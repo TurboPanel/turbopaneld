@@ -1,0 +1,50 @@
+{
+  "ServerReportedIp": {
+    "instance": "src/contracts/server-addresses.ts",
+    "daemon": "src/contracts/server-reported-ip.ts",
+    "fields": [
+      { "name": "address", "required": true, "type": "string" },
+      { "name": "cidr", "required": false, "type": "string" },
+      { "name": "interface", "required": false, "type": "string" },
+      { "name": "preferred", "required": false, "type": "boolean" },
+      { "name": "scope", "required": true, "type": "'private' | 'public'" },
+      { "name": "version", "required": true, "type": "4 | 6" }
+    ]
+  },
+  "CellAttachVersionMessage": {
+    "instance": "src/contracts/cell-protocol.ts",
+    "daemon": "src/contracts/cell-messages.ts",
+    "fields": [
+      { "name": "at", "required": true, "type": "string" },
+      { "name": "branch", "required": true, "type": "string" },
+      { "name": "commit", "required": true, "type": "string" },
+      { "name": "instanceVersion", "required": false, "type": "string" },
+      { "name": "type", "required": true, "type": "'version'" }
+    ]
+  },
+  "InstanceAcmeWireSettings": {
+    "instance": "src/contracts/cell-protocol.ts",
+    "daemon": "src/contracts/cell-messages.ts",
+    "fields": [
+      { "name": "contactEmail", "required": true, "type": "string" },
+      { "name": "directoryUrl", "required": true, "type": "string" },
+      { "name": "tosAccepted", "required": true, "type": "boolean" },
+      { "name": "useStaging", "required": true, "type": "boolean" }
+    ]
+  },
+  "InstanceHostnameWireEntry": {
+    "instance": "src/contracts/cell-protocol.ts",
+    "daemon": "src/contracts/cell-messages.ts",
+    "fields": [
+      { "name": "certPem", "required": false, "type": "string" },
+      { "name": "host", "required": true, "type": "string" },
+      { "name": "keyPem", "required": false, "type": "string" },
+      {
+        "name": "source",
+        "required": true,
+        "type": "'lets-encrypt' | 'platform-ca' | 'uploaded'"
+      },
+      { "name": "uploadedCertId", "required": false, "type": "string" }
+    ]
+  }
+}

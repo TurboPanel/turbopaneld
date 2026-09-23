@@ -14,9 +14,49 @@ import type { HardwareProfile } from "../metrics/collector/types.ts";
 import type { MetricsCapabilityPlan } from "../metrics/capability-plan.ts";
 import type { TopologySnapshot } from "./topology-types.ts";
 
+/**
+ * Attach acknowledgement. Twin of `CellAttachVersionMessage` in
+ * `turbopanel/src/contracts/cell-protocol.ts`. `instanceVersion` is optional
+ * so a control plane that predates the field still parses.
+ */
+export type CellAttachVersionMessage = {
+  type: "version";
+  commit: string;
+  branch: string;
+  at: string;
+  instanceVersion?: string;
+};
+
+/**
+ * One control-plane hostname on `public-urls-update`. `certPem` / `keyPem`
+ * travel decrypted once, over the authenticated cell socket, for `uploaded`
+ * sources. The daemon writes them under the instance certs dir and does not
+ * echo them back.
+ */
+export type InstanceHostnameCertSource =
+  | "lets-encrypt"
+  | "platform-ca"
+  | "uploaded";
+
+export type InstanceHostnameWireEntry = {
+  host: string;
+  source: InstanceHostnameCertSource;
+  certPem?: string;
+  keyPem?: string;
+  uploadedCertId?: string;
+};
+
+/** Instance-wide ACME knobs for hostnames whose source is `lets-encrypt`. */
+export type InstanceAcmeWireSettings = {
+  contactEmail: string;
+  tosAccepted: boolean;
+  directoryUrl: string;
+  useStaging: boolean;
+};
+
 export type DaemonMessage =
   | { type: "echo"; payload: unknown; at: string }
-  | { type: "version"; commit: string; branch: string; at: string }
+  | CellAttachVersionMessage
   | { type: "addresses-request"; id: string; at: string }
   | {
     type: "addresses-result";
@@ -223,6 +263,21 @@ export type DaemonMessage =
     at: string;
   }
   | {
+    /**
+     * Daemon-initiated, fire-and-forget. The instance's own Let's Encrypt
+     * hostnames, reported by `InstanceAcmeIssuanceObserver`. Distinct from
+     * `acme-issuance-event`, which is an organization's tenant certificate.
+     * The two streams must not share a discriminator.
+     */
+    type: "instance-acme-issuance-event";
+    hostname: string;
+    ok: boolean;
+    errorMessage?: string;
+    /** Leaf notAfter from the probe. Absent when the leaf could not be read. */
+    notAfter?: string;
+    at: string;
+  }
+  | {
     type: "fabric-paths-request";
     id: string;
     fabricId: string;
@@ -273,7 +328,17 @@ export type DaemonMessage =
     error?: string;
     at: string;
   }
-  | { type: "public-urls-update"; id: string; urls: string[]; at: string }
+  | {
+    type: "public-urls-update";
+    id: string;
+    /** Flat compatibility list. Daemons below the per-hostname floor read only this. */
+    urls: string[];
+    /** Present when the daemon can render per-hostname certificate sources. */
+    hostnames?: InstanceHostnameWireEntry[];
+    /** Present when any hostname uses `lets-encrypt`. */
+    instanceAcme?: InstanceAcmeWireSettings;
+    at: string;
+  }
   | {
     type: "public-urls-update-result";
     id: string;
@@ -291,6 +356,24 @@ export type DaemonMessage =
   }
   | {
     type: "update-result";
+    id: string;
+    ok: boolean;
+    error?: string;
+    at: string;
+  }
+  | {
+    type: "instance-update";
+    id: string;
+    channel?: string;
+    manifestUrl?: string;
+    /** UI package pin. Passed to run.sh as `--ui-manifest-url`. */
+    uiManifestUrl?: string;
+    /** Semver the control plane is about to install, when the manifest names one. */
+    targetVersion?: string;
+    at: string;
+  }
+  | {
+    type: "instance-update-result";
     id: string;
     ok: boolean;
     error?: string;

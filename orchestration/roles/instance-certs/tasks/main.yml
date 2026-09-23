@@ -4,43 +4,10 @@
 # addresses or SANs change, so running it on every converge is cheap.
 # The CA is durable under turbopanel_instance_ca_dir; this role never passes
 # TURBOPANEL_TLS_CA_ROTATE (leaf-only apply / converge).
-- name: Assert control-plane TLS mode is valid
-  ansible.builtin.assert:
-    that:
-      - turbopanel_tls_mode | default('self_signed') in ['self_signed', 'upload', 'lets_encrypt']
-    fail_msg: >-
-      turbopanel_tls_mode must be one of self_signed, upload, or lets_encrypt
-      (got '{{ turbopanel_tls_mode | default('') }}').
-
-- name: Assert upload TLS mode has cert and key paths
-  when: turbopanel_tls_mode | default('self_signed') == 'upload'
-  ansible.builtin.assert:
-    that:
-      - turbopanel_tls_cert_path | default('') | length > 0
-      - turbopanel_tls_key_path | default('') | length > 0
-    fail_msg: >-
-      turbopanel_tls_mode=upload requires turbopanel_tls_cert_path and
-      turbopanel_tls_key_path.
-
-- name: Assert Let's Encrypt TLS mode has a public hostname
-  when: turbopanel_tls_mode | default('self_signed') == 'lets_encrypt'
-  ansible.builtin.assert:
-    that:
-      - turbopanel_public_hostname | default('') | length > 0
-    fail_msg: >-
-      turbopanel_tls_mode=lets_encrypt requires turbopanel_public_hostname.
-      ACME email is optional: the rendered Caddyfile omits the email
-      directive when turbopanel_acme_email is empty.
-
-- name: Assert Let's Encrypt TLS mode is managed-install only
-  when: turbopanel_tls_mode | default('self_signed') == 'lets_encrypt'
-  ansible.builtin.assert:
-    that:
-      - turbopanel_dev_user | default('') | length == 0
-    fail_msg: >-
-      turbopanel_tls_mode=lets_encrypt is managed-install only
-      (turbopanel_dev_user must be empty; the dev overlay Caddyfile wins
-      over turbopanel_caddyfile).
+# Let's Encrypt material is not written here. Caddy's own client stores that
+# hostname's certificate under the control-plane unit's XDG_DATA_HOME.
+- name: Resolve instance hostnames
+  ansible.builtin.include_tasks: resolve-hostnames.yml
 
 - name: Ensure durable platform CA directory exists
   ansible.builtin.file:
@@ -83,9 +50,41 @@
 
 # Caddy runs as `tpcaddy` (supplementary group `tp`) and must read the server leaf key.
 # generate-self-signed-cert.mjs chmods keys to 0640 but does not set group ownership.
+- name: Publish the platform-ca leaf certificate
+  ansible.builtin.copy:
+    src: "{{ turbopanel_instance_certs_dir }}/self-signed.crt"
+    dest: "{{ turbopanel_instance_certs_dir }}/platform-ca.crt"
+    remote_src: true
+    owner: "{{ instance_certs_owner }}"
+    group: "{{ turbopanel_group }}"
+    mode: "0640"
+
+- name: Publish the platform-ca leaf key
+  ansible.builtin.copy:
+    src: "{{ turbopanel_instance_certs_dir }}/self-signed.key"
+    dest: "{{ turbopanel_instance_certs_dir }}/platform-ca.key"
+    remote_src: true
+    owner: "{{ instance_certs_owner }}"
+    group: "{{ turbopanel_group }}"
+    mode: "0640"
+
+- name: Keep the deprecated self-signed certificate name
+  ansible.builtin.file:
+    src: "{{ turbopanel_instance_certs_dir }}/platform-ca.crt"
+    dest: "{{ turbopanel_instance_certs_dir }}/self-signed.crt"
+    state: link
+    force: true
+
+- name: Keep the deprecated self-signed key name
+  ansible.builtin.file:
+    src: "{{ turbopanel_instance_certs_dir }}/platform-ca.key"
+    dest: "{{ turbopanel_instance_certs_dir }}/self-signed.key"
+    state: link
+    force: true
+
 - name: Harden server leaf key ownership for Caddy
   ansible.builtin.file:
-    path: "{{ turbopanel_instance_certs_dir }}/self-signed.key"
+    path: "{{ turbopanel_instance_certs_dir }}/platform-ca.key"
     owner: "{{ instance_certs_owner }}"
     group: "{{ turbopanel_group }}"
     mode: "0640"
@@ -144,3 +143,25 @@
     owner: "{{ instance_certs_owner }}"
     group: "{{ turbopanel_group }}"
     mode: "0640"
+
+- name: Harden per-hostname uploaded certificates
+  when: item.cert_id | default('') | length > 0
+  ansible.builtin.file:
+    path: "{{ turbopanel_instance_certs_dir }}/uploaded-{{ item.cert_id }}.crt"
+    owner: "{{ instance_certs_owner }}"
+    group: "{{ turbopanel_group }}"
+    mode: "0640"
+  loop: "{{ turbopanel_hostnames | default([]) | selectattr('source', 'equalto', 'uploaded') | list }}"
+  loop_control:
+    label: "{{ item.cert_id | default('') }}"
+
+- name: Harden per-hostname uploaded keys
+  when: item.cert_id | default('') | length > 0
+  ansible.builtin.file:
+    path: "{{ turbopanel_instance_certs_dir }}/uploaded-{{ item.cert_id }}.key"
+    owner: "{{ instance_certs_owner }}"
+    group: "{{ turbopanel_group }}"
+    mode: "0640"
+  loop: "{{ turbopanel_hostnames | default([]) | selectattr('source', 'equalto', 'uploaded') | list }}"
+  loop_control:
+    label: "{{ item.cert_id | default('') }}"

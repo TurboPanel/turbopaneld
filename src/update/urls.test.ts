@@ -6,6 +6,7 @@ import {
   builtinChannelManifestUrl,
   catalogAllowsHttp,
   DL_BASE_URL,
+  type ReleaseArtifactKind,
   resolveDlBase,
   resolveMaybeRelativeUrl,
   resolveOverlayDlBase,
@@ -86,20 +87,67 @@ test("builtinChannelManifestUrl: trunk on the CDN, canary/rc/release on GitHub R
     "https://github.com/TurboPanel/turbopaneld/releases/download/canary/manifest.json",
   );
   assertEquals(builtinChannelManifestUrl("edge"), null);
+  assertEquals(builtinChannelManifestUrl("trunk", "instance"), null);
+  assertEquals(builtinChannelManifestUrl("trunk", "ui"), null);
+  assertEquals(
+    builtinChannelManifestUrl("release", "instance"),
+    "https://github.com/TurboPanel/turbopanel/releases/latest/download/manifest.json",
+  );
+  assertEquals(
+    builtinChannelManifestUrl("canary", "ui"),
+    "https://github.com/TurboPanel/ui/releases/download/canary/manifest.json",
+  );
 });
 
-test("scripts/run.sh mirrors builtinChannelManifestUrl exactly", async () => {
-  const runSh = await Deno.readTextFile(join(ROOT, "scripts", "run.sh"));
-  const fn = runSh.match(
-    /tp_builtin_channel_manifest_url\(\) \{\n([\s\S]*?)\n\}/,
+test("resolvePinnedManifestUrl reads a different env var per artifact kind", () => {
+  const instancePin =
+    "https://github.com/TurboPanel/turbopanel/releases/download/v0.1.1/manifest.json";
+  const uiPin =
+    "https://github.com/TurboPanel/ui/releases/download/v0.1.1/manifest.json";
+  const env = {
+    TURBOPANEL_MANIFEST_URL:
+      "https://github.com/TurboPanel/turbopaneld/releases/download/v0.1.0/manifest.json",
+    TURBOPANEL_INSTANCE_MANIFEST_URL: instancePin,
+    TURBOPANEL_UI_MANIFEST_URL: uiPin,
+  };
+  assertEquals(resolvePinnedManifestUrl(env, "instance"), instancePin);
+  assertEquals(resolvePinnedManifestUrl(env, "ui"), uiPin);
+  assertEquals(
+    resolvePinnedManifestUrl(env, "daemon"),
+    env.TURBOPANEL_MANIFEST_URL,
   );
-  if (!fn) {
-    throw new Error("tp_builtin_channel_manifest_url not found in run.sh");
+  assertEquals(
+    resolvePinnedManifestUrl(
+      { TURBOPANEL_INSTANCE_MANIFEST_URL: "http://x" },
+      "instance",
+    ),
+    null,
+  );
+});
+
+async function shellBuiltinManifestUrl(
+  channel: string,
+  kind?: string,
+): Promise<{ code: number; stdout: string }> {
+  const runSh = await Deno.readTextFile(join(ROOT, "scripts", "run.sh"));
+  const start = runSh.indexOf("tp_builtin_channel_manifest_url() {");
+  const end = runSh.indexOf("tp_fetch_channel_manifest() {");
+  if (start < 0 || end < 0) {
+    throw new TypeError("tp_builtin_channel_manifest_url not found in run.sh");
   }
-  const shell = new Map<string, string>();
-  for (const m of fn[1].matchAll(/^\s+(\w+)\) printf '%s' "([^"]+)" ;;$/gm)) {
-    shell.set(m[1], m[2]);
-  }
+  const args = kind === undefined ? channel : `${channel} ${kind}`;
+  const script = `${
+    runSh.slice(start, end)
+  }\ntp_builtin_channel_manifest_url ${args}\n`;
+  const out = await new Deno.Command("sh", {
+    args: ["-c", script],
+    stdout: "piped",
+    stderr: "piped",
+  }).output();
+  return { code: out.code, stdout: new TextDecoder().decode(out.stdout) };
+}
+
+test("scripts/run.sh mirrors builtinChannelManifestUrl for every artifact kind", async () => {
   const channels: UpdateChannel[] = [
     "trunk",
     "edge",
@@ -107,13 +155,23 @@ test("scripts/run.sh mirrors builtinChannelManifestUrl exactly", async () => {
     "rc",
     "release",
   ];
-  const expected = new Map<string, string>();
-  for (const channel of channels) {
-    const url = builtinChannelManifestUrl(channel);
-    if (url !== null) expected.set(channel, url);
+  const kinds: ReleaseArtifactKind[] = ["daemon", "instance", "ui"];
+  for (const kind of kinds) {
+    for (const channel of channels) {
+      const expected = builtinChannelManifestUrl(channel, kind);
+      const shell = await shellBuiltinManifestUrl(channel, kind);
+      if (expected === null) {
+        assertEquals(shell.code, 1, `${kind} ${channel}`);
+        assertEquals(shell.stdout, "");
+      } else {
+        assertEquals(shell.code, 0, `${kind} ${channel}`);
+        assertEquals(shell.stdout, expected);
+      }
+    }
   }
-  assertEquals(shell.size, 4);
-  assertEquals(shell, expected);
+  const daemonDefault = await shellBuiltinManifestUrl("trunk");
+  assertEquals(daemonDefault.code, 0);
+  assertEquals(daemonDefault.stdout, builtinChannelManifestUrl("trunk"));
 });
 
 test("rootCatalogUrl joins channels.json onto the overlay origin", () => {

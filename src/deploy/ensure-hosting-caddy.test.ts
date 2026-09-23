@@ -6,7 +6,10 @@ import {
   ensureHostingCaddy,
   type EnsureHostingCaddyDeps,
   HOSTING_CADDY_VERSION,
+  verifyHostingCaddyTarballSha256,
 } from "./ensure-hosting-caddy.ts";
+
+const skipTarballDigestVerify = () => Promise.resolve();
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -166,6 +169,7 @@ test({
           commands.push(command);
           return mockDownloadCommands({ chownOk: false })(command, args, opts);
         },
+        verifyTarballSha256: skipTarballDigestVerify,
       });
       assertEquals(commands, ["/usr/bin/curl", "/usr/bin/tar", "sudo"]);
       assertEquals(await Deno.readTextFile(resolved), "#!/bin/caddy-mock\n");
@@ -204,8 +208,53 @@ test({
           chownOk: true,
           chownStderr: "",
         }),
+        verifyTarballSha256: skipTarballDigestVerify,
       });
       assertEquals(await Deno.readTextFile(resolved), "#!/bin/caddy-mock\n");
+    });
+  },
+});
+
+test({
+  name: "verifyHostingCaddyTarballSha256 rejects digest mismatch",
+  permissions: { read: true, write: true },
+  fn: async () => {
+    const tmp = await Deno.makeTempDir({ prefix: "tp-caddy-digest-" });
+    const tarball = join(tmp, "caddy.tar.gz");
+    await Deno.writeTextFile(tarball, "not-a-real-caddy-release");
+    try {
+      await assertRejects(
+        () => verifyHostingCaddyTarballSha256("amd64", tarball),
+        Error,
+        "SHA-256 mismatch",
+      );
+    } finally {
+      await Deno.remove(tmp, { recursive: true });
+    }
+  },
+});
+
+test({
+  name: "ensureHostingCaddy surfaces digest verification failure",
+  permissions: { read: true, write: true },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      const layout = resolveLayout(fixture.env, {
+        skipDiscovery: true,
+        forceMode: "production",
+      });
+      await assertRejects(
+        () =>
+          ensureHostingCaddy(layout, {
+            runCaddySetup: () => Promise.resolve(),
+            resolveArch: () => "amd64",
+            runCommand: mockDownloadCommands({}),
+            verifyTarballSha256: () =>
+              Promise.reject(new Error("digest mismatch")),
+          }),
+        Error,
+        "digest mismatch",
+      );
     });
   },
 });
@@ -228,6 +277,7 @@ test({
               curlOk: false,
               curlStderr: "connection refused",
             }),
+            verifyTarballSha256: skipTarballDigestVerify,
           }),
         Error,
         "curl failed: connection refused",
@@ -251,6 +301,7 @@ test({
             runCaddySetup: () => Promise.resolve(),
             resolveArch: () => "amd64",
             runCommand: mockDownloadCommands({ curlOk: false, curlStderr: "" }),
+            verifyTarballSha256: skipTarballDigestVerify,
           }),
         Error,
         "curl failed: download error",
@@ -277,6 +328,7 @@ test({
               tarOk: false,
               tarStderr: "not a gzip",
             }),
+            verifyTarballSha256: skipTarballDigestVerify,
           }),
         Error,
         "tar failed: not a gzip",
@@ -300,6 +352,7 @@ test({
             runCaddySetup: () => Promise.resolve(),
             resolveArch: () => "amd64",
             runCommand: mockDownloadCommands({ tarOk: false, tarStderr: "" }),
+            verifyTarballSha256: skipTarballDigestVerify,
           }),
         Error,
         "tar failed: extract error",
@@ -334,6 +387,7 @@ test({
               }
               return result;
             },
+            verifyTarballSha256: skipTarballDigestVerify,
           }),
         Error,
         "Hosting Caddy runtime is missing",
@@ -420,6 +474,7 @@ test({
         // No resolveArch / runCommand inject — exercises defaults.
         const resolved = await ensureHostingCaddy(layout, {
           runCaddySetup: () => Promise.resolve(),
+          verifyTarballSha256: skipTarballDigestVerify,
         });
         assertEquals(await Deno.readTextFile(resolved), "#!/bin/via-command\n");
       } finally {
@@ -446,6 +501,7 @@ test({
           chownOk: false,
           chownStderr: "sudo: a password is required",
         }),
+        verifyTarballSha256: skipTarballDigestVerify,
       });
       assertEquals(await Deno.readTextFile(resolved), "#!/bin/caddy-mock\n");
     });
@@ -542,6 +598,7 @@ test({
               runCaddySetup: () => Promise.resolve(),
               resolveArch: () => "amd64",
               runCommand: mockDownloadCommands({}),
+              verifyTarballSha256: skipTarballDigestVerify,
             }),
           Deno.errors.PermissionDenied,
           "link",

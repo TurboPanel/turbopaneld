@@ -12,8 +12,11 @@
 
 set -eu
 
-CADDY_VER="${CADDY_VER:-2.10.2}"
+CADDY_VER="${CADDY_VER:-2.11.4}"
 CADDY_TAG="${CADDY_TAG:-v${CADDY_VER}}"
+# Upstream SHA-256 of linux release tarballs (keep in step with roles/caddy/defaults/main.yml).
+CADDY_SHA256_AMD64=527fbf917c39189a1e3b31d34fa955601680b2d5c8055d2a87b8b9588dec7bb9
+CADDY_SHA256_ARM64=52d42ae12b3462097e9868da6dfed3c9648ae12edd3b3638102312af84cb6904
 # Same composition as scripts/lib/runtime-paths.sh (keep curl|sh self-contained).
 TURBOPANEL_HOME="${TURBOPANEL_HOME:-/opt/turbopanel}"
 VENDOR_DIR="${TURBOPANEL_RUNTIMES_DIR:-${TURBOPANEL_HOME}/vendor}"
@@ -21,8 +24,14 @@ GROUP="${TURBOPANEL_GROUP:-tp}"
 
 arch="$(uname -m)"
 case "$arch" in
-  aarch64 | arm64) CADDY_ARCH=arm64 ;;
-  x86_64 | amd64) CADDY_ARCH=amd64 ;;
+  aarch64 | arm64)
+    CADDY_ARCH=arm64
+    CADDY_SHA256="${CADDY_SHA256_ARM64}"
+    ;;
+  x86_64 | amd64)
+    CADDY_ARCH=amd64
+    CADDY_SHA256="${CADDY_SHA256_AMD64}"
+    ;;
   *)
     echo "unsupported architecture: $arch" >&2
     exit 1
@@ -44,6 +53,11 @@ ASSET="caddy_${CADDY_VER}_linux_${CADDY_ARCH}.tar.gz"
 # HTTPS-only fetch (block clear-text redirect downgrades; Sonar shell:S6506).
 curl -fsSL --proto "=https" --proto-redir "=https" -o "${TMP}/${ASSET}" \
   "https://github.com/caddyserver/caddy/releases/download/${CADDY_TAG}/${ASSET}"
+actual_sha256="$(sha256sum "${TMP}/${ASSET}" | awk '{print $1}')"
+if [ "${actual_sha256}" != "${CADDY_SHA256}" ]; then
+  echo "Caddy tarball SHA-256 mismatch (got ${actual_sha256})" >&2
+  exit 1
+fi
 tar -xzf "${TMP}/${ASSET}" -C "$TMP" caddy
 
 install -d "$target_dir"

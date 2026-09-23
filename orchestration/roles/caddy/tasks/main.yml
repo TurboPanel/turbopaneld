@@ -16,23 +16,58 @@
     path: "{{ turbopanel_vendor_dir }}/caddy/{{ caddy_version }}/caddy"
   register: _caddy_pinned
 
+# A version bump must land with its upstream digests: refuse rather than
+# install an unverified runtime.
+- name: Require a pinned SHA-256 for this Caddy version and architecture
+  ansible.builtin.assert:
+    that:
+      - caddy_version in caddy_sha256
+      - ansible_architecture in caddy_sha256[caddy_version]
+      - caddy_sha256[caddy_version][ansible_architecture] | length == 64
+    fail_msg: >-
+      caddy_sha256 has no digest for Caddy {{ caddy_version }} on
+      {{ ansible_architecture }} — add the upstream sha256 to
+      roles/caddy/defaults/main.yml before bumping caddy_version.
+
+- name: Create Caddy download scratch directory
+  when: not _caddy_pinned.stat.exists
+  ansible.builtin.tempfile:
+    state: directory
+    prefix: caddy-tar-
+  register: _caddy_tmp
+
+# get_url verifies the digest before the file is kept: a mismatch fails the
+# task and leaves nothing to extract.
+- name: Download Caddy release tarball (SHA-256 verified)
+  when: not _caddy_pinned.stat.exists
+  ansible.builtin.get_url:
+    url: >-
+      https://github.com/caddyserver/caddy/releases/download/{{
+      caddy_release_tag }}/caddy_{{ caddy_version }}_linux_{{ caddy_arch }}.tar.gz
+    dest: >-
+      {{ _caddy_tmp.path }}/caddy_{{ caddy_version }}_linux_{{ caddy_arch }}.tar.gz
+    checksum: "sha256:{{ caddy_sha256[caddy_version][ansible_architecture] }}"
+    owner: root
+    group: root
+    mode: "0600"
+
 - name: Install Caddy into runtimes directory
   when: not _caddy_pinned.stat.exists
   ansible.builtin.shell: |
     set -euo pipefail
-    CADDY_VER="{{ caddy_version }}"
-    CADDY_TAG="{{ caddy_release_tag }}"
-    CADDY_ARCH="{{ caddy_arch }}"
-    TMP="$(mktemp -d)"
-    ASSET="caddy_${CADDY_VER}_linux_${CADDY_ARCH}.tar.gz"
-    curl -fsSL -o "$TMP/$ASSET" \
-      "https://github.com/caddyserver/caddy/releases/download/${CADDY_TAG}/${ASSET}"
-    tar -xzf "$TMP/$ASSET" -C "$TMP" caddy
-    install -d "{{ turbopanel_vendor_dir }}/caddy/${CADDY_VER}"
-    install -m 0750 "$TMP/caddy" "{{ turbopanel_vendor_dir }}/caddy/${CADDY_VER}/caddy"
-    rm -rf "$TMP"
+    ASSET="caddy_{{ caddy_version }}_linux_{{ caddy_arch }}.tar.gz"
+    tar -xzf "{{ _caddy_tmp.path }}/${ASSET}" -C "{{ _caddy_tmp.path }}" caddy
+    install -d "{{ turbopanel_vendor_dir }}/caddy/{{ caddy_version }}"
+    install -m 0750 "{{ _caddy_tmp.path }}/caddy" \
+      "{{ turbopanel_vendor_dir }}/caddy/{{ caddy_version }}/caddy"
   args:
     creates: "{{ turbopanel_vendor_dir }}/caddy/{{ caddy_version }}/caddy"
+
+- name: Remove Caddy download scratch directory
+  when: _caddy_tmp.path is defined
+  ansible.builtin.file:
+    path: "{{ _caddy_tmp.path }}"
+    state: absent
 
 - name: Harden Caddy binary permissions
   ansible.builtin.file:

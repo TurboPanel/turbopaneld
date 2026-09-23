@@ -2,7 +2,18 @@
 # Runtimes always live under the FHS vendor tree (dev shares it with prod).
 turbopanel_vendor_dir: "{{ turbopanel_install_root | default('/opt/turbopanel') }}/vendor"  # noqa: var-naming[no-role-prefix]
 # Pinned to match scripts/download-caddy.mjs in the instance repo.
-caddy_version: "2.10.2"
-caddy_release_tag: "v2.10.2"
+caddy_version: "2.11.4"
+caddy_release_tag: "v2.11.4"
+# Upstream SHA-256 of each release tarball, keyed by version then by
+# ansible_architecture (GitHub caddy_*_checksums.txt publishes SHA-512; the
+# linux amd64/arm64 .tar.gz digests are recorded here as SHA-256). The install
+# task refuses to run when the pinned version has no entry for the host
+# architecture. Keep in step with HOSTING_CADDY_VERSION /
+# scripts/install-hosting-caddy.sh / download-caddy.mjs (assets.test.ts pins
+# all copies against this table).
+caddy_sha256:
+  "2.11.4":
+    x86_64: "527fbf917c39189a1e3b31d34fa955601680b2d5c8055d2a87b8b9588dec7bb9"
+    aarch64: "52d42ae12b3462097e9868da6dfed3c9648ae12edd3b3638102312af84cb6904"
 turbopanel_dev_user: ""  # noqa: var-naming[no-role-prefix]
 turbopanel_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tp' }}"  # noqa: var-naming[no-role-prefix]

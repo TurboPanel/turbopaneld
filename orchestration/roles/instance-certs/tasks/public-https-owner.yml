@@ -1,0 +1,20 @@
+---
+# Public :443 belongs to control-plane Caddy only when this host is proven
+# not to be serving tenant ingress. Hosting Caddy's unit or its sites
+# directory is that proof the other way: either one means hosting owns
+# :80/:443. The template reads turbopanel_control_plane_binds_public_https
+# and must not treat a missing fact as permission to bind :443 (the default
+# in both roles is false).
+- name: Stat the hosting Caddy unit
+  ansible.builtin.stat:
+    path: /etc/systemd/system/turbopanel-hosting-caddy.service
+  register: _hosting_caddy_unit
+
+- name: Stat the hosting Caddy sites directory
+  ansible.builtin.stat:
+    path: "{{ turbopanel_config_dir | default('/etc/turbopanel') }}/hosting/sites"
+  register: _hosting_caddy_sites
+
+- name: Record whether control-plane Caddy may bind public :443
+  ansible.builtin.set_fact:
+    turbopanel_control_plane_binds_public_https: "{{ not ((_hosting_caddy_unit.stat.exists | default(false)) or (_hosting_caddy_sites.stat.isdir | default(false))) }}"

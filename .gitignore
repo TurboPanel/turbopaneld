@@ -4,6 +4,8 @@
 # Deno V8 profiles + HTML/LCOV (`deno test --coverage=…`). Official task uses
 # coverage/; scoped local runs may write coverage-commands/ and similar.
 coverage*/
+# Trunk copy of scripts/download-caddy.mjs checked out by verify.yml.
+.ci-instance-caddy-pin/
 
 # Python bytecode (e.g. scripts/extract-deno-zip.py)
 __pycache__/

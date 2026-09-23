@@ -20,6 +20,7 @@ import {
   readRemoteFiles,
   resolveDefaultBranch,
 } from "../deploy/release/read-remote-files.ts";
+import { syncInstanceAcmeHttp01Site } from "../deploy/instance-acme-http01.ts";
 import { collectManagedLogs } from "../managed/logs.ts";
 import { collectContainerLogs } from "../logs/container-tail.ts";
 import type { SendCommandLogChunkFn } from "../logs/uploader.ts";
@@ -45,6 +46,13 @@ import {
 import { type DaemonKeyFile, loadDaemonKeyFile } from "../crypto/keys.ts";
 import { readMachineKey } from "../host/machine-key.ts";
 import { DaemonApiClient, DaemonApiError } from "./api-client.ts";
+import {
+  INSTANCE_VERSION_HEADER,
+  type InstanceSupportStatus,
+  instanceUnsupportedReason,
+  MIN_SUPPORTED_INSTANCE_VERSION,
+  resolveInstanceSupport,
+} from "./version-wire.ts";
 import {
   parseRehydrateDeploymentResults,
   rehydrateLocalDeployments,
@@ -82,14 +90,20 @@ import {
   buildRunReconcileArgs,
   downloadRunScript,
   encodeLicenseArg,
+  executeInstanceUpdateReconcile,
   executeRunReconcile,
   reconcileNeedsRootHelper,
   resolveAutomaticUpdateTrust,
   resolveRunScriptUrl,
+  restartControlPlaneUnits,
 } from "./run-reconcile.ts";
+import { resolvePinnedManifestUrl } from "../update/urls.ts";
 import { installOriginNeedsInsecureTls } from "./install-tls.ts";
 import { ManagedHaObserver } from "./ha-observe.ts";
 import { AcmeIssuanceObserver } from "./acme-observe.ts";
+import { InstanceAcmeIssuanceObserver } from "./instance-acme-observe.ts";
+import { DAEMON_VERSION } from "../version.ts";
+import { resolveDaemonCapabilities } from "./version-wire.ts";
 import { TopologyReporter } from "./topology-reporter.ts";
 import type { TopologySnapshot } from "../contracts/topology-types.ts";
 import type { DaemonMessage } from "../contracts/cell-messages.ts";
@@ -360,10 +374,16 @@ export class InstanceClient {
   #parkedReason: string | undefined;
   #parkedKind: ParkedKind | undefined;
   #parkedBackoffMs = PARKED_BACKOFF_MIN_MS;
+  /** Latest control-plane semver from a REST header or the attach `version` frame. */
+  #instanceVersion: string | undefined;
+  /** Last unsupported version we already logged, so reconnects do not repeat it. */
+  #loggedUnsupportedInstanceVersion: string | undefined;
   #licenseStamp: string | undefined;
   #idlePresence: IdlePresence | undefined;
   #haObserver: ManagedHaObserver | undefined;
   #acmeObserver: AcmeIssuanceObserver | undefined;
+  /** Own debounce map. Never shares state with `#acmeObserver`. */
+  #instanceAcmeObserver: InstanceAcmeIssuanceObserver | undefined;
   #metricsScheduler: MetricsScheduler | undefined;
   /** Server id the current metrics scheduler was bound for (not `#tokenServerId`). */
   #metricsSchedulerServerId: string | undefined;
@@ -382,6 +402,7 @@ export class InstanceClient {
   readonly #handleFabricPathProbe?: FabricPathProbeHandler;
   readonly #handleDrivetempEnable?: DrivetempEnableHandler;
   #updateInstallInProgress = false;
+  #instanceUpdateInProgress = false;
   /**
    * Identity directory captured at {@link start} so reconnects do not follow a
    * later `TURBOPANEL_DAEMON_STATE_DIR` change (parallel tests share process env).
@@ -414,6 +435,25 @@ export class InstanceClient {
 
   get target(): string {
     return describeInstance(this.#config);
+  }
+
+  /**
+   * Observed control-plane version and the floor verdict. `unknown` when the
+   * current peer has not reported a semver, including when a later response
+   * or attach frame omits one. That is a flag, not a refusal, and the socket
+   * stays up either way.
+   */
+  get connectionState(): {
+    instanceVersion: string | null;
+    instanceSupport: InstanceSupportStatus;
+    minSupportedInstanceVersion: string;
+  } {
+    const support = resolveInstanceSupport(this.#instanceVersion);
+    return {
+      instanceVersion: support.version,
+      instanceSupport: support.status,
+      minSupportedInstanceVersion: MIN_SUPPORTED_INSTANCE_VERSION,
+    };
   }
 
   /** Re-read the platform CA bundle (mtime+size cached) unless tests pinned a client. */
@@ -460,11 +500,42 @@ export class InstanceClient {
     return this.#httpClient ? { ...init, client: this.#httpClient } : init;
   }
 
+  #noteInstanceVersion(reported: string | undefined | null): void {
+    const trimmed = reported?.trim() ?? "";
+    if (!trimmed) {
+      this.#instanceVersion = undefined;
+      this.#loggedUnsupportedInstanceVersion = undefined;
+      return;
+    }
+    this.#instanceVersion = trimmed;
+    const support = resolveInstanceSupport(trimmed);
+    if (support.status !== "unsupported") {
+      this.#loggedUnsupportedInstanceVersion = undefined;
+      return;
+    }
+    if (this.#loggedUnsupportedInstanceVersion === support.version) return;
+    this.#loggedUnsupportedInstanceVersion = support.version ?? undefined;
+    logWarn("instance", instanceUnsupportedReason(support));
+  }
+
+  #noteInstanceVersionHeader(response: Response): void {
+    this.#noteInstanceVersion(response.headers.get(INSTANCE_VERSION_HEADER));
+  }
+
+  #apiClientVersionHook(): {
+    onInstanceVersion: (version: string | null) => void;
+  } {
+    return {
+      onInstanceVersion: (version) => this.#noteInstanceVersion(version),
+    };
+  }
+
   async fetchHealth(): Promise<{ ok: boolean }> {
     const response = await fetch(
       instanceUrl(this.#config, "/api/health"),
       this.#fetchInit(),
     );
+    this.#noteInstanceVersionHeader(response);
     if (!response.ok) {
       throw new Error(`health check failed: HTTP ${response.status}`);
     }
@@ -491,6 +562,7 @@ export class InstanceClient {
       throw new Error(`daemon readiness check failed: HTTP ${response.status}`);
     }
 
+    this.#noteInstanceVersionHeader(response);
     if (!response.ok) {
       if (body.ready === false) {
         return {
@@ -552,6 +624,7 @@ export class InstanceClient {
       instanceUrl(this.#config, "/api/daemon/v1/version"),
       this.#fetchInit(),
     );
+    this.#noteInstanceVersionHeader(response);
     if (!response.ok) {
       throw new Error(`version fetch failed: HTTP ${response.status}`);
     }
@@ -565,6 +638,7 @@ export class InstanceClient {
       instanceUrl(this.#config, "/api/developer/v1/daemon/connections"),
       this.#fetchInit(),
     );
+    this.#noteInstanceVersionHeader(response);
     if (!response.ok) {
       throw new Error(`connections fetch failed: HTTP ${response.status}`);
     }
@@ -596,6 +670,8 @@ export class InstanceClient {
     this.#haObserver = undefined;
     this.#acmeObserver?.detach();
     this.#acmeObserver = undefined;
+    this.#instanceAcmeObserver?.detach();
+    this.#instanceAcmeObserver = undefined;
     this.#metricsScheduler?.detach();
     this.#liveLeases?.dispose();
     this.#liveLeases = undefined;
@@ -670,6 +746,7 @@ export class InstanceClient {
     this.#idlePresence?.detach();
     this.#haObserver?.detach();
     this.#acmeObserver?.detach();
+    this.#instanceAcmeObserver?.detach();
     this.#metricsScheduler?.detach();
     const classified = classifyConnectFailure(err);
     if (classified.kind === "permanent") {
@@ -862,6 +939,7 @@ export class InstanceClient {
       httpClient: this.#httpClient,
       getToken: () =>
         Promise.reject(new Error("token unavailable before enrollment")),
+      ...this.#apiClientVersionHook(),
     });
     const enrollment = await enrollDaemon({
       apiClient: enrollClient,
@@ -904,6 +982,7 @@ export class InstanceClient {
         httpClient: this.#httpClient,
         getToken: () =>
           Promise.reject(new Error("token unavailable for JWKS fetch")),
+        ...this.#apiClientVersionHook(),
       });
       this.#jwksClient = new DaemonJwksClient({ apiClient: jwksApiClient });
     }
@@ -918,6 +997,7 @@ export class InstanceClient {
         }
         return await tokenManagerRef.current.getToken(options);
       },
+      ...this.#apiClientVersionHook(),
     });
     const tokenManager = new DaemonTokenManager({
       keyFile,
@@ -1078,6 +1158,8 @@ export class InstanceClient {
     this.#haObserver?.attach();
     this.#ensureAcmeObserver();
     this.#acmeObserver?.attach();
+    this.#ensureInstanceAcmeObserver();
+    this.#instanceAcmeObserver?.attach();
     this.#metricsScheduler?.attach((sample) =>
       this.#apiClient?.sendHostMetrics(sample) ?? Promise.resolve()
     );
@@ -1119,6 +1201,7 @@ export class InstanceClient {
       this.#idlePresence?.detach();
       this.#haObserver?.detach();
       this.#acmeObserver?.detach();
+      this.#instanceAcmeObserver?.detach();
       this.#metricsScheduler?.detach();
       this.#topologyReporter?.detach();
       // Live leases die with the socket — the next attach starts at baseline.
@@ -1169,6 +1252,18 @@ export class InstanceClient {
   #ensureAcmeObserver(): void {
     if (this.#acmeObserver) return;
     this.#acmeObserver = new AcmeIssuanceObserver({
+      send: (message) => {
+        if (!this.#ws || this.#ws.readyState !== WebSocket.OPEN) return;
+        this.#ws.send(JSON.stringify(message));
+      },
+    });
+  }
+
+  #ensureInstanceAcmeObserver(): void {
+    if (this.#instanceAcmeObserver) return;
+    this.#instanceAcmeObserver = new InstanceAcmeIssuanceObserver({
+      publishEdge: () =>
+        syncInstanceAcmeHttp01Site(resolveLayout(Deno.env.toObject())),
       send: (message) => {
         if (!this.#ws || this.#ws.readyState !== WebSocket.OPEN) return;
         this.#ws.send(JSON.stringify(message));
@@ -1296,8 +1391,12 @@ export class InstanceClient {
   #handleMessage(message: DaemonMessage, ws: WebSocket): void {
     switch (message.type) {
       case "version":
-        // Informational only. The daemon never self-updates; updates are
-        // operator-driven via the developer upgrade button / dev-sync push.
+        // `commit` / `branch` stay informational — the daemon never
+        // self-updates. `instanceVersion` is the control plane's semver for
+        // the floor check. A frame that omits it is the current peer: clear
+        // the last observation so a downgrade or pre-field control plane
+        // resolves to unknown.
+        this.#noteInstanceVersion(message.instanceVersion);
         break;
       case "echo":
         this.#echoMessage(message, ws);
@@ -1373,6 +1472,12 @@ export class InstanceClient {
         break;
       case "update":
         this.#runSocketHandler("update", this.#applyUpdate(message, ws));
+        break;
+      case "instance-update":
+        this.#runSocketHandler(
+          "instance-update",
+          this.#applyInstanceUpdate(message, ws),
+        );
         break;
     }
   }
@@ -1551,7 +1656,23 @@ export class InstanceClient {
     let ok = false;
     let error: string | undefined;
     try {
-      await clientTestHooks.applyPublicUrls(message.urls);
+      const capable = resolveDaemonCapabilities(DAEMON_VERSION)[
+        "instance-cert-sources-per-hostname"
+      ] === true;
+      const hostnames = capable && message.hostnames ? message.hostnames : null;
+      if (!hostnames) {
+        logInfo(
+          "public-urls",
+          "instance-cert-sources: public-urls-update degrading to the flat urls list",
+        );
+      }
+      await clientTestHooks.applyPublicUrls(
+        hostnames ?? message.urls.map((host) => ({
+          host,
+          source: "platform-ca" as const,
+        })),
+        hostnames ? { instanceAcme: message.instanceAcme } : {},
+      );
       ok = true;
     } catch (err) {
       error = err instanceof Error ? err.message : String(err);
@@ -1717,6 +1838,86 @@ export class InstanceClient {
     }
 
     this.#updateInstallInProgress = false;
+  }
+
+  #sendInstanceUpdateResult(
+    ws: WebSocket,
+    id: string,
+    ok: boolean,
+    error?: string,
+  ): void {
+    const result: DaemonMessage = {
+      type: "instance-update-result",
+      id,
+      ok,
+      error,
+      at: new Date().toISOString(),
+    };
+    if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(result));
+  }
+
+  async #applyInstanceUpdate(
+    message: Extract<DaemonMessage, { type: "instance-update" }>,
+    ws: WebSocket,
+  ): Promise<void> {
+    if (this.#instanceUpdateInProgress) {
+      this.#sendInstanceUpdateResult(
+        ws,
+        message.id,
+        false,
+        "control-plane update already in progress",
+      );
+      return;
+    }
+
+    this.#instanceUpdateInProgress = true;
+    let ok = false;
+    let error: string | undefined;
+    try {
+      const env = Deno.env.toObject();
+      const channel = message.channel?.trim() ||
+        resolveUpdateChannelConfig(env).channel;
+      // An env pin holds a package. A panel click must not replace it with
+      // the floating channel URL. The message supplies the pin only when
+      // the host has none.
+      const instancePin = resolvePinnedManifestUrl(env, "instance") ||
+        message.manifestUrl?.trim() ||
+        undefined;
+      const uiPin = resolvePinnedManifestUrl(env, "ui") ||
+        message.uiManifestUrl?.trim() ||
+        undefined;
+      await clientTestHooks.executeInstanceUpdateReconcile({
+        channel,
+        ...(instancePin ? { manifestUrl: instancePin } : {}),
+        ...(uiPin ? { uiManifestUrl: uiPin } : {}),
+        ...(message.targetVersion
+          ? { targetVersion: message.targetVersion }
+          : {}),
+      });
+      ok = true;
+    } catch (err) {
+      error = err instanceof Error ? err.message : String(err);
+      logError("update", "control-plane update failed:", sanitizeForLog(error));
+    }
+
+    this.#sendInstanceUpdateResult(ws, message.id, ok, error);
+
+    // Ack before restarting the control plane this socket is attached to.
+    // The daemon process stays up.
+    if (ok) {
+      await new Promise((resolve) =>
+        setTimeout(resolve, clientTestHooks.updateResultHandoffDelayMs)
+      );
+      const restarted = await clientTestHooks.restartControlPlaneUnits();
+      if (!restarted) {
+        logWarn(
+          "update",
+          "control-plane reconcile succeeded but systemd restart of the instance and Caddy failed; the new binary may not be live",
+        );
+      }
+    }
+
+    this.#instanceUpdateInProgress = false;
   }
 
   #collectAddresses(
@@ -2317,6 +2518,8 @@ type ClientTestHooks = {
   getBuildInfo: typeof getBuildInfo;
   downloadRunScript: typeof downloadRunScript;
   executeRunReconcile: typeof executeRunReconcile;
+  executeInstanceUpdateReconcile: typeof executeInstanceUpdateReconcile;
+  restartControlPlaneUnits: typeof restartControlPlaneUnits;
   collectServerIps: typeof collectServerIps;
   collectMetricsCapabilities: typeof collectMetricsCapabilities;
   handleCommandDispatch?: CommandDispatchHandler;
@@ -2337,6 +2540,8 @@ let clientTestHooks: ClientTestHooks = {
   getBuildInfo,
   downloadRunScript,
   executeRunReconcile,
+  executeInstanceUpdateReconcile,
+  restartControlPlaneUnits,
   collectServerIps,
   collectMetricsCapabilities,
   writeInstanceTunnelToken,

@@ -216,8 +216,12 @@ CDN_RUN_SCRIPT="https://turbopanel.sh"
 # /etc/turbopanel is daemon-owned, which is why the pin does not live there.
 UPDATE_ORIGIN_PIN="$INSTALL_ROOT/lib/update-origin"
 # Manifest pins may only name the release rails run.sh itself trusts.
+# Each prefix is an explicit arm — a closed set, not a pattern over every
+# TurboPanel repository.
 MANIFEST_URL_PREFIX_CDN="https://dl.trbp.nl/channels/"
 MANIFEST_URL_PREFIX_GITHUB="https://github.com/TurboPanel/turbopaneld/releases/download/"
+MANIFEST_URL_PREFIX_GITHUB_INSTANCE="https://github.com/TurboPanel/turbopanel/releases/download/"
+MANIFEST_URL_PREFIX_GITHUB_UI="https://github.com/TurboPanel/ui/releases/download/"
 
 tp_valid_url() {
   case "$1" in
@@ -241,6 +245,62 @@ tp_read_update_origin_pin() {
   _pin_dl_base="$(tp_pin_field dl_base)"
   _pin_ca="$(tp_pin_field instance_ca)"
   [ -n "$_pin_host" ] || tp_die "$UPDATE_ORIGIN_PIN carries no host"
+}
+
+# Closed allowlist: CDN trunk drop, plus the daemon, control-plane, and UI
+# GitHub release rails. Each prefix is its own alternative.
+tp_manifest_url_allowed() {
+  case "$1" in
+    "$MANIFEST_URL_PREFIX_CDN"*|"$MANIFEST_URL_PREFIX_GITHUB"*|"$MANIFEST_URL_PREFIX_GITHUB_INSTANCE"*|"$MANIFEST_URL_PREFIX_GITHUB_UI"*)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+# The UI pin is only the UI release rail. An instance, daemon, or CDN URL
+# must not be passed as --ui-manifest-url.
+tp_ui_manifest_url_allowed() {
+  case "$1" in
+    "$MANIFEST_URL_PREFIX_GITHUB_UI"*)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+# Download run.sh into $_script from the root-pinned origin. The caller has
+# already read the pin. TLS is never relaxed: CDN public trust, plaintext
+# dev, or the pinned Platform CA on an overlay host.
+tp_fetch_pinned_run_script() {
+  _script_url="$CDN_RUN_SCRIPT"
+  set -- curl -fsSL --max-time 120
+  case "$_pin_host" in
+    http://*)
+      _script_url="${_pin_host%/}/run.sh"
+      ;;
+    https://*)
+      if [ -n "$_pin_dl_base" ]; then
+        _script_url="${_pin_host%/}/run.sh"
+        if [ -n "$_pin_ca" ]; then
+          [ -f "$_pin_ca" ] || tp_die "Platform CA missing at $_pin_ca — re-run the installer with --instance-ca"
+          set -- "$@" --cacert "$_pin_ca"
+        fi
+      fi
+      ;;
+  esac
+
+  _script="$ROOT_SCRATCH/run.sh.$$"
+  rm -f "$_script"
+  if ! "$@" -o "$_script" "$_script_url"; then
+    rm -f "$_script"
+    tp_die "failed to download $_script_url (TLS is never relaxed for automatic updates)"
+  fi
+  [ -s "$_script" ] || { rm -f "$_script"; tp_die "empty run.sh from $_script_url"; }
 }
 
 tp_verb_update() {
@@ -294,10 +354,7 @@ tp_verb_update() {
         ;;
       --manifest-url)
         [ $# -ge 2 ] || tp_die "--manifest-url requires a value"
-        case "$2" in
-          "$MANIFEST_URL_PREFIX_CDN"*|"$MANIFEST_URL_PREFIX_GITHUB"*) ;;
-          *) tp_die "refusing --manifest-url $2: not a TurboPanel release rail" ;;
-        esac
+        tp_manifest_url_allowed "$2" || tp_die "refusing --manifest-url $2: not a TurboPanel release rail"
         tp_valid_url "$2" || tp_die "refusing --manifest-url $2"
         _manifest_url="$2"
         shift 2
@@ -324,31 +381,9 @@ tp_verb_update() {
   # Where run.sh comes from, and how it is trusted — the same three answers
   # as the daemon's resolveAutomaticUpdateTrust, decided here from the pinned
   # origin rather than from anything the caller downloaded or passed.
-  _script_url="$CDN_RUN_SCRIPT"
-  set -- curl -fsSL --max-time 120
-  case "$_host" in
-    http://*)
-      # Plaintext development control plane: the dev Caddy serves run.sh.
-      _script_url="${_host%/}/run.sh"
-      ;;
-    https://*)
-      if [ -n "$_dl_base" ]; then
-        _script_url="${_host%/}/run.sh"
-        if [ -n "$_ca" ]; then
-          [ -f "$_ca" ] || tp_die "Platform CA missing at $_ca — re-run the installer with --instance-ca"
-          set -- "$@" --cacert "$_ca"
-        fi
-      fi
-      ;;
-  esac
-
-  _script="$ROOT_SCRATCH/run.sh.$$"
-  rm -f "$_script"
-  if ! "$@" -o "$_script" "$_script_url"; then
-    rm -f "$_script"
-    tp_die "failed to download $_script_url (TLS is never relaxed for automatic updates)"
-  fi
-  [ -s "$_script" ] || { rm -f "$_script"; tp_die "empty run.sh from $_script_url"; }
+  # After the checks above, absent flags have been filled from the pin, so
+  # the host / overlay / CA the installer records are the pinned ones.
+  tp_fetch_pinned_run_script
 
   set -- --license "$_license"
   [ -n "$_host" ] && set -- "$@" --host "$_host"
@@ -364,12 +399,84 @@ tp_verb_update() {
   exit "$_rc"
 }
 
-[ $# -ge 1 ] || tp_die "usage: tp-orchestrate playbook|galaxy-docker-role|update …"
+# Reconcile an already-installed control plane (`run.sh --instance`).
+# Distinct from `update`: no license, no host, no overlay, no Platform CA.
+# The pin only chooses where this helper downloads run.sh. `--instance`
+# refuses those daemon-enrolment flags, and it already knows its own config.
+# `--manifest-url` here is the control-plane pin; it is passed to run.sh as
+# `--instance-manifest-url` so it does not set TURBOPANEL_MANIFEST_URL (that
+# pin is the daemon package, which `--instance` also reinstalls).
+tp_verb_update_instance() {
+  tp_require_root_scratch
+  _channel=""
+  _manifest_url=""
+  _ui_manifest_url=""
+  _no_start=false
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --channel)
+        [ $# -ge 2 ] || tp_die "--channel requires a value"
+        case "$2" in
+          trunk|edge|canary|rc|release) ;;
+          *) tp_die "refusing --channel $2" ;;
+        esac
+        _channel="$2"
+        shift 2
+        ;;
+      --manifest-url)
+        [ $# -ge 2 ] || tp_die "--manifest-url requires a value"
+        tp_manifest_url_allowed "$2" || tp_die "refusing --manifest-url $2: not a TurboPanel release rail"
+        tp_valid_url "$2" || tp_die "refusing --manifest-url $2"
+        _manifest_url="$2"
+        shift 2
+        ;;
+      --ui-manifest-url)
+        [ $# -ge 2 ] || tp_die "--ui-manifest-url requires a value"
+        tp_ui_manifest_url_allowed "$2" || tp_die "refusing --ui-manifest-url $2: not the UI release rail"
+        tp_valid_url "$2" || tp_die "refusing --ui-manifest-url $2"
+        _ui_manifest_url="$2"
+        shift 2
+        ;;
+      --no-start)
+        _no_start=true
+        shift
+        ;;
+      *)
+        # --insecure-tls, --license, --host, --dl-base, --instance-ca land
+        # here on purpose. This verb does not enrol a daemon.
+        tp_die "refusing update-instance flag $1"
+        ;;
+    esac
+  done
+  [ -n "$_channel" ] || tp_die "update-instance requires --channel"
+  case "$_channel" in
+    canary|rc|release) ;;
+    *)
+      tp_die "--instance needs --channel canary, rc or release (the instance and UI packages publish only through GitHub Releases; got ${_channel})"
+      ;;
+  esac
+  [ "$_no_start" = true ] || tp_die "update-instance requires --no-start (the daemon restarts the control plane)"
+  tp_read_update_origin_pin
+  tp_fetch_pinned_run_script
+
+  set -- --instance --channel "$_channel"
+  [ -n "$_manifest_url" ] && set -- "$@" --instance-manifest-url "$_manifest_url"
+  [ -n "$_ui_manifest_url" ] && set -- "$@" --ui-manifest-url "$_ui_manifest_url"
+  set -- "$@" --no-start
+  cd "$INSTALL_ROOT"
+  _rc=0
+  sh "$_script" "$@" || _rc=$?
+  rm -f "$_script"
+  exit "$_rc"
+}
+
+[ $# -ge 1 ] || tp_die "usage: tp-orchestrate playbook|galaxy-docker-role|update|update-instance …"
 _verb="$1"
 shift
 case "$_verb" in
   playbook) tp_verb_playbook "$@" ;;
   galaxy-docker-role) tp_verb_galaxy_docker_role "$@" ;;
   update) tp_verb_update "$@" ;;
+  update-instance) tp_verb_update_instance "$@" ;;
   *) tp_die "unknown verb $_verb" ;;
 esac

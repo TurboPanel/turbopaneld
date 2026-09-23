@@ -1,5 +1,9 @@
 import { assertEquals, assertStringIncludes } from "@std/assert";
-import { probeAcmeHostname } from "./acme-probe.ts";
+import {
+  certificateNotAfterFromOpenssl,
+  probeAcmeHostname,
+  readCertificateNotAfter,
+} from "./acme-probe.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -80,4 +84,54 @@ test("probeAcmeHostname reports failure on a client-side timeout", async () => {
     ),
   });
   assertEquals(result.ok, false);
+});
+
+test("probeAcmeHostname includes an injected leaf expiry", async () => {
+  const result = await probeAcmeHostname("example.test", {
+    fetchImpl: fakeFetch(() =>
+      Promise.resolve(new Response(null, { status: 200 }))
+    ),
+    readNotAfter: () => Promise.resolve("2027-01-01T00:00:00.000Z"),
+  });
+  assertEquals(result, {
+    hostname: "example.test",
+    ok: true,
+    notAfter: "2027-01-01T00:00:00.000Z",
+  });
+});
+
+test("certificateNotAfterFromOpenssl parses an enddate line", () => {
+  const raw = "notAfter=Sep 22 12:00:00 2027 GMT\n";
+  assertEquals(
+    certificateNotAfterFromOpenssl(raw),
+    new Date("Sep 22 12:00:00 2027 GMT").toISOString(),
+  );
+  assertEquals(certificateNotAfterFromOpenssl("subject=example\n"), null);
+});
+
+test("readCertificateNotAfter uses the injected runner and skips a bad name", async () => {
+  const pem = "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----";
+  let calls = 0;
+  const expiry = await readCertificateNotAfter("example.test", (args) => {
+    calls += 1;
+    if (args[0] === "s_client") {
+      return Promise.resolve({ code: 0, stdout: pem });
+    }
+    return Promise.resolve({
+      code: 0,
+      stdout: "notAfter=Sep 22 12:00:00 2027 GMT\n",
+    });
+  });
+  assertEquals(calls, 2);
+  assertEquals(expiry, new Date("Sep 22 12:00:00 2027 GMT").toISOString());
+
+  let spawned = 0;
+  assertEquals(
+    await readCertificateNotAfter("..", () => {
+      spawned += 1;
+      return Promise.resolve({ code: 0, stdout: "" });
+    }),
+    null,
+  );
+  assertEquals(spawned, 0);
 });

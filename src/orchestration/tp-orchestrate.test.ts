@@ -187,6 +187,7 @@ test("tp-orchestrate insists on root and a root-owned scratch directory", async 
 async function runUpdateVerb(
   args: string[],
   pin: string | null,
+  verb: "tp_verb_update" | "tp_verb_update_instance" = "tp_verb_update",
 ): Promise<{ status: number; stdout: string; stderr: string }> {
   const source = await Deno.readTextFile(helperPath);
   const root = await Deno.makeTempDir({ prefix: "tp-orchestrate-update-" });
@@ -215,6 +216,8 @@ async function runUpdateVerb(
       'CDN_RUN_SCRIPT="https://turbopanel.sh"',
       'MANIFEST_URL_PREFIX_CDN="https://dl.trbp.nl/channels/"',
       'MANIFEST_URL_PREFIX_GITHUB="https://github.com/TurboPanel/turbopaneld/releases/download/"',
+      'MANIFEST_URL_PREFIX_GITHUB_INSTANCE="https://github.com/TurboPanel/turbopanel/releases/download/"',
+      'MANIFEST_URL_PREFIX_GITHUB_UI="https://github.com/TurboPanel/ui/releases/download/"',
       'tp_require_root_scratch() { mkdir -p "$ROOT_SCRATCH"; }',
       // The pin ownership check needs uid 0; the file is ours here.
       'stat() { if [ "$1" = -c ] && [ "$2" = %u ]; then echo 0; else command stat "$@"; fi; }',
@@ -222,8 +225,12 @@ async function runUpdateVerb(
       extractShellFunction(source, "tp_valid_url"),
       extractShellFunction(source, "tp_pin_field"),
       extractShellFunction(source, "tp_read_update_origin_pin"),
+      extractShellFunction(source, "tp_manifest_url_allowed"),
+      extractShellFunction(source, "tp_ui_manifest_url_allowed"),
+      extractShellFunction(source, "tp_fetch_pinned_run_script"),
       extractShellFunction(source, "tp_verb_update"),
-      'tp_verb_update "$@"',
+      extractShellFunction(source, "tp_verb_update_instance"),
+      `${verb} "$@"`,
     ].join("\n");
     const out = await new Deno.Command("sh", {
       args: ["-c", script, "sh", ...args],
@@ -315,11 +322,13 @@ test("tp-orchestrate update uses the pinned overlay host with the pinned Platfor
   assertEquals(result.stdout.includes("[-k]"), false);
 });
 
-test("tp-orchestrate update accepts the two release rails as manifest pins", async () => {
+test("tp-orchestrate update accepts the release rails as manifest pins", async () => {
   for (
     const url of [
       "https://dl.trbp.nl/channels/trunk/manifest.json",
       "https://github.com/TurboPanel/turbopaneld/releases/download/v0.1.0/manifest.json",
+      "https://github.com/TurboPanel/turbopanel/releases/download/v0.1.0/manifest.json",
+      "https://github.com/TurboPanel/ui/releases/download/v0.1.0/manifest.json",
     ]
   ) {
     const result = await runUpdateVerb(
@@ -329,4 +338,131 @@ test("tp-orchestrate update accepts the two release rails as manifest pins", asy
     assertEquals(result.status, 0, result.stderr);
     assertStringIncludes(result.stdout, `[--manifest-url] [${url}]`);
   }
+});
+
+test("tp-orchestrate update-instance reconciles run.sh --instance without daemon enrolment flags", async () => {
+  const result = await runUpdateVerb(
+    ["--channel", "release", "--no-start"],
+    PUBLIC_PIN,
+    "tp_verb_update_instance",
+  );
+  assertEquals(result.status, 0, result.stderr);
+  assertStringIncludes(result.stdout, "[https://turbopanel.sh]");
+  assertStringIncludes(
+    result.stdout,
+    "RUNSH [--instance] [--channel] [release] [--no-start]",
+  );
+  assertEquals(result.stdout.includes("[--license]"), false);
+  assertEquals(result.stdout.includes("[--host]"), false);
+  assertEquals(result.stdout.includes("[--dl-base]"), false);
+  assertEquals(result.stdout.includes("[--instance-ca]"), false);
+  assertEquals(result.stdout.includes("[-k]"), false);
+});
+
+test("tp-orchestrate update-instance maps a control-plane pin onto --instance-manifest-url", async () => {
+  const url =
+    "https://github.com/TurboPanel/turbopanel/releases/download/v0.1.1/manifest.json";
+  const result = await runUpdateVerb(
+    ["--channel", "rc", "--manifest-url", url, "--no-start"],
+    PUBLIC_PIN,
+    "tp_verb_update_instance",
+  );
+  assertEquals(result.status, 0, result.stderr);
+  assertStringIncludes(
+    result.stdout,
+    `RUNSH [--instance] [--channel] [rc] [--instance-manifest-url] [${url}] [--no-start]`,
+  );
+  assertEquals(result.stdout.includes("[--manifest-url]"), false);
+});
+
+test("tp-orchestrate update-instance forwards a UI pin and refuses other rails", async () => {
+  const instanceUrl =
+    "https://github.com/TurboPanel/turbopanel/releases/download/v0.1.1/manifest.json";
+  const uiUrl =
+    "https://github.com/TurboPanel/ui/releases/download/v0.1.1/manifest.json";
+  const result = await runUpdateVerb(
+    [
+      "--channel",
+      "release",
+      "--manifest-url",
+      instanceUrl,
+      "--ui-manifest-url",
+      uiUrl,
+      "--no-start",
+    ],
+    PUBLIC_PIN,
+    "tp_verb_update_instance",
+  );
+  assertEquals(result.status, 0, result.stderr);
+  assertStringIncludes(
+    result.stdout,
+    `RUNSH [--instance] [--channel] [release] [--instance-manifest-url] [${instanceUrl}] [--ui-manifest-url] [${uiUrl}] [--no-start]`,
+  );
+
+  for (
+    const refused of [
+      "https://github.com/TurboPanel/turbopanel/releases/download/v0.1.1/manifest.json",
+      "https://dl.trbp.nl/channels/release/manifest.json",
+    ]
+  ) {
+    const denied = await runUpdateVerb(
+      [
+        "--channel",
+        "release",
+        "--ui-manifest-url",
+        refused,
+        "--no-start",
+      ],
+      PUBLIC_PIN,
+      "tp_verb_update_instance",
+    );
+    assertEquals(denied.status, 1, refused);
+    assertStringIncludes(denied.stderr, "not the UI release rail");
+  }
+});
+
+test("tp-orchestrate update-instance refuses trunk, missing flags, and daemon enrolment flags", async () => {
+  const cases: Array<[string[], string]> = [
+    [["--no-start"], "update-instance requires --channel"],
+    [["--channel", "release"], "requires --no-start"],
+    [
+      ["--channel", "trunk", "--no-start"],
+      "--instance needs --channel canary, rc or release",
+    ],
+    [["--channel", "nightly", "--no-start"], "refusing --channel"],
+    [
+      ["--channel", "release", "--license", "abc", "--no-start"],
+      "refusing update-instance flag --license",
+    ],
+    [
+      ["--channel", "release", "--insecure-tls", "--no-start"],
+      "refusing update-instance flag --insecure-tls",
+    ],
+    [
+      [
+        "--channel",
+        "release",
+        "--manifest-url",
+        "https://attacker.example/manifest.json",
+        "--no-start",
+      ],
+      "not a TurboPanel release rail",
+    ],
+  ];
+  for (const [args, needle] of cases) {
+    const result = await runUpdateVerb(
+      args,
+      PUBLIC_PIN,
+      "tp_verb_update_instance",
+    );
+    assertEquals(result.status, 1, args.join(" "));
+    assertStringIncludes(result.stderr, needle);
+  }
+  const missing = await runUpdateVerb(
+    ["--channel", "release", "--no-start"],
+    null,
+    "tp_verb_update_instance",
+  );
+  assertEquals(missing.status, 1);
+  assertStringIncludes(missing.stderr, "update origin pin missing");
 });

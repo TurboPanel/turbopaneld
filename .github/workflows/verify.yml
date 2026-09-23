@@ -119,6 +119,20 @@ jobs:
       - name: Check orchestration (playbook syntax + ansible-lint min profile)
         run: deno task check:orchestration
 
+      # assets.test.ts requires scripts/download-caddy.mjs and fails when it is
+      # missing. A single-repo checkout does not include that file; place the
+      # trunk copy at .ci-instance-caddy-pin, the other path the test accepts.
+      - name: Check out instance Caddy downloader
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: TurboPanel/turbopanel
+          ref: trunk
+          fetch-depth: 1
+          path: .ci-instance-caddy-pin
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: scripts/download-caddy.mjs
+
       - name: Test with coverage
         run: deno task test:coverage
 

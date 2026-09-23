@@ -1,14 +1,19 @@
 ---
 # Targeted cert regeneration + Caddy reload.
-# Invoked by the daemon public-urls-apply handler after writing TURBOPANEL_PUBLIC_URLS
-# to {{ turbopanel_config_dir }}/instance/runtime.env. Runs instance-certs only (cheap, idempotent) then reloads
-# turbopanel-caddy so the new leaf cert is served immediately. Restart (not
-# reload) so Caddy re-reads the leaf PEM from disk after in-place regeneration.
-# CA is preserved across runs; only the leaf is regenerated when SANs change.
+# Invoked by the daemon public-urls-apply handler after writing
+# TURBOPANEL_PUBLIC_URLS and any uploaded pairs. Runs instance-certs, renders
+# a candidate Caddyfile, and validates it. When Caddy is already running, the
+# candidate is loaded through admin localhost:2019 first; the persistent
+# Caddyfile is replaced only after that process accepts the config. A
+# rejected reload leaves the live file (including :8443) untouched. When
+# Caddy is not running, a failed start restores the previous file. Reload,
+# not restart, so the in-flight admin request that triggered the apply is
+# not killed.
 #
-# Caddy MUST NOT auto-provision certs (auto_https off in Caddyfile is mandatory).
-# Certs come only from the platform CA-signed leaf or an explicitly-requested
-# publicly-trusted cert. Never add ACME/on-demand TLS configuration.
+# Let's Encrypt certificates are not files this playbook writes. Caddy's own
+# client stores them under the control-plane unit's XDG_DATA_HOME. The
+# hostname sidecar next to the Caddyfile is what InstanceAcmeIssuanceObserver
+# reads.
 - name: TurboPanel instance certs apply
   hosts: localhost
   connection: local
@@ -17,7 +22,167 @@
   roles:
     - role: instance-certs
   post_tasks:
-    - name: Restart turbopanel-caddy to serve updated leaf cert
+    - name: Decide whether control-plane Caddy may bind public :443
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/../roles/instance-certs/tasks/public-https-owner.yml"
+
+    - name: Ensure the control-plane Caddy config directory exists
+      when: turbopanel_dev_user | default('') | length == 0
+      ansible.builtin.file:
+        path: "{{ turbopanel_caddyfile | dirname }}"
+        state: directory
+        owner: root
+        group: "{{ turbopanel_group }}"
+        mode: "0750"
+
+    - name: Render a candidate Caddyfile
+      when: turbopanel_dev_user | default('') | length == 0
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/../roles/instance-launch/templates/Caddyfile.j2"
+        dest: "{{ turbopanel_caddyfile }}.candidate"
+        owner: root
+        group: "{{ turbopanel_group }}"
+        mode: "0640"
+
+    - name: Validate the candidate Caddyfile
+      when: turbopanel_dev_user | default('') | length == 0
+      ansible.builtin.command:
+        argv:
+          - "{{ turbopanel_caddy_bin }}"
+          - validate
+          - --config
+          - "{{ turbopanel_caddyfile }}.candidate"
+          - --adapter
+          - caddyfile
+
+    - name: Read whether control-plane Caddy is active
+      ansible.builtin.command:
+        argv: ["systemctl", "is-active", "turbopanel-caddy"]
+      register: _caddy_active
+      failed_when: false
+      changed_when: false
+
+    - name: Ask the running control-plane Caddy to accept the candidate
+      when:
+        - turbopanel_dev_user | default('') | length == 0
+        - _caddy_active.rc == 0
+      ansible.builtin.command:
+        argv:
+          - "{{ turbopanel_caddy_bin }}"
+          - reload
+          - --config
+          - "{{ turbopanel_caddyfile }}.candidate"
+          - --adapter
+          - caddyfile
+          - --address
+          - localhost:2019
+
+    - name: Install the Caddyfile the running process accepted
+      when:
+        - turbopanel_dev_user | default('') | length == 0
+        - _caddy_active.rc == 0
+      ansible.builtin.copy:
+        src: "{{ turbopanel_caddyfile }}.candidate"
+        dest: "{{ turbopanel_caddyfile }}"
+        remote_src: true
+        owner: root
+        group: "{{ turbopanel_group }}"
+        mode: "0640"
+
+    - name: Stat the persistent Caddyfile before a cold install
+      when:
+        - turbopanel_dev_user | default('') | length == 0
+        - _caddy_active.rc != 0
+      ansible.builtin.stat:
+        path: "{{ turbopanel_caddyfile }}"
+      register: _live_caddyfile
+
+    - name: Copy the persistent Caddyfile aside before a cold install
+      when:
+        - turbopanel_dev_user | default('') | length == 0
+        - _caddy_active.rc != 0
+        - _live_caddyfile.stat.exists | default(false)
+      ansible.builtin.copy:
+        src: "{{ turbopanel_caddyfile }}"
+        dest: "{{ turbopanel_caddyfile }}.previous"
+        remote_src: true
+        owner: root
+        group: "{{ turbopanel_group }}"
+        mode: "0640"
+
+    - name: Install and start the candidate when Caddy is not running
+      when:
+        - turbopanel_dev_user | default('') | length == 0
+        - _caddy_active.rc != 0
+      block:
+        - name: Install the validated Caddyfile when Caddy is not running
+          ansible.builtin.copy:
+            src: "{{ turbopanel_caddyfile }}.candidate"
+            dest: "{{ turbopanel_caddyfile }}"
+            remote_src: true
+            owner: root
+            group: "{{ turbopanel_group }}"
+            mode: "0640"
+
+        - name: Start control-plane Caddy when it is not already serving
+          ansible.builtin.systemd:
+            name: turbopanel-caddy
+            state: started
+
+        - name: Remove the cold-install snapshot after Caddy accepts the candidate
+          ansible.builtin.file:
+            path: "{{ turbopanel_caddyfile }}.previous"
+            state: absent
+      rescue:
+        - name: Restore the previous Caddyfile after a rejected start
+          when: _live_caddyfile.stat.exists | default(false)
+          ansible.builtin.copy:
+            src: "{{ turbopanel_caddyfile }}.previous"
+            dest: "{{ turbopanel_caddyfile }}"
+            remote_src: true
+            owner: root
+            group: "{{ turbopanel_group }}"
+            mode: "0640"
+
+        - name: Remove a rejected first Caddyfile when nothing was serving before
+          when: not (_live_caddyfile.stat.exists | default(false))
+          ansible.builtin.file:
+            path: "{{ turbopanel_caddyfile }}"
+            state: absent
+
+        - name: Report that control-plane Caddy rejected the candidate
+          ansible.builtin.fail:
+            msg: >-
+              control-plane Caddy did not accept the candidate config.
+              The persistent Caddyfile was left unchanged.
+
+    - name: Reload the development Caddy unit
+      when:
+        - turbopanel_dev_user | default('') | length > 0
+        - _caddy_active.rc == 0
       ansible.builtin.systemd:
         name: turbopanel-caddy
-        state: restarted
+        state: reloaded
+
+    - name: Start the development Caddy unit when it is not already serving
+      when:
+        - turbopanel_dev_user | default('') | length > 0
+        - _caddy_active.rc != 0
+      ansible.builtin.systemd:
+        name: turbopanel-caddy
+        state: started
+
+    - name: Ensure the hostname sidecar directory exists
+      ansible.builtin.file:
+        path: "{{ turbopanel_config_dir }}/caddy"
+        state: directory
+        owner: root
+        group: "{{ turbopanel_group }}"
+        mode: "0750"
+
+    - name: Record instance hostnames for the ACME observer
+      ansible.builtin.copy:
+        dest: "{{ turbopanel_config_dir }}/caddy/instance-hostnames.json"
+        content: "{{ turbopanel_hostnames | default([]) | to_json }}"
+        owner: root
+        group: "{{ turbopanel_group }}"
+        mode: "0640"

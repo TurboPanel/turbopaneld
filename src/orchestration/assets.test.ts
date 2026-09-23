@@ -916,6 +916,13 @@ test("requirements.lock.txt pins ansible-core with hashes", () => {
 // must carry its upstream SHA-256 for every supported architecture, and the
 // three copies (role default, run.sh, this constant) must agree — a version
 // bump without new digests fails here, not on a customer host.
+//
+// Hosting Caddy has four required pin sites: the caddy role default,
+// ensure-hosting-caddy.ts, install-hosting-caddy.sh, and the instance
+// download-caddy.mjs. Version and tarball SHA-256 must match on all four.
+// The instance file is not optional — these tests fail when it is absent.
+// Daemon CI checks the trunk copy out at .ci-instance-caddy-pin before the
+// suite; a co-located sibling checkout is the other accepted path.
 
 const SHA256_HEX = /^[0-9a-f]{64}$/;
 
@@ -949,6 +956,74 @@ function readDigestTable(
     }
   }
   return table;
+}
+
+function requireCapture(
+  source: string,
+  pattern: RegExp,
+  label: string,
+): string {
+  const value = pattern.exec(source)?.[1];
+  if (!value) throw new TypeError(`could not read ${label}`);
+  return value;
+}
+
+/**
+ * Role digests are keyed by ansible_architecture (`x86_64` / `aarch64`).
+ * The direct downloaders use the release-asset names (`amd64` / `arm64`).
+ */
+function readCaddyRolePin(): {
+  version: string;
+  amd64: string;
+  arm64: string;
+} {
+  const yaml = readRoleDefaults("caddy");
+  const version = requireCapture(
+    yaml,
+    /^caddy_version:\s*"([\d.]+)"\s*$/m,
+    "caddy_version",
+  );
+  const digests = readDigestTable(yaml, "caddy_sha256")[version];
+  const amd64 = digests?.x86_64;
+  const arm64 = digests?.aarch64;
+  if (!amd64 || !arm64) {
+    throw new TypeError(
+      `caddy_sha256 has no x86_64/aarch64 entry for caddy_version ${version}`,
+    );
+  }
+  return { version, amd64, arm64 };
+}
+
+/**
+ * Instance downloader. Required on every run — absence is a failure.
+ * Co-located dev reads the sibling checkout; daemon CI reads the trunk copy
+ * checked out at `.ci-instance-caddy-pin`.
+ */
+function instanceCaddyDownloaderPath(): string {
+  const candidates = [
+    join(fromMeta, "..", "turbopanel", "scripts", "download-caddy.mjs"),
+    join(
+      fromMeta,
+      ".ci-instance-caddy-pin",
+      "scripts",
+      "download-caddy.mjs",
+    ),
+  ];
+  for (const path of candidates) {
+    try {
+      Deno.statSync(path);
+      return path;
+    } catch (err) {
+      if (!(err instanceof Deno.errors.NotFound)) throw err;
+    }
+  }
+  throw new TypeError(
+    `required Caddy pin site missing (download-caddy.mjs): ${candidates[0]}`,
+  );
+}
+
+function readInstanceCaddyDownloader(): string {
+  return Deno.readTextFileSync(instanceCaddyDownloaderPath());
 }
 
 test("deno-runtime pins an upstream SHA-256 for DENO_VERSION on both architectures", () => {
@@ -1025,12 +1100,126 @@ test("node-runtime pins corepack by version and verified tarball digest", () => 
   );
 });
 
+test("caddy role pins an upstream SHA-256 for caddy_version on both architectures", () => {
+  const yaml = readRoleDefaults("caddy");
+  const version = /^caddy_version:\s*"([\d.]+)"\s*$/m.exec(yaml)?.[1];
+  if (!version) throw new TypeError("could not read caddy_version");
+  const table = readDigestTable(yaml, "caddy_sha256");
+  const digests = table[version];
+  if (!digests) {
+    throw new TypeError(
+      `caddy_sha256 has no entry for caddy_version ${version}`,
+    );
+  }
+  for (const arch of ["x86_64", "aarch64"]) {
+    assertEquals(SHA256_HEX.test(digests[arch] ?? ""), true, `caddy ${arch}`);
+  }
+});
+
+test("caddy version pin stays aligned across install surfaces", () => {
+  const { version } = readCaddyRolePin();
+
+  const ensureHosting = Deno.readTextFileSync(
+    join(fromMeta, "src", "deploy", "ensure-hosting-caddy.ts"),
+  );
+  const hostingVersion = requireCapture(
+    ensureHosting,
+    /HOSTING_CADDY_VERSION = "([\d.]+)"/,
+    "HOSTING_CADDY_VERSION",
+  );
+
+  const installSh = Deno.readTextFileSync(
+    join(fromMeta, "scripts", "install-hosting-caddy.sh"),
+  );
+  const shellDefault = requireCapture(
+    installSh,
+    /^CADDY_VER="\$\{CADDY_VER:-([\d.]+)\}"/m,
+    "CADDY_VER",
+  );
+
+  const downloadVersion = requireCapture(
+    readInstanceCaddyDownloader(),
+    /const CADDY_VERSION = '([\d.]+)'/,
+    "CADDY_VERSION",
+  );
+
+  assertEquals(hostingVersion, version, "ensure-hosting-caddy.ts");
+  assertEquals(shellDefault, version, "install-hosting-caddy.sh");
+  assertEquals(downloadVersion, version, "download-caddy.mjs");
+});
+
+test("caddy SHA-256 pins stay aligned across install surfaces", () => {
+  const pin = readCaddyRolePin();
+  const ensureHosting = Deno.readTextFileSync(
+    join(fromMeta, "src", "deploy", "ensure-hosting-caddy.ts"),
+  );
+  const installSh = Deno.readTextFileSync(
+    join(fromMeta, "scripts", "install-hosting-caddy.sh"),
+  );
+  const downloadMjs = readInstanceCaddyDownloader();
+
+  assertEquals(
+    requireCapture(
+      ensureHosting,
+      /amd64: "([0-9a-f]{64})"/,
+      "HOSTING_CADDY_SHA256 amd64",
+    ),
+    pin.amd64,
+    "ensure-hosting-caddy.ts amd64",
+  );
+  assertEquals(
+    requireCapture(
+      ensureHosting,
+      /arm64: "([0-9a-f]{64})"/,
+      "HOSTING_CADDY_SHA256 arm64",
+    ),
+    pin.arm64,
+    "ensure-hosting-caddy.ts arm64",
+  );
+  assertEquals(
+    requireCapture(
+      installSh,
+      /^CADDY_SHA256_AMD64=([0-9a-f]{64})$/m,
+      "CADDY_SHA256_AMD64",
+    ),
+    pin.amd64,
+    "install-hosting-caddy.sh amd64",
+  );
+  assertEquals(
+    requireCapture(
+      installSh,
+      /^CADDY_SHA256_ARM64=([0-9a-f]{64})$/m,
+      "CADDY_SHA256_ARM64",
+    ),
+    pin.arm64,
+    "install-hosting-caddy.sh arm64",
+  );
+  assertEquals(
+    requireCapture(
+      downloadMjs,
+      /amd64: '([0-9a-f]{64})'/,
+      "CADDY_SHA256 amd64",
+    ),
+    pin.amd64,
+    "download-caddy.mjs amd64",
+  );
+  assertEquals(
+    requireCapture(
+      downloadMjs,
+      /arm64: '([0-9a-f]{64})'/,
+      "CADDY_SHA256 arm64",
+    ),
+    pin.arm64,
+    "download-caddy.mjs arm64",
+  );
+});
+
 test("runtime roles verify every download with get_url checksum before extraction", () => {
-  for (const role of ["deno-runtime", "node-runtime"]) {
+  for (const role of ["deno-runtime", "node-runtime", "caddy"]) {
     const tasks = Deno.readTextFileSync(
       join(fromMeta, "orchestration", "roles", role, "tasks", "main.yml"),
     );
-    // curl-and-extract shell pipelines are gone from both roles.
+    // curl-and-extract shell pipelines are gone from runtime install roles.
     assertEquals(tasks.includes("curl -fsSL"), false, `${role} curl`);
     assertEquals(tasks.includes("ansible.builtin.get_url"), true, role);
     assertEquals(/checksum: "sha256:\{\{/.test(tasks), true, role);

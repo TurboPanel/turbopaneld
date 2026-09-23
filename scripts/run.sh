@@ -797,35 +797,49 @@ PY
   ln -sfn "../current/deno" "$RUNTIMES_DIR/deno/bin/deno"
 }
 
-# Built-in manifest location per advertised channel, used when no overlay
-# catalog is configured. Mirrors src/update/urls.ts builtinChannelManifestUrl
-# (urls.test.ts pins this copy against that one) — keep the two in step.
-# canary is the rolling GitHub pre-release carrying the newest green trunk
-# build; edge is reserved and unadvertised: no built-in location.
+# Built-in manifest location per advertised channel and artifact kind, used
+# when no overlay catalog is configured. Mirrors src/update/urls.ts
+# builtinChannelManifestUrl (urls.test.ts pins this copy against that one) —
+# keep the two in step. Kind is daemon (default), instance, or ui.
+# Daemon trunk is the CDN drop. Instance and UI publish only through GitHub
+# Releases, so their trunk has no location. canary is the rolling GitHub
+# pre-release carrying the newest green trunk build; edge is reserved and
+# unadvertised: no built-in location.
 tp_builtin_channel_manifest_url() {
-  case "$1" in
-    trunk) printf '%s' "https://dl.trbp.nl/channels/trunk/manifest.json" ;;
-    canary) printf '%s' "https://github.com/TurboPanel/turbopaneld/releases/download/canary/manifest.json" ;;
-    rc) printf '%s' "https://github.com/TurboPanel/turbopaneld/releases/download/rc/manifest.json" ;;
-    release) printf '%s' "https://github.com/TurboPanel/turbopaneld/releases/latest/download/manifest.json" ;;
+  _channel="$1"
+  _kind="${2:-daemon}"
+  case "$_kind" in
+    daemon) _repo="turbopaneld" ;;
+    instance) _repo="turbopanel" ;;
+    ui) _repo="ui" ;;
     *) return 1 ;;
   esac
-}
-
-# The same rail for the other two packages a self-hosted install needs
-# (TurboPanel/turbopanel — the compiled instance; TurboPanel/ui — the web
-# export). Both publish only through GitHub Releases: canary (every green
-# trunk merge, rolling), rc and release. There is no CDN drop for them, so
-# trunk has no location and an --instance install must name canary, rc or
-# release.
-tp_builtin_repo_manifest_url() {
-  _repo="$1"
-  case "$2" in
+  case "$_channel" in
+    trunk)
+      if [ "$_kind" != "daemon" ]; then
+        return 1
+      fi
+      printf '%s' "https://dl.trbp.nl/channels/trunk/manifest.json"
+      ;;
     canary) printf '%s' "https://github.com/TurboPanel/${_repo}/releases/download/canary/manifest.json" ;;
     rc) printf '%s' "https://github.com/TurboPanel/${_repo}/releases/download/rc/manifest.json" ;;
     release) printf '%s' "https://github.com/TurboPanel/${_repo}/releases/latest/download/manifest.json" ;;
     *) return 1 ;;
   esac
+}
+
+# The same rail addressed by repository name (turbopaneld, turbopanel, ui).
+# Instance and UI publish only through GitHub Releases: canary, rc, release.
+# There is no CDN drop for them, so trunk has no location and an --instance
+# install must name canary, rc or release.
+tp_builtin_repo_manifest_url() {
+  case "$1" in
+    turbopaneld) _kind="daemon" ;;
+    turbopanel) _kind="instance" ;;
+    ui) _kind="ui" ;;
+    *) return 1 ;;
+  esac
+  tp_builtin_channel_manifest_url "$2" "$_kind"
 }
 
 tp_fetch_channel_manifest() {
@@ -894,7 +908,18 @@ tp_fetch_channel_manifest() {
 tp_fetch_repo_manifest() {
   _repo="$1"
   _channel="${TURBOPANEL_UPDATE_CHANNEL:-release}"
-  if ! _manifest_url="$(tp_builtin_repo_manifest_url "$_repo" "$_channel")"; then
+  # A pin names one exact manifest for that package and wins over the
+  # channel pointer. The daemon pin (TURBOPANEL_MANIFEST_URL) is not read
+  # here: --instance also reinstalls the daemon, and that package keeps its
+  # own pin.
+  _pin=""
+  case "$_repo" in
+    turbopanel) _pin="${TURBOPANEL_INSTANCE_MANIFEST_URL:-}" ;;
+    ui) _pin="${TURBOPANEL_UI_MANIFEST_URL:-}" ;;
+  esac
+  if [ -n "$_pin" ]; then
+    _manifest_url="$_pin"
+  elif ! _manifest_url="$(tp_builtin_repo_manifest_url "$_repo" "$_channel")"; then
     echo "run.sh: ${_repo} has no ${_channel} channel — use --channel canary, rc or release" >&2
     return 1
   fi
@@ -1165,6 +1190,8 @@ INSECURE_TLS=false
 NO_START=false
 INSTANCE_INSTALL=false
 MANIFEST_URL=""
+INSTANCE_MANIFEST_URL=""
+UI_MANIFEST_URL=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -1192,6 +1219,12 @@ while [ $# -gt 0 ]; do
     --manifest-url)
       [ $# -ge 2 ] || { tp_print_error "--manifest-url requires an argument"; exit 1; }
       MANIFEST_URL="$2"; shift 2 ;;
+    --instance-manifest-url)
+      [ $# -ge 2 ] || { tp_print_error "--instance-manifest-url requires an argument"; exit 1; }
+      INSTANCE_MANIFEST_URL="$2"; shift 2 ;;
+    --ui-manifest-url)
+      [ $# -ge 2 ] || { tp_print_error "--ui-manifest-url requires an argument"; exit 1; }
+      UI_MANIFEST_URL="$2"; shift 2 ;;
     --channel)
       [ $# -ge 2 ] || { tp_print_error "--channel requires an argument"; exit 1; }
       export TURBOPANEL_UPDATE_CHANNEL="$2"; shift 2 ;;
@@ -1227,6 +1260,25 @@ if [ -n "$MANIFEST_URL" ]; then
   fi
   export TURBOPANEL_MANIFEST_URL="$MANIFEST_URL"
 fi
+# Independent pins for the control plane and the UI. They must not share
+# TURBOPANEL_MANIFEST_URL: that variable pins the daemon package, which an
+# --instance run also reinstalls.
+[ -n "$INSTANCE_MANIFEST_URL" ] || INSTANCE_MANIFEST_URL="${TURBOPANEL_INSTANCE_MANIFEST_URL:-}"
+if [ -n "$INSTANCE_MANIFEST_URL" ]; then
+  case "$INSTANCE_MANIFEST_URL" in
+    https://*) ;;
+    *) tp_print_error "--instance-manifest-url must be an https:// URL (got $INSTANCE_MANIFEST_URL)"; exit 1 ;;
+  esac
+  export TURBOPANEL_INSTANCE_MANIFEST_URL="$INSTANCE_MANIFEST_URL"
+fi
+[ -n "$UI_MANIFEST_URL" ] || UI_MANIFEST_URL="${TURBOPANEL_UI_MANIFEST_URL:-}"
+if [ -n "$UI_MANIFEST_URL" ]; then
+  case "$UI_MANIFEST_URL" in
+    https://*) ;;
+    *) tp_print_error "--ui-manifest-url must be an https:// URL (got $UI_MANIFEST_URL)"; exit 1 ;;
+  esac
+  export TURBOPANEL_UI_MANIFEST_URL="$UI_MANIFEST_URL"
+fi
 case "${TURBOPANEL_INSECURE_TLS:-}" in
   1|true|TRUE|yes|YES) INSECURE_TLS=true ;;
   *)
@@ -1245,7 +1297,8 @@ esac
 # settled, so a sudo re-exec does not show the banner twice.
 if [ "$INSTANCE_INSTALL" != true ] && [ -z "$LICENSE" ] && [ -z "$HOST_URL" ] \
   && [ -z "$TUNNEL_TOKEN" ] && [ -z "$INSTANCE_CA" ] && [ -z "$DL_BASE" ] \
-  && [ -z "$MANIFEST_URL" ]; then
+  && [ -z "$MANIFEST_URL" ] && [ -z "$INSTANCE_MANIFEST_URL" ] \
+  && [ -z "$UI_MANIFEST_URL" ]; then
   INSTANCE_INSTALL=true
 fi
 
@@ -1308,6 +1361,8 @@ if ! tp_is_root; then
   [ -n "$LICENSE" ] && set -- "$@" --license "$LICENSE"
   [ "$INSTANCE_INSTALL" = true ] && set -- "$@" --instance
   [ -n "$MANIFEST_URL" ] && set -- "$@" --manifest-url "$MANIFEST_URL"
+  [ -n "$INSTANCE_MANIFEST_URL" ] && set -- "$@" --instance-manifest-url "$INSTANCE_MANIFEST_URL"
+  [ -n "$UI_MANIFEST_URL" ] && set -- "$@" --ui-manifest-url "$UI_MANIFEST_URL"
   [ -n "$HOST_URL" ] && set -- "$@" --host "$HOST_URL"
   [ -n "$DL_BASE" ] && set -- "$@" --dl-base "$DL_BASE"
   [ -n "$INSTANCE_CA" ] && set -- "$@" --instance-ca "$INSTANCE_CA"
@@ -1656,6 +1711,12 @@ trap 'rm -f "$VARS_FILE"' EXIT
   fi
   if [ -n "$MANIFEST_URL" ]; then
     printf 'turbopanel_manifest_url: %s\n' "$MANIFEST_URL"
+  fi
+  if [ -n "$INSTANCE_MANIFEST_URL" ]; then
+    printf 'turbopanel_instance_manifest_url: %s\n' "$INSTANCE_MANIFEST_URL"
+  fi
+  if [ -n "$UI_MANIFEST_URL" ]; then
+    printf 'turbopanel_ui_manifest_url: %s\n' "$UI_MANIFEST_URL"
   fi
   if [ -n "$TUNNEL_TOKEN" ]; then
     printf 'turbopanel_tunnel_token: %s\n' "$TUNNEL_TOKEN"

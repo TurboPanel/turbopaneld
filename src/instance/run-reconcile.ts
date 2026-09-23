@@ -2,6 +2,7 @@ import { encodeBase64Url } from "@std/encoding/base64url";
 import { ORCHESTRATE_HELPER } from "../orchestration/assets.ts";
 import { playbooksNeedRootHelper } from "../orchestration/privileged.ts";
 import { readEnv, resolveLayout } from "../paths/layout.ts";
+import { resolveInstanceSupport } from "./version-wire.ts";
 import { type InstanceConfig, stripTrailingSlashes } from "./sockets.ts";
 
 export const PRODUCTION_CONTROL_PLANE = "https://turbopanel.app";
@@ -315,4 +316,151 @@ export async function executeRunReconcile(options: {
         "run.sh reconcile failed",
     );
   }
+}
+
+/**
+ * A development checkout runs the control plane from source. `run.sh
+ * --instance` would install production binaries under `/opt/turbopanel`,
+ * which is the wrong control plane. Those hosts use the dev console
+ * converge path.
+ */
+export const DEV_CONTROL_PLANE_UPDATE_REFUSAL =
+  "control-plane update is not supported on a development host; the co-located control plane is source-run — use the dev console converge path";
+
+/** The daemon refuses to install a control plane older than its own floor. */
+export class InstanceUpdateRefusedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "InstanceUpdateRefusedError";
+  }
+}
+
+/**
+ * Refuse a control-plane downgrade below `MIN_SUPPORTED_INSTANCE_VERSION`.
+ *
+ * Instance updates only move forward, and there is no reverse path that
+ * asks the control plane to vet a daemon self-update. The practical guard
+ * is this one: do not install a control plane the daemon would then flag
+ * as unsupported. A missing or non-semver target is `unknown` and is
+ * allowed, the same default as {@link resolveInstanceSupport}.
+ */
+export function assertControlPlaneUpdateAllowed(
+  targetVersion: string | undefined | null,
+): void {
+  const support = resolveInstanceSupport(targetVersion);
+  if (support.status !== "unsupported") return;
+  throw new InstanceUpdateRefusedError(
+    `refusing control-plane update: target version ${support.version} is below this daemon's supported minimum ${support.minVersion}`,
+  );
+}
+
+function assertInstanceUpdateChannel(channel: string): void {
+  if (channel === "canary" || channel === "rc" || channel === "release") {
+    return;
+  }
+  throw new InstanceUpdateRefusedError(
+    `--instance needs --channel canary, rc or release (the instance and UI packages publish only through GitHub Releases; got ${
+      channel || "unset"
+    })`,
+  );
+}
+
+/**
+ * `sudo -n tp-orchestrate update-instance`. The helper's `--manifest-url`
+ * is the control-plane pin; the shell maps it to `run.sh
+ * --instance-manifest-url` so it does not pin the daemon package.
+ */
+export function rootHelperInstanceUpdateInvocation(
+  options: { channel: string; manifestUrl?: string; uiManifestUrl?: string },
+): { bin: string; args: string[] } {
+  const flags = ["--channel", options.channel];
+  const pinned = options.manifestUrl?.trim();
+  if (pinned) flags.push("--manifest-url", pinned);
+  const uiPinned = options.uiManifestUrl?.trim();
+  if (uiPinned) flags.push("--ui-manifest-url", uiPinned);
+  flags.push("--no-start");
+  return {
+    bin: "sudo",
+    args: ["-n", "--", ORCHESTRATE_HELPER, "update-instance", ...flags],
+  };
+}
+
+/**
+ * Reconcile an already-installed control plane on a managed host.
+ *
+ * Development hosts are refused: their control plane is source-run.
+ * The daemon's own `update` verb is untouched and does not consult this
+ * floor — `MIN_SUPPORTED_INSTANCE_VERSION` gates commands the daemon
+ * sends, not a daemon updating itself.
+ */
+export async function executeInstanceUpdateReconcile(options: {
+  channel: string;
+  manifestUrl?: string;
+  uiManifestUrl?: string;
+  targetVersion?: string;
+}): Promise<void> {
+  assertControlPlaneUpdateAllowed(options.targetVersion);
+  if (!reconcileNeedsRootHelper()) {
+    throw new InstanceUpdateRefusedError(DEV_CONTROL_PLANE_UPDATE_REFUSAL);
+  }
+  const channel = options.channel.trim();
+  assertInstanceUpdateChannel(channel);
+  const helper = rootHelperInstanceUpdateInvocation({
+    channel,
+    manifestUrl: options.manifestUrl,
+    uiManifestUrl: options.uiManifestUrl,
+  });
+  const reconcileCwd = resolveReconcileCwd();
+  try {
+    Deno.chdir(reconcileCwd);
+  } catch {
+    Deno.chdir("/");
+  }
+  const run = await new Deno.Command(helper.bin, {
+    args: helper.args,
+    cwd: reconcileCwd,
+    stdin: "null",
+    stdout: "piped",
+    stderr: "piped",
+  }).output();
+  if (!run.success) {
+    const stderr = new TextDecoder().decode(run.stderr).trim();
+    throw new Error(stderr || "tp-orchestrate update-instance failed");
+  }
+}
+
+export const CONTROL_PLANE_UNITS = [
+  "turbopanel-instance",
+  "turbopanel-caddy",
+] as const;
+
+/**
+ * Restart the control plane and its Caddy after `--no-start` reconcile.
+ *
+ * The instance-install playbook starts units that are not running; it does
+ * not replace a process that is already up. The daemon itself is not
+ * restarted here.
+ */
+export async function restartControlPlaneUnits(
+  runSystemctl?: (
+    args: string[],
+  ) => Promise<{ success: boolean; stderr: string }>,
+): Promise<boolean> {
+  const run = runSystemctl ?? (async (args: string[]) => {
+    const result = await new Deno.Command("sudo", {
+      args,
+      stdin: "null",
+      stdout: "piped",
+      stderr: "piped",
+    }).output();
+    return {
+      success: result.success,
+      stderr: new TextDecoder().decode(result.stderr).trim(),
+    };
+  });
+  for (const unit of CONTROL_PLANE_UNITS) {
+    const result = await run(["-n", "systemctl", "restart", unit]);
+    if (!result.success) return false;
+  }
+  return true;
 }
