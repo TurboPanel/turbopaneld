@@ -684,6 +684,61 @@ test("syncInstanceAcmeHttp01Site skips sudo find for a wildcard and a failed sud
   }
 });
 
+test("syncInstanceAcmeHttp01Site skips a leaf sudo cannot read", async () => {
+  const host = "panel.example.com";
+  const { root, layout, dest } = await hostingFixture([{
+    host,
+    source: "lets-encrypt",
+  }]);
+  const issued = join(
+    root,
+    "caddy",
+    ".local",
+    "share",
+    "caddy",
+    "certificates",
+    "acme.example",
+    host,
+  );
+  await Deno.mkdir(issued, { recursive: true });
+  const crt = join(issued, `${host}.crt`);
+  await Deno.writeFile(crt, new TextEncoder().encode("hidden"));
+  await Deno.writeFile(
+    join(issued, `${host}.key`),
+    new TextEncoder().encode("key"),
+  );
+  await Deno.chmod(crt, 0o000);
+  const previous = Deno.env.get("PATH") ?? "";
+  const empty = await Deno.makeTempDir({ prefix: "tp-no-sudo-" });
+  Deno.env.set("PATH", empty);
+  try {
+    await syncInstanceAcmeHttp01Site(layout, {
+      reload: () => Promise.resolve(),
+    });
+    const written = await Deno.readTextFile(dest);
+    assertEquals(written.includes("127.0.0.1:8444"), false);
+    const nonce = "ab".repeat(16);
+    await preflightInstanceLetsEncryptHttp01(
+      [{ host, source: "lets-encrypt" }],
+      { configDir: root } as LayoutPaths,
+      {
+        nonce: () => nonce,
+        syncChallenge: () => Promise.resolve(),
+        reloadControlPlane: () => Promise.resolve(),
+        fetchImpl: (() =>
+          Promise.resolve(
+            new Response(nonce, { status: 200 }),
+          )) as typeof fetch,
+      },
+    );
+  } finally {
+    Deno.env.set("PATH", previous);
+    await Deno.chmod(crt, 0o644);
+    await Deno.remove(empty, { recursive: true });
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
 test("syncInstanceAcmeHttp01Site skips uploaded names without a usable certificate id", async () => {
   const { root, layout, dest } = await hostingFixture([]);
   const certDir = join(root, "tls", "certs");
