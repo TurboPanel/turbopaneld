@@ -171,7 +171,10 @@ test("readCertificateNotAfter runs openssl when no runner is injected", async ()
   await Deno.writeTextFile(
     openssl,
     `#!/bin/sh
-cat >/dev/null
+# Consume stdin with a builtin. PATH is only this directory, so cat is absent.
+while IFS= read -r _line || [ -n "$_line" ]; do
+  :
+done
 if [ "$1" = s_client ]; then
   printf '%s\\n' '-----BEGIN CERTIFICATE-----'
   printf '%s\\n' 'MIIB'
