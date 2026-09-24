@@ -191,6 +191,10 @@ const INSTALLER_STEP_LABELS: Record<
     running: "Running self-hosted instance provisioning…",
     done: "TurboPanel instance provisioning complete",
   },
+  "daemon-colocated-refresh.yml": {
+    running: "Refreshing the co-located daemon…",
+    done: "Co-located daemon refresh complete",
+  },
 };
 
 function resolveInstallerFailureMessage(

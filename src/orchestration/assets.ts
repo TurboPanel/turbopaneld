@@ -311,10 +311,21 @@ export const INSTANCE_INSTALL_PLAYBOOK = join(
   "playbooks",
   "instance-install.yml",
 );
+/**
+ * Daemon package refresh on an existing self-hosted control-plane host.
+ * Socket-mode `daemon.env`, shared state ownership, and instance ordering.
+ * Not the remote-node installer.
+ */
+export const DAEMON_COLOCATED_REFRESH_PLAYBOOK = join(
+  ORCHESTRATION_DIR,
+  "playbooks",
+  "daemon-colocated-refresh.yml",
+);
 /** The playbooks `run-installer --playbook` may name; anything else is refused. */
 export const INSTALLER_PLAYBOOKS = {
   "daemon-install.yml": DAEMON_INSTALL_PLAYBOOK,
   "instance-install.yml": INSTANCE_INSTALL_PLAYBOOK,
+  "daemon-colocated-refresh.yml": DAEMON_COLOCATED_REFRESH_PLAYBOOK,
 } as const;
 export type InstallerPlaybook = keyof typeof INSTALLER_PLAYBOOKS;
 

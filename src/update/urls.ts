@@ -79,6 +79,38 @@ function trunkManifestUrl(kind: ReleaseArtifactKind): string | null {
   return `${DL_BASE_URL}/channels/trunk/manifest.json`;
 }
 
+/**
+ * A version token safe to place in one GitHub release path segment.
+ * The tag is `v<version>`, so the token itself starts with a digit.
+ */
+const PINNED_VERSION_RE = /^[0-9][0-9A-Za-z._+-]*$/;
+
+/**
+ * Manifest URL for one published build, beside {@link builtinChannelManifestUrl}.
+ *
+ * `canary` keeps `manifest-<version>.json` on the rolling `canary` release
+ * (gh-canary.yml). `rc` and `release` use the tag `v<version>` and
+ * `manifest.json` (gh-release.yml). `trunk` and `edge` have no pin.
+ * Mirrored in scripts/run.sh (`tp_pinned_channel_manifest_url`).
+ */
+export function pinnedChannelManifestUrl(
+  kind: ReleaseArtifactKind,
+  channel: UpdateChannel,
+  version: string,
+): string | null {
+  if (!PINNED_VERSION_RE.test(version)) return null;
+  const repo = githubReleasesRepo(kind);
+  switch (channel) {
+    case "canary":
+      return `https://github.com/${repo}/releases/download/canary/manifest-${version}.json`;
+    case "rc":
+    case "release":
+      return `https://github.com/${repo}/releases/download/v${version}/manifest.json`;
+    default:
+      return null;
+  }
+}
+
 /** Env var that pins one artifact kind to an exact manifest. Independent per kind. */
 export function pinnedManifestEnvName(
   kind: ReleaseArtifactKind = "daemon",

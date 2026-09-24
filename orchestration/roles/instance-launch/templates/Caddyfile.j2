@@ -117,6 +117,39 @@
                 try_files {path} /index.html
                 file_server
         }
+
+        # Upstream 502/503/504 while the instance socket is down (package
+        # swap and restart). API and websocket callers get a JSON 503 they
+        # can retry; Git webhooks get a bare 503; HTML navigation gets
+        # updating.html, which refreshes itself.
+        handle_errors {
+                @updating `{http.error.status_code} in [502, 503, 504]`
+                handle @updating {
+                        @api path /api/*
+                        handle @api {
+                                header Content-Type "application/json"
+                                header Retry-After "5"
+                                respond `{"ok":false,"error":"control_plane_updating"}` 503
+                        }
+                        @ws path /ws/*
+                        handle @ws {
+                                header Content-Type "application/json"
+                                header Retry-After "5"
+                                respond `{"ok":false,"error":"control_plane_updating"}` 503
+                        }
+                        @webhook path /webhook/*
+                        handle @webhook {
+                                respond "" 503
+                        }
+                        handle {
+                                header Content-Type "text/html; charset=utf-8"
+                                header Retry-After "5"
+                                root * {{ turbopanel_caddyfile | dirname }}
+                                rewrite * /updating.html
+                                file_server
+                        }
+                }
+        }
 }
 
 # Always-on recovery listener. The Platform CA leaf covers every platform-ca

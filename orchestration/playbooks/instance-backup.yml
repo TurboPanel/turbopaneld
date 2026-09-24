@@ -1,0 +1,97 @@
+---
+# Snapshot the control plane before a package swap.
+# Invoked as: tp-orchestrate playbook -i localhost, -c local
+#   -e turbopanel_upgrade_id=… [-e turbopanel_backup_dir=/backup]
+#   [-e turbopanel_instance_version=…] [-e turbopanel_instance_revision=…]
+- name: Back up the control plane before an update
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: false
+  vars:
+    turbopanel_backup_dir: /backup
+    turbopanel_group: tp
+    turbopanel_install_root: /opt/turbopanel
+    postgres_user: turbopanel
+    postgres_db: turbopanel
+    postgres_container_name: turbopanel-database
+    control_plane_backup_keep: 3
+
+  tasks:
+    - name: Require a single-segment upgrade id
+      ansible.builtin.assert:
+        that:
+          - turbopanel_upgrade_id is match('^[A-Za-z0-9][A-Za-z0-9._-]{0,80}$')
+        fail_msg: turbopanel_upgrade_id must be one path segment
+
+    - name: Set the backup directory for this attempt
+      ansible.builtin.set_fact:
+        control_plane_backup_dir: "{{ turbopanel_backup_dir }}/control-plane/{{ turbopanel_upgrade_id }}"
+        control_plane_backup_parent: "{{ turbopanel_backup_dir }}/control-plane"
+
+    - name: Create the backup directory
+      ansible.builtin.file:
+        path: "{{ control_plane_backup_dir }}"
+        state: directory
+        owner: root
+        group: "{{ turbopanel_group }}"
+        mode: "0750"
+
+    - name: Dump the control-plane database
+      ansible.builtin.shell:
+        cmd: |
+          set -euo pipefail
+          umask 077
+          tmp="{{ control_plane_backup_dir }}/turbopanel.dump.part"
+          dest="{{ control_plane_backup_dir }}/turbopanel.dump"
+          rm -f -- "$tmp"
+          docker exec "{{ postgres_container_name }}" pg_dump -Fc -U "{{ postgres_user }}" -d "{{ postgres_db }}" > "$tmp"
+          mv -- "$tmp" "$dest"
+          chmod 0600 "$dest"
+        executable: /bin/bash
+
+    - name: Archive /etc/turbopanel
+      ansible.builtin.shell:
+        cmd: |
+          set -euo pipefail
+          archive="{{ control_plane_backup_dir }}/etc-turbopanel.tar.gz"
+          tar czf "$archive" -C / etc/turbopanel
+          chown root:"{{ turbopanel_group }}" "$archive"
+          chmod 0640 "$archive"
+        executable: /bin/bash
+
+    - name: Read the migration history fingerprint
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - "{{ postgres_container_name }}"
+          - psql
+          - -U
+          - "{{ postgres_user }}"
+          - -d
+          - "{{ postgres_db }}"
+          - -Atc
+          - select string_agg(id::text, ',' order by id) from public.migration
+      register: migration_fingerprint
+      changed_when: false
+
+    - name: Record backup metadata
+      ansible.builtin.copy:
+        dest: "{{ control_plane_backup_dir }}/meta.json"
+        owner: root
+        group: "{{ turbopanel_group }}"
+        mode: "0640"
+        content: "{{ {'upgradeId': turbopanel_upgrade_id, 'instanceVersion': turbopanel_instance_version | default(''), 'instanceRevision': turbopanel_instance_revision | default(''), 'installRoot': turbopanel_install_root, 'migrationFingerprint': migration_fingerprint.stdout | trim} | to_nice_json }}\n"
+
+    - name: Prune control-plane backups to the newest three
+      ansible.builtin.shell:
+        cmd: |
+          set -euo pipefail
+          parent="{{ control_plane_backup_parent }}"
+          keep="{{ control_plane_backup_keep }}"
+          mapfile -t old < <(find "$parent" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' | sort -rn | tail -n "+$((keep + 1))" | cut -d' ' -f2-)
+          if [ -n "${old[*]:-}" ]; then
+            rm -rf -- "${old[@]}"
+          fi
+        executable: /bin/bash

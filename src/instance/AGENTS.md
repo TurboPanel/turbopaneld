@@ -315,6 +315,13 @@ still pipes the downloaded script through `sudo sh -s`. Flags (`--license`,
 `--host`, …) remain supported for scripts and sudo re-exec. There is no
 separate update binary installed under `/opt/turbopanel/bin/`.
 
+`run.sh --daemon-only` on a host that already has the control-plane binary
+and a socket-mode `daemon.env` (no `TURBOPANEL_INSTANCE_URL`) runs
+`daemon-colocated-refresh.yml`. That play refreshes the daemon unit, keeps
+`After=turbopanel-instance.service`, and does not recurse-chown state or
+config. It does not run `daemon-install.yml`. A remote node, or a `daemon.env`
+that already dials a URL, still uses the remote installer.
+
 The control plane is a **separate verb**, `tp-orchestrate update-instance
 --channel NAME [--manifest-url URL] [--ui-manifest-url URL] --no-start`. It does not take `--license`,
 `--host`, `--dl-base`, or `--instance-ca` (`run.sh --instance` refuses those).
@@ -330,10 +337,109 @@ reconcile (`control-plane update is not supported on a development host; the
 co-located control plane is source-run — use the dev console converge path`).
 Before the helper runs, the daemon refuses a target below
 `MIN_SUPPORTED_INSTANCE_VERSION`. A missing target version is not a refusal.
-After a successful install the daemon restarts `turbopanel-instance` and
-`turbopanel-caddy` (playbook `state: started` does not replace a running
-process) and does not restart itself. The result cell message goes out before
-that restart. Daemon self-update does not consult the instance floor.
+After a successful install the daemon runs the new binary's `migrate` verb.
+`tp-orchestrate migrate` takes no arguments and reads
+`Environment=TURBOPANEL_DATABASE_URL` from `turbopanel-instance.service` (the
+URL the unit already uses). Managed `instance-deno.env` does not contain that
+URL. Then the daemon restarts `turbopanel-instance` and
+reloads `turbopanel-caddy` (`ExecReload`) so `:8443` keeps serving the
+updating page. Caddy is restarted only when its binary changed. A failed
+migration keeps the dump and rolls back through `instance-rollback.yml`.
+The daemon does not restart itself. The result cell message goes out after
+the health check (and is retried on the next attach if the restart closed
+the socket). Daemon self-update does not consult the instance floor.
+
+**Control-plane update (`executeInstanceUpdateReconcile`):** this path is
+separate from the daemon self-update guard above. `tp-orchestrate
+update-instance` always appends `--skip-daemon-package` and
+`--progress-markers` (not caller-controlled), so `run.sh --instance` swaps
+`bin/turbopanel`, `lib/libduckdb.so`, and `share/ui` and does not replace the
+running daemon package or run `instance-install.yml`. One previous generation
+is kept by rename (`bin/turbopanel.prev`, `lib/libduckdb.so.prev`,
+`share/ui.prev`); the UI is extracted to `share/ui.new` and renamed into
+place. The update path writes `<stateDir>/instance-swap.json` when it starts
+moving those files and removes it only after the new tree is verified or
+`.prev` has been restored. A nonzero install or a thrown installer/migrate
+error rolls back when that marker is set (migrate failures always roll back,
+because the new files are already live). A download that fails before the
+marker does not. Before that swap the daemon checks free space on the install root and
+`layout.backupDir` (`MIN_INSTANCE_UPDATE_FREE_INSTALL_BYTES` /
+`MIN_INSTANCE_UPDATE_FREE_BACKUP_BYTES`), verifies the instance manifest and
+any UI pin (`preflight_manifest`), and requires `turbopanel-database` to be
+running (`preflight_backup` via `docker inspect`). An overlapping
+`instance-update` is `preflight_in_progress`. `instance-backup.yml` then
+writes `<backupDir>/control-plane/<upgradeId>/` (`pg_dump -Fc` inside the
+database container, an `/etc/turbopanel` tarball, and `meta.json` with the
+migration-history fingerprint) and keeps the newest three. When the rendered
+Caddyfile does not yet serve `updating.html`, `instance-launch-only.yml`
+re-templates it first. After restart, `waitForInstanceHealth` polls
+`GET /api/health` on the instance socket until `version` and
+`revision.commit` match the manifest, within
+`INSTANCE_UPDATE_HEALTH_TIMEOUT_MS`. A timeout or mismatch runs
+`instance-rollback.yml` (restore `.prev`, and `pg_restore` only when the
+migration fingerprint changed) and checks health again. Success of that
+check reports `rolled-back` with the original `errorCode` (`health_timeout`,
+`health_mismatch`, or `restart_failed`) on `update-progress` (when
+`update-progress-v1` is advertised) and on `instance-update-result`. A failed
+rollback reports `failed` / `recovery_required` and includes the backup path,
+`sudo -n tp-orchestrate playbook … instance-rollback.yml -e
+turbopanel_upgrade_id=…`, and a pinned `update-instance` reinstall command.
+Stages are `preparing → downloading → installing → restarting → verifying →
+done`. The managed Caddyfile `handle_errors` block answers socket
+502/503/504 with JSON `control_plane_updating` on `/api` and `/ws`, a bare
+503 on `/webhook`, and `updating.html` (refresh 5s) for HTML. Dev hosts still
+refuse the reconcile (`DEV_CONTROL_PLANE_UPDATE_REFUSAL`); the dev overlay
+Caddyfile is unchanged.
+
+**Pre-flight (`#applyUpdate`):** before `executeRunReconcile`, the daemon runs
+disk space (`assertUpdateDiskPreflight` / `statfs` on install root, state dir,
+and tmp), manifest resolve+verify (`clientTestHooks.resolveUpdate` — same path
+as reconcile), and automatic-update trust (`resolveAutomaticUpdateTrust`). Failures
+map to stable `update-result.error` prefixes consumed by the control plane:
+`preflight_in_progress`, `preflight_disk`, `preflight_manifest`,
+`preflight_trust`. Manifest signature, schema, overlay, and missing-channel
+errors are `preflight_manifest`. `update-result` also carries optional
+`errorCode` / `upgradeId` (legacy `error` text remains). An in-progress
+reconcile still wins first. Cell `manifestUrl` / `targetCommit` / `upgradeId`
+are honoured when present: env `TURBOPANEL_MANIFEST_URL` (and other pins) still
+beat a message `manifestUrl`; `#applyUpdate` retains the verified
+`resolveUpdate` result (commit + `manifestUrl`) so reconcile does not follow a
+moving channel pointer. `targetCommit` must match that signed commit (host pin
+still wins the fetch); it also short-circuits reconcile when it already matches
+`getBuildInfo().commit`. A failed `statfs` is `preflight_disk`, not "enough
+space". Reconcile/restart failures emit `failed` progress; restart success is
+required before `update-result(ok: true)`; an already-on-target no-op emits
+`done`.
+
+**Progress (`update-progress-v1`):** when the attach `version` frame lists
+`update-progress-v1`, `UpdateProgressReporter` sends fire-and-forget
+`update-progress` messages (stages: `preparing`, `downloading`, `installing`,
+`restarting`, `verifying`, `done`, `failed`, `rolled-back`). Events queue under
+`<stateDir>/update/progress-queue.jsonl` and flush on reconnect. `run.sh` with
+`--progress-markers` (always passed by `tp-orchestrate update`) prints
+`::turbopanel-stage::<stage>` lines; `executeRunReconcile` streams stdout and
+forwards markers. The old process reports `restarting` just before the
+post-`update-result` handoff delay and systemd restart; the **new** process
+reports `verifying` then `done` on first attach after a successful self-update.
+
+**Self-healing guard:** daemon self-update arms `<runDir>/update-guard.json`
+(target commit + deadline) and starts `turbopaneld-update-guard.timer` (~10
+minutes, one-shot per attempt). `turbopaneld.service` uses `OnFailure=` that
+unit plus a start limit so a crash-looping build can trigger
+`orchestration/scripts/tp-update-guard` (root, no sudoers entry). The guard
+restores `bin/turbopaneld.prev`, `bin/turbopaneld.js.prev` on JS-mode hosts,
+and `share/orchestration.prev`, writes `<stateDir>/update-rollback.json`, and
+restarts the daemon. A successful new build disarms via
+`<stateDir>/update-guard-disarm.json` on attach (the armed file stays
+root-owned `0640` with the daemon group so the process can read it). A restored
+previous build reports `rolled-back` from `<stateDir>/update-rollback.json`
+(also root-owned, daemon-readable; `toCommit` is parsed from
+`turbopaneld v<semver> <commit> (…)` or the armed `previousCommit`).
+`--no-start` / `run-installer` arms the guard and timer before returning to
+`InstanceClient`; a failed `systemctl start` of the timer fails the update.
+Overlapping `update` requests send `preflight_in_progress` on the rejected id
+without rewriting the active reporter. Terminal failed/no-op attempts clear
+`active-upgrade.json`. Progress queue append/rewrite/flush is one ordered chain.
 
 ### Daemon TLS trust model (4 paths)
 

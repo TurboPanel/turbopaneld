@@ -15,6 +15,12 @@
     state: restarted
   when: instance_start | bool
 
+- name: Reload turbopanel caddy
+  ansible.builtin.systemd:
+    name: "{{ caddy_service_name }}"
+    state: reloaded
+  when: instance_start | bool
+
 - name: Restart turbopanel ui
   ansible.builtin.systemd:
     name: "{{ ui_service_name }}"

@@ -345,3 +345,72 @@ test({
     assertStringIncludes(log, "0.0.9");
   },
 });
+
+test({
+  name:
+    "an unrecognized control-plane message is ignored and the socket stays up",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    net: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  fn: async () => {
+    const log = await withClient(undefined, async (client, socket) => {
+      await settleConnect();
+      assertEquals(client.instanceSupports("managed-upgrade-v1"), false);
+      assertEquals(client.connectionState.peerFeatures, []);
+      socket.receive({
+        type: "not-a-real-message",
+        at: new Date().toISOString(),
+      });
+      await flushMicrotasks();
+      assertEquals(socket.readyState, OPEN);
+      socket.receive({
+        type: "echo",
+        payload: { ok: true },
+        at: new Date().toISOString(),
+      });
+      await flushMicrotasks();
+      assertEquals(socket.readyState, OPEN);
+    });
+    assertStringIncludes(
+      log,
+      "ignored unknown websocket message type not-a-real-message",
+    );
+    assertEquals(log.includes("websocket closed"), false);
+  },
+});
+
+test({
+  name:
+    "instanceSupports is closed until the attach frame advertises a feature",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    net: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  fn: async () => {
+    await withClient(undefined, async (client, socket) => {
+      await settleConnect();
+      assertEquals(client.instanceSupports("update-progress-v1"), false);
+      socket.receive({
+        ...versionFrame("0.1.1"),
+        features: ["managed-upgrade-v1", "update-progress-v1"],
+      });
+      assertEquals(client.connectionState.peerFeatures, [
+        "managed-upgrade-v1",
+        "update-progress-v1",
+      ]);
+      assertEquals(client.instanceSupports("managed-upgrade-v1"), true);
+      assertEquals(client.instanceSupports("missing"), false);
+      socket.receive(versionFrame("0.1.1"));
+      assertEquals(client.connectionState.peerFeatures, []);
+      assertEquals(client.instanceSupports("managed-upgrade-v1"), false);
+      assertEquals(socket.readyState, OPEN);
+    });
+  },
+});

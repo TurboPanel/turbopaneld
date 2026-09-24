@@ -40,3 +40,11 @@ runtime_socket_dir: /run/turbopanel
 runtime_socket_owner: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tp' }}"
 runtime_socket_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tp' }}"
 runtime_socket_mode: "2770"
+turbopanel_update_guard_script: "{{ turbopanel_orchestration_dir }}/scripts/tp-update-guard"
+# Outside the replaceable orchestration tree so a rollback to an older daemon
+# package cannot delete the only copy the timer can exec.
+turbopanel_update_guard_bin: "{{ turbopanel_install_root }}/lib/tp-update-guard"
+turbopanel_update_guard_deadline_sec: 600
+# Follow-up after a restored daemon fails to come back. The guard stops the
+# timer on recovery and after the attention threshold.
+turbopanel_update_guard_retry_sec: 30

@@ -1,0 +1,202 @@
+#!/bin/sh
+# Self-healing rollback when a daemon self-update leaves turbopaneld down.
+# Invoked by turbopaneld-update-guard.service (OnFailure= + one-shot timer).
+set -eu
+
+tp_die() {
+  printf 'tp-update-guard: %s\n' "$1" >&2
+  exit 1
+}
+
+[ "$(id -u)" = "0" ] || tp_die "must run as root"
+
+# A copy under <install>/lib survives replacing share/orchestration with a
+# build from before this script existed. The systemd unit runs that copy.
+_script_dir="$(CDPATH= cd "$(dirname "$0")" && pwd -P)"
+_script="$_script_dir/$(basename "$0")"
+case "$_script" in
+  */orchestration/scripts/tp-update-guard)
+    ORCH_DIR="$(CDPATH= cd "$_script_dir/.." && pwd -P)"
+    INSTALL_ROOT="${TURBOPANEL_INSTALL_ROOT:-$(CDPATH= cd "$ORCH_DIR/../.." && pwd -P)}"
+    ;;
+  *)
+    INSTALL_ROOT="${TURBOPANEL_INSTALL_ROOT:-/opt/turbopanel}"
+    ;;
+esac
+_stable_guard="$INSTALL_ROOT/lib/tp-update-guard"
+if [ "$_script" != "$_stable_guard" ]; then
+  mkdir -p "$(dirname "$_stable_guard")"
+  cp -f "$_script" "$_stable_guard"
+  chmod 0750 "$_stable_guard"
+fi
+RUN_DIR="${TURBOPANEL_RUN_DIR:-/run/turbopanel}"
+STATE_DIR="${TURBOPANEL_STATE_DIR:-/var/lib/turbopanel}"
+GUARD_PATH="$RUN_DIR/update-guard.json"
+DISARM_PATH="$STATE_DIR/update-guard-disarm.json"
+ROLLBACK_PATH="$STATE_DIR/update-rollback.json"
+DAEMON_SERVICE="turbopaneld.service"
+BIN_DIR="$INSTALL_ROOT/bin"
+
+tp_read_json_field() {
+  _file="$1"
+  _key="$2"
+  sed -n "s/.*\"$_key\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p" "$_file" | head -1
+}
+
+# Documented `turbopaneld --version` line:
+#   turbopaneld v<semver> <commit> (<channel>, <buildId>, <builtAt>)
+tp_parse_daemon_commit_from_version() {
+  printf '%s' "$1" | sed -n 's/^turbopaneld v[^[:space:]]\{1,\}[[:space:]]\{1,\}\([^[:space:]]\{1,\}\).*/\1/p' | head -1
+}
+
+tp_daemon_file_group() {
+  if [ -n "${TURBOPANEL_DAEMON_GROUP:-}" ]; then
+    printf '%s' "$TURBOPANEL_DAEMON_GROUP"
+    return 0
+  fi
+  _g="$(stat -c '%G' "$STATE_DIR" 2>/dev/null || true)"
+  if [ -n "$_g" ]; then
+    printf '%s' "$_g"
+    return 0
+  fi
+  printf '%s' "tp"
+}
+
+tp_install_daemon_readable_file() {
+  _path="$1"
+  chmod 0640 "$_path" || return 1
+  _g="$(tp_daemon_file_group)"
+  if ! chown "root:${_g}" "$_path" 2>/dev/null; then
+    chgrp "$_g" "$_path" 2>/dev/null || true
+  fi
+}
+
+GUARD_TIMER="turbopaneld-update-guard.timer"
+
+# Stop the deadline timer so OnUnitInactiveSec cannot schedule another attempt.
+tp_stop_guard_timer() {
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl stop "$GUARD_TIMER" 2>/dev/null || true
+  fi
+}
+
+# One bounded follow-up. The deadline timer is one-shot at first arm; a failed
+# restored restart has to ask for the next run itself.
+tp_schedule_guard_followup() {
+  _delay="${TURBOPANEL_UPDATE_GUARD_RETRY_SEC:-30}"
+  case "$_delay" in
+    ''|*[!0-9]*) _delay=30 ;;
+  esac
+  if command -v systemd-run >/dev/null 2>&1; then
+    systemd-run --quiet --on-active="${_delay}s" \
+      --unit="turbopaneld-update-guard-retry-${_next}" \
+      -- "$_stable_guard" || true
+    return 0
+  fi
+  printf '%s\n' "$_stable_guard" > "$RUN_DIR/update-guard-followup"
+}
+
+if [ ! -f "$GUARD_PATH" ]; then
+  tp_stop_guard_timer
+  exit 0
+fi
+
+_target="$(tp_read_json_field "$GUARD_PATH" targetCommit)"
+_deadline="$(tp_read_json_field "$GUARD_PATH" deadlineAt)"
+_previous_commit="$(tp_read_json_field "$GUARD_PATH" previousCommit)"
+[ -n "$_target" ] || exit 0
+
+if [ -f "$DISARM_PATH" ]; then
+  _disarm_commit="$(tp_read_json_field "$DISARM_PATH" targetCommit)"
+  if [ -n "$_disarm_commit" ] && [ "$_disarm_commit" = "$_target" ]; then
+    rm -f "$GUARD_PATH" "$DISARM_PATH"
+    tp_stop_guard_timer
+    exit 0
+  fi
+fi
+
+_should_rollback=false
+if command -v systemctl >/dev/null 2>&1; then
+  if systemctl is-failed --quiet "$DAEMON_SERVICE" 2>/dev/null; then
+    _should_rollback=true
+  fi
+fi
+
+if [ "$_should_rollback" = false ] && [ -n "$_deadline" ]; then
+  _now_epoch="$(date -u +%s 2>/dev/null || echo 0)"
+  _deadline_epoch="$(date -u -d "$_deadline" +%s 2>/dev/null || echo 0)"
+  if [ "$_deadline_epoch" -gt 0 ] && [ "$_now_epoch" -ge "$_deadline_epoch" ]; then
+    _should_rollback=true
+  fi
+fi
+
+[ "$_should_rollback" = true ] || exit 0
+
+_from_commit="$_target"
+_to_commit="$_previous_commit"
+if [ -z "$_to_commit" ] && [ -f "$BIN_DIR/turbopaneld.prev" ]; then
+  if _prev_out="$("$BIN_DIR/turbopaneld.prev" --version 2>/dev/null)"; then
+    _to_commit="$(tp_parse_daemon_commit_from_version "$_prev_out")"
+  fi
+fi
+if [ -z "$_to_commit" ] && [ -f "$BIN_DIR/turbopaneld.js.prev" ]; then
+  if _prev_out="$("$BIN_DIR/turbopaneld.js.prev" --version 2>/dev/null)"; then
+    _to_commit="$(tp_parse_daemon_commit_from_version "$_prev_out")"
+  fi
+fi
+[ -n "$_to_commit" ] || _to_commit="unknown"
+
+if [ -f "$BIN_DIR/turbopaneld.prev" ]; then
+  mv -f "$BIN_DIR/turbopaneld.prev" "$BIN_DIR/turbopaneld"
+fi
+if [ -f "$BIN_DIR/turbopaneld.js.prev" ]; then
+  mv -f "$BIN_DIR/turbopaneld.js.prev" "$BIN_DIR/turbopaneld.js"
+fi
+if [ -d "$INSTALL_ROOT/share/orchestration.prev" ]; then
+  rm -rf "$INSTALL_ROOT/share/orchestration"
+  mv "$INSTALL_ROOT/share/orchestration.prev" "$INSTALL_ROOT/share/orchestration"
+fi
+
+_reason="daemon service failed or update guard deadline elapsed"
+_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+mkdir -p "$STATE_DIR"
+printf '{"fromCommit":"%s","toCommit":"%s","reason":"%s","at":"%s"}\n' \
+  "$_from_commit" "$_to_commit" "$_reason" "$_at" > "$ROLLBACK_PATH"
+tp_install_daemon_readable_file "$ROLLBACK_PATH" || true
+
+_restart_ok=false
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl reset-failed "$DAEMON_SERVICE" 2>/dev/null || true
+  if systemctl restart "$DAEMON_SERVICE"; then
+    if systemctl is-active --quiet "$DAEMON_SERVICE"; then
+      _restart_ok=true
+    fi
+  fi
+fi
+
+if [ "$_restart_ok" = true ]; then
+  rm -f "$GUARD_PATH" "$DISARM_PATH"
+  tp_stop_guard_timer
+  exit 0
+fi
+
+# Restart failed. Keep the guard and schedule one more attempt, up to the
+# attention threshold. A one-shot deadline timer does not do this by itself.
+_attempts="$(tp_read_json_field "$GUARD_PATH" restartAttempts)"
+case "$_attempts" in
+  ''|*[!0-9]*) _attempts=0 ;;
+esac
+_next=$((_attempts + 1))
+printf '{"targetCommit":"%s","deadlineAt":"%s","previousCommit":"%s","restartAttempts":"%s"}\n' \
+  "$_target" "$_deadline" "$_to_commit" "$_next" > "$GUARD_PATH"
+chmod 0640 "$GUARD_PATH" 2>/dev/null || true
+if [ "$_next" -ge 3 ]; then
+  printf '{"needsAttention":true,"targetCommit":"%s","attempts":"%s","at":"%s"}\n' \
+    "$_target" "$_next" "$_at" > "$STATE_DIR/update-guard-attention.json"
+  tp_install_daemon_readable_file "$STATE_DIR/update-guard-attention.json" || true
+  tp_stop_guard_timer
+else
+  tp_schedule_guard_followup
+fi
+printf 'tp-update-guard: restored daemon did not become active (attempt %s)\n' "$_next" >&2
+exit 1

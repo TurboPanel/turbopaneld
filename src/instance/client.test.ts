@@ -25,6 +25,7 @@ import {
   writeKeyId,
 } from "./client.ts";
 import { wireCommandPorts } from "../commands/wire.ts";
+import { ControlPlaneUpdateFailedError } from "./run-reconcile.ts";
 import { generateDaemonKeypair, saveDaemonKeyFile } from "../crypto/keys.ts";
 import { enrollDaemon } from "./enroll.ts";
 import { IdlePresence, installIdlePresenceProviders } from "./idle-presence.ts";
@@ -47,6 +48,15 @@ import {
   type TestSigningMaterial,
   withTempLayout,
 } from "../testing/index.ts";
+import {
+  MalformedManifestError,
+  ManifestSignatureError,
+} from "../update/errors.ts";
+import {
+  readActiveUpgradeContext,
+  writeActiveUpgradeContext,
+} from "./update-active-context.ts";
+import { updateGuardPath, updateRollbackPath } from "./update-guard.ts";
 import { DaemonTokenManager } from "./token-manager.ts";
 import {
   setDrivetempDropinWriterForTests,
@@ -3450,6 +3460,11 @@ it({
 
           socket.receive("not-json");
           socket.receive({
+            type: "not-a-real-message",
+            at: new Date().toISOString(),
+          });
+          assertEquals(socket.readyState, 1);
+          socket.receive({
             type: "version",
             commit: "abc",
             branch: "trunk",
@@ -4547,6 +4562,915 @@ it({
   },
 });
 
+it({
+  name:
+    "update maps manifest preflight failures and emits update-progress when advertised",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const restoreHooks = installClientTestHooks({
+      getBuildInfo: () => ({
+        commit: "old",
+        buildId: "dev-old",
+        builtAt: "2026-08-01T00:00:00Z",
+        channel: "trunk",
+        sourceUrl: "https://github.com/TurboPanel/turbopaneld/tree/old",
+      }),
+      resolveUpdate: () =>
+        Promise.reject(new MalformedManifestError("signature invalid")),
+    });
+    const { socket, restore } = await startConnectedClient();
+    try {
+      socket.receive({
+        type: "version",
+        commit: "abc",
+        branch: "trunk",
+        instanceVersion: "0.1.1",
+        features: ["update-progress-v1"],
+        at: new Date().toISOString(),
+      });
+      await flushMicrotasks();
+      socket.receive({
+        type: "update",
+        id: "upd-manifest",
+        upgradeId: "up-1",
+        at: new Date().toISOString(),
+      });
+      const result = await waitFor(
+        "manifest preflight update-result",
+        () =>
+          framesOfType(socket, "update-result").find((f) =>
+            (f as { id?: string }).id === "upd-manifest"
+          ) as { ok?: boolean; error?: string } | undefined,
+      );
+      assertEquals(result.ok, false);
+      assertStringIncludes(String(result.error ?? ""), "preflight_manifest");
+      const failedProgress = await waitFor(
+        "manifest preflight update-progress",
+        () =>
+          framesOfType(socket, "update-progress").find((f) =>
+            (f as { stage?: string; errorCode?: string }).stage === "failed" &&
+            (f as { errorCode?: string }).errorCode === "preflight_manifest"
+          ),
+      );
+      assertExists(failedProgress);
+    } finally {
+      restore();
+      restoreHooks();
+    }
+  },
+});
+
+it({
+  name:
+    "update classifies ManifestSignatureError as preflight_manifest with errorCode",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const restoreHooks = installClientTestHooks({
+      getBuildInfo: () => ({
+        commit: "old",
+        buildId: "dev-old",
+        builtAt: "2026-08-01T00:00:00Z",
+        channel: "trunk",
+        sourceUrl: "https://github.com/TurboPanel/turbopaneld/tree/old",
+      }),
+      resolveUpdate: () =>
+        Promise.reject(new ManifestSignatureError("signature invalid")),
+    });
+    const { socket, restore } = await startConnectedClient();
+    try {
+      socket.receive({
+        type: "version",
+        commit: "abc",
+        branch: "trunk",
+        instanceVersion: "0.1.1",
+        features: ["update-progress-v1"],
+        at: new Date().toISOString(),
+      });
+      await flushMicrotasks();
+      socket.receive({
+        type: "update",
+        id: "upd-sig",
+        upgradeId: "up-sig",
+        at: new Date().toISOString(),
+      });
+      const result = await waitFor(
+        "signature update-result",
+        () =>
+          framesOfType(socket, "update-result").find((f) =>
+            (f as { id?: string }).id === "upd-sig"
+          ) as {
+            ok?: boolean;
+            error?: string;
+            errorCode?: string;
+            upgradeId?: string;
+          } | undefined,
+      );
+      assertEquals(result.ok, false);
+      assertStringIncludes(String(result.error ?? ""), "preflight_manifest");
+      assertEquals(result.errorCode, "preflight_manifest");
+      assertEquals(result.upgradeId, "up-sig");
+    } finally {
+      restore();
+      restoreHooks();
+    }
+  },
+});
+
+it({
+  name: "update-result still carries errorCode when progress feature is closed",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const restoreHooks = installClientTestHooks({
+      getBuildInfo: () => ({
+        commit: "old",
+        buildId: "dev-old",
+        builtAt: "2026-08-01T00:00:00Z",
+        channel: "trunk",
+        sourceUrl: "https://github.com/TurboPanel/turbopaneld/tree/old",
+      }),
+      resolveUpdate: () =>
+        Promise.reject(new ManifestSignatureError("signature invalid")),
+    });
+    const { socket, restore } = await startConnectedClient();
+    try {
+      socket.receive({
+        type: "update",
+        id: "upd-legacy",
+        upgradeId: "up-legacy",
+        at: new Date().toISOString(),
+      });
+      const result = await waitFor(
+        "legacy signature update-result",
+        () =>
+          framesOfType(socket, "update-result").find((f) =>
+            (f as { id?: string }).id === "upd-legacy"
+          ) as { errorCode?: string; upgradeId?: string } | undefined,
+      );
+      assertEquals(result.errorCode, "preflight_manifest");
+      assertEquals(result.upgradeId, "up-legacy");
+      assertEquals(framesOfType(socket, "update-progress").length, 0);
+    } finally {
+      restore();
+      restoreHooks();
+    }
+  },
+});
+
+it({
+  name: "update targetCommit short-circuit skips reconcile",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    let reconcileCalls = 0;
+    const restoreHooks = installClientTestHooks({
+      updateResultHandoffDelayMs: 0,
+      restartDaemonService: () => Promise.resolve(true),
+      getBuildInfo: () => ({
+        commit: "deadbeef",
+        buildId: "dev-deadbeef",
+        builtAt: "2026-08-01T00:00:00Z",
+        channel: "trunk",
+        sourceUrl: "https://github.com/TurboPanel/turbopaneld/tree/deadbeef",
+      }),
+      resolveUpdate: () =>
+        Promise.resolve({
+          channel: "trunk",
+          buildId: "build-new",
+          commit: "deadbeef",
+          builtAt: "2026-08-18T00:00:00Z",
+          binaryArtifact: {
+            url: "https://dl.example/daemon.tar.zst",
+            sha256: "a".repeat(64),
+            size: 1,
+          },
+          jsFallbackArtifact: {
+            url: "https://dl.example/daemon.js.tar.zst",
+            sha256: "b".repeat(64),
+            size: 1,
+          },
+          orchestrationArtifact: {
+            url: "https://dl.example/orch.tar.zst",
+            sha256: "c".repeat(64),
+            size: 1,
+          },
+          downloadUrl: "https://dl.example/daemon.tar.zst",
+        }),
+      executeRunReconcile: () => {
+        reconcileCalls += 1;
+        return Promise.resolve();
+      },
+    });
+    const { socket, restore } = await startConnectedClient();
+    try {
+      socket.receive({
+        type: "update",
+        id: "upd-target",
+        targetCommit: "deadbeef",
+        at: new Date().toISOString(),
+      });
+      const result = await waitFor(
+        "targetCommit update-result",
+        () =>
+          framesOfType(socket, "update-result").find((f) =>
+            (f as { id?: string }).id === "upd-target"
+          ) as { ok?: boolean } | undefined,
+      );
+      assertEquals(result.ok, true);
+      assertEquals(reconcileCalls, 0);
+    } finally {
+      restore();
+      restoreHooks();
+    }
+  },
+});
+
+it({
+  name: "attach after rollback reports rolled-back progress",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      const envKeys = Object.keys(fixture.env);
+      const prior: Record<string, string | undefined> = {};
+      for (const key of envKeys) {
+        prior[key] = Deno.env.get(key);
+        Deno.env.set(key, fixture.env[key]);
+      }
+      const restoreHooks = installClientTestHooks({
+        getBuildInfo: () => ({
+          commit: "restored",
+          buildId: "dev-restored",
+          builtAt: "2026-08-01T00:00:00Z",
+          channel: "trunk",
+          sourceUrl: "https://github.com/TurboPanel/turbopaneld/tree/restored",
+        }),
+      });
+      const { socket, restore } = await startConnectedClient();
+      await Deno.writeTextFile(
+        updateRollbackPath(),
+        JSON.stringify({
+          fromCommit: "badnew",
+          toCommit: "restored",
+          reason: "update guard deadline",
+          at: new Date().toISOString(),
+        }),
+      );
+      await writeActiveUpgradeContext({
+        progressId: "upd-rolled",
+        upgradeId: "up-rolled",
+        targetCommit: "badnew",
+      });
+      try {
+        socket.receive({
+          type: "version",
+          commit: "abc",
+          branch: "trunk",
+          instanceVersion: "0.1.1",
+          features: ["update-progress-v1"],
+          at: new Date().toISOString(),
+        });
+        await flushMicrotasks();
+        const rolled = await waitFor(
+          "rolled-back progress",
+          () =>
+            framesOfType(socket, "update-progress").find((f) =>
+              (f as { stage?: string }).stage === "rolled-back"
+            ),
+        );
+        assertExists(rolled);
+      } finally {
+        restore();
+        restoreHooks();
+        for (const key of envKeys) {
+          setOptionalEnv(key, prior[key]);
+        }
+      }
+    });
+  },
+});
+
+function sampleUpdateInfo(commit: string, manifestUrl?: string) {
+  return {
+    channel: "trunk" as const,
+    buildId: "build-new",
+    commit,
+    builtAt: "2026-08-18T00:00:00Z",
+    binaryArtifact: {
+      url: "https://dl.example/daemon.tar.zst",
+      sha256: "a".repeat(64),
+      size: 1,
+    },
+    jsFallbackArtifact: {
+      url: "https://dl.example/daemon.js.tar.zst",
+      sha256: "b".repeat(64),
+      size: 1,
+    },
+    orchestrationArtifact: {
+      url: "https://dl.example/orch.tar.zst",
+      sha256: "c".repeat(64),
+      size: 1,
+    },
+    downloadUrl: "https://dl.example/daemon.tar.zst",
+    ...(manifestUrl ? { manifestUrl } : {}),
+  };
+}
+
+it({
+  name: "update refuses a targetCommit that does not match the signed manifest",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    let reconcileCalls = 0;
+    const restoreHooks = installClientTestHooks({
+      getBuildInfo: () => ({
+        commit: "old",
+        buildId: "dev-old",
+        builtAt: "2026-08-01T00:00:00Z",
+        channel: "trunk",
+        sourceUrl: "https://github.com/TurboPanel/turbopaneld/tree/old",
+      }),
+      resolveUpdate: () => Promise.resolve(sampleUpdateInfo("signed-aaa")),
+      executeRunReconcile: () => {
+        reconcileCalls += 1;
+        return Promise.resolve();
+      },
+    });
+    const { socket, restore } = await startConnectedClient();
+    try {
+      socket.receive({
+        type: "update",
+        id: "upd-mismatch",
+        targetCommit: "wanted-bbb",
+        at: new Date().toISOString(),
+      });
+      const result = await waitFor(
+        "mismatch update-result",
+        () =>
+          framesOfType(socket, "update-result").find((f) =>
+            (f as { id?: string }).id === "upd-mismatch"
+          ) as { ok?: boolean; errorCode?: string } | undefined,
+      );
+      assertEquals(result.ok, false);
+      assertEquals(result.errorCode, "preflight_manifest");
+      assertEquals(reconcileCalls, 0);
+    } finally {
+      restore();
+      restoreHooks();
+    }
+  },
+});
+
+it({
+  name: "update reconciles the verified manifest instead of a moving channel",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    let resolveCalls = 0;
+    let reconciledManifest: string | undefined;
+    const restoreHooks = installClientTestHooks({
+      updateResultHandoffDelayMs: 0,
+      restartDaemonService: () => Promise.resolve(true),
+      getBuildInfo: () => ({
+        commit: "old",
+        buildId: "dev-old",
+        builtAt: "2026-08-01T00:00:00Z",
+        channel: "trunk",
+        sourceUrl: "https://github.com/TurboPanel/turbopaneld/tree/old",
+      }),
+      resolveUpdate: () => {
+        resolveCalls += 1;
+        return Promise.resolve(
+          sampleUpdateInfo(
+            "commit-one",
+            `https://dl.example/manifest-${resolveCalls}.json`,
+          ),
+        );
+      },
+      downloadRunScript: () => Promise.resolve("#!/bin/sh\nexit 0\n"),
+      executeRunReconcile: (opts) => {
+        reconciledManifest = opts.manifestUrl;
+        return Promise.resolve();
+      },
+    });
+    const { socket, restore } = await startConnectedClient();
+    try {
+      socket.receive({
+        type: "update",
+        id: "upd-stable",
+        at: new Date().toISOString(),
+      });
+      const result = await waitFor(
+        "stable manifest update-result",
+        () =>
+          framesOfType(socket, "update-result").find((f) =>
+            (f as { id?: string }).id === "upd-stable"
+          ) as { ok?: boolean } | undefined,
+      );
+      assertEquals(result.ok, true);
+      assertEquals(resolveCalls, 1);
+      assertEquals(reconciledManifest, "https://dl.example/manifest-1.json");
+    } finally {
+      restore();
+      restoreHooks();
+    }
+  },
+});
+
+it({
+  name: "overlapping update does not hijack the active progress context",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    let releaseUpdate: (() => void) | undefined;
+    const updateGate = new Promise<void>((resolve) => {
+      releaseUpdate = resolve;
+    });
+    const restoreHooks = installClientTestHooks({
+      updateResultHandoffDelayMs: 0,
+      restartDaemonService: () => Promise.resolve(true),
+      getBuildInfo: () => ({
+        commit: "old",
+        buildId: "dev-old",
+        builtAt: "2026-08-01T00:00:00Z",
+        channel: "trunk",
+        sourceUrl: "https://github.com/TurboPanel/turbopaneld/tree/old",
+      }),
+      resolveUpdate: () => Promise.resolve(sampleUpdateInfo("newsha")),
+      downloadRunScript: () => Promise.resolve("#!/bin/sh\nexit 0\n"),
+      executeRunReconcile: async () => {
+        if (releaseUpdate) await updateGate;
+      },
+    });
+    const { socket, restore } = await startConnectedClient();
+    try {
+      socket.receive({
+        type: "version",
+        commit: "abc",
+        branch: "trunk",
+        instanceVersion: "0.1.1",
+        features: ["update-progress-v1"],
+        at: new Date().toISOString(),
+      });
+      await flushMicrotasks();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      socket.receive({
+        type: "update",
+        id: "upd-keep",
+        upgradeId: "up-keep",
+        at: new Date().toISOString(),
+      });
+      await waitFor(
+        "active upgrade context for first update",
+        async () => {
+          const ctx = await readActiveUpgradeContext();
+          return ctx?.progressId === "upd-keep" ? ctx : undefined;
+        },
+      );
+      socket.receive({
+        type: "update",
+        id: "upd-reject",
+        upgradeId: "up-reject",
+        at: new Date().toISOString(),
+      });
+      const rejected = await waitFor(
+        "rejected overlapping update",
+        () =>
+          framesOfType(socket, "update-result").find((f) =>
+            (f as { id?: string }).id === "upd-reject"
+          ) as { errorCode?: string } | undefined,
+      );
+      assertEquals(rejected.errorCode, "preflight_in_progress");
+      const failedProgress = framesOfType(socket, "update-progress").filter(
+        (f) => (f as { id?: string }).id === "upd-reject",
+      );
+      assertEquals(failedProgress.length >= 1, true);
+      const active = await readActiveUpgradeContext();
+      assertEquals(active?.progressId, "upd-keep");
+      assertEquals(active?.upgradeId, "up-keep");
+      releaseUpdate?.();
+      await waitFor(
+        "kept update-result",
+        () =>
+          framesOfType(socket, "update-result").find((f) =>
+            (f as { id?: string }).id === "upd-keep"
+          ),
+      );
+    } finally {
+      restore();
+      restoreHooks();
+    }
+  },
+});
+
+it({
+  name: "attach scopes progress to the armed update, not a stale context",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const originalRunDir = Deno.env.get("TURBOPANEL_RUN_DIR");
+    const runDir = await Deno.makeTempDir({ prefix: "tp-armed-run-" });
+    Deno.env.set("TURBOPANEL_RUN_DIR", runDir);
+    const restoreHooks = installClientTestHooks({
+      getBuildInfo: () => ({
+        commit: "armedsha",
+        buildId: "dev-armed",
+        builtAt: "2026-08-01T00:00:00Z",
+        channel: "trunk",
+        sourceUrl: "https://github.com/TurboPanel/turbopaneld/tree/armedsha",
+      }),
+    });
+    const { socket, restore } = await startConnectedClient();
+    try {
+      await Deno.writeTextFile(
+        updateGuardPath(),
+        JSON.stringify({
+          targetCommit: "armedsha",
+          deadlineAt: "2099-01-01T00:00:00Z",
+          armedAt: new Date().toISOString(),
+          previousCommit: "old",
+        }),
+      );
+      await writeActiveUpgradeContext({
+        progressId: "armed-req",
+        upgradeId: "up-armed",
+        targetCommit: "armedsha",
+      });
+      socket.receive({
+        type: "version",
+        commit: "abc",
+        branch: "trunk",
+        instanceVersion: "0.1.1",
+        features: ["update-progress-v1"],
+        at: new Date().toISOString(),
+      });
+      const done = await waitFor(
+        "armed verifying/done progress",
+        () =>
+          framesOfType(socket, "update-progress").find((f) =>
+            (f as { id?: string; stage?: string }).id === "armed-req" &&
+            (f as { stage?: string }).stage === "done"
+          ),
+      );
+      assertExists(done);
+    } finally {
+      restore();
+      restoreHooks();
+      setOptionalEnv("TURBOPANEL_RUN_DIR", originalRunDir);
+      await Deno.remove(runDir, { recursive: true });
+    }
+  },
+});
+
+it({
+  name: "update reports failed when systemd restart fails",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const restoreHooks = installClientTestHooks({
+      updateResultHandoffDelayMs: 0,
+      restartDaemonService: () => Promise.resolve(false),
+      getBuildInfo: () => ({
+        commit: "old",
+        buildId: "dev-old",
+        builtAt: "2026-08-01T00:00:00Z",
+        channel: "trunk",
+        sourceUrl: "https://github.com/TurboPanel/turbopaneld/tree/old",
+      }),
+      resolveUpdate: () => Promise.resolve(sampleUpdateInfo("newsha")),
+      downloadRunScript: () => Promise.resolve("#!/bin/sh\nexit 0\n"),
+      executeRunReconcile: () => Promise.resolve(),
+    });
+    const { socket, restore } = await startConnectedClient();
+    try {
+      socket.receive({
+        type: "version",
+        commit: "abc",
+        branch: "trunk",
+        instanceVersion: "0.1.1",
+        features: ["update-progress-v1"],
+        at: new Date().toISOString(),
+      });
+      await flushMicrotasks();
+      socket.receive({
+        type: "update",
+        id: "upd-restart",
+        upgradeId: "up-restart",
+        at: new Date().toISOString(),
+      });
+      const result = await waitFor(
+        "restart-failed update-result",
+        () =>
+          framesOfType(socket, "update-result").find((f) =>
+            (f as { id?: string }).id === "upd-restart"
+          ) as { ok?: boolean; errorCode?: string } | undefined,
+      );
+      assertEquals(result.ok, false);
+      assertEquals(result.errorCode, "restart_failed");
+      const failed = await waitFor(
+        "restart-failed progress",
+        () =>
+          framesOfType(socket, "update-progress").find((f) =>
+            (f as { stage?: string; errorCode?: string }).stage === "failed" &&
+            (f as { errorCode?: string }).errorCode === "restart_failed"
+          ),
+      );
+      assertExists(failed);
+    } finally {
+      restore();
+      restoreHooks();
+    }
+  },
+});
+
+it({
+  name: "already-on-target update emits done progress",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const restoreHooks = installClientTestHooks({
+      getBuildInfo: () => ({
+        commit: "deadbeef",
+        buildId: "dev-deadbeef",
+        builtAt: "2026-08-01T00:00:00Z",
+        channel: "trunk",
+        sourceUrl: "https://github.com/TurboPanel/turbopaneld/tree/deadbeef",
+      }),
+      resolveUpdate: () => Promise.resolve(sampleUpdateInfo("deadbeef")),
+    });
+    const { socket, restore } = await startConnectedClient();
+    try {
+      socket.receive({
+        type: "version",
+        commit: "abc",
+        branch: "trunk",
+        instanceVersion: "0.1.1",
+        features: ["update-progress-v1"],
+        at: new Date().toISOString(),
+      });
+      await flushMicrotasks();
+      socket.receive({
+        type: "update",
+        id: "upd-noop",
+        at: new Date().toISOString(),
+      });
+      const result = await waitFor(
+        "noop update-result",
+        () =>
+          framesOfType(socket, "update-result").find((f) =>
+            (f as { id?: string }).id === "upd-noop"
+          ) as { ok?: boolean } | undefined,
+      );
+      assertEquals(result.ok, true);
+      const done = await waitFor(
+        "noop done progress",
+        () =>
+          framesOfType(socket, "update-progress").find((f) =>
+            (f as { id?: string; stage?: string }).id === "upd-noop" &&
+            (f as { stage?: string }).stage === "done"
+          ),
+      );
+      assertExists(done);
+    } finally {
+      restore();
+      restoreHooks();
+    }
+  },
+});
+
+it({
+  name: "instance-update reports progress stages and instance-update-result",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const restoreHooks = installClientTestHooks({
+      executeInstanceUpdateReconcile: (options) => {
+        options.onStage?.("preparing");
+        options.onStage?.("downloading");
+        options.onStage?.("installing");
+        options.onStage?.("restarting");
+        options.onStage?.("verifying");
+        options.onStage?.("done");
+        return Promise.resolve();
+      },
+    });
+    const { socket, restore } = await startConnectedClient();
+    try {
+      socket.receive({
+        type: "version",
+        commit: "abc",
+        branch: "trunk",
+        instanceVersion: "0.1.1",
+        features: ["update-progress-v1"],
+        at: new Date().toISOString(),
+      });
+      await flushMicrotasks();
+      socket.receive({
+        type: "instance-update",
+        id: "iu-ok",
+        channel: "release",
+        upgradeId: "up-ok",
+        at: new Date().toISOString(),
+      });
+      const result = await waitFor(
+        "instance-update-result ok",
+        () =>
+          framesOfType(socket, "instance-update-result").find((frame) =>
+            (frame as { id?: string }).id === "iu-ok"
+          ) as { ok?: boolean } | undefined,
+      );
+      assertEquals(result.ok, true);
+      const stages = framesOfType(socket, "update-progress").map((frame) =>
+        (frame as { stage?: string; unit?: string }).stage
+      );
+      assertEquals(stages, [
+        "preparing",
+        "downloading",
+        "installing",
+        "restarting",
+        "verifying",
+        "done",
+      ]);
+      assertEquals(
+        framesOfType(socket, "update-progress").every((frame) =>
+          (frame as { unit?: string }).unit === "instance"
+        ),
+        true,
+      );
+    } finally {
+      restore();
+      restoreHooks();
+    }
+  },
+});
+
+it({
+  name: "instance-update reports rolled-back and recovery_required",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    let attempt = 0;
+    const restoreHooks = installClientTestHooks({
+      executeInstanceUpdateReconcile: () => {
+        attempt += 1;
+        if (attempt === 1) {
+          return Promise.reject(
+            new ControlPlaneUpdateFailedError(
+              "rolled-back",
+              "health_timeout",
+              "health check timed out",
+            ),
+          );
+        }
+        return Promise.reject(
+          new ControlPlaneUpdateFailedError(
+            "failed",
+            "recovery_required",
+            "rollback did not restore a healthy control plane",
+          ),
+        );
+      },
+    });
+    const { socket, restore } = await startConnectedClient();
+    try {
+      socket.receive({
+        type: "version",
+        commit: "abc",
+        branch: "trunk",
+        instanceVersion: "0.1.1",
+        features: ["update-progress-v1"],
+        at: new Date().toISOString(),
+      });
+      await flushMicrotasks();
+      socket.receive({
+        type: "instance-update",
+        id: "iu-back",
+        channel: "release",
+        at: new Date().toISOString(),
+      });
+      const rolled = await waitFor(
+        "rolled-back instance-update-result",
+        () =>
+          framesOfType(socket, "instance-update-result").find((frame) =>
+            (frame as { id?: string }).id === "iu-back"
+          ) as { ok?: boolean; errorCode?: string } | undefined,
+      );
+      assertEquals(rolled.ok, false);
+      assertEquals(rolled.errorCode, "health_timeout");
+      const rolledStage = framesOfType(socket, "update-progress").find((
+        frame,
+      ) => (frame as { stage?: string }).stage === "rolled-back");
+      assertExists(rolledStage);
+
+      socket.receive({
+        type: "instance-update",
+        id: "iu-recover",
+        channel: "release",
+        at: new Date().toISOString(),
+      });
+      const failed = await waitFor(
+        "recovery_required instance-update-result",
+        () =>
+          framesOfType(socket, "instance-update-result").find((frame) =>
+            (frame as { id?: string }).id === "iu-recover"
+          ) as { ok?: boolean; errorCode?: string } | undefined,
+      );
+      assertEquals(failed.ok, false);
+      assertEquals(failed.errorCode, "recovery_required");
+      const failedStage = framesOfType(socket, "update-progress").find((
+        frame,
+      ) =>
+        (frame as { id?: string }).id === "iu-recover" &&
+        (frame as { stage?: string }).stage === "failed"
+      );
+      assertExists(failedStage);
+    } finally {
+      restore();
+      restoreHooks();
+    }
+  },
+});
+
 async function startConnectedClient(
   options: {
     applyDevSyncTarball?:
@@ -4562,6 +5486,8 @@ async function startConnectedClient(
   restore: () => void;
 }> {
   const originalStateDir = Deno.env.get("TURBOPANEL_DAEMON_STATE_DIR");
+  const originalStateRoot = Deno.env.get("TURBOPANEL_STATE_DIR");
+  const originalHome = Deno.env.get("TURBOPANEL_HOME");
   const originalForceEnroll = Deno.env.get("TURBOPANEL_FORCE_ENROLL");
   const originalDevInstance = Deno.env.get("TURBOPANEL_DEV_INSTANCE");
   const originalDaemonRoot = Deno.env.get("TURBOPANEL_DAEMON_ROOT");
@@ -4591,6 +5517,8 @@ async function startConnectedClient(
   const restoreFetch = api.install();
 
   const fixture = await Deno.makeTempDir({ prefix: "tp-client-connected-" });
+  Deno.env.set("TURBOPANEL_HOME", fixture);
+  Deno.env.set("TURBOPANEL_STATE_DIR", fixture);
   Deno.env.set("TURBOPANEL_DAEMON_STATE_DIR", fixture);
   Deno.env.set("TURBOPANEL_FORCE_ENROLL", "1");
   Deno.env.delete("TURBOPANEL_DEV_INSTANCE");
@@ -4610,6 +5538,9 @@ async function startConnectedClient(
     clientOpts.applyDevSyncTarball = options.applyDevSyncTarball;
   }
 
+  const restoreDisk = installClientTestHooks({
+    assertUpdateDiskPreflight: () => Promise.resolve(),
+  });
   const client = new InstanceClient(clientOpts);
   client.start();
   const socket = await waitFor("connected socket", () => sockets.at(0), 5_000);
@@ -4623,7 +5554,10 @@ async function startConnectedClient(
       client.stop();
       restoreFetch();
       restoreWebSocket();
+      restoreDisk();
       setOptionalEnv("TURBOPANEL_DAEMON_STATE_DIR", originalStateDir);
+      setOptionalEnv("TURBOPANEL_STATE_DIR", originalStateRoot);
+      setOptionalEnv("TURBOPANEL_HOME", originalHome);
       setOptionalEnv("TURBOPANEL_FORCE_ENROLL", originalForceEnroll);
       setOptionalEnv("TURBOPANEL_DEV_INSTANCE", originalDevInstance);
       setOptionalEnv("TURBOPANEL_DAEMON_ROOT", originalDaemonRoot);
@@ -4656,8 +5590,7 @@ it({
       updateResultHandoffDelayMs: 0,
       restartDaemonService: () => {
         restartCalls += 1;
-        // First update restart fails; later (dev-sync) also fails once.
-        return Promise.resolve(restartCalls > 2);
+        return Promise.resolve(restartCalls < 2);
       },
       resolveUpdate: (_config) =>
         Promise.resolve({
@@ -4729,12 +5662,12 @@ it({
         at: new Date().toISOString(),
       });
       const inProgress = await waitFor(
-        "update already in progress",
+        "preflight_in_progress: update already in progress",
         () =>
           framesOfType(socket, "update-result").find((f) =>
             (f as { id?: string; error?: string }).id === "upd-b" &&
             String((f as { error?: string }).error ?? "").includes(
-              "already in progress",
+              "preflight_in_progress",
             )
           ),
       );

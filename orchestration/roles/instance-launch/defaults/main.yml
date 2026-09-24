@@ -189,6 +189,10 @@ postgres_port: 5432
 postgres_expose_port: false
 postgres_user: turbopanel
 postgres_db: turbopanel
+# Control-plane update backups (instance-backup.yml). Same default as
+# TURBOPANEL_BACKUP_DIR / layout.backupDir on the daemon. An extra-var or
+# that env override wins.
+turbopanel_backup_dir: /backup
 # Service logs always live under /var/log/turbopanel/<svc> (dev shares it with prod).
 turbopanel_log_dir: /var/log/turbopanel
 instance_log_dir: "{{ turbopanel_log_dir }}/instance"

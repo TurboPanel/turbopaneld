@@ -25,6 +25,73 @@ export type CellAttachVersionMessage = {
   branch: string;
   at: string;
   instanceVersion?: string;
+  /**
+   * Features the control plane advertises. Omitted by a peer that predates
+   * the field; `instanceSupports` stays closed.
+   */
+  features?: string[];
+};
+
+/** Daemon → control plane hello. `features` is the advertised wire set. */
+export type DaemonHelloMessage = {
+  type: "hello";
+  at: string;
+  features?: string[];
+};
+
+/** Control-plane → daemon self-update. Optional pin fields are expand-only. */
+export type DaemonUpdateMessage = {
+  type: "update";
+  id: string;
+  channel?: string;
+  updateUrl?: string;
+  updateSha256?: string;
+  upgradeId?: string;
+  manifestUrl?: string;
+  targetCommit?: string;
+  at: string;
+};
+
+/** Control-plane → daemon control-plane update. Optional pin fields are expand-only. */
+export type InstanceUpdateMessage = {
+  type: "instance-update";
+  id: string;
+  channel?: string;
+  manifestUrl?: string;
+  /** UI package pin. Passed to run.sh as `--ui-manifest-url`. */
+  uiManifestUrl?: string;
+  /** Semver the control plane is about to install, when the manifest names one. */
+  targetVersion?: string;
+  upgradeId?: string;
+  targetCommit?: string;
+  at: string;
+};
+
+export type UpdateProgressUnit = "daemon" | "instance";
+
+export type UpdateProgressStage =
+  | "preparing"
+  | "downloading"
+  | "installing"
+  | "restarting"
+  | "verifying"
+  | "done"
+  | "failed"
+  | "rolled-back";
+
+/**
+ * Daemon → control plane upgrade progress. Fire-and-forget: it does not
+ * complete a pending `update` or `instance-update`.
+ */
+export type UpdateProgressMessage = {
+  type: "update-progress";
+  id: string;
+  upgradeId?: string;
+  unit: UpdateProgressUnit;
+  stage: UpdateProgressStage;
+  at: string;
+  detail?: string;
+  errorCode?: string;
 };
 
 /**
@@ -347,37 +414,24 @@ export type DaemonMessage =
     error?: string;
     at: string;
   }
-  | {
-    type: "update";
-    id: string;
-    channel?: string;
-    updateUrl?: string;
-    updateSha256?: string;
-    at: string;
-  }
+  | DaemonUpdateMessage
   | {
     type: "update-result";
     id: string;
     ok: boolean;
     error?: string;
+    errorCode?: string;
+    upgradeId?: string;
     at: string;
   }
-  | {
-    type: "instance-update";
-    id: string;
-    channel?: string;
-    manifestUrl?: string;
-    /** UI package pin. Passed to run.sh as `--ui-manifest-url`. */
-    uiManifestUrl?: string;
-    /** Semver the control plane is about to install, when the manifest names one. */
-    targetVersion?: string;
-    at: string;
-  }
+  | InstanceUpdateMessage
+  | UpdateProgressMessage
   | {
     type: "instance-update-result";
     id: string;
     ok: boolean;
     error?: string;
+    errorCode?: string;
     at: string;
   }
   | {

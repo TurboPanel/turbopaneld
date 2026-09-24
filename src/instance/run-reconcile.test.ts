@@ -1,22 +1,37 @@
-import { assertEquals, assertRejects, assertThrows } from "@std/assert";
 import {
+  assertEquals,
+  assertRejects,
+  assertStringIncludes,
+  assertThrows,
+} from "@std/assert";
+import {
+  assertControlPlaneBackupPreflight,
+  assertControlPlaneManifestPreflight,
   assertControlPlaneUpdateAllowed,
+  assertUpdateDiskPreflight,
   buildRunReconcileArgs,
   CDN_RUN_SCRIPT,
+  ControlPlaneUpdateFailedError,
   downloadRunScript,
   encodeLicenseArg,
   executeInstanceUpdateReconcile,
   executeRunReconcile,
+  type InstanceUpdateHooks,
   InstanceUpdateRefusedError,
+  MIN_INSTANCE_UPDATE_FREE_BACKUP_BYTES,
+  MIN_INSTANCE_UPDATE_FREE_INSTALL_BYTES,
   PRODUCTION_CONTROL_PLANE,
   reconcileNeedsRootHelper,
   resolveAutomaticUpdateTrust,
   resolveBootstrapInsecureTls,
   resolveRunScriptUrl,
+  restartControlPlaneUnits,
   rootHelperInstanceUpdateInvocation,
   rootHelperReconcileInvocation,
+  UpdatePreflightError,
   UpdateTrustRepairError,
 } from "./run-reconcile.ts";
+import { parseTurbopanelStageLine } from "./update-progress-reporter.ts";
 import { join } from "@std/path";
 
 /**
@@ -26,6 +41,48 @@ import { join } from "@std/path";
  * reports Deno suites as empty; keep this alias so analysis sees real tests.
  */
 const test = Deno.test.bind(Deno);
+
+function readableText(
+  text: string,
+  chunks?: string[],
+): ReadableStream<Uint8Array> {
+  const encoder = new TextEncoder();
+  const parts = chunks ?? (text ? [text] : []);
+  return new ReadableStream({
+    start(controller) {
+      for (const part of parts) {
+        controller.enqueue(encoder.encode(part));
+      }
+      controller.close();
+    },
+  });
+}
+
+function fakeReconcileChild(options: {
+  stdout?: string;
+  stdoutChunks?: string[];
+  stderr?: string;
+  code?: number;
+} = {}) {
+  const code = options.code ?? 0;
+  return {
+    stdin: {
+      getWriter() {
+        return {
+          write() {
+            return Promise.resolve();
+          },
+          close() {
+            return Promise.resolve();
+          },
+        };
+      },
+    },
+    stdout: readableText(options.stdout ?? "", options.stdoutChunks),
+    stderr: readableText(options.stderr ?? ""),
+    status: Promise.resolve({ code, success: code === 0 }),
+  };
+}
 
 test("encodeLicenseArg uses base64url without padding", () => {
   const encoded = encodeLicenseArg("license-id", "token");
@@ -261,28 +318,7 @@ test("executeRunReconcile keeps release downloads TLS-verified when instance boo
       }
 
       spawn() {
-        return {
-          stdin: {
-            getWriter() {
-              return {
-                write() {
-                  return Promise.resolve();
-                },
-                close() {
-                  return Promise.resolve();
-                },
-              };
-            },
-          },
-          output() {
-            return Promise.resolve({
-              success: true,
-              code: 0,
-              stdout: new Uint8Array(),
-              stderr: new Uint8Array(),
-            });
-          },
-        };
+        return fakeReconcileChild();
       }
     } as unknown as typeof Deno.Command;
 
@@ -339,28 +375,7 @@ test("executeRunReconcile chdir survives daemon directory swap", async () => {
         Deno.mkdirSync(daemonDir, { recursive: true });
         Deno.writeTextFileSync(join(daemonDir, "main.ts"), "x\n");
         Deno.removeSync(`${daemonDir}.old`, { recursive: true });
-        return {
-          stdin: {
-            getWriter() {
-              return {
-                write() {
-                  return Promise.resolve();
-                },
-                close() {
-                  return Promise.resolve();
-                },
-              };
-            },
-          },
-          output() {
-            return Promise.resolve({
-              success: true,
-              code: 0,
-              stdout: new Uint8Array(),
-              stderr: new Uint8Array(),
-            });
-          },
-        };
+        return fakeReconcileChild();
       }
     } as unknown as typeof Deno.Command;
 
@@ -399,28 +414,7 @@ test("executeRunReconcile reports sudo failure stderr", async () => {
     Deno.Command = class {
       constructor(_cmd: string, _opts: Deno.CommandOptions) {}
       spawn() {
-        return {
-          stdin: {
-            getWriter() {
-              return {
-                write() {
-                  return Promise.resolve();
-                },
-                close() {
-                  return Promise.resolve();
-                },
-              };
-            },
-          },
-          output() {
-            return Promise.resolve({
-              success: false,
-              code: 1,
-              stdout: new Uint8Array(),
-              stderr: new TextEncoder().encode("reconcile blew up\n"),
-            });
-          },
-        };
+        return fakeReconcileChild({ code: 1, stderr: "reconcile blew up\n" });
       }
     } as unknown as typeof Deno.Command;
 
@@ -610,28 +604,7 @@ test("executeRunReconcile preserves trimmed TURBOPANEL_DL_BASE", async () => {
         capturedEnv = opts.env as Record<string, string> | undefined;
       }
       spawn() {
-        return {
-          stdin: {
-            getWriter() {
-              return {
-                write() {
-                  return Promise.resolve();
-                },
-                close() {
-                  return Promise.resolve();
-                },
-              };
-            },
-          },
-          output() {
-            return Promise.resolve({
-              success: true,
-              code: 0,
-              stdout: new Uint8Array(),
-              stderr: new Uint8Array(),
-            });
-          },
-        };
+        return fakeReconcileChild();
       }
     } as unknown as typeof Deno.Command;
 
@@ -674,28 +647,7 @@ test("executeRunReconcile falls back cwd when primary chdir fails", async () => 
     Deno.Command = class {
       constructor(_cmd: string, _opts: Deno.CommandOptions) {}
       spawn() {
-        return {
-          stdin: {
-            getWriter() {
-              return {
-                write() {
-                  return Promise.resolve();
-                },
-                close() {
-                  return Promise.resolve();
-                },
-              };
-            },
-          },
-          output() {
-            return Promise.resolve({
-              success: true,
-              code: 0,
-              stdout: new Uint8Array(),
-              stderr: new Uint8Array(),
-            });
-          },
-        };
+        return fakeReconcileChild();
       }
     } as unknown as typeof Deno.Command;
 
@@ -851,6 +803,7 @@ test("rootHelperReconcileInvocation hands validated flags to sudo -n tp-orchestr
     "release",
     "--manifest-url",
     "https://github.com/TurboPanel/turbopaneld/releases/download/v0.1.0/manifest.json",
+    "--progress-markers",
   ]);
   // Never a shell, never a script body, never --insecure-tls.
   assertEquals(invocation.args.includes("sh"), false);
@@ -944,4 +897,575 @@ test("executeInstanceUpdateReconcile refuses a development checkout", async () =
     InstanceUpdateRefusedError,
     "development host",
   );
+});
+
+test("assertUpdateDiskPreflight maps low free space to preflight_disk", async () => {
+  await assertRejects(
+    () =>
+      assertUpdateDiskPreflight({
+        statfsProbe: () => Promise.resolve({ bavail: 1, bsize: 4096 }),
+      }),
+    UpdatePreflightError,
+    "preflight_disk",
+  );
+});
+
+test("parseTurbopanelStageLine accepts marker lines", () => {
+  assertEquals(
+    parseTurbopanelStageLine("::turbopanel-stage::downloading"),
+    "downloading",
+  );
+  assertEquals(
+    parseTurbopanelStageLine("noise ::turbopanel-stage::installing"),
+    null,
+  );
+  assertEquals(parseTurbopanelStageLine("not a marker"), null);
+});
+
+test("executeRunReconcile forwards split-chunk stage markers", async () => {
+  const originalCommand = Deno.Command;
+  const stages: string[] = [];
+  try {
+    Deno.Command = class {
+      constructor(_cmd: string, _opts: Deno.CommandOptions) {}
+      spawn() {
+        return fakeReconcileChild({
+          stdoutChunks: ["::turbo", "panel-stage::installing\n"],
+        });
+      }
+    } as unknown as typeof Deno.Command;
+    await executeRunReconcile({
+      script: "#!/bin/sh\n",
+      args: [],
+      onStage: (stage) => {
+        stages.push(stage);
+      },
+    });
+    assertEquals(stages, ["installing"]);
+  } finally {
+    Deno.Command = originalCommand;
+  }
+});
+
+test("executeRunReconcile surfaces stdout when stderr is empty on failure", async () => {
+  const originalCommand = Deno.Command;
+  try {
+    Deno.Command = class {
+      constructor(_cmd: string, _opts: Deno.CommandOptions) {}
+      spawn() {
+        return fakeReconcileChild({
+          code: 2,
+          stdout: "installer exploded\n",
+        });
+      }
+    } as unknown as typeof Deno.Command;
+    await assertRejects(
+      () => executeRunReconcile({ script: "#!/bin/sh\n", args: [] }),
+      Error,
+      "installer exploded",
+    );
+  } finally {
+    Deno.Command = originalCommand;
+  }
+});
+
+test("assertUpdateDiskPreflight rejects an unreadable filesystem", async () => {
+  await assertRejects(
+    () =>
+      assertUpdateDiskPreflight({
+        installRoot: "/tmp",
+        stateDir: "/tmp",
+        tmpDir: "/tmp",
+        statfsProbe: () => Promise.resolve(null),
+      }),
+    UpdatePreflightError,
+    "preflight_disk",
+  );
+});
+
+test("assertUpdateDiskPreflight rejects a failed statfs probe", async () => {
+  await assertRejects(
+    () =>
+      assertUpdateDiskPreflight({
+        installRoot: "/tmp",
+        stateDir: "/tmp",
+        tmpDir: "/tmp",
+        statfsProbe: () => Promise.reject(new Error("EACCES")),
+      }),
+    UpdatePreflightError,
+    "preflight_disk",
+  );
+});
+
+test("assertUpdateDiskPreflight rejects an invalid statfs result", async () => {
+  await assertRejects(
+    () =>
+      assertUpdateDiskPreflight({
+        installRoot: "/tmp",
+        stateDir: "/tmp",
+        tmpDir: "/tmp",
+        statfsProbe: () => Promise.resolve({ bavail: 10, bsize: 0 }),
+      }),
+    UpdatePreflightError,
+    "preflight_disk",
+  );
+});
+
+test("assertUpdateDiskPreflight probes a missing directory via create-or-parent", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-disk-missing-" });
+  const missing = join(root, "state", "nested");
+  try {
+    await assertUpdateDiskPreflight({
+      installRoot: root,
+      stateDir: missing,
+      tmpDir: root,
+      statfsProbe: () => Promise.resolve({ bavail: 1024 * 1024, bsize: 4096 }),
+    });
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+const PLENTY_STATFS = () =>
+  Promise.resolve({ bavail: 1024 * 1024, bsize: 4096 });
+
+function instanceManifestBody(): string {
+  return JSON.stringify({
+    commit: "newcommit",
+    version: "0.1.1",
+    channel: "release",
+  });
+}
+
+function managedUpdateHooks(
+  calls: Array<{ bin: string; args: string[] }>,
+  overrides: Partial<InstanceUpdateHooks> = {},
+): InstanceUpdateHooks {
+  let clock = 0;
+  return {
+    forceManaged: true,
+    statfsProbe: PLENTY_STATFS,
+    fetchText: () =>
+      Promise.resolve({ ok: true, status: 200, body: instanceManifestBody() }),
+    readCaddyfile: () => Promise.resolve("handle_errors\nupdating.html\n"),
+    restartUnits: () => Promise.resolve(true),
+    migrate: () =>
+      Promise.resolve({
+        code: 0,
+        stdout: "migrations applied successfully\n",
+        stderr: "",
+      }),
+    unitActive: () => Promise.resolve(true),
+    readHealth: () =>
+      Promise.resolve({ version: "0.1.1", commit: "newcommit" }),
+    now: () => clock,
+    sleep: () => {
+      clock += 5 * 60 * 1000;
+      return Promise.resolve();
+    },
+    run: (bin, args, onStage) => {
+      calls.push({ bin, args });
+      if (args[0] === "inspect") {
+        return Promise.resolve({
+          code: 0,
+          stdout: "true healthy\n",
+          stderr: "",
+        });
+      }
+      if (args.includes("update-instance")) {
+        onStage?.("downloading");
+        onStage?.("installing");
+        onStage?.("restarting");
+      }
+      return Promise.resolve({ code: 0, stdout: "", stderr: "" });
+    },
+    ...overrides,
+  };
+}
+
+test("assertUpdateDiskPreflight sizes a control-plane update for install and backup", async () => {
+  await assertRejects(
+    () =>
+      assertUpdateDiskPreflight({
+        installRoot: "/tmp",
+        backupDir: "/tmp",
+        statfsProbe: () => Promise.resolve({ bavail: 1, bsize: 4096 }),
+      }),
+    UpdatePreflightError,
+    "preflight_disk",
+  );
+  assertEquals(
+    MIN_INSTANCE_UPDATE_FREE_INSTALL_BYTES > 512 * 1024 * 1024,
+    true,
+  );
+  assertEquals(MIN_INSTANCE_UPDATE_FREE_BACKUP_BYTES > 0, true);
+});
+
+test("assertControlPlaneBackupPreflight refuses a stopped database container", async () => {
+  await assertRejects(
+    () =>
+      assertControlPlaneBackupPreflight(() =>
+        Promise.resolve({ code: 0, stdout: "false exited\n", stderr: "" })
+      ),
+    UpdatePreflightError,
+    "preflight_backup",
+  );
+  await assertRejects(
+    () =>
+      assertControlPlaneBackupPreflight(() =>
+        Promise.resolve({ code: 1, stdout: "", stderr: "no such container" })
+      ),
+    UpdatePreflightError,
+    "not present",
+  );
+});
+
+test("assertControlPlaneManifestPreflight rejects a bad instance manifest", async () => {
+  await assertRejects(
+    () =>
+      assertControlPlaneManifestPreflight({
+        channel: "release",
+        fetchText: () =>
+          Promise.resolve({ ok: true, status: 200, body: "not-json" }),
+      }),
+    UpdatePreflightError,
+    "preflight_manifest",
+  );
+});
+
+test("executeInstanceUpdateReconcile reports stages and backs up before install", async () => {
+  const calls: Array<{ bin: string; args: string[] }> = [];
+  const stages: string[] = [];
+  await executeInstanceUpdateReconcile({
+    channel: "release",
+    upgradeId: "up1",
+    onStage: (stage) => stages.push(stage),
+    hooks: managedUpdateHooks(calls),
+  });
+  assertEquals(stages, [
+    "preparing",
+    "downloading",
+    "installing",
+    "restarting",
+    "verifying",
+    "done",
+  ]);
+  const playbooks = calls.map((call) => call.args.at(-1));
+  assertEquals(playbooks.includes("instance-backup.yml"), true);
+  assertEquals(playbooks.includes("instance-launch-only.yml"), false);
+  assertEquals(
+    calls.some((call) => call.args.includes("update-instance")),
+    true,
+  );
+  assertEquals(
+    calls.some((call) => call.args.includes("instance-rollback.yml")),
+    false,
+  );
+  const backup = calls.find((call) =>
+    call.args.includes("instance-backup.yml")
+  );
+  assertEquals(
+    backup?.args.some((arg) => arg.startsWith("turbopanel_upgrade_id=up1")),
+    true,
+  );
+});
+
+test("executeInstanceUpdateReconcile refreshes Caddy when the updating page is absent", async () => {
+  const calls: Array<{ bin: string; args: string[] }> = [];
+  await executeInstanceUpdateReconcile({
+    channel: "release",
+    hooks: managedUpdateHooks(calls, {
+      readCaddyfile: () => Promise.resolve("reverse_proxy only"),
+    }),
+  });
+  const names = calls.map((call) => call.args.at(-1));
+  const backupAt = names.indexOf("instance-backup.yml");
+  const refreshAt = names.indexOf("instance-launch-only.yml");
+  const installAt = calls.findIndex((call) =>
+    call.args.includes("update-instance")
+  );
+  assertEquals(backupAt >= 0 && refreshAt > backupAt, true);
+  assertEquals(installAt > refreshAt, true);
+});
+
+test("executeInstanceUpdateReconcile rolls back when health never matches", async () => {
+  const calls: Array<{ bin: string; args: string[] }> = [];
+  let reads = 0;
+  await assertRejects(
+    () =>
+      executeInstanceUpdateReconcile({
+        channel: "release",
+        upgradeId: "up-health",
+        hooks: managedUpdateHooks(calls, {
+          readHealth: () => {
+            reads += 1;
+            if (reads === 1 || reads >= 4) {
+              return Promise.resolve({ version: "0.1.0", commit: "oldcommit" });
+            }
+            return Promise.resolve(null);
+          },
+        }),
+      }),
+    ControlPlaneUpdateFailedError,
+    "health_timeout",
+  );
+  assertEquals(
+    calls.some((call) => call.args.includes("instance-rollback.yml")),
+    true,
+  );
+});
+
+test("executeInstanceUpdateReconcile reports recovery_required when rollback fails", async () => {
+  const calls: Array<{ bin: string; args: string[] }> = [];
+  const error = await assertRejects(
+    () =>
+      executeInstanceUpdateReconcile({
+        channel: "release",
+        upgradeId: "up-recover",
+        hooks: managedUpdateHooks(calls, {
+          readHealth: () =>
+            Promise.resolve({ version: "0.1.0", commit: "oldcommit" }),
+          run: (bin, args, onStage) => {
+            calls.push({ bin, args });
+            if (args.includes("instance-rollback.yml")) {
+              return Promise.resolve({
+                code: 1,
+                stdout: "",
+                stderr: "no previous generation",
+              });
+            }
+            if (args[0] === "inspect") {
+              return Promise.resolve({
+                code: 0,
+                stdout: "true healthy\n",
+                stderr: "",
+              });
+            }
+            if (args.includes("update-instance")) {
+              onStage?.("downloading");
+              onStage?.("installing");
+              onStage?.("restarting");
+            }
+            return Promise.resolve({ code: 0, stdout: "", stderr: "" });
+          },
+        }),
+      }),
+    ControlPlaneUpdateFailedError,
+    "recovery_required",
+  );
+  assertEquals(error instanceof ControlPlaneUpdateFailedError, true);
+  if (error instanceof ControlPlaneUpdateFailedError) {
+    assertEquals(error.stage, "failed");
+    assertEquals(error.code, "recovery_required");
+    assertStringIncludes(error.message, "instance-rollback.yml");
+    assertStringIncludes(error.message, "up-recover");
+  }
+});
+
+test("a failed migration keeps the previous database and rolls back", async () => {
+  const calls: Array<{ bin: string; args: string[] }> = [];
+  let history = ["0000_init"];
+  const error = await assertRejects(
+    () =>
+      executeInstanceUpdateReconcile({
+        channel: "release",
+        upgradeId: "up-migrate",
+        hooks: managedUpdateHooks(calls, {
+          migrate: () => {
+            history = ["0000_init"];
+            return Promise.resolve({
+              code: 1,
+              stdout: "",
+              stderr: "migration refused",
+            });
+          },
+        }),
+      }),
+    ControlPlaneUpdateFailedError,
+    "migration_failed",
+  );
+  assertEquals(history, ["0000_init"]);
+  assertEquals(
+    calls.some((call) => call.args.includes("instance-rollback.yml")),
+    true,
+  );
+  assertEquals(error instanceof ControlPlaneUpdateFailedError, true);
+});
+
+test("a successful migration lets the new instance boot", async () => {
+  const calls: Array<{ bin: string; args: string[] }> = [];
+  let history = ["0000_init"];
+  let booted = false;
+  await executeInstanceUpdateReconcile({
+    channel: "release",
+    hooks: managedUpdateHooks(calls, {
+      migrate: () => {
+        history = ["0000_init", "0007_add_upgrade_tables"];
+        return Promise.resolve({
+          code: 0,
+          stdout: "migrations applied successfully\n",
+          stderr: "",
+        });
+      },
+      readHealth: () => {
+        booted = history.includes("0007_add_upgrade_tables");
+        return Promise.resolve({ version: "0.1.1", commit: "newcommit" });
+      },
+    }),
+  });
+  assertEquals(booted, true);
+  assertEquals(history.at(-1), "0007_add_upgrade_tables");
+  assertEquals(
+    calls.some((call) => call.args.includes("instance-rollback.yml")),
+    false,
+  );
+});
+
+test("a partial install restores the previous instance and UI", async () => {
+  const calls: Array<{ bin: string; args: string[] }> = [];
+  let instance = "old-instance";
+  let ui = "old-ui";
+  await assertRejects(
+    () =>
+      executeInstanceUpdateReconcile({
+        channel: "release",
+        upgradeId: "up-partial",
+        hooks: managedUpdateHooks(calls, {
+          filesTouched: () => Promise.resolve(true),
+          readHealth: () =>
+            Promise.resolve(
+              instance === "old-instance" && ui === "old-ui"
+                ? { version: "0.1.0", commit: "oldcommit" }
+                : { version: "0.1.1", commit: "partial" },
+            ),
+          run: (bin, args, onStage) => {
+            calls.push({ bin, args });
+            if (args[0] === "inspect") {
+              return Promise.resolve({
+                code: 0,
+                stdout: "true healthy\n",
+                stderr: "",
+              });
+            }
+            if (args.includes("update-instance")) {
+              instance = "partial-instance";
+              ui = "partial-ui";
+              onStage?.("installing");
+              return Promise.resolve({
+                code: 1,
+                stdout: "",
+                stderr: "unpack failed after swap",
+              });
+            }
+            if (args.includes("instance-rollback.yml")) {
+              instance = "old-instance";
+              ui = "old-ui";
+              return Promise.resolve({ code: 0, stdout: "", stderr: "" });
+            }
+            return Promise.resolve({ code: 0, stdout: "", stderr: "" });
+          },
+        }),
+      }),
+    ControlPlaneUpdateFailedError,
+    "install_failed",
+  );
+  assertEquals(instance, "old-instance");
+  assertEquals(ui, "old-ui");
+  assertEquals(
+    calls.some((call) => call.args.includes("instance-rollback.yml")),
+    true,
+  );
+});
+
+test("a thrown migration command restores the previous instance and UI", async () => {
+  const calls: Array<{ bin: string; args: string[] }> = [];
+  let instance = "old-instance";
+  let ui = "old-ui";
+  await assertRejects(
+    () =>
+      executeInstanceUpdateReconcile({
+        channel: "release",
+        upgradeId: "up-throw",
+        hooks: managedUpdateHooks(calls, {
+          migrate: () => {
+            throw new Error("migrate: spawn failed");
+          },
+          readHealth: () =>
+            Promise.resolve(
+              instance === "old-instance" && ui === "old-ui"
+                ? { version: "0.1.0", commit: "oldcommit" }
+                : { version: "0.1.1", commit: "newcommit" },
+            ),
+          run: (bin, args, onStage) => {
+            calls.push({ bin, args });
+            if (args[0] === "inspect") {
+              return Promise.resolve({
+                code: 0,
+                stdout: "true healthy\n",
+                stderr: "",
+              });
+            }
+            if (args.includes("update-instance")) {
+              instance = "new-instance";
+              ui = "new-ui";
+              onStage?.("downloading");
+              onStage?.("installing");
+              onStage?.("restarting");
+              return Promise.resolve({ code: 0, stdout: "", stderr: "" });
+            }
+            if (args.includes("instance-rollback.yml")) {
+              instance = "old-instance";
+              ui = "old-ui";
+              return Promise.resolve({ code: 0, stdout: "", stderr: "" });
+            }
+            return Promise.resolve({ code: 0, stdout: "", stderr: "" });
+          },
+        }),
+      }),
+    ControlPlaneUpdateFailedError,
+    "migration_failed",
+  );
+  assertEquals(instance, "old-instance");
+  assertEquals(ui, "old-ui");
+});
+
+test("restart reloads Caddy unless its binary changed", async () => {
+  const calls: string[][] = [];
+  const run = (args: string[]) => {
+    calls.push(args);
+    return Promise.resolve({ success: true, stderr: "" });
+  };
+  assertEquals(await restartControlPlaneUnits({ runSystemctl: run }), true);
+  assertEquals(calls[0]?.includes("restart"), true);
+  assertEquals(calls[0]?.includes("turbopanel-instance"), true);
+  assertEquals(calls[1]?.includes("reload"), true);
+  assertEquals(calls[1]?.includes("turbopanel-caddy"), true);
+  calls.length = 0;
+  assertEquals(
+    await restartControlPlaneUnits({
+      runSystemctl: run,
+      restartCaddy: true,
+    }),
+    true,
+  );
+  assertEquals(calls[1]?.includes("restart"), true);
+});
+
+test("the updating page stays on :8443 while the instance restarts", async () => {
+  const template = await Deno.readTextFile(
+    new URL(
+      "../../orchestration/roles/instance-launch/templates/Caddyfile.j2",
+      import.meta.url,
+    ),
+  );
+  assertStringIncludes(template, "updating.html");
+  assertStringIncludes(template, "control_plane_updating");
+  assertStringIncludes(template, "@webhook path /webhook/*");
+  const tasks = await Deno.readTextFile(
+    new URL(
+      "../../orchestration/roles/instance-launch/tasks/main.yml",
+      import.meta.url,
+    ),
+  );
+  assertStringIncludes(tasks, "Reload turbopanel caddy");
 });

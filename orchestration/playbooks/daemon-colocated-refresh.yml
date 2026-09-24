@@ -1,0 +1,91 @@
+---
+# Refresh only the co-located daemon on an existing self-hosted control-plane
+# host (run.sh --daemon-only). Never daemon-install.yml: that play requires a
+# remote instance URL, which replaces socket-mode daemon.env, and its post_task
+# recursively chowns the state and config trees onto the daemon account. The
+# instance, Caddy, ProxySQL, and database subtrees cannot survive that chown,
+# and the unit would drop After=turbopanel-instance.service.
+- name: TurboPanel co-located daemon refresh
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: true
+
+  vars:
+    turbopanel_install_root: /opt/turbopanel
+    turbopanel_managed_install: true
+    turbopanel_vendor_dir: "{{ turbopanel_install_root }}/vendor"
+    turbopanel_orchestration_dir: "{{ turbopanel_install_root }}/share/orchestration"
+    turbopanel_config_dir: /etc/turbopanel
+    turbopanel_state_dir: /var/lib/turbopanel
+    turbopanel_daemon_state_dir: "{{ turbopanel_state_dir }}"
+    turbopanel_daemon_env_file: "{{ turbopanel_config_dir }}/daemon.env"
+    turbopanel_daemon_bin: "{{ turbopanel_install_root }}/bin/turbopaneld"
+    turbopanel_daemon_js: "{{ turbopanel_install_root }}/bin/turbopaneld.js"
+    turbopanel_daemon_workdir: "{{ turbopanel_install_root }}"
+    turbopanel_daemon_deno_bin: "{{ turbopanel_vendor_dir }}/deno/bin/deno"
+    turbopanel_daemon_exec_mode: native
+    turbopanel_service_name: turbopaneld
+    turbopanel_user: tp
+    turbopanel_group: tp
+    # Socket mode. A non-empty URL would make the daemon dial HTTPS instead of
+    # /run/turbopanel/instance.sock.
+    turbopanel_instance_url: ""
+    turbopanel_instance_ca: ""
+    turbopanel_tunnel_token: ""
+    turbopanel_after_instance_service: true
+    turbopanel_start: true
+
+  pre_tasks:
+    - name: Require the installed control-plane binary
+      ansible.builtin.stat:
+        path: "{{ turbopanel_install_root }}/bin/turbopanel"
+      register: _instance_binary
+
+    - name: Refuse a refresh when this host is not the control plane
+      ansible.builtin.assert:
+        that:
+          - _instance_binary.stat.exists
+        fail_msg: >-
+          Co-located daemon refresh requires {{ turbopanel_install_root }}/bin/turbopanel.
+          A remote node uses daemon-install.yml.
+
+    - name: Refuse a remote instance URL
+      ansible.builtin.assert:
+        that:
+          - turbopanel_instance_url | default('') | length == 0
+        fail_msg: >-
+          Co-located daemon refresh keeps socket mode and does not take
+          turbopanel_instance_url.
+
+    - name: Read the existing daemon environment
+      ansible.builtin.slurp:
+        src: "{{ turbopanel_daemon_env_file }}"
+      register: _daemon_env
+
+    - name: Refuse a daemon.env that already dials a remote control plane
+      ansible.builtin.assert:
+        that:
+          - "'TURBOPANEL_INSTANCE_URL=' not in (_daemon_env.content | b64decode)"
+        fail_msg: >-
+          daemon.env names TURBOPANEL_INSTANCE_URL. Co-located refresh will
+          not replace that remote dial.
+
+  roles:
+    - role: daemon-layout
+    - role: principal-access
+    - role: deno-runtime
+    - role: daemon-config
+    - role: daemon-launch
+
+  post_tasks:
+    - name: Keep the state directory shared with the instance
+      # daemon-layout and daemon-config pin this directory 0750. The instance
+      # still writes the co-located license here. Directory mode only — never
+      # recurse into postgres, caddy, or other state the instance owns.
+      ansible.builtin.file:
+        path: "{{ turbopanel_state_dir }}"
+        state: directory
+        owner: "{{ turbopanel_user }}"
+        group: "{{ turbopanel_group }}"
+        mode: "2770"

@@ -185,7 +185,18 @@
     group: "{{ turbopanel_group }}"
     mode: "0640"
   notify:
-    - Restart turbopanel caddy
+    - Reload turbopanel caddy
+
+- name: Install the control-plane updating page
+  when: turbopanel_dev_user | default('') | length == 0
+  ansible.builtin.template:
+    src: updating.html
+    dest: "{{ turbopanel_caddyfile | dirname }}/updating.html"
+    owner: root
+    group: "{{ turbopanel_group }}"
+    mode: "0640"
+  notify:
+    - Reload turbopanel caddy
 
 - name: Install Caddy systemd unit
   ansible.builtin.template:

@@ -28,6 +28,35 @@
   # lock. Ownership migration is handled by runtime-sockets — this is only a probe.
   failed_when: false
 
+- name: Ensure update-guard helper is executable
+  ansible.builtin.file:
+    path: "{{ turbopanel_update_guard_script }}"
+    owner: root
+    group: "{{ turbopanel_group }}"
+    mode: "0750"
+
+- name: Install update-guard outside the replaceable orchestration tree
+  ansible.builtin.copy:
+    src: "{{ turbopanel_update_guard_script }}"
+    dest: "{{ turbopanel_update_guard_bin }}"
+    owner: root
+    group: "{{ turbopanel_group }}"
+    mode: "0750"
+    remote_src: true
+
+- name: Install daemon update-guard systemd units
+  ansible.builtin.template:
+    src: "{{ item.src }}"
+    dest: "/etc/systemd/system/{{ item.dest }}"
+    owner: root
+    group: root
+    mode: "0640"
+  loop:
+    - { src: turbopaneld-update-guard.service.j2, dest: turbopaneld-update-guard.service }
+    - { src: turbopaneld-update-guard.timer.j2, dest: turbopaneld-update-guard.timer }
+  notify:
+    - Reload systemd
+
 - name: Install daemon systemd unit
   ansible.builtin.template:
     src: turbopaneld.service.j2

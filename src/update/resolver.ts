@@ -213,5 +213,6 @@ export async function resolveUpdate(
     jsFallbackArtifact: manifest.jsFallbackArtifact,
     orchestrationArtifact: manifest.orchestrationArtifact,
     downloadUrl: binaryArtifact.url,
+    manifestUrl,
   };
 }

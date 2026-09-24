@@ -15,6 +15,7 @@ import {
 } from "../host/os-release.ts";
 import { type HostTimeSync, readTimeSync } from "../host/time-sync.ts";
 import { logInfo, logWarn, sanitizeForLog } from "../util/logger.ts";
+import { DAEMON_WIRE_FEATURES } from "./version-wire.ts";
 import {
   collectServerIps,
   readDefaultRouteInterfaces,
@@ -343,6 +344,7 @@ export class IdlePresence {
         timeSync: presence.timeSync,
         ...(presence.docker ? { docker: presence.docker } : {}),
         ...(presence.runtimes ? { runtimes: presence.runtimes } : {}),
+        features: [...DAEMON_WIRE_FEATURES],
       }));
       this.#lastActivityAt = Date.now();
       this.#lastPresenceFrameAt = this.#lastActivityAt;

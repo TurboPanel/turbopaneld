@@ -18,8 +18,57 @@
       { "name": "at", "required": true, "type": "string" },
       { "name": "branch", "required": true, "type": "string" },
       { "name": "commit", "required": true, "type": "string" },
+      { "name": "features", "required": false, "type": "Array<string>" },
       { "name": "instanceVersion", "required": false, "type": "string" },
       { "name": "type", "required": true, "type": "'version'" }
+    ]
+  },
+  "DaemonUpdateMessage": {
+    "instance": "src/contracts/cell-protocol.ts",
+    "daemon": "src/contracts/cell-messages.ts",
+    "fields": [
+      { "name": "at", "required": true, "type": "string" },
+      { "name": "channel", "required": false, "type": "string" },
+      { "name": "id", "required": true, "type": "string" },
+      { "name": "manifestUrl", "required": false, "type": "string" },
+      { "name": "targetCommit", "required": false, "type": "string" },
+      { "name": "type", "required": true, "type": "'update'" },
+      { "name": "updateSha256", "required": false, "type": "string" },
+      { "name": "updateUrl", "required": false, "type": "string" },
+      { "name": "upgradeId", "required": false, "type": "string" }
+    ]
+  },
+  "InstanceUpdateMessage": {
+    "instance": "src/contracts/cell-protocol.ts",
+    "daemon": "src/contracts/cell-messages.ts",
+    "fields": [
+      { "name": "at", "required": true, "type": "string" },
+      { "name": "channel", "required": false, "type": "string" },
+      { "name": "id", "required": true, "type": "string" },
+      { "name": "manifestUrl", "required": false, "type": "string" },
+      { "name": "targetCommit", "required": false, "type": "string" },
+      { "name": "targetVersion", "required": false, "type": "string" },
+      { "name": "type", "required": true, "type": "'instance-update'" },
+      { "name": "uiManifestUrl", "required": false, "type": "string" },
+      { "name": "upgradeId", "required": false, "type": "string" }
+    ]
+  },
+  "UpdateProgressMessage": {
+    "instance": "src/contracts/cell-protocol.ts",
+    "daemon": "src/contracts/cell-messages.ts",
+    "fields": [
+      { "name": "at", "required": true, "type": "string" },
+      { "name": "detail", "required": false, "type": "string" },
+      { "name": "errorCode", "required": false, "type": "string" },
+      { "name": "id", "required": true, "type": "string" },
+      {
+        "name": "stage",
+        "required": true,
+        "type": "'done' | 'downloading' | 'failed' | 'installing' | 'preparing' | 'restarting' | 'rolled-back' | 'verifying'"
+      },
+      { "name": "type", "required": true, "type": "'update-progress'" },
+      { "name": "unit", "required": true, "type": "'daemon' | 'instance'" },
+      { "name": "upgradeId", "required": false, "type": "string" }
     ]
   },
   "InstanceAcmeWireSettings": {

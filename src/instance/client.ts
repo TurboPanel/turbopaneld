@@ -85,9 +85,19 @@ import {
 } from "../metrics/collector/sensors/overrides.ts";
 import type { DrivetempEnableResult } from "../contracts/commands-contracts.ts";
 import { resolveUpdateChannelConfig } from "../update/config.ts";
+import type { UpdateInfo } from "../update/types.ts";
+import {
+  InsecureOverlayBaseError,
+  MalformedManifestError,
+  ManifestSignatureError,
+  MissingChannelError,
+  UnsupportedSchemaVersionError,
+} from "../update/errors.ts";
 import { resolveUpdate } from "../update/resolver.ts";
 import {
+  assertUpdateDiskPreflight,
   buildRunReconcileArgs,
+  ControlPlaneUpdateFailedError,
   downloadRunScript,
   encodeLicenseArg,
   executeInstanceUpdateReconcile,
@@ -96,7 +106,20 @@ import {
   resolveAutomaticUpdateTrust,
   resolveRunScriptUrl,
   restartControlPlaneUnits,
+  UpdatePreflightError,
+  UpdateTrustRepairError,
 } from "./run-reconcile.ts";
+import {
+  clearActiveUpgradeContext,
+  readActiveUpgradeContext,
+  writeActiveUpgradeContext,
+} from "./update-active-context.ts";
+import {
+  handleSelfUpdateAttachOutcome,
+  readUpdateGuardArmed,
+  readUpdateRollback,
+} from "./update-guard.ts";
+import { UpdateProgressReporter } from "./update-progress-reporter.ts";
 import { resolvePinnedManifestUrl } from "../update/urls.ts";
 import { installOriginNeedsInsecureTls } from "./install-tls.ts";
 import { ManagedHaObserver } from "./ha-observe.ts";
@@ -106,7 +129,10 @@ import { DAEMON_VERSION } from "../version.ts";
 import { resolveDaemonCapabilities } from "./version-wire.ts";
 import { TopologyReporter } from "./topology-reporter.ts";
 import type { TopologySnapshot } from "../contracts/topology-types.ts";
-import type { DaemonMessage } from "../contracts/cell-messages.ts";
+import type {
+  DaemonMessage,
+  UpdateProgressStage,
+} from "../contracts/cell-messages.ts";
 
 /**
  * Secrets / transcript ports the command router needs. Structural twin of
@@ -376,6 +402,11 @@ export class InstanceClient {
   #parkedBackoffMs = PARKED_BACKOFF_MIN_MS;
   /** Latest control-plane semver from a REST header or the attach `version` frame. */
   #instanceVersion: string | undefined;
+  /**
+   * Features from the latest attach `version` frame. Empty when the frame
+   * omits `features` — default closed.
+   */
+  #peerFeatures: readonly string[] = [];
   /** Last unsupported version we already logged, so reconnects do not repeat it. */
   #loggedUnsupportedInstanceVersion: string | undefined;
   #licenseStamp: string | undefined;
@@ -403,6 +434,17 @@ export class InstanceClient {
   readonly #handleDrivetempEnable?: DrivetempEnableHandler;
   #updateInstallInProgress = false;
   #instanceUpdateInProgress = false;
+  #pendingInstanceUpdateResult: DaemonMessage | null = null;
+  readonly #updateProgress = new UpdateProgressReporter({
+    layout: (() => {
+      try {
+        return resolveLayout(Deno.env.toObject());
+      } catch {
+        return resolveLayout();
+      }
+    })(),
+  });
+  #updateProgressWs: WebSocket | undefined;
   /**
    * Identity directory captured at {@link start} so reconnects do not follow a
    * later `TURBOPANEL_DAEMON_STATE_DIR` change (parallel tests share process env).
@@ -447,13 +489,116 @@ export class InstanceClient {
     instanceVersion: string | null;
     instanceSupport: InstanceSupportStatus;
     minSupportedInstanceVersion: string;
+    peerFeatures: readonly string[];
   } {
     const support = resolveInstanceSupport(this.#instanceVersion);
     return {
       instanceVersion: support.version,
       instanceSupport: support.status,
       minSupportedInstanceVersion: MIN_SUPPORTED_INSTANCE_VERSION,
+      peerFeatures: this.#peerFeatures,
     };
+  }
+
+  /**
+   * True when the attached control plane advertised `feature`. Closed when
+   * the attach frame omitted `features`.
+   */
+  instanceSupports(feature: string): boolean {
+    return this.#peerFeatures.includes(feature);
+  }
+
+  async #wireUpdateProgress(
+    ws: WebSocket,
+    progressId: string,
+    options: { upgradeId?: string; targetCommit?: string } = {},
+  ): Promise<void> {
+    this.#updateProgressWs = ws;
+    this.#updateProgress.setContext({
+      progressId,
+      upgradeId: options.upgradeId,
+      canSend: () =>
+        this.instanceSupports("update-progress-v1") &&
+        ws.readyState === WebSocket.OPEN,
+      send: (message) => {
+        if (ws.readyState !== WebSocket.OPEN) return false;
+        ws.send(JSON.stringify(message));
+        return true;
+      },
+    });
+    await writeActiveUpgradeContext({
+      progressId,
+      upgradeId: options.upgradeId,
+      targetCommit: options.targetCommit,
+    });
+  }
+
+  #reportUpdateStage(
+    stage: UpdateProgressStage,
+    options: {
+      upgradeId?: string;
+      detail?: string;
+      errorCode?: string;
+      unit?: "daemon" | "instance";
+    } = {},
+  ): void {
+    const { unit, ...rest } = options;
+    this.#updateProgress.reportStage(unit ?? "daemon", stage, rest);
+  }
+
+  async #afterAttachVersion(ws: WebSocket): Promise<void> {
+    const pending = this.#pendingInstanceUpdateResult;
+    if (pending && ws.readyState === WebSocket.OPEN) {
+      this.#pendingInstanceUpdateResult = null;
+      ws.send(JSON.stringify({ ...pending, at: new Date().toISOString() }));
+    }
+    this.#updateProgressWs = ws;
+    this.#updateProgress.setContext({
+      canSend: () =>
+        this.instanceSupports("update-progress-v1") &&
+        ws.readyState === WebSocket.OPEN,
+      send: (message) => {
+        if (ws.readyState !== WebSocket.OPEN) return false;
+        ws.send(JSON.stringify(message));
+        return true;
+      },
+    });
+    await this.#updateProgress.flushOnAttach();
+    const armed = await readUpdateGuardArmed();
+    const rollback = await readUpdateRollback();
+    let active = await readActiveUpgradeContext();
+    if (active && !armed && !rollback && !this.#updateInstallInProgress) {
+      await clearActiveUpgradeContext();
+      active = null;
+    }
+    if (
+      active?.targetCommit &&
+      armed &&
+      active.targetCommit !== armed.targetCommit
+    ) {
+      await clearActiveUpgradeContext();
+      active = null;
+    }
+    if (active) {
+      this.#updateProgress.setContext({
+        progressId: active.progressId,
+        upgradeId: active.upgradeId,
+      });
+    }
+    const commit = clientTestHooks.getBuildInfo().commit;
+    await handleSelfUpdateAttachOutcome({
+      currentCommit: commit,
+      reportStage: (stage, detail) => {
+        this.#reportUpdateStage(stage, {
+          upgradeId: active?.upgradeId,
+          errorCode: detail?.errorCode,
+          detail: detail?.detail,
+        });
+        if (stage === "done" || stage === "rolled-back") {
+          void clearActiveUpgradeContext();
+        }
+      },
+    });
   }
 
   /** Re-read the platform CA bundle (mtime+size cached) unless tests pinned a client. */
@@ -520,6 +665,19 @@ export class InstanceClient {
 
   #noteInstanceVersionHeader(response: Response): void {
     this.#noteInstanceVersion(response.headers.get(INSTANCE_VERSION_HEADER));
+  }
+
+  /** Attach-frame advertisement. A missing or non-array field is closed. */
+  #notePeerFeatures(features: unknown): void {
+    if (!Array.isArray(features)) {
+      this.#peerFeatures = [];
+      return;
+    }
+    const accepted: string[] = [];
+    for (const entry of features) {
+      if (typeof entry === "string") accepted.push(entry);
+    }
+    this.#peerFeatures = accepted;
   }
 
   #apiClientVersionHook(): {
@@ -1199,6 +1357,7 @@ export class InstanceClient {
         logDebug("instance", "websocket closed before registration");
       }
       if (this.#ws === ws) this.#ws = undefined;
+      this.#peerFeatures = [];
       this.#idlePresence?.detach();
       this.#haObserver?.detach();
       this.#acmeObserver?.detach();
@@ -1396,6 +1555,8 @@ export class InstanceClient {
         // the last observation so a downgrade or pre-field control plane
         // resolves to unknown.
         this.#noteInstanceVersion(message.instanceVersion);
+        this.#notePeerFeatures(message.features);
+        void this.#afterAttachVersion(ws);
         break;
       case "echo":
         this.#echoMessage(message, ws);
@@ -1476,6 +1637,16 @@ export class InstanceClient {
         this.#runSocketHandler(
           "instance-update",
           this.#applyInstanceUpdate(message, ws),
+        );
+        break;
+      case "update-progress":
+        break;
+      default:
+        logWarn(
+          "instance",
+          `ignored unknown websocket message type ${
+            String((message as { type?: unknown }).type)
+          }`,
         );
         break;
     }
@@ -1707,9 +1878,16 @@ export class InstanceClient {
 
   async #reconcileToLatestUpdate(
     config: ReturnType<typeof resolveUpdateChannelConfig>,
+    options: {
+      verified: UpdateInfo;
+      manifestUrl?: string;
+      upgradeId?: string;
+    },
   ): Promise<boolean> {
-    const updateInfo = await clientTestHooks.resolveUpdate(config);
-    if (clientTestHooks.getBuildInfo().commit === updateInfo.commit) {
+    const env = Deno.env.toObject();
+    const updateInfo = options.verified;
+    const currentCommit = clientTestHooks.getBuildInfo().commit;
+    if (currentCommit === updateInfo.commit) {
       logInfo(
         "update",
         "already on current commit",
@@ -1725,7 +1903,6 @@ export class InstanceClient {
       );
     }
 
-    const env = Deno.env.toObject();
     const instanceUrl = env.TURBOPANEL_INSTANCE_URL?.trim();
     const instanceCaPath = resolveInstanceCaPath(env);
     const uploadedTrustPath = resolveInstanceUploadedTrustPath(env);
@@ -1773,12 +1950,47 @@ export class InstanceClient {
         insecureTls: false,
         caPath: scriptCaPath,
       });
+    const hostPin = resolvePinnedManifestUrl(env, "daemon");
+    const manifestForReconcile = hostPin
+      ? undefined
+      : updateInfo.manifestUrl?.trim() || options.manifestUrl?.trim();
+    this.#reportUpdateStage("preparing", { upgradeId: options.upgradeId });
     await clientTestHooks.executeRunReconcile({
       script,
       args: reconcileArgs,
       channel: config.channel,
+      manifestUrl: manifestForReconcile,
+      onStage: (stage) => {
+        this.#reportUpdateStage(stage, { upgradeId: options.upgradeId });
+      },
     });
     return true;
+  }
+
+  #classifyUpdateFailure(err: unknown): { error: string; errorCode?: string } {
+    if (err instanceof UpdatePreflightError) {
+      return { error: err.message, errorCode: err.code };
+    }
+    if (err instanceof UpdateTrustRepairError) {
+      return {
+        error: `preflight_trust: ${err.message}`,
+        errorCode: "preflight_trust",
+      };
+    }
+    const message = err instanceof Error ? err.message : String(err);
+    if (
+      err instanceof MalformedManifestError ||
+      err instanceof MissingChannelError ||
+      err instanceof ManifestSignatureError ||
+      err instanceof UnsupportedSchemaVersionError ||
+      err instanceof InsecureOverlayBaseError
+    ) {
+      return {
+        error: `preflight_manifest: ${message}`,
+        errorCode: "preflight_manifest",
+      };
+    }
+    return { error: message };
   }
 
   #sendUpdateResult(
@@ -1786,6 +1998,7 @@ export class InstanceClient {
     id: string,
     ok: boolean,
     error?: string,
+    extra: { errorCode?: string; upgradeId?: string } = {},
   ): void {
     const result: DaemonMessage = {
       type: "update-result",
@@ -1793,8 +2006,38 @@ export class InstanceClient {
       ok,
       error,
       at: new Date().toISOString(),
+      ...(extra.errorCode ? { errorCode: extra.errorCode } : {}),
+      ...(extra.upgradeId ? { upgradeId: extra.upgradeId } : {}),
     };
     if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(result));
+  }
+
+  #sendRejectedInProgressUpdate(
+    ws: WebSocket,
+    message: Extract<DaemonMessage, { type: "update" }>,
+  ): void {
+    const upgradeId = message.upgradeId?.trim() || undefined;
+    const error = "preflight_in_progress: update already in progress";
+    if (
+      this.instanceSupports("update-progress-v1") &&
+      ws.readyState === WebSocket.OPEN
+    ) {
+      const progress: DaemonMessage = {
+        type: "update-progress",
+        id: message.id,
+        unit: "daemon",
+        stage: "failed",
+        at: new Date().toISOString(),
+        errorCode: "preflight_in_progress",
+        detail: "update already in progress",
+        ...(upgradeId ? { upgradeId } : {}),
+      };
+      ws.send(JSON.stringify(progress));
+    }
+    this.#sendUpdateResult(ws, message.id, false, error, {
+      errorCode: "preflight_in_progress",
+      upgradeId,
+    });
   }
 
   async #applyUpdate(
@@ -1804,44 +2047,102 @@ export class InstanceClient {
     // Long-running reconcile + restart runs here; the instance queues the request
     // and returns immediately — this path is decoupled from that HTTP lifecycle.
     if (this.#updateInstallInProgress) {
-      this.#sendUpdateResult(
-        ws,
-        message.id,
-        false,
-        "update already in progress",
-      );
+      this.#sendRejectedInProgressUpdate(ws, message);
       return;
     }
 
     this.#updateInstallInProgress = true;
+    const upgradeId = message.upgradeId?.trim() || undefined;
+    const targetCommit = message.targetCommit?.trim() || undefined;
+    await this.#wireUpdateProgress(ws, message.id, { upgradeId, targetCommit });
     let ok = false;
     let shouldRestart = false;
     let error: string | undefined;
+    let errorCode: string | undefined;
     try {
+      await clientTestHooks.assertUpdateDiskPreflight();
+
       const config = this.#resolveUpdateConfigForMessage(message);
-      shouldRestart = await this.#reconcileToLatestUpdate(config);
+      const env = Deno.env.toObject();
+      const messageManifest = resolvePinnedManifestUrl(env, "daemon")
+        ? undefined
+        : message.manifestUrl?.trim() || undefined;
+      const resolveEnv = messageManifest
+        ? { ...env, TURBOPANEL_MANIFEST_URL: messageManifest }
+        : env;
+
+      const verified = await clientTestHooks.resolveUpdate(config, resolveEnv);
+      if (targetCommit && verified.commit !== targetCommit) {
+        throw new UpdatePreflightError(
+          "preflight_manifest",
+          `signed manifest commit ${verified.commit} does not match targetCommit ${targetCommit}`,
+        );
+      }
+      await this.#wireUpdateProgress(ws, message.id, {
+        upgradeId,
+        targetCommit: verified.commit,
+      });
+
+      const runScriptUrl = resolveRunScriptUrl(this.#config, {
+        dlBase: env.TURBOPANEL_DL_BASE?.trim(),
+      });
+      const instanceCaPath = resolveInstanceCaPath(env);
+      const uploadedTrustPath = resolveInstanceUploadedTrustPath(env);
+      resolveAutomaticUpdateTrust({
+        runScriptUrl,
+        instanceCaPath,
+        uploadedTrustPath,
+        originNeedsInsecureTls: installOriginNeedsInsecureTls,
+      });
+
+      shouldRestart = await this.#reconcileToLatestUpdate(config, {
+        verified,
+        manifestUrl: messageManifest,
+        upgradeId,
+      });
       ok = true;
     } catch (err) {
-      error = err instanceof Error ? err.message : String(err);
+      const classified = this.#classifyUpdateFailure(err);
+      error = classified.error;
+      errorCode = classified.errorCode;
+      this.#reportUpdateStage("failed", {
+        upgradeId,
+        errorCode: classified.errorCode,
+        detail: error,
+      });
       logError("update", "failed:", sanitizeForLog(error));
     }
 
-    this.#sendUpdateResult(ws, message.id, ok, error);
-
-    // Restart only after acking success and a short handoff delay, so the
-    // instance can persist update-result before this process is replaced.
     if (ok && shouldRestart) {
+      this.#reportUpdateStage("restarting", { upgradeId });
+      await this.#updateProgress.flush();
       await new Promise((resolve) =>
         setTimeout(resolve, clientTestHooks.updateResultHandoffDelayMs)
       );
       const restarted = await clientTestHooks.restartDaemonService();
       if (!restarted) {
+        ok = false;
+        error = "daemon restart failed after reconcile";
+        errorCode = "restart_failed";
+        this.#reportUpdateStage("failed", {
+          upgradeId,
+          errorCode,
+          detail: error,
+        });
         logWarn(
           "update",
           "reconcile succeeded but systemd restart failed; daemon may still be on old code",
         );
       }
+    } else if (ok && !shouldRestart) {
+      this.#reportUpdateStage("done", { upgradeId });
     }
+
+    await this.#updateProgress.flush();
+    if (!ok || !shouldRestart) {
+      await clearActiveUpgradeContext();
+    }
+    this.#sendUpdateResult(ws, message.id, ok, error, { errorCode, upgradeId });
 
     this.#updateInstallInProgress = false;
   }
@@ -1851,6 +2152,7 @@ export class InstanceClient {
     id: string,
     ok: boolean,
     error?: string,
+    extra: { errorCode?: string; upgradeId?: string } = {},
   ): void {
     const result: DaemonMessage = {
       type: "instance-update-result",
@@ -1858,8 +2160,13 @@ export class InstanceClient {
       ok,
       error,
       at: new Date().toISOString(),
+      ...(extra.errorCode ? { errorCode: extra.errorCode } : {}),
     };
-    if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(result));
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(result));
+      return;
+    }
+    this.#pendingInstanceUpdateResult = result;
   }
 
   async #applyInstanceUpdate(
@@ -1867,18 +2174,36 @@ export class InstanceClient {
     ws: WebSocket,
   ): Promise<void> {
     if (this.#instanceUpdateInProgress) {
-      this.#sendInstanceUpdateResult(
-        ws,
-        message.id,
-        false,
-        "control-plane update already in progress",
-      );
+      const upgradeId = message.upgradeId?.trim() || undefined;
+      const error =
+        "preflight_in_progress: control-plane update already in progress";
+      if (
+        this.instanceSupports("update-progress-v1") &&
+        ws.readyState === WebSocket.OPEN
+      ) {
+        const progress: DaemonMessage = {
+          type: "update-progress",
+          id: message.id,
+          unit: "instance",
+          stage: "failed",
+          at: new Date().toISOString(),
+          errorCode: "preflight_in_progress",
+          detail: "control-plane update already in progress",
+          ...(upgradeId ? { upgradeId } : {}),
+        };
+        ws.send(JSON.stringify(progress));
+      }
+      this.#sendInstanceUpdateResult(ws, message.id, false, error, {
+        errorCode: "preflight_in_progress",
+      });
       return;
     }
 
     this.#instanceUpdateInProgress = true;
+    const upgradeId = message.upgradeId?.trim() || undefined;
     let ok = false;
     let error: string | undefined;
+    let errorCode: string | undefined;
     try {
       const env = Deno.env.toObject();
       const channel = message.channel?.trim() ||
@@ -1892,6 +2217,10 @@ export class InstanceClient {
       const uiPin = resolvePinnedManifestUrl(env, "ui") ||
         message.uiManifestUrl?.trim() ||
         undefined;
+      await this.#wireUpdateProgress(ws, message.id, {
+        upgradeId,
+        targetCommit: message.targetCommit?.trim() || undefined,
+      });
       await clientTestHooks.executeInstanceUpdateReconcile({
         channel,
         ...(instancePin ? { manifestUrl: instancePin } : {}),
@@ -1899,31 +2228,61 @@ export class InstanceClient {
         ...(message.targetVersion
           ? { targetVersion: message.targetVersion }
           : {}),
+        ...(message.targetCommit ? { targetCommit: message.targetCommit } : {}),
+        ...(upgradeId ? { upgradeId } : {}),
+        onStage: (stage) => {
+          this.#reportUpdateStage(stage, { unit: "instance", upgradeId });
+        },
       });
       ok = true;
     } catch (err) {
-      error = err instanceof Error ? err.message : String(err);
+      const classified = this.#classifyControlPlaneUpdateFailure(err);
+      error = classified.error;
+      errorCode = classified.errorCode;
+      const stage = err instanceof ControlPlaneUpdateFailedError
+        ? err.stage
+        : "failed";
+      this.#reportUpdateStage(stage, {
+        unit: "instance",
+        upgradeId,
+        errorCode,
+        detail: error,
+      });
       logError("update", "control-plane update failed:", sanitizeForLog(error));
     }
 
-    this.#sendInstanceUpdateResult(ws, message.id, ok, error);
-
-    // Ack before restarting the control plane this socket is attached to.
-    // The daemon process stays up.
-    if (ok) {
-      await new Promise((resolve) =>
-        setTimeout(resolve, clientTestHooks.updateResultHandoffDelayMs)
-      );
-      const restarted = await clientTestHooks.restartControlPlaneUnits();
-      if (!restarted) {
-        logWarn(
-          "update",
-          "control-plane reconcile succeeded but systemd restart of the instance and Caddy failed; the new binary may not be live",
-        );
-      }
-    }
-
+    await this.#updateProgress.flush();
+    this.#sendInstanceUpdateResult(ws, message.id, ok, error, {
+      errorCode,
+      upgradeId,
+    });
     this.#instanceUpdateInProgress = false;
+  }
+
+  #classifyControlPlaneUpdateFailure(
+    err: unknown,
+  ): { error: string; errorCode?: string } {
+    if (err instanceof ControlPlaneUpdateFailedError) {
+      return { error: err.message, errorCode: err.code };
+    }
+    if (err instanceof UpdatePreflightError) {
+      return { error: err.message, errorCode: err.code };
+    }
+    if (
+      err instanceof MalformedManifestError ||
+      err instanceof MissingChannelError ||
+      err instanceof ManifestSignatureError ||
+      err instanceof UnsupportedSchemaVersionError ||
+      err instanceof InsecureOverlayBaseError
+    ) {
+      const message = err.message;
+      return {
+        error: `preflight_manifest: ${message}`,
+        errorCode: "preflight_manifest",
+      };
+    }
+    const message = err instanceof Error ? err.message : String(err);
+    return { error: message };
   }
 
   #collectAddresses(
@@ -2524,6 +2883,7 @@ type ClientTestHooks = {
   getBuildInfo: typeof getBuildInfo;
   downloadRunScript: typeof downloadRunScript;
   executeRunReconcile: typeof executeRunReconcile;
+  assertUpdateDiskPreflight: typeof assertUpdateDiskPreflight;
   executeInstanceUpdateReconcile: typeof executeInstanceUpdateReconcile;
   restartControlPlaneUnits: typeof restartControlPlaneUnits;
   collectServerIps: typeof collectServerIps;
@@ -2546,6 +2906,7 @@ let clientTestHooks: ClientTestHooks = {
   getBuildInfo,
   downloadRunScript,
   executeRunReconcile,
+  assertUpdateDiskPreflight,
   executeInstanceUpdateReconcile,
   restartControlPlaneUnits,
   collectServerIps,

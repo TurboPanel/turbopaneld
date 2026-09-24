@@ -44,6 +44,22 @@ const LAYOUT_TASKS = "roles/daemon-layout/tasks/main.yml";
 const SUDOERS_TEMPLATE = "roles/turbopanel-user/templates/sudoers.j2";
 const DAEMON_INSTALL = "playbooks/daemon-install.yml";
 
+test("tp-update-guard is not granted via sudoers (root systemd only)", async () => {
+  const template = await Deno.readTextFile(join(orch, SUDOERS_TEMPLATE));
+  assertStringIncludes(
+    template,
+    "tp-update-guard runs only as root via systemd",
+  );
+  assertEquals(template.includes("tp-update-guard"), true);
+  for (const line of template.split("\n")) {
+    if (line.includes("tp-update-guard") && line.includes("Cmnd_Alias")) {
+      throw new TypeError(
+        `tp-update-guard must not appear in a Cmnd_Alias: ${line}`,
+      );
+    }
+  }
+});
+
 test("production sudoers never grants NOPASSWD:ALL as root", async () => {
   const template = await Deno.readTextFile(join(orch, SUDOERS_TEMPLATE));
   for (const line of template.split("\n")) {

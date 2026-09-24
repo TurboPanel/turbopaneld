@@ -875,10 +875,24 @@ test(
       );
     }
     assertEquals(
-      caddyfile.lastIndexOf("path /webhook/*") <
+      caddyfile.indexOf("@webhook path /webhook/*") <
         caddyfile.lastIndexOf("try_files {path} /index.html"),
       true,
-      "the SPA catch-all is the last handle",
+      "the route-level webhook matcher stays ahead of the SPA catch-all",
+    );
+    assertEquals(
+      caddyfile.lastIndexOf("try_files {path} /index.html") <
+        caddyfile.indexOf("handle_errors"),
+      true,
+      "handle_errors follows the site routes",
+    );
+    assertEquals(caddyfile.includes("handle_errors"), true);
+    assertEquals(caddyfile.includes("updating.html"), true);
+    assertEquals(caddyfile.includes("control_plane_updating"), true);
+    assertEquals(caddyfile.includes('Retry-After "5"'), true);
+    assertEquals(
+      tasks.includes("Install the control-plane updating page"),
+      true,
     );
     assertMatch(
       caddyfile,

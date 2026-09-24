@@ -31,6 +31,8 @@
 # installer run. Never enrol this host with the remote-node path instead:
 # daemon-install.yml's post_task re-chowns the whole state tree to the daemon
 # account, which the instance, Caddy and ProxySQL subtrees here cannot survive.
+# A later daemon-only package refresh uses daemon-colocated-refresh.yml, which
+# keeps socket mode, this ordering, and that ownership.
 - name: TurboPanel self-hosted instance install
   hosts: localhost
   connection: local

@@ -1001,6 +1001,11 @@ async function checkExpandOnly(tp: string, td: string): Promise<void> {
     extractObjectLiteral(daemonWire, "INSTANCE_FEATURE_MIN_VERSIONS"),
     "INSTANCE_FEATURE_MIN_VERSIONS drifted",
   );
+  requireJoinedEqual(
+    extractArrayConst(instanceWire, "DAEMON_WIRE_FEATURES"),
+    extractArrayConst(daemonWire, "DAEMON_WIRE_FEATURES"),
+    "DAEMON_WIRE_FEATURES drifted",
+  );
 }
 
 async function runContractDriftCheck(): Promise<void> {

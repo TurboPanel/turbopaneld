@@ -634,6 +634,7 @@ tp_install_verified_binary_and_orchestration() {
   _orchestration_archive="$(mktemp)"
   _staging="$(mktemp -d)"
 
+  tp_emit_update_stage downloading
   if ! tp_download_verified_artifact "$_binary_artifact_url" "$_binary_artifact_sha256" "$_binary_archive"; then
     return 1
   fi
@@ -665,6 +666,7 @@ tp_install_verified_binary_and_orchestration() {
   # manifest (--manifest-url, or TURBOPANEL_MANIFEST_URL in daemon.env); the
   # .prev copies are the offline emergency — swap them back by hand when the
   # rail itself is unreachable.
+  tp_emit_update_stage installing
   if [ -f "$_home/bin/$_binary_name" ]; then
     rm -f "$_home/bin/$_binary_name.prev"
     mv "$_home/bin/$_binary_name" "$_home/bin/$_binary_name.prev"
@@ -709,6 +711,10 @@ tp_install_verified_js_fallback() {
   fi
 
   mkdir -p "$_home/bin"
+  if [ -f "$_home/bin/$_js_name" ]; then
+    rm -f "$_home/bin/$_js_name.prev"
+    mv "$_home/bin/$_js_name" "$_home/bin/$_js_name.prev"
+  fi
   install -m 0644 "$_staging/$_home/bin/$_js_name" "$_home/bin/$_js_name"
   trap - EXIT INT HUP TERM
   _cleanup
@@ -782,6 +788,80 @@ tp_print_error() {
 }
 
 DAEMON_SERVICE_NAME="turbopaneld.service"
+UPDATE_GUARD_TIMER="turbopaneld-update-guard.timer"
+PROGRESS_MARKERS=false
+
+tp_emit_update_stage() {
+  [ "$PROGRESS_MARKERS" = true ] || return 0
+  printf '%s%s\n' "::turbopanel-stage::" "$1"
+}
+
+# Documented `turbopaneld --version` line:
+#   turbopaneld v<semver> <commit> (<channel>, <buildId>, <builtAt>)
+tp_parse_daemon_commit_from_version() {
+  printf '%s' "$1" | sed -n 's/^turbopaneld v[^[:space:]]\{1,\}[[:space:]]\{1,\}\([^[:space:]]\{1,\}\).*/\1/p' | head -1
+}
+
+tp_daemon_file_group() {
+  if [ -n "${TURBOPANEL_DAEMON_GROUP:-}" ]; then
+    printf '%s' "$TURBOPANEL_DAEMON_GROUP"
+    return 0
+  fi
+  _g="$(stat -c '%G' "$RUN_DIR" 2>/dev/null || true)"
+  if [ -n "$_g" ]; then
+    printf '%s' "$_g"
+    return 0
+  fi
+  printf '%s' "tp"
+}
+
+# Root-owned, daemon-group readable (production: root:tp 0640).
+tp_install_daemon_readable_file() {
+  _path="$1"
+  chmod 0640 "$_path" || return 1
+  _g="$(tp_daemon_file_group)"
+  if ! chown "root:${_g}" "$_path" 2>/dev/null; then
+    chgrp "$_g" "$_path" 2>/dev/null || true
+  fi
+}
+
+tp_arm_update_guard() {
+  [ "$INSTANCE_INSTALL" = true ] && return 0
+  [ -n "${_manifest_commit:-}" ] || return 0
+  _native_prev="$(tp_daemon_binary_path).prev"
+  _js_prev="$(tp_daemon_js_fallback_path).prev"
+  if [ ! -f "$_native_prev" ] && [ ! -f "$_js_prev" ]; then
+    return 0
+  fi
+  _guard_path="${RUN_DIR}/update-guard.json"
+  _deadline=""
+  if _deadline="$(date -u -d '+10 minutes' '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null)"; then
+    :
+  else
+    _deadline="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  fi
+  _armed_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  _previous_commit=""
+  if [ -x "$_native_prev" ]; then
+    _previous_commit="$(tp_parse_daemon_commit_from_version "$("$_native_prev" --version 2>/dev/null || true)")"
+  fi
+  if [ -z "$_previous_commit" ] && [ -x "$_js_prev" ]; then
+    _previous_commit="$(tp_parse_daemon_commit_from_version "$("$_js_prev" --version 2>/dev/null || true)")"
+  fi
+  mkdir -p "$RUN_DIR"
+  printf '{"targetCommit":"%s","deadlineAt":"%s","armedAt":"%s","previousCommit":"%s"}\n' \
+    "$_manifest_commit" "$_deadline" "$_armed_at" "$_previous_commit" > "$_guard_path"
+  if ! tp_install_daemon_readable_file "$_guard_path"; then
+    tp_print_error "Failed to write update guard $_guard_path"
+    return 1
+  fi
+  if command -v systemctl >/dev/null 2>&1; then
+    if ! systemctl start "$UPDATE_GUARD_TIMER"; then
+      tp_print_error "Failed to start $UPDATE_GUARD_TIMER"
+      return 1
+    fi
+  fi
+}
 
 # Stop the running daemon before replacing release binaries on manual reconcile.
 # Skipped for --no-start (in-process UI update): that path must not stop the
@@ -809,6 +889,10 @@ tp_stop_running_daemon_for_release_swap() {
 
 tp_start_or_restart_daemon() {
   if [ "$NO_START" = true ]; then
+    tp_emit_update_stage restarting
+    if ! tp_arm_update_guard; then
+      return 1
+    fi
     return 0
   fi
   if ! command -v systemctl >/dev/null 2>&1; then
@@ -816,6 +900,10 @@ tp_start_or_restart_daemon() {
   fi
   if ! systemctl cat "$DAEMON_SERVICE_NAME" >/dev/null 2>&1; then
     return 0
+  fi
+  tp_emit_update_stage restarting
+  if ! tp_arm_update_guard; then
+    return 1
   fi
   tp_print_step "▸" "Starting $DAEMON_SERVICE_NAME…"
   if ! systemctl enable --now "$DAEMON_SERVICE_NAME"; then
@@ -986,6 +1074,52 @@ tp_builtin_channel_manifest_url() {
   esac
 }
 
+# One published build, beside tp_builtin_channel_manifest_url.
+# canary: releases/download/canary/manifest-<version>.json (gh-canary.yml).
+# rc/release: releases/download/v<version>/manifest.json (gh-release.yml).
+# trunk and edge have no pin. Mirrors src/update/urls.ts pinnedChannelManifestUrl.
+tp_pinned_version_ok() {
+  case "$1" in
+    ""|*[!0-9A-Za-z._+-]*) return 1 ;;
+    [0-9]*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+tp_pinned_channel_manifest_url() {
+  _kind="${1:-daemon}"
+  _channel="$2"
+  _version="$3"
+  tp_pinned_version_ok "$_version" || return 1
+  case "$_kind" in
+    daemon) _repo="turbopaneld" ;;
+    instance) _repo="turbopanel" ;;
+    ui) _repo="ui" ;;
+    *) return 1 ;;
+  esac
+  case "$_channel" in
+    canary)
+      printf '%s' "https://github.com/TurboPanel/${_repo}/releases/download/canary/manifest-${_version}.json"
+      ;;
+    rc|release)
+      printf '%s' "https://github.com/TurboPanel/${_repo}/releases/download/v${_version}/manifest.json"
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+# https pins, including the versioned shapes tp_pinned_channel_manifest_url
+# builds. The pinned globs are named so a later tightening of this check
+# still accepts them. Unversioned rail URLs stay on the https arm.
+tp_manifest_url_accepted() {
+  case "$1" in
+    https://github.com/TurboPanel/*/releases/download/canary/manifest-*.json) return 0 ;;
+    https://github.com/TurboPanel/*/releases/download/v*/manifest.json) return 0 ;;
+    https://*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # The same rail addressed by repository name (turbopaneld, turbopanel, ui).
 # Instance and UI publish only through GitHub Releases: canary, rc, release.
 # There is no CDN drop for them, so trunk has no location and an --instance
@@ -1121,9 +1255,77 @@ tp_download_repo_artifact() {
   tp_download_verified_artifact "$_url" "$_sha" "$_dest"
 }
 
+# Keep one previous generation of the instance binary, libduckdb, and the UI
+# tree. Directories are renamed, not copied. A later failure calls
+# tp_restore_instance_prev so a half-unpacked update does not stay live.
+tp_drop_prev() {
+  if [ -e "$1" ] || [ -L "$1" ]; then
+    rm -rf "$1"
+  fi
+}
+
+tp_retain_instance_prev() {
+  _bin="$INSTALL_ROOT/bin/turbopanel"
+  _lib="$INSTALL_ROOT/lib/libduckdb.so"
+  _ui="$INSTALL_ROOT/share/ui"
+  tp_drop_prev "${_bin}.prev"
+  tp_drop_prev "${_lib}.prev"
+  tp_drop_prev "${_ui}.prev"
+  if [ -e "$_bin" ]; then
+    mv "$_bin" "${_bin}.prev"
+  fi
+  if [ -e "$_lib" ]; then
+    mv "$_lib" "${_lib}.prev"
+  fi
+  if [ -d "$_ui" ]; then
+    mv "$_ui" "${_ui}.prev"
+  fi
+}
+
+tp_restore_instance_prev() {
+  _bin="$INSTALL_ROOT/bin/turbopanel"
+  _lib="$INSTALL_ROOT/lib/libduckdb.so"
+  _ui="$INSTALL_ROOT/share/ui"
+  if [ -e "${_bin}.prev" ]; then
+    rm -f "$_bin"
+    mv "${_bin}.prev" "$_bin"
+  fi
+  if [ -e "${_lib}.prev" ]; then
+    rm -f "$_lib"
+    mv "${_lib}.prev" "$_lib"
+  fi
+  if [ -d "${_ui}.prev" ]; then
+    rm -rf "$_ui"
+    mv "${_ui}.prev" "$_ui"
+  fi
+  rm -rf "${_ui}.new"
+}
+
+# Written when an update starts moving the live instance and UI aside.
+# Cleared only after the new tree is verified, or after .prev is restored.
+# A crash in between leaves the marker so the daemon rolls the backup back.
+tp_instance_swap_marker() {
+  printf '%s/instance-swap.json' "${TURBOPANEL_STATE_DIR:-/var/lib/turbopanel}"
+}
+
+tp_mark_instance_swap() {
+  _marker="$(tp_instance_swap_marker)"
+  mkdir -p "$(dirname "$_marker")"
+  printf '%s\n' '{"swapped":true}' > "$_marker"
+}
+
+tp_clear_instance_swap_marker() {
+  rm -f "$(tp_instance_swap_marker)"
+}
+
 tp_run_instance_install() {
   _ui_dir="$INSTALL_ROOT/share/ui"
   _work="$(mktemp -d)"
+  _skip_daemon="${SKIP_DAEMON_PACKAGE:-false}"
+
+  if [ "$_skip_daemon" = true ]; then
+    tp_emit_update_stage downloading
+  fi
 
   tp_print_step "▸" "Fetching instance release manifest (TurboPanel/turbopanel, channel ${TURBOPANEL_UPDATE_CHANNEL:-release})…"
   tp_fetch_repo_manifest turbopanel || { rm -rf "$_work"; return 1; }
@@ -1151,19 +1353,50 @@ tp_run_instance_install() {
   mkdir -p "$INSTALL_ROOT/bin" "$INSTALL_ROOT/lib"
   # Drop retired names from older packages so upgrades do not leave stale
   # binaries beside the renamed instance binary.
-  rm -f "$INSTALL_ROOT/bin/turbopanel" "$INSTALL_ROOT/bin/turbopanel-instance" \
-    "$INSTALL_ROOT/bin/turbopanel-mailer" "$INSTALL_ROOT/lib/libduckdb.so"
+  rm -f "$INSTALL_ROOT/bin/turbopanel-instance" "$INSTALL_ROOT/bin/turbopanel-mailer"
+  if [ "$_skip_daemon" = true ]; then
+    tp_emit_update_stage installing
+    tp_mark_instance_swap
+    tp_retain_instance_prev
+  else
+    rm -f "$INSTALL_ROOT/bin/turbopanel" "$INSTALL_ROOT/lib/libduckdb.so"
+  fi
   # --no-overwrite-dir: the archive carries bin/ and lib/ directory entries;
   # never let them re-own or re-mode the shared install dirs (root:tp 0750).
-  zstd -d -q -c "$_work/instance.tar.zst" | tar -x --no-same-owner --no-overwrite-dir -C "$INSTALL_ROOT"
+  if ! zstd -d -q -c "$_work/instance.tar.zst" | tar -x --no-same-owner --no-overwrite-dir -C "$INSTALL_ROOT"; then
+    if [ "$_skip_daemon" = true ]; then
+      tp_restore_instance_prev
+      tp_clear_instance_swap_marker
+    fi
+    rm -rf "$_work"
+    return 1
+  fi
   # Earlier packages unpacked into lib/instance/ (a nested bin/lib/share tree)
   # and the install copied libduckdb.so into vendor/duckdb/; a package built
   # before the flat layout also carries share/caddy/, which is now rendered
   # by instance-launch instead. All three are package content, never state.
   rm -rf "$INSTALL_ROOT/lib/instance" "$INSTALL_ROOT/vendor/duckdb" "$INSTALL_ROOT/share/caddy"
-  rm -rf "$_ui_dir"
-  mkdir -p "$_ui_dir"
-  tar -xzf "$_work/ui.tar.gz" -C "$_ui_dir"
+  if [ "$_skip_daemon" = true ]; then
+    rm -rf "$_ui_dir.new"
+    mkdir -p "$_ui_dir.new"
+    if ! tar -xzf "$_work/ui.tar.gz" -C "$_ui_dir.new"; then
+      tp_restore_instance_prev
+      tp_clear_instance_swap_marker
+      rm -rf "$_work"
+      return 1
+    fi
+    rm -rf "$_ui_dir"
+    if ! mv "$_ui_dir.new" "$_ui_dir"; then
+      tp_restore_instance_prev
+      tp_clear_instance_swap_marker
+      rm -rf "$_work"
+      return 1
+    fi
+  else
+    rm -rf "$_ui_dir"
+    mkdir -p "$_ui_dir"
+    tar -xzf "$_work/ui.tar.gz" -C "$_ui_dir"
+  fi
   rm -rf "$_work"
   for _required in \
     "$INSTALL_ROOT/bin/turbopanel" \
@@ -1171,12 +1404,32 @@ tp_run_instance_install() {
     "$_ui_dir/index.html"; do
     if [ ! -e "$_required" ]; then
       tp_print_error "Instance package missing $_required"
+      if [ "$_skip_daemon" = true ]; then
+        tp_restore_instance_prev
+        tp_clear_instance_swap_marker
+      fi
       return 1
     fi
   done
-  chmod 0755 "$INSTALL_ROOT/bin/turbopanel"
-  chmod 0644 "$INSTALL_ROOT/lib/libduckdb.so"
+  if [ "$_skip_daemon" = true ]; then
+    if ! chmod 0755 "$INSTALL_ROOT/bin/turbopanel" || ! chmod 0644 "$INSTALL_ROOT/lib/libduckdb.so"; then
+      tp_restore_instance_prev
+      tp_clear_instance_swap_marker
+      return 1
+    fi
+  else
+    chmod 0755 "$INSTALL_ROOT/bin/turbopanel"
+    chmod 0644 "$INSTALL_ROOT/lib/libduckdb.so"
+  fi
   tp_print_ok "Packages unpacked (instance v${_instance_version:-?}, UI v${_ui_version:-?})"
+
+  # Update path: the caller restarts the units. Do not re-run the full
+  # instance-install play, and do not replace the co-located daemon package.
+  if [ "$_skip_daemon" = true ]; then
+    tp_clear_instance_swap_marker
+    tp_emit_update_stage restarting
+    return 0
+  fi
 
   _vars="$(mktemp)"
   {
@@ -1210,6 +1463,88 @@ tp_run_instance_install() {
     return "$_rc"
   fi
   tp_print_ok "Self-hosted instance installed — open the wizard URL printed above (https://<this host>:8443/install); this host's daemon enrols itself once the wizard has issued the first license"
+  return 0
+}
+
+# An existing self-hosted control plane dials the instance Unix socket: the
+# instance binary is installed and daemon.env does not name a remote URL.
+tp_colocated_control_plane_host() {
+  [ -e "$INSTALL_ROOT/bin/turbopanel" ] || return 1
+  [ -f "$ENV_FILE" ] || return 1
+  if grep -q '^TURBOPANEL_INSTANCE_URL=' "$ENV_FILE"; then
+    return 1
+  fi
+  return 0
+}
+
+tp_daemon_env_value() {
+  _key="$1"
+  sed -n "s/^${_key}=//p" "$ENV_FILE" | head -1
+}
+
+# Refresh the co-located daemon without daemon-install.yml. That play would
+# write a remote instance URL and recursively chown state and config.
+tp_run_colocated_daemon_refresh() {
+  _vars="$(mktemp)"
+  _channel="${TURBOPANEL_UPDATE_CHANNEL:-}"
+  if [ -z "$_channel" ]; then
+    _channel="$(tp_daemon_env_value TURBOPANEL_UPDATE_CHANNEL)"
+  fi
+  [ -n "$_channel" ] || _channel=release
+  {
+    printf 'turbopanel_instance_url: ""\n'
+    printf 'turbopanel_after_instance_service: true\n'
+    printf 'turbopanel_start: %s\n' "$([ "$NO_START" = true ] && echo false || echo true)"
+    printf 'turbopanel_manage_service_state: %s\n' "$([ "$NO_START" = true ] && echo false || echo true)"
+    printf 'turbopanel_restart_daemon: %s\n' "$([ "$NO_START" = true ] && echo false || echo true)"
+    printf 'turbopanel_daemon_exec_mode: %s\n' "$DAEMON_EXEC_MODE"
+    printf 'turbopanel_vendor_dir: %s\n' "$RUNTIMES_DIR"
+    printf 'turbopanel_orchestration_dir: %s\n' "$ORCHESTRATION_DIR"
+    printf 'turbopanel_config_dir: %s\n' "$CONFIG_DIR"
+    printf 'turbopanel_daemon_state_dir: %s\n' "$STATE_DIR"
+    printf 'turbopanel_daemon_env_file: %s\n' "$ENV_FILE"
+    printf 'turbopanel_daemon_bin: %s\n' "$(tp_daemon_binary_path)"
+    printf 'turbopanel_daemon_js: %s\n' "$(tp_daemon_js_fallback_path)"
+    printf 'turbopanel_daemon_workdir: %s\n' "$INSTALL_ROOT"
+    if [ "$DAEMON_EXEC_MODE" = "js" ]; then
+      printf 'turbopanel_daemon_deno_bin: %s\n' "$DENO_BIN"
+    fi
+    printf 'turbopanel_service_name: %s\n' "turbopaneld"
+    printf 'turbopanel_update_channel: %s\n' "$_channel"
+    if [ -n "$MANIFEST_URL" ]; then
+      printf 'turbopanel_manifest_url: "%s"\n' "$MANIFEST_URL"
+    fi
+    _kept="$(tp_daemon_env_value TURBOPANEL_INSTANCE_CA)"
+    if [ -n "$_kept" ]; then
+      printf 'turbopanel_instance_ca: "%s"\n' "$_kept"
+    fi
+    _kept="$(tp_daemon_env_value TURBOPANEL_DL_BASE)"
+    if [ -n "$_kept" ]; then
+      printf 'turbopanel_dl_base: "%s"\n' "$_kept"
+    fi
+    _kept="$(tp_daemon_env_value TURBOPANEL_INSTANCE_MANIFEST_URL)"
+    if [ -n "$_kept" ]; then
+      printf 'turbopanel_instance_manifest_url: "%s"\n' "$_kept"
+    fi
+    _kept="$(tp_daemon_env_value TURBOPANEL_UI_MANIFEST_URL)"
+    if [ -n "$_kept" ]; then
+      printf 'turbopanel_ui_manifest_url: "%s"\n' "$_kept"
+    fi
+  } > "$_vars"
+  tp_print_step "▸" "Refreshing the co-located daemon (socket mode; instance, UI, and database unchanged)…"
+  _rc=0
+  if [ "$DAEMON_EXEC_MODE" = "$TP_EXEC_MODE_NATIVE" ]; then
+    "$(tp_daemon_binary_path)" run-installer --playbook daemon-colocated-refresh.yml --vars-file "$_vars" || _rc=$?
+  else
+    HOME="$INSTALL_ROOT" "$DENO_BIN" run $TP_INSTALLER_DENO_PERMISSIONS "$(tp_daemon_js_fallback_path)" run-installer --playbook daemon-colocated-refresh.yml --vars-file "$_vars" || _rc=$?
+  fi
+  rm -f "$_vars"
+  rm -rf /tmp/turbopanel-ansible /root/.ansible 2>/dev/null || true
+  if [ "$_rc" -ne 0 ]; then
+    tp_print_error "Co-located daemon refresh failed"
+    return "$_rc"
+  fi
+  tp_print_ok "Co-located daemon refreshed"
   return 0
 }
 
@@ -1347,6 +1682,8 @@ TUNNEL_TOKEN=""
 INSECURE_TLS=false
 NO_START=false
 INSTANCE_INSTALL=false
+DAEMON_ONLY=false
+SKIP_DAEMON_PACKAGE=false
 MANIFEST_URL=""
 INSTANCE_MANIFEST_URL=""
 UI_MANIFEST_URL=""
@@ -1372,8 +1709,14 @@ while [ $# -gt 0 ]; do
       INSECURE_TLS=true; shift ;;
     --no-start)
       NO_START=true; shift ;;
+    --progress-markers)
+      PROGRESS_MARKERS=true; shift ;;
     --instance)
       INSTANCE_INSTALL=true; shift ;;
+    --daemon-only)
+      DAEMON_ONLY=true; shift ;;
+    --skip-daemon-package)
+      SKIP_DAEMON_PACKAGE=true; shift ;;
     --manifest-url)
       [ $# -ge 2 ] || { tp_print_error "--manifest-url requires an argument"; exit 1; }
       MANIFEST_URL="$2"; shift 2 ;;
@@ -1424,10 +1767,10 @@ fi
 # channel install. Rolling back is pinning the previous tag.
 [ -n "$MANIFEST_URL" ] || MANIFEST_URL="${TURBOPANEL_MANIFEST_URL:-}"
 if [ -n "$MANIFEST_URL" ]; then
-  case "$MANIFEST_URL" in
-    https://*) ;;
-    *) tp_print_error "--manifest-url must be an https:// URL (got $MANIFEST_URL)"; exit 1 ;;
-  esac
+  if ! tp_manifest_url_accepted "$MANIFEST_URL"; then
+    tp_print_error "--manifest-url must be an https:// URL (got $MANIFEST_URL)"
+    exit 1
+  fi
   if [ -n "$DL_BASE" ]; then
     tp_print_error "--manifest-url and TURBOPANEL_DL_BASE are exclusive: a pin names one manifest, an overlay names a catalog"
     exit 1
@@ -1439,18 +1782,18 @@ fi
 # --instance run also reinstalls.
 [ -n "$INSTANCE_MANIFEST_URL" ] || INSTANCE_MANIFEST_URL="${TURBOPANEL_INSTANCE_MANIFEST_URL:-}"
 if [ -n "$INSTANCE_MANIFEST_URL" ]; then
-  case "$INSTANCE_MANIFEST_URL" in
-    https://*) ;;
-    *) tp_print_error "--instance-manifest-url must be an https:// URL (got $INSTANCE_MANIFEST_URL)"; exit 1 ;;
-  esac
+  if ! tp_manifest_url_accepted "$INSTANCE_MANIFEST_URL"; then
+    tp_print_error "--instance-manifest-url must be an https:// URL (got $INSTANCE_MANIFEST_URL)"
+    exit 1
+  fi
   export TURBOPANEL_INSTANCE_MANIFEST_URL="$INSTANCE_MANIFEST_URL"
 fi
 [ -n "$UI_MANIFEST_URL" ] || UI_MANIFEST_URL="${TURBOPANEL_UI_MANIFEST_URL:-}"
 if [ -n "$UI_MANIFEST_URL" ]; then
-  case "$UI_MANIFEST_URL" in
-    https://*) ;;
-    *) tp_print_error "--ui-manifest-url must be an https:// URL (got $UI_MANIFEST_URL)"; exit 1 ;;
-  esac
+  if ! tp_manifest_url_accepted "$UI_MANIFEST_URL"; then
+    tp_print_error "--ui-manifest-url must be an https:// URL (got $UI_MANIFEST_URL)"
+    exit 1
+  fi
   export TURBOPANEL_UI_MANIFEST_URL="$UI_MANIFEST_URL"
 fi
 case "${TURBOPANEL_INSECURE_TLS:-}" in
@@ -1463,17 +1806,45 @@ case "${TURBOPANEL_INSTANCE:-}" in
   1|true|TRUE|yes|YES) INSTANCE_INSTALL=true ;;
   *) ;;
 esac
+case "${TURBOPANEL_DAEMON_ONLY:-}" in
+  1|true|TRUE|yes|YES) DAEMON_ONLY=true ;;
+  *) ;;
+esac
+if [ "$DAEMON_ONLY" = true ] && [ "$INSTANCE_INSTALL" = true ]; then
+  tp_print_error "--daemon-only cannot be combined with --instance"
+  exit 1
+fi
 
 # A bare run — no license, no daemon arguments — is a control plane install.
 # Daemon arguments without a license keep the old error: that is an enrolment
 # that forgot its license, not a request for a panel. The welcome (and the
 # non-stable-channel warning) print from tp_print_header once privileges are
 # settled, so a sudo re-exec does not show the banner twice.
-if [ "$INSTANCE_INSTALL" != true ] && [ -z "$LICENSE" ] && [ -z "$HOST_URL" ] \
+if [ "$DAEMON_ONLY" != true ] && [ "$INSTANCE_INSTALL" != true ] && [ -z "$LICENSE" ] && [ -z "$HOST_URL" ] \
   && [ -z "$TUNNEL_TOKEN" ] && [ -z "$INSTANCE_CA" ] && [ -z "$DL_BASE" ] \
   && [ -z "$MANIFEST_URL" ] && [ -z "$INSTANCE_MANIFEST_URL" ] \
   && [ -z "$UI_MANIFEST_URL" ]; then
   INSTANCE_INSTALL=true
+fi
+if [ "$DAEMON_ONLY" = true ]; then
+  if [ -z "$MANIFEST_URL" ]; then
+    tp_print_error "--daemon-only requires a pinned https manifest (--manifest-url or TURBOPANEL_MANIFEST_URL) and does not install the control plane"
+    exit 1
+  fi
+  if [ -z "$LICENSE" ]; then
+    _state="${TURBOPANEL_STATE_DIR:-/var/lib/turbopanel}"
+    if [ -f "$_state/license.id" ] && [ -f "$_state/license.token" ]; then
+      _id="$(tr -d '[:space:]' < "$_state/license.id")"
+      _tok="$(tr -d '[:space:]' < "$_state/license.token")"
+      if [ -n "$_id" ] && [ -n "$_tok" ]; then
+        LICENSE="$(printf '%s:%s' "$_id" "$_tok" | base64 | tr -d '\n' | tr '+/' '-_')"
+      fi
+    fi
+  fi
+  if [ -z "$LICENSE" ]; then
+    tp_print_error "--daemon-only needs TURBOPANEL_LICENSE or an existing license.id and license.token; it does not install the control plane"
+    exit 1
+  fi
 fi
 
 if [ "$INSTANCE_INSTALL" = true ]; then
@@ -1489,6 +1860,13 @@ if [ "$INSTANCE_INSTALL" = true ]; then
     tp_print_error "--instance needs --channel canary, rc or release (the instance and UI packages publish only through GitHub Releases; got ${TURBOPANEL_UPDATE_CHANNEL})"
     exit 1
   fi
+  if [ "$SKIP_DAEMON_PACKAGE" = true ] && [ "$NO_START" != true ]; then
+    tp_print_error "--skip-daemon-package is only valid with --instance --no-start"
+    exit 1
+  fi
+elif [ "$SKIP_DAEMON_PACKAGE" = true ]; then
+  tp_print_error "--skip-daemon-package is only valid with --instance --no-start"
+  exit 1
 elif [ -z "$LICENSE" ]; then
   tp_print_error "TURBOPANEL_LICENSE (or --license) is required to enrol a daemon (run with no arguments to install a control plane instead)"
   exit 1
@@ -1534,6 +1912,7 @@ if ! tp_is_root; then
   set --
   [ -n "$LICENSE" ] && set -- "$@" --license "$LICENSE"
   [ "$INSTANCE_INSTALL" = true ] && set -- "$@" --instance
+  [ "$DAEMON_ONLY" = true ] && set -- "$@" --daemon-only
   [ -n "$MANIFEST_URL" ] && set -- "$@" --manifest-url "$MANIFEST_URL"
   [ -n "$INSTANCE_MANIFEST_URL" ] && set -- "$@" --instance-manifest-url "$INSTANCE_MANIFEST_URL"
   [ -n "$UI_MANIFEST_URL" ] && set -- "$@" --ui-manifest-url "$UI_MANIFEST_URL"
@@ -1543,6 +1922,8 @@ if ! tp_is_root; then
   [ -n "$TUNNEL_TOKEN" ] && set -- "$@" --tunnel-token "$TUNNEL_TOKEN"
   [ "$INSECURE_TLS" = true ] && set -- "$@" --insecure-tls
   [ "$NO_START" = true ] && set -- "$@" --no-start
+  [ "$SKIP_DAEMON_PACKAGE" = true ] && set -- "$@" --skip-daemon-package
+  [ "$PROGRESS_MARKERS" = true ] && set -- "$@" --progress-markers
   [ -n "${TURBOPANEL_UPDATE_CHANNEL:-}" ] && set -- "$@" --channel "$TURBOPANEL_UPDATE_CHANNEL"
   _curl="$TP_CURL_FETCH"
   [ "$INSECURE_TLS" = true ] && _curl="$TP_CURL_FETCH_INSECURE"
@@ -1647,12 +2028,24 @@ fi
 rm -f "$_apt_log"
 tp_print_ok "Host prerequisites ready"
 
+# Control-plane update: swap the instance and UI packages only. The running
+# daemon binary, its JS fallback, and the orchestration tree stay put.
+if [ "$SKIP_DAEMON_PACKAGE" = true ]; then
+  _linux_arch="$(tp_resolve_linux_arch)" || exit 1
+  tp_run_instance_install
+  exit $?
+fi
+
 tp_print_step "▸" "Fetching release manifest…"
 if ! tp_fetch_channel_manifest; then
   tp_print_error "Failed to fetch release manifest"
   exit 1
 fi
-if [ -z "$HOST_URL" ]; then
+_colocated_daemon_refresh=false
+if [ "$DAEMON_ONLY" = true ] && tp_colocated_control_plane_host; then
+  _colocated_daemon_refresh=true
+fi
+if [ -z "$HOST_URL" ] && [ "$_colocated_daemon_refresh" != true ]; then
   HOST_URL="$_manifest_host"
 fi
 if [ -n "$HOST_URL" ]; then
@@ -1674,6 +2067,8 @@ tp_print_step "  " "JS bundle (if needed): $_js_fallback_artifact_url"
 tp_print_step "  " "Commit: ${_manifest_commit:-unknown}"
 if [ "$INSTANCE_INSTALL" = true ]; then
   tp_print_step "  " "Control plane: this host (self-hosted instance install)"
+elif [ "$_colocated_daemon_refresh" = true ]; then
+  tp_print_step "  " "Control plane: this host (co-located socket)"
 else
   tp_print_step "  " "Control plane: $HOST_URL"
 fi
@@ -1778,7 +2173,7 @@ tp_write_update_origin_pin() {
   install -m 0600 -o root -g root "$_pin_tmp" "$_pin_dir/update-origin"
   rm -f "$_pin_tmp"
 }
-if [ "$INSTANCE_INSTALL" != true ]; then
+if [ "$INSTANCE_INSTALL" != true ] && [ "$_colocated_daemon_refresh" != true ]; then
   tp_write_update_origin_pin
 fi
 
@@ -1854,6 +2249,18 @@ if [ ! -f "$ORCHESTRATION_DIR/ansible.cfg" ]; then
   exit 1
 fi
 
+if [ "$_colocated_daemon_refresh" = true ]; then
+  # Existing control plane: refresh the daemon in socket mode. Do not run
+  # daemon-install.yml (remote URL plus a recursive chown of state/config).
+  if ! tp_run_colocated_daemon_refresh; then
+    exit 1
+  fi
+  if ! tp_arm_update_guard; then
+    exit 1
+  fi
+  exit 0
+fi
+
 if [ "$INSTANCE_INSTALL" = true ]; then
   # The daemon package above is the co-located daemon's binary and the
   # orchestration tree instance-install.yml runs; the play configures and
@@ -1925,3 +2332,10 @@ else
 fi
 # Disposable ansible scratch (ANSIBLE_HOME); roles/collections already live under FHS.
 rm -rf /tmp/turbopanel-ansible /root/.ansible
+
+# `--no-start` returns here so InstanceClient can restart the unit. Arm the
+# rollback timer before that handoff; a silent start failure would leave
+# OnFailure= with no guard file.
+if ! tp_arm_update_guard; then
+  exit 1
+fi

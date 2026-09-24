@@ -319,6 +319,7 @@ tp_verb_update() {
   _ca=""
   _channel=""
   _manifest_url=""
+  _progress_markers=false
   _no_start=false
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -370,6 +371,10 @@ tp_verb_update() {
         _no_start=true
         shift
         ;;
+      --progress-markers)
+        _progress_markers=true
+        shift
+        ;;
       *)
         # --insecure-tls lands here on purpose: automatic updates never
         # relax TLS (src/instance/run-reconcile.ts resolveAutomaticUpdateTrust).
@@ -398,6 +403,7 @@ tp_verb_update() {
   [ -n "$_ca" ] && set -- "$@" --instance-ca "$_ca"
   [ -n "$_channel" ] && set -- "$@" --channel "$_channel"
   [ -n "$_manifest_url" ] && set -- "$@" --manifest-url "$_manifest_url"
+  [ "$_progress_markers" = true ] && set -- "$@" --progress-markers
   set -- "$@" --no-start
   cd "$INSTALL_ROOT"
   _rc=0
@@ -412,7 +418,8 @@ tp_verb_update() {
 # refuses those daemon-enrolment flags, and it already knows its own config.
 # `--manifest-url` here is the control-plane pin; it is passed to run.sh as
 # `--instance-manifest-url` so it does not set TURBOPANEL_MANIFEST_URL (that
-# pin is the daemon package, which `--instance` also reinstalls).
+# pin is the daemon package. This verb always passes --skip-daemon-package
+# so a panel update does not replace the running daemon binary.
 tp_verb_update_instance() {
   tp_require_root_scratch
   _channel=""
@@ -469,7 +476,7 @@ tp_verb_update_instance() {
   set -- --instance --channel "$_channel"
   [ -n "$_manifest_url" ] && set -- "$@" --instance-manifest-url "$_manifest_url"
   [ -n "$_ui_manifest_url" ] && set -- "$@" --ui-manifest-url "$_ui_manifest_url"
-  set -- "$@" --no-start
+  set -- "$@" --no-start --skip-daemon-package --progress-markers
   cd "$INSTALL_ROOT"
   _rc=0
   sh "$_script" "$@" || _rc=$?
@@ -477,7 +484,22 @@ tp_verb_update_instance() {
   exit "$_rc"
 }
 
-[ $# -ge 1 ] || tp_die "usage: tp-orchestrate playbook|galaxy-docker-role|update|update-instance …"
+# The instance unit's Environment= line is the Postgres URL. runtime.env does
+# not carry it on a managed host, and this verb refuses caller-supplied
+# credentials (no arguments, and any inherited URL is discarded).
+tp_verb_migrate() {
+  [ $# -eq 0 ] || tp_die "migrate takes no arguments"
+  unset TURBOPANEL_DATABASE_URL
+  _unit="/etc/systemd/system/turbopanel-instance.service"
+  [ -f "$_unit" ] || tp_die "missing $_unit"
+  _url="$(sed -n 's/^Environment="\{0,1\}TURBOPANEL_DATABASE_URL=//p' "$_unit" | head -1 | tr -d '\r' | sed 's/"$//')"
+  [ -n "$_url" ] || tp_die "TURBOPANEL_DATABASE_URL is missing from $_unit"
+  _bin="/opt/turbopanel/bin/turbopanel"
+  [ -x "$_bin" ] || tp_die "missing $_bin"
+  timeout 120 env TURBOPANEL_DATABASE_URL="$_url" "$_bin" migrate
+}
+
+[ $# -ge 1 ] || tp_die "usage: tp-orchestrate playbook|galaxy-docker-role|update|update-instance|migrate …"
 _verb="$1"
 shift
 case "$_verb" in
@@ -485,5 +507,6 @@ case "$_verb" in
   galaxy-docker-role) tp_verb_galaxy_docker_role "$@" ;;
   update) tp_verb_update "$@" ;;
   update-instance) tp_verb_update_instance "$@" ;;
+  migrate) tp_verb_migrate "$@" ;;
   *) tp_die "unknown verb $_verb" ;;
 esac

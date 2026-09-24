@@ -266,6 +266,15 @@ test("tp-orchestrate update fetches run.sh from the CDN for a public control pla
   assertEquals(result.stdout.includes("[-k]"), false);
 });
 
+test("tp-orchestrate update forwards --progress-markers to run.sh", async () => {
+  const result = await runUpdateVerb(
+    ["--license", "abc", "--no-start", "--progress-markers"],
+    PUBLIC_PIN,
+  );
+  assertEquals(result.status, 0, result.stderr);
+  assertStringIncludes(result.stdout, "[--progress-markers]");
+});
+
 test("tp-orchestrate update refuses without a root-pinned origin", async () => {
   const result = await runUpdateVerb(["--license", "abc", "--no-start"], null);
   assertEquals(result.status, 1);
@@ -377,7 +386,7 @@ test("tp-orchestrate update-instance reconciles run.sh --instance without daemon
   assertStringIncludes(result.stdout, "[https://turbopanel.sh]");
   assertStringIncludes(
     result.stdout,
-    "RUNSH [--instance] [--channel] [release] [--no-start]",
+    "RUNSH [--instance] [--channel] [release] [--no-start] [--skip-daemon-package] [--progress-markers]",
   );
   assertEquals(result.stdout.includes("[--license]"), false);
   assertEquals(result.stdout.includes("[--host]"), false);
@@ -397,7 +406,7 @@ test("tp-orchestrate update-instance maps a control-plane pin onto --instance-ma
   assertEquals(result.status, 0, result.stderr);
   assertStringIncludes(
     result.stdout,
-    `RUNSH [--instance] [--channel] [rc] [--instance-manifest-url] [${url}] [--no-start]`,
+    `RUNSH [--instance] [--channel] [rc] [--instance-manifest-url] [${url}] [--no-start] [--skip-daemon-package] [--progress-markers]`,
   );
   assertEquals(result.stdout.includes("[--manifest-url]"), false);
 });
@@ -423,7 +432,7 @@ test("tp-orchestrate update-instance forwards a UI pin and refuses other rails",
   assertEquals(result.status, 0, result.stderr);
   assertStringIncludes(
     result.stdout,
-    `RUNSH [--instance] [--channel] [release] [--instance-manifest-url] [${instanceUrl}] [--ui-manifest-url] [${uiUrl}] [--no-start]`,
+    `RUNSH [--instance] [--channel] [release] [--instance-manifest-url] [${instanceUrl}] [--ui-manifest-url] [${uiUrl}] [--no-start] [--skip-daemon-package] [--progress-markers]`,
   );
 
   for (
@@ -493,3 +502,191 @@ test("tp-orchestrate update-instance refuses trunk, missing flags, and daemon en
   assertEquals(missing.status, 1);
   assertStringIncludes(missing.stderr, "update origin pin missing");
 });
+
+test("the documented rollback command runs from a clean PATH", async () => {
+  const helper = await Deno.readTextFile(helperPath);
+  assertEquals(helperPath.startsWith("/"), true);
+  const result = await new Deno.Command(helperPath, {
+    args: [
+      "playbook",
+      "-i",
+      "localhost,",
+      "-c",
+      "local",
+      "-e",
+      "turbopanel_upgrade_id=pending",
+      "instance-rollback.yml",
+    ],
+    env: { PATH: "/usr/bin:/bin" },
+    clearEnv: true,
+    stdout: "piped",
+    stderr: "piped",
+  }).output();
+  const stderr = new TextDecoder().decode(result.stderr);
+  assertEquals(result.code, 1);
+  assertStringIncludes(stderr, "tp-orchestrate:");
+  assertEquals(stderr.includes("not found"), false);
+  void helper;
+});
+
+test("control-plane backup and rollback playbooks are shipped basenames", async () => {
+  const playbooks = join(here, "../../orchestration/playbooks");
+  for (const name of ["instance-backup.yml", "instance-rollback.yml"]) {
+    const info = await Deno.lstat(join(playbooks, name));
+    assertEquals(info.isFile, true);
+    assertEquals(info.isSymlink, false);
+  }
+  const helper = await Deno.readTextFile(helperPath);
+  assertEquals(helper.includes("*.yml) ;;"), true);
+});
+
+test("migrate reads the instance unit URL, not runtime.env or a caller URL", async () => {
+  const source = await Deno.readTextFile(helperPath);
+  const fn = extractShellFunction(source, "tp_verb_migrate");
+  assertEquals(fn.includes("runtime.env"), false);
+  assertEquals(fn.includes("unset TURBOPANEL_DATABASE_URL"), true);
+
+  const root = await Deno.makeTempDir({ prefix: "tp-migrate-" });
+  const envPath = join(root, "runtime.env");
+  const unitPath = join(root, "turbopanel-instance.service");
+  const binPath = join(root, "turbopanel");
+  const templates = join(
+    here,
+    "../../orchestration/roles/instance-launch/templates",
+  );
+  const python = await pythonWithJinja();
+  const render = await new Deno.Command(python, {
+    args: ["-c", RENDER_MANAGED_INSTANCE, templates, envPath, unitPath],
+    stdout: "piped",
+    stderr: "piped",
+  }).output();
+  assertEquals(
+    render.code,
+    0,
+    new TextDecoder().decode(render.stderr),
+  );
+  const runtimeEnv = await Deno.readTextFile(envPath);
+  const unit = await Deno.readTextFile(unitPath);
+  assertEquals(runtimeEnv.includes("TURBOPANEL_DATABASE_URL"), false);
+  assertStringIncludes(
+    unit,
+    "Environment=TURBOPANEL_DATABASE_URL=postgresql://turbopanel:s3cret-db@/turbopanel?host=/run/turbopanel/postgres",
+  );
+  await Deno.writeTextFile(
+    binPath,
+    "#!/bin/sh\nprintf '%s\\n' \"$TURBOPANEL_DATABASE_URL\"\n",
+  );
+  await Deno.chmod(binPath, 0o755);
+  const script = [
+    "set -eu",
+    "tp_die() { printf 'tp-orchestrate: %s\\n' \"$1\" >&2; exit 1; }",
+    fn
+      .replaceAll(
+        "/etc/systemd/system/turbopanel-instance.service",
+        unitPath,
+      )
+      .replaceAll("/opt/turbopanel/bin/turbopanel", binPath),
+    'tp_verb_migrate "$@"',
+  ].join("\n");
+  const migrated = await new Deno.Command("sh", {
+    args: ["-c", script, "sh"],
+    env: {
+      PATH: "/usr/bin:/bin",
+      TURBOPANEL_DATABASE_URL: "postgresql://caller:secret@localhost/wrong",
+    },
+    clearEnv: true,
+    stdout: "piped",
+    stderr: "piped",
+  }).output();
+  assertEquals(migrated.code, 0, new TextDecoder().decode(migrated.stderr));
+  assertEquals(
+    new TextDecoder().decode(migrated.stdout).trim(),
+    "postgresql://turbopanel:s3cret-db@/turbopanel?host=/run/turbopanel/postgres",
+  );
+  const refused = await new Deno.Command("sh", {
+    args: ["-c", script, "sh", "postgresql://nope"],
+    env: { PATH: "/usr/bin:/bin" },
+    clearEnv: true,
+    stdout: "piped",
+    stderr: "piped",
+  }).output();
+  assertEquals(refused.code, 1);
+  assertStringIncludes(
+    new TextDecoder().decode(refused.stderr),
+    "migrate takes no arguments",
+  );
+  await Deno.remove(root, { recursive: true });
+});
+
+async function pythonWithJinja(): Promise<string> {
+  const candidates = [
+    "/opt/turbopanel/vendor/ansible/current/bin/python",
+    "python3",
+  ];
+  for (const bin of candidates) {
+    const probe = await new Deno.Command(bin, {
+      args: ["-c", "import jinja2"],
+      stdout: "null",
+      stderr: "null",
+    }).output().catch(() => null);
+    if (probe?.success) return bin;
+  }
+  throw new TypeError("jinja2 is required to render the instance templates");
+}
+
+const RENDER_MANAGED_INSTANCE = `
+import sys
+from pathlib import Path
+import jinja2
+templates, env_path, unit_path = sys.argv[1:]
+def as_bool(value):
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    return str(value).lower() in ("1", "true", "yes", "on")
+env = jinja2.Environment(undefined=jinja2.Undefined, keep_trailing_newline=True)
+env.filters["bool"] = as_bool
+managed = {
+    "turbopanel_public_urls": "",
+    "turbopanel_tls_public_effective": False,
+    "turbopanel_server_metrics_retention_days": 90,
+    "turbopanel_update_channel": "release",
+    "turbopanel_instance_revision": "",
+    "instance_user": "tpctrl",
+    "turbopanel_group": "tp",
+    "turbopanel_instance_dir": "/opt/turbopanel",
+    "turbopanel_instance_runtime_dir": "/var/lib/turbopanel/instance",
+    "turbopanel_node": "/opt/turbopanel/vendor/node/current/bin/node",
+    "turbopanel_runtime_path": "/usr/bin",
+    "turbopanel_github_key": "/var/lib/turbopanel/github",
+    "turbopanel_ssh_dir": "/var/lib/turbopanel/ssh",
+    "instance_service_name": "turbopanel-instance",
+    "turbopanel_ui_mode": "static",
+    "turbopanel_dev_user": "",
+    "turbopanel_instance_run_mode": "compiled",
+    "turbopanel_instance_runtime": "deno",
+    "turbopanel_pg_password": "s3cret-db",
+    "postgres_user": "turbopanel",
+    "postgres_db": "turbopanel",
+    "postgres_socket_dir": "/run/turbopanel/postgres",
+    "redis_socket_path": "/run/turbopanel/redis.sock",
+    "turbopanel_daemon_state_dir": "/var/lib/turbopanel",
+    "turbopanel_metrics_dir": "/var/lib/turbopanel/metrics",
+    "turbopanel_user": "tp",
+    "turbopanel_config_dir": "/etc/turbopanel",
+    "turbopanel_run_dir": "/run/turbopanel",
+    "turbopanel_instance_runtime_env": "/etc/turbopanel/instance/runtime.env",
+    "turbopanel_instance_runtime_dev_vars": "/etc/turbopanel/instance/runtime.dev-vars",
+    "instance_log_dir": "/var/log/turbopanel/instance",
+    "turbopanel_duckdb_lib_dir": "/opt/turbopanel/lib",
+    "turbopanel_instance_binary": "/opt/turbopanel/bin/turbopanel",
+    "turbopanel_deno": "/opt/turbopanel/vendor/deno/current/deno",
+    "turbopanel_daemon_dir": "/opt/turbopanel/lib/daemon",
+}
+root = Path(templates)
+env_text = env.from_string((root / "instance-deno.env.j2").read_text()).render(managed)
+unit_text = env.from_string((root / "turbopanel-instance.service.j2").read_text()).render(managed)
+Path(env_path).write_text(env_text)
+Path(unit_path).write_text(unit_text)
+`;

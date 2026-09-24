@@ -20,6 +20,13 @@
  * — it gates commands the daemon dispatches, not a daemon updating itself.
  * The control plane does not gate `instance-update` on the daemon's version;
  * the daemon only executes the reconcile.
+ *
+ * `DAEMON_WIRE_FEATURES` is the advertised feature set: this daemon lists it
+ * on `hello`, and the control plane lists it on the attach `version` frame.
+ * `instanceSupports` reads the peer's list. That is distinct from
+ * `DAEMON_FEATURE_MIN_VERSIONS`, which infers support from a semver floor.
+ * A new wire message is gated on the advertisement. It does not raise
+ * either floor.
  */
 
 export const INSTANCE_VERSION_HEADER = "x-turbopanel-version";
@@ -41,6 +48,22 @@ export const MIN_SUPPORTED_INSTANCE_VERSION = "0.1.0";
 export const DAEMON_FEATURE_MIN_VERSIONS: Readonly<Record<string, string>> = {
   "instance-cert-sources-per-hostname": "0.1.1",
 };
+
+/**
+ * Features this process advertises on the cell wire. Twin of
+ * `DAEMON_WIRE_FEATURES` in `turbopanel/src/lib/version-wire.ts` —
+ * contract-drift keeps them equal.
+ *
+ * This list is what the peer says it supports. `DAEMON_FEATURE_MIN_VERSIONS`
+ * is the semver-floor inference for daemon-rendered artifacts. Do not treat
+ * them as the same gate.
+ */
+export const DAEMON_WIRE_FEATURES = [
+  "managed-upgrade-v1",
+  "update-progress-v1",
+] as const;
+
+export type DaemonWireFeature = (typeof DAEMON_WIRE_FEATURES)[number];
 
 /** Features that need an instance at or above a semver. Empty until one lands. */
 export const INSTANCE_FEATURE_MIN_VERSIONS: Readonly<Record<string, string>> =

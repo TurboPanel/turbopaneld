@@ -66,4 +66,6 @@ export interface UpdateInfo {
   orchestrationArtifact: ArtifactEntry;
   /** Native binary tarball URL for the current host architecture. */
   downloadUrl: string;
+  /** Manifest URL that produced this verified result. */
+  manifestUrl?: string;
 }

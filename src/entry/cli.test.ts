@@ -236,6 +236,14 @@ test("parseInstallerFlags accepts only the two shipped installers for --playbook
     parseInstallerFlags(["--playbook", "daemon-install.yml"], ok.io).playbook,
     "daemon-install.yml",
   );
+  const refresh = captureIo();
+  assertEquals(
+    parseInstallerFlags([
+      "--playbook",
+      "daemon-colocated-refresh.yml",
+    ], refresh.io).playbook,
+    "daemon-colocated-refresh.yml",
+  );
   // Never a path: a vars file or flag must not point the daemon at arbitrary
   // YAML on the host.
   for (

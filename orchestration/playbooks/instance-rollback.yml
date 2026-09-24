@@ -1,0 +1,113 @@
+---
+# Restore the previous control-plane generation after a failed health check.
+# Invoked as: tp-orchestrate playbook -i localhost, -c local
+#   -e turbopanel_upgrade_id=… -e turbopanel_rollback_reason=…
+- name: Roll back a control-plane update
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: false
+  vars:
+    turbopanel_backup_dir: /backup
+    turbopanel_group: tp
+    turbopanel_install_root: /opt/turbopanel
+    postgres_user: turbopanel
+    postgres_db: turbopanel
+    postgres_container_name: turbopanel-database
+    turbopanel_rollback_reason: health_timeout
+
+  tasks:
+    - name: Require a single-segment upgrade id
+      ansible.builtin.assert:
+        that:
+          - turbopanel_upgrade_id is match('^[A-Za-z0-9][A-Za-z0-9._-]{0,80}$')
+        fail_msg: turbopanel_upgrade_id must be one path segment
+
+    - name: Stop the control plane before restoring files
+      ansible.builtin.systemd:
+        name: turbopanel-instance
+        state: stopped
+
+    - name: Require the previous instance binary
+      ansible.builtin.stat:
+        path: "{{ turbopanel_install_root }}/bin/turbopanel.prev"
+      register: prev_bin
+
+    - name: Require the previous libduckdb
+      ansible.builtin.stat:
+        path: "{{ turbopanel_install_root }}/lib/libduckdb.so.prev"
+      register: prev_lib
+
+    - name: Require the previous UI tree
+      ansible.builtin.stat:
+        path: "{{ turbopanel_install_root }}/share/ui.prev"
+      register: prev_ui
+
+    - name: Refuse rollback when no previous generation exists
+      ansible.builtin.assert:
+        that:
+          - prev_bin.stat.exists
+          - prev_lib.stat.exists
+          - prev_ui.stat.exists
+        fail_msg: nothing to roll back to (a .prev instance, libduckdb, or UI tree is missing)
+
+    - name: Restore the previous instance, library, and UI
+      ansible.builtin.shell:
+        cmd: |
+          set -euo pipefail
+          root="{{ turbopanel_install_root }}"
+          restore_one() {
+            src="$1"
+            dest="$2"
+            rm -rf -- "$dest"
+            mv -- "$src" "$dest"
+          }
+          restore_one "$root/bin/turbopanel.prev" "$root/bin/turbopanel"
+          restore_one "$root/lib/libduckdb.so.prev" "$root/lib/libduckdb.so"
+          restore_one "$root/share/ui.prev" "$root/share/ui"
+          chmod 0755 "$root/bin/turbopanel"
+          chmod 0644 "$root/lib/libduckdb.so"
+        executable: /bin/bash
+
+    - name: Load the backup metadata for this attempt
+      ansible.builtin.slurp:
+        src: "{{ turbopanel_backup_dir }}/control-plane/{{ turbopanel_upgrade_id }}/meta.json"
+      register: backup_meta
+
+    - name: Parse the backup metadata
+      ansible.builtin.set_fact:
+        backup_meta_json: "{{ backup_meta.content | b64decode | from_json }}"
+
+    - name: Read the current migration history fingerprint
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - "{{ postgres_container_name }}"
+          - psql
+          - -U
+          - "{{ postgres_user }}"
+          - -d
+          - "{{ postgres_db }}"
+          - -Atc
+          - select string_agg(id::text, ',' order by id) from public.migration
+      register: current_fingerprint
+      changed_when: false
+
+    - name: Restore the database when the migration history changed
+      when: (current_fingerprint.stdout | trim) != (backup_meta_json.migrationFingerprint | default('') | trim)
+      ansible.builtin.shell:
+        cmd: |
+          set -euo pipefail
+          dump="{{ turbopanel_backup_dir }}/control-plane/{{ turbopanel_upgrade_id }}/turbopanel.dump"
+          if [ ! -f "$dump" ]; then
+            echo "migration history changed and $dump is missing" >&2
+            exit 1
+          fi
+          docker exec -i "{{ postgres_container_name }}" pg_restore --clean --if-exists -U "{{ postgres_user }}" -d "{{ postgres_db }}" < "$dump"
+        executable: /bin/bash
+
+    - name: Start the restored control plane
+      ansible.builtin.systemd:
+        name: turbopanel-instance
+        state: started

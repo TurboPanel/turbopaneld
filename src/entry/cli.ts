@@ -63,6 +63,8 @@ export async function maybeRunDaemonCli(io: DaemonCliIo = {}): Promise<void> {
     // to follow), not a build fact — read live, never baked into BuildInfo.
     const { channel } = (io.resolveUpdateChannelConfig ??
       resolveUpdateChannelConfig)();
+    // Format consumed by tp-update-guard / run.sh:
+    // `turbopaneld v<semver> <commit> (<channel>, <buildId>, <builtAt>)`
     log(
       `turbopaneld v${DAEMON_VERSION} ${info.commit} (${channel}, ${info.buildId}, ${info.builtAt})`,
     );

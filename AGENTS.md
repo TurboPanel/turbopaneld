@@ -181,7 +181,13 @@ several minor versions. There is no fixed upgrade order. Bump
 `MIN_SUPPORTED_DAEMON_VERSION` and `MIN_SUPPORTED_INSTANCE_VERSION` together,
 in the same change, and record why in this section and in
 `turbopanel/AGENTS.md` → Versions on the wires. Never raise either floor
-silently. A control-plane update the daemon is about to install is refused
+silently. A release that introduces a new wire message leaves both floors
+where they are. Each new message is feature-gated: the peer advertises
+support in `features[]` (`DAEMON_WIRE_FEATURES`, kept equal in both
+`version-wire.ts` files) and the daemon checks `InstanceClient.instanceSupports()`
+before treating the peer as able to speak it. `update-progress`
+(`update-progress-v1`) is the worked example — fire-and-forget progress,
+ignored by a peer that does not list the feature. A control-plane update the daemon is about to install is refused
 when the target version is below `MIN_SUPPORTED_INSTANCE_VERSION`; the
 daemon's own self-update does not consult that floor, and the control plane
 does not gate `instance-update` on the daemon version.
@@ -615,6 +621,13 @@ Six controls, each with a test that fails the build when it regresses:
   Platform CA — never `-k`) and runs it with re-validated flags, which is how
   panel-driven daemon updates work now (`executeRunReconcile` →
   `rootHelperReconcileInvocation`; the daemon never hands root a script body).
+  **`tp-update-guard`** (`orchestration/scripts/tp-update-guard`, POSIX sh,
+  `root:tp 0750`) is installed with `turbopaneld-update-guard.service` /
+  `.timer` and runs only as **root** via `OnFailure=` and the one-shot timer
+  after a daemon self-update — not through `sudo` and not from the `tp` user.
+  `daemon-launch` also copies it to `/opt/turbopanel/lib/tp-update-guard`, and
+  the unit's `ExecStart` is that path, so restoring an older orchestration
+  tree cannot remove the only executable the timer can run.
   The control plane is a separate verb, `sudo -n tp-orchestrate update-instance
   --channel canary|rc|release [--manifest-url …] --no-start`
   (`rootHelperInstanceUpdateInvocation`). It takes no license, host, overlay,

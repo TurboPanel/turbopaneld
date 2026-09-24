@@ -6,6 +6,7 @@ import {
   absolutizeRootCatalogJson,
   builtinChannelManifestUrl,
   DL_BASE_URL,
+  pinnedChannelManifestUrl,
   type ReleaseArtifactKind,
   resolveDlBase,
   resolveMaybeRelativeUrl,
@@ -158,6 +159,107 @@ async function shellBuiltinManifestUrl(
   }).output();
   return { code: out.code, stdout: new TextDecoder().decode(out.stdout) };
 }
+
+test("pinnedChannelManifestUrl pins canary and versioned releases and leaves trunk floating", () => {
+  const kinds: ReleaseArtifactKind[] = ["daemon", "instance", "ui"];
+  const repos: Record<ReleaseArtifactKind, string> = {
+    daemon: "TurboPanel/turbopaneld",
+    instance: "TurboPanel/turbopanel",
+    ui: "TurboPanel/ui",
+  };
+  for (const kind of kinds) {
+    const repo = repos[kind];
+    assertEquals(
+      pinnedChannelManifestUrl(kind, "canary", "0.1.0-rc.1"),
+      `https://github.com/${repo}/releases/download/canary/manifest-0.1.0-rc.1.json`,
+    );
+    assertEquals(
+      pinnedChannelManifestUrl(kind, "rc", "0.1.1"),
+      `https://github.com/${repo}/releases/download/v0.1.1/manifest.json`,
+    );
+    assertEquals(
+      pinnedChannelManifestUrl(kind, "release", "0.1.1"),
+      `https://github.com/${repo}/releases/download/v0.1.1/manifest.json`,
+    );
+    assertEquals(pinnedChannelManifestUrl(kind, "trunk", "0.1.1"), null);
+    assertEquals(pinnedChannelManifestUrl(kind, "edge", "0.1.1"), null);
+  }
+  assertEquals(pinnedChannelManifestUrl("daemon", "canary", ""), null);
+  assertEquals(pinnedChannelManifestUrl("daemon", "canary", "v0.1.0"), null);
+  assertEquals(pinnedChannelManifestUrl("daemon", "release", "../x"), null);
+});
+
+async function shellPinnedManifestUrl(
+  kind: string,
+  channel: string,
+  version: string,
+): Promise<{ code: number; stdout: string }> {
+  const runSh = await Deno.readTextFile(join(ROOT, "scripts", "run.sh"));
+  const start = runSh.indexOf("tp_pinned_version_ok() {");
+  const end = runSh.indexOf("tp_manifest_url_accepted() {");
+  if (start < 0 || end < 0) {
+    throw new TypeError("tp_pinned_channel_manifest_url not found in run.sh");
+  }
+  const script = `${runSh.slice(start, end)}
+tp_pinned_channel_manifest_url ${kind} ${channel} ${version}
+`;
+  const out = await new Deno.Command("sh", {
+    args: ["-c", script],
+    stdout: "piped",
+    stderr: "piped",
+  }).output();
+  return { code: out.code, stdout: new TextDecoder().decode(out.stdout) };
+}
+
+async function shellManifestUrlAccepted(url: string): Promise<number> {
+  const runSh = await Deno.readTextFile(join(ROOT, "scripts", "run.sh"));
+  const start = runSh.indexOf("tp_manifest_url_accepted() {");
+  const end = runSh.indexOf("tp_builtin_repo_manifest_url() {");
+  if (start < 0 || end < 0) {
+    throw new TypeError("tp_manifest_url_accepted not found in run.sh");
+  }
+  const script = `${runSh.slice(start, end)}
+tp_manifest_url_accepted ${url}
+`;
+  const out = await new Deno.Command("sh", {
+    args: ["-c", script],
+    stdout: "piped",
+    stderr: "piped",
+  }).output();
+  return out.code;
+}
+
+test("scripts/run.sh mirrors pinnedChannelManifestUrl and accepts the pinned shape", async () => {
+  const kinds: ReleaseArtifactKind[] = ["daemon", "instance", "ui"];
+  const channels: UpdateChannel[] = [
+    "trunk",
+    "edge",
+    "canary",
+    "rc",
+    "release",
+  ];
+  for (const kind of kinds) {
+    for (const channel of channels) {
+      const expected = pinnedChannelManifestUrl(kind, channel, "0.1.2");
+      const shell = await shellPinnedManifestUrl(kind, channel, "0.1.2");
+      if (expected === null) {
+        assertEquals(shell.code, 1, `${kind} ${channel}`);
+        assertEquals(shell.stdout, "");
+      } else {
+        assertEquals(shell.code, 0, `${kind} ${channel}`);
+        assertEquals(shell.stdout, expected);
+        assertEquals(await shellManifestUrlAccepted(expected), 0);
+      }
+    }
+  }
+  const floating = builtinChannelManifestUrl("canary");
+  assertEquals(floating === null, false);
+  if (floating) assertEquals(await shellManifestUrlAccepted(floating), 0);
+  assertEquals(
+    await shellManifestUrlAccepted("http://example/manifest.json"),
+    1,
+  );
+});
 
 test("scripts/run.sh mirrors builtinChannelManifestUrl for every artifact kind", async () => {
   const channels: UpdateChannel[] = [
