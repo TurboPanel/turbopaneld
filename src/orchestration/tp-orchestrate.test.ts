@@ -620,8 +620,8 @@ test("migrate reads the instance unit URL, not runtime.env or a caller URL", asy
 
 async function pythonWithJinja(): Promise<string> {
   const candidates = [
-    "/opt/turbopanel/vendor/ansible/current/bin/python",
     "python3",
+    "/opt/turbopanel/vendor/ansible/current/bin/python",
   ];
   for (const bin of candidates) {
     const probe = await new Deno.Command(bin, {

@@ -3379,6 +3379,7 @@ it({
     let restoreFetch: (() => void) | undefined;
     const received: unknown[] = [];
     let applyCalls = 0;
+    let restoreDiskPreflight: (() => void) | undefined;
 
     try {
       const { signing, authToken, enroll } = await prepareVerifiedAuth();
@@ -3424,6 +3425,9 @@ it({
         await Deno.writeTextFile(`${tempDir}/license.id`, "license-123\n");
         await Deno.writeTextFile(`${tempDir}/license.token`, "token-abc\n");
 
+        restoreDiskPreflight = installClientTestHooks({
+          assertUpdateDiskPreflight: () => Promise.resolve(),
+        });
         const client = new InstanceClient({
           config: {
             kind: "url",
@@ -3617,11 +3621,13 @@ it({
           assertEquals(sendThrew, true);
         } finally {
           client.stop();
+          restoreDiskPreflight?.();
         }
       });
     } finally {
       restoreFetch?.();
       restoreWebSocket();
+      restoreDiskPreflight?.();
       setOptionalEnv("TURBOPANEL_DAEMON_STATE_DIR", originalStateDir);
       setOptionalEnv("TURBOPANEL_FORCE_ENROLL", originalForceEnroll);
       setOptionalEnv("TURBOPANEL_DAEMON_ROOT", originalDaemonRoot);

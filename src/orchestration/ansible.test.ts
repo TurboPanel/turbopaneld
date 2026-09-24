@@ -847,8 +847,8 @@ test(
     );
     assertMatch(
       tasks,
-      /- name: Render the Caddy site config\n\s+when: turbopanel_dev_user \| default\(''\) \| length == 0\n\s+ansible\.builtin\.template:\n\s+src: Caddyfile\.j2\n\s+dest: "\{\{ turbopanel_caddyfile \}\}"[\s\S]*?notify:\n\s+- Restart turbopanel caddy/,
-      "instance-launch renders Caddyfile.j2 to turbopanel_caddyfile on managed hosts and restarts Caddy on change",
+      /- name: Render the Caddy site config\n\s+when: turbopanel_dev_user \| default\(''\) \| length == 0\n\s+ansible\.builtin\.template:\n\s+src: Caddyfile\.j2\n\s+dest: "\{\{ turbopanel_caddyfile \}\}"[\s\S]*?notify:\n\s+- Reload turbopanel caddy/,
+      "instance-launch renders Caddyfile.j2 to turbopanel_caddyfile on managed hosts and reloads Caddy on change",
     );
     assertMatch(
       tasks,
