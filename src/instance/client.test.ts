@@ -3427,6 +3427,8 @@ it({
 
         restoreDiskPreflight = installClientTestHooks({
           assertUpdateDiskPreflight: () => Promise.resolve(),
+          resolveUpdate: () =>
+            Promise.reject(new MalformedManifestError("signature invalid")),
         });
         const client = new InstanceClient({
           config: {
