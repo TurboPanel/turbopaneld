@@ -3414,8 +3414,12 @@ it({
       restoreFetch = api.install();
 
       await withTempLayout(async (fixture) => {
+        const layoutPrior: Record<string, string | undefined> = {};
+        for (const [key, value] of Object.entries(fixture.env)) {
+          layoutPrior[key] = Deno.env.get(key);
+          Deno.env.set(key, value);
+        }
         const tempDir = fixture.dirs.stateDir;
-        Deno.env.set("TURBOPANEL_DAEMON_STATE_DIR", tempDir);
         Deno.env.set("TURBOPANEL_FORCE_ENROLL", "1");
         Deno.env.delete("TURBOPANEL_DEV_INSTANCE");
         const checkout = join(tempDir, "checkout");
@@ -3588,6 +3592,7 @@ it({
           await waitFor(
             "update-result",
             () => lastFrameOfType(socket, "update-result") ? true : undefined,
+            5_000,
           );
           await waitFor(
             "dev-sync-result",
@@ -3624,6 +3629,10 @@ it({
         } finally {
           client.stop();
           restoreDiskPreflight?.();
+          for (const [key, value] of Object.entries(layoutPrior)) {
+            if (value === undefined) Deno.env.delete(key);
+            else Deno.env.set(key, value);
+          }
         }
       });
     } finally {
