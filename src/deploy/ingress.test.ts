@@ -1738,7 +1738,11 @@ test("installAndStartCaddy returns early when unit install fails", async () => {
       throw new TypeError(`unexpected host command: ${args.join(" ")}`);
     });
     try {
-      await ensureHostingCaddyRuntime(layout);
+      await assertRejects(
+        () => ensureHostingCaddyRuntime(layout),
+        Error,
+        "hosting Caddy could not be installed or started",
+      );
       await Deno.stat(join(layout.configDir, "hosting", "Caddyfile"));
     } finally {
       restore();
@@ -1758,7 +1762,11 @@ test("installAndStartCaddy returns early when daemon-reload fails", async () => 
       throw new TypeError(`unexpected host command: ${args.join(" ")}`);
     });
     try {
-      await ensureHostingCaddyRuntime(layout);
+      await assertRejects(
+        () => ensureHostingCaddyRuntime(layout),
+        Error,
+        "hosting Caddy could not be installed or started",
+      );
     } finally {
       restore();
     }
