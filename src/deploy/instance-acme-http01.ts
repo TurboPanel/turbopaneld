@@ -275,14 +275,8 @@ export async function openInstanceAcmeWindow(
     if (holder.kind !== "hosting-caddy") {
       startedRuntime = true;
       await ensure(layout);
-      const after = await inspect();
-      if (after.kind === "other") {
-        throw new Error(port80HeldMessage(after.process));
-      }
-      if (after.kind !== "hosting-caddy") {
-        throw new Error("hosting Caddy is not listening on port 80");
-      }
     }
+    // Site blocks define :80 listeners; verify only after the ACME snippet exists.
     wroteSite = true;
     await writeTextPrivileged(
       dest,
@@ -290,6 +284,13 @@ export async function openInstanceAcmeWindow(
       run,
     );
     await reloadHostingCaddy(run);
+    const after = await inspect();
+    if (after.kind === "other") {
+      throw new Error(port80HeldMessage(after.process));
+    }
+    if (after.kind !== "hosting-caddy") {
+      throw new Error("hosting Caddy is not listening on port 80");
+    }
   } catch (err) {
     await rollbackOpenedWindow(dest, startedRuntime, wroteSite, run);
     throw err;

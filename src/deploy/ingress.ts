@@ -707,7 +707,10 @@ export async function ensureHostingCaddyRuntime(
 
   // A non-root daemon cannot install a system unit. Keep the generated config
   // so test and dev environments can grant sudo later without redeploying.
-  await installAndStartCaddy(unitSource);
+  const started = await installAndStartCaddy(unitSource);
+  if (!started) {
+    throw new Error("hosting Caddy could not be installed or started");
+  }
 }
 
 /** Optional test seams for {@link ensureHostingIngress}. */

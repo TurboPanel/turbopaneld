@@ -1626,7 +1626,11 @@ test("ensureHostingCaddyRuntime writes unit and attempts install via host comman
     return Promise.resolve({ success: false, stderr: "unexpected" });
   });
   try {
-    await ensureHostingCaddyRuntime(layout);
+    await assertRejects(
+      () => ensureHostingCaddyRuntime(layout),
+      Error,
+      "hosting Caddy could not be installed or started",
+    );
     const caddyfilePath = join(layout.configDir, "hosting", "Caddyfile");
     assertStringIncludes(
       await Deno.readTextFile(caddyfilePath),
