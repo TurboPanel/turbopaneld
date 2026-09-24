@@ -16,10 +16,6 @@ const layout = resolveLayout({
 
 export const CANONICAL_INSTANCE_CA_PATH = layout.instanceCaPath;
 
-export function isPlaintextHttpUrl(url: string | undefined): boolean {
-  return url?.trim()?.startsWith("http://") === true;
-}
-
 export function encodeLicenseArg(
   licenseId: string,
   licenseToken: string,
@@ -32,20 +28,16 @@ export function encodeLicenseArg(
  *
  * Production Caddy never serves `/run.sh` — managed installs curl the CDN.
  * The **dev overlay** Caddyfile serves the checkout installer at `/run.sh` on
- * both plaintext `:8880` and HTTPS `:8443` (and whatever public origin a
- * Cloudflare tunnel forwards). Use the instance host when dialing plaintext
- * HTTP **or** when `TURBOPANEL_DL_BASE` is set so overlay updates never hit
- * the public CDN.
+ * `https://<host>:8443`. Use the instance host when `TURBOPANEL_DL_BASE` is
+ * set so overlay updates never hit the public CDN.
  */
 export function resolveRunScriptUrl(
   config: InstanceConfig,
   opts: { dlBase?: string } = {},
 ): string {
-  if (config.kind === "url") {
+  if (config.kind === "url" && opts.dlBase?.trim()) {
     const base = stripTrailingSlashes(config.baseUrl);
-    if (isPlaintextHttpUrl(base) || opts.dlBase?.trim()) {
-      return `${base}${RUN_SCRIPT_PATH}`;
-    }
+    return `${base}${RUN_SCRIPT_PATH}`;
   }
   return CDN_RUN_SCRIPT;
 }
@@ -69,38 +61,45 @@ export class UpdateTrustRepairError extends Error {
 }
 
 export type AutomaticUpdateTrust =
-  | { kind: "plaintext-dev" }
   | { kind: "public-tls" }
-  | { kind: "platform-ca"; caPath: string };
+  | { kind: "platform-ca"; caPath: string }
+  | { kind: "uploaded-trust"; caPath: string };
 
 /**
  * How the **automatic** update path (`update` over the daemon socket) may
- * fetch `run.sh`. Exactly three answers, none of which relax TLS:
+ * fetch `run.sh`. None of these relax TLS:
  *
- * - plaintext `http://` (development mode only — the daemon already refused
- *   to start on such a control plane without `TURBOPANEL_DEV_HTTP_CONTROL_PLANE`);
  * - publicly trusted TLS (the CDN, or an instance origin that is neither
  *   private-network nor off-port, so the system trust store applies);
- * - the configured Platform CA, when that file exists on disk.
+ * - the configured Platform CA, when that file exists on disk;
+ * - the private uploaded issuer, when the Platform CA file is absent. That
+ *   path is used as `--cacert` for the script download and is not passed as
+ *   `--instance-ca`.
  *
- * Anything else — a `.lan` / private-IP / non-443 origin with no CA file — is
- * a trust-repair error. `--insecure-tls` stays available to the operator's
- * explicit manual bootstrap (run.sh) and is never derived here.
+ * A plaintext `http://` origin is refused. Anything else — a `.lan` /
+ * private-IP / non-443 origin with neither file — is a trust-repair error.
+ * `--insecure-tls` stays available to the operator's explicit manual
+ * bootstrap (run.sh) and is never derived here.
  */
 export function resolveAutomaticUpdateTrust(options: {
   runScriptUrl: string;
   instanceCaPath?: string;
+  /** Verified private uploaded issuer. Not a Platform CA path. */
+  uploadedTrustPath?: string;
   /** Origin classifier — `installOriginNeedsInsecureTls` in production. */
   originNeedsInsecureTls: (origin: string) => boolean;
   /** File probe — `Deno.statSync`-shaped in production, injectable in tests. */
   caFileExists?: (path: string) => boolean;
 }): AutomaticUpdateTrust {
   const url = options.runScriptUrl;
-  if (isPlaintextHttpUrl(url)) return { kind: "plaintext-dev" };
+  if (url.trim().startsWith("http://")) {
+    throw new UpdateTrustRepairError(
+      `automatic update refused: run.sh origin ${url} is plaintext HTTP; the control plane is https://<host>:8443 and the daemon never fetches updates without TLS`,
+    );
+  }
   if (url === CDN_RUN_SCRIPT || !options.originNeedsInsecureTls(url)) {
     return { kind: "public-tls" };
   }
-  const caPath = options.instanceCaPath?.trim();
   const exists = options.caFileExists ?? ((path: string) => {
     try {
       Deno.statSync(path);
@@ -109,12 +108,18 @@ export function resolveAutomaticUpdateTrust(options: {
       return false;
     }
   });
+  const caPath = options.instanceCaPath?.trim();
   if (caPath && exists(caPath)) {
     return { kind: "platform-ca", caPath };
+  }
+  const uploaded = options.uploadedTrustPath?.trim();
+  if (uploaded && exists(uploaded)) {
+    return { kind: "uploaded-trust", caPath: uploaded };
   }
   throw new UpdateTrustRepairError(
     `automatic update refused: run.sh origin ${url} is not publicly trusted and no Platform CA is configured` +
       (caPath ? ` (${caPath} is missing)` : "") +
+      (uploaded ? ` (${uploaded} is missing)` : "") +
       " — re-run the installer with --instance-ca to repair trust; the daemon never disables TLS verification for automatic updates",
   );
 }
@@ -129,7 +134,6 @@ export function resolveBootstrapInsecureTls(options: {
   runScriptUrl: string;
   instanceCaPath?: string;
 }): boolean {
-  if (isPlaintextHttpUrl(options.runScriptUrl)) return false;
   if (options.releaseTlsInsecure === "1") return true;
   if (options.runScriptUrl === CDN_RUN_SCRIPT) return false;
   // Non-CDN run.sh over HTTPS (unusual; prefer --cacert when configured and
@@ -154,14 +158,12 @@ export function buildRunReconcileArgs(options: {
   if (dlBase) {
     args.push("--dl-base", stripTrailingSlashes(dlBase));
   }
-  if (!isPlaintextHttpUrl(instanceUrl)) {
-    const caPath = options.instanceCaPath?.trim();
-    if (caPath) {
-      args.push("--instance-ca", caPath);
-    }
-    if (options.insecureTls) {
-      args.push("--insecure-tls");
-    }
+  const caPath = options.instanceCaPath?.trim();
+  if (caPath) {
+    args.push("--instance-ca", caPath);
+  }
+  if (options.insecureTls) {
+    args.push("--insecure-tls");
   }
   args.push("--no-start");
   return args;
@@ -174,17 +176,13 @@ export async function downloadRunScript(
   const opts = typeof options === "boolean"
     ? { insecureTls: options }
     : options;
-  const curlArgs = isPlaintextHttpUrl(runScriptUrl)
-    ? ["-fsSL", runScriptUrl]
-    : ["-fsSL"];
-  if (!isPlaintextHttpUrl(runScriptUrl)) {
-    if (opts.insecureTls) {
-      curlArgs.push("-k");
-    } else if (opts.caPath?.trim()) {
-      curlArgs.push("--cacert", opts.caPath.trim());
-    }
-    curlArgs.push(runScriptUrl);
+  const curlArgs = ["-fsSL"];
+  if (opts.insecureTls) {
+    curlArgs.push("-k");
+  } else if (opts.caPath?.trim()) {
+    curlArgs.push("--cacert", opts.caPath.trim());
   }
+  curlArgs.push(runScriptUrl);
   const curl = await new Deno.Command("curl", {
     args: curlArgs,
     stdout: "piped",

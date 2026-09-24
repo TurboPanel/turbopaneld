@@ -19,6 +19,18 @@ export class UnsupportedSchemaVersionError extends Error {
   }
 }
 
+/**
+ * `TURBOPANEL_DL_BASE` is set, but it is not an https overlay catalog.
+ * An absent base selects the built-in rail. A configured non-https base
+ * must fail the update — it must not be treated as "no overlay".
+ */
+export class InsecureOverlayBaseError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "InsecureOverlayBaseError";
+  }
+}
+
 export class MalformedManifestError extends Error {
   constructor(message: string) {
     super(message);

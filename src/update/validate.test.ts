@@ -36,11 +36,15 @@ test("requireHttpsUrl rejects invalid absolute URLs", () => {
   );
 });
 
-test("requireHttpsUrl allows HTTP when overlay catalogs opt in", () => {
-  requireHttpsUrl(
-    "http://studio.lan:8880/downloads/daemon/turbopaneld-amd64.tar.zst",
-    "artifact.url",
-    true,
+test("requireHttpsUrl rejects HTTP overlay artifact URLs", () => {
+  assertThrows(
+    () =>
+      requireHttpsUrl(
+        "http://studio.lan/downloads/daemon/turbopaneld-amd64.tar.zst",
+        "artifact.url",
+      ),
+    MalformedManifestError,
+    "must use HTTPS",
   );
 });
 

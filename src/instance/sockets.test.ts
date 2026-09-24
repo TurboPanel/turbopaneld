@@ -1,7 +1,8 @@
 import { join } from "@std/path";
-import { assertEquals, assertRejects } from "@std/assert";
+import { assertEquals, assertRejects, assertThrows } from "@std/assert";
 import {
   CANONICAL_INSTANCE_CA_PATH,
+  CANONICAL_INSTANCE_UPLOADED_TRUST_PATH,
   createHttpClientFromCaPath,
   createInstanceHttpClient,
   DEFAULT_SOCKET_DIR,
@@ -12,6 +13,7 @@ import {
   resolveInstanceCaPath,
   resolveInstanceConfig,
   resolveInstanceSocket,
+  resolveInstanceUploadedTrustPath,
   resolveServerIdentityDir,
   resolveServerKeyPath,
   splitPemBundle,
@@ -47,6 +49,11 @@ test("development layout resolves shared FHS socket and CA paths", () => {
     "instanceCaPath",
   );
   assertEquals(
+    layout.instanceUploadedTrustPath,
+    join(DEV_CONFIG_DIR_DEFAULT, "instance-uploaded-trust.pem"),
+    "instanceUploadedTrustPath",
+  );
+  assertEquals(
     layout.instanceConfigDir,
     join(DEV_CONFIG_DIR_DEFAULT, "instance"),
     "instanceConfigDir",
@@ -60,6 +67,11 @@ test("production layout resolves FHS socket and CA paths", () => {
     layout.instanceCaPath,
     join(PROD_CONFIG_DIR_DEFAULT, "instance-ca.pem"),
     "instanceCaPath",
+  );
+  assertEquals(
+    layout.instanceUploadedTrustPath,
+    join(PROD_CONFIG_DIR_DEFAULT, "instance-uploaded-trust.pem"),
+    "instanceUploadedTrustPath",
   );
   assertEquals(
     layout.instanceConfigDir,
@@ -79,6 +91,11 @@ test("DEFAULT_SOCKET_DIR and CANONICAL_INSTANCE_CA_PATH match active layout", ()
     CANONICAL_INSTANCE_CA_PATH,
     layout.instanceCaPath,
     "CANONICAL_INSTANCE_CA_PATH",
+  );
+  assertEquals(
+    CANONICAL_INSTANCE_UPLOADED_TRUST_PATH,
+    layout.instanceUploadedTrustPath,
+    "CANONICAL_INSTANCE_UPLOADED_TRUST_PATH",
   );
 });
 
@@ -214,74 +231,28 @@ test("resolveInstanceCaPath returns undefined when env unset and canonical file 
   });
 });
 
-test("createInstanceHttpClient returns undefined for plaintext http with dev flag without reading CA", async () => {
-  const client = await createInstanceHttpClient(
-    {
-      kind: "url",
-      baseUrl: "http://localhost:8880",
-      wsBaseUrl: "ws://localhost:8880",
-    },
-    {
-      caCertPath: "/nonexistent/etc/turbopanel/instance-ca.pem",
-      env: { TURBOPANEL_DEV_HTTP_CONTROL_PLANE: "1" },
-    },
-  );
-  if (client !== undefined) {
-    throw new Error(`expected undefined, got ${client}`);
-  }
-});
-
-test("createInstanceHttpClient rejects plaintext http without the dev flag", async () => {
-  let threw = false;
-  try {
-    await createInstanceHttpClient(
-      {
+test("createInstanceHttpClient rejects plaintext http", async () => {
+  await assertRejects(
+    () =>
+      createInstanceHttpClient({
         kind: "url",
         baseUrl: "http://managed.example.com",
         wsBaseUrl: "ws://managed.example.com",
-      },
-      { env: {} },
-    );
-  } catch {
-    threw = true;
-  }
-  if (!threw) {
-    throw new Error(
-      "expected createInstanceHttpClient to reject plaintext http without TURBOPANEL_DEV_HTTP_CONTROL_PLANE",
-    );
-  }
+      }),
+    Error,
+    "must use https://",
+  );
 });
 
-test("resolveInstanceConfig rejects plaintext http control plane without the dev flag", () => {
-  let threw = false;
-  try {
-    resolveInstanceConfig({
-      TURBOPANEL_INSTANCE_URL: "http://managed.example.com",
-    });
-  } catch {
-    threw = true;
-  }
-  if (!threw) {
-    throw new Error(
-      "expected resolveInstanceConfig to reject plaintext http without TURBOPANEL_DEV_HTTP_CONTROL_PLANE",
-    );
-  }
-});
-
-test("resolveInstanceConfig allows plaintext http control plane with the dev flag", () => {
-  const config = resolveInstanceConfig({
-    TURBOPANEL_INSTANCE_URL: "http://localhost:8880",
-    TURBOPANEL_DEV_HTTP_CONTROL_PLANE: "1",
-  });
-  if (config.kind !== "url") {
-    throw new Error("expected url mode for plaintext http with dev flag");
-  }
-  if (config.baseUrl !== "http://localhost:8880") {
-    throw new Error(`expected http://localhost:8880, got ${config.baseUrl}`);
-  }
-  if (config.wsBaseUrl !== "ws://localhost:8880") {
-    throw new Error(`expected ws://localhost:8880, got ${config.wsBaseUrl}`);
-  }
+test("resolveInstanceConfig rejects plaintext http", () => {
+  assertThrows(
+    () =>
+      resolveInstanceConfig({
+        TURBOPANEL_INSTANCE_URL: "http://managed.example.com",
+      }),
+    Error,
+    "must use https://",
+  );
 });
 
 test("deno transition: cleared URL key restores socket mode", () => {
@@ -307,7 +278,7 @@ test("resolveInstanceSocket prefers TURBOPANEL_SOCKET override", () => {
   );
 });
 
-test("resolveInstanceConfig rejects non-http instance URL schemes", () => {
+test("resolveInstanceConfig rejects non-https instance URL schemes", () => {
   let threw = false;
   try {
     resolveInstanceConfig({
@@ -318,10 +289,7 @@ test("resolveInstanceConfig rejects non-http instance URL schemes", () => {
     if (!(err instanceof Error)) {
       throw new TypeError("expected Error for invalid scheme");
     }
-    assertEquals(
-      err.message.includes("must start with http:// or https://"),
-      true,
-    );
+    assertEquals(err.message.includes("must use https://"), true);
   }
   assertEquals(threw, true);
 });
@@ -575,6 +543,130 @@ test("createHttpClientFromCaPath caches by mtime+size and rejects empty bundles"
       "contains no certificates",
     );
   } finally {
+    invalidatePlatformCaHttpClient();
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+async function opensslOrThrow(args: string[]): Promise<void> {
+  const out = await new Deno.Command("openssl", {
+    args,
+    stdout: "null",
+    stderr: "piped",
+  }).output();
+  if (!out.success) {
+    throw new TypeError(new TextDecoder().decode(out.stderr));
+  }
+}
+
+test("a private uploaded issuer enrolls and reconnects; system roots do not", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "tp-uploaded-enroll-" });
+  const caKey = `${dir}/ca.key`;
+  const caCert = `${dir}/ca.crt`;
+  const leafKey = `${dir}/leaf.key`;
+  const leafCsr = `${dir}/leaf.csr`;
+  const leafCert = `${dir}/leaf.crt`;
+  const ac = new AbortController();
+  let client: Deno.HttpClient | undefined;
+  let server: ReturnType<typeof Deno.serve> | undefined;
+  try {
+    await opensslOrThrow([
+      "req",
+      "-x509",
+      "-newkey",
+      "rsa:2048",
+      "-nodes",
+      "-keyout",
+      caKey,
+      "-out",
+      caCert,
+      "-days",
+      "1",
+      "-subj",
+      "/CN=PrivateUploadCA",
+      "-addext",
+      "basicConstraints=critical,CA:TRUE",
+    ]);
+    await opensslOrThrow([
+      "req",
+      "-newkey",
+      "rsa:2048",
+      "-nodes",
+      "-keyout",
+      leafKey,
+      "-out",
+      leafCsr,
+      "-subj",
+      "/CN=private.example.com",
+      "-addext",
+      "subjectAltName=DNS:private.example.com,IP:127.0.0.1",
+    ]);
+    await opensslOrThrow([
+      "x509",
+      "-req",
+      "-in",
+      leafCsr,
+      "-CA",
+      caCert,
+      "-CAkey",
+      caKey,
+      "-CAcreateserial",
+      "-out",
+      leafCert,
+      "-days",
+      "1",
+      "-copy_extensions",
+      "copy",
+    ]);
+    const cert = await Deno.readTextFile(leafCert);
+    const key = await Deno.readTextFile(leafKey);
+    server = Deno.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      cert,
+      key,
+      signal: ac.signal,
+      onListen() {},
+    }, () => new Response("enrolled"));
+    const addr = server.addr;
+    const port = typeof addr === "object" && "port" in addr ? addr.port : 0;
+    const config = {
+      kind: "url" as const,
+      baseUrl: `https://127.0.0.1:${port}`,
+      wsBaseUrl: `wss://127.0.0.1:${port}`,
+    };
+    const env = {
+      TURBOPANEL_CONFIG_DIR: dir,
+      TURBOPANEL_INSTANCE_UPLOADED_TRUST: caCert,
+    };
+    assertEquals(resolveInstanceUploadedTrustPath(env), caCert);
+    invalidatePlatformCaHttpClient();
+    client = await createInstanceHttpClient(config, { env });
+    if (!client) {
+      throw new TypeError("expected an HttpClient for the private issuer");
+    }
+    const first = await fetch(`https://127.0.0.1:${port}/`, { client });
+    assertEquals(await first.text(), "enrolled");
+    const again = await createInstanceHttpClient(config, { env });
+    const second = await fetch(`https://127.0.0.1:${port}/`, { client: again });
+    assertEquals(second.status, 200);
+    assertEquals(await second.text(), "enrolled");
+
+    const publicRoots = await createInstanceHttpClient(config, {
+      env: { TURBOPANEL_CONFIG_DIR: dir },
+    });
+    assertEquals(publicRoots, undefined);
+    let systemRootsRejected = false;
+    try {
+      await fetch(`https://127.0.0.1:${port}/`);
+    } catch {
+      systemRootsRejected = true;
+    }
+    assertEquals(systemRootsRejected, true);
+  } finally {
+    client?.close();
+    ac.abort();
+    await server?.finished.catch(() => undefined);
     invalidatePlatformCaHttpClient();
     await Deno.remove(dir, { recursive: true });
   }

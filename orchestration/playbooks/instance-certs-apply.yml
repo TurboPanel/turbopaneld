@@ -3,17 +3,18 @@
 # Invoked by the daemon public-urls-apply handler after writing
 # TURBOPANEL_PUBLIC_URLS and any uploaded pairs. Runs instance-certs, renders
 # a candidate Caddyfile, and validates it. When Caddy is already running, the
-# candidate is loaded through admin localhost:2019 first; the persistent
+# candidate is loaded through the admin Unix socket first; the persistent
 # Caddyfile is replaced only after that process accepts the config. A
 # rejected reload leaves the live file (including :8443) untouched. When
 # Caddy is not running, a failed start restores the previous file. Reload,
 # not restart, so the in-flight admin request that triggered the apply is
 # not killed.
 #
-# Let's Encrypt certificates are not files this playbook writes. Caddy's own
-# client stores them under the control-plane unit's XDG_DATA_HOME. The
-# hostname sidecar next to the Caddyfile is what InstanceAcmeIssuanceObserver
-# reads.
+# Let's Encrypt certificates are not files this playbook writes. A named
+# :8443 site is rendered only when letsencrypt-<host>.{crt,key} already
+# exist (letsencrypt-files.yml), so the first apply cannot fail Caddy load.
+# The hostname sidecar next to the Caddyfile is what
+# InstanceAcmeRenewalScheduler reads.
 - name: TurboPanel instance certs apply
   hosts: localhost
   connection: local
@@ -22,8 +23,17 @@
   roles:
     - role: instance-certs
   post_tasks:
-    - name: Decide whether control-plane Caddy may bind public :443
-      ansible.builtin.include_tasks: "{{ playbook_dir }}/../roles/instance-certs/tasks/public-https-owner.yml"
+    - name: Harden Let's Encrypt keys and record hostnames whose files exist
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/../roles/instance-certs/tasks/letsencrypt-files.yml"
+
+    - name: Ensure the control-plane Caddy admin socket directory exists
+      when: turbopanel_dev_user | default('') | length == 0
+      ansible.builtin.file:
+        path: "{{ turbopanel_caddy_admin_socket | dirname }}"
+        state: directory
+        owner: "{{ caddy_user }}"
+        group: "{{ caddy_primary_group }}"
+        mode: "0750"
 
     - name: Ensure the control-plane Caddy config directory exists
       when: turbopanel_dev_user | default('') | length == 0
@@ -74,7 +84,8 @@
           - --adapter
           - caddyfile
           - --address
-          - localhost:2019
+          - "unix/{{ turbopanel_caddy_admin_socket }}"
+          - --force
 
     - name: Install the Caddyfile the running process accepted
       when:

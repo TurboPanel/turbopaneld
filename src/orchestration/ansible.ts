@@ -31,6 +31,10 @@ import {
   devConvergeOptionsExtraArgs,
   resolveDevConvergeOptions,
 } from "./dev-converge-options.ts";
+import {
+  mergeDevCertPublicUrls,
+  readDevForwardHostsFile,
+} from "./dev-forward-hosts.ts";
 import { join } from "@std/path";
 import { logInfo, logWarn } from "../util/logger.ts";
 import { readDockerNetworkingState } from "../deploy/docker-networking-state.ts";
@@ -183,7 +187,10 @@ function devInstanceExtraArgs(
       ? "workers"
       : "deno";
 
-  const publicUrls = Deno.env.get("TURBOPANEL_PUBLIC_URLS");
+  const publicUrls = mergeDevCertPublicUrls(
+    Deno.env.get("TURBOPANEL_PUBLIC_URLS"),
+    readDevForwardHostsFile(),
+  );
 
   return [
     ...devOwnershipPlaybookExtraArgs(),

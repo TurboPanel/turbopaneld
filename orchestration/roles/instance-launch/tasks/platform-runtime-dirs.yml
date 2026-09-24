@@ -69,6 +69,18 @@
 
 # Upgraded hosts may still have nested XDG state owned by tpctrl from before the
 # tpcaddy unit user switch; migrate ownership without forcing file modes.
+# Admin API socket directory. caddy_user must be able to bind the socket
+# here; mode 0750 keeps every other account out. Managed installs only —
+# the dev overlay does not use turbopanel_caddy_admin_socket.
+- name: Ensure control-plane Caddy admin socket directory exists
+  when: turbopanel_dev_user | default('') | length == 0
+  ansible.builtin.file:
+    path: "{{ turbopanel_caddy_admin_socket | dirname }}"
+    state: directory
+    owner: "{{ caddy_user }}"
+    group: "{{ caddy_primary_group }}"
+    mode: "0750"
+
 - name: Migrate existing Caddy XDG subtree ownership to caddy user
   ansible.builtin.file:
     path: "{{ item }}"

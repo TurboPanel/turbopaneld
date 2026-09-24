@@ -611,7 +611,7 @@ Six controls, each with a test that fails the build when it regresses:
   PATH/ANSIBLE_* itself, and keeps Ansible's temp/home in a root-only
   `/tmp/turbopanel-orchestrate`. `galaxy-docker-role` fetches the pinned
   geerlingguy.docker role into the root-owned roles dir; `update` fetches
-  `run.sh` (CDN, plaintext dev host, or overlay host with the canonical
+  `run.sh` (CDN, or an HTTPS overlay host with the canonical
   Platform CA — never `-k`) and runs it with re-validated flags, which is how
   panel-driven daemon updates work now (`executeRunReconcile` →
   `rootHelperReconcileInvocation`; the daemon never hands root a script body).
@@ -649,7 +649,7 @@ Six controls, each with a test that fails the build when it regresses:
   repo manifests (`--instance` installs) are verified when signed and reported
   loudly when not — their release jobs do not sign yet.
 - **Automatic-update TLS** — `resolveAutomaticUpdateTrust`
-  (`src/instance/run-reconcile.ts`): plaintext dev, public trust, or the
+  (`src/instance/run-reconcile.ts`): public trust or the
   configured Platform CA file; otherwise `UpdateTrustRepairError` naming
   `--instance-ca`. `TURBOPANEL_RELEASE_TLS_INSECURE` and `--insecure-tls` are
   never consulted on that path (manual `run.sh` keeps the flag).

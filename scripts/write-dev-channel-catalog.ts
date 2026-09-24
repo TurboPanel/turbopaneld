@@ -1,7 +1,7 @@
 /**
  * Write a local overlay catalog (`dist/channels.json` + `dist/manifest.json`)
- * with **relative** artifact URLs so the same files work behind LAN HTTPS,
- * plaintext `:8880`, and a Cloudflare tunnel. Remote `run.sh` / `resolveUpdate`
+ * with **relative** artifact URLs so the same files work behind LAN HTTPS
+ * on `:8443` and a Cloudflare tunnel. Remote `run.sh` / `resolveUpdate`
  * join those URLs against `TURBOPANEL_DL_BASE`.
  *
  * Usage: deno run --allow-read --allow-write --allow-run scripts/write-dev-channel-catalog.ts

@@ -4,10 +4,18 @@ import {
   runLocalPlaybook,
 } from "../orchestration/ansible.ts";
 import { INSTANCE_CERTS_APPLY_PLAYBOOK } from "../orchestration/assets.ts";
+import {
+  mergeDevCertPublicUrls,
+  readDevForwardHostsFile,
+} from "../orchestration/dev-forward-hosts.ts";
 import { resolveDevRoot, resolveLayout } from "../paths/layout.ts";
 import {
+  closeInstanceAcmeWindow,
+  issueInstanceLetsEncryptCertificates,
+  letsEncryptHostnames,
+  openInstanceAcmeWindow,
   preflightInstanceLetsEncryptHttp01,
-  syncInstanceAcmeHttp01Site,
+  withInstanceAcmeWindowLock,
 } from "../deploy/instance-acme-http01.ts";
 import type {
   InstanceAcmeWireSettings,
@@ -138,15 +146,31 @@ export async function writeUploadedInstanceCerts(
   }
 }
 
+/**
+ * Leaf SANs for instance-certs. Operator platform-ca hosts only, plus the
+ * Vagrant host LAN names in co-located dev. Those names are not hostname rows.
+ */
+export function certificateGenerationPublicUrls(
+  hostnames: readonly InstanceHostnameApplyEntry[],
+  env: Record<string, string | undefined> = Deno.env.toObject(),
+  readForwardHosts: () => string = readDevForwardHostsFile,
+): string {
+  const platformCa = platformCaHosts(hostnames).join(",");
+  if (!isCoLocatedDev(env)) return platformCa;
+  return mergeDevCertPublicUrls(platformCa, readForwardHosts());
+}
+
 export async function runInstanceCertsApply(
   instanceDir: string,
   hostnames: readonly InstanceHostnameApplyEntry[],
   deps: {
     runPlaybook?: typeof runLocalPlaybook;
     instanceAcme?: InstanceAcmeWireSettings;
+    readForwardHosts?: () => string;
+    env?: Record<string, string | undefined>;
   } = {},
 ): Promise<void> {
-  const platformCa = platformCaHosts(hostnames);
+  const env = deps.env ?? Deno.env.toObject();
   const extra: Record<string, unknown> = {
     turbopanel_hostnames: hostnames.map(ansibleHostname),
   };
@@ -158,10 +182,16 @@ export async function runInstanceCertsApply(
     "-e",
     `turbopanel_instance_dir=${instanceDir}`,
     "-e",
-    `turbopanel_public_urls=${platformCa.join(",")}`,
+    `turbopanel_public_urls=${
+      certificateGenerationPublicUrls(
+        hostnames,
+        env,
+        deps.readForwardHosts ?? readDevForwardHostsFile,
+      )
+    }`,
     "-e",
     JSON.stringify(extra),
-    ...devOwnershipPlaybookExtraArgs(),
+    ...devOwnershipPlaybookExtraArgs(env),
   ];
   const runPlaybook = deps.runPlaybook ?? runLocalPlaybook;
   await runPlaybook(INSTANCE_CERTS_APPLY_PLAYBOOK, args);
@@ -171,23 +201,91 @@ export async function applyPublicUrls(
   hostnames: readonly InstanceHostnameApplyEntry[],
   deps: {
     runCertsApply?: typeof runInstanceCertsApply;
+    runPlaybook?: typeof runLocalPlaybook;
+    readForwardHosts?: () => string;
     instanceAcme?: InstanceAcmeWireSettings;
     writeUploadedCerts?: typeof writeUploadedInstanceCerts;
-    syncChallenge?: typeof syncInstanceAcmeHttp01Site;
+    openWindow?: typeof openInstanceAcmeWindow;
     preflightLetsEncrypt?: typeof preflightInstanceLetsEncryptHttp01;
+    issueLetsEncrypt?: typeof issueInstanceLetsEncryptCertificates;
+    closeWindow?: typeof closeInstanceAcmeWindow;
+    withLock?: typeof withInstanceAcmeWindowLock;
   } = {},
 ): Promise<void> {
   const instanceDir = resolveInstanceDir();
+  const layout = resolveLayout(Deno.env.toObject());
   await upsertPublicUrlsInEnv(platformCaHosts(hostnames));
   const writeUploaded = deps.writeUploadedCerts ?? writeUploadedInstanceCerts;
-  await writeUploaded(hostnames, resolveInstanceCertsDir());
-  const preflight = deps.preflightLetsEncrypt ??
-    preflightInstanceLetsEncryptHttp01;
-  await preflight(hostnames, resolveLayout(Deno.env.toObject()));
+  const certsDir = resolveInstanceCertsDir();
+  await writeUploaded(hostnames, certsDir);
+  await issueLetsEncryptHosts(hostnames, layout, certsDir, deps);
   const runCerts = deps.runCertsApply ?? runInstanceCertsApply;
   await runCerts(instanceDir, hostnames, {
     instanceAcme: deps.instanceAcme,
+    readForwardHosts: deps.readForwardHosts,
+    runPlaybook: deps.runPlaybook,
   });
-  const syncChallenge = deps.syncChallenge ?? syncInstanceAcmeHttp01Site;
-  await syncChallenge(resolveLayout(Deno.env.toObject()));
+}
+
+async function issueLetsEncryptHosts(
+  hostnames: readonly InstanceHostnameApplyEntry[],
+  layout: ReturnType<typeof resolveLayout>,
+  certsDir: string,
+  deps: {
+    instanceAcme?: InstanceAcmeWireSettings;
+    openWindow?: typeof openInstanceAcmeWindow;
+    preflightLetsEncrypt?: typeof preflightInstanceLetsEncryptHttp01;
+    issueLetsEncrypt?: typeof issueInstanceLetsEncryptCertificates;
+    closeWindow?: typeof closeInstanceAcmeWindow;
+    withLock?: typeof withInstanceAcmeWindowLock;
+  },
+): Promise<void> {
+  const hosts = letsEncryptHostnames(hostnames);
+  if (hosts.length === 0) return;
+  const instanceAcme = deps.instanceAcme;
+  if (!instanceAcme?.tosAccepted) {
+    throw new Error("Let's Encrypt terms have not been accepted");
+  }
+  const withLock = deps.withLock ?? withInstanceAcmeWindowLock;
+  await withLock(() =>
+    openIssueWindow(hostnames, hosts, layout, certsDir, instanceAcme, deps)
+  );
+}
+
+async function openIssueWindow(
+  hostnames: readonly InstanceHostnameApplyEntry[],
+  hosts: readonly string[],
+  layout: ReturnType<typeof resolveLayout>,
+  certsDir: string,
+  instanceAcme: InstanceAcmeWireSettings,
+  deps: {
+    openWindow?: typeof openInstanceAcmeWindow;
+    preflightLetsEncrypt?: typeof preflightInstanceLetsEncryptHttp01;
+    issueLetsEncrypt?: typeof issueInstanceLetsEncryptCertificates;
+    closeWindow?: typeof closeInstanceAcmeWindow;
+  },
+): Promise<void> {
+  const open = deps.openWindow ?? openInstanceAcmeWindow;
+  const preflight = deps.preflightLetsEncrypt ??
+    preflightInstanceLetsEncryptHttp01;
+  const issue = deps.issueLetsEncrypt ?? issueInstanceLetsEncryptCertificates;
+  const close = deps.closeWindow ?? closeInstanceAcmeWindow;
+  let attempted = false;
+  let closed = false;
+  const closeOnce = async (): Promise<void> => {
+    if (closed) return;
+    closed = true;
+    await close(layout);
+  };
+  try {
+    attempted = true;
+    await open(layout, hosts);
+    await preflight(hostnames, layout);
+    await issue(layout, hosts, instanceAcme, certsDir, {
+      closeWindow: () => closeOnce(),
+    });
+  } catch (err) {
+    if (attempted) await closeOnce().catch(() => undefined);
+    throw err;
+  }
 }

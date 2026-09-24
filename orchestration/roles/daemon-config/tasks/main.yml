@@ -56,6 +56,21 @@
     mode: "0640"
   notify: Restart turbopanel daemon
 
+- name: Check for a private uploaded issuer
+  ansible.builtin.stat:
+    path: "{{ turbopanel_config_dir }}/instance-uploaded-trust.pem"
+  register: _uploaded_trust
+
+- name: Restrict private uploaded issuer permissions
+  when: _uploaded_trust.stat.exists | default(false)
+  ansible.builtin.file:
+    path: "{{ turbopanel_config_dir }}/instance-uploaded-trust.pem"
+    state: file
+    owner: "{{ turbopanel_user }}"
+    group: "{{ turbopanel_group }}"
+    mode: "0640"
+  notify: Restart turbopanel daemon
+
 - name: Write daemon environment file
   ansible.builtin.template:
     src: dotenv.j2

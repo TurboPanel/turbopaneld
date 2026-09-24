@@ -52,7 +52,8 @@ TP_CURL_FETCH_INSECURE='curl -fsSLk'
 # Release artifact downloads (channel manifest, verified binary/orchestration/JS
 # artifacts, and the Deno runtime zip) always verify TLS against public trust.
 # `--insecure-tls` only relaxes trust for the self-hosted *instance* bootstrap
-# legs (the initial run.sh re-exec and the instance CA fetch) — it must never
+# legs (the initial run.sh re-exec, the instance CA fetch, and the private
+# uploaded-issuer fetch) — it must never
 # weaken release/CDN trust, so bootstrapping a self-signed instance cannot
 # silently disable verification of the code we execute. If a genuine
 # release-download TLS emergency ever arises, TURBOPANEL_RELEASE_TLS_INSECURE_OVERRIDE=1
@@ -98,6 +99,172 @@ tp_ca_validates_leaf() {
   esac
 }
 
+# True when TRUST_FILE holds an issuer (not the presented leaf itself) that
+# verifies PRESENTED and PRESENTED's SAN covers HOST. A leaf pin is rejected:
+# the daemon verifies the chain against an issuer and still checks the name.
+tp_trust_has_distinct_issuer() {
+  _trust="$1"
+  _leaf_fp="$2"
+  _dir="$(mktemp -d)"
+  awk -v dir="$_dir" '
+    /-----BEGIN CERTIFICATE-----/ { n++; file = dir "/c" n ".pem" }
+    n > 0 { print >> file }
+    /-----END CERTIFICATE-----/ { if (file != "") close(file) }
+  ' "$_trust"
+  _distinct=1
+  for _cert in "$_dir"/c*.pem; do
+    [ -f "$_cert" ] || continue
+    _fp="$(tp_ca_fingerprint "$_cert")"
+    if [ -n "$_fp" ] && [ "$_fp" != "$_leaf_fp" ]; then
+      _distinct=0
+      break
+    fi
+  done
+  rm -rf "$_dir"
+  return "$_distinct"
+}
+
+tp_uploaded_trust_verifies() {
+  _trust="$1"
+  _leaf="$2"
+  _host="$3"
+  if [ -z "$_trust" ] || [ -z "$_leaf" ] || [ -z "$_host" ]; then
+    return 1
+  fi
+  if ! tp_ca_parses "$_trust" || ! tp_ca_parses "$_leaf"; then
+    return 1
+  fi
+  _leaf_fp="$(tp_ca_fingerprint "$_leaf")"
+  if [ -z "$_leaf_fp" ]; then
+    return 1
+  fi
+  if ! tp_trust_has_distinct_issuer "$_trust" "$_leaf_fp"; then
+    return 1
+  fi
+  openssl verify -verify_hostname "$_host" -partial_chain -CAfile "$_trust" "$_leaf" >/dev/null 2>&1
+}
+
+tp_url_host() {
+  python3 -c 'import sys; from urllib.parse import urlparse; print(urlparse(sys.argv[1]).hostname or "")' "$1"
+}
+
+tp_url_port() {
+  python3 -c 'import sys; from urllib.parse import urlparse; u=urlparse(sys.argv[1]); print(u.port or (443 if u.scheme=="https" else 80))' "$1"
+}
+
+tp_capture_presented_leaf() {
+  _dest="$1"
+  _host="$2"
+  _port="$(tp_url_port "$HOST_URL")"
+  _raw="$(mktemp)"
+  openssl s_client -connect "${_host}:${_port}" -servername "$_host" -showcerts </dev/null >"$_raw" 2>/dev/null || true
+  awk '
+    /-----BEGIN CERTIFICATE-----/ { n++ }
+    n == 1 { print }
+    /-----END CERTIFICATE-----/ && n == 1 { exit }
+  ' "$_raw" > "$_dest"
+  rm -f "$_raw"
+  tp_ca_parses "$_dest"
+}
+
+# Install TRUST only when it is the issuer of the certificate HOST_URL presents.
+# Never copied onto the Platform CA path.
+tp_install_verified_uploaded_trust() {
+  _src="$1"
+  _host="$(tp_url_host "$HOST_URL")"
+  _presented="$(mktemp)"
+  if ! tp_capture_presented_leaf "$_presented" "$_host"; then
+    rm -f "$_presented"
+    tp_print_error "Could not read the certificate presented by ${_host}. Refusing to store an unverified private issuer."
+    return 1
+  fi
+  if ! tp_uploaded_trust_verifies "$_src" "$_presented" "$_host"; then
+    rm -f "$_presented"
+    tp_print_error "The uploaded trust document does not verify the certificate presented for ${_host}. Upload the private issuer that signed that leaf, with ${_host} on the certificate. Bootstrap insecure TLS is not runtime trust."
+    return 1
+  fi
+  rm -f "$_presented"
+  install -m 0640 "$_src" "$UPLOADED_TRUST_PATH"
+  tp_print_ok "Private uploaded issuer installed ($(tp_ca_fingerprint "$UPLOADED_TRUST_PATH")); runtime TLS still verifies the chain and hostname"
+}
+
+# Bootstrap -k is not enough. A private upload must leave either a Platform CA
+# that validates the live leaf or an uploaded issuer that signs the certificate
+# HOST_URL is presenting now. An existing file from a previous install is not
+# that proof: a non-404 fetch keeps it, including after the leaf was replaced.
+tp_bootstrap_trust_anchored() {
+  if [ "${INSECURE_TLS:-false}" != true ]; then
+    return 0
+  fi
+  if [ -n "${CA_PATH:-}" ] && [ -f "$CA_PATH" ] && tp_ca_validates_leaf "$CA_PATH"; then
+    return 0
+  fi
+  if [ -n "${UPLOADED_TRUST_PATH:-}" ] && [ -f "$UPLOADED_TRUST_PATH" ]; then
+    _host="$(tp_url_host "${HOST_URL:-}")"
+    _presented="$(mktemp)"
+    if tp_capture_presented_leaf "$_presented" "$_host" &&
+      tp_uploaded_trust_verifies "$UPLOADED_TRUST_PATH" "$_presented" "$_host"
+    then
+      rm -f "$_presented"
+      return 0
+    fi
+    rm -f "$_presented"
+  fi
+  return 1
+}
+
+tp_instance_bootstrap_curl() {
+  if [ "${INSECURE_TLS:-false}" = true ]; then
+    printf '%s' "curl -sSLk"
+    return 0
+  fi
+  if [ -n "${UPLOADED_TRUST_PATH:-}" ] && [ -f "$UPLOADED_TRUST_PATH" ]; then
+    printf '%s' "curl -sSL --cacert $UPLOADED_TRUST_PATH"
+    return 0
+  fi
+  if [ -n "${CA_PATH:-}" ] && [ -f "$CA_PATH" ]; then
+    printf '%s' "curl -sSL --cacert $CA_PATH"
+    return 0
+  fi
+  printf '%s' "curl -sSL"
+}
+
+tp_fetch_uploaded_trust() {
+  _curl_base="$(tp_instance_bootstrap_curl)"
+  _trust_tmp="$(mktemp)"
+  # shellcheck disable=SC2086
+  _trust_code=$(tp_curl_http_code $_curl_base -o "$_trust_tmp" -w '%{http_code}' "${HOST_URL%/}/api/daemon/v1/instance/uploaded-trust")
+  case "$_trust_code" in
+    200)
+      if ! tp_install_verified_uploaded_trust "$_trust_tmp"; then
+        rm -f "$_trust_tmp"
+        return 1
+      fi
+      ;;
+    404)
+      rm -f "$UPLOADED_TRUST_PATH"
+      ;;
+    000)
+      if [ -f "$UPLOADED_TRUST_PATH" ]; then
+        _retry="$(mktemp)"
+        _retry_code=$(tp_curl_http_code curl -sSLk -o "$_retry" -w '%{http_code}' "${HOST_URL%/}/api/daemon/v1/instance/uploaded-trust")
+        if [ "$_retry_code" = "200" ] && tp_install_verified_uploaded_trust "$_retry"; then
+          rm -f "$_retry"
+        else
+          rm -f "$_trust_tmp" "$_retry"
+          tp_print_error "private uploaded issuer changed and could not be verified"
+          return 1
+        fi
+      fi
+      ;;
+    *)
+      tp_print_step "~" "Could not download private uploaded issuer (HTTP ${_trust_code}) — keeping existing issuer if present"
+      ;;
+  esac
+  rm -f "$_trust_tmp"
+  return 0
+}
+
 tp_install_instance_ca() {
   _new_ca="$1"
   _old_fp=""
@@ -121,20 +288,16 @@ tp_artifact_curl() {
     tp_release_curl
     return 0
   fi
-  case "${TURBOPANEL_DL_BASE}" in
-    http://*)
-      printf '%s' "$TP_CURL_FETCH"
-      return 0
-      ;;
-    *)
-      ;;
-  esac
   if [ "${INSECURE_TLS:-false}" = true ]; then
     printf '%s' "$TP_CURL_FETCH_INSECURE"
     return 0
   fi
   _cacert=""
-  if [ -n "${INSTANCE_CA:-}" ] && [ -f "$INSTANCE_CA" ]; then
+  if [ -n "${UPLOADED_TRUST_PATH:-}" ] && [ -f "$UPLOADED_TRUST_PATH" ]; then
+    _cacert="$UPLOADED_TRUST_PATH"
+  elif [ -f "/etc/turbopanel/instance-uploaded-trust.pem" ]; then
+    _cacert="/etc/turbopanel/instance-uploaded-trust.pem"
+  elif [ -n "${INSTANCE_CA:-}" ] && [ -f "$INSTANCE_CA" ]; then
     _cacert="$INSTANCE_CA"
   elif [ -n "${CA_PATH:-}" ] && [ -f "$CA_PATH" ]; then
     _cacert="$CA_PATH"
@@ -152,9 +315,13 @@ tp_join_url() {
   _base="$1"
   _ref="$2"
   case "$_ref" in
-    http://*|https://*)
+    https://*)
       printf '%s' "$_ref"
       return 0
+      ;;
+    http://*)
+      echo "run.sh: refusing plaintext URL: $_ref" >&2
+      return 1
       ;;
     *)
       ;;
@@ -409,15 +576,6 @@ tp_download_verified_artifact() {
 
   case "$_url" in
     https://*) ;;
-    http://*)
-      case "${TURBOPANEL_DL_BASE:-}" in
-        http://*) ;;
-        *)
-          echo "run.sh: release URL must use HTTPS: $_url" >&2
-          return 1
-          ;;
-      esac
-      ;;
     *)
       echo "run.sh: release URL must use HTTPS: $_url" >&2
       return 1
@@ -1240,7 +1398,23 @@ done
 [ -n "$HOST_URL" ] || HOST_URL="${TURBOPANEL_HOST:-}"
 [ -n "$DL_BASE" ] || DL_BASE="${TURBOPANEL_DL_BASE:-}"
 DL_BASE="$(tp_strip_trailing_slashes "$DL_BASE")"
+if [ -n "$HOST_URL" ]; then
+  case "$HOST_URL" in
+    https://*) ;;
+    *)
+      tp_print_error "--host must be an https:// URL (got $HOST_URL)"
+      exit 1
+      ;;
+  esac
+fi
 if [ -n "$DL_BASE" ]; then
+  case "$DL_BASE" in
+    https://*) ;;
+    *)
+      tp_print_error "TURBOPANEL_DL_BASE must be an https:// URL (got $DL_BASE)"
+      exit 1
+      ;;
+  esac
   export TURBOPANEL_DL_BASE="$DL_BASE"
 fi
 # A pin: one exact daemon manifest (a tag's
@@ -1393,11 +1567,15 @@ STATE_DIR="/var/lib/turbopanel"
 RUN_DIR="/run/turbopanel"
 ENV_FILE="$CONFIG_DIR/daemon.env"
 CA_PATH="$CONFIG_DIR/instance-ca.pem"
+UPLOADED_TRUST_PATH="$CONFIG_DIR/instance-uploaded-trust.pem"
 LICENSE_STAGING_DIR="$STATE_DIR/daemon-license-staging"
 
 # NOTE: `--insecure-tls` (INSECURE_TLS) deliberately does NOT export any
 # release-insecure flag. It only relaxes trust for the self-hosted instance
-# bootstrap legs below (the run.sh re-exec above and the instance CA fetch).
+# bootstrap legs below (the run.sh re-exec, the instance CA fetch, and the
+# private uploaded-issuer fetch). The issuer is verified against the presented
+# leaf before it is stored. It is not written to instance-ca.pem, and it is
+# not a permanent insecure TLS setting.
 # Release/CDN downloads stay TLS-verified via tp_release_curl(); the only way to
 # relax them is the undocumented operator-only TURBOPANEL_RELEASE_TLS_INSECURE_OVERRIDE.
 
@@ -1477,6 +1655,15 @@ fi
 if [ -z "$HOST_URL" ]; then
   HOST_URL="$_manifest_host"
 fi
+if [ -n "$HOST_URL" ]; then
+  case "$HOST_URL" in
+    https://*) ;;
+    *)
+      tp_print_error "control plane URL must use https:// (got $HOST_URL)"
+      exit 1
+      ;;
+  esac
+fi
 if [ -n "$MANIFEST_URL" ]; then
   tp_print_ok "Release manifest resolved (pinned to $MANIFEST_URL, arch ${_linux_arch:-unknown})"
 else
@@ -1507,17 +1694,8 @@ elif [ -n "$INSTANCE_CA" ]; then
     install -m 0640 "$INSTANCE_CA" "$CA_PATH"
   fi
 else
-  case "$HOST_URL" in
-    http://*)
-      tp_print_step "–" "No platform CA (plaintext control plane — TLS not used)"
-      ;;
-    *)
-      tp_print_step "▸" "Fetching instance CA…"
-      _curl_base="curl -sSL"
-      [ "$INSECURE_TLS" = true ] && _curl_base="curl -sSLk"
-      if [ "$INSECURE_TLS" != true ] && [ -f "$CA_PATH" ]; then
-        _curl_base="curl -sSL --cacert $CA_PATH"
-      fi
+  tp_print_step "▸" "Fetching instance CA…"
+      _curl_base="$(tp_instance_bootstrap_curl)"
       _ca_tmp="$(mktemp)"
       _ca_http_code=""
       # shellcheck disable=SC2086
@@ -1527,9 +1705,9 @@ else
           tp_install_instance_ca "$_ca_tmp"
           ;;
         404)
-          # Workers production and other publicly-trusted control planes have no
-          # platform CA — the daemon uses the system trust store instead.
-          tp_print_step "–" "No platform CA (public TLS — using system trust store)"
+          # Not a Platform CA leaf. A public upload or Let's Encrypt name uses
+          # the system roots. A private upload is handled by the issuer fetch
+          # below — do not announce system trust until that fetch also misses.
           rm -f "$CA_PATH"
           ;;
         000)
@@ -1559,8 +1737,19 @@ else
           ;;
       esac
       rm -f "$_ca_tmp"
-      ;;
-  esac
+fi
+if [ "$INSTANCE_INSTALL" != true ] && [ -n "$HOST_URL" ]; then
+  tp_print_step "▸" "Fetching private uploaded issuer…"
+  if ! tp_fetch_uploaded_trust; then
+    exit 1
+  fi
+  if [ "$INSECURE_TLS" != true ] && [ ! -f "$CA_PATH" ] && [ ! -f "$UPLOADED_TRUST_PATH" ]; then
+    tp_print_step "–" "No platform CA (public TLS — using system trust store)"
+  fi
+  if ! tp_bootstrap_trust_anchored; then
+    tp_print_error "Private control-plane TLS has no trust anchor. The Platform CA does not validate this uploaded certificate. In Admin → Access, upload the leaf together with the private issuer that signed it. Bootstrap insecure TLS is not runtime trust."
+    exit 1
+  fi
 fi
 
 # Root-pinned update origin for tp-orchestrate (orchestration/scripts): the
@@ -1579,6 +1768,11 @@ tp_write_update_origin_pin() {
       printf 'instance_ca=%s\n' "$CA_PATH"
     else
       printf 'instance_ca=\n'
+    fi
+    if [ -f "$UPLOADED_TRUST_PATH" ]; then
+      printf 'uploaded_trust=%s\n' "$UPLOADED_TRUST_PATH"
+    else
+      printf 'uploaded_trust=\n'
     fi
   } > "$_pin_tmp"
   install -m 0600 -o root -g root "$_pin_tmp" "$_pin_dir/update-origin"
@@ -1693,18 +1887,13 @@ trap 'rm -f "$VARS_FILE"' EXIT
     printf 'turbopanel_daemon_deno_bin: %s\n' "$DENO_BIN"
   fi
   printf 'turbopanel_service_name: %s\n' "turbopaneld"
-  case "$HOST_URL" in
-    http://*) ;;
-    *)
-      if [ -f "$CA_PATH" ]; then
-        printf 'turbopanel_instance_ca: %s\n' "$CA_PATH"
-        _ca_fp="$(openssl x509 -in "$CA_PATH" -noout -fingerprint -sha256 2>/dev/null | sed 's/^.*=//' | tr 'A-F' 'a-f' | tr -d ':')"
-        if [ -n "$_ca_fp" ]; then
-          printf 'turbopanel_instance_ca_fingerprint: %s\n' "$_ca_fp"
-        fi
-      fi
-      ;;
-  esac
+  if [ -f "$CA_PATH" ]; then
+    printf 'turbopanel_instance_ca: %s\n' "$CA_PATH"
+    _ca_fp="$(openssl x509 -in "$CA_PATH" -noout -fingerprint -sha256 2>/dev/null | sed 's/^.*=//' | tr 'A-F' 'a-f' | tr -d ':')"
+    if [ -n "$_ca_fp" ]; then
+      printf 'turbopanel_instance_ca_fingerprint: %s\n' "$_ca_fp"
+    fi
+  fi
   printf 'turbopanel_update_channel: %s\n' "${TURBOPANEL_UPDATE_CHANNEL:-trunk}"
   if [ -n "$DL_BASE" ]; then
     printf 'turbopanel_dl_base: %s\n' "$DL_BASE"
@@ -1736,30 +1925,3 @@ else
 fi
 # Disposable ansible scratch (ANSIBLE_HOME); roles/collections already live under FHS.
 rm -rf /tmp/turbopanel-ansible /root/.ansible
-
-# Plaintext --host http://… installs must opt into TURBOPANEL_DEV_HTTP_CONTROL_PLANE
-# or the daemon refuses to start (resolveInstanceConfig). daemon-config dotenv.j2
-# is the only writer — validate rather than patching daemon.env outside Ansible.
-tp_assert_dev_http_control_plane_env() {
-  _env_file="$1"
-  _host_url="$2"
-  case "$_host_url" in
-    http://*)
-      ;;
-    *)
-      return 0
-      ;;
-  esac
-  if [ ! -f "$_env_file" ]; then
-    tp_print_error "daemon env missing after install: $_env_file"
-    return 1
-  fi
-  if grep -q '^TURBOPANEL_DEV_HTTP_CONTROL_PLANE=1$' "$_env_file" 2>/dev/null; then
-    return 0
-  fi
-  tp_print_error "http:// control plane requires TURBOPANEL_DEV_HTTP_CONTROL_PLANE=1 in $_env_file (written by daemon-config dotenv.j2; older orchestration bundles are unsupported)"
-  return 1
-}
-if ! tp_assert_dev_http_control_plane_env "$ENV_FILE" "$HOST_URL"; then
-  exit 1
-fi

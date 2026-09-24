@@ -1,0 +1,25 @@
+[Unit]
+Description=TurboPanel instance Let's Encrypt issuer
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{ caddy_user }}
+Group={{ turbopanel_group }}
+# Storage is this process only. Control-plane Caddy uses
+# <state>/caddy/.local/share and hosting Caddy uses <state>/hosting-caddy.
+WorkingDirectory={{ turbopanel_state_dir }}/instance-acme
+Environment=HOME={{ turbopanel_state_dir }}/instance-acme
+Environment=XDG_DATA_HOME={{ turbopanel_state_dir }}/instance-acme
+Environment=XDG_CONFIG_HOME={{ turbopanel_state_dir }}/instance-acme
+# No capabilities. The HTTP server is a Unix socket. Port 80 stays with
+# hosting Caddy for the challenge window.
+NoNewPrivileges=true
+AmbientCapabilities=
+CapabilityBoundingSet=
+ExecStartPre=+/usr/bin/install -d -o {{ caddy_user }} -g {{ turbopanel_group }} -m 0750 {{ turbopanel_state_dir }}/instance-acme
+ExecStartPre=+/usr/bin/install -o {{ caddy_user }} -g {{ turbopanel_group }} -m 0640 /dev/null {{ turbopanel_log_dir }}/instance-acme.log
+ExecStart={{ turbopanel_vendor_dir }}/caddy/current/caddy run --config {{ turbopanel_config_dir }}/caddy/instance-acme.json
+TimeoutStopSec=20
+Restart=no

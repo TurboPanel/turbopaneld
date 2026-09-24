@@ -1,0 +1,179 @@
+---
+# Let's Encrypt sites are file-backed. Control-plane Caddy does not issue
+# certificates. Render a named :8443 site only when both
+# letsencrypt-<host>.{crt,key} exist so the first apply cannot fail Caddy
+# validate or load.
+#
+# The daemon installs each certificate as root:tp mode 0640 and each key as
+# root:tp mode 0600. Group tp does not grant read on mode 0600, and the
+# managed unit runs as caddy_user (tpcaddy). Reassign each existing key to
+# caddy_user, still mode 0600, and load it as that account before the
+# hostname is marked ready.
+#
+# A converge that still has the previous control-plane store copies a
+# validated pair into those names first. _le_sites includes the deprecated
+# single-hostname alias: resolve-hostnames.yml synthesizes
+# turbopanel_public_hostname as lets-encrypt when the hostname list is empty.
+- name: Initialize Let's Encrypt file presence
+  ansible.builtin.set_fact:
+    turbopanel_letsencrypt_ready: []
+    _le_sites: "{{ turbopanel_hostnames | default([]) | selectattr('source', 'equalto', 'lets-encrypt') | map(attribute='host') | map('regex_replace', '^https?://', '') | map('regex_replace', '/.*$', '') | map('regex_replace', ':.*$', '') | list }}"
+    _legacy_acme_root: "{{ turbopanel_legacy_acme_certificate_root | default(turbopanel_state_dir ~ '/caddy/.local/share/caddy/certificates', true) }}"
+
+- name: Migrate validated legacy control-plane certificates
+  when: (_le_sites | default([]) | length) > 0
+  ansible.builtin.command:
+    argv:
+      - /bin/bash
+      - -eu
+      - -c
+      - |
+        case "$LE_HOST" in
+          ''|*[!A-Za-z0-9.-]*) exit 0 ;;
+        esac
+        set -o pipefail
+        dest_crt="${LE_DEST}/letsencrypt-${LE_HOST}.crt"
+        dest_key="${LE_DEST}/letsencrypt-${LE_HOST}.key"
+        if [ -f "$dest_crt" ] && [ -f "$dest_key" ]; then
+          exit 0
+        fi
+        if [ ! -d "$LE_ROOT" ]; then
+          exit 0
+        fi
+        best=""
+        best_end=0
+        while IFS= read -r crt; do
+          [ -n "$crt" ] || continue
+          key="${crt%.crt}.key"
+          [ -f "$key" ] || continue
+          if ! python3 - "$crt" "$key" "$LE_HOST" <<'PY'
+        import subprocess
+        import sys
+
+        crt, key, host = sys.argv[1:]
+
+        def text(args):
+            result = subprocess.run(args, capture_output=True, text=True)
+            return result.returncode, result.stdout
+
+        code, _pubkey_ignored = text(["openssl", "x509", "-in", crt, "-noout"])
+        if code != 0:
+            sys.exit(1)
+        names = set()
+        code, san = text([
+            "openssl", "x509", "-in", crt, "-noout", "-ext", "subjectAltName",
+        ])
+        if code == 0:
+            for part in san.replace(",", "\n").splitlines():
+                token = part.strip()
+                if token.startswith("DNS:"):
+                    names.add(token[4:].strip())
+        code, subject = text([
+            "openssl", "x509", "-in", crt, "-noout", "-subject", "-nameopt", "RFC2253",
+        ])
+        if code == 0:
+            for part in subject.replace(",", "\n").splitlines():
+                token = part.strip()
+                marker = token.find("CN=")
+                if marker >= 0:
+                    names.add(token[marker + 3:].strip())
+        if host not in names:
+            sys.exit(1)
+        code, cert_pub = text(["openssl", "x509", "-in", crt, "-noout", "-pubkey"])
+        code_key, key_pub = text(["openssl", "pkey", "-in", key, "-pubout"])
+        if code != 0 or code_key != 0 or cert_pub != key_pub:
+            sys.exit(1)
+        sys.exit(0)
+        PY
+          then
+            continue
+          fi
+          end_raw=$(openssl x509 -in "$crt" -noout -enddate | sed 's/^notAfter=//')
+          end=$(date -d "$end_raw" +%s)
+          if [ "$end" -ge "$best_end" ]; then
+            best="$crt"
+            best_end="$end"
+          fi
+        done < <(find "$LE_ROOT" -mindepth 3 -maxdepth 3 -type f -name "${LE_HOST}.crt" 2>/dev/null | sort)
+        [ -n "$best" ] || exit 0
+        key="${best%.crt}.key"
+        if [ ! -d "$LE_DEST" ]; then
+          install -d -o root -g "$LE_GROUP" -m 0750 "$LE_DEST"
+        fi
+        install -o root -g "$LE_GROUP" -m 0640 "$best" "$dest_crt"
+        install -o root -g "$LE_GROUP" -m 0600 "$key" "$dest_key"
+        echo migrated
+  environment:
+    LE_HOST: "{{ item }}"
+    LE_ROOT: "{{ _legacy_acme_root }}"
+    LE_DEST: "{{ turbopanel_instance_certs_dir }}"
+    LE_GROUP: "{{ turbopanel_group }}"
+  loop: "{{ _le_sites }}"
+  loop_control:
+    label: "{{ item }}"
+  # Bare `stdout` is not a variable here. Register the loop and read each
+  # result's stdout: during the loop the register is the current item, and
+  # the finished task stores the same text on results[].
+  register: _le_migrate
+  changed_when: >-
+    (
+      (_le_migrate.results | default([_le_migrate]))
+      | selectattr('stdout', 'defined')
+      | map(attribute='stdout')
+      | select('search', 'migrated')
+      | list
+      | length
+    ) > 0
+
+- name: Stat Let's Encrypt certificates
+  when: (_le_sites | default([]) | length) > 0
+  ansible.builtin.stat:
+    path: "{{ turbopanel_instance_certs_dir }}/letsencrypt-{{ item }}.crt"
+  loop: "{{ _le_sites }}"
+  register: _le_crt
+
+- name: Stat Let's Encrypt keys
+  when: (_le_sites | default([]) | length) > 0
+  ansible.builtin.stat:
+    path: "{{ turbopanel_instance_certs_dir }}/letsencrypt-{{ item }}.key"
+  loop: "{{ _le_sites }}"
+  register: _le_key
+
+- name: Harden Let's Encrypt keys for the control-plane Caddy user
+  ansible.builtin.file:
+    path: "{{ turbopanel_instance_certs_dir }}/letsencrypt-{{ item.item }}.key"
+    state: file
+    owner: "{{ caddy_user }}"
+    mode: "0600"
+  loop: "{{ _le_key.results | default([]) }}"
+  when:
+    - item.stat is defined
+    - item.stat.exists | default(false)
+  loop_control:
+    label: "{{ item.item | default('') }}"
+
+- name: Load Let's Encrypt certificates as the control-plane Caddy user
+  become: true
+  become_user: "{{ caddy_user }}"
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/openssl
+      - pkey
+      - -in
+      - "{{ turbopanel_instance_certs_dir }}/letsencrypt-{{ item.item }}.key"
+      - -noout
+  loop: "{{ _le_key.results | default([]) }}"
+  when:
+    - item.stat is defined
+    - item.stat.exists | default(false)
+  loop_control:
+    label: "{{ item.item | default('') }}"
+  changed_when: false
+
+- name: Record Let's Encrypt hostnames whose files exist
+  when: (_le_sites | default([]) | length) > 0
+  ansible.builtin.set_fact:
+    turbopanel_letsencrypt_ready: "{{ _le_crt_ready | intersect(_le_key_ready) }}"
+  vars:
+    _le_crt_ready: "{{ _le_crt.results | default([]) | selectattr('stat', 'defined') | selectattr('stat.exists') | map(attribute='item') | list }}"
+    _le_key_ready: "{{ _le_key.results | default([]) | selectattr('stat', 'defined') | selectattr('stat.exists') | map(attribute='item') | list }}"

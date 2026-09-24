@@ -19,6 +19,17 @@ function fakeFetch(impl: (input: string) => Promise<Response> | never) {
     impl(String(input))) as typeof fetch;
 }
 
+test("probeAcmeHostname honors an explicit port", async () => {
+  const result = await probeAcmeHostname("example.test", {
+    port: 8443,
+    fetchImpl: fakeFetch((url) => {
+      assertEquals(url, "https://example.test:8443/");
+      return Promise.resolve(new Response(null, { status: 200 }));
+    }),
+  });
+  assertEquals(result.ok, true);
+});
+
 test("probeAcmeHostname reports ok on any HTTP response — TLS already validated to get this far", async () => {
   const result = await probeAcmeHostname("example.test", {
     fetchImpl: fakeFetch((url) => {

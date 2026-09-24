@@ -4,12 +4,6 @@
    (src/instance/sockets.ts resolveInstanceConfig). #}
 {% if turbopanel_instance_url | default('', true) | length > 0 %}
 TURBOPANEL_INSTANCE_URL={{ turbopanel_instance_url }}
-{# Plaintext http:// control plane is development-only; the daemon refuses it
-   unless this flag is set. Derive from the URL so --host http://… installs
-   (Add Server → :8880) opt in automatically without a separate installer flag. #}
-{% if turbopanel_instance_url is string and turbopanel_instance_url.startswith('http://') %}
-TURBOPANEL_DEV_HTTP_CONTROL_PLANE=1
-{% endif %}
 {% endif %}
 TURBOPANEL_RUNTIMES_DIR={{ turbopanel_vendor_dir }}
 TURBOPANEL_ORCHESTRATION_DIR={{ turbopanel_orchestration_dir }}

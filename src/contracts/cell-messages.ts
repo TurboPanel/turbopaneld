@@ -265,15 +265,16 @@ export type DaemonMessage =
   | {
     /**
      * Daemon-initiated, fire-and-forget. The instance's own Let's Encrypt
-     * hostnames, reported by `InstanceAcmeIssuanceObserver`. Distinct from
-     * `acme-issuance-event`, which is an organization's tenant certificate.
-     * The two streams must not share a discriminator.
+     * hostnames, reported by `InstanceAcmeRenewalScheduler` for each
+     * renewal attempt. Distinct from `acme-issuance-event`, which is an
+     * organization's tenant certificate. The two streams must not share a
+     * discriminator.
      */
     type: "instance-acme-issuance-event";
     hostname: string;
     ok: boolean;
     errorMessage?: string;
-    /** Leaf notAfter from the probe. Absent when the leaf could not be read. */
+    /** Leaf notAfter from the installed certificate file. */
     notAfter?: string;
     at: string;
   }

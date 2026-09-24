@@ -57,17 +57,6 @@ test("resolveRunScriptUrl uses CDN for self-hosted HTTPS installs", () => {
   );
 });
 
-test("resolveRunScriptUrl uses instance host for plaintext dev overlay", () => {
-  assertEquals(
-    resolveRunScriptUrl({
-      kind: "url",
-      baseUrl: "http://huey.lan:8880",
-      wsBaseUrl: "ws://huey.lan:8880",
-    }),
-    "http://huey.lan:8880/run.sh",
-  );
-});
-
 test("resolveRunScriptUrl uses instance /run.sh when overlay dlBase is set", () => {
   assertEquals(
     resolveRunScriptUrl({
@@ -108,29 +97,38 @@ test("buildRunReconcileArgs omits --host for production", () => {
   );
 });
 
-test("resolveBootstrapInsecureTls returns false for plaintext http even with releaseTlsInsecure", () => {
+test("resolveBootstrapInsecureTls follows releaseTlsInsecure for an https origin", () => {
   assertEquals(
     resolveBootstrapInsecureTls({
       releaseTlsInsecure: "1",
-      runScriptUrl: "http://localhost:8880",
+      runScriptUrl: "https://huey.lan:8443/run.sh",
     }),
-    false,
+    true,
   );
 });
 
-test("buildRunReconcileArgs omits TLS flags for plaintext http instance URL", () => {
+test("buildRunReconcileArgs includes TLS flags for an https instance URL", () => {
   assertEquals(
     buildRunReconcileArgs({
       licenseArg: "abc",
-      instanceUrl: "http://localhost:8880",
+      instanceUrl: "https://huey.lan:8443",
       instanceCaPath: "/etc/turbopanel/instance-ca.pem",
       insecureTls: true,
     }),
-    ["--license", "abc", "--host", "http://localhost:8880", "--no-start"],
+    [
+      "--license",
+      "abc",
+      "--host",
+      "https://huey.lan:8443",
+      "--instance-ca",
+      "/etc/turbopanel/instance-ca.pem",
+      "--insecure-tls",
+      "--no-start",
+    ],
   );
 });
 
-test("downloadRunScript uses plain -fsSL for plaintext http URL", async () => {
+test("downloadRunScript applies insecure TLS flags", async () => {
   const originalCommand = Deno.Command;
   let capturedArgs: string[] | undefined;
   try {
@@ -148,11 +146,15 @@ test("downloadRunScript uses plain -fsSL for plaintext http URL", async () => {
         });
       }
     } as typeof Deno.Command;
-    const script = await downloadRunScript("http://localhost:8880", {
+    const script = await downloadRunScript("https://huey.lan:8443/run.sh", {
       insecureTls: true,
       caPath: "/etc/turbopanel/instance-ca.pem",
     });
-    assertEquals(capturedArgs, ["-fsSL", "http://localhost:8880"]);
+    assertEquals(capturedArgs, [
+      "-fsSL",
+      "-k",
+      "https://huey.lan:8443/run.sh",
+    ]);
     if (!script.trim()) {
       throw new Error("expected non-empty script");
     }
@@ -714,13 +716,15 @@ test("executeRunReconcile falls back cwd when primary chdir fails", async () => 
 
 const needsInsecure = (origin: string) => origin.includes(".lan");
 
-test("resolveAutomaticUpdateTrust: plaintext http is development mode", () => {
-  assertEquals(
-    resolveAutomaticUpdateTrust({
-      runScriptUrl: "http://192.168.1.10:8880/run.sh",
-      originNeedsInsecureTls: needsInsecure,
-    }),
-    { kind: "plaintext-dev" },
+test("resolveAutomaticUpdateTrust refuses plaintext http", () => {
+  assertThrows(
+    () =>
+      resolveAutomaticUpdateTrust({
+        runScriptUrl: "http://192.168.1.10/run.sh",
+        originNeedsInsecureTls: needsInsecure,
+      }),
+    UpdateTrustRepairError,
+    "plaintext HTTP",
   );
 });
 
@@ -750,6 +754,32 @@ test("resolveAutomaticUpdateTrust: a private origin needs the Platform CA on dis
       caFileExists: () => true,
     }),
     { kind: "platform-ca", caPath: "/etc/turbopanel/instance-ca.pem" },
+  );
+});
+
+test("resolveAutomaticUpdateTrust: a private upload uses its issuer file, not the Platform CA path", () => {
+  assertEquals(
+    resolveAutomaticUpdateTrust({
+      runScriptUrl: "https://private.example.com:8443/run.sh",
+      instanceCaPath: "/etc/turbopanel/instance-ca.pem",
+      uploadedTrustPath: "/etc/turbopanel/instance-uploaded-trust.pem",
+      originNeedsInsecureTls: () => true,
+      caFileExists: (path) => path.endsWith("instance-uploaded-trust.pem"),
+    }),
+    {
+      kind: "uploaded-trust",
+      caPath: "/etc/turbopanel/instance-uploaded-trust.pem",
+    },
+  );
+  assertEquals(
+    resolveAutomaticUpdateTrust({
+      runScriptUrl: "https://private.example.com:8443/run.sh",
+      instanceCaPath: "/etc/turbopanel/instance-ca.pem",
+      uploadedTrustPath: "/etc/turbopanel/instance-uploaded-trust.pem",
+      originNeedsInsecureTls: () => true,
+      caFileExists: () => true,
+    }).kind,
+    "platform-ca",
   );
 });
 
@@ -789,7 +819,11 @@ test("the automatic update path never consults TURBOPANEL_RELEASE_TLS_INSECURE o
   assertEquals(body.includes("TURBOPANEL_RELEASE_TLS_INSECURE"), false);
   assertEquals(body.includes("resolveBootstrapInsecureTls"), false);
   assertEquals(body.includes("insecureTls: true"), false);
+  assertEquals(body.includes("insecureTls: false"), true);
   assertEquals(body.includes("resolveAutomaticUpdateTrust("), true);
+  assertEquals(body.includes("uploadedTrustPath"), true);
+  assertEquals(body.includes('trust.kind === "platform-ca"'), true);
+  assertEquals(body.includes('trust.kind === "public-tls"'), true);
 });
 
 // --- managed-host reconcile through the root helper -----------------------

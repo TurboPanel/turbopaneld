@@ -4,6 +4,7 @@ import {
   TEST_RELEASE_SIGNING_PUBLIC_KEY_HEX,
 } from "../testing/release-signing-fixture.ts";
 import {
+  InsecureOverlayBaseError,
   MalformedManifestError,
   ManifestSignatureError,
   MissingChannelError,
@@ -294,9 +295,30 @@ test("resolveUpdate throws when channel manifest HTTP status is not ok", async (
   }
 });
 
-test("resolveUpdate allows http overlay catalogs via TURBOPANEL_DL_BASE", async () => {
+test("resolveUpdate refuses a configured http overlay without fetching the public rail", async () => {
+  const fetched: string[] = [];
   const restore = installFetch((url) => {
-    if (url === "http://203.0.113.10:8880/downloads/daemon/channels.json") {
+    fetched.push(url);
+    return new Response("should not fetch", { status: 500 });
+  });
+  try {
+    await assertRejects(
+      () =>
+        resolveUpdate({ app: "daemon", channel: "trunk" }, {
+          TURBOPANEL_DL_BASE: "http://203.0.113.10/downloads/daemon",
+        }),
+      InsecureOverlayBaseError,
+      "must be an https URL",
+    );
+    assertEquals(fetched, []);
+  } finally {
+    restore();
+  }
+});
+
+test("resolveUpdate reads an https overlay catalog via TURBOPANEL_DL_BASE", async () => {
+  const restore = installFetch((url) => {
+    if (url === "https://203.0.113.10:8443/downloads/daemon/channels.json") {
       return Response.json({
         schema: 1,
         defaultChannel: "trunk",
@@ -305,7 +327,7 @@ test("resolveUpdate allows http overlay catalogs via TURBOPANEL_DL_BASE", async 
         },
       });
     }
-    if (url === "http://203.0.113.10:8880/downloads/daemon/manifest.json") {
+    if (url === "https://203.0.113.10:8443/downloads/daemon/manifest.json") {
       return Response.json({
         ...channelManifest(),
         binaryArtifacts: {
@@ -330,7 +352,7 @@ test("resolveUpdate allows http overlay catalogs via TURBOPANEL_DL_BASE", async 
   try {
     const info = await resolveUpdate(
       { app: "daemon", channel: "trunk" },
-      { TURBOPANEL_DL_BASE: "http://203.0.113.10:8880/downloads/daemon" },
+      { TURBOPANEL_DL_BASE: "https://203.0.113.10:8443/downloads/daemon" },
     );
     assertEquals(info.commit, "abc1234");
     assertEquals(info.downloadUrl.includes("203.0.113.10"), true);

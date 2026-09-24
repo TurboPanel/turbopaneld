@@ -108,6 +108,19 @@ test("every sudoers command is an absolute path or the orchestrate helper", asyn
       );
     }
   }
+  assertStringIncludes(template, "/usr/bin/ss");
+  assertStringIncludes(
+    template,
+    "/usr/bin/systemctl start turbopanel-instance-acme.service",
+  );
+  assertStringIncludes(
+    template,
+    "/usr/bin/systemctl stop turbopanel-instance-acme.service",
+  );
+  assertStringIncludes(
+    template,
+    "/usr/bin/systemctl disable --now turbopanel-hosting-caddy.service",
+  );
   assertStringIncludes(template, "/scripts/tp-orchestrate");
   assertStringIncludes(template, "env_reset");
 });

@@ -50,6 +50,8 @@ export async function probeAcmeHostname(
   hostname: string,
   opts?: {
     timeoutMs?: number;
+    /** TCP port. Tenant sites use 443. */
+    port?: number;
     fetchImpl?: typeof fetch;
     /** When omitted, a production probe reads the leaf with openssl. Injected fetches skip that. */
     readNotAfter?: (hostname: string) => Promise<string | null>;
@@ -57,8 +59,9 @@ export async function probeAcmeHostname(
 ): Promise<AcmeProbeResult> {
   const fetchImpl = opts?.fetchImpl ?? fetch;
   const timeoutMs = opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const port = opts?.port ?? 443;
   try {
-    const res = await fetchImpl(`https://${hostname}/`, {
+    const res = await fetchImpl(probeUrl(hostname, port), {
       method: "HEAD",
       redirect: "manual",
       signal: AbortSignal.timeout(timeoutMs),
@@ -68,8 +71,15 @@ export async function probeAcmeHostname(
     return { hostname, ok: false, errorMessage: summarizeError(err) };
   }
   const reader = opts?.readNotAfter ??
-    (opts?.fetchImpl ? undefined : readCertificateNotAfter);
+    (opts?.fetchImpl
+      ? undefined
+      : (name: string) => readCertificateNotAfter(name, runOpenssl, port));
   return await withObservedExpiry(hostname, reader);
+}
+
+function probeUrl(hostname: string, port: number): string {
+  if (port === 443) return `https://${hostname}/`;
+  return `https://${hostname}:${port}/`;
 }
 
 async function withObservedExpiry(
@@ -137,12 +147,13 @@ export async function readCertificateNotAfter(
     args: readonly string[],
     input?: Uint8Array,
   ) => Promise<OpensslRun> = runOpenssl,
+  port = 443,
 ): Promise<string | null> {
   if (!DNS_HOSTNAME_RE.test(hostname) || hostname.includes("..")) return null;
   const handshake = await run([
     "s_client",
     "-connect",
-    `${hostname}:443`,
+    `${hostname}:${port}`,
     "-servername",
     hostname,
     "-showcerts",

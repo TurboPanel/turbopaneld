@@ -43,27 +43,32 @@ turbopanel_instance_dir: "{{ (turbopanel_dev_root ~ '/turbopanel') if (turbopane
 turbopanel_user: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tp' }}"
 instance_user: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tpctrl' }}"
 turbopanel_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tp' }}"
+# Same account instance-launch runs control-plane Caddy as. Let's Encrypt
+# keys are reassigned to this user (mode 0600) before a hostname is marked
+# ready — group tp cannot read a key the issuer wrote as tp.
+caddy_user: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tpcaddy' }}"
+caddy_primary_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tpcaddy' }}"
 # Co-located dev generates certs as the dev user (git/Ansible identity); managed
 # installs use tpctrl. Both branches naturally resolve to the single dev user in dev.
 instance_certs_owner: "{{ turbopanel_user if (turbopanel_dev_user | default('') | length > 0) else instance_user }}"
 # Deprecated single-hostname alias. See instance-launch defaults: the
-# listener set is always :8443 and :8880, and turbopanel_hostnames is the
-# source of per-name tls. An empty list is synthesized from this alias.
+# listener set is always :8443, and turbopanel_hostnames is the source of
+# per-name tls. An empty list is synthesized from this alias.
 turbopanel_tls_mode: self_signed
 turbopanel_hostnames: []
 # Compact JSON list of the same objects. key=value extra-vars stay strings,
-# so the public-HTTPS release path passes this and resolve-hostnames.yml
-# decodes it into turbopanel_hostnames.
+# so public-urls apply passes this and resolve-hostnames.yml decodes it
+# into turbopanel_hostnames.
 turbopanel_hostnames_json: ""
 turbopanel_config_dir: /etc/turbopanel
 turbopanel_run_dir: /run/turbopanel
 turbopanel_ui_dist_dir: /opt/turbopanel/share/ui
+# Dev overlay only (CADDY_PORT on turbopanel-caddy.service). The managed
+# Caddyfile binds literal :8443 and does not read this variable.
 caddy_port: 8443
-caddy_http_port: 8880
-# See instance-launch defaults. The certs-apply render uses the same ports.
-caddy_internal_https_port: 8444
-# See instance-launch defaults. public-https-owner.yml overwrites this.
-turbopanel_control_plane_binds_public_https: false
+# Admin API for managed reloads. A Unix socket, not a TCP port. The parent
+# directory is created for caddy_user. The dev overlay does not use it.
+turbopanel_caddy_admin_socket: "{{ turbopanel_run_dir }}/caddy/admin.sock"
 turbopanel_acme_directory: ""
 turbopanel_caddy_bin: "{{ turbopanel_vendor_dir }}/caddy/current/caddy"
 turbopanel_caddyfile: >-
@@ -74,10 +79,10 @@ turbopanel_caddyfile: >-
 # certs/ tree so tpcaddy can read the key without mutating the operator's files.
 turbopanel_tls_cert_path: ""
 turbopanel_tls_key_path: ""
-# Public DNS name Caddy obtains a certificate for (lets_encrypt).
+# Public DNS name for a deprecated single lets-encrypt hostname alias.
 turbopanel_public_hostname: ""
-# ACME account contact (lets_encrypt). Optional: the rendered Caddyfile
-# (instance-launch templates/Caddyfile.j2) omits the `email` directive when empty.
+# ACME account contact (lets_encrypt). Kept for extra-vars; the Caddyfile
+# no longer emits `email` because this process does not issue certificates.
 turbopanel_acme_email: ""
 # Operator-declared "the endpoint presents a publicly trusted certificate".
 # Forced true when turbopanel_tls_mode is lets_encrypt.

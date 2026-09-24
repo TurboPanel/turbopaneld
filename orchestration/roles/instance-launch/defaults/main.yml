@@ -16,6 +16,9 @@ turbopanel_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') 
 instance_user: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tpctrl' }}"
 caddy_user: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tpcaddy' }}"
 caddy_primary_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tpcaddy' }}"
+# Managed Caddy admin API. Unix socket so the process does not bind a second
+# TCP port. The dev overlay Caddyfile keeps its own admin listener.
+turbopanel_caddy_admin_socket: "{{ turbopanel_run_dir }}/caddy/admin.sock"
 # FHS config dir (dev shares it with prod).
 turbopanel_config_dir: /etc/turbopanel
 # Secret-bearing runtime env lives under the config dir — never in the git checkout.
@@ -79,20 +82,16 @@ website_port: 19820
 website_cors_origins: "http://localhost:{{ website_port }},http://127.0.0.1:{{ website_port }}"
 instance_service_name: turbopanel-instance
 caddy_service_name: turbopanel-caddy
+# Short-lived Let's Encrypt issuer. Installed, not enabled. The daemon
+# starts and stops it while HTTP-01 is in progress.
+instance_acme_service_name: turbopanel-instance-acme
 # Workers dev only: minutely timer that hits wrangler's local scheduled-trigger
 # endpoint, because `wrangler dev` never fires the Worker's cron on its own.
 instance_cron_service_name: turbopanel-instance-cron
 ui_service_name: turbopanel-ui
+# Dev overlay only (CADDY_PORT in the unit). The managed Caddyfile binds
+# literal :8443 and does not read this variable.
 caddy_port: 8443
-caddy_http_port: 8880
-# Loopback HTTPS port for Let's Encrypt issuance when hosting Caddy owns
-# public :443. Unprivileged. Keep in step with CONTROL_PLANE_INTERNAL_HTTPS_PORT
-# in src/deploy/instance-acme-http01.ts.
-caddy_internal_https_port: 8444
-# Computed by instance-certs/tasks/public-https-owner.yml. True only when the
-# hosting Caddy unit and its sites directory are both absent. False stops a
-# render that skipped that task from binding :443.
-turbopanel_control_plane_binds_public_https: false
 expo_port: 8081
 drizzle_studio_port: 4983
 # "dev" proxies Caddy to the Expo dev server (turbopanel-ui.service);
@@ -100,7 +99,7 @@ drizzle_studio_port: 4983
 # Production default is static; co-located converge passes -e turbopanel_ui_mode=dev.
 turbopanel_ui_mode: static
 # Deprecated single-hostname alias. The listener set no longer follows this
-# switch: :8443 and :8880 are always bound, and turbopanel_hostnames decides
+# switch: :8443 is the only TCP port, and turbopanel_hostnames decides
 # per-name tls. When hostnames is empty, resolve-hostnames.yml synthesizes
 # one entry from this alias plus turbopanel_public_hostname. The template
 # also derives a display-only mode (upload if any uploaded name, lets_encrypt
@@ -110,28 +109,28 @@ turbopanel_tls_mode: self_signed
 # Empty means "use the deprecated aliases above".
 turbopanel_hostnames: []
 # Compact JSON list for key=value extra-vars. resolve-hostnames.yml decodes
-# it into turbopanel_hostnames. Empty leaves that list alone.
+# it into turbopanel_hostnames. Empty leaves that list alone. tp-orchestrate
+# accepts only key=value extra-vars, which stay strings.
 turbopanel_hostnames_json: ""
 # Absolute paths on the target host (upload). Copied into the role-owned
 # certs/ tree so tpcaddy can read the key without mutating the operator's files.
 turbopanel_tls_cert_path: ""
 turbopanel_tls_key_path: ""
-# Public DNS name Caddy obtains a certificate for (lets_encrypt).
+# Public DNS name for a deprecated single lets-encrypt hostname alias.
 turbopanel_public_hostname: ""
-# ACME account contact (lets_encrypt). Optional: the rendered Caddyfile omits
-# the `email` directive when empty.
+# ACME account contact (lets_encrypt). Kept for extra-vars; the Caddyfile
+# no longer emits `email` because this process does not issue certificates.
 turbopanel_acme_email: ""
 # Operator-declared "the endpoint presents a publicly trusted certificate".
 # Forced true when turbopanel_tls_mode is lets_encrypt.
 turbopanel_tls_public: false
 # The Caddy site config. Co-located dev (turbopanel_dev_user set) loads the
 # development Caddyfile from the turbopanel/dev overlay. A managed install
-# renders templates/Caddyfile.j2 — :8443 and :8880 always. Explicit :443
-# sites are added only when turbopanel_control_plane_binds_public_https is
-# true. On a combined host, Let's Encrypt names listen on loopback
-# caddy_internal_https_port instead, and hosting Caddy owns public :443.
-# The file is rendered into the platform config dir on every converge
-# (see "Render the Caddy site config" in tasks/main.yml).
+# renders templates/Caddyfile.j2 — :8443 only. Uploaded and Let's Encrypt
+# names are extra :8443 sites (Let's Encrypt only when
+# letsencrypt-<host>.{crt,key} exist). The file is rendered into the
+# platform config dir on every converge (see "Render the Caddy site config"
+# in tasks/main.yml).
 turbopanel_caddyfile: >-
   {{ (turbopanel_dev_root ~ '/dev/orchestration/Caddyfile') if
   (turbopanel_dev_user | default('') | length > 0) else

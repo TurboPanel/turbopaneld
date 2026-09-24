@@ -156,8 +156,12 @@
   ansible.builtin.set_fact:
     turbopanel_tls_public_effective: "{{ true if ((turbopanel_hostnames | default([]) | selectattr('source', 'equalto', 'lets-encrypt') | list | length > 0) or (turbopanel_tls_mode | default('self_signed') == 'lets_encrypt')) else (turbopanel_tls_public | default(false) | bool) }}"
 
-- name: Decide whether control-plane Caddy may bind public :443
-  ansible.builtin.include_tasks: "{{ role_path }}/../instance-certs/tasks/public-https-owner.yml"
+- name: Migrate validated legacy control-plane Let's Encrypt certificates
+  ansible.builtin.set_fact:
+    turbopanel_legacy_acme_certificate_root: "{{ turbopanel_caddy_runtime_dir }}/share/caddy/certificates"
+
+- name: Harden Let's Encrypt keys and record hostnames whose files exist
+  ansible.builtin.include_tasks: "{{ role_path }}/../instance-certs/tasks/letsencrypt-files.yml"
 
 # Managed installs get their Caddyfile rendered here, from one template whose
 # branches are the TLS modes, into the platform config dir — the release
@@ -193,6 +197,22 @@
   notify:
     - Reload systemd for instance units
     - Restart turbopanel caddy
+
+- name: Install instance ACME issuer unit
+  ansible.builtin.template:
+    src: turbopanel-instance-acme.service.j2
+    dest: "/etc/systemd/system/{{ instance_acme_service_name }}.service"
+    owner: root
+    group: root
+    mode: "0640"
+  notify:
+    - Reload systemd for instance units
+
+- name: Keep the instance ACME issuer disabled
+  ansible.builtin.systemd:
+    name: "{{ instance_acme_service_name }}.service"
+    enabled: false
+    daemon_reload: true
 
 - name: Install UI (Expo) systemd unit
   when: turbopanel_ui_mode == 'dev'

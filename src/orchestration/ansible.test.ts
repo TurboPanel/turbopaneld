@@ -850,6 +850,17 @@ test(
       /- name: Render the Caddy site config\n\s+when: turbopanel_dev_user \| default\(''\) \| length == 0\n\s+ansible\.builtin\.template:\n\s+src: Caddyfile\.j2\n\s+dest: "\{\{ turbopanel_caddyfile \}\}"[\s\S]*?notify:\n\s+- Restart turbopanel caddy/,
       "instance-launch renders Caddyfile.j2 to turbopanel_caddyfile on managed hosts and restarts Caddy on change",
     );
+    assertMatch(
+      tasks,
+      /letsencrypt-files\.yml/,
+      "instance-launch stats Let's Encrypt files before rendering the Caddyfile",
+    );
+    assertEquals(tasks.includes("public-https-owner.yml"), false);
+    assertEquals(defaults.includes("caddy_internal_https_port"), false);
+    assertEquals(
+      defaults.includes("turbopanel_control_plane_binds_public_https"),
+      false,
+    );
     const caddyfile = await Deno.readTextFile(
       join(
         CHECKOUT_ORCHESTRATION_DIR,
@@ -871,39 +882,58 @@ test(
     );
     assertMatch(
       caddyfile,
-      /http_port \{\{ caddy_http_port \| default\(8880\) \}\}/,
-      "ACME HTTP-01 is pinned to caddy_http_port so :80 stays with hosting Caddy",
+      /auto_https off/,
+      "automatic HTTPS is off so this process never binds :80 or issues certificates",
+    );
+    assertEquals(
+      caddyfile.includes("http_port"),
+      false,
+      "http_port is gone; ACME is not this process's job",
+    );
+    assertEquals(
+      caddyfile.includes("email {{ turbopanel_acme_email }}"),
+      false,
+    );
+    assertEquals(caddyfile.includes("acme_ca"), false);
+    assertEquals(
+      caddyfile.includes("caddy_port"),
+      false,
+      "the managed listener is literal :8443; caddy_port is the dev overlay only",
+    );
+    assertEquals(caddyfile.includes("_listen"), false);
+    assertEquals(
+      caddyfile.includes("localhost:2019"),
+      false,
+      "the admin API is a Unix socket, not a second TCP port",
     );
     assertMatch(
       caddyfile,
-      /\{% if ns\.acme and \(turbopanel_acme_email \| default\(''\) \| length > 0\) %\}\n\s+email \{\{ turbopanel_acme_email \}\}/,
-      "email is emitted only when a lets-encrypt hostname and a contact are set",
+      /admin unix\/\{\{ turbopanel_caddy_admin_socket \}\}/,
+      "admin endpoint is turbopanel_caddy_admin_socket",
     );
-    assertEquals(caddyfile.includes("auto_https off"), false);
     assertMatch(
       caddyfile,
-      /:\{\{ caddy_port \| default\(8443\) \}\} \{\n\s+tls \{\{ _certs_dir \}\}\/platform-ca\.crt \{\{ _certs_dir \}\}\/platform-ca\.key/,
+      /:8443 \{\n\s+tls \{\{ _certs_dir \}\}\/platform-ca\.crt \{\{ _certs_dir \}\}\/platform-ca\.key/,
       ":8443 is always present and serves the platform-ca leaf",
     );
-    assertMatch(
-      caddyfile,
-      /:\{\{ caddy_http_port \| default\(8880\) \}\} \{/,
-      ":8880 is always present",
+    assertEquals(
+      caddyfile.includes("caddy_internal_https_port"),
+      false,
+      "the internal HTTPS issuance port is gone",
+    );
+    assertEquals(
+      caddyfile.includes("turbopanel_control_plane_binds_public_https"),
+      false,
     );
     assertMatch(
       caddyfile,
-      /\{% if h\.source == 'lets-encrypt' %\}[\s\S]*?\{\{ _site \}\}:443 \{\n\s+import turbopanel_app\n\}/,
-      "a dedicated host emits an explicit :443 lets-encrypt site with no tls line",
+      /\{\{ _site \}\}:8443 \{\n\s+tls \{\{ _certs_dir \}\}\/\{\{ _leaf \}\}\.crt \{\{ _certs_dir \}\}\/\{\{ _leaf \}\}\.key/,
+      "an uploaded hostname is a named :8443 site with uploaded-<cert_id> files",
     );
     assertMatch(
       caddyfile,
-      /https:\/\/\{\{ _site \}\}:\{\{ caddy_internal_https_port \| default\(8444\) \}\} \{\n\s+bind 127\.0\.0\.1/,
-      "a combined host issues Let's Encrypt on loopback :8444",
-    );
-    assertMatch(
-      caddyfile,
-      /turbopanel_control_plane_binds_public_https \| default\(false\) \| bool/,
-      "public :443 is gated on proof that hosting Caddy is absent",
+      /_site in \(turbopanel_letsencrypt_ready \| default\(\[\]\)\)[\s\S]*?\{\{ _site \}\}:8443 \{\n\s+tls \{\{ _certs_dir \}\}\/letsencrypt-\{\{ _site \}\}\.crt \{\{ _certs_dir \}\}\/letsencrypt-\{\{ _site \}\}\.key/,
+      "a Let's Encrypt hostname is a named :8443 site only when its files exist",
     );
     assertEquals(
       caddyfile.includes("{{ _site }} {"),
@@ -941,41 +971,34 @@ test(
     assertMatch(
       caddyUnit,
       /Environment=CADDY_PORT=\{\{\s*caddy_port\s*\}\}/,
-      "the unit keeps CADDY_PORT on the always-on listener",
-    );
-    assertMatch(
-      caddyUnit,
-      /Environment=CADDY_HTTP_PORT=\{\{\s*caddy_http_port\s*\}\}/,
-      "the unit exposes caddy_http_port",
-    );
-    assertMatch(
-      caddyUnit,
-      /turbopanel_control_plane_binds_public_https \| default\(false\) \| bool[\s\S]*?h\.source == 'lets-encrypt' or h\.source == 'uploaded'[\s\S]*?== 'upload'[\s\S]*?AmbientCapabilities=CAP_NET_BIND_SERVICE/,
-      "uploaded and lets-encrypt names grant CAP_NET_BIND_SERVICE only when this unit owns public :443",
-    );
-    assertMatch(
-      caddyUnit,
-      /lets_encrypt[\s\S]*?CapabilityBoundingSet=CAP_NET_BIND_SERVICE/,
-      "the public :443 capability set stays bounded",
-    );
-    const withoutLetsEncrypt = caddyUnit.replace(
-      /\{% if _bind\.cap %\}[\s\S]*?\{% endif %\}/,
-      "",
+      "the unit keeps CADDY_PORT for the dev overlay; the managed template does not read it",
     );
     assertEquals(
-      withoutLetsEncrypt.includes("AmbientCapabilities"),
+      caddyUnit.includes("CAP_NET_BIND_SERVICE"),
       false,
-      "AmbientCapabilities only appear inside the public :443 capability branch",
+      "control-plane Caddy never binds a privileged port",
+    );
+    assertEquals(caddyUnit.includes("AmbientCapabilities"), false);
+    assertEquals(caddyUnit.includes("CapabilityBoundingSet"), false);
+    assertMatch(
+      caddyUnit,
+      /caddy reload --config \{\{ turbopanel_caddyfile \}\} --adapter caddyfile --address unix\/\{\{ turbopanel_caddy_admin_socket \}\} --force/,
+      "managed reload targets the admin Unix socket and --force re-reads certificate files",
     );
     assertEquals(
-      withoutLetsEncrypt.includes("CapabilityBoundingSet"),
+      caddyUnit.includes("localhost:2019"),
       false,
-      "CapabilityBoundingSet only appear inside the public :443 capability branch",
+      "the unit does not point reload at a TCP admin port",
+    );
+    assertMatch(
+      caddyUnit,
+      /ExecStartPre=\+\/usr\/bin\/install -d -o \{\{ caddy_user \}\} -g \{\{ caddy_primary_group \}\} -m 0750 \{\{ turbopanel_caddy_admin_socket \| dirname \}\}/,
+      "the admin socket directory is created for caddy_user before start",
     );
     assertEquals(
       caddyUnit.includes("TURBOPANEL_CADDY_ACME_EMAIL_DIRECTIVE"),
       false,
-      "the ACME contact is rendered into the Caddyfile, not smuggled through the unit env",
+      "the ACME contact is not smuggled through the unit env",
     );
 
     const denoEnv = await Deno.readTextFile(
@@ -1011,7 +1034,6 @@ test(
       caddyUnit;
     for (
       const forbidden of [
-        "CADDY_HTTP_PORT",
         "EXPO_PORT",
         "WRANGLER_DEV_PORT",
         "TURBOPANEL_UI_MODE",
@@ -1767,7 +1789,7 @@ test("instance-certs apply never passes a platform CA rotate flag", async () => 
     /TURBOPANEL_TLS_CA_BUNDLE:/,
     "pass TURBOPANEL_TLS_CA_BUNDLE",
   );
-  const proof = playbook.indexOf("public-https-owner.yml");
+  const proof = playbook.indexOf("letsencrypt-files.yml");
   const render = playbook.indexOf("Render a candidate Caddyfile");
   const accept = playbook.indexOf(
     "Ask the running control-plane Caddy to accept the candidate",
@@ -1782,10 +1804,154 @@ test("instance-certs apply never passes a platform CA rotate flag", async () => 
     between.includes("{{ turbopanel_caddyfile }}.candidate"),
     true,
   );
+  assertEquals(between.includes("--force"), true);
+  assertEquals(
+    between.includes("unix/{{ turbopanel_caddy_admin_socket }}"),
+    true,
+    "reload targets the admin Unix socket",
+  );
+  assertEquals(
+    playbook.includes("localhost:2019"),
+    false,
+    "instance-certs-apply does not open a TCP admin port",
+  );
   assertEquals(between.includes('dest: "{{ turbopanel_caddyfile }}"'), false);
   assertEquals(
     playbook.includes("{{ turbopanel_caddyfile }}.previous"),
     true,
+  );
+  assertEquals(playbook.includes("public-https-owner.yml"), false);
+  const leFiles = await Deno.readTextFile(
+    join(
+      CHECKOUT_ORCHESTRATION_DIR,
+      "roles/instance-certs/tasks/letsencrypt-files.yml",
+    ),
+  );
+  assertMatch(
+    leFiles,
+    /ansible\.builtin\.stat/,
+    "letsencrypt-files.yml stats on-disk leaves",
+  );
+  assertMatch(
+    leFiles,
+    /letsencrypt-\{\{ item \}\}\.crt/,
+    "letsencrypt-files.yml stats letsencrypt-<host>.crt",
+  );
+  assertMatch(
+    leFiles,
+    /letsencrypt-\{\{ item \}\}\.key/,
+    "letsencrypt-files.yml stats letsencrypt-<host>.key",
+  );
+  const hardenAt = leFiles.indexOf(
+    "Harden Let's Encrypt keys for the control-plane Caddy user",
+  );
+  const loadAt = leFiles.indexOf(
+    "Load Let's Encrypt certificates as the control-plane Caddy user",
+  );
+  const readyAt = leFiles.indexOf(
+    "Record Let's Encrypt hostnames whose files exist",
+  );
+  assertEquals(hardenAt >= 0 && loadAt > hardenAt && readyAt > loadAt, true);
+  assertMatch(
+    leFiles,
+    /owner: "\{\{ caddy_user \}\}"[\s\S]*?mode: "0600"/,
+    "existing Let's Encrypt keys are caddy_user mode 0600 before they are ready",
+  );
+  assertMatch(
+    leFiles,
+    /become_user: "\{\{ caddy_user \}\}"[\s\S]*?\/usr\/bin\/openssl[\s\S]*?pkey/,
+    "the service account loads each issuer key before the hostname is ready",
+  );
+  assertMatch(
+    defaults,
+    /caddy_user: "\{\{ turbopanel_dev_user if \(turbopanel_dev_user \| default\(''\) \| length > 0\) else 'tpcaddy' \}\}"/,
+    "instance-certs defines caddy_user for the key handoff",
+  );
+  const resolveHostnames = await Deno.readTextFile(
+    join(
+      CHECKOUT_ORCHESTRATION_DIR,
+      "roles/instance-certs/tasks/resolve-hostnames.yml",
+    ),
+  );
+  const decodeAt = resolveHostnames.indexOf(
+    'turbopanel_hostnames: "{{ turbopanel_hostnames_json | from_json }}"',
+  );
+  const selectAt = resolveHostnames.indexOf("selectattr(");
+  assertEquals(decodeAt >= 0 && selectAt > decodeAt, true);
+  assertEquals(defaults.includes("caddy_internal_https_port"), false);
+  assertEquals(
+    defaults.includes("turbopanel_control_plane_binds_public_https"),
+    false,
+  );
+});
+
+test("instance-launch migrates a legacy control-plane certificate before the file-backed site", async () => {
+  const tasks = await Deno.readTextFile(
+    join(CHECKOUT_ORCHESTRATION_DIR, "roles/instance-launch/tasks/main.yml"),
+  );
+  const resolveAt = tasks.indexOf("resolve-hostnames.yml");
+  const migrateAt = tasks.indexOf(
+    "Migrate validated legacy control-plane Let's Encrypt certificates",
+  );
+  const renderAt = tasks.indexOf("Render the Caddy site config");
+  assertEquals(resolveAt >= 0 && migrateAt > resolveAt, true);
+  assertEquals(renderAt > migrateAt, true);
+  assertMatch(
+    tasks,
+    /turbopanel_legacy_acme_certificate_root: "\{\{ turbopanel_caddy_runtime_dir \}\}\/share\/caddy\/certificates"/,
+    "legacy certificate root is the old control-plane Caddy store",
+  );
+  const resolve = await Deno.readTextFile(
+    join(
+      CHECKOUT_ORCHESTRATION_DIR,
+      "roles/instance-certs/tasks/resolve-hostnames.yml",
+    ),
+  );
+  assertMatch(
+    resolve,
+    /turbopanel_public_hostname[\s\S]*'lets-encrypt' if \(turbopanel_tls_mode/,
+    "the deprecated single-hostname alias is a Let's Encrypt name",
+  );
+  const leFiles = await Deno.readTextFile(
+    join(
+      CHECKOUT_ORCHESTRATION_DIR,
+      "roles/instance-certs/tasks/letsencrypt-files.yml",
+    ),
+  );
+  const copyAt = leFiles.indexOf(
+    "Migrate validated legacy control-plane certificates",
+  );
+  const statAt = leFiles.indexOf("Stat Let's Encrypt certificates");
+  const hardenAt = leFiles.indexOf(
+    "Harden Let's Encrypt keys for the control-plane Caddy user",
+  );
+  assertEquals(copyAt >= 0 && statAt > copyAt && hardenAt > statAt, true);
+  assertMatch(
+    leFiles,
+    /caddy\/\.local\/share\/caddy\/certificates/,
+    "legacy certificates live under the old control-plane data directory",
+  );
+  assertMatch(
+    leFiles,
+    /openssl", "x509"/,
+    "legacy leaves are parsed with openssl x509",
+  );
+  assertMatch(
+    leFiles,
+    /openssl", "pkey"/,
+    "legacy keys are checked with openssl pkey",
+  );
+  assertMatch(
+    leFiles,
+    /letsencrypt-\$\{LE_HOST\}\.crt/,
+    "migrated leaves use the letsencrypt-<host> names",
+  );
+  assertMatch(leFiles, /-m 0640/, "migrated certificates are mode 0640");
+  assertMatch(leFiles, /-m 0600/, "migrated keys are mode 0600");
+  assertMatch(
+    leFiles,
+    /_le_sites/,
+    "migration covers every Let's Encrypt hostname, including the synthesized alias",
   );
 });
 
