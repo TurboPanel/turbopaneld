@@ -122,23 +122,26 @@
         # swap and restart). API and websocket callers get a JSON 503 they
         # can retry; Git webhooks get a bare 503; HTML navigation gets
         # updating.html, which refreshes itself.
+        # Named matchers are unique per site, including inside handle_errors.
+        # Reusing @api/@ws/@webhook here makes Caddy refuse to start
+        # ("matcher is defined more than once").
         handle_errors {
                 @updating `{http.error.status_code} in [502, 503, 504]`
                 handle @updating {
-                        @api path /api/*
-                        handle @api {
+                        @updating_api path /api/*
+                        handle @updating_api {
                                 header Content-Type "application/json"
                                 header Retry-After "5"
                                 respond `{"ok":false,"error":"control_plane_updating"}` 503
                         }
-                        @ws path /ws/*
-                        handle @ws {
+                        @updating_ws path /ws/*
+                        handle @updating_ws {
                                 header Content-Type "application/json"
                                 header Retry-After "5"
                                 respond `{"ok":false,"error":"control_plane_updating"}` 503
                         }
-                        @webhook path /webhook/*
-                        handle @webhook {
+                        @updating_webhook path /webhook/*
+                        handle @updating_webhook {
                                 respond "" 503
                         }
                         handle {

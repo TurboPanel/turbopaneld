@@ -890,8 +890,44 @@ test(
     assertEquals(caddyfile.includes("updating.html"), true);
     assertEquals(caddyfile.includes("control_plane_updating"), true);
     assertEquals(caddyfile.includes('Retry-After "5"'), true);
+    assertEquals(caddyfile.includes("@updating_api path /api/*"), true);
+    assertEquals(caddyfile.includes("@updating_ws path /ws/*"), true);
+    assertEquals(caddyfile.includes("@updating_webhook path /webhook/*"), true);
+    {
+      const snippetStart = caddyfile.indexOf("(turbopanel_app)");
+      const snippetEnd = caddyfile.indexOf(":8443 {");
+      assertEquals(
+        snippetStart >= 0 && snippetEnd > snippetStart,
+        true,
+        "turbopanel_app snippet precedes the :8443 catch-all",
+      );
+      const snippet = caddyfile.slice(snippetStart, snippetEnd);
+      const defined = [
+        ...snippet.matchAll(/^\s+@([A-Za-z_][A-Za-z0-9_]*)\s/gm),
+      ].map((match) => match[1]);
+      const seen = new Set<string>();
+      const dupes: string[] = [];
+      for (const name of defined) {
+        if (seen.has(name)) {
+          dupes.push(name);
+        } else {
+          seen.add(name);
+        }
+      }
+      assertEquals(
+        dupes,
+        [],
+        `named matchers in turbopanel_app must be unique (Caddy refuses a second @api inside handle_errors): ${
+          dupes.join(", ")
+        }`,
+      );
+    }
     assertEquals(
       tasks.includes("Install the control-plane updating page"),
+      true,
+    );
+    assertEquals(
+      tasks.includes("Validate the rendered Caddy site config"),
       true,
     );
     assertMatch(

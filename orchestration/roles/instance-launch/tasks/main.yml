@@ -198,6 +198,18 @@
   notify:
     - Reload turbopanel caddy
 
+- name: Validate the rendered Caddy site config
+  when: turbopanel_dev_user | default('') | length == 0
+  ansible.builtin.command:
+    argv:
+      - "{{ turbopanel_vendor_dir }}/caddy/current/caddy"
+      - validate
+      - --config
+      - "{{ turbopanel_caddyfile }}"
+      - --adapter
+      - caddyfile
+  changed_when: false
+
 - name: Install Caddy systemd unit
   ansible.builtin.template:
     src: turbopanel-caddy.service.j2
