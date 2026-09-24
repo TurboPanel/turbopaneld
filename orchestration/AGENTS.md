@@ -246,7 +246,11 @@ files are re-read even when the Caddyfile text is unchanged. The socket
 directory is `caddy_user`:`caddy_primary_group` mode `0750`. This process
 does not open a TCP admin port. A failed validate does not replace the live
 file, so `:8443` stays up. `self-signed.{crt,key}` is a symlink to
-`platform-ca.*` for one release.
+`platform-ca.*` for one release. Named matchers in `(turbopanel_app)` are
+unique across the snippet, including `handle_errors` — Caddy 2.11 rejects a
+second `@api` (`matcher is defined more than once`) and the unit crash-loops.
+`instance-launch` runs `caddy validate` on the rendered file so a bad
+template fails the play instead of starting that loop.
 
 Control-plane `XDG_DATA_HOME` is `{{ turbopanel_caddy_runtime_dir }}/share`
 (`<state>/caddy/.local/share`). Hosting Caddy uses `<state>/hosting-caddy`.
