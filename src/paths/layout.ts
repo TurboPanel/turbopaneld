@@ -132,6 +132,13 @@ export interface LayoutPaths {
   instanceDir: string;
   instanceConfigDir: string;
   instanceCaPath: string;
+  /**
+   * Private uploaded issuer for one control-plane hostname
+   * (`instance-uploaded-trust.pem`). Distinct from {@link instanceCaPath}.
+   * Absent unless the installer verified that issuer against the presented
+   * leaf. Runtime TLS still checks the chain and the dialed name.
+   */
+  instanceUploadedTrustPath: string;
   daemonStateDir: string;
   /** Hosting TLS materialization root (`/etc/turbopanel/tls`). */
   tlsDir: string;
@@ -405,6 +412,10 @@ export function resolveLayout(
 
   const instanceConfigDir = join(configDir, "instance");
   const instanceCaPath = join(configDir, "instance-ca.pem");
+  const instanceUploadedTrustPath = join(
+    configDir,
+    "instance-uploaded-trust.pem",
+  );
   const tlsDir = join(configDir, "tls");
   const daemonStateDir = (() => {
     const override = env.TURBOPANEL_DAEMON_STATE_DIR?.trim();
@@ -437,6 +448,7 @@ export function resolveLayout(
     instanceDir,
     instanceConfigDir,
     instanceCaPath,
+    instanceUploadedTrustPath,
     daemonStateDir,
     tlsDir,
     principalHomeRoot,

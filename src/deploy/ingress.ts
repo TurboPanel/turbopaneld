@@ -8,10 +8,7 @@ import {
   isValidIpv6Literal,
 } from "../contracts/commands-contracts.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
-import {
-  isDaemonReservedHostingSite,
-  syncInstanceAcmeHttp01Site,
-} from "./instance-acme-http01.ts";
+import { isDaemonReservedHostingSite } from "./instance-acme-http01.ts";
 import {
   parseComposePsEntries,
   readComposePsContainer,
@@ -22,12 +19,6 @@ import {
   runDocker as defaultRunDocker,
   type RunDockerOptions,
 } from "./docker-cli.ts";
-import { instanceHostnameSidecarPath } from "../instance/instance-acme-observe.ts";
-import {
-  devOwnershipPlaybookExtraArgs,
-  runLocalPlaybook,
-} from "../orchestration/ansible.ts";
-import { INSTANCE_CERTS_APPLY_PLAYBOOK } from "../orchestration/assets.ts";
 import { ensureHostingCaddy } from "./ensure-hosting-caddy.ts";
 import {
   assertSafeIngressIdentity,
@@ -237,20 +228,6 @@ export function setIngressHostCommandForTest(
   hostCommandOverride = fn;
   return () => {
     hostCommandOverride = previous;
-  };
-}
-
-/**
- * Test-only replacement for {@link releaseControlPlanePublicHttps}.
- * Returns a restore function that clears the override.
- */
-export function setReleaseControlPlanePublicHttpsForTest(
-  fn?: (layout: LayoutPaths) => Promise<void>,
-): () => void {
-  const previous = releaseControlPlanePublicHttpsForTest;
-  releaseControlPlanePublicHttpsForTest = fn;
-  return () => {
-    releaseControlPlanePublicHttpsForTest = previous;
   };
 }
 
@@ -663,146 +640,6 @@ WantedBy=multi-user.target
 `;
 }
 
-let releaseControlPlanePublicHttpsForTest:
-  | ((layout: LayoutPaths) => Promise<void>)
-  | undefined;
-
-type ControlPlaneCaddyApply = (
-  playbook: string,
-  extraArgs: string[],
-) => Promise<void>;
-
-/**
- * True when a rendered control-plane Caddyfile opens a public `:443` site.
- *
- * `:8443` and comment lines that mention the port do not count. The recovery
- * listener stays on `:8443` either way.
- */
-function caddyfileBindsPublicHttps(text: string): boolean {
-  for (const raw of text.split("\n")) {
-    if (siteLineBindsPublicHttps(raw.trim())) return true;
-  }
-  return false;
-}
-
-function siteLineBindsPublicHttps(line: string): boolean {
-  if (line.length === 0 || line.startsWith("#") || !line.endsWith("{")) {
-    return false;
-  }
-  const marker = ":443";
-  const at = line.lastIndexOf(marker);
-  if (at < 0) return false;
-  const between = line.slice(at + marker.length, -1).trim();
-  if (between.length > 0) return false;
-  return !previousIsDigit(line, at);
-}
-
-function previousIsDigit(line: string, index: number): boolean {
-  if (index <= 0) return false;
-  const code = line.codePointAt(index - 1);
-  return code !== undefined && code >= 48 && code <= 57;
-}
-
-/** The on-disk control-plane Caddyfile still claims public `:443`. */
-async function controlPlaneCouldOwnPublicHttps(
-  layout: LayoutPaths,
-): Promise<boolean> {
-  const path = join(layout.configDir, "caddy", "Caddyfile");
-  try {
-    return caddyfileBindsPublicHttps(await Deno.readTextFile(path));
-  } catch (err) {
-    if (err instanceof Deno.errors.NotFound) return false;
-    logWarn(
-      "deploy",
-      "could not read the control-plane Caddyfile before hosting Caddy install:",
-      err,
-    );
-    return true;
-  }
-}
-
-/**
- * Hostnames the last cert apply recorded, as one `key=value` extra-var.
- *
- * `tp-orchestrate` accepts only that shape, and a key=value value stays a
- * string. `turbopanel_hostnames_json` carries the compact JSON list;
- * `resolve-hostnames.yml` parses it with `from_json` so
- * `turbopanel_hostnames` is a list before `selectattr` and the Caddy
- * template. That list keeps Let's Encrypt names on loopback `:8444` when
- * public `:443` is released.
- */
-async function controlPlaneHostnameExtra(
-  layout: LayoutPaths,
-): Promise<string | null> {
-  let raw: string;
-  try {
-    raw = await Deno.readTextFile(instanceHostnameSidecarPath(layout));
-  } catch (err) {
-    if (err instanceof Deno.errors.NotFound) return null;
-    logWarn(
-      "deploy",
-      "control-plane hostname sidecar unreadable; re-render keeps no per-name sites:",
-      err,
-    );
-    return null;
-  }
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    if (!Array.isArray(parsed) || parsed.length === 0) return null;
-    return `turbopanel_hostnames_json=${JSON.stringify(parsed)}`;
-  } catch (err) {
-    logWarn(
-      "deploy",
-      "control-plane hostname sidecar is not a JSON list; re-render keeps no per-name sites:",
-      err,
-    );
-    return null;
-  }
-}
-
-async function applyControlPlaneCaddyRelease(
-  layout: LayoutPaths,
-  runPlaybook: ControlPlaneCaddyApply,
-): Promise<void> {
-  // Extra vars beat set_fact in public-https-owner.yml. Ansible's bool
-  // filter reads this string as false, so the render omits public :443
-  // sites. The same template always keeps the :8443 recovery listener.
-  const extraArgs = [
-    "-e",
-    "turbopanel_control_plane_binds_public_https=false",
-  ];
-  const hostnames = await controlPlaneHostnameExtra(layout);
-  if (hostnames) extraArgs.push("-e", hostnames);
-  extraArgs.push(...devOwnershipPlaybookExtraArgs());
-  await runPlaybook(INSTANCE_CERTS_APPLY_PLAYBOOK, extraArgs);
-}
-
-/**
- * Re-render and reload control-plane Caddy so it drops public `:443`.
- *
- * Uses the instance-certs apply playbook: validate a candidate, reload the
- * running process through its admin listener, and replace the persistent
- * file only after that process accepts it. `:8443` stays in the template.
- */
-export async function releaseControlPlanePublicHttps(
-  layout: LayoutPaths,
-  deps: { runPlaybook?: ControlPlaneCaddyApply } = {},
-): Promise<void> {
-  if (deps.runPlaybook) {
-    await applyControlPlaneCaddyRelease(layout, deps.runPlaybook);
-    return;
-  }
-  if (releaseControlPlanePublicHttpsForTest) {
-    await releaseControlPlanePublicHttpsForTest(layout);
-    return;
-  }
-  logInfo(
-    "deploy",
-    "releasing control-plane public :443 before starting hosting Caddy",
-  );
-  await applyControlPlaneCaddyRelease(layout, runLocalPlaybook);
-}
-
 async function installAndStartCaddy(
   unitSource: string,
 ): Promise<boolean> {
@@ -845,10 +682,6 @@ async function installAndStartCaddy(
 export async function ensureHostingCaddyRuntime(
   layout: LayoutPaths,
 ): Promise<void> {
-  // Snapshot before this function creates the hosting sites directory. That
-  // directory is itself proof hosting should own :443, but the running
-  // control-plane process still has the previous file until we reload it.
-  const releasePublicHttps = await controlPlaneCouldOwnPublicHttps(layout);
   await ensureHostingCaddy(layout);
   await Deno.mkdir(hostingCaddyDataDir(layout), {
     recursive: true,
@@ -874,16 +707,7 @@ export async function ensureHostingCaddyRuntime(
 
   // A non-root daemon cannot install a system unit. Keep the generated config
   // so test and dev environments can grant sudo later without redeploying.
-  // Drop control-plane public :443 first, or hosting Caddy cannot bind it.
-  // :8443 is left in place by the same render.
-  if (releasePublicHttps) {
-    await releaseControlPlanePublicHttps(layout);
-  }
   await installAndStartCaddy(unitSource);
-  // Hosting Caddy owns :80 and :443. The reserved site forwards HTTP-01 to
-  // :8880 and, once the certificate is on disk, publishes the control-plane
-  // name on :443.
-  await syncInstanceAcmeHttp01Site(layout);
 }
 
 /** Optional test seams for {@link ensureHostingIngress}. */

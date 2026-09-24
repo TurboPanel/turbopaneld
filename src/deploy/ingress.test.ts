@@ -28,7 +28,6 @@ import {
   listPersistedTcpUdpServiceIds,
   readAcmeModeHostnames,
   readEnvironmentTcpUdpServiceIds,
-  releaseControlPlanePublicHttps,
   removeEnvironmentTcpUdpServiceIngress,
   removeHostingCaddySite,
   removeServiceIngress,
@@ -39,7 +38,6 @@ import {
   serviceIngressProject,
   serviceTraefikCompose,
   setIngressHostCommandForTest,
-  setReleaseControlPlanePublicHttpsForTest,
   siteSnippet,
   sortCaddySiteRoutes,
   syncTcpUdpIngressEntries,
@@ -63,7 +61,6 @@ import {
   SYSTEM_MANAGED_INGRESS_COMPONENT,
   writeSystemComponentDescriptor,
 } from "./system-component.ts";
-import { INSTANCE_CERTS_APPLY_PLAYBOOK } from "../orchestration/assets.ts";
 import { resolveLayout } from "../paths/layout.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 
@@ -1777,27 +1774,6 @@ test("installAndStartCaddy succeeds when enable --now works", async () => {
   });
 });
 
-const CONTROL_PLANE_CADDY_WITH_PUBLIC_HTTPS = `:8443 {
-	tls /var/lib/turbopanel/tls/certs/platform-ca.crt /var/lib/turbopanel/tls/certs/platform-ca.key
-	import turbopanel_app
-}
-# Dedicated host: explicit :443.
-panel.example.com:443 {
-	import turbopanel_app
-}
-`;
-
-const CONTROL_PLANE_CADDY_RECOVERY_ONLY = `# Hosting Caddy owns public :443.
-:8443 {
-	tls /var/lib/turbopanel/tls/certs/platform-ca.crt /var/lib/turbopanel/tls/certs/platform-ca.key
-	import turbopanel_app
-}
-https://panel.example.com:8444 {
-	bind 127.0.0.1
-	import turbopanel_app
-}
-`;
-
 function recordHostingUnitStages(stages: string[]): () => void {
   return setIngressHostCommandForTest((_command, args) => {
     if (args.includes("install")) {
@@ -1815,147 +1791,6 @@ function recordHostingUnitStages(stages: string[]): () => void {
     throw new TypeError(`unexpected host command: ${args.join(" ")}`);
   });
 }
-
-async function writeControlPlaneCaddyfile(
-  layout: LayoutPaths,
-  text: string,
-): Promise<string> {
-  const dir = join(layout.configDir, "caddy");
-  await Deno.mkdir(dir, { recursive: true });
-  const path = join(dir, "Caddyfile");
-  await Deno.writeTextFile(path, text);
-  return path;
-}
-
-test("ensureHostingCaddyRuntime releases control-plane public :443 before starting hosting Caddy", async () => {
-  await withCaddyRuntimeLayout(async (layout) => {
-    const caddyfilePath = await writeControlPlaneCaddyfile(
-      layout,
-      CONTROL_PLANE_CADDY_WITH_PUBLIC_HTTPS,
-    );
-    const stages: string[] = [];
-    const restoreHost = recordHostingUnitStages(stages);
-    const restoreRelease = setReleaseControlPlanePublicHttpsForTest(() => {
-      stages.push("release-public-https");
-      return Promise.resolve();
-    });
-    try {
-      await ensureHostingCaddyRuntime(layout);
-      const releaseAt = stages.indexOf("release-public-https");
-      const enableAt = stages.indexOf("enable");
-      assertEquals(releaseAt >= 0, true);
-      assertEquals(enableAt > releaseAt, true);
-      assertStringIncludes(await Deno.readTextFile(caddyfilePath), ":8443 {");
-    } finally {
-      restoreRelease();
-      restoreHost();
-    }
-  });
-});
-
-test("ensureHostingCaddyRuntime skips the control-plane reload when public :443 is already free", async () => {
-  await withCaddyRuntimeLayout(async (layout) => {
-    await writeControlPlaneCaddyfile(layout, CONTROL_PLANE_CADDY_RECOVERY_ONLY);
-    const stages: string[] = [];
-    const restoreHost = recordHostingUnitStages(stages);
-    const restoreRelease = setReleaseControlPlanePublicHttpsForTest(() => {
-      stages.push("release-public-https");
-      return Promise.resolve();
-    });
-    try {
-      await ensureHostingCaddyRuntime(layout);
-      assertEquals(stages.includes("release-public-https"), false);
-      assertEquals(stages.includes("enable"), true);
-    } finally {
-      restoreRelease();
-      restoreHost();
-    }
-  });
-});
-
-/** The list `resolve-hostnames.yml` builds with `from_json`. */
-function parsedControlPlaneHostnames(extraArgs: readonly string[]): unknown {
-  const prefix = "turbopanel_hostnames_json=";
-  const raw = extraArgs.find((arg) => arg.startsWith(prefix));
-  if (typeof raw !== "string") {
-    throw new TypeError("expected turbopanel_hostnames_json extra-var");
-  }
-  if (raw.includes("\n")) {
-    throw new TypeError("hostname extra-var must stay one key=value line");
-  }
-  return JSON.parse(raw.slice(prefix.length));
-}
-
-test("releaseControlPlanePublicHttps re-renders control-plane Caddy with public :443 disabled", async () => {
-  const root = await Deno.makeTempDir({ prefix: "tp-ingress-release-443-" });
-  const layout = resolveLayout(
-    {
-      TURBOPANEL_STATE_DIR: `${root}/state`,
-      TURBOPANEL_CONFIG_DIR: `${root}/config`,
-    },
-    { skipDiscovery: true, forceMode: "production" },
-  );
-  const caddyDir = join(layout.configDir, "caddy");
-  await Deno.mkdir(caddyDir, { recursive: true });
-  await Deno.writeTextFile(
-    join(caddyDir, "instance-hostnames.json"),
-    JSON.stringify([{
-      host: "panel.example.com",
-      source: "lets-encrypt",
-      cert_id: "",
-    }]),
-  );
-  const calls: Array<{ playbook: string; extraArgs: string[] }> = [];
-  try {
-    await releaseControlPlanePublicHttps(layout, {
-      runPlaybook: (playbook, extraArgs) => {
-        calls.push({ playbook, extraArgs: [...extraArgs] });
-        return Promise.resolve();
-      },
-    });
-    assertEquals(calls.length, 1);
-    const call = calls[0];
-    if (!call) throw new TypeError("expected a playbook call");
-    assertEquals(call.playbook, INSTANCE_CERTS_APPLY_PLAYBOOK);
-    assertEquals(
-      call.extraArgs.includes(
-        "turbopanel_control_plane_binds_public_https=false",
-      ),
-      true,
-    );
-    const hostnames = parsedControlPlaneHostnames(call.extraArgs);
-    if (!Array.isArray(hostnames)) {
-      throw new TypeError("turbopanel_hostnames_json must parse to a list");
-    }
-    assertEquals(hostnames, [{
-      host: "panel.example.com",
-      source: "lets-encrypt",
-      cert_id: "",
-    }]);
-    const resolveHostnames = await Deno.readTextFile(
-      new URL(
-        "../../orchestration/roles/instance-certs/tasks/resolve-hostnames.yml",
-        import.meta.url,
-      ),
-    );
-    const decodeAt = resolveHostnames.indexOf(
-      'turbopanel_hostnames: "{{ turbopanel_hostnames_json | from_json }}"',
-    );
-    const selectAt = resolveHostnames.indexOf("selectattr(");
-    if (decodeAt < 0 || selectAt < decodeAt) {
-      throw new TypeError(
-        "resolve-hostnames.yml must from_json the hostname list before selectattr",
-      );
-    }
-    assertEquals(
-      call.extraArgs.some((arg) => arg.startsWith("turbopanel_hostnames=")),
-      false,
-    );
-    assertEquals(call.extraArgs.some((arg) => arg.startsWith("{")), false);
-  } finally {
-    await Deno.remove(root, { recursive: true });
-  }
-});
 
 test("serviceIngressProject and Dir reject unsafe serviceId", () => {
   assertThrows(

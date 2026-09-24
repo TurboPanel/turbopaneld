@@ -192,6 +192,8 @@ export const DAEMON_RUN_PROGRAMS: readonly string[] = [
   "test",
   "smartctl",
   "nvidia-smi",
+  // who holds :80 during instance ACME (`ss -H -ltnp`)
+  "ss",
   // networking / firewall / fabric
   "ip",
   "iptables",

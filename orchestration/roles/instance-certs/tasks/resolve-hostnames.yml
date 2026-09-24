@@ -4,9 +4,9 @@
 # gets one synthesized entry so the Caddyfile and leaf tasks keep working.
 #
 # tp-orchestrate accepts only key=value extra-vars, and those values stay
-# strings. The public-HTTPS release path therefore passes
-# turbopanel_hostnames_json. Decode it into a real list before selectattr
-# or the Caddy template iterates turbopanel_hostnames.
+# strings. Public-urls apply therefore passes turbopanel_hostnames_json.
+# Decode it into a real list before selectattr or the Caddy template
+# iterates turbopanel_hostnames.
 - name: Parse instance hostnames from the JSON extra-var
   when:
     - (turbopanel_hostnames_json | default('')) is string
@@ -63,10 +63,17 @@
     _json: >-
       [{% for host in turbopanel_public_urls.split(',') | map('trim') | reject('equalto', '') | list %}{"host": {{ host | to_json }}, "source": "platform-ca", "cert_id": ""}{% if not loop.last %},{% endif %}{% endfor %}]
 
+# Operator hostname rows stay as passed. Tokens already on
+# turbopanel_public_urls that are not those rows — co-located
+# dev-forward-hosts, the Vagrant host LAN address — remain on the leaf.
 - name: Project platform-ca hosts for the leaf generator
   when: (turbopanel_hostnames | default([])) | length > 0
   ansible.builtin.set_fact:
-    turbopanel_public_urls: "{{ turbopanel_hostnames | selectattr('source', 'equalto', 'platform-ca') | map(attribute='host') | join(',') }}"
+    turbopanel_public_urls: "{{ (_platform_ca_hosts + _forwarded_cert_names) | unique | join(',') }}"
+  vars:
+    _platform_ca_hosts: "{{ turbopanel_hostnames | selectattr('source', 'equalto', 'platform-ca') | map(attribute='host') | list }}"
+    _hostname_hosts: "{{ turbopanel_hostnames | map(attribute='host') | list }}"
+    _forwarded_cert_names: "{{ (turbopanel_public_urls | default('', true)).split(',') | map('trim') | reject('equalto', '') | reject('in', _hostname_hosts) | list }}"
 
 - name: Assert each instance hostname has a known source
   when: (turbopanel_hostnames | default([])) | length > 0

@@ -204,22 +204,49 @@ subsection.
 
 ### instance-launch control-plane TLS
 
-`:8443` (Platform CA leaf, `platform-ca.crt`) and `:8880` (plaintext) are
-always bound. `http_port 8880` keeps Caddy's ACME HTTP-01 solver off `:80`,
-which hosting Caddy owns on a combined host. `turbopanel_hostnames` is the
-list of `{host, source, cert_id}` the `public-urls-update` wire renders.
-`lets-encrypt` names are their own sites with no `tls` line (Caddy automatic
-HTTPS, storage under this unit's `XDG_DATA_HOME`). `uploaded` names use
-`uploaded-<cert_id>.{crt,key}`. `turbopanel_tls_mode`,
+Control-plane Caddy binds **exactly one TCP port**, `:8443`. It never binds
+`:80` or `:443` and never runs Let's Encrypt (`auto_https off`). Hosting Caddy
+owns public `:80`/`:443` for tenant sites and does **not** publish panel names.
+`turbopanel_hostnames` is the list of `{host, source, cert_id}` the
+`public-urls-update` wire renders. `uploaded` names are extra `:8443` sites
+with `tls uploaded-<cert_id>.{crt,key}` (legacy empty `cert_id` uses
+`uploaded.{crt,key}`). `lets-encrypt` names are extra `:8443` sites with
+`tls letsencrypt-<host>.{crt,key}` under `turbopanel_instance_certs_dir`,
+rendered **only when both files exist** (`letsencrypt-files.yml` stats them
+before the template). The daemon installs each certificate as `root:tp`
+mode `0640` and each key as `root:tp` mode `0600` through `sudo -n install`.
+The cert directory is `tpctrl:tp` mode `0750`, so an unprivileged write from
+`tp` cannot create the files, and a later handoff leaves the key owned by
+`caddy_user` mode `0600`, which `tp` cannot read on the next copy.
+`letsencrypt-files.yml` reassigns that key to `caddy_user` mode `0600` and
+loads it with `openssl pkey` as that user before the hostname is marked
+ready. Before that stat, it copies a validated pair out of the previous
+control-plane store
+(`<state>/caddy/.local/share/caddy/certificates/<issuer>/<host>/`) when the
+named files are absent. The host list includes the deprecated
+single-hostname alias: `resolve-hostnames.yml` synthesizes
+`turbopanel_public_hostname` as `lets-encrypt` when `turbopanel_hostnames`
+is empty and `turbopanel_tls_mode` is `lets_encrypt`. A converge therefore
+keeps serving the leaf that control-plane Caddy already issued instead of
+falling through to the Platform CA on `:8443`. Root-run `caddy validate` is
+not that check. The first apply of a Let's Encrypt name that has no leaf
+yet cannot fail Caddy validate or load: the bare `:8443` Platform CA site
+stays the catch-all for IPs and other names. The managed
+template binds literal `:8443`. `caddy_port` is only the dev overlay's
+`CADDY_PORT` and does not move this listener. `turbopanel_tls_mode`,
 `turbopanel_public_hostname`, and the single `uploaded.{crt,key}` pair stay
 as deprecated aliases: an empty `turbopanel_hostnames` is synthesized from
 them. The template's display-only mode is `upload` if any hostname is
 uploaded, `lets_encrypt` if any is ACME, otherwise `self_signed`.
 
-`instance-certs-apply` validates a candidate Caddyfile and reloads through
-`admin localhost:2019`. A failed validate does not replace the live file, so
-`:8443` stays up. `self-signed.{crt,key}` is a symlink to `platform-ca.*`
-for one release.
+`instance-certs-apply` validates a candidate Caddyfile and reloads with
+`caddy reload --address unix/<turbopanel_caddy_admin_socket> --force`
+(default `unix//run/turbopanel/caddy/admin.sock`), so changed certificate
+files are re-read even when the Caddyfile text is unchanged. The socket
+directory is `caddy_user`:`caddy_primary_group` mode `0750`. This process
+does not open a TCP admin port. A failed validate does not replace the live
+file, so `:8443` stays up. `self-signed.{crt,key}` is a symlink to
+`platform-ca.*` for one release.
 
 Control-plane `XDG_DATA_HOME` is `{{ turbopanel_caddy_runtime_dir }}/share`
 (`<state>/caddy/.local/share`). Hosting Caddy uses `<state>/hosting-caddy`.
@@ -230,26 +257,26 @@ Vars (both roles; extra-vars win):
 | Var | Purpose |
 | --- | --- |
 | `turbopanel_hostnames` | Per-hostname `{host, source, cert_id}` list |
-| `turbopanel_hostnames_json` | Compact JSON of that list. `tp-orchestrate` accepts only `key=value` extra-vars, which stay strings, so the public-HTTPS release path passes this and `resolve-hostnames.yml` loads it with `from_json` into `turbopanel_hostnames` before `selectattr` and the Caddy template |
+| `turbopanel_hostnames_json` | Compact JSON of that list. `tp-orchestrate` accepts only `key=value` extra-vars, which stay strings, so public-urls apply passes this and `resolve-hostnames.yml` loads it with `from_json` into `turbopanel_hostnames` before `selectattr` and the Caddy template |
 | `turbopanel_tls_mode` | Deprecated alias. Display-only once hostnames are set |
 | `turbopanel_tls_cert_path` / `turbopanel_tls_key_path` | Legacy uploaded pair when `cert_id` is empty; copied to `uploaded.{crt,key}` |
-| `turbopanel_public_hostname` / `turbopanel_acme_email` | Deprecated single ACME name, and the account email when any hostname is `lets-encrypt` |
-| `turbopanel_acme_directory` | ACME directory URL rendered as `acme_ca` when a lets-encrypt hostname exists |
+| `turbopanel_public_hostname` / `turbopanel_acme_email` | Deprecated single ACME name, and the account email (no longer rendered into the Caddyfile) |
+| `turbopanel_acme_directory` | ACME directory URL (no longer rendered as `acme_ca`; this process does not issue) |
 | `turbopanel_tls_public` | Operator-declared publicly trusted leaf; forced true when any hostname is `lets-encrypt` |
-| `turbopanel_public_urls` | Platform-ca hosts only, comma-separated, for the leaf generator |
+| `turbopanel_public_urls` | Platform-ca hosts, comma-separated, for the leaf generator. Co-located public-urls apply also merges `/etc/turbopanel/dev-forward-hosts` so the Vagrant host LAN address stays on the leaf. When hostname rows are already set, `resolve-hostnames.yml` keeps those extra tokens and does not add them as hostname rows |
+| `turbopanel_letsencrypt_ready` | List of Let's Encrypt hostnames whose `letsencrypt-<host>.{crt,key}` files exist; set by `letsencrypt-files.yml` after each key is `caddy_user` mode `0600` and that user can load it |
+| `caddy_user` | Control-plane Caddy account (`tpcaddy` when `turbopanel_dev_user` is empty). Let's Encrypt keys are chowned to it |
+| `turbopanel_caddy_admin_socket` | Unix socket for the managed admin API (`<run dir>/caddy/admin.sock`). Not a TCP port. The dev overlay does not use it |
 
 `turbopanel_caddyfile` is the dev overlay (`<dev root>/dev/orchestration/Caddyfile`)
 when `turbopanel_dev_user` is set; otherwise it is
 `{{ turbopanel_config_dir }}/caddy/Caddyfile`, which `instance-launch`
 **renders** from `templates/Caddyfile.j2` on every converge (root:tp `0640`,
-"Render the Caddy site config", notifies a Caddy restart). Ports, leaf paths,
-and the optional `email` directive are baked in at render time — no Caddy env
-placeholders, no static site config in the instance release package. When
-`turbopanel_control_plane_binds_public_https` is true (hosting Caddy's unit
-and its sites directory are both absent), uploaded and Let's Encrypt sites
-bind explicit `:443` and the unit grants `CAP_NET_BIND_SERVICE`. On a
-combined host this unit does not bind `:443`. Updating the proxy config is a
-template edit plus a converge, never a hand edit of the rendered file.
+"Render the Caddy site config", notifies a Caddy restart). Ports and leaf
+paths are baked in at render time — no Caddy env placeholders, no static site
+config in the instance release package. The unit does not grant
+`CAP_NET_BIND_SERVICE`. Updating the proxy config is a template edit plus a
+converge, never a hand edit of the rendered file.
 
 **Managed install layout.** The instance package lies flat in the install
 root beside the daemon — `bin/turbopanel` and `lib/libduckdb.so` (the unit's
@@ -262,30 +289,70 @@ to `compiled` whenever `turbopanel_dev_user` is empty, so
 `instance-certs-apply.yml` (run by the daemon with defaults only) resolves
 the binary's own `generate-self-signed-cert` verb.
 `instance-deno.env.j2` emits `TURBOPANEL_TLS_PUBLIC=1` when the effective flag
-is true — not the Workers env template.
+is true — not the Workers env template, and not a per-upload boolean. Uploaded
+public trust is whether the dialed certificate chains to a public root. The
+catch-all leaf SANs include platform-ca hosts, operator extra SANs, and the
+machine name, so an unlisted install name on `:8443` can still match.
 
 A `lets-encrypt` hostname is managed-install only (`turbopanel_dev_user` must
-be empty). HTTP-01 is served on `:8880`. Let's Encrypt dials **port 80** of
-the public hostname, so something has to deliver that request to the solver.
-Three shapes:
+be empty). Control-plane Caddy presents `letsencrypt-<host>.{crt,key}` on
+`:8443` once those files exist. It does not solve HTTP-01. The daemon opens
+a short window on hosting Caddy: `00-instance-acme-http01.caddy` forwards
+only `/.well-known/acme-challenge/*` to `unix/<run dir>/instance-acme.sock`
+and answers every other path with 404. A separate unit,
+`turbopanel-instance-acme.service`, is installed and left disabled. The
+daemon starts it for the issuance and stops it when the leaf is copied.
+A certificate already inside the renewal window (about the last third of
+its lifetime, `renewal_window_ratio` `0.33`) is copied only after the issuer
+storage holds a different, currently valid leaf. An unchanged leaf is
+accepted only when it is not due. An expired leaf is due. The issuer's
+`XDG_DATA_HOME` is `<state>/instance-acme`, not hosting Caddy's store
+and not control-plane Caddy's store. JSON logs go to
+`/var/log/turbopanel/instance-acme.log`. If the sites directory then holds
+only daemon-reserved files, the daemon disables hosting Caddy.
 
-1. **Solver.** `:8880` always answers `/.well-known/acme-challenge/*`. Every other path redirects to `https://{host}:8443`. This port is not a public copy of the panel.
-2. **Hosting Caddy on the same host.** The daemon writes the reserved site `00-instance-acme-http01.caddy` (`INSTANCE_ACME_HTTP01_SITE` in `src/deploy/instance-acme-http01.ts`). For each control-plane Let's Encrypt hostname, `http://<host>` reverse-proxies only the challenge path to `127.0.0.1:8880`. Once the leaf is on disk, that same file terminates public `:443` and reverse-proxies to this unit's loopback `:8444`. An uploaded name is published on `:443` from the on-disk pair and reverse-proxied to `:8443`. Tenant teardown skips that file. The file is removed when no hostname is `lets-encrypt` or `uploaded`. `ensureHostingCaddyRuntime` syncs the site after hosting Caddy starts, so a new name is forwarded before the next public-urls apply.
-3. **No hosting Caddy yet.** The sync is a no-op. An edge must forward public `:80` to `:8880`, or issuance waits until hosting Caddy is installed. With hosting absent, this unit is the public HTTPS owner and binds explicit `:443`.
+**Issuer proof (Caddy 2.11.4, Let's Encrypt staging, Vagrant guest, 2026-09-23).**
+The guest's public port 80 is the site router, so staging cannot fetch that
+address directly. A Cloudflare quick tunnel
+(`cloudflared tunnel --no-autoupdate --url http://127.0.0.1:80`) supplied a
+reachable hostname. Caddy 2.11.4 (`caddy_2.11.4_linux_amd64.tar.gz`, sha256
+`527fbf917c39189a1e3b31d34fa955601680b2d5c8055d2a87b8b9588dec7bb9`) ran two
+processes:
 
-On a combined host, control-plane Caddy does not bind `:443`. Let's Encrypt
-still listens on loopback `https://<host>:8444` so issuance stays in this
-unit's ACME storage. Hosting Caddy copies that leaf to
-`<state>/caddy/public-edge` and presents it on public `:443`. A dedicated
-host (no hosting unit and no sites directory) emits explicit `<host>:443`.
-Installing hosting Caddy does not rewrite this unit's Caddyfile; the next
-public-urls apply or converge is what drops the `:443` sites.
-`instance-certs-apply` asks the running process to load the candidate through
-`admin localhost:2019` and replaces the persistent Caddyfile only after that
-process accepts it. A rejected reload leaves the live file in place. A cold
-start restores the previous file when the new process does not stay up.
-`:8443` stays up either way. Wildcards are upload-only: the stock Caddy binary
-speaks HTTP-01, and DNS-01 needs a provider module that build does not include.
+1. A forwarder on port 80 whose site was `http://<tunnel host>` and whose
+   only challenge handler was `reverse_proxy unix/<run>/instance-acme.sock`
+   with `header_up Host {http.request.host}`.
+2. The issuer JSON: `admin.disabled`, an HTTP server on `unix/<sock>` with
+   `automatic_https.disable`, `tls.certificates.automate` for that hostname,
+   `challenges.tls-alpn.disabled`, staging directory
+   `https://acme-staging-v02.api.letsencrypt.org/directory`, and
+   `renewal_window_ratio` `0.33`.
+
+The first start stored
+`certificates/acme-staging-v02.api.letsencrypt.org-directory/<host>/<host>.crt`.
+`ss -ltnp` for that process listed no TCP socket, only the unix socket. The
+leaf was `notBefore=Sep 23 18:39:00 2026 GMT` and
+`notAfter=Dec 22 18:38:59 2026 GMT` (about 90 days). A ratio of `0.99` does
+not make a seconds-old leaf due: the window opens after one percent of the
+lifetime. Setting `renewal_window_ratio` to `1` makes the window the whole
+lifetime, so that stored leaf was already inside it (`remaining` about
+7772484 seconds). Starting the issuer again logged `renewing certificate`
+and then `certificate renewed successfully`, replaced the stored leaf
+(sha256 fingerprint changed), and again bound no TCP port.
+`challenges.bind_host` set to the socket path does not work: certmagic calls
+`listen tcp` on `unix//path:80` and fails with `no such host`. Leave
+`bind_host` unset so the solver targets port 80. When the forwarder already
+holds that port, certmagic does not bind it and the socket server answers.
+The loopback `bind_host` plus `alternate_port` fallback was not required.
+
+`instance-certs-apply` asks the running control-plane process to load the
+candidate through `turbopanel_caddy_admin_socket` with `--address` and
+`--force`, and replaces the persistent Caddyfile only after that process
+accepts it. A rejected reload leaves the live file in place. A cold start
+restores the previous file when the new process does not stay up. `:8443`
+stays up either way. Wildcards are upload-only: the stock Caddy binary
+speaks HTTP-01, and DNS-01 needs a provider module that build does not
+include.
 
 ### instance-launch secret keyring
 

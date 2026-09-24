@@ -45,32 +45,19 @@ function httpToWs(url: string): string {
   if (url.startsWith("https://")) {
     return `wss://${url.slice("https://".length)}`;
   }
-  if (url.startsWith("http://")) return `ws://${url.slice("http://".length)}`;
   throw new Error(
-    `TURBOPANEL_INSTANCE_URL must start with http:// or https:// (got "${url}")`,
+    `TURBOPANEL_INSTANCE_URL must start with https:// (got "${url}")`,
   );
 }
 
 /**
  * Decide how to reach the instance.
  *
- * When `TURBOPANEL_INSTANCE_URL` is set the daemon connects over the network to
- * that base URL (the full URL including scheme and port, e.g.
- * `https://<instance-host>:<port>`). Otherwise it falls back to the
- * local Unix socket used by the co-located dev setup.
+ * When `TURBOPANEL_INSTANCE_URL` is set the daemon connects over HTTPS to that
+ * base URL (the full URL including scheme and port, e.g.
+ * `https://<instance-host>:8443`). Otherwise it falls back to the local Unix
+ * socket used by the co-located dev setup. Plaintext `http://` is rejected.
  */
-/**
- * Plaintext `http://` to the control plane is a development-only path gated by
- * `TURBOPANEL_DEV_HTTP_CONTROL_PLANE`. On managed/production hosts the flag is
- * never set, so a plaintext control-plane URL is rejected rather than silently
- * dialed without TLS.
- */
-function isDevHttpControlPlaneEnabled(
-  env: Record<string, string | undefined>,
-): boolean {
-  return isTruthyFlag(env.TURBOPANEL_DEV_HTTP_CONTROL_PLANE);
-}
-
 function envOrProcess(
   env?: Record<string, string | undefined>,
 ): Record<string, string | undefined> {
@@ -84,12 +71,9 @@ export function resolveInstanceConfig(
   const url = resolved.TURBOPANEL_INSTANCE_URL?.trim();
   if (url) {
     const baseUrl = stripTrailingSlashes(url);
-    if (
-      baseUrl.startsWith("http://") && !isDevHttpControlPlaneEnabled(resolved)
-    ) {
+    if (!baseUrl.startsWith("https://")) {
       throw new Error(
-        `TURBOPANEL_INSTANCE_URL must use https:// (got "${baseUrl}"); ` +
-          "set TURBOPANEL_DEV_HTTP_CONTROL_PLANE=1 to allow plaintext http in development only",
+        `TURBOPANEL_INSTANCE_URL must use https:// (got "${baseUrl}")`,
       );
     }
     return { kind: "url", baseUrl, wsBaseUrl: httpToWs(baseUrl) };
@@ -128,6 +112,13 @@ export function describeInstance(config: InstanceConfig): string {
 
 /** Default platform CA path written by run.sh / daemon-config on managed nodes. */
 export const CANONICAL_INSTANCE_CA_PATH = layout.instanceCaPath;
+
+/**
+ * Private uploaded issuer, written by run.sh only after it matches the
+ * presented leaf and the dialed name. Not the Platform CA bundle.
+ */
+export const CANONICAL_INSTANCE_UPLOADED_TRUST_PATH =
+  layout.instanceUploadedTrustPath;
 
 function isTruthyFlag(value: string | undefined): boolean {
   const normalized = value?.trim().toLowerCase();
@@ -190,6 +181,35 @@ export function resolveInstanceCaPath(
   return fileExistsSync(canonicalPath) ? canonicalPath : undefined;
 }
 
+/**
+ * Private uploaded issuer for the control plane this daemon dials.
+ *
+ * Prefers `TURBOPANEL_INSTANCE_UPLOADED_TRUST` when that file exists, otherwise
+ * the layout path beside `instance-ca.pem`. Missing means this origin is not
+ * a private upload — public certificates stay on the system roots.
+ */
+export function resolveInstanceUploadedTrustPath(
+  env?: Record<string, string | undefined>,
+): string | undefined {
+  const resolved = envOrProcess(env);
+  const fromEnv = resolved.TURBOPANEL_INSTANCE_UPLOADED_TRUST?.trim();
+  if (fromEnv && fileExistsSync(fromEnv)) return fromEnv;
+  const canonicalPath = resolveLayout(resolved).instanceUploadedTrustPath;
+  return fileExistsSync(canonicalPath) ? canonicalPath : undefined;
+}
+
+/** Platform CA and private uploaded issuer, when each file is present. */
+export function resolveInstanceTrustPaths(
+  env?: Record<string, string | undefined>,
+): string[] {
+  const paths: string[] = [];
+  const platformCa = resolveInstanceCaPath(env);
+  const uploaded = resolveInstanceUploadedTrustPath(env);
+  if (platformCa) paths.push(platformCa);
+  if (uploaded && uploaded !== platformCa) paths.push(uploaded);
+  return paths;
+}
+
 function fileExistsSync(path: string): boolean {
   try {
     Deno.statSync(path);
@@ -202,7 +222,7 @@ function fileExistsSync(path: string): boolean {
 export interface InstanceHttpClientOptions {
   /** Path to the platform CA PEM to trust (self-hosted instances). */
   caCertPath?: string;
-  /** Environment used to gate the dev-only plaintext http control plane. */
+  /** Environment used to locate a private uploaded issuer PEM. */
   env?: Record<string, string | undefined>;
 }
 
@@ -265,44 +285,62 @@ export function normalizeCaFingerprint(value: string): string {
 }
 
 type PlatformCaHttpClientCache = {
-  path: string;
-  mtimeMs: number;
-  size: number;
+  stamp: string;
   client: Deno.HttpClient;
 };
 
 let platformCaHttpClientCache: PlatformCaHttpClientCache | undefined;
 
-/** Drop the cached HTTP client so the next connect re-reads the CA bundle. */
+/** Drop the cached HTTP client so the next connect re-reads trust PEMs. */
 export function invalidatePlatformCaHttpClient(): void {
   platformCaHttpClientCache = undefined;
 }
 
-/** Build an HTTP client that trusts every certificate in the platform CA PEM bundle. */
+async function trustFileStamp(path: string): Promise<string> {
+  const stat = await Deno.stat(path);
+  const mtimeMs = stat.mtime?.getTime() ?? 0;
+  return `${path}\0${mtimeMs}\0${stat.size}`;
+}
+
+/**
+ * HTTP client that trusts every certificate in the given PEM files.
+ * `caCerts` is added to the system roots. Hostname verification stays on.
+ * An empty list returns undefined so public certificates use the system
+ * roots alone.
+ */
+export async function createHttpClientFromCaPaths(
+  paths: readonly string[],
+): Promise<Deno.HttpClient | undefined> {
+  const present = paths
+    .map((path) => path.trim())
+    .filter((path) => path.length > 0);
+  if (present.length === 0) return undefined;
+  const stamps: string[] = [];
+  const certs: string[] = [];
+  for (const path of present) {
+    stamps.push(await trustFileStamp(path));
+    const pem = await Deno.readTextFile(path);
+    const blocks = splitPemBundle(pem);
+    if (blocks.length === 0) {
+      throw new Error(`trust PEM at ${path} contains no certificates`);
+    }
+    certs.push(...blocks);
+  }
+  const stamp = stamps.join("\n");
+  const cached = platformCaHttpClientCache;
+  if (cached?.stamp === stamp) return cached.client;
+  const client = Deno.createHttpClient({ caCerts: certs });
+  platformCaHttpClientCache = { stamp, client };
+  return client;
+}
+
+/** Build an HTTP client that trusts every certificate in one PEM bundle. */
 export async function createHttpClientFromCaPath(
   caCertPath: string | undefined,
 ): Promise<Deno.HttpClient | undefined> {
   const trimmed = caCertPath?.trim();
   if (!trimmed) return undefined;
-  const stat = await Deno.stat(trimmed);
-  const mtimeMs = stat.mtime?.getTime() ?? 0;
-  const size = stat.size;
-  const cached = platformCaHttpClientCache;
-  if (
-    cached?.path === trimmed &&
-    cached.mtimeMs === mtimeMs &&
-    cached.size === size
-  ) {
-    return cached.client;
-  }
-  const pem = await Deno.readTextFile(trimmed);
-  const certs = splitPemBundle(pem);
-  if (certs.length === 0) {
-    throw new Error(`platform CA PEM at ${trimmed} contains no certificates`);
-  }
-  const client = Deno.createHttpClient({ caCerts: certs });
-  platformCaHttpClientCache = { path: trimmed, mtimeMs, size, client };
-  return client;
+  return await createHttpClientFromCaPaths([trimmed]);
 }
 
 /**
@@ -316,8 +354,8 @@ export async function fetchWithPlatformCa(
   env?: Record<string, string | undefined>,
   init?: RequestInit,
 ): Promise<Response> {
-  const client = await createHttpClientFromCaPath(
-    resolveInstanceCaPath(envOrProcess(env)),
+  const client = await createHttpClientFromCaPaths(
+    resolveInstanceTrustPaths(envOrProcess(env)),
   );
   if (client) {
     return fetch(url, { ...init, client });
@@ -329,16 +367,18 @@ export async function fetchWithPlatformCa(
  * Build the HTTP client used for both REST and the WebSocket upgrade.
  *
  * - socket mode: a Unix-transport client (host in the URL is ignored).
- * - url mode with a CA: a client trusting the platform CA PEM (self-hosted).
- * - url mode without a CA: `undefined`, so the platform default fetch/WebSocket
- *   is used (valid public certs: Let's Encrypt, Cloudflare, etc.).
+ * - url mode with a CA and/or a private uploaded issuer: a client trusting
+ *   those PEMs in addition to the system roots.
+ * - url mode without either file: `undefined`, so the platform default
+ *   fetch/WebSocket is used (valid public certs: Let's Encrypt, a publicly
+ *   trusted upload, Cloudflare).
  *
- * There is no "insecure"/skip-verification mode: the daemon either trusts a
- * publicly-valid cert via the system store, or trusts the platform CA PEM. In
- * both cases the instance server cert MUST be valid for the hostname the daemon
- * dials (its SAN must include the configured public URL host) — otherwise the
- * TLS handshake fails. Manage the instance cert SANs from the admin surface /
- * `TURBOPANEL_PUBLIC_URL`, not by disabling verification.
+ * There is no "insecure"/skip-verification mode. The daemon trusts the system
+ * roots, the Platform CA bundle, or the private uploaded issuer for the dialed
+ * hostname. The instance server cert MUST be valid for the hostname the daemon
+ * dials (its SAN must include that host) — otherwise the TLS handshake fails.
+ * Manage the instance cert SANs from the admin surface / `TURBOPANEL_PUBLIC_URL`,
+ * not by disabling verification.
  */
 export async function createInstanceHttpClient(
   config: InstanceConfig,
@@ -350,17 +390,21 @@ export async function createInstanceHttpClient(
     });
   }
 
-  if (config.baseUrl.startsWith("http://")) {
-    const env = options.env ??
-      (typeof Deno !== "undefined" ? Deno.env.toObject() : {});
-    if (!isDevHttpControlPlaneEnabled(env)) {
-      throw new Error(
-        `instance base URL must use https:// (got "${config.baseUrl}"); ` +
-          "set TURBOPANEL_DEV_HTTP_CONTROL_PLANE=1 to allow plaintext http in development only",
-      );
-    }
-    return undefined;
+  if (!config.baseUrl.startsWith("https://")) {
+    throw new Error(
+      `instance base URL must use https:// (got "${config.baseUrl}")`,
+    );
   }
 
-  return await createHttpClientFromCaPath(options.caCertPath);
+  return await createHttpClientFromCaPaths(instanceTrustPaths(options));
+}
+
+function instanceTrustPaths(options: InstanceHttpClientOptions): string[] {
+  const paths: string[] = [];
+  const explicit = options.caCertPath?.trim();
+  if (explicit) paths.push(explicit);
+  if (!options.env) return paths;
+  const uploaded = resolveInstanceUploadedTrustPath(options.env);
+  if (uploaded && !paths.includes(uploaded)) paths.push(uploaded);
+  return paths;
 }

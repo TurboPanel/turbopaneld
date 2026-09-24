@@ -1,10 +1,10 @@
-import { assertEquals } from "@std/assert";
+import { assertEquals, assertThrows } from "@std/assert";
+import { InsecureOverlayBaseError } from "./errors.ts";
 import { dirname, fromFileUrl, join } from "@std/path";
 import {
   absolutizeChannelManifestJson,
   absolutizeRootCatalogJson,
   builtinChannelManifestUrl,
-  catalogAllowsHttp,
   DL_BASE_URL,
   type ReleaseArtifactKind,
   resolveDlBase,
@@ -58,14 +58,26 @@ test("resolvePinnedManifestUrl accepts only an https pin", () => {
   );
 });
 
-test("resolveOverlayDlBase is null without TURBOPANEL_DL_BASE", () => {
+test("resolveOverlayDlBase accepts https and rejects a configured non-https base", () => {
   assertEquals(resolveOverlayDlBase({}), null);
   assertEquals(resolveOverlayDlBase({ TURBOPANEL_DL_BASE: "  " }), null);
+  assertThrows(
+    () =>
+      resolveOverlayDlBase({
+        TURBOPANEL_DL_BASE: "http://203.0.113.10/downloads/daemon/",
+      }),
+    InsecureOverlayBaseError,
+    "must be an https URL",
+  );
+  assertThrows(
+    () => resolveOverlayDlBase({ TURBOPANEL_DL_BASE: "not a url" }),
+    InsecureOverlayBaseError,
+  );
   assertEquals(
     resolveOverlayDlBase({
-      TURBOPANEL_DL_BASE: "http://203.0.113.10:8880/downloads/daemon/",
+      TURBOPANEL_DL_BASE: "https://203.0.113.10:8443/downloads/daemon/",
     }),
-    "http://203.0.113.10:8880/downloads/daemon",
+    "https://203.0.113.10:8443/downloads/daemon",
   );
 });
 
@@ -180,18 +192,6 @@ test("rootCatalogUrl joins channels.json onto the overlay origin", () => {
     "https://turbopanel.dev/downloads/daemon/channels.json",
   );
   assertEquals(rootCatalogUrl(), `${DL_BASE_URL}/channels.json`);
-});
-
-test("catalogAllowsHttp is true only for http: catalog URLs", () => {
-  assertEquals(
-    catalogAllowsHttp("http://studio.lan:8880/downloads/daemon/channels.json"),
-    true,
-  );
-  assertEquals(
-    catalogAllowsHttp("https://turbopanel.dev/downloads/daemon/channels.json"),
-    false,
-  );
-  assertEquals(catalogAllowsHttp("not a url"), false);
 });
 
 test("resolveMaybeRelativeUrl resolves overlay-relative catalog paths", () => {

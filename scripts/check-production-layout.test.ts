@@ -46,6 +46,7 @@ function productionLayout(
     instanceDir: "/opt/turbopanel",
     instanceConfigDir: "/etc/turbopanel/instance",
     instanceCaPath: "/etc/turbopanel/instance-ca.pem",
+    instanceUploadedTrustPath: "/etc/turbopanel/instance-uploaded-trust.pem",
     tlsDir: "/etc/turbopanel/tls",
     ...overrides,
   };

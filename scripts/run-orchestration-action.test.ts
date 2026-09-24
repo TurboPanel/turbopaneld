@@ -213,6 +213,41 @@ test("devInstanceExtraArgs emits no optional extra-vars without a payload", () =
   assertEquals(explicit.includes('{"turbopanel_optional_ui":true}'), true);
 });
 
+test("devInstanceExtraArgs passes forwarded LAN hosts as certificate public URLs", () => {
+  const args = devInstanceExtraArgs(
+    fakeEnv({
+      TURBOPANEL_PUBLIC_URLS: "https://panel.lan:8443",
+      TURBOPANEL_TLS_EXTRA_SANS: "extra.lan",
+    }),
+    undefined,
+    () => "192.0.2.10\nlab.lan\n",
+  );
+  assertEquals(
+    args.includes(
+      "turbopanel_public_urls=https://panel.lan:8443,192.0.2.10,lab.lan",
+    ),
+    true,
+  );
+  assertEquals(args.includes("turbopanel_tls_extra_sans=extra.lan"), true);
+});
+
+test("devInstanceExtraArgs adds configured LAN aliases beside forwarded hosts", () => {
+  const args = devInstanceExtraArgs(
+    fakeEnv({
+      TURBOPANEL_PUBLIC_URLS: "https://panel.lan:8443",
+      TURBOPANEL_DEV_LAN_ALIASES: "dev.lan, $(id), not a host",
+    }),
+    undefined,
+    () => "192.0.2.10\n",
+  );
+  assertEquals(
+    args.includes(
+      "turbopanel_public_urls=https://panel.lan:8443,192.0.2.10,dev.lan",
+    ),
+    true,
+  );
+});
+
 test("devInstanceExtraArgs includes SSH repo urls and workers postgres expose", () => {
   const args = devInstanceExtraArgs(
     fakeEnv({

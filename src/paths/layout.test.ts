@@ -368,6 +368,10 @@ test("resolveLayout production defaults match the FHS tree", () => {
     layout.instanceCaPath,
     join(PROD_CONFIG_DIR_DEFAULT, "instance-ca.pem"),
   );
+  assertEquals(
+    layout.instanceUploadedTrustPath,
+    join(PROD_CONFIG_DIR_DEFAULT, "instance-uploaded-trust.pem"),
+  );
   assertEquals(layout.tlsDir, join(PROD_CONFIG_DIR_DEFAULT, "tls"));
   assertEquals(layout.daemonStateDir, PROD_STATE_DIR_DEFAULT);
   assertEquals(layout.principalHomeRoot, "/srv/users");
@@ -439,6 +443,10 @@ test("resolveLayout honors every path override", () => {
   assertEquals(layout.principalHomeRoot, "/p");
   assertEquals(layout.instanceConfigDir, "/c/instance");
   assertEquals(layout.instanceCaPath, "/c/instance-ca.pem");
+  assertEquals(
+    layout.instanceUploadedTrustPath,
+    "/c/instance-uploaded-trust.pem",
+  );
   assertEquals(layout.tlsDir, "/c/tls");
 });
 

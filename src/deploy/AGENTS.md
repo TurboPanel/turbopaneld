@@ -1,6 +1,6 @@
 # Tenant deploy & hosting ingress — AGENTS.md
 
-The `environment.deploy` / `environment.lifecycle` / `environment.stop` command handlers: Docker Compose bring-up with Traefik labels, hosting Caddy (`:80`/`:443`, distinct from control-plane Caddy), org TLS materialization from `tpdaemon` envelopes, non-destructive start/stop/restart, and best-effort container reporting. On a combined host, hosting Caddy also terminates public `:443` for the control plane's uploaded and Let's Encrypt names via `00-instance-acme-http01.caddy`.
+The `environment.deploy` / `environment.lifecycle` / `environment.stop` command handlers: Docker Compose bring-up with Traefik labels, hosting Caddy (`:80`/`:443`, distinct from control-plane Caddy on `:8443` only), org TLS materialization from `tpdaemon` envelopes, non-destructive start/stop/restart, and best-effort container reporting. While the control plane obtains a Let's Encrypt certificate, hosting Caddy forwards only `/.well-known/acme-challenge/*` for those names to the issuer socket (`00-instance-acme-http01.caddy`). That file is removed when issuance finishes. Hosting Caddy does not terminate panel HTTPS.
 
 **Managed engines are a separate path** (`../managed/AGENTS.md`): platform-owned
 compose + config under `<stateDir>/managed/<managedId>/`, native ports only, no
@@ -133,14 +133,8 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    `bind` scope: **public** pinned `ip` row, **datacenter** private `ip`
    (`scope = 'datacenter'` on the target server), or **local** loopback
    `127.0.0.1`. Unit `turbopanel-hosting-caddy.service` when sudo allows.
-   Before that unit starts, if the control-plane Caddyfile still opens a
-   public `:443` site, `ensureHostingCaddyRuntime` re-runs
-   `instance-certs-apply` with
-   `turbopanel_control_plane_binds_public_https=false` and, when the
-   hostname sidecar is present, `turbopanel_hostnames_json` (a compact JSON
-   list). `resolve-hostnames.yml` parses that string into the
-   `turbopanel_hostnames` list before `selectattr` and the Caddy template,
-   then reloads control-plane Caddy. The recovery listener on `:8443` stays.
+   Control-plane Caddy binds only `:8443` and never public `:443`, so hosting
+   Caddy can take `:80`/`:443` without a control-plane release step.
    **Distinct**
    from control-plane Caddy (`:8443`).
 11a. Alongside each environment's `.caddy` site file, `rewriteHostingCaddySites`

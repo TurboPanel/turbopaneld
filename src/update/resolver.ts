@@ -9,7 +9,6 @@ import {
   absolutizeChannelManifestJson,
   absolutizeRootCatalogJson,
   builtinChannelManifestUrl,
-  catalogAllowsHttp,
   resolveOverlayDlBase,
   resolvePinnedManifestUrl,
   rootCatalogUrl,
@@ -67,21 +66,22 @@ function resolveLinuxArch(): LinuxArch {
 
 /**
  * Where the channel manifest is read from: the overlay catalog's
- * `channels.json` when `TURBOPANEL_DL_BASE` is set (the catalog hop stays so
- * relative overlay URLs and plaintext `:8880` keep working), otherwise a
- * pinned manifest when `TURBOPANEL_MANIFEST_URL` is set (update-rollback),
- * otherwise the built-in rail — one URL per advertised channel, no catalog
- * fetch.
+ * `channels.json` when `TURBOPANEL_DL_BASE` is an https URL (the catalog hop
+ * stays so relative overlay URLs keep working). A configured base that is
+ * not https throws from {@link resolveOverlayDlBase} and is not replaced
+ * with the public rail. An absent base uses a pinned manifest when
+ * `TURBOPANEL_MANIFEST_URL` is set (update-rollback), otherwise the
+ * built-in rail — one URL per advertised channel, no catalog fetch.
  */
 async function resolveManifestLocation(
   config: UpdateChannelConfig,
   env: Record<string, string | undefined>,
-): Promise<{ manifestUrl: string; allowHttp: boolean; overlay: boolean }> {
+): Promise<{ manifestUrl: string; overlay: boolean }> {
   const overlayBase = resolveOverlayDlBase(env);
   if (overlayBase === null) {
     const pinned = resolvePinnedManifestUrl(env);
     if (pinned !== null) {
-      return { manifestUrl: pinned, allowHttp: false, overlay: false };
+      return { manifestUrl: pinned, overlay: false };
     }
     const manifestUrl = builtinChannelManifestUrl(config.channel);
     if (manifestUrl === null) {
@@ -89,11 +89,10 @@ async function resolveManifestLocation(
         `Channel has no built-in manifest location: ${config.channel}`,
       );
     }
-    return { manifestUrl, allowHttp: false, overlay: false };
+    return { manifestUrl, overlay: false };
   }
 
   const catalogUrl = rootCatalogUrl(overlayBase);
-  const allowHttp = catalogAllowsHttp(catalogUrl);
   const catalogResponse = await trustedFetch(
     catalogUrl,
     env,
@@ -107,7 +106,6 @@ async function resolveManifestLocation(
 
   const catalog = parseRootCatalog(
     absolutizeRootCatalogJson(await catalogResponse.json(), catalogUrl),
-    allowHttp,
   );
 
   const channelEntry = catalog.channels[config.channel];
@@ -120,7 +118,7 @@ async function resolveManifestLocation(
       `Channel not found in catalog: ${config.channel}`,
     );
   }
-  return { manifestUrl: channelEntry.manifestUrl, allowHttp, overlay: true };
+  return { manifestUrl: channelEntry.manifestUrl, overlay: true };
 }
 
 export type ResolveUpdateOptions = {
@@ -179,7 +177,7 @@ export async function resolveUpdate(
   env: Record<string, string | undefined> = Deno.env.toObject(),
   options: ResolveUpdateOptions = {},
 ): Promise<UpdateInfo> {
-  const { manifestUrl, allowHttp, overlay } = await resolveManifestLocation(
+  const { manifestUrl, overlay } = await resolveManifestLocation(
     config,
     env,
   );
@@ -201,7 +199,6 @@ export async function resolveUpdate(
   );
   const manifest = parseChannelManifest(
     absolutizeChannelManifestJson(verified, manifestUrl),
-    allowHttp,
   );
 
   const arch = resolveLinuxArch();

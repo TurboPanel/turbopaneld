@@ -40,6 +40,10 @@ import {
   resolveDevConvergeOptions,
 } from "../src/orchestration/dev-converge-options.ts";
 import {
+  mergeDevCertPublicUrls,
+  readDevForwardHostsFile,
+} from "../src/orchestration/dev-forward-hosts.ts";
+import {
   devOrchestrationAnsibleEnv,
   type DevOrchestrationLayout,
   requireDevOrchestrationLayout,
@@ -166,6 +170,7 @@ export function devInstanceExtraArgs(
     toObject(): { [index: string]: string };
   } = Deno.env,
   options: DevConvergeOptions = resolveDevConvergeOptions(env),
+  readForwardHosts: () => string = readDevForwardHostsFile,
 ): string[] {
   const devUser = env.get("TURBOPANEL_DEV_USER");
   const devUid = env.get("TURBOPANEL_DEV_UID");
@@ -206,6 +211,19 @@ export function devInstanceExtraArgs(
   );
   if (instanceRuntime === "workers") {
     args.push("-e", "postgres_expose_port=true");
+  }
+  const publicUrls = mergeDevCertPublicUrls(
+    env.get("TURBOPANEL_PUBLIC_URLS"),
+    [readForwardHosts(), env.get("TURBOPANEL_DEV_LAN_ALIASES") ?? ""].join(
+      "\n",
+    ),
+  );
+  if (publicUrls) {
+    args.push("-e", `turbopanel_public_urls=${publicUrls}`);
+  }
+  const extraSans = env.get("TURBOPANEL_TLS_EXTRA_SANS")?.trim();
+  if (extraSans) {
+    args.push("-e", `turbopanel_tls_extra_sans=${extraSans}`);
   }
   return args;
 }

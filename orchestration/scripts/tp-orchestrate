@@ -19,8 +19,8 @@
 #   update --license <b64url> [--host URL] [--dl-base URL]
 #          [--instance-ca /etc/turbopanel/instance-ca.pem] [--channel NAME]
 #          [--manifest-url https://…] --no-start
-#       Fetch run.sh (the CDN, or the control plane for plaintext-dev /
-#       overlay hosts) and run it as root with exactly those flags. The
+#       Fetch run.sh (the CDN, or the control plane for an HTTPS overlay
+#       host) and run it as root with exactly those flags. The
 #       script body is never accepted from the caller, --insecure-tls is not
 #       a recognised flag here, and the only CA the fetch trusts beyond the
 #       system store is the daemon's canonical Platform CA file.
@@ -207,6 +207,7 @@ tp_verb_galaxy_docker_role() {
 }
 
 CANONICAL_INSTANCE_CA="/etc/turbopanel/instance-ca.pem"
+CANONICAL_INSTANCE_UPLOADED_TRUST="/etc/turbopanel/instance-uploaded-trust.pem"
 CDN_RUN_SCRIPT="https://turbopanel.sh"
 # Root-pinned update origin, written by run.sh (as root) at install time into
 # the root-owned lib/ tree: the control plane this host enrolled with, the
@@ -226,7 +227,7 @@ MANIFEST_URL_PREFIX_GITHUB_UI="https://github.com/TurboPanel/ui/releases/downloa
 tp_valid_url() {
   case "$1" in
     *"$(printf ' ')"*|*"'"*|*'"'*) return 1 ;;
-    https://[A-Za-z0-9]*|http://[A-Za-z0-9]*) return 0 ;;
+    https://[A-Za-z0-9]*) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -244,6 +245,7 @@ tp_read_update_origin_pin() {
   _pin_host="$(tp_pin_field host)"
   _pin_dl_base="$(tp_pin_field dl_base)"
   _pin_ca="$(tp_pin_field instance_ca)"
+  _pin_uploaded="$(tp_pin_field uploaded_trust)"
   [ -n "$_pin_host" ] || tp_die "$UPDATE_ORIGIN_PIN carries no host"
 }
 
@@ -274,14 +276,15 @@ tp_ui_manifest_url_allowed() {
 }
 
 # Download run.sh into $_script from the root-pinned origin. The caller has
-# already read the pin. TLS is never relaxed: CDN public trust, plaintext
-# dev, or the pinned Platform CA on an overlay host.
+# already read the pin. TLS is never relaxed: CDN public trust, the pinned
+# Platform CA, or the pinned private uploaded issuer. The issuer is --cacert
+# only and is never passed as --instance-ca.
 tp_fetch_pinned_run_script() {
   _script_url="$CDN_RUN_SCRIPT"
   set -- curl -fsSL --max-time 120
   case "$_pin_host" in
     http://*)
-      _script_url="${_pin_host%/}/run.sh"
+      tp_die "refusing plaintext update origin $_pin_host — the control plane is https://<host>:8443"
       ;;
     https://*)
       if [ -n "$_pin_dl_base" ]; then
@@ -289,6 +292,10 @@ tp_fetch_pinned_run_script() {
         if [ -n "$_pin_ca" ]; then
           [ -f "$_pin_ca" ] || tp_die "Platform CA missing at $_pin_ca — re-run the installer with --instance-ca"
           set -- "$@" --cacert "$_pin_ca"
+        elif [ -n "$_pin_uploaded" ]; then
+          [ "$_pin_uploaded" = "$CANONICAL_INSTANCE_UPLOADED_TRUST" ] || tp_die "refusing uploaded trust pin $_pin_uploaded"
+          [ -f "$_pin_uploaded" ] || tp_die "private uploaded issuer missing at $_pin_uploaded — re-run the installer"
+          set -- "$@" --cacert "$_pin_uploaded"
         fi
       fi
       ;;

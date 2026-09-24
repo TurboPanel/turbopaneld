@@ -21,8 +21,10 @@ excluded from release packaging (`package-daemon-release.sh` /
 `/run.sh` and `/downloads/daemon/*` from the daemon checkout. Remote servers
 installed through that overlay receive `TURBOPANEL_DL_BASE=<origin>/downloads/daemon`
 (persisted in `daemon.env`) and must **never** fall back to `https://dl.trbp.nl`.
+A configured `TURBOPANEL_DL_BASE` that is not https is refused
+(`InsecureOverlayBaseError`); only an absent base selects the public rail.
 Catalog URLs in `dist/channels.json` / `dist/manifest.json` are relative so the
-same files work behind LAN HTTPS, plaintext `:8880`, and a Cloudflare tunnel.
+same files work behind LAN HTTPS on `:8443` and a Cloudflare tunnel.
 `run.sh --insecure-tls` still only relaxes the platform-CA instance legs;
 public :443 TLS (tunnel) uses the system store. Rebuild the overlay with
 `deno task release:dev` (dev console **Rebuild daemon and upgrade connected servers**).

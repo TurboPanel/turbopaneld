@@ -70,3 +70,8 @@ export {
   TEST_RELEASE_SIGNING_KEY_PEM,
   TEST_RELEASE_SIGNING_PUBLIC_KEY_HEX,
 } from "./release-signing-fixture.ts";
+
+export {
+  writeFixtureLeafCertificate,
+  writeFixtureLeafPair,
+} from "./openssl-fixture-leaf.ts";

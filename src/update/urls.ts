@@ -1,3 +1,4 @@
+import { InsecureOverlayBaseError } from "./errors.ts";
 import type { UpdateChannel } from "./types.ts";
 
 export const DL_BASE_URL = "https://dl.trbp.nl";
@@ -145,16 +146,31 @@ export function resolvePinnedManifestUrl(
 }
 
 /**
- * The overlay catalog origin when one is configured, else `null` — the
- * resolver reads `<origin>/channels.json` in that case and the built-in
- * per-channel rail otherwise. Setting `TURBOPANEL_DL_BASE=https://dl.trbp.nl`
- * is the manual override that forces the CDN catalog for every channel.
+ * The overlay catalog origin when `TURBOPANEL_DL_BASE` is an https URL.
+ * An absent or blank value is `null` (the built-in rail). A configured
+ * value that is not https throws {@link InsecureOverlayBaseError} so the
+ * resolver cannot treat it as "no overlay" and fetch the public catalog.
+ * Setting `TURBOPANEL_DL_BASE=https://dl.trbp.nl` is the manual override
+ * that forces the CDN catalog for every channel.
  */
 export function resolveOverlayDlBase(
   env: Record<string, string | undefined> = Deno.env.toObject(),
 ): string | null {
   const override = env.TURBOPANEL_DL_BASE?.trim();
-  return override ? stripTrailingSlashes(override) : null;
+  if (!override) return null;
+  const base = stripTrailingSlashes(override);
+  let protocol = "";
+  try {
+    protocol = new URL(base).protocol;
+  } catch {
+    protocol = "";
+  }
+  if (protocol !== "https:") {
+    throw new InsecureOverlayBaseError(
+      `TURBOPANEL_DL_BASE must be an https URL (configured value is not https). Daemon updates will not use the public catalog.`,
+    );
+  }
+  return base;
 }
 
 export function rootCatalogUrl(base = DL_BASE_URL): string {
@@ -167,14 +183,6 @@ export function resolveMaybeRelativeUrl(
   value: string,
 ): string {
   return new URL(value, baseUrl).href;
-}
-
-export function catalogAllowsHttp(catalogUrl: string): boolean {
-  try {
-    return new URL(catalogUrl).protocol === "http:";
-  } catch {
-    return false;
-  }
 }
 
 /** Rewrite `channels[].manifestUrl` to absolute URLs against the catalog fetch URL. */

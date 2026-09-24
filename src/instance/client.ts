@@ -9,6 +9,7 @@ import {
   normalizeCaFingerprint,
   resolveInstanceCaPath,
   resolveInstanceConfig,
+  resolveInstanceUploadedTrustPath,
   resolveServerIdentityDir,
 } from "./sockets.ts";
 import {
@@ -20,7 +21,6 @@ import {
   readRemoteFiles,
   resolveDefaultBranch,
 } from "../deploy/release/read-remote-files.ts";
-import { syncInstanceAcmeHttp01Site } from "../deploy/instance-acme-http01.ts";
 import { collectManagedLogs } from "../managed/logs.ts";
 import { collectContainerLogs } from "../logs/container-tail.ts";
 import type { SendCommandLogChunkFn } from "../logs/uploader.ts";
@@ -101,7 +101,7 @@ import { resolvePinnedManifestUrl } from "../update/urls.ts";
 import { installOriginNeedsInsecureTls } from "./install-tls.ts";
 import { ManagedHaObserver } from "./ha-observe.ts";
 import { AcmeIssuanceObserver } from "./acme-observe.ts";
-import { InstanceAcmeIssuanceObserver } from "./instance-acme-observe.ts";
+import { InstanceAcmeRenewalScheduler } from "./instance-acme-renew.ts";
 import { DAEMON_VERSION } from "../version.ts";
 import { resolveDaemonCapabilities } from "./version-wire.ts";
 import { TopologyReporter } from "./topology-reporter.ts";
@@ -382,8 +382,8 @@ export class InstanceClient {
   #idlePresence: IdlePresence | undefined;
   #haObserver: ManagedHaObserver | undefined;
   #acmeObserver: AcmeIssuanceObserver | undefined;
-  /** Own debounce map. Never shares state with `#acmeObserver`. */
-  #instanceAcmeObserver: InstanceAcmeIssuanceObserver | undefined;
+  /** Panel certificate renewal. Independent of `#acmeObserver`. */
+  #instanceAcmeRenewal: InstanceAcmeRenewalScheduler | undefined;
   #metricsScheduler: MetricsScheduler | undefined;
   /** Server id the current metrics scheduler was bound for (not `#tokenServerId`). */
   #metricsSchedulerServerId: string | undefined;
@@ -653,6 +653,8 @@ export class InstanceClient {
     this.#forceEnrollPending = isTruthyFlag(
       Deno.env.get("TURBOPANEL_FORCE_ENROLL"),
     );
+    this.#ensureInstanceAcmeRenewal();
+    this.#instanceAcmeRenewal?.start();
     this.#runConnectLoop().catch((err) => {
       logWarn(
         "instance",
@@ -670,8 +672,8 @@ export class InstanceClient {
     this.#haObserver = undefined;
     this.#acmeObserver?.detach();
     this.#acmeObserver = undefined;
-    this.#instanceAcmeObserver?.detach();
-    this.#instanceAcmeObserver = undefined;
+    this.#instanceAcmeRenewal?.stop();
+    this.#instanceAcmeRenewal = undefined;
     this.#metricsScheduler?.detach();
     this.#liveLeases?.dispose();
     this.#liveLeases = undefined;
@@ -746,7 +748,6 @@ export class InstanceClient {
     this.#idlePresence?.detach();
     this.#haObserver?.detach();
     this.#acmeObserver?.detach();
-    this.#instanceAcmeObserver?.detach();
     this.#metricsScheduler?.detach();
     const classified = classifyConnectFailure(err);
     if (classified.kind === "permanent") {
@@ -799,6 +800,7 @@ export class InstanceClient {
     }
     if (kind === "tls-trust") {
       const caPath = resolveInstanceCaPath() ?? "(none)";
+      const uploadedTrust = resolveInstanceUploadedTrustPath() ?? "(none)";
       let fingerprint = "(unreadable)";
       try {
         if (caPath !== "(none)") {
@@ -811,9 +813,9 @@ export class InstanceClient {
       }
       logError(
         "instance",
-        `tls-trust: platform CA does not validate the control plane (host=${
+        `tls-trust: control plane certificate is not trusted (host=${
           sanitizeForLog(this.target)
-        } caPath=${caPath} fingerprint=${fingerprint}); parked — re-run the installer with --instance-ca or --insecure-tls`,
+        } platformCa=${caPath} fingerprint=${fingerprint} uploadedTrust=${uploadedTrust}); parked — re-run the installer so it can store the private issuer for an uploaded certificate, or pass --instance-ca for a Platform CA leaf. Bootstrap insecure TLS is not runtime trust`,
       );
       return;
     }
@@ -1158,8 +1160,7 @@ export class InstanceClient {
     this.#haObserver?.attach();
     this.#ensureAcmeObserver();
     this.#acmeObserver?.attach();
-    this.#ensureInstanceAcmeObserver();
-    this.#instanceAcmeObserver?.attach();
+    this.#instanceAcmeRenewal?.flush();
     this.#metricsScheduler?.attach((sample) =>
       this.#apiClient?.sendHostMetrics(sample) ?? Promise.resolve()
     );
@@ -1201,7 +1202,6 @@ export class InstanceClient {
       this.#idlePresence?.detach();
       this.#haObserver?.detach();
       this.#acmeObserver?.detach();
-      this.#instanceAcmeObserver?.detach();
       this.#metricsScheduler?.detach();
       this.#topologyReporter?.detach();
       // Live leases die with the socket — the next attach starts at baseline.
@@ -1259,14 +1259,13 @@ export class InstanceClient {
     });
   }
 
-  #ensureInstanceAcmeObserver(): void {
-    if (this.#instanceAcmeObserver) return;
-    this.#instanceAcmeObserver = new InstanceAcmeIssuanceObserver({
-      publishEdge: () =>
-        syncInstanceAcmeHttp01Site(resolveLayout(Deno.env.toObject())),
+  #ensureInstanceAcmeRenewal(): void {
+    if (this.#instanceAcmeRenewal) return;
+    this.#instanceAcmeRenewal = new InstanceAcmeRenewalScheduler({
       send: (message) => {
-        if (!this.#ws || this.#ws.readyState !== WebSocket.OPEN) return;
+        if (!this.#ws || this.#ws.readyState !== WebSocket.OPEN) return false;
         this.#ws.send(JSON.stringify(message));
+        return true;
       },
     });
   }
@@ -1729,17 +1728,24 @@ export class InstanceClient {
     const env = Deno.env.toObject();
     const instanceUrl = env.TURBOPANEL_INSTANCE_URL?.trim();
     const instanceCaPath = resolveInstanceCaPath(env);
+    const uploadedTrustPath = resolveInstanceUploadedTrustPath(env);
     const dlBase = env.TURBOPANEL_DL_BASE?.trim();
     const runScriptUrl = resolveRunScriptUrl(this.#config, { dlBase });
-    // Automatic updates never relax TLS: plaintext dev, public trust, or the
-    // configured Platform CA — otherwise a trust-repair error (no `curl -k`,
-    // and the operator release-insecure override is not consulted here).
+    // Automatic updates never relax TLS: public trust, the Platform CA, or
+    // the private uploaded issuer — otherwise a trust-repair error (no
+    // `curl -k`, and the operator release-insecure override is not consulted).
     const trust = resolveAutomaticUpdateTrust({
       runScriptUrl,
       instanceCaPath,
+      uploadedTrustPath,
       originNeedsInsecureTls: installOriginNeedsInsecureTls,
     });
-    const caPath = trust.kind === "platform-ca" ? trust.caPath : undefined;
+    const scriptCaPath = trust.kind === "public-tls" ? undefined : trust.caPath;
+    // `--instance-ca` is only the Platform CA file. The uploaded issuer is
+    // a different path and must not be copied onto instance-ca.pem.
+    const reconcileCaPath = trust.kind === "platform-ca"
+      ? trust.caPath
+      : undefined;
     const licenseArg = encodeLicenseArg(
       credentials.licenseId,
       credentials.licenseToken,
@@ -1747,7 +1753,7 @@ export class InstanceClient {
     const reconcileArgs = buildRunReconcileArgs({
       licenseArg,
       instanceUrl,
-      instanceCaPath: caPath,
+      instanceCaPath: reconcileCaPath,
       insecureTls: false,
       dlBase,
     });
@@ -1765,7 +1771,7 @@ export class InstanceClient {
       ? undefined
       : await clientTestHooks.downloadRunScript(runScriptUrl, {
         insecureTls: false,
-        caPath,
+        caPath: scriptCaPath,
       });
     await clientTestHooks.executeRunReconcile({
       script,

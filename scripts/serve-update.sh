@@ -34,7 +34,7 @@ shutdown() {
 trap shutdown EXIT INT TERM
 
 cat >"$TMPDIR/Caddyfile" <<EOF
-http://:8444 {
+http://127.0.0.1:8094 {
 	handle /update.sh {
 		root * $DAEMON_DIR
 		file_server

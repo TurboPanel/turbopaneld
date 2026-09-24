@@ -2,16 +2,32 @@ import { assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import type { LayoutPaths } from "../paths/layout.ts";
 import {
+  inspectIssuerCertificatePem,
+  INSTANCE_ACME_HTTP01_ISSUER_UNREACHABLE,
+  INSTANCE_ACME_RENEWAL_WINDOW_RATIO,
+  instanceAcmeHostSettled,
+  instanceAcmeIssuerFailureLine,
+  LETS_ENCRYPT_STAGING_DIRECTORY_URL,
+  parseInstanceAcmeSettings,
+  renderInstanceAcmeIssuerConfig,
+} from "./instance-acme-issuer.ts";
+import { writeFixtureLeafPair } from "../testing/openssl-fixture-leaf.ts";
+import {
+  classifyPort80,
+  closeInstanceAcmeWindow,
+  type CommandResult,
+  groupIdFromGroupFile,
+  INSTANCE_ACME_HTTP01_PREFLIGHT_PREFIX,
   INSTANCE_ACME_HTTP01_SITE,
-  InstanceAcmeHttp01PreflightError,
-  instanceAcmePreflightNonce,
-  isDaemonReservedHostingSite,
+  type InstanceAcmeCommand,
+  issueInstanceLetsEncryptCertificates,
+  letsEncryptHostnames,
+  openInstanceAcmeWindow,
+  parseSsListeners,
+  port80HeldMessage,
+  preflightHttpResponse,
   preflightInstanceLetsEncryptHttp01,
   renderInstanceAcmeHttp01Site,
-  renderInstancePublicEdgeSite,
-  syncInstanceAcmeHttp01Site,
-  verifyInstanceAcmeHttp01Reachability,
-  withInstanceAcmePreflightHandle,
 } from "./instance-acme-http01.ts";
 
 /**
@@ -22,902 +38,881 @@ import {
  */
 const test = Deno.test.bind(Deno);
 
-test("isDaemonReservedHostingSite names the challenge forward and the empty site", () => {
-  assertEquals(isDaemonReservedHostingSite(INSTANCE_ACME_HTTP01_SITE), true);
-  assertEquals(isDaemonReservedHostingSite("00-empty.caddy"), true);
-  assertEquals(isDaemonReservedHostingSite("env-1.caddy"), false);
-});
-
-test("syncInstanceAcmeHttp01Site writes the reserved site and removes it when idle", async () => {
-  const root = await Deno.makeTempDir({ prefix: "tp-acme-http01-" });
-  const sites = join(root, "hosting", "sites");
-  const caddy = join(root, "caddy");
-  await Deno.mkdir(sites, { recursive: true });
-  await Deno.mkdir(caddy, { recursive: true });
-  await Deno.writeTextFile(
-    join(caddy, "instance-hostnames.json"),
-    JSON.stringify([{ host: "panel.example.com", source: "lets-encrypt" }]),
-  );
-  const layout = { configDir: root } as LayoutPaths;
-  const dest = join(sites, INSTANCE_ACME_HTTP01_SITE);
+async function readUnixChallenge(
+  socketPath: string,
+  path: string,
+): Promise<string> {
+  const conn = await Deno.connect({ transport: "unix", path: socketPath });
   try {
-    await syncInstanceAcmeHttp01Site(layout, {
-      reload: () => Promise.resolve(),
-    });
-    const written = await Deno.readTextFile(dest);
-    assertEquals(written.includes("http://panel.example.com"), true);
-    assertEquals(written.includes("127.0.0.1:8880"), true);
-    assertEquals(
-      written,
-      renderInstanceAcmeHttp01Site(["panel.example.com"]),
-    );
-
-    await Deno.writeTextFile(
-      join(caddy, "instance-hostnames.json"),
-      "[]",
-    );
-    await syncInstanceAcmeHttp01Site(layout, {
-      reload: () => Promise.resolve(),
-    });
-    let removed = false;
-    try {
-      await Deno.stat(dest);
-    } catch (err) {
-      removed = err instanceof Deno.errors.NotFound;
+    const request =
+      `GET ${path} HTTP/1.1\r\nHost: ${HOST}\r\nConnection: close\r\n\r\n`;
+    await conn.write(new TextEncoder().encode(request));
+    const buf = new Uint8Array(1024);
+    let text = "";
+    while (true) {
+      const n = await conn.read(buf);
+      if (n === null) break;
+      text += new TextDecoder().decode(buf.subarray(0, n));
     }
-    assertEquals(removed, true);
+    const split = text.indexOf("\r\n\r\n");
+    return split < 0 ? "" : text.slice(split + 4);
   } finally {
-    await Deno.remove(root, { recursive: true });
+    conn.close();
   }
-});
-
-test("syncInstanceAcmeHttp01Site does nothing when hosting Caddy is absent", async () => {
-  const root = await Deno.makeTempDir({ prefix: "tp-acme-http01-absent-" });
-  try {
-    await syncInstanceAcmeHttp01Site({ configDir: root } as LayoutPaths);
-    let sites = false;
-    try {
-      await Deno.stat(join(root, "hosting", "sites"));
-      sites = true;
-    } catch (err) {
-      sites = !(err instanceof Deno.errors.NotFound);
-    }
-    assertEquals(sites, false);
-  } finally {
-    await Deno.remove(root, { recursive: true });
-  }
-});
-
-const UPLOADED_ID = "11111111-1111-4111-8111-111111111111";
-
-async function hostingFixture(
-  sidecar: unknown,
-): Promise<{ root: string; layout: LayoutPaths; dest: string }> {
-  const root = await Deno.makeTempDir({ prefix: "tp-acme-edge-" });
-  const sites = join(root, "hosting", "sites");
-  await Deno.mkdir(sites, { recursive: true });
-  await Deno.mkdir(join(root, "caddy"), { recursive: true });
-  await Deno.writeTextFile(
-    join(root, "caddy", "instance-hostnames.json"),
-    JSON.stringify(sidecar),
-  );
-  return {
-    root,
-    layout: { configDir: root, stateDir: root } as LayoutPaths,
-    dest: join(sites, INSTANCE_ACME_HTTP01_SITE),
-  };
 }
 
-test("syncInstanceAcmeHttp01Site publishes an uploaded name on hosting :443", async () => {
-  const { root, layout, dest } = await hostingFixture([{
-    host: "panel.example.com",
-    source: "uploaded",
-    cert_id: UPLOADED_ID,
-  }]);
-  const certDir = join(root, "tls", "certs");
-  await Deno.mkdir(certDir, { recursive: true });
-  const certFile = join(certDir, `uploaded-${UPLOADED_ID}.crt`);
-  const keyFile = join(certDir, `uploaded-${UPLOADED_ID}.key`);
-  await Deno.writeTextFile(certFile, "uploaded-cert\n");
-  await Deno.writeTextFile(keyFile, "uploaded-key\n");
-  let reloads = 0;
-  try {
-    await syncInstanceAcmeHttp01Site(layout, {
-      reload: () => {
-        reloads += 1;
-        return Promise.resolve();
-      },
-    });
-    const written = await Deno.readTextFile(dest);
-    assertEquals(/^panel\.example\.com \{$/m.test(written), true);
-    assertEquals(written.includes(certFile), true);
-    assertEquals(written.includes(keyFile), true);
-    assertEquals(written.includes("127.0.0.1:8443"), true);
-    assertEquals(written.includes("acme-challenge"), false);
-    await syncInstanceAcmeHttp01Site(layout, {
-      reload: () => {
-        reloads += 1;
-        return Promise.resolve();
-      },
-    });
-    assertEquals(reloads, 1);
-  } finally {
-    await Deno.remove(root, { recursive: true });
-  }
-});
+const HOST = "panel.example.com";
+const FIXED_NOW_MS = Date.parse("2026-09-23T12:00:00.000Z");
 
-test("syncInstanceAcmeHttp01Site omits an uploaded name whose files are missing", async () => {
-  const { root, layout, dest } = await hostingFixture([{
-    host: "panel.example.com",
-    source: "uploaded",
-    cert_id: UPLOADED_ID,
-  }]);
-  let reloads = 0;
-  try {
-    await syncInstanceAcmeHttp01Site(layout, {
-      reload: () => {
-        reloads += 1;
-        return Promise.resolve();
-      },
-    });
-    let present = true;
-    try {
-      await Deno.stat(dest);
-    } catch (err) {
-      present = !(err instanceof Deno.errors.NotFound);
-    }
-    assertEquals(present, false);
-    assertEquals(reloads, 0);
-  } finally {
-    await Deno.remove(root, { recursive: true });
-  }
-});
+const ACME_SETTINGS = {
+  contactEmail: "acme@example.com",
+  tosAccepted: true,
+  directoryUrl: "",
+  useStaging: true,
+} as const;
 
-test("syncInstanceAcmeHttp01Site forwards HTTP-01 and leaves :443 unpublished before the leaf exists", async () => {
-  const { root, layout, dest } = await hostingFixture([{
-    host: "panel.example.com",
-    source: "lets-encrypt",
-  }]);
-  try {
-    await syncInstanceAcmeHttp01Site(layout, {
-      reload: () => Promise.resolve(),
-    });
-    const written = await Deno.readTextFile(dest);
-    assertEquals(written, renderInstanceAcmeHttp01Site(["panel.example.com"]));
-    assertEquals(/^panel\.example\.com \{$/m.test(written), false);
-  } finally {
-    await Deno.remove(root, { recursive: true });
-  }
-});
+function layoutUnder(root: string): LayoutPaths {
+  return {
+    configDir: join(root, "config"),
+    stateDir: join(root, "state"),
+    logDir: join(root, "log"),
+    runDir: join(root, "run"),
+  } as LayoutPaths;
+}
 
-test("syncInstanceAcmeHttp01Site publishes Let's Encrypt :443 after the leaf is copied", async () => {
-  const host = "panel.example.com";
-  const { root, layout, dest } = await hostingFixture([{
-    host,
-    source: "lets-encrypt",
-  }]);
-  const issued = join(
-    root,
-    "caddy",
-    ".local",
-    "share",
-    "caddy",
-    "certificates",
-    "acme-v02.api.letsencrypt.org",
-    host,
-  );
-  await Deno.mkdir(issued, { recursive: true });
-  const certBytes = new TextEncoder().encode("leaf-v1");
-  await Deno.writeFile(join(issued, `${host}.crt`), certBytes);
-  await Deno.writeFile(
-    join(issued, `${host}.key`),
-    new TextEncoder().encode("key-v1"),
-  );
-  let reloads = 0;
-  try {
-    await syncInstanceAcmeHttp01Site(layout, {
-      reload: () => {
-        reloads += 1;
-        return Promise.resolve();
-      },
-    });
-    const written = await Deno.readTextFile(dest);
-    const edgeCert = join(root, "caddy", "public-edge", `${host}.crt`);
-    assertEquals(written.includes("127.0.0.1:8880"), true);
-    assertEquals(written.includes("127.0.0.1:8444"), true);
-    assertEquals(written.includes(edgeCert), true);
-    assertEquals(/^panel\.example\.com \{$/m.test(written), true);
-    assertEquals(await Deno.readFile(edgeCert), certBytes);
-    await syncInstanceAcmeHttp01Site(layout, {
-      reload: () => {
-        reloads += 1;
-        return Promise.resolve();
-      },
-    });
-    assertEquals(reloads, 1);
-    const renewed = new TextEncoder().encode("leaf-version-2");
-    await Deno.writeFile(join(issued, `${host}.crt`), renewed);
-    await syncInstanceAcmeHttp01Site(layout, {
-      reload: () => {
-        reloads += 1;
-        return Promise.resolve();
-      },
-    });
-    assertEquals(reloads, 2);
-    assertEquals(await Deno.readFile(edgeCert), renewed);
-    assertEquals(await Deno.readTextFile(dest), written);
-    const sameLength = new TextEncoder().encode("leaf-version-3");
-    await Deno.writeFile(join(issued, `${host}.crt`), sameLength);
-    await syncInstanceAcmeHttp01Site(layout, {
-      reload: () => {
-        reloads += 1;
-        return Promise.resolve();
-      },
-    });
-    assertEquals(reloads, 3);
-    assertEquals(await Deno.readFile(edgeCert), sameLength);
-  } finally {
-    await Deno.remove(root, { recursive: true });
-  }
-});
+function ok(stdout = ""): CommandResult {
+  return { ok: true, stdout, stderr: "" };
+}
 
-test("withInstanceAcmePreflightHandle inserts a pass-through challenge root", () => {
-  const root = "/etc/turbopanel/caddy/acme-preflight";
-  const source = ":8880 {\n\tredir https://example\n}\n";
-  const once = withInstanceAcmePreflightHandle(source, root);
-  assertStringIncludes(once, `root * ${root}`);
-  assertStringIncludes(once, "pass_thru");
-  assertEquals(withInstanceAcmePreflightHandle(once, root), once);
-});
-
-test("verifyInstanceAcmeHttp01Reachability requires both hops to echo the nonce", async () => {
-  const nonce = "ab".repeat(16);
-  const seen: string[] = [];
-  await verifyInstanceAcmeHttp01Reachability("panel.example.com", nonce, {
-    fetchImpl: ((input: string | URL | Request) => {
-      seen.push(String(input));
-      return Promise.resolve(new Response(nonce, { status: 200 }));
-    }) as typeof fetch,
-  });
-  assertEquals(seen[0]?.includes("127.0.0.1:8880"), true);
+test("parseSsListeners keeps unidentified rows beside identified ones", () => {
+  const text = [
+    'LISTEN 0 4096 *:80 *:* users:(("caddy",pid=9,fd=4))',
+    'LISTEN 0 4096 [::]:80 [::]:* users:(("caddy",pid=9,fd=5))',
+    "LISTEN 0 128 127.0.0.1:80 *:*",
+    "",
+  ].join("\n");
+  const listeners = parseSsListeners(text);
   assertEquals(
-    seen[1],
-    `http://panel.example.com/.well-known/acme-challenge/${nonce}`,
+    listeners.filter((row) => row.process === "caddy"),
+    [{ process: "caddy", pid: 9 }],
   );
-
-  await assertRejects(
-    () =>
-      verifyInstanceAcmeHttp01Reachability("panel.example.com", nonce, {
-        fetchImpl: (() =>
-          Promise.resolve(
-            new Response("nope", { status: 404 }),
-          )) as typeof fetch,
-      }),
-    InstanceAcmeHttp01PreflightError,
-    "did not reach 127.0.0.1:8880",
+  assertEquals(
+    listeners.some((row) => row.process === "unknown" && row.pid < 0),
+    true,
   );
+  assertEquals(classifyPort80(listeners, 9).kind, "other");
+  assertEquals(parseSsListeners(""), []);
+  assertEquals(parseSsListeners("LISTEN 0 128 *:80 *:*\n"), [
+    { process: "unknown", pid: -1 },
+  ]);
 });
 
-test("preflightInstanceLetsEncryptHttp01 publishes a nonce and removes it", async () => {
-  const root = await Deno.makeTempDir({ prefix: "tp-acme-preflight-" });
-  const layout = { configDir: root } as LayoutPaths;
-  await Deno.mkdir(join(root, "caddy"), { recursive: true });
-  await Deno.writeTextFile(
-    join(root, "caddy", "Caddyfile"),
-    ":8880 {\n\tredir https://example\n}\n",
+test("classifyPort80 names hosting Caddy only when every listener is its pid", () => {
+  assertEquals(classifyPort80([], 9), { kind: "free" });
+  assertEquals(
+    classifyPort80([{ process: "caddy", pid: 9 }], 9),
+    { kind: "hosting-caddy" },
   );
-  const nonce = "cd".repeat(16);
-  let synced = 0;
+  assertEquals(
+    classifyPort80([{ process: "nginx", pid: 3 }], 9),
+    { kind: "other", process: "nginx" },
+  );
+  assertEquals(
+    classifyPort80([
+      { process: "caddy", pid: 9 },
+      { process: "unknown", pid: -1 },
+    ], 9).kind,
+    "other",
+  );
+  assertEquals(port80HeldMessage("nginx"), "port 80 is held by nginx");
+});
+
+test("renderInstanceAcmeHttp01Site forwards only the challenge path", () => {
+  const text = renderInstanceAcmeHttp01Site(
+    ["b.example", "a.example"],
+    "/run/turbopanel/instance-acme.sock",
+  );
+  assertStringIncludes(text, "http://a.example {");
+  assertStringIncludes(
+    text,
+    "reverse_proxy unix//run/turbopanel/instance-acme.sock",
+  );
+  assertStringIncludes(text, "header_up Host {http.request.host}");
+  assertStringIncludes(text, "respond 404");
+  assertEquals(text.includes(":443"), false);
+  const first = text.indexOf("http://a.example");
+  const second = text.indexOf("http://b.example");
+  assertEquals(first < second, true);
+});
+
+test("issuer config automates the names on the socket and disables TLS-ALPN", () => {
+  const rendered = renderInstanceAcmeIssuerConfig({
+    hosts: ["b.example", "a.example"],
+    instanceAcme: {
+      contactEmail: "acme@example.com",
+      tosAccepted: true,
+      directoryUrl: "https://acme-v02.api.letsencrypt.org/directory",
+      useStaging: true,
+    },
+    socketPath: "/run/turbopanel/instance-acme.sock",
+    logFile: "/var/log/turbopanel/instance-acme.log",
+  });
+  const config = JSON.parse(rendered) as {
+    admin: { disabled: boolean };
+    apps: {
+      http: { servers: { acme: { listen: string[] } } };
+      tls: {
+        certificates: { automate: string[] };
+        automation: {
+          policies: Array<{
+            renewal_window_ratio: number;
+            issuers: Array<{
+              ca: string;
+              email: string;
+              challenges: {
+                "tls-alpn": { disabled: boolean };
+                bind_host?: string;
+              };
+            }>;
+          }>;
+        };
+      };
+    };
+  };
+  assertEquals(config.admin.disabled, true);
+  assertEquals(config.apps.http.servers.acme.listen, [
+    "unix//run/turbopanel/instance-acme.sock",
+  ]);
+  assertEquals(config.apps.tls.certificates.automate, [
+    "a.example",
+    "b.example",
+  ]);
+  const issuer = config.apps.tls.automation.policies[0]!.issuers[0]!;
+  assertEquals(issuer.challenges["tls-alpn"].disabled, true);
+  assertEquals(issuer.challenges.bind_host, undefined);
+  assertEquals(issuer.ca, LETS_ENCRYPT_STAGING_DIRECTORY_URL);
+  assertEquals(issuer.email, "acme@example.com");
+  assertEquals(
+    config.apps.tls.automation.policies[0]!.renewal_window_ratio,
+    INSTANCE_ACME_RENEWAL_WINDOW_RATIO,
+  );
+  assertStringIncludes(rendered, "/var/log/turbopanel/instance-acme.log");
+});
+
+test("issuer config refuses terms that were not accepted", () => {
+  let message = "";
   try {
+    renderInstanceAcmeIssuerConfig({
+      hosts: [HOST],
+      instanceAcme: {
+        contactEmail: "",
+        tosAccepted: false,
+        directoryUrl: "",
+        useStaging: false,
+      },
+      socketPath: "/run/turbopanel/instance-acme.sock",
+      logFile: "/var/log/turbopanel/instance-acme.log",
+    });
+  } catch (err) {
+    if (err instanceof Error) message = err.message;
+  }
+  assertStringIncludes(message, "terms have not been accepted");
+});
+
+test("openInstanceAcmeWindow refuses a foreign listener and installs Caddy when the port is free", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-acme-window-" });
+  const layout = layoutUnder(root);
+  const calls: string[] = [];
+  const run: InstanceAcmeCommand = (_program, args) => {
+    calls.push(args.join(" "));
+    return Promise.resolve(ok());
+  };
+  try {
+    await assertRejects(
+      () =>
+        openInstanceAcmeWindow(layout, [HOST], {
+          run,
+          inspect: () => Promise.resolve({ kind: "other", process: "nginx" }),
+        }),
+      Error,
+      "port 80 is held by nginx",
+    );
+    let inspections = 0;
+    await openInstanceAcmeWindow(layout, [HOST], {
+      run,
+      inspect: () => {
+        inspections += 1;
+        if (inspections === 1) return Promise.resolve({ kind: "free" });
+        return Promise.resolve({ kind: "hosting-caddy" });
+      },
+      ensureHostingCaddyRuntime: () => {
+        calls.push("ensure");
+        return Promise.resolve();
+      },
+    });
+    const site = await Deno.readTextFile(
+      join(root, "config", "hosting", "sites", INSTANCE_ACME_HTTP01_SITE),
+    );
+    assertStringIncludes(site, `http://${HOST}`);
+    assertStringIncludes(site, "respond 404");
+    assertEquals(calls.includes("ensure"), true);
+    assertEquals(
+      calls.some((line) => line.includes("systemctl reload")),
+      true,
+    );
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+test("openInstanceAcmeWindow rolls back a reload failure and a missed listen", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-acme-rollback-" });
+  const layout = layoutUnder(root);
+  const site = join(
+    root,
+    "config",
+    "hosting",
+    "sites",
+    INSTANCE_ACME_HTTP01_SITE,
+  );
+  try {
+    const reloadCalls: string[] = [];
+    await assertRejects(
+      () =>
+        openInstanceAcmeWindow(layout, [HOST], {
+          run: (_program, args) => {
+            reloadCalls.push(args.join(" "));
+            if (args.includes("reload")) {
+              return Promise.resolve({
+                ok: false,
+                stdout: "",
+                stderr: "reload failed",
+              });
+            }
+            return Promise.resolve(ok());
+          },
+          inspect: () => Promise.resolve({ kind: "hosting-caddy" }),
+        }),
+      Error,
+      "reload failed",
+    );
+    assertEquals(
+      await Deno.stat(site).then(() => true).catch(() => false),
+      false,
+    );
+    assertEquals(reloadCalls.some((line) => line.includes("disable")), false);
+
+    const startCalls: string[] = [];
+    await assertRejects(
+      () =>
+        openInstanceAcmeWindow(layout, [HOST], {
+          run: (_program, args) => {
+            startCalls.push(args.join(" "));
+            return Promise.resolve(ok());
+          },
+          inspect: () => Promise.resolve({ kind: "free" }),
+          ensureHostingCaddyRuntime: () => {
+            startCalls.push("ensure");
+            return Promise.resolve();
+          },
+        }),
+      Error,
+      "hosting Caddy is not listening on port 80",
+    );
+    assertEquals(startCalls.includes("ensure"), true);
+    assertEquals(
+      startCalls.some((line) => line.includes("disable --now")),
+      true,
+    );
+    assertEquals(
+      await Deno.stat(site).then(() => true).catch(() => false),
+      false,
+    );
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+test("openInstanceAcmeWindow fails closed when both ss commands fail", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-acme-ss-" });
+  const layout = layoutUnder(root);
+  let ensured = false;
+  const run: InstanceAcmeCommand = (program, args) => {
+    if (program === "ss" || args.includes("ss")) {
+      return Promise.resolve({
+        ok: false,
+        stdout: 'LISTEN 0 128 *:80 *:* users:(("caddy",pid=9,fd=4))',
+        stderr: "ss failed",
+      });
+    }
+    return Promise.resolve(ok("0"));
+  };
+  try {
+    await assertRejects(
+      () =>
+        openInstanceAcmeWindow(layout, [HOST], {
+          run,
+          ensureHostingCaddyRuntime: () => {
+            ensured = true;
+            return Promise.resolve();
+          },
+        }),
+      Error,
+      "port 80 inspection failed",
+    );
+    assertEquals(ensured, false);
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+test("closeInstanceAcmeWindow disables hosting Caddy when only reserved sites remain", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-acme-close-" });
+  const layout = layoutUnder(root);
+  const sites = join(root, "config", "hosting", "sites");
+  await Deno.mkdir(sites, { recursive: true });
+  await Deno.writeTextFile(join(sites, "00-empty.caddy"), "# empty\n");
+  await Deno.writeTextFile(
+    join(sites, INSTANCE_ACME_HTTP01_SITE),
+    "http://x {\n}\n",
+  );
+  const calls: string[] = [];
+  const run: InstanceAcmeCommand = (_program, args) => {
+    calls.push(args.join(" "));
+    return Promise.resolve(ok());
+  };
+  try {
+    await closeInstanceAcmeWindow(layout, { run });
+    const names: string[] = [];
+    for await (const entry of Deno.readDir(sites)) names.push(entry.name);
+    assertEquals(names, ["00-empty.caddy"]);
+    assertEquals(
+      calls.some((line) => line.includes("disable --now")),
+      true,
+    );
+    await Deno.writeTextFile(join(sites, "tenant.caddy"), "http://t {\n}\n");
+    calls.length = 0;
+    await closeInstanceAcmeWindow(layout, { run });
+    assertEquals(
+      calls.some((line) => line.includes("systemctl reload")),
+      true,
+    );
+    assertEquals(calls.some((line) => line.includes("disable")), false);
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+test("preflight serves the nonce on the socket and rejects a public miss", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-acme-preflight-" });
+  const layout = layoutUnder(root);
+  await Deno.mkdir(layout.runDir, { recursive: true });
+  try {
+    assertEquals(
+      preflightHttpResponse(`/.well-known/acme-challenge/abc`, "abc"),
+      {
+        status: 200,
+        body: "abc",
+      },
+    );
+    assertEquals(preflightHttpResponse("/", "abc").status, 404);
     await preflightInstanceLetsEncryptHttp01(
-      [{ host: "https://panel.example.com", source: "lets-encrypt" }],
+      [{ host: `https://${HOST}/`, source: "lets-encrypt" }],
       layout,
       {
-        nonce: () => nonce,
-        syncChallenge: () => {
-          synced += 1;
-          return Promise.resolve();
+        nonce: () => "abc",
+        fetchImpl: async (input) => {
+          const url = new URL(String(input));
+          assertStringIncludes(
+            url.href,
+            `http://${HOST}/.well-known/acme-challenge/abc`,
+          );
+          const body = await readUnixChallenge(
+            join(layout.runDir, "instance-acme.sock"),
+            url.pathname,
+          );
+          assertEquals(body, "abc");
+          return new Response(body, { status: 200 });
         },
-        reloadControlPlane: () => Promise.resolve(),
-        fetchImpl: ((input: string | URL | Request) => {
-          const url = String(input);
-          if (url.includes(nonce)) {
-            return Promise.resolve(new Response(nonce, { status: 200 }));
-          }
-          return Promise.resolve(new Response("missing", { status: 404 }));
-        }) as typeof fetch,
       },
     );
-    assertEquals(synced, 1);
-    const caddyfile = await Deno.readTextFile(join(root, "caddy", "Caddyfile"));
-    assertStringIncludes(caddyfile, "acme-preflight");
-    const names: string[] = [];
-    for await (
-      const entry of Deno.readDir(
-        join(root, "caddy", "acme-preflight", ".well-known", "acme-challenge"),
-      )
-    ) {
-      names.push(entry.name);
-    }
-    assertEquals(names, []);
-
     await assertRejects(
       () =>
         preflightInstanceLetsEncryptHttp01(
-          [{ host: "panel.example.com", source: "lets-encrypt" }],
+          [{ host: HOST, source: "lets-encrypt" }],
           layout,
           {
-            nonce: () => nonce,
-            syncChallenge: () => Promise.resolve(),
-            reloadControlPlane: () => Promise.resolve(),
-            fetchImpl: (() =>
-              Promise.resolve(
-                new Response("nope", { status: 404 }),
-              )) as typeof fetch,
+            nonce: () => "abc",
+            fetchImpl: () =>
+              Promise.resolve(new Response("nope", { status: 404 })),
           },
         ),
-      InstanceAcmeHttp01PreflightError,
-      "panel.example.com",
+      Error,
+      INSTANCE_ACME_HTTP01_ISSUER_UNREACHABLE,
     );
-    const afterFailure: string[] = [];
-    for await (
-      const entry of Deno.readDir(
-        join(root, "caddy", "acme-preflight", ".well-known", "acme-challenge"),
-      )
-    ) {
-      afterFailure.push(entry.name);
-    }
-    assertEquals(afterFailure, []);
-  } finally {
-    await Deno.remove(root, { recursive: true });
-  }
-});
-
-test("renderInstancePublicEdgeSite returns the HTTP-01 forward before a leaf exists", async () => {
-  const { root, layout } = await hostingFixture([]);
-  try {
-    const text = await renderInstancePublicEdgeSite(layout, [{
-      host: "panel.example.com",
-      source: "lets-encrypt",
-      certId: "",
-    }]);
-    assertEquals(text, renderInstanceAcmeHttp01Site(["panel.example.com"]));
-  } finally {
-    await Deno.remove(root, { recursive: true });
-  }
-});
-
-test("syncInstanceAcmeHttp01Site rethrows when the sites path is not a directory", async () => {
-  const root = await Deno.makeTempDir({ prefix: "tp-acme-not-dir-" });
-  await Deno.writeTextFile(join(root, "hosting"), "not-a-directory");
-  try {
-    await assertRejects(
-      () =>
-        syncInstanceAcmeHttp01Site({ configDir: root } as LayoutPaths, {
-          reload: () => Promise.resolve(),
-        }),
-    );
-  } finally {
-    await Deno.remove(root, { recursive: true });
-  }
-});
-
-test("syncInstanceAcmeHttp01Site rethrows when the site path cannot be read or removed", async () => {
-  const idle = await hostingFixture([]);
-  await Deno.mkdir(idle.dest, { recursive: true });
-  await Deno.writeTextFile(join(idle.dest, "keep"), "x");
-  const blocked = await hostingFixture([{
-    host: "panel.example.com",
-    source: "lets-encrypt",
-  }]);
-  await Deno.mkdir(blocked.dest, { recursive: true });
-  try {
-    await assertRejects(
-      () =>
-        syncInstanceAcmeHttp01Site(idle.layout, {
-          reload: () => Promise.resolve(),
-        }),
-    );
-    await assertRejects(
-      () =>
-        syncInstanceAcmeHttp01Site(blocked.layout, {
-          reload: () => Promise.resolve(),
-        }),
-    );
-  } finally {
-    await Deno.remove(idle.root, { recursive: true });
-    await Deno.remove(blocked.root, { recursive: true });
-  }
-});
-
-test("syncInstanceAcmeHttp01Site skips a Let's Encrypt leaf it cannot copy", async () => {
-  const host = "panel.example.com";
-  const { root, layout, dest } = await hostingFixture([{
-    host,
-    source: "lets-encrypt",
-  }]);
-  const certificates = join(
-    root,
-    "caddy",
-    ".local",
-    "share",
-    "caddy",
-    "certificates",
-  );
-  await Deno.mkdir(
-    join(root, "caddy", ".local", "share", "caddy"),
-    { recursive: true },
-  );
-  await Deno.writeTextFile(certificates, "not-a-directory");
-  try {
-    await syncInstanceAcmeHttp01Site(layout, {
-      reload: () => Promise.resolve(),
-    });
-    const written = await Deno.readTextFile(dest);
-    assertEquals(/^panel\.example\.com \{$/m.test(written), false);
-  } finally {
-    await Deno.remove(root, { recursive: true });
-  }
-});
-
-test("syncInstanceAcmeHttp01Site skips a leaf when stat or read is not a file", async () => {
-  const host = "panel.example.com";
-  const { root, layout, dest } = await hostingFixture([{
-    host,
-    source: "lets-encrypt",
-  }]);
-  const certificates = join(
-    root,
-    "caddy",
-    ".local",
-    "share",
-    "caddy",
-    "certificates",
-  );
-  await Deno.mkdir(certificates, { recursive: true });
-  await Deno.writeTextFile(join(certificates, "not-a-directory"), "x");
-  try {
-    await syncInstanceAcmeHttp01Site(layout, {
-      reload: () => Promise.resolve(),
-    });
-    const issued = join(certificates, "acme.example", host);
-    await Deno.mkdir(issued, { recursive: true });
-    await Deno.writeFile(
-      join(issued, `${host}.crt`),
-      new TextEncoder().encode("leaf"),
-    );
-    await Deno.writeFile(
-      join(issued, `${host}.key`),
-      new TextEncoder().encode("key"),
-    );
-    await syncInstanceAcmeHttp01Site(layout, {
-      reload: () => Promise.resolve(),
-    });
-    const edgeCert = join(root, "caddy", "public-edge", `${host}.crt`);
-    await Deno.remove(edgeCert);
-    await Deno.mkdir(edgeCert);
-    await syncInstanceAcmeHttp01Site(layout, {
-      reload: () => Promise.resolve(),
-    });
-    assertEquals(
-      (await Deno.readTextFile(dest)).includes("127.0.0.1:8880"),
-      true,
-    );
-  } finally {
-    await Deno.remove(root, { recursive: true });
-  }
-});
-
-test("syncInstanceAcmeHttp01Site ignores an issuer directory with no leaf", async () => {
-  const host = "panel.example.com";
-  const { root, layout, dest } = await hostingFixture([{
-    host,
-    source: "lets-encrypt",
-  }]);
-  await Deno.mkdir(
-    join(
-      root,
-      "caddy",
-      ".local",
-      "share",
-      "caddy",
-      "certificates",
-      "acme.example",
-    ),
-    { recursive: true },
-  );
-  try {
-    await syncInstanceAcmeHttp01Site(layout, {
-      reload: () => Promise.resolve(),
-    });
-    const written = await Deno.readTextFile(dest);
-    assertEquals(written, renderInstanceAcmeHttp01Site([host]));
-  } finally {
-    await Deno.remove(root, { recursive: true });
-  }
-});
-
-async function withSudo(
-  script: string,
-  fn: () => Promise<void>,
-): Promise<void> {
-  const bin = await Deno.makeTempDir({ prefix: "tp-fake-sudo-" });
-  const sudo = join(bin, "sudo");
-  await Deno.writeTextFile(sudo, script);
-  await Deno.chmod(sudo, 0o755);
-  const previous = Deno.env.get("PATH") ?? "";
-  Deno.env.set("PATH", `${bin}:${previous}`);
-  try {
-    await fn();
-  } finally {
-    Deno.env.set("PATH", previous);
-    await Deno.remove(bin, { recursive: true });
-  }
-}
-
-test("syncInstanceAcmeHttp01Site reads a root-only issued leaf through sudo", async () => {
-  const host = "panel.example.com";
-  const { root, layout, dest } = await hostingFixture([{
-    host,
-    source: "lets-encrypt",
-  }]);
-  const issued = join(
-    root,
-    "caddy",
-    ".local",
-    "share",
-    "caddy",
-    "certificates",
-    "acme.example",
-    host,
-  );
-  await Deno.mkdir(issued, { recursive: true });
-  const crt = join(issued, `${host}.crt`);
-  const key = join(issued, `${host}.key`);
-  await Deno.writeFile(crt, new TextEncoder().encode("secret-leaf"));
-  await Deno.writeFile(key, new TextEncoder().encode("secret-key"));
-  await Deno.chmod(crt, 0o000);
-  const certificates = join(
-    root,
-    "caddy",
-    ".local",
-    "share",
-    "caddy",
-    "certificates",
-  );
-  await Deno.chmod(certificates, 0o000);
-  const script = `#!/bin/sh
-if [ "$2" = find ]; then
-  printf '%s\\n' '${crt}'
-  exit 0
-fi
-if [ "$2" = cat ]; then
-  printf '%s' 'from-sudo'
-  exit 0
-fi
-exit 1
-`;
-  try {
-    await withSudo(script, async () => {
-      await syncInstanceAcmeHttp01Site(layout, {
-        reload: () => Promise.resolve(),
-      });
-    });
-    const edgeCert = join(root, "caddy", "public-edge", `${host}.crt`);
-    assertEquals(await Deno.readTextFile(edgeCert), "from-sudo");
-    assertEquals(
-      (await Deno.readTextFile(dest)).includes("127.0.0.1:8444"),
-      true,
-    );
-  } finally {
-    await Deno.chmod(certificates, 0o755);
-    await Deno.chmod(crt, 0o644);
-    await Deno.remove(root, { recursive: true });
-  }
-});
-
-test("syncInstanceAcmeHttp01Site skips sudo find for a wildcard and a failed sudo", async () => {
-  const { root, layout, dest } = await hostingFixture([]);
-  const certificates = join(
-    root,
-    "caddy",
-    ".local",
-    "share",
-    "caddy",
-    "certificates",
-  );
-  await Deno.mkdir(certificates, { recursive: true });
-  await Deno.chmod(certificates, 0o000);
-  try {
-    await withSudo("#!/bin/sh\nexit 1\n", async () => {
-      await syncInstanceAcmeHttp01Site(layout, {
-        entries: [{
-          host: "*.example.com",
-          source: "lets-encrypt",
-          certId: "",
-        }],
-        reload: () => Promise.resolve(),
-      });
-      await syncInstanceAcmeHttp01Site(layout, {
-        entries: [{
-          host: "panel.example.com",
-          source: "lets-encrypt",
-          certId: "",
-        }],
-        reload: () => Promise.resolve(),
-      });
-    });
-    await withSudo(
-      "#!/bin/sh\nprintf '%s\\n' 'not-a-certificate'\n",
-      async () => {
-        await syncInstanceAcmeHttp01Site(layout, {
-          entries: [{
-            host: "panel.example.com",
-            source: "lets-encrypt",
-            certId: "",
-          }],
-          reload: () => Promise.resolve(),
-        });
-      },
-    );
-    await Deno.chmod(certificates, 0o755);
-    const host = "panel.example.com";
-    const issued = join(certificates, "acme.example", host);
-    await Deno.mkdir(issued, { recursive: true });
-    const crt = join(issued, `${host}.crt`);
-    await Deno.writeFile(crt, new TextEncoder().encode("hidden"));
-    await Deno.chmod(crt, 0o000);
-    await syncInstanceAcmeHttp01Site(layout, {
-      entries: [{
-        host,
-        source: "lets-encrypt",
-        certId: "",
-      }],
-      reload: () => Promise.resolve(),
-    });
-    await Deno.chmod(crt, 0o644);
-    const written = await Deno.readTextFile(dest);
-    assertEquals(written.includes("127.0.0.1:8444"), false);
-  } finally {
-    await Deno.chmod(certificates, 0o755);
-    await Deno.remove(root, { recursive: true });
-  }
-});
-
-test("syncInstanceAcmeHttp01Site skips a leaf sudo cannot read", async () => {
-  const host = "panel.example.com";
-  const { root, layout, dest } = await hostingFixture([{
-    host,
-    source: "lets-encrypt",
-  }]);
-  const issued = join(
-    root,
-    "caddy",
-    ".local",
-    "share",
-    "caddy",
-    "certificates",
-    "acme.example",
-    host,
-  );
-  await Deno.mkdir(issued, { recursive: true });
-  const crt = join(issued, `${host}.crt`);
-  await Deno.writeFile(crt, new TextEncoder().encode("hidden"));
-  await Deno.writeFile(
-    join(issued, `${host}.key`),
-    new TextEncoder().encode("key"),
-  );
-  await Deno.chmod(crt, 0o000);
-  const previous = Deno.env.get("PATH") ?? "";
-  const empty = await Deno.makeTempDir({ prefix: "tp-no-sudo-" });
-  Deno.env.set("PATH", empty);
-  try {
-    await syncInstanceAcmeHttp01Site(layout, {
-      reload: () => Promise.resolve(),
-    });
-    const written = await Deno.readTextFile(dest);
-    assertEquals(written.includes("127.0.0.1:8444"), false);
-    const nonce = "ab".repeat(16);
-    await preflightInstanceLetsEncryptHttp01(
-      [{ host, source: "lets-encrypt" }],
-      { configDir: root } as LayoutPaths,
-      {
-        nonce: () => nonce,
-        syncChallenge: () => Promise.resolve(),
-        reloadControlPlane: () => Promise.resolve(),
-        fetchImpl: (() =>
-          Promise.resolve(
-            new Response(nonce, { status: 200 }),
-          )) as typeof fetch,
-      },
-    );
-  } finally {
-    Deno.env.set("PATH", previous);
-    await Deno.chmod(crt, 0o644);
-    await Deno.remove(empty, { recursive: true });
-    await Deno.remove(root, { recursive: true });
-  }
-});
-
-test("syncInstanceAcmeHttp01Site skips uploaded names without a usable certificate id", async () => {
-  const { root, layout, dest } = await hostingFixture([]);
-  const certDir = join(root, "tls", "certs");
-  await Deno.mkdir(certDir, { recursive: true });
-  await Deno.writeTextFile(join(certDir, "uploaded.crt"), "bare-cert\n");
-  await Deno.writeTextFile(join(certDir, "uploaded.key"), "bare-key\n");
-  try {
-    await syncInstanceAcmeHttp01Site(layout, {
-      entries: [{
-        host: "panel.example.com",
-        source: "uploaded",
-        certId: "not-a-uuid",
-      }],
-      reload: () => Promise.resolve(),
-    });
-    let present = true;
+    let message = "";
     try {
-      await Deno.stat(dest);
+      await preflightInstanceLetsEncryptHttp01(
+        [{ host: HOST, source: "lets-encrypt" }],
+        layout,
+        {
+          nonce: () => "abc",
+          fetchImpl: () => Promise.resolve(new Response("", { status: 404 })),
+        },
+      );
     } catch (err) {
-      present = !(err instanceof Deno.errors.NotFound);
+      if (err instanceof Error) message = err.message;
     }
-    assertEquals(present, false);
+    assertStringIncludes(message, INSTANCE_ACME_HTTP01_PREFLIGHT_PREFIX);
+    assertEquals(
+      letsEncryptHostnames([{ host: HOST, source: "platform-ca" }]),
+      [],
+    );
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
 
-    await syncInstanceAcmeHttp01Site(
-      { configDir: root } as LayoutPaths,
+test("issuer log settles on a new leaf and keeps a due certificate open", () => {
+  const obtained =
+    `{"level":"info","logger":"tls.obtain","msg":"certificate obtained successfully","identifier":"${HOST}"}`;
+  assertEquals(
+    instanceAcmeHostSettled(
+      obtained,
+      HOST,
+      { identity: null, due: true },
+      0,
+      { identity: "new", valid: true },
+    ),
+    true,
+  );
+  const renewing =
+    `{"level":"info","msg":"renewing certificate","identifier":"${HOST}"}`;
+  const due = { identity: "old", due: true };
+  assertEquals(
+    instanceAcmeHostSettled(
+      renewing,
+      HOST,
+      due,
+      10_000,
+      { identity: "old", valid: true },
+    ),
+    false,
+  );
+  const renewed =
+    `${renewing}\n{"level":"info","msg":"certificate renewed successfully","identifier":"${HOST}"}`;
+  assertEquals(
+    instanceAcmeHostSettled(
+      renewed,
+      HOST,
+      due,
+      1,
+      { identity: "old", valid: true },
+    ),
+    false,
+  );
+  assertEquals(
+    instanceAcmeHostSettled(
+      renewed,
+      HOST,
+      due,
+      1,
+      { identity: "new", valid: true },
+    ),
+    true,
+  );
+  const current = { identity: "same", due: false };
+  assertEquals(
+    instanceAcmeHostSettled(
+      "",
+      HOST,
+      current,
+      5_000,
+      { identity: "same", valid: true },
+    ),
+    true,
+  );
+  assertEquals(
+    instanceAcmeHostSettled(
+      "",
+      HOST,
+      current,
+      1_000,
+      { identity: "same", valid: true },
+    ),
+    false,
+  );
+  assertEquals(
+    instanceAcmeHostSettled(
+      "",
+      HOST,
+      due,
+      10_000,
+      { identity: "old", valid: true },
+    ),
+    false,
+  );
+  const failed =
+    `{"level":"error","msg":"could not get certificate from issuer","identifier":"${HOST}"}`;
+  assertEquals(instanceAcmeIssuerFailureLine(failed)?.includes(HOST), true);
+  assertEquals(
+    instanceAcmeIssuerFailureLine('{"level":"error","msg":"will retry"}'),
+    null,
+  );
+});
+
+test("issue copies the leaf and stops the issuer in finally", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-acme-issue-" });
+  const layout = layoutUnder(root);
+  const issuer = join(
+    root,
+    "state",
+    "instance-acme",
+    "caddy",
+    "certificates",
+    "staging",
+    HOST,
+  );
+  await writeFixtureLeafPair(
+    issuer,
+    HOST,
+    "20260901000000Z",
+    "20270901000000Z",
+  );
+  const leaf = await Deno.readTextFile(join(issuer, `${HOST}.crt`));
+  const calls: string[] = [];
+  const run: InstanceAcmeCommand = (program, args) => {
+    calls.push(`${program} ${args.join(" ")}`);
+    return Promise.resolve(ok());
+  };
+  const log =
+    `{"level":"info","msg":"certificate obtained successfully","identifier":"${HOST}"}`;
+  try {
+    await issueInstanceLetsEncryptCertificates(
+      layout,
+      [HOST],
       {
-        entries: [{
-          host: "panel.example.com",
-          source: "uploaded",
-          certId: "",
-        }],
-        reload: () => Promise.resolve(),
+        contactEmail: "acme@example.com",
+        tosAccepted: true,
+        directoryUrl: "",
+        useStaging: true,
+      },
+      join(root, "certs"),
+      {
+        run,
+        now: () => FIXED_NOW_MS,
+        readLog: () => Promise.resolve(log),
+        closeWindow: () => {
+          calls.push("close");
+          return Promise.resolve();
+        },
       },
     );
-    assertEquals(present, false);
-
-    await syncInstanceAcmeHttp01Site(layout, {
-      entries: [{
-        host: "panel.example.com",
-        source: "uploaded",
-        certId: "",
-      }],
-      reload: () => Promise.resolve(),
-    });
-    const written = await Deno.readTextFile(dest);
-    assertEquals(written.includes("uploaded.crt"), true);
-  } finally {
-    await Deno.remove(root, { recursive: true });
-  }
-});
-
-test("the default hosting and control-plane reloads tolerate a missing sudo", async () => {
-  const { root, layout } = await hostingFixture([{
-    host: "panel.example.com",
-    source: "lets-encrypt",
-  }]);
-  const caddyfile = join(root, "caddy", "Caddyfile");
-  await Deno.writeTextFile(caddyfile, ":8880 {\n\tredir https://example\n}\n");
-  const nonce = "ef".repeat(16);
-  const fetchImpl =
-    (() =>
-      Promise.resolve(new Response(nonce, { status: 200 }))) as typeof fetch;
-  try {
-    await withSudo("#!/bin/sh\nexit 1\n", async () => {
-      await syncInstanceAcmeHttp01Site(layout);
-      await preflightInstanceLetsEncryptHttp01(
-        [{ host: "panel.example.com", source: "lets-encrypt" }],
-        layout,
-        {
-          nonce: () => nonce,
-          syncChallenge: () => Promise.resolve(),
-          fetchImpl,
-        },
-      );
-    });
-    const empty = await Deno.makeTempDir({ prefix: "tp-no-sudo-" });
-    const previous = Deno.env.get("PATH") ?? "";
-    Deno.env.set("PATH", empty);
-    try {
-      await syncInstanceAcmeHttp01Site(layout, {
-        entries: [],
-      });
-      await preflightInstanceLetsEncryptHttp01(
-        [{ host: "panel.example.com", source: "lets-encrypt" }],
-        layout,
-        {
-          nonce: () => nonce,
-          syncChallenge: () => Promise.resolve(),
-          fetchImpl,
-        },
-      );
-    } finally {
-      Deno.env.set("PATH", previous);
-      await Deno.remove(empty, { recursive: true });
-    }
-  } finally {
-    await Deno.remove(root, { recursive: true });
-  }
-});
-
-test("preflight rejects a non-DNS name, a blocked Caddyfile, and a mismatched nonce", async () => {
-  await assertRejects(
-    () =>
-      preflightInstanceLetsEncryptHttp01(
-        [{ host: "   ", source: "lets-encrypt" }],
-        { configDir: "unused-config" } as LayoutPaths,
-        { syncChallenge: () => Promise.resolve() },
+    assertEquals(
+      await Deno.readTextFile(join(root, "certs", `letsencrypt-${HOST}.crt`)),
+      leaf,
+    );
+    assertEquals(
+      (await Deno.stat(join(root, "certs", `letsencrypt-${HOST}.key`))).mode! &
+        0o777,
+      0o600,
+    );
+    assertEquals(
+      calls.some((line) => line.includes("systemctl start")),
+      true,
+    );
+    assertEquals(calls.some((line) => line.includes("systemctl stop")), true);
+    assertEquals(calls.includes("close"), true);
+    const config = await Deno.readTextFile(
+      join(root, "config", "caddy", "instance-acme.json"),
+    );
+    assertStringIncludes(config, LETS_ENCRYPT_STAGING_DIRECTORY_URL);
+    assertEquals(
+      parseInstanceAcmeSettings(
+        await Deno.readTextFile(
+          join(root, "config", "caddy", "instance-acme-settings.json"),
+        ),
       ),
-    InstanceAcmeHttp01PreflightError,
-    "not a DNS name",
-  );
+      {
+        contactEmail: "acme@example.com",
+        tosAccepted: true,
+        directoryUrl: "",
+        useStaging: true,
+      },
+    );
+    calls.length = 0;
+    await assertRejects(
+      () =>
+        issueInstanceLetsEncryptCertificates(
+          layout,
+          [HOST],
+          {
+            contactEmail: "",
+            tosAccepted: true,
+            directoryUrl: "",
+            useStaging: false,
+          },
+          join(root, "certs"),
+          {
+            run,
+            readLog: () =>
+              Promise.resolve(
+                `{"level":"error","msg":"challenge failed","identifier":"${HOST}"}`,
+              ),
+            timeoutMs: 0,
+            now: () => 0,
+            sleep: () => Promise.resolve(),
+            closeWindow: () => {
+              calls.push("close");
+              return Promise.resolve();
+            },
+          },
+        ),
+      Error,
+      "instance ACME issuer failed",
+    );
+    assertEquals(calls.includes("close"), true);
+    assertEquals(groupIdFromGroupFile("tp:x:9999:\n", "tp"), 9999);
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
 
-  const root = await Deno.makeTempDir({ prefix: "tp-acme-caddyfile-" });
-  await Deno.mkdir(join(root, "caddy", "Caddyfile"), { recursive: true });
+test("issue waits for a replacement when the stored certificate is inside the renewal window", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-acme-renew-" });
+  const layout = layoutUnder(root);
+  const issuer = join(
+    root,
+    "state",
+    "instance-acme",
+    "caddy",
+    "certificates",
+    "staging",
+    HOST,
+  );
+  await writeFixtureLeafPair(
+    issuer,
+    HOST,
+    "20260705000000Z",
+    "20261003000000Z",
+  );
+  const original = await Deno.readTextFile(join(issuer, `${HOST}.crt`));
+  const due = inspectIssuerCertificatePem(original, FIXED_NOW_MS);
+  if (!due?.due || !due.valid) {
+    throw new TypeError("fixture certificate is not inside the renewal window");
+  }
+  let ticks = 0;
+  try {
+    await issueInstanceLetsEncryptCertificates(
+      layout,
+      [HOST],
+      ACME_SETTINGS,
+      join(root, "certs"),
+      {
+        run: () => Promise.resolve(ok()),
+        now: () => FIXED_NOW_MS + ticks * 1000,
+        sleep: () => {
+          ticks += 1;
+          if (ticks === 8) {
+            return writeFixtureLeafPair(
+              issuer,
+              HOST,
+              "20260923000000Z",
+              "20270923000000Z",
+            );
+          }
+          return Promise.resolve();
+        },
+        readLog: () => Promise.resolve(""),
+        timeoutMs: 30_000,
+        closeWindow: () => Promise.resolve(),
+      },
+    );
+    const copied = await Deno.readTextFile(
+      join(root, "certs", `letsencrypt-${HOST}.crt`),
+    );
+    assertEquals(ticks >= 8, true);
+    assertEquals(copied === original, false);
+    assertEquals(copied, await Deno.readTextFile(join(issuer, `${HOST}.crt`)));
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+test("issue does not copy an expired certificate that the issuer log calls successful", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-acme-expired-" });
+  const layout = layoutUnder(root);
+  const issuer = join(
+    root,
+    "state",
+    "instance-acme",
+    "caddy",
+    "certificates",
+    "staging",
+    HOST,
+  );
+  await writeFixtureLeafPair(
+    issuer,
+    HOST,
+    "20200101000000Z",
+    "20200102000000Z",
+  );
+  const expired = inspectIssuerCertificatePem(
+    await Deno.readTextFile(join(issuer, `${HOST}.crt`)),
+    FIXED_NOW_MS,
+  );
+  if (expired?.valid !== false || expired.due !== true) {
+    throw new TypeError("fixture certificate is not expired");
+  }
+  let elapsed = 0;
+  const dest = join(root, "certs", `letsencrypt-${HOST}.crt`);
   try {
     await assertRejects(
       () =>
-        preflightInstanceLetsEncryptHttp01(
-          [{ host: "panel.example.com", source: "lets-encrypt" }],
-          { configDir: root } as LayoutPaths,
-          { syncChallenge: () => Promise.resolve() },
+        issueInstanceLetsEncryptCertificates(
+          layout,
+          [HOST],
+          ACME_SETTINGS,
+          join(root, "certs"),
+          {
+            run: () => Promise.resolve(ok()),
+            now: () => FIXED_NOW_MS + elapsed,
+            sleep: () => {
+              elapsed += 6_000;
+              return Promise.resolve();
+            },
+            readLog: () =>
+              Promise.resolve(
+                `{"level":"info","msg":"certificate obtained successfully","identifier":"${HOST}"}`,
+              ),
+            timeoutMs: 10_000,
+            closeWindow: () => Promise.resolve(),
+          },
         ),
+      Error,
+      "timed out",
+    );
+    assertEquals(
+      await Deno.stat(dest).then(() => true).catch(() => false),
+      false,
     );
   } finally {
     await Deno.remove(root, { recursive: true });
   }
-
-  const nonce = instanceAcmePreflightNonce();
-  assertEquals(/^[0-9a-f]{32}$/.test(nonce), true);
-  assertEquals(
-    withInstanceAcmePreflightHandle("example.com {\n}\n", "/tmp/preflight"),
-    "example.com {\n}\n",
-  );
-
-  await assertRejects(
-    () =>
-      verifyInstanceAcmeHttp01Reachability("panel.example.com", nonce, {
-        fetchImpl: (() =>
-          Promise.resolve(
-            new Response("other", { status: 200 }),
-          )) as typeof fetch,
-      }),
-    InstanceAcmeHttp01PreflightError,
-    "body did not match the nonce",
-  );
-  await assertRejects(
-    () =>
-      verifyInstanceAcmeHttp01Reachability("panel.example.com", nonce, {
-        fetchImpl: ((input: string | URL | Request) => {
-          if (String(input).includes("127.0.0.1")) {
-            return Promise.resolve(new Response(nonce, { status: 200 }));
-          }
-          return Promise.resolve(new Response("other", { status: 200 }));
-        }) as typeof fetch,
-      }),
-    InstanceAcmeHttp01PreflightError,
-    "body did not match the nonce",
-  );
-  await assertRejects(
-    () =>
-      verifyInstanceAcmeHttp01Reachability("panel.example.com", nonce, {
-        fetchImpl: (() => Promise.reject(new Error("refused"))) as typeof fetch,
-      }),
-    InstanceAcmeHttp01PreflightError,
-    "refused",
-  );
 });
 
-test("preflightInstanceLetsEncryptHttp01 skips hostnames that are not Let's Encrypt", async () => {
-  let fetched = 0;
-  await preflightInstanceLetsEncryptHttp01(
-    [{ host: "panel.example.com", source: "platform-ca" }],
-    { configDir: "unused-config" } as LayoutPaths,
-    {
-      fetchImpl: (() => {
-        fetched += 1;
-        return Promise.resolve(new Response("nope", { status: 500 }));
-      }) as typeof fetch,
-    },
+test("managed identity installs a leaf and repeats against an unreadable key", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-acme-managed-" });
+  const layout = layoutUnder(root);
+  const issuer = join(
+    root,
+    "state",
+    "instance-acme",
+    "caddy",
+    "certificates",
+    "staging",
+    HOST,
   );
-  assertEquals(fetched, 0);
+  await writeFixtureLeafPair(
+    issuer,
+    HOST,
+    "20260901000000Z",
+    "20270901000000Z",
+  );
+  const certsDir = join(root, "certs");
+  await Deno.mkdir(certsDir, { recursive: true });
+  await Deno.chmod(certsDir, 0o555);
+  const calls: string[] = [];
+  const run: InstanceAcmeCommand = async (_program, args) => {
+    calls.push(args.join(" "));
+    if (args[1] === "install") {
+      const staged = args.at(-2);
+      const dest = args.at(-1);
+      const modeArg = args[args.indexOf("-m") + 1];
+      if (!staged || !dest || !modeArg) {
+        throw new TypeError("install args");
+      }
+      await Deno.chmod(certsDir, 0o755);
+      await Deno.copyFile(staged, dest);
+      await Deno.chmod(dest, Number.parseInt(modeArg, 8));
+      if (dest.endsWith(".key")) await Deno.chmod(dest, 0o000);
+      await Deno.chmod(certsDir, 0o555);
+      return ok();
+    }
+    if (args[1] === "cat") {
+      const path = args.at(-1);
+      if (!path) throw new TypeError("cat args");
+      await Deno.chmod(path, 0o600);
+      const text = await Deno.readTextFile(path);
+      await Deno.chmod(path, 0o000);
+      return ok(text);
+    }
+    return ok();
+  };
+  const log =
+    `{"level":"info","msg":"certificate obtained successfully","identifier":"${HOST}"}`;
+  const issue = () =>
+    issueInstanceLetsEncryptCertificates(
+      layout,
+      [HOST],
+      ACME_SETTINGS,
+      certsDir,
+      {
+        run,
+        now: () => FIXED_NOW_MS,
+        readLog: () => Promise.resolve(log),
+        closeWindow: () => Promise.resolve(),
+      },
+    );
+  try {
+    await issue();
+    await Deno.chmod(certsDir, 0o755);
+    assertEquals(
+      await Deno.readTextFile(join(certsDir, `letsencrypt-${HOST}.crt`)),
+      await Deno.readTextFile(join(issuer, `${HOST}.crt`)),
+    );
+    await Deno.chmod(certsDir, 0o555);
+    assertEquals(
+      calls.some((line) => line.includes("install -m 0640 -o root -g tp")),
+      true,
+    );
+    assertEquals(
+      calls.some((line) => line.includes("install -m 0600 -o root -g tp")),
+      true,
+    );
+    calls.length = 0;
+    await issue();
+    assertEquals(calls.some((line) => line.includes(" cat ")), true);
+    assertEquals(calls.some((line) => line.includes(" install ")), false);
+    await Deno.writeTextFile(join(issuer, `${HOST}.key`), "replaced-key\n");
+    calls.length = 0;
+    await issue();
+    assertEquals(
+      calls.some((line) => line.includes("install -m 0600 -o root -g tp")),
+      true,
+    );
+  } finally {
+    await Deno.chmod(certsDir, 0o755).catch(() => undefined);
+    const key = join(certsDir, `letsencrypt-${HOST}.key`);
+    await Deno.chmod(key, 0o600).catch(() => undefined);
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+test("issuer unit is installed without capabilities or an install target", async () => {
+  const text = await Deno.readTextFile(
+    new URL(
+      "../../orchestration/roles/instance-launch/templates/turbopanel-instance-acme.service.j2",
+      import.meta.url,
+    ),
+  );
+  assertEquals(text.includes("[Install]"), false);
+  assertEquals(text.includes("CAP_"), false);
+  assertStringIncludes(
+    text,
+    "XDG_DATA_HOME={{ turbopanel_state_dir }}/instance-acme",
+  );
+  assertStringIncludes(text, "instance-acme.json");
+  assertStringIncludes(text, "instance-acme.log");
+  assertStringIncludes(text, "NoNewPrivileges=true");
 });

@@ -42,6 +42,36 @@ pre-provisioned `server.id`) there and the daemon enrols on the next check.
 `enrollDaemon` never rewrites an unchanged `server.id` and replaces a changed
 one by rename (the wizard's file is instance-owned 0640 in a setgid dir).
 
+### Instance Let's Encrypt renewal (`src/instance/instance-acme-renew.ts`)
+
+`InstanceAcmeRenewalScheduler` renews the control plane's own Let's Encrypt
+leaves. It starts from `InstanceClient.start()` and keeps running across
+socket reconnects; events queued while the socket is down flush on the next
+attach. It does not probe public `:443` — that port is tenant hosting. The
+hostname list is `instance-hostnames.json` (`readInstanceLetsEncryptHostnames`).
+Each leaf is `letsencrypt-<host>.crt` in the instance certs directory. A name
+is due when that file is missing, not a certificate, or inside the issuer
+window (`INSTANCE_ACME_RENEWAL_WINDOW_RATIO`, the same `renewal_window_ratio`
+`0.33` written into the issuer config). The check runs at daemon start, then
+every six hours, or sooner when a failure backoff or a pending Caddy reload
+expires. It does not poll.
+
+A due name runs the HTTP-01 window, preflight, and issue path from
+`applyPublicUrls`. `withInstanceAcmeWindowLock` allows one window at a time.
+Issue copies `letsencrypt-<host>.{crt,key}`. The scheduler then runs
+`systemctl reload turbopanel-caddy`. That unit's `ExecReload` passes
+`--force`, so Caddy re-reads the certificate files without a Caddyfile
+render. Account email, terms, and directory URL come from
+`instance-acme-settings.json`, written on each issue.
+
+Each attempt sends `instance-acme-issuance-event`: `ok` with `notAfter` from
+the installed file, or `ok: false` with the issuer's error text. A failure
+waits at least one hour before that hostname is tried again, then doubles up
+to 24 hours. The wait is stored in `<stateDir>/instance-acme/renewal-state.json`
+so a restart cannot spend Let's Encrypt's five failed authorizations per
+identifier per hour (one refill every 12 minutes). The tenant
+`AcmeIssuanceObserver` is unchanged and still probes organization names.
+
 ### Idle presence (`src/instance/idle-presence.ts`)
 
 `IdlePresence` runs per open socket:
@@ -273,12 +303,12 @@ when triggered from the control-plane UI or manually with the same piped
 installer (`curl -fsSL turbopanel.sh | TURBOPANEL_LICENSE=… sh`; optional
 `TURBOPANEL_HOST` / `TURBOPANEL_INSECURE_TLS=1`). On a **managed host** the
 daemon does not download or pipe the script itself: it resolves the trust
-regime (`resolveAutomaticUpdateTrust` — plaintext dev, public TLS, or the
+regime (`resolveAutomaticUpdateTrust` — public TLS or the
 configured Platform CA; never `curl -k`) and then runs
 `sudo -n tp-orchestrate update --license … [--host …] [--dl-base …]
 [--instance-ca …] [--channel …] [--manifest-url …] --no-start`. The helper
-fetches `run.sh` from `turbopanel.sh` (or `<instance>/run.sh` for plaintext
-dev / overlay hosts) and re-validates every flag against the root-pinned
+fetches `run.sh` from `turbopanel.sh` (or `<instance>/run.sh` for an HTTPS
+overlay host) and re-validates every flag against the root-pinned
 `/opt/turbopanel/lib/update-origin` that `run.sh` wrote at install, so a
 daemon cannot point root at another origin or control plane. Co-located dev
 still pipes the downloaded script through `sudo sh -s`. Flags (`--license`,
@@ -310,33 +340,29 @@ that restart. Daemon self-update does not consult the instance floor.
 The daemon validates the instance server cert on **every HTTPS connect** — both
 chain trust **and** hostname (SAN). There is **no** insecure/skip-verification
 mode at runtime (`run.sh --insecure-tls` only affects bootstrap `curl -k`
-downloads over HTTPS). Four valid configurations:
+downloads over HTTPS, including the first fetch of a private uploaded issuer).
+The control plane is HTTPS on `:8443`. Four valid
+configurations:
 
 | Path                                 | CA trust                                                                                                                                                                                     | SAN requirement                                                                                                                                                                                                                                                                                                                                                                                                               |
 | ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Plaintext HTTP dev control plane** | none — no CA is fetched, stored, or configured (`run.sh` skips the CA-fetch block and omits `turbopanel_instance_ca`; `createInstanceHttpClient` short-circuits before any CA/cert handling) | none — there is no TLS handshake; the daemon dials `ws://`/`http://` directly                                                                                                                                                                                                                                                                                                                                                 |
 | **Self-signed (self-hosted)**        | Daemon trusts the downloaded **platform CA bundle** (`TURBOPANEL_INSTANCE_CA` → `/etc/turbopanel/instance-ca.pem`, fetched from `GET /api/daemon/v1/instance/ca`). The instance stores the current root plus retired overlap PEMs under `/var/lib/turbopanel/tls/` (`ca.crt`, `ca.key`, `ca-bundle.pem`) — not the replaceable checkout. Distinct from the org TLS library. | The leaf cert **must** include the hostname the daemon dials. SANs are derived from the configured public URL(s) — `TURBOPANEL_PUBLIC_URL` / `TURBOPANEL_BASE_URL` / `TURBOPANEL_INSTANCE_URL` and `TURBOPANEL_TLS_EXTRA_SANS` (see `../turbopanel/scripts/generate-self-signed-cert.mjs`). Never hardcode the hostname.                                                                                                        |
 | **Let's Encrypt**                    | Publicly-valid → daemon uses the **system trust store** (ship **no** `TURBOPANEL_INSTANCE_CA`)                                                                                               | The real cert already covers the public hostname.                                                                                                                                                                                                                                                                                                                                                                             |
+| **Private uploaded certificate**     | Hostname-specific issuer at `TURBOPANEL_INSTANCE_UPLOADED_TRUST` → `/etc/turbopanel/instance-uploaded-trust.pem`, from `GET /api/daemon/v1/instance/uploaded-trust`. The installer stores it only after an issuer in that PEM signs the presented leaf and the leaf's SAN is the dialed name. It is not copied onto `instance-ca.pem`. A publicly trusted upload does not use this file. An insecure reinstall rechecks an existing file against the leaf `HOST_URL` presents; a non-404 fetch that keeps the previous issuer does not anchor bootstrap unless that issuer still verifies the active leaf. | Runtime still verifies the chain and the hostname. Bootstrap `curl -k` is not stored. A private upload whose PEM has no covering issuer is refused before an install command is emitted. |
 | **Cloudflare tunnel / proxy**        | Cloudflare's edge cert is publicly-valid → **system trust**                                                                                                                                  | Daemon dials the public Cloudflare hostname, which the edge cert already covers. **Caveat:** behind a tunnel the instance cannot auto-discover its own public hostname (cloudflared dials out), so the reachable URL(s) must be **declared by the operator** (admin surface / `TURBOPANEL_PUBLIC_URL`), not auto-detected. The self-signed origin leg (cloudflared → local Caddy) is separate from what the daemon validates. |
 
-The plaintext HTTP path targets the **dev overlay** Caddyfile at
-`../dev/orchestration/Caddyfile` (`:8880`, always on when that file is loaded —
-see **`../dev/AGENTS.md`**). The production `../turbopanel/Caddyfile` has no
-plaintext listener. The daemon refuses `TURBOPANEL_INSTANCE_URL=http://…`
-unless `TURBOPANEL_DEV_HTTP_CONTROL_PLANE=1` is set (client-side gate for
-dialing a development control plane — never valid on managed/production
-installs that serve HTTPS only). Remote **Add Server** installs that pass
-`--host http://…:8880` get the opt-in in `/etc/turbopanel/daemon.env`:
-`daemon-config` `dotenv.j2` is the only writer (derives it from the URL).
-`scripts/run.sh` validates the line after install and fails if missing —
-it does not patch `daemon.env` outside Ansible. HTTPS `--host` installs never
-write the flag.
+`TURBOPANEL_INSTANCE_URL` must be `https://`. `daemon-config` `dotenv.j2`
+writes that URL and the Platform CA path. Remote **Add Server** installs
+pass `--host https://<host>:8443`. LAN and `*.lan` names use bootstrap
+`curl -k` / `TURBOPANEL_INSECURE_TLS=1` only; automatic updates never skip
+verification.
 
 Note: `Deno.createHttpClient({ caCerts })` **adds** to the system roots (does
 not replace them), so configuring the platform CA does not break validation of
-publicly-trusted certs. `createHttpClientFromCaPath` splits
-`instance-ca.pem` into every `BEGIN CERTIFICATE` block and passes **all** of
-them as `caCerts`. Each reconnect re-reads the file (mtime+size cache);
+publicly-trusted certs. `createHttpClientFromCaPaths` passes every
+`BEGIN CERTIFICATE` block from `instance-ca.pem` and from
+`instance-uploaded-trust.pem` as `caCerts`. Each reconnect re-reads those
+files (mtime+size cache);
 `server.tls.trust.reconcile` writes the bundle atomically to the same path
 `resolveInstanceCaPath` uses (`TURBOPANEL_INSTANCE_CA` when that file exists,
 else the canonical layout `instance-ca.pem`) then invalidates

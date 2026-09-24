@@ -213,6 +213,7 @@ async function runUpdateVerb(
       `ROOT_SCRATCH="${root}/scratch"`,
       `UPDATE_ORIGIN_PIN="${root}/lib/update-origin"`,
       'CANONICAL_INSTANCE_CA="/etc/turbopanel/instance-ca.pem"',
+      'CANONICAL_INSTANCE_UPLOADED_TRUST="/etc/turbopanel/instance-uploaded-trust.pem"',
       'CDN_RUN_SCRIPT="https://turbopanel.sh"',
       'MANIFEST_URL_PREFIX_CDN="https://dl.trbp.nl/channels/"',
       'MANIFEST_URL_PREFIX_GITHUB="https://github.com/TurboPanel/turbopaneld/releases/download/"',
@@ -320,6 +321,32 @@ test("tp-orchestrate update uses the pinned overlay host with the pinned Platfor
   assertEquals(result.status, 1);
   assertStringIncludes(result.stderr, "Platform CA missing");
   assertEquals(result.stdout.includes("[-k]"), false);
+});
+
+test("tp-orchestrate update trusts a pinned private uploaded issuer without --instance-ca", async () => {
+  const missing = await runUpdateVerb(
+    [
+      "--license",
+      "abc",
+      "--host",
+      "https://private.example.com:8443",
+      "--dl-base",
+      "https://private.example.com:8443/downloads",
+      "--no-start",
+    ],
+    "host=https://private.example.com:8443\ndl_base=https://private.example.com:8443/downloads\ninstance_ca=\nuploaded_trust=/etc/turbopanel/instance-uploaded-trust.pem\n",
+  );
+  assertEquals(missing.status, 1);
+  assertStringIncludes(missing.stderr, "private uploaded issuer missing");
+  assertEquals(missing.stdout.includes("[-k]"), false);
+  assertEquals(missing.stdout.includes("[--instance-ca]"), false);
+
+  const wrong = await runUpdateVerb(
+    ["--license", "abc", "--no-start"],
+    "host=https://panel.example.com\ndl_base=https://panel.example.com/downloads\ninstance_ca=\nuploaded_trust=/tmp/evil.pem\n",
+  );
+  assertEquals(wrong.status, 1);
+  assertStringIncludes(wrong.stderr, "refusing uploaded trust pin");
 });
 
 test("tp-orchestrate update accepts the release rails as manifest pins", async () => {

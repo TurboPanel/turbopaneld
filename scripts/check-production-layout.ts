@@ -149,6 +149,12 @@ export function assertProductionLayout(
     prod.instanceDir,
     "/opt/turbopanel",
   );
+  recordLayoutMismatch(
+    failures,
+    "instanceUploadedTrustPath",
+    prod.instanceUploadedTrustPath,
+    "/etc/turbopanel/instance-uploaded-trust.pem",
+  );
 
   recordLayoutMismatch(
     failures,

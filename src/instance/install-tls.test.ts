@@ -23,7 +23,7 @@ test("installOriginNeedsInsecureTls flags platform-CA listeners", () => {
     true,
   );
   assertEquals(installOriginNeedsInsecureTls("https://studio.lan"), true);
-  assertEquals(installOriginNeedsInsecureTls("http://studio.lan:8880"), false);
+  assertEquals(installOriginNeedsInsecureTls("http://studio.lan"), false);
 });
 
 test("installOriginNeedsInsecureTls flags RFC1918 and loopback IPv4 on 443", () => {

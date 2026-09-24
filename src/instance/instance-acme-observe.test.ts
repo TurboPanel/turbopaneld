@@ -2,7 +2,6 @@ import { assertEquals } from "@std/assert";
 import { join } from "@std/path";
 import type { LayoutPaths } from "../paths/layout.ts";
 import {
-  InstanceAcmeIssuanceObserver,
   instanceEdgeHostname,
   instanceSiteHostname,
   readInstanceEdgeHostnames,
@@ -49,29 +48,6 @@ test("readInstanceLetsEncryptHostnames keeps only lets-encrypt names", async () 
   }
 });
 
-test("InstanceAcmeIssuanceObserver reports a failure only after two probes", async () => {
-  const sent: Array<{ ok: boolean; hostname: string }> = [];
-  const observer = new InstanceAcmeIssuanceObserver({
-    now: () => "2026-09-22T00:00:00.000Z",
-    listHostnames: () => Promise.resolve(["panel.example.com"]),
-    probe: () =>
-      Promise.resolve({
-        hostname: "panel.example.com",
-        ok: false,
-        errorMessage: "tls alert",
-      }),
-    send: (message) => {
-      sent.push({ ok: message.ok, hostname: message.hostname });
-    },
-  });
-  await observer.poll();
-  assertEquals(sent, []);
-  await observer.poll();
-  assertEquals(sent, [{ ok: false, hostname: "panel.example.com" }]);
-  await observer.poll();
-  assertEquals(sent.length, 1);
-});
-
 test("readInstanceEdgeHostnames keeps uploaded wildcards and cert ids", async () => {
   const root = await Deno.makeTempDir({ prefix: "tp-instance-edge-" });
   const layout = { configDir: root } as LayoutPaths;
@@ -100,100 +76,4 @@ test("readInstanceEdgeHostnames keeps uploaded wildcards and cert ids", async ()
   } finally {
     await Deno.remove(root, { recursive: true });
   }
-});
-
-test("poll publishes the public edge before listing hostnames", async () => {
-  const order: string[] = [];
-  const observer = new InstanceAcmeIssuanceObserver({
-    publishEdge: () => {
-      order.push("publish");
-      return Promise.resolve();
-    },
-    listHostnames: () => {
-      order.push("list");
-      return Promise.resolve([]);
-    },
-    send: () => {},
-  });
-  await observer.poll();
-  assertEquals(order, ["publish", "list"]);
-});
-
-test("poll keeps probing when the public-edge publish fails", async () => {
-  const order: string[] = [];
-  const observer = new InstanceAcmeIssuanceObserver({
-    publishEdge: () => {
-      order.push("publish");
-      return Promise.reject(new Error("disk"));
-    },
-    listHostnames: () => {
-      order.push("list");
-      return Promise.resolve([]);
-    },
-    send: () => {},
-  });
-  await observer.poll();
-  assertEquals(order, ["publish", "list"]);
-});
-
-test("first success emits once, with the observed expiry", async () => {
-  const sent: Array<{ ok: boolean; notAfter?: string }> = [];
-  const notAfter = "2027-01-01T00:00:00.000Z";
-  const observer = new InstanceAcmeIssuanceObserver({
-    now: () => "2026-09-22T00:00:00.000Z",
-    listHostnames: () => Promise.resolve(["panel.example.com"]),
-    probe: () =>
-      Promise.resolve({ hostname: "panel.example.com", ok: true, notAfter }),
-    send: (message) =>
-      sent.push({ ok: message.ok, notAfter: message.notAfter }),
-  });
-  await observer.poll();
-  await observer.poll();
-  assertEquals(sent, [{ ok: true, notAfter }]);
-});
-
-test("recovery after failure emits success with expiry", async () => {
-  let healthy = false;
-  const sent: Array<{ ok: boolean; notAfter?: string }> = [];
-  const notAfter = "2027-06-01T00:00:00.000Z";
-  const observer = new InstanceAcmeIssuanceObserver({
-    now: () => "2026-09-22T00:00:00.000Z",
-    listHostnames: () => Promise.resolve(["panel.example.com"]),
-    probe: () =>
-      healthy
-        ? Promise.resolve({ hostname: "panel.example.com", ok: true, notAfter })
-        : Promise.resolve({
-          hostname: "panel.example.com",
-          ok: false,
-          errorMessage: "tls alert",
-        }),
-    send: (message) =>
-      sent.push({ ok: message.ok, notAfter: message.notAfter }),
-  });
-  await observer.poll();
-  await observer.poll();
-  healthy = true;
-  await observer.poll();
-  assertEquals(sent, [
-    { ok: false, notAfter: undefined },
-    { ok: true, notAfter },
-  ]);
-});
-
-test("an expiry that moves into the past emits again", async () => {
-  let notAfter = "2027-01-01T00:00:00.000Z";
-  const sent: string[] = [];
-  const observer = new InstanceAcmeIssuanceObserver({
-    now: () => "2026-09-22T00:00:00.000Z",
-    listHostnames: () => Promise.resolve(["panel.example.com"]),
-    probe: () =>
-      Promise.resolve({ hostname: "panel.example.com", ok: true, notAfter }),
-    send: (message) => {
-      if (message.notAfter) sent.push(message.notAfter);
-    },
-  });
-  await observer.poll();
-  notAfter = "2020-01-01T00:00:00.000Z";
-  await observer.poll();
-  assertEquals(sent, ["2027-01-01T00:00:00.000Z", "2020-01-01T00:00:00.000Z"]);
 });

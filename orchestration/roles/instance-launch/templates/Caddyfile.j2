@@ -3,13 +3,14 @@
 
   One template, rendered by the instance-launch role to
   {{ turbopanel_caddyfile }} ({{ turbopanel_config_dir }}/caddy/Caddyfile).
-  :8443 (Platform CA leaf) and :8880 (plaintext HTTP-01 or redirect) are
-  always bound. Per-hostname sites come from turbopanel_hostnames.
-  Explicit :443 sites are emitted only when
-  turbopanel_control_plane_binds_public_https is true (hosting Caddy's unit
-  and sites directory are both absent). On a combined host, Let's Encrypt
-  names listen on loopback caddy_internal_https_port and hosting Caddy owns
-  public :443. turbopanel_tls_mode is a display-only derivation of sources.
+  This process binds exactly one TCP port, literal :8443. An extra-var
+  cannot move it. It never binds :80 or :443 and never runs Let's Encrypt.
+  The admin API is the Unix socket turbopanel_caddy_admin_socket.
+  Per-hostname sites come from
+  turbopanel_hostnames (uploaded always; lets-encrypt only when
+  letsencrypt-<host>.{crt,key} exist — see letsencrypt-files.yml). The bare
+  :8443 site is the Platform CA catch-all for IPs and other names.
+  turbopanel_tls_mode is a display-only derivation of sources.
 
   Co-located development does not use this template: the turbopanel/dev
   overlay ships its own Caddyfile.
@@ -36,9 +37,9 @@
 # serves the SPA shell with HTTP 200, and a Git provider reads that as a
 # delivered webhook and never retries. Add the matcher when you add the surface.
 {
-        admin localhost:2019
-        # ACME HTTP-01 listens here. :80 stays free for tenant hosting Caddy.
-        http_port {{ caddy_http_port | default(8880) }}
+        # Unix socket in a directory owned by caddy_user. Not a TCP listener.
+        admin unix/{{ turbopanel_caddy_admin_socket }}
+        auto_https off
         # Hosting Caddy (and cloudflared) dial this process from loopback and
         # set X-Forwarded-For. {client_ip} then keeps the original client on
         # X-Real-IP. A direct peer has that header stripped above, so
@@ -46,12 +47,6 @@
         servers {
                 trusted_proxies static 127.0.0.0/8 ::1
         }
-{% if ns.acme and (turbopanel_acme_email | default('') | length > 0) %}
-        email {{ turbopanel_acme_email }}
-{% endif %}
-{% if ns.acme and (turbopanel_acme_directory | default('') | length > 0) %}
-        acme_ca {{ turbopanel_acme_directory }}
-{% endif %}
 }
 
 (turbopanel_app) {
@@ -125,50 +120,30 @@
 }
 
 # Always-on recovery listener. The Platform CA leaf covers every platform-ca
-# hostname, and is still minted when the operator has configured none.
-:{{ caddy_port | default(8443) }} {
+# hostname, operator extra SANs, and the machine name (instance-certs), and
+# is still minted when the operator has configured none. IPs and names
+# without a dedicated site land here. An unlisted public install name has to
+# be one of those SANs; the license route refuses a name the leaf does not
+# cover.
+:8443 {
         tls {{ _certs_dir }}/platform-ca.crt {{ _certs_dir }}/platform-ca.key
         import turbopanel_app
-}
-
-# Plaintext. The built-in HTTP-01 solver owns active challenge tokens
-# before this site. The file_server publishes the apply-time preflight
-# nonce and pass_thru leaves a missing file for that solver.
-:{{ caddy_http_port | default(8880) }} {
-        handle /.well-known/acme-challenge/* {
-                root * {{ turbopanel_config_dir | default('/etc/turbopanel') }}/caddy/acme-preflight
-                file_server {
-                        pass_thru
-                }
-        }
-        @not_acme_challenge not path /.well-known/acme-challenge/*
-        redir @not_acme_challenge https://{host}:{{ caddy_port | default(8443) }}{uri} permanent
 }
 
 {% for h in turbopanel_hostnames | default([]) %}
 {% if h.source == 'lets-encrypt' or h.source == 'uploaded' %}
 {% set _site = h.host | regex_replace('^https?://', '') | regex_replace('/.*$', '') | regex_replace(':.*$', '') %}
 {% if _site | length > 0 %}
-{% if turbopanel_control_plane_binds_public_https | default(false) | bool %}
-{% if h.source == 'lets-encrypt' %}
-# Dedicated host: explicit :443. No tls line, so Caddy issues this name
-# into this unit's XDG_DATA_HOME, never the hosting Caddy store.
-{{ _site }}:443 {
-        import turbopanel_app
-}
-{% else %}
+{% if h.source == 'uploaded' %}
 {% set _id = h.cert_id | default('') %}
 {% set _leaf = ('uploaded-' ~ _id) if (_id | length > 0) else 'uploaded' %}
-{{ _site }}:443 {
+{{ _site }}:8443 {
         tls {{ _certs_dir }}/{{ _leaf }}.crt {{ _certs_dir }}/{{ _leaf }}.key
         import turbopanel_app
 }
-{% endif %}
-{% elif h.source == 'lets-encrypt' %}
-# Combined host: hosting Caddy owns public :443. This loopback listener
-# exists so automatic HTTPS can obtain the certificate without binding :443.
-https://{{ _site }}:{{ caddy_internal_https_port | default(8444) }} {
-        bind 127.0.0.1
+{% elif _site in (turbopanel_letsencrypt_ready | default([])) %}
+{{ _site }}:8443 {
+        tls {{ _certs_dir }}/letsencrypt-{{ _site }}.crt {{ _certs_dir }}/letsencrypt-{{ _site }}.key
         import turbopanel_app
 }
 {% endif %}
