@@ -2166,6 +2166,7 @@ export class InstanceClient {
       error,
       at: new Date().toISOString(),
       ...(extra.errorCode ? { errorCode: extra.errorCode } : {}),
+      ...(extra.upgradeId ? { upgradeId: extra.upgradeId } : {}),
     };
     if (ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify(result));
@@ -2200,6 +2201,7 @@ export class InstanceClient {
       }
       this.#sendInstanceUpdateResult(ws, message.id, false, error, {
         errorCode: "preflight_in_progress",
+        upgradeId,
       });
       return;
     }

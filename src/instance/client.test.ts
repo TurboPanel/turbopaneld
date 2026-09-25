@@ -5443,6 +5443,7 @@ it({
         type: "instance-update",
         id: "iu-back",
         channel: "release",
+        upgradeId: "upg-rollback-1",
         at: new Date().toISOString(),
       });
       const rolled = await waitFor(
@@ -5450,10 +5451,14 @@ it({
         () =>
           framesOfType(socket, "instance-update-result").find((frame) =>
             (frame as { id?: string }).id === "iu-back"
-          ) as { ok?: boolean; errorCode?: string } | undefined,
+          ) as
+            | { ok?: boolean; errorCode?: string; upgradeId?: string }
+            | undefined,
       );
       assertEquals(rolled.ok, false);
       assertEquals(rolled.errorCode, "health_timeout");
+      // The control plane matches the result to its upgrade run by this id.
+      assertEquals(rolled.upgradeId, "upg-rollback-1");
       const rolledStage = framesOfType(socket, "update-progress").find((
         frame,
       ) => (frame as { stage?: string }).stage === "rolled-back");

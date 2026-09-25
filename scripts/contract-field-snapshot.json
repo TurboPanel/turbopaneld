@@ -53,6 +53,19 @@
       { "name": "upgradeId", "required": false, "type": "string" }
     ]
   },
+  "InstanceUpdateResultMessage": {
+    "instance": "src/contracts/cell-protocol.ts",
+    "daemon": "src/contracts/cell-messages.ts",
+    "fields": [
+      { "name": "at", "required": true, "type": "string" },
+      { "name": "error", "required": false, "type": "string" },
+      { "name": "errorCode", "required": false, "type": "string" },
+      { "name": "id", "required": true, "type": "string" },
+      { "name": "ok", "required": true, "type": "boolean" },
+      { "name": "type", "required": true, "type": "'instance-update-result'" },
+      { "name": "upgradeId", "required": false, "type": "string" }
+    ]
+  },
   "UpdateProgressMessage": {
     "instance": "src/contracts/cell-protocol.ts",
     "daemon": "src/contracts/cell-messages.ts",

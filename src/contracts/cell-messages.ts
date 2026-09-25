@@ -67,6 +67,21 @@ export type InstanceUpdateMessage = {
   at: string;
 };
 
+/**
+ * Outcome of an `instance-update`. `errorCode` is the rollback or preflight
+ * reason; `upgradeId` echoes the run the control plane dispatched it for, so
+ * a rollback is recorded against the right upgrade step.
+ */
+export type InstanceUpdateResultMessage = {
+  type: "instance-update-result";
+  id: string;
+  ok: boolean;
+  error?: string;
+  errorCode?: string;
+  upgradeId?: string;
+  at: string;
+};
+
 export type UpdateProgressUnit = "daemon" | "instance";
 
 export type UpdateProgressStage =
@@ -426,14 +441,7 @@ export type DaemonMessage =
   }
   | InstanceUpdateMessage
   | UpdateProgressMessage
-  | {
-    type: "instance-update-result";
-    id: string;
-    ok: boolean;
-    error?: string;
-    errorCode?: string;
-    at: string;
-  }
+  | InstanceUpdateResultMessage
   | {
     type: "command-dispatch";
     id: string;
