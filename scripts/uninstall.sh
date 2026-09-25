@@ -1816,7 +1816,10 @@ tp_confirm() {
   esac
   if [ "$TP_ACTION" = purge ]; then
     _cf_expected="purge ${TP_HOSTNAME} ${TP_CODE}"
-    tp_say "Type ${_cf_expected} to purge."
+    tp_say "To confirm, type the line below exactly — the code alone is not enough:"
+    tp_say ""
+    tp_say "  ${_cf_expected}"
+    tp_say ""
   else
     _cf_expected="remove-${TP_CODE}"
     tp_say "Type ${_cf_expected} to remove TurboPanel."
@@ -1985,11 +1988,20 @@ tp_remove_units() {
   tp_prune_wants_symlinks
   tp_run "systemctl daemon-reload" systemctl daemon-reload || true
   # Scoped to TurboPanel units. A bare reset-failed would clear every failed
-  # unit on the host, including ones this uninstall did not touch. A pattern
-  # that matches nothing is not a failed uninstall. Dry-run must skip this:
-  # it clears live unit state.
+  # unit on the host, including ones this uninstall did not touch. A glob
+  # that matches nothing is not a failed uninstall, but wg-quick@tp0.service
+  # is a literal name, not a glob: systemctl errors on "not loaded" for a
+  # literal it has never seen, which is the common case on a host that never
+  # brought up a WireGuard tunnel. Only pass it when it is actually known.
+  _ru_units="turbopanel* turbopaneld*"
+  if systemctl list-units --all --no-legend --plain 'wg-quick@tp0.service' \
+      2>/dev/null | grep -q .; then
+    _ru_units="$_ru_units wg-quick@tp0.service"
+  fi
+  # Dry-run must skip this: it clears live unit state.
+  # shellcheck disable=SC2086
   tp_run "clear failed TurboPanel unit state" \
-    systemctl reset-failed 'turbopanel*' 'turbopaneld*' 'wg-quick@tp0.service' || true
+    systemctl reset-failed $_ru_units || true
 }
 
 tp_remove_docker() {
