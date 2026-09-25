@@ -1089,6 +1089,45 @@ test("managed payloads reject a non-Docker managedNetwork", () => {
   );
 });
 
+const MINIMAL_DEPLOY = {
+  environmentId: "env-1",
+  projectId: "proj-1",
+  organizationId: "org-1",
+  projectName: "tp-demo",
+  composeFiles: [{
+    filename: "compose.yaml",
+    role: "runtime",
+    source: "inline",
+    content: "services:\n  web:\n    image: nginx\n",
+  }],
+  hostings: [],
+};
+
+test("environment.deploy round-trips hostLevelApproved", () => {
+  const payload = parseEnvironmentDeployPayload({
+    ...MINIMAL_DEPLOY,
+    hostLevelApproved: true,
+  });
+  assertEquals(payload.hostLevelApproved, true);
+});
+
+test("environment.deploy from an older control plane has no hostLevelApproved", () => {
+  const payload = parseEnvironmentDeployPayload(MINIMAL_DEPLOY);
+  assertEquals(payload.hostLevelApproved, undefined);
+});
+
+test("environment.deploy rejects non-boolean hostLevelApproved", () => {
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...MINIMAL_DEPLOY,
+        hostLevelApproved: "true",
+      }),
+    TypeError,
+    "hostLevelApproved must be a boolean",
+  );
+});
+
 test("environment.deploy round-trips noCache", () => {
   const payload = parseEnvironmentDeployPayload({
     environmentId: "env-1",

@@ -32,6 +32,7 @@ type Volume = Record<string, unknown>;
 async function deployWithVolumes(
   prepare: (deploymentDir: string) => Promise<void>,
   volumes: (stageDir: string) => Volume[],
+  payloadExtra: { hostLevelApproved?: boolean } = {},
 ): Promise<{ upRan: boolean; error: Error | null }> {
   const root = await Deno.makeTempDir({ prefix: "tp-deploy-hostpaths-" });
   const previous = {
@@ -78,6 +79,7 @@ async function deployWithVolumes(
           content: "services:\n  web:\n    image: nginx:alpine\n",
         }],
         hostings: [],
+        ...payloadExtra,
       },
       new Date().toISOString(),
       { runDocker: fakeRunDocker, ...hermeticDeployDeps },
@@ -159,4 +161,56 @@ test("deploy runs compose up for a plain bind inside the deployment directory", 
   );
   assertEquals(error, null);
   assertEquals(upRan, true);
+});
+
+test("deploy refuses an absolute host bind without host-level approval", async () => {
+  const { upRan, error } = await deployWithVolumes(
+    () => Promise.resolve(),
+    () => [{ type: "bind", source: "/srv/media", target: "/media" }],
+  );
+  assertEquals(upRan, false, "compose up must not run");
+  assertEquals(
+    error?.message.includes("outside the deployment directory"),
+    true,
+    error?.message,
+  );
+});
+
+test("a host-level approved deploy runs compose up with the Docker socket and an absolute bind", async () => {
+  const { upRan, error } = await deployWithVolumes(
+    () => Promise.resolve(),
+    (stage) => [
+      {
+        type: "bind",
+        source: "/var/run/docker.sock",
+        target: "/var/run/docker.sock",
+      },
+      { type: "bind", source: "/srv/media", target: "/media" },
+      { type: "bind", source: join(stage, "data"), target: "/data" },
+    ],
+    { hostLevelApproved: true },
+  );
+  assertEquals(error, null);
+  assertEquals(upRan, true);
+});
+
+test("host-level approval never excuses a symlink escape from inside the deployment directory", async () => {
+  const { upRan, error } = await deployWithVolumes(
+    async (dir) => {
+      await Deno.mkdir(join(dir, "data"), { recursive: true });
+      await Deno.symlink("/", join(dir, "data", "escape"));
+    },
+    (stage) => [{
+      type: "bind",
+      source: join(stage, "data", "escape"),
+      target: "/host",
+    }],
+    { hostLevelApproved: true },
+  );
+  assertEquals(upRan, false, "compose up must not run");
+  assertEquals(
+    error?.message.includes("resolves through a symlink to /"),
+    true,
+    error?.message,
+  );
 });

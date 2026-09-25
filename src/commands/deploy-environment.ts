@@ -1315,8 +1315,9 @@ async function deployContainerServices(
       run,
     );
     // The control plane's host-level gate is lexical; only the host can see
-    // where a bind source really resolves. No wire field marks a deploy
-    // host-level approved yet, so lexically outside sources are refused too.
+    // where a bind source really resolves. `hostLevelApproved` (absent reads
+    // false) lets absolute and Docker-socket sources through; it never
+    // excuses a symlink escape, a nested writable bind, or the staging dir.
     await assertComposeHostPathsConfined(
       [
         collectResolvedHostPaths(
@@ -1328,7 +1329,7 @@ async function deployContainerServices(
       {
         deploymentDir,
         stageDir,
-        hostLevelApproved: false,
+        hostLevelApproved: parsedPayload.hostLevelApproved === true,
         priorWritableMounts: await priorWritableMounts(
           parsedPayload.projectName,
           deploymentDir,

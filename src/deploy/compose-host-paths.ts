@@ -13,8 +13,11 @@
  *
  * Sources that are lexically outside the deployment directory (absolute
  * paths, `../`, the Docker socket) are host-level Compose features. They pass
- * only when the deploy is host-level approved; nothing on the command wire
- * says so yet, so the deploy path always passes `hostLevelApproved: false`.
+ * only when the control plane marked the deploy `hostLevelApproved` on the
+ * `environment.deploy` payload (absent reads false, so an older control plane
+ * gets the strict reading). Approval never excuses a source inside the
+ * directory that resolves out of it through a symlink, a source nested in
+ * another writable bind, or the staging directory.
  */
 
 import {
@@ -364,7 +367,7 @@ export type ConfinementOptions = {
   deploymentDir: string;
   /** Directory of the staged compose file relative paths were resolved from. */
   stageDir: string;
-  /** Set only when the control plane marks the deploy host-level approved. */
+  /** `environment.deploy` `hostLevelApproved`; absent on the wire is false. */
   hostLevelApproved: boolean;
   /**
    * Writable bind sources (live paths) of the generation still running. Its

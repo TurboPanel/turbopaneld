@@ -930,7 +930,23 @@ export type EnvironmentDeployDockerNetwork = {
   mtu?: number;
 };
 
-export type EnvironmentDeployPayload = {
+/**
+ * Host-level Compose approval carried on `environment.deploy`.
+ *
+ * `hostLevelApproved` is set by the control plane only when the deployed
+ * document reaches the host, the organization has host-level Compose features
+ * on, and the actor rule passed. Absent reads as `false` (an older control
+ * plane never sends it). It lets `src/deploy/compose-host-paths.ts` allow
+ * absolute and Docker-socket binds; it never excuses a symlink escape from the
+ * deployment directory. Twinned by name in turbopanel's
+ * `src/contracts/commands/schemas.ts` and pinned in
+ * `scripts/contract-field-snapshot.json`.
+ */
+export type EnvironmentDeployHostAccess = {
+  hostLevelApproved?: boolean;
+};
+
+export type EnvironmentDeployPayload = EnvironmentDeployHostAccess & {
   environmentId: string;
   projectId: string;
   organizationId: string;
@@ -4813,6 +4829,10 @@ export function parseEnvironmentDeployPayload(
         managedNetworkServices,
       ),
       noCache: parseOptionalBoolean(value.noCache, "noCache"),
+      hostLevelApproved: parseOptionalBoolean(
+        value.hostLevelApproved,
+        "hostLevelApproved",
+      ),
       tlsMaterial: parseOptionalMaterialArray(
         value.tlsMaterial,
         "tlsMaterial",

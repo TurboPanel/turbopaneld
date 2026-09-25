@@ -297,9 +297,12 @@ entry. There is no `composeYaml` fallback on `environment.deploy`.
   running (a container there could swap a path component for a symlink before
   or after `up`); `extends.file` and `include`; interpolated paths. Sources
   lexically outside the dir (absolute, `../`, the Docker socket) are
-  host-level Compose features the control plane gates; the command wire does
-  not carry that approval yet, so `hostLevelApproved` is always `false` here
-  and they are refused too.
+  host-level Compose features the control plane gates; they pass only when
+  the `environment.deploy` payload carries `hostLevelApproved: true` (the
+  `EnvironmentDeployHostAccess` twin, pinned in
+  `scripts/contract-field-snapshot.json`; absent reads false, so an older
+  control plane gets the strict reading). Approval never excuses the refusals
+  above.
 - **Staged write + validated cutover:** each deploy resets
   `<deploymentDir>/.staging/`, writes the compiled YAML there, resolves the
   merged Docker Compose model, merges the daemon overlay fragment into that
