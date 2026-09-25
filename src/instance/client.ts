@@ -34,7 +34,15 @@ import {
   type DevSyncApplyFn,
   getCheckoutDevSyncApply,
 } from "../dev-sync/runtime.ts";
-import { applyPublicUrls } from "./public-urls-apply.ts";
+import {
+  applyPublicUrls,
+  resolveInstanceCertsDir,
+} from "./public-urls-apply.ts";
+import { instanceSiteHostname } from "./instance-acme-observe.ts";
+import {
+  InstanceAcmeRenewalScheduler,
+  readInstalledLetsEncryptNotAfter,
+} from "./instance-acme-renew.ts";
 import { writeInstanceTunnelToken } from "../tunnels/supervisor.ts";
 import {
   logDebug,
@@ -124,7 +132,6 @@ import { resolvePinnedManifestUrl } from "../update/urls.ts";
 import { installOriginNeedsInsecureTls } from "./install-tls.ts";
 import { ManagedHaObserver } from "./ha-observe.ts";
 import { AcmeIssuanceObserver } from "./acme-observe.ts";
-import { InstanceAcmeRenewalScheduler } from "./instance-acme-renew.ts";
 import { DAEMON_VERSION } from "../version.ts";
 import { resolveDaemonCapabilities } from "./version-wire.ts";
 import { TopologyReporter } from "./topology-reporter.ts";
@@ -1844,6 +1851,9 @@ export class InstanceClient {
         hostnames ? { instanceAcme: message.instanceAcme } : {},
       );
       ok = true;
+      if (hostnames) {
+        await sendInstalledInstanceAcmeEvents(ws, hostnames);
+      }
     } catch (err) {
       error = err instanceof Error ? err.message : String(err);
       logError("public-urls", "failed:", sanitizeForLog(error));
@@ -3028,6 +3038,45 @@ async function waitForRemoteHealth(
       await delay(fullJitterMs(initialBackoffMs, backoffMs));
       backoffMs = nextBackoffMs(backoffMs, DEFAULT_MAX_BACKOFF_MS);
     }
+  }
+}
+
+async function sendInstalledInstanceAcmeEvents(
+  ws: WebSocket,
+  hostnames: readonly { host: string; source: string }[],
+): Promise<void> {
+  if (ws.readyState !== WebSocket.OPEN) return;
+  const certsDir = resolveInstanceCertsDir();
+  const at = new Date().toISOString();
+  const nowMs = Date.now();
+  for (const entry of hostnames) {
+    if (entry.source !== "lets-encrypt") continue;
+    const host = instanceSiteHostname(entry.host);
+    if (!host) continue;
+    const notAfter = await readInstalledLetsEncryptNotAfter(
+      certsDir,
+      host,
+      nowMs,
+    );
+    if (!notAfter) {
+      logWarn(
+        "public-urls",
+        `instance-acme-issuance-event skipped hostname=${host}: installed certificate is missing`,
+      );
+      continue;
+    }
+    const message = {
+      type: "instance-acme-issuance-event",
+      hostname: host,
+      ok: true,
+      notAfter,
+      at,
+    } satisfies DaemonMessage;
+    ws.send(JSON.stringify(message));
+    logInfo(
+      "public-urls",
+      `instance-acme-issuance-event ok hostname=${host}`,
+    );
   }
 }
 
