@@ -115,6 +115,12 @@ import {
 } from "../deploy/site-docker.ts";
 import { logInfo, logWarn } from "../util/logger.ts";
 import {
+  assertComposeHostPathsConfined,
+  collectAuthoredHostPaths,
+  collectResolvedHostPaths,
+  priorWritableMounts,
+} from "../deploy/compose-host-paths.ts";
+import {
   materializeSecretFiles,
   rewriteComposeSecretFilePaths,
 } from "../deploy/secret-runtime.ts";
@@ -1307,6 +1313,28 @@ async function deployContainerServices(
       parsedPayload.projectName,
       [stagedPath],
       run,
+    );
+    // The control plane's host-level gate is lexical; only the host can see
+    // where a bind source really resolves. No wire field marks a deploy
+    // host-level approved yet, so lexically outside sources are refused too.
+    await assertComposeHostPathsConfined(
+      [
+        collectResolvedHostPaths(
+          resolved.document ?? {},
+          new Set((parsedPayload.secretPlan ?? []).map((e) => e.source)),
+        ),
+        collectAuthoredHostPaths(yaml),
+      ],
+      {
+        deploymentDir,
+        stageDir,
+        hostLevelApproved: false,
+        priorWritableMounts: await priorWritableMounts(
+          parsedPayload.projectName,
+          deploymentDir,
+          run,
+        ),
+      },
     );
 
     const fragment = buildDaemonOverlayFragment(
