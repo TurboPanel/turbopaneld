@@ -1816,7 +1816,10 @@ tp_confirm() {
   esac
   if [ "$TP_ACTION" = purge ]; then
     _cf_expected="purge ${TP_HOSTNAME} ${TP_CODE}"
-    tp_say "Type ${_cf_expected} to purge."
+    tp_say "To confirm, type the line below exactly — the code alone is not enough:"
+    tp_say ""
+    tp_say "  ${_cf_expected}"
+    tp_say ""
   else
     _cf_expected="remove-${TP_CODE}"
     tp_say "Type ${_cf_expected} to remove TurboPanel."
@@ -1985,11 +1988,20 @@ tp_remove_units() {
   tp_prune_wants_symlinks
   tp_run "systemctl daemon-reload" systemctl daemon-reload || true
   # Scoped to TurboPanel units. A bare reset-failed would clear every failed
-  # unit on the host, including ones this uninstall did not touch. A pattern
-  # that matches nothing is not a failed uninstall. Dry-run must skip this:
-  # it clears live unit state.
+  # unit on the host, including ones this uninstall did not touch. A glob
+  # that matches nothing is not a failed uninstall, but wg-quick@tp0.service
+  # is a literal name, not a glob: systemctl errors on "not loaded" for a
+  # literal it has never seen, which is the common case on a host that never
+  # brought up a WireGuard tunnel. Only pass it when it is actually known.
+  _ru_units="turbopanel* turbopaneld*"
+  if systemctl list-units --all --no-legend --plain 'wg-quick@tp0.service' \
+      2>/dev/null | grep -q .; then
+    _ru_units="$_ru_units wg-quick@tp0.service"
+  fi
+  # Dry-run must skip this: it clears live unit state.
+  # shellcheck disable=SC2086
   tp_run "clear failed TurboPanel unit state" \
-    systemctl reset-failed 'turbopanel*' 'turbopaneld*' 'wg-quick@tp0.service' || true
+    systemctl reset-failed $_ru_units || true
 }
 
 tp_remove_docker() {
@@ -2532,7 +2544,7 @@ tp_consider_apt_package() {
   [ -n "$_cap" ] || return 0
   tp_pkg_installed "$_cap" || return 0
   case $_cap in
-    sudo|systemd-timesyncd)
+    sudo|systemd-timesyncd|curl)
       tp_purge_note_kept "$_cap" "never removed by this script"
       return 0
       ;;
@@ -2813,8 +2825,10 @@ tp_purge_apt_packages() {
   tp_run "apt-get update" env LC_ALL=C DEBIAN_FRONTEND=noninteractive apt-get update || true
   tp_collect_purge_candidates
   tp_choose_purge_packages
-  # sudo and systemd-timesyncd are not purge candidates. Mark them manual
-  # before autoremove, or an automatic install is removed with its stack.
+  # sudo, systemd-timesyncd, and curl are not purge candidates. Mark them
+  # manual before autoremove, or an automatic install is removed with its
+  # stack. curl is kept so the reinstall commands this script prints (and
+  # the curl | sh install itself) still work after a purge.
   tp_protect_never_removed_packages
   _pap_marked=false
   if tp_mark_kept_packages_manual; then
@@ -2826,8 +2840,8 @@ tp_purge_apt_packages() {
     tp_run "autoremove apt packages" \
       env LC_ALL=C DEBIAN_FRONTEND=noninteractive apt-get autoremove --purge -y || true
   else
-    tp_print_error "skipped autoremove so sudo and systemd-timesyncd cannot be removed"
-    tp_record_fail "skipped autoremove so sudo and systemd-timesyncd cannot be removed"
+    tp_print_error "skipped autoremove so sudo, systemd-timesyncd, and curl cannot be removed"
+    tp_record_fail "skipped autoremove so sudo, systemd-timesyncd, and curl cannot be removed"
   fi
 }
 
@@ -3440,16 +3454,17 @@ TP_RESUME_DIR=/var/lib/turbopanel-uninstall
 TP_PURGE_MARKER=$TP_RESUME_DIR/purge-in-progress
 TP_RESUME_MANIFEST=$TP_RESUME_DIR/resume-manifest
 TP_DOCKER_DATA_ROOT_DEFAULT=/var/lib/docker
-TP_AUTOREMOVE_PROTECTED="sudo systemd-timesyncd"
+TP_AUTOREMOVE_PROTECTED="sudo systemd-timesyncd curl"
 TP_INV_NAMES="units containers networks chains wireguard hostfiles shellrc folders_remove folders_keep accounts groups principals volumes leftalone cpmarkers purge_targets"
 
 # Apt packages option 2 may purge. A role that installs apt packages or adds
 # an apt repository has to add them here (and the repo file, when the Docker
 # download.docker.com scan or the sury filenames below would not match it).
 # daemon-prereqs/tasks/main.yml, plus apt-transport-https from php-fpm.
-# apache/tasks/main.yml build dependencies. Installed sudo and
-# systemd-timesyncd are marked manual before autoremove; they are not purge
-# candidates. time-sync installs systemd-timesyncd.
+# apache/tasks/main.yml build dependencies. Installed sudo, systemd-timesyncd,
+# and curl are marked manual before autoremove; they are not purge
+# candidates. time-sync installs systemd-timesyncd. curl is kept so the
+# printed reinstall commands (and a repeat curl | sh) still work post-purge.
 TP_PURGE_BASE_PACKAGES="acl ca-certificates curl git gnupg iptables openssl pamtester python3-debian tar unzip wireguard-tools xz-utils zstd apt-transport-https"
 TP_PURGE_APACHE_PACKAGES="build-essential libexpat1-dev libpcre2-dev libssl-dev zlib1g-dev"
 TP_DOCKER_PACKAGES="docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin docker-ce-rootless-extras docker.io docker-compose containerd runc"
