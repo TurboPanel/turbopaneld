@@ -67,9 +67,9 @@ render. Account email, terms, and directory URL come from
 Each attempt sends `instance-acme-issuance-event`: `ok` with `notAfter` from
 the installed file, or `ok: false` with the issuer's error text. A leaf that
 is already valid and outside the renewal window is reported once as well
-(stored under `reported` in the renewal state), including a leaf Save & Apply
-installed on its own. Save & Apply sends the same event before its result so
-the Hostnames row can leave Pending on that request. A failure
+(stored under `reported` in the renewal state). Save & Apply runs that check
+before it answers, so a leaf it just installed is reported on the same
+request. A failure
 waits at least one hour before that hostname is tried again, then doubles up
 to 24 hours. The wait is stored in `<stateDir>/instance-acme/renewal-state.json`
 so a restart cannot spend Let's Encrypt's five failed authorizations per

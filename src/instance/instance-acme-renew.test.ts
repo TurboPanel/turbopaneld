@@ -210,6 +210,40 @@ test("a leaf outside the renewal window is left alone", async () => {
     }]);
     await scheduler.check();
     assertEquals(sent.length, 1);
+    const statePath = join(
+      layout.stateDir,
+      "instance-acme",
+      "renewal-state.json",
+    );
+    const saved = JSON.parse(await Deno.readTextFile(statePath));
+    saved.reported["not a host"] = "x";
+    saved.reported.extra = 1;
+    saved.reported[HOST] = `${saved.reported[HOST]}`;
+    await Deno.writeTextFile(statePath, `${JSON.stringify(saved)}\n`);
+    const restarted = new InstanceAcmeRenewalScheduler({
+      env: fixture.env,
+      layout,
+      now: () => clock.now(),
+      withLock: (fn) => fn(),
+      send: (message) => {
+        sent.push(message);
+        return true;
+      },
+      issue: () => {
+        issued += 1;
+        return Promise.resolve();
+      },
+      openWindow: () => Promise.resolve(),
+      preflight: () => Promise.resolve(),
+      closeWindow: () => Promise.resolve(),
+      reload: () => Promise.resolve(),
+    });
+    await restarted.check();
+    assertEquals(issued, 0);
+    assertEquals(sent.length, 1);
+    await writeSidecar(layout.configDir, []);
+    await restarted.check();
+    assertEquals(sent.length, 1);
   });
 });
 

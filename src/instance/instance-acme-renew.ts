@@ -603,27 +603,6 @@ function installedLeafPath(certsDir: string, host: string): string {
   return join(certsDir, `letsencrypt-${host}.crt`);
 }
 
-/** Expiry of the installed Let's Encrypt leaf, when the file can be read. */
-export async function readInstalledLetsEncryptNotAfter(
-  certsDir: string,
-  host: string,
-  nowMs: number,
-): Promise<string | undefined> {
-  if (!isRenewableHost(host)) return undefined;
-  try {
-    const pem = await Deno.readTextFile(installedLeafPath(certsDir, host));
-    return inspectIssuerCertificatePem(pem, nowMs)?.notAfter;
-  } catch (err) {
-    if (err instanceof Deno.errors.NotFound) return undefined;
-    logWarn(
-      "instance",
-      `instance ACME leaf unreadable hostname=${host}:`,
-      sanitizeForLog(err),
-    );
-    return undefined;
-  }
-}
-
 function clipError(message: string): string {
   const text = message.replaceAll("\n", " ").trim();
   if (text.length <= EVENT_ERROR_MAX) return text;
