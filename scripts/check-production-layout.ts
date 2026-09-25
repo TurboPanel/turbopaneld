@@ -265,6 +265,7 @@ export const ANSIBLE_SCAN_ALLOWLIST = new Set([
   "scripts/lib/release-artifacts.sh",
   "scripts/verify-release-root.sh",
   "scripts/check-production-layout.ts",
+  "scripts/uninstall.sh",
 ]);
 
 export const RETIRED_RUNTIMES_REF = /\/opt\/turbopanel\/runtimes/;
@@ -280,6 +281,7 @@ export const RETIRED_RUNTIMES_SCAN_ALLOWLIST = new Set([
   "src/dev-sync/apply.ts", // comment only: documents legacy path for operators
   "src/orchestration/cloudflared.ts", // comment only
   "scripts/run.sh", // removes the retired lib/instance subtree on upgrade
+  "scripts/uninstall.sh", // removes retired paths on host purge
 ]);
 
 export const RUNTIME_ROOT_LITERAL = /\/opt\/turbopanel\/vendor/;
@@ -295,6 +297,7 @@ export const RUNTIME_ROOT_SCAN_ALLOWLIST = new Set([
   // them from the layout module); src/permissions/daemon-permissions.test.ts pins both
   // copies to that renderer, so the literals cannot drift.
   "scripts/run.sh",
+  "scripts/uninstall.sh",
   "orchestration/roles/daemon-launch/templates/turbopaneld.service.j2",
 ]);
 
