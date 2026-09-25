@@ -36,7 +36,7 @@ test("resolveDlBase prefers TURBOPANEL_DL_BASE over the public CDN", () => {
   );
 });
 
-test("resolvePinnedManifestUrl accepts only an https pin", () => {
+test("resolvePinnedManifestUrl accepts only a release-rail https pin", () => {
   assertEquals(resolvePinnedManifestUrl({}), null);
   assertEquals(
     resolvePinnedManifestUrl({ TURBOPANEL_MANIFEST_URL: " " }),
@@ -48,6 +48,12 @@ test("resolvePinnedManifestUrl accepts only an https pin", () => {
   );
   assertEquals(
     resolvePinnedManifestUrl({ TURBOPANEL_MANIFEST_URL: "not a url" }),
+    null,
+  );
+  assertEquals(
+    resolvePinnedManifestUrl({
+      TURBOPANEL_MANIFEST_URL: "https://attacker.example/manifest.json",
+    }),
     null,
   );
   assertEquals(
@@ -196,7 +202,7 @@ async function shellPinnedManifestUrl(
 ): Promise<{ code: number; stdout: string }> {
   const runSh = await Deno.readTextFile(join(ROOT, "scripts", "run.sh"));
   const start = runSh.indexOf("tp_pinned_version_ok() {");
-  const end = runSh.indexOf("tp_manifest_url_accepted() {");
+  const end = runSh.indexOf("# Release-rail manifest URL check");
   if (start < 0 || end < 0) {
     throw new TypeError("tp_pinned_channel_manifest_url not found in run.sh");
   }
@@ -211,18 +217,21 @@ tp_pinned_channel_manifest_url ${kind} ${channel} ${version}
   return { code: out.code, stdout: new TextDecoder().decode(out.stdout) };
 }
 
-async function shellManifestUrlAccepted(url: string): Promise<number> {
+async function shellManifestUrlAccepted(
+  kind: ReleaseArtifactKind,
+  url: string,
+): Promise<number> {
   const runSh = await Deno.readTextFile(join(ROOT, "scripts", "run.sh"));
-  const start = runSh.indexOf("tp_manifest_url_accepted() {");
+  const start = runSh.indexOf("tp_release_manifest_url_ok() {");
   const end = runSh.indexOf("tp_builtin_repo_manifest_url() {");
   if (start < 0 || end < 0) {
-    throw new TypeError("tp_manifest_url_accepted not found in run.sh");
+    throw new TypeError("tp_release_manifest_url_ok not found in run.sh");
   }
   const script = `${runSh.slice(start, end)}
-tp_manifest_url_accepted ${url}
+tp_release_manifest_url_ok "$1" "$2"
 `;
   const out = await new Deno.Command("sh", {
-    args: ["-c", script],
+    args: ["-c", script, "sh", kind, url],
     stdout: "piped",
     stderr: "piped",
   }).output();
@@ -248,15 +257,24 @@ test("scripts/run.sh mirrors pinnedChannelManifestUrl and accepts the pinned sha
       } else {
         assertEquals(shell.code, 0, `${kind} ${channel}`);
         assertEquals(shell.stdout, expected);
-        assertEquals(await shellManifestUrlAccepted(expected), 0);
+        assertEquals(await shellManifestUrlAccepted(kind, expected), 0);
       }
     }
   }
-  const floating = builtinChannelManifestUrl("canary");
-  assertEquals(floating === null, false);
-  if (floating) assertEquals(await shellManifestUrlAccepted(floating), 0);
+  for (const kind of kinds) {
+    for (const channel of channels) {
+      const floating = builtinChannelManifestUrl(channel, kind);
+      if (floating) {
+        assertEquals(
+          await shellManifestUrlAccepted(kind, floating),
+          0,
+          `${kind} ${channel}`,
+        );
+      }
+    }
+  }
   assertEquals(
-    await shellManifestUrlAccepted("http://example/manifest.json"),
+    await shellManifestUrlAccepted("daemon", "http://example/manifest.json"),
     1,
   );
 });

@@ -1108,16 +1108,68 @@ tp_pinned_channel_manifest_url() {
   esac
 }
 
-# https pins, including the versioned shapes tp_pinned_channel_manifest_url
-# builds. The pinned globs are named so a later tightening of this check
-# still accepts them. Unversioned rail URLs stay on the https arm.
-tp_manifest_url_accepted() {
-  case "$1" in
-    https://github.com/TurboPanel/*/releases/download/canary/manifest-*.json) return 0 ;;
-    https://github.com/TurboPanel/*/releases/download/v*/manifest.json) return 0 ;;
-    https://*) return 0 ;;
+# Release-rail manifest URL check, on the raw string: https only, exact host,
+# no %, @, :, ?, #, \, whitespace or controls, no empty, "." or ".." path
+# segment, and one exact rail shape per kind (daemon, instance, ui):
+#   daemon    https://dl.trbp.nl/channels/<channel>/manifest*.json
+#   any kind  https://github.com/TurboPanel/<repo>/releases/download/<tag>/manifest*.json
+#             https://github.com/TurboPanel/<repo>/releases/latest/download/manifest*.json
+# Byte-identical in scripts/run.sh and orchestration/scripts/tp-orchestrate;
+# src/update/urls.ts releaseManifestUrlAllowed is the TypeScript copy, and
+# src/testing/release-manifest-url-corpus.json pins all three together.
+tp_release_manifest_url_ok() {
+  _rmu_kind="$1"
+  _rmu_url="$2"
+  case "$_rmu_kind" in
+    daemon) _rmu_repo="turbopaneld" ;;
+    instance) _rmu_repo="turbopanel" ;;
+    ui) _rmu_repo="ui" ;;
     *) return 1 ;;
   esac
+  case "$_rmu_url" in
+    https://*) ;;
+    *) return 1 ;;
+  esac
+  _rmu_rest="${_rmu_url#https://}"
+  case "$_rmu_rest" in
+    ""|*[!A-Za-z0-9._~/+-]*) return 1 ;;
+  esac
+  _rmu_host="${_rmu_rest%%/*}"
+  _rmu_path="${_rmu_rest#"$_rmu_host"}"
+  case "$_rmu_path" in
+    ""|*/|*//*|*/./*|*/../*|*/.|*/..) return 1 ;;
+  esac
+  case "${_rmu_path##*/}" in
+    manifest.json|manifest-?*.json) ;;
+    *) return 1 ;;
+  esac
+  case "$_rmu_host" in
+    dl.trbp.nl)
+      [ "$_rmu_kind" = daemon ] || return 1
+      _rmu_mid="${_rmu_path#/channels/}"
+      ;;
+    github.com)
+      _rmu_mid="${_rmu_path#/TurboPanel/"$_rmu_repo"/releases/}"
+      ;;
+    *) return 1 ;;
+  esac
+  [ "$_rmu_mid" != "$_rmu_path" ] || return 1
+  case "$_rmu_mid" in
+    */*) _rmu_mid="${_rmu_mid%/*}" ;;
+    *) return 1 ;;
+  esac
+  if [ "$_rmu_host" = dl.trbp.nl ]; then
+    case "$_rmu_mid" in
+      */*) return 1 ;;
+    esac
+    return 0
+  fi
+  case "$_rmu_mid" in
+    latest/download) return 0 ;;
+    download/*/*) return 1 ;;
+    download/?*) return 0 ;;
+  esac
+  return 1
 }
 
 # The same rail addressed by repository name (turbopaneld, turbopanel, ui).
@@ -1166,7 +1218,9 @@ tp_fetch_channel_manifest() {
   fi
 
   _manifest_json=""
-  if ! _manifest_json="$($_curl "${_manifest_url}?$(date +%s)" 2>/dev/null)"; then
+  # --path-as-is: curl must fetch the path that was validated, never a
+  # dot-segment-normalised one (tp_release_manifest_url_ok).
+  if ! _manifest_json="$($_curl --path-as-is "${_manifest_url}?$(date +%s)" 2>/dev/null)"; then
     return 1
   fi
 
@@ -1217,7 +1271,7 @@ tp_fetch_repo_manifest() {
   fi
   _curl="$(tp_release_curl)"
   _manifest_json=""
-  if ! _manifest_json="$($_curl "${_manifest_url}?$(date +%s)" 2>/dev/null)"; then
+  if ! _manifest_json="$($_curl --path-as-is "${_manifest_url}?$(date +%s)" 2>/dev/null)"; then
     echo "run.sh: failed to fetch ${_manifest_url} — does TurboPanel/${_repo} have a ${_channel} release yet?" >&2
     return 1
   fi
@@ -1767,8 +1821,8 @@ fi
 # channel install. Rolling back is pinning the previous tag.
 [ -n "$MANIFEST_URL" ] || MANIFEST_URL="${TURBOPANEL_MANIFEST_URL:-}"
 if [ -n "$MANIFEST_URL" ]; then
-  if ! tp_manifest_url_accepted "$MANIFEST_URL"; then
-    tp_print_error "--manifest-url must be an https:// URL (got $MANIFEST_URL)"
+  if ! tp_release_manifest_url_ok daemon "$MANIFEST_URL"; then
+    tp_print_error "--manifest-url must be a TurboPanel daemon release manifest (dl.trbp.nl/channels/… or github.com/TurboPanel/turbopaneld/releases/…; got $MANIFEST_URL)"
     exit 1
   fi
   if [ -n "$DL_BASE" ]; then
@@ -1782,16 +1836,16 @@ fi
 # --instance run also reinstalls.
 [ -n "$INSTANCE_MANIFEST_URL" ] || INSTANCE_MANIFEST_URL="${TURBOPANEL_INSTANCE_MANIFEST_URL:-}"
 if [ -n "$INSTANCE_MANIFEST_URL" ]; then
-  if ! tp_manifest_url_accepted "$INSTANCE_MANIFEST_URL"; then
-    tp_print_error "--instance-manifest-url must be an https:// URL (got $INSTANCE_MANIFEST_URL)"
+  if ! tp_release_manifest_url_ok instance "$INSTANCE_MANIFEST_URL"; then
+    tp_print_error "--instance-manifest-url must be a TurboPanel control-plane release manifest (github.com/TurboPanel/turbopanel/releases/…; got $INSTANCE_MANIFEST_URL)"
     exit 1
   fi
   export TURBOPANEL_INSTANCE_MANIFEST_URL="$INSTANCE_MANIFEST_URL"
 fi
 [ -n "$UI_MANIFEST_URL" ] || UI_MANIFEST_URL="${TURBOPANEL_UI_MANIFEST_URL:-}"
 if [ -n "$UI_MANIFEST_URL" ]; then
-  if ! tp_manifest_url_accepted "$UI_MANIFEST_URL"; then
-    tp_print_error "--ui-manifest-url must be an https:// URL (got $UI_MANIFEST_URL)"
+  if ! tp_release_manifest_url_ok ui "$UI_MANIFEST_URL"; then
+    tp_print_error "--ui-manifest-url must be a TurboPanel UI release manifest (github.com/TurboPanel/ui/releases/…; got $UI_MANIFEST_URL)"
     exit 1
   fi
   export TURBOPANEL_UI_MANIFEST_URL="$UI_MANIFEST_URL"

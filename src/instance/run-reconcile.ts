@@ -9,6 +9,8 @@ import { verifyManifestSignature } from "../update/signing.ts";
 import {
   builtinChannelManifestUrl,
   pinnedChannelManifestUrl,
+  type ReleaseArtifactKind,
+  releaseManifestUrlAllowed,
 } from "../update/urls.ts";
 import { parseTurbopanelStageLine } from "./update-progress-reporter.ts";
 import {
@@ -65,6 +67,25 @@ export class UpdatePreflightError extends Error {
     this.name = "UpdatePreflightError";
     this.code = code;
   }
+}
+
+/**
+ * Refuse a manifest URL that is not on `kind`'s release rail
+ * ({@link releaseManifestUrlAllowed}) before it reaches a fetch or the root
+ * helper. tp-orchestrate and run.sh apply the same rule again as root.
+ */
+export function assertReleaseManifestUrl(
+  kind: ReleaseArtifactKind,
+  url: string,
+  label: string,
+): void {
+  if (releaseManifestUrlAllowed(kind, url)) return;
+  throw new UpdatePreflightError(
+    "preflight_manifest",
+    `refusing ${label} ${
+      JSON.stringify(url)
+    }: not a TurboPanel ${kind} release rail`,
+  );
 }
 
 type StatfsProbe = (
@@ -435,6 +456,7 @@ export function rootHelperReconcileInvocation(
   }
   const pinned = options.manifestUrl?.trim();
   if (pinned && !flags.includes("--manifest-url")) {
+    assertReleaseManifestUrl("daemon", pinned, "--manifest-url");
     flags.push("--manifest-url", pinned);
   }
   if (!flags.includes("--progress-markers")) {
@@ -664,9 +686,15 @@ export function rootHelperInstanceUpdateInvocation(
 ): { bin: string; args: string[] } {
   const flags = ["--channel", options.channel];
   const pinned = options.manifestUrl?.trim();
-  if (pinned) flags.push("--manifest-url", pinned);
+  if (pinned) {
+    assertReleaseManifestUrl("instance", pinned, "--manifest-url");
+    flags.push("--manifest-url", pinned);
+  }
   const uiPinned = options.uiManifestUrl?.trim();
-  if (uiPinned) flags.push("--ui-manifest-url", uiPinned);
+  if (uiPinned) {
+    assertReleaseManifestUrl("ui", uiPinned, "--ui-manifest-url");
+    flags.push("--ui-manifest-url", uiPinned);
+  }
   flags.push("--no-start");
   return {
     bin: "sudo",
@@ -879,8 +907,11 @@ export async function assertControlPlaneManifestPreflight(options: {
   fetchText?: InstanceUpdateHooks["fetchText"];
 }): Promise<VerifiedPackageManifest> {
   const fetchText = options.fetchText ?? defaultFetchManifestText;
-  const url = options.manifestUrl?.trim() ||
-    builtinChannelManifestUrl(options.channel, "instance");
+  const pinned = options.manifestUrl?.trim();
+  if (pinned) assertReleaseManifestUrl("instance", pinned, "manifestUrl");
+  const uiUrl = options.uiManifestUrl?.trim();
+  if (uiUrl) assertReleaseManifestUrl("ui", uiUrl, "uiManifestUrl");
+  const url = pinned || builtinChannelManifestUrl(options.channel, "instance");
   if (!url) {
     throw new UpdatePreflightError(
       "preflight_manifest",
@@ -910,7 +941,6 @@ export async function assertControlPlaneManifestPreflight(options: {
       `signed manifest version ${version} does not match targetVersion ${options.targetVersion}`,
     );
   }
-  const uiUrl = options.uiManifestUrl?.trim();
   if (uiUrl) {
     await fetchVerifiedManifest(uiUrl, "ui", fetchText);
   }

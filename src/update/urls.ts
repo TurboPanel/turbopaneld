@@ -111,6 +111,56 @@ export function pinnedChannelManifestUrl(
   }
 }
 
+/**
+ * Every character a release-rail manifest URL may carry after `https://`.
+ * No `%` (no percent-encoded dot segments or slashes), no `@` / `:` (no
+ * userinfo, no port), no `?` / `#`, no `\`, no whitespace or controls.
+ */
+const RELEASE_MANIFEST_URL_CHARS = /^[A-Za-z0-9._~/+-]+$/;
+const RELEASE_MANIFEST_FILE = /^manifest(?:-[A-Za-z0-9._~+-]+)?\.json$/;
+const RELEASE_CDN_HOST = new URL(DL_BASE_URL).host;
+
+/**
+ * Whether `url` names a manifest on the release rail for `kind`, checked on
+ * the raw string before anything parses or normalises it:
+ *
+ * - daemon: `https://dl.trbp.nl/channels/<channel>/manifest*.json`, or the
+ *   turbopaneld GitHub rail;
+ * - every kind: `https://github.com/TurboPanel/<repo>/releases/download/<tag>/manifest*.json`
+ *   or `…/releases/latest/download/manifest*.json`, `<repo>` fixed by kind.
+ *
+ * Exact host, no empty / `.` / `..` segment, closed character set. A URL
+ * that a client would normalise onto another path can therefore never match.
+ * scripts/run.sh and orchestration/scripts/tp-orchestrate carry the same
+ * rule as `tp_release_manifest_url_ok`; src/testing/release-manifest-url-corpus.json
+ * pins all three together.
+ */
+export function releaseManifestUrlAllowed(kind: string, url: string): boolean {
+  if (kind !== "daemon" && kind !== "instance" && kind !== "ui") return false;
+  if (!url.startsWith("https://")) return false;
+  const rest = url.slice("https://".length);
+  if (!RELEASE_MANIFEST_URL_CHARS.test(rest)) return false;
+  const slash = rest.indexOf("/");
+  if (slash <= 0) return false;
+  const host = rest.slice(0, slash);
+  const segments = rest.slice(slash + 1).split("/");
+  if (segments.some((s) => s === "" || s === "." || s === "..")) return false;
+  if (!RELEASE_MANIFEST_FILE.test(segments[segments.length - 1])) return false;
+  if (host === RELEASE_CDN_HOST) {
+    return kind === "daemon" && segments.length === 3 &&
+      segments[0] === "channels";
+  }
+  if (host !== "github.com" || segments.length !== 6) return false;
+  const [owner, repo] = githubReleasesRepo(kind).split("/");
+  if (
+    segments[0] !== owner || segments[1] !== repo || segments[2] !== "releases"
+  ) {
+    return false;
+  }
+  return segments[3] === "download" ||
+    (segments[3] === "latest" && segments[4] === "download");
+}
+
 /** Env var that pins one artifact kind to an exact manifest. Independent per kind. */
 export function pinnedManifestEnvName(
   kind: ReleaseArtifactKind = "daemon",
@@ -163,6 +213,9 @@ export function resolveDlBase(
  * The control plane and the UI have their own pins
  * (`TURBOPANEL_INSTANCE_MANIFEST_URL`, `TURBOPANEL_UI_MANIFEST_URL`) so a
  * canary host can hold each package on a different build.
+ *
+ * A pin off that kind's release rail ({@link releaseManifestUrlAllowed}) is
+ * ignored, the same as an unset one.
  */
 export function resolvePinnedManifestUrl(
   env: Record<string, string | undefined> = Deno.env.toObject(),
@@ -170,11 +223,7 @@ export function resolvePinnedManifestUrl(
 ): string | null {
   const pinned = env[pinnedManifestEnvName(kind)]?.trim();
   if (!pinned) return null;
-  try {
-    return new URL(pinned).protocol === "https:" ? pinned : null;
-  } catch {
-    return null;
-  }
+  return releaseManifestUrlAllowed(kind, pinned) ? pinned : null;
 }
 
 /**

@@ -663,6 +663,21 @@ Six controls, each with a test that fails the build when it regresses:
   built-in rail and `TURBOPANEL_MANIFEST_URL` pins always verify. Instance/UI
   repo manifests (`--instance` installs) are verified when signed and reported
   loudly when not — their release jobs do not sign yet.
+- **Release-rail manifest URLs** — every manifest pin (run.sh
+  `--manifest-url` / `--instance-manifest-url` / `--ui-manifest-url` and
+  their env vars, tp-orchestrate `update` / `update-instance`, the
+  `manifestUrl` / `uiManifestUrl` on a cell message, and the env pins
+  `resolvePinnedManifestUrl` reads) must name that package's own rail:
+  `https://dl.trbp.nl/channels/<channel>/manifest*.json` (daemon only) or
+  `https://github.com/TurboPanel/<repo>/releases/{download/<tag>,latest/download}/manifest*.json`.
+  The check runs on the raw string — exact host, no `%`/`@`/`:`/`?`/`#`/`\`/
+  whitespace, no empty/`.`/`..` segment — so nothing a client would
+  normalise onto another path can pass, and run.sh fetches pins with
+  `curl --path-as-is`. The rule exists three times: `tp_release_manifest_url_ok`
+  (byte-identical in run.sh and tp-orchestrate) and `releaseManifestUrlAllowed`
+  (`src/update/urls.ts`). `src/update/release-manifest-url-policy.test.ts`
+  runs all three over `src/testing/release-manifest-url-corpus.json`
+  (hostile and legitimate shapes); add a case there when a rail changes.
 - **Automatic-update TLS** — `resolveAutomaticUpdateTrust`
   (`src/instance/run-reconcile.ts`): public trust or the
   configured Platform CA file; otherwise `UpdateTrustRepairError` naming

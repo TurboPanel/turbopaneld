@@ -95,6 +95,7 @@ import {
 } from "../update/errors.ts";
 import { resolveUpdate } from "../update/resolver.ts";
 import {
+  assertReleaseManifestUrl,
   assertUpdateDiskPreflight,
   buildRunReconcileArgs,
   ControlPlaneUpdateFailedError,
@@ -2068,6 +2069,9 @@ export class InstanceClient {
       const messageManifest = resolvePinnedManifestUrl(env, "daemon")
         ? undefined
         : message.manifestUrl?.trim() || undefined;
+      if (messageManifest) {
+        assertReleaseManifestUrl("daemon", messageManifest, "manifestUrl");
+      }
       const resolveEnv = messageManifest
         ? { ...env, TURBOPANEL_MANIFEST_URL: messageManifest }
         : env;
@@ -2212,12 +2216,17 @@ export class InstanceClient {
       // An env pin holds a package. A panel click must not replace it with
       // the floating channel URL. The message supplies the pin only when
       // the host has none.
+      const messageInstancePin = message.manifestUrl?.trim() || undefined;
+      const messageUiPin = message.uiManifestUrl?.trim() || undefined;
+      if (messageInstancePin) {
+        assertReleaseManifestUrl("instance", messageInstancePin, "manifestUrl");
+      }
+      if (messageUiPin) {
+        assertReleaseManifestUrl("ui", messageUiPin, "uiManifestUrl");
+      }
       const instancePin = resolvePinnedManifestUrl(env, "instance") ||
-        message.manifestUrl?.trim() ||
-        undefined;
-      const uiPin = resolvePinnedManifestUrl(env, "ui") ||
-        message.uiManifestUrl?.trim() ||
-        undefined;
+        messageInstancePin;
+      const uiPin = resolvePinnedManifestUrl(env, "ui") || messageUiPin;
       await this.#wireUpdateProgress(ws, message.id, {
         upgradeId,
         targetCommit: message.targetCommit?.trim() || undefined,
