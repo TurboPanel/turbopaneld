@@ -95,12 +95,29 @@ test("ensureSystemPrincipals fresh create without ids uses group name and omits 
   );
   assertEquals(groupProbe?.args, ["group", "appuser-grp"]);
 
+  const groupadd = calls.find((c) =>
+    c.command === "sudo" && c.args.includes("groupadd")
+  );
+  assertEquals(groupadd?.args, [
+    "-n",
+    "groupadd",
+    "-K",
+    "GID_MIN=15001",
+    "-K",
+    "GID_MAX=60000",
+    "appuser-grp",
+  ]);
+
   const useradd = calls.find((c) =>
     c.command === "sudo" && c.args.includes("useradd")
   );
   assertEquals(useradd?.args, [
     "-n",
     "useradd",
+    "-K",
+    "UID_MIN=15001",
+    "-K",
+    "UID_MAX=60000",
     "-g",
     "appuser-grp",
     "-d",
@@ -127,8 +144,8 @@ test("ensureSystemPrincipals fresh create with explicit uid/gid passes -u and gr
   const { run, calls } = captureRun({});
   await ensureSystemPrincipals(stubLayout(), [{
     ...baseSpec,
-    uid: 10001,
-    gid: 10001,
+    uid: 15001,
+    gid: 15001,
     home: defaultHome,
     shell: "/bin/bash",
   }], run);
@@ -140,7 +157,7 @@ test("ensureSystemPrincipals fresh create with explicit uid/gid passes -u and gr
     "-n",
     "groupadd",
     "-g",
-    "10001",
+    "15001",
     "appuser-grp",
   ]);
 
@@ -151,7 +168,7 @@ test("ensureSystemPrincipals fresh create with explicit uid/gid passes -u and gr
     "-n",
     "useradd",
     "-u",
-    "10001",
+    "15001",
     "-g",
     "appuser-grp",
     "-d",
@@ -161,6 +178,64 @@ test("ensureSystemPrincipals fresh create with explicit uid/gid passes -u and gr
     "/bin/bash",
     "appuser",
   ]);
+});
+
+test("ensureSystemPrincipals rejects an override below 15001 with no host calls", async () => {
+  const uidRun = captureRun({});
+  await assertRejects(
+    () =>
+      ensureSystemPrincipals(stubLayout(), [{
+        ...baseSpec,
+        uid: 10001,
+        gid: 15001,
+        home: defaultHome,
+      }], uidRun.run),
+    TypeError,
+    "Principal uid override must be >= 15001",
+  );
+  assertEquals(uidRun.calls, []);
+
+  const gidRun = captureRun({});
+  await assertRejects(
+    () =>
+      ensureSystemPrincipals(stubLayout(), [{
+        ...baseSpec,
+        uid: 15001,
+        gid: 10001,
+        home: defaultHome,
+      }], gidRun.run),
+    TypeError,
+    "Principal gid override must be >= 15001",
+  );
+  assertEquals(gidRun.calls, []);
+});
+
+test("ensureSystemPrincipals rejects a later override below 15001 before any host call", async () => {
+  // A valid account followed by one below the floor must fail the whole
+  // batch before the first host call. Checking inside the mutation loop
+  // would create the first account and then throw.
+  const { run, calls } = captureRun({});
+  await assertRejects(
+    () =>
+      ensureSystemPrincipals(stubLayout(), [
+        {
+          ...baseSpec,
+          uid: 15001,
+          gid: 15001,
+          home: defaultHome,
+        },
+        {
+          principalId: "01936b3e-aaaa-bbbb-cccc-123456789abd",
+          username: "otheruser",
+          uid: 10001,
+          gid: 15002,
+          home: "/srv/users/otheruser",
+        },
+      ], run),
+    TypeError,
+    "Principal uid override must be >= 15001",
+  );
+  assertEquals(calls, []);
 });
 
 test("ensureSystemPrincipals adopts matching home and reconciles shell only", async () => {
@@ -258,7 +333,7 @@ test("ensureSystemPrincipals rejects existing username with mismatched uid overr
     () =>
       ensureSystemPrincipals(stubLayout(), [{
         ...baseSpec,
-        uid: 10001,
+        uid: 15001,
         home: defaultHome,
         shell: "/bin/bash",
       }], run),
@@ -281,11 +356,11 @@ test("ensureSystemPrincipals rejects existing username with mismatched uid overr
 
 test("ensureSystemPrincipals adopts existing group when gid override matches", async () => {
   const { run, calls } = captureRun({
-    getentGroup: { success: true, stdout: "appuser-grp:x:10001:", stderr: "" },
+    getentGroup: { success: true, stdout: "appuser-grp:x:15001:", stderr: "" },
   });
   await ensureSystemPrincipals(stubLayout(), [{
     ...baseSpec,
-    gid: 10001,
+    gid: 15001,
     home: defaultHome,
     shell: "/bin/bash",
   }], run);
@@ -300,6 +375,10 @@ test("ensureSystemPrincipals adopts existing group when gid override matches", a
   assertEquals(useradd?.args, [
     "-n",
     "useradd",
+    "-K",
+    "UID_MIN=15001",
+    "-K",
+    "UID_MAX=60000",
     "-g",
     "appuser-grp",
     "-d",
@@ -319,12 +398,12 @@ test("ensureSystemPrincipals rejects existing group with mismatched gid override
     () =>
       ensureSystemPrincipals(stubLayout(), [{
         ...baseSpec,
-        gid: 10001,
+        gid: 15001,
         home: defaultHome,
         shell: "/bin/bash",
       }], run),
     Error,
-    "Principal group appuser-grp already exists with gid=33; expected gid=10001",
+    "Principal group appuser-grp already exists with gid=33; expected gid=15001",
   );
   assertEquals(
     calls.some((c) => c.command === "sudo" && c.args.includes("useradd")),
@@ -503,7 +582,7 @@ test("ensureSystemPrincipals fails when group entry cannot be parsed with gid ov
     () =>
       ensureSystemPrincipals(stubLayout(), [{
         ...baseSpec,
-        gid: 2000,
+        gid: 15001,
         home: defaultHome,
       }], run),
     Error,
@@ -1137,10 +1216,10 @@ test("ensureSystemPrincipals drops an unknown runtime instead of failing", async
 
 test("ensureSystemPrincipals rejects existing username with mismatched gid override", async () => {
   const { run } = captureRun({
-    getentGroup: { success: true, stdout: "appuser-grp:x:10001:", stderr: "" },
+    getentGroup: { success: true, stdout: "appuser-grp:x:15001:", stderr: "" },
     getentPasswd: {
       success: true,
-      stdout: `appuser:x:10001:33::${defaultHome}:/usr/sbin/nologin`,
+      stdout: `appuser:x:15001:33::${defaultHome}:/usr/sbin/nologin`,
       stderr: "",
     },
   });
@@ -1148,12 +1227,12 @@ test("ensureSystemPrincipals rejects existing username with mismatched gid overr
     () =>
       ensureSystemPrincipals(stubLayout(), [{
         ...baseSpec,
-        uid: 10001,
-        gid: 10001,
+        uid: 15001,
+        gid: 15001,
         home: defaultHome,
       }], run),
     Error,
-    "already exists with uid=10001 gid=33",
+    "already exists with uid=15001 gid=33",
   );
 });
 

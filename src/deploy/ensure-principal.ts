@@ -12,8 +12,10 @@ export type PrincipalEnsureSpec = {
   principalId: string;
   username: string;
   /**
-   * Numeric id overrides. Omitted means "let `useradd` allocate", which is what
-   * every account gets today.
+   * Numeric id overrides. Omitted means the host picks an id in
+   * [{@link PRINCIPAL_ID_MIN}, {@link PRINCIPAL_ID_MAX}] via `-K` on that one
+   * `useradd` / `groupadd`. An explicit value must be ≥ {@link PRINCIPAL_ID_MIN}.
+   * Existing accounts are adopted and never renumbered.
    *
    * This pair is also the seam a **stable, control-plane-allocated** id will
    * arrive through when shared POSIX storage spans hosts: a tree written as
@@ -71,6 +73,16 @@ export type PrincipalEnsureSpec = {
 };
 
 export const DEFAULT_PRINCIPAL_SHELL = "/usr/sbin/nologin";
+
+/**
+ * Inclusive range for a host-picked principal uid/gid, passed as `-K` on that
+ * one `useradd` / `groupadd`. An explicit operator override must be ≥
+ * {@link PRINCIPAL_ID_MIN}. `-K` does not edit `/etc/login.defs`.
+ *
+ * Keep in step with `PRINCIPAL_UID_START` in `turbopanel/src/lib/naming.ts`.
+ */
+export const PRINCIPAL_ID_MIN = 15001;
+export const PRINCIPAL_ID_MAX = 60000;
 
 /**
  * Shells a principal may be given. The daemon re-validates rather than trusting
@@ -316,6 +328,14 @@ async function ensurePrincipalGroup(
   const args = ["-n", "groupadd"];
   if (principal.gid !== undefined) {
     args.push("-g", String(principal.gid));
+  } else {
+    // `-K` overrides login.defs for this command only.
+    args.push(
+      "-K",
+      `GID_MIN=${PRINCIPAL_ID_MIN}`,
+      "-K",
+      `GID_MAX=${PRINCIPAL_ID_MAX}`,
+    );
   }
   args.push(groupName);
   const groupAdd = await runFn("sudo", args);
@@ -336,6 +356,14 @@ async function ensurePrincipalUser(
     const args = ["-n", "useradd"];
     if (principal.uid !== undefined) {
       args.push("-u", String(principal.uid));
+    } else {
+      // `-K` overrides login.defs for this command only.
+      args.push(
+        "-K",
+        `UID_MIN=${PRINCIPAL_ID_MIN}`,
+        "-K",
+        `UID_MAX=${PRINCIPAL_ID_MAX}`,
+      );
     }
     args.push(
       "-g",
@@ -480,11 +508,36 @@ async function ensurePrincipalHomeTree(
   await ensureDir(join(home, "volumes"), "0750", owner, runFn);
 }
 
+/**
+ * Re-check an explicit uid/gid before any host call. Same posture as the
+ * shell allowlist and the password-hash check: the wire is not trusted.
+ * Omitted ids are host-picked and are not rejected here.
+ *
+ * {@link ensureSystemPrincipals} runs this for every principal in the batch
+ * before the first host call, so a later id below {@link PRINCIPAL_ID_MIN}
+ * cannot leave an earlier account already created.
+ */
+function assertPrincipalIdOverrides(principal: PrincipalEnsureSpec): void {
+  if (principal.uid !== undefined && principal.uid < PRINCIPAL_ID_MIN) {
+    throw new TypeError(
+      `Principal uid override must be >= ${PRINCIPAL_ID_MIN}`,
+    );
+  }
+  if (principal.gid !== undefined && principal.gid < PRINCIPAL_ID_MIN) {
+    throw new TypeError(
+      `Principal gid override must be >= ${PRINCIPAL_ID_MIN}`,
+    );
+  }
+}
+
 export async function ensureSystemPrincipals(
   layout: LayoutPaths,
   principals: PrincipalEnsureSpec[],
   runFn: RunFn = runDefault,
 ): Promise<void> {
+  for (const principal of principals) {
+    assertPrincipalIdOverrides(principal);
+  }
   for (const principal of principals) {
     assertSafePrincipalUsername(principal.username);
     const groupName = principalUnixGroupName(principal.username);

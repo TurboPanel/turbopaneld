@@ -98,9 +98,11 @@ override affects **new** backups only — nothing relocates an existing tree —
 and `managed.destroy` still removes an engine's backup directory along with its
 state dir, so destroying an engine never leaves an orphan tree on that storage.
 
-The **host** allocates UID/GID via `useradd`/`groupadd`. The control plane may
-send an optional operator override, which must clear the `tp*` service band
-**9989–9999**. Homes are keyed on the username. Override the home root with
+The **host** allocates UID/GID via `useradd`/`groupadd` from **15001–60000**
+(`-K` on that one command; `/etc/login.defs` is not edited). The control plane
+may send an optional operator override, which must be ≥ **15001** and clear
+the `tp*` service band **9989–9999**. Homes are keyed on the username. Override
+the home root with
 `TURBOPANEL_PRINCIPAL_HOME_ROOT` (`layout.principalHomeRoot`). **Platform CA**
 vs **Organization CA** (two-CA distinction):
 `../turbopanel/src/lib/tls/AGENTS.md`.
