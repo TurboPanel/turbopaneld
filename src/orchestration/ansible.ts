@@ -36,6 +36,7 @@ import {
   readDevForwardHostsFile,
 } from "./dev-forward-hosts.ts";
 import { join } from "@std/path";
+import { isValidHostname } from "../contracts/commands-contracts.ts";
 import { logInfo, logWarn } from "../util/logger.ts";
 import { readDockerNetworkingState } from "../deploy/docker-networking-state.ts";
 import { logComponent } from "./presentation.ts";
@@ -172,7 +173,7 @@ export function devOwnershipPlaybookExtraArgs(
  * toggles come from the structured dev-converge options payload
  * ({@link resolveDevConvergeOptions}) — nothing here reads per-service flags.
  */
-function devInstanceExtraArgs(
+export function devInstanceExtraArgs(
   options: DevConvergeOptions = resolveDevConvergeOptions(),
 ): string[] {
   const uiMode = Deno.env.get("TURBOPANEL_UI_MODE") === "static"
@@ -665,10 +666,22 @@ export async function runSocketDirsSetup(
   logInfo("orchestration", "socket-dirs-setup complete");
 }
 
+/**
+ * `-e` for set-hostname. The name reaches a root-run playbook as a key=value
+ * extra-var, so it is held to RFC 1123 here as well as in tp-orchestrate.
+ */
+export function buildSetHostnameExtraArgs(hostname: string): string[] {
+  if (!isValidHostname(hostname)) {
+    throw new Error(`refusing host name ${JSON.stringify(hostname)}`);
+  }
+  return ["-e", `turbopanel_hostname=${hostname}`];
+}
+
 export async function runSetHostname(
   hostname: string,
   onEvent?: AnsibleEventHandler,
 ): Promise<{ summary: string }> {
+  const extraArgs = buildSetHostnameExtraArgs(hostname);
   logInfo("orchestration", "running set-hostname playbook");
   const collector = new AnsibleRunSummaryCollector();
   const eventHandler: AnsibleEventHandler = (event) => {
@@ -676,11 +689,7 @@ export async function runSetHostname(
     onEvent?.(event);
   };
   try {
-    await runLocalPlaybook(
-      SET_HOSTNAME_PLAYBOOK,
-      ["-e", `turbopanel_hostname=${hostname}`],
-      eventHandler,
-    );
+    await runLocalPlaybook(SET_HOSTNAME_PLAYBOOK, extraArgs, eventHandler);
   } catch {
     const summary = collector.build();
     throw new Error(
@@ -881,24 +890,20 @@ export async function runInstanceDevInstall(
   logInfo("orchestration", "instance-dev-install complete");
 }
 
-/**
- * Switch UI and instance run modes (dev/source ↔ static/compiled).
- */
-export async function runBuildToggle(
+/** `-e` key=value extra-vars for instance-build-toggle. */
+export function buildBuildToggleExtraArgs(
   opts: {
     uiMode: "dev" | "static";
     instanceRunMode: "source" | "compiled";
     forceBuild?: boolean;
   },
-  onEvent?: AnsibleEventHandler,
-): Promise<void> {
-  const instanceRuntime =
-    Deno.env.get("TURBOPANEL_INSTANCE_RUNTIME") === "workers"
-      ? "workers"
-      : "deno";
-
-  const args = [
-    ...devOwnershipPlaybookExtraArgs(),
+  env: Record<string, string | undefined> = Deno.env.toObject(),
+): string[] {
+  const instanceRuntime = env.TURBOPANEL_INSTANCE_RUNTIME === "workers"
+    ? "workers"
+    : "deno";
+  return [
+    ...devOwnershipPlaybookExtraArgs(env),
     "-e",
     `turbopanel_ui_mode=${opts.uiMode}`,
     "-e",
@@ -910,6 +915,20 @@ export async function runBuildToggle(
     "-e",
     `force_compile=${opts.forceBuild ?? false}`,
   ];
+}
+
+/**
+ * Switch UI and instance run modes (dev/source ↔ static/compiled).
+ */
+export async function runBuildToggle(
+  opts: {
+    uiMode: "dev" | "static";
+    instanceRunMode: "source" | "compiled";
+    forceBuild?: boolean;
+  },
+  onEvent?: AnsibleEventHandler,
+): Promise<void> {
+  const args = buildBuildToggleExtraArgs(opts);
 
   logInfo(
     "orchestration",

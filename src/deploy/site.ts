@@ -1821,7 +1821,7 @@ type SiteEngineSet = Set<SiteApplySpec["engine"]>;
  */
 type PhpFpmEngine = "caddy" | "nginx" | "apache";
 
-type SiteEngineNeeds = {
+export type SiteEngineNeeds = {
   caddy: boolean;
   nginx: boolean;
   apache: boolean;
@@ -1838,7 +1838,7 @@ type SiteEngineNeeds = {
   openlitespeedLsphp: boolean;
 };
 
-function resolveSiteEngineNeeds(
+export function resolveSiteEngineNeeds(
   sites: readonly SiteApplySpec[],
 ): SiteEngineNeeds {
   const phpFpmEngines = new Set<PhpFpmEngine>();
@@ -1865,6 +1865,36 @@ function resolveSiteEngineNeeds(
 }
 
 /**
+ * The `-e` JSON object each site-engine apply playbook takes. One JSON object,
+ * not key=value, so the version list stays a list and the extension map a map
+ * (tp-orchestrate accepts these keys in `TP_JSON_EXTRA_VAR_KEYS`).
+ */
+export function siteEngineApplyExtraArgs(
+  engine: "caddy" | "nginx" | "apache" | "openlitespeed",
+  needs: SiteEngineNeeds,
+  phpSeries: readonly string[],
+  phpExtensions: Record<string, string[]>,
+): string[] {
+  if (engine === "openlitespeed") {
+    return [
+      "-e",
+      JSON.stringify({
+        turbopanel_lsphp_install: needs.openlitespeedLsphp,
+        openlitespeed_lsphp_versions: phpSeries,
+      }),
+    ];
+  }
+  return [
+    "-e",
+    JSON.stringify({
+      turbopanel_php_fpm_install: needs.phpFpmEngines.has(engine),
+      php_fpm_versions: phpSeries,
+      php_fpm_extensions: phpExtensions,
+    }),
+  ];
+}
+
+/**
  * `phpSeries` is the distinct set this deploy needs. The role only ever
  * *installs* what it is handed — it must not remove a series it was not asked
  * about, because the host serves many environments and this payload describes
@@ -1875,59 +1905,38 @@ async function installSiteEngines(
   phpSeries: readonly string[],
   phpExtensions: Record<string, string[]>,
 ): Promise<void> {
-  if (needs.caddy) {
-    await runSitePlaybook(
+  const engines = [
+    [
+      needs.caddy,
+      "caddy",
       SITE_CADDY_APPLY_PLAYBOOK,
       "site-caddy-apply (vendor caddy + php-fpm + identity)",
-      [
-        "-e",
-        JSON.stringify({
-          turbopanel_php_fpm_install: needs.phpFpmEngines.has("caddy"),
-          php_fpm_versions: phpSeries,
-          php_fpm_extensions: phpExtensions,
-        }),
-      ],
-    );
-  }
-  if (needs.nginx) {
-    await runSitePlaybook(
+    ],
+    [
+      needs.nginx,
+      "nginx",
       SITE_NGINX_APPLY_PLAYBOOK,
       "site-apply (vendor nginx + php-fpm + identity)",
-      [
-        "-e",
-        JSON.stringify({
-          turbopanel_php_fpm_install: needs.phpFpmEngines.has("nginx"),
-          php_fpm_versions: phpSeries,
-          php_fpm_extensions: phpExtensions,
-        }),
-      ],
-    );
-  }
-  if (needs.apache) {
-    await runSitePlaybook(
+    ],
+    [
+      needs.apache,
+      "apache",
       SITE_APACHE_APPLY_PLAYBOOK,
       "site-apache-apply (vendor httpd + php-fpm + identity)",
-      [
-        "-e",
-        JSON.stringify({
-          turbopanel_php_fpm_install: needs.phpFpmEngines.has("apache"),
-          php_fpm_versions: phpSeries,
-          php_fpm_extensions: phpExtensions,
-        }),
-      ],
-    );
-  }
-  if (needs.openlitespeed) {
-    await runSitePlaybook(
+    ],
+    [
+      needs.openlitespeed,
+      "openlitespeed",
       SITE_OPENLITESPEED_APPLY_PLAYBOOK,
       "site-openlitespeed-apply (vendor + lsphp + identity)",
-      [
-        "-e",
-        JSON.stringify({
-          turbopanel_lsphp_install: needs.openlitespeedLsphp,
-          openlitespeed_lsphp_versions: phpSeries,
-        }),
-      ],
+    ],
+  ] as const;
+  for (const [needed, engine, playbook, label] of engines) {
+    if (!needed) continue;
+    await runSitePlaybook(
+      playbook,
+      label,
+      siteEngineApplyExtraArgs(engine, needs, phpSeries, phpExtensions),
     );
   }
 }
