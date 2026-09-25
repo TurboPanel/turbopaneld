@@ -736,7 +736,7 @@ in `daemon.env`, `/etc/sudoers.d/turbopanel-dev-nopasswd`,
 that runs `main.ts`. The message points at `~/dev/console` → Developer →
 **Reset development environment** / **Purge completely**.
 
-Three maintenance rules:
+Four maintenance rules:
 
 1. A new host file that lives outside the FHS folders this script already
    deletes must use a `turbopanel-*` or `tp*` name the scan already matches,
@@ -750,6 +750,9 @@ Three maintenance rules:
    or the `php*` / `debsuryorg-archive-keyring` scan). A repository file has
    to be named there too, unless the Docker `download.docker.com` scan or the
    `sury-php.sources` / `sury-php.list` removal already matches it.
+4. A new folder the script must delete has to sit inside a tree listed in
+   `TP_OWNED_TREES` (or be a `turbopanel*` unit drop-in), or be added to that
+   list. `tp_path_is_safe` refuses everything else.
 
 Option 1 stops at the remove-only steps. Option 2 runs those same steps,
 then `tp_purge_hosted_data`. Detection still only changes labels; purge runs
@@ -762,12 +765,44 @@ outside the trees purge deletes. `--dry-run` does not write either file.
 resumes purge when only apt packages or Docker data are left. Docker being
 installed is not, by itself, a TurboPanel install. The manifest is loaded
 from `tp_discover_paths` and restores discovered config, state, log, run,
-backup, and principal-root paths, including overrides such as a custom
-backup directory. Both files are removed only after purge finishes with no
-recorded failures. Commands go through `tp_run`, so `--dry-run` logs them and
-does not run them. Folder deletion uses `tp_safe_rm_tree` (unsafe paths,
-symlink-only unlink, mount contents cleared and the mount kept). There is one
-copy of that function.
+backup, and principal-root paths. Both files are removed once purge finishes
+and every recorded failure is benign (`tp_record_benign_fail`: a failed
+`apt-get update`, or a Docker data root no rerun could find); any other
+failure keeps them for the rerun. Commands go through `tp_run`, so
+`--dry-run` logs them and does not run them.
+
+**Path safety is an allowlist.** `tp_path_is_safe` resolves the parent's
+symlinks (`realpath -m`), keeps the leaf as written, refuses `.` / `..`
+segments and whitespace, and accepts only paths inside `TP_OWNED_TREES` or a
+`turbopanel*` entry under a systemd unit directory. A folder discovered
+outside those trees — a custom backup directory, principal root, or Docker
+data root, from `daemon.env`, a unit, or the resume manifest — is never
+deleted, and a principal root outside them is never used to pick accounts
+for `userdel`: `daemon.env` is writable by the daemon account, so it must not
+widen what root deletes. Such folders are listed as "Configured outside
+TurboPanel's folders (kept)" in the report and the summary. Folder deletion
+uses `tp_safe_rm_tree` (allowlist, symlink-only unlink, mount contents cleared
+and the mount kept). There is one copy of that function. A Docker apt
+`Signed-By` keyring is only removed when it is a file directly in
+`/etc/apt/keyrings`, `/usr/share/keyrings`, or `/etc/apt/trusted.gpg.d`.
+
+**Shell startup files** (`.bashrc` and friends) are scanned in root's home
+and in every UID ≥ 1000 home except principal homes (those are purged whole
+by option 2 and untouched by option 1). A symlinked file is left alone. The
+backup and the strip run as the owner of the directory holding the file
+(`setpriv --reuid/--regid --clear-groups`), never as root: that owner controls
+every name there, so a planted `.bak`, temp name, or swapped file could
+otherwise turn root's write into an overwrite of `/etc/passwd`. An existing
+backup is never reused; a second one gets a `mktemp` suffix. A file not owned
+by its directory's owner, or a host without `setpriv`, is skipped and
+reported.
+
+**Tests:** `scripts/uninstall.test.ts` lifts the functions and constants out
+of the real script and runs them as a normal user against temp directories
+(planted `.bak` symlink, principal homes, path allowlist and symlink escape,
+custom folders kept, benign-failure marker rule, shared packages, firewall
+warning). CI also runs `shellcheck -s sh scripts/uninstall.sh`
+(`verify.yml`); an inline `shellcheck disable` needs a reason.
 
 Purge order:
 
@@ -792,10 +827,10 @@ Purge order:
    root (`docker info` while the daemon responds, otherwise `data-root` in
    `/etc/docker/daemon.json`, otherwise `--data-root` on the docker unit).
    The Docker role preserves operator keys in `daemon.json`, including
-   `data-root`. A nondefault root is shown in the confirmation report and
-   removed with `tp_safe_rm_tree` after the same path-safety checks. If it
-   cannot be determined or removed, the summary says so; a root that was
-   determined is kept in the resume manifest. Stop `docker.socket`, `docker`,
+   `data-root`. A nondefault root is shown in the confirmation report; it is
+   removed only when it lies inside `TP_OWNED_TREES`, and otherwise listed as
+   kept. If it cannot be determined, the summary says so (a benign failure);
+   a root that was determined is kept in the resume manifest. Stop `docker.socket`, `docker`,
    and `containerd`. `apt-get purge` the installed Docker packages (Docker's
    own set and Debian's `docker.io` / `docker-compose` / `containerd` /
    `runc`). Remove `/var/lib/docker`, `/var/lib/containerd`, the nondefault
@@ -812,13 +847,12 @@ Purge order:
    `daemon-prereqs` (plus `apt-transport-https`), the Apache build
    dependencies, installed `php*` packages, and
    `debsuryorg-archive-keyring`. Keep only installed packages. Drop anything
-   Essential or priority `required` (this skips `tar`). Drop `ca-certificates`
-   and `openssl` when any remaining apt source uses `https://`. `--dry-run`
-   evaluates that check against the sources that will still exist after the
-   Docker and sury repository files are removed, so those packages are not
-   kept only because the files are still on disk. Installed `sudo`,
-   `systemd-timesyncd`, and `curl` are added to the kept set and marked
-   manual before `autoremove`; the purge summary names that protection.
+   Essential or priority `required` (this skips `tar`). `sudo`,
+   `systemd-timesyncd`, `curl`, `ca-certificates`, and `openssl` are never
+   removed; `git`, `gnupg`, and `iptables` are kept too, because they are
+   common before TurboPanel and nothing records that the installer added
+   them. All of these are added to the kept set and marked manual before
+   `autoremove`; the purge summary names that protection.
    `autoremove` is skipped if they cannot be marked manual, so it cannot
    remove them. The time-sync role installs `systemd-timesyncd`;
    `/etc/systemd/timesyncd.conf` stays as TurboPanel wrote it. `curl` is
@@ -830,6 +864,10 @@ Purge order:
    so the following `autoremove` does not undo that decision. Then `apt-get
    purge -y` the final list and `apt-get autoremove --purge -y`.
 
+Both options warn, on the confirmation screen and in the summary, that no
+inbound firewall remains: `ufw` / `firewalld` were purged at install and the
+script removes TurboPanel's own `TP-*` rules.
+
 The summary adds, on top of the remove-only skipped steps and the "could not
 remove" list from the second scan: hosted data that is still present
 (config, state, log, run, and backup paths, principal roots and homes, and
@@ -839,8 +877,7 @@ kept and why, including `sudo` and `systemd-timesyncd` when they were marked
 manual; a warning that sury-provided library versions stay installed (the
 php-fpm role treats that repo as permanent while PHP remains — purge removes
 the repo and the `php*` packages, and does not downgrade the libraries sury
-replaced); that `ufw` / `firewalld` were removed at install and are not
-restored; that `/etc/systemd/timesyncd.conf` is left as written; a reboot so
+replaced); that `/etc/systemd/timesyncd.conf` is left as written; a reboot so
 leftover kernel state (bridges, NAT rules) is cleared; and the commands to
 install a daemon or a self-hosted control plane again.
 
