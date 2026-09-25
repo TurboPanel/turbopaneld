@@ -976,6 +976,10 @@ test("issuer unit is installed without capabilities or an install target", async
   assertEquals(text.includes("CAP_"), false);
   assertStringIncludes(
     text,
+    "WorkingDirectory=-{{ turbopanel_state_dir }}/instance-acme",
+  );
+  assertStringIncludes(
+    text,
     "XDG_DATA_HOME={{ turbopanel_state_dir }}/instance-acme",
   );
   assertStringIncludes(text, "instance-acme.json");
