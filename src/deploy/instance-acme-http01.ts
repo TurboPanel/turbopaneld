@@ -96,6 +96,13 @@ export const INSTANCE_ACME_HTTP01_PREFLIGHT_PREFIX =
 const CHALLENGE_PREFIX = "/.well-known/acme-challenge/";
 const PREFLIGHT_TIMEOUT_MS = 8_000;
 const POLL_MS = 500;
+/**
+ * `Type=simple` reports hosting Caddy active as soon as `caddy run` is
+ * forked. `:80` (and admin `:2029`) bind a few milliseconds later. Bounded
+ * by attempts so an injected `sleep` keeps tests instant.
+ */
+const HOSTING_CADDY_READY_ATTEMPTS = 20;
+const HOSTING_CADDY_READY_INTERVAL_MS = 50;
 
 export function isDaemonReservedHostingSite(name: string): boolean {
   return DAEMON_RESERVED_HOSTING_SITES.has(name);
@@ -259,11 +266,13 @@ export async function openInstanceAcmeWindow(
     run?: InstanceAcmeCommand;
     ensureHostingCaddyRuntime?: (layout: LayoutPaths) => Promise<void>;
     inspect?: () => Promise<Port80Holder>;
+    sleep?: (ms: number) => Promise<void>;
   } = {},
 ): Promise<void> {
   const run = deps.run ?? defaultCommand;
   const inspect = deps.inspect ?? (() => inspectPort80(run));
   const ensure = deps.ensureHostingCaddyRuntime ?? ensureHostingCaddy;
+  const sleepFn = deps.sleep ?? delay;
   const dest = join(hostingSitesDir(layout), INSTANCE_ACME_HTTP01_SITE);
   let startedRuntime = false;
   let wroteSite = false;
@@ -272,19 +281,22 @@ export async function openInstanceAcmeWindow(
     if (holder.kind === "other") {
       throw new Error(port80HeldMessage(holder.process));
     }
-    if (holder.kind !== "hosting-caddy") {
-      startedRuntime = true;
-      await ensure(layout);
-    }
-    // Site blocks define :80 listeners; verify only after the ACME snippet exists.
+    // Write before start: the unit is Type=simple, so enable --now returns
+    // before admin :2029 exists. ExecReload then fails with connection
+    // refused. A first start must load this snippet as the initial config.
     wroteSite = true;
     await writeTextPrivileged(
       dest,
       renderInstanceAcmeHttp01Site(hosts, instanceAcmeSocketPath(layout)),
       run,
     );
-    await reloadHostingCaddy(run);
-    const after = await inspect();
+    startedRuntime = await activateHostingCaddyForWindow(
+      holder,
+      layout,
+      ensure,
+      run,
+    );
+    const after = await waitForHostingCaddyOn80(inspect, sleepFn);
     if (after.kind === "other") {
       throw new Error(port80HeldMessage(after.process));
     }
@@ -295,6 +307,35 @@ export async function openInstanceAcmeWindow(
     await rollbackOpenedWindow(dest, startedRuntime, wroteSite, run);
     throw err;
   }
+}
+
+async function activateHostingCaddyForWindow(
+  holder: Port80Holder,
+  layout: LayoutPaths,
+  ensure: (layout: LayoutPaths) => Promise<void>,
+  run: InstanceAcmeCommand,
+): Promise<boolean> {
+  if (holder.kind === "hosting-caddy") {
+    await reloadHostingCaddy(run);
+    return false;
+  }
+  await ensure(layout);
+  return true;
+}
+
+async function waitForHostingCaddyOn80(
+  inspect: () => Promise<Port80Holder>,
+  sleepFn: (ms: number) => Promise<void>,
+): Promise<Port80Holder> {
+  let last: Port80Holder = { kind: "free" };
+  for (let attempt = 0; attempt < HOSTING_CADDY_READY_ATTEMPTS; attempt++) {
+    last = await inspect();
+    if (last.kind !== "free") return last;
+    if (attempt < HOSTING_CADDY_READY_ATTEMPTS - 1) {
+      await sleepFn(HOSTING_CADDY_READY_INTERVAL_MS);
+    }
+  }
+  return last;
 }
 
 async function rollbackOpenedWindow(
