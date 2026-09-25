@@ -50,9 +50,8 @@ Environment=TURBOPANEL_REDIS_SOCKET={{ redis_socket_path }}
 Environment=TURBOPANEL_DEV_USER={{ turbopanel_dev_user }}
 {% endif %}
 {% if turbopanel_dev_user | length > 0 and (turbopanel_instance_runtime | default('deno')) == 'deno' %}
-Environment=TURBOPANEL_SYSTEM_EMAIL__PROVIDER=smtp
-Environment=TURBOPANEL_SYSTEM_EMAIL__SMTP_HOST=127.0.0.1
-Environment=TURBOPANEL_SYSTEM_EMAIL__SMTP_PORT={{ mailpit_smtp_port | default(1025) }}
+Environment=TURBOPANEL_SYSTEM_EMAIL__PROVIDER=mailpit-smtp
+Environment=TURBOPANEL_SYSTEM_EMAIL__MAILPIT_SMTP_PORT={{ mailpit_smtp_port | default(1025) }}
 {% endif %}
 Environment=TURBOPANEL_DAEMON_STATE_DIR={{ turbopanel_daemon_state_dir }}
 Environment=TURBOPANEL_METRICS_DIR={{ turbopanel_metrics_dir }}
