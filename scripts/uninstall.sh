@@ -110,6 +110,18 @@ tp_record_fail() {
   tp_log_line "FAIL: $1"
 }
 
+# Mark the failure just recorded as one that leaves no purge work undone: an
+# `apt-get update` that failed, or a Docker data root no rerun could find.
+tp_record_benign_fail() {
+  TP_BENIGN_FAIL_COUNT=$((TP_BENIGN_FAIL_COUNT + 1))
+}
+
+# The purge marker only exists to finish deletions. Once every failure left is
+# benign, a rerun has nothing to resume, so the marker must not outlive it.
+tp_resume_clearable() {
+  [ "$TP_FAIL_COUNT" -eq "$TP_BENIGN_FAIL_COUNT" ]
+}
+
 tp_record_skip() {
   tp_print_warn "SKIPPED: $1"
   if [ -n "${TP_TMP:-}" ]; then
@@ -245,7 +257,47 @@ tp_normalize_path() {
   printf '%s' "$_np"
 }
 
-# Same refusals as tp_safe_rm_tree: empty, relative, "..", and filesystem roots.
+# The parent with every symlink resolved, plus the leaf as written. The leaf is
+# not followed: tp_safe_rm_tree unlinks a symlinked leaf and keeps its target.
+tp_resolve_parent_path() {
+  _rpp_dir=$(dirname "$1")
+  _rpp_leaf=$(basename "$1")
+  if tp_has_tool realpath; then
+    _rpp_real=$(realpath -m -- "$_rpp_dir" 2>/dev/null) || return 1
+  else
+    _rpp_real=$(readlink -f -- "$_rpp_dir" 2>/dev/null) || return 1
+  fi
+  [ -n "$_rpp_real" ] || return 1
+  if [ "$_rpp_real" = / ]; then
+    printf '/%s' "$_rpp_leaf"
+  else
+    printf '%s/%s' "$_rpp_real" "$_rpp_leaf"
+  fi
+}
+
+tp_path_in_owned_tree() {
+  _pot=$1
+  for _pot_root in $TP_OWNED_TREES; do
+    case $_pot in
+      "$_pot_root"|"$_pot_root"/*) return 0 ;;
+    esac
+  done
+  for _pot_dir in $TP_SYSTEMD_DIRS; do
+    case $_pot in
+      "$_pot_dir"/*)
+        case ${_pot##*/} in
+          turbopanel*) return 0 ;;
+        esac
+        ;;
+    esac
+  done
+  return 1
+}
+
+# Allowlist: a path is safe to delete only when, with its parent's symlinks
+# resolved, it lies inside a tree TurboPanel creates (TP_OWNED_TREES, plus
+# turbopanel* unit drop-ins). Folders read from daemon.env are not trusted to
+# widen that set, because the daemon account can write that file.
 tp_path_is_safe() {
   _pis=$1
   [ -n "$_pis" ] || return 1
@@ -254,14 +306,22 @@ tp_path_is_safe() {
     *) return 1 ;;
   esac
   case $_pis in
-    *..*) return 1 ;;
     *[[:space:]]*) return 1 ;;
   esac
-  _pis=$(tp_normalize_path "$_pis")
-  case $_pis in
-    /|/etc|/var|/srv|/opt|/usr|/home|/root|/tmp) return 1 ;;
+  case "$_pis/" in
+    */./*|*/../*) return 1 ;;
   esac
-  return 0
+  _pis=$(tp_normalize_path "$_pis")
+  [ "$_pis" != / ] || return 1
+  _pis_real=$(tp_resolve_parent_path "$_pis") || return 1
+  tp_path_in_owned_tree "$_pis_real"
+}
+
+# A folder TurboPanel was configured to use outside its own trees. It is shown
+# to the operator and left in place.
+tp_note_custom_kept() {
+  tp_file_add "$TP_TMP/custom.kept" "$1 ($2)"
+  tp_print_warn "$1 is outside TurboPanel's own folders; it will be listed, not removed ($2)"
 }
 
 tp_path_present() {
@@ -346,7 +406,12 @@ tp_discover_add() {
   [ -n "$_da_path" ] || return 0
   _da_path=$(tp_normalize_path "$_da_path")
   if ! tp_path_is_safe "$_da_path"; then
-    tp_print_warn "ignoring unsafe ${_da_kind} path: ${_da_path}"
+    # Never deleted, and a principal root outside the owned trees is never
+    # used to pick accounts for userdel; its homes are still left unscanned.
+    tp_note_custom_kept "$_da_path" "${_da_kind} folder"
+    if [ "$_da_kind" = principal ]; then
+      TP_PRINCIPAL_HOME_ROOTS_CUSTOM=$(tp_ws_add "${TP_PRINCIPAL_HOME_ROOTS_CUSTOM:-}" "$_da_path")
+    fi
     return 0
   fi
   case $_da_kind in
@@ -666,11 +731,12 @@ tp_load_resume_manifest() {
           TP_DOCKER_DATA_ROOT_SAVED_UNKNOWN=true
           continue
         fi
-        if tp_path_is_safe "$2"; then
-          TP_DOCKER_DATA_ROOT_SAVED=$(tp_normalize_path "$2")
-        else
-          tp_print_warn "ignoring unsafe Docker data root in resume manifest"
-        fi
+        # The manifest is root-only. Whether the saved root may be deleted is
+        # decided by tp_purge_docker_data_root, like a freshly detected one.
+        case $2 in
+          /*) TP_DOCKER_DATA_ROOT_SAVED=$(tp_normalize_path "$2") ;;
+          *) tp_print_warn "ignoring a relative Docker data root in resume manifest" ;;
+        esac
         ;;
     esac
   done < "$TP_RESUME_MANIFEST"
@@ -1102,7 +1168,11 @@ tp_resolve_docker_data_root() {
 tp_print_docker_data_root_line() {
   case $TP_DOCKER_DATA_ROOT_STATUS in
     custom)
-      tp_say "Docker data root: ${TP_DOCKER_DATA_ROOT}"
+      if tp_path_is_safe "$TP_DOCKER_DATA_ROOT"; then
+        tp_say "Docker data root: ${TP_DOCKER_DATA_ROOT}"
+      else
+        tp_say "Docker data root: ${TP_DOCKER_DATA_ROOT} (outside TurboPanel's folders; kept)"
+      fi
       ;;
     unknown)
       tp_print_warn "Docker data root could not be determined"
@@ -1492,20 +1562,35 @@ tp_inventory_folders() {
 # Same homes and filenames as the startup-file cleanup. Each matching line is
 # one row (file, tab, line text). Removal edits those inventoried files, and
 # the final scan compares this same category.
-tp_collect_shell_homes() {
-  : > "$TP_TMP/homes"
-  printf '%s\n' /root >> "$TP_TMP/homes"
-  if [ -r /etc/passwd ]; then
-    while IFS=: read -r _csh_name _csh_pw _csh_uid _csh_gid _csh_gecos _csh_home _csh_shell; do
-      case $_csh_uid in
-        ''|*[!0-9]*) continue ;;
+# Homes whose startup files may carry TurboPanel lines: root's, then every
+# account from UID 1000 up except principals. A principal home is purged whole
+# by option 2 and left untouched by option 1, so it is never edited.
+tp_list_shell_homes() {
+  printf '%s\n' /root
+  [ -r "$1" ] || return 0
+  while IFS=: read -r _lsh_name _lsh_pw _lsh_uid _lsh_gid _lsh_gecos _lsh_home _lsh_shell; do
+    case $_lsh_uid in
+      ''|*[!0-9]*) continue ;;
+    esac
+    [ "$_lsh_uid" -ge 1000 ] || continue
+    [ -n "$_lsh_home" ] || continue
+    [ "$_lsh_home" = /root ] && continue
+    _lsh_skip=false
+    for _lsh_root in ${TP_PRINCIPAL_HOME_ROOTS:-} ${TP_PRINCIPAL_HOME_ROOTS_CUSTOM:-}; do
+      case $_lsh_home in
+        "$_lsh_root"|"$_lsh_root"/*) _lsh_skip=true ;;
       esac
-      [ "$_csh_uid" -ge 1000 ] || continue
-      [ -n "$_csh_home" ] || continue
-      [ "$_csh_home" = /root ] && continue
-      printf '%s\n' "$_csh_home" >> "$TP_TMP/homes"
-    done < /etc/passwd
-  fi
+    done
+    [ "$_lsh_skip" = false ] || continue
+    printf '%s\n' "$_lsh_home"
+  done < "$1"
+}
+
+# Same homes and filenames as the startup-file cleanup. Each matching line is
+# one row (file, tab, line text). Removal edits those inventoried files, and
+# the final scan compares this same category.
+tp_collect_shell_homes() {
+  tp_list_shell_homes /etc/passwd > "$TP_TMP/homes"
 }
 
 tp_shell_rc_matches() {
@@ -1520,6 +1605,7 @@ tp_inventory_shell_rcs() {
     [ -d "$_isr_home" ] || continue
     for _isr_name in .bashrc .profile .bash_profile .zshrc .zshenv .zprofile; do
       _isr_file="${_isr_home}/${_isr_name}"
+      [ -L "$_isr_file" ] && continue
       [ -f "$_isr_file" ] || continue
       tp_shell_rc_matches "$_isr_file" || continue
       grep -F -e '/opt/turbopanel/' -e "$TP_LEGACY_SHELL_RC_NEEDLE" "$_isr_file" > "$TP_TMP/shell.hits" || true
@@ -1679,7 +1765,7 @@ tp_print_sizes() {
   for _ps_path in $TP_CONFIG_DIRS $TP_STATE_DIRS $TP_LOG_DIRS $TP_RUNTIMES_DIRS $TP_RUN_DIRS $TP_BACKUP_DIRS $TP_PRINCIPAL_HOME_ROOTS /opt/turbopanel; do
     [ -e "$_ps_path" ] || continue
     _ps_size=$(du -sh "$_ps_path" 2>/dev/null | awk '{ print $1; exit }')
-    [ -n "$_ps_size" ] || _ps_size=?
+    [ -n "$_ps_size" ] || _ps_size='?'
     tp_say "  ${_ps_size}  ${_ps_path}"
     _ps_any=true
   done
@@ -1731,10 +1817,17 @@ tp_print_report() {
   tp_print_group "Groups to remove" "$TP_TMP/inv.groups"
   tp_print_group "Principal homes (kept)" "$TP_TMP/inv.principals"
   tp_print_group "Left alone" "$TP_TMP/inv.leftalone"
+  tp_print_group "Configured outside TurboPanel's folders (kept)" "$TP_TMP/custom.kept"
   tp_say ""
   tp_print_sizes
   tp_say ""
   tp_print_detection_warnings
+}
+
+# ufw and firewalld are purged at install and TurboPanel owns the firewall
+# from then on, so removing its TP-* chains leaves nothing filtering inbound.
+tp_print_firewall_gone_warning() {
+  tp_print_warn "No inbound firewall will remain: ufw and firewalld were removed when TurboPanel was installed, and this removes TurboPanel's own rules. Set up a firewall before this host takes traffic."
 }
 
 tp_print_choice_table() {
@@ -1749,7 +1842,7 @@ tp_print_choice_table() {
     tp_say "  backup folders, and apt packages TurboPanel installed."
     tp_say ""
     if [ "$TP_DOCKER_DATA_ROOT_STATUS" = custom ]; then
-      tp_say "Docker data root: ${TP_DOCKER_DATA_ROOT}"
+      tp_print_docker_data_root_line
       tp_say ""
     fi
     if [ "$TP_DOCKER_DATA_ROOT_STATUS" = unknown ]; then
@@ -1757,6 +1850,7 @@ tp_print_choice_table() {
       tp_say ""
     fi
     tp_print_warn "Purging Docker Engine removes every container, volume, and image on this host, including ones TurboPanel did not create."
+    tp_print_firewall_gone_warning
     return 0
   fi
   tp_say "This option removes:"
@@ -1768,6 +1862,7 @@ tp_print_choice_table() {
   tp_say "  config, state, log, and backup folders, principal homes and accounts,"
   tp_say "  Docker volumes, Docker images, Docker Engine, and apt packages"
   tp_say ""
+  tp_print_firewall_gone_warning
 }
 
 tp_menu() {
@@ -1917,7 +2012,7 @@ tp_stop_units_matching() {
         ;;
       other)
         case $_sum_name in
-          *.timer|*.service|turbopaneld-update-guard.timer|turbopaneld.service) ;;
+          *.timer|*.service) ;;
           *) tp_stop_disable_unit "$_sum_name" ;;
         esac
         ;;
@@ -1959,10 +2054,10 @@ tp_prune_wants_symlinks() {
     _pws_target=$(readlink "$_pws_link" 2>/dev/null || true)
     _pws_ours=false
     case $_pws_base in
-      turbopanel*|turbopaneld*|wg-quick@tp0*) _pws_ours=true ;;
+      turbopanel*|wg-quick@tp0*) _pws_ours=true ;;
     esac
     case $_pws_target in
-      *turbopanel*|*turbopaneld*) _pws_ours=true ;;
+      *turbopanel*) _pws_ours=true ;;
     esac
     [ "$_pws_ours" = true ] || continue
     if [ ! -e "$_pws_link" ]; then
@@ -2273,34 +2368,69 @@ tp_remove_host_config() {
   tp_remove_statoverrides
 }
 
-# cat's redirect keeps the destination inode. tp_run applies its own stdout
-# redirect to the function, which this inner redirect replaces.
-tp_write_stripped_rc() {
-  cat "$1" > "$2"
+# Back up and strip one startup file as the owner of the directory it sits in.
+# That owner controls every name in the directory, so root must never open a
+# path there: a planted symlink (the file, its backup, a temp name) would turn
+# root's write into an overwrite of /etc/passwd. As the owner, the kernel only
+# lets the write reach what that owner could already change.
+# shellcheck disable=SC2329 # run through tp_run
+tp_strip_rc_as_owner() {
+  _sra_file=$1
+  _sra_uid=$2
+  _sra_gid=$3
+  # shellcheck disable=SC2016 # expanded by the inner sh, not here
+  set -- sh -c '
+    f=$1
+    legacy=$2
+    { [ -f "$f" ] && [ ! -L "$f" ]; } || exit 3
+    bak="$f.turbopanel-uninstall.bak"
+    if [ -e "$bak" ] || [ -L "$bak" ]; then
+      bak=$(mktemp "$f.turbopanel-uninstall.bak.XXXXXX") || exit 4
+    fi
+    cp -p -- "$f" "$bak" || exit 5
+    tmp=$(mktemp "$f.turbopanel-uninstall.XXXXXX") || exit 6
+    grep -v -F -e /opt/turbopanel/ -e "$legacy" "$f" > "$tmp"
+    [ $? -le 1 ] || { rm -f "$tmp"; exit 7; }
+    if ! cat "$tmp" > "$f"; then
+      rm -f "$tmp"
+      cat "$bak" > "$f"
+      exit 8
+    fi
+    rm -f "$tmp"
+  ' tp-strip-rc "$_sra_file" "$TP_LEGACY_SHELL_RC_NEEDLE"
+  if [ "$_sra_uid" = "$(id -u)" ]; then
+    "$@"
+  else
+    setpriv --reuid="$_sra_uid" --regid="$_sra_gid" --clear-groups -- \
+      env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin "$@"
+  fi
 }
 
 tp_strip_one_rc() {
   _sor=$1
-  [ -f "$_sor" ] || return 0
   if [ -L "$_sor" ]; then
     tp_print_warn "$_sor is a symlink; left it unchanged"
     return 0
   fi
-  if ! tp_shell_rc_matches "$_sor"; then
+  [ -f "$_sor" ] || return 0
+  tp_shell_rc_matches "$_sor" || return 0
+  _sor_dir=$(dirname "$_sor")
+  _sor_owner=$(stat -c '%u %g' -- "$_sor" 2>/dev/null) || return 0
+  _sor_dir_uid=$(stat -c '%u' -- "$_sor_dir" 2>/dev/null) || return 0
+  _sor_uid=${_sor_owner% *}
+  _sor_gid=${_sor_owner#* }
+  if [ "$_sor_uid" != "$_sor_dir_uid" ]; then
+    tp_record_skip "$_sor is not owned by the owner of $_sor_dir; left it unchanged"
     return 0
   fi
-  _sor_bak="${_sor}.turbopanel-uninstall.bak"
-  tp_run "backup $_sor" cp -a "$_sor" "$_sor_bak" || return 0
-  if [ "$DRY_RUN" = true ]; then
-    tp_run "strip TurboPanel lines from $_sor" tp_write_stripped_rc "$TP_TMP/rc.strip" "$_sor" || true
+  if [ "$_sor_uid" != "$(id -u)" ] && ! tp_has_tool setpriv; then
+    tp_record_skip "setpriv not installed; left $_sor unchanged"
     return 0
   fi
-  # grep -v exits 1 when every line matched, which still leaves a correct file.
-  grep -v -F -e '/opt/turbopanel/' -e "$TP_LEGACY_SHELL_RC_NEEDLE" "$_sor" > "$TP_TMP/rc.strip" || true
-  if tp_run "strip TurboPanel lines from $_sor" tp_write_stripped_rc "$TP_TMP/rc.strip" "$_sor"; then
-    tp_print_ok "stripped $_sor (backup $_sor_bak)"
-  else
-    tp_run "restore $_sor" cp -a "$_sor_bak" "$_sor" || true
+  tp_run "strip TurboPanel lines from $_sor" \
+    tp_strip_rc_as_owner "$_sor" "$_sor_uid" "$_sor_gid" || return 0
+  if [ "$DRY_RUN" != true ]; then
+    tp_print_ok "stripped $_sor (backup ${_sor}.turbopanel-uninstall.bak*)"
   fi
 }
 
@@ -2334,6 +2464,7 @@ tp_remove_folders_and_shell() {
 
 # A signal whose target has already exited is success. A signal that leaves
 # the process running is a real failure and is recorded by tp_run.
+# shellcheck disable=SC2329 # run through tp_run
 tp_signal_pid() {
   _sp_pid=$1
   _sp_sig=$2
@@ -2396,6 +2527,7 @@ tp_exe_is_ours() {
 
 # pkill exits 1 when no process matches. Keep that distinct from a real failure
 # so a host with nothing to signal is not recorded as a failed uninstall.
+# shellcheck disable=SC2329 # run through tp_run
 tp_pkill_turbopanel() {
   pkill -f /opt/turbopanel
   _ppt_status=$?
@@ -2544,8 +2676,14 @@ tp_consider_apt_package() {
   [ -n "$_cap" ] || return 0
   tp_pkg_installed "$_cap" || return 0
   case $_cap in
-    sudo|systemd-timesyncd|curl)
+    sudo|systemd-timesyncd|curl|ca-certificates|openssl)
       tp_purge_note_kept "$_cap" "never removed by this script"
+      return 0
+      ;;
+    git|gnupg|iptables)
+      # Common on hosts before TurboPanel, and nothing records that the
+      # installer added them, so removing them could break other software.
+      tp_purge_note_kept "$_cap" "may predate TurboPanel; not proven installed by it"
       return 0
       ;;
   esac
@@ -2555,56 +2693,6 @@ tp_consider_apt_package() {
     return 0
   fi
   tp_file_add "$TP_TMP/apt.candidates" "$_cap"
-}
-
-tp_apt_source_removed_by_purge() {
-  case $1 in
-    /etc/apt/sources.list.d/sury-php.sources|/etc/apt/sources.list.d/sury-php.list)
-      return 0
-      ;;
-  esac
-  case $1 in
-    /etc/apt/sources.list.d/*)
-      grep -q 'download.docker.com' "$1" 2>/dev/null
-      return $?
-      ;;
-  esac
-  return 1
-}
-
-tp_apt_https_remains() {
-  : > "$TP_TMP/apt.https"
-  if [ -f /etc/apt/sources.list ]; then
-    printf '%s\n' /etc/apt/sources.list >> "$TP_TMP/apt.https"
-  fi
-  if [ -d /etc/apt/sources.list.d ]; then
-    find /etc/apt/sources.list.d -maxdepth 1 \( -type f -o -type l \) >> "$TP_TMP/apt.https" 2>/dev/null || true
-  fi
-  while IFS= read -r _ahr; do
-    [ -n "$_ahr" ] || continue
-    [ -f "$_ahr" ] || continue
-    # Dry-run does not delete source files. Ignore the ones purge removes
-    # before this check so the package plan matches a real run. Sources that
-    # survive those removals still count.
-    if [ "$DRY_RUN" = true ] && tp_apt_source_removed_by_purge "$_ahr"; then
-      continue
-    fi
-    if grep -q 'https://' "$_ahr" 2>/dev/null; then
-      return 0
-    fi
-  done < "$TP_TMP/apt.https"
-  return 1
-}
-
-tp_drop_https_tls_packages() {
-  tp_apt_https_remains || return 0
-  for _dht in ca-certificates openssl; do
-    if [ -f "$TP_TMP/apt.candidates" ] && grep -Fxq "$_dht" "$TP_TMP/apt.candidates"; then
-      grep -Fxv "$_dht" "$TP_TMP/apt.candidates" > "$TP_TMP/apt.candidates.next" || true
-      mv "$TP_TMP/apt.candidates.next" "$TP_TMP/apt.candidates"
-      tp_purge_note_kept "$_dht" "an apt source still uses https://"
-    fi
-  done
 }
 
 tp_collect_purge_candidates() {
@@ -2618,7 +2706,6 @@ tp_collect_purge_candidates() {
     tp_consider_apt_package "$_cpc"
   done < "$TP_TMP/apt.php"
   tp_consider_apt_package debsuryorg-archive-keyring
-  tp_drop_https_tls_packages
   if [ -s "$TP_TMP/apt.candidates" ]; then
     LC_ALL=C sort -u "$TP_TMP/apt.candidates" > "$TP_TMP/apt.candidates.sorted"
     mv "$TP_TMP/apt.candidates.sorted" "$TP_TMP/apt.candidates"
@@ -2745,6 +2832,8 @@ tp_choose_purge_packages() {
     tp_print_warn "Could not simulate purging these packages together; testing them one at a time"
   fi
   : > "$TP_TMP/apt.growing"
+  # tp_classify_removal only reads the candidate list it is handed.
+  # shellcheck disable=SC2094
   while IFS= read -r _cpp_pkg; do
     [ -n "$_cpp_pkg" ] || continue
     printf '%s\n' "$_cpp_pkg" > "$TP_TMP/apt.one"
@@ -2822,7 +2911,11 @@ tp_purge_apt_packages() {
       tp_run "remove $_pap" rm -f "$_pap" || true
     fi
   done
-  tp_run "apt-get update" env LC_ALL=C DEBIAN_FRONTEND=noninteractive apt-get update || true
+  if ! tp_run "apt-get update" env LC_ALL=C DEBIAN_FRONTEND=noninteractive apt-get update; then
+    # Stale package lists still let the purge below run; its own failures
+    # count on their own.
+    tp_record_benign_fail
+  fi
   tp_collect_purge_candidates
   tp_choose_purge_packages
   # sudo, systemd-timesyncd, and curl are not purge candidates. Mark them
@@ -2840,8 +2933,8 @@ tp_purge_apt_packages() {
     tp_run "autoremove apt packages" \
       env LC_ALL=C DEBIAN_FRONTEND=noninteractive apt-get autoremove --purge -y || true
   else
-    tp_print_error "skipped autoremove so sudo, systemd-timesyncd, and curl cannot be removed"
-    tp_record_fail "skipped autoremove so sudo, systemd-timesyncd, and curl cannot be removed"
+    tp_print_error "skipped autoremove so the kept packages cannot be removed"
+    tp_record_fail "skipped autoremove so the kept packages cannot be removed"
   fi
 }
 
@@ -2899,30 +2992,43 @@ tp_purge_docker_sources() {
   while IFS= read -r _pds_key; do
     [ -n "$_pds_key" ] || continue
     [ -e "$_pds_key" ] || [ -L "$_pds_key" ] || continue
-    if ! tp_path_is_safe "$_pds_key"; then
+    if ! tp_apt_keyring_path_ok "$_pds_key"; then
       tp_record_fail "refusing unsafe Docker keyring ${_pds_key}"
       tp_print_error "refusing unsafe Docker keyring ${_pds_key}"
       continue
     fi
-    if [ -d "$_pds_key" ] && [ ! -L "$_pds_key" ]; then
-      tp_safe_rm_tree "$_pds_key"
-    else
-      tp_run "remove $_pds_key" rm -f "$_pds_key" || true
-    fi
+    tp_run "remove $_pds_key" rm -f "$_pds_key" || true
   done < "$TP_TMP/docker.keyrings"
+}
+
+# A Signed-By keyring may only be a file (or a link to one, which rm -f
+# unlinks) directly inside an apt keyring directory.
+tp_apt_keyring_path_ok() {
+  _akp=$1
+  case $_akp in
+    *[[:space:]]*|*/./*|*/../*) return 1 ;;
+  esac
+  [ -d "$_akp" ] && [ ! -L "$_akp" ] && return 1
+  _akp_real=$(tp_resolve_parent_path "$_akp") || return 1
+  case ${_akp_real%/*} in
+    /etc/apt/keyrings|/usr/share/keyrings|/etc/apt/trusted.gpg.d) return 0 ;;
+  esac
+  return 1
 }
 
 tp_purge_docker_data_root() {
   if [ "$TP_DOCKER_DATA_ROOT_STATUS" = unknown ]; then
     tp_print_error "Docker data root could not be determined. Custom containers, images, and volumes may remain."
     tp_record_fail "Docker data root could not be determined"
+    # A rerun cannot learn more once Docker is gone, so this must not hold the
+    # purge marker.
+    tp_record_benign_fail
     return 0
   fi
   [ "$TP_DOCKER_DATA_ROOT_STATUS" = custom ] || return 0
   [ -n "$TP_DOCKER_DATA_ROOT" ] || return 0
   if ! tp_path_is_safe "$TP_DOCKER_DATA_ROOT"; then
-    tp_print_error "could not remove Docker data root ${TP_DOCKER_DATA_ROOT}"
-    tp_record_fail "could not remove Docker data root ${TP_DOCKER_DATA_ROOT}"
+    tp_note_custom_kept "$TP_DOCKER_DATA_ROOT" "Docker data root"
     return 0
   fi
   tp_safe_rm_tree "$TP_DOCKER_DATA_ROOT"
@@ -3224,7 +3330,6 @@ tp_print_purge_notes() {
   tp_print_group "Packages kept" "$TP_TMP/kept-packages"
   tp_print_protected_package_note
   tp_print_warn "sury-provided library versions stay installed."
-  tp_print_warn "ufw and firewalld were removed when TurboPanel was installed and are not restored."
   tp_say "/etc/systemd/timesyncd.conf is left as TurboPanel wrote it."
   tp_say "Reboot this host to clear leftover kernel state (bridges and NAT rules)."
 }
@@ -3247,6 +3352,8 @@ tp_print_summary() {
   tp_print_group "Removed" "$TP_TMP/removed"
   tp_print_group "Skipped" "$TP_TMP/skipped"
   tp_print_group "Failed" "$TP_TMP/failed"
+  tp_print_group "Configured outside TurboPanel's folders (kept)" "$TP_TMP/custom.kept"
+  tp_print_firewall_gone_warning
   if [ "$TP_ACTION" = purge ]; then
     if [ "$DRY_RUN" != true ]; then
       tp_report_remaining "hosted data" purge_targets
@@ -3274,20 +3381,19 @@ tp_print_summary() {
   tp_print_reinstall_commands
   tp_say ""
   tp_say "Log: ${TP_LOG_FILE}"
+  # Benign failures (tp_record_benign_fail) leave no purge work undone, so the
+  # marker goes even when they are the only failures; anything else keeps it.
+  if [ "$TP_ACTION" = purge ] && tp_resume_clearable; then
+    tp_clear_purge_resume || true
+  fi
   if [ "$TP_FAIL_COUNT" -gt 0 ]; then
     tp_print_error "${TP_FAIL_COUNT} step(s) failed"
   else
-    if [ "$TP_ACTION" = purge ]; then
-      tp_clear_purge_resume || true
-    fi
-    if [ "$TP_FAIL_COUNT" -gt 0 ]; then
-      tp_print_error "${TP_FAIL_COUNT} step(s) failed"
-    else
-      tp_print_ok "Uninstall finished"
-    fi
+    tp_print_ok "Uninstall finished"
   fi
 }
 
+# shellcheck disable=SC2329 # run from trap
 tp_on_signal() {
   if [ "${TP_STARTED_REMOVAL:-false}" = true ] && [ "${DRY_RUN:-false}" != true ]; then
     tp_print_error "Interrupted — this host may be partly uninstalled. Log: ${TP_LOG_FILE:-}"
@@ -3297,6 +3403,7 @@ tp_on_signal() {
   exit 130
 }
 
+# shellcheck disable=SC2329 # run from trap
 tp_cleanup() {
   if [ -n "${TP_TMP:-}" ] && [ -d "${TP_TMP}" ]; then
     rm -rf "$TP_TMP"
@@ -3407,6 +3514,7 @@ PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH
 export PATH
 
 TP_FAIL_COUNT=0
+TP_BENIGN_FAIL_COUNT=0
 TP_STARTED_REMOVAL=false
 TP_INV_QUIET=false
 TP_LOG_FILE=
@@ -3435,6 +3543,7 @@ TP_RUNTIMES_DIRS=
 TP_RUN_DIRS=
 TP_BACKUP_DIRS=
 TP_PRINCIPAL_HOME_ROOTS=
+TP_PRINCIPAL_HOME_ROOTS_CUSTOM=
 TP_OTHER_DIRS=
 
 # Older names retired by later releases. When a release renames or retires a
@@ -3448,13 +3557,17 @@ TP_LEGACY_UNITS="turbopanel-mailer.service turbopanel-php-fpm.service"
 TP_LEGACY_CONTAINER_NAMES="turbopanel-database turbopanel-queue"
 TP_LEGACY_OPT_PATHS="runtimes platform share/ansible lib/instance vendor/duckdb share/caddy bin/turbopanel-instance bin/turbopanel-mailer"
 TP_LEGACY_SHELL_RC_NEEDLE='/opt/turbopanel/runtimes/deno/.install/env'
+# Every tree this script may delete: what TurboPanel creates, plus Docker's
+# default state it purges. tp_path_is_safe refuses anything else, including a
+# folder configured elsewhere in daemon.env; those are listed as kept.
+TP_OWNED_TREES="/opt/turbopanel /etc/turbopanel /etc/ssh/turbopanel /var/lib/turbopanel /var/log/turbopanel /run/turbopanel /var/run/turbopanel /backup /srv/users /tmp/turbopanel-ansible /tmp/turbopanel-orchestrate /root/.ansible /var/lib/docker /var/lib/containerd /etc/docker /var/lib/turbopanel-uninstall"
 TP_SYSTEMD_DIRS="/etc/systemd/system /usr/local/lib/systemd/system /lib/systemd/system /usr/lib/systemd/system"
 TP_DAEMON_ENV=/etc/turbopanel/daemon.env
 TP_RESUME_DIR=/var/lib/turbopanel-uninstall
 TP_PURGE_MARKER=$TP_RESUME_DIR/purge-in-progress
 TP_RESUME_MANIFEST=$TP_RESUME_DIR/resume-manifest
 TP_DOCKER_DATA_ROOT_DEFAULT=/var/lib/docker
-TP_AUTOREMOVE_PROTECTED="sudo systemd-timesyncd curl"
+TP_AUTOREMOVE_PROTECTED="sudo systemd-timesyncd curl ca-certificates openssl"
 TP_INV_NAMES="units containers networks chains wireguard hostfiles shellrc folders_remove folders_keep accounts groups principals volumes leftalone cpmarkers purge_targets"
 
 # Apt packages option 2 may purge. A role that installs apt packages or adds
