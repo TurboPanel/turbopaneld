@@ -281,6 +281,28 @@ that tree. `src/deploy/compose-files.ts` owns the path/argv/manifest helpers;
 `{ filename: 'compose.yaml', role: 'runtime', source: 'inline', content }`
 entry. There is no `composeYaml` fallback on `environment.deploy`.
 
+- **Host-path confinement (`compose-host-paths.ts`):** right after the staged
+  `docker compose config --format json`, before the overlay, publish, hooks or
+  `up`, every host path the tenant document mounts or reads is checked on the
+  host: bind volumes, bind-type `driver_opts` devices, `configs`/`secrets`
+  `file:` (except the secrets the daemon rewrote to its run dir), build
+  contexts / Dockerfiles / additional contexts, and — from the staged YAML,
+  because `config` inlines or cannot render them — `env_file`, `label_file`
+  and build SSH keys. Each source is mapped from `.staging` to the live
+  deployment dir and resolved with `realPath` (deepest existing ancestor for a
+  path Docker will create). Refused: a source that resolves outside the
+  deployment dir through a symlink (always, whatever the approval); the
+  deployment dir itself mounted writable or anything under `.staging`; a source
+  inside another writable bind of this deploy or of the generation still
+  running (a container there could swap a path component for a symlink before
+  or after `up`); `extends.file` and `include`; interpolated paths. Sources
+  lexically outside the dir (absolute, `../`, the Docker socket) are
+  host-level Compose features the control plane gates; they pass only when
+  the `environment.deploy` payload carries `hostLevelApproved: true` (the
+  `EnvironmentDeployHostAccess` twin, pinned in
+  `scripts/contract-field-snapshot.json`; absent reads false, so an older
+  control plane gets the strict reading). Approval never excuses the refusals
+  above.
 - **Staged write + validated cutover:** each deploy resets
   `<deploymentDir>/.staging/`, writes the compiled YAML there, resolves the
   merged Docker Compose model, merges the daemon overlay fragment into that

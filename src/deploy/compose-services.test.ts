@@ -111,7 +111,11 @@ test("resolveComposeModel accepts missing services as empty", async () => {
       code: 0,
     })),
   );
-  assertEquals(model, { serviceNames: [], services: {} });
+  assertEquals(model, {
+    serviceNames: [],
+    services: {},
+    document: { services: null },
+  });
 });
 
 test("resolveComposeModel surfaces docker failures and invalid stdout", async () => {
