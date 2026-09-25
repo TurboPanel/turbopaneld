@@ -171,13 +171,10 @@ export async function runInstanceCertsApply(
   } = {},
 ): Promise<void> {
   const env = deps.env ?? Deno.env.toObject();
-  const extra: Record<string, unknown> = {
-    turbopanel_hostnames: hostnames.map(ansibleHostname),
-  };
-  const email = deps.instanceAcme?.contactEmail.trim();
-  if (email) extra.turbopanel_acme_email = email;
-  const directory = deps.instanceAcme?.directoryUrl.trim();
-  if (directory) extra.turbopanel_acme_directory = directory;
+  // tp-orchestrate accepts only key=value extra-vars. A JSON object is
+  // refused before ansible-playbook starts, which is an exit 1 with no
+  // task log. resolve-hostnames.yml decodes the list from
+  // turbopanel_hostnames_json.
   const args = [
     "-e",
     `turbopanel_instance_dir=${instanceDir}`,
@@ -190,9 +187,15 @@ export async function runInstanceCertsApply(
       )
     }`,
     "-e",
-    JSON.stringify(extra),
-    ...devOwnershipPlaybookExtraArgs(env),
+    `turbopanel_hostnames_json=${
+      JSON.stringify(hostnames.map(ansibleHostname))
+    }`,
   ];
+  const email = deps.instanceAcme?.contactEmail.trim();
+  if (email) args.push("-e", `turbopanel_acme_email=${email}`);
+  const directory = deps.instanceAcme?.directoryUrl.trim();
+  if (directory) args.push("-e", `turbopanel_acme_directory=${directory}`);
+  args.push(...devOwnershipPlaybookExtraArgs(env));
   const runPlaybook = deps.runPlaybook ?? runLocalPlaybook;
   await runPlaybook(INSTANCE_CERTS_APPLY_PLAYBOOK, args);
 }
