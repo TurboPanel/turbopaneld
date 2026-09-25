@@ -258,8 +258,73 @@ test("openInstanceAcmeWindow refuses a foreign listener and installs Caddy when 
     assertEquals(calls.includes("ensure"), true);
     assertEquals(
       calls.some((line) => line.includes("systemctl reload")),
+      false,
+    );
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+test("openInstanceAcmeWindow reloads when hosting Caddy is already on port 80", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-acme-reload-running-" });
+  const layout = layoutUnder(root);
+  const calls: string[] = [];
+  let ensured = false;
+  try {
+    await openInstanceAcmeWindow(layout, [HOST], {
+      run: (_program, args) => {
+        calls.push(args.join(" "));
+        return Promise.resolve(ok());
+      },
+      inspect: () => Promise.resolve({ kind: "hosting-caddy" }),
+      ensureHostingCaddyRuntime: () => {
+        ensured = true;
+        return Promise.resolve();
+      },
+    });
+    assertEquals(ensured, false);
+    assertEquals(
+      calls.some((line) => line.includes("systemctl reload")),
       true,
     );
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+test("openInstanceAcmeWindow waits for port 80 after a first start", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-acme-wait-80-" });
+  const layout = layoutUnder(root);
+  const calls: string[] = [];
+  let inspections = 0;
+  let sleeps = 0;
+  try {
+    await openInstanceAcmeWindow(layout, [HOST], {
+      run: (_program, args) => {
+        calls.push(args.join(" "));
+        return Promise.resolve(ok());
+      },
+      inspect: () => {
+        inspections += 1;
+        if (inspections < 3) return Promise.resolve({ kind: "free" });
+        return Promise.resolve({ kind: "hosting-caddy" });
+      },
+      sleep: () => {
+        sleeps += 1;
+        return Promise.resolve();
+      },
+      ensureHostingCaddyRuntime: () => {
+        calls.push("ensure");
+        return Promise.resolve();
+      },
+    });
+    assertEquals(calls.includes("ensure"), true);
+    assertEquals(
+      calls.some((line) => line.includes("systemctl reload")),
+      false,
+    );
+    assertEquals(inspections >= 3, true);
+    assertEquals(sleeps >= 1, true);
   } finally {
     await Deno.remove(root, { recursive: true });
   }
@@ -311,6 +376,7 @@ test("openInstanceAcmeWindow rolls back a reload failure and a missed listen", a
             return Promise.resolve(ok());
           },
           inspect: () => Promise.resolve({ kind: "free" }),
+          sleep: () => Promise.resolve(),
           ensureHostingCaddyRuntime: () => {
             startCalls.push("ensure");
             return Promise.resolve();

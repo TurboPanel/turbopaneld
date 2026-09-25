@@ -623,6 +623,10 @@ After=network-online.target docker.service
 Wants=network-online.target
 
 [Service]
+# Type=simple is active as soon as ExecStart is forked. ExecReload POSTs to
+# admin ${HOSTING_CADDY_ADMIN_ADDR}, which is not listening yet. Instance
+# ACME writes the HTTP-01 site before the first start and does not reload
+# that window; an already-running unit still reloads.
 Type=simple
 Environment=XDG_DATA_HOME=${dataDir}
 WorkingDirectory=${configDir}
