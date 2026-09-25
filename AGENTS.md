@@ -801,12 +801,14 @@ Purge order:
    and `openssl` when any remaining apt source uses `https://`. `--dry-run`
    evaluates that check against the sources that will still exist after the
    Docker and sury repository files are removed, so those packages are not
-   kept only because the files are still on disk. Installed `sudo` and
-   `systemd-timesyncd` are added to the kept set and marked manual before
-   `autoremove`; the purge summary names that protection. `autoremove` is
-   skipped if they cannot be marked manual, so it cannot remove them. The
-   time-sync role installs `systemd-timesyncd`; `/etc/systemd/timesyncd.conf`
-   stays as TurboPanel wrote it. `apt-get -s purge` runs first. If that would
+   kept only because the files are still on disk. Installed `sudo`,
+   `systemd-timesyncd`, and `curl` are added to the kept set and marked
+   manual before `autoremove`; the purge summary names that protection.
+   `autoremove` is skipped if they cannot be marked manual, so it cannot
+   remove them. The time-sync role installs `systemd-timesyncd`;
+   `/etc/systemd/timesyncd.conf` stays as TurboPanel wrote it. `curl` is
+   kept so the reinstall commands the summary prints, and a repeat
+   `curl | sh`, still work after a purge. `apt-get -s purge` runs first. If that would
    remove packages that are not candidates, each candidate is simulated alone
    and any that still pull extras are dropped, including when adding one to
    an otherwise safe set would pull them. Kept packages are `apt-mark manual`
