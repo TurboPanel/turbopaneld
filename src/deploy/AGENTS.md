@@ -62,8 +62,12 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    without list — a `0751` world bit trips `ansible:S2612`, and `0755`
    would let a tenant `ls` every account). home `0750`, `.ssh` `0700`
    (reserved for `authorized_keys`), and `volumes`
-   `0750`, all owned `username:<username>-grp`. UID/GID are host-assigned
-   unless an explicit operator override arrives on the payload. Username max
+   `0750`, all owned `username:<username>-grp`. Host-picked UID/GID come from
+   **15001–60000** (`-K` on that `useradd` / `groupadd` only; `/etc/login.defs`
+   is not edited). An explicit operator override must be ≥ **15001**, and every
+   override in the batch is checked before the first host call so a later id
+   below that floor cannot leave an earlier account already created. Existing
+   accounts are adopted and never renumbered. Username max
    length is **28** so `<username>-grp` fits the Linux 32-char group-name
    limit (keep in sync with instance `MAX_PRINCIPAL_USERNAME_LENGTH`). When a GID
    override is supplied and `<username>-grp` already exists with a different

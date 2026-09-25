@@ -473,8 +473,9 @@ export type EnvironmentDeployStorageMaterial = {
 /**
  * Host Linux account material for a project principal.
  *
- * The host allocates UID/GID via `useradd`/`groupadd` unless the control plane
- * sends an explicit operator override (`uid`/`gid`).
+ * The host allocates UID/GID from 15001–60000 via `useradd`/`groupadd`
+ * (`-K` on that command) unless the control plane sends an explicit operator
+ * override (`uid`/`gid` ≥ 15001).
  */
 /** One runtime series a principal is entitled to execute. */
 export type EnvironmentDeployPrincipalRuntime = {
@@ -558,7 +559,8 @@ export type EnvironmentDeployHostingPhp = {
  * Project principal that owns a site tree on the host.
  * `ensureSystemPrincipals` creates the Linux user before apply; document
  * roots are owned by this user with the engine group for read access.
- * UID/GID are optional operator overrides — the host allocates otherwise.
+ * UID/GID are optional operator overrides (≥ 15001) — the host allocates
+ * from 15001–60000 otherwise.
  */
 export type EnvironmentDeploySitePrincipal = {
   principalId: string;
