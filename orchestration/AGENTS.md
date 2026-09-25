@@ -306,6 +306,10 @@ only `/.well-known/acme-challenge/*` to `unix/<run dir>/instance-acme.sock`
 and answers every other path with 404. A separate unit,
 `turbopanel-instance-acme.service`, is installed and left disabled. The
 daemon starts it for the issuance and stops it when the leaf is copied.
+`WorkingDirectory` is prefixed with `-` because systemd chdirs before
+`ExecStartPre`, and that directory is created by the first `ExecStartPre`
+(`install -d`). A hard path fails the start job with status `200/CHDIR`
+before `install` runs.
 A certificate already inside the renewal window (about the last third of
 its lifetime, `renewal_window_ratio` `0.33`) is copied only after the issuer
 storage holds a different, currently valid leaf. An unchanged leaf is

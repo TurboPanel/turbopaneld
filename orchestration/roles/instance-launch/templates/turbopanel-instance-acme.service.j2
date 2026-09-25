@@ -9,7 +9,11 @@ User={{ caddy_user }}
 Group={{ turbopanel_group }}
 # Storage is this process only. Control-plane Caddy uses
 # <state>/caddy/.local/share and hosting Caddy uses <state>/hosting-caddy.
-WorkingDirectory={{ turbopanel_state_dir }}/instance-acme
+# systemd chdirs before ExecStartPre. This directory does not exist until
+# the first ExecStartPre creates it, so a hard WorkingDirectory fails the
+# start job with status 200/CHDIR and install never runs. The "-" prefix
+# ignores a missing directory for that first command.
+WorkingDirectory=-{{ turbopanel_state_dir }}/instance-acme
 Environment=HOME={{ turbopanel_state_dir }}/instance-acme
 Environment=XDG_DATA_HOME={{ turbopanel_state_dir }}/instance-acme
 Environment=XDG_CONFIG_HOME={{ turbopanel_state_dir }}/instance-acme
