@@ -1,0 +1,647 @@
+{
+  "description": "Shared release-manifest URL policy corpus. Every implementation (scripts/run.sh tp_release_manifest_url_ok, orchestration/scripts/tp-orchestrate tp_release_manifest_url_ok, src/update/urls.ts releaseManifestUrlAllowed) must return `allow` for every case; src/update/release-manifest-url-policy.test.ts enforces it.",
+  "cases": [
+    {
+      "kind": "daemon",
+      "url": "https://dl.trbp.nl/channels/trunk/manifest.json",
+      "allow": true,
+      "why": "CDN trunk drop (builtin daemon trunk)"
+    },
+    {
+      "kind": "daemon",
+      "url": "https://dl.trbp.nl/channels/release/manifest.json",
+      "allow": true,
+      "why": "CDN channel manifest (manual-override rail)"
+    },
+    {
+      "kind": "daemon",
+      "url": "https://github.com/TurboPanel/turbopaneld/releases/download/canary/manifest.json",
+      "allow": true,
+      "why": "daemon builtin canary pointer"
+    },
+    {
+      "kind": "daemon",
+      "url": "https://github.com/TurboPanel/turbopaneld/releases/download/rc/manifest.json",
+      "allow": true,
+      "why": "daemon builtin rc pointer"
+    },
+    {
+      "kind": "daemon",
+      "url": "https://github.com/TurboPanel/turbopaneld/releases/latest/download/manifest.json",
+      "allow": true,
+      "why": "daemon builtin release pointer (control plane sends this)"
+    },
+    {
+      "kind": "daemon",
+      "url": "https://github.com/TurboPanel/turbopaneld/releases/download/v0.1.0/manifest.json",
+      "allow": true,
+      "why": "daemon pinned rc/release tag"
+    },
+    {
+      "kind": "daemon",
+      "url": "https://github.com/TurboPanel/turbopaneld/releases/download/v0.1.1-rc.1/manifest.json",
+      "allow": true,
+      "why": "daemon pinned pre-release tag"
+    },
+    {
+      "kind": "daemon",
+      "url": "https://github.com/TurboPanel/turbopaneld/releases/download/canary/manifest-0.1.1-canary.20260919-143000-a1b2c3d.json",
+      "allow": true,
+      "why": "daemon pinned canary build"
+    },
+    {
+      "kind": "daemon",
+      "url": "https://github.com/TurboPanel/turbopaneld/releases/download/v0.1.0+build.5/manifest.json",
+      "allow": true,
+      "why": "daemon tag with semver build metadata (PINNED_VERSION_RE allows +)"
+    },
+    {
+      "kind": "instance",
+      "url": "https://github.com/TurboPanel/turbopanel/releases/download/canary/manifest.json",
+      "allow": true,
+      "why": "instance builtin canary pointer"
+    },
+    {
+      "kind": "instance",
+      "url": "https://github.com/TurboPanel/turbopanel/releases/download/rc/manifest.json",
+      "allow": true,
+      "why": "instance builtin rc pointer"
+    },
+    {
+      "kind": "instance",
+      "url": "https://github.com/TurboPanel/turbopanel/releases/latest/download/manifest.json",
+      "allow": true,
+      "why": "instance builtin release pointer (control plane sends this)"
+    },
+    {
+      "kind": "instance",
+      "url": "https://github.com/TurboPanel/turbopanel/releases/download/v0.1.0/manifest.json",
+      "allow": true,
+      "why": "instance pinned rc/release tag"
+    },
+    {
+      "kind": "instance",
+      "url": "https://github.com/TurboPanel/turbopanel/releases/download/v0.1.1-rc.1/manifest.json",
+      "allow": true,
+      "why": "instance pinned pre-release tag"
+    },
+    {
+      "kind": "instance",
+      "url": "https://github.com/TurboPanel/turbopanel/releases/download/canary/manifest-0.1.1-canary.20260919-143000-a1b2c3d.json",
+      "allow": true,
+      "why": "instance pinned canary build"
+    },
+    {
+      "kind": "instance",
+      "url": "https://github.com/TurboPanel/turbopanel/releases/download/v0.1.0+build.5/manifest.json",
+      "allow": true,
+      "why": "instance tag with semver build metadata (PINNED_VERSION_RE allows +)"
+    },
+    {
+      "kind": "ui",
+      "url": "https://github.com/TurboPanel/ui/releases/download/canary/manifest.json",
+      "allow": true,
+      "why": "ui builtin canary pointer"
+    },
+    {
+      "kind": "ui",
+      "url": "https://github.com/TurboPanel/ui/releases/download/rc/manifest.json",
+      "allow": true,
+      "why": "ui builtin rc pointer"
+    },
+    {
+      "kind": "ui",
+      "url": "https://github.com/TurboPanel/ui/releases/latest/download/manifest.json",
+      "allow": true,
+      "why": "ui builtin release pointer (control plane sends this)"
+    },
+    {
+      "kind": "ui",
+      "url": "https://github.com/TurboPanel/ui/releases/download/v0.1.0/manifest.json",
+      "allow": true,
+      "why": "ui pinned rc/release tag"
+    },
+    {
+      "kind": "ui",
+      "url": "https://github.com/TurboPanel/ui/releases/download/v0.1.1-rc.1/manifest.json",
+      "allow": true,
+      "why": "ui pinned pre-release tag"
+    },
+    {
+      "kind": "ui",
+      "url": "https://github.com/TurboPanel/ui/releases/download/canary/manifest-0.1.1-canary.20260919-143000-a1b2c3d.json",
+      "allow": true,
+      "why": "ui pinned canary build"
+    },
+    {
+      "kind": "ui",
+      "url": "https://github.com/TurboPanel/ui/releases/download/v0.1.0+build.5/manifest.json",
+      "allow": true,
+      "why": "ui tag with semver build metadata (PINNED_VERSION_RE allows +)"
+    },
+    {
+      "kind": "daemon",
+      "url": "https://github.com/TurboPanel/turbopaneld/releases/download/../../../../attacker/repo/releases/download/v1/manifest.json",
+      "allow": false,
+      "why": "raw .. segments escape the repo (audit D-3)"
+    },
+    {
+      "kind": "daemon",
+      "url": "https://github.com/TurboPanel/turbopaneld/releases/download/%2e%2e/%2e%2e/%2e%2e/%2e%2e/attacker/repo/releases/download/v1/manifest.json",
+      "allow": false,
+      "why": "percent-encoded .. segments"
+    },
+    {
+      "kind": "daemon",
+      "url": "https://github.com/TurboPanel/turbopaneld/releases/download/%2E%2e/%2E%2E/attacker/manifest.json",
+      "allow": false,
+      "why": "mixed-case encoded .."
+    },
+    {
+      "kind": "daemon",
+      "url": "https://github.com/TurboPanel/turbopaneld/releases/download/.%2e/.%2e/attacker/manifest.json",
+      "allow": false,
+      "why": "half-encoded .."
+    },
+    {
+      "kind": "daemon",
+      "url": "https://github.com/TurboPanel/turbopaneld/releases/download/v1%2f..%2f..%2fattacker/manifest.json",
+      "allow": false,
+      "why": "encoded slash"
+    },
+    {
+      "kind": "daemon",
+      "url": "https://github.com/TurboPanel/turbopaneld/releases/download/..\\..\\attacker\\manifest.json",
+      "allow": false,
+      "why": "backslashes"
+    },
+    {
+      "kind": "daemon",
+      "url": "https://github.com:8443/TurboPanel/turbopaneld/releases/download/v1/manifest.json",
+      "allow": false,
+      "why": "explicit port"
+    },
+    {
+      "kind": "daemon",
+      "url": "https://github.com@attacker.example/TurboPanel/turbopaneld/releases/download/v1/manifest.json",
+      "allow": false,
+      "why": "userinfo host confusion"
+    },
+    {
+      "kind": "daemon",
+      "url": "http://github.com/TurboPanel/turbopaneld/releases/download/v1/manifest.json",
+      "allow": false,
+      "why": "plain http"
+    },
+    {
+      "kind": "daemon",
+      "url": "https://attacker.example/TurboPanel/turbopaneld/releases/download/v1/manifest.json",
+      "allow": false,
+      "why": "other host, rail-shaped path"
+    },
+    {
+      "kind": "instance",
+      "url": "https://github.com/TurboPanel/turbopanel/releases/download/../../../../attacker/repo/releases/download/v1/manifest.json",
+      "allow": false,
+      "why": "raw .. segments escape the repo (audit D-3)"
+    },
+    {
+      "kind": "instance",
+      "url": "https://github.com/TurboPanel/turbopanel/releases/download/%2e%2e/%2e%2e/%2e%2e/%2e%2e/attacker/repo/releases/download/v1/manifest.json",
+      "allow": false,
+      "why": "percent-encoded .. segments"
+    },
+    {
+      "kind": "instance",
+      "url": "https://github.com/TurboPanel/turbopanel/releases/download/%2E%2e/%2E%2E/attacker/manifest.json",
+      "allow": false,
+      "why": "mixed-case encoded .."
+    },
+    {
+      "kind": "instance",
+      "url": "https://github.com/TurboPanel/turbopanel/releases/download/.%2e/.%2e/attacker/manifest.json",
+      "allow": false,
+      "why": "half-encoded .."
+    },
+    {
+      "kind": "instance",
+      "url": "https://github.com/TurboPanel/turbopanel/releases/download/v1%2f..%2f..%2fattacker/manifest.json",
+      "allow": false,
+      "why": "encoded slash"
+    },
+    {
+      "kind": "instance",
+      "url": "https://github.com/TurboPanel/turbopanel/releases/download/..\\..\\attacker\\manifest.json",
+      "allow": false,
+      "why": "backslashes"
+    },
+    {
+      "kind": "instance",
+      "url": "https://github.com:8443/TurboPanel/turbopanel/releases/download/v1/manifest.json",
+      "allow": false,
+      "why": "explicit port"
+    },
+    {
+      "kind": "instance",
+      "url": "https://github.com@attacker.example/TurboPanel/turbopanel/releases/download/v1/manifest.json",
+      "allow": false,
+      "why": "userinfo host confusion"
+    },
+    {
+      "kind": "instance",
+      "url": "http://github.com/TurboPanel/turbopanel/releases/download/v1/manifest.json",
+      "allow": false,
+      "why": "plain http"
+    },
+    {
+      "kind": "instance",
+      "url": "https://attacker.example/TurboPanel/turbopanel/releases/download/v1/manifest.json",
+      "allow": false,
+      "why": "other host, rail-shaped path"
+    },
+    {
+      "kind": "ui",
+      "url": "https://github.com/TurboPanel/ui/releases/download/../../../../attacker/repo/releases/download/v1/manifest.json",
+      "allow": false,
+      "why": "raw .. segments escape the repo (audit D-3)"
+    },
+    {
+      "kind": "ui",
+      "url": "https://github.com/TurboPanel/ui/releases/download/%2e%2e/%2e%2e/%2e%2e/%2e%2e/attacker/repo/releases/download/v1/manifest.json",
+      "allow": false,
+      "why": "percent-encoded .. segments"
+    },
+    {
+      "kind": "ui",
+      "url": "https://github.com/TurboPanel/ui/releases/download/%2E%2e/%2E%2E/attacker/manifest.json",
+      "allow": false,
+      "why": "mixed-case encoded .."
+    },
+    {
+      "kind": "ui",
+      "url": "https://github.com/TurboPanel/ui/releases/download/.%2e/.%2e/attacker/manifest.json",
+      "allow": false,
+      "why": "half-encoded .."
+    },
+    {
+      "kind": "ui",
+      "url": "https://github.com/TurboPanel/ui/releases/download/v1%2f..%2f..%2fattacker/manifest.json",
+      "allow": false,
+      "why": "encoded slash"
+    },
+    {
+      "kind": "ui",
+      "url": "https://github.com/TurboPanel/ui/releases/download/..\\..\\attacker\\manifest.json",
+      "allow": false,
+      "why": "backslashes"
+    },
+    {
+      "kind": "ui",
+      "url": "https://github.com:8443/TurboPanel/ui/releases/download/v1/manifest.json",
+      "allow": false,
+      "why": "explicit port"
+    },
+    {
+      "kind": "ui",
+      "url": "https://github.com@attacker.example/TurboPanel/ui/releases/download/v1/manifest.json",
+      "allow": false,
+      "why": "userinfo host confusion"
+    },
+    {
+      "kind": "ui",
+      "url": "http://github.com/TurboPanel/ui/releases/download/v1/manifest.json",
+      "allow": false,
+      "why": "plain http"
+    },
+    {
+      "kind": "ui",
+      "url": "https://attacker.example/TurboPanel/ui/releases/download/v1/manifest.json",
+      "allow": false,
+      "why": "other host, rail-shaped path"
+    },
+    {
+      "kind": "instance",
+      "url": "https://github.com/TurboPanel/turbopanel/releases/download/./v1/manifest.json",
+      "allow": false,
+      "why": "single-dot segment"
+    },
+    {
+      "kind": "instance",
+      "url": "https://github.com/TurboPanel/turbopanel/releases/download/v1/manifest.json/..",
+      "allow": false,
+      "why": "trailing .."
+    },
+    {
+      "kind": "instance",
+      "url": "https://github.com/TurboPanel/turbopanel/releases/download/v1/manifest.json/.",
+      "allow": false,
+      "why": "trailing ."
+    },
+    {
+      "kind": "instance",
+      "url": "https://github.com/TurboPanel/turbopanel/releases/download//v1/manifest.json",
+      "allow": false,
+      "why": "empty segment (double slash)"
+    },
+    {
+      "kind": "instance",
+      "url": "https://github.com//TurboPanel/turbopanel/releases/download/v1/manifest.json",
+      "allow": false,
+      "why": "double slash after host"
+    },
+    {
+      "kind": "instance",
+      "url": "https://github.com/TurboPanel/turbopanel/releases/download/v1/",
+      "allow": false,
+      "why": "trailing slash, no file"
+    },
+    {
+      "kind": "instance",
+      "url": "https://github.com/TurboPanel/turbopanel/releases/download/v1/manifest.json?x=1",
+      "allow": false,
+      "why": "query string"
+    },
+    {
+      "kind": "instance",
+      "url": "https://github.com/TurboPanel/turbopanel/releases/download/v1/manifest.json#frag",
+      "allow": false,
+      "why": "fragment"
+    },
+    {
+      "kind": "instance",
+      "url": "https://github.com/TurboPanel/turbopanel/releases/download/v1/x?/../../../../attacker/manifest.json",
+      "allow": false,
+      "why": "query hiding traversal"
+    },
+    {
+      "kind": "instance",
+      "url": "https://github.com/TurboPanel/turbopanel/releases/download/v1/manifest.json@attacker.example",
+      "allow": false,
+      "why": "@ in path"
+    },
+    {
+      "kind": "instance",
+      "url": "https://github.com:443/TurboPanel/turbopanel/releases/download/v1/manifest.json",
+      "allow": false,
+      "why": "default port spelled out"
+    },
+    {
+      "kind": "instance",
+      "url": "https://user:pass@github.com/TurboPanel/turbopanel/releases/download/v1/manifest.json",
+      "allow": false,
+      "why": "userinfo with password"
+    },
+    {
+      "kind": "instance",
+      "url": "https://github.com./TurboPanel/turbopanel/releases/download/v1/manifest.json",
+      "allow": false,
+      "why": "trailing-dot host"
+    },
+    {
+      "kind": "instance",
+      "url": "https://GitHub.com/TurboPanel/turbopanel/releases/download/v1/manifest.json",
+      "allow": false,
+      "why": "mixed-case host"
+    },
+    {
+      "kind": "instance",
+      "url": "https://GITHUB.COM/TurboPanel/turbopanel/releases/download/v1/manifest.json",
+      "allow": false,
+      "why": "upper-case host"
+    },
+    {
+      "kind": "instance",
+      "url": "HTTPS://github.com/TurboPanel/turbopanel/releases/download/v1/manifest.json",
+      "allow": false,
+      "why": "upper-case scheme"
+    },
+    {
+      "kind": "instance",
+      "url": "https://github.com/turbopanel/turbopanel/releases/download/v1/manifest.json",
+      "allow": false,
+      "why": "wrong-case owner"
+    },
+    {
+      "kind": "instance",
+      "url": "https://github.com/attacker/turbopanel/releases/download/v1/manifest.json",
+      "allow": false,
+      "why": "other owner"
+    },
+    {
+      "kind": "instance",
+      "url": "https://github.com/TurboPanel/turbopanel-evil/releases/download/v1/manifest.json",
+      "allow": false,
+      "why": "repo prefix without segment boundary"
+    },
+    {
+      "kind": "instance",
+      "url": "https://github.com/TurboPanel/turbopaneld/releases/download/v1/manifest.json",
+      "allow": false,
+      "why": "daemon repo for the instance pin"
+    },
+    {
+      "kind": "instance",
+      "url": "https://github.com/TurboPanel/ui/releases/download/v1/manifest.json",
+      "allow": false,
+      "why": "ui repo for the instance pin"
+    },
+    {
+      "kind": "instance",
+      "url": "https://dl.trbp.nl/channels/release/manifest.json",
+      "allow": false,
+      "why": "CDN has no instance drop"
+    },
+    {
+      "kind": "ui",
+      "url": "https://github.com/TurboPanel/turbopanel/releases/download/v0.1.1/manifest.json",
+      "allow": false,
+      "why": "instance repo for the ui pin"
+    },
+    {
+      "kind": "ui",
+      "url": "https://dl.trbp.nl/channels/release/manifest.json",
+      "allow": false,
+      "why": "CDN has no ui drop"
+    },
+    {
+      "kind": "daemon",
+      "url": "https://github.com/TurboPanel/turbopanel/releases/download/v0.1.0/manifest.json",
+      "allow": false,
+      "why": "instance repo for the daemon pin"
+    },
+    {
+      "kind": "daemon",
+      "url": "https://github.com/TurboPanel/ui/releases/download/v0.1.0/manifest.json",
+      "allow": false,
+      "why": "ui repo for the daemon pin"
+    },
+    {
+      "kind": "daemon",
+      "url": "https://dl.trbp.nl/channels/../evil/manifest.json",
+      "allow": false,
+      "why": "CDN traversal"
+    },
+    {
+      "kind": "daemon",
+      "url": "https://dl.trbp.nl/other/manifest.json",
+      "allow": false,
+      "why": "CDN outside channels/"
+    },
+    {
+      "kind": "daemon",
+      "url": "https://dl.trbp.nl/channels/manifest.json",
+      "allow": false,
+      "why": "CDN missing channel segment"
+    },
+    {
+      "kind": "daemon",
+      "url": "https://dl.trbp.nl/channels/trunk/daemon/b1/manifest.json",
+      "allow": false,
+      "why": "CDN nested path"
+    },
+    {
+      "kind": "daemon",
+      "url": "https://dl.trbp.nl.attacker.example/channels/trunk/manifest.json",
+      "allow": false,
+      "why": "CDN host suffix"
+    },
+    {
+      "kind": "daemon",
+      "url": "https://attacker.example/manifest.json",
+      "allow": false,
+      "why": "arbitrary host (previously accepted by run.sh)"
+    },
+    {
+      "kind": "instance",
+      "url": "https://github.com/TurboPanel/turbopanel/releases/download/v1/turbopanel-amd64.tar.zst",
+      "allow": false,
+      "why": "not a manifest file"
+    },
+    {
+      "kind": "instance",
+      "url": "https://github.com/TurboPanel/turbopanel/releases/download/v1/manifest.json.sig",
+      "allow": false,
+      "why": "manifest suffix"
+    },
+    {
+      "kind": "instance",
+      "url": "https://github.com/TurboPanel/turbopanel/releases/download/v1/manifest-.json",
+      "allow": false,
+      "why": "empty manifest version"
+    },
+    {
+      "kind": "instance",
+      "url": "https://github.com/TurboPanel/turbopanel/releases/download/v1/extra/manifest.json",
+      "allow": false,
+      "why": "extra segment"
+    },
+    {
+      "kind": "instance",
+      "url": "https://github.com/TurboPanel/turbopanel/releases/download/manifest.json",
+      "allow": false,
+      "why": "missing tag"
+    },
+    {
+      "kind": "instance",
+      "url": "https://github.com/TurboPanel/turbopanel/releases/latest/manifest.json",
+      "allow": false,
+      "why": "latest without download"
+    },
+    {
+      "kind": "instance",
+      "url": "https://github.com/TurboPanel/turbopanel/releases/latest/download/v1/manifest.json",
+      "allow": false,
+      "why": "latest with extra segment"
+    },
+    {
+      "kind": "instance",
+      "url": " https://github.com/TurboPanel/turbopanel/releases/download/v1/manifest.json",
+      "allow": false,
+      "why": "leading space"
+    },
+    {
+      "kind": "instance",
+      "url": "https://github.com/TurboPanel/turbopanel/releases/download/v1/manifest.json ",
+      "allow": false,
+      "why": "trailing space"
+    },
+    {
+      "kind": "instance",
+      "url": "https://github.com/TurboPanel/turbopanel/releases/download/v 1/manifest.json",
+      "allow": false,
+      "why": "embedded space"
+    },
+    {
+      "kind": "instance",
+      "url": "https://github.com/TurboPanel/turbopanel/releases/download/v1/manifest.json\thttps://attacker.example/manifest.json",
+      "allow": false,
+      "why": "tab"
+    },
+    {
+      "kind": "instance",
+      "url": "https://github.com/TurboPanel/turbopanel/releases/download/v1/manifest.json\nhttps://attacker.example/manifest.json",
+      "allow": false,
+      "why": "newline"
+    },
+    {
+      "kind": "instance",
+      "url": "https://github.com/TurboPanel/turbopanel/releases/download/v1/manifest.json\r",
+      "allow": false,
+      "why": "carriage return"
+    },
+    {
+      "kind": "instance",
+      "url": "https://github.com/TurboPanel/turbopanel/releases/download/v1/manifest\u0007.json",
+      "allow": false,
+      "why": "control character"
+    },
+    {
+      "kind": "instance",
+      "url": "https://github.com/TurboPanel/turbopanel/releases/download/v1/manif\u0435st.json",
+      "allow": false,
+      "why": "non-ASCII homoglyph"
+    },
+    {
+      "kind": "instance",
+      "url": "",
+      "allow": false,
+      "why": "empty"
+    },
+    {
+      "kind": "instance",
+      "url": "https://",
+      "allow": false,
+      "why": "scheme only"
+    },
+    {
+      "kind": "instance",
+      "url": "https:///TurboPanel/turbopanel/releases/download/v1/manifest.json",
+      "allow": false,
+      "why": "empty host"
+    },
+    {
+      "kind": "instance",
+      "url": "not a url",
+      "allow": false,
+      "why": "garbage"
+    },
+    {
+      "kind": "instance",
+      "url": "file:///etc/passwd",
+      "allow": false,
+      "why": "file scheme"
+    },
+    {
+      "kind": "instance",
+      "url": "ftp://github.com/TurboPanel/turbopanel/releases/download/v1/manifest.json",
+      "allow": false,
+      "why": "ftp scheme"
+    },
+    {
+      "kind": "unknown",
+      "url": "https://github.com/TurboPanel/turbopanel/releases/download/v1/manifest.json",
+      "allow": false,
+      "why": "unknown kind"
+    }
+  ]
+}

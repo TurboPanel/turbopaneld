@@ -215,10 +215,6 @@ async function runUpdateVerb(
       'CANONICAL_INSTANCE_CA="/etc/turbopanel/instance-ca.pem"',
       'CANONICAL_INSTANCE_UPLOADED_TRUST="/etc/turbopanel/instance-uploaded-trust.pem"',
       'CDN_RUN_SCRIPT="https://turbopanel.sh"',
-      'MANIFEST_URL_PREFIX_CDN="https://dl.trbp.nl/channels/"',
-      'MANIFEST_URL_PREFIX_GITHUB="https://github.com/TurboPanel/turbopaneld/releases/download/"',
-      'MANIFEST_URL_PREFIX_GITHUB_INSTANCE="https://github.com/TurboPanel/turbopanel/releases/download/"',
-      'MANIFEST_URL_PREFIX_GITHUB_UI="https://github.com/TurboPanel/ui/releases/download/"',
       'tp_require_root_scratch() { mkdir -p "$ROOT_SCRATCH"; }',
       // The pin ownership check needs uid 0; the file is ours here.
       'stat() { if [ "$1" = -c ] && [ "$2" = %u ]; then echo 0; else command stat "$@"; fi; }',
@@ -226,8 +222,7 @@ async function runUpdateVerb(
       extractShellFunction(source, "tp_valid_url"),
       extractShellFunction(source, "tp_pin_field"),
       extractShellFunction(source, "tp_read_update_origin_pin"),
-      extractShellFunction(source, "tp_manifest_url_allowed"),
-      extractShellFunction(source, "tp_ui_manifest_url_allowed"),
+      extractShellFunction(source, "tp_release_manifest_url_ok"),
       extractShellFunction(source, "tp_fetch_pinned_run_script"),
       extractShellFunction(source, "tp_verb_update"),
       extractShellFunction(source, "tp_verb_update_instance"),
@@ -358,13 +353,12 @@ test("tp-orchestrate update trusts a pinned private uploaded issuer without --in
   assertStringIncludes(wrong.stderr, "refusing uploaded trust pin");
 });
 
-test("tp-orchestrate update accepts the release rails as manifest pins", async () => {
+test("tp-orchestrate update accepts the daemon release rails as manifest pins", async () => {
   for (
     const url of [
       "https://dl.trbp.nl/channels/trunk/manifest.json",
       "https://github.com/TurboPanel/turbopaneld/releases/download/v0.1.0/manifest.json",
-      "https://github.com/TurboPanel/turbopanel/releases/download/v0.1.0/manifest.json",
-      "https://github.com/TurboPanel/ui/releases/download/v0.1.0/manifest.json",
+      "https://github.com/TurboPanel/turbopaneld/releases/latest/download/manifest.json",
     ]
   ) {
     const result = await runUpdateVerb(
@@ -373,6 +367,25 @@ test("tp-orchestrate update accepts the release rails as manifest pins", async (
     );
     assertEquals(result.status, 0, result.stderr);
     assertStringIncludes(result.stdout, `[--manifest-url] [${url}]`);
+  }
+});
+
+test("tp-orchestrate update refuses traversal and other packages' rails as the daemon pin", async () => {
+  for (
+    const url of [
+      "https://github.com/TurboPanel/turbopaneld/releases/download/../../../../attacker/repo/releases/download/v1/manifest.json",
+      "https://github.com/TurboPanel/turbopaneld/releases/download/%2e%2e/%2e%2e/attacker/manifest.json",
+      "https://github.com/TurboPanel/turbopanel/releases/download/v0.1.0/manifest.json",
+      "https://github.com/TurboPanel/ui/releases/download/v0.1.0/manifest.json",
+    ]
+  ) {
+    const result = await runUpdateVerb(
+      ["--license", "abc", "--manifest-url", url, "--no-start"],
+      PUBLIC_PIN,
+    );
+    assertEquals(result.status, 1, url);
+    assertStringIncludes(result.stderr, "not a TurboPanel release rail");
+    assertEquals(result.stdout.includes("RUNSH"), false, url);
   }
 });
 
@@ -480,6 +493,26 @@ test("tp-orchestrate update-instance refuses trunk, missing flags, and daemon en
         "release",
         "--manifest-url",
         "https://attacker.example/manifest.json",
+        "--no-start",
+      ],
+      "not a TurboPanel release rail",
+    ],
+    [
+      [
+        "--channel",
+        "release",
+        "--manifest-url",
+        "https://github.com/TurboPanel/turbopanel/releases/download/../../../../attacker/repo/releases/download/v1/manifest.json",
+        "--no-start",
+      ],
+      "not a TurboPanel release rail",
+    ],
+    [
+      [
+        "--channel",
+        "release",
+        "--manifest-url",
+        "https://dl.trbp.nl/channels/release/manifest.json",
         "--no-start",
       ],
       "not a TurboPanel release rail",

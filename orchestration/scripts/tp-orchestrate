@@ -216,13 +216,6 @@ CDN_RUN_SCRIPT="https://turbopanel.sh"
 # installer records — every origin flag must match this file or be absent.
 # /etc/turbopanel is daemon-owned, which is why the pin does not live there.
 UPDATE_ORIGIN_PIN="$INSTALL_ROOT/lib/update-origin"
-# Manifest pins may only name the release rails run.sh itself trusts.
-# Each prefix is an explicit arm — a closed set, not a pattern over every
-# TurboPanel repository.
-MANIFEST_URL_PREFIX_CDN="https://dl.trbp.nl/channels/"
-MANIFEST_URL_PREFIX_GITHUB="https://github.com/TurboPanel/turbopaneld/releases/download/"
-MANIFEST_URL_PREFIX_GITHUB_INSTANCE="https://github.com/TurboPanel/turbopanel/releases/download/"
-MANIFEST_URL_PREFIX_GITHUB_UI="https://github.com/TurboPanel/ui/releases/download/"
 
 tp_valid_url() {
   case "$1" in
@@ -249,30 +242,71 @@ tp_read_update_origin_pin() {
   [ -n "$_pin_host" ] || tp_die "$UPDATE_ORIGIN_PIN carries no host"
 }
 
-# Closed allowlist: CDN trunk drop, plus the daemon, control-plane, and UI
-# GitHub release rails. Each prefix is its own alternative.
-tp_manifest_url_allowed() {
-  case "$1" in
-    "$MANIFEST_URL_PREFIX_CDN"*|"$MANIFEST_URL_PREFIX_GITHUB"*|"$MANIFEST_URL_PREFIX_GITHUB_INSTANCE"*|"$MANIFEST_URL_PREFIX_GITHUB_UI"*)
-      return 0
-      ;;
-    *)
-      return 1
-      ;;
+# Manifest pins may only name the release rail run.sh itself trusts for
+# that package: `update --manifest-url` the daemon rail, `update-instance
+# --manifest-url` the control-plane rail, `--ui-manifest-url` the UI rail.
+# Release-rail manifest URL check, on the raw string: https only, exact host,
+# no %, @, :, ?, #, \, whitespace or controls, no empty, "." or ".." path
+# segment, and one exact rail shape per kind (daemon, instance, ui):
+#   daemon    https://dl.trbp.nl/channels/<channel>/manifest*.json
+#   any kind  https://github.com/TurboPanel/<repo>/releases/download/<tag>/manifest*.json
+#             https://github.com/TurboPanel/<repo>/releases/latest/download/manifest*.json
+# Byte-identical in scripts/run.sh and orchestration/scripts/tp-orchestrate;
+# src/update/urls.ts releaseManifestUrlAllowed is the TypeScript copy, and
+# src/testing/release-manifest-url-corpus.json pins all three together.
+tp_release_manifest_url_ok() {
+  _rmu_kind="$1"
+  _rmu_url="$2"
+  case "$_rmu_kind" in
+    daemon) _rmu_repo="turbopaneld" ;;
+    instance) _rmu_repo="turbopanel" ;;
+    ui) _rmu_repo="ui" ;;
+    *) return 1 ;;
   esac
-}
-
-# The UI pin is only the UI release rail. An instance, daemon, or CDN URL
-# must not be passed as --ui-manifest-url.
-tp_ui_manifest_url_allowed() {
-  case "$1" in
-    "$MANIFEST_URL_PREFIX_GITHUB_UI"*)
-      return 0
-      ;;
-    *)
-      return 1
-      ;;
+  case "$_rmu_url" in
+    https://*) ;;
+    *) return 1 ;;
   esac
+  _rmu_rest="${_rmu_url#https://}"
+  case "$_rmu_rest" in
+    ""|*[!A-Za-z0-9._~/+-]*) return 1 ;;
+  esac
+  _rmu_host="${_rmu_rest%%/*}"
+  _rmu_path="${_rmu_rest#"$_rmu_host"}"
+  case "$_rmu_path" in
+    ""|*/|*//*|*/./*|*/../*|*/.|*/..) return 1 ;;
+  esac
+  case "${_rmu_path##*/}" in
+    manifest.json|manifest-?*.json) ;;
+    *) return 1 ;;
+  esac
+  case "$_rmu_host" in
+    dl.trbp.nl)
+      [ "$_rmu_kind" = daemon ] || return 1
+      _rmu_mid="${_rmu_path#/channels/}"
+      ;;
+    github.com)
+      _rmu_mid="${_rmu_path#/TurboPanel/"$_rmu_repo"/releases/}"
+      ;;
+    *) return 1 ;;
+  esac
+  [ "$_rmu_mid" != "$_rmu_path" ] || return 1
+  case "$_rmu_mid" in
+    */*) _rmu_mid="${_rmu_mid%/*}" ;;
+    *) return 1 ;;
+  esac
+  if [ "$_rmu_host" = dl.trbp.nl ]; then
+    case "$_rmu_mid" in
+      */*) return 1 ;;
+    esac
+    return 0
+  fi
+  case "$_rmu_mid" in
+    latest/download) return 0 ;;
+    download/*/*) return 1 ;;
+    download/?*) return 0 ;;
+  esac
+  return 1
 }
 
 # Download run.sh into $_script from the root-pinned origin. The caller has
@@ -362,7 +396,7 @@ tp_verb_update() {
         ;;
       --manifest-url)
         [ $# -ge 2 ] || tp_die "--manifest-url requires a value"
-        tp_manifest_url_allowed "$2" || tp_die "refusing --manifest-url $2: not a TurboPanel release rail"
+        tp_release_manifest_url_ok daemon "$2" || tp_die "refusing --manifest-url $2: not a TurboPanel release rail"
         tp_valid_url "$2" || tp_die "refusing --manifest-url $2"
         _manifest_url="$2"
         shift 2
@@ -439,14 +473,14 @@ tp_verb_update_instance() {
         ;;
       --manifest-url)
         [ $# -ge 2 ] || tp_die "--manifest-url requires a value"
-        tp_manifest_url_allowed "$2" || tp_die "refusing --manifest-url $2: not a TurboPanel release rail"
+        tp_release_manifest_url_ok instance "$2" || tp_die "refusing --manifest-url $2: not a TurboPanel release rail"
         tp_valid_url "$2" || tp_die "refusing --manifest-url $2"
         _manifest_url="$2"
         shift 2
         ;;
       --ui-manifest-url)
         [ $# -ge 2 ] || tp_die "--ui-manifest-url requires a value"
-        tp_ui_manifest_url_allowed "$2" || tp_die "refusing --ui-manifest-url $2: not the UI release rail"
+        tp_release_manifest_url_ok ui "$2" || tp_die "refusing --ui-manifest-url $2: not the UI release rail"
         tp_valid_url "$2" || tp_die "refusing --ui-manifest-url $2"
         _ui_manifest_url="$2"
         shift 2
