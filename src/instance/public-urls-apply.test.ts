@@ -173,6 +173,12 @@ test({
         { host: "https://b.example", source: "platform-ca" },
       ], {
         readForwardHosts: () => "",
+        instanceAcme: {
+          contactEmail: "acme@example.com",
+          tosAccepted: true,
+          directoryUrl: "https://acme-v02.api.letsencrypt.org/directory",
+          useStaging: false,
+        },
         runPlaybook: (playbook, extraArgs = []) => {
           calls.push({ playbook, args: [...extraArgs] });
           return Promise.resolve();
@@ -193,6 +199,28 @@ test({
       assertEquals(
         calls[0]!.args.includes("turbopanel_dev_user=dev"),
         true,
+      );
+      const hostnamesJson = calls[0]!.args.find((arg) =>
+        arg.startsWith("turbopanel_hostnames_json=")
+      );
+      assertEquals(hostnamesJson?.startsWith("{"), false);
+      assertEquals(
+        hostnamesJson?.includes('"source":"platform-ca"'),
+        true,
+      );
+      assertEquals(
+        calls[0]!.args.includes("turbopanel_acme_email=acme@example.com"),
+        true,
+      );
+      assertEquals(
+        calls[0]!.args.includes(
+          "turbopanel_acme_directory=https://acme-v02.api.letsencrypt.org/directory",
+        ),
+        true,
+      );
+      assertEquals(
+        calls[0]!.args.some((arg) => arg.startsWith("{")),
+        false,
       );
       assertEquals(
         calls[0]!.args.join(" ").includes("TURBOPANEL_TLS_CA_ROTATE"),
