@@ -7,6 +7,8 @@ import { composeFileArgs } from "./compose-files.ts";
 export type ResolvedComposeModel = {
   serviceNames: string[];
   services: Record<string, Record<string, unknown>>;
+  /** The whole `config --format json` document (top-level volumes, configs, secrets). */
+  document?: Record<string, unknown>;
 };
 
 type RunDockerFn = (
@@ -125,7 +127,7 @@ function parseConfigJson(stdout: string): ResolvedComposeModel {
   }
   const servicesRaw = parsed.services;
   if (servicesRaw === undefined || servicesRaw === null) {
-    return { serviceNames: [], services: {} };
+    return { serviceNames: [], services: {}, document: parsed };
   }
   if (!isRecord(servicesRaw)) {
     throw new Error(
@@ -139,7 +141,7 @@ function parseConfigJson(stdout: string): ResolvedComposeModel {
     }
   }
   const serviceNames = Object.keys(services).sort((a, b) => a.localeCompare(b));
-  return { serviceNames, services };
+  return { serviceNames, services, document: parsed };
 }
 
 /**

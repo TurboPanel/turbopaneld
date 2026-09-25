@@ -95,5 +95,12 @@
       },
       { "name": "uploadedCertId", "required": false, "type": "string" }
     ]
+  },
+  "EnvironmentDeployHostAccess": {
+    "instance": "src/contracts/commands/schemas.ts",
+    "daemon": "src/contracts/commands-contracts.ts",
+    "fields": [
+      { "name": "hostLevelApproved", "required": false, "type": "boolean" }
+    ]
   }
 }
