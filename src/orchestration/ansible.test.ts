@@ -2143,6 +2143,31 @@ test("stripe-listen role is unit-only, gated on its optional var, and never re-t
     false,
     "instance unit sets no Stripe variables",
   );
+  assertEquals(
+    instanceUnit.includes("TURBOPANEL_SYSTEM_EMAIL__PROVIDER=mailpit-smtp"),
+    true,
+    "deno dev: co-located instance uses mailpit-smtp for Mailpit capture",
+  );
+  assertEquals(
+    instanceUnit.includes("TURBOPANEL_SYSTEM_EMAIL__MAILPIT_SMTP_PORT="),
+    true,
+    "deno dev: Mailpit SMTP port is injected from mailpit_smtp_port",
+  );
+  assertEquals(
+    instanceUnit.includes("TURBOPANEL_SYSTEM_EMAIL__SMTP_HOST"),
+    false,
+    "deno dev: legacy generic SMTP host env is not set on the unit",
+  );
+  assertEquals(
+    workersDevVars.includes("TURBOPANEL_SYSTEM_EMAIL__PROVIDER=mailpit-api"),
+    true,
+    "workers dev vars: Mailpit HTTP API provider",
+  );
+  assertEquals(
+    workersDevVars.includes("TURBOPANEL_SYSTEM_EMAIL__MAILPIT_API_URL="),
+    true,
+    "workers dev vars: Mailpit API base URL",
+  );
 });
 
 test("docker-backed optional roles gate readiness and stop disabled containers", async () => {
