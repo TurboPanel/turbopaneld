@@ -5,8 +5,9 @@
  * see the control-plane certificate. The scheduler reads
  * `instance-hostnames.json` and each `letsencrypt-<host>.crt`. A leaf is
  * due when the file is missing or inside the issuer renewal window
- * (`renewal_window_ratio` 0.33). It checks when the daemon starts, then
- * every few hours.
+ * (`renewal_window_ratio` 0.33). A leaf that is not due is reported once,
+ * so the control plane can show its expiry without waiting for renewal.
+ * The check runs when the daemon starts, then every few hours.
  *
  * A due name runs the same HTTP-01 window, preflight, and issue path as
  * public-URL apply. {@link withInstanceAcmeWindowLock} keeps that to one
@@ -100,6 +101,8 @@ type HostBackoff = {
 type RenewalState = {
   reloadPending: boolean;
   hosts: Map<string, HostBackoff>;
+  /** `notAfter` values already sent. A repeat check stays quiet. */
+  reported: Map<string, string>;
 };
 
 export type InstanceAcmeRenewalSchedulerOptions = {
@@ -136,7 +139,11 @@ export class InstanceAcmeRenewalScheduler {
   readonly #withLock: typeof withInstanceAcmeWindowLock;
   readonly #send: (message: InstanceAcmeIssuanceEventMessage) => boolean;
   readonly #pending = new Map<string, InstanceAcmeIssuanceEventMessage>();
-  #state: RenewalState = { reloadPending: false, hosts: new Map() };
+  #state: RenewalState = {
+    reloadPending: false,
+    hosts: new Map(),
+    reported: new Map(),
+  };
   #stateLoaded = false;
   #started = false;
   #generation = 0;
@@ -194,6 +201,9 @@ export class InstanceAcmeRenewalScheduler {
     for (const [host, message] of this.#pending) {
       if (!this.#trySend(message)) return;
       this.#pending.delete(host);
+      if (message.ok && message.notAfter) {
+        this.#state.reported.set(host, message.notAfter);
+      }
     }
   }
 
@@ -277,6 +287,8 @@ export class InstanceAcmeRenewalScheduler {
       if (!this.#current(generation)) return;
       if (this.#state.reloadPending) await this.#retryReload();
       if (!this.#current(generation)) return;
+      await this.#reportCurrentLeaves();
+      if (!this.#current(generation)) return;
       const ready = await this.#readyHosts();
       if (ready.length === 0 || !this.#current(generation)) return;
       await this.#withLock(() => this.#renew(generation));
@@ -337,6 +349,50 @@ export class InstanceAcmeRenewalScheduler {
       if (opened) await closeOnce().catch(() => undefined);
       await this.#fail(hosts, errorText(err));
     }
+  }
+
+  /**
+   * Tell the control plane about a leaf that is already valid and outside
+   * the renewal window. Save & Apply installs that file itself, and a due
+   * check would otherwise stay quiet until the certificate is near expiry.
+   */
+  async #reportCurrentLeaves(): Promise<void> {
+    const listed = await this.#listHostnames();
+    const current = new Set(listed.filter(isRenewableHost));
+    this.#forgetAbsent(current);
+    const now = this.#nowMs();
+    const at = new Date(now).toISOString();
+    let changed = false;
+    const hosts = [...current].sort((a, b) => a.localeCompare(b));
+    for (const host of hosts) {
+      const notAfter = await this.#unreportedCurrentNotAfter(host, now);
+      if (!notAfter) continue;
+      this.#emit({
+        type: "instance-acme-issuance-event",
+        hostname: host,
+        ok: true,
+        notAfter,
+        at,
+      });
+      changed = true;
+      logInfo(
+        "instance",
+        `instance-acme-issuance-event ok hostname=${host}`,
+      );
+    }
+    if (changed) await this.#save();
+  }
+
+  async #unreportedCurrentNotAfter(
+    host: string,
+    nowMs: number,
+  ): Promise<string | undefined> {
+    if (this.#inBackoff(host, nowMs)) return undefined;
+    if (await this.#hostDue(host, nowMs)) return undefined;
+    const notAfter = await this.#installedNotAfter(host);
+    if (!notAfter) return undefined;
+    if (this.#state.reported.get(host) === notAfter) return undefined;
+    return notAfter;
   }
 
   async #reportInstalled(hosts: readonly string[]): Promise<void> {
@@ -491,6 +547,11 @@ export class InstanceAcmeRenewalScheduler {
       this.#state.hosts.delete(host);
       changed = true;
     }
+    for (const host of this.#state.reported.keys()) {
+      if (current.has(host)) continue;
+      this.#state.reported.delete(host);
+      changed = true;
+    }
     return changed;
   }
 
@@ -564,7 +625,7 @@ async function readRenewalState(layout: LayoutPaths): Promise<RenewalState> {
 }
 
 function emptyState(): RenewalState {
-  return { reloadPending: false, hosts: new Map() };
+  return { reloadPending: false, hosts: new Map(), reported: new Map() };
 }
 
 function parseRenewalState(raw: string): RenewalState {
@@ -587,7 +648,19 @@ function parseRenewalState(raw: string): RenewalState {
   return {
     reloadPending: record.reloadPending === true,
     hosts,
+    reported: reportedFromUnknown(record.reported),
   };
+}
+
+function reportedFromUnknown(value: unknown): Map<string, string> {
+  const reported = new Map<string, string>();
+  if (typeof value !== "object" || value === null) return reported;
+  for (const [host, notAfter] of Object.entries(value)) {
+    if (!isRenewableHost(host) || typeof notAfter !== "string") continue;
+    if (notAfter.length === 0) continue;
+    reported.set(host, notAfter);
+  }
+  return reported;
 }
 
 function backoffFromUnknown(value: unknown): HostBackoff | null {
@@ -611,8 +684,10 @@ async function writeRenewalState(
   await Deno.mkdir(dirname(path), { recursive: true, mode: 0o750 });
   const hosts: Record<string, HostBackoff> = {};
   for (const [host, entry] of state.hosts) hosts[host] = entry;
+  const reported: Record<string, string> = {};
+  for (const [host, notAfter] of state.reported) reported[host] = notAfter;
   const text = `${
-    JSON.stringify({ reloadPending: state.reloadPending, hosts })
+    JSON.stringify({ reloadPending: state.reloadPending, hosts, reported })
   }\n`;
   const tmp = `${path}.tmp`;
   await Deno.writeTextFile(tmp, text, { mode: 0o640 });
