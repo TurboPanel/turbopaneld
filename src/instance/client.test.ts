@@ -5567,6 +5567,8 @@ async function startConnectedClient(
     forceApplyOwned?: boolean;
     /** Control-plane origin the client dials (default `https://instance.test`). */
     instanceBaseUrl?: string;
+    /** What `/secrets/decrypt` opens each ciphertext to (default: nothing). */
+    decrypt?: (ciphertexts: string[]) => (string | null)[];
   } = {},
 ): Promise<{
   client: InstanceClient;
@@ -5596,7 +5598,7 @@ async function startConnectedClient(
   );
   api.script(
     "/api/daemon/v1/secrets/decrypt",
-    () => new Response(JSON.stringify({ plaintexts: [] }), { status: 200 }),
+    (init) => fakeDecryptResponse(init, options.decrypt),
   );
   api.script(
     "/api/daemon/v1/deployments/secrets/rehydrate",
@@ -7026,6 +7028,213 @@ it({
       setDrivetempExecutorForTests(null);
       setDrivetempDropinWriterForTests(null);
       await Deno.remove(tempDir, { recursive: true });
+    }
+  },
+});
+
+/** `/secrets/decrypt` for `startConnectedClient`: opens via `decrypt`, or to nothing. */
+function fakeDecryptResponse(
+  init: RequestInit | undefined,
+  decrypt: ((ciphertexts: string[]) => (string | null)[]) | undefined,
+): Response {
+  const body = JSON.parse(String(init?.body ?? "{}")) as {
+    ciphertexts?: string[];
+  };
+  const plaintexts = decrypt ? decrypt(body.ciphertexts ?? []) : [];
+  return new Response(JSON.stringify({ plaintexts }), { status: 200 });
+}
+
+const SEALED_KEY_ENVELOPE = "tpdaemon.v1.server.key.sealed-uploaded-key";
+const SEALED_TUNNEL_ENVELOPE = "tpdaemon.v1.server.key.sealed-tunnel-token";
+const OPENED_KEY_PEM = "opened-uploaded-key-pem";
+const OPENED_TUNNEL_TOKEN = "opened-tunnel-token";
+
+function openSealedFixtures(ciphertexts: string[]): (string | null)[] {
+  return ciphertexts.map((ciphertext) => {
+    if (ciphertext === SEALED_KEY_ENVELOPE) return OPENED_KEY_PEM;
+    if (ciphertext === SEALED_TUNNEL_ENVELOPE) return OPENED_TUNNEL_TOKEN;
+    return null;
+  });
+}
+
+it({
+  name:
+    "public-urls-update opens a sealed uploaded key before the certificate is applied",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const applied: unknown[][] = [];
+    const restoreHooks = installClientTestHooks({
+      applyPublicUrls: (hostnames) => {
+        applied.push(hostnames as unknown[]);
+        return Promise.resolve();
+      },
+    });
+    const { socket, restore } = await startConnectedClient({
+      decrypt: openSealedFixtures,
+    });
+    try {
+      socket.receive({
+        type: "public-urls-update",
+        id: "urls-sealed",
+        urls: ["https://panel.example.test"],
+        hostnames: [
+          { host: "panel.example.test", source: "platform-ca" },
+          {
+            host: "uploaded.example.test",
+            source: "uploaded",
+            uploadedCertId: "cert-1",
+            certPem: "uploaded-cert-pem",
+            keyEnvelope: SEALED_KEY_ENVELOPE,
+          },
+        ],
+        at: new Date().toISOString(),
+      });
+      const result = await waitFor(
+        "sealed public-urls-update-result",
+        () =>
+          framesOfType(socket, "public-urls-update-result").find((f) =>
+            (f as { id?: string }).id === "urls-sealed"
+          ) as { ok?: boolean; error?: string } | undefined,
+      );
+      assertEquals(result.ok, true, result.error);
+      assertEquals(applied.length, 1);
+      assertEquals(applied[0], [
+        { host: "panel.example.test", source: "platform-ca" },
+        {
+          host: "uploaded.example.test",
+          source: "uploaded",
+          uploadedCertId: "cert-1",
+          certPem: "uploaded-cert-pem",
+          keyPem: OPENED_KEY_PEM,
+        },
+      ]);
+    } finally {
+      restore();
+      restoreHooks();
+    }
+  },
+});
+
+it({
+  name:
+    "public-urls-update fails, without applying, when a key envelope cannot be opened",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    let applyCalls = 0;
+    const restoreHooks = installClientTestHooks({
+      applyPublicUrls: () => {
+        applyCalls += 1;
+        return Promise.resolve();
+      },
+    });
+    const { socket, restore } = await startConnectedClient({
+      decrypt: (ciphertexts) => ciphertexts.map(() => null),
+    });
+    try {
+      socket.receive({
+        type: "public-urls-update",
+        id: "urls-unopenable",
+        urls: ["https://uploaded.example.test"],
+        hostnames: [{
+          host: "uploaded.example.test",
+          source: "uploaded",
+          uploadedCertId: "cert-1",
+          certPem: "uploaded-cert-pem",
+          keyEnvelope: SEALED_KEY_ENVELOPE,
+        }],
+        at: new Date().toISOString(),
+      });
+      const result = await waitFor(
+        "unopenable public-urls-update-result",
+        () =>
+          framesOfType(socket, "public-urls-update-result").find((f) =>
+            (f as { id?: string }).id === "urls-unopenable"
+          ) as { ok?: boolean; error?: string } | undefined,
+      );
+      assertEquals(result.ok, false);
+      assertEquals(String(result.error).includes("could not be opened"), true);
+      assertEquals(applyCalls, 0);
+    } finally {
+      restore();
+      restoreHooks();
+    }
+  },
+});
+
+it({
+  name:
+    "tunnel-token opens a sealed token, still takes a legacy one, and refuses an empty message",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const written: string[] = [];
+    const restoreHooks = installClientTestHooks({
+      writeInstanceTunnelToken: (token) => {
+        written.push(token);
+        return Promise.resolve();
+      },
+    });
+    const { socket, restore } = await startConnectedClient({
+      decrypt: openSealedFixtures,
+    });
+    const resultFor = (id: string) =>
+      waitFor(
+        `tunnel-token-result ${id}`,
+        () =>
+          framesOfType(socket, "tunnel-token-result").find((f) =>
+            (f as { id?: string }).id === id
+          ) as { ok?: boolean; error?: string } | undefined,
+      );
+    try {
+      socket.receive({
+        type: "tunnel-token",
+        id: "tun-sealed",
+        tokenEnvelope: SEALED_TUNNEL_ENVELOPE,
+        at: new Date().toISOString(),
+      });
+      assertEquals((await resultFor("tun-sealed")).ok, true);
+
+      socket.receive({
+        type: "tunnel-token",
+        id: "tun-legacy",
+        token: "legacy-plaintext-token",
+        at: new Date().toISOString(),
+      });
+      assertEquals((await resultFor("tun-legacy")).ok, true);
+
+      // Neither field: a failure, never an empty token that tears the tunnel down.
+      socket.receive({
+        type: "tunnel-token",
+        id: "tun-empty",
+        at: new Date().toISOString(),
+      });
+      const empty = await resultFor("tun-empty");
+      assertEquals(empty.ok, false);
+
+      assertEquals(written, [OPENED_TUNNEL_TOKEN, "legacy-plaintext-token"]);
+    } finally {
+      restore();
+      restoreHooks();
     }
   },
 });

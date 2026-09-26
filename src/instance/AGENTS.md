@@ -42,6 +42,18 @@ pre-provisioned `server.id`) there and the daemon enrols on the next check.
 `enrollDaemon` never rewrites an unchanged `server.id` and replaces a changed
 one by rename (the wizard's file is instance-owned 0640 in a setgid dir).
 
+**Sealed instance secrets (`sealed-instance-secrets-v1`).** This daemon
+advertises the feature in `hello.features` (`DAEMON_WIRE_FEATURES`). A control
+plane that sees it sends an uploaded control-plane key on `public-urls-update`
+as `hostnames[].keyEnvelope` and a non-empty tunnel token on `tunnel-token` as
+`tokenEnvelope` — recipient-bound `tpdaemon` envelopes, so neither sits in
+plaintext in the cell outbox. `#openHostnameKeys` / `#resolveTunnelToken` open
+them through `DaemonApiClient.decryptSecrets` (`POST /api/daemon/v1/secrets/decrypt`),
+the same path every deploy secret uses. An envelope that cannot be opened fails
+the request (nothing is applied, the tunnel is not torn down). The legacy
+plaintext `keyPem` / `token` from an older control plane is still accepted
+until both floors pass the release that ships this; then those fields go.
+
 ### Instance Let's Encrypt renewal (`src/instance/instance-acme-renew.ts`)
 
 `InstanceAcmeRenewalScheduler` renews the control plane's own Let's Encrypt
