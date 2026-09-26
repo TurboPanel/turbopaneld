@@ -26,7 +26,7 @@ import { ManifestSignatureError } from "./errors.ts";
  * coordinated change to both plus the CI `RELEASE_SIGNING_KEY` secret.
  */
 export const RELEASE_SIGNING_PUBLIC_KEY_HEX =
-  "ce1a5ade02f9d2a0b0687d0f9cfd341bcec7a129ed426c37fc2686c22d6b43db";
+  "e854267676c6700a79ff19b89211b76d609af142f4c2c1cb011339346d1cea0a";
 
 /** Only signature algorithm the daemon accepts. */
 export const MANIFEST_SIGNATURE_ALG = "ed25519";

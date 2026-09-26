@@ -411,7 +411,7 @@ tp_manifest_binary_artifact_field() {
 # signed by any other key, or altered after signing is refused before a single
 # artifact is downloaded. python3 canonicalises (already a host prerequisite),
 # openssl verifies (Ed25519 needs OpenSSL >= 1.1.1; Debian 12+ ships 3.x).
-TP_RELEASE_SIGNING_PUBLIC_KEY="ce1a5ade02f9d2a0b0687d0f9cfd341bcec7a129ed426c37fc2686c22d6b43db"
+TP_RELEASE_SIGNING_PUBLIC_KEY="e854267676c6700a79ff19b89211b76d609af142f4c2c1cb011339346d1cea0a"
 
 # The canonicaliser, printed so it can be run here and byte-compared in tests
 # (src/update/signing.test.ts). stdin: manifest JSON; stdout: canonical bytes.
