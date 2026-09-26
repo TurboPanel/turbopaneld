@@ -30,6 +30,7 @@
  */
 
 import { join } from "@std/path";
+import { hostSudoArgs } from "../../permissions/host-sudo.ts";
 import type { LayoutPaths } from "../../paths/layout.ts";
 import {
   principalHomePath,
@@ -290,12 +291,18 @@ export async function sealPublishedRelease(
   runFn: RunFn = runPrivileged,
 ): Promise<void> {
   const owner = `root:${principalUnixGroupName(username)}`;
-  const chown = await runFn("sudo", ["-n", "chown", "-R", owner, releaseDir]);
+  const chown = await runFn(
+    "sudo",
+    hostSudoArgs(["-n", "chown", "-R", owner, releaseDir]),
+  );
   if (!chown.success) {
     throw new Error(chown.stderr || `Failed to chown release ${releaseDir}`);
   }
   const mode = RELEASE_PUBLISHED_MODE.toString(8).padStart(4, "0");
-  const chmod = await runFn("sudo", ["-n", "chmod", mode, releaseDir]);
+  const chmod = await runFn(
+    "sudo",
+    hostSudoArgs(["-n", "chmod", mode, releaseDir]),
+  );
   if (!chmod.success) {
     throw new Error(chmod.stderr || `Failed to chmod release ${releaseDir}`);
   }
@@ -311,7 +318,10 @@ export async function removePublishedRelease(
   releaseDir: string,
   runFn: RunFn = runPrivileged,
 ): Promise<void> {
-  const result = await runFn("sudo", ["-n", "rm", "-rf", "--", releaseDir]);
+  const result = await runFn(
+    "sudo",
+    hostSudoArgs(["-n", "rm", "-rf", "--", releaseDir]),
+  );
   if (!result.success) {
     throw new Error(result.stderr || `Failed to remove release ${releaseDir}`);
   }

@@ -3,6 +3,7 @@ import {
   resolveDeployedComposePaths,
   resolveEnvironmentDeploymentDir,
 } from "../deploy/compose-files.ts";
+import { hostSudoArgs } from "../permissions/host-sudo.ts";
 import { removeSecretTree } from "../deploy/secret-runtime.ts";
 import {
   createStreamedRunner,
@@ -86,7 +87,10 @@ async function removeEnvironmentSiteReleases(
       entry.serviceId,
     );
     try {
-      const result = await runFn("sudo", ["-n", "rm", "-rf", "--", path]);
+      const result = await runFn(
+        "sudo",
+        hostSudoArgs(["-n", "rm", "-rf", "--", path]),
+      );
       if (!result.success) {
         logWarn(
           "commands",

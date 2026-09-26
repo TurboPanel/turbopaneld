@@ -10,6 +10,7 @@
  */
 
 import { dirname, join } from "@std/path";
+import { hostSudoArgs } from "../permissions/host-sudo.ts";
 import type { InstanceAcmeWireSettings } from "../contracts/cell-messages.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 import { logWarn } from "../util/logger.ts";
@@ -71,12 +72,15 @@ export async function reloadControlPlaneCaddy(
   deps: { run?: InstanceAcmeCommand } = {},
 ): Promise<void> {
   const run = deps.run ?? defaultCommand;
-  const result = await run("sudo", [
-    "-n",
-    "systemctl",
-    "reload",
-    CONTROL_PLANE_CADDY_SERVICE,
-  ]);
+  const result = await run(
+    "sudo",
+    hostSudoArgs([
+      "-n",
+      "systemctl",
+      "reload",
+      CONTROL_PLANE_CADDY_SERVICE,
+    ]),
+  );
   if (!result.ok) {
     throw new Error(
       result.stderr.trim() || "control-plane Caddy reload failed",
@@ -200,7 +204,10 @@ async function defaultCommand(
 }
 
 async function inspectPort80(run: InstanceAcmeCommand): Promise<Port80Holder> {
-  const sudo = await run("sudo", ["-n", "ss", "-H", "-ltnp", "sport = :80"]);
+  const sudo = await run(
+    "sudo",
+    hostSudoArgs(["-n", "ss", "-H", "-ltnp", "sport = :80"]),
+  );
   const listed = sudo.ok
     ? sudo
     : await run("ss", ["-H", "-ltnp", "sport = :80"]);
@@ -382,25 +389,31 @@ async function sitesHoldOnlyReserved(dir: string): Promise<boolean> {
 }
 
 async function reloadHostingCaddy(run: InstanceAcmeCommand): Promise<void> {
-  const result = await run("sudo", [
-    "-n",
-    "systemctl",
-    "reload",
-    HOSTING_CADDY_SERVICE,
-  ]);
+  const result = await run(
+    "sudo",
+    hostSudoArgs([
+      "-n",
+      "systemctl",
+      "reload",
+      HOSTING_CADDY_SERVICE,
+    ]),
+  );
   if (!result.ok) {
     throw new Error(result.stderr.trim() || "hosting Caddy reload failed");
   }
 }
 
 async function disableHostingCaddy(run: InstanceAcmeCommand): Promise<void> {
-  const result = await run("sudo", [
-    "-n",
-    "systemctl",
-    "disable",
-    "--now",
-    HOSTING_CADDY_SERVICE,
-  ]);
+  const result = await run(
+    "sudo",
+    hostSudoArgs([
+      "-n",
+      "systemctl",
+      "disable",
+      "--now",
+      HOSTING_CADDY_SERVICE,
+    ]),
+  );
   if (!result.ok) {
     throw new Error(result.stderr.trim() || "hosting Caddy disable failed");
   }
@@ -737,12 +750,15 @@ async function readIssuerLog(layout: LayoutPaths): Promise<string> {
 }
 
 async function startIssuer(run: InstanceAcmeCommand): Promise<void> {
-  const result = await run("sudo", [
-    "-n",
-    "systemctl",
-    "start",
-    INSTANCE_ACME_SERVICE,
-  ]);
+  const result = await run(
+    "sudo",
+    hostSudoArgs([
+      "-n",
+      "systemctl",
+      "start",
+      INSTANCE_ACME_SERVICE,
+    ]),
+  );
   if (!result.ok) {
     throw new Error(
       result.stderr.trim() || "instance ACME issuer did not start",
@@ -751,12 +767,15 @@ async function startIssuer(run: InstanceAcmeCommand): Promise<void> {
 }
 
 async function stopIssuer(run: InstanceAcmeCommand): Promise<Error | null> {
-  const result = await run("sudo", [
-    "-n",
-    "systemctl",
-    "stop",
-    INSTANCE_ACME_SERVICE,
-  ]);
+  const result = await run(
+    "sudo",
+    hostSudoArgs([
+      "-n",
+      "systemctl",
+      "stop",
+      INSTANCE_ACME_SERVICE,
+    ]),
+  );
   if (result.ok) return null;
   return new Error(result.stderr.trim() || "instance ACME issuer did not stop");
 }
@@ -924,19 +943,22 @@ async function stageAndInstall(
   const staged = await Deno.makeTempFile({ prefix: "tp-instance-acme-" });
   try {
     await Deno.writeFile(staged, bytes, { mode: 0o600 });
-    const installed = await run("sudo", [
-      "-n",
-      "install",
-      "-m",
-      modeText(mode),
-      "-o",
-      "root",
-      "-g",
-      INSTANCE_ACME_CERT_GROUP,
-      "--",
-      staged,
-      dest,
-    ]);
+    const installed = await run(
+      "sudo",
+      hostSudoArgs([
+        "-n",
+        "install",
+        "-m",
+        modeText(mode),
+        "-o",
+        "root",
+        "-g",
+        INSTANCE_ACME_CERT_GROUP,
+        "--",
+        staged,
+        dest,
+      ]),
+    );
     if (!installed.ok) {
       throw new Error(installed.stderr.trim() || `failed to install ${dest}`);
     }
@@ -957,16 +979,22 @@ async function ensureInstalledMode(
   } catch (err) {
     if (!needsRoot(err)) throw err;
   }
-  const grouped = await run("sudo", [
-    "-n",
-    "chown",
-    `:${INSTANCE_ACME_CERT_GROUP}`,
-    dest,
-  ]);
+  const grouped = await run(
+    "sudo",
+    hostSudoArgs([
+      "-n",
+      "chown",
+      `:${INSTANCE_ACME_CERT_GROUP}`,
+      dest,
+    ]),
+  );
   if (!grouped.ok) {
     throw new Error(grouped.stderr.trim() || `failed to chgrp ${dest}`);
   }
-  const chmod = await run("sudo", ["-n", "chmod", modeText(mode), dest]);
+  const chmod = await run(
+    "sudo",
+    hostSudoArgs(["-n", "chmod", modeText(mode), dest]),
+  );
   if (!chmod.ok) {
     throw new Error(chmod.stderr.trim() || `failed to chmod ${dest}`);
   }
@@ -992,7 +1020,7 @@ async function readFilePrivileged(
     return await Deno.readFile(path);
   } catch (err) {
     if (!needsRoot(err)) throw err;
-    const result = await run("sudo", ["-n", "cat", "--", path]);
+    const result = await run("sudo", hostSudoArgs(["-n", "cat", "--", path]));
     if (!result.ok) throw err;
     return new TextEncoder().encode(result.stdout);
   }
@@ -1008,7 +1036,7 @@ async function readDestBytes(
     if (err instanceof Deno.errors.NotFound) return null;
     if (!needsRoot(err)) throw err;
   }
-  const result = await run("sudo", ["-n", "cat", "--", path]);
+  const result = await run("sudo", hostSudoArgs(["-n", "cat", "--", path]));
   if (result.ok) return new TextEncoder().encode(result.stdout);
   if (isAbsentFile(result.stderr)) return null;
   throw new Error(result.stderr.trim() || `failed to read ${path}`);
@@ -1035,7 +1063,7 @@ async function readIssuerInspection(
 async function sudoBytes(args: readonly string[]): Promise<Uint8Array | null> {
   try {
     const cmd = new Deno.Command("sudo", {
-      args: [...args],
+      args: hostSudoArgs([...args]),
       stdout: "piped",
       stderr: "piped",
     });
@@ -1061,18 +1089,21 @@ async function writeTextPrivileged(
   } catch (err) {
     if (!needsRoot(err)) throw err;
   }
-  const tee = await run("sudo", ["-n", "tee", path], text);
+  const tee = await run("sudo", hostSudoArgs(["-n", "tee", path]), text);
   if (!tee.ok) throw new Error(tee.stderr.trim() || `failed to write ${path}`);
-  const chown = await run("sudo", [
-    "-n",
-    "chown",
-    `root:${INSTANCE_ACME_CERT_GROUP}`,
-    path,
-  ]);
+  const chown = await run(
+    "sudo",
+    hostSudoArgs([
+      "-n",
+      "chown",
+      `root:${INSTANCE_ACME_CERT_GROUP}`,
+      path,
+    ]),
+  );
   if (!chown.ok) {
     throw new Error(chown.stderr.trim() || `failed to chown ${path}`);
   }
-  const chmod = await run("sudo", ["-n", "chmod", "0640", path]);
+  const chmod = await run("sudo", hostSudoArgs(["-n", "chmod", "0640", path]));
   if (!chmod.ok) {
     throw new Error(chmod.stderr.trim() || `failed to chmod ${path}`);
   }

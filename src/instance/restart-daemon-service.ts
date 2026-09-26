@@ -1,5 +1,6 @@
 import { logWarn } from "../util/logger.ts";
 
+import { hostSudoArgs } from "../permissions/host-sudo.ts";
 export const DEFAULT_DAEMON_UNIT = "turbopaneld";
 
 function stripLogInjection(text: string): string {
@@ -42,7 +43,7 @@ export async function restartDaemonService(
   const runSystemctl = options.runSystemctl ??
     (async (args: string[]) => {
       const result = await new Deno.Command("sudo", {
-        args,
+        args: hostSudoArgs(args),
         stdin: "null",
         stdout: "piped",
         stderr: "piped",

@@ -1,4 +1,5 @@
 import { dirname, join } from "@std/path";
+import { hostSudoArgs } from "../permissions/host-sudo.ts";
 import { resolveLayout } from "../paths/layout.ts";
 const RUNTIME_ENV_FILENAME = "runtime.env";
 const PUBLIC_URLS_KEY = "TURBOPANEL_PUBLIC_URLS=";
@@ -38,7 +39,7 @@ async function readEnvFileMeta(envPath: string): Promise<EnvFileMeta | null> {
 
 async function runSudo(args: string[]): Promise<void> {
   const result = await new Deno.Command("sudo", {
-    args: ["-n", ...args],
+    args: hostSudoArgs(["-n", ...args]),
     stdout: "piped",
     stderr: "piped",
   }).output();

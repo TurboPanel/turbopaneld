@@ -23,6 +23,7 @@ import {
   isValidIpv4Literal,
   type ManagedApplyPayload,
 } from "../contracts/commands-contracts.ts";
+import { hostSudoArgs } from "../permissions/host-sudo.ts";
 import { logWarn, sanitizeForLog } from "../util/logger.ts";
 
 /** Parent chain hung off `DOCKER-USER`; holds one jump per managed cluster. */
@@ -88,7 +89,7 @@ async function runIptables(
   if (runOverride) return await runOverride("iptables", args);
   const direct = await spawnHost("iptables", args);
   if (direct.success || !isPermissionDenied(direct)) return direct;
-  return await spawnHost("sudo", ["-n", "iptables", ...args]);
+  return await spawnHost("sudo", hostSudoArgs(["-n", "iptables", ...args]));
 }
 
 function alreadyExists(result: ManagedFirewallRunResult): boolean {

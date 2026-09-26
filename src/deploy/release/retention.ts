@@ -26,6 +26,7 @@
  */
 
 import { join } from "@std/path";
+import { hostSudoArgs } from "../../permissions/host-sudo.ts";
 import type { RunFn } from "../ensure-principal.ts";
 import {
   type ReleasePaths,
@@ -73,7 +74,10 @@ async function listReleaseIdsPrivileged(
   releasesDir: string,
   runFn: RunFn,
 ): Promise<string[]> {
-  const result = await runFn("sudo", ["-n", "ls", "-1t", "--", releasesDir]);
+  const result = await runFn(
+    "sudo",
+    hostSudoArgs(["-n", "ls", "-1t", "--", releasesDir]),
+  );
   if (!result.success) {
     if (
       result.stderr.toLowerCase().includes("no such file") ||
@@ -228,7 +232,10 @@ export async function reclaimRemovedReleaseTrees(
       ref.serviceId,
     );
     try {
-      const result = await runFn("sudo", ["-n", "rm", "-rf", "--", path]);
+      const result = await runFn(
+        "sudo",
+        hostSudoArgs(["-n", "rm", "-rf", "--", path]),
+      );
       if (!result.success) {
         params.onOutput?.(
           "stderr",

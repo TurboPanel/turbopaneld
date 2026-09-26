@@ -1,0 +1,1231 @@
+#!/bin/sh
+# tp-host — the daemon account's only root entry point for host files,
+# services, accounts and networking (POSIX sh, root:root 0755).
+#
+# /etc/sudoers.d/tp grants `tp` this script instead of the raw utilities it
+# wraps (install, rm, cp, mv, chown, chmod, tee, find, systemctl, useradd,
+# iptables, ip, wg, …). Each of those, with free arguments, is a one-line root
+# shell (`find / -exec sh`, `tee /etc/sudoers.d/x`, `systemctl link /tmp/u`,
+# `sysctl kernel.core_pattern=|…`, `ip netns exec … sh`, `iptables --modprobe`).
+# Here every verb accepts only the argument shapes the daemon produces, every
+# path must fall inside a tree TurboPanel owns, and nothing follows a symlink:
+#
+# - Paths are pinned, not trusted. The parent directory is entered with
+#   `cd -P` and `pwd -P` must equal the path as written, so no component was a
+#   symlink; the operation then runs relative to that pinned directory.
+# - Writes land through a root-only 0700 scratch directory created inside the
+#   pinned directory and are renamed into place with `mv -T`, which replaces a
+#   symlink entry instead of writing through it.
+# - Root reads open the file on a descriptor and check /proc/self/fd, so a
+#   swapped-in symlink is caught on the file actually opened.
+# - Source files the daemon staged are read *as the daemon account*
+#   (setpriv), so root never copies anything the daemon could not read.
+# - systemd unit files must match a directive allowlist: tenant services run
+#   as the principal with no capabilities, and nothing gets a `+`/`!` exec
+#   prefix.
+#
+# What this does not contain (see AGENTS.md → Managed-host privilege
+# boundary): Docker (the daemon account is in the `docker` group), the root
+# hosting Caddy whose config lives in the daemon-owned config tree, and root
+# engine config validation.
+set -eu
+umask 077
+
+tp_die() {
+  printf 'tp-host: %s\n' "$*" >&2
+  exit 1
+}
+
+_nl="$(printf '\nx')"
+_nl="${_nl%x}"
+
+# --- mode -----------------------------------------------------------------
+# Under sudo (uid 0) the environment is reset, so nothing below can be steered
+# by the caller. Unprivileged, the script only runs in test mode, rooted at
+# TP_HOST_TEST_PREFIX, printing the privileged commands instead of running them.
+if [ "$(id -u)" = "0" ]; then
+  TP_TEST=""
+  P=""
+  CALLER_UID="${SUDO_UID:-}"
+  CALLER_GID="${SUDO_GID:-}"
+  case "$CALLER_UID" in ''|*[!0-9]*) tp_die "must be run through sudo" ;; esac
+  case "$CALLER_GID" in ''|*[!0-9]*) tp_die "must be run through sudo" ;; esac
+else
+  [ -n "${TP_HOST_TEST_PREFIX:-}" ] || tp_die "must run as root (sudo -n tp-host …)"
+  TP_TEST=1
+  P="$TP_HOST_TEST_PREFIX"
+  CALLER_UID="$(id -u)"
+  CALLER_GID="$(id -g)"
+fi
+
+_self_dir="$(CDPATH='' cd -P -- "$(dirname -- "$0")" && pwd -P)"
+INSTALL_ROOT="$(CDPATH='' cd -P -- "$_self_dir/.." && pwd -P)"
+
+R_CONFIG="$P/etc/turbopanel"
+R_STATE="$P/var/lib/turbopanel"
+R_LOG="$P/var/log/turbopanel"
+R_RUN="$P/run/turbopanel"
+R_PRINCIPALS="$P/srv/users"
+R_SSHKEYS="$P/etc/ssh/turbopanel"
+R_UNITS="$P/etc/systemd/system"
+R_SSHD_DROPINS="$P/etc/ssh/sshd_config.d"
+R_WG="$P/etc/wireguard"
+R_SYSCTL="$P/etc/sysctl.d"
+# A principal home root the operator moved is recorded root-side, next to this
+# script — never taken from the daemon's own environment.
+if [ -f "$_self_dir/tp-host.conf" ] && [ ! -L "$_self_dir/tp-host.conf" ]; then
+  _conf_root="$(sed -n 's/^principal_home_root=\(\/[A-Za-z0-9._\/-]*\)$/\1/p' "$_self_dir/tp-host.conf" | head -1)"
+  [ -n "$_conf_root" ] && R_PRINCIPALS="$P$_conf_root"
+fi
+
+PRINCIPAL_ID_MIN=15001
+PRINCIPAL_ID_MAX=60000
+# Service identities and runtime entitlements (orchestration/runtime-registry.json).
+SERVICE_ID_MIN=9900
+SERVICE_ID_MAX=9999
+ENGINE_USERS="tpnginx tpapache tpols tpcaddysite"
+
+# --- running the real thing ------------------------------------------------
+# Privileged commands. In test mode they are printed, one argv element per
+# field, so a test can assert exactly what root would have run.
+tp_run() {
+  if [ -n "$TP_TEST" ]; then
+    printf 'EXEC'
+    for _a in "$@"; do printf ' [%s]' "$_a"; done
+    printf '\n'
+    return 0
+  fi
+  "$@"
+}
+
+tp_exec() {
+  if [ -n "$TP_TEST" ]; then
+    tp_run "$@"
+    exit 0
+  fi
+  exec "$@"
+}
+
+# Run as the account that owns the thing being changed (or the caller).
+tp_as() {
+  _as_uid="$1"
+  _as_gid="$2"
+  shift 2
+  if [ -n "$TP_TEST" ] || [ "$_as_uid" = "0" ]; then
+    "$@"
+    return
+  fi
+  setpriv --reuid="$_as_uid" --regid="$_as_gid" --clear-groups -- "$@"
+}
+
+# --- paths -----------------------------------------------------------------
+
+# Absolute, normalised, no `.`/`..`/empty segment, no trailing slash, and a
+# closed character set (no whitespace, globs, quotes or controls).
+tp_path_shape_ok() {
+  case "$1" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+  case "$1" in
+    *//*|*/./*|*/../*|*/.|*/..|*/|*"$_nl"*) return 1 ;;
+    *[!A-Za-z0-9._@:+,=/-]*) return 1 ;;
+  esac
+  return 0
+}
+
+tp_under() {
+  case "$1" in
+    "$2"|"$2"/*) return 0 ;;
+  esac
+  return 1
+}
+
+# Which managed place a path is. Prints the class, or fails.
+tp_path_class() {
+  _pc="$1"
+  tp_path_shape_ok "$_pc" || return 1
+  if tp_under "$_pc" "$R_PRINCIPALS"; then echo principal; return 0; fi
+  for _pc_root in "$R_CONFIG" "$R_STATE" "$R_LOG" "$R_RUN" "$R_SSHKEYS"; do
+    if tp_under "$_pc" "$_pc_root"; then echo tree; return 0; fi
+  done
+  _pc_parent="${_pc%/*}"
+  _pc_name="${_pc##*/}"
+  if [ "$_pc" = "$R_UNITS" ]; then echo unitdir; return 0; fi
+  if [ "$_pc_parent" = "$R_UNITS" ]; then
+    case "$_pc_name" in
+      turbopanel-*.service|turbopanel-*.timer|turbopanel-*.slice) echo unit; return 0 ;;
+    esac
+    return 1
+  fi
+  if [ "$_pc" = "$R_SSHD_DROPINS" ]; then echo sshddir; return 0; fi
+  if [ "$_pc_parent" = "$R_SSHD_DROPINS" ]; then
+    case "$_pc_name" in
+      60-turbopanel.conf|60-turbopanel.conf.tpprev) echo sshd; return 0 ;;
+    esac
+    return 1
+  fi
+  if [ "$_pc" = "$R_WG" ] || [ "$_pc" = "$R_WG/tp0.conf" ]; then
+    echo wireguard
+    return 0
+  fi
+  if [ "$_pc_parent" = "$R_SYSCTL" ]; then
+    case "$_pc_name" in
+      99-turbopanel-*.conf) echo sysctl; return 0 ;;
+    esac
+    return 1
+  fi
+  # Operator storage a volume can bind (a path-provider storage location):
+  # created and handed to a principal, never re-owned to anyone else.
+  case "$_pc" in
+    "$P"/mnt/?*|"$P"/media/?*|"$P"/data/?*|"$P"/srv/?*) echo storage; return 0 ;;
+  esac
+  case "$_pc" in
+    "$INSTALL_ROOT"/vendor/caddy/*/caddy)
+      _pc_ver="${_pc#"$INSTALL_ROOT"/vendor/caddy/}"
+      _pc_ver="${_pc_ver%/caddy}"
+      case "$_pc_ver" in
+        *[!A-Za-z0-9._-]*|'') return 1 ;;
+      esac
+      echo vendorbin
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+tp_require_class() {
+  _rc_path="$1"
+  shift
+  _rc_class="$(tp_path_class "$_rc_path")" || tp_die "refusing path $_rc_path"
+  for _rc_ok in "$@"; do
+    [ "$_rc_class" = "$_rc_ok" ] && return 0
+  done
+  tp_die "refusing path $_rc_path ($_rc_class)"
+}
+
+# The managed roots themselves are never removed or re-owned.
+tp_is_root_path() {
+  for _ir in "$R_CONFIG" "$R_STATE" "$R_LOG" "$R_RUN" "$R_PRINCIPALS" \
+    "$R_SSHKEYS" "$R_UNITS" "$R_SSHD_DROPINS" "$R_SYSCTL"; do
+    [ "$1" = "$_ir" ] && return 0
+  done
+  return 1
+}
+
+# cd into DIR; its real path must be exactly DIR (no symlink anywhere in it).
+tp_pin_dir() {
+  CDPATH='' cd -P -- "$1" 2>/dev/null || return 1
+  [ "$(pwd -P)" = "$1" ] || tp_die "refusing $1: a component is a symlink"
+}
+
+# Pin PATH's parent directory and set PIN_NAME to its last component.
+tp_pin_parent() {
+  _pp="$1"
+  _pp_parent="${_pp%/*}"
+  [ -n "$_pp_parent" ] || _pp_parent=/
+  PIN_NAME="${_pp##*/}"
+  tp_pin_dir "$_pp_parent"
+}
+
+# Create DIR and any missing parents inside the same managed root, each new
+# directory root:root with MODE (like `install -d` / `mkdir -p`), pinning at
+# every step. Leaves the working directory in DIR.
+tp_mkdir_pinned() {
+  _mk_dir="$1"
+  _mk_mode="$2"
+  _mk_root="$(tp_root_of "$_mk_dir")"
+  _mk_floor="${_mk_root%/*}"
+  [ -n "$_mk_floor" ] || _mk_floor=/
+  _mk_existing="$_mk_dir"
+  while ! [ -d "$_mk_existing" ]; do
+    _mk_existing="${_mk_existing%/*}"
+    [ -n "$_mk_existing" ] || _mk_existing=/
+    # Never create anything above the managed root (the root itself may be
+    # created when its parent exists).
+    tp_under "$_mk_existing" "$_mk_root" || [ "$_mk_existing" = "$_mk_floor" ] ||
+      tp_die "refusing to create $_mk_dir above $_mk_root"
+  done
+  tp_pin_dir "$_mk_existing" || tp_die "cannot enter $_mk_existing"
+  _mk_rest="${_mk_dir#"$_mk_existing"}"
+  _mk_rest="${_mk_rest#/}"
+  _mk_at="$_mk_existing"
+  while [ -n "$_mk_rest" ]; do
+    _mk_c="${_mk_rest%%/*}"
+    case "$_mk_rest" in
+      */*) _mk_rest="${_mk_rest#*/}" ;;
+      *) _mk_rest="" ;;
+    esac
+    mkdir -m "$_mk_mode" -- "./$_mk_c" 2>/dev/null || [ -d "./$_mk_c" ] ||
+      tp_die "cannot create $_mk_at/$_mk_c"
+    _mk_at="${_mk_at%/}/$_mk_c"
+    tp_pin_dir "$_mk_at" || tp_die "cannot enter $_mk_at"
+  done
+}
+
+tp_root_of() {
+  for _ro in "$R_PRINCIPALS" "$R_CONFIG" "$R_STATE" "$R_LOG" "$R_RUN" "$R_SSHKEYS"; do
+    if tp_under "$1" "$_ro"; then printf '%s' "$_ro"; return 0; fi
+  done
+  # /etc/wireguard, a storage path: its own parent is the floor.
+  printf '%s' "$1"
+}
+
+# Open PATH on fd 3 and check the file actually opened is PATH itself.
+tp_open_verified() {
+  tp_pin_parent "$1" || tp_die "no such directory for $1"
+  [ -e "./$PIN_NAME" ] || [ -L "./$PIN_NAME" ] || return 1
+  exec 3<"./$PIN_NAME" || tp_die "cannot open $1"
+  _ov_real="$(readlink /proc/self/fd/3)"
+  if [ "$_ov_real" != "$(pwd -P)/$PIN_NAME" ]; then
+    exec 3<&-
+    tp_die "refusing $1: it resolves to $_ov_real"
+  fi
+}
+
+# Write stdin to PATH (in the pinned parent), then chmod/chown it, without
+# ever opening PATH by name. OWNER/GROUP empty = leave as root.
+tp_put_file() {
+  _pf_path="$1"
+  _pf_mode="$2"
+  _pf_owner="${3:-}"
+  _pf_group="${4:-}"
+  tp_pin_parent "$_pf_path" || tp_die "no such directory for $_pf_path"
+  _pf_real="$(pwd -P)"
+  _pf_priv="$(mktemp -d "./.tp-host.XXXXXX")"
+  _pf_priv="${_pf_priv#./}"
+  CDPATH='' cd -P -- "$_pf_priv"
+  if [ "$(pwd -P)" != "$_pf_real/$_pf_priv" ] || {
+      # shellcheck disable=SC3067 # dash (Debian's /bin/sh) implements -O
+      [ ! -O . ]
+    } ||
+    [ "$(stat -c '%a' .)" != "700" ]; then
+    tp_die "scratch directory for $_pf_path moved; not writing"
+  fi
+  cat > ./f
+  chmod "$_pf_mode" ./f
+  if [ -n "$_pf_owner$_pf_group" ]; then
+    tp_run chown -h -- "${_pf_owner}${_pf_group:+:$_pf_group}" ./f
+  fi
+  mv -T -f -- ./f "../$PIN_NAME"
+  cd ..
+  rmdir -- "$_pf_priv" 2>/dev/null || true
+}
+
+# A root-only scratch directory for this run (never a guessable name in /tmp).
+tp_stage_dir() {
+  if [ -z "${TP_STAGE:-}" ]; then
+    TP_STAGE="$(mktemp -d)"
+    trap 'rm -rf -- "$TP_STAGE"' EXIT
+  fi
+}
+
+# Read a file the daemon staged, as the daemon account, onto stdout.
+tp_read_as_caller() {
+  tp_path_shape_ok "$1" || tp_die "refusing source $1"
+  tp_as "$CALLER_UID" "$CALLER_GID" cat -- "$1" ||
+    tp_die "cannot read $1 as the calling account"
+}
+
+# --- identities --------------------------------------------------------------
+
+# Account lookups. Test mode reads the prefix's etc/passwd and etc/group.
+tp_getent() {
+  if [ -n "$TP_TEST" ]; then
+    awk -F: -v n="$2" '$1 == n { print; found = 1 } END { exit !found }' "$P/etc/$1"
+    return
+  fi
+  getent "$1" "$2"
+}
+tp_uid_of() { tp_getent passwd "$1" | cut -d: -f3; }
+tp_gid_of_group() { tp_getent group "$1" | cut -d: -f3; }
+
+tp_name_shape_ok() {
+  case "$1" in
+    ''|-*|*[!A-Za-z0-9_.-]*) return 1 ;;
+  esac
+  [ "${#1}" -le 32 ]
+}
+
+# A tenant principal: an existing account with a uid in the principal band.
+tp_is_principal() {
+  tp_name_shape_ok "$1" || return 1
+  _ip_uid="$(tp_uid_of "$1")"
+  case "$_ip_uid" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$_ip_uid" -ge "$PRINCIPAL_ID_MIN" ] && [ "$_ip_uid" -ne 65534 ]
+}
+
+tp_is_principal_group() {
+  tp_name_shape_ok "$1" || return 1
+  _ipg="$(tp_gid_of_group "$1")"
+  case "$_ipg" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$_ipg" -ge "$PRINCIPAL_ID_MIN" ] && [ "$_ipg" -ne 65534 ]
+}
+
+tp_is_service_account() {
+  [ "$1" = "root" ] && return 0
+  tp_name_shape_ok "$1" || return 1
+  _isa="$(tp_uid_of "$1")"
+  case "$_isa" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$_isa" -ge "$SERVICE_ID_MIN" ] && [ "$_isa" -le "$SERVICE_ID_MAX" ]
+}
+
+tp_is_service_group() {
+  [ "$1" = "root" ] && return 0
+  tp_name_shape_ok "$1" || return 1
+  _isg="$(tp_gid_of_group "$1")"
+  case "$_isg" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$_isg" -ge "$SERVICE_ID_MIN" ] && [ "$_isg" -le "$SERVICE_ID_MAX" ]
+}
+
+# The principal whose home a path lies in (first component under the root).
+tp_home_owner_of() {
+  _ho="${1#"$R_PRINCIPALS"/}"
+  [ "$_ho" != "$1" ] || return 1
+  printf '%s' "${_ho%%/*}"
+}
+
+# Who may own PATH: inside a principal's home, that principal (or root / a
+# service account); anywhere else, root or a service account only — a tenant
+# owning a file root or an engine reads would be a way in.
+tp_owner_ok() {
+  _oo_path="$1"
+  _oo_owner="$2"
+  _oo_group="$3"
+  _oo_class="$(tp_path_class "$_oo_path")" || return 1
+  if [ -n "$_oo_owner" ]; then
+    if [ "$_oo_class" = "principal" ] &&
+      [ "$_oo_owner" = "$(tp_home_owner_of "$_oo_path")" ]; then
+      tp_is_principal "$_oo_owner" || return 1
+    elif [ "$_oo_class" = "storage" ]; then
+      tp_is_principal "$_oo_owner" || return 1
+    else
+      tp_is_service_account "$_oo_owner" || return 1
+    fi
+  fi
+  if [ -n "$_oo_group" ]; then
+    tp_is_service_group "$_oo_group" && return 0
+    case "$_oo_class" in
+      principal|storage) tp_is_principal_group "$_oo_group" && return 0 ;;
+    esac
+    return 1
+  fi
+  return 0
+}
+
+# Octal only, no setuid/setgid/sticky, never group- or world-writable
+# outside a principal's home.
+tp_mode_ok() {
+  _mo_mode="$1"
+  _mo_path="$2"
+  case "$_mo_mode" in
+    [0-7][0-7][0-7]|0[0-7][0-7][0-7]) ;;
+    *) return 1 ;;
+  esac
+  _mo_last3="${_mo_mode#0}"
+  [ "${#_mo_last3}" -eq 3 ] || _mo_last3="${_mo_mode#?}"
+  if [ "$(tp_path_class "$_mo_path")" != "principal" ]; then
+    _mo_g="${_mo_last3#?}"
+    _mo_g="${_mo_g%?}"
+    _mo_o="${_mo_last3#??}"
+    case "$_mo_g" in 2|3|6|7) return 1 ;; esac
+    case "$_mo_o" in 2|3|6|7) return 1 ;; esac
+  fi
+  return 0
+}
+
+# --- systemd units -------------------------------------------------------------
+
+# The daemon renders tenant units (native apps, cron jobs, slices) and the
+# hosting Caddy unit. Installing a unit is starting a process, so its content
+# is checked: known directives only, tenant services pinned to the principal
+# with no capabilities, no privileged exec prefixes.
+tp_unit_ok() {
+  _uk_file="$1"
+  _uk_name="$2"
+  awk -v name="$_uk_name" -v min="$PRINCIPAL_ID_MIN" '
+    function fail(msg) { print "tp-host: unit " name ": " msg > "/dev/stderr"; bad = 1; exit 1 }
+    BEGIN {
+      split("Description After Before Wants Requires PartOf StartLimitBurst StartLimitIntervalSec", a, " ");
+      for (i in a) ok["Unit", a[i]] = 1
+      split("Type User Group Slice WorkingDirectory Environment ExecStart ExecReload Restart RestartSec NoNewPrivileges PrivateTmp ProtectSystem ProtectHome ProtectKernelTunables ProtectKernelModules ProtectControlGroups RestrictSUIDSGID RestrictRealtime LockPersonality CapabilityBoundingSet AmbientCapabilities ReadWritePaths CPUQuota MemoryMax MemoryHigh TimeoutStartSec StandardOutput StandardError SyslogIdentifier", b, " ");
+      for (i in b) ok["Service", b[i]] = 1
+      split("OnCalendar Persistent Unit AccuracySec RandomizedDelaySec", c, " ");
+      for (i in c) ok["Timer", c[i]] = 1
+      split("CPUQuota MemoryMax MemoryHigh TasksMax", d, " ");
+      for (i in d) ok["Slice", d[i]] = 1
+      ok["Install", "WantedBy"] = 1
+      section = ""
+    }
+    /^[ \t]*$/ || /^[ \t]*[#;]/ { next }
+    /^\[[A-Za-z]+\][ \t]*$/ {
+      section = $0; gsub(/[\[\] \t]/, "", section)
+      if (!(section == "Unit" || section == "Service" || section == "Timer" || section == "Slice" || section == "Install")) fail("section [" section "]")
+      seen[section] = 1
+      next
+    }
+    {
+      eq = index($0, "=")
+      if (eq < 2) fail("line without a key: " $0)
+      key = substr($0, 1, eq - 1); val = substr($0, eq + 1)
+      if (section == "") fail("directive outside a section: " key)
+      if (key ~ /^X-TurboPanel-[A-Za-z]+$/ && section == "Unit") next
+      if (!((section, key) in ok)) fail("directive " section "." key)
+      if (key ~ /^Exec/ && val ~ /^[+!:]/) fail(key " with a privileged prefix")
+      if (key == "User") user = val
+      if (key == "Group") group = val
+      if (key == "Slice") slice = val
+      if (key == "CapabilityBoundingSet" && val != "") fail("CapabilityBoundingSet=" val)
+      if (key == "AmbientCapabilities" && val != "") fail("AmbientCapabilities=" val)
+      if (key == "NoNewPrivileges") nnp = val
+      if (key == "Unit" && section == "Timer") timerunit = val
+    }
+    END {
+      if (bad) exit 1
+      kind = name; sub(/^.*\./, "", kind)
+      if (kind == "slice") {
+        if (seen["Service"] || seen["Timer"] || seen["Install"]) exit 1
+        exit 0
+      }
+      if (kind == "timer") {
+        if (seen["Service"] || seen["Slice"]) exit 1
+        base = name; sub(/\.timer$/, "", base)
+        # A timer may only start its own service.
+        if (timerunit != "" && timerunit != base ".service") fail("Unit=" timerunit)
+        exit 0
+      }
+      if (seen["Timer"] || seen["Slice"]) exit 1
+      print user "\t" group "\t" slice "\t" nnp
+    }
+  ' "$_uk_file" > "$_uk_file.meta" || return 1
+  case "$_uk_name" in
+    *.slice|*.timer) return 0 ;;
+  esac
+  IFS="	" read -r _uk_user _uk_group _uk_slice _uk_nnp < "$_uk_file.meta" || return 1
+  if [ "$_uk_name" = "turbopanel-hosting-caddy.service" ]; then
+    # Runs as root today (binds :80/:443) — see AGENTS.md residual risks. Its
+    # exec lines must be the vendored Caddy against the hosting config.
+    [ -z "$_uk_user" ] || return 1
+    tp_hosting_caddy_unit_ok "$_uk_file"
+    return
+  fi
+  tp_is_principal "$_uk_user" || return 1
+  [ "$_uk_group" = "${_uk_user}-grp" ] || return 1
+  [ "$_uk_slice" = "turbopanel-${_uk_user}.slice" ] || return 1
+  [ "$_uk_nnp" = "yes" ] || return 1
+  return 0
+}
+
+tp_hosting_caddy_unit_ok() {
+  _hc_bin="$INSTALL_ROOT/vendor/caddy/current/caddy"
+  _hc_cfg="$R_CONFIG/hosting/Caddyfile"
+  while IFS= read -r _hc_line || [ -n "$_hc_line" ]; do
+    case "$_hc_line" in
+      ExecStart=*)
+        [ "$_hc_line" = "ExecStart=$_hc_bin run --config $_hc_cfg --adapter caddyfile" ] ||
+          return 1
+        ;;
+      ExecReload=*)
+        case "$_hc_line" in
+          "ExecReload=$_hc_bin reload --config $_hc_cfg --adapter caddyfile --address "*) ;;
+          *) return 1 ;;
+        esac
+        ;;
+      User=*|Group=*) return 1 ;;
+    esac
+  done < "$1"
+}
+
+# --- verbs -------------------------------------------------------------------
+
+tp_verb_install() {
+  _in_dir=""
+  _in_mode=""
+  _in_owner=""
+  _in_group=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -d) _in_dir=1; shift ;;
+      -m) [ $# -ge 2 ] || tp_die "-m needs a mode"; _in_mode="$2"; shift 2 ;;
+      -o) [ $# -ge 2 ] || tp_die "-o needs an owner"; _in_owner="$2"; shift 2 ;;
+      -g) [ $# -ge 2 ] || tp_die "-g needs a group"; _in_group="$2"; shift 2 ;;
+      --) shift; break ;;
+      -*) tp_die "install: refusing option $1" ;;
+      *) break ;;
+    esac
+  done
+  [ -n "$_in_mode" ] || tp_die "install: a mode is required"
+  if [ -n "$_in_dir" ]; then
+    [ $# -eq 1 ] || tp_die "install -d takes one directory"
+    _in_path="$1"
+    tp_require_class "$_in_path" tree principal sshddir wireguard storage
+    tp_is_root_path "$_in_path" && [ -n "$_in_owner$_in_group" ] &&
+      [ "$_in_path" != "$R_PRINCIPALS" ] && tp_die "refusing to re-own $_in_path"
+    tp_mode_ok "$_in_mode" "$_in_path" || tp_die "refusing mode $_in_mode for $_in_path"
+    tp_owner_ok "$_in_path" "$_in_owner" "$_in_group" ||
+      tp_die "refusing owner $_in_owner:$_in_group for $_in_path"
+    tp_mkdir_pinned "$_in_path" 0755
+    # Operate on the pinned directory itself, never by name.
+    chmod "$_in_mode" .
+    if [ -n "$_in_owner$_in_group" ]; then
+      tp_run chown -h -- "${_in_owner}${_in_group:+:$_in_group}" .
+    fi
+    return 0
+  fi
+  [ $# -eq 2 ] || tp_die "install takes a source and a destination"
+  _in_src="$1"
+  _in_dest="$2"
+  _in_class="$(tp_path_class "$_in_dest")" || tp_die "refusing path $_in_dest"
+  case "$_in_class" in
+    tree|principal|unit|sshd|wireguard|sysctl) ;;
+    *) tp_die "refusing path $_in_dest ($_in_class)" ;;
+  esac
+  tp_mode_ok "$_in_mode" "$_in_dest" || tp_die "refusing mode $_in_mode for $_in_dest"
+  tp_owner_ok "$_in_dest" "$_in_owner" "$_in_group" ||
+    tp_die "refusing owner $_in_owner:$_in_group for $_in_dest"
+  tp_stage_dir
+  _in_stage="$TP_STAGE/src"
+  tp_read_as_caller "$_in_src" > "$_in_stage"
+  if [ "$_in_class" = "unit" ]; then
+    [ "$_in_owner:$_in_group" = "root:root" ] || [ -z "$_in_owner$_in_group" ] ||
+      tp_die "unit files are root:root"
+    tp_unit_ok "$_in_stage" "${_in_dest##*/}" ||
+      tp_die "refusing unit ${_in_dest##*/}: content outside the allowed shape"
+  fi
+  tp_put_file "$_in_dest" "$_in_mode" "$_in_owner" "$_in_group" < "$_in_stage"
+}
+
+tp_verb_mkdir() {
+  [ "${1:-}" = "-p" ] || tp_die "mkdir: only mkdir -p [--] DIR"
+  shift
+  [ "${1:-}" = "--" ] && shift
+  [ $# -eq 1 ] || tp_die "mkdir: only mkdir -p [--] DIR"
+  _md_path="$1"
+  tp_require_class "$_md_path" tree principal wireguard
+  tp_mkdir_pinned "$_md_path" 0755
+}
+
+tp_verb_cp() {
+  case "$1" in
+    -a)
+      [ "$#" -eq 4 ] && [ "$2" = "--" ] || tp_die "cp: only cp -a -- SRC/. DEST"
+      _cp_src="$3"
+      _cp_dest="$4"
+      case "$_cp_src" in
+        */.) _cp_src="${_cp_src%/.}" ;;
+        *) tp_die "cp -a: the source must end in /." ;;
+      esac
+      tp_require_class "$_cp_dest" principal
+      _cp_src_class="$(tp_path_class "$_cp_src")" || tp_die "refusing source $_cp_src"
+      case "$_cp_src_class" in tree|principal) ;; *) tp_die "refusing source $_cp_src" ;; esac
+      tp_pin_dir "$_cp_dest" || tp_die "no such directory $_cp_dest"
+      # The source directory is opened and checked on a descriptor; cp reads
+      # it through /proc/self/fd/3, never by a name the caller controls.
+      exec 3<"$_cp_src" || tp_die "cannot open $_cp_src"
+      [ "$(readlink /proc/self/fd/3)" = "$_cp_src" ] ||
+        tp_die "refusing $_cp_src: it resolves elsewhere"
+      tp_run cp -a --no-dereference -- /proc/self/fd/3/. .
+      ;;
+    -p)
+      [ "$#" -eq 4 ] && [ "$2" = "--" ] || tp_die "cp: only cp -p -- SRC DEST"
+      _cp_src="$3"
+      _cp_dest="$4"
+      [ "${_cp_src%/*}" = "${_cp_dest%/*}" ] ||
+        tp_die "cp -p: source and destination must share a directory"
+      _cp_class="$(tp_path_class "$_cp_dest")" || tp_die "refusing path $_cp_dest"
+      case "$_cp_class" in tree|sshd) ;; *) tp_die "refusing path $_cp_dest" ;; esac
+      tp_path_class "$_cp_src" >/dev/null || tp_die "refusing path $_cp_src"
+      tp_open_verified "$_cp_src" || tp_die "no such file $_cp_src"
+      _cp_meta="$(stat -L -c '%a %U %G' /proc/self/fd/3)"
+      set -- $_cp_meta
+      tp_put_file "$_cp_dest" "$1" "$2" "$3" <&3
+      ;;
+    *)
+      [ "$#" -eq 2 ] || tp_die "cp: unsupported form"
+      _cp_src="$1"
+      _cp_dest="$2"
+      [ "$_cp_dest" = "$R_WG/tp0.conf" ] || tp_die "refusing cp destination $_cp_dest"
+      tp_stage_dir
+      tp_read_as_caller "$_cp_src" > "$TP_STAGE/src"
+      tp_put_file "$_cp_dest" 600 < "$TP_STAGE/src"
+      ;;
+  esac
+}
+
+tp_verb_mv() {
+  _mv_flags=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -f|-Tf|-fT|-T) _mv_flags="$1"; shift ;;
+      --) shift; break ;;
+      *) break ;;
+    esac
+  done
+  [ $# -eq 2 ] || tp_die "mv takes two paths"
+  [ "${1%/*}" = "${2%/*}" ] || tp_die "mv: both paths must share a directory"
+  _mv_class="$(tp_path_class "$2")" || tp_die "refusing path $2"
+  case "$_mv_class" in tree|principal|sshd) ;; *) tp_die "refusing path $2" ;; esac
+  tp_path_class "$1" >/dev/null || tp_die "refusing path $1"
+  tp_pin_parent "$1" || tp_die "no such directory for $1"
+  _mv_from="${1##*/}"
+  mv -T -f -- "./$_mv_from" "./$PIN_NAME"
+}
+
+tp_verb_rm() {
+  _rm_recursive=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -f) shift ;;
+      -rf|-fr) _rm_recursive=1; shift ;;
+      --) shift; break ;;
+      *) break ;;
+    esac
+  done
+  [ $# -eq 1 ] || tp_die "rm takes one path"
+  _rm_class="$(tp_path_class "$1")" || tp_die "refusing path $1"
+  case "$_rm_class" in tree|principal|unit|sshd) ;; *) tp_die "refusing path $1" ;; esac
+  tp_is_root_path "$1" && tp_die "refusing to remove $1"
+  # A principal home itself is removed by the uninstaller, never by the daemon.
+  [ "${1%/*}" = "$R_PRINCIPALS" ] && tp_die "refusing to remove a principal home"
+  tp_pin_parent "$1" || return 0
+  if [ -n "$_rm_recursive" ]; then
+    rm -rf -- "./$PIN_NAME"
+  else
+    rm -f -- "./$PIN_NAME"
+  fi
+}
+
+tp_verb_ln() {
+  [ "$#" -eq 4 ] && [ "$1" = "-s" ] && [ "$2" = "--" ] || tp_die "ln: only ln -s -- TARGET LINK"
+  _ln_target="$3"
+  _ln_link="$4"
+  case "$_ln_target" in
+    ../../shared) ;;
+    releases/?*)
+      case "${_ln_target#releases/}" in
+        */*|.|..|*[!A-Za-z0-9._-]*) tp_die "refusing link target $_ln_target" ;;
+      esac
+      ;;
+    *) tp_die "refusing link target $_ln_target" ;;
+  esac
+  tp_require_class "$_ln_link" principal
+  tp_pin_parent "$_ln_link" || tp_die "no such directory for $_ln_link"
+  ln -s -- "$_ln_target" "./$PIN_NAME"
+}
+
+tp_verb_readlink() {
+  [ "$#" -eq 2 ] && [ "$1" = "--" ] || tp_die "readlink: only readlink -- PATH"
+  tp_require_class "$2" principal
+  tp_pin_parent "$2" || exit 1
+  readlink -- "./$PIN_NAME"
+}
+
+tp_verb_test() {
+  [ "$#" -eq 2 ] || tp_die "test: only test -e|-L PATH"
+  case "$1" in -e|-L) ;; *) tp_die "test: only -e or -L" ;; esac
+  tp_require_class "$2" principal tree
+  tp_pin_parent "$2" || exit 1
+  test "$1" "./$PIN_NAME"
+}
+
+tp_verb_cat() {
+  [ "$#" -eq 2 ] && [ "$1" = "--" ] || tp_die "cat: only cat -- PATH"
+  tp_require_class "$2" tree
+  tp_open_verified "$2" || tp_die "no such file $2"
+  cat <&3
+}
+
+tp_verb_cmp() {
+  [ "$#" -eq 4 ] && [ "$1" = "-s" ] && [ "$2" = "--" ] || tp_die "cmp: only cmp -s -- STAGED PATH"
+  _cm_staged="$3"
+  _cm_path="$4"
+  _cm_class="$(tp_path_class "$_cm_path")" || tp_die "refusing path $_cm_path"
+  case "$_cm_class" in tree|unit|sshd) ;; *) tp_die "refusing path $_cm_path" ;; esac
+  tp_stage_dir
+  _cm_tmp="$TP_STAGE/staged"
+  tp_read_as_caller "$_cm_staged" > "$_cm_tmp"
+  tp_open_verified "$_cm_path" || exit 1
+  cmp -s -- "$_cm_tmp" /proc/self/fd/3
+}
+
+tp_verb_ls() {
+  [ "$#" -eq 3 ] && [ "$2" = "--" ] || tp_die "ls: only ls -1|-1t|-A -- DIR"
+  case "$1" in -1|-1t|-A) ;; *) tp_die "ls: refusing option $1" ;; esac
+  tp_require_class "$3" tree principal unitdir
+  tp_pin_dir "$3" || tp_die "no such directory $3"
+  ls "$1" -- .
+}
+
+tp_verb_find() {
+  [ $# -ge 1 ] || tp_die "find needs a start directory"
+  _fd_base="$1"
+  shift
+  if [ "$#" -eq 9 ] && [ "$1" = "-mindepth" ] && [ "$2" = "3" ] &&
+    [ "$3" = "-maxdepth" ] && [ "$4" = "3" ] && [ "$5" = "-type" ] &&
+    [ "$6" = "f" ] && [ "$7" = "-name" ]; then
+    # Read-only lookup of an issued certificate.
+    _fd_name="$8"
+    case "$_fd_name" in
+      *.crt) ;;
+      *) tp_die "find: only -name <host>.crt" ;;
+    esac
+    tp_hostname_ok "${_fd_name%.crt}" || tp_die "find: refusing name $_fd_name"
+    [ "$#" -eq 8 ] || tp_die "find: unexpected arguments"
+    tp_require_class "$_fd_base" tree
+    tp_pin_dir "$_fd_base" || exit 1
+    find . -mindepth 3 -maxdepth 3 -type f -name "$_fd_name" 2>/dev/null |
+      sed "s|^\\.|$_fd_base|"
+    return 0
+  fi
+  if [ "$#" -eq 7 ] && [ "$1" = "-type" ] && [ "$2" = "d" ] && [ "$3" = "-exec" ] &&
+    [ "$4" = "chmod" ] && [ "$5" = "g+s" ] && [ "$6" = "{}" ] && [ "$7" = "+" ]; then
+    tp_require_class "$_fd_base" principal
+    tp_pin_dir "$_fd_base" || tp_die "no such directory $_fd_base"
+    # As the tree's owner: a tenant can only race its own directories.
+    _fd_owner="$(stat -c '%u %g' .)"
+    tp_as ${_fd_owner} find . -type d -exec chmod g+s {} +
+    return 0
+  fi
+  tp_die "find: unsupported expression"
+}
+
+tp_verb_chown() {
+  _co_rec=""
+  if [ "${1:-}" = "-R" ]; then _co_rec=1; shift; fi
+  [ $# -eq 2 ] || tp_die "chown: only chown [-R] SPEC PATH"
+  _co_spec="$1"
+  _co_path="$2"
+  case "$_co_spec" in
+    *:*) _co_owner="${_co_spec%%:*}"; _co_group="${_co_spec#*:}" ;;
+    *) _co_owner="$_co_spec"; _co_group="" ;;
+  esac
+  _co_class="$(tp_path_class "$_co_path")" || tp_die "refusing path $_co_path"
+  case "$_co_class" in
+    tree|principal) ;;
+    storage)
+      [ -z "$_co_rec" ] && [ -n "$_co_owner" ] || tp_die "refusing chown of $_co_path"
+      ;;
+    vendorbin)
+      [ -z "$_co_rec" ] && [ "$_co_owner" = "root" ] || tp_die "refusing chown of $_co_path"
+      ;;
+    *) tp_die "refusing path $_co_path" ;;
+  esac
+  tp_is_root_path "$_co_path" && tp_die "refusing to re-own $_co_path"
+  tp_owner_ok "$_co_path" "$_co_owner" "$_co_group" ||
+    tp_die "refusing owner $_co_spec for $_co_path"
+  tp_pin_parent "$_co_path" || tp_die "no such directory for $_co_path"
+  if [ -n "$_co_rec" ]; then
+    tp_run chown -R -h -P -- "$_co_spec" "./$PIN_NAME"
+  else
+    tp_run chown -h -- "$_co_spec" "./$PIN_NAME"
+  fi
+}
+
+tp_verb_chmod() {
+  _cm_rec=""
+  if [ "${1:-}" = "-R" ]; then _cm_rec=1; shift; fi
+  [ $# -eq 2 ] || tp_die "chmod: only chmod [-R] MODE PATH"
+  _ch_mode="$1"
+  _ch_path="$2"
+  _ch_class="$(tp_path_class "$_ch_path")" || tp_die "refusing path $_ch_path"
+  case "$_ch_class" in tree|principal|wireguard|sysctl) ;; *) tp_die "refusing path $_ch_path" ;; esac
+  case "$_ch_mode" in
+    u=rwX,g=rX,o=) [ "$_ch_class" = "principal" ] || tp_die "refusing mode $_ch_mode" ;;
+    *) tp_mode_ok "$_ch_mode" "$_ch_path" || tp_die "refusing mode $_ch_mode for $_ch_path" ;;
+  esac
+  tp_pin_parent "$_ch_path" || tp_die "no such directory for $_ch_path"
+  [ -L "./$PIN_NAME" ] && tp_die "refusing to chmod through a symlink: $_ch_path"
+  if [ -d "./$PIN_NAME" ]; then
+    tp_pin_dir "$_ch_path" || tp_die "cannot enter $_ch_path"
+    _ch_target=.
+  else
+    [ -n "$_cm_rec" ] && tp_die "chmod -R needs a directory"
+    _ch_target="./$PIN_NAME"
+  fi
+  if [ "$_ch_class" = "principal" ]; then
+    # Inside a home, change it as its owner: the tenant can only race itself.
+    _ch_owner="$(stat -c '%u %g' "$_ch_target")"
+    tp_as ${_ch_owner} chmod ${_cm_rec:+-R} "$_ch_mode" "$_ch_target"
+  else
+    chmod ${_cm_rec:+-R} "$_ch_mode" "$_ch_target"
+  fi
+}
+
+tp_verb_setfacl() {
+  [ "$#" -eq 3 ] && [ "$1" = "-m" ] && [ "$2" = "o::x" ] || tp_die "setfacl: only -m o::x PATH"
+  [ "$3" = "$R_PRINCIPALS" ] || tp_die "setfacl: only the principal home root"
+  tp_pin_dir "$3" || tp_die "no such directory $3"
+  tp_run setfacl -m o::x .
+}
+
+tp_verb_tee() {
+  [ $# -eq 1 ] || tp_die "tee: only tee PATH"
+  _te_class="$(tp_path_class "$1")" || tp_die "refusing path $1"
+  case "$_te_class" in tree|sysctl) ;; *) tp_die "refusing path $1" ;; esac
+  tp_stage_dir
+  _te_tmp="$TP_STAGE/stdin"
+  cat > "$_te_tmp"
+  # 0600 until the caller sets the final mode (it always follows with chmod).
+  tp_put_file "$1" 600 < "$_te_tmp"
+  cat -- "$_te_tmp"
+}
+
+tp_unit_name_ok() {
+  case "$1" in
+    turbopanel|turbopanel-*|turbopaneld|turbopaneld.*|turbopaneld-*) ;;
+    wg-quick@tp0|wg-quick@tp0.service|ssh|ssh.service|sshd|sshd.service) ;;
+    *) return 1 ;;
+  esac
+  case "$1" in
+    *[!A-Za-z0-9@._-]*) return 1 ;;
+  esac
+  return 0
+}
+
+tp_verb_systemctl() {
+  [ $# -ge 1 ] || tp_die "systemctl needs a verb"
+  _sc_verb="$1"
+  shift
+  case "$_sc_verb" in
+    daemon-reload|reboot)
+      [ $# -eq 0 ] || tp_die "systemctl $_sc_verb takes no unit"
+      tp_exec systemctl "$_sc_verb"
+      ;;
+    start|stop|restart|reload|enable|disable|is-active|is-enabled|is-failed|reset-failed)
+      set -- "$_sc_verb" "$@"
+      _sc_units=0
+      for _sc_a in "$@"; do
+        [ "$_sc_a" = "$_sc_verb" ] && continue
+        case "$_sc_a" in
+          --now|--quiet|--no-block) ;;
+          -*) tp_die "systemctl: refusing option $_sc_a" ;;
+          *)
+            tp_unit_name_ok "$_sc_a" || tp_die "systemctl: refusing unit $_sc_a"
+            _sc_units=$((_sc_units + 1))
+            ;;
+        esac
+      done
+      [ "$_sc_units" -ge 1 ] || tp_die "systemctl $_sc_verb needs a unit"
+      tp_exec systemctl --no-pager "$@"
+      ;;
+    *) tp_die "systemctl: refusing verb $_sc_verb" ;;
+  esac
+}
+
+tp_verb_journalctl() {
+  [ "$#" -eq 5 ] || tp_die "journalctl: unsupported form"
+  case "$1" in
+    --unit=turbopanel-app-*) ;;
+    *) tp_die "journalctl: refusing unit $1" ;;
+  esac
+  tp_unit_name_ok "${1#--unit=}" || tp_die "journalctl: refusing unit $1"
+  [ "$2" = "-n" ] || tp_die "journalctl: unsupported form"
+  case "$3" in ''|*[!0-9]*) tp_die "journalctl: -n needs a count" ;; esac
+  [ "$4" = "--no-pager" ] && [ "$5" = "--output=short-iso" ] || tp_die "journalctl: unsupported form"
+  tp_exec journalctl "$@"
+}
+
+tp_verb_sshd() {
+  [ "$#" -eq 1 ] || tp_die "sshd: only -t or -T"
+  case "$1" in -t|-T) tp_exec /usr/sbin/sshd "$1" ;; esac
+  tp_die "sshd: only -t or -T"
+}
+
+tp_verb_ss() {
+  [ "$#" -eq 3 ] && [ "$1" = "-H" ] && [ "$2" = "-ltnp" ] && [ "$3" = "sport = :80" ] ||
+    tp_die "ss: only -H -ltnp 'sport = :80'"
+  tp_exec ss -H -ltnp "sport = :80"
+}
+
+tp_verb_sysctl() {
+  if [ "$#" -eq 2 ] && [ "$1" = "-w" ] && [ "$2" = "net.ipv4.ip_forward=1" ]; then
+    tp_exec sysctl -w net.ipv4.ip_forward=1
+  fi
+  if [ "$#" -eq 2 ] && [ "$1" = "-p" ]; then
+    tp_require_class "$2" sysctl
+    tp_open_verified "$2" || tp_die "no such file $2"
+    # Only the keys the fabric drop-in carries.
+    while IFS= read -r _sy_line || [ -n "$_sy_line" ]; do
+      case "$_sy_line" in
+        ''|'#'*|'net.ipv4.ip_forward=1'|'net.ipv4.ip_forward = 1') ;;
+        *) tp_die "sysctl: refusing drop-in line $_sy_line" ;;
+      esac
+    done <&3
+    tp_exec sysctl -w net.ipv4.ip_forward=1
+  fi
+  tp_die "sysctl: unsupported form"
+}
+
+# xtables: any rule, but never --modprobe (it names a program root runs) and
+# no rule files (restore reads stdin only).
+tp_verb_xtables() {
+  _xt_bin="$1"
+  shift
+  for _xt_a in "$@"; do
+    case "$_xt_a" in
+      --modprobe*|-M) tp_die "$_xt_bin: refusing $_xt_a" ;;
+    esac
+  done
+  case "$_xt_bin" in
+    iptables-restore|ip6tables-restore)
+      for _xt_a in "$@"; do
+        case "$_xt_a" in
+          -w|--wait|--noflush|-n|--counters|-c|--test|-t|[0-9]|[0-9][0-9]) ;;
+          *) tp_die "$_xt_bin: refusing argument $_xt_a (rules come on stdin)" ;;
+        esac
+      done
+      ;;
+    iptables-save|ip6tables-save)
+      for _xt_a in "$@"; do
+        case "$_xt_a" in
+          -w|--wait|-c|--counters|-t|filter|nat|mangle|raw|security|[0-9]|[0-9][0-9]) ;;
+          *) tp_die "$_xt_bin: refusing argument $_xt_a" ;;
+        esac
+      done
+      ;;
+  esac
+  tp_exec "$_xt_bin" "$@"
+}
+
+# Only the fabric interface, only these shapes.
+tp_verb_ip() {
+  case "$*" in
+    "link add dev tp0 type wireguard"|"link set dev tp0 up"|\
+"-o -4 addr show dev tp0"|"-o link show dev tp0")
+      tp_exec ip "$@"
+      ;;
+  esac
+  if [ "$#" -eq 6 ] && [ "$1 $2 $3 $4" = "link set dev tp0" ] && [ "$5" = "mtu" ]; then
+    case "$6" in ''|*[!0-9]*) tp_die "ip: bad mtu" ;; esac
+    tp_exec ip "$@"
+  fi
+  if [ "$#" -eq 5 ] && [ "$1 $2" = "addr replace" ] && [ "$4 $5" = "dev tp0" ]; then
+    case "$3" in ''|*[!0-9A-Fa-f.:/]*) tp_die "ip: bad address $3" ;; esac
+    tp_exec ip "$@"
+  fi
+  tp_die "ip: unsupported command"
+}
+
+tp_verb_wg() {
+  case "${1:-}" in
+    genkey)
+      [ $# -eq 1 ] || tp_die "wg genkey takes no arguments"
+      tp_exec wg genkey
+      ;;
+    pubkey)
+      [ $# -eq 1 ] || tp_die "wg pubkey takes no arguments"
+      tp_exec wg pubkey
+      ;;
+    show)
+      [ "${2:-}" = "tp0" ] || tp_die "wg show: only tp0"
+      [ $# -eq 2 ] || { [ $# -eq 3 ] && [ "$3" = "dump" ]; } || tp_die "wg show: unsupported form"
+      tp_exec wg "$@"
+      ;;
+    syncconf)
+      [ $# -eq 3 ] && [ "$2" = "tp0" ] || tp_die "wg syncconf: only tp0 FILE"
+      # Read as the daemon account first; a failed read must never reach wg
+      # as an empty config (that would drop every peer).
+      tp_stage_dir
+      tp_read_as_caller "$3" > "$TP_STAGE/wg.conf"
+      [ -s "$TP_STAGE/wg.conf" ] || tp_die "wg syncconf: empty config"
+      tp_run wg syncconf tp0 "$TP_STAGE/wg.conf"
+      exit $?
+      ;;
+    set)
+      [ "${2:-}" = "tp0" ] && [ "${3:-}" = "peer" ] || tp_die "wg set: only tp0 peer …"
+      [ $# -eq 8 ] && [ "$5" = "endpoint" ] && [ "$7" = "persistent-keepalive" ] ||
+        tp_die "wg set: only endpoint and persistent-keepalive"
+      case "$4" in *[!A-Za-z0-9+/=]*|'') tp_die "wg set: bad peer key" ;; esac
+      [ -n "$6" ] && [ -z "$(printf '%s' "$6" | tr -d 'A-Za-z0-9.:\133\135-')" ] ||
+        tp_die "wg set: bad endpoint"
+      case "$8" in *[!0-9]*|'') tp_die "wg set: bad keepalive" ;; esac
+      tp_exec wg "$@"
+      ;;
+  esac
+  tp_die "wg: unsupported command"
+}
+
+tp_hostname_ok() {
+  case "$1" in
+    ''|*[!A-Za-z0-9.-]*|.*|*.|*..*|-*|*-) return 1 ;;
+  esac
+  [ "${#1}" -le 253 ]
+}
+
+# --- accounts ----------------------------------------------------------------
+
+# A group orchestration/runtime-registry.json defines — read from the
+# root-owned orchestration tree, the same file the daemon and Ansible use.
+tp_registry_group() {
+  tp_name_shape_ok "$1" || return 1
+  _rg_file="$INSTALL_ROOT/share/orchestration/runtime-registry.json"
+  [ -f "$_rg_file" ] && [ ! -L "$_rg_file" ] || return 1
+  grep -Eq "\"group\"[[:space:]]*:[[:space:]]*\"$1\"" "$_rg_file"
+}
+
+tp_principal_home_ok() {
+  [ "$1" = "$R_PRINCIPALS/$2" ]
+}
+
+tp_shell_ok() {
+  case "$1" in
+    /usr/sbin/nologin|/sbin/nologin|/bin/false|/bin/sh|/bin/bash) return 0 ;;
+  esac
+  return 1
+}
+
+tp_new_name_ok() {
+  case "$1" in
+    ''|-*|*[!A-Za-z0-9_-]*|root|tp|tp[a-z]*) return 1 ;;
+  esac
+  [ "${#1}" -le 32 ] || return 1
+  ! tp_getent passwd "$1" >/dev/null 2>&1 || return 1
+  return 0
+}
+
+# Either an explicit id in the principal band, or the band itself via -K.
+tp_id_args_ok() {
+  _ia_kind="$1"
+  shift
+  if [ "$1" = "-u" ] || [ "$1" = "-g" ]; then
+    case "$2" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$2" -ge "$PRINCIPAL_ID_MIN" ] && [ "$2" -ne 65534 ] && [ "$2" -lt 2147483647 ]
+    return
+  fi
+  [ "$1" = "-K" ] && [ "$2" = "${_ia_kind}_MIN=$PRINCIPAL_ID_MIN" ] &&
+    [ "$3" = "-K" ] && [ "$4" = "${_ia_kind}_MAX=$PRINCIPAL_ID_MAX" ]
+}
+
+tp_verb_groupadd() {
+  for _ga_name in "$@"; do :; done
+  case "$_ga_name" in *-grp) ;; *) tp_die "groupadd: only <principal>-grp" ;; esac
+  tp_name_shape_ok "$_ga_name" || tp_die "groupadd: bad name"
+  ! tp_getent group "$_ga_name" >/dev/null 2>&1 || tp_die "groupadd: $_ga_name exists"
+  if [ $# -eq 3 ]; then
+    tp_id_args_ok GID "$1" "$2" || tp_die "groupadd: gid outside the principal band"
+  elif [ $# -eq 5 ]; then
+    tp_id_args_ok GID "$1" "$2" "$3" "$4" || tp_die "groupadd: unsupported range"
+  else
+    tp_die "groupadd: unsupported form"
+  fi
+  tp_exec groupadd "$@"
+}
+
+tp_verb_useradd() {
+  for _ua_name in "$@"; do :; done
+  tp_new_name_ok "$_ua_name" || tp_die "useradd: refusing name $_ua_name"
+  case "$1" in
+    -u) tp_id_args_ok UID "$1" "$2" || tp_die "useradd: uid outside the principal band"; shift 2 ;;
+    -K) tp_id_args_ok UID "$1" "$2" "$3" "$4" || tp_die "useradd: unsupported range"; shift 4 ;;
+    *) tp_die "useradd: an id or the principal range is required" ;;
+  esac
+  [ "$#" -eq 8 ] && [ "$1" = "-g" ] && [ "$3" = "-d" ] && [ "$5" = "-M" ] &&
+    [ "$6" = "-s" ] || tp_die "useradd: unsupported form"
+  [ "$2" = "${_ua_name}-grp" ] && tp_is_principal_group "$2" ||
+    tp_die "useradd: primary group must be ${_ua_name}-grp"
+  tp_principal_home_ok "$4" "$_ua_name" || tp_die "useradd: home must be $R_PRINCIPALS/$_ua_name"
+  tp_shell_ok "$7" || tp_die "useradd: refusing shell $7"
+  tp_exec useradd "$@"
+}
+
+tp_verb_usermod() {
+  case "${1:-}" in
+    -s)
+      [ $# -eq 3 ] || tp_die "usermod -s SHELL USER"
+      tp_shell_ok "$2" || tp_die "usermod: refusing shell $2"
+      tp_is_principal "$3" || tp_die "usermod: $3 is not a principal"
+      ;;
+    -p)
+      [ $# -eq 3 ] && [ "$2" = "!" ] || tp_die "usermod -p only locks (!)"
+      tp_is_principal "$3" || tp_die "usermod: $3 is not a principal"
+      ;;
+    -aG)
+      [ $# -eq 3 ] || tp_die "usermod -aG GROUP USER"
+      # A principal joins a group the runtime registry defines (entitlements
+      # and SSH access levels); an engine account joins a site's group.
+      if tp_is_principal "$3"; then
+        tp_registry_group "$2" || tp_die "usermod: $2 is not a registry group"
+      else
+        case " $ENGINE_USERS " in *" $3 "*) ;; *) tp_die "usermod: refusing account $3" ;; esac
+        tp_is_principal_group "$2" || tp_die "usermod: $2 is not a principal group"
+      fi
+      ;;
+    *) tp_die "usermod: unsupported form" ;;
+  esac
+  tp_exec usermod "$@"
+}
+
+tp_verb_gpasswd() {
+  [ $# -eq 3 ] && [ "$1" = "-d" ] || tp_die "gpasswd: only -d USER GROUP"
+  tp_is_principal "$2" || tp_die "gpasswd: $2 is not a principal"
+  tp_registry_group "$3" || tp_die "gpasswd: $3 is not a registry group"
+  tp_exec gpasswd -d "$2" "$3"
+}
+
+tp_verb_chpasswd() {
+  [ $# -eq 1 ] && [ "$1" = "-e" ] || tp_die "chpasswd: only -e"
+  IFS= read -r _cp_line || tp_die "chpasswd: expected one line"
+  if IFS= read -r _cp_extra; then tp_die "chpasswd: exactly one line"; fi
+  _cp_user="${_cp_line%%:*}"
+  _cp_hash="${_cp_line#*:}"
+  tp_is_principal "$_cp_user" || tp_die "chpasswd: $_cp_user is not a principal"
+  case "$_cp_hash" in
+    '$6$'*) ;;
+    *) tp_die "chpasswd: only sha512-crypt" ;;
+  esac
+  case "$_cp_hash" in
+    *[!A-Za-z0-9./\$=]*|*:*) tp_die "chpasswd: malformed hash" ;;
+  esac
+  printf '%s:%s\n' "$_cp_user" "$_cp_hash" | tp_run chpasswd -e
+}
+
+tp_verb_getent() {
+  [ "$#" -eq 3 ] && [ "$1" = "shadow" ] && [ "$2" = "--" ] || tp_die "getent: only shadow -- USER"
+  tp_is_principal "$3" || tp_die "getent: $3 is not a principal"
+  tp_exec getent shadow -- "$3"
+}
+
+# --- dispatch ----------------------------------------------------------------
+
+[ $# -ge 1 ] || tp_die "usage: tp-host <verb> [args…]"
+_verb="$1"
+shift
+for _arg in "$@"; do
+  case "$_arg" in
+    *"$_nl"*) tp_die "refusing an argument with a newline" ;;
+  esac
+done
+case "$_verb" in
+  install) tp_verb_install "$@" ;;
+  mkdir) tp_verb_mkdir "$@" ;;
+  cp) tp_verb_cp "$@" ;;
+  mv) tp_verb_mv "$@" ;;
+  rm) tp_verb_rm "$@" ;;
+  ln) tp_verb_ln "$@" ;;
+  readlink) tp_verb_readlink "$@" ;;
+  test) tp_verb_test "$@" ;;
+  cat) tp_verb_cat "$@" ;;
+  cmp) tp_verb_cmp "$@" ;;
+  ls) tp_verb_ls "$@" ;;
+  find) tp_verb_find "$@" ;;
+  chown) tp_verb_chown "$@" ;;
+  chmod) tp_verb_chmod "$@" ;;
+  setfacl) tp_verb_setfacl "$@" ;;
+  tee) tp_verb_tee "$@" ;;
+  systemctl) tp_verb_systemctl "$@" ;;
+  journalctl) tp_verb_journalctl "$@" ;;
+  sshd) tp_verb_sshd "$@" ;;
+  ss) tp_verb_ss "$@" ;;
+  sysctl) tp_verb_sysctl "$@" ;;
+  iptables|ip6tables|iptables-restore|ip6tables-restore|iptables-save|ip6tables-save)
+    tp_verb_xtables "$_verb" "$@" ;;
+  ip) tp_verb_ip "$@" ;;
+  wg) tp_verb_wg "$@" ;;
+  groupadd) tp_verb_groupadd "$@" ;;
+  useradd) tp_verb_useradd "$@" ;;
+  usermod) tp_verb_usermod "$@" ;;
+  gpasswd) tp_verb_gpasswd "$@" ;;
+  chpasswd) tp_verb_chpasswd "$@" ;;
+  getent) tp_verb_getent "$@" ;;
+  *) tp_die "refusing verb $_verb" ;;
+esac

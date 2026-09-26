@@ -14,6 +14,7 @@
  */
 import { logWarn } from "../../../util/logger.ts";
 
+import { hostSudoArgs } from "../../../permissions/host-sudo.ts";
 const MODULES_LOAD_DROPIN_PATH =
   "/etc/modules-load.d/turbopanel-drivetemp.conf";
 
@@ -46,7 +47,7 @@ function stripLogInjection(text: string): string {
 
 const runModprobeDefault: RunModprobe = async () => {
   const result = await new Deno.Command("sudo", {
-    args: ["-n", "modprobe", "drivetemp"],
+    args: hostSudoArgs(["-n", "modprobe", "drivetemp"]),
     stdin: "null",
     stdout: "piped",
     stderr: "piped",

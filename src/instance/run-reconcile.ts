@@ -1,4 +1,5 @@
 import { encodeBase64Url } from "@std/encoding/base64url";
+import { hostSudoArgs } from "../permissions/host-sudo.ts";
 import { dirname } from "@std/path";
 import { statfs } from "node:fs/promises";
 import { ORCHESTRATE_HELPER } from "../orchestration/assets.ts";
@@ -1349,7 +1350,7 @@ export async function restartControlPlaneUnits(options?: {
 }): Promise<boolean> {
   const run = options?.runSystemctl ?? (async (args: string[]) => {
     const result = await new Deno.Command("sudo", {
-      args,
+      args: hostSudoArgs(args),
       stdin: "null",
       stdout: "piped",
       stderr: "piped",
@@ -1381,5 +1382,8 @@ async function defaultInstanceMigrate(
   report: (stage: UpdateProgressStage) => void,
 ): Promise<InstanceUpdateCommandResult> {
   report("installing");
-  return await run("sudo", ["-n", "--", ORCHESTRATE_HELPER, "migrate"]);
+  return await run(
+    "sudo",
+    hostSudoArgs(["-n", "--", ORCHESTRATE_HELPER, "migrate"]),
+  );
 }

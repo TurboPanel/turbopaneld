@@ -16,6 +16,7 @@
  */
 
 import { join } from "@std/path";
+import { hostSudoArgs } from "../../permissions/host-sudo.ts";
 import { logInfo, logWarn } from "../../util/logger.ts";
 import type { LayoutPaths } from "../../paths/layout.ts";
 import type { RunFn, RunResult } from "../ensure-principal.ts";
@@ -67,7 +68,7 @@ async function runDefault(command: string, args: string[]): Promise<RunResult> {
 }
 
 function systemctl(runFn: RunFn, args: string[]): Promise<RunResult> {
-  return runFn("sudo", ["-n", "systemctl", ...args]);
+  return runFn("sudo", hostSudoArgs(["-n", "systemctl", ...args]));
 }
 
 /** Install one root-owned unit file; returns whether the bytes moved. */
@@ -79,20 +80,26 @@ async function installUnit(
   const staged = await Deno.makeTempFile({ prefix: "tp-cron-" });
   try {
     await Deno.writeTextFile(staged, contents, { mode: 0o600 });
-    const same = await runFn("sudo", ["-n", "cmp", "-s", "--", staged, path]);
+    const same = await runFn(
+      "sudo",
+      hostSudoArgs(["-n", "cmp", "-s", "--", staged, path]),
+    );
     if (same.success) return false;
-    const install = await runFn("sudo", [
-      "-n",
-      "install",
-      "-m",
-      "0644",
-      "-o",
-      "root",
-      "-g",
-      "root",
-      staged,
-      path,
-    ]);
+    const install = await runFn(
+      "sudo",
+      hostSudoArgs([
+        "-n",
+        "install",
+        "-m",
+        "0644",
+        "-o",
+        "root",
+        "-g",
+        "root",
+        staged,
+        path,
+      ]),
+    );
     if (!install.success) {
       throw new Error(install.stderr || `Failed to install unit ${path}`);
     }
@@ -114,7 +121,10 @@ async function installedTimerNames(
   unitDir: string,
   environmentId: string,
 ): Promise<string[]> {
-  const listing = await runFn("sudo", ["-n", "ls", "-1", "--", unitDir]);
+  const listing = await runFn(
+    "sudo",
+    hostSudoArgs(["-n", "ls", "-1", "--", unitDir]),
+  );
   if (!listing.success) return [];
   const prefix = `${CRON_UNIT_PREFIX}${environmentId}-`;
   return listing.stdout
@@ -140,13 +150,16 @@ async function removeUnit(
     );
   }
   for (const suffix of [".timer", ".service"]) {
-    const rm = await runFn("sudo", [
-      "-n",
-      "rm",
-      "-f",
-      "--",
-      join(unitDir, `${unit}${suffix}`),
-    ]);
+    const rm = await runFn(
+      "sudo",
+      hostSudoArgs([
+        "-n",
+        "rm",
+        "-f",
+        "--",
+        join(unitDir, `${unit}${suffix}`),
+      ]),
+    );
     if (!rm.success) {
       logWarn("deploy", `cron unit removal failed unit=${unit}: ${rm.stderr}`);
     }

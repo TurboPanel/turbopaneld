@@ -51,6 +51,7 @@
  */
 
 import { join } from "@std/path";
+import { hostSudoArgs } from "../../permissions/host-sudo.ts";
 import { logWarn } from "../../util/logger.ts";
 import type { LayoutPaths } from "../../paths/layout.ts";
 
@@ -108,14 +109,17 @@ export async function ownedConfigFileMatches(
   stagedPath: string,
   configPath: string,
 ): Promise<boolean> {
-  const cmp = await run("sudo", [
-    "-n",
-    "cmp",
-    "-s",
-    "--",
-    stagedPath,
-    configPath,
-  ]);
+  const cmp = await run(
+    "sudo",
+    hostSudoArgs([
+      "-n",
+      "cmp",
+      "-s",
+      "--",
+      stagedPath,
+      configPath,
+    ]),
+  );
   return cmp.success;
 }
 
@@ -175,18 +179,21 @@ export async function writeOwnedConfigFile(
     await removeStagedFile(tmp);
     return false;
   }
-  const install = await run("sudo", [
-    "-n",
-    "install",
-    "-m",
-    "0640",
-    "-o",
-    "root",
-    "-g",
-    group,
-    tmp,
-    configPath,
-  ]);
+  const install = await run(
+    "sudo",
+    hostSudoArgs([
+      "-n",
+      "install",
+      "-m",
+      "0640",
+      "-o",
+      "root",
+      "-g",
+      group,
+      tmp,
+      configPath,
+    ]),
+  );
   await removeStagedFile(tmp);
   if (!install.success) {
     throw new Error(
@@ -217,32 +224,38 @@ export async function stageOwnedConfigFile(
     return null;
   }
   const candidatePath = `${configPath}${CONFIG_CANDIDATE_SUFFIX}`;
-  const install = await run("sudo", [
-    "-n",
-    "install",
-    "-m",
-    "0640",
-    "-o",
-    "root",
-    "-g",
-    group,
-    tmp,
-    candidatePath,
-  ]);
+  const install = await run(
+    "sudo",
+    hostSudoArgs([
+      "-n",
+      "install",
+      "-m",
+      "0640",
+      "-o",
+      "root",
+      "-g",
+      group,
+      tmp,
+      candidatePath,
+    ]),
+  );
   await removeStagedFile(tmp);
   if (!install.success) {
     throw new Error(install.stderr || `Failed to stage config ${configPath}`);
   }
   // A copy that fails is the "no live file yet" case: nothing to restore.
   const previousPath = `${configPath}${CONFIG_PREVIOUS_SUFFIX}`;
-  const snapshot = await run("sudo", [
-    "-n",
-    "cp",
-    "-p",
-    "--",
-    configPath,
-    previousPath,
-  ]);
+  const snapshot = await run(
+    "sudo",
+    hostSudoArgs([
+      "-n",
+      "cp",
+      "-p",
+      "--",
+      configPath,
+      previousPath,
+    ]),
+  );
   return {
     kind: "owned",
     path: configPath,
@@ -290,14 +303,17 @@ export async function publishStagedConfig(
   if (staged.kind === "daemon") {
     await Deno.rename(staged.candidatePath, staged.path);
   } else {
-    const mv = await run("sudo", [
-      "-n",
-      "mv",
-      "-f",
-      "--",
-      staged.candidatePath,
-      staged.path,
-    ]);
+    const mv = await run(
+      "sudo",
+      hostSudoArgs([
+        "-n",
+        "mv",
+        "-f",
+        "--",
+        staged.candidatePath,
+        staged.path,
+      ]),
+    );
     if (!mv.success) {
       throw new Error(mv.stderr || `Failed to install config ${staged.path}`);
     }
@@ -317,7 +333,7 @@ async function discardStagedArtifacts(
       await removeStagedFile(path);
       continue;
     }
-    await run("sudo", ["-n", "rm", "-f", "--", path]);
+    await run("sudo", hostSudoArgs(["-n", "rm", "-f", "--", path]));
   }
 }
 
@@ -342,19 +358,22 @@ export async function restoreStagedConfig(
       if (staged.kind === "daemon") {
         await Deno.rename(staged.previousPath, staged.path);
       } else {
-        await run("sudo", [
-          "-n",
-          "mv",
-          "-f",
-          "--",
-          staged.previousPath,
-          staged.path,
-        ]);
+        await run(
+          "sudo",
+          hostSudoArgs([
+            "-n",
+            "mv",
+            "-f",
+            "--",
+            staged.previousPath,
+            staged.path,
+          ]),
+        );
       }
     } else if (staged.kind === "daemon") {
       await removeStagedFile(staged.path);
     } else {
-      await run("sudo", ["-n", "rm", "-f", "--", staged.path]);
+      await run("sudo", hostSudoArgs(["-n", "rm", "-f", "--", staged.path]));
     }
     staged.published = false;
   }
@@ -377,16 +396,22 @@ export async function systemctlReloadOrStart(
   label = unit,
 ): Promise<void> {
   const action = restart ? "restart" : "reload";
-  const reload = await run("sudo", ["-n", "systemctl", action, unit]);
+  const reload = await run(
+    "sudo",
+    hostSudoArgs(["-n", "systemctl", action, unit]),
+  );
   if (reload.success) return;
   // First deploy may need start instead of reload.
-  const start = await run("sudo", [
-    "-n",
-    "systemctl",
-    "enable",
-    "--now",
-    unit,
-  ]);
+  const start = await run(
+    "sudo",
+    hostSudoArgs([
+      "-n",
+      "systemctl",
+      "enable",
+      "--now",
+      unit,
+    ]),
+  );
   if (!start.success) {
     throw new Error(
       reload.stderr || start.stderr || `Failed to reload/start ${label}`,
@@ -585,16 +610,19 @@ export const NGINX_DRIVER: SiteEngineDriver = {
     // Run -t as tpnginx: the nginx.org binary defaults to user "nginx", and a
     // root-owned configtest looks that user up even without a `user` directive.
     // The systemd unit also runs as tpnginx (high-port vhosts only).
-    const test = await run("sudo", [
-      "-n",
-      "-u",
-      "tpnginx",
-      "--",
-      nginxBinaryPath(layout),
-      "-t",
-      "-c",
-      nginxMainConfigPath(layout),
-    ]);
+    const test = await run(
+      "sudo",
+      hostSudoArgs([
+        "-n",
+        "-u",
+        "tpnginx",
+        "--",
+        nginxBinaryPath(layout),
+        "-t",
+        "-c",
+        nginxMainConfigPath(layout),
+      ]),
+    );
     if (!test.success) {
       throw new Error(test.stderr || "nginx -t failed");
     }
@@ -614,13 +642,16 @@ export const APACHE_DRIVER: SiteEngineDriver = {
     return stageOwnedConfigFile(run, path, contents, "tpapache");
   },
   async configTest(run, layout) {
-    const test = await run("sudo", [
-      "-n",
-      apacheBinaryPath(layout),
-      "-t",
-      "-f",
-      apacheMainConfigPath(layout),
-    ]);
+    const test = await run(
+      "sudo",
+      hostSudoArgs([
+        "-n",
+        apacheBinaryPath(layout),
+        "-t",
+        "-f",
+        apacheMainConfigPath(layout),
+      ]),
+    );
     if (!test.success) {
       throw new Error(test.stderr || "httpd -t failed");
     }
@@ -647,16 +678,19 @@ export const OPENLITESPEED_DRIVER: SiteEngineDriver = {
     // the account the unit runs as: the parse resolves each vhost's suEXEC
     // user/group and its LSAPI socket path relative to the server root, so a
     // root-owned test would validate paths the service can never reach.
-    const test = await run("sudo", [
-      "-n",
-      "-u",
-      "tpols",
-      "--",
-      openlitespeedBinaryPath(layout),
-      "-t",
-      "-c",
-      openlitespeedMainConfigPath(layout),
-    ]);
+    const test = await run(
+      "sudo",
+      hostSudoArgs([
+        "-n",
+        "-u",
+        "tpols",
+        "--",
+        openlitespeedBinaryPath(layout),
+        "-t",
+        "-c",
+        openlitespeedMainConfigPath(layout),
+      ]),
+    );
     if (!test.success) {
       throw new Error(test.stderr || "openlitespeed -t failed");
     }
@@ -684,20 +718,23 @@ export const CADDY_DRIVER: SiteEngineDriver = {
     // and exits without binding a port — the property this interface requires
     // of every engine's test. Run it as the unit's own account so any path it
     // resolves is one the service can actually reach.
-    const test = await run("sudo", [
-      "-n",
-      "-u",
-      "tpcaddysite",
-      "--",
-      "env",
-      `XDG_DATA_HOME=${siteCaddyDataDir(layout)}`,
-      siteCaddyBinaryPath(layout),
-      "validate",
-      "--adapter",
-      "caddyfile",
-      "--config",
-      siteCaddyMainConfigPath(layout),
-    ]);
+    const test = await run(
+      "sudo",
+      hostSudoArgs([
+        "-n",
+        "-u",
+        "tpcaddysite",
+        "--",
+        "env",
+        `XDG_DATA_HOME=${siteCaddyDataDir(layout)}`,
+        siteCaddyBinaryPath(layout),
+        "validate",
+        "--adapter",
+        "caddyfile",
+        "--config",
+        siteCaddyMainConfigPath(layout),
+      ]),
+    );
     if (!test.success) {
       throw new Error(test.stderr || "caddy validate failed");
     }
@@ -744,13 +781,16 @@ export function phpFpmDriver(series: string): PhpFpmDriver {
     label: `php-fpm ${series}`,
     unit,
     async configTest(run: SiteRunFn, layout: LayoutPaths): Promise<void> {
-      const test = await run("sudo", [
-        "-n",
-        phpFpmBinaryPath(series),
-        "--fpm-config",
-        phpFpmMainConfigPath(layout, series),
-        "--test",
-      ]);
+      const test = await run(
+        "sudo",
+        hostSudoArgs([
+          "-n",
+          phpFpmBinaryPath(series),
+          "--fpm-config",
+          phpFpmMainConfigPath(layout, series),
+          "--test",
+        ]),
+      );
       if (!test.success) {
         throw new Error(test.stderr || `php-fpm ${series} --test failed`);
       }

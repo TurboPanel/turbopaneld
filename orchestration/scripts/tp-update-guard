@@ -12,12 +12,12 @@ tp_die() {
 
 # A copy under <install>/lib survives replacing share/orchestration with a
 # build from before this script existed. The systemd unit runs that copy.
-_script_dir="$(CDPATH= cd "$(dirname "$0")" && pwd -P)"
+_script_dir="$(CDPATH='' cd "$(dirname "$0")" && pwd -P)"
 _script="$_script_dir/$(basename "$0")"
 case "$_script" in
   */orchestration/scripts/tp-update-guard)
-    ORCH_DIR="$(CDPATH= cd "$_script_dir/.." && pwd -P)"
-    INSTALL_ROOT="${TURBOPANEL_INSTALL_ROOT:-$(CDPATH= cd "$ORCH_DIR/../.." && pwd -P)}"
+    ORCH_DIR="$(CDPATH='' cd "$_script_dir/.." && pwd -P)"
+    INSTALL_ROOT="${TURBOPANEL_INSTALL_ROOT:-$(CDPATH='' cd "$ORCH_DIR/../.." && pwd -P)}"
     ;;
   *)
     INSTALL_ROOT="${TURBOPANEL_INSTALL_ROOT:-/opt/turbopanel}"
@@ -64,7 +64,10 @@ tp_write_file() (
   cd -P -- "$_wf_priv"
   # Same path, owned by us, 0700: a directory the daemon swapped in under the
   # same name would be owned by the daemon.
-  if [ "$(pwd -P)" != "$_wf_real/$_wf_priv" ] || [ ! -O . ] ||
+  if [ "$(pwd -P)" != "$_wf_real/$_wf_priv" ] || {
+      # shellcheck disable=SC3067 # dash (Debian's /bin/sh) implements -O
+      [ ! -O . ]
+    } ||
     [ "$(stat -c '%a' .)" != "700" ]; then
     printf 'tp-update-guard: %s moved while writing %s; not writing\n' \
       "$_wf_priv" "$1" >&2
