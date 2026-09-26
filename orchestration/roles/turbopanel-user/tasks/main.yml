@@ -104,8 +104,8 @@
     src: "{{ turbopanel_orchestration_dir }}/scripts/tp-host"
     dest: "{{ turbopanel_install_root }}/lib/tp-host"
     owner: root
-    group: root
-    mode: "0755"
+    group: "{{ turbopanel_group }}"
+    mode: "0750"
     remote_src: true
   when: turbopanel_dev_user | default('') | length == 0
 
@@ -114,8 +114,8 @@
     content: "principal_home_root={{ principal_home_root | default('/srv/users') }}\n"
     dest: "{{ turbopanel_install_root }}/lib/tp-host.conf"
     owner: root
-    group: root
-    mode: "0644"
+    group: "{{ turbopanel_group }}"
+    mode: "0640"
   when: turbopanel_dev_user | default('') | length == 0
 
 # Narrow sudo: tp-host and tp-orchestrate (which runs the shipped playbooks as

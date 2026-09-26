@@ -211,7 +211,7 @@ test("known root escapes are refused by the sudoers grant", async () => {
   }
 });
 
-test("tp-host is installed root:root 0755 before the sudoers file that names it", async () => {
+test("tp-host is installed root:tp 0750 (never writable by tp) before the sudoers file that names it", async () => {
   const tasks = await readTasks(USER_TASKS);
   const install = tasks.findIndex((task) =>
     String(task["ansible.builtin.copy"]?.dest ?? "").endsWith("/lib/tp-host")
@@ -223,8 +223,8 @@ test("tp-host is installed root:root 0755 before the sudoers file that names it"
   assertEquals(install < sudoers, true, "tp-host must be installed first");
   const copy = tasks[install]!["ansible.builtin.copy"]!;
   assertEquals(copy.owner, "root");
-  assertEquals(copy.group, "root");
-  assertEquals(copy.mode, "0755");
+  assertEquals(copy.group, "{{ turbopanel_group }}");
+  assertEquals(copy.mode, "0750");
   assertEquals(copy.src, "{{ turbopanel_orchestration_dir }}/scripts/tp-host");
 });
 
