@@ -542,7 +542,7 @@ from production code.
 | Stage | dev | daemon | Rationale |
 | ----- | --- | ------ | --------- |
 | pre-commit | scan-secrets only (tests deferred) | scan-secrets + `deno fmt` + `lint` + `check:layout` + `check:vocabulary` (typecheck/tests deferred) | secret scan always; daemon fmt/guards via the pinned Deno or `vagrant ssh`; the cheap half of `verify.yml` runs in ~1s so contract breaks never reach CI; suites in CI / guest |
-| PR → `trunk` | `verify.yml` | `verify.yml` | blocks merge |
+| PR → `trunk` | `verify.yml` | `verify.yml` (`verify` + `contract-drift`, folded into the single `ci-ok` job that the ruleset requires) | blocks merge |
 | push `trunk` | `verify.yml` | `verify.yml`; `publish` job `needs: verify` → the `trunk` CDN drop **and** the rolling GitHub `canary` pre-release (`canary` job, via `TurboPanel/dev` `gh-canary.yml`) | nothing compiles from failing code |
 | promote → rc/release | n/a | **artifact integrity only** (re-download + sha256/size against the release's manifest) | no new code enters after publish |
 
