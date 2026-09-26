@@ -46,19 +46,30 @@ VENDOR_DIR="$INSTALL_ROOT/vendor"
 PLAYBOOKS_DIR="$ORCH_DIR/playbooks"
 GALAXY_ROLES_DIR="$VENDOR_DIR/ansible/galaxy-roles"
 ANSIBLE_PLAYBOOK_BIN="$VENDOR_DIR/ansible/current/bin/ansible-playbook"
-# Root-only scratch. /tmp is sticky, so an unprivileged pre-created directory
-# cannot be removed by us — refuse it instead of using it.
+# Root-only scratch. The well-known name is reused while it is a root-owned
+# directory (so `exec ansible-playbook` leaves nothing behind per run). /tmp is
+# sticky: another account can pre-create that name, and we cannot remove it.
+# Never use such a path, and never let it block root either — take a private,
+# unpredictable `mktemp -d` directory for this run instead.
 ROOT_SCRATCH="/tmp/turbopanel-orchestrate"
 
+tp_scratch_is_ours() {
+  [ -d "$1" ] && [ ! -L "$1" ] &&
+    [ "$(stat -c %u "$1" 2>/dev/null || echo -1)" = "$(id -u)" ]
+}
+
 tp_require_root_scratch() {
-  if [ -L "$ROOT_SCRATCH" ]; then
-    tp_die "$ROOT_SCRATCH is a symlink; refusing"
+  if tp_scratch_is_ours "$ROOT_SCRATCH"; then
+    chmod 0700 "$ROOT_SCRATCH"
+    return 0
   fi
-  if [ ! -d "$ROOT_SCRATCH" ]; then
-    mkdir -m 0700 "$ROOT_SCRATCH"
+  if [ ! -e "$ROOT_SCRATCH" ] && [ ! -L "$ROOT_SCRATCH" ] &&
+    mkdir -m 0700 "$ROOT_SCRATCH" 2>/dev/null; then
+    return 0
   fi
-  _owner="$(stat -c %u "$ROOT_SCRATCH" 2>/dev/null || echo -1)"
-  [ "$_owner" = "0" ] || tp_die "$ROOT_SCRATCH is not root-owned; refusing"
+  # Squatted (a symlink, or a directory another account created): not ours.
+  ROOT_SCRATCH="$(mktemp -d /tmp/turbopanel-orchestrate.XXXXXXXX)" ||
+    tp_die "cannot create a private scratch directory"
   chmod 0700 "$ROOT_SCRATCH"
 }
 

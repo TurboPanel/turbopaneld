@@ -61,9 +61,18 @@ export const DAEMON_FEATURE_MIN_VERSIONS: Readonly<Record<string, string>> = {
 export const DAEMON_WIRE_FEATURES = [
   "managed-upgrade-v1",
   "update-progress-v1",
+  "sealed-instance-secrets-v1",
 ] as const;
 
 export type DaemonWireFeature = (typeof DAEMON_WIRE_FEATURES)[number];
+
+/**
+ * This daemon opens `tpdaemon` envelopes on `public-urls-update`
+ * (`keyEnvelope`) and `tunnel-token` (`tokenEnvelope`), so the control plane
+ * seals those instance secrets instead of sending plaintext.
+ */
+export const SEALED_INSTANCE_SECRETS_FEATURE: DaemonWireFeature =
+  "sealed-instance-secrets-v1";
 
 /** Features that need an instance at or above a semver. Empty until one lands. */
 export const INSTANCE_FEATURE_MIN_VERSIONS: Readonly<Record<string, string>> =

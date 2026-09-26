@@ -354,6 +354,42 @@ test("a failed attempt backs off, reports the issuer error, and survives restart
   });
 });
 
+test("a failed close of the HTTP-01 window is reported, not swallowed", async () => {
+  await withTempLayout(async (fixture) => {
+    const clock = createFakeClock({ now: FIXED_NOW_MS });
+    const layout = resolveLayout(fixture.env);
+    await writeSidecar(layout.configDir, [HOST]);
+    await writeSettings(layout.configDir);
+    const sent: InstanceAcmeIssuanceEventMessage[] = [];
+    const scheduler = new InstanceAcmeRenewalScheduler({
+      env: fixture.env,
+      layout,
+      now: () => clock.now(),
+      withLock: <T>(fn: () => Promise<T>) => fn(),
+      send: (message: InstanceAcmeIssuanceEventMessage) => {
+        sent.push(message);
+        return true;
+      },
+      openWindow: () => Promise.resolve(),
+      preflight: () => Promise.resolve(),
+      closeWindow: () =>
+        Promise.reject(new Error("hosting Caddy disable failed: unit busy")),
+      reload: () => Promise.resolve(),
+      issue: () =>
+        Promise.reject(
+          new Error("instance ACME issuer failed: challenge failed"),
+        ),
+    });
+    await scheduler.check();
+    assertEquals(sent.length, 1);
+    assertEquals(sent[0]?.ok, false);
+    const message = sent[0]?.errorMessage ?? "";
+    assertStringIncludes(message, "challenge failed");
+    assertStringIncludes(message, "closing the HTTP-01 window also failed");
+    assertStringIncludes(message, "unit busy");
+  });
+});
+
 test("a reload failure is retried without issuing again", async () => {
   await withTempLayout(async (fixture) => {
     const clock = createFakeClock({ now: FIXED_NOW_MS });

@@ -110,10 +110,12 @@ export type UpdateProgressMessage = {
 };
 
 /**
- * One control-plane hostname on `public-urls-update`. `certPem` / `keyPem`
- * travel decrypted once, over the authenticated cell socket, for `uploaded`
- * sources. The daemon writes them under the instance certs dir and does not
- * echo them back.
+ * One control-plane hostname on `public-urls-update`. For an `uploaded`
+ * source the key arrives as `keyEnvelope`, a `tpdaemon` envelope this daemon
+ * opens through `POST /api/daemon/v1/secrets/decrypt` (it advertises
+ * `sealed-instance-secrets-v1`); an older control plane sends the legacy
+ * plaintext `keyPem`, still accepted. The daemon writes the pair under the
+ * instance certs dir and does not echo it back.
  */
 export type InstanceHostnameCertSource =
   | "lets-encrypt"
@@ -125,7 +127,22 @@ export type InstanceHostnameWireEntry = {
   source: InstanceHostnameCertSource;
   certPem?: string;
   keyPem?: string;
+  keyEnvelope?: string;
   uploadedCertId?: string;
+};
+
+/**
+ * Instance → daemon: start (or, with an empty `token`, stop) the Cloudflare
+ * tunnel. A non-empty token arrives as `tokenEnvelope` (`tpdaemon`) from a
+ * control plane that sees `sealed-instance-secrets-v1`; `token` is the legacy
+ * plaintext field. Twin of `turbopanel/src/contracts/cell-protocol.ts`.
+ */
+export type TunnelTokenMessage = {
+  type: "tunnel-token";
+  id: string;
+  token?: string;
+  tokenEnvelope?: string;
+  at: string;
 };
 
 /** Instance-wide ACME knobs for hostnames whose source is `lets-encrypt`. */
@@ -403,7 +420,7 @@ export type DaemonMessage =
     error?: string;
     at: string;
   }
-  | { type: "tunnel-token"; id: string; token: string; at: string }
+  | TunnelTokenMessage
   | {
     type: "tunnel-token-result";
     id: string;

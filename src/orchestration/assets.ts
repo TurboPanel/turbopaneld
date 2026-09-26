@@ -141,12 +141,31 @@ export const GALAXY_COLLECTIONS_DIR = join(
   "galaxy-collections",
 );
 export const ANSIBLE_LOCAL_TMP = join(CACHE_DIR, "ansible-tmp");
+let ansibleHomeDir: string | undefined;
+
 /**
- * Ephemeral Ansible home (galaxy download cache, etc.). Under `/tmp` so root-run
- * install bootstrap never writes `/root/.ansible`. Real content lands in FHS
- * paths (`GALAXY_*`); this dir is disposable and cleaned after managed install.
+ * Ephemeral Ansible home (galaxy download cache, etc.), private to this
+ * process: a `0700` temp directory created on first use and removed on exit,
+ * so root-run install bootstrap never writes `/root/.ansible`. Real content
+ * lands in FHS paths (`GALAXY_*`). It used to be the fixed
+ * `/tmp/turbopanel-ansible`, which any local account could pre-create — and
+ * Ansible derives its plugin and module search paths from `ANSIBLE_HOME`,
+ * with the installer running as root.
  */
-export const ANSIBLE_HOME = "/tmp/turbopanel-ansible"; // NOSONAR typescript:S5443 — disposable ephemeral cache; durable content uses FHS GALAXY_* paths
+export function ansibleHome(): string {
+  if (ansibleHomeDir === undefined) {
+    const dir = Deno.makeTempDirSync({ prefix: "turbopanel-ansible-" });
+    ansibleHomeDir = dir;
+    globalThis.addEventListener("unload", () => {
+      try {
+        Deno.removeSync(dir, { recursive: true });
+      } catch {
+        // Best effort: the OS temp cleaner takes whatever is left.
+      }
+    });
+  }
+  return ansibleHomeDir;
+}
 export const ANSIBLE_CFG = join(ORCHESTRATION_DIR, "ansible.cfg");
 
 /**
@@ -172,7 +191,7 @@ export function ansibleEnv(): Record<string, string> {
   return {
     ANSIBLE_CONFIG: ANSIBLE_CFG,
     ANSIBLE_EXECUTABLE: ANSIBLE_SHELL_EXECUTABLE,
-    ANSIBLE_HOME,
+    ANSIBLE_HOME: ansibleHome(),
     ANSIBLE_LOCAL_TEMP: ANSIBLE_LOCAL_TMP,
     ANSIBLE_ROLES_PATH: `${GALAXY_ROLES_DIR}:${GALAXY_VENDOR_ROLES_DIR}`,
   };

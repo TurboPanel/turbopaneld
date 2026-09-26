@@ -1,9 +1,11 @@
 import { assertEquals, assertStringIncludes } from "@std/assert";
 import { fromFileUrl, join } from "@std/path";
 import {
+  ContractDriftError,
   type ContractFieldPin,
   extractFieldSpecs,
   fieldPinDrift,
+  runContractDriftCheck,
 } from "./check-contract-drift.ts";
 
 /**
@@ -131,5 +133,26 @@ test("the committed snapshot matches both checkouts' normalized field types", as
       ),
       null,
     );
+  }
+});
+
+test("a missing sibling fails when CI requires it, and skips otherwise", async () => {
+  const absent = await Deno.makeTempDir();
+  const sibling = join(absent, "turbopanel");
+  try {
+    let refused: unknown;
+    try {
+      await runContractDriftCheck({ sibling, requireSibling: true });
+    } catch (err) {
+      refused = err;
+    }
+    assertEquals(refused instanceof ContractDriftError, true);
+    assertStringIncludes((refused as Error).message, sibling);
+    assertEquals(
+      await runContractDriftCheck({ sibling, requireSibling: false }),
+      "skipped",
+    );
+  } finally {
+    await Deno.remove(absent, { recursive: true });
   }
 });

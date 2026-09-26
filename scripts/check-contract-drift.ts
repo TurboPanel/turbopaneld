@@ -1008,23 +1008,38 @@ async function checkExpandOnly(tp: string, td: string): Promise<void> {
   );
 }
 
-async function runContractDriftCheck(): Promise<void> {
-  const siblingSrc = join(SIBLING, "src");
+/** A precondition the check itself refuses (not a drift in the contracts). */
+export class ContractDriftError extends Error {}
+
+export type ContractDriftOptions = {
+  /** The turbopanel checkout to compare against. */
+  sibling?: string;
+  /** Fail instead of skipping when the sibling is absent (CI sets this). */
+  requireSibling?: boolean;
+};
+
+export async function runContractDriftCheck(
+  opts: ContractDriftOptions = {},
+): Promise<"ok" | "skipped"> {
+  const sibling = opts.sibling ?? SIBLING;
+  const requireSibling = opts.requireSibling ??
+    Deno.env.get("TURBOPANEL_REQUIRE_SIBLING") === "1";
+  const siblingSrc = join(sibling, "src");
   try {
     await Deno.stat(siblingSrc);
   } catch {
     // CI's contract-drift job checks the sibling out and sets this, so a
     // missing checkout there is a failure rather than a silent pass.
-    if (Deno.env.get("TURBOPANEL_REQUIRE_SIBLING") === "1") {
-      fail(`sibling checkout missing at ${SIBLING}`);
+    if (requireSibling) {
+      throw new ContractDriftError(`sibling checkout missing at ${sibling}`);
     }
     console.log(
-      `check-contract-drift: sibling checkout missing at ${SIBLING}; skip`,
+      `check-contract-drift: sibling checkout missing at ${sibling}; skip`,
     );
-    return;
+    return "skipped";
   }
 
-  const tp = SIBLING;
+  const tp = sibling;
   const td = ROOT;
   await checkMetrics(tp, td);
   await checkHostname(tp, td);
@@ -1037,8 +1052,14 @@ async function runContractDriftCheck(): Promise<void> {
   console.log(
     "check-contract-drift: metrics, hostname, machine-key, channels, ServerReportedIp, slot-mapping, expand-only fields agree.",
   );
+  return "ok";
 }
 
 if (import.meta.main) {
-  await runContractDriftCheck();
+  try {
+    await runContractDriftCheck();
+  } catch (err) {
+    if (err instanceof ContractDriftError) fail(err.message);
+    throw err;
+  }
 }

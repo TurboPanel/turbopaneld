@@ -4,11 +4,11 @@ import {
   ANSIBLE_CFG,
   ANSIBLE_CORE_VERSION,
   ANSIBLE_CURRENT_DIR,
-  ANSIBLE_HOME,
   ANSIBLE_INSTALL_DIR,
   ANSIBLE_LOCAL_TMP,
   ANSIBLE_PLAYBOOK_BIN,
   ANSIBLE_PLAYBOOK_CWD,
+  ansibleHome,
   CACHE_DIR,
   CLOUDFLARED_CURRENT_DIR,
   DAEMON_ROOT,
@@ -483,9 +483,14 @@ test("module-level orchestration constants match active layout", () => {
     "ANSIBLE_LOCAL_TMP",
   );
   assertEquals(
-    ANSIBLE_HOME,
-    "/tmp/turbopanel-ansible",
-    "ANSIBLE_HOME",
+    ansibleHome() === "/tmp/turbopanel-ansible",
+    false,
+    "ANSIBLE_HOME must not be the predictable shared /tmp path",
+  );
+  assertEquals(
+    ansibleHome(),
+    ansibleHome(),
+    "ANSIBLE_HOME is stable per process",
   );
   assertEquals(
     ANSIBLE_CFG,

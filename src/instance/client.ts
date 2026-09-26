@@ -132,6 +132,7 @@ import { TopologyReporter } from "./topology-reporter.ts";
 import type { TopologySnapshot } from "../contracts/topology-types.ts";
 import type {
   DaemonMessage,
+  InstanceHostnameWireEntry,
   UpdateProgressStage,
 } from "../contracts/cell-messages.ts";
 
@@ -1803,7 +1804,8 @@ export class InstanceClient {
     let ok = false;
     let error: string | undefined;
     try {
-      await clientTestHooks.writeInstanceTunnelToken(message.token);
+      const token = await this.#resolveTunnelToken(message);
+      await clientTestHooks.writeInstanceTunnelToken(token);
       ok = true;
     } catch (err) {
       error = err instanceof Error ? err.message : String(err);
@@ -1820,6 +1822,63 @@ export class InstanceClient {
     if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(result));
   }
 
+  /**
+   * The plaintext tunnel token: opened from `tokenEnvelope` through the same
+   * `/secrets/decrypt` path every deploy secret uses, or the legacy `token`
+   * from an older control plane. An envelope that cannot be opened fails the
+   * request rather than tearing the tunnel down.
+   */
+  async #resolveTunnelToken(
+    message: Extract<DaemonMessage, { type: "tunnel-token" }>,
+  ): Promise<string> {
+    if (message.tokenEnvelope !== undefined) {
+      const [plaintext] = await this.#openSealedSecrets([
+        message.tokenEnvelope,
+      ]);
+      if (typeof plaintext !== "string") {
+        throw new Error("tunnel token envelope could not be opened");
+      }
+      return plaintext;
+    }
+    if (typeof message.token !== "string") {
+      throw new Error("tunnel-token carries no token");
+    }
+    return message.token;
+  }
+
+  /**
+   * Replace every `keyEnvelope` with the opened `keyPem`, in one
+   * `/secrets/decrypt` call. Entries from an older control plane already
+   * carry `keyPem` and pass through.
+   */
+  async #openHostnameKeys(
+    hostnames: InstanceHostnameWireEntry[],
+  ): Promise<InstanceHostnameWireEntry[]> {
+    const sealed = hostnames.filter((entry) => entry.keyEnvelope !== undefined);
+    if (sealed.length === 0) return hostnames;
+    const opened = await this.#openSealedSecrets(
+      sealed.map((entry) => entry.keyEnvelope as string),
+    );
+    return hostnames.map((entry) => {
+      const index = sealed.indexOf(entry);
+      if (index < 0) return entry;
+      const keyPem = opened[index];
+      if (typeof keyPem !== "string") {
+        throw new Error(
+          `uploaded certificate key for ${entry.host} could not be opened`,
+        );
+      }
+      const { keyEnvelope: _sealed, ...rest } = entry;
+      return { ...rest, keyPem };
+    });
+  }
+
+  async #openSealedSecrets(envelopes: string[]): Promise<(string | null)[]> {
+    const apiClient = this.#apiClient;
+    if (!apiClient) throw new Error("api client unavailable");
+    return await apiClient.decryptSecrets(envelopes);
+  }
+
   async #applyPublicUrls(
     message: Extract<DaemonMessage, { type: "public-urls-update" }>,
     ws: WebSocket,
@@ -1830,7 +1889,9 @@ export class InstanceClient {
       const capable = resolveDaemonCapabilities(DAEMON_VERSION)[
         "instance-cert-sources-per-hostname"
       ] === true;
-      const hostnames = capable && message.hostnames ? message.hostnames : null;
+      const hostnames = capable && message.hostnames
+        ? await this.#openHostnameKeys(message.hostnames)
+        : null;
       if (!hostnames) {
         logInfo(
           "public-urls",
