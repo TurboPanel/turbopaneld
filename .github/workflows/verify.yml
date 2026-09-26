@@ -232,3 +232,27 @@ jobs:
         env:
           TURBOPANEL_REQUIRE_SIBLING: "1"
         run: deno task check:contract-drift
+
+  # The one context the trunk ruleset will require: green only when every
+  # PR-time job above succeeded. `if: always()` so a failed or cancelled need
+  # still produces a (red) result instead of leaving the check pending, which
+  # would block the merge with no signal. Both needs run unconditionally on
+  # pull_request, so a `skipped` result is a failure here too.
+  ci-ok:
+    name: ci-ok
+    needs: [verify, contract-drift]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Require every PR job to have succeeded
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          echo "$RESULTS"
+          if echo "$RESULTS" | grep -Eq '"result": *"(failure|cancelled|skipped)"'; then
+            echo "::error::a required job did not succeed"
+            exit 1
+          fi
+          echo "$RESULTS" | grep -Eq '"result": *"success"' || { echo "::error::no job results"; exit 1; }
