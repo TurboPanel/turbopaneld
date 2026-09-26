@@ -1,0 +1,71 @@
+# One-click promotion for this repo (Testing Checklist rel-s19..s21).
+#
+#   to=rc       canary build → v<base>-rc.1 pre-release + `staging` branch
+#   to=release  v<base>-rc.1 → v<base> (releases/latest) + `live` branch
+#
+# The bytes are the tested build's; only the asset names, the manifest
+# (version, channel, urls) and its signature change. Order across repos:
+# turbopaneld → turbopanel → ui → website → dev. The three jobs are
+# TurboPanel/dev's reusable workflows pinned to ONE sha, passed again as
+# dev-ref (that is where the scripts live). Approval = the `release`
+# environment (prepare, then finalize). to=release needs the TurboPanel
+# Release GitHub App (RELEASE_APP_ID / RELEASE_APP_PRIVATE_KEY) for the
+# bare tag and the live push and refuses to start without it; to=rc works
+# with GITHUB_TOKEN up to the staging push, which then says how to do it by
+# hand until the App exists.
+
+name: Promote
+
+on:
+  workflow_dispatch:
+    inputs:
+      to:
+        description: Promote to
+        required: true
+        type: choice
+        options:
+          - rc
+          - release
+      source:
+        description: "to=rc: a canary build id (yyyymmdd-hhmmss-sha7 from the rolling canary release), a canary version, or manifest-<version>.json. to=release: the rc tag (vX.Y.Z-rc.1)."
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    uses: TurboPanel/dev/.github/workflows/gh-promote.yml@ecedd23166407720d0f92bfdb38d2205bd6527bc # dev#16
+    with:
+      repo-kind: daemon
+      to: ${{ inputs.to }}
+      source: ${{ inputs.source }}
+      dev-ref: ecedd23166407720d0f92bfdb38d2205bd6527bc
+      # turbopaneld commit carrying scripts/sign-manifest.ts and the release
+      # public-key pin. Bump it when the key is rotated.
+      signer-ref: 93c4f94510c9499e6bf04366a9500fe9f8e38aaa
+    secrets: inherit
+
+  publish:
+    needs: prepare
+    uses: TurboPanel/dev/.github/workflows/gh-release.yml@ecedd23166407720d0f92bfdb38d2205bd6527bc # dev#16
+    with:
+      version: ${{ needs.prepare.outputs.version }}
+      channel: ${{ inputs.to }}
+      release-notes: ${{ needs.prepare.outputs.release-notes }}
+      assets-artifact-name: ${{ needs.prepare.outputs.assets-artifact-name }}
+      manifest-filename: ${{ needs.prepare.outputs.manifest-filename }}
+      target-commit: ${{ needs.prepare.outputs.commit }}
+    secrets: inherit
+
+  finalize:
+    needs: [prepare, publish]
+    uses: TurboPanel/dev/.github/workflows/gh-promote-finalize.yml@ecedd23166407720d0f92bfdb38d2205bd6527bc # dev#16
+    with:
+      to: ${{ inputs.to }}
+      version: ${{ needs.prepare.outputs.version }}
+      commit: ${{ needs.prepare.outputs.commit }}
+      branch: ${{ needs.prepare.outputs.branch }}
+      manifest-filename: ${{ needs.prepare.outputs.manifest-filename }}
+    secrets: inherit
