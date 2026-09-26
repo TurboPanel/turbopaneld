@@ -415,9 +415,7 @@ compile toolchain).
   goes stale is caught here). Its `contract-drift` job checks out
   `TurboPanel/turbopanel` (same-named branch, else trunk) beside this repo and
   runs `check:contract-drift` with `TURBOPANEL_REQUIRE_SIBLING=1`, so a missing
-  sibling fails instead of skipping. The daemon's `scan-secrets.sh` keeps two
-  patterns the other repos' copies lack (the RabbitMQ and Postgres password
-  files the daemon writes) and still refuses to run outside a git work tree.
+  sibling fails instead of skipping. `scripts/scan-secrets.sh` is byte-identical in turbopanel, turbopaneld, ui, website and dev — change all five together. It refuses a committed secret-bearing file (`license.token`, `server-key.json`, `.pgpass`, `.rabbitmq_pass`, …), flags credential URLs (`amqp(s)`/`postgres(ql)` with `user:pass@`) and `TURBOPANEL_SECRET(S)` bindings, and flags any line that names a secret-bearing file unless that exact `path:line:content` is in `.secretscan-allowlist`. dev's `src/lib/scan-secrets.test.ts` tests the rules and, with the siblings checked out in dev CI, fails if any copy drifts.
 - **CI gate:** `.github/workflows/verify.yml` is the canonical quality gate —
   reusable via `workflow_call`, the trunk `publish` job `needs: verify`, and
   promotion re-verifies artifact hashes only (no new compile from source).
