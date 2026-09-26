@@ -411,7 +411,7 @@ jobs:
     needs: publish
     permissions:
       contents: write
-    uses: TurboPanel/dev/.github/workflows/gh-canary.yml@trunk
+    uses: TurboPanel/dev/.github/workflows/gh-canary.yml@177d481666cce2e1dcfa76290b141b0149a6a0a9 # trunk
     with:
       version: ${{ needs.publish.outputs.canary-version }}
       commit: ${{ github.sha }}

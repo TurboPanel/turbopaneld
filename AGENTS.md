@@ -409,6 +409,15 @@ compile toolchain).
   `bash`, not `sh` (Debian `/bin/sh` is dash and silently skips prune/verify
   checks that use `[[`). `run.sh` stays POSIX and inlines a separate copy of the
   manifest helpers for `curl | sh`.
+- **Secret scan and contract drift in CI:** `verify.yml` runs
+  `scripts/scan-secrets.sh --all` over every tracked file (the pre-commit hook
+  only sees staged files, so a line-keyed `.secretscan-allowlist` entry that
+  goes stale is caught here). Its `contract-drift` job checks out
+  `TurboPanel/turbopanel` (same-named branch, else trunk) beside this repo and
+  runs `check:contract-drift` with `TURBOPANEL_REQUIRE_SIBLING=1`, so a missing
+  sibling fails instead of skipping. The daemon's `scan-secrets.sh` keeps two
+  patterns the other repos' copies lack (the RabbitMQ and Postgres password
+  files the daemon writes) and still refuses to run outside a git work tree.
 - **CI gate:** `.github/workflows/verify.yml` is the canonical quality gate —
   reusable via `workflow_call`, the trunk `publish` job `needs: verify`, and
   promotion re-verifies artifact hashes only (no new compile from source).

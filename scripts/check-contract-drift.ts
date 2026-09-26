@@ -1013,6 +1013,11 @@ async function runContractDriftCheck(): Promise<void> {
   try {
     await Deno.stat(siblingSrc);
   } catch {
+    // CI's contract-drift job checks the sibling out and sets this, so a
+    // missing checkout there is a failure rather than a silent pass.
+    if (Deno.env.get("TURBOPANEL_REQUIRE_SIBLING") === "1") {
+      fail(`sibling checkout missing at ${SIBLING}`);
+    }
     console.log(
       `check-contract-drift: sibling checkout missing at ${SIBLING}; skip`,
     );

@@ -1,6 +1,13 @@
 #!/usr/bin/env sh
 # Scan tracked/staged files for secret-like content. Allowlist exact fixture lines only.
+# Pre-commit scans the staged (else modified) files; `--all` scans every
+# tracked file, which is what CI runs.
 set -eu
+
+SCAN_ALL=0
+if [ "${1:-}" = "--all" ]; then
+  SCAN_ALL=1
+fi
 
 ROOT="$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -12,8 +19,12 @@ if [ ! -f "$ALLOWLIST" ]; then
 fi
 
 if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-  FILES="$(git diff --cached --name-only --diff-filter=ACM 2>/dev/null || true)"
-  if [ -z "$FILES" ]; then
+  if [ "$SCAN_ALL" = 1 ]; then
+    FILES="$(git ls-files)"
+  else
+    FILES="$(git diff --cached --name-only --diff-filter=ACM 2>/dev/null || true)"
+  fi
+  if [ -z "$FILES" ] && [ "$SCAN_ALL" = 0 ]; then
     FILES="$(git diff --name-only --diff-filter=ACM 2>/dev/null || true)"
   fi
 else
@@ -29,8 +40,9 @@ fail=0
 for file in $FILES; do
   [ -f "$file" ] || continue
   case "$file" in
-    .secretscan-allowlist)
-      # Allowlist entries echo the exact fixture lines; skip self-scan.
+    .secretscan-allowlist|scripts/scan-secrets.sh)
+      # The allowlist echoes the exact fixture lines and this script names the
+      # patterns; skip both.
       continue
       ;;
     *.png|*.jpg|*.jpeg|*.gif|*.webp|*.ico|*.woff|*.woff2|*.ttf|*.otf|*.zip|*.tar|*.zst|*.gz)
