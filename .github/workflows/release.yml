@@ -46,6 +46,12 @@ permissions:
 
 jobs:
   verify:
+    # A tag pushed by a `[bot]` actor is the TurboPanel Release App
+    # promoting a tested build (promote.yml → TurboPanel/dev gh-promote.yml);
+    # that flow publishes the release itself, so this from-source path must
+    # not race it. A person pushing a tag still gets the classic cut; trunk
+    # pushes (canary) are unaffected.
+    if: github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/') || !endsWith(github.actor, '[bot]')
     uses: ./.github/workflows/verify.yml
     secrets: inherit
 
