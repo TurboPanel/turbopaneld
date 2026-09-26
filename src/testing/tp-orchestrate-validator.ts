@@ -19,6 +19,7 @@ export const TP_ORCHESTRATE_PATH = join(
 const VALIDATOR_FUNCTIONS = [
   "tp_extra_var_value_ok",
   "tp_hostname_ok",
+  "tp_host_token_ok",
   "tp_host_list_ok",
   "tp_email_ok",
   "tp_backup_dir_ok",
@@ -62,14 +63,21 @@ async function hostPython3(): Promise<string> {
 }
 
 /**
- * A throwaway `<vendor>/ansible/current/bin/python3` pointing at the host
+ * A throwaway `<vendor>/ansible/current/bin/python3` that runs the host
  * interpreter, standing in for the Ansible venv the helper uses.
  */
 export async function makeFakeVendorDir(): Promise<string> {
   const vendor = await Deno.makeTempDir({ prefix: "tp-orch-vendor-" });
   const bin = join(vendor, "ansible", "current", "bin");
   await Deno.mkdir(bin, { recursive: true });
-  await Deno.symlink(await hostPython3(), join(bin, "python3"));
+  // A tiny exec shim, not a symlink: src/ stays free of Deno.symlink (see
+  // scoped-writes.test.ts), and the helper only ever runs this path.
+  const shim = join(bin, "python3");
+  await Deno.writeTextFile(
+    shim,
+    `#!/bin/sh\nexec '${await hostPython3()}' "$@"\n`,
+  );
+  await Deno.chmod(shim, 0o755);
   return vendor;
 }
 

@@ -127,6 +127,9 @@ tp_extra_var_value_ok() {
     turbopanel_hostnames_json)
       # Compact JSON of {host, source, cert_id} rows; the roles re-check each
       # host. Structural characters only — no quotes-in-strings, no escapes.
+      # A host is stored as an install origin (https://panel.example.com:8443),
+      # so `/` and `:` are part of the set; the roles strip scheme, path and
+      # port before a host names anything.
       case "$_xv" in
         '['*']') ;;
         *) return 1 ;;
@@ -134,7 +137,7 @@ tp_extra_var_value_ok() {
       # \133 \135 are [ ]: a bracket inside a case pattern's own brackets is
       # not portable across shells, so strip the allowed set and require
       # nothing to remain.
-      [ -z "$(printf '%s' "$_xv" | tr -d 'A-Za-z0-9{}":,._\133\135-')" ] &&
+      [ -z "$(printf '%s' "$_xv" | tr -d 'A-Za-z0-9{}":,._/\133\135-')" ] &&
         return 0
       ;;
     turbopanel_acme_email)
@@ -195,8 +198,53 @@ tp_hostname_ok() {
   return 0
 }
 
-# Comma-separated host tokens for the certificate SANs: host names, IPv4, or
-# IPv6 literals. No wildcards, no ports, no empty entries.
+# One control-plane host as the daemon passes it: a host name, IPv4 or IPv6
+# literal, or the install origin the control plane stores for it
+# (https://<host>[:port][/], IPv6 bracketed). No wildcards, no userinfo, no
+# path, query or fragment.
+tp_host_token_ok() {
+  _ht="$1"
+  case "$_ht" in
+    https://*)
+      _ht="${_ht#https://}"
+      _ht="${_ht%/}"
+      case "$_ht" in
+        '['*)
+          _ht_port="${_ht##*]}"
+          _ht="${_ht#?}"
+          _ht="${_ht%]"$_ht_port"}"
+          ;;
+        *:*)
+          _ht_port=":${_ht##*:}"
+          _ht="${_ht%:*}"
+          ;;
+        *) _ht_port="" ;;
+      esac
+      case "$_ht_port" in
+        '') ;;
+        :[0-9]|:[0-9][0-9]|:[0-9][0-9][0-9]|:[0-9][0-9][0-9][0-9]|:[0-9][0-9][0-9][0-9][0-9])
+          [ "${_ht_port#:}" -le 65535 ] || return 1
+          ;;
+        *) return 1 ;;
+      esac
+      ;;
+  esac
+  case "$_ht" in
+    '') return 1 ;;
+    *:*)
+      case "$_ht" in
+        *[!0-9A-Fa-f:.]*) return 1 ;;
+      esac
+      ;;
+    *)
+      tp_hostname_ok "$_ht" || return 1
+      ;;
+  esac
+  return 0
+}
+
+# Comma-separated host tokens for the certificate SANs (see
+# tp_host_token_ok). No empty entries.
 tp_host_list_ok() {
   _hl="$1"
   [ -n "$_hl" ] || return 1
@@ -210,16 +258,7 @@ tp_host_list_ok() {
       *,*) _hl_rest="${_hl_rest#*,}" ;;
       *) _hl_rest="" ;;
     esac
-    case "$_hl_tok" in
-      *:*)
-        case "$_hl_tok" in
-          *[!0-9A-Fa-f:.]*) return 1 ;;
-        esac
-        ;;
-      *)
-        tp_hostname_ok "$_hl_tok" || return 1
-        ;;
-    esac
+    tp_host_token_ok "$_hl_tok" || return 1
   done
   return 0
 }

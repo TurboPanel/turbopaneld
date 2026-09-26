@@ -118,6 +118,10 @@ async function daemonExtraVars(): Promise<Array<[string, string[]]>> {
     INSTALL_ROOT,
     [
       { host: "panel.example.com", source: "platform-ca" },
+      // The control plane stores install origins; this is the usual shape.
+      { host: "https://origin.example.com:8443", source: "platform-ca" },
+      { host: "https://[2001:db8::10]:8443", source: "platform-ca" },
+      { host: "https://le-origin.example.com", source: "lets-encrypt" },
       { host: "192.0.2.10", source: "platform-ca" },
       { host: "le.example.com", source: "lets-encrypt" },
       {
@@ -237,6 +241,11 @@ test("tp-orchestrate refuses keys and values that would steer root Ansible", asy
       "turbopanel_public_urls=panel.example.com,{{x}}",
       "turbopanel_public_urls=panel.example.com,,x.com",
       "turbopanel_public_urls=*.example.com",
+      "turbopanel_public_urls=https://panel.example.com/x",
+      "turbopanel_public_urls=https://u@panel.example.com",
+      "turbopanel_public_urls=http://panel.example.com",
+      "turbopanel_public_urls=https://panel.example.com:84433",
+      "turbopanel_public_urls=https://[2001:db8::1:8443",
       'turbopanel_hostnames_json=[{"host":"{{x}}"}]',
       'turbopanel_hostnames_json=[{"host":"a b"}]',
       "turbopanel_acme_email=no-at-sign",
@@ -279,6 +288,24 @@ test("the daemon refuses an unsafe host name or ACME value before any playbook",
       ],
       [
         [{ host: "{{x}}.example.com", source: "platform-ca" as const }],
+        undefined,
+      ],
+      [
+        [{
+          host: "https://panel.example.com/x",
+          source: "platform-ca" as const,
+        }],
+        undefined,
+      ],
+      [
+        [{
+          host: "https://u@panel.example.com",
+          source: "platform-ca" as const,
+        }],
+        undefined,
+      ],
+      [
+        [{ host: "http://panel.example.com", source: "platform-ca" as const }],
         undefined,
       ],
       [[{ host: "ok.example.com", source: "lets-encrypt" as const }], {

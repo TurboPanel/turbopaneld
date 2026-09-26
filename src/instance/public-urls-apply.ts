@@ -31,8 +31,23 @@ import { upsertPublicUrlsInEnv } from "./public-urls-env.ts";
 export type InstanceHostnameApplyEntry = InstanceHostnameWireEntry;
 
 const UPLOADED_CERT_ID = /^[0-9a-f-]{36}$/i;
+/** `https://<host>[:port][/]`, the install origin the control plane stores. */
+const INSTALL_ORIGIN =
+  /^https:\/\/(?:\[([0-9A-Fa-f:.]+)\]|([^/:[\]]+))(?::(\d{1,5}))?\/?$/;
 const ACME_EMAIL_LOCAL = /^[A-Za-z0-9._+-]{1,64}$/;
 const ACME_DIRECTORY_PATH = /^[A-Za-z0-9._~/:-]*$/;
+
+/** A bare host, or its install origin, with a host the NTP check accepts. */
+function isApplyHost(value: string): boolean {
+  if (!value.startsWith("https://")) return isValidNtpServer(value);
+  const match = INSTALL_ORIGIN.exec(value);
+  if (!match) return false;
+  const [, ipv6, host, port] = match;
+  if (port !== undefined && Number(port) > 65535) return false;
+  return ipv6 !== undefined
+    ? ipv6.includes(":") && isValidNtpServer(ipv6)
+    : isValidNtpServer(host);
+}
 
 /**
  * These values reach a root-run playbook as key=value extra-vars, so they are
@@ -48,7 +63,7 @@ export function assertInstanceCertsApplyInputs(
   >,
 ): void {
   for (const entry of hostnames) {
-    if (!isValidNtpServer(entry.host)) {
+    if (!isApplyHost(entry.host)) {
       throw new Error(
         `refusing instance hostname ${JSON.stringify(entry.host)}`,
       );
