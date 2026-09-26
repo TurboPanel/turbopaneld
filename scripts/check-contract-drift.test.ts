@@ -1,9 +1,12 @@
 import { assertEquals, assertStringIncludes } from "@std/assert";
 import { fromFileUrl, join } from "@std/path";
 import {
+  ContractDriftError,
   type ContractFieldPin,
   extractFieldSpecs,
   fieldPinDrift,
+  main,
+  runContractDriftCheck,
 } from "./check-contract-drift.ts";
 
 /**
@@ -132,4 +135,49 @@ test("the committed snapshot matches both checkouts' normalized field types", as
       null,
     );
   }
+});
+
+test("a missing sibling fails when CI requires it, and skips otherwise", async () => {
+  const absent = await Deno.makeTempDir();
+  const sibling = join(absent, "turbopanel");
+  try {
+    let refused: unknown;
+    try {
+      await runContractDriftCheck({ sibling, requireSibling: true });
+    } catch (err) {
+      refused = err;
+    }
+    assertEquals(refused instanceof ContractDriftError, true);
+    assertStringIncludes((refused as Error).message, sibling);
+    assertEquals(
+      await runContractDriftCheck({ sibling, requireSibling: false }),
+      "skipped",
+    );
+  } finally {
+    await Deno.remove(absent, { recursive: true });
+  }
+});
+
+test("the CLI entry exits on a refusal, rethrows other errors, and passes a clean run", async () => {
+  const refusals: string[] = [];
+  await main(
+    () =>
+      Promise.reject(new ContractDriftError("sibling checkout missing at /x")),
+    (message) => refusals.push(message),
+  );
+  assertEquals(refusals, ["sibling checkout missing at /x"]);
+
+  let rethrown: unknown;
+  try {
+    await main(
+      () => Promise.reject(new Error("boom")),
+      (m) => refusals.push(m),
+    );
+  } catch (err) {
+    rethrown = err;
+  }
+  assertEquals((rethrown as Error).message, "boom");
+
+  await main(() => Promise.resolve("ok"), (m) => refusals.push(m));
+  assertEquals(refusals.length, 1);
 });

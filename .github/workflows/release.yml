@@ -216,7 +216,7 @@ jobs:
 
   release:
     needs: [prepare, build]
-    uses: TurboPanel/dev/.github/workflows/gh-release.yml@trunk
+    uses: TurboPanel/dev/.github/workflows/gh-release.yml@177d481666cce2e1dcfa76290b141b0149a6a0a9 # trunk
     with:
       version: ${{ needs.prepare.outputs.version }}
       channel: ${{ needs.prepare.outputs.channel }}
