@@ -381,7 +381,8 @@ because the new files are already live). A download that fails before the
 marker does not. Before that swap the daemon checks free space on the install root and
 `layout.backupDir` (`MIN_INSTANCE_UPDATE_FREE_INSTALL_BYTES` /
 `MIN_INSTANCE_UPDATE_FREE_BACKUP_BYTES`), verifies the instance manifest and
-any UI pin (`preflight_manifest`), and requires `turbopanel-database` to be
+any UI pin — each must carry a valid signature by the pinned release key, and
+an unsigned one is refused like an invalid one (`preflight_manifest`) — and requires `turbopanel-database` to be
 running (`preflight_backup` via `docker inspect`). An overlapping
 `instance-update` is `preflight_in_progress`. `instance-backup.yml` then
 writes `<backupDir>/control-plane/<upgradeId>/` (`pg_dump -Fc` inside the

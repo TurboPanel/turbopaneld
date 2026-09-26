@@ -33,6 +33,10 @@ import {
 } from "./run-reconcile.ts";
 import { parseTurbopanelStageLine } from "./update-progress-reporter.ts";
 import { join } from "@std/path";
+import {
+  signWithTestKey,
+  TEST_RELEASE_SIGNING_PUBLIC_KEY_HEX,
+} from "../testing/release-signing-fixture.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -1029,12 +1033,25 @@ test("assertUpdateDiskPreflight probes a missing directory via create-or-parent"
 const PLENTY_STATFS = () =>
   Promise.resolve({ bavail: 1024 * 1024, bsize: 4096 });
 
+const INSTANCE_MANIFEST = {
+  commit: "newcommit",
+  version: "0.1.1",
+  channel: "release",
+};
+const UI_MANIFEST = {
+  commit: "uicommit",
+  version: "0.1.1",
+  channel: "release",
+};
+const SIGNED_INSTANCE_MANIFEST_BODY = JSON.stringify(
+  await signWithTestKey(INSTANCE_MANIFEST),
+);
+const SIGNED_UI_MANIFEST_BODY = JSON.stringify(
+  await signWithTestKey(UI_MANIFEST),
+);
+
 function instanceManifestBody(): string {
-  return JSON.stringify({
-    commit: "newcommit",
-    version: "0.1.1",
-    channel: "release",
-  });
+  return SIGNED_INSTANCE_MANIFEST_BODY;
 }
 
 function managedUpdateHooks(
@@ -1044,6 +1061,7 @@ function managedUpdateHooks(
   let clock = 0;
   return {
     forceManaged: true,
+    manifestPublicKeyHex: TEST_RELEASE_SIGNING_PUBLIC_KEY_HEX,
     statfsProbe: PLENTY_STATFS,
     fetchText: () =>
       Promise.resolve({ ok: true, status: 200, body: instanceManifestBody() }),
@@ -1118,6 +1136,124 @@ test("assertControlPlaneBackupPreflight refuses a stopped database container", a
     UpdatePreflightError,
     "not present",
   );
+});
+
+/** Serve `bodies[url]` (by manifest kind) to the preflight fetch. */
+function serveManifests(instance: string, ui?: string) {
+  return (url: string) =>
+    Promise.resolve({
+      ok: true,
+      status: 200,
+      body: url.includes("/TurboPanel/ui/") ? (ui ?? "") : instance,
+    });
+}
+
+const UI_PIN =
+  "https://github.com/TurboPanel/ui/releases/download/v0.1.1/manifest.json";
+
+test("assertControlPlaneManifestPreflight refuses an unsigned instance manifest", async () => {
+  await assertRejects(
+    () =>
+      assertControlPlaneManifestPreflight({
+        channel: "release",
+        installMode: "production",
+        publicKeyHex: TEST_RELEASE_SIGNING_PUBLIC_KEY_HEX,
+        fetchText: serveManifests(JSON.stringify(INSTANCE_MANIFEST)),
+      }),
+    UpdatePreflightError,
+    "instance manifest is unsigned",
+  );
+});
+
+test("assertControlPlaneManifestPreflight refuses an unsigned UI manifest", async () => {
+  await assertRejects(
+    () =>
+      assertControlPlaneManifestPreflight({
+        channel: "release",
+        uiManifestUrl: UI_PIN,
+        installMode: "production",
+        publicKeyHex: TEST_RELEASE_SIGNING_PUBLIC_KEY_HEX,
+        fetchText: serveManifests(
+          SIGNED_INSTANCE_MANIFEST_BODY,
+          JSON.stringify(UI_MANIFEST),
+        ),
+      }),
+    UpdatePreflightError,
+    "ui manifest is unsigned",
+  );
+});
+
+test("assertControlPlaneManifestPreflight refuses a tampered manifest", async () => {
+  const tampered = JSON.stringify({
+    ...JSON.parse(SIGNED_INSTANCE_MANIFEST_BODY),
+    commit: "evilcommit",
+  });
+  await assertRejects(
+    () =>
+      assertControlPlaneManifestPreflight({
+        channel: "release",
+        installMode: "production",
+        publicKeyHex: TEST_RELEASE_SIGNING_PUBLIC_KEY_HEX,
+        fetchText: serveManifests(tampered),
+      }),
+    UpdatePreflightError,
+    "invalid",
+  );
+});
+
+test("assertControlPlaneManifestPreflight accepts signed instance and UI manifests", async () => {
+  const verified = await assertControlPlaneManifestPreflight({
+    channel: "release",
+    uiManifestUrl: UI_PIN,
+    installMode: "production",
+    publicKeyHex: TEST_RELEASE_SIGNING_PUBLIC_KEY_HEX,
+    fetchText: serveManifests(
+      SIGNED_INSTANCE_MANIFEST_BODY,
+      SIGNED_UI_MANIFEST_BODY,
+    ),
+  });
+  assertEquals(verified.commit, "newcommit");
+});
+
+test("assertControlPlaneManifestPreflight skips signatures only under the development bypass", async () => {
+  const unsigned = serveManifests(JSON.stringify(INSTANCE_MANIFEST));
+  // Source checkout: the one unconditional bypass.
+  const dev = await assertControlPlaneManifestPreflight({
+    channel: "release",
+    installMode: "development",
+    fetchText: unsigned,
+  });
+  assertEquals(dev.commit, "newcommit");
+  // Overlay host that opted in: bypassed.
+  const overlay = await assertControlPlaneManifestPreflight({
+    channel: "release",
+    installMode: "production",
+    env: {
+      TURBOPANEL_DL_BASE: "https://dev.example.lan:8443",
+      TURBOPANEL_DEV_ALLOW_UNSIGNED_MANIFEST: "1",
+    },
+    fetchText: unsigned,
+  });
+  assertEquals(overlay.commit, "newcommit");
+  // The opt-in without an overlay, or an overlay without the opt-in, is not.
+  for (
+    const env of [
+      { TURBOPANEL_DEV_ALLOW_UNSIGNED_MANIFEST: "1" },
+      { TURBOPANEL_DL_BASE: "https://dev.example.lan:8443" },
+    ]
+  ) {
+    await assertRejects(
+      () =>
+        assertControlPlaneManifestPreflight({
+          channel: "release",
+          installMode: "production",
+          env,
+          fetchText: unsigned,
+        }),
+      UpdatePreflightError,
+      "unsigned",
+    );
+  }
 });
 
 test("assertControlPlaneManifestPreflight rejects a bad instance manifest", async () => {

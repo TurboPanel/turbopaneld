@@ -1275,21 +1275,24 @@ tp_fetch_repo_manifest() {
     echo "run.sh: failed to fetch ${_manifest_url} — does TurboPanel/${_repo} have a ${_channel} release yet?" >&2
     return 1
   fi
-  # TurboPanel/turbopanel and TurboPanel/ui publish their manifests from their
-  # own release jobs. A signature they carry is verified against the same
-  # release key; one they do not carry yet is reported, not waved through
-  # silently — the artifact checksums below still bind bytes to the manifest.
-  case "$_manifest_json" in
-    *'"signature"'*)
-      if ! tp_verify_manifest_signature "$_manifest_json"; then
-        echo "run.sh: ${_repo} ${_channel} manifest signature rejected" >&2
+  # Same rule as the daemon package: the manifest must carry a valid
+  # signature by the pinned release key before any field of it is read. Only
+  # a development overlay (tp_manifest_signature_bypass) skips it.
+  if tp_manifest_signature_bypass; then
+    tp_print_styled_line "1;33" "*** DEVELOPMENT OVERLAY: ${_repo} manifest signature not verified (TURBOPANEL_DL_BASE=${TURBOPANEL_DL_BASE}) ***" >&2
+  else
+    case "$_manifest_json" in
+      *'"signature"'*) ;;
+      *)
+        echo "run.sh: ${_repo} ${_channel} manifest ${_manifest_url} is unsigned — refusing to install it" >&2
         return 1
-      fi
-      ;;
-    *)
-      tp_print_styled_line "1;33" "*** ${_repo} ${_channel} manifest is unsigned — verified by SHA-256 only ***" >&2
-      ;;
-  esac
+        ;;
+    esac
+    if ! tp_verify_manifest_signature "$_manifest_json"; then
+      echo "run.sh: ${_repo} ${_channel} manifest ${_manifest_url} has an invalid signature — refusing to install it" >&2
+      return 1
+    fi
+  fi
   _repo_manifest_compact="$(tp_manifest_compact "$_manifest_json")"
   [ -n "$_repo_manifest_compact" ]
 }
