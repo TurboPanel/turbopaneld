@@ -756,9 +756,16 @@ it regresses:
   `scripts/sign-manifest.ts` from a SHA-pinned checkout of this repo, so one
   signer and one canonicaliser cover every package. It refuses to publish an
   unsigned manifest and fails when `RELEASE_SIGNING_KEY` does not match the
-  key pinned in `signing.ts`. Verification of those manifests still accepts an
-  unsigned one with a loud report; making that a refusal is the next step once
-  signed instance/UI canaries have been proven.
+  key pinned in `signing.ts`. Verification follows the same single rule as the
+  daemon package: an unsigned or invalidly signed instance/UI manifest is a
+  refusal — in `run.sh` (`tp_fetch_repo_manifest`, before any field is read)
+  and in the control-plane update preflight (`preflight_manifest`,
+  `assertControlPlaneManifestPreflight`) — with the same development-only
+  bypass (source checkout, or an opted-in `--dl-base` overlay). Enforced since
+  2026-09-26: releases published before signing existed (v0.1.0 on
+  `release`/`rc`) no longer install; cut and promote a signed release.
+  Tests: `src/instance/run-sh-manifest-signature.test.ts`,
+  `src/instance/run-reconcile.test.ts`.
 - **Release-rail manifest URLs** — every manifest pin (run.sh
   `--manifest-url` / `--instance-manifest-url` / `--ui-manifest-url` and
   their env vars, tp-orchestrate `update` / `update-instance`, the

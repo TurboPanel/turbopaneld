@@ -4,14 +4,23 @@ import { dirname } from "@std/path";
 import { statfs } from "node:fs/promises";
 import { ORCHESTRATE_HELPER } from "../orchestration/assets.ts";
 import { playbooksNeedRootHelper } from "../orchestration/privileged.ts";
-import { readEnv, resolveLayout } from "../paths/layout.ts";
+import {
+  detectInstallMode,
+  type InstallMode,
+  readEnv,
+  resolveLayout,
+} from "../paths/layout.ts";
 import type { UpdateProgressStage } from "../contracts/cell-messages.ts";
-import { verifyManifestSignature } from "../update/signing.ts";
+import {
+  unsignedManifestBypass,
+  verifyManifestSignature,
+} from "../update/signing.ts";
 import {
   builtinChannelManifestUrl,
   pinnedChannelManifestUrl,
   type ReleaseArtifactKind,
   releaseManifestUrlAllowed,
+  resolveOverlayDlBase,
 } from "../update/urls.ts";
 import { parseTurbopanelStageLine } from "./update-progress-reporter.ts";
 import {
@@ -734,6 +743,8 @@ export type InstanceUpdateHooks = {
   caddyBinaryChanged?: boolean;
   /** Test seam: run the managed-host path without a production uid. */
   forceManaged?: boolean;
+  /** Test seam: verify manifests against this key, not the pinned release key. */
+  manifestPublicKeyHex?: string;
   readHealth?: () => Promise<ControlPlaneHealthSnapshot | null>;
   unitActive?: () => Promise<boolean>;
   readCaddyfile?: () => Promise<string | null>;
@@ -839,9 +850,35 @@ async function defaultInstanceUpdateRun(
   return { code: (await status).code, stdout, stderr };
 }
 
+/**
+ * How an instance or UI manifest's signature is checked. The rule is the
+ * daemon package's (`unsignedManifestBypass`): required everywhere except a
+ * source checkout or an opted-in `--dl-base` overlay host.
+ */
+type ManifestSignaturePolicy = {
+  required: boolean;
+  /** Tests only: verify against this key instead of the pinned release key. */
+  publicKeyHex?: string;
+};
+
+function manifestSignaturePolicy(options: {
+  installMode?: InstallMode;
+  env?: Record<string, string | undefined>;
+  publicKeyHex?: string;
+}): ManifestSignaturePolicy {
+  const env = options.env ?? Deno.env.toObject();
+  const bypass = unsignedManifestBypass({
+    installMode: options.installMode ?? detectInstallMode(env),
+    overlay: resolveOverlayDlBase(env) !== null,
+    env,
+  });
+  return { required: !bypass, publicKeyHex: options.publicKeyHex };
+}
+
 async function verifyFetchedManifest(
   body: string,
   label: string,
+  policy: ManifestSignaturePolicy,
 ): Promise<Record<string, unknown>> {
   let raw: unknown;
   try {
@@ -858,13 +895,18 @@ async function verifyFetchedManifest(
       `${label} manifest is not an object`,
     );
   }
-  if (raw.signature != null) {
-    try {
-      await verifyManifestSignature(raw);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      throw new UpdatePreflightError("preflight_manifest", message);
-    }
+  if (!policy.required) return raw;
+  if (raw.signature == null) {
+    throw new UpdatePreflightError(
+      "preflight_manifest",
+      `${label} manifest is unsigned`,
+    );
+  }
+  try {
+    await verifyManifestSignature(raw, policy.publicKeyHex);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new UpdatePreflightError("preflight_manifest", message);
   }
   return raw;
 }
@@ -873,6 +915,7 @@ async function fetchVerifiedManifest(
   url: string,
   label: string,
   fetchText: NonNullable<InstanceUpdateHooks["fetchText"]>,
+  policy: ManifestSignaturePolicy,
 ): Promise<Record<string, unknown>> {
   let fetched: { ok: boolean; status: number; body: string };
   try {
@@ -890,14 +933,14 @@ async function fetchVerifiedManifest(
       `failed to fetch ${label} manifest: HTTP ${fetched.status}`,
     );
   }
-  return await verifyFetchedManifest(fetched.body, label);
+  return await verifyFetchedManifest(fetched.body, label, policy);
 }
 
 /**
- * Resolve and, when the body carries a signature, verify the instance
- * manifest. A UI pin is verified the same way and does not have to name a
- * commit. Unsigned manifests are accepted here; `run.sh` still checks them
- * again before it unpacks.
+ * Resolve and verify the instance manifest, and the UI pin when one is given
+ * (a UI manifest does not have to name a commit). An unsigned or invalidly
+ * signed manifest is `preflight_manifest` — the same rule `run.sh` applies
+ * before it unpacks, and the one the daemon package already follows.
  */
 export async function assertControlPlaneManifestPreflight(options: {
   channel: ReleaseChannel;
@@ -906,8 +949,14 @@ export async function assertControlPlaneManifestPreflight(options: {
   targetVersion?: string;
   targetCommit?: string;
   fetchText?: InstanceUpdateHooks["fetchText"];
+  /** Defaults to {@link detectInstallMode}; the managed update path passes production. */
+  installMode?: InstallMode;
+  env?: Record<string, string | undefined>;
+  /** Tests only: the key to verify against instead of the pinned release key. */
+  publicKeyHex?: string;
 }): Promise<VerifiedPackageManifest> {
   const fetchText = options.fetchText ?? defaultFetchManifestText;
+  const policy = manifestSignaturePolicy(options);
   const pinned = options.manifestUrl?.trim();
   if (pinned) assertReleaseManifestUrl("instance", pinned, "manifestUrl");
   const uiUrl = options.uiManifestUrl?.trim();
@@ -919,7 +968,12 @@ export async function assertControlPlaneManifestPreflight(options: {
       `instance channel ${options.channel} has no manifest location`,
     );
   }
-  const manifest = await fetchVerifiedManifest(url, "instance", fetchText);
+  const manifest = await fetchVerifiedManifest(
+    url,
+    "instance",
+    fetchText,
+    policy,
+  );
   const commit = typeof manifest.commit === "string" ? manifest.commit : "";
   if (!commit) {
     throw new UpdatePreflightError(
@@ -943,7 +997,7 @@ export async function assertControlPlaneManifestPreflight(options: {
     );
   }
   if (uiUrl) {
-    await fetchVerifiedManifest(uiUrl, "ui", fetchText);
+    await fetchVerifiedManifest(uiUrl, "ui", fetchText, policy);
   }
   return { url, commit, version };
 }
@@ -1216,6 +1270,10 @@ export async function executeInstanceUpdateReconcile(options: {
     targetVersion: options.targetVersion,
     targetCommit: options.targetCommit,
     fetchText: hooks.fetchText,
+    // Only a managed host reaches this point (dev checkouts were refused
+    // above), so the development-checkout bypass never applies here.
+    installMode: "production",
+    publicKeyHex: hooks.manifestPublicKeyHex,
   });
   await assertControlPlaneBackupPreflight(run);
 
