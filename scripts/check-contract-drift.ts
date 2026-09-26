@@ -1055,11 +1055,17 @@ export async function runContractDriftCheck(
   return "ok";
 }
 
-if (import.meta.main) {
+/** CLI entry: a refused precondition exits non-zero; anything else rethrows. */
+export async function main(
+  run: () => Promise<unknown> = runContractDriftCheck,
+  onRefused: (message: string) => void = fail,
+): Promise<void> {
   try {
-    await runContractDriftCheck();
+    await run();
   } catch (err) {
-    if (err instanceof ContractDriftError) fail(err.message);
-    throw err;
+    if (!(err instanceof ContractDriftError)) throw err;
+    onRefused(err.message);
   }
 }
+
+if (import.meta.main) await main();
