@@ -1,22 +1,19 @@
 # turbopanel-sh
 
-Assets-only Workers Static Assets deployment of the daemon installer script on
-**turbopanel.sh** — no Worker script, so public installer requests are
-free/unbilled. The bare root serves the installer with
-`Content-Type: text/x-shellscript; charset=utf-8` and `Cache-Control: no-store`
-so `curl | sh` fetches are always fresh.
+Assets-only Workers Static Assets deployment on **turbopanel.sh** — no Worker
+script, so installer requests are free/unbilled. It hosts nothing: every path
+is a `301` to the installer's one source of truth on GitHub,
 
-## Source of truth
+    https://raw.githubusercontent.com/TurboPanel/turbopaneld/live/scripts/run.sh
 
-`scripts/run.sh` in the daemon repo is the only copy. The deploy flow stages it
-into a gitignored `public/bootstrap` before upload — nothing is duplicated in git.
+`curl -fsSL turbopanel.sh | sh` follows it (`-L`). `live` moves only when a
+release is promoted, so installer changes ship at release cadence.
 
-Committed asset config lives under `assets/` (`_headers`, `_redirects`) and is
-staged into `public/` by `pnpm run stage`. Wrangler consumes those files at
-deploy time rather than uploading them as downloadable assets.
+## What is committed
 
-Non-GET/HEAD requests no longer get a hand-rolled `405` from Worker code —
-method handling is whatever the asset server returns.
+`assets/_redirects` (the rules) and `assets/_headers` (`Cache-Control:
+no-store`). `pnpm run stage` copies both into gitignored `public/`; wrangler
+consumes them as config rather than uploading them as assets.
 
 ## Prerequisites
 
@@ -40,18 +37,14 @@ catalog — `--frozen-lockfile` fails without it. `pnpm-workspace.yaml` must
 `strictDepBuilds` otherwise fails the install with `ERR_PNPM_IGNORED_BUILDS`.
 
 `deploy` runs `wrangler deploy`, which executes the `build.command` in
-`wrangler.jsonc` first (staging `../../scripts/run.sh` → `public/bootstrap` plus
-`assets/_headers` and `assets/_redirects` into `public/`) then uploads.
-Cloudflare Workers Builds that invoke `npx wrangler deploy` directly get the
-same stage step automatically.
+`wrangler.jsonc` first (`pnpm run stage`) then uploads. Cloudflare Workers
+Builds that invoke `npx wrangler deploy` directly get the same stage step.
 
 ## Verify
 
 ```bash
-curl -sI https://turbopanel.sh
-curl -fsSL turbopanel.sh | head
-curl -sI https://turbopanel.sh | grep -E '^(content-type|cache-control):'
+curl -sI https://turbopanel.sh | grep -Ei '^(HTTP|location):'
+curl -fsSL turbopanel.sh | head -3
 ```
 
-Expect `200` with the shell body on the bare host, and
-`Content-Type: text/x-shellscript; charset=utf-8` plus `Cache-Control: no-store`.
+Expect `HTTP/2 301` with `location: https://raw.githubusercontent.com/TurboPanel/turbopaneld/live/scripts/run.sh` and, once followed, the shell script.
