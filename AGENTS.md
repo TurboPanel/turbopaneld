@@ -751,8 +751,14 @@ it regresses:
   `daemon.env` carries `TURBOPANEL_DEV_ALLOW_UNSIGNED_MANIFEST=1`
   (`daemon-config/dotenv.j2` writes it for overlay installs only). The
   built-in rail and `TURBOPANEL_MANIFEST_URL` pins always verify. Instance/UI
-  repo manifests (`--instance` installs) are verified when signed and reported
-  loudly when not — their release jobs do not sign yet.
+  repo manifests (`--instance` installs) are signed by their release jobs with
+  the same key: TurboPanel/turbopanel and TurboPanel/ui run
+  `scripts/sign-manifest.ts` from a SHA-pinned checkout of this repo, so one
+  signer and one canonicaliser cover every package. It refuses to publish an
+  unsigned manifest and fails when `RELEASE_SIGNING_KEY` does not match the
+  key pinned in `signing.ts`. Verification of those manifests still accepts an
+  unsigned one with a loud report; making that a refusal is the next step once
+  signed instance/UI canaries have been proven.
 - **Release-rail manifest URLs** — every manifest pin (run.sh
   `--manifest-url` / `--instance-manifest-url` / `--ui-manifest-url` and
   their env vars, tp-orchestrate `update` / `update-instance`, the

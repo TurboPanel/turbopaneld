@@ -1,9 +1,11 @@
 import { assertEquals, assertStringIncludes } from "@std/assert";
-import { dirname, fromFileUrl, join } from "@std/path";
+import { signWithTestKey } from "../testing/release-signing-fixture.ts";
 import {
-  signWithTestKey,
-  TEST_RELEASE_SIGNING_PUBLIC_KEY_HEX,
-} from "../testing/release-signing-fixture.ts";
+  extractShellFunction,
+  hostCanVerify,
+  RUN_SH_PATH as runShPath,
+  verifyWithRunSh,
+} from "../testing/run-sh-manifest-verifier.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -12,79 +14,6 @@ import {
  * reports Deno suites as empty; keep this alias so analysis sees real tests.
  */
 const test = Deno.test.bind(Deno);
-
-const here = dirname(fromFileUrl(import.meta.url));
-const runShPath = join(here, "../../scripts/run.sh");
-
-function extractShellFunction(source: string, name: string): string {
-  const needle = `${name}() {`;
-  const start = source.indexOf(needle);
-  if (start < 0) {
-    throw new TypeError(`missing ${name} in run.sh`);
-  }
-  const brace = source.indexOf("{", start);
-  let depth = 0;
-  for (let i = brace; i < source.length; i++) {
-    const ch = source[i];
-    if (ch === "{") depth += 1;
-    else if (ch === "}") {
-      depth -= 1;
-      if (depth === 0) {
-        return source.slice(start, i + 1);
-      }
-    }
-  }
-  throw new TypeError(`unclosed ${name} in run.sh`);
-}
-
-async function hostCanVerify(): Promise<boolean> {
-  for (const bin of ["python3", "openssl"]) {
-    try {
-      const out = await new Deno.Command(bin, {
-        args: ["--version"],
-        stdout: "null",
-        stderr: "null",
-      }).output();
-      if (!out.success) return false;
-    } catch {
-      return false;
-    }
-  }
-  return true;
-}
-
-/** Run run.sh's verifier against a manifest file with the test key pinned. */
-async function verifyWithRunSh(
-  manifestJson: string,
-): Promise<{ status: number; stderr: string }> {
-  const source = await Deno.readTextFile(runShPath);
-  const helpers = [
-    "tp_manifest_canonical_python",
-    "tp_manifest_signature_material_python",
-    "tp_verify_manifest_signature",
-  ].map((name) => extractShellFunction(source, name)).join("\n");
-  const dir = await Deno.makeTempDir({ prefix: "tp-run-sh-sig-" });
-  try {
-    const manifestPath = join(dir, "manifest.json");
-    await Deno.writeTextFile(manifestPath, manifestJson);
-    const script = [
-      `TP_RELEASE_SIGNING_PUBLIC_KEY="${TEST_RELEASE_SIGNING_PUBLIC_KEY_HEX}"`,
-      helpers,
-      `tp_verify_manifest_signature "$(cat "$1")"`,
-    ].join("\n");
-    const out = await new Deno.Command("sh", {
-      args: ["-eu", "-c", script, "sh", manifestPath],
-      stdout: "piped",
-      stderr: "piped",
-    }).output();
-    return {
-      status: out.code,
-      stderr: new TextDecoder().decode(out.stderr),
-    };
-  } finally {
-    await Deno.remove(dir, { recursive: true });
-  }
-}
 
 function manifest(): Record<string, unknown> {
   return {
