@@ -5443,6 +5443,7 @@ it({
         type: "instance-update",
         id: "iu-back",
         channel: "release",
+        upgradeId: "upg-rollback-1",
         at: new Date().toISOString(),
       });
       const rolled = await waitFor(
@@ -5450,10 +5451,14 @@ it({
         () =>
           framesOfType(socket, "instance-update-result").find((frame) =>
             (frame as { id?: string }).id === "iu-back"
-          ) as { ok?: boolean; errorCode?: string } | undefined,
+          ) as
+            | { ok?: boolean; errorCode?: string; upgradeId?: string }
+            | undefined,
       );
       assertEquals(rolled.ok, false);
       assertEquals(rolled.errorCode, "health_timeout");
+      // The control plane matches the result to its upgrade run by this id.
+      assertEquals(rolled.upgradeId, "upg-rollback-1");
       const rolledStage = framesOfType(socket, "update-progress").find((
         frame,
       ) => (frame as { stage?: string }).stage === "rolled-back");
@@ -5482,6 +5487,72 @@ it({
       );
       assertExists(failedStage);
     } finally {
+      restore();
+      restoreHooks();
+    }
+  },
+});
+
+it({
+  name:
+    "an overlapping instance-update is refused as preflight_in_progress with its own upgradeId",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    let releaseFirst: (() => void) | undefined;
+    const firstHeld = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const restoreHooks = installClientTestHooks({
+      executeInstanceUpdateReconcile: () => firstHeld,
+    });
+    const { socket, restore } = await startConnectedClient();
+    try {
+      socket.receive({
+        type: "version",
+        commit: "abc",
+        branch: "trunk",
+        instanceVersion: "0.1.1",
+        features: ["update-progress-v1"],
+        at: new Date().toISOString(),
+      });
+      await flushMicrotasks();
+      socket.receive({
+        type: "instance-update",
+        id: "iu-first",
+        channel: "release",
+        upgradeId: "upg-first",
+        at: new Date().toISOString(),
+      });
+      await flushMicrotasks();
+      socket.receive({
+        type: "instance-update",
+        id: "iu-second",
+        channel: "release",
+        upgradeId: "upg-second",
+        at: new Date().toISOString(),
+      });
+      const refused = await waitFor(
+        "overlapping instance-update-result",
+        () =>
+          framesOfType(socket, "instance-update-result").find((frame) =>
+            (frame as { id?: string }).id === "iu-second"
+          ) as
+            | { ok?: boolean; errorCode?: string; upgradeId?: string }
+            | undefined,
+      );
+      assertEquals(refused.ok, false);
+      assertEquals(refused.errorCode, "preflight_in_progress");
+      // The refusal belongs to the second run, not the one still installing.
+      assertEquals(refused.upgradeId, "upg-second");
+    } finally {
+      releaseFirst?.();
       restore();
       restoreHooks();
     }
