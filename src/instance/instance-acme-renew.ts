@@ -346,8 +346,25 @@ export class InstanceAcmeRenewalScheduler {
       await this.#reportInstalled(hosts);
       await this.#reloadAfterCopy();
     } catch (err) {
-      if (opened) await closeOnce().catch(() => undefined);
-      await this.#fail(hosts, errorText(err));
+      let detail = errorText(err);
+      if (opened) {
+        // A window left open keeps hosting Caddy serving the HTTP-01 site;
+        // say so instead of dropping the close failure.
+        const closeError = await closeOnce().then(
+          () => null,
+          (closeErr: unknown) => closeErr,
+        );
+        if (closeError !== null) {
+          const closeDetail = errorText(closeError);
+          logWarn(
+            "instance",
+            `closing the HTTP-01 window failed: ${sanitizeForLog(closeDetail)}`,
+          );
+          detail =
+            `${detail}; closing the HTTP-01 window also failed: ${closeDetail}`;
+        }
+      }
+      await this.#fail(hosts, detail);
     }
   }
 

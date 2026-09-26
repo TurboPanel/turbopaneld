@@ -11,6 +11,7 @@ import {
   applyRenderedFirewall,
   FIREWALL_V4_FILENAME,
   FIREWALL_V6_FILENAME,
+  FirewallIpv6ApplyError,
   hasDockerUserChain,
   isControlPlaneColocated,
   probeXtables,
@@ -274,36 +275,51 @@ test("applyRenderedFirewall: a refused v4 --test throws before anything is appli
   });
 });
 
-test("applyRenderedFirewall: a v6 failure is a warning, v4 stays applied, no v6 document is kept", async () => {
+test("applyRenderedFirewall: a v6 failure fails the reconcile, keeps v4 applied and durable, leaves the v6 document alone", async () => {
   await withTempLayout(async (layout) => {
     const rendered = renderFirewall({
       payload: payload(),
       sshPorts: [22],
       includeForward: { 4: false, 6: false },
     });
+    // The v6 state the kernel already holds, from an earlier generation.
+    await Deno.mkdir(layout.configDir, { recursive: true });
+    await Deno.writeTextFile(
+      join(layout.configDir, FIREWALL_V6_FILENAME),
+      "previous v6 generation\n",
+    );
     const host = fakeHost({
       "ip6tables-restore --noflush --test": fail(
         "ip6tables-restore: line 4 failed",
       ),
     });
-    const outcome = await applyRenderedFirewall(
-      rendered,
-      { 4: false, 6: false },
-      NFT_PROBE,
-      { run: host.run, layout },
+    const err = await assertRejects(
+      () =>
+        applyRenderedFirewall(
+          rendered,
+          { 4: false, 6: false },
+          NFT_PROBE,
+          { run: host.run, layout },
+        ),
+      FirewallIpv6ApplyError,
     );
-    assertEquals(outcome.ipv6Applied, false);
-    assertEquals(outcome.forwardApplied, false);
-    assertEquals(outcome.warnings.length, 2);
-    assertStringIncludes(outcome.warnings[0]!, "DOCKER-USER is absent");
-    assertStringIncludes(outcome.warnings[1]!, "IPv6 ruleset was not applied");
+    assertStringIncludes(err.message, "IPv4 is applied");
+    assertStringIncludes(err.message, "line 4 failed");
+    // v4 went in and is durable for boot.
+    assert(host.calls.some((c) => c.cmd === "iptables-restore"));
+    assertEquals(
+      await Deno.readTextFile(join(layout.configDir, FIREWALL_V4_FILENAME)),
+      rendered.v4,
+    );
+    // v6 was never applied, and its durable document still matches the kernel.
     assert(
-      !host.calls.some((c) => c.args.includes("DOCKER-USER")),
-      "no DOCKER-USER jump is attempted when the chain is absent",
+      !host.calls.some((c) =>
+        c.cmd === "ip6tables-restore" && !c.args.includes("--test")
+      ),
     );
-    await assertRejects(
-      () => Deno.readTextFile(join(layout.configDir, FIREWALL_V6_FILENAME)),
-      Deno.errors.NotFound,
+    assertEquals(
+      await Deno.readTextFile(join(layout.configDir, FIREWALL_V6_FILENAME)),
+      "previous v6 generation\n",
     );
   });
 });

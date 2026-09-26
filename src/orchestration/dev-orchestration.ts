@@ -1,9 +1,9 @@
 import { join } from "@std/path";
 import { readEnv, resolveDevRoot } from "../paths/layout.ts";
 import {
-  ANSIBLE_HOME,
   ANSIBLE_LOCAL_TMP,
   ANSIBLE_SHELL_EXECUTABLE,
+  ansibleHome,
   GALAXY_ROLES_DIR,
   GALAXY_VENDOR_ROLES_DIR,
 } from "./assets.ts";
@@ -162,7 +162,7 @@ export function devOrchestrationAnsibleEnv(
   return {
     ANSIBLE_CONFIG: layout.ansibleCfgPath,
     ANSIBLE_EXECUTABLE: ANSIBLE_SHELL_EXECUTABLE,
-    ANSIBLE_HOME,
+    ANSIBLE_HOME: ansibleHome(),
     ANSIBLE_LOCAL_TEMP: ANSIBLE_LOCAL_TMP,
     ANSIBLE_ROLES_PATH:
       `${layout.devRolesDir}:${layout.daemonRolesDir}:${GALAXY_VENDOR_ROLES_DIR}`,

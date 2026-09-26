@@ -1379,6 +1379,58 @@ test("rewriteHostingCaddySites writes site snippet and best-effort reloads", asy
   }
 });
 
+test("rewriteHostingCaddySites enables hosting Caddy before reloading when it wrote a tenant site", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const calls: string[] = [];
+  const restore = setIngressHostCommandForTest((_command, args) => {
+    calls.push(args.join(" "));
+    return Promise.resolve({ success: true, stderr: "" });
+  });
+  const base = {
+    projectId: "proj-1",
+    organizationId: "org-1",
+    projectName: "demo",
+    composeFiles: [{
+      filename: "compose.yaml",
+      role: "runtime" as const,
+      content: "services: {}",
+    }],
+  };
+  try {
+    // An instance ACME window close may have just disabled Caddy: a reload of
+    // a stopped unit would leave this site offline.
+    await rewriteHostingCaddySites(layout, {
+      ...base,
+      environmentId: "env-caddy-2",
+      hostings: [{
+        hostingId: "h1",
+        serviceId: "s1",
+        composeServiceName: "web",
+        hostnames: ["app.example.com"],
+      }],
+    });
+    const enableAt = calls.findIndex((c) => c.includes("enable --now"));
+    const reloadAt = calls.findIndex((c) => c.includes("reload"));
+    assertEquals(
+      enableAt >= 0 && reloadAt > enableAt,
+      true,
+      JSON.stringify(calls),
+    );
+
+    // No hostnames → nothing to serve, so Caddy is not started for it.
+    calls.length = 0;
+    await rewriteHostingCaddySites(layout, {
+      ...base,
+      environmentId: "env-caddy-3",
+      hostings: [],
+    });
+    assertEquals(calls.some((c) => c.includes("enable")), false);
+  } finally {
+    restore();
+    await cleanup();
+  }
+});
+
 test("rewriteHostingCaddySites rejects unsafe environmentId", async () => {
   const { layout, cleanup } = await makeTestLayout();
   try {

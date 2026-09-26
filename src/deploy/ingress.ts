@@ -1461,6 +1461,20 @@ export async function rewriteHostingCaddySites(
     { mode: 0o640 },
   );
 
+  if (hostnames.length > 0) {
+    // The instance ACME window may have just disabled hosting Caddy after
+    // seeing only its own reserved site (it does not wait for deploys): a
+    // tenant site must end with Caddy running and enabled at boot, not rely
+    // on a reload of a stopped unit.
+    const enable = await run(
+      "sudo",
+      hostSudoArgs(["-n", "systemctl", "enable", "--now", CADDY_SERVICE]),
+    );
+    if (!enable.success) {
+      logWarn("deploy", `hosting Caddy enable skipped: ${enable.stderr}`);
+    }
+  }
+
   const reload = await run(
     "sudo",
     hostSudoArgs([

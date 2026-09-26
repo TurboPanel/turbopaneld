@@ -47,12 +47,12 @@ import {
 } from "./dev-orchestration.ts";
 import {
   ANSIBLE_CURRENT_DIR,
-  ANSIBLE_HOME,
   ANSIBLE_INSTALL_DIR,
   ANSIBLE_LINT_BIN,
   ANSIBLE_PLAYBOOK_BIN,
   ANSIBLE_PLAYBOOK_CWD,
   ansibleEnv,
+  ansibleHome,
   BUILD_TOGGLE_PLAYBOOK,
   BUILDKIT_PLAYBOOK,
   CADDY_PLAYBOOK,
@@ -315,7 +315,7 @@ export async function ensureGalaxyCollections(): Promise<void> {
 
   const galaxyBin = join(VENV_BIN_DIR, "ansible-galaxy");
   const galaxyRun = galaxyBootstrapRunContext();
-  await Deno.mkdir(ANSIBLE_HOME, { recursive: true });
+  ansibleHome();
 
   logInfo(
     "orchestration",
@@ -600,7 +600,7 @@ export async function ensureGalaxyDockerRole(): Promise<void> {
     return;
   }
 
-  await Deno.mkdir(ANSIBLE_HOME, { recursive: true });
+  ansibleHome();
   await Deno.mkdir(GALAXY_VENDOR_ROLES_DIR, { recursive: true });
 
   const requirementsYaml = await Deno.readTextFile(

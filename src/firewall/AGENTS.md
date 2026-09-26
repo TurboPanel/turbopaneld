@@ -56,7 +56,11 @@ the on-host proof is Road row `fw-proof`.
    `CONTROL_PLANE_PORTS_MISSING_WARNING`. Remove the hold in
    `fw-invariants-commit-confirm`, not before.
 4. `mode: observe` → rendered, digest reported, nothing applied.
-5. v4 apply failure throws; v6 failure is a warning with `ipv6Applied: false`.
+5. v4 apply failure throws. A v6 apply failure keeps v4 applied and its
+   durable document written, leaves the v6 chains and `firewall.v6` as they
+   were, and throws `FirewallIpv6ApplyError`, so the reconcile fails in the
+   panel rather than enforcing a `drop` on IPv4 only behind a warning. No
+   `ip6tables` binary at all is still a warning (`ipv6Applied: false`).
 
 ## Not here yet (later rows)
 

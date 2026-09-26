@@ -200,14 +200,24 @@ test({
         calls[0]!.args.includes("turbopanel_dev_user=dev"),
         true,
       );
+      // resolve-hostnames.yml decodes this value; it must be the full list,
+      // in order, as a JSON array behind a key= (tp-orchestrate refuses a
+      // bare JSON object extra-var).
       const hostnamesJson = calls[0]!.args.find((arg) =>
         arg.startsWith("turbopanel_hostnames_json=")
       );
-      assertEquals(hostnamesJson?.startsWith("{"), false);
+      if (hostnamesJson === undefined) {
+        throw new TypeError("turbopanel_hostnames_json extra-var missing");
+      }
       assertEquals(
-        hostnamesJson?.includes('"source":"platform-ca"'),
-        true,
+        JSON.parse(hostnamesJson.slice("turbopanel_hostnames_json=".length)),
+        [
+          { host: "https://a.example", source: "platform-ca", cert_id: "" },
+          { host: "https://b.example", source: "platform-ca", cert_id: "" },
+        ],
       );
+      const valueIndex = calls[0]!.args.indexOf(hostnamesJson);
+      assertEquals(calls[0]!.args[valueIndex - 1], "-e");
       assertEquals(
         calls[0]!.args.includes("turbopanel_acme_email=acme@example.com"),
         true,

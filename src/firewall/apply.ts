@@ -14,10 +14,15 @@
  * `--noflush` restore would add one more jump on every apply; the `-C` → `-I`
  * idiom the fabric and managed-listener code already use is idempotent.
  *
- * **IPv4 is the product; IPv6 is a mirror.** A v4 failure throws — the command
- * fails and the panel sees it. A v6 failure after a successful v4 apply is a
- * warning with `ipv6Applied: false`: v6 is left exactly as it was, which is
- * what it was a minute ago.
+ * **A v6 failure fails the reconcile.** A v4 failure throws before anything is
+ * kept. A v6 failure after a successful v4 apply keeps v4 applied (and its
+ * durable document written) but throws {@link FirewallIpv6ApplyError}: the
+ * v6 chains are left exactly as they were, so a `drop` / `reject` the panel
+ * just asked for is enforced on IPv4 and not on IPv6 — that must reach the
+ * panel as a failed command, not a warning it can scroll past. The durable
+ * v6 document is left untouched too, so a reboot restores the same v6 state
+ * the kernel holds. No `ip6tables` at all is still a warning: there is
+ * nothing to apply against.
  *
  * **`DOCKER-USER` may not exist** (Docker not installed yet; `ip6tables` unless
  * Docker's own ip6tables is on). The renderer is told per family and leaves
@@ -191,6 +196,22 @@ async function restoreDocument(
   }
 }
 
+/**
+ * v4 applied, v6 did not. Thrown after the v4 durable document is written so
+ * the command fails with the host in a known state: v4 on the new generation,
+ * v6 on whatever it held before.
+ */
+export class FirewallIpv6ApplyError extends Error {
+  constructor(cause: unknown) {
+    super(
+      `IPv6 ruleset was not applied (IPv4 is applied; IPv6 left unchanged): ${
+        errorText(cause)
+      }`,
+    );
+    this.name = "FirewallIpv6ApplyError";
+  }
+}
+
 export type FirewallApplyOutcome = {
   ipv6Applied: boolean;
   forwardApplied: boolean;
@@ -221,62 +242,57 @@ export async function applyRenderedFirewall(
     );
   }
 
-  const ipv6Applied = rendered.v6 === null ? false : await applyIpv6BestEffort(
-    rendered.v6,
-    includeForward[6],
-    probe,
-    run,
-    warnings,
-  );
+  let ipv6Applied = false;
+  let ipv6Failure: unknown = null;
+  if (rendered.v6 !== null) {
+    if (probe.ipv6) {
+      try {
+        await applyIpv6(rendered.v6, includeForward[6], run);
+        ipv6Applied = true;
+      } catch (err) {
+        ipv6Failure = err;
+      }
+    } else {
+      warnings.push("ip6tables is not available; IPv6 was left unchanged");
+    }
+  }
 
   await writeDurableDocuments(
     layout,
     rendered.v4,
-    ipv6Applied ? rendered.v6 : null,
+    ipv6Failure === null ? (ipv6Applied ? rendered.v6 : null) : "keep",
   );
 
+  if (ipv6Failure !== null) throw new FirewallIpv6ApplyError(ipv6Failure);
   return { ipv6Applied, forwardApplied: includeForward[4], warnings };
 }
 
-/**
- * IPv4 is the product; the v6 document is applied best-effort and any failure
- * becomes a warning rather than a failed command. Returns whether it applied.
- */
-async function applyIpv6BestEffort(
+async function applyIpv6(
   v6: string,
   includeForward: boolean,
-  probe: XtablesProbe,
   run: FirewallRunFn,
-  warnings: string[],
-): Promise<boolean> {
-  if (!probe.ipv6) {
-    warnings.push("ip6tables is not available; IPv6 was left unchanged");
-    return false;
-  }
-  try {
-    await restoreDocument(6, v6, run);
-    await ensureJump(6, INPUT_BUILTIN, FIREWALL_INPUT_CHAIN, run);
-    if (includeForward) {
-      await ensureJump(6, DOCKER_USER_CHAIN, FIREWALL_FORWARD_CHAIN, run);
-    }
-    return true;
-  } catch (err) {
-    warnings.push(
-      `IPv6 ruleset was not applied; IPv6 left unchanged: ${errorText(err)}`,
-    );
-    return false;
+): Promise<void> {
+  await restoreDocument(6, v6, run);
+  await ensureJump(6, INPUT_BUILTIN, FIREWALL_INPUT_CHAIN, run);
+  if (includeForward) {
+    await ensureJump(6, DOCKER_USER_CHAIN, FIREWALL_FORWARD_CHAIN, run);
   }
 }
 
+/**
+ * `v6`: the document to keep, `null` to forget it, or `"keep"` to leave the
+ * existing file alone (the v6 kernel state did not change).
+ */
 async function writeDurableDocuments(
   layout: LayoutPaths,
   v4: string,
-  v6: string | null,
+  v6: string | null | "keep",
 ): Promise<void> {
   await Deno.mkdir(layout.configDir, { recursive: true });
   const v4Path = join(layout.configDir, FIREWALL_V4_FILENAME);
   const v6Path = join(layout.configDir, FIREWALL_V6_FILENAME);
   await Deno.writeTextFile(v4Path, v4, { mode: 0o644 });
+  if (v6 === "keep") return;
   if (v6 === null) {
     await removeIfPresent(v6Path);
   } else {

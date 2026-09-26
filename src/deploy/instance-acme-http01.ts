@@ -376,6 +376,13 @@ export async function closeInstanceAcmeWindow(
   await removeSite(join(sitesDir, INSTANCE_ACME_HTTP01_SITE));
   if (await sitesHoldOnlyReserved(sitesDir)) {
     await disableHostingCaddy(run);
+    // A tenant deploy does not take the window lock: it may have written its
+    // site between the check above and the disable. Look again and put hosting
+    // Caddy back rather than leave that site offline (the deploy side also
+    // enables Caddy after writing a site, so either order ends running).
+    if (!(await sitesHoldOnlyReserved(sitesDir))) {
+      await enableHostingCaddy(run);
+    }
     return;
   }
   await reloadHostingCaddy(run);
@@ -400,6 +407,22 @@ async function reloadHostingCaddy(run: InstanceAcmeCommand): Promise<void> {
   );
   if (!result.ok) {
     throw new Error(result.stderr.trim() || "hosting Caddy reload failed");
+  }
+}
+
+async function enableHostingCaddy(run: InstanceAcmeCommand): Promise<void> {
+  const result = await run(
+    "sudo",
+    hostSudoArgs([
+      "-n",
+      "systemctl",
+      "enable",
+      "--now",
+      HOSTING_CADDY_SERVICE,
+    ]),
+  );
+  if (!result.ok) {
+    throw new Error(result.stderr.trim() || "hosting Caddy enable failed");
   }
 }
 

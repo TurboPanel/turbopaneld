@@ -12,7 +12,6 @@ DAEMON_DIR="${TURBOPANEL_DAEMON_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 . "$SCRIPT_DIR/lib/runtime-paths.sh"
 ANSIBLE_PLAYBOOK="$RUNTIMES_DIR/ansible/current/bin/ansible-playbook"
 ANSIBLE_CFG="$DAEMON_DIR/orchestration/ansible.cfg"
-ANSIBLE_HOME_DIR="/tmp/turbopanel-ansible"
 ANSIBLE_LOCAL_TMP="$RUNTIMES_DIR/uv/cache/ansible-tmp"
 PLAYBOOK="$DAEMON_DIR/orchestration/playbooks/daemon-systemd-setup.yml"
 SERVICE_NAME="turbopaneld"
@@ -54,7 +53,10 @@ trap 'rm -f "$VARS_FILE"' EXIT
   fi
 } > "$VARS_FILE"
 
-mkdir -p "$ANSIBLE_HOME_DIR"
+# Private, per-run Ansible home: a fixed /tmp name could be pre-created by
+# another account, and this runs as root.
+ANSIBLE_HOME_DIR="$(mktemp -d /tmp/turbopanel-ansible.XXXXXXXX)"
+trap 'rm -f "$VARS_FILE"; rm -rf "$ANSIBLE_HOME_DIR"' EXIT
 # OPENSSL_armcap is exported by runtime-paths.sh (Apple Silicon VM SVE2 workaround).
 # ANSIBLE_EXECUTABLE: Debian /bin/sh is dash (`set -o pipefail` is illegal).
 ANSIBLE_CONFIG="$ANSIBLE_CFG" \
