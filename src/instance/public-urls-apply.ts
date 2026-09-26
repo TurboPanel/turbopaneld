@@ -21,12 +21,85 @@ import type {
   InstanceAcmeWireSettings,
   InstanceHostnameWireEntry,
 } from "../contracts/cell-messages.ts";
+import {
+  isValidHostname,
+  isValidNtpServer,
+} from "../contracts/commands-contracts.ts";
 import { upsertPublicUrlsInEnv } from "./public-urls-env.ts";
 
 /** Wire hostname, including the one-hop decrypted upload pair. */
 export type InstanceHostnameApplyEntry = InstanceHostnameWireEntry;
 
 const UPLOADED_CERT_ID = /^[0-9a-f-]{36}$/i;
+/** `https://<host>[:port][/]`, the install origin the control plane stores. */
+const INSTALL_ORIGIN =
+  /^https:\/\/(?:\[([0-9A-Fa-f:.]+)\]|([^/:[\]]+))(?::(\d{1,5}))?\/?$/;
+const ACME_EMAIL_LOCAL = /^[A-Za-z0-9._+-]{1,64}$/;
+const ACME_DIRECTORY_PATH = /^[A-Za-z0-9._~/:-]*$/;
+
+/** A bare host, or its install origin, with a host the NTP check accepts. */
+function isApplyHost(value: string): boolean {
+  if (!value.startsWith("https://")) return isValidNtpServer(value);
+  const match = INSTALL_ORIGIN.exec(value);
+  if (!match) return false;
+  const [, ipv6, host, port] = match;
+  if (port !== undefined && Number(port) > 65535) return false;
+  return ipv6 !== undefined
+    ? ipv6.includes(":") && isValidNtpServer(ipv6)
+    : isValidNtpServer(host);
+}
+
+/**
+ * These values reach a root-run playbook as key=value extra-vars, so they are
+ * held to plain host / email / URL shapes before they leave the daemon (and
+ * again by tp-orchestrate). The control plane validates them too; this is the
+ * daemon not trusting that it did.
+ */
+export function assertInstanceCertsApplyInputs(
+  hostnames: readonly InstanceHostnameApplyEntry[],
+  instanceAcme?: Pick<
+    InstanceAcmeWireSettings,
+    "contactEmail" | "directoryUrl"
+  >,
+): void {
+  for (const entry of hostnames) {
+    if (!isApplyHost(entry.host)) {
+      throw new Error(
+        `refusing instance hostname ${JSON.stringify(entry.host)}`,
+      );
+    }
+    const id = entry.uploadedCertId;
+    if (id && !UPLOADED_CERT_ID.test(id)) {
+      throw new Error(`refusing uploaded certificate id ${JSON.stringify(id)}`);
+    }
+  }
+  const email = instanceAcme?.contactEmail.trim();
+  if (email) {
+    const at = email.lastIndexOf("@");
+    const local = email.slice(0, at);
+    const domain = email.slice(at + 1);
+    if (
+      at <= 0 || !ACME_EMAIL_LOCAL.test(local) || local.startsWith(".") ||
+      local.endsWith(".") || !isValidHostname(domain) || !domain.includes(".")
+    ) {
+      throw new Error(`refusing ACME contact email ${JSON.stringify(email)}`);
+    }
+  }
+  const directory = instanceAcme?.directoryUrl.trim();
+  if (directory) {
+    const rest = directory.startsWith("https://")
+      ? directory.slice("https://".length)
+      : null;
+    if (
+      rest === null || rest.length === 0 || !ACME_DIRECTORY_PATH.test(rest) ||
+      rest.split("/").some((segment) => segment === "." || segment === "..")
+    ) {
+      throw new Error(
+        `refusing ACME directory URL ${JSON.stringify(directory)}`,
+      );
+    }
+  }
+}
 
 function stripTrailingSlashes(path: string): string {
   let out = path;
@@ -171,7 +244,8 @@ export async function runInstanceCertsApply(
   } = {},
 ): Promise<void> {
   const env = deps.env ?? Deno.env.toObject();
-  // tp-orchestrate accepts only key=value extra-vars. A JSON object is
+  assertInstanceCertsApplyInputs(hostnames, deps.instanceAcme);
+  // tp-orchestrate accepts only key=value extra-vars here. A JSON object is
   // refused before ansible-playbook starts, which is an exit 1 with no
   // task log. resolve-hostnames.yml decodes the list from
   // turbopanel_hostnames_json.

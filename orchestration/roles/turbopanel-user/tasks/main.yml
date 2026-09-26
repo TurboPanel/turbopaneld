@@ -84,10 +84,45 @@
     mode: "0750"
   loop: "{{ turbopanel_daemon_vendor_cache_dirs }}"
 
-# Narrow sudo: a fixed allowlist of host utilities by absolute path plus the
-# tp-orchestrate helper (which runs the shipped playbooks as root so Ansible
-# never needs `become` from an unprivileged account). Never NOPASSWD:ALL —
-# src/orchestration/sudoers-contract.test.ts fails the build if it returns.
+# tp-host is the daemon account's only root entry point for host files,
+# services, accounts and networking (orchestration/scripts/tp-host). It lives
+# outside the replaceable orchestration tree, root:root 0755 in a root-owned
+# lib/, and is installed before the sudoers file that names it. The principal
+# home root it confines tenant paths to comes from here, root-side — never
+# from the daemon's own environment.
+- name: Ensure the root-owned lib directory for root helpers
+  ansible.builtin.file:
+    path: "{{ turbopanel_install_root }}/lib"
+    state: directory
+    owner: root
+    group: "{{ turbopanel_group }}"
+    mode: "0750"
+  when: turbopanel_dev_user | default('') | length == 0
+
+- name: Install tp-host
+  ansible.builtin.copy:
+    src: "{{ turbopanel_orchestration_dir }}/scripts/tp-host"
+    dest: "{{ turbopanel_install_root }}/lib/tp-host"
+    owner: root
+    group: "{{ turbopanel_group }}"
+    mode: "0750"
+    remote_src: true
+  when: turbopanel_dev_user | default('') | length == 0
+
+- name: Record the principal home root for tp-host
+  ansible.builtin.copy:
+    content: "principal_home_root={{ principal_home_root | default('/srv/users') }}\n"
+    dest: "{{ turbopanel_install_root }}/lib/tp-host.conf"
+    owner: root
+    group: "{{ turbopanel_group }}"
+    mode: "0640"
+  when: turbopanel_dev_user | default('') | length == 0
+
+# Narrow sudo: tp-host and tp-orchestrate (which runs the shipped playbooks as
+# root so Ansible never needs `become` from an unprivileged account), plus the
+# residual grants documented in sudoers.j2. Never NOPASSWD:ALL and never a raw
+# host utility — src/orchestration/sudoers-contract.test.ts fails the build if
+# either returns.
 - name: Grant scoped passwordless sudo for orchestration
   ansible.builtin.template:
     src: sudoers.j2

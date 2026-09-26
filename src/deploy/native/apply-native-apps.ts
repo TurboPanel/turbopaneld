@@ -34,6 +34,7 @@
  */
 
 import { join } from "@std/path";
+import { hostSudoArgs } from "../../permissions/host-sudo.ts";
 import { logInfo, logWarn } from "../../util/logger.ts";
 import type { LayoutPaths } from "../../paths/layout.ts";
 import {
@@ -254,14 +255,17 @@ async function installedFileMatches(
   stagedPath: string,
   installedPath: string,
 ): Promise<boolean> {
-  const cmp = await io.run("sudo", [
-    "-n",
-    "cmp",
-    "-s",
-    "--",
-    stagedPath,
-    installedPath,
-  ]);
+  const cmp = await io.run(
+    "sudo",
+    hostSudoArgs([
+      "-n",
+      "cmp",
+      "-s",
+      "--",
+      stagedPath,
+      installedPath,
+    ]),
+  );
   return cmp.success;
 }
 
@@ -277,18 +281,21 @@ async function installUnitFile(
   if (await installedFileMatches(io, params.stagedPath, params.installedPath)) {
     return false;
   }
-  const install = await io.run("sudo", [
-    "-n",
-    "install",
-    "-m",
-    "0644",
-    "-o",
-    "root",
-    "-g",
-    "root",
-    params.stagedPath,
-    params.installedPath,
-  ]);
+  const install = await io.run(
+    "sudo",
+    hostSudoArgs([
+      "-n",
+      "install",
+      "-m",
+      "0644",
+      "-o",
+      "root",
+      "-g",
+      "root",
+      params.stagedPath,
+      params.installedPath,
+    ]),
+  );
   if (!install.success) {
     throw new Error(
       install.stderr || `Failed to install unit ${params.installedPath}`,
@@ -301,7 +308,7 @@ async function systemctl(
   io: NativeAppIo,
   args: string[],
 ): Promise<RunResult> {
-  return await io.run("sudo", ["-n", "systemctl", ...args]);
+  return await io.run("sudo", hostSudoArgs(["-n", "systemctl", ...args]));
 }
 
 /** True when the unit is currently active (a redeploy restarts, not enables). */
@@ -379,15 +386,18 @@ async function emitNativeAppJournal(
     "stderr",
     `--- ${unit} journal (last ${NATIVE_APP_JOURNAL_TAIL} lines) ---`,
   );
-  const result = await io.run("sudo", [
-    "-n",
-    "journalctl",
-    `--unit=${unit}`,
-    "-n",
-    String(NATIVE_APP_JOURNAL_TAIL),
-    "--no-pager",
-    "--output=short-iso",
-  ]);
+  const result = await io.run(
+    "sudo",
+    hostSudoArgs([
+      "-n",
+      "journalctl",
+      `--unit=${unit}`,
+      "-n",
+      String(NATIVE_APP_JOURNAL_TAIL),
+      "--no-pager",
+      "--output=short-iso",
+    ]),
+  );
   const text = result.stdout.trim() || result.stderr.trim();
   let lineCount = 0;
   if (text.length > 0) {
@@ -844,13 +854,16 @@ export async function removeNativeAppServices(
         `native app disable failed unit=${unit}: ${disable.stderr}`,
       );
     }
-    const rm = await io.run("sudo", [
-      "-n",
-      "rm",
-      "-f",
-      "--",
-      nativeAppUnitPath(serviceId, deps?.systemdUnitDir),
-    ]);
+    const rm = await io.run(
+      "sudo",
+      hostSudoArgs([
+        "-n",
+        "rm",
+        "-f",
+        "--",
+        nativeAppUnitPath(serviceId, deps?.systemdUnitDir),
+      ]),
+    );
     if (!rm.success) {
       logWarn(
         "deploy",

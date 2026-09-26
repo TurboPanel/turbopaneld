@@ -6,6 +6,7 @@
  */
 
 import { encodeHex } from "@std/encoding/hex";
+import { hostSudoArgs } from "../permissions/host-sudo.ts";
 import { dirname, join } from "@std/path";
 import { logInfo, logWarn } from "../util/logger.ts";
 import { createSymlink } from "../permissions/scoped-writes.ts";
@@ -154,12 +155,15 @@ async function downloadHostingCaddy(
     // Best-effort ownership for managed hosts (root:turbopanel). May fail
     // without sudo — binary is still runnable by the daemon user when owned by
     // that user (typical after a direct download as turbopanel/dev).
-    const chown = await deps.runCommand("sudo", [
-      "-n",
-      "chown",
-      "root:turbopanel",
-      binPath,
-    ]);
+    const chown = await deps.runCommand(
+      "sudo",
+      hostSudoArgs([
+        "-n",
+        "chown",
+        "root:turbopanel",
+        binPath,
+      ]),
+    );
     if (!chown.success) {
       logWarn(
         "deploy",

@@ -96,49 +96,136 @@ test("production sudoers never grants NOPASSWD:ALL as root", async () => {
   }
 });
 
-test("every sudoers command is an absolute path or the orchestrate helper", async () => {
+/** Every `Cmnd_Alias` entry the root grant names, Jinja rendered to defaults. */
+async function rootGrantEntries(): Promise<string[]> {
   const template = await Deno.readTextFile(join(orch, SUDOERS_TEMPLATE));
+  const aliases = new Map<string, string[]>();
   for (const line of template.split("\n")) {
-    const alias = /^Cmnd_Alias\s+\w+\s*=\s*(.+)$/.exec(line);
+    const alias = /^Cmnd_Alias\s+(\w+)\s*=\s*(.+)$/.exec(line);
     if (!alias) continue;
-    for (const raw of alias[1]!.split(",")) {
-      // Jinja path variables render to absolute paths; treat them as such.
-      const entry = raw.trim().replaceAll(/\{\{ turbopanel_\w+ \}\}/g, "/tp");
-      const command = entry.split(/\s+/)[0] ?? "";
-      assertEquals(
-        command.startsWith("/"),
-        true,
-        `relative sudoers command: ${raw.trim()}`,
-      );
-      assertEquals(
-        [
-          "/bin/sh",
-          "/bin/bash",
-          "/usr/bin/sh",
-          "/usr/bin/bash",
-          "/usr/bin/sudo",
-          "/usr/bin/su",
-        ].includes(command),
-        false,
-        `shell in sudoers: ${command}`,
-      );
-    }
+    aliases.set(
+      alias[1]!,
+      alias[2]!.split(",").map((raw) =>
+        raw.trim()
+          .replaceAll(
+            "{{ turbopanel_orchestration_dir }}",
+            "/opt/turbopanel/share/orchestration",
+          )
+          .replaceAll("{{ turbopanel_install_root }}", "/opt/turbopanel")
+          .replaceAll("{{ turbopanel_vendor_dir }}", "/opt/turbopanel/vendor")
+      ),
+    );
   }
-  assertStringIncludes(template, "/usr/bin/ss");
-  assertStringIncludes(
-    template,
-    "/usr/bin/systemctl start turbopanel-instance-acme.service",
+  const grant = template.split("\n").find((line) =>
+    /ALL=\(root\) NOPASSWD:/.test(line)
   );
-  assertStringIncludes(
-    template,
-    "/usr/bin/systemctl stop turbopanel-instance-acme.service",
+  if (!grant) throw new TypeError("no root grant in sudoers.j2");
+  return grant.split("NOPASSWD:")[1]!.split(",").flatMap((name) => {
+    const entries = aliases.get(name.trim());
+    if (!entries) throw new TypeError(`root grant names unknown alias ${name}`);
+    return entries;
+  });
+}
+
+/**
+ * sudoers command matching, enough for this file: a bare path allows any
+ * arguments; otherwise the arguments are a glob where `*` matches anything
+ * (spaces and slashes included — sudoers argument wildcards do) and `[..]`
+ * is a character class.
+ */
+function grantAllows(entry: string, command: string): boolean {
+  const space = entry.indexOf(" ");
+  const path = space < 0 ? entry : entry.slice(0, space);
+  const wantArgs = space < 0 ? null : entry.slice(space + 1);
+  const cSpace = command.indexOf(" ");
+  const cPath = cSpace < 0 ? command : command.slice(0, cSpace);
+  const cArgs = cSpace < 0 ? "" : command.slice(cSpace + 1);
+  const glob = (pattern: string) =>
+    new RegExp(
+      "^" + pattern.replaceAll(/[.+^${}()|\\]/g, "\\$&").replaceAll("*", ".*") +
+        "$",
+    );
+  if (!glob(path).test(cPath)) return false;
+  return wantArgs === null || glob(wantArgs).test(cArgs);
+}
+
+test("the root grant is tp-host, tp-orchestrate and two pinned engine checks — nothing else", async () => {
+  const entries = (await rootGrantEntries()).sort((a, b) => a.localeCompare(b));
+  assertEquals(
+    entries,
+    [
+      "/opt/turbopanel/lib/tp-host",
+      "/opt/turbopanel/share/orchestration/scripts/tp-orchestrate",
+      "/opt/turbopanel/vendor/apache/current/bin/httpd -t -f /etc/turbopanel/apache/httpd.conf",
+      "/usr/sbin/php-fpm[0-9].[0-9] --fpm-config /etc/turbopanel/php/[0-9].[0-9]/php-fpm.conf --test",
+    ].sort((a, b) => a.localeCompare(b)),
   );
-  assertStringIncludes(
-    template,
-    "/usr/bin/systemctl disable --now turbopanel-hosting-caddy.service",
-  );
-  assertStringIncludes(template, "/scripts/tp-orchestrate");
+  const template = await Deno.readTextFile(join(orch, SUDOERS_TEMPLATE));
   assertStringIncludes(template, "env_reset");
+});
+
+test("known root escapes are refused by the sudoers grant", async () => {
+  const entries = await rootGrantEntries();
+  const escapes = [
+    "/usr/bin/find / -exec /bin/sh ;",
+    "/usr/bin/tee /etc/sudoers.d/evil",
+    "/usr/bin/cp /tmp/x /etc/cron.d/x",
+    "/usr/bin/install -m 4755 /tmp/sh /usr/local/bin/sh",
+    "/usr/bin/chown tp /etc/shadow",
+    "/usr/bin/chmod 0777 /etc/shadow",
+    "/usr/bin/mv /tmp/x /etc/passwd",
+    "/usr/bin/rm -rf /",
+    "/usr/bin/systemctl link /tmp/evil.service",
+    "/usr/bin/systemctl start evil.service",
+    "/usr/sbin/useradd -o -u 0 evil",
+    "/usr/sbin/usermod -aG sudo tp",
+    "/usr/sbin/chpasswd",
+    "/usr/sbin/sysctl -w kernel.core_pattern=|/tmp/x",
+    "/usr/sbin/ip netns exec x /bin/sh",
+    "/usr/sbin/iptables --modprobe=/tmp/x -L",
+    "/usr/bin/docker run -v /:/h alpine",
+    "/usr/bin/journalctl",
+    "/opt/turbopanel/vendor/apache/current/bin/httpd -t -f /tmp/evil.conf",
+    "/usr/sbin/php-fpm8.4 --fpm-config /tmp/x/php-fpm.conf --test",
+    "/usr/sbin/php-fpm8.4 --fpm-config /etc/turbopanel/php/8.4/../../../tmp/php-fpm.conf --test",
+    "/bin/sh -c id",
+  ];
+  const allowed = escapes.filter((command) =>
+    entries.some((entry) => grantAllows(entry, command))
+  );
+  assertEquals(allowed, [], "sudoers still grants these root escapes");
+  // The daemon's real commands still match.
+  for (
+    const command of [
+      "/opt/turbopanel/lib/tp-host install -m 0640 a b",
+      "/opt/turbopanel/share/orchestration/scripts/tp-orchestrate playbook -i localhost, -c local x.yml",
+      "/opt/turbopanel/vendor/apache/current/bin/httpd -t -f /etc/turbopanel/apache/httpd.conf",
+      "/usr/sbin/php-fpm8.4 --fpm-config /etc/turbopanel/php/8.4/php-fpm.conf --test",
+    ]
+  ) {
+    assertEquals(
+      entries.some((entry) => grantAllows(entry, command)),
+      true,
+      command,
+    );
+  }
+});
+
+test("tp-host is installed root:tp 0750 (never writable by tp) before the sudoers file that names it", async () => {
+  const tasks = await readTasks(USER_TASKS);
+  const install = tasks.findIndex((task) =>
+    String(task["ansible.builtin.copy"]?.dest ?? "").endsWith("/lib/tp-host")
+  );
+  const sudoers = tasks.findIndex((task) =>
+    String(task["ansible.builtin.template"]?.dest ?? "") === "/etc/sudoers.d/tp"
+  );
+  assertEquals(install >= 0, true, "no task installs tp-host");
+  assertEquals(install < sudoers, true, "tp-host must be installed first");
+  const copy = tasks[install]!["ansible.builtin.copy"]!;
+  assertEquals(copy.owner, "root");
+  assertEquals(copy.group, "{{ turbopanel_group }}");
+  assertEquals(copy.mode, "0750");
+  assertEquals(copy.src, "{{ turbopanel_orchestration_dir }}/scripts/tp-host");
 });
 
 test("the install root and vendor tree are root-owned on managed hosts", async () => {

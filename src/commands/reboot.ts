@@ -7,6 +7,7 @@
  * {@link setRebootExecutorForTests} for unit tests.
  */
 import { logInfo, logWarn } from "../util/logger.ts";
+import { hostSudoArgs } from "../permissions/host-sudo.ts";
 import {
   parseRebootPayload,
   type RebootPayload,
@@ -30,7 +31,7 @@ function stripLogInjection(text: string): string {
 
 const runRebootDefault: RunReboot = async () => {
   const result = await new Deno.Command("sudo", {
-    args: ["-n", "systemctl", "reboot"],
+    args: hostSudoArgs(["-n", "systemctl", "reboot"]),
     stdin: "null",
     stdout: "piped",
     stderr: "piped",

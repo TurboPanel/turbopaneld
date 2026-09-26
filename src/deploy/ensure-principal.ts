@@ -1,4 +1,5 @@
 import { join } from "@std/path";
+import { hostSudoArgs } from "../permissions/host-sudo.ts";
 import { logWarn } from "../util/logger.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 import {
@@ -267,7 +268,10 @@ async function ensurePrincipalHomeRootTraverse(
   path: string,
   runFn: RunFn,
 ): Promise<void> {
-  const result = await runFn("sudo", ["-n", "setfacl", "-m", "o::x", path]);
+  const result = await runFn(
+    "sudo",
+    hostSudoArgs(["-n", "setfacl", "-m", "o::x", path]),
+  );
   if (!result.success) {
     throw new Error(
       result.stderr || `Failed to grant traverse ACL on ${path}`,
@@ -284,18 +288,21 @@ async function ensureDir(
   const sep = owner.indexOf(":");
   const user = sep === -1 ? owner : owner.slice(0, sep);
   const group = sep === -1 ? owner : owner.slice(sep + 1);
-  const result = await runFn("sudo", [
-    "-n",
-    "install",
-    "-d",
-    "-m",
-    mode,
-    "-o",
-    user,
-    "-g",
-    group,
-    path,
-  ]);
+  const result = await runFn(
+    "sudo",
+    hostSudoArgs([
+      "-n",
+      "install",
+      "-d",
+      "-m",
+      mode,
+      "-o",
+      user,
+      "-g",
+      group,
+      path,
+    ]),
+  );
   if (!result.success) {
     throw new Error(result.stderr || `Failed to create directory ${path}`);
   }
@@ -338,7 +345,7 @@ async function ensurePrincipalGroup(
     );
   }
   args.push(groupName);
-  const groupAdd = await runFn("sudo", args);
+  const groupAdd = await runFn("sudo", hostSudoArgs(args));
   if (!groupAdd.success) {
     throw new Error(groupAdd.stderr || "Failed to create principal group");
   }
@@ -375,7 +382,7 @@ async function ensurePrincipalUser(
       shell,
       principal.username,
     );
-    const userAdd = await runFn("sudo", args);
+    const userAdd = await runFn("sudo", hostSudoArgs(args));
     if (!userAdd.success) {
       throw new Error(userAdd.stderr || "Failed to create principal user");
     }
@@ -404,13 +411,16 @@ async function ensurePrincipalUser(
     );
   }
   if (current.shell !== shell) {
-    const usermodShell = await runFn("sudo", [
-      "-n",
-      "usermod",
-      "-s",
-      shell,
-      principal.username,
-    ]);
+    const usermodShell = await runFn(
+      "sudo",
+      hostSudoArgs([
+        "-n",
+        "usermod",
+        "-s",
+        shell,
+        principal.username,
+      ]),
+    );
     if (!usermodShell.success) {
       throw new Error(
         usermodShell.stderr || "Failed to update principal shell",
@@ -428,13 +438,16 @@ async function currentShadowPasswordField(
   username: string,
   runFn: RunFn,
 ): Promise<string | null> {
-  const result = await runFn("sudo", [
-    "-n",
-    "getent",
-    "shadow",
-    "--",
-    username,
-  ]);
+  const result = await runFn(
+    "sudo",
+    hostSudoArgs([
+      "-n",
+      "getent",
+      "shadow",
+      "--",
+      username,
+    ]),
+  );
   if (!result.success) return null;
   const fields = result.stdout.split(":");
   return fields.length >= 2 ? fields[1] : null;
@@ -474,7 +487,7 @@ export async function ensurePrincipalPassword(
     if (current === passwordHash) return;
     const result = await runFn(
       "sudo",
-      ["-n", "chpasswd", "-e"],
+      hostSudoArgs(["-n", "chpasswd", "-e"]),
       `${username}:${passwordHash}\n`,
     );
     if (!result.success) {
@@ -488,7 +501,10 @@ export async function ensurePrincipalPassword(
   if (current !== null && isLockedShadowPasswordField(current)) return;
   // A failed lock is loud for the same reason a failed group revoke is: a
   // password that silently outlives its revocation is a security problem.
-  const result = await runFn("sudo", ["-n", "usermod", "-p", "!", username]);
+  const result = await runFn(
+    "sudo",
+    hostSudoArgs(["-n", "usermod", "-p", "!", username]),
+  );
   if (!result.success) {
     throw new Error(
       result.stderr || `Failed to lock password for ${username}`,
@@ -628,7 +644,10 @@ export async function ensureSupplementaryGroupMembership(
   groupName: string,
   runFn: RunFn = runDefault,
 ): Promise<void> {
-  const result = await runFn("sudo", ["-n", "usermod", "-aG", groupName, user]);
+  const result = await runFn(
+    "sudo",
+    hostSudoArgs(["-n", "usermod", "-aG", groupName, user]),
+  );
   if (!result.success) {
     throw new Error(
       result.stderr || `Failed to add ${user} to group ${groupName}`,
@@ -660,7 +679,10 @@ async function removeSupplementaryGroupMembership(
   groupName: string,
   runFn: RunFn = runDefault,
 ): Promise<void> {
-  const result = await runFn("sudo", ["-n", "gpasswd", "-d", user, groupName]);
+  const result = await runFn(
+    "sudo",
+    hostSudoArgs(["-n", "gpasswd", "-d", user, groupName]),
+  );
   if (!result.success) {
     throw new Error(
       result.stderr || `Failed to remove ${user} from group ${groupName}`,
@@ -760,7 +782,7 @@ export async function ensureDirectoryOwnedByPrincipal(
     await ensureDir(path, "0750", owner, runFn);
     return;
   }
-  const chown = await runFn("sudo", ["-n", "chown", owner, path]);
+  const chown = await runFn("sudo", hostSudoArgs(["-n", "chown", owner, path]));
   if (!chown.success) {
     throw new Error(chown.stderr || `Failed to chown ${path}`);
   }

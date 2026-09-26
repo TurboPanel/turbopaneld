@@ -225,6 +225,81 @@ exit 1
   assertEquals(guard.includes("restartAttempts"), true);
 });
 
+test("the guard never writes through a symlink the daemon planted", async () => {
+  // RUN_DIR and STATE_DIR belong to the daemon account; root must replace a
+  // planted symlink, never write the rollback or attention record through it.
+  const root = await Deno.makeTempDir({ prefix: "tp-update-guard-link-" });
+  const bin = join(root, "bin");
+  const runDir = join(root, "run");
+  const stateDir = join(root, "state");
+  const outside = join(root, "outside");
+  await Deno.mkdir(bin, { recursive: true });
+  await Deno.mkdir(runDir, { recursive: true });
+  await Deno.mkdir(stateDir, { recursive: true });
+  await Deno.mkdir(outside, { recursive: true });
+  const victimRollback = join(outside, "passwd");
+  const victimAttention = join(outside, "shadow");
+  await Deno.writeTextFile(victimRollback, "root:x:0:0\n");
+  await Deno.writeTextFile(victimAttention, "root:*:1\n");
+  await Deno.symlink(victimRollback, join(stateDir, "update-rollback.json"));
+  await Deno.symlink(
+    victimAttention,
+    join(stateDir, "update-guard-attention.json"),
+  );
+  await Deno.writeTextFile(join(bin, "id"), "#!/bin/sh\necho 0\n");
+  await Deno.writeTextFile(
+    join(bin, "systemctl"),
+    `#!/bin/sh
+case "$1" in
+  is-failed) exit 0 ;;
+  reset-failed) exit 0 ;;
+esac
+exit 1
+`,
+  );
+  await Deno.writeTextFile(join(bin, "systemd-run"), "#!/bin/sh\nexit 0\n");
+  for (const name of ["id", "systemctl", "systemd-run"]) {
+    await Deno.chmod(join(bin, name), 0o755);
+  }
+  // Third failed attempt: writes the rollback record and the attention file.
+  await Deno.writeTextFile(
+    join(runDir, "update-guard.json"),
+    '{"targetCommit":"new","deadlineAt":"2020-01-01T00:00:00Z","previousCommit":"old","restartAttempts":"2"}\n',
+  );
+  const result = await new Deno.Command("sh", {
+    args: [updateGuardSh],
+    env: {
+      PATH: `${bin}:/usr/bin:/bin`,
+      TURBOPANEL_RUN_DIR: runDir,
+      TURBOPANEL_STATE_DIR: stateDir,
+      TURBOPANEL_INSTALL_ROOT: root,
+    },
+    stdout: "piped",
+    stderr: "piped",
+  }).output();
+  assertEquals(result.code === 0, false);
+  assertEquals(await Deno.readTextFile(victimRollback), "root:x:0:0\n");
+  assertEquals(await Deno.readTextFile(victimAttention), "root:*:1\n");
+  for (const name of ["update-rollback.json", "update-guard-attention.json"]) {
+    const info = await Deno.lstat(join(stateDir, name));
+    assertEquals(info.isSymlink, false, `${name} is still a symlink`);
+    assertEquals(info.isFile, true);
+    assertEquals((info.mode ?? 0) & 0o777, 0o640);
+  }
+  assertStringIncludes(
+    await Deno.readTextFile(join(stateDir, "update-rollback.json")),
+    '"fromCommit":"new"',
+  );
+  assertStringIncludes(
+    await Deno.readTextFile(join(stateDir, "update-guard-attention.json")),
+    '"needsAttention":true',
+  );
+  // No private scratch directory is left behind.
+  for await (const entry of Deno.readDir(stateDir)) {
+    assertEquals(entry.name.startsWith(".tp-update-guard."), false);
+  }
+});
+
 test("a pre-feature tree can still be recovered by the stable guard", async () => {
   const root = await Deno.makeTempDir({ prefix: "tp-guard-stable-" });
   const orchScripts = join(root, "share", "orchestration", "scripts");

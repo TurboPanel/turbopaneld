@@ -8,11 +8,12 @@
 # instead, and `become: true` becomes a no-op.
 #
 # Verbs:
-#   playbook -i localhost, -c local [-e key=value]... <playbook.yml>
+#   playbook -i localhost, -c local [-e key=value|-e '{json}']... <playbook.yml>
 #       Run one of the shipped playbooks (a basename resolved under this
-#       tree's playbooks/ — never a caller-supplied path) with key=value
-#       extra-vars only (no JSON, no @file). Everything else on the command
-#       line is refused.
+#       tree's playbooks/ — never a caller-supplied path). Each extra-var key
+#       must be on the allowlist below with a value of the expected shape;
+#       JSON objects are limited to TP_JSON_EXTRA_VAR_KEYS; @file is refused.
+#       Everything else on the command line is refused.
 #   galaxy-docker-role
 #       Fetch the geerlingguy.docker role pinned in requirements-docker.yml
 #       into the root-owned vendor roles dir (codeload tag tarball).
@@ -75,22 +76,296 @@ tp_export_runtime_env() {
     ANSIBLE_LOCAL_TEMP ANSIBLE_ROLES_PATH
 }
 
-# key=value with an identifier key and no newline — the only extra-var shape
-# the daemon produces (src/orchestration/ansible.ts). JSON blobs and @file
-# references would let the caller feed root arbitrary structured input.
+# Every key=value extra-var the daemon passes to a playbook through this
+# helper, and what its value may be. The caller is the daemon account, so a
+# key is data it chooses: anything not listed here is refused, and so is every
+# `ansible_*` key (interpreter, connection, become — Ansible itself, not a
+# TurboPanel role) and every `turbopanel_dev_*` key (co-located development
+# ownership; a managed host never has a dev user). Values are checked per key;
+# paths that decide where root reads or writes are pinned to this tree rather
+# than trusted. A new key the daemon starts passing must be added here, or the
+# playbook fails before Ansible starts (src/orchestration/tp-orchestrate-argv.test.ts
+# runs the daemon's real argv builders through this function).
+tp_extra_var_value_ok() {
+  _xk="$1"
+  _xv="$2"
+  # Jinja delimiters: Ansible templates a string extra-var when a role uses it.
+  case "$_xv" in
+    *'{{'*|*'{%'*|*'{#'*) return 1 ;;
+  esac
+  # key=value extra-vars split on whitespace: `a=1 b=2` is two variables.
+  case "$_xv" in
+    *[[:space:]]*|*[[:cntrl:]]*) return 1 ;;
+  esac
+  case "$_xk" in
+    turbopanel_ui_mode)
+      case "$_xv" in dev|static) return 0 ;; esac
+      ;;
+    turbopanel_instance_run_mode)
+      case "$_xv" in source|compiled) return 0 ;; esac
+      ;;
+    turbopanel_instance_runtime)
+      case "$_xv" in deno|workers) return 0 ;; esac
+      ;;
+    postgres_expose_port|force_build|force_compile|turbopanel_after_instance_service)
+      case "$_xv" in true|false) return 0 ;; esac
+      ;;
+    turbopanel_install_root|turbopanel_instance_dir)
+      # A managed host's instance lies flat in the install root; root must
+      # never run a generator or restore a backup from a tree the caller names.
+      [ "$_xv" = "$INSTALL_ROOT" ] && return 0
+      ;;
+    turbopanel_backup_dir)
+      tp_backup_dir_ok "$_xv" && return 0
+      ;;
+    turbopanel_hostname)
+      tp_hostname_ok "$_xv" && return 0
+      ;;
+    turbopanel_public_urls)
+      tp_host_list_ok "$_xv" && return 0
+      ;;
+    turbopanel_hostnames_json)
+      # Compact JSON of {host, source, cert_id} rows; the roles re-check each
+      # host. Structural characters only — no quotes-in-strings, no escapes.
+      # A host is stored as an install origin (https://panel.example.com:8443),
+      # so `/` and `:` are part of the set; the roles strip scheme, path and
+      # port before a host names anything.
+      case "$_xv" in
+        '['*']') ;;
+        *) return 1 ;;
+      esac
+      # \133 \135 are [ ]: a bracket inside a case pattern's own brackets is
+      # not portable across shells, so strip the allowed set and require
+      # nothing to remain.
+      [ -z "$(printf '%s' "$_xv" | tr -d 'A-Za-z0-9{}":,._/\133\135-')" ] &&
+        return 0
+      ;;
+    turbopanel_acme_email)
+      tp_email_ok "$_xv" && return 0
+      ;;
+    turbopanel_acme_directory)
+      case "$_xv" in
+        https://?*) ;;
+        *) return 1 ;;
+      esac
+      case "${_xv#https://}" in
+        *[!A-Za-z0-9._~/:-]*|*/../*|*/..|*/./*) return 1 ;;
+      esac
+      return 0
+      ;;
+    turbopanel_upgrade_id)
+      case "$_xv" in
+        ''|*[!A-Za-z0-9_-]*) return 1 ;;
+      esac
+      [ "${#_xv}" -le 128 ] && return 0
+      ;;
+    turbopanel_instance_version)
+      case "$_xv" in
+        ''|*[!0-9A-Za-z.+-]*) return 1 ;;
+      esac
+      return 0
+      ;;
+    turbopanel_instance_revision)
+      case "$_xv" in
+        ''|*[!0-9A-Za-z]*) return 1 ;;
+      esac
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+# RFC 1123 host name: dot-separated LDH labels, 1-63 characters each, no
+# leading or trailing hyphen, 253 characters in all.
+tp_hostname_ok() {
+  _hn="$1"
+  [ -n "$_hn" ] && [ "${#_hn}" -le 253 ] || return 1
+  case "$_hn" in
+    *[!A-Za-z0-9.-]*|.*|*.|*..*) return 1 ;;
+  esac
+  _hn_rest="$_hn"
+  while [ -n "$_hn_rest" ]; do
+    _hn_label="${_hn_rest%%.*}"
+    case "$_hn_rest" in
+      *.*) _hn_rest="${_hn_rest#*.}" ;;
+      *) _hn_rest="" ;;
+    esac
+    [ -n "$_hn_label" ] && [ "${#_hn_label}" -le 63 ] || return 1
+    case "$_hn_label" in
+      -*|*-) return 1 ;;
+    esac
+  done
+  return 0
+}
+
+# One control-plane host as the daemon passes it: a host name, IPv4 or IPv6
+# literal, or the install origin the control plane stores for it
+# (https://<host>[:port][/], IPv6 bracketed). No wildcards, no userinfo, no
+# path, query or fragment.
+tp_host_token_ok() {
+  _ht="$1"
+  case "$_ht" in
+    https://*)
+      _ht="${_ht#https://}"
+      _ht="${_ht%/}"
+      case "$_ht" in
+        '['*)
+          _ht_port="${_ht##*]}"
+          _ht="${_ht#?}"
+          _ht="${_ht%]"$_ht_port"}"
+          ;;
+        *:*)
+          _ht_port=":${_ht##*:}"
+          _ht="${_ht%:*}"
+          ;;
+        *) _ht_port="" ;;
+      esac
+      case "$_ht_port" in
+        '') ;;
+        :[0-9]|:[0-9][0-9]|:[0-9][0-9][0-9]|:[0-9][0-9][0-9][0-9]|:[0-9][0-9][0-9][0-9][0-9])
+          [ "${_ht_port#:}" -le 65535 ] || return 1
+          ;;
+        *) return 1 ;;
+      esac
+      ;;
+  esac
+  case "$_ht" in
+    '') return 1 ;;
+    *:*)
+      case "$_ht" in
+        *[!0-9A-Fa-f:.]*) return 1 ;;
+      esac
+      ;;
+    *)
+      tp_hostname_ok "$_ht" || return 1
+      ;;
+  esac
+  return 0
+}
+
+# Comma-separated host tokens for the certificate SANs (see
+# tp_host_token_ok). No empty entries.
+tp_host_list_ok() {
+  _hl="$1"
+  [ -n "$_hl" ] || return 1
+  case "$_hl" in
+    ,*|*,|*,,*) return 1 ;;
+  esac
+  _hl_rest="$_hl"
+  while [ -n "$_hl_rest" ]; do
+    _hl_tok="${_hl_rest%%,*}"
+    case "$_hl_rest" in
+      *,*) _hl_rest="${_hl_rest#*,}" ;;
+      *) _hl_rest="" ;;
+    esac
+    tp_host_token_ok "$_hl_tok" || return 1
+  done
+  return 0
+}
+
+# A deliberately small email shape: local@domain with an RFC 1123 domain.
+tp_email_ok() {
+  _em="$1"
+  case "$_em" in
+    ?*@?*) ;;
+    *) return 1 ;;
+  esac
+  _em_local="${_em%@*}"
+  _em_domain="${_em##*@}"
+  [ "$_em_local@$_em_domain" = "$_em" ] || return 1
+  case "$_em_local" in
+    *[!A-Za-z0-9._+-]*|.*|*.) return 1 ;;
+  esac
+  [ "${#_em_local}" -le 64 ] || return 1
+  case "$_em_domain" in
+    *.*) ;;
+    *) return 1 ;;
+  esac
+  tp_hostname_ok "$_em_domain"
+}
+
+# Backups are the one path an operator may repoint (a second disk, a NAS
+# mount), so this is a set of storage roots rather than one value: absolute,
+# normalised, and under /backup, /srv, /mnt, /media, /data, or /var/backups.
+# Anywhere else (/etc, /usr, /root, /var/spool, …) would let the daemon aim a
+# root-run backup at a system directory.
+tp_backup_dir_ok() {
+  _bd="$1"
+  case "$_bd" in
+    *[!A-Za-z0-9._/-]*|*//*|*/./*|*/../*|*/.|*/..) return 1 ;;
+  esac
+  case "$_bd" in
+    /backup|/backup/?*|/srv/?*|/mnt/?*|/media/?*|/data|/data/?*|/var/backups|/var/backups/?*) return 0 ;;
+  esac
+  return 1
+}
+
+# Keys a JSON-object extra-var may carry (-e '{"k": …}'), for the playbooks
+# whose inputs are lists or booleans: time sync, Docker addressing, native
+# app runtimes, site engines. Checked by tp_json_extra_var_ok.
+TP_JSON_EXTRA_VAR_KEYS="turbopanel_timezone turbopanel_ntp_servers turbopanel_ntp_fallback_servers turbopanel_ntp_enabled turbopanel_apply_ntp_config turbopanel_docker_address_pools turbopanel_docker_default_bridge_cidr turbopanel_docker_clear_addressing node_app_versions turbopanel_php_fpm_install php_fpm_versions php_fpm_extensions turbopanel_lsphp_install openlitespeed_lsphp_versions"
+
+# A single-line JSON object whose keys are all in TP_JSON_EXTRA_VAR_KEYS and
+# whose leaf strings carry no Jinja delimiter or control character and no
+# whitespace (host names, versions, CIDRs, zone names). Parsed with the
+# vendored Ansible interpreter — the same Python that will read it.
+tp_json_extra_var_ok() {
+  _jv="$1"
+  case "$_jv" in
+    '{'*'}') ;;
+    *) return 1 ;;
+  esac
+  _jpy="$VENDOR_DIR/ansible/current/bin/python3"
+  [ -x "$_jpy" ] || return 1
+  TP_JSON_KEYS="$TP_JSON_EXTRA_VAR_KEYS" "$_jpy" -I -S -c '
+import json, os, re, sys
+allowed = set(os.environ["TP_JSON_KEYS"].split())
+map_key = re.compile(r"[A-Za-z0-9._-]{1,64}")
+bad = ("{{", "{%", "{#")
+def leaf_ok(v, depth=0):
+    if depth > 4:
+        return False
+    if isinstance(v, bool) or v is None:
+        return True
+    if isinstance(v, int):
+        return abs(v) < 2**31
+    if isinstance(v, str):
+        return (len(v) <= 253 and not any(b in v for b in bad)
+                and all(c.isprintable() and not c.isspace() for c in v))
+    if isinstance(v, list):
+        return len(v) <= 64 and all(leaf_ok(x, depth + 1) for x in v)
+    if isinstance(v, dict):
+        return (len(v) <= 16 and all(isinstance(k, str) and map_key.fullmatch(k)
+                and leaf_ok(x, depth + 1) for k, x in v.items()))
+    return False
+try:
+    doc = json.loads(sys.argv[1])
+except ValueError:
+    sys.exit(1)
+if not isinstance(doc, dict) or not doc:
+    sys.exit(1)
+if any(k not in allowed for k in doc):
+    sys.exit(1)
+sys.exit(0 if all(leaf_ok(v) for v in doc.values()) else 1)
+' "$_jv"
+}
+
+# One -e value: `key=value` (key and value checked by tp_extra_var_value_ok)
+# or a JSON object (tp_json_extra_var_ok). `@file` references are refused.
 tp_valid_extra_var() {
   _nl="$(printf '\nx')"
   _nl="${_nl%x}"
   case "$1" in
     *"$_nl"*) return 1 ;;
+    '{'*) tp_json_extra_var_ok "$1"; return $? ;;
     [a-z_]*=*) ;;
     *) return 1 ;;
   esac
   _key="${1%%=*}"
   case "$_key" in
     *[!a-z0-9_]*) return 1 ;;
-    *) return 0 ;;
   esac
+  tp_extra_var_value_ok "$_key" "${1#*=}"
 }
 
 tp_verb_playbook() {
@@ -117,7 +392,8 @@ tp_verb_playbook() {
         ;;
       -e)
         [ $# -ge 2 ] || tp_die "-e requires a value"
-        tp_valid_extra_var "$2" || tp_die "refusing extra-var '$2' (key=value only)"
+        tp_valid_extra_var "$2" ||
+          tp_die "refusing extra-var ${2%%=*} (not an allowed key, or its value is out of shape)"
         eval "_extra_$_n=\$2"
         _n=$((_n + 1))
         shift 2

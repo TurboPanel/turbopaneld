@@ -1,3 +1,4 @@
+import { hostSudoArgs } from "../permissions/host-sudo.ts";
 /**
  * Host command runner for the firewall module (`iptables`, `ip6tables`, their
  * `-restore` / `-save` twins, `sshd`, `systemctl`).
@@ -161,5 +162,9 @@ export async function runFirewallHost(
   }
   const direct = await spawnCommand(cmd, finalArgs, options);
   if (direct.success || !isPermissionDeniedText(direct)) return direct;
-  return await spawnCommand("sudo", ["-n", cmd, ...finalArgs], options);
+  return await spawnCommand(
+    "sudo",
+    hostSudoArgs(["-n", cmd, ...finalArgs]),
+    options,
+  );
 }

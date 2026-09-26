@@ -12,12 +12,12 @@ tp_die() {
 
 # A copy under <install>/lib survives replacing share/orchestration with a
 # build from before this script existed. The systemd unit runs that copy.
-_script_dir="$(CDPATH= cd "$(dirname "$0")" && pwd -P)"
+_script_dir="$(CDPATH='' cd "$(dirname "$0")" && pwd -P)"
 _script="$_script_dir/$(basename "$0")"
 case "$_script" in
   */orchestration/scripts/tp-update-guard)
-    ORCH_DIR="$(CDPATH= cd "$_script_dir/.." && pwd -P)"
-    INSTALL_ROOT="${TURBOPANEL_INSTALL_ROOT:-$(CDPATH= cd "$ORCH_DIR/../.." && pwd -P)}"
+    ORCH_DIR="$(CDPATH='' cd "$_script_dir/.." && pwd -P)"
+    INSTALL_ROOT="${TURBOPANEL_INSTALL_ROOT:-$(CDPATH='' cd "$ORCH_DIR/../.." && pwd -P)}"
     ;;
   *)
     INSTALL_ROOT="${TURBOPANEL_INSTALL_ROOT:-/opt/turbopanel}"
@@ -40,8 +40,48 @@ BIN_DIR="$INSTALL_ROOT/bin"
 tp_read_json_field() {
   _file="$1"
   _key="$2"
+  # The daemon owns these directories; a symlink here is not ours to follow.
+  [ -L "$_file" ] && return 0
   sed -n "s/.*\"$_key\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p" "$_file" | head -1
 }
+
+# Write <content> to <path> as root without following a symlink anywhere.
+# The daemon owns RUN_DIR and STATE_DIR, so it can rename any entry in them at
+# any moment: writing by name there (even to a fresh mktemp name) can be
+# redirected through a symlink it swaps in. Instead, pin the directory with
+# `cd -P`, create a root-only 0700 subdirectory (the daemon cannot add entries
+# inside it), check that the working directory really is that subdirectory,
+# write the file there, and rename it over <path> with `mv -T` — rename(2)
+# replaces a symlink entry, it never writes through one.
+# Usage: tp_write_file <path> <content> <mode> [group]
+tp_write_file() (
+  set -e
+  _wf_name="$(basename -- "$1")"
+  cd -P -- "$(dirname -- "$1")"
+  _wf_real="$(pwd -P)"
+  _wf_priv="$(mktemp -d "./.tp-update-guard.XXXXXX")"
+  _wf_priv="${_wf_priv#./}"
+  cd -P -- "$_wf_priv"
+  # Same path, owned by us, 0700: a directory the daemon swapped in under the
+  # same name would be owned by the daemon.
+  if [ "$(pwd -P)" != "$_wf_real/$_wf_priv" ] || {
+      # shellcheck disable=SC3067 # dash (Debian's /bin/sh) implements -O
+      [ ! -O . ]
+    } ||
+    [ "$(stat -c '%a' .)" != "700" ]; then
+    printf 'tp-update-guard: %s moved while writing %s; not writing\n' \
+      "$_wf_priv" "$1" >&2
+    exit 1
+  fi
+  printf '%s\n' "$2" > ./f
+  chmod "$3" ./f
+  if [ -n "${4:-}" ]; then
+    chown "root:$4" ./f 2>/dev/null || chgrp "$4" ./f 2>/dev/null || true
+  fi
+  mv -T -f -- ./f "../$_wf_name"
+  cd ..
+  rmdir -- "$_wf_priv" 2>/dev/null || true
+)
 
 # Documented `turbopaneld --version` line:
 #   turbopaneld v<semver> <commit> (<channel>, <buildId>, <builtAt>)
@@ -60,15 +100,6 @@ tp_daemon_file_group() {
     return 0
   fi
   printf '%s' "tp"
-}
-
-tp_install_daemon_readable_file() {
-  _path="$1"
-  chmod 0640 "$_path" || return 1
-  _g="$(tp_daemon_file_group)"
-  if ! chown "root:${_g}" "$_path" 2>/dev/null; then
-    chgrp "$_g" "$_path" 2>/dev/null || true
-  fi
 }
 
 GUARD_TIMER="turbopaneld-update-guard.timer"
@@ -93,7 +124,7 @@ tp_schedule_guard_followup() {
       -- "$_stable_guard" || true
     return 0
   fi
-  printf '%s\n' "$_stable_guard" > "$RUN_DIR/update-guard-followup"
+  tp_write_file "$RUN_DIR/update-guard-followup" "$_stable_guard" 0644 || true
 }
 
 if [ ! -f "$GUARD_PATH" ]; then
@@ -160,9 +191,10 @@ fi
 _reason="daemon service failed or update guard deadline elapsed"
 _at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 mkdir -p "$STATE_DIR"
-printf '{"fromCommit":"%s","toCommit":"%s","reason":"%s","at":"%s"}\n' \
-  "$_from_commit" "$_to_commit" "$_reason" "$_at" > "$ROLLBACK_PATH"
-tp_install_daemon_readable_file "$ROLLBACK_PATH" || true
+tp_write_file "$ROLLBACK_PATH" \
+  "$(printf '{"fromCommit":"%s","toCommit":"%s","reason":"%s","at":"%s"}' \
+    "$_from_commit" "$_to_commit" "$_reason" "$_at")" \
+  0640 "$(tp_daemon_file_group)" || true
 
 _restart_ok=false
 if command -v systemctl >/dev/null 2>&1; then
@@ -187,13 +219,15 @@ case "$_attempts" in
   ''|*[!0-9]*) _attempts=0 ;;
 esac
 _next=$((_attempts + 1))
-printf '{"targetCommit":"%s","deadlineAt":"%s","previousCommit":"%s","restartAttempts":"%s"}\n' \
-  "$_target" "$_deadline" "$_to_commit" "$_next" > "$GUARD_PATH"
-chmod 0640 "$GUARD_PATH" 2>/dev/null || true
+tp_write_file "$GUARD_PATH" \
+  "$(printf '{"targetCommit":"%s","deadlineAt":"%s","previousCommit":"%s","restartAttempts":"%s"}' \
+    "$_target" "$_deadline" "$_to_commit" "$_next")" \
+  0640 "$(tp_daemon_file_group)" || true
 if [ "$_next" -ge 3 ]; then
-  printf '{"needsAttention":true,"targetCommit":"%s","attempts":"%s","at":"%s"}\n' \
-    "$_target" "$_next" "$_at" > "$STATE_DIR/update-guard-attention.json"
-  tp_install_daemon_readable_file "$STATE_DIR/update-guard-attention.json" || true
+  tp_write_file "$STATE_DIR/update-guard-attention.json" \
+    "$(printf '{"needsAttention":true,"targetCommit":"%s","attempts":"%s","at":"%s"}' \
+      "$_target" "$_next" "$_at")" \
+    0640 "$(tp_daemon_file_group)" || true
   tp_stop_guard_timer
 else
   tp_schedule_guard_followup

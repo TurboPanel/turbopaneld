@@ -16,6 +16,7 @@
  * local-bridge ↔ remote peer prefix (non-/32) forwarding.
  */
 import { encodeHex } from "@std/encoding/hex";
+import { hostSudoArgs } from "../permissions/host-sudo.ts";
 import { join } from "@std/path";
 import { logInfo, logWarn } from "../util/logger.ts";
 import { runDocker } from "../deploy/docker-cli.ts";
@@ -251,7 +252,7 @@ async function runDefault(
   if (!isPermissionDenied(direct)) return direct;
   return await spawnCommand(
     "sudo",
-    ["-n", cmd, ...args],
+    hostSudoArgs(["-n", cmd, ...args]),
     options?.stdin,
     options?.timeoutMs,
   );

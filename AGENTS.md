@@ -539,9 +539,34 @@ from production code.
 | push `trunk` | `verify.yml` | `verify.yml`; `publish` job `needs: verify` → the `trunk` CDN drop **and** the rolling GitHub `canary` pre-release (`canary` job, via `TurboPanel/dev` `gh-canary.yml`) | nothing compiles from failing code |
 | promote → rc/release | n/a | **artifact integrity only** (re-download + sha256/size against the release's manifest) | no new code enters after publish |
 
-## Managed-host privilege boundary (2026-09-19 hardening)
+## Managed-host privilege boundary (2026-09-19 hardening, sudo 2026-09-25)
 
-Six controls, each with a test that fails the build when it regresses:
+**What this boundary does not contain yet — read first.** The daemon account
+`tp` is still root-equivalent on a managed host, through three paths the
+controls below do not close:
+
+1. **Docker.** The `docker` role adds `tp` to the `docker` group, and Docker
+   socket access is root (`docker run -v /:/h`). There is no sudo grant for
+   Docker any more; the group is the residual. Closing it needs rootless
+   Docker or an authorizing proxy in front of the socket.
+2. **Hosting Caddy runs as root** (`turbopanel-hosting-caddy.service`, no
+   `User=`, it binds :80/:443) with its Caddyfile and working directory in
+   `/etc/turbopanel/hosting`, which `tp` owns. A Caddyfile can serve or log
+   to any path as root. tp-host pins that unit's exec lines, not the config.
+   Closing it needs the unit to run as `tpcaddy` with
+   `CAP_NET_BIND_SERVICE` and a config directory `tp` cannot rewrite.
+3. **Engine config tests run as root** — `httpd -t -f
+   /etc/turbopanel/apache/httpd.conf` and `php-fpm<x.y> --fpm-config
+   /etc/turbopanel/php/<x.y>/php-fpm.conf --test` (`TP_ENGINE_VALIDATE`,
+   pinned to exactly those files). `/etc/turbopanel` is `tp`-owned, so `tp`
+   can replace those files, and both engines load modules while testing.
+   Closing it needs those tests to run as the engine account, or the config
+   directories to be root-owned.
+
+The controls below remove every direct root escape through sudo and keep a
+daemon bug or an injected argument from reaching arbitrary host paths,
+units, accounts or root Ansible. Each has a test that fails the build when
+it regresses:
 
 - **Deno grants** — `src/permissions/daemon-permissions.ts` is the one definition of what
   the production daemon may read/write/run; `renderDaemonPermissionFlags()`
@@ -606,16 +631,71 @@ Six controls, each with a test that fails the build when it regresses:
   `DENO_DIR` under it. `repointUvCurrent` & co. are no-ops when the root-owned
   `current` symlink is already right; `ensurePython` skips uv when the pinned
   interpreter is present.
-- **sudo** — `roles/turbopanel-user/templates/sudoers.j2` replaces
-  `NOPASSWD:ALL`: absolute-path `Cmnd_Alias` groups for the host utilities the
-  deploy code invokes through `sudo -n`, `(tp) NOPASSWD: ALL` for the
-  self re-exec pattern, engine config validation as the engine service users,
-  and **`tp-orchestrate`** (`orchestration/scripts/tp-orchestrate`, POSIX sh,
-  `root:tp 0750`). Ansible `become` from `tp` would need `sudo /bin/sh`, so on
+- **sudo** — `roles/turbopanel-user/templates/sudoers.j2` grants root exactly
+  four commands: **`tp-host`** (`orchestration/scripts/tp-host`, installed
+  `root:root 0755` at `<install>/lib/tp-host`), `tp-orchestrate`, and the two
+  pinned engine config tests. There is no raw host utility, no Docker, no
+  shell. `(tp) NOPASSWD: ALL` stays for the self re-exec pattern and engine
+  config tests run as the engine service users.
+  `src/orchestration/sudoers-contract.test.ts` pins that set and runs a corpus
+  of classic escapes (`find -exec`, `tee`/`cp`/`install`/`mv`/`chown`/`chmod`
+  to system paths, `systemctl link`, `useradd -o -u 0`, `usermod -aG sudo`,
+  `sysctl kernel.core_pattern`, `ip netns exec`, `iptables --modprobe`,
+  `docker run -v /:/h`, a foreign engine config) through a sudoers matcher.
+- **tp-host** — every root host command the daemon issues goes
+  `sudo -n -- <install>/lib/tp-host <verb> …`: every `sudo -n <cmd>` call site
+  passes its argv through `hostSudoArgs` (`src/permissions/host-sudo.ts`),
+  which rewrites a tp-host verb on a managed install and leaves development,
+  root, `-u` re-execs, tp-orchestrate and engine tests alone;
+  `host-sudo.test.ts` fails on any unwrapped `sudo -n <verb>` literal in `src/`.
+  tp-host accepts only the argument shapes the daemon produces and:
+  - confines paths to the trees TurboPanel owns (`/etc/turbopanel`,
+    `/var/lib|log/turbopanel`, `/run/turbopanel`, the principal home root —
+    recorded root-side in `lib/tp-host.conf`, never read from `daemon.env` —
+    `/etc/ssh/turbopanel`) plus named files (`turbopanel-*` units,
+    `60-turbopanel.conf`, `/etc/wireguard/tp0.conf`,
+    `/etc/sysctl.d/99-turbopanel-*.conf`, operator storage under
+    `/mnt|/media|/data|/srv` for principal-owned volumes);
+  - pins every path (`cd -P` + `pwd -P` equality, so no component is a
+    symlink) and works relative to the pinned directory; writes go through a
+    root-only 0700 scratch directory and `mv -T`; root reads are checked on
+    the opened descriptor (`/proc/self/fd/3`); files the daemon staged are
+    read *as the daemon account* (`setpriv`);
+  - checks systemd unit content before installing it: known directives only,
+    tenant services `User=<principal>` / `Group=<principal>-grp` /
+    `Slice=turbopanel-<principal>.slice` / `NoNewPrivileges=yes` / empty
+    capability sets, no `+`/`!`/`:` exec prefixes, a timer may only start its
+    own service; the root hosting-Caddy unit may only exec the vendored Caddy
+    against the hosting Caddyfile;
+  - changes only principal accounts (uid ≥ 15001, `<name>-grp`, home under
+    the principal root, a listed shell), adds principals only to groups
+    `runtime-registry.json` defines and engine accounts only to principal
+    groups, and takes `chpasswd` input only as one sha512-crypt line;
+  - allows `systemctl` verbs on `turbopanel*` / `wg-quick@tp0` / `ssh(d)`
+    units, fixed `journalctl`/`ss`/`sshd -t|-T`/`sysctl`/`ip`/`wg` shapes, and
+    xtables without `--modprobe` or rule files.
+  `src/permissions/tp-host.test.ts` runs it unprivileged in its test mode
+  (`TP_HOST_TEST_PREFIX`, ignored as root) against the daemon's own rendered
+  units and a hostile corpus. Known gap: it is TOCTOU-safe for paths it pins,
+  but `chown -R`/`chmod -R`/`find -exec chmod g+s` over a tenant-owned tree
+  rely on coreutils not following symlinks (and run as the tree's owner where
+  possible), not on per-entry pinning.
+- **tp-orchestrate** (`orchestration/scripts/tp-orchestrate`, POSIX sh,
+  `root:tp 0750`) — Ansible `become` from `tp` would need `sudo /bin/sh`, so on
   managed hosts `runPlaybookStreaming` routes through
   `sudo -n tp-orchestrate playbook …` (`src/orchestration/privileged.ts`):
-  the helper accepts only `-i localhost, -c local`, `-e key=value` and one
-  shipped playbook **basename** resolved under the root-owned tree, rebuilds
+  the helper accepts only `-i localhost, -c local`, allowlisted extra-vars and
+  one shipped playbook **basename** resolved under the root-owned tree.
+  `tp_extra_var_value_ok` lists every key the daemon passes with its value
+  shape (enums, RFC 1123 hosts, a plain email, an https directory, backups
+  only under storage roots) and pins `turbopanel_install_root` /
+  `turbopanel_instance_dir` to its own tree; it refuses `ansible_*`,
+  `turbopanel_dev_*`, any unknown key, whitespace, controls and Jinja
+  delimiters. A JSON `-e` object is accepted only with
+  `TP_JSON_EXTRA_VAR_KEYS`, parsed by the Ansible venv's python3.
+  `src/orchestration/tp-orchestrate-argv.test.ts` runs the daemon's real argv
+  builders and a hostile corpus through the validator lifted verbatim from
+  the script (`src/testing/tp-orchestrate-validator.ts`). It rebuilds
   PATH/ANSIBLE_* itself, and keeps Ansible's temp/home in a root-only
   `/tmp/turbopanel-orchestrate`. `galaxy-docker-role` fetches the pinned
   geerlingguy.docker role into the root-owned roles dir; `update` fetches
@@ -629,7 +709,10 @@ Six controls, each with a test that fails the build when it regresses:
   after a daemon self-update — not through `sudo` and not from the `tp` user.
   `daemon-launch` also copies it to `/opt/turbopanel/lib/tp-update-guard`, and
   the unit's `ExecStart` is that path, so restoring an older orchestration
-  tree cannot remove the only executable the timer can run.
+  tree cannot remove the only executable the timer can run. Its records live
+  in `tp`-owned `RUN_DIR`/`STATE_DIR`, so every root write goes through
+  `tp_write_file` (a verified root-only 0700 subdirectory, then `mv -T`) and
+  never through a symlink `tp` planted (`update-guard.test.ts`).
   The control plane is a separate verb, `sudo -n tp-orchestrate update-instance
   --channel canary|rc|release [--manifest-url …] --no-start`
   (`rootHelperInstanceUpdateInvocation`). It takes no license, host, overlay,

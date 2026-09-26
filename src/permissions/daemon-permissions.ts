@@ -169,17 +169,18 @@ export const DAEMON_WRITE_PATHS: readonly string[] = [
 
 /**
  * Programs the daemon spawns. Bare names resolve on the unit's PATH; vendored
- * tools are exact paths. `sudo`, `sh` and `bash` are here because host
- * mutation goes through `sudo -n <cmd>` and native builds through
- * `sudo -n -u <self> -- env … sh -c` — the run boundary is therefore only as
- * tight as `/etc/sudoers.d/tp` (turbopanel-user role), never tighter.
+ * tools are exact paths. `sudo` is here because root host changes go through
+ * `sudo -n tp-host …` / `tp-orchestrate` and native builds through
+ * `sudo -n -u <self> -- env … sh -c`; `sh` because builds and deploy hooks
+ * run shell commands as the daemon account. Neither widens what the account
+ * can do as root — that is `/etc/sudoers.d/tp` (turbopanel-user role) and
+ * tp-host. Nothing spawns `bash` directly, so it is not granted.
  */
 export const DAEMON_RUN_PROGRAMS: readonly string[] = [
-  // privilege boundary + shells
+  // privilege boundary + shell
   "sudo",
   "sh",
   "/bin/sh",
-  "bash",
   // host inspection (all read-only; /proc fallbacks)
   "cat",
   "ls",

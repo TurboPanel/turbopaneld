@@ -1,5 +1,6 @@
 import { assertEquals, assertStringIncludes } from "@std/assert";
 import { dirname, fromFileUrl, join } from "@std/path";
+import { tpOrchestrateValidatorSource } from "../testing/tp-orchestrate-validator.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -71,7 +72,7 @@ async function runPlaybookVerb(
       `ROOT_SCRATCH="${root}/scratch"`,
       'tp_require_root_scratch() { mkdir -p "$ROOT_SCRATCH"; }',
       extractShellFunction(source, "tp_export_runtime_env"),
-      extractShellFunction(source, "tp_valid_extra_var"),
+      await tpOrchestrateValidatorSource(),
       extractShellFunction(source, "tp_verb_playbook"),
       'tp_verb_playbook "$@"',
     ].join("\n");
@@ -99,7 +100,7 @@ test("tp-orchestrate runs a shipped playbook by basename with fixed inventory, e
     "-e",
     "turbopanel_after_instance_service=true",
     "-e",
-    "postgres_expose_port=5432",
+    "postgres_expose_port=true",
     // The daemon passes its absolute constant; only the basename survives.
     "/opt/turbopanel/share/orchestration/playbooks/daemon-converge.yml",
   ]);
@@ -108,7 +109,7 @@ test("tp-orchestrate runs a shipped playbook by basename with fixed inventory, e
     "";
   assertStringIncludes(argv, "[-i] [localhost,] [-c] [local]");
   assertStringIncludes(argv, "[-e] [turbopanel_after_instance_service=true]");
-  assertStringIncludes(argv, "[-e] [postgres_expose_port=5432]");
+  assertStringIncludes(argv, "[-e] [postgres_expose_port=true]");
   assertStringIncludes(
     argv,
     "share/orchestration/playbooks/daemon-converge.yml]",
@@ -144,12 +145,21 @@ test("tp-orchestrate refuses playbooks outside the shipped tree, symlinks and tr
 test("tp-orchestrate refuses anything but key=value extra-vars and the fixed local inventory", async () => {
   const base = ["-i", "localhost,", "-c", "local"];
   const cases: Array<[string[], string]> = [
-    [[...base, "-e", '{"a":1}', "daemon-converge.yml"], "key=value only"],
+    [[...base, "-e", '{"a":1}', "daemon-converge.yml"], "refusing extra-var"],
     [
       [...base, "-e", "@/tmp/vars.yml", "daemon-converge.yml"],
-      "key=value only",
+      "refusing extra-var",
     ],
-    [[...base, "-e", "Turbo=1", "daemon-converge.yml"], "key=value only"],
+    [[...base, "-e", "Turbo=1", "daemon-converge.yml"], "refusing extra-var"],
+    [
+      [
+        ...base,
+        "-e",
+        "ansible_python_interpreter=/tmp/x",
+        "daemon-converge.yml",
+      ],
+      "refusing extra-var ansible_python_interpreter",
+    ],
     [[...base, "--become", "daemon-converge.yml"], "refusing option"],
     [[...base, "-vvv", "daemon-converge.yml"], "refusing option"],
     [["-i", "evil,", "-c", "local", "daemon-converge.yml"], "localhost,"],

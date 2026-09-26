@@ -1,4 +1,5 @@
 import { join } from "@std/path";
+import { hostSudoArgs } from "../permissions/host-sudo.ts";
 import { errorText, logInfo, logWarn } from "../util/logger.ts";
 import {
   type EnvironmentDeployContainer,
@@ -606,7 +607,7 @@ import ${join(configDir, "hosting", "sites", "*.caddy")}
 `;
 }
 
-function caddyUnit(layout: LayoutPaths): string {
+export function caddyUnit(layout: LayoutPaths): string {
   const caddy = join(layout.runtimesDir, "caddy", "current", "caddy");
   const configDir = join(layout.configDir, "hosting");
   // systemd gives the unit no $HOME, so Caddy would fall back to `./caddy`
@@ -647,20 +648,26 @@ WantedBy=multi-user.target
 async function installAndStartCaddy(
   unitSource: string,
 ): Promise<boolean> {
-  const install = await run("sudo", [
-    "-n",
-    "install",
-    "-m",
-    "0640",
-    unitSource,
-    join("/etc/systemd/system", CADDY_SERVICE),
-  ]);
+  const install = await run(
+    "sudo",
+    hostSudoArgs([
+      "-n",
+      "install",
+      "-m",
+      "0640",
+      unitSource,
+      join("/etc/systemd/system", CADDY_SERVICE),
+    ]),
+  );
   if (!install.success) {
     logWarn("deploy", `hosting Caddy unit not installed: ${install.stderr}`);
     return false;
   }
 
-  const daemonReload = await run("sudo", ["-n", "systemctl", "daemon-reload"]);
+  const daemonReload = await run(
+    "sudo",
+    hostSudoArgs(["-n", "systemctl", "daemon-reload"]),
+  );
   if (!daemonReload.success) {
     logWarn(
       "deploy",
@@ -668,13 +675,16 @@ async function installAndStartCaddy(
     );
     return false;
   }
-  const enable = await run("sudo", [
-    "-n",
-    "systemctl",
-    "enable",
-    "--now",
-    CADDY_SERVICE,
-  ]);
+  const enable = await run(
+    "sudo",
+    hostSudoArgs([
+      "-n",
+      "systemctl",
+      "enable",
+      "--now",
+      CADDY_SERVICE,
+    ]),
+  );
   if (!enable.success) {
     logWarn("deploy", `hosting Caddy start failed: ${enable.stderr}`);
     return false;
@@ -1451,12 +1461,15 @@ export async function rewriteHostingCaddySites(
     { mode: 0o640 },
   );
 
-  const reload = await run("sudo", [
-    "-n",
-    "systemctl",
-    "reload",
-    CADDY_SERVICE,
-  ]);
+  const reload = await run(
+    "sudo",
+    hostSudoArgs([
+      "-n",
+      "systemctl",
+      "reload",
+      CADDY_SERVICE,
+    ]),
+  );
   if (!reload.success) {
     logWarn("deploy", `hosting Caddy reload skipped: ${reload.stderr}`);
   }
@@ -1495,12 +1508,15 @@ export async function removeHostingCaddySite(
     }
   }
 
-  const reload = await run("sudo", [
-    "-n",
-    "systemctl",
-    "reload",
-    CADDY_SERVICE,
-  ]);
+  const reload = await run(
+    "sudo",
+    hostSudoArgs([
+      "-n",
+      "systemctl",
+      "reload",
+      CADDY_SERVICE,
+    ]),
+  );
   if (!reload.success) {
     logWarn("deploy", `hosting Caddy reload skipped: ${reload.stderr}`);
   }

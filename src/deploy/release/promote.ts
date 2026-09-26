@@ -24,6 +24,7 @@
  */
 
 import { basename, join } from "@std/path";
+import { hostSudoArgs } from "../../permissions/host-sudo.ts";
 import type { RunFn } from "../ensure-principal.ts";
 import {
   createSymlink,
@@ -73,15 +74,24 @@ async function copyTreePrivileged(
   to: string,
   runFn: RunFn,
 ): Promise<void> {
-  const mkdir = await runFn("sudo", ["-n", "mkdir", "-p", "--", to]);
+  const mkdir = await runFn(
+    "sudo",
+    hostSudoArgs(["-n", "mkdir", "-p", "--", to]),
+  );
   if (!mkdir.success) {
     throw new Error(mkdir.stderr || `Failed to mkdir ${to}`);
   }
-  const cp = await runFn("sudo", ["-n", "cp", "-a", "--", `${from}/.`, to]);
+  const cp = await runFn(
+    "sudo",
+    hostSudoArgs(["-n", "cp", "-a", "--", `${from}/.`, to]),
+  );
   if (!cp.success) {
     throw new Error(cp.stderr || `Failed to copy ${from} to ${to}`);
   }
-  await runFn("sudo", ["-n", "rm", "-rf", "--", join(to, ".git")]);
+  await runFn(
+    "sudo",
+    hostSudoArgs(["-n", "rm", "-rf", "--", join(to, ".git")]),
+  );
 }
 
 async function writeReleaseManifestPrivileged(
@@ -94,24 +104,30 @@ async function writeReleaseManifestPrivileged(
     const body = `${JSON.stringify(manifest, null, 2)}\n`;
     await Deno.writeTextFile(staged, body);
     const destDir = join(releaseDir, RELEASE_METADATA_DIRNAME);
-    const mkdir = await runFn("sudo", ["-n", "mkdir", "-p", "--", destDir]);
+    const mkdir = await runFn(
+      "sudo",
+      hostSudoArgs(["-n", "mkdir", "-p", "--", destDir]),
+    );
     if (!mkdir.success) {
       throw new Error(mkdir.stderr || `Failed to mkdir ${destDir}`);
     }
     const dest = join(destDir, RELEASE_MANIFEST_FILENAME);
-    const install = await runFn("sudo", [
-      "-n",
-      "install",
-      "-m",
-      "0640",
-      "-o",
-      "root",
-      "-g",
-      "root",
-      "--",
-      staged,
-      dest,
-    ]);
+    const install = await runFn(
+      "sudo",
+      hostSudoArgs([
+        "-n",
+        "install",
+        "-m",
+        "0640",
+        "-o",
+        "root",
+        "-g",
+        "root",
+        "--",
+        staged,
+        dest,
+      ]),
+    );
     if (!install.success) {
       throw new Error(install.stderr || `Failed to install ${dest}`);
     }
@@ -137,18 +153,27 @@ async function readCurrentReleaseIdPrivileged(
   currentLink: string,
   runFn: RunFn,
 ): Promise<string | null> {
-  const exists = await runFn("sudo", ["-n", "test", "-e", currentLink]);
+  const exists = await runFn(
+    "sudo",
+    hostSudoArgs(["-n", "test", "-e", currentLink]),
+  );
   if (!exists.success) {
     if (isSudoInvocationError(exists.stderr)) {
       throw new Error(exists.stderr || `Failed to stat ${currentLink}`);
     }
     return null;
   }
-  const isLink = await runFn("sudo", ["-n", "test", "-L", currentLink]);
+  const isLink = await runFn(
+    "sudo",
+    hostSudoArgs(["-n", "test", "-L", currentLink]),
+  );
   if (!isLink.success) {
     return null;
   }
-  const result = await runFn("sudo", ["-n", "readlink", "--", currentLink]);
+  const result = await runFn(
+    "sudo",
+    hostSudoArgs(["-n", "readlink", "--", currentLink]),
+  );
   if (result.success) {
     const name = basename(result.stdout.trim());
     return name.length > 0 ? name : null;
@@ -169,21 +194,27 @@ async function swapCurrentSymlinkPrivileged(
   tmpLink: string,
   runFn: RunFn,
 ): Promise<void> {
-  await runFn("sudo", ["-n", "rm", "-f", "--", tmpLink]);
-  const ln = await runFn("sudo", ["-n", "ln", "-s", "--", target, tmpLink]);
+  await runFn("sudo", hostSudoArgs(["-n", "rm", "-f", "--", tmpLink]));
+  const ln = await runFn(
+    "sudo",
+    hostSudoArgs(["-n", "ln", "-s", "--", target, tmpLink]),
+  );
   if (!ln.success) {
     throw new Error(ln.stderr || `Failed to create ${tmpLink}`);
   }
-  const mv = await runFn("sudo", [
-    "-n",
-    "mv",
-    "-Tf",
-    "--",
-    tmpLink,
-    currentLink,
-  ]);
+  const mv = await runFn(
+    "sudo",
+    hostSudoArgs([
+      "-n",
+      "mv",
+      "-Tf",
+      "--",
+      tmpLink,
+      currentLink,
+    ]),
+  );
   if (!mv.success) {
-    await runFn("sudo", ["-n", "rm", "-f", "--", tmpLink]);
+    await runFn("sudo", hostSudoArgs(["-n", "rm", "-f", "--", tmpLink]));
     throw new Error(mv.stderr || `Failed to swap ${currentLink}`);
   }
 }
@@ -245,7 +276,10 @@ async function releasePathExists(
   } catch (err) {
     if (err instanceof Deno.errors.NotFound) return false;
     if (err instanceof Deno.errors.PermissionDenied && runFn) {
-      const result = await runFn("sudo", ["-n", "test", "-e", path]);
+      const result = await runFn(
+        "sudo",
+        hostSudoArgs(["-n", "test", "-e", path]),
+      );
       return result.success;
     }
     throw err;
@@ -361,15 +395,18 @@ export async function linkReleaseSharedDir(
     await createSymlink(RELEASE_SHARED_LINK_TARGET, linkPath);
   } catch (err) {
     if (!isUnprivilegedFailure(err)) throw err;
-    await runFn("sudo", ["-n", "rm", "-rf", "--", linkPath]);
-    const ln = await runFn("sudo", [
-      "-n",
-      "ln",
-      "-s",
-      "--",
-      RELEASE_SHARED_LINK_TARGET,
-      linkPath,
-    ]);
+    await runFn("sudo", hostSudoArgs(["-n", "rm", "-rf", "--", linkPath]));
+    const ln = await runFn(
+      "sudo",
+      hostSudoArgs([
+        "-n",
+        "ln",
+        "-s",
+        "--",
+        RELEASE_SHARED_LINK_TARGET,
+        linkPath,
+      ]),
+    );
     if (!ln.success) {
       throw new Error(ln.stderr || `Failed to link shared at ${linkPath}`);
     }

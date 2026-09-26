@@ -19,6 +19,7 @@
  */
 
 import { dirname } from "@std/path";
+import { hostSudoArgs } from "../../permissions/host-sudo.ts";
 import { logInfo, logWarn } from "../../util/logger.ts";
 import { accessGroup } from "../../runtime/registry.ts";
 import type { RunFn, RunResult } from "../ensure-principal.ts";
@@ -100,7 +101,7 @@ async function readPrivileged(
   runFn: RunFn,
   path: string,
 ): Promise<string | null> {
-  const result = await runFn("sudo", ["-n", "cat", "--", path]);
+  const result = await runFn("sudo", hostSudoArgs(["-n", "cat", "--", path]));
   return result.success ? result.stdout : null;
 }
 
@@ -120,20 +121,26 @@ async function installRootFile(
   const staged = await Deno.makeTempFile({ prefix: "tp-ssh-" });
   try {
     await Deno.writeTextFile(staged, contents, { mode: 0o600 });
-    const same = await runFn("sudo", ["-n", "cmp", "-s", "--", staged, path]);
+    const same = await runFn(
+      "sudo",
+      hostSudoArgs(["-n", "cmp", "-s", "--", staged, path]),
+    );
     if (same.success) return false;
-    const install = await runFn("sudo", [
-      "-n",
-      "install",
-      "-m",
-      mode,
-      "-o",
-      "root",
-      "-g",
-      "root",
-      staged,
-      path,
-    ]);
+    const install = await runFn(
+      "sudo",
+      hostSudoArgs([
+        "-n",
+        "install",
+        "-m",
+        mode,
+        "-o",
+        "root",
+        "-g",
+        "root",
+        staged,
+        path,
+      ]),
+    );
     if (!install.success) {
       throw new Error(install.stderr || `Failed to install ${path}`);
     }
@@ -162,19 +169,25 @@ async function removeUnmanagedKeyFiles(
   dir: string,
   managed: ReadonlySet<string>,
 ): Promise<string[]> {
-  const listing = await runFn("sudo", ["-n", "ls", "-1", "--", dir]);
+  const listing = await runFn(
+    "sudo",
+    hostSudoArgs(["-n", "ls", "-1", "--", dir]),
+  );
   if (!listing.success) return [];
   const removed: string[] = [];
   for (const name of listing.stdout.split("\n").map((line) => line.trim())) {
     if (name.length === 0 || managed.has(name)) continue;
     if (!isKeyFileUsername(name)) continue;
-    const result = await runFn("sudo", [
-      "-n",
-      "rm",
-      "-f",
-      "--",
-      `${dir}/${name}`,
-    ]);
+    const result = await runFn(
+      "sudo",
+      hostSudoArgs([
+        "-n",
+        "rm",
+        "-f",
+        "--",
+        `${dir}/${name}`,
+      ]),
+    );
     // A failed removal is loud: an access grant that outlives its revocation is
     // a security problem, not an inconvenience.
     if (!result.success) {
@@ -195,7 +208,7 @@ async function removeUnmanagedKeyFiles(
  * with what the administrator wrote below the `Include` line.
  */
 async function sshdConfigTest(runFn: RunFn): Promise<RunResult> {
-  return await runFn("sudo", ["-n", "sshd", "-t"]);
+  return await runFn("sudo", hostSudoArgs(["-n", "sshd", "-t"]));
 }
 
 /**
@@ -209,7 +222,10 @@ async function reloadSshd(runFn: RunFn): Promise<void> {
   const units = ["ssh.service", "sshd.service"];
   const errors: string[] = [];
   for (const unit of units) {
-    const result = await runFn("sudo", ["-n", "systemctl", "reload", unit]);
+    const result = await runFn(
+      "sudo",
+      hostSudoArgs(["-n", "systemctl", "reload", unit]),
+    );
     if (result.success) return;
     errors.push(result.stderr || `reload ${unit} failed`);
   }
@@ -229,22 +245,25 @@ async function reconcileKeyFiles(
   principals: readonly PrincipalSshSpec[],
   prune: boolean,
 ): Promise<{ changed: string[]; removed: string[] }> {
-  const mkdir = await runFn("sudo", [
-    "-n",
-    "install",
-    "-d",
-    "-m",
-    // 0750, and every parent root-owned: `sshd` with `StrictModes` on refuses
-    // an `AuthorizedKeysFile` whose path is group- or world-writable.
-    // Traversal for the authenticating account is an ACL on tpsftp/tpshell
-    // (principal-access role), not a world bit.
-    "0750",
-    "-o",
-    "root",
-    "-g",
-    "root",
-    dir,
-  ]);
+  const mkdir = await runFn(
+    "sudo",
+    hostSudoArgs([
+      "-n",
+      "install",
+      "-d",
+      "-m",
+      // 0750, and every parent root-owned: `sshd` with `StrictModes` on refuses
+      // an `AuthorizedKeysFile` whose path is group- or world-writable.
+      // Traversal for the authenticating account is an ACL on tpsftp/tpshell
+      // (principal-access role), not a world bit.
+      "0750",
+      "-o",
+      "root",
+      "-g",
+      "root",
+      dir,
+    ]),
+  );
   if (!mkdir.success) {
     throw new Error(mkdir.stderr || `Failed to create ${dir}`);
   }
@@ -291,14 +310,17 @@ async function reconcileDropIn(
   const backup = `${dropInPath}.tpprev`;
   const existing = await readPrivileged(runFn, dropInPath);
   if (existing !== null) {
-    const snapshot = await runFn("sudo", [
-      "-n",
-      "cp",
-      "-p",
-      "--",
-      dropInPath,
-      backup,
-    ]);
+    const snapshot = await runFn(
+      "sudo",
+      hostSudoArgs([
+        "-n",
+        "cp",
+        "-p",
+        "--",
+        dropInPath,
+        backup,
+      ]),
+    );
     if (!snapshot.success) {
       throw new Error(
         snapshot.stderr || `Failed to snapshot ${dropInPath} before rewriting`,
@@ -306,24 +328,27 @@ async function reconcileDropIn(
     }
   }
 
-  const mkdir = await runFn("sudo", [
-    "-n",
-    "install",
-    "-d",
-    "-m",
-    "0755",
-    "-o",
-    "root",
-    "-g",
-    "root",
-    dirname(dropInPath),
-  ]);
+  const mkdir = await runFn(
+    "sudo",
+    hostSudoArgs([
+      "-n",
+      "install",
+      "-d",
+      "-m",
+      "0755",
+      "-o",
+      "root",
+      "-g",
+      "root",
+      dirname(dropInPath),
+    ]),
+  );
   if (!mkdir.success) {
     throw new Error(mkdir.stderr || `Failed to create ${dirname(dropInPath)}`);
   }
 
   if (!await installRootFile(runFn, dropInPath, contents, "0644")) {
-    await runFn("sudo", ["-n", "rm", "-f", "--", backup]);
+    await runFn("sudo", hostSudoArgs(["-n", "rm", "-f", "--", backup]));
     return false;
   }
 
@@ -333,9 +358,12 @@ async function reconcileDropIn(
     // drop-in in place would break the next unrelated `systemctl reload ssh`,
     // by anyone, for any reason.
     if (existing === null) {
-      await runFn("sudo", ["-n", "rm", "-f", "--", dropInPath]);
+      await runFn("sudo", hostSudoArgs(["-n", "rm", "-f", "--", dropInPath]));
     } else {
-      await runFn("sudo", ["-n", "mv", "-f", "--", backup, dropInPath]);
+      await runFn(
+        "sudo",
+        hostSudoArgs(["-n", "mv", "-f", "--", backup, dropInPath]),
+      );
     }
     throw new Error(
       `sshd rejected the TurboPanel configuration, and it has been rolled back: ${
@@ -345,7 +373,7 @@ async function reconcileDropIn(
   }
 
   await reloadSshd(runFn);
-  await runFn("sudo", ["-n", "rm", "-f", "--", backup]);
+  await runFn("sudo", hostSudoArgs(["-n", "rm", "-f", "--", backup]));
   return true;
 }
 

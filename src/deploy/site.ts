@@ -43,6 +43,7 @@
  */
 
 import { join } from "@std/path";
+import { hostSudoArgs } from "../permissions/host-sudo.ts";
 import { logInfo, logWarn } from "../util/logger.ts";
 import { runLocalPlaybook } from "../orchestration/ansible.ts";
 import {
@@ -1309,18 +1310,21 @@ async function writeReleaseHostingWebMetadata(
     principalHomePath(layout, release.username),
     release.serviceId,
   );
-  const mkdir = await run("sudo", [
-    "-n",
-    "install",
-    "-d",
-    "-m",
-    "0750",
-    "-o",
-    "root",
-    "-g",
-    group,
-    metaDir,
-  ]);
+  const mkdir = await run(
+    "sudo",
+    hostSudoArgs([
+      "-n",
+      "install",
+      "-d",
+      "-m",
+      "0750",
+      "-o",
+      "root",
+      "-g",
+      group,
+      metaDir,
+    ]),
+  );
   if (!mkdir.success) {
     throw new Error(
       mkdir.stderr || `Failed to create hosting metadata dir ${metaDir}`,
@@ -1343,18 +1347,21 @@ async function writeReleaseHostingWebMetadata(
       await removeStagedFile(staged);
       continue;
     }
-    const install = await run("sudo", [
-      "-n",
-      "install",
-      "-m",
-      "0640",
-      "-o",
-      "root",
-      "-g",
-      group,
-      staged,
-      target,
-    ]);
+    const install = await run(
+      "sudo",
+      hostSudoArgs([
+        "-n",
+        "install",
+        "-m",
+        "0640",
+        "-o",
+        "root",
+        "-g",
+        group,
+        staged,
+        target,
+      ]),
+    );
     await removeStagedFile(staged);
     if (!install.success) {
       throw new Error(
@@ -1502,18 +1509,21 @@ async function reloadPhpFpm(
 }
 
 async function ensureOpenLiteSpeedDir(path: string): Promise<void> {
-  const install = await run("sudo", [
-    "-n",
-    "install",
-    "-d",
-    "-m",
-    "0750",
-    "-o",
-    "root",
-    "-g",
-    "tpols",
-    path,
-  ]);
+  const install = await run(
+    "sudo",
+    hostSudoArgs([
+      "-n",
+      "install",
+      "-d",
+      "-m",
+      "0750",
+      "-o",
+      "root",
+      "-g",
+      "tpols",
+      path,
+    ]),
+  );
   if (!install.success) {
     throw new Error(install.stderr || `Failed to create directory ${path}`);
   }
@@ -1617,7 +1627,7 @@ async function tryRemoveSiteConfigFile(
   path: string,
   label: string,
 ): Promise<boolean> {
-  const rm = await run("sudo", ["-n", "rm", "-f", path]);
+  const rm = await run("sudo", hostSudoArgs(["-n", "rm", "-f", path]));
   if (rm.success) return true;
   logWarn("deploy", `failed to remove ${label} site ${path}: ${rm.stderr}`);
   return false;
@@ -1699,40 +1709,49 @@ async function chownWebTree(
   user: string,
   group: string,
 ): Promise<void> {
-  const chown = await run("sudo", [
-    "-n",
-    "chown",
-    "-R",
-    `${user}:${group}`,
-    base,
-  ]);
+  const chown = await run(
+    "sudo",
+    hostSudoArgs([
+      "-n",
+      "chown",
+      "-R",
+      `${user}:${group}`,
+      base,
+    ]),
+  );
   if (!chown.success) {
     logWarn("deploy", `chown ${user} skipped for ${base}: ${chown.stderr}`);
     return;
   }
   // Owner write + engine group read; setgid dirs so new files keep the engine group.
-  const chmod = await run("sudo", [
-    "-n",
-    "chmod",
-    "-R",
-    "u=rwX,g=rX,o=",
-    base,
-  ]);
+  const chmod = await run(
+    "sudo",
+    hostSudoArgs([
+      "-n",
+      "chmod",
+      "-R",
+      "u=rwX,g=rX,o=",
+      base,
+    ]),
+  );
   if (!chmod.success) {
     logWarn("deploy", `chmod skipped for ${base}: ${chmod.stderr}`);
   }
-  const setgid = await run("sudo", [
-    "-n",
-    "find",
-    base,
-    "-type",
-    "d",
-    "-exec",
-    "chmod",
-    "g+s",
-    "{}",
-    "+",
-  ]);
+  const setgid = await run(
+    "sudo",
+    hostSudoArgs([
+      "-n",
+      "find",
+      base,
+      "-type",
+      "d",
+      "-exec",
+      "chmod",
+      "g+s",
+      "{}",
+      "+",
+    ]),
+  );
   if (!setgid.success) {
     logWarn("deploy", `setgid skipped for ${base}: ${setgid.stderr}`);
   }
@@ -1821,7 +1840,7 @@ type SiteEngineSet = Set<SiteApplySpec["engine"]>;
  */
 type PhpFpmEngine = "caddy" | "nginx" | "apache";
 
-type SiteEngineNeeds = {
+export type SiteEngineNeeds = {
   caddy: boolean;
   nginx: boolean;
   apache: boolean;
@@ -1838,7 +1857,7 @@ type SiteEngineNeeds = {
   openlitespeedLsphp: boolean;
 };
 
-function resolveSiteEngineNeeds(
+export function resolveSiteEngineNeeds(
   sites: readonly SiteApplySpec[],
 ): SiteEngineNeeds {
   const phpFpmEngines = new Set<PhpFpmEngine>();
@@ -1865,6 +1884,36 @@ function resolveSiteEngineNeeds(
 }
 
 /**
+ * The `-e` JSON object each site-engine apply playbook takes. One JSON object,
+ * not key=value, so the version list stays a list and the extension map a map
+ * (tp-orchestrate accepts these keys in `TP_JSON_EXTRA_VAR_KEYS`).
+ */
+export function siteEngineApplyExtraArgs(
+  engine: "caddy" | "nginx" | "apache" | "openlitespeed",
+  needs: SiteEngineNeeds,
+  phpSeries: readonly string[],
+  phpExtensions: Record<string, string[]>,
+): string[] {
+  if (engine === "openlitespeed") {
+    return [
+      "-e",
+      JSON.stringify({
+        turbopanel_lsphp_install: needs.openlitespeedLsphp,
+        openlitespeed_lsphp_versions: phpSeries,
+      }),
+    ];
+  }
+  return [
+    "-e",
+    JSON.stringify({
+      turbopanel_php_fpm_install: needs.phpFpmEngines.has(engine),
+      php_fpm_versions: phpSeries,
+      php_fpm_extensions: phpExtensions,
+    }),
+  ];
+}
+
+/**
  * `phpSeries` is the distinct set this deploy needs. The role only ever
  * *installs* what it is handed — it must not remove a series it was not asked
  * about, because the host serves many environments and this payload describes
@@ -1875,59 +1924,38 @@ async function installSiteEngines(
   phpSeries: readonly string[],
   phpExtensions: Record<string, string[]>,
 ): Promise<void> {
-  if (needs.caddy) {
-    await runSitePlaybook(
+  const engines = [
+    [
+      needs.caddy,
+      "caddy",
       SITE_CADDY_APPLY_PLAYBOOK,
       "site-caddy-apply (vendor caddy + php-fpm + identity)",
-      [
-        "-e",
-        JSON.stringify({
-          turbopanel_php_fpm_install: needs.phpFpmEngines.has("caddy"),
-          php_fpm_versions: phpSeries,
-          php_fpm_extensions: phpExtensions,
-        }),
-      ],
-    );
-  }
-  if (needs.nginx) {
-    await runSitePlaybook(
+    ],
+    [
+      needs.nginx,
+      "nginx",
       SITE_NGINX_APPLY_PLAYBOOK,
       "site-apply (vendor nginx + php-fpm + identity)",
-      [
-        "-e",
-        JSON.stringify({
-          turbopanel_php_fpm_install: needs.phpFpmEngines.has("nginx"),
-          php_fpm_versions: phpSeries,
-          php_fpm_extensions: phpExtensions,
-        }),
-      ],
-    );
-  }
-  if (needs.apache) {
-    await runSitePlaybook(
+    ],
+    [
+      needs.apache,
+      "apache",
       SITE_APACHE_APPLY_PLAYBOOK,
       "site-apache-apply (vendor httpd + php-fpm + identity)",
-      [
-        "-e",
-        JSON.stringify({
-          turbopanel_php_fpm_install: needs.phpFpmEngines.has("apache"),
-          php_fpm_versions: phpSeries,
-          php_fpm_extensions: phpExtensions,
-        }),
-      ],
-    );
-  }
-  if (needs.openlitespeed) {
-    await runSitePlaybook(
+    ],
+    [
+      needs.openlitespeed,
+      "openlitespeed",
       SITE_OPENLITESPEED_APPLY_PLAYBOOK,
       "site-openlitespeed-apply (vendor + lsphp + identity)",
-      [
-        "-e",
-        JSON.stringify({
-          turbopanel_lsphp_install: needs.openlitespeedLsphp,
-          openlitespeed_lsphp_versions: phpSeries,
-        }),
-      ],
+    ],
+  ] as const;
+  for (const [needed, engine, playbook, label] of engines) {
+    if (!needed) continue;
+    await runSitePlaybook(
+      playbook,
+      label,
+      siteEngineApplyExtraArgs(engine, needs, phpSeries, phpExtensions),
     );
   }
 }
@@ -2444,7 +2472,10 @@ async function seedManagedIndexHtml(
   documentRoot: string,
   owner: string,
 ): Promise<void> {
-  const listing = await run("sudo", ["-n", "ls", "-A", "--", documentRoot]);
+  const listing = await run(
+    "sudo",
+    hostSudoArgs(["-n", "ls", "-A", "--", documentRoot]),
+  );
   if (!listing.success || listing.stdout.trim().length > 0) return;
 
   const staged = await Deno.makeTempFile({ prefix: "tp-site-index-" });
@@ -2455,18 +2486,21 @@ async function seedManagedIndexHtml(
       { mode: 0o600 },
     );
     const [user, group] = owner.split(":");
-    const install = await run("sudo", [
-      "-n",
-      "install",
-      "-m",
-      "0640",
-      "-o",
-      user as string,
-      "-g",
-      group as string,
-      staged,
-      join(documentRoot, "index.html"),
-    ]);
+    const install = await run(
+      "sudo",
+      hostSudoArgs([
+        "-n",
+        "install",
+        "-m",
+        "0640",
+        "-o",
+        user as string,
+        "-g",
+        group as string,
+        staged,
+        join(documentRoot, "index.html"),
+      ]),
+    );
     if (!install.success) {
       logWarn(
         "deploy",
@@ -2789,7 +2823,10 @@ async function disableIdlePhpSeries(
     return;
   }
   const unit = phpFpmDriver(series).unit;
-  const stop = await run("sudo", ["-n", "systemctl", "disable", "--now", unit]);
+  const stop = await run(
+    "sudo",
+    hostSudoArgs(["-n", "systemctl", "disable", "--now", unit]),
+  );
   if (!stop.success) {
     logWarn("deploy", `could not disable idle ${unit}: ${stop.stderr}`);
   }
@@ -2797,7 +2834,7 @@ async function disableIdlePhpSeries(
 
 /** Remove an OpenLiteSpeed vhost dir; best-effort (missing dir is not an error). */
 async function tryRemoveOpenLiteSpeedVhostDir(vhostDir: string): Promise<void> {
-  const rm = await run("sudo", ["-n", "rm", "-rf", vhostDir]);
+  const rm = await run("sudo", hostSudoArgs(["-n", "rm", "-rf", vhostDir]));
   if (!rm.success) {
     logWarn(
       "deploy",
