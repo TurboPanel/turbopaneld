@@ -986,9 +986,9 @@ install a daemon or a self-hosted control plane again.
 
 ## Installer script hosting (`workers/turbopanel-sh/`)
 
-Moved to `workers/turbopanel-sh/AGENTS.md` — the assets-only
-**turbopanel.sh** Workers Static Assets host, deploy tooling, channel
-manifests, and build/commit stamping.
+Moved to `workers/turbopanel-sh/AGENTS.md` — **turbopanel.sh** is an
+assets-only Worker that only 301-redirects to `scripts/run.sh` on the `live`
+branch of this repo; plus the dev overlay catalog notes.
 
 ## Host facts & command handlers
 
@@ -1008,7 +1008,7 @@ Large subsystems live in focused `AGENTS.md` files next to their code — Cursor
 | **Command execution logs** | `src/logs/` | Streamed command transcripts: redaction deny-set, `<stateDir>/spool/execution-logs/` spool, batched upload to `POST /api/daemon/v1/commands/:commandId/log`, orphan sweep. Control-plane side: `../turbopanel/src/features/execution-logs/AGENTS.md`; capture details in `src/deploy/AGENTS.md` (Streamed transcript capture). This is the **only** log class uploaded and retained. |
 | **Managed engines (daemon runtime)** | `src/managed/AGENTS.md` | `managed.apply` / `.lifecycle` / `.destroy`, `managed.ingress.reconcile` (shared ProxySQL — compose project = the `managed-ingress` `serviceId` — on the organization's managed network, a bare-UUID name carried as `managedNetwork` on the command), engine registry (Postgres first); separate from tenant deploy. On-demand tails ride the same correlated cell round trip as `managed-logs-request` / `managed-logs-result`: engine `compose logs`, and running-container `docker container logs`. Neither is stored or collected; presence does not carry `containerLogsEnabled`. |
 | **Installer presentation** | `src/orchestration/AGENTS.md` | Installer presenter + sanitizer / vocabulary map for `run.sh` install & converge |
-| **Installer script hosting** | `workers/turbopanel-sh/AGENTS.md` | Assets-only **turbopanel.sh** Workers Static Assets host, deploy tooling, channel manifests, build/commit stamping |
+| **Installer script hosting** | `workers/turbopanel-sh/AGENTS.md` | **turbopanel.sh** = assets-only 301 to `scripts/run.sh` on `live`; dev overlay catalog notes |
 | **Host facts** | `src/host/AGENTS.md` | Host OS, time sync, docker, machine key, runtime inventory probes (hello + change-detected heartbeats) |
 | **Time sync (Ansible)** | `orchestration/AGENTS.md` | `time-sync` role + `time-sync-apply.yml` (NTP / timezone) |
 

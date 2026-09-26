@@ -76,7 +76,7 @@ For self-hosted control planes, add `TURBOPANEL_HOST=https://<instance-host>:844
 
 ### Trust and what the script does
 
-- Hosted at **https://turbopanel.sh** (assets-only Cloudflare Worker — no server-side script execution; see `workers/turbopanel-sh/` in this repo)
+- **https://turbopanel.sh** redirects (301) to `scripts/run.sh` on this repo's `live` branch — the script's only copy; the assets-only Cloudflare Worker behind it runs no code (see `workers/turbopanel-sh/`)
 - Downloads the release artifact for your channel, lays out `/opt/turbopanel`, installs `turbopaneld.service`, and runs initial Ansible converge
 - **Self-escalates with `sudo`** when needed — do not prefix the pipeline with `sudo`
 - Fetches the platform CA from the control plane for TLS verification on self-hosted installs
