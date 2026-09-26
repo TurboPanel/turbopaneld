@@ -175,12 +175,68 @@ test("tp-orchestrate refuses anything but key=value extra-vars and the fixed loc
   }
 });
 
-test("tp-orchestrate insists on root and a root-owned scratch directory", async () => {
+/**
+ * Run the real `tp_require_root_scratch` (and `tp_scratch_is_ours`) as this
+ * user against `rootScratch`, printing the directory it settled on.
+ */
+async function runScratchCheck(
+  rootScratch: string,
+): Promise<{ status: number; dir: string; stderr: string }> {
+  const source = await Deno.readTextFile(helperPath);
+  const script = [
+    'tp_die() { echo "DIE: $*" >&2; exit 1; }',
+    `ROOT_SCRATCH='${rootScratch}'`,
+    extractShellFunction(source, "tp_scratch_is_ours"),
+    extractShellFunction(source, "tp_require_root_scratch"),
+    'tp_require_root_scratch && printf "%s" "$ROOT_SCRATCH"',
+  ].join("\n");
+  const out = await new Deno.Command("sh", {
+    args: ["-c", script],
+    stdout: "piped",
+    stderr: "piped",
+  }).output();
+  return {
+    status: out.code,
+    dir: new TextDecoder().decode(out.stdout),
+    stderr: new TextDecoder().decode(out.stderr),
+  };
+}
+
+test("a squatted scratch name never blocks tp-orchestrate: it takes a private directory instead", async () => {
+  const base = await Deno.makeTempDir({ prefix: "tp-orch-scratch-" });
+  try {
+    // Someone else's name: a symlink planted where root expects its scratch.
+    const target = join(base, "attacker");
+    await Deno.mkdir(target);
+    const squatted = join(base, "turbopanel-orchestrate");
+    await Deno.symlink(target, squatted);
+    const result = await runScratchCheck(squatted);
+    assertEquals(result.status, 0, result.stderr);
+    assertEquals(result.dir === squatted, false);
+    assertEquals(result.dir.startsWith("/tmp/turbopanel-orchestrate."), true);
+    const info = await Deno.lstat(result.dir);
+    assertEquals(info.isDirectory && !info.isSymlink, true);
+    assertEquals((info.mode ?? 0) & 0o777, 0o700);
+    // Nothing was written through the planted link.
+    assertEquals([...Deno.readDirSync(target)].length, 0);
+    await Deno.remove(result.dir, { recursive: true });
+
+    // Free name: created 0700 and reused as-is.
+    const fresh = join(base, "fresh");
+    const created = await runScratchCheck(fresh);
+    assertEquals(created.status, 0, created.stderr);
+    assertEquals(created.dir, fresh);
+    assertEquals(((await Deno.stat(fresh)).mode ?? 0) & 0o777, 0o700);
+  } finally {
+    await Deno.remove(base, { recursive: true });
+  }
+});
+
+test("tp-orchestrate insists on root and a private scratch directory", async () => {
   const source = await Deno.readTextFile(helperPath);
   assertStringIncludes(source, '[ "$(id -u)" = "0" ] || tp_die');
   const scratch = extractShellFunction(source, "tp_require_root_scratch");
-  assertStringIncludes(scratch, "is a symlink; refusing");
-  assertStringIncludes(scratch, "is not root-owned; refusing");
+  assertStringIncludes(scratch, "mktemp -d /tmp/turbopanel-orchestrate.");
   // Ansible's temp and home never point at a daemon-writable directory.
   const env = extractShellFunction(source, "tp_export_runtime_env");
   assertStringIncludes(env, 'ANSIBLE_HOME="$ROOT_SCRATCH/home"');

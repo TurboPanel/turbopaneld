@@ -175,7 +175,8 @@ test("devOrchestrationAnsibleEnv overlays dev roles ahead of daemon roles", asyn
       true,
     );
     assertEquals(env.ANSIBLE_EXECUTABLE, "/bin/bash");
-    assertEquals(env.ANSIBLE_HOME, "/tmp/turbopanel-ansible");
+    assertEquals(env.ANSIBLE_HOME === "/tmp/turbopanel-ansible", false);
+    assertEquals(env.ANSIBLE_HOME?.includes("turbopanel-ansible-"), true);
   });
 });
 

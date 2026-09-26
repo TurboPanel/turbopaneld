@@ -257,7 +257,31 @@ test(
   },
 );
 
-test("ansibleEnv pins ANSIBLE_HOME under /tmp without overriding collections_path", () => {
+/**
+ * ANSIBLE_HOME must never be a predictable shared path: Ansible derives its
+ * plugin and module search paths from it and the installer runs as root, so
+ * a name another account can pre-create is a way in.
+ */
+function assertPrivateAnsibleHome(home: string | undefined): void {
+  if (!home) throw new TypeError("ANSIBLE_HOME is unset");
+  if (home === "/tmp/turbopanel-ansible") {
+    throw new Error(
+      "ANSIBLE_HOME is the predictable shared /tmp/turbopanel-ansible",
+    );
+  }
+  const info = Deno.lstatSync(home);
+  if (!info.isDirectory || info.isSymlink) {
+    throw new Error(`ANSIBLE_HOME ${home} is not a real directory`);
+  }
+  if (((info.mode ?? 0) & 0o077) !== 0) {
+    throw new Error(`ANSIBLE_HOME ${home} is readable or writable by others`);
+  }
+  if (ansibleEnv().ANSIBLE_HOME !== home) {
+    throw new Error("ANSIBLE_HOME changed within one process");
+  }
+}
+
+test("ansibleEnv uses a private per-process ANSIBLE_HOME without overriding collections_path", () => {
   const env = ansibleEnv();
   if (env.ANSIBLE_CONFIG !== ANSIBLE_CFG) {
     throw new Error(
@@ -269,11 +293,7 @@ test("ansibleEnv pins ANSIBLE_HOME under /tmp without overriding collections_pat
       `expected ANSIBLE_EXECUTABLE=${ANSIBLE_SHELL_EXECUTABLE}, got ${env.ANSIBLE_EXECUTABLE}`,
     );
   }
-  if (env.ANSIBLE_HOME !== "/tmp/turbopanel-ansible") {
-    throw new Error(
-      `expected ANSIBLE_HOME=/tmp/turbopanel-ansible, got ${env.ANSIBLE_HOME}`,
-    );
-  }
+  assertPrivateAnsibleHome(env.ANSIBLE_HOME);
   if (env.ANSIBLE_LOCAL_TEMP !== ANSIBLE_LOCAL_TMP) {
     throw new Error(
       `expected ANSIBLE_LOCAL_TEMP=${ANSIBLE_LOCAL_TMP}, got ${env.ANSIBLE_LOCAL_TEMP}`,
@@ -336,11 +356,7 @@ test("galaxyBootstrapRunContext matches playbook ansible contract", () => {
       `expected ANSIBLE_EXECUTABLE=${ANSIBLE_SHELL_EXECUTABLE}, got ${ctx.env.ANSIBLE_EXECUTABLE}`,
     );
   }
-  if (ctx.env.ANSIBLE_HOME !== "/tmp/turbopanel-ansible") {
-    throw new Error(
-      `expected ANSIBLE_HOME=/tmp/turbopanel-ansible, got ${ctx.env.ANSIBLE_HOME}`,
-    );
-  }
+  assertPrivateAnsibleHome(ctx.env.ANSIBLE_HOME);
   assertNotIn(ctx.env, "ANSIBLE_COLLECTIONS_PATH", "galaxyBootstrapRunContext");
 });
 

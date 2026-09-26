@@ -432,6 +432,42 @@ test("openInstanceAcmeWindow fails closed when both ss commands fail", async () 
   }
 });
 
+test("closeInstanceAcmeWindow puts hosting Caddy back when a tenant site lands during the disable", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-acme-close-race-" });
+  const layout = layoutUnder(root);
+  const sites = join(root, "config", "hosting", "sites");
+  await Deno.mkdir(sites, { recursive: true });
+  await Deno.writeTextFile(join(sites, "00-empty.caddy"), "# empty\n");
+  await Deno.writeTextFile(
+    join(sites, INSTANCE_ACME_HTTP01_SITE),
+    "http://x {\n}\n",
+  );
+  const calls: string[] = [];
+  const run: InstanceAcmeCommand = async (_program, args) => {
+    const line = args.join(" ");
+    calls.push(line);
+    if (line.includes("disable --now")) {
+      // A concurrent first tenant deploy writes its site right after the
+      // window saw only reserved sites.
+      await Deno.writeTextFile(join(sites, "tenant.caddy"), "http://t {\n}\n");
+    }
+    return ok();
+  };
+  try {
+    await closeInstanceAcmeWindow(layout, { run });
+    const disableAt = calls.findIndex((line) => line.includes("disable --now"));
+    const enableAt = calls.findIndex((line) => line.includes("enable --now"));
+    assertEquals(disableAt >= 0, true);
+    assertEquals(
+      enableAt > disableAt,
+      true,
+      `expected enable --now after disable, got ${JSON.stringify(calls)}`,
+    );
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
 test("closeInstanceAcmeWindow disables hosting Caddy when only reserved sites remain", async () => {
   const root = await Deno.makeTempDir({ prefix: "tp-acme-close-" });
   const layout = layoutUnder(root);
