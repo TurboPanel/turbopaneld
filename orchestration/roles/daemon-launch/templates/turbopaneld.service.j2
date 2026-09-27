@@ -1,7 +1,10 @@
 [Unit]
 Description=TurboPanel daemon
-After=network-online.target{% if turbopanel_after_instance_service | bool %} turbopanel-instance.service{% endif %}
-Wants=network-online.target{% if turbopanel_after_instance_service | bool %} turbopanel-instance.service{% endif %}
+{# Inline expressions, never an if/endif block tag at the end of a line: Ansible
+   renders with trim_blocks, which eats the newline after a block tag and ran
+   After=, Wants= and OnFailure= together on one line on every host. #}
+After=network-online.target{{ ' turbopanel-instance.service' if (turbopanel_after_instance_service | bool) else '' }}
+Wants=network-online.target{{ ' turbopanel-instance.service' if (turbopanel_after_instance_service | bool) else '' }}
 OnFailure=turbopaneld-update-guard.service
 StartLimitIntervalSec=300
 StartLimitBurst=5
