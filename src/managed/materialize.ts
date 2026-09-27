@@ -41,6 +41,26 @@ function parseMode(mode: "0640" | "0600"): number {
 }
 
 /**
+ * Render a failed docker run's output as a readable message.
+ *
+ * `sanitizeForLog` turns embedded newlines into `_` (log-injection defense),
+ * which mashes multi-line stderr — e.g. a shell's own "command not found"
+ * diagnostic followed by our `echo` fallback — into one unreadable run-on.
+ * Split first, sanitize each line alone (never introduces a newline), join
+ * for humans.
+ */
+function formatDockerFailure(
+  result: { stderr: string; stdout: string },
+): string {
+  const raw = result.stderr || result.stdout || "docker run failed";
+  const lines = raw
+    .split(/\r?\n/)
+    .map((line) => sanitizeForLog(line.trim()))
+    .filter((line) => line.length > 0);
+  return lines.length > 0 ? lines.join("; ") : "docker run failed";
+}
+
+/**
  * Write a config file under the managed config dir.
  *
  * After ownership normalization, existing files are often `root:<engineGroup>`
@@ -183,7 +203,7 @@ export async function normalizeManagedFileOwnership(
   if (!result.success) {
     throw new Error(
       `failed to normalize managed file ownership: ${
-        sanitizeForLog(result.stderr || result.stdout || "docker run failed")
+        formatDockerFailure(result)
       }`,
     );
   }
@@ -193,8 +213,12 @@ export async function normalizeManagedFileOwnership(
   // never traverses the daemon-only managed root). A daemon-owned directory
   // blocks traversal even when every file inside is correctly owned, and the
   // engine then crash-loops on unreadable config/TLS with no hint in the
-  // apply — fail the apply loudly instead. `su -s /bin/sh` works on both
-  // shadow su (debian/ubuntu) and busybox su (alpine).
+  // apply — fail the apply loudly instead. Run the container directly as
+  // `<engineUser>:<engineGroup>` (Docker resolves the names from the image's
+  // own /etc/passwd before the entrypoint runs) instead of shelling out to
+  // `su` — some engine images (e.g. Oracle's mysql:9.7-oracle) ship no `su`
+  // binary at all, so a `su`-based check fails on those images regardless of
+  // whether the actual ownership is correct.
   const verifyMounts: string[] = [];
   for (const subdir of ["config", "tls"]) {
     try {
@@ -213,18 +237,17 @@ export async function normalizeManagedFileOwnership(
 
   const verifyScript = [
     "set -eu",
-    `USER_NAME=${shellSingleQuote(containerUser)}`,
     "[ ! -d /verify/config ] ||",
-    '  su -s /bin/sh "$USER_NAME" -c "ls /verify/config > /dev/null" ||',
+    "  ls /verify/config > /dev/null ||",
     '  { echo "engine user cannot traverse config/" >&2; exit 1; }',
     "[ ! -d /verify/tls ] ||",
-    '  su -s /bin/sh "$USER_NAME" -c "ls /verify/tls > /dev/null" ||',
+    "  ls /verify/tls > /dev/null ||",
     '  { echo "engine user cannot traverse tls/" >&2; exit 1; }',
     "[ ! -f /verify/tls/server.crt ] ||",
-    '  su -s /bin/sh "$USER_NAME" -c "cat /verify/tls/server.crt > /dev/null" ||',
+    "  cat /verify/tls/server.crt > /dev/null ||",
     '  { echo "engine user cannot read tls/server.crt" >&2; exit 1; }',
     "[ ! -f /verify/tls/server.key ] ||",
-    '  su -s /bin/sh "$USER_NAME" -c "cat /verify/tls/server.key > /dev/null" ||',
+    "  cat /verify/tls/server.key > /dev/null ||",
     '  { echo "engine user cannot read tls/server.key" >&2; exit 1; }',
   ].join("\n");
 
@@ -232,7 +255,7 @@ export async function normalizeManagedFileOwnership(
     "run",
     "--rm",
     "--user",
-    "0",
+    `${containerUser}:${containerGroup}`,
     "--entrypoint",
     "sh",
     ...verifyMounts,
@@ -243,9 +266,7 @@ export async function normalizeManagedFileOwnership(
   if (!verified.success) {
     throw new Error(
       `managed file ownership verification failed: ${
-        sanitizeForLog(
-          verified.stderr || verified.stdout || "docker run failed",
-        )
+        formatDockerFailure(verified)
       }`,
     );
   }
