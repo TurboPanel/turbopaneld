@@ -38,6 +38,7 @@ test("a failed swap restores the previous instance and UI and clears the marker"
     "tp_instance_swap_marker",
     "tp_mark_instance_swap",
     "tp_clear_instance_swap_marker",
+    "tp_instance_build_label_path",
   ].map((name) => extractShellFunction(source, name)).join("\n");
   const root = await Deno.makeTempDir({ prefix: "tp-instance-swap-" });
   const install = join(root, "opt");

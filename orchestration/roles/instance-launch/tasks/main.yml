@@ -510,6 +510,30 @@
   ansible.builtin.set_fact:
     turbopanel_instance_revision: "{{ _instance_git_revision.stdout | default('') | trim }}"
 
+# The release label of the installed bytes (run.sh writes lib/build-label from
+# the manifest version and keeps it beside the binary through updates and
+# rollbacks). Rendered into runtime.env so a full converge keeps the line the
+# update path syncs in; a source-run dev host has no label file.
+- name: Stat the installed instance's release label
+  ansible.builtin.stat:
+    path: "{{ turbopanel_install_root }}/lib/build-label"
+  register: _instance_build_label_stat
+
+- name: Read the installed instance's release label
+  ansible.builtin.slurp:
+    src: "{{ turbopanel_install_root }}/lib/build-label"
+  register: _instance_build_label_raw
+  when: _instance_build_label_stat.stat.exists | default(false)
+
+- name: Set the instance release label fact
+  ansible.builtin.set_fact:
+    # Same charset run.sh writes; anything else renders no line at all.
+    turbopanel_instance_build_label: >-
+      {{ (((_instance_build_label_raw.content | b64decode | trim).splitlines() | first | default(''))
+          if (_instance_build_label_raw.content | default('') | length > 0) else '')
+         | regex_search('^[0-9A-Za-z.+-]+$') | default('', true) }}
+  when: _instance_build_label_stat.stat.exists | default(false)
+
 - name: Install Workers runtime env (protected config dir)
   ansible.builtin.template:
     src: instance-workers.env.j2

@@ -11,6 +11,7 @@
     turbopanel_backup_dir: /backup
     turbopanel_group: tp
     turbopanel_install_root: /opt/turbopanel
+    turbopanel_instance_runtime_env: /etc/turbopanel/instance/runtime.env
     postgres_user: turbopanel
     postgres_db: turbopanel
     postgres_container_name: turbopanel-database
@@ -67,7 +68,38 @@
           restore_one "$root/share/ui.prev" "$root/share/ui"
           chmod 0755 "$root/bin/turbopanel"
           chmod 0644 "$root/lib/libduckdb.so"
+          # The release label travels with the bytes (run.sh
+          # tp_retain_instance_prev): a generation that predates it has none.
+          rm -f -- "$root/lib/build-label"
+          if [ -e "$root/lib/build-label.prev" ]; then
+            mv -- "$root/lib/build-label.prev" "$root/lib/build-label"
+          fi
         executable: /bin/bash
+
+    - name: Read the restored instance's release label
+      ansible.builtin.slurp:
+        src: "{{ turbopanel_install_root }}/lib/build-label"
+      register: restored_build_label
+      failed_when: false
+
+    - name: Stat the instance runtime env
+      ansible.builtin.stat:
+        path: "{{ turbopanel_instance_runtime_env }}"
+      register: runtime_env_stat
+
+    - name: Point TURBOPANEL_BUILD_LABEL at the restored bytes
+      ansible.builtin.lineinfile:
+        path: "{{ turbopanel_instance_runtime_env }}"
+        regexp: '^TURBOPANEL_BUILD_LABEL='
+        line: "TURBOPANEL_BUILD_LABEL={{ _restored_label }}"
+        state: "{{ 'present' if _restored_label | length > 0 else 'absent' }}"
+      vars:
+        _restored_label: >-
+          {{ ((restored_build_label.content | default('') | b64decode | trim).splitlines() | first | default(''))
+             if (restored_build_label.content | default('') | length > 0) else '' }}
+      when:
+        - runtime_env_stat.stat.exists
+        - _restored_label is match('^[0-9A-Za-z.+-]*$')
 
     - name: Load the backup metadata for this attempt
       ansible.builtin.slurp:
