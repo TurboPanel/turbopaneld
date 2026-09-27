@@ -38,6 +38,10 @@ test("a managed host routes every tp-host verb through /opt/turbopanel/lib/tp-ho
     hostSudoArgs(["-n", "--", "systemctl", "daemon-reload"], MANAGED),
     ["-n", "--", "/opt/turbopanel/lib/tp-host", "systemctl", "daemon-reload"],
   );
+  assertEquals(
+    hostSudoArgs(["-n", "modprobe", "drivetemp"], MANAGED),
+    ["-n", "--", "/opt/turbopanel/lib/tp-host", "modprobe", "drivetemp"],
+  );
 });
 
 test("self re-exec, docker, helpers and engine checks are left alone", () => {
@@ -58,7 +62,6 @@ test("self re-exec, docker, helpers and engine checks are left alone", () => {
         "/etc/turbopanel/php/8.4/php-fpm.conf",
         "--test",
       ],
-      ["-n", "modprobe", "drivetemp"],
       ["sh", "-s", "--"],
     ]
   ) {
