@@ -71,6 +71,11 @@ const BASE_RAFT = {
   }>,
 };
 
+const NO_WAIT = {
+  daemonGid: null,
+  stability: { sleep: () => Promise.resolve() },
+};
+
 function fakeRunSuccess(): (args: string[]) => Promise<DockerCliResult> {
   return (_args) =>
     Promise.resolve({ success: true, stdout: "", stderr: "", code: 0 });
@@ -421,6 +426,7 @@ test("readCurrentOrchestratorManagedNetwork reads the name back off disk", async
       MANAGED_NETWORK,
       sampleConf(),
       fakeRunSuccess(),
+      NO_WAIT,
     );
     assertEquals(
       await readCurrentOrchestratorManagedNetwork(layout),
@@ -443,6 +449,7 @@ test("ensureOrchestratorStack writes files and reports restart on first apply", 
       MANAGED_NETWORK,
       conf,
       fakeRunSuccess(),
+      NO_WAIT,
     );
     assertEquals(restarted, true);
     const writtenConf = await Deno.readTextFile(orchestratorConfPath(layout));
@@ -473,6 +480,7 @@ test("ensureOrchestratorStack reports no restart when compose and conf are uncha
         MANAGED_NETWORK,
         conf,
         fakeRunSuccess(),
+        NO_WAIT,
       ),
       true,
     );
@@ -484,6 +492,7 @@ test("ensureOrchestratorStack reports no restart when compose and conf are uncha
         MANAGED_NETWORK,
         conf,
         fakeRunSuccess(),
+        NO_WAIT,
       ),
       false,
     );
@@ -569,6 +578,103 @@ test("restartOrchestratorStack throws when compose restart fails", async () => {
           })),
       Error,
       "restart denied",
+    );
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("orchestratorCompose joins the daemon's group so uid 1001 can read the 0640 conf and CA", () => {
+  const yaml = orchestratorCompose(
+    HA_DESCRIPTOR,
+    BASE_RAFT,
+    MANAGED_NETWORK,
+    9999,
+  );
+  const doc = parseYaml(yaml) as {
+    services: Record<string, { group_add?: string[] }>;
+  };
+  const service = Object.values(doc.services)[0];
+  assertEquals(service.group_add, ["9999"]);
+});
+
+test("orchestratorCompose adds no group without a usable daemon gid", () => {
+  for (const gid of [undefined, null, 0, -1, 1.5]) {
+    const yaml = orchestratorCompose(
+      HA_DESCRIPTOR,
+      BASE_RAFT,
+      MANAGED_NETWORK,
+      gid,
+    );
+    assertEquals(yaml.includes("group_add"), false, `gid ${gid}`);
+  }
+});
+
+test("ensureOrchestratorStack defaults group_add to the group owning the written conf", async () => {
+  const fixture = await createTempLayout();
+  try {
+    const layout = resolveLayout(fixture.env);
+    await ensureOrchestratorStack(
+      layout,
+      HA_DESCRIPTOR,
+      BASE_RAFT,
+      MANAGED_NETWORK,
+      sampleConf(),
+      fakeRunSuccess(),
+      { stability: NO_WAIT.stability },
+    );
+    const compose = await Deno.readTextFile(orchestratorComposePath(layout));
+    const gid = (await Deno.stat(orchestratorConfPath(layout))).gid;
+    if (gid !== null && gid > 0) {
+      assertEquals(compose.includes(`- "${gid}"`), true);
+    }
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("ensureOrchestratorStack fails with the container's last log line when it crash-loops", async () => {
+  const fixture = await createTempLayout();
+  try {
+    const layout = resolveLayout(fixture.env);
+    const run = (args: string[]): Promise<DockerCliResult> => {
+      if (args[0] === "inspect") {
+        return Promise.resolve({
+          success: true,
+          stdout: '{"Status":"restarting","ExitCode":1} 121',
+          stderr: "",
+          code: 0,
+        });
+      }
+      if (args[0] === "logs") {
+        return Promise.resolve({
+          success: true,
+          stdout: "",
+          stderr: "+ exec /usr/local/orchestrator/orchestrator\n" +
+            "FATAL Cannot read config file: /etc/orchestrator.conf.json open /etc/orchestrator.conf.json: permission denied\n",
+          code: 0,
+        });
+      }
+      return Promise.resolve({
+        success: true,
+        stdout: "",
+        stderr: "",
+        code: 0,
+      });
+    };
+    await assertRejects(
+      () =>
+        ensureOrchestratorStack(
+          layout,
+          HA_DESCRIPTOR,
+          BASE_RAFT,
+          MANAGED_NETWORK,
+          sampleConf(),
+          run,
+          NO_WAIT,
+        ),
+      Error,
+      "is crash-looping (restarting, exit 1, 121 restarts): FATAL Cannot read config file",
     );
   } finally {
     await fixture.cleanup();
