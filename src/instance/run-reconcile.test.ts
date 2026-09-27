@@ -21,11 +21,13 @@ import {
   MIN_INSTANCE_UPDATE_FREE_BACKUP_BYTES,
   MIN_INSTANCE_UPDATE_FREE_INSTALL_BYTES,
   PRODUCTION_CONTROL_PLANE,
+  reconcileHelperInvocation,
   reconcileNeedsRootHelper,
   resolveAutomaticUpdateTrust,
   resolveBootstrapInsecureTls,
   resolveRunScriptUrl,
   restartControlPlaneUnits,
+  rootHelperColocatedRefreshInvocation,
   rootHelperInstanceUpdateInvocation,
   rootHelperReconcileInvocation,
   UpdatePreflightError,
@@ -1604,4 +1606,92 @@ test("the updating page stays on :8443 while the instance restarts", async () =>
     ),
   );
   assertStringIncludes(tasks, "Reload turbopanel caddy");
+});
+
+test("rootHelperColocatedRefreshInvocation refreshes a panel host's daemon with no enrolment flags", () => {
+  const invocation = rootHelperColocatedRefreshInvocation({
+    channel: "canary",
+  });
+  assertEquals(invocation.bin, "sudo");
+  assertEquals(invocation.args[2]?.endsWith("/scripts/tp-orchestrate"), true);
+  assertEquals([...invocation.args.slice(0, 2), ...invocation.args.slice(3)], [
+    "-n",
+    "--",
+    "update-colocated",
+    "--channel",
+    "canary",
+    "--progress-markers",
+    "--no-start",
+  ]);
+  const pinned =
+    "https://github.com/TurboPanel/turbopaneld/releases/download/canary/manifest-0.1.2-canary.20260927-190000-abcdef0.json";
+  assertEquals(
+    rootHelperColocatedRefreshInvocation({
+      channel: "canary",
+      manifestUrl: pinned,
+    }).args.slice(4),
+    [
+      "--channel",
+      "canary",
+      "--manifest-url",
+      pinned,
+      "--progress-markers",
+      "--no-start",
+    ],
+  );
+});
+
+test("rootHelperColocatedRefreshInvocation refuses a missing channel and a non-daemon rail", () => {
+  assertThrows(
+    () => rootHelperColocatedRefreshInvocation({}),
+    Error,
+    "update channel",
+  );
+  assertThrows(() =>
+    rootHelperColocatedRefreshInvocation({
+      channel: "canary",
+      manifestUrl:
+        "https://github.com/TurboPanel/turbopanel/releases/download/canary/manifest.json",
+    })
+  );
+});
+
+test("reconcileHelperInvocation picks update-colocated for a panel host and update elsewhere", () => {
+  const colocated = reconcileHelperInvocation({
+    colocated: true,
+    args: ["--license", "ignored", "--no-start"],
+    channel: "canary",
+  });
+  assertEquals(colocated.args[3], "update-colocated");
+  assertEquals(colocated.args.includes("--license"), false);
+
+  const remote = reconcileHelperInvocation({
+    args: ["--license", "abc", "--no-start"],
+    channel: "canary",
+  });
+  assertEquals(remote.args[3], "update");
+  assertEquals(remote.args.includes("--license"), true);
+});
+
+test("executeRunReconcile refuses a co-located daemon update on a development host", async () => {
+  const originalCommand = Deno.Command;
+  let spawned = false;
+  try {
+    Deno.Command = class {
+      constructor(_cmd: string, _opts: Deno.CommandOptions) {}
+      spawn() {
+        spawned = true;
+        return fakeReconcileChild();
+      }
+    } as unknown as typeof Deno.Command;
+    await assertRejects(
+      () =>
+        executeRunReconcile({ args: [], channel: "canary", colocated: true }),
+      Error,
+      "not supported on a development host",
+    );
+    assertEquals(spawned, false);
+  } finally {
+    Deno.Command = originalCommand;
+  }
 });

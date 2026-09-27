@@ -1959,6 +1959,30 @@ export class InstanceClient {
       return false;
     }
 
+    if (this.#isColocatedSocketMode()) {
+      // The daemon on a self-hosted control-plane host: refresh it in socket
+      // mode (tp-orchestrate update-colocated → run.sh --daemon-only). It
+      // does not re-enrol, so no license, host or CA travels.
+      const hostPin = resolvePinnedManifestUrl(env, "daemon");
+      logInfo(
+        "update",
+        "refreshing the co-located daemon via run.sh --daemon-only",
+      );
+      this.#reportUpdateStage("preparing", { upgradeId: options.upgradeId });
+      await clientTestHooks.executeRunReconcile({
+        args: [],
+        channel: config.channel,
+        manifestUrl: hostPin
+          ? undefined
+          : updateInfo.manifestUrl?.trim() || options.manifestUrl?.trim(),
+        colocated: true,
+        onStage: (stage) => {
+          this.#reportUpdateStage(stage, { upgradeId: options.upgradeId });
+        },
+      });
+      return true;
+    }
+
     const credentials = await readLicenseCredentials(this.#serverIdentityDir());
     if (!credentials.licenseId || !credentials.licenseToken) {
       throw new Error(

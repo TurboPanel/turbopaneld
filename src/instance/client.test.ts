@@ -5039,6 +5039,86 @@ it({
 });
 
 it({
+  name:
+    "co-located daemon update refreshes in socket mode without a license or run.sh body",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    let captured:
+      | {
+        colocated?: boolean;
+        args: string[];
+        channel?: string;
+        script?: string;
+      }
+      | undefined;
+    let downloads = 0;
+    const restoreHooks = installClientTestHooks({
+      updateResultHandoffDelayMs: 0,
+      restartDaemonService: () => Promise.resolve(true),
+      getBuildInfo: () => ({
+        commit: "old",
+        buildId: "dev-old",
+        builtAt: "2026-08-01T00:00:00Z",
+        channel: "trunk",
+        sourceUrl: "https://github.com/TurboPanel/turbopaneld/tree/old",
+      }),
+      resolveUpdate: () =>
+        Promise.resolve(
+          sampleUpdateInfo(
+            "commit-new",
+            "https://dl.example/manifest-colo.json",
+          ),
+        ),
+      downloadRunScript: () => {
+        downloads += 1;
+        return Promise.resolve("#!/bin/sh\nexit 0\n");
+      },
+      executeRunReconcile: (opts) => {
+        captured = opts;
+        opts.onStage?.("downloading");
+        return Promise.resolve();
+      },
+    });
+    const { socket, restore } = await startConnectedClient({
+      socketMode: true,
+    });
+    // The panel host's daemon does not re-enrol: no license is required.
+    const stateDir = Deno.env.get("TURBOPANEL_DAEMON_STATE_DIR")!;
+    await Deno.remove(`${stateDir}/license.id`).catch(() => {});
+    await Deno.remove(`${stateDir}/license.token`).catch(() => {});
+    try {
+      socket.receive({
+        type: "update",
+        id: "upd-colo",
+        at: new Date().toISOString(),
+      });
+      const result = await waitFor(
+        "co-located update-result",
+        () =>
+          framesOfType(socket, "update-result").find((f) =>
+            (f as { id?: string }).id === "upd-colo"
+          ) as { ok?: boolean; error?: string } | undefined,
+      );
+      assertEquals(result.ok, true, result.error);
+      assertEquals(captured?.colocated, true);
+      assertEquals(captured?.args, []);
+      assertEquals(captured?.script, undefined);
+      assertEquals(downloads, 0);
+    } finally {
+      restore();
+      restoreHooks();
+    }
+  },
+});
+
+it({
   name: "overlapping update does not hijack the active progress context",
   permissions: {
     env: true,
@@ -5569,6 +5649,8 @@ async function startConnectedClient(
     instanceBaseUrl?: string;
     /** What `/secrets/decrypt` opens each ciphertext to (default: nothing). */
     decrypt?: (ciphertexts: string[]) => (string | null)[];
+    /** Dial the co-located instance socket (a self-hosted control-plane host). */
+    socketMode?: boolean;
   } = {},
 ): Promise<{
   client: InstanceClient;
@@ -5590,6 +5672,11 @@ async function startConnectedClient(
     () => new Response(JSON.stringify({ ok: true }), { status: 200 }),
   );
   api.script("/api/daemon/v1/jwks.json", () => scriptedJwksResponse(signing));
+  api.script(
+    "/api/daemon/v1/readiness",
+    () =>
+      new Response(JSON.stringify({ ok: true, ready: true }), { status: 200 }),
+  );
   api.script("/api/daemon/v1/auth/challenge", () => challengeResponse());
   api.script("/api/daemon/v1/enroll", () => enrollResponse(enroll));
   api.script(
@@ -5617,11 +5704,13 @@ async function startConnectedClient(
 
   const baseUrl = options.instanceBaseUrl ?? "https://instance.test";
   const clientOpts: ConstructorParameters<typeof InstanceClient>[0] = {
-    config: {
-      kind: "url",
-      baseUrl,
-      wsBaseUrl: baseUrl.replace(/^http/, "ws"),
-    },
+    config: options.socketMode
+      ? { kind: "socket", socketPath: "/tmp/turbopanel-test-instance.sock" }
+      : {
+        kind: "url",
+        baseUrl,
+        wsBaseUrl: baseUrl.replace(/^http/, "ws"),
+      },
     httpClient: {} as Deno.HttpClient,
   };
   if (options.forceApplyOwned || options.applyDevSyncTarball !== undefined) {
