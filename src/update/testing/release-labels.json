@@ -1,0 +1,24 @@
+{
+  "$comment": "Real release labels as each side of the upgrade seam spells them. Mirrors turbopanel src/features/upgrades/testing/release-labels.ts (same builds): binaries report the plain base, canary/rc manifests carry the label, git tags add a leading v. Ordered oldest to newest; entries with the same rank are the same build spelled two ways.",
+  "labels": [
+    { "name": "older base", "version": "0.1.0", "rank": 0 },
+    {
+      "name": "earlier canary",
+      "version": "0.1.1-canary.20260926-161020-b613d3d",
+      "rank": 1
+    },
+    {
+      "name": "canary",
+      "version": "0.1.1-canary.20260927-192410-1ade037",
+      "rank": 2
+    },
+    { "name": "rc", "version": "0.1.1-rc.1", "rank": 3 },
+    { "name": "release", "version": "0.1.1", "rank": 4 },
+    { "name": "tag", "version": "v0.1.1", "rank": 4 },
+    {
+      "name": "next base canary",
+      "version": "0.1.2-canary.20261001-090000-c0ffee0",
+      "rank": 5
+    }
+  ]
+}
