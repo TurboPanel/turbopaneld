@@ -18,6 +18,7 @@ import { hostSudoArgs } from "./host-sudo.ts";
 import {
   CALL_SITES,
   type CallSiteSetup,
+  type KnownBug,
   STAGED_CONTENT,
   STALE_KNOWN_BUGS,
   type SudoSample,
@@ -53,26 +54,79 @@ function normaliseCallArgument(text: string): string {
     .replace(/,$/, "");
 }
 
-/** `<file>|<normalised argument>` for every `hostSudoArgs(` call in `source`. */
+type Call = { at: number; argument: string };
+
+/** The text up to the bracket that closes the one just before `start`. */
+function enclosed(source: string, start: number): string {
+  let depth = 1;
+  let i = start;
+  while (depth > 0 && i < source.length) {
+    const ch = source[i];
+    if (ch === "(" || ch === "[" || ch === "{") depth += 1;
+    else if (ch === ")" || ch === "]" || ch === "}") depth -= 1;
+    i += 1;
+  }
+  return source.slice(start, i - 1);
+}
+
+/** Every call of `name(…)` in `source` (not its definition). */
+function calls(source: string, name: string): Call[] {
+  const found: Call[] = [];
+  const pattern = new RegExp(String.raw`(?<![\w.$])${name}\(`, "g");
+  for (const match of source.matchAll(pattern)) {
+    const before = source.slice(Math.max(0, match.index - 16), match.index);
+    if (/function\s*$/.test(before)) continue;
+    found.push({
+      at: match.index,
+      argument: enclosed(source, match.index + match[0].length),
+    });
+  }
+  return found;
+}
+
+/** An argument that forwards the caller's `args` rather than naming a shape. */
+const FORWARDS_ARGS = /(?:^|[[,(])(?:\.\.\.)?args(?:[\],)]|$)/;
+
+/**
+ * The named function around `at` when it takes an `args` parameter: a
+ * wrapper whose own callers pick the shape root sees.
+ */
+function enclosingWrapper(source: string, at: number): string | undefined {
+  const heads = source.slice(0, at).matchAll(
+    /(?:function\s+(\w+)\s*\(|(?:const|let)\s+(\w+)\s*=\s*(?:async\s*)?\()/g,
+  );
+  const head = [...heads].at(-1);
+  if (head === undefined) return undefined;
+  const params = enclosed(source, head.index + head[0].length);
+  const takesArgs = params.split(",").some((param) =>
+    /^(?:\.\.\.)?args\??(?::|$)/.test(param.trim())
+  );
+  return takesArgs ? head[1] ?? head[2] : undefined;
+}
+
+/**
+ * Keys for every root request in `source`: `<file>|<argument>` per
+ * `hostSudoArgs(` call and, when that call only forwards a wrapper's
+ * `args`, `<file>|<wrapper>(<argument>)` per call of the wrapper (and so on
+ * up a chain of wrappers) — so a new `runSudo([...])` needs a sample just as
+ * a new direct call does.
+ */
 function callSiteKeys(file: string, source: string): string[] {
   const keys: string[] = [];
-  const needle = "hostSudoArgs(";
-  let at = source.indexOf(needle);
-  while (at >= 0) {
-    const isDefinition = source.slice(Math.max(0, at - 9), at) === "function ";
-    const start = at + needle.length;
-    let depth = 1;
-    let i = start;
-    while (depth > 0 && i < source.length) {
-      const ch = source[i];
-      if (ch === "(" || ch === "[" || ch === "{") depth += 1;
-      else if (ch === ")" || ch === "]" || ch === "}") depth -= 1;
-      i += 1;
+  const expand = (call: Call, argument: string, depth: number) => {
+    if (depth > 4 || !FORWARDS_ARGS.test(argument)) return;
+    const wrapper = enclosingWrapper(source, call.at);
+    if (wrapper === undefined) return;
+    for (const use of calls(source, wrapper)) {
+      const forwarded = normaliseCallArgument(use.argument);
+      keys.push(`${file}|${wrapper}(${forwarded})`);
+      expand(use, forwarded, depth + 1);
     }
-    if (!isDefinition) {
-      keys.push(`${file}|${normaliseCallArgument(source.slice(start, i - 1))}`);
-    }
-    at = source.indexOf(needle, i);
+  };
+  for (const call of calls(source, "hostSudoArgs")) {
+    const argument = normaliseCallArgument(call.argument);
+    keys.push(`${file}|${argument}`);
+    expand(call, argument, 0);
   }
   return keys;
 }
@@ -113,6 +167,30 @@ test("the scanner reads a call site's argument text, comments and layout aside",
   ]);
 });
 
+test("the scanner follows wrappers that forward their args to hostSudoArgs", () => {
+  const source = [
+    "async function runSudo(args: string[]) {",
+    '  return run("sudo", hostSudoArgs(["-n", ...args]));',
+    "}",
+    "async function removeQuietly(args: string[]) {",
+    "  await runSudo(args);",
+    "}",
+    "function notAWrapper(path: string) {",
+    "  const args = [path];",
+    '  return run("sudo", hostSudoArgs(args));',
+    "}",
+    'await runSudo(["rm", "-f", path]);',
+    'await removeQuietly(["rm", "-rf", dir]);',
+  ].join("\n");
+  assertEquals(callSiteKeys("src/x.ts", source), [
+    'src/x.ts|["-n",...args]',
+    "src/x.ts|runSudo(args)",
+    'src/x.ts|removeQuietly(["rm","-rf",dir])',
+    'src/x.ts|runSudo(["rm","-f",path])',
+    "src/x.ts|args",
+  ]);
+});
+
 test("every hostSudoArgs call site has samples, and every listed call site still exists", async () => {
   const scanned = await scannedKeys();
   const listed = new Set(CALL_SITES.map((site) => site.key));
@@ -127,6 +205,7 @@ test("every hostSudoArgs call site has samples, and every listed call site still
   assertEquals(STALE_KNOWN_BUGS, [], "these known bugs name no call site");
   assertEquals(listed.size, CALL_SITES.length, "a call site is listed twice");
   for (const site of CALL_SITES) {
+    if (site.via === "none") continue;
     assert(site.samples.length > 0, `${site.key} has no sample`);
   }
 });
@@ -282,12 +361,37 @@ async function runSample(sample: TpHostSample): Promise<string | undefined> {
   }
 }
 
+/**
+ * A known bug's samples must still fail the way its entry says; once one
+ * passes, the fix has landed and the entry has to go.
+ */
+function assertStillBroken(
+  key: string,
+  bug: KnownBug,
+  failures: Array<string | undefined>,
+): void {
+  if (!("refusal" in bug)) return;
+  assert(
+    failures.some((failure) => failure?.includes(bug.refusal)),
+    `${key} no longer fails with "${bug.refusal}" (got ${
+      JSON.stringify(failures)
+    }): fixed? remove its KNOWN_BUGS entry in tp-host-callsites.ts`,
+  );
+}
+
 for (const site of CALL_SITES) {
   if (site.via !== "tp-host") continue;
+  const bug = site.knownBug;
   test({
-    name: `tp-host accepts ${site.key}${knownBugSuffix(site.knownBug)}`,
-    ignore: site.knownBug !== undefined,
+    name: `tp-host accepts ${site.key}${knownBugSuffix(bug)}`,
+    ignore: bug !== undefined && "pending" in bug,
   }, async () => {
+    if (bug !== undefined) {
+      const failures = [];
+      for (const sample of site.samples) failures.push(await runSample(sample));
+      assertStillBroken(site.key, bug, failures);
+      return;
+    }
     for (const sample of site.samples) {
       const routed = hostSudoArgs(["-n", ...onHost(sample.argv)], MANAGED);
       assert(
@@ -383,8 +487,10 @@ for (const { why, sample } of NEAR_MISSES) {
   });
 }
 
-function knownBugSuffix(reason: string | undefined): string {
-  return reason === undefined ? "" : ` (KNOWN BUG: ${reason})`;
+function knownBugSuffix(bug: KnownBug | undefined): string {
+  if (bug === undefined) return "";
+  const pending = "pending" in bug ? `, fixed by ${bug.pending}` : "";
+  return ` (KNOWN BUG: ${bug.why}${pending})`;
 }
 
 // --- 3. direct sudo matches the sudoers rules --------------------------------
@@ -486,11 +592,19 @@ test("the sudoers parser follows aliases, run-as lists and argument globs", asyn
 
 for (const site of CALL_SITES) {
   if (site.via !== "sudo") continue;
+  const bug = site.knownBug;
   test({
-    name: `sudoers allows ${site.key}${knownBugSuffix(site.knownBug)}`,
-    ignore: site.knownBug !== undefined,
+    name: `sudoers allows ${site.key}${knownBugSuffix(bug)}`,
+    ignore: bug !== undefined && "pending" in bug,
   }, async () => {
     const rules = parseSudoers(await renderSudoers(), "tp");
+    if (bug !== undefined) {
+      const failures = site.samples.map((sample) =>
+        sudoersAllows(rules, sample) ? undefined : "sudoers denies"
+      );
+      assertStillBroken(site.key, bug, failures);
+      return;
+    }
     for (const sample of site.samples) {
       const argv = sample.runas === undefined
         ? ["-n", ...sample.argv]

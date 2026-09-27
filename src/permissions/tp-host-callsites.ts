@@ -54,10 +54,11 @@ export type SudoSample = {
 };
 
 export type CallSite =
-  & { key: string; knownBug?: string }
+  & { key: string; knownBug?: KnownBug }
   & (
     | { via: "tp-host"; samples: TpHostSample[] }
     | { via: "sudo"; samples: SudoSample[] }
+    | { via: "none"; why: string }
   );
 
 const P = "{P}";
@@ -75,6 +76,28 @@ const ACME_CERT =
   `${ACME_CERTS}/acme-v02.api.letsencrypt.org-directory/panel.example.com/panel.example.com.crt`;
 const CADDY_BIN = `${P}/opt/turbopanel/vendor/caddy/2.11.4/caddy`;
 const NGINX_CONF = `${CONF}/nginx/sites/svc1.conf`;
+const FABRIC_DIR = `${STATE}/network`;
+const WG_CONF = `${P}/etc/wireguard/tp0.conf`;
+const FABRIC_SYSCTL = `${P}/etc/sysctl.d/99-turbopanel-fabric.conf`;
+/** A WireGuard key's shape (32 bytes, base64), built so no key sits in source. */
+const WG_KEY = `${"A".repeat(43)}=`;
+const MGD_CHAIN = "TP-MGD-0a1b2c3d";
+const MGD_MATCH = [
+  "-p",
+  "tcp",
+  "-m",
+  "conntrack",
+  "--ctorigdst",
+  "198.51.100.2",
+  "--ctorigdstport",
+  "5432",
+];
+const APP_UNIT = "turbopanel-app-svc1.service";
+const PROBE =
+  "a version probe runs as the daemon and never gets a permission error, " +
+  "so runHost never retries it through sudo";
+const DOCKER_DIRECT =
+  "fabric's runDefault sends docker through runDocker, never sudo";
 
 /** What the harness writes to {@link STAGED}. */
 export const STAGED_CONTENT = "staged content\n";
@@ -114,6 +137,11 @@ function tpHost(key: string, ...samples: TpHostSample[]): CallSite {
 /** Samples that bypass tp-host and must match a sudoers rule. */
 function sudo(key: string, ...samples: SudoSample[]): CallSite {
   return { key, via: "sudo", samples };
+}
+
+/** A wrapper call that never reaches sudo (so root never sees it). */
+function notRoot(key: string, why: string): CallSite {
+  return { key, via: "none", why };
 }
 
 const file = (path: string, contents = "x\n"): CallSiteSetup => ({
@@ -1064,29 +1092,454 @@ const SITES: CallSite[] = [
       argv: ["modprobe", "drivetemp"],
     },
   ),
+
+  // --- wrapper calls: each shape a forwarding wrapper is handed -------------
+  // TurboFabric: `runHost` tries the command as the daemon first and retries
+  // through sudo on a permission error; Docker never goes through sudo.
+  notRoot(
+    'src/commands/fabric.ts|probeFabricTool("docker",["--version"])',
+    DOCKER_DIRECT,
+  ),
+  notRoot('src/commands/fabric.ts|probeFabricTool("ip",["-V"])', PROBE),
+  tpHost('src/commands/fabric.ts|probeFabricTool("iptables",["--version"])', {
+    argv: ["iptables", "--version"],
+  }),
+  notRoot('src/commands/fabric.ts|probeFabricTool("wg",["--version"])', PROBE),
+  tpHost("src/commands/fabric.ts|runDefault(cmd,args,options)", {
+    argv: ["ip", "link", "set", "dev", "tp0", "up"],
+  }),
+  tpHost("src/commands/fabric.ts|runHost(cmd,args)", {
+    argv: ["ip", "link", "set", "dev", "tp0", "up"],
+  }),
+  tpHost(
+    "src/commands/fabric.ts|runHost(cmd,args,{timeoutMs:PREFLIGHT_TIMEOUT_MS})",
+    { argv: ["iptables", "--version"] },
+  ),
+  tpHost('src/commands/fabric.ts|runHost("chmod",["600",WG_QUICK_CONF_PATH])', {
+    argv: ["chmod", "600", WG_CONF],
+    setup: file(WG_CONF),
+  }),
+  tpHost(
+    'src/commands/fabric.ts|runHost("chmod",["644",FABRIC_SYSCTL_DROPIN])',
+    {
+      argv: ["chmod", "644", FABRIC_SYSCTL],
+      setup: file(FABRIC_SYSCTL),
+    },
+  ),
+  tpHost('src/commands/fabric.ts|runHost("chmod",["700","/etc/wireguard"])', {
+    argv: ["chmod", "700", `${P}/etc/wireguard`],
+  }),
+  tpHost('src/commands/fabric.ts|runHost("cp",[confPath,WG_QUICK_CONF_PATH])', {
+    argv: ["cp", `${FABRIC_DIR}/wireguard/tp0.conf`, WG_CONF],
+    setup: file(`${FABRIC_DIR}/wireguard/tp0.conf`),
+  }),
+  notRoot(
+    'src/commands/fabric.ts|runHost("docker",["network","create","--driver","bridge","--subnet",network.subnet,"--opt",DOCKER_ROUTED_BRIDGE_OPT,"--opt",`${DOCKER_MTU_OPT_KEY}=${mtu}`,network.name])',
+    DOCKER_DIRECT,
+  ),
+  notRoot(
+    'src/commands/fabric.ts|runHost("docker",["network","inspect","-f",`{{index.Options"${DOCKER_MTU_OPT_KEY}"}}`,network.name])',
+    DOCKER_DIRECT,
+  ),
+  tpHost(
+    'src/commands/fabric.ts|runHost("ip",["-o","-4","addr","show","dev",FABRIC_INTERFACE_NAME])',
+    { argv: ["ip", "-o", "-4", "addr", "show", "dev", "tp0"] },
+  ),
+  tpHost(
+    'src/commands/fabric.ts|runHost("ip",["-o","link","show","dev",FABRIC_INTERFACE_NAME])',
+    {
+      argv: ["ip", "-o", "link", "show", "dev", "tp0"],
+    },
+  ),
+  tpHost(
+    'src/commands/fabric.ts|runHost("ip",["addr","replace",address,"dev",FABRIC_INTERFACE_NAME])',
+    { argv: ["ip", "addr", "replace", "10.99.0.1/24", "dev", "tp0"] },
+  ),
+  tpHost(
+    'src/commands/fabric.ts|runHost("ip",["link","add","dev",FABRIC_INTERFACE_NAME,"type","wireguard"])',
+    { argv: ["ip", "link", "add", "dev", "tp0", "type", "wireguard"] },
+  ),
+  tpHost(
+    'src/commands/fabric.ts|runHost("ip",["link","set","dev",FABRIC_INTERFACE_NAME,"mtu",String(mtu)])',
+    { argv: ["ip", "link", "set", "dev", "tp0", "mtu", "1420"] },
+  ),
+  tpHost(
+    'src/commands/fabric.ts|runHost("ip",["link","set","dev",FABRIC_INTERFACE_NAME,"up"])',
+    {
+      argv: ["ip", "link", "set", "dev", "tp0", "up"],
+    },
+  ),
+  tpHost('src/commands/fabric.ts|runHost("iptables",["-C",...checkArgs])', {
+    argv: ["iptables", "-C", "TP-FORWARD", "-i", "tp0", "-j", "ACCEPT"],
+  }),
+  tpHost('src/commands/fabric.ts|runHost("iptables",["-D",...checkArgs])', {
+    argv: ["iptables", "-D", "DOCKER-USER", "-j", "TP-FORWARD"],
+  }),
+  tpHost('src/commands/fabric.ts|runHost("iptables",["-N",name])', {
+    argv: ["iptables", "-N", "TP-FORWARD"],
+  }),
+  tpHost('src/commands/fabric.ts|runHost("iptables",addArgs)', {
+    argv: ["iptables", "-A", "TP-FORWARD", "-i", "tp0", "-j", "ACCEPT"],
+  }),
+  tpHost('src/commands/fabric.ts|runHost("mkdir",["-p","/etc/wireguard"])', {
+    argv: ["mkdir", "-p", `${P}/etc/wireguard`],
+  }),
+  tpHost(
+    'src/commands/fabric.ts|runHost("sysctl",["-p",FABRIC_SYSCTL_DROPIN])',
+    {
+      argv: ["sysctl", "-p", FABRIC_SYSCTL],
+      setup: file(FABRIC_SYSCTL, "net.ipv4.ip_forward=1\n"),
+    },
+  ),
+  tpHost(
+    'src/commands/fabric.ts|runHost("sysctl",["-w","net.ipv4.ip_forward=1"])',
+    {
+      argv: ["sysctl", "-w", "net.ipv4.ip_forward=1"],
+    },
+  ),
+  tpHost(
+    'src/commands/fabric.ts|runHost("systemctl",["disable","--now",WG_QUICK_UNIT])',
+    {
+      argv: ["systemctl", "disable", "--now", "wg-quick@tp0"],
+    },
+  ),
+  tpHost(
+    'src/commands/fabric.ts|runHost("systemctl",["enable","--now",WG_QUICK_UNIT])',
+    {
+      argv: ["systemctl", "enable", "--now", "wg-quick@tp0"],
+    },
+  ),
+  tpHost(
+    'src/commands/fabric.ts|runHost("systemctl",["enable",WG_QUICK_UNIT])',
+    {
+      argv: ["systemctl", "enable", "wg-quick@tp0"],
+    },
+  ),
+  tpHost(
+    'src/commands/fabric.ts|runHost("systemctl",["is-active",WG_QUICK_UNIT])',
+    {
+      argv: ["systemctl", "is-active", "wg-quick@tp0"],
+    },
+  ),
+  tpHost(
+    'src/commands/fabric.ts|runHost("systemctl",["is-enabled",WG_QUICK_UNIT])',
+    {
+      argv: ["systemctl", "is-enabled", "wg-quick@tp0"],
+    },
+  ),
+  tpHost(
+    'src/commands/fabric.ts|runHost("tee",[FABRIC_SYSCTL_DROPIN],{stdin:FABRIC_SYSCTL_CONTENTS,})',
+    { argv: ["tee", FABRIC_SYSCTL], stdin: "net.ipv4.ip_forward=1\n" },
+  ),
+  tpHost('src/commands/fabric.ts|runHost("wg",["genkey"])', {
+    argv: ["wg", "genkey"],
+  }),
+  tpHost('src/commands/fabric.ts|runHost("wg",["pubkey"],{stdin:privateKey})', {
+    argv: ["wg", "pubkey"],
+    stdin: `${WG_KEY}\n`,
+  }),
+  tpHost(
+    'src/commands/fabric.ts|runHost("wg",["set",FABRIC_INTERFACE_NAME,"peer",publicKey,"endpoint",endpoint,"persistent-keepalive",String(keepalive)])',
+    {
+      argv: [
+        "wg",
+        "set",
+        "tp0",
+        "peer",
+        WG_KEY,
+        "endpoint",
+        "203.0.113.5:51820",
+        "persistent-keepalive",
+        "25",
+      ],
+    },
+  ),
+  tpHost(
+    'src/commands/fabric.ts|runHost("wg",["show",FABRIC_INTERFACE_NAME,"dump"])',
+    {
+      argv: ["wg", "show", "tp0", "dump"],
+    },
+  ),
+  tpHost(
+    'src/commands/fabric.ts|runHost("wg",["show",FABRIC_INTERFACE_NAME])',
+    {
+      argv: ["wg", "show", "tp0"],
+    },
+  ),
+  tpHost(
+    'src/commands/fabric.ts|runHost("wg",["syncconf",FABRIC_INTERFACE_NAME,syncPath])',
+    {
+      argv: ["wg", "syncconf", "tp0", `${FABRIC_DIR}/wireguard/tp0.sync.conf`],
+      setup: file(`${FABRIC_DIR}/wireguard/tp0.sync.conf`),
+    },
+  ),
+  notRoot(
+    'src/commands/fabric.ts|runTeardownBestEffort("docker",["network","rm",name],(result)=>isMissingDeviceText(result)||isActiveEndpointsText(result))',
+    DOCKER_DIRECT,
+  ),
+  tpHost(
+    'src/commands/fabric.ts|runTeardownBestEffort("ip",["link","delete",FABRIC_INTERFACE_NAME],isMissingDeviceText)',
+    { argv: ["ip", "link", "delete", "tp0"] },
+  ),
+  tpHost(
+    'src/commands/fabric.ts|runTeardownBestEffort("iptables",["-D",DOCKER_USER_CHAIN,"-j",FABRIC_FORWARD_CHAIN],isMissingIptablesText)',
+    { argv: ["iptables", "-D", "DOCKER-USER", "-j", "TP-FORWARD"] },
+  ),
+  tpHost(
+    'src/commands/fabric.ts|runTeardownBestEffort("iptables",["-F",FABRIC_FORWARD_CHAIN],isMissingIptablesText)',
+    { argv: ["iptables", "-F", "TP-FORWARD"] },
+  ),
+  tpHost(
+    'src/commands/fabric.ts|runTeardownBestEffort("iptables",["-X",FABRIC_FORWARD_CHAIN],isMissingIptablesText)',
+    { argv: ["iptables", "-X", "TP-FORWARD"] },
+  ),
+  tpHost(
+    'src/commands/fabric.ts|runTeardownBestEffort("rm",["-f",FABRIC_SYSCTL_DROPIN],()=>true)',
+    { argv: ["rm", "-f", FABRIC_SYSCTL], setup: file(FABRIC_SYSCTL) },
+  ),
+  tpHost(
+    'src/commands/fabric.ts|runTeardownBestEffort("rm",["-f",WG_QUICK_CONF_PATH],()=>true)',
+    {
+      argv: ["rm", "-f", WG_CONF],
+      setup: file(WG_CONF),
+    },
+  ),
+
+  // Managed-database public listener scoping.
+  tpHost(
+    'src/managed/firewall.ts|removeBestEffort(["-D",MANAGED_PUBLIC_CHAIN,"-j",chain])',
+    {
+      argv: ["iptables", "-D", "TP-MANAGED-PUB", "-j", MGD_CHAIN],
+    },
+  ),
+  tpHost('src/managed/firewall.ts|removeBestEffort(["-F",chain])', {
+    argv: ["iptables", "-F", MGD_CHAIN],
+  }),
+  tpHost('src/managed/firewall.ts|removeBestEffort(["-X",chain])', {
+    argv: ["iptables", "-X", MGD_CHAIN],
+  }),
+  tpHost('src/managed/firewall.ts|runIptables(["-A",...rule])', {
+    argv: [
+      "iptables",
+      "-A",
+      MGD_CHAIN,
+      "-s",
+      "203.0.113.7",
+      ...MGD_MATCH,
+      "-j",
+      "ACCEPT",
+    ],
+  }),
+  tpHost(
+    'src/managed/firewall.ts|runIptables(["-A",chain,...match,"-j","DROP"])',
+    {
+      argv: ["iptables", "-A", MGD_CHAIN, ...MGD_MATCH, "-j", "DROP"],
+    },
+  ),
+  tpHost('src/managed/firewall.ts|runIptables(["-C",...checkArgs])', {
+    argv: ["iptables", "-C", "DOCKER-USER", "-j", "TP-MANAGED-PUB"],
+  }),
+  tpHost('src/managed/firewall.ts|runIptables(["-F",chain])', {
+    argv: ["iptables", "-F", MGD_CHAIN],
+  }),
+  tpHost('src/managed/firewall.ts|runIptables(["-N",name])', {
+    argv: ["iptables", "-N", "TP-MANAGED-PUB"],
+  }),
+  tpHost("src/managed/firewall.ts|runIptables(addArgs)", {
+    argv: ["iptables", "-I", "DOCKER-USER", "1", "-j", "TP-MANAGED-PUB"],
+  }),
+  tpHost("src/managed/firewall.ts|runIptables(args)", {
+    argv: ["iptables", "-X", MGD_CHAIN],
+  }),
+
+  // Cron and native-app units.
+  tpHost('src/deploy/cron/apply.ts|systemctl(runFn,["daemon-reload"])', {
+    argv: ["systemctl", "daemon-reload"],
+  }),
+  tpHost(
+    'src/deploy/cron/apply.ts|systemctl(runFn,["disable","--now",`${unit}.timer`])',
+    {
+      argv: [
+        "systemctl",
+        "disable",
+        "--now",
+        "turbopanel-cron-env1-web-backup.timer",
+      ],
+    },
+  ),
+  tpHost(
+    'src/deploy/cron/apply.ts|systemctl(runFn,["enable","--now",`${unit}.timer`])',
+    {
+      argv: [
+        "systemctl",
+        "enable",
+        "--now",
+        "turbopanel-cron-env1-web-backup.timer",
+      ],
+    },
+  ),
+  tpHost(
+    'src/deploy/native/apply-native-apps.ts|systemctl(io,["daemon-reload"])',
+    {
+      argv: ["systemctl", "daemon-reload"],
+    },
+  ),
+  tpHost(
+    'src/deploy/native/apply-native-apps.ts|systemctl(io,["disable","--now",unit])',
+    {
+      argv: ["systemctl", "disable", "--now", APP_UNIT],
+    },
+  ),
+  tpHost(
+    'src/deploy/native/apply-native-apps.ts|systemctl(io,["enable","--now",unit])',
+    {
+      argv: ["systemctl", "enable", "--now", APP_UNIT],
+    },
+  ),
+  tpHost(
+    'src/deploy/native/apply-native-apps.ts|systemctl(io,["is-active","--quiet",unit])',
+    {
+      argv: ["systemctl", "is-active", "--quiet", APP_UNIT],
+    },
+  ),
+  tpHost(
+    'src/deploy/native/apply-native-apps.ts|systemctl(io,["is-failed","--quiet",unit])',
+    {
+      argv: ["systemctl", "is-failed", "--quiet", APP_UNIT],
+    },
+  ),
+  tpHost(
+    'src/deploy/native/apply-native-apps.ts|systemctl(io,["restart",nativeAppUnitName(params.app.serviceId)])',
+    { argv: ["systemctl", "restart", APP_UNIT] },
+  ),
+  tpHost(
+    'src/deploy/native/apply-native-apps.ts|systemctl(io,["restart",unit])',
+    {
+      argv: ["systemctl", "restart", APP_UNIT],
+    },
+  ),
+  tpHost(
+    "src/deploy/native/apply-native-apps.ts|systemctl(io,[action,unit])",
+    { argv: ["systemctl", "start", APP_UNIT] },
+    { argv: ["systemctl", "stop", APP_UNIT] },
+    { argv: ["systemctl", "restart", APP_UNIT] },
+  ),
+
+  // Control-plane settings (`runtime.env`).
+  tpHost(
+    'src/instance/public-urls-env.ts|runSudo(["chown",`${uid}:${gid}`,path])',
+    {
+      argv: ["chown", "0:9999", `${CONF}/instance/runtime.env`],
+      setup: file(`${CONF}/instance/runtime.env`),
+    },
+  ),
+  tpHost(
+    'src/instance/public-urls-env.ts|runSudo(["install","-d","-m","0750",configDir])',
+    {
+      argv: ["install", "-d", "-m", "0750", `${CONF}/instance`],
+    },
+  ),
+  tpHost(
+    "src/instance/public-urls-env.ts|runSudo(installArgs)",
+    {
+      argv: [
+        "install",
+        "-m",
+        "0640",
+        "-o",
+        "0",
+        "-g",
+        "9999",
+        STAGED,
+        `${CONF}/instance/runtime.env`,
+      ],
+      setup: dir(`${CONF}/instance`),
+    },
+    {
+      argv: ["install", "-m", "0640", STAGED, `${CONF}/instance/runtime.env`],
+      setup: dir(`${CONF}/instance`),
+    },
+  ),
+
+  // The issued-certificate lookup (turbopaneld #50 rebuilds this call).
+  tpHost(
+    'src/deploy/instance-acme-http01.ts|sudoBytes(["-n","find",root,"-mindepth","3","-maxdepth","3","-type","f","-name",`${host}.crt`])',
+    {
+      argv: [
+        "find",
+        ACME_CERTS,
+        "-mindepth",
+        "3",
+        "-maxdepth",
+        "3",
+        "-type",
+        "f",
+        "-name",
+        "panel.example.com.crt",
+      ],
+      setup: file(ACME_CERT),
+    },
+  ),
 ];
 
 /**
- * Call sites the host refuses today, each with why. Their tests are skipped
- * (and named KNOWN BUG) until the fix lands; the fix removes the entry.
+ * A call site the host refuses today. Its test asserts the refusal still
+ * happens (with `refusal` in tp-host's message, or a sudoers denial), so the
+ * fix that makes it pass must delete the entry; a `pending` entry is skipped
+ * until the named change lands (another PR owns that fix).
  */
-const KNOWN_BUGS: Record<string, string> = {
+export type KnownBug =
+  | { why: string; refusal: string }
+  | { why: string; pending: string };
+
+const SAME_FILE: KnownBug = {
+  why: "tp-host mv renames the source onto itself",
+  refusal: "are the same file",
+};
+const FIND_DEPTH: KnownBug = {
+  why: "tp-host find refuses -mindepth/-maxdepth",
+  pending: "turbopaneld#50",
+};
+
+const FABRIC_RM: KnownBug = {
+  why: "TurboFabric teardown: tp-host rm refuses sysctl.d and wireguard files",
+  refusal: "refusing path",
+};
+
+const KNOWN_BUGS: Record<string, KnownBug> = {
   'src/deploy/release/promote.ts|["-n","mv","-Tf","--",tmpLink,currentLink]':
-    "tp-host mv renames the source onto itself",
+    SAME_FILE,
   'src/deploy/site/engine-driver.ts|["-n","mv","-f","--",staged.candidatePath,staged.path]':
-    "tp-host mv renames the source onto itself",
+    SAME_FILE,
   'src/deploy/site/engine-driver.ts|["-n","mv","-f","--",staged.previousPath,staged.path]':
-    "tp-host mv renames the source onto itself",
-  'src/deploy/ssh/apply.ts|["-n","mv","-f","--",backup,dropInPath]':
-    "tp-host mv renames the source onto itself",
+    SAME_FILE,
+  'src/deploy/ssh/apply.ts|["-n","mv","-f","--",backup,dropInPath]': SAME_FILE,
   'src/deploy/ssh/apply.ts|["-n","install","-d","-m","0755","-o","root","-g","root",dirname(dropInPath)]':
-    "tp-host refuses to re-own the sshd_config.d root",
+    {
+      why: "tp-host never re-owns a managed root such as sshd_config.d",
+      refusal: "refusing to re-own",
+    },
   'src/deploy/ensure-hosting-caddy.ts|["-n","chown","root:turbopanel",binPath]':
-    "no host has a `turbopanel` group",
-  "src/deploy/instance-acme-http01.ts|[...args]":
-    "tp-host find refuses -mindepth/-maxdepth",
-  'src/metrics/collector/sensors/drivetemp.ts|["-n","modprobe","drivetemp"]':
-    "no sudoers rule or tp-host verb for modprobe",
+    {
+      why: "no host has a `turbopanel` group",
+      refusal: "refusing owner root:turbopanel",
+    },
+  "src/deploy/instance-acme-http01.ts|[...args]": FIND_DEPTH,
+  'src/deploy/instance-acme-http01.ts|sudoBytes(["-n","find",root,"-mindepth","3","-maxdepth","3","-type","f","-name",`${host}.crt`])':
+    FIND_DEPTH,
+  'src/commands/fabric.ts|runTeardownBestEffort("ip",["link","delete",FABRIC_INTERFACE_NAME],isMissingDeviceText)':
+    {
+      why: "TurboFabric teardown: tp-host has no `ip link delete dev tp0`",
+      refusal: "ip: unsupported command",
+    },
+  'src/commands/fabric.ts|runTeardownBestEffort("rm",["-f",FABRIC_SYSCTL_DROPIN],()=>true)':
+    FABRIC_RM,
+  'src/commands/fabric.ts|runTeardownBestEffort("rm",["-f",WG_QUICK_CONF_PATH],()=>true)':
+    FABRIC_RM,
+  'src/metrics/collector/sensors/drivetemp.ts|["-n","modprobe","drivetemp"]': {
+    why: "neither sudoers nor tp-host allows modprobe",
+    refusal: "sudoers",
+  },
 };
 
 export const CALL_SITES: readonly CallSite[] = SITES.map((site) =>
