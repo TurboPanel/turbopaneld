@@ -1,4 +1,4 @@
-import { assertEquals } from "@std/assert";
+import { assert, assertEquals } from "@std/assert";
 import {
   buildDaemonRestartSystemctlArgs,
   DEFAULT_DAEMON_UNIT,
@@ -17,12 +17,23 @@ const test = Deno.test.bind(Deno);
 test("buildDaemonRestartSystemctlArgs enables then restarts via sudo", () => {
   assertEquals(buildDaemonRestartSystemctlArgs("turbopaneld.service"), [
     ["-n", "systemctl", "enable", "turbopaneld.service"],
-    ["-n", "systemctl", "restart", "turbopaneld.service"],
+    ["-n", "systemctl", "restart", "--no-block", "turbopaneld.service"],
   ]);
   assertEquals(buildDaemonRestartSystemctlArgs(), [
     ["-n", "systemctl", "enable", DEFAULT_DAEMON_UNIT],
-    ["-n", "systemctl", "restart", DEFAULT_DAEMON_UNIT],
+    ["-n", "systemctl", "restart", "--no-block", DEFAULT_DAEMON_UNIT],
   ]);
+});
+
+test("the restart step is --no-block: it can't be the one blocked by its own unit's teardown", () => {
+  // A blocking `restart` on the unit that command is itself running inside
+  // waits for the job to finish — which starts by killing every process in
+  // the old unit's cgroup, including a still-waiting `sudo systemctl`
+  // child. `--no-block` only waits for the job to be *queued*, which
+  // happens well before that teardown starts, so this specific command
+  // must always carry the flag.
+  const [, restart] = buildDaemonRestartSystemctlArgs("turbopaneld.service");
+  assert(restart.includes("--no-block"));
 });
 
 test("resolveDaemonServiceUnit prefers TURBOPANEL_SERVICE_NAME when set", () => {
@@ -50,7 +61,7 @@ test("restartDaemonService runs sudo systemctl enable before restart", async () 
   assertEquals(ok, true);
   assertEquals(calls, [
     ["-n", "systemctl", "enable", "turbopaneld.service"],
-    ["-n", "systemctl", "restart", "turbopaneld.service"],
+    ["-n", "systemctl", "restart", "--no-block", "turbopaneld.service"],
   ]);
 });
 
@@ -121,7 +132,7 @@ test("restartDaemonService default runner invokes sudo systemctl", async () => {
     assertEquals(ok, true);
     assertEquals(calls, [
       ["-n", "systemctl", "enable", "turbopaneld.service"],
-      ["-n", "systemctl", "restart", "turbopaneld.service"],
+      ["-n", "systemctl", "restart", "--no-block", "turbopaneld.service"],
     ]);
   } finally {
     Deno.Command = originalCommand;
