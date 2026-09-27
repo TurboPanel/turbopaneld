@@ -15,6 +15,8 @@ import {
   principalSliceContent,
 } from "../deploy/native/unit.ts";
 import { caddyUnit } from "../deploy/ingress.ts";
+import { issuedCertificateFindArgs } from "../deploy/instance-acme-http01.ts";
+import { setgidDirectoriesFindArgs } from "../deploy/site.ts";
 import type {
   EnvironmentDeployCronJob,
   EnvironmentDeployNativeAppService,
@@ -714,5 +716,60 @@ test("tp-host refuses unknown verbs and arguments with a newline", async () => {
       "--",
       `${host.path("var/lib/turbopanel/x")}\nroot`,
     ]);
+  });
+});
+
+test("find: every daemon-built find argv is accepted; anything else is refused", async () => {
+  await withHost(async (host) => {
+    // instance-acme-http01.ts: the issued certificate lookup (Let's Encrypt
+    // apply polls it until the certificate appears).
+    const root = host.path(
+      "var/lib/turbopanel/instance-acme/caddy/certificates",
+    );
+    const dir = join(
+      root,
+      "acme-v02.api.letsencrypt.org-directory",
+      "canary.example.com",
+    );
+    await Deno.mkdir(dir, { recursive: true });
+    await Deno.writeTextFile(join(dir, "canary.example.com.crt"), "cert\n");
+    await Deno.writeTextFile(join(dir, "canary.example.com.key"), "key\n");
+    const found = await host.run(
+      issuedCertificateFindArgs(root, "canary.example.com"),
+    );
+    assertEquals(found.code, 0, found.stderr);
+    assertEquals(found.stdout.trim(), join(dir, "canary.example.com.crt"));
+
+    // site.ts: setgid on a principal's web tree.
+    const setgid = await host.run(
+      setgidDirectoriesFindArgs(host.path("srv/users/alice/sites")),
+    );
+    assertEquals(setgid.code, 0, setgid.stderr);
+
+    const lookup = issuedCertificateFindArgs(root, "canary.example.com");
+    for (
+      const args of [
+        [...lookup, "-print"],
+        lookup.slice(0, -1),
+        issuedCertificateFindArgs(root, "*.example.com"),
+        issuedCertificateFindArgs(root, "../canary.example.com"),
+        [...lookup.slice(0, -1), "canary.example.com.key"],
+        issuedCertificateFindArgs(host.path("outside"), "canary.example.com"),
+        [
+          "find",
+          root,
+          "-mindepth",
+          "2",
+          "-maxdepth",
+          "3",
+          "-type",
+          "f",
+          "-name",
+          "a.crt",
+        ],
+      ]
+    ) {
+      await refused(host, args);
+    }
   });
 });

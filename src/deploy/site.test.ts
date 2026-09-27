@@ -22,6 +22,7 @@ import {
   phpSeriesForDeploy,
   resolveSiteOwnership,
   resolveSitePhpSeries,
+  setgidDirectoriesFindArgs,
   type SiteApplySpec,
   siteDir,
   siteEngineUnixUser,
@@ -871,4 +872,18 @@ test("openlitespeedSiteFragment enables scripts only for a PHP site", () => {
     openlitespeedSiteFragment("env1", site, vhConf, root, null, { php: true }),
     "enableScript              1",
   );
+});
+
+test("setgidDirectoriesFindArgs builds the exact find tp-host accepts", () => {
+  assertEquals(setgidDirectoriesFindArgs("/srv/users/alice/sites/web"), [
+    "find",
+    "/srv/users/alice/sites/web",
+    "-type",
+    "d",
+    "-exec",
+    "chmod",
+    "g+s",
+    "{}",
+    "+",
+  ]);
 });

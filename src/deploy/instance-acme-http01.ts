@@ -886,13 +886,16 @@ async function findIssuedPair(
   return null;
 }
 
-async function findIssuedPairViaSudo(
+/**
+ * The tp-host argv (verb first) that lists `<root>/<issuer>/<host>/<host>.crt`.
+ * tp-host accepts exactly this shape; its test runs this builder's output
+ * through the real script, so the two cannot drift apart again.
+ */
+export function issuedCertificateFindArgs(
   root: string,
   host: string,
-): Promise<{ crt: string; key: string } | null> {
-  if (/[*?[\]]/.test(host)) return null;
-  const stdout = await sudoBytes([
-    "-n",
+): string[] {
+  return [
     "find",
     root,
     "-mindepth",
@@ -903,11 +906,33 @@ async function findIssuedPairViaSudo(
     "f",
     "-name",
     `${host}.crt`,
+  ];
+}
+
+export async function findIssuedPairViaSudo(
+  root: string,
+  host: string,
+): Promise<{ crt: string; key: string } | null> {
+  if (/[*?[\]]/.test(host)) return null;
+  const stdout = await sudoBytes([
+    "-n",
+    ...issuedCertificateFindArgs(root, host),
   ]);
   if (!stdout) return null;
-  const paths = new TextDecoder().decode(stdout).split("\n").map((line) =>
-    line.trim()
-  ).filter((line) => line.endsWith(`/${host}.crt`));
+  return issuedPairFromFindOutput(new TextDecoder().decode(stdout), host);
+}
+
+/**
+ * The first `<host>.crt` (sorted, so the issuer choice is stable) in the
+ * tp-host find listing, and its sibling `.key`; null when none is listed.
+ */
+export function issuedPairFromFindOutput(
+  listing: string,
+  host: string,
+): { crt: string; key: string } | null {
+  const paths = listing.split("\n").map((line) => line.trim()).filter((
+    line,
+  ) => line.endsWith(`/${host}.crt`));
   paths.sort((a, b) => a.localeCompare(b));
   const crt = paths[0];
   if (!crt) return null;
