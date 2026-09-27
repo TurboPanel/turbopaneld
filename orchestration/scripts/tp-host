@@ -803,7 +803,9 @@ tp_verb_find() {
   [ $# -ge 1 ] || tp_die "find needs a start directory"
   _fd_base="$1"
   shift
-  if [ "$#" -eq 9 ] && [ "$1" = "-mindepth" ] && [ "$2" = "3" ] &&
+  # Exactly the daemon's issued-certificate lookup (instance-acme-http01.ts
+  # issuedCertificateFindArgs): 8 arguments after the start directory.
+  if [ "$#" -eq 8 ] && [ "$1" = "-mindepth" ] && [ "$2" = "3" ] &&
     [ "$3" = "-maxdepth" ] && [ "$4" = "3" ] && [ "$5" = "-type" ] &&
     [ "$6" = "f" ] && [ "$7" = "-name" ]; then
     # Read-only lookup of an issued certificate.
@@ -813,7 +815,6 @@ tp_verb_find() {
       *) tp_die "find: only -name <host>.crt" ;;
     esac
     tp_hostname_ok "${_fd_name%.crt}" || tp_die "find: refusing name $_fd_name"
-    [ "$#" -eq 8 ] || tp_die "find: unexpected arguments"
     tp_require_class "$_fd_base" tree
     tp_pin_dir "$_fd_base" || exit 1
     find . -mindepth 3 -maxdepth 3 -type f -name "$_fd_name" 2>/dev/null |

@@ -886,13 +886,16 @@ async function findIssuedPair(
   return null;
 }
 
-async function findIssuedPairViaSudo(
+/**
+ * The tp-host argv (verb first) that lists `<root>/<issuer>/<host>/<host>.crt`.
+ * tp-host accepts exactly this shape; its test runs this builder's output
+ * through the real script, so the two cannot drift apart again.
+ */
+export function issuedCertificateFindArgs(
   root: string,
   host: string,
-): Promise<{ crt: string; key: string } | null> {
-  if (/[*?[\]]/.test(host)) return null;
-  const stdout = await sudoBytes([
-    "-n",
+): string[] {
+  return [
     "find",
     root,
     "-mindepth",
@@ -903,6 +906,17 @@ async function findIssuedPairViaSudo(
     "f",
     "-name",
     `${host}.crt`,
+  ];
+}
+
+async function findIssuedPairViaSudo(
+  root: string,
+  host: string,
+): Promise<{ crt: string; key: string } | null> {
+  if (/[*?[\]]/.test(host)) return null;
+  const stdout = await sudoBytes([
+    "-n",
+    ...issuedCertificateFindArgs(root, host),
   ]);
   if (!stdout) return null;
   const paths = new TextDecoder().decode(stdout).split("\n").map((line) =>

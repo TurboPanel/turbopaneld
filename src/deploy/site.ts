@@ -1704,6 +1704,14 @@ function assertSite(site: SiteApplySpec): void {
   }
 }
 
+/**
+ * The tp-host argv (verb first) that sets the setgid bit on every directory
+ * under a principal's web tree. tp-host's test runs it through the script.
+ */
+export function setgidDirectoriesFindArgs(base: string): string[] {
+  return ["find", base, "-type", "d", "-exec", "chmod", "g+s", "{}", "+"];
+}
+
 async function chownWebTree(
   base: string,
   user: string,
@@ -1739,18 +1747,7 @@ async function chownWebTree(
   }
   const setgid = await run(
     "sudo",
-    hostSudoArgs([
-      "-n",
-      "find",
-      base,
-      "-type",
-      "d",
-      "-exec",
-      "chmod",
-      "g+s",
-      "{}",
-      "+",
-    ]),
+    hostSudoArgs(["-n", ...setgidDirectoriesFindArgs(base)]),
   );
   if (!setgid.success) {
     logWarn("deploy", `setgid skipped for ${base}: ${setgid.stderr}`);
