@@ -1159,7 +1159,7 @@ const SITES: CallSite[] = [
   ),
   tpHost(
     'src/commands/fabric.ts|runHost("ip",["addr","replace",address,"dev",FABRIC_INTERFACE_NAME])',
-    { argv: ["ip", "addr", "replace", "10.99.0.1/24", "dev", "tp0"] },
+    { argv: ["ip", "addr", "replace", "10.99.0.1/24", "dev", "tp0"] }, // NOSONAR typescript:S1313 — sample TurboFabric address for this test fixture, not a reachable host
   ),
   tpHost(
     'src/commands/fabric.ts|runHost("ip",["link","add","dev",FABRIC_INTERFACE_NAME,"type","wireguard"])',
