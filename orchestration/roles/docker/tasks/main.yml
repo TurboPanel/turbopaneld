@@ -46,11 +46,46 @@
   failed_when: false
   check_mode: false
 
+# An installed Docker that is stopped — typically systemd's `start-limit-hit`
+# after a burst of restarts — is started again here instead of falling into
+# the install branch, where geerlingguy's "ensure started" hits the same
+# lockout and fails. `reset-failed` is the only way to clear that lockout
+# (no module equivalent), and it is a no-op on a unit that is not failed.
+- name: Clear a systemd start-limit lockout on an installed but stopped Docker  # noqa: command-instead-of-module
+  ansible.builtin.command: systemctl reset-failed docker.service
+  when:
+    - _docker_bin.stat.exists
+    - (_docker_svc.status.ActiveState | default('')) != 'active'
+  changed_when: false
+  failed_when: false
+
+- name: Start an installed but stopped Docker
+  ansible.builtin.systemd:
+    name: docker
+    state: started
+    enabled: true
+  when:
+    - _docker_bin.stat.exists
+    - (_docker_svc.status.ActiveState | default('')) != 'active'
+  register: _docker_restart_attempt
+  failed_when: false
+
+- name: Re-check Docker service state after a start attempt
+  ansible.builtin.systemd:
+    name: docker
+  register: _docker_svc_after
+  failed_when: false
+  check_mode: false
+  when: _docker_restart_attempt is not skipped
+
 - name: Set _docker_ready fact
   ansible.builtin.set_fact:
     _docker_ready: >-
       {{ _docker_bin.stat.exists
-      and (_docker_svc.status.ActiveState | default('')) == 'active' }}
+      and (
+        (_docker_svc.status.ActiveState | default('')) == 'active'
+        or (_docker_svc_after.status.ActiveState | default('')) == 'active'
+      ) }}
 
 - name: Docker already installed and running
   ansible.builtin.debug:

@@ -44,6 +44,10 @@ import {
   proxysqlConfigDir,
   proxysqlProject,
 } from "./engine-paths.ts";
+import {
+  assertContainerStable,
+  type ContainerStabilityOptions,
+} from "./container-stability.ts";
 
 /**
  * Pinned 3.0.9 — fixes CVE-2026-48773 (pre-auth first-packet heap overflow)
@@ -1486,6 +1490,7 @@ export async function ensureProxySqlIngress(
   segmentAttachments: ReadonlyArray<ProxySqlSegmentAttachment>,
   listenerPorts: ProxySqlListenerPorts | null | undefined,
   managedNetwork: string,
+  stability?: ContainerStabilityOptions,
 ): Promise<void> {
   const composePath = proxysqlComposePath(layout);
   await Deno.mkdir(proxysqlConfigDir(layout), { recursive: true, mode: 0o750 });
@@ -1511,6 +1516,12 @@ export async function ensureProxySqlIngress(
   if (!up.success) {
     throw new Error(up.stderr || "proxysql compose up failed");
   }
+  await assertContainerStable(
+    run,
+    descriptor.containerName,
+    "ProxySQL",
+    stability,
+  );
 }
 
 /**

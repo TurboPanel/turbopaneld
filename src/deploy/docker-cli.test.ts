@@ -1,6 +1,7 @@
 import { assertEquals } from "@std/assert";
 import {
   type DockerCliResult,
+  dockerEngineProbe,
   dockerEngineReachable,
   resolveDockerInvocation,
   runDocker,
@@ -523,6 +524,28 @@ test("spawnDockerStreaming spawns dockerBin=/bin/true without spawnStreaming moc
     const process = await spawnDockerStreaming(["ignored"]);
     const status = await process.status;
     assertEquals(status.success, true);
+  } finally {
+    restore();
+  }
+});
+
+test("dockerEngineProbe returns the probe's stderr so the diagnosis can use it", async () => {
+  const restore = setDockerCliIoForTest({
+    runRaw: () =>
+      Promise.resolve(
+        fail(
+          "Cannot connect to the Docker daemon at unix:///var/run/docker.sock",
+        ),
+      ),
+  });
+  try {
+    const probe = await dockerEngineProbe();
+    assertEquals(probe.success, false);
+    assertEquals(
+      probe.stderr.startsWith("Cannot connect to the Docker daemon"),
+      true,
+    );
+    assertEquals(await dockerEngineReachable(), false);
   } finally {
     restore();
   }
