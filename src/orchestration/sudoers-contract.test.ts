@@ -40,6 +40,9 @@ async function readDefaults(role: string): Promise<Record<string, unknown>> {
 }
 
 const USER_TASKS = "roles/turbopanel-user/tasks/main.yml";
+/** tp-host, its conf and the sudoers file: imported by USER_TASKS and by the co-located refresh. */
+const ROOT_HELPER_TASKS = "roles/turbopanel-user/tasks/root-helpers.yml";
+const COLOCATED_REFRESH = "playbooks/daemon-colocated-refresh.yml";
 const LAYOUT_TASKS = "roles/daemon-layout/tasks/main.yml";
 const SUDOERS_TEMPLATE = "roles/turbopanel-user/templates/sudoers.j2";
 const DAEMON_INSTALL = "playbooks/daemon-install.yml";
@@ -82,7 +85,12 @@ test("production sudoers never grants NOPASSWD:ALL as root", async () => {
     assertEquals(/\(ALL(:ALL)?\)/.test(line), false, `runas ALL: ${line}`);
   }
   // No task writes a sudoers file by inline content any more.
-  for (const task of await readTasks(USER_TASKS)) {
+  for (
+    const task of [
+      ...(await readTasks(USER_TASKS)),
+      ...(await readTasks(ROOT_HELPER_TASKS)),
+    ]
+  ) {
     const copy = task["ansible.builtin.copy"];
     if (copy && String(copy.dest ?? "").startsWith("/etc/sudoers")) {
       throw new TypeError(`inline sudoers content in task ${task.name}`);
@@ -212,7 +220,7 @@ test("known root escapes are refused by the sudoers grant", async () => {
 });
 
 test("tp-host is installed root:tp 0750 (never writable by tp) before the sudoers file that names it", async () => {
-  const tasks = await readTasks(USER_TASKS);
+  const tasks = await readTasks(ROOT_HELPER_TASKS);
   const install = tasks.findIndex((task) =>
     String(task["ansible.builtin.copy"]?.dest ?? "").endsWith("/lib/tp-host")
   );
@@ -226,6 +234,74 @@ test("tp-host is installed root:tp 0750 (never writable by tp) before the sudoer
   assertEquals(copy.group, "{{ turbopanel_group }}");
   assertEquals(copy.mode, "0750");
   assertEquals(copy.src, "{{ turbopanel_orchestration_dir }}/scripts/tp-host");
+});
+
+test("the full install still installs the root helpers (turbopanel-user imports root-helpers.yml)", async () => {
+  const tasks = await readTasks(USER_TASKS);
+  const imports = tasks.filter((task) =>
+    task["ansible.builtin.import_tasks"] === "root-helpers.yml"
+  );
+  assertEquals(
+    imports.length,
+    1,
+    "turbopanel-user must import root-helpers.yml once",
+  );
+  // The helper and sudoers tasks live only in root-helpers.yml (one source).
+  for (const task of tasks) {
+    assertEquals(
+      String(task["ansible.builtin.copy"]?.dest ?? "").endsWith("/lib/tp-host"),
+      false,
+      "tp-host must be installed from root-helpers.yml only",
+    );
+    assertEquals(
+      String(task["ansible.builtin.template"]?.dest ?? "").startsWith(
+        "/etc/sudoers",
+      ),
+      false,
+      "sudoers must be written from root-helpers.yml only",
+    );
+  }
+});
+
+test("every daemon-replacing play refreshes tp-host and sudoers from the new release", async () => {
+  // Remote nodes (tp-orchestrate update → run.sh → daemon-install.yml) and
+  // fresh control planes (instance-install.yml) run the whole role.
+  for (const play of [DAEMON_INSTALL, "playbooks/instance-install.yml"]) {
+    const doc = parseYaml(await Deno.readTextFile(join(orch, play)));
+    const roles = (Array.isArray(doc) ? doc[0]?.roles : []) as unknown[];
+    const names = roles.map((r) =>
+      typeof r === "string" ? r : String((r as Record<string, unknown>).role)
+    );
+    assertEquals(
+      names.includes("turbopanel-user"),
+      true,
+      `${play} lacks turbopanel-user`,
+    );
+  }
+  // The co-located refresh (run.sh --daemon-only on a panel host) replaces the
+  // daemon binary and orchestration tree too, so it must re-install the
+  // helpers — and before any role that restarts the daemon.
+  const doc = parseYaml(await Deno.readTextFile(join(orch, COLOCATED_REFRESH)));
+  const play = (Array.isArray(doc) ? doc[0] : {}) as Record<string, unknown>;
+  const preTasks = (play.pre_tasks ?? []) as Task[];
+  const helper = preTasks.find((task) => {
+    const role = task["ansible.builtin.import_role"] as
+      | Record<string, unknown>
+      | undefined;
+    return role?.name === "turbopanel-user" &&
+      role?.tasks_from === "root-helpers";
+  });
+  assertEquals(
+    helper !== undefined,
+    true,
+    "co-located refresh must import root-helpers",
+  );
+  // Only the helpers — never the whole role (its FHS/ownership tasks belong
+  // to instance-install.yml on a panel host).
+  const roles = ((play.roles ?? []) as unknown[]).map((r) =>
+    typeof r === "string" ? r : String((r as Record<string, unknown>).role)
+  );
+  assertEquals(roles.includes("turbopanel-user"), false);
 });
 
 test("the install root and vendor tree are root-owned on managed hosts", async () => {

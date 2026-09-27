@@ -335,7 +335,12 @@ separate update binary installed under `/opt/turbopanel/bin/`.
 and a socket-mode `daemon.env` (no `TURBOPANEL_INSTANCE_URL`) runs
 `daemon-colocated-refresh.yml`. That play refreshes the daemon unit, keeps
 `After=turbopanel-instance.service`, and does not recurse-chown state or
-config. It does not run `daemon-install.yml`. A remote node, or a `daemon.env`
+config. It does not run `daemon-install.yml`. It does re-install the root
+helpers from the new orchestration tree first (`turbopanel-user`
+`tasks_from: root-helpers` — `lib/tp-host`, `lib/tp-host.conf` and
+`/etc/sudoers.d/tp`, `visudo -cf`-validated), so a tp-host fix reaches a
+self-hosted panel host; every play that replaces the daemon binary ships the
+matching tp-host (`sudoers-contract.test.ts` pins this). A remote node, or a `daemon.env`
 that already dials a URL, still uses the remote installer.
 
 The control plane is a **separate verb**, `tp-orchestrate update-instance

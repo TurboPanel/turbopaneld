@@ -71,6 +71,17 @@
           daemon.env names TURBOPANEL_INSTANCE_URL. Co-located refresh will
           not replace that remote dial.
 
+    # run.sh has just replaced the daemon binary and the orchestration tree.
+    # tp-host (the daemon's only root entry point) and the sudoers file that
+    # names it must come from that same tree, before the new daemon starts —
+    # otherwise a fixed helper never reaches a self-hosted panel host. Only the
+    # root-helper tasks: the rest of turbopanel-user (install root, FHS dirs)
+    # is instance-install.yml's to own on this host.
+    - name: Refresh tp-host and the scoped sudoers from the new release
+      ansible.builtin.import_role:
+        name: turbopanel-user
+        tasks_from: root-helpers
+
   roles:
     - role: daemon-layout
     - role: principal-access
