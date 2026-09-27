@@ -383,8 +383,12 @@ The helper reads the update-origin pin (`tp_read_control_plane_pin` — the CDN 
 pin (`TURBOPANEL_MANIFEST_URL`) stays independent of
 `TURBOPANEL_INSTANCE_MANIFEST_URL`. `--ui-manifest-url` accepts only the UI
 GitHub release rail and maps to `run.sh --ui-manifest-url`
-(`TURBOPANEL_UI_MANIFEST_URL`). A host env pin wins over the URL on the
-cell message, so a panel click does not drop a hold. A development checkout refuses the
+(`TURBOPANEL_UI_MANIFEST_URL`). A host env pin wins over a *floating* URL on
+the cell message (a channel pointer), so a panel click does not drop a hold;
+a message URL naming one exact build (`isExactBuildManifestUrl`: a canary
+`manifest-<version>.json` or a `v<version>` tag) wins over the pin
+(`selectUpdateManifestUrl`) — run.sh persists every `--manifest-url` into
+daemon.env, so otherwise the first managed update froze the host. A development checkout refuses the
 reconcile (`control-plane update is not supported on a development host; the
 co-located control plane is source-run — use the dev console converge path`).
 Before the helper runs, the daemon refuses a target below
@@ -454,11 +458,14 @@ map to stable `update-result.error` prefixes consumed by the control plane:
 errors are `preflight_manifest`. `update-result` also carries optional
 `errorCode` / `upgradeId` (legacy `error` text remains). An in-progress
 reconcile still wins first. Cell `manifestUrl` / `targetCommit` / `upgradeId`
-are honoured when present: env `TURBOPANEL_MANIFEST_URL` (and other pins) still
-beat a message `manifestUrl`; `#applyUpdate` retains the verified
-`resolveUpdate` result (commit + `manifestUrl`) so reconcile does not follow a
-moving channel pointer. `targetCommit` must match that signed commit (host pin
-still wins the fetch); it also short-circuits reconcile when it already matches
+are honoured when present: a message `manifestUrl` naming one exact build beats
+env `TURBOPANEL_MANIFEST_URL` (and the other pins); a floating one does not
+(`selectUpdateManifestUrl`). `#applyUpdate` retains the verified
+`resolveUpdate` result (commit + `manifestUrl`) and reconcile hands run.sh
+exactly that URL (`reconcileManifestUrl`; nothing under a dev overlay) — also
+when a host pin supplied it, which before went to run.sh as nothing, so run.sh
+re-resolved the channel and rewrote daemon.env without the hold. `targetCommit`
+must match that signed commit; it also short-circuits reconcile when it already matches
 `getBuildInfo().commit`. A failed `statfs` is `preflight_disk`, not "enough
 space". Reconcile/restart failures emit `failed` progress; restart success is
 required before `update-result(ok: true)`; an already-on-target no-op emits

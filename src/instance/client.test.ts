@@ -5040,6 +5040,146 @@ it({
 
 it({
   name:
+    "update installs the control plane's targeted build over a pin an earlier managed update left",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const stale =
+      "https://github.com/TurboPanel/turbopaneld/releases/download/canary/manifest-0.1.1-canary.20260927-192410-1ade037.json";
+    const target =
+      "https://github.com/TurboPanel/turbopaneld/releases/download/canary/manifest-0.1.1-canary.20260927-193059-fc561fc.json";
+    const prior = Deno.env.get("TURBOPANEL_MANIFEST_URL");
+    Deno.env.set("TURBOPANEL_MANIFEST_URL", stale);
+    let resolvedFrom: string | undefined;
+    let reconciledManifest: string | undefined;
+    const restoreHooks = installClientTestHooks({
+      updateResultHandoffDelayMs: 0,
+      restartDaemonService: () => Promise.resolve(true),
+      getBuildInfo: () => ({
+        commit: "1ade037",
+        buildId: "20260927-192410-1ade037",
+        builtAt: "2026-09-27T19:24:10Z",
+        channel: "canary",
+        sourceUrl: "https://github.com/TurboPanel/turbopaneld/tree/1ade037",
+      }),
+      resolveUpdate: (_config, env) => {
+        resolvedFrom = env?.TURBOPANEL_MANIFEST_URL;
+        return Promise.resolve(
+          sampleUpdateInfo(
+            resolvedFrom === target ? "fc561fc" : "1ade037",
+            resolvedFrom,
+          ),
+        );
+      },
+      downloadRunScript: () => Promise.resolve("#!/bin/sh\nexit 0\n"),
+      executeRunReconcile: (opts) => {
+        reconciledManifest = opts.manifestUrl;
+        return Promise.resolve();
+      },
+    });
+    const { socket, restore } = await startConnectedClient();
+    try {
+      socket.receive({
+        type: "update",
+        id: "upd-unfreeze",
+        manifestUrl: target,
+        targetCommit: "fc561fc",
+        at: new Date().toISOString(),
+      });
+      const result = await waitFor(
+        "unfreeze update-result",
+        () =>
+          framesOfType(socket, "update-result").find((f) =>
+            (f as { id?: string }).id === "upd-unfreeze"
+          ) as { ok?: boolean; errorCode?: string } | undefined,
+      );
+      assertEquals(result.ok, true);
+      assertEquals(resolvedFrom, target);
+      assertEquals(reconciledManifest, target);
+    } finally {
+      restore();
+      restoreHooks();
+      setOptionalEnv("TURBOPANEL_MANIFEST_URL", prior);
+    }
+  },
+});
+
+it({
+  name:
+    "update keeps a host's release pin when the message only names the channel",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const tagPin =
+      "https://github.com/TurboPanel/turbopaneld/releases/download/v0.1.1/manifest.json";
+    const pointer =
+      "https://github.com/TurboPanel/turbopaneld/releases/download/canary/manifest.json";
+    const prior = Deno.env.get("TURBOPANEL_MANIFEST_URL");
+    Deno.env.set("TURBOPANEL_MANIFEST_URL", tagPin);
+    let resolvedFrom: string | undefined;
+    let reconciledManifest: string | undefined;
+    const restoreHooks = installClientTestHooks({
+      updateResultHandoffDelayMs: 0,
+      restartDaemonService: () => Promise.resolve(true),
+      getBuildInfo: () => ({
+        commit: "old",
+        buildId: "dev-old",
+        builtAt: "2026-08-01T00:00:00Z",
+        channel: "release",
+        sourceUrl: "https://github.com/TurboPanel/turbopaneld/tree/old",
+      }),
+      resolveUpdate: (_config, env) => {
+        resolvedFrom = env?.TURBOPANEL_MANIFEST_URL;
+        return Promise.resolve(sampleUpdateInfo("pinned-commit", resolvedFrom));
+      },
+      downloadRunScript: () => Promise.resolve("#!/bin/sh\nexit 0\n"),
+      executeRunReconcile: (opts) => {
+        reconciledManifest = opts.manifestUrl;
+        return Promise.resolve();
+      },
+    });
+    const { socket, restore } = await startConnectedClient();
+    try {
+      socket.receive({
+        type: "update",
+        id: "upd-held",
+        manifestUrl: pointer,
+        at: new Date().toISOString(),
+      });
+      const result = await waitFor(
+        "held update-result",
+        () =>
+          framesOfType(socket, "update-result").find((f) =>
+            (f as { id?: string }).id === "upd-held"
+          ) as { ok?: boolean } | undefined,
+      );
+      assertEquals(result.ok, true);
+      assertEquals(resolvedFrom, tagPin);
+      // run.sh gets the pin itself, not nothing (which re-resolved the
+      // channel and rewrote daemon.env without the hold).
+      assertEquals(reconciledManifest, tagPin);
+    } finally {
+      restore();
+      restoreHooks();
+      setOptionalEnv("TURBOPANEL_MANIFEST_URL", prior);
+    }
+  },
+});
+
+it({
+  name:
     "co-located daemon update refreshes in socket mode without a license or run.sh body",
   permissions: {
     env: true,

@@ -6,6 +6,7 @@ import {
   absolutizeRootCatalogJson,
   builtinChannelManifestUrl,
   DL_BASE_URL,
+  isExactBuildManifestUrl,
   pinnedChannelManifestUrl,
   type ReleaseArtifactKind,
   resolveDlBase,
@@ -13,6 +14,7 @@ import {
   resolveOverlayDlBase,
   resolvePinnedManifestUrl,
   rootCatalogUrl,
+  selectUpdateManifestUrl,
 } from "./urls.ts";
 import type { UpdateChannel } from "./types.ts";
 
@@ -398,4 +400,82 @@ test("absolutizeChannelManifestJson rewrites relative artifact urls", () => {
   }, "https://x/manifest.json") as Record<string, unknown>;
   assertEquals(withoutBinary.binaryArtifacts, "nope");
   assertEquals(withoutBinary.orchestrationArtifact, 12);
+});
+
+const CANARY_BUILD_OLD =
+  "https://github.com/TurboPanel/turbopaneld/releases/download/canary/manifest-0.1.1-canary.20260927-192410-1ade037.json";
+const CANARY_BUILD_NEW =
+  "https://github.com/TurboPanel/turbopaneld/releases/download/canary/manifest-0.1.1-canary.20260927-193059-fc561fc.json";
+const CANARY_POINTER =
+  "https://github.com/TurboPanel/turbopaneld/releases/download/canary/manifest.json";
+const TAG_PIN =
+  "https://github.com/TurboPanel/turbopaneld/releases/download/v0.1.1/manifest.json";
+
+test("isExactBuildManifestUrl: per-build canary copies and release tags name one build", () => {
+  assertEquals(isExactBuildManifestUrl("daemon", CANARY_BUILD_NEW), true);
+  assertEquals(isExactBuildManifestUrl("daemon", TAG_PIN), true);
+  assertEquals(
+    isExactBuildManifestUrl(
+      "instance",
+      "https://github.com/TurboPanel/turbopanel/releases/download/v0.1.2-rc.1/manifest.json",
+    ),
+    true,
+  );
+});
+
+test("isExactBuildManifestUrl: channel pointers and off-rail URLs float", () => {
+  assertEquals(isExactBuildManifestUrl("daemon", CANARY_POINTER), false);
+  assertEquals(
+    isExactBuildManifestUrl(
+      "daemon",
+      "https://github.com/TurboPanel/turbopaneld/releases/latest/download/manifest.json",
+    ),
+    false,
+  );
+  assertEquals(
+    isExactBuildManifestUrl(
+      "daemon",
+      "https://dl.trbp.nl/channels/trunk/manifest.json",
+    ),
+    false,
+  );
+  // the right shape on the wrong repo for the kind
+  assertEquals(isExactBuildManifestUrl("instance", CANARY_BUILD_NEW), false);
+  assertEquals(
+    isExactBuildManifestUrl(
+      "daemon",
+      "https://example.com/TurboPanel/turbopaneld/releases/download/v0.1.1/manifest.json",
+    ),
+    false,
+  );
+  assertEquals(
+    isExactBuildManifestUrl(
+      "daemon",
+      "https://github.com/TurboPanel/turbopaneld/releases/download/canary/manifest-.json",
+    ),
+    false,
+  );
+});
+
+test("selectUpdateManifestUrl: the targeted build wins over a pin an earlier managed update left", () => {
+  const env = { TURBOPANEL_MANIFEST_URL: CANARY_BUILD_OLD };
+  assertEquals(
+    selectUpdateManifestUrl("daemon", env, CANARY_BUILD_NEW),
+    CANARY_BUILD_NEW,
+  );
+});
+
+test("selectUpdateManifestUrl: a floating message never replaces a host pin", () => {
+  const env = { TURBOPANEL_MANIFEST_URL: TAG_PIN };
+  assertEquals(selectUpdateManifestUrl("daemon", env, CANARY_POINTER), TAG_PIN);
+  assertEquals(selectUpdateManifestUrl("daemon", env, undefined), TAG_PIN);
+});
+
+test("selectUpdateManifestUrl: no pin falls back to the message, then nothing", () => {
+  assertEquals(
+    selectUpdateManifestUrl("daemon", {}, CANARY_POINTER),
+    CANARY_POINTER,
+  );
+  assertEquals(selectUpdateManifestUrl("daemon", {}, "  "), undefined);
+  assertEquals(selectUpdateManifestUrl("ui", {}, undefined), undefined);
 });

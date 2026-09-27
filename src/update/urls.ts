@@ -226,6 +226,51 @@ export function resolvePinnedManifestUrl(
   return releaseManifestUrlAllowed(kind, pinned) ? pinned : null;
 }
 
+/** `v<version>`: a release tag as gh-release.yml creates it. */
+const RELEASE_TAG_RE = /^v[0-9][0-9A-Za-z._+-]*$/;
+/** `manifest-<version>.json`: gh-canary.yml's per-build copy on the rolling release. */
+const PER_BUILD_MANIFEST_FILE_RE = /^manifest-[0-9][0-9A-Za-z._+-]*\.json$/;
+
+/**
+ * Whether `url` names exactly one published build of `kind` — the shapes
+ * {@link pinnedChannelManifestUrl} produces and the control plane sends for
+ * an update run: a canary build's `…/releases/download/canary/manifest-<version>.json`
+ * or a tag's `…/releases/download/v<version>/manifest.json`. A channel
+ * pointer (`…/download/canary/manifest.json`, `…/latest/download/…`, the
+ * CDN's `channels/<channel>/manifest.json`) floats and is not one build.
+ */
+export function isExactBuildManifestUrl(kind: string, url: string): boolean {
+  if (!releaseManifestUrlAllowed(kind, url)) return false;
+  const segments = url.slice("https://".length).split("/");
+  // github.com/<owner>/<repo>/releases/download/<tag>/<file>
+  if (segments.length !== 7 || segments[0] !== "github.com") return false;
+  if (segments[4] !== "download") return false;
+  const [tag, file] = [segments[5], segments[6]];
+  if (tag === "canary") return PER_BUILD_MANIFEST_FILE_RE.test(file);
+  return RELEASE_TAG_RE.test(tag) && file === "manifest.json";
+}
+
+/**
+ * The manifest a control-plane-targeted update verifies and installs.
+ *
+ * A run that names one exact build ({@link isExactBuildManifestUrl}) wins
+ * over the host pin. run.sh persists every `--manifest-url` it is handed into
+ * daemon.env, so without this the first managed update left
+ * `TURBOPANEL_MANIFEST_URL=<that build>` behind and every later run verified
+ * the old build and failed `preflight_manifest` against its targetCommit —
+ * the host froze. A floating message URL (a channel pointer) never replaces
+ * a host pin: a panel click must not move a held host onto the channel.
+ */
+export function selectUpdateManifestUrl(
+  kind: ReleaseArtifactKind,
+  env: Record<string, string | undefined>,
+  messageUrl: string | undefined,
+): string | undefined {
+  const requested = messageUrl?.trim() || undefined;
+  if (requested && isExactBuildManifestUrl(kind, requested)) return requested;
+  return resolvePinnedManifestUrl(env, kind) ?? requested;
+}
+
 /**
  * The overlay catalog origin when `TURBOPANEL_DL_BASE` is an https URL.
  * An absent or blank value is `null` (the built-in rail). A configured
