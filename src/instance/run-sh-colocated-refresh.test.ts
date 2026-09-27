@@ -306,3 +306,114 @@ test("run.sh gates --daemon-only's license and manifest checks behind the co-loc
     "else\n  tp_write_colocated_update_origin_pin\nfi",
   );
 });
+
+/**
+ * Run run.sh's real argument checks — from the bare-run decision through the
+ * license decode, exactly as shipped — against a scratch layout. The helper
+ * test above passed while this section still demanded a license, so this one
+ * exercises the whole gate a `--daemon-only` refresh actually goes through.
+ */
+async function runArgumentChecks(
+  opts: { controlPlane: boolean; license?: string; manifestUrl?: string },
+): Promise<{ status: number; stdout: string; stderr: string }> {
+  const source = await Deno.readTextFile(runShPath);
+  const start = source.indexOf("# A bare run — no license");
+  const end = source.indexOf("\nif ! tp_is_root; then");
+  if (start < 0 || end < 0 || end < start) {
+    throw new Error("run.sh argument-check markers moved");
+  }
+  const root = await Deno.makeTempDir({ prefix: "tp-colo-args-" });
+  try {
+    const installRoot = join(root, "opt");
+    const configDir = join(root, "etc");
+    await Deno.mkdir(join(installRoot, "bin"), { recursive: true });
+    await Deno.mkdir(configDir, { recursive: true });
+    if (opts.controlPlane) {
+      await Deno.writeTextFile(join(installRoot, "bin", "turbopanel"), "");
+    }
+    await Deno.writeTextFile(
+      join(configDir, "daemon.env"),
+      opts.controlPlane
+        ? "TURBOPANEL_UPDATE_CHANNEL=canary\n"
+        : "TURBOPANEL_UPDATE_CHANNEL=canary\nTURBOPANEL_INSTANCE_URL=https://panel.example.com\n",
+    );
+    const script = [
+      "set -eu",
+      `INSTALL_ROOT="${installRoot}"`,
+      `ENV_FILE="${configDir}/daemon.env"`,
+      `TURBOPANEL_STATE_DIR="${join(root, "state")}"`,
+      "unset TURBOPANEL_UPDATE_CHANNEL",
+      'tp_print_error() { printf "error: %s\\n" "$*"; }',
+      "tp_builtin_repo_manifest_url() { return 0; }",
+      "DAEMON_ONLY=true",
+      "INSTANCE_INSTALL=false",
+      `LICENSE="${opts.license ?? ""}"`,
+      'HOST_URL=""; TUNNEL_TOKEN=""; INSTANCE_CA=""; DL_BASE=""',
+      `MANIFEST_URL="${opts.manifestUrl ?? ""}"`,
+      'INSTANCE_MANIFEST_URL=""; UI_MANIFEST_URL=""',
+      "SKIP_DAEMON_PACKAGE=false; NO_START=false",
+      extractShellFunction(source, "tp_colocated_control_plane_host"),
+      extractShellFunction(source, "tp_prepare_colocated_daemon_only"),
+      source.slice(start, end),
+      'echo "passed colocated=$COLOCATED_DAEMON_ONLY channel=$TURBOPANEL_UPDATE_CHANNEL license_id=$LICENSE_ID"',
+    ].join("\n");
+    const out = await new Deno.Command("sh", {
+      args: ["-c", script],
+      stdout: "piped",
+      stderr: "piped",
+    }).output();
+    return {
+      status: out.code,
+      stdout: new TextDecoder().decode(out.stdout).trim(),
+      stderr: new TextDecoder().decode(out.stderr),
+    };
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+}
+
+test("--daemon-only on a control-plane host gets past every argument check with no license", async () => {
+  // The owner's command on canary.turbopanel.dev (2026-09-27) stopped here
+  // with "TURBOPANEL_LICENSE (or --license) is required to enrol a daemon".
+  const withPin = await runArgumentChecks({
+    controlPlane: true,
+    manifestUrl:
+      "https://github.com/TurboPanel/turbopaneld/releases/download/canary/manifest-0.1.1-canary.1.json",
+  });
+  assertEquals(withPin.status, 0, withPin.stdout + withPin.stderr);
+  assertEquals(
+    withPin.stdout,
+    "passed colocated=true channel=canary license_id=",
+  );
+
+  const bare = await runArgumentChecks({ controlPlane: true });
+  assertEquals(bare.status, 0, bare.stdout + bare.stderr);
+  assertEquals(bare.stdout, "passed colocated=true channel=canary license_id=");
+});
+
+test("--daemon-only still decodes a license a control-plane caller passes", async () => {
+  const license = btoa("lic-id:lic-token").replaceAll("+", "-").replaceAll(
+    "/",
+    "_",
+  ).replaceAll("=", "");
+  const out = await runArgumentChecks({ controlPlane: true, license });
+  assertEquals(out.status, 0, out.stdout + out.stderr);
+  assertEquals(
+    out.stdout,
+    "passed colocated=false channel=canary license_id=lic-id",
+  );
+});
+
+test("--daemon-only on a remote daemon still needs a pinned manifest and a license", async () => {
+  const noPin = await runArgumentChecks({ controlPlane: false });
+  assertEquals(noPin.status, 1);
+  assertStringIncludes(noPin.stdout, "requires a pinned https manifest");
+
+  const noLicense = await runArgumentChecks({
+    controlPlane: false,
+    manifestUrl:
+      "https://github.com/TurboPanel/turbopaneld/releases/download/canary/manifest-0.1.1-canary.1.json",
+  });
+  assertEquals(noLicense.status, 1);
+  assertStringIncludes(noLicense.stdout, "needs TURBOPANEL_LICENSE");
+});
