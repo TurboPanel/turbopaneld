@@ -74,7 +74,14 @@ const DROP_IN = `${P}/etc/ssh/sshd_config.d/60-turbopanel.conf`;
 const ACME_CERTS = `${STATE}/instance-acme/caddy/certificates`;
 const ACME_CERT =
   `${ACME_CERTS}/acme-v02.api.letsencrypt.org-directory/panel.example.com/panel.example.com.crt`;
-const CADDY_BIN = `${P}/opt/turbopanel/vendor/caddy/2.11.4/caddy`;
+/** A production layout (paths as a managed host has them). */
+const LAYOUT = resolveLayout({}, {
+  skipDiscovery: true,
+  forceMode: "production",
+});
+/** The vendored runtimes root on a managed host. */
+const VENDOR = LAYOUT.runtimesDir;
+const CADDY_BIN = `${P}${VENDOR}/caddy/2.11.4/caddy`;
 const NGINX_CONF = `${CONF}/nginx/sites/svc1.conf`;
 const FABRIC_DIR = `${STATE}/network`;
 const WG_CONF = `${P}/etc/wireguard/tp0.conf`;
@@ -106,10 +113,6 @@ export const STAGED_CONTENT = "staged content\n";
  * Unit text as the daemon renders it for a production layout, with the
  * managed roots moved under `{P}` (tp-host checks some exec paths exactly).
  */
-const LAYOUT = resolveLayout({}, {
-  skipDiscovery: true,
-  forceMode: "production",
-});
 const underPrefix = (text: string) =>
   ["/opt/turbopanel", "/etc/turbopanel", "/var/lib/turbopanel", "/srv/users"]
     .reduce((out, root) => out.replaceAll(root, `${P}${root}`), text);
@@ -856,7 +859,7 @@ const SITES: CallSite[] = [
     {
       runas: "tpnginx",
       argv: [
-        "/opt/turbopanel/vendor/nginx/1.28.0/sbin/nginx",
+        `${VENDOR}/nginx/1.28.0/sbin/nginx`,
         "-t",
         "-c",
         "/etc/turbopanel/nginx/nginx.conf",
@@ -867,7 +870,7 @@ const SITES: CallSite[] = [
     'src/deploy/site/engine-driver.ts|["-n",apacheBinaryPath(layout),"-t","-f",apacheMainConfigPath(layout)]',
     {
       argv: [
-        "/opt/turbopanel/vendor/apache/current/bin/httpd",
+        `${VENDOR}/apache/current/bin/httpd`,
         "-t",
         "-f",
         "/etc/turbopanel/apache/httpd.conf",
@@ -879,7 +882,7 @@ const SITES: CallSite[] = [
     {
       runas: "tpols",
       argv: [
-        "/opt/turbopanel/vendor/openlitespeed/1.8.3/bin/openlitespeed",
+        `${VENDOR}/openlitespeed/1.8.3/bin/openlitespeed`,
         "-t",
         "-c",
         "/etc/turbopanel/openlitespeed/httpd_config.conf",
@@ -893,7 +896,7 @@ const SITES: CallSite[] = [
       argv: [
         "/usr/bin/env",
         "XDG_DATA_HOME=/var/lib/turbopanel/site-caddy",
-        "/opt/turbopanel/vendor/caddy/2.11.4/caddy",
+        `${VENDOR}/caddy/2.11.4/caddy`,
         "validate",
         "--adapter",
         "caddyfile",
