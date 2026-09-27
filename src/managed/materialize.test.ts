@@ -361,3 +361,77 @@ test("normalizeManagedFileOwnership throws when verification docker run fails", 
     );
   });
 });
+
+test("normalizeManagedFileOwnership verify step never invokes su — runs as engine user directly", async () => {
+  await withTempLayout(async (_layout, root) => {
+    const managedRoot = join(root, "managed1");
+    await Deno.mkdir(join(managedRoot, "config"), { recursive: true });
+    const calls: string[][] = [];
+    await normalizeManagedFileOwnership(
+      "mysql:9.7-oracle",
+      managedRoot,
+      "mysql",
+      "mysql",
+      (args) => {
+        calls.push([...args]);
+        return Promise.resolve({
+          success: true,
+          stdout: "",
+          stderr: "",
+          code: 0,
+        });
+      },
+    );
+    const verifyCall = calls[1] ?? [];
+    assertEquals(verifyCall.includes("mysql:mysql"), true);
+    assertEquals(verifyCall.includes("0"), false);
+    assertEquals(
+      verifyCall.some((part) => part.includes("su ")),
+      false,
+    );
+  });
+});
+
+test("normalizeManagedFileOwnership formats multi-line verification failures as readable, separated reasons", async () => {
+  await withTempLayout(async (_layout, root) => {
+    const managedRoot = join(root, "managed1");
+    await Deno.mkdir(join(managedRoot, "config"), { recursive: true });
+    let attempt = 0;
+    const err = await assertRejects(
+      () =>
+        normalizeManagedFileOwnership(
+          "mysql:9.7-oracle",
+          managedRoot,
+          "mysql",
+          "mysql",
+          () => {
+            attempt += 1;
+            if (attempt === 1) {
+              return Promise.resolve({
+                success: true,
+                stdout: "",
+                stderr: "",
+                code: 0,
+              });
+            }
+            return Promise.resolve({
+              success: false,
+              stdout: "",
+              stderr:
+                "sh: line 4: su: command not found\nengine user cannot traverse config/\n",
+              code: 127,
+            });
+          },
+        ),
+      Error,
+    );
+    const message = (err as Error).message;
+    assertEquals(message.includes("_"), false);
+    assertEquals(
+      message.includes(
+        "sh: line 4: su: command not found; engine user cannot traverse config/",
+      ),
+      true,
+    );
+  });
+});
