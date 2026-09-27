@@ -67,6 +67,11 @@ test("ensureDocker throws when Engine still unreachable after docker-setup", asy
         dockerBinaryPresent: () => Promise.resolve(false),
         dockerEngineReachable: () => Promise.resolve(false),
         runDockerSetup: () => Promise.resolve(),
+        // Host-free: the default diagnosis would read this machine's systemd.
+        diagnose: () =>
+          Promise.resolve(
+            "Docker Engine API still unreachable after docker-setup",
+          ),
       }),
     Error,
     "Docker Engine API still unreachable after docker-setup",
@@ -132,5 +137,58 @@ test("ensureDocker default binary probe rethrows unexpected stat errors", async 
       }),
     TypeError,
     "stat failed",
+  );
+});
+
+test("concurrent ensureDocker callers share one docker-setup run", async () => {
+  let setupCalls = 0;
+  let reachablePhase = 0;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  const deps = {
+    dockerBinaryPresent: () => Promise.resolve(true),
+    dockerEngineReachable: () => {
+      reachablePhase += 1;
+      return Promise.resolve(reachablePhase > 1);
+    },
+    runDockerSetup: async () => {
+      setupCalls += 1;
+      await gate;
+    },
+  };
+  const first = ensureDocker(deps);
+  const second = ensureDocker(deps);
+  release();
+  await Promise.all([first, second]);
+  assertEquals(setupCalls, 1);
+});
+
+test("ensureDocker settles before the next call starts a fresh run", async () => {
+  let setupCalls = 0;
+  const deps = {
+    dockerBinaryPresent: () => Promise.resolve(false),
+    dockerEngineReachable: () => Promise.resolve(true),
+    runDockerSetup: () => {
+      setupCalls += 1;
+      return Promise.resolve();
+    },
+  };
+  await ensureDocker(deps);
+  await ensureDocker(deps);
+  assertEquals(setupCalls, 2);
+});
+
+test("ensureDocker throws the diagnosis when the API stays unreachable", async () => {
+  await assertRejects(
+    () =>
+      ensureDocker({
+        dockerBinaryPresent: () => Promise.resolve(true),
+        dockerEngineReachable: () => Promise.resolve(false),
+        runDockerSetup: () => Promise.resolve(),
+        diagnose: () =>
+          Promise.resolve("Docker service is not running (ActiveState=failed)"),
+      }),
+    Error,
+    "Docker service is not running",
   );
 });

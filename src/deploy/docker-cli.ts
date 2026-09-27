@@ -257,14 +257,18 @@ export async function runDocker(
   return preferOriginalSocketError(direct, asRoot);
 }
 
-/** True when `docker version` can talk to the Engine API. */
-export async function dockerEngineReachable(): Promise<boolean> {
-  const result = await runDocker([
+/** `docker version` through the same escalation ladder as every other call. */
+export async function dockerEngineProbe(): Promise<DockerCliResult> {
+  return await runDocker([
     "version",
     "--format",
     "{{.Server.Version}}",
   ]);
-  return result.success;
+}
+
+/** True when `docker version` can talk to the Engine API. */
+export async function dockerEngineReachable(): Promise<boolean> {
+  return (await dockerEngineProbe()).success;
 }
 
 export type DockerInvocation = {
