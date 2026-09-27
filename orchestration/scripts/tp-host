@@ -340,6 +340,43 @@ tp_getent() {
 tp_uid_of() { tp_getent passwd "$1" | cut -d: -f3; }
 tp_gid_of_group() { tp_getent group "$1" | cut -d: -f3; }
 
+# A numeric uid/gid is only another spelling of an account or group the name
+# checks already allow: it must resolve to an entry whose id field is exactly
+# that number, and every check (and the chown itself) then sees the name.
+# All-digit strings are always ids, never names; no leading zeros.
+tp_is_numeric_id() {
+  case "$1" in ''|*[!0-9]*) return 1 ;; esac
+  case "$1" in 0?*) return 1 ;; esac
+  [ "${#1}" -le 10 ]
+}
+
+# The passwd/group entry whose id field (the third) is exactly $2.
+tp_getent_id() {
+  if [ -n "$TP_TEST" ]; then
+    awk -F: -v i="$2" '$3 == i { print; found = 1; exit } END { exit !found }' "$P/etc/$1"
+    return
+  fi
+  getent "$1" "$2"
+}
+
+tp_name_for_id() {
+  _ni_line="$(tp_getent_id "$1" "$2")" || return 1
+  _ni_name="${_ni_line%%:*}"
+  _ni_rest="${_ni_line#*:*:}"
+  [ "${_ni_rest%%:*}" = "$2" ] || return 1
+  tp_name_shape_ok "$_ni_name" || return 1
+  ! tp_is_numeric_id "$_ni_name" || return 1
+  printf '%s' "$_ni_name"
+}
+
+# An owner or group as a name: names pass through unchanged, ids resolve.
+tp_canon_owner() {
+  if tp_is_numeric_id "$1"; then tp_name_for_id passwd "$1"; else printf '%s' "$1"; fi
+}
+tp_canon_group() {
+  if tp_is_numeric_id "$1"; then tp_name_for_id group "$1"; else printf '%s' "$1"; fi
+}
+
 tp_name_shape_ok() {
   case "$1" in
     ''|-*|*[!A-Za-z0-9_.-]*) return 1 ;;
@@ -555,6 +592,12 @@ tp_verb_install() {
     esac
   done
   [ -n "$_in_mode" ] || tp_die "install: a mode is required"
+  if [ -n "$_in_owner" ]; then
+    _in_owner="$(tp_canon_owner "$_in_owner")" || tp_die "refusing owner id $_in_owner"
+  fi
+  if [ -n "$_in_group" ]; then
+    _in_group="$(tp_canon_group "$_in_group")" || tp_die "refusing group id $_in_group"
+  fi
   if [ -n "$_in_dir" ]; then
     [ $# -eq 1 ] || tp_die "install -d takes one directory"
     _in_path="$1"
@@ -798,6 +841,16 @@ tp_verb_chown() {
   case "$_co_spec" in
     *:*) _co_owner="${_co_spec%%:*}"; _co_group="${_co_spec#*:}" ;;
     *) _co_owner="$_co_spec"; _co_group="" ;;
+  esac
+  if [ -n "$_co_owner" ]; then
+    _co_owner="$(tp_canon_owner "$_co_owner")" || tp_die "refusing owner id in $_co_spec"
+  fi
+  if [ -n "$_co_group" ]; then
+    _co_group="$(tp_canon_group "$_co_group")" || tp_die "refusing group id in $_co_spec"
+  fi
+  case "$_co_spec" in
+    *:*) _co_spec="$_co_owner:$_co_group" ;;
+    *) _co_spec="$_co_owner" ;;
   esac
   _co_class="$(tp_path_class "$_co_path")" || tp_die "refusing path $_co_path"
   case "$_co_class" in

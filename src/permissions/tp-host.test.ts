@@ -422,6 +422,60 @@ test("the daemon's own unit files pass; privileged or foreign units do not", asy
   });
 });
 
+test("numeric owner and group ids resolve to the same accounts the name checks allow", async () => {
+  await withHost(async (host) => {
+    // The daemon rewrites instance/runtime.env keeping the file's numeric
+    // owner (Admin → Hostnames → Apply): `install -o 0 -g 9999` must mean
+    // root:tp, exactly as the names would.
+    await Deno.mkdir(host.path("etc/turbopanel/instance"), { recursive: true });
+    const env = host.path("etc/turbopanel/instance/runtime.env");
+    const ok = await host.run([
+      "install",
+      "-m",
+      "0640",
+      "-o",
+      "0",
+      "-g",
+      "9999",
+      host.path("tmp/staged"),
+      env,
+    ]);
+    assertEquals(ok.code, 0, ok.stderr);
+    assertStringIncludes(ok.stdout, "EXEC [chown] [-h] [--] [root:tp] [./f]");
+    assertEquals(await Deno.readTextFile(env), "staged content\n");
+
+    // A principal's own ids on its own home, as names would be.
+    const sites = host.path("srv/users/alice/sites");
+    const mine = await host.run(["chown", "15001:15001", sites]);
+    assertEquals(mine.code, 0, mine.stderr);
+    assertStringIncludes(
+      mine.stdout,
+      "EXEC [chown] [-h] [--] [alice:alice-grp] [./sites]",
+    );
+
+    const staged = host.path("tmp/staged");
+    // An id with no account, or one only a name the checks refuse maps to.
+    await refused(host, ["install", "-m", "0640", "-o", "1000", staged, env]);
+    await refused(host, ["install", "-m", "0640", "-g", "27", staged, env]);
+    // A principal's uid is not a service account on the managed tree.
+    await refused(host, ["install", "-m", "0640", "-o", "15001", staged, env]);
+    // Leading zeros and over-long ids are not ids.
+    await refused(host, ["install", "-m", "0640", "-o", "00", staged, env]);
+    await refused(host, ["install", "-m", "0640", "-g", "09999", staged, env]);
+    await refused(host, [
+      "install",
+      "-m",
+      "0640",
+      "-o",
+      "12345678901",
+      staged,
+      env,
+    ]);
+    // Another principal's ids on alice's home stay refused.
+    await refused(host, ["chown", "15003", sites]);
+  });
+});
+
 test("rm, chown and chmod stay inside the trees and never follow a symlink", async () => {
   await withHost(async (host) => {
     const tree = host.path("var/lib/turbopanel/scratch");
