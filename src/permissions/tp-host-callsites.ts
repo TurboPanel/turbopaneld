@@ -1075,7 +1075,9 @@ const SITES: CallSite[] = [
   tpHost(
     "src/instance/restart-daemon-service.ts|args",
     { argv: ["systemctl", "enable", "turbopaneld.service"] },
-    { argv: ["systemctl", "restart", "turbopaneld.service"] },
+    // --no-block: restarting one's own unit must not wait for the job to
+    // finish (see restart-daemon-service.ts for why).
+    { argv: ["systemctl", "restart", "--no-block", "turbopaneld.service"] },
   ),
   tpHost(
     "src/instance/run-reconcile.ts|args",

@@ -481,6 +481,15 @@ required before `update-result(ok: true)`; an already-on-target no-op emits
 forwards markers. The old process reports `restarting` just before the
 post-`update-result` handoff delay and systemd restart; the **new** process
 reports `verifying` then `done` on first attach after a successful self-update.
+That restart (`restart-daemon-service.ts`) is `systemctl restart --no-block`,
+never a plain blocking restart: a blocking call waits for the job to finish,
+and finishing means stopping the old unit — which, by default `KillMode`,
+kills every process in its cgroup, including the very `sudo systemctl` child
+still waiting on that job. `--no-block` only waits for the job to be queued,
+which happens before that teardown starts, so the old process's own restart
+call can't be caught mid-race and misreported as a failure. Whether the
+restart actually worked is never this call's job to decide — that's what the
+guard/attach flow below is for.
 
 **Self-healing guard:** daemon self-update arms `<runDir>/update-guard.json`
 (target commit + deadline) and starts `turbopaneld-update-guard.timer` (~10
