@@ -21,6 +21,7 @@ import {
   MIN_INSTANCE_UPDATE_FREE_BACKUP_BYTES,
   MIN_INSTANCE_UPDATE_FREE_INSTALL_BYTES,
   PRODUCTION_CONTROL_PLANE,
+  reconcileHelperInvocation,
   reconcileNeedsRootHelper,
   resolveAutomaticUpdateTrust,
   resolveBootstrapInsecureTls,
@@ -1653,4 +1654,44 @@ test("rootHelperColocatedRefreshInvocation refuses a missing channel and a non-d
         "https://github.com/TurboPanel/turbopanel/releases/download/canary/manifest.json",
     })
   );
+});
+
+test("reconcileHelperInvocation picks update-colocated for a panel host and update elsewhere", () => {
+  const colocated = reconcileHelperInvocation({
+    colocated: true,
+    args: ["--license", "ignored", "--no-start"],
+    channel: "canary",
+  });
+  assertEquals(colocated.args[3], "update-colocated");
+  assertEquals(colocated.args.includes("--license"), false);
+
+  const remote = reconcileHelperInvocation({
+    args: ["--license", "abc", "--no-start"],
+    channel: "canary",
+  });
+  assertEquals(remote.args[3], "update");
+  assertEquals(remote.args.includes("--license"), true);
+});
+
+test("executeRunReconcile refuses a co-located daemon update on a development host", async () => {
+  const originalCommand = Deno.Command;
+  let spawned = false;
+  try {
+    Deno.Command = class {
+      constructor(_cmd: string, _opts: Deno.CommandOptions) {}
+      spawn() {
+        spawned = true;
+        return fakeReconcileChild();
+      }
+    } as unknown as typeof Deno.Command;
+    await assertRejects(
+      () =>
+        executeRunReconcile({ args: [], channel: "canary", colocated: true }),
+      Error,
+      "not supported on a development host",
+    );
+    assertEquals(spawned, false);
+  } finally {
+    Deno.Command = originalCommand;
+  }
 });

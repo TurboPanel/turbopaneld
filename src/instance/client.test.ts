@@ -5082,6 +5082,7 @@ it({
       },
       executeRunReconcile: (opts) => {
         captured = opts;
+        opts.onStage?.("downloading");
         return Promise.resolve();
       },
     });

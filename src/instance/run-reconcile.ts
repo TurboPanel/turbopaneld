@@ -504,6 +504,22 @@ export function rootHelperColocatedRefreshInvocation(
   };
 }
 
+/**
+ * Which root-helper verb a daemon self-update runs — exported for tests:
+ * `update-colocated` on a self-hosted control-plane host, `update` elsewhere.
+ */
+export function reconcileHelperInvocation(options: {
+  colocated?: boolean;
+  args: string[];
+  channel?: string;
+  manifestUrl?: string;
+}): { bin: string; args: string[] } {
+  const pins = { channel: options.channel, manifestUrl: options.manifestUrl };
+  return options.colocated
+    ? rootHelperColocatedRefreshInvocation(pins)
+    : rootHelperReconcileInvocation(options.args, pins);
+}
+
 async function consumeReconcileStdout(
   stream: ReadableStream<Uint8Array>,
   onStage?: (stage: UpdateProgressStage) => void,
@@ -626,15 +642,12 @@ export async function executeRunReconcile(options: {
   }
 
   if (reconcileNeedsRootHelper()) {
-    const helper = options.colocated
-      ? rootHelperColocatedRefreshInvocation({
-        channel,
-        manifestUrl: manifestForHelper,
-      })
-      : rootHelperReconcileInvocation(options.args, {
-        channel,
-        manifestUrl: manifestForHelper,
-      });
+    const helper = reconcileHelperInvocation({
+      colocated: options.colocated,
+      args: options.args,
+      channel,
+      manifestUrl: manifestForHelper,
+    });
     const child = new Deno.Command(helper.bin, {
       args: helper.args,
       cwd: reconcileCwd,
