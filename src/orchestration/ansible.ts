@@ -596,7 +596,9 @@ export async function ensureGalaxyDockerRole(): Promise<void> {
     const helper = galaxyDockerRoleHelperInvocation();
     await runOrThrow(helper.bin, helper.args);
     logInfo("orchestration", "galaxy docker role ready");
-    await writeGalaxyDockerStamp(stamp);
+    // No stamp write: the stamp lives in the same root-owned tree. The
+    // helper keeps its own marker (`.turbopanel-version` in the role) and
+    // answers "already installed" when the pin is current.
     return;
   }
 
@@ -1095,7 +1097,10 @@ export async function runRabbitmqSetup(
  *
  * Docker Galaxy roles are not installed here — see {@link ensureGalaxyDockerRole}.
  * Runs the localhost smoke test only when bootstrap inputs changed or ansible
- * was freshly installed. Writes the bootstrap stamp on success.
+ * was freshly installed. Writes the bootstrap stamp on success, and only when
+ * it changed: on a managed host the root-run install (`run.sh` →
+ * `bootstrap-orchestration`) wrote it into the root-owned vendor tree, and the
+ * daemon runs this again at every start as `tp`, which cannot write there.
  */
 export async function bootstrapOrchestrationRuntime(): Promise<void> {
   const stamp = await computeBootstrapStamp();
@@ -1117,5 +1122,5 @@ export async function bootstrapOrchestrationRuntime(): Promise<void> {
     );
   }
 
-  await writeBootstrapStamp(stamp);
+  if (bootstrapInputsChanged) await writeBootstrapStamp(stamp);
 }

@@ -138,6 +138,22 @@ describe("ansible runtime with stubbed binaries", () => {
     await ansible.bootstrapOrchestrationRuntime();
   });
 
+  it("bootstrapOrchestrationRuntime leaves a current stamp untouched", async () => {
+    // A managed daemon runs this at every start as `tp`, and the root-owned
+    // vendor tree refuses the write: a current stamp must not be rewritten.
+    const { bootstrapStampFile } = runtimePaths(fixture.runtimesDir);
+    const current = await bootstrapStamp.computeBootstrapStamp();
+    await Deno.writeTextFile(bootstrapStampFile, `${current}\n`);
+    const past = new Date("2001-01-01T00:00:00Z");
+    await Deno.utime(bootstrapStampFile, past, past);
+
+    await ansible.bootstrapOrchestrationRuntime();
+
+    const after = await Deno.stat(bootstrapStampFile);
+    assertEquals(after.mtime?.getTime(), past.getTime());
+    assertEquals(await bootstrapStamp.readBootstrapStamp(), current);
+  });
+
   it("ensureUv and ensurePython use stub uv without network", async () => {
     await uv.ensureUv();
     await python.ensurePython();
@@ -409,6 +425,11 @@ exit 1
     const { bootstrapStampFile } = runtimePaths(fixture.runtimesDir);
     await Deno.remove(bootstrapStampFile).catch(() => {});
     await ansible.bootstrapOrchestrationRuntime();
+    // A missing (or stale) stamp is written once the runtime checks out.
+    assertEquals(
+      await bootstrapStamp.readBootstrapStamp(),
+      await bootstrapStamp.computeBootstrapStamp(),
+    );
   });
 
   it("warns when ansible current symlink cannot be created", async () => {
