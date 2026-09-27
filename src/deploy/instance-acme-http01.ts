@@ -919,9 +919,20 @@ async function findIssuedPairViaSudo(
     ...issuedCertificateFindArgs(root, host),
   ]);
   if (!stdout) return null;
-  const paths = new TextDecoder().decode(stdout).split("\n").map((line) =>
-    line.trim()
-  ).filter((line) => line.endsWith(`/${host}.crt`));
+  return issuedPairFromFindOutput(new TextDecoder().decode(stdout), host);
+}
+
+/**
+ * The first `<host>.crt` (sorted, so the issuer choice is stable) in the
+ * tp-host find listing, and its sibling `.key`; null when none is listed.
+ */
+export function issuedPairFromFindOutput(
+  listing: string,
+  host: string,
+): { crt: string; key: string } | null {
+  const paths = listing.split("\n").map((line) => line.trim()).filter((
+    line,
+  ) => line.endsWith(`/${host}.crt`));
   paths.sort((a, b) => a.localeCompare(b));
   const crt = paths[0];
   if (!crt) return null;

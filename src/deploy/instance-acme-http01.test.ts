@@ -20,6 +20,8 @@ import {
   INSTANCE_ACME_HTTP01_PREFLIGHT_PREFIX,
   INSTANCE_ACME_HTTP01_SITE,
   type InstanceAcmeCommand,
+  issuedCertificateFindArgs,
+  issuedPairFromFindOutput,
   issueInstanceLetsEncryptCertificates,
   letsEncryptHostnames,
   openInstanceAcmeWindow,
@@ -1021,4 +1023,55 @@ test("issuer unit is installed without capabilities or an install target", async
   assertStringIncludes(text, "instance-acme.json");
   assertStringIncludes(text, "instance-acme.log");
   assertStringIncludes(text, "NoNewPrivileges=true");
+});
+
+test("issuedCertificateFindArgs builds the exact find tp-host accepts", () => {
+  assertEquals(
+    issuedCertificateFindArgs("/var/lib/acme/certificates", "a.example.com"),
+    [
+      "find",
+      "/var/lib/acme/certificates",
+      "-mindepth",
+      "3",
+      "-maxdepth",
+      "3",
+      "-type",
+      "f",
+      "-name",
+      "a.example.com.crt",
+    ],
+  );
+});
+
+test("issuedPairFromFindOutput picks the first issuer's cert and its key", () => {
+  const root = "/var/lib/acme/certificates";
+  const le = `${root}/acme-v02.api.letsencrypt.org-directory/a.example.com`;
+  const listing = [
+    `${root}/z-issuer/a.example.com/a.example.com.crt`,
+    "",
+    `  ${le}/a.example.com.crt  `,
+    `${root}/acme-v02/b.example.com/b.example.com.crt`,
+  ].join("\n");
+  assertEquals(issuedPairFromFindOutput(listing, "a.example.com"), {
+    crt: `${le}/a.example.com.crt`,
+    key: `${le}/a.example.com.key`,
+  });
+});
+
+test("issuedPairFromFindOutput is null when the host has no certificate", () => {
+  assertEquals(issuedPairFromFindOutput("", "a.example.com"), null);
+  assertEquals(
+    issuedPairFromFindOutput(
+      "/r/i/b.example.com/b.example.com.crt\n",
+      "a.example.com",
+    ),
+    null,
+  );
+  assertEquals(
+    issuedPairFromFindOutput(
+      "/r/i/xa.example.com/xa.example.com.crt\n",
+      "a.example.com",
+    ),
+    null,
+  );
 });
