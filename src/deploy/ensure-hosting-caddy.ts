@@ -152,15 +152,16 @@ async function downloadHostingCaddy(
     }
     await createSymlink(versionDir, currentLink);
 
-    // Best-effort ownership for managed hosts (root:turbopanel). May fail
-    // without sudo — binary is still runnable by the daemon user when owned by
-    // that user (typical after a direct download as turbopanel/dev).
+    // Best-effort root ownership on managed hosts; the group stays the daemon
+    // account's (it downloaded the file), so the 0750 binary still runs. May
+    // fail without sudo — then the daemon user keeps owning it, which also
+    // runs.
     const chown = await deps.runCommand(
       "sudo",
       hostSudoArgs([
         "-n",
         "chown",
-        "root:turbopanel",
+        "root",
         binPath,
       ]),
     );

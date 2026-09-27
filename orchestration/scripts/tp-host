@@ -710,8 +710,10 @@ tp_verb_mv() {
   case "$_mv_class" in tree|principal|sshd) ;; *) tp_die "refusing path $2" ;; esac
   tp_path_class "$1" >/dev/null || tp_die "refusing path $1"
   tp_pin_parent "$1" || tp_die "no such directory for $1"
+  # Both names live in the pinned directory (checked above); PIN_NAME is the
+  # source's, so the destination's last component is taken from $2.
   _mv_from="${1##*/}"
-  mv -T -f -- "./$_mv_from" "./$PIN_NAME"
+  mv -T -f -- "./$_mv_from" "./${2##*/}"
 }
 
 tp_verb_rm() {
@@ -726,7 +728,12 @@ tp_verb_rm() {
   done
   [ $# -eq 1 ] || tp_die "rm takes one path"
   _rm_class="$(tp_path_class "$1")" || tp_die "refusing path $1"
-  case "$_rm_class" in tree|principal|unit|sshd) ;; *) tp_die "refusing path $1" ;; esac
+  case "$_rm_class" in
+    tree|principal|unit|sshd|sysctl) ;;
+    # TurboFabric teardown removes the tp0 config, never the directory.
+    wireguard) [ "$1" = "$R_WG/tp0.conf" ] || tp_die "refusing path $1" ;;
+    *) tp_die "refusing path $1" ;;
+  esac
   tp_is_root_path "$1" && tp_die "refusing to remove $1"
   # A principal home itself is removed by the uninstaller, never by the daemon.
   [ "${1%/*}" = "$R_PRINCIPALS" ] && tp_die "refusing to remove a principal home"
@@ -1045,7 +1052,7 @@ tp_verb_xtables() {
 tp_verb_ip() {
   case "$*" in
     "link add dev tp0 type wireguard"|"link set dev tp0 up"|\
-"-o -4 addr show dev tp0"|"-o link show dev tp0")
+"-o -4 addr show dev tp0"|"-o link show dev tp0"|"link delete tp0")
       tp_exec ip "$@"
       ;;
   esac
@@ -1058,6 +1065,13 @@ tp_verb_ip() {
     tp_exec ip "$@"
   fi
   tp_die "ip: unsupported command"
+}
+
+# Kernel modules the daemon loads on request: the drive temperature sensor
+# (hardware profile `drivetempEnabled`). One fixed name, no options.
+tp_verb_modprobe() {
+  [ "$*" = "drivetemp" ] || tp_die "modprobe: only drivetemp"
+  tp_exec modprobe drivetemp
 }
 
 tp_verb_wg() {
@@ -1281,5 +1295,6 @@ case "$_verb" in
   gpasswd) tp_verb_gpasswd "$@" ;;
   chpasswd) tp_verb_chpasswd "$@" ;;
   getent) tp_verb_getent "$@" ;;
+  modprobe) tp_verb_modprobe "$@" ;;
   *) tp_die "refusing verb $_verb" ;;
 esac

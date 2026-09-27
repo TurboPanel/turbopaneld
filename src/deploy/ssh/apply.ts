@@ -336,10 +336,6 @@ async function reconcileDropIn(
       "-d",
       "-m",
       "0755",
-      "-o",
-      "root",
-      "-g",
-      "root",
       dirname(dropInPath),
     ]),
   );

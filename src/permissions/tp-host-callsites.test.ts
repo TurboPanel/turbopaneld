@@ -477,6 +477,21 @@ const NEAR_MISSES: Array<{ why: string; sample: TpHostSample }> = [
     why: "a verb tp-host does not implement",
     sample: { argv: ["sh", "-c", "id"] },
   },
+  {
+    why: "a kernel module other than drivetemp",
+    sample: { argv: ["modprobe", "overlay"] },
+  },
+  {
+    why: "removing the wireguard directory rather than tp0.conf",
+    sample: { argv: ["rm", "-rf", "{P}/etc/wireguard"] },
+  },
+  {
+    why: "a sysctl file TurboPanel does not own",
+    sample: {
+      argv: ["rm", "-f", "{P}/etc/sysctl.d/10-network-security.conf"],
+      setup: { files: { "{P}/etc/sysctl.d/10-network-security.conf": "x\n" } },
+    },
+  },
 ];
 
 for (const { why, sample } of NEAR_MISSES) {

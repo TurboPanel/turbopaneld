@@ -226,8 +226,8 @@ const SITES: CallSite[] = [
 
   // --- hosting Caddy --------------------------------------------------------
   tpHost(
-    'src/deploy/ensure-hosting-caddy.ts|["-n","chown","root:turbopanel",binPath]',
-    { argv: ["chown", "root:turbopanel", CADDY_BIN], setup: file(CADDY_BIN) },
+    'src/deploy/ensure-hosting-caddy.ts|["-n","chown","root",binPath]',
+    { argv: ["chown", "root", CADDY_BIN], setup: file(CADDY_BIN) },
   ),
 
   // --- principals -----------------------------------------------------------
@@ -1005,20 +1005,8 @@ const SITES: CallSite[] = [
     setup: file(DROP_IN),
   }),
   tpHost(
-    'src/deploy/ssh/apply.ts|["-n","install","-d","-m","0755","-o","root","-g","root",dirname(dropInPath)]',
-    {
-      argv: [
-        "install",
-        "-d",
-        "-m",
-        "0755",
-        "-o",
-        "root",
-        "-g",
-        "root",
-        `${P}/etc/ssh/sshd_config.d`,
-      ],
-    },
+    'src/deploy/ssh/apply.ts|["-n","install","-d","-m","0755",dirname(dropInPath)]',
+    { argv: ["install", "-d", "-m", "0755", `${P}/etc/ssh/sshd_config.d`] },
   ),
   tpHost('src/deploy/ssh/apply.ts|["-n","rm","-f","--",backup]', {
     argv: ["rm", "-f", "--", `${DROP_IN}.tpprev`],
@@ -1106,11 +1094,9 @@ const SITES: CallSite[] = [
   ),
 
   // --- metrics ------------------------------------------------------------
-  sudo(
+  tpHost(
     'src/metrics/collector/sensors/drivetemp.ts|["-n","modprobe","drivetemp"]',
-    {
-      argv: ["modprobe", "drivetemp"],
-    },
+    { argv: ["modprobe", "drivetemp"] },
   ),
 
   // --- wrapper calls: each shape a forwarding wrapper is handed -------------
@@ -1492,47 +1478,7 @@ export type KnownBug =
   | { why: string; refusal: string }
   | { why: string; pending: string };
 
-const SAME_FILE: KnownBug = {
-  why: "tp-host mv renames the source onto itself",
-  refusal: "are the same file",
-};
-const FABRIC_RM: KnownBug = {
-  why: "TurboFabric teardown: tp-host rm refuses sysctl.d and wireguard files",
-  refusal: "refusing path",
-};
-
-const KNOWN_BUGS: Record<string, KnownBug> = {
-  'src/deploy/release/promote.ts|["-n","mv","-Tf","--",tmpLink,currentLink]':
-    SAME_FILE,
-  'src/deploy/site/engine-driver.ts|["-n","mv","-f","--",staged.candidatePath,staged.path]':
-    SAME_FILE,
-  'src/deploy/site/engine-driver.ts|["-n","mv","-f","--",staged.previousPath,staged.path]':
-    SAME_FILE,
-  'src/deploy/ssh/apply.ts|["-n","mv","-f","--",backup,dropInPath]': SAME_FILE,
-  'src/deploy/ssh/apply.ts|["-n","install","-d","-m","0755","-o","root","-g","root",dirname(dropInPath)]':
-    {
-      why: "tp-host never re-owns a managed root such as sshd_config.d",
-      refusal: "refusing to re-own",
-    },
-  'src/deploy/ensure-hosting-caddy.ts|["-n","chown","root:turbopanel",binPath]':
-    {
-      why: "no host has a `turbopanel` group",
-      refusal: "refusing owner root:turbopanel",
-    },
-  'src/commands/fabric.ts|runTeardownBestEffort("ip",["link","delete",FABRIC_INTERFACE_NAME],isMissingDeviceText)':
-    {
-      why: "TurboFabric teardown: tp-host has no `ip link delete dev tp0`",
-      refusal: "ip: unsupported command",
-    },
-  'src/commands/fabric.ts|runTeardownBestEffort("rm",["-f",FABRIC_SYSCTL_DROPIN],()=>true)':
-    FABRIC_RM,
-  'src/commands/fabric.ts|runTeardownBestEffort("rm",["-f",WG_QUICK_CONF_PATH],()=>true)':
-    FABRIC_RM,
-  'src/metrics/collector/sensors/drivetemp.ts|["-n","modprobe","drivetemp"]': {
-    why: "neither sudoers nor tp-host allows modprobe",
-    refusal: "sudoers",
-  },
-};
+const KNOWN_BUGS: Record<string, KnownBug> = {};
 
 export const CALL_SITES: readonly CallSite[] = SITES.map((site) =>
   KNOWN_BUGS[site.key] === undefined
