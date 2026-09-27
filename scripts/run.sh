@@ -1986,6 +1986,13 @@ if [ "$DAEMON_ONLY" = true ] && ! tp_prepare_colocated_daemon_only; then
     exit 1
   fi
 fi
+# The co-located refresh (daemon-colocated-refresh.yml) does not enrol, so a
+# license is neither required nor decoded nor staged. A caller-supplied one is
+# still validated and staged exactly as before.
+COLOCATED_DAEMON_ONLY=false
+if [ "$DAEMON_ONLY" = true ] && [ -z "$LICENSE" ] && tp_colocated_control_plane_host; then
+  COLOCATED_DAEMON_ONLY=true
+fi
 
 if [ "$INSTANCE_INSTALL" = true ]; then
   # A control plane install: no license (the wizard issues the first one),
@@ -2007,14 +2014,14 @@ if [ "$INSTANCE_INSTALL" = true ]; then
 elif [ "$SKIP_DAEMON_PACKAGE" = true ]; then
   tp_print_error "--skip-daemon-package is only valid with --instance --no-start"
   exit 1
-elif [ -z "$LICENSE" ]; then
+elif [ -z "$LICENSE" ] && [ "$COLOCATED_DAEMON_ONLY" != true ]; then
   tp_print_error "TURBOPANEL_LICENSE (or --license) is required to enrol a daemon (run with no arguments to install a control plane instead)"
   exit 1
 fi
 
 LICENSE_ID=""
 LICENSE_TOKEN=""
-if [ "$INSTANCE_INSTALL" != true ]; then
+if [ "$INSTANCE_INSTALL" != true ] && [ "$COLOCATED_DAEMON_ONLY" != true ]; then
   _padded="$LICENSE"
   while [ $(( ${#_padded} % 4 )) -ne 0 ]; do
     _padded="${_padded}="
@@ -2101,7 +2108,7 @@ LICENSE_STAGING_DIR="$STATE_DIR/daemon-license-staging"
 # relax them is the undocumented operator-only TURBOPANEL_RELEASE_TLS_INSECURE_OVERRIDE.
 
 mkdir -p "$STATE_DIR" "$CONFIG_DIR" "$BIN_DIR" "$INSTALL_ROOT/share" "$RUN_DIR"
-if [ "$INSTANCE_INSTALL" != true ]; then
+if [ "$INSTANCE_INSTALL" != true ] && [ "$COLOCATED_DAEMON_ONLY" != true ]; then
   STAGING_DIR="$LICENSE_STAGING_DIR"
   mkdir -p "$STAGING_DIR"
   printf '%s' "$LICENSE_ID" > "$STAGING_DIR/license.id"
