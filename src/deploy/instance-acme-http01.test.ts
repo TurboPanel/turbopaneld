@@ -16,6 +16,7 @@ import {
   classifyPort80,
   closeInstanceAcmeWindow,
   type CommandResult,
+  findIssuedPairViaSudo,
   groupIdFromGroupFile,
   INSTANCE_ACME_HTTP01_PREFLIGHT_PREFIX,
   INSTANCE_ACME_HTTP01_SITE,
@@ -1074,4 +1075,73 @@ test("issuedPairFromFindOutput is null when the host has no certificate", () => 
     ),
     null,
   );
+});
+
+test("findIssuedPairViaSudo refuses a glob-shaped host without spawning a command", async () => {
+  const original = Deno.Command;
+  let spawned = false;
+  // deno-lint-ignore no-explicit-any
+  (Deno as any).Command = class {
+    constructor() {
+      spawned = true;
+    }
+  };
+  try {
+    const found = await findIssuedPairViaSudo(
+      "/var/lib/acme/certificates",
+      "*.example.com",
+    );
+    assertEquals(found, null);
+    assertEquals(spawned, false);
+  } finally {
+    Deno.Command = original;
+  }
+});
+
+test("findIssuedPairViaSudo is null when the sudo find fails", async () => {
+  const original = Deno.Command;
+  // deno-lint-ignore no-explicit-any
+  (Deno as any).Command = class {
+    output() {
+      return Promise.resolve({
+        success: false,
+        stdout: new Uint8Array(),
+        stderr: new TextEncoder().encode("sudo: a password is required"),
+      });
+    }
+  };
+  try {
+    const found = await findIssuedPairViaSudo(
+      "/var/lib/acme/certificates",
+      "a.example.com",
+    );
+    assertEquals(found, null);
+  } finally {
+    Deno.Command = original;
+  }
+});
+
+test("findIssuedPairViaSudo parses tp-host's listing into the issued pair", async () => {
+  const original = Deno.Command;
+  const root = "/var/lib/acme/certificates";
+  const le = `${root}/acme-v02.api.letsencrypt.org-directory/a.example.com`;
+  // deno-lint-ignore no-explicit-any
+  (Deno as any).Command = class {
+    output() {
+      return Promise.resolve({
+        success: true,
+        stdout: new TextEncoder().encode(`${le}/a.example.com.crt\n`),
+        stderr: new Uint8Array(),
+      });
+    }
+  };
+  try {
+    const found = await findIssuedPairViaSudo(root, "a.example.com");
+    assertEquals(found, {
+      crt: `${le}/a.example.com.crt`,
+      key: `${le}/a.example.com.key`,
+    });
+  } finally {
+    Deno.Command = original;
+  }
 });

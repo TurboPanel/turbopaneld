@@ -909,7 +909,7 @@ export function issuedCertificateFindArgs(
   ];
 }
 
-async function findIssuedPairViaSudo(
+export async function findIssuedPairViaSudo(
   root: string,
   host: string,
 ): Promise<{ crt: string; key: string } | null> {
