@@ -121,7 +121,10 @@ import {
   readUpdateRollback,
 } from "./update-guard.ts";
 import { UpdateProgressReporter } from "./update-progress-reporter.ts";
-import { resolvePinnedManifestUrl } from "../update/urls.ts";
+import {
+  isExactBuildManifestUrl,
+  selectUpdateManifestUrl,
+} from "../update/urls.ts";
 import { installOriginNeedsInsecureTls } from "./install-tls.ts";
 import { ManagedHaObserver } from "./ha-observe.ts";
 import { AcmeIssuanceObserver } from "./acme-observe.ts";
@@ -1963,7 +1966,6 @@ export class InstanceClient {
       // The daemon on a self-hosted control-plane host: refresh it in socket
       // mode (tp-orchestrate update-colocated → run.sh --daemon-only). It
       // does not re-enrol, so no license, host or CA travels.
-      const hostPin = resolvePinnedManifestUrl(env, "daemon");
       logInfo(
         "update",
         "refreshing the co-located daemon via run.sh --daemon-only",
@@ -1972,9 +1974,7 @@ export class InstanceClient {
       await clientTestHooks.executeRunReconcile({
         args: [],
         channel: config.channel,
-        manifestUrl: hostPin
-          ? undefined
-          : updateInfo.manifestUrl?.trim() || options.manifestUrl?.trim(),
+        manifestUrl: reconcileManifestUrl(updateInfo, options.manifestUrl, env),
         colocated: true,
         onStage: (stage) => {
           this.#reportUpdateStage(stage, { upgradeId: options.upgradeId });
@@ -2037,10 +2037,11 @@ export class InstanceClient {
         insecureTls: false,
         caPath: scriptCaPath,
       });
-    const hostPin = resolvePinnedManifestUrl(env, "daemon");
-    const manifestForReconcile = hostPin
-      ? undefined
-      : updateInfo.manifestUrl?.trim() || options.manifestUrl?.trim();
+    const manifestForReconcile = reconcileManifestUrl(
+      updateInfo,
+      options.manifestUrl,
+      env,
+    );
     this.#reportUpdateStage("preparing", { upgradeId: options.upgradeId });
     await clientTestHooks.executeRunReconcile({
       script,
@@ -2151,12 +2152,17 @@ export class InstanceClient {
 
       const config = this.#resolveUpdateConfigForMessage(message);
       const env = Deno.env.toObject();
-      const messageManifest = resolvePinnedManifestUrl(env, "daemon")
-        ? undefined
-        : message.manifestUrl?.trim() || undefined;
-      if (messageManifest) {
-        assertReleaseManifestUrl("daemon", messageManifest, "manifestUrl");
+      const requestedManifest = message.manifestUrl?.trim() || undefined;
+      if (requestedManifest) {
+        assertReleaseManifestUrl("daemon", requestedManifest, "manifestUrl");
       }
+      // The build the control plane targeted wins over a pin an earlier
+      // managed update left in daemon.env (selectUpdateManifestUrl).
+      const messageManifest = selectUpdateManifestUrl(
+        "daemon",
+        env,
+        requestedManifest,
+      );
       const resolveEnv = messageManifest
         ? { ...env, TURBOPANEL_MANIFEST_URL: messageManifest }
         : env;
@@ -2300,9 +2306,10 @@ export class InstanceClient {
       const env = Deno.env.toObject();
       const channel = message.channel?.trim() ||
         resolveUpdateChannelConfig(env).channel;
-      // An env pin holds a package. A panel click must not replace it with
-      // the floating channel URL. The message supplies the pin only when
-      // the host has none.
+      // An env pin holds a package: a panel click must not replace it with
+      // the floating channel URL. A message naming one exact build (the
+      // control plane's target) wins, so a pin an earlier managed update
+      // left in daemon.env cannot freeze the host (selectUpdateManifestUrl).
       const messageInstancePin = message.manifestUrl?.trim() || undefined;
       const messageUiPin = message.uiManifestUrl?.trim() || undefined;
       if (messageInstancePin) {
@@ -2311,9 +2318,12 @@ export class InstanceClient {
       if (messageUiPin) {
         assertReleaseManifestUrl("ui", messageUiPin, "uiManifestUrl");
       }
-      const instancePin = resolvePinnedManifestUrl(env, "instance") ||
-        messageInstancePin;
-      const uiPin = resolvePinnedManifestUrl(env, "ui") || messageUiPin;
+      const instancePin = selectUpdateManifestUrl(
+        "instance",
+        env,
+        messageInstancePin,
+      );
+      const uiPin = selectUpdateManifestUrl("ui", env, messageUiPin);
       await this.#wireUpdateProgress(ws, message.id, {
         upgradeId,
         targetCommit: message.targetCommit?.trim() || undefined,
@@ -3155,3 +3165,24 @@ export async function connectInstance(
 
 export type { DaemonMessage };
 export { readKeyId, writeKeyId };
+
+/**
+ * The manifest run.sh installs for a daemon update: exactly the one that was
+ * verified when it names one build, so run.sh never re-resolves the channel
+ * pointer onto a different build (and rewrites daemon.env with that build,
+ * not whatever the channel says now). A floating verified URL passes through
+ * unchanged. Nothing under a development overlay: run.sh refuses
+ * `--manifest-url` together with `TURBOPANEL_DL_BASE`.
+ */
+export function reconcileManifestUrl(
+  verified: { manifestUrl?: string },
+  requested: string | undefined,
+  env: Record<string, string | undefined>,
+): string | undefined {
+  if (env.TURBOPANEL_DL_BASE?.trim()) return undefined;
+  const verifiedUrl = verified.manifestUrl?.trim() || undefined;
+  if (verifiedUrl && isExactBuildManifestUrl("daemon", verifiedUrl)) {
+    return verifiedUrl;
+  }
+  return verifiedUrl ?? (requested?.trim() || undefined);
+}
