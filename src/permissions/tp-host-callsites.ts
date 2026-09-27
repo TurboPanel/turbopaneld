@@ -436,8 +436,25 @@ const SITES: CallSite[] = [
     argv: ["cat", "--", ACME_CERT],
     setup: file(ACME_CERT),
   }),
+  tpHost(
+    'src/deploy/instance-acme-http01.ts|sudoBytes(["-n",...issuedCertificateFindArgs(root,host)])',
+    {
+      argv: [
+        "find",
+        ACME_CERTS,
+        "-mindepth",
+        "3",
+        "-maxdepth",
+        "3",
+        "-type",
+        "f",
+        "-name",
+        "panel.example.com.crt",
+      ],
+      setup: file(ACME_CERT),
+    },
+  ),
   tpHost("src/deploy/instance-acme-http01.ts|[...args]", {
-    // issuedCertificateFindArgs: where Caddy stored the issued pair.
     argv: [
       "find",
       ACME_CERTS,
@@ -727,7 +744,7 @@ const SITES: CallSite[] = [
     setup: dir(`${SITE}/webroot`),
   }),
   tpHost(
-    'src/deploy/site.ts|["-n","find",base,"-type","d","-exec","chmod","g+s","{}","+"]',
+    'src/deploy/site.ts|["-n",...setgidDirectoriesFindArgs(base)]',
     {
       argv: [
         "find",
@@ -1463,26 +1480,6 @@ const SITES: CallSite[] = [
       setup: dir(`${CONF}/instance`),
     },
   ),
-
-  // The issued-certificate lookup (turbopaneld #50 rebuilds this call).
-  tpHost(
-    'src/deploy/instance-acme-http01.ts|sudoBytes(["-n","find",root,"-mindepth","3","-maxdepth","3","-type","f","-name",`${host}.crt`])',
-    {
-      argv: [
-        "find",
-        ACME_CERTS,
-        "-mindepth",
-        "3",
-        "-maxdepth",
-        "3",
-        "-type",
-        "f",
-        "-name",
-        "panel.example.com.crt",
-      ],
-      setup: file(ACME_CERT),
-    },
-  ),
 ];
 
 /**
@@ -1499,11 +1496,6 @@ const SAME_FILE: KnownBug = {
   why: "tp-host mv renames the source onto itself",
   refusal: "are the same file",
 };
-const FIND_DEPTH: KnownBug = {
-  why: "tp-host find refuses -mindepth/-maxdepth",
-  pending: "turbopaneld#50",
-};
-
 const FABRIC_RM: KnownBug = {
   why: "TurboFabric teardown: tp-host rm refuses sysctl.d and wireguard files",
   refusal: "refusing path",
@@ -1527,9 +1519,6 @@ const KNOWN_BUGS: Record<string, KnownBug> = {
       why: "no host has a `turbopanel` group",
       refusal: "refusing owner root:turbopanel",
     },
-  "src/deploy/instance-acme-http01.ts|[...args]": FIND_DEPTH,
-  'src/deploy/instance-acme-http01.ts|sudoBytes(["-n","find",root,"-mindepth","3","-maxdepth","3","-type","f","-name",`${host}.crt`])':
-    FIND_DEPTH,
   'src/commands/fabric.ts|runTeardownBestEffort("ip",["link","delete",FABRIC_INTERFACE_NAME],isMissingDeviceText)':
     {
       why: "TurboFabric teardown: tp-host has no `ip link delete dev tp0`",
