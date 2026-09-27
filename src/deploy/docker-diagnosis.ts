@@ -68,8 +68,8 @@ export function parseDockerGroup(
     if (name !== "docker" || gid === undefined) continue;
     const parsed = Number(gid);
     if (!Number.isInteger(parsed)) return null;
-    const list = (members ?? "").split(",").map((m) => m.trim()).filter((m) =>
-      m
+    const list = (members ?? "").split(",").map((m) => m.trim()).filter(
+      Boolean,
     );
     return { gid: parsed, members: list };
   }
@@ -89,7 +89,7 @@ export function explainDockerUnreachable(input: {
   probeStderr: string;
 }): string {
   const { service, processGroups, dockerGroup, username, probeStderr } = input;
-  if (service && service.activeState && service.activeState !== "active") {
+  if (service?.activeState && service.activeState !== "active") {
     const result = service.result && service.result !== "success"
       ? `, Result=${service.result}`
       : "";
@@ -147,7 +147,8 @@ async function usernameDefault(): Promise<string> {
   }
 }
 
-const defaultIo: DockerDiagnosisIo = {
+/** The real host reads; exported so tests can exercise them where they are safe. */
+export const defaultDockerDiagnosisIo: DockerDiagnosisIo = {
   systemctlShow: systemctlShowDefault,
   readProcStatus: () => readText("/proc/self/status"),
   readGroupFile: () => readText("/etc/group"),
@@ -157,7 +158,7 @@ const defaultIo: DockerDiagnosisIo = {
 /** Read the host and explain why Docker is unreachable. */
 export async function diagnoseDockerUnreachable(
   probeStderr: string,
-  io: DockerDiagnosisIo = defaultIo,
+  io: DockerDiagnosisIo = defaultDockerDiagnosisIo,
 ): Promise<string> {
   const [showText, statusText, groupText, username] = await Promise.all([
     io.systemctlShow(),

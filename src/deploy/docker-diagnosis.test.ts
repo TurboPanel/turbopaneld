@@ -1,5 +1,6 @@
 import { assertEquals, assertStringIncludes } from "@std/assert";
 import {
+  defaultDockerDiagnosisIo,
   diagnoseDockerUnreachable,
   explainDockerUnreachable,
   parseDockerGroup,
@@ -113,4 +114,70 @@ test("diagnoseDockerUnreachable reads the host through its seams", async () => {
     username: () => Promise.resolve("tp"),
   });
   assertStringIncludes(msg, "restart the daemon");
+});
+
+test("a stopped Docker without a failure Result omits the Result and lockout note", () => {
+  const msg = explainDockerUnreachable({
+    service: { activeState: "inactive", result: "success" },
+    processGroups: [],
+    dockerGroup: null,
+    username: "tp",
+    probeStderr: "",
+  });
+  assertEquals(
+    msg,
+    "Docker service is not running (ActiveState=inactive); check `journalctl -u docker`",
+  );
+});
+
+test("an unknown service state falls through to the group checks", () => {
+  const msg = explainDockerUnreachable({
+    service: { activeState: "", result: "" },
+    processGroups: [9999],
+    dockerGroup: { gid: 989, members: ["tp"] },
+    username: "tp",
+    probeStderr: "",
+  });
+  assertStringIncludes(msg, "restart the daemon");
+});
+
+test("with no username the membership check is skipped", () => {
+  const msg = explainDockerUnreachable({
+    service: null,
+    processGroups: [989],
+    dockerGroup: { gid: 989, members: [] },
+    username: "",
+    probeStderr: "boom",
+  });
+  assertEquals(
+    msg,
+    "Docker Engine API still unreachable after docker-setup: boom",
+  );
+});
+
+test("parseDockerGroup handles a docker line with no member field", () => {
+  assertEquals(parseDockerGroup("docker:x:989\n"), { gid: 989, members: [] });
+});
+
+test("empty host reads still produce an explanation", async () => {
+  const msg = await diagnoseDockerUnreachable("", {
+    systemctlShow: () => Promise.resolve(""),
+    readProcStatus: () => Promise.resolve(""),
+    readGroupFile: () => Promise.resolve(""),
+    username: () => Promise.resolve(""),
+  });
+  assertEquals(msg, "Docker Engine API still unreachable after docker-setup");
+});
+
+test("the default host reads never throw", async () => {
+  const [show, status, group, user] = await Promise.all([
+    defaultDockerDiagnosisIo.systemctlShow(),
+    defaultDockerDiagnosisIo.readProcStatus(),
+    defaultDockerDiagnosisIo.readGroupFile(),
+    defaultDockerDiagnosisIo.username(),
+  ]);
+  for (const value of [show, status, group, user]) {
+    assertEquals(typeof value, "string");
+  }
+  assertEquals(typeof (await diagnoseDockerUnreachable("x")), "string");
 });

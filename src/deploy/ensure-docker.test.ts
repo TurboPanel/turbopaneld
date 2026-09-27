@@ -192,3 +192,36 @@ test("ensureDocker throws the diagnosis when the API stays unreachable", async (
     "Docker service is not running",
   );
 });
+
+test("an unreachable engine with the binary present always attempts setup", async () => {
+  let setupCalls = 0;
+  let reachableCalls = 0;
+  await ensureDocker({
+    dockerBinaryPresent: () => Promise.resolve(true),
+    dockerEngineReachable: () => {
+      reachableCalls += 1;
+      return Promise.resolve(reachableCalls > 1);
+    },
+    runDockerSetup: () => {
+      setupCalls += 1;
+      return Promise.resolve();
+    },
+  });
+  assertEquals(setupCalls, 1);
+});
+
+test("a caller arriving after a failed run starts a fresh one", async () => {
+  let setupCalls = 0;
+  const failing = {
+    dockerBinaryPresent: () => Promise.resolve(true),
+    dockerEngineReachable: () => Promise.resolve(false),
+    runDockerSetup: () => {
+      setupCalls += 1;
+      return Promise.resolve();
+    },
+    diagnose: () => Promise.resolve("down"),
+  };
+  await assertRejects(() => ensureDocker(failing), Error, "down");
+  await assertRejects(() => ensureDocker(failing), Error, "down");
+  assertEquals(setupCalls, 2);
+});

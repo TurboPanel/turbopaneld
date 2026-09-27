@@ -80,7 +80,7 @@ let inflight: Promise<void> | undefined;
  * docker-diagnosis.ts.
  */
 export function ensureDocker(deps?: EnsureDockerDeps): Promise<void> {
-  if (inflight) return inflight;
+  if (inflight !== undefined) return inflight;
   const run = ensureDockerOnce(deps).finally(() => {
     inflight = undefined;
   });
