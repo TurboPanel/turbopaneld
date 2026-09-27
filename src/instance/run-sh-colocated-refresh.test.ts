@@ -208,3 +208,101 @@ exit 0
     await Deno.remove(root, { recursive: true });
   }
 });
+
+/** Run extracted run.sh functions in a scratch layout; prints `$@`'s result. */
+async function runPrepare(
+  opts: { controlPlane: boolean; envChannel?: string; callerChannel?: string },
+): Promise<{ status: number; stdout: string; stderr: string }> {
+  const source = await Deno.readTextFile(runShPath);
+  const root = await Deno.makeTempDir({ prefix: "tp-colo-prepare-" });
+  try {
+    const installRoot = join(root, "opt");
+    const configDir = join(root, "etc");
+    await Deno.mkdir(join(installRoot, "bin"), { recursive: true });
+    await Deno.mkdir(configDir, { recursive: true });
+    if (opts.controlPlane) {
+      await Deno.writeTextFile(join(installRoot, "bin", "turbopanel"), "");
+    }
+    const envLines = ["TURBOPANEL_CONFIG_DIR=/etc/turbopanel"];
+    if (opts.envChannel) {
+      envLines.push(`TURBOPANEL_UPDATE_CHANNEL=${opts.envChannel}`);
+    }
+    if (!opts.controlPlane) {
+      envLines.push("TURBOPANEL_INSTANCE_URL=https://panel.example.com");
+    }
+    await Deno.writeTextFile(
+      join(configDir, "daemon.env"),
+      envLines.join("\n") + "\n",
+    );
+    const script = [
+      "set -eu",
+      `INSTALL_ROOT="${installRoot}"`,
+      `ENV_FILE="${configDir}/daemon.env"`,
+      opts.callerChannel
+        ? `TURBOPANEL_UPDATE_CHANNEL="${opts.callerChannel}"; export TURBOPANEL_UPDATE_CHANNEL`
+        : "unset TURBOPANEL_UPDATE_CHANNEL",
+      extractShellFunction(source, "tp_colocated_control_plane_host"),
+      extractShellFunction(source, "tp_prepare_colocated_daemon_only"),
+      'if tp_prepare_colocated_daemon_only; then echo "colocated channel=$TURBOPANEL_UPDATE_CHANNEL"; else echo remote; fi',
+    ].join("\n");
+    const out = await new Deno.Command("sh", {
+      args: ["-c", script],
+      stdout: "piped",
+      stderr: "piped",
+    }).output();
+    return {
+      status: out.code,
+      stdout: new TextDecoder().decode(out.stdout).trim(),
+      stderr: new TextDecoder().decode(out.stderr),
+    };
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+}
+
+test("--daemon-only on a control-plane host needs no license or manifest pin: the channel comes from daemon.env", async () => {
+  const fromEnv = await runPrepare({
+    controlPlane: true,
+    envChannel: "canary",
+  });
+  assertEquals(fromEnv.status, 0, fromEnv.stderr);
+  assertEquals(fromEnv.stdout, "colocated channel=canary");
+
+  const caller = await runPrepare({
+    controlPlane: true,
+    envChannel: "canary",
+    callerChannel: "rc",
+  });
+  assertEquals(caller.stdout, "colocated channel=rc");
+
+  const defaulted = await runPrepare({ controlPlane: true });
+  assertEquals(defaulted.stdout, "colocated channel=release");
+
+  // A remote daemon keeps the old requirements (license + pinned manifest).
+  const remote = await runPrepare({
+    controlPlane: false,
+    envChannel: "canary",
+  });
+  assertEquals(remote.stdout, "remote");
+});
+
+test("run.sh gates --daemon-only's license and manifest checks behind the co-located test, and pins a control-plane host to the CDN", async () => {
+  const source = await Deno.readTextFile(runShPath);
+  assertStringIncludes(
+    source,
+    'if [ "$DAEMON_ONLY" = true ] && ! tp_prepare_colocated_daemon_only; then',
+  );
+  const pinFn = extractShellFunction(
+    source,
+    "tp_write_colocated_update_origin_pin",
+  );
+  assertStringIncludes(
+    pinFn,
+    "host=\\ndl_base=\\ninstance_ca=\\nuploaded_trust=\\ncolocated=1",
+  );
+  assertStringIncludes(pinFn, "install -m 0600 -o root -g root");
+  assertStringIncludes(
+    source,
+    "else\n  tp_write_colocated_update_origin_pin\nfi",
+  );
+});
