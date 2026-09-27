@@ -34,6 +34,10 @@ import { logInfo } from "../util/logger.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 import { pruneStaleManagedDockerNetworks } from "./networks.ts";
 import {
+  assertContainerStable,
+  type ContainerStabilityOptions,
+} from "./container-stability.ts";
+import {
   orchestratorApiCnfPath,
   orchestratorComposePath,
   orchestratorConfigDir,
@@ -175,6 +179,7 @@ export function orchestratorCompose(
   identity: SystemComponentDescriptor,
   raft: ManagedHaRaftConfig,
   managedNetwork: string,
+  daemonGid?: number | null,
 ): string {
   const project = orchestratorProject(identity.serviceId);
   assertSafeComposeProjectName(project);
@@ -201,6 +206,16 @@ export function orchestratorCompose(
     `      serviceId: ${identity.serviceId}`,
     `      containerName: ${identity.containerName}`,
     "    restart: unless-stopped",
+    // The image runs as uid 1001 (`mysql`), but the daemon writes the
+    // bind-mounted conf and TLS CA as `tp:tp` 0640 (they hold the topology
+    // and HTTP-auth passwords, so never world-readable). Joining the
+    // daemon's group is what lets the container read them; without it the
+    // process dies on start with "Cannot read config file … permission
+    // denied" and `restart: unless-stopped` loops it forever.
+    ...(typeof daemonGid === "number" && Number.isInteger(daemonGid) &&
+        daemonGid > 0
+      ? ["    group_add:", `      - ${quoteYamlScalar(String(daemonGid))}`]
+      : []),
     "    ports:",
     `      - ${httpPublish}`,
     `      - ${raftPublish}`,
@@ -317,6 +332,12 @@ export async function inspectOrchestratorContainer(
   }
 }
 
+export type EnsureOrchestratorOptions = {
+  /** Group the container joins to read daemon-written files; defaults to the daemon's own gid. */
+  daemonGid?: number | null;
+  stability?: ContainerStabilityOptions;
+};
+
 export async function ensureOrchestratorStack(
   layout: LayoutPaths,
   descriptor: SystemComponentDescriptor,
@@ -324,6 +345,7 @@ export async function ensureOrchestratorStack(
   managedNetwork: string,
   conf: string,
   run: RunDockerFn = defaultRunDocker,
+  options: EnsureOrchestratorOptions = {},
 ): Promise<boolean> {
   const configDir = orchestratorConfigDir(layout);
   await Deno.mkdir(configDir, { recursive: true, mode: 0o750 });
@@ -338,7 +360,7 @@ export async function ensureOrchestratorStack(
 
   const composePath = orchestratorComposePath(layout);
   const confPath = orchestratorConfPath(layout);
-  const composeYaml = orchestratorCompose(descriptor, raft, managedNetwork);
+
   const previousCompose = await readPreviousConfig(composePath);
   const previousConf = await readPreviousConfig(confPath);
   const previousNetwork = previousCompose === null
@@ -346,10 +368,22 @@ export async function ensureOrchestratorStack(
     : readManagedNetworkFromCompose(previousCompose);
   const networkRenamed = previousNetwork !== null &&
     previousNetwork !== managedNetwork;
-  const restarted = previousCompose !== composeYaml || previousConf !== conf ||
-    networkRenamed;
 
   await Deno.writeTextFile(confPath, conf, { mode: 0o640 });
+  // The group that owns the conf the daemon just wrote is the one the
+  // container must join to read it (`tp` on a host; the dev user's group in
+  // the Vagrant overlay). Read off the file so no `--allow-sys` is needed.
+  const daemonGid = options.daemonGid === undefined
+    ? (await Deno.stat(confPath)).gid
+    : options.daemonGid;
+  const composeYaml = orchestratorCompose(
+    descriptor,
+    raft,
+    managedNetwork,
+    daemonGid,
+  );
+  const restarted = previousCompose !== composeYaml || previousConf !== conf ||
+    networkRenamed;
   await Deno.writeTextFile(composePath, composeYaml, { mode: 0o640 });
 
   const upArgs = [
@@ -365,6 +399,12 @@ export async function ensureOrchestratorStack(
   if (!up.success) {
     throw new Error(up.stderr || "orchestrator compose up failed");
   }
+  await assertContainerStable(
+    run,
+    descriptor.containerName,
+    "Orchestrator",
+    options.stability,
+  );
   await pruneStaleManagedDockerNetworks(
     managedNetwork,
     previousNetwork,
