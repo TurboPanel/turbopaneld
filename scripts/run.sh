@@ -1325,11 +1325,16 @@ tp_retain_instance_prev() {
   _bin="$INSTALL_ROOT/bin/turbopanel"
   _lib="$INSTALL_ROOT/lib/libduckdb.so"
   _ui="$INSTALL_ROOT/share/ui"
+  _label="$(tp_instance_build_label_path)"
   tp_drop_prev "${_bin}.prev"
   tp_drop_prev "${_lib}.prev"
   tp_drop_prev "${_ui}.prev"
+  tp_drop_prev "${_label}.prev"
   if [ -e "$_bin" ]; then
     mv "$_bin" "${_bin}.prev"
+  fi
+  if [ -e "$_label" ]; then
+    mv "$_label" "${_label}.prev"
   fi
   if [ -e "$_lib" ]; then
     mv "$_lib" "${_lib}.prev"
@@ -1343,9 +1348,16 @@ tp_restore_instance_prev() {
   _bin="$INSTALL_ROOT/bin/turbopanel"
   _lib="$INSTALL_ROOT/lib/libduckdb.so"
   _ui="$INSTALL_ROOT/share/ui"
+  _label="$(tp_instance_build_label_path)"
   if [ -e "${_bin}.prev" ]; then
     rm -f "$_bin"
     mv "${_bin}.prev" "$_bin"
+  fi
+  # The label belongs to the bytes: a restored generation that predates the
+  # label has none, so a newer label must not outlive its binary.
+  rm -f "$_label"
+  if [ -e "${_label}.prev" ]; then
+    mv "${_label}.prev" "$_label"
   fi
   if [ -e "${_lib}.prev" ]; then
     rm -f "$_lib"
@@ -1356,6 +1368,56 @@ tp_restore_instance_prev() {
     mv "${_ui}.prev" "$_ui"
   fi
   rm -rf "${_ui}.new"
+}
+
+# The release label of the instance bytes in bin/turbopanel — the manifest
+# version they were installed from (e.g. 0.1.1-canary.20260926-192741-3754712,
+# 0.1.1-rc.1, 0.1.1). The control plane reports it as `build` in /api/health.
+# It is not baked into the binary because a promotion re-labels the same
+# canary bytes as rc and release. It travels with the binary — retained and
+# restored beside it — so the panel always names the bytes it runs.
+tp_instance_build_label_path() {
+  printf '%s/lib/build-label' "$INSTALL_ROOT"
+}
+
+tp_write_instance_build_label() {
+  _label_path="$(tp_instance_build_label_path)"
+  case "$1" in
+    '' | *[!0-9A-Za-z.+-]*)
+      rm -f "$_label_path"
+      return 0
+      ;;
+  esac
+  printf '%s\n' "$1" > "${_label_path}.tmp"
+  chmod 0644 "${_label_path}.tmp"
+  mv -f "${_label_path}.tmp" "$_label_path"
+}
+
+# Copy the label into the instance's runtime.env — the file the unit already
+# loads — so an update, which does not re-render that template, still restarts
+# the instance with the right TURBOPANEL_BUILD_LABEL. Owner and mode are kept
+# (cp -p, then truncate-and-write). No runtime.env yet (a first install, before
+# instance-launch renders it) is left alone: the template reads the same file.
+tp_sync_instance_build_label() {
+  _env="${CONFIG_DIR}/instance/runtime.env"
+  [ -f "$_env" ] || return 0
+  _label_path="$(tp_instance_build_label_path)"
+  _label=""
+  if [ -f "$_label_path" ]; then
+    _label="$(head -n 1 "$_label_path")"
+  fi
+  case "$_label" in
+    *[!0-9A-Za-z.+-]*) _label="" ;;
+  esac
+  _tmp="${_env}.tmp.$$"
+  cp -p "$_env" "$_tmp"
+  {
+    grep -v '^TURBOPANEL_BUILD_LABEL=' "$_env" || true
+    if [ -n "$_label" ]; then
+      printf 'TURBOPANEL_BUILD_LABEL=%s\n' "$_label"
+    fi
+  } > "$_tmp"
+  mv -f "$_tmp" "$_env"
 }
 
 # Written when an update starts moving the live instance and UI aside.
@@ -1478,6 +1540,8 @@ tp_run_instance_install() {
     chmod 0755 "$INSTALL_ROOT/bin/turbopanel"
     chmod 0644 "$INSTALL_ROOT/lib/libduckdb.so"
   fi
+  tp_write_instance_build_label "${_instance_version:-}"
+  tp_sync_instance_build_label
   tp_print_ok "Packages unpacked (instance v${_instance_version:-?}, UI v${_ui_version:-?})"
 
   # Update path: the caller restarts the units. Do not re-run the full

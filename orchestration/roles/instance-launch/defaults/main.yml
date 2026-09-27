@@ -182,6 +182,9 @@ turbopanel_instance_runtime: deno
 # Exact git SHA of the instance checkout (set at converge). Injected as
 # TURBOPANEL_REVISION so GET /api/health can name Corresponding Source.
 turbopanel_instance_revision: ""
+# Release label of the installed instance bytes (from lib/build-label); set by
+# the role, empty on a source-run dev host.
+turbopanel_instance_build_label: ""
 wrangler_dev_port: 18787
 instance_start: true
 postgres_socket_dir: /var/run/turbopanel/postgres
