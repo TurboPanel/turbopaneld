@@ -253,12 +253,21 @@ test("tp-orchestrate insists on root and a private scratch directory", async () 
 async function runUpdateVerb(
   args: string[],
   pin: string | null,
-  verb: "tp_verb_update" | "tp_verb_update_instance" = "tp_verb_update",
+  verb:
+    | "tp_verb_update"
+    | "tp_verb_update_instance"
+    | "tp_verb_update_colocated" = "tp_verb_update",
+  options: { controlPlaneHost?: boolean } = {},
 ): Promise<{ status: number; stdout: string; stderr: string }> {
   const source = await Deno.readTextFile(helperPath);
   const root = await Deno.makeTempDir({ prefix: "tp-orchestrate-update-" });
   try {
     await Deno.mkdir(join(root, "lib"), { recursive: true });
+    if (options.controlPlaneHost) {
+      // A self-hosted control-plane host: the instance binary is installed.
+      await Deno.mkdir(join(root, "bin"), { recursive: true });
+      await Deno.writeTextFile(join(root, "bin", "turbopanel"), "");
+    }
     if (pin !== null) {
       await Deno.writeTextFile(join(root, "lib", "update-origin"), pin);
     }
@@ -287,11 +296,15 @@ async function runUpdateVerb(
       fakeCurl,
       extractShellFunction(source, "tp_valid_url"),
       extractShellFunction(source, "tp_pin_field"),
+      extractShellFunction(source, "tp_load_update_origin_pin"),
       extractShellFunction(source, "tp_read_update_origin_pin"),
+      extractShellFunction(source, "tp_colocated_host"),
+      extractShellFunction(source, "tp_read_control_plane_pin"),
       extractShellFunction(source, "tp_release_manifest_url_ok"),
       extractShellFunction(source, "tp_fetch_pinned_run_script"),
       extractShellFunction(source, "tp_verb_update"),
       extractShellFunction(source, "tp_verb_update_instance"),
+      extractShellFunction(source, "tp_verb_update_colocated"),
       `${verb} "$@"`,
     ].join("\n");
     const out = await new Deno.Command("sh", {
@@ -789,3 +802,138 @@ unit_text = env.from_string((root / "turbopanel-instance.service.j2").read_text(
 Path(env_path).write_text(env_text)
 Path(unit_path).write_text(unit_text)
 `;
+
+// --- control-plane hosts: update-colocated and the pin-less fallback -------
+
+const COLOCATED_PIN =
+  "host=\ndl_base=\ninstance_ca=\nuploaded_trust=\ncolocated=1\n";
+
+test("tp-orchestrate update-colocated refreshes the panel host's daemon via run.sh --daemon-only from the CDN", async () => {
+  const result = await runUpdateVerb(
+    ["--channel", "canary", "--no-start", "--progress-markers"],
+    COLOCATED_PIN,
+    "tp_verb_update_colocated",
+    { controlPlaneHost: true },
+  );
+  assertEquals(result.status, 0, result.stderr);
+  assertStringIncludes(result.stdout, "[https://turbopanel.sh]");
+  assertStringIncludes(
+    result.stdout,
+    "RUNSH [--daemon-only] [--channel] [canary] [--progress-markers] [--no-start]",
+  );
+  assertEquals(result.stdout.includes("[--license]"), false);
+  assertEquals(result.stdout.includes("[-k]"), false);
+});
+
+test("tp-orchestrate update-colocated forwards a daemon-rail pin and refuses other rails", async () => {
+  const pinned =
+    "https://github.com/TurboPanel/turbopaneld/releases/download/canary/manifest-0.1.2-canary.20260927-190000-abcdef0.json";
+  const ok = await runUpdateVerb(
+    ["--channel", "canary", "--manifest-url", pinned, "--no-start"],
+    COLOCATED_PIN,
+    "tp_verb_update_colocated",
+    { controlPlaneHost: true },
+  );
+  assertEquals(ok.status, 0, ok.stderr);
+  assertStringIncludes(ok.stdout, `[--manifest-url] [${pinned}]`);
+
+  const denied = await runUpdateVerb(
+    [
+      "--channel",
+      "canary",
+      "--manifest-url",
+      "https://github.com/TurboPanel/turbopanel/releases/download/canary/manifest.json",
+      "--no-start",
+    ],
+    COLOCATED_PIN,
+    "tp_verb_update_colocated",
+    { controlPlaneHost: true },
+  );
+  assertEquals(denied.status, 1);
+  assertStringIncludes(denied.stderr, "not a TurboPanel release rail");
+});
+
+test("tp-orchestrate update-colocated refuses enrolment flags, a missing channel or --no-start, and non-panel hosts", async () => {
+  const cases: Array<[string[], string]> = [
+    [["--no-start"], "update-colocated requires --channel"],
+    [["--channel", "canary"], "update-colocated requires --no-start"],
+    [
+      ["--channel", "canary", "--license", "abc", "--no-start"],
+      "refusing update-colocated flag --license",
+    ],
+    [
+      ["--channel", "canary", "--host", "https://evil.example", "--no-start"],
+      "refusing update-colocated flag --host",
+    ],
+    [
+      ["--channel", "canary", "--insecure-tls", "--no-start"],
+      "refusing update-colocated flag --insecure-tls",
+    ],
+    [["--channel", "nightly", "--no-start"], "refusing --channel"],
+  ];
+  for (const [args, needle] of cases) {
+    const result = await runUpdateVerb(
+      args,
+      COLOCATED_PIN,
+      "tp_verb_update_colocated",
+      {
+        controlPlaneHost: true,
+      },
+    );
+    assertEquals(result.status, 1, args.join(" "));
+    assertStringIncludes(result.stderr, needle);
+  }
+  const remote = await runUpdateVerb(
+    ["--channel", "canary", "--no-start"],
+    PUBLIC_PIN,
+    "tp_verb_update_colocated",
+  );
+  assertEquals(remote.status, 1);
+  assertStringIncludes(
+    remote.stderr,
+    "only on a self-hosted control-plane host",
+  );
+});
+
+test("a control-plane host without a pin (installed before run.sh wrote one) updates from the CDN only", async () => {
+  const colocated = await runUpdateVerb(
+    ["--channel", "canary", "--no-start"],
+    null,
+    "tp_verb_update_colocated",
+    { controlPlaneHost: true },
+  );
+  assertEquals(colocated.status, 0, colocated.stderr);
+  assertStringIncludes(colocated.stdout, "[https://turbopanel.sh]");
+
+  const instance = await runUpdateVerb(
+    ["--channel", "canary", "--no-start"],
+    null,
+    "tp_verb_update_instance",
+    { controlPlaneHost: true },
+  );
+  assertEquals(instance.status, 0, instance.stderr);
+  assertStringIncludes(
+    instance.stdout,
+    "RUNSH [--instance] [--channel] [canary]",
+  );
+
+  // A remote daemon host without a pin still refuses.
+  const remote = await runUpdateVerb(
+    ["--channel", "canary", "--no-start"],
+    null,
+    "tp_verb_update_instance",
+  );
+  assertEquals(remote.status, 1);
+  assertStringIncludes(remote.stderr, "update origin pin missing");
+});
+
+test("tp-orchestrate update (remote enrolment) refuses a control-plane pin", async () => {
+  const result = await runUpdateVerb(
+    ["--license", "abc", "--no-start"],
+    COLOCATED_PIN,
+    "tp_verb_update",
+    { controlPlaneHost: true },
+  );
+  assertEquals(result.status, 1);
+  assertStringIncludes(result.stderr, "update-colocated");
+});

@@ -516,7 +516,8 @@ tp_pin_field() {
   sed -n "s/^$1=//p" "$UPDATE_ORIGIN_PIN" | head -1
 }
 
-tp_read_update_origin_pin() {
+# Read the pin fields without judging them (callers decide what they need).
+tp_load_update_origin_pin() {
   if [ -L "$UPDATE_ORIGIN_PIN" ] || [ ! -f "$UPDATE_ORIGIN_PIN" ]; then
     tp_die "update origin pin missing at $UPDATE_ORIGIN_PIN — re-run the installer (run.sh) once as root to write it"
   fi
@@ -526,6 +527,49 @@ tp_read_update_origin_pin() {
   _pin_dl_base="$(tp_pin_field dl_base)"
   _pin_ca="$(tp_pin_field instance_ca)"
   _pin_uploaded="$(tp_pin_field uploaded_trust)"
+  _pin_colocated="$(tp_pin_field colocated)"
+}
+
+# The remote-daemon pin: `update` re-enrols against the pinned control
+# plane, so it must name one. A control-plane host's pin names none and is
+# refused here — its daemon updates through `update-colocated`.
+tp_read_update_origin_pin() {
+  tp_load_update_origin_pin
+  [ "$_pin_colocated" != 1 ] ||
+    tp_die "this is a control-plane host; its daemon updates with tp-orchestrate update-colocated"
+  [ -n "$_pin_host" ] || tp_die "$UPDATE_ORIGIN_PIN carries no host"
+}
+
+# A self-hosted control-plane host: the root-owned instance binary is
+# installed. Decided from root-owned files only, never from daemon.env.
+tp_colocated_host() {
+  _ch_bin="$INSTALL_ROOT/bin/turbopanel"
+  [ -f "$_ch_bin" ] && [ ! -L "$_ch_bin" ] &&
+    [ "$(stat -c %u "$_ch_bin" 2>/dev/null || echo -1)" = "0" ]
+}
+
+# For update-instance and update-colocated the pin only chooses where run.sh
+# comes from. A control-plane host installed before run.sh wrote a pin there
+# has none; it falls back to the CDN (public TLS, never relaxed), the most
+# restrictive origin there is. Any other host without a pin still refuses.
+tp_read_control_plane_pin() {
+  if [ ! -e "$UPDATE_ORIGIN_PIN" ] && [ ! -L "$UPDATE_ORIGIN_PIN" ] && tp_colocated_host; then
+    _pin_host=""
+    _pin_dl_base=""
+    _pin_ca=""
+    _pin_uploaded=""
+    _pin_colocated=1
+    return 0
+  fi
+  tp_load_update_origin_pin
+  if [ "$_pin_colocated" = 1 ]; then
+    # A control-plane pin never carries an origin: run.sh comes from the CDN.
+    _pin_host=""
+    _pin_dl_base=""
+    _pin_ca=""
+    _pin_uploaded=""
+    return 0
+  fi
   [ -n "$_pin_host" ] || tp_die "$UPDATE_ORIGIN_PIN carries no host"
 }
 
@@ -791,13 +835,75 @@ tp_verb_update_instance() {
       ;;
   esac
   [ "$_no_start" = true ] || tp_die "update-instance requires --no-start (the daemon restarts the control plane)"
-  tp_read_update_origin_pin
+  tp_read_control_plane_pin
   tp_fetch_pinned_run_script
 
   set -- --instance --channel "$_channel"
   [ -n "$_manifest_url" ] && set -- "$@" --instance-manifest-url "$_manifest_url"
   [ -n "$_ui_manifest_url" ] && set -- "$@" --ui-manifest-url "$_ui_manifest_url"
   set -- "$@" --no-start --skip-daemon-package --progress-markers
+  cd "$INSTALL_ROOT"
+  _rc=0
+  sh "$_script" "$@" || _rc=$?
+  rm -f "$_script"
+  exit "$_rc"
+}
+
+# Refresh the daemon on a self-hosted control-plane host (`run.sh
+# --daemon-only`, which there runs daemon-colocated-refresh.yml: socket mode,
+# no enrolment, no recursive chown). No license and no host: the daemon on a
+# panel host enrols with the local instance, not a remote control plane.
+# `--manifest-url` is the daemon-rail pin; without it run.sh takes the
+# channel's built-in rail. Signatures are verified by run.sh either way.
+tp_verb_update_colocated() {
+  tp_require_root_scratch
+  tp_colocated_host || tp_die "update-colocated runs only on a self-hosted control-plane host"
+  _channel=""
+  _manifest_url=""
+  _no_start=false
+  _progress_markers=false
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --channel)
+        [ $# -ge 2 ] || tp_die "--channel requires a value"
+        case "$2" in
+          trunk|edge|canary|rc|release) ;;
+          *) tp_die "refusing --channel $2" ;;
+        esac
+        _channel="$2"
+        shift 2
+        ;;
+      --manifest-url)
+        [ $# -ge 2 ] || tp_die "--manifest-url requires a value"
+        tp_release_manifest_url_ok daemon "$2" || tp_die "refusing --manifest-url $2: not a TurboPanel release rail"
+        tp_valid_url "$2" || tp_die "refusing --manifest-url $2"
+        _manifest_url="$2"
+        shift 2
+        ;;
+      --no-start)
+        _no_start=true
+        shift
+        ;;
+      --progress-markers)
+        _progress_markers=true
+        shift
+        ;;
+      *)
+        # --license, --host, --dl-base, --instance-ca, --insecure-tls land
+        # here on purpose: a control-plane host's daemon does not re-enrol.
+        tp_die "refusing update-colocated flag $1"
+        ;;
+    esac
+  done
+  [ -n "$_channel" ] || tp_die "update-colocated requires --channel"
+  [ "$_no_start" = true ] || tp_die "update-colocated requires --no-start (the daemon restarts itself)"
+  tp_read_control_plane_pin
+  tp_fetch_pinned_run_script
+
+  set -- --daemon-only --channel "$_channel"
+  [ -n "$_manifest_url" ] && set -- "$@" --manifest-url "$_manifest_url"
+  [ "$_progress_markers" = true ] && set -- "$@" --progress-markers
+  set -- "$@" --no-start
   cd "$INSTALL_ROOT"
   _rc=0
   sh "$_script" "$@" || _rc=$?
@@ -820,7 +926,7 @@ tp_verb_migrate() {
   timeout 120 env TURBOPANEL_DATABASE_URL="$_url" "$_bin" migrate
 }
 
-[ $# -ge 1 ] || tp_die "usage: tp-orchestrate playbook|galaxy-docker-role|update|update-instance|migrate …"
+[ $# -ge 1 ] || tp_die "usage: tp-orchestrate playbook|galaxy-docker-role|update|update-instance|update-colocated|migrate …"
 _verb="$1"
 shift
 case "$_verb" in
@@ -828,6 +934,7 @@ case "$_verb" in
   galaxy-docker-role) tp_verb_galaxy_docker_role "$@" ;;
   update) tp_verb_update "$@" ;;
   update-instance) tp_verb_update_instance "$@" ;;
+  update-colocated) tp_verb_update_colocated "$@" ;;
   migrate) tp_verb_migrate "$@" ;;
   *) tp_die "unknown verb $_verb" ;;
 esac

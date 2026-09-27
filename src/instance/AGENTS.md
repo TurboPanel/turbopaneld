@@ -343,10 +343,41 @@ self-hosted panel host; every play that replaces the daemon binary ships the
 matching tp-host (`sudoers-contract.test.ts` pins this). A remote node, or a `daemon.env`
 that already dials a URL, still uses the remote installer.
 
+On such a host `--daemon-only` needs **no license and no manifest pin**
+(`tp_prepare_colocated_daemon_only`): the play does not enrol, the channel
+comes from `daemon.env` when the caller names none (default `release`), and
+the manifest from that channel's built-in rail — signature-verified by
+`tp_fetch_channel_manifest` like every install. A remote daemon still needs
+`TURBOPANEL_LICENSE` (or `license.id`/`license.token`) and a pinned manifest.
+
+**Co-located daemon self-update.** The daemon on a self-hosted
+control-plane host (socket mode) updates through its own root-helper verb,
+`tp-orchestrate update-colocated --channel NAME [--manifest-url URL]
+[--progress-markers] --no-start`, which runs `run.sh --daemon-only` (the
+co-located refresh above). It takes no `--license`, `--host`, `--dl-base`,
+`--instance-ca` or `--insecure-tls` — the panel host's daemon never re-enrols
+— and only runs where the root-owned `bin/turbopanel` is installed.
+`#reconcileToLatestUpdate` routes socket-mode daemons there
+(`rootHelperColocatedRefreshInvocation`) instead of `update`; the managed
+upgrade planner already orders `colocated_daemon` → `control_plane` → `fleet`
+(turbopanel `src/features/upgrades/planner.ts`), so a panel update refreshes
+this daemon first. A development host refuses (source-run).
+
+**Update-origin pin on a control-plane host.** `run.sh` writes
+`lib/update-origin` with `host=` empty and `colocated=1` on a control-plane
+install and on every co-located refresh: that pin names no origin, so
+`update-instance` and `update-colocated` fetch `run.sh` from the CDN
+(`turbopanel.sh`, public TLS, never relaxed). `update` (remote enrolment)
+refuses a `colocated=1` pin. A control-plane host installed before run.sh
+wrote a pin has none; those two verbs then fall back to the CDN
+(`tp_read_control_plane_pin`) — decided from the root-owned
+`bin/turbopanel`, never from `daemon.env`. Any other host without a pin still
+refuses.
+
 The control plane is a **separate verb**, `tp-orchestrate update-instance
 --channel NAME [--manifest-url URL] [--ui-manifest-url URL] --no-start`. It does not take `--license`,
 `--host`, `--dl-base`, or `--instance-ca` (`run.sh --instance` refuses those).
-The helper still reads the update-origin pin to fetch `run.sh`, then runs
+The helper reads the update-origin pin (`tp_read_control_plane_pin` — the CDN on a control-plane host) to fetch `run.sh`, then runs
 `run.sh --instance --channel … [--instance-manifest-url …] [--ui-manifest-url …] --no-start`.
 `--manifest-url` on the verb maps to `--instance-manifest-url` so the daemon
 pin (`TURBOPANEL_MANIFEST_URL`) stays independent of

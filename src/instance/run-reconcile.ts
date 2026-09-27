@@ -478,6 +478,32 @@ export function rootHelperReconcileInvocation(
   };
 }
 
+/**
+ * The helper invocation for a co-located daemon refresh on a self-hosted
+ * control-plane host — exported for tests. No license, no host: the helper
+ * runs `run.sh --daemon-only`, which there refreshes the socket-mode daemon
+ * (daemon-colocated-refresh.yml) from the channel's signed manifest.
+ */
+export function rootHelperColocatedRefreshInvocation(
+  options: { channel?: string; manifestUrl?: string },
+): { bin: string; args: string[] } {
+  const channel = options.channel?.trim();
+  if (!channel) {
+    throw new Error("co-located daemon update needs an update channel");
+  }
+  const flags = ["--channel", channel];
+  const pinned = options.manifestUrl?.trim();
+  if (pinned) {
+    assertReleaseManifestUrl("daemon", pinned, "--manifest-url");
+    flags.push("--manifest-url", pinned);
+  }
+  flags.push("--progress-markers", "--no-start");
+  return {
+    bin: "sudo",
+    args: ["-n", "--", ORCHESTRATE_HELPER, "update-colocated", ...flags],
+  };
+}
+
 async function consumeReconcileStdout(
   stream: ReadableStream<Uint8Array>,
   onStage?: (stage: UpdateProgressStage) => void,
@@ -562,6 +588,11 @@ export async function executeRunReconcile(options: {
   channel?: string;
   /** Panel pin when the host env has no TURBOPANEL_MANIFEST_URL. */
   manifestUrl?: string;
+  /**
+   * The daemon on a self-hosted control-plane host (socket mode): refresh it
+   * through `tp-orchestrate update-colocated` instead of re-enrolling.
+   */
+  colocated?: boolean;
   onStage?: (stage: UpdateProgressStage) => void;
 }): Promise<void> {
   const env = { ...Deno.env.toObject() };
@@ -588,11 +619,22 @@ export async function executeRunReconcile(options: {
 
   const onStage = options.onStage;
 
+  if (options.colocated && !reconcileNeedsRootHelper()) {
+    throw new Error(
+      "co-located daemon update is not supported on a development host; the daemon is source-run — use the dev console converge path",
+    );
+  }
+
   if (reconcileNeedsRootHelper()) {
-    const helper = rootHelperReconcileInvocation(options.args, {
-      channel,
-      manifestUrl: manifestForHelper,
-    });
+    const helper = options.colocated
+      ? rootHelperColocatedRefreshInvocation({
+        channel,
+        manifestUrl: manifestForHelper,
+      })
+      : rootHelperReconcileInvocation(options.args, {
+        channel,
+        manifestUrl: manifestForHelper,
+      });
     const child = new Deno.Command(helper.bin, {
       args: helper.args,
       cwd: reconcileCwd,

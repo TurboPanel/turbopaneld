@@ -1589,11 +1589,30 @@ tp_run_instance_install() {
 
 # An existing self-hosted control plane dials the instance Unix socket: the
 # instance binary is installed and daemon.env does not name a remote URL.
+# Works before INSTALL_ROOT / ENV_FILE are assigned (the --daemon-only
+# argument checks run earlier than the layout constants).
 tp_colocated_control_plane_host() {
-  [ -e "$INSTALL_ROOT/bin/turbopanel" ] || return 1
-  [ -f "$ENV_FILE" ] || return 1
-  if grep -q '^TURBOPANEL_INSTANCE_URL=' "$ENV_FILE"; then
+  _ccp_root="${INSTALL_ROOT:-/opt/turbopanel}"
+  _ccp_env="${ENV_FILE:-/etc/turbopanel/daemon.env}"
+  [ -e "$_ccp_root/bin/turbopanel" ] || return 1
+  [ -f "$_ccp_env" ] || return 1
+  if grep -q '^TURBOPANEL_INSTANCE_URL=' "$_ccp_env"; then
     return 1
+  fi
+  return 0
+}
+
+# --daemon-only on a self-hosted control-plane host refreshes the co-located
+# daemon (daemon-colocated-refresh.yml). It needs no license (the play does
+# not enrol) and no manifest pin: the channel comes from daemon.env when the
+# caller names none, and the manifest from that channel's built-in rail —
+# signature-verified by tp_fetch_channel_manifest like every other install.
+tp_prepare_colocated_daemon_only() {
+  tp_colocated_control_plane_host || return 1
+  if [ -z "${TURBOPANEL_UPDATE_CHANNEL:-}" ]; then
+    _cdo_channel="$(sed -n 's/^TURBOPANEL_UPDATE_CHANNEL=//p' "${ENV_FILE:-/etc/turbopanel/daemon.env}" | head -1)"
+    TURBOPANEL_UPDATE_CHANNEL="${_cdo_channel:-release}"
+    export TURBOPANEL_UPDATE_CHANNEL
   fi
   return 0
 }
@@ -1947,7 +1966,7 @@ if [ "$DAEMON_ONLY" != true ] && [ "$INSTANCE_INSTALL" != true ] && [ -z "$LICEN
   && [ -z "$UI_MANIFEST_URL" ]; then
   INSTANCE_INSTALL=true
 fi
-if [ "$DAEMON_ONLY" = true ]; then
+if [ "$DAEMON_ONLY" = true ] && ! tp_prepare_colocated_daemon_only; then
   if [ -z "$MANIFEST_URL" ]; then
     tp_print_error "--daemon-only requires a pinned https manifest (--manifest-url or TURBOPANEL_MANIFEST_URL) and does not install the control plane"
     exit 1
@@ -2294,8 +2313,22 @@ tp_write_update_origin_pin() {
   install -m 0600 -o root -g root "$_pin_tmp" "$_pin_dir/update-origin"
   rm -f "$_pin_tmp"
 }
+# A control-plane host enrols with no remote control plane: its pin names
+# no host, and tp-orchestrate then only ever fetches run.sh from the CDN
+# (update-instance, update-colocated). `update` — the remote enrolment
+# verb — refuses a pin with no host, so it can never run here.
+tp_write_colocated_update_origin_pin() {
+  _pin_dir="$INSTALL_ROOT/lib"
+  mkdir -p "$_pin_dir"
+  _pin_tmp="$(mktemp)"
+  printf 'host=\ndl_base=\ninstance_ca=\nuploaded_trust=\ncolocated=1\n' > "$_pin_tmp"
+  install -m 0600 -o root -g root "$_pin_tmp" "$_pin_dir/update-origin"
+  rm -f "$_pin_tmp"
+}
 if [ "$INSTANCE_INSTALL" != true ] && [ "$_colocated_daemon_refresh" != true ]; then
   tp_write_update_origin_pin
+else
+  tp_write_colocated_update_origin_pin
 fi
 
 # Production FHS layout — never point TURBOPANEL_DAEMON_ROOT at a source
