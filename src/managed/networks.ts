@@ -118,6 +118,15 @@ function networkConnectAlreadyJoined(stderr: string): boolean {
 }
 
 /**
+ * `docker network create` reports "network with name <name> already exists"
+ * — distinct from `networkConnectAlreadyJoined`'s "already exists **in
+ * network**" (a container-to-network attach conflict, not this one).
+ */
+function networkCreateAlreadyExists(stderr: string): boolean {
+  return stderr.toLowerCase().includes("already exists");
+}
+
+/**
  * Attach a running container to the current managed-engine bridge.
  * Compose `--force-recreate` can throw or no-op while the frontend stays on
  * a leftover `turbopanel-managed` endpoint.
@@ -214,7 +223,20 @@ export async function removeUnusedManagedDockerNetwork(
   await pruneDockerNetworkBestEffort(name, run, false);
 }
 
-/** Idempotently create the organization's managed-engine Docker network. */
+/**
+ * Idempotently create the organization's managed-engine Docker network.
+ *
+ * `managed.apply`, `managed.ingress.reconcile`, and `managed.ha.reconcile`
+ * are dispatched to the daemon concurrently (no cross-command serialization
+ * — see `client.ts`'s fire-and-forget dispatch) and can all target the same
+ * newly-joined host in the same batch. The inspect-then-create pattern below
+ * is inherently racy under that concurrency: two callers can both see the
+ * network missing before either creates it, so the loser's `docker network
+ * create` fails with "already exists" even though the network now exists in
+ * the shape every caller wants. Treat that failure as success, the same way
+ * `ensureContainerJoinedManagedNetwork` already tolerates an analogous
+ * "already connected" race on `network connect`.
+ */
 export async function ensureManagedIngressNetwork(
   name: string,
   run: RunDockerFn = defaultRunDocker,
@@ -227,10 +249,10 @@ export async function ensureManagedIngressNetwork(
   if (inspect.success) return;
 
   const create = await run(["network", "create", name]);
-  if (!create.success) {
-    throw new Error(
-      create.stderr ||
-        `Creating managed ingress Docker network ${name} failed`,
-    );
-  }
+  if (create.success || networkCreateAlreadyExists(create.stderr)) return;
+
+  throw new Error(
+    create.stderr ||
+      `Creating managed ingress Docker network ${name} failed`,
+  );
 }
