@@ -553,8 +553,15 @@ payload can never carry the complete set that safe removal requires. It
 subsumes shell and entitlement changes too, so granting a principal PHP 8.4 no
 longer means deploying one of its environments. See `../deploy/ssh/` for the
 host side. `run.sh` still pins
-`--cacert` first; on HTTP `000` with an existing CA it retries **once**
-unpinned, then installs only if the fetched PEM parses as a CA **and**
-validates the live leaf. `TURBOPANEL_INSTANCE_CA_FINGERPRINT` in `daemon.env`
+`--cacert` first (`tp_fetch_instance_ca`); on HTTP `000` with an existing CA
+it asks again with the **system roots** — a `404` there means the control
+plane moved to public TLS and the stale CA is dropped — and only then retries
+**once** unpinned, installing only a PEM that parses as a CA **and** validates
+the live leaf. The fetch is **never fatal**: an unverifiable or unreachable
+control plane keeps the existing CA and the install continues (the daemon
+adds that file to the system roots, so nothing is lost), and a co-located
+daemon refresh skips the fetch entirely (`HOST_URL` is empty there). Before
+2026-09-28 the unverified case was `exit 1`, which is how canary's
+co-located refresh failed after its Let's Encrypt switch. `TURBOPANEL_INSTANCE_CA_FINGERPRINT` in `daemon.env`
 is the expected first-cert fingerprint for startup mismatch logs.
 

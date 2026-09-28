@@ -280,6 +280,84 @@ tp_install_instance_ca() {
   fi
 }
 
+# Fetch the control plane's Platform CA into CA_PATH. Never fatal: a host
+# that cannot re-fetch the CA keeps the one it has. The daemon adds that file
+# to the system roots at runtime, so a control plane that moved to a publicly
+# trusted certificate keeps validating either way, and an unreachable one is
+# reported by the daemon itself — never by refusing the install. Only a
+# fetched PEM that parses and validates the live leaf is ever installed.
+tp_fetch_instance_ca() {
+  _curl_base="$(tp_instance_bootstrap_curl)"
+  _ca_tmp="$(mktemp)"
+  _ca_http_code=""
+  # shellcheck disable=SC2086
+  _ca_http_code=$(tp_curl_http_code $_curl_base -o "$_ca_tmp" -w '%{http_code}' "${HOST_URL%/}/api/daemon/v1/instance/ca")
+  case "$_ca_http_code" in
+    200)
+      tp_install_instance_ca "$_ca_tmp"
+      ;;
+    404)
+      # Not a Platform CA leaf. A public upload or Let's Encrypt name uses
+      # the system roots. A private upload is handled by the issuer fetch
+      # below — do not announce system trust until that fetch also misses.
+      rm -f "$CA_PATH"
+      ;;
+    000)
+      if [ -f "$CA_PATH" ]; then
+        tp_refetch_instance_ca_unpinned
+      else
+        tp_print_step "~" "Could not download instance CA (HTTP ${_ca_http_code}) — keeping existing CA if present"
+      fi
+      ;;
+    *)
+      tp_print_step "~" "Could not download instance CA (HTTP ${_ca_http_code}) — keeping existing CA if present"
+      ;;
+  esac
+  rm -f "$_ca_tmp"
+  return 0
+}
+
+# The pinned fetch could not verify the control plane. Most often it moved to
+# a publicly trusted certificate (Let's Encrypt, a public upload, Cloudflare)
+# and no longer presents a Platform CA leaf, so ask again with the system
+# roots first; only then fall back to one unpinned fetch of the CA document.
+# Whatever happens, the existing CA stays unless a replacement verifies.
+tp_refetch_instance_ca_unpinned() {
+  _old_fp="$(tp_ca_fingerprint "$CA_PATH")"
+  _ca_retry="$(mktemp)"
+  _sys_code=$(tp_curl_http_code curl -sSL -o "$_ca_retry" -w '%{http_code}' "${HOST_URL%/}/api/daemon/v1/instance/ca")
+  case "$_sys_code" in
+    404)
+      tp_print_ok "Control plane now presents a publicly trusted certificate — Platform CA no longer needed (was ${_old_fp:-unknown})"
+      rm -f "$CA_PATH" "$_ca_retry"
+      return 0
+      ;;
+    200)
+      if tp_ca_parses "$_ca_retry" && tp_ca_validates_leaf "$_ca_retry"; then
+        tp_install_instance_ca "$_ca_retry"
+        rm -f "$_ca_retry"
+        return 0
+      fi
+      ;;
+    000)
+      # Unpinned fetch of the CA document only; acceptance is gated below.
+      _ca_retry_code=$(tp_curl_http_code curl -sSLk -o "$_ca_retry" -w '%{http_code}' "${HOST_URL%/}/api/daemon/v1/instance/ca")
+      if [ "$_ca_retry_code" = "200" ] && tp_ca_parses "$_ca_retry" && tp_ca_validates_leaf "$_ca_retry"; then
+        tp_install_instance_ca "$_ca_retry"
+        rm -f "$_ca_retry"
+        return 0
+      fi
+      ;;
+  esac
+  _new_fp=""
+  if [ -f "$_ca_retry" ] && tp_ca_parses "$_ca_retry"; then
+    _new_fp="$(tp_ca_fingerprint "$_ca_retry")"
+  fi
+  tp_print_step "~" "Could not verify the control plane's Platform CA (existing ${_old_fp:-unknown}; fetched ${_new_fp:-unknown}) — keeping the existing CA; the daemon trusts it alongside the system roots"
+  rm -f "$_ca_retry"
+  return 0
+}
+
 # Overlay artifact downloads (TURBOPANEL_DL_BASE) follow the *instance* TLS
 # policy: platform CA via --cacert when available, else -k when INSECURE_TLS is
 # set. Public tunnel TLS uses the system store. CDN downloads use tp_release_curl.
@@ -2221,9 +2299,11 @@ else
 fi
 
 mkdir -p "$CONFIG_DIR"
-if [ "$INSTANCE_INSTALL" = true ]; then
-  # No control plane to fetch a CA from — this host mints its own
-  # (instance-certs, via the binary's generate-self-signed-cert verb).
+if [ "$INSTANCE_INSTALL" = true ] || [ "$_colocated_daemon_refresh" = true ]; then
+  # No control plane to fetch a CA from — a self-hosted instance install mints
+  # its own (instance-certs, via the binary's generate-self-signed-cert verb),
+  # and a co-located daemon refresh reaches this host over the local socket:
+  # HOST_URL is empty here, so a fetch could only ever fail.
   :
 elif [ -n "$INSTANCE_CA" ]; then
   # Compare resolved paths, not raw strings: a symlink or path-variant (e.g. a
@@ -2237,48 +2317,7 @@ elif [ -n "$INSTANCE_CA" ]; then
   fi
 else
   tp_print_step "▸" "Fetching instance CA…"
-      _curl_base="$(tp_instance_bootstrap_curl)"
-      _ca_tmp="$(mktemp)"
-      _ca_http_code=""
-      # shellcheck disable=SC2086
-      _ca_http_code=$(tp_curl_http_code $_curl_base -o "$_ca_tmp" -w '%{http_code}' "${HOST_URL%/}/api/daemon/v1/instance/ca")
-      case "$_ca_http_code" in
-        200)
-          tp_install_instance_ca "$_ca_tmp"
-          ;;
-        404)
-          # Not a Platform CA leaf. A public upload or Let's Encrypt name uses
-          # the system roots. A private upload is handled by the issuer fetch
-          # below — do not announce system trust until that fetch also misses.
-          rm -f "$CA_PATH"
-          ;;
-        000)
-          if [ -f "$CA_PATH" ]; then
-            _old_fp="$(tp_ca_fingerprint "$CA_PATH")"
-            _ca_retry="$(mktemp)"
-            # Unpinned fetch of the CA document only; acceptance is gated below.
-            _ca_retry_code=$(tp_curl_http_code curl -sSLk -o "$_ca_retry" -w '%{http_code}' "${HOST_URL%/}/api/daemon/v1/instance/ca")
-            if [ "$_ca_retry_code" = "200" ] && tp_ca_parses "$_ca_retry" && tp_ca_validates_leaf "$_ca_retry"; then
-              tp_install_instance_ca "$_ca_retry"
-            else
-              _new_fp=""
-              if [ -f "$_ca_retry" ]; then
-                _new_fp="$(tp_ca_fingerprint "$_ca_retry")"
-              fi
-              tp_print_error "platform CA changed and could not be verified (existing ${_old_fp:-unknown}; fetched ${_new_fp:-unknown})"
-              rm -f "$_ca_tmp" "$_ca_retry"
-              exit 1
-            fi
-            rm -f "$_ca_retry"
-          else
-            tp_print_step "~" "Could not download instance CA (HTTP ${_ca_http_code}) — keeping existing CA if present"
-          fi
-          ;;
-        *)
-          tp_print_step "~" "Could not download instance CA (HTTP ${_ca_http_code}) — keeping existing CA if present"
-          ;;
-      esac
-      rm -f "$_ca_tmp"
+  tp_fetch_instance_ca
 fi
 if [ "$INSTANCE_INSTALL" != true ] && [ -n "$HOST_URL" ]; then
   tp_print_step "▸" "Fetching private uploaded issuer…"
