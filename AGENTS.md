@@ -177,7 +177,7 @@ reconnecting`, and does **not** close the socket or stop retrying. It is a
 flag, not a park.
 
 Each floor tolerates every peer semver at or above the constant. Today both
-floors are **`0.1.0`** against package **`0.1.1`**, so a `0.1.x` peer is in
+floors are **`0.1.0`** against package **`0.1.2`**, so a `0.1.x` peer is in
 window and a `0.0.x` peer is not. The window may trail the current release by
 several minor versions. There is no fixed upgrade order. Bump
 `MIN_SUPPORTED_DAEMON_VERSION` and `MIN_SUPPORTED_INSTANCE_VERSION` together,
