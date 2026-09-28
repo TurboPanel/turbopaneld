@@ -315,20 +315,29 @@ async function ensurePrincipalGroup(
 ): Promise<void> {
   const groupCheck = await runFn("getent", ["group", groupName]);
   if (groupCheck.success) {
+    const currentGid = parseGroupGid(groupCheck.stdout);
+    if (currentGid === null) {
+      throw new Error(
+        `Failed to parse group entry for principal group ${groupName}`,
+      );
+    }
     // Explicit gid overrides must match the existing group — never silently
     // attach a principal to a colliding group with a different numeric id.
     if (principal.gid !== undefined) {
-      const currentGid = parseGroupGid(groupCheck.stdout);
-      if (currentGid === null) {
-        throw new Error(
-          `Failed to parse group entry for principal group ${groupName}`,
-        );
-      }
       if (currentGid !== principal.gid) {
         throw new Error(
           `Principal group ${groupName} already exists with gid=${currentGid}; expected gid=${principal.gid}`,
         );
       }
+    } else if (currentGid < PRINCIPAL_ID_MIN) {
+      // Adopted from a host provisioned before the current floor
+      // (PRINCIPAL_ID_MIN was raised from 10001 to 15001 on 2026-09-25).
+      // tp-host hard-floors `tp_is_principal_group` at PRINCIPAL_ID_MIN, so
+      // silently adopting this group would only defer the failure to the
+      // first host command that touches its home tree.
+      throw new Error(
+        `Principal group ${groupName} has gid=${currentGid}, below the current PRINCIPAL_ID_MIN=${PRINCIPAL_ID_MIN} — needs UID/GID migration (groupmod -g <new gid in [${PRINCIPAL_ID_MIN}, ${PRINCIPAL_ID_MAX}]> ${groupName}, then chown -R the principal's home tree) before this host can be used again`,
+      );
     }
     return;
   }
@@ -403,6 +412,16 @@ async function ensurePrincipalUser(
   ) {
     throw new Error(
       `Principal username ${principal.username} already exists with uid=${current.uid} gid=${current.gid}; expected uid=${principal.uid} gid=${principal.gid}`,
+    );
+  }
+  if (principal.uid === undefined && current.uid < PRINCIPAL_ID_MIN) {
+    // Adopted from a host provisioned before the current floor
+    // (PRINCIPAL_ID_MIN was raised from 10001 to 15001 on 2026-09-25).
+    // tp-host hard-floors `tp_is_principal` at PRINCIPAL_ID_MIN, so silently
+    // adopting this account would only defer the failure to the first host
+    // command that touches its home tree.
+    throw new Error(
+      `Principal user ${principal.username} has uid=${current.uid}, below the current PRINCIPAL_ID_MIN=${PRINCIPAL_ID_MIN} — needs UID/GID migration (usermod -u <new uid in [${PRINCIPAL_ID_MIN}, ${PRINCIPAL_ID_MAX}]> ${principal.username}, then chown -R the principal's home tree) before this host can be used again`,
     );
   }
   if (current.home !== home) {
