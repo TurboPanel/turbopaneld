@@ -240,10 +240,10 @@ test("ensureSystemPrincipals rejects a later override below 15001 before any hos
 
 test("ensureSystemPrincipals adopts matching home and reconciles shell only", async () => {
   const { run, calls } = captureRun({
-    getentGroup: { success: true, stdout: "appuser-grp:x:10001:", stderr: "" },
+    getentGroup: { success: true, stdout: "appuser-grp:x:15001:", stderr: "" },
     getentPasswd: {
       success: true,
-      stdout: "appuser:x:10001:10001::/srv/users/appuser:/usr/sbin/nologin",
+      stdout: "appuser:x:15001:15001::/srv/users/appuser:/usr/sbin/nologin",
       stderr: "",
     },
   });
@@ -287,12 +287,65 @@ test("ensureSystemPrincipals adopts matching home and reconciles shell only", as
   );
 });
 
-test("ensureSystemPrincipals refuses foreign home without usermod or install", async () => {
+test("ensureSystemPrincipals rejects an adopted group below the current UID/GID floor", async () => {
   const { run, calls } = captureRun({
-    getentGroup: { success: true, stdout: "appuser-grp:x:33:", stderr: "" },
+    getentGroup: { success: true, stdout: "appuser-grp:x:10001:", stderr: "" },
+  });
+  await assertRejects(
+    () =>
+      ensureSystemPrincipals(stubLayout(), [{
+        ...baseSpec,
+        home: defaultHome,
+      }], run),
+    Error,
+    "Principal group appuser-grp has gid=10001, below the current PRINCIPAL_ID_MIN=15001 — needs UID/GID migration",
+  );
+  assertEquals(
+    calls.some((c) => c.command === "getent" && c.args[0] === "passwd"),
+    false,
+  );
+  assertEquals(
+    calls.some((c) =>
+      c.command === "sudo" &&
+      (c.args.includes("groupadd") || c.args.includes("useradd"))
+    ),
+    false,
+  );
+});
+
+test("ensureSystemPrincipals rejects an adopted user below the current UID/GID floor", async () => {
+  const { run, calls } = captureRun({
+    getentGroup: { success: true, stdout: "appuser-grp:x:15001:", stderr: "" },
     getentPasswd: {
       success: true,
-      stdout: "appuser:x:33:33::/var/www:/usr/sbin/nologin",
+      stdout: "appuser:x:10001:15001::/srv/users/appuser:/usr/sbin/nologin",
+      stderr: "",
+    },
+  });
+  await assertRejects(
+    () =>
+      ensureSystemPrincipals(stubLayout(), [{
+        ...baseSpec,
+        home: defaultHome,
+      }], run),
+    Error,
+    "Principal user appuser has uid=10001, below the current PRINCIPAL_ID_MIN=15001 — needs UID/GID migration",
+  );
+  assertEquals(
+    calls.some((c) =>
+      c.command === "sudo" &&
+      (c.args.includes("useradd") || c.args.includes("usermod"))
+    ),
+    false,
+  );
+});
+
+test("ensureSystemPrincipals refuses foreign home without usermod or install", async () => {
+  const { run, calls } = captureRun({
+    getentGroup: { success: true, stdout: "appuser-grp:x:15005:", stderr: "" },
+    getentPasswd: {
+      success: true,
+      stdout: "appuser:x:15005:15005::/var/www:/usr/sbin/nologin",
       stderr: "",
     },
   });
@@ -322,7 +375,7 @@ test("ensureSystemPrincipals refuses foreign home without usermod or install", a
 
 test("ensureSystemPrincipals rejects existing username with mismatched uid override", async () => {
   const { run, calls } = captureRun({
-    getentGroup: { success: true, stdout: "appuser-grp:x:10001:", stderr: "" },
+    getentGroup: { success: true, stdout: "appuser-grp:x:15001:", stderr: "" },
     getentPasswd: {
       success: true,
       stdout: "appuser:x:33:33::/srv/users/appuser:/usr/sbin/nologin",
@@ -647,7 +700,7 @@ test("ensureSystemPrincipals fails when existing passwd line is unparsable", asy
   const { run } = captureRun({
     getentGroup: {
       success: true,
-      stdout: "appuser-grp:x:1000:",
+      stdout: "appuser-grp:x:15001:",
       stderr: "",
     },
     getentPasswd: {
@@ -672,14 +725,14 @@ test("ensureSystemPrincipals fails when usermod -s fails", async () => {
     if (command === "getent" && args[0] === "group") {
       return Promise.resolve({
         success: true,
-        stdout: "appuser-grp:x:1000:",
+        stdout: "appuser-grp:x:15001:",
         stderr: "",
       });
     }
     if (command === "getent" && args[0] === "passwd") {
       return Promise.resolve({
         success: true,
-        stdout: `appuser:x:1000:1000::${defaultHome}:/bin/false`,
+        stdout: `appuser:x:15001:15001::${defaultHome}:/bin/false`,
         stderr: "",
       });
     }
@@ -1238,10 +1291,10 @@ test("ensureSystemPrincipals rejects existing username with mismatched gid overr
 
 test("ensureSystemPrincipals skips usermod when the adopted shell already matches", async () => {
   const { run, calls } = captureRun({
-    getentGroup: { success: true, stdout: "appuser-grp:x:10001:", stderr: "" },
+    getentGroup: { success: true, stdout: "appuser-grp:x:15001:", stderr: "" },
     getentPasswd: {
       success: true,
-      stdout: `appuser:x:10001:10001::${defaultHome}:/bin/bash`,
+      stdout: `appuser:x:15001:15001::${defaultHome}:/bin/bash`,
       stderr: "",
     },
   });
@@ -1321,14 +1374,14 @@ test("ensureSystemPrincipals uses generic errors when sudo stderr is empty", asy
     if (command === "getent" && args[0] === "group") {
       return Promise.resolve({
         success: true,
-        stdout: "appuser-grp:x:1000:",
+        stdout: "appuser-grp:x:15001:",
         stderr: "",
       });
     }
     if (command === "getent" && args[0] === "passwd") {
       return Promise.resolve({
         success: true,
-        stdout: `appuser:x:1000:1000::${defaultHome}:/bin/false`,
+        stdout: `appuser:x:15001:15001::${defaultHome}:/bin/false`,
         stderr: "",
       });
     }
