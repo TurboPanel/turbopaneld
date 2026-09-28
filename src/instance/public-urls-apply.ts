@@ -253,18 +253,22 @@ export async function runInstanceCertsApply(
     "-e",
     `turbopanel_instance_dir=${instanceDir}`,
     "-e",
-    `turbopanel_public_urls=${
-      certificateGenerationPublicUrls(
-        hostnames,
-        env,
-        deps.readForwardHosts ?? readDevForwardHostsFile,
-      )
-    }`,
-    "-e",
     `turbopanel_hostnames_json=${
       JSON.stringify(hostnames.map(ansibleHostname))
     }`,
   ];
+  // tp-orchestrate's tp_host_list_ok refuses an empty extra-var value
+  // outright — an all-lets-encrypt/all-uploaded hostname set (no
+  // platform-ca hosts, not co-located dev) legitimately computes "" here.
+  // The role already defaults this var to '' when absent
+  // (instance-certs/defaults/main.yml), so omitting it is equivalent to
+  // passing empty and keeps tp-orchestrate from refusing the whole apply.
+  const publicUrls = certificateGenerationPublicUrls(
+    hostnames,
+    env,
+    deps.readForwardHosts ?? readDevForwardHostsFile,
+  );
+  if (publicUrls) args.push("-e", `turbopanel_public_urls=${publicUrls}`);
   const email = deps.instanceAcme?.contactEmail.trim();
   if (email) args.push("-e", `turbopanel_acme_email=${email}`);
   const directory = deps.instanceAcme?.directoryUrl.trim();

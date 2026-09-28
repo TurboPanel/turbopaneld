@@ -246,6 +246,51 @@ test({
 });
 
 test({
+  name:
+    "runInstanceCertsApply omits turbopanel_public_urls when no platform-ca hosts exist (not co-located dev)",
+  permissions: { env: true },
+  fn: async () => {
+    // A managed host whose only hostname is lets-encrypt-sourced computes an
+    // empty platform-ca list. tp-orchestrate's tp_host_list_ok refuses an
+    // empty extra-var value outright, so the flag must be omitted rather
+    // than sent as `turbopanel_public_urls=`. Reproduces the apply failure
+    // seen against a real managed host with exactly this hostname shape.
+    const originalDevUser = Deno.env.get("TURBOPANEL_DEV_USER");
+    Deno.env.delete("TURBOPANEL_DEV_USER");
+    const calls: Array<{ playbook: string; args: string[] }> = [];
+    try {
+      await runInstanceCertsApply("/opt/turbopanel", [
+        {
+          host: "https://canary.turbopanel.dev:8443",
+          source: "lets-encrypt",
+        },
+      ], {
+        readForwardHosts: () => "",
+        instanceAcme: {
+          contactEmail: "noc@turbopanel.io",
+          tosAccepted: true,
+          directoryUrl: "https://acme-v02.api.letsencrypt.org/directory",
+          useStaging: false,
+        },
+        runPlaybook: (playbook, extraArgs = []) => {
+          calls.push({ playbook, args: [...extraArgs] });
+          return Promise.resolve();
+        },
+      });
+      assertEquals(calls.length, 1);
+      assertEquals(
+        calls[0]!.args.some((arg) => arg.startsWith("turbopanel_public_urls")),
+        false,
+      );
+    } finally {
+      if (originalDevUser === undefined) {
+        Deno.env.delete("TURBOPANEL_DEV_USER");
+      } else Deno.env.set("TURBOPANEL_DEV_USER", originalDevUser);
+    }
+  },
+});
+
+test({
   name: "applyPublicUrls upserts env then invokes certs apply stub",
   permissions: { read: true, write: true, env: true },
   fn: async () => {
