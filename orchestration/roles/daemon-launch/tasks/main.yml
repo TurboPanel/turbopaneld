@@ -35,6 +35,16 @@
     group: "{{ turbopanel_group }}"
     mode: "0750"
 
+# Production run.sh lays down <install>/lib before this role runs; a
+# co-located dev host never has it, and the copy below does not create parents.
+- name: Ensure update-guard install directory exists
+  ansible.builtin.file:
+    path: "{{ turbopanel_update_guard_bin | dirname }}"
+    state: directory
+    owner: root
+    group: "{{ turbopanel_group }}"
+    mode: "0750"
+
 - name: Install update-guard outside the replaceable orchestration tree
   ansible.builtin.copy:
     src: "{{ turbopanel_update_guard_script }}"
