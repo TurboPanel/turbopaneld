@@ -629,6 +629,70 @@ test("executeRunReconcile preserves trimmed TURBOPANEL_DL_BASE", async () => {
   }
 });
 
+const PINNED_OLD_BUILD =
+  "https://github.com/TurboPanel/turbopaneld/releases/download/canary/manifest-0.1.1-canary.20260927-192410-1ade037.json";
+const TARGET_BUILD =
+  "https://github.com/TurboPanel/turbopaneld/releases/download/canary/manifest-0.1.1-canary.20260927-193059-fc561fc.json";
+const TAG_PIN =
+  "https://github.com/TurboPanel/turbopaneld/releases/download/v0.1.1/manifest.json";
+const CANARY_POINTER =
+  "https://github.com/TurboPanel/turbopaneld/releases/download/canary/manifest.json";
+
+async function reconcileManifestEnv(
+  hostPin: string | undefined,
+  manifestUrl: string | undefined,
+): Promise<string | undefined> {
+  const originalCommand = Deno.Command;
+  const originalPin = Deno.env.get("TURBOPANEL_MANIFEST_URL");
+  const originalDlBase = Deno.env.get("TURBOPANEL_DL_BASE");
+  let capturedEnv: Record<string, string> | undefined;
+  try {
+    Deno.env.delete("TURBOPANEL_DL_BASE");
+    if (hostPin === undefined) Deno.env.delete("TURBOPANEL_MANIFEST_URL");
+    else Deno.env.set("TURBOPANEL_MANIFEST_URL", hostPin);
+    Deno.Command = class {
+      constructor(_cmd: string, opts: Deno.CommandOptions) {
+        capturedEnv = opts.env as Record<string, string> | undefined;
+      }
+      spawn() {
+        return fakeReconcileChild();
+      }
+    } as unknown as typeof Deno.Command;
+
+    await executeRunReconcile({
+      script: "#!/bin/sh\nexit 0",
+      args: [],
+      manifestUrl,
+    });
+    return capturedEnv?.TURBOPANEL_MANIFEST_URL;
+  } finally {
+    Deno.Command = originalCommand;
+    if (originalPin === undefined) Deno.env.delete("TURBOPANEL_MANIFEST_URL");
+    else Deno.env.set("TURBOPANEL_MANIFEST_URL", originalPin);
+    if (originalDlBase === undefined) Deno.env.delete("TURBOPANEL_DL_BASE");
+    else Deno.env.set("TURBOPANEL_DL_BASE", originalDlBase);
+  }
+}
+
+test("executeRunReconcile installs the targeted build over the last build run.sh persisted", async () => {
+  assertEquals(
+    await reconcileManifestEnv(PINNED_OLD_BUILD, TARGET_BUILD),
+    TARGET_BUILD,
+  );
+});
+
+test("executeRunReconcile keeps a host pin when the message only names the channel", async () => {
+  assertEquals(await reconcileManifestEnv(TAG_PIN, CANARY_POINTER), TAG_PIN);
+  assertEquals(await reconcileManifestEnv(TAG_PIN, undefined), TAG_PIN);
+});
+
+test("executeRunReconcile uses the message URL when the host has no pin", async () => {
+  assertEquals(
+    await reconcileManifestEnv(undefined, CANARY_POINTER),
+    CANARY_POINTER,
+  );
+});
+
 test("executeRunReconcile falls back cwd when primary chdir fails", async () => {
   const originalCommand = Deno.Command;
   const originalChdir = Deno.chdir;
