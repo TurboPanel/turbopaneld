@@ -540,6 +540,12 @@ const mysqlReplicationRuntime: ManagedEngineReplicationRuntime = {
     // replication is configured.
     await runMysql(ctx, disableReadOnlySql());
 
+    // The seed imports the primary's grant tables, where root@localhost is
+    // `auth_socket`. A standby's initdb cannot install the plugin (it boots
+    // super_read_only, error 1290), so without this the FLUSH below locks
+    // every socket admin out ("Plugin 'auth_socket' is not loaded").
+    await ensureAuthSocketPlugin(ctx);
+
     // Short-lived 0600 defaults file via stdin (never -p on argv / never MYSQL_PWD).
     const seed = await ctx.exec(
       ["sh", "-c", buildMysqlStandbySeedScript()],
