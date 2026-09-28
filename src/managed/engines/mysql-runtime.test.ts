@@ -434,6 +434,57 @@ test("mysql configureStandby seeds replication and writes marker", async () => {
   );
 });
 
+test("mysql configureStandby installs auth_socket in the writable window before the seed", async () => {
+  const replication = mysqlManagedEngineRuntime.replication;
+  if (!replication?.configureStandby) {
+    throw new TypeError("expected mysql configureStandby");
+  }
+  const steps: string[] = [];
+  const exec: ManagedEngineExec = (argv, input) => {
+    const text = `${argv.join(" ")}\n${input ?? ""}`;
+    if (argv[0] === "test" && argv.includes("-f")) {
+      return Promise.resolve({ success: false, stdout: "", stderr: "" });
+    }
+    if (text.includes("super_read_only = OFF")) steps.push("writable");
+    else if (text.includes("INSTALL PLUGIN auth_socket")) steps.push("install");
+    else if (text.includes("mysqldump")) steps.push("seed");
+    else if (text.includes("FLUSH PRIVILEGES")) steps.push("flush");
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  await replication.configureStandby(
+    buildContext(exec),
+    standbyReplicationSpec(),
+  );
+  assertEquals(steps, ["writable", "install", "seed", "flush"]);
+});
+
+test("mysql configureStandby skips INSTALL PLUGIN when auth_socket is already loaded", async () => {
+  const replication = mysqlManagedEngineRuntime.replication;
+  if (!replication?.configureStandby) {
+    throw new TypeError("expected mysql configureStandby");
+  }
+  let installs = 0;
+  const exec: ManagedEngineExec = (argv, input) => {
+    if (argv[0] === "test" && argv.includes("-f")) {
+      return Promise.resolve({ success: false, stdout: "", stderr: "" });
+    }
+    if (argv.some((part) => part.includes("INFORMATION_SCHEMA.PLUGINS"))) {
+      return Promise.resolve({
+        success: true,
+        stdout: "auth_socket\n",
+        stderr: "",
+      });
+    }
+    if (input?.includes("INSTALL PLUGIN")) installs++;
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  await replication.configureStandby(
+    buildContext(exec),
+    standbyReplicationSpec(),
+  );
+  assertEquals(installs, 0);
+});
+
 test("mysql configureStandby throws when seed script fails", async () => {
   const replication = mysqlManagedEngineRuntime.replication;
   if (!replication?.configureStandby) {
