@@ -67,6 +67,26 @@ test("ensureManagedIngressNetwork uses the name it is given, never a constant", 
   assertEquals(calls, [["network", "inspect", other]]);
 });
 
+test("ensureManagedIngressNetwork tolerates a concurrent creator winning the race", async () => {
+  const calls: string[][] = [];
+  await ensureManagedIngressNetwork(MANAGED_NETWORK, (args) => {
+    calls.push([...args]);
+    if (args[1] === "inspect") {
+      return Promise.resolve(failResult("not found"));
+    }
+    return Promise.resolve(
+      failResult(
+        `Error response from daemon: network with name ${MANAGED_NETWORK} already exists`,
+      ),
+    );
+  });
+
+  assertEquals(calls, [
+    ["network", "inspect", MANAGED_NETWORK],
+    ["network", "create", MANAGED_NETWORK],
+  ]);
+});
+
 test("ensureManagedIngressNetwork throws when create fails", async () => {
   await assertRejects(
     () =>
