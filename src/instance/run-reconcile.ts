@@ -21,6 +21,7 @@ import {
   type ReleaseArtifactKind,
   releaseManifestUrlAllowed,
   resolveOverlayDlBase,
+  selectUpdateManifestUrl,
 } from "../update/urls.ts";
 import { parseTurbopanelStageLine } from "./update-progress-reporter.ts";
 import {
@@ -602,7 +603,10 @@ export async function executeRunReconcile(options: {
   script?: string;
   args: string[];
   channel?: string;
-  /** Panel pin when the host env has no TURBOPANEL_MANIFEST_URL. */
+  /**
+   * Control plane's target. An exact-build URL beats the host's
+   * TURBOPANEL_MANIFEST_URL; a floating one never replaces it.
+   */
   manifestUrl?: string;
   /**
    * The daemon on a self-hosted control-plane host (socket mode): refresh it
@@ -620,11 +624,17 @@ export async function executeRunReconcile(options: {
   if (dlBase) {
     env.TURBOPANEL_DL_BASE = dlBase;
   }
-  const messagePin = options.manifestUrl?.trim();
-  if (messagePin && !env.TURBOPANEL_MANIFEST_URL?.trim()) {
-    env.TURBOPANEL_MANIFEST_URL = messagePin;
+  // run.sh persists every --manifest-url into daemon.env, so the env pin is
+  // usually just the last build installed. Letting it win here meant a host
+  // reinstalled that build on every dispatch and never reached the target.
+  const manifestForHelper = selectUpdateManifestUrl(
+    "daemon",
+    env,
+    options.manifestUrl,
+  );
+  if (manifestForHelper) {
+    env.TURBOPANEL_MANIFEST_URL = manifestForHelper;
   }
-  const manifestForHelper = env.TURBOPANEL_MANIFEST_URL?.trim() || messagePin;
 
   const reconcileCwd = resolveReconcileCwd();
   try {
