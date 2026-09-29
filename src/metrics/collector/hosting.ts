@@ -39,13 +39,10 @@ async function nearestExistingAncestor(
   path: string,
   isDirectory: IsDirectoryLike,
 ): Promise<string> {
-  let current = path;
-  while (!(await isDirectory(current))) {
-    const parent = dirname(current);
-    if (parent === current) return current;
-    current = parent;
-  }
-  return current;
+  if (await isDirectory(path)) return path;
+  const parent = dirname(path);
+  if (parent === path) return path;
+  return nearestExistingAncestor(parent, isDirectory);
 }
 
 /**

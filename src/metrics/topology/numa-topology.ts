@@ -35,14 +35,15 @@ export async function collectNumaTopology(
     NODE_DIR_RE.test(entry)
   );
 
-  const nodes: NumaNodeTopology[] = [];
-  for (const entry of entries) {
-    const cpulistRaw = await deps.io.readFile(`${nodeRoot}/${entry}/cpulist`);
-    nodes.push({
-      nodeId: entry,
-      cpuIds: cpulistRaw ? parseCpuList(cpulistRaw) : [],
-    });
-  }
+  const nodes: NumaNodeTopology[] = await Promise.all(
+    entries.map(async (entry) => {
+      const cpulistRaw = await deps.io.readFile(`${nodeRoot}/${entry}/cpulist`);
+      return {
+        nodeId: entry,
+        cpuIds: cpulistRaw ? parseCpuList(cpulistRaw) : [],
+      };
+    }),
+  );
   return nodes.sort((a, b) =>
     a.nodeId.localeCompare(b.nodeId, undefined, { numeric: true })
   );

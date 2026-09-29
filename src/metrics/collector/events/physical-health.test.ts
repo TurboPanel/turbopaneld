@@ -304,3 +304,59 @@ test("PhysicalHealthEventCollector: a service drive carrying both its raw probe 
   assertEquals(crossed[0].kind, "temp_critical");
   assertEquals(crossed[0].entityId, DISK_PROBE_SIGNAL.signalId);
 });
+
+/** An io whose reads settle in reverse call order, to expose order dependence. */
+function reverseSettlingIo(
+  files: Record<string, string | undefined>,
+  dirs: Record<string, string[]>,
+): SensorIo {
+  let pending = 0;
+  return {
+    listDir: (path) => Promise.resolve(dirs[path] ?? []),
+    readFile: async (path) => {
+      pending += 1;
+      await new Promise((resolve) => setTimeout(resolve, 20 - pending));
+      return files[path];
+    },
+  };
+}
+
+test("PhysicalHealthEventCollector: events keep candidate then directory-listing order even when reads settle out of order", async () => {
+  const fanA: SensorCandidate = {
+    chip: "nct6775",
+    label: "fan1",
+    path: "/sys/class/hwmon/hwmon1/fan1_input",
+  };
+  const fanB: SensorCandidate = {
+    chip: "nct6775",
+    label: "fan2",
+    path: "/sys/class/hwmon/hwmon1/fan2_input",
+  };
+  const dirs = {
+    "/sys/class/hwmon/hwmon1": ["in0_alarm", "power1_alarm"],
+  };
+  const files = {
+    "/sys/class/hwmon/hwmon1/fan1_fault": "1",
+    "/sys/class/hwmon/hwmon1/fan2_alarm": "1",
+    "/sys/class/hwmon/hwmon1/in0_alarm": "1",
+    "/sys/class/hwmon/hwmon1/power1_alarm": "1",
+  };
+  const collector = new PhysicalHealthEventCollector();
+  const events = await collector.detect(ctx({
+    snapshot: snapshot([]),
+    hardwareSignalCandidates: new Map([
+      ["signal:nct6775:fan1", fanA],
+      ["signal:nct6775:fan2", fanB],
+    ]),
+    io: reverseSettlingIo(files, dirs),
+  }));
+  assertEquals(
+    events.map((e) => `${e.kind}:${e.entityId ?? e.source}`),
+    [
+      "fan_fault:signal:nct6775:fan1",
+      "fan_alarm:signal:nct6775:fan2",
+      "voltage_alarm:/sys/class/hwmon/hwmon1/in0_alarm",
+      "psu_fault:/sys/class/hwmon/hwmon1/power1_alarm",
+    ],
+  );
+});

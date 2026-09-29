@@ -5,6 +5,7 @@ import type {
   DockerEvent,
 } from "./client.ts";
 import { logInfo, logWarn } from "../util/logger.ts";
+import { forEachSequential } from "../util/sequential.ts";
 
 export type DockerMonitorChange = {
   containerId: string;
@@ -218,10 +219,11 @@ export class DockerMonitor {
     signal: AbortSignal,
   ): Promise<Map<string, ContainerInspect>> {
     const inspects = new Map<string, ContainerInspect>();
-    for (const summary of summaries) {
-      if (signal.aborted) break;
+    // One Docker socket call at a time; stop starting new ones once aborted.
+    await forEachSequential(summaries, async (summary) => {
+      if (signal.aborted) return;
       await this.#inspectOne(summary.Id, inspects);
-    }
+    });
     return inspects;
   }
 
@@ -266,40 +268,43 @@ export class DockerMonitor {
    * makes that class of leak structurally impossible.
    */
   async #reconcileLoop(signal: AbortSignal): Promise<void> {
-    while (!signal.aborted) {
-      const usingPollFallback = this.#usingPollFallback;
-      const delayMs = usingPollFallback
-        ? this.#pollBackoffMs
-        : this.#reconcileBackoffMs;
-      await delay(delayMs, signal);
-      if (signal.aborted) break;
+    if (signal.aborted) return;
+    const usingPollFallback = this.#usingPollFallback;
+    const delayMs = usingPollFallback
+      ? this.#pollBackoffMs
+      : this.#reconcileBackoffMs;
+    await delay(delayMs, signal);
+    if (signal.aborted) return;
 
-      const ok = await this.#reconcileAll(signal);
-      if (this.#usingPollFallback) {
-        this.#pollBackoffMs = ok
-          ? this.#pollIntervalMs
-          : Math.min(this.#pollBackoffMs * 2, MAX_IDLE_BACKOFF_MS);
-      } else {
-        this.#reconcileBackoffMs = ok
-          ? this.#reconcileIntervalMs
-          : Math.min(this.#reconcileBackoffMs * 2, MAX_IDLE_BACKOFF_MS);
-      }
+    const ok = await this.#reconcileAll(signal);
+    if (this.#usingPollFallback) {
+      this.#pollBackoffMs = ok
+        ? this.#pollIntervalMs
+        : Math.min(this.#pollBackoffMs * 2, MAX_IDLE_BACKOFF_MS);
+    } else {
+      this.#reconcileBackoffMs = ok
+        ? this.#reconcileIntervalMs
+        : Math.min(this.#reconcileBackoffMs * 2, MAX_IDLE_BACKOFF_MS);
     }
+    // Next cycle is detached (not awaited) so a loop that runs for the
+    // daemon's lifetime never builds an ever-deeper chain of pending promises.
+    void this.#reconcileLoop(signal);
   }
 
   async #eventsLoop(signal: AbortSignal): Promise<void> {
-    while (!signal.aborted) {
-      const streamedAny = await this.#runEventsStream(signal);
-      if (signal.aborted) return;
+    if (signal.aborted) return;
+    const streamedAny = await this.#runEventsStream(signal);
+    if (signal.aborted) return;
 
-      if (!streamedAny) {
-        // Events aren't flowing (connect failed, or the stream ended with
-        // nothing to report) — lean on `#reconcileLoop`'s faster poll
-        // cadence until a live event proves the stream is healthy again.
-        this.#usingPollFallback = true;
-      }
-      await this.#backoffAfterStream(streamedAny, signal);
+    if (!streamedAny) {
+      // Events aren't flowing (connect failed, or the stream ended with
+      // nothing to report) — lean on `#reconcileLoop`'s faster poll
+      // cadence until a live event proves the stream is healthy again.
+      this.#usingPollFallback = true;
     }
+    await this.#backoffAfterStream(streamedAny, signal);
+    // Detached for the same reason as in `#reconcileLoop`.
+    void this.#eventsLoop(signal);
   }
 
   async #runEventsStream(signal: AbortSignal): Promise<boolean> {

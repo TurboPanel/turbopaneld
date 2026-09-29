@@ -181,9 +181,12 @@ export async function readManagedEngineCensus(
 ): Promise<ManagedEngineCensusReading> {
   const reading = emptyManagedEngineCensus();
   const containers = managedEngineContainers(await deps.listContainers());
-  for (const engine of STORAGE_ENGINE_KEYS) {
+  // Engines are independent; each writes only its own `reading[engine]` slot,
+  // so the reading's shape is fixed by `emptyManagedEngineCensus()` and does
+  // not depend on completion order.
+  await Promise.all(STORAGE_ENGINE_KEYS.map(async (engine) => {
     const instances = containers.filter((c) => c.engine === engine);
-    if (instances.length === 0) continue;
+    if (instances.length === 0) return;
     const running = instances.filter((c) => c.running);
     const runtime = deps.runtimeFor(engine);
     const censuses = runtime
@@ -202,7 +205,7 @@ export async function readManagedEngineCensus(
       connectionsUsed: sumOrNull(answered.map((c) => c.connectionsUsed)),
       connectionsMax: sumOrNull(answered.map((c) => c.connectionsMax)),
     };
-  }
+  }));
   return reading;
 }
 
