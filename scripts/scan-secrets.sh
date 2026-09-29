@@ -61,10 +61,14 @@ is_secret_bearing_path() {
     license.token|license.id|server-key.json|server-key-id|server.id|.pgpass|.rabbitmq_pass)
       return 0
       ;;
+    *)
+      ;;
   esac
   case "$path" in
     *.pgpass|*.rabbitmq_pass)
       return 0
+      ;;
+    *)
       ;;
   esac
   return 1
@@ -78,6 +82,8 @@ line_looks_like_secret() {
     *amqp://*:*@*|*amqps://*:*@*|*postgresql://*:*@*|*postgres://*:*@*)
       return 0
       ;;
+    *)
+      ;;
   esac
   # Env / YAML / JSON binding of the root secret (not bare mentions).
   # Deliberately requires `=` or `:` right after the name so prose like
@@ -89,11 +95,15 @@ line_looks_like_secret() {
     *'"TURBOPANEL_SECRET":'*|*'"TURBOPANEL_SECRETS":'*)
       return 0
       ;;
+    *)
+      ;;
   esac
   # Mentions of secret-bearing files: allowlisted line by line.
   case "$line" in
     *license.token*|*server-key.json*|*.rabbitmq_pass*|*.pgpass*)
       return 0
+      ;;
+    *)
       ;;
   esac
   return 1
@@ -117,6 +127,8 @@ for file in $FILES; do
       ;;
     *.png|*.jpg|*.jpeg|*.gif|*.webp|*.ico|*.woff|*.woff2|*.ttf|*.otf|*.zip|*.tar|*.zst|*.gz)
       continue
+      ;;
+    *)
       ;;
   esac
 
