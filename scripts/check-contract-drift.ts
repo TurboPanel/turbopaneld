@@ -970,13 +970,21 @@ async function checkExpandOnly(tp: string, td: string): Promise<void> {
     fail("contract-field-snapshot.json drifted between checkouts");
   }
   const snapshot = JSON.parse(left) as Record<string, ContractPin>;
-  for (const [typeName, pin] of Object.entries(snapshot)) {
+  // Reads are independent (readRel never throws); the checks below still run
+  // in snapshot order so the first failure reported is unchanged.
+  const sources = await Promise.all(
+    Object.values(snapshot).map(async (pin) => ({
+      instance: await readRel(tp, pin.instance),
+      daemon: await readRel(td, pin.daemon),
+    })),
+  );
+  for (const [index, [typeName, pin]] of Object.entries(snapshot).entries()) {
     const instanceSrc = requireText(
-      await readRel(tp, pin.instance),
+      sources[index].instance,
       `${typeName} instance source missing`,
     );
     const daemonSrc = requireText(
-      await readRel(td, pin.daemon),
+      sources[index].daemon,
       `${typeName} daemon source missing`,
     );
     const instanceFields = extractFieldSpecs(instanceSrc, typeName);

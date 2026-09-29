@@ -6,6 +6,8 @@
  * relicense — third-party components keep their own copyright and terms.
  */
 
+import { mapSequential } from "../../src/util/sequential.ts";
+
 export const NOTICES_FILE_NAME = "THIRD_PARTY_NOTICES.md";
 
 export type NoticeRole =
@@ -1110,21 +1112,21 @@ export function packagesFromOrchestrationPins(
   }));
 }
 
-export async function fillMissingLicenses(
+/**
+ * Lookups hit the package registries, so they run one at a time (a burst
+ * gets throttled and leaves packages "Unknown" from one run to the next);
+ * rows keep their input order.
+ */
+export function fillMissingLicenses(
   packages: readonly NoticePackage[],
   lookup: (pkg: NoticePackage) => Promise<string>,
 ): Promise<NoticePackage[]> {
-  const out: NoticePackage[] = [];
-  for (const pkg of packages) {
-    if (!needsLicenseLookup(pkg.license)) {
-      out.push(pkg);
-      continue;
-    }
+  return mapSequential(packages, async (pkg) => {
+    if (!needsLicenseLookup(pkg.license)) return pkg;
     const lookedUp = (await lookup(pkg)).trim();
     const license = lookedUp || defaultLicenseForPackageName(pkg.name) || "";
-    out.push(license ? { ...pkg, license } : pkg);
-  }
-  return out;
+    return license ? { ...pkg, license } : pkg;
+  });
 }
 
 export function needsLicenseLookup(license: string): boolean {

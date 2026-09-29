@@ -67,6 +67,7 @@ import {
 } from "./promote.ts";
 import { pruneReleases } from "./retention.ts";
 import { definedFields } from "../../util/optional-fields.ts";
+import { forEachSequential } from "../../util/sequential.ts";
 import {
   readReleaseManifest,
   type ReleaseManifestV1,
@@ -810,9 +811,10 @@ export async function applySourceReleases(
   if (material.length === 0) return [];
 
   const applied: AppliedRelease[] = [];
-  for (const entry of material) {
+  // Builds run one at a time, in payload order, stopping at the first failure.
+  await forEachSequential(material, async (entry) => {
     const result = await applyOneRelease(layout, payload, entry, deps);
     if (result) applied.push(result);
-  }
+  });
   return applied;
 }

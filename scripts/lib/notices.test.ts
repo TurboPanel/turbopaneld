@@ -610,6 +610,28 @@ describe("fillMissingLicenses", () => {
     assertEquals(filled[1]?.license, "MIT");
   });
 
+  it("keeps input order when lookups settle out of order", async () => {
+    const filled = await fillMissingLicenses(
+      [
+        pkg({ name: "slow", license: "" }),
+        pkg({ name: "kept", license: "ISC" }),
+        pkg({ name: "fast", license: "" }),
+      ],
+      async (row) => {
+        await new Promise((resolve) =>
+          setTimeout(resolve, row.name === "slow" ? 15 : 0)
+        );
+        return row.name === "slow" ? "MIT" : "Apache-2.0";
+      },
+    );
+    assertEquals(filled.map((row) => row.name), ["slow", "kept", "fast"]);
+    assertEquals(filled.map((row) => row.license), [
+      "MIT",
+      "ISC",
+      "Apache-2.0",
+    ]);
+  });
+
   it("keeps the package when lookup and default both miss", async () => {
     const filled = await fillMissingLicenses(
       [pkg({ name: "unknown-pkg", license: "" })],

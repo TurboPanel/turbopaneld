@@ -27,6 +27,7 @@
 
 import { join } from "@std/path";
 import { hostSudoArgs } from "../../permissions/host-sudo.ts";
+import { forEachSequential } from "../../util/sequential.ts";
 import type { RunFn } from "../ensure-principal.ts";
 import {
   type ReleasePaths,
@@ -129,7 +130,8 @@ export async function pruneReleases(
   const doomed = releasesToPrune(releaseIds, currentReleaseId, keep);
 
   const removed: string[] = [];
-  for (const releaseId of doomed) {
+  // Deleted one at a time, in listing order: never concurrent with each other.
+  await forEachSequential(doomed, async (releaseId) => {
     try {
       await removePublishedRelease(
         join(params.paths.releasesDir, releaseId),
@@ -143,7 +145,7 @@ export async function pruneReleases(
         `release retention could not remove ${releaseId}: ${message}`,
       );
     }
-  }
+  });
   return removed;
 }
 
@@ -223,7 +225,7 @@ export async function reclaimRemovedReleaseTrees(
 
   const runFn = params.runFn ?? runPrivileged;
   const removed: string[] = [];
-  for (const ref of doomed) {
+  await forEachSequential(doomed, async (ref) => {
     const path = siteRoot(
       principalHomePath(
         { principalHomeRoot: params.layout.principalHomeRoot },
@@ -241,7 +243,7 @@ export async function reclaimRemovedReleaseTrees(
           "stderr",
           `release tree reclaim could not remove ${path}: ${result.stderr}`,
         );
-        continue;
+        return;
       }
       removed.push(path);
     } catch (err) {
@@ -251,6 +253,6 @@ export async function reclaimRemovedReleaseTrees(
         `release tree reclaim could not remove ${path}: ${message}`,
       );
     }
-  }
+  });
   return removed;
 }
