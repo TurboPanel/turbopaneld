@@ -411,6 +411,34 @@ const CANARY_POINTER =
 const TAG_PIN =
   "https://github.com/TurboPanel/turbopaneld/releases/download/v0.1.1/manifest.json";
 
+test("isExactBuildManifestUrl: counter canaries and the plain -rc tag name one build", () => {
+  const base = "https://github.com/TurboPanel/turbopaneld/releases/download";
+  assertEquals(
+    isExactBuildManifestUrl(
+      "daemon",
+      `${base}/canary/manifest-0.1.3-canary.412.json`,
+    ),
+    true,
+  );
+  assertEquals(
+    isExactBuildManifestUrl("daemon", `${base}/v0.1.3-rc/manifest.json`),
+    true,
+  );
+  assertEquals(
+    isExactBuildManifestUrl("daemon", `${base}/v0.1.3/manifest.json`),
+    true,
+  );
+  // The rolling pointers still float.
+  assertEquals(
+    isExactBuildManifestUrl("daemon", `${base}/canary/manifest.json`),
+    false,
+  );
+  assertEquals(
+    isExactBuildManifestUrl("daemon", `${base}/rc/manifest.json`),
+    false,
+  );
+});
+
 test("isExactBuildManifestUrl: per-build canary copies and release tags name one build", () => {
   assertEquals(isExactBuildManifestUrl("daemon", CANARY_BUILD_NEW), true);
   assertEquals(isExactBuildManifestUrl("daemon", TAG_PIN), true);
