@@ -25,6 +25,7 @@ import {
   writeSystemComponentDescriptor,
 } from "../deploy/system-component.ts";
 import { logInfo } from "../util/logger.ts";
+import { forEachSequential } from "../util/sequential.ts";
 import { type LayoutPaths, resolveLayout } from "../paths/layout.ts";
 import { ensureManagedIngressNetwork } from "../managed/networks.ts";
 import { materializeProxySqlTlsMaterial } from "../managed/tls.ts";
@@ -104,15 +105,15 @@ async function registerClusters(
   api: OrchestratorApiDeps,
 ): Promise<string[]> {
   const registered: string[] = [];
-  for (const cluster of clusters) {
-    for (const member of cluster.members) {
+  await forEachSequential(clusters, async (cluster) => {
+    await forEachSequential(cluster.members, async (member) => {
       await discoverInstance({ host: member.host, port: member.port }, api);
       await registerCandidate(
         { host: member.host, port: member.port },
         member.promotionRule,
         api,
       );
-    }
+    });
     const primary = cluster.members.find((member) => member.role === "primary");
     if (primary) {
       await setClusterAlias(
@@ -124,7 +125,7 @@ async function registerClusters(
       });
     }
     registered.push(cluster.managedId);
-  }
+  });
   return registered.sort((a, b) => a.localeCompare(b));
 }
 

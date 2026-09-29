@@ -2,6 +2,7 @@ import { encodeHex } from "@std/encoding/hex";
 import { join } from "@std/path";
 import { run, runLogged, symlinkPointsAt } from "./exec.ts";
 import { logInfo, logWarn } from "../util/logger.ts";
+import { forEachSequential } from "../util/sequential.ts";
 import { logComponent } from "./presentation.ts";
 import { withRetry } from "./retry.ts";
 import {
@@ -199,16 +200,17 @@ async function extractUv(
 
     // Tarball name is "uv-<triple>.tar.gz"; the inner dir is "uv-<triple>".
     const innerDir = join(tmpDir, asset.replace(/\.tar\.gz$/, ""));
-    for (
-      const [src, dst] of [
+    await forEachSequential(
+      [
         [join(innerDir, "uv"), UV_BIN],
         [join(innerDir, "uvx"), UVX_BIN],
-      ] as const
-    ) {
-      // `uv` and `uvx` are on the run allowlist, which Deno treats as a write
-      // refusal on those exact paths — see scoped-writes.ts.
-      await installVendorExecutable(src, dst);
-    }
+      ] as const,
+      async ([src, dst]) => {
+        // `uv` and `uvx` are on the run allowlist, which Deno treats as a write
+        // refusal on those exact paths — see scoped-writes.ts.
+        await installVendorExecutable(src, dst);
+      },
+    );
   } finally {
     await Deno.remove(tmpDir, { recursive: true }).catch(() => {});
   }

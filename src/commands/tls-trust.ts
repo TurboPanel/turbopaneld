@@ -50,13 +50,11 @@ async function fingerprintsInPem(pem: string): Promise<string[]> {
   if (blocks.length === 0) {
     throw new Error("bundlePem contains no certificates");
   }
-  const fingerprints: string[] = [];
-  for (const block of blocks) {
-    fingerprints.push(
-      normalizeCaFingerprint(await fingerprintPemCertificate(block)),
-    );
-  }
-  return fingerprints;
+  return await Promise.all(
+    blocks.map(async (block) =>
+      normalizeCaFingerprint(await fingerprintPemCertificate(block))
+    ),
+  );
 }
 
 async function currentAnchorFingerprints(

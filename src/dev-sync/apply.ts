@@ -1,5 +1,6 @@
 import { dirname, join } from "@std/path";
 import { logWarn } from "../util/logger.ts";
+import { forEachSequential } from "../util/sequential.ts";
 import { resolveDevSyncSourceRoot } from "./resolve.ts";
 
 export {
@@ -56,15 +57,15 @@ async function replaceDaemonSourceTree(
   // Move preserved host-local artifacts from the live tree into staging so the
   // swapped-in directory keeps them. Host-local always wins over anything that
   // happened to ship in the archive.
-  for (const name of HOST_LOCAL_ARTIFACTS) {
+  await forEachSequential(HOST_LOCAL_ARTIFACTS, async (name) => {
     const current = join(daemonRoot, name);
-    if (!(await pathExists(current))) continue;
+    if (!(await pathExists(current))) return;
     const target = join(staging, name);
     if (await pathExists(target)) {
       await Deno.remove(target, { recursive: true });
     }
     await Deno.rename(current, target);
-  }
+  });
 
   // Best-effort: match the live tree's directory mode on the replacement.
   try {

@@ -1,4 +1,5 @@
 import { encodeHex } from "@std/encoding/hex";
+import { forEachSequential } from "../util/sequential.ts";
 import { dirname, join, relative } from "@std/path";
 import {
   type DevOrchestrationLayout,
@@ -64,23 +65,23 @@ async function collectRoleYamlMaterial(
       throw err;
     }
 
-    for (const entry of entries) {
+    await forEachSequential(entries, async (entry) => {
       const path = join(dir, entry.name);
       if (entry.isDirectory) {
         await walk(path);
-        continue;
+        return;
       }
-      if (!entry.isFile) continue;
+      if (!entry.isFile) return;
       if (
         !entry.name.endsWith(".yml") && !entry.name.endsWith(".yaml") &&
         !entry.name.endsWith(".j2")
       ) {
-        continue;
+        return;
       }
       const rel = relative(roleDir, path);
       const body = await Deno.readTextFile(path);
       collected.push(`${roleName}/${rel}\n${body}`);
-    }
+    });
   }
 
   await walk(roleDir);
@@ -137,9 +138,9 @@ export async function computeDevConvergeStamp(
   const layout = await resolveDevOrchestrationLayout();
   const playbook = await Deno.readTextFile(layout.playbookPath);
   const roleChunks: string[] = [];
-  for (const roleName of layout.manifest.roles) {
+  await forEachSequential(layout.manifest.roles, async (roleName) => {
     roleChunks.push(...await collectRoleYamlMaterial(layout, roleName));
-  }
+  });
   const material = [
     layout.root,
     playbook,
