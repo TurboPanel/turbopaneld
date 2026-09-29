@@ -1,4 +1,5 @@
 import { restartDaemonService } from "./restart-daemon-service.ts";
+import { describeUnknown } from "../util/describe-unknown.ts";
 import {
   createInstanceHttpClient,
   describeInstance,
@@ -450,7 +451,6 @@ export class InstanceClient {
       }
     })(),
   });
-  #updateProgressWs: WebSocket | undefined;
   /**
    * Identity directory captured at {@link start} so reconnects do not follow a
    * later `TURBOPANEL_DAEMON_STATE_DIR` change (parallel tests share process env).
@@ -519,7 +519,6 @@ export class InstanceClient {
     progressId: string,
     options: { upgradeId?: string; targetCommit?: string } = {},
   ): Promise<void> {
-    this.#updateProgressWs = ws;
     this.#updateProgress.setContext({
       progressId,
       upgradeId: options.upgradeId,
@@ -558,7 +557,6 @@ export class InstanceClient {
       this.#pendingInstanceUpdateResult = null;
       ws.send(JSON.stringify({ ...pending, at: new Date().toISOString() }));
     }
-    this.#updateProgressWs = ws;
     this.#updateProgress.setContext({
       canSend: () =>
         this.instanceSupports("update-progress-v1") &&
@@ -1654,7 +1652,7 @@ export class InstanceClient {
         logWarn(
           "instance",
           `ignored unknown websocket message type ${
-            String((message as { type?: unknown }).type)
+            describeUnknown((message as { type?: unknown }).type)
           }`,
         );
         break;
@@ -1843,12 +1841,12 @@ export class InstanceClient {
         message.tokenEnvelope,
       ]);
       if (typeof plaintext !== "string") {
-        throw new Error("tunnel token envelope could not be opened");
+        throw new TypeError("tunnel token envelope could not be opened");
       }
       return plaintext;
     }
     if (typeof message.token !== "string") {
-      throw new Error("tunnel-token carries no token");
+      throw new TypeError("tunnel-token carries no token");
     }
     return message.token;
   }
@@ -1871,7 +1869,7 @@ export class InstanceClient {
       if (index < 0) return entry;
       const keyPem = opened[index];
       if (typeof keyPem !== "string") {
-        throw new Error(
+        throw new TypeError(
           `uploaded certificate key for ${entry.host} could not be opened`,
         );
       }
@@ -2069,7 +2067,7 @@ export class InstanceClient {
         errorCode: "preflight_trust",
       };
     }
-    const message = err instanceof Error ? err.message : String(err);
+    const message = describeUnknown(err);
     if (
       err instanceof MalformedManifestError ||
       err instanceof MissingChannelError ||
@@ -2270,34 +2268,45 @@ export class InstanceClient {
     this.#pendingInstanceUpdateResult = result;
   }
 
+  /**
+   * Refuse a control-plane update that arrives while another is running,
+   * reporting the failure on the progress channel and as the update result.
+   */
+  #rejectInstanceUpdateInProgress(
+    message: Extract<DaemonMessage, { type: "instance-update" }>,
+    ws: WebSocket,
+  ): void {
+    const upgradeId = message.upgradeId?.trim() || undefined;
+    const error =
+      "preflight_in_progress: control-plane update already in progress";
+    if (
+      this.instanceSupports("update-progress-v1") &&
+      ws.readyState === WebSocket.OPEN
+    ) {
+      const progress: DaemonMessage = {
+        type: "update-progress",
+        id: message.id,
+        unit: "instance",
+        stage: "failed",
+        at: new Date().toISOString(),
+        errorCode: "preflight_in_progress",
+        detail: "control-plane update already in progress",
+        ...(upgradeId ? { upgradeId } : {}),
+      };
+      ws.send(JSON.stringify(progress));
+    }
+    this.#sendInstanceUpdateResult(ws, message.id, false, error, {
+      errorCode: "preflight_in_progress",
+      upgradeId,
+    });
+  }
+
   async #applyInstanceUpdate(
     message: Extract<DaemonMessage, { type: "instance-update" }>,
     ws: WebSocket,
   ): Promise<void> {
     if (this.#instanceUpdateInProgress) {
-      const upgradeId = message.upgradeId?.trim() || undefined;
-      const error =
-        "preflight_in_progress: control-plane update already in progress";
-      if (
-        this.instanceSupports("update-progress-v1") &&
-        ws.readyState === WebSocket.OPEN
-      ) {
-        const progress: DaemonMessage = {
-          type: "update-progress",
-          id: message.id,
-          unit: "instance",
-          stage: "failed",
-          at: new Date().toISOString(),
-          errorCode: "preflight_in_progress",
-          detail: "control-plane update already in progress",
-          ...(upgradeId ? { upgradeId } : {}),
-        };
-        ws.send(JSON.stringify(progress));
-      }
-      this.#sendInstanceUpdateResult(ws, message.id, false, error, {
-        errorCode: "preflight_in_progress",
-        upgradeId,
-      });
+      this.#rejectInstanceUpdateInProgress(message, ws);
       return;
     }
 
@@ -2392,7 +2401,7 @@ export class InstanceClient {
         errorCode: "preflight_manifest",
       };
     }
-    const message = err instanceof Error ? err.message : String(err);
+    const message = describeUnknown(err);
     return { error: message };
   }
 

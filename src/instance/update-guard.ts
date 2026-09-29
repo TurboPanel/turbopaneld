@@ -118,7 +118,7 @@ export async function handleSelfUpdateAttachOutcome(options: {
   }
 
   const armed = await readUpdateGuardArmed(layout);
-  if (armed && armed.targetCommit.trim() === commit) {
+  if (armed?.targetCommit.trim() === commit) {
     await writeUpdateGuardDisarm(commit, layout);
     options.reportStage("verifying");
     options.reportStage("done");
