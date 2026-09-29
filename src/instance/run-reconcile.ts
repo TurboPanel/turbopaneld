@@ -1,6 +1,7 @@
 import { encodeBase64Url } from "@std/encoding/base64url";
 import { hostSudoArgs } from "../permissions/host-sudo.ts";
 import { dirname } from "@std/path";
+import { forEachSequential } from "../util/sequential.ts";
 import { statfs } from "node:fs/promises";
 import { ORCHESTRATE_HELPER } from "../orchestration/assets.ts";
 import { playbooksNeedRootHelper } from "../orchestration/privileged.ts";
@@ -211,34 +212,41 @@ export async function assertUpdateDiskPreflight(options: {
         { path: stateDir, min: MIN_UPDATE_FREE_STATE_BYTES, label: "state" },
         { path: tmpDir, min: MIN_UPDATE_FREE_TMP_BYTES, label: "tmp" },
       ];
+  await forEachSequential(
+    checks,
+    (check) => assertDiskHeadroom(check, probe),
+  );
+}
 
-  for (const { path, min, label } of checks) {
-    let probePath: string;
-    try {
-      probePath = await resolveDiskProbePath(path);
-    } catch (err) {
-      if (err instanceof UpdatePreflightError) throw err;
-      throw new UpdatePreflightError(
-        "preflight_disk",
-        `unable to probe ${label} (${path})`,
-      );
-    }
-    let free: number;
-    try {
-      free = await freeBytesAt(probePath, probe);
-    } catch (err) {
-      if (err instanceof UpdatePreflightError) throw err;
-      throw new UpdatePreflightError(
-        "preflight_disk",
-        `unable to measure free space on ${label} (${path})`,
-      );
-    }
-    if (free < min) {
-      throw new UpdatePreflightError(
-        "preflight_disk",
-        `insufficient free space on ${label} (${path}): need at least ${min} bytes`,
-      );
-    }
+async function assertDiskHeadroom(
+  { path, min, label }: { path: string; min: number; label: string },
+  probe: StatfsProbe,
+): Promise<void> {
+  let probePath: string;
+  try {
+    probePath = await resolveDiskProbePath(path);
+  } catch (err) {
+    if (err instanceof UpdatePreflightError) throw err;
+    throw new UpdatePreflightError(
+      "preflight_disk",
+      `unable to probe ${label} (${path})`,
+    );
+  }
+  let free: number;
+  try {
+    free = await freeBytesAt(probePath, probe);
+  } catch (err) {
+    if (err instanceof UpdatePreflightError) throw err;
+    throw new UpdatePreflightError(
+      "preflight_disk",
+      `unable to measure free space on ${label} (${path})`,
+    );
+  }
+  if (free < min) {
+    throw new UpdatePreflightError(
+      "preflight_disk",
+      `insufficient free space on ${label} (${path}): need at least ${min} bytes`,
+    );
   }
 }
 

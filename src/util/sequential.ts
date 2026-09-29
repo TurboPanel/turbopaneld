@@ -12,7 +12,7 @@
 /** Await `step(item, index)` for each item, in order. */
 export function forEachSequential<T>(
   items: Iterable<T>,
-  step: (item: T, index: number) => Promise<unknown> | unknown,
+  step: (item: T, index: number) => unknown,
 ): Promise<void> {
   return [...items].reduce<Promise<void>>(
     (chain, item, index) =>
@@ -39,17 +39,44 @@ export function mapSequential<T, R>(
 }
 
 /**
- * The first result that is not `undefined`, trying the items in order and
+ * The first result that is neither `undefined` nor `null`, trying the items in order and
  * never starting a step once one has produced a result (an early `return` /
- * `break` out of a `for … await` loop).
+ * `break` out of a `for … await` loop). A step that resolves `null` counts as
+ * "no result yet", the same as `undefined`, so the next item is tried.
  */
 export function firstSequential<T, R>(
   items: Iterable<T>,
   step: (item: T, index: number) => Promise<R | undefined> | R | undefined,
 ): Promise<R | undefined> {
   return [...items].reduce<Promise<R | undefined>>(
-    (chain, item, index) =>
-      chain.then((found) => found !== undefined ? found : step(item, index)),
+    (chain, item, index) => chain.then((found) => found ?? step(item, index)),
     Promise.resolve(undefined),
   );
+}
+
+/**
+ * Run `step` again and again, one run at a time, for as long as it resolves
+ * `true` — a poll / retry / reconnect loop (`while (…) { await … }`) without
+ * the `await` in a loop. It stops when `step` resolves `false` (the `break` /
+ * `return`) or rejects (the `throw`, which rejects the result).
+ *
+ * Unlike a recursive `async` function, each run is chained with a plain
+ * callback rather than by returning the next run's promise, so a loop that
+ * lives for the whole process (a reconnect loop) does not accumulate one
+ * pending promise per turn.
+ */
+export function repeatSequential(
+  step: () => Promise<boolean>,
+): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const next = (): void => {
+      // A synchronous throw on the first turn rejects through the executor;
+      // on a later turn it is thrown inside the callback and caught below.
+      step().then((again) => {
+        if (again) next();
+        else resolve();
+      }).catch(reject);
+    };
+    next();
+  });
 }

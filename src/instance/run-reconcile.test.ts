@@ -1081,6 +1081,38 @@ test("assertUpdateDiskPreflight rejects an invalid statfs result", async () => {
   );
 });
 
+test("assertUpdateDiskPreflight probes install root, state, tmp in order and stops at the first low one", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-disk-order-" });
+  try {
+    const install = join(root, "install");
+    const state = join(root, "state");
+    const tmp = join(root, "tmp");
+    const probed: string[] = [];
+    const plenty = { bavail: Number.MAX_SAFE_INTEGER, bsize: 1 };
+    const run = (lowAt: string | null) =>
+      assertUpdateDiskPreflight({
+        installRoot: install,
+        stateDir: state,
+        tmpDir: tmp,
+        statfsProbe: (path) => {
+          probed.push(path);
+          return Promise.resolve(
+            path === lowAt ? { bavail: 1, bsize: 1 } : plenty,
+          );
+        },
+      });
+    await run(null);
+    assertEquals(probed, [install, state, tmp]);
+
+    probed.length = 0;
+    const err = await assertRejects(() => run(state), UpdatePreflightError);
+    assertEquals(probed, [install, state]);
+    assertStringIncludes(err.message, `insufficient free space on state`);
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
 test("assertUpdateDiskPreflight probes a missing directory via create-or-parent", async () => {
   const root = await Deno.makeTempDir({ prefix: "tp-disk-missing-" });
   const missing = join(root, "state", "nested");

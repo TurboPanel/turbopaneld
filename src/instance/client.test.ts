@@ -7494,3 +7494,111 @@ it({
     }
   },
 });
+
+it({
+  name:
+    "colocated client that had a stable session keeps polling readiness at poll cadence through an instance restart",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const clock = createFakeClock({ now: 2_600_000 });
+    const restoreClientTime = installClientTimeSource({
+      now: () => clock.now(),
+      delay: (ms) => clock.delay(ms),
+    });
+    const originalStateDir = Deno.env.get("TURBOPANEL_DAEMON_STATE_DIR");
+    const originalForceEnroll = Deno.env.get("TURBOPANEL_FORCE_ENROLL");
+    const { sockets, restore: restoreWebSocket } = installTrackingWebSocket();
+    let restoreFetch: (() => void) | undefined;
+    let restarting = false;
+    const restartHits: number[] = [];
+    try {
+      const { signing, authToken, enroll } = await prepareVerifiedAuth();
+      const api = createFakeInstanceApi();
+      api.script("/api/daemon/v1/readiness", () => {
+        if (!restarting) {
+          return new Response(JSON.stringify({ ok: true, ready: true }), {
+            status: 200,
+          });
+        }
+        restartHits.push(clock.now());
+        return new Response(
+          JSON.stringify({ ok: true, ready: false, needsInstall: true }),
+          { status: 503 },
+        );
+      });
+      api.script(
+        "/api/daemon/v1/jwks.json",
+        () => scriptedJwksResponse(signing),
+      );
+      api.script("/api/daemon/v1/auth/challenge", () => challengeResponse());
+      api.script("/api/daemon/v1/enroll", () => enrollResponse(enroll));
+      api.script(
+        "/api/daemon/v1/auth/session",
+        () => sessionResponse({ token: authToken }),
+      );
+      restoreFetch = api.install();
+
+      await withTempLayout(async (fixture) => {
+        Deno.env.set("TURBOPANEL_DAEMON_STATE_DIR", fixture.dirs.stateDir);
+        Deno.env.set("TURBOPANEL_FORCE_ENROLL", "1");
+        await Deno.writeTextFile(
+          `${fixture.dirs.stateDir}/license.id`,
+          "license-123\n",
+        );
+        await Deno.writeTextFile(
+          `${fixture.dirs.stateDir}/license.token`,
+          "token-abc\n",
+        );
+        const client = new InstanceClient({
+          config: {
+            kind: "socket",
+            socketPath: "/tmp/turbopanel-test-instance.sock",
+          },
+          httpClient: {} as Deno.HttpClient,
+          reconnectDelayMs: DEFAULT_INITIAL_BACKOFF_MS,
+        });
+        try {
+          client.start();
+          const first = await waitFor(
+            "first socket",
+            () => sockets.at(0),
+            5_000,
+          );
+          first.open();
+          await flushMicrotasks();
+          restarting = true;
+          first.close(1000, "instance restarting");
+          for (let i = 0; i < 80; i++) {
+            await clock.advance(1_000);
+            await flushMicrotasks();
+            await new Promise((resolve) => setTimeout(resolve, 1));
+          }
+          const t0 = restartHits[0];
+          const withinWindow = restartHits.filter((t) => t - t0 < 60_000);
+          const gaps = withinWindow.slice(1).map((t, i) => t - withinWindow[i]);
+          assertEquals(
+            gaps.every((g) => g >= 2_000 && g <= 5_000),
+            true,
+            `poll gaps left the [2s, 5s] cadence: ${gaps.join(",")}`,
+          );
+          assertEquals(withinWindow.length >= 12, true);
+        } finally {
+          client.stop();
+        }
+      });
+    } finally {
+      restoreFetch?.();
+      restoreWebSocket();
+      restoreClientTime();
+      setOptionalEnv("TURBOPANEL_DAEMON_STATE_DIR", originalStateDir);
+      setOptionalEnv("TURBOPANEL_FORCE_ENROLL", originalForceEnroll);
+    }
+  },
+});

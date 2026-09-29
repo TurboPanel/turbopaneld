@@ -1469,6 +1469,31 @@ test("port preflight refuses a port an unrelated host listener already owns", as
   assertEquals(err.kind, "managed_ingress_port_in_use");
 });
 
+test("port preflight probes address by address, pgsql before mysql, and stops at the first busy port", async () => {
+  const probed: string[] = [];
+  const err = await assertRejects(
+    () =>
+      assertManagedIngressPortsBindable(
+        ["203.0.113.5", "203.0.113.6", "203.0.113.7"],
+        { pgsql: 18432, mysql: 18306 },
+        null,
+        (host, port) => {
+          probed.push(`${host}:${port}`);
+          return Promise.resolve(!(host === "203.0.113.6" && port === 18432));
+        },
+      ),
+    ManagedIngressPortInUseError,
+  );
+  assertEquals(probed, [
+    "203.0.113.5:18432",
+    "203.0.113.5:18306",
+    "203.0.113.6:18432",
+  ]);
+  assertEquals(err.bindAddress, "203.0.113.6");
+  assertEquals(err.family, "pgsql");
+  assertEquals(err.port, 18432);
+});
+
 test("legacy published 5432 compose text differs from current render so compose up is required", () => {
   const next = proxysqlCompose(
     DESCRIPTOR,

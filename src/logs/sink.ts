@@ -98,17 +98,21 @@ class CommandOutputSinkImpl implements CommandOutputSink {
     if (this.#finalized) return this.#chain;
     this.#finalized = true;
     this.#queueFlush();
-    this.#chain = this.#chain.then(async () => {
-      if (this.#allAcked) {
-        await this.#spool.discard().catch((err) => {
-          this.#warn("spool cleanup failed", err);
-        });
-        return;
-      }
+    this.#chain = this.#chain.then(() => this.#settleSpool());
+    return this.#chain;
+  }
+
+  async #settleSpool(): Promise<void> {
+    if (!this.#allAcked) {
       // Leave the file behind: the orphan sweep re-uploads it on next start.
       this.#spool.close();
-    });
-    return this.#chain;
+      return;
+    }
+    try {
+      await this.#spool.discard();
+    } catch (err) {
+      this.#warn("spool cleanup failed", err);
+    }
   }
 
   #queueFlush(): void {
