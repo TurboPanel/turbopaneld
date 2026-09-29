@@ -37,6 +37,17 @@ jobs:
           app-id: ${{ secrets.RELEASE_APP_ID }}
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
 
+      - name: Check out the changelog script (TurboPanel/dev)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: TurboPanel/dev
+          ref: 104651a09386eb24d3bd78432f921bbfb76c66f4
+          path: .promote
+          fetch-depth: 1
+          persist-credentials: false
+          sparse-checkout: scripts/promote
+          sparse-checkout-cone-mode: false
+
       - name: Open or refresh the trunk → staging PR
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}
@@ -60,7 +71,7 @@ jobs:
             echo
             echo "**$ahead commit(s) on trunk not yet on staging:**"
             echo
-            gh api "repos/$REPO/compare/staging...trunk" --jq '.commits[] | "- " + (.commit.message | split("\n")[0])' | head -50
+            sh .promote/scripts/promote/changelog.sh "$REPO" staging trunk 50
             echo
             echo "Merge with a merge commit (staging takes merge commits only). Wait for \`ci-ok\` first."
           } > body.md

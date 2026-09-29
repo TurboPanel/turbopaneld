@@ -260,7 +260,7 @@ jobs:
   # (TurboPanel/dev gh-minor-gate.yml). Only ever red on a minor Release PR
   # into live; a patch or any other PR passes at once.
   minor-gate:
-    uses: TurboPanel/dev/.github/workflows/gh-minor-gate.yml@d5d3d0b14af8d0788c9341fccd0c3e729e2614c7 # dev#27
+    uses: TurboPanel/dev/.github/workflows/gh-minor-gate.yml@104651a09386eb24d3bd78432f921bbfb76c66f4 # dev#30
     with:
       role: daemon
       version-file: deno.json
