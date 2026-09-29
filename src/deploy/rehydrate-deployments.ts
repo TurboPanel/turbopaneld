@@ -217,9 +217,9 @@ async function listDeploymentsNeedingSecretFiles(
   locals: readonly LocalDeploymentManifest[],
 ): Promise<LocalDeploymentManifest[]> {
   // Independent read-only stats per deployment; order of `locals` is kept.
-  const missing = await Promise.all(locals.map(async (local) => {
+  const missing = await Promise.all(locals.map((local) => {
     const plan = manifestSecretPlan(local);
-    if (plan.length === 0) return false;
+    if (plan.length === 0) return Promise.resolve(false);
     return plannedSecretsMissing(
       layout,
       local.manifest.projectId,
