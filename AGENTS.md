@@ -1004,6 +1004,19 @@ used to do this was removed 2026-09-29):
 
     https://raw.githubusercontent.com/TurboPanel/turbopaneld/live/scripts/run.sh
 
+**One installer host per environment** (2026-09-29, all served outside this repo,
+each a redirect to that branch's `scripts/run.sh`): `turbopanel.sh` → `live`
+(release channel), `staging.turbopanel.sh` → `staging` (rc channel),
+`testing.turbopanel.sh` → `trunk` (canary rail: `trunk`, `edge`, `canary`).
+The update channel picks the host, everywhere: the control plane's install
+command, run.sh's re-run under sudo, `tp-orchestrate`'s run.sh download and the
+daemon's own update path (`runScriptUrlForChannel` in
+`src/instance/run-reconcile.ts`; `tp_installer_host_for_channel` in `run.sh` and
+`tp-orchestrate`). The four copies are tested against each other
+(`src/instance/installer-host-channel.test.ts`). run.sh only re-fetches itself
+from a non-release host when `TURBOPANEL_UPDATE_CHANNEL` says so, which is why
+the control plane's install command always carries the channel.
+
 `live` is the branch a release promotion fast-forwards, so an installer change
 reaches new installs at release cadence, matching the `release` channel the
 script installs by default. **Keep `scripts/run.sh` at that path on `live`** —
