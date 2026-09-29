@@ -997,9 +997,10 @@ a self-hosted control plane again.
 ## Installer script hosting
 
 **https://turbopanel.sh is a plain redirect, and nothing in this repo hosts it.**
-The domain answers every path with a redirect to the one copy of the installer on GitHub,
-served from outside this repository (the owner's DNS/redirect; the Cloudflare
-Worker that used to do this was removed 2026-09-29):
+Only the domain root redirects, to the one copy of the installer on GitHub; no
+other path on turbopanel.sh is served or referenced. The redirect is served from
+outside this repository (the owner's DNS/redirect; the Cloudflare Worker that
+used to do this was removed 2026-09-29):
 
     https://raw.githubusercontent.com/TurboPanel/turbopaneld/live/scripts/run.sh
 
