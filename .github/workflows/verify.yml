@@ -74,7 +74,7 @@ jobs:
         run: deno task check:vocabulary
 
       - name: Shellcheck the uninstall script and the root helpers
-        run: shellcheck -s sh --severity=warning scripts/uninstall.sh orchestration/scripts/tp-host orchestration/scripts/tp-update-guard
+        run: shellcheck -s sh --severity=warning scripts/purge.sh orchestration/scripts/tp-host orchestration/scripts/tp-update-guard
 
       # ClickHouse/Tabix metrics infrastructure is retired (DuckDB + Parquet /
       # Analytics Engine replaced it). Sibling repo trees are scanned too when

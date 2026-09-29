@@ -1,0 +1,545 @@
+import { assert, assertEquals, assertStringIncludes } from "@std/assert";
+import { dirname, fromFileUrl, join } from "@std/path";
+
+/**
+ * Jest/Mocha-shaped alias for {@link Deno.test}.
+ *
+ * Sonar typescript:S2187 only recognizes `test()` / `it()` / `describe()` and
+ * reports Deno suites as empty; keep this alias so analysis sees real tests.
+ */
+const test = Deno.test.bind(Deno);
+
+const here = dirname(fromFileUrl(import.meta.url));
+const purgePath = join(here, "purge.sh");
+
+// purge.sh runs its root check and main flow at top level, so these tests
+// never source it. They lift the named functions and constants out of the real
+// file and run them in a throwaway sh as the current (non-root) user, against
+// temp directories only.
+const SUPPORT_FUNCTIONS = [
+  "tp_log_line",
+  "tp_print_step",
+  "tp_print_ok",
+  "tp_print_error",
+  "tp_print_warn",
+  "tp_say",
+  "tp_record_fail",
+  "tp_record_benign_fail",
+  "tp_record_skip",
+  "tp_run",
+  "tp_has_tool",
+  "tp_file_add",
+  "tp_ws_add",
+  "tp_normalize_path",
+  "tp_resolve_parent_path",
+  "tp_path_in_owned_tree",
+  "tp_path_is_safe",
+  "tp_note_custom_kept",
+];
+
+const CONSTANTS = [
+  "TP_SYSTEMD_DIRS",
+  "TP_LEGACY_SHELL_RC_NEEDLE",
+  "TP_OWNED_TREES",
+  "TP_DOCKER_PACKAGES",
+];
+
+function extractFunction(source: string, name: string): string | null {
+  const needle = `\n${name}() {`;
+  const start = source.indexOf(needle);
+  if (start < 0) return null;
+  const end = source.indexOf("\n}\n", start + 1);
+  if (end < 0) throw new TypeError(`unclosed ${name} in purge.sh`);
+  return source.slice(start + 1, end + 2);
+}
+
+function extractConstant(source: string, name: string): string | null {
+  const match = source.match(new RegExp(`^${name}=.*$`, "m"));
+  return match ? match[0] : null;
+}
+
+type ShResult = { code: number; stdout: string; stderr: string };
+
+async function runPurgeSh(
+  functions: string[],
+  body: string,
+  env: Record<string, string> = {},
+): Promise<ShResult> {
+  const source = await Deno.readTextFile(purgePath);
+  const parts: string[] = [];
+  for (const name of CONSTANTS) {
+    const line = extractConstant(source, name);
+    if (line) parts.push(line);
+  }
+  // A helper missing from an older script is left undefined, so the calling
+  // test fails on behaviour rather than on the harness.
+  for (const name of [...SUPPORT_FUNCTIONS, ...functions]) {
+    const fn = extractFunction(source, name);
+    if (fn) parts.push(fn);
+  }
+  const tmp = await Deno.makeTempDir({ prefix: "tp-purge-test-" });
+  parts.push(
+    `TP_TMP=${tmp}`,
+    `TP_LOG_FILE=${tmp}/log`,
+    "DRY_RUN=false",
+    "TP_FAIL_COUNT=0",
+    "TP_BENIGN_FAIL_COUNT=0",
+    body,
+  );
+  const out = await new Deno.Command("sh", {
+    args: ["-c", parts.join("\n")],
+    env,
+    stdout: "piped",
+    stderr: "piped",
+  }).output();
+  return {
+    code: out.code,
+    stdout: new TextDecoder().decode(out.stdout),
+    stderr: new TextDecoder().decode(out.stderr),
+  };
+}
+
+async function exists(path: string): Promise<boolean> {
+  try {
+    await Deno.lstat(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const RC_WITH_TURBOPANEL = [
+  "alias ll='ls -l'",
+  'export PATH="/opt/turbopanel/bin:$PATH"',
+  "",
+].join("\n");
+
+test("a planted .bak symlink is never written through when a startup file is stripped", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "tp-rc-" });
+  const home = join(dir, "home");
+  await Deno.mkdir(home);
+  const rc = join(home, ".bashrc");
+  const victim = join(dir, "victim");
+  await Deno.writeTextFile(rc, RC_WITH_TURBOPANEL);
+  await Deno.writeTextFile(victim, "ORIGINAL\n");
+  await Deno.symlink(victim, `${rc}.turbopanel-purge.bak`);
+
+  const result = await runPurgeSh(
+    ["tp_shell_rc_matches", "tp_strip_rc_as_owner", "tp_strip_one_rc"],
+    `tp_strip_one_rc "$RC"`,
+    { RC: rc, PATH: Deno.env.get("PATH") ?? "/usr/bin:/bin" },
+  );
+
+  assertEquals(
+    await Deno.readTextFile(victim),
+    "ORIGINAL\n",
+    `the backup was written through the planted symlink\n${result.stderr}`,
+  );
+  const stripped = await Deno.readTextFile(rc);
+  assert(!stripped.includes("/opt/turbopanel/"), stripped);
+  assertStringIncludes(stripped, "alias ll='ls -l'");
+  const backups: string[] = [];
+  for await (const entry of Deno.readDir(home)) {
+    if (
+      entry.isFile && entry.name.startsWith(".bashrc.turbopanel-purge.bak")
+    ) {
+      backups.push(await Deno.readTextFile(join(home, entry.name)));
+    }
+  }
+  assertEquals(backups, [RC_WITH_TURBOPANEL]);
+});
+
+test("a startup file that is itself a symlink is left alone", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "tp-rc-" });
+  const home = join(dir, "home");
+  await Deno.mkdir(home);
+  const victim = join(dir, "victim");
+  await Deno.writeTextFile(victim, RC_WITH_TURBOPANEL);
+  const rc = join(home, ".bashrc");
+  await Deno.symlink(victim, rc);
+
+  await runPurgeSh(
+    ["tp_shell_rc_matches", "tp_strip_rc_as_owner", "tp_strip_one_rc"],
+    `tp_strip_one_rc "$RC"`,
+    { RC: rc, PATH: Deno.env.get("PATH") ?? "/usr/bin:/bin" },
+  );
+
+  assertEquals(await Deno.readTextFile(victim), RC_WITH_TURBOPANEL);
+  assertEquals(await exists(`${rc}.turbopanel-purge.bak`), false);
+});
+
+test("principal homes are not scanned for startup files", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "tp-homes-" });
+  const principals = join(dir, "srv", "users");
+  const passwd = join(dir, "passwd");
+  await Deno.writeTextFile(
+    passwd,
+    [
+      "root:x:0:0:root:/root:/bin/bash",
+      "daemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin",
+      `alice:x:1000:1000:Alice:${dir}/home/alice:/bin/bash`,
+      `bob:x:15001:15001::${principals}/bob:/bin/bash`,
+      `carol:x:15002:15002::${principals}:/bin/bash`,
+      "",
+    ].join("\n"),
+  );
+
+  const result = await runPurgeSh(
+    ["tp_list_shell_homes"],
+    `tp_list_shell_homes "$PASSWD"`,
+    { PASSWD: passwd, TP_PRINCIPAL_HOME_ROOTS: principals },
+  );
+
+  const homes = result.stdout.trim().split("\n").map((line) =>
+    line.split("\t")[0]
+  );
+  assertEquals(homes, ["/root", `${dir}/home/alice`], result.stderr);
+});
+
+const REFUSED_PATHS = [
+  "",
+  "relative/path",
+  "/",
+  "/run",
+  "/var",
+  "/var/lib",
+  "/var/lib/postgresql",
+  "/./etc",
+  "/etc",
+  "/etc/passwd",
+  "/usr/local",
+  "/home",
+  "/home/alice",
+  "/srv",
+  "/opt",
+  "/opt/turbopanel/../../etc",
+  "/opt/turbopanel/./x",
+  "/opt/turbopanel-other",
+  "/tmp",
+];
+
+const OWNED_PATHS = [
+  "/opt/turbopanel",
+  "/opt/turbopanel/vendor/deno",
+  "/etc/turbopanel",
+  "/etc/ssh/turbopanel",
+  "/var/lib/turbopanel",
+  "/var/lib/turbopanel/state",
+  "/var/log/turbopanel",
+  "/run/turbopanel",
+  "/backup",
+  "/backup/managed-1",
+  "/srv/users",
+  "/srv/users/bob",
+  "/tmp/turbopanel-ansible",
+  "/root/.ansible",
+  "/var/lib/docker",
+  "/etc/docker",
+  "/etc/systemd/system/turbopaneld.service.d",
+];
+
+test("tp_path_is_safe refuses every path outside TurboPanel's own trees", async () => {
+  const body = REFUSED_PATHS.map((p) =>
+    `if tp_path_is_safe '${p}'; then printf 'ACCEPTED %s\\n' '${p}'; fi`
+  ).join("\n");
+  const result = await runPurgeSh([], body);
+  assertEquals(result.stdout, "", result.stderr);
+});
+
+test("tp_path_is_safe accepts the trees TurboPanel creates", async () => {
+  const body = OWNED_PATHS.map((p) =>
+    `tp_path_is_safe '${p}' || printf 'REFUSED %s\\n' '${p}'`
+  ).join("\n");
+  const result = await runPurgeSh([], body);
+  assertEquals(result.stdout, "", result.stderr);
+});
+
+test("a symlink inside an owned tree is followed before the allowlist check", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "tp-owned-" });
+  const owned = join(dir, "owned");
+  await Deno.mkdir(owned);
+  await Deno.mkdir(join(owned, "data"));
+  await Deno.symlink("/etc", join(owned, "link"));
+
+  const result = await runPurgeSh(
+    [],
+    [
+      `TP_OWNED_TREES="$TP_OWNED_TREES ${owned}"`,
+      `tp_path_is_safe '${owned}/link/passwd' && echo 'ACCEPTED escape'`,
+      `tp_path_is_safe '${owned}/link/ssh/sshd_config' && echo 'ACCEPTED nested escape'`,
+      `tp_path_is_safe '${owned}/data' || echo 'REFUSED data'`,
+      `tp_path_is_safe '${owned}/link' || echo 'REFUSED link itself'`,
+    ].join("\n"),
+  );
+
+  assertEquals(result.stdout, "", result.stderr);
+});
+
+test("a discovered folder outside TurboPanel's trees is listed as kept, never used", async () => {
+  const result = await runPurgeSh(
+    ["tp_discover_add"],
+    [
+      "tp_discover_add backup /etc explicit",
+      "tp_discover_add principal /var/lib explicit",
+      "tp_discover_add principal /home explicit",
+      "tp_discover_add state /var/lib/turbopanel explicit",
+      'printf "backup=%s\\n" "$TP_BACKUP_DIRS"',
+      'printf "principal=%s\\n" "$TP_PRINCIPAL_HOME_ROOTS"',
+      'printf "state=%s\\n" "$TP_STATE_DIRS"',
+      'cat "$TP_TMP/custom.kept"',
+    ].join("\n"),
+  );
+
+  const lines = result.stdout.trim().split("\n");
+  assertEquals(lines.slice(0, 3), [
+    "backup=",
+    "principal=",
+    "state=/var/lib/turbopanel",
+  ], result.stderr);
+  const kept = lines.slice(3).join("\n");
+  assertStringIncludes(kept, "/etc");
+  assertStringIncludes(kept, "/var/lib");
+  assertStringIncludes(kept, "/home");
+});
+
+test("the purge marker clears when every recorded failure is benign", async () => {
+  const result = await runPurgeSh(
+    ["tp_resume_clearable"],
+    [
+      "tp_resume_clearable && echo 'clean:clear'",
+      "tp_record_fail 'apt-get update'; tp_record_benign_fail",
+      "tp_resume_clearable && echo 'benign:clear'",
+      "tp_record_fail 'remove /var/lib/turbopanel'",
+      "tp_resume_clearable || echo 'hard:keep'",
+    ].join("\n"),
+  );
+  assertEquals(
+    result.stdout.trim().split("\n"),
+    ["clean:clear", "benign:clear", "hard:keep"],
+    result.stderr,
+  );
+});
+
+test("an unknown Docker data root is a benign failure and a custom one is kept, not deleted", async () => {
+  const unknown = await runPurgeSh(
+    ["tp_purge_docker_data_root"],
+    [
+      "TP_DOCKER_DATA_ROOT_STATUS=unknown",
+      "TP_DOCKER_DATA_ROOT=",
+      "tp_purge_docker_data_root",
+      'echo "fail=$TP_FAIL_COUNT benign=$TP_BENIGN_FAIL_COUNT"',
+    ].join("\n"),
+  );
+  assertStringIncludes(unknown.stdout, "fail=1 benign=1");
+
+  const dir = await Deno.makeTempDir({ prefix: "tp-docker-root-" });
+  const custom = await runPurgeSh(
+    [
+      "tp_purge_docker_data_root",
+      "tp_safe_rm_tree",
+      "tp_path_present",
+      "tp_is_mountpoint",
+      "tp_empty_retained_mount",
+    ],
+    [
+      "TP_DOCKER_DATA_ROOT_STATUS=custom",
+      `TP_DOCKER_DATA_ROOT='${dir}'`,
+      "tp_purge_docker_data_root",
+      'echo "fail=$TP_FAIL_COUNT"',
+      'cat "$TP_TMP/custom.kept"',
+    ].join("\n"),
+  );
+  assertEquals(
+    await exists(dir),
+    true,
+    "a custom Docker data root was deleted",
+  );
+  assertStringIncludes(custom.stdout, "fail=0");
+  assertStringIncludes(custom.stdout, dir);
+});
+
+const REAL_PATH = Deno.env.get("PATH") ?? "/usr/bin:/bin";
+
+// A fake apt-get earlier on PATH: `-s purge <pkgs>` prints a simulation that
+// removes the requested packages plus whatever FAKE_APT_EXTRA names; any real
+// (non-simulated) call is recorded in $FAKE_APT_LOG and does nothing.
+async function fakeAptBin(): Promise<string> {
+  const dir = await Deno.makeTempDir({ prefix: "tp-fake-apt-" });
+  const script = [
+    "#!/bin/sh",
+    'case " $* " in',
+    '  *" -s "*)',
+    '    for a in "$@"; do',
+    '      case $a in -*|purge|remove) ;; *) echo "Purg $a [1.0]" ;; esac',
+    "    done",
+    '    for e in $FAKE_APT_EXTRA; do echo "Purg $e [1.0]"; done',
+    "    exit 0 ;;",
+    "esac",
+    'echo "$*" >> "$FAKE_APT_LOG"',
+    "",
+  ].join("\n");
+  await Deno.writeTextFile(join(dir, "apt-get"), script, { mode: 0o755 });
+  return dir;
+}
+
+const PACKAGE_FUNCTIONS = [
+  "tp_purge_guarded_packages",
+  "tp_choose_purge_packages",
+  "tp_classify_removal",
+  "tp_apt_simulate_file",
+  "tp_apt_parse_removed",
+  "tp_sim_write_extras",
+  "tp_file_words",
+  "tp_choose_note_sim",
+  "tp_purge_note_kept",
+  "tp_run_listed_packages",
+];
+
+test("no package is a purge candidate without TurboPanel's own sury evidence", async () => {
+  const result = await runPurgeSh(
+    ["tp_collect_purge_candidates", "tp_sury_evidence", "tp_pkg_installed"],
+    [
+      // Everything below is installed, but nothing shows TurboPanel's PHP role ran.
+      "tp_pkg_installed() { return 0; }",
+      "dpkg-query() { printf 'php8.3-cli\\nphp8.3-fpm\\n'; }",
+      "tp_sury_evidence() { return 1; }",
+      "tp_collect_purge_candidates",
+      'echo "candidates=[$(cat "$TP_TMP/apt.candidates")]"',
+    ].join("\n"),
+    { PATH: REAL_PATH },
+  );
+  assertStringIncludes(result.stdout, "candidates=[]");
+});
+
+test("with sury evidence only phpN.N packages and the sury keyring are candidates, never a generic package", async () => {
+  const result = await runPurgeSh(
+    ["tp_collect_purge_candidates", "tp_file_add"],
+    [
+      "tp_pkg_installed() { return 0; }",
+      "tp_sury_evidence() { return 0; }",
+      // What dpkg-query returns for the 'php[0-9]*.[0-9]*-*' glob.
+      "dpkg-query() { printf 'php8.3-cli\\nphp8.3-fpm\\nphp8.3-common\\n'; }",
+      "tp_collect_purge_candidates",
+      'cat "$TP_TMP/apt.candidates"',
+    ].join("\n"),
+    { PATH: REAL_PATH },
+  );
+  const candidates = result.stdout.trim().split("\n").sort();
+  assertEquals(candidates, [
+    "debsuryorg-archive-keyring",
+    "php8.3-cli",
+    "php8.3-common",
+    "php8.3-fpm",
+  ], result.stderr);
+  for (
+    const generic of [
+      "curl",
+      "git",
+      "acl",
+      "gnupg",
+      "iptables",
+      "openssl",
+      "wireguard-tools",
+      "build-essential",
+      "sudo",
+      "systemd-timesyncd",
+      "ca-certificates",
+    ]
+  ) {
+    assert(!candidates.includes(generic), `${generic} is a purge candidate`);
+  }
+});
+
+test("a package whose purge would drag others along is kept and reported, not purged", async () => {
+  const bin = await fakeAptBin();
+  const log = join(bin, "apt.log");
+  const result = await runPurgeSh(
+    PACKAGE_FUNCTIONS,
+    [
+      "DRY_RUN=true",
+      'printf "docker-ce\\n" > "$TP_TMP/docker.pkgs"',
+      'tp_purge_guarded_packages Docker "$TP_TMP/docker.pkgs"',
+      'echo "--final"; cat "$TP_TMP/apt.final"',
+      'echo "--kept"; cat "$TP_TMP/kept-packages"',
+    ].join("\n"),
+    {
+      PATH: `${bin}:${REAL_PATH}`,
+      FAKE_APT_EXTRA: "podman",
+      FAKE_APT_LOG: log,
+    },
+  );
+  const [finalList, kept] = result.stdout.split("--final")[1].split("--kept");
+  assertEquals(
+    finalList.trim(),
+    "",
+    `docker-ce would have been purged\n${result.stdout}`,
+  );
+  assertStringIncludes(kept, "docker-ce");
+  assertStringIncludes(kept, "podman");
+  assertEquals(await exists(log), false, "a real apt-get purge ran");
+});
+
+test("a package whose purge removes only the listed packages is purged", async () => {
+  const bin = await fakeAptBin();
+  const result = await runPurgeSh(
+    PACKAGE_FUNCTIONS,
+    [
+      "DRY_RUN=true",
+      'printf "docker-ce\\ndocker-ce-cli\\n" > "$TP_TMP/docker.pkgs"',
+      'tp_purge_guarded_packages Docker "$TP_TMP/docker.pkgs"',
+      'echo "--final"; cat "$TP_TMP/apt.final"',
+    ].join("\n"),
+    { PATH: `${bin}:${REAL_PATH}`, FAKE_APT_LOG: join(bin, "apt.log") },
+  );
+  assertStringIncludes(
+    result.stdout,
+    "apt-get purge -y docker-ce docker-ce-cli",
+  );
+  assertEquals(
+    result.stdout.split("--final")[1].trim().split("\n").sort(),
+    ["docker-ce", "docker-ce-cli"],
+    result.stderr,
+  );
+});
+
+test("the script never autoremoves, never marks packages manual, and purges only through the guard", async () => {
+  const source = await Deno.readTextFile(purgePath);
+  const code = source
+    .split("\n")
+    .filter((line) => !/^\s*#/.test(line))
+    .join("\n");
+  assert(!/apt-get[^\n]*autoremove/.test(code), "apt-get autoremove is back");
+  assert(!/apt-mark/.test(code), "apt-mark is back");
+  assert(!/TP_PURGE_BASE_PACKAGES|TP_PURGE_APACHE_PACKAGES/.test(code));
+  const purgeCalls = code.match(/apt-get purge/g) ?? [];
+  assertEquals(
+    purgeCalls.length,
+    1,
+    "apt-get purge must appear once, inside tp_purge_guarded_packages",
+  );
+  const guarded = extractFunction(source, "tp_purge_guarded_packages") ?? "";
+  assertStringIncludes(guarded, "apt-get purge");
+});
+
+test("there is no keep-anything mode: no menu, no remove-only path, one typed confirmation", async () => {
+  const source = await Deno.readTextFile(purgePath);
+  assert(!/tp_menu|TP_ACTION|remove-\$\{TP_CODE\}/.test(source));
+  const confirm = extractFunction(source, "tp_confirm") ?? "";
+  assertStringIncludes(
+    confirm,
+    '_cf_expected="purge ${TP_HOSTNAME} ${TP_CODE}"',
+  );
+  assertStringIncludes(confirm, "type the line below exactly");
+});
+
+test("the purge scope warns that no inbound firewall remains and that other packages stay", async () => {
+  const result = await runPurgeSh(
+    ["tp_print_purge_scope", "tp_print_firewall_gone_warning"],
+    [
+      "TP_DOCKER_DATA_ROOT_STATUS=default",
+      "tp_print_purge_scope 2>&1",
+    ].join("\n"),
+  );
+  assertStringIncludes(result.stdout.toLowerCase(), "no inbound firewall");
+  assertStringIncludes(result.stdout, "does not remove any other package");
+});

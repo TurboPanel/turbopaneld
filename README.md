@@ -81,7 +81,7 @@ For self-hosted control planes, add `TURBOPANEL_HOST=https://<instance-host>:844
 - **Self-escalates with `sudo`** when needed — do not prefix the pipeline with `sudo`
 - Fetches the platform CA from the control plane for TLS verification on self-hosted installs
 
-Upgrade: re-run the same command or use the in-console **Update** action. Removal: [Uninstall guide](https://turbopanel.io/docs/deployment/uninstall).
+Upgrade: re-run the same command or use the in-console **Update** action. Removal: [Purge guide](https://turbopanel.io/docs/deployment/purge).
 
 ## Logs and troubleshooting
 
