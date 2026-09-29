@@ -1284,6 +1284,59 @@ async function migrateControlPlaneOrRollback(
   }
 }
 
+/** Back up the control plane before the update; a failed backup aborts it. */
+async function runControlPlaneBackup(options: {
+  run: NonNullable<InstanceUpdateHooks["run"]>;
+  layout: { home: string; backupDir: string };
+  upgradeId: string;
+  previous: Awaited<ReturnType<typeof readInstanceHealth>>;
+}): Promise<void> {
+  const { run, layout, upgradeId, previous } = options;
+  const backupExtra: Record<string, string> = {
+    turbopanel_backup_dir: layout.backupDir,
+    turbopanel_install_root: layout.home,
+    turbopanel_upgrade_id: upgradeId,
+  };
+  if (previous?.version) {
+    backupExtra.turbopanel_instance_version = previous.version;
+  }
+  if (previous?.commit) {
+    backupExtra.turbopanel_instance_revision = previous.commit;
+  }
+  const backup = rootHelperPlaybookInvocation(
+    "instance-backup.yml",
+    backupExtra,
+  );
+  const backupRun = await run(backup.bin, backup.args);
+  if (backupRun.code !== 0) {
+    throw new UpdatePreflightError(
+      "preflight_backup",
+      backupRun.stderr.trim() || "control-plane backup failed",
+    );
+  }
+}
+
+/** Re-render the Caddyfile through instance-launch-only when it is stale. */
+async function refreshCaddyIfNeeded(
+  run: NonNullable<InstanceUpdateHooks["run"]>,
+  installRoot: string,
+  readCaddyfile: InstanceUpdateHooks["readCaddyfile"],
+): Promise<void> {
+  const caddyfile = readCaddyfile
+    ? await readCaddyfile()
+    : await defaultReadCaddyfile();
+  if (!caddyNeedsRefresh(caddyfile)) return;
+  const refresh = rootHelperPlaybookInvocation("instance-launch-only.yml", {
+    turbopanel_install_root: installRoot,
+  });
+  const refreshed = await run(refresh.bin, refresh.args);
+  if (refreshed.code !== 0) {
+    throw new Error(
+      refreshed.stderr.trim() || "instance-launch-only refresh failed",
+    );
+  }
+}
+
 /**
  * Reconcile an already-installed control plane on a managed host.
  *
@@ -1350,43 +1403,8 @@ export async function executeInstanceUpdateReconcile(options: {
   }
 
   const previous = await readHealth();
-  const backupExtra: Record<string, string> = {
-    turbopanel_backup_dir: layout.backupDir,
-    turbopanel_install_root: layout.home,
-    turbopanel_upgrade_id: upgradeId,
-  };
-  if (previous?.version) {
-    backupExtra.turbopanel_instance_version = previous.version;
-  }
-  if (previous?.commit) {
-    backupExtra.turbopanel_instance_revision = previous.commit;
-  }
-  const backup = rootHelperPlaybookInvocation(
-    "instance-backup.yml",
-    backupExtra,
-  );
-  const backupRun = await run(backup.bin, backup.args);
-  if (backupRun.code !== 0) {
-    throw new UpdatePreflightError(
-      "preflight_backup",
-      backupRun.stderr.trim() || "control-plane backup failed",
-    );
-  }
-
-  const caddyfile = hooks.readCaddyfile
-    ? await hooks.readCaddyfile()
-    : await defaultReadCaddyfile();
-  if (caddyNeedsRefresh(caddyfile)) {
-    const refresh = rootHelperPlaybookInvocation("instance-launch-only.yml", {
-      turbopanel_install_root: layout.home,
-    });
-    const refreshed = await run(refresh.bin, refresh.args);
-    if (refreshed.code !== 0) {
-      throw new Error(
-        refreshed.stderr.trim() || "instance-launch-only refresh failed",
-      );
-    }
-  }
+  await runControlPlaneBackup({ run, layout, upgradeId, previous });
+  await refreshCaddyIfNeeded(run, layout.home, hooks.readCaddyfile);
 
   const helper = rootHelperInstanceUpdateInvocation({
     channel: releaseChannel,
