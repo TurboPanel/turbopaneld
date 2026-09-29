@@ -78,12 +78,15 @@ tp_ca_parses() {
   openssl x509 -in "$_parse_path" -noout >/dev/null 2>&1
 }
 
-# Capture curl's %{http_code} independently of curl's exit status.
+# Run "$1 <args>" with curl's -w %{http_code} appended and print the code
+# independently of curl's exit status.
 # `curl ... || echo 000` concatenates onto an already-printed code (commonly
 # producing 000000) so the CA-fetch `000)` retry never runs and leaf checks
 # can treat a TLS/transport failure as success.
 tp_curl_http_code() {
-  if _tp_http_code=$("$@"); then
+  _tp_curl_cmd="$1"
+  shift
+  if _tp_http_code=$("$_tp_curl_cmd" -w '%{http_code}' "$@"); then
     printf '%s' "$_tp_http_code"
   else
     printf '%s' "000"
@@ -92,7 +95,7 @@ tp_curl_http_code() {
 
 tp_ca_validates_leaf() {
   _leaf_ca="$1"
-  _code=$(tp_curl_http_code curl -sSL --cacert "$_leaf_ca" -o /dev/null -w '%{http_code}' "${HOST_URL%/}/api/health")
+  _code=$(tp_curl_http_code curl -sSL --cacert "$_leaf_ca" -o /dev/null "${HOST_URL%/}/api/health")
   case "$_code" in
     000) return 1 ;;
     *) return 0 ;;
@@ -145,11 +148,13 @@ tp_uploaded_trust_verifies() {
 }
 
 tp_url_host() {
-  python3 -c 'import sys; from urllib.parse import urlparse; print(urlparse(sys.argv[1]).hostname or "")' "$1"
+  _url_host_in="$1"
+  python3 -c 'import sys; from urllib.parse import urlparse; print(urlparse(sys.argv[1]).hostname or "")' "$_url_host_in"
 }
 
 tp_url_port() {
-  python3 -c 'import sys; from urllib.parse import urlparse; u=urlparse(sys.argv[1]); print(u.port or (443 if u.scheme=="https" else 80))' "$1"
+  _url_port_in="$1"
+  python3 -c 'import sys; from urllib.parse import urlparse; u=urlparse(sys.argv[1]); print(u.port or (443 if u.scheme=="https" else 80))' "$_url_port_in"
 }
 
 tp_capture_presented_leaf() {
@@ -233,7 +238,7 @@ tp_fetch_uploaded_trust() {
   _curl_base="$(tp_instance_bootstrap_curl)"
   _trust_tmp="$(mktemp)"
   # shellcheck disable=SC2086
-  _trust_code=$(tp_curl_http_code $_curl_base -o "$_trust_tmp" -w '%{http_code}' "${HOST_URL%/}/api/daemon/v1/instance/uploaded-trust")
+  _trust_code=$(tp_curl_http_code $_curl_base -o "$_trust_tmp" "${HOST_URL%/}/api/daemon/v1/instance/uploaded-trust")
   case "$_trust_code" in
     200)
       if ! tp_install_verified_uploaded_trust "$_trust_tmp"; then
@@ -247,7 +252,7 @@ tp_fetch_uploaded_trust() {
     000)
       if [ -f "$UPLOADED_TRUST_PATH" ]; then
         _retry="$(mktemp)"
-        _retry_code=$(tp_curl_http_code curl -sSLk -o "$_retry" -w '%{http_code}' "${HOST_URL%/}/api/daemon/v1/instance/uploaded-trust")
+        _retry_code=$(tp_curl_http_code curl -sSLk -o "$_retry" "${HOST_URL%/}/api/daemon/v1/instance/uploaded-trust")
         if [ "$_retry_code" = "200" ] && tp_install_verified_uploaded_trust "$_retry"; then
           rm -f "$_retry"
         else
@@ -291,7 +296,7 @@ tp_fetch_instance_ca() {
   _ca_tmp="$(mktemp)"
   _ca_http_code=""
   # shellcheck disable=SC2086
-  _ca_http_code=$(tp_curl_http_code $_curl_base -o "$_ca_tmp" -w '%{http_code}' "${HOST_URL%/}/api/daemon/v1/instance/ca")
+  _ca_http_code=$(tp_curl_http_code $_curl_base -o "$_ca_tmp" "${HOST_URL%/}/api/daemon/v1/instance/ca")
   case "$_ca_http_code" in
     200)
       tp_install_instance_ca "$_ca_tmp"
@@ -325,7 +330,7 @@ tp_fetch_instance_ca() {
 tp_refetch_instance_ca_unpinned() {
   _old_fp="$(tp_ca_fingerprint "$CA_PATH")"
   _ca_retry="$(mktemp)"
-  _sys_code=$(tp_curl_http_code curl -sSL -o "$_ca_retry" -w '%{http_code}' "${HOST_URL%/}/api/daemon/v1/instance/ca")
+  _sys_code=$(tp_curl_http_code curl -sSL -o "$_ca_retry" "${HOST_URL%/}/api/daemon/v1/instance/ca")
   case "$_sys_code" in
     404)
       tp_print_ok "Control plane now presents a publicly trusted certificate — Platform CA no longer needed (was ${_old_fp:-unknown})"
@@ -341,13 +346,14 @@ tp_refetch_instance_ca_unpinned() {
       ;;
     000)
       # Unpinned fetch of the CA document only; acceptance is gated below.
-      _ca_retry_code=$(tp_curl_http_code curl -sSLk -o "$_ca_retry" -w '%{http_code}' "${HOST_URL%/}/api/daemon/v1/instance/ca")
+      _ca_retry_code=$(tp_curl_http_code curl -sSLk -o "$_ca_retry" "${HOST_URL%/}/api/daemon/v1/instance/ca")
       if [ "$_ca_retry_code" = "200" ] && tp_ca_parses "$_ca_retry" && tp_ca_validates_leaf "$_ca_retry"; then
         tp_install_instance_ca "$_ca_retry"
         rm -f "$_ca_retry"
         return 0
       fi
       ;;
+    *) ;;
   esac
   _new_fp=""
   if [ -f "$_ca_retry" ] && tp_ca_parses "$_ca_retry"; then
@@ -871,13 +877,15 @@ PROGRESS_MARKERS=false
 
 tp_emit_update_stage() {
   [ "$PROGRESS_MARKERS" = true ] || return 0
-  printf '%s%s\n' "::turbopanel-stage::" "$1"
+  _stage_name="$1"
+  printf '%s%s\n' "::turbopanel-stage::" "$_stage_name"
 }
 
 # Documented `turbopaneld --version` line:
 #   turbopaneld v<semver> <commit> (<channel>, <buildId>, <builtAt>)
 tp_parse_daemon_commit_from_version() {
-  printf '%s' "$1" | sed -n 's/^turbopaneld v[^[:space:]]\{1,\}[[:space:]]\{1,\}\([^[:space:]]\{1,\}\).*/\1/p' | head -1
+  _version_line="$1"
+  printf '%s' "$_version_line" | sed -n 's/^turbopaneld v[^[:space:]]\{1,\}[[:space:]]\{1,\}\([^[:space:]]\{1,\}\).*/\1/p' | head -1
 }
 
 tp_daemon_file_group() {
@@ -933,11 +941,9 @@ tp_arm_update_guard() {
     tp_print_error "Failed to write update guard $_guard_path"
     return 1
   fi
-  if command -v systemctl >/dev/null 2>&1; then
-    if ! systemctl start "$UPDATE_GUARD_TIMER"; then
-      tp_print_error "Failed to start $UPDATE_GUARD_TIMER"
-      return 1
-    fi
+  if command -v systemctl >/dev/null 2>&1 && ! systemctl start "$UPDATE_GUARD_TIMER"; then
+    tp_print_error "Failed to start $UPDATE_GUARD_TIMER"
+    return 1
   fi
 }
 
@@ -1030,7 +1036,8 @@ TP_DENO_SHA256_AARCH64="c832298b1ad4422481334855f6003e0f54145762c5a134f20a489511
 # Print the pinned digest for the host architecture ($1 = uname -m), or fail
 # when none is pinned — a bump without digests must not install anything.
 tp_deno_pinned_sha256() {
-  case "$1" in
+  _pin_arch="$1"
+  case "$_pin_arch" in
     aarch64 | arm64) _sum="$TP_DENO_SHA256_AARCH64" ;;
     x86_64 | amd64) _sum="$TP_DENO_SHA256_X86_64" ;;
     *) return 1 ;;
@@ -1044,8 +1051,9 @@ tp_deno_pinned_sha256() {
 # Verify $1 against the pinned Deno digest for architecture $2.
 tp_verify_deno_archive() {
   _archive="$1"
-  _sum="$(tp_deno_pinned_sha256 "$2")" || {
-    echo "run.sh: no pinned SHA-256 for Deno ${TP_DENO_VERSION} on $2" >&2
+  _deno_arch="$2"
+  _sum="$(tp_deno_pinned_sha256 "$_deno_arch")" || {
+    echo "run.sh: no pinned SHA-256 for Deno ${TP_DENO_VERSION} on $_deno_arch" >&2
     return 1
   }
   if printf '%s  %s\n' "$_sum" "$_archive" | sha256sum -c - >/dev/null 2>&1; then
@@ -1133,7 +1141,7 @@ tp_builtin_channel_manifest_url() {
   _channel="$1"
   _kind="${2:-daemon}"
   case "$_kind" in
-    daemon) _repo="turbopaneld" ;;
+    daemon) _repo=turbopaneld ;;
     instance) _repo="turbopanel" ;;
     ui) _repo="ui" ;;
     *) return 1 ;;
@@ -1157,7 +1165,8 @@ tp_builtin_channel_manifest_url() {
 # rc/release: releases/download/v<version>/manifest.json (gh-release.yml).
 # trunk and edge have no pin. Mirrors src/update/urls.ts pinnedChannelManifestUrl.
 tp_pinned_version_ok() {
-  case "$1" in
+  _pinned_version_in="$1"
+  case "$_pinned_version_in" in
     ""|*[!0-9A-Za-z._+-]*) return 1 ;;
     [0-9]*) return 0 ;;
     *) return 1 ;;
@@ -1170,7 +1179,7 @@ tp_pinned_channel_manifest_url() {
   _version="$3"
   tp_pinned_version_ok "$_version" || return 1
   case "$_kind" in
-    daemon) _repo="turbopaneld" ;;
+    daemon) _repo=turbopaneld ;;
     instance) _repo="turbopanel" ;;
     ui) _repo="ui" ;;
     *) return 1 ;;
@@ -1211,11 +1220,13 @@ tp_release_manifest_url_ok() {
   _rmu_rest="${_rmu_url#https://}"
   case "$_rmu_rest" in
     ""|*[!A-Za-z0-9._~/+-]*) return 1 ;;
+    *) ;;
   esac
   _rmu_host="${_rmu_rest%%/*}"
   _rmu_path="${_rmu_rest#"$_rmu_host"}"
   case "$_rmu_path" in
     ""|*/|*//*|*/./*|*/../*|*/.|*/..) return 1 ;;
+    *) ;;
   esac
   case "${_rmu_path##*/}" in
     manifest.json|manifest-?*.json) ;;
@@ -1239,6 +1250,7 @@ tp_release_manifest_url_ok() {
   if [ "$_rmu_host" = dl.trbp.nl ]; then
     case "$_rmu_mid" in
       */*) return 1 ;;
+      *) ;;
     esac
     return 0
   fi
@@ -1246,6 +1258,7 @@ tp_release_manifest_url_ok() {
     latest/download) return 0 ;;
     download/*/*) return 1 ;;
     download/?*) return 0 ;;
+    *) ;;
   esac
   return 1
 }
@@ -1255,13 +1268,15 @@ tp_release_manifest_url_ok() {
 # There is no CDN drop for them, so trunk has no location and an --instance
 # install must name canary, rc or release.
 tp_builtin_repo_manifest_url() {
-  case "$1" in
+  _bru_repo="$1"
+  _bru_channel="$2"
+  case "$_bru_repo" in
     turbopaneld) _kind="daemon" ;;
     turbopanel) _kind="instance" ;;
     ui) _kind="ui" ;;
     *) return 1 ;;
   esac
-  tp_builtin_channel_manifest_url "$2" "$_kind"
+  tp_builtin_channel_manifest_url "$_bru_channel" "$_kind"
 }
 
 tp_fetch_channel_manifest() {
@@ -1340,6 +1355,7 @@ tp_fetch_repo_manifest() {
   case "$_repo" in
     turbopanel) _pin="${TURBOPANEL_INSTANCE_MANIFEST_URL:-}" ;;
     ui) _pin="${TURBOPANEL_UI_MANIFEST_URL:-}" ;;
+    *) ;;
   esac
   if [ -n "$_pin" ]; then
     _manifest_url="$_pin"
@@ -1394,8 +1410,9 @@ tp_download_repo_artifact() {
 # tree. Directories are renamed, not copied. A later failure calls
 # tp_restore_instance_prev so a half-unpacked update does not stay live.
 tp_drop_prev() {
-  if [ -e "$1" ] || [ -L "$1" ]; then
-    rm -rf "$1"
+  _drop_path="$1"
+  if [ -e "$_drop_path" ] || [ -L "$_drop_path" ]; then
+    rm -rf "$_drop_path"
   fi
 }
 
@@ -1460,13 +1477,15 @@ tp_instance_build_label_path() {
 
 tp_write_instance_build_label() {
   _label_path="$(tp_instance_build_label_path)"
-  case "$1" in
+  _build_label_in="$1"
+  case "$_build_label_in" in
     '' | *[!0-9A-Za-z.+-]*)
       rm -f "$_label_path"
       return 0
       ;;
+    *) ;;
   esac
-  printf '%s\n' "$1" > "${_label_path}.tmp"
+  printf '%s\n' "$_build_label_in" > "${_label_path}.tmp"
   chmod 0644 "${_label_path}.tmp"
   mv -f "${_label_path}.tmp" "$_label_path"
 }
@@ -1486,6 +1505,7 @@ tp_sync_instance_build_label() {
   fi
   case "$_label" in
     *[!0-9A-Za-z.+-]*) _label="" ;;
+    *) ;;
   esac
   _tmp="${_env}.tmp.$$"
   cp -p "$_env" "$_tmp"
@@ -1727,7 +1747,7 @@ tp_run_colocated_daemon_refresh() {
     if [ "$DAEMON_EXEC_MODE" = "js" ]; then
       printf 'turbopanel_daemon_deno_bin: %s\n' "$DENO_BIN"
     fi
-    printf 'turbopanel_service_name: %s\n' "turbopaneld"
+    printf 'turbopanel_service_name: %s\n' "$(tp_daemon_binary_name)"
     printf 'turbopanel_update_channel: %s\n' "$_channel"
     if [ -n "$MANIFEST_URL" ]; then
       printf 'turbopanel_manifest_url: "%s"\n' "$MANIFEST_URL"
@@ -2493,7 +2513,7 @@ trap 'rm -f "$VARS_FILE"' EXIT
   if [ "$DAEMON_EXEC_MODE" = "js" ]; then
     printf 'turbopanel_daemon_deno_bin: %s\n' "$DENO_BIN"
   fi
-  printf 'turbopanel_service_name: %s\n' "turbopaneld"
+  printf 'turbopanel_service_name: %s\n' "$(tp_daemon_binary_name)"
   if [ -f "$CA_PATH" ]; then
     printf 'turbopanel_instance_ca: %s\n' "$CA_PATH"
     _ca_fp="$(openssl x509 -in "$CA_PATH" -noout -fingerprint -sha256 2>/dev/null | sed 's/^.*=//' | tr 'A-F' 'a-f' | tr -d ':')"

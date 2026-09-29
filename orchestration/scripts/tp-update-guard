@@ -86,7 +86,8 @@ tp_write_file() (
 # Documented `turbopaneld --version` line:
 #   turbopaneld v<semver> <commit> (<channel>, <buildId>, <builtAt>)
 tp_parse_daemon_commit_from_version() {
-  printf '%s' "$1" | sed -n 's/^turbopaneld v[^[:space:]]\{1,\}[[:space:]]\{1,\}\([^[:space:]]\{1,\}\).*/\1/p' | head -1
+  _version_line="$1"
+  printf '%s' "$_version_line" | sed -n 's/^turbopaneld v[^[:space:]]\{1,\}[[:space:]]\{1,\}\([^[:space:]]\{1,\}\).*/\1/p' | head -1
 }
 
 tp_daemon_file_group() {
