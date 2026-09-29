@@ -559,7 +559,9 @@ async function discoverDrmIntelGpuDevices(
     const engineNames = [...await io.listDir(engineRoot)].sort(engineSort);
     // Independent busy-file reads, in parallel; kept in engine order.
     const busyReads = await Promise.all(
-      engineNames.map((engine) => io.readFile(`${engineRoot}/${engine}/busy`)),
+      engineNames.map(async (engine) =>
+        await io.readFile(`${engineRoot}/${engine}/busy`)
+      ),
     );
     const utilization: SensorCandidate[] = [];
     for (const [index, engine] of engineNames.entries()) {

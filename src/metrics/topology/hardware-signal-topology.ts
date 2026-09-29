@@ -248,7 +248,9 @@ async function readTemperatureThresholds(
   const base = path.slice(0, -TEMP_INPUT_SUFFIX.length);
   const thresholds: PhysicalSignalThresholds = {};
   const raws = await Promise.all(
-    TEMP_THRESHOLD_FILES.map(([, suffix]) => io.readFile(`${base}${suffix}`)),
+    TEMP_THRESHOLD_FILES.map(async ([, suffix]) =>
+      await io.readFile(`${base}${suffix}`)
+    ),
   );
   for (const [index, [key]] of TEMP_THRESHOLD_FILES.entries()) {
     const milli = Number(raws[index]?.trim());

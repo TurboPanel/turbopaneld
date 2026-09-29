@@ -39,8 +39,8 @@ export class NicLinkEventCollector implements EventCollector {
     // Independent sysfs reads, in parallel; state and events are then
     // processed in snapshot order.
     const operstates = await Promise.all(
-      devices.map((device) =>
-        ctx.io.readFile(`${root}/class/net/${device.name}/operstate`)
+      devices.map(async (device) =>
+        await ctx.io.readFile(`${root}/class/net/${device.name}/operstate`)
       ),
     );
 

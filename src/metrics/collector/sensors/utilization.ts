@@ -55,7 +55,7 @@ async function readEngineBusy(
   const engines: Record<string, number> = {};
   // Independent sysfs reads, in parallel; recorded in candidate order.
   const raws = await Promise.all(
-    candidates.map((candidate) => io.readFile(candidate.path)),
+    candidates.map(async (candidate) => await io.readFile(candidate.path)),
   );
   for (const [index, candidate] of candidates.entries()) {
     const nanoseconds = Number(raws[index]?.trim());
