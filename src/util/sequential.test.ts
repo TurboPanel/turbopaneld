@@ -140,3 +140,18 @@ test("repeatSequential survives many turns without recursion depth or ordering t
   await repeatSequential(() => Promise.resolve(++turns < 20_000));
   assertEquals(turns, 20_000);
 });
+
+test("repeatSequential rejects, rather than hanging, when a later turn throws synchronously", async () => {
+  let turns = 0;
+  await assertRejects(
+    () =>
+      repeatSequential(() => {
+        turns++;
+        if (turns === 3) throw new Error("late sync boom");
+        return Promise.resolve(true);
+      }),
+    Error,
+    "late sync boom",
+  );
+  assertEquals(turns, 3);
+});

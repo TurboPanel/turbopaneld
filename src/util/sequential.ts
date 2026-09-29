@@ -70,11 +70,12 @@ export function repeatSequential(
 ): Promise<void> {
   return new Promise<void>((resolve, reject) => {
     const next = (): void => {
-      // The executor turns a synchronous throw from `step` into a rejection.
-      new Promise<boolean>((turnDone) => turnDone(step())).then((again) => {
+      // A synchronous throw on the first turn rejects through the executor;
+      // on a later turn it is thrown inside the callback and caught below.
+      step().then((again) => {
         if (again) next();
         else resolve();
-      }, reject);
+      }).catch(reject);
     };
     next();
   });
