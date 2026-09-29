@@ -7,8 +7,8 @@
 # keeps a trunk → staging PR open; merging it runs cut-rc.yml).
 #
 # The bytes are the tested build's; only the asset names, the manifest
-# (version, channel, urls) and its signature change. Order across repos:
-# turbopaneld → turbopanel → ui → website → dev. The three jobs are
+# (version, channel, urls) and its signature change. Repos release
+# independently — nothing here waits on another repo. The three jobs are
 # TurboPanel/dev's reusable workflows pinned to ONE sha, passed again as
 # dev-ref (that is where the scripts live). Approval = the `release`
 # environment (prepare, then finalize). to=release needs the TurboPanel

@@ -181,7 +181,7 @@ jobs:
           set -eu
           existing="$(gh pr list --repo "$REPO" --base live --head staging --state open --json number --jq '.[0].number // empty')"
           {
-            echo "Merging this cuts the release \`v$VERSION\` from \`v$RC\` (same bytes, re-signed) and moves \`live\`. It runs automatically after the merge (\`cut-release.yml\`). Release TurboPanel daemons before the control plane, then the UI."
+            echo "Merging this cuts the release \`v$VERSION\` from \`v$RC\` (same bytes, re-signed) and moves \`live\`. It runs automatically after the merge (\`cut-release.yml\`)."
             echo
             echo "**Since the last release:**"
             echo
