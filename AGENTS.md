@@ -362,7 +362,7 @@ compile toolchain).
   the co-located `turbopanel`/`dev`/`ui` `src` trees when present.
 - `deno task test` / `test:coverage` / `lint` / `fmt:check` / `check` / `notices:check` — quality
   surface in `deno.json`. `notices:generate` writes `THIRD_PARTY_NOTICES.md` from
-  `deno.lock`, `workers/turbopanel-sh/pnpm-lock.yaml`, and orchestration pins
+  `deno.lock` and orchestration pins
   (GPL-3.0-or-later Ansible tooling is a reviewed orchestration exception).
   Release packaging stages that file at `opt/turbopanel/share/THIRD_PARTY_NOTICES.md`.
   `tp_install_verified_channel_release` copies the verified notice into
@@ -396,7 +396,7 @@ compile toolchain).
   of uncovered history. Sibling `turbopanel` / `ui` also use CI-based analysis;
   `website` still uses Automatic Analysis. Coverage exclusions include
   `**/*.test.ts`, `src/testing/**`, `src/build-info.ts`, `dist/**`,
-  `publish/**`, the Galaxy Docker role tree, and `workers/**`.
+  `publish/**`, and the Galaxy Docker role tree.
   **`sonar.sources` / `sonar.tests` / `sonar.test.inclusions`** must stay set
   (`src` + `orchestration` + `scripts` + `main.ts`; tests = `**/*.test.ts` and
   `src/testing/**`). The `denoS2187` issue-ignore (`typescript:S2187` on
@@ -825,7 +825,7 @@ it regresses:
 nothing else. There is no keep-my-data option and no remove-only mode — one
 path, ending in a typed confirmation line (`purge <hostname> <code>`). It
 lives only in this repository: release packages do not ship it, and
-`workers/turbopanel-sh` does not serve it.
+turbopanel.sh does not serve it.
 
 Canonical command (root, no sudo re-exec):
 
@@ -994,11 +994,47 @@ along); a note that other packages stay installed by design; that
 state (bridges, NAT rules) is cleared; and the commands to install a daemon or
 a self-hosted control plane again.
 
-## Installer script hosting (`workers/turbopanel-sh/`)
+## Installer script hosting
 
-Moved to `workers/turbopanel-sh/AGENTS.md` — **turbopanel.sh** is an
-assets-only Worker that only 301-redirects to `scripts/run.sh` on the `live`
-branch of this repo; plus the dev overlay catalog notes.
+**https://turbopanel.sh is a plain redirect, and nothing in this repo hosts it.**
+Only the domain root redirects, to the one copy of the installer on GitHub; no
+other path on turbopanel.sh is served or referenced. The redirect is served from
+outside this repository (the owner's DNS/redirect; the Cloudflare Worker that
+used to do this was removed 2026-09-29):
+
+    https://raw.githubusercontent.com/TurboPanel/turbopaneld/live/scripts/run.sh
+
+`live` is the branch a release promotion fast-forwards, so an installer change
+reaches new installs at release cadence, matching the `release` channel the
+script installs by default. **Keep `scripts/run.sh` at that path on `live`** —
+the redirect points straight at the file. Any of 301/302/307/308 works (every
+consumer follows it); prefer 307 so a later change of target is not cached by
+browsers and proxies. `curl -fsSL turbopanel.sh | sh` works because `-L` follows
+the redirect (a bare `curl turbopanel.sh | sh` does not), and every automatic-update consumer already
+fetches with `-L`: `tp-orchestrate update` (`CDN_RUN_SCRIPT`), the daemon's
+`downloadRunScript` (`src/instance/run-reconcile.ts`), and run.sh's own
+re-exec. Threat model is unchanged: a party who could tamper with the domain
+could serve a bad script directly, so the redirect widens nothing; the release
+rail's signed manifests protect what the script then installs.
+
+**Overlay catalog (`TURBOPANEL_DL_BASE`):** co-located development Caddy serves
+`/run.sh` and `/downloads/daemon/*` from the daemon checkout. Remote servers
+installed through that overlay receive `TURBOPANEL_DL_BASE=<origin>/downloads/daemon`
+(persisted in `daemon.env`) and must **never** fall back to `https://dl.trbp.nl`.
+A configured `TURBOPANEL_DL_BASE` that is not https is refused
+(`InsecureOverlayBaseError`); only an absent base selects the public rail.
+Catalog URLs in `dist/channels.json` / `dist/manifest.json` are relative so the
+same files work behind LAN HTTPS on `:8443` and a Cloudflare tunnel.
+`run.sh --insecure-tls` still only relaxes the platform-CA instance legs;
+public :443 TLS (tunnel) uses the system store. Rebuild the overlay with
+`deno task release:dev` (dev console **Rebuild daemon and upgrade connected servers**).
+Each `release:dev` stamps overlay `commit` as `<40-char-sha>+<unix-seconds>`
+(baked into the binaries **and** the catalog). `sourceUrl` keeps the full
+immutable source commit (the SHA before `+`). Remotes skip reconcile when
+`getBuildInfo().commit` already matches the catalog; a plain git SHA would
+make **U** a no-op until HEAD moves. Production `release` stores the full
+40-character git SHA in `BUILD_INFO.commit`, `BUILD_INFO.sourceUrl`, and
+`ChannelManifest.commit` (short SHA is only for `buildId` / logs).
 
 ## Host facts & command handlers
 
@@ -1018,7 +1054,7 @@ Large subsystems live in focused `AGENTS.md` files next to their code — Cursor
 | **Command execution logs** | `src/logs/` | Streamed command transcripts: redaction deny-set, `<stateDir>/spool/execution-logs/` spool, batched upload to `POST /api/daemon/v1/commands/:commandId/log`, orphan sweep. Control-plane side: `../turbopanel/src/features/execution-logs/AGENTS.md`; capture details in `src/deploy/AGENTS.md` (Streamed transcript capture). This is the **only** log class uploaded and retained. |
 | **Managed engines (daemon runtime)** | `src/managed/AGENTS.md` | `managed.apply` / `.lifecycle` / `.destroy`, `managed.ingress.reconcile` (shared ProxySQL — compose project = the `managed-ingress` `serviceId` — on the organization's managed network, a bare-UUID name carried as `managedNetwork` on the command), engine registry (Postgres first); separate from tenant deploy. On-demand tails ride the same correlated cell round trip as `managed-logs-request` / `managed-logs-result`: engine `compose logs`, and running-container `docker container logs`. Neither is stored or collected; presence does not carry `containerLogsEnabled`. |
 | **Installer presentation** | `src/orchestration/AGENTS.md` | Installer presenter + sanitizer / vocabulary map for `run.sh` install & converge |
-| **Installer script hosting** | `workers/turbopanel-sh/AGENTS.md` | **turbopanel.sh** = assets-only 301 to `scripts/run.sh` on `live`; dev overlay catalog notes |
+| **Installer script hosting** | this file → *Installer script hosting* | **turbopanel.sh** = a redirect (served outside this repo) to `scripts/run.sh` on `live`; dev overlay catalog notes |
 | **Host facts** | `src/host/AGENTS.md` | Host OS, time sync, docker, machine key, runtime inventory probes (hello + change-detected heartbeats) |
 | **Time sync (Ansible)** | `orchestration/AGENTS.md` | `time-sync` role + `time-sync-apply.yml` (NTP / timezone) |
 
