@@ -87,6 +87,7 @@ function layoutAssignments(root: string): string {
 }
 
 const STUBS = `
+tp_daemon_binary_name() { printf 'turbopaneld'; }
 tp_daemon_binary_path() { printf '%s/bin/turbopaneld' "$INSTALL_ROOT"; }
 tp_daemon_js_fallback_path() { printf '%s/bin/turbopaneld.js' "$INSTALL_ROOT"; }
 tp_print_step() { :; }
