@@ -88,12 +88,12 @@ jobs:
   prepare:
     needs: resolve
     if: needs.resolve.outputs.proceed == 'true'
-    uses: TurboPanel/dev/.github/workflows/gh-promote.yml@104651a09386eb24d3bd78432f921bbfb76c66f4 # dev#30
+    uses: TurboPanel/dev/.github/workflows/gh-promote.yml@5464e72c40aec3528fb10e6fc660583ad963b3cb # dev#35
     with:
       repo-kind: daemon
       to: release
       source: ${{ needs.resolve.outputs.rc-tag }}
-      dev-ref: 104651a09386eb24d3bd78432f921bbfb76c66f4
+      dev-ref: 5464e72c40aec3528fb10e6fc660583ad963b3cb
       # Same signer pin as promote.yml.
       signer-ref: 93c4f94510c9499e6bf04366a9500fe9f8e38aaa
       # Default: the `release` environment approval stays for the release hop.
@@ -101,7 +101,7 @@ jobs:
 
   publish:
     needs: prepare
-    uses: TurboPanel/dev/.github/workflows/gh-release.yml@104651a09386eb24d3bd78432f921bbfb76c66f4 # dev#30
+    uses: TurboPanel/dev/.github/workflows/gh-release.yml@5464e72c40aec3528fb10e6fc660583ad963b3cb # dev#35
     with:
       version: ${{ needs.prepare.outputs.version }}
       channel: release
@@ -113,7 +113,7 @@ jobs:
 
   finalize:
     needs: [prepare, publish]
-    uses: TurboPanel/dev/.github/workflows/gh-promote-finalize.yml@104651a09386eb24d3bd78432f921bbfb76c66f4 # dev#30
+    uses: TurboPanel/dev/.github/workflows/gh-promote-finalize.yml@5464e72c40aec3528fb10e6fc660583ad963b3cb # dev#35
     with:
       to: release
       version: ${{ needs.prepare.outputs.version }}
@@ -124,13 +124,13 @@ jobs:
 
   next-version:
     needs: [prepare, finalize]
-    uses: TurboPanel/dev/.github/workflows/gh-next-version.yml@104651a09386eb24d3bd78432f921bbfb76c66f4 # dev#30
+    uses: TurboPanel/dev/.github/workflows/gh-next-version.yml@5464e72c40aec3528fb10e6fc660583ad963b3cb # dev#35
     with:
       released-version: ${{ needs.prepare.outputs.version }}
       version-files: |
         deno.json
         sonar-project.properties
-      dev-ref: 104651a09386eb24d3bd78432f921bbfb76c66f4
+      dev-ref: 5464e72c40aec3528fb10e6fc660583ad963b3cb
     secrets: inherit
 
   # A new minor's turbopanel and ui Release PRs wait for this release
@@ -155,7 +155,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: TurboPanel/dev
-          ref: 104651a09386eb24d3bd78432f921bbfb76c66f4
+          ref: 5464e72c40aec3528fb10e6fc660583ad963b3cb
           path: .promote
           persist-credentials: false
           sparse-checkout: scripts/promote
