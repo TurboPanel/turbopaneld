@@ -12,6 +12,7 @@ import type {
 } from "../../contracts/commands-contracts.ts";
 import { sanitizeForLog } from "../../util/logger.ts";
 import { forEachSequential } from "../../util/sequential.ts";
+import { grantDatabasePrivileges } from "./grant-databases.ts";
 import {
   authSocketPluginPresentSql,
   changeReplicationSourceSql,
@@ -30,7 +31,6 @@ import {
   grantRootSql,
   installAuthSocketPluginSql,
   isWritableSql,
-  type ManagedDatabasePrivilege,
   promoteSql,
   quoteIdentifier,
   showReplicaStatusSql,
@@ -280,28 +280,6 @@ async function runMysqlStatusQuery(
   return result.stdout;
 }
 
-function asPrivilege(value: string): ManagedDatabasePrivilege | null {
-  if (value === "owner" || value === "read-write" || value === "read-only") {
-    return value;
-  }
-  return null;
-}
-
-/** The grant for the wildcard account plus one per client source host. */
-function grantForAllSourcesSql(
-  database: string,
-  username: string,
-  privilege: ManagedDatabasePrivilege,
-  hosts: readonly string[],
-): string {
-  return [
-    grantDatabaseSql(database, username, privilege),
-    ...hosts.map((host) =>
-      grantDatabaseSql(database, username, privilege, host)
-    ),
-  ].join("\n");
-}
-
 async function applyOneCredential(
   ctx: ManagedEngineContext,
   credential: ManagedApplyCredential,
@@ -345,24 +323,14 @@ async function applyOneCredential(
     ),
   );
 
-  const privileges = credential.privileges ?? [];
-  await forEachSequential(
-    credential.databases,
-    (database) =>
-      forEachSequential(privileges, async (raw) => {
-        const privilege = asPrivilege(raw);
-        if (privilege === null) return;
-        await runMysql(
-          ctx,
-          grantForAllSourcesSql(
-            database,
-            credential.username,
-            privilege,
-            ctx.clientSourceHosts ?? [],
-          ),
-        );
-      }),
-  );
+  await grantDatabasePrivileges({
+    databases: credential.databases,
+    privileges: credential.privileges ?? [],
+    username: credential.username,
+    hosts: ctx.clientSourceHosts ?? [],
+    grantSql: grantDatabaseSql,
+    run: (sql) => runMysql(ctx, sql),
+  });
   await runMysql(ctx, "FLUSH PRIVILEGES;");
 }
 

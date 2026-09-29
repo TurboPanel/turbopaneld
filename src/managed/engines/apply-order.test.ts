@@ -4,6 +4,7 @@
  */
 
 import { assertEquals, assertRejects } from "@std/assert";
+import type { ManagedApplyCredential } from "../../contracts/commands-contracts.ts";
 import { mariadbManagedEngineRuntime } from "./mariadb.ts";
 import { mysqlManagedEngineRuntime } from "./mysql.ts";
 import { postgresManagedEngineRuntime } from "./postgres.ts";
@@ -75,6 +76,27 @@ for (const [name, engine] of engines) {
     );
     assertEquals(inputs.length, 2);
     assertEquals(inputs[0]!.includes("db_a"), true);
+    assertEquals(maxInFlight(), 1);
+  });
+}
+
+for (const [name, engine] of engines) {
+  test(`${name} applyCredentials grants database by database and stops at the first failure`, async () => {
+    const { ctx, inputs, maxInFlight } = failingContext("db_b");
+    await assertRejects(() =>
+      engine.applyCredentials(ctx, [{
+        principalId: "p1",
+        username: "app_user",
+        password: ["pw", crypto.randomUUID()].join("-"),
+        role: "user",
+        databases: ["db_a", "db_b", "db_c"],
+        privileges: ["read-write"],
+      } as ManagedApplyCredential])
+    );
+    const grants = inputs.filter((input) => /GRANT/i.test(input));
+    assertEquals(grants.length, 2);
+    assertEquals(grants[0]!.includes("db_a"), true);
+    assertEquals(grants[1]!.includes("db_b"), true);
     assertEquals(maxInFlight(), 1);
   });
 }
