@@ -10,6 +10,8 @@ import type {
   ManagedApplyDatabaseOp,
 } from "../../contracts/commands-contracts.ts";
 import { sanitizeForLog } from "../../util/logger.ts";
+import { forEachSequential } from "../../util/sequential.ts";
+import { grantDatabasePrivileges } from "./grant-databases.ts";
 import {
   changeReplicationSourceSql,
   connectionCensusSql,
@@ -26,7 +28,6 @@ import {
   grantDatabaseSql,
   grantRootSql,
   isWritableSql,
-  type ManagedDatabasePrivilege,
   promoteSql,
   quoteIdentifier,
   showReplicaStatusSql,
@@ -245,13 +246,6 @@ async function runMariadbStatusQuery(
   return result.stdout;
 }
 
-function asPrivilege(value: string): ManagedDatabasePrivilege | null {
-  if (value === "owner" || value === "read-write" || value === "read-only") {
-    return value;
-  }
-  return null;
-}
-
 async function applyOneCredential(
   ctx: ManagedEngineContext,
   credential: ManagedApplyCredential,
@@ -293,22 +287,14 @@ async function applyOneCredential(
     ),
   );
 
-  const privileges = credential.privileges ?? [];
-  for (const database of credential.databases) {
-    for (const raw of privileges) {
-      const privilege = asPrivilege(raw);
-      if (privilege === null) continue;
-      await runMariadb(
-        ctx,
-        [
-          grantDatabaseSql(database, credential.username, privilege),
-          ...(ctx.clientSourceHosts ?? []).map((host) =>
-            grantDatabaseSql(database, credential.username, privilege, host)
-          ),
-        ].join("\n"),
-      );
-    }
-  }
+  await grantDatabasePrivileges({
+    databases: credential.databases,
+    privileges: credential.privileges ?? [],
+    username: credential.username,
+    hosts: ctx.clientSourceHosts ?? [],
+    grantSql: grantDatabaseSql,
+    run: (sql) => runMariadb(ctx, sql),
+  });
   await runMariadb(ctx, "FLUSH PRIVILEGES;");
 }
 
@@ -560,12 +546,15 @@ const mariadbReplicationRuntime: ManagedEngineReplicationRuntime = {
   async promote(ctx) {
     await runMariadb(ctx, promoteSql());
     const deadline = Date.now() + 60_000;
-    while (Date.now() < deadline) {
+    const writable = async (): Promise<boolean> => {
+      if (Date.now() >= deadline) return false;
       const out = await runMariadbQuery(ctx, isWritableSql());
       const readOnly = out.trim();
-      if (readOnly === "0") return;
+      if (readOnly === "0") return true;
       await sleep(500);
-    }
+      return writable();
+    };
+    if (await writable()) return;
     throw new Error("mariadb promote did not become writable within 60s");
   },
 
@@ -597,7 +586,8 @@ export const mariadbManagedEngineRuntime: ManagedEngineRuntime = {
   async waitReady(ctx: ManagedEngineContext): Promise<void> {
     const deadline = Date.now() + READY_TIMEOUT_MS;
     let lastError = "mariadb-admin ping did not succeed";
-    while (Date.now() < deadline) {
+    const ready = async (): Promise<boolean> => {
+      if (Date.now() >= deadline) return false;
       const result = await execMariadb(ctx, [
         "mariadb-admin",
         "ping",
@@ -605,10 +595,12 @@ export const mariadbManagedEngineRuntime: ManagedEngineRuntime = {
         "-u",
         ctx.rootUsername,
       ]);
-      if (result.success) return;
+      if (result.success) return true;
       lastError = result.stderr || result.stdout || lastError;
       await sleep(READY_POLL_MS);
-    }
+      return ready();
+    };
+    if (await ready()) return;
     throw new Error(
       `managed mariadb not ready within ${READY_TIMEOUT_MS}ms: ${
         sanitizeForLog(lastError)
@@ -652,10 +644,10 @@ export const mariadbManagedEngineRuntime: ManagedEngineRuntime = {
     credentials: ManagedApplyCredential[],
   ): Promise<string[]> {
     const applied: string[] = [];
-    for (const credential of credentials) {
+    await forEachSequential(credentials, async (credential) => {
       await applyOneCredential(ctx, credential);
       applied.push(credential.username);
-    }
+    });
     return applied;
   },
 
@@ -678,14 +670,14 @@ export const mariadbManagedEngineRuntime: ManagedEngineRuntime = {
     ops: ManagedApplyDatabaseOp[],
   ): Promise<string[]> {
     const applied: string[] = [];
-    for (const op of ops) {
+    await forEachSequential(ops, async (op) => {
       if (op.action === "create") {
         await runMariadb(ctx, createDatabaseSql(op.name));
       } else {
         await runMariadb(ctx, dropDatabaseSql(op.name));
       }
       applied.push(op.name);
-    }
+    });
     return applied;
   },
 
@@ -694,11 +686,11 @@ export const mariadbManagedEngineRuntime: ManagedEngineRuntime = {
     usernames: string[],
   ): Promise<string[]> {
     const dropped: string[] = [];
-    for (const username of usernames) {
-      if (username === ctx.rootUsername) continue;
+    await forEachSequential(usernames, async (username) => {
+      if (username === ctx.rootUsername) return;
       await runMariadb(ctx, dropAccountSql(username));
       dropped.push(username);
-    }
+    });
     return dropped;
   },
 

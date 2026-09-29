@@ -190,8 +190,7 @@ export class DaemonJwksClient {
   async #doRefresh(): Promise<void> {
     try {
       const doc = await this.#options.apiClient.getJwks();
-      const nextKeys = new Map<string, CryptoKey>();
-
+      const usable: Array<JsonWebKey & { kid: string; x: string }> = [];
       for (const entry of doc.keys) {
         const jwk = entry as JsonWebKey & { kid?: string };
         if (
@@ -203,15 +202,26 @@ export class DaemonJwksClient {
         if (typeof jwk.kid !== "string" || jwk.kid.length === 0) {
           continue;
         }
+        usable.push(jwk as JsonWebKey & { kid: string; x: string });
+      }
 
-        const verifyKey = await crypto.subtle.importKey(
-          "jwk",
-          { kty: "OKP", crv: "Ed25519", x: jwk.x },
-          { name: "Ed25519" },
-          false,
-          ["verify"],
-        );
-        nextKeys.set(jwk.kid, verifyKey);
+      // Importing a public key is independent per entry; insertion into the
+      // map stays in document order so a repeated kid still resolves to the
+      // later entry.
+      const verifyKeys = await Promise.all(
+        usable.map((jwk) =>
+          crypto.subtle.importKey(
+            "jwk",
+            { kty: "OKP", crv: "Ed25519", x: jwk.x },
+            { name: "Ed25519" },
+            false,
+            ["verify"],
+          )
+        ),
+      );
+      const nextKeys = new Map<string, CryptoKey>();
+      for (const [index, jwk] of usable.entries()) {
+        nextKeys.set(jwk.kid, verifyKeys[index]);
       }
 
       this.#keys = nextKeys;

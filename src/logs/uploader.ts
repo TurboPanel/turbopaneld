@@ -100,26 +100,29 @@ export class CommandLogUploader {
     return true;
   }
 
-  async #sendWithRetry(seq: number, bytes: string): Promise<boolean> {
-    for (let attempt = 1; attempt <= this.#maxAttempts; attempt += 1) {
-      try {
-        await this.#send({ commandId: this.commandId, seq, bytes });
-        return true;
-      } catch (err) {
-        if (attempt === this.#maxAttempts) {
-          logWarn(
-            "logs",
-            `command log chunk dropped command=${
-              sanitizeForLog(this.commandId)
-            } seq=${seq}: ${sanitizeForLog(err)}`,
-          );
-          return false;
-        }
-        await this.#sleep(
-          Math.min(BASE_BACKOFF_MS * 2 ** (attempt - 1), MAX_BACKOFF_MS),
+  async #sendWithRetry(
+    seq: number,
+    bytes: string,
+    attempt = 1,
+  ): Promise<boolean> {
+    if (attempt > this.#maxAttempts) return false;
+    try {
+      await this.#send({ commandId: this.commandId, seq, bytes });
+      return true;
+    } catch (err) {
+      if (attempt === this.#maxAttempts) {
+        logWarn(
+          "logs",
+          `command log chunk dropped command=${
+            sanitizeForLog(this.commandId)
+          } seq=${seq}: ${sanitizeForLog(err)}`,
         );
+        return false;
       }
+      await this.#sleep(
+        Math.min(BASE_BACKOFF_MS * 2 ** (attempt - 1), MAX_BACKOFF_MS),
+      );
+      return await this.#sendWithRetry(seq, bytes, attempt + 1);
     }
-    return false;
   }
 }

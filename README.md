@@ -3,6 +3,7 @@
 **Host daemon for every TurboPanel-managed host** — Ansible orchestration, authenticated control-plane presence, deploy/runtime, and host metrics. This is the piece that connects your servers to [TurboPanel](https://turbopanel.io), one place to run everything you host.
 
 [![Release](https://img.shields.io/github/v/release/TurboPanel/turbopaneld?label=release)](https://github.com/TurboPanel/turbopaneld/releases)
+[![Release candidate](https://img.shields.io/github/v/tag/TurboPanel/turbopaneld?filter=*-rc.*&sort=semver&include_prereleases&label=release%20candidate&color=orange)](https://github.com/TurboPanel/turbopaneld/releases)
 [![Quality Gate](https://sonarcloud.io/api/project_badges/measure?project=turbopanel_turbopaneld&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=turbopanel_turbopaneld)
 [![Coverage](https://sonarcloud.io/api/project_badges/measure?project=turbopanel_turbopaneld&metric=coverage)](https://sonarcloud.io/component_measures?id=turbopanel_turbopaneld&metric=coverage)
 [![Code Smells](https://sonarcloud.io/api/project_badges/measure?project=turbopanel_turbopaneld&metric=code_smells)](https://sonarcloud.io/project/issues?id=turbopanel_turbopaneld&resolved=false&types=CODE_SMELL)
@@ -76,12 +77,12 @@ For self-hosted control planes, add `TURBOPANEL_HOST=https://<instance-host>:844
 
 ### Trust and what the script does
 
-- **https://turbopanel.sh** redirects (301) to `scripts/run.sh` on this repo's `live` branch — the script's only copy; the assets-only Cloudflare Worker behind it runs no code (see `workers/turbopanel-sh/`)
+- **https://turbopanel.sh** redirects to `scripts/run.sh` on this repo's `live` branch — the script's only copy (nothing in this repo hosts the domain)
 - Downloads the release artifact for your channel, lays out `/opt/turbopanel`, installs `turbopaneld.service`, and runs initial Ansible converge
 - **Self-escalates with `sudo`** when needed — do not prefix the pipeline with `sudo`
 - Fetches the platform CA from the control plane for TLS verification on self-hosted installs
 
-Upgrade: re-run the same command or use the in-console **Update** action. Removal: [Uninstall guide](https://turbopanel.io/docs/deployment/uninstall).
+Upgrade: re-run the same command or use the in-console **Update** action. Removal: [Purge guide](https://turbopanel.io/docs/deployment/purge).
 
 ## Logs and troubleshooting
 

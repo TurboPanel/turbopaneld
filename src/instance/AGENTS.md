@@ -456,7 +456,7 @@ turbopanel_upgrade_id=…`, and a pinned `update-instance` reinstall command.
 Stages are `preparing → downloading → installing → restarting → verifying →
 done`. The managed Caddyfile `handle_errors` block answers socket
 502/503/504 with JSON `control_plane_updating` on `/api` and `/ws`, a bare
-503 on `/webhook`, and `updating.html` (refresh 5s) for HTML. Dev hosts still
+503 on `/webhook`, and `updating.html` (reloads itself every 5s via an inline script) for HTML. Dev hosts still
 refuse the reconcile (`DEV_CONTROL_PLANE_UPDATE_REFUSAL`); the dev overlay
 Caddyfile is unchanged.
 

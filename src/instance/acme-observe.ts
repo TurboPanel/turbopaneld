@@ -15,6 +15,7 @@
  */
 
 import { logInfo, logWarn, sanitizeForLog } from "../util/logger.ts";
+import { forEachSequential } from "../util/sequential.ts";
 import { type LayoutPaths, resolveLayout } from "../paths/layout.ts";
 import { readAcmeModeHostnames } from "../deploy/ingress.ts";
 import {
@@ -102,7 +103,7 @@ export class AcmeIssuanceObserver {
         if (!current.has(key)) this.#state.delete(key);
       }
 
-      for (const hostname of hostnames) {
+      await forEachSequential(hostnames, async (hostname) => {
         const result = await this.#probe(hostname);
         const state = this.#state.get(hostname) ??
           { lastReportedOk: undefined, consecutiveFailures: 0 };
@@ -126,7 +127,7 @@ export class AcmeIssuanceObserver {
             state.lastReportedOk = true;
             this.#state.set(hostname, state);
           }
-          continue;
+          return;
         }
 
         state.consecutiveFailures += 1;
@@ -148,7 +149,7 @@ export class AcmeIssuanceObserver {
             `acme-issuance-event failed hostname=${hostname}: ${result.errorMessage}`,
           );
         }
-      }
+      });
     } catch (err) {
       logWarn("deploy", "acme-issuance observe failed:", sanitizeForLog(err));
     }

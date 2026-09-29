@@ -464,9 +464,9 @@ async function neutralizeOneGalaxyRoleLintTree(roleDir: string): Promise<void> {
  * still lints an explicitly opened path and walks up to this nested config.
  */
 async function neutralizeGalaxyDockerLintConfig(): Promise<void> {
-  for (const roleDir of galaxyDockerRoleDirCandidates()) {
-    await neutralizeOneGalaxyRoleLintTree(roleDir);
-  }
+  await Promise.all(
+    galaxyDockerRoleDirCandidates().map(neutralizeOneGalaxyRoleLintTree),
+  );
 }
 
 /**

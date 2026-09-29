@@ -1,32 +1,46 @@
 #!/bin/sh
-# Remove TurboPanel from a managed host.
+# Purge TurboPanel from a host: everything TurboPanel put there, and nothing
+# else. There is no "keep my data" mode and no remove-only mode; this is a purge.
 #
 # This script lives only in the repository. Release packages do not ship it,
-# and workers/turbopanel-sh does not serve it.
+# and turbopanel.sh does not serve it.
 #
 # Canonical command (must already be root — there is no sudo re-exec):
-#   curl -fsSL https://raw.githubusercontent.com/TurboPanel/turbopaneld/trunk/scripts/uninstall.sh | sudo sh
+#   curl -fsSL https://raw.githubusercontent.com/TurboPanel/turbopaneld/trunk/scripts/purge.sh | sudo sh
 #
 # From a checkout:
-#   sudo sh uninstall.sh
-#   sudo sh uninstall.sh --dry-run
+#   sudo sh purge.sh
+#   sudo sh purge.sh --dry-run
 #
 # --dry-run still requires root and a controlling terminal. There is no
-# non-interactive bypass. Detection only changes labels and warnings; every
-# removal step runs for whichever install is found, including a partial one.
+# non-interactive bypass: the purge always ends in a typed confirmation line.
+# Detection only changes labels and warnings; every removal step runs for
+# whichever install is found, including a partial one.
 #
-# Option 2 calls tp_purge_hosted_data after the remove-only steps. That deletes
-# principal accounts and homes, Docker Engine, data folders, and apt packages.
-# Every purge command goes through tp_run, so --dry-run only logs it.
+# What it removes: systemd units, Docker containers and networks, TP-* firewall
+# chains, WireGuard tp0, host config drop-ins, /opt/turbopanel and the runtime,
+# run, config, state, log and backup folders TurboPanel created, service
+# accounts in the 9900-9999 band, principal accounts and homes, ansible scratch
+# dirs, /opt/turbopanel/ lines in shell startup files, and Docker Engine
+# completely (containers, images, volumes, packages, apt source).
 #
-# After confirmation, option 2 writes a root-only purge-in-progress marker and
-# a resume manifest under /var/lib/turbopanel-uninstall. The marker is outside
-# the trees purge deletes. A later run resumes purge when that marker is
+# What it never removes: any distribution package. Hosts run this on desktops
+# and shared machines, so curl, git, acl, gnupg, iptables, openssl,
+# wireguard-tools, build-essential, sudo, systemd-timesyncd and the rest of what
+# the installer relies on stay installed and are never autoremoved. The only
+# apt packages it purges are Docker's, and the PHP series (phpN.N-*) and the
+# sury archive keyring that TurboPanel's own PHP role added — each checked with
+# an apt simulation first; a package whose removal would drag anything else
+# along is kept and reported.
+#
+# After confirmation it writes a root-only purge-in-progress marker and a
+# resume manifest under /var/lib/turbopanel-purge. The marker is outside the
+# trees the purge deletes. A later run resumes the purge when that marker is
 # present, including when inventory markers are already gone. Docker being
 # installed is not itself a TurboPanel install. The manifest reloads discovered
 # config, state, log, run, backup, and principal roots. --dry-run does not
-# write either file. Both are removed only after purge finishes with no
-# failures.
+# write either file. Both are removed only after the purge finishes with no
+# failures. Every removal command goes through tp_run, so --dry-run only logs it.
 
 # shellcheck shell=sh
 
@@ -745,7 +759,7 @@ tp_load_resume_manifest() {
 tp_write_resume_manifest_body() {
   _wrmb=$1
   : > "$_wrmb"
-  printf '%s\n' "# turbopanel-uninstall resume manifest" >> "$_wrmb"
+  printf '%s\n' "# turbopanel-purge resume manifest" >> "$_wrmb"
   if [ "$TP_BACKUP_EXPLICIT" = true ]; then
     printf '%s\n' "flag backup_explicit true" >> "$_wrmb"
   fi
@@ -1564,7 +1578,7 @@ tp_inventory_folders() {
 # the final scan compares this same category.
 # Homes whose startup files may carry TurboPanel lines: root's, then every
 # account from UID 1000 up except principals. A principal home is purged whole
-# by option 2 and left untouched by option 1, so it is never edited.
+# by the purge, so it is never edited.
 tp_list_shell_homes() {
   printf '%s\n' /root
   [ -r "$1" ] || return 0
@@ -1625,7 +1639,7 @@ tp_note_purge_target() {
   fi
 }
 
-# Paths option 2 deletes, including ones the second scan must compare with
+# Paths the purge deletes, including ones the second scan must compare with
 # the pre-removal snapshot. Principal homes are copied even when the
 # directory is already gone, because the account is still a purge target.
 tp_inventory_purge_targets() {
@@ -1750,7 +1764,7 @@ tp_print_detection_warnings() {
       tp_print_warn "Purging hosted data is unrecoverable and leaves other enrolled servers without this control plane."
       ;;
     ha-daemon|remote-daemon)
-      tp_print_warn "After uninstall, delete this server in the console so the control plane drops the enrolment."
+      tp_print_warn "After the purge, delete this server in the console so the control plane drops the enrolment."
       ;;
   esac
 }
@@ -1806,16 +1820,16 @@ tp_print_report() {
   tp_print_group "Units" "$TP_TMP/inv.units"
   tp_print_group "Containers" "$TP_TMP/inv.containers"
   tp_print_group "Networks" "$TP_TMP/inv.networks"
-  tp_print_group "Docker volumes (kept)" "$TP_TMP/inv.volumes"
+  tp_print_group "Docker volumes" "$TP_TMP/inv.volumes"
   tp_print_group "Firewall chains" "$TP_TMP/inv.chains"
   tp_print_group "WireGuard" "$TP_TMP/inv.wireguard"
   tp_print_group "Host files" "$TP_TMP/inv.hostfiles"
   tp_print_group "Shell startup files" "$TP_TMP/inv.shellrc"
   tp_print_group "Folders to remove" "$TP_TMP/inv.folders_remove"
-  tp_print_group "Data folders kept by option 1" "$TP_TMP/inv.folders_keep"
+  tp_print_group "Data folders (config, state, logs, backups)" "$TP_TMP/inv.folders_keep"
   tp_print_group "Accounts to remove" "$TP_TMP/inv.accounts"
   tp_print_group "Groups to remove" "$TP_TMP/inv.groups"
-  tp_print_group "Principal homes (kept)" "$TP_TMP/inv.principals"
+  tp_print_group "Principal homes" "$TP_TMP/inv.principals"
   tp_print_group "Left alone" "$TP_TMP/inv.leftalone"
   tp_print_group "Configured outside TurboPanel's folders (kept)" "$TP_TMP/custom.kept"
   tp_say ""
@@ -1830,72 +1844,34 @@ tp_print_firewall_gone_warning() {
   tp_print_warn "No inbound firewall will remain: ufw and firewalld were removed when TurboPanel was installed, and this removes TurboPanel's own rules. Set up a firewall before this host takes traffic."
 }
 
-tp_print_choice_table() {
+tp_print_purge_scope() {
   tp_say ""
-  if [ "$TP_ACTION" = purge ]; then
-    tp_say "This option removes:"
-    tp_say "  systemd units, Docker containers and networks, TP-* firewall chains,"
-    tp_say "  WireGuard tp0, host config drop-ins, /opt/turbopanel, runtime and run"
-    tp_say "  folders, ansible scratch dirs, /opt/turbopanel/ lines in shell startup"
-    tp_say "  files, service accounts/groups in the 9900-9999 band, principal"
-    tp_say "  accounts and homes, Docker Engine, config, state, log, run, and"
-    tp_say "  backup folders, and apt packages TurboPanel installed."
-    tp_say ""
-    if [ "$TP_DOCKER_DATA_ROOT_STATUS" = custom ]; then
-      tp_print_docker_data_root_line
-      tp_say ""
-    fi
-    if [ "$TP_DOCKER_DATA_ROOT_STATUS" = unknown ]; then
-      tp_print_warn "Docker data root could not be determined. Custom Docker data may remain."
-      tp_say ""
-    fi
-    tp_print_warn "Purging Docker Engine removes every container, volume, and image on this host, including ones TurboPanel did not create."
-    tp_print_firewall_gone_warning
-    return 0
-  fi
-  tp_say "This option removes:"
+  tp_say "This purge removes:"
   tp_say "  systemd units, Docker containers and networks, TP-* firewall chains,"
   tp_say "  WireGuard tp0, host config drop-ins, /opt/turbopanel, runtime and run"
   tp_say "  folders, ansible scratch dirs, /opt/turbopanel/ lines in shell startup"
-  tp_say "  files, and service accounts/groups in the 9900-9999 band"
-  tp_say "This option keeps:"
-  tp_say "  config, state, log, and backup folders, principal homes and accounts,"
-  tp_say "  Docker volumes, Docker images, Docker Engine, and apt packages"
+  tp_say "  files, service accounts/groups in the 9900-9999 band, principal"
+  tp_say "  accounts and homes, config, state, log, and backup folders, and Docker"
+  tp_say "  Engine (containers, images, volumes, packages)."
+  tp_say "It does not remove any other package: curl, git, acl, gnupg, iptables,"
+  tp_say "openssl, wireguard-tools, build tools, desktops and their apps all stay."
+  tp_say "The only packages it purges are Docker's and the PHP versions and sury"
+  tp_say "key TurboPanel itself added."
   tp_say ""
+  if [ "$TP_DOCKER_DATA_ROOT_STATUS" = custom ]; then
+    tp_print_docker_data_root_line
+    tp_say ""
+  fi
+  if [ "$TP_DOCKER_DATA_ROOT_STATUS" = unknown ]; then
+    tp_print_warn "Docker data root could not be determined. Custom Docker data may remain."
+    tp_say ""
+  fi
+  tp_print_warn "Purging Docker Engine removes every container, volume, and image on this host, including ones TurboPanel did not create."
   tp_print_firewall_gone_warning
 }
 
-tp_menu() {
-  tp_say "1) Remove TurboPanel only (keeps hosted data)"
-  tp_say "2) Remove TurboPanel and purge all hosted data"
-  tp_say "q) Quit"
-  while :; do
-    if ! _menu_choice=$(tp_read_tty "Choice: "); then
-      tp_print_error "Aborted — nothing changed"
-      exit 1
-    fi
-    case $_menu_choice in
-      1)
-        TP_ACTION=remove
-        return 0
-        ;;
-      2)
-        TP_ACTION=purge
-        return 0
-        ;;
-      q|Q)
-        tp_print_ok "Quit — nothing changed"
-        exit 0
-        ;;
-      *)
-        tp_print_error "Enter 1, 2, or q"
-        ;;
-    esac
-  done
-}
-
 tp_confirm() {
-  tp_print_choice_table
+  tp_print_purge_scope
   tp_print_detection_warnings
   if ! tp_has_tool od || ! tp_has_tool tr; then
     tp_print_error "od and tr are required to confirm. Nothing was changed."
@@ -1909,16 +1885,11 @@ tp_confirm() {
       exit 1
       ;;
   esac
-  if [ "$TP_ACTION" = purge ]; then
-    _cf_expected="purge ${TP_HOSTNAME} ${TP_CODE}"
-    tp_say "To confirm, type the line below exactly — the code alone is not enough:"
-    tp_say ""
-    tp_say "  ${_cf_expected}"
-    tp_say ""
-  else
-    _cf_expected="remove-${TP_CODE}"
-    tp_say "Type ${_cf_expected} to remove TurboPanel."
-  fi
+  _cf_expected="purge ${TP_HOSTNAME} ${TP_CODE}"
+  tp_say "To confirm, type the line below exactly — the code alone is not enough:"
+  tp_say ""
+  tp_say "  ${_cf_expected}"
+  tp_say ""
   if ! _cf_got=$(tp_read_tty "Confirmation: "); then
     tp_print_error "Aborted — nothing changed"
     exit 1
@@ -2083,8 +2054,8 @@ tp_remove_units() {
   tp_prune_wants_symlinks
   tp_run "systemctl daemon-reload" systemctl daemon-reload || true
   # Scoped to TurboPanel units. A bare reset-failed would clear every failed
-  # unit on the host, including ones this uninstall did not touch. A glob
-  # that matches nothing is not a failed uninstall, but wg-quick@tp0.service
+  # unit on the host, including ones this purge did not touch. A glob
+  # that matches nothing is not a failed purge, but wg-quick@tp0.service
   # is a literal name, not a glob: systemctl errors on "not loaded" for a
   # literal it has never seen, which is the common case on a host that never
   # brought up a WireGuard tunnel. Only pass it when it is actually known.
@@ -2383,12 +2354,12 @@ tp_strip_rc_as_owner() {
     f=$1
     legacy=$2
     { [ -f "$f" ] && [ ! -L "$f" ]; } || exit 3
-    bak="$f.turbopanel-uninstall.bak"
+    bak="$f.turbopanel-purge.bak"
     if [ -e "$bak" ] || [ -L "$bak" ]; then
-      bak=$(mktemp "$f.turbopanel-uninstall.bak.XXXXXX") || exit 4
+      bak=$(mktemp "$f.turbopanel-purge.bak.XXXXXX") || exit 4
     fi
     cp -p -- "$f" "$bak" || exit 5
-    tmp=$(mktemp "$f.turbopanel-uninstall.XXXXXX") || exit 6
+    tmp=$(mktemp "$f.turbopanel-purge.XXXXXX") || exit 6
     grep -v -F -e /opt/turbopanel/ -e "$legacy" "$f" > "$tmp"
     [ $? -le 1 ] || { rm -f "$tmp"; exit 7; }
     if ! cat "$tmp" > "$f"; then
@@ -2430,7 +2401,7 @@ tp_strip_one_rc() {
   tp_run "strip TurboPanel lines from $_sor" \
     tp_strip_rc_as_owner "$_sor" "$_sor_uid" "$_sor_gid" || return 0
   if [ "$DRY_RUN" != true ]; then
-    tp_print_ok "stripped $_sor (backup ${_sor}.turbopanel-uninstall.bak*)"
+    tp_print_ok "stripped $_sor (backup ${_sor}.turbopanel-purge.bak*)"
   fi
 }
 
@@ -2526,7 +2497,7 @@ tp_exe_is_ours() {
 }
 
 # pkill exits 1 when no process matches. Keep that distinct from a real failure
-# so a host with nothing to signal is not recorded as a failed uninstall.
+# so a host with nothing to signal is not recorded as a failed purge.
 # shellcheck disable=SC2329 # run through tp_run
 tp_pkill_turbopanel() {
   pkill -f /opt/turbopanel
@@ -2540,7 +2511,7 @@ tp_pkill_turbopanel() {
 tp_kill_by_exe() {
   if [ ! -d /proc/1 ]; then
     if tp_has_tool pkill; then
-      # Exit 1 means nothing matched. That is not a failed uninstall.
+      # Exit 1 means nothing matched. That is not a failed purge.
       tp_run "signal processes running from /opt/turbopanel" tp_pkill_turbopanel || true
     else
       tp_record_skip "pkill not installed"
@@ -2642,12 +2613,11 @@ tp_remove_processes_and_accounts() {
   fi
 }
 
-# --- purge (option 2, after the remove-only steps) --------------------------
+# --- purge (after the removal steps above) ------------------------------
 
 tp_purge_note_kept() {
   _pnk_pkg=$1
   _pnk_why=$2
-  tp_file_add "$TP_TMP/kept-packages.names" "$_pnk_pkg"
   tp_file_add "$TP_TMP/kept-packages" "${_pnk_pkg}: ${_pnk_why}"
   tp_print_warn "keeping ${_pnk_pkg}: ${_pnk_why}"
 }
@@ -2657,55 +2627,32 @@ tp_pkg_installed() {
   [ "$_pi_status" = "install ok installed" ]
 }
 
-tp_pkg_protect_reason() {
-  _protect_ess=$(dpkg-query -W -f '${Essential}' "$1" 2>/dev/null || true)
-  _protect_pri=$(dpkg-query -W -f '${Priority}' "$1" 2>/dev/null || true)
-  if [ "$_protect_ess" = yes ]; then
-    printf '%s' "marked Essential"
-    return 0
-  fi
-  if [ "$_protect_pri" = required ]; then
-    printf '%s' "priority required"
-    return 0
-  fi
+# Only packages that are provably TurboPanel's own go through the purge. The
+# installer's generic dependencies (curl, git, acl, gnupg, iptables, openssl,
+# wireguard-tools, build-essential and friends) predate or outlive TurboPanel on
+# a desktop or shared host and are never removed. What is left is the PHP the
+# sury repo supplied for TurboPanel's php-fpm role: phpN.N-* packages and the
+# sury keyring, considered only when TurboPanel's own sury source file (or its
+# php-fpm unit) shows the role ran on this host.
+tp_sury_evidence() {
+  [ -e /etc/apt/sources.list.d/sury-php.sources ] && return 0
+  [ -e /etc/apt/sources.list.d/sury-php.list ] && return 0
+  [ -f "$TP_TMP/before.units" ] && grep -q 'turbopanel-php-fpm' "$TP_TMP/before.units" && return 0
   return 1
-}
-
-tp_consider_apt_package() {
-  _cap=$1
-  [ -n "$_cap" ] || return 0
-  tp_pkg_installed "$_cap" || return 0
-  case $_cap in
-    sudo|systemd-timesyncd|curl|ca-certificates|openssl)
-      tp_purge_note_kept "$_cap" "never removed by this script"
-      return 0
-      ;;
-    git|gnupg|iptables)
-      # Common on hosts before TurboPanel, and nothing records that the
-      # installer added them, so removing them could break other software.
-      tp_purge_note_kept "$_cap" "may predate TurboPanel; not proven installed by it"
-      return 0
-      ;;
-  esac
-  _cap_why=$(tp_pkg_protect_reason "$_cap" || true)
-  if [ -n "$_cap_why" ]; then
-    tp_purge_note_kept "$_cap" "$_cap_why"
-    return 0
-  fi
-  tp_file_add "$TP_TMP/apt.candidates" "$_cap"
 }
 
 tp_collect_purge_candidates() {
   : > "$TP_TMP/apt.candidates"
-  for _cpc in $TP_PURGE_BASE_PACKAGES $TP_PURGE_APACHE_PACKAGES; do
-    tp_consider_apt_package "$_cpc"
-  done
-  dpkg-query -W -f '${Package}\n' 'php*' > "$TP_TMP/apt.php" 2>/dev/null || true
+  tp_sury_evidence || return 0
+  dpkg-query -W -f '${Package}\n' 'php[0-9]*.[0-9]*-*' > "$TP_TMP/apt.php" 2>/dev/null || true
   while IFS= read -r _cpc; do
     [ -n "$_cpc" ] || continue
-    tp_consider_apt_package "$_cpc"
+    tp_pkg_installed "$_cpc" || continue
+    tp_file_add "$TP_TMP/apt.candidates" "$_cpc"
   done < "$TP_TMP/apt.php"
-  tp_consider_apt_package debsuryorg-archive-keyring
+  if tp_pkg_installed debsuryorg-archive-keyring; then
+    tp_file_add "$TP_TMP/apt.candidates" debsuryorg-archive-keyring
+  fi
   if [ -s "$TP_TMP/apt.candidates" ]; then
     LC_ALL=C sort -u "$TP_TMP/apt.candidates" > "$TP_TMP/apt.candidates.sorted"
     mv "$TP_TMP/apt.candidates.sorted" "$TP_TMP/apt.candidates"
@@ -2818,12 +2765,16 @@ tp_choose_note_sim() {
   fi
 }
 
+# $1 is the candidate list (one package per line). apt.final gets the packages
+# whose removal an apt simulation shows drags nothing else along; the rest are
+# kept and reported.
 tp_choose_purge_packages() {
+  _cpp_cand=$1
   : > "$TP_TMP/apt.final"
-  [ -s "$TP_TMP/apt.candidates" ] || return 0
-  tp_classify_removal "$TP_TMP/apt.candidates" "$TP_TMP/apt.candidates"
+  [ -s "$_cpp_cand" ] || return 0
+  tp_classify_removal "$_cpp_cand" "$_cpp_cand"
   if [ "$_sim_kind" = ok ]; then
-    cp "$TP_TMP/apt.candidates" "$TP_TMP/apt.final"
+    cp "$_cpp_cand" "$TP_TMP/apt.final"
     return 0
   fi
   if [ "$_sim_kind" = extras ]; then
@@ -2837,7 +2788,7 @@ tp_choose_purge_packages() {
   while IFS= read -r _cpp_pkg; do
     [ -n "$_cpp_pkg" ] || continue
     printf '%s\n' "$_cpp_pkg" > "$TP_TMP/apt.one"
-    tp_classify_removal "$TP_TMP/apt.one" "$TP_TMP/apt.candidates"
+    tp_classify_removal "$TP_TMP/apt.one" "$_cpp_cand"
     if [ "$_sim_kind" != ok ]; then
       tp_choose_note_sim "$_cpp_pkg"
       continue
@@ -2845,14 +2796,14 @@ tp_choose_purge_packages() {
     if [ -s "$TP_TMP/apt.growing" ]; then
       cp "$TP_TMP/apt.growing" "$TP_TMP/apt.trial"
       printf '%s\n' "$_cpp_pkg" >> "$TP_TMP/apt.trial"
-      tp_classify_removal "$TP_TMP/apt.trial" "$TP_TMP/apt.candidates"
+      tp_classify_removal "$TP_TMP/apt.trial" "$_cpp_cand"
       if [ "$_sim_kind" != ok ]; then
         tp_choose_note_sim "$_cpp_pkg"
         continue
       fi
     fi
     printf '%s\n' "$_cpp_pkg" >> "$TP_TMP/apt.growing"
-  done < "$TP_TMP/apt.candidates"
+  done < "$_cpp_cand"
   if [ -s "$TP_TMP/apt.growing" ]; then
     cp "$TP_TMP/apt.growing" "$TP_TMP/apt.final"
   fi
@@ -2873,69 +2824,45 @@ tp_run_listed_packages() {
   tp_run "$_rlp_desc" "$@" || true
 }
 
-tp_protect_never_removed_packages() {
-  for _pnr in $TP_AUTOREMOVE_PROTECTED; do
-    tp_pkg_installed "$_pnr" || continue
-    if [ -f "$TP_TMP/kept-packages.names" ] && grep -Fxq "$_pnr" "$TP_TMP/kept-packages.names"; then
-      continue
-    fi
-    tp_purge_note_kept "$_pnr" "never removed by this script"
-  done
-}
-
-tp_mark_kept_packages_manual() {
-  [ -s "$TP_TMP/kept-packages.names" ] || return 0
-  if ! tp_has_tool apt-mark; then
-    tp_record_skip "apt-mark not installed"
-    return 1
-  fi
-  _mkp_fail=false
-  while IFS= read -r _mkp; do
-    [ -n "$_mkp" ] || continue
-    tp_pkg_installed "$_mkp" || continue
-    if ! tp_run "mark $_mkp manual" apt-mark manual "$_mkp"; then
-      _mkp_fail=true
-    fi
-  done < "$TP_TMP/kept-packages.names"
-  [ "$_mkp_fail" = false ]
+# $1 label, $2 candidate list. Purges what an apt simulation shows removes
+# nothing beyond the list; a package whose purge would drag anything else along
+# is kept and reported. Nothing here ever runs autoremove: only the named
+# packages leave, so whatever else is on the host stays exactly as it was.
+tp_purge_guarded_packages() {
+  _pgp_label=$1
+  _pgp_cand=$2
+  [ -s "$_pgp_cand" ] || return 0
+  LC_ALL=C sort -u "$_pgp_cand" > "$_pgp_cand.sorted"
+  mv "$_pgp_cand.sorted" "$_pgp_cand"
+  tp_choose_purge_packages "$_pgp_cand"
+  tp_run_listed_packages "purge ${_pgp_label} packages" "$TP_TMP/apt.final" \
+    env LC_ALL=C DEBIAN_FRONTEND=noninteractive apt-get purge -y
 }
 
 tp_purge_apt_packages() {
-  tp_print_step "▸" "Apt packages"
+  tp_print_step "▸" "PHP packages TurboPanel added"
   if ! tp_has_tool apt-get || ! tp_has_tool dpkg-query; then
     tp_record_skip "apt-get or dpkg-query not installed"
     return 0
   fi
+  tp_collect_purge_candidates
+  if [ -s "$TP_TMP/apt.candidates" ]; then
+    if ! tp_run "apt-get update" env LC_ALL=C DEBIAN_FRONTEND=noninteractive apt-get update; then
+      # Stale package lists still let the purge below run; its own failures
+      # count on their own.
+      tp_record_benign_fail
+    fi
+    tp_purge_guarded_packages "PHP" "$TP_TMP/apt.candidates"
+  else
+    tp_print_ok "no PHP packages added by TurboPanel"
+  fi
+  # TurboPanel's own sury source goes last, so an interrupted run still finds
+  # it as evidence on the next one.
   for _pap in /etc/apt/sources.list.d/sury-php.sources /etc/apt/sources.list.d/sury-php.list; do
     if [ -e "$_pap" ] || [ -L "$_pap" ]; then
       tp_run "remove $_pap" rm -f "$_pap" || true
     fi
   done
-  if ! tp_run "apt-get update" env LC_ALL=C DEBIAN_FRONTEND=noninteractive apt-get update; then
-    # Stale package lists still let the purge below run; its own failures
-    # count on their own.
-    tp_record_benign_fail
-  fi
-  tp_collect_purge_candidates
-  tp_choose_purge_packages
-  # sudo, systemd-timesyncd, and curl are not purge candidates. Mark them
-  # manual before autoremove, or an automatic install is removed with its
-  # stack. curl is kept so the reinstall commands this script prints (and
-  # the curl | sh install itself) still work after a purge.
-  tp_protect_never_removed_packages
-  _pap_marked=false
-  if tp_mark_kept_packages_manual; then
-    _pap_marked=true
-  fi
-  tp_run_listed_packages "purge apt packages" "$TP_TMP/apt.final" \
-    env LC_ALL=C DEBIAN_FRONTEND=noninteractive apt-get purge -y
-  if [ "$_pap_marked" = true ]; then
-    tp_run "autoremove apt packages" \
-      env LC_ALL=C DEBIAN_FRONTEND=noninteractive apt-get autoremove --purge -y || true
-  else
-    tp_print_error "skipped autoremove so the kept packages cannot be removed"
-    tp_record_fail "skipped autoremove so the kept packages cannot be removed"
-  fi
 }
 
 tp_stop_unit_if_running() {
@@ -3060,8 +2987,7 @@ tp_purge_docker_engine() {
   fi
   if [ -s "$TP_TMP/docker.pkgs" ]; then
     if tp_has_tool apt-get; then
-      tp_run_listed_packages "purge Docker packages" "$TP_TMP/docker.pkgs" \
-        env LC_ALL=C DEBIAN_FRONTEND=noninteractive apt-get purge -y
+      tp_purge_guarded_packages "Docker" "$TP_TMP/docker.pkgs"
     else
       tp_record_skip "apt-get not installed"
     fi
@@ -3267,7 +3193,6 @@ tp_purge_principals() {
 
 tp_purge_hosted_data() {
   : > "$TP_TMP/kept-packages"
-  : > "$TP_TMP/kept-packages.names"
   tp_purge_principals
   tp_purge_docker_engine
   tp_purge_data_folders
@@ -3315,21 +3240,9 @@ tp_print_reinstall_commands() {
   tp_say "  curl -fsSL turbopanel.sh | sh"
 }
 
-tp_print_protected_package_note() {
-  _ppn=
-  for _ppn_pkg in $TP_AUTOREMOVE_PROTECTED; do
-    if [ -f "$TP_TMP/kept-packages.names" ] && grep -Fxq "$_ppn_pkg" "$TP_TMP/kept-packages.names"; then
-      _ppn="${_ppn} ${_ppn_pkg}"
-    fi
-  done
-  [ -n "$_ppn" ] || return 0
-  tp_say "Marked manual so autoremove cannot remove:${_ppn}."
-}
-
 tp_print_purge_notes() {
   tp_print_group "Packages kept" "$TP_TMP/kept-packages"
-  tp_print_protected_package_note
-  tp_print_warn "sury-provided library versions stay installed."
+  tp_say "Other packages stay installed by design (curl, git, acl, gnupg, iptables, openssl, wireguard-tools, build tools, ...); this purge never runs autoremove."
   tp_say "/etc/systemd/timesyncd.conf is left as TurboPanel wrote it."
   tp_say "Reboot this host to clear leftover kernel state (bridges and NAT rules)."
 }
@@ -3354,49 +3267,35 @@ tp_print_summary() {
   tp_print_group "Failed" "$TP_TMP/failed"
   tp_print_group "Configured outside TurboPanel's folders (kept)" "$TP_TMP/custom.kept"
   tp_print_firewall_gone_warning
-  if [ "$TP_ACTION" = purge ]; then
-    if [ "$DRY_RUN" != true ]; then
-      tp_report_remaining "hosted data" purge_targets
-    fi
-    tp_print_purge_notes
+  if [ "$DRY_RUN" != true ]; then
+    tp_report_remaining "hosted data" purge_targets
   fi
+  tp_print_purge_notes
   if [ "$DRY_RUN" = true ]; then
-    if [ "$TP_ACTION" = purge ]; then
-      tp_print_reinstall_commands
-    fi
+    tp_print_reinstall_commands
     tp_print_ok "Dry run finished — nothing was changed"
     tp_say "Log: ${TP_LOG_FILE}"
     return 0
-  fi
-  if [ "$TP_ACTION" != purge ]; then
-    tp_print_group "Kept data folders" "$TP_TMP/inv.folders_keep"
-    tp_print_group "Kept Docker volumes" "$TP_TMP/inv.volumes"
-    tp_print_group "Left alone" "$TP_TMP/inv.leftalone"
-    tp_say "Docker images, Docker Engine, and apt packages were kept."
-    tp_say ""
-    tp_say "Principal users were not deleted. Service groups in the 9900-9999 band"
-    tp_say "(including SFTP and shell groups) were removed, so principal users lost"
-    tp_say "those groups. Re-apply access after the host is enrolled again."
   fi
   tp_print_reinstall_commands
   tp_say ""
   tp_say "Log: ${TP_LOG_FILE}"
   # Benign failures (tp_record_benign_fail) leave no purge work undone, so the
   # marker goes even when they are the only failures; anything else keeps it.
-  if [ "$TP_ACTION" = purge ] && tp_resume_clearable; then
+  if tp_resume_clearable; then
     tp_clear_purge_resume || true
   fi
   if [ "$TP_FAIL_COUNT" -gt 0 ]; then
     tp_print_error "${TP_FAIL_COUNT} step(s) failed"
   else
-    tp_print_ok "Uninstall finished"
+    tp_print_ok "Purge finished"
   fi
 }
 
 # shellcheck disable=SC2329 # run from trap
 tp_on_signal() {
   if [ "${TP_STARTED_REMOVAL:-false}" = true ] && [ "${DRY_RUN:-false}" != true ]; then
-    tp_print_error "Interrupted — this host may be partly uninstalled. Log: ${TP_LOG_FILE:-}"
+    tp_print_error "Interrupted — this host may be partly purged. Log: ${TP_LOG_FILE:-}"
   else
     tp_print_error "Aborted — nothing changed"
   fi
@@ -3413,15 +3312,15 @@ tp_cleanup() {
 tp_main() {
   # mktemp creates the file with O_EXCL. A predictable name in /var/tmp can be
   # planted as a symlink; appending and chmod would then follow it.
-  TP_LOG_FILE=$(umask 077; mktemp "/var/tmp/turbopanel-uninstall-$(date -u +%Y%m%dT%H%M%SZ).XXXXXX") || {
-    tp_print_error "Could not create a secure uninstall log. Nothing was changed."
+  TP_LOG_FILE=$(umask 077; mktemp "/var/tmp/turbopanel-purge-$(date -u +%Y%m%dT%H%M%SZ).XXXXXX") || {
+    tp_print_error "Could not create a secure purge log. Nothing was changed."
     exit 1
   }
   if [ -L "$TP_LOG_FILE" ] || [ ! -f "$TP_LOG_FILE" ]; then
-    tp_print_error "Could not create a secure uninstall log. Nothing was changed."
+    tp_print_error "Could not create a secure purge log. Nothing was changed."
     exit 1
   fi
-  TP_TMP=$(mktemp -d /var/tmp/turbopanel-uninstall.XXXXXX) || {
+  TP_TMP=$(mktemp -d /var/tmp/turbopanel-purge.XXXXXX) || {
     tp_print_error "Could not create a temporary directory. Nothing was changed."
     exit 1
   }
@@ -3431,7 +3330,7 @@ tp_main() {
   trap 'tp_on_signal' INT TERM
   trap 'tp_cleanup' EXIT
 
-  tp_print_step "▸" "TurboPanel uninstall"
+  tp_print_step "▸" "TurboPanel purge"
   tp_print_step "·" "Log: ${TP_LOG_FILE}"
   if [ "$DRY_RUN" = true ]; then
     tp_print_warn "Dry run — no changes will be made"
@@ -3454,19 +3353,14 @@ tp_main() {
   tp_print_report
   if tp_purge_marker_pending; then
     tp_print_warn "A previous purge did not finish. Resuming purge."
-    TP_ACTION=purge
-  else
-    tp_menu
   fi
   tp_confirm
 
   TP_STARTED_REMOVAL=true
   tp_snapshot_inventory
-  if [ "$TP_ACTION" = purge ]; then
-    if ! tp_persist_purge_resume; then
-      tp_print_error "Could not save purge resume state. No removal steps were run."
-      exit 1
-    fi
+  if ! tp_persist_purge_resume; then
+    tp_print_error "Could not save purge resume state. No removal steps were run."
+    exit 1
   fi
   tp_remove_units
   tp_remove_docker
@@ -3475,9 +3369,7 @@ tp_main() {
   tp_remove_host_config
   tp_remove_folders_and_shell
   tp_remove_processes_and_accounts
-  if [ "$TP_ACTION" = purge ]; then
-    tp_purge_hosted_data
-  fi
+  tp_purge_hosted_data
   TP_INV_QUIET=true
   tp_inventory
   tp_print_summary
@@ -3491,8 +3383,8 @@ tp_main() {
 # host or prints, aside from function definitions.
 if [ "$(id -u)" != 0 ]; then
   tp_print_error "root is required"
-  tp_print_error "  curl -fsSL https://raw.githubusercontent.com/TurboPanel/turbopaneld/trunk/scripts/uninstall.sh | sudo sh"
-  tp_print_error "  sudo sh uninstall.sh"
+  tp_print_error "  curl -fsSL https://raw.githubusercontent.com/TurboPanel/turbopaneld/trunk/scripts/purge.sh | sudo sh"
+  tp_print_error "  sudo sh purge.sh"
   exit 1
 fi
 
@@ -3502,7 +3394,7 @@ for _arg in "$@"; do
     --dry-run) DRY_RUN=true ;;
     *)
       tp_print_error "Unknown argument: $_arg"
-      tp_print_error "Usage: sudo sh uninstall.sh [--dry-run]"
+      tp_print_error "Usage: sudo sh purge.sh [--dry-run]"
       exit 1
       ;;
   esac
@@ -3519,7 +3411,6 @@ TP_STARTED_REMOVAL=false
 TP_INV_QUIET=false
 TP_LOG_FILE=
 TP_TMP=
-TP_ACTION=
 TP_CODE=
 TP_HOSTNAME=
 TP_INSTANCE_URL=
@@ -3560,26 +3451,24 @@ TP_LEGACY_SHELL_RC_NEEDLE='/opt/turbopanel/runtimes/deno/.install/env'
 # Every tree this script may delete: what TurboPanel creates, plus Docker's
 # default state it purges. tp_path_is_safe refuses anything else, including a
 # folder configured elsewhere in daemon.env; those are listed as kept.
-TP_OWNED_TREES="/opt/turbopanel /etc/turbopanel /etc/ssh/turbopanel /var/lib/turbopanel /var/log/turbopanel /run/turbopanel /var/run/turbopanel /backup /srv/users /tmp/turbopanel-ansible /tmp/turbopanel-orchestrate /root/.ansible /var/lib/docker /var/lib/containerd /etc/docker /var/lib/turbopanel-uninstall"
+TP_OWNED_TREES="/opt/turbopanel /etc/turbopanel /etc/ssh/turbopanel /var/lib/turbopanel /var/log/turbopanel /run/turbopanel /var/run/turbopanel /backup /srv/users /tmp/turbopanel-ansible /tmp/turbopanel-orchestrate /root/.ansible /var/lib/docker /var/lib/containerd /etc/docker /var/lib/turbopanel-purge"
 TP_SYSTEMD_DIRS="/etc/systemd/system /usr/local/lib/systemd/system /lib/systemd/system /usr/lib/systemd/system"
 TP_DAEMON_ENV=/etc/turbopanel/daemon.env
-TP_RESUME_DIR=/var/lib/turbopanel-uninstall
+TP_RESUME_DIR=/var/lib/turbopanel-purge
 TP_PURGE_MARKER=$TP_RESUME_DIR/purge-in-progress
 TP_RESUME_MANIFEST=$TP_RESUME_DIR/resume-manifest
 TP_DOCKER_DATA_ROOT_DEFAULT=/var/lib/docker
-TP_AUTOREMOVE_PROTECTED="sudo systemd-timesyncd curl ca-certificates openssl"
 TP_INV_NAMES="units containers networks chains wireguard hostfiles shellrc folders_remove folders_keep accounts groups principals volumes leftalone cpmarkers purge_targets"
 
-# Apt packages option 2 may purge. A role that installs apt packages or adds
-# an apt repository has to add them here (and the repo file, when the Docker
-# download.docker.com scan or the sury filenames below would not match it).
-# daemon-prereqs/tasks/main.yml, plus apt-transport-https from php-fpm.
-# apache/tasks/main.yml build dependencies. Installed sudo, systemd-timesyncd,
-# and curl are marked manual before autoremove; they are not purge
-# candidates. time-sync installs systemd-timesyncd. curl is kept so the
-# printed reinstall commands (and a repeat curl | sh) still work post-purge.
-TP_PURGE_BASE_PACKAGES="acl ca-certificates curl git gnupg iptables openssl pamtester python3-debian tar unzip wireguard-tools xz-utils zstd apt-transport-https"
-TP_PURGE_APACHE_PACKAGES="build-essential libexpat1-dev libpcre2-dev libssl-dev zlib1g-dev"
+# Apt packages this script may purge: Docker's (the list below; a purge of
+# Docker Engine is the point) and, only when TurboPanel's own sury source or
+# php-fpm unit is on the host, the phpN.N-* packages and debsuryorg-archive-keyring
+# it added. Never add a generic package here (curl, git, acl, gnupg, iptables,
+# openssl, wireguard-tools, build-essential, sudo, systemd-timesyncd, ...): the
+# installer relies on them but a desktop or shared host owns them. A role that
+# adds an apt repository has to add its source file to the removal in
+# tp_purge_apt_packages (the Docker download.docker.com scan or the sury
+# filenames would not match another).
 TP_DOCKER_PACKAGES="docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin docker-ce-rootless-extras docker.io docker-compose containerd runc"
 
 if ! tp_is_interactive; then

@@ -36,6 +36,7 @@
 import { join } from "@std/path";
 import { hostSudoArgs } from "../../permissions/host-sudo.ts";
 import { logInfo, logWarn } from "../../util/logger.ts";
+import { forEachSequential } from "../../util/sequential.ts";
 import type { LayoutPaths } from "../../paths/layout.ts";
 import {
   devOwnershipPlaybookExtraArgs,
@@ -346,12 +347,14 @@ async function waitForNativeApp(
     1,
     Math.ceil(timeoutMs / NATIVE_APP_HEALTH_INTERVAL_MS),
   );
-  for (let attempt = 0; attempt < attempts; attempt++) {
+  const pollFrom = async (attempt: number): Promise<boolean> => {
+    if (attempt >= attempts) return false;
     if (await io.probe(port)) return true;
     if (await unitIsFailed(io, unit)) return false;
     if (attempt < attempts - 1) await io.sleep(NATIVE_APP_HEALTH_INTERVAL_MS);
-  }
-  return false;
+    return await pollFrom(attempt + 1);
+  };
+  return await pollFrom(0);
 }
 
 function emitOutputLines(
@@ -615,7 +618,7 @@ async function applyPrincipalSlices(
   }
 
   let changed = false;
-  for (const [username, limits] of limitsByUsername) {
+  await forEachSequential(limitsByUsername, async ([username, limits]) => {
     const installed = await installUnitFile(io, {
       stagedPath: principalSliceStagedPath(layout, username),
       installedPath: principalSlicePath(username, systemdUnitDir),
@@ -625,7 +628,7 @@ async function applyPrincipalSlices(
       }),
     });
     if (installed) changed = true;
-  }
+  });
   return changed;
 }
 
@@ -714,14 +717,14 @@ export async function applyNativeAppServices(
   );
 
   const prepared: PreparedNativeApp[] = [];
-  for (const app of apps) {
+  await forEachSequential(apps, async (app) => {
     const binding = opts.bindings.get(app.composeServiceName);
     if (!binding) {
       logWarn(
         "deploy",
         `native app skipped for ${app.composeServiceName}: no project principal assigned`,
       );
-      continue;
+      return;
     }
     const unitChanged = await installNativeAppUnit(io, layout, {
       environmentId,
@@ -735,7 +738,7 @@ export async function applyNativeAppServices(
       binding,
       unit: nativeAppUnitName(app.serviceId),
     });
-  }
+  });
 
   // Phase 2 — one `daemon-reload`, after every file is installed and before any
   // unit is started, so no `restart` below can read a stale unit definition.
@@ -749,14 +752,14 @@ export async function applyNativeAppServices(
   // Phase 3 — start / restart and health-probe each app; an operator-disabled
   // app is stopped and disabled instead, and still counts as applied.
   const applied: string[] = [];
-  for (const entry of prepared) {
+  await forEachSequential(prepared, async (entry) => {
     if (entry.app.enabled === false) {
       await disableNativeApp(io, entry);
     } else {
       await startNativeApp(io, layout, entry);
     }
     applied.push(entry.app.composeServiceName);
-  }
+  });
 
   logInfo(
     "deploy",
@@ -774,14 +777,15 @@ export async function listEnvironmentNativeAppServiceIds(
 ): Promise<string[]> {
   const prefix = nativeAppStagedFilePrefix(environmentId);
   const dir = nativeAppConfigDir(layout);
-  const ids: string[] = [];
+  let ids: string[] = [];
   try {
-    for await (const entry of Deno.readDir(dir)) {
-      if (!entry.isFile) continue;
-      if (!entry.name.startsWith(prefix)) continue;
-      if (!entry.name.endsWith(".service")) continue;
-      ids.push(entry.name.slice(prefix.length, -".service".length));
-    }
+    const entries = await Array.fromAsync(Deno.readDir(dir));
+    ids = entries
+      .filter((entry) =>
+        entry.isFile && entry.name.startsWith(prefix) &&
+        entry.name.endsWith(".service")
+      )
+      .map((entry) => entry.name.slice(prefix.length, -".service".length));
   } catch (err) {
     if (!(err instanceof Deno.errors.NotFound)) throw err;
   }
@@ -808,7 +812,7 @@ export async function applyNativeAppLifecycle(
     environmentId,
   );
   const touched: string[] = [];
-  for (const serviceId of serviceIds) {
+  await forEachSequential(serviceIds, async (serviceId) => {
     const unit = nativeAppUnitName(serviceId);
     const result = await systemctl(io, [action, unit]);
     if (!result.success) {
@@ -816,10 +820,10 @@ export async function applyNativeAppLifecycle(
         "deploy",
         `native app lifecycle ${action} failed unit=${unit}: ${result.stderr}`,
       );
-      continue;
+      return;
     }
     touched.push(unit);
-  }
+  });
   return touched;
 }
 
@@ -845,7 +849,7 @@ export async function removeNativeAppServices(
   if (serviceIds.length === 0) return 0;
 
   let removed = 0;
-  for (const serviceId of serviceIds) {
+  await forEachSequential(serviceIds, async (serviceId) => {
     const unit = nativeAppUnitName(serviceId);
     const disable = await systemctl(io, ["disable", "--now", unit]);
     if (!disable.success) {
@@ -869,7 +873,7 @@ export async function removeNativeAppServices(
         "deploy",
         `native app unit removal failed unit=${unit}: ${rm.stderr}`,
       );
-      continue;
+      return;
     }
     await removeStagedFile(
       join(
@@ -878,7 +882,7 @@ export async function removeNativeAppServices(
       ),
     );
     removed += 1;
-  }
+  });
 
   if (removed > 0) {
     const reload = await systemctl(io, ["daemon-reload"]);

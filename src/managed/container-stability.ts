@@ -93,7 +93,8 @@ export async function assertContainerStable(
   const sleep = options.sleep ??
     ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
 
-  for (let i = 0; i < attempts; i += 1) {
+  const check = async (i: number): Promise<void> => {
+    if (i >= attempts) return;
     // The first check is immediate (it also settles an engine that cannot be
     // inspected at all); later ones wait for a fresh container to crash.
     if (i > 0) await sleep(intervalMs);
@@ -106,7 +107,7 @@ export async function assertContainerStable(
     if (!inspect.success) return;
     const state = parseContainerState(inspect.stdout);
     if (state === null) return;
-    if (!isCrashLooping(state)) continue;
+    if (!isCrashLooping(state)) return await check(i + 1);
 
     const logs = await run([
       "logs",
@@ -120,5 +121,6 @@ export async function assertContainerStable(
         `exit ${state.exitCode}, ${state.restartCount} restarts)` +
         (reason ? `: ${reason}` : ""),
     );
-  }
+  };
+  await check(0);
 }

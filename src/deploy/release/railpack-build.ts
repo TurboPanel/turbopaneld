@@ -57,6 +57,7 @@ import { createSymlink } from "../../permissions/scoped-writes.ts";
 import type { LayoutPaths } from "../../paths/layout.ts";
 import type { EnvironmentDeploySourceBuild } from "../../contracts/commands-contracts.ts";
 import type { ReleaseOutputHandler } from "./checkout.ts";
+import { forEachSequential } from "../../util/sequential.ts";
 
 /** Keep in step with orchestration/roles/buildkit/defaults/main.yml. */
 export const BUILDKIT_VERSION = "0.27.0";
@@ -455,13 +456,13 @@ async function installBuildkit(
   const toolDir = join(runtimesDir, "buildkit");
   const versionDir = join(toolDir, BUILDKIT_VERSION);
   await Deno.mkdir(versionDir, { recursive: true, mode: 0o750 });
-  for (const binary of ["buildctl", "buildkitd"]) {
+  await forEachSequential(["buildctl", "buildkitd"], async (binary) => {
     await Deno.copyFile(
       join(extractDir, "bin", binary),
       join(versionDir, binary),
     );
     await Deno.chmod(join(versionDir, binary), 0o750);
-  }
+  });
   await refreshCurrentSymlink(toolDir, versionDir);
 }
 
@@ -685,10 +686,13 @@ async function ensureBuildkitDaemon(
   child.unref();
 
   const deadline = Date.now() + readyMs;
-  while (Date.now() < deadline) {
-    if (await buildkitdResponds(tools.buildctl, addr)) return addr;
+  const waitUntilReady = async (): Promise<boolean> => {
+    if (Date.now() >= deadline) return false;
+    if (await buildkitdResponds(tools.buildctl, addr)) return true;
     await new Promise((resolve) => setTimeout(resolve, pollMs));
-  }
+    return await waitUntilReady();
+  };
+  if (await waitUntilReady()) return addr;
   throw new Error(
     `buildkitd did not become ready on ${socketPath} within ${readyMs}ms`,
   );

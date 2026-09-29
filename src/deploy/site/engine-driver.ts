@@ -53,6 +53,7 @@
 import { join } from "@std/path";
 import { hostSudoArgs } from "../../permissions/host-sudo.ts";
 import { logWarn } from "../../util/logger.ts";
+import { forEachSequential } from "../../util/sequential.ts";
 import type { LayoutPaths } from "../../paths/layout.ts";
 
 /** Engines that can serve a site. */
@@ -328,13 +329,13 @@ async function discardStagedArtifacts(
 ): Promise<void> {
   const leftovers = [staged.candidatePath];
   if (staged.previousPath) leftovers.push(staged.previousPath);
-  for (const path of leftovers) {
+  await forEachSequential(leftovers, async (path) => {
     if (staged.kind === "daemon") {
       await removeStagedFile(path);
-      continue;
+      return;
     }
     await run("sudo", hostSudoArgs(["-n", "rm", "-f", "--", path]));
-  }
+  });
 }
 
 /** Keep a published swap: only the temp candidate/snapshot are cleaned up. */
@@ -843,7 +844,7 @@ async function rollbackSiteConfigs(
   opts: SiteRolloutOpts,
   published: readonly StagedConfigWrite[],
 ): Promise<void> {
-  for (const staged of published) {
+  await forEachSequential(published, async (staged) => {
     try {
       await restoreStagedConfig(opts.run, staged);
     } catch (err) {
@@ -853,7 +854,7 @@ async function rollbackSiteConfigs(
         `${opts.target.label} could not restore ${staged.path}: ${message}`,
       );
     }
-  }
+  });
   if (published.length === 0) return;
   try {
     await opts.target.configTest(opts.run, opts.layout);
@@ -885,10 +886,10 @@ export async function rolloutSiteConfigs(
 ): Promise<void> {
   const published: StagedConfigWrite[] = [];
   try {
-    for (const staged of opts.staged) {
+    await forEachSequential(opts.staged, async (staged) => {
       await publishStagedConfig(opts.run, staged);
       published.push(staged);
-    }
+    });
     const aggregated = await opts.afterPublish?.();
     if (aggregated) {
       await publishStagedConfig(opts.run, aggregated);
@@ -910,7 +911,8 @@ export async function rolloutSiteConfigs(
     await rollbackSiteConfigs(opts, published);
     throw err;
   }
-  for (const staged of published) {
-    await commitStagedConfig(opts.run, staged);
-  }
+  await forEachSequential(
+    published,
+    (staged) => commitStagedConfig(opts.run, staged),
+  );
 }

@@ -601,11 +601,13 @@ tp_release_manifest_url_ok() {
   _rmu_rest="${_rmu_url#https://}"
   case "$_rmu_rest" in
     ""|*[!A-Za-z0-9._~/+-]*) return 1 ;;
+    *) ;;
   esac
   _rmu_host="${_rmu_rest%%/*}"
   _rmu_path="${_rmu_rest#"$_rmu_host"}"
   case "$_rmu_path" in
     ""|*/|*//*|*/./*|*/../*|*/.|*/..) return 1 ;;
+    *) ;;
   esac
   case "${_rmu_path##*/}" in
     manifest.json|manifest-?*.json) ;;
@@ -629,6 +631,7 @@ tp_release_manifest_url_ok() {
   if [ "$_rmu_host" = dl.trbp.nl ]; then
     case "$_rmu_mid" in
       */*) return 1 ;;
+      *) ;;
     esac
     return 0
   fi
@@ -636,6 +639,7 @@ tp_release_manifest_url_ok() {
     latest/download) return 0 ;;
     download/*/*) return 1 ;;
     download/?*) return 0 ;;
+    *) ;;
   esac
   return 1
 }

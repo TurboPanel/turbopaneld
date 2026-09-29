@@ -239,14 +239,14 @@ export async function writeCheckoutCredentialFiles(
 export async function removeCheckoutCredentialFiles(
   files: CheckoutCredentialFiles,
 ): Promise<void> {
-  for (const path of [files.askpassPath, files.sshKeyPath]) {
-    if (!path) continue;
+  await Promise.all([files.askpassPath, files.sshKeyPath].map(async (path) => {
+    if (!path) return;
     try {
       await Deno.remove(path);
     } catch {
       // Scratch teardown removes the whole tree; a missing file is fine.
     }
-  }
+  }));
 }
 
 async function runGit(

@@ -172,6 +172,84 @@ test("handleSelfUpdateAttachOutcome reports rolled-back from a nonempty toCommit
   });
 });
 
+test("handleSelfUpdateAttachOutcome disarms only a guard armed for this build", async () => {
+  const armedBody = (target: string) =>
+    JSON.stringify({
+      targetCommit: target,
+      deadlineAt: "2026-09-24T12:00:00Z",
+      armedAt: "2026-09-24T11:50:00Z",
+    });
+  const cases: Array<{
+    name: string;
+    current: string;
+    armed: string | null;
+    stages: string[];
+    disarmed: boolean;
+  }> = [
+    {
+      name: "armed for this build",
+      current: " newsha ",
+      armed: "newsha",
+      stages: ["verifying", "done"],
+      disarmed: true,
+    },
+    {
+      name: "armed for another build",
+      current: "newsha",
+      armed: "othersha",
+      stages: [],
+      disarmed: false,
+    },
+    {
+      name: "no guard armed",
+      current: "newsha",
+      armed: null,
+      stages: [],
+      disarmed: false,
+    },
+    {
+      name: "blank current commit",
+      current: "   ",
+      armed: "newsha",
+      stages: [],
+      disarmed: false,
+    },
+  ];
+  for (const c of cases) {
+    await withTempLayout(async (fixture) => {
+      const prior: Record<string, string | undefined> = {};
+      for (const key of Object.keys(fixture.env)) {
+        prior[key] = Deno.env.get(key);
+        Deno.env.set(key, fixture.env[key]);
+      }
+      const stages: string[] = [];
+      try {
+        if (c.armed !== null) {
+          await Deno.writeTextFile(updateGuardPath(), armedBody(c.armed));
+        }
+        await handleSelfUpdateAttachOutcome({
+          currentCommit: c.current,
+          reportStage: (stage) => {
+            stages.push(stage);
+          },
+        });
+        assertEquals(stages, c.stages, c.name);
+        const disarmed = await Deno.stat(updateGuardDisarmPath()).then(
+          () => true,
+          () => false,
+        );
+        assertEquals(disarmed, c.disarmed, c.name);
+      } finally {
+        for (const key of Object.keys(fixture.env)) {
+          const value = prior[key];
+          if (value === undefined) Deno.env.delete(key);
+          else Deno.env.set(key, value);
+        }
+      }
+    });
+  }
+});
+
 test("a failed daemon restart keeps update-guard.json", async () => {
   const root = await Deno.makeTempDir({ prefix: "tp-update-guard-" });
   const bin = join(root, "bin");

@@ -14,6 +14,7 @@
  */
 
 import { logInfo, logWarn, sanitizeForLog } from "../util/logger.ts";
+import { forEachSequential } from "../util/sequential.ts";
 import { commandLogSpoolDir, type LayoutPaths } from "../paths/layout.ts";
 import { isActiveSpoolPath } from "./spool.ts";
 import type { SendCommandLogChunkFn } from "./uploader.ts";
@@ -111,8 +112,8 @@ export async function sweepOrphanCommandLogs(
   const entries = await listSpoolEntries(dir);
   if (!entries) return result;
 
-  for (const entry of entries) {
-    if (!entry.isFile || !entry.name.endsWith(SPOOL_SUFFIX)) continue;
+  await forEachSequential(entries, async (entry) => {
+    if (!entry.isFile || !entry.name.endsWith(SPOOL_SUFFIX)) return;
     const commandId = entry.name.slice(0, -SPOOL_SUFFIX.length);
     const path = `${dir}/${entry.name}`;
     // A command still running in this process owns its spool file until
@@ -121,7 +122,7 @@ export async function sweepOrphanCommandLogs(
       ? "skipped"
       : await resendOrphanSpool(path, commandId, options.send);
     result[outcome] += 1;
-  }
+  });
 
   if (result.uploaded > 0 || result.failed > 0) {
     logInfo(

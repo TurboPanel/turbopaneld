@@ -319,3 +319,28 @@ test("runDeployServiceHooks streams build output and skips entries without work"
   assertEquals(runner.calls.length, 1);
   assertEquals(lines.some((row) => row.line.includes("building")), true);
 });
+
+test("runDeployServiceHooks runs services in order and a failure stops the later ones", async () => {
+  const runner = recordingRunner((args) =>
+    args.includes("web") ? failed("build exploded") : ok()
+  );
+  await assertRejects(
+    () =>
+      runDeployServiceHooks(
+        [
+          { composeServiceName: "web", buildDisableCache: true },
+          { composeServiceName: "worker", buildDisableCache: true },
+        ],
+        {
+          projectName: "demo",
+          composePaths: COMPOSE,
+          deploymentDir: "/d",
+          runDocker: runner.run,
+        },
+      ),
+    Error,
+    "build exploded",
+  );
+  assertEquals(runner.calls.length, 1);
+  assertEquals(runner.calls[0]?.at(-1), "web");
+});

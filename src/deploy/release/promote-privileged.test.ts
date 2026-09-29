@@ -559,6 +559,17 @@ test("expectedPathsProbe uses sudo test when Deno.stat is denied", async () => {
   });
 });
 
+test("expectedPathsProbe reports the first missing path, in order", async () => {
+  await withTempRelease(async (root) => {
+    await Deno.mkdir(join(root, "present"));
+    await assertRejects(
+      () => expectedPathsProbe(["present", "gone-a", "gone-b"])(root),
+      Error,
+      "missing gone-a",
+    );
+  });
+});
+
 test("expectedPathsProbe rethrows a non-NotFound stat error", async () => {
   await withTempRelease(async (root) => {
     const originalStat = Deno.stat;

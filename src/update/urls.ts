@@ -83,7 +83,7 @@ function trunkManifestUrl(kind: ReleaseArtifactKind): string | null {
  * A version token safe to place in one GitHub release path segment.
  * The tag is `v<version>`, so the token itself starts with a digit.
  */
-const PINNED_VERSION_RE = /^[0-9][0-9A-Za-z._+-]*$/;
+const PINNED_VERSION_RE = /^\d[0-9A-Za-z._+-]*$/;
 
 /**
  * Manifest URL for one published build, beside {@link builtinChannelManifestUrl}.
@@ -145,7 +145,7 @@ export function releaseManifestUrlAllowed(kind: string, url: string): boolean {
   const host = rest.slice(0, slash);
   const segments = rest.slice(slash + 1).split("/");
   if (segments.some((s) => s === "" || s === "." || s === "..")) return false;
-  if (!RELEASE_MANIFEST_FILE.test(segments[segments.length - 1])) return false;
+  if (!RELEASE_MANIFEST_FILE.test(segments.at(-1) ?? "")) return false;
   if (host === RELEASE_CDN_HOST) {
     return kind === "daemon" && segments.length === 3 &&
       segments[0] === "channels";
@@ -227,9 +227,9 @@ export function resolvePinnedManifestUrl(
 }
 
 /** `v<version>`: a release tag as gh-release.yml creates it. */
-const RELEASE_TAG_RE = /^v[0-9][0-9A-Za-z._+-]*$/;
+const RELEASE_TAG_RE = /^v\d[0-9A-Za-z._+-]*$/;
 /** `manifest-<version>.json`: gh-canary.yml's per-build copy on the rolling release. */
-const PER_BUILD_MANIFEST_FILE_RE = /^manifest-[0-9][0-9A-Za-z._+-]*\.json$/;
+const PER_BUILD_MANIFEST_FILE_RE = /^manifest-\d[0-9A-Za-z._+-]*\.json$/;
 
 /**
  * Whether `url` names exactly one published build of `kind` — the shapes

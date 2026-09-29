@@ -375,18 +375,23 @@ async function collectStorage(
   const entries = mountsText
     ? storageMountCandidates(parseProcMounts(mountsText))
     : [];
-  const candidates: MetricsStorageMountCandidate[] = [];
-  for (const entry of capList(entries, MAX_MOUNT_CANDIDATES)) {
-    const probed = await probe(entry.mountPoint);
-    if (!probed) continue;
-    candidates.push({
-      path: entry.mountPoint,
-      source: entry.source,
-      fsType: entry.fsType,
-      totalBytes: probed.totalBytes,
-      availableBytes: probed.availableBytes,
-    });
-  }
+  // Independent statfs probes (at most MAX_MOUNT_CANDIDATES); Promise.all
+  // keeps the candidates in mount order.
+  const probedCandidates = await Promise.all(
+    capList(entries, MAX_MOUNT_CANDIDATES).map(async (entry) => {
+      const probed = await probe(entry.mountPoint);
+      if (!probed) return null;
+      const candidate: MetricsStorageMountCandidate = {
+        path: entry.mountPoint,
+        source: entry.source,
+        fsType: entry.fsType,
+        totalBytes: probed.totalBytes,
+        availableBytes: probed.availableBytes,
+      };
+      return candidate;
+    }),
+  );
+  const candidates = probedCandidates.filter((c) => c !== null);
 
   return {
     system: mountFromProbe("/", systemProbe),

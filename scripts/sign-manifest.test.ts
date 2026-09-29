@@ -174,6 +174,28 @@ test("an earlier signature is replaced, and non-object JSON is refused", async (
   }
 });
 
+test("the CLI stops at the first refusal and leaves later manifests untouched", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "tp-sign-manifest-" });
+  try {
+    const first = join(dir, "first.json");
+    const second = join(dir, "second.json");
+    const text = asReleaseJobWrites(uiManifest());
+    await Deno.writeTextFile(first, text);
+    await Deno.writeTextFile(second, text);
+    const lines: string[] = [];
+
+    assertEquals(
+      await main([first, second], () => undefined, (l) => lines.push(l)),
+      1,
+    );
+    assertEquals(await Deno.readTextFile(first), text);
+    assertEquals(await Deno.readTextFile(second), text);
+    assertEquals(lines.length, 1, "the run stops at the first refusal");
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
 test("the CLI signs files in place and exits non-zero when it refuses", async () => {
   const dir = await Deno.makeTempDir({ prefix: "tp-sign-manifest-" });
   try {

@@ -4,6 +4,7 @@
 
 import { dirname, join } from "@std/path";
 import { parse, stringify } from "yaml";
+import { forEachSequential } from "../util/sequential.ts";
 import type { DecryptSecretsFn } from "./materialize-tls.ts";
 import type {
   EnvironmentDeploySecretPlanEntry,
@@ -106,7 +107,8 @@ export async function writeSecretFiles(
   } catch (err) {
     if (!(err instanceof Deno.errors.NotFound)) throw err;
   }
-  for (const file of files) {
+  // Ordered writes: an unsafe path stops every later file from being written.
+  await forEachSequential(files, async (file) => {
     if (
       file.relativePath.includes("/") ||
       file.relativePath.includes("\\") ||
@@ -119,7 +121,7 @@ export async function writeSecretFiles(
       file.plaintext,
       SECRET_FILE_MODE,
     );
-  }
+  });
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -162,14 +164,18 @@ async function decryptEnvelopes(
   envelopes: readonly string[],
 ): Promise<(string | null)[]> {
   const out: (string | null)[] = [];
+  const chunks: string[][] = [];
   for (let i = 0; i < envelopes.length; i += DECRYPT_BATCH_SIZE) {
-    const chunk = envelopes.slice(i, i + DECRYPT_BATCH_SIZE);
+    chunks.push(envelopes.slice(i, i + DECRYPT_BATCH_SIZE));
+  }
+  // Batches go to the daemon one at a time (that is what the batch size is for).
+  await forEachSequential(chunks, async (chunk) => {
     const plaintexts = await decryptSecrets(chunk);
     if (plaintexts.length !== chunk.length) {
       throw new Error("secrets/decrypt returned unexpected length");
     }
     out.push(...plaintexts);
-  }
+  });
   return out;
 }
 

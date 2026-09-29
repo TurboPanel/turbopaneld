@@ -15,6 +15,7 @@
  */
 import type { EventCollector, EventDetectContext } from "./types.ts";
 import { makeEvent } from "./types.ts";
+import { forEachSequential } from "../../../util/sequential.ts";
 import type { MetricEvent } from "../../../contracts/metrics-contract.ts";
 
 export const DEFAULT_SMART_INTERVAL_MS = 10 * 60_000;
@@ -109,9 +110,11 @@ export class SmartEventCollector implements EventCollector {
       device.deviceType === "physical"
     );
 
-    for (const disk of physicalDisks) {
-      await this.#probeDisk(disk.deviceId, disk.kernelName, ctx, events);
-    }
+    // One smartctl run at a time — never a burst of processes.
+    await forEachSequential(
+      physicalDisks,
+      (disk) => this.#probeDisk(disk.deviceId, disk.kernelName, ctx, events),
+    );
 
     return events;
   }

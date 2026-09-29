@@ -1,6 +1,7 @@
 import { join } from "@std/path";
 import { hostSudoArgs } from "../permissions/host-sudo.ts";
 import { logWarn } from "../util/logger.ts";
+import { forEachSequential } from "../util/sequential.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 import {
   allAccessGroups,
@@ -360,6 +361,115 @@ async function ensurePrincipalGroup(
   }
 }
 
+/** `useradd` for an account that does not exist yet. */
+async function createPrincipalUser(
+  principal: PrincipalEnsureSpec,
+  home: string,
+  shell: string,
+  groupName: string,
+  runFn: RunFn,
+): Promise<void> {
+  const args = ["-n", "useradd"];
+  if (principal.uid !== undefined) {
+    args.push("-u", String(principal.uid));
+  } else {
+    // `-K` overrides login.defs for this command only.
+    args.push(
+      "-K",
+      `UID_MIN=${PRINCIPAL_ID_MIN}`,
+      "-K",
+      `UID_MAX=${PRINCIPAL_ID_MAX}`,
+    );
+  }
+  args.push(
+    "-g",
+    groupName,
+    "-d",
+    home,
+    "-M",
+    "-s",
+    shell,
+    principal.username,
+  );
+  const userAdd = await runFn("sudo", hostSudoArgs(args));
+  if (!userAdd.success) {
+    throw new Error(userAdd.stderr || "Failed to create principal user");
+  }
+}
+
+/** Explicit uid/gid overrides must still match the existing account. */
+function assertAdoptedIdsMatch(
+  principal: PrincipalEnsureSpec,
+  current: { uid: number; gid: number },
+): void {
+  const uidMismatch = principal.uid !== undefined &&
+    current.uid !== principal.uid;
+  const gidMismatch = principal.gid !== undefined &&
+    current.gid !== principal.gid;
+  if (uidMismatch || gidMismatch) {
+    throw new Error(
+      `Principal username ${principal.username} already exists with uid=${current.uid} gid=${current.gid}; expected uid=${principal.uid} gid=${principal.gid}`,
+    );
+  }
+}
+
+/**
+ * Without an explicit uid the account must sit at or above the floor.
+ * Adopted from a host provisioned before the current floor
+ * (PRINCIPAL_ID_MIN was raised from 10001 to 15001 on 2026-09-25).
+ * tp-host hard-floors `tp_is_principal` at PRINCIPAL_ID_MIN, so silently
+ * adopting this account would only defer the failure to the first host
+ * command that touches its home tree.
+ */
+function assertAdoptedUidAboveFloor(
+  principal: PrincipalEnsureSpec,
+  current: { uid: number },
+): void {
+  if (principal.uid === undefined && current.uid < PRINCIPAL_ID_MIN) {
+    throw new Error(
+      `Principal user ${principal.username} has uid=${current.uid}, below the current PRINCIPAL_ID_MIN=${PRINCIPAL_ID_MIN} — needs UID/GID migration (usermod -u <new uid in [${PRINCIPAL_ID_MIN}, ${PRINCIPAL_ID_MAX}]> ${principal.username}, then chown -R the principal's home tree) before this host can be used again`,
+    );
+  }
+}
+
+/** Adopt only when the passwd home matches — never `usermod -m` / `-d`. */
+function assertAdoptedHomeMatches(
+  principal: PrincipalEnsureSpec,
+  current: { home: string },
+  home: string,
+): void {
+  if (current.home !== home) {
+    throw new Error(
+      `refusing to adopt existing account \`${principal.username}\` — home \`${current.home}\` does not match \`${home}\``,
+    );
+  }
+}
+
+/** `usermod -s`, only when the adopted account's shell differs. */
+async function reconcilePrincipalShell(
+  principal: PrincipalEnsureSpec,
+  currentShell: string,
+  shell: string,
+  runFn: RunFn,
+): Promise<void> {
+  if (currentShell === shell) return;
+  const usermodShell = await runFn(
+    "sudo",
+    hostSudoArgs([
+      "-n",
+      "usermod",
+      "-s",
+      shell,
+      principal.username,
+    ]),
+  );
+  if (!usermodShell.success) {
+    throw new Error(
+      usermodShell.stderr || "Failed to update principal shell",
+    );
+  }
+}
+
 async function ensurePrincipalUser(
   principal: PrincipalEnsureSpec,
   home: string,
@@ -369,83 +479,19 @@ async function ensurePrincipalUser(
 ): Promise<void> {
   const userCheck = await runFn("getent", ["passwd", principal.username]);
   if (!userCheck.success) {
-    const args = ["-n", "useradd"];
-    if (principal.uid !== undefined) {
-      args.push("-u", String(principal.uid));
-    } else {
-      // `-K` overrides login.defs for this command only.
-      args.push(
-        "-K",
-        `UID_MIN=${PRINCIPAL_ID_MIN}`,
-        "-K",
-        `UID_MAX=${PRINCIPAL_ID_MAX}`,
-      );
-    }
-    args.push(
-      "-g",
-      groupName,
-      "-d",
-      home,
-      "-M",
-      "-s",
-      shell,
-      principal.username,
-    );
-    const userAdd = await runFn("sudo", hostSudoArgs(args));
-    if (!userAdd.success) {
-      throw new Error(userAdd.stderr || "Failed to create principal user");
-    }
+    await createPrincipalUser(principal, home, shell, groupName, runFn);
     return;
   }
-
-  // Adopt only when the passwd home matches — never `usermod -m` / `-d`.
-  // Explicit uid/gid overrides must still match the existing account.
   const current = parsePasswdHomeShell(userCheck.stdout);
   if (!current) {
     throw new Error(
       `Failed to parse passwd entry for principal user ${principal.username}`,
     );
   }
-  if (
-    (principal.uid !== undefined && current.uid !== principal.uid) ||
-    (principal.gid !== undefined && current.gid !== principal.gid)
-  ) {
-    throw new Error(
-      `Principal username ${principal.username} already exists with uid=${current.uid} gid=${current.gid}; expected uid=${principal.uid} gid=${principal.gid}`,
-    );
-  }
-  if (principal.uid === undefined && current.uid < PRINCIPAL_ID_MIN) {
-    // Adopted from a host provisioned before the current floor
-    // (PRINCIPAL_ID_MIN was raised from 10001 to 15001 on 2026-09-25).
-    // tp-host hard-floors `tp_is_principal` at PRINCIPAL_ID_MIN, so silently
-    // adopting this account would only defer the failure to the first host
-    // command that touches its home tree.
-    throw new Error(
-      `Principal user ${principal.username} has uid=${current.uid}, below the current PRINCIPAL_ID_MIN=${PRINCIPAL_ID_MIN} — needs UID/GID migration (usermod -u <new uid in [${PRINCIPAL_ID_MIN}, ${PRINCIPAL_ID_MAX}]> ${principal.username}, then chown -R the principal's home tree) before this host can be used again`,
-    );
-  }
-  if (current.home !== home) {
-    throw new Error(
-      `refusing to adopt existing account \`${principal.username}\` — home \`${current.home}\` does not match \`${home}\``,
-    );
-  }
-  if (current.shell !== shell) {
-    const usermodShell = await runFn(
-      "sudo",
-      hostSudoArgs([
-        "-n",
-        "usermod",
-        "-s",
-        shell,
-        principal.username,
-      ]),
-    );
-    if (!usermodShell.success) {
-      throw new Error(
-        usermodShell.stderr || "Failed to update principal shell",
-      );
-    }
-  }
+  assertAdoptedIdsMatch(principal, current);
+  assertAdoptedUidAboveFloor(principal, current);
+  assertAdoptedHomeMatches(principal, current, home);
+  await reconcilePrincipalShell(principal, current.shell, shell, runFn);
 }
 
 /**
@@ -573,50 +619,54 @@ export async function ensureSystemPrincipals(
   for (const principal of principals) {
     assertPrincipalIdOverrides(principal);
   }
-  for (const principal of principals) {
-    assertSafePrincipalUsername(principal.username);
-    const groupName = principalUnixGroupName(principal.username);
-    const home = assertSafeAbsolutePath(
-      principal.home ?? join(layout.principalHomeRoot, principal.username),
-      "home",
-    );
-    const shell = assertSafeAbsolutePath(
-      principal.shell ?? DEFAULT_PRINCIPAL_SHELL,
-      "shell",
-    );
-    if (!ALLOWED_PRINCIPAL_SHELLS.includes(shell)) {
-      throw new TypeError(`Principal shell is not allowed: ${shell}`);
-    }
+  await forEachSequential(
+    principals,
+    (principal) => ensureOnePrincipal(layout, principal, runFn),
+  );
+}
 
-    // 0750 plus other:x, not 0751. A world bit trips ansible:S2612; the ACL
-    // is traverse without list. A principal with a shell can otherwise
-    // `ls /srv/users` and enumerate every other tenant. Homes are 0750 so
-    // contents were never exposed — the account names were. `install -d -m`
-    // resets the other class, so the ACL is applied after, not instead of.
-    await ensureDir(layout.principalHomeRoot, "0750", "root:root", runFn);
-    await ensurePrincipalHomeRootTraverse(layout.principalHomeRoot, runFn);
-    await ensurePrincipalGroup(principal, groupName, runFn);
-    await ensurePrincipalUser(principal, home, shell, groupName, runFn);
-    await ensurePrincipalHomeTree(
-      home,
-      principal.username,
-      groupName,
-      runFn,
-    );
-    // Runs here, before any unit is installed or pool staged: systemd resolves
-    // supplementary groups at `execve`, so a unit started before its principal
-    // joined the runtime group dies `203/EXEC`.
-    await ensurePrincipalManagedGroups(
-      principal.username,
-      resolveManagedGroups(principal),
-      runFn,
-    );
-    await ensurePrincipalPassword(
-      principal.username,
-      principal.passwordHash,
-      runFn,
-    );
+async function ensureOnePrincipal(
+  layout: LayoutPaths,
+  principal: PrincipalEnsureSpec,
+  runFn: RunFn,
+): Promise<void> {
+  assertSafePrincipalUsername(principal.username);
+  const groupName = principalUnixGroupName(principal.username);
+  const home = assertSafeAbsolutePath(
+    principal.home ?? join(layout.principalHomeRoot, principal.username),
+    "home",
+  );
+  const shell = assertSafeAbsolutePath(
+    principal.shell ?? DEFAULT_PRINCIPAL_SHELL,
+    "shell",
+  );
+  if (!ALLOWED_PRINCIPAL_SHELLS.includes(shell)) {
+    throw new TypeError(`Principal shell is not allowed: ${shell}`);
   }
+
+  // 0750 plus other:x, not 0751. A world bit trips ansible:S2612; the ACL
+  // is traverse without list. A principal with a shell can otherwise
+  // `ls /srv/users` and enumerate every other tenant. Homes are 0750 so
+  // contents were never exposed — the account names were. `install -d -m`
+  // resets the other class, so the ACL is applied after, not instead of.
+  await ensureDir(layout.principalHomeRoot, "0750", "root:root", runFn);
+  await ensurePrincipalHomeRootTraverse(layout.principalHomeRoot, runFn);
+  await ensurePrincipalGroup(principal, groupName, runFn);
+  await ensurePrincipalUser(principal, home, shell, groupName, runFn);
+  await ensurePrincipalHomeTree(home, principal.username, groupName, runFn);
+  // Runs here, before any unit is installed or pool staged: systemd resolves
+  // supplementary groups at `execve`, so a unit started before its principal
+  // joined the runtime group dies `203/EXEC`.
+  await ensurePrincipalManagedGroups(
+    principal.username,
+    resolveManagedGroups(principal),
+    runFn,
+  );
+  await ensurePrincipalPassword(
+    principal.username,
+    principal.passwordHash,
+    runFn,
+  );
 }
 
 /**
@@ -749,8 +799,8 @@ export async function ensurePrincipalManagedGroups(
   const sorted = (values: Iterable<string>) =>
     [...values].sort((a, b) => a.localeCompare(b));
 
-  for (const group of sorted(desiredGroups)) {
-    if (current.has(group)) continue;
+  await forEachSequential(sorted(desiredGroups), async (group) => {
+    if (current.has(group)) return;
     try {
       await ensureSupplementaryGroupMembership(username, group, runFn);
     } catch (err) {
@@ -761,13 +811,13 @@ export async function ensurePrincipalManagedGroups(
         }`,
       );
     }
-  }
+  });
 
-  for (const group of sorted(current)) {
+  await forEachSequential(sorted(current), async (group) => {
     // Never touch a group outside the registry, even if it looks like ours.
-    if (!registryGroups.has(group) || desiredGroups.has(group)) continue;
+    if (!registryGroups.has(group) || desiredGroups.has(group)) return;
     await removeSupplementaryGroupMembership(username, group, runFn);
-  }
+  });
 }
 
 /**

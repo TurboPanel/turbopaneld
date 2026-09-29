@@ -26,6 +26,7 @@
 import { basename, join } from "@std/path";
 import { hostSudoArgs } from "../../permissions/host-sudo.ts";
 import type { RunFn } from "../ensure-principal.ts";
+import { forEachSequential } from "../../util/sequential.ts";
 import {
   createSymlink,
   ScopedWriteError,
@@ -254,15 +255,16 @@ export function expectedPathsProbe(
   runFn?: RunFn,
 ): ReleaseHealthProbe {
   return async (releaseDir: string) => {
-    for (const relative of relativePaths) {
+    // In order: the first missing path is the one reported.
+    await forEachSequential(relativePaths, async (relative) => {
       const target = relative.length === 0
         ? releaseDir
         : join(releaseDir, relative);
-      if (await releasePathExists(target, runFn)) continue;
+      if (await releasePathExists(target, runFn)) return;
       throw new Error(
         `release health probe failed: missing ${relative || "release root"}`,
       );
-    }
+    });
   };
 }
 

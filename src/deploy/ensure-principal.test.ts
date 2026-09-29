@@ -1436,6 +1436,106 @@ test("userSupplementaryGroups returns empty when id fails", async () => {
   assertEquals([...groups], []);
 });
 
+test("ensureSystemPrincipals finishes one principal before starting the next, one host call at a time", async () => {
+  const { run: inner, calls } = captureRun({});
+  let inFlight = 0;
+  let maxInFlight = 0;
+  const run: RunFn = async (command, args, stdin) => {
+    inFlight++;
+    maxInFlight = Math.max(maxInFlight, inFlight);
+    await new Promise((resolve) => setTimeout(resolve, 1));
+    const result = await inner(command, args, stdin);
+    inFlight--;
+    return result;
+  };
+  await ensureSystemPrincipals(stubLayout(), [
+    { ...baseSpec, username: "alice", home: "/srv/users/alice" },
+    { ...baseSpec, username: "bob", home: "/srv/users/bob" },
+  ], run);
+  assertEquals(maxInFlight, 1);
+  const creations = calls
+    .filter((c) => c.args.includes("groupadd") || c.args.includes("useradd"))
+    .map((c) =>
+      `${c.args.includes("groupadd") ? "group" : "user"} ${c.args.at(-1)}`
+    );
+  assertEquals(creations, [
+    "group alice-grp",
+    "user alice",
+    "group bob-grp",
+    "user bob",
+  ]);
+});
+
+test("ensureSystemPrincipals stops at the first principal that fails and never starts the next", async () => {
+  const { run: inner, calls } = captureRun({});
+  const run: RunFn = (command, args, stdin) => {
+    if (args.includes("useradd")) {
+      return Promise.resolve({ success: false, stdout: "", stderr: "denied" });
+    }
+    return inner(command, args, stdin);
+  };
+  await assertRejects(
+    () =>
+      ensureSystemPrincipals(stubLayout(), [
+        { ...baseSpec, username: "alice", home: "/srv/users/alice" },
+        { ...baseSpec, username: "bob", home: "/srv/users/bob" },
+      ], run),
+    Error,
+  );
+  assertEquals(calls.some((c) => c.args.includes("bob-grp")), false);
+  assertEquals(calls.some((c) => c.args.includes("bob")), false);
+});
+
+test("ensurePrincipalManagedGroups adds in sorted order and keeps going after a failed add", async () => {
+  const calls: string[][] = [];
+  const run: RunFn = (command, args) => {
+    if (command === "id") {
+      return Promise.resolve({
+        success: true,
+        stdout: "appuser-grp",
+        stderr: "",
+      });
+    }
+    calls.push(args);
+    return Promise.resolve(
+      args.includes("tpnode24")
+        ? { success: false, stdout: "", stderr: "no such group" }
+        : { success: true, stdout: "", stderr: "" },
+    );
+  };
+  await ensurePrincipalManagedGroups(
+    "appuser",
+    new Set(["tpphp84", "tpnode24", "tpnode22"]),
+    run,
+  );
+  assertEquals(calls.map((a) => a.at(-2)), ["tpnode22", "tpnode24", "tpphp84"]);
+});
+
+test("ensurePrincipalManagedGroups revokes in sorted order and stops at the first failed revoke", async () => {
+  const revoked: string[] = [];
+  const run: RunFn = (command, args) => {
+    if (command === "id") {
+      return Promise.resolve({
+        success: true,
+        stdout: "appuser-grp tpphp84 tpnode22 tpnode24",
+        stderr: "",
+      });
+    }
+    revoked.push(args.at(-1) ?? "");
+    return Promise.resolve(
+      args.at(-1) === "tpnode24"
+        ? { success: false, stdout: "", stderr: "gpasswd denied" }
+        : { success: true, stdout: "", stderr: "" },
+    );
+  };
+  await assertRejects(
+    () => ensurePrincipalManagedGroups("appuser", new Set(), run),
+    Error,
+    "gpasswd denied",
+  );
+  assertEquals(revoked, ["tpnode22", "tpnode24"]);
+});
+
 test("ensurePrincipalManagedGroups is loud when a revoke fails", async () => {
   const run: RunFn = (command, args) => {
     if (command === "id") {
@@ -1627,4 +1727,108 @@ test("ensureDirectoryWithOwner default runner pipes stdin and reports output", a
   } finally {
     Deno.Command = original;
   }
+});
+
+// Adopted-account rules run in a fixed order (ids, floor, home, shell) and each
+// refusal leaves the host untouched. One row per way the rules can overlap.
+const ADOPTED_USER_CASES: Array<{
+  label: string;
+  passwd: string;
+  spec: Partial<PrincipalEnsureSpec>;
+  group: string;
+  error: string;
+}> = [
+  {
+    label: "uid override mismatch wins over a foreign home",
+    passwd: "appuser:x:15002:15001::/srv/users/other:/usr/sbin/nologin",
+    spec: { uid: 15001 },
+    group: "appuser-grp:x:15001:",
+    error:
+      "Principal username appuser already exists with uid=15002 gid=15001; expected uid=15001 gid=undefined",
+  },
+  {
+    label: "gid override mismatch alone",
+    passwd: "appuser:x:15001:15009::/srv/users/appuser:/usr/sbin/nologin",
+    spec: { gid: 15001 },
+    group: "appuser-grp:x:15001:",
+    error:
+      "Principal username appuser already exists with uid=15001 gid=15009; expected uid=undefined gid=15001",
+  },
+  {
+    label: "both overrides mismatched",
+    passwd: "appuser:x:15002:15003::/srv/users/appuser:/usr/sbin/nologin",
+    spec: { uid: 15001, gid: 15001 },
+    group: "appuser-grp:x:15001:",
+    error:
+      "already exists with uid=15002 gid=15003; expected uid=15001 gid=15001",
+  },
+  {
+    label: "uid below the floor wins over a foreign home",
+    passwd: "appuser:x:10001:15001::/srv/users/other:/usr/sbin/nologin",
+    spec: {},
+    group: "appuser-grp:x:15001:",
+    error:
+      "Principal user appuser has uid=10001, below the current PRINCIPAL_ID_MIN=15001",
+  },
+  {
+    label: "foreign home is refused even when the shell differs",
+    passwd: "appuser:x:15001:15001::/srv/users/other:/bin/bash",
+    spec: {},
+    group: "appuser-grp:x:15001:",
+    error:
+      "refusing to adopt existing account `appuser` — home `/srv/users/other` does not match `/srv/users/appuser`",
+  },
+];
+
+for (const c of ADOPTED_USER_CASES) {
+  test(`ensureSystemPrincipals adopted user: ${c.label}`, async () => {
+    const { run, calls } = captureRun({
+      getentGroup: { success: true, stdout: c.group, stderr: "" },
+      getentPasswd: { success: true, stdout: c.passwd, stderr: "" },
+    });
+    await assertRejects(
+      () =>
+        ensureSystemPrincipals(stubLayout(), [{
+          ...baseSpec,
+          ...c.spec,
+          home: defaultHome,
+        }], run),
+      Error,
+      c.error,
+    );
+    assertEquals(
+      calls.some((call) =>
+        call.command === "sudo" &&
+        (call.args.includes("useradd") || call.args.includes("usermod"))
+      ),
+      false,
+    );
+  });
+}
+
+test("ensureSystemPrincipals adopts an account below the floor when its uid is an explicit override", async () => {
+  // With an explicit uid the floor rule does not apply; ensureSystemPrincipals
+  // separately refuses overrides below the floor, so use one at the floor.
+  const { run, calls } = captureRun({
+    getentGroup: { success: true, stdout: "appuser-grp:x:15001:", stderr: "" },
+    getentPasswd: {
+      success: true,
+      stdout: `appuser:x:15001:15001::${defaultHome}:/bin/bash`,
+      stderr: "",
+    },
+  });
+  await ensureSystemPrincipals(stubLayout(), [{
+    ...baseSpec,
+    uid: 15001,
+    gid: 15001,
+    home: defaultHome,
+    shell: "/bin/bash",
+  }], run);
+  assertEquals(
+    calls.some((call) =>
+      call.command === "sudo" &&
+      (call.args.includes("useradd") || call.args.includes("usermod"))
+    ),
+    false,
+  );
 });

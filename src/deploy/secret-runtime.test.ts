@@ -536,3 +536,34 @@ test({
     }
   },
 });
+
+test("writeSecretFiles writes in order and an unsafe path stops the later files", async () => {
+  const tmp = await Deno.makeTempDir({ prefix: "tp-secret-order-" });
+  try {
+    const layout = { runDir: tmp };
+    await assertRejects(
+      () =>
+        writeSecretFiles(layout, "proj", "env", [
+          { relativePath: "first", plaintext: "one" },
+          { relativePath: "../escape", plaintext: "two" },
+          { relativePath: "third", plaintext: "three" },
+        ]),
+      Error,
+      "unsafe secret relativePath",
+    );
+    assertEquals(
+      await plannedSecretsMissing(layout, "proj", "env", [
+        { relativePath: "first" },
+      ]),
+      false,
+    );
+    assertEquals(
+      await plannedSecretsMissing(layout, "proj", "env", [
+        { relativePath: "third" },
+      ]),
+      true,
+    );
+  } finally {
+    await Deno.remove(tmp, { recursive: true });
+  }
+});

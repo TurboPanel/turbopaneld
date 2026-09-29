@@ -9,6 +9,10 @@ on:
     secrets:
       SONAR_TOKEN:
         required: false
+      RELEASE_APP_ID:
+        required: false
+      RELEASE_APP_PRIVATE_KEY:
+        required: false
   pull_request:
     branches:
       - trunk
@@ -74,7 +78,7 @@ jobs:
         run: deno task check:vocabulary
 
       - name: Shellcheck the uninstall script and the root helpers
-        run: shellcheck -s sh --severity=warning scripts/uninstall.sh orchestration/scripts/tp-host orchestration/scripts/tp-update-guard
+        run: shellcheck -s sh --severity=warning scripts/purge.sh orchestration/scripts/tp-host orchestration/scripts/tp-update-guard
 
       # ClickHouse/Tabix metrics infrastructure is retired (DuckDB + Parquet /
       # Analytics Engine replaced it). Sibling repo trees are scanned too when
@@ -252,6 +256,21 @@ jobs:
           TURBOPANEL_REQUIRE_SIBLING: "1"
         run: deno task check:contract-drift
 
+  # A new minor (x.y.0) ships turbopanel + ui rcs before the daemon releases it
+  # (TurboPanel/dev gh-minor-gate.yml). Only ever red on a minor Release PR
+  # into live; a patch or any other PR passes at once.
+  minor-gate:
+    uses: TurboPanel/dev/.github/workflows/gh-minor-gate.yml@5464e72c40aec3528fb10e6fc660583ad963b3cb # dev#35
+    with:
+      role: daemon
+      version-file: deno.json
+      siblings: |
+        turbopanel
+        ui
+    secrets:
+      RELEASE_APP_ID: ${{ secrets.RELEASE_APP_ID }}
+      RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+
   # The one context the trunk ruleset will require: green only when every
   # PR-time job above succeeded. `if: always()` so a failed or cancelled need
   # still produces a (red) result instead of leaving the check pending, which
@@ -259,7 +278,7 @@ jobs:
   # pull_request, so a `skipped` result is a failure here too.
   ci-ok:
     name: ci-ok
-    needs: [verify, contract-drift]
+    needs: [verify, contract-drift, minor-gate]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5

@@ -383,6 +383,55 @@ test("removeFirewall takes every jump, flushes and deletes both chains in both f
   });
 });
 
+test("removeFirewall runs the host commands strictly one at a time, in a fixed order", async () => {
+  await withTempLayout(async (layout) => {
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const seen: string[] = [];
+    const run: FirewallRunFn = async (cmd, args) => {
+      inFlight++;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      seen.push(`${cmd} ${args.join(" ")}`);
+      await new Promise((resolve) => setTimeout(resolve, 1));
+      inFlight--;
+      return args[0] === "-D"
+        ? fail(
+          "iptables: Bad rule (does a matching rule exist in that chain?).",
+        )
+        : ok();
+    };
+    await removeFirewall({ run, layout });
+    assertEquals(maxInFlight, 1);
+    const perFamily = (bin: string) => [
+      `${bin} -D INPUT -j TP-INPUT`,
+      `${bin} -D DOCKER-USER -j TP-FWD`,
+      `${bin} -F TP-INPUT`,
+      `${bin} -X TP-INPUT`,
+      `${bin} -F TP-FWD`,
+      `${bin} -X TP-FWD`,
+    ];
+    assertEquals(seen, [...perFamily("iptables"), ...perFamily("ip6tables")]);
+  });
+});
+
+test("removeFirewall stops at the first host command that throws and touches nothing after it", async () => {
+  await withTempLayout(async (layout) => {
+    const seen: string[] = [];
+    const run: FirewallRunFn = (cmd, args) => {
+      seen.push(`${cmd} ${args.join(" ")}`);
+      return seen.length === 4
+        ? Promise.reject(new Error("host went away"))
+        : Promise.resolve(ok());
+    };
+    await assertRejects(
+      () => removeFirewall({ run, layout }),
+      Error,
+      "host went away",
+    );
+    assertEquals(seen.length, 4);
+  });
+});
+
 test("snapshotFirewallChains keeps only the TP- lines of iptables-save", async () => {
   const host = fakeHost({
     "iptables-save -t filter": ok([

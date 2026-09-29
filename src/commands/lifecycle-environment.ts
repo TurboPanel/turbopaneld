@@ -45,6 +45,7 @@ import {
 } from "../deploy/ingress.ts";
 import { applyNativeAppLifecycle } from "../deploy/native/apply-native-apps.ts";
 import { logInfo, sanitizeForLog } from "../util/logger.ts";
+import { forEachSequential } from "../util/sequential.ts";
 import { resolveLayout } from "../paths/layout.ts";
 import {
   type EnvironmentDeployContainer,
@@ -104,9 +105,9 @@ async function applyIngressLifecycle(
     layout,
     environmentId,
   );
-  for (const serviceId of serviceIds) {
+  await forEachSequential(serviceIds, async (serviceId) => {
     const composePath = serviceIngressComposePath(layout, serviceId);
-    if (!(await composeFileExists(composePath))) continue;
+    if (!(await composeFileExists(composePath))) return;
     const project = serviceIngressProject(serviceId);
     const ingressResult = await run([
       "compose",
@@ -124,7 +125,7 @@ async function applyIngressLifecycle(
         }`,
       );
     }
-  }
+  });
 }
 
 /**

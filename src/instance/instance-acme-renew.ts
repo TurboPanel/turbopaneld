@@ -37,6 +37,7 @@ import {
 } from "../deploy/instance-acme-issuer.ts";
 import { type LayoutPaths, resolveLayout } from "../paths/layout.ts";
 import { errorText, logInfo, logWarn, sanitizeForLog } from "../util/logger.ts";
+import { forEachSequential } from "../util/sequential.ts";
 import {
   type InstanceAcmeIssuanceEventMessage,
   readInstanceLetsEncryptHostnames,
@@ -215,21 +216,25 @@ export class InstanceAcmeRenewalScheduler {
     });
   }
 
+  /**
+   * One pass, a sleep, then the next pass. Each pass starts the next without
+   * awaiting it, so the promise chain does not grow for the life of the daemon.
+   */
   async #loop(generation: number): Promise<void> {
-    while (this.#alive(generation)) {
-      try {
-        await this.check();
-      } catch (err) {
-        logWarn(
-          "instance",
-          "instance ACME renewal check failed:",
-          sanitizeForLog(err),
-        );
-      }
-      if (!this.#alive(generation)) return;
-      this.#noteChecked();
-      await this.#sleep(this.#waitMs());
+    if (!this.#alive(generation)) return;
+    try {
+      await this.check();
+    } catch (err) {
+      logWarn(
+        "instance",
+        "instance ACME renewal check failed:",
+        sanitizeForLog(err),
+      );
     }
+    if (!this.#alive(generation)) return;
+    this.#noteChecked();
+    await this.#sleep(this.#waitMs());
+    void this.#loop(generation);
   }
 
   #alive(generation: number): boolean {
@@ -381,9 +386,9 @@ export class InstanceAcmeRenewalScheduler {
     const at = new Date(now).toISOString();
     let changed = false;
     const hosts = [...current].sort((a, b) => a.localeCompare(b));
-    for (const host of hosts) {
+    await forEachSequential(hosts, async (host) => {
       const notAfter = await this.#unreportedCurrentNotAfter(host, now);
-      if (!notAfter) continue;
+      if (!notAfter) return;
       this.#emit({
         type: "instance-acme-issuance-event",
         hostname: host,
@@ -396,7 +401,7 @@ export class InstanceAcmeRenewalScheduler {
         "instance",
         `instance-acme-issuance-event ok hostname=${host}`,
       );
-    }
+    });
     if (changed) await this.#save();
   }
 
@@ -414,12 +419,12 @@ export class InstanceAcmeRenewalScheduler {
 
   async #reportInstalled(hosts: readonly string[]): Promise<void> {
     const at = new Date(this.#nowMs()).toISOString();
-    for (const host of hosts) {
+    await forEachSequential(hosts, async (host) => {
       const notAfter = await this.#installedNotAfter(host);
       if (!notAfter) {
         this.#backoff(host);
         this.#emitFailure(host, "installed certificate is missing", at);
-        continue;
+        return;
       }
       this.#state.hosts.delete(host);
       this.#emit({
@@ -433,7 +438,7 @@ export class InstanceAcmeRenewalScheduler {
         "instance",
         `instance-acme-issuance-event ok hostname=${host}`,
       );
-    }
+    });
     await this.#save();
   }
 
@@ -499,10 +504,10 @@ export class InstanceAcmeRenewalScheduler {
     const now = this.#nowMs();
     const due: string[] = [];
     const hosts = [...current].sort((a, b) => a.localeCompare(b));
-    for (const host of hosts) {
-      if (this.#inBackoff(host, now)) continue;
+    await forEachSequential(hosts, async (host) => {
+      if (this.#inBackoff(host, now)) return;
       if (await this.#hostDue(host, now)) due.push(host);
-    }
+    });
     return due;
   }
 

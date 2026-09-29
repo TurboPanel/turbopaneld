@@ -24,6 +24,7 @@ import {
 import { removeSites } from "../deploy/site.ts";
 import { removeNativeAppServices } from "../deploy/native/apply-native-apps.ts";
 import { logInfo, logWarn } from "../util/logger.ts";
+import { forEachSequential } from "../util/sequential.ts";
 import {
   fabricNetworkDir,
   type LayoutPaths,
@@ -81,7 +82,7 @@ async function removeEnvironmentSiteReleases(
   siteReleases: ReadonlyArray<{ serviceId: string; username: string }>,
   runFn: RunFn,
 ): Promise<void> {
-  for (const entry of siteReleases) {
+  await forEachSequential(siteReleases, async (entry) => {
     const path = siteRoot(
       principalHomePath(layout, entry.username),
       entry.serviceId,
@@ -105,7 +106,7 @@ async function removeEnvironmentSiteReleases(
         }`,
       );
     }
-  }
+  });
 }
 
 /**

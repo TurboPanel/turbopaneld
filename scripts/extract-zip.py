@@ -36,9 +36,10 @@ def main() -> int:
     if member.startswith("/") or ".." in member.split("/"):
         print(f"path {member!r} is outside the allowed directory", file=sys.stderr)
         return 1
-    with zipfile.ZipFile(archive) as zf:
-        with zf.open(member) as src, open(dest, "wb") as dst:
-            shutil.copyfileobj(src, dst)
+    with zipfile.ZipFile(archive) as zf, zf.open(member) as src, open(
+        dest, "wb"
+    ) as dst:
+        shutil.copyfileobj(src, dst)
     return 0
 
 

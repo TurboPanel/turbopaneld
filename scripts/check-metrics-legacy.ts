@@ -407,69 +407,71 @@ export async function resolveScanRoots(
   daemonRoot = repoRoot,
   siblingsRoot = workspaceRoot,
 ): Promise<ScanRoot[]> {
-  const roots: ScanRoot[] = [];
+  // Candidate roots in scan order. Existence probes are independent, so they
+  // run together; the surviving roots keep this order.
+  const candidates: Array<{ root: ScanRoot; exists: () => Promise<boolean> }> =
+    [];
+  const addDir = (scope: string, dir: string) =>
+    candidates.push({
+      root: { scope, dir },
+      exists: () => directoryExists(dir),
+    });
+  const addFile = (scope: string, file: string) =>
+    candidates.push({
+      root: { scope, file },
+      exists: () => fileExists(file),
+    });
   for (const tree of ["src", "scripts", "orchestration"]) {
-    const dir = `${daemonRoot}/${tree}`;
-    if (await directoryExists(dir)) {
-      roots.push({ scope: `turbopaneld/${tree}`, dir });
-    }
+    addDir(`turbopaneld/${tree}`, `${daemonRoot}/${tree}`);
   }
   for (const repo of ["turbopanel", "dev", "ui"]) {
-    const dir = `${siblingsRoot}/${repo}/src`;
-    if (await directoryExists(dir)) {
-      roots.push({ scope: `${repo}/src`, dir });
-    }
+    addDir(`${repo}/src`, `${siblingsRoot}/${repo}/src`);
   }
   // Contributor-tooling surfaces beyond `src/`: the dev repo's Vagrant guest
   // and its orchestration overlay are exactly where the retired ClickHouse
   // container / Tabix GUI provisioning used to live.
   for (const tree of ["scripts", "orchestration"]) {
-    const dir = `${siblingsRoot}/dev/${tree}`;
-    if (await directoryExists(dir)) {
-      roots.push({ scope: `dev/${tree}`, dir });
-    }
+    addDir(`dev/${tree}`, `${siblingsRoot}/dev/${tree}`);
   }
-  const devVagrantfile = `${siblingsRoot}/dev/Vagrantfile`;
-  if (await fileExists(devVagrantfile)) {
-    roots.push({ scope: "dev/Vagrantfile", file: devVagrantfile });
-  }
+  addFile("dev/Vagrantfile", `${siblingsRoot}/dev/Vagrantfile`);
   // Public docs + console design-system docs (page overrides such as
   // server-metrics.md) and the instance Wrangler config — retired dataset
   // names must not return here as historical context.
-  const websiteDocs = `${siblingsRoot}/website/docs`;
-  if (await directoryExists(websiteDocs)) {
-    roots.push({ scope: "website/docs", dir: websiteDocs });
-  }
-  const uiDesignSystem = `${siblingsRoot}/ui/design-system`;
-  if (await directoryExists(uiDesignSystem)) {
-    roots.push({ scope: "ui/design-system", dir: uiDesignSystem });
-  }
-  const wrangler = `${siblingsRoot}/turbopanel/wrangler.jsonc`;
-  if (await fileExists(wrangler)) {
-    roots.push({ scope: "turbopanel/wrangler.jsonc", file: wrangler });
-  }
-  return roots;
+  addDir("website/docs", `${siblingsRoot}/website/docs`);
+  addDir("ui/design-system", `${siblingsRoot}/ui/design-system`);
+  addFile(
+    "turbopanel/wrangler.jsonc",
+    `${siblingsRoot}/turbopanel/wrangler.jsonc`,
+  );
+  const present = await Promise.all(candidates.map((c) => c.exists()));
+  return candidates.filter((_, i) => present[i]).map((c) => c.root);
 }
 
 export async function runMetricsLegacyCheck(
   roots?: ScanRoot[],
 ): Promise<string[]> {
   const scanRoots = roots ?? await resolveScanRoots();
-  const failures: string[] = [];
-  for (const root of scanRoots) {
+  // Each root (and each file within it) is scanned independently; results are
+  // joined in root/walk order so the failure list stays deterministic.
+  const perRoot = await Promise.all(scanRoots.map(async (root) => {
     if ("file" in root) {
       const text = await Deno.readTextFile(root.file);
-      failures.push(...collectMetricsLegacyFailures(root.scope, text));
-      continue;
+      return collectMetricsLegacyFailures(root.scope, text);
     }
     const { scope, dir } = root;
-    for await (const file of walkFiles(dir, dir)) {
-      if (!SCAN_EXTENSIONS.test(file)) continue;
-      const scoped = `${scope}/${relative(dir, file)}`;
+    const files = (await Array.fromAsync(walkFiles(dir, dir))).filter((file) =>
+      SCAN_EXTENSIONS.test(file)
+    );
+    const perFile = await Promise.all(files.map(async (file) => {
       const text = await Deno.readTextFile(file);
-      failures.push(...collectMetricsLegacyFailures(scoped, text));
-    }
-  }
+      return collectMetricsLegacyFailures(
+        `${scope}/${relative(dir, file)}`,
+        text,
+      );
+    }));
+    return perFile.flat();
+  }));
+  const failures = perRoot.flat();
   return failures;
 }
 

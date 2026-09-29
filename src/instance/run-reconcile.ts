@@ -1,6 +1,7 @@
 import { encodeBase64Url } from "@std/encoding/base64url";
 import { hostSudoArgs } from "../permissions/host-sudo.ts";
 import { dirname } from "@std/path";
+import { forEachSequential } from "../util/sequential.ts";
 import { statfs } from "node:fs/promises";
 import { ORCHESTRATE_HELPER } from "../orchestration/assets.ts";
 import { playbooksNeedRootHelper } from "../orchestration/privileged.ts";
@@ -211,34 +212,41 @@ export async function assertUpdateDiskPreflight(options: {
         { path: stateDir, min: MIN_UPDATE_FREE_STATE_BYTES, label: "state" },
         { path: tmpDir, min: MIN_UPDATE_FREE_TMP_BYTES, label: "tmp" },
       ];
+  await forEachSequential(
+    checks,
+    (check) => assertDiskHeadroom(check, probe),
+  );
+}
 
-  for (const { path, min, label } of checks) {
-    let probePath: string;
-    try {
-      probePath = await resolveDiskProbePath(path);
-    } catch (err) {
-      if (err instanceof UpdatePreflightError) throw err;
-      throw new UpdatePreflightError(
-        "preflight_disk",
-        `unable to probe ${label} (${path})`,
-      );
-    }
-    let free: number;
-    try {
-      free = await freeBytesAt(probePath, probe);
-    } catch (err) {
-      if (err instanceof UpdatePreflightError) throw err;
-      throw new UpdatePreflightError(
-        "preflight_disk",
-        `unable to measure free space on ${label} (${path})`,
-      );
-    }
-    if (free < min) {
-      throw new UpdatePreflightError(
-        "preflight_disk",
-        `insufficient free space on ${label} (${path}): need at least ${min} bytes`,
-      );
-    }
+async function assertDiskHeadroom(
+  { path, min, label }: { path: string; min: number; label: string },
+  probe: StatfsProbe,
+): Promise<void> {
+  let probePath: string;
+  try {
+    probePath = await resolveDiskProbePath(path);
+  } catch (err) {
+    if (err instanceof UpdatePreflightError) throw err;
+    throw new UpdatePreflightError(
+      "preflight_disk",
+      `unable to probe ${label} (${path})`,
+    );
+  }
+  let free: number;
+  try {
+    free = await freeBytesAt(probePath, probe);
+  } catch (err) {
+    if (err instanceof UpdatePreflightError) throw err;
+    throw new UpdatePreflightError(
+      "preflight_disk",
+      `unable to measure free space on ${label} (${path})`,
+    );
+  }
+  if (free < min) {
+    throw new UpdatePreflightError(
+      "preflight_disk",
+      `insufficient free space on ${label} (${path}): need at least ${min} bytes`,
+    );
   }
 }
 
@@ -1284,6 +1292,59 @@ async function migrateControlPlaneOrRollback(
   }
 }
 
+/** Back up the control plane before the update; a failed backup aborts it. */
+async function runControlPlaneBackup(options: {
+  run: NonNullable<InstanceUpdateHooks["run"]>;
+  layout: { home: string; backupDir: string };
+  upgradeId: string;
+  previous: Awaited<ReturnType<typeof readInstanceHealth>>;
+}): Promise<void> {
+  const { run, layout, upgradeId, previous } = options;
+  const backupExtra: Record<string, string> = {
+    turbopanel_backup_dir: layout.backupDir,
+    turbopanel_install_root: layout.home,
+    turbopanel_upgrade_id: upgradeId,
+  };
+  if (previous?.version) {
+    backupExtra.turbopanel_instance_version = previous.version;
+  }
+  if (previous?.commit) {
+    backupExtra.turbopanel_instance_revision = previous.commit;
+  }
+  const backup = rootHelperPlaybookInvocation(
+    "instance-backup.yml",
+    backupExtra,
+  );
+  const backupRun = await run(backup.bin, backup.args);
+  if (backupRun.code !== 0) {
+    throw new UpdatePreflightError(
+      "preflight_backup",
+      backupRun.stderr.trim() || "control-plane backup failed",
+    );
+  }
+}
+
+/** Re-render the Caddyfile through instance-launch-only when it is stale. */
+async function refreshCaddyIfNeeded(
+  run: NonNullable<InstanceUpdateHooks["run"]>,
+  installRoot: string,
+  readCaddyfile: InstanceUpdateHooks["readCaddyfile"],
+): Promise<void> {
+  const caddyfile = readCaddyfile
+    ? await readCaddyfile()
+    : await defaultReadCaddyfile();
+  if (!caddyNeedsRefresh(caddyfile)) return;
+  const refresh = rootHelperPlaybookInvocation("instance-launch-only.yml", {
+    turbopanel_install_root: installRoot,
+  });
+  const refreshed = await run(refresh.bin, refresh.args);
+  if (refreshed.code !== 0) {
+    throw new Error(
+      refreshed.stderr.trim() || "instance-launch-only refresh failed",
+    );
+  }
+}
+
 /**
  * Reconcile an already-installed control plane on a managed host.
  *
@@ -1350,43 +1411,8 @@ export async function executeInstanceUpdateReconcile(options: {
   }
 
   const previous = await readHealth();
-  const backupExtra: Record<string, string> = {
-    turbopanel_backup_dir: layout.backupDir,
-    turbopanel_install_root: layout.home,
-    turbopanel_upgrade_id: upgradeId,
-  };
-  if (previous?.version) {
-    backupExtra.turbopanel_instance_version = previous.version;
-  }
-  if (previous?.commit) {
-    backupExtra.turbopanel_instance_revision = previous.commit;
-  }
-  const backup = rootHelperPlaybookInvocation(
-    "instance-backup.yml",
-    backupExtra,
-  );
-  const backupRun = await run(backup.bin, backup.args);
-  if (backupRun.code !== 0) {
-    throw new UpdatePreflightError(
-      "preflight_backup",
-      backupRun.stderr.trim() || "control-plane backup failed",
-    );
-  }
-
-  const caddyfile = hooks.readCaddyfile
-    ? await hooks.readCaddyfile()
-    : await defaultReadCaddyfile();
-  if (caddyNeedsRefresh(caddyfile)) {
-    const refresh = rootHelperPlaybookInvocation("instance-launch-only.yml", {
-      turbopanel_install_root: layout.home,
-    });
-    const refreshed = await run(refresh.bin, refresh.args);
-    if (refreshed.code !== 0) {
-      throw new Error(
-        refreshed.stderr.trim() || "instance-launch-only refresh failed",
-      );
-    }
-  }
+  await runControlPlaneBackup({ run, layout, upgradeId, previous });
+  await refreshCaddyIfNeeded(run, layout.home, hooks.readCaddyfile);
 
   const helper = rootHelperInstanceUpdateInvocation({
     channel: releaseChannel,

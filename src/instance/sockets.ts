@@ -1,4 +1,5 @@
 import { readEnv, resolveLayout } from "../paths/layout.ts";
+import { mapSequential } from "../util/sequential.ts";
 
 const layout = resolveLayout({
   TURBOPANEL_RUN_DIR: readEnv("TURBOPANEL_RUN_DIR"),
@@ -315,17 +316,17 @@ export async function createHttpClientFromCaPaths(
     .map((path) => path.trim())
     .filter((path) => path.length > 0);
   if (present.length === 0) return undefined;
-  const stamps: string[] = [];
-  const certs: string[] = [];
-  for (const path of present) {
-    stamps.push(await trustFileStamp(path));
+  const loaded = await mapSequential(present, async (path) => {
+    const pathStamp = await trustFileStamp(path);
     const pem = await Deno.readTextFile(path);
     const blocks = splitPemBundle(pem);
     if (blocks.length === 0) {
       throw new Error(`trust PEM at ${path} contains no certificates`);
     }
-    certs.push(...blocks);
-  }
+    return { pathStamp, blocks };
+  });
+  const stamps = loaded.map((entry) => entry.pathStamp);
+  const certs = loaded.flatMap((entry) => entry.blocks);
   const stamp = stamps.join("\n");
   const cached = platformCaHttpClientCache;
   if (cached?.stamp === stamp) return cached.client;

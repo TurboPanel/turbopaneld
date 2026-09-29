@@ -195,6 +195,22 @@ test("pinnedChannelManifestUrl pins canary and versioned releases and leaves tru
   assertEquals(pinnedChannelManifestUrl("daemon", "canary", ""), null);
   assertEquals(pinnedChannelManifestUrl("daemon", "canary", "v0.1.0"), null);
   assertEquals(pinnedChannelManifestUrl("daemon", "release", "../x"), null);
+  // The leading digit is ASCII-only: `\d` never matches other Unicode digits.
+  assertEquals(
+    pinnedChannelManifestUrl("daemon", "release", "\u0663.0.1"),
+    null,
+  );
+  assertEquals(
+    pinnedChannelManifestUrl("daemon", "release", "\uff11.0.1"),
+    null,
+  );
+  assertEquals(pinnedChannelManifestUrl("daemon", "release", "x1.0.1"), null);
+  for (const digit of "0123456789") {
+    assertEquals(
+      pinnedChannelManifestUrl("daemon", "release", `${digit}.0.1`) !== null,
+      true,
+    );
+  }
 });
 
 async function shellPinnedManifestUrl(
@@ -506,4 +522,25 @@ test("selectUpdateManifestUrl: no pin falls back to the message, then nothing", 
   );
   assertEquals(selectUpdateManifestUrl("daemon", {}, "  "), undefined);
   assertEquals(selectUpdateManifestUrl("ui", {}, undefined), undefined);
+});
+
+test("isExactBuildManifestUrl: only ASCII 0-9 starts a version (non-ASCII digits are refused)", () => {
+  const base = "https://github.com/TurboPanel/turbopaneld/releases/download";
+  const digits = ["0", "9", "١", "٣", "１", "９"];
+  const accepted = digits.filter((d) =>
+    isExactBuildManifestUrl("daemon", `${base}/v${d}.1.2/manifest.json`)
+  );
+  assertEquals(accepted, ["0", "9"]);
+  const acceptedCanary = digits.filter((d) =>
+    isExactBuildManifestUrl(
+      "daemon",
+      `${base}/canary/manifest-${d}.1.2-canary.4.json`,
+    )
+  );
+  assertEquals(acceptedCanary, ["0", "9"]);
+});
+
+test("isExactBuildManifestUrl: a URL with no path segments is not a build", () => {
+  assertEquals(isExactBuildManifestUrl("daemon", "https://github.com"), false);
+  assertEquals(isExactBuildManifestUrl("daemon", "https://"), false);
 });

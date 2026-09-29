@@ -397,14 +397,15 @@ export class NvmlGpuAdapter implements GpuAdapter {
     this.#openBinding = deps?.openBinding ?? openDefaultNvmlBinding;
   }
 
-  // deno-lint-ignore require-await
-  async probe(): Promise<void> {
-    if (this.#binding !== undefined) return;
+  /** Open and initialise NVML once. `safeCall` swallows every throw, so this resolves. */
+  probe(): Promise<void> {
+    if (this.#binding !== undefined) return Promise.resolve();
     this.#binding = safeCall(() => {
       const binding = this.#openBinding();
       if (!binding) return null;
       return binding.init() ? binding : null;
     });
+    return Promise.resolve();
   }
 
   async read(
