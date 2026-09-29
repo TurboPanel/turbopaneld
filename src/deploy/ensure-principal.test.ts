@@ -1628,3 +1628,107 @@ test("ensureDirectoryWithOwner default runner pipes stdin and reports output", a
     Deno.Command = original;
   }
 });
+
+// Adopted-account rules run in a fixed order (ids, floor, home, shell) and each
+// refusal leaves the host untouched. One row per way the rules can overlap.
+const ADOPTED_USER_CASES: Array<{
+  label: string;
+  passwd: string;
+  spec: Partial<PrincipalEnsureSpec>;
+  group: string;
+  error: string;
+}> = [
+  {
+    label: "uid override mismatch wins over a foreign home",
+    passwd: "appuser:x:15002:15001::/srv/users/other:/usr/sbin/nologin",
+    spec: { uid: 15001 },
+    group: "appuser-grp:x:15001:",
+    error:
+      "Principal username appuser already exists with uid=15002 gid=15001; expected uid=15001 gid=undefined",
+  },
+  {
+    label: "gid override mismatch alone",
+    passwd: "appuser:x:15001:15009::/srv/users/appuser:/usr/sbin/nologin",
+    spec: { gid: 15001 },
+    group: "appuser-grp:x:15001:",
+    error:
+      "Principal username appuser already exists with uid=15001 gid=15009; expected uid=undefined gid=15001",
+  },
+  {
+    label: "both overrides mismatched",
+    passwd: "appuser:x:15002:15003::/srv/users/appuser:/usr/sbin/nologin",
+    spec: { uid: 15001, gid: 15001 },
+    group: "appuser-grp:x:15001:",
+    error:
+      "already exists with uid=15002 gid=15003; expected uid=15001 gid=15001",
+  },
+  {
+    label: "uid below the floor wins over a foreign home",
+    passwd: "appuser:x:10001:15001::/srv/users/other:/usr/sbin/nologin",
+    spec: {},
+    group: "appuser-grp:x:15001:",
+    error:
+      "Principal user appuser has uid=10001, below the current PRINCIPAL_ID_MIN=15001",
+  },
+  {
+    label: "foreign home is refused even when the shell differs",
+    passwd: "appuser:x:15001:15001::/srv/users/other:/bin/bash",
+    spec: {},
+    group: "appuser-grp:x:15001:",
+    error:
+      "refusing to adopt existing account `appuser` — home `/srv/users/other` does not match `/srv/users/appuser`",
+  },
+];
+
+for (const c of ADOPTED_USER_CASES) {
+  test(`ensureSystemPrincipals adopted user: ${c.label}`, async () => {
+    const { run, calls } = captureRun({
+      getentGroup: { success: true, stdout: c.group, stderr: "" },
+      getentPasswd: { success: true, stdout: c.passwd, stderr: "" },
+    });
+    await assertRejects(
+      () =>
+        ensureSystemPrincipals(stubLayout(), [{
+          ...baseSpec,
+          ...c.spec,
+          home: defaultHome,
+        }], run),
+      Error,
+      c.error,
+    );
+    assertEquals(
+      calls.some((call) =>
+        call.command === "sudo" &&
+        (call.args.includes("useradd") || call.args.includes("usermod"))
+      ),
+      false,
+    );
+  });
+}
+
+test("ensureSystemPrincipals adopts an account below the floor when its uid is an explicit override", async () => {
+  // With an explicit uid the floor rule does not apply; ensureSystemPrincipals
+  // separately refuses overrides below the floor, so use one at the floor.
+  const { run, calls } = captureRun({
+    getentGroup: { success: true, stdout: "appuser-grp:x:15001:", stderr: "" },
+    getentPasswd: {
+      success: true,
+      stdout: `appuser:x:15001:15001::${defaultHome}:/bin/bash`,
+      stderr: "",
+    },
+  });
+  await ensureSystemPrincipals(stubLayout(), [{
+    ...baseSpec,
+    uid: 15001,
+    gid: 15001,
+    home: defaultHome,
+    shell: "/bin/bash",
+  }], run);
+  assertEquals(
+    calls.some((call) =>
+      call.command === "sudo" &&
+      (call.args.includes("useradd") || call.args.includes("usermod"))
+    ),
+    false,
+  );
+});
