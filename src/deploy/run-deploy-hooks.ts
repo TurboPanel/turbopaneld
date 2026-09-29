@@ -19,6 +19,7 @@ import {
 } from "./docker-cli.ts";
 import type { CommandSummaryRedactor } from "../logs/contracts.ts";
 import { redactCommandSummary } from "../logs/redactor.ts";
+import { forEachSequential } from "../util/sequential.ts";
 import { composeFileArgs } from "./compose-files.ts";
 
 const HOOK_TIMEOUT_MS = 300_000;
@@ -197,7 +198,8 @@ export async function runDeployServiceHooks(
   const runStreamed = createStreamedRunner(params.runDocker);
   const onOutput = params.onOutput;
   const redactSummary = params.redactSummary ?? defaultSummaryRedactor;
-  for (const hook of hooks) {
+  // Builds and hooks run one service at a time; a failure stops the rest.
+  await forEachSequential(hooks, async (hook) => {
     if (hook.buildDisableCache) {
       const args = [
         ...composeFileArgs(params.projectName, params.composePaths),
@@ -244,7 +246,7 @@ export async function runDeployServiceHooks(
         },
       );
     }
-  }
+  });
 }
 
 export async function runPostDeployHooks(
@@ -260,7 +262,7 @@ export async function runPostDeployHooks(
   const run = params.runDocker ?? defaultRunDocker;
   const runStreamed = createStreamedRunner(params.runDocker);
   const redactSummary = params.redactSummary ?? defaultSummaryRedactor;
-  for (const hook of hooks) {
+  await forEachSequential(hooks, async (hook) => {
     if (hook.postDeployCommand) {
       // After `up` the service is running: exec inside that container.
       await runConfinedHook(
@@ -273,7 +275,7 @@ export async function runPostDeployHooks(
         { run, runStreamed, onOutput: params.onOutput, redactSummary },
       );
     }
-  }
+  });
 }
 
 export { HOOK_TIMEOUT_MS };

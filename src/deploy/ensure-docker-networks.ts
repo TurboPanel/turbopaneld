@@ -14,6 +14,7 @@ import {
   cidrLiteralContains,
 } from "../contracts/commands-contracts.ts";
 import { logInfo, logWarn } from "../util/logger.ts";
+import { forEachSequential } from "../util/sequential.ts";
 import {
   type DockerCliResult,
   runDocker as defaultRunDocker,
@@ -176,7 +177,8 @@ export async function ensureExternalDockerNetworks(
 ): Promise<void> {
   if (networks.length === 0) return;
 
-  for (const entry of networks) {
+  // Docker network create/inspect calls stay ordered and stop at the first failure.
+  await forEachSequential(networks, async (entry) => {
     const spec: ExternalDockerNetworkSpec = typeof entry === "string"
       ? { name: entry }
       : entry;
@@ -185,7 +187,7 @@ export async function ensureExternalDockerNetworks(
     const inspect = await run(["network", "inspect", spec.name]);
     if (inspect.success) {
       warnOnSubnetDrift(spec, inspect);
-      continue;
+      return;
     }
 
     logInfo("deploy", `creating external docker network ${spec.name}`);
@@ -195,5 +197,5 @@ export async function ensureExternalDockerNetworks(
         create.stderr || `Failed to create docker network ${spec.name}`,
       );
     }
-  }
+  });
 }

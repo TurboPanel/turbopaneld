@@ -1,6 +1,7 @@
 import { join } from "@std/path";
 import { hostSudoArgs } from "../permissions/host-sudo.ts";
 import { errorText, logInfo, logWarn } from "../util/logger.ts";
+import { forEachSequential } from "../util/sequential.ts";
 import {
   type EnvironmentDeployContainer,
   type EnvironmentDeployHosting,
@@ -1712,13 +1713,15 @@ export async function collectTcpUdpIngressEntries(
   const dir = tcpUdpStateDir(layout);
   const dirEntries = await listDirEntriesOrEmpty(dir);
   const excludeFile = excludeServiceId ? `${excludeServiceId}.json` : undefined;
-  const merged: TcpUdpIngressEntry[] = [];
-  for (const entry of dirEntries) {
-    if (!isCommittedTcpUdpClaimFile(entry)) continue;
-    if (entry.name === excludeFile) continue;
-    merged.push(...await readTcpUdpIngressEntriesFile(dir, entry.name));
-  }
-  return merged;
+  // Independent read-only file reads; `Promise.all` keeps directory order.
+  const perFile = await Promise.all(
+    dirEntries
+      .filter((entry) =>
+        isCommittedTcpUdpClaimFile(entry) && entry.name !== excludeFile
+      )
+      .map((entry) => readTcpUdpIngressEntriesFile(dir, entry.name)),
+  );
+  return perFile.flat();
 }
 
 function addClaimFileServiceIds(
@@ -1841,11 +1844,15 @@ export async function removeEnvironmentTcpUdpServiceIngress(
   );
   const serviceIds = new Set<string>([...fromIndex, ...payloadServiceIds]);
   const removed: string[] = [];
-  for (const serviceId of [...serviceIds].sort((a, b) => a.localeCompare(b))) {
-    await removeServiceIngress(layout, serviceId, deps);
-    await removeTcpUdpIngressEntries(layout, serviceId);
-    removed.push(serviceId);
-  }
+  // Docker teardown + claim-file removal stay ordered per service.
+  await forEachSequential(
+    [...serviceIds].sort((a, b) => a.localeCompare(b)),
+    async (serviceId) => {
+      await removeServiceIngress(layout, serviceId, deps);
+      await removeTcpUdpIngressEntries(layout, serviceId);
+      removed.push(serviceId);
+    },
+  );
   await writeEnvironmentTcpUdpServiceIds(layout, environmentId, []);
   return removed;
 }
@@ -1878,14 +1885,17 @@ export async function cleanupStaleTcpUdpServiceIngress(
   }
 
   const removed: string[] = [];
-  for (const serviceId of [...candidates].sort((a, b) => a.localeCompare(b))) {
-    if (activeIngressServiceIds.has(serviceId)) continue;
-    if (persisted.includes(serviceId)) {
-      await removeServiceIngress(layout, serviceId, deps);
-      await removeTcpUdpIngressEntries(layout, serviceId);
-    }
-    removed.push(serviceId);
-  }
+  await forEachSequential(
+    [...candidates].sort((a, b) => a.localeCompare(b)),
+    async (serviceId) => {
+      if (activeIngressServiceIds.has(serviceId)) return;
+      if (persisted.includes(serviceId)) {
+        await removeServiceIngress(layout, serviceId, deps);
+        await removeTcpUdpIngressEntries(layout, serviceId);
+      }
+      removed.push(serviceId);
+    },
+  );
 
   await writeEnvironmentTcpUdpServiceIds(
     layout,

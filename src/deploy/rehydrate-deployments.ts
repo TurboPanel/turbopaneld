@@ -6,6 +6,7 @@
  */
 
 import { logInfo, logWarn, sanitizeForLog } from "../util/logger.ts";
+import { forEachSequential } from "../util/sequential.ts";
 import {
   composeFileArgs,
   type DeploymentManifestSecret,
@@ -215,22 +216,18 @@ async function listDeploymentsNeedingSecretFiles(
   layout: LayoutPaths,
   locals: readonly LocalDeploymentManifest[],
 ): Promise<LocalDeploymentManifest[]> {
-  const needingFiles: LocalDeploymentManifest[] = [];
-  for (const local of locals) {
+  // Independent read-only stats per deployment; order of `locals` is kept.
+  const missing = await Promise.all(locals.map((local) => {
     const plan = manifestSecretPlan(local);
-    if (plan.length === 0) continue;
-    if (
-      await plannedSecretsMissing(
-        layout,
-        local.manifest.projectId,
-        local.manifest.environmentId,
-        plan,
-      )
-    ) {
-      needingFiles.push(local);
-    }
-  }
-  return needingFiles;
+    if (plan.length === 0) return false;
+    return plannedSecretsMissing(
+      layout,
+      local.manifest.projectId,
+      local.manifest.environmentId,
+      plan,
+    );
+  }));
+  return locals.filter((_, i) => missing[i]);
 }
 
 function rehydrateRefsFor(
@@ -381,8 +378,9 @@ export async function rehydrateLocalDeployments(params: {
     rehydrateRefsFor(targets),
     params.rehydrate,
   );
-  for (const local of targets) {
-    await rehydrateOneLocalDeployment(
+  // Secret writes and `compose up` per deployment stay ordered.
+  await forEachSequential(targets, (local) =>
+    rehydrateOneLocalDeployment(
       params,
       local,
       byKey.get(
@@ -391,6 +389,5 @@ export async function rehydrateLocalDeployments(params: {
           local.manifest.environmentId,
         ),
       ),
-    );
-  }
+    ));
 }
