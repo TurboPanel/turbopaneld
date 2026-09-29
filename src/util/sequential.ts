@@ -49,8 +49,39 @@ export function firstSequential<T, R>(
   step: (item: T, index: number) => Promise<R | undefined> | R | undefined,
 ): Promise<R | undefined> {
   return [...items].reduce<Promise<R | undefined>>(
-    (chain, item, index) =>
-      chain.then((found) => found ?? step(item, index)),
+    (chain, item, index) => chain.then((found) => found ?? step(item, index)),
     Promise.resolve(undefined),
   );
+}
+
+/**
+ * Run `step` again and again, one run at a time, for as long as it resolves
+ * `true` — a poll / retry / reconnect loop (`while (…) { await … }`) without
+ * the `await` in a loop. It stops when `step` resolves `false` (the `break` /
+ * `return`) or rejects (the `throw`, which rejects the result).
+ *
+ * Unlike a recursive `async` function, each run is chained with a plain
+ * callback rather than by returning the next run's promise, so a loop that
+ * lives for the whole process (a reconnect loop) does not accumulate one
+ * pending promise per turn.
+ */
+export function repeatSequential(
+  step: () => Promise<boolean>,
+): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const next = (): void => {
+      let turn: Promise<boolean>;
+      try {
+        turn = step();
+      } catch (err) {
+        reject(err);
+        return;
+      }
+      turn.then((again) => {
+        if (again) next();
+        else resolve();
+      }, reject);
+    };
+    next();
+  });
 }

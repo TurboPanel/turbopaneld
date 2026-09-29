@@ -1100,7 +1100,7 @@ test("confinement: entries are resolved one at a time, in entry order", () =>
       order.findIndex((p) => p.endsWith(`/${name}`))
     );
     assertEquals(firstTouch.every((i) => i >= 0), true);
-    assertEquals([...firstTouch].sort((a, b) => a - b), firstTouch);
+    assertEquals(firstTouch.toSorted((a, b) => a - b), firstTouch);
   }));
 
 test("confinement: a missing deployment directory rejects with the raw error", () =>

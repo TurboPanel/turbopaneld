@@ -1,5 +1,6 @@
 import { restartDaemonService } from "./restart-daemon-service.ts";
 import { describeUnknown } from "../util/describe-unknown.ts";
+import { forEachSequential, repeatSequential } from "../util/sequential.ts";
 import {
   createInstanceHttpClient,
   describeInstance,
@@ -358,13 +359,13 @@ function parseMessage(raw: string): DaemonMessage | null {
 
 /** Removes only `server-key.json` + `server-key-id`; keeps persisted `server.id`. */
 export async function clearDaemonKeyState(stateDir: string): Promise<void> {
-  for (const file of [SERVER_KEY_FILE, KEY_ID_FILE]) {
+  await forEachSequential([SERVER_KEY_FILE, KEY_ID_FILE], async (file) => {
     try {
       await Deno.remove(`${stateDir}/${file}`);
     } catch {
       // Missing files are fine.
     }
-  }
+  });
 }
 
 /**
@@ -749,23 +750,31 @@ export class InstanceClient {
     if (this.#isColocatedSocketMode()) {
       const maxWaitMs = this.#hadStableSession ? INSTANCE_RESTART_WAIT_MS : 0;
       const started = now();
-      while (true) {
-        try {
-          const readiness = await this.fetchDaemonReadiness();
-          if (readiness.ready) return;
-        } catch {
-          // Instance unreachable during restart — keep polling when recovering.
-        }
+      await repeatSequential(async () => {
+        if (await this.#instanceReportsReady()) return false;
         if (maxWaitMs === 0 || now() - started >= maxWaitMs) {
           throw new Error("instance install incomplete");
         }
         await delay(
           fullJitterMs(this.#initialBackoffMs, INSTALL_READINESS_POLL_MS),
         );
-      }
+        return true;
+      });
+      return;
     }
 
     await this.fetchHealth();
+  }
+
+  /** Whether the instance reports ready; an unreachable instance counts as not ready. */
+  async #instanceReportsReady(): Promise<boolean> {
+    try {
+      const readiness = await this.fetchDaemonReadiness();
+      return readiness.ready;
+    } catch {
+      // Instance unreachable during restart — keep polling when recovering.
+      return false;
+    }
   }
 
   #resetBackoff(): void {
@@ -855,33 +864,35 @@ export class InstanceClient {
     this.#idlePresence?.touchActivity();
   }
 
-  async #runConnectLoop(): Promise<void> {
-    while (!this.#stopped) {
-      if (!(await this.#waitForParkedWake())) {
-        if (this.#stopped) break;
-        continue;
-      }
+  #runConnectLoop(): Promise<void> {
+    return repeatSequential(() => this.#connectLoopTurn());
+  }
 
-      try {
-        await this.#connectOnce();
-      } catch (err) {
-        await this.#handleConnectFailure(err);
-      }
+  /** One pass of the connect loop. Resolves `false` once the client is stopped. */
+  async #connectLoopTurn(): Promise<boolean> {
+    if (this.#stopped) return false;
+    if (!(await this.#waitForParkedWake())) return !this.#stopped;
 
-      if (this.#stopped) break;
-      if (this.#parked) continue;
-      const reconnectDelayMs = this.#nextReconnectDelayMs();
-      logDebug(
-        "instance",
-        "reconnect scheduled in",
-        reconnectDelayMs,
-        "ms (ceiling",
-        this.#backoffMs,
-        "ms) via",
-        sanitizeForLog(this.target),
-      );
-      await delay(reconnectDelayMs);
+    try {
+      await this.#connectOnce();
+    } catch (err) {
+      await this.#handleConnectFailure(err);
     }
+
+    if (this.#stopped) return false;
+    if (this.#parked) return true;
+    const reconnectDelayMs = this.#nextReconnectDelayMs();
+    logDebug(
+      "instance",
+      "reconnect scheduled in",
+      reconnectDelayMs,
+      "ms (ceiling",
+      this.#backoffMs,
+      "ms) via",
+      sanitizeForLog(this.target),
+    );
+    await delay(reconnectDelayMs);
+    return true;
   }
 
   /**
@@ -1217,47 +1228,55 @@ export class InstanceClient {
     const machineKey = await readMachineKey();
     const hostname = Deno.hostname();
 
-    for (let attempt = 0; attempt < 2; attempt++) {
-      const identity = await this.#loadOrEnrollIdentity(
-        stateDir,
-        machineKey,
-        hostname,
-      );
-      if (identity.keyFile === null || !identity.serverId || !identity.keyId) {
-        throw new Error(
-          "daemon identity incomplete after enrollment/auth bootstrap",
-        );
-      }
+    await this.#connectWithIdentity(stateDir, machineKey, hostname, 0);
+  }
 
-      this.#ensureAuthClients(
-        {
-          keyFile: identity.keyFile,
-          serverId: identity.serverId,
-          keyId: identity.keyId,
-        },
-        machineKey,
-        hostname,
+  /**
+   * Load (or enrol) the identity and open the websocket. A stale identity is
+   * cleared and re-enrolled once: attempt 0 may recover into attempt 1, whose
+   * failures always surface.
+   */
+  async #connectWithIdentity(
+    stateDir: string,
+    machineKey: string | undefined,
+    hostname: string,
+    attempt: number,
+  ): Promise<void> {
+    const identity = await this.#loadOrEnrollIdentity(
+      stateDir,
+      machineKey,
+      hostname,
+    );
+    if (identity.keyFile === null || !identity.serverId || !identity.keyId) {
+      throw new Error(
+        "daemon identity incomplete after enrollment/auth bootstrap",
       );
-
-      try {
-        const jwt = await this.#tokenManager!.getToken();
-        await this.#openDaemonWebSocket(jwt, identity.serverId);
-        return;
-      } catch (err) {
-        if (
-          attempt === 0 &&
-          classifyConnectFailure(err).kind === "stale-identity"
-        ) {
-          await this.#recoverFromStaleIdentity(stateDir);
-          continue;
-        }
-        throw err;
-      }
     }
 
-    throw new Error(
-      "daemon identity bootstrap failed after stale identity retry",
+    this.#ensureAuthClients(
+      {
+        keyFile: identity.keyFile,
+        serverId: identity.serverId,
+        keyId: identity.keyId,
+      },
+      machineKey,
+      hostname,
     );
+
+    try {
+      const jwt = await this.#tokenManager!.getToken();
+      await this.#openDaemonWebSocket(jwt, identity.serverId);
+    } catch (err) {
+      if (
+        attempt === 0 &&
+        classifyConnectFailure(err).kind === "stale-identity"
+      ) {
+        await this.#recoverFromStaleIdentity(stateDir);
+        await this.#connectWithIdentity(stateDir, machineKey, hostname, 1);
+        return;
+      }
+      throw err;
+    }
   }
 
   async #openDaemonWebSocket(jwt: string, serverId: string): Promise<void> {
@@ -3109,7 +3128,7 @@ async function waitForColocatedReadiness(
   client: InstanceClient,
   initialBackoffMs: number,
 ): Promise<void> {
-  while (true) {
+  await repeatSequential(async () => {
     try {
       const readiness = await client.fetchDaemonReadiness();
       if (readiness.ready) {
@@ -3118,7 +3137,7 @@ async function waitForColocatedReadiness(
           "instance ready for daemon registration via",
           sanitizeForLog(client.target),
         );
-        break;
+        return false;
       }
     } catch {
       // Instance not reachable yet — keep polling silently.
@@ -3126,7 +3145,8 @@ async function waitForColocatedReadiness(
     await delay(
       fullJitterMs(initialBackoffMs, INSTALL_READINESS_POLL_MS),
     );
-  }
+    return true;
+  });
 }
 
 function describeHealthCheckFailure(err: unknown): string {
@@ -3149,7 +3169,7 @@ async function waitForRemoteHealth(
   let failureCount = 0;
   let backoffMs = initialBackoffMs;
 
-  while (true) {
+  await repeatSequential(async () => {
     try {
       await client.fetchHealth();
       logInfo(
@@ -3157,7 +3177,7 @@ async function waitForRemoteHealth(
         "instance available via",
         sanitizeForLog(client.target),
       );
-      break;
+      return false;
     } catch (err) {
       failureCount += 1;
       const detail = describeHealthCheckFailure(err);
@@ -3183,8 +3203,9 @@ async function waitForRemoteHealth(
       }
       await delay(fullJitterMs(initialBackoffMs, backoffMs));
       backoffMs = nextBackoffMs(backoffMs, DEFAULT_MAX_BACKOFF_MS);
+      return true;
     }
-  }
+  });
 }
 
 export async function connectInstance(

@@ -524,7 +524,7 @@ test("selectUpdateManifestUrl: no pin falls back to the message, then nothing", 
   assertEquals(selectUpdateManifestUrl("ui", {}, undefined), undefined);
 });
 
-test("isExactBuildManifestUrl: only ASCII 0-9 starts a version (Arabic-Indic and fullwidth digits do not)", () => {
+test("isExactBuildManifestUrl: only ASCII 0-9 starts a version (non-ASCII digits are refused)", () => {
   const base = "https://github.com/TurboPanel/turbopaneld/releases/download";
   const digits = ["0", "9", "١", "٣", "１", "９"];
   const accepted = digits.filter((d) =>

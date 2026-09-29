@@ -813,10 +813,10 @@ export async function ensurePrincipalManagedGroups(
     }
   });
 
-  await forEachSequential(sorted(current), (group) => {
+  await forEachSequential(sorted(current), async (group) => {
     // Never touch a group outside the registry, even if it looks like ours.
     if (!registryGroups.has(group) || desiredGroups.has(group)) return;
-    return removeSupplementaryGroupMembership(username, group, runFn);
+    await removeSupplementaryGroupMembership(username, group, runFn);
   });
 }
 

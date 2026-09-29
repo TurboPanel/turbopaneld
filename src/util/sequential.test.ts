@@ -3,6 +3,7 @@ import {
   firstSequential,
   forEachSequential,
   mapSequential,
+  repeatSequential,
 } from "./sequential.ts";
 
 /**
@@ -88,4 +89,54 @@ test("firstSequential stops at the first rejection and starts nothing after it",
     "boom",
   );
   assertEquals(tried, [1, 2]);
+});
+
+test("repeatSequential runs one turn at a time until a turn resolves false", async () => {
+  const log: string[] = [];
+  let turns = 0;
+  await repeatSequential(async () => {
+    const turn = ++turns;
+    log.push(`start ${turn}`);
+    await tick(turn === 1 ? 10 : 1);
+    log.push(`end ${turn}`);
+    return turn < 3;
+  });
+  assertEquals(log, [
+    "start 1",
+    "end 1",
+    "start 2",
+    "end 2",
+    "start 3",
+    "end 3",
+  ]);
+});
+
+test("repeatSequential stops at the first rejection, including a synchronous throw", async () => {
+  let turns = 0;
+  await assertRejects(
+    () =>
+      repeatSequential(() => {
+        turns++;
+        return turns === 2
+          ? Promise.reject(new Error("boom"))
+          : Promise.resolve(true);
+      }),
+    Error,
+    "boom",
+  );
+  assertEquals(turns, 2);
+  await assertRejects(
+    () =>
+      repeatSequential(() => {
+        throw new Error("sync boom");
+      }),
+    Error,
+    "sync boom",
+  );
+});
+
+test("repeatSequential survives many turns without recursion depth or ordering trouble", async () => {
+  let turns = 0;
+  await repeatSequential(() => Promise.resolve(++turns < 20_000));
+  assertEquals(turns, 20_000);
 });
