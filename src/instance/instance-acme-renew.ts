@@ -215,21 +215,25 @@ export class InstanceAcmeRenewalScheduler {
     });
   }
 
+  /**
+   * One pass, a sleep, then the next pass. Each pass starts the next without
+   * awaiting it, so the promise chain does not grow for the life of the daemon.
+   */
   async #loop(generation: number): Promise<void> {
-    while (this.#alive(generation)) {
-      try {
-        await this.check();
-      } catch (err) {
-        logWarn(
-          "instance",
-          "instance ACME renewal check failed:",
-          sanitizeForLog(err),
-        );
-      }
-      if (!this.#alive(generation)) return;
-      this.#noteChecked();
-      await this.#sleep(this.#waitMs());
+    if (!this.#alive(generation)) return;
+    try {
+      await this.check();
+    } catch (err) {
+      logWarn(
+        "instance",
+        "instance ACME renewal check failed:",
+        sanitizeForLog(err),
+      );
     }
+    if (!this.#alive(generation)) return;
+    this.#noteChecked();
+    await this.#sleep(this.#waitMs());
+    void this.#loop(generation);
   }
 
   #alive(generation: number): boolean {
@@ -381,8 +385,12 @@ export class InstanceAcmeRenewalScheduler {
     const at = new Date(now).toISOString();
     let changed = false;
     const hosts = [...current].sort((a, b) => a.localeCompare(b));
-    for (const host of hosts) {
-      const notAfter = await this.#unreportedCurrentNotAfter(host, now);
+    // The reads are independent; the events still go out in host order.
+    const notAfters = await Promise.all(
+      hosts.map((host) => this.#unreportedCurrentNotAfter(host, now)),
+    );
+    for (const [index, host] of hosts.entries()) {
+      const notAfter = notAfters[index];
       if (!notAfter) continue;
       this.#emit({
         type: "instance-acme-issuance-event",
@@ -414,8 +422,12 @@ export class InstanceAcmeRenewalScheduler {
 
   async #reportInstalled(hosts: readonly string[]): Promise<void> {
     const at = new Date(this.#nowMs()).toISOString();
-    for (const host of hosts) {
-      const notAfter = await this.#installedNotAfter(host);
+    // The reads are independent; state changes and events stay in host order.
+    const notAfters = await Promise.all(
+      hosts.map((host) => this.#installedNotAfter(host)),
+    );
+    for (const [index, host] of hosts.entries()) {
+      const notAfter = notAfters[index];
       if (!notAfter) {
         this.#backoff(host);
         this.#emitFailure(host, "installed certificate is missing", at);
@@ -497,13 +509,14 @@ export class InstanceAcmeRenewalScheduler {
     const current = new Set(listed.filter(isRenewableHost));
     if (this.#forgetAbsent(current)) await this.#save();
     const now = this.#nowMs();
-    const due: string[] = [];
-    const hosts = [...current].sort((a, b) => a.localeCompare(b));
-    for (const host of hosts) {
-      if (this.#inBackoff(host, now)) continue;
-      if (await this.#hostDue(host, now)) due.push(host);
-    }
-    return due;
+    const candidates = [...current]
+      .sort((a, b) => a.localeCompare(b))
+      .filter((host) => !this.#inBackoff(host, now));
+    // Reading each leaf is independent; `due` keeps the sorted host order.
+    const dueFlags = await Promise.all(
+      candidates.map((host) => this.#hostDue(host, now)),
+    );
+    return candidates.filter((_, index) => dueFlags[index]);
   }
 
   async #hostDue(host: string, nowMs: number): Promise<boolean> {

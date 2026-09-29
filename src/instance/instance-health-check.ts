@@ -121,15 +121,19 @@ export async function waitForInstanceHealth(options: {
     ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
   const deadline = now() + timeoutMs;
   let sawMismatch = false;
-  while (now() <= deadline) {
+  // One poll, then (unless accepted or out of time) a sleep and the next poll.
+  const poll = async (): Promise<boolean> => {
+    if (now() > deadline) return false;
     const active = await unitActive();
     const health = active ? await readHealth() : null;
-    if (health && healthAccepted(health, options)) return;
+    if (health && healthAccepted(health, options)) return true;
     if (health && health.commit !== options.target.commit) sawMismatch = true;
-    if (now() >= deadline) break;
+    if (now() >= deadline) return false;
     const remaining = deadline - now();
     await sleep(Math.min(intervalMs, Math.max(remaining, 0)));
-  }
+    return poll();
+  };
+  if (await poll()) return;
   const code = sawMismatch ? "health_mismatch" : "health_timeout";
   throw new InstanceHealthError(
     code,

@@ -1,4 +1,5 @@
 import { join } from "@std/path";
+import { forEachSequential } from "../util/sequential.ts";
 import {
   devOwnershipPlaybookExtraArgs,
   runLocalPlaybook,
@@ -189,14 +190,14 @@ export async function writeUploadedInstanceCerts(
 ): Promise<void> {
   const seen = new Set<string>();
   let wrote = false;
-  for (const entry of hostnames) {
-    if (entry.source !== "uploaded") continue;
+  await forEachSequential(hostnames, async (entry) => {
+    if (entry.source !== "uploaded") return;
     const id = entry.uploadedCertId;
-    if (!id || !entry.certPem || !entry.keyPem) continue;
+    if (!id || !entry.certPem || !entry.keyPem) return;
     if (!UPLOADED_CERT_ID.test(id)) {
       throw new Error(`refusing uploaded certificate id ${id}`);
     }
-    if (seen.has(id)) continue;
+    if (seen.has(id)) return;
     seen.add(id);
     if (!wrote) {
       await Deno.mkdir(certsDir, { recursive: true, mode: 0o750 });
@@ -216,7 +217,7 @@ export async function writeUploadedInstanceCerts(
         mode: 0o640,
       },
     );
-  }
+  });
 }
 
 /**

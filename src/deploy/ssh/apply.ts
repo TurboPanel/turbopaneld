@@ -21,6 +21,7 @@
 import { dirname } from "@std/path";
 import { hostSudoArgs } from "../../permissions/host-sudo.ts";
 import { logInfo, logWarn } from "../../util/logger.ts";
+import { forEachSequential } from "../../util/sequential.ts";
 import { accessGroup } from "../../runtime/registry.ts";
 import type { RunFn, RunResult } from "../ensure-principal.ts";
 import {
@@ -175,9 +176,10 @@ async function removeUnmanagedKeyFiles(
   );
   if (!listing.success) return [];
   const removed: string[] = [];
-  for (const name of listing.stdout.split("\n").map((line) => line.trim())) {
-    if (name.length === 0 || managed.has(name)) continue;
-    if (!isKeyFileUsername(name)) continue;
+  const names = listing.stdout.split("\n").map((line) => line.trim());
+  await forEachSequential(names, async (name) => {
+    if (name.length === 0 || managed.has(name)) return;
+    if (!isKeyFileUsername(name)) return;
     const result = await runFn(
       "sudo",
       hostSudoArgs([
@@ -196,7 +198,7 @@ async function removeUnmanagedKeyFiles(
       );
     }
     removed.push(name);
-  }
+  });
   return removed;
 }
 
@@ -269,7 +271,7 @@ async function reconcileKeyFiles(
   }
 
   const changed: string[] = [];
-  for (const principal of principals) {
+  await forEachSequential(principals, async (principal) => {
     const path = authorizedKeysPath(principal.username, dir);
     // Throws on a key that is not in canonical form — see
     // `authorizedKeysContent`. Failing the reconcile is deliberate: a silently
@@ -279,7 +281,7 @@ async function reconcileKeyFiles(
     if (await installRootFile(runFn, path, contents, "0644")) {
       changed.push(principal.username);
     }
-  }
+  });
 
   // Only when the caller holds the whole host. See `SshApplyPaths.prune`.
   const removed = prune
