@@ -997,7 +997,7 @@ a self-hosted control plane again.
 ## Installer script hosting
 
 **https://turbopanel.sh is a plain redirect, and nothing in this repo hosts it.**
-The domain answers with a 301 to the one copy of the installer on GitHub,
+The domain answers every path with a redirect to the one copy of the installer on GitHub,
 served from outside this repository (the owner's DNS/redirect; the Cloudflare
 Worker that used to do this was removed 2026-09-29):
 
@@ -1006,8 +1006,10 @@ Worker that used to do this was removed 2026-09-29):
 `live` is the branch a release promotion fast-forwards, so an installer change
 reaches new installs at release cadence, matching the `release` channel the
 script installs by default. **Keep `scripts/run.sh` at that path on `live`** —
-the redirect points straight at the file. `curl -fsSL turbopanel.sh | sh` works
-because `-L` follows the redirect, and every automatic-update consumer already
+the redirect points straight at the file. Any of 301/302/307/308 works (every
+consumer follows it); prefer 307 so a later change of target is not cached by
+browsers and proxies. `curl -fsSL turbopanel.sh | sh` works because `-L` follows
+the redirect (a bare `curl turbopanel.sh | sh` does not), and every automatic-update consumer already
 fetches with `-L`: `tp-orchestrate update` (`CDN_RUN_SCRIPT`), the daemon's
 `downloadRunScript` (`src/instance/run-reconcile.ts`), and run.sh's own
 re-exec. Threat model is unchanged: a party who could tamper with the domain
@@ -1051,7 +1053,7 @@ Large subsystems live in focused `AGENTS.md` files next to their code — Cursor
 | **Command execution logs** | `src/logs/` | Streamed command transcripts: redaction deny-set, `<stateDir>/spool/execution-logs/` spool, batched upload to `POST /api/daemon/v1/commands/:commandId/log`, orphan sweep. Control-plane side: `../turbopanel/src/features/execution-logs/AGENTS.md`; capture details in `src/deploy/AGENTS.md` (Streamed transcript capture). This is the **only** log class uploaded and retained. |
 | **Managed engines (daemon runtime)** | `src/managed/AGENTS.md` | `managed.apply` / `.lifecycle` / `.destroy`, `managed.ingress.reconcile` (shared ProxySQL — compose project = the `managed-ingress` `serviceId` — on the organization's managed network, a bare-UUID name carried as `managedNetwork` on the command), engine registry (Postgres first); separate from tenant deploy. On-demand tails ride the same correlated cell round trip as `managed-logs-request` / `managed-logs-result`: engine `compose logs`, and running-container `docker container logs`. Neither is stored or collected; presence does not carry `containerLogsEnabled`. |
 | **Installer presentation** | `src/orchestration/AGENTS.md` | Installer presenter + sanitizer / vocabulary map for `run.sh` install & converge |
-| **Installer script hosting** | this file → *Installer script hosting* | **turbopanel.sh** = a 301 (served outside this repo) to `scripts/run.sh` on `live`; dev overlay catalog notes |
+| **Installer script hosting** | this file → *Installer script hosting* | **turbopanel.sh** = a redirect (served outside this repo) to `scripts/run.sh` on `live`; dev overlay catalog notes |
 | **Host facts** | `src/host/AGENTS.md` | Host OS, time sync, docker, machine key, runtime inventory probes (hello + change-detected heartbeats) |
 | **Time sync (Ansible)** | `orchestration/AGENTS.md` | `time-sync` role + `time-sync-apply.yml` (NTP / timezone) |
 
