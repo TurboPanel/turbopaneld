@@ -18,6 +18,7 @@
 import { join } from "@std/path";
 import { hostSudoArgs } from "../../permissions/host-sudo.ts";
 import { logInfo, logWarn } from "../../util/logger.ts";
+import { forEachSequential } from "../../util/sequential.ts";
 import type { LayoutPaths } from "../../paths/layout.ts";
 import type { RunFn, RunResult } from "../ensure-principal.ts";
 import { SYSTEMD_UNIT_DIR } from "../native/unit.ts";
@@ -149,7 +150,7 @@ async function removeUnit(
       `cron timer disable failed unit=${unit}: ${disable.stderr}`,
     );
   }
-  for (const suffix of [".timer", ".service"]) {
+  await forEachSequential([".timer", ".service"], async (suffix) => {
     const rm = await runFn(
       "sudo",
       hostSudoArgs([
@@ -163,7 +164,7 @@ async function removeUnit(
     if (!rm.success) {
       logWarn("deploy", `cron unit removal failed unit=${unit}: ${rm.stderr}`);
     }
-  }
+  });
 }
 
 /**
@@ -185,39 +186,41 @@ export async function applyCronJobs(
   const desired = new Map<string, { changed: boolean }>();
   // Phase 1 — render and install every file. Nothing is reloaded or enabled
   // yet, so a failure here leaves the previous timers running unchanged.
-  for (const spec of specs) {
-    for (const job of spec.jobs) {
-      const identity = {
-        environmentId,
-        composeServiceName: spec.composeServiceName,
-        jobName: job.name,
-      };
-      const unit = cronUnitName(identity);
-      const opts_ = {
-        layout,
-        environmentId,
-        composeServiceName: spec.composeServiceName,
-        job,
-        username: spec.username,
-        workingDirectory: spec.workingDirectory,
-      };
-      const serviceChanged = await installUnit(
-        runFn,
-        cronServicePath(identity, unitDir),
-        cronServiceContent(opts_),
-      );
-      const timerChanged = await installUnit(
-        runFn,
-        cronTimerPath(identity, unitDir),
-        cronTimerContent(opts_),
-      );
-      desired.set(unit, { changed: serviceChanged || timerChanged });
-    }
-  }
+  await forEachSequential(
+    specs,
+    (spec) =>
+      forEachSequential(spec.jobs, async (job) => {
+        const identity = {
+          environmentId,
+          composeServiceName: spec.composeServiceName,
+          jobName: job.name,
+        };
+        const unit = cronUnitName(identity);
+        const opts_ = {
+          layout,
+          environmentId,
+          composeServiceName: spec.composeServiceName,
+          job,
+          username: spec.username,
+          workingDirectory: spec.workingDirectory,
+        };
+        const serviceChanged = await installUnit(
+          runFn,
+          cronServicePath(identity, unitDir),
+          cronServiceContent(opts_),
+        );
+        const timerChanged = await installUnit(
+          runFn,
+          cronTimerPath(identity, unitDir),
+          cronTimerContent(opts_),
+        );
+        desired.set(unit, { changed: serviceChanged || timerChanged });
+      }),
+  );
 
   const installed = await installedTimerNames(runFn, unitDir, environmentId);
   const stale = installed.filter((unit) => !desired.has(unit));
-  for (const unit of stale) await removeUnit(runFn, unitDir, unit);
+  await forEachSequential(stale, (unit) => removeUnit(runFn, unitDir, unit));
 
   const changed = [...desired]
     .filter(([, state]) => state.changed)
@@ -235,12 +238,12 @@ export async function applyCronJobs(
   // Phase 3 — enable only what moved. A schedule that did not change keeps its
   // next firing; re-enabling every timer on every deploy would reset them all,
   // and a five-minute job would then never actually fire on a busy project.
-  for (const unit of changed) {
+  await forEachSequential(changed, async (unit) => {
     const enable = await systemctl(runFn, ["enable", "--now", `${unit}.timer`]);
     if (!enable.success) {
       throw new Error(enable.stderr || `Failed to enable timer ${unit}`);
     }
-  }
+  });
 
   if (changed.length > 0 || stale.length > 0) {
     logInfo(
@@ -262,7 +265,10 @@ export async function removeCronJobs(
   const unitDir = opts.systemdUnitDir ?? SYSTEMD_UNIT_DIR;
   const installed = await installedTimerNames(runFn, unitDir, environmentId);
   if (installed.length === 0) return 0;
-  for (const unit of installed) await removeUnit(runFn, unitDir, unit);
+  await forEachSequential(
+    installed,
+    (unit) => removeUnit(runFn, unitDir, unit),
+  );
   const reload = await systemctl(runFn, ["daemon-reload"]);
   if (!reload.success) {
     logWarn(
