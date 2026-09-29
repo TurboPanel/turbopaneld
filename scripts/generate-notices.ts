@@ -1,7 +1,8 @@
 #!/usr/bin/env -S deno run --allow-read --allow-write --allow-run --allow-net --allow-env
 /**
- * Generate or check THIRD_PARTY_NOTICES.md from deno.lock, the turbopanel-sh
- * pnpm lock, and orchestration pins.
+ * Generate or check THIRD_PARTY_NOTICES.md from deno.lock, the optional
+ * workers/turbopanel-sh pnpm lock (that Worker was removed 2026-09-29, so the
+ * lookup finds nothing today), and orchestration pins.
  *
  * Usage:
  *   deno task notices:generate

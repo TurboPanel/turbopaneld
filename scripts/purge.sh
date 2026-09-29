@@ -3,7 +3,7 @@
 # else. There is no "keep my data" mode and no remove-only mode; this is a purge.
 #
 # This script lives only in the repository. Release packages do not ship it,
-# and workers/turbopanel-sh does not serve it.
+# and turbopanel.sh does not serve it.
 #
 # Canonical command (must already be root — there is no sudo re-exec):
 #   curl -fsSL https://raw.githubusercontent.com/TurboPanel/turbopaneld/trunk/scripts/purge.sh | sudo sh
