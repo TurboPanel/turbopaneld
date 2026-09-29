@@ -23,6 +23,7 @@ import type {
 import { ensureDocker as defaultEnsureDocker } from "../deploy/ensure-docker.ts";
 import { spawnDockerStreaming } from "../deploy/docker-cli.ts";
 import { sanitizeForLog } from "../util/logger.ts";
+import { forEachSequential } from "../util/sequential.ts";
 import { resolveLayout } from "../paths/layout.ts";
 import {
   collectManagedContainers,
@@ -259,15 +260,15 @@ async function pruneBackupArtifacts(
   keep.add(keepId);
 
   const pruned: string[] = [];
-  for (const entry of sorted) {
-    if (keep.has(entry.id)) continue;
+  await forEachSequential(sorted, async (entry) => {
+    if (keep.has(entry.id)) return;
     try {
       await Deno.remove(entry.path);
       pruned.push(entry.id);
     } catch (err) {
       if (!(err instanceof Deno.errors.NotFound)) throw err;
     }
-  }
+  });
   return pruned;
 }
 

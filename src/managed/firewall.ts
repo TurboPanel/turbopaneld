@@ -25,6 +25,7 @@ import {
 } from "../contracts/commands-contracts.ts";
 import { hostSudoArgs } from "../permissions/host-sudo.ts";
 import { logWarn, sanitizeForLog } from "../util/logger.ts";
+import { forEachSequential } from "../util/sequential.ts";
 
 /** Parent chain hung off `DOCKER-USER`; holds one jump per managed cluster. */
 export const MANAGED_PUBLIC_CHAIN = "TP-MANAGED-PUB";
@@ -194,13 +195,13 @@ export async function reconcileManagedPublicFirewall(
   if (!flushed.success) {
     throw new Error(flushed.stderr || `failed to flush chain ${chain}`);
   }
-  for (const source of sources) {
+  await forEachSequential(sources, async (source) => {
     const rule = [chain, "-s", source, ...match, "-j", "ACCEPT"];
     const added = await runIptables(["-A", ...rule]);
     if (!added.success) {
       throw new Error(added.stderr || "failed to allow managed peer");
     }
-  }
+  });
   const dropped = await runIptables(["-A", chain, ...match, "-j", "DROP"]);
   if (!dropped.success) {
     throw new Error(dropped.stderr || "failed to install managed drop rule");

@@ -14,6 +14,7 @@ import { hostSudoArgs } from "../permissions/host-sudo.ts";
 import type { InstanceAcmeWireSettings } from "../contracts/cell-messages.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 import { logWarn } from "../util/logger.ts";
+import { forEachSequential } from "../util/sequential.ts";
 import { instanceSiteHostname } from "../instance/instance-acme-observe.ts";
 import {
   HOSTING_CADDY_SERVICE,
@@ -333,16 +334,14 @@ async function activateHostingCaddyForWindow(
 async function waitForHostingCaddyOn80(
   inspect: () => Promise<Port80Holder>,
   sleepFn: (ms: number) => Promise<void>,
+  attempt = 0,
 ): Promise<Port80Holder> {
-  let last: Port80Holder = { kind: "free" };
-  for (let attempt = 0; attempt < HOSTING_CADDY_READY_ATTEMPTS; attempt++) {
-    last = await inspect();
-    if (last.kind !== "free") return last;
-    if (attempt < HOSTING_CADDY_READY_ATTEMPTS - 1) {
-      await sleepFn(HOSTING_CADDY_READY_INTERVAL_MS);
-    }
+  const last = await inspect();
+  if (last.kind !== "free" || attempt >= HOSTING_CADDY_READY_ATTEMPTS - 1) {
+    return last;
   }
-  return last;
+  await sleepFn(HOSTING_CADDY_READY_INTERVAL_MS);
+  return waitForHostingCaddyOn80(inspect, sleepFn, attempt + 1);
 }
 
 async function rollbackOpenedWindow(
@@ -566,19 +565,18 @@ async function acceptPreflight(
   listener: Deno.Listener,
   nonce: string,
 ): Promise<void> {
-  while (true) {
-    let conn: Deno.Conn;
-    try {
-      conn = await listener.accept();
-    } catch {
-      return;
-    }
-    try {
-      await answerPreflight(conn, nonce);
-    } finally {
-      conn.close();
-    }
+  let conn: Deno.Conn;
+  try {
+    conn = await listener.accept();
+  } catch {
+    return;
   }
+  try {
+    await answerPreflight(conn, nonce);
+  } finally {
+    conn.close();
+  }
+  return acceptPreflight(listener, nonce);
 }
 
 async function answerPreflight(conn: Deno.Conn, nonce: string): Promise<void> {
@@ -624,7 +622,9 @@ export async function preflightInstanceLetsEncryptHttp01(
 ): Promise<void> {
   const hosts = letsEncryptHostnames(hostnames);
   const socketPath = instanceAcmeSocketPath(layout);
-  for (const host of hosts) {
+  // One shared issuer socket: hosts are probed one at a time, stopping at the
+  // first failure.
+  await forEachSequential(hosts, async (host) => {
     const nonce = deps.nonce?.() ?? instanceAcmePreflightNonce();
     await withPreflightServer(socketPath, nonce, async () => {
       await verifyInstanceAcmeHttp01Reachability(host, nonce, {
@@ -632,7 +632,7 @@ export async function preflightInstanceLetsEncryptHttp01(
         timeoutMs: deps.timeoutMs,
       });
     });
-  }
+  });
 }
 
 export type InstanceAcmeIssueDeps = {
@@ -676,9 +676,10 @@ export async function issueInstanceLetsEncryptCertificates(
   let stopError: Error | null = null;
   try {
     await waitForCertificates(layout, hosts, had, deps, run);
-    for (const host of hosts) {
-      await publishIssuedCertificate(layout, host, certsDir, run);
-    }
+    await forEachSequential(
+      hosts,
+      (host) => publishIssuedCertificate(layout, host, certsDir, run),
+    );
     failed = false;
   } finally {
     stopError = await stopIssuer(run);
@@ -694,9 +695,9 @@ async function snapshotIssued(
   run: InstanceAcmeCommand,
 ): Promise<Map<string, InstanceAcmeCertificateBaseline>> {
   const had = new Map<string, InstanceAcmeCertificateBaseline>();
-  for (const host of hosts) {
+  await forEachSequential(hosts, async (host) => {
     had.set(host, await baselineForHost(layout, host, nowMs, run));
-  }
+  });
   return had;
 }
 
@@ -714,7 +715,7 @@ async function baselineForHost(
   };
 }
 
-async function waitForCertificates(
+function waitForCertificates(
   layout: LayoutPaths,
   hosts: readonly string[],
   had: ReadonlyMap<string, InstanceAcmeCertificateBaseline>,
@@ -725,7 +726,7 @@ async function waitForCertificates(
   const sleep = deps.sleep ?? delay;
   const timeoutMs = deps.timeoutMs ?? INSTANCE_ACME_ISSUE_TIMEOUT_MS;
   const started = now();
-  while (true) {
+  const poll = async (): Promise<void> => {
     const elapsed = now() - started;
     const log = await (deps.readLog ?? (() => readIssuerLog(layout)))();
     const failure = instanceAcmeIssuerFailureLine(log);
@@ -735,7 +736,9 @@ async function waitForCertificates(
     }
     if (elapsed >= timeoutMs) throw new Error("instance ACME issuer timed out");
     await sleep(POLL_MS);
-  }
+    return poll();
+  };
+  return poll();
 }
 
 async function everyHostSettled(

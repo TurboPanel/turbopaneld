@@ -4,6 +4,7 @@ import type {
   EnvironmentDeployTlsMaterial,
 } from "../contracts/commands-contracts.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
+import { forEachSequential } from "../util/sequential.ts";
 
 const SAFE_TLS_ID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -32,8 +33,8 @@ export async function materializeTlsCertificates(
     throw new Error("secrets/decrypt returned unexpected length");
   }
 
-  for (let i = 0; i < material.length; i += 1) {
-    const entry = material[i]!;
+  // Writes stay ordered; the first invalid entry stops later ones.
+  await forEachSequential(material, async (entry, i) => {
     if (!SAFE_TLS_ID_RE.test(entry.tlsId)) {
       throw new Error("tlsId contains unsupported characters");
     }
@@ -51,7 +52,7 @@ export async function materializeTlsCertificates(
       mode: 0o600,
     });
     written.add(entry.tlsId);
-  }
+  });
 
   return written;
 }

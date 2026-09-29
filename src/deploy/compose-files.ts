@@ -421,12 +421,11 @@ function isDeploymentTreeDir(entry: Deno.DirEntry): boolean {
   return entry.isDirectory && entry.name !== COMPOSE_STAGE_DIRNAME;
 }
 
-async function pushLocalManifest(
-  out: LocalDeploymentManifest[],
+async function readLocalManifest(
   dir: string,
-): Promise<void> {
+): Promise<LocalDeploymentManifest | undefined> {
   const manifest = await readDeploymentManifest(dir);
-  if (manifest) out.push({ dir, manifest });
+  return manifest ? { dir, manifest } : undefined;
 }
 
 /**
@@ -437,21 +436,25 @@ export async function listLocalDeploymentManifests(
   layout: { stateDir: string },
 ): Promise<LocalDeploymentManifest[]> {
   const root = join(layout.stateDir, "deployments");
-  const out: LocalDeploymentManifest[] = [];
   const projectEntries = await readDirEntries(root);
   if (!projectEntries) return [];
 
-  for (const projectEntry of projectEntries) {
-    if (!isDeploymentTreeDir(projectEntry)) continue;
-    const projectDir = join(root, projectEntry.name);
-    const envEntries = await readDirEntries(projectDir);
-    if (!envEntries) continue;
-    for (const envEntry of envEntries) {
-      if (!isDeploymentTreeDir(envEntry)) continue;
-      await pushLocalManifest(out, join(projectDir, envEntry.name));
-    }
-  }
-  return out;
+  // Read-only scans of independent directories; `Promise.all` keeps the
+  // directory-listing order in the result.
+  const perProject = await Promise.all(
+    projectEntries.filter(isDeploymentTreeDir).map(async (projectEntry) => {
+      const projectDir = join(root, projectEntry.name);
+      const envEntries = await readDirEntries(projectDir);
+      if (!envEntries) return [];
+      const found = await Promise.all(
+        envEntries.filter(isDeploymentTreeDir).map((envEntry) =>
+          readLocalManifest(join(projectDir, envEntry.name))
+        ),
+      );
+      return found.filter((m): m is LocalDeploymentManifest => m !== undefined);
+    }),
+  );
+  return perProject.flat();
 }
 
 export async function writeComposeEnvFile(

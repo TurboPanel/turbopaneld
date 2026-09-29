@@ -363,3 +363,23 @@ test("parseInspectedSubnets reads IPAM config and tolerates garbage", () => {
     [],
   );
 });
+
+test("ensureExternalDockerNetworks handles networks in order and stops at the first failure", async () => {
+  const calls: string[][] = [];
+  await assertRejects(
+    () =>
+      ensureExternalDockerNetworks(["tp_a", "tp_b", "tp_c"], (args) => {
+        calls.push([...args]);
+        if (args[1] === "inspect") return Promise.resolve(fail("missing"));
+        return Promise.resolve(args.includes("tp_b") ? fail("denied") : ok());
+      }),
+    Error,
+    "denied",
+  );
+  assertEquals(calls.map((c) => `${c[1]} ${c.at(-1)}`), [
+    "inspect tp_a",
+    "create tp_a",
+    "inspect tp_b",
+    "create tp_b",
+  ]);
+});

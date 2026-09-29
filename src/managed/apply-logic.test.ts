@@ -505,3 +505,76 @@ test("isRetryableEngineExecFailure matches restart-window exec errors only", asy
     throw new Error("SQL failures must not retry");
   }
 });
+
+test("buildEngineExec retries restart-window failures, then stops on success", async () => {
+  const { buildEngineExec } = await import("./apply.ts");
+  const calls: string[][] = [];
+  const exec = buildEngineExec(
+    "cid",
+    (text) => text,
+    (argv) => {
+      calls.push(argv);
+      return Promise.resolve(
+        calls.length < 3
+          ? {
+            success: false,
+            stdout: "",
+            stderr: "container cid is not running",
+            code: 1,
+          }
+          : { success: true, stdout: "done", stderr: "", code: 0 },
+      );
+    },
+    0,
+  );
+  const result = await exec(["mysql", "-e", "select 1"]);
+  assertEquals(result, { success: true, stdout: "done", stderr: "" });
+  assertEquals(calls.length, 3);
+  assertEquals(calls[0], ["exec", "-i", "cid", "mysql", "-e", "select 1"]);
+});
+
+test("buildEngineExec does not retry non-transient failures and redacts stderr", async () => {
+  const { buildEngineExec } = await import("./apply.ts");
+  let calls = 0;
+  const exec = buildEngineExec(
+    "cid",
+    (text) => text.replace("secret", "***"),
+    () => {
+      calls++;
+      return Promise.resolve({
+        success: false,
+        stdout: "",
+        stderr: "ERROR 1045 secret",
+        code: 1,
+      });
+    },
+    0,
+  );
+  const result = await exec(["mysql"]);
+  assertEquals(result.success, false);
+  assertEquals(result.stderr, "ERROR 1045 ***");
+  assertEquals(calls, 1);
+});
+
+test("buildEngineExec gives up after the retry budget on a persistent restart window", async () => {
+  const { buildEngineExec } = await import("./apply.ts");
+  let calls = 0;
+  const exec = buildEngineExec(
+    "cid",
+    (text) => text,
+    () => {
+      calls++;
+      return Promise.resolve({
+        success: false,
+        stdout: "",
+        stderr: "container cid is not running",
+        code: 1,
+      });
+    },
+    0,
+  );
+  const result = await exec(["mysql"]);
+  assertEquals(result.success, false);
+  // One initial attempt plus ENGINE_EXEC_RETRIES (10) retries.
+  assertEquals(calls, 11);
+});

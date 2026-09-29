@@ -41,6 +41,7 @@
 import { join } from "@std/path";
 import { type LayoutPaths, resolveLayout } from "../paths/layout.ts";
 import { errorText, logInfo, logWarn, sanitizeForLog } from "../util/logger.ts";
+import { forEachSequential } from "../util/sequential.ts";
 import {
   FIREWALL_FORWARD_CHAIN,
   FIREWALL_INPUT_CHAIN,
@@ -257,11 +258,11 @@ export async function applyRenderedFirewall(
     }
   }
 
-  await writeDurableDocuments(
-    layout,
-    rendered.v4,
-    ipv6Failure === null ? (ipv6Applied ? rendered.v6 : null) : "keep",
-  );
+  // v6 durable document: a failed apply leaves the file alone, a successful
+  // one records the rendered document, and no apply forgets it.
+  let durableV6: DurableV6Document = KEEP_V6_DOCUMENT;
+  if (ipv6Failure === null) durableV6 = ipv6Applied ? rendered.v6 : null;
+  await writeDurableDocuments(layout, rendered.v4, durableV6);
 
   if (ipv6Failure !== null) throw new FirewallIpv6ApplyError(ipv6Failure);
   return { ipv6Applied, forwardApplied: includeForward[4], warnings };
@@ -280,19 +281,23 @@ async function applyIpv6(
 }
 
 /**
- * `v6`: the document to keep, `null` to forget it, or `"keep"` to leave the
- * existing file alone (the v6 kernel state did not change).
+ * What to do with the durable v6 document: the document text to keep, `null`
+ * to forget it, or the {@link KEEP_V6_DOCUMENT} sentinel to leave the existing
+ * file alone (the v6 kernel state did not change).
  */
+type DurableV6Document = string | null | typeof KEEP_V6_DOCUMENT;
+const KEEP_V6_DOCUMENT: unique symbol = Symbol("keep-v6-document");
+
 async function writeDurableDocuments(
   layout: LayoutPaths,
   v4: string,
-  v6: string | null | "keep",
+  v6: DurableV6Document,
 ): Promise<void> {
   await Deno.mkdir(layout.configDir, { recursive: true });
   const v4Path = join(layout.configDir, FIREWALL_V4_FILENAME);
   const v6Path = join(layout.configDir, FIREWALL_V6_FILENAME);
   await Deno.writeTextFile(v4Path, v4, { mode: 0o644 });
-  if (v6 === "keep") return;
+  if (v6 === KEEP_V6_DOCUMENT) return;
   if (v6 === null) {
     await removeIfPresent(v6Path);
   } else {
@@ -318,37 +323,42 @@ export async function removeFirewall(
 ): Promise<void> {
   const run = options.run ?? runFirewallHost;
   const layout = options.layout ?? resolveLayout(Deno.env.toObject());
-  for (const family of [4, 6] as const) {
-    const bin = binaryFor(family, "");
-    await removeJumpBestEffort(
-      family,
-      INPUT_BUILTIN,
-      FIREWALL_INPUT_CHAIN,
-      run,
-    );
-    await removeJumpBestEffort(
-      family,
-      DOCKER_USER_CHAIN,
-      FIREWALL_FORWARD_CHAIN,
-      run,
-    );
-    for (const chain of [FIREWALL_INPUT_CHAIN, FIREWALL_FORWARD_CHAIN]) {
-      for (const flag of ["-F", "-X"]) {
-        const result = await run(bin, [flag, chain]);
-        if (!result.success && !isMissingRuleText(result)) {
-          logWarn(
-            "firewall",
-            `${bin} ${flag} ${chain} failed: ${
-              sanitizeForLog(failureText(result))
-            }`,
-          );
-        }
-      }
-    }
-  }
+  await forEachSequential(
+    [4, 6] as const,
+    (family) => removeFamilyChains(family, run),
+  );
   await removeIfPresent(join(layout.configDir, FIREWALL_V4_FILENAME));
   await removeIfPresent(join(layout.configDir, FIREWALL_V6_FILENAME));
   logInfo("firewall", "TurboPanel firewall chains removed (mode off)");
+}
+
+/** One family's half of {@link removeFirewall}: jumps out, then flush + delete. */
+async function removeFamilyChains(
+  family: FirewallFamily,
+  run: FirewallRunFn,
+): Promise<void> {
+  const bin = binaryFor(family, "");
+  await removeJumpBestEffort(family, INPUT_BUILTIN, FIREWALL_INPUT_CHAIN, run);
+  await removeJumpBestEffort(
+    family,
+    DOCKER_USER_CHAIN,
+    FIREWALL_FORWARD_CHAIN,
+    run,
+  );
+  const steps = [FIREWALL_INPUT_CHAIN, FIREWALL_FORWARD_CHAIN].flatMap(
+    (chain) => ["-F", "-X"].map((flag) => ({ chain, flag })),
+  );
+  await forEachSequential(steps, async ({ chain, flag }) => {
+    const result = await run(bin, [flag, chain]);
+    if (!result.success && !isMissingRuleText(result)) {
+      logWarn(
+        "firewall",
+        `${bin} ${flag} ${chain} failed: ${
+          sanitizeForLog(failureText(result))
+        }`,
+      );
+    }
+  });
 }
 
 /**

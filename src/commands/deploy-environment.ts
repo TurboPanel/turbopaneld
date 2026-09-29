@@ -114,6 +114,7 @@ import {
   resolveDockerHostGatewayAddress,
 } from "../deploy/site-docker.ts";
 import { logInfo, logWarn } from "../util/logger.ts";
+import { forEachSequential } from "../util/sequential.ts";
 import {
   assertComposeHostPathsConfined,
   collectAuthoredHostPaths,
@@ -463,7 +464,7 @@ async function ensureDeployIngress(
     { runDocker },
   );
 
-  for (const ingress of ingressServices) {
+  await forEachSequential(ingressServices, async (ingress) => {
     const hostingsForService = containerHostings.filter(
       (h) => h.serviceId === ingress.serviceId,
     );
@@ -486,7 +487,7 @@ async function ensureDeployIngress(
       requireHostingIngressNetwork(hostingIngressNetwork),
       { runDocker },
     );
-  }
+  });
 }
 
 /**
@@ -1663,14 +1664,14 @@ async function collectEnvironmentDeployContainers(input: {
   if (containers === null || input.ingressServices.length === 0) {
     return containers;
   }
-  for (const ingress of input.ingressServices) {
+  await forEachSequential(input.ingressServices, async (ingress) => {
     const ingressContainer = await collectServiceIngressContainer(
       ingress,
       input.layout,
       input.run,
     );
     if (ingressContainer) containers.push(ingressContainer);
-  }
+  });
   return containers;
 }
 

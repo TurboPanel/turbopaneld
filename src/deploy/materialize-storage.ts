@@ -1,5 +1,6 @@
 import { dirname, join } from "@std/path";
 import type { LayoutPaths } from "../paths/layout.ts";
+import { forEachSequential } from "../util/sequential.ts";
 import type {
   EnvironmentDeployPrincipalMaterial,
   EnvironmentDeployStorageMaterial,
@@ -195,8 +196,8 @@ export async function materializeStorageEntries(
   const principalMap = principalById(principals);
   const decryptedContents = await decryptEntryContents(entries, decryptSecrets);
 
-  for (let i = 0; i < entries.length; i += 1) {
-    const entry = entries[i]!;
+  // Host paths / docker volumes are created in order; a failure stops the rest.
+  await forEachSequential(entries, async (entry, i) => {
     const hostPath = await materializeLocation(
       layout,
       organizationId,
@@ -205,7 +206,7 @@ export async function materializeStorageEntries(
       resolveEntryFileContent(entry, decryptedContents[i]),
     );
     mountPaths.set(entry.locationId, hostPath);
-  }
+  });
 
   return mountPaths;
 }

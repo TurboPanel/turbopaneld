@@ -362,7 +362,7 @@ compile toolchain).
   the co-located `turbopanel`/`dev`/`ui` `src` trees when present.
 - `deno task test` / `test:coverage` / `lint` / `fmt:check` / `check` / `notices:check` — quality
   surface in `deno.json`. `notices:generate` writes `THIRD_PARTY_NOTICES.md` from
-  `deno.lock`, `workers/turbopanel-sh/pnpm-lock.yaml`, and orchestration pins
+  `deno.lock` and orchestration pins
   (GPL-3.0-or-later Ansible tooling is a reviewed orchestration exception).
   Release packaging stages that file at `opt/turbopanel/share/THIRD_PARTY_NOTICES.md`.
   `tp_install_verified_channel_release` copies the verified notice into
@@ -396,7 +396,7 @@ compile toolchain).
   of uncovered history. Sibling `turbopanel` / `ui` also use CI-based analysis;
   `website` still uses Automatic Analysis. Coverage exclusions include
   `**/*.test.ts`, `src/testing/**`, `src/build-info.ts`, `dist/**`,
-  `publish/**`, the Galaxy Docker role tree, and `workers/**`.
+  `publish/**`, and the Galaxy Docker role tree.
   **`sonar.sources` / `sonar.tests` / `sonar.test.inclusions`** must stay set
   (`src` + `orchestration` + `scripts` + `main.ts`; tests = `**/*.test.ts` and
   `src/testing/**`). The `denoS2187` issue-ignore (`typescript:S2187` on
@@ -551,9 +551,9 @@ from production code.
 | push `trunk` | `verify.yml` | `verify.yml`; `publish` job `needs: verify` → the `trunk` CDN drop **and** the rolling GitHub `canary` pre-release (`canary` job, via `TurboPanel/dev` `gh-canary.yml`) | nothing compiles from failing code |
 | promote → rc/release | `promote.yml` (notes-only) | `promote.yml` → `TurboPanel/dev` `gh-promote.yml`: **signature + sha256/size of the tested canary build, manifest re-signed, same bytes**; gh-release.yml re-downloads and re-hashes after publish | no new code enters after publish |
 
-**Automatic promotion (two PRs, the normal path):** `promote-prs.yml` keeps a **trunk → staging** PR ("Cut rc for x.y.z") open after every green trunk build (opened with the Release App token so `ci-ok` runs; merge commit only). Merging it makes a push to `staging`, which runs `cut-rc.yml` (from the pushed commit, so the first merge already works): it finds the merged PR's head commit, waits for that commit's canary build, checks the canary manifest names exactly that commit, then runs the shared promote workflows with **no approval gate** (`approval-environment: ""` — the merge is the act) to cut `v<base>-rc.<N>` (N = one past the highest existing rc tag; a bad rc is fixed on trunk and the next merge cuts rc.N+1), and opens/refreshes the **staging → live** PR "Release x.y.z". `verify.yml` skips Sonar on PRs into staging/live (no new code in a promotion). Merging the staging → live PR pushes to `live`, which runs `cut-release.yml`: it picks the newest `v<x.y.z>-rc.N` of the version on live, runs the shared promote workflows (the `release` environment approval stays on this hop until the path has run once end to end) to cut `v<x.y.z>`, then `gh-next-version.yml` opens the "Start <next>" PR into trunk (`deno.json` + `sonar-project.properties`; patch by default, `minor` label = minor, never below the highest minor across the repos). The plain `promote.yml` form below is **break-glass only**.
+**Automatic promotion (two PRs, the normal path):** `promote-prs.yml` keeps a **trunk → staging** PR ("Release candidate x.y.z-rc.N") open after every green trunk build (opened with the Release App token so `ci-ok` runs; merge commit only). Merging it makes a push to `staging`, which runs `cut-rc.yml` (from the pushed commit, so the first merge already works): it finds the merged PR's head commit, waits for that commit's canary build, checks the canary manifest names exactly that commit, then runs the shared promote workflows with **no approval gate** (`approval-environment: ""` — the merge is the act) to cut `v<base>-rc.<N>` (N = one past the highest existing rc tag; a bad rc is fixed on trunk and the next merge cuts rc.N+1), and opens/refreshes the **staging → live** PR "Release x.y.z". `verify.yml` skips Sonar on PRs into staging/live (no new code in a promotion). Merging the staging → live PR pushes to `live`, which runs `cut-release.yml`: it picks the newest `v<x.y.z>-rc.N` of the version on live, runs the shared promote workflows (the `release` environment approval stays on this hop until the path has run once end to end) to cut `v<x.y.z>`, then `gh-next-version.yml` opens the "Start <next>" PR into trunk (`deno.json` + `sonar-project.properties`; patch by default, `minor` label = minor, never below the highest minor across the repos). The plain `promote.yml` form below is **break-glass only**.
 
-**Promotion (`.github/workflows/promote.yml`, break-glass):** one click moves a tested build up a channel — `to=rc` turns a canary build (`source` = build id, canary version or `manifest-<version>.json` from the rolling canary release) into `v<base>-rc.<N>` and fast-forwards `staging`; `to=release` turns `v<base>-rc.<N>` into `v<base>` (`releases/latest`; the rolling `rc` pointer is re-pointed at it) and fast-forwards `live`. Same bytes: the source manifest's signature and every asset's sha256/size are verified first, the assets are renamed, the manifest rewritten and re-signed, and the tag is created at the source commit (an existing tag elsewhere = burned version, fails). The three jobs are `TurboPanel/dev`'s `gh-promote.yml` → `gh-release.yml` → `gh-promote-finalize.yml` pinned to ONE dev sha, passed again as `dev-ref`; `signer-ref` is the turbopaneld commit carrying `scripts/sign-manifest.ts` + the key pin — bump it together with the signer pin in `release.yml`. Approval = the `release` environment (prepare, then finalize). `to=release` needs the TurboPanel Release App secrets (`RELEASE_APP_ID` / `RELEASE_APP_PRIVATE_KEY`: bare tags and the `live` push are ruleset-bypass only) and refuses to start without them; `to=rc` runs on `GITHUB_TOKEN` and only its `staging` push fails — with the exact manual `git push` — until the App exists. An rc is refused while `.changeset/*.md` are pending at the source commit (no `.changeset/` → skipped with a notice). `release.yml` ignores tag pushes by `[bot]` actors so an App-created tag does not race the promotion with a from-source rebuild. Order across repos: turbopaneld → turbopanel → ui → website → dev. Full contract: `../dev/AGENTS.md` → Release promotion.
+**Promotion (`.github/workflows/promote.yml`, break-glass):** one click moves a tested build up a channel — `to=rc` turns a canary build (`source` = build id, canary version or `manifest-<version>.json` from the rolling canary release) into `v<base>-rc.<N>` and fast-forwards `staging`; `to=release` turns `v<base>-rc.<N>` into `v<base>` (`releases/latest`; the rolling `rc` pointer is re-pointed at it) and fast-forwards `live`. Same bytes: the source manifest's signature and every asset's sha256/size are verified first, the assets are renamed, the manifest rewritten and re-signed, and the tag is created at the source commit (an existing tag elsewhere = burned version, fails). The three jobs are `TurboPanel/dev`'s `gh-promote.yml` → `gh-release.yml` → `gh-promote-finalize.yml` pinned to ONE dev sha, passed again as `dev-ref`; `signer-ref` is the turbopaneld commit carrying `scripts/sign-manifest.ts` + the key pin — bump it together with the signer pin in `release.yml`. Approval = the `release` environment (prepare, then finalize). `to=release` needs the TurboPanel Release App secrets (`RELEASE_APP_ID` / `RELEASE_APP_PRIVATE_KEY`: bare tags and the `live` push are ruleset-bypass only) and refuses to start without them; `to=rc` runs on `GITHUB_TOKEN` and only its `staging` push fails — with the exact manual `git push` — until the App exists. `release.yml` ignores tag pushes by `[bot]` actors so an App-created tag does not race the promotion with a from-source rebuild. Repos release independently: no release waits on a matching release in another repo — except a new minor (x.y.0), where turbopanel and ui each need an rc of it before the daemon may release it (`minor-gate` in `verify.yml`, dev `gh-minor-gate.yml`; a patch is never gated), and `cut-release.yml` re-runs their waiting Release PR checks after the daemon release exists. Full contract: `../dev/AGENTS.md` → Release promotion.
 
 ## Managed-host privilege boundary (2026-09-19 hardening, sudo 2026-09-25)
 
@@ -819,16 +819,18 @@ it regresses:
   (`PUT /organizations/:id/deploy-hooks`; `parseServiceOptions` drops the
   command fields otherwise).
 
-## Uninstall script
+## Purge script
 
-`scripts/uninstall.sh` removes a TurboPanel install from a managed host. It
+`scripts/purge.sh` purges TurboPanel from a host: everything TurboPanel put there and
+nothing else. There is no keep-my-data option and no remove-only mode — one
+path, ending in a typed confirmation line (`purge <hostname> <code>`). It
 lives only in this repository: release packages do not ship it, and
-`workers/turbopanel-sh` does not serve it.
+turbopanel.sh does not serve it.
 
 Canonical command (root, no sudo re-exec):
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/TurboPanel/turbopaneld/trunk/scripts/uninstall.sh | sudo sh
+curl -fsSL https://raw.githubusercontent.com/TurboPanel/turbopaneld/trunk/scripts/purge.sh | sudo sh
 ```
 
 The script refuses to continue unless it is already root. It does not
@@ -855,33 +857,37 @@ Four maintenance rules:
    or be added to the script explicitly.
 2. When a release renames or retires a unit, account, path, or container
    name, add the old name to the `TP_LEGACY_*` block at the top of
-   `scripts/uninstall.sh`.
-3. A role that installs apt packages or adds an apt repository must add
-   those packages to the purge candidate list in `scripts/uninstall.sh`
-   (`TP_PURGE_BASE_PACKAGES`, `TP_PURGE_APACHE_PACKAGES`, `TP_DOCKER_PACKAGES`,
-   or the `php*` / `debsuryorg-archive-keyring` scan). A repository file has
-   to be named there too, unless the Docker `download.docker.com` scan or the
-   `sury-php.sources` / `sury-php.list` removal already matches it.
+   `scripts/purge.sh`.
+3. **Never add a generic package to the purge.** Hosts run this on desktops and
+   shared machines, and the installer's dependencies (curl, git, acl, gnupg,
+   iptables, openssl, wireguard-tools, build-essential, sudo,
+   systemd-timesyncd, ...) are not TurboPanel's to remove. Only Docker's
+   packages (`TP_DOCKER_PACKAGES`) and the `phpN.N-*` packages plus
+   `debsuryorg-archive-keyring` that the php-fpm role's sury repo supplied are
+   purged. A role that adds a new apt repository for its own packages must add
+   its source file to the removal in `tp_purge_apt_packages`, unless the Docker
+   `download.docker.com` scan or the `sury-php.sources` / `sury-php.list` removal
+   already matches it.
 4. A new folder the script must delete has to sit inside a tree listed in
    `TP_OWNED_TREES` (or be a `turbopanel*` unit drop-in), or be added to that
    list. `tp_path_is_safe` refuses everything else.
 
-Option 1 stops at the remove-only steps. Option 2 runs those same steps,
-then `tp_purge_hosted_data`. Detection still only changes labels; purge runs
-for every server type. Each purge step checks what is actually present and is safe to run again
-after an earlier run stopped partway. After confirmation, option 2 writes a
-root-only marker and a resume manifest under `/var/lib/turbopanel-uninstall/`
-(directory `0700`, files `0600`, never through a symlink). That directory is
-outside the trees purge deletes. `--dry-run` does not write either file.
-`tp_main` checks the marker before the empty-inventory exit, so a rerun
-resumes purge when only apt packages or Docker data are left. Docker being
-installed is not, by itself, a TurboPanel install. The manifest is loaded
-from `tp_discover_paths` and restores discovered config, state, log, run,
-backup, and principal-root paths. Both files are removed once purge finishes
-and every recorded failure is benign (`tp_record_benign_fail`: a failed
-`apt-get update`, or a Docker data root no rerun could find); any other
-failure keeps them for the rerun. Commands go through `tp_run`, so
-`--dry-run` logs them and does not run them.
+The purge runs the removal steps, then `tp_purge_hosted_data`. Detection
+still only changes labels; the purge runs for every server type. Each step
+checks what is actually present and is safe to run again after an earlier run
+stopped partway. After confirmation, the purge writes a root-only marker and a
+resume manifest under `/var/lib/turbopanel-purge/` (directory `0700`, files
+`0600`, never through a symlink). That directory is outside the trees the
+purge deletes. `--dry-run` does not write either file. `tp_main` checks the
+marker before the empty-inventory exit, so a rerun resumes the purge when only
+apt packages or Docker data are left. Docker being installed is not, by
+itself, a TurboPanel install. The manifest is loaded from `tp_discover_paths`
+and restores discovered config, state, log, run, backup, and principal-root
+paths. Both files are removed once the purge finishes and every recorded
+failure is benign (`tp_record_benign_fail`: a failed `apt-get update`, or a
+Docker data root no rerun could find); any other failure keeps them for the
+rerun. Commands go through `tp_run`, so `--dry-run` logs them and does not run
+them.
 
 **Path safety is an allowlist.** `tp_path_is_safe` resolves the parent's
 symlinks (`realpath -m`), keeps the leaf as written, refuses `.` / `..`
@@ -900,7 +906,7 @@ and the mount kept). There is one copy of that function. A Docker apt
 
 **Shell startup files** (`.bashrc` and friends) are scanned in root's home
 and in every UID ≥ 1000 home except principal homes (those are purged whole
-by option 2 and untouched by option 1). A symlinked file is left alone. The
+by the purge). A symlinked file is left alone. The
 backup and the strip run as the owner of the directory holding the file
 (`setpriv --reuid/--regid --clear-groups`), never as root: that owner controls
 every name there, so a planted `.bak`, temp name, or swapped file could
@@ -909,11 +915,13 @@ backup is never reused; a second one gets a `mktemp` suffix. A file not owned
 by its directory's owner, or a host without `setpriv`, is skipped and
 reported.
 
-**Tests:** `scripts/uninstall.test.ts` lifts the functions and constants out
+**Tests:** `scripts/purge.test.ts` lifts the functions and constants out
 of the real script and runs them as a normal user against temp directories
 (planted `.bak` symlink, principal homes, path allowlist and symlink escape,
-custom folders kept, benign-failure marker rule, shared packages, firewall
-warning). CI also runs `shellcheck -s sh scripts/uninstall.sh`
+custom folders kept, benign-failure marker rule, no generic package is ever a
+candidate, the apt-simulation guard keeps a package that would drag others
+along, no autoremove / apt-mark / menu, firewall warning). CI also runs
+`shellcheck -s sh scripts/purge.sh`
 (`verify.yml`); an inline `shellcheck disable` needs a reason.
 
 Purge order:
@@ -945,7 +953,9 @@ Purge order:
    a root that was determined is kept in the resume manifest. Stop `docker.socket`, `docker`,
    and `containerd`. `apt-get purge` the installed Docker packages (Docker's
    own set and Debian's `docker.io` / `docker-compose` / `containerd` /
-   `runc`). Remove `/var/lib/docker`, `/var/lib/containerd`, the nondefault
+   `runc`) through the same apt-simulation guard as step 4 — a package whose
+   purge would also remove something outside the Docker set (e.g. `runc` under a
+   `podman` install) is kept and reported. Remove `/var/lib/docker`, `/var/lib/containerd`, the nondefault
    data root, and `/etc/docker` even when the packages are already gone.
    Remove any file in `/etc/apt/sources.list.d` that references
    `download.docker.com`, and the keyring named in that file's `Signed-By`
@@ -953,51 +963,78 @@ Purge order:
    the `docker0` bridge when it is present.
 3. **Data folders.** Every discovered config, state, log, run, and backup
    path, plus `/etc/ssh/turbopanel`.
-4. **Apt packages**, last, because earlier steps use `iptables`, `acl`, and
-   `openssl`. Remove `/etc/apt/sources.list.d/sury-php.sources` and the legacy
-   `sury-php.list`, then `apt-get update`. Candidates are the base set from
-   `daemon-prereqs` (plus `apt-transport-https`), the Apache build
-   dependencies, installed `php*` packages, and
-   `debsuryorg-archive-keyring`. Keep only installed packages. Drop anything
-   Essential or priority `required` (this skips `tar`). `sudo`,
-   `systemd-timesyncd`, `curl`, `ca-certificates`, and `openssl` are never
-   removed; `git`, `gnupg`, and `iptables` are kept too, because they are
-   common before TurboPanel and nothing records that the installer added
-   them. All of these are added to the kept set and marked manual before
-   `autoremove`; the purge summary names that protection.
-   `autoremove` is skipped if they cannot be marked manual, so it cannot
-   remove them. The time-sync role installs `systemd-timesyncd`;
-   `/etc/systemd/timesyncd.conf` stays as TurboPanel wrote it. `curl` is
-   kept so the reinstall commands the summary prints, and a repeat
-   `curl | sh`, still work after a purge. `apt-get -s purge` runs first. If that would
-   remove packages that are not candidates, each candidate is simulated alone
-   and any that still pull extras are dropped, including when adding one to
-   an otherwise safe set would pull them. Kept packages are `apt-mark manual`
-   so the following `autoremove` does not undo that decision. Then `apt-get
-   purge -y` the final list and `apt-get autoremove --purge -y`.
+4. **PHP packages TurboPanel added**, last, and only when TurboPanel's own
+   evidence is on the host (`tp_sury_evidence`: its `sury-php.sources` /
+   `sury-php.list`, or a `turbopanel-php-fpm` unit in the pre-removal
+   inventory). Candidates are the installed `phpN.N-*` packages and
+   `debsuryorg-archive-keyring`; nothing else. Every other package the
+   installer relied on (`curl`, `git`, `acl`, `gnupg`, `iptables`, `openssl`,
+   `wireguard-tools`, `build-essential`, `sudo`, `systemd-timesyncd`, ...) is
+   never touched, and there is **no `autoremove` and no `apt-mark`**. `apt-get
+   update` runs, then `apt-get -s purge` simulates the candidates
+   (`tp_purge_guarded_packages`). If that would remove packages that are not
+   candidates, each candidate is simulated alone and any that still pull
+   extras are dropped and reported, including when adding one to an otherwise
+   safe set would pull them. Then `apt-get purge -y` the final list. The sury
+   source file is removed last, so an interrupted run still finds it as
+   evidence. `/etc/systemd/timesyncd.conf` stays as TurboPanel wrote it.
 
-Both options warn, on the confirmation screen and in the summary, that no
+The purge warns, on the confirmation screen and in the summary, that no
 inbound firewall remains: `ufw` / `firewalld` were purged at install and the
 script removes TurboPanel's own `TP-*` rules.
 
-The summary adds, on top of the remove-only skipped steps and the "could not
+The summary adds, on top of the skipped steps and the "could not
 remove" list from the second scan: hosted data that is still present
 (config, state, log, run, and backup paths, principal roots and homes, and
 `/etc/ssh/turbopanel`), compared with the pre-removal snapshot. Empty
 mountpoints kept on purpose are left off that list. It also lists packages
-kept and why, including `sudo` and `systemd-timesyncd` when they were marked
-manual; a warning that sury-provided library versions stay installed (the
-php-fpm role treats that repo as permanent while PHP remains — purge removes
-the repo and the `php*` packages, and does not downgrade the libraries sury
-replaced); that `/etc/systemd/timesyncd.conf` is left as written; a reboot so
-leftover kernel state (bridges, NAT rules) is cleared; and the commands to
-install a daemon or a self-hosted control plane again.
+kept and why (a Docker or PHP package whose purge would have dragged others
+along); a note that other packages stay installed by design; that
+`/etc/systemd/timesyncd.conf` is left as written; a reboot so leftover kernel
+state (bridges, NAT rules) is cleared; and the commands to install a daemon or
+a self-hosted control plane again.
 
-## Installer script hosting (`workers/turbopanel-sh/`)
+## Installer script hosting
 
-Moved to `workers/turbopanel-sh/AGENTS.md` — **turbopanel.sh** is an
-assets-only Worker that only 301-redirects to `scripts/run.sh` on the `live`
-branch of this repo; plus the dev overlay catalog notes.
+**https://turbopanel.sh is a plain redirect, and nothing in this repo hosts it.**
+Only the domain root redirects, to the one copy of the installer on GitHub; no
+other path on turbopanel.sh is served or referenced. The redirect is served from
+outside this repository (the owner's DNS/redirect; the Cloudflare Worker that
+used to do this was removed 2026-09-29):
+
+    https://raw.githubusercontent.com/TurboPanel/turbopaneld/live/scripts/run.sh
+
+`live` is the branch a release promotion fast-forwards, so an installer change
+reaches new installs at release cadence, matching the `release` channel the
+script installs by default. **Keep `scripts/run.sh` at that path on `live`** —
+the redirect points straight at the file. Any of 301/302/307/308 works (every
+consumer follows it); prefer 307 so a later change of target is not cached by
+browsers and proxies. `curl -fsSL turbopanel.sh | sh` works because `-L` follows
+the redirect (a bare `curl turbopanel.sh | sh` does not), and every automatic-update consumer already
+fetches with `-L`: `tp-orchestrate update` (`CDN_RUN_SCRIPT`), the daemon's
+`downloadRunScript` (`src/instance/run-reconcile.ts`), and run.sh's own
+re-exec. Threat model is unchanged: a party who could tamper with the domain
+could serve a bad script directly, so the redirect widens nothing; the release
+rail's signed manifests protect what the script then installs.
+
+**Overlay catalog (`TURBOPANEL_DL_BASE`):** co-located development Caddy serves
+`/run.sh` and `/downloads/daemon/*` from the daemon checkout. Remote servers
+installed through that overlay receive `TURBOPANEL_DL_BASE=<origin>/downloads/daemon`
+(persisted in `daemon.env`) and must **never** fall back to `https://dl.trbp.nl`.
+A configured `TURBOPANEL_DL_BASE` that is not https is refused
+(`InsecureOverlayBaseError`); only an absent base selects the public rail.
+Catalog URLs in `dist/channels.json` / `dist/manifest.json` are relative so the
+same files work behind LAN HTTPS on `:8443` and a Cloudflare tunnel.
+`run.sh --insecure-tls` still only relaxes the platform-CA instance legs;
+public :443 TLS (tunnel) uses the system store. Rebuild the overlay with
+`deno task release:dev` (dev console **Rebuild daemon and upgrade connected servers**).
+Each `release:dev` stamps overlay `commit` as `<40-char-sha>+<unix-seconds>`
+(baked into the binaries **and** the catalog). `sourceUrl` keeps the full
+immutable source commit (the SHA before `+`). Remotes skip reconcile when
+`getBuildInfo().commit` already matches the catalog; a plain git SHA would
+make **U** a no-op until HEAD moves. Production `release` stores the full
+40-character git SHA in `BUILD_INFO.commit`, `BUILD_INFO.sourceUrl`, and
+`ChannelManifest.commit` (short SHA is only for `buildId` / logs).
 
 ## Host facts & command handlers
 
@@ -1017,7 +1054,7 @@ Large subsystems live in focused `AGENTS.md` files next to their code — Cursor
 | **Command execution logs** | `src/logs/` | Streamed command transcripts: redaction deny-set, `<stateDir>/spool/execution-logs/` spool, batched upload to `POST /api/daemon/v1/commands/:commandId/log`, orphan sweep. Control-plane side: `../turbopanel/src/features/execution-logs/AGENTS.md`; capture details in `src/deploy/AGENTS.md` (Streamed transcript capture). This is the **only** log class uploaded and retained. |
 | **Managed engines (daemon runtime)** | `src/managed/AGENTS.md` | `managed.apply` / `.lifecycle` / `.destroy`, `managed.ingress.reconcile` (shared ProxySQL — compose project = the `managed-ingress` `serviceId` — on the organization's managed network, a bare-UUID name carried as `managedNetwork` on the command), engine registry (Postgres first); separate from tenant deploy. On-demand tails ride the same correlated cell round trip as `managed-logs-request` / `managed-logs-result`: engine `compose logs`, and running-container `docker container logs`. Neither is stored or collected; presence does not carry `containerLogsEnabled`. |
 | **Installer presentation** | `src/orchestration/AGENTS.md` | Installer presenter + sanitizer / vocabulary map for `run.sh` install & converge |
-| **Installer script hosting** | `workers/turbopanel-sh/AGENTS.md` | **turbopanel.sh** = assets-only 301 to `scripts/run.sh` on `live`; dev overlay catalog notes |
+| **Installer script hosting** | this file → *Installer script hosting* | **turbopanel.sh** = a redirect (served outside this repo) to `scripts/run.sh` on `live`; dev overlay catalog notes |
 | **Host facts** | `src/host/AGENTS.md` | Host OS, time sync, docker, machine key, runtime inventory probes (hello + change-detected heartbeats) |
 | **Time sync (Ansible)** | `orchestration/AGENTS.md` | `time-sync` role + `time-sync-apply.yml` (NTP / timezone) |
 

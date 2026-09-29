@@ -11,6 +11,7 @@
  * carry no useful topology identity and stay excluded entirely, same as v3.
  */
 import { parseDiskstatsRows } from "../collector/parse-diskstats.ts";
+import { mapSequential } from "../../util/sequential.ts";
 import {
   type BlockDeviceIdentity,
   deriveBlockDeviceIdentity,
@@ -227,16 +228,12 @@ export async function collectBlockTopology(
     !isPartitionOf(name, allNames)
   );
   const identities = await loadIdentities(allNames, deps.io, root);
-  const results: BlockDeviceTopology[] = [];
-  for (const name of allNames) {
-    const device = await collectOneDevice(
-      name,
-      wholeDiskNames,
-      identities,
-      deps,
-      root,
-    );
-    if (device) results.push(device);
-  }
+  // One device at a time: resolving a dm/md relation lists sysfs directories,
+  // which can shell out to `ls`, so keep that from bursting across every disk.
+  const devices = await mapSequential(
+    allNames,
+    (name) => collectOneDevice(name, wholeDiskNames, identities, deps, root),
+  );
+  const results = devices.filter((device) => device !== undefined);
   return results.sort((a, b) => a.deviceId.localeCompare(b.deviceId));
 }

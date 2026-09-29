@@ -37,6 +37,7 @@ import {
 } from "../deploy/compose-ps.ts";
 import type { EnvironmentDeployContainer } from "../contracts/commands-contracts.ts";
 import { logInfo } from "../util/logger.ts";
+import { forEachSequential } from "../util/sequential.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 import { reservedManagedIngressAddress } from "./ingress-cidr.ts";
 import {
@@ -477,13 +478,14 @@ export async function assertManagedIngressPortsBindable(
     ["pgsql", next.pgsql],
     ["mysql", next.mysql],
   ];
-  for (const bindAddress of bindAddresses) {
-    for (const [family, port] of families) {
-      if (held.has(port)) continue;
-      if (await probe(bindAddress, port)) continue;
-      throw new ManagedIngressPortInUseError(family, port, bindAddress);
-    }
-  }
+  const targets = bindAddresses.flatMap((bindAddress) =>
+    families.map(([family, port]) => ({ bindAddress, family, port }))
+  );
+  await forEachSequential(targets, async ({ bindAddress, family, port }) => {
+    if (held.has(port)) return;
+    if (await probe(bindAddress, port)) return;
+    throw new ManagedIngressPortInUseError(family, port, bindAddress);
+  });
 }
 
 function formatAdminPublishedPort(): string {
@@ -1470,6 +1472,15 @@ export async function inspectProxySqlContainer(
   }
 }
 
+/** Rendering and stability inputs for {@link ensureProxySqlIngress}. */
+export type EnsureProxySqlIngressOptions = {
+  readonly bindAddresses: readonly string[];
+  readonly segmentAttachments: ReadonlyArray<ProxySqlSegmentAttachment>;
+  readonly listenerPorts: ProxySqlListenerPorts | null | undefined;
+  readonly managedNetwork: string;
+  readonly stability?: ContainerStabilityOptions;
+};
+
 /**
  * Write identity-bearing compose and bring the shared ProxySQL project up.
  *
@@ -1486,12 +1497,15 @@ export async function ensureProxySqlIngress(
   layout: LayoutPaths,
   descriptor: SystemComponentDescriptor,
   run: RunDockerFn,
-  bindAddresses: readonly string[],
-  segmentAttachments: ReadonlyArray<ProxySqlSegmentAttachment>,
-  listenerPorts: ProxySqlListenerPorts | null | undefined,
-  managedNetwork: string,
-  stability?: ContainerStabilityOptions,
+  options: EnsureProxySqlIngressOptions,
 ): Promise<void> {
+  const {
+    bindAddresses,
+    segmentAttachments,
+    listenerPorts,
+    managedNetwork,
+    stability,
+  } = options;
   const composePath = proxysqlComposePath(layout);
   await Deno.mkdir(proxysqlConfigDir(layout), { recursive: true, mode: 0o750 });
   await Deno.writeTextFile(

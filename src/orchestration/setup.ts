@@ -20,6 +20,7 @@ import { ensureUv } from "./uv.ts";
 import { resolveInstanceConfig } from "../instance/sockets.ts";
 import { detectInstallMode, type InstallMode } from "../paths/layout.ts";
 import { logError, logInfo, sanitizeForLog } from "../util/logger.ts";
+import { forEachSequential } from "../util/sequential.ts";
 import {
   DAEMON_INSTALL_PLAYBOOK,
   INSTALLER_PLAYBOOKS,
@@ -153,9 +154,9 @@ export async function initOrchestration(): Promise<boolean> {
     );
   }
   try {
-    for (const [, step] of steps) {
+    await forEachSequential(steps, async ([, step]) => {
       await step();
-    }
+    });
     const elapsed = ((performance.now() - started) / 1000).toFixed(1);
     logInfo("orchestration", `runtime ready in ${elapsed}s`);
     return true;

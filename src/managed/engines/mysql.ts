@@ -11,6 +11,8 @@ import type {
   ManagedApplyDatabaseOp,
 } from "../../contracts/commands-contracts.ts";
 import { sanitizeForLog } from "../../util/logger.ts";
+import { forEachSequential } from "../../util/sequential.ts";
+import { grantDatabasePrivileges } from "./grant-databases.ts";
 import {
   authSocketPluginPresentSql,
   changeReplicationSourceSql,
@@ -29,7 +31,6 @@ import {
   grantRootSql,
   installAuthSocketPluginSql,
   isWritableSql,
-  type ManagedDatabasePrivilege,
   promoteSql,
   quoteIdentifier,
   showReplicaStatusSql,
@@ -279,13 +280,6 @@ async function runMysqlStatusQuery(
   return result.stdout;
 }
 
-function asPrivilege(value: string): ManagedDatabasePrivilege | null {
-  if (value === "owner" || value === "read-write" || value === "read-only") {
-    return value;
-  }
-  return null;
-}
-
 async function applyOneCredential(
   ctx: ManagedEngineContext,
   credential: ManagedApplyCredential,
@@ -329,22 +323,14 @@ async function applyOneCredential(
     ),
   );
 
-  const privileges = credential.privileges ?? [];
-  for (const database of credential.databases) {
-    for (const raw of privileges) {
-      const privilege = asPrivilege(raw);
-      if (privilege === null) continue;
-      await runMysql(
-        ctx,
-        [
-          grantDatabaseSql(database, credential.username, privilege),
-          ...(ctx.clientSourceHosts ?? []).map((host) =>
-            grantDatabaseSql(database, credential.username, privilege, host)
-          ),
-        ].join("\n"),
-      );
-    }
-  }
+  await grantDatabasePrivileges({
+    databases: credential.databases,
+    privileges: credential.privileges ?? [],
+    username: credential.username,
+    hosts: ctx.clientSourceHosts ?? [],
+    grantSql: grantDatabaseSql,
+    run: (sql) => runMysql(ctx, sql),
+  });
   await runMysql(ctx, "FLUSH PRIVILEGES;");
 }
 
@@ -593,12 +579,15 @@ const mysqlReplicationRuntime: ManagedEngineReplicationRuntime = {
   async promote(ctx) {
     await runMysql(ctx, promoteSql());
     const deadline = Date.now() + 60_000;
-    while (Date.now() < deadline) {
+    const writable = async (): Promise<boolean> => {
+      if (Date.now() >= deadline) return false;
       const out = await runMysqlQuery(ctx, isWritableSql());
       const [readOnly, superReadOnly] = out.trim().split(/\s+/);
-      if (readOnly === "0" && superReadOnly === "0") return;
+      if (readOnly === "0" && superReadOnly === "0") return true;
       await sleep(500);
-    }
+      return writable();
+    };
+    if (await writable()) return;
     throw new Error("mysql promote did not become writable within 60s");
   },
 
@@ -630,7 +619,8 @@ export const mysqlManagedEngineRuntime: ManagedEngineRuntime = {
   async waitReady(ctx: ManagedEngineContext): Promise<void> {
     const deadline = Date.now() + READY_TIMEOUT_MS;
     let lastError = "mysqladmin ping did not succeed";
-    while (Date.now() < deadline) {
+    const ready = async (): Promise<boolean> => {
+      if (Date.now() >= deadline) return false;
       const result = await execMysql(ctx, [
         "mysqladmin",
         "ping",
@@ -638,12 +628,12 @@ export const mysqlManagedEngineRuntime: ManagedEngineRuntime = {
         "-u",
         ctx.rootUsername,
       ]);
-      if (result.success) {
-        return;
-      }
+      if (result.success) return true;
       lastError = result.stderr || result.stdout || lastError;
       await sleep(READY_POLL_MS);
-    }
+      return ready();
+    };
+    if (await ready()) return;
     throw new Error(
       `managed mysql not ready within ${READY_TIMEOUT_MS}ms: ${
         sanitizeForLog(lastError)
@@ -687,10 +677,10 @@ export const mysqlManagedEngineRuntime: ManagedEngineRuntime = {
     credentials: ManagedApplyCredential[],
   ): Promise<string[]> {
     const applied: string[] = [];
-    for (const credential of credentials) {
+    await forEachSequential(credentials, async (credential) => {
       await applyOneCredential(ctx, credential);
       applied.push(credential.username);
-    }
+    });
     return applied;
   },
 
@@ -713,14 +703,14 @@ export const mysqlManagedEngineRuntime: ManagedEngineRuntime = {
     ops: ManagedApplyDatabaseOp[],
   ): Promise<string[]> {
     const applied: string[] = [];
-    for (const op of ops) {
+    await forEachSequential(ops, async (op) => {
       if (op.action === "create") {
         await runMysql(ctx, createDatabaseSql(op.name));
       } else {
         await runMysql(ctx, dropDatabaseSql(op.name));
       }
       applied.push(op.name);
-    }
+    });
     return applied;
   },
 
@@ -729,11 +719,11 @@ export const mysqlManagedEngineRuntime: ManagedEngineRuntime = {
     usernames: string[],
   ): Promise<string[]> {
     const dropped: string[] = [];
-    for (const username of usernames) {
-      if (username === ctx.rootUsername) continue;
+    await forEachSequential(usernames, async (username) => {
+      if (username === ctx.rootUsername) return;
       await runMysql(ctx, dropAccountSql(username));
       dropped.push(username);
-    }
+    });
     return dropped;
   },
 

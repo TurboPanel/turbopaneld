@@ -303,15 +303,17 @@ test("ensureProxySqlIngress preserves passed segment attachments in the written 
           stderr: "",
           code: 0,
         }),
-      [],
-      [
-        {
-          name: "tpn_00000000-0000-4000-8000-0000000000cc",
-          ipv4Address: "10.90.1.254",
-        },
-      ],
-      null,
-      MANAGED_NETWORK,
+      {
+        bindAddresses: [],
+        segmentAttachments: [
+          {
+            name: "tpn_00000000-0000-4000-8000-0000000000cc",
+            ipv4Address: "10.90.1.254",
+          },
+        ],
+        listenerPorts: null,
+        managedNetwork: MANAGED_NETWORK,
+      },
     );
     assertEquals(await readCurrentProxySqlSegmentAttachments(layout), [
       {
@@ -466,10 +468,12 @@ test("readCurrentProxySqlManagedNetwork reads the name back off disk", async () 
       layout,
       DESCRIPTOR,
       () => Promise.resolve({ success: true, stdout: "", stderr: "", code: 0 }),
-      ["203.0.113.5"],
-      [],
-      null,
-      MANAGED_NETWORK,
+      {
+        bindAddresses: ["203.0.113.5"],
+        segmentAttachments: [],
+        listenerPorts: null,
+        managedNetwork: MANAGED_NETWORK,
+      },
     );
     assertEquals(
       await readCurrentProxySqlManagedNetwork(layout),
@@ -1465,6 +1469,31 @@ test("port preflight refuses a port an unrelated host listener already owns", as
   assertEquals(err.kind, "managed_ingress_port_in_use");
 });
 
+test("port preflight probes address by address, pgsql before mysql, and stops at the first busy port", async () => {
+  const probed: string[] = [];
+  const err = await assertRejects(
+    () =>
+      assertManagedIngressPortsBindable(
+        ["203.0.113.5", "203.0.113.6", "203.0.113.7"],
+        { pgsql: 18432, mysql: 18306 },
+        null,
+        (host, port) => {
+          probed.push(`${host}:${port}`);
+          return Promise.resolve(!(host === "203.0.113.6" && port === 18432));
+        },
+      ),
+    ManagedIngressPortInUseError,
+  );
+  assertEquals(probed, [
+    "203.0.113.5:18432",
+    "203.0.113.5:18306",
+    "203.0.113.6:18432",
+  ]);
+  assertEquals(err.bindAddress, "203.0.113.6");
+  assertEquals(err.family, "pgsql");
+  assertEquals(err.port, 18432);
+});
+
 test("legacy published 5432 compose text differs from current render so compose up is required", () => {
   const next = proxysqlCompose(
     DESCRIPTOR,
@@ -1560,10 +1589,12 @@ test("inspectProxySqlContainer matches labelled managed-ingress row", async () =
           stderr: "",
           code: 0,
         }),
-      [],
-      [],
-      null,
-      MANAGED_NETWORK,
+      {
+        bindAddresses: [],
+        segmentAttachments: [],
+        listenerPorts: null,
+        managedNetwork: MANAGED_NETWORK,
+      },
     );
     const ps = JSON.stringify([
       {
@@ -1616,10 +1647,12 @@ test("inspectProxySqlContainer returns undefined when compose ps fails", async (
           stderr: "",
           code: 0,
         }),
-      [],
-      [],
-      null,
-      MANAGED_NETWORK,
+      {
+        bindAddresses: [],
+        segmentAttachments: [],
+        listenerPorts: null,
+        managedNetwork: MANAGED_NETWORK,
+      },
     );
     const row = await inspectProxySqlContainer(layout, DESCRIPTOR, {
       runDocker: () =>
@@ -1650,10 +1683,12 @@ test("readCurrentProxySqlBindAddresses round-trips published bind", async () => 
           stderr: "",
           code: 0,
         }),
-      ["203.0.113.8"],
-      [],
-      null,
-      MANAGED_NETWORK,
+      {
+        bindAddresses: ["203.0.113.8"],
+        segmentAttachments: [],
+        listenerPorts: null,
+        managedNetwork: MANAGED_NETWORK,
+      },
     );
     assertEquals(
       await readCurrentProxySqlBindAddresses(layout),
@@ -1698,10 +1733,12 @@ test("restartProxySqlIngress throws when compose restart fails", async () => {
           stderr: "",
           code: 0,
         }),
-      [],
-      [],
-      null,
-      MANAGED_NETWORK,
+      {
+        bindAddresses: [],
+        segmentAttachments: [],
+        listenerPorts: null,
+        managedNetwork: MANAGED_NETWORK,
+      },
     );
     await assertRejects(
       () =>

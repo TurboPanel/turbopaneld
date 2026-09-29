@@ -45,6 +45,7 @@
 import { join } from "@std/path";
 import { hostSudoArgs } from "../permissions/host-sudo.ts";
 import { logInfo, logWarn } from "../util/logger.ts";
+import { forEachSequential } from "../util/sequential.ts";
 import { runLocalPlaybook } from "../orchestration/ansible.ts";
 import {
   ORCHESTRATION_DIR,
@@ -1280,11 +1281,14 @@ async function writeHostingWebMetadata(
 
   const metaDir = join(siteBase, ".turbopanel");
   await Deno.mkdir(metaDir, { recursive: true, mode: 0o750 });
-  for (const file of files) {
-    await Deno.writeTextFile(join(metaDir, file.name), file.contents, {
-      mode: 0o640,
-    });
-  }
+  // Distinct files in a fresh directory: no ordering between the writes.
+  await Promise.all(
+    files.map((file) =>
+      Deno.writeTextFile(join(metaDir, file.name), file.contents, {
+        mode: 0o640,
+      })
+    ),
+  );
 }
 
 /**
@@ -1337,7 +1341,8 @@ async function writeReleaseHostingWebMetadata(
     site.composeServiceName,
   );
   await Deno.mkdir(stagingDir, { recursive: true, mode: 0o750 });
-  for (const file of files) {
+  // Root-owned installs stay ordered; a failed install stops the later ones.
+  await forEachSequential(files, async (file) => {
     const staged = join(stagingDir, `${file.name}.tmp`);
     const target = join(metaDir, file.name);
     await Deno.writeTextFile(staged, file.contents, { mode: 0o640 });
@@ -1345,7 +1350,7 @@ async function writeReleaseHostingWebMetadata(
     // do not change when a promote only moves `current`.
     if (await ownedConfigFileMatches(staged, target)) {
       await removeStagedFile(staged);
-      continue;
+      return;
     }
     const install = await run(
       "sudo",
@@ -1368,7 +1373,7 @@ async function writeReleaseHostingWebMetadata(
         install.stderr || `Failed to install hosting metadata ${target}`,
       );
     }
-  }
+  });
 }
 
 const SITE_ENGINE_LABELS: Record<
@@ -1548,9 +1553,12 @@ async function renderOpenLiteSpeedMainConfig(
       if (entry.isFile && entry.name.endsWith(".conf")) names.push(entry.name);
     }
     names.sort((a, b) => a.localeCompare(b));
-    for (const name of names) {
-      fragments.push(await Deno.readTextFile(join(sitesDir, name)));
-    }
+    // Independent reads; `Promise.all` keeps the sorted fragment order.
+    fragments.push(
+      ...await Promise.all(
+        names.map((name) => Deno.readTextFile(join(sitesDir, name))),
+      ),
+    );
   } catch (err) {
     if (!(err instanceof Deno.errors.NotFound)) throw err;
   }
@@ -1947,14 +1955,18 @@ async function installSiteEngines(
       "site-openlitespeed-apply (vendor + lsphp + identity)",
     ],
   ] as const;
-  for (const [needed, engine, playbook, label] of engines) {
-    if (!needed) continue;
-    await runSitePlaybook(
-      playbook,
-      label,
-      siteEngineApplyExtraArgs(engine, needs, phpSeries, phpExtensions),
-    );
-  }
+  // Host provisioning playbooks run one engine at a time, in this order.
+  await forEachSequential(
+    engines,
+    async ([needed, engine, playbook, label]) => {
+      if (!needed) return;
+      await runSitePlaybook(
+        playbook,
+        label,
+        siteEngineApplyExtraArgs(engine, needs, phpSeries, phpExtensions),
+      );
+    },
+  );
 }
 
 async function ensureSiteConfigDirs(
@@ -1976,12 +1988,15 @@ async function ensureSiteConfigDirs(
     await Deno.mkdir(sitesDirs.openlitespeed, { recursive: true, mode: 0o750 });
   }
   if (needs.phpFpm) {
-    for (const series of phpSeries) {
-      await Deno.mkdir(phpFpmPoolsDir(layout, series), {
-        recursive: true,
-        mode: 0o750,
-      });
-    }
+    // Distinct per-series directories: no ordering between the mkdirs.
+    await Promise.all(
+      phpSeries.map((series) =>
+        Deno.mkdir(phpFpmPoolsDir(layout, series), {
+          recursive: true,
+          mode: 0o750,
+        })
+      ),
+    );
   }
 }
 
@@ -2064,24 +2079,25 @@ async function reloadSiteEngines(
   const touched: string[] = [];
   // Roll php-fpm out first so its sockets exist before nginx/Apache config-test
   // the `fastcgi_pass` / `proxy:unix:` lines that point at them.
-  for (
-    const series of [...plan.staged.phpFpm.keys()].sort((a, b) =>
+  await forEachSequential(
+    [...plan.staged.phpFpm.keys()].sort((a, b) =>
       a.localeCompare(b, undefined, { numeric: true })
-    )
-  ) {
-    const staged = plan.staged.phpFpm.get(series) ?? [];
-    if (staged.length === 0) continue;
-    await rolloutSiteConfigs({
-      run,
-      layout,
-      target: phpFpmDriver(series),
-      restart: false,
-      staged,
-    });
-    touched.push(`php-fpm ${series}`);
-  }
-  for (const engine of SITE_ENGINE_ORDER) {
-    if (!engineNeedsReload(engine, plan)) continue;
+    ),
+    async (series) => {
+      const staged = plan.staged.phpFpm.get(series) ?? [];
+      if (staged.length === 0) return;
+      await rolloutSiteConfigs({
+        run,
+        layout,
+        target: phpFpmDriver(series),
+        restart: false,
+        staged,
+      });
+      touched.push(`php-fpm ${series}`);
+    },
+  );
+  await forEachSequential(SITE_ENGINE_ORDER, async (engine) => {
+    if (!engineNeedsReload(engine, plan)) return;
     await rolloutSiteConfigs({
       run,
       layout,
@@ -2100,7 +2116,7 @@ async function reloadSiteEngines(
         : {}),
     });
     touched.push(engine);
-  }
+  });
   return touched;
 }
 
@@ -2450,16 +2466,13 @@ async function ensureManagedDirectory(
 ): Promise<void> {
   const principalHome = principalHomePath(layout, managed.username);
   const owner = `${managed.username}:${siteEngineUnixUser(site.engine)}`;
-  for (
-    const dir of [
-      siteRoot(principalHome, managed.serviceId),
-      siteWebrootDir(principalHome, managed.serviceId),
-      siteSharedDir(principalHome, managed.serviceId),
-      documentRoot,
-    ]
-  ) {
-    await ensureDirectoryWithOwner(dir, "0750", owner, run);
-  }
+  // Parent before child: the directories are created in this order.
+  await forEachSequential([
+    siteRoot(principalHome, managed.serviceId),
+    siteWebrootDir(principalHome, managed.serviceId),
+    siteSharedDir(principalHome, managed.serviceId),
+    documentRoot,
+  ], (dir) => ensureDirectoryWithOwner(dir, "0750", owner, run));
   await seedManagedIndexHtml(site, documentRoot, owner);
 }
 
@@ -2681,7 +2694,7 @@ export async function applySites(
     const restartEngines: SiteEngineSet = new Set();
     const staged = emptyStagedConfigs();
     const validationTargets = emptyValidationTargets();
-    for (const site of sites) {
+    await forEachSequential(sites, async (site) => {
       const result = await applyOneSite(
         layout,
         environmentId,
@@ -2705,7 +2718,7 @@ export async function applySites(
         url: `http://127.0.0.1:${site.listenPort}/`,
       });
       applied.push(site.composeServiceName);
-    }
+    });
 
     const reloaded = await reloadSiteEngines(layout, {
       needs,
@@ -2760,7 +2773,7 @@ async function removePhpFpmEngineSites(
   // engine while pools live under `<configDir>/php/<series>/pools/`.
   let poolsRemoved = 0;
   const touchedSeries = new Set<string>();
-  for (const series of await installedPhpSeries(layout)) {
+  await forEachSequential(await installedPhpSeries(layout), async (series) => {
     const poolsDir = phpFpmPoolsDir(layout, series);
     const removed = await removePrefixedConfFiles(
       poolsDir,
@@ -2770,7 +2783,7 @@ async function removePhpFpmEngineSites(
     await removeStagingPrefixedFiles(poolsDir, prefix);
     if (removed > 0) touchedSeries.add(series);
     poolsRemoved += removed;
-  }
+  });
   return { sitesRemoved, poolsRemoved, touchedSeries };
 }
 
@@ -2926,31 +2939,33 @@ export async function removeSites(
       ...nginxRemoved.touchedSeries,
       ...apacheRemoved.touchedSeries,
     ]);
-    for (
-      const series of [...touchedSeries].sort((a, b) =>
+    await forEachSequential(
+      [...touchedSeries].sort((a, b) =>
         a.localeCompare(b, undefined, { numeric: true })
-      )
-    ) {
-      await tryReloadAfterSiteRemoval(
-        `php-fpm ${series}`,
-        () => reloadPhpFpm(layout, series),
-      );
-      await disableIdlePhpSeries(layout, series);
-    }
-    for (
-      const [engine, removed] of [
+      ),
+      async (series) => {
+        await tryReloadAfterSiteRemoval(
+          `php-fpm ${series}`,
+          () => reloadPhpFpm(layout, series),
+        );
+        await disableIdlePhpSeries(layout, series);
+      },
+    );
+    await forEachSequential(
+      [
         ["caddy", caddyRemoved.sitesRemoved],
         ["nginx", nginxRemoved.sitesRemoved],
         ["apache", apacheRemoved.sitesRemoved],
         ["openlitespeed", openlitespeedRemoved],
-      ] as const
-    ) {
-      if (removed === 0) continue;
-      const driver = SITE_ENGINE_DRIVERS[engine];
-      await tryReloadAfterSiteRemoval(
-        driver.label,
-        () => driver.reload(run, layout, false),
-      );
-    }
+      ] as const,
+      async ([engine, removed]) => {
+        if (removed === 0) return;
+        const driver = SITE_ENGINE_DRIVERS[engine];
+        await tryReloadAfterSiteRemoval(
+          driver.label,
+          () => driver.reload(run, layout, false),
+        );
+      },
+    );
   });
 }

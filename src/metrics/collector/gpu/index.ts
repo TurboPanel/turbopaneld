@@ -30,6 +30,7 @@
  */
 import type { GpuSample } from "../../../contracts/metrics-contract.ts";
 import type { GpuTopology } from "../../../contracts/topology-types.ts";
+import { mapSequential } from "../../../util/sequential.ts";
 import type { CounterBaselineTracker } from "../baseline.ts";
 import type {
   GpuAdapter,
@@ -170,16 +171,15 @@ export async function buildGpuSamples(
 
   const merged = await Promise.all(topology.map(async (gpu) => {
     const chain = adapterChainFor(gpu.vendor, adapters);
-    const readings: GpuReading[] = [];
-    for (const adapter of chain) {
-      let reading: GpuReading | null;
+    // Adapters for one GPU run one after another, in precedence order.
+    const attempts = await mapSequential(chain, async (adapter) => {
       try {
-        reading = await adapter.read(gpu, readCtx);
+        return await adapter.read(gpu, readCtx);
       } catch {
-        reading = null;
+        return null;
       }
-      if (reading !== null) readings.push(reading);
-    }
+    });
+    const readings: GpuReading[] = attempts.filter((r) => r !== null);
     if (readings.length === 0) {
       invalidateKnownBaselineKeys(ctx.tracker, gpu.gpuId);
       return {

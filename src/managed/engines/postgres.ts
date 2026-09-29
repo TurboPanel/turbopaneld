@@ -9,6 +9,7 @@ import type {
   ManagedApplyDatabaseOp,
 } from "../../contracts/commands-contracts.ts";
 import { logInfo, sanitizeForLog } from "../../util/logger.ts";
+import { forEachSequential } from "../../util/sequential.ts";
 import {
   connectionCensusSql,
   createDatabaseSql,
@@ -168,16 +169,18 @@ async function applyOneCredential(
   );
 
   const privileges = credential.privileges ?? [];
-  for (const database of credential.databases) {
-    for (const raw of privileges) {
-      const privilege = asPrivilege(raw);
-      if (privilege === null) continue;
-      await runPsql(
-        ctx,
-        grantDatabaseSql(database, credential.username, privilege),
-      );
-    }
-  }
+  await forEachSequential(
+    credential.databases,
+    (database) =>
+      forEachSequential(privileges, async (raw) => {
+        const privilege = asPrivilege(raw);
+        if (privilege === null) return;
+        await runPsql(
+          ctx,
+          grantDatabaseSql(database, credential.username, privilege),
+        );
+      }),
+  );
 }
 
 async function parsePsqlRows(
@@ -222,15 +225,16 @@ const postgresReplicationRuntime: ManagedEngineReplicationRuntime = {
     );
 
     const desired = new Set(spec.desiredSlots);
-    for (const slot of desired) {
-      await runPsql(ctx, createPhysicalSlotSql(slot));
-    }
+    await forEachSequential(
+      desired,
+      (slot) => runPsql(ctx, createPhysicalSlotSql(slot)),
+    );
 
     const rows = await parsePsqlRows(ctx, listManagedSlotsSql());
-    for (const [slotName] of rows) {
-      if (!slotName || desired.has(slotName)) continue;
+    await forEachSequential(rows, async ([slotName]) => {
+      if (!slotName || desired.has(slotName)) return;
       await runPsql(ctx, dropPhysicalSlotSql(slotName));
-    }
+    });
   },
 
   async bootstrapStandby(ctx: ManagedEngineBootstrapContext, spec) {
@@ -385,12 +389,15 @@ const postgresReplicationRuntime: ManagedEngineReplicationRuntime = {
   async promote(ctx) {
     await runPsql(ctx, promoteSql());
     const deadline = Date.now() + 60_000;
-    while (Date.now() < deadline) {
+    const leftRecovery = async (): Promise<boolean> => {
+      if (Date.now() >= deadline) return false;
       const rows = await parsePsqlRows(ctx, isInRecoverySql());
       const value = rows[0]?.[0]?.toLowerCase();
-      if (value === "f" || value === "false") return;
+      if (value === "f" || value === "false") return true;
       await sleep(500);
-    }
+      return leftRecovery();
+    };
+    if (await leftRecovery()) return;
     throw new Error("pg_promote did not leave recovery within 60s");
   },
 
@@ -448,7 +455,8 @@ export const postgresManagedEngineRuntime: ManagedEngineRuntime = {
   async waitReady(ctx: ManagedEngineContext): Promise<void> {
     const deadline = Date.now() + READY_TIMEOUT_MS;
     let lastError = "pg_isready did not succeed";
-    while (Date.now() < deadline) {
+    const ready = async (): Promise<boolean> => {
+      if (Date.now() >= deadline) return false;
       const result = await ctx.exec([
         "pg_isready",
         "-U",
@@ -456,10 +464,12 @@ export const postgresManagedEngineRuntime: ManagedEngineRuntime = {
         "-d",
         ctx.defaultDatabase,
       ]);
-      if (result.success) return;
+      if (result.success) return true;
       lastError = result.stderr || result.stdout || lastError;
       await sleep(READY_POLL_MS);
-    }
+      return ready();
+    };
+    if (await ready()) return;
     throw new Error(
       `managed postgres not ready within ${READY_TIMEOUT_MS}ms: ${
         sanitizeForLog(lastError)
@@ -541,10 +551,10 @@ export const postgresManagedEngineRuntime: ManagedEngineRuntime = {
     credentials: ManagedApplyCredential[],
   ): Promise<string[]> {
     const applied: string[] = [];
-    for (const credential of credentials) {
+    await forEachSequential(credentials, async (credential) => {
       await applyOneCredential(ctx, credential);
       applied.push(credential.username);
-    }
+    });
     return applied;
   },
 
@@ -567,7 +577,7 @@ export const postgresManagedEngineRuntime: ManagedEngineRuntime = {
     ops: ManagedApplyDatabaseOp[],
   ): Promise<string[]> {
     const applied: string[] = [];
-    for (const op of ops) {
+    await forEachSequential(ops, async (op) => {
       if (op.action === "create") {
         // CREATE DATABASE cannot run inside PL/pgSQL; check then create.
         const existing = await parsePsqlRows(ctx, databaseExistsSql(op.name));
@@ -578,7 +588,7 @@ export const postgresManagedEngineRuntime: ManagedEngineRuntime = {
         await runPsql(ctx, dropDatabaseSql(op.name));
       }
       applied.push(op.name);
-    }
+    });
     return applied;
   },
 
@@ -587,11 +597,11 @@ export const postgresManagedEngineRuntime: ManagedEngineRuntime = {
     usernames: string[],
   ): Promise<string[]> {
     const dropped: string[] = [];
-    for (const username of usernames) {
-      if (username === ctx.rootUsername) continue;
+    await forEachSequential(usernames, async (username) => {
+      if (username === ctx.rootUsername) return;
       await runPsql(ctx, dropRoleSql(username));
       dropped.push(username);
-    }
+    });
     return dropped;
   },
 

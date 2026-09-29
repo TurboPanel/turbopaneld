@@ -132,22 +132,23 @@ export async function backingDeviceNames(
   io: MapperResolverIo,
   sysRoot = "/sys",
 ): Promise<string[]> {
-  const names = new Set<string>();
-  for (const path of paths) {
+  // Each path resolves independently (read-only sysfs lookups); adding the
+  // results to the set in `paths` order keeps the output order deterministic.
+  const resolved = await Promise.all(paths.map(async (path) => {
     const mount = mountForPath(entries, path);
-    if (!mount) continue;
+    if (!mount) return undefined;
 
     const direct = /^\/dev\/([^/]+)$/.exec(mount.source);
-    if (direct) {
-      names.add(direct[1]);
-      continue;
-    }
+    if (direct) return direct[1];
 
     const mapper = /^\/dev\/mapper\/(.+)$/.exec(mount.source);
-    if (mapper) {
-      const dmName = await resolveMapperDevice(mapper[1], io, sysRoot);
-      if (dmName) names.add(dmName);
-    }
+    return mapper
+      ? await resolveMapperDevice(mapper[1], io, sysRoot)
+      : undefined;
+  }));
+  const names = new Set<string>();
+  for (const name of resolved) {
+    if (name) names.add(name);
   }
   return [...names];
 }

@@ -1081,6 +1081,38 @@ test("assertUpdateDiskPreflight rejects an invalid statfs result", async () => {
   );
 });
 
+test("assertUpdateDiskPreflight probes install root, state, tmp in order and stops at the first low one", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-disk-order-" });
+  try {
+    const install = join(root, "install");
+    const state = join(root, "state");
+    const tmp = join(root, "tmp");
+    const probed: string[] = [];
+    const plenty = { bavail: Number.MAX_SAFE_INTEGER, bsize: 1 };
+    const run = (lowAt: string | null) =>
+      assertUpdateDiskPreflight({
+        installRoot: install,
+        stateDir: state,
+        tmpDir: tmp,
+        statfsProbe: (path) => {
+          probed.push(path);
+          return Promise.resolve(
+            path === lowAt ? { bavail: 1, bsize: 1 } : plenty,
+          );
+        },
+      });
+    await run(null);
+    assertEquals(probed, [install, state, tmp]);
+
+    probed.length = 0;
+    const err = await assertRejects(() => run(state), UpdatePreflightError);
+    assertEquals(probed, [install, state]);
+    assertStringIncludes(err.message, `insufficient free space on state`);
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
 test("assertUpdateDiskPreflight probes a missing directory via create-or-parent", async () => {
   const root = await Deno.makeTempDir({ prefix: "tp-disk-missing-" });
   const missing = join(root, "state", "nested");
@@ -1388,6 +1420,113 @@ test("executeInstanceUpdateReconcile refreshes Caddy when the updating page is a
   );
   assertEquals(backupAt >= 0 && refreshAt > backupAt, true);
   assertEquals(installAt > refreshAt, true);
+});
+
+test("executeInstanceUpdateReconcile names the running build in the backup playbook", async () => {
+  const calls: Array<{ bin: string; args: string[] }> = [];
+  await executeInstanceUpdateReconcile({
+    channel: "release",
+    upgradeId: "up-prev",
+    hooks: managedUpdateHooks(calls, {
+      readHealth: () =>
+        Promise.resolve({ version: "0.1.0", commit: "oldcommit" }),
+    }),
+  }).catch(() => undefined);
+  const backup = calls.find((call) =>
+    call.args.includes("instance-backup.yml")
+  );
+  const joined = backup?.args.join(" ") ?? "";
+  assertEquals(joined.includes("turbopanel_instance_version=0.1.0"), true);
+  assertEquals(joined.includes("turbopanel_instance_revision=oldcommit"), true);
+});
+
+test("executeInstanceUpdateReconcile omits build vars from the backup when no build is running", async () => {
+  const calls: Array<{ bin: string; args: string[] }> = [];
+  let reads = 0;
+  await executeInstanceUpdateReconcile({
+    channel: "release",
+    upgradeId: "up-noprev",
+    hooks: managedUpdateHooks(calls, {
+      readHealth: () => {
+        reads += 1;
+        return Promise.resolve(
+          reads === 1 ? null : { version: "0.1.1", commit: "newcommit" },
+        );
+      },
+    }),
+  });
+  const backup = calls.find((call) =>
+    call.args.includes("instance-backup.yml")
+  );
+  const joined = backup?.args.join(" ") ?? "";
+  assertEquals(joined.includes("turbopanel_instance_version"), false);
+  assertEquals(joined.includes("turbopanel_instance_revision"), false);
+  assertEquals(joined.includes("turbopanel_upgrade_id=up-noprev"), true);
+});
+
+test("executeInstanceUpdateReconcile stops with preflight_backup when the backup playbook fails", async () => {
+  for (
+    const [stderr, expected] of [
+      ["disk full\n", "disk full"],
+      ["  ", "control-plane backup failed"],
+    ] as const
+  ) {
+    const calls: Array<{ bin: string; args: string[] }> = [];
+    const base = managedUpdateHooks(calls);
+    const error = await assertRejects(
+      () =>
+        executeInstanceUpdateReconcile({
+          channel: "release",
+          hooks: {
+            ...base,
+            run: (bin, args, onStage) =>
+              args.includes("instance-backup.yml")
+                ? Promise.resolve({ code: 1, stdout: "", stderr })
+                : base.run!(bin, args, onStage),
+          },
+        }),
+      UpdatePreflightError,
+    );
+    assertEquals(error.code, "preflight_backup");
+    assertEquals(error.message.includes(expected), true);
+    assertEquals(
+      calls.some((call) => call.args.includes("update-instance")),
+      false,
+    );
+  }
+});
+
+test("executeInstanceUpdateReconcile fails before installing when the Caddy refresh fails", async () => {
+  for (
+    const [stderr, expected] of [
+      ["caddy render broke", "caddy render broke"],
+      ["", "instance-launch-only refresh failed"],
+    ] as const
+  ) {
+    const calls: Array<{ bin: string; args: string[] }> = [];
+    const base = managedUpdateHooks(calls, {
+      readCaddyfile: () => Promise.resolve("reverse_proxy only"),
+    });
+    await assertRejects(
+      () =>
+        executeInstanceUpdateReconcile({
+          channel: "release",
+          hooks: {
+            ...base,
+            run: (bin, args, onStage) =>
+              args.includes("instance-launch-only.yml")
+                ? Promise.resolve({ code: 1, stdout: "", stderr })
+                : base.run!(bin, args, onStage),
+          },
+        }),
+      Error,
+      expected,
+    );
+    assertEquals(
+      calls.some((call) => call.args.includes("update-instance")),
+      false,
+    );
+  }
 });
 
 test("executeInstanceUpdateReconcile rolls back when health never matches", async () => {

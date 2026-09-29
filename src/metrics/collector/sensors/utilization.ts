@@ -53,9 +53,12 @@ async function readEngineBusy(
   io: SensorIo,
 ): Promise<ResolvedGpuUtilization> {
   const engines: Record<string, number> = {};
-  for (const candidate of candidates) {
-    const raw = await io.readFile(candidate.path);
-    const nanoseconds = Number(raw?.trim());
+  // Independent sysfs reads, in parallel; recorded in candidate order.
+  const raws = await Promise.all(
+    candidates.map(async (candidate) => await io.readFile(candidate.path)),
+  );
+  for (const [index, candidate] of candidates.entries()) {
+    const nanoseconds = Number(raws[index]?.trim());
     if (!Number.isFinite(nanoseconds) || nanoseconds < 0) continue;
     engines[candidate.label] = nanoseconds;
   }

@@ -338,30 +338,41 @@ export type ContractFieldPin = ContractFieldSpec & {
 
 type TypeRelation = "same" | "narrower" | "wider" | "different";
 
+function isWhitespaceChar(ch: string | undefined): boolean {
+  return ch === " " || ch === "\t" || ch === "\n" || ch === "\r";
+}
+
+/** Index after a `//` comment starting at `i` (stops on the newline). */
+function skipLineComment(source: string, i: number): number {
+  let j = i + 2;
+  while (j < source.length && source[j] !== "\n") j += 1;
+  return j;
+}
+
+/** Index after a block comment starting at `i` (or the end of the source). */
+function skipBlockComment(source: string, i: number): number {
+  let j = i + 2;
+  while (
+    j < source.length && !(source[j] === "*" && source[j + 1] === "/")
+  ) {
+    j += 1;
+  }
+  return Math.min(source.length, j + 2);
+}
+
 function skipTrivia(source: string, i: number): number {
   let j = i;
   while (j < source.length) {
     const ch = source[j];
-    if (ch === " " || ch === "\t" || ch === "\n" || ch === "\r") {
+    if (isWhitespaceChar(ch)) {
       j += 1;
-      continue;
+    } else if (ch === "/" && source[j + 1] === "/") {
+      j = skipLineComment(source, j);
+    } else if (ch === "/" && source[j + 1] === "*") {
+      j = skipBlockComment(source, j);
+    } else {
+      break;
     }
-    if (ch === "/" && source[j + 1] === "/") {
-      j += 2;
-      while (j < source.length && source[j] !== "\n") j += 1;
-      continue;
-    }
-    if (ch === "/" && source[j + 1] === "*") {
-      j += 2;
-      while (
-        j < source.length && !(source[j] === "*" && source[j + 1] === "/")
-      ) {
-        j += 1;
-      }
-      j = Math.min(source.length, j + 2);
-      continue;
-    }
-    break;
   }
   return j;
 }
@@ -411,11 +422,14 @@ function decodeString(raw: string): string {
 }
 
 function quoteLiteral(value: string): string {
-  return `'${value.replaceAll("\\", "\\\\").replaceAll("'", "\\'")}'`;
+  const escaped = value
+    .replaceAll("\\", String.raw`\\`)
+    .replaceAll("'", String.raw`\'`);
+  return `'${escaped}'`;
 }
 
 class TypeParser {
-  #source: string;
+  readonly #source: string;
   #i = 0;
 
   constructor(source: string) {
@@ -956,13 +970,21 @@ async function checkExpandOnly(tp: string, td: string): Promise<void> {
     fail("contract-field-snapshot.json drifted between checkouts");
   }
   const snapshot = JSON.parse(left) as Record<string, ContractPin>;
-  for (const [typeName, pin] of Object.entries(snapshot)) {
+  // Reads are independent (readRel never throws); the checks below still run
+  // in snapshot order so the first failure reported is unchanged.
+  const sources = await Promise.all(
+    Object.values(snapshot).map(async (pin) => ({
+      instance: await readRel(tp, pin.instance),
+      daemon: await readRel(td, pin.daemon),
+    })),
+  );
+  for (const [index, [typeName, pin]] of Object.entries(snapshot).entries()) {
     const instanceSrc = requireText(
-      await readRel(tp, pin.instance),
+      sources[index].instance,
       `${typeName} instance source missing`,
     );
     const daemonSrc = requireText(
-      await readRel(td, pin.daemon),
+      sources[index].daemon,
       `${typeName} daemon source missing`,
     );
     const instanceFields = extractFieldSpecs(instanceSrc, typeName);

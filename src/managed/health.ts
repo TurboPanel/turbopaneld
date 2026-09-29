@@ -92,7 +92,7 @@ export async function probeManagedMemberHealth(
       run,
     );
     const member = collected.member;
-    if (!member || !member.replication) {
+    if (!member?.replication) {
       // `collectManagedMemberHealth` swallows engine errors and omits the
       // member (container down, engine not answering). Say so.
       return {

@@ -234,19 +234,25 @@ export async function applyProxySqlAdminStatements(
   // interface accepts connections — the first reconcile on a new server
   // otherwise fails with `ERROR 2002 … Can't connect`. Retry connect-class
   // failures with a short backoff; any other failure surfaces immediately.
-  let result = await run(argv, { input: sql });
-  for (
-    let attempt = 0;
-    !result.success &&
-    ADMIN_CONNECT_RETRYABLE_RE.test(`${result.stderr}\n${result.stdout}`) &&
-    attempt < ADMIN_CONNECT_RETRIES;
-    attempt++
-  ) {
+  const retryWhileNotUp = async (
+    previous: Awaited<ReturnType<typeof run>>,
+    attempt: number,
+  ): Promise<Awaited<ReturnType<typeof run>>> => {
+    if (
+      previous.success ||
+      !ADMIN_CONNECT_RETRYABLE_RE.test(
+        `${previous.stderr}\n${previous.stdout}`,
+      ) ||
+      attempt >= ADMIN_CONNECT_RETRIES
+    ) {
+      return previous;
+    }
     await new Promise((resolve) =>
       setTimeout(resolve, options?.retryDelayMs ?? ADMIN_CONNECT_RETRY_MS)
     );
-    result = await run(argv, { input: sql });
-  }
+    return await retryWhileNotUp(await run(argv, { input: sql }), attempt + 1);
+  };
+  const result = await retryWhileNotUp(await run(argv, { input: sql }), 0);
   if (!result.success) {
     throw new Error(
       redactCredentials(

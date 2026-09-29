@@ -64,3 +64,19 @@ test("withRetry rethrows a non-Error value after default attempts", async () => 
   }
   assertEquals(calls, 3);
 });
+
+test("withRetry with zero attempts never calls fn and rethrows undefined", async () => {
+  let calls = 0;
+  let thrown: unknown = "unset";
+  try {
+    await withRetry(async () => {
+      await Promise.resolve();
+      calls++;
+      return "never";
+    }, { label: "zero", attempts: 0, baseDelayMs: 1, maxDelayMs: 1 });
+  } catch (err) {
+    thrown = err;
+  }
+  assertEquals(calls, 0);
+  assertEquals(thrown, undefined);
+});

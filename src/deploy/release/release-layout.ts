@@ -31,6 +31,7 @@
 
 import { join } from "@std/path";
 import { hostSudoArgs } from "../../permissions/host-sudo.ts";
+import { forEachSequential } from "../../util/sequential.ts";
 import type { LayoutPaths } from "../../paths/layout.ts";
 import {
   principalHomePath,
@@ -197,17 +198,16 @@ export function resolveDaemonReleasePaths(
 export async function ensureDaemonReleaseRecordDir(
   paths: ReleasePaths,
 ): Promise<void> {
-  for (
-    const dir of [
-      paths.principalHome,
-      paths.sitesDir,
-      paths.siteDir,
-      paths.releasesDir,
-      paths.releaseDir,
-    ]
-  ) {
+  // Outermost first, one at a time.
+  await forEachSequential([
+    paths.principalHome,
+    paths.sitesDir,
+    paths.siteDir,
+    paths.releasesDir,
+    paths.releaseDir,
+  ], async (dir) => {
     await Deno.mkdir(dir, { recursive: true, mode: 0o750 });
-  }
+  });
 }
 
 /**
@@ -237,9 +237,11 @@ export async function ensureReleaseTree(
 ): Promise<void> {
   const group = principalUnixGroupName(username);
   const owner = releaseRootOwner(username);
-  for (const dir of [paths.sitesDir, paths.siteDir, paths.releasesDir]) {
-    await ensureDirectoryWithOwner(dir, RELEASE_DIR_MODE, owner, runFn);
-  }
+  // Parent before child, one at a time.
+  await forEachSequential(
+    [paths.sitesDir, paths.siteDir, paths.releasesDir],
+    (dir) => ensureDirectoryWithOwner(dir, RELEASE_DIR_MODE, owner, runFn),
+  );
   await ensureDirectoryOwnedByPrincipal(
     paths.sharedDir,
     username,

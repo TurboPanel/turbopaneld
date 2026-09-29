@@ -95,49 +95,53 @@ function superviseTunnel(
   config: TunnelConfig,
   signal: AbortSignal,
 ): void {
-  void (async () => {
-    while (!signal.aborted) {
-      logInfo("tunnels", `starting tunnel "${config.name}"`);
-      const args = [
-        "--no-autoupdate",
-        "tunnel",
-        "run",
-        "--token",
-        config.token,
-      ];
+  // Each supervise-restart cycle schedules the next one detached (not
+  // awaited), so a tunnel that restarts for the daemon's lifetime never builds
+  // an ever-deeper chain of pending promises.
+  const cycle = async (): Promise<void> => {
+    if (signal.aborted) return;
+    logInfo("tunnels", `starting tunnel "${config.name}"`);
+    const args = [
+      "--no-autoupdate",
+      "tunnel",
+      "run",
+      "--token",
+      config.token,
+    ];
 
-      let status: { code: number };
-      if (testHooks?.runTunnel) {
-        status = await testHooks.runTunnel(bin, args, signal);
-      } else {
-        const command = new Deno.Command(bin, {
-          args,
-          stdout: "inherit",
-          stderr: "inherit",
-        });
-        const child = command.spawn();
+    let status: { code: number };
+    if (testHooks?.runTunnel) {
+      status = await testHooks.runTunnel(bin, args, signal);
+    } else {
+      const command = new Deno.Command(bin, {
+        args,
+        stdout: "inherit",
+        stderr: "inherit",
+      });
+      const child = command.spawn();
 
-        const onAbort = () => {
-          try {
-            child.kill("SIGTERM");
-          } catch {
-            // already exited
-          }
-        };
-        signal.addEventListener("abort", onAbort, { once: true });
+      const onAbort = () => {
+        try {
+          child.kill("SIGTERM");
+        } catch {
+          // already exited
+        }
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
 
-        status = await child.status;
-        signal.removeEventListener("abort", onAbort);
-      }
-
-      if (signal.aborted) break;
-      logWarn(
-        "tunnels",
-        `tunnel "${config.name}" exited (code ${status.code}); restarting in 5s`,
-      );
-      await delay(5_000);
+      status = await child.status;
+      signal.removeEventListener("abort", onAbort);
     }
-  })();
+
+    if (signal.aborted) return;
+    logWarn(
+      "tunnels",
+      `tunnel "${config.name}" exited (code ${status.code}); restarting in 5s`,
+    );
+    await delay(5_000);
+    void cycle();
+  };
+  void cycle();
 }
 
 /** Token filename for the self-hosted instance's own Cloudflare tunnel. */

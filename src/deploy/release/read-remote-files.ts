@@ -14,6 +14,7 @@
  */
 
 import { join } from "@std/path";
+import { mapSequential } from "../../util/sequential.ts";
 import {
   type CheckoutCredentialKind,
   gitEnvironment,
@@ -187,14 +188,14 @@ async function discardScratch(
   scratchDir: string,
   credentialPaths: readonly (string | null | undefined)[],
 ): Promise<void> {
-  for (const path of credentialPaths) {
-    if (!path) continue;
+  await Promise.all(credentialPaths.map(async (path) => {
+    if (!path) return;
     try {
       await Deno.remove(path);
     } catch {
       // Best effort: the scratch dir removal below is the real guarantee.
     }
-  }
+  }));
   try {
     await Deno.remove(scratchDir, { recursive: true });
   } catch {
@@ -315,10 +316,11 @@ export async function readRemoteFiles(
     if (!head.success) throw new Error(head.stderr || "git rev-parse failed");
     const commitSha = new TextDecoder().decode(head.stdout).trim();
 
-    const files: RemoteFileEntry[] = [];
-    for (const path of params.paths) {
-      files.push(await readOneFile(ctx, path, params.maxBytesPerFile));
-    }
+    // One git process at a time, in request order.
+    const files = await mapSequential(
+      params.paths,
+      (path) => readOneFile(ctx, path, params.maxBytesPerFile),
+    );
 
     const entries = params.listPath === undefined
       ? []

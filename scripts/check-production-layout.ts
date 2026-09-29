@@ -265,7 +265,7 @@ export const ANSIBLE_SCAN_ALLOWLIST = new Set([
   "scripts/lib/release-artifacts.sh",
   "scripts/verify-release-root.sh",
   "scripts/check-production-layout.ts",
-  "scripts/uninstall.sh",
+  "scripts/purge.sh",
 ]);
 
 export const RETIRED_RUNTIMES_REF = /\/opt\/turbopanel\/runtimes/;
@@ -281,7 +281,7 @@ export const RETIRED_RUNTIMES_SCAN_ALLOWLIST = new Set([
   "src/dev-sync/apply.ts", // comment only: documents legacy path for operators
   "src/orchestration/cloudflared.ts", // comment only
   "scripts/run.sh", // removes the retired lib/instance subtree on upgrade
-  "scripts/uninstall.sh", // removes retired paths on host purge
+  "scripts/purge.sh", // removes retired paths on host purge
 ]);
 
 export const RUNTIME_ROOT_LITERAL = /\/opt\/turbopanel\/vendor/;
@@ -297,7 +297,7 @@ export const RUNTIME_ROOT_SCAN_ALLOWLIST = new Set([
   // them from the layout module); src/permissions/daemon-permissions.test.ts pins both
   // copies to that renderer, so the literals cannot drift.
   "scripts/run.sh",
-  "scripts/uninstall.sh",
+  "scripts/purge.sh",
   "orchestration/roles/daemon-launch/templates/turbopaneld.service.j2",
 ]);
 
@@ -464,27 +464,33 @@ export async function runProductionLayoutCheck(
   const daemonUnitText = await Deno.readTextFile(daemonUnitPath);
   assertDaemonUnitLock(failures, daemonUnitText);
 
-  for (const scanRoot of PRODUCTION_SCAN_ROOTS) {
-    const abs = join(root, scanRoot);
-    let stat: Deno.FileInfo;
-    try {
-      stat = await Deno.stat(abs);
-    } catch {
-      continue;
-    }
-    const files = stat.isDirectory ? walk(abs, root) : (async function* () {
-      yield abs;
-    })();
-    for await (const file of files) {
-      if (!SCAN_EXTENSIONS.test(file)) continue;
-      const rel = relative(root, file);
-      const text = await Deno.readTextFile(file);
-      failures.push(
-        ...collectForbiddenReferenceFailures(rel, text),
-        ...collectRetiredIdentityFailures(rel, text),
-      );
-    }
-  }
+  // Scan roots and the files under them are independent reads; results are
+  // joined in root/walk order so the failure list stays deterministic.
+  const perRoot = await Promise.all(
+    PRODUCTION_SCAN_ROOTS.map(async (scanRoot) => {
+      const abs = join(root, scanRoot);
+      let stat: Deno.FileInfo;
+      try {
+        stat = await Deno.stat(abs);
+      } catch {
+        return [];
+      }
+      const found = stat.isDirectory
+        ? await Array.fromAsync(walk(abs, root))
+        : [abs];
+      const files = found.filter((file) => SCAN_EXTENSIONS.test(file));
+      const perFile = await Promise.all(files.map(async (file) => {
+        const rel = relative(root, file);
+        const text = await Deno.readTextFile(file);
+        return [
+          ...collectForbiddenReferenceFailures(rel, text),
+          ...collectRetiredIdentityFailures(rel, text),
+        ];
+      }));
+      return perFile.flat();
+    }),
+  );
+  failures.push(...perRoot.flat());
 
   assertRuntimesDirContract(failures);
   return failures;

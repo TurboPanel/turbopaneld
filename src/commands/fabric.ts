@@ -19,6 +19,7 @@ import { encodeHex } from "@std/encoding/hex";
 import { hostSudoArgs } from "../permissions/host-sudo.ts";
 import { join } from "@std/path";
 import { logInfo, logWarn } from "../util/logger.ts";
+import { forEachSequential } from "../util/sequential.ts";
 import { runDocker } from "../deploy/docker-cli.ts";
 import { fabricNetworkDir, resolveLayout } from "../paths/layout.ts";
 import {
@@ -585,8 +586,8 @@ async function materializePeerPresharedKeys(
 
   const pskByPublicKey = new Map<string, string>();
   const pskFiles: string[] = [];
-  for (const [index, peer] of payload.peers.entries()) {
-    if (!peer.presharedKeyEnvelope) continue;
+  await forEachSequential(payload.peers, async (peer, index) => {
+    if (!peer.presharedKeyEnvelope) return;
     const plain = decrypted[index];
     if (!plain) {
       await removeFilesBestEffort(pskFiles);
@@ -599,7 +600,7 @@ async function materializePeerPresharedKeys(
     );
     pskFiles.push(path);
     pskByPublicKey.set(peer.publicKey, plain);
-  }
+  });
   return { pskByPublicKey, pskFiles };
 }
 
@@ -720,7 +721,7 @@ export async function ensureFabricDockerNetworks(
   networks: readonly FabricReconcileNetwork[],
   defaultMtu: number,
 ): Promise<void> {
-  for (const network of networks) {
+  await forEachSequential(networks, async (network) => {
     const mtu = resolveNetworkMtu(network, defaultMtu);
     const create = await runHost("docker", [
       "network",
@@ -735,15 +736,15 @@ export async function ensureFabricDockerNetworks(
       `${DOCKER_MTU_OPT_KEY}=${mtu}`,
       network.name,
     ]);
-    if (create.success) continue;
+    if (create.success) return;
     if (alreadyExistsText(create)) {
       await warnIfDockerNetworkMtuDiffers(network, mtu);
-      continue;
+      return;
     }
     throw new Error(
       create.stderr || `Failed to create docker network ${network.name}`,
     );
-  }
+  });
 }
 
 /**
@@ -753,13 +754,13 @@ export async function ensureFabricDockerNetworks(
 export async function removeFabricDockerNetworks(
   names: readonly string[],
 ): Promise<void> {
-  for (const name of names) {
+  await forEachSequential(names, async (name) => {
     await runTeardownBestEffort(
       "docker",
       ["network", "rm", name],
       (result) => isMissingDeviceText(result) || isActiveEndpointsText(result),
     );
-  }
+  });
 }
 
 async function ensureIptablesChain(name: string): Promise<void> {
@@ -903,18 +904,19 @@ async function reconcileFabricForwarding(
       "ACCEPT",
     ],
   );
-  for (const network of networks) {
+  await forEachSequential(networks, async (network) => {
     await ensureForwardAccept(network.subnet, network.subnet);
-  }
+  });
   const localSubnets = networks.map((network) => network.subnet);
-  for (
-    const pair of fabricCrossSubnetForwardPairs(
+  await forEachSequential(
+    fabricCrossSubnetForwardPairs(
       localSubnets,
       fabricOwnedPeerPrefixes(peers),
-    )
-  ) {
-    await ensureForwardAccept(pair.source, pair.dest);
-  }
+    ),
+    async (pair) => {
+      await ensureForwardAccept(pair.source, pair.dest);
+    },
+  );
   await reconcileTp0Transit(gateway);
 }
 
@@ -1776,11 +1778,11 @@ async function applyProbeCandidates(
 ): Promise<{ appliedKeys: Set<string>; failedApplyKeys: Set<string> }> {
   const appliedKeys = new Set<string>();
   const failedApplyKeys = new Set<string>();
-  for (const candidate of candidates) {
-    if (!isValidWireguardPublicKey(candidate.publicKey)) continue;
+  await forEachSequential(candidates, async (candidate) => {
+    if (!isValidWireguardPublicKey(candidate.publicKey)) return;
     let applied = false;
-    for (const endpoint of candidate.endpoints) {
-      if (!isValidWireguardEndpoint(endpoint)) continue;
+    await forEachSequential(candidate.endpoints, async (endpoint) => {
+      if (!isValidWireguardEndpoint(endpoint)) return;
       if (
         await applyPeerEndpoint(
           candidate.publicKey,
@@ -1790,10 +1792,10 @@ async function applyProbeCandidates(
       ) {
         applied = true;
       }
-    }
+    });
     if (applied) appliedKeys.add(candidate.publicKey);
     else failedApplyKeys.add(candidate.publicKey);
-  }
+  });
   return { appliedKeys, failedApplyKeys };
 }
 
@@ -1860,17 +1862,17 @@ export async function handleFabricPathProbe(
     probeStartedAtMs,
   );
 
-  for (const publicKey of appliedKeys) {
-    if (successfulKeys.has(publicKey)) continue;
+  await forEachSequential(appliedKeys, async (publicKey) => {
+    if (successfulKeys.has(publicKey)) return;
     const restore = restorePeerEndpoint(
       publicKey,
       state,
       confPeers,
       liveEndpointByKey.get(publicKey),
     );
-    if (!restore) continue;
+    if (!restore) return;
     await applyPeerEndpoint(publicKey, restore.endpoint, restore.keepalive);
-  }
+  });
 
   const restored = await collectFabricPeerState();
   const observations: FabricPathObservation[] = [];
