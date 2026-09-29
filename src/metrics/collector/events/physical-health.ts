@@ -22,6 +22,7 @@ import type { EventCollector, EventDetectContext } from "./types.ts";
 import { makeEvent } from "./types.ts";
 import type { MetricEvent } from "../../../contracts/metrics-contract.ts";
 import type { SensorIo } from "../sensors/discovery.ts";
+import { forEachSequential } from "../../../util/sequential.ts";
 
 const INPUT_SUFFIX = "_input";
 const FAN_CANDIDATE_RE = /\/fan\d+_input$/;
@@ -30,6 +31,13 @@ const PSU_ALARM_RE = /^power(\d+)_alarm$/;
 
 type FanFaultState = { fault: boolean; alarm: boolean };
 type TempAlarmState = { alarm: boolean; critical: boolean };
+
+type AlarmFile = {
+  path: string;
+  state: Map<string, boolean>;
+  kind: "voltage_alarm" | "psu_fault";
+  severity: "warning" | "critical";
+};
 
 async function readBooleanFlag(
   io: SensorIo,
@@ -60,14 +68,21 @@ export class PhysicalHealthEventCollector implements EventCollector {
     ctx: EventDetectContext,
     events: MetricEvent[],
   ): Promise<void> {
-    for (const [signalId, candidate] of ctx.hardwareSignalCandidates) {
-      if (!FAN_CANDIDATE_RE.test(candidate.path)) continue;
-
+    const fans = [...ctx.hardwareSignalCandidates].filter(([, candidate]) =>
+      FAN_CANDIDATE_RE.test(candidate.path)
+    );
+    // Independent sysfs reads, in parallel; state and events are then
+    // processed in candidate order.
+    const flags = await Promise.all(fans.map(([, candidate]) => {
       const base = candidate.path.slice(0, -INPUT_SUFFIX.length);
-      const [fault, alarm] = await Promise.all([
+      return Promise.all([
         readBooleanFlag(ctx.io, `${base}_fault`),
         readBooleanFlag(ctx.io, `${base}_alarm`),
       ]);
+    }));
+
+    for (const [index, [signalId]] of fans.entries()) {
+      const [fault, alarm] = flags[index];
       const prior = this.#fanState.get(signalId);
 
       if (fault && !(prior?.fault ?? false)) {
@@ -145,41 +160,56 @@ export class PhysicalHealthEventCollector implements EventCollector {
       if (slash > 0) dirs.add(candidate.path.slice(0, slash));
     }
 
-    for (const dir of dirs) {
+    // One directory at a time (a listing can shell out to `ls`); within a
+    // directory the alarm files are read in parallel and applied in listing
+    // order, so events keep their deterministic order.
+    await forEachSequential(dirs, async (dir) => {
       const files = await ctx.io.listDir(dir);
-      for (const file of files) {
+      const alarms = files.flatMap((file): AlarmFile[] => {
         if (VOLTAGE_ALARM_RE.test(file)) {
-          await this.#detectAlarmFile(
-            ctx,
-            events,
-            `${dir}/${file}`,
-            this.#voltageActive,
-            "voltage_alarm",
-            "warning",
-          );
-        } else if (PSU_ALARM_RE.test(file)) {
-          await this.#detectAlarmFile(
-            ctx,
-            events,
-            `${dir}/${file}`,
-            this.#psuActive,
-            "psu_fault",
-            "critical",
-          );
+          return [{
+            path: `${dir}/${file}`,
+            state: this.#voltageActive,
+            kind: "voltage_alarm",
+            severity: "warning",
+          }];
         }
+        if (PSU_ALARM_RE.test(file)) {
+          return [{
+            path: `${dir}/${file}`,
+            state: this.#psuActive,
+            kind: "psu_fault",
+            severity: "critical",
+          }];
+        }
+        return [];
+      });
+      const actives = await Promise.all(
+        alarms.map((alarm) => readBooleanFlag(ctx.io, alarm.path)),
+      );
+      for (const [index, alarm] of alarms.entries()) {
+        this.#applyAlarmFile(
+          ctx,
+          events,
+          alarm.path,
+          actives[index],
+          alarm.state,
+          alarm.kind,
+          alarm.severity,
+        );
       }
-    }
+    });
   }
 
-  async #detectAlarmFile(
+  #applyAlarmFile(
     ctx: EventDetectContext,
     events: MetricEvent[],
     path: string,
+    active: boolean,
     state: Map<string, boolean>,
     kind: "voltage_alarm" | "psu_fault",
     severity: "warning" | "critical",
-  ): Promise<void> {
-    const active = await readBooleanFlag(ctx.io, path);
+  ): void {
     const prior = state.get(path) ?? false;
     if (active && !prior) {
       events.push(makeEvent(kind, severity, ctx.nowMs, { source: path }));

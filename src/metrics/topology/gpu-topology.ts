@@ -45,14 +45,20 @@ async function collectDrmCards(
   root: string,
 ): Promise<GpuTopology[]> {
   const drmRoot = `${root}/class/drm`;
-  const gpus: GpuTopology[] = [];
-  for (const entry of await io.listDir(drmRoot)) {
-    if (!DRM_CARD_DIR_RE.test(entry)) continue;
+  const cards = (await io.listDir(drmRoot)).filter((entry) =>
+    DRM_CARD_DIR_RE.test(entry)
+  );
+  // Independent sysfs reads, in parallel; GPUs are built in listing order.
+  const reads = await Promise.all(cards.map((entry) => {
     const cardPath = `${drmRoot}/${entry}`;
-    const [vendorRaw, uevent] = await Promise.all([
+    return Promise.all([
       io.readFile(`${cardPath}/device/vendor`),
       io.readFile(`${cardPath}/device/uevent`),
     ]);
+  }));
+  const gpus: GpuTopology[] = [];
+  for (const [index, entry] of cards.entries()) {
+    const [vendorRaw, uevent] = reads[index];
     const vendorId = vendorRaw?.trim();
     if (!vendorId) continue;
     const pciPath = uevent ? parsePciSlotName(uevent) : undefined;
@@ -76,15 +82,24 @@ async function collectHwmonGpuChips(
   existing: GpuTopology[],
 ): Promise<GpuTopology[]> {
   const hwmonRoot = `${root}/class/hwmon`;
+  // Independent sysfs reads per chip, in parallel; GPUs are built (and
+  // de-duplicated) in listing order.
+  const probes = await Promise.all(
+    (await io.listDir(hwmonRoot)).map(async (entry) => {
+      const dir = `${hwmonRoot}/${entry}`;
+      const chip = (await io.readFile(`${dir}/name`))?.trim();
+      if (!chip || !GPU_HWMON_CHIPS.has(chip)) return undefined;
+      const [vendorRaw, uevent] = await Promise.all([
+        io.readFile(`${dir}/device/vendor`),
+        io.readFile(`${dir}/device/uevent`),
+      ]);
+      return { entry, chip, vendorRaw, uevent };
+    }),
+  );
   const gpus: GpuTopology[] = [];
-  for (const entry of await io.listDir(hwmonRoot)) {
-    const dir = `${hwmonRoot}/${entry}`;
-    const chip = (await io.readFile(`${dir}/name`))?.trim();
-    if (!chip || !GPU_HWMON_CHIPS.has(chip)) continue;
-    const [vendorRaw, uevent] = await Promise.all([
-      io.readFile(`${dir}/device/vendor`),
-      io.readFile(`${dir}/device/uevent`),
-    ]);
+  for (const probe of probes) {
+    if (!probe) continue;
+    const { entry, chip, vendorRaw, uevent } = probe;
     const pciPath = uevent ? parsePciSlotName(uevent) : undefined;
     const identityKey = `${entry}:${chip}`;
     const gpuId = pciPath ? `pci:${pciPath}` : `hwmon:${fnv1aHex(identityKey)}`;

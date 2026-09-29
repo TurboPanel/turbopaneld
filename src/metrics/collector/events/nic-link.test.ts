@@ -146,3 +146,37 @@ test("NicLinkEventCollector: unreadable operstate is skipped, not treated as dow
   );
   assertEquals(events, []);
 });
+
+test("NicLinkEventCollector: events keep snapshot order even when reads settle out of order", async () => {
+  const eth1: NetworkDeviceTopology = {
+    deviceId: "mac:aa:bb:cc:dd:ee:01",
+    kind: "uplink",
+    name: "eth1",
+    identity: { mac: "aa:bb:cc:dd:ee:01" },
+  };
+  const states: Record<string, string> = {
+    "/sys/class/net/eth0/operstate": "up",
+    "/sys/class/net/eth1/operstate": "up",
+  };
+  const delays: Record<string, number> = {
+    "/sys/class/net/eth0/operstate": 20,
+    "/sys/class/net/eth1/operstate": 1,
+  };
+  const io: SensorIo = {
+    listDir: () => [],
+    readFile: async (path) => {
+      await new Promise((resolve) => setTimeout(resolve, delays[path]));
+      return states[path];
+    },
+  };
+  const collector = new NicLinkEventCollector();
+  const snap = snapshot([ETH0, eth1]);
+  await collector.detect(ctx({ snapshot: snap, io }));
+  states["/sys/class/net/eth0/operstate"] = "down";
+  states["/sys/class/net/eth1/operstate"] = "down";
+  const events = await collector.detect(ctx({ snapshot: snap, io, nowMs: 1 }));
+  assertEquals(
+    events.map((e) => [e.kind, e.entityId]),
+    [["nic_link_down", ETH0.deviceId], ["nic_link_down", eth1.deviceId]],
+  );
+});

@@ -27,6 +27,7 @@
 import { readProcFile } from "../proc-read.ts";
 import { parsePciSlotName } from "../../topology/identity.ts";
 import type { SensorCandidate } from "../types.ts";
+import { forEachSequential } from "../../../util/sequential.ts";
 
 /** Injectable sysfs access for fixture-driven tests. */
 export type SensorIo = {
@@ -212,14 +213,17 @@ async function hwmonTempCandidates(
   io: SensorIo,
   preferred: readonly string[],
 ): Promise<SensorCandidate[]> {
-  const candidates: SensorCandidate[] = [];
-  for (const entry of entries) {
-    const match = TEMP_INPUT_RE.exec(entry);
-    if (!match) continue;
-    const labelRaw = await io.readFile(`${dir}/temp${match[1]}_label`);
-    const label = labelRaw?.trim() || `temp${match[1]}`;
-    candidates.push({ chip, label, path: `${dir}/${entry}` });
-  }
+  // Independent label reads, in parallel; the sort below fixes the order.
+  const candidates: SensorCandidate[] = await Promise.all(
+    entries.flatMap((entry) => {
+      const match = TEMP_INPUT_RE.exec(entry);
+      return match ? [{ entry, index: match[1] }] : [];
+    }).map(async ({ entry, index }) => {
+      const labelRaw = await io.readFile(`${dir}/temp${index}_label`);
+      const label = labelRaw?.trim() || `temp${index}`;
+      return { chip, label, path: `${dir}/${entry}` };
+    }),
+  );
   candidates.sort((a, b) =>
     labelRank(a.label, preferred) - labelRank(b.label, preferred) ||
     a.path.localeCompare(b.path)
@@ -233,14 +237,17 @@ async function hwmonFanCandidates(
   entries: string[],
   io: SensorIo,
 ): Promise<SensorCandidate[]> {
-  const candidates: SensorCandidate[] = [];
-  for (const entry of entries) {
-    const match = FAN_INPUT_RE.exec(entry);
-    if (!match) continue;
-    const labelRaw = await io.readFile(`${dir}/fan${match[1]}_label`);
-    const label = labelRaw?.trim() || `fan${match[1]}`;
-    candidates.push({ chip, label, path: `${dir}/${entry}` });
-  }
+  // Independent label reads, in parallel; the sort below fixes the order.
+  const candidates: SensorCandidate[] = await Promise.all(
+    entries.flatMap((entry) => {
+      const match = FAN_INPUT_RE.exec(entry);
+      return match ? [{ entry, index: match[1] }] : [];
+    }).map(async ({ entry, index }) => {
+      const labelRaw = await io.readFile(`${dir}/fan${index}_label`);
+      const label = labelRaw?.trim() || `fan${index}`;
+      return { chip, label, path: `${dir}/${entry}` };
+    }),
+  );
   candidates.sort((a, b) => a.path.localeCompare(b.path));
   return candidates;
 }
@@ -345,10 +352,13 @@ async function discoverHwmonSensors(
   const entries = await io.listDir(hwmonRoot);
   let sawDrivetempChip = false;
 
-  for (const entry of entries) {
+  // One chip at a time, in listing order: each chip's candidates are appended
+  // to the shared capability lists (order matters), and its directory listing
+  // can shell out to `ls`, so chips are not probed in a burst.
+  await forEachSequential(entries, async (entry) => {
     const dir = `${hwmonRoot}/${entry}`;
     const chip = (await io.readFile(`${dir}/name`))?.trim();
-    if (!chip) continue;
+    if (!chip) return;
     const files = await io.listDir(dir);
 
     if (CPU_HWMON_CHIPS.has(chip)) {
@@ -362,7 +372,7 @@ async function discoverHwmonSensors(
         ),
       );
       capabilities.fan.push(...await hwmonFanCandidates(dir, chip, files, io));
-      continue;
+      return;
     }
     if (GPU_HWMON_CHIPS.has(chip)) {
       const device = await hwmonGpuDevice(dir, chip, files, io);
@@ -374,14 +384,14 @@ async function discoverHwmonSensors(
       ) {
         capabilities.gpuDevices.push(device);
       }
-      continue;
+      return;
     }
     if (chip === NVME_HWMON_CHIP || chip === DRIVETEMP_HWMON_CHIP) {
       if (chip === DRIVETEMP_HWMON_CHIP) sawDrivetempChip = true;
       capabilities.diskTemperature.push(
         ...await hwmonDiskTempCandidates(dir, chip, files, io),
       );
-      continue;
+      return;
     }
     // Everything else: unclaimed temps are ambient/board candidates, fans
     // are system fans (chip identity distinguishes them from CPU fans).
@@ -389,7 +399,7 @@ async function discoverHwmonSensors(
       ...await hwmonTempCandidates(dir, chip, files, io, []),
     );
     capabilities.fan.push(...await hwmonFanCandidates(dir, chip, files, io));
-  }
+  });
 
   return { hwmonRootHadEntries: entries.length > 0, sawDrivetempChip };
 }
@@ -445,16 +455,18 @@ export async function findIntelRaplGpuEnergyPath(
   io: SensorIo,
 ): Promise<string | undefined> {
   const powercapRoot = `${root}/class/powercap`;
-  const matches: string[] = [];
-  for (const entry of await io.listDir(powercapRoot)) {
-    if (!RAPL_SUBDOMAIN_RE.test(entry)) continue;
+  const subdomains = (await io.listDir(powercapRoot)).filter((entry) =>
+    RAPL_SUBDOMAIN_RE.test(entry)
+  );
+  // Independent sysfs reads per subdomain, in parallel; sorted below.
+  const found = await Promise.all(subdomains.map(async (entry) => {
     const dir = `${powercapRoot}/${entry}`;
     const name = (await io.readFile(`${dir}/name`))?.trim().toLowerCase();
-    if (!name || !RAPL_GPU_DOMAIN_NAMES.has(name)) continue;
+    if (!name || !RAPL_GPU_DOMAIN_NAMES.has(name)) return undefined;
     const path = `${dir}/energy_uj`;
-    if ((await io.readFile(path)) === undefined) continue;
-    matches.push(path);
-  }
+    return (await io.readFile(path)) === undefined ? undefined : path;
+  }));
+  const matches = found.filter((path) => path !== undefined);
   matches.sort((a, b) => a.localeCompare(b));
   return matches[0];
 }
@@ -529,12 +541,15 @@ async function discoverDrmIntelGpuDevices(
 ): Promise<void> {
   const drmRoot = `${root}/class/drm`;
   const drmCreated = new Set<GpuDeviceCandidates>();
-  for (const entry of await io.listDir(drmRoot)) {
-    if (!DRM_CARD_DIR_RE.test(entry)) continue;
+  // One card at a time: whether a card attaches to an existing hwmon device
+  // or creates its own depends on what earlier cards already did, and each
+  // card's listings can shell out to `ls`.
+  await forEachSequential(await io.listDir(drmRoot), async (entry) => {
+    if (!DRM_CARD_DIR_RE.test(entry)) return;
     const cardPath = `${drmRoot}/${entry}`;
     const vendor = (await io.readFile(`${cardPath}/device/vendor`))?.trim()
       .toLowerCase();
-    if (!vendor || !INTEL_PCI_VENDOR_IDS.has(vendor)) continue;
+    if (!vendor || !INTEL_PCI_VENDOR_IDS.has(vendor)) return;
 
     const uevent = (await io.readFile(`${cardPath}/device/uevent`))?.trim() ??
       "";
@@ -542,17 +557,24 @@ async function discoverDrmIntelGpuDevices(
     const pciPath = parsePciSlotName(uevent);
     const engineRoot = `${cardPath}/engine`;
     const engineNames = [...await io.listDir(engineRoot)].sort(engineSort);
+    // Independent busy-file reads, in parallel; kept in engine order.
+    const busyReads = await Promise.all(
+      engineNames.map((engine) => io.readFile(`${engineRoot}/${engine}/busy`)),
+    );
     const utilization: SensorCandidate[] = [];
-    for (const engine of engineNames) {
-      const path = `${engineRoot}/${engine}/busy`;
-      if ((await io.readFile(path)) === undefined) continue;
-      utilization.push({ chip, label: engine, path });
+    for (const [index, engine] of engineNames.entries()) {
+      if (busyReads[index] === undefined) continue;
+      utilization.push({
+        chip,
+        label: engine,
+        path: `${engineRoot}/${engine}/busy`,
+      });
     }
     if (
       utilization.length === 0 &&
       (await findIntelRc6ResidencyPath(cardPath, io)) === undefined
     ) {
-      continue;
+      return;
     }
 
     const existing = await findExistingIntelHwmonDevice(
@@ -564,7 +586,7 @@ async function discoverDrmIntelGpuDevices(
     );
     if (existing) {
       existing.utilization.push(...utilization);
-      continue;
+      return;
     }
 
     const created: GpuDeviceCandidates = {
@@ -577,7 +599,7 @@ async function discoverDrmIntelGpuDevices(
     };
     capabilities.gpuDevices.push(created);
     drmCreated.add(created);
-  }
+  });
 }
 
 /** SATA/SAS whole-disk devices under `/sys/block` (`sd*`), for the drivetemp-not-loaded reason. */
@@ -608,16 +630,23 @@ async function discoverThermalZoneSensors(
   capabilities: SensorCapabilities,
 ): Promise<void> {
   const thermalRoot = `${root}/class/thermal`;
-  for (const entry of await io.listDir(thermalRoot)) {
-    if (!entry.startsWith("thermal_zone")) continue;
-    const dir = `${thermalRoot}/${entry}`;
-    const type = (await io.readFile(`${dir}/type`))?.trim();
+  const zones = (await io.listDir(thermalRoot)).filter((entry) =>
+    entry.startsWith("thermal_zone")
+  );
+  // Independent type reads, in parallel; appended in listing order.
+  const types = await Promise.all(
+    zones.map(async (entry) =>
+      (await io.readFile(`${thermalRoot}/${entry}/type`))?.trim()
+    ),
+  );
+  for (const [index, entry] of zones.entries()) {
+    const type = types[index];
     if (!type) continue;
     if (!CPU_THERMAL_ZONE_TYPES.has(type)) continue;
     capabilities.cpuTemperature.push({
       chip: "thermal",
       label: type,
-      path: `${dir}/temp`,
+      path: `${thermalRoot}/${entry}/temp`,
     });
   }
 }
@@ -628,17 +657,24 @@ async function discoverRaplSensors(
   capabilities: SensorCapabilities,
 ): Promise<void> {
   const powercapRoot = `${root}/class/powercap`;
-  for (const entry of await io.listDir(powercapRoot)) {
-    // Top-level package domains only — `intel-rapl:0:0` subdomains (core,
-    // uncore, dram) would double-count the package counter.
-    if (!RAPL_PACKAGE_DIR_RE.test(entry)) continue;
-    const dir = `${powercapRoot}/${entry}`;
-    const name = (await io.readFile(`${dir}/name`))?.trim();
+  // Top-level package domains only — `intel-rapl:0:0` subdomains (core,
+  // uncore, dram) would double-count the package counter.
+  const packages = (await io.listDir(powercapRoot)).filter((entry) =>
+    RAPL_PACKAGE_DIR_RE.test(entry)
+  );
+  // Independent name reads, in parallel; appended in listing order.
+  const names = await Promise.all(
+    packages.map(async (entry) =>
+      (await io.readFile(`${powercapRoot}/${entry}/name`))?.trim()
+    ),
+  );
+  for (const [index, entry] of packages.entries()) {
+    const name = names[index];
     if (!name?.startsWith("package")) continue;
     capabilities.cpuPower.push({
       chip: "intel-rapl",
       label: name,
-      path: `${dir}/energy_uj`,
+      path: `${powercapRoot}/${entry}/energy_uj`,
     });
   }
 }

@@ -269,7 +269,9 @@ test("ManagedEngineSampler.start polls on its own slow interval and stop clears 
   });
   sampler.start();
   sampler.start();
-  await Promise.resolve();
+  // Let the initial (start-triggered) refresh settle — a macrotask, not a
+  // microtask count, so the census's internal awaits don't matter.
+  await new Promise((resolve) => setTimeout(resolve, 0));
   assertEquals(intervals, [MANAGED_ENGINE_CENSUS_REFRESH_INTERVAL_MS]);
   sampler.stop();
   sampler.stop();

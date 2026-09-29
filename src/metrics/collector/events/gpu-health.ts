@@ -20,6 +20,7 @@
  */
 import type { EventCollector, EventDetectContext } from "./types.ts";
 import { makeEvent } from "./types.ts";
+import { forEachSequential } from "../../../util/sequential.ts";
 import type { MetricEvent } from "../../../contracts/metrics-contract.ts";
 import type { GpuTopology } from "../../../contracts/topology-types.ts";
 
@@ -81,12 +82,13 @@ export class GpuHealthEventCollector implements EventCollector {
     const currentIds = new Set(ctx.snapshot.gpus.map((g) => g.gpuId));
     this.#forgetMissingGpus(ctx, events, currentIds);
 
-    for (const gpu of ctx.snapshot.gpus) {
+    // One GPU probe at a time (the reader may run a vendor CLI per device).
+    await forEachSequential(ctx.snapshot.gpus, async (gpu) => {
       this.#seenGpuIds.add(gpu.gpuId);
       const prior = this.#state.get(gpu.gpuId) ?? EMPTY_STATE;
       const health = await this.#reader(gpu);
       this.#detectGpu(ctx, events, gpu.gpuId, prior, health);
-    }
+    });
 
     return events;
   }

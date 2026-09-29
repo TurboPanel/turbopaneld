@@ -32,18 +32,20 @@ export class NicLinkEventCollector implements EventCollector {
     const root = ctx.sysRoot ?? "/sys";
     const events: MetricEvent[] = [];
 
-    for (const device of ctx.snapshot.networks) {
-      if (
-        device.kind === "loopback" || device.kind === "container-bridge" ||
-        device.kind === "virtual"
-      ) {
-        continue;
-      }
+    const devices = ctx.snapshot.networks.filter((device) =>
+      device.kind !== "loopback" && device.kind !== "container-bridge" &&
+      device.kind !== "virtual"
+    );
+    // Independent sysfs reads, in parallel; state and events are then
+    // processed in snapshot order.
+    const operstates = await Promise.all(
+      devices.map((device) =>
+        ctx.io.readFile(`${root}/class/net/${device.name}/operstate`)
+      ),
+    );
 
-      const operstateRaw = await ctx.io.readFile(
-        `${root}/class/net/${device.name}/operstate`,
-      );
-      const operstate = operstateRaw?.trim();
+    for (const [index, device] of devices.entries()) {
+      const operstate = operstates[index]?.trim();
       if (operstate === undefined) continue;
 
       const prior = this.#previous.get(device.deviceId);

@@ -23,12 +23,17 @@ async function sumMcCounters(
   let ue = 0;
   let any = false;
 
-  for (const name of entries) {
-    if (!MC_DIR_RE.test(name)) continue;
-    const [ceRaw, ueRaw] = await Promise.all([
-      io.readFile(`${mcRoot}/${name}/ce_count`),
-      io.readFile(`${mcRoot}/${name}/ue_count`),
-    ]);
+  // Independent sysfs reads, in parallel; summed in directory order below.
+  const counters = await Promise.all(
+    entries.filter((name) => MC_DIR_RE.test(name)).map((name) =>
+      Promise.all([
+        io.readFile(`${mcRoot}/${name}/ce_count`),
+        io.readFile(`${mcRoot}/${name}/ue_count`),
+      ])
+    ),
+  );
+
+  for (const [ceRaw, ueRaw] of counters) {
     const ceValue = Number(ceRaw?.trim());
     const ueValue = Number(ueRaw?.trim());
     if (Number.isFinite(ceValue)) {

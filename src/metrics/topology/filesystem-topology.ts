@@ -68,17 +68,25 @@ async function groupByFilesystemId(
   io: IdentityIo,
   root: string,
 ): Promise<Map<string, RoleGroup>> {
-  const groups = new Map<string, RoleGroup>();
-  for (const { path, role } of candidates) {
-    if (!path) continue;
+  // Identity derivation for each candidate is an independent read; the
+  // grouping below runs in candidate order so the "first-resolved entry"
+  // display rule stays deterministic.
+  const resolved = await Promise.all(candidates.map(async ({ path, role }) => {
+    if (!path) return undefined;
     const entry = mountForPath(mountEntries, path);
-    if (!entry) continue;
+    if (!entry) return undefined;
     const deviceName = kernelDeviceName(entry.source) ?? null;
     const filesystemId = await deriveFilesystemId(
       { sourceDevice: entry.source, deviceName, mountpoint: entry.mountPoint },
       io,
       root,
     );
+    return { entry, role, filesystemId };
+  }));
+  const groups = new Map<string, RoleGroup>();
+  for (const item of resolved) {
+    if (!item) continue;
+    const { entry, role, filesystemId } = item;
     const existing = groups.get(filesystemId);
     if (existing) {
       existing.roles.add(role);
