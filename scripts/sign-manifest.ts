@@ -23,6 +23,7 @@ import {
   signManifest,
   verifyManifestSignature,
 } from "../src/update/signing.ts";
+import { forEachSequential } from "../src/util/sequential.ts";
 import { RELEASE_SIGNING_KEY_ENV } from "./generate-channel-manifest.ts";
 
 /** A manifest this script will not sign, or a key it will not sign with. */
@@ -81,7 +82,9 @@ export async function main(
     return 2;
   }
   try {
-    for (const path of args) {
+    // In order, stopping at the first failure: manifests after a bad one are
+    // left untouched.
+    await forEachSequential(args, async (path) => {
       const signed = await signManifestText(
         await Deno.readTextFile(path),
         getEnv(RELEASE_SIGNING_KEY_ENV),
@@ -90,7 +93,7 @@ export async function main(
       const keyId = (JSON.parse(signed) as { signature: { keyId: string } })
         .signature.keyId;
       log(`sign-manifest: signed ${path} (keyId ${keyId})`);
-    }
+    });
   } catch (err) {
     if (!(err instanceof SignManifestError)) throw err;
     log(`sign-manifest: ${err.message}`);

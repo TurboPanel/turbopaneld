@@ -1114,17 +1114,12 @@ export async function fillMissingLicenses(
   packages: readonly NoticePackage[],
   lookup: (pkg: NoticePackage) => Promise<string>,
 ): Promise<NoticePackage[]> {
-  const out: NoticePackage[] = [];
-  for (const pkg of packages) {
-    if (!needsLicenseLookup(pkg.license)) {
-      out.push(pkg);
-      continue;
-    }
+  return await Promise.all(packages.map(async (pkg) => {
+    if (!needsLicenseLookup(pkg.license)) return pkg;
     const lookedUp = (await lookup(pkg)).trim();
     const license = lookedUp || defaultLicenseForPackageName(pkg.name) || "";
-    out.push(license ? { ...pkg, license } : pkg);
-  }
-  return out;
+    return license ? { ...pkg, license } : pkg;
+  }));
 }
 
 export function needsLicenseLookup(license: string): boolean {

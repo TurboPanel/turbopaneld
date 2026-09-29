@@ -125,22 +125,26 @@ export async function runGenerateNotices(options: {
   } catch {
     // Optional deploy-tool lock may be absent in stripped checkouts.
   }
-  for (
-    const rel of [
-      "orchestration/requirements.txt",
-      "orchestration/requirements.lock.txt",
-      "orchestration/requirements.yml",
-      "orchestration/requirements-docker.yml",
-    ]
-  ) {
+  const pinFiles = [
+    "orchestration/requirements.txt",
+    "orchestration/requirements.lock.txt",
+    "orchestration/requirements.yml",
+    "orchestration/requirements-docker.yml",
+  ];
+  // Hash the pin files together; entries are added in list order so the
+  // fingerprint map keeps a deterministic key order.
+  const pinHashes = await Promise.all(pinFiles.map(async (rel) => {
     try {
-      fingerprints[rel] = fingerprintCommentValue(
-        await hashFile(join(root, rel)),
-      );
+      return fingerprintCommentValue(await hashFile(join(root, rel)));
     } catch {
       // Pin files should exist; skip a missing optional docker pin file.
+      return undefined;
     }
-  }
+  }));
+  pinFiles.forEach((rel, i) => {
+    const hash = pinHashes[i];
+    if (hash !== undefined) fingerprints[rel] = hash;
+  });
 
   const markdown = renderThirdPartyNotices(packages, {
     repoLicense: "AGPL-3.0-only",
@@ -238,8 +242,12 @@ export async function specifiersFromDenoInfo(
     };
   });
   const specs = new Set<string>();
-  for (const entry of entrypoints) {
-    const result = await run(["info", "--json", "--quiet", entry]);
+  // Each entrypoint is resolved independently; specifiers are merged in
+  // entrypoint order and sorted below, so the result is deterministic.
+  const results = await Promise.all(
+    entrypoints.map((entry) => run(["info", "--json", "--quiet", entry])),
+  );
+  for (const result of results) {
     if (!result.success) continue;
     collectSpecifiersFromDenoInfoJson(result.stdout, specs);
   }

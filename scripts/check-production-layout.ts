@@ -464,27 +464,33 @@ export async function runProductionLayoutCheck(
   const daemonUnitText = await Deno.readTextFile(daemonUnitPath);
   assertDaemonUnitLock(failures, daemonUnitText);
 
-  for (const scanRoot of PRODUCTION_SCAN_ROOTS) {
-    const abs = join(root, scanRoot);
-    let stat: Deno.FileInfo;
-    try {
-      stat = await Deno.stat(abs);
-    } catch {
-      continue;
-    }
-    const files = stat.isDirectory ? walk(abs, root) : (async function* () {
-      yield abs;
-    })();
-    for await (const file of files) {
-      if (!SCAN_EXTENSIONS.test(file)) continue;
-      const rel = relative(root, file);
-      const text = await Deno.readTextFile(file);
-      failures.push(
-        ...collectForbiddenReferenceFailures(rel, text),
-        ...collectRetiredIdentityFailures(rel, text),
-      );
-    }
-  }
+  // Scan roots and the files under them are independent reads; results are
+  // joined in root/walk order so the failure list stays deterministic.
+  const perRoot = await Promise.all(
+    PRODUCTION_SCAN_ROOTS.map(async (scanRoot) => {
+      const abs = join(root, scanRoot);
+      let stat: Deno.FileInfo;
+      try {
+        stat = await Deno.stat(abs);
+      } catch {
+        return [];
+      }
+      const found = stat.isDirectory
+        ? await Array.fromAsync(walk(abs, root))
+        : [abs];
+      const files = found.filter((file) => SCAN_EXTENSIONS.test(file));
+      const perFile = await Promise.all(files.map(async (file) => {
+        const rel = relative(root, file);
+        const text = await Deno.readTextFile(file);
+        return [
+          ...collectForbiddenReferenceFailures(rel, text),
+          ...collectRetiredIdentityFailures(rel, text),
+        ];
+      }));
+      return perFile.flat();
+    }),
+  );
+  failures.push(...perRoot.flat());
 
   assertRuntimesDirContract(failures);
   return failures;

@@ -27,6 +27,7 @@ import type {
 import type { ReleaseOutputHandler } from "./checkout.ts";
 import { normalizeNodePackageManagerCommand } from "../node-package-manager.ts";
 import { copyTree } from "./promote.ts";
+import { forEachSequential } from "../../util/sequential.ts";
 
 /** Build ceiling. Long enough for a cold dependency install, not unbounded. */
 export const BUILD_TIMEOUT_MS = 1_800_000;
@@ -455,7 +456,8 @@ export async function runReleaseBuild(
         commandRedactSummary,
         params.nativeRuntime?.runtimeGroup,
       ));
-  for (const command of commands) {
+  // Build commands run in order and stop at the first failure.
+  await forEachSequential(commands, async (command) => {
     params.onOutput?.("stdout", `$ ${command}`);
     await execute(
       command,
@@ -465,7 +467,7 @@ export async function runReleaseBuild(
       params.onOutput,
       params.redactSummary,
     );
-  }
+  });
 }
 
 /**
@@ -597,16 +599,14 @@ export async function prepareNativeAppBuildOutput(
     return { standaloneOutput: false, staticExport: false };
   }
 
-  for (
-    const [from, to] of [
-      [NEXT_STATIC_DIR, join(NEXT_STANDALONE_DIR, NEXT_STATIC_DIR)],
-      [NEXT_PUBLIC_DIR, join(NEXT_STANDALONE_DIR, NEXT_PUBLIC_DIR)],
-    ]
-  ) {
+  await forEachSequential([
+    [NEXT_STATIC_DIR, join(NEXT_STANDALONE_DIR, NEXT_STATIC_DIR)],
+    [NEXT_PUBLIC_DIR, join(NEXT_STANDALONE_DIR, NEXT_PUBLIC_DIR)],
+  ], async ([from, to]) => {
     const source = join(context.workingDir, from);
-    if (!(await directoryExists(source))) continue;
+    if (!(await directoryExists(source))) return;
     await copyTree(source, join(context.workingDir, to));
-  }
+  });
 
   context.onOutput?.(
     "stdout",
