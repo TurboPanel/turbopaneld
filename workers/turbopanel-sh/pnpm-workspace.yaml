@@ -3,3 +3,5 @@ allowBuilds:
   workerd: true
 overrides:
   sharp: ^0.35.4
+  # GHSA-3wwx-pv8p-q78v: miniflare pins undici 7.29.0 exactly; force the fixed release.
+  undici: 7.29.1

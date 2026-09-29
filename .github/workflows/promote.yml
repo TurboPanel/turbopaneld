@@ -1,7 +1,10 @@
 # One-click promotion for this repo (Testing Checklist rel-s19..s21).
 #
-#   to=rc       canary build → v<base>-rc.1 pre-release + `staging` branch
-#   to=release  v<base>-rc.1 → v<base> (releases/latest) + `live` branch
+#   to=rc       canary build → v<base>-rc.<N> pre-release + `staging` branch
+#   to=release  v<base>-rc.<N> → v<base> (releases/latest) + `live` branch
+#
+# BREAK-GLASS ONLY. The normal path is the two automatic PRs (promote-prs.yml
+# keeps a trunk → staging PR open; merging it runs cut-rc.yml).
 #
 # The bytes are the tested build's; only the asset names, the manifest
 # (version, channel, urls) and its signature change. Order across repos:
@@ -27,7 +30,7 @@ on:
           - rc
           - release
       source:
-        description: "to=rc: a canary build id (yyyymmdd-hhmmss-sha7 from the rolling canary release), a canary version, or manifest-<version>.json. to=release: the rc tag (vX.Y.Z-rc.1)."
+        description: "to=rc: a canary build id (yyyymmdd-hhmmss-sha7 from the rolling canary release), a canary version, or manifest-<version>.json. to=release: the rc tag (vX.Y.Z-rc.N)."
         required: true
         type: string
 
@@ -36,12 +39,12 @@ permissions:
 
 jobs:
   prepare:
-    uses: TurboPanel/dev/.github/workflows/gh-promote.yml@952d34d394347b8ad80e9b0f87efcf0b3233bba8 # dev#16
+    uses: TurboPanel/dev/.github/workflows/gh-promote.yml@b15365e63ddb42e96b9fe3b7594b8bc0b03a2b49 # dev#24
     with:
       repo-kind: daemon
       to: ${{ inputs.to }}
       source: ${{ inputs.source }}
-      dev-ref: 952d34d394347b8ad80e9b0f87efcf0b3233bba8
+      dev-ref: b15365e63ddb42e96b9fe3b7594b8bc0b03a2b49
       # turbopaneld commit carrying scripts/sign-manifest.ts and the release
       # public-key pin. Bump it when the key is rotated.
       signer-ref: 93c4f94510c9499e6bf04366a9500fe9f8e38aaa
@@ -49,7 +52,7 @@ jobs:
 
   publish:
     needs: prepare
-    uses: TurboPanel/dev/.github/workflows/gh-release.yml@952d34d394347b8ad80e9b0f87efcf0b3233bba8 # dev#16
+    uses: TurboPanel/dev/.github/workflows/gh-release.yml@b15365e63ddb42e96b9fe3b7594b8bc0b03a2b49 # dev#24
     with:
       version: ${{ needs.prepare.outputs.version }}
       channel: ${{ inputs.to }}
@@ -61,7 +64,7 @@ jobs:
 
   finalize:
     needs: [prepare, publish]
-    uses: TurboPanel/dev/.github/workflows/gh-promote-finalize.yml@952d34d394347b8ad80e9b0f87efcf0b3233bba8 # dev#16
+    uses: TurboPanel/dev/.github/workflows/gh-promote-finalize.yml@b15365e63ddb42e96b9fe3b7594b8bc0b03a2b49 # dev#24
     with:
       to: ${{ inputs.to }}
       version: ${{ needs.prepare.outputs.version }}

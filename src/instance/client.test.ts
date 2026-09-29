@@ -3502,6 +3502,17 @@ it({
             tail: 20,
             at: new Date().toISOString(),
           });
+          // Unsupported engine: the daemon answers `ok: false` without
+          // touching Docker, on the request id.
+          socket.receive({
+            type: "managed-health-request",
+            id: "health-1",
+            managedId: "00000000-0000-4000-8000-000000000001",
+            memberId: "00000000-0000-4000-8000-000000000004",
+            role: "replica",
+            engine: "redis",
+            at: new Date().toISOString(),
+          });
           socket.receive({
             type: "fabric-paths-request",
             id: "fabric-1",
@@ -3572,6 +3583,22 @@ it({
             () =>
               lastFrameOfType(socket, "managed-logs-result") ? true : undefined,
           );
+          await waitFor(
+            "managed-health-result",
+            () =>
+              lastFrameOfType(socket, "managed-health-result")
+                ? true
+                : undefined,
+          );
+          const healthFrame = lastFrameOfType(
+            socket,
+            "managed-health-result",
+          ) as
+            | { id?: string; ok?: boolean; error?: unknown }
+            | undefined;
+          assertEquals(healthFrame?.id, "health-1");
+          assertEquals(healthFrame?.ok, false);
+          assertEquals(typeof healthFrame?.error, "string");
           await waitFor(
             "fabric-paths-result",
             () =>

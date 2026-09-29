@@ -3,7 +3,9 @@ import { DAEMON_VERSION } from "../version.ts";
 import {
   compareSemver,
   DAEMON_FEATURE_MIN_VERSIONS,
+  DAEMON_WIRE_FEATURES,
   instanceUnsupportedReason,
+  MANAGED_HEALTH_FEATURE,
   MIN_SUPPORTED_INSTANCE_VERSION,
   parseSemver,
   resolveDaemonCapabilities,
@@ -97,4 +99,16 @@ test("capability gates: above and equal open, below and unknown stay closed", ()
     ],
     true,
   );
+});
+
+test("managed-health-v1 is advertised on the wire and raised no floor", () => {
+  assertEquals(MANAGED_HEALTH_FEATURE, "managed-health-v1");
+  assertEquals(
+    (DAEMON_WIRE_FEATURES as readonly string[]).includes(
+      MANAGED_HEALTH_FEATURE,
+    ),
+    true,
+  );
+  // A new wire message is feature-gated; it never moves the version floor.
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
 });

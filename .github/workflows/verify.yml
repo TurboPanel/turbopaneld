@@ -127,13 +127,17 @@ jobs:
       # assets.test.ts requires scripts/download-caddy.mjs and fails when it is
       # missing. A single-repo checkout does not include that file. Prefer the
       # same-named branch on TurboPanel/turbopanel so a paired PR is compared
-      # with its own pin; otherwise use trunk.
+      # with its own pin; otherwise use trunk. PRs into staging/live use trunk
+      # (see contract-drift below).
       - name: Resolve instance checkout ref
         id: instance-ref
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           REF="${{ github.head_ref || github.ref_name }}"
+          case "${{ github.base_ref }}" in
+            staging | live) REF=trunk ;;
+          esac
           if gh api "repos/TurboPanel/turbopanel/branches/${REF}" --silent; then
             echo "ref=${REF}" >> "$GITHUB_OUTPUT"
           else
@@ -175,7 +179,13 @@ jobs:
       # off for turbopanel_turbopaneld). Skipped only when SONAR_TOKEN is empty
       # (fork or Dependabot PRs). Quality gate failure fails this job.
       - name: SonarQube Scan
-        if: env.SONAR_TOKEN != ''
+        # Promotion PRs (trunk → staging, staging → live) carry no new code —
+        # every commit in them was analysed when it landed on trunk — and
+        # Sonar would count the whole diff since the last release as new code.
+        if: >-
+          env.SONAR_TOKEN != ''
+          && !(github.event_name == 'pull_request'
+               && (github.base_ref == 'staging' || github.base_ref == 'live'))
         uses: SonarSource/sonarqube-scan-action@ba9859eae8dd6bd29e412f25ddbbef3d032000f4 # v8.2.2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -188,6 +198,12 @@ jobs:
   # branch (else trunk), so a daemon-only change that drifts fails here rather
   # than turning turbopanel red after it merges. Mirrors turbopanel's
   # metrics-legacy job.
+  #
+  # PRs into staging/live (the automatic promotion PRs) have `staging` or
+  # `trunk` as their head, carrying commits that were checked against
+  # turbopanel trunk. Pairing them with turbopanel's staging/live would
+  # compare the new daemon with the older control plane (the daemon ships
+  # first by design), so those PRs compare against turbopanel trunk too.
   contract-drift:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -207,6 +223,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           REF="${{ github.head_ref || github.ref_name }}"
+          case "${{ github.base_ref }}" in
+            staging | live) REF=trunk ;;
+          esac
           if gh api "repos/TurboPanel/turbopanel/branches/${REF}" --silent; then
             echo "ref=${REF}" >> "$GITHUB_OUTPUT"
           else
