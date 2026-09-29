@@ -287,6 +287,21 @@ function asPrivilege(value: string): ManagedDatabasePrivilege | null {
   return null;
 }
 
+/** The grant for the wildcard account plus one per client source host. */
+function grantForAllSourcesSql(
+  database: string,
+  username: string,
+  privilege: ManagedDatabasePrivilege,
+  hosts: readonly string[],
+): string {
+  return [
+    grantDatabaseSql(database, username, privilege),
+    ...hosts.map((host) =>
+      grantDatabaseSql(database, username, privilege, host)
+    ),
+  ].join("\n");
+}
+
 async function applyOneCredential(
   ctx: ManagedEngineContext,
   credential: ManagedApplyCredential,
@@ -339,12 +354,12 @@ async function applyOneCredential(
         if (privilege === null) return;
         await runMysql(
           ctx,
-          [
-            grantDatabaseSql(database, credential.username, privilege),
-            ...(ctx.clientSourceHosts ?? []).map((host) =>
-              grantDatabaseSql(database, credential.username, privilege, host)
-            ),
-          ].join("\n"),
+          grantForAllSourcesSql(
+            database,
+            credential.username,
+            privilege,
+            ctx.clientSourceHosts ?? [],
+          ),
         );
       }),
   );

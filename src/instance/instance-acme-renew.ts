@@ -37,6 +37,7 @@ import {
 } from "../deploy/instance-acme-issuer.ts";
 import { type LayoutPaths, resolveLayout } from "../paths/layout.ts";
 import { errorText, logInfo, logWarn, sanitizeForLog } from "../util/logger.ts";
+import { forEachSequential } from "../util/sequential.ts";
 import {
   type InstanceAcmeIssuanceEventMessage,
   readInstanceLetsEncryptHostnames,
@@ -385,13 +386,9 @@ export class InstanceAcmeRenewalScheduler {
     const at = new Date(now).toISOString();
     let changed = false;
     const hosts = [...current].sort((a, b) => a.localeCompare(b));
-    // The reads are independent; the events still go out in host order.
-    const notAfters = await Promise.all(
-      hosts.map((host) => this.#unreportedCurrentNotAfter(host, now)),
-    );
-    for (const [index, host] of hosts.entries()) {
-      const notAfter = notAfters[index];
-      if (!notAfter) continue;
+    await forEachSequential(hosts, async (host) => {
+      const notAfter = await this.#unreportedCurrentNotAfter(host, now);
+      if (!notAfter) return;
       this.#emit({
         type: "instance-acme-issuance-event",
         hostname: host,
@@ -404,7 +401,7 @@ export class InstanceAcmeRenewalScheduler {
         "instance",
         `instance-acme-issuance-event ok hostname=${host}`,
       );
-    }
+    });
     if (changed) await this.#save();
   }
 
@@ -422,16 +419,12 @@ export class InstanceAcmeRenewalScheduler {
 
   async #reportInstalled(hosts: readonly string[]): Promise<void> {
     const at = new Date(this.#nowMs()).toISOString();
-    // The reads are independent; state changes and events stay in host order.
-    const notAfters = await Promise.all(
-      hosts.map((host) => this.#installedNotAfter(host)),
-    );
-    for (const [index, host] of hosts.entries()) {
-      const notAfter = notAfters[index];
+    await forEachSequential(hosts, async (host) => {
+      const notAfter = await this.#installedNotAfter(host);
       if (!notAfter) {
         this.#backoff(host);
         this.#emitFailure(host, "installed certificate is missing", at);
-        continue;
+        return;
       }
       this.#state.hosts.delete(host);
       this.#emit({
@@ -445,7 +438,7 @@ export class InstanceAcmeRenewalScheduler {
         "instance",
         `instance-acme-issuance-event ok hostname=${host}`,
       );
-    }
+    });
     await this.#save();
   }
 
@@ -509,14 +502,13 @@ export class InstanceAcmeRenewalScheduler {
     const current = new Set(listed.filter(isRenewableHost));
     if (this.#forgetAbsent(current)) await this.#save();
     const now = this.#nowMs();
-    const candidates = [...current]
-      .sort((a, b) => a.localeCompare(b))
-      .filter((host) => !this.#inBackoff(host, now));
-    // Reading each leaf is independent; `due` keeps the sorted host order.
-    const dueFlags = await Promise.all(
-      candidates.map((host) => this.#hostDue(host, now)),
-    );
-    return candidates.filter((_, index) => dueFlags[index]);
+    const due: string[] = [];
+    const hosts = [...current].sort((a, b) => a.localeCompare(b));
+    await forEachSequential(hosts, async (host) => {
+      if (this.#inBackoff(host, now)) return;
+      if (await this.#hostDue(host, now)) due.push(host);
+    });
+    return due;
   }
 
   async #hostDue(host: string, nowMs: number): Promise<boolean> {
