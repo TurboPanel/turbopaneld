@@ -257,11 +257,11 @@ export async function applyRenderedFirewall(
     }
   }
 
-  await writeDurableDocuments(
-    layout,
-    rendered.v4,
-    ipv6Failure === null ? (ipv6Applied ? rendered.v6 : null) : "keep",
-  );
+  // v6 durable document: a failed apply leaves the file alone, a successful
+  // one records the rendered document, and no apply forgets it.
+  let durableV6: DurableV6Document = KEEP_V6_DOCUMENT;
+  if (ipv6Failure === null) durableV6 = ipv6Applied ? rendered.v6 : null;
+  await writeDurableDocuments(layout, rendered.v4, durableV6);
 
   if (ipv6Failure !== null) throw new FirewallIpv6ApplyError(ipv6Failure);
   return { ipv6Applied, forwardApplied: includeForward[4], warnings };
@@ -280,19 +280,23 @@ async function applyIpv6(
 }
 
 /**
- * `v6`: the document to keep, `null` to forget it, or `"keep"` to leave the
- * existing file alone (the v6 kernel state did not change).
+ * What to do with the durable v6 document: the document text to keep, `null`
+ * to forget it, or the {@link KEEP_V6_DOCUMENT} sentinel to leave the existing
+ * file alone (the v6 kernel state did not change).
  */
+type DurableV6Document = string | null | typeof KEEP_V6_DOCUMENT;
+const KEEP_V6_DOCUMENT: unique symbol = Symbol("keep-v6-document");
+
 async function writeDurableDocuments(
   layout: LayoutPaths,
   v4: string,
-  v6: string | null | "keep",
+  v6: DurableV6Document,
 ): Promise<void> {
   await Deno.mkdir(layout.configDir, { recursive: true });
   const v4Path = join(layout.configDir, FIREWALL_V4_FILENAME);
   const v6Path = join(layout.configDir, FIREWALL_V6_FILENAME);
   await Deno.writeTextFile(v4Path, v4, { mode: 0o644 });
-  if (v6 === "keep") return;
+  if (v6 === KEEP_V6_DOCUMENT) return;
   if (v6 === null) {
     await removeIfPresent(v6Path);
   } else {

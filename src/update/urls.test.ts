@@ -195,6 +195,22 @@ test("pinnedChannelManifestUrl pins canary and versioned releases and leaves tru
   assertEquals(pinnedChannelManifestUrl("daemon", "canary", ""), null);
   assertEquals(pinnedChannelManifestUrl("daemon", "canary", "v0.1.0"), null);
   assertEquals(pinnedChannelManifestUrl("daemon", "release", "../x"), null);
+  // The leading digit is ASCII-only: `\d` never matches other Unicode digits.
+  assertEquals(
+    pinnedChannelManifestUrl("daemon", "release", "\u0663.0.1"),
+    null,
+  );
+  assertEquals(
+    pinnedChannelManifestUrl("daemon", "release", "\uff11.0.1"),
+    null,
+  );
+  assertEquals(pinnedChannelManifestUrl("daemon", "release", "x1.0.1"), null);
+  for (const digit of "0123456789") {
+    assertEquals(
+      pinnedChannelManifestUrl("daemon", "release", `${digit}.0.1`) !== null,
+      true,
+    );
+  }
 });
 
 async function shellPinnedManifestUrl(

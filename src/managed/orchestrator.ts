@@ -333,8 +333,12 @@ export async function inspectOrchestratorContainer(
 }
 
 export type EnsureOrchestratorOptions = {
-  /** Group the container joins to read daemon-written files; defaults to the daemon's own gid. */
-  daemonGid?: number | null;
+  /**
+   * Group the container joins to read daemon-written files; defaults to the
+   * group owning the conf the daemon just wrote. A non-positive gid (`0`)
+   * adds no `group_add`.
+   */
+  daemonGid?: number;
   stability?: ContainerStabilityOptions;
 };
 
@@ -373,9 +377,7 @@ export async function ensureOrchestratorStack(
   // The group that owns the conf the daemon just wrote is the one the
   // container must join to read it (`tp` on a host; the dev user's group in
   // the Vagrant overlay). Read off the file so no `--allow-sys` is needed.
-  const daemonGid = options.daemonGid === undefined
-    ? (await Deno.stat(confPath)).gid
-    : options.daemonGid;
+  const daemonGid = options.daemonGid ?? (await Deno.stat(confPath)).gid;
   const composeYaml = orchestratorCompose(
     descriptor,
     raft,

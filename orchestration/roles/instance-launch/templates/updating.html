@@ -3,7 +3,6 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta http-equiv="refresh" content="5">
   <title>TurboPanel is updating</title>
   <style>
     :root { color-scheme: dark; }
@@ -31,6 +30,10 @@
   <main>
     <h1>TurboPanel</h1>
     <p><strong>Updating the control plane.</strong> This page retries every few seconds.</p>
+    <p>If this page does not update, reload it.</p>
   </main>
+  <script>
+    setTimeout(function () { location.reload(); }, 5000);
+  </script>
 </body>
 </html>
