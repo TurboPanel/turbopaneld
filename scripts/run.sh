@@ -1051,9 +1051,9 @@ tp_deno_pinned_sha256() {
 # Verify $1 against the pinned Deno digest for architecture $2.
 tp_verify_deno_archive() {
   _archive="$1"
-  _deno_arch="$2"
-  _sum="$(tp_deno_pinned_sha256 "$_deno_arch")" || {
-    echo "run.sh: no pinned SHA-256 for Deno ${TP_DENO_VERSION} on $_deno_arch" >&2
+  _verify_arch="$2"
+  _sum="$(tp_deno_pinned_sha256 "$_verify_arch")" || {
+    echo "run.sh: no pinned SHA-256 for Deno ${TP_DENO_VERSION} on $_verify_arch" >&2
     return 1
   }
   if printf '%s  %s\n' "$_sum" "$_archive" | sha256sum -c - >/dev/null 2>&1; then
