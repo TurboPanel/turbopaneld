@@ -125,12 +125,12 @@ jobs:
   prepare:
     needs: resolve
     if: needs.resolve.outputs.proceed == 'true'
-    uses: TurboPanel/dev/.github/workflows/gh-promote.yml@d5d3d0b14af8d0788c9341fccd0c3e729e2614c7 # dev#27
+    uses: TurboPanel/dev/.github/workflows/gh-promote.yml@104651a09386eb24d3bd78432f921bbfb76c66f4 # dev#30
     with:
       repo-kind: daemon
       to: rc
       source: ${{ needs.resolve.outputs.build }}
-      dev-ref: d5d3d0b14af8d0788c9341fccd0c3e729e2614c7
+      dev-ref: 104651a09386eb24d3bd78432f921bbfb76c66f4
       # Same signer pin as promote.yml.
       signer-ref: 93c4f94510c9499e6bf04366a9500fe9f8e38aaa
       # The merge of the promotion PR is the approval.
@@ -139,7 +139,7 @@ jobs:
 
   publish:
     needs: prepare
-    uses: TurboPanel/dev/.github/workflows/gh-release.yml@d5d3d0b14af8d0788c9341fccd0c3e729e2614c7 # dev#27
+    uses: TurboPanel/dev/.github/workflows/gh-release.yml@104651a09386eb24d3bd78432f921bbfb76c66f4 # dev#30
     with:
       version: ${{ needs.prepare.outputs.version }}
       channel: rc
@@ -151,7 +151,7 @@ jobs:
 
   finalize:
     needs: [prepare, publish]
-    uses: TurboPanel/dev/.github/workflows/gh-promote-finalize.yml@d5d3d0b14af8d0788c9341fccd0c3e729e2614c7 # dev#27
+    uses: TurboPanel/dev/.github/workflows/gh-promote-finalize.yml@104651a09386eb24d3bd78432f921bbfb76c66f4 # dev#30
     with:
       to: rc
       version: ${{ needs.prepare.outputs.version }}
@@ -171,6 +171,17 @@ jobs:
           app-id: ${{ secrets.RELEASE_APP_ID }}
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
 
+      - name: Check out the changelog script (TurboPanel/dev)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: TurboPanel/dev
+          ref: 104651a09386eb24d3bd78432f921bbfb76c66f4
+          path: .promote
+          fetch-depth: 1
+          persist-credentials: false
+          sparse-checkout: scripts/promote
+          sparse-checkout-cone-mode: false
+
       - name: Open or refresh the staging → live PR
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}
@@ -185,7 +196,7 @@ jobs:
             echo
             echo "**Since the last release:**"
             echo
-            gh api "repos/$REPO/compare/live...staging" --jq '.commits[] | select((.parents | length) == 1) | "- " + (.commit.message | split("\n")[0])' | head -80
+            sh .promote/scripts/promote/changelog.sh "$REPO" live staging 80
             echo
             echo "Merge with a merge commit (live takes merge commits only). Wait for \`ci-ok\` first."
           } > body.md
