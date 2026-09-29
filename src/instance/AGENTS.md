@@ -54,6 +54,18 @@ the request (nothing is applied, the tunnel is not torn down). The legacy
 plaintext `keyPem` / `token` from an older control plane is still accepted
 until both floors pass the release that ships this; then those fields go.
 
+**On-demand managed health (`managed-health-v1`).** The daemon advertises
+the feature in `hello.features`. A control plane that sees it may send
+`managed-health-request` (`managedId`, `memberId`, `role`, `engine`) and gets
+`managed-health-result` (`ok`, `member.replication` or `error`) on the same id.
+`InstanceClient.#probeManagedHealth` hands it to `probeManagedMemberHealth`
+(`src/managed/health.ts`) and always answers, `ok: false` on any failure. It
+is not a command: no command row, no outbox. Health was otherwise only
+observed when a `managed.apply` / `managed.lifecycle` result came back, so the
+promote gate's staleness window expired on an idle, healthy cluster. A control
+plane that predates the feature never sends the request; the message is
+additive and no floor moved.
+
 ### Instance Let's Encrypt renewal (`src/instance/instance-acme-renew.ts`)
 
 `InstanceAcmeRenewalScheduler` renews the control plane's own Let's Encrypt

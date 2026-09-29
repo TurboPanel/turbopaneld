@@ -1,0 +1,68 @@
+# Keeps the trunk → staging promotion PR open (Road to 0.2.x, versioning flow).
+#
+# Every green trunk build ("Publish daemon trunk build" succeeded, so a canary
+# exists for that commit) makes sure a PR "Cut rc <version>" from trunk into
+# staging is open. Merging it is the one human act: cut-rc.yml then cuts the
+# next x.y.z-rc.N from that exact canary's bytes. The PR is opened with the
+# Release App's token, because a PR created with GITHUB_TOKEN never starts the
+# required `ci-ok` check.
+
+name: Keep the rc PR open
+
+on:
+  workflow_run:
+    workflows: ["Publish daemon trunk build"]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: promote-prs
+  cancel-in-progress: false
+
+jobs:
+  rc-pr:
+    if: >-
+      github.event_name == 'workflow_dispatch'
+      || (github.event.workflow_run.conclusion == 'success'
+          && github.event.workflow_run.head_branch == 'trunk')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mint a Release App token
+        id: app
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+
+      - name: Open or refresh the trunk → staging PR
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -eu
+          ahead="$(gh api "repos/$REPO/compare/staging...trunk" --jq .ahead_by)"
+          existing="$(gh pr list --repo "$REPO" --base staging --head trunk --state open --json number --jq '.[0].number // empty')"
+          if [ "$ahead" = "0" ]; then
+            echo "trunk has nothing staging lacks — no rc PR needed"
+            exit 0
+          fi
+          version="$(gh api "repos/$REPO/contents/deno.json?ref=trunk" --jq .content | base64 -d | jq -r .version)"
+          title="Cut rc for $version"
+          {
+            echo "Merging this cuts the next \`v$version-rc.N\` from the exact canary build of the merged trunk commit (same bytes, re-signed) and moves \`staging\`. It runs automatically after the merge (\`cut-rc.yml\`)."
+            echo
+            echo "**$ahead commit(s) on trunk not yet on staging:**"
+            echo
+            gh api "repos/$REPO/compare/staging...trunk" --jq '.commits[] | "- " + (.commit.message | split("\n")[0])' | head -50
+            echo
+            echo "Merge with a merge commit (staging takes merge commits only). Wait for \`ci-ok\` first."
+          } > body.md
+          if [ -n "$existing" ]; then
+            gh pr edit "$existing" --repo "$REPO" --title "$title" --body-file body.md
+            echo "refreshed #$existing"
+          else
+            gh pr create --repo "$REPO" --base staging --head trunk --title "$title" --body-file body.md
+          fi

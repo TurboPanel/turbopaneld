@@ -10,7 +10,7 @@ orchestration/requirements-docker.yml sha256:7aaeade63e316749d179a03a9289e37a23a
 orchestration/requirements.lock.txt sha256:2a2b88cc97affa78a54c1635b65333eb1259a4aa49f251cfc41aaa0261f2e673
 orchestration/requirements.txt sha256:bcd5495ade36b7203ef5411fe77be58d740df3437810a00332203a1bbc162162
 orchestration/requirements.yml sha256:e2003efba060bce064c6f4f7e4f5857dd8f41120e2537aaa6a76cab7834cae3c
-workers/turbopanel-sh/pnpm-lock.yaml sha256:e896877b5d6aad7cb3409814debd516fe793d3d23af1380fd61f46b923b2c491
+workers/turbopanel-sh/pnpm-lock.yaml sha256:aea81d396cc594dac3aa79f5d6149709e0a8c53e81080664d854be8ccead1275
 -->
 
 ## Production dependencies
@@ -479,7 +479,7 @@ These packages are used for development, test, or build tooling and are not bund
 - License: 0BSD
 - Source: pnpm-lock.yaml
 
-### undici@7.29.0
+### undici@7.29.1
 
 - License: MIT
 - Source: pnpm-lock.yaml
