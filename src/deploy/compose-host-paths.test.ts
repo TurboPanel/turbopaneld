@@ -1070,6 +1070,39 @@ test("confinement: a resolution error other than not-found is reported and does 
     ]);
   }));
 
+test("confinement: entries are resolved one at a time, in entry order", () =>
+  withFixture(async (f) => {
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const order: string[] = [];
+    const realPath = async (p: string): Promise<string> => {
+      inFlight++;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      order.push(p);
+      await new Promise((resolve) => setTimeout(resolve, 3));
+      try {
+        return await Deno.realPath(p);
+      } finally {
+        inFlight--;
+      }
+    };
+    await assertComposeHostPathsConfined(
+      [entryScan({ path: "one" }, { path: "two" }, { path: "three" })],
+      {
+        deploymentDir: f.dir,
+        stageDir: f.stage,
+        hostLevelApproved: false,
+        realPath,
+      },
+    );
+    assertEquals(maxInFlight, 1);
+    const firstTouch = ["one", "two", "three"].map((name) =>
+      order.findIndex((p) => p.endsWith(`/${name}`))
+    );
+    assertEquals(firstTouch.every((i) => i >= 0), true);
+    assertEquals([...firstTouch].sort((a, b) => a - b), firstTouch);
+  }));
+
 test("confinement: a missing deployment directory rejects with the raw error", () =>
   withFixture(async (f) => {
     await assertRejects(

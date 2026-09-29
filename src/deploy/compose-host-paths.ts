@@ -36,6 +36,7 @@ import {
 } from "./compose-files.ts";
 import { resolveComposeModel } from "./compose-services.ts";
 import { logWarn } from "../util/logger.ts";
+import { mapSequential } from "../util/sequential.ts";
 
 /** Engine socket paths that are refused as host-level, whatever else holds. */
 export const DOCKER_SOCKET_PATHS: ReadonlySet<string> = new Set([
@@ -579,9 +580,12 @@ export async function assertComposeHostPathsConfined(
     realStage: join(realDir, COMPOSE_STAGE_DIRNAME),
     stageDir: normalize(opts.stageDir),
   };
+  const outcomes = await mapSequential(
+    scans.flatMap((scan) => scan.entries),
+    (entry) => confineEntry(entry, ctx),
+  );
   const checked: Checked[] = [];
-  for (const entry of scans.flatMap((scan) => scan.entries)) {
-    const outcome = await confineEntry(entry, ctx);
+  for (const outcome of outcomes) {
     if (outcome.kind === "finding") findings.push(outcome.finding);
     else if (outcome.kind === "checked") checked.push(outcome.checked);
   }

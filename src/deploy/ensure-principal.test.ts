@@ -1436,6 +1436,106 @@ test("userSupplementaryGroups returns empty when id fails", async () => {
   assertEquals([...groups], []);
 });
 
+test("ensureSystemPrincipals finishes one principal before starting the next, one host call at a time", async () => {
+  const { run: inner, calls } = captureRun({});
+  let inFlight = 0;
+  let maxInFlight = 0;
+  const run: RunFn = async (command, args, stdin) => {
+    inFlight++;
+    maxInFlight = Math.max(maxInFlight, inFlight);
+    await new Promise((resolve) => setTimeout(resolve, 1));
+    const result = await inner(command, args, stdin);
+    inFlight--;
+    return result;
+  };
+  await ensureSystemPrincipals(stubLayout(), [
+    { ...baseSpec, username: "alice", home: "/srv/users/alice" },
+    { ...baseSpec, username: "bob", home: "/srv/users/bob" },
+  ], run);
+  assertEquals(maxInFlight, 1);
+  const creations = calls
+    .filter((c) => c.args.includes("groupadd") || c.args.includes("useradd"))
+    .map((c) =>
+      `${c.args.includes("groupadd") ? "group" : "user"} ${c.args.at(-1)}`
+    );
+  assertEquals(creations, [
+    "group alice-grp",
+    "user alice",
+    "group bob-grp",
+    "user bob",
+  ]);
+});
+
+test("ensureSystemPrincipals stops at the first principal that fails and never starts the next", async () => {
+  const { run: inner, calls } = captureRun({});
+  const run: RunFn = (command, args, stdin) => {
+    if (args.includes("useradd")) {
+      return Promise.resolve({ success: false, stdout: "", stderr: "denied" });
+    }
+    return inner(command, args, stdin);
+  };
+  await assertRejects(
+    () =>
+      ensureSystemPrincipals(stubLayout(), [
+        { ...baseSpec, username: "alice", home: "/srv/users/alice" },
+        { ...baseSpec, username: "bob", home: "/srv/users/bob" },
+      ], run),
+    Error,
+  );
+  assertEquals(calls.some((c) => c.args.includes("bob-grp")), false);
+  assertEquals(calls.some((c) => c.args.includes("bob")), false);
+});
+
+test("ensurePrincipalManagedGroups adds in sorted order and keeps going after a failed add", async () => {
+  const calls: string[][] = [];
+  const run: RunFn = (command, args) => {
+    if (command === "id") {
+      return Promise.resolve({
+        success: true,
+        stdout: "appuser-grp",
+        stderr: "",
+      });
+    }
+    calls.push(args);
+    return Promise.resolve(
+      args.includes("tpnode24")
+        ? { success: false, stdout: "", stderr: "no such group" }
+        : { success: true, stdout: "", stderr: "" },
+    );
+  };
+  await ensurePrincipalManagedGroups(
+    "appuser",
+    new Set(["tpphp84", "tpnode24", "tpnode22"]),
+    run,
+  );
+  assertEquals(calls.map((a) => a.at(-2)), ["tpnode22", "tpnode24", "tpphp84"]);
+});
+
+test("ensurePrincipalManagedGroups revokes in sorted order and stops at the first failed revoke", async () => {
+  const revoked: string[] = [];
+  const run: RunFn = (command, args) => {
+    if (command === "id") {
+      return Promise.resolve({
+        success: true,
+        stdout: "appuser-grp tpphp84 tpnode22 tpnode24",
+        stderr: "",
+      });
+    }
+    revoked.push(args.at(-1) ?? "");
+    return Promise.resolve(
+      args.at(-1) === "tpnode24"
+        ? { success: false, stdout: "", stderr: "gpasswd denied" }
+        : { success: true, stdout: "", stderr: "" },
+    );
+  };
+  await assertRejects(
+    () => ensurePrincipalManagedGroups("appuser", new Set(), run),
+    Error,
+    "gpasswd denied",
+  );
+  assertEquals(revoked, ["tpnode22", "tpnode24"]);
+});
+
 test("ensurePrincipalManagedGroups is loud when a revoke fails", async () => {
   const run: RunFn = (command, args) => {
     if (command === "id") {

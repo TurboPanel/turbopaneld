@@ -12,7 +12,7 @@
 /** Await `step(item, index)` for each item, in order. */
 export function forEachSequential<T>(
   items: Iterable<T>,
-  step: (item: T, index: number) => Promise<unknown> | unknown,
+  step: (item: T, index: number) => unknown,
 ): Promise<void> {
   return [...items].reduce<Promise<void>>(
     (chain, item, index) =>
@@ -39,9 +39,10 @@ export function mapSequential<T, R>(
 }
 
 /**
- * The first result that is not `undefined`, trying the items in order and
+ * The first result that is neither `undefined` nor `null`, trying the items in order and
  * never starting a step once one has produced a result (an early `return` /
- * `break` out of a `for … await` loop).
+ * `break` out of a `for … await` loop). A step that resolves `null` counts as
+ * "no result yet", the same as `undefined`, so the next item is tried.
  */
 export function firstSequential<T, R>(
   items: Iterable<T>,
@@ -49,7 +50,7 @@ export function firstSequential<T, R>(
 ): Promise<R | undefined> {
   return [...items].reduce<Promise<R | undefined>>(
     (chain, item, index) =>
-      chain.then((found) => found !== undefined ? found : step(item, index)),
+      chain.then((found) => found ?? step(item, index)),
     Promise.resolve(undefined),
   );
 }

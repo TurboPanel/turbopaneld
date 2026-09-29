@@ -523,3 +523,24 @@ test("selectUpdateManifestUrl: no pin falls back to the message, then nothing", 
   assertEquals(selectUpdateManifestUrl("daemon", {}, "  "), undefined);
   assertEquals(selectUpdateManifestUrl("ui", {}, undefined), undefined);
 });
+
+test("isExactBuildManifestUrl: only ASCII 0-9 starts a version (Arabic-Indic and fullwidth digits do not)", () => {
+  const base = "https://github.com/TurboPanel/turbopaneld/releases/download";
+  const digits = ["0", "9", "١", "٣", "１", "９"];
+  const accepted = digits.filter((d) =>
+    isExactBuildManifestUrl("daemon", `${base}/v${d}.1.2/manifest.json`)
+  );
+  assertEquals(accepted, ["0", "9"]);
+  const acceptedCanary = digits.filter((d) =>
+    isExactBuildManifestUrl(
+      "daemon",
+      `${base}/canary/manifest-${d}.1.2-canary.4.json`,
+    )
+  );
+  assertEquals(acceptedCanary, ["0", "9"]);
+});
+
+test("isExactBuildManifestUrl: a URL with no path segments is not a build", () => {
+  assertEquals(isExactBuildManifestUrl("daemon", "https://github.com"), false);
+  assertEquals(isExactBuildManifestUrl("daemon", "https://"), false);
+});

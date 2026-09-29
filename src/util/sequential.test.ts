@@ -64,3 +64,28 @@ test("firstSequential returns the first defined result and stops trying", async 
   assertEquals(await firstSequential([1, 2], () => undefined), undefined);
   assertEquals(await firstSequential([], () => "never"), undefined);
 });
+
+test("firstSequential treats a null result as no result and keeps trying", async () => {
+  const tried: number[] = [];
+  const found = await firstSequential([1, 2, 3, 4], (n) => {
+    tried.push(n);
+    if (n === 1) return null as unknown as undefined;
+    return n === 3 ? "three" : undefined;
+  });
+  assertEquals(found, "three");
+  assertEquals(tried, [1, 2, 3]);
+});
+
+test("firstSequential stops at the first rejection and starts nothing after it", async () => {
+  const tried: number[] = [];
+  await assertRejects(
+    () =>
+      firstSequential([1, 2, 3], (n) => {
+        tried.push(n);
+        return n === 2 ? Promise.reject(new Error("boom")) : undefined;
+      }),
+    Error,
+    "boom",
+  );
+  assertEquals(tried, [1, 2]);
+});

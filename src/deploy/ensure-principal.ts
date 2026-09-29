@@ -1,6 +1,7 @@
 import { join } from "@std/path";
 import { hostSudoArgs } from "../permissions/host-sudo.ts";
 import { logWarn } from "../util/logger.ts";
+import { forEachSequential } from "../util/sequential.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 import {
   allAccessGroups,
@@ -618,50 +619,54 @@ export async function ensureSystemPrincipals(
   for (const principal of principals) {
     assertPrincipalIdOverrides(principal);
   }
-  for (const principal of principals) {
-    assertSafePrincipalUsername(principal.username);
-    const groupName = principalUnixGroupName(principal.username);
-    const home = assertSafeAbsolutePath(
-      principal.home ?? join(layout.principalHomeRoot, principal.username),
-      "home",
-    );
-    const shell = assertSafeAbsolutePath(
-      principal.shell ?? DEFAULT_PRINCIPAL_SHELL,
-      "shell",
-    );
-    if (!ALLOWED_PRINCIPAL_SHELLS.includes(shell)) {
-      throw new TypeError(`Principal shell is not allowed: ${shell}`);
-    }
+  await forEachSequential(
+    principals,
+    (principal) => ensureOnePrincipal(layout, principal, runFn),
+  );
+}
 
-    // 0750 plus other:x, not 0751. A world bit trips ansible:S2612; the ACL
-    // is traverse without list. A principal with a shell can otherwise
-    // `ls /srv/users` and enumerate every other tenant. Homes are 0750 so
-    // contents were never exposed — the account names were. `install -d -m`
-    // resets the other class, so the ACL is applied after, not instead of.
-    await ensureDir(layout.principalHomeRoot, "0750", "root:root", runFn);
-    await ensurePrincipalHomeRootTraverse(layout.principalHomeRoot, runFn);
-    await ensurePrincipalGroup(principal, groupName, runFn);
-    await ensurePrincipalUser(principal, home, shell, groupName, runFn);
-    await ensurePrincipalHomeTree(
-      home,
-      principal.username,
-      groupName,
-      runFn,
-    );
-    // Runs here, before any unit is installed or pool staged: systemd resolves
-    // supplementary groups at `execve`, so a unit started before its principal
-    // joined the runtime group dies `203/EXEC`.
-    await ensurePrincipalManagedGroups(
-      principal.username,
-      resolveManagedGroups(principal),
-      runFn,
-    );
-    await ensurePrincipalPassword(
-      principal.username,
-      principal.passwordHash,
-      runFn,
-    );
+async function ensureOnePrincipal(
+  layout: LayoutPaths,
+  principal: PrincipalEnsureSpec,
+  runFn: RunFn,
+): Promise<void> {
+  assertSafePrincipalUsername(principal.username);
+  const groupName = principalUnixGroupName(principal.username);
+  const home = assertSafeAbsolutePath(
+    principal.home ?? join(layout.principalHomeRoot, principal.username),
+    "home",
+  );
+  const shell = assertSafeAbsolutePath(
+    principal.shell ?? DEFAULT_PRINCIPAL_SHELL,
+    "shell",
+  );
+  if (!ALLOWED_PRINCIPAL_SHELLS.includes(shell)) {
+    throw new TypeError(`Principal shell is not allowed: ${shell}`);
   }
+
+  // 0750 plus other:x, not 0751. A world bit trips ansible:S2612; the ACL
+  // is traverse without list. A principal with a shell can otherwise
+  // `ls /srv/users` and enumerate every other tenant. Homes are 0750 so
+  // contents were never exposed — the account names were. `install -d -m`
+  // resets the other class, so the ACL is applied after, not instead of.
+  await ensureDir(layout.principalHomeRoot, "0750", "root:root", runFn);
+  await ensurePrincipalHomeRootTraverse(layout.principalHomeRoot, runFn);
+  await ensurePrincipalGroup(principal, groupName, runFn);
+  await ensurePrincipalUser(principal, home, shell, groupName, runFn);
+  await ensurePrincipalHomeTree(home, principal.username, groupName, runFn);
+  // Runs here, before any unit is installed or pool staged: systemd resolves
+  // supplementary groups at `execve`, so a unit started before its principal
+  // joined the runtime group dies `203/EXEC`.
+  await ensurePrincipalManagedGroups(
+    principal.username,
+    resolveManagedGroups(principal),
+    runFn,
+  );
+  await ensurePrincipalPassword(
+    principal.username,
+    principal.passwordHash,
+    runFn,
+  );
 }
 
 /**
@@ -794,8 +799,8 @@ export async function ensurePrincipalManagedGroups(
   const sorted = (values: Iterable<string>) =>
     [...values].sort((a, b) => a.localeCompare(b));
 
-  for (const group of sorted(desiredGroups)) {
-    if (current.has(group)) continue;
+  await forEachSequential(sorted(desiredGroups), async (group) => {
+    if (current.has(group)) return;
     try {
       await ensureSupplementaryGroupMembership(username, group, runFn);
     } catch (err) {
@@ -806,13 +811,13 @@ export async function ensurePrincipalManagedGroups(
         }`,
       );
     }
-  }
+  });
 
-  for (const group of sorted(current)) {
+  await forEachSequential(sorted(current), (group) => {
     // Never touch a group outside the registry, even if it looks like ours.
-    if (!registryGroups.has(group) || desiredGroups.has(group)) continue;
-    await removeSupplementaryGroupMembership(username, group, runFn);
-  }
+    if (!registryGroups.has(group) || desiredGroups.has(group)) return;
+    return removeSupplementaryGroupMembership(username, group, runFn);
+  });
 }
 
 /**
