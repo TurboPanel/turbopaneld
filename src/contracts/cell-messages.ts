@@ -9,7 +9,10 @@
  * discriminators in step when adding a message.
  */
 import type { ServerReportedIp } from "./server-reported-ip.ts";
-import type { DrivetempEnableResult } from "./commands-contracts.ts";
+import type {
+  DrivetempEnableResult,
+  ManagedMemberObservedResult,
+} from "./commands-contracts.ts";
 import type { HardwareProfile } from "../metrics/collector/types.ts";
 import type { MetricsCapabilityPlan } from "../metrics/capability-plan.ts";
 import type { TopologySnapshot } from "./topology-types.ts";
@@ -168,6 +171,24 @@ export type DaemonMessage =
     id: string;
     managedId: string;
     tail: number;
+    at: string;
+  }
+  | {
+    type: "managed-health-request";
+    id: string;
+    managedId: string;
+    memberId: string;
+    /** The member's real role: a `replica` is read as a standby. */
+    role: "primary" | "replica";
+    engine: string;
+    at: string;
+  }
+  | {
+    type: "managed-health-result";
+    id: string;
+    ok: boolean;
+    member?: ManagedMemberObservedResult;
+    error?: string;
     at: string;
   }
   | {

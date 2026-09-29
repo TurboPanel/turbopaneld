@@ -189,7 +189,12 @@ support in `features[]` (`DAEMON_WIRE_FEATURES`, kept equal in both
 `version-wire.ts` files) and the daemon checks `InstanceClient.instanceSupports()`
 before treating the peer as able to speak it. `update-progress`
 (`update-progress-v1`) is the worked example — fire-and-forget progress,
-ignored by a peer that does not list the feature. A control-plane update the daemon is about to install is refused
+ignored by a peer that does not list the feature. `managed-health-v1` is the
+worked example of a control-plane-initiated correlated request
+(`managed-health-request` / `managed-health-result`): this daemon advertises it
+in `DAEMON_WIRE_FEATURES`, and the control plane sends the request only to a
+daemon whose `hello.features` lists it, falling back to its stored observation
+otherwise. A control-plane update the daemon is about to install is refused
 when the target version is below `MIN_SUPPORTED_INSTANCE_VERSION`; the
 daemon's own self-update does not consult that floor, and the control plane
 does not gate `instance-update` on the daemon version.
