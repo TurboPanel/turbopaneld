@@ -382,6 +382,17 @@ async function fakeAptBin(): Promise<string> {
   return dir;
 }
 
+// A fake dpkg-query earlier on PATH that prints the given package names. Not a
+// shell function: dash rejects a hyphen in a function name.
+async function fakeDpkgBin(packages: string[]): Promise<string> {
+  const dir = await Deno.makeTempDir({ prefix: "tp-fake-dpkg-" });
+  const script = ["#!/bin/sh", ...packages.map((p) => `echo ${p}`), ""].join(
+    "\n",
+  );
+  await Deno.writeTextFile(join(dir, "dpkg-query"), script, { mode: 0o755 });
+  return dir;
+}
+
 const PACKAGE_FUNCTIONS = [
   "tp_purge_guarded_packages",
   "tp_choose_purge_packages",
@@ -396,33 +407,33 @@ const PACKAGE_FUNCTIONS = [
 ];
 
 test("no package is a purge candidate without TurboPanel's own sury evidence", async () => {
+  const bin = await fakeDpkgBin(["php8.3-cli", "php8.3-fpm"]);
   const result = await runPurgeSh(
     ["tp_collect_purge_candidates", "tp_sury_evidence", "tp_pkg_installed"],
     [
       // Everything below is installed, but nothing shows TurboPanel's PHP role ran.
       "tp_pkg_installed() { return 0; }",
-      "dpkg-query() { printf 'php8.3-cli\\nphp8.3-fpm\\n'; }",
       "tp_sury_evidence() { return 1; }",
       "tp_collect_purge_candidates",
       'echo "candidates=[$(cat "$TP_TMP/apt.candidates")]"',
     ].join("\n"),
-    { PATH: REAL_PATH },
+    { PATH: `${bin}:${REAL_PATH}` },
   );
   assertStringIncludes(result.stdout, "candidates=[]");
 });
 
 test("with sury evidence only phpN.N packages and the sury keyring are candidates, never a generic package", async () => {
+  // What dpkg-query returns for the 'php[0-9]*.[0-9]*-*' glob.
+  const bin = await fakeDpkgBin(["php8.3-cli", "php8.3-fpm", "php8.3-common"]);
   const result = await runPurgeSh(
     ["tp_collect_purge_candidates", "tp_file_add"],
     [
       "tp_pkg_installed() { return 0; }",
       "tp_sury_evidence() { return 0; }",
-      // What dpkg-query returns for the 'php[0-9]*.[0-9]*-*' glob.
-      "dpkg-query() { printf 'php8.3-cli\\nphp8.3-fpm\\nphp8.3-common\\n'; }",
       "tp_collect_purge_candidates",
       'cat "$TP_TMP/apt.candidates"',
     ].join("\n"),
-    { PATH: REAL_PATH },
+    { PATH: `${bin}:${REAL_PATH}` },
   );
   const candidates = result.stdout.trim().split("\n").sort();
   assertEquals(candidates, [
