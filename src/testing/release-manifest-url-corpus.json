@@ -642,6 +642,24 @@
       "url": "https://github.com/TurboPanel/turbopanel/releases/download/v1/manifest.json",
       "allow": false,
       "why": "unknown kind"
+    },
+    {
+      "kind": "daemon",
+      "url": "https://github.com/TurboPanel/turbopaneld/releases/download/canary/manifest-0.1.3-canary.412.json",
+      "allow": true,
+      "why": "counter canary per-build manifest (2026-09-28 naming)"
+    },
+    {
+      "kind": "daemon",
+      "url": "https://github.com/TurboPanel/turbopaneld/releases/download/v0.1.3-rc/manifest.json",
+      "allow": true,
+      "why": "plain -rc tag manifest (2026-09-28 naming)"
+    },
+    {
+      "kind": "daemon",
+      "url": "https://github.com/TurboPanel/turbopaneld/releases/download/v0.1.3/manifest.json",
+      "allow": true,
+      "why": "release tag manifest"
     }
   ]
 }

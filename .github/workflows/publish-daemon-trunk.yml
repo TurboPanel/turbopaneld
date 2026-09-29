@@ -29,7 +29,7 @@
 #     channels/trunk/daemon/<buildId>/ on dl.trbp.nl — the hosted platform's
 #     rail and the hand-operable override (Road to 0.1.x, `trunk-canary`);
 #   - the GitHub canary (`canary` channel): the same tarballs under versioned
-#     names (turbopaneld-<X.Y.Z>-canary.<buildId>-<arch>.tar.zst) on the
+#     names (turbopaneld-<X.Y.Z>-canary.<N>-<arch>.tar.zst) on the
 #     rolling `canary` pre-release, published by TurboPanel/dev's
 #     gh-canary.yml — what a self-hosted canary install follows.
 
@@ -365,14 +365,14 @@ jobs:
         # Same bytes as the CDN drop, renamed the way a release names them so
         # the rolling canary release never has two builds fighting over one
         # filename. The version is deno.json's number (what the binary
-        # reports on the wire) plus a `-canary.<buildId>` pre-release suffix,
+        # reports on the wire) plus a `-canary.<run number>` pre-release suffix,
         # which semver orders below the release it leads to.
         run: |
           set -eu
           # shellcheck source=scripts/lib/release-artifacts.sh
           . scripts/lib/release-artifacts.sh
           _pkg_version="$(python3 -c 'import json; print(json.load(open("deno.json"))["version"])')"
-          _version="${_pkg_version}-canary.${BUILD_ID}"
+          _version="${_pkg_version}-canary.${GITHUB_RUN_NUMBER}"
           echo "version=${_version}" >> "$GITHUB_OUTPUT"
           mkdir -p canary-assets
           _src="publish/channels/trunk/daemon"
