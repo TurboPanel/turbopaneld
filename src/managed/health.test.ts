@@ -85,7 +85,7 @@ test("probe rejects a non-uuid memberId, a bad role and an unknown engine", asyn
   );
   // Known code, but no runtime registered for it.
   const noRuntime = await probeManagedMemberHealth(
-    { ...base, engine: "clickhouse" },
+    { ...base, engine: "redis" },
     run,
   );
   assertEquals(noRuntime.ok, false);

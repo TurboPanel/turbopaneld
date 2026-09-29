@@ -3510,7 +3510,7 @@ it({
             managedId: "00000000-0000-4000-8000-000000000001",
             memberId: "00000000-0000-4000-8000-000000000004",
             role: "replica",
-            engine: "clickhouse",
+            engine: "redis",
             at: new Date().toISOString(),
           });
           socket.receive({
