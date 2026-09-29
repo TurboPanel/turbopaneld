@@ -91,6 +91,49 @@ function isRemoteBuildSource(value: string): boolean {
 
 const OCI_LAYOUT_PREFIX = "oci-layout://";
 
+/** Short syntax `source:target[:opts]`: a path source starts with `/` or `.`. */
+function collectShortVolume(
+  name: string,
+  volume: string,
+  out: ComposeHostPathScan,
+): void {
+  const colon = volume.indexOf(":");
+  const source = colon === -1 ? "" : volume.slice(0, colon);
+  if (!source.startsWith("/") && !source.startsWith(".")) return;
+  out.entries.push({
+    what: `service ${name} volume \`${volume}\``,
+    path: source,
+    kind: "mount",
+    readOnly: /:ro(?:,|$)/.test(volume.slice(colon + 1)),
+  });
+}
+
+/** Long syntax: only `bind` mounts name a host path; `npipe` is unsupported. */
+function collectLongVolume(
+  name: string,
+  volume: Record<string, unknown>,
+  out: ComposeHostPathScan,
+): void {
+  if (volume.type === "npipe") {
+    out.findings.push(
+      `service ${name} volume uses an npipe mount, which is not supported`,
+    );
+    return;
+  }
+  if (volume.type !== "bind") return;
+  const target = typeof volume.target === "string" ? volume.target : "?";
+  if (typeof volume.source !== "string") {
+    out.findings.push(`service ${name} volume ${target} has no bind source`);
+    return;
+  }
+  out.entries.push({
+    what: `service ${name} volume ${target}`,
+    path: volume.source,
+    kind: "mount",
+    readOnly: volume.read_only === true,
+  });
+}
+
 function collectServiceVolumes(
   name: string,
   volumes: unknown,
@@ -98,40 +141,25 @@ function collectServiceVolumes(
 ): void {
   if (!Array.isArray(volumes)) return;
   for (const volume of volumes) {
-    if (typeof volume === "string") {
-      const colon = volume.indexOf(":");
-      const source = colon === -1 ? "" : volume.slice(0, colon);
-      if (source.startsWith("/") || source.startsWith(".")) {
-        out.entries.push({
-          what: `service ${name} volume \`${volume}\``,
-          path: source,
-          kind: "mount",
-          readOnly: /:ro(?:,|$)/.test(volume.slice(colon + 1)),
-        });
-      }
-      continue;
-    }
-    if (!isRecord(volume)) continue;
-    const type = volume.type;
-    if (type === "npipe") {
-      out.findings.push(
-        `service ${name} volume uses an npipe mount, which is not supported`,
-      );
-      continue;
-    }
-    if (type !== "bind") continue;
-    const target = typeof volume.target === "string" ? volume.target : "?";
-    if (typeof volume.source !== "string") {
-      out.findings.push(`service ${name} volume ${target} has no bind source`);
-      continue;
-    }
-    out.entries.push({
-      what: `service ${name} volume ${target}`,
-      path: volume.source,
-      kind: "mount",
-      readOnly: volume.read_only === true,
-    });
+    if (typeof volume === "string") collectShortVolume(name, volume, out);
+    else if (isRecord(volume)) collectLongVolume(name, volume, out);
   }
+}
+
+/** The build context when it is a host path, `null` for absent or remote. */
+function localBuildContext(build: Record<string, unknown>): string | null {
+  const context = build.context;
+  if (typeof context !== "string" || isRemoteBuildSource(context)) return null;
+  return context;
+}
+
+/** Host path of an `additional_contexts` value, `null` when it is not one. */
+function additionalContextPath(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  if (value.startsWith(OCI_LAYOUT_PREFIX)) {
+    return value.slice(OCI_LAYOUT_PREFIX.length);
+  }
+  return isRemoteBuildSource(value) ? null : value;
 }
 
 function collectBuild(
@@ -140,40 +168,35 @@ function collectBuild(
   out: ComposeHostPathScan,
 ): void {
   if (!isRecord(build)) return;
-  const context = typeof build.context === "string" ? build.context : null;
-  const localContext = context !== null && !isRemoteBuildSource(context);
-  if (localContext) {
+  const context = localBuildContext(build);
+  if (context !== null) {
     out.entries.push({
       what: `service ${name} build context`,
       path: context,
       kind: "read",
       readOnly: true,
     });
-  }
-  if (typeof build.dockerfile === "string" && localContext) {
-    out.entries.push({
-      what: `service ${name} Dockerfile`,
-      path: isAbsolute(build.dockerfile)
-        ? build.dockerfile
-        : join(context, build.dockerfile),
-      kind: "read",
-      readOnly: true,
-    });
-  }
-  if (isRecord(build.additional_contexts)) {
-    for (const [key, value] of Object.entries(build.additional_contexts)) {
-      if (typeof value !== "string") continue;
-      const path = value.startsWith(OCI_LAYOUT_PREFIX)
-        ? value.slice(OCI_LAYOUT_PREFIX.length)
-        : value;
-      if (path === value && isRemoteBuildSource(value)) continue;
+    if (typeof build.dockerfile === "string") {
       out.entries.push({
-        what: `service ${name} build context \`${key}\``,
-        path,
+        what: `service ${name} Dockerfile`,
+        path: isAbsolute(build.dockerfile)
+          ? build.dockerfile
+          : join(context, build.dockerfile),
         kind: "read",
         readOnly: true,
       });
     }
+  }
+  if (!isRecord(build.additional_contexts)) return;
+  for (const [key, value] of Object.entries(build.additional_contexts)) {
+    const path = additionalContextPath(value);
+    if (path === null) continue;
+    out.entries.push({
+      what: `service ${name} build context \`${key}\``,
+      path,
+      kind: "read",
+      readOnly: true,
+    });
   }
 }
 
@@ -275,6 +298,52 @@ function sshKeyPaths(value: unknown): string[] {
   return paths;
 }
 
+function collectExtendsFile(
+  name: string,
+  service: Record<string, unknown>,
+  out: ComposeHostPathScan,
+): void {
+  if (isRecord(service.extends) && service.extends.file !== undefined) {
+    out.findings.push(
+      `service ${name} \`extends.file\` pulls another Compose file from the host — ${HOST_LEVEL_NOTE}`,
+    );
+  }
+}
+
+function collectFileListEntries(
+  name: string,
+  service: Record<string, unknown>,
+  out: ComposeHostPathScan,
+): void {
+  for (const key of ["env_file", "label_file"] as const) {
+    if (service[key] === undefined || service[key] === null) continue;
+    for (const path of fileListPaths(service[key])) {
+      out.entries.push({
+        what: `service ${name} ${key}`,
+        path,
+        kind: "read",
+        readOnly: true,
+      });
+    }
+  }
+}
+
+function collectBuildSshEntries(
+  name: string,
+  service: Record<string, unknown>,
+  out: ComposeHostPathScan,
+): void {
+  if (!isRecord(service.build) || service.build.ssh === undefined) return;
+  for (const path of sshKeyPaths(service.build.ssh)) {
+    out.entries.push({
+      what: `service ${name} build SSH key`,
+      path,
+      kind: "read",
+      readOnly: true,
+    });
+  }
+}
+
 /**
  * Host paths `docker compose config` consumes or cannot render, read from the
  * staged YAML itself: env and label files (inlined into `environment` /
@@ -301,32 +370,9 @@ export function collectAuthoredHostPaths(yaml: string): ComposeHostPathScan {
   const services = isRecord(doc.services) ? doc.services : {};
   for (const [name, service] of Object.entries(services)) {
     if (!isRecord(service)) continue;
-    if (isRecord(service.extends) && service.extends.file !== undefined) {
-      out.findings.push(
-        `service ${name} \`extends.file\` pulls another Compose file from the host — ${HOST_LEVEL_NOTE}`,
-      );
-    }
-    for (const key of ["env_file", "label_file"] as const) {
-      if (service[key] === undefined || service[key] === null) continue;
-      for (const path of fileListPaths(service[key])) {
-        out.entries.push({
-          what: `service ${name} ${key}`,
-          path,
-          kind: "read",
-          readOnly: true,
-        });
-      }
-    }
-    if (isRecord(service.build) && service.build.ssh !== undefined) {
-      for (const path of sshKeyPaths(service.build.ssh)) {
-        out.entries.push({
-          what: `service ${name} build SSH key`,
-          path,
-          kind: "read",
-          readOnly: true,
-        });
-      }
-    }
+    collectExtendsFile(name, service, out);
+    collectFileListEntries(name, service, out);
+    collectBuildSshEntries(name, service, out);
   }
   return out;
 }
@@ -380,6 +426,138 @@ export type ConfinementOptions = {
 
 type Checked = { entry: HostPathEntry; real: string };
 
+/** What one host path came to: refused, accepted for the nesting pass, or waved through. */
+type EntryOutcome =
+  | { kind: "finding"; finding: string }
+  | { kind: "checked"; checked: Checked }
+  | { kind: "accepted" };
+
+type ConfinementContext = {
+  opts: ConfinementOptions;
+  realPath: RealPathFn;
+  /** Resolved live deployment directory. */
+  realDir: string;
+  /** Resolved live staging directory under {@link realDir}. */
+  realStage: string;
+  /** Normalized staging directory relative paths were resolved from. */
+  stageDir: string;
+};
+
+const finding = (finding: string): EntryOutcome => ({
+  kind: "finding",
+  finding,
+});
+
+/**
+ * Rule: paths that are lexically outside the deployment directory, and the
+ * engine socket, are host-level Compose features. `undefined` when the path is
+ * inside (the later rules apply); otherwise the verdict is final: refused
+ * unless the control plane approved host-level features.
+ */
+function hostLevelOutcome(
+  label: string,
+  staged: string,
+  ctx: ConfinementContext,
+): EntryOutcome | undefined {
+  let reason: string;
+  if (DOCKER_SOCKET_PATHS.has(staged)) {
+    reason = "is the Docker engine socket";
+  } else if (!isWithin(staged, ctx.stageDir)) {
+    reason = "is outside the deployment directory";
+  } else {
+    return undefined;
+  }
+  return ctx.opts.hostLevelApproved
+    ? { kind: "accepted" }
+    : finding(`${label} ${reason} — ${HOST_LEVEL_NOTE}`);
+}
+
+/**
+ * Rules for a path inside the deployment directory once it is resolved on the
+ * host: it may not leave through a symlink, and a mount may be neither the
+ * staging directory nor the deployment directory itself writable. Approval
+ * never reaches this far.
+ */
+function resolvedPathRefusal(
+  entry: HostPathEntry,
+  label: string,
+  real: string,
+  ctx: ConfinementContext,
+): string | null {
+  if (!isWithin(real, ctx.realDir)) {
+    return `${label} resolves through a symlink to ${real}, outside the deployment directory`;
+  }
+  if (entry.kind !== "mount") return null;
+  if (isWithin(real, ctx.realStage)) {
+    return `${label} is the daemon's staging directory`;
+  }
+  if (real === ctx.realDir && !entry.readOnly) {
+    return `${label} mounts the deployment directory itself writable, which would let a container rewrite ${RUNTIME_COMPOSE_FILENAME}`;
+  }
+  return null;
+}
+
+async function confineEntry(
+  entry: HostPathEntry,
+  ctx: ConfinementContext,
+): Promise<EntryOutcome> {
+  const label = `${entry.what} \`${entry.path}\``;
+  if (entry.path.includes("$")) {
+    return finding(
+      `${label} is interpolated, so where it points cannot be checked`,
+    );
+  }
+  const staged = normalize(
+    isAbsolute(entry.path) ? entry.path : resolve(ctx.stageDir, entry.path),
+  );
+  const hostLevel = hostLevelOutcome(label, staged, ctx);
+  if (hostLevel) return hostLevel;
+  const live = join(ctx.opts.deploymentDir, relative(ctx.stageDir, staged));
+  let real: string;
+  try {
+    real = await resolveExistingPrefix(live, ctx.realPath);
+  } catch (err) {
+    return finding(
+      `${label} cannot be resolved on this host (${(err as Error).message})`,
+    );
+  }
+  const refusal = resolvedPathRefusal(entry, label, real, ctx);
+  return refusal === null
+    ? { kind: "checked", checked: { entry, real } }
+    : finding(refusal);
+}
+
+/**
+ * Rule: nothing may sit strictly inside a writable bind source — this deploy's
+ * own, or the running generation's — because a container could swap part of the
+ * path for a symlink.
+ */
+async function nestedInWritableBindFindings(
+  checked: readonly Checked[],
+  ctx: ConfinementContext,
+): Promise<string[]> {
+  const writable = [
+    ...checked.filter((c) => c.entry.kind === "mount" && !c.entry.readOnly).map(
+      (c) => c.real,
+    ),
+    ...await Promise.all(
+      (ctx.opts.priorWritableMounts ?? []).map((p) =>
+        resolveExistingPrefix(p, ctx.realPath).catch(() => p)
+      ),
+    ),
+  ];
+  const findings: string[] = [];
+  for (const { entry, real } of checked) {
+    const holder = writable.find((w) => isStrictlyWithin(real, w));
+    if (holder) {
+      findings.push(
+        `${entry.what} \`${entry.path}\` sits inside the writable bind ${holder}, where a container could replace part of its path with a symlink`,
+      );
+    }
+  }
+  return findings;
+}
+
 /**
  * Refuse the deploy (throws {@link ComposeHostPathError}) when any host path
  * leaves the deployment directory lexically without host-level approval,
@@ -394,85 +572,20 @@ export async function assertComposeHostPathsConfined(
   const realPath = opts.realPath ?? Deno.realPath;
   const findings = scans.flatMap((scan) => scan.findings);
   const realDir = await realPath(opts.deploymentDir);
-  const realStage = join(realDir, COMPOSE_STAGE_DIRNAME);
-  const stageDir = normalize(opts.stageDir);
+  const ctx: ConfinementContext = {
+    opts,
+    realPath,
+    realDir,
+    realStage: join(realDir, COMPOSE_STAGE_DIRNAME),
+    stageDir: normalize(opts.stageDir),
+  };
   const checked: Checked[] = [];
-
   for (const entry of scans.flatMap((scan) => scan.entries)) {
-    const label = `${entry.what} \`${entry.path}\``;
-    if (entry.path.includes("$")) {
-      findings.push(
-        `${label} is interpolated, so where it points cannot be checked`,
-      );
-      continue;
-    }
-    const staged = normalize(
-      isAbsolute(entry.path) ? entry.path : resolve(stageDir, entry.path),
-    );
-    if (DOCKER_SOCKET_PATHS.has(staged)) {
-      if (!opts.hostLevelApproved) {
-        findings.push(
-          `${label} is the Docker engine socket — ${HOST_LEVEL_NOTE}`,
-        );
-      }
-      continue;
-    }
-    if (!isWithin(staged, stageDir)) {
-      if (!opts.hostLevelApproved) {
-        findings.push(
-          `${label} is outside the deployment directory — ${HOST_LEVEL_NOTE}`,
-        );
-      }
-      continue;
-    }
-    const live = join(opts.deploymentDir, relative(stageDir, staged));
-    let real: string;
-    try {
-      real = await resolveExistingPrefix(live, realPath);
-    } catch (err) {
-      findings.push(
-        `${label} cannot be resolved on this host (${(err as Error).message})`,
-      );
-      continue;
-    }
-    if (!isWithin(real, realDir)) {
-      findings.push(
-        `${label} resolves through a symlink to ${real}, outside the deployment directory`,
-      );
-      continue;
-    }
-    if (entry.kind === "mount" && isWithin(real, realStage)) {
-      findings.push(`${label} is the daemon's staging directory`);
-      continue;
-    }
-    if (entry.kind === "mount" && real === realDir && !entry.readOnly) {
-      findings.push(
-        `${label} mounts the deployment directory itself writable, which would let a container rewrite ${RUNTIME_COMPOSE_FILENAME}`,
-      );
-      continue;
-    }
-    checked.push({ entry, real });
+    const outcome = await confineEntry(entry, ctx);
+    if (outcome.kind === "finding") findings.push(outcome.finding);
+    else if (outcome.kind === "checked") checked.push(outcome.checked);
   }
-
-  const writable = [
-    ...checked.filter((c) => c.entry.kind === "mount" && !c.entry.readOnly).map(
-      (c) => c.real,
-    ),
-    ...await Promise.all(
-      (opts.priorWritableMounts ?? []).map((p) =>
-        resolveExistingPrefix(p, realPath).catch(() => p)
-      ),
-    ),
-  ];
-  for (const { entry, real } of checked) {
-    const holder = writable.find((w) => isStrictlyWithin(real, w));
-    if (holder) {
-      findings.push(
-        `${entry.what} \`${entry.path}\` sits inside the writable bind ${holder}, where a container could replace part of its path with a symlink`,
-      );
-    }
-  }
-
+  findings.push(...await nestedInWritableBindFindings(checked, ctx));
   if (findings.length > 0) throw new ComposeHostPathError(findings);
 }
 

@@ -360,6 +360,115 @@ async function ensurePrincipalGroup(
   }
 }
 
+/** `useradd` for an account that does not exist yet. */
+async function createPrincipalUser(
+  principal: PrincipalEnsureSpec,
+  home: string,
+  shell: string,
+  groupName: string,
+  runFn: RunFn,
+): Promise<void> {
+  const args = ["-n", "useradd"];
+  if (principal.uid !== undefined) {
+    args.push("-u", String(principal.uid));
+  } else {
+    // `-K` overrides login.defs for this command only.
+    args.push(
+      "-K",
+      `UID_MIN=${PRINCIPAL_ID_MIN}`,
+      "-K",
+      `UID_MAX=${PRINCIPAL_ID_MAX}`,
+    );
+  }
+  args.push(
+    "-g",
+    groupName,
+    "-d",
+    home,
+    "-M",
+    "-s",
+    shell,
+    principal.username,
+  );
+  const userAdd = await runFn("sudo", hostSudoArgs(args));
+  if (!userAdd.success) {
+    throw new Error(userAdd.stderr || "Failed to create principal user");
+  }
+}
+
+/** Explicit uid/gid overrides must still match the existing account. */
+function assertAdoptedIdsMatch(
+  principal: PrincipalEnsureSpec,
+  current: { uid: number; gid: number },
+): void {
+  const uidMismatch = principal.uid !== undefined &&
+    current.uid !== principal.uid;
+  const gidMismatch = principal.gid !== undefined &&
+    current.gid !== principal.gid;
+  if (uidMismatch || gidMismatch) {
+    throw new Error(
+      `Principal username ${principal.username} already exists with uid=${current.uid} gid=${current.gid}; expected uid=${principal.uid} gid=${principal.gid}`,
+    );
+  }
+}
+
+/**
+ * Without an explicit uid the account must sit at or above the floor.
+ * Adopted from a host provisioned before the current floor
+ * (PRINCIPAL_ID_MIN was raised from 10001 to 15001 on 2026-09-25).
+ * tp-host hard-floors `tp_is_principal` at PRINCIPAL_ID_MIN, so silently
+ * adopting this account would only defer the failure to the first host
+ * command that touches its home tree.
+ */
+function assertAdoptedUidAboveFloor(
+  principal: PrincipalEnsureSpec,
+  current: { uid: number },
+): void {
+  if (principal.uid === undefined && current.uid < PRINCIPAL_ID_MIN) {
+    throw new Error(
+      `Principal user ${principal.username} has uid=${current.uid}, below the current PRINCIPAL_ID_MIN=${PRINCIPAL_ID_MIN} — needs UID/GID migration (usermod -u <new uid in [${PRINCIPAL_ID_MIN}, ${PRINCIPAL_ID_MAX}]> ${principal.username}, then chown -R the principal's home tree) before this host can be used again`,
+    );
+  }
+}
+
+/** Adopt only when the passwd home matches — never `usermod -m` / `-d`. */
+function assertAdoptedHomeMatches(
+  principal: PrincipalEnsureSpec,
+  current: { home: string },
+  home: string,
+): void {
+  if (current.home !== home) {
+    throw new Error(
+      `refusing to adopt existing account \`${principal.username}\` — home \`${current.home}\` does not match \`${home}\``,
+    );
+  }
+}
+
+/** `usermod -s`, only when the adopted account's shell differs. */
+async function reconcilePrincipalShell(
+  principal: PrincipalEnsureSpec,
+  currentShell: string,
+  shell: string,
+  runFn: RunFn,
+): Promise<void> {
+  if (currentShell === shell) return;
+  const usermodShell = await runFn(
+    "sudo",
+    hostSudoArgs([
+      "-n",
+      "usermod",
+      "-s",
+      shell,
+      principal.username,
+    ]),
+  );
+  if (!usermodShell.success) {
+    throw new Error(
+      usermodShell.stderr || "Failed to update principal shell",
+    );
+  }
+}
+
 async function ensurePrincipalUser(
   principal: PrincipalEnsureSpec,
   home: string,
@@ -369,83 +478,19 @@ async function ensurePrincipalUser(
 ): Promise<void> {
   const userCheck = await runFn("getent", ["passwd", principal.username]);
   if (!userCheck.success) {
-    const args = ["-n", "useradd"];
-    if (principal.uid !== undefined) {
-      args.push("-u", String(principal.uid));
-    } else {
-      // `-K` overrides login.defs for this command only.
-      args.push(
-        "-K",
-        `UID_MIN=${PRINCIPAL_ID_MIN}`,
-        "-K",
-        `UID_MAX=${PRINCIPAL_ID_MAX}`,
-      );
-    }
-    args.push(
-      "-g",
-      groupName,
-      "-d",
-      home,
-      "-M",
-      "-s",
-      shell,
-      principal.username,
-    );
-    const userAdd = await runFn("sudo", hostSudoArgs(args));
-    if (!userAdd.success) {
-      throw new Error(userAdd.stderr || "Failed to create principal user");
-    }
+    await createPrincipalUser(principal, home, shell, groupName, runFn);
     return;
   }
-
-  // Adopt only when the passwd home matches — never `usermod -m` / `-d`.
-  // Explicit uid/gid overrides must still match the existing account.
   const current = parsePasswdHomeShell(userCheck.stdout);
   if (!current) {
     throw new Error(
       `Failed to parse passwd entry for principal user ${principal.username}`,
     );
   }
-  if (
-    (principal.uid !== undefined && current.uid !== principal.uid) ||
-    (principal.gid !== undefined && current.gid !== principal.gid)
-  ) {
-    throw new Error(
-      `Principal username ${principal.username} already exists with uid=${current.uid} gid=${current.gid}; expected uid=${principal.uid} gid=${principal.gid}`,
-    );
-  }
-  if (principal.uid === undefined && current.uid < PRINCIPAL_ID_MIN) {
-    // Adopted from a host provisioned before the current floor
-    // (PRINCIPAL_ID_MIN was raised from 10001 to 15001 on 2026-09-25).
-    // tp-host hard-floors `tp_is_principal` at PRINCIPAL_ID_MIN, so silently
-    // adopting this account would only defer the failure to the first host
-    // command that touches its home tree.
-    throw new Error(
-      `Principal user ${principal.username} has uid=${current.uid}, below the current PRINCIPAL_ID_MIN=${PRINCIPAL_ID_MIN} — needs UID/GID migration (usermod -u <new uid in [${PRINCIPAL_ID_MIN}, ${PRINCIPAL_ID_MAX}]> ${principal.username}, then chown -R the principal's home tree) before this host can be used again`,
-    );
-  }
-  if (current.home !== home) {
-    throw new Error(
-      `refusing to adopt existing account \`${principal.username}\` — home \`${current.home}\` does not match \`${home}\``,
-    );
-  }
-  if (current.shell !== shell) {
-    const usermodShell = await runFn(
-      "sudo",
-      hostSudoArgs([
-        "-n",
-        "usermod",
-        "-s",
-        shell,
-        principal.username,
-      ]),
-    );
-    if (!usermodShell.success) {
-      throw new Error(
-        usermodShell.stderr || "Failed to update principal shell",
-      );
-    }
-  }
+  assertAdoptedIdsMatch(principal, current);
+  assertAdoptedUidAboveFloor(principal, current);
+  assertAdoptedHomeMatches(principal, current, home);
+  await reconcilePrincipalShell(principal, current.shell, shell, runFn);
 }
 
 /**
