@@ -1,0 +1,134 @@
+# Cuts the release when the staging → live PR is merged (Road to 0.2.x,
+# versioning flow) — the second automatic PR. Runs on the push the merge makes
+# to `live` (a push runs the workflow file from the pushed commit, so the very
+# first merge, which brings this file into live, already works).
+#
+#   1. resolve  the merged PR, the version it carries, and the NEWEST
+#               v<version>-rc.N tag — that rc's bytes become the release
+#   2. prepare / publish / finalize   the shared promote workflows
+#               (TurboPanel/dev). prepare still waits on the `release`
+#               environment approval: keep it until this path has run once end
+#               to end, then drop it (`approval-environment: ""`).
+#   3. next-version  opens the "Start <next>" PR into trunk
+#
+# A push to live that is not a merged staging PR (a break-glass promotion, the
+# finalize fast-forward) does nothing. workflow_dispatch re-runs a release cut
+# for a given rc tag.
+
+name: Cut release
+
+on:
+  push:
+    branches: [live]
+  workflow_dispatch:
+    inputs:
+      rc-tag:
+        description: The rc tag to release (vX.Y.Z-rc.N)
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  actions: read
+  pull-requests: write
+
+concurrency:
+  group: cut-release
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      proceed: ${{ steps.r.outputs.proceed }}
+      rc-tag: ${{ steps.r.outputs.rc-tag }}
+      version: ${{ steps.r.outputs.version }}
+    steps:
+      - name: Find the merged PR and the newest rc of its version
+        id: r
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          PUSHED: ${{ github.sha }}
+          INPUT_RC_TAG: ${{ inputs.rc-tag }}
+        run: |
+          set -eu
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            rc_tag="$INPUT_RC_TAG"
+            version="${rc_tag#v}"; version="${version%-rc.*}"
+          else
+            pr=""
+            for _ in 1 2 3 4 5 6; do
+              pr="$(gh api "repos/$REPO/commits/$PUSHED/pulls" --jq '[.[] | select(.base.ref == "live" and .head.ref == "staging" and .merged_at != null)][0].number // empty')"
+              [ -n "$pr" ] && break
+              sleep 10
+            done
+            if [ -z "$pr" ]; then
+              echo "push to live is not a merged staging PR — nothing to release"
+              echo "proceed=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            version="$(gh api "repos/$REPO/contents/deno.json?ref=$PUSHED" --jq .content | base64 -d | jq -r .version)"
+            rc_tag="$(gh api --paginate "repos/$REPO/git/matching-refs/tags/v$version-rc." --jq '.[].ref' | sed 's#^refs/tags/##' | sort -V | tail -n 1)"
+            [ -n "$rc_tag" ] || { echo "::error::no v$version-rc.N tag exists — cut an rc first (merge the trunk → staging PR)"; exit 1; }
+            echo "PR #$pr merged; releasing $version from $rc_tag"
+          fi
+          if gh api "repos/$REPO/git/ref/tags/v$version" --silent 2>/dev/null; then
+            echo "v$version already exists — nothing to release"
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          {
+            echo "proceed=true"
+            echo "rc-tag=$rc_tag"
+            echo "version=$version"
+          } >> "$GITHUB_OUTPUT"
+
+  prepare:
+    needs: resolve
+    if: needs.resolve.outputs.proceed == 'true'
+    uses: TurboPanel/dev/.github/workflows/gh-promote.yml@b15365e63ddb42e96b9fe3b7594b8bc0b03a2b49 # dev#24
+    with:
+      repo-kind: daemon
+      to: release
+      source: ${{ needs.resolve.outputs.rc-tag }}
+      dev-ref: b15365e63ddb42e96b9fe3b7594b8bc0b03a2b49
+      # Same signer pin as promote.yml.
+      signer-ref: 93c4f94510c9499e6bf04366a9500fe9f8e38aaa
+      # Default: the `release` environment approval stays for the release hop.
+    secrets: inherit
+
+  publish:
+    needs: prepare
+    uses: TurboPanel/dev/.github/workflows/gh-release.yml@b15365e63ddb42e96b9fe3b7594b8bc0b03a2b49 # dev#24
+    with:
+      version: ${{ needs.prepare.outputs.version }}
+      channel: release
+      release-notes: ${{ needs.prepare.outputs.release-notes }}
+      assets-artifact-name: ${{ needs.prepare.outputs.assets-artifact-name }}
+      manifest-filename: ${{ needs.prepare.outputs.manifest-filename }}
+      target-commit: ${{ needs.prepare.outputs.commit }}
+    secrets: inherit
+
+  finalize:
+    needs: [prepare, publish]
+    uses: TurboPanel/dev/.github/workflows/gh-promote-finalize.yml@b15365e63ddb42e96b9fe3b7594b8bc0b03a2b49 # dev#24
+    with:
+      to: release
+      version: ${{ needs.prepare.outputs.version }}
+      commit: ${{ needs.prepare.outputs.commit }}
+      branch: ${{ needs.prepare.outputs.branch }}
+      manifest-filename: ${{ needs.prepare.outputs.manifest-filename }}
+    secrets: inherit
+
+  next-version:
+    needs: [prepare, finalize]
+    uses: TurboPanel/dev/.github/workflows/gh-next-version.yml@b15365e63ddb42e96b9fe3b7594b8bc0b03a2b49 # dev#24
+    with:
+      released-version: ${{ needs.prepare.outputs.version }}
+      version-files: |
+        deno.json
+        sonar-project.properties
+      dev-ref: b15365e63ddb42e96b9fe3b7594b8bc0b03a2b49
+    secrets: inherit

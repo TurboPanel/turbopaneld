@@ -39,12 +39,12 @@ permissions:
 
 jobs:
   prepare:
-    uses: TurboPanel/dev/.github/workflows/gh-promote.yml@d9af8b54bc1e9062f5427da198e4e31818a0f002 # dev#23
+    uses: TurboPanel/dev/.github/workflows/gh-promote.yml@b15365e63ddb42e96b9fe3b7594b8bc0b03a2b49 # dev#24
     with:
       repo-kind: daemon
       to: ${{ inputs.to }}
       source: ${{ inputs.source }}
-      dev-ref: d9af8b54bc1e9062f5427da198e4e31818a0f002
+      dev-ref: b15365e63ddb42e96b9fe3b7594b8bc0b03a2b49
       # turbopaneld commit carrying scripts/sign-manifest.ts and the release
       # public-key pin. Bump it when the key is rotated.
       signer-ref: 93c4f94510c9499e6bf04366a9500fe9f8e38aaa
@@ -52,7 +52,7 @@ jobs:
 
   publish:
     needs: prepare
-    uses: TurboPanel/dev/.github/workflows/gh-release.yml@d9af8b54bc1e9062f5427da198e4e31818a0f002 # dev#23
+    uses: TurboPanel/dev/.github/workflows/gh-release.yml@b15365e63ddb42e96b9fe3b7594b8bc0b03a2b49 # dev#24
     with:
       version: ${{ needs.prepare.outputs.version }}
       channel: ${{ inputs.to }}
@@ -64,7 +64,7 @@ jobs:
 
   finalize:
     needs: [prepare, publish]
-    uses: TurboPanel/dev/.github/workflows/gh-promote-finalize.yml@d9af8b54bc1e9062f5427da198e4e31818a0f002 # dev#23
+    uses: TurboPanel/dev/.github/workflows/gh-promote-finalize.yml@b15365e63ddb42e96b9fe3b7594b8bc0b03a2b49 # dev#24
     with:
       to: ${{ inputs.to }}
       version: ${{ needs.prepare.outputs.version }}
