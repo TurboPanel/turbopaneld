@@ -127,13 +127,17 @@ jobs:
       # assets.test.ts requires scripts/download-caddy.mjs and fails when it is
       # missing. A single-repo checkout does not include that file. Prefer the
       # same-named branch on TurboPanel/turbopanel so a paired PR is compared
-      # with its own pin; otherwise use trunk.
+      # with its own pin; otherwise use trunk. PRs into staging/live use trunk
+      # (see contract-drift below).
       - name: Resolve instance checkout ref
         id: instance-ref
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           REF="${{ github.head_ref || github.ref_name }}"
+          case "${{ github.base_ref }}" in
+            staging | live) REF=trunk ;;
+          esac
           if gh api "repos/TurboPanel/turbopanel/branches/${REF}" --silent; then
             echo "ref=${REF}" >> "$GITHUB_OUTPUT"
           else
@@ -194,6 +198,12 @@ jobs:
   # branch (else trunk), so a daemon-only change that drifts fails here rather
   # than turning turbopanel red after it merges. Mirrors turbopanel's
   # metrics-legacy job.
+  #
+  # PRs into staging/live (the automatic promotion PRs) have `staging` or
+  # `trunk` as their head, carrying commits that were checked against
+  # turbopanel trunk. Pairing them with turbopanel's staging/live would
+  # compare the new daemon with the older control plane (the daemon ships
+  # first by design), so those PRs compare against turbopanel trunk too.
   contract-drift:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -213,6 +223,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           REF="${{ github.head_ref || github.ref_name }}"
+          case "${{ github.base_ref }}" in
+            staging | live) REF=trunk ;;
+          esac
           if gh api "repos/TurboPanel/turbopanel/branches/${REF}" --silent; then
             echo "ref=${REF}" >> "$GITHUB_OUTPUT"
           else
