@@ -62,6 +62,7 @@ export const DAEMON_WIRE_FEATURES = [
   "managed-upgrade-v1",
   "update-progress-v1",
   "sealed-instance-secrets-v1",
+  "managed-health-v1",
 ] as const;
 
 export type DaemonWireFeature = (typeof DAEMON_WIRE_FEATURES)[number];
@@ -73,6 +74,13 @@ export type DaemonWireFeature = (typeof DAEMON_WIRE_FEATURES)[number];
  */
 export const SEALED_INSTANCE_SECRETS_FEATURE: DaemonWireFeature =
   "sealed-instance-secrets-v1";
+
+/**
+ * This daemon answers `managed-health-request` with `managed-health-result`
+ * (a fresh replication observation for one member). The control plane sends
+ * the request only to a daemon that lists this feature.
+ */
+export const MANAGED_HEALTH_FEATURE: DaemonWireFeature = "managed-health-v1";
 
 /** Features that need an instance at or above a semver. Empty until one lands. */
 export const INSTANCE_FEATURE_MIN_VERSIONS: Readonly<Record<string, string>> =

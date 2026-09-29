@@ -22,6 +22,7 @@ import {
   resolveDefaultBranch,
 } from "../deploy/release/read-remote-files.ts";
 import { collectManagedLogs } from "../managed/logs.ts";
+import { probeManagedMemberHealth } from "../managed/health.ts";
 import { collectContainerLogs } from "../logs/container-tail.ts";
 import type { SendCommandLogChunkFn } from "../logs/uploader.ts";
 import {
@@ -1584,6 +1585,9 @@ export class InstanceClient {
       case "managed-logs-request":
         this.#collectManagedLogs(message, ws);
         break;
+      case "managed-health-request":
+        this.#probeManagedHealth(message, ws);
+        break;
       case "metrics-live-start":
         this.#applyLiveLeaseStart(message, ws);
         break;
@@ -2490,6 +2494,42 @@ export class InstanceClient {
       id: message.id,
       logs,
       ...(error === undefined ? {} : { error }),
+      at: new Date().toISOString(),
+    };
+
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(result));
+    }
+  }
+
+  #probeManagedHealth(
+    message: Extract<DaemonMessage, { type: "managed-health-request" }>,
+    ws: WebSocket,
+  ): void {
+    void this.#probeManagedHealthAsync(message, ws);
+  }
+
+  async #probeManagedHealthAsync(
+    message: Extract<DaemonMessage, { type: "managed-health-request" }>,
+    ws: WebSocket,
+  ): Promise<void> {
+    // `probeManagedMemberHealth` never throws — a failure is `ok: false`, so
+    // the control plane is answered instead of waiting out its timeout.
+    const probe = await probeManagedMemberHealth({
+      managedId: message.managedId,
+      memberId: message.memberId,
+      role: message.role,
+      engine: message.engine,
+    });
+    if (!probe.ok) {
+      logWarn("instance", "managed health probe failed:", probe.error);
+    }
+
+    const result: DaemonMessage = {
+      type: "managed-health-result",
+      id: message.id,
+      ok: probe.ok,
+      ...(probe.ok ? { member: probe.member } : { error: probe.error }),
       at: new Date().toISOString(),
     };
 
