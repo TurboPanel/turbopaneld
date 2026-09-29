@@ -746,10 +746,12 @@ test({
           layout,
           descriptor,
           fakeRunOk(),
-          [],
-          [],
-          null,
-          MANAGED_NETWORK,
+          {
+            bindAddresses: [],
+            segmentAttachments: [],
+            listenerPorts: null,
+            managedNetwork: MANAGED_NETWORK,
+          },
         );
 
         const dockerArgs: string[][] = [];
@@ -951,10 +953,12 @@ test({
           layout,
           descriptor,
           fakeRunOk(),
-          ["203.0.113.9"],
-          [],
-          null,
-          MANAGED_NETWORK,
+          {
+            bindAddresses: ["203.0.113.9"],
+            segmentAttachments: [],
+            listenerPorts: null,
+            managedNetwork: MANAGED_NETWORK,
+          },
         );
 
         await handleSystemReconcile(
@@ -1156,10 +1160,12 @@ test({
           layout,
           descriptor,
           fakeRunOk(),
-          [],
-          [],
-          null,
-          MANAGED_NETWORK,
+          {
+            bindAddresses: [],
+            segmentAttachments: [],
+            listenerPorts: null,
+            managedNetwork: MANAGED_NETWORK,
+          },
         );
 
         const dockerArgs: string[][] = [];
@@ -1386,10 +1392,12 @@ test({
           layout,
           descriptor,
           fakeRunOk(),
-          [],
-          [],
-          null,
-          MANAGED_NETWORK,
+          {
+            bindAddresses: [],
+            segmentAttachments: [],
+            listenerPorts: null,
+            managedNetwork: MANAGED_NETWORK,
+          },
         );
 
         const dockerArgs: string[][] = [];

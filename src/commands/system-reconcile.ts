@@ -402,10 +402,12 @@ async function ensurePresentProxySql(
     layout,
     descriptor,
     run,
-    preservedBindAddresses,
-    preservedSegments,
-    preservedListenerPorts,
-    managedNetwork,
+    {
+      bindAddresses: preservedBindAddresses,
+      segmentAttachments: preservedSegments,
+      listenerPorts: preservedListenerPorts,
+      managedNetwork,
+    },
   );
   // Restart only once the compose file we just healed is known to exist —
   // the skip above means there is no stack here to restart.

@@ -72,7 +72,8 @@ const BASE_RAFT = {
 };
 
 const NO_WAIT = {
-  daemonGid: null,
+  // 0 = no group_add (skips the gid lookup on the written conf).
+  daemonGid: 0,
   stability: { sleep: () => Promise.resolve() },
 };
 

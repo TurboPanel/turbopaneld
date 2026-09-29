@@ -1470,6 +1470,15 @@ export async function inspectProxySqlContainer(
   }
 }
 
+/** Rendering and stability inputs for {@link ensureProxySqlIngress}. */
+export type EnsureProxySqlIngressOptions = {
+  readonly bindAddresses: readonly string[];
+  readonly segmentAttachments: ReadonlyArray<ProxySqlSegmentAttachment>;
+  readonly listenerPorts: ProxySqlListenerPorts | null | undefined;
+  readonly managedNetwork: string;
+  readonly stability?: ContainerStabilityOptions;
+};
+
 /**
  * Write identity-bearing compose and bring the shared ProxySQL project up.
  *
@@ -1486,12 +1495,15 @@ export async function ensureProxySqlIngress(
   layout: LayoutPaths,
   descriptor: SystemComponentDescriptor,
   run: RunDockerFn,
-  bindAddresses: readonly string[],
-  segmentAttachments: ReadonlyArray<ProxySqlSegmentAttachment>,
-  listenerPorts: ProxySqlListenerPorts | null | undefined,
-  managedNetwork: string,
-  stability?: ContainerStabilityOptions,
+  options: EnsureProxySqlIngressOptions,
 ): Promise<void> {
+  const {
+    bindAddresses,
+    segmentAttachments,
+    listenerPorts,
+    managedNetwork,
+    stability,
+  } = options;
   const composePath = proxysqlComposePath(layout);
   await Deno.mkdir(proxysqlConfigDir(layout), { recursive: true, mode: 0o750 });
   await Deno.writeTextFile(

@@ -83,7 +83,7 @@ function trunkManifestUrl(kind: ReleaseArtifactKind): string | null {
  * A version token safe to place in one GitHub release path segment.
  * The tag is `v<version>`, so the token itself starts with a digit.
  */
-const PINNED_VERSION_RE = /^[0-9][0-9A-Za-z._+-]*$/;
+const PINNED_VERSION_RE = /^\d[0-9A-Za-z._+-]*$/;
 
 /**
  * Manifest URL for one published build, beside {@link builtinChannelManifestUrl}.

@@ -303,15 +303,17 @@ test("ensureProxySqlIngress preserves passed segment attachments in the written 
           stderr: "",
           code: 0,
         }),
-      [],
-      [
-        {
-          name: "tpn_00000000-0000-4000-8000-0000000000cc",
-          ipv4Address: "10.90.1.254",
-        },
-      ],
-      null,
-      MANAGED_NETWORK,
+      {
+        bindAddresses: [],
+        segmentAttachments: [
+          {
+            name: "tpn_00000000-0000-4000-8000-0000000000cc",
+            ipv4Address: "10.90.1.254",
+          },
+        ],
+        listenerPorts: null,
+        managedNetwork: MANAGED_NETWORK,
+      },
     );
     assertEquals(await readCurrentProxySqlSegmentAttachments(layout), [
       {
@@ -466,10 +468,12 @@ test("readCurrentProxySqlManagedNetwork reads the name back off disk", async () 
       layout,
       DESCRIPTOR,
       () => Promise.resolve({ success: true, stdout: "", stderr: "", code: 0 }),
-      ["203.0.113.5"],
-      [],
-      null,
-      MANAGED_NETWORK,
+      {
+        bindAddresses: ["203.0.113.5"],
+        segmentAttachments: [],
+        listenerPorts: null,
+        managedNetwork: MANAGED_NETWORK,
+      },
     );
     assertEquals(
       await readCurrentProxySqlManagedNetwork(layout),
@@ -1560,10 +1564,12 @@ test("inspectProxySqlContainer matches labelled managed-ingress row", async () =
           stderr: "",
           code: 0,
         }),
-      [],
-      [],
-      null,
-      MANAGED_NETWORK,
+      {
+        bindAddresses: [],
+        segmentAttachments: [],
+        listenerPorts: null,
+        managedNetwork: MANAGED_NETWORK,
+      },
     );
     const ps = JSON.stringify([
       {
@@ -1616,10 +1622,12 @@ test("inspectProxySqlContainer returns undefined when compose ps fails", async (
           stderr: "",
           code: 0,
         }),
-      [],
-      [],
-      null,
-      MANAGED_NETWORK,
+      {
+        bindAddresses: [],
+        segmentAttachments: [],
+        listenerPorts: null,
+        managedNetwork: MANAGED_NETWORK,
+      },
     );
     const row = await inspectProxySqlContainer(layout, DESCRIPTOR, {
       runDocker: () =>
@@ -1650,10 +1658,12 @@ test("readCurrentProxySqlBindAddresses round-trips published bind", async () => 
           stderr: "",
           code: 0,
         }),
-      ["203.0.113.8"],
-      [],
-      null,
-      MANAGED_NETWORK,
+      {
+        bindAddresses: ["203.0.113.8"],
+        segmentAttachments: [],
+        listenerPorts: null,
+        managedNetwork: MANAGED_NETWORK,
+      },
     );
     assertEquals(
       await readCurrentProxySqlBindAddresses(layout),
@@ -1698,10 +1708,12 @@ test("restartProxySqlIngress throws when compose restart fails", async () => {
           stderr: "",
           code: 0,
         }),
-      [],
-      [],
-      null,
-      MANAGED_NETWORK,
+      {
+        bindAddresses: [],
+        segmentAttachments: [],
+        listenerPorts: null,
+        managedNetwork: MANAGED_NETWORK,
+      },
     );
     await assertRejects(
       () =>
