@@ -12,6 +12,7 @@ import {
   type RunDockerOptions,
 } from "../deploy/docker-cli.ts";
 import { logInfo } from "../util/logger.ts";
+import { forEachSequential } from "../util/sequential.ts";
 
 /**
  * Hyphen-permitting Docker resource name. Must stay in sync with the
@@ -174,9 +175,9 @@ export async function pruneStaleManagedDockerNetworks(
   options?: { disconnect: boolean },
 ): Promise<void> {
   const stale = staleManagedDockerNetworkNames(currentName, previousName);
-  for (const name of stale) {
+  await forEachSequential(stale, async (name) => {
     await pruneDockerNetworkBestEffort(name, run, options?.disconnect ?? false);
-  }
+  });
 }
 
 async function pruneDockerNetworkBestEffort(
@@ -194,9 +195,9 @@ async function pruneDockerNetworkBestEffort(
   if (containers.length > 0 && !disconnect) return;
 
   if (disconnect) {
-    for (const container of containers) {
+    await forEachSequential(containers, async (container) => {
       await run(["network", "disconnect", "-f", name, container]);
-    }
+    });
   }
 
   const rm = await run(["network", "rm", name]);

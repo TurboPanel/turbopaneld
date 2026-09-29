@@ -26,6 +26,7 @@ import {
 } from "../logs/contracts.ts";
 import { redactPlaintexts } from "../logs/redactor.ts";
 import { logInfo, sanitizeForLog } from "../util/logger.ts";
+import { forEachSequential } from "../util/sequential.ts";
 import { type LayoutPaths, resolveLayout } from "../paths/layout.ts";
 import {
   runDockerSetup as defaultRunDockerSetup,
@@ -133,7 +134,7 @@ export function isRetryableEngineExecFailure(text: string): boolean {
 const ENGINE_EXEC_RETRIES = 10;
 const ENGINE_EXEC_RETRY_MS = 3_000;
 
-function buildEngineExec(
+export function buildEngineExec(
   containerId: string,
   redact: (text: string) => string,
   run: RunDockerFn,
@@ -145,17 +146,23 @@ function buildEngineExec(
         ["exec", "-i", containerId, ...argv],
         input === undefined ? undefined : { input },
       );
-    let result = await execOnce();
-    for (
-      let attempt = 0;
-      !result.success &&
-      isRetryableEngineExecFailure(`${result.stderr}\n${result.stdout}`) &&
-      attempt < ENGINE_EXEC_RETRIES;
-      attempt++
-    ) {
+    const retryWhileTransient = async (
+      previous: Awaited<ReturnType<typeof execOnce>>,
+      attempt: number,
+    ): Promise<Awaited<ReturnType<typeof execOnce>>> => {
+      if (
+        previous.success ||
+        !isRetryableEngineExecFailure(
+          `${previous.stderr}\n${previous.stdout}`,
+        ) ||
+        attempt >= ENGINE_EXEC_RETRIES
+      ) {
+        return previous;
+      }
       await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
-      result = await execOnce();
-    }
+      return await retryWhileTransient(await execOnce(), attempt + 1);
+    };
+    const result = await retryWhileTransient(await execOnce(), 0);
     return {
       success: result.success,
       stdout: result.stdout,
@@ -489,9 +496,9 @@ async function ensureProxySqlMonitorRoles(
 
   const monitorUsers = deps?.monitorUsers;
   if (monitorUsers && monitorUsers.length > 0) {
-    for (const monitor of monitorUsers) {
-      await engine.ensureProxySqlMonitor(ctx, monitor);
-    }
+    await forEachSequential(monitorUsers, async (monitor) => {
+      await engine.ensureProxySqlMonitor?.(ctx, monitor);
+    });
     logInfo(
       "managed",
       `managed.apply ensured ${monitorUsers.length} ProxySQL monitor role(s)`,

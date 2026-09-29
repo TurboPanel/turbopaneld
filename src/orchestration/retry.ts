@@ -42,13 +42,12 @@ export async function withRetry<T>(
   const baseDelayMs = opts.baseDelayMs ?? 1000;
   const maxDelayMs = opts.maxDelayMs ?? 8000;
 
-  let lastErr: unknown;
-  for (let attempt = 1; attempt <= attempts; attempt++) {
+  const tryFrom = async (attempt: number, lastErr: unknown): Promise<T> => {
+    if (attempt > attempts) throw lastErr;
     try {
       return await fn(attempt);
     } catch (err) {
-      lastErr = err;
-      if (attempt === attempts) break;
+      if (attempt === attempts) throw err;
       const message = err instanceof Error ? err.message : String(err);
       const wait = delayMs(attempt, baseDelayMs, maxDelayMs);
       logWarn(
@@ -58,7 +57,8 @@ export async function withRetry<T>(
         }ms`,
       );
       await new Promise((resolve) => setTimeout(resolve, wait));
+      return await tryFrom(attempt + 1, err);
     }
-  }
-  throw lastErr;
+  };
+  return await tryFrom(1, undefined);
 }

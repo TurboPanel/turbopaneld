@@ -15,6 +15,7 @@ import {
   type RunDockerOptions,
 } from "../deploy/docker-cli.ts";
 import { sanitizeForLog } from "../util/logger.ts";
+import { forEachSequential } from "../util/sequential.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 import {
   managedConfigDir,
@@ -100,11 +101,11 @@ export async function materializeManagedState(
   await Deno.mkdir(root, { recursive: true, mode: DIR_MODE });
   await Deno.mkdir(configDir, { recursive: true, mode: DIR_MODE });
 
-  for (const file of payload.configFiles) {
+  await forEachSequential(payload.configFiles, async (file) => {
     const dest = resolveManagedRelativePath(configDir, file.path);
     await Deno.mkdir(dirnameOf(dest), { recursive: true, mode: DIR_MODE });
     await writeManagedConfigFile(dest, file.contents, parseMode(file.mode));
-  }
+  });
 
   if (payload.tlsMaterial) {
     await ensureManagedSelfSignedCert(root, payload.tlsMaterial);
@@ -220,7 +221,7 @@ export async function normalizeManagedFileOwnership(
   // binary at all, so a `su`-based check fails on those images regardless of
   // whether the actual ownership is correct.
   const verifyMounts: string[] = [];
-  for (const subdir of ["config", "tls"]) {
+  await forEachSequential(["config", "tls"], async (subdir) => {
     try {
       const info = await Deno.stat(join(managedRoot, subdir));
       if (info.isDirectory) {
@@ -232,7 +233,7 @@ export async function normalizeManagedFileOwnership(
     } catch (err) {
       if (!(err instanceof Deno.errors.NotFound)) throw err;
     }
-  }
+  });
   if (verifyMounts.length === 0) return;
 
   const verifyScript = [
