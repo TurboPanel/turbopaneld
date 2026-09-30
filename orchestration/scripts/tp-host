@@ -84,6 +84,9 @@ PRINCIPAL_ID_MAX=60000
 SERVICE_ID_MIN=9900
 SERVICE_ID_MAX=9999
 ENGINE_USERS="tpnginx tpapache tpols tpcaddysite"
+# The daemon's own account and group: the only User=/Group= a scheduled backup
+# unit (turbopanel-backup-<uuid>.service) may name.
+DAEMON_ACCOUNT="tp"
 
 # --- running the real thing ------------------------------------------------
 # Privileged commands. In test mode they are printed, one argv element per
@@ -480,7 +483,17 @@ tp_mode_ok() {
 tp_unit_ok() {
   _uk_file="$1"
   _uk_name="$2"
-  awk -v name="$_uk_name" -v min="$PRINCIPAL_ID_MIN" '
+  # `turbopanel-backup-` is reserved for scheduled backups: a name under it is
+  # either exactly turbopanel-backup-<lower-case uuid>.service|.timer and gets
+  # the backup check below, or it is refused.
+  _uk_backup=""
+  case "$_uk_name" in
+    turbopanel-backup-*)
+      _uk_backup="$(tp_backup_unit_id "$_uk_name")" || return 1
+      ;;
+    *) ;;
+  esac
+  awk -v name="$_uk_name" -v min="$PRINCIPAL_ID_MIN" -v backup="${_uk_backup:+1}" '
     function fail(msg) { print "tp-host: unit " name ": " msg > "/dev/stderr"; bad = 1; exit 1 }
     BEGIN {
       split("Description After Before Wants Requires PartOf StartLimitBurst StartLimitIntervalSec", a, " ");
@@ -492,8 +505,20 @@ tp_unit_ok() {
       split("CPUQuota MemoryMax MemoryHigh TasksMax", d, " ");
       for (i in d) ok["Slice", d[i]] = 1
       ok["Install", "WantedBy"] = 1
+      # Only a scheduled-backup service may read the daemon env file and run
+      # at low priority; tp_backup_unit_ok pins each value exactly.
+      if (backup == "1") {
+        ok["Service", "EnvironmentFile"] = 1
+        ok["Service", "Nice"] = 1
+        ok["Service", "IOSchedulingClass"] = 1
+      }
       section = ""
     }
+    # systemd joins a line ending in a backslash onto the next one, so a
+    # continuation would let a line checked here as `User=<principal>` reach
+    # systemd as part of the line above it (and the unit run as root). The
+    # daemon never renders one; refuse it before anything else is read.
+    /\\[ \t\r]*$/ { fail("line continuation") }
     /^[ \t]*$/ || /^[ \t]*[#;]/ { next }
     /^\[[A-Za-z]+\][ \t]*$/ {
       section = $0; gsub(/[\[\] \t]/, "", section)
@@ -538,6 +563,10 @@ tp_unit_ok() {
   case "$_uk_name" in
     *.slice|*.timer) return 0 ;;
   esac
+  if [ -n "$_uk_backup" ]; then
+    tp_backup_unit_ok "$_uk_file" "$_uk_backup"
+    return
+  fi
   IFS="	" read -r _uk_user _uk_group _uk_slice _uk_nnp < "$_uk_file.meta" || return 1
   if [ "$_uk_name" = "turbopanel-hosting-caddy.service" ]; then
     # Runs as root today (binds :80/:443) — see AGENTS.md residual risks. Its
@@ -571,6 +600,64 @@ tp_hosting_caddy_unit_ok() {
       User=*|Group=*) return 1 ;;
     esac
   done < "$1"
+}
+
+# The policy id in turbopanel-backup-<id>.service|.timer, printed; fails unless
+# <id> is a lower-case UUID (it becomes the wrapper's only argument).
+tp_backup_unit_id() {
+  _bi_name="$1"
+  case "$_bi_name" in
+    *.service) _bi_id="${_bi_name%.service}" ;;
+    *.timer) _bi_id="${_bi_name%.timer}" ;;
+    *) return 1 ;;
+  esac
+  _bi_id="${_bi_id#turbopanel-backup-}"
+  # A lower-case UUID, spelled out: 8-4-4-4-12 hex digits.
+  case "$_bi_id" in
+    [0123456789abcdef][0123456789abcdef][0123456789abcdef][0123456789abcdef][0123456789abcdef][0123456789abcdef][0123456789abcdef][0123456789abcdef]-[0123456789abcdef][0123456789abcdef][0123456789abcdef][0123456789abcdef]-[0123456789abcdef][0123456789abcdef][0123456789abcdef][0123456789abcdef]-[0123456789abcdef][0123456789abcdef][0123456789abcdef][0123456789abcdef]-[0123456789abcdef][0123456789abcdef][0123456789abcdef][0123456789abcdef][0123456789abcdef][0123456789abcdef][0123456789abcdef][0123456789abcdef][0123456789abcdef][0123456789abcdef][0123456789abcdef][0123456789abcdef]) ;;
+    *) return 1 ;;
+  esac
+  printf '%s' "$_bi_id"
+}
+
+# A scheduled-backup service runs as the daemon account and can do exactly one
+# thing: exec the root-owned <install>/lib/tp-backup-run wrapper for the policy
+# id in its own name, with the daemon env file. No slice, no Environment=, no
+# reload, no second exec; low priority only. The account already has every
+# capability a backup uses (Docker, /backup), so this grants nothing new.
+#
+# Read straight from the file the awk pass above already shape-checked (keys
+# start in column one, known directives only, no continuations); a repeated
+# key keeps its last value, as systemd does.
+tp_backup_unit_ok() {
+  _bk_file="$1"
+  _bk_id="$2"
+  _bk_exec="ExecStart=$INSTALL_ROOT/lib/tp-backup-run $_bk_id"
+  _bk_envfile="EnvironmentFile=-$R_CONFIG/daemon.env"
+  _bk_user=""
+  _bk_group=""
+  _bk_nnp=""
+  _bk_execs=0
+  while IFS= read -r _bk_line || [ -n "$_bk_line" ]; do
+    case "$_bk_line" in
+      User=*) _bk_user="${_bk_line#User=}" ;;
+      Group=*) _bk_group="${_bk_line#Group=}" ;;
+      NoNewPrivileges=*) _bk_nnp="${_bk_line#NoNewPrivileges=}" ;;
+      ExecStart=*)
+        [ "$_bk_line" = "$_bk_exec" ] || return 1
+        _bk_execs=$((_bk_execs + 1))
+        ;;
+      ExecReload=*|Environment=*|Slice=*) return 1 ;;
+      EnvironmentFile=*) [ "$_bk_line" = "$_bk_envfile" ] || return 1 ;;
+      Nice=*) [ "$_bk_line" = "Nice=10" ] || return 1 ;;
+      IOSchedulingClass=*) [ "$_bk_line" = "IOSchedulingClass=idle" ] || return 1 ;;
+      *) ;;
+    esac
+  done < "$_bk_file"
+  [ "$_bk_user" = "$DAEMON_ACCOUNT" ] || return 1
+  [ "$_bk_group" = "$DAEMON_ACCOUNT" ] || return 1
+  [ "$_bk_nnp" = "yes" ] || return 1
+  [ "$_bk_execs" -eq 1 ]
 }
 
 # --- verbs -------------------------------------------------------------------

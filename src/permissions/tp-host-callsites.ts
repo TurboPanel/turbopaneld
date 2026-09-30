@@ -23,6 +23,12 @@
  * paths under `/etc/turbopanel`, `/var/lib/turbopanel`, `/srv/users`, … .
  */
 
+import {
+  backupServiceContent,
+  backupServicePath,
+  backupTimerContent,
+  backupTimerPath,
+} from "../backups/units.ts";
 import { cronTimerContent, cronTimerPath } from "../deploy/cron/unit.ts";
 import { caddyUnit } from "../deploy/ingress.ts";
 import { nativeAppUnitContent } from "../deploy/native/unit.ts";
@@ -128,6 +134,11 @@ const CRON_TIMER = cronTimerPath(
   { ...CRON, jobName: CRON.job.name },
   UNITS,
 );
+/** A scheduled-backup policy's units (turbopanel-backup-<policyId>.*). */
+const BACKUP_POLICY = "0192a3b4-c5d6-7e8f-9a0b-1c2d3e4f5a6b";
+const BACKUP_SERVICE = backupServicePath(BACKUP_POLICY, UNITS);
+const BACKUP_TIMER = backupTimerPath(BACKUP_POLICY, UNITS);
+const BACKUP_TIMER_UNIT = `turbopanel-backup-${BACKUP_POLICY}.timer`;
 const unitSetup = (text: string): CallSiteSetup => ({
   files: { [STAGED]: underPrefix(text) },
 });
@@ -168,9 +179,9 @@ const SITES: CallSite[] = [
     setup: dir(SITE),
   }),
 
-  // --- cron -----------------------------------------------------------------
+  // --- systemd unit sets (tenant cron, scheduled backups) ------------------
   tpHost(
-    'src/deploy/cron/apply.ts|["-n","systemctl",...args]',
+    'src/deploy/systemd-unit-set.ts|["-n","systemctl",...args]',
     { argv: ["systemctl", "daemon-reload"] },
     {
       argv: [
@@ -188,8 +199,10 @@ const SITES: CallSite[] = [
         "turbopanel-cron-svc1-backup.timer",
       ],
     },
+    { argv: ["systemctl", "enable", "--now", BACKUP_TIMER_UNIT] },
+    { argv: ["systemctl", "disable", "--now", BACKUP_TIMER_UNIT] },
   ),
-  tpHost('src/deploy/cron/apply.ts|["-n","cmp","-s","--",staged,path]', {
+  tpHost('src/deploy/systemd-unit-set.ts|["-n","cmp","-s","--",staged,path]', {
     argv: [
       "cmp",
       "-s",
@@ -200,7 +213,7 @@ const SITES: CallSite[] = [
     setup: file(`${UNITS}/turbopanel-cron-svc1-backup.service`, STAGED_CONTENT),
   }),
   tpHost(
-    'src/deploy/cron/apply.ts|["-n","install","-m","0644","-o","root","-g","root",staged,path]',
+    'src/deploy/systemd-unit-set.ts|["-n","install","-m","0644","-o","root","-g","root",staged,path]',
     {
       argv: [
         "install",
@@ -215,13 +228,43 @@ const SITES: CallSite[] = [
       ],
       setup: unitSetup(cronTimerContent(CRON)),
     },
+    {
+      argv: [
+        "install",
+        "-m",
+        "0644",
+        "-o",
+        "root",
+        "-g",
+        "root",
+        STAGED,
+        BACKUP_SERVICE,
+      ],
+      setup: unitSetup(backupServiceContent(LAYOUT, BACKUP_POLICY)),
+    },
+    {
+      argv: [
+        "install",
+        "-m",
+        "0644",
+        "-o",
+        "root",
+        "-g",
+        "root",
+        STAGED,
+        BACKUP_TIMER,
+      ],
+      setup: unitSetup(backupTimerContent(BACKUP_POLICY, "*-*-* 03:00:00")),
+    },
   ),
-  tpHost('src/deploy/cron/apply.ts|["-n","ls","-1","--",unitDir]', {
+  tpHost('src/deploy/systemd-unit-set.ts|["-n","ls","-1","--",unitDir]', {
     argv: ["ls", "-1", "--", UNITS],
   }),
   tpHost(
-    'src/deploy/cron/apply.ts|["-n","rm","-f","--",join(unitDir,`${unit}${suffix}`)]',
+    'src/deploy/systemd-unit-set.ts|["-n","rm","-f","--",join(unitDir,`${unit}${suffix}`)]',
     { argv: ["rm", "-f", "--", `${UNITS}/turbopanel-cron-svc1-backup.timer`] },
+    { argv: ["rm", "-f", "--", BACKUP_TIMER] },
+    { argv: ["rm", "-f", "--", BACKUP_SERVICE] },
   ),
 
   // --- hosting Caddy --------------------------------------------------------
@@ -1360,12 +1403,12 @@ const SITES: CallSite[] = [
     argv: ["iptables", "-X", MGD_CHAIN],
   }),
 
-  // Cron and native-app units.
-  tpHost('src/deploy/cron/apply.ts|systemctl(runFn,["daemon-reload"])', {
+  // Cron, scheduled-backup and native-app units.
+  tpHost('src/deploy/systemd-unit-set.ts|systemctl(runFn,["daemon-reload"])', {
     argv: ["systemctl", "daemon-reload"],
   }),
   tpHost(
-    'src/deploy/cron/apply.ts|systemctl(runFn,["disable","--now",`${unit}.timer`])',
+    'src/deploy/systemd-unit-set.ts|systemctl(runFn,["disable","--now",`${unit}.timer`])',
     {
       argv: [
         "systemctl",
@@ -1376,7 +1419,7 @@ const SITES: CallSite[] = [
     },
   ),
   tpHost(
-    'src/deploy/cron/apply.ts|systemctl(runFn,["enable","--now",`${unit}.timer`])',
+    'src/deploy/systemd-unit-set.ts|systemctl(runFn,["enable","--now",`${unit}.timer`])',
     {
       argv: [
         "systemctl",

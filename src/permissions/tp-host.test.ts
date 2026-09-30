@@ -15,6 +15,7 @@ import {
   principalSliceContent,
 } from "../deploy/native/unit.ts";
 import { caddyUnit } from "../deploy/ingress.ts";
+import { backupServiceContent, backupTimerContent } from "../backups/units.ts";
 import { issuedCertificateFindArgs } from "../deploy/instance-acme-http01.ts";
 import { setgidDirectoriesFindArgs } from "../deploy/site.ts";
 import type {
@@ -392,6 +393,13 @@ test("the daemon's own unit files pass; privileged or foreign units do not", asy
         service.replace("NoNewPrivileges=yes", "NoNewPrivileges=no"),
       ],
       [
+        // systemd joins a line ending in `\\` onto the next one, so it reads
+        // `SyslogIdentifier=x User=alice` and no User= at all (root), while a
+        // line-by-line check would see User=alice.
+        "a line continuation that hides User= from systemd",
+        service.replace(/^User=alice$/m, "SyslogIdentifier=x \\\nUser=alice"),
+      ],
+      [
         "timer for another unit",
         cronTimerContent(cronOpts).replace(
           /^Unit=.*$/m,
@@ -421,6 +429,217 @@ test("the daemon's own unit files pass; privileged or foreign units do not", asy
         host.path(`etc/systemd/system/${name}`),
       ]);
     }
+  });
+});
+
+const BACKUP_ID = "0192a3b4-c5d6-7e8f-9a0b-1c2d3e4f5a6b";
+const OTHER_BACKUP_ID = "0192a3b4-c5d6-7e8f-9a0b-ffffffffffff";
+
+async function installUnit(host: Host, name: string, content: string) {
+  await Deno.writeTextFile(host.path("tmp/unit"), content);
+  return host.run([
+    "install",
+    "-m",
+    "0644",
+    "-o",
+    "root",
+    "-g",
+    "root",
+    host.path("tmp/unit"),
+    host.path(`etc/systemd/system/${name}`),
+  ]);
+}
+
+async function refusedUnit(host: Host, name: string, content: string) {
+  await Deno.writeTextFile(host.path("tmp/unit"), content);
+  await refused(host, [
+    "install",
+    "-m",
+    "0644",
+    "-o",
+    "root",
+    "-g",
+    "root",
+    host.path("tmp/unit"),
+    host.path(`etc/systemd/system/${name}`),
+  ]);
+}
+
+test("scheduled-backup units pass only in their exact shape; tenant units gain nothing", async () => {
+  await withHost(async (host) => {
+    const layout = resolveLayout({
+      TURBOPANEL_HOME: host.path("opt/turbopanel"),
+      TURBOPANEL_LIB_DIR: host.path("opt/turbopanel/lib"),
+      TURBOPANEL_RUNTIMES_DIR: host.path("opt/turbopanel/vendor"),
+      TURBOPANEL_CONFIG_DIR: host.path("etc/turbopanel"),
+      TURBOPANEL_STATE_DIR: host.path("var/lib/turbopanel"),
+      TURBOPANEL_PRINCIPAL_HOME_ROOT: host.path("srv/users"),
+    }, { forceMode: "production" });
+    const serviceName = `turbopanel-backup-${BACKUP_ID}.service`;
+    const timerName = `turbopanel-backup-${BACKUP_ID}.timer`;
+    const service = backupServiceContent(layout, BACKUP_ID);
+    const timer = backupTimerContent(BACKUP_ID, "*-*-* 03:00:00");
+
+    // The daemon's own rendering passes.
+    for (
+      const [name, content] of [[serviceName, service], [timerName, timer]]
+    ) {
+      const result = await installUnit(host, name, content);
+      assertEquals(result.code, 0, `${name}: ${result.stderr}`);
+    }
+
+    const wrapper = `${host.path("opt/turbopanel/lib")}/tp-backup-run`;
+    const hostileServices: Array<[string, string]> = [
+      [
+        "another policy's id in ExecStart",
+        service.replace(
+          `tp-backup-run ${BACKUP_ID}`,
+          `tp-backup-run ${OTHER_BACKUP_ID}`,
+        ),
+      ],
+      [
+        "a second ExecStart",
+        service.replace(
+          "NoNewPrivileges=yes",
+          `ExecStart=${wrapper} ${BACKUP_ID}\nNoNewPrivileges=yes`,
+        ),
+      ],
+      ["a different binary", service.replace(wrapper, "/bin/sh")],
+      [
+        "an extra argument",
+        service.replace(`${BACKUP_ID}\nNoNew`, `${BACKUP_ID} --x\nNoNew`),
+      ],
+      ["runs as root", service.replace("User=tp", "User=root")],
+      ["root group", service.replace("Group=tp", "Group=root")],
+      ["another service account", service.replace("User=tp", "User=tpnginx")],
+      [
+        "a principal instead of the daemon",
+        service.replace("User=tp", "User=alice").replace(
+          "Group=tp",
+          "Group=alice-grp",
+        ),
+      ],
+      [
+        "an Environment= line",
+        service.replace(
+          "NoNewPrivileges=yes",
+          "Environment=DENO_DIR=/tmp\nNoNewPrivileges=yes",
+        ),
+      ],
+      [
+        "another EnvironmentFile",
+        service.replace(
+          /^EnvironmentFile=.*$/m,
+          "EnvironmentFile=/tmp/steer.env",
+        ),
+      ],
+      ["a raised priority", service.replace("Nice=10", "Nice=-20")],
+      [
+        "realtime IO",
+        service.replace("IOSchedulingClass=idle", "IOSchedulingClass=realtime"),
+      ],
+      [
+        "a slice",
+        service.replace(
+          "NoNewPrivileges=yes",
+          "Slice=turbopanel-alice.slice\nNoNewPrivileges=yes",
+        ),
+      ],
+      [
+        "a reload command",
+        service.replace(
+          "NoNewPrivileges=yes",
+          `ExecReload=${wrapper} ${BACKUP_ID}\nNoNewPrivileges=yes`,
+        ),
+      ],
+      [
+        "no NoNewPrivileges",
+        service.replace("NoNewPrivileges=yes", "NoNewPrivileges=no"),
+      ],
+      [
+        "capabilities",
+        service.replace(
+          "AmbientCapabilities=",
+          "AmbientCapabilities=CAP_SYS_ADMIN",
+        ),
+      ],
+      [
+        "a privileged exec prefix",
+        service.replace("ExecStart=", "ExecStart=+"),
+      ],
+      [
+        "a line continuation that hides User=",
+        service.replace("User=tp", "SyslogIdentifier=x \\\nUser=tp"),
+      ],
+    ];
+    for (const [label, content] of hostileServices) {
+      assertEquals(
+        content === service,
+        false,
+        `fixture did not change: ${label}`,
+      );
+      await refusedUnit(host, serviceName, content);
+    }
+
+    // The timer may start only its own service.
+    for (
+      const other of [
+        `turbopanel-backup-${OTHER_BACKUP_ID}.service`,
+        "turbopanel-hosting-caddy.service",
+      ]
+    ) {
+      await refusedUnit(
+        host,
+        timerName,
+        timer.replace(/^Unit=.*$/m, `Unit=${other}`),
+      );
+    }
+
+    // The prefix is reserved: only an exact lower-case uuid name gets the
+    // backup check, and anything else under it is refused outright.
+    for (
+      const name of [
+        `turbopanel-backup-${BACKUP_ID.toUpperCase()}.service`,
+        "turbopanel-backup-nightly.service",
+        `turbopanel-backup-${BACKUP_ID}x.service`,
+        `turbopanel-backup-${BACKUP_ID}.slice`,
+        "turbopanel-backup-../x",
+      ]
+    ) {
+      await refusedUnit(host, name, service);
+    }
+
+    // A tenant unit cannot borrow the backup-only directives.
+    const job = {
+      name: "nightly",
+      schedule: "*-*-* 03:00:00",
+      command: ["/usr/bin/php8.4", "artisan", "schedule:run"],
+    } as unknown as EnvironmentDeployCronJob;
+    const cron = cronServiceContent({
+      layout,
+      environmentId: "env1",
+      composeServiceName: "web",
+      job,
+      username: "alice",
+      workingDirectory: host.path("srv/users/alice/sites/web/current"),
+    });
+    const cronName = "turbopanel-cron-env1-web-nightly.service";
+    assertEquals((await installUnit(host, cronName, cron)).code, 0);
+    for (
+      const line of [
+        `EnvironmentFile=-${host.path("etc/turbopanel")}/daemon.env`,
+        "Nice=10",
+        "IOSchedulingClass=idle",
+      ]
+    ) {
+      await refusedUnit(
+        host,
+        cronName,
+        cron.replace("NoNewPrivileges=yes", `${line}\nNoNewPrivileges=yes`),
+      );
+    }
+    // And the backup shape is not a way to run as the daemon under a tenant name.
+    await refusedUnit(host, cronName, service);
   });
 });
 

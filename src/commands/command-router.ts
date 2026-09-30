@@ -7,6 +7,7 @@ import type {
   RebootPayload,
 } from "../contracts/commands-contracts.ts";
 import {
+  parseBackupsReconcilePayload,
   parseEnvironmentDeployPayload,
   parseEnvironmentLifecyclePayload,
   parseEnvironmentStopPayload,
@@ -53,6 +54,7 @@ import { handleReboot } from "./reboot.ts";
 import { handleTimezone } from "./timezone.ts";
 import { handlePrincipalsReconcile } from "./principals-reconcile.ts";
 import { handleFirewallReconcile } from "./firewall-reconcile.ts";
+import { handleBackupsReconcile } from "../backups/reconcile.ts";
 import { handleTlsTrust } from "./tls-trust.ts";
 import { handleFabricReconcile } from "./fabric.ts";
 import {
@@ -96,6 +98,7 @@ export type CommandRouterHandlerOverrides = {
   handleEnvironmentLifecycle?: typeof handleEnvironmentLifecycle;
   handlePrincipalsReconcile?: typeof handlePrincipalsReconcile;
   handleFirewallReconcile?: typeof handleFirewallReconcile;
+  handleBackupsReconcile?: typeof handleBackupsReconcile;
   handleManagedApply?: typeof handleManagedApply;
   handleManagedLifecycle?: typeof handleManagedLifecycle;
   handleManagedDestroy?: typeof handleManagedDestroy;
@@ -261,6 +264,16 @@ export async function handleCommandDispatch(
         result = await pickCommandRouterHandler(
           "handleFirewallReconcile",
           handleFirewallReconcile,
+        )(payload, daemonReceivedAt);
+        ok = true;
+        daemonRespondedAt = new Date().toISOString();
+        break;
+      }
+      case "server.backups.reconcile": {
+        const payload = parseBackupsReconcilePayload(message.payload);
+        result = await pickCommandRouterHandler(
+          "handleBackupsReconcile",
+          handleBackupsReconcile,
         )(payload, daemonReceivedAt);
         ok = true;
         daemonRespondedAt = new Date().toISOString();
