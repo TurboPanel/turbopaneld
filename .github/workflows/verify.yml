@@ -218,7 +218,7 @@ jobs:
       # only where the PR scan above ran, so it skips the promotion PRs too.
       - name: No new Sonar issues
         if: github.event_name == 'pull_request' && steps.sonar.outcome == 'success'
-        uses: TurboPanel/dev/.github/actions/sonar-new-issues@a2b3b69f1e4d58ee9bf0e4aacdb0c58de5782c2e # dev#47
+        uses: TurboPanel/dev/.github/actions/sonar-new-issues@2db1bbfa3cff89a52fac3ee4a53bd495dc1c79b1 # dev#47
 
   # The contract twins (commands, cell messages, version-wire, the field
   # snapshot) are compared against the turbopanel checkout of the same-named
