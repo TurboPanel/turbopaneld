@@ -2015,7 +2015,10 @@ export class InstanceClient {
     const instanceCaPath = resolveInstanceCaPath(env);
     const uploadedTrustPath = resolveInstanceUploadedTrustPath(env);
     const dlBase = env.TURBOPANEL_DL_BASE?.trim();
-    const runScriptUrl = resolveRunScriptUrl(this.#config, { dlBase });
+    const runScriptUrl = resolveRunScriptUrl(this.#config, {
+      dlBase,
+      channel: config.channel,
+    });
     // Automatic updates never relax TLS: public trust, the Platform CA, or
     // the private uploaded issuer — otherwise a trust-repair error (no
     // `curl -k`, and the operator release-insecure override is not consulted).
@@ -2202,6 +2205,7 @@ export class InstanceClient {
 
       const runScriptUrl = resolveRunScriptUrl(this.#config, {
         dlBase: env.TURBOPANEL_DL_BASE?.trim(),
+        channel: config.channel,
       });
       const instanceCaPath = resolveInstanceCaPath(env);
       const uploadedTrustPath = resolveInstanceUploadedTrustPath(env);

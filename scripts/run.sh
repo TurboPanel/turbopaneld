@@ -93,6 +93,20 @@ tp_curl_http_code() {
   fi
 }
 
+# The public installer host that serves an update channel's run.sh: rc is the
+# staging branch's (staging.turbopanel.sh), the canary rail is trunk's
+# (testing.turbopanel.sh), a release or anything else the bare turbopanel.sh.
+# Same mapping as src/instance/run-reconcile.ts (runScriptUrlForChannel) and the
+# control plane's install command; keep the three in step.
+tp_installer_host_for_channel() {
+  _ihc_channel="$1"
+  case "$_ihc_channel" in
+    rc) printf '%s' "staging.turbopanel.sh" ;;
+    trunk | edge | canary) printf '%s' "testing.turbopanel.sh" ;;
+    *) printf '%s' "turbopanel.sh" ;;
+  esac
+}
+
 tp_ca_validates_leaf() {
   _leaf_ca="$1"
   _code=$(tp_curl_http_code curl -sSL --cacert "$_leaf_ca" -o /dev/null "${HOST_URL%/}/api/health")
@@ -2152,7 +2166,7 @@ if ! tp_is_root; then
     fi
     _REEXEC_SCRIPT_URL="${HOST_URL%/}/run.sh"
   else
-    _REEXEC_SCRIPT_URL="https://turbopanel.sh"
+    _REEXEC_SCRIPT_URL="https://$(tp_installer_host_for_channel "${TURBOPANEL_UPDATE_CHANNEL:-release}")"
   fi
   set --
   [ -n "$LICENSE" ] && set -- "$@" --license "$LICENSE"

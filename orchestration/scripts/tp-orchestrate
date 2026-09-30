@@ -495,7 +495,6 @@ tp_verb_galaxy_docker_role() {
 
 CANONICAL_INSTANCE_CA="/etc/turbopanel/instance-ca.pem"
 CANONICAL_INSTANCE_UPLOADED_TRUST="/etc/turbopanel/instance-uploaded-trust.pem"
-CDN_RUN_SCRIPT="https://turbopanel.sh"
 # Root-pinned update origin, written by run.sh (as root) at install time into
 # the root-owned lib/ tree: the control plane this host enrolled with, the
 # overlay catalog (dev hosts only) and the Platform CA it trusts. The caller
@@ -644,12 +643,29 @@ tp_release_manifest_url_ok() {
   return 1
 }
 
+# The public installer host that serves an update channel's run.sh: rc is the
+# staging branch's (staging.turbopanel.sh), the canary rail is trunk's
+# (testing.turbopanel.sh), a release or anything else the bare turbopanel.sh.
+# Same mapping as src/instance/run-reconcile.ts (runScriptUrlForChannel) and the
+# control plane's install command; keep the three in step.
+tp_installer_host_for_channel() {
+  _ihc_channel="$1"
+  case "$_ihc_channel" in
+    rc) printf '%s' "staging.turbopanel.sh" ;;
+    trunk | edge | canary) printf '%s' "testing.turbopanel.sh" ;;
+    *) printf '%s' "turbopanel.sh" ;;
+  esac
+}
+
 # Download run.sh into $_script from the root-pinned origin. The caller has
 # already read the pin. TLS is never relaxed: CDN public trust, the pinned
 # Platform CA, or the pinned private uploaded issuer. The issuer is --cacert
 # only and is never passed as --instance-ca.
 tp_fetch_pinned_run_script() {
-  _script_url="$CDN_RUN_SCRIPT"
+  # The public installer for the channel being installed; an origin-pinned host
+  # (dev overlay) replaces it below. `_channel` is set by the calling verb from
+  # a fixed vocabulary and only ever selects one of three constant hosts.
+  _script_url="https://$(tp_installer_host_for_channel "${_channel:-}")"
   set -- curl -fsSL --max-time 120
   case "$_pin_host" in
     http://*)

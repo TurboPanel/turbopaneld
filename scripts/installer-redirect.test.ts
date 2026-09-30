@@ -32,7 +32,7 @@ test("every automatic-update consumer fetches run.sh with -L, so the redirect is
 });
 
 test("every curl command on turbopanel.sh printed by this repo follows redirects", async () => {
-  const bare = /curl\s+(-[A-Za-z]*)\s+turbopanel\.sh/g;
+  const bare = /curl\s+(-[A-Za-z]*)\s+(?:staging\.|testing\.)?turbopanel\.sh/g;
   for (
     const file of [
       "scripts/run.sh",
