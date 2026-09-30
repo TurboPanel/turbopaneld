@@ -2,7 +2,9 @@
 #
 # Every green trunk build ("Publish Daemon Trunk Build" succeeded, so a canary
 # exists for that commit) makes sure a PR "Release Candidate <version>-rc.N" from trunk into
-# staging is open. Merging it is the one human act: publish-rc.yml then publishes the
+# staging is open. <version> is the base of the canary built from trunk's head
+# (versions come from tags — TurboPanel/dev scripts/promote/version.sh — never
+# from deno.json), so the title names exactly what merging publishes. Merging it is the one human act: publish-rc.yml then publishes the
 # next x.y.z-rc.N from that exact canary's bytes. The PR is opened with the
 # Release App's token, because a PR created with GITHUB_TOKEN never starts the
 # required `ci-ok` check.
@@ -39,11 +41,11 @@ jobs:
           app-id: ${{ secrets.RELEASE_APP_ID }}
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
 
-      - name: Check out the changelog script (TurboPanel/dev)
+      - name: Check out the changelog and version scripts (TurboPanel/dev)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: TurboPanel/dev
-          ref: 5464e72c40aec3528fb10e6fc660583ad963b3cb
+          ref: ac03b76f3b1f3416f711c55b010a06daaf875dcd
           path: .promote
           fetch-depth: 1
           persist-credentials: false
@@ -62,7 +64,14 @@ jobs:
             echo "trunk has nothing staging lacks — no rc PR needed"
             exit 0
           fi
-          version="$(gh api "repos/$REPO/contents/deno.json?ref=trunk" --jq .content | base64 -d | jq -r .version)"
+          # The version is the canary of trunk's head; before that canary exists
+          # (a manual run), the base trunk is building now.
+          head="$(gh api "repos/$REPO/commits/trunk" --jq .sha)"
+          version="$(sh .promote/scripts/promote/version.sh canary-of "$head" | sed -n 's/^base=//p')"
+          if [ -z "$version" ]; then
+            version="$(sh .promote/scripts/promote/version.sh base | sed -n 's/^base=//p')"
+          fi
+          [ -n "$version" ] || { echo "::error::could not work out the version from the tags"; exit 1; }
           # The number after -rc. is the next one for this version: one past the
           # highest rc tag that already exists.
           last="$(gh api --paginate "repos/$REPO/git/matching-refs/tags/v$version-rc." --jq '.[].ref' | sed -E 's#.*-rc\.([0-9]+)$#\1#' | sort -n | tail -n 1)"

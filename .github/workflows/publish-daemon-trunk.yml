@@ -32,6 +32,17 @@
 #     names (turbopaneld-<X.Y.Z>-canary.<N>-<arch>.tar.zst) on the
 #     rolling `canary` pre-release, published by TurboPanel/dev's
 #     gh-canary.yml — what a self-hosted canary install follows.
+#
+# The version comes from git tags, never from deno.json (TurboPanel/dev's
+# Version From Tags action): X.Y.Z is the newest release's next patch, or a
+# higher started / in-flight version, and N restarts at 1 for each X.Y.Z. The
+# binary reports plain X.Y.Z (stamped into this checkout's deno.json before
+# compiling); `-canary.<N>` lives only in the asset names and the signed
+# manifest. deno.json's committed number is what a local build reports.
+#
+# workflow_dispatch re-runs the whole thing for trunk's head: "Start Next
+# Version" uses it so a started minor gets its first canary without waiting
+# for the next merge. A dispatch on any other branch does nothing.
 
 name: Publish Daemon Trunk Build
 
@@ -39,6 +50,7 @@ on:
   push:
     branches:
       - trunk
+  workflow_dispatch:
 
 # Everything reads by default; only the canary job (the rolling `canary`
 # GitHub release) gets write, below.
@@ -59,10 +71,12 @@ concurrency:
   queue: max
 
 jobs:
-  # The whole verify.yml (tests, contract drift, minor gate, ci-ok) for this
-  # exact commit, in this run. `publish` needs it, and `canary` needs
-  # `publish`, so nothing is published unless every one of them passed.
+  # The whole verify.yml (tests, contract drift, ci-ok) for this exact
+  # commit, in this run. `publish` needs it, and `canary` needs `publish`, so
+  # nothing is published unless every one of them passed. Only trunk builds
+  # canaries: a manual run on another branch skips everything.
   verify:
+    if: github.ref == 'refs/heads/trunk'
     uses: ./.github/workflows/verify.yml
     secrets: inherit
 
@@ -116,6 +130,34 @@ jobs:
 
       - name: Install zstd
         run: sudo apt-get update -qq && sudo apt-get install -y -qq zstd
+
+      - name: Work out this build's version from the tags
+        id: version
+        uses: TurboPanel/dev/.github/actions/version@ac03b76f3b1f3416f711c55b010a06daaf875dcd # dev#42
+        with:
+          mode: canary
+
+      - name: Stamp the version into deno.json
+        # What the binary reports (src/version.ts reads deno.json at compile
+        # time): the plain base X.Y.Z, never the -canary.N label. Transient,
+        # this checkout only; the committed number is not the source of truth.
+        env:
+          BASE_VERSION: ${{ steps.version.outputs.base }}
+          CANARY_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -eu
+          python3 - <<'PY'
+          import json, os
+          path = "deno.json"
+          with open(path) as f:
+              config = json.load(f)
+          config["version"] = os.environ["BASE_VERSION"]
+          with open(path, "w") as f:
+              json.dump(config, f, indent=2)
+              f.write("\n")
+          PY
+          python3 -c 'import json, os, sys; v = json.load(open("deno.json"))["version"]; sys.exit(v != os.environ["BASE_VERSION"])'
+          echo "building ${BASE_VERSION} (canary ${CANARY_VERSION})"
 
       - name: Compute build metadata
         run: |
@@ -379,15 +421,20 @@ jobs:
         id: canary
         # Same bytes as the CDN drop, renamed the way a release names them so
         # the rolling canary release never has two builds fighting over one
-        # filename. The version is deno.json's number (what the binary
-        # reports on the wire) plus a `-canary.<run number>` pre-release suffix,
+        # filename. The version is the base the binary reports plus a
+        # `-canary.<N>` pre-release suffix (N counts this base's canaries),
         # which semver orders below the release it leads to.
+        env:
+          CANARY_VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -eu
           # shellcheck source=scripts/lib/release-artifacts.sh
           . scripts/lib/release-artifacts.sh
-          _pkg_version="$(python3 -c 'import json; print(json.load(open("deno.json"))["version"])')"
-          _version="${_pkg_version}-canary.${GITHUB_RUN_NUMBER}"
+          _version="$CANARY_VERSION"
+          case "$_version" in
+            *-canary.*) ;;
+            *) echo "::error::no canary version worked out (got '${_version}')"; exit 1 ;;
+          esac
           echo "version=${_version}" >> "$GITHUB_OUTPUT"
           mkdir -p canary-assets
           _src="publish/channels/trunk/daemon"
@@ -427,7 +474,7 @@ jobs:
     # gh-canary.yml creates/updates the rolling `canary` release and its assets.
     permissions:
       contents: write
-    uses: TurboPanel/dev/.github/workflows/gh-canary.yml@60fd59793793a2c8e8d5f30536e3036dc628d6da # dev#40
+    uses: TurboPanel/dev/.github/workflows/gh-canary.yml@ac03b76f3b1f3416f711c55b010a06daaf875dcd # dev#42
     with:
       version: ${{ needs.publish.outputs.canary-version }}
       commit: ${{ github.sha }}

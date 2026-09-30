@@ -3,9 +3,10 @@
 # runs the workflow file from the pushed commit, so the very first merge (which
 # brings this file into staging) already works.
 #
-#   1. resolve  the merged PR's head commit, the canary that was built from it
-#               (waits for it if it is still building), and a sanity check that
-#               the canary manifest names exactly that commit
+#   1. resolve  the merged PR's head commit and the canary that was built from
+#               it (waits for it if it is still building): the manifest on the
+#               rolling canary release that names exactly that commit. Its
+#               version (<base>-canary.<N>) came from tags, not deno.json.
 #   2. prepare / publish / finalize   the shared promote workflows
 #               (TurboPanel/dev) with NO approval gate — the merge was the
 #               deliberate act; the rc is the canary's bytes re-signed
@@ -46,12 +47,12 @@ jobs:
       actions: read
       pull-requests: read
     outputs:
-      proceed: ${{ steps.r.outputs.proceed }}
-      commit: ${{ steps.r.outputs.commit }}
-      build: ${{ steps.r.outputs.build }}
-      version: ${{ steps.r.outputs.version }}
+      proceed: ${{ steps.check.outputs.proceed || steps.r.outputs.proceed }}
+      commit: ${{ steps.check.outputs.commit }}
+      canary: ${{ steps.check.outputs.canary }}
+      version: ${{ steps.check.outputs.version }}
     steps:
-      - name: Find the merged PR, its canary build, and check they match
+      - name: Find the merged PR and wait for its canary build
         id: r
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -84,15 +85,15 @@ jobs:
           # The canary build of that commit: the newest publish run for it.
           # It may still be building (the PR can merge while the newest trunk
           # commit publishes) — wait, up to 45 minutes.
-          number=""
+          done=""
           for _ in $(seq 1 90); do
-            row="$(gh run list --repo "$REPO" --workflow publish-daemon-trunk.yml --commit "$commit" --limit 1 --json number,status,conclusion --jq '.[0] // empty')"
+            row="$(gh run list --repo "$REPO" --workflow publish-daemon-trunk.yml --commit "$commit" --limit 1 --json status,conclusion --jq '.[0] // empty')"
             if [ -n "$row" ]; then
               status="$(echo "$row" | jq -r .status)"
               conclusion="$(echo "$row" | jq -r .conclusion)"
               if [ "$status" = "completed" ]; then
                 if [ "$conclusion" = "success" ]; then
-                  number="$(echo "$row" | jq -r .number)"
+                  done=yes
                   break
                 fi
                 echo "::error::the canary build of $commit ended $conclusion — fix trunk (or re-run that build) and re-run this workflow with workflow_dispatch"
@@ -101,20 +102,39 @@ jobs:
             fi
             sleep 30
           done
-          [ -n "$number" ] || { echo "::error::no finished canary build for $commit after 45 minutes"; exit 1; }
+          [ -n "$done" ] || { echo "::error::no finished canary build for $commit after 45 minutes"; exit 1; }
+          {
+            echo "proceed=true"
+            echo "commit=$commit"
+          } >> "$GITHUB_OUTPUT"
 
-          gh release view canary --repo "$REPO" --json assets --jq '.assets[].name' > canary-assets.txt
-          manifest="$(grep -E "^manifest-[0-9]+\.[0-9]+\.[0-9]+-canary\.$number\.json$" canary-assets.txt || true)"
-          [ "$(echo "$manifest" | grep -c .)" = "1" ] || { echo "::error::expected one canary manifest for build $number, found: ${manifest:-none} (pruned? the rail keeps the newest 20)"; exit 1; }
-          gh release download canary --repo "$REPO" --pattern "$manifest" --output manifest.json
-          built="$(jq -r .commit manifest.json)"
-          [ "$built" = "$commit" ] || { echo "::error::canary $number was built from $built, not $commit"; exit 1; }
-          version="$(jq -r .version manifest.json | sed 's/-canary\..*$//')"
+      # The canary manifest on the rolling release that names exactly that
+      # commit (its version comes from tags: <base>-canary.<N>).
+      - name: Find the canary built from that commit
+        id: canary
+        if: steps.r.outputs.proceed == 'true'
+        uses: TurboPanel/dev/.github/actions/version@ac03b76f3b1f3416f711c55b010a06daaf875dcd # dev#42
+        with:
+          mode: canary-of
+          commit: ${{ steps.r.outputs.commit }}
+
+      - name: Check the canary, and skip a re-run
+        id: check
+        if: steps.r.outputs.proceed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          COMMIT: ${{ steps.r.outputs.commit }}
+          ASSET: ${{ steps.canary.outputs.asset }}
+          VERSION: ${{ steps.canary.outputs.base }}
+        run: |
+          set -eu
+          [ -n "$ASSET" ] || { echo "::error::no canary manifest on the canary release names $COMMIT (pruned? the rail keeps the newest 20)"; exit 1; }
 
           # Idempotence: this commit already has an rc (a re-run) — do not publish rc.N+1 of the same bytes.
-          for ref in $(gh api --paginate "repos/$REPO/git/matching-refs/tags/v$version-rc." --jq '.[].ref' | sed 's#^refs/tags/##'); do
-            if [ "$(gh api "repos/$REPO/commits/$ref" --jq .sha)" = "$commit" ]; then
-              echo "$ref already carries $commit — nothing to publish"
+          for ref in $(gh api --paginate "repos/$REPO/git/matching-refs/tags/v$VERSION-rc." --jq '.[].ref' | sed 's#^refs/tags/##'); do
+            if [ "$(gh api "repos/$REPO/commits/$ref" --jq .sha)" = "$COMMIT" ]; then
+              echo "$ref already carries $COMMIT — nothing to publish"
               echo "proceed=false" >> "$GITHUB_OUTPUT"
               exit 0
             fi
@@ -122,11 +142,11 @@ jobs:
 
           {
             echo "proceed=true"
-            echo "commit=$commit"
-            echo "build=$number"
-            echo "version=$version"
+            echo "commit=$COMMIT"
+            echo "canary=$ASSET"
+            echo "version=$VERSION"
           } >> "$GITHUB_OUTPUT"
-          echo "publishing an rc of $version from canary build $number ($commit)"
+          echo "publishing an rc of $VERSION from canary $ASSET ($COMMIT)"
 
   prepare:
     needs: resolve
@@ -135,12 +155,12 @@ jobs:
     # release and upload assets.
     permissions:
       contents: write
-    uses: TurboPanel/dev/.github/workflows/gh-promote.yml@5464e72c40aec3528fb10e6fc660583ad963b3cb # dev#35
+    uses: TurboPanel/dev/.github/workflows/gh-promote.yml@ac03b76f3b1f3416f711c55b010a06daaf875dcd # dev#42
     with:
       repo-kind: daemon
       to: rc
-      source: ${{ needs.resolve.outputs.build }}
-      dev-ref: 5464e72c40aec3528fb10e6fc660583ad963b3cb
+      source: ${{ needs.resolve.outputs.canary }}
+      dev-ref: ac03b76f3b1f3416f711c55b010a06daaf875dcd
       # Same signer pin as promote.yml.
       signer-ref: 93c4f94510c9499e6bf04366a9500fe9f8e38aaa
       # The merge of the promotion PR is the approval.
@@ -153,7 +173,7 @@ jobs:
     # release and upload assets.
     permissions:
       contents: write
-    uses: TurboPanel/dev/.github/workflows/gh-release.yml@5464e72c40aec3528fb10e6fc660583ad963b3cb # dev#35
+    uses: TurboPanel/dev/.github/workflows/gh-release.yml@ac03b76f3b1f3416f711c55b010a06daaf875dcd # dev#42
     with:
       version: ${{ needs.prepare.outputs.version }}
       channel: rc
@@ -169,7 +189,7 @@ jobs:
     # release and upload assets.
     permissions:
       contents: write
-    uses: TurboPanel/dev/.github/workflows/gh-promote-finalize.yml@5464e72c40aec3528fb10e6fc660583ad963b3cb # dev#35
+    uses: TurboPanel/dev/.github/workflows/gh-promote-finalize.yml@ac03b76f3b1f3416f711c55b010a06daaf875dcd # dev#42
     with:
       to: rc
       version: ${{ needs.prepare.outputs.version }}
@@ -196,7 +216,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: TurboPanel/dev
-          ref: 5464e72c40aec3528fb10e6fc660583ad963b3cb
+          ref: ac03b76f3b1f3416f711c55b010a06daaf875dcd
           path: .promote
           fetch-depth: 1
           persist-credentials: false

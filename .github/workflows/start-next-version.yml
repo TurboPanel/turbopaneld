@@ -1,0 +1,97 @@
+# Start Next Version: the one button that starts a new minor or major across
+# turbopaneld, turbopanel, ui and website (Road to 0.2.x, versioning Phase 3).
+#
+# Patches need no button: once vX.Y.Z is released, every repo's next canary is
+# X.Y.(Z+1) by itself, because versions come from git tags, not from a file and
+# not from a "Start x.y.z" PR. A minor (next X.Y.0) or a major (next X.0.0;
+# the first is 1.0.0) is the one deliberate act, and this is it:
+#
+#   1. each repo's target is the next minor/major after THAT repo's newest
+#      release (repos release independently). A repo already building the
+#      target or later is skipped, so running this twice is harmless.
+#   2. an annotated tag start/v<target> is pushed at the repo's trunk head
+#      (Release App token). That marker is the whole signal; no file changes,
+#      no PR opens. It matches no release-tag ruleset and no tag trigger.
+#   3. each repo's trunk build runs again on trunk, so its next canary, and the
+#      Release Candidate PR, carry the new number at once (website has no
+#      build: its Release Candidate PR is refreshed instead).
+#
+# From then on every release of that repo, a hotfix included, carries the new
+# number: run this only when everything on trunk may ship as the new version.
+# An rc already on staging still ships under its own number.
+#
+# Who can run it: workflow_dispatch is only offered to people with write access
+# to this repository (Actions → Start Next Version → Run workflow). Tick
+# dry-run first to see what each repo would get. The logic is TurboPanel/dev
+# scripts/promote/start-version.sh.
+
+name: Start Next Version
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: What to start (minor = next X.Y.0, major = next X.0.0)
+        required: true
+        type: choice
+        options:
+          - minor
+          - major
+        default: minor
+      dry-run:
+        description: Only show what each repo would get; push nothing
+        required: false
+        type: boolean
+        default: false
+
+# The GITHUB_TOKEN only checks out TurboPanel/dev; the tags and the rebuilds in
+# all four repos go through the Release App token.
+permissions:
+  contents: read
+
+concurrency:
+  group: start-next-version
+  cancel-in-progress: false
+
+jobs:
+  start:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Mint a Release App token
+        id: app
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: TurboPanel
+          repositories: |
+            turbopaneld
+            turbopanel
+            ui
+            website
+
+      - name: Check out the version scripts (TurboPanel/dev)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: TurboPanel/dev
+          ref: ac03b76f3b1f3416f711c55b010a06daaf875dcd
+          path: .promote
+          fetch-depth: 1
+          persist-credentials: false
+          sparse-checkout: scripts/promote
+          sparse-checkout-cone-mode: false
+
+      - name: Start the next ${{ inputs.bump }}
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          BUMP: ${{ inputs.bump }}
+          DRY_RUN: ${{ inputs.dry-run }}
+          START_MESSAGE: "Start the next ${{ inputs.bump }}: run by ${{ github.actor }} in ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+        run: |
+          echo "### Start Next Version: $BUMP" >> "$GITHUB_STEP_SUMMARY"
+          sh .promote/scripts/promote/start-version.sh "$BUMP" \
+            TurboPanel/turbopaneld:publish-daemon-trunk.yml \
+            TurboPanel/turbopanel:build.yml \
+            TurboPanel/ui:verify.yml \
+            TurboPanel/website:promote-prs.yml

@@ -58,12 +58,11 @@ jobs:
 
   dry-run:
     if: github.event_name == 'workflow_dispatch' && inputs.pr != ''
-    uses: TurboPanel/dev/.github/workflows/gh-promote-ok.yml@2e0291995207bfd01fd911c1200d72fc3a17f4e0 # dev#41
+    uses: TurboPanel/dev/.github/workflows/gh-promote-ok.yml@ac03b76f3b1f3416f711c55b010a06daaf875dcd # dev#42
     with:
       repo-kind: daemon
       ci-workflow: publish-daemon-trunk.yml
-      version-file: deno.json
-      dev-ref: 2e0291995207bfd01fd911c1200d72fc3a17f4e0
+      dev-ref: ac03b76f3b1f3416f711c55b010a06daaf875dcd
       pr-number: ${{ inputs.pr }}
     permissions:
       contents: read
