@@ -1,0 +1,117 @@
+# Sonar Trunk Analysis: the SonarCloud analysis of each trunk commit, run
+# after its Publish Daemon Trunk Build completes instead of inside it.
+#
+# Why a separate workflow: `publish` needs `verify`, and the Sonar scan used to
+# run inside verify.yml's verify job, so every daemon build and canary waited
+# for a full analysis whose result blocks nothing on trunk (the quality gate
+# blocks pull requests only, and each commit already passed it on its PR —
+# Road to 0.2.x decision 4, 2026-09-30). Here it runs after the canary instead
+# of ahead of it. Pull requests are unchanged: verify.yml still scans them and
+# waits for the quality gate.
+#
+# This analysis is still required: it is the baseline SonarCloud compares
+# each pull request's new code against. It imports the same LCOV
+# (daemon-coverage-lcov, uploaded by verify.yml's verify job inside the
+# trunk build), and it runs whenever that job produced one, i.e. whenever the
+# tests passed, as the in-verify scan did.
+#
+# The analysed commit is the trunk build's head_sha, set explicitly: in a
+# workflow_run job GITHUB_SHA and GITHUB_REF name the default branch's
+# current tip, which is a newer commit when merges queue up.
+#
+# Same shape as TurboPanel/turbopanel's sonar-trunk.yml (after its Build).
+
+name: Sonar Trunk Analysis
+
+on:
+  workflow_run:
+    workflows: [Publish Daemon Trunk Build]
+    types: [completed]
+    branches: [trunk]
+
+# Nothing by default; the one job below asks for what it needs.
+permissions: {}
+
+# One analysis at a time, in the order trunk builds complete (they queue in
+# push order). Never cancelled: each analysis uploads that commit's baseline.
+# `queue: max` keeps every pending run (the default would drop one when a
+# third arrives) and cannot be combined with cancel-in-progress.
+concurrency:
+  group: sonar-trunk
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  sonarqube:
+    name: SonarQube (trunk)
+    # Only a trunk build of the trunk commit itself: a push to trunk, or a
+    # manual run (Start Next Version). A cancelled build has no complete
+    # coverage, so it is skipped.
+    if: >-
+      github.event.workflow_run.head_branch == 'trunk'
+      && (github.event.workflow_run.event == 'push'
+          || github.event.workflow_run.event == 'workflow_dispatch')
+      && (github.event.workflow_run.conclusion == 'success'
+          || github.event.workflow_run.conclusion == 'failure')
+    # contents: read — check out the commit. actions: read — look up and
+    # download the coverage artifact of the trunk build run.
+    permissions:
+      contents: read
+      actions: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      BUILD_RUN_ID: ${{ github.event.workflow_run.id }}
+      HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+    steps:
+      - name: Require SONAR_TOKEN
+        run: |
+          if [ -z "$SONAR_TOKEN" ]; then
+            echo "::error::SONAR_TOKEN is missing — add the secret on TurboPanel/turbopaneld (or org)."
+            exit 1
+          fi
+
+      # verify.yml uploads the LCOV only when the tests passed (the upload
+      # step comes after them). No artifact: the test failure is already red
+      # in the trunk build, so this run ends quietly without an analysis.
+      - name: Find the coverage artifact
+        id: lcov
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          count="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${BUILD_RUN_ID}/artifacts?name=daemon-coverage-lcov" --jq '.total_count')"
+          if [ "$count" -gt 0 ]; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::Trunk build run ${BUILD_RUN_ID} has no daemon-coverage-lcov (the tests did not pass); no trunk analysis for ${HEAD_SHA}."
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check out the trunk build commit
+        if: steps.lcov.outputs.found == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0 # Shallow clones should be disabled for a better relevancy of analysis
+
+      - name: Download coverage LCOV
+        if: steps.lcov.outputs.found == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: daemon-coverage-lcov
+          path: coverage
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+
+      # The main branch is named explicitly and the revision is the trunk
+      # build's commit, not GITHUB_SHA (see the header). No quality-gate wait:
+      # the gate blocks pull requests only, and the result shows on SonarCloud.
+      - name: SonarQube Scan
+        if: steps.lcov.outputs.found == 'true'
+        uses: SonarSource/sonarqube-scan-action@ba9859eae8dd6bd29e412f25ddbbef3d032000f4 # v8.2.2
+        with:
+          args: >
+            -Dsonar.branch.name=trunk
+            -Dsonar.scm.revision=${{ github.event.workflow_run.head_sha }}
+            -Dsonar.qualitygate.wait=false
