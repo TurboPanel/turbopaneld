@@ -1,0 +1,65 @@
+# promote-ok: the two automatic promotion PRs are mergeable only once what
+# their merge publishes exists (Road to 0.2.x, green-only CI phase 2).
+#
+#   "Release Candidate x.y.z-rc.N" (trunk -> staging): the head commit's trunk
+#       publish-daemon-trunk.yml run passed and its canary is on the rolling `canary` release.
+#   "Release x.y.z" (staging -> live): the newest v<x.y.z>-rc.N is published
+#       and staging is exactly its content.
+#
+# Red means "not yet" and says what it is waiting for; promote-ok-recheck.yml
+# re-runs it when the daemon trunk build ("Publish Daemon Trunk Build" tests the commit and publishes its canary) or Publish Release Candidate finishes. The
+# logic is TurboPanel/dev gh-promote-ok.yml (scripts/promote/promote-ok.sh).
+#
+# The required check is the `promote-ok` job below (a job inside a reusable
+# workflow reports as "<caller job> / <job>", so the name comes from this
+# fan-in). Never add workflow_dispatch here: a manual run on trunk would put a
+# `promote-ok` check on the trunk head, which is the Release Candidate PR's
+# head. The manual dry run is in promote-ok-recheck.yml.
+#
+# The Release PR runs this file from staging, so it gates Release PRs only
+# after this file has reached staging (the next Release Candidate merge).
+
+name: Promote OK
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [staging, live]
+
+# Read-only: the evaluation reads runs, releases, tags and commits.
+permissions:
+  contents: read
+
+jobs:
+  evaluate:
+    uses: TurboPanel/dev/.github/workflows/gh-promote-ok.yml@7f3d977e2b695fbb9bb59b70b266fe400d47340f # dev#41
+    with:
+      repo-kind: daemon
+      ci-workflow: publish-daemon-trunk.yml
+      version-file: deno.json
+      dev-ref: 7f3d977e2b695fbb9bb59b70b266fe400d47340f
+      base: ${{ github.event.pull_request.base.ref }}
+      head-sha: ${{ github.event.pull_request.head.sha }}
+    # gh-promote-ok.yml reads the canary release, tags and releases (contents),
+    # the trunk CI run (actions) and, in a dry run, the PR (pull-requests).
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+
+  promote-ok:
+    name: promote-ok
+    needs: [evaluate]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Pass only when what this PR publishes exists
+        env:
+          RESULT: ${{ needs.evaluate.result }}
+        run: |
+          if [ "$RESULT" != "success" ]; then
+            echo "::error::Not mergeable yet: the evaluate job says what this PR is waiting for. It re-checks automatically."
+            exit 1
+          fi
+          echo "What this PR publishes exists."
