@@ -20,9 +20,6 @@ on:
     workflows: [Publish Daemon Trunk Build, Publish Release Candidate]
     types: [completed]
     branches: [trunk, staging]
-  # TEMPORARY (registers the workflow so the dry run can be dispatched from this branch); removed before review.
-  push:
-    branches: [ci/promote-ok]
   workflow_dispatch:
     inputs:
       pr:
