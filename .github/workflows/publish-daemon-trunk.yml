@@ -33,17 +33,35 @@
 #     rolling `canary` pre-release, published by TurboPanel/dev's
 #     gh-canary.yml — what a self-hosted canary install follows.
 
-name: Publish daemon trunk build
+name: Publish Daemon Trunk Build
 
 on:
   push:
     branches:
       - trunk
 
+# Everything reads by default; only the canary job (the rolling `canary`
+# GitHub release) gets write, below.
 permissions:
   contents: read
 
+# One trunk build at a time, oldest first, and none dropped. The default queue
+# keeps a single pending run and cancels it when a newer push arrives, so on a
+# busy day a merged commit could be tested (half-way), never published, and
+# show a red X. `queue: max` keeps up to 100 pending runs in push order
+# instead (it cannot be combined with cancel-in-progress: true). Serialising
+# the whole run — verify, publish and canary — also keeps the job-level
+# groups inside verify.yml and gh-canary.yml free of competing pending jobs,
+# and SonarCloud's trunk analyses in commit order.
+concurrency:
+  group: publish-daemon-trunk-run
+  cancel-in-progress: false
+  queue: max
+
 jobs:
+  # The whole verify.yml (tests, contract drift, minor gate, ci-ok) for this
+  # exact commit, in this run. `publish` needs it, and `canary` needs
+  # `publish`, so nothing is published unless every one of them passed.
   verify:
     uses: ./.github/workflows/verify.yml
     secrets: inherit
@@ -51,9 +69,6 @@ jobs:
   publish:
     needs: verify
     runs-on: ubuntu-latest
-    concurrency:
-      group: publish-daemon-trunk
-      cancel-in-progress: false
     steps:
       - name: Verify required secrets and variables
         env:
@@ -409,9 +424,10 @@ jobs:
 
   canary:
     needs: publish
+    # gh-canary.yml creates/updates the rolling `canary` release and its assets.
     permissions:
       contents: write
-    uses: TurboPanel/dev/.github/workflows/gh-canary.yml@177d481666cce2e1dcfa76290b141b0149a6a0a9 # trunk
+    uses: TurboPanel/dev/.github/workflows/gh-canary.yml@60fd59793793a2c8e8d5f30536e3036dc628d6da # dev#40
     with:
       version: ${{ needs.publish.outputs.canary-version }}
       commit: ${{ github.sha }}

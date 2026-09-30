@@ -1,20 +1,22 @@
 # Keeps the trunk → staging promotion PR open (Road to 0.2.x, versioning flow).
 #
-# Every green trunk build ("Publish daemon trunk build" succeeded, so a canary
-# exists for that commit) makes sure a PR "Release candidate <version>-rc.N" from trunk into
-# staging is open. Merging it is the one human act: cut-rc.yml then cuts the
+# Every green trunk build ("Publish Daemon Trunk Build" succeeded, so a canary
+# exists for that commit) makes sure a PR "Release Candidate <version>-rc.N" from trunk into
+# staging is open. Merging it is the one human act: publish-rc.yml then publishes the
 # next x.y.z-rc.N from that exact canary's bytes. The PR is opened with the
 # Release App's token, because a PR created with GITHUB_TOKEN never starts the
 # required `ci-ok` check.
 
-name: Keep the rc PR open
+name: Keep the RC PR Open
 
 on:
   workflow_run:
-    workflows: ["Publish daemon trunk build"]
+    # By NAME: keep in step with publish-daemon-trunk.yml's `name:`.
+    workflows: ["Publish Daemon Trunk Build"]
     types: [completed]
   workflow_dispatch:
 
+# Read-only: the PR is opened and edited with the Release App's token.
 permissions:
   contents: read
 
@@ -65,9 +67,9 @@ jobs:
           # highest rc tag that already exists.
           last="$(gh api --paginate "repos/$REPO/git/matching-refs/tags/v$version-rc." --jq '.[].ref' | sed -E 's#.*-rc\.([0-9]+)$#\1#' | sort -n | tail -n 1)"
           rc="$version-rc.$(( ${last:-0} + 1 ))"
-          title="Release candidate $rc"
+          title="Release Candidate $rc"
           {
-            echo "Merging this cuts \`v$rc\` from the exact canary build of the merged trunk commit (same bytes, re-signed) and moves \`staging\`. It runs automatically after the merge (\`cut-rc.yml\`)."
+            echo "Merging this publishes \`v$rc\` from the exact canary build of the merged trunk commit (same bytes, re-signed) and moves \`staging\`. It runs automatically after the merge (\`publish-rc.yml\`)."
             echo
             echo "**$ahead commit(s) on trunk not yet on staging:**"
             echo

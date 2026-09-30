@@ -137,10 +137,19 @@ jobs:
         id: instance-ref
         env:
           GH_TOKEN: ${{ github.token }}
+          HEAD_REF: ${{ github.head_ref || github.ref_name }}
+          BASE_REF: ${{ github.base_ref }}
         run: |
-          REF="${{ github.head_ref || github.ref_name }}"
-          case "${{ github.base_ref }}" in
+          REF="$HEAD_REF"
+          # Never staging/live: not as the head (a staging → trunk PR), not as
+          # the base (the promotion PRs), not as the pushed branch.
+          case "$REF" in
             staging | live) REF=trunk ;;
+            *) ;;
+          esac
+          case "$BASE_REF" in
+            staging | live) REF=trunk ;;
+            *) ;;
           esac
           if gh api "repos/TurboPanel/turbopanel/branches/${REF}" --silent; then
             echo "ref=${REF}" >> "$GITHUB_OUTPUT"
@@ -199,7 +208,7 @@ jobs:
 
   # The contract twins (commands, cell messages, version-wire, the field
   # snapshot) are compared against the turbopanel checkout of the same-named
-  # branch (else trunk), so a daemon-only change that drifts fails here rather
+  # branch (else trunk; never turbopanel's staging or live), so a daemon-only change that drifts fails here rather
   # than turning turbopanel red after it merges. Mirrors turbopanel's
   # metrics-legacy job.
   #
@@ -225,10 +234,19 @@ jobs:
         id: instance-ref
         env:
           GH_TOKEN: ${{ github.token }}
+          HEAD_REF: ${{ github.head_ref || github.ref_name }}
+          BASE_REF: ${{ github.base_ref }}
         run: |
-          REF="${{ github.head_ref || github.ref_name }}"
-          case "${{ github.base_ref }}" in
+          REF="$HEAD_REF"
+          # Never staging/live: not as the head (a staging → trunk PR), not as
+          # the base (the promotion PRs), not as the pushed branch.
+          case "$REF" in
             staging | live) REF=trunk ;;
+            *) ;;
+          esac
+          case "$BASE_REF" in
+            staging | live) REF=trunk ;;
+            *) ;;
           esac
           if gh api "repos/TurboPanel/turbopanel/branches/${REF}" --silent; then
             echo "ref=${REF}" >> "$GITHUB_OUTPUT"
@@ -272,14 +290,19 @@ jobs:
       RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
 
   # The one context the trunk ruleset will require: green only when every
-  # PR-time job above succeeded. `if: always()` so a failed or cancelled need
-  # still produces a (red) result instead of leaving the check pending, which
-  # would block the merge with no signal. Both needs run unconditionally on
-  # pull_request, so a `skipped` result is a failure here too.
+  # PR-time job above succeeded. Every need runs unconditionally, so a
+  # `skipped` result is a failure here too.
+  #
+  # On a pull_request this runs even when the run was cancelled, so a
+  # cancelled PR run reports a (red) ci-ok instead of leaving the required
+  # check pending with no signal — and can never satisfy it. On a push (the
+  # trunk build and tag builds that call this file) a cancelled run is just
+  # cancelled: this job is skipped rather than turning a working commit red.
+  # A real failure of a need still runs it, and still fails it.
   ci-ok:
     name: ci-ok
     needs: [verify, contract-drift, minor-gate]
-    if: always()
+    if: ${{ (github.event_name == 'pull_request' && always()) || !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}

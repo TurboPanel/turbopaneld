@@ -16,8 +16,19 @@
 #      only mention the path; each such line is allowlisted exactly, so a new
 #      mention gets a second look before it lands.
 #
-# Allowlist: exact "path:lineno:full line" fixture lines only (see
-# .secretscan-allowlist). Do not add broad wildcards.
+# Allowlist (.secretscan-allowlist): one "path:full line text" entry per
+# allowed line, e.g. "docs/a.md:see license.token in the state dir". A flagged
+# line passes only when that exact path has an entry with that exact full line
+# text (whitespace included). There is no line number, so edits elsewhere in
+# the file do not break the entry; the same text anywhere in that one file is
+# allowed. Lines starting with # are comments. Do not add broad wildcards.
+#
+# Deprecated: the old "path:lineno:full line" form is still accepted with the
+# number ignored, so repos can migrate one at a time. (So a new-form entry
+# whose text itself starts with "digits:" is read as the old form.)
+#
+# With --all, an entry that allows no flagged line is reported as stale on
+# stderr. That is a warning only; it does not change the exit status.
 set -eu
 
 SCAN_ALL=0
@@ -109,11 +120,30 @@ line_looks_like_secret() {
   return 1
 }
 
+# The allowlist entries as "path:line": comments and blank lines dropped, and
+# the deprecated "path:lineno:line" form rewritten without its number.
+ALLOWED="$(sed -e '/^#/d' -e '/^[[:space:]]*$/d' \
+  -e 's/^\([^:]*\):[0-9][0-9]*:/\1:/' "$ALLOWLIST")"
+
+NL='
+'
+# Every flagged line seen, as "path:line", for the stale-entry report.
+FLAGGED=""
+
 line_is_allowlisted() {
   file=$1
-  lineno=$2
-  line=$3
-  grep -Fxq -- "$file:$lineno:$line" "$ALLOWLIST" 2>/dev/null
+  line=$2
+  printf '%s\n' "$ALLOWED" | grep -Fxq -- "$file:$line"
+}
+
+# Warn (stderr only) about allowlist entries that allow no flagged line.
+report_stale_entries() {
+  printf '%s\n' "$ALLOWED" | while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    if ! printf '%s' "$FLAGGED" | grep -Fxq -- "$entry"; then
+      echo "scan-secrets: warning: stale allowlist entry (allows no flagged line): $entry" >&2
+    fi
+  done
 }
 
 fail=0
@@ -142,7 +172,8 @@ for file in $FILES; do
   while IFS= read -r line || [ -n "$line" ]; do
     lineno=$((lineno + 1))
     if line_looks_like_secret "$line"; then
-      if line_is_allowlisted "$file" "$lineno" "$line"; then
+      FLAGGED="$FLAGGED$file:$line$NL"
+      if line_is_allowlisted "$file" "$line"; then
         continue
       fi
       echo "scan-secrets: suspected secret in $file:$lineno" >&2
@@ -150,5 +181,9 @@ for file in $FILES; do
     fi
   done < "$file"
 done
+
+if [ "$SCAN_ALL" = 1 ]; then
+  report_stale_entries
+fi
 
 exit "$fail"

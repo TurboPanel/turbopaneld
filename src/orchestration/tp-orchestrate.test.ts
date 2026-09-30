@@ -289,7 +289,6 @@ async function runUpdateVerb(
       `UPDATE_ORIGIN_PIN="${root}/lib/update-origin"`,
       'CANONICAL_INSTANCE_CA="/etc/turbopanel/instance-ca.pem"',
       'CANONICAL_INSTANCE_UPLOADED_TRUST="/etc/turbopanel/instance-uploaded-trust.pem"',
-      'CDN_RUN_SCRIPT="https://turbopanel.sh"',
       'tp_require_root_scratch() { mkdir -p "$ROOT_SCRATCH"; }',
       // The pin ownership check needs uid 0; the file is ours here.
       'stat() { if [ "$1" = -c ] && [ "$2" = %u ]; then echo 0; else command stat "$@"; fi; }',
@@ -301,6 +300,7 @@ async function runUpdateVerb(
       extractShellFunction(source, "tp_colocated_host"),
       extractShellFunction(source, "tp_read_control_plane_pin"),
       extractShellFunction(source, "tp_release_manifest_url_ok"),
+      extractShellFunction(source, "tp_installer_host_for_channel"),
       extractShellFunction(source, "tp_fetch_pinned_run_script"),
       extractShellFunction(source, "tp_verb_update"),
       extractShellFunction(source, "tp_verb_update_instance"),
@@ -325,6 +325,33 @@ async function runUpdateVerb(
 const PUBLIC_PIN = "host=https://panel.example.com\ndl_base=\ninstance_ca=\n";
 const OVERLAY_PIN =
   "host=https://huey.lan:8443\ndl_base=https://huey.lan:8443/downloads\ninstance_ca=/etc/turbopanel/instance-ca.pem\n";
+
+for (
+  const [channel, host] of [
+    ["canary", "testing.turbopanel.sh"],
+    ["trunk", "testing.turbopanel.sh"],
+    ["rc", "staging.turbopanel.sh"],
+    ["release", "turbopanel.sh"],
+  ] as const
+) {
+  test(`tp-orchestrate update on channel ${channel} fetches run.sh from ${host}`, async () => {
+    const result = await runUpdateVerb(
+      ["--license", "abc", "--channel", channel, "--no-start"],
+      PUBLIC_PIN,
+    );
+    assertEquals(result.status, 0, result.stderr);
+    assertStringIncludes(result.stdout, `[https://${host}]`);
+  });
+}
+
+test("tp-orchestrate update with no channel keeps the release installer host", async () => {
+  const result = await runUpdateVerb(
+    ["--license", "abc", "--no-start"],
+    PUBLIC_PIN,
+  );
+  assertEquals(result.status, 0, result.stderr);
+  assertStringIncludes(result.stdout, "[https://turbopanel.sh]");
+});
 
 test("tp-orchestrate update fetches run.sh from the CDN for a public control plane and passes the pinned host", async () => {
   const result = await runUpdateVerb(
@@ -816,7 +843,7 @@ test("tp-orchestrate update-colocated refreshes the panel host's daemon via run.
     { controlPlaneHost: true },
   );
   assertEquals(result.status, 0, result.stderr);
-  assertStringIncludes(result.stdout, "[https://turbopanel.sh]");
+  assertStringIncludes(result.stdout, "[https://testing.turbopanel.sh]");
   assertStringIncludes(
     result.stdout,
     "RUNSH [--daemon-only] [--channel] [canary] [--progress-markers] [--no-start]",
@@ -903,7 +930,7 @@ test("a control-plane host without a pin (installed before run.sh wrote one) upd
     { controlPlaneHost: true },
   );
   assertEquals(colocated.status, 0, colocated.stderr);
-  assertStringIncludes(colocated.stdout, "[https://turbopanel.sh]");
+  assertStringIncludes(colocated.stdout, "[https://testing.turbopanel.sh]");
 
   const instance = await runUpdateVerb(
     ["--channel", "canary", "--no-start"],

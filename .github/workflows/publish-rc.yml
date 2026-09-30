@@ -1,4 +1,4 @@
-# Cuts the next x.y.z-rc.N when the trunk → staging PR is merged (Road to
+# Publishes the next x.y.z-rc.N when the trunk → staging PR is merged (Road to
 # 0.2.x, versioning flow). Runs on the push the merge makes to staging — a push
 # runs the workflow file from the pushed commit, so the very first merge (which
 # brings this file into staging) already works.
@@ -12,10 +12,10 @@
 #   3. release-pr  opens (or refreshes) the staging → live PR "Release <version>"
 #
 # A push to staging that is not a merged trunk PR (a break-glass promotion, the
-# finalize fast-forward) does nothing. workflow_dispatch re-runs a cut for a
+# finalize fast-forward) does nothing. workflow_dispatch re-runs it for a
 # given trunk commit.
 
-name: Cut rc
+name: Publish Release Candidate
 
 on:
   push:
@@ -27,18 +27,24 @@ on:
         required: true
         type: string
 
+# Read-only by default; each job below asks for exactly what it writes. The
+# PRs are opened with the Release App's token, not GITHUB_TOKEN.
 permissions:
-  contents: write
-  actions: read
-  pull-requests: write
+  contents: read
 
 concurrency:
-  group: cut-rc
+  group: publish-rc
   cancel-in-progress: false
 
 jobs:
   resolve:
     runs-on: ubuntu-latest
+    # Reads the merged PR (pull-requests), the canary build's run (actions)
+    # and the canary release / tags (contents).
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
     outputs:
       proceed: ${{ steps.r.outputs.proceed }}
       commit: ${{ steps.r.outputs.commit }}
@@ -58,7 +64,7 @@ jobs:
           if [ "$EVENT" = "workflow_dispatch" ]; then
             commit="$INPUT_COMMIT"
           else
-            # Only a merged trunk → staging PR cuts an rc. The API can take a
+            # Only a merged trunk → staging PR publishes an rc. The API can take a
             # moment to associate the merge commit with its PR.
             pr=""
             for _ in 1 2 3 4 5 6; do
@@ -67,7 +73,7 @@ jobs:
               sleep 10
             done
             if [ -z "$pr" ]; then
-              echo "push to staging is not a merged trunk PR — nothing to cut"
+              echo "push to staging is not a merged trunk PR — nothing to publish"
               echo "proceed=false" >> "$GITHUB_OUTPUT"
               exit 0
             fi
@@ -89,7 +95,7 @@ jobs:
                   number="$(echo "$row" | jq -r .number)"
                   break
                 fi
-                echo "::error::the canary build of $commit ended $conclusion — fix trunk (or re-run that build) and re-run this cut with workflow_dispatch"
+                echo "::error::the canary build of $commit ended $conclusion — fix trunk (or re-run that build) and re-run this workflow with workflow_dispatch"
                 exit 1
               fi
             fi
@@ -105,10 +111,10 @@ jobs:
           [ "$built" = "$commit" ] || { echo "::error::canary $number was built from $built, not $commit"; exit 1; }
           version="$(jq -r .version manifest.json | sed 's/-canary\..*$//')"
 
-          # Idempotence: this commit already has an rc (a re-run) — do not cut rc.N+1 of the same bytes.
+          # Idempotence: this commit already has an rc (a re-run) — do not publish rc.N+1 of the same bytes.
           for ref in $(gh api --paginate "repos/$REPO/git/matching-refs/tags/v$version-rc." --jq '.[].ref' | sed 's#^refs/tags/##'); do
             if [ "$(gh api "repos/$REPO/commits/$ref" --jq .sha)" = "$commit" ]; then
-              echo "$ref already carries $commit — nothing to cut"
+              echo "$ref already carries $commit — nothing to publish"
               echo "proceed=false" >> "$GITHUB_OUTPUT"
               exit 0
             fi
@@ -120,11 +126,15 @@ jobs:
             echo "build=$number"
             echo "version=$version"
           } >> "$GITHUB_OUTPUT"
-          echo "cutting an rc of $version from canary build $number ($commit)"
+          echo "publishing an rc of $version from canary build $number ($commit)"
 
   prepare:
     needs: resolve
     if: needs.resolve.outputs.proceed == 'true'
+    # gh-promote / gh-release / gh-promote-finalize create the tag and the
+    # release and upload assets.
+    permissions:
+      contents: write
     uses: TurboPanel/dev/.github/workflows/gh-promote.yml@5464e72c40aec3528fb10e6fc660583ad963b3cb # dev#35
     with:
       repo-kind: daemon
@@ -139,6 +149,10 @@ jobs:
 
   publish:
     needs: prepare
+    # gh-promote / gh-release / gh-promote-finalize create the tag and the
+    # release and upload assets.
+    permissions:
+      contents: write
     uses: TurboPanel/dev/.github/workflows/gh-release.yml@5464e72c40aec3528fb10e6fc660583ad963b3cb # dev#35
     with:
       version: ${{ needs.prepare.outputs.version }}
@@ -151,6 +165,10 @@ jobs:
 
   finalize:
     needs: [prepare, publish]
+    # gh-promote / gh-release / gh-promote-finalize create the tag and the
+    # release and upload assets.
+    permissions:
+      contents: write
     uses: TurboPanel/dev/.github/workflows/gh-promote-finalize.yml@5464e72c40aec3528fb10e6fc660583ad963b3cb # dev#35
     with:
       to: rc
@@ -163,6 +181,9 @@ jobs:
   release-pr:
     needs: [resolve, prepare, finalize]
     runs-on: ubuntu-latest
+    # Writes only through the Release App token.
+    permissions:
+      contents: read
     steps:
       - name: Mint a Release App token
         id: app
@@ -192,7 +213,7 @@ jobs:
           set -eu
           existing="$(gh pr list --repo "$REPO" --base live --head staging --state open --json number --jq '.[0].number // empty')"
           {
-            echo "Merging this cuts the release \`v$VERSION\` from \`v$RC\` (same bytes, re-signed) and moves \`live\`. It runs automatically after the merge (\`cut-release.yml\`)."
+            echo "Merging this publishes the release \`v$VERSION\` from \`v$RC\` (same bytes, re-signed) and moves \`live\`. It runs automatically after the merge (\`publish-release.yml\`)."
             echo
             echo "**Since the last release:**"
             echo

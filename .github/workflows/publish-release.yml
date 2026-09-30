@@ -1,4 +1,4 @@
-# Cuts the release when the staging → live PR is merged (Road to 0.2.x,
+# Publishes the release when the staging → live PR is merged (Road to 0.2.x,
 # versioning flow) — the second automatic PR. Runs on the push the merge makes
 # to `live` (a push runs the workflow file from the pushed commit, so the very
 # first merge, which brings this file into live, already works).
@@ -12,10 +12,10 @@
 #   3. next-version  opens the "Start <next>" PR into trunk
 #
 # A push to live that is not a merged staging PR (a break-glass promotion, the
-# finalize fast-forward) does nothing. workflow_dispatch re-runs a release cut
+# finalize fast-forward) does nothing. workflow_dispatch re-runs the release
 # for a given rc tag.
 
-name: Cut release
+name: Publish Release
 
 on:
   push:
@@ -27,18 +27,22 @@ on:
         required: true
         type: string
 
+# Read-only by default; each job below asks for exactly what it writes. The
+# "Start <next>" PR and the sibling re-runs use the Release App's token.
 permissions:
-  contents: write
-  actions: read
-  pull-requests: write
+  contents: read
 
 concurrency:
-  group: cut-release
+  group: publish-release
   cancel-in-progress: false
 
 jobs:
   resolve:
     runs-on: ubuntu-latest
+    # Reads the merged PR (pull-requests) and deno.json / the rc tags (contents).
+    permissions:
+      contents: read
+      pull-requests: read
     outputs:
       proceed: ${{ steps.r.outputs.proceed }}
       rc-tag: ${{ steps.r.outputs.rc-tag }}
@@ -71,7 +75,7 @@ jobs:
             fi
             version="$(gh api "repos/$REPO/contents/deno.json?ref=$PUSHED" --jq .content | base64 -d | jq -r .version)"
             rc_tag="$(gh api --paginate "repos/$REPO/git/matching-refs/tags/v$version-rc." --jq '.[].ref' | sed 's#^refs/tags/##' | sort -V | tail -n 1)"
-            [ -n "$rc_tag" ] || { echo "::error::no v$version-rc.N tag exists — cut an rc first (merge the trunk → staging PR)"; exit 1; }
+            [ -n "$rc_tag" ] || { echo "::error::no v$version-rc.N tag exists — publish an rc first (merge the trunk → staging PR)"; exit 1; }
             echo "PR #$pr merged; releasing $version from $rc_tag"
           fi
           if gh api "repos/$REPO/git/ref/tags/v$version" --silent 2>/dev/null; then
@@ -88,6 +92,10 @@ jobs:
   prepare:
     needs: resolve
     if: needs.resolve.outputs.proceed == 'true'
+    # gh-promote / gh-release / gh-promote-finalize create the tag and the
+    # release and upload assets.
+    permissions:
+      contents: write
     uses: TurboPanel/dev/.github/workflows/gh-promote.yml@5464e72c40aec3528fb10e6fc660583ad963b3cb # dev#35
     with:
       repo-kind: daemon
@@ -101,6 +109,10 @@ jobs:
 
   publish:
     needs: prepare
+    # gh-promote / gh-release / gh-promote-finalize create the tag and the
+    # release and upload assets.
+    permissions:
+      contents: write
     uses: TurboPanel/dev/.github/workflows/gh-release.yml@5464e72c40aec3528fb10e6fc660583ad963b3cb # dev#35
     with:
       version: ${{ needs.prepare.outputs.version }}
@@ -113,6 +125,10 @@ jobs:
 
   finalize:
     needs: [prepare, publish]
+    # gh-promote / gh-release / gh-promote-finalize create the tag and the
+    # release and upload assets.
+    permissions:
+      contents: write
     uses: TurboPanel/dev/.github/workflows/gh-promote-finalize.yml@5464e72c40aec3528fb10e6fc660583ad963b3cb # dev#35
     with:
       to: release
@@ -124,6 +140,10 @@ jobs:
 
   next-version:
     needs: [prepare, finalize]
+    # gh-next-version.yml pushes the branch and opens the PR with the Release
+    # App token; GITHUB_TOKEN only reads.
+    permissions:
+      contents: read
     uses: TurboPanel/dev/.github/workflows/gh-next-version.yml@5464e72c40aec3528fb10e6fc660583ad963b3cb # dev#35
     with:
       released-version: ${{ needs.prepare.outputs.version }}
@@ -139,6 +159,9 @@ jobs:
   rerun-siblings:
     needs: [prepare, finalize]
     runs-on: ubuntu-latest
+    # Re-runs checks through the Release App token.
+    permissions:
+      contents: read
     steps:
       - name: Mint a Release App token
         id: app
