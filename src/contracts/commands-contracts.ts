@@ -6913,7 +6913,7 @@ function parseBackupPolicyNextRuns(value: unknown): BackupPolicyNextRun[] {
         typeof raw.nextRunAt !== "string" ||
         Number.isNaN(Date.parse(raw.nextRunAt))
       ) {
-        throw new Error("Invalid backups reconcile nextRunAt");
+        throw new TypeError("Invalid backups reconcile nextRunAt");
       }
       next.nextRunAt = raw.nextRunAt;
     }
