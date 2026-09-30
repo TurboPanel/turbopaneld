@@ -1,4 +1,4 @@
-# Cuts a GitHub Release on a v* tag: compiles and packages the daemon
+# Publishes a GitHub Release on a v* tag: compiles and packages the daemon
 # exactly like publish-daemon-trunk.yml does for the trunk/CDN drop, but
 # with a real version (TURBOPANEL_RELEASE_VERSION, already supported
 # end-to-end by scripts/package-daemon-release.sh and
@@ -41,15 +41,17 @@ on:
         type: string
         default: rc
 
+# Read-only by default (verify, prepare, build); only the job that creates
+# the GitHub Release writes.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   verify:
     # A tag pushed by a `[bot]` actor is the TurboPanel Release App
     # promoting a tested build (promote.yml → TurboPanel/dev gh-promote.yml);
     # that flow publishes the release itself, so this from-source path must
-    # not race it. A person pushing a tag still gets the classic cut; trunk
+    # not race it. A person pushing a tag still gets the classic from-source release; trunk
     # pushes (canary) are unaffected.
     if: github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/') || !endsWith(github.actor, '[bot]')
     uses: ./.github/workflows/verify.yml
@@ -81,7 +83,7 @@ jobs:
 
       - name: Require the tag to match deno.json's version
         # The number the binary reports (src/version.ts reads deno.json) and
-        # the number on the release must be the same number — a tag cut
+        # the number on the release must be the same number — a tag pushed
         # before the bump is a release that lies about itself. Dry runs
         # (workflow_dispatch) use throwaway versions and skip this.
         if: inputs.version == ''
@@ -222,6 +224,9 @@ jobs:
 
   release:
     needs: [prepare, build]
+    # gh-release.yml creates the tag's release and uploads the assets.
+    permissions:
+      contents: write
     uses: TurboPanel/dev/.github/workflows/gh-release.yml@177d481666cce2e1dcfa76290b141b0149a6a0a9 # trunk
     with:
       version: ${{ needs.prepare.outputs.version }}

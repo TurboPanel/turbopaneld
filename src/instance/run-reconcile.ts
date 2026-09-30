@@ -42,6 +42,40 @@ import {
 
 export const PRODUCTION_CONTROL_PLANE = "https://turbopanel.app";
 export const CDN_RUN_SCRIPT = "https://turbopanel.sh";
+/** The same installer for the staging branch (rc channel) and for trunk (canary rail). */
+export const STAGING_RUN_SCRIPT = "https://staging.turbopanel.sh";
+export const TESTING_RUN_SCRIPT = "https://testing.turbopanel.sh";
+
+const CDN_RUN_SCRIPTS: ReadonlySet<string> = new Set([
+  CDN_RUN_SCRIPT,
+  STAGING_RUN_SCRIPT,
+  TESTING_RUN_SCRIPT,
+]);
+
+/** Whether `url` is one of the public installer hosts (public TLS, no pinned CA). */
+export function isCdnRunScript(url: string): boolean {
+  return CDN_RUN_SCRIPTS.has(url);
+}
+
+/**
+ * The public installer for an update channel: `rc` is `staging.turbopanel.sh`,
+ * the canary rail (`trunk`, `edge`, `canary`) is `testing.turbopanel.sh`, and a
+ * release (or a channel we do not know) is `turbopanel.sh`. Mirrors
+ * `tp_installer_host_for_channel` in run.sh and tp-orchestrate and the control
+ * plane's `installScriptHostForChannel`.
+ */
+export function runScriptUrlForChannel(channel?: string): string {
+  switch (channel) {
+    case "rc":
+      return STAGING_RUN_SCRIPT;
+    case "trunk":
+    case "edge":
+    case "canary":
+      return TESTING_RUN_SCRIPT;
+    default:
+      return CDN_RUN_SCRIPT;
+  }
+}
 export const RUN_SCRIPT_PATH = "/run.sh";
 
 const layout = resolveLayout({
@@ -267,13 +301,13 @@ export function encodeLicenseArg(
  */
 export function resolveRunScriptUrl(
   config: InstanceConfig,
-  opts: { dlBase?: string } = {},
+  opts: { dlBase?: string; channel?: string } = {},
 ): string {
   if (config.kind === "url" && opts.dlBase?.trim()) {
     const base = stripTrailingSlashes(config.baseUrl);
     return `${base}${RUN_SCRIPT_PATH}`;
   }
-  return CDN_RUN_SCRIPT;
+  return runScriptUrlForChannel(opts.channel);
 }
 
 export type RunScriptDownloadOptions = {
@@ -331,7 +365,7 @@ export function resolveAutomaticUpdateTrust(options: {
       `automatic update refused: run.sh origin ${url} is plaintext HTTP; the control plane is https://<host>:8443 and the daemon never fetches updates without TLS`,
     );
   }
-  if (url === CDN_RUN_SCRIPT || !options.originNeedsInsecureTls(url)) {
+  if (isCdnRunScript(url) || !options.originNeedsInsecureTls(url)) {
     return { kind: "public-tls" };
   }
   const exists = options.caFileExists ?? ((path: string) => {
@@ -369,7 +403,7 @@ export function resolveBootstrapInsecureTls(options: {
   instanceCaPath?: string;
 }): boolean {
   if (options.releaseTlsInsecure === "1") return true;
-  if (options.runScriptUrl === CDN_RUN_SCRIPT) return false;
+  if (isCdnRunScript(options.runScriptUrl)) return false;
   // Non-CDN run.sh over HTTPS (unusual; prefer --cacert when configured and
   // fall back to curl -k for hosts without a trust anchor).
   return !options.instanceCaPath?.trim();
