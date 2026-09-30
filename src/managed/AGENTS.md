@@ -16,7 +16,7 @@ Certificate authorities: `../../../turbopanel/src/lib/tls/AGENTS.md`.
 
 | File | Role |
 | --- | --- |
-| `engine-paths.ts` | Managed state-dir layout + identifier / relative-path guards; `managedBackupsDir` / `managedBackupArtifactPath`; ProxySQL layout helpers (`proxysqlConfigDir`, `proxysqlComposePath`, `proxysqlConfigPath`, `proxysqlTlsDir`, `proxysqlDataDir`, `proxysqlAdminCnfPath`, `proxysqlProject`) |
+| `engine-paths.ts` | Managed state-dir layout + identifier / relative-path guards; `managedBackupsDir` / `managedBackupArtifactDir` (per-policy `policy-<id>/`) / `managedBackupArtifactPath`; ProxySQL layout helpers (`proxysqlConfigDir`, `proxysqlComposePath`, `proxysqlConfigPath`, `proxysqlTlsDir`, `proxysqlDataDir`, `proxysqlAdminCnfPath`, `proxysqlProject`) |
 | `compose.ts` | Platform compose normalization (image, volumes, resources); always joins the organization's managed network (`payload.managedNetwork`); optional private-listener-only `ports:` (rejects all other publishes / Traefik labels). Top-level data volumes are **name-pinned** (`name: <volume.name>`) — an unnamed entry gets the compose project prefix while `bootstrapStandby` throwaway containers `docker run -v <bare name>`, and that mismatch made every standby seed/probe operate on an orphan volume the engine never mounted (replicas silently initdb'd standalone clusters) |
 | `materialize.ts` | Write `config/` verbatim; optional engine self-signed TLS + `orgTlsMaterial` → `tls/server.*` + `tls/proxysql/`; ownership normalization via throwaway container (scoped to `config/`+`tls/`; backups live outside this tree entirely since v6); a second throwaway run then verifies config/TLS readability AS the engine user with subdir-shaped mounts, failing the apply loudly instead of letting the engine crash-loop on an untraversable dir. Standby replication passwords are **not** written under `auth/`. |
 | `tls.ts` | Engine self-signed cert generation; org-CA materialization for engine leaf + ProxySQL; standby passfile materialization |
@@ -29,7 +29,7 @@ Certificate authorities: `../../../turbopanel/src/lib/tls/AGENTS.md`.
 | `orchestrator.ts` / `orchestrator-api.ts` | Per-org Orchestrator compose (project = the `managed-ha` `serviceId`, written into the compose file's own `name:` key so the stack unit needs no `-p`) + local HTTP (`:33001`); `Recover: false`; Raft `:33002` on advertise address only |
 | `../commands/managed-ha-reconcile.ts` / `managed-ha-failover.ts` | `managed.ha.reconcile` (whole-server HA stack) + `managed.ha.failover` (`drain` / `recover`). Designated Orchestrator recover-to; on HTTP/API failure **or** absent stack, falls back to `managed.promote` so fencing is not stranded. `Recover: false` stays — TurboPanel picks the candidate. `Future:` fail-closed HA lease when Raft is unreachable. |
 | `../instance/ha-observe.ts` | Poll local Orchestrator `/api/problems` when `configDir/orchestrator/docker-compose.yml` exists; emit unsolicited `managed-ha-event` |
-| `backup.ts` | `managed.backup` (`create`/`delete`) + `managed.restore` — streamed dump/restore, checksum, prune |
+| `backup.ts` | `managed.backup` (`create`/`delete`) + `managed.restore` — streamed dump/restore, checksum, prune; exports the shared core (`createManagedBackupArtifact`, `restoreManagedBackupArtifact`, `resolveBackupEngine`) for scheduled runs |
 | `logs.ts` | Bounded `compose logs`; cell `managed-logs-request` / `managed-logs-result` (not a command) |
 | `health.ts` | On-demand member health; cell `managed-health-request` / `managed-health-result` (feature `managed-health-v1`, not a command). Runs `collectManagedMemberHealth` with the request's **real** role — a `replica` is read as a `standby`; the primary query reports `pg_stat_replication` rows and would pass a promote gate for a replica that is not streaming. Never throws: any failure (bad ids, unsupported engine, engine down — `collectManagedMemberHealth` swallows errors and omits `member`) is `{ ok: false, error }` so the control plane is answered instead of waiting out its timeout. Nothing is persisted here; the control plane writes the observation |
 | `engines/` | Per-engine runtime registry (`postgres`, `mysql`, `mariadb`); optional `dropUsers` / `backup` / `replication` (+ optional `configureStandby` for SQL-configured standbys) |
@@ -59,8 +59,10 @@ Certificate authorities: `../../../turbopanel/src/lib/tls/AGENTS.md`.
 # TURBOPANEL_BACKUP_DIR to override) so an operator can mount separate storage
 # for them without moving the engine's own state:
 #
-# /backup/<managedId>/    # 0750; artifacts written 0600 by the daemon user itself
-# └── <backupId>.<ext>    # <ext> from MANAGED_BACKUP_ARTIFACT_EXTENSIONS (dump | sql)
+# /backup/<managedId>/          # 0750; artifacts written 0600 by the daemon user itself
+# ├── <backupId>.<ext>          # manual backups; <ext> from MANAGED_BACKUP_ARTIFACT_EXTENSIONS (dump | sql)
+# └── policy-<policyId>/        # one dir per scheduled policy (managedBackupArtifactDir)
+#     └── <backupId>.<ext>      # pruned only within its own policy dir
 
 # Standby replication passwords must not live under managed/<id>/auth.
 # Bootstrap uses a short-lived 0600 env-file; streaming password is seeded by
@@ -353,13 +355,24 @@ ProxySQL to enforce. Canonical policy:
    - **Checksum before restore.** Verify size/checksum before touching the
      engine container.
    - **`.part` cleanup on failure.** Partial artifacts must never look complete.
-   - **Prune by payload retention.** After create, keep newest
-     `payload.retentionKeep` artifacts; omit retention → no prune.
+   - **Prune by retention, one directory at a time.** After create, keep the
+     newest `retentionKeep` artifacts **in the artifact's own directory**;
+     omit retention → no prune. Manual backups prune `<backupDir>/<managedId>/`
+     (files only, so never a `policy-*` subdirectory); a scheduled backup
+     prunes only its `policy-<policyId>/` directory, so an hourly keep-24
+     policy never deletes a daily or manual backup.
+   - **One core, two entry points.** `createManagedBackupArtifact` /
+     `restoreManagedBackupArtifact` hold the dump/verify/restore logic;
+     `handleManagedBackup` / `handleManagedRestore` validate the command
+     payload and call them. Scheduled runs call the same core with a
+     `policyId`. The core re-checks every id it builds a path from.
    - **`managed.destroy` removes `<backupDir>/<managedId>/`** alongside the
      managed state dir. Backups moved out of the managed tree in v6, so
      removing the state dir no longer takes them with it — destroy removes both
      explicitly rather than leaving an orphan tree on the backup storage.
-   - **Scheduled backups** remain an explicit future seam (no timers here).
+   - **Scheduled backups** run outside this process (a platform-owned
+     systemd timer per policy, Road to 0.2.x `r2-backup-*`); this module only
+     provides the shared core and the per-policy layout. No timers here.
    - Container resolution reuses `containers.ts` /
      `resolveSoleEngineContainer`.
 

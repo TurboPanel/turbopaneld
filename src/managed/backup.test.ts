@@ -5,18 +5,23 @@ import { setDockerCliIoForTest } from "../deploy/docker-cli.ts";
 import type { EnvironmentDeployContainer } from "../contracts/commands-contracts.ts";
 import {
   buildEngineContext,
+  createManagedBackupArtifact,
   handleManagedBackup,
   handleManagedRestore,
   pipeDumpOutput,
   pipeRestoreInput,
+  resolveBackupEngine,
+  restoreManagedBackupArtifact,
 } from "./backup.ts";
 import { getManagedEngineRuntime } from "./engines/index.ts";
 import { ManagedBackupNotSupportedError } from "./engines/types.ts";
 import { postgresManagedEngineRuntime } from "./engines/postgres.ts";
 import {
+  managedBackupArtifactDir,
   managedBackupArtifactPath,
   managedBackupsDir,
 } from "./engine-paths.ts";
+import { resolveLayout } from "../paths/layout.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -1530,5 +1535,146 @@ test("handleManagedBackup manual prune never touches artifacts inside policy-* s
       await listFileNames(policyDir),
       new Set(["sched_1.dump", "sched_2.dump"]),
     );
+  });
+});
+
+const POSTGRES_BACKUP = () =>
+  resolveBackupEngine("postgres", "dump", "managed.backup");
+
+function fakeDumpDeps(payload: string) {
+  return {
+    ensureDocker: noopEnsureDocker,
+    resolveContainer: () => Promise.resolve(FAKE_CONTAINER),
+    runDump: async (
+      _argv: string[],
+      destination: WritableStream<Uint8Array>,
+    ) => {
+      await writeAllToStream(destination, new TextEncoder().encode(payload));
+      return { success: true, stderr: "" };
+    },
+  };
+}
+
+test("createManagedBackupArtifact with a policyId writes under policy-<id> and prunes only that policy", async () => {
+  await withTempStateDir(async () => {
+    const layout = resolveLayout(Deno.env.toObject());
+    const managedId = `bk-${crypto.randomUUID()}`;
+    const policyA = crypto.randomUUID();
+    const policyB = crypto.randomUUID();
+    const dirA = managedBackupArtifactDir(layout, managedId, policyA);
+    const dirB = managedBackupArtifactDir(layout, managedId, policyB);
+    const manualDir = managedBackupsDir(layout, managedId);
+    await writeAgedArtifact(dirA, "a_old_1.dump", 300_000);
+    await writeAgedArtifact(dirA, "a_old_2.dump", 200_000);
+    await writeAgedArtifact(dirB, "b_old.dump", 400_000);
+    await writeAgedArtifact(manualDir, "manual.dump", 500_000);
+
+    const artifact = await createManagedBackupArtifact(
+      layout,
+      POSTGRES_BACKUP(),
+      {
+        managedId,
+        backupId: "a_new",
+        artifactExtension: "dump",
+        retentionKeep: 2,
+        policyId: policyA,
+      },
+      fakeDumpDeps("scheduled"),
+    );
+
+    assertEquals(artifact.path, join(dirA, "a_new.dump"));
+    assertEquals(artifact.pruned, ["a_old_1"]);
+    assertEquals(artifact.database, "postgres");
+    const stat = await Deno.stat(artifact.path);
+    assertEquals(stat.mode !== null && (stat.mode & 0o777), 0o600);
+    assertEquals(
+      artifact.checksum,
+      await sha256Hex(new TextEncoder().encode("scheduled")),
+    );
+    assertEquals(
+      await listFileNames(dirA),
+      new Set(["a_old_2.dump", "a_new.dump"]),
+    );
+    assertEquals(await listFileNames(dirB), new Set(["b_old.dump"]));
+    assertEquals(await listFileNames(manualDir), new Set(["manual.dump"]));
+  });
+});
+
+test("createManagedBackupArtifact rejects an unsafe policyId before touching Docker", async () => {
+  await withTempStateDir(async () => {
+    let dockerTouched = false;
+    await assertRejects(
+      () =>
+        createManagedBackupArtifact(
+          resolveLayout(Deno.env.toObject()),
+          POSTGRES_BACKUP(),
+          {
+            managedId: `bk-${crypto.randomUUID()}`,
+            backupId: "b1",
+            artifactExtension: "dump",
+            policyId: "../escape",
+          },
+          {
+            ensureDocker: () => {
+              dockerTouched = true;
+              return Promise.resolve();
+            },
+          },
+        ),
+      Error,
+      "policyId",
+    );
+    assertEquals(dockerTouched, false);
+  });
+});
+
+test("restoreManagedBackupArtifact locates a scheduled artifact by policyId", async () => {
+  await withTempStateDir(async () => {
+    const layout = resolveLayout(Deno.env.toObject());
+    const managedId = `bk-${crypto.randomUUID()}`;
+    const policyId = crypto.randomUUID();
+    const artifact = await createManagedBackupArtifact(
+      layout,
+      POSTGRES_BACKUP(),
+      { managedId, backupId: "sched", artifactExtension: "dump", policyId },
+      fakeDumpDeps("scheduled-bytes"),
+    );
+
+    const request = {
+      managedId,
+      backupId: "sched",
+      artifactExtension: "dump" as const,
+      checksum: artifact.checksum,
+      sizeBytes: artifact.sizeBytes,
+    };
+    let restored: Uint8Array = new Uint8Array();
+    const deps = {
+      ensureDocker: noopEnsureDocker,
+      resolveContainer: () => Promise.resolve(FAKE_CONTAINER),
+      runRestore: async (
+        _argv: string[],
+        source: ReadableStream<Uint8Array>,
+      ) => {
+        restored = await drainStream(source);
+        return { success: true, stderr: "" };
+      },
+    };
+
+    // Without the policyId the artifact is looked for in the manual directory.
+    await assertRejects(
+      () =>
+        restoreManagedBackupArtifact(layout, POSTGRES_BACKUP(), request, deps),
+      Error,
+      "artifact not found",
+    );
+
+    const database = await restoreManagedBackupArtifact(
+      layout,
+      POSTGRES_BACKUP(),
+      { ...request, policyId },
+      deps,
+    );
+    assertEquals(database, "postgres");
+    assertEquals(new TextDecoder().decode(restored), "scheduled-bytes");
   });
 });
