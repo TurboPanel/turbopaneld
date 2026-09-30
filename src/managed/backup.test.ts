@@ -1441,3 +1441,94 @@ test("buildEngineContext exec stub rejects when invoked", () => {
     "does not support exec()",
   );
 });
+
+async function createPostgresBackup(
+  managedId: string,
+  backupId: string,
+  retentionKeep?: number,
+) {
+  const bytes = new TextEncoder().encode(`dump-${backupId}`);
+  return await handleManagedBackup(
+    {
+      managedId,
+      engine: "postgres",
+      action: "create",
+      backupId,
+      artifactExtension: "dump",
+      scope: "database",
+      retentionKeep,
+    },
+    new Date().toISOString(),
+    {
+      ensureDocker: noopEnsureDocker,
+      resolveContainer: () => Promise.resolve(FAKE_CONTAINER),
+      runDump: async (_argv, destination) => {
+        await writeAllToStream(destination, bytes);
+        return { success: true, stderr: "" };
+      },
+    },
+  );
+}
+
+async function writeAgedArtifact(
+  dir: string,
+  name: string,
+  ageMs: number,
+): Promise<void> {
+  await Deno.mkdir(dir, { recursive: true, mode: 0o750 });
+  const path = join(dir, name);
+  await Deno.writeFile(path, new TextEncoder().encode("old"), { mode: 0o600 });
+  const mtime = new Date(Date.now() - ageMs);
+  await Deno.utime(path, mtime, mtime);
+}
+
+async function listFileNames(dir: string): Promise<Set<string>> {
+  const names = new Set<string>();
+  for await (const entry of Deno.readDir(dir)) {
+    if (entry.isFile) names.add(entry.name);
+  }
+  return names;
+}
+
+test("handleManagedBackup without retentionKeep prunes nothing and reports no pruned list", async () => {
+  await withTempStateDir(async (tmp) => {
+    const managedId = `bk-${crypto.randomUUID()}`;
+    const dir = managedBackupsDir(
+      { backupDir: tmp } as Parameters<typeof managedBackupsDir>[0],
+      managedId,
+    );
+    await writeAgedArtifact(dir, "old_1.dump", 120_000);
+    await writeAgedArtifact(dir, "old_2.dump", 60_000);
+
+    const result = await createPostgresBackup(managedId, "fresh");
+
+    assertEquals(result.pruned, undefined);
+    assertEquals(
+      await listFileNames(dir),
+      new Set(["old_1.dump", "old_2.dump", "fresh.dump"]),
+    );
+  });
+});
+
+test("handleManagedBackup manual prune never touches artifacts inside policy-* subdirectories", async () => {
+  await withTempStateDir(async (tmp) => {
+    const managedId = `bk-${crypto.randomUUID()}`;
+    const dir = managedBackupsDir(
+      { backupDir: tmp } as Parameters<typeof managedBackupsDir>[0],
+      managedId,
+    );
+    const policyDir = join(dir, `policy-${crypto.randomUUID()}`);
+    await writeAgedArtifact(policyDir, "sched_1.dump", 300_000);
+    await writeAgedArtifact(policyDir, "sched_2.dump", 240_000);
+    await writeAgedArtifact(dir, "manual_old.dump", 60_000);
+
+    const result = await createPostgresBackup(managedId, "manual_new", 1);
+
+    assertEquals(result.pruned, ["manual_old"]);
+    assertEquals(await listFileNames(dir), new Set(["manual_new.dump"]));
+    assertEquals(
+      await listFileNames(policyDir),
+      new Set(["sched_1.dump", "sched_2.dump"]),
+    );
+  });
+});
