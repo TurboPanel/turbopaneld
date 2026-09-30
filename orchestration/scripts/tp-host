@@ -612,10 +612,9 @@ tp_backup_unit_id() {
     *) return 1 ;;
   esac
   _bi_id="${_bi_id#turbopanel-backup-}"
-  _bi_h='[0123456789abcdef]'
-  # Unquoted on purpose: each $_bi_h expands to a bracket pattern.
+  # A lower-case UUID, spelled out: 8-4-4-4-12 hex digits.
   case "$_bi_id" in
-    $_bi_h$_bi_h$_bi_h$_bi_h$_bi_h$_bi_h$_bi_h$_bi_h-$_bi_h$_bi_h$_bi_h$_bi_h-$_bi_h$_bi_h$_bi_h$_bi_h-$_bi_h$_bi_h$_bi_h$_bi_h-$_bi_h$_bi_h$_bi_h$_bi_h$_bi_h$_bi_h$_bi_h$_bi_h$_bi_h$_bi_h$_bi_h$_bi_h) ;;
+    [0123456789abcdef][0123456789abcdef][0123456789abcdef][0123456789abcdef][0123456789abcdef][0123456789abcdef][0123456789abcdef][0123456789abcdef]-[0123456789abcdef][0123456789abcdef][0123456789abcdef][0123456789abcdef]-[0123456789abcdef][0123456789abcdef][0123456789abcdef][0123456789abcdef]-[0123456789abcdef][0123456789abcdef][0123456789abcdef][0123456789abcdef]-[0123456789abcdef][0123456789abcdef][0123456789abcdef][0123456789abcdef][0123456789abcdef][0123456789abcdef][0123456789abcdef][0123456789abcdef][0123456789abcdef][0123456789abcdef][0123456789abcdef][0123456789abcdef]) ;;
     *) return 1 ;;
   esac
   printf '%s' "$_bi_id"
