@@ -191,6 +191,7 @@ jobs:
       # Coverage import needs CI-based analysis (Automatic Analysis must stay
       # off for turbopanel_turbopaneld). Quality gate failure fails this job.
       - name: SonarQube Scan
+        id: sonar
         # Pull requests only; the quality gate blocks pull requests only. A
         # trunk build is analysed by sonar-trunk.yml after it completes, from
         # the daemon-coverage-lcov artifact uploaded above, so the scan does
@@ -211,6 +212,13 @@ jobs:
         with:
           args: >
             -Dsonar.qualitygate.wait=true
+
+      # The Sonar way gate fails only on ratings, so one new code smell passes
+      # it; this fails the PR on any new issue (owner rule, 2026-09-30). Runs
+      # only where the PR scan above ran, so it skips the promotion PRs too.
+      - name: No new Sonar issues
+        if: github.event_name == 'pull_request' && steps.sonar.outcome == 'success'
+        uses: TurboPanel/dev/.github/actions/sonar-new-issues@a2b3b69f1e4d58ee9bf0e4aacdb0c58de5782c2e # dev#47
 
   # The contract twins (commands, cell messages, version-wire, the field
   # snapshot) are compared against the turbopanel checkout of the same-named
