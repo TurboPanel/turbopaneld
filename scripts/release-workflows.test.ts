@@ -151,7 +151,9 @@ test("the release workflows pin one TurboPanel/dev commit", () => {
     ) {
       pins.add(m[1]);
     }
-    for (const m of text.matchAll(/^ +(?:dev-)?ref: ([0-9a-f]{40})$/gm)) {
+    for (
+      const m of text.matchAll(/^ +(?:dev-)?ref: ([0-9a-f]{40})(?: #.*)?$/gm)
+    ) {
       pins.add(m[1]);
     }
   }
