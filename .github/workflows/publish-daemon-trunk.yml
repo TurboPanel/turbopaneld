@@ -10,9 +10,10 @@
 #   DL_S3_BUCKET            — Bunny Storage Zone name (bucket name)
 #   DL_S3_ACCESS_KEY_ID     — Bunny Storage Zone Access Key ID
 #   DL_S3_SECRET_ACCESS_KEY — Bunny Storage Zone Password (Secret Access Key)
-#   SONAR_TOKEN             — SonarCloud token for CI-based scan + LCOV import in
-#                             verify.yml (required for same-repo / trunk; fork
-#                             PRs omit it). Keep Automatic Analysis off.
+#   SONAR_TOKEN             — SonarCloud token for CI-based scan + LCOV import:
+#                             verify.yml on pull requests, sonar-trunk.yml on
+#                             trunk (required for same-repo / trunk; fork PRs
+#                             omit it). Keep Automatic Analysis off.
 #
 # The workflow will fail with a clear error if any DL_S3_* variable or secret is
 # missing. Missing SONAR_TOKEN fails verify on trunk (publish `needs: verify`).
@@ -63,8 +64,9 @@ permissions:
 # show a red X. `queue: max` keeps up to 100 pending runs in push order
 # instead (it cannot be combined with cancel-in-progress: true). Serialising
 # the whole run — verify, publish and canary — also keeps the job-level
-# groups inside verify.yml and gh-canary.yml free of competing pending jobs,
-# and SonarCloud's trunk analyses in commit order.
+# groups inside verify.yml and gh-canary.yml free of competing pending jobs.
+# SonarCloud's trunk analysis runs after this workflow, in sonar-trunk.yml
+# (its own queue keeps those in commit order).
 concurrency:
   group: publish-daemon-trunk-run
   cancel-in-progress: false

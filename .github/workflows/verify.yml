@@ -1,8 +1,11 @@
 name: Verify
 
-# Tests + LCOV first, then Sonar quality gate. If Sonar fails, the workflow
-# stops (no further jobs). Automatic Analysis must stay off
-# (Administration → Analysis Method).
+# Tests + LCOV, then, on a pull request, the SonarCloud scan and its quality
+# gate: a failed gate fails the verify job, so ci-ok is red. On a trunk build
+# (this file called by publish-daemon-trunk.yml) the job uploads the LCOV and
+# stops there; sonar-trunk.yml analyses the commit after the trunk build
+# completes, so the scan never holds back publish or the canary. Automatic
+# Analysis must stay off (Administration → Analysis Method).
 
 on:
   workflow_call:
@@ -93,15 +96,12 @@ jobs:
       - name: Check third-party notices
         run: deno task notices:check
 
-      - name: Install osv-scanner
-        run: |
-          curl -sSfL --proto "=https" --proto-redir "=https" --retry 3 --retry-connrefused --retry-delay 2 -o /usr/local/bin/osv-scanner \
-            https://github.com/google/osv-scanner/releases/download/v2.6.0/osv-scanner_linux_amd64
-          echo "ca69b3d3cd08f889a49dc0a383122f71cc528b83803671df5fd874d97485b108  /usr/local/bin/osv-scanner" | sha256sum -c -
-          chmod +x /usr/local/bin/osv-scanner
-
-      - name: Dependency vulnerability scan (osv-scanner)
-        run: osv-scanner scan source --recursive .
+      # Dependency Advisory Gate (TurboPanel/dev): fails only on a HIGH or
+      # CRITICAL advisory that already has a fixed version; everything else is
+      # a warning annotation. Override for one verified not exploitable here:
+      # an [[IgnoredVulns]] entry with a reason in osv-scanner.toml.
+      - name: Dependency advisory gate (osv-scanner)
+        uses: TurboPanel/dev/.github/actions/osv-scan@7099adc383f0d0eb7a1d91e907a071e9222dfc2e # dev#46
 
       # The Ansible layer (20+ playbooks, 30+ first-party roles) had no CI
       # gate at all -- its only feedback was a converge failure on a real host.
@@ -189,16 +189,22 @@ jobs:
           retention-days: 7
 
       # Coverage import needs CI-based analysis (Automatic Analysis must stay
-      # off for turbopanel_turbopaneld). Skipped only when SONAR_TOKEN is empty
-      # (fork or Dependabot PRs). Quality gate failure fails this job.
+      # off for turbopanel_turbopaneld). Quality gate failure fails this job.
       - name: SonarQube Scan
-        # Promotion PRs (trunk → staging, staging → live) carry no new code —
-        # every commit in them was analysed when it landed on trunk — and
-        # Sonar would count the whole diff since the last release as new code.
+        # Pull requests only; the quality gate blocks pull requests only. A
+        # trunk build is analysed by sonar-trunk.yml after it completes, from
+        # the daemon-coverage-lcov artifact uploaded above, so the scan does
+        # not hold back publish or the canary (decision 4, 2026-09-30).
+        #
+        # Also skipped when SONAR_TOKEN is empty (fork or Dependabot PR) and on
+        # the automatic promotion PRs into staging/live, which carry only
+        # commits already analysed on trunk (no new code to gate; Sonar would
+        # count the whole diff since the last release as new code).
         if: >-
           env.SONAR_TOKEN != ''
-          && !(github.event_name == 'pull_request'
-               && (github.base_ref == 'staging' || github.base_ref == 'live'))
+          && github.event_name == 'pull_request'
+          && github.base_ref != 'staging'
+          && github.base_ref != 'live'
         uses: SonarSource/sonarqube-scan-action@ba9859eae8dd6bd29e412f25ddbbef3d032000f4 # v8.2.2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
