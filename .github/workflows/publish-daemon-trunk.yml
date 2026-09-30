@@ -427,7 +427,7 @@ jobs:
     # gh-canary.yml creates/updates the rolling `canary` release and its assets.
     permissions:
       contents: write
-    uses: TurboPanel/dev/.github/workflows/gh-canary.yml@177d481666cce2e1dcfa76290b141b0149a6a0a9 # trunk
+    uses: TurboPanel/dev/.github/workflows/gh-canary.yml@60fd59793793a2c8e8d5f30536e3036dc628d6da # dev#40
     with:
       version: ${{ needs.publish.outputs.canary-version }}
       commit: ${{ github.sha }}
