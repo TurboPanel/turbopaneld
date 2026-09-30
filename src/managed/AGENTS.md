@@ -30,6 +30,7 @@ Certificate authorities: `../../../turbopanel/src/lib/tls/AGENTS.md`.
 | `../commands/managed-ha-reconcile.ts` / `managed-ha-failover.ts` | `managed.ha.reconcile` (whole-server HA stack) + `managed.ha.failover` (`drain` / `recover`). Designated Orchestrator recover-to; on HTTP/API failure **or** absent stack, falls back to `managed.promote` so fencing is not stranded. `Recover: false` stays — TurboPanel picks the candidate. `Future:` fail-closed HA lease when Raft is unreachable. |
 | `../instance/ha-observe.ts` | Poll local Orchestrator `/api/problems` when `configDir/orchestrator/docker-compose.yml` exists; emit unsolicited `managed-ha-event` |
 | `backup.ts` | `managed.backup` (`create`/`delete`) + `managed.restore` — streamed dump/restore, checksum, prune; exports the shared core (`createManagedBackupArtifact`, `restoreManagedBackupArtifact`, `resolveBackupEngine`) for scheduled runs |
+| `target-lock.ts` | Per-engine `flock` (`withManagedTargetLock`, `ManagedTargetBusyError`) shared by the backup/restore handlers and the scheduled `backup-run` process |
 | `logs.ts` | Bounded `compose logs`; cell `managed-logs-request` / `managed-logs-result` (not a command) |
 | `health.ts` | On-demand member health; cell `managed-health-request` / `managed-health-result` (feature `managed-health-v1`, not a command). Runs `collectManagedMemberHealth` with the request's **real** role — a `replica` is read as a `standby`; the primary query reports `pg_stat_replication` rows and would pass a promote gate for a replica that is not streaming. Never throws: any failure (bad ids, unsupported engine, engine down — `collectManagedMemberHealth` swallows errors and omits `member`) is `{ ok: false, error }` so the control plane is answered instead of waiting out its timeout. Nothing is persisted here; the control plane writes the observation |
 | `engines/` | Per-engine runtime registry (`postgres`, `mysql`, `mariadb`); optional `dropUsers` / `backup` / `replication` (+ optional `configureStandby` for SQL-configured standbys) |
@@ -370,9 +371,17 @@ ProxySQL to enforce. Canonical policy:
      managed state dir. Backups moved out of the managed tree in v6, so
      removing the state dir no longer takes them with it — destroy removes both
      explicitly rather than leaving an orphan tree on the backup storage.
+   - **One engine, one operation at a time.** `handleManagedBackup` (create)
+     and `handleManagedRestore` hold `withManagedTargetLock`
+     (`target-lock.ts`): a non-blocking `flock` on
+     `<runDir>/managed-locks/<managedId>.lock`. The scheduled runner takes the
+     same lock from its own process, so a scheduled run, a manual backup and a
+     restore never overlap on one engine; the second one fails at once with
+     `ManagedTargetBusyError` instead of queueing.
    - **Scheduled backups** run outside this process (a platform-owned
-     systemd timer per policy, Road to 0.2.x `r2-backup-*`); this module only
-     provides the shared core and the per-policy layout. No timers here.
+     systemd timer per policy, Road to 0.2.x `r2-backup-*`; see
+     `src/backups/AGENTS.md`); this module only provides the shared core, the
+     per-policy layout and the lock. No timers here.
    - Container resolution reuses `containers.ts` /
      `resolveSoleEngineContainer`.
 

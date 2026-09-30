@@ -44,6 +44,7 @@ import {
   managedComposeProject,
   SAFE_MANAGED_ID_RE,
 } from "./engine-paths.ts";
+import { withManagedTargetLock } from "./target-lock.ts";
 
 type StreamExecOutcome = { success: boolean; stderr: string };
 
@@ -231,9 +232,16 @@ async function digestFileSha256(path: string): Promise<string> {
   return encodeHex(new Uint8Array(digest));
 }
 
-type BackupArtifactEntry = { id: string; path: string; mtimeMs: number };
+/** One artifact file in a backup directory. */
+export type BackupArtifactEntry = {
+  id: string;
+  path: string;
+  mtimeMs: number;
+  sizeBytes: number;
+};
 
-async function listBackupArtifacts(
+/** Artifacts (`<id>.<ext>`, safe ids only) directly in `dir`; a missing dir is empty. */
+export async function listBackupArtifacts(
   dir: string,
   ext: string,
 ): Promise<BackupArtifactEntry[]> {
@@ -247,7 +255,12 @@ async function listBackupArtifacts(
       if (id.length === 0 || !SAFE_MANAGED_ID_RE.test(id)) continue;
       const path = `${dir}/${entry.name}`;
       const stat = await Deno.stat(path);
-      entries.push({ id, path, mtimeMs: stat.mtime?.getTime() ?? 0 });
+      entries.push({
+        id,
+        path,
+        mtimeMs: stat.mtime?.getTime() ?? 0,
+        sizeBytes: stat.size,
+      });
     }
   } catch (err) {
     if (!(err instanceof Deno.errors.NotFound)) throw err;
@@ -521,17 +534,22 @@ export async function handleManagedBackup(
     };
   }
 
-  const artifact = await createManagedBackupArtifact(
+  const artifact = await withManagedTargetLock(
     layout,
-    engine,
-    {
-      managedId: payload.managedId,
-      backupId: payload.backupId,
-      artifactExtension: payload.artifactExtension,
-      database: payload.database,
-      retentionKeep: payload.retentionKeep,
-    },
-    deps,
+    payload.managedId,
+    () =>
+      createManagedBackupArtifact(
+        layout,
+        engine,
+        {
+          managedId: payload.managedId,
+          backupId: payload.backupId,
+          artifactExtension: payload.artifactExtension,
+          database: payload.database,
+          retentionKeep: payload.retentionKeep,
+        },
+        deps,
+      ),
   );
 
   const result: ManagedBackupResult = {
@@ -639,18 +657,24 @@ export async function handleManagedRestore(
   );
   const now = deps?.now ?? (() => new Date());
 
-  const database = await restoreManagedBackupArtifact(
+  const database = await withManagedTargetLock(
     layout,
-    engine,
-    {
-      managedId: payload.managedId,
-      backupId: payload.backupId,
-      artifactExtension: payload.artifactExtension,
-      checksum: payload.checksum,
-      sizeBytes: payload.sizeBytes,
-      database: payload.database,
-    },
-    deps,
+    payload.managedId,
+    () =>
+      restoreManagedBackupArtifact(
+        layout,
+        engine,
+        {
+          managedId: payload.managedId,
+          backupId: payload.backupId,
+          artifactExtension: payload.artifactExtension,
+          checksum: payload.checksum,
+          sizeBytes: payload.sizeBytes,
+          database: payload.database,
+          policyId: payload.policyId,
+        },
+        deps,
+      ),
   );
 
   return {
