@@ -16,6 +16,7 @@ export const COMMAND_TYPES = [
   "server.tls.trust.reconcile",
   "server.principals.reconcile",
   "server.firewall.reconcile",
+  "server.backups.reconcile",
   "environment.deploy",
   "environment.lifecycle",
   "environment.stop",
@@ -279,6 +280,55 @@ export type FirewallReconcileResult = {
   sshPorts: number[];
   warnings: string[];
   summary: string;
+};
+
+/**
+ * One scheduled backup as this host runs it. Must stay in sync with the
+ * instance canonical `server.backups.reconcile` entry (pinned in
+ * `scripts/contract-field-snapshot.json`).
+ *
+ * `onCalendar` arrives already translated from the authored schedule, so the
+ * daemon renders it and never parses cron. A `managed` entry carries what the
+ * host needs to dump the engine on its own (`engine`, `artifactExtension`):
+ * a scheduled run never asks the control plane anything.
+ */
+export type BackupPolicyWireEntry = {
+  policyId: string;
+  targetKind: "managed" | "copy";
+  managedId?: string;
+  engine?: ManagedEngineCode;
+  artifactExtension?: ManagedBackupArtifactExtension;
+  copyId?: string;
+  onCalendar: string;
+  retentionKeep: number;
+  enabled: boolean;
+};
+
+/**
+ * Must stay in sync with the instance canonical `server.backups.reconcile`
+ * shape. `policies` is the **complete** set for this server, the same contract
+ * as `server.principals.reconcile`: a policy absent from it is one this host
+ * no longer runs, and its timer goes.
+ */
+export type BackupsReconcilePayload = {
+  policies: BackupPolicyWireEntry[];
+};
+
+/** When one policy's timer next fires; `nextRunAt` is absent while none is scheduled. */
+export type BackupPolicyNextRun = {
+  policyId: string;
+  nextRunAt?: string;
+};
+
+/** Must stay in sync with the instance canonical `server.backups.reconcile` shape. */
+export type BackupsReconcileResult = {
+  policiesApplied: number;
+  /** Policy ids whose units were written or rewritten. */
+  unitsChanged: string[];
+  /** Policy ids whose units were removed. */
+  unitsRemoved: string[];
+  nextRuns: BackupPolicyNextRun[];
+  warnings: string[];
 };
 
 /** Must stay in sync with the instance canonical `server.tls.trust.reconcile` shape. */
@@ -6566,6 +6616,12 @@ export type ManagedRestorePayload = {
   database?: string;
   checksum: string;
   sizeBytes?: number;
+  /**
+   * The `backuppolicy` that made the artifact, when a scheduled run did: each
+   * policy keeps its artifacts in their own directory, so this is how the
+   * file is found. Omitted for a manual backup.
+   */
+  policyId?: string;
 };
 
 /** Must stay in sync with the instance canonical `managed.restore` shape. */
@@ -6710,6 +6766,12 @@ export function parseManagedRestorePayload(
     }
     payload.sizeBytes = value.sizeBytes;
   }
+  if (value.policyId !== undefined) {
+    if (!isCanonicalBackupUuid(value.policyId)) {
+      throw new Error("Invalid managed.restore payload policyId");
+    }
+    payload.policyId = value.policyId;
+  }
   return payload;
 }
 
@@ -6728,6 +6790,158 @@ export function parseManagedRestoreResult(
   if (isString(value.database)) result.database = value.database;
   if (isString(value.summary)) result.summary = value.summary;
   return result;
+}
+
+/**
+ * A lower-case UUID. A backup policy id becomes a systemd unit name
+ * (`turbopanel-backup-<policyId>.timer`) that the host's unit check matches
+ * exactly, so a mixed-case spelling of the same id is refused. Same rule as
+ * the instance's `isCanonicalUuid`.
+ */
+const BACKUP_POLICY_UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+function isCanonicalBackupUuid(value: unknown): value is string {
+  return typeof value === "string" && BACKUP_POLICY_UUID_RE.test(value);
+}
+
+const BACKUP_TARGET_KIND_SET = new Set(["managed", "copy"]);
+/** Bound on one server's policy set; far above any real schedule list. */
+const MAX_BACKUP_POLICIES_PER_SERVER = 500;
+
+function parseBackupPolicyTarget(
+  raw: Record<string, unknown>,
+  entry: BackupPolicyWireEntry,
+): void {
+  if (entry.targetKind === "managed") {
+    if (
+      !isCanonicalBackupUuid(raw.managedId) ||
+      typeof raw.engine !== "string" || !isManagedEngineCode(raw.engine) ||
+      typeof raw.artifactExtension !== "string" ||
+      !isManagedBackupArtifactExtension(raw.artifactExtension) ||
+      raw.copyId !== undefined
+    ) {
+      throw new Error("Invalid backup policy managed target");
+    }
+    entry.managedId = raw.managedId;
+    entry.engine = raw.engine;
+    entry.artifactExtension = raw.artifactExtension;
+    return;
+  }
+  if (
+    !isCanonicalBackupUuid(raw.copyId) ||
+    raw.managedId !== undefined ||
+    raw.engine !== undefined ||
+    raw.artifactExtension !== undefined
+  ) {
+    throw new Error("Invalid backup policy copy target");
+  }
+  entry.copyId = raw.copyId;
+}
+
+function parseBackupPolicyWireEntry(raw: unknown): BackupPolicyWireEntry {
+  if (
+    !isRecord(raw) ||
+    !isCanonicalBackupUuid(raw.policyId) ||
+    typeof raw.targetKind !== "string" ||
+    !BACKUP_TARGET_KIND_SET.has(raw.targetKind) ||
+    typeof raw.onCalendar !== "string" ||
+    !ON_CALENDAR_RE.test(raw.onCalendar) ||
+    typeof raw.retentionKeep !== "number" ||
+    !Number.isInteger(raw.retentionKeep) ||
+    raw.retentionKeep < 1 ||
+    raw.retentionKeep > MAX_BACKUP_RETENTION_KEEP_BOUND ||
+    typeof raw.enabled !== "boolean"
+  ) {
+    throw new Error("Invalid backup policy entry");
+  }
+  const entry: BackupPolicyWireEntry = {
+    policyId: raw.policyId,
+    targetKind: raw.targetKind as BackupPolicyWireEntry["targetKind"],
+    onCalendar: raw.onCalendar,
+    retentionKeep: raw.retentionKeep,
+    enabled: raw.enabled,
+  };
+  parseBackupPolicyTarget(raw, entry);
+  return entry;
+}
+
+/** Must stay in sync with the instance canonical `server.backups.reconcile` validator. */
+export function parseBackupsReconcilePayload(
+  value: unknown,
+): BackupsReconcilePayload {
+  if (!isRecord(value)) {
+    throw new Error("Invalid backups reconcile payload");
+  }
+  if (
+    !Array.isArray(value.policies) ||
+    value.policies.length > MAX_BACKUP_POLICIES_PER_SERVER
+  ) {
+    throw new TypeError("policies must be an array of at most 500 entries");
+  }
+  const policies = value.policies.map(parseBackupPolicyWireEntry);
+  const seen = new Set<string>();
+  for (const policy of policies) {
+    // Two entries for one id would name the same unit twice, and "the
+    // complete set" would no longer say which schedule wins.
+    if (seen.has(policy.policyId)) {
+      throw new Error(`policies contains ${policy.policyId} more than once`);
+    }
+    seen.add(policy.policyId);
+  }
+  return { policies };
+}
+
+function parseBackupStringArray(value: unknown, field: string): string[] {
+  if (!Array.isArray(value) || !value.every(isString)) {
+    throw new Error(`${field} must be an array of strings`);
+  }
+  return [...value];
+}
+
+function parseBackupPolicyNextRuns(value: unknown): BackupPolicyNextRun[] {
+  if (!Array.isArray(value)) {
+    throw new TypeError("nextRuns must be an array");
+  }
+  return value.map((raw) => {
+    if (!isRecord(raw) || !isCanonicalBackupUuid(raw.policyId)) {
+      throw new Error("Invalid backups reconcile nextRuns entry");
+    }
+    const next: BackupPolicyNextRun = { policyId: raw.policyId };
+    if (raw.nextRunAt !== undefined) {
+      if (
+        typeof raw.nextRunAt !== "string" ||
+        Number.isNaN(Date.parse(raw.nextRunAt))
+      ) {
+        throw new Error("Invalid backups reconcile nextRunAt");
+      }
+      next.nextRunAt = raw.nextRunAt;
+    }
+    return next;
+  });
+}
+
+/** Must stay in sync with the instance canonical `server.backups.reconcile` result validator. */
+export function parseBackupsReconcileResult(
+  value: unknown,
+): BackupsReconcileResult {
+  if (!isRecord(value)) {
+    throw new Error("Invalid backups reconcile result");
+  }
+  if (
+    typeof value.policiesApplied !== "number" ||
+    !Number.isInteger(value.policiesApplied) ||
+    value.policiesApplied < 0
+  ) {
+    throw new TypeError("policiesApplied must be a non-negative integer");
+  }
+  return {
+    policiesApplied: value.policiesApplied,
+    unitsChanged: parseBackupStringArray(value.unitsChanged, "unitsChanged"),
+    unitsRemoved: parseBackupStringArray(value.unitsRemoved, "unitsRemoved"),
+    nextRuns: parseBackupPolicyNextRuns(value.nextRuns),
+    warnings: parseBackupStringArray(value.warnings, "warnings"),
+  };
 }
 
 function parseProxySqlBackendPayload(value: unknown): ProxySqlBackendPayload {
