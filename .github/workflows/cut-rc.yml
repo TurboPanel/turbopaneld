@@ -15,7 +15,7 @@
 # finalize fast-forward) does nothing. workflow_dispatch re-runs a cut for a
 # given trunk commit.
 
-name: Cut rc
+name: Cut RC
 
 on:
   push:
@@ -27,10 +27,10 @@ on:
         required: true
         type: string
 
+# Read-only by default; each job below asks for exactly what it writes. The
+# PRs are opened with the Release App's token, not GITHUB_TOKEN.
 permissions:
-  contents: write
-  actions: read
-  pull-requests: write
+  contents: read
 
 concurrency:
   group: cut-rc
@@ -39,6 +39,12 @@ concurrency:
 jobs:
   resolve:
     runs-on: ubuntu-latest
+    # Reads the merged PR (pull-requests), the canary build's run (actions)
+    # and the canary release / tags (contents).
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
     outputs:
       proceed: ${{ steps.r.outputs.proceed }}
       commit: ${{ steps.r.outputs.commit }}
@@ -125,6 +131,10 @@ jobs:
   prepare:
     needs: resolve
     if: needs.resolve.outputs.proceed == 'true'
+    # gh-promote / gh-release / gh-promote-finalize create the tag and the
+    # release and upload assets.
+    permissions:
+      contents: write
     uses: TurboPanel/dev/.github/workflows/gh-promote.yml@5464e72c40aec3528fb10e6fc660583ad963b3cb # dev#35
     with:
       repo-kind: daemon
@@ -139,6 +149,10 @@ jobs:
 
   publish:
     needs: prepare
+    # gh-promote / gh-release / gh-promote-finalize create the tag and the
+    # release and upload assets.
+    permissions:
+      contents: write
     uses: TurboPanel/dev/.github/workflows/gh-release.yml@5464e72c40aec3528fb10e6fc660583ad963b3cb # dev#35
     with:
       version: ${{ needs.prepare.outputs.version }}
@@ -151,6 +165,10 @@ jobs:
 
   finalize:
     needs: [prepare, publish]
+    # gh-promote / gh-release / gh-promote-finalize create the tag and the
+    # release and upload assets.
+    permissions:
+      contents: write
     uses: TurboPanel/dev/.github/workflows/gh-promote-finalize.yml@5464e72c40aec3528fb10e6fc660583ad963b3cb # dev#35
     with:
       to: rc
@@ -163,6 +181,9 @@ jobs:
   release-pr:
     needs: [resolve, prepare, finalize]
     runs-on: ubuntu-latest
+    # Writes only through the Release App token.
+    permissions:
+      contents: read
     steps:
       - name: Mint a Release App token
         id: app

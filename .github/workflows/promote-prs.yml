@@ -1,20 +1,22 @@
 # Keeps the trunk → staging promotion PR open (Road to 0.2.x, versioning flow).
 #
-# Every green trunk build ("Publish daemon trunk build" succeeded, so a canary
+# Every green trunk build ("Publish Daemon Trunk Build" succeeded, so a canary
 # exists for that commit) makes sure a PR "Release Candidate <version>-rc.N" from trunk into
 # staging is open. Merging it is the one human act: cut-rc.yml then cuts the
 # next x.y.z-rc.N from that exact canary's bytes. The PR is opened with the
 # Release App's token, because a PR created with GITHUB_TOKEN never starts the
 # required `ci-ok` check.
 
-name: Keep the rc PR open
+name: Keep the RC PR Open
 
 on:
   workflow_run:
-    workflows: ["Publish daemon trunk build"]
+    # By NAME: keep in step with publish-daemon-trunk.yml's `name:`.
+    workflows: ["Publish Daemon Trunk Build"]
     types: [completed]
   workflow_dispatch:
 
+# Read-only: the PR is opened and edited with the Release App's token.
 permissions:
   contents: read
 
