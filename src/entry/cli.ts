@@ -12,6 +12,10 @@ import {
 } from "../orchestration/assets.ts";
 import { resolveUpdateChannelConfig } from "../update/config.ts";
 import { DAEMON_VERSION } from "../version.ts";
+import {
+  runScheduledBackup,
+  type ScheduledBackupOutcome,
+} from "../backups/runner.ts";
 
 export type DaemonCliIo = {
   args?: string[];
@@ -22,6 +26,7 @@ export type DaemonCliIo = {
   resolveUpdateChannelConfig?: typeof resolveUpdateChannelConfig;
   runBootstrapOrchestration?: () => Promise<void>;
   runInstaller?: (opts: RunInstallerOptions) => Promise<void>;
+  runScheduledBackup?: (policyId: string) => Promise<ScheduledBackupOutcome>;
 };
 
 export type InstallerCliFlags = {
@@ -51,9 +56,9 @@ function resolveIo(io: DaemonCliIo = {}): Required<
 }
 
 /**
- * Handle one-shot CLI verbs (`version`, bootstrap, installer). Returns after
- * those paths `Deno.exit`. Fall-through means the caller should start the
- * long-running daemon.
+ * Handle one-shot CLI verbs (`version`, bootstrap, installer, `backup-run`).
+ * Returns after those paths `Deno.exit`. Fall-through means the caller should
+ * start the long-running daemon.
  */
 export async function maybeRunDaemonCli(io: DaemonCliIo = {}): Promise<void> {
   const { args, exit, log, error } = resolveIo(io);
@@ -86,10 +91,68 @@ export async function maybeRunDaemonCli(io: DaemonCliIo = {}): Promise<void> {
     return;
   }
 
+  if (args[0] === "backup-run") {
+    await runBackupRunCli(args.slice(1), io);
+    return;
+  }
+
   if (args[0] !== "run-installer") {
     return;
   }
   await runInstallerCli(args.slice(1), io);
+}
+
+/**
+ * Exit codes for `backup-run <policyId>`: 0 the backup succeeded, 1 it ran and
+ * failed (a result was spooled), 2 bad usage or policy id, 3 the host holds no
+ * enabled policy with that id (nothing ran, nothing spooled).
+ */
+export const BACKUP_RUN_EXIT = {
+  succeeded: 0,
+  failed: 1,
+  usage: 2,
+  noPolicy: 3,
+} as const;
+
+async function runBackupRunCli(
+  args: string[],
+  io: DaemonCliIo = {},
+): Promise<void> {
+  const { exit, log, error } = resolveIo(io);
+  if (args.length !== 1) {
+    error("[backup-run] usage: backup-run <policyId>");
+    exit(BACKUP_RUN_EXIT.usage);
+    return;
+  }
+  let outcome: ScheduledBackupOutcome;
+  try {
+    outcome = await (io.runScheduledBackup ?? runScheduledBackup)(args[0]);
+  } catch (err) {
+    error(`[backup-run] ${sanitizeForLog(err)}`);
+    exit(BACKUP_RUN_EXIT.failed);
+    return;
+  }
+  if (outcome.kind !== "ran") {
+    error(`[backup-run] ${outcome.message}`);
+    exit(
+      outcome.kind === "no-policy"
+        ? BACKUP_RUN_EXIT.noPolicy
+        : BACKUP_RUN_EXIT.usage,
+    );
+    return;
+  }
+  const { result, resultPath } = outcome;
+  if (result.status === "succeeded") {
+    log(
+      `[backup-run] policy ${result.policyId}: ${result.backupId} (${result.sizeBytes} bytes); result ${resultPath}`,
+    );
+    exit(BACKUP_RUN_EXIT.succeeded);
+    return;
+  }
+  error(
+    `[backup-run] policy ${result.policyId} failed: ${result.error}; result ${resultPath}`,
+  );
+  exit(BACKUP_RUN_EXIT.failed);
 }
 
 function isInstallerPlaybook(value: string): value is InstallerPlaybook {

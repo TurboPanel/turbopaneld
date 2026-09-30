@@ -45,6 +45,10 @@ const SERVICE_TEMPLATE = join(
   "orchestration/roles/daemon-launch/templates/turbopaneld.service.j2",
 );
 const RUN_SH = join(root, "scripts/run.sh");
+const BACKUP_RUN_TEMPLATE = join(
+  root,
+  "orchestration/roles/daemon-launch/templates/tp-backup-run.j2",
+);
 
 /** Permissions that must never appear unscoped on a production daemon path. */
 const SCOPED_ONLY = ["read", "write", "run", "ffi", "sys"] as const;
@@ -75,6 +79,16 @@ async function productionInvocations(): Promise<
   );
   if (!jsExec) throw new TypeError("service template lost the JS ExecStart");
   out.push({ source: "turbopaneld.service.j2 js", flags: jsExec.split(/\s+/) });
+
+  // The scheduled-backup wrapper runs the same daemon in JS mode.
+  const backupRun = await Deno.readTextFile(BACKUP_RUN_TEMPLATE);
+  const backupJsExec = backupRun.split("\n").find((line) =>
+    line.startsWith("exec ") && line.includes("turbopanel_daemon_js")
+  );
+  if (!backupJsExec) {
+    throw new TypeError("tp-backup-run.j2 lost the JS exec line");
+  }
+  out.push({ source: "tp-backup-run.j2 js", flags: backupJsExec.split(/\s+/) });
 
   const runSh = await Deno.readTextFile(RUN_SH);
   const installer = /^TP_INSTALLER_DENO_PERMISSIONS="([^"]+)"$/m.exec(runSh)
@@ -133,7 +147,7 @@ test("unscoped net/env grants appear only with their documented reason, and net 
   }
 });
 
-test("deno.json compile tasks and the JS ExecStart render the same daemon contract", async () => {
+test("deno.json compile tasks, the JS ExecStart and the backup wrapper render the same daemon contract", async () => {
   const expected = renderDaemonPermissionFlags();
   const invocations = await productionInvocations();
   for (
@@ -142,6 +156,7 @@ test("deno.json compile tasks and the JS ExecStart render the same daemon contra
       "deno.json compile:linux-amd64",
       "deno.json compile:linux-arm64",
       "turbopaneld.service.j2 js",
+      "tp-backup-run.j2 js",
     ]
   ) {
     const found = invocations.find((entry) => entry.source === name);

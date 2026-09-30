@@ -2,6 +2,7 @@ import { assertEquals, assertThrows } from "@std/assert";
 import { DAEMON_VERSION } from "../version.ts";
 import { InstallerPresentedFailure } from "../orchestration/install-presenter-context.ts";
 import {
+  BACKUP_RUN_EXIT,
   type DaemonCliIo,
   maybeRunDaemonCli,
   parseInstallerFlags,
@@ -324,4 +325,84 @@ test("run-installer success and failure paths", async () => {
   await maybeRunDaemonCli(presented.io);
   assertEquals(presented.exits, [1]);
   assertEquals(presented.errors, []);
+});
+
+const RAN_BASE = {
+  policyId: "0192f1de-7c3b-7e4a-9f10-3a5b6c7d8e9f",
+  runId: "run_1",
+  startedAt: "2026-09-30T03:00:00.000Z",
+  finishedAt: "2026-09-30T03:00:05.000Z",
+};
+
+test("backup-run without exactly one policy id is a usage error (exit 2) and runs nothing", async () => {
+  for (const args of [["backup-run"], ["backup-run", "a", "b"]]) {
+    let called = false;
+    const { io, exits, errors } = captureIo({
+      args,
+      runScheduledBackup: () => {
+        called = true;
+        return Promise.resolve({ kind: "no-policy", message: "x" });
+      },
+    });
+    await maybeRunDaemonCli(io);
+    assertEquals(exits, [BACKUP_RUN_EXIT.usage]);
+    assertEquals(called, false);
+    assertEquals(errors[0], "[backup-run] usage: backup-run <policyId>");
+  }
+});
+
+test("backup-run maps each runner outcome to its exit code", async () => {
+  const cases: Array<
+    [
+      Awaited<ReturnType<NonNullable<DaemonCliIo["runScheduledBackup"]>>>,
+      number,
+    ]
+  > = [
+    [{ kind: "invalid-policy-id", message: "bad id" }, BACKUP_RUN_EXIT.usage],
+    [{ kind: "no-policy", message: "not here" }, BACKUP_RUN_EXIT.noPolicy],
+    [
+      {
+        kind: "ran",
+        resultPath: "/r/run_1.json",
+        result: {
+          ...RAN_BASE,
+          status: "succeeded",
+          backupId: "bk_1",
+          sizeBytes: 3,
+        },
+      },
+      BACKUP_RUN_EXIT.succeeded,
+    ],
+    [
+      {
+        kind: "ran",
+        resultPath: "/r/run_1.json",
+        result: { ...RAN_BASE, status: "failed", error: "engine busy" },
+      },
+      BACKUP_RUN_EXIT.failed,
+    ],
+  ];
+  for (const [outcome, code] of cases) {
+    const seen: string[] = [];
+    const { io, exits } = captureIo({
+      args: ["backup-run", RAN_BASE.policyId],
+      runScheduledBackup: (policyId) => {
+        seen.push(policyId);
+        return Promise.resolve(outcome);
+      },
+    });
+    await maybeRunDaemonCli(io);
+    assertEquals(exits, [code], outcome.kind);
+    assertEquals(seen, [RAN_BASE.policyId]);
+  }
+});
+
+test("backup-run exits 1 when the runner itself throws", async () => {
+  const { io, exits, errors } = captureIo({
+    args: ["backup-run", RAN_BASE.policyId],
+    runScheduledBackup: () => Promise.reject(new Error("disk gone")),
+  });
+  await maybeRunDaemonCli(io);
+  assertEquals(exits, [BACKUP_RUN_EXIT.failed]);
+  assertEquals(errors[0], "[backup-run] disk gone");
 });
