@@ -77,25 +77,6 @@ jobs:
             echo "channel=release" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Check out repository
-        if: inputs.version == ''
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Require the tag to match deno.json's version
-        # The number the binary reports (src/version.ts reads deno.json) and
-        # the number on the release must be the same number — a tag pushed
-        # before the bump is a release that lies about itself. Dry runs
-        # (workflow_dispatch) use throwaway versions and skip this.
-        if: inputs.version == ''
-        run: |
-          set -eu
-          _tag_version="${{ steps.resolve.outputs.version }}"
-          _pkg_version="$(python3 -c 'import json; print(json.load(open("deno.json"))["version"])')"
-          if [ "$_tag_version" != "$_pkg_version" ]; then
-            echo "::error::tag v${_tag_version} does not match deno.json version ${_pkg_version} — bump deno.json (and sonar.projectVersion) first"
-            exit 1
-          fi
-
   build:
     needs: prepare
     runs-on: ubuntu-latest
@@ -121,6 +102,27 @@ jobs:
           echo "GIT_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
           echo "BUILD_ID=$(date -u '+%Y%m%d-%H%M%S')-$(git rev-parse --short=7 HEAD)" >> "$GITHUB_ENV"
           echo "BUILT_AT=$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_ENV"
+
+      - name: Stamp the version into deno.json
+        # What the binary reports (src/version.ts reads deno.json): the tag's
+        # number. Versions come from tags now, so deno.json's committed number
+        # is not checked against the tag; it is overwritten in this checkout.
+        # A dry run's throwaway version (not X.Y.Z) leaves deno.json alone.
+        run: |
+          set -eu
+          case "$TURBOPANEL_RELEASE_VERSION" in
+            [0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "dry run ${TURBOPANEL_RELEASE_VERSION}: deno.json keeps its number"; exit 0 ;;
+          esac
+          python3 - <<'PY'
+          import json, os
+          with open("deno.json") as f:
+              config = json.load(f)
+          config["version"] = os.environ["TURBOPANEL_RELEASE_VERSION"]
+          with open("deno.json", "w") as f:
+              json.dump(config, f, indent=2)
+              f.write("\n")
+          PY
 
       - name: Embed build identity
         # Same content as publish-daemon-trunk.yml's step of the same name —
