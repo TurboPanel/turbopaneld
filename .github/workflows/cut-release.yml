@@ -15,7 +15,7 @@
 # finalize fast-forward) does nothing. workflow_dispatch re-runs a release cut
 # for a given rc tag.
 
-name: Cut release
+name: Cut Release
 
 on:
   push:
@@ -27,10 +27,10 @@ on:
         required: true
         type: string
 
+# Read-only by default; each job below asks for exactly what it writes. The
+# "Start <next>" PR and the sibling re-runs use the Release App's token.
 permissions:
-  contents: write
-  actions: read
-  pull-requests: write
+  contents: read
 
 concurrency:
   group: cut-release
@@ -39,6 +39,10 @@ concurrency:
 jobs:
   resolve:
     runs-on: ubuntu-latest
+    # Reads the merged PR (pull-requests) and deno.json / the rc tags (contents).
+    permissions:
+      contents: read
+      pull-requests: read
     outputs:
       proceed: ${{ steps.r.outputs.proceed }}
       rc-tag: ${{ steps.r.outputs.rc-tag }}
@@ -88,6 +92,10 @@ jobs:
   prepare:
     needs: resolve
     if: needs.resolve.outputs.proceed == 'true'
+    # gh-promote / gh-release / gh-promote-finalize create the tag and the
+    # release and upload assets.
+    permissions:
+      contents: write
     uses: TurboPanel/dev/.github/workflows/gh-promote.yml@5464e72c40aec3528fb10e6fc660583ad963b3cb # dev#35
     with:
       repo-kind: daemon
@@ -101,6 +109,10 @@ jobs:
 
   publish:
     needs: prepare
+    # gh-promote / gh-release / gh-promote-finalize create the tag and the
+    # release and upload assets.
+    permissions:
+      contents: write
     uses: TurboPanel/dev/.github/workflows/gh-release.yml@5464e72c40aec3528fb10e6fc660583ad963b3cb # dev#35
     with:
       version: ${{ needs.prepare.outputs.version }}
@@ -113,6 +125,10 @@ jobs:
 
   finalize:
     needs: [prepare, publish]
+    # gh-promote / gh-release / gh-promote-finalize create the tag and the
+    # release and upload assets.
+    permissions:
+      contents: write
     uses: TurboPanel/dev/.github/workflows/gh-promote-finalize.yml@5464e72c40aec3528fb10e6fc660583ad963b3cb # dev#35
     with:
       to: release
@@ -124,6 +140,10 @@ jobs:
 
   next-version:
     needs: [prepare, finalize]
+    # gh-next-version.yml pushes the branch and opens the PR with the Release
+    # App token; GITHUB_TOKEN only reads.
+    permissions:
+      contents: read
     uses: TurboPanel/dev/.github/workflows/gh-next-version.yml@5464e72c40aec3528fb10e6fc660583ad963b3cb # dev#35
     with:
       released-version: ${{ needs.prepare.outputs.version }}
@@ -139,6 +159,9 @@ jobs:
   rerun-siblings:
     needs: [prepare, finalize]
     runs-on: ubuntu-latest
+    # Re-runs checks through the Release App token.
+    permissions:
+      contents: read
     steps:
       - name: Mint a Release App token
         id: app
