@@ -9,7 +9,9 @@ turbopanel_daemon_license_staging_dir: "{{ turbopanel_daemon_state_dir }}/daemon
 turbopanel_daemon_tunnels_dir: "{{ turbopanel_daemon_state_dir }}/cloudflared/tunnels"
 turbopanel_service_name: turbopaneld
 turbopanel_update_channel: trunk
-# Local overlay catalog (dev). Empty in production — daemons use https://dl.trbp.nl.
+# Local overlay catalog (dev). Empty in production: daemons use the built-in
+# rail (src/update/urls.ts) — GitHub Releases for canary/rc/release, and
+# https://dl.trbp.nl only for the daemon's trunk channel.
 turbopanel_dl_base: ""
 turbopanel_manifest_url: ""
 turbopanel_instance_manifest_url: ""
