@@ -33,11 +33,11 @@ permissions:
 
 jobs:
   evaluate:
-    uses: TurboPanel/dev/.github/workflows/gh-promote-ok.yml@ac03b76f3b1f3416f711c55b010a06daaf875dcd # dev#42
+    uses: TurboPanel/dev/.github/workflows/gh-promote-ok.yml@387788e9e64344fc5de32f6b93abd178e956d6a1 # dev#42
     with:
       repo-kind: daemon
       ci-workflow: publish-daemon-trunk.yml
-      dev-ref: ac03b76f3b1f3416f711c55b010a06daaf875dcd
+      dev-ref: 387788e9e64344fc5de32f6b93abd178e956d6a1 # dev#42
       base: ${{ github.event.pull_request.base.ref }}
       head-sha: ${{ github.event.pull_request.head.sha }}
     # gh-promote-ok.yml reads the canary release, tags and releases (contents),
