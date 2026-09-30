@@ -96,15 +96,12 @@ jobs:
       - name: Check third-party notices
         run: deno task notices:check
 
-      - name: Install osv-scanner
-        run: |
-          curl -sSfL --proto "=https" --proto-redir "=https" --retry 3 --retry-connrefused --retry-delay 2 -o /usr/local/bin/osv-scanner \
-            https://github.com/google/osv-scanner/releases/download/v2.6.0/osv-scanner_linux_amd64
-          echo "ca69b3d3cd08f889a49dc0a383122f71cc528b83803671df5fd874d97485b108  /usr/local/bin/osv-scanner" | sha256sum -c -
-          chmod +x /usr/local/bin/osv-scanner
-
-      - name: Dependency vulnerability scan (osv-scanner)
-        run: osv-scanner scan source --recursive .
+      # Dependency Advisory Gate (TurboPanel/dev): fails only on a HIGH or
+      # CRITICAL advisory that already has a fixed version; everything else is
+      # a warning annotation. Override for one verified not exploitable here:
+      # an [[IgnoredVulns]] entry with a reason in osv-scanner.toml.
+      - name: Dependency advisory gate (osv-scanner)
+        uses: TurboPanel/dev/.github/actions/osv-scan@7099adc383f0d0eb7a1d91e907a071e9222dfc2e # dev#46
 
       # The Ansible layer (20+ playbooks, 30+ first-party roles) had no CI
       # gate at all -- its only feedback was a converge failure on a real host.
