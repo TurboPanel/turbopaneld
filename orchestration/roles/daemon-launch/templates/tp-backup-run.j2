@@ -1,0 +1,43 @@
+#!/bin/sh
+# tp-backup-run <policyId>: run one scheduled backup.
+#
+# Rendered by the daemon-launch role for this host's exec mode and installed
+# root-owned (0750, group {{ turbopanel_group }}) at {{ turbopanel_backup_run_bin }},
+# outside the replaceable orchestration tree. A policy's systemd service
+# (turbopanel-backup-<policyId>.service) execs it as the daemon account; the
+# host's unit check pins that ExecStart to exactly this path plus one
+# lower-case UUID, so this script takes no other input. It hands the one
+# argument to the daemon's `backup-run` verb, which reads the policy from the
+# host's policies file and spools the result; it never takes daemon.lock.
+set -eu
+
+tp_backup_run_die() {
+  _message="$1"
+  printf 'tp-backup-run: %s\n' "$_message" >&2
+  exit 2
+}
+
+[ "$#" -eq 1 ] || tp_backup_run_die "usage: tp-backup-run <policyId>"
+policy_id="$1"
+hex='[0123456789abcdef]'
+# Unquoted on purpose: each $hex expands to a bracket pattern.
+case "$policy_id" in
+  $hex$hex$hex$hex$hex$hex$hex$hex-$hex$hex$hex$hex-$hex$hex$hex$hex-$hex$hex$hex$hex-$hex$hex$hex$hex$hex$hex$hex$hex$hex$hex$hex$hex) ;;
+  *) tp_backup_run_die "policy id must be a lower-case UUID" ;;
+esac
+
+# The per-engine lock lives under the run dir: it must be the daemon's own, or
+# a scheduled run and a manual backup would not exclude each other.
+export TURBOPANEL_RUN_DIR="${TURBOPANEL_RUN_DIR:-{{ runtime_socket_dir | default('/run/turbopanel') }}}"
+
+{% if turbopanel_daemon_exec_mode | default('source') == 'native' %}
+exec {{ turbopanel_daemon_bin }} backup-run "$policy_id"
+{% elif turbopanel_daemon_exec_mode | default('source') == 'js' %}
+{# Same scoped grants as the daemon's JS ExecStart (turbopaneld.service.j2),
+   pinned by src/permissions/daemon-permissions.test.ts. #}
+export DENO_DIR={{ turbopanel_daemon_state_dir | default('/var/lib/turbopanel') }}/deno-cache
+exec {{ turbopanel_daemon_deno_bin }} run --quiet --allow-read=/opt/turbopanel,/etc/turbopanel,/var/lib/turbopanel,/var/log/turbopanel,/run/turbopanel,/backup,/srv/users,/run/docker.sock,/var/run/docker.sock,/tmp,/proc,/sys,/dev,/etc/os-release,/etc/hostname,/etc/machine-id,/etc/passwd,/etc/group,/etc/localtime,/etc/timezone,/etc/ssl,/etc/ssh,/etc/systemd,/etc/docker,/etc/php,/etc/apache2,/etc/nginx,/etc/caddy,/etc/wireguard,/etc/sysctl.d,/usr,/bin,/sbin,/lib,/lib64 --allow-write=/etc/turbopanel,/var/lib/turbopanel,/var/log/turbopanel,/run/turbopanel,/backup,/srv/users,/run/docker.sock,/var/run/docker.sock,/tmp,/opt/turbopanel/vendor/uv/cache,/opt/turbopanel/vendor/cloudflared,/opt/turbopanel/vendor/uv,/opt/turbopanel/vendor/python,/opt/turbopanel/vendor/ansible --allow-run=sudo,sh,/bin/sh,cat,ls,df,dmesg,getconf,getent,id,/usr/bin/id,test,smartctl,nvidia-smi,ss,ip,iptables,ip6tables,iptables-restore,ip6tables-restore,iptables-save,ip6tables-save,wg,sysctl,tee,chmod,mkdir,cp,ln,systemctl,sshd,git,curl,/usr/bin/curl,tar,/usr/bin/tar,openssl,/usr/bin/openssl,/usr/bin/env,/usr/bin/prlimit,docker,/usr/bin/docker,/opt/turbopanel/vendor/buildkit/current/buildctl,/opt/turbopanel/vendor/buildkit/current/buildkitd,/opt/turbopanel/vendor/railpack/current/railpack,/opt/turbopanel/bin/turbopaneld,/opt/turbopanel/vendor/deno/bin/deno,/opt/turbopanel/vendor/deno/current/deno,/opt/turbopanel/vendor/uv/0.11.21/uv,/opt/turbopanel/vendor/uv/0.11.21/uvx,/opt/turbopanel/vendor/ansible/2.20/bin/ansible-playbook,/opt/turbopanel/vendor/ansible/2.20/bin/ansible-galaxy,/opt/turbopanel/vendor/ansible/2.20/bin/ansible-lint,/opt/turbopanel/vendor/cloudflared/2026.5.2/cloudflared --allow-env --allow-net --deny-net=169.254.169.254,metadata.google.internal,[fd00:ec2::254] --allow-sys=networkInterfaces,hostname,statfs,uid --allow-ffi=/usr/lib,/usr/lib64,/lib,/lib64 {{ turbopanel_daemon_js }} backup-run "$policy_id"
+{% else %}
+cd {{ turbopanel_daemon_workdir }}
+exec {{ turbopanel_daemon_deno_bin }} run --quiet --allow-net --allow-sys=networkInterfaces,hostname,statfs --allow-read --allow-write --allow-run --allow-env --allow-ffi main.ts backup-run "$policy_id"
+{% endif %}

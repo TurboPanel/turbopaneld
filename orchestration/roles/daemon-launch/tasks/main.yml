@@ -54,6 +54,16 @@
     mode: "0750"
     remote_src: true
 
+# Root-owned, group-executable: the daemon account runs it from a backup
+# timer's service but can never rewrite it.
+- name: Install the scheduled-backup runner wrapper
+  ansible.builtin.template:
+    src: tp-backup-run.j2
+    dest: "{{ turbopanel_backup_run_bin }}"
+    owner: root
+    group: "{{ turbopanel_group }}"
+    mode: "0750"
+
 - name: Install daemon update-guard systemd units
   ansible.builtin.template:
     src: "{{ item.src }}"
