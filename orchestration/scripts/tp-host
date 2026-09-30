@@ -494,6 +494,11 @@ tp_unit_ok() {
       ok["Install", "WantedBy"] = 1
       section = ""
     }
+    # systemd joins a line ending in a backslash onto the next one, so a
+    # continuation would let a line checked here as `User=<principal>` reach
+    # systemd as part of the line above it (and the unit run as root). The
+    # daemon never renders one; refuse it before anything else is read.
+    /\\[ \t\r]*$/ { fail("line continuation") }
     /^[ \t]*$/ || /^[ \t]*[#;]/ { next }
     /^\[[A-Za-z]+\][ \t]*$/ {
       section = $0; gsub(/[\[\] \t]/, "", section)

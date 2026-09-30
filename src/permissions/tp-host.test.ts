@@ -392,6 +392,13 @@ test("the daemon's own unit files pass; privileged or foreign units do not", asy
         service.replace("NoNewPrivileges=yes", "NoNewPrivileges=no"),
       ],
       [
+        // systemd joins a line ending in `\\` onto the next one, so it reads
+        // `SyslogIdentifier=x User=alice` and no User= at all (root), while a
+        // line-by-line check would see User=alice.
+        "a line continuation that hides User= from systemd",
+        service.replace(/^User=alice$/m, "SyslogIdentifier=x \\\nUser=alice"),
+      ],
+      [
         "timer for another unit",
         cronTimerContent(cronOpts).replace(
           /^Unit=.*$/m,
