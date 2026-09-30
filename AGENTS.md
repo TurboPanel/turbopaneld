@@ -416,11 +416,11 @@ compile toolchain).
   manifest helpers for `curl | sh`.
 - **Secret scan and contract drift in CI:** `verify.yml` runs
   `scripts/scan-secrets.sh --all` over every tracked file (the pre-commit hook
-  only sees staged files, so a line-keyed `.secretscan-allowlist` entry that
-  goes stale is caught here). Its `contract-drift` job checks out
+  only sees staged files, so a flagged line in a file nobody staged is caught
+  here, and a stale `.secretscan-allowlist` entry is warned about). Its `contract-drift` job checks out
   `TurboPanel/turbopanel` (same-named branch, else trunk) beside this repo and
   runs `check:contract-drift` with `TURBOPANEL_REQUIRE_SIBLING=1`, so a missing
-  sibling fails instead of skipping. `scripts/scan-secrets.sh` is byte-identical in turbopanel, turbopaneld, ui, website and dev — change all five together. It refuses a committed secret-bearing file (`license.token`, `server-key.json`, `.pgpass`, `.rabbitmq_pass`, …), flags credential URLs (`amqp(s)`/`postgres(ql)` with `user:pass@`) and `TURBOPANEL_SECRET(S)` bindings, and flags any line that names a secret-bearing file unless that exact `path:line:content` is in `.secretscan-allowlist`. dev's `src/lib/scan-secrets.test.ts` tests the rules and, with the siblings checked out in dev CI, fails if any copy drifts.
+  sibling fails instead of skipping. `scripts/scan-secrets.sh` is byte-identical in turbopanel, turbopaneld, ui, website and dev — change all five together. It refuses a committed secret-bearing file (`license.token`, `server-key.json`, `.pgpass`, `.rabbitmq_pass`, …), flags credential URLs (`amqp(s)`/`postgres(ql)` with `user:pass@`) and `TURBOPANEL_SECRET(S)` bindings, and flags any line that names a secret-bearing file unless that exact path and full line text is in `.secretscan-allowlist` as `path:line text` (no line number, so edits elsewhere in the file do not break it; the old `path:lineno:text` form is deprecated but still accepted, and with `--all` an entry that allows nothing is warned about as stale). dev's `src/lib/scan-secrets.test.ts` tests the rules and, with the siblings checked out in dev CI, fails if any copy drifts.
 - **CI gate:** `.github/workflows/verify.yml` is the canonical quality gate —
   reusable via `workflow_call`, the trunk `publish` job `needs: verify`, and
   promotion re-verifies artifact hashes only (no new compile from source).
