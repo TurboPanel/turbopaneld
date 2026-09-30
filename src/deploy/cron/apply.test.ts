@@ -583,3 +583,66 @@ test("a failed unit file removal is logged rather than aborting teardown", async
     await host.cleanup();
   }
 });
+
+/** Every host command in order, with the random staged path and unit dir named. */
+function commandLog(host: Host): string[] {
+  return host.calls.map((call) =>
+    [call.command, ...call.args]
+      .map((arg) =>
+        arg.startsWith(host.unitDir)
+          ? arg.replace(host.unitDir, "<units>")
+          : arg
+      )
+      .map((arg) => /\/tp-cron-[^/]*$/.test(arg) ? "<staged>" : arg)
+      .join(" ")
+  );
+}
+
+test("apply issues exactly this host command sequence", async () => {
+  const host = await makeHost();
+  try {
+    const stale = cronUnitName({
+      environmentId: ENV_ID,
+      composeServiceName: "blog",
+      jobName: "old",
+    });
+    await Deno.writeTextFile(join(host.unitDir, `${stale}.timer`), "old\n");
+    await Deno.writeTextFile(join(host.unitDir, `${stale}.service`), "old\n");
+    await apply(host, [specFor()]);
+    assertEquals(commandLog(host), [
+      `sudo -n cmp -s -- <staged> <units>/${UNIT}.service`,
+      `sudo -n install -m 0644 -o root -g root <staged> <units>/${UNIT}.service`,
+      `sudo -n cmp -s -- <staged> <units>/${UNIT}.timer`,
+      `sudo -n install -m 0644 -o root -g root <staged> <units>/${UNIT}.timer`,
+      "sudo -n ls -1 -- <units>",
+      `sudo -n systemctl disable --now ${stale}.timer`,
+      `sudo -n rm -f -- <units>/${stale}.timer`,
+      `sudo -n rm -f -- <units>/${stale}.service`,
+      "sudo -n systemctl daemon-reload",
+      `sudo -n systemctl enable --now ${UNIT}.timer`,
+    ]);
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("removeCronJobs issues exactly this host command sequence", async () => {
+  const host = await makeHost();
+  try {
+    await apply(host, [specFor()]);
+    host.calls.length = 0;
+    await removeCronJobs(ENV_ID, {
+      run: host.run,
+      systemdUnitDir: host.unitDir,
+    });
+    assertEquals(commandLog(host), [
+      "sudo -n ls -1 -- <units>",
+      `sudo -n systemctl disable --now ${UNIT}.timer`,
+      `sudo -n rm -f -- <units>/${UNIT}.timer`,
+      `sudo -n rm -f -- <units>/${UNIT}.service`,
+      "sudo -n systemctl daemon-reload",
+    ]);
+  } finally {
+    await host.cleanup();
+  }
+});

@@ -168,9 +168,9 @@ const SITES: CallSite[] = [
     setup: dir(SITE),
   }),
 
-  // --- cron -----------------------------------------------------------------
+  // --- systemd unit sets (tenant cron, scheduled backups) ------------------
   tpHost(
-    'src/deploy/cron/apply.ts|["-n","systemctl",...args]',
+    'src/deploy/systemd-unit-set.ts|["-n","systemctl",...args]',
     { argv: ["systemctl", "daemon-reload"] },
     {
       argv: [
@@ -189,7 +189,7 @@ const SITES: CallSite[] = [
       ],
     },
   ),
-  tpHost('src/deploy/cron/apply.ts|["-n","cmp","-s","--",staged,path]', {
+  tpHost('src/deploy/systemd-unit-set.ts|["-n","cmp","-s","--",staged,path]', {
     argv: [
       "cmp",
       "-s",
@@ -200,7 +200,7 @@ const SITES: CallSite[] = [
     setup: file(`${UNITS}/turbopanel-cron-svc1-backup.service`, STAGED_CONTENT),
   }),
   tpHost(
-    'src/deploy/cron/apply.ts|["-n","install","-m","0644","-o","root","-g","root",staged,path]',
+    'src/deploy/systemd-unit-set.ts|["-n","install","-m","0644","-o","root","-g","root",staged,path]',
     {
       argv: [
         "install",
@@ -216,11 +216,11 @@ const SITES: CallSite[] = [
       setup: unitSetup(cronTimerContent(CRON)),
     },
   ),
-  tpHost('src/deploy/cron/apply.ts|["-n","ls","-1","--",unitDir]', {
+  tpHost('src/deploy/systemd-unit-set.ts|["-n","ls","-1","--",unitDir]', {
     argv: ["ls", "-1", "--", UNITS],
   }),
   tpHost(
-    'src/deploy/cron/apply.ts|["-n","rm","-f","--",join(unitDir,`${unit}${suffix}`)]',
+    'src/deploy/systemd-unit-set.ts|["-n","rm","-f","--",join(unitDir,`${unit}${suffix}`)]',
     { argv: ["rm", "-f", "--", `${UNITS}/turbopanel-cron-svc1-backup.timer`] },
   ),
 
@@ -1361,11 +1361,11 @@ const SITES: CallSite[] = [
   }),
 
   // Cron and native-app units.
-  tpHost('src/deploy/cron/apply.ts|systemctl(runFn,["daemon-reload"])', {
+  tpHost('src/deploy/systemd-unit-set.ts|systemctl(runFn,["daemon-reload"])', {
     argv: ["systemctl", "daemon-reload"],
   }),
   tpHost(
-    'src/deploy/cron/apply.ts|systemctl(runFn,["disable","--now",`${unit}.timer`])',
+    'src/deploy/systemd-unit-set.ts|systemctl(runFn,["disable","--now",`${unit}.timer`])',
     {
       argv: [
         "systemctl",
@@ -1376,7 +1376,7 @@ const SITES: CallSite[] = [
     },
   ),
   tpHost(
-    'src/deploy/cron/apply.ts|systemctl(runFn,["enable","--now",`${unit}.timer`])',
+    'src/deploy/systemd-unit-set.ts|systemctl(runFn,["enable","--now",`${unit}.timer`])',
     {
       argv: [
         "systemctl",
