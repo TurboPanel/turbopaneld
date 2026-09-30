@@ -3,13 +3,16 @@
 # to `live` (a push runs the workflow file from the pushed commit, so the very
 # first merge, which brings this file into live, already works).
 #
-#   1. resolve  the merged PR, the version it carries, and the NEWEST
-#               v<version>-rc.N tag — that rc's bytes become the release
+#   1. resolve  the merged PR and the newest rc that has not shipped (from the
+#               tags, never a version file) — that rc's bytes become the release
 #   2. prepare / publish / finalize   the shared promote workflows
 #               (TurboPanel/dev). prepare still waits on the `release`
 #               environment approval: keep it until this path has run once end
 #               to end, then drop it (`approval-environment: ""`).
-#   3. next-version  opens the "Start <next>" PR into trunk
+#
+# Nothing opens a "Start <next>" PR afterwards: once v<version> exists, the
+# next canary is <version>'s next patch by itself (versions come from tags;
+# minors and majors are started with start-next-version.yml).
 #
 # A push to live that is not a merged staging PR (a break-glass promotion, the
 # finalize fast-forward) does nothing. workflow_dispatch re-runs the release
@@ -27,8 +30,7 @@ on:
         required: true
         type: string
 
-# Read-only by default; each job below asks for exactly what it writes. The
-# "Start <next>" PR and the sibling re-runs use the Release App's token.
+# Read-only by default; each job below asks for exactly what it writes.
 permissions:
   contents: read
 
@@ -39,7 +41,7 @@ concurrency:
 jobs:
   resolve:
     runs-on: ubuntu-latest
-    # Reads the merged PR (pull-requests) and deno.json / the rc tags (contents).
+    # Reads the merged PR (pull-requests) and the tags (contents).
     permissions:
       contents: read
       pull-requests: read
@@ -48,7 +50,14 @@ jobs:
       rc-tag: ${{ steps.r.outputs.rc-tag }}
       version: ${{ steps.r.outputs.version }}
     steps:
-      - name: Find the merged PR and the newest rc of its version
+      # The newest rc above the newest release — what staging holds.
+      - name: Work out the rc to release from the tags
+        id: rc
+        uses: TurboPanel/dev/.github/actions/version@387788e9e64344fc5de32f6b93abd178e956d6a1 # dev#42
+        with:
+          mode: release-rc
+
+      - name: Find the merged PR and the rc it releases
         id: r
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -56,6 +65,8 @@ jobs:
           EVENT: ${{ github.event_name }}
           PUSHED: ${{ github.sha }}
           INPUT_RC_TAG: ${{ inputs.rc-tag }}
+          NEWEST_RC: ${{ steps.rc.outputs.rc-tag }}
+          NEWEST_VERSION: ${{ steps.rc.outputs.version }}
         run: |
           set -eu
           if [ "$EVENT" = "workflow_dispatch" ]; then
@@ -73,9 +84,9 @@ jobs:
               echo "proceed=false" >> "$GITHUB_OUTPUT"
               exit 0
             fi
-            version="$(gh api "repos/$REPO/contents/deno.json?ref=$PUSHED" --jq .content | base64 -d | jq -r .version)"
-            rc_tag="$(gh api --paginate "repos/$REPO/git/matching-refs/tags/v$version-rc." --jq '.[].ref' | sed 's#^refs/tags/##' | sort -V | tail -n 1)"
-            [ -n "$rc_tag" ] || { echo "::error::no v$version-rc.N tag exists — publish an rc first (merge the trunk → staging PR)"; exit 1; }
+            rc_tag="$NEWEST_RC"
+            version="$NEWEST_VERSION"
+            [ -n "$rc_tag" ] || { echo "::error::no rc newer than the latest release exists — publish an rc first (merge the trunk → staging PR)"; exit 1; }
             echo "PR #$pr merged; releasing $version from $rc_tag"
           fi
           if gh api "repos/$REPO/git/ref/tags/v$version" --silent 2>/dev/null; then
@@ -96,12 +107,12 @@ jobs:
     # release and upload assets.
     permissions:
       contents: write
-    uses: TurboPanel/dev/.github/workflows/gh-promote.yml@5464e72c40aec3528fb10e6fc660583ad963b3cb # dev#35
+    uses: TurboPanel/dev/.github/workflows/gh-promote.yml@387788e9e64344fc5de32f6b93abd178e956d6a1 # dev#42
     with:
       repo-kind: daemon
       to: release
       source: ${{ needs.resolve.outputs.rc-tag }}
-      dev-ref: 5464e72c40aec3528fb10e6fc660583ad963b3cb
+      dev-ref: 387788e9e64344fc5de32f6b93abd178e956d6a1 # dev#42
       # Same signer pin as promote.yml.
       signer-ref: 93c4f94510c9499e6bf04366a9500fe9f8e38aaa
       # Default: the `release` environment approval stays for the release hop.
@@ -113,7 +124,7 @@ jobs:
     # release and upload assets.
     permissions:
       contents: write
-    uses: TurboPanel/dev/.github/workflows/gh-release.yml@5464e72c40aec3528fb10e6fc660583ad963b3cb # dev#35
+    uses: TurboPanel/dev/.github/workflows/gh-release.yml@387788e9e64344fc5de32f6b93abd178e956d6a1 # dev#42
     with:
       version: ${{ needs.prepare.outputs.version }}
       channel: release
@@ -129,7 +140,7 @@ jobs:
     # release and upload assets.
     permissions:
       contents: write
-    uses: TurboPanel/dev/.github/workflows/gh-promote-finalize.yml@5464e72c40aec3528fb10e6fc660583ad963b3cb # dev#35
+    uses: TurboPanel/dev/.github/workflows/gh-promote-finalize.yml@387788e9e64344fc5de32f6b93abd178e956d6a1 # dev#42
     with:
       to: release
       version: ${{ needs.prepare.outputs.version }}
@@ -137,54 +148,3 @@ jobs:
       branch: ${{ needs.prepare.outputs.branch }}
       manifest-filename: ${{ needs.prepare.outputs.manifest-filename }}
     secrets: inherit
-
-  next-version:
-    needs: [prepare, finalize]
-    # gh-next-version.yml pushes the branch and opens the PR with the Release
-    # App token; GITHUB_TOKEN only reads.
-    permissions:
-      contents: read
-    uses: TurboPanel/dev/.github/workflows/gh-next-version.yml@5464e72c40aec3528fb10e6fc660583ad963b3cb # dev#35
-    with:
-      released-version: ${{ needs.prepare.outputs.version }}
-      version-files: |
-        deno.json
-        sonar-project.properties
-      dev-ref: 5464e72c40aec3528fb10e6fc660583ad963b3cb
-    secrets: inherit
-
-  # A new minor's turbopanel and ui Release PRs wait for this release
-  # (gh-minor-gate.yml): re-run their failed checks now that it exists. Best
-  # effort — if the App cannot, re-run the failed check by hand.
-  rerun-siblings:
-    needs: [prepare, finalize]
-    runs-on: ubuntu-latest
-    # Re-runs checks through the Release App token.
-    permissions:
-      contents: read
-    steps:
-      - name: Mint a Release App token
-        id: app
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        with:
-          app-id: ${{ secrets.RELEASE_APP_ID }}
-          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
-          owner: TurboPanel
-          repositories: |
-            turbopanel
-            ui
-
-      - name: Check out the promotion scripts
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: TurboPanel/dev
-          ref: 5464e72c40aec3528fb10e6fc660583ad963b3cb
-          path: .promote
-          persist-credentials: false
-          sparse-checkout: scripts/promote
-          sparse-checkout-cone-mode: false
-
-      - name: Re-run the waiting Release PR checks
-        env:
-          GH_TOKEN: ${{ steps.app.outputs.token }}
-        run: sh .promote/scripts/promote/rerun-release-pr-checks.sh turbopanel ui

@@ -274,21 +274,6 @@ jobs:
           TURBOPANEL_REQUIRE_SIBLING: "1"
         run: deno task check:contract-drift
 
-  # A new minor (x.y.0) ships turbopanel + ui rcs before the daemon releases it
-  # (TurboPanel/dev gh-minor-gate.yml). Only ever red on a minor Release PR
-  # into live; a patch or any other PR passes at once.
-  minor-gate:
-    uses: TurboPanel/dev/.github/workflows/gh-minor-gate.yml@5464e72c40aec3528fb10e6fc660583ad963b3cb # dev#35
-    with:
-      role: daemon
-      version-file: deno.json
-      siblings: |
-        turbopanel
-        ui
-    secrets:
-      RELEASE_APP_ID: ${{ secrets.RELEASE_APP_ID }}
-      RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
-
   # The one context the trunk ruleset will require: green only when every
   # PR-time job above succeeded. Every need runs unconditionally, so a
   # `skipped` result is a failure here too.
@@ -301,7 +286,7 @@ jobs:
   # A real failure of a need still runs it, and still fails it.
   ci-ok:
     name: ci-ok
-    needs: [verify, contract-drift, minor-gate]
+    needs: [verify, contract-drift]
     if: ${{ (github.event_name == 'pull_request' && always()) || !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
