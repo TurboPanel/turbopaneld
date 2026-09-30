@@ -130,6 +130,7 @@ import {
 } from "../update/urls.ts";
 import { installOriginNeedsInsecureTls } from "./install-tls.ts";
 import { ManagedHaObserver } from "./ha-observe.ts";
+import { BackupResultReporter } from "../backups/result-reporter.ts";
 import { AcmeIssuanceObserver } from "./acme-observe.ts";
 import { InstanceAcmeRenewalScheduler } from "./instance-acme-renew.ts";
 import { DAEMON_VERSION } from "../version.ts";
@@ -420,6 +421,7 @@ export class InstanceClient {
   #licenseStamp: string | undefined;
   #idlePresence: IdlePresence | undefined;
   #haObserver: ManagedHaObserver | undefined;
+  #backupReporter: BackupResultReporter | undefined;
   #acmeObserver: AcmeIssuanceObserver | undefined;
   /** Panel certificate renewal. Independent of `#acmeObserver`. */
   #instanceAcmeRenewal: InstanceAcmeRenewalScheduler | undefined;
@@ -841,6 +843,8 @@ export class InstanceClient {
     this.#idlePresence = undefined;
     this.#haObserver?.detach();
     this.#haObserver = undefined;
+    this.#backupReporter?.detach();
+    this.#backupReporter = undefined;
     this.#acmeObserver?.detach();
     this.#acmeObserver = undefined;
     this.#instanceAcmeRenewal?.stop();
@@ -920,6 +924,7 @@ export class InstanceClient {
     this.#closeActiveSocket();
     this.#idlePresence?.detach();
     this.#haObserver?.detach();
+    this.#backupReporter?.detach();
     this.#acmeObserver?.detach();
     this.#metricsScheduler?.detach();
     const classified = classifyConnectFailure(err);
@@ -1339,6 +1344,7 @@ export class InstanceClient {
     this.#idlePresence?.attach(ws);
     this.#ensureHaObserver();
     this.#haObserver?.attach();
+    this.#ensureBackupReporter().attach();
     this.#ensureAcmeObserver();
     this.#acmeObserver?.attach();
     this.#instanceAcmeRenewal?.flush();
@@ -1383,6 +1389,7 @@ export class InstanceClient {
       this.#peerFeatures = [];
       this.#idlePresence?.detach();
       this.#haObserver?.detach();
+      this.#backupReporter?.detach();
       this.#acmeObserver?.detach();
       this.#metricsScheduler?.detach();
       this.#topologyReporter?.detach();
@@ -1429,6 +1436,17 @@ export class InstanceClient {
         this.#ws.send(JSON.stringify(message));
       },
     });
+  }
+
+  #ensureBackupReporter(): BackupResultReporter {
+    this.#backupReporter ??= new BackupResultReporter({
+      send: (message) => {
+        if (!this.#ws || this.#ws.readyState !== WebSocket.OPEN) return false;
+        this.#ws.send(JSON.stringify(message));
+        return true;
+      },
+    });
+    return this.#backupReporter;
   }
 
   #ensureAcmeObserver(): void {
@@ -1648,6 +1666,12 @@ export class InstanceClient {
         this.#runSocketHandler(
           "tunnel-token",
           this.#applyTunnelToken(message, ws),
+        );
+        break;
+      case "backup-run-report-result":
+        this.#runSocketHandler(
+          "backup-run-report-result",
+          this.#ensureBackupReporter().handleResult(message),
         );
         break;
       case "public-urls-update":
