@@ -53,7 +53,7 @@ jobs:
       # The newest rc above the newest release — what staging holds.
       - name: Work out the rc to release from the tags
         id: rc
-        uses: TurboPanel/dev/.github/actions/version@7e1b90a0f8b33047d6c59438a7df03b20ea5cd24 # dev#43
+        uses: TurboPanel/dev/.github/actions/version@dadee433d35a73c7a9946268c30a96e466371140 # dev#44
         with:
           mode: release-rc
 
@@ -107,12 +107,12 @@ jobs:
     # release and upload assets.
     permissions:
       contents: write
-    uses: TurboPanel/dev/.github/workflows/gh-promote.yml@7e1b90a0f8b33047d6c59438a7df03b20ea5cd24 # dev#43
+    uses: TurboPanel/dev/.github/workflows/gh-promote.yml@dadee433d35a73c7a9946268c30a96e466371140 # dev#44
     with:
       repo-kind: daemon
       to: release
       source: ${{ needs.resolve.outputs.rc-tag }}
-      dev-ref: 7e1b90a0f8b33047d6c59438a7df03b20ea5cd24 # dev#43
+      dev-ref: dadee433d35a73c7a9946268c30a96e466371140 # dev#44
       # Same signer pin as promote.yml.
       signer-ref: 93c4f94510c9499e6bf04366a9500fe9f8e38aaa
       # Default: the `release` environment approval stays for the release hop.
@@ -124,7 +124,7 @@ jobs:
     # release and upload assets.
     permissions:
       contents: write
-    uses: TurboPanel/dev/.github/workflows/gh-release.yml@7e1b90a0f8b33047d6c59438a7df03b20ea5cd24 # dev#43
+    uses: TurboPanel/dev/.github/workflows/gh-release.yml@dadee433d35a73c7a9946268c30a96e466371140 # dev#44
     with:
       version: ${{ needs.prepare.outputs.version }}
       channel: release
@@ -140,7 +140,7 @@ jobs:
     # release and upload assets.
     permissions:
       contents: write
-    uses: TurboPanel/dev/.github/workflows/gh-promote-finalize.yml@7e1b90a0f8b33047d6c59438a7df03b20ea5cd24 # dev#43
+    uses: TurboPanel/dev/.github/workflows/gh-promote-finalize.yml@dadee433d35a73c7a9946268c30a96e466371140 # dev#44
     with:
       to: release
       version: ${{ needs.prepare.outputs.version }}
