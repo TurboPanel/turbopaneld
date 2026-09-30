@@ -113,7 +113,7 @@ jobs:
       - name: Find the canary built from that commit
         id: canary
         if: steps.r.outputs.proceed == 'true'
-        uses: TurboPanel/dev/.github/actions/version@7e1b90a0f8b33047d6c59438a7df03b20ea5cd24 # dev#43
+        uses: TurboPanel/dev/.github/actions/version@a903ecc40b8b27ce08dd3336497597f66c13d171 # dev#44
         with:
           mode: canary-of
           commit: ${{ steps.r.outputs.commit }}
@@ -155,12 +155,12 @@ jobs:
     # release and upload assets.
     permissions:
       contents: write
-    uses: TurboPanel/dev/.github/workflows/gh-promote.yml@7e1b90a0f8b33047d6c59438a7df03b20ea5cd24 # dev#43
+    uses: TurboPanel/dev/.github/workflows/gh-promote.yml@a903ecc40b8b27ce08dd3336497597f66c13d171 # dev#44
     with:
       repo-kind: daemon
       to: rc
       source: ${{ needs.resolve.outputs.canary }}
-      dev-ref: 7e1b90a0f8b33047d6c59438a7df03b20ea5cd24 # dev#43
+      dev-ref: a903ecc40b8b27ce08dd3336497597f66c13d171 # dev#44
       # Same signer pin as promote.yml.
       signer-ref: 93c4f94510c9499e6bf04366a9500fe9f8e38aaa
       # The merge of the promotion PR is the approval.
@@ -173,7 +173,7 @@ jobs:
     # release and upload assets.
     permissions:
       contents: write
-    uses: TurboPanel/dev/.github/workflows/gh-release.yml@7e1b90a0f8b33047d6c59438a7df03b20ea5cd24 # dev#43
+    uses: TurboPanel/dev/.github/workflows/gh-release.yml@a903ecc40b8b27ce08dd3336497597f66c13d171 # dev#44
     with:
       version: ${{ needs.prepare.outputs.version }}
       channel: rc
@@ -189,7 +189,7 @@ jobs:
     # release and upload assets.
     permissions:
       contents: write
-    uses: TurboPanel/dev/.github/workflows/gh-promote-finalize.yml@7e1b90a0f8b33047d6c59438a7df03b20ea5cd24 # dev#43
+    uses: TurboPanel/dev/.github/workflows/gh-promote-finalize.yml@a903ecc40b8b27ce08dd3336497597f66c13d171 # dev#44
     with:
       to: rc
       version: ${{ needs.prepare.outputs.version }}
@@ -216,7 +216,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: TurboPanel/dev
-          ref: 7e1b90a0f8b33047d6c59438a7df03b20ea5cd24 # dev#43
+          ref: a903ecc40b8b27ce08dd3336497597f66c13d171 # dev#44
           path: .promote
           fetch-depth: 1
           persist-credentials: false
