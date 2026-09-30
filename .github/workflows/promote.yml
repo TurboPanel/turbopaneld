@@ -4,7 +4,7 @@
 #   to=release  v<base>-rc.<N> → v<base> (releases/latest) + `live` branch
 #
 # BREAK-GLASS ONLY. The normal path is the two automatic PRs (promote-prs.yml
-# keeps a trunk → staging PR open; merging it runs cut-rc.yml).
+# keeps a trunk → staging PR open; merging it runs publish-rc.yml).
 #
 # The bytes are the tested build's; only the asset names, the manifest
 # (version, channel, urls) and its signature change. Repos release
