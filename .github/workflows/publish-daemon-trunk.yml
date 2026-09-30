@@ -133,7 +133,7 @@ jobs:
 
       - name: Work out this build's version from the tags
         id: version
-        uses: TurboPanel/dev/.github/actions/version@387788e9e64344fc5de32f6b93abd178e956d6a1 # dev#42
+        uses: TurboPanel/dev/.github/actions/version@7e1b90a0f8b33047d6c59438a7df03b20ea5cd24 # dev#43
         with:
           mode: canary
 
@@ -474,7 +474,7 @@ jobs:
     # gh-canary.yml creates/updates the rolling `canary` release and its assets.
     permissions:
       contents: write
-    uses: TurboPanel/dev/.github/workflows/gh-canary.yml@387788e9e64344fc5de32f6b93abd178e956d6a1 # dev#42
+    uses: TurboPanel/dev/.github/workflows/gh-canary.yml@7e1b90a0f8b33047d6c59438a7df03b20ea5cd24 # dev#43
     with:
       version: ${{ needs.publish.outputs.canary-version }}
       commit: ${{ github.sha }}
