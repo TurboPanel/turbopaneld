@@ -11,7 +11,8 @@ daemon, and it never takes `daemon.lock`.
 | `backup-run` verb and exit codes (0 ok, 1 failed + spooled, 2 usage, 3 no policy) | `src/entry/cli.ts` |
 | The run itself | `runner.ts` |
 | Host copy of the policies, written by `server.backups.reconcile` | `policies-file.ts` |
-| Result spool, drained by the reporter (Road row `r2-backup-status-report`) | `result-spool.ts` |
+| Result spool, drained by the reporter | `result-spool.ts` |
+| Reporter: spool → `backup-run-report`, delete on `backup-run-report-result` | `result-reporter.ts` (wired in `src/instance/client.ts`) |
 | Free-space probe | `free-space.ts` |
 | Wrapper, rendered per exec mode by the daemon-launch role | `orchestration/roles/daemon-launch/templates/tp-backup-run.j2` |
 | Per-engine lock shared with `managed.backup` / `managed.restore` | `src/managed/target-lock.ts` |
@@ -71,3 +72,20 @@ lines — change `units.ts` and `tp_backup_unit_ok` together.
   a second holder fails at once instead of queueing, and the kernel releases
   it when the holder exits, so it cannot go stale. The wrapper exports the
   daemon's `TURBOPANEL_RUN_DIR` so both sides lock the same file.
+
+## Reporting
+
+- `BackupResultReporter` runs in the long-running daemon while the socket is
+  up: on attach and every 60 s it sends up to 20 spooled results, oldest first,
+  as `backup-run-report` with `id` = the run id (= the file name), so an
+  answer finds its file after a reconnect or restart.
+- A file is deleted only when `backup-run-report-result` with its id arrives,
+  `ok` true (recorded) or false (refused for good). No answer leaves it for
+  the next tick; the control plane records a run once however often it is
+  sent. A closed socket ends the tick.
+- `nextRunAt` comes from `systemctl show turbopanel-backup-<policyId>.timer
+  --property=NextElapseUSecRealtime --value --timestamp=unix` (read-only, no
+  sudo); it is omitted while the unit does not exist or is not scheduled.
+- A spooled file that would not pass the control plane's frame check is
+  renamed to `.<runId>.json.invalid` and never sent: an out-of-shape frame
+  closes the socket, which would otherwise repeat every tick.

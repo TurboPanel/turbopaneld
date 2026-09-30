@@ -492,6 +492,8 @@ export type DaemonMessage =
     error?: string;
     at: string;
   }
+  | BackupRunReportMessage
+  | BackupRunReportResultMessage
   | {
     type: "public-urls-update";
     id: string;
