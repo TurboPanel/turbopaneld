@@ -680,9 +680,19 @@ it regresses:
   - checks systemd unit content before installing it: known directives only,
     tenant services `User=<principal>` / `Group=<principal>-grp` /
     `Slice=turbopanel-<principal>.slice` / `NoNewPrivileges=yes` / empty
-    capability sets, no `+`/`!`/`:` exec prefixes, a timer may only start its
-    own service; the root hosting-Caddy unit may only exec the vendored Caddy
-    against the hosting Caddyfile;
+    capability sets, no `+`/`!`/`:` exec prefixes, no line ending in a
+    backslash (systemd would join it onto the next line, hiding e.g. `User=`
+    from this line-by-line check), a timer may only start its own service;
+    the root hosting-Caddy unit may only exec the vendored Caddy against the
+    hosting Caddyfile; the `turbopanel-backup-` prefix is reserved for
+    scheduled backups — a name under it must be exactly
+    `turbopanel-backup-<lower-case uuid>.service|.timer`, and the service
+    must run as `tp:tp` (`DAEMON_ACCOUNT`), with exactly one
+    `ExecStart=<install>/lib/tp-backup-run <that uuid>`, only
+    `EnvironmentFile=-/etc/turbopanel/daemon.env`, `Nice=10`,
+    `IOSchedulingClass=idle` (those three directives exist for no other
+    unit), and no `Environment=`, `Slice=` or `ExecReload=`
+    (`tp_backup_unit_ok`);
   - changes only principal accounts (uid ≥ 15001, `<name>-grp`, home under
     the principal root, a listed shell), adds principals only to groups
     `runtime-registry.json` defines and engine accounts only to principal

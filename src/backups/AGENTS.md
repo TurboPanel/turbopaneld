@@ -15,6 +15,28 @@ daemon, and it never takes `daemon.lock`.
 | Free-space probe | `free-space.ts` |
 | Wrapper, rendered per exec mode by the daemon-launch role | `orchestration/roles/daemon-launch/templates/tp-backup-run.j2` |
 | Per-engine lock shared with `managed.backup` / `managed.restore` | `src/managed/target-lock.ts` |
+| Timer + service renderers (`turbopanel-backup-<policyId>.*`) | `units.ts` |
+| `server.backups.reconcile` handler | `reconcile.ts` |
+| Shared install-if-changed / reload / enable / sweep machinery (with tenant cron) | `src/deploy/systemd-unit-set.ts` |
+| Host-side unit check for this family | `orchestration/scripts/tp-host` (`tp_backup_unit_id`, `tp_backup_unit_ok`) |
+
+## `server.backups.reconcile`
+
+The payload is the **complete** set for this server. The handler writes the
+policies file first (only when the set changed, so an unchanged set leaves its
+`appliedAt` alone), then applies the unit family: install a service + timer for
+each enabled policy only when the bytes differ, one `daemon-reload`, `enable
+--now` only the timers that moved, and remove every `turbopanel-backup-*` timer
+the set no longer names (disabled policies included). Next runs come from
+`systemctl show <timer> --property=NextElapseUSecRealtime --value
+--timestamp=unix`, unprivileged; a failed read is a warning, not an error.
+
+The units: the service is a oneshot as `tp:tp` whose only `ExecStart` is the
+wrapper with its own policy id, reading `daemon.env`, at `Nice=10` /
+`IOSchedulingClass=idle`, no `[Install]` (only its timer starts it). The timer
+is `Persistent=true` (a run missed while the host was off happens once when it
+returns) with a 300 s `RandomizedDelaySec`. tp-host pins every one of those
+lines — change `units.ts` and `tp_backup_unit_ok` together.
 
 ## Files on the host
 

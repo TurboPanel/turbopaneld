@@ -705,6 +705,7 @@ async function dispatchWithStubHandler(
     | "handleEnvironmentDeploy"
     | "handleEnvironmentLifecycle"
     | "handlePrincipalsReconcile"
+    | "handleBackupsReconcile"
     | "handleManagedApply"
     | "handleManagedLifecycle"
     | "handleManagedDestroy"
@@ -988,6 +989,30 @@ test({
     const result = outcome.result as Record<string, unknown>;
     assertEquals(result.summary, "principals stub");
     assertEquals(result.principalsApplied, 0);
+  },
+});
+
+test({
+  name:
+    "handleCommandDispatch routes server.backups.reconcile through stub handler",
+  permissions: { env: true, read: true },
+  fn: async () => {
+    const outcome = await dispatchWithStubHandler(
+      "server.backups.reconcile",
+      { policies: [] },
+      {
+        policiesApplied: 0,
+        unitsChanged: [],
+        unitsRemoved: [],
+        nextRuns: [],
+        warnings: [],
+      },
+      "handleBackupsReconcile",
+    );
+    assertEquals(outcome.ok, true);
+    const result = outcome.result as Record<string, unknown>;
+    assertEquals(result.policiesApplied, 0);
+    assertEquals(result.unitsRemoved, []);
   },
 });
 
