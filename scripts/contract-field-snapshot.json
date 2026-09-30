@@ -127,5 +127,50 @@
     "fields": [
       { "name": "hostLevelApproved", "required": false, "type": "boolean" }
     ]
+  },
+  "BackupPolicyWireEntry": {
+    "instance": "src/contracts/commands/schemas.ts",
+    "daemon": "src/contracts/commands-contracts.ts",
+    "fields": [
+      { "name": "copyId", "required": false, "type": "string" },
+      { "name": "enabled", "required": true, "type": "boolean" },
+      { "name": "managedId", "required": false, "type": "string" },
+      { "name": "onCalendar", "required": true, "type": "string" },
+      { "name": "policyId", "required": true, "type": "string" },
+      { "name": "retentionKeep", "required": true, "type": "number" },
+      { "name": "targetKind", "required": true, "type": "'managed' | 'copy'" }
+    ]
+  },
+  "BackupRunReportMessage": {
+    "instance": "src/contracts/cell-protocol.ts",
+    "daemon": "src/contracts/cell-messages.ts",
+    "fields": [
+      { "name": "at", "required": true, "type": "string" },
+      { "name": "backupId", "required": false, "type": "string" },
+      { "name": "checksum", "required": false, "type": "string" },
+      { "name": "error", "required": false, "type": "string" },
+      { "name": "finishedAt", "required": true, "type": "string" },
+      { "name": "id", "required": true, "type": "string" },
+      { "name": "nextRunAt", "required": false, "type": "string" },
+      { "name": "path", "required": false, "type": "string" },
+      { "name": "policyId", "required": true, "type": "string" },
+      { "name": "pruned", "required": false, "type": "string[]" },
+      { "name": "runId", "required": true, "type": "string" },
+      { "name": "sizeBytes", "required": false, "type": "number" },
+      { "name": "startedAt", "required": true, "type": "string" },
+      { "name": "status", "required": true, "type": "'succeeded' | 'failed'" },
+      { "name": "type", "required": true, "type": "'backup-run-report'" }
+    ]
+  },
+  "BackupRunReportResultMessage": {
+    "instance": "src/contracts/cell-protocol.ts",
+    "daemon": "src/contracts/cell-messages.ts",
+    "fields": [
+      { "name": "at", "required": true, "type": "string" },
+      { "name": "error", "required": false, "type": "string" },
+      { "name": "id", "required": true, "type": "string" },
+      { "name": "ok", "required": true, "type": "boolean" },
+      { "name": "type", "required": true, "type": "'backup-run-report-result'" }
+    ]
   }
 }

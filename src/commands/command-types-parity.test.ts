@@ -55,6 +55,7 @@ const INSTANCE_COMMAND_TYPES = [
   "server.tls.trust.reconcile",
   "server.principals.reconcile",
   "server.firewall.reconcile",
+  "server.backups.reconcile",
   "environment.deploy",
   "environment.lifecycle",
   "environment.stop",
