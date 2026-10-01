@@ -9,7 +9,7 @@ page carries the build order; this is the `fw-daemon-reconcile` row.
 | File | Role |
 | --- | --- |
 | `render.ts` | **Pure.** `FirewallReconcilePayload` → `iptables-restore` / `ip6tables-restore` documents + sha256 digest. Invariants first (lo, `ESTABLISHED,RELATED`, ICMP / ICMPv6, DHCP client, every sshd port, the co-located control plane's ports), then `drop`/`reject` rows, then `accept` rows, then the default. Never emits `OUTPUT`, a builtin policy line, or a jump. |
-| `apply.ts` | Host side. `probeXtables`, `hasDockerUserChain`, `isControlPlaneColocated`; `applyRenderedFirewall` = arm the rollback guard and stage the documents (`pending.ts`) → `--test` → `--noflush` restore per family → `-C`/`-I` jumps, **pending, not durable**; `removeFirewall` (mode `off`, and the `turbopaneld firewall off` break-glass); `snapshotFirewallChains` (unused so far); `reinstallFirewallForwardingIfEnabled` (the Docker-monitor hook, wired in `fw-boot-persistence`). |
+| `apply.ts` | Host side. `probeXtables`, `hasDockerUserChain`, `isControlPlaneColocated`; `applyRenderedFirewall` = arm the rollback guard and stage the documents (`pending.ts`) → `--test` → `--noflush` restore per family → `-C`/`-I` jumps, **pending, not durable**; `removeFirewall` (mode `off`, and the `turbopaneld firewall off` break-glass); `snapshotFirewallChains` (unused so far); `reinstallFirewallForwardingIfEnabled` (the Docker-monitor hook, wired in `../entry/run.ts` beside the fabric one: at startup and on every Docker reachability change; while a ruleset is pending it re-applies the *pending* document, never the older confirmed one). |
 | `pending.ts` | Commit-confirm state: the marker (`<runDir>/firewall-pending.json`), the pending documents (`<configDir>/firewall.pending.v4|.v6`), the rollback record the guard writes (`<stateDir>/firewall-rollback.json`), `armPendingFirewall` (arms `turbopanel-firewall-guard.timer` **before** anything is loaded; no guard, no rules) and `clearPendingFirewall`. |
 | `confirm.ts` | `confirmPendingFirewall(digest)`: promotes the pending documents to the durable `<configDir>/firewall.v4|.v6`, clears the stage, stops the guard. States `confirmed`, `nothing_pending` (idempotent), `digest_mismatch`, `expired`, `rolled_back`. Behind `server.firewall.confirm` and `turbopaneld firewall confirm`. |
 | `run.ts` | Spawn + `sudo -n` fallback, with **`-w 5`** on every xtables binary (Docker holds the xtables lock while it mutates chains). Test seams `setFirewallRunForTests` / `setFirewallSkipRealSyscallsForTests`. |
@@ -80,6 +80,19 @@ who reached the host from outside confirms it:
 
 The guard timer is not enabled at boot and `<runDir>` is tmpfs, so a reboot
 forgets any pending ruleset; the durable documents change only on confirm.
+
+**Boot (`fw-boot-persistence`).** `turbopanel-firewall.service` (enabled by the
+`daemon-launch` role, `DefaultDependencies=no`, `Before=network-pre.target
+docker.service`, a no-op until `/etc/turbopanel/firewall.v4|.v6` exists) runs
+`tp-firewall-guard restore`: it loads **only the confirmed documents** (never a
+pending one: it removes stale `firewall.pending.*`), with the same validation
+and the same fail-open handling as a rollback, and writes no rollback record.
+`ExecStart=-` means the unit can never fail a boot. `TP-INPUT` is therefore in
+place before Docker starts; `TP-FWD` needs `DOCKER-USER`, which only exists once
+dockerd is up, so the daemon's Docker monitor re-hangs it
+(`reinstallFirewallForwardingIfEnabled`) at startup and whenever Docker becomes
+reachable again. IPv6's `DOCKER-USER` is not re-hung (Docker's own ip6tables is
+off by default).
 `turbopaneld firewall off` (root, over SSH) removes every chain, jump, stored
 document and the pending state: the break-glass when the panel is unreachable.
 The default-drop hold below stays until the guard has been proven on a real
@@ -104,9 +117,8 @@ host (`fw-proof`).
 
 ## Not here yet (later rows)
 
-The boot unit and the Docker-monitor call to
-`reinstallFirewallForwardingIfEnabled` (`fw-boot-persistence`); the control
-plane's outside probe that sends the confirm (`fw-derived-rules`); the
+The control plane's outside probe that sends the confirm
+(`fw-derived-rules`); the
 installer's bootstrap ruleset (`fw-installer-bootstrap`; the ufw/firewalld
 removal itself is done — `orchestration/roles/daemon-prereqs/tasks/firewall-takeover.yml`,
 on every converge, `fw-takeover`); folding `../managed/firewall.ts` and the fabric `TP-FORWARD`

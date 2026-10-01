@@ -642,6 +642,103 @@ test("reinstallFirewallForwardingIfEnabled: no document → nothing; document wi
   });
 });
 
+test("reinstallFirewallForwardingIfEnabled: while a ruleset is pending it re-applies the PENDING document, never the older confirmed one", async () => {
+  await withTempLayout(async (layout) => {
+    const confirmed = renderFirewall({
+      payload: payload({
+        rules: [{
+          id: "old",
+          scope: "published",
+          action: "drop",
+          proto: "tcp",
+          ports: "1111",
+          sources: ["any"],
+          origin: "user",
+        }],
+      }),
+      sshPorts: [22],
+      includeForward: { 4: true, 6: false },
+    });
+    const pending = renderFirewall({
+      payload: payload({
+        rules: [{
+          id: "new",
+          scope: "published",
+          action: "drop",
+          proto: "tcp",
+          ports: "2222",
+          sources: ["any"],
+          origin: "user",
+        }],
+      }),
+      sshPorts: [22],
+      includeForward: { 4: true, 6: false },
+    });
+    await Deno.mkdir(layout.configDir, { recursive: true });
+    await Deno.mkdir(layout.runDir, { recursive: true });
+    await Deno.writeTextFile(
+      join(layout.configDir, FIREWALL_V4_FILENAME),
+      confirmed.v4,
+    );
+    await Deno.writeTextFile(
+      join(layout.configDir, FIREWALL_PENDING_V4_FILENAME),
+      pending.v4,
+    );
+    await Deno.writeTextFile(
+      pendingMarkerPath(layout),
+      JSON.stringify({
+        version: 1,
+        digest: pending.digest,
+        generation: 9,
+        armedAt: "2026-10-01T12:00:00.000Z",
+        deadlineAt: "2026-10-01T12:02:00.000Z",
+        windowSeconds: 120,
+        v6: "keep",
+      }),
+    );
+    const host = fakeHost({
+      "iptables -C DOCKER-USER -j TP-FWD": fail("Bad rule"),
+    });
+    await reinstallFirewallForwardingIfEnabled({ run: host.run, layout });
+    const restores = host.calls.filter((c) =>
+      c.cmd === "iptables-restore" && !c.args.includes("--test")
+    );
+    assertEquals(restores.length, 1);
+    assertEquals(restores[0]!.stdin, pending.v4);
+
+    // Once the marker is gone (confirmed or rolled back) the durable document
+    // is the truth again.
+    await Deno.remove(pendingMarkerPath(layout));
+    const after = fakeHost();
+    await reinstallFirewallForwardingIfEnabled({ run: after.run, layout });
+    const durable = after.calls.filter((c) =>
+      c.cmd === "iptables-restore" && !c.args.includes("--test")
+    );
+    assertEquals(durable[0]!.stdin, confirmed.v4);
+  });
+});
+
+test("reinstallFirewallForwardingIfEnabled: a pending marker with no pending document does nothing and never throws", async () => {
+  await withTempLayout(async (layout) => {
+    await Deno.mkdir(layout.runDir, { recursive: true });
+    await Deno.writeTextFile(
+      pendingMarkerPath(layout),
+      JSON.stringify({
+        version: 1,
+        digest: "d".repeat(64),
+        generation: 1,
+        armedAt: "2026-10-01T12:00:00.000Z",
+        deadlineAt: "2026-10-01T12:02:00.000Z",
+        windowSeconds: 120,
+        v6: "keep",
+      }),
+    );
+    const host = fakeHost();
+    await reinstallFirewallForwardingIfEnabled({ run: host.run, layout });
+    assertEquals(host.calls, []);
+  });
+});
+
 test("parseSshdEffectivePorts reads port and pinned listenaddress lines", () => {
   const output = [
     "port 22",

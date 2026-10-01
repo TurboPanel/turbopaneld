@@ -24,6 +24,7 @@ function stubIo(overrides: Partial<DaemonRunIo> = {}): {
   exits: number[];
   fabricRestores: number;
   fabricReinstalls: number;
+  firewallReinstalls: number;
   instanceStops: number;
   sentinelStops: number;
   dockerCloses: number;
@@ -34,6 +35,7 @@ function stubIo(overrides: Partial<DaemonRunIo> = {}): {
   const exits: number[] = [];
   let fabricRestores = 0;
   let fabricReinstalls = 0;
+  let firewallReinstalls = 0;
   let instanceStops = 0;
   let sentinelStops = 0;
   let dockerCloses = 0;
@@ -81,6 +83,10 @@ function stubIo(overrides: Partial<DaemonRunIo> = {}): {
       fabricReinstalls += 1;
       return Promise.resolve();
     },
+    reinstallFirewallForwardingIfEnabled: () => {
+      firewallReinstalls += 1;
+      return Promise.resolve();
+    },
     shouldEnableDockerIntegration: () => false,
     shouldConnectToInstance: () => false,
     createDockerClient: () => dockerClient,
@@ -113,6 +119,9 @@ function stubIo(overrides: Partial<DaemonRunIo> = {}): {
     },
     get fabricReinstalls() {
       return fabricReinstalls;
+    },
+    get firewallReinstalls() {
+      return firewallReinstalls;
     },
     get instanceStops() {
       return instanceStops;
@@ -235,6 +244,59 @@ test("runDaemon reinstalls fabric when Docker becomes reachable", async () => {
   });
   await runDaemon(stub.io);
   assertEquals(stub.fabricReinstalls >= 2, true);
+});
+
+test("runDaemon re-hangs the firewall chain at startup and every time Docker becomes reachable, beside the fabric one", async () => {
+  const reachability: Array<(reachable: boolean) => void> = [];
+  const stub = stubIo({
+    initOrchestration: () => Promise.resolve(true),
+    shouldEnableDockerIntegration: () => true,
+    dockerBinaryPresent: () => Promise.resolve(true),
+    createDockerMonitor: () => ({
+      subscribeReachability: (cb) => {
+        reachability.push(cb);
+      },
+    }),
+    startTunnels: () => {
+      for (const cb of reachability) {
+        cb(false);
+        cb(true);
+        cb(true);
+      }
+      return Promise.resolve();
+    },
+  });
+  await runDaemon(stub.io);
+  // one at startup, two for the two reachable callbacks (the unreachable one is ignored)
+  assertEquals(stub.firewallReinstalls, 3);
+  assertEquals(stub.firewallReinstalls, stub.fabricReinstalls);
+});
+
+test("runDaemon does not touch the firewall when orchestration is not ready", async () => {
+  const stub = stubIo();
+  await runDaemon(stub.io);
+  assertEquals(stub.firewallReinstalls, 0);
+});
+
+test("a failing fabric reinstall does not skip the firewall one", async () => {
+  let firewall = 0;
+  const stub = stubIo({
+    initOrchestration: () => Promise.resolve(true),
+    reinstallFabricForwardingIfEnabled: () =>
+      Promise.reject(new Error("fabric went away")),
+    reinstallFirewallForwardingIfEnabled: () => {
+      firewall += 1;
+      return Promise.resolve();
+    },
+  });
+  let failure: unknown = null;
+  try {
+    await runDaemon(stub.io);
+  } catch (err) {
+    failure = err;
+  }
+  assertEquals(firewall, 1, "the firewall hook still ran");
+  assertEquals((failure as Error | null)?.message, "fabric went away");
 });
 
 test("runDaemon passes the Docker monitor into the default sentinel", async () => {

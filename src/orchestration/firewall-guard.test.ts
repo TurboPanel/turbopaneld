@@ -100,9 +100,10 @@ async function withTree<T>(fn: (tree: Tree) => Promise<T>): Promise<T> {
 async function runGuard(
   tree: Tree,
   extraEnv: Record<string, string> = {},
+  guardArgs: string[] = [],
 ): Promise<{ code: number; stderr: string; calls: string[] }> {
   const output = await new Deno.Command("/bin/sh", {
-    args: [GUARD],
+    args: [GUARD, ...guardArgs],
     clearEnv: true,
     env: {
       PATH: `${tree.bin}:/usr/bin:/bin`,
@@ -403,5 +404,106 @@ test("it refuses to run as anyone but root", async () => {
     assertEquals(result.code, 1);
     assertStringIncludes(result.stderr, "must run as root");
     assertEquals(result.calls, []);
+  });
+});
+
+const GUARD_TIMER_STOP = "systemctl stop turbopanel-firewall-guard.timer";
+
+test("restore at boot loads the confirmed documents only, drops stale pending ones and leaves the marker and timer alone", async () => {
+  await withTree(async (tree) => {
+    await Deno.copyFile(
+      join(FIXTURES, "golden.v4"),
+      join(tree.config, "firewall.v4"),
+    );
+    await Deno.copyFile(
+      join(FIXTURES, "golden.v6"),
+      join(tree.config, "firewall.v6"),
+    );
+    await arm(tree, FUTURE);
+    const result = await runGuard(tree, {}, ["restore"]);
+    assertEquals(result.code, 0, result.stderr);
+    assert(
+      result.calls.includes("iptables-restore -w 5 --noflush --test"),
+      "the document is tested first",
+    );
+    assert(result.calls.includes("iptables -w 5 -I INPUT 1 -j TP-INPUT"));
+    assert(result.calls.includes("ip6tables -w 5 -I INPUT 1 -j TP-INPUT"));
+    assert(
+      !result.calls.includes(GUARD_TIMER_STOP),
+      "boot restore never touches the confirm timer",
+    );
+    assert(
+      await exists(join(tree.run, "firewall-pending.json")),
+      "nor the marker",
+    );
+    assert(!(await exists(join(tree.config, "firewall.pending.v4"))));
+    assert(!(await exists(join(tree.config, "firewall.pending.v6"))));
+    assert(
+      !(await exists(join(tree.state, "firewall-rollback.json"))),
+      "a boot restore is not a rollback and records none",
+    );
+    assertStringIncludes(result.stderr, "boot restore");
+  });
+});
+
+test("restore never loads a pending ruleset: only firewall.v4|.v6 are read", async () => {
+  await withTree(async (tree) => {
+    await arm(tree, FUTURE);
+    await Deno.copyFile(
+      join(FIXTURES, "golden.v4"),
+      join(tree.config, "firewall.pending.v4"),
+    );
+    const result = await runGuard(tree, {}, ["restore"]);
+    assertEquals(result.code, 0, result.stderr);
+    assert(
+      !result.calls.some((c) => c.startsWith("iptables-restore")),
+      "no confirmed document, so nothing is loaded",
+    );
+    assert(!(await exists(join(tree.config, "firewall.pending.v4"))));
+  });
+});
+
+test("restore with a document that is invalid or that the kernel refuses leaves the host open", async () => {
+  await withTree(async (tree) => {
+    await Deno.writeTextFile(
+      join(tree.config, "firewall.v4"),
+      "*filter\n:TP-INPUT - [0:0]\n-A INPUT -j ACCEPT\nCOMMIT\n",
+    );
+    const result = await runGuard(tree, {}, ["restore"]);
+    assertEquals(result.code, 0, result.stderr);
+    assert(!result.calls.some((c) => c.startsWith("iptables-restore")));
+    assert(result.calls.includes("iptables -w 5 -X TP-INPUT"));
+    assertStringIncludes(result.stderr, "v4 open");
+  });
+  await withTree(async (tree) => {
+    await Deno.copyFile(
+      join(FIXTURES, "golden.v4"),
+      join(tree.config, "firewall.v4"),
+    );
+    await Deno.writeTextFile(join(tree.fake, "fail-test"), "");
+    const result = await runGuard(tree, {}, ["restore"]);
+    assertEquals(result.code, 0, result.stderr);
+    assertStringIncludes(result.stderr, "v4 open");
+    assert(!(await exists(join(tree.fake, "jump.iptables.INPUT"))));
+  });
+});
+
+test("restore with nothing confirmed yet loads nothing", async () => {
+  await withTree(async (tree) => {
+    const result = await runGuard(tree, {}, ["restore"]);
+    assertEquals(result.code, 0, result.stderr);
+    assert(!result.calls.some((c) => c.startsWith("iptables-restore")));
+    assertStringIncludes(result.stderr, "v4 none");
+  });
+});
+
+test("an unknown mode is refused before anything runs", async () => {
+  await withTree(async (tree) => {
+    await arm(tree, PAST);
+    const result = await runGuard(tree, {}, ["flush"]);
+    assertEquals(result.code, 1);
+    assertStringIncludes(result.stderr, "usage: tp-firewall-guard [restore]");
+    assertEquals(result.calls, []);
+    assert(await exists(join(tree.run, "firewall-pending.json")));
   });
 });

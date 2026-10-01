@@ -15,6 +15,12 @@
 # reach the control plane" can never prove a ruleset is safe; only a human or
 # an outside probe can, which is why confirmation is explicit.
 #
+# `tp-firewall-guard restore` is the boot half (turbopanel-firewall.service,
+# ordered before docker.service): it loads only the CONFIRMED documents, never a
+# pending ruleset (the marker lives on tmpfs, so a reboot forgets it), and drops
+# any stale pending documents. It uses the same validation and the same
+# fail-open handling as a rollback.
+#
 # FAILS OPEN. The first thing a rollback does is take TurboPanel's jumps out of
 # INPUT / DOCKER-USER, which disables every TurboPanel rule at once; only then
 # does it try to put the confirmed rules back. Any error after that leaves the
@@ -27,6 +33,12 @@ tp_die() {
 }
 
 [ "$(id -u)" = "0" ] || tp_die "must run as root"
+
+MODE="${1:-guard}"
+case "$MODE" in
+  guard|restore) ;;
+  *) tp_die "usage: tp-firewall-guard [restore]" ;;
+esac
 
 # A copy under <install>/lib survives replacing share/orchestration with a
 # build from before this script existed. The systemd unit runs that copy.
@@ -129,32 +141,34 @@ tp_stop_guard_timer() {
   fi
 }
 
-# Nothing pending: the guard has nothing to do, and the timer would only keep
-# waking it.
-if [ ! -e "$MARKER" ] && [ ! -L "$MARKER" ]; then
-  tp_stop_guard_timer
-  exit 0
-fi
+if [ "$MODE" = "guard" ]; then
+  # Nothing pending: the guard has nothing to do, and the timer would only keep
+  # waking it.
+  if [ ! -e "$MARKER" ] && [ ! -L "$MARKER" ]; then
+    tp_stop_guard_timer
+    exit 0
+  fi
 
-_digest="$(tp_read_json_field "$MARKER" digest)"
-_deadline="$(tp_read_json_field "$MARKER" deadlineAt)"
-case "$_digest" in
-  ''|*[!0123456789abcdef]*) _digest="unknown" ;;
-esac
+  _digest="$(tp_read_json_field "$MARKER" digest)"
+  _deadline="$(tp_read_json_field "$MARKER" deadlineAt)"
+  case "$_digest" in
+    ''|*[!0123456789abcdef]*) _digest="unknown" ;;
+  esac
 
-_deadline_epoch=0
-if [ -n "$_deadline" ]; then
-  _deadline_epoch="$(date -u -d "$_deadline" +%s 2>/dev/null || echo 0)"
-fi
-_now_epoch="$(date -u +%s 2>/dev/null || echo 0)"
+  _deadline_epoch=0
+  if [ -n "$_deadline" ]; then
+    _deadline_epoch="$(date -u -d "$_deadline" +%s 2>/dev/null || echo 0)"
+  fi
+  _now_epoch="$(date -u +%s 2>/dev/null || echo 0)"
 
-# Not yet: the timer retries shortly. An unreadable marker (no parseable
-# deadline) is rolled back at once: a guard that cannot tell when the window
-# ends must not leave rules loaded.
-# A clock that cannot be read counts as "the window is over".
-if [ "$_now_epoch" -gt 0 ] && [ "$_deadline_epoch" -gt 0 ] &&
-  [ "$_now_epoch" -lt "$_deadline_epoch" ]; then
-  exit 0
+  # Not yet: the timer retries shortly. An unreadable marker (no parseable
+  # deadline) is rolled back at once: a guard that cannot tell when the window
+  # ends must not leave rules loaded.
+  # A clock that cannot be read counts as "the window is over".
+  if [ "$_now_epoch" -gt 0 ] && [ "$_deadline_epoch" -gt 0 ] &&
+    [ "$_now_epoch" -lt "$_deadline_epoch" ]; then
+    exit 0
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -284,6 +298,17 @@ tp_rollback_family() {
 # which cannot hand a variable back. No work dir means nothing can be staged,
 # and every family then ends open.
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/tp-firewall-guard.XXXXXX" 2>/dev/null)" || WORK_DIR=""
+
+if [ "$MODE" = "restore" ]; then
+  # Boot: confirmed rules only. A pending ruleset cannot have survived the
+  # reboot (its marker is on tmpfs), so its documents are stale: remove them.
+  rm -f "$PENDING_V4" "$PENDING_V6"
+  _boot_v4="$(tp_rollback_family iptables iptables-restore "$DURABLE_V4" durable.v4)"
+  _boot_v6="$(tp_rollback_family ip6tables ip6tables-restore "$DURABLE_V6" durable.v6)"
+  printf 'tp-firewall-guard: boot restore of confirmed rules (v4 %s, v6 %s)\n' \
+    "$_boot_v4" "$_boot_v6" >&2
+  exit 0
+fi
 
 _restored_v4="$(tp_rollback_family iptables iptables-restore "$DURABLE_V4" durable.v4)"
 _restored_v6="$(tp_rollback_family ip6tables ip6tables-restore "$DURABLE_V6" durable.v6)"
