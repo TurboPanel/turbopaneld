@@ -53,9 +53,78 @@ function routeLogThroughPresenter(
   return true;
 }
 
+const ESC = 0x1b;
+const BEL = 0x07;
+
+/** Index just past a CSI sequence (`ESC [ params intermediates final`) starting at `start` (the `[`). */
+function endOfCsi(text: string, start: number): number {
+  let i = start + 1;
+  while (
+    i < text.length && text.charCodeAt(i) >= 0x30 && text.charCodeAt(i) <= 0x3f
+  ) i++;
+  while (
+    i < text.length && text.charCodeAt(i) >= 0x20 && text.charCodeAt(i) <= 0x2f
+  ) i++;
+  const final = text.charCodeAt(i);
+  return final >= 0x40 && final <= 0x7e ? i + 1 : i;
+}
+
+/** Index just past an OSC/DCS/SOS/PM/APC string (ends at BEL or `ESC \`; unterminated eats the rest). */
+function endOfString(text: string, start: number): number {
+  for (let i = start + 1; i < text.length; i++) {
+    const code = text.charCodeAt(i);
+    if (code === BEL) return i + 1;
+    if (code === ESC) return text.charCodeAt(i + 1) === 0x5c ? i + 2 : i;
+  }
+  return text.length;
+}
+
+/** Index just past the escape sequence whose ESC is at `esc`. */
+function endOfEscape(text: string, esc: number): number {
+  const next = text.charCodeAt(esc + 1);
+  if (next === 0x5b) return endOfCsi(text, esc + 1);
+  if (
+    next === 0x5d || next === 0x50 || next === 0x58 || next === 0x5e ||
+    next === 0x5f
+  ) {
+    return endOfString(text, esc + 1);
+  }
+  return next >= 0x40 && next <= 0x5f ? esc + 2 : esc + 1;
+}
+
+/** C0 (except tab/CR/LF, handled by the caller), DEL and C1 controls. */
+function isLoneControl(code: number): boolean {
+  if (code === 0x09 || code === 0x0a || code === 0x0d) return false;
+  return code < 0x20 || (code >= 0x7f && code <= 0x9f);
+}
+
+/**
+ * Remove terminal escape sequences (ANSI CSI/OSC/...) outright and replace any
+ * other control character with `_`, so transcripts cannot repaint, retitle or
+ * beep a reader's terminal. Newline, CR and tab pass through untouched (the
+ * caller maps them).
+ */
+export function stripTerminalControls(text: string): string {
+  let out = "";
+  let i = 0;
+  while (i < text.length) {
+    const code = text.charCodeAt(i);
+    if (code === ESC) {
+      i = endOfEscape(text, i);
+    } else {
+      out += isLoneControl(code) ? "_" : text[i];
+      i++;
+    }
+  }
+  return out;
+}
+
 /** Chained replace pattern Sonar S5145 recognizes for log-injection sanitization. */
 export function stripLogInjection(text: string): string {
-  return text.replaceAll("\n", "_").replaceAll("\r", "_").replaceAll("\t", "_");
+  return stripTerminalControls(text)
+    .replaceAll("\n", "_")
+    .replaceAll("\r", "_")
+    .replaceAll("\t", "_");
 }
 
 /**
