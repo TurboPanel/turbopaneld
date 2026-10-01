@@ -40,7 +40,7 @@ test("run.sh --daemon-only does not install the control plane", async () => {
   const missingText = new TextDecoder().decode(missingPin.stderr);
   assertStringIncludes(missingText, "does not install the control plane");
   assertEquals(
-    missingText.includes("this host (self-hosted instance install)"),
+    missingText.includes("this host (self-hosted install)"),
     false,
   );
 

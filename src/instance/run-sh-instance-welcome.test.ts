@@ -82,7 +82,7 @@ test({
     assertEquals(result.status, 0, result.stdout);
     assertStringIncludes(
       result.stdout,
-      "TurboPanel  ·  Self-Hosted Instance Installer / Updater",
+      "TurboPanel  ·  Self-Hosted Control Plane Installer / Updater",
     );
     assertStringIncludes(
       result.stdout,
