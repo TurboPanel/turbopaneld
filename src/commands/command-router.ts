@@ -28,6 +28,7 @@ import {
   parsePrincipalsReconcilePayload,
   parseRebootPayload,
   parseStorageBackupPayload,
+  parseStorageRestorePayload,
   parseSystemReconcilePayload,
   parseTimezoneSetPayload,
   parseTlsTrustReconcilePayload,
@@ -57,6 +58,7 @@ import { handlePrincipalsReconcile } from "./principals-reconcile.ts";
 import { handleFirewallReconcile } from "./firewall-reconcile.ts";
 import { handleBackupsReconcile } from "../backups/reconcile.ts";
 import { handleStorageBackup } from "../backups/storage-backup.ts";
+import { handleStorageRestore } from "../backups/copy-restore.ts";
 import { handleTlsTrust } from "./tls-trust.ts";
 import { handleFabricReconcile } from "./fabric.ts";
 import {
@@ -111,6 +113,7 @@ export type CommandRouterHandlerOverrides = {
   handleManagedHaReconcile?: typeof handleManagedHaReconcile;
   handleManagedHaFailover?: typeof handleManagedHaFailover;
   handleStorageBackup?: typeof handleStorageBackup;
+  handleStorageRestore?: typeof handleStorageRestore;
   handleSystemReconcile?: typeof handleSystemReconcile;
 };
 
@@ -453,6 +456,18 @@ export async function handleCommandDispatch(
         result = await pickCommandRouterHandler(
           "handleStorageBackup",
           handleStorageBackup,
+        )(payload, daemonReceivedAt);
+        ok = true;
+        daemonRespondedAt = new Date().toISOString();
+        break;
+      }
+      case "storage.restore": {
+        // Stops exactly the containers mounting the copy, swaps in the
+        // verified archive through the helper, and starts them again.
+        const payload = parseStorageRestorePayload(message.payload);
+        result = await pickCommandRouterHandler(
+          "handleStorageRestore",
+          handleStorageRestore,
         )(payload, daemonReceivedAt);
         ok = true;
         daemonRespondedAt = new Date().toISOString();

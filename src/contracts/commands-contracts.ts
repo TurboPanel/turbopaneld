@@ -30,6 +30,7 @@ export const COMMAND_TYPES = [
   "managed.ha.reconcile",
   "managed.ha.failover",
   "storage.backup",
+  "storage.restore",
   "system.reconcile",
 ] as const;
 
@@ -355,6 +356,29 @@ export type StorageBackupResult = {
   sizeBytes?: number;
   checksum?: string;
   completedAt?: string;
+  summary?: string;
+};
+
+/**
+ * Must stay in sync with the instance canonical `storage.restore` shape.
+ *
+ * Replaces one storage copy's contents with an archive this host made.
+ * `checksum` comes from the control plane's `archive` row: an artifact whose
+ * sha256 differs is refused before anything is stopped.
+ */
+export type StorageRestorePayload = CopyBackupSource & {
+  backupId: string;
+  checksum: string;
+  policyId?: string;
+};
+
+/** Must stay in sync with the instance canonical `storage.restore` result. Container ids only. */
+export type StorageRestoreResult = {
+  backupId: string;
+  restoredAt?: string;
+  stopped?: string[];
+  restarted?: string[];
+  notRestarted?: string[];
   summary?: string;
 };
 
@@ -7130,6 +7154,59 @@ export function parseStorageBackupResult(value: unknown): StorageBackupResult {
     result.checksum = value.checksum;
   }
   if (isString(value.completedAt)) result.completedAt = value.completedAt;
+  if (isString(value.summary)) result.summary = value.summary;
+  return result;
+}
+
+/** Must stay in sync with the instance canonical `storage.restore` validator. */
+export function parseStorageRestorePayload(
+  value: unknown,
+): StorageRestorePayload {
+  if (
+    !isRecord(value) ||
+    typeof value.backupId !== "string" ||
+    !isSafeBackupId(value.backupId) ||
+    typeof value.checksum !== "string" ||
+    !CHECKSUM_SHA256_RE.test(value.checksum) ||
+    (value.policyId !== undefined && !isCanonicalBackupUuid(value.policyId))
+  ) {
+    throw new Error("Invalid storage.restore payload");
+  }
+  const payload: StorageRestorePayload = {
+    ...parseCopyBackupSource(value),
+    backupId: value.backupId,
+    checksum: value.checksum,
+  };
+  if (value.policyId !== undefined) payload.policyId = value.policyId;
+  return payload;
+}
+
+const CONTAINER_ID_RE = /^[a-f\d]{12,64}$/;
+
+function parseContainerIds(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  return value.filter((id): id is string =>
+    isString(id) && CONTAINER_ID_RE.test(id)
+  );
+}
+
+/** Lenient result parser: keeps only well-formed fields. */
+export function parseStorageRestoreResult(
+  value: unknown,
+): StorageRestoreResult {
+  if (
+    !isRecord(value) || !isString(value.backupId) || value.backupId.length === 0
+  ) {
+    return { backupId: "" };
+  }
+  const result: StorageRestoreResult = { backupId: value.backupId };
+  if (isString(value.restoredAt)) result.restoredAt = value.restoredAt;
+  const stopped = parseContainerIds(value.stopped);
+  if (stopped) result.stopped = stopped;
+  const restarted = parseContainerIds(value.restarted);
+  if (restarted) result.restarted = restarted;
+  const notRestarted = parseContainerIds(value.notRestarted);
+  if (notRestarted) result.notRestarted = notRestarted;
   if (isString(value.summary)) result.summary = value.summary;
   return result;
 }

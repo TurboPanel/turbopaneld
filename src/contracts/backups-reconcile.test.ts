@@ -4,6 +4,8 @@ import {
   parseBackupsReconcilePayload,
   parseBackupsReconcileResult,
   parseManagedRestorePayload,
+  parseStorageRestorePayload,
+  parseStorageRestoreResult,
 } from "./commands-contracts.ts";
 
 /**
@@ -250,4 +252,55 @@ test("managed.restore carries an optional policy id for a scheduled artifact", (
     Error,
     "policyId",
   );
+});
+
+const RESTORE = {
+  copyId: COPY_ID,
+  copyProvider: "docker",
+  volumeName: "shop_uploads",
+  backupId: "bk_0123abcd",
+  checksum: "a".repeat(64),
+};
+
+test("storage.restore needs the archive's checksum and a safe source", () => {
+  const parsed: unknown = parseStorageRestorePayload(RESTORE);
+  assertEquals(parsed, RESTORE);
+  const scheduled: unknown = parseStorageRestorePayload({
+    ...RESTORE,
+    policyId: POLICY_A,
+  });
+  assertEquals(scheduled, { ...RESTORE, policyId: POLICY_A });
+  for (
+    const bad of [
+      { ...RESTORE, checksum: undefined },
+      { ...RESTORE, checksum: "A".repeat(64) },
+      { ...RESTORE, policyId: "not-a-uuid" },
+      { ...RESTORE, backupId: "../x" },
+      { ...RESTORE, volumeName: "bad name" },
+      { ...RESTORE, copyProvider: "path", hostPath: "/srv/users/../etc" },
+    ]
+  ) {
+    assertThrows(() => parseStorageRestorePayload(bad));
+  }
+});
+
+test("storage.restore results keep container ids only", () => {
+  const ids = ["0123456789ab", "f".repeat(64)];
+  assertEquals(
+    parseStorageRestoreResult({
+      backupId: "bk_0123abcd",
+      restoredAt: "2026-09-30T04:00:00.000Z",
+      stopped: [...ids, "web; rm -rf /"],
+      restarted: ids,
+      notRestarted: [],
+    }),
+    {
+      backupId: "bk_0123abcd",
+      restoredAt: "2026-09-30T04:00:00.000Z",
+      stopped: ids,
+      restarted: ids,
+      notRestarted: [],
+    },
+  );
+  assertEquals(parseStorageRestoreResult(null), { backupId: "" });
 });
