@@ -21,6 +21,7 @@ import {
   listLocalDeploymentManifests,
   type LocalDeploymentManifest,
 } from "../deploy/compose-files.ts";
+import { allProjects } from "../deploy/deployment-generations.ts";
 import { sanitizeForLog } from "../util/logger.ts";
 import {
   type MutableTranscriptRedactor,
@@ -126,7 +127,7 @@ function isOwnedByLocalManifests(
 ): boolean {
   if (composeProject.length === 0 || composeService.length === 0) return false;
   for (const { manifest } of manifests) {
-    if (manifest.projectName !== composeProject) continue;
+    if (!allProjects(manifest).includes(composeProject)) continue;
     if (manifest.serviceIds?.[composeService]) return true;
   }
   return false;
