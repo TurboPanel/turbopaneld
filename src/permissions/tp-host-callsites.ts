@@ -807,6 +807,10 @@ const SITES: CallSite[] = [
     argv: ["ls", "-A", "--", `${SITE}/webroot`],
     setup: dir(`${SITE}/webroot`),
   }),
+  tpHost('src/deploy/site/app-detect.ts|["-n","ls","-A","--",path]', {
+    argv: ["ls", "-A", "--", `${SITE}/webroot`],
+    setup: dir(`${SITE}/webroot`),
+  }),
   tpHost(
     'src/deploy/site.ts|["-n","install","-m","0640","-o",userasstring,"-g",groupasstring,staged,join(documentRoot,"index.html")]',
     {
