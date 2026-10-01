@@ -93,9 +93,10 @@
   notify:
     - Reload systemd
 
-# Not enabled: the daemon arms the timer (systemctl restart) only while a
-# ruleset is pending, and a reboot forgets it. No [Install] section on purpose.
-- name: Install firewall rollback guard systemd units
+# The guard timer is not enabled: the daemon arms it (systemctl restart) only
+# while a ruleset is pending, and a reboot forgets it. No [Install] section on
+# purpose. turbopanel-firewall.service is the boot restore (enabled below).
+- name: Install firewall systemd units
   ansible.builtin.template:
     src: "{{ item.src }}"
     dest: "/etc/systemd/system/{{ item.dest }}"
@@ -105,8 +106,18 @@
   loop:
     - { src: turbopanel-firewall-guard.service.j2, dest: turbopanel-firewall-guard.service }
     - { src: turbopanel-firewall-guard.timer.j2, dest: turbopanel-firewall-guard.timer }
+    - { src: turbopanel-firewall.service.j2, dest: turbopanel-firewall.service }
   notify:
     - Reload systemd
+
+# Boot restore of the confirmed rules. Enabled, not started: starting would only
+# re-load what the kernel already holds, and the condition keeps it a no-op until
+# a ruleset has been confirmed once.
+- name: Enable the firewall boot restore unit
+  ansible.builtin.systemd:
+    name: turbopanel-firewall.service
+    enabled: true
+    daemon_reload: true
 
 - name: Install daemon systemd unit
   ansible.builtin.template:

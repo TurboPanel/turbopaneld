@@ -49,6 +49,8 @@ import {
   armPendingFirewall,
   clearPendingFirewall,
   disarmGuardTimer,
+  FIREWALL_PENDING_V4_FILENAME,
+  readPendingMarker,
   recordPendingV6,
   removeIfPresent,
   rollbackRecordPath,
@@ -433,10 +435,18 @@ export async function snapshotFirewallChains(
 }
 
 /**
- * Re-hang `TP-FWD` off `DOCKER-USER` (and re-apply the durable v4 document)
- * when dockerd becomes reachable — the Docker monitor's hook, mirroring
- * `reinstallFabricForwardingIfEnabled`. No durable document means the
- * firewall is not managed here, and nothing happens. Never throws.
+ * Re-hang `TP-FWD` off `DOCKER-USER` (and re-apply the v4 document) when
+ * dockerd becomes reachable — the Docker monitor's hook, mirroring
+ * `reinstallFabricForwardingIfEnabled`. dockerd rebuilds `DOCKER-USER` on
+ * restart, so the jump has to be put back.
+ *
+ * **Which document.** While a ruleset is pending (loaded, not yet confirmed)
+ * the kernel holds the *pending* document, so that is the one re-applied: the
+ * durable document is the last *confirmed* rules and loading it here would
+ * silently undo a ruleset that is still inside its confirm window. With
+ * nothing pending it is the durable document. No document at all means the
+ * firewall is not managed here, and nothing happens. Never throws. (IPv6's
+ * `DOCKER-USER` is not re-hung here; Docker's own ip6tables is off by default.)
  */
 export async function reinstallFirewallForwardingIfEnabled(
   options: FirewallApplyOptions = {},
@@ -445,12 +455,16 @@ export async function reinstallFirewallForwardingIfEnabled(
   const layout = options.layout ?? resolveLayout(Deno.env.toObject());
   let v4: string;
   try {
-    v4 = await Deno.readTextFile(join(layout.configDir, FIREWALL_V4_FILENAME));
+    const pending = await readPendingMarker(layout);
+    const filename = pending === null
+      ? FIREWALL_V4_FILENAME
+      : FIREWALL_PENDING_V4_FILENAME;
+    v4 = await Deno.readTextFile(join(layout.configDir, filename));
   } catch (err) {
     if (err instanceof Deno.errors.NotFound) return;
     logWarn(
       "firewall",
-      `firewall.v4 unreadable: ${sanitizeForLog(err)}`,
+      `firewall document unreadable: ${sanitizeForLog(err)}`,
     );
     return;
   }

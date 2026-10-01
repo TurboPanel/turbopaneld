@@ -12,6 +12,7 @@ import {
   reinstallFabricForwardingIfEnabled,
   restoreFabricFromPersistedState,
 } from "../commands/fabric.ts";
+import { reinstallFirewallForwardingIfEnabled } from "../firewall/apply.ts";
 import { logInfo, logWarn } from "../util/logger.ts";
 import { createSentinel, type SentinelOptions } from "../monitor/index.ts";
 import {
@@ -47,6 +48,7 @@ export type DaemonRunIo = {
   initOrchestration?: () => Promise<boolean>;
   restoreFabricFromPersistedState?: () => Promise<void>;
   reinstallFabricForwardingIfEnabled?: () => Promise<void>;
+  reinstallFirewallForwardingIfEnabled?: () => Promise<void>;
   shouldEnableDockerIntegration?: () => boolean;
   shouldConnectToInstance?: () => boolean;
   createDockerClient?: () => DockerClientLike;
@@ -105,7 +107,7 @@ async function connectControlPlane(
 
 async function maybeAttachDocker(
   io: DaemonRunIo,
-  reinstallFabric: () => Promise<void>,
+  reinstallForwardingJumps: () => Promise<void>,
 ): Promise<{
   dockerClient?: DockerClientLike;
   dockerMonitor?: DockerMonitorLike;
@@ -139,7 +141,7 @@ async function maybeAttachDocker(
     ((client) => new DockerMonitor(client as DockerClient)))(dockerClient);
   dockerMonitor.subscribeReachability((reachable) => {
     if (!reachable) return;
-    void reinstallFabric();
+    void reinstallForwardingJumps();
   });
   return { dockerClient, dockerMonitor };
 }
@@ -157,8 +159,20 @@ export async function runDaemon(io: DaemonRunIo = {}): Promise<void> {
     ((signal: Deno.Signal, handler: () => void) => {
       Deno.addSignalListener(signal, handler);
     });
-  const reinstallFabric = io.reinstallFabricForwardingIfEnabled ??
+  const reinstallFabricJump = io.reinstallFabricForwardingIfEnabled ??
     reinstallFabricForwardingIfEnabled;
+  const reinstallFirewallJump = io.reinstallFirewallForwardingIfEnabled ??
+    reinstallFirewallForwardingIfEnabled;
+  // dockerd rebuilds DOCKER-USER whenever it restarts, so both chains hung off
+  // it (the fabric's TP-FORWARD and the firewall's TP-FWD) are put back
+  // together, at startup and on every Docker reachability change.
+  const reinstallForwardingJumps = async (): Promise<void> => {
+    try {
+      await reinstallFabricJump();
+    } finally {
+      await reinstallFirewallJump();
+    }
+  };
 
   info("daemon", "starting up");
 
@@ -168,7 +182,7 @@ export async function runDaemon(io: DaemonRunIo = {}): Promise<void> {
   if (orchestrationReady) {
     await (io.restoreFabricFromPersistedState ??
       restoreFabricFromPersistedState)();
-    await reinstallFabric();
+    await reinstallForwardingJumps();
   }
 
   const abort = new AbortController();
@@ -177,7 +191,7 @@ export async function runDaemon(io: DaemonRunIo = {}): Promise<void> {
   const sentinelOptions: SentinelOptions = {};
 
   if (orchestrationReady) {
-    const attached = await maybeAttachDocker(io, reinstallFabric);
+    const attached = await maybeAttachDocker(io, reinstallForwardingJumps);
     dockerClient = attached.dockerClient;
     if (attached.dockerMonitor && !io.createSentinel) {
       sentinelOptions.dockerMonitor = attached.dockerMonitor as DockerMonitor;
