@@ -78,8 +78,9 @@ jobs:
           fi
 
   build:
-    # Signing key = environment secret TURBOPANEL_RELEASE_SIGNING_KEY (owner approval).
-    environment: release
+    # Signing key = environment secret TURBOPANEL_RELEASE_SIGNING_KEY, one environment per
+    # channel: `canary` (trunk), `rc` (staging), `release` (live, owner approval).
+    environment: ${{ inputs.channel == 'canary' && 'canary' || (inputs.channel == 'rc' && 'rc' || 'release') }}
     needs: prepare
     runs-on: ubuntu-latest
     env:
