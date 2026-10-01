@@ -588,6 +588,13 @@ export function hostingCaddyDataDir(layout: LayoutPaths): string {
   return join(layout.stateDir, "hosting-caddy");
 }
 
+/**
+ * Bounded shutdown for the hosting Caddy. Without it Caddy waits forever for
+ * open connections after SIGTERM and systemd has to kill it. The unit's
+ * `TimeoutStopSec` must stay above this.
+ */
+export const HOSTING_CADDY_GRACE_PERIOD = "5s";
+
 export function caddyfile(configDir: string): string {
   // `disable_redirects`, not `off`: every site snippet writes its own
   // `http://<host>` redirect block, but `off` also disables certificate
@@ -600,6 +607,7 @@ export function caddyfile(configDir: string): string {
   return `{
   admin ${HOSTING_CADDY_ADMIN_ADDR}
   auto_https disable_redirects
+  grace_period ${HOSTING_CADDY_GRACE_PERIOD}
   servers {
     protocols h1 h2 h3
   }
@@ -638,6 +646,7 @@ ExecStart=${caddy} run --config ${
 ExecReload=${caddy} reload --config ${
     join(configDir, "Caddyfile")
   } --adapter caddyfile --address ${HOSTING_CADDY_ADMIN_ADDR}
+TimeoutStopSec=30
 Restart=always
 RestartSec=2
 
