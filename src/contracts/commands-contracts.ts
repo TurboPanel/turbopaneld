@@ -1650,6 +1650,12 @@ export type ManagedLifecyclePayload = {
    * (defaults to postgres).
    */
   engine?: ManagedEngineCode;
+  /**
+   * Optional HA role of the member being acted on, so its health is reported
+   * under the right role. Absent on in-flight commands from older releases
+   * (defaults to primary).
+   */
+  role?: "primary" | "replica";
 };
 
 /** Must stay in sync with the instance canonical `managed.lifecycle` shape. */
@@ -6626,6 +6632,12 @@ export function parseManagedLifecyclePayload(
       throw new TypeError("Invalid managed.lifecycle payload");
     }
     payload.engine = value.engine;
+  }
+  if (value.role !== undefined) {
+    if (value.role !== "primary" && value.role !== "replica") {
+      throw new TypeError("Invalid managed.lifecycle payload");
+    }
+    payload.role = value.role;
   }
   return payload;
 }

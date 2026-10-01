@@ -103,7 +103,7 @@ export async function handleManagedLifecycle(
     const engine = getManagedEngineRuntime(payload.engine ?? "postgres");
     const collected = await collectManagedMemberHealth(project, engine, {
       memberId: payload.memberId,
-      role: "primary",
+      role: payload.role ?? "primary",
       redact: (text) => sanitizeForLog(text),
     }, run);
     const containers = collected.containers ?? [];
