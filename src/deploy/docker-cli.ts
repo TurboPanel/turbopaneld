@@ -200,6 +200,16 @@ async function runDockerAsRoot(
   );
 }
 
+/**
+ * True when Deno refused the spawn itself because this process's `--allow-run`
+ * list does not name the program (a scoped runner such as the scheduled-backup
+ * one is not granted `sudo`). Nothing was run, so the escalation rung has told
+ * us nothing about the Docker socket and must not mask its real error.
+ */
+function deniedByDenoPermissions(result: DockerCliResult): boolean {
+  return result.stderr.includes("Requires run access");
+}
+
 function preferOriginalSocketError(
   direct: DockerCliResult,
   fallback: DockerCliResult,
@@ -220,7 +230,8 @@ function preferOriginalSocketError(
  * command failure (e.g. a non-zero pg_basebackup) must be reported verbatim.
  */
 function escalationBlocked(result: DockerCliResult): boolean {
-  return result.stderr.toLowerCase().includes("sudo:") ||
+  return deniedByDenoPermissions(result) ||
+    result.stderr.toLowerCase().includes("sudo:") ||
     dockerOutputLooksLikeSocketPermission(result.stdout, result.stderr);
 }
 
@@ -299,6 +310,11 @@ async function probeDockerInvocation(): Promise<DockerInvocation> {
   const selfPrefix = ["-n", "-u", user, "--", dockerBin];
   const refreshed = await runRaw(SUDO_BIN, [...selfPrefix, ...PROBE_ARGS]);
   if (refreshed.success) return { bin: SUDO_BIN, prefixArgs: selfPrefix };
+  // This process may not run sudo at all: keep the direct invocation so the
+  // caller sees Docker's own socket error, not a Deno permission error.
+  if (deniedByDenoPermissions(refreshed)) {
+    return { bin: dockerBin, prefixArgs: [] };
+  }
 
   const rootPrefix = ["-n", "--", dockerBin];
   const asRoot = await runRaw(SUDO_BIN, [...rootPrefix, ...PROBE_ARGS]);
