@@ -189,6 +189,70 @@ export async function runVocabularyCheck(
   return failures;
 }
 
+// --- Warn mode (not blocking) -----------------------------------------------
+// The terminology page on the website names one word for each part: control
+// plane, app / web app, daemon, server, administrator. These retired words are
+// reported as warnings so new copy can be corrected before the list is promoted
+// to FORBIDDEN_PHRASES. Keep in sync with the sibling checks.
+export const WARN_PHRASES: ReadonlyArray<{ label: string; pattern: RegExp }> = [
+  { label: "the console", pattern: /(?<![\w./-])the console(?![\w-])/i },
+  { label: "instance owner", pattern: /\binstance owner\b/i },
+  { label: "Instance CA", pattern: /\bInstance CA\b/ },
+  { label: "hosted instance", pattern: /\bhosted instance\b/i },
+  { label: "remote node", pattern: /\bremote nodes?\b/i },
+  { label: "fleet", pattern: /(?<![\w./'"`-])fleet(?![\w'"`-])(?!\.\w)/i },
+];
+
+/** Lines where a warn phrase is a real tool or identifier name. */
+export const WARN_ALLOWLIST_LINE_PATTERNS: RegExp[] = [
+  /console\.(log|error|warn|info|debug|table)/,
+  /\.\/console|dev console|developer console|dev\/console|\.local\/console/i,
+  /^\s*(import|export)\b.*from\b/,
+];
+
+export function collectVocabularyWarnings(rel: string, text: string): string[] {
+  if (rel.endsWith("terminology.mdx")) return [];
+  const warnings: string[] = [];
+  text.split("\n").forEach((line, i) => {
+    if (WARN_ALLOWLIST_LINE_PATTERNS.some((pattern) => pattern.test(line))) {
+      return;
+    }
+    for (const { label, pattern } of WARN_PHRASES) {
+      if (pattern.test(line)) {
+        warnings.push(
+          `${rel}:${i + 1} says "${label}" (see the terminology page)`,
+        );
+      }
+    }
+  });
+  return warnings;
+}
+
+export async function runVocabularyWarnings(
+  root = repoRoot,
+): Promise<string[]> {
+  const warnings: string[] = [];
+  for await (const file of walkVocabularyFiles(root, root)) {
+    if (!SCAN_EXTENSIONS.test(file)) continue;
+    const text = await Deno.readTextFile(file);
+    warnings.push(...collectVocabularyWarnings(relative(root, file), text));
+  }
+  return warnings;
+}
+
+export function reportVocabularyWarnings(
+  warnings: string[],
+  log: (message: string) => void = (message) => console.log(message),
+): void {
+  if (warnings.length === 0) return;
+  log(
+    `check-vocabulary: ${warnings.length} terminology warning(s) (warn mode, not blocking):`,
+  );
+  for (const warning of warnings.slice(0, 40)) log(`  ! ${warning}`);
+  if (warnings.length > 40) log(`  ... and ${warnings.length - 40} more`);
+}
+
 if (import.meta.main) {
+  reportVocabularyWarnings(await runVocabularyWarnings());
   reportVocabularyFailures(await runVocabularyCheck());
 }
