@@ -2,9 +2,11 @@ import { assertEquals, assertThrows } from "@std/assert";
 import { join } from "@std/path";
 import {
   collectVocabularyFailures,
+  collectVocabularyWarnings,
   isAllowlisted,
   isSkippedPath,
   reportVocabularyFailures,
+  reportVocabularyWarnings,
   runVocabularyCheck,
 } from "./check-vocabulary.ts";
 
@@ -174,4 +176,52 @@ test("runVocabularyCheck walks fixtures and skips lockfiles and skip dirs", asyn
   } finally {
     await Deno.remove(root, { recursive: true });
   }
+});
+
+test("collectVocabularyWarnings reports the retired customer words", () => {
+  const text = [
+    "Sign in to the console.",
+    "Ask the instance owner.",
+    "Instance CA downloaded",
+    "On a hosted instance.",
+    "Enrol a remote node.",
+    "Update the fleet.",
+  ].join("\n");
+  assertEquals(
+    collectVocabularyWarnings("src/x.ts", text).map((w) => w.split('"')[1]),
+    [
+      "the console",
+      "instance owner",
+      "Instance CA",
+      "hosted instance",
+      "remote node",
+      "fleet",
+    ],
+  );
+});
+
+test("collectVocabularyWarnings leaves tool names and identifiers alone", () => {
+  const text = [
+    'console.log("the console")',
+    "Run ./console from the dev checkout",
+    "The dev console converges the stack.",
+    "case 'fleet':",
+    "fleet-capacity.ts and fleet.mass_disconnect and summarizeFleetSteps",
+  ].join("\n");
+  assertEquals(collectVocabularyWarnings("src/x.ts", text), []);
+  assertEquals(
+    collectVocabularyWarnings("docs/terminology.mdx", "the console fleet"),
+    [],
+  );
+});
+
+test("reportVocabularyWarnings prints a summary and never exits", () => {
+  const lines: string[] = [];
+  reportVocabularyWarnings(
+    ['a.md:1 says "fleet" (see the terminology page)'],
+    (m) => lines.push(m),
+  );
+  assertEquals(lines.length, 2);
+  reportVocabularyWarnings([], (m) => lines.push(m));
+  assertEquals(lines.length, 2);
 });
