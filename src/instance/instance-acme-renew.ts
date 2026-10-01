@@ -631,19 +631,35 @@ function clipError(message: string): string {
   return `${text.slice(0, EVENT_ERROR_MAX)}…`;
 }
 
+/**
+ * The renewal wait lives in the instance's own state directory
+ * (`<state>/instance`, owned by the instance user). It used to sit in
+ * `<state>/instance-acme`, which is the issuer's Caddy storage: `tpcaddy:tp`
+ * mode 2750, so the instance user could never write there (EACCES on every
+ * save) and Caddy's key storage must not be group-writable.
+ */
 function renewalStatePath(layout: LayoutPaths): string {
+  return join(layout.stateDir, "instance", "acme-renewal-state.json");
+}
+
+/** Where an earlier release looked; read only, never written. */
+function legacyRenewalStatePath(layout: LayoutPaths): string {
   return join(layout.stateDir, "instance-acme", "renewal-state.json");
 }
 
-async function readRenewalState(layout: LayoutPaths): Promise<RenewalState> {
-  let raw: string;
+async function readOptionalText(path: string): Promise<string | null> {
   try {
-    raw = await Deno.readTextFile(renewalStatePath(layout));
+    return await Deno.readTextFile(path);
   } catch (err) {
-    if (err instanceof Deno.errors.NotFound) return emptyState();
+    if (err instanceof Deno.errors.NotFound) return null;
     throw err;
   }
-  return parseRenewalState(raw);
+}
+
+async function readRenewalState(layout: LayoutPaths): Promise<RenewalState> {
+  const raw = await readOptionalText(renewalStatePath(layout)) ??
+    await readOptionalText(legacyRenewalStatePath(layout));
+  return raw === null ? emptyState() : parseRenewalState(raw);
 }
 
 function emptyState(): RenewalState {

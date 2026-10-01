@@ -95,7 +95,7 @@ is already valid and outside the renewal window is reported once as well
 before it answers, so a leaf it just installed is reported on the same
 request. A failure
 waits at least one hour before that hostname is tried again, then doubles up
-to 24 hours. The wait is stored in `<stateDir>/instance-acme/renewal-state.json`
+to 24 hours. The wait is stored in `<stateDir>/instance/acme-renewal-state.json` (not under `instance-acme`, which is the issuer's Caddy storage, `tpcaddy:tp` 2750; an older `instance-acme/renewal-state.json` is still read)
 so a restart cannot spend Let's Encrypt's five failed authorizations per
 identifier per hour (one refill every 12 minutes). The tenant
 `AcmeIssuanceObserver` is unchanged and still probes organization names.
