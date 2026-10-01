@@ -13,68 +13,8 @@
   when: turbopanel_dev_user | default('') | length > 0
   ansible.builtin.import_tasks: website-logs.yml
 
-- name: Read postgres password for systemd units
-  ansible.builtin.slurp:
-    src: "{{ turbopanel_config_dir }}/postgres/.pgpass"
-  register: _launch_pgpass
-  failed_when: false
-
-- name: Set postgres password for systemd units
-  ansible.builtin.set_fact:
-    turbopanel_pg_password: "{{ _launch_pgpass.content | b64decode | trim }}"
-  when:
-    - _launch_pgpass.content is defined
-    - (_launch_pgpass.content | b64decode | trim | length) > 0
-
-- name: Read RabbitMQ password for systemd units
-  when: (turbopanel_instance_runtime | default('deno')) == 'deno'
-  ansible.builtin.slurp:
-    src: "{{ turbopanel_config_dir }}/rabbitmq/.rabbitmq_pass"
-  register: _launch_rabbitmq_pass
-  failed_when: false
-
-- name: Set RabbitMQ URL for systemd units
-  when:
-    - (turbopanel_instance_runtime | default('deno')) == 'deno'
-    - _launch_rabbitmq_pass.content is defined
-    - (_launch_rabbitmq_pass.content | b64decode | trim | length) > 0
-  ansible.builtin.set_fact:
-    turbopanel_amqp_url: >-
-      amqp://{{ rabbitmq_user }}:{{ _launch_rabbitmq_pass.content | b64decode | trim }}@127.0.0.1:{{ rabbitmq_amqp_port }}{{ rabbitmq_vhost }}
-
-# Compiled-mode contract: the unit puts {{ turbopanel_duckdb_lib_dir }} on
-# LD_LIBRARY_PATH so the self-extracted duckdb.node addon can dlopen its
-# companion libduckdb.so. instance-build stages it; converging a compiled
-# instance without it would install a service that crash-loops at startup,
-# so fail the converge loudly instead.
-- name: Check vendored libduckdb.so for compiled instance
-  when: turbopanel_instance_run_mode == 'compiled'
-  ansible.builtin.stat:
-    path: "{{ turbopanel_duckdb_lib_dir }}/libduckdb.so"
-  register: _launch_duckdb_lib
-
-- name: Fail when compiled instance lacks vendored libduckdb.so
-  when:
-    - turbopanel_instance_run_mode == 'compiled'
-    - not _launch_duckdb_lib.stat.exists
-  ansible.builtin.fail:
-    msg: >-
-      Compiled run mode requires {{ turbopanel_duckdb_lib_dir }}/libduckdb.so
-      (the instance unit's LD_LIBRARY_PATH). On a managed install the release
-      package ships it (run.sh --instance unpacks lib/libduckdb.so); in
-      co-located dev run the instance-build role (instance-build-toggle
-      playbook) so it stages the DuckDB native library.
-
-- name: Install instance systemd unit
-  ansible.builtin.template:
-    src: turbopanel-instance.service.j2
-    dest: "/etc/systemd/system/{{ instance_service_name }}.service"
-    owner: root
-    group: root
-    mode: "0640"
-  notify:
-    - Reload systemd for instance units
-    - Restart turbopanel instance
+- name: Render the instance, Caddy and ACME issuer units
+  ansible.builtin.import_tasks: units.yml
 
 # `wrangler dev` does not run the Worker's `* * * * *` cron trigger, so on the
 # Workers dev runtime a systemd timer hits wrangler's local trigger endpoint
@@ -176,16 +116,8 @@
     group: "{{ turbopanel_group }}"
     mode: "0750"
 
-- name: Render the Caddy site config
-  when: turbopanel_dev_user | default('') | length == 0
-  ansible.builtin.template:
-    src: Caddyfile.j2
-    dest: "{{ turbopanel_caddyfile }}"
-    owner: root
-    group: "{{ turbopanel_group }}"
-    mode: "0640"
-  notify:
-    - Reload turbopanel caddy
+- name: Render the Caddy site config unless that would downgrade TLS
+  ansible.builtin.import_tasks: caddyfile.yml
 
 - name: Install the control-plane updating page
   when: turbopanel_dev_user | default('') | length == 0
@@ -209,27 +141,6 @@
       - --adapter
       - caddyfile
   changed_when: false
-
-- name: Install Caddy systemd unit
-  ansible.builtin.template:
-    src: turbopanel-caddy.service.j2
-    dest: "/etc/systemd/system/{{ caddy_service_name }}.service"
-    owner: root
-    group: root
-    mode: "0640"
-  notify:
-    - Reload systemd for instance units
-    - Restart turbopanel caddy
-
-- name: Install instance ACME issuer unit
-  ansible.builtin.template:
-    src: turbopanel-instance-acme.service.j2
-    dest: "/etc/systemd/system/{{ instance_acme_service_name }}.service"
-    owner: root
-    group: root
-    mode: "0640"
-  notify:
-    - Reload systemd for instance units
 
 - name: Keep the instance ACME issuer disabled
   ansible.builtin.systemd:

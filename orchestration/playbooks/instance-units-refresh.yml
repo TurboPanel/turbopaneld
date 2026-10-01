@@ -11,6 +11,11 @@
 #     -e turbopanel_install_root=/opt/turbopanel instance-units-refresh.yml
 #
 # Contract:
+# - It never touches the Caddyfile or any TLS state: only unit templates are
+#   rendered (instance-launch tasks/units.yml). The hostname list, ACME
+#   settings and uploaded certificates arrive as extra-vars from the control
+#   plane's apply, which this play does not have; the leaf generator reads the
+#   persisted instance-hostnames.json instead (resolve-hostnames.yml).
 # - It restarts nothing (instance_start is false, so the instance-launch
 #   handlers that restart the instance and Caddy are skipped). The caller
 #   restarts the instance once, under the update health check and rollback.
@@ -54,9 +59,13 @@
             - deno-runtime
             - node-runtime
 
-        - name: Instance, Caddy and supporting units
+        # Unit templates ONLY (tasks/units.yml). The rest of instance-launch
+        # renders the Caddyfile from TLS extra-vars this play does not carry,
+        # rotates secrets and runs migrations: never include it from here.
+        - name: Instance, Caddy and ACME issuer units
           ansible.builtin.include_role:
             name: instance-launch
+            tasks_from: units.yml
 
         - name: Docker gate (no-op without Docker, observe mode)
           ansible.builtin.include_role:

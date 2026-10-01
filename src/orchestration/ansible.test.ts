@@ -861,9 +861,15 @@ test(
     const tasks = await Deno.readTextFile(
       join(CHECKOUT_ORCHESTRATION_DIR, "roles/instance-launch/tasks/main.yml"),
     );
+    const caddyfileTasks = await Deno.readTextFile(
+      join(
+        CHECKOUT_ORCHESTRATION_DIR,
+        "roles/instance-launch/tasks/caddyfile.yml",
+      ),
+    );
     assertMatch(
-      tasks,
-      /- name: Render the Caddy site config\n\s+when: turbopanel_dev_user \| default\(''\) \| length == 0\n\s+ansible\.builtin\.template:\n\s+src: Caddyfile\.j2\n\s+dest: "\{\{ turbopanel_caddyfile \}\}"[\s\S]*?notify:\n\s+- Reload turbopanel caddy/,
+      caddyfileTasks,
+      /- name: Render the Caddy site config\n\s+when:\n\s+- turbopanel_dev_user \| default\(''\) \| length == 0\n\s+- not \(_caddyfile_keep_installed \| bool\)\n\s+ansible\.builtin\.template:\n\s+src: Caddyfile\.j2\n\s+dest: "\{\{ turbopanel_caddyfile \}\}"[\s\S]*?notify:\n\s+- Reload turbopanel caddy/,
       "instance-launch renders Caddyfile.j2 to turbopanel_caddyfile on managed hosts and reloads Caddy on change",
     );
     assertMatch(

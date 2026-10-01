@@ -1,0 +1,49 @@
+---
+# Guarded render of the managed Caddyfile (imported by main.yml).
+# Never silently downgrade TLS. The hostnames above come from the caller's
+# extra-vars or, when it passed none, from the persisted
+# instance-hostnames.json. If neither names a Let's Encrypt or uploaded host
+# but the installed Caddyfile serves one, a bare converge would replace it
+# with a self-signed one: keep the installed file and say so. An explicit
+# turbopanel_hostnames_json (even "[]") is the operator's decision and wins.
+- name: Read the installed Caddyfile
+  when: turbopanel_dev_user | default('') | length == 0
+  ansible.builtin.slurp:
+    src: "{{ turbopanel_caddyfile }}"
+  register: _installed_caddyfile
+  failed_when: false
+
+- name: Decide whether the render would downgrade TLS
+  ansible.builtin.set_fact:
+    _caddyfile_keep_installed: >-
+      {{
+        (turbopanel_dev_user | default('') | length == 0)
+        and (turbopanel_hostnames_json | default('') | length == 0)
+        and (_installed_caddyfile.content is defined)
+        and ((_installed_caddyfile.content | b64decode) is search('tls mode: (lets_encrypt|upload)\)'))
+        and ((turbopanel_hostnames | default([]) | rejectattr('source', 'equalto', 'platform-ca') | list | length) == 0)
+      }}
+
+- name: Warn that the Caddyfile was kept to avoid a TLS downgrade
+  when: _caddyfile_keep_installed | bool
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: kept the installed Caddyfile at {{ turbopanel_caddyfile }}.
+      It serves Let's Encrypt or uploaded certificates, but this converge
+      carries no hostnames and {{ turbopanel_config_dir }}/caddy/instance-hostnames.json
+      lists none, so rendering would have switched the panel to a
+      self-signed certificate. Re-apply Hostnames in the app (Save and
+      Apply) to re-render it.
+
+- name: Render the Caddy site config
+  when:
+    - turbopanel_dev_user | default('') | length == 0
+    - not (_caddyfile_keep_installed | bool)
+  ansible.builtin.template:
+    src: Caddyfile.j2
+    dest: "{{ turbopanel_caddyfile }}"
+    owner: root
+    group: "{{ turbopanel_group }}"
+    mode: "0640"
+  notify:
+    - Reload turbopanel caddy
