@@ -2992,6 +2992,23 @@ test("ensureHostingIngress in gate mode writes the gate shape and compose remove
   }
 });
 
+test("ensureHostingIngress keeps the socket proxy for the anonymous Traefik (no ingress label) even with the switch on", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  try {
+    await ensureHostingIngress(layout, HOSTING_INGRESS_NETWORK, {
+      runDocker: () => Promise.resolve(fakeDockerOk()),
+      ensureHostingCaddyRuntime: () => Promise.resolve(),
+      ingressDockerGate: () => Promise.resolve(true),
+    });
+    assertEquals(
+      await Deno.readTextFile(hostingIngressComposePath(layout)),
+      traefikCompose(HOSTING_INGRESS_NETWORK),
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
 test("ensureHostingIngress without the flag keeps the socket proxy", async () => {
   const { layout, cleanup } = await makeTestLayout();
   try {

@@ -175,8 +175,10 @@ use `--providers.docker.endpoint=unix:///var/run/turbopanel-gate/docker.sock`.
 The shared ingress project drops the `docker-socket-proxy` service (and
 `--remove-orphans` deletes the Tecnativa container) once no service Traefik
 compose file on disk still names it; until then it keeps the proxy without
-Traefik depending on it. Without the switch both compose documents are byte
-for byte what they were.
+Traefik depending on it. The anonymous shared Traefik (no
+`hosting-ingress` descriptor yet, so no `turbopanel.role=ingress` label for the
+allowance) keeps the proxy until it has one. Without the switch both compose
+documents are byte for byte what they were.
 
 **Policy.** A container labelled `turbopanel.role=ingress` (both Traefiks) may
 bind exactly `/run/turbopanel-gate/ro`, read-only (`ingress-socket`

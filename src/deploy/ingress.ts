@@ -849,11 +849,19 @@ async function composeNamesSocketProxy(path: string): Promise<boolean> {
   }
 }
 
+/**
+ * The anonymous (pre-`system.reconcile`) shared Traefik carries no
+ * `turbopanel.role=ingress` label, so the gate would not grant it the
+ * read-only socket bind: it keeps the socket proxy until it has an identity.
+ */
 async function sharedTraefikDocker(
   layout: LayoutPaths,
+  hasIdentity: boolean,
   gateEnabled: () => Promise<boolean>,
 ): Promise<SharedTraefikDocker> {
-  if (!(await gateEnabled())) return { source: "socket-proxy" };
+  if (!hasIdentity || !(await gateEnabled())) {
+    return { source: "socket-proxy" };
+  }
   return {
     source: "gate",
     keepSocketProxy: await serviceIngressUsesSocketProxy(layout),
@@ -897,6 +905,7 @@ export async function ensureHostingIngress(
 
   const docker = await sharedTraefikDocker(
     layout,
+    descriptor !== undefined,
     deps?.ingressDockerGate ?? (() => ingressDockerGateEnabled()),
   );
   await Deno.writeTextFile(
