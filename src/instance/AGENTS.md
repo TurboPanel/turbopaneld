@@ -444,12 +444,17 @@ Caddyfile does not yet serve `updating.html`, `instance-launch-only.yml`
 re-templates it first. After restart, `waitForInstanceHealth` polls
 `GET /api/health` on the instance socket until `version` and
 `revision.commit` match the manifest, within
-`INSTANCE_UPDATE_HEALTH_TIMEOUT_MS`. A timeout or mismatch runs
+`INSTANCE_UPDATE_HEALTH_TIMEOUT_MS` (10 min by default; set
+`TURBOPANEL_UPDATE_HEALTH_TIMEOUT_SECONDS` to 30..3600 for a slow host; the poll
+backs off from 1 s to 10 s and succeeds the moment the new build answers). A timeout or mismatch runs
 `instance-rollback.yml` (restore `.prev`, and `pg_restore` only when the
 migration fingerprint changed) and checks health again. Success of that
 check reports `rolled-back` with the original `errorCode` (`health_timeout`,
 `health_mismatch`, or `restart_failed`) on `update-progress` (when
-`update-progress-v1` is advertised) and on `instance-update-result`. A failed
+`update-progress-v1` is advertised) and on `instance-update-result`. If the rollback cannot be confirmed but a final
+60 s recheck finds the NEW build serving, the update is a success with a
+warning (logged, and carried as the `done` progress detail), not
+`recovery_required`. A failed
 rollback reports `failed` / `recovery_required` and includes the backup path,
 `sudo -n tp-orchestrate playbook … instance-rollback.yml -e
 turbopanel_upgrade_id=…`, and a pinned `update-instance` reinstall command.
