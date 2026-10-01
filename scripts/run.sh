@@ -46,8 +46,16 @@
 # Manifest and release helpers below must stay in sync with scripts/lib/release-artifacts.sh.
 
 # Shared curl prefixes for HTTPS downloads (and the insecure-TLS install path).
-TP_CURL_FETCH='curl -fsSL'
-TP_CURL_FETCH_INSECURE='curl -fsSLk'
+#
+# Transient failures (HTTP 408/429/500/502/503/504, timeouts) are retried twice
+# (3 attempts), 3 s apart, within 60 s overall; curl honours Retry-After inside
+# that cap. GitHub answers 504 now and then and the next try works. Plain
+# --retry is used (not --retry-all-errors, curl >= 7.71) so old distro curls
+# keep working. 4xx other than 408/429 are never retried; the SHA-256 check
+# after the download is outside curl and is not retried here.
+TP_CURL_RETRY='--retry 2 --retry-delay 3 --retry-max-time 60'
+TP_CURL_FETCH="curl -fsSL $TP_CURL_RETRY"
+TP_CURL_FETCH_INSECURE="curl -fsSLk $TP_CURL_RETRY"
 
 # Release artifact downloads (channel manifest, verified binary/orchestration/JS
 # artifacts, and the Deno runtime zip) always verify TLS against public trust.
@@ -403,7 +411,7 @@ tp_artifact_curl() {
     _cacert="/etc/turbopanel/instance-ca.pem"
   fi
   if [ -n "$_cacert" ]; then
-    printf 'curl -fsSL --cacert %s' "$_cacert"
+    printf 'curl -fsSL %s --cacert %s' "$TP_CURL_RETRY" "$_cacert"
     return 0
   fi
   printf '%s' "$TP_CURL_FETCH"

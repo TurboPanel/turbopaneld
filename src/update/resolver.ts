@@ -1,5 +1,6 @@
 import { fetchWithPlatformCa } from "../instance/sockets.ts";
 import { errorText } from "../util/logger.ts";
+import { fetchWithRetry, type RetryFetchOptions } from "../util/retry-fetch.ts";
 import { getBuildInfo } from "../build-info.ts";
 import { detectInstallMode, type InstallMode } from "../paths/layout.ts";
 import { DAEMON_VERSION } from "../version.ts";
@@ -46,9 +47,10 @@ async function trustedFetch(
   url: string,
   env: Record<string, string | undefined>,
   context: string,
+  retry?: RetryFetchOptions,
 ): Promise<Response> {
   try {
-    return await fetchWithPlatformCa(url, env);
+    return await fetchWithRetry(() => fetchWithPlatformCa(url, env), retry);
   } catch (err) {
     throw describeFetchError(context, err);
   }
@@ -79,6 +81,7 @@ function resolveLinuxArch(): LinuxArch {
 async function resolveManifestLocation(
   config: UpdateChannelConfig,
   env: Record<string, string | undefined>,
+  retry?: RetryFetchOptions,
 ): Promise<{ manifestUrl: string; overlay: boolean }> {
   const overlayBase = resolveOverlayDlBase(env);
   if (overlayBase === null) {
@@ -100,6 +103,7 @@ async function resolveManifestLocation(
     catalogUrl,
     env,
     "Failed to fetch channels.json",
+    retry,
   );
   if (!catalogResponse.ok) {
     throw new MalformedManifestError(
@@ -138,6 +142,8 @@ export type ResolveUpdateOptions = {
    * the running daemon (`DAEMON_VERSION` + the stamped build identity).
    */
   installed?: InstalledBuild;
+  /** Retry policy for the manifest reads (tests inject a no-wait sleep). */
+  retry?: RetryFetchOptions;
 };
 
 function runningBuild(): InstalledBuild {
@@ -197,11 +203,13 @@ export async function resolveUpdate(
   const { manifestUrl, overlay } = await resolveManifestLocation(
     config,
     env,
+    options.retry,
   );
   const manifestResponse = await trustedFetch(
     manifestUrl,
     env,
     "Failed to fetch channel manifest",
+    options.retry,
   );
   if (!manifestResponse.ok) {
     throw new MalformedManifestError(

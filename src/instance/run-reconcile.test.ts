@@ -191,6 +191,15 @@ test("buildRunReconcileArgs includes TLS flags for an https instance URL", () =>
   );
 });
 
+const RETRY_ARGS = [
+  "--retry",
+  "2",
+  "--retry-delay",
+  "3",
+  "--retry-max-time",
+  "60",
+];
+
 test("downloadRunScript applies insecure TLS flags", async () => {
   const originalCommand = Deno.Command;
   let capturedArgs: string[] | undefined;
@@ -216,6 +225,7 @@ test("downloadRunScript applies insecure TLS flags", async () => {
     assertEquals(capturedArgs, [
       "-fsSL",
       "-k",
+      ...RETRY_ARGS,
       "https://huey.lan:8443/run.sh",
     ]);
     if (!script.trim()) {
@@ -477,7 +487,12 @@ test("downloadRunScript uses -k for insecure HTTPS", async () => {
     await downloadRunScript("https://huey.lan:8443/run.sh", {
       insecureTls: true,
     });
-    assertEquals(capturedArgs, ["-fsSL", "-k", "https://huey.lan:8443/run.sh"]);
+    assertEquals(capturedArgs, [
+      "-fsSL",
+      "-k",
+      ...RETRY_ARGS,
+      "https://huey.lan:8443/run.sh",
+    ]);
   } finally {
     Deno.Command = originalCommand;
   }
@@ -507,6 +522,7 @@ test("downloadRunScript uses --cacert when platform CA is provided", async () =>
       "-fsSL",
       "--cacert",
       "/etc/turbopanel/instance-ca.pem",
+      ...RETRY_ARGS,
       "https://huey.lan:8443/run.sh",
     ]);
   } finally {
@@ -532,7 +548,12 @@ test("downloadRunScript accepts legacy boolean insecureTls option", async () => 
       }
     } as typeof Deno.Command;
     await downloadRunScript("https://huey.lan:8443/run.sh", true);
-    assertEquals(capturedArgs, ["-fsSL", "-k", "https://huey.lan:8443/run.sh"]);
+    assertEquals(capturedArgs, [
+      "-fsSL",
+      "-k",
+      ...RETRY_ARGS,
+      "https://huey.lan:8443/run.sh",
+    ]);
   } finally {
     Deno.Command = originalCommand;
   }
@@ -1297,6 +1318,91 @@ test("assertControlPlaneManifestPreflight refuses a tampered manifest", async ()
     UpdatePreflightError,
     "invalid",
   );
+});
+
+/** A fetchText that answers `statuses` in turn (the last one repeats) and counts calls. */
+function flakyManifests(statuses: number[], okBody: string) {
+  const calls = { n: 0 };
+  const fetchText = (_url: string) => {
+    const status = statuses[Math.min(calls.n, statuses.length - 1)];
+    calls.n += 1;
+    return Promise.resolve({
+      ok: status === 200,
+      status,
+      body: status === 200 ? okBody : "",
+    });
+  };
+  return { calls, fetchText };
+}
+
+const noWait = { sleep: () => Promise.resolve() };
+
+test("assertControlPlaneManifestPreflight retries a 503 and then verifies", async () => {
+  const flaky = flakyManifests([503, 200], SIGNED_INSTANCE_MANIFEST_BODY);
+  const verified = await assertControlPlaneManifestPreflight({
+    channel: "release",
+    installMode: "production",
+    publicKeyHex: TEST_RELEASE_SIGNING_PUBLIC_KEY_HEX,
+    fetchText: flaky.fetchText,
+    retry: noWait,
+  });
+  assertEquals(verified.commit, "newcommit");
+  assertEquals(flaky.calls.n, 2);
+});
+
+test("assertControlPlaneManifestPreflight gives up after three 504s with the original text", async () => {
+  const flaky = flakyManifests([504], "");
+  await assertRejects(
+    () =>
+      assertControlPlaneManifestPreflight({
+        channel: "release",
+        installMode: "production",
+        publicKeyHex: TEST_RELEASE_SIGNING_PUBLIC_KEY_HEX,
+        fetchText: flaky.fetchText,
+        retry: noWait,
+      }),
+    UpdatePreflightError,
+    "failed to fetch instance manifest: HTTP 504",
+  );
+  assertEquals(flaky.calls.n, 3);
+});
+
+test("assertControlPlaneManifestPreflight does not retry a 404", async () => {
+  const flaky = flakyManifests([404, 200], SIGNED_INSTANCE_MANIFEST_BODY);
+  await assertRejects(
+    () =>
+      assertControlPlaneManifestPreflight({
+        channel: "release",
+        installMode: "production",
+        publicKeyHex: TEST_RELEASE_SIGNING_PUBLIC_KEY_HEX,
+        fetchText: flaky.fetchText,
+        retry: noWait,
+      }),
+    UpdatePreflightError,
+    "HTTP 404",
+  );
+  assertEquals(flaky.calls.n, 1);
+});
+
+test("assertControlPlaneManifestPreflight does not retry a bad signature", async () => {
+  const tampered = JSON.stringify({
+    ...JSON.parse(SIGNED_INSTANCE_MANIFEST_BODY),
+    commit: "evilcommit",
+  });
+  const flaky = flakyManifests([200], tampered);
+  await assertRejects(
+    () =>
+      assertControlPlaneManifestPreflight({
+        channel: "release",
+        installMode: "production",
+        publicKeyHex: TEST_RELEASE_SIGNING_PUBLIC_KEY_HEX,
+        fetchText: flaky.fetchText,
+        retry: noWait,
+      }),
+    UpdatePreflightError,
+    "invalid",
+  );
+  assertEquals(flaky.calls.n, 1);
 });
 
 test("assertControlPlaneManifestPreflight accepts signed instance and UI manifests", async () => {

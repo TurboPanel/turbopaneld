@@ -472,7 +472,7 @@ tp_verb_galaxy_docker_role() {
   _work="$ROOT_SCRATCH/galaxy-docker.$$"
   rm -rf "$_work"
   mkdir -m 0700 "$_work"
-  if ! curl -fsSL --max-time 120 -o "$_work/role.tar.gz" "$_url"; then
+  if ! curl -fsSL --max-time 120 --retry 2 --retry-delay 3 --retry-max-time 60 -o "$_work/role.tar.gz" "$_url"; then
     rm -rf "$_work"
     tp_die "failed to download $_url"
   fi
@@ -666,7 +666,7 @@ tp_fetch_pinned_run_script() {
   # (dev overlay) replaces it below. `_channel` is set by the calling verb from
   # a fixed vocabulary and only ever selects one of three constant hosts.
   _script_url="https://$(tp_installer_host_for_channel "${_channel:-}")"
-  set -- curl -fsSL --max-time 120
+  set -- curl -fsSL --max-time 120 --retry 2 --retry-delay 3 --retry-max-time 60
   case "$_pin_host" in
     http://*)
       tp_die "refusing plaintext update origin $_pin_host — the control plane is https://<host>:8443"

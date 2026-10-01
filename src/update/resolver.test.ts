@@ -770,3 +770,47 @@ test("resolveUpdate (production) accepts a newer canary of the installed base, a
     restore();
   }
 });
+
+const noWaitRetry = { sleep: () => Promise.resolve() };
+
+test("resolveUpdate retries a 504 on the manifest and keeps the HTTP text when it persists", async () => {
+  let calls = 0;
+  const restore = installFetch(() => {
+    calls += 1;
+    return new Response("", { status: 504 });
+  });
+  try {
+    await assertRejects(
+      () =>
+        resolveUpdate({ app: "daemon", channel: "trunk" }, {}, {
+          retry: noWaitRetry,
+        }),
+      MalformedManifestError,
+      "Failed to fetch channel manifest: HTTP 504",
+    );
+    assertEquals(calls, 3);
+  } finally {
+    restore();
+  }
+});
+
+test("resolveUpdate does not retry a 404 on the manifest", async () => {
+  let calls = 0;
+  const restore = installFetch(() => {
+    calls += 1;
+    return new Response("", { status: 404 });
+  });
+  try {
+    await assertRejects(
+      () =>
+        resolveUpdate({ app: "daemon", channel: "trunk" }, {}, {
+          retry: noWaitRetry,
+        }),
+      MalformedManifestError,
+      "HTTP 404",
+    );
+    assertEquals(calls, 1);
+  } finally {
+    restore();
+  }
+});
