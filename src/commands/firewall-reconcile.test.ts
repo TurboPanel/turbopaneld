@@ -215,9 +215,18 @@ test("observe renders and reports without touching the host", async () => {
     assertEquals(result.digest.length, 64);
     assertStringIncludes(result.summary, "observed");
     assert(
-      !host.calls.some((c) => c.cmd.endsWith("-restore") || c.args[0] === "-I"),
-      "observe never restores or inserts",
+      !host.calls.some((c) =>
+        (c.cmd.endsWith("-restore") && !c.args.includes("--test")) ||
+        c.args[0] === "-I"
+      ),
+      "observe only ever asks the kernel to --test; it never loads or inserts",
     );
+    assertEquals(result.validation, { ok: true, errors: [] });
+    assert(
+      result.rendered !== undefined,
+      "a preview carries the rendered text",
+    );
+    assertStringIncludes(result.rendered!.v4, "TP-INPUT");
     await assertRejects(
       () => Deno.readTextFile(join(layout.configDir, FIREWALL_V4_FILENAME)),
       Deno.errors.NotFound,
@@ -236,7 +245,13 @@ test("inputDefault drop is rendered, then refused with the default-drop-held sen
     assertEquals(result.applied, false);
     assertEquals(result.warnings, [DEFAULT_DROP_HELD_WARNING]);
     assertStringIncludes(result.summary, "refused: 1 condition(s)");
-    assert(!host.calls.some((c) => c.cmd.endsWith("-restore")));
+    assert(
+      !host.calls.some((c) =>
+        c.cmd.endsWith("-restore") && !c.args.includes("--test")
+      ),
+      "a refused apply is still only checked, never loaded",
+    );
+    assertEquals(result.validation?.ok, true);
   });
 });
 
@@ -463,4 +478,137 @@ test({
       setCommandRouterHandlersForTests(null);
     }
   },
+});
+
+test("observe asks the kernel to --test both families and loads nothing", async () => {
+  await withLayout(async (layout) => {
+    const host = fakeHost({
+      ...HEALTHY,
+      "ip6tables -S DOCKER-USER": ok("-N DOCKER-USER"),
+    });
+    const result = await handleFirewallReconcile(
+      payload({ mode: "observe" }),
+      "now",
+      { run: host.run, resolveLayout: () => layout },
+    );
+    const restores = host.calls.filter((c) => c.cmd.endsWith("-restore"));
+    assertEquals(restores.map((c) => c.cmd), [
+      "iptables-restore",
+      "ip6tables-restore",
+    ]);
+    for (const call of restores) {
+      assertEquals(call.args, ["--noflush", "--test"]);
+    }
+    assertEquals(result.validation, { ok: true, errors: [] });
+    assert(
+      result.rendered?.v6 !== undefined,
+      "v6 text is included under mirror",
+    );
+    assertEquals(await readPendingMarker(layout), null);
+    parseFirewallReconcileResult(JSON.parse(JSON.stringify(result)));
+  });
+});
+
+test("observe reports a kernel refusal as validation, not as a failed command", async () => {
+  await withLayout(async (layout) => {
+    const host = fakeHost({
+      ...HEALTHY,
+      "iptables-restore --noflush --test": fail(
+        "iptables-restore: line 7 failed",
+      ),
+    });
+    const result = await handleFirewallReconcile(
+      payload({ mode: "observe" }),
+      "now",
+      { run: host.run, resolveLayout: () => layout },
+    );
+    assertEquals(result.applied, false);
+    assertEquals(result.validation?.ok, false);
+    assertEquals(result.validation?.errors.length, 1);
+    assertStringIncludes(
+      result.validation!.errors[0]!,
+      "iptables-restore --test refused the ruleset",
+    );
+    assert(
+      result.warnings.some((w) => w.includes("the kernel would refuse")),
+      "the refusal is a warning the console shows",
+    );
+    assertEquals(
+      result.digest.length,
+      64,
+      "the ruleset is still rendered and digested",
+    );
+  });
+});
+
+test("observe leaves the rendered text out, with a warning, when it is too large", async () => {
+  await withLayout(async (layout) => {
+    const sources = Array.from({ length: 256 }, (_, i) => `10.${i}.0.0/16`);
+    const rules = Array.from({ length: 12 }, (_, i) => ({
+      id: `big-${i}`,
+      scope: "host" as const,
+      action: "accept" as const,
+      proto: "tcp" as const,
+      ports: String(8000 + i),
+      sources,
+      origin: "derived" as const,
+    }));
+    const host = fakeHost(HEALTHY);
+    const result = await handleFirewallReconcile(
+      payload({ mode: "observe", rules }),
+      "now",
+      { run: host.run, resolveLayout: () => layout },
+    );
+    assertEquals(result.rendered, undefined);
+    assertEquals(result.digest.length, 64);
+    assert(result.ruleCount > 0);
+    assert(
+      result.warnings.some((w) => w.includes("is not included")),
+      "the omission is explained",
+    );
+    assertEquals(result.validation?.ok, true, "it was still checked");
+  });
+});
+
+test("a result with validation and rendered round-trips the contract parser", () => {
+  const base = {
+    generation: 1,
+    mode: "observe",
+    applied: false,
+    digest: "a".repeat(64),
+    ruleCount: 1,
+    ipv6Applied: false,
+    forwardApplied: false,
+    sshPorts: [22],
+    warnings: [],
+    summary: "observed",
+  };
+  const parsed = parseFirewallReconcileResult({
+    ...base,
+    validation: {
+      ok: false,
+      errors: ["iptables-restore --test refused the ruleset: x"],
+    },
+    rendered: { v4: "*filter\nCOMMIT\n", v6: "*filter\nCOMMIT\n" },
+  });
+  assertEquals(parsed.validation?.ok, false);
+  assertEquals(parsed.rendered?.v4, "*filter\nCOMMIT\n");
+  assertEquals(parseFirewallReconcileResult(base).validation, undefined);
+  for (
+    const bad of [
+      { validation: { ok: "yes", errors: [] } },
+      { validation: { ok: true, errors: "none" } },
+      { validation: { ok: true, errors: Array(9).fill("x") } },
+      { rendered: { v4: 5 } },
+      { rendered: { v4: "x".repeat(65_537) } },
+    ]
+  ) {
+    let threw = false;
+    try {
+      parseFirewallReconcileResult({ ...base, ...bad });
+    } catch {
+      threw = true;
+    }
+    assert(threw, `must reject ${JSON.stringify(bad).slice(0, 40)}`);
+  }
 });

@@ -36,7 +36,10 @@
  * `server.firewall.confirm` names the result's digest in time.
  *
  * `mode: "observe"` renders and reports (digest, warnings, rule count) and
- * applies nothing; `mode: "off"` removes TurboPanel's chains and jumps.
+ * applies nothing: it also asks the kernel to check the documents with
+ * `--test` (nothing is loaded) and returns the verdict as `validation` plus
+ * the rendered text as `rendered`, so it is a true preview. `mode: "off"`
+ * removes TurboPanel's chains and jumps.
  */
 
 import { logInfo, sanitizeForLog } from "../util/logger.ts";
@@ -47,13 +50,20 @@ import {
   isControlPlaneColocated,
   probeXtables,
   removeFirewall,
+  validateRenderedFirewall,
 } from "../firewall/apply.ts";
-import { type FirewallFamily, renderFirewall } from "../firewall/render.ts";
+import {
+  type FirewallFamily,
+  type RenderedFirewall,
+  renderFirewall,
+} from "../firewall/render.ts";
 import { type FirewallRunFn, runFirewallHost } from "../firewall/run.ts";
 import { readSshdEffectivePorts } from "../firewall/sshd-port.ts";
-import type {
-  FirewallReconcilePayload,
-  FirewallReconcileResult,
+import {
+  FIREWALL_RENDERED_MAX_BYTES,
+  type FirewallReconcilePayload,
+  type FirewallReconcileResult,
+  type FirewallRendered,
 } from "../contracts/commands-contracts.ts";
 
 /** The exact sentence a refused default-drop carries, so a test can pin it. */
@@ -70,6 +80,28 @@ export type FirewallReconcileDeps = {
 
 function union(a: number[], b: number[]): number[] {
   return [...new Set([...a, ...b])].sort((x, y) => x - y);
+}
+
+/**
+ * The rendered documents for a result that did not apply, or `null` (with a
+ * warning) when either exceeds {@link FIREWALL_RENDERED_MAX_BYTES}: the
+ * digest and rule count still describe the ruleset, only the text is left out.
+ */
+function renderedForResult(
+  rendered: RenderedFirewall,
+  warnings: string[],
+): FirewallRendered | null {
+  const v6 = rendered.v6 ?? undefined;
+  if (
+    rendered.v4.length > FIREWALL_RENDERED_MAX_BYTES ||
+    (v6 !== undefined && v6.length > FIREWALL_RENDERED_MAX_BYTES)
+  ) {
+    warnings.push(
+      `the rendered ruleset is larger than ${FIREWALL_RENDERED_MAX_BYTES} characters and is not included; the digest and rule count still describe it`,
+    );
+    return null;
+  }
+  return v6 === undefined ? { v4: rendered.v4 } : { v4: rendered.v4, v6 };
 }
 
 export async function handleFirewallReconcile(
@@ -139,6 +171,15 @@ export async function handleFirewallReconcile(
 
   if (payload.mode === "observe" || refusals.length > 0) {
     warnings.push(...refusals);
+    // Not applied, but still checked: the kernel parses the rendered documents
+    // (`--test`, nothing is loaded) so a preview says whether it would load.
+    const validation = await validateRenderedFirewall(rendered, probe, run);
+    if (!validation.ok) {
+      warnings.push(
+        "the kernel would refuse this ruleset (iptables-restore --test failed); see validation",
+      );
+    }
+    const renderedText = renderedForResult(rendered, warnings);
     logInfo(
       "command",
       `firewall generation ${payload.generation} rendered, not applied (${
@@ -151,6 +192,8 @@ export async function handleFirewallReconcile(
       ipv6Applied: false,
       forwardApplied: false,
       warnings,
+      validation,
+      ...(renderedText === null ? {} : { rendered: renderedText }),
       summary: payload.mode === "observe"
         ? `firewall generation ${payload.generation} observed: ${rendered.ruleCount} rules would render`
         : `firewall generation ${payload.generation} refused: ${refusals.length} condition(s) block a default-drop apply`,
