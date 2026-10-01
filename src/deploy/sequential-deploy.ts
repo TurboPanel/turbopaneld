@@ -146,7 +146,7 @@ async function startAndGate(
 }
 
 function errorReason(err: unknown, steps: SequentialDeploySteps): string {
-  const text = err instanceof Error ? err.message : String(err);
+  const text = err instanceof Error ? err.message : "unexpected failure";
   return steps.redact(text);
 }
 
