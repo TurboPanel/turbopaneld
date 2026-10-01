@@ -371,6 +371,22 @@ test("the daemon's own unit files pass; privileged or foreign units do not", asy
     const hostile: Array<[string, string]> = [
       ["runs as root", service.replace("User=alice", "User=root")],
       ["no User=", service.replace(/^User=alice\n/m, "")],
+      // The unit's fields are read back as tab-separated values, so an empty
+      // one must be refused outright, never shift the others into its place
+      // (Road to 0.2.x row r2-tphost-field-parsing).
+      ["an empty User=", service.replace(/^User=alice$/m, "User=")],
+      ["no Group=", service.replace(/^Group=.*\n/m, "")],
+      ["an empty Group=", service.replace(/^Group=.*$/m, "Group=")],
+      ["no Slice=", service.replace(/^Slice=.*\n/m, "")],
+      ["an empty Slice=", service.replace(/^Slice=.*$/m, "Slice=")],
+      [
+        "no NoNewPrivileges=",
+        service.replace(/^NoNewPrivileges=.*\n/m, ""),
+      ],
+      [
+        "an empty NoNewPrivileges=",
+        service.replace(/^NoNewPrivileges=.*$/m, "NoNewPrivileges="),
+      ],
       ["privileged exec prefix", service.replace("ExecStart=", "ExecStart=+")],
       [
         "root pre-start",
