@@ -23,7 +23,7 @@ import { ManifestSignatureError } from "./errors.ts";
  * Raw 32-byte Ed25519 public key of the TurboPanel release signing key, hex.
  * Mirrored by hand as `TP_RELEASE_SIGNING_PUBLIC_KEY` in scripts/run.sh —
  * signing.test.ts pins the two against each other. Rotating the key is a
- * coordinated change to both plus the CI `RELEASE_SIGNING_KEY` secret.
+ * coordinated change to both plus the CI `TURBOPANEL_RELEASE_SIGNING_KEY` environment secret.
  */
 export const RELEASE_SIGNING_PUBLIC_KEY_HEX =
   "e854267676c6700a79ff19b89211b76d609af142f4c2c1cb011339346d1cea0a";

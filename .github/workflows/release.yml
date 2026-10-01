@@ -78,6 +78,8 @@ jobs:
           fi
 
   build:
+    # Signing key = environment secret TURBOPANEL_RELEASE_SIGNING_KEY (owner approval).
+    environment: release
     needs: prepare
     runs-on: ubuntu-latest
     env:
@@ -210,7 +212,7 @@ jobs:
           ARTIFACT_BASE_URL: https://github.com/${{ github.repository }}/releases/download/v${{ needs.prepare.outputs.version }}
           # PKCS#8 PEM of the offline release signing key; the generator refuses
           # to write an unsigned manifest (src/update/signing.ts).
-          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+          RELEASE_SIGNING_KEY: ${{ secrets.TURBOPANEL_RELEASE_SIGNING_KEY }}
         run: |
           deno run --allow-env --allow-read --allow-write scripts/generate-channel-manifest.ts \
             release-assets \
