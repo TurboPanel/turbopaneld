@@ -29,8 +29,8 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     concurrency:
-      group: daemon-verify-${{ github.event_name }}-${{ github.ref }}
-      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+      group: daemon-verify-${{ github.event_name }}-${{ (github.head_ref == 'trunk' || github.head_ref == 'staging') && github.run_id || github.ref }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' && github.head_ref != 'trunk' && github.head_ref != 'staging' }}
     env:
       # Job-level so Sonar `if:` / require-token steps can read the secret.
       # Empty only for fork PRs (secrets are not available to forks).
@@ -58,7 +58,33 @@ jobs:
             exit 1
           fi
 
+      # Three attempts, 15 s then 45 s apart: setup-deno has no retry input and
+      # a transient GitHub 5xx on the download must not turn the run red.
       - name: Install Deno
+        id: deno-try-1
+        continue-on-error: true
+        uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
+        with:
+          # Keep in step with DENO_VERSION / deno_version / TP_DENO_VERSION (2.9.7).
+          deno-version: "2.9.7"
+          cache: true
+      - name: Wait before retrying the Deno download
+        if: steps.deno-try-1.outcome == 'failure'
+        run: sleep 15
+      - name: Install Deno (retry 1 of 2)
+        id: deno-try-2
+        if: steps.deno-try-1.outcome == 'failure'
+        continue-on-error: true
+        uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
+        with:
+          # Keep in step with DENO_VERSION / deno_version / TP_DENO_VERSION (2.9.7).
+          deno-version: "2.9.7"
+          cache: true
+      - name: Wait before retrying the Deno download again
+        if: steps.deno-try-2.outcome == 'failure'
+        run: sleep 45
+      - name: Install Deno (retry 2 of 2)
+        if: steps.deno-try-2.outcome == 'failure'
         uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
         with:
           # Keep in step with DENO_VERSION / deno_version / TP_DENO_VERSION (2.9.7).
@@ -235,8 +261,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     concurrency:
-      group: daemon-contract-drift-${{ github.event_name }}-${{ github.ref }}
-      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+      group: daemon-contract-drift-${{ github.event_name }}-${{ (github.head_ref == 'trunk' || github.head_ref == 'staging') && github.run_id || github.ref }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' && github.head_ref != 'trunk' && github.head_ref != 'staging' }}
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -277,7 +303,29 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
+      # Three attempts, 15 s then 45 s apart: setup-deno has no retry input and
+      # a transient GitHub 5xx on the download must not turn the run red.
       - name: Install Deno
+        id: deno-try-1
+        continue-on-error: true
+        uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
+        with:
+          deno-version: "2.9.7"
+      - name: Wait before retrying the Deno download
+        if: steps.deno-try-1.outcome == 'failure'
+        run: sleep 15
+      - name: Install Deno (retry 1 of 2)
+        id: deno-try-2
+        if: steps.deno-try-1.outcome == 'failure'
+        continue-on-error: true
+        uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
+        with:
+          deno-version: "2.9.7"
+      - name: Wait before retrying the Deno download again
+        if: steps.deno-try-2.outcome == 'failure'
+        run: sleep 45
+      - name: Install Deno (retry 2 of 2)
+        if: steps.deno-try-2.outcome == 'failure'
         uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
         with:
           deno-version: "2.9.7"

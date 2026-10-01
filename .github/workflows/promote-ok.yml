@@ -34,11 +34,14 @@ permissions:
   contents: read
 
 # The evaluation can now run for up to an hour (it waits, not fails-and-retries
-# — see gh-promote-ok.yml). A superseded PR head's still-running evaluation is
-# cancelled instead of finishing stale.
+# — see gh-promote-ok.yml). The two promotion PRs have head trunk or staging, and
+# each head commit is a real trunk or staging commit: cancelling the evaluation
+# of a superseded head left a cancelled (red) mark on that commit. So each run has its own group and runs to its own
+# verdict; the newest head's run is the one the required check reads. Any
+# other head keeps the old behaviour: a superseded run is cancelled.
 concurrency:
-  group: promote-ok-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+  group: promote-ok-${{ github.event.pull_request.number }}${{ (github.head_ref == 'trunk' || github.head_ref == 'staging') && format('-{0}', github.run_id) || '' }}
+  cancel-in-progress: ${{ github.head_ref != 'trunk' && github.head_ref != 'staging' }}
 
 jobs:
   evaluate:

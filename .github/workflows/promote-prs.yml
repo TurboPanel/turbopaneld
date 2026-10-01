@@ -22,9 +22,14 @@ on:
 permissions:
   contents: read
 
+# Never dropped: the default single-pending queue replaces a waiting run when
+# a third arrives, and the replaced run concludes cancelled (a red mark on
+# the trunk commit). The job is idempotent (it reads trunk's head), so a
+# queued run that finds nothing to do is harmless.
 concurrency:
   group: promote-prs
   cancel-in-progress: false
+  queue: max
 
 jobs:
   rc-pr:
