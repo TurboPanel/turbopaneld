@@ -75,6 +75,7 @@ function layoutAssignments(root: string): string {
     RUNTIMES_DIR: join(root, "opt/turbopanel/vendor"),
     ORCHESTRATION_DIR: join(root, "opt/turbopanel/share/orchestration"),
     CONFIG_DIR: join(root, "etc/turbopanel"),
+    LICENSE_STAGING_DIR: join(root, "var/lib/turbopanel-license-staging"),
     STATE_DIR: join(root, "var/lib/turbopanel"),
     ENV_FILE: join(root, "etc/turbopanel/daemon.env"),
     CA_PATH: join(root, "etc/turbopanel/instance-ca.pem"),
