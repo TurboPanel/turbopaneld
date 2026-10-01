@@ -474,3 +474,52 @@ test("runScheduledBackup reports a dump failure with its error text capped", asy
     );
   });
 });
+
+test("a managed database run and a volume run on one host overlap without refusing each other", async () => {
+  await withLayout(async (layout) => {
+    const managed = managedPolicy({ onCalendar: "hourly" });
+    const volume = copyPolicy({ onCalendar: "*-*-* 02:00:00" });
+    await writeBackupPoliciesFile(layout, { policies: [managed, volume] });
+
+    // Each run parks until the other has started: both must hold their own
+    // lock at the same moment, so a lock shared between targets would fail
+    // the second one as busy instead of letting it begin.
+    const bothStarted = Promise.withResolvers<void>();
+    let started = 0;
+    const arrive = async () => {
+      started += 1;
+      if (started === 2) bothStarted.resolve();
+      await bothStarted.promise;
+    };
+    const write = async (destination: WritableStream<Uint8Array>) => {
+      await arrive();
+      const writer = destination.getWriter();
+      await writer.write(new TextEncoder().encode("bytes"));
+      await writer.close();
+      return { success: true, stderr: "" };
+    };
+    const deps: ScheduledBackupDeps = {
+      freeBytes: () => Promise.resolve(PLENTY),
+      artifact: {
+        ensureDocker: () => Promise.resolve(),
+        resolveContainer: () => Promise.resolve(FAKE_CONTAINER),
+        runDump: (_argv, destination) => write(destination),
+      },
+      copy: {
+        runDocker: () =>
+          Promise.resolve({ success: true, code: 0, stdout: "", stderr: "" }),
+        runArchive: (_argv, destination) => write(destination),
+      },
+    };
+
+    const [first, second] = await Promise.all([
+      runScheduledBackup(managed.policyId, { ...deps, layout }),
+      runScheduledBackup(volume.policyId, { ...deps, layout }),
+    ]);
+
+    assert(first.kind === "ran" && second.kind === "ran");
+    assertEquals(first.result.status, "succeeded");
+    assertEquals(second.result.status, "succeeded");
+    assertEquals(started, 2);
+  });
+});
