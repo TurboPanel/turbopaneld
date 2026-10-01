@@ -1772,6 +1772,17 @@ test("executeInstanceUpdateReconcile reports recovery_required when rollback fai
     assertEquals(error.code, "recovery_required");
     assertStringIncludes(error.message, "instance-rollback.yml");
     assertStringIncludes(error.message, "up-recover");
+    // The plain fact leads; the commands come second, behind a health check.
+    assertStringIncludes(
+      error.message,
+      "recovery_required: The new control plane",
+    );
+    assertStringIncludes(error.message, "could not be confirmed");
+    assertEquals(
+      error.message.indexOf("Check first") <
+        error.message.indexOf("instance-rollback.yml"),
+      true,
+    );
   }
 });
 

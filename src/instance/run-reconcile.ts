@@ -33,6 +33,7 @@ import {
   type InstanceHealthTarget,
   instanceUnitIsActive,
   readInstanceHealth,
+  resolveUpdateHealthTimeoutMs,
   waitForInstanceHealth,
 } from "./instance-health-check.ts";
 import { resolveInstanceSupport } from "./version-wire.ts";
@@ -1185,7 +1186,21 @@ function caddyNeedsRefresh(text: string | null): boolean {
   return !text.includes("handle_errors") || !text.includes("updating.html");
 }
 
+/** The plain fact first: what did not happen, and for how long we waited. */
+function controlPlaneRecoveryLead(reason: string | undefined): string {
+  if (reason === "health_timeout" || reason === "health_mismatch") {
+    const minutes = Math.max(
+      1,
+      Math.round(resolveUpdateHealthTimeoutMs() / 60_000),
+    );
+    const unit = minutes === 1 ? "minute" : "minutes";
+    return `The new control plane did not become healthy within ${minutes} ${unit} and the previous build could not be confirmed.`;
+  }
+  return "The new control plane could not be started and the previous build could not be confirmed.";
+}
+
 function controlPlaneRecoveryDetail(options: {
+  reason?: string;
   channel: ReleaseChannel;
   previous: ControlPlaneHealthSnapshot | null;
   upgradeId: string;
@@ -1204,7 +1219,9 @@ function controlPlaneRecoveryDetail(options: {
   const rollback =
     `sudo -n ${ORCHESTRATE_HELPER} playbook -i localhost, -c local -e turbopanel_upgrade_id=${options.upgradeId} instance-rollback.yml`;
   const backup = `${options.backupDir}/control-plane/${options.upgradeId}`;
-  return `rollback did not restore a healthy control plane. Backup: ${backup}. Retry rollback: ${rollback}. Reinstall the previous build: ${reinstall}`;
+  return `${
+    controlPlaneRecoveryLead(options.reason)
+  } The automatic rollback did not restore a healthy control plane. Check first whether the control plane is answering (for example, open the panel); if it is, do nothing. Only if it is not: backup ${backup}. Retry the rollback: ${rollback}. Or reinstall the previous build: ${reinstall}`;
 }
 
 async function rollbackControlPlane(options: {
