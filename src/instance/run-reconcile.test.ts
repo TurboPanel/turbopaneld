@@ -1528,6 +1528,70 @@ test("executeInstanceUpdateReconcile refreshes Caddy when the updating page is a
   assertEquals(installAt > refreshAt, true);
 });
 
+test("executeInstanceUpdateReconcile re-renders the units once, after the swap and before the restart", async () => {
+  const calls: Array<{ bin: string; args: string[] }> = [];
+  const order: string[] = [];
+  await executeInstanceUpdateReconcile({
+    channel: "release",
+    hooks: managedUpdateHooks(calls, {
+      restartUnits: () => {
+        order.push("restart");
+        return Promise.resolve(true);
+      },
+      run: (bin, args) => {
+        calls.push({ bin, args });
+        order.push(
+          args.includes("update-instance")
+            ? "update-instance"
+            : args.at(-1) ?? "",
+        );
+        if (args[0] === "inspect") {
+          return Promise.resolve({
+            code: 0,
+            stdout: "true healthy\n",
+            stderr: "",
+          });
+        }
+        return Promise.resolve({ code: 0, stdout: "", stderr: "" });
+      },
+    }),
+  });
+  const refreshes = order.filter((name) =>
+    name === "instance-units-refresh.yml"
+  );
+  assertEquals(refreshes.length, 1);
+  const refreshAt = order.indexOf("instance-units-refresh.yml");
+  assertEquals(refreshAt > order.indexOf("update-instance"), true);
+  assertEquals(order.indexOf("update-instance") >= 0, true);
+  assertEquals(order.indexOf("restart") > refreshAt, true);
+  assertEquals(order.filter((name) => name === "restart").length, 1);
+});
+
+test("executeInstanceUpdateReconcile warns and carries on when the unit refresh fails", async () => {
+  const calls: Array<{ bin: string; args: string[] }> = [];
+  const base = managedUpdateHooks(calls);
+  const stages: string[] = [];
+  await executeInstanceUpdateReconcile({
+    channel: "release",
+    onStage: (stage) => stages.push(stage),
+    hooks: {
+      ...base,
+      run: (bin, args, onStage) => {
+        if (args.at(-1) === "instance-units-refresh.yml") {
+          calls.push({ bin, args });
+          return Promise.resolve({ code: 2, stdout: "", stderr: "boom" });
+        }
+        return base.run!(bin, args, onStage);
+      },
+    },
+  });
+  assertEquals(stages.at(-1), "done");
+  assertEquals(
+    calls.some((call) => call.args.includes("instance-rollback.yml")),
+    false,
+  );
+});
+
 test("executeInstanceUpdateReconcile names the running build in the backup playbook", async () => {
   const calls: Array<{ bin: string; args: string[] }> = [];
   await executeInstanceUpdateReconcile({

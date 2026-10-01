@@ -837,6 +837,58 @@ test("instance-launch-only refreshes the runtimes its units ExecStart through", 
   }
 });
 
+test("instance-units-refresh re-renders the instance units and the Docker gate without restarting or failing the update", () => {
+  const playbook = readPlaybook("instance-units-refresh.yml");
+  for (const role of ["instance-launch", "docker-gate"]) {
+    if (!playbook.includes(`name: ${role}`)) {
+      throw new TypeError(`instance-units-refresh.yml must include ${role}`);
+    }
+  }
+  // Runtimes and users come before the units that name them.
+  for (const role of ["instance-user", "deno-runtime", "node-runtime"]) {
+    if (playbook.indexOf(role) > playbook.indexOf("name: instance-launch")) {
+      throw new TypeError(`${role} must precede instance-launch`);
+    }
+  }
+  // The caller owns the one restart; nothing here may restart the instance.
+  if (!/^ {4}instance_start: false$/m.test(playbook)) {
+    throw new TypeError("instance_start must be false");
+  }
+  if (/state:\s*restarted/.test(playbook)) {
+    throw new TypeError("the unit refresh must not restart anything");
+  }
+  // A render failure warns; it never fails the play.
+  for (const marker of ["rescue:", "always:", "daemon_reload: true"]) {
+    if (!playbook.includes(marker)) {
+      throw new TypeError(`instance-units-refresh.yml needs ${marker}`);
+    }
+  }
+});
+
+test("a co-located daemon refresh also installs the Docker gate", () => {
+  const roles = readPlaybook("daemon-colocated-refresh.yml");
+  if (!roles.includes("- role: docker-gate")) {
+    throw new TypeError("daemon-colocated-refresh.yml must run docker-gate");
+  }
+});
+
+test("a rollback puts the saved instance unit back, and the backup keeps it", () => {
+  const backup = readPlaybook("instance-backup.yml");
+  const rollback = readPlaybook("instance-rollback.yml");
+  if (
+    !backup.includes(
+      "{{ control_plane_backup_dir }}/turbopanel-instance.service",
+    )
+  ) {
+    throw new TypeError("instance-backup.yml must keep the instance unit");
+  }
+  if (
+    !rollback.includes("dest: /etc/systemd/system/turbopanel-instance.service")
+  ) {
+    throw new TypeError("instance-rollback.yml must restore the instance unit");
+  }
+});
+
 test("daemon playbooks run deno-runtime unconditionally", () => {
   assertRoleIsUnconditional("daemon-converge.yml", "deno-runtime");
   assertRoleIsUnconditional("daemon-install.yml", "deno-runtime");

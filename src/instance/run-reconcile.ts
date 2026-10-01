@@ -2,6 +2,7 @@ import { encodeBase64Url } from "@std/encoding/base64url";
 import { hostSudoArgs } from "../permissions/host-sudo.ts";
 import { dirname } from "@std/path";
 import { forEachSequential } from "../util/sequential.ts";
+import { logWarn } from "../util/logger.ts";
 import { statfs } from "node:fs/promises";
 import { ORCHESTRATE_HELPER } from "../orchestration/assets.ts";
 import { playbooksNeedRootHelper } from "../orchestration/privileged.ts";
@@ -1398,6 +1399,40 @@ async function refreshCaddyIfNeeded(
 }
 
 /**
+ * Re-render the control-plane units (instance, Caddy, Docker gate, ...) from
+ * the orchestration bundle the daemon already carries. The package swap above
+ * only replaces binaries, so a changed unit template (a sandbox, a new gate)
+ * never reached a host that updated in place. Runs before the one restart the
+ * caller performs next (the playbook itself restarts nothing), and never
+ * blocks the update: a failed render is a warning, the old unit keeps working.
+ */
+async function refreshControlPlaneUnits(
+  run: NonNullable<InstanceUpdateHooks["run"]>,
+  installRoot: string,
+): Promise<void> {
+  const refresh = rootHelperPlaybookInvocation("instance-units-refresh.yml", {
+    turbopanel_install_root: installRoot,
+  });
+  let problem = "";
+  try {
+    const refreshed = await run(refresh.bin, refresh.args);
+    if (refreshed.code !== 0) {
+      problem = refreshed.stderr.trim() || refreshed.stdout.trim() ||
+        "unknown error";
+    }
+  } catch (err) {
+    problem = err instanceof Error ? err.message : String(err);
+  }
+  if (problem) {
+    logWarn(
+      "update",
+      "unit refresh failed, keeping the installed units:",
+      problem,
+    );
+  }
+}
+
+/**
  * Reconcile an already-installed control plane on a managed host.
  *
  * Development hosts are refused: their control plane is source-run.
@@ -1495,6 +1530,7 @@ export async function executeInstanceUpdateReconcile(options: {
   const migrate = hooks.migrate ??
     (() => defaultInstanceMigrate(run, report));
   await migrateControlPlaneOrRollback(migrate, rollbackBase);
+  await refreshControlPlaneUnits(run, layout.home);
 
   const restart = hooks.restartUnits ??
     (() =>

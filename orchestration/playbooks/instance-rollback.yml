@@ -139,6 +139,25 @@
           docker exec -i "{{ postgres_container_name }}" pg_restore --clean --if-exists -U "{{ postgres_user }}" -d "{{ postgres_db }}" < "$dump"
         executable: /bin/bash
 
+    - name: Look for the instance unit saved by the backup
+      ansible.builtin.stat:
+        path: "{{ turbopanel_backup_dir }}/control-plane/{{ turbopanel_upgrade_id }}/turbopanel-instance.service"
+      register: saved_instance_unit
+
+    - name: Restore the instance unit the update replaced
+      when: saved_instance_unit.stat.exists
+      ansible.builtin.copy:
+        src: "{{ turbopanel_backup_dir }}/control-plane/{{ turbopanel_upgrade_id }}/turbopanel-instance.service"
+        dest: /etc/systemd/system/turbopanel-instance.service
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0640"
+
+    - name: Reload systemd for the restored unit
+      ansible.builtin.systemd:
+        daemon_reload: true
+
     - name: Start the restored control plane
       ansible.builtin.systemd:
         name: turbopanel-instance

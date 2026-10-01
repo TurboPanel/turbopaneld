@@ -151,6 +151,7 @@ async function daemonExtraVars(): Promise<Array<[string, string[]]>> {
         turbopanel_instance_revision: "70bfa6da",
       }],
       ["instance-launch-only.yml", { turbopanel_install_root: INSTALL_ROOT }],
+      ["instance-units-refresh.yml", { turbopanel_install_root: INSTALL_ROOT }],
       ["instance-rollback.yml", {
         turbopanel_upgrade_id: "01J9Z8Y7X6W5V4T3S2R1Q0P9N8",
       }],
