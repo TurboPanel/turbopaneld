@@ -1,0 +1,69 @@
+---
+- name: Look up the daemon group id
+  ansible.builtin.getent:
+    database: group
+    key: "{{ docker_gate_group }}"
+    fail_key: false
+
+- name: Record the daemon group id
+  ansible.builtin.set_fact:
+    docker_gate_gid: "{{ (getent_group[docker_gate_group] | default(['', ''], true))[1] | default('') }}"
+
+- name: Ensure the gate source directory exists
+  ansible.builtin.file:
+    path: "{{ docker_gate_dir }}"
+    state: directory
+    owner: root
+    group: "{{ docker_gate_group }}"
+    mode: "0750"
+
+- name: Install the gate source (root-owned, never writable by the daemon)
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: "{{ docker_gate_dir }}/{{ item }}"
+    owner: root
+    group: "{{ docker_gate_group }}"
+    mode: "0640"
+  loop: "{{ docker_gate_files }}"
+  notify: Restart Docker gate
+
+# The socket directory is created at boot by tmpfiles.d (and by ExecStartPre
+# on every start), owned by root with the daemon group allowed in.
+- name: Install tmpfiles.d entry for the gate socket directory
+  ansible.builtin.copy:
+    dest: /etc/tmpfiles.d/turbopanel-docker-gate.conf
+    owner: root
+    group: root
+    mode: "0640"
+    content: |
+      # Managed by TurboPanel daemon orchestration (docker-gate role).
+      d {{ docker_gate_run_dir }} 0750 root {{ docker_gate_group }} -
+
+- name: Ensure the gate socket directory exists
+  ansible.builtin.file:
+    path: "{{ docker_gate_run_dir }}"
+    state: directory
+    owner: root
+    group: "{{ docker_gate_group }}"
+    mode: "0750"
+
+- name: Install the gate systemd unit
+  ansible.builtin.template:
+    src: turbopanel-docker-gate.service.j2
+    dest: "/etc/systemd/system/{{ docker_gate_service_name }}.service"
+    owner: root
+    group: root
+    mode: "0640"
+  notify:
+    - Reload systemd for the Docker gate
+    - Restart Docker gate
+
+- name: Flush handlers so the unit is loaded before it is started
+  ansible.builtin.meta: flush_handlers
+
+- name: Enable and start the Docker gate
+  ansible.builtin.systemd:
+    name: "{{ docker_gate_service_name }}"
+    enabled: true
+    state: started
+    daemon_reload: true

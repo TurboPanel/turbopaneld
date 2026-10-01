@@ -1,0 +1,44 @@
+---
+# Master switch. false = leave an existing gate alone and install nothing.
+docker_gate_enabled: true
+
+turbopanel_install_root: /opt/turbopanel
+turbopanel_config_dir: /etc/turbopanel
+turbopanel_daemon_state_dir: /var/lib/turbopanel
+# Co-located dev runs everything as the human user, with no `tp` group and no
+# docker-group boundary to guard: the gate is a managed-host component only.
+turbopanel_dev_user: ""  # noqa: var-naming[no-role-prefix]
+
+docker_gate_service_name: turbopanel-docker-gate
+# Group allowed to open the gate socket (the daemon account's group).
+docker_gate_group: tp
+# Gate source, copied here root-owned (outside the replaceable orchestration
+# tree, so a rollback to an older package cannot delete the only copy the unit
+# can exec). tp can read it, never change it.
+docker_gate_dir: "{{ turbopanel_install_root }}/lib/docker-gate"
+docker_gate_deno_bin: "{{ turbopanel_install_root }}/vendor/deno/current/deno"
+# Root-owned directory (NOT under /run/turbopanel, which tp owns and could
+# swap): the only thing in it is the gate's listening socket.
+docker_gate_run_dir: /run/turbopanel-gate
+docker_gate_socket: "{{ docker_gate_run_dir }}/docker.sock"
+docker_gate_upstream_socket: /var/run/docker.sock
+docker_gate_cache_dir: /var/cache/turbopanel-docker-gate
+docker_gate_summary_seconds: 300
+# Host trees a tenant bind mount may resolve under; everything else is what the
+# strict profile would refuse. Tenant principal homes + operator storage.
+docker_gate_bind_roots:
+  - /srv/users
+  - "{{ turbopanel_daemon_state_dir }}/storage"
+# Added to the gate's built-in deny list (/etc, /run, /proc, /sys, /dev, /root,
+# /boot, /opt/turbopanel, /backup ...).
+docker_gate_deny_prefixes_extra:
+  - "{{ turbopanel_install_root }}"
+# The gate's own source files, in the order they are copied.
+docker_gate_files:
+  - http.ts
+  - policy.ts
+  - proxy.ts
+  - resolve.ts
+  - stats.ts
+  - util.ts
+  - main.ts

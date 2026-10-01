@@ -1,0 +1,14 @@
+galaxy_info:
+  role_name: docker_gate
+  author: turbopanel
+  license: AGPL-3.0
+  description: >
+    Install the TurboPanel Docker gate: a root-owned systemd service (vendored
+    Deno) that sits in front of the Docker socket on managed hosts. Stage 1:
+    observe mode only, it forwards everything and logs what the strict profile
+    would refuse.
+  min_ansible_version: "2.20"
+  platforms:
+    - name: Debian
+      versions:
+        - all

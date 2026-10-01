@@ -60,6 +60,10 @@
     - role: principal-access
     - role: rapl-access
     - role: time-sync
+    # Existing Docker hosts get the observe-mode gate on their next converge;
+    # the role is a no-op where Docker is absent (docker-setup installs it
+    # there, via the docker role).
+    - role: docker-gate
 
   # Already-provisioned managed daemons only ever receive this lightweight
   # converge (see src/orchestration/setup.ts), never a full reinstall. Refresh

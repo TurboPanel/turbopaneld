@@ -1402,6 +1402,7 @@ tp_inventory_host_files() {
   done
   for _ih_file in \
     /etc/tmpfiles.d/turbopanel.conf \
+    /etc/tmpfiles.d/turbopanel-docker-gate.conf \
     /etc/sudoers.d/tp \
     /etc/ssh/sshd_config.d/60-turbopanel.conf \
     /usr/local/bin/php
@@ -1541,6 +1542,9 @@ tp_inventory_folders() {
   done
   tp_add_existing "$TP_TMP/inv.folders_remove" /tmp/turbopanel-ansible ""
   tp_add_existing "$TP_TMP/inv.folders_remove" /tmp/turbopanel-orchestrate ""
+  # The Docker gate's socket directory and Deno transpile cache.
+  tp_add_existing "$TP_TMP/inv.folders_remove" /run/turbopanel-gate ""
+  tp_add_existing "$TP_TMP/inv.folders_remove" /var/cache/turbopanel-docker-gate ""
   for _ifo_path in $TP_CONFIG_DIRS $TP_STATE_DIRS $TP_LOG_DIRS; do
     tp_add_existing "$TP_TMP/inv.folders_keep" "$_ifo_path" ""
   done
@@ -2326,7 +2330,7 @@ tp_remove_host_config() {
       tp_record_skip "udevadm not installed"
     fi
   fi
-  for _rhc in /etc/tmpfiles.d/turbopanel.conf /etc/sudoers.d/tp; do
+  for _rhc in /etc/tmpfiles.d/turbopanel.conf /etc/tmpfiles.d/turbopanel-docker-gate.conf /etc/sudoers.d/tp; do
     if [ -e "$_rhc" ]; then
       tp_run "remove $_rhc" rm -f "$_rhc" || true
     fi
