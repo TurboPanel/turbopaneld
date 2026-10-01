@@ -615,6 +615,48 @@ export async function publishStagedRuntimeCompose(
   return [live];
 }
 
+/** Compose chain of the deploy kept under `previous/`, or `null` when none was kept. */
+export async function previousComposePaths(
+  deploymentDir: string,
+): Promise<string[] | null> {
+  const path = join(
+    deploymentDir,
+    COMPOSE_PREVIOUS_DIRNAME,
+    RUNTIME_COMPOSE_FILENAME,
+  );
+  return (await fileExists(path)) ? [path] : null;
+}
+
+/**
+ * Put the files kept under `previous/` back as the live deployment (rollback of
+ * a failed sequential deploy) and return the live compose chain, or `null` when
+ * there is nothing to restore.
+ *
+ * The restored manifest loses its own `previous` index and `previous/` is
+ * removed: both described a deploy that no longer exists once this one is the
+ * live one again, and keeping either would let the next publish record a
+ * bogus "previous".
+ */
+export async function restorePreviousDeployment(
+  deploymentDir: string,
+): Promise<string[] | null> {
+  const previousDir = join(deploymentDir, COMPOSE_PREVIOUS_DIRNAME);
+  const manifest = await readDeploymentManifest(previousDir);
+  const composeFrom = join(previousDir, RUNTIME_COMPOSE_FILENAME);
+  if (manifest === null || !(await fileExists(composeFrom))) return null;
+  const live = join(deploymentDir, RUNTIME_COMPOSE_FILENAME);
+  await writeComposeFileSecure(live, await Deno.readTextFile(composeFrom));
+  const hadEnv = await copyIfPresent(
+    join(previousDir, COMPOSE_ENV_FILENAME),
+    join(deploymentDir, COMPOSE_ENV_FILENAME),
+  );
+  if (!hadEnv) await removeComposeEnvFile(deploymentDir);
+  const { previous: _index, ...restored } = manifest;
+  await writeDeploymentManifest(deploymentDir, restored);
+  await removePreviousDir(deploymentDir);
+  return [live];
+}
+
 /** Recreate an empty compose stage directory under `deploymentDir`. */
 export async function resetComposeStageDir(
   deploymentDir: string,

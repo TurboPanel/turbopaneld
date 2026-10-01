@@ -7,6 +7,7 @@ import {
   composeFileArgs,
   environmentDeploymentDir,
   listLocalDeploymentManifests,
+  previousComposePaths,
   pruneStaleComposeLayerFiles,
   publishStagedRuntimeCompose,
   readDeploymentManifest,
@@ -15,6 +16,7 @@ import {
   resetComposeStageDir,
   resolveDeployedComposePaths,
   resolveEnvironmentDeploymentDir,
+  restorePreviousDeployment,
   RUNTIME_COMPOSE_FILENAME,
   writeComposeEnvFile,
   writeComposeFileSecure,
@@ -868,6 +870,56 @@ describe("compose-files", () => {
         assertEquals(read?.version, 2);
         assertEquals(read?.generations, undefined);
         assertEquals(read?.previous, undefined);
+      });
+    });
+
+    it("restorePreviousDeployment puts previous/ back as live and drops the index", async () => {
+      await withDir(async (dir, stage) => {
+        await writeComposeFileSecure(
+          join(stage, RUNTIME_COMPOSE_FILENAME),
+          "v1\n",
+        );
+        await publishStagedRuntimeCompose(dir, stage, {
+          ...base,
+          version: 3,
+          generation: 1,
+          composeSha256: "a".repeat(64),
+        });
+        await writeComposeEnvFile(dir, "A=1\n");
+        await writeComposeFileSecure(
+          join(stage, RUNTIME_COMPOSE_FILENAME),
+          "v2\n",
+        );
+        await publishStagedRuntimeCompose(dir, stage, {
+          ...base,
+          version: 3,
+          generation: 2,
+          composeSha256: "b".repeat(64),
+        });
+        await writeComposeEnvFile(dir, "A=2\n");
+        assertEquals(await previousComposePaths(dir), [
+          join(dir, "previous", "compose.yaml"),
+        ]);
+
+        assertEquals(await restorePreviousDeployment(dir), [
+          join(dir, "compose.yaml"),
+        ]);
+        assertEquals(
+          await Deno.readTextFile(join(dir, "compose.yaml")),
+          "v1\n",
+        );
+        assertEquals((await readDeploymentManifest(dir))?.generation, 1);
+        assertEquals((await readDeploymentManifest(dir))?.previous, undefined);
+        assertEquals(await previousComposePaths(dir), null);
+        await assertRejects(() => Deno.stat(join(dir, "previous")));
+        // The v2 .env (A=2) must not survive; v1's is back.
+        assertEquals(await Deno.readTextFile(join(dir, ".env")), "A=1\n");
+      });
+    });
+
+    it("restorePreviousDeployment is null when nothing was kept", async () => {
+      await withDir(async (dir) => {
+        assertEquals(await restorePreviousDeployment(dir), null);
       });
     });
 
