@@ -441,9 +441,12 @@ writes `<backupDir>/control-plane/<upgradeId>/` (`pg_dump -Fc` inside the
 database container, an `/etc/turbopanel` tarball, and `meta.json` with the
 migration-history fingerprint) and keeps the newest three. When the rendered
 Caddyfile does not yet serve `updating.html`, `instance-launch-only.yml`
-re-templates it first. After restart, `waitForInstanceHealth` polls
-`GET /api/health` on the instance socket until `version` and
-`revision.commit` match the manifest, within
+re-templates it first; that render keeps the `TURBOPANEL_UPDATE_CHANNEL` already
+in runtime.env (only the installer sets the channel). After restart, `waitForInstanceHealth` polls
+`GET /api/health` on the instance socket until `revision.commit` matches the
+manifest and the version agrees (the reported `build` label equals the
+manifest version, or the base versions match: the binary reports `0.1.7`
+while a canary manifest says `0.1.7-canary.56`), within
 `INSTANCE_UPDATE_HEALTH_TIMEOUT_MS` (10 min by default; set
 `TURBOPANEL_UPDATE_HEALTH_TIMEOUT_SECONDS` to 30..3600 for a slow host; the poll
 backs off from 1 s to 10 s and succeeds the moment the new build answers). A timeout or mismatch runs

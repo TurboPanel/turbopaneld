@@ -448,6 +448,34 @@
          | regex_search('^[0-9A-Za-z.+-]+$') | default('', true) }}
   when: _instance_build_label_stat.stat.exists | default(false)
 
+# The update channel is chosen once, by the installer: run.sh passes the channel
+# it installed from as an extra-var. Every other render of runtime.env (the
+# update flow's Caddy refresh through instance-launch-only, a build toggle, a
+# converge) passes none and keeps the line already on disk. Falling back to
+# `release` there moved a canary host to release on its first update (canary,
+# 2026-10-01), so Update found nothing to install. No file or no line → the
+# template's `release`.
+- name: Stat the instance runtime env (the update channel it follows)
+  ansible.builtin.stat:
+    path: "{{ turbopanel_instance_runtime_env }}"
+  register: _instance_runtime_env_stat
+
+- name: Read the instance runtime env
+  ansible.builtin.slurp:
+    src: "{{ turbopanel_instance_runtime_env }}"
+  register: _instance_runtime_env_raw
+  when: _instance_runtime_env_stat.stat.exists | default(false)
+  # The Workers runtime env carries the database URL.
+  no_log: true
+
+- name: Keep the update channel the instance was installed from
+  ansible.builtin.set_fact:
+    turbopanel_installed_update_channel: >-
+      {{ (_instance_runtime_env_raw.content | b64decode)
+         | regex_findall('(?m)^TURBOPANEL_UPDATE_CHANNEL=([a-z]+)[ \t]*$')
+         | last | default('', true) }}
+  when: _instance_runtime_env_raw.content is defined
+
 - name: Install Workers runtime env (protected config dir)
   ansible.builtin.template:
     src: instance-workers.env.j2
