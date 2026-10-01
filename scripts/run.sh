@@ -929,14 +929,72 @@ tp_daemon_file_group() {
   printf '%s' "tp"
 }
 
-# Root-owned, daemon-group readable (production: root:tp 0640).
-tp_install_daemon_readable_file() {
-  _path="$1"
-  chmod 0640 "$_path" || return 1
-  _g="$(tp_daemon_file_group)"
-  if ! chown "root:${_g}" "$_path" 2>/dev/null; then
-    chgrp "$_g" "$_path" 2>/dev/null || true
+# Write stdin to a new file in a root-only staging dir, then set its mode and
+# (when given) group. Only ever called on a path inside tp_root_safe_write's
+# fresh 0700 directory, so nothing here can be redirected by tp.
+tp_root_safe_stage() {
+  _rss_path="$1"
+  _rss_mode="$2"
+  _rss_group="$3"
+  (umask 077 && cat > "$_rss_path") || return 1
+  chmod "$_rss_mode" "$_rss_path" || return 1
+  if [ -n "$_rss_group" ] && ! chown "root:${_rss_group}" "$_rss_path" 2>/dev/null; then
+    chgrp "$_rss_group" "$_rss_path" 2>/dev/null || true
   fi
+}
+
+# Root writes into a directory tp can write (/run/turbopanel, /var/lib/turbopanel)
+# go through here: stdin becomes <dest> with <mode> and optional <group>. The
+# content is staged in a fresh 0700 directory beside that directory (its parent
+# is root-owned and on the same filesystem) and renamed into place. rename(2)
+# replaces a link or file tp planted at <dest> and never writes through it; no
+# path inside the tp-writable directory is opened, chmod-ed or chown-ed by root.
+tp_root_safe_write() {
+  _rsw_dest="$1"
+  _rsw_mode="$2"
+  _rsw_group="${3:-}"
+  _rsw_dir="$(dirname "$_rsw_dest")"
+  if [ -L "$_rsw_dir" ] || [ ! -d "$_rsw_dir" ]; then
+    tp_print_error "Refusing to write $_rsw_dest: $_rsw_dir is not a plain directory"
+    return 1
+  fi
+  _rsw_stage="$(mktemp -d "$(dirname "$_rsw_dir")/.tp-stage.XXXXXX")" || return 1
+  _rsw_rc=0
+  if ! tp_root_safe_stage "$_rsw_stage/new" "$_rsw_mode" "$_rsw_group"; then
+    _rsw_rc=1
+  elif ! mv -fT "$_rsw_stage/new" "$_rsw_dest"; then
+    tp_print_error "Refusing to write $_rsw_dest: it is not a plain file"
+    _rsw_rc=1
+  fi
+  rm -rf "$_rsw_stage"
+  return "$_rsw_rc"
+}
+
+# Print a license file from tp's state dir with whitespace removed, or nothing.
+# Root reads it, so a link (to /etc/shadow, say) or a fifo is refused: dd opens
+# with O_NOFOLLOW and O_NONBLOCK. Relies on fs.protected_hardlinks=1 (Debian's
+# default) so tp cannot hard-link a root file into place.
+tp_read_state_license_file() {
+  _rsl_path="$1"
+  if [ -L "$_rsl_path" ] || [ ! -f "$_rsl_path" ]; then
+    return 0
+  fi
+  dd if="$_rsl_path" iflag=nofollow,nonblock bs=4096 count=4 status=none 2>/dev/null | tr -d '[:space:]' || true
+}
+
+# Stage the enrolment license for the daemon-config role. The staging dir sits
+# directly under root-owned /var/lib (LICENSE_STAGING_DIR), not in tp's state
+# dir, so tp cannot plant links in it for these writes or for the role's root
+# copy out of it. Whatever is at that path is removed and made fresh at 0700.
+tp_stage_daemon_license() {
+  _sdl_dir="$LICENSE_STAGING_DIR"
+  rm -rf "$_sdl_dir"
+  if ! mkdir -m 0700 "$_sdl_dir"; then
+    tp_print_error "Failed to create license staging dir $_sdl_dir"
+    return 1
+  fi
+  (umask 077 && printf '%s' "$LICENSE_ID" > "$_sdl_dir/license.id" \
+    && printf '%s' "$LICENSE_TOKEN" > "$_sdl_dir/license.token")
 }
 
 tp_arm_update_guard() {
@@ -963,9 +1021,11 @@ tp_arm_update_guard() {
     _previous_commit="$(tp_parse_daemon_commit_from_version "$("$_js_prev" --version 2>/dev/null || true)")"
   fi
   mkdir -p "$RUN_DIR"
-  printf '{"targetCommit":"%s","deadlineAt":"%s","armedAt":"%s","previousCommit":"%s"}\n' \
-    "$_manifest_commit" "$_deadline" "$_armed_at" "$_previous_commit" > "$_guard_path"
-  if ! tp_install_daemon_readable_file "$_guard_path"; then
+  # Root-owned, daemon-group readable (production: root:tp 0640). /run/turbopanel
+  # is tp-writable, so the file is staged elsewhere and renamed in.
+  if ! printf '{"targetCommit":"%s","deadlineAt":"%s","armedAt":"%s","previousCommit":"%s"}\n' \
+    "$_manifest_commit" "$_deadline" "$_armed_at" "$_previous_commit" \
+    | tp_root_safe_write "$_guard_path" 0640 "$(tp_daemon_file_group)"; then
     tp_print_error "Failed to write update guard $_guard_path"
     return 1
   fi
@@ -1533,12 +1593,14 @@ tp_write_instance_build_label() {
 
 # Copy the label into the instance's runtime.env — the file the unit already
 # loads — so an update, which does not re-render that template, still restarts
-# the instance with the right TURBOPANEL_BUILD_LABEL. Owner and mode are kept
-# (cp -p, then truncate-and-write). No runtime.env yet (a first install, before
-# instance-launch renders it) is left alone: the template reads the same file.
+# the instance with the right TURBOPANEL_BUILD_LABEL. Owner and mode are kept.
+# No runtime.env yet (a first install, before instance-launch renders it) is
+# left alone: the template reads the same file. A refused rewrite (see
+# tp_rewrite_instance_runtime_env) is reported and skipped; the label is only
+# cosmetic, so it does not fail the update.
 tp_sync_instance_build_label() {
-  _env="${CONFIG_DIR}/instance/runtime.env"
-  [ -f "$_env" ] || return 0
+  _env_dir="${CONFIG_DIR}/instance"
+  [ -f "$_env_dir/runtime.env" ] || return 0
   _label_path="$(tp_instance_build_label_path)"
   _label=""
   if [ -f "$_label_path" ]; then
@@ -1548,15 +1610,44 @@ tp_sync_instance_build_label() {
     *[!0-9A-Za-z.+-]*) _label="" ;;
     *) ;;
   esac
-  _tmp="${_env}.tmp.$$"
-  cp -p "$_env" "$_tmp"
-  {
-    grep -v '^TURBOPANEL_BUILD_LABEL=' "$_env" || true
-    if [ -n "$_label" ]; then
-      printf 'TURBOPANEL_BUILD_LABEL=%s\n' "$_label"
+  if ! (tp_rewrite_instance_runtime_env "$_env_dir" "$_label"); then
+    tp_print_error "Skipped the build label in $_env_dir/runtime.env"
+  fi
+  return 0
+}
+
+# Runs in a subshell: it pins the instance config dir as the working directory
+# so every later step uses that directory, not a path tp can re-point. tp owns
+# /etc/turbopanel, so it can rename instance/ and put its own directory or a
+# link in its place. Refused: a dir that is not where it should be (a link), is
+# not owned by this user (root), or is group/other writable, and a runtime.env
+# that is a link or not a plain file. The new file is a mktemp in the pinned
+# dir, given runtime.env's owner and mode, then renamed over it.
+tp_rewrite_instance_runtime_env() {
+  _rre_dir="$1"
+  _rre_label="$2"
+  cd -P -- "$_rre_dir" || return 1
+  if [ "$(pwd -P)" != "$_rre_dir" ] || [ "$(stat -c '%u' .)" != "$(id -u)" ] \
+    || [ -n "$(find . -maxdepth 0 -perm /022)" ]; then
+    tp_print_error "Refusing to rewrite $_rre_dir/runtime.env: the directory is not root-owned and private"
+    return 1
+  fi
+  if [ -L runtime.env ] || [ ! -f runtime.env ]; then
+    tp_print_error "Refusing to rewrite $_rre_dir/runtime.env: it is not a plain file"
+    return 1
+  fi
+  _rre_tmp="$(mktemp runtime.env.XXXXXX)" || return 1
+  if {
+    grep -v '^TURBOPANEL_BUILD_LABEL=' runtime.env || true
+    if [ -n "$_rre_label" ]; then
+      printf 'TURBOPANEL_BUILD_LABEL=%s\n' "$_rre_label"
     fi
-  } > "$_tmp"
-  mv -f "$_tmp" "$_env"
+  } > "$_rre_tmp" && chown --reference=runtime.env "$_rre_tmp" \
+    && chmod --reference=runtime.env "$_rre_tmp" && mv -fT "$_rre_tmp" runtime.env; then
+    return 0
+  fi
+  rm -f "$_rre_tmp"
+  return 1
 }
 
 # Written when an update starts moving the live instance and UI aside.
@@ -1569,7 +1660,8 @@ tp_instance_swap_marker() {
 tp_mark_instance_swap() {
   _marker="$(tp_instance_swap_marker)"
   mkdir -p "$(dirname "$_marker")"
-  printf '%s\n' '{"swapped":true}' > "$_marker"
+  # The state dir is tp-writable: stage and rename, never write through a link.
+  printf '%s\n' '{"swapped":true}' | tp_root_safe_write "$_marker" 0644 ""
 }
 
 tp_clear_instance_swap_marker() {
@@ -2115,8 +2207,8 @@ if [ "$DAEMON_ONLY" = true ] && ! tp_prepare_colocated_daemon_only; then
   if [ -z "$LICENSE" ]; then
     _state="${TURBOPANEL_STATE_DIR:-/var/lib/turbopanel}"
     if [ -f "$_state/license.id" ] && [ -f "$_state/license.token" ]; then
-      _id="$(tr -d '[:space:]' < "$_state/license.id")"
-      _tok="$(tr -d '[:space:]' < "$_state/license.token")"
+      _id="$(tp_read_state_license_file "$_state/license.id")"
+      _tok="$(tp_read_state_license_file "$_state/license.token")"
       if [ -n "$_id" ] && [ -n "$_tok" ]; then
         LICENSE="$(printf '%s:%s' "$_id" "$_tok" | base64 | tr -d '\n' | tr '+/' '-_')"
       fi
@@ -2238,7 +2330,9 @@ RUN_DIR="/run/turbopanel"
 ENV_FILE="$CONFIG_DIR/daemon.env"
 CA_PATH="$CONFIG_DIR/instance-ca.pem"
 UPLOADED_TRUST_PATH="$CONFIG_DIR/instance-uploaded-trust.pem"
-LICENSE_STAGING_DIR="$STATE_DIR/daemon-license-staging"
+# Root-owned parent on purpose (not $STATE_DIR, which tp owns): see
+# tp_stage_daemon_license. Passed to the daemon-config role in the vars file.
+LICENSE_STAGING_DIR="/var/lib/turbopanel-license-staging"
 
 # NOTE: `--insecure-tls` (INSECURE_TLS) deliberately does NOT export any
 # release-insecure flag. It only relaxes trust for the self-hosted instance
@@ -2251,11 +2345,7 @@ LICENSE_STAGING_DIR="$STATE_DIR/daemon-license-staging"
 
 mkdir -p "$STATE_DIR" "$CONFIG_DIR" "$BIN_DIR" "$INSTALL_ROOT/share" "$RUN_DIR"
 if [ "$INSTANCE_INSTALL" != true ] && [ "$COLOCATED_DAEMON_ONLY" != true ]; then
-  STAGING_DIR="$LICENSE_STAGING_DIR"
-  mkdir -p "$STAGING_DIR"
-  printf '%s' "$LICENSE_ID" > "$STAGING_DIR/license.id"
-  printf '%s' "$LICENSE_TOKEN" > "$STAGING_DIR/license.token"
-  chmod 0640 "$STAGING_DIR/license.id" "$STAGING_DIR/license.token"
+  tp_stage_daemon_license
 fi
 
 export DEBIAN_FRONTEND=noninteractive
@@ -2542,6 +2632,7 @@ VARS_FILE="$(mktemp)"
 trap 'rm -f "$VARS_FILE"' EXIT
 {
   printf 'turbopanel_instance_url: %s\n' "$HOST_URL"
+  printf 'turbopanel_daemon_license_staging_dir: %s\n' "$LICENSE_STAGING_DIR"
   printf 'turbopanel_start: %s\n' "$([ "$NO_START" = true ] && echo false || echo true)"
   printf 'turbopanel_manage_service_state: %s\n' "$([ "$NO_START" = true ] && echo false || echo true)"
   printf 'turbopanel_restart_daemon: %s\n' "$([ "$NO_START" = true ] && echo false || echo true)"
