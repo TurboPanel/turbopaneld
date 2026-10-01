@@ -226,6 +226,7 @@ test("applyRenderedFirewall: guard armed first, --test then restore per family, 
     );
     assertEquals(outcome, {
       ipv6Applied: true,
+      ipv6Status: "applied",
       forwardApplied: true,
       warnings: [],
       confirmation: {
@@ -420,6 +421,7 @@ test("applyRenderedFirewall: a v6 failure fails the reconcile, keeps v4 applied 
         ),
       FirewallIpv6ApplyError,
     );
+    assertStringIncludes(err.message, "ipv6_unfiltered:");
     assertStringIncludes(err.message, "IPv4 is applied");
     assertStringIncludes(err.message, "line 4 failed");
     // v4 went in and is pending: the guard stays armed (it is the net under
@@ -449,7 +451,7 @@ test("applyRenderedFirewall: a v6 failure fails the reconcile, keeps v4 applied 
   });
 });
 
-test("applyRenderedFirewall: no ip6tables → v6 left alone with a warning", async () => {
+test("applyRenderedFirewall: no ip6tables → v6 left alone, reported ipv6_unfiltered with a warning", async () => {
   await withTempLayout(async (layout) => {
     const rendered = renderFirewall({
       payload: payload(),
@@ -464,6 +466,8 @@ test("applyRenderedFirewall: no ip6tables → v6 left alone with a warning", asy
       { run: host.run, layout },
     );
     assertEquals(outcome.ipv6Applied, false);
+    assertEquals(outcome.ipv6Status, "ipv6_unfiltered");
+    assertStringIncludes(outcome.warnings[0]!, "ipv6_unfiltered:");
     assertStringIncludes(outcome.warnings[0]!, "ip6tables is not available");
     assert(!host.calls.some((c) => c.cmd.startsWith("ip6tables")));
     assertEquals((await readPendingMarker(layout))?.v6, "forget");

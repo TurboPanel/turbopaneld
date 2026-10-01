@@ -265,7 +265,7 @@ export class FirewallRulesetRefusedError extends Error {
 export class FirewallIpv6ApplyError extends Error {
   constructor(cause: unknown) {
     super(
-      `IPv6 ruleset was not applied (IPv4 is applied; IPv6 left unchanged): ${
+      `ipv6_unfiltered: IPv6 ruleset was not applied (IPv4 is applied; IPv6 left unchanged): ${
         errorText(cause)
       }`,
     );
@@ -273,8 +273,20 @@ export class FirewallIpv6ApplyError extends Error {
   }
 }
 
+/**
+ * What happened to IPv6 on a managed apply. `ipv6_unfiltered` is the degraded
+ * state: v4 is enforced but a rendered v6 ruleset could not be applied (no
+ * `ip6tables`), so IPv6 traffic is not filtered by this generation. It is
+ * never reported as success; a v6 *apply error* fails the command instead.
+ */
+export type FirewallIpv6Status = "applied" | "skipped" | "ipv6_unfiltered";
+
+export const IPV6_UNFILTERED_WARNING =
+  "ipv6_unfiltered: ip6tables is not available; IPv4 is enforced but IPv6 is NOT filtered (left unchanged)";
+
 export type FirewallApplyOutcome = {
   ipv6Applied: boolean;
+  ipv6Status: FirewallIpv6Status;
   forwardApplied: boolean;
   warnings: string[];
   /** The ruleset is loaded but not durable: confirm it before this deadline. */
@@ -363,7 +375,7 @@ async function loadStagedRuleset(
         ipv6Failure = err;
       }
     } else {
-      warnings.push("ip6tables is not available; IPv6 was left unchanged");
+      warnings.push(IPV6_UNFILTERED_WARNING);
     }
   }
 
@@ -379,8 +391,12 @@ async function loadStagedRuleset(
     ipv6Applied ? "replace" : "forget",
     ipv6Applied ? rendered.v6 : null,
   );
+  let ipv6Status: FirewallIpv6Status = "skipped";
+  if (ipv6Applied) ipv6Status = "applied";
+  else if (rendered.v6 !== null) ipv6Status = "ipv6_unfiltered";
   return {
     ipv6Applied,
+    ipv6Status,
     forwardApplied: includeForward[4],
     warnings,
     confirmation: armed,
