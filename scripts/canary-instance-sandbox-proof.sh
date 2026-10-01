@@ -51,12 +51,13 @@ fail() {
 
 health_status() {
   curl -s -o /dev/null -w '%{http_code}' --max-time 5 --unix-socket "$SOCKET" http://localhost/api/health 2>/dev/null
+  return 0
 }
 
 wait_healthy() {
   _wait_tries=${1:-30}
-  while [ "$_wait_tries" -gt 0 ]; do
-    if [ "$(health_status)" = 200 ]; then
+  while [[ "$_wait_tries" -gt 0 ]]; do
+    if [[ "$(health_status)" = 200 ]]; then
       return 0
     fi
     _wait_tries=$((_wait_tries - 1))
@@ -65,7 +66,7 @@ wait_healthy() {
   return 1
 }
 
-if [ "$(id -u)" -ne 0 ]; then
+if [[ "$(id -u)" -ne 0 ]]; then
   echo "run as root" >&2
   exit 2
 fi
@@ -81,7 +82,7 @@ for pair in ProtectSystem=strict ProtectHome=yes PrivateTmp=yes PrivateDevices=y
   prop=${pair%%=*}
   want=${pair#*=}
   have=$(systemctl show -p "$prop" --value "$UNIT")
-  if [ "$have" = "$want" ]; then pass "$prop=$want"; else fail "$prop is '$have', expected '$want'"; fi
+  if [[ "$have" = "$want" ]]; then pass "$prop=$want"; else fail "$prop is '$have', expected '$want'"; fi
 done
 families=$(systemctl show -p RestrictAddressFamilies --value "$UNIT")
 case "$families" in
@@ -94,23 +95,23 @@ else
   pass "NoNewPrivileges not set"
 fi
 nnp=$(grep NoNewPrivs "/proc/$(systemctl show -p MainPID --value "$UNIT")/status" | awk '{print $2}')
-if [ "$nnp" = 0 ]; then pass "process NoNewPrivs=0"; else fail "process NoNewPrivs=$nnp"; fi
+if [[ "$nnp" = 0 ]]; then pass "process NoNewPrivs=0"; else fail "process NoNewPrivs=$nnp"; fi
 
 echo "== 2. clean journal"
 errors=$(journalctl -u "$UNIT" --since "$since" --no-pager 2>/dev/null |
   grep -Ei 'NotCapable|Permission denied|Read-only file system|EROFS|Operation not permitted|status=2[0-9][0-9]|Failed at step|Failed to set up mount namespacing' || true)
-if [ -z "$errors" ]; then
+if [[ -z "$errors" ]]; then
   pass "journal clean since $since"
 else
   fail "journal has errors since $since"
   printf '%s\n' "$errors" >&2
 fi
-if [ "$(systemctl show -p ActiveState --value "$UNIT")" = active ]; then pass "unit active"; else fail "unit not active"; fi
+if [[ "$(systemctl show -p ActiveState --value "$UNIT")" = active ]]; then pass "unit active"; else fail "unit not active"; fi
 
 echo "== 3. metrics still write"
-if [ -d "$METRICS_DIR" ]; then
+if [[ -d "$METRICS_DIR" ]]; then
   newer=$(find "$METRICS_DIR" -maxdepth 2 -newer "$reference" -type f 2>/dev/null | head -3)
-  if [ -n "$newer" ]; then pass "files written under $METRICS_DIR since the restart"; else fail "nothing under $METRICS_DIR written since the restart"; fi
+  if [[ -n "$newer" ]]; then pass "files written under $METRICS_DIR since the restart"; else fail "nothing under $METRICS_DIR written since the restart"; fi
 else
   fail "$METRICS_DIR missing"
 fi
@@ -124,6 +125,7 @@ done < <(systemctl cat "$UNIT" | grep -E '^(PrivateTmp|PrivateDevices|ProtectSys
 probe() {
   _probe_script=$1
   systemd-run --quiet --wait --pipe --collect -p "User=$INSTANCE_USER" -p "Group=$INSTANCE_GROUP" "${props[@]}" /bin/sh -c "$_probe_script" 2>&1
+  return 0
 }
 listing=$(probe 'sudo -n -l')
 case "$listing" in
@@ -151,7 +153,7 @@ echo "== 5. prompt stop"
 start_ns=$(date +%s%N)
 systemctl stop "$UNIT"
 elapsed_ms=$((($(date +%s%N) - start_ns) / 1000000))
-if [ "$elapsed_ms" -lt $((STOP_BUDGET_SECONDS * 1000)) ]; then
+if [[ "$elapsed_ms" -lt $((STOP_BUDGET_SECONDS * 1000)) ]]; then
   pass "stop took ${elapsed_ms} ms"
 else
   fail "stop took ${elapsed_ms} ms (budget ${STOP_BUDGET_SECONDS} s)"
@@ -165,7 +167,7 @@ systemctl start "$UNIT"
 if wait_healthy 40; then pass "health 200 after start"; else fail "health did not reach 200 after start"; fi
 
 echo
-if [ "$FAILED" -eq 0 ]; then
+if [[ "$FAILED" -eq 0 ]]; then
   echo "ALL PASS. Remaining manual step: click Update in the panel and watch the restart come back healthy."
   exit 0
 fi
