@@ -112,8 +112,11 @@ host (`fw-proof`).
    the guard: nobody confirms a failed command, so the guard undoes it at the
    deadline), leaves the v6 chains and the durable `firewall.v6` as they were,
    and throws `FirewallIpv6ApplyError`, so the reconcile fails in the panel
-   rather than enforcing a `drop` on IPv4 only behind a warning. No `ip6tables`
-   binary at all is still a warning (`ipv6Applied: false`).
+   rather than enforcing a `drop` on IPv4 only behind a warning. The error text
+   starts `ipv6_unfiltered:`. No `ip6tables` binary at all (v6 rendered) is a
+   successful apply with `ipv6Status: "ipv6_unfiltered"` and a warning that
+   begins `ipv6_unfiltered:`; the control plane must show it as degraded, never
+   as plain success. `ipv6Status` is absent on observe/off/refused results.
 
 ## Not here yet (later rows)
 

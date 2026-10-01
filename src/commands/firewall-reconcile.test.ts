@@ -255,6 +255,74 @@ test("inputDefault drop is rendered, then refused with the default-drop-held sen
   });
 });
 
+test("managed, ip6tables missing: v4 applies, result is ipv6_unfiltered with a warning, never plain success", async () => {
+  await withLayout(async (layout) => {
+    const host = fakeHost({
+      ...HEALTHY,
+      "ip6tables -V": fail("ip6tables: command not found", 127),
+    });
+    const result = await handleFirewallReconcile(payload(), "now", {
+      run: host.run,
+      resolveLayout: () => layout,
+    });
+    assertEquals(parseFirewallReconcileResult(result), result);
+    assertEquals(result.applied, true);
+    assertEquals(result.ipv6Applied, false);
+    assertEquals(result.ipv6Status, "ipv6_unfiltered");
+    assert(result.warnings.some((w) => w.startsWith("ipv6_unfiltered:")));
+  });
+});
+
+test("managed, v6 apply error with v4 success: the command fails with ipv6_unfiltered", async () => {
+  await withLayout(async (layout) => {
+    const host = fakeHost({
+      ...HEALTHY,
+      "ip6tables-restore --noflush": fail("ip6tables-restore: boom"),
+    });
+    const err = await assertRejects(() =>
+      handleFirewallReconcile(payload(), "now", {
+        run: host.run,
+        resolveLayout: () => layout,
+      })
+    );
+    assertStringIncludes((err as Error).message, "ipv6_unfiltered:");
+    assert(host.calls.some((c) => c.cmd === "iptables-restore"));
+  });
+});
+
+test("managed, both families apply: ipv6Status is applied", async () => {
+  await withLayout(async (layout) => {
+    const host = fakeHost(HEALTHY);
+    const result = await handleFirewallReconcile(payload(), "now", {
+      run: host.run,
+      resolveLayout: () => layout,
+    });
+    assertEquals(result.ipv6Status, "applied");
+    assertEquals(result.warnings, []);
+  });
+});
+
+test("observe with ip6tables missing is untouched: nothing applied, no ipv6Status", async () => {
+  await withLayout(async (layout) => {
+    const host = fakeHost({
+      ...HEALTHY,
+      "ip6tables -V": fail("ip6tables: command not found", 127),
+    });
+    const result = await handleFirewallReconcile(
+      payload({ mode: "observe" }),
+      "now",
+      { run: host.run, resolveLayout: () => layout },
+    );
+    assertEquals(result.applied, false);
+    assertEquals(result.ipv6Status, undefined);
+    assert(
+      !host.calls.some((c) =>
+        c.cmd.endsWith("-restore") && !c.args.includes("--test")
+      ),
+    );
+  });
+});
+
 test("a co-located control plane with no controlPlane.tcpPorts adds the canary refusal", async () => {
   await withLayout(async (layout) => {
     const colocated = fakeHost({

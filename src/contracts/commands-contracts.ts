@@ -271,6 +271,13 @@ export type FirewallReconcileResult = {
   digest: string;
   ruleCount: number;
   ipv6Applied: boolean;
+  /**
+   * Managed applies only: `applied`, `skipped` (policy ipv6: skip) or
+   * `ipv6_unfiltered` (v4 enforced, a rendered v6 ruleset could not be applied
+   * because ip6tables is missing; the panel should show a degraded state).
+   * Absent on observe, off and refused results.
+   */
+  ipv6Status?: "applied" | "skipped" | "ipv6_unfiltered";
   /** `DOCKER-USER` existed and `TP-FWD` is hung off it (v4). */
   forwardApplied: boolean;
   /**
@@ -2595,6 +2602,9 @@ export function parseFirewallReconcileResult(
     digest: value.digest,
     ruleCount: value.ruleCount,
     ipv6Applied: value.ipv6Applied as boolean,
+    ...(value.ipv6Status === undefined
+      ? {}
+      : { ipv6Status: parseIpv6Status(value.ipv6Status) }),
     forwardApplied: value.forwardApplied as boolean,
     sshPorts: parseFirewallPortList(value.sshPorts, "sshPorts"),
     warnings: [...value.warnings],
@@ -2609,6 +2619,19 @@ export function parseFirewallReconcileResult(
       : { rendered: parseFirewallRendered(value.rendered) }),
     summary: value.summary,
   };
+}
+
+function parseIpv6Status(
+  value: unknown,
+): "applied" | "skipped" | "ipv6_unfiltered" {
+  if (
+    value !== "applied" && value !== "skipped" && value !== "ipv6_unfiltered"
+  ) {
+    throw new TypeError(
+      "ipv6Status must be applied, skipped or ipv6_unfiltered",
+    );
+  }
+  return value;
 }
 
 const FIREWALL_VALIDATION_MAX_ERRORS = 8;

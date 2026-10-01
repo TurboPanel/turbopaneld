@@ -239,7 +239,7 @@ export async function handleFirewallReconcile(
 
   logInfo(
     "command",
-    `firewall generation ${payload.generation} applied (pending confirmation): ${rendered.ruleCount} rules, v6=${outcome.ipv6Applied}, forward=${outcome.forwardApplied}, digest ${
+    `firewall generation ${payload.generation} applied (pending confirmation): ${rendered.ruleCount} rules, v6=${outcome.ipv6Status}, forward=${outcome.forwardApplied}, digest ${
       rendered.digest.slice(0, 12)
     }${
       warnings.length > 0
@@ -252,6 +252,7 @@ export async function handleFirewallReconcile(
     ...base,
     applied: true,
     ipv6Applied: outcome.ipv6Applied,
+    ipv6Status: outcome.ipv6Status,
     forwardApplied: outcome.forwardApplied,
     warnings,
     confirmation: {
