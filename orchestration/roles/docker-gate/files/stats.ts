@@ -14,6 +14,14 @@ export type StatsSnapshot = {
   upgrades: Record<string, number>;
   wouldDeny: Record<string, number>;
   refusals: Record<string, number>;
+  /** Platform allowances that removed a finding, by name. */
+  allowances: Record<string, number>;
+  /** Signed approvals by outcome (`accepted`, `rejected:<reason>`). */
+  approvals: Record<string, number>;
+  /** Findings an accepted approval covered, by rule. */
+  approvedRules: Record<string, number>;
+  /** Container creates by owner class (`platform` / `tenant` / `unlabeled`). */
+  owners: Record<string, number>;
 };
 
 function byKey(a: [string, number], b: [string, number]): number {
@@ -33,6 +41,10 @@ export class GateStats {
   private readonly upgrades = new Map<string, number>();
   private readonly wouldDeny = new Map<string, number>();
   private readonly refusals = new Map<string, number>();
+  private readonly allowances = new Map<string, number>();
+  private readonly approvals = new Map<string, number>();
+  private readonly approvedRules = new Map<string, number>();
+  private readonly owners = new Map<string, number>();
 
   request(route: string, method: string, status: number): void {
     bump(this.requests, `${route}\t${method}\t${status}`);
@@ -50,6 +62,22 @@ export class GateStats {
     bump(this.refusals, String(status));
   }
 
+  allowance(name: string): void {
+    bump(this.allowances, name);
+  }
+
+  approval(outcome: string): void {
+    bump(this.approvals, outcome);
+  }
+
+  approvedRule(rule: string): void {
+    bump(this.approvedRules, rule);
+  }
+
+  owner(owner: string): void {
+    bump(this.owners, owner);
+  }
+
   snapshot(): StatsSnapshot {
     const requests = [...this.requests.entries()].toSorted(byKey).map(
       ([key, count]) => {
@@ -62,6 +90,10 @@ export class GateStats {
       upgrades: toRecord(this.upgrades),
       wouldDeny: toRecord(this.wouldDeny),
       refusals: toRecord(this.refusals),
+      allowances: toRecord(this.allowances),
+      approvals: toRecord(this.approvals),
+      approvedRules: toRecord(this.approvedRules),
+      owners: toRecord(this.owners),
     };
   }
 }

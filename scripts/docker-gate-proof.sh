@@ -16,6 +16,12 @@
 #   4. nothing routes through the gate by default: the daemon's environment has
 #      no DOCKER_HOST / TURBOPANEL_DOCKER_SOCKET.
 #
+# Stage 2 adds: the ownership observation (a container nothing stamped is
+# logged as unowned-container when stopped through the gate), a rejected signed
+# approval (approvals are off on a default install, so any token is refused and
+# the finding stands), and, when buildx is installed, a summary that shows both
+# BuildKit upgrades (`grpc` and `session`).
+#
 # The containers are `true` / `echo` on a pinned Alpine image and are removed.
 # A BuildKit upgrade (Compose `build:`) is exercised when the buildx plugin is
 # installed; the summary then shows `grpc` and `session` upgrades.
@@ -129,11 +135,22 @@ if gate_docker run --rm --network none -v /var/run/docker.sock:/s:ro "$IMAGE" tr
 if gate_docker run --rm --network host "$IMAGE" true >/dev/null 2>&1; then pass "host network ran (observe)"; else fail "host network did not run"; fi
 if gate_docker run --rm --network none --cap-add SYS_ADMIN "$IMAGE" true >/dev/null 2>&1; then pass "cap-add ran (observe)"; else fail "cap-add did not run"; fi
 
+# Stage 2: ownership and approvals (still observe: nothing is refused).
+gate_docker run -d --name tpgate-proof-human --network none "$IMAGE" sleep 120 >/dev/null 2>&1
+if gate_docker stop -t 1 tpgate-proof-human >/dev/null 2>&1; then pass "stop of an unlabeled container ran (observe)"; else fail "stop of an unlabeled container did not run"; fi
+gate_docker rm -f tpgate-proof-human >/dev/null 2>&1
+if gate_docker run --rm --privileged --network none --label com.turbopanel.approval=v1.bm90LWEtdG9rZW4.bm90LWEtc2lnbmF0dXJl "$IMAGE" true >/dev/null 2>&1; then pass "privileged with a bogus approval ran (observe)"; else fail "privileged with a bogus approval did not run"; fi
+
 sleep 1
 _log=$(journalctl -u "$GATE_UNIT" --since "$SINCE" --no-pager -o cat 2>/dev/null)
 for _rule in privileged bind-host-root bind-docker-socket network-mode-host cap-add; do
   if printf '%s\n' "$_log" | grep -q "\"rule\":\"$_rule\""; then pass "journal has would-deny $_rule"; else fail "journal has no would-deny $_rule"; fi
 done
+for _needle in '"rule":"unlabeled-create"' '"rule":"unowned-container"'; do
+  if printf '%s\n' "$_log" | grep -q "$_needle"; then pass "journal has $_needle"; else fail "journal has no $_needle"; fi
+done
+if printf '%s\n' "$_log" | grep '"event":"docker-gate.approval"' | grep -q '"result":"rejected"'; then pass "journal has a rejected approval (approvals are off by default)"; else fail "journal has no rejected approval"; fi
+if printf '%s\n' "$_log" | grep -q 'bm90LWEtdG9rZW4'; then fail "an approval token reached the journal"; else pass "approval token is never logged"; fi
 if printf '%s\n' "$_log" | grep -q '"level":"error"'; then fail "the gate logged an error (see below)"; printf '%s\n' "$_log" | grep '"level":"error"' | head -5; else pass "no error-level gate log lines"; fi
 
 echo "== 4. nothing routes through the gate by default"
@@ -153,7 +170,13 @@ for _attempt in 1 2 3 4 5 6 7 8 9 10; do
     break
   fi
 done
-journalctl -u "$GATE_UNIT" --since "$SINCE" --no-pager -o cat | grep '"event":"docker-gate.summary"' | tail -1
+_summary=$(journalctl -u "$GATE_UNIT" --since "$SINCE" --no-pager -o cat | grep '"event":"docker-gate.summary"' | tail -1)
+printf '%s\n' "$_summary"
+if docker buildx version >/dev/null 2>&1; then
+  if printf '%s\n' "$_summary" | grep -q '"grpc":' && printf '%s\n' "$_summary" | grep -q '"session":'; then pass "summary shows the BuildKit grpc and session upgrades"; else fail "summary shows no grpc/session upgrade (compose build did not go through the gate?)"; fi
+else
+  echo "NOTE  buildx is not installed: grpc/session upgrades not exercised"
+fi
 if [[ "$_came_back" == true ]]; then pass "unit restarted itself after the stop (Restart=always)"; else fail "unit did not come back within 10 s"; fi
 
 if [[ "$FAILED" -ne 0 ]]; then

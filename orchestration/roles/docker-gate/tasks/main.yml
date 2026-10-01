@@ -1,5 +1,5 @@
 ---
-# Stage 1 of closing the Docker-socket route to root (observe mode). Installed
+# Stages 1-2 of closing the Docker-socket route to root (observe mode). Installed
 # wherever Docker is, on managed hosts only. Nothing routes through the gate
 # yet: the daemon still talks to the real socket and `tp` is still in the
 # `docker` group, so a failure here must never block the Docker install or a

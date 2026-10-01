@@ -33,6 +33,24 @@ test("loadConfig defaults to observe mode on the documented sockets", () => {
   assertEquals(config.policy, { ...DEFAULT_POLICY_CONFIG, capAllowlist: [] });
 });
 
+test("loadConfig reads the platform trees and the approval key path", () => {
+  const config = loadConfig({
+    TP_DOCKER_GATE_PLATFORM_RO_ROOTS: "/etc/x/a:/etc/x/b/",
+    TP_DOCKER_GATE_PLATFORM_RW_ROOTS: "/var/x",
+    TP_DOCKER_GATE_APPROVAL_PUBKEY:
+      "/opt/turbopanel/lib/docker-gate/approval.pub",
+  });
+  assertEquals(config.policy.platform, {
+    readOnly: ["/etc/x/a", "/etc/x/b"],
+    writable: ["/var/x"],
+  });
+  assertEquals(
+    config.approvalKeyFile,
+    "/opt/turbopanel/lib/docker-gate/approval.pub",
+  );
+  assertEquals(loadConfig({}).approvalKeyFile, undefined);
+});
+
 test("loadConfig takes every setting from the environment", () => {
   const config = loadConfig({
     TP_DOCKER_GATE_MODE: "observe",

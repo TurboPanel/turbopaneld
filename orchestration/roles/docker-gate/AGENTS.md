@@ -2,9 +2,9 @@
 
 Root context: `../../../AGENTS.md` → **Managed-host privilege boundary**
 ("Docker" is the first of the three root-equivalent routes of the daemon
-account `tp`). This role is **stage 1 of 5** of closing it.
+account `tp`). This role is **stage 2 of 5** of closing it.
 
-## What exists today (stage 1: observe mode)
+## What exists today (stages 1-2: observe mode)
 
 A root-owned systemd service, `turbopanel-docker-gate.service`, runs the
 vendored Deno (`<install>/vendor/deno/current/deno`) over the TypeScript in
@@ -29,6 +29,10 @@ A later stage that routes traffic through it flips this to fatal.
 | ---- | --- |
 | `http.ts` | Strict HTTP/1.1 framing: head parse, `Content-Length` / chunked bodies, refusal of every ambiguity (both lengths, repeated lengths, folding, bare LF, `Transfer-Encoding` other than `chunked`) |
 | `proxy.ts` | One client connection: request in, fresh engine connection, response back. Upgrades (`attach`, `exec start`, Compose `/session` + `/grpc`) are spliced raw **only after the engine answers 101** |
+| `platform.ts` | Ownership classes (`platform` / `tenant` / `unlabeled`) from labels, and the narrow bind allowance of platform containers |
+| `approval.ts` | Verifier for the control plane's signed per-deploy approval (Ed25519 via WebCrypto); no signer, no private key |
+| `inspect.ts` | Root-side `GET /containers/{id}/json` for the ownership check (labels only, never logged) |
+| `review.ts` | Per request: policy findings, allowance hits, approval check, ownership check; logs + counters |
 | `policy.ts` | Route classification and the strict-profile rules (see below); returns findings, secret-free |
 | `resolve.ts` | Resolves a bind source by hand, component by component, following symlinks (including dangling ones, which Docker creates the target of) |
 | `stats.ts` | Counters for the periodic summary line |
@@ -64,8 +68,75 @@ engine would clean (`..`, `//`).
 own containers bind `/etc/turbopanel/...` and `/var/lib/turbopanel/...`
 (ProxySQL, orchestrator, managed-engine config and data) and the ingress
 Tecnativa proxy container mounts `/var/run/docker.sock` until stage 3 deletes
-it. Stage 2 turns those into an ownership rule; this stage's logs are the
-exact list.
+it. Since stage 2 the platform's own compose containers are allowed (see
+below), so what remains on a host is the socket proxy and the label-less
+managed-file helpers.
+
+## Stage 2 additions (still observe: nothing is refused)
+
+**Platform allowance** (`platform.ts`). A create is `platform` when it carries
+`turbopanel.role` in {`turbopanel`, `ingress`} plus a known
+`com.turbopanel.system.component` (`hosting-ingress`, `managed-ingress`,
+`managed-ha`), or `tp.managed.engine`. Such a container may bind, after symlink
+resolution: config trees read-only (`<config>/proxysql`, `<config>/orchestrator`,
+`TP_DOCKER_GATE_PLATFORM_RO_ROOTS`) and state trees in any mode
+(`<state>/{proxysql,orchestrator,managed}`, `..._RW_ROOTS`). A writable mount of
+a config tree is its own finding (`platform-config-writable`). Everything else
+still fires: `/`, `/etc` or `/etc/turbopanel` wholesale, the install dir, the
+Docker socket. Hits are counted (`allowances`) and logged `docker-gate.allowed`.
+A test renders the real ProxySQL / orchestrator emitters and asserts every bind
+passes, so a changed emitter fails CI instead of the canary.
+**This is a false-positive remover, not a boundary:** the daemon account stamps
+these labels itself and the config trees are daemon-writable today. It must
+tighten (and the labels stop being trusted) when route 2b makes the config trees
+root-owned; the label check can then be replaced by an exact-path list.
+Known gaps, left as findings on purpose: the ingress `docker-socket-proxy`
+service mounts the Docker socket until stage 3 deletes it, and the managed-file
+helpers in `src/managed/materialize.ts` are plain `docker run -v <state>/managed`
+with no platform label (the daemon must stamp one before enforcement).
+
+**Ownership observation.** Every create counts by owner class (`owners`) and an
+unlabeled one is `unlabeled-create`. For start / stop / restart / kill / pause /
+rename / update / exec-create / attach / archive / remove, the gate inspects the
+target as root and logs `unowned-container` when it carries neither a Compose
+project, a TurboPanel label nor `tp.managed.engine`. An inspect that fails (gone,
+engine error) is skipped, never a finding.
+
+**Signed approvals** (`approval.ts`). Host-level Compose features cannot rest on
+the daemon's own `hostLevelApproved` flag (the daemon account sets it). The
+control plane signs, the gate verifies with a public key. Token = container
+label `com.turbopanel.approval` = `v1.<b64url payload>.<b64url sig>`; the
+signature covers `turbopanel-docker-gate-approval-v1\n` + the payload text.
+Payload: `deployId`, `project`, `composeDigest` (audit only: the gate never sees
+the compose file), `features[]`, `iat`, `exp` (seconds). The gate checks the
+signature (any trusted key: one raw base64url Ed25519 key per line, so rotation
+can overlap), `exp` not past, `iat` at most 60 s ahead, a lifetime of at most
+900 s, and `project` equal to the container's `com.docker.compose.project`.
+Only the rules in `APPROVABLE_RULES` are ever relaxed, each under one feature
+(`privileged`, `docker-socket`, `host-paths`, `host-network`, `cap-add`,
+`devices`); the host-root bind, denied trees, userns, masked paths and
+volumes-from are never approvable. An approved finding is dropped from
+`would-deny` and counted (`approvedRules`); every outcome is one
+`docker-gate.approval` line (`accepted` / `rejected` + reason + deployId +
+project; the token is never logged). **Off by default:** with no key
+(`docker_gate_approval_pubkeys` empty, no `TP_DOCKER_GATE_APPROVAL_PUBKEY`)
+every token is `rejected: approvals-off` and findings stand. The key lives
+root-owned in `<install>/lib/docker-gate/approval.pub`, never under
+`/etc/turbopanel` or `/run/turbopanel` (the daemon could swap it there). An
+unreadable key file turns approvals off with an error line; the gate keeps
+serving. Replay of a still-valid token by the daemon only repeats the same
+relaxation for the same project until `exp`. `docker-socket` is approvable
+because the owner asked for it; plan finding B wanted socket mounts forbidden
+outright, so delete that one line in `APPROVABLE_RULES` to forbid it. The signer
+(control plane) is not built yet; tests sign with a key generated at run time.
+
+**Corpus.** `src/docker-gate/testdata/corpus.json` now also holds creates
+recorded from a real Engine 29 / Compose 5.5 for the ProxySQL, orchestrator and
+managed-engine compose shapes (images swapped, `Env`/`Cmd` scrubbed, paths
+rewritten) and the managed-file helper.
+
+**Counters** in the summary line: `allowances`, `approvals`, `approvedRules`,
+`owners` (plus the stage-1 `requests`, `upgrades`, `wouldDeny`, `refusals`).
 
 ## Wire behaviour that is not a pass-through
 
@@ -79,7 +150,9 @@ No docker, Compose or daemon client sends any of these today.
 `docker-gate.would-deny` (rule, secret-free detail, method, route, path),
 `docker-gate.summary` (every `TP_DOCKER_GATE_SUMMARY_SEC`, and on stop:
 route / method / status counts, `upgrades`, `wouldDeny`, `refusals`),
-`docker-gate.started`, `docker-gate.bad-request`,
+`docker-gate.allowed`, `docker-gate.approval`,
+`docker-gate.approval-keys-unusable`, `docker-gate.started`,
+`docker-gate.bad-request`,
 `docker-gate.upstream-unreachable`, `docker-gate.peer-closed`. **Never
 logged:** environment, commands, entrypoints, labels, registry auth, query
 strings, request bodies.
@@ -100,9 +173,9 @@ strings, request bodies.
 
 ## Stages (plan: closing the Docker route)
 
-1. **This role**: gate service, observe mode, nothing routed through it.
-2. Policy engine hardening: ownership labels, platform allowance, `/grpc` +
-   `/session` proven, still observe.
+1. Gate service, observe mode, nothing routed through it.
+2. **This role (added)**: platform allowance, ownership observation, signed
+   approval verifier, `/grpc` + `/session` proven end to end, still observe.
 3. Traefik on a read-only filtered socket; the tp-created Tecnativa container
    is removed.
 4. `tp` switches to the gate (`DOCKER_HOST`, `TURBOPANEL_DOCKER_SOCKET`), drops
@@ -110,3 +183,17 @@ strings, request bodies.
 5. `tp` leaves the `docker` group; the real socket is root-only.
 
 Break-glass at every stage: `systemctl stop turbopanel-docker-gate` as root.
+
+## Lockouts to expect when enforcement arrives (stage 4; none bite in stage 2)
+
+- Approval key missing or rotated without overlap: every host-level deploy is
+  denied. Ship the new key alongside the old one, then retire the old one.
+- Clock skew between control plane and host beyond 60 s (or a token older than
+  its `exp`): approvals read as `expired` / `not-yet-valid`.
+- An inspect round trip that fails would deny the action once ownership is
+  enforced: stage 4 must decide fail-open vs fail-closed per route.
+- Renaming a system component label (or an emitter changing a bind path)
+  makes platform containers lose the allowance; the emitter test guards the
+  paths, the label constants are pinned to `src/deploy/labels.ts`.
+- The label-less managed-file helpers would be denied until the daemon stamps
+  a platform label on them.

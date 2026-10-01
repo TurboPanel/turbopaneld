@@ -23,6 +23,11 @@ Environment=TP_DOCKER_GATE_SOCKET_GID={{ docker_gate_gid }}
 {% endif %}
 Environment=TP_DOCKER_GATE_BIND_ROOTS={{ docker_gate_bind_roots | join(':') }}
 Environment=TP_DOCKER_GATE_DENY_PREFIXES={{ docker_gate_deny_prefixes_extra | join(':') }}
+Environment=TP_DOCKER_GATE_PLATFORM_RO_ROOTS={{ docker_gate_platform_ro_roots | join(':') }}
+Environment=TP_DOCKER_GATE_PLATFORM_RW_ROOTS={{ docker_gate_platform_rw_roots | join(':') }}
+{% if (docker_gate_approval_pubkeys | string | trim | length) > 0 %}
+Environment=TP_DOCKER_GATE_APPROVAL_PUBKEY={{ docker_gate_approval_pubkey_file }}
+{% endif %}
 Environment=TP_DOCKER_GATE_SUMMARY_SEC={{ docker_gate_summary_seconds }}
 Environment=DENO_DIR={{ docker_gate_cache_dir }}
 Environment=DENO_NO_UPDATE_CHECK=1

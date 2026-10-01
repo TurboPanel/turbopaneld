@@ -27,6 +27,23 @@
   loop: "{{ docker_gate_files }}"
   notify: Restart Docker gate
 
+- name: Install the approval public key (root-owned; empty variable = approvals off)
+  ansible.builtin.copy:
+    content: "{{ docker_gate_approval_pubkeys | trim }}\n"
+    dest: "{{ docker_gate_approval_pubkey_file }}"
+    owner: root
+    group: "{{ docker_gate_group }}"
+    mode: "0640"
+  when: (docker_gate_approval_pubkeys | string | trim | length) > 0
+  notify: Restart Docker gate
+
+- name: Remove a stale approval public key when approvals are switched off
+  ansible.builtin.file:
+    path: "{{ docker_gate_approval_pubkey_file }}"
+    state: absent
+  when: (docker_gate_approval_pubkeys | string | trim | length) == 0
+  notify: Restart Docker gate
+
 # The socket directory is created at boot by tmpfiles.d (and by ExecStartPre
 # on every start), owned by root with the daemon group allowed in.
 - name: Install tmpfiles.d entry for the gate socket directory
