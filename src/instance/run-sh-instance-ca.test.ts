@@ -270,7 +270,7 @@ test("a rotated CA that validates the live leaf is installed over the pinned one
       TP_TEST_SERVED_CA: next,
     }, caPath);
     assertEquals(out.status, 0, out.stderr);
-    assertStringIncludes(out.stdout, "Instance CA downloaded (was");
+    assertStringIncludes(out.stdout, "Platform CA downloaded (was");
     assertEquals(await fingerprint(caPath), await fingerprint(next));
   } finally {
     await Deno.remove(dir, { recursive: true });

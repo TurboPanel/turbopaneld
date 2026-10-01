@@ -189,7 +189,7 @@ const INSTALLER_STEP_LABELS: Record<
     done: "TurboPanel daemon provisioning complete",
   },
   "instance-install.yml": {
-    running: "Running self-hosted instance provisioning…",
+    running: "Running self-hosted control plane provisioning…",
     done: "TurboPanel instance provisioning complete",
   },
   "daemon-colocated-refresh.yml": {
@@ -214,10 +214,10 @@ function assertInstanceCaFile(path: string): void {
   try {
     stat = Deno.statSync(path);
   } catch {
-    throw new Error(`Instance CA file not found or unreadable: ${path}`);
+    throw new Error(`Platform CA file not found or unreadable: ${path}`);
   }
   if (!stat.isFile) {
-    throw new Error(`Instance CA path is not a file: ${path}`);
+    throw new Error(`Platform CA path is not a file: ${path}`);
   }
 }
 

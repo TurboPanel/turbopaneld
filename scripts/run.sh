@@ -293,9 +293,9 @@ tp_install_instance_ca() {
   install -m 0640 "$_new_ca" "$CA_PATH"
   _new_fp="$(tp_ca_fingerprint "$CA_PATH")"
   if [ -n "$_old_fp" ]; then
-    tp_print_ok "Instance CA downloaded (was ${_old_fp}; now ${_new_fp})"
+    tp_print_ok "Platform CA downloaded (was ${_old_fp}; now ${_new_fp})"
   else
-    tp_print_ok "Instance CA downloaded (${_new_fp})"
+    tp_print_ok "Platform CA downloaded (${_new_fp})"
   fi
 }
 
@@ -325,11 +325,11 @@ tp_fetch_instance_ca() {
       if [ -f "$CA_PATH" ]; then
         tp_refetch_instance_ca_unpinned
       else
-        tp_print_step "~" "Could not download instance CA (HTTP ${_ca_http_code}) — keeping existing CA if present"
+        tp_print_step "~" "Could not download the Platform CA (HTTP ${_ca_http_code}) — keeping existing CA if present"
       fi
       ;;
     *)
-      tp_print_step "~" "Could not download instance CA (HTTP ${_ca_http_code}) — keeping existing CA if present"
+      tp_print_step "~" "Could not download the Platform CA (HTTP ${_ca_http_code}) — keeping existing CA if present"
       ;;
   esac
   rm -f "$_ca_tmp"
@@ -1571,14 +1571,14 @@ tp_run_instance_install() {
     tp_emit_update_stage downloading
   fi
 
-  tp_print_step "▸" "Fetching instance release manifest (TurboPanel/turbopanel, channel ${TURBOPANEL_UPDATE_CHANNEL:-release})…"
+  tp_print_step "▸" "Fetching control plane release manifest (TurboPanel/turbopanel, channel ${TURBOPANEL_UPDATE_CHANNEL:-release})…"
   tp_fetch_repo_manifest turbopanel || { rm -rf "$_work"; return 1; }
   _instance_version="$(tp_manifest_field "$_repo_manifest_compact" "version")"
   _instance_commit="$(tp_manifest_field "$_repo_manifest_compact" "commit")"
   tp_print_step "  " "Instance: v${_instance_version:-?} (${_instance_commit:-unknown})"
-  tp_print_step "▸" "Downloading instance package (${_linux_arch})…"
+  tp_print_step "▸" "Downloading control plane package (${_linux_arch})…"
   tp_download_repo_artifact "instance-${_linux_arch}" "$_work/instance.tar.zst" || { rm -rf "$_work"; return 1; }
-  tp_print_ok "Instance package verified (SHA-256 ok)"
+  tp_print_ok "Control plane package verified (SHA-256 ok)"
 
   tp_print_step "▸" "Fetching UI release manifest (TurboPanel/ui)…"
   tp_fetch_repo_manifest ui || { rm -rf "$_work"; return 1; }
@@ -1647,7 +1647,7 @@ tp_run_instance_install() {
     "$INSTALL_ROOT/lib/libduckdb.so" \
     "$_ui_dir/index.html"; do
     if [ ! -e "$_required" ]; then
-      tp_print_error "Instance package missing $_required"
+      tp_print_error "Control plane package missing $_required"
       if [ "$_skip_daemon" = true ]; then
         tp_restore_instance_prev
         tp_clear_instance_swap_marker
@@ -1695,7 +1695,7 @@ tp_run_instance_install() {
     printf 'turbopanel_daemon_state_dir: %s\n' "$STATE_DIR"
     printf 'turbopanel_daemon_env_file: %s\n' "$ENV_FILE"
   } > "$_vars"
-  tp_print_step "▸" "Provisioning the self-hosted instance (Postgres, Redis, RabbitMQ, Docker, certs, units, Caddy, co-located daemon)…"
+  tp_print_step "▸" "Provisioning the self-hosted control plane (Postgres, Redis, RabbitMQ, Docker, certs, units, Caddy, co-located daemon)…"
   _rc=0
   if [ "$DAEMON_EXEC_MODE" = "$TP_EXEC_MODE_NATIVE" ]; then
     "$(tp_daemon_binary_path)" run-installer --playbook instance-install.yml --vars-file "$_vars" || _rc=$?
@@ -1705,10 +1705,10 @@ tp_run_instance_install() {
   rm -f "$_vars"
   rm -rf /tmp/turbopanel-ansible /root/.ansible
   if [ "$_rc" -ne 0 ]; then
-    tp_print_error "Instance provisioning failed"
+    tp_print_error "Control plane provisioning failed"
     return "$_rc"
   fi
-  tp_print_ok "Self-hosted instance installed — open the wizard URL printed above (https://<this host>:8443/install); this host's daemon enrols itself once the wizard has issued the first license"
+  tp_print_ok "Self-hosted control plane installed — open the wizard URL printed above (https://<this host>:8443/install); this host's daemon enrols itself once the wizard has issued the first license"
   return 0
 }
 
@@ -1796,7 +1796,7 @@ tp_run_colocated_daemon_refresh() {
       printf 'turbopanel_ui_manifest_url: "%s"\n' "$_kept"
     fi
   } > "$_vars"
-  tp_print_step "▸" "Refreshing the co-located daemon (socket mode; instance, UI, and database unchanged)…"
+  tp_print_step "▸" "Refreshing the co-located daemon (socket mode; control plane, web app, and database unchanged)…"
   _rc=0
   if [ "$DAEMON_EXEC_MODE" = "$TP_EXEC_MODE_NATIVE" ]; then
     "$(tp_daemon_binary_path)" run-installer --playbook daemon-colocated-refresh.yml --vars-file "$_vars" || _rc=$?
@@ -1882,9 +1882,9 @@ tp_print_instance_welcome() {
   _channel="${TURBOPANEL_UPDATE_CHANNEL:-release}"
 
   printf '\n'
-  tp_print_styled_line "1" '  ╭──────────────────────────────────────────────────────────────╮'
-  tp_print_styled_line "1" '  │  ⚡ TurboPanel  ·  Self-Hosted Instance Installer / Updater  │'
-  tp_print_styled_line "1" '  ╰──────────────────────────────────────────────────────────────╯'
+  tp_print_styled_line "1" '  ╭──────────────────────────────────────────────────────────────────╮'
+  tp_print_styled_line "1" '  │  ⚡ TurboPanel  ·  Self-Hosted Control Plane Installer / Updater  │'
+  tp_print_styled_line "1" '  ╰──────────────────────────────────────────────────────────────────╯'
   _version=""
   _version="$(tp_peek_instance_version 2>/dev/null)" || _version=""
   if [ -n "$_version" ]; then
@@ -1900,7 +1900,7 @@ tp_print_instance_welcome() {
   printf '  This installs the full TurboPanel control plane on this host.\n'
   printf '\n'
   printf '  Connecting a server to an existing control plane? Sign in to that\n'
-  printf '  panel and copy the install command from Servers. It includes the\n'
+  printf '  control plane and copy the install command from Servers. It includes the\n'
   printf '  license this host needs.\n'
   printf '\n'
   if [ -t 1 ] && tp_is_interactive; then
@@ -2129,7 +2129,7 @@ if [ "$INSTANCE_INSTALL" = true ]; then
     exit 1
   fi
   if ! tp_builtin_repo_manifest_url turbopanel "$TURBOPANEL_UPDATE_CHANNEL" >/dev/null; then
-    tp_print_error "--instance needs --channel canary, rc or release (the instance and UI packages publish only through GitHub Releases; got ${TURBOPANEL_UPDATE_CHANNEL})"
+    tp_print_error "--instance needs --channel canary, rc or release (the control plane and web app packages publish only through GitHub Releases; got ${TURBOPANEL_UPDATE_CHANNEL})"
     exit 1
   fi
   if [ "$SKIP_DAEMON_PACKAGE" = true ] && [ "$NO_START" != true ]; then
@@ -2338,7 +2338,7 @@ tp_print_step "  " "Binary (${_linux_arch:-unknown}): $_binary_artifact_url"
 tp_print_step "  " "JS bundle (if needed): $_js_fallback_artifact_url"
 tp_print_step "  " "Commit: ${_manifest_commit:-unknown}"
 if [ "$INSTANCE_INSTALL" = true ]; then
-  tp_print_step "  " "Control plane: this host (self-hosted instance install)"
+  tp_print_step "  " "Control plane: this host (self-hosted install)"
 elif [ "$_colocated_daemon_refresh" = true ]; then
   tp_print_step "  " "Control plane: this host (co-located socket)"
 else
@@ -2363,7 +2363,7 @@ elif [ -n "$INSTANCE_CA" ]; then
     install -m 0640 "$INSTANCE_CA" "$CA_PATH"
   fi
 else
-  tp_print_step "▸" "Fetching instance CA…"
+  tp_print_step "▸" "Fetching the Platform CA…"
   tp_fetch_instance_ca
 fi
 if [ "$INSTANCE_INSTALL" != true ] && [ -n "$HOST_URL" ]; then
@@ -2514,7 +2514,7 @@ if [ "$INSTANCE_INSTALL" = true ]; then
   # starts turbopaneld itself (socket mode), so nothing daemon-specific
   # happens in this script for a control-plane install.
   if ! command -v zstd >/dev/null 2>&1; then
-    tp_print_error "zstd is required to unpack the instance package (apt install zstd)"
+    tp_print_error "zstd is required to unpack the control plane package (apt install zstd)"
     exit 1
   fi
   tp_run_instance_install
