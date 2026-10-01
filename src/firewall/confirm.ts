@@ -26,6 +26,7 @@ import {
   removeIfPresent,
   writeFileAtomic,
 } from "./pending.ts";
+import { foldManagedPublicChainBestEffort } from "./fold.ts";
 import { runFirewallHost } from "./run.ts";
 
 export type FirewallConfirmState =
@@ -137,6 +138,9 @@ export async function confirmPendingFirewall(
   await promoteDurable(layout, marker.v6, v4Document);
   await clearPendingFirewall(layout);
   await disarmGuardTimer(run);
+  // Stage 6: the ruleset is confirmed, so the legacy managed public chain can
+  // go if (and only if) it now covers every listener that chain restricted.
+  await foldManagedPublicChainBestEffort({ run, layout });
   logInfo(
     "firewall",
     `firewall ruleset ${digest.slice(0, 12)} confirmed and made durable`,

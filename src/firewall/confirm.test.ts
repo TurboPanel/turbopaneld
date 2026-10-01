@@ -116,7 +116,11 @@ test("confirm promotes the pending v4 document, clears the stage and stops the g
       () => read(layout, FIREWALL_PENDING_V4_FILENAME),
       Deno.errors.NotFound,
     );
-    assertEquals(host.calls, [`systemctl stop ${FIREWALL_GUARD_TIMER}`]);
+    assertEquals(host.calls, [
+      `systemctl stop ${FIREWALL_GUARD_TIMER}`,
+      // Stage 6: after a confirm, look for a legacy managed chain to fold.
+      "iptables -S TP-MANAGED-PUB",
+    ]);
   });
 });
 
