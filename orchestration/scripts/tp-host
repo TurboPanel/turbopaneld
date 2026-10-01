@@ -557,7 +557,11 @@ tp_unit_ok() {
         exit 0
       }
       if (seen["Timer"] || seen["Slice"]) exit 1
-      print user "\t" group "\t" slice "\t" nnp
+      # `read` collapses an empty tab-separated field (tab is IFS whitespace)
+      # and shifts the rest left, so an empty field is written as "-" and a
+      # literal "-" is refused; the shell maps "-" back to empty.
+      if (user == "-" || group == "-" || slice == "-" || nnp == "-") fail("a field of \"-\"")
+      print (user == "" ? "-" : user) "\t" (group == "" ? "-" : group) "\t" (slice == "" ? "-" : slice) "\t" (nnp == "" ? "-" : nnp)
     }
   ' "$_uk_file" > "$_uk_file.meta" || return 1
   case "$_uk_name" in
@@ -568,6 +572,10 @@ tp_unit_ok() {
     return
   fi
   IFS="	" read -r _uk_user _uk_group _uk_slice _uk_nnp < "$_uk_file.meta" || return 1
+  [ "$_uk_user" != "-" ] || _uk_user=""
+  [ "$_uk_group" != "-" ] || _uk_group=""
+  [ "$_uk_slice" != "-" ] || _uk_slice=""
+  [ "$_uk_nnp" != "-" ] || _uk_nnp=""
   if [ "$_uk_name" = "turbopanel-hosting-caddy.service" ]; then
     # Runs as root today (binds :80/:443) — see AGENTS.md residual risks. Its
     # exec lines must be the vendored Caddy against the hosting config.
