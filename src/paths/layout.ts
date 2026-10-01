@@ -195,10 +195,37 @@ export function pathExists(path: string): boolean {
   }
 }
 
+/** Asks whether this process may read `path` (a seam: tests pass a fake). */
+export type ReadPermissionQuery = (path: string) => Deno.PermissionState;
+
+function queryReadPermission(path: string): Deno.PermissionState {
+  try {
+    return Deno.permissions.querySync({ name: "read", path }).state;
+  } catch {
+    return "denied";
+  }
+}
+
+/**
+ * Existence probe that never raises a permission prompt: a read this process
+ * has not been granted counts as "not there". Probing for a checkout runs
+ * before anything else (even `turbopaneld --version`), so it must not ask an
+ * operator for read access to paths they did not mean to touch.
+ */
+export function probeExists(
+  path: string,
+  query: ReadPermissionQuery = queryReadPermission,
+): boolean {
+  return query(path) === "granted" && pathExists(path);
+}
+
 /** True when `root` looks like a daemon source or dev checkout tree. */
-export function hasDaemonCheckout(root: string): boolean {
-  return pathExists(join(root, "orchestration", "ansible.cfg")) ||
-    pathExists(join(root, "main.ts"));
+export function hasDaemonCheckout(
+  root: string,
+  query: ReadPermissionQuery = queryReadPermission,
+): boolean {
+  return probeExists(join(root, "orchestration", "ansible.cfg"), query) ||
+    probeExists(join(root, "main.ts"), query);
 }
 
 /**
