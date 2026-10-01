@@ -306,6 +306,70 @@ export function renderDaemonPermissionFlags(): string[] {
 }
 
 /**
+ * The scheduled-backup runner's Deno permission contract (JS mode).
+ *
+ * `turbopaneld backup-run <policyId>` is started by a policy's systemd timer
+ * through `lib/tp-backup-run` (`orchestration/roles/daemon-launch/templates/
+ * tp-backup-run.j2`). It never talks to the control plane or a socket and
+ * only ever drives the Docker CLI, so it gets a fraction of the daemon's set
+ * instead of a copy of it:
+ *
+ * - read/write: the policies file and result spool under
+ *   `<state>/backup`, the two per-target lock directories under the run dir,
+ *   and the backup tree itself. Nothing else under the state dir (licence,
+ *   server id, TLS, tunnels), no tenant home (`/srv/users`: the volume is
+ *   read by a helper container, never by this process), and not the Docker
+ *   socket (the CLI child opens that, not Deno).
+ * - read of the docker binary: `ensureDocker` stats it.
+ * - run: the Docker CLI only. Not `sudo`: a timer-started process has fresh
+ *   credentials, and `docker-cli.ts` reports the real socket error when it
+ *   may not run the sudo fallback.
+ * - env: `Deno.env.toObject()` (layout resolution) needs the unscoped grant,
+ *   which is harmless here because there is no network grant to send it over.
+ * - sys: `statfs` for the free-space check.
+ * - no net, no ffi.
+ *
+ * Native hosts execute the compiled binary instead, whose baked grants are
+ * the daemon's ({@link renderDaemonPermissionFlags}) and cannot be narrowed
+ * at runtime.
+ */
+export const BACKUP_RUNNER_STATE_SUBDIR = "backup";
+export const BACKUP_RUNNER_LOCK_SUBDIRS: readonly string[] = [
+  "managed-locks",
+  "copy-locks",
+];
+export const BACKUP_RUNNER_DOCKER_BIN = "/usr/bin/docker";
+
+/** Folders the runner reads and writes. */
+export const BACKUP_RUNNER_DATA_PATHS: readonly string[] = [
+  `${PROD_STATE_DIR_DEFAULT}/${BACKUP_RUNNER_STATE_SUBDIR}`,
+  ...BACKUP_RUNNER_LOCK_SUBDIRS.map((dir) => `${PROD_RUN_DIR_DEFAULT}/${dir}`),
+  PROD_BACKUP_DIR_DEFAULT,
+];
+export const BACKUP_RUNNER_READ_PATHS: readonly string[] = [
+  ...BACKUP_RUNNER_DATA_PATHS,
+  BACKUP_RUNNER_DOCKER_BIN,
+];
+export const BACKUP_RUNNER_WRITE_PATHS: readonly string[] = [
+  ...BACKUP_RUNNER_DATA_PATHS,
+];
+export const BACKUP_RUNNER_RUN_PROGRAMS: readonly string[] = [
+  BACKUP_RUNNER_DOCKER_BIN,
+];
+export const BACKUP_RUNNER_SYS_APIS: readonly string[] = ["statfs"];
+
+/** Render the backup runner's flags in canonical order for `deno run`. */
+export function renderBackupRunnerPermissionFlags(): string[] {
+  return [
+    `--allow-read=${BACKUP_RUNNER_READ_PATHS.join(",")}`,
+    `--allow-write=${BACKUP_RUNNER_WRITE_PATHS.join(",")}`,
+    `--allow-run=${BACKUP_RUNNER_RUN_PROGRAMS.join(",")}`,
+    "--allow-env",
+    `--allow-sys=${BACKUP_RUNNER_SYS_APIS.join(",")}`,
+  ];
+}
+
+/**
  * What `scripts/run.sh` grants the JS bundle for `bootstrap-orchestration`
  * and `run-installer`, which run as **root** before the unit exists. Same
  * shape as the daemon set minus the socket/principal/tenant surfaces the
