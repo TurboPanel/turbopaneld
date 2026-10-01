@@ -91,7 +91,7 @@ function textOf(result: FirewallRunResult): string {
 }
 
 function field(line: string, flag: string): string | null {
-  const match = new RegExp(`(?:^| )${flag} (\\S+)`).exec(line);
+  const match = new RegExp(String.raw`(?:^| )${flag} (\S+)`).exec(line);
   return match ? match[1] : null;
 }
 

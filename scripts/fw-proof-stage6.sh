@@ -25,21 +25,38 @@ LEGACY_PARENT=TP-MANAGED-PUB
 GUARD_TIMER=turbopanel-firewall-guard.timer
 BOOT_UNIT=turbopanel-firewall.service
 
-pass() { printf 'PASS %s\n' "$1"; }
-skip() { printf 'SKIP %s\n' "$1"; }
+pass() {
+  local message=$1
+  printf 'PASS %s\n' "$message"
+  return 0
+}
+skip() {
+  local message=$1
+  printf 'SKIP %s\n' "$message"
+  return 0
+}
 fail() {
-  printf 'FAIL %s\n' "$1"
+  local message=$1
+  printf 'FAIL %s\n' "$message"
   FAILED=1
+  return 0
 }
 
-ipt() { iptables -w 5 "$@"; }
+ipt() {
+  iptables -w 5 "$@"
+  return $?
+}
 chain_exists() {
   local name=$1
   ipt -S "$name" >/dev/null 2>&1
+  return $?
 }
-snapshot() { iptables-save -t filter 2>/dev/null | grep -v '^[#:]' | sed 's/ -m comment --comment "[^"]*"//'; }
+snapshot() {
+  iptables-save -t filter 2>/dev/null | grep -v '^[#:]' | sed 's/ -m comment --comment "[^"]*"//'
+  return 0
+}
 
-if [ "$(id -u)" != "0" ]; then
+if [[ "$(id -u)" != "0" ]]; then
   echo "FAIL must run as root" >&2
   exit 1
 fi
@@ -52,12 +69,12 @@ MODE=${1:-check}
 FILE=${2:-}
 case "$MODE" in
   --save)
-    [ -n "$FILE" ] || { echo "usage: --save FILE" >&2; exit 2; }
+    [[ -n "$FILE" ]] || { echo "usage: --save FILE" >&2; exit 2; }
     snapshot >"$FILE" && pass "saved $(wc -l <"$FILE") filter rules to $FILE"
     exit 0
     ;;
   --compare)
-    [ -f "${FILE:-}" ] || { echo "usage: --compare FILE" >&2; exit 2; }
+    [[ -f "${FILE:-}" ]] || { echo "usage: --compare FILE" >&2; exit 2; }
     if diff <(cat "$FILE") <(snapshot) >/dev/null; then
       pass "no filter rule changed since $FILE (SSH, 8443, tenant ports untouched)"
     else
@@ -77,7 +94,7 @@ esac
 #    then; once a ruleset is applied both must exist and be hung.
 APPLIED=0
 if chain_exists TP-INPUT; then APPLIED=1; fi
-if [ "$APPLIED" = "1" ]; then
+if [[ "$APPLIED" = "1" ]]; then
   chain_exists TP-INPUT && pass "TP-INPUT present"
   if ipt -C INPUT -j TP-INPUT 2>/dev/null; then pass "INPUT jumps to TP-INPUT"; else fail "INPUT does not jump to TP-INPUT"; fi
   if chain_exists DOCKER-USER; then
@@ -103,19 +120,21 @@ legacy_lines() {
   for child in $(ipt -S "$LEGACY_PARENT" 2>/dev/null | awk '$1=="-A"{print $4}' | grep -E '^TP-MGD-[a-z0-9]+$'); do
     ipt -S "$child" 2>/dev/null | grep '^-A '
   done
+  return 0
 }
 field() {
   local line=$1 flag=$2
   printf '%s\n' "$line" | awk -v f="$flag" '{for(i=1;i<NF;i++) if($i==f){print $(i+1); exit}}'
+  return 0
 }
 covered_source() {
-  local rules=$1 dest=$2 port=$3 source=$4 line s
+  local rules=$1 port=$2 source=$3 line s
   while IFS= read -r line; do
-    [ -n "$line" ] || continue
+    [[ -n "$line" ]] || continue
     case "$line" in *"-j RETURN"*) ;; *) continue ;; esac
-    [ "$(field "$line" --ctorigdstport)" = "$port" ] || continue
+    [[ "$(field "$line" --ctorigdstport)" = "$port" ]] || continue
     s=$(field "$line" -s)
-    if [ "$s" = "$source" ] || [ "${s%/32}" = "${source%/32}" ]; then return 0; fi
+    if [[ "$s" = "$source" ]] || [[ "${s%/32}" = "${source%/32}" ]]; then return 0; fi
     if command -v python3 >/dev/null 2>&1 &&
       python3 -c 'import ipaddress,sys; sys.exit(0 if ipaddress.ip_network(sys.argv[2],False).subnet_of(ipaddress.ip_network(sys.argv[1],False)) else 1)' "$s" "$source" 2>/dev/null; then
       return 0
@@ -125,7 +144,7 @@ covered_source() {
 }
 if chain_exists "$LEGACY_PARENT"; then
   LEGACY=$(legacy_lines)
-  if [ -z "$LEGACY" ]; then
+  if [[ -z "$LEGACY" ]]; then
     pass "legacy $LEGACY_PARENT exists with no per-cluster rules"
   elif ! chain_exists TP-FWD; then
     pass "legacy $LEGACY_PARENT still protects managed listeners (TP-FWD not loaded: nothing folded, as intended)"
@@ -133,13 +152,13 @@ if chain_exists "$LEGACY_PARENT"; then
     FWD=$(ipt -S TP-FWD 2>/dev/null)
     EQUIVALENT=1
     while IFS= read -r line; do
-      [ -n "$line" ] || continue
+      [[ -n "$line" ]] || continue
       port=$(field "$line" --ctorigdstport)
       dest=$(field "$line" --ctorigdst)
       source=$(field "$line" -s)
       case "$line" in
         *"-j ACCEPT"*)
-          if ! covered_source "$FWD" "$dest" "$port" "$source"; then
+          if ! covered_source "$FWD" "$port" "$source"; then
             printf 'FAIL legacy admits %s to %s:%s but TP-FWD has no RETURN for it (kept legacy: fold will refuse)\n' "$source" "${dest:-*}" "$port"
             EQUIVALENT=0
           fi
@@ -153,7 +172,7 @@ if chain_exists "$LEGACY_PARENT"; then
         *) ;;
       esac
     done <<<"$LEGACY"
-    if [ "$EQUIVALENT" = "1" ]; then
+    if [[ "$EQUIVALENT" = "1" ]]; then
       pass "derived TP-FWD is equivalent to legacy $LEGACY_PARENT (fold may remove it: turbopaneld firewall fold)"
     else
       FAILED=1
@@ -165,21 +184,21 @@ fi
 
 # 3. Rollback guard.
 PENDING=$RUN_DIR/firewall-pending.json
-if [ -f "$PENDING" ]; then
+if [[ -f "$PENDING" ]]; then
   if systemctl is-active --quiet "$GUARD_TIMER"; then pass "ruleset pending and $GUARD_TIMER is armed"; else fail "ruleset pending but $GUARD_TIMER is NOT active"; fi
 else
   if systemctl is-active --quiet "$GUARD_TIMER"; then fail "$GUARD_TIMER is active with no pending ruleset"; else pass "no pending ruleset; guard timer idle (armed only during a confirm window)"; fi
 fi
-if [ -x "$LIB_DIR/tp-firewall-guard" ]; then pass "guard script installed at $LIB_DIR/tp-firewall-guard"; else fail "guard script missing at $LIB_DIR/tp-firewall-guard"; fi
+if [[ -x "$LIB_DIR/tp-firewall-guard" ]]; then pass "guard script installed at $LIB_DIR/tp-firewall-guard"; else fail "guard script missing at $LIB_DIR/tp-firewall-guard"; fi
 if systemctl is-enabled --quiet "$BOOT_UNIT" 2>/dev/null; then pass "$BOOT_UNIT enabled (boot restore)"; else fail "$BOOT_UNIT not enabled"; fi
 
 # 4. SSH and the control-plane port stay reachable. In observe mode no INPUT
 #    rule of ours exists at all; applied, TP-INPUT must ACCEPT them.
 SSH_PORTS=$(ss -Hltn 2>/dev/null | awk '{print $4}' | sed 's/.*://' | sort -u | grep -x -E '22|2222' || true)
-[ -n "$SSH_PORTS" ] || SSH_PORTS=22
+[[ -n "$SSH_PORTS" ]] || SSH_PORTS=22
 check_port_open() {
   local port=$1 label=$2
-  if [ "$APPLIED" = "1" ]; then
+  if [[ "$APPLIED" = "1" ]]; then
     if ipt -S TP-INPUT 2>/dev/null | grep -E -- "--dport $port( |$)" | grep -q -- '-j ACCEPT'; then
       pass "$label port $port is ACCEPTed by TP-INPUT"
     else
@@ -190,6 +209,7 @@ check_port_open() {
   else
     pass "$label port $port: no TurboPanel rule touches it (observe mode)"
   fi
+  return 0
 }
 for port in $SSH_PORTS; do check_port_open "$port" "SSH"; done
 if systemctl is-active --quiet turbopanel-instance.service; then
