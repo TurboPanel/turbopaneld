@@ -22,12 +22,18 @@
  *     control-plane host — and the payload names no `controlPlane.tcpPorts`,
  *     a default-drop apply is refused. A panel that forgot its own port must
  *     not lock its wizard out a second time (the 2026-09-19 canary incident).
- *  3. **Held until commit-confirm lands** (`fw-invariants-commit-confirm`):
- *     `policy.inputDefault: "drop"` is refused outright. Until the daemon can
- *     roll a ruleset back on its own when its control-plane session dies,
- *     there is no safe way to apply a default drop to a host nobody is
- *     standing next to. `accept` applies today: explicit `drop` / `reject`
- *     rows and published-port narrowing bite, the default does not.
+ *  3. **Default drop is still held.** `policy.inputDefault: "drop"` is refused
+ *     outright. Commit-confirm now exists (an applied ruleset is pending until
+ *     `server.firewall.confirm`, and a root timer undoes it otherwise), but the
+ *     hold is only lifted once that safety net has been proven on a real host
+ *     (`fw-proof`), and the control plane can confirm from outside. `accept`
+ *     applies today: explicit `drop` / `reject` rows and published-port
+ *     narrowing bite, the default does not.
+ *
+ * **Applied means pending.** An apply loads the rules and arms the rollback
+ * guard but does not make them durable (`../firewall/pending.ts`); the result
+ * carries `confirmation.deadlineAt`, and the rules become durable only when
+ * `server.firewall.confirm` names the result's digest in time.
  *
  * `mode: "observe"` renders and reports (digest, warnings, rule count) and
  * applies nothing; `mode: "off"` removes TurboPanel's chains and jumps.
@@ -52,7 +58,7 @@ import type {
 
 /** The exact sentence a refused default-drop carries, so a test can pin it. */
 export const DEFAULT_DROP_HELD_WARNING =
-  "policy.inputDefault drop is held until commit-confirm rollback lands (fw-invariants-commit-confirm); rendered, not applied";
+  "policy.inputDefault drop is held until the commit-confirm rollback is proven on a real host (fw-proof); rendered, not applied";
 
 export const CONTROL_PLANE_PORTS_MISSING_WARNING =
   "turbopanel-instance.service is active on this host but the payload names no controlPlane.tcpPorts; a default-drop apply would close the control plane and is refused";
@@ -154,12 +160,13 @@ export async function handleFirewallReconcile(
   const outcome = await applyRenderedFirewall(rendered, includeForward, probe, {
     run,
     layout,
+    generation: payload.generation,
   });
   warnings.push(...outcome.warnings);
 
   logInfo(
     "command",
-    `firewall generation ${payload.generation} applied: ${rendered.ruleCount} rules, v6=${outcome.ipv6Applied}, forward=${outcome.forwardApplied}, digest ${
+    `firewall generation ${payload.generation} applied (pending confirmation): ${rendered.ruleCount} rules, v6=${outcome.ipv6Applied}, forward=${outcome.forwardApplied}, digest ${
       rendered.digest.slice(0, 12)
     }${
       warnings.length > 0
@@ -174,7 +181,12 @@ export async function handleFirewallReconcile(
     ipv6Applied: outcome.ipv6Applied,
     forwardApplied: outcome.forwardApplied,
     warnings,
+    confirmation: {
+      state: "pending",
+      deadlineAt: outcome.confirmation.deadlineAt,
+      windowSeconds: outcome.confirmation.windowSeconds,
+    },
     summary:
-      `firewall generation ${payload.generation} applied: ${rendered.ruleCount} rules, ${probe.version}`,
+      `firewall generation ${payload.generation} applied, pending confirmation until ${outcome.confirmation.deadlineAt}: ${rendered.ruleCount} rules, ${probe.version}`,
   };
 }

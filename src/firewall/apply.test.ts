@@ -21,6 +21,16 @@ import {
 } from "./apply.ts";
 import { renderFirewall } from "./render.ts";
 import {
+  FIREWALL_CONFIRM_WINDOW_SECONDS,
+  FIREWALL_GUARD_TIMER,
+  FIREWALL_PENDING_V4_FILENAME,
+  FIREWALL_PENDING_V6_FILENAME,
+  FirewallGuardUnavailableError,
+  pendingMarkerPath,
+  readPendingMarker,
+  rollbackRecordPath,
+} from "./pending.ts";
+import {
   type FirewallRunFn,
   type FirewallRunResult,
   runFirewallHost,
@@ -108,6 +118,7 @@ async function withTempLayout<T>(
       TURBOPANEL_CONFIG_DIR: join(root, "etc"),
       TURBOPANEL_STATE_DIR: join(root, "state"),
       TURBOPANEL_DAEMON_STATE_DIR: join(root, "state"),
+      TURBOPANEL_RUN_DIR: join(root, "run"),
     });
     return await fn(layout);
   } finally {
@@ -190,7 +201,7 @@ test("hasDockerUserChain and isControlPlaneColocated read the host's answer", as
   assertEquals(await isControlPlaneColocated(plain.run), false);
 });
 
-test("applyRenderedFirewall: --test then restore per family, jumps ensured only when missing, documents persisted", async () => {
+test("applyRenderedFirewall: guard armed first, --test then restore per family, jumps ensured only when missing, documents left pending", async () => {
   await withTempLayout(async (layout) => {
     const rendered = renderFirewall({
       payload: payload(),
@@ -206,19 +217,25 @@ test("applyRenderedFirewall: --test then restore per family, jumps ensured only 
       "ip6tables -C INPUT -j TP-INPUT": fail("Bad rule"),
       "ip6tables -C DOCKER-USER -j TP-FWD": fail("Bad rule"),
     });
+    const now = new Date("2026-10-01T12:00:00.000Z");
     const outcome = await applyRenderedFirewall(
       rendered,
       { 4: true, 6: true },
       NFT_PROBE,
-      { run: host.run, layout },
+      { run: host.run, layout, generation: 4, now: () => now },
     );
     assertEquals(outcome, {
       ipv6Applied: true,
       forwardApplied: true,
       warnings: [],
+      confirmation: {
+        deadlineAt: "2026-10-01T12:02:00.000Z",
+        windowSeconds: FIREWALL_CONFIRM_WINDOW_SECONDS,
+      },
     });
     const keys = host.calls.map((c) => `${c.cmd} ${c.args.join(" ")}`);
     assertEquals(keys, [
+      `systemctl restart ${FIREWALL_GUARD_TIMER}`,
       "iptables-restore --noflush --test",
       "iptables-restore --noflush",
       "iptables -C INPUT -j TP-INPUT",
@@ -232,16 +249,107 @@ test("applyRenderedFirewall: --test then restore per family, jumps ensured only 
       "ip6tables -I DOCKER-USER 1 -j TP-FWD",
     ]);
     // the restore documents went in over stdin, byte for byte
-    assertEquals(host.calls[0]!.stdin, rendered.v4);
     assertEquals(host.calls[1]!.stdin, rendered.v4);
-    assertEquals(host.calls[5]!.stdin, rendered.v6!);
+    assertEquals(host.calls[2]!.stdin, rendered.v4);
+    assertEquals(host.calls[6]!.stdin, rendered.v6!);
+    // Nothing durable yet: the documents wait, pending, for a confirm.
+    await assertRejects(
+      () => Deno.readTextFile(join(layout.configDir, FIREWALL_V4_FILENAME)),
+      Deno.errors.NotFound,
+    );
+    await assertRejects(
+      () => Deno.readTextFile(join(layout.configDir, FIREWALL_V6_FILENAME)),
+      Deno.errors.NotFound,
+    );
     assertEquals(
-      await Deno.readTextFile(join(layout.configDir, FIREWALL_V4_FILENAME)),
+      await Deno.readTextFile(
+        join(layout.configDir, FIREWALL_PENDING_V4_FILENAME),
+      ),
       rendered.v4,
     );
     assertEquals(
-      await Deno.readTextFile(join(layout.configDir, FIREWALL_V6_FILENAME)),
+      await Deno.readTextFile(
+        join(layout.configDir, FIREWALL_PENDING_V6_FILENAME),
+      ),
       rendered.v6!,
+    );
+    assertEquals(await readPendingMarker(layout), {
+      version: 1,
+      digest: rendered.digest,
+      generation: 4,
+      armedAt: "2026-10-01T12:00:00.000Z",
+      deadlineAt: "2026-10-01T12:02:00.000Z",
+      windowSeconds: FIREWALL_CONFIRM_WINDOW_SECONDS,
+      v6: "replace",
+    });
+  });
+});
+
+test("applyRenderedFirewall: when the guard cannot be armed, no rule is loaded and nothing stays staged", async () => {
+  await withTempLayout(async (layout) => {
+    const rendered = renderFirewall({
+      payload: payload(),
+      sshPorts: [22],
+      includeForward: { 4: false, 6: false },
+    });
+    const host = fakeHost({
+      [`systemctl restart ${FIREWALL_GUARD_TIMER}`]: fail(
+        `Unit ${FIREWALL_GUARD_TIMER} not found.`,
+        5,
+      ),
+    });
+    const err = await assertRejects(
+      () =>
+        applyRenderedFirewall(rendered, { 4: false, 6: false }, NFT_PROBE, {
+          run: host.run,
+          layout,
+        }),
+      FirewallGuardUnavailableError,
+    );
+    assertStringIncludes(err.message, "no rules were loaded");
+    assertStringIncludes(err.message, "not found");
+    assertEquals(host.calls.length, 1, "no iptables call after a failed arm");
+    assertEquals(await readPendingMarker(layout), null);
+    await assertRejects(
+      () =>
+        Deno.readTextFile(join(layout.configDir, FIREWALL_PENDING_V4_FILENAME)),
+      Deno.errors.NotFound,
+    );
+  });
+});
+
+test("applyRenderedFirewall: a second apply inside the window moves the deadline and forgets an earlier rollback", async () => {
+  await withTempLayout(async (layout) => {
+    const rendered = renderFirewall({
+      payload: payload(),
+      sshPorts: [22],
+      includeForward: { 4: false, 6: false },
+    });
+    await Deno.mkdir(layout.stateDir, { recursive: true });
+    await Deno.writeTextFile(rollbackRecordPath(layout), "{}");
+    const host = fakeHost();
+    const first = new Date("2026-10-01T12:00:00.000Z");
+    const later = new Date("2026-10-01T12:01:00.000Z");
+    for (const now of [first, later]) {
+      await applyRenderedFirewall(
+        rendered,
+        { 4: false, 6: false },
+        { ...NFT_PROBE, ipv6: false },
+        { run: host.run, layout, now: () => now },
+      );
+    }
+    assertEquals(
+      (await readPendingMarker(layout))?.deadlineAt,
+      "2026-10-01T12:03:00.000Z",
+    );
+    assertEquals(
+      host.calls.filter((c) => c.cmd === "systemctl").length,
+      2,
+      "the timer is restarted on every apply, so the deadline really moves",
+    );
+    await assertRejects(
+      () => Deno.readTextFile(rollbackRecordPath(layout)),
+      Deno.errors.NotFound,
     );
   });
 });
@@ -267,7 +375,16 @@ test("applyRenderedFirewall: a refused v4 --test throws before anything is appli
       Error,
       "--test refused the ruleset",
     );
-    assertEquals(host.calls.length, 1, "nothing ran after the refused test");
+    assertEquals(
+      host.calls.map((c) => `${c.cmd} ${c.args.join(" ")}`),
+      [
+        `systemctl restart ${FIREWALL_GUARD_TIMER}`,
+        "iptables-restore --noflush --test",
+        `systemctl stop ${FIREWALL_GUARD_TIMER}`,
+      ],
+      "armed, refused, then disarmed: nothing reached the kernel",
+    );
+    assertEquals(await readPendingMarker(layout), null);
     await assertRejects(
       () => Deno.readTextFile(join(layout.configDir, FIREWALL_V4_FILENAME)),
       Deno.errors.NotFound,
@@ -275,7 +392,7 @@ test("applyRenderedFirewall: a refused v4 --test throws before anything is appli
   });
 });
 
-test("applyRenderedFirewall: a v6 failure fails the reconcile, keeps v4 applied and durable, leaves the v6 document alone", async () => {
+test("applyRenderedFirewall: a v6 failure fails the reconcile, keeps v4 applied and pending under the guard, leaves the durable v6 document alone", async () => {
   await withTempLayout(async (layout) => {
     const rendered = renderFirewall({
       payload: payload(),
@@ -305,11 +422,19 @@ test("applyRenderedFirewall: a v6 failure fails the reconcile, keeps v4 applied 
     );
     assertStringIncludes(err.message, "IPv4 is applied");
     assertStringIncludes(err.message, "line 4 failed");
-    // v4 went in and is durable for boot.
+    // v4 went in and is pending: the guard stays armed (it is the net under
+    // a half-applied state), and a confirm would leave durable v6 alone.
     assert(host.calls.some((c) => c.cmd === "iptables-restore"));
     assertEquals(
-      await Deno.readTextFile(join(layout.configDir, FIREWALL_V4_FILENAME)),
+      await Deno.readTextFile(
+        join(layout.configDir, FIREWALL_PENDING_V4_FILENAME),
+      ),
       rendered.v4,
+    );
+    assertEquals((await readPendingMarker(layout))?.v6, "keep");
+    assert(
+      !host.calls.some((c) => c.cmd === "systemctl" && c.args[0] === "stop"),
+      "the guard is not disarmed after v4 went in",
     );
     // v6 was never applied, and its durable document still matches the kernel.
     assert(
@@ -341,14 +466,23 @@ test("applyRenderedFirewall: no ip6tables → v6 left alone with a warning", asy
     assertEquals(outcome.ipv6Applied, false);
     assertStringIncludes(outcome.warnings[0]!, "ip6tables is not available");
     assert(!host.calls.some((c) => c.cmd.startsWith("ip6tables")));
+    assertEquals((await readPendingMarker(layout))?.v6, "forget");
   });
 });
 
-test("removeFirewall takes every jump, flushes and deletes both chains in both families, forgets the documents", async () => {
+test("removeFirewall takes every jump, flushes and deletes both chains in both families, forgets the documents, pending state and guard", async () => {
   await withTempLayout(async (layout) => {
     await Deno.mkdir(layout.configDir, { recursive: true });
+    await Deno.mkdir(layout.runDir, { recursive: true });
+    await Deno.mkdir(layout.stateDir, { recursive: true });
     await Deno.writeTextFile(join(layout.configDir, FIREWALL_V4_FILENAME), "x");
     await Deno.writeTextFile(join(layout.configDir, FIREWALL_V6_FILENAME), "y");
+    await Deno.writeTextFile(
+      join(layout.configDir, FIREWALL_PENDING_V4_FILENAME),
+      "p",
+    );
+    await Deno.writeTextFile(pendingMarkerPath(layout), "{}");
+    await Deno.writeTextFile(rollbackRecordPath(layout), "{}");
     // the INPUT jump was doubled by some older tool; the second -D succeeds, the third says gone
     let inputDeletes = 0;
     const host = fakeHost();
@@ -380,6 +514,22 @@ test("removeFirewall takes every jump, flushes and deletes both chains in both f
       () => Deno.readTextFile(join(layout.configDir, FIREWALL_V6_FILENAME)),
       Deno.errors.NotFound,
     );
+    for (
+      const path of [
+        join(layout.configDir, FIREWALL_PENDING_V4_FILENAME),
+        pendingMarkerPath(layout),
+        rollbackRecordPath(layout),
+      ]
+    ) {
+      await assertRejects(() => Deno.readTextFile(path), Deno.errors.NotFound);
+    }
+    assert(
+      host.calls.some((c) =>
+        c.cmd === "systemctl" && c.args.join(" ") ===
+          `stop ${FIREWALL_GUARD_TIMER}`
+      ),
+      "the guard timer is stopped",
+    );
   });
 });
 
@@ -410,7 +560,11 @@ test("removeFirewall runs the host commands strictly one at a time, in a fixed o
       `${bin} -F TP-FWD`,
       `${bin} -X TP-FWD`,
     ];
-    assertEquals(seen, [...perFamily("iptables"), ...perFamily("ip6tables")]);
+    assertEquals(seen, [
+      ...perFamily("iptables"),
+      ...perFamily("ip6tables"),
+      `systemctl stop ${FIREWALL_GUARD_TIMER}`,
+    ]);
   });
 });
 

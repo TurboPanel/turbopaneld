@@ -9,7 +9,9 @@ page carries the build order; this is the `fw-daemon-reconcile` row.
 | File | Role |
 | --- | --- |
 | `render.ts` | **Pure.** `FirewallReconcilePayload` → `iptables-restore` / `ip6tables-restore` documents + sha256 digest. Invariants first (lo, `ESTABLISHED,RELATED`, ICMP / ICMPv6, DHCP client, every sshd port, the co-located control plane's ports), then `drop`/`reject` rows, then `accept` rows, then the default. Never emits `OUTPUT`, a builtin policy line, or a jump. |
-| `apply.ts` | Host side. `probeXtables`, `hasDockerUserChain`, `isControlPlaneColocated`; `applyRenderedFirewall` = `--test` → `--noflush` restore per family → `-C`/`-I` jumps → durable `<configDir>/firewall.v4|.v6`; `removeFirewall` (mode `off`); `snapshotFirewallChains` (the rollback input commit-confirm will use); `reinstallFirewallForwardingIfEnabled` (the Docker-monitor hook, wired in `fw-boot-persistence`). |
+| `apply.ts` | Host side. `probeXtables`, `hasDockerUserChain`, `isControlPlaneColocated`; `applyRenderedFirewall` = arm the rollback guard and stage the documents (`pending.ts`) → `--test` → `--noflush` restore per family → `-C`/`-I` jumps, **pending, not durable**; `removeFirewall` (mode `off`, and the `turbopaneld firewall off` break-glass); `snapshotFirewallChains` (unused so far); `reinstallFirewallForwardingIfEnabled` (the Docker-monitor hook, wired in `fw-boot-persistence`). |
+| `pending.ts` | Commit-confirm state: the marker (`<runDir>/firewall-pending.json`), the pending documents (`<configDir>/firewall.pending.v4|.v6`), the rollback record the guard writes (`<stateDir>/firewall-rollback.json`), `armPendingFirewall` (arms `turbopanel-firewall-guard.timer` **before** anything is loaded; no guard, no rules) and `clearPendingFirewall`. |
+| `confirm.ts` | `confirmPendingFirewall(digest)`: promotes the pending documents to the durable `<configDir>/firewall.v4|.v6`, clears the stage, stops the guard. States `confirmed`, `nothing_pending` (idempotent), `digest_mismatch`, `expired`, `rolled_back`. Behind `server.firewall.confirm` and `turbopaneld firewall confirm`. |
 | `run.ts` | Spawn + `sudo -n` fallback, with **`-w 5`** on every xtables binary (Docker holds the xtables lock while it mutates chains). Test seams `setFirewallRunForTests` / `setFirewallSkipRealSyscallsForTests`. |
 | `sshd-port.ts` | Effective sshd ports from `sshd -T` (`port` and pinned `listenaddress` lines). Fails **open**: no answer → the renderer keeps 22 with a warning. |
 
@@ -46,27 +48,65 @@ regenerate to make a red test green.** The hostfree suites (`render.test.ts`,
 `../commands/firewall-reconcile.test.ts`) are the bar for this row;
 the on-host proof is Road row `fw-proof`.
 
+## Commit-confirm (`fw-invariants-commit-confirm`)
+
+Outbound is an invariant `ACCEPT` and `ESTABLISHED,RELATED` is always accepted,
+so no ruleset can break a remote daemon's own connection: "roll back when the
+daemon loses the control plane" could never fire. What a bad ruleset cuts is a
+human's SSH, the co-located panel's own port, public tenant ports, and the same
+after a reboot if it were persisted. So an apply is **pending** until someone
+who reached the host from outside confirms it:
+
+1. `applyRenderedFirewall` writes the marker and the pending v4 document, then
+   `systemctl restart turbopanel-firewall-guard.timer`. If that fails it throws
+   `FirewallGuardUnavailableError` and **loads nothing**.
+2. It loads the rules (`--test` first; a refusal clears the stage again) and
+   records the IPv6 intent in the marker (`replace` / `forget` / `keep`).
+3. The result carries `confirmation: { state: "pending", deadlineAt,
+   windowSeconds: 120 }`. The control plane sends `server.firewall.confirm`
+   `{ digest }` once it has reached the host from outside (stage 4 adds that
+   probe), or an operator runs `turbopaneld firewall confirm`.
+4. `confirmPendingFirewall` promotes the pending documents to the durable ones,
+   clears the marker and stops the timer. After the deadline it refuses
+   (`expired`) and starts the guard service instead.
+5. Otherwise `orchestration/scripts/tp-firewall-guard` (root, from
+   `<install>/lib`, run by the timer) takes both TurboPanel jumps out first
+   (the host is open), then restores the last **confirmed** documents if they
+   exist and are strictly TurboPanel's own chains and targets (validated, not
+   trusted, and never read through a symlink), else deletes the chains. It
+   writes `firewall-rollback.json`, removes the marker and pending documents,
+   stops its timer. It **fails open**: any error leaves fewer restrictions,
+   never more. It does not need the daemon to be running.
+
+The guard timer is not enabled at boot and `<runDir>` is tmpfs, so a reboot
+forgets any pending ruleset; the durable documents change only on confirm.
+`turbopaneld firewall off` (root, over SSH) removes every chain, jump, stored
+document and the pending state: the break-glass when the panel is unreachable.
+The default-drop hold below stays until the guard has been proven on a real
+host (`fw-proof`).
+
 ## Guards, in order
 
 1. `mode: off` → `removeFirewall`, nothing probed.
 2. No `iptables` → the command **fails** (nothing to render against).
 3. `policy.inputDefault: drop` → rendered, then **refused**
-   (`DEFAULT_DROP_HELD_WARNING`) until commit-confirm rollback exists. A
-   co-located control plane with no `controlPlane.tcpPorts` adds
-   `CONTROL_PLANE_PORTS_MISSING_WARNING`. Remove the hold in
-   `fw-invariants-commit-confirm`, not before.
+   (`DEFAULT_DROP_HELD_WARNING`) until the commit-confirm guard is proven on a
+   real host (`fw-proof`) and the control plane confirms from outside (stage 4).
+   A co-located control plane with no `controlPlane.tcpPorts` adds
+   `CONTROL_PLANE_PORTS_MISSING_WARNING`. Remove the hold there, not before.
 4. `mode: observe` → rendered, digest reported, nothing applied.
-5. v4 apply failure throws. A v6 apply failure keeps v4 applied and its
-   durable document written, leaves the v6 chains and `firewall.v6` as they
-   were, and throws `FirewallIpv6ApplyError`, so the reconcile fails in the
-   panel rather than enforcing a `drop` on IPv4 only behind a warning. No
-   `ip6tables` binary at all is still a warning (`ipv6Applied: false`).
+5. v4 apply failure throws. A v6 apply failure keeps v4 loaded (pending, under
+   the guard: nobody confirms a failed command, so the guard undoes it at the
+   deadline), leaves the v6 chains and the durable `firewall.v6` as they were,
+   and throws `FirewallIpv6ApplyError`, so the reconcile fails in the panel
+   rather than enforcing a `drop` on IPv4 only behind a warning. No `ip6tables`
+   binary at all is still a warning (`ipv6Applied: false`).
 
 ## Not here yet (later rows)
 
-Commit-confirm rollback and `turbopaneld firewall off`
-(`fw-invariants-commit-confirm`); the boot unit and the Docker-monitor call
-to `reinstallFirewallForwardingIfEnabled` (`fw-boot-persistence`); the
+The boot unit and the Docker-monitor call to
+`reinstallFirewallForwardingIfEnabled` (`fw-boot-persistence`); the control
+plane's outside probe that sends the confirm (`fw-derived-rules`); the
 installer's bootstrap ruleset (`fw-installer-bootstrap`; the ufw/firewalld
 removal itself is done — `orchestration/roles/daemon-prereqs/tasks/firewall-takeover.yml`,
 on every converge, `fw-takeover`); folding `../managed/firewall.ts` and the fabric `TP-FORWARD`

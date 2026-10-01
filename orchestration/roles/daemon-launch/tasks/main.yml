@@ -54,6 +54,22 @@
     mode: "0750"
     remote_src: true
 
+- name: Ensure firewall guard helper is executable
+  ansible.builtin.file:
+    path: "{{ turbopanel_firewall_guard_script }}"
+    owner: root
+    group: "{{ turbopanel_group }}"
+    mode: "0750"
+
+- name: Install firewall rollback guard outside the replaceable orchestration tree
+  ansible.builtin.copy:
+    src: "{{ turbopanel_firewall_guard_script }}"
+    dest: "{{ turbopanel_firewall_guard_bin }}"
+    owner: root
+    group: "{{ turbopanel_group }}"
+    mode: "0750"
+    remote_src: true
+
 # Root-owned, group-executable: the daemon account runs it from a backup
 # timer's service but can never rewrite it.
 - name: Install the scheduled-backup runner wrapper
@@ -74,6 +90,21 @@
   loop:
     - { src: turbopaneld-update-guard.service.j2, dest: turbopaneld-update-guard.service }
     - { src: turbopaneld-update-guard.timer.j2, dest: turbopaneld-update-guard.timer }
+  notify:
+    - Reload systemd
+
+# Not enabled: the daemon arms the timer (systemctl restart) only while a
+# ruleset is pending, and a reboot forgets it. No [Install] section on purpose.
+- name: Install firewall rollback guard systemd units
+  ansible.builtin.template:
+    src: "{{ item.src }}"
+    dest: "/etc/systemd/system/{{ item.dest }}"
+    owner: root
+    group: root
+    mode: "0640"
+  loop:
+    - { src: turbopanel-firewall-guard.service.j2, dest: turbopanel-firewall-guard.service }
+    - { src: turbopanel-firewall-guard.timer.j2, dest: turbopanel-firewall-guard.timer }
   notify:
     - Reload systemd
 

@@ -23,6 +23,8 @@ Defaults:{{ turbopanel_user }} env_reset
 Cmnd_Alias TP_HOST = {{ turbopanel_install_root }}/lib/tp-host
 Cmnd_Alias TP_ORCHESTRATE = {{ turbopanel_orchestration_dir }}/scripts/tp-orchestrate
 # tp-update-guard runs only as root via systemd OnFailure=/timer — no sudo entry.
+# tp-firewall-guard runs only as root via its systemd timer (armed through tp-host's
+# systemctl verb on turbopanel-* units) — no sudo entry.
 Cmnd_Alias TP_ENGINE_VALIDATE = {{ turbopanel_vendor_dir }}/apache/current/bin/httpd -t -f /etc/turbopanel/apache/httpd.conf, /usr/sbin/php-fpm[0-9].[0-9] --fpm-config /etc/turbopanel/php/[0-9].[0-9]/php-fpm.conf --test
 
 {{ turbopanel_user }} ALL=(root) NOPASSWD: TP_HOST, TP_ORCHESTRATE, TP_ENGINE_VALIDATE

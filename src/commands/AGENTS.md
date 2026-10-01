@@ -25,8 +25,11 @@ Root context: `../../AGENTS.md`. Transport: `../instance/AGENTS.md`.
   invariants (lo, established, ICMP/ICMPv6, DHCP, every `sshd -T` port, the
   co-located control plane's ports) rendered first. `policy.inputDefault:
   drop` is **held** (rendered, refused with `DEFAULT_DROP_HELD_WARNING`) until
-  commit-confirm rollback lands (`fw-invariants-commit-confirm`); `accept`
-  applies. Refusals are `applied: false` + a warning, not a failed command.
+  the commit-confirm guard is proven on a real host (`fw-proof`); `accept`
+  applies, **pending**: the result carries `confirmation.deadlineAt`, the rules
+  become durable only when `server.firewall.confirm` (`firewall-confirm.ts`)
+  names the result's digest in time, and a root timer undoes them otherwise.
+  Refusals are `applied: false` + a warning, not a failed command.
 - Deploy / lifecycle / stop / system.reconcile / managed.* /
   `server.fabric.reconcile` / `server.sensors.drivetemp.enable` sit in the
   sibling modules next to `command-router.ts`. Remaining

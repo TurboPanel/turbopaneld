@@ -12,6 +12,7 @@ import {
   parseEnvironmentLifecyclePayload,
   parseEnvironmentStopPayload,
   parseFabricReconcilePayload,
+  parseFirewallConfirmPayload,
   parseFirewallReconcilePayload,
   parseHostnamePayload,
   parseManagedApplyPayload,
@@ -56,6 +57,7 @@ import { handleReboot } from "./reboot.ts";
 import { handleTimezone } from "./timezone.ts";
 import { handlePrincipalsReconcile } from "./principals-reconcile.ts";
 import { handleFirewallReconcile } from "./firewall-reconcile.ts";
+import { handleFirewallConfirm } from "./firewall-confirm.ts";
 import { handleBackupsReconcile } from "../backups/reconcile.ts";
 import { handleStorageBackup } from "../backups/storage-backup.ts";
 import { handleStorageRestore } from "../backups/copy-restore.ts";
@@ -102,6 +104,7 @@ export type CommandRouterHandlerOverrides = {
   handleEnvironmentLifecycle?: typeof handleEnvironmentLifecycle;
   handlePrincipalsReconcile?: typeof handlePrincipalsReconcile;
   handleFirewallReconcile?: typeof handleFirewallReconcile;
+  handleFirewallConfirm?: typeof handleFirewallConfirm;
   handleBackupsReconcile?: typeof handleBackupsReconcile;
   handleManagedApply?: typeof handleManagedApply;
   handleManagedLifecycle?: typeof handleManagedLifecycle;
@@ -270,6 +273,16 @@ export async function handleCommandDispatch(
         result = await pickCommandRouterHandler(
           "handleFirewallReconcile",
           handleFirewallReconcile,
+        )(payload, daemonReceivedAt);
+        ok = true;
+        daemonRespondedAt = new Date().toISOString();
+        break;
+      }
+      case "server.firewall.confirm": {
+        const payload = parseFirewallConfirmPayload(message.payload);
+        result = await pickCommandRouterHandler(
+          "handleFirewallConfirm",
+          handleFirewallConfirm,
         )(payload, daemonReceivedAt);
         ok = true;
         daemonRespondedAt = new Date().toISOString();
