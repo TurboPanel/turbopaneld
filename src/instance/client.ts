@@ -1589,6 +1589,9 @@ export class InstanceClient {
   // Identity is established locally (enrollment + server.id) and confirmed via
   // verified JWT `sub` in DaemonTokenManager — no socket message adopts serverId.
   #handleMessage(message: DaemonMessage, ws: WebSocket): void {
+    // The control plane answers the daemon's wire ping with `{type:"pong"}`
+    // (a Workers auto-response); it carries nothing to act on.
+    if ((message as { type?: unknown }).type === "pong") return;
     switch (message.type) {
       case "version":
         // `commit` / `branch` stay informational — the daemon never
@@ -2390,7 +2393,7 @@ export class InstanceClient {
         upgradeId,
         targetCommit: message.targetCommit?.trim() || undefined,
       });
-      await clientTestHooks.executeInstanceUpdateReconcile({
+      const outcome = await clientTestHooks.executeInstanceUpdateReconcile({
         channel,
         ...(instancePin ? { manifestUrl: instancePin } : {}),
         ...(uiPin ? { uiManifestUrl: uiPin } : {}),
@@ -2403,6 +2406,18 @@ export class InstanceClient {
           this.#reportUpdateStage(stage, { unit: "instance", upgradeId });
         },
       });
+      if (outcome?.warning) {
+        logWarn(
+          "update",
+          "control-plane update succeeded with a warning:",
+          sanitizeForLog(outcome.warning),
+        );
+        this.#reportUpdateStage("done", {
+          unit: "instance",
+          upgradeId,
+          detail: outcome.warning,
+        });
+      }
       ok = true;
     } catch (err) {
       const classified = this.#classifyControlPlaneUpdateFailure(err);
@@ -3090,7 +3105,9 @@ type ClientTestHooks = {
   downloadRunScript: typeof downloadRunScript;
   executeRunReconcile: typeof executeRunReconcile;
   assertUpdateDiskPreflight: typeof assertUpdateDiskPreflight;
-  executeInstanceUpdateReconcile: typeof executeInstanceUpdateReconcile;
+  executeInstanceUpdateReconcile: (
+    options: Parameters<typeof executeInstanceUpdateReconcile>[0],
+  ) => Promise<{ warning?: string } | void>;
   restartControlPlaneUnits: typeof restartControlPlaneUnits;
   collectServerIps: typeof collectServerIps;
   collectMetricsCapabilities: typeof collectMetricsCapabilities;

@@ -1646,7 +1646,7 @@ test("executeInstanceUpdateReconcile rolls back when health never matches", asyn
         hooks: managedUpdateHooks(calls, {
           readHealth: () => {
             reads += 1;
-            if (reads === 1 || reads >= 4) {
+            if (reads === 1 || reads >= 6) {
               return Promise.resolve({ version: "0.1.0", commit: "oldcommit" });
             }
             return Promise.resolve(null);
@@ -1707,6 +1707,80 @@ test("executeInstanceUpdateReconcile reports recovery_required when rollback fai
     assertStringIncludes(error.message, "instance-rollback.yml");
     assertStringIncludes(error.message, "up-recover");
   }
+});
+
+test("a slow host that answers after more than five minutes is not rolled back", async () => {
+  const calls: Array<{ bin: string; args: string[] }> = [];
+  let clock = 0;
+  let reads = 0;
+  await executeInstanceUpdateReconcile({
+    channel: "release",
+    upgradeId: "up-slow",
+    hooks: managedUpdateHooks(calls, {
+      now: () => clock,
+      sleep: (ms) => {
+        clock += ms;
+        return Promise.resolve();
+      },
+      readHealth: () => {
+        reads += 1;
+        if (reads === 1) {
+          return Promise.resolve({ version: "0.1.0", commit: "oldcommit" });
+        }
+        // Silent for 7 minutes of fake time, then the new build answers.
+        return Promise.resolve(
+          clock < 7 * 60 * 1000
+            ? null
+            : { version: "0.1.1", commit: "newcommit" },
+        );
+      },
+    }),
+  });
+  assertEquals(clock >= 7 * 60 * 1000, true);
+  assertEquals(
+    calls.some((call) => call.args.includes("instance-rollback.yml")),
+    false,
+  );
+});
+
+test("a new build that is serving after a failed rollback is a success with a warning", async () => {
+  const calls: Array<{ bin: string; args: string[] }> = [];
+  let clock = 0;
+  let reads = 0;
+  let rollbackRan = false;
+  const base = managedUpdateHooks(calls);
+  const outcome = await executeInstanceUpdateReconcile({
+    channel: "release",
+    upgradeId: "up-late",
+    hooks: {
+      ...base,
+      now: () => clock,
+      sleep: (ms) => {
+        clock += ms;
+        return Promise.resolve();
+      },
+      readHealth: () => {
+        reads += 1;
+        if (reads === 1) {
+          return Promise.resolve({ version: "0.1.0", commit: "oldcommit" });
+        }
+        return Promise.resolve(
+          rollbackRan ? { version: "0.1.1", commit: "newcommit" } : null,
+        );
+      },
+      run: (bin, args, onStage) => {
+        if (args.includes("instance-rollback.yml")) {
+          calls.push({ bin, args });
+          rollbackRan = true;
+          return Promise.resolve({ code: 1, stdout: "", stderr: "slow" });
+        }
+        return base.run!(bin, args, onStage);
+      },
+    },
+  });
+  assertEquals(rollbackRan, true);
+  assertStringIncludes(outcome.warning ?? "", "health_timeout");
+  assertStringIncludes(outcome.warning ?? "", "0.1.1 is serving");
 });
 
 test("a failed migration keeps the previous database and rolls back", async () => {

@@ -27,6 +27,7 @@ import {
 import { parseTurbopanelStageLine } from "./update-progress-reporter.ts";
 import {
   type ControlPlaneHealthSnapshot,
+  INSTANCE_UPDATE_HEALTH_MAX_INTERVAL_MS,
   InstanceHealthError,
   type InstanceHealthTarget,
   instanceUnitIsActive,
@@ -1237,6 +1238,7 @@ async function rollbackControlPlane(options: {
   try {
     await waitForInstanceHealth({
       target,
+      maxIntervalMs: INSTANCE_UPDATE_HEALTH_MAX_INTERVAL_MS,
       readHealth: options.readHealth,
       unitActive: options.unitActive,
       sleep: options.sleep,
@@ -1276,12 +1278,65 @@ type ControlPlaneRollbackBase = {
   backupDir: string;
   previous: ControlPlaneHealthSnapshot | null;
   failedCommit: string;
+  failedVersion?: string;
   run: NonNullable<InstanceUpdateHooks["run"]>;
   readHealth: () => Promise<ControlPlaneHealthSnapshot | null>;
   unitActive: () => Promise<boolean>;
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
 };
+
+/** Last look at the new build after a rollback that could not be confirmed. */
+export const NEW_BUILD_RECHECK_MS = 60_000;
+
+/**
+ * The health wait for the new build failed, so roll back. If the rollback
+ * itself cannot be confirmed (`recovery_required`) but the NEW build is
+ * serving after all (a slow host answered late), that is a success with a
+ * warning, not a failure: the returned text. Any other outcome throws.
+ */
+async function rollbackAfterVerifyFailure(
+  options: ControlPlaneRollbackBase & { reason: string },
+): Promise<string> {
+  let failure: unknown;
+  try {
+    await rollbackControlPlane(options);
+  } catch (err) {
+    failure = err;
+  }
+  if (
+    failure instanceof ControlPlaneUpdateFailedError &&
+    failure.code === "recovery_required" &&
+    await newBuildServing(options)
+  ) {
+    return `${options.reason}: the new control plane was slow to answer; the automatic rollback was not confirmed, but the new build ${
+      options.failedVersion ?? options.failedCommit
+    } is serving`;
+  }
+  throw failure;
+}
+
+async function newBuildServing(
+  options: ControlPlaneRollbackBase,
+): Promise<boolean> {
+  try {
+    await waitForInstanceHealth({
+      target: {
+        commit: options.failedCommit,
+        ...(options.failedVersion ? { version: options.failedVersion } : {}),
+      },
+      timeoutMs: NEW_BUILD_RECHECK_MS,
+      maxIntervalMs: INSTANCE_UPDATE_HEALTH_MAX_INTERVAL_MS,
+      readHealth: options.readHealth,
+      unitActive: options.unitActive,
+      sleep: options.sleep,
+      now: options.now,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 async function installControlPlaneOrRollback(options: {
   run: NonNullable<InstanceUpdateHooks["run"]>;
@@ -1419,7 +1474,7 @@ export async function executeInstanceUpdateReconcile(options: {
   upgradeId?: string;
   onStage?: (stage: UpdateProgressStage) => void;
   hooks?: InstanceUpdateHooks;
-}): Promise<void> {
+}): Promise<{ warning?: string }> {
   assertControlPlaneUpdateAllowed(options.targetVersion);
   const hooks = options.hooks ?? {};
   if (!hooks.forceManaged && !reconcileNeedsRootHelper()) {
@@ -1477,6 +1532,7 @@ export async function executeInstanceUpdateReconcile(options: {
     backupDir: layout.backupDir,
     previous,
     failedCommit: manifest.commit,
+    ...(manifest.version ? { failedVersion: manifest.version } : {}),
     run,
     readHealth,
     unitActive,
@@ -1519,6 +1575,7 @@ export async function executeInstanceUpdateReconcile(options: {
         commit: manifest.commit,
         ...(manifest.version ? { version: manifest.version } : {}),
       },
+      maxIntervalMs: INSTANCE_UPDATE_HEALTH_MAX_INTERVAL_MS,
       readHealth,
       unitActive,
       sleep: hooks.sleep,
@@ -1528,9 +1585,15 @@ export async function executeInstanceUpdateReconcile(options: {
     const code = err instanceof InstanceHealthError
       ? err.code
       : "health_timeout";
-    await rollbackControlPlane({ ...rollbackBase, reason: code });
+    const warning = await rollbackAfterVerifyFailure({
+      ...rollbackBase,
+      reason: code,
+    });
+    report("done");
+    return { warning };
   }
   report("done");
+  return {};
 }
 
 export const CONTROL_PLANE_UNITS = [
