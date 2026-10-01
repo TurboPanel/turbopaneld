@@ -43,6 +43,43 @@
       turbopanel_tls_mode must be one of self_signed, upload, or lets_encrypt
       (got '{{ turbopanel_tls_mode | default('') }}').
 
+# A caller that carries no hostname inputs (the update flow's refresh, a bare
+# re-converge) must not read as "no hostnames": that silently downgrades the
+# Caddyfile and the leaf SANs to self-signed. The control plane's apply
+# persists the list it last applied as instance-hostnames.json; use that when
+# nothing was passed. An explicit turbopanel_hostnames_json (even "[]") always
+# wins, so an operator can still remove every hostname.
+- name: Read the persisted instance hostnames
+  when:
+    - (turbopanel_hostnames | default([])) | length == 0
+    - (turbopanel_hostnames_json | default('')) | length == 0
+    - turbopanel_public_hostname | default('') | length == 0
+  ansible.builtin.slurp:
+    src: "{{ turbopanel_config_dir }}/caddy/instance-hostnames.json"
+  register: _persisted_hostnames
+  failed_when: false
+
+- name: Use the persisted instance hostnames when none were passed
+  when: _persisted_hostnames.content is defined
+  block:
+    - name: Decode the persisted instance hostnames
+      ansible.builtin.set_fact:
+        _persisted_hostnames_list: "{{ _persisted_hostnames.content | b64decode | from_json }}"
+
+    - name: Adopt the persisted instance hostnames
+      when:
+        - _persisted_hostnames_list is sequence
+        - _persisted_hostnames_list is not string
+        - _persisted_hostnames_list | length > 0
+      ansible.builtin.set_fact:
+        turbopanel_hostnames: "{{ _persisted_hostnames_list }}"
+  rescue:
+    - name: Warn that the persisted instance hostnames are unreadable
+      ansible.builtin.debug:
+        msg: >-
+          WARNING: {{ turbopanel_config_dir }}/caddy/instance-hostnames.json
+          is not valid JSON; ignoring it.
+
 - name: Synthesize one hostname from deprecated TLS aliases
   when:
     - (turbopanel_hostnames | default([])) | length == 0
