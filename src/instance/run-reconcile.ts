@@ -33,6 +33,7 @@ import {
   type InstanceHealthTarget,
   instanceUnitIsActive,
   readInstanceHealth,
+  resolveUpdateHealthTimeoutMs,
   waitForInstanceHealth,
 } from "./instance-health-check.ts";
 import { resolveInstanceSupport } from "./version-wire.ts";
@@ -850,6 +851,11 @@ export type InstanceUpdateHooks = {
   ) => Promise<InstanceUpdateCommandResult>;
   restartUnits?: () => Promise<boolean>;
   /**
+   * Make sure the web server (Caddy, `:8443`) is serving, starting it with a
+   * short backoff when it is not. `false` means it never came up.
+   */
+  ensureWebServer?: () => Promise<boolean>;
+  /**
    * Run the new instance binary's `migrate` verb. A non-zero exit keeps the
    * backup and rolls the previous generation back.
    */
@@ -1180,7 +1186,21 @@ function caddyNeedsRefresh(text: string | null): boolean {
   return !text.includes("handle_errors") || !text.includes("updating.html");
 }
 
+/** The plain fact first: what did not happen, and for how long we waited. */
+function controlPlaneRecoveryLead(reason: string | undefined): string {
+  if (reason === "health_timeout" || reason === "health_mismatch") {
+    const minutes = Math.max(
+      1,
+      Math.round(resolveUpdateHealthTimeoutMs() / 60_000),
+    );
+    const unit = minutes === 1 ? "minute" : "minutes";
+    return `The new control plane did not become healthy within ${minutes} ${unit} and the previous build could not be confirmed.`;
+  }
+  return "The new control plane could not be started and the previous build could not be confirmed.";
+}
+
 function controlPlaneRecoveryDetail(options: {
+  reason?: string;
   channel: ReleaseChannel;
   previous: ControlPlaneHealthSnapshot | null;
   upgradeId: string;
@@ -1199,7 +1219,9 @@ function controlPlaneRecoveryDetail(options: {
   const rollback =
     `sudo -n ${ORCHESTRATE_HELPER} playbook -i localhost, -c local -e turbopanel_upgrade_id=${options.upgradeId} instance-rollback.yml`;
   const backup = `${options.backupDir}/control-plane/${options.upgradeId}`;
-  return `rollback did not restore a healthy control plane. Backup: ${backup}. Retry rollback: ${rollback}. Reinstall the previous build: ${reinstall}`;
+  return `${
+    controlPlaneRecoveryLead(options.reason)
+  } The automatic rollback did not restore a healthy control plane. Check first whether the control plane is answering (for example, open the panel); if it is, do nothing. Only if it is not: backup ${backup}. Retry the rollback: ${rollback}. Or reinstall the previous build: ${reinstall}`;
 }
 
 async function rollbackControlPlane(options: {
@@ -1593,6 +1615,8 @@ export async function executeInstanceUpdateReconcile(options: {
       restartControlPlaneUnits({
         restartCaddy: hooks.caddyBinaryChanged === true,
       }));
+  const ensureWebServer = hooks.ensureWebServer ??
+    (() => ensureWebServerRunning({ sleep: hooks.sleep }));
   let restarted = false;
   try {
     restarted = await restart();
@@ -1604,6 +1628,9 @@ export async function executeInstanceUpdateReconcile(options: {
     await rollbackControlPlane({ ...rollbackBase, reason: "restart_failed" });
   }
 
+  // The instance is checked directly (its own socket) below; the proxy in
+  // front of it is a separate step so a dead proxy never reads as a bad build.
+  let webServerUp = await ensureWebServer();
   report("verifying");
   try {
     await waitForInstanceHealth({
@@ -1628,6 +1655,14 @@ export async function executeInstanceUpdateReconcile(options: {
     report("done");
     return { warning };
   }
+  if (!webServerUp) webServerUp = await ensureWebServer();
+  if (!webServerUp) {
+    throw new ControlPlaneUpdateFailedError(
+      "failed",
+      "web_server_failed",
+      webServerFailureDetail(manifest.version ?? manifest.commit),
+    );
+  }
   report("done");
   return {};
 }
@@ -1637,29 +1672,34 @@ export const CONTROL_PLANE_UNITS = [
   "turbopanel-caddy",
 ] as const;
 
+type SystemctlResult = { success: boolean; stderr: string };
+type RunSystemctl = (args: string[]) => Promise<SystemctlResult>;
+
+async function defaultRunSystemctl(args: string[]): Promise<SystemctlResult> {
+  const result = await new Deno.Command("sudo", {
+    args: hostSudoArgs(args),
+    stdin: "null",
+    stdout: "piped",
+    stderr: "piped",
+  }).output();
+  return {
+    success: result.success,
+    stderr: new TextDecoder().decode(result.stderr).trim(),
+  };
+}
+
 /**
  * Restart `turbopanel-instance` and reload `turbopanel-caddy` so `:8443`
  * keeps serving the updating page. Restart Caddy only when its binary changed.
- * The daemon itself is not restarted here.
+ * The daemon itself is not restarted here. The result is the instance's: a
+ * Caddy that is not running afterwards is handled by
+ * {@link ensureWebServerRunning}, not by rolling the instance back.
  */
 export async function restartControlPlaneUnits(options?: {
-  runSystemctl?: (
-    args: string[],
-  ) => Promise<{ success: boolean; stderr: string }>;
+  runSystemctl?: RunSystemctl;
   restartCaddy?: boolean;
 }): Promise<boolean> {
-  const run = options?.runSystemctl ?? (async (args: string[]) => {
-    const result = await new Deno.Command("sudo", {
-      args: hostSudoArgs(args),
-      stdin: "null",
-      stdout: "piped",
-      stderr: "piped",
-    }).output();
-    return {
-      success: result.success,
-      stderr: new TextDecoder().decode(result.stderr).trim(),
-    };
-  });
+  const run = options?.runSystemctl ?? defaultRunSystemctl;
   const instance = await run([
     "-n",
     "systemctl",
@@ -1668,13 +1708,51 @@ export async function restartControlPlaneUnits(options?: {
   ]);
   if (!instance.success) return false;
   const caddyVerb = options?.restartCaddy ? "restart" : "reload";
-  const caddy = await run([
-    "-n",
-    "systemctl",
-    caddyVerb,
-    "turbopanel-caddy",
-  ]);
-  return caddy.success;
+  // A failed reload (Caddy not running) is not an instance failure.
+  await run(["-n", "systemctl", caddyVerb, "turbopanel-caddy"]);
+  return true;
+}
+
+/** Waits between attempts to start the web server. */
+export const WEB_SERVER_START_BACKOFF_MS: readonly number[] = [
+  1_000,
+  3_000,
+  6_000,
+  10_000,
+];
+
+async function webServerUnitIsActive(): Promise<boolean> {
+  return await instanceUnitIsActive("turbopanel-caddy");
+}
+
+/**
+ * True once `turbopanel-caddy` is active. When it is not, start it with
+ * `systemctl restart` (a start for an inactive unit), retrying with backoff.
+ */
+export async function ensureWebServerRunning(options?: {
+  isActive?: () => Promise<boolean>;
+  runSystemctl?: RunSystemctl;
+  sleep?: (ms: number) => Promise<void>;
+  backoffMs?: readonly number[];
+}): Promise<boolean> {
+  const isActive = options?.isActive ?? webServerUnitIsActive;
+  const run = options?.runSystemctl ?? defaultRunSystemctl;
+  const sleep = options?.sleep ??
+    ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const backoff = options?.backoffMs ?? WEB_SERVER_START_BACKOFF_MS;
+  const attempt = async (index: number): Promise<boolean> => {
+    if (await isActive()) return true;
+    if (index >= backoff.length) return false;
+    logWarn("update", "web server is not running, starting it");
+    await run(["-n", "systemctl", "restart", "turbopanel-caddy"]);
+    await sleep(backoff[index] ?? 0);
+    return attempt(index + 1);
+  };
+  return await attempt(0);
+}
+
+function webServerFailureDetail(build: string): string {
+  return `web server did not start: the new control plane (${build}) is running and healthy, but the web server on port 8443 could not be started. Start it with: sudo systemctl restart turbopanel-caddy`;
 }
 
 async function defaultInstanceMigrate(

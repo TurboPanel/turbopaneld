@@ -14,6 +14,7 @@ import {
   ControlPlaneUpdateFailedError,
   downloadRunScript,
   encodeLicenseArg,
+  ensureWebServerRunning,
   executeInstanceUpdateReconcile,
   executeRunReconcile,
   type InstanceUpdateHooks,
@@ -1186,6 +1187,7 @@ function managedUpdateHooks(
       Promise.resolve({ ok: true, status: 200, body: instanceManifestBody() }),
     readCaddyfile: () => Promise.resolve("handle_errors\nupdating.html\n"),
     restartUnits: () => Promise.resolve(true),
+    ensureWebServer: () => Promise.resolve(true),
     migrate: () =>
       Promise.resolve({
         code: 0,
@@ -1770,7 +1772,146 @@ test("executeInstanceUpdateReconcile reports recovery_required when rollback fai
     assertEquals(error.code, "recovery_required");
     assertStringIncludes(error.message, "instance-rollback.yml");
     assertStringIncludes(error.message, "up-recover");
+    // The plain fact leads; the commands come second, behind a health check.
+    assertStringIncludes(
+      error.message,
+      "recovery_required: The new control plane",
+    );
+    assertStringIncludes(error.message, "could not be confirmed");
+    assertEquals(
+      error.message.indexOf("Check first") <
+        error.message.indexOf("instance-rollback.yml"),
+      true,
+    );
   }
+});
+
+test("ensureWebServerRunning starts an inactive Caddy and then succeeds", async () => {
+  let active = false;
+  const calls: string[][] = [];
+  const ok = await ensureWebServerRunning({
+    isActive: () => Promise.resolve(active),
+    runSystemctl: (args) => {
+      calls.push(args);
+      active = true;
+      return Promise.resolve({ success: true, stderr: "" });
+    },
+    sleep: () => Promise.resolve(),
+  });
+  assertEquals(ok, true);
+  assertEquals(calls.length, 1);
+  assertEquals(calls[0], ["-n", "systemctl", "restart", "turbopanel-caddy"]);
+});
+
+test("ensureWebServerRunning leaves a running Caddy alone", async () => {
+  let started = 0;
+  const ok = await ensureWebServerRunning({
+    isActive: () => Promise.resolve(true),
+    runSystemctl: () => {
+      started++;
+      return Promise.resolve({ success: true, stderr: "" });
+    },
+  });
+  assertEquals(ok, true);
+  assertEquals(started, 0);
+});
+
+test("ensureWebServerRunning retries with backoff, then gives up", async () => {
+  const waits: number[] = [];
+  let starts = 0;
+  const ok = await ensureWebServerRunning({
+    isActive: () => Promise.resolve(false),
+    runSystemctl: () => {
+      starts++;
+      return Promise.resolve({ success: false, stderr: "boom" });
+    },
+    sleep: (ms) => {
+      waits.push(ms);
+      return Promise.resolve();
+    },
+    backoffMs: [1, 2, 3],
+  });
+  assertEquals(ok, false);
+  assertEquals(starts, 3);
+  assertEquals(waits, [1, 2, 3]);
+});
+
+test("a failed Caddy reload does not fail the instance restart", async () => {
+  const run = (args: string[]) =>
+    Promise.resolve({
+      success: !args.includes("reload"),
+      stderr: "Unit cannot be reloaded because it is inactive",
+    });
+  assertEquals(await restartControlPlaneUnits({ runSystemctl: run }), true);
+});
+
+test("Caddy down after the restart is started and the update succeeds", async () => {
+  const calls: Array<{ bin: string; args: string[] }> = [];
+  let caddyUp = false;
+  const result = await executeInstanceUpdateReconcile({
+    channel: "release",
+    hooks: managedUpdateHooks(calls, {
+      ensureWebServer: () => {
+        const ok = ensureWebServerRunning({
+          isActive: () => Promise.resolve(caddyUp),
+          runSystemctl: () => {
+            caddyUp = true;
+            return Promise.resolve({ success: true, stderr: "" });
+          },
+          sleep: () => Promise.resolve(),
+        });
+        return ok;
+      },
+    }),
+  });
+  assertEquals(caddyUp, true);
+  assertEquals(result.warning, undefined);
+  assertEquals(
+    calls.some((call) => call.args.includes("instance-rollback.yml")),
+    false,
+  );
+});
+
+test("a web server that never starts is its own error, with no rollback", async () => {
+  const calls: Array<{ bin: string; args: string[] }> = [];
+  const error = await assertRejects(
+    () =>
+      executeInstanceUpdateReconcile({
+        channel: "release",
+        hooks: managedUpdateHooks(calls, {
+          ensureWebServer: () => Promise.resolve(false),
+        }),
+      }),
+    ControlPlaneUpdateFailedError,
+    "web server did not start",
+  );
+  if (error instanceof ControlPlaneUpdateFailedError) {
+    assertEquals(error.code, "web_server_failed");
+    assertEquals(error.stage, "failed");
+  }
+  assertEquals(
+    calls.some((call) => call.args.includes("instance-rollback.yml")),
+    false,
+  );
+});
+
+test("a bad new build still rolls back even when the web server is down", async () => {
+  const calls: Array<{ bin: string; args: string[] }> = [];
+  await assertRejects(
+    () =>
+      executeInstanceUpdateReconcile({
+        channel: "release",
+        hooks: managedUpdateHooks(calls, {
+          ensureWebServer: () => Promise.resolve(false),
+          readHealth: () => Promise.resolve(null),
+        }),
+      }),
+    ControlPlaneUpdateFailedError,
+  );
+  assertEquals(
+    calls.some((call) => call.args.includes("instance-rollback.yml")),
+    true,
+  );
 });
 
 test("a slow host that answers after more than five minutes is not rolled back", async () => {

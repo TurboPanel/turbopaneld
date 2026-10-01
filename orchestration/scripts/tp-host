@@ -498,7 +498,7 @@ tp_unit_ok() {
     BEGIN {
       split("Description After Before Wants Requires PartOf StartLimitBurst StartLimitIntervalSec", a, " ");
       for (i in a) ok["Unit", a[i]] = 1
-      split("Type User Group Slice WorkingDirectory Environment ExecStart ExecReload Restart RestartSec NoNewPrivileges PrivateTmp ProtectSystem ProtectHome ProtectKernelTunables ProtectKernelModules ProtectControlGroups RestrictSUIDSGID RestrictRealtime LockPersonality CapabilityBoundingSet AmbientCapabilities ReadWritePaths CPUQuota MemoryMax MemoryHigh TimeoutStartSec StandardOutput StandardError SyslogIdentifier", b, " ");
+      split("Type User Group Slice WorkingDirectory Environment ExecStart ExecReload Restart RestartSec NoNewPrivileges PrivateTmp ProtectSystem ProtectHome ProtectKernelTunables ProtectKernelModules ProtectControlGroups RestrictSUIDSGID RestrictRealtime LockPersonality CapabilityBoundingSet AmbientCapabilities ReadWritePaths CPUQuota MemoryMax MemoryHigh TimeoutStartSec TimeoutStopSec StandardOutput StandardError SyslogIdentifier", b, " ");
       for (i in b) ok["Service", b[i]] = 1
       split("OnCalendar Persistent Unit AccuracySec RandomizedDelaySec", c, " ");
       for (i in c) ok["Timer", c[i]] = 1

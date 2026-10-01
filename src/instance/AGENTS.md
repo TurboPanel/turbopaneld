@@ -458,6 +458,12 @@ warning (logged, and carried as the `done` progress detail), not
 rollback reports `failed` / `recovery_required` and includes the backup path,
 `sudo -n tp-orchestrate playbook … instance-rollback.yml -e
 turbopanel_upgrade_id=…`, and a pinned `update-instance` reinstall command.
+The web server (`turbopanel-caddy`, :8443) is separate from the build: the
+restart only reloads or restarts it best-effort, then `ensureWebServerRunning`
+starts it again (backoff) when it is not active. The instance is checked
+directly on its socket, so a dead proxy never rolls back a healthy build; if
+Caddy never starts the update fails with `web_server_failed` ("web server did
+not start"), no rollback.
 Stages are `preparing → downloading → installing → restarting → verifying →
 done`. The managed Caddyfile `handle_errors` block answers socket
 502/503/504 with JSON `control_plane_updating` on `/api` and `/ws`, a bare

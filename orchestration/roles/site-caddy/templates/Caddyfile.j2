@@ -7,6 +7,9 @@
 	# here over loopback. `auto_https off` (not `disable_redirects`) keeps it
 	# from trying to issue certificates for site blocks.
 	auto_https off
+	# Bounded shutdown: close open connections 5 s after SIGTERM instead of
+	# waiting forever (keep below the unit's TimeoutStopSec).
+	grace_period 5s
 	# Caddy has exactly one admin listener per process (the address above) —
 	# there is no supported way to bind a second, metrics-only admin API.
 	# The global `metrics` option is what actually exposes Prometheus text at

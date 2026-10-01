@@ -13,6 +13,8 @@ Environment=XDG_DATA_HOME={{ turbopanel_state_dir }}/site-caddy
 Environment=XDG_CONFIG_HOME={{ turbopanel_state_dir }}/site-caddy
 ExecStart={{ turbopanel_vendor_dir }}/caddy/current/caddy run --config {{ turbopanel_config_dir }}/caddy/Caddyfile --adapter caddyfile
 ExecReload={{ turbopanel_vendor_dir }}/caddy/current/caddy reload --config {{ turbopanel_config_dir }}/caddy/Caddyfile --adapter caddyfile --address {{ site_caddy_admin_addr }}
+# Longer than the Caddyfile's grace_period (5s) plus a margin.
+TimeoutStopSec=30
 Restart=on-failure
 RestartSec=5
 

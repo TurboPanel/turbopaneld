@@ -119,6 +119,9 @@
 - name: Render the Caddy site config unless that would downgrade TLS
   ansible.builtin.import_tasks: caddyfile.yml
 
+- name: Bound Caddy's shutdown in the installed Caddyfile
+  ansible.builtin.import_tasks: caddyfile-grace.yml
+
 - name: Install the control-plane updating page
   when: turbopanel_dev_user | default('') | length == 0
   ansible.builtin.template:
