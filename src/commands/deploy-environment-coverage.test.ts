@@ -28,6 +28,7 @@ import type { AppliedRelease } from "../deploy/release/apply-source-releases.ts"
 import type {
   EnvironmentDeployPayload,
   EnvironmentDeployResultRelease,
+  EnvironmentDeployResultSite,
 } from "../contracts/commands-contracts.ts";
 
 /**
@@ -264,6 +265,32 @@ test("shapeEnvironmentDeployResult includes releases and omits empty services", 
   });
   assertEquals(result.releases, releases);
   assertEquals("services" in result, false);
+});
+
+test("shapeEnvironmentDeployResult carries per-site app facts and omits them when empty", () => {
+  const base = {
+    projectName: "demo",
+    environmentId: "env-apps",
+    labeledServices: [],
+    sites: [],
+    containers: [],
+  };
+  const siteApps: EnvironmentDeployResultSite[] = [
+    {
+      composeServiceName: "blog",
+      app: { kind: "wordpress", version: "6.5.2" },
+    },
+    { composeServiceName: "docs" },
+  ];
+  assertEquals(
+    shapeEnvironmentDeployResult({ ...base, siteApps }).sites,
+    siteApps,
+  );
+  assertEquals("sites" in shapeEnvironmentDeployResult(base), false);
+  assertEquals(
+    "sites" in shapeEnvironmentDeployResult({ ...base, siteApps: [] }),
+    false,
+  );
 });
 
 test("resolveHostNativeLanes preserves payload when nothing static-exported", () => {

@@ -320,3 +320,17 @@ forever. Refused at three layers: deploy-prepare
 (`site_managed_directory_unowned`, with a sentence naming the service), the
 wire parser, and the daemon's own contract parser.
 
+
+## Application detection (`app-detect.ts`, `../site-apps.ts`)
+
+After the site apply, `environment.deploy` reports one `sites[]` row per applied
+site (`{ composeServiceName, app? }`, `app: { kind: "wordpress", version? }`).
+WordPress = `wp-config.php` (or `wp-config-sample.php` + `wp-settings.php`)
+**and** `wp-includes/` or `wp-content/`; a lone `wp-content/` is not enough.
+Read-only and bounded: three listings plus one 64 KiB read of
+`wp-includes/version.php`. `wp-config.php` is only ever listed, **never opened**
+(it holds the database password). The probe refuses symlinks and any real path
+outside the docroot. A principal tree the daemon user cannot list falls back to
+`sudo -n ls -A` (tp-host refuses symlinked components); content is never read
+with elevated rights, so on such a host `version` is omitted. Any failure means
+no fact and never fails the deploy.

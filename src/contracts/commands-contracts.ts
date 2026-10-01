@@ -1298,6 +1298,26 @@ export type EnvironmentDeployResultRelease = {
   railpackPlanVersion?: string;
 };
 
+/**
+ * What the daemon recognised in a site's document root. Detected from file
+ * names (never from `wp-config.php` contents), so it carries no secret.
+ */
+export type EnvironmentDeployResultApp = {
+  kind: "wordpress";
+  /** WordPress release when `wp-includes/version.php` could be read. */
+  version?: string;
+};
+
+/**
+ * One site this deploy applied and what it found in the document root. `app`
+ * is omitted for a plain PHP or static site; the row is still sent so the
+ * control plane can clear a fact that no longer holds.
+ */
+export type EnvironmentDeployResultSite = {
+  composeServiceName: string;
+  app?: EnvironmentDeployResultApp;
+};
+
 export type EnvironmentDeployResult = {
   projectName: string;
   summary: string;
@@ -1305,6 +1325,8 @@ export type EnvironmentDeployResult = {
   containers?: EnvironmentDeployContainer[];
   /** Git-backed releases this deploy applied; omitted when there were none. */
   releases?: EnvironmentDeployResultRelease[];
+  /** Per-site facts for the sites this deploy applied; omitted when none. */
+  sites?: EnvironmentDeployResultSite[];
 };
 
 export type EnvironmentStopPayload = {

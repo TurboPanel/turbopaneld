@@ -78,6 +78,7 @@ import {
   type SiteManagedDirectory,
   type SiteRelease,
 } from "../deploy/site.ts";
+import { detectSiteApps } from "../deploy/site-apps.ts";
 import { applyCronJobs, type CronApplySpec } from "../deploy/cron/apply.ts";
 import {
   type AppliedRelease,
@@ -137,6 +138,7 @@ import {
   type EnvironmentDeployPrincipalMaterial,
   type EnvironmentDeployResult,
   type EnvironmentDeployResultRelease,
+  type EnvironmentDeployResultSite,
   type EnvironmentDeploySite,
   type EnvironmentDeploySource,
   parseEnvironmentDeployPayload,
@@ -1563,6 +1565,8 @@ export function shapeEnvironmentDeployResult(input: {
   containers: EnvironmentDeployContainer[] | null;
   /** Git-backed releases this deploy applied, in payload order. */
   releases?: readonly EnvironmentDeployResultRelease[];
+  /** Per-site application facts for the sites this deploy applied. */
+  siteApps?: readonly EnvironmentDeployResultSite[];
 }): EnvironmentDeployResult {
   const summary = buildDeploySummary(
     input.environmentId,
@@ -1584,6 +1588,9 @@ export function shapeEnvironmentDeployResult(input: {
     // environment with no sources should not grow a release array.
     ...(input.releases && input.releases.length > 0
       ? { releases: [...input.releases] }
+      : {}),
+    ...(input.siteApps && input.siteApps.length > 0
+      ? { sites: [...input.siteApps] }
       : {}),
   };
 }
@@ -1789,6 +1796,19 @@ export async function handleEnvironmentDeploy(
     siteManagedBindings,
   );
 
+  // Read-only: what each site's document root runs (WordPress today), reported
+  // so the control plane can warn about an unusable database pairing.
+  const siteApps = await detectSiteApps(
+    layout,
+    parsedPayload.environmentId,
+    sites,
+    {
+      releaseBindings: siteReleaseBindings,
+      managedDirectoryBindings: siteManagedBindings,
+      run: runtime.runPrivileged,
+    },
+  );
+
   // Native apps come last of the host-native lanes: the release is promoted and
   // the vhost tree is settled, so a unit that fails its health probe fails only
   // itself and rolls its own `current` back. Health (not promote) owns this
@@ -1873,5 +1893,6 @@ export async function handleEnvironmentDeploy(
     sites,
     containers,
     releases: deployResultReleases(appliedReleases),
+    siteApps,
   });
 }
