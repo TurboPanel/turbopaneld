@@ -53,7 +53,7 @@ jobs:
       # The newest rc above the newest release — what staging holds.
       - name: Work out the rc to release from the tags
         id: rc
-        uses: TurboPanel/dev/.github/actions/version@dadee433d35a73c7a9946268c30a96e466371140 # dev#44
+        uses: TurboPanel/dev/.github/actions/version@d9127ee03a6a3b42e9435ebec3542db5fab09bc0 # dev#49
         with:
           mode: release-rc
 
@@ -124,7 +124,7 @@ jobs:
     # release and upload assets.
     permissions:
       contents: write
-    uses: TurboPanel/dev/.github/workflows/gh-release.yml@dadee433d35a73c7a9946268c30a96e466371140 # dev#44
+    uses: TurboPanel/dev/.github/workflows/gh-release.yml@d9127ee03a6a3b42e9435ebec3542db5fab09bc0 # dev#49
     with:
       version: ${{ needs.prepare.outputs.version }}
       channel: release
@@ -140,7 +140,7 @@ jobs:
     # release and upload assets.
     permissions:
       contents: write
-    uses: TurboPanel/dev/.github/workflows/gh-promote-finalize.yml@dadee433d35a73c7a9946268c30a96e466371140 # dev#44
+    uses: TurboPanel/dev/.github/workflows/gh-promote-finalize.yml@d9127ee03a6a3b42e9435ebec3542db5fab09bc0 # dev#49
     with:
       to: release
       version: ${{ needs.prepare.outputs.version }}
