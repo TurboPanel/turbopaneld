@@ -226,7 +226,7 @@ async function pathExists(path: string): Promise<boolean> {
   }
 }
 
-async function digestFileSha256(path: string): Promise<string> {
+export async function digestFileSha256(path: string): Promise<string> {
   const file = await Deno.open(path, { read: true });
   const digest = await crypto.subtle.digest("SHA-256", file.readable);
   return encodeHex(new Uint8Array(digest));
@@ -269,7 +269,7 @@ export async function listBackupArtifacts(
 }
 
 /** Keep the newest `retentionKeep` artifacts by mtime; unlink the rest. Returns pruned ids. */
-async function pruneBackupArtifacts(
+export async function pruneBackupArtifacts(
   dir: string,
   ext: string,
   retentionKeep: number | undefined,
@@ -322,7 +322,7 @@ export function buildEngineContext(
   };
 }
 
-async function removeIfExists(path: string): Promise<void> {
+export async function removeIfExists(path: string): Promise<void> {
   try {
     await Deno.remove(path);
   } catch (err) {

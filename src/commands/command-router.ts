@@ -27,6 +27,7 @@ import {
   parsePingPayload,
   parsePrincipalsReconcilePayload,
   parseRebootPayload,
+  parseStorageBackupPayload,
   parseSystemReconcilePayload,
   parseTimezoneSetPayload,
   parseTlsTrustReconcilePayload,
@@ -55,6 +56,7 @@ import { handleTimezone } from "./timezone.ts";
 import { handlePrincipalsReconcile } from "./principals-reconcile.ts";
 import { handleFirewallReconcile } from "./firewall-reconcile.ts";
 import { handleBackupsReconcile } from "../backups/reconcile.ts";
+import { handleStorageBackup } from "../backups/storage-backup.ts";
 import { handleTlsTrust } from "./tls-trust.ts";
 import { handleFabricReconcile } from "./fabric.ts";
 import {
@@ -108,6 +110,7 @@ export type CommandRouterHandlerOverrides = {
   handleManagedIngressReconcile?: typeof handleManagedIngressReconcile;
   handleManagedHaReconcile?: typeof handleManagedHaReconcile;
   handleManagedHaFailover?: typeof handleManagedHaFailover;
+  handleStorageBackup?: typeof handleStorageBackup;
   handleSystemReconcile?: typeof handleSystemReconcile;
 };
 
@@ -439,6 +442,18 @@ export async function handleCommandDispatch(
           daemonReceivedAt,
           { decryptSecrets: deps?.decryptSecrets },
         );
+        ok = true;
+        daemonRespondedAt = new Date().toISOString();
+        break;
+      }
+      case "storage.backup": {
+        // A live archive of one storage copy through the pinned helper
+        // container; no credentials involved.
+        const payload = parseStorageBackupPayload(message.payload);
+        result = await pickCommandRouterHandler(
+          "handleStorageBackup",
+          handleStorageBackup,
+        )(payload, daemonReceivedAt);
         ok = true;
         daemonRespondedAt = new Date().toISOString();
         break;
