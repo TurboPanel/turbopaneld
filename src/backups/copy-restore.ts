@@ -172,9 +172,11 @@ export async function findContainersUsingCopy(
     );
   }
   const containers = JSON.parse(inspect.stdout) as DockerInspect[];
-  return containers
-    .filter((container) => usesCopy(container, copy))
-    .map((container) => String(container.Id));
+  return containers.flatMap((container) =>
+    typeof container.Id === "string" && usesCopy(container, copy)
+      ? [container.Id]
+      : []
+  );
 }
 
 /** Start each container; returns the ones that would not start. */
@@ -298,7 +300,9 @@ async function swapWithServicesStopped(
       success: false,
       code: -1,
       stdout: "",
-      stderr: err instanceof Error ? err.message : String(err),
+      stderr: err instanceof Error
+        ? err.message
+        : "the helper could not be started",
     }),
   );
   // Whatever the helper did, every container stopped above starts again.
