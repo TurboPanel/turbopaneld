@@ -166,3 +166,16 @@ Deno.test("the pinned Caddy accepts the grace period in every global block", asy
     assertEquals(result.ok, false);
   });
 });
+
+Deno.test("existing hosts get grace_period added in place, safely", async () => {
+  const tasks = await readRole("instance-launch/tasks/caddyfile-grace.yml");
+  // One line, only when missing, after the global auto_https line, backed up,
+  // and refused unless the vendored Caddy still adapts the result.
+  assertStringIncludes(tasks, "insertafter: '^\\s*auto_https\\s'");
+  assertStringIncludes(tasks, "grace_period 5s");
+  assertStringIncludes(tasks, "backup: true");
+  assertStringIncludes(tasks, "caddy adapt --config %s");
+  assertStringIncludes(tasks, "is not search('(?m)^\\s*grace_period\\s')");
+  const main = await readRole("instance-launch/tasks/main.yml");
+  assertStringIncludes(main, "caddyfile-grace.yml");
+});

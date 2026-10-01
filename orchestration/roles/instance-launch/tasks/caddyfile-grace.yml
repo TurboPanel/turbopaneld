@@ -1,0 +1,47 @@
+---
+# Bound Caddy's shutdown in an INSTALLED Caddyfile (imported by main.yml).
+#
+# Without `grace_period` Caddy waits forever for open connections after
+# SIGTERM, systemd kills it at TimeoutStopSec, and a stop leaves :8443 down.
+# The template carries the option, but a host whose Caddyfile was kept (Let's
+# Encrypt or uploaded hostnames, see caddyfile.yml) or rendered by an older
+# build does not have it, and the units refresh must not re-render that file.
+# So add exactly one line to the global options block, only when missing:
+# nothing else in the file is touched, the result must still adapt with the
+# vendored Caddy or the file is left as it was, and a backup is kept.
+- name: Read the installed Caddyfile for the grace period check
+  when: turbopanel_dev_user | default('') | length == 0
+  ansible.builtin.slurp:
+    src: "{{ turbopanel_caddyfile }}"
+  register: _grace_caddyfile
+  failed_when: false
+
+- name: Add grace_period to the installed Caddyfile's global options when missing
+  when:
+    - turbopanel_dev_user | default('') | length == 0
+    - _grace_caddyfile.content is defined
+    - (_grace_caddyfile.content | b64decode) is search('(?m)^\s*auto_https\s')
+    - (_grace_caddyfile.content | b64decode) is not search('(?m)^\s*grace_period\s')
+  ansible.builtin.lineinfile:
+    path: "{{ turbopanel_caddyfile }}"
+    regexp: '^\s*grace_period\s'
+    insertafter: '^\s*auto_https\s'
+    firstmatch: true
+    line: "        grace_period 5s"
+    backup: true
+    validate: "{{ turbopanel_vendor_dir }}/caddy/current/caddy adapt --config %s --adapter caddyfile"
+  register: _grace_inserted
+  failed_when: false
+  notify:
+    - Reload turbopanel caddy
+
+- name: Warn when the grace period could not be added
+  when:
+    - _grace_inserted is not skipped
+    - _grace_inserted.msg is defined
+    - _grace_inserted.msg is search('validation')
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: could not add grace_period to {{ turbopanel_caddyfile }}; the
+      file is unchanged. Caddy keeps its unbounded shutdown until Hostnames is
+      re-applied in the app.
