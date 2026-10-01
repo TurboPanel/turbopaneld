@@ -69,8 +69,8 @@ own containers bind `/etc/turbopanel/...` and `/var/lib/turbopanel/...`
 (ProxySQL, orchestrator, managed-engine config and data) and the ingress
 Tecnativa proxy container mounts `/var/run/docker.sock` until stage 3 deletes
 it. Since stage 2 the platform's own compose containers are allowed (see
-below), so what remains on a host is the socket proxy and the label-less
-managed-file helpers.
+below), so what remains on a host is the socket proxy (the daemon's helper
+containers are labelled, see below).
 
 ## Stage 2 additions (still observe: nothing is refused)
 
@@ -91,12 +91,17 @@ these labels itself and the config trees are daemon-writable today. It must
 tighten (and the labels stop being trusted) when route 2b makes the config trees
 root-owned; the label check can then be replaced by an exact-path list.
 Known gaps, left as findings on purpose: the ingress `docker-socket-proxy`
-service mounts the Docker socket until stage 3 deletes it, and the managed-file
-helpers in `src/managed/materialize.ts` are plain `docker run -v <state>/managed`
-with no platform label, and so are the backup and restore helpers in
-`src/backups/copy-backup.ts` / `copy-restore.ts` (`docker run --rm --mount`):
-every backup run logs `unlabeled-create` today. The daemon must stamp a platform
-label on all of these before enforcement.
+service mounts the Docker socket until stage 3 deletes it.
+
+**Helper containers.** Every daemon-started throwaway `docker run` (backup tar,
+restore swap, managed-file ownership, engine volume bootstrap) stamps
+`turbopanel.role=turbopanel` + `com.turbopanel.system.component=<backup-copy |
+backup-restore | managed-files | volume-copy>` through `helperLabelArgs` in
+`src/deploy/labels.ts`; `platform.ts` lists those components, and `/backup`
+(the restore archive, read-only only) is a platform read-only root. A test in
+`platform.test.ts` scans `src` for any `docker run` without the helper. The
+same binds with no label, a forged component, or a writable archive stay
+findings (corpus `attack` entries).
 
 **Ownership observation.** Every create counts by owner class (`owners`) and an
 unlabeled one is `unlabeled-create`. For start / stop / restart / kill / pause /

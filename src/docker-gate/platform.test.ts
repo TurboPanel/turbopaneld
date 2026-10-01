@@ -21,6 +21,8 @@ import {
   platformBindVerdict,
 } from "../../orchestration/roles/docker-gate/files/platform.ts";
 import {
+  HELPER_COMPONENTS,
+  helperLabelArgs,
   LABEL_COMPOSE_PROJECT as DEPLOY_COMPOSE_PROJECT,
   LABEL_ROLE as DEPLOY_ROLE,
   LABEL_ROLE_INGRESS,
@@ -64,6 +66,7 @@ test("the gate's label names are the ones the platform stamps", () => {
       SYSTEM_HOSTING_INGRESS_COMPONENT,
       SYSTEM_MANAGED_HA_COMPONENT,
       SYSTEM_MANAGED_INGRESS_COMPONENT,
+      ...HELPER_COMPONENTS,
     ].toSorted(),
   );
 });
@@ -306,3 +309,47 @@ test("a create without any platform or compose label is an unlabeled finding onl
   const found = await verdictFor({ HostConfig: {} });
   assertEquals(found, { violations: [], allowances: [] });
 });
+
+test("helperLabelArgs stamps labels the gate reads as platform", () => {
+  for (const component of HELPER_COMPONENTS) {
+    const args = helperLabelArgs(component);
+    const labels: Record<string, string> = {};
+    for (let i = 0; i < args.length; i += 2) {
+      assertEquals(args[i], "--label");
+      const [key, value] = args[i + 1].split("=");
+      labels[key] = value;
+    }
+    assertEquals(ownerOf(labels), "platform", component);
+  }
+});
+
+test("every `docker run` helper in src stamps the shared platform label", async () => {
+  const root = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
+  // Compose `run` of a tenant deploy hook and cloudflared's own `run` are not
+  // daemon helper containers.
+  const exempt = new Set([
+    "deploy/run-deploy-hooks.ts",
+    "tunnels/supervisor.ts",
+  ]);
+  const offenders: string[] = [];
+  for await (const file of walkSource(root)) {
+    const rel = file.slice(root.length + 1);
+    if (exempt.has(rel) || rel.endsWith("deploy/labels.ts")) continue;
+    const text = await Deno.readTextFile(file);
+    const bare = text.match(
+      /"run",\s*(?!\s|"--rm",\s*\.\.\.helperLabelArgs\()/g,
+    );
+    if (bare) offenders.push(rel);
+  }
+  assertEquals(offenders, []);
+});
+
+async function* walkSource(dir: string): AsyncGenerator<string> {
+  for await (const entry of Deno.readDir(dir)) {
+    const child = `${dir}/${entry.name}`;
+    if (entry.isDirectory) yield* walkSource(child);
+    else if (/\.ts$/.test(entry.name) && !/\.test\.ts$/.test(entry.name)) {
+      yield child;
+    }
+  }
+}

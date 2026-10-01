@@ -19,6 +19,7 @@
  * one (its retention prunes only that directory).
  */
 
+import { helperLabelArgs } from "../deploy/labels.ts";
 import { join } from "@std/path";
 import {
   COPY_BACKUP_ARTIFACT_EXTENSION,
@@ -164,6 +165,7 @@ export function copyArchiveArgv(mount: CopyMount): string[] {
   return [
     "run",
     "--rm",
+    ...helperLabelArgs("backup-copy"),
     "--network",
     "none",
     "--pull",

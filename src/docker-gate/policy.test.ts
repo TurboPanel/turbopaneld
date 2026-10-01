@@ -108,26 +108,47 @@ test("the corpus covers every platform flow and the attack shapes", () => {
   }
 });
 
-test("tenant-facing flows are clean; the platform's own containers are clean except two known gaps", async () => {
+test("tenant-facing flows are clean; the platform's own containers are clean except the ingress socket proxy", async () => {
   const clean = ["backup", "deploy", "managed", "fabric", "compose"];
   for (const entry of CORPUS.filter((e) => clean.includes(e.flow))) {
     assertEquals(entry.expect, [], entry.name);
   }
-  // Real ProxySQL / orchestrator / managed-engine creates pass through the
-  // platform allowance. Two findings remain on purpose: the ingress socket
-  // proxy mounts the Docker socket until stage 3 deletes it, and the
-  // managed-file helper is a plain `docker run` with no platform label, so
-  // its bind of the managed state root is outside the tenant roots (it needs
-  // a label from the daemon before enforcement).
+  // Real ProxySQL / orchestrator / managed-engine creates and the daemon's
+  // helper containers (labelled by `helperLabelArgs`) pass through the
+  // platform allowance. One finding remains on purpose: the ingress socket
+  // proxy mounts the Docker socket until stage 3 deletes it.
   const platform = CORPUS.filter((e) => e.flow === "platform");
   assertEquals(platform.map((e) => [e.name, e.expect]), [
     ["ingress-socket-proxy", ["bind-docker-socket"]],
     ["proxysql-compose", []],
     ["orchestrator-compose", []],
     ["managed-engine-compose", []],
-    ["managed-root-helper", ["bind-outside-roots"]],
+    ["managed-root-helper", []],
+    ["backup-restore-helper", []],
+    ["engine-volume-helper", []],
   ]);
-  for (const entry of platform.filter((e) => e.name.endsWith("-compose"))) {
+  // The same binds without a platform label (or with a forged component, or a
+  // writable archive) are still flagged.
+  const attacks = new Map(
+    CORPUS.filter((e) => e.flow === "attack").map((e) => [e.name, e.expect]),
+  );
+  assertEquals(attacks.get("managed-root-helper-unlabeled"), [
+    "bind-outside-roots",
+  ]);
+  assertEquals(attacks.get("managed-root-helper-forged-component"), [
+    "bind-outside-roots",
+  ]);
+  assertEquals(attacks.get("backup-restore-helper-unlabeled"), [
+    "bind-forbidden-path",
+  ]);
+  assertEquals(attacks.get("backup-restore-helper-writable-archive"), [
+    "platform-config-writable",
+  ]);
+  for (
+    const entry of platform.filter((e) =>
+      e.name.endsWith("-compose") || e.name.endsWith("-helper")
+    )
+  ) {
     const found = await evaluateDetailed(
       {
         method: entry.method,
