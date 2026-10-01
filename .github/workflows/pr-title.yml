@@ -1,0 +1,37 @@
+# pr-title: advisory lint of the pull request title (not a required check).
+# Squash merges use the PR title as the commit subject, so keep it in the
+# `type(scope): summary` shape. The automatic Release Candidate / Release
+# pull requests and bot pull requests are exempt.
+name: PR Title
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+permissions: {}
+
+jobs:
+  pr-title:
+    name: pr-title
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check the title shape
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          set -eu
+          case "$PR_AUTHOR" in
+            dependabot\[bot\]|*"[bot]") echo "Bot pull request: skipped."; exit 0 ;;
+            *) ;;
+          esac
+          if printf '%s' "$PR_TITLE" | grep -Eq '^(Release Candidate|Release) [0-9]+\.[0-9]+\.[0-9]+'; then
+            echo "Release pull request: skipped."
+            exit 0
+          fi
+          if printf '%s' "$PR_TITLE" | grep -Eq '^(feat|fix|chore|ci|docs|refactor|test|perf|build|revert|style)(\([a-z0-9._/-]+\))?!?: .+'; then
+            echo "Title shape OK."
+          else
+            echo "::warning title=PR title::Use 'type(scope): summary' (feat, fix, chore, ci, docs, refactor, test, perf, build, revert)."
+            exit 1
+          fi
