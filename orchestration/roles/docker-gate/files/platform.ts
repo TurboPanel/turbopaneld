@@ -20,6 +20,12 @@ export const PLATFORM_COMPONENTS: readonly string[] = [
   "hosting-ingress",
   "managed-ingress",
   "managed-ha",
+  // Throwaway helper containers the daemon starts with a plain `docker run`
+  // (`HELPER_COMPONENTS` in `src/deploy/labels.ts`; a test pins the match).
+  "backup-copy",
+  "backup-restore",
+  "managed-files",
+  "volume-copy",
 ];
 export const LABEL_ROLE = "turbopanel.role";
 export const LABEL_SYSTEM_COMPONENT = "com.turbopanel.system.component";
@@ -37,7 +43,12 @@ export type PlatformRoots = {
 };
 
 export const DEFAULT_PLATFORM_ROOTS: PlatformRoots = {
-  readOnly: ["/etc/turbopanel/proxysql", "/etc/turbopanel/orchestrator"],
+  readOnly: [
+    "/etc/turbopanel/proxysql",
+    "/etc/turbopanel/orchestrator",
+    // Backup artifacts: the restore helper binds one archive read-only.
+    "/backup",
+  ],
   writable: [
     "/var/lib/turbopanel/proxysql",
     "/var/lib/turbopanel/orchestrator",

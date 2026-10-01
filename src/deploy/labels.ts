@@ -58,3 +58,29 @@ export const LABEL_ROLE_SYSTEM = "turbopanel";
  */
 export const LABEL_COMPOSE_PROJECT = "com.docker.compose.project";
 export const LABEL_COMPOSE_SERVICE = "com.docker.compose.service";
+
+/**
+ * `com.turbopanel.system.component` values of the throwaway helper containers
+ * the daemon starts with a plain `docker run` (backup tar, restore swap, managed
+ * file ownership, engine volume bootstrap). The Docker gate allows them as
+ * platform containers by this label, so every such `docker run` must stamp it
+ * through {@link helperLabelArgs} (a test scans `src` for any that does not).
+ */
+export const HELPER_COMPONENTS = [
+  "backup-copy",
+  "backup-restore",
+  "managed-files",
+  "volume-copy",
+] as const;
+
+export type HelperComponent = (typeof HELPER_COMPONENTS)[number];
+
+/** `docker run` label flags that mark a daemon helper container as platform-owned. */
+export function helperLabelArgs(component: HelperComponent): string[] {
+  return [
+    "--label",
+    `${LABEL_ROLE}=${LABEL_ROLE_SYSTEM}`,
+    "--label",
+    `${LABEL_SYSTEM_COMPONENT}=${component}`,
+  ];
+}

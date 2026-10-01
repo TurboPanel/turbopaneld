@@ -7,6 +7,7 @@
  * by the container's engine user.
  */
 
+import { helperLabelArgs } from "../deploy/labels.ts";
 import { join } from "@std/path";
 import type { ManagedApplyPayload } from "../contracts/commands-contracts.ts";
 import {
@@ -190,6 +191,7 @@ export async function normalizeManagedFileOwnership(
   const result = await run([
     "run",
     "--rm",
+    ...helperLabelArgs("managed-files"),
     "--user",
     "0",
     "--entrypoint",
@@ -255,6 +257,7 @@ export async function normalizeManagedFileOwnership(
   const verified = await run([
     "run",
     "--rm",
+    ...helperLabelArgs("managed-files"),
     "--user",
     `${containerUser}:${containerGroup}`,
     "--entrypoint",

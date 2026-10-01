@@ -27,6 +27,7 @@
  * `/var/lib/docker/volumes`.
  */
 
+import { helperLabelArgs } from "../deploy/labels.ts";
 import type {
   StorageRestorePayload,
   StorageRestoreResult,
@@ -110,6 +111,7 @@ export function restoreArgv(mount: CopyMount, artifactPath: string): string[] {
   return [
     "run",
     "--rm",
+    ...helperLabelArgs("backup-restore"),
     "--network",
     "none",
     "--pull",

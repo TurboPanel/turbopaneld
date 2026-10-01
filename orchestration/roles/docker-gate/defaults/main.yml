@@ -39,6 +39,8 @@ docker_gate_deny_prefixes_extra:
 docker_gate_platform_ro_roots:
   - "{{ turbopanel_config_dir }}/proxysql"
   - "{{ turbopanel_config_dir }}/orchestrator"
+  # Backup artifacts: the restore helper binds one archive read-only.
+  - "{{ turbopanel_backup_dir | default('/backup') }}"
 docker_gate_platform_rw_roots:
   - "{{ turbopanel_daemon_state_dir }}/proxysql"
   - "{{ turbopanel_daemon_state_dir }}/orchestrator"

@@ -5,6 +5,7 @@
  * Dump flag is `--gtid` (not MySQL `--set-gtid-purged`).
  */
 
+import { helperLabelArgs } from "../../deploy/labels.ts";
 import type {
   ManagedApplyCredential,
   ManagedApplyDatabaseOp,
@@ -421,6 +422,7 @@ const mariadbReplicationRuntime: ManagedEngineReplicationRuntime = {
       const probe = await ctx.runDocker([
         "run",
         "--rm",
+        ...helperLabelArgs("volume-copy"),
         "--user",
         ctx.containerUser,
         ...volumeArgs,
@@ -444,6 +446,7 @@ const mariadbReplicationRuntime: ManagedEngineReplicationRuntime = {
       const clean = await ctx.runDocker([
         "run",
         "--rm",
+        ...helperLabelArgs("volume-copy"),
         "--user",
         "0",
         ...volumeArgs,

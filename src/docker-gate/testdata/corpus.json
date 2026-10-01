@@ -22,7 +22,10 @@
       "Volumes": {},
       "WorkingDir": "",
       "Entrypoint": null,
-      "Labels": {},
+      "Labels": {
+        "turbopanel.role": "turbopanel",
+        "com.turbopanel.system.component": "backup-copy"
+      },
       "HostConfig": {
         "Binds": null,
         "ContainerIDFile": "",
@@ -2095,6 +2098,369 @@
       "Entrypoint": [
         "sh"
       ],
+      "Labels": {
+        "turbopanel.role": "turbopanel",
+        "com.turbopanel.system.component": "managed-files"
+      },
+      "HostConfig": {
+        "Binds": [
+          "/var/lib/turbopanel/managed:/managed"
+        ],
+        "ContainerIDFile": "",
+        "LogConfig": {
+          "Type": "",
+          "Config": {}
+        },
+        "NetworkMode": "default",
+        "PortBindings": {},
+        "RestartPolicy": {
+          "Name": "no",
+          "MaximumRetryCount": 0
+        },
+        "AutoRemove": true,
+        "VolumeDriver": "",
+        "VolumesFrom": null,
+        "ConsoleSize": [
+          0,
+          0
+        ],
+        "CapAdd": null,
+        "CapDrop": null,
+        "CgroupnsMode": "",
+        "Dns": null,
+        "DnsOptions": [],
+        "DnsSearch": [],
+        "ExtraHosts": null,
+        "GroupAdd": null,
+        "IpcMode": "",
+        "Cgroup": "",
+        "Links": null,
+        "OomScoreAdj": 0,
+        "PidMode": "",
+        "Privileged": false,
+        "PublishAllPorts": false,
+        "ReadonlyRootfs": false,
+        "SecurityOpt": null,
+        "UTSMode": "",
+        "UsernsMode": "",
+        "ShmSize": 0,
+        "Isolation": "",
+        "CpuShares": 0,
+        "Memory": 0,
+        "NanoCpus": 0,
+        "CgroupParent": "",
+        "BlkioWeight": 0,
+        "BlkioWeightDevice": [],
+        "BlkioDeviceReadBps": [],
+        "BlkioDeviceWriteBps": [],
+        "BlkioDeviceReadIOps": [],
+        "BlkioDeviceWriteIOps": [],
+        "CpuPeriod": 0,
+        "CpuQuota": 0,
+        "CpuRealtimePeriod": 0,
+        "CpuRealtimeRuntime": 0,
+        "CpusetCpus": "",
+        "CpusetMems": "",
+        "Devices": [],
+        "DeviceCgroupRules": null,
+        "DeviceRequests": null,
+        "MemoryReservation": 0,
+        "MemorySwap": 0,
+        "MemorySwappiness": -1,
+        "OomKillDisable": false,
+        "PidsLimit": 0,
+        "Ulimits": [],
+        "CpuCount": 0,
+        "CpuPercent": 0,
+        "IOMaximumIOps": 0,
+        "IOMaximumBandwidth": 0,
+        "MaskedPaths": null,
+        "ReadonlyPaths": null
+      },
+      "NetworkingConfig": {
+        "EndpointsConfig": {
+          "default": {
+            "IPAMConfig": null,
+            "Links": null,
+            "Aliases": null,
+            "DriverOpts": null,
+            "GwPriority": 0,
+            "NetworkID": "",
+            "EndpointID": "",
+            "Gateway": "",
+            "IPAddress": "",
+            "MacAddress": "",
+            "IPPrefixLen": 0,
+            "IPv6Gateway": "",
+            "GlobalIPv6Address": "",
+            "GlobalIPv6PrefixLen": 0,
+            "DNSNames": null
+          }
+        }
+      }
+    },
+    "expect": []
+  },
+  {
+    "name": "backup-restore-helper",
+    "flow": "platform",
+    "method": "POST",
+    "path": "/containers/create",
+    "body": {
+      "Hostname": "",
+      "Domainname": "",
+      "User": "",
+      "AttachStdin": false,
+      "AttachStdout": true,
+      "AttachStderr": true,
+      "Tty": false,
+      "OpenStdin": false,
+      "StdinOnce": false,
+      "Env": null,
+      "Cmd": [
+        "true"
+      ],
+      "Image": "alpine:3.22",
+      "Volumes": {},
+      "WorkingDir": "",
+      "Entrypoint": null,
+      "Labels": {
+        "turbopanel.role": "turbopanel",
+        "com.turbopanel.system.component": "backup-restore"
+      },
+      "HostConfig": {
+        "Binds": null,
+        "ContainerIDFile": "",
+        "LogConfig": {
+          "Type": "",
+          "Config": {}
+        },
+        "NetworkMode": "none",
+        "PortBindings": {},
+        "RestartPolicy": {
+          "Name": "no",
+          "MaximumRetryCount": 0
+        },
+        "AutoRemove": true,
+        "VolumeDriver": "",
+        "VolumesFrom": null,
+        "ConsoleSize": [
+          0,
+          0
+        ],
+        "CapAdd": null,
+        "CapDrop": null,
+        "CgroupnsMode": "",
+        "Dns": null,
+        "DnsOptions": [],
+        "DnsSearch": [],
+        "ExtraHosts": null,
+        "GroupAdd": null,
+        "IpcMode": "",
+        "Cgroup": "",
+        "Links": null,
+        "OomScoreAdj": 0,
+        "PidMode": "",
+        "Privileged": false,
+        "PublishAllPorts": false,
+        "ReadonlyRootfs": true,
+        "SecurityOpt": [
+          "no-new-privileges"
+        ],
+        "UTSMode": "",
+        "UsernsMode": "",
+        "ShmSize": 0,
+        "Isolation": "",
+        "CpuShares": 0,
+        "Memory": 0,
+        "NanoCpus": 0,
+        "CgroupParent": "",
+        "BlkioWeight": 0,
+        "BlkioWeightDevice": [],
+        "BlkioDeviceReadBps": [],
+        "BlkioDeviceWriteBps": [],
+        "BlkioDeviceReadIOps": [],
+        "BlkioDeviceWriteIOps": [],
+        "CpuPeriod": 0,
+        "CpuQuota": 0,
+        "CpuRealtimePeriod": 0,
+        "CpuRealtimeRuntime": 0,
+        "CpusetCpus": "",
+        "CpusetMems": "",
+        "Devices": [],
+        "DeviceCgroupRules": null,
+        "DeviceRequests": null,
+        "MemoryReservation": 0,
+        "MemorySwap": 0,
+        "MemorySwappiness": -1,
+        "OomKillDisable": false,
+        "PidsLimit": 0,
+        "Ulimits": [],
+        "CpuCount": 0,
+        "CpuPercent": 0,
+        "IOMaximumIOps": 0,
+        "IOMaximumBandwidth": 0,
+        "Mounts": [
+          {
+            "Type": "bind",
+            "Source": "/srv/users/alice/app",
+            "Target": "/dst",
+            "ReadOnly": false
+          },
+          {
+            "Type": "bind",
+            "Source": "/backup/copies/c1/b1.tar.gz",
+            "Target": "/archive.tar.gz",
+            "ReadOnly": true
+          }
+        ],
+        "MaskedPaths": null,
+        "ReadonlyPaths": null
+      },
+      "NetworkingConfig": {
+        "EndpointsConfig": {}
+      }
+    },
+    "expect": []
+  },
+  {
+    "name": "engine-volume-helper",
+    "flow": "platform",
+    "method": "POST",
+    "path": "/containers/create",
+    "body": {
+      "Hostname": "",
+      "Domainname": "",
+      "User": "",
+      "AttachStdin": false,
+      "AttachStdout": true,
+      "AttachStderr": true,
+      "Tty": false,
+      "OpenStdin": false,
+      "StdinOnce": false,
+      "Env": null,
+      "Cmd": [
+        "true"
+      ],
+      "Image": "alpine:3.22",
+      "Volumes": {},
+      "WorkingDir": "",
+      "Entrypoint": null,
+      "Labels": {
+        "turbopanel.role": "turbopanel",
+        "com.turbopanel.system.component": "volume-copy"
+      },
+      "HostConfig": {
+        "Binds": [
+          "tpg-vol:/var/lib/postgresql",
+          "/var/lib/turbopanel/managed/00000000-0000-4000-8000-0000000000cc/tls:/etc/postgresql/tls:ro"
+        ],
+        "ContainerIDFile": "",
+        "LogConfig": {
+          "Type": "",
+          "Config": {}
+        },
+        "NetworkMode": "none",
+        "PortBindings": {},
+        "RestartPolicy": {
+          "Name": "no",
+          "MaximumRetryCount": 0
+        },
+        "AutoRemove": true,
+        "VolumeDriver": "",
+        "VolumesFrom": null,
+        "ConsoleSize": [
+          0,
+          0
+        ],
+        "CapAdd": null,
+        "CapDrop": null,
+        "CgroupnsMode": "",
+        "Dns": null,
+        "DnsOptions": [],
+        "DnsSearch": [],
+        "ExtraHosts": null,
+        "GroupAdd": null,
+        "IpcMode": "",
+        "Cgroup": "",
+        "Links": null,
+        "OomScoreAdj": 0,
+        "PidMode": "",
+        "Privileged": false,
+        "PublishAllPorts": false,
+        "ReadonlyRootfs": true,
+        "SecurityOpt": [
+          "no-new-privileges"
+        ],
+        "UTSMode": "",
+        "UsernsMode": "",
+        "ShmSize": 0,
+        "Isolation": "",
+        "CpuShares": 0,
+        "Memory": 0,
+        "NanoCpus": 0,
+        "CgroupParent": "",
+        "BlkioWeight": 0,
+        "BlkioWeightDevice": [],
+        "BlkioDeviceReadBps": [],
+        "BlkioDeviceWriteBps": [],
+        "BlkioDeviceReadIOps": [],
+        "BlkioDeviceWriteIOps": [],
+        "CpuPeriod": 0,
+        "CpuQuota": 0,
+        "CpuRealtimePeriod": 0,
+        "CpuRealtimeRuntime": 0,
+        "CpusetCpus": "",
+        "CpusetMems": "",
+        "Devices": [],
+        "DeviceCgroupRules": null,
+        "DeviceRequests": null,
+        "MemoryReservation": 0,
+        "MemorySwap": 0,
+        "MemorySwappiness": -1,
+        "OomKillDisable": false,
+        "PidsLimit": 0,
+        "Ulimits": [],
+        "CpuCount": 0,
+        "CpuPercent": 0,
+        "IOMaximumIOps": 0,
+        "IOMaximumBandwidth": 0,
+        "Mounts": null,
+        "MaskedPaths": null,
+        "ReadonlyPaths": null
+      },
+      "NetworkingConfig": {
+        "EndpointsConfig": {}
+      }
+    },
+    "expect": []
+  },
+  {
+    "name": "managed-root-helper-unlabeled",
+    "flow": "attack",
+    "method": "POST",
+    "path": "/containers/create",
+    "body": {
+      "Hostname": "",
+      "Domainname": "",
+      "User": "0",
+      "AttachStdin": false,
+      "AttachStdout": false,
+      "AttachStderr": false,
+      "Tty": false,
+      "OpenStdin": false,
+      "StdinOnce": false,
+      "Env": null,
+      "Cmd": [
+        "sleep",
+        "5"
+      ],
+      "Image": "alpine:3.22",
+      "Volumes": {},
+      "WorkingDir": "",
+      "Entrypoint": [
+        "sh"
+      ],
       "Labels": {},
       "HostConfig": {
         "Binds": [
@@ -2195,6 +2561,382 @@
     },
     "expect": [
       "bind-outside-roots"
+    ]
+  },
+  {
+    "name": "managed-root-helper-forged-component",
+    "flow": "attack",
+    "method": "POST",
+    "path": "/containers/create",
+    "body": {
+      "Hostname": "",
+      "Domainname": "",
+      "User": "0",
+      "AttachStdin": false,
+      "AttachStdout": false,
+      "AttachStderr": false,
+      "Tty": false,
+      "OpenStdin": false,
+      "StdinOnce": false,
+      "Env": null,
+      "Cmd": [
+        "sleep",
+        "5"
+      ],
+      "Image": "alpine:3.22",
+      "Volumes": {},
+      "WorkingDir": "",
+      "Entrypoint": [
+        "sh"
+      ],
+      "Labels": {
+        "turbopanel.role": "turbopanel",
+        "com.turbopanel.system.component": "not-a-helper"
+      },
+      "HostConfig": {
+        "Binds": [
+          "/var/lib/turbopanel/managed:/managed"
+        ],
+        "ContainerIDFile": "",
+        "LogConfig": {
+          "Type": "",
+          "Config": {}
+        },
+        "NetworkMode": "default",
+        "PortBindings": {},
+        "RestartPolicy": {
+          "Name": "no",
+          "MaximumRetryCount": 0
+        },
+        "AutoRemove": true,
+        "VolumeDriver": "",
+        "VolumesFrom": null,
+        "ConsoleSize": [
+          0,
+          0
+        ],
+        "CapAdd": null,
+        "CapDrop": null,
+        "CgroupnsMode": "",
+        "Dns": null,
+        "DnsOptions": [],
+        "DnsSearch": [],
+        "ExtraHosts": null,
+        "GroupAdd": null,
+        "IpcMode": "",
+        "Cgroup": "",
+        "Links": null,
+        "OomScoreAdj": 0,
+        "PidMode": "",
+        "Privileged": false,
+        "PublishAllPorts": false,
+        "ReadonlyRootfs": false,
+        "SecurityOpt": null,
+        "UTSMode": "",
+        "UsernsMode": "",
+        "ShmSize": 0,
+        "Isolation": "",
+        "CpuShares": 0,
+        "Memory": 0,
+        "NanoCpus": 0,
+        "CgroupParent": "",
+        "BlkioWeight": 0,
+        "BlkioWeightDevice": [],
+        "BlkioDeviceReadBps": [],
+        "BlkioDeviceWriteBps": [],
+        "BlkioDeviceReadIOps": [],
+        "BlkioDeviceWriteIOps": [],
+        "CpuPeriod": 0,
+        "CpuQuota": 0,
+        "CpuRealtimePeriod": 0,
+        "CpuRealtimeRuntime": 0,
+        "CpusetCpus": "",
+        "CpusetMems": "",
+        "Devices": [],
+        "DeviceCgroupRules": null,
+        "DeviceRequests": null,
+        "MemoryReservation": 0,
+        "MemorySwap": 0,
+        "MemorySwappiness": -1,
+        "OomKillDisable": false,
+        "PidsLimit": 0,
+        "Ulimits": [],
+        "CpuCount": 0,
+        "CpuPercent": 0,
+        "IOMaximumIOps": 0,
+        "IOMaximumBandwidth": 0,
+        "MaskedPaths": null,
+        "ReadonlyPaths": null
+      },
+      "NetworkingConfig": {
+        "EndpointsConfig": {
+          "default": {
+            "IPAMConfig": null,
+            "Links": null,
+            "Aliases": null,
+            "DriverOpts": null,
+            "GwPriority": 0,
+            "NetworkID": "",
+            "EndpointID": "",
+            "Gateway": "",
+            "IPAddress": "",
+            "MacAddress": "",
+            "IPPrefixLen": 0,
+            "IPv6Gateway": "",
+            "GlobalIPv6Address": "",
+            "GlobalIPv6PrefixLen": 0,
+            "DNSNames": null
+          }
+        }
+      }
+    },
+    "expect": [
+      "bind-outside-roots"
+    ]
+  },
+  {
+    "name": "backup-restore-helper-unlabeled",
+    "flow": "attack",
+    "method": "POST",
+    "path": "/containers/create",
+    "body": {
+      "Hostname": "",
+      "Domainname": "",
+      "User": "",
+      "AttachStdin": false,
+      "AttachStdout": true,
+      "AttachStderr": true,
+      "Tty": false,
+      "OpenStdin": false,
+      "StdinOnce": false,
+      "Env": null,
+      "Cmd": [
+        "true"
+      ],
+      "Image": "alpine:3.22",
+      "Volumes": {},
+      "WorkingDir": "",
+      "Entrypoint": null,
+      "Labels": {},
+      "HostConfig": {
+        "Binds": null,
+        "ContainerIDFile": "",
+        "LogConfig": {
+          "Type": "",
+          "Config": {}
+        },
+        "NetworkMode": "none",
+        "PortBindings": {},
+        "RestartPolicy": {
+          "Name": "no",
+          "MaximumRetryCount": 0
+        },
+        "AutoRemove": true,
+        "VolumeDriver": "",
+        "VolumesFrom": null,
+        "ConsoleSize": [
+          0,
+          0
+        ],
+        "CapAdd": null,
+        "CapDrop": null,
+        "CgroupnsMode": "",
+        "Dns": null,
+        "DnsOptions": [],
+        "DnsSearch": [],
+        "ExtraHosts": null,
+        "GroupAdd": null,
+        "IpcMode": "",
+        "Cgroup": "",
+        "Links": null,
+        "OomScoreAdj": 0,
+        "PidMode": "",
+        "Privileged": false,
+        "PublishAllPorts": false,
+        "ReadonlyRootfs": true,
+        "SecurityOpt": [
+          "no-new-privileges"
+        ],
+        "UTSMode": "",
+        "UsernsMode": "",
+        "ShmSize": 0,
+        "Isolation": "",
+        "CpuShares": 0,
+        "Memory": 0,
+        "NanoCpus": 0,
+        "CgroupParent": "",
+        "BlkioWeight": 0,
+        "BlkioWeightDevice": [],
+        "BlkioDeviceReadBps": [],
+        "BlkioDeviceWriteBps": [],
+        "BlkioDeviceReadIOps": [],
+        "BlkioDeviceWriteIOps": [],
+        "CpuPeriod": 0,
+        "CpuQuota": 0,
+        "CpuRealtimePeriod": 0,
+        "CpuRealtimeRuntime": 0,
+        "CpusetCpus": "",
+        "CpusetMems": "",
+        "Devices": [],
+        "DeviceCgroupRules": null,
+        "DeviceRequests": null,
+        "MemoryReservation": 0,
+        "MemorySwap": 0,
+        "MemorySwappiness": -1,
+        "OomKillDisable": false,
+        "PidsLimit": 0,
+        "Ulimits": [],
+        "CpuCount": 0,
+        "CpuPercent": 0,
+        "IOMaximumIOps": 0,
+        "IOMaximumBandwidth": 0,
+        "Mounts": [
+          {
+            "Type": "bind",
+            "Source": "/srv/users/alice/app",
+            "Target": "/dst",
+            "ReadOnly": false
+          },
+          {
+            "Type": "bind",
+            "Source": "/backup/copies/c1/b1.tar.gz",
+            "Target": "/archive.tar.gz",
+            "ReadOnly": true
+          }
+        ],
+        "MaskedPaths": null,
+        "ReadonlyPaths": null
+      },
+      "NetworkingConfig": {
+        "EndpointsConfig": {}
+      }
+    },
+    "expect": [
+      "bind-forbidden-path"
+    ]
+  },
+  {
+    "name": "backup-restore-helper-writable-archive",
+    "flow": "attack",
+    "method": "POST",
+    "path": "/containers/create",
+    "body": {
+      "Hostname": "",
+      "Domainname": "",
+      "User": "",
+      "AttachStdin": false,
+      "AttachStdout": true,
+      "AttachStderr": true,
+      "Tty": false,
+      "OpenStdin": false,
+      "StdinOnce": false,
+      "Env": null,
+      "Cmd": [
+        "true"
+      ],
+      "Image": "alpine:3.22",
+      "Volumes": {},
+      "WorkingDir": "",
+      "Entrypoint": null,
+      "Labels": {
+        "turbopanel.role": "turbopanel",
+        "com.turbopanel.system.component": "backup-restore"
+      },
+      "HostConfig": {
+        "Binds": null,
+        "ContainerIDFile": "",
+        "LogConfig": {
+          "Type": "",
+          "Config": {}
+        },
+        "NetworkMode": "none",
+        "PortBindings": {},
+        "RestartPolicy": {
+          "Name": "no",
+          "MaximumRetryCount": 0
+        },
+        "AutoRemove": true,
+        "VolumeDriver": "",
+        "VolumesFrom": null,
+        "ConsoleSize": [
+          0,
+          0
+        ],
+        "CapAdd": null,
+        "CapDrop": null,
+        "CgroupnsMode": "",
+        "Dns": null,
+        "DnsOptions": [],
+        "DnsSearch": [],
+        "ExtraHosts": null,
+        "GroupAdd": null,
+        "IpcMode": "",
+        "Cgroup": "",
+        "Links": null,
+        "OomScoreAdj": 0,
+        "PidMode": "",
+        "Privileged": false,
+        "PublishAllPorts": false,
+        "ReadonlyRootfs": true,
+        "SecurityOpt": [
+          "no-new-privileges"
+        ],
+        "UTSMode": "",
+        "UsernsMode": "",
+        "ShmSize": 0,
+        "Isolation": "",
+        "CpuShares": 0,
+        "Memory": 0,
+        "NanoCpus": 0,
+        "CgroupParent": "",
+        "BlkioWeight": 0,
+        "BlkioWeightDevice": [],
+        "BlkioDeviceReadBps": [],
+        "BlkioDeviceWriteBps": [],
+        "BlkioDeviceReadIOps": [],
+        "BlkioDeviceWriteIOps": [],
+        "CpuPeriod": 0,
+        "CpuQuota": 0,
+        "CpuRealtimePeriod": 0,
+        "CpuRealtimeRuntime": 0,
+        "CpusetCpus": "",
+        "CpusetMems": "",
+        "Devices": [],
+        "DeviceCgroupRules": null,
+        "DeviceRequests": null,
+        "MemoryReservation": 0,
+        "MemorySwap": 0,
+        "MemorySwappiness": -1,
+        "OomKillDisable": false,
+        "PidsLimit": 0,
+        "Ulimits": [],
+        "CpuCount": 0,
+        "CpuPercent": 0,
+        "IOMaximumIOps": 0,
+        "IOMaximumBandwidth": 0,
+        "Mounts": [
+          {
+            "Type": "bind",
+            "Source": "/srv/users/alice/app",
+            "Target": "/dst",
+            "ReadOnly": false
+          },
+          {
+            "Type": "bind",
+            "Source": "/backup/copies/c1/b1.tar.gz",
+            "Target": "/archive.tar.gz",
+            "ReadOnly": false
+          }
+        ],
+        "MaskedPaths": null,
+        "ReadonlyPaths": null
+      },
+      "NetworkingConfig": {
+        "EndpointsConfig": {}
+      }
+    },
+    "expect": [
+      "platform-config-writable"
     ]
   }
 ]

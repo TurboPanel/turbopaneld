@@ -4,6 +4,7 @@
  * SQL is built by `postgres-sql.ts` and fed to `psql` via stdin (never `-c`).
  */
 
+import { helperLabelArgs } from "../../deploy/labels.ts";
 import type {
   ManagedApplyCredential,
   ManagedApplyDatabaseOp,
@@ -256,6 +257,7 @@ const postgresReplicationRuntime: ManagedEngineReplicationRuntime = {
       const probe = await ctx.runDocker([
         "run",
         "--rm",
+        ...helperLabelArgs("volume-copy"),
         "--user",
         ctx.containerUser,
         ...volumeArgs,
@@ -289,6 +291,7 @@ const postgresReplicationRuntime: ManagedEngineReplicationRuntime = {
     const clean = await ctx.runDocker([
       "run",
       "--rm",
+      ...helperLabelArgs("volume-copy"),
       "--user",
       ctx.containerUser,
       ...volumeArgs,
@@ -320,6 +323,7 @@ const postgresReplicationRuntime: ManagedEngineReplicationRuntime = {
         [
           "run",
           "--rm",
+          ...helperLabelArgs("volume-copy"),
           "--user",
           ctx.containerUser,
           "--network",
@@ -368,6 +372,7 @@ const postgresReplicationRuntime: ManagedEngineReplicationRuntime = {
     const publish = await ctx.runDocker([
       "run",
       "--rm",
+      ...helperLabelArgs("volume-copy"),
       "--user",
       ctx.containerUser,
       ...volumeArgs,
