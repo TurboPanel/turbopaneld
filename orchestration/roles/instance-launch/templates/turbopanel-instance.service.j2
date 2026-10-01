@@ -84,23 +84,63 @@ ExecStart={{ turbopanel_instance_dir }}/scripts/workers-serve.sh
    compiled instance loads the vendored copy via LD_LIBRARY_PATH. Source mode
    needs no equivalent: both files are real siblings under node_modules. #}
 Environment=LD_LIBRARY_PATH={{ turbopanel_duckdb_lib_dir }}
+{% if turbopanel_dev_user | length == 0 %}
+# Sandbox: production (tpctrl) compiled instance only. Co-located dev keeps its
+# source checkout under the dev user's home, which these would hide.
+# What the instance touches: its own state and the runtime socket dir (the
+# listen socket Caddy and the daemon connect to, plus the Postgres/Redis/Caddy
+# sockets under it), its logs, and /tmp (Deno extracts the embedded DuckDB
+# addon to /tmp/deno-native-addons; PrivateTmp gives it a private one). The
+# DuckDB library is read from /opt/turbopanel/lib.
+# NOT set, on purpose: NoNewPrivileges (sudo is setuid: credentials.ts runs
+# `sudo pamtester`, upgrades run `sudo systemctl restart`),
+# MemoryDenyWriteExecute (V8 JIT), SystemCallFilter and a positive CapabilityBoundingSet (the sudo
+# targets run as root and are not proven under a filter). The reasoning is in
+# src/orchestration/instance-unit-sandbox.test.ts.
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+# /run/sudo, /var/lib/sudo and /run/faillock: sudo's timestamp dir (either
+# distro layout) and PAM's failure counter, written by the root children
+# (sudo, pamtester) of the host-credential login.
+ReadWritePaths=-{{ turbopanel_run_dir }} -{{ turbopanel_daemon_state_dir }} -{{ turbopanel_metrics_dir }} -{{ turbopanel_instance_runtime_dir }} -{{ turbopanel_instance_config_dir }} -{{ instance_log_dir }} -/run/sudo -/run/faillock -/var/lib/sudo
+# AF_NETLINK: os.networkInterfaces() (getifaddrs) and sudo's audit socket.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+# Capabilities nothing the instance (or its sudo targets) uses.
+CapabilityBoundingSet=~CAP_SYS_PTRACE CAP_SYS_BOOT CAP_SYS_PACCT CAP_SYS_TTY_CONFIG CAP_NET_ADMIN CAP_NET_RAW CAP_LINUX_IMMUTABLE CAP_WAKE_ALARM
+{% endif %}
 ExecStart={{ turbopanel_instance_binary }}
 {% else %}
 {# Outbound network is unrestricted on self-hosted (decided 2026-09-18): the
    instance talks to whatever the operator configures — webhooks, chat, push
    relays, a self-managed forge — and the host firewall is the boundary. Deno
    2.9+ also treats Unix-domain connect as --allow-net (not --allow-read), so
-   the flag must stay even with no host list. #}
+   the flag must stay even with no host list. The one carve-out is the cloud
+   metadata endpoints (--deny-net), the same list the daemon denies. #}
 {% if turbopanel_dev_user | length > 0 and turbopanel_ui_mode == 'dev' %}
-ExecStart={{ turbopanel_deno }} run --allow-env --allow-sys=networkInterfaces,hostname --allow-ffi={{ turbopanel_instance_dir }}/node_modules --allow-read={{ turbopanel_run_dir }},{{ postgres_socket_dir }},{{ turbopanel_daemon_dir }},{{ turbopanel_instance_dir }},{{ turbopanel_instance_runtime_dir }},{{ turbopanel_daemon_state_dir }},{{ turbopanel_metrics_dir }} --allow-write={{ turbopanel_run_dir }},{{ postgres_socket_dir }},{{ turbopanel_instance_runtime_dir }},{{ turbopanel_daemon_state_dir }},{{ turbopanel_metrics_dir }} --allow-net --allow-run=git,systemctl,tar,sudo,/usr/bin/sudo,/bin/sh,mkfifo,/usr/bin/mkfifo,pamtester,/usr/bin/pamtester,openssl,/usr/bin/openssl,{{ turbopanel_node }},{{ turbopanel_deno }} src/deno-dev.ts
+ExecStart={{ turbopanel_deno }} run --allow-env --allow-sys=networkInterfaces,hostname --allow-ffi={{ turbopanel_instance_dir }}/node_modules --allow-read={{ turbopanel_run_dir }},{{ postgres_socket_dir }},{{ turbopanel_daemon_dir }},{{ turbopanel_instance_dir }},{{ turbopanel_instance_runtime_dir }},{{ turbopanel_daemon_state_dir }},{{ turbopanel_metrics_dir }} --allow-write={{ turbopanel_run_dir }},{{ postgres_socket_dir }},{{ turbopanel_instance_runtime_dir }},{{ turbopanel_daemon_state_dir }},{{ turbopanel_metrics_dir }} --allow-net --deny-net=169.254.169.254,metadata.google.internal,[fd00:ec2::254] --allow-run=git,systemctl,tar,sudo,/usr/bin/sudo,/bin/sh,mkfifo,/usr/bin/mkfifo,pamtester,/usr/bin/pamtester,openssl,/usr/bin/openssl,{{ turbopanel_node }},{{ turbopanel_deno }} src/deno-dev.ts
 {% else %}
-ExecStart={{ turbopanel_deno }} run --allow-env --allow-sys=networkInterfaces,hostname --allow-ffi={{ turbopanel_instance_dir }}/node_modules --allow-read={{ turbopanel_run_dir }},{{ postgres_socket_dir }},{{ turbopanel_daemon_dir }},{{ turbopanel_instance_dir }},{{ turbopanel_instance_runtime_dir }},{{ turbopanel_daemon_state_dir }},{{ turbopanel_metrics_dir }} --allow-write={{ turbopanel_run_dir }},{{ postgres_socket_dir }},{{ turbopanel_instance_runtime_dir }},{{ turbopanel_daemon_state_dir }},{{ turbopanel_metrics_dir }} --allow-net --allow-run=sudo,/usr/bin/sudo,/bin/sh,pamtester,/usr/bin/pamtester,openssl,/usr/bin/openssl src/deno.ts
+ExecStart={{ turbopanel_deno }} run --allow-env --allow-sys=networkInterfaces,hostname --allow-ffi={{ turbopanel_instance_dir }}/node_modules --allow-read={{ turbopanel_run_dir }},{{ postgres_socket_dir }},{{ turbopanel_daemon_dir }},{{ turbopanel_instance_dir }},{{ turbopanel_instance_runtime_dir }},{{ turbopanel_daemon_state_dir }},{{ turbopanel_metrics_dir }} --allow-write={{ turbopanel_run_dir }},{{ postgres_socket_dir }},{{ turbopanel_instance_runtime_dir }},{{ turbopanel_daemon_state_dir }},{{ turbopanel_metrics_dir }} --allow-net --deny-net=169.254.169.254,metadata.google.internal,[fd00:ec2::254] --allow-run=sudo,/usr/bin/sudo,/bin/sh,pamtester,/usr/bin/pamtester,openssl,/usr/bin/openssl src/deno.ts
 {% endif %}
 {% endif %}
 Restart=always
 RestartSec=2
-# Deno.serve waits for active WS connections to drain on SIGTERM which can hang
-# indefinitely with long-lived daemon connections. Kill promptly instead.
+# On SIGTERM the instance flushes its queues and metrics, ends its database
+# pool and exits by itself in about a second (src/platform/deno/
+# instance-shutdown.ts; it force-exits at 6 s). Deno.serve alone would wait on
+# long-lived daemon WebSockets and the idle Postgres pool, so this timeout is
+# only the backstop before SIGKILL.
 TimeoutStopSec=10
 
 [Install]
