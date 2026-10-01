@@ -38,7 +38,7 @@ const DERIVED_CACHE_MAX = 2048;
 function base64Of(value: string): string {
   let binary = "";
   for (const byte of new TextEncoder().encode(value)) {
-    binary += String.fromCharCode(byte);
+    binary += String.fromCodePoint(byte);
   }
   return btoa(binary);
 }
