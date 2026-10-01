@@ -16,12 +16,16 @@ export type StatsSnapshot = {
   refusals: Record<string, number>;
 };
 
+function byKey(a: [string, number], b: [string, number]): number {
+  return a[0].localeCompare(b[0]);
+}
+
 function bump(map: Map<string, number>, key: string): void {
   map.set(key, (map.get(key) ?? 0) + 1);
 }
 
 function toRecord(map: Map<string, number>): Record<string, number> {
-  return Object.fromEntries([...map.entries()].toSorted());
+  return Object.fromEntries([...map.entries()].toSorted(byKey));
 }
 
 export class GateStats {
@@ -47,7 +51,7 @@ export class GateStats {
   }
 
   snapshot(): StatsSnapshot {
-    const requests = [...this.requests.entries()].toSorted().map(
+    const requests = [...this.requests.entries()].toSorted(byKey).map(
       ([key, count]) => {
         const [route, method, status] = key.split("\t");
         return { route, method, status: Number(status), count };

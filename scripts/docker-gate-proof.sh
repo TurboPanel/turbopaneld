@@ -145,9 +145,16 @@ fi
 
 echo "== gate summary (final counters are written when the unit stops or every summary interval)"
 systemctl kill --signal=SIGTERM "$GATE_UNIT" >/dev/null 2>&1
-sleep 3
+_came_back=false
+for _attempt in 1 2 3 4 5 6 7 8 9 10; do
+  sleep 1
+  if [[ "$_attempt" -ge 3 ]] && systemctl is-active --quiet "$GATE_UNIT" && [[ -S "$GATE_SOCKET" ]]; then
+    _came_back=true
+    break
+  fi
+done
 journalctl -u "$GATE_UNIT" --since "$SINCE" --no-pager -o cat | grep '"event":"docker-gate.summary"' | tail -1
-if systemctl is-active --quiet "$GATE_UNIT"; then pass "unit restarted itself after the stop (Restart=always)"; else fail "unit did not come back"; fi
+if [[ "$_came_back" == true ]]; then pass "unit restarted itself after the stop (Restart=always)"; else fail "unit did not come back within 10 s"; fi
 
 if [[ "$FAILED" -ne 0 ]]; then
   echo "RESULT: $FAILED check(s) failed"

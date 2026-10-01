@@ -307,3 +307,10 @@ test("errorResponse is a complete JSON response that closes the connection", () 
   assert(response.endsWith('{"message":"nope"}'));
   assert(text(errorResponse(499, "x")).startsWith("HTTP/1.1 499 Error"));
 });
+
+test("optional whitespace is only space and tab: a vertical tab is not trimmed", () => {
+  const spaced = head("POST / HTTP/1.1\r\nContent-Length: \t 5 \t\r\n\r\n");
+  assertEquals(requestFraming(spaced), { kind: "length", length: 5 });
+  const odd = head("POST / HTTP/1.1\r\nContent-Length: \u000b5\r\n\r\n");
+  assertThrows(() => requestFraming(odd), HttpError, "invalid Content-Length");
+});

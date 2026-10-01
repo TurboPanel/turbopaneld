@@ -5,6 +5,9 @@ Documentation=https://github.com/TurboPanel/turbopaneld/blob/trunk/orchestration
 # per request, so a Docker restart needs no gate restart, and a stopped Docker
 # is a 502 from the gate, not a dead gate.
 After=docker.service docker.socket
+# Never give up restarting: once traffic is routed through the gate (later
+# stages) a unit stuck in `failed` is a Docker outage.
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple

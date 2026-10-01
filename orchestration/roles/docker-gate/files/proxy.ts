@@ -44,6 +44,7 @@ import {
   type Violation,
 } from "./policy.ts";
 import type { GateStats } from "./stats.ts";
+import { describeError, repeatSequential } from "./util.ts";
 
 export interface GateConn extends ByteSource, ByteSink {
   close(): void;
@@ -162,7 +163,8 @@ async function relayResponse(
   upstream: BufferedReader,
   client: ByteSink,
 ): Promise<ResponseOutcome> {
-  while (true) {
+  let outcome: ResponseOutcome | undefined;
+  await repeatSequential(async () => {
     const raw = await upstream.readHead();
     if (raw === null) {
       throw new HttpError(502, "the engine closed the connection");
@@ -170,18 +172,22 @@ async function relayResponse(
     const head = parseResponseHead(raw);
     await writeAll(client, raw);
     if (head.status === 101) {
-      return { upgraded: true, keepAlive: false, status: 101 };
+      outcome = { upgraded: true, keepAlive: false, status: 101 };
+      return false;
     }
-    if (head.status < 200) continue;
+    if (head.status < 200) return true; // interim: the final response follows
     const framing = responseFraming(method, head);
     await relayBody(upstream, framing, client);
-    return {
+    outcome = {
       upgraded: false,
       keepAlive: framing.kind !== "eof" &&
         !wantsClose(head.headers, head.version),
       status: head.status,
     };
-  }
+    return false;
+  });
+  if (outcome === undefined) throw new HttpError(502, "no response");
+  return outcome;
 }
 
 type RequestOutcome = { complete: boolean };
@@ -281,7 +287,7 @@ async function openUpstream(deps: ProxyDeps): Promise<GateConn> {
     deps.log({
       level: "error",
       event: "docker-gate.upstream-unreachable",
-      error: String(err),
+      error: describeError(err),
     });
     throw new HttpError(502, "the Docker engine socket is unreachable");
   }
@@ -354,13 +360,13 @@ export async function handleConnection(
 ): Promise<void> {
   const clientReader = new BufferedReader(client);
   try {
-    while (true) {
+    await repeatSequential(async () => {
       const raw = await clientReader.readHead();
-      if (raw === null) return;
+      if (raw === null) return false;
       const head = parseRequestHead(raw);
       const outcome = await exchange(head, client, clientReader, deps);
-      if (!outcome.keepAlive) return;
-    }
+      return outcome.keepAlive;
+    });
   } catch (err) {
     await answerFailure(client, err, deps);
   } finally {
@@ -392,14 +398,14 @@ async function answerFailure(
     deps.log({
       level: "info",
       event: "docker-gate.peer-closed",
-      error: String(err),
+      error: describeError(err),
     });
     return;
   }
   deps.log({
     level: "error",
     event: "docker-gate.connection-error",
-    error: String(err),
+    error: describeError(err),
   });
 }
 

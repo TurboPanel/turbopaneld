@@ -40,4 +40,5 @@ docker_gate_files:
   - proxy.ts
   - resolve.ts
   - stats.ts
+  - util.ts
   - main.ts

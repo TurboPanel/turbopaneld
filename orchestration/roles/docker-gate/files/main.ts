@@ -23,6 +23,7 @@ import {
 import { DEFAULT_POLICY_CONFIG, type PolicyConfig } from "./policy.ts";
 import { resolveBindPath } from "./resolve.ts";
 import { GateStats } from "./stats.ts";
+import { describeError } from "./util.ts";
 
 export const DEFAULT_GATE_SOCKET = "/run/turbopanel-gate/docker.sock";
 export const DEFAULT_UPSTREAM_SOCKET = "/var/run/docker.sock";
@@ -40,10 +41,17 @@ export type GateConfig = {
 
 type Env = Record<string, string | undefined>;
 
+/** `/a/b//` -> `/a/b`; a lone `/` stays. */
+function trimTrailingSlashes(path: string): string {
+  let end = path.length;
+  while (end > 1 && path[end - 1] === "/") end--;
+  return path.slice(0, end);
+}
+
 function pathList(value: string | undefined): string[] {
   return (value ?? "").split(":").map((item) => item.trim()).filter((item) =>
     item.startsWith("/")
-  ).map((item) => item.replace(/(?<=.)\/+$/, ""));
+  ).map(trimTrailingSlashes);
 }
 
 function positiveInt(value: string | undefined, fallback: number): number {
@@ -146,7 +154,10 @@ export async function startGate(
         continue;
       }
       active++;
-      handleConnection(conn, deps).finally(() => active--);
+      const finished = () => {
+        active--;
+      };
+      handleConnection(conn, deps).then(finished, finished);
     }
   })();
   const timer = setInterval(
@@ -209,7 +220,7 @@ if (import.meta.main) {
     log({
       level: "error",
       event: "docker-gate.failed-to-start",
-      error: String(err),
+      error: describeError(err),
     });
     Deno.exit(1);
   }

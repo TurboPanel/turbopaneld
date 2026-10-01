@@ -13,6 +13,8 @@
  * vendored Deno with no import map, no network and no cache of remote modules.
  */
 
+import { repeatSequential } from "./util.ts";
+
 export interface ByteSource {
   read(p: Uint8Array): Promise<number | null>;
 }
@@ -154,16 +156,20 @@ export class BufferedReader {
     tooLong: string,
   ): Promise<Uint8Array | null> {
     let searchFrom = 0;
-    while (true) {
+    let found = null as Uint8Array | null;
+    await repeatSequential(async () => {
       const at = indexOfSequence(this.buffer, delimiter, searchFrom);
-      if (at !== -1) return this.consume(at + delimiter.length);
+      if (at !== -1) {
+        found = this.consume(at + delimiter.length);
+        return false;
+      }
       if (this.buffer.length > max) throw new HttpError(431, tooLong);
       searchFrom = Math.max(0, this.buffer.length - delimiter.length + 1);
-      if (!(await this.fill())) {
-        if (this.buffer.length === 0) return null;
-        throw new HttpError(400, "connection closed inside a message head");
-      }
-    }
+      if (await this.fill()) return true;
+      if (this.buffer.length === 0) return false;
+      throw new HttpError(400, "connection closed inside a message head");
+    });
+    return found;
   }
 
   private consume(count: number): Uint8Array {
@@ -190,35 +196,37 @@ export class BufferedReader {
 
   /** Exactly `count` bytes into memory; throws on EOF. */
   async readExact(count: number): Promise<Uint8Array> {
-    while (this.buffer.length < count) {
-      if (!(await this.fill())) {
-        throw new HttpError(400, "connection closed inside a body");
-      }
-    }
+    await repeatSequential(async () => {
+      if (this.buffer.length >= count) return false;
+      if (await this.fill()) return true;
+      throw new HttpError(400, "connection closed inside a body");
+    });
     return this.consume(count);
   }
 
   /** Relay exactly `count` bytes to `sink` without holding them all. */
   async copyExact(count: number, sink: ByteSink): Promise<void> {
     let remaining = count;
-    while (remaining > 0) {
+    await repeatSequential(async () => {
+      if (remaining <= 0) return false;
       if (this.buffer.length === 0 && !(await this.fill())) {
         throw new HttpError(400, "connection closed inside a body");
       }
       const take = Math.min(remaining, this.buffer.length);
       await writeAll(sink, this.consume(take));
       remaining -= take;
-    }
+      return remaining > 0;
+    });
   }
 
   /** Relay everything until the source ends. */
   async copyToEnd(sink: ByteSink): Promise<void> {
-    while (true) {
+    await repeatSequential(async () => {
       if (this.buffer.length > 0) {
         await writeAll(sink, this.consume(this.buffer.length));
       }
-      if (!(await this.fill())) return;
-    }
+      return await this.fill();
+    });
   }
 }
 
@@ -227,9 +235,11 @@ export async function writeAll(
   data: Uint8Array,
 ): Promise<void> {
   let offset = 0;
-  while (offset < data.length) {
+  await repeatSequential(async () => {
+    if (offset >= data.length) return false;
     offset += await sink.write(data.subarray(offset));
-  }
+    return offset < data.length;
+  });
 }
 
 const TOKEN = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
@@ -238,13 +248,26 @@ const TARGET = /^\/[\x21-\x7e]*$/;
 const VERSION = /^HTTP\/1\.[01]$/;
 
 function splitHeadLines(raw: Uint8Array): string[] {
-  const text = latin1(raw.subarray(0, raw.length - 4));
+  const text = latin1(raw.subarray(0, -4));
   if (text.includes("\0")) throw new HttpError(400, "NUL in message head");
   const lines = text.split("\r\n");
   if (lines.some((line) => line.includes("\n") || line.includes("\r"))) {
     throw new HttpError(400, "bare CR or LF in message head");
   }
   return lines;
+}
+
+/** Optional whitespace is only space and tab (what the engine's parser trims). */
+function trimOws(value: string): string {
+  let start = 0;
+  let end = value.length;
+  while (start < end && isOws(value[start])) start++;
+  while (end > start && isOws(value[end - 1])) end--;
+  return value.slice(start, end);
+}
+
+function isOws(char: string): boolean {
+  return char === " " || char === "\t";
 }
 
 function parseHeaderLine(line: string): Header {
@@ -255,7 +278,7 @@ function parseHeaderLine(line: string): Header {
   if (colon <= 0) throw new HttpError(400, "malformed header line");
   const name = line.slice(0, colon);
   if (!TOKEN.test(name)) throw new HttpError(400, "invalid header name");
-  return [name, line.slice(colon + 1).replaceAll(/^[ \t]+|[ \t]+$/g, "")];
+  return [name, trimOws(line.slice(colon + 1))];
 }
 
 function parseHeaders(lines: readonly string[]): Header[] {
@@ -297,7 +320,7 @@ export function headerTokens(
   for (const [key, value] of headers) {
     if (key.toLowerCase() !== wanted) continue;
     for (const part of value.split(",")) {
-      const token = part.trim().toLowerCase();
+      const token = trimOws(part).toLowerCase();
       if (token) out.push(token);
     }
   }
@@ -372,12 +395,41 @@ export function wantsClose(
 
 /** Hex chunk-size line to a number (extensions after `;` are ignored). */
 function parseChunkSize(line: Uint8Array): number {
-  const text = latin1(line.subarray(0, line.length - 2));
-  const size = text.split(";")[0].trim();
+  const text = latin1(line.subarray(0, -2));
+  const size = trimOws(text.split(";")[0]);
   if (!/^[0-9a-fA-F]{1,15}$/.test(size)) {
     throw new HttpError(400, "invalid chunk size");
   }
   return Number.parseInt(size, 16);
+}
+
+const NULL_SINK: ByteSink = { write: (p) => Promise.resolve(p.length) };
+
+type ChunkCapture = { chunks: Uint8Array[]; maxBytes: number };
+
+/** Hold one chunk's payload (and relay its bytes), refusing a body over the cap. */
+async function relayCapturedChunk(
+  reader: BufferedReader,
+  sink: ByteSink,
+  size: number,
+  capture: ChunkCapture,
+): Promise<void> {
+  const held = capture.chunks.reduce((total, chunk) => total + chunk.length, 0);
+  if (held + size > capture.maxBytes) {
+    throw new HttpError(413, "request body too large");
+  }
+  const data = await reader.readExact(size + 2);
+  capture.chunks.push(data.subarray(0, size));
+  await writeAll(sink, data);
+}
+
+/** Trailers (normally none), through the blank line. */
+function relayTrailers(reader: BufferedReader, sink: ByteSink): Promise<void> {
+  return repeatSequential(async () => {
+    const line = await reader.readLine();
+    await writeAll(sink, line);
+    return line.length !== 2;
+  });
 }
 
 /**
@@ -388,35 +440,20 @@ function parseChunkSize(line: Uint8Array): number {
 export async function relayChunked(
   reader: BufferedReader,
   sink: ByteSink | null,
-  capture?: { chunks: Uint8Array[]; maxBytes: number },
+  capture?: ChunkCapture,
 ): Promise<void> {
-  let captured = 0;
-  while (true) {
+  const out = sink ?? NULL_SINK;
+  await repeatSequential(async () => {
     const sizeLine = await reader.readLine();
-    if (sink) await writeAll(sink, sizeLine);
+    await writeAll(out, sizeLine);
     const size = parseChunkSize(sizeLine);
-    if (size === 0) break;
-    if (capture) {
-      captured += size;
-      if (captured > capture.maxBytes) {
-        throw new HttpError(413, "request body too large");
-      }
-      const data = await reader.readExact(size + 2);
-      capture.chunks.push(data.subarray(0, size));
-      if (sink) await writeAll(sink, data);
-    } else {
-      await reader.copyExact(size + 2, sink ?? NULL_SINK);
-    }
-  }
-  // Trailers (normally none), through the blank line.
-  while (true) {
-    const line = await reader.readLine();
-    if (sink) await writeAll(sink, line);
-    if (line.length === 2) return;
-  }
+    if (size === 0) return false;
+    if (capture) await relayCapturedChunk(reader, out, size, capture);
+    else await reader.copyExact(size + 2, out);
+    return true;
+  });
+  await relayTrailers(reader, out);
 }
-
-const NULL_SINK: ByteSink = { write: (p) => Promise.resolve(p.length) };
 
 /** Relay a body per its framing; `eof` bodies run to the end of the stream. */
 export async function relayBody(
