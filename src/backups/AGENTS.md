@@ -18,6 +18,7 @@ daemon, and it never takes `daemon.lock`.
 | Per-engine lock shared with `managed.backup` / `managed.restore`, per-copy lock shared by copy backups | `src/managed/target-lock.ts` |
 | Storage-copy archive through the pinned helper image (scheduled and manual) | `copy-backup.ts` |
 | `storage.backup` handler (manual create / delete of one copy archive) | `storage-backup.ts` |
+| `storage.restore` handler (stop the copy's containers, swap, start them) | `copy-restore.ts` |
 | Timer + service renderers (`turbopanel-backup-<policyId>.*`) | `units.ts` |
 | `server.backups.reconcile` handler | `reconcile.ts` |
 | Shared install-if-changed / reload / enable / sweep machinery (with tenant cron) | `src/deploy/systemd-unit-set.ts` |
@@ -73,8 +74,33 @@ lines — change `units.ts` and `tp_backup_unit_ok` together.
   missing volume is refused rather than created empty), or a host directory
   under `/srv/users/` or `<stateDir>/storage/` only. Never
   `/var/lib/docker/volumes`.
-- `<runDir>/copy-locks/<copyId>.lock` is the per-copy flock: a scheduled run
-  and a manual backup of one copy never run at once.
+- `<runDir>/copy-locks/<copyId>.lock` is the per-copy flock: a scheduled run,
+  a manual backup and a restore of one copy never run at once.
+
+## `storage.restore`
+
+Security-sensitive: it stops tenant services and writes into a tenant's copy.
+Keep this order (`copy-restore.ts`, pinned by `copy-restore.test.ts`):
+
+1. Before anything stops: the artifact's sha256 equals the payload's (the
+   control plane's `archive` row), the copy resolves inside the allowed roots,
+   the helper image is present, and the volume or directory exists.
+2. Under the copy lock: list **running** containers (`docker ps`, then
+   `docker inspect`) whose mounts are the copy's volume, or a bind at or under
+   its directory, and stop them one at a time. If one will not stop, start
+   the ones already stopped and extract nothing.
+3. The helper mounts the copy read-write at `/dst` and the artifact read-only,
+   extracts into `/dst/.tp-restore-stage`, moves the current entries to
+   `/dst/.tp-restore-old`, moves the staged ones up, deletes the old ones
+   (`RESTORE_SCRIPT`: exit 3 = unextractable, copy unchanged; 4 = swap failed,
+   old contents put back; 5 = putting them back failed too).
+4. Always: start every container stopped in step 2; report the ones that
+   would not start.
+
+Only containers are stopped. A native (systemd) app reading a `/srv/users/`
+directory keeps running, and a deploy or lifecycle command for the same app
+during the restore can start a container again: the copy lock does not cover
+deploy.
 
 ## Rules
 
