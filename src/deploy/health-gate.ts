@@ -2,9 +2,9 @@
  * Health gate: decide from `docker compose ps --format json` whether a freshly
  * started Compose project is actually up.
  *
- * Not wired into `environment.deploy` yet: today's in-place deploys are
- * unchanged. The sequential strategy calls {@link waitForHealthGate} after
- * `up -d` and rolls back when it reports a failure.
+ * Used by the sequential deploy strategy (`sequential-deploy.ts`), which calls
+ * {@link waitForHealthGate} after `up -d` and rolls back when it reports a
+ * failure. In-place deploys do not gate.
  *
  * Rules (per container, grouped by compose service):
  * - `Health: healthy` passes; `unhealthy` fails at once; `starting` keeps

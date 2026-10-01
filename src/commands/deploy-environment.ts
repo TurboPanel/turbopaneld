@@ -8,12 +8,14 @@ import {
   type DeploymentManifestRelease,
   type DeploymentManifestSecret,
   environmentDeploymentDir,
+  previousComposePaths,
   pruneStaleComposeLayerFiles,
   publishStagedRuntimeCompose,
   readDeploymentManifest,
   removeComposeEnvFile,
   removeComposeStageDir,
   resetComposeStageDir,
+  restorePreviousDeployment,
   RUNTIME_COMPOSE_FILENAME,
   writeComposeEnvFile,
   writeComposeFileSecure,
@@ -67,6 +69,16 @@ import {
   hostnameTlsMap,
   materializeTlsCertificates,
 } from "../deploy/materialize-tls.ts";
+import {
+  runSequentialDeploy,
+  type SequentialDeploySteps,
+} from "../deploy/sequential-deploy.ts";
+import {
+  composePsForGate,
+  HEALTH_GATE_DEFAULT_POLL_MS,
+  HEALTH_GATE_DEFAULT_STABLE_MS,
+  waitForHealthGate,
+} from "../deploy/health-gate.ts";
 import {
   assertHooksConfined,
   runDeployServiceHooks,
@@ -139,6 +151,7 @@ import {
   type EnvironmentDeployResult,
   type EnvironmentDeployResultRelease,
   type EnvironmentDeployResultSite,
+  type EnvironmentDeployServiceHook,
   type EnvironmentDeploySite,
   type EnvironmentDeploySource,
   parseEnvironmentDeployPayload,
@@ -1269,6 +1282,181 @@ function applySecretFilePaths(
   );
 }
 
+/** External, fabric and managed networks a deploy needs before compose runs. */
+async function ensureDeployNetworks(
+  input: DeployContainerServicesInput,
+): Promise<void> {
+  const { parsedPayload, run } = input;
+  const externalNetworks = zipExternalDockerNetworkSpecs(
+    parsedPayload.dockerExternalNetworks,
+    parsedPayload.dockerNetworkAddressing,
+  );
+  if (externalNetworks.length > 0) {
+    await input.ensureExternalNetworks(externalNetworks);
+  }
+
+  const fabricNetworks = parsedPayload.fabricNetworks ?? [];
+  if (fabricNetworks.length > 0) {
+    // Belt-and-braces for the race between reconcile and deploy: a deploy
+    // must never depend on `server.fabric.reconcile` having landed first.
+    await input.ensureFabricDockerNetworks(fabricNetworks, FABRIC_DEFAULT_MTU);
+  }
+
+  const managedNetworkServices = parsedPayload.managedNetworkServices ?? [];
+  if (managedNetworkServices.length > 0) {
+    // The contract requires `managedNetwork` exactly when at least one
+    // compose service joins it, so this is a non-null read.
+    await ensureManagedIngressNetwork(parsedPayload.managedNetwork!, run);
+  }
+}
+
+type LineHandler = (
+  event: { stream: "stdout" | "stderr"; line: string },
+) => void;
+
+/** `docker compose build --no-cache --pull` for the whole project. */
+async function runComposeBuild(
+  input: DeployContainerServicesInput,
+  chain: string[],
+  onLine: LineHandler,
+): Promise<void> {
+  const { parsedPayload, runStreamed, logSink } = input;
+  logInfo(
+    "commands",
+    `cacheless rebuild for compose project ${parsedPayload.projectName}`,
+  );
+  logSink.setPhase(COMMAND_LOG_PHASES.BUILD);
+  const build = await runStreamed([
+    ...composeFileArgs(parsedPayload.projectName, chain),
+    "build",
+    "--no-cache",
+    "--pull",
+  ], { onLine });
+  if (!build.success) {
+    // Docker echoes build args and failing command output verbatim —
+    // redact against the sink's deny-set before it becomes a summary.
+    throw new Error(
+      logSink.redactSummary(build.stderr) ||
+        "Docker Compose cacheless build failed",
+    );
+  }
+}
+
+type SequentialDeployContext = {
+  chain: string[];
+  serviceHooks: EnvironmentDeployServiceHook[];
+  labeledServices: string[];
+  deploymentDir: string;
+  onLine: LineHandler;
+};
+
+const DEFAULT_HEALTH_TIMEOUT_SECONDS = 120;
+
+/**
+ * The `sequential` strategy: stop the old version, migrate, start the new one,
+ * gate on health, roll back when safe. See `deploy/sequential-deploy.ts`.
+ */
+async function deploySequentially(
+  input: DeployContainerServicesInput,
+  ctx: SequentialDeployContext,
+): Promise<{ serviceNames: string[]; composePaths: string[] }> {
+  const { parsedPayload, run, runStreamed, logSink } = input;
+  const { chain, serviceHooks, labeledServices, deploymentDir, onLine } = ctx;
+  if (serviceHooks.length > 0) {
+    assertHooksConfined(serviceHooks, labeledServices);
+  }
+  const timeoutMs = (parsedPayload.healthTimeoutSeconds ??
+    DEFAULT_HEALTH_TIMEOUT_SECONDS) * 1000;
+  const projectName = parsedPayload.projectName;
+  const steps: SequentialDeploySteps = {
+    prepare: () => prepareSequentialDeploy(input, chain, onLine),
+    run: (args) => run(args),
+    runStreamed: (args) => runStreamed(args, { onLine }),
+    runPreDeployHooks: () =>
+      runDeployServiceHooks(serviceHooks, {
+        projectName,
+        composePaths: chain,
+        deploymentDir,
+        runDocker: run,
+        onOutput: (stream, line) => logSink.onLine(stream, line),
+        redactSummary: (text) => logSink.redactSummary(text),
+      }),
+    gate: (paths) =>
+      waitForHealthGate({
+        ps: composePsForGate(run, projectName, paths),
+        timeoutMs,
+        stableMs: Math.min(HEALTH_GATE_DEFAULT_STABLE_MS, timeoutMs),
+        pollMs: HEALTH_GATE_DEFAULT_POLL_MS,
+        onProgress: (message) => logSink.onLine("stdout", message),
+      }),
+    restorePrevious: () => restorePreviousDeployment(deploymentDir),
+    composeArgs: (paths) => composeFileArgs(projectName, paths),
+    redact: (text) => logSink.redactSummary(text),
+    log: (line) => logSink.onLine("stdout", line),
+    setPhase: (phase) => logSink.setPhase(SEQUENTIAL_PHASES[phase]),
+  };
+  await runSequentialDeploy({
+    composePaths: chain,
+    previousComposePaths: await previousComposePaths(deploymentDir),
+    keepRunning: parsedPayload.keepRunningServices ?? [],
+    hasHooks: serviceHooks.length > 0,
+    hooksMigrate: serviceHooks.some((hook) => Boolean(hook.preDeployCommand)),
+    breakingMigration: parsedPayload.migrations === "breaking",
+    steps,
+  });
+  if (serviceHooks.length > 0) {
+    logSink.setPhase(COMMAND_LOG_PHASES.POST_DEPLOY);
+    await runPostDeployHooks(serviceHooks, {
+      projectName,
+      composePaths: chain,
+      runDocker: run,
+      onOutput: (stream, line) => logSink.onLine(stream, line),
+      redactSummary: (text) => logSink.redactSummary(text),
+    });
+  }
+  return { serviceNames: labeledServices, composePaths: chain };
+}
+
+const SEQUENTIAL_PHASES = {
+  build: COMMAND_LOG_PHASES.BUILD,
+  "pre-deploy": COMMAND_LOG_PHASES.PRE_DEPLOY,
+  "compose-up": COMMAND_LOG_PHASES.COMPOSE_UP,
+  health: COMMAND_LOG_PHASES.HEALTH,
+} as const;
+
+/**
+ * Everything a sequential deploy does before it stops anything: networks,
+ * image build and a best-effort pull, so the downtime window is only stop to
+ * healthy and a build failure leaves the old version serving.
+ */
+async function prepareSequentialDeploy(
+  input: DeployContainerServicesInput,
+  chain: string[],
+  onLine: LineHandler,
+): Promise<void> {
+  const { parsedPayload, runStreamed, logSink } = input;
+  await ensureDeployNetworks(input);
+  if (parsedPayload.noCache === true) {
+    await runComposeBuild(input, chain, onLine);
+  } else {
+    const build = await runStreamed([
+      ...composeFileArgs(parsedPayload.projectName, chain),
+      "build",
+    ], { onLine });
+    if (!build.success) {
+      throw new Error(
+        logSink.redactSummary(build.stderr) || "Docker Compose build failed",
+      );
+    }
+  }
+  // Best effort: `up` pulls anything still missing.
+  await runStreamed([
+    ...composeFileArgs(parsedPayload.projectName, chain),
+    "pull",
+    "--ignore-buildable",
+  ], { onLine });
+}
+
 /**
  * Writes one compiled `compose.yaml` (daemon overlay merged in), validates
  * Docker config, publishes `compose.yaml` + `deployment.json` + `.env`, then
@@ -1292,8 +1480,6 @@ async function deployContainerServices(
     runStreamed,
     logSink,
     decryptSecrets,
-    ensureExternalNetworks,
-    ensureFabricDockerNetworks,
   } = input;
   const onLine = (event: { stream: "stdout" | "stderr"; line: string }) =>
     logSink.onLine(event.stream, event.line);
@@ -1393,6 +1579,15 @@ async function deployContainerServices(
     await persistComposeEnvFile(deploymentDir, parsedPayload.envFile);
 
     const serviceHooks = parsedPayload.serviceHooks ?? [];
+    if (parsedPayload.deployStrategy === "sequential") {
+      return await deploySequentially(input, {
+        chain,
+        serviceHooks,
+        labeledServices,
+        deploymentDir,
+        onLine,
+      });
+    }
     if (serviceHooks.length > 0) {
       // Every hook must be confined to a compose service this deploy runs;
       // the runner then executes it inside that service's container.
@@ -1408,48 +1603,10 @@ async function deployContainerServices(
       });
     }
 
-    const externalNetworks = zipExternalDockerNetworkSpecs(
-      parsedPayload.dockerExternalNetworks,
-      parsedPayload.dockerNetworkAddressing,
-    );
-    if (externalNetworks.length > 0) {
-      await ensureExternalNetworks(externalNetworks);
-    }
-
-    const fabricNetworks = parsedPayload.fabricNetworks ?? [];
-    if (fabricNetworks.length > 0) {
-      // Belt-and-braces for the race between reconcile and deploy: a deploy
-      // must never depend on `server.fabric.reconcile` having landed first.
-      await ensureFabricDockerNetworks(fabricNetworks, FABRIC_DEFAULT_MTU);
-    }
-
-    const managedNetworkServices = parsedPayload.managedNetworkServices ?? [];
-    if (managedNetworkServices.length > 0) {
-      // The contract requires `managedNetwork` exactly when at least one
-      // compose service joins it, so this is a non-null read.
-      await ensureManagedIngressNetwork(parsedPayload.managedNetwork!, run);
-    }
+    await ensureDeployNetworks(input);
 
     if (parsedPayload.noCache === true) {
-      logInfo(
-        "commands",
-        `cacheless rebuild for compose project ${parsedPayload.projectName}`,
-      );
-      logSink.setPhase(COMMAND_LOG_PHASES.BUILD);
-      const build = await runStreamed([
-        ...composeFileArgs(parsedPayload.projectName, chain),
-        "build",
-        "--no-cache",
-        "--pull",
-      ], { onLine });
-      if (!build.success) {
-        // Docker echoes build args and failing command output verbatim —
-        // redact against the sink's deny-set before it becomes a summary.
-        throw new Error(
-          logSink.redactSummary(build.stderr) ||
-            "Docker Compose cacheless build failed",
-        );
-      }
+      await runComposeBuild(input, chain, onLine);
     }
 
     logSink.setPhase(COMMAND_LOG_PHASES.COMPOSE_UP);

@@ -1249,6 +1249,22 @@ export type EnvironmentDeployPayload = EnvironmentDeployHostAccess & {
    * (cacheless redeploy from the control plane).
    */
   noCache?: boolean;
+  /**
+   * `sequential` stops the previous version, runs migrations, starts the new
+   * version, gates on health and rolls back (see `deploy/sequential-deploy.ts`).
+   * Absent or `inplace` is the original `compose up -d` deploy. An older
+   * control plane never sends it, so it keeps deploying in place.
+   */
+  deployStrategy?: EnvironmentDeployStrategy;
+  /** Environment's declared migration status; only `breaking` changes the engine. */
+  migrations?: EnvironmentDeployMigrations;
+  /** Seconds the health gate waits (default 120 when absent). */
+  healthTimeoutSeconds?: number;
+  /**
+   * Compose services left running while a sequential deploy stops the
+   * application (databases and other stateful services).
+   */
+  keepRunningServices?: string[];
   tlsMaterial?: EnvironmentDeployTlsMaterial[];
   variableMaterial?: EnvironmentDeployVariableMaterial[];
   envFile?: string;
@@ -1288,6 +1304,13 @@ export type EnvironmentDeployContainer = {
  * surface is the image tag plus the pinned tools that produced it; a native
  * release simply omits those three fields.
  */
+export type EnvironmentDeployStrategy = "inplace" | "sequential";
+export type EnvironmentDeployMigrations =
+  | "none"
+  | "compatible"
+  | "breaking"
+  | "unknown";
+
 export type EnvironmentDeployResultRelease = {
   composeServiceName: string;
   serviceId: string;
@@ -4660,6 +4683,51 @@ function parseOptionalBoolean(
   return value;
 }
 
+function parseDeployStrategy(
+  value: unknown,
+): EnvironmentDeployStrategy | undefined {
+  if (value === undefined) return undefined;
+  if (value !== "inplace" && value !== "sequential") {
+    throw new TypeError("deployStrategy must be inplace or sequential");
+  }
+  return value;
+}
+
+function parseDeployMigrations(
+  value: unknown,
+): EnvironmentDeployMigrations | undefined {
+  if (value === undefined) return undefined;
+  if (
+    value !== "none" && value !== "compatible" && value !== "breaking" &&
+    value !== "unknown"
+  ) {
+    throw new TypeError("migrations is not a known migration status");
+  }
+  return value;
+}
+
+function parseDeployHealthTimeout(value: unknown): number | undefined {
+  if (value === undefined) return undefined;
+  if (
+    typeof value !== "number" || !Number.isInteger(value) || value < 10 ||
+    value > 3600
+  ) {
+    throw new TypeError("healthTimeoutSeconds must be an integer 10 to 3600");
+  }
+  return value;
+}
+
+function parseDeployKeepRunning(value: unknown): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (
+    !Array.isArray(value) ||
+    value.some((name) => typeof name !== "string" || name.length === 0)
+  ) {
+    throw new TypeError("keepRunningServices must be an array of names");
+  }
+  return value as string[];
+}
+
 const DESIRED_HASH_RE = /^[0-9a-f]{64}$/;
 const DEPLOY_SERVER_ID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -5233,6 +5301,12 @@ export function parseEnvironmentDeployPayload(
         managedNetworkServices,
       ),
       noCache: parseOptionalBoolean(value.noCache, "noCache"),
+      deployStrategy: parseDeployStrategy(value.deployStrategy),
+      migrations: parseDeployMigrations(value.migrations),
+      healthTimeoutSeconds: parseDeployHealthTimeout(
+        value.healthTimeoutSeconds,
+      ),
+      keepRunningServices: parseDeployKeepRunning(value.keepRunningServices),
       hostLevelApproved: parseOptionalBoolean(
         value.hostLevelApproved,
         "hostLevelApproved",

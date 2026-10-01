@@ -114,6 +114,21 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    `docker compose build --no-cache --pull` for the whole project, then
    `docker compose up -d --remove-orphans`, then post-deploy hooks
    (`run-deploy-hooks.ts`).
+   **Sequential strategy** (payload `deployStrategy: "sequential"`;
+   absent or `inplace` is the flow above, unchanged; `src/deploy/sequential-deploy.ts`):
+   networks and `compose build` + best-effort `pull` first (a failure there leaves the
+   old version serving), then stop the previous deploy's services (those named in
+   `keepRunningServices`, the stateful ones, stay up), pre-deploy hooks (migrations),
+   `up -d --remove-orphans`, then the health gate (`healthTimeoutSeconds`, default 120).
+   A failure before any migration restores `previous/` (`restorePreviousDeployment`)
+   and starts the old version (`rolled_back`). Once a `preDeployCommand` hook has
+   started, or `migrations` is `breaking`, a failure stops and is `needs_attention`
+   (old code is never started on a changed schema); so is a rollback that cannot
+   restore or does not come back healthy. A first deploy (nothing in `previous/`)
+   fails plainly. The outcome travels as the command error text
+   `rolled_back: <reason>` / `needs_attention: <reason>`; the control plane parses
+   that prefix. Post-deploy hooks run only after the gate passes and fail the deploy
+   as before. Multi-host ordering is the control plane's (not yet staggered).
 10. When the payload includes `tlsMaterial[]`, materialize org certs under
    `layout.tlsDir` (`/etc/turbopanel/tls/<tlsId>/fullchain.pem` + `privkey.pem`,
    modes `0640`/`0600`) via `materializeTlsCertificates`

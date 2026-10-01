@@ -3247,3 +3247,42 @@ test("environment.deploy round-trips dockerNetworkAddressing beside dockerExtern
     "Invalid dockerNetworkAddressing gateway",
   );
 });
+
+Deno.test("environment.deploy payload parses the sequential strategy fields", () => {
+  const base = {
+    environmentId: "env1",
+    projectId: "proj1",
+    organizationId: "org1",
+    projectName: "tp-demo",
+    composeFiles: [{
+      filename: "compose.yaml",
+      role: "runtime",
+      source: "inline",
+      content: "services: {}\n",
+    }],
+    hostings: [],
+  };
+  const parsed = parseEnvironmentDeployPayload({
+    ...base,
+    deployStrategy: "sequential",
+    migrations: "breaking",
+    healthTimeoutSeconds: 90,
+    keepRunningServices: ["db"],
+  });
+  assertEquals(parsed.deployStrategy, "sequential");
+  assertEquals(parsed.migrations, "breaking");
+  assertEquals(parsed.healthTimeoutSeconds, 90);
+  assertEquals(parsed.keepRunningServices, ["db"]);
+  // Absent keys stay absent: a payload from an older control plane is in place.
+  assertEquals("deployStrategy" in parseEnvironmentDeployPayload(base), false);
+  for (
+    const bad of [
+      { deployStrategy: "bluegreen" },
+      { migrations: "maybe" },
+      { healthTimeoutSeconds: 5 },
+      { keepRunningServices: [""] },
+    ]
+  ) {
+    assertThrows(() => parseEnvironmentDeployPayload({ ...base, ...bad }));
+  }
+});
