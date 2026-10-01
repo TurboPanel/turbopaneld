@@ -120,6 +120,18 @@
 
         # Serve the exported UI (turbopanel-ui-<version>.tar.gz → share/ui).
         handle {
+                # UI-only headers (the API sets its own, stricter set in the app).
+                # The script CSP is REPORT-ONLY: violations show in the browser
+                # console, nothing is blocked. Only frame-ancestors is enforced.
+                # The sha256 is the Expo router hydrate inline script
+                # (`globalThis.__EXPO_ROUTER_HYDRATE__=true;`) in every exported
+                # page; keep it identical to ui/public/_headers.
+                header {
+                        Content-Security-Policy "frame-ancestors 'none'"
+                        Content-Security-Policy-Report-Only "default-src 'self'; script-src 'self' 'sha256-67fhrP0+BkBqmgGGXTtgiVO/9EQs3QruYNU/7fnRkI8='; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' https: wss:; object-src 'none'; base-uri 'self'; form-action 'self' https:; frame-ancestors 'none'"
+                        Referrer-Policy "strict-origin-when-cross-origin"
+                        Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
+                }
                 root * {{ turbopanel_ui_dist_dir }}
                 try_files {path} /index.html
                 file_server
