@@ -93,7 +93,10 @@ root-owned; the label check can then be replaced by an exact-path list.
 Known gaps, left as findings on purpose: the ingress `docker-socket-proxy`
 service mounts the Docker socket until stage 3 deletes it, and the managed-file
 helpers in `src/managed/materialize.ts` are plain `docker run -v <state>/managed`
-with no platform label (the daemon must stamp one before enforcement).
+with no platform label, and so are the backup and restore helpers in
+`src/backups/copy-backup.ts` / `copy-restore.ts` (`docker run --rm --mount`):
+every backup run logs `unlabeled-create` today. The daemon must stamp a platform
+label on all of these before enforcement.
 
 **Ownership observation.** Every create counts by owner class (`owners`) and an
 unlabeled one is `unlabeled-create`. For start / stop / restart / kill / pause /
@@ -154,8 +157,10 @@ route / method / status counts, `upgrades`, `wouldDeny`, `refusals`),
 `docker-gate.approval-keys-unusable`, `docker-gate.started`,
 `docker-gate.bad-request`,
 `docker-gate.upstream-unreachable`, `docker-gate.peer-closed`. **Never
-logged:** environment, commands, entrypoints, labels, registry auth, query
-strings, request bodies.
+logged:** environment, commands, entrypoints, labels (other than the claims of
+a signature-verified approval: deployId, project, composeDigest, features),
+registry auth, query strings, request bodies, the approval token itself. An
+`unowned-container` line carries the container name or id from the request path.
 
 ## Hard rules for this role
 
@@ -195,5 +200,6 @@ Break-glass at every stage: `systemctl stop turbopanel-docker-gate` as root.
 - Renaming a system component label (or an emitter changing a bind path)
   makes platform containers lose the allowance; the emitter test guards the
   paths, the label constants are pinned to `src/deploy/labels.ts`.
-- The label-less managed-file helpers would be denied until the daemon stamps
-  a platform label on them.
+- The label-less helpers (managed-file normalisation, **backup and restore**)
+  would be denied until the daemon stamps a platform label on them: backups and
+  restores stop working. This is the most critical gap to close before stage 4.
