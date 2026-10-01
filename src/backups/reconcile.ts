@@ -10,6 +10,11 @@
  * enable only what moved, and remove every `turbopanel-backup-*` timer the set
  * no longer names — disabled policies included. An unchanged set touches
  * nothing: the file is left as is and no unit is rewritten or restarted.
+ *
+ * When any enabled policy backs up a storage copy, the pinned helper image the
+ * archive runs in is pulled here (only if it is missing), because a scheduled
+ * run never pulls. A pull failure is a warning, not an error: the timers are
+ * in place and the run reports the missing image itself.
  */
 
 import {
@@ -34,6 +39,7 @@ import {
   readBackupPoliciesFile,
   writeBackupPoliciesFile,
 } from "./policies-file.ts";
+import { ensureCopyBackupImage } from "./copy-backup.ts";
 import {
   BACKUP_UNIT_PREFIX,
   backupServiceContent,
@@ -49,6 +55,8 @@ export type BackupsReconcileDeps = {
   run?: RunFn;
   systemdUnitDir?: string;
   now?: () => Date;
+  /** Pull the storage-copy helper image when missing; an error string on failure. */
+  ensureHelperImage?: () => Promise<string | undefined>;
 };
 
 const BACKUP_UNIT_FAMILY: UnitSetFamily = {
@@ -157,6 +165,12 @@ export async function handleBackupsReconcile(
 
   const enabled = parsed.policies.filter((policy) => policy.enabled);
   const warnings: string[] = [];
+  if (enabled.some((policy) => policy.targetKind === "copy")) {
+    const ensureHelperImage = deps.ensureHelperImage ??
+      (() => ensureCopyBackupImage());
+    const imageIssue = await ensureHelperImage();
+    if (imageIssue) warnings.push(imageIssue);
+  }
   const nextRuns = await mapSequential(
     enabled,
     async (policy): Promise<BackupPolicyNextRun> => {

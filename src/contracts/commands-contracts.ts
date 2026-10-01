@@ -29,6 +29,7 @@ export const COMMAND_TYPES = [
   "managed.ingress.reconcile",
   "managed.ha.reconcile",
   "managed.ha.failover",
+  "storage.backup",
   "system.reconcile",
 ] as const;
 
@@ -289,8 +290,10 @@ export type FirewallReconcileResult = {
  *
  * `onCalendar` arrives already translated from the authored schedule, so the
  * daemon renders it and never parses cron. A `managed` entry carries what the
- * host needs to dump the engine on its own (`engine`, `artifactExtension`):
- * a scheduled run never asks the control plane anything.
+ * host needs to dump the engine on its own (`engine`, `artifactExtension`),
+ * and a `copy` entry where the storage copy's bytes live
+ * ({@link CopyBackupSource}): a scheduled run never asks the control plane
+ * anything.
  */
 export type BackupPolicyWireEntry = {
   policyId: string;
@@ -299,9 +302,60 @@ export type BackupPolicyWireEntry = {
   engine?: ManagedEngineCode;
   artifactExtension?: ManagedBackupArtifactExtension;
   copyId?: string;
+  copyProvider?: CopyBackupProvider;
+  volumeName?: string;
+  hostPath?: string;
+  organizationId?: string;
+  storageId?: string;
   onCalendar: string;
   retentionKeep: number;
   enabled: boolean;
+};
+
+/** The storage-copy providers a backup can read: a named Docker volume, or a host directory. */
+export type CopyBackupProvider = "docker" | "path";
+
+/**
+ * Where one storage copy's bytes live on this host. Must stay in sync with the
+ * instance canonical `CopyBackupSource`.
+ *
+ * - `docker`: the named volume (`volumeName`) deploy mounts.
+ * - `path`: `hostPath`, or — when absent — the default
+ *   `<stateDir>/storage/<organizationId>/<storageId>/<copyId>/data` deploy
+ *   materializes. The host refuses any directory outside its own storage root
+ *   and `/srv/users/`.
+ */
+export type CopyBackupSource = {
+  copyId: string;
+  copyProvider: CopyBackupProvider;
+  volumeName?: string;
+  hostPath?: string;
+  organizationId?: string;
+  storageId?: string;
+};
+
+/**
+ * Must stay in sync with the instance canonical `storage.backup` shape.
+ * `create` archives the copy (live, no pause) into
+ * `<backupDir>/copies/<copyId>/<backupId>.tar.gz`; `delete` removes an
+ * artifact, and `policyId` locates one a scheduled run made
+ * (`<backupDir>/copies/<copyId>/policy-<policyId>/…`).
+ */
+export type StorageBackupPayload = CopyBackupSource & {
+  action: "create" | "delete";
+  backupId: string;
+  policyId?: string;
+};
+
+/** Must stay in sync with the instance canonical `storage.backup` result. */
+export type StorageBackupResult = {
+  backupId: string;
+  deleted?: boolean;
+  path?: string;
+  sizeBytes?: number;
+  checksum?: string;
+  completedAt?: string;
+  summary?: string;
 };
 
 /**
@@ -6809,6 +6863,114 @@ const BACKUP_TARGET_KIND_SET = new Set(["managed", "copy"]);
 /** Bound on one server's policy set; far above any real schedule list. */
 const MAX_BACKUP_POLICIES_PER_SERVER = 500;
 
+/** A storage-copy backup is a gzipped tar of the copy's contents. */
+export const COPY_BACKUP_ARTIFACT_EXTENSION = "tar.gz";
+
+const COPY_BACKUP_PROVIDER_SET: ReadonlySet<string> = new Set([
+  "docker",
+  "path",
+]);
+const MAX_COPY_HOST_PATH_LENGTH = 1024;
+/** One path segment: no `/`, no `,` (the path lands in a `docker --mount` value), no shell metacharacters. */
+const COPY_HOST_PATH_SEGMENT_RE = /^[\w.@+-]+$/;
+const COPY_SOURCE_FIELDS = [
+  "volumeName",
+  "hostPath",
+  "organizationId",
+  "storageId",
+] as const;
+
+/**
+ * An absolute, already-normalized host directory: `/`-separated segments of a
+ * conservative charset, none of them `.` or `..`, no empty segment. Same rule
+ * as the instance's `isSafeCopyHostPath`.
+ */
+export function isSafeCopyHostPath(value: unknown): value is string {
+  if (
+    typeof value !== "string" || value.length < 2 ||
+    value.length > MAX_COPY_HOST_PATH_LENGTH || !value.startsWith("/")
+  ) {
+    return false;
+  }
+  return value
+    .slice(1)
+    .split("/")
+    .every((segment) =>
+      segment !== "." && segment !== ".." &&
+      COPY_HOST_PATH_SEGMENT_RE.test(segment)
+    );
+}
+
+function parsePathCopySource(
+  raw: Record<string, unknown>,
+  source: CopyBackupSource,
+): void {
+  if (raw.volumeName !== undefined) {
+    throw new Error("A path copy source cannot name a volume");
+  }
+  if (raw.hostPath !== undefined) {
+    if (
+      !isSafeCopyHostPath(raw.hostPath) ||
+      raw.organizationId !== undefined ||
+      raw.storageId !== undefined
+    ) {
+      throw new Error("Invalid path copy source hostPath");
+    }
+    source.hostPath = raw.hostPath;
+    return;
+  }
+  if (
+    !isCanonicalBackupUuid(raw.organizationId) ||
+    !isCanonicalBackupUuid(raw.storageId)
+  ) {
+    throw new Error(
+      "A path copy source needs hostPath, or organizationId and storageId",
+    );
+  }
+  source.organizationId = raw.organizationId;
+  source.storageId = raw.storageId;
+}
+
+/** Must stay in sync with the instance canonical `parseCopyBackupSource`. */
+export function parseCopyBackupSource(
+  raw: Record<string, unknown>,
+): CopyBackupSource {
+  if (
+    !isCanonicalBackupUuid(raw.copyId) ||
+    typeof raw.copyProvider !== "string" ||
+    !COPY_BACKUP_PROVIDER_SET.has(raw.copyProvider)
+  ) {
+    throw new Error("Invalid copy backup source");
+  }
+  const source: CopyBackupSource = {
+    copyId: raw.copyId,
+    copyProvider: raw.copyProvider as CopyBackupProvider,
+  };
+  if (source.copyProvider === "path") {
+    parsePathCopySource(raw, source);
+    return source;
+  }
+  if (
+    typeof raw.volumeName !== "string" ||
+    !DOCKER_RESOURCE_NAME_RE.test(raw.volumeName)
+  ) {
+    throw new Error("A docker copy source needs a valid volumeName");
+  }
+  if (
+    raw.hostPath !== undefined || raw.organizationId !== undefined ||
+    raw.storageId !== undefined
+  ) {
+    throw new Error("A docker copy source cannot name a host path");
+  }
+  source.volumeName = raw.volumeName;
+  return source;
+}
+
+function hasCopySourceFields(raw: Record<string, unknown>): boolean {
+  return raw.copyProvider !== undefined ||
+    COPY_SOURCE_FIELDS.some((field) => raw[field] !== undefined);
+}
+
 function parseBackupPolicyTarget(
   raw: Record<string, unknown>,
   entry: BackupPolicyWireEntry,
@@ -6819,7 +6981,8 @@ function parseBackupPolicyTarget(
       typeof raw.engine !== "string" || !isManagedEngineCode(raw.engine) ||
       typeof raw.artifactExtension !== "string" ||
       !isManagedBackupArtifactExtension(raw.artifactExtension) ||
-      raw.copyId !== undefined
+      raw.copyId !== undefined ||
+      hasCopySourceFields(raw)
     ) {
       throw new Error("Invalid backup policy managed target");
     }
@@ -6829,14 +6992,13 @@ function parseBackupPolicyTarget(
     return;
   }
   if (
-    !isCanonicalBackupUuid(raw.copyId) ||
     raw.managedId !== undefined ||
     raw.engine !== undefined ||
     raw.artifactExtension !== undefined
   ) {
     throw new Error("Invalid backup policy copy target");
   }
-  entry.copyId = raw.copyId;
+  Object.assign(entry, parseCopyBackupSource(raw));
 }
 
 function parseBackupPolicyWireEntry(raw: unknown): BackupPolicyWireEntry {
@@ -6919,6 +7081,57 @@ function parseBackupPolicyNextRuns(value: unknown): BackupPolicyNextRun[] {
     }
     return next;
   });
+}
+
+/** Must stay in sync with the instance canonical `storage.backup` validator. */
+export function parseStorageBackupPayload(
+  value: unknown,
+): StorageBackupPayload {
+  if (
+    !isRecord(value) ||
+    typeof value.action !== "string" ||
+    !MANAGED_BACKUP_ACTIONS.has(value.action) ||
+    typeof value.backupId !== "string" ||
+    !isSafeBackupId(value.backupId)
+  ) {
+    throw new Error("Invalid storage.backup payload");
+  }
+  const payload: StorageBackupPayload = {
+    ...parseCopyBackupSource(value),
+    action: value.action as StorageBackupPayload["action"],
+    backupId: value.backupId,
+  };
+  if (value.policyId !== undefined) {
+    if (payload.action !== "delete" || !isCanonicalBackupUuid(value.policyId)) {
+      throw new Error("Invalid storage.backup payload policyId");
+    }
+    payload.policyId = value.policyId;
+  }
+  return payload;
+}
+
+/** Lenient result parser, like `managed.backup`'s. Never carries archive contents. */
+export function parseStorageBackupResult(value: unknown): StorageBackupResult {
+  if (
+    !isRecord(value) || !isString(value.backupId) || value.backupId.length === 0
+  ) {
+    return { backupId: "" };
+  }
+  const result: StorageBackupResult = { backupId: value.backupId };
+  if (typeof value.deleted === "boolean") result.deleted = value.deleted;
+  if (isString(value.path)) result.path = value.path;
+  if (
+    typeof value.sizeBytes === "number" && Number.isFinite(value.sizeBytes) &&
+    value.sizeBytes >= 0
+  ) {
+    result.sizeBytes = value.sizeBytes;
+  }
+  if (isString(value.checksum) && CHECKSUM_SHA256_RE.test(value.checksum)) {
+    result.checksum = value.checksum;
+  }
+  if (isString(value.completedAt)) result.completedAt = value.completedAt;
+  if (isString(value.summary)) result.summary = value.summary;
+  return result;
 }
 
 /** Must stay in sync with the instance canonical `server.backups.reconcile` result validator. */

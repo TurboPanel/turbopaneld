@@ -34,6 +34,8 @@ const copyEntry: BackupPolicyWireEntry = {
   policyId: POLICY_B,
   targetKind: "copy",
   copyId: COPY_ID,
+  copyProvider: "docker",
+  volumeName: "shop_uploads",
   onCalendar: "hourly",
   retentionKeep: 24,
   enabled: false,
@@ -140,6 +142,52 @@ test("server.backups.reconcile needs exactly the target its kind names", () => {
     Error,
     "Invalid backup policy entry",
   );
+});
+
+test("server.backups.reconcile copy entries name exactly one safe source", () => {
+  const pathEntry: BackupPolicyWireEntry = {
+    policyId: POLICY_B,
+    targetKind: "copy",
+    copyId: COPY_ID,
+    copyProvider: "path",
+    hostPath: "/srv/users/shop/volumes/uploads",
+    onCalendar: "hourly",
+    retentionKeep: 24,
+    enabled: true,
+  };
+  assertEquals(
+    parseBackupsReconcilePayload({ policies: [pathEntry] }),
+    { policies: [pathEntry] },
+  );
+  const defaultPath: BackupPolicyWireEntry = {
+    policyId: POLICY_B,
+    targetKind: "copy",
+    copyId: COPY_ID,
+    copyProvider: "path",
+    organizationId: MANAGED_ID,
+    storageId: POLICY_A,
+    onCalendar: "hourly",
+    retentionKeep: 24,
+    enabled: true,
+  };
+  assertEquals(
+    parseBackupsReconcilePayload({ policies: [defaultPath] }).policies[0],
+    defaultPath,
+  );
+  for (
+    const bad of [
+      { ...copyEntry, volumeName: undefined },
+      { ...copyEntry, volumeName: "bad name" },
+      { ...copyEntry, copyProvider: "nfs" },
+      { ...copyEntry, hostPath: "/srv/users/x" },
+      { ...pathEntry, hostPath: "/srv/users/../etc" },
+      { ...pathEntry, hostPath: "srv/users/x" },
+      { ...pathEntry, hostPath: undefined },
+      { ...managedEntry, copyProvider: "docker" },
+    ]
+  ) {
+    assertThrows(() => parseBackupsReconcilePayload({ policies: [bad] }));
+  }
 });
 
 test("server.backups.reconcile refuses a malformed or oversized payload", () => {

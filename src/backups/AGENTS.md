@@ -15,7 +15,9 @@ daemon, and it never takes `daemon.lock`.
 | Reporter: spool → `backup-run-report`, delete on `backup-run-report-result` | `result-reporter.ts` (wired in `src/instance/client.ts`) |
 | Free-space probe | `free-space.ts` |
 | Wrapper, rendered per exec mode by the daemon-launch role | `orchestration/roles/daemon-launch/templates/tp-backup-run.j2` |
-| Per-engine lock shared with `managed.backup` / `managed.restore` | `src/managed/target-lock.ts` |
+| Per-engine lock shared with `managed.backup` / `managed.restore`, per-copy lock shared by copy backups | `src/managed/target-lock.ts` |
+| Storage-copy archive through the pinned helper image (scheduled and manual) | `copy-backup.ts` |
+| `storage.backup` handler (manual create / delete of one copy archive) | `storage-backup.ts` |
 | Timer + service renderers (`turbopanel-backup-<policyId>.*`) | `units.ts` |
 | `server.backups.reconcile` handler | `reconcile.ts` |
 | Shared install-if-changed / reload / enable / sweep machinery (with tenant cron) | `src/deploy/systemd-unit-set.ts` |
@@ -54,7 +56,25 @@ lines — change `units.ts` and `tp_backup_unit_ok` together.
   after the control plane acks it.
 - Artifacts: `<backupDir>/<managedId>/policy-<policyId>/<backupId>.<ext>`
   (`managed/engine-paths.ts`), pruned to the policy's `retentionKeep` within
-  that directory only.
+  that directory only. Storage copies: `<backupDir>/copies/<copyId>/<backupId>.tar.gz`
+  (manual) and `<backupDir>/copies/<copyId>/policy-<policyId>/…` (scheduled).
+
+## Storage copies
+
+- A copy archive is a live gzipped tar (no pause, no stop) written by a
+  throwaway helper container, never by the daemon reading tenant files:
+  `COPY_BACKUP_HELPER_IMAGE` (alpine pinned by its multi-arch index digest),
+  `--network none --read-only --security-opt no-new-privileges --pull never`,
+  the copy mounted read-only at `/src`. Changing the image is a code change.
+- The image is pulled by `server.backups.reconcile` when an enabled copy
+  policy exists (a failed pull is a warning) and by a manual `storage.backup`;
+  a scheduled run never pulls.
+- Sources: a Docker volume by name (`docker volume inspect` first, so a
+  missing volume is refused rather than created empty), or a host directory
+  under `/srv/users/` or `<stateDir>/storage/` only. Never
+  `/var/lib/docker/volumes`.
+- `<runDir>/copy-locks/<copyId>.lock` is the per-copy flock: a scheduled run
+  and a manual backup of one copy never run at once.
 
 ## Rules
 
@@ -62,10 +82,10 @@ lines — change `units.ts` and `tp_backup_unit_ok` together.
   unreadable policies file) runs nothing and spools nothing: the control plane
   would refuse a report for it anyway, and the unit is removed at the next
   reconcile.
-- Every other outcome spools a result, `succeeded` or `failed`: busy engine
-  (the lock is held), not enough free space, a `copy` target (volumes are Road
-  row `r2-backup-tenant-volumes`, not supported yet), or a dump error. Error
-  text is capped at 2000 characters.
+- Every other outcome spools a result, `succeeded` or `failed`: busy engine or
+  copy (the lock is held), not enough free space, a missing volume or a
+  directory outside the allowed roots, or a dump / archive error. Error text is
+  capped at 2000 characters.
 - Free space: refuse below `max(2 × the policy's newest artifact, 256 MiB)` on
   the backup filesystem (nearest existing ancestor of the policy directory).
 - The lock is a non-blocking `flock` on `<runDir>/managed-locks/<managedId>.lock`:

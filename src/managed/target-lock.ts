@@ -1,10 +1,12 @@
 /**
- * One lock per managed engine, shared by everything that dumps or restores
- * it: the `managed.backup` / `managed.restore` command handlers in the
- * long-running daemon and the scheduled `backup-run` one-shot (a separate
- * process started by a systemd timer).
+ * One lock per backup target, shared by everything that dumps or restores
+ * it: for a managed engine, the `managed.backup` / `managed.restore` command
+ * handlers in the long-running daemon and the scheduled `backup-run` one-shot
+ * (a separate process started by a systemd timer); for a storage copy, the
+ * `storage.backup` handler and the same one-shot.
  *
  * The lock is an advisory `flock` on `<runDir>/managed-locks/<managedId>.lock`
+ * (or `<runDir>/copy-locks/<copyId>.lock`)
  * taken with `tryLock`: a second holder is refused at once rather than queued,
  * and the kernel drops the lock when the holding process exits, so a crashed
  * run can never leave a stale lock behind. `runDir` is tmpfs, so the lock
@@ -36,6 +38,30 @@ export function managedTargetLockPath(
   return join(layout.runDir, "managed-locks", `${managedId}.lock`);
 }
 
+/** Hold the non-blocking flock on `path` (under `dir`) while `fn` runs; `busy()` is thrown when it is taken. */
+async function withTargetLock<T>(
+  dir: string,
+  path: string,
+  busy: () => Error,
+  fn: () => Promise<T>,
+): Promise<T> {
+  await Deno.mkdir(dir, { recursive: true, mode: 0o770 });
+  const file = await Deno.open(path, {
+    create: true,
+    write: true,
+    mode: 0o660,
+  });
+  try {
+    if (!(await file.tryLock(true))) {
+      throw busy();
+    }
+    return await fn();
+  } finally {
+    // Closing the descriptor releases the flock; no separate unlock needed.
+    file.close();
+  }
+}
+
 /**
  * Run `fn` while holding the engine's lock. Throws {@link ManagedTargetBusyError}
  * without running `fn` when another holder has it.
@@ -45,23 +71,49 @@ export async function withManagedTargetLock<T>(
   managedId: string,
   fn: () => Promise<T>,
 ): Promise<T> {
-  const path = managedTargetLockPath(layout, managedId);
-  await Deno.mkdir(join(layout.runDir, "managed-locks"), {
-    recursive: true,
-    mode: 0o770,
-  });
-  const file = await Deno.open(path, {
-    create: true,
-    write: true,
-    mode: 0o660,
-  });
-  try {
-    if (!(await file.tryLock(true))) {
-      throw new ManagedTargetBusyError(managedId);
-    }
-    return await fn();
-  } finally {
-    // Closing the descriptor releases the flock; no separate unlock needed.
-    file.close();
+  return await withTargetLock(
+    join(layout.runDir, "managed-locks"),
+    managedTargetLockPath(layout, managedId),
+    () => new ManagedTargetBusyError(managedId),
+    fn,
+  );
+}
+
+/** Another backup or restore holds this storage copy's lock. */
+export class CopyTargetBusyError extends Error {
+  constructor(copyId: string) {
+    super(
+      `storage copy ${copyId} is busy: another backup or restore is running`,
+    );
+    this.name = "CopyTargetBusyError";
   }
+}
+
+/** `<runDir>/copy-locks/<copyId>.lock`; `copyId` is re-validated because it becomes a filename. */
+export function copyTargetLockPath(
+  layout: Pick<LayoutPaths, "runDir">,
+  copyId: string,
+): string {
+  if (!SAFE_MANAGED_ID_RE.test(copyId)) {
+    throw new Error("copyId contains unsupported characters");
+  }
+  return join(layout.runDir, "copy-locks", `${copyId}.lock`);
+}
+
+/**
+ * Run `fn` while holding the storage copy's lock — shared by the scheduled
+ * run, a manual `storage.backup` and a restore of that copy. Throws
+ * {@link CopyTargetBusyError} without running `fn` when another holder has it.
+ */
+export async function withCopyTargetLock<T>(
+  layout: Pick<LayoutPaths, "runDir">,
+  copyId: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  return await withTargetLock(
+    join(layout.runDir, "copy-locks"),
+    copyTargetLockPath(layout, copyId),
+    () => new CopyTargetBusyError(copyId),
+    fn,
+  );
 }

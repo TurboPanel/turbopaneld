@@ -7,7 +7,14 @@ import type {
 } from "../contracts/commands-contracts.ts";
 import { type LayoutPaths, resolveLayout } from "../paths/layout.ts";
 import { managedBackupArtifactDir } from "../managed/engine-paths.ts";
-import { managedTargetLockPath } from "../managed/target-lock.ts";
+import {
+  copyTargetLockPath,
+  managedTargetLockPath,
+} from "../managed/target-lock.ts";
+import {
+  COPY_BACKUP_HELPER_IMAGE,
+  copyBackupArtifactDir,
+} from "./copy-backup.ts";
 import {
   backupPoliciesPath,
   writeBackupPoliciesFile,
@@ -214,27 +221,153 @@ test("runScheduledBackup refuses a malformed policies file instead of half-trust
   });
 });
 
-test("runScheduledBackup spools a failed result for a copy target (not supported yet)", async () => {
+function copyPolicy(
+  overrides: Partial<BackupPolicyWireEntry> = {},
+): BackupPolicyWireEntry {
+  return {
+    policyId: crypto.randomUUID(),
+    targetKind: "copy",
+    copyId: crypto.randomUUID(),
+    copyProvider: "docker",
+    volumeName: "shop_uploads",
+    onCalendar: "hourly",
+    retentionKeep: 3,
+    enabled: true,
+    ...overrides,
+  };
+}
+
+type ArchiveCalls = { argv: string[][]; inspected: string[][] };
+
+function copyDeps(
+  bytes: Uint8Array,
+  calls: ArchiveCalls,
+  options: { volumeExists?: boolean } = {},
+): ScheduledBackupDeps {
+  return {
+    freeBytes: () => Promise.resolve(PLENTY),
+    copy: {
+      runDocker: (args) => {
+        calls.inspected.push(args);
+        const success = options.volumeExists ?? true;
+        return Promise.resolve({
+          success,
+          code: success ? 0 : 1,
+          stdout: "",
+          stderr: success ? "" : "no such volume",
+        });
+      },
+      runArchive: async (argv, destination) => {
+        calls.argv.push(argv);
+        const writer = destination.getWriter();
+        await writer.write(bytes);
+        await writer.close();
+        return { success: true, stderr: "" };
+      },
+    },
+  };
+}
+
+test("runScheduledBackup archives a docker copy under its policy directory through the helper", async () => {
   await withLayout(async (layout) => {
-    const policy: BackupPolicyWireEntry = {
-      policyId: crypto.randomUUID(),
-      targetKind: "copy",
-      copyId: crypto.randomUUID(),
-      onCalendar: "daily",
-      retentionKeep: 3,
-      enabled: true,
-    };
+    const policy = copyPolicy();
     await writeBackupPoliciesFile(layout, { policies: [policy] });
-    const counter = { calls: 0 };
-    const outcome = await runScheduledBackup(
-      policy.policyId,
-      { ...fakeDeps(new Uint8Array(), counter), layout },
+    const bytes = new TextEncoder().encode("copy-archive");
+    const calls: ArchiveCalls = { argv: [], inspected: [] };
+
+    const outcome = await runScheduledBackup(policy.policyId, {
+      ...copyDeps(bytes, calls),
+      layout,
+    });
+
+    assert(outcome.kind === "ran");
+    assertEquals(outcome.result.status, "succeeded");
+    const dir = copyBackupArtifactDir(layout, policy.copyId!, policy.policyId);
+    assertEquals(
+      outcome.result.path,
+      join(dir, `${outcome.result.backupId}.tar.gz`),
     );
+    assertEquals(outcome.result.checksum, await sha256Hex(bytes));
+    assertEquals(calls.inspected, [["volume", "inspect", "shop_uploads"]]);
+    const argv = calls.argv[0]!;
+    assert(
+      argv.includes("--pull") && argv[argv.indexOf("--pull") + 1] === "never",
+    );
+    assert(argv.includes("--read-only"));
+    assertEquals(argv[argv.indexOf("--network") + 1], "none");
+    assertEquals(
+      argv[argv.indexOf("--mount") + 1],
+      "type=volume,src=shop_uploads,dst=/src,readonly",
+    );
+    assertEquals(argv.slice(-7), [
+      COPY_BACKUP_HELPER_IMAGE,
+      "tar",
+      "-C",
+      "/src",
+      "-czf",
+      "-",
+      ".",
+    ]);
+  });
+});
+
+test("runScheduledBackup fails a copy whose volume is missing without archiving", async () => {
+  await withLayout(async (layout) => {
+    const policy = copyPolicy();
+    await writeBackupPoliciesFile(layout, { policies: [policy] });
+    const calls: ArchiveCalls = { argv: [], inspected: [] };
+    const outcome = await runScheduledBackup(policy.policyId, {
+      ...copyDeps(new Uint8Array(), calls, { volumeExists: false }),
+      layout,
+    });
     assert(outcome.kind === "ran");
     assertEquals(outcome.result.status, "failed");
-    assertEquals(outcome.result.error, "copy targets not supported yet");
-    assertEquals(outcome.result.backupId, undefined);
-    assertEquals(counter.calls, 0);
+    assertMatch(outcome.result.error ?? "", /not found on this host/);
+    assertEquals(calls.argv.length, 0);
+  });
+});
+
+test("runScheduledBackup refuses a copy directory outside the allowed roots", async () => {
+  await withLayout(async (layout) => {
+    const policy = copyPolicy({
+      copyProvider: "path",
+      volumeName: undefined,
+      hostPath: "/opt/elsewhere",
+    });
+    await writeBackupPoliciesFile(layout, { policies: [policy] });
+    const calls: ArchiveCalls = { argv: [], inspected: [] };
+    const outcome = await runScheduledBackup(policy.policyId, {
+      ...copyDeps(new Uint8Array(), calls),
+      layout,
+    });
+    assert(outcome.kind === "ran");
+    assertEquals(outcome.result.status, "failed");
+    assertMatch(outcome.result.error ?? "", /only \/srv\/users\//);
+    assertEquals(calls.argv.length, 0);
+  });
+});
+
+test("runScheduledBackup fails as busy while another backup holds the copy lock", async () => {
+  await withLayout(async (layout) => {
+    const policy = copyPolicy();
+    await writeBackupPoliciesFile(layout, { policies: [policy] });
+    const lockPath = copyTargetLockPath(layout, policy.copyId!);
+    await Deno.mkdir(join(layout.runDir, "copy-locks"), { recursive: true });
+    const holder = await Deno.open(lockPath, { create: true, write: true });
+    try {
+      await holder.lock(true);
+      const calls: ArchiveCalls = { argv: [], inspected: [] };
+      const outcome = await runScheduledBackup(policy.policyId, {
+        ...copyDeps(new Uint8Array(), calls),
+        layout,
+      });
+      assert(outcome.kind === "ran");
+      assertEquals(outcome.result.status, "failed");
+      assertMatch(outcome.result.error ?? "", /busy/);
+      assertEquals(calls.argv.length, 0);
+    } finally {
+      holder.close();
+    }
   });
 });
 

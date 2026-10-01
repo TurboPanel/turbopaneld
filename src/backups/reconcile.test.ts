@@ -342,3 +342,73 @@ test("a malformed policies file on disk is replaced, not trusted", async () => {
     );
   });
 });
+
+test("a copy policy makes sure the helper image is present; a pull failure is a warning", async () => {
+  await withHost(async (host) => {
+    const copy = policy(B, {
+      targetKind: "copy",
+      managedId: undefined,
+      engine: undefined,
+      artifactExtension: undefined,
+      copyId: C,
+      copyProvider: "docker",
+      volumeName: "shop_uploads",
+    });
+    let pulls = 0;
+    const run = (answer: string | undefined) =>
+      handleBackupsReconcile({ policies: [policy(A), copy] }, "", {
+        resolveLayout: () => host.layout,
+        run: host.run,
+        systemdUnitDir: host.unitDir,
+        ensureHelperImage: () => {
+          pulls++;
+          return Promise.resolve(answer);
+        },
+      });
+
+    let result = await run(undefined);
+    assertEquals(pulls, 1);
+    assertEquals(result.warnings, []);
+    assertEquals(result.nextRuns.map((next) => next.policyId), [A, B]);
+
+    result = await run("could not pull the backup helper image: offline");
+    assertEquals(pulls, 2);
+    assertEquals(result.warnings, [
+      "could not pull the backup helper image: offline",
+    ]);
+  });
+});
+
+test("a set with no enabled copy policy never touches the helper image", async () => {
+  await withHost(async (host) => {
+    let pulls = 0;
+    await handleBackupsReconcile(
+      {
+        policies: [
+          policy(A),
+          policy(B, {
+            targetKind: "copy",
+            managedId: undefined,
+            engine: undefined,
+            artifactExtension: undefined,
+            copyId: C,
+            copyProvider: "docker",
+            volumeName: "shop_uploads",
+            enabled: false,
+          }),
+        ],
+      },
+      "",
+      {
+        resolveLayout: () => host.layout,
+        run: host.run,
+        systemdUnitDir: host.unitDir,
+        ensureHelperImage: () => {
+          pulls++;
+          return Promise.resolve(undefined);
+        },
+      },
+    );
+    assertEquals(pulls, 0);
+  });
+});

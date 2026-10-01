@@ -68,6 +68,7 @@ const INSTANCE_COMMAND_TYPES = [
   "managed.ingress.reconcile",
   "managed.ha.reconcile",
   "managed.ha.failover",
+  "storage.backup",
   "system.reconcile",
 ] as const;
 

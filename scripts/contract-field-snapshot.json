@@ -133,12 +133,21 @@
     "daemon": "src/contracts/commands-contracts.ts",
     "fields": [
       { "name": "copyId", "required": false, "type": "string" },
+      {
+        "name": "copyProvider",
+        "required": false,
+        "type": "'docker' | 'path'"
+      },
       { "name": "enabled", "required": true, "type": "boolean" },
+      { "name": "hostPath", "required": false, "type": "string" },
       { "name": "managedId", "required": false, "type": "string" },
       { "name": "onCalendar", "required": true, "type": "string" },
+      { "name": "organizationId", "required": false, "type": "string" },
       { "name": "policyId", "required": true, "type": "string" },
       { "name": "retentionKeep", "required": true, "type": "number" },
-      { "name": "targetKind", "required": true, "type": "'managed' | 'copy'" }
+      { "name": "storageId", "required": false, "type": "string" },
+      { "name": "targetKind", "required": true, "type": "'managed' | 'copy'" },
+      { "name": "volumeName", "required": false, "type": "string" }
     ]
   },
   "BackupRunReportMessage": {
