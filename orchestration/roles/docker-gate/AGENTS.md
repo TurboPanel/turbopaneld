@@ -151,7 +151,7 @@ rewritten) and the managed-file helper.
 
 **Read-only listener** (`readonly.ts`, `TP_DOCKER_GATE_RO_SOCKET`). A second
 socket, `/run/turbopanel-gate/ro/docker.sock`, in a directory of its own
-(`root:root 0755`, socket `root:root 0660`: root and a container's root reach
+(`root:root 0750`, socket `root:root 0660`: root and a container's root reach
 it, the daemon account does not). It answers only GET/HEAD `/_ping`,
 `/version`, `/events`, `/containers/json` and `/containers/{id}/json` (optional
 API version prefix; id `[A-Za-z\d][A-Za-z\d_.-]*`), with no body and no

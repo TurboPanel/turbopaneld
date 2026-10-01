@@ -41,7 +41,7 @@ Environment=NO_COLOR=1
 # `--allow-net=unix:` is what Deno gates `listen()` on; `connect()` is gated on
 # read and write of the socket path.
 ExecStartPre=+/usr/bin/install -d -m 0750 -o root -g {{ docker_gate_group }} {{ docker_gate_run_dir }}
-ExecStartPre=+/usr/bin/install -d -m 0755 -o root -g root {{ docker_gate_ro_run_dir }}
+ExecStartPre=+/usr/bin/install -d -m 0750 -o root -g root {{ docker_gate_ro_run_dir }}
 ExecStart={{ docker_gate_deno_bin }} run --no-prompt --no-remote --no-config --no-lock --allow-read --allow-write={{ docker_gate_run_dir }},{{ docker_gate_upstream_socket }} --allow-net=unix:{{ docker_gate_socket }},unix:{{ docker_gate_ro_socket }},unix:{{ docker_gate_upstream_socket }} --allow-env=TP_DOCKER_GATE_* {{ docker_gate_dir }}/main.ts
 SyslogIdentifier={{ docker_gate_service_name }}
 Restart=always

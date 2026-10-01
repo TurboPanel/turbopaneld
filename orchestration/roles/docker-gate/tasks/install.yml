@@ -55,7 +55,7 @@
     content: |
       # Managed by TurboPanel daemon orchestration (docker-gate role).
       d {{ docker_gate_run_dir }} 0750 root {{ docker_gate_group }} -
-      d {{ docker_gate_ro_run_dir }} 0755 root root -
+      d {{ docker_gate_ro_run_dir }} 0750 root root -
 
 - name: Ensure the gate socket directory exists
   ansible.builtin.file:
@@ -72,7 +72,7 @@
     state: directory
     owner: root
     group: root
-    mode: "0755"
+    mode: "0750"
 
 # The daemon's switch to the read-only socket for Traefik. Root-owned in the
 # gate's own directory, so the daemon can read it and never write it. Sticky:

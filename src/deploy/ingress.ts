@@ -92,6 +92,8 @@ export type SharedTraefikDocker =
   | { source: "socket-proxy" }
   | { source: "gate"; keepSocketProxy: boolean };
 
+const VIA_SOCKET_PROXY: SharedTraefikDocker = { source: "socket-proxy" };
+
 /**
  * True when Traefik should use the gate's read-only socket: the switch file
  * is there AND so is the gate's read-only directory (created by tmpfiles and
@@ -439,7 +441,7 @@ function tcpUdpPortLines(entries: readonly TcpUdpIngressEntry[]): string[] {
 export function traefikCompose(
   ingressNetwork: string,
   identity?: SystemComponentDescriptor,
-  docker: SharedTraefikDocker = { source: "socket-proxy" },
+  docker: SharedTraefikDocker = VIA_SOCKET_PROXY,
 ): string {
   assertSafeComposeProjectName(ingressNetwork);
   if (identity !== undefined) {
@@ -859,9 +861,7 @@ async function sharedTraefikDocker(
   hasIdentity: boolean,
   gateEnabled: () => Promise<boolean>,
 ): Promise<SharedTraefikDocker> {
-  if (!hasIdentity || !(await gateEnabled())) {
-    return { source: "socket-proxy" };
-  }
+  if (!hasIdentity || !(await gateEnabled())) return VIA_SOCKET_PROXY;
   return {
     source: "gate",
     keepSocketProxy: await serviceIngressUsesSocketProxy(layout),

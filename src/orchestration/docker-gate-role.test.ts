@@ -265,7 +265,7 @@ jinjaTest(
     );
     assert(
       service.includes(
-        "ExecStartPre=+/usr/bin/install -d -m 0755 -o root -g root /run/turbopanel-gate/ro",
+        "ExecStartPre=+/usr/bin/install -d -m 0750 -o root -g root /run/turbopanel-gate/ro",
       ),
     );
     const defaults = await read("defaults/main.yml");
@@ -277,7 +277,7 @@ jinjaTest(
     const tasks = await read("tasks/install.yml");
     assertStringIncludes(
       tasks,
-      "d {{ docker_gate_ro_run_dir }} 0755 root root -",
+      "d {{ docker_gate_ro_run_dir }} 0750 root root -",
     );
   },
 );
