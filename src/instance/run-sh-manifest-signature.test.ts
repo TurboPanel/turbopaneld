@@ -233,17 +233,43 @@ for (const repo of ["turbopanel", "ui"] as const) {
   });
 }
 
-test("run.sh --instance skips the signature only for a development overlay", async () => {
+test("run.sh --instance skips the signature only for an overlay that also opted in", async () => {
   if (!(await hostCanVerify())) return;
   const unsigned = JSON.stringify(repoManifest("turbopanel"));
   const overlay = await fetchRepoManifestWithRunSh("turbopanel", unsigned, {
     TURBOPANEL_DL_BASE: "https://dev.example.lan:8443",
+    TURBOPANEL_DEV_ALLOW_UNSIGNED_MANIFEST: "1",
   });
   assertEquals(overlay.status, 0, overlay.stderr);
   assertStringIncludes(overlay.stderr, "DEVELOPMENT OVERLAY");
-  // An unrelated env var is not the overlay flag.
+  // A stray overlay variable alone (ambient env, a pasted one-liner) still
+  // verifies the signature and fails closed on an unsigned manifest.
+  const ambient = await fetchRepoManifestWithRunSh("turbopanel", unsigned, {
+    TURBOPANEL_DL_BASE: "https://dev.example.lan:8443",
+  });
+  assertEquals(ambient.status, 1, ambient.stderr);
+  assertStringIncludes(ambient.stderr, "unsigned");
+  // The opt-in without an overlay is not the bypass either.
   const other = await fetchRepoManifestWithRunSh("turbopanel", unsigned, {
     TURBOPANEL_DEV_ALLOW_UNSIGNED_MANIFEST: "1",
   });
   assertEquals(other.status, 1, other.stderr);
+});
+
+test("run.sh carries --dev-allow-unsigned through the sudo re-exec and the root helper, and extracts archives without their recorded owner", async () => {
+  const source = await Deno.readTextFile(runShPath);
+  assertStringIncludes(source, "--dev-allow-unsigned)");
+  assertStringIncludes(source, '--dl-base "$DL_BASE"');
+  assertStringIncludes(source, 'set -- "$@" --dev-allow-unsigned');
+  const helper = await Deno.readTextFile(
+    join(runShPath, "../../orchestration/scripts/tp-orchestrate"),
+  );
+  assertStringIncludes(helper, '--dl-base "$_dl_base" --dev-allow-unsigned');
+  const extractions = source.split("\n").filter((line) =>
+    /\btar -x/.test(line) && !line.trimStart().startsWith("#")
+  );
+  assertEquals(extractions.length >= 5, true);
+  for (const line of extractions) {
+    assertStringIncludes(line, "--no-same-owner");
+  }
 });

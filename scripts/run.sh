@@ -596,11 +596,17 @@ tp_verify_manifest_signature() {
 
 # The development-only bypass: a TURBOPANEL_DL_BASE overlay is a contributor's
 # own build served from their dev host, and the dev catalog writer signs
-# nothing. Host-side and explicit (the --dl-base flag), never something a
-# manifest can switch on; the built-in rail and --manifest-url pins always
-# verify. Printed loudly so nobody mistakes an overlay install for a release.
+# nothing. Two explicit, host-side switches are required together: the overlay
+# (--dl-base / TURBOPANEL_DL_BASE) AND the second opt-in
+# (--dev-allow-unsigned / TURBOPANEL_DEV_ALLOW_UNSIGNED_MANIFEST=1, the same
+# name the daemon honours). A stray TURBOPANEL_DL_BASE in an environment, a
+# pasted one-liner or a shell profile therefore still verifies the signature
+# and fails closed on an unsigned manifest. Never something a manifest can
+# switch on; the built-in rail and --manifest-url pins always verify. Printed
+# loudly so nobody mistakes an overlay install for a release.
 tp_manifest_signature_bypass() {
-  [ -n "${TURBOPANEL_DL_BASE:-}" ]
+  [ -n "${TURBOPANEL_DL_BASE:-}" ] \
+    && [ "${TURBOPANEL_DEV_ALLOW_UNSIGNED_MANIFEST:-}" = "1" ]
 }
 
 tp_resolve_channel_manifest() {
@@ -635,7 +641,7 @@ tp_extract_tar_zst_archive() {
     return 1
   fi
   mkdir -p "$_dest_root"
-  if ! zstd -d -q -c "$_archive" | tar -x -C "$_dest_root"; then
+  if ! zstd -d -q -c "$_archive" | tar -x --no-same-owner --no-overwrite-dir -C "$_dest_root"; then
     echo "run.sh: failed to extract $_archive" >&2
     return 1
   fi
@@ -651,7 +657,7 @@ tp_extract_orchestration_release() {
     return 1
   fi
   mkdir -p "$_dest_root"
-  if ! zstd -d -q -c "$_archive" | tar -x -C "$_dest_root"; then
+  if ! zstd -d -q -c "$_archive" | tar -x --no-same-owner --no-overwrite-dir -C "$_dest_root"; then
     echo "run.sh: failed to extract $_archive" >&2
     return 1
   fi
@@ -1623,7 +1629,7 @@ tp_run_instance_install() {
   if [ "$_skip_daemon" = true ]; then
     rm -rf "$_ui_dir.new"
     mkdir -p "$_ui_dir.new"
-    if ! tar -xzf "$_work/ui.tar.gz" -C "$_ui_dir.new"; then
+    if ! tar -xzf "$_work/ui.tar.gz" --no-same-owner --no-overwrite-dir -C "$_ui_dir.new"; then
       tp_restore_instance_prev
       tp_clear_instance_swap_marker
       rm -rf "$_work"
@@ -1639,7 +1645,7 @@ tp_run_instance_install() {
   else
     rm -rf "$_ui_dir"
     mkdir -p "$_ui_dir"
-    tar -xzf "$_work/ui.tar.gz" -C "$_ui_dir"
+    tar -xzf "$_work/ui.tar.gz" --no-same-owner --no-overwrite-dir -C "$_ui_dir"
   fi
   rm -rf "$_work"
   for _required in \
@@ -1970,6 +1976,8 @@ while [ $# -gt 0 ]; do
     --tunnel-token)
       [ $# -ge 2 ] || { tp_print_error "--tunnel-token requires an argument"; exit 1; }
       TUNNEL_TOKEN="$2"; shift 2 ;;
+    --dev-allow-unsigned)
+      export TURBOPANEL_DEV_ALLOW_UNSIGNED_MANIFEST=1; shift ;;
     --insecure-tls)
       INSECURE_TLS=true; shift ;;
     --no-start)
@@ -2190,6 +2198,7 @@ if ! tp_is_root; then
   [ -n "$UI_MANIFEST_URL" ] && set -- "$@" --ui-manifest-url "$UI_MANIFEST_URL"
   [ -n "$HOST_URL" ] && set -- "$@" --host "$HOST_URL"
   [ -n "$DL_BASE" ] && set -- "$@" --dl-base "$DL_BASE"
+  [ -n "$DL_BASE" ] && [ "${TURBOPANEL_DEV_ALLOW_UNSIGNED_MANIFEST:-}" = "1" ] && set -- "$@" --dev-allow-unsigned
   [ -n "$INSTANCE_CA" ] && set -- "$@" --instance-ca "$INSTANCE_CA"
   [ -n "$TUNNEL_TOKEN" ] && set -- "$@" --tunnel-token "$TUNNEL_TOKEN"
   [ "$INSECURE_TLS" = true ] && set -- "$@" --insecure-tls
@@ -2551,6 +2560,13 @@ trap 'rm -f "$VARS_FILE"' EXIT
   printf 'turbopanel_update_channel: %s\n' "${TURBOPANEL_UPDATE_CHANNEL:-$(tp_default_update_channel)}"
   if [ -n "$DL_BASE" ]; then
     printf 'turbopanel_dl_base: %s\n' "$DL_BASE"
+    # The daemon's own unsigned-manifest bypass is written only when this
+    # install opted in (--dev-allow-unsigned); a signed overlay keeps verifying.
+    if tp_manifest_signature_bypass; then
+      printf 'turbopanel_dev_allow_unsigned: true\n'
+    else
+      printf 'turbopanel_dev_allow_unsigned: false\n'
+    fi
   fi
   if [ -n "$MANIFEST_URL" ]; then
     printf 'turbopanel_manifest_url: %s\n' "$MANIFEST_URL"

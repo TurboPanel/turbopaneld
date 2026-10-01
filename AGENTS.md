@@ -772,7 +772,12 @@ it regresses:
   only bypass is development-side and host-side: a source checkout
   (development install mode), or a `--dl-base` overlay host whose
   `daemon.env` carries `TURBOPANEL_DEV_ALLOW_UNSIGNED_MANIFEST=1`
-  (`daemon-config/dotenv.j2` writes it for overlay installs only). The
+  (`daemon-config/dotenv.j2` writes it for overlay installs only). run.sh needs
+  the same second opt-in: `TURBOPANEL_DL_BASE` alone (ambient env, a pasted
+  one-liner) does **not** skip verification; the install must also pass
+  `--dev-allow-unsigned` (or `TURBOPANEL_DEV_ALLOW_UNSIGNED_MANIFEST=1`, which
+  does not survive the sudo re-exec, so the flag is forwarded) and
+  `tp-orchestrate update` adds it for a root-pinned overlay. The
   built-in rail and `TURBOPANEL_MANIFEST_URL` pins always verify. Instance/UI
   repo manifests (`--instance` installs) are signed by their release jobs with
   the same key: TurboPanel/turbopanel and TurboPanel/ui run
@@ -1094,3 +1099,18 @@ Large subsystems live in focused `AGENTS.md` files next to their code — Cursor
 | **Time sync (Ansible)** | `orchestration/AGENTS.md` | `time-sync` role + `time-sync-apply.yml` (NTP / timezone) |
 
 Ansible playbooks/roles live under `orchestration/`; runtime TypeScript under `src/`.
+
+### Manifest freshness (no rollback by replay)
+
+A signature proves who made a manifest, not that it is current.
+`resolveUpdate` (`src/update/freshness.ts`) refuses a signed manifest older
+than the running build (`RollbackRefusedError`, reported as
+`preflight_manifest`): base `major.minor.patch` orders builds, same base
+compares `builtAt` (canary / rc labels are ignored, as in the control plane's
+`isDowngrade`), the same commit is never a rollback, and missing or
+unparsable evidence (dev checkout `unstamped`, the trunk drop's absent
+`version`) is never refused. There is deliberately **no** expiry or sequence
+field: a host offline for weeks must still update and old manifests lack it.
+Break-glass is host-side only: `TURBOPANEL_ALLOW_DOWNGRADE=1` in the daemon
+environment, or running `run.sh --manifest-url <older tag>` by hand (run.sh
+itself does not compare versions). Nothing in a WebSocket message can lift it.

@@ -22,9 +22,13 @@ TURBOPANEL_UPDATE_CHANNEL={{ turbopanel_update_channel | default('release') }}
 TURBOPANEL_DL_BASE={{ turbopanel_dl_base }}
 {# A development overlay serves a contributor's own unsigned builds. This is
    the only place the daemon's manifest-signature bypass is switched on: it is
-   host-side, written solely for --dl-base installs, and the resolver honours
-   it for overlay-catalog manifests only (src/update/signing.ts). #}
+   host-side, written solely for --dl-base installs that also passed
+   run.sh --dev-allow-unsigned (absent var keeps the old default for the
+   co-located refresh path), and the resolver honours it for overlay-catalog
+   manifests only (src/update/signing.ts). #}
+{% if turbopanel_dev_allow_unsigned | default(true) | bool %}
 TURBOPANEL_DEV_ALLOW_UNSIGNED_MANIFEST=1
+{% endif %}
 {% endif %}
 {# A pin (run.sh --manifest-url): one exact release manifest instead of the
    channel's current pointer. The daemon's resolver honours it for

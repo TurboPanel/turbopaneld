@@ -8,6 +8,7 @@ import {
   MalformedManifestError,
   ManifestSignatureError,
   MissingChannelError,
+  RollbackRefusedError,
 } from "./errors.ts";
 import { resolveUpdate } from "./resolver.ts";
 import { DEV_UNSIGNED_MANIFEST_ENV } from "./signing.ts";
@@ -685,6 +686,86 @@ test("resolveUpdate rejects a manifest body that is not JSON", async () => {
       MalformedManifestError,
       "not valid JSON",
     );
+  } finally {
+    restore();
+  }
+});
+
+// --- freshness: replay of an old signed manifest ----------------------------
+
+const NEWER_BUILD = {
+  commit: "fff9999",
+  version: "0.1.3",
+  builtAt: "2026-10-01T00:00:00.000Z",
+};
+
+test("resolveUpdate (production) refuses a replayed, validly signed older manifest", async () => {
+  // channelManifest() is the old build: abc1234 built 2026-01-01, no version.
+  const restore = serveManifest(await signWithTestKey(channelManifest()));
+  try {
+    await assertRejects(
+      () =>
+        resolveUpdate({ app: "daemon", channel: "trunk" }, {}, {
+          ...PRODUCTION,
+          installed: NEWER_BUILD,
+        }),
+      RollbackRefusedError,
+      "refusing to roll back",
+    );
+  } finally {
+    restore();
+  }
+});
+
+test("resolveUpdate (production) refuses an older versioned release even when its builtAt looks newer", async () => {
+  const restore = serveManifest(
+    await signWithTestKey({
+      ...channelManifest(),
+      version: "0.1.2",
+      builtAt: "2026-12-01T00:00:00.000Z",
+    }),
+  );
+  try {
+    await assertRejects(
+      () =>
+        resolveUpdate({ app: "daemon", channel: "release" }, {}, {
+          ...PRODUCTION,
+          installed: NEWER_BUILD,
+        }),
+      RollbackRefusedError,
+    );
+  } finally {
+    restore();
+  }
+});
+
+test("resolveUpdate (production) accepts a newer canary of the installed base, and the host break-glass accepts the old one", async () => {
+  const newer = await signWithTestKey({
+    ...channelManifest(),
+    commit: "eee7777",
+    version: "0.1.3-canary.9",
+    builtAt: "2026-10-02T00:00:00.000Z",
+  });
+  let restore = serveManifest(newer);
+  try {
+    const info = await resolveUpdate({ app: "daemon", channel: "canary" }, {}, {
+      ...PRODUCTION,
+      installed: NEWER_BUILD,
+    });
+    assertEquals(info.commit, "eee7777");
+    assertEquals(info.version, "0.1.3-canary.9");
+  } finally {
+    restore();
+  }
+
+  restore = serveManifest(await signWithTestKey(channelManifest()));
+  try {
+    const info = await resolveUpdate(
+      { app: "daemon", channel: "trunk" },
+      { TURBOPANEL_ALLOW_DOWNGRADE: "1" },
+      { ...PRODUCTION, installed: NEWER_BUILD },
+    );
+    assertEquals(info.commit, "abc1234");
   } finally {
     restore();
   }

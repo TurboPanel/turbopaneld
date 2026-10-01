@@ -784,7 +784,9 @@ tp_verb_update() {
 
   set -- --license "$_license"
   [ -n "$_host" ] && set -- "$@" --host "$_host"
-  [ -n "$_dl_base" ] && set -- "$@" --dl-base "$_dl_base"
+  # An overlay host was installed with --dev-allow-unsigned (the root-owned
+  # pin exists only for such an install), so the refresh carries it too.
+  [ -n "$_dl_base" ] && set -- "$@" --dl-base "$_dl_base" --dev-allow-unsigned
   [ -n "$_ca" ] && set -- "$@" --instance-ca "$_ca"
   [ -n "$_channel" ] && set -- "$@" --channel "$_channel"
   [ -n "$_manifest_url" ] && set -- "$@" --manifest-url "$_manifest_url"
