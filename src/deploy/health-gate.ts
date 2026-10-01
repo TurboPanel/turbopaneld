@@ -178,12 +178,14 @@ function observe(
     });
   }
   // A container that stopped running starts its window over if it comes back.
-  for (const id of [...runningSince.keys()]) {
+  for (const id of runningSince.keys()) {
     if (!live.has(id)) runningSince.delete(id);
   }
   return {
     verdicts,
-    services: [...new Set(containers.map((c) => c.service))].sort(),
+    services: [...new Set(containers.map((c) => c.service))].toSorted((a, b) =>
+      a.localeCompare(b)
+    ),
   };
 }
 
