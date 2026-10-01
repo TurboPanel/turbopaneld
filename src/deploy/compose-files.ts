@@ -193,9 +193,6 @@ export type DeploymentManifest = {
   previous?: DeploymentPrevious;
 };
 
-/** @deprecated Kept so existing imports compile; use {@link DeploymentManifest}. */
-export type DeploymentManifestV2 = DeploymentManifest;
-
 function isDeploymentManifest(
   value: unknown,
 ): value is DeploymentManifest {
@@ -538,13 +535,18 @@ async function copyIfPresent(from: string, to: string): Promise<boolean> {
   return true;
 }
 
-async function resetPreviousDir(deploymentDir: string): Promise<string> {
+async function removePreviousDir(deploymentDir: string): Promise<string> {
   const previousDir = join(deploymentDir, COMPOSE_PREVIOUS_DIRNAME);
   try {
     await Deno.remove(previousDir, { recursive: true });
   } catch (err) {
     if (!(err instanceof Deno.errors.NotFound)) throw err;
   }
+  return previousDir;
+}
+
+async function resetPreviousDir(deploymentDir: string): Promise<string> {
+  const previousDir = await removePreviousDir(deploymentDir);
   await Deno.mkdir(previousDir, { recursive: true, mode: 0o750 });
   return previousDir;
 }
@@ -562,13 +564,12 @@ export async function retainPreviousDeployment(
   deploymentDir: string,
 ): Promise<DeploymentPrevious | null> {
   const live = await readDeploymentManifest(deploymentDir);
-  if (live === null) return null;
   const composePath = join(deploymentDir, RUNTIME_COMPOSE_FILENAME);
-  try {
-    await Deno.stat(composePath);
-  } catch (err) {
-    if (err instanceof Deno.errors.NotFound) return null;
-    throw err;
+  if (live === null || !(await fileExists(composePath))) {
+    // Nothing readable to keep: drop any older copy so `previous/` and the
+    // manifest's `previous` index never disagree.
+    await removePreviousDir(deploymentDir);
+    return null;
   }
   const previousDir = await resetPreviousDir(deploymentDir);
   await copyIfPresent(composePath, join(previousDir, RUNTIME_COMPOSE_FILENAME));

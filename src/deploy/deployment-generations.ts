@@ -142,3 +142,27 @@ export function allProjects(manifest: GenerationsCarrier): string[] {
   const names = manifestGenerations(manifest).map((g) => g.projectName);
   return [...new Set(names)];
 }
+
+/**
+ * Which compose projects a lifecycle command acts on.
+ *
+ * The control plane names one project per command; the manifest is trusted for
+ * the rest only when it is a manifest *of that project* (the name is one of its
+ * generations). With no manifest, or a manifest that does not know the name,
+ * the command acts on the project it named, exactly as before generations.
+ * `live` = start / restart; `all` = stop / teardown.
+ */
+export function projectsForCommand(
+  manifest: GenerationsCarrier | null,
+  payloadProjectName: string,
+  scope: "live" | "all",
+): string[] {
+  if (manifest === null) return [payloadProjectName];
+  if (!allProjects(manifest).includes(payloadProjectName)) {
+    return [payloadProjectName];
+  }
+  const names = scope === "live"
+    ? liveProjects(manifest)
+    : allProjects(manifest);
+  return names.length > 0 ? names : [payloadProjectName];
+}

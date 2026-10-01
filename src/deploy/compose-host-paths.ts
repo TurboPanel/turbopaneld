@@ -31,6 +31,7 @@ import {
 } from "@std/path";
 import { parse } from "yaml";
 import {
+  COMPOSE_PREVIOUS_DIRNAME,
   COMPOSE_STAGE_DIRNAME,
   RUNTIME_COMPOSE_FILENAME,
 } from "./compose-files.ts";
@@ -440,6 +441,8 @@ type ConfinementContext = {
   realDir: string;
   /** Resolved live staging directory under {@link realDir}. */
   realStage: string;
+  /** Resolved live directory holding the previous deploy's files. */
+  realPrevious: string;
   /** Normalized staging directory relative paths were resolved from. */
   stageDir: string;
 };
@@ -491,6 +494,9 @@ function resolvedPathRefusal(
   if (entry.kind !== "mount") return null;
   if (isWithin(real, ctx.realStage)) {
     return `${label} is the daemon's staging directory`;
+  }
+  if (isWithin(real, ctx.realPrevious)) {
+    return `${label} is the daemon's retained previous deployment, which rollback restores from`;
   }
   if (real === ctx.realDir && !entry.readOnly) {
     return `${label} mounts the deployment directory itself writable, which would let a container rewrite ${RUNTIME_COMPOSE_FILENAME}`;
@@ -578,6 +584,7 @@ export async function assertComposeHostPathsConfined(
     realPath,
     realDir,
     realStage: join(realDir, COMPOSE_STAGE_DIRNAME),
+    realPrevious: join(realDir, COMPOSE_PREVIOUS_DIRNAME),
     stageDir: normalize(opts.stageDir),
   };
   const outcomes = await mapSequential(

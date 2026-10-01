@@ -301,6 +301,31 @@ test("the daemon's staging directory is refused", () =>
     assert(msg.includes("staging directory"), msg);
   }));
 
+test("the retained previous deployment is refused, read-only included", () =>
+  withFixture(async (f) => {
+    await Deno.mkdir(join(f.dir, "previous"));
+    for (const readOnly of [false, true]) {
+      const msg = await refusal(f, [
+        binds({
+          type: "bind",
+          source: join(f.stage, "previous"),
+          target: "/x",
+          read_only: readOnly,
+        }),
+      ]);
+      assert(msg.includes("retained previous deployment"), msg);
+    }
+    // A sibling whose name merely starts with `previous` is fine.
+    await Deno.mkdir(join(f.dir, "previous-data"));
+    await allowed(f, [
+      binds({
+        type: "bind",
+        source: join(f.stage, "previous-data"),
+        target: "/x",
+      }),
+    ]);
+  }));
+
 test("an env_file symlinked to a daemon file is refused", () =>
   withFixture(async (f) => {
     await Deno.mkdir(join(f.dir, "data"));

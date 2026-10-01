@@ -319,8 +319,12 @@ entry. There is no `composeYaml` fallback on `environment.deploy`.
   (index of the files kept in `<deploymentDir>/previous/`: `compose.yaml`,
   `.env`, `deployment.json` of the deploy the last publish replaced, one
   generation back only, retained by `publishStagedRuntimeCompose`). Lifecycle
-  consumers resolve project names through `liveProjects()` (start, rehydrate)
-  and `allProjects()` (ownership, stop) in `deployment-generations.ts`; a v2
+  consumers resolve project names through `deployment-generations.ts`:
+  `projectsForCommand()` for `environment.lifecycle` / `environment.stop`
+  (live for start/restart, all for stop; the payload's project name is used
+  when no manifest knows it), `liveProjects()` for reboot rehydrate,
+  `allProjects()` for log-tail ownership. Host-path confinement refuses any
+  mount inside `previous/` (like `.staging`), read-only included; a v2
   manifest reads as one live blue generation. `health-gate.ts`
   (`waitForHealthGate`) judges `compose ps -a --format json`: healthy passes,
   unhealthy / non-zero exit / crash loop fail at once, a service with no

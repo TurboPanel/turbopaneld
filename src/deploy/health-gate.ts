@@ -259,7 +259,8 @@ async function pollGate(
     }
     : evaluatePoll(stdout, state.runningSince, nowMs, state.stableMs);
   if (poll.done) return poll.result;
-  if (poll.pending.length > 0) options.onProgress?.(poll.pending[0]!);
+  const first = poll.pending[0];
+  if (first !== undefined) options.onProgress?.(first);
   if (nowMs - state.startedAt + options.pollMs > options.timeoutMs) {
     return {
       ok: false,

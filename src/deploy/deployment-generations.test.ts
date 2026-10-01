@@ -5,6 +5,7 @@ import {
   manifestGenerations,
   parseGenerations,
   parsePrevious,
+  projectsForCommand,
   singleGeneration,
 } from "./deployment-generations.ts";
 
@@ -83,4 +84,38 @@ test("parsePrevious validates the digest and fields", () => {
   );
   assertEquals(parsePrevious({ generation: -1, projectName: "p" }), null);
   assertEquals(parsePrevious(null), null);
+});
+
+test("projectsForCommand: live for start, all for stop, payload name as fallback", () => {
+  const m = {
+    projectName: "app",
+    generation: 5,
+    generations: [
+      { color: "blue", generation: 4, projectName: "app", state: "draining" },
+      {
+        color: "green",
+        generation: 5,
+        projectName: "app-green",
+        state: "live",
+      },
+    ] as const,
+  };
+  assertEquals(projectsForCommand(m, "app", "live"), ["app-green"]);
+  assertEquals(projectsForCommand(m, "app", "all"), ["app", "app-green"]);
+  // No manifest, or a manifest of some other project: act on the named one.
+  assertEquals(projectsForCommand(null, "app", "live"), ["app"]);
+  assertEquals(projectsForCommand(m, "other", "all"), ["other"]);
+  // A single-generation manifest is the named project either way.
+  const single = { projectName: "app", generation: 1 };
+  assertEquals(projectsForCommand(single, "app", "live"), ["app"]);
+  assertEquals(projectsForCommand(single, "app", "all"), ["app"]);
+  // Nothing live (every generation retired): still act on the named project.
+  const none = {
+    projectName: "app",
+    generation: 1,
+    generations: [
+      { color: "blue", generation: 1, projectName: "app", state: "retired" },
+    ] as const,
+  };
+  assertEquals(projectsForCommand(none, "app", "live"), ["app"]);
 });

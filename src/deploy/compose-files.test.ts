@@ -958,6 +958,28 @@ describe("compose-files", () => {
       });
     });
 
+    it("clears a stale previous/ when there is no readable earlier deploy", async () => {
+      await withDir(async (dir, stage) => {
+        await Deno.mkdir(join(dir, "previous"));
+        await writeComposeFileSecure(
+          join(dir, "previous", "compose.yaml"),
+          "old\n",
+        );
+        await writeComposeFileSecure(
+          join(stage, RUNTIME_COMPOSE_FILENAME),
+          "v1\n",
+        );
+        await publishStagedRuntimeCompose(dir, stage, {
+          ...base,
+          version: 3,
+          generation: 1,
+          composeSha256: "a".repeat(64),
+        });
+        await assertRejects(() => Deno.stat(join(dir, "previous")));
+        assertEquals((await readDeploymentManifest(dir))?.previous, undefined);
+      });
+    });
+
     it("previous/ is not mistaken for a deployment by the local scan", async () => {
       const tmp = await Deno.makeTempDir({ prefix: "tp-v3-scan-" });
       try {

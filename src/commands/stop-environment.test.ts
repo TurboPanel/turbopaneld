@@ -1,7 +1,11 @@
 import { assertEquals, assertRejects } from "@std/assert";
 import { join } from "@std/path";
 import type { DockerCliResult } from "../deploy/docker-cli.ts";
-import { RUNTIME_COMPOSE_FILENAME } from "../deploy/compose-files.ts";
+import {
+  RUNTIME_COMPOSE_FILENAME,
+  writeComposeFileSecure,
+  writeDeploymentManifest,
+} from "../deploy/compose-files.ts";
 import {
   cleanupStaleTcpUdpServiceIngress,
   listPersistedTcpUdpServiceIds,
@@ -458,4 +462,97 @@ test({
       await Deno.remove(root, { recursive: true });
     }
   },
+});
+
+const TWO_GENERATIONS = [
+  {
+    color: "blue",
+    generation: 1,
+    projectName: "tp-demo-gen",
+    state: "draining",
+  },
+  {
+    color: "green",
+    generation: 2,
+    projectName: "tp-demo-gen-green",
+    state: "live",
+  },
+] as const;
+
+/** A deployment dir with a two-generation v3 manifest; returns the env + dir. */
+async function withTwoGenerationDeployment(
+  fn: (deploymentDir: string) => Promise<void>,
+): Promise<void> {
+  const root = await Deno.makeTempDir({ prefix: "tp-gen-cmd-" });
+  const previous = {
+    TURBOPANEL_STATE_DIR: Deno.env.get("TURBOPANEL_STATE_DIR"),
+    TURBOPANEL_CONFIG_DIR: Deno.env.get("TURBOPANEL_CONFIG_DIR"),
+  };
+  const stateDir = join(root, "state");
+  Deno.env.set("TURBOPANEL_STATE_DIR", stateDir);
+  Deno.env.set("TURBOPANEL_CONFIG_DIR", join(root, "config"));
+  const dir = join(stateDir, "deployments", "proj-1", "envgen001");
+  try {
+    await Deno.mkdir(dir, { recursive: true, mode: 0o750 });
+    await writeComposeFileSecure(
+      join(dir, RUNTIME_COMPOSE_FILENAME),
+      "services: {}\n",
+    );
+    await writeDeploymentManifest(dir, {
+      version: 3,
+      projectId: "proj-1",
+      environmentId: "envgen001",
+      serverId: "srv-1",
+      generation: 2,
+      projectName: "tp-demo-gen",
+      composeSha256: "a".repeat(64),
+      services: {},
+      generations: [...TWO_GENERATIONS],
+    });
+    await fn(dir);
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) Deno.env.delete(key);
+      else Deno.env.set(key, value);
+    }
+    await Deno.remove(root, { recursive: true });
+  }
+}
+
+function recordingRun(calls: string[][]) {
+  return (args: string[]): Promise<DockerCliResult> => {
+    calls.push([...args]);
+    return Promise.resolve({
+      success: true,
+      stdout: "[]",
+      stderr: "",
+      code: 0,
+    });
+  };
+}
+
+function projectOf(argv: string[]): string {
+  return argv[argv.indexOf("-p") + 1]!;
+}
+
+test({
+  name: "environment.stop brings down every generation of the deployment",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: () =>
+    withTwoGenerationDeployment(async () => {
+      const calls: string[][] = [];
+      await handleEnvironmentStop(
+        {
+          environmentId: "envgen001",
+          projectId: "proj-1",
+          projectName: "tp-demo-gen",
+        },
+        new Date().toISOString(),
+        { runDocker: recordingRun(calls) },
+      );
+      assertEquals(
+        calls.filter((argv) => argv.includes("down")).map(projectOf),
+        ["tp-demo-gen", "tp-demo-gen-green"],
+      );
+    }),
 });
