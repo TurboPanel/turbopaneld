@@ -34,6 +34,7 @@ import {
   waitForInstanceHealth,
 } from "./instance-health-check.ts";
 import { resolveInstanceSupport } from "./version-wire.ts";
+import { type RetryFetchOptions, retryTransient } from "../util/retry-fetch.ts";
 import {
   fetchWithPlatformCa,
   type InstanceConfig,
@@ -437,6 +438,16 @@ export function buildRunReconcileArgs(options: {
   return args;
 }
 
+/** Same policy as run.sh: two retries of transient failures, 3 s apart, 60 s cap. */
+const RUN_SCRIPT_CURL_RETRY_ARGS = [
+  "--retry",
+  "2",
+  "--retry-delay",
+  "3",
+  "--retry-max-time",
+  "60",
+];
+
 export async function downloadRunScript(
   runScriptUrl: string,
   options: boolean | RunScriptDownloadOptions = {},
@@ -450,7 +461,7 @@ export async function downloadRunScript(
   } else if (opts.caPath?.trim()) {
     curlArgs.push("--cacert", opts.caPath.trim());
   }
-  curlArgs.push(runScriptUrl);
+  curlArgs.push(...RUN_SCRIPT_CURL_RETRY_ARGS, runScriptUrl);
   const curl = await new Deno.Command("curl", {
     args: curlArgs,
     stdout: "piped",
@@ -1023,10 +1034,14 @@ async function fetchVerifiedManifest(
   label: string,
   fetchText: NonNullable<InstanceUpdateHooks["fetchText"]>,
   policy: ManifestSignaturePolicy,
+  retry?: RetryFetchOptions,
 ): Promise<Record<string, unknown>> {
   let fetched: { ok: boolean; status: number; body: string };
   try {
-    fetched = await fetchText(url);
+    fetched = await retryTransient(() => fetchText(url), {
+      status: (res) => res.status,
+      retryAfter: () => null,
+    }, retry);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     throw new UpdatePreflightError(
@@ -1056,6 +1071,8 @@ export async function assertControlPlaneManifestPreflight(options: {
   targetVersion?: string;
   targetCommit?: string;
   fetchText?: InstanceUpdateHooks["fetchText"];
+  /** Retry policy for the manifest reads (tests inject a no-wait sleep). */
+  retry?: RetryFetchOptions;
   /** Defaults to {@link detectInstallMode}; the managed update path passes production. */
   installMode?: InstallMode;
   env?: Record<string, string | undefined>;
@@ -1080,6 +1097,7 @@ export async function assertControlPlaneManifestPreflight(options: {
     "instance",
     fetchText,
     policy,
+    options.retry,
   );
   const commit = typeof manifest.commit === "string" ? manifest.commit : "";
   if (!commit) {
@@ -1104,7 +1122,7 @@ export async function assertControlPlaneManifestPreflight(options: {
     );
   }
   if (uiUrl) {
-    await fetchVerifiedManifest(uiUrl, "ui", fetchText, policy);
+    await fetchVerifiedManifest(uiUrl, "ui", fetchText, policy, options.retry);
   }
   return { url, commit, version };
 }

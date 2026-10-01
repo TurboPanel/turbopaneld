@@ -21,14 +21,20 @@ test("every automatic-update consumer fetches run.sh with -L, so the redirect is
   const orchestrate = await Deno.readTextFile(
     join(ROOT, "orchestration", "scripts", "tp-orchestrate"),
   );
-  assertStringIncludes(orchestrate, "set -- curl -fsSL --max-time 120");
+  assertStringIncludes(
+    orchestrate,
+    "set -- curl -fsSL --max-time 120 --retry 2",
+  );
   const reconcile = await Deno.readTextFile(
     join(ROOT, "src", "instance", "run-reconcile.ts"),
   );
   assertStringIncludes(reconcile, 'const curlArgs = ["-fsSL"];');
   const runSh = await Deno.readTextFile(join(ROOT, "scripts", "run.sh"));
-  assertStringIncludes(runSh, "TP_CURL_FETCH='curl -fsSL'");
-  assertStringIncludes(runSh, "TP_CURL_FETCH_INSECURE='curl -fsSLk'");
+  assertStringIncludes(runSh, 'TP_CURL_FETCH="curl -fsSL $TP_CURL_RETRY"');
+  assertStringIncludes(
+    runSh,
+    'TP_CURL_FETCH_INSECURE="curl -fsSLk $TP_CURL_RETRY"',
+  );
 });
 
 test("every curl command on turbopanel.sh printed by this repo follows redirects", async () => {

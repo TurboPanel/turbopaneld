@@ -414,7 +414,7 @@ tp_download_verified_artifact() {
 	while [[ "$_attempt" -le "$_max_attempts" ]]; do
 		rm -f "$_dest"
 		# shellcheck disable=SC2086
-		if ! curl -fsSL $_curl_tls "$_fetch_url" -o "$_dest"; then
+		if ! curl -fsSL --retry 2 --retry-delay 3 --retry-max-time 60 $_curl_tls "$_fetch_url" -o "$_dest"; then
 			echo "tp_download_verified_artifact: failed to download $_fetch_url" >&2
 			return 1
 		fi
