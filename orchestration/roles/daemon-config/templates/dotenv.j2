@@ -17,7 +17,7 @@ TURBOPANEL_INSTANCE_CA={{ turbopanel_instance_ca }}
 TURBOPANEL_INSTANCE_CA_FINGERPRINT={{ turbopanel_instance_ca_fingerprint }}
 {% endif %}
 {% endif %}
-TURBOPANEL_UPDATE_CHANNEL={{ turbopanel_update_channel | default('trunk') }}
+TURBOPANEL_UPDATE_CHANNEL={{ turbopanel_update_channel | default('release') }}
 {% if turbopanel_dl_base | default('') | length > 0 %}
 TURBOPANEL_DL_BASE={{ turbopanel_dl_base }}
 {# A development overlay serves a contributor's own unsigned builds. This is
