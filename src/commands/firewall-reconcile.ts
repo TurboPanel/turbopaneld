@@ -104,6 +104,55 @@ function renderedForResult(
   return v6 === undefined ? { v4: rendered.v4 } : { v4: rendered.v4, v6 };
 }
 
+type RenderOnlyArgs = {
+  payload: FirewallReconcilePayload;
+  rendered: RenderedFirewall;
+  probe: Parameters<typeof validateRenderedFirewall>[1];
+  run: FirewallRunFn;
+  base: Pick<
+    FirewallReconcileResult,
+    "generation" | "mode" | "digest" | "ruleCount" | "sshPorts"
+  >;
+  warnings: string[];
+  refusals: string[];
+};
+
+/**
+ * Observe (preview) and refused applies: render, ask the kernel to check the
+ * text (`--test`, nothing is loaded) and report. Never applies anything.
+ */
+async function renderOnlyResult(
+  args: RenderOnlyArgs,
+): Promise<FirewallReconcileResult> {
+  const { payload, rendered, probe, run, base, warnings, refusals } = args;
+  warnings.push(...refusals);
+  const validation = await validateRenderedFirewall(rendered, probe, run);
+  if (!validation.ok) {
+    warnings.push(
+      "the kernel would refuse this ruleset (iptables-restore --test failed); see validation",
+    );
+  }
+  const renderedText = renderedForResult(rendered, warnings);
+  logInfo(
+    "command",
+    `firewall generation ${payload.generation} rendered, not applied (${
+      payload.mode === "observe" ? "observe" : "refused"
+    }): ${rendered.ruleCount} rules, digest ${rendered.digest.slice(0, 12)}`,
+  );
+  return {
+    ...base,
+    applied: false,
+    ipv6Applied: false,
+    forwardApplied: false,
+    warnings,
+    validation,
+    ...(renderedText === null ? {} : { rendered: renderedText }),
+    summary: payload.mode === "observe"
+      ? `firewall generation ${payload.generation} observed: ${rendered.ruleCount} rules would render`
+      : `firewall generation ${payload.generation} refused: ${refusals.length} condition(s) block a default-drop apply`,
+  };
+}
+
 export async function handleFirewallReconcile(
   payload: FirewallReconcilePayload,
   _daemonReceivedAt: string,
@@ -170,34 +219,15 @@ export async function handleFirewallReconcile(
   }
 
   if (payload.mode === "observe" || refusals.length > 0) {
-    warnings.push(...refusals);
-    // Not applied, but still checked: the kernel parses the rendered documents
-    // (`--test`, nothing is loaded) so a preview says whether it would load.
-    const validation = await validateRenderedFirewall(rendered, probe, run);
-    if (!validation.ok) {
-      warnings.push(
-        "the kernel would refuse this ruleset (iptables-restore --test failed); see validation",
-      );
-    }
-    const renderedText = renderedForResult(rendered, warnings);
-    logInfo(
-      "command",
-      `firewall generation ${payload.generation} rendered, not applied (${
-        payload.mode === "observe" ? "observe" : "refused"
-      }): ${rendered.ruleCount} rules, digest ${rendered.digest.slice(0, 12)}`,
-    );
-    return {
-      ...base,
-      applied: false,
-      ipv6Applied: false,
-      forwardApplied: false,
+    return await renderOnlyResult({
+      payload,
+      rendered,
+      probe,
+      run,
+      base,
       warnings,
-      validation,
-      ...(renderedText === null ? {} : { rendered: renderedText }),
-      summary: payload.mode === "observe"
-        ? `firewall generation ${payload.generation} observed: ${rendered.ruleCount} rules would render`
-        : `firewall generation ${payload.generation} refused: ${refusals.length} condition(s) block a default-drop apply`,
-    };
+      refusals,
+    });
   }
 
   const outcome = await applyRenderedFirewall(rendered, includeForward, probe, {
