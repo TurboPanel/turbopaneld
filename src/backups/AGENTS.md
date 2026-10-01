@@ -42,6 +42,32 @@ is `Persistent=true` (a run missed while the host was off happens once when it
 returns) with a 300 s `RandomizedDelaySec`. tp-host pins every one of those
 lines — change `units.ts` and `tp_backup_unit_ok` together.
 
+## What the runner may do (Deno permissions)
+
+In **JS mode** the wrapper runs `backup-run` under its own small grant set,
+`renderBackupRunnerPermissionFlags()` in `src/permissions/daemon-permissions.ts`
+(rendered verbatim into `tp-backup-run.j2` and pinned by
+`daemon-permissions.test.ts`), not the daemon's:
+
+- **read/write:** `<state>/backup` (policies file, result spool), the two lock
+  folders `<run>/managed-locks` and `<run>/copy-locks`, and `/backup`. Nothing
+  else under the state dir, no `/srv/users` (a helper container reads the
+  volume, never this process), no Docker socket (the CLI child opens it).
+- **read of `/usr/bin/docker`:** `ensureDocker` stats the binary.
+- **run:** `/usr/bin/docker` only. No `sudo`, shell, `systemctl`, `iptables`.
+  `docker-cli.ts` treats Deno's "Requires run access" refusal of its `sudo`
+  fallback as "no escalation available", so a socket permission problem is
+  reported as the real Docker error.
+- **env:** unscoped (`Deno.env.toObject()` in layout resolution needs it); safe
+  because there is no net grant. **sys:** `statfs`. No net, no ffi.
+
+A new path or program on the backup path needs the same change in
+`daemon-permissions.ts` (the tests check the grants cover every path the code
+builds). `TURBOPANEL_BACKUP_DIR` repointing needs the grant to follow it (the
+daemon's own set has the same fixed `/backup`). **Native hosts** run the
+compiled binary, whose baked grants are the daemon's full set and cannot be
+narrowed at runtime; narrowing them would take a second compiled binary.
+
 ## Files on the host
 
 - `<daemonStateDir>/backup/policies.json` —
