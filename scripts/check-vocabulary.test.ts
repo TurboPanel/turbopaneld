@@ -8,6 +8,7 @@ import {
   reportVocabularyFailures,
   reportVocabularyWarnings,
   runVocabularyCheck,
+  runVocabularyWarnings,
 } from "./check-vocabulary.ts";
 
 /**
@@ -224,4 +225,25 @@ test("reportVocabularyWarnings prints a summary and never exits", () => {
   assertEquals(lines.length, 2);
   reportVocabularyWarnings([], (m) => lines.push(m));
   assertEquals(lines.length, 2);
+});
+
+test("runVocabularyWarnings walks fixtures, skips non-source files and never fails", async () => {
+  const root = await Deno.makeTempDir({ prefix: "vocab-warn-" });
+  try {
+    await Deno.mkdir(join(root, "src"), { recursive: true });
+    await Deno.writeTextFile(
+      join(root, "src/copy.ts"),
+      "// Update the fleet.\n",
+    );
+    await Deno.writeTextFile(join(root, "src/notes.txt"), "the console\n");
+    await Deno.writeTextFile(
+      join(root, "src/clean.ts"),
+      "export const ok = 1;\n",
+    );
+    const warnings = await runVocabularyWarnings(root);
+    assertEquals(warnings.length, 1);
+    assertEquals(warnings[0]?.startsWith("src/copy.ts:1 says"), true);
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
 });
