@@ -540,3 +540,22 @@ test("firewall with an unknown or malformed verb is a usage error (exit 2) and d
     assertEquals(errors.length, 1);
   }
 });
+
+test("firewall fold reports the outcome and exits 0; a partial removal exits 1", async () => {
+  const folded = captureIo({
+    args: ["firewall", "fold"],
+    foldFirewall: () =>
+      Promise.resolve({ state: "folded", listeners: 1, reasons: [] }),
+  });
+  await maybeRunDaemonCli(folded.io);
+  assertEquals(folded.logs, ["[firewall] fold folded"]);
+  assertEquals(folded.exits, [0]);
+  const partial = captureIo({
+    args: ["firewall", "fold"],
+    foldFirewall: () =>
+      Promise.resolve({ state: "partial", listeners: 1, reasons: ["busy"] }),
+  });
+  await maybeRunDaemonCli(partial.io);
+  assertEquals(partial.logs, ["[firewall] fold partial (busy)"]);
+  assertEquals(partial.exits, [1]);
+});

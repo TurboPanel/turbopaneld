@@ -17,6 +17,7 @@ import {
   type ScheduledBackupOutcome,
 } from "../backups/runner.ts";
 import { removeFirewall } from "../firewall/apply.ts";
+import { foldManagedPublicChain, type FoldOutcome } from "../firewall/fold.ts";
 import {
   confirmPendingFirewall,
   type FirewallConfirmOutcome,
@@ -39,6 +40,7 @@ export type DaemonCliIo = {
   runScheduledBackup?: (policyId: string) => Promise<ScheduledBackupOutcome>;
   removeFirewall?: () => Promise<void>;
   confirmFirewall?: (digest: string) => Promise<FirewallConfirmOutcome>;
+  foldFirewall?: () => Promise<FoldOutcome>;
   readPendingFirewall?: () => Promise<PendingFirewallMarker | null>;
 };
 
@@ -182,7 +184,7 @@ async function runBackupRunCli(
 export const FIREWALL_CLI_EXIT = { ok: 0, failed: 1, usage: 2 } as const;
 
 const FIREWALL_USAGE =
-  "[firewall] usage: firewall off | firewall status | firewall confirm [<digest>]";
+  "[firewall] usage: firewall off | firewall status | firewall fold | firewall confirm [<digest>]";
 
 /**
  * `turbopaneld firewall …`, run as root over SSH when the panel cannot be
@@ -214,6 +216,19 @@ async function runFirewallCli(
           : `[firewall] pending ${pending.digest} until ${pending.deadlineAt}`,
       );
       exit(FIREWALL_CLI_EXIT.ok);
+      return;
+    }
+    if (verb === "fold" && args.length === 1) {
+      const outcome = await (io.foldFirewall ?? foldManagedPublicChain)();
+      const detail = outcome.reasons.length > 0
+        ? ` (${outcome.reasons.join("; ")})`
+        : "";
+      log(`[firewall] fold ${outcome.state}${detail}`);
+      exit(
+        outcome.state === "partial"
+          ? FIREWALL_CLI_EXIT.failed
+          : FIREWALL_CLI_EXIT.ok,
+      );
       return;
     }
     if (verb === "confirm" && args.length <= 2) {

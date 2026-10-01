@@ -338,3 +338,32 @@ test("reconcile throws when a missing jump cannot be inserted", async () => {
     return null;
   });
 });
+
+const FOLDED_FORWARD = [
+  "-N TP-FWD",
+  "-A TP-FWD -s 203.0.113.51/32 -p tcp -m conntrack --ctorigdstport 45001 --ctorigdst 203.0.113.50/32 -j RETURN",
+  "-A TP-FWD -p tcp -m conntrack --ctorigdstport 45001 --ctorigdst 203.0.113.50/32 -j DROP",
+  "",
+].join("\n");
+
+test("stage 6: a listener TP-FWD already narrows drops its legacy chain and builds none", async () => {
+  await withRunner(async (invocations) => {
+    await reconcileManagedPublicFirewall(publicPayload());
+    assertEquals(invocations.includes(`-N ${CHAIN}`), false);
+    assertEquals(
+      invocations.includes(
+        `-A ${CHAIN} -p tcp -m conntrack --ctorigdst 203.0.113.50 --ctorigdstport 45001 -j DROP`,
+      ),
+      false,
+    );
+    assertEquals(
+      invocations.includes(`-D ${MANAGED_PUBLIC_CHAIN} -j ${CHAIN}`),
+      true,
+    );
+  }, (args) => {
+    const line = args.join(" ");
+    if (line === "-C DOCKER-USER -j TP-FWD") return ok();
+    if (line === "-S TP-FWD") return ok(FOLDED_FORWARD);
+    return null;
+  });
+});
