@@ -107,12 +107,12 @@ jobs:
     # release and upload assets.
     permissions:
       contents: write
-    uses: TurboPanel/dev/.github/workflows/gh-promote.yml@dadee433d35a73c7a9946268c30a96e466371140 # dev#44
+    uses: TurboPanel/dev/.github/workflows/gh-promote.yml@d9127ee03a6a3b42e9435ebec3542db5fab09bc0 # dev#49
     with:
       repo-kind: daemon
       to: release
       source: ${{ needs.resolve.outputs.rc-tag }}
-      dev-ref: dadee433d35a73c7a9946268c30a96e466371140 # dev#44
+      dev-ref: d9127ee03a6a3b42e9435ebec3542db5fab09bc0 # dev#49
       # Same signer pin as promote.yml.
       signer-ref: 93c4f94510c9499e6bf04366a9500fe9f8e38aaa
       # Default: the `release` environment approval stays for the release hop.
