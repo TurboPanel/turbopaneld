@@ -213,6 +213,42 @@ async function restoreDocument(
   }
 }
 
+/**
+ * Ask the kernel whether it would accept a rendered ruleset, loading nothing.
+ *
+ * Runs the same `--noflush --test` pass an apply makes first (`-t`/`--test`
+ * parses and constructs the ruleset but does not commit it), once per family
+ * that was rendered. No marker, no guard, no file, no chain or jump changes:
+ * a preview must be able to call this on any host without moving it. A family
+ * that refuses becomes an entry in `errors`; this never throws for a refusal.
+ */
+export async function validateRenderedFirewall(
+  rendered: RenderedFirewall,
+  probe: XtablesProbe,
+  run: FirewallRunFn,
+): Promise<{ ok: boolean; errors: string[] }> {
+  const documents: Array<{ family: FirewallFamily; document: string }> = [
+    { family: 4, document: rendered.v4 },
+  ];
+  if (rendered.v6 !== null && probe.ipv6) {
+    documents.push({ family: 6, document: rendered.v6 });
+  }
+  const errors: string[] = [];
+  await forEachSequential(documents, async ({ family, document }) => {
+    const bin = binaryFor(family, "-restore");
+    const tested = await run(bin, ["--noflush", "--test"], { stdin: document });
+    if (!tested.success) {
+      errors.push(
+        sanitizeForLog(
+          `${bin} --test refused the ruleset: ${failureText(tested)}`,
+        )
+          .slice(0, 500),
+      );
+    }
+  });
+  return { ok: errors.length === 0, errors };
+}
+
 /** `--test` refused the document: nothing was loaded. */
 export class FirewallRulesetRefusedError extends Error {
   constructor(message: string) {

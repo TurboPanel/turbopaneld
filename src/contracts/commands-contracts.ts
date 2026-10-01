@@ -288,6 +288,14 @@ export type FirewallReconcileResult = {
    * for `digest` arrives first. Absent for observe, off and refused applies.
    */
   confirmation?: FirewallPendingConfirmation;
+  /**
+   * The kernel's verdict on the rendered ruleset when this result did not
+   * apply it: observe (a preview) or a refused apply. Absent when the rules
+   * were loaded (the load itself is the verdict).
+   */
+  validation?: FirewallValidation;
+  /** The rendered documents, on the same results as `validation`; omitted when over {@link FIREWALL_RENDERED_MAX_BYTES}. */
+  rendered?: FirewallRendered;
   summary: string;
 };
 
@@ -301,6 +309,33 @@ export type FirewallPendingConfirmation = {
   deadlineAt: string;
   /** The confirm window the host armed, in seconds. */
   windowSeconds: number;
+};
+
+/**
+ * What the kernel said about a rendered ruleset when the daemon only checked
+ * it (`iptables-restore --noflush --test`: parse and validate, load nothing).
+ * Present on results that did not apply (observe, or a refused apply). Must
+ * stay in sync with the instance canonical shape.
+ */
+export type FirewallValidation = {
+  /** Every family that was checked accepted the ruleset. */
+  ok: boolean;
+  /** One entry per refusing family, e.g. `iptables-restore --test refused the ruleset: ...`. */
+  errors: string[];
+};
+
+/** Longest rendered document a result carries (bytes of text); a longer one is left out with a warning. */
+export const FIREWALL_RENDERED_MAX_BYTES = 65_536;
+
+/**
+ * The exact `iptables-restore` / `ip6tables-restore` documents the daemon
+ * rendered, so the console can show what would be loaded. `v6` is absent under
+ * `ipv6: skip` or when ip6tables is unavailable. Must stay in sync with the
+ * instance canonical shape.
+ */
+export type FirewallRendered = {
+  v4: string;
+  v6?: string;
 };
 
 /**
@@ -2560,8 +2595,58 @@ export function parseFirewallReconcileResult(
     ...(value.confirmation === undefined
       ? {}
       : { confirmation: parseFirewallPendingConfirmation(value.confirmation) }),
+    ...(value.validation === undefined
+      ? {}
+      : { validation: parseFirewallValidation(value.validation) }),
+    ...(value.rendered === undefined
+      ? {}
+      : { rendered: parseFirewallRendered(value.rendered) }),
     summary: value.summary,
   };
+}
+
+const FIREWALL_VALIDATION_MAX_ERRORS = 8;
+const FIREWALL_VALIDATION_MAX_ERROR_LENGTH = 500;
+
+function parseFirewallValidation(value: unknown): FirewallValidation {
+  if (!isRecord(value) || typeof value.ok !== "boolean") {
+    throw new TypeError("validation must carry a boolean ok");
+  }
+  if (
+    !Array.isArray(value.errors) ||
+    value.errors.length > FIREWALL_VALIDATION_MAX_ERRORS ||
+    !value.errors.every((entry) =>
+      typeof entry === "string" &&
+      entry.length <= FIREWALL_VALIDATION_MAX_ERROR_LENGTH
+    )
+  ) {
+    throw new TypeError(
+      "validation.errors must be a short list of short strings",
+    );
+  }
+  return { ok: value.ok, errors: [...value.errors] };
+}
+
+function parseFirewallRenderedDocument(value: unknown, field: string): string {
+  if (
+    typeof value !== "string" || value.length > FIREWALL_RENDERED_MAX_BYTES
+  ) {
+    throw new TypeError(
+      `rendered.${field} must be a string of at most ${FIREWALL_RENDERED_MAX_BYTES} characters`,
+    );
+  }
+  return value;
+}
+
+function parseFirewallRendered(value: unknown): FirewallRendered {
+  if (!isRecord(value)) throw new Error("rendered must be an object");
+  const rendered: FirewallRendered = {
+    v4: parseFirewallRenderedDocument(value.v4, "v4"),
+  };
+  if (value.v6 !== undefined) {
+    rendered.v6 = parseFirewallRenderedDocument(value.v6, "v6");
+  }
+  return rendered;
 }
 
 function parseFirewallPendingConfirmation(
