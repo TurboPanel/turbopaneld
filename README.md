@@ -3,7 +3,6 @@
 **Host daemon for every TurboPanel-managed host** — Ansible orchestration, authenticated control-plane presence, deploy/runtime, and host metrics. This is the piece that connects your servers to [TurboPanel](https://turbopanel.io), one place to run everything you host.
 
 [![Release](https://img.shields.io/github/v/release/TurboPanel/turbopaneld?label=release)](https://github.com/TurboPanel/turbopaneld/releases)
-[![Release candidate](https://img.shields.io/github/v/tag/TurboPanel/turbopaneld?filter=*-rc.*&sort=semver&include_prereleases&label=release%20candidate&color=orange)](https://github.com/TurboPanel/turbopaneld/releases)
 [![Quality Gate](https://sonarcloud.io/api/project_badges/measure?project=turbopanel_turbopaneld&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=turbopanel_turbopaneld)
 [![Coverage](https://sonarcloud.io/api/project_badges/measure?project=turbopanel_turbopaneld&metric=coverage)](https://sonarcloud.io/component_measures?id=turbopanel_turbopaneld&metric=coverage)
 [![Code Smells](https://sonarcloud.io/api/project_badges/measure?project=turbopanel_turbopaneld&metric=code_smells)](https://sonarcloud.io/project/issues?id=turbopanel_turbopaneld&resolved=false&types=CODE_SMELL)
