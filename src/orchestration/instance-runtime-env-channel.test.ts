@@ -207,5 +207,8 @@ for (const template of [DENO_ENV, WORKERS_ENV]) {
 
 test("instance-install sets no play-level channel that would hide the installed one", async () => {
   const play = await Deno.readTextFile(INSTALL_PLAY);
-  assertEquals(/^\s+turbopanel_update_channel:/m.test(play), false);
+  const sets = play.split("\n").some((line) =>
+    line.trimStart().startsWith("turbopanel_update_channel:")
+  );
+  assertEquals(sets, false);
 });
