@@ -8,6 +8,7 @@ import {
   type Verdict,
 } from "../../orchestration/roles/docker-gate/files/policy.ts";
 import {
+  DEFAULT_INGRESS_SOCKET_DIR,
   DEFAULT_PLATFORM_ROOTS,
   isPlatformContainer,
   LABEL_COMPOSE_PROJECT,
@@ -39,7 +40,11 @@ import { MANAGED_ENGINE_LABEL } from "../managed/compose.ts";
 import { ORCHESTRATOR_COMPOSE_SERVICE_NAME } from "../deploy/system-component.ts";
 import { orchestratorCompose } from "../managed/orchestrator.ts";
 import { proxysqlCompose } from "../managed/proxysql.ts";
-import { traefikCompose } from "../deploy/ingress.ts";
+import {
+  INGRESS_GATE_SOCKET_DIR,
+  serviceTraefikCompose,
+  traefikCompose,
+} from "../deploy/ingress.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -237,7 +242,7 @@ test("the same binds from a container without platform labels are findings", asy
   );
 });
 
-test("the ingress socket-proxy service stays a finding until stage 3 deletes it", async () => {
+test("the ingress socket-proxy service stays a finding until the stage-3 switch drops it", async () => {
   const services = servicesOf(traefikCompose("ingress-net", {
     component: SYSTEM_HOSTING_INGRESS_COMPONENT,
     serviceId: "00000000-0000-4000-8000-0000000000bb",
@@ -353,3 +358,118 @@ async function* walkSource(dir: string): AsyncGenerator<string> {
     }
   }
 }
+
+// Stage 3: Traefik on the gate's read-only socket.
+
+const HOSTING_INGRESS: SystemComponentDescriptor = {
+  component: SYSTEM_HOSTING_INGRESS_COMPONENT,
+  serviceId: "00000000-0000-4000-8000-0000000000bb",
+  composeServiceName: "traefik",
+  containerName: "00000000-0000-4000-8000-0000000000bb-in",
+  role: "ingress",
+};
+const SERVICE_ID = "00000000-0000-4000-8000-0000000000cc";
+
+test("the daemon mounts the directory the gate's read-only listener lives in", () => {
+  assertEquals(INGRESS_GATE_SOCKET_DIR, DEFAULT_INGRESS_SOCKET_DIR);
+  assertEquals(
+    DEFAULT_POLICY_CONFIG.ingressSocketDir,
+    DEFAULT_INGRESS_SOCKET_DIR,
+  );
+});
+
+test("in gate mode both real Traefik emitters pass with no finding and no socket proxy left", async () => {
+  const shared = servicesOf(
+    traefikCompose("ingress-net", HOSTING_INGRESS, {
+      source: "gate",
+      keepSocketProxy: false,
+    }),
+  );
+  assertEquals(Object.keys(shared), ["traefik"]);
+  const perService = servicesOf(
+    serviceTraefikCompose(
+      [{ hostingId: "h1", protocol: "tcp", publishedPort: 15432 }],
+      {
+        serviceId: SERVICE_ID,
+        composeServiceName: "traefik",
+        containerName: `${SERVICE_ID}-in`,
+      },
+      "ingress-net",
+      "gate",
+    ),
+  );
+  const cases: Array<[string, Service]> = [
+    ["ingress-net", shared.traefik],
+    [SERVICE_ID, perService.traefik],
+  ];
+  for (const [project, service] of cases) {
+    const body = createBodyFor("/var/lib/turbopanel/ingress", project, service);
+    assertEquals(body.HostConfig.Binds.length, 1, project);
+    const found = await verdictFor(body);
+    assertEquals(found.violations, [], project);
+    assertEquals(found.allowances, ["ingress-socket"], project);
+  }
+});
+
+test("the read-only socket allowance is exact: other containers, the parent directory and writable mounts stay findings", async () => {
+  const ingress = { [LABEL_ROLE]: "ingress", [LABEL_COMPOSE_PROJECT]: "p" };
+  const cases: Array<[Record<string, string>, string, string]> = [
+    // A tenant workload binding the read-only socket directory.
+    [
+      { [LABEL_COMPOSE_PROJECT]: "tenant" },
+      `${DEFAULT_INGRESS_SOCKET_DIR}:/s:ro`,
+      "bind-forbidden-path",
+    ],
+    // A forged system label is still not the ingress role.
+    [
+      platformLabels,
+      `${DEFAULT_INGRESS_SOCKET_DIR}:/s:ro`,
+      "bind-forbidden-path",
+    ],
+    // A Traefik binding the parent: that holds the gate's main socket.
+    [ingress, "/run/turbopanel-gate:/s:ro", "bind-forbidden-path"],
+    // A Traefik binding the read-only directory writable.
+    [ingress, `${DEFAULT_INGRESS_SOCKET_DIR}:/s`, "bind-forbidden-path"],
+    // Below the directory is not the directory.
+    [
+      ingress,
+      `${DEFAULT_INGRESS_SOCKET_DIR}/docker.sock:/s:ro`,
+      "bind-forbidden-path",
+    ],
+    // The engine socket itself, even read-only, even for a Traefik.
+    [
+      ingress,
+      "/var/run/docker.sock:/var/run/docker.sock:ro",
+      "bind-docker-socket",
+    ],
+  ];
+  for (const [labels, bind, rule] of cases) {
+    const found = await verdictFor({
+      Labels: labels,
+      HostConfig: { Binds: [bind] },
+    });
+    assertEquals(found.allowances, [], bind);
+    assertEquals(found.violations.map((v) => v.rule), [rule], bind);
+  }
+});
+
+test("a symlink that resolves onto the read-only directory gets no allowance for a non-Traefik", async () => {
+  const viaLink: ResolvePath = (path) =>
+    Promise.resolve(
+      path === "/srv/users/u/link" ? DEFAULT_INGRESS_SOCKET_DIR : path,
+    );
+  const found = await evaluateDetailed(
+    {
+      method: "POST",
+      path: "/containers/create",
+      query: new URLSearchParams(),
+      body: {
+        Labels: { [LABEL_COMPOSE_PROJECT]: "tenant" },
+        HostConfig: { Binds: ["/srv/users/u/link:/s:ro"] },
+      },
+    },
+    DEFAULT_POLICY_CONFIG,
+    viaLink,
+  );
+  assertEquals(found.violations.map((v) => v.rule), ["bind-forbidden-path"]);
+});

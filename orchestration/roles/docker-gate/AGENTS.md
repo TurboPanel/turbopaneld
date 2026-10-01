@@ -2,9 +2,9 @@
 
 Root context: `../../../AGENTS.md` → **Managed-host privilege boundary**
 ("Docker" is the first of the three root-equivalent routes of the daemon
-account `tp`). This role is **stage 2 of 5** of closing it.
+account `tp`). This role is **stage 3 of 5** of closing it.
 
-## What exists today (stages 1-2: observe mode)
+## What exists today (stages 1-3: observe mode, plus Traefik's read-only socket)
 
 A root-owned systemd service, `turbopanel-docker-gate.service`, runs the
 vendored Deno (`<install>/vendor/deno/current/deno`) over the TypeScript in
@@ -29,6 +29,7 @@ A later stage that routes traffic through it flips this to fatal.
 | ---- | --- |
 | `http.ts` | Strict HTTP/1.1 framing: head parse, `Content-Length` / chunked bodies, refusal of every ambiguity (both lengths, repeated lengths, folding, bare LF, `Transfer-Encoding` other than `chunked`) |
 | `proxy.ts` | One client connection: request in, fresh engine connection, response back. Upgrades (`attach`, `exec start`, Compose `/session` + `/grpc`) are spliced raw **only after the engine answers 101** |
+| `readonly.ts` | Stage 3: the exact list the read-only listener answers (GET/HEAD `/_ping`, `/version`, `/events`, `/containers/json`, `/containers/{id}/json`); everything else is a 403 |
 | `platform.ts` | Ownership classes (`platform` / `tenant` / `unlabeled`) from labels, and the narrow bind allowance of platform containers |
 | `approval.ts` | Verifier for the control plane's signed per-deploy approval (Ed25519 via WebCrypto); no signer, no private key |
 | `inspect.ts` | Root-side `GET /containers/{id}/json` for the ownership check (labels only, never logged) |
@@ -67,8 +68,8 @@ engine would clean (`..`, `//`).
 **Expected findings on every host in this stage** (not bugs): the platform's
 own containers bind `/etc/turbopanel/...` and `/var/lib/turbopanel/...`
 (ProxySQL, orchestrator, managed-engine config and data) and the ingress
-Tecnativa proxy container mounts `/var/run/docker.sock` until stage 3 deletes
-it. Since stage 2 the platform's own compose containers are allowed (see
+Tecnativa proxy container mounts `/var/run/docker.sock` until the stage-3
+switch is on for the host (see below). Since stage 2 the platform's own compose containers are allowed (see
 below), so what remains on a host is the socket proxy (the daemon's helper
 containers are labelled, see below).
 
@@ -91,7 +92,7 @@ these labels itself and the config trees are daemon-writable today. It must
 tighten (and the labels stop being trusted) when route 2b makes the config trees
 root-owned; the label check can then be replaced by an exact-path list.
 Known gaps, left as findings on purpose: the ingress `docker-socket-proxy`
-service mounts the Docker socket until stage 3 deletes it.
+service mounts the Docker socket until the stage-3 switch is on.
 
 **Helper containers.** Every daemon-started throwaway `docker run` (backup tar,
 restore swap, managed-file ownership, engine volume bootstrap) stamps
@@ -146,6 +147,46 @@ rewritten) and the managed-file helper.
 **Counters** in the summary line: `allowances`, `approvals`, `approvedRules`,
 `owners` (plus the stage-1 `requests`, `upgrades`, `wouldDeny`, `refusals`).
 
+## Stage 3 additions (Traefik on a read-only socket; the main socket still observes)
+
+**Read-only listener** (`readonly.ts`, `TP_DOCKER_GATE_RO_SOCKET`). A second
+socket, `/run/turbopanel-gate/ro/docker.sock`, in a directory of its own
+(`root:root 0750`, socket `root:root 0660`: root and a container's root reach
+it, the daemon account does not). It answers only GET/HEAD `/_ping`,
+`/version`, `/events`, `/containers/json` and `/containers/{id}/json` (optional
+API version prefix; id `[A-Za-z\d][A-Za-z\d_.-]*`), with no body and no
+upgrade, and refuses anything else, and any path holding `%`, `..`, `//` or
+`\`, with a **403** and a `docker-gate.ro-refused` line. It is narrower than
+the Tecnativa proxy it replaces (`CONTAINERS=1` there also passed `logs`,
+`export`, `archive` reads). These refusals are what this socket is, **not**
+strict-profile enforcement: the main socket and `TP_DOCKER_GATE_MODE` stay
+observe-only. The listener opens on every gate host (nothing connects to it
+until the switch is on); if it cannot open, the gate logs
+`docker-gate.ro-socket-unavailable` and keeps serving the main socket.
+
+**The switch** (off by default): `docker_gate_ingress_socket: true` writes the
+root-owned `<install>/lib/docker-gate/ingress-socket.on`; `false` removes it;
+empty (the default, and every update converge) leaves it alone. The daemon
+(`src/deploy/ingress.ts` `ingressDockerGateEnabled`) uses the gate only when the
+switch file AND `/run/turbopanel-gate/ro` exist. Then both Traefiks mount the
+DIRECTORY read-only at `/var/run/turbopanel-gate` (a directory, so a gate
+restart that recreates the socket does not strand Traefik on a dead inode) and
+use `--providers.docker.endpoint=unix:///var/run/turbopanel-gate/docker.sock`.
+The shared ingress project drops the `docker-socket-proxy` service (and
+`--remove-orphans` deletes the Tecnativa container) once no service Traefik
+compose file on disk still names it; until then it keeps the proxy without
+Traefik depending on it. The anonymous shared Traefik (no
+`hosting-ingress` descriptor yet, so no `turbopanel.role=ingress` label for the
+allowance) keeps the proxy until it has one. Without the switch both compose
+documents are byte for byte what they were.
+
+**Policy.** A container labelled `turbopanel.role=ingress` (both Traefiks) may
+bind exactly `/run/turbopanel-gate/ro`, read-only (`ingress-socket`
+allowance). Its parent (the main socket), a writable mount, a path below it, a
+non-ingress container, and the engine socket stay findings (corpus `ro-socket-*`
+attacks, `platform.test.ts`). Like the platform allowance this rests on a label
+the daemon stamps: a false-positive remover, not a boundary.
+
 ## Wire behaviour that is not a pass-through
 
 The gate refuses, even in observe mode: `Expect:` requests (417), create
@@ -174,6 +215,9 @@ registry auth, query strings, request bodies, the approval token itself. An
   tmpfiles.d and `ExecStartPre=+`.
 - `TP_DOCKER_GATE_MODE` accepts only `observe`; the unit pins it. Enforcement
   is a later stage and must arrive with its own tests.
+- The read-only listener's directory holds nothing but its socket, and never
+  becomes a parent of (or the same as) the main socket's directory: a Traefik
+  mounts it.
 - The gate source is root-owned in `<install>/lib/docker-gate/`; `tp` can read
   it, never change it.
 - `src/permissions/daemon-permissions.ts` grants the daemon read + write on
@@ -184,15 +228,34 @@ registry auth, query strings, request bodies, the approval token itself. An
 ## Stages (plan: closing the Docker route)
 
 1. Gate service, observe mode, nothing routed through it.
-2. **This role (added)**: platform allowance, ownership observation, signed
-   approval verifier, `/grpc` + `/session` proven end to end, still observe.
-3. Traefik on a read-only filtered socket; the tp-created Tecnativa container
-   is removed.
+2. Platform allowance, ownership observation, signed approval verifier,
+   `/grpc` + `/session` proven end to end, still observe.
+3. **This role (added)**: Traefik on a read-only filtered socket behind a
+   per-host switch (off by default); with it on, the tp-created Tecnativa
+   container is removed.
 4. `tp` switches to the gate (`DOCKER_HOST`, `TURBOPANEL_DOCKER_SOCKET`), drops
    the `sudo -u self docker` fallback, **enforce mode**; `tp` still in `docker`.
 5. `tp` leaves the `docker` group; the real socket is root-only.
 
 Break-glass at every stage: `systemctl stop turbopanel-docker-gate` as root.
+
+## What stage 4 needs from stage 3
+
+- Turn the switch on by default (or for every managed host) and prove it on
+  canary with `scripts/docker-gate-proof.sh` section 5, before enforcement:
+  an enforcing gate refuses the Tecnativa container's socket bind.
+- The Tecnativa container stays on a host until every TCP/UDP service with a
+  service Traefik has been redeployed once with the switch on: stage 4 cannot
+  claim "no socket mounts" before that (re-render them during the switch, or
+  check `serviceIngressUsesSocketProxy` is false).
+- Turning the switch off again re-renders the shared Traefik on its next
+  deploy; service Traefiks already on the gate keep working (the listener is
+  always on) until their own redeploy.
+- `/containers/{id}/json` still hands Traefik every container's `Config.Env`,
+  as Tecnativa did: redacting it needs response rewriting (a separate change).
+- The `ingress-socket` allowance trusts `turbopanel.role=ingress`, a label the
+  daemon (and possibly tenant Compose) can set; enforcement needs tenant
+  Compose to be refused `turbopanel.*` / `com.turbopanel.*` labels.
 
 ## Lockouts to expect when enforcement arrives (stage 4; none bite in stage 2)
 

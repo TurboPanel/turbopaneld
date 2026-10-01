@@ -68,6 +68,22 @@ export function labelsOf(value: unknown): Labels {
   return out;
 }
 
+/**
+ * Directory of the gate's read-only listener (readonly.ts). Only a Traefik
+ * (`turbopanel.role=ingress`) may bind it, read-only, and only exactly it:
+ * never its parent, which holds the main gate socket.
+ */
+export const DEFAULT_INGRESS_SOCKET_DIR = "/run/turbopanel-gate/ro";
+
+/**
+ * Both Traefiks: the shared hosting one and each service's TCP/UDP one. The
+ * daemon stamps this label itself, so like the platform allowance it removes
+ * a false positive, it is not a boundary.
+ */
+export function isIngressContainer(labels: Labels): boolean {
+  return labels[LABEL_ROLE] === "ingress";
+}
+
 /** The platform's own system containers (ProxySQL, orchestrator, engines, ingress). */
 export function isPlatformContainer(labels: Labels): boolean {
   if ((labels[LABEL_MANAGED_ENGINE] ?? "") !== "") return true;

@@ -9,7 +9,7 @@ import {
   isValidIpv4Literal,
   isValidIpv6Literal,
 } from "../contracts/commands-contracts.ts";
-import type { LayoutPaths } from "../paths/layout.ts";
+import { type LayoutPaths, PROD_HOME_DEFAULT } from "../paths/layout.ts";
 import { isDaemonReservedHostingSite } from "./instance-acme-http01.ts";
 import {
   parseComposePsEntries,
@@ -55,6 +55,73 @@ const TRAEFIK_IMAGE = "traefik:v3.6.6";
  */
 const SOCKET_PROXY_IMAGE = "tecnativa/docker-socket-proxy:0.3.0";
 const SOCKET_PROXY_PORT = 2375;
+const SOCKET_PROXY_ENDPOINT =
+  `tcp://${SOCKET_PROXY_COMPOSE_SERVICE_NAME}:${SOCKET_PROXY_PORT}`;
+
+/**
+ * Docker gate stage 3 (opt-in): the directory holding the root-owned gate's
+ * READ-ONLY listener (`orchestration/roles/docker-gate/files/readonly.ts`),
+ * which answers only container list / inspect, events, version and ping. A
+ * directory of its own, so mounting it never exposes the gate's main socket;
+ * the directory (not the socket file) is mounted so a gate restart, which
+ * recreates the socket, does not strand Traefik on a dead inode.
+ */
+export const INGRESS_GATE_SOCKET_DIR = "/run/turbopanel-gate/ro";
+const INGRESS_GATE_MOUNT = "/var/run/turbopanel-gate";
+const INGRESS_GATE_ENDPOINT = `unix://${INGRESS_GATE_MOUNT}/docker.sock`;
+/**
+ * The switch (off by default): a root-owned marker in the gate's own source
+ * directory (`root:tp 0750`, so the daemon can read it and never create it),
+ * written by the docker-gate role when `docker_gate_ingress_socket` is true.
+ * It sticks across converges until the role is run with `false`. Without it,
+ * both Traefiks keep the socket proxy exactly as before.
+ */
+export const INGRESS_GATE_SWITCH_FILE =
+  `${PROD_HOME_DEFAULT}/lib/docker-gate/ingress-socket.on`;
+
+/** Where a Traefik reaches Docker: the socket proxy, or the gate's read-only socket. */
+export type TraefikDockerSource = "socket-proxy" | "gate";
+
+/**
+ * The shared Traefik's Docker access. In gate mode the socket proxy stays in
+ * the project only while a service Traefik rendered before the switch still
+ * points at it (`keepSocketProxy`); the next render drops it and
+ * `--remove-orphans` deletes the container.
+ */
+export type SharedTraefikDocker =
+  | { source: "socket-proxy" }
+  | { source: "gate"; keepSocketProxy: boolean };
+
+const VIA_SOCKET_PROXY: SharedTraefikDocker = { source: "socket-proxy" };
+
+/**
+ * True when Traefik should use the gate's read-only socket: the switch file
+ * is there AND so is the gate's read-only directory (created by tmpfiles and
+ * the gate unit, so it survives gate restarts; a host where the gate failed
+ * to install keeps the socket proxy).
+ */
+export async function ingressDockerGateEnabled(
+  stat: (path: string) => Promise<Deno.FileInfo> = Deno.stat,
+): Promise<boolean> {
+  const probe = (path: string) => stat(path).catch(() => undefined);
+  const [flag, dir] = await Promise.all([
+    probe(INGRESS_GATE_SWITCH_FILE),
+    probe(INGRESS_GATE_SOCKET_DIR),
+  ]);
+  return flag?.isFile === true && dir?.isDirectory === true;
+}
+
+function dockerEndpoint(source: TraefikDockerSource): string {
+  return source === "gate" ? INGRESS_GATE_ENDPOINT : SOCKET_PROXY_ENDPOINT;
+}
+
+function gateVolumeLines(source: TraefikDockerSource): string[] {
+  if (source !== "gate") return [];
+  return [
+    "    volumes:",
+    `      - ${INGRESS_GATE_SOCKET_DIR}:${INGRESS_GATE_MOUNT}:ro`,
+  ];
+}
 const TRAEFIK_LOOPBACK = "127.0.0.1";
 const TRAEFIK_HTTP_PORT = 7080;
 const TRAEFIK_HTTPS_PORT = 7443;
@@ -374,6 +441,7 @@ function tcpUdpPortLines(entries: readonly TcpUdpIngressEntry[]): string[] {
 export function traefikCompose(
   ingressNetwork: string,
   identity?: SystemComponentDescriptor,
+  docker: SharedTraefikDocker = VIA_SOCKET_PROXY,
 ): string {
   assertSafeComposeProjectName(ingressNetwork);
   if (identity !== undefined) {
@@ -396,6 +464,12 @@ export function traefikCompose(
     }`,
     `      ${LABEL_SERVICE_ID}: ${quoteYamlScalar(identity.serviceId)}`,
   ];
+  const viaProxy = docker.source === "socket-proxy";
+  const dependsLines = viaProxy
+    ? ["    depends_on:", `      - ${SOCKET_PROXY_COMPOSE_SERVICE_NAME}`]
+    : [];
+  const keepProxy = viaProxy || docker.keepSocketProxy;
+  const proxyLines = keepProxy ? socketProxyServiceLines(ingressNetwork) : [];
 
   const lines = [
     `name: ${ingressNetwork}`,
@@ -407,7 +481,7 @@ export function traefikCompose(
     "    restart: unless-stopped",
     "    command:",
     "      - --providers.docker=true",
-    `      - --providers.docker.endpoint=${socketProxyEndpoint()}`,
+    `      - --providers.docker.endpoint=${dockerEndpoint(docker.source)}`,
     "      - --providers.docker.exposedbydefault=false",
     `      - --providers.docker.network=${ingressNetwork}`,
     `      - --entrypoints.web.address=:${TRAEFIK_HTTP_PORT}`,
@@ -434,11 +508,11 @@ export function traefikCompose(
     `      - ${TRAEFIK_LOOPBACK}:${TRAEFIK_HTTPS_PORT}:${TRAEFIK_HTTPS_PORT}`,
     `      - ${TRAEFIK_LOOPBACK}:${TRAEFIK_METRICS_PORT}:${TRAEFIK_METRICS_PORT}`,
     ...labelLines,
+    ...gateVolumeLines(docker.source),
     "    networks:",
     `      - ${ingressNetwork}`,
-    "    depends_on:",
-    `      - ${SOCKET_PROXY_COMPOSE_SERVICE_NAME}`,
-    ...socketProxyServiceLines(ingressNetwork),
+    ...dependsLines,
+    ...proxyLines,
     "",
     "networks:",
     `  ${ingressNetwork}:`,
@@ -446,11 +520,6 @@ export function traefikCompose(
     "",
   ];
   return lines.join("\n");
-}
-
-/** Where every Traefik on this host reaches Docker. */
-function socketProxyEndpoint(): string {
-  return `tcp://${SOCKET_PROXY_COMPOSE_SERVICE_NAME}:${SOCKET_PROXY_PORT}`;
 }
 
 /**
@@ -535,6 +604,7 @@ export function serviceTraefikCompose(
   entries: readonly TcpUdpIngressEntry[],
   identity: ServiceIngressIdentity,
   ingressNetwork: string,
+  docker: TraefikDockerSource = "socket-proxy",
 ): string {
   assertSafeServiceIngressIdentity(identity);
   assertSafeComposeProjectName(ingressNetwork);
@@ -560,8 +630,9 @@ export function serviceTraefikCompose(
     "      - --providers.docker=true",
     // The host's socket proxy lives in the shared ingress project and is
     // reachable over the ingress network this container already joins — one
-    // proxy per host, not one per service.
-    `      - --providers.docker.endpoint=${socketProxyEndpoint()}`,
+    // proxy per host, not one per service. In gate mode: the gate's
+    // read-only socket, mounted below.
+    `      - --providers.docker.endpoint=${dockerEndpoint(docker)}`,
     "      - --providers.docker.exposedbydefault=false",
     `      - --providers.docker.network=${ingressNetwork}`,
     `      - ${
@@ -572,6 +643,7 @@ export function serviceTraefikCompose(
     "    labels:",
     `      ${LABEL_ROLE}: ${LABEL_ROLE_INGRESS}`,
     `      ${LABEL_SERVICE_ID}: ${quoteYamlScalar(identity.serviceId)}`,
+    ...gateVolumeLines(docker),
     "    networks:",
     `      - ${ingressNetwork}`,
     "",
@@ -742,7 +814,59 @@ export type EnsureHostingIngressDeps = {
   runDocker?: RunDockerFn;
   /** When set, skips binary/unit install (host-free tests). */
   ensureHostingCaddyRuntime?: (layout: LayoutPaths) => Promise<void>;
+  /** Docker gate stage 3 switch; defaults to {@link ingressDockerGateEnabled}. */
+  ingressDockerGate?: () => Promise<boolean>;
 };
+
+/**
+ * True while a service Traefik rendered before the gate switch still reaches
+ * Docker through the shared socket proxy (its compose file on disk names the
+ * proxy). The shared project keeps the proxy until none does.
+ */
+export async function serviceIngressUsesSocketProxy(
+  layout: LayoutPaths,
+): Promise<boolean> {
+  const root = join(layout.stateDir, "ingress", "services");
+  let entries: Deno.DirEntry[];
+  try {
+    entries = await Array.fromAsync(Deno.readDir(root));
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) return false;
+    throw err;
+  }
+  const uses = await Promise.all(
+    entries.filter((entry) => entry.isDirectory).map((entry) =>
+      composeNamesSocketProxy(join(root, entry.name, "docker-compose.yml"))
+    ),
+  );
+  return uses.includes(true);
+}
+
+async function composeNamesSocketProxy(path: string): Promise<boolean> {
+  try {
+    return (await Deno.readTextFile(path)).includes(SOCKET_PROXY_ENDPOINT);
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) return false;
+    throw err;
+  }
+}
+
+/**
+ * The anonymous (pre-`system.reconcile`) shared Traefik carries no
+ * `turbopanel.role=ingress` label, so the gate would not grant it the
+ * read-only socket bind: it keeps the socket proxy until it has an identity.
+ */
+async function sharedTraefikDocker(
+  layout: LayoutPaths,
+  hasIdentity: boolean,
+  gateEnabled: () => Promise<boolean>,
+): Promise<SharedTraefikDocker> {
+  if (!hasIdentity || !(await gateEnabled())) return VIA_SOCKET_PROXY;
+  return {
+    source: "gate",
+    keepSocketProxy: await serviceIngressUsesSocketProxy(layout),
+  };
+}
 
 /**
  * Ensure the shared HTTP-only Traefik + hosting Caddy runtime.
@@ -779,9 +903,14 @@ export async function ensureHostingIngress(
     );
   }
 
+  const docker = await sharedTraefikDocker(
+    layout,
+    descriptor !== undefined,
+    deps?.ingressDockerGate ?? (() => ingressDockerGateEnabled()),
+  );
   await Deno.writeTextFile(
     composePath,
-    traefikCompose(ingressNetwork, descriptor),
+    traefikCompose(ingressNetwork, descriptor, docker),
     { mode: 0o640 },
   );
   // No `-p`: the compose file declares its own project through `name:`.
@@ -909,6 +1038,8 @@ export async function inspectHostingIngressContainer(
 /** Optional test seams for {@link ensureServiceIngress}. */
 export type EnsureServiceIngressDeps = {
   runDocker?: RunDockerFn;
+  /** Docker gate stage 3 switch; defaults to {@link ingressDockerGateEnabled}. */
+  ingressDockerGate?: () => Promise<boolean>;
 };
 
 /**
@@ -932,9 +1063,14 @@ export async function ensureServiceIngress(
   const ingressDir = serviceIngressDir(layout, serviceId);
   await Deno.mkdir(ingressDir, { recursive: true, mode: 0o750 });
   const composePath = serviceIngressComposePath(layout, serviceId);
+  const gateEnabled = deps?.ingressDockerGate ??
+    (() => ingressDockerGateEnabled());
+  const docker: TraefikDockerSource = (await gateEnabled())
+    ? "gate"
+    : "socket-proxy";
   await Deno.writeTextFile(
     composePath,
-    serviceTraefikCompose(entries, identity, ingressNetwork),
+    serviceTraefikCompose(entries, identity, ingressNetwork, docker),
     { mode: 0o640 },
   );
   const project = serviceIngressProject(serviceId);

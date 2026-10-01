@@ -91,6 +91,8 @@ type UnitVars = {
   docker_gate_deno_bin: string;
   docker_gate_run_dir: string;
   docker_gate_socket: string;
+  docker_gate_ro_run_dir: string;
+  docker_gate_ro_socket: string;
   docker_gate_upstream_socket: string;
   docker_gate_cache_dir: string;
   docker_gate_group: string;
@@ -106,6 +108,8 @@ const DEFAULT_VARS: UnitVars = {
   docker_gate_deno_bin: "/opt/turbopanel/vendor/deno/current/deno",
   docker_gate_run_dir: "/run/turbopanel-gate",
   docker_gate_socket: "/run/turbopanel-gate/docker.sock",
+  docker_gate_ro_run_dir: "/run/turbopanel-gate/ro",
+  docker_gate_ro_socket: "/run/turbopanel-gate/ro/docker.sock",
   docker_gate_upstream_socket: "/var/run/docker.sock",
   docker_gate_cache_dir: "/var/cache/turbopanel-docker-gate",
   docker_gate_group: "tp",
@@ -250,6 +254,62 @@ jinjaTest(
 );
 
 jinjaTest(
+  "stage 3: the read-only listener lives in a root-only directory of its own inside the gate's",
+  async () => {
+    const unit = await renderUnit();
+    const service = directives(unit, "Service");
+    assert(
+      service.includes(
+        "Environment=TP_DOCKER_GATE_RO_SOCKET=/run/turbopanel-gate/ro/docker.sock",
+      ),
+    );
+    assert(
+      service.includes(
+        "ExecStartPre=+/usr/bin/install -d -m 0750 -o root -g root /run/turbopanel-gate/ro",
+      ),
+    );
+    const defaults = await read("defaults/main.yml");
+    assertStringIncludes(
+      defaults,
+      'docker_gate_ro_run_dir: "{{ docker_gate_run_dir }}/ro"',
+    );
+    assertStringIncludes(defaults, 'docker_gate_ingress_socket: ""');
+    const tasks = await read("tasks/install.yml");
+    assertStringIncludes(
+      tasks,
+      "d {{ docker_gate_ro_run_dir }} 0750 root root -",
+    );
+  },
+);
+
+test("stage 3: Traefik's switch is root-owned, sticky, and off unless turned on", async () => {
+  const install = await read("tasks/install.yml");
+  const on = install.slice(
+    install.indexOf("Turn on Traefik's read-only gate socket"),
+    install.indexOf("Turn off Traefik's read-only gate socket"),
+  );
+  assertStringIncludes(on, 'dest: "{{ docker_gate_ingress_switch_file }}"');
+  assertStringIncludes(on, "owner: root");
+  assertStringIncludes(on, 'mode: "0640"');
+  // An empty variable (every update converge) neither writes nor removes it.
+  for (const task of [on, install.slice(install.indexOf("Turn off Traefik"))]) {
+    assertStringIncludes(
+      task,
+      "(docker_gate_ingress_socket | string | length) > 0",
+    );
+  }
+  const defaults = await read("defaults/main.yml");
+  assertStringIncludes(
+    defaults,
+    'docker_gate_ingress_switch_file: "{{ docker_gate_dir }}/ingress-socket.on"',
+  );
+  assertStringIncludes(
+    await Deno.readTextFile(join(DAEMON_ROOT, "src/deploy/ingress.ts")),
+    "/lib/docker-gate/ingress-socket.on",
+  );
+});
+
+jinjaTest(
   "the gate runs with scoped Deno permissions and no way to spawn or reach the network",
   async () => {
     const unit = await renderUnit();
@@ -273,7 +333,7 @@ jinjaTest(
     );
     assert(
       argv.includes(
-        "--allow-net=unix:/run/turbopanel-gate/docker.sock,unix:/var/run/docker.sock",
+        "--allow-net=unix:/run/turbopanel-gate/docker.sock,unix:/run/turbopanel-gate/ro/docker.sock,unix:/var/run/docker.sock",
       ),
     );
     assert(argv.includes("--allow-env=TP_DOCKER_GATE_*"));
@@ -378,7 +438,11 @@ jinjaTest(
     const runDir = join(dir, "run");
     await Deno.mkdir(runDir);
     const socket = join(runDir, "docker.sock");
+    await Deno.mkdir(join(runDir, "ro"));
+    const roSocket = join(runDir, "ro", "docker.sock");
     const unit = await renderUnit({
+      docker_gate_ro_run_dir: join(runDir, "ro"),
+      docker_gate_ro_socket: roSocket,
       docker_gate_gid: "",
       docker_gate_dir: join(ROLE, "files"),
       docker_gate_deno_bin: Deno.execPath(),
@@ -443,6 +507,19 @@ jinjaTest(
       );
       assert(got.endsWith("\r\n\r\npong"), got);
       assertEquals((await Deno.stat(socket)).mode! & 0o777, 0o660);
+      const ro = await Deno.connect({ transport: "unix", path: roSocket });
+      await ro.write(
+        new TextEncoder().encode(
+          "POST /containers/create HTTP/1.1\r\nHost: d\r\nContent-Length: 0\r\n\r\n",
+        ),
+      );
+      const refused = new Uint8Array(4096);
+      const n = await ro.read(refused);
+      ro.close();
+      assertStringIncludes(
+        new TextDecoder().decode(refused.slice(0, n ?? 0)),
+        "403 Forbidden",
+      );
     } finally {
       child.kill("SIGTERM");
       const out = await child.output();

@@ -21,6 +21,18 @@ docker_gate_deno_bin: "{{ turbopanel_install_root }}/vendor/deno/current/deno"
 # swap): the only thing in it is the gate's listening socket.
 docker_gate_run_dir: /run/turbopanel-gate
 docker_gate_socket: "{{ docker_gate_run_dir }}/docker.sock"
+# Stage 3: the READ-ONLY listener for Traefik (container list / inspect,
+# events, version, ping; everything else is a 403). A directory of its own,
+# root:root 0750, so a Traefik can mount it without the main socket.
+docker_gate_ro_run_dir: "{{ docker_gate_run_dir }}/ro"
+docker_gate_ro_socket: "{{ docker_gate_ro_run_dir }}/docker.sock"
+# Whether the daemon points both Traefiks at the read-only socket instead of
+# the Tecnativa socket-proxy container. Sticky: true writes the root-owned
+# switch file, false removes it, empty (the default) leaves it as it is, so an
+# update converge that does not pass the variable never flips it. Off until
+# someone turns it on.
+docker_gate_ingress_socket: ""
+docker_gate_ingress_switch_file: "{{ docker_gate_dir }}/ingress-socket.on"
 docker_gate_upstream_socket: /var/run/docker.sock
 docker_gate_cache_dir: /var/cache/turbopanel-docker-gate
 docker_gate_summary_seconds: 300
@@ -60,6 +72,7 @@ docker_gate_files:
   - platform.ts
   - policy.ts
   - proxy.ts
+  - readonly.ts
   - resolve.ts
   - review.ts
   - stats.ts

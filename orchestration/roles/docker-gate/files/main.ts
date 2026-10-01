@@ -28,12 +28,19 @@ import { GateStats } from "./stats.ts";
 import { describeError } from "./util.ts";
 
 export const DEFAULT_GATE_SOCKET = "/run/turbopanel-gate/docker.sock";
+/**
+ * Where the unit puts the read-only listener: a directory of its own, so a
+ * Traefik container can mount it without the main socket (see readonly.ts).
+ */
+export const DEFAULT_RO_SOCKET = "/run/turbopanel-gate/ro/docker.sock";
 export const DEFAULT_UPSTREAM_SOCKET = "/var/run/docker.sock";
 export const DEFAULT_SUMMARY_SECONDS = 300;
 export const MAX_CONNECTIONS = 512;
 
 export type GateConfig = {
   socket: string;
+  /** The read-only listener for Traefik; unset = no such listener. */
+  roSocket?: string;
   upstream: string;
   /** Numeric group that may open the gate socket; unset leaves it as created. */
   socketGid?: number;
@@ -65,6 +72,16 @@ function positiveInt(value: string | undefined, fallback: number): number {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+/** The read-only listener's directory (the default when none is configured). */
+function ingressSocketDirOf(roSocket: string | undefined): string {
+  const path = pathList(roSocket)[0];
+  if (path === undefined) return DEFAULT_POLICY_CONFIG.ingressSocketDir;
+  const slash = path.lastIndexOf("/");
+  return slash > 0
+    ? path.slice(0, slash)
+    : DEFAULT_POLICY_CONFIG.ingressSocketDir;
+}
+
 /** Read the gate's settings; throws on a mode other than `observe`. */
 export function loadConfig(env: Env): GateConfig {
   const mode = env.TP_DOCKER_GATE_MODE ?? "observe";
@@ -83,6 +100,7 @@ export function loadConfig(env: Env): GateConfig {
   const gid = Number(env.TP_DOCKER_GATE_SOCKET_GID);
   return {
     socket: env.TP_DOCKER_GATE_SOCKET || DEFAULT_GATE_SOCKET,
+    roSocket: pathList(env.TP_DOCKER_GATE_RO_SOCKET)[0],
     upstream: env.TP_DOCKER_GATE_UPSTREAM || DEFAULT_UPSTREAM_SOCKET,
     socketGid: Number.isInteger(gid) && gid > 0 ? gid : undefined,
     approvalKeyFile: pathList(env.TP_DOCKER_GATE_APPROVAL_PUBKEY)[0],
@@ -95,6 +113,7 @@ export function loadConfig(env: Env): GateConfig {
       denyPrefixes: [...DEFAULT_POLICY_CONFIG.denyPrefixes, ...denyExtra],
       dockerSockets: DEFAULT_POLICY_CONFIG.dockerSockets,
       capAllowlist: caps,
+      ingressSocketDir: ingressSocketDirOf(env.TP_DOCKER_GATE_RO_SOCKET),
       platform: {
         readOnly: platformRo.length > 0
           ? platformRo
@@ -129,14 +148,54 @@ async function removeStaleSocket(path: string): Promise<void> {
   await Deno.remove(path);
 }
 
-async function openListener(config: GateConfig): Promise<Deno.Listener> {
-  await removeStaleSocket(config.socket);
-  const listener = Deno.listen({ transport: "unix", path: config.socket });
-  await Deno.chmod(config.socket, 0o660);
-  if (config.socketGid !== undefined) {
-    await Deno.chown(config.socket, null, config.socketGid);
-  }
+async function openListener(
+  path: string,
+  gid: number | undefined,
+): Promise<Deno.Listener> {
+  await removeStaleSocket(path);
+  const listener = Deno.listen({ transport: "unix", path });
+  await Deno.chmod(path, 0o660);
+  if (gid !== undefined) await Deno.chown(path, null, gid);
   return listener;
+}
+
+/**
+ * The read-only listener, root-only (`root:root 0660`: only root and a
+ * container's root reach it). A failure to open it is logged and the gate
+ * keeps serving the main socket: nothing routes through either yet.
+ */
+async function openReadOnlyListener(
+  path: string | undefined,
+  log: (record: LogRecord) => void,
+): Promise<Deno.Listener | undefined> {
+  if (path === undefined) return undefined;
+  try {
+    return await openListener(path, undefined);
+  } catch (err) {
+    log({
+      level: "error",
+      event: "docker-gate.ro-socket-unavailable",
+      socket: path,
+      error: describeError(err),
+    });
+    return undefined;
+  }
+}
+
+/** Accept connections until the listener closes, capped at MAX_CONNECTIONS. */
+async function serve(listener: Deno.Listener, deps: ProxyDeps): Promise<void> {
+  let active = 0;
+  for await (const conn of listener) {
+    if (active >= MAX_CONNECTIONS) {
+      conn.close();
+      continue;
+    }
+    active++;
+    const finished = () => {
+      active--;
+    };
+    handleConnection(conn, deps).then(finished, finished);
+  }
 }
 
 function connectUpstream(path: string): () => Promise<GateConn> {
@@ -190,21 +249,12 @@ export async function startGate(
     approvalKeys,
     nowSec: config.nowSec,
   };
-  const listener = await openListener(config);
-  let active = 0;
-  const serving = (async () => {
-    for await (const conn of listener) {
-      if (active >= MAX_CONNECTIONS) {
-        conn.close();
-        continue;
-      }
-      active++;
-      const finished = () => {
-        active--;
-      };
-      handleConnection(conn, deps).then(finished, finished);
-    }
-  })();
+  const listener = await openListener(config.socket, config.socketGid);
+  const serving = serve(listener, deps);
+  const roListener = await openReadOnlyListener(config.roSocket, log);
+  const roServing = roListener
+    ? serve(roListener, { ...deps, readOnly: true })
+    : Promise.resolve();
   const timer = setInterval(
     () =>
       log({ level: "info", event: "docker-gate.summary", ...stats.snapshot() }),
@@ -216,6 +266,7 @@ export async function startGate(
     event: "docker-gate.started",
     mode: "observe",
     socket: config.socket,
+    roSocket: roListener ? config.roSocket : null,
     upstream: config.upstream,
     bindRoots: config.policy.bindRoots,
     platformRoots: config.policy.platform,
@@ -233,8 +284,12 @@ export async function startGate(
         ...stats.snapshot(),
       });
       listener.close();
-      await serving;
+      roListener?.close();
+      await Promise.all([serving, roServing]);
       await removeStaleSocket(config.socket);
+      if (roListener && config.roSocket) {
+        await removeStaleSocket(config.roSocket);
+      }
     },
   };
 }
@@ -243,6 +298,7 @@ export async function startGate(
 export const GATE_ENV_KEYS = [
   "TP_DOCKER_GATE_MODE",
   "TP_DOCKER_GATE_SOCKET",
+  "TP_DOCKER_GATE_RO_SOCKET",
   "TP_DOCKER_GATE_UPSTREAM",
   "TP_DOCKER_GATE_SOCKET_GID",
   "TP_DOCKER_GATE_BIND_ROOTS",
