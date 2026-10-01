@@ -762,7 +762,7 @@ it regresses:
 - **Signed manifests** — `src/update/signing.ts`: every production channel
   manifest carries an Ed25519 `signature` over its canonical JSON (sorted
   keys, compact, `signature` removed). `generate-channel-manifest.ts` signs
-  with `RELEASE_SIGNING_KEY` (PKCS#8 PEM; the CI secret) and **refuses to
+  with `RELEASE_SIGNING_KEY` (PKCS#8 PEM; in CI the env var is mapped from the `TURBOPANEL_RELEASE_SIGNING_KEY` environment secret: `canary` environment for `publish-daemon-trunk.yml`, `rc`/`release` for the promote path and `release.yml`) and **refuses to
   write an unsigned manifest**. The public key is pinned twice —
   `RELEASE_SIGNING_PUBLIC_KEY_HEX` and `TP_RELEASE_SIGNING_PUBLIC_KEY` in
   `run.sh` (`signing.test.ts` pins them together, and byte-compares Deno's
