@@ -22,6 +22,13 @@ import {
   startGate,
 } from "../../orchestration/roles/docker-gate/files/main.ts";
 import type { LogRecord } from "../../orchestration/roles/docker-gate/files/proxy.ts";
+import { APPROVAL_LABEL } from "../../orchestration/roles/docker-gate/files/approval.ts";
+import {
+  generateKeys,
+  payloadFor,
+  signToken,
+  type TestKeys,
+} from "../testing/docker-gate-approval.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -105,7 +112,17 @@ type Harness = {
   connect(): Promise<Deno.UnixConn>;
 };
 
-async function withGate(fn: (h: Harness) => Promise<void>): Promise<void> {
+type GateOptions = {
+  /** Extra `TP_DOCKER_GATE_*` settings. */
+  env?: Record<string, string>;
+  /** The clock approvals are judged against. */
+  nowSec?: () => number;
+};
+
+async function withGate(
+  fn: (h: Harness) => Promise<void>,
+  options: GateOptions = {},
+): Promise<void> {
   const dir = await Deno.makeTempDir({ prefix: "tp-gate-" });
   const engineSocket = join(dir, "engine.sock");
   const gateSocket = join(dir, "gate.sock");
@@ -127,7 +144,9 @@ async function withGate(fn: (h: Harness) => Promise<void>): Promise<void> {
     TP_DOCKER_GATE_SOCKET: gateSocket,
     TP_DOCKER_GATE_UPSTREAM: engineSocket,
     TP_DOCKER_GATE_SUMMARY_SEC: "3600",
+    ...options.env,
   });
+  config.nowSec = options.nowSec;
   const gate = await startGate(config, (record) => logs.push(record));
   Object.assign(harness, {
     gate,
@@ -148,13 +167,20 @@ async function withGate(fn: (h: Harness) => Promise<void>): Promise<void> {
   }
 }
 
-const e2e = (name: string, fn: (h: Harness) => Promise<void>) =>
+const e2e = (
+  name: string,
+  fn: (h: Harness) => Promise<void>,
+  options?: GateOptions,
+) =>
   test({
     name,
     sanitizeOps: false,
     sanitizeResources: false,
-    fn: () => withGate(fn),
+    fn: () => withGate(fn, options),
   });
+
+/** Compose-stamped identity: a create that carries it is not `unlabeled-create`. */
+const PROJECT_LABELS = { "com.docker.compose.project": "p" };
 
 const OK_EMPTY = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
 
@@ -215,6 +241,7 @@ e2e(
     });
     const body = JSON.stringify({
       Image: "alpine",
+      Labels: PROJECT_LABELS,
       HostConfig: { Privileged: true, Binds: ["/:/h"], NetworkMode: "host" },
     });
     const request =
@@ -246,7 +273,10 @@ e2e(
       seen = await readRequest(conn);
       await conn.write(encodeText(OK_EMPTY));
     });
-    const json = JSON.stringify({ HostConfig: { CapAdd: ["SYS_ADMIN"] } });
+    const json = JSON.stringify({
+      Labels: PROJECT_LABELS,
+      HostConfig: { CapAdd: ["SYS_ADMIN"] },
+    });
     const half = Math.floor(json.length / 2);
     const chunked = `${half.toString(16)}\r\n${json.slice(0, half)}\r\n` +
       `${(json.length - half).toString(16)}\r\n${
@@ -401,7 +431,10 @@ e2e(
     await client.write(encodeText(UPGRADE));
     assertEquals(await timeout(readResponse(reader, "POST")), OK_EMPTY);
     // What follows is a plain request, so the policy still sees it.
-    const body = JSON.stringify({ HostConfig: { Privileged: true } });
+    const body = JSON.stringify({
+      Labels: PROJECT_LABELS,
+      HostConfig: { Privileged: true },
+    });
     await client.write(
       encodeText(
         `POST /containers/create HTTP/1.1\r\nHost: d\r\nContent-Length: ${body.length}\r\n\r\n${body}`,
@@ -409,7 +442,8 @@ e2e(
     );
     assertEquals(await timeout(readResponse(reader, "POST")), OK_EMPTY);
     assertEquals(wouldDeny(h.logs), ["privileged"]);
-    assertEquals(seen.length, 2);
+    // The attach is first looked up (inspect), then relayed; then the create.
+    assertEquals(seen.filter((line) => !line.includes("/json")).length, 2);
     client.close();
   },
 );
@@ -554,3 +588,308 @@ async function assertRejectsNotFound(path: string): Promise<void> {
   }
   throw new Error(`${path} still exists`);
 }
+
+const CREATED = "HTTP/1.1 201 Created\r\nContent-Length: 2\r\n\r\n{}";
+
+/** One create, sent on a fresh connection; resolves with what the engine saw. */
+async function sendCreate(h: Harness, body: unknown): Promise<string> {
+  let forwarded = "";
+  h.engine(async (conn) => {
+    const seen = await readRequest(conn);
+    forwarded = seen.head + seen.body;
+    await conn.write(encodeText(CREATED));
+  });
+  const json = JSON.stringify(body);
+  const request =
+    `POST /containers/create HTTP/1.1\r\nHost: d\r\nContent-Length: ${json.length}\r\n` +
+    `Connection: close\r\n\r\n${json}`;
+  const client = await h.connect();
+  await client.write(encodeText(request));
+  assertStringIncludes(await timeout(readUntilEof(client)), "201 Created");
+  assertEquals(forwarded, request, "the request is relayed untouched");
+  return forwarded;
+}
+
+const NOW = 1_800_000_000;
+
+/** Approvals on: a trusted key file (public half only) and a fixed clock. */
+async function withApprovals(
+  fn: (h: Harness, keys: TestKeys) => Promise<void>,
+): Promise<void> {
+  const keys = await generateKeys();
+  const dir = await Deno.makeTempDir({ prefix: "tp-gate-keys-" });
+  const keyFile = join(dir, "approval.pub");
+  await Deno.writeTextFile(keyFile, `${keys.rawB64}\n`);
+  try {
+    await withGate((h) => fn(h, keys), {
+      env: { TP_DOCKER_GATE_APPROVAL_PUBKEY: keyFile },
+      nowSec: () => NOW,
+    });
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+}
+
+const privilegedCreate = (token: string, project = "tenantapp") => ({
+  Image: "alpine",
+  Labels: {
+    "com.docker.compose.project": project,
+    [APPROVAL_LABEL]: token,
+  },
+  HostConfig: { Privileged: true, Binds: ["/var/run/docker.sock:/s"] },
+});
+
+const approvalLogs = (logs: LogRecord[]) =>
+  logs.filter((l) => l.event === "docker-gate.approval");
+
+test({
+  name: "a signed approval relaxes exactly the features it names, nothing else",
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: () =>
+    withApprovals(async (h, keys) => {
+      const token = await signToken(
+        keys,
+        payloadFor(NOW, { features: ["privileged"] }),
+      );
+      await sendCreate(h, privilegedCreate(token));
+      // `privileged` is covered; the socket mount is a different feature.
+      assertEquals(wouldDeny(h.logs), ["bind-docker-socket"]);
+      const snapshot = h.gate.stats.snapshot();
+      assertEquals(snapshot.approvals, { accepted: 1 });
+      assertEquals(snapshot.approvedRules, { privileged: 1 });
+      const [line] = approvalLogs(h.logs);
+      assertEquals(line.result, "accepted");
+      assertEquals(line.deployId, "deploy-1");
+      assertEquals(line.covered, ["privileged"]);
+      assertFalse(JSON.stringify(h.logs).includes(token), "token never logged");
+    }),
+});
+
+test({
+  name:
+    "an approval for another project, an expired one and a forged one cover nothing",
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: () =>
+    withApprovals(async (h, keys) => {
+      const features = ["privileged", "docker-socket"];
+      const wrongProject = await signToken(
+        keys,
+        payloadFor(NOW, { features, project: "otherapp" }),
+      );
+      const expired = await signToken(
+        keys,
+        payloadFor(NOW - 1000, { features, exp: NOW - 10 }),
+      );
+      const forged = await signToken(
+        await generateKeys(),
+        payloadFor(NOW, { features }),
+      );
+      for (const token of [wrongProject, expired, forged]) {
+        h.logs.length = 0;
+        await sendCreate(h, privilegedCreate(token));
+        assertEquals(wouldDeny(h.logs), ["privileged", "bind-docker-socket"]);
+      }
+      assertEquals(h.gate.stats.snapshot().approvals, {
+        "rejected:bad-signature": 1,
+        "rejected:expired": 1,
+        "rejected:wrong-project": 1,
+      });
+      assertEquals(h.gate.stats.snapshot().approvedRules, {});
+    }),
+});
+
+e2e(
+  "without a trusted key a token is refused and findings stand",
+  async (h) => {
+    const keys = await generateKeys();
+    const token = await signToken(keys, payloadFor(NOW));
+    await sendCreate(h, privilegedCreate(token));
+    assertEquals(wouldDeny(h.logs), ["privileged", "bind-docker-socket"]);
+    assertEquals(h.gate.stats.snapshot().approvals, {
+      "rejected:approvals-off": 1,
+    });
+    const started = h.logs.find((l) => l.event === "docker-gate.started");
+    assertEquals(started?.approvals, "off");
+  },
+);
+
+e2e(
+  "an unusable key file turns approvals off, loudly, and the gate still serves",
+  async (h) => {
+    const error = h.logs.find((l) =>
+      l.event === "docker-gate.approval-keys-unusable"
+    );
+    assert(error !== undefined);
+    assertEquals(error.level, "error");
+    const started = h.logs.find((l) => l.event === "docker-gate.started");
+    assertEquals(started?.approvals, "off");
+    await sendCreate(h, { Labels: PROJECT_LABELS, HostConfig: {} });
+    assertEquals(wouldDeny(h.logs), []);
+  },
+  { env: { TP_DOCKER_GATE_APPROVAL_PUBKEY: "/nonexistent/approval.pub" } },
+);
+
+const PLATFORM = {
+  "turbopanel.role": "ingress",
+  "com.turbopanel.system.component": "managed-ingress",
+  "com.docker.compose.project": "p",
+};
+
+e2e(
+  "a platform container's config binds are allowed and counted",
+  async (h) => {
+    await sendCreate(h, {
+      Labels: PLATFORM,
+      HostConfig: {
+        Binds: [
+          "/etc/turbopanel/proxysql/proxysql.cnf:/etc/proxysql.cnf:ro",
+          "/etc/turbopanel/proxysql/tls:/var/lib/proxysql/certs:ro",
+        ],
+      },
+    });
+    assertEquals(wouldDeny(h.logs), []);
+    const snapshot = h.gate.stats.snapshot();
+    assertEquals(snapshot.allowances, { "platform-bind": 2 });
+    assertEquals(snapshot.owners, { platform: 1 });
+  },
+);
+
+e2e(
+  "a create no platform label identifies is counted and flagged",
+  async (h) => {
+    await sendCreate(h, {
+      Image: "alpine",
+      Labels: { "io.turbopanel.owner": "x" },
+      HostConfig: {},
+    });
+    assertEquals(wouldDeny(h.logs), ["unlabeled-create"]);
+    assertEquals(h.gate.stats.snapshot().owners, { unlabeled: 1 });
+  },
+);
+
+type InspectAnswer = { status: number; labels?: Record<string, string> };
+
+/** `doc` as a chunked body split in two. */
+function chunked(doc: string): string {
+  const cut = Math.floor(doc.length / 2);
+  const parts = [doc.slice(0, cut), doc.slice(cut)];
+  return parts.map((p) => `${p.length.toString(16)}\r\n${p}\r\n`).join("") +
+    "0\r\n\r\n";
+}
+
+/** Engine that answers inspect from `containers`, and records every other request line. */
+function scriptEngine(
+  h: Harness,
+  containers: Record<string, InspectAnswer>,
+): string[] {
+  const lines: string[] = [];
+  h.engine(async (conn) => {
+    const { head } = await readRequest(conn);
+    const line = head.split("\r\n")[0];
+    const match = /^GET \/containers\/([^/]+)\/json /.exec(line);
+    if (match) {
+      const found = containers[decodeURIComponent(match[1])] ?? { status: 404 };
+      const doc = JSON.stringify({ Config: { Labels: found.labels ?? null } });
+      await conn.write(
+        encodeText(
+          found.status === 200
+            // The real engine answers inspect chunked, in two pieces.
+            ? `HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n${
+              chunked(doc)
+            }`
+            : "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n",
+        ),
+      );
+      return;
+    }
+    lines.push(line);
+    await conn.write(encodeText(OK_EMPTY));
+  });
+  return lines;
+}
+
+async function post(h: Harness, path: string, json = ""): Promise<void> {
+  const client = await h.connect();
+  const length = json === "" ? "" : `Content-Length: ${json.length}\r\n`;
+  await client.write(
+    encodeText(
+      `POST ${path} HTTP/1.1\r\nHost: d\r\n${length}Connection: close\r\n\r\n${json}`,
+    ),
+  );
+  await timeout(readUntilEof(client));
+}
+
+e2e(
+  "actions on containers nothing owns are flagged; owned and unknown ones are not",
+  async (h) => {
+    const relayed = scriptEngine(h, {
+      human: { status: 200, labels: {} },
+      tenant: { status: 200, labels: { "com.docker.compose.project": "app" } },
+      system: {
+        status: 200,
+        labels: { "tp.managed.engine": "postgres" },
+      },
+    });
+    await post(h, "/v1.55/containers/human/stop");
+    await post(h, "/containers/tenant/restart");
+    await post(h, "/containers/system/kill");
+    await post(h, "/containers/ghost/start");
+    await post(h, "/containers/human/exec", '{"Cmd":["true"]}');
+    assertEquals(wouldDeny(h.logs), ["unowned-container", "unowned-container"]);
+    assertEquals(
+      h.logs.filter((l) => l.rule === "unowned-container").map((l) => l.detail),
+      ["human", "human"],
+    );
+    // Every action still reached the engine.
+    assertEquals(relayed.length, 5);
+  },
+);
+
+const H2C_UPGRADE = (path: string) =>
+  `POST ${path} HTTP/1.1\r\nHost: d\r\nConnection: Upgrade\r\nUpgrade: h2c\r\n\r\n`;
+
+e2e(
+  "BuildKit's /session and /grpc upgrades are spliced and counted",
+  async (h) => {
+    const seen: string[] = [];
+    h.engine(async (conn) => {
+      const { head, reader } = await readRequest(conn);
+      const line = head.split("\r\n")[0];
+      seen.push(line);
+      await conn.write(
+        encodeText(
+          "HTTP/1.1 101 UPGRADED\r\nConnection: Upgrade\r\nUpgrade: h2c\r\n\r\nready;",
+        ),
+      );
+      const echoed: string[] = [];
+      while (true) {
+        const bytes = reader.takeBuffered();
+        if (bytes.length > 0) echoed.push(text(bytes));
+        if (await reader.atEof()) break;
+      }
+      await conn.write(encodeText(`${line.split(" ")[1]}:${echoed.join("")}`));
+      await (conn as Deno.UnixConn).closeWrite();
+    });
+    for (const path of ["/v1.55/session", "/v1.55/grpc"]) {
+      const client = await h.connect();
+      // HTTP/2 preface bytes follow the request head and belong to the stream.
+      await client.write(encodeText(`${H2C_UPGRADE(path)}PRI * HTTP/2.0;`));
+      const reader = new BufferedReader(client);
+      assertStringIncludes(text((await timeout(reader.readHead()))!), "101");
+      await client.closeWrite();
+      const rest = text(reader.takeBuffered()) +
+        await timeout(readUntilEof(client));
+      assertEquals(rest, `ready;${path}:PRI * HTTP/2.0;`);
+      client.close();
+    }
+    assertEquals(seen, [
+      "POST /v1.55/session HTTP/1.1",
+      "POST /v1.55/grpc HTTP/1.1",
+    ]);
+    const snapshot = h.gate.stats.snapshot();
+    assertEquals(snapshot.upgrades, { grpc: 1, session: 1 });
+    assertEquals(wouldDeny(h.logs), []);
+  },
+);

@@ -82,6 +82,10 @@ const JINJA_PYTHON = await findJinjaPython();
 const RENDER_REQUIRED = Deno.env.get("CI") === "true";
 
 type UnitVars = {
+  docker_gate_platform_ro_roots: string[];
+  docker_gate_platform_rw_roots: string[];
+  docker_gate_approval_pubkeys: string;
+  docker_gate_approval_pubkey_file: string;
   docker_gate_gid: string;
   docker_gate_dir: string;
   docker_gate_deno_bin: string;
@@ -109,6 +113,18 @@ const DEFAULT_VARS: UnitVars = {
   docker_gate_summary_seconds: 300,
   docker_gate_bind_roots: ["/srv/users", "/var/lib/turbopanel/storage"],
   docker_gate_deny_prefixes_extra: ["/opt/turbopanel"],
+  docker_gate_platform_ro_roots: [
+    "/etc/turbopanel/proxysql",
+    "/etc/turbopanel/orchestrator",
+  ],
+  docker_gate_platform_rw_roots: [
+    "/var/lib/turbopanel/proxysql",
+    "/var/lib/turbopanel/orchestrator",
+    "/var/lib/turbopanel/managed",
+  ],
+  docker_gate_approval_pubkeys: "",
+  docker_gate_approval_pubkey_file:
+    "/opt/turbopanel/lib/docker-gate/approval.pub",
 };
 
 async function renderUnit(overrides: Partial<UnitVars> = {}): Promise<string> {
@@ -172,6 +188,36 @@ jinjaTest(
     assert(service.includes("Environment=TP_DOCKER_GATE_SOCKET_GID=9999"));
     assert(service.includes("Restart=always"));
     assertEquals(directives(unit, "Install"), ["WantedBy=multi-user.target"]);
+  },
+);
+
+jinjaTest(
+  "signed approvals are off by default and their key is root-owned, outside daemon-writable trees",
+  async () => {
+    const off = directives(await renderUnit(), "Service");
+    assertFalse(off.some((d) => d.includes("APPROVAL")), "inert by default");
+    const on = directives(
+      await renderUnit({ docker_gate_approval_pubkeys: "AAAA" }),
+      "Service",
+    );
+    const line = on.find((d) => d.includes("TP_DOCKER_GATE_APPROVAL_PUBKEY="));
+    assertEquals(
+      line,
+      "Environment=TP_DOCKER_GATE_APPROVAL_PUBKEY=/opt/turbopanel/lib/docker-gate/approval.pub",
+    );
+    const defaults = await read("defaults/main.yml");
+    assertStringIncludes(
+      defaults,
+      'docker_gate_approval_pubkey_file: "{{ docker_gate_dir }}/approval.pub"',
+    );
+    const install = await read("tasks/install.yml");
+    const task = install.slice(
+      install.indexOf("Install the approval public key"),
+      install.indexOf("Remove a stale approval"),
+    );
+    assertStringIncludes(task, "owner: root");
+    assertStringIncludes(task, 'mode: "0640"');
+    assertFalse(task.includes("/etc/turbopanel"));
   },
 );
 

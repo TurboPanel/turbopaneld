@@ -21,6 +21,8 @@ import {
   type ProxyDeps,
 } from "./proxy.ts";
 import { DEFAULT_POLICY_CONFIG, type PolicyConfig } from "./policy.ts";
+import { DEFAULT_PLATFORM_ROOTS } from "./platform.ts";
+import { importApprovalKeys } from "./approval.ts";
 import { resolveBindPath } from "./resolve.ts";
 import { GateStats } from "./stats.ts";
 import { describeError } from "./util.ts";
@@ -37,6 +39,10 @@ export type GateConfig = {
   socketGid?: number;
   policy: PolicyConfig;
   summarySeconds: number;
+  /** File of trusted approval public keys; unset = signed approvals are off. */
+  approvalKeyFile?: string;
+  /** Test hook: the clock approvals are judged against (seconds). */
+  nowSec?: () => number;
 };
 
 type Env = Record<string, string | undefined>;
@@ -72,11 +78,14 @@ export function loadConfig(env: Env): GateConfig {
   const caps = (env.TP_DOCKER_GATE_CAP_ALLOW ?? "").split(",").map((cap) =>
     cap.trim().toUpperCase().replace(/^CAP_/, "")
   ).filter(Boolean);
+  const platformRo = pathList(env.TP_DOCKER_GATE_PLATFORM_RO_ROOTS);
+  const platformRw = pathList(env.TP_DOCKER_GATE_PLATFORM_RW_ROOTS);
   const gid = Number(env.TP_DOCKER_GATE_SOCKET_GID);
   return {
     socket: env.TP_DOCKER_GATE_SOCKET || DEFAULT_GATE_SOCKET,
     upstream: env.TP_DOCKER_GATE_UPSTREAM || DEFAULT_UPSTREAM_SOCKET,
     socketGid: Number.isInteger(gid) && gid > 0 ? gid : undefined,
+    approvalKeyFile: pathList(env.TP_DOCKER_GATE_APPROVAL_PUBKEY)[0],
     summarySeconds: positiveInt(
       env.TP_DOCKER_GATE_SUMMARY_SEC,
       DEFAULT_SUMMARY_SECONDS,
@@ -86,6 +95,14 @@ export function loadConfig(env: Env): GateConfig {
       denyPrefixes: [...DEFAULT_POLICY_CONFIG.denyPrefixes, ...denyExtra],
       dockerSockets: DEFAULT_POLICY_CONFIG.dockerSockets,
       capAllowlist: caps,
+      platform: {
+        readOnly: platformRo.length > 0
+          ? platformRo
+          : DEFAULT_PLATFORM_ROOTS.readOnly,
+        writable: platformRw.length > 0
+          ? platformRw
+          : DEFAULT_PLATFORM_ROOTS.writable,
+      },
     },
   };
 }
@@ -126,6 +143,31 @@ function connectUpstream(path: string): () => Promise<GateConn> {
   return () => Deno.connect({ transport: "unix", path });
 }
 
+/**
+ * Trusted approval keys from the key file. A missing, unreadable or malformed
+ * file turns approvals OFF (and says so): observe mode must never die over
+ * an optional feature, and an approval-less gate only keeps findings.
+ */
+export async function loadApprovalKeys(
+  file: string | undefined,
+  log: (record: LogRecord) => void,
+): Promise<CryptoKey[]> {
+  if (file === undefined) return [];
+  try {
+    const keys = await importApprovalKeys(await Deno.readTextFile(file));
+    if (keys.length === 0) throw new Error("the key file holds no keys");
+    return keys;
+  } catch (err) {
+    log({
+      level: "error",
+      event: "docker-gate.approval-keys-unusable",
+      file,
+      error: describeError(err),
+    });
+    return [];
+  }
+}
+
 export type RunningGate = {
   stats: GateStats;
   stop(): Promise<void>;
@@ -137,6 +179,7 @@ export async function startGate(
   log: (record: LogRecord) => void,
 ): Promise<RunningGate> {
   const stats = new GateStats();
+  const approvalKeys = await loadApprovalKeys(config.approvalKeyFile, log);
   const deps: ProxyDeps = {
     connectUpstream: connectUpstream(config.upstream),
     policy: config.policy,
@@ -144,6 +187,8 @@ export async function startGate(
     log,
     stats,
     maxBodyBytes: DEFAULT_MAX_BODY_BYTES,
+    approvalKeys,
+    nowSec: config.nowSec,
   };
   const listener = await openListener(config);
   let active = 0;
@@ -173,6 +218,9 @@ export async function startGate(
     socket: config.socket,
     upstream: config.upstream,
     bindRoots: config.policy.bindRoots,
+    platformRoots: config.policy.platform,
+    approvals: approvalKeys.length > 0 ? "on" : "off",
+    approvalKeys: approvalKeys.length,
   });
   return {
     stats,
@@ -200,6 +248,9 @@ export const GATE_ENV_KEYS = [
   "TP_DOCKER_GATE_BIND_ROOTS",
   "TP_DOCKER_GATE_DENY_PREFIXES",
   "TP_DOCKER_GATE_CAP_ALLOW",
+  "TP_DOCKER_GATE_PLATFORM_RO_ROOTS",
+  "TP_DOCKER_GATE_PLATFORM_RW_ROOTS",
+  "TP_DOCKER_GATE_APPROVAL_PUBKEY",
   "TP_DOCKER_GATE_SUMMARY_SEC",
 ] as const;
 

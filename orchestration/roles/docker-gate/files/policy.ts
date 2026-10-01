@@ -10,6 +10,14 @@
  * Dependency-free on purpose (see http.ts).
  */
 
+import {
+  DEFAULT_PLATFORM_ROOTS,
+  isPlatformContainer,
+  labelsOf,
+  platformBindVerdict,
+  type PlatformRoots,
+} from "./platform.ts";
+
 export type Violation = {
   rule: string;
   /** Short, secret-free value the rule fired on (a path, a mode, a cap name). */
@@ -25,6 +33,8 @@ export type PolicyConfig = {
   dockerSockets: readonly string[];
   /** Capabilities a container may add (default none). */
   capAllowlist: readonly string[];
+  /** Trees the platform's own containers may bind (see platform.ts). */
+  platform: PlatformRoots;
 };
 
 export const DEFAULT_POLICY_CONFIG: PolicyConfig = {
@@ -43,6 +53,7 @@ export const DEFAULT_POLICY_CONFIG: PolicyConfig = {
   ],
   dockerSockets: ["/var/run/docker.sock", "/run/docker.sock"],
   capAllowlist: [],
+  platform: DEFAULT_PLATFORM_ROOTS,
 };
 
 /** Resolve symlinks of the deepest existing ancestor (injected so tests need no disk). */
@@ -268,41 +279,96 @@ function bindViolation(
   return undefined;
 }
 
-async function checkBindSource(
-  source: string,
-  config: PolicyConfig,
-  resolvePath: ResolvePath,
-): Promise<Violation | undefined> {
-  if (!source.startsWith("/")) return undefined; // a named volume
-  if (!pathIsCanonical(source)) {
+/** One bind as authored: its source and whether it was asked read-only. */
+type BindEntry = { source: string; readOnly: boolean };
+
+/** What one bind source came to: a finding, an allowance that applied, or neither. */
+type BindOutcome = { violation?: Violation; allowance?: string };
+
+/** Who is asking: the platform allowance applies only to its own containers. */
+type BindContext = {
+  config: PolicyConfig;
+  resolvePath: ResolvePath;
+  platform: boolean;
+};
+
+function platformOutcome(
+  resolved: string,
+  entry: BindEntry,
+  ctx: BindContext,
+): BindOutcome | undefined {
+  if (!ctx.platform) return undefined;
+  const verdict = platformBindVerdict(
+    resolved,
+    entry.readOnly,
+    ctx.config.platform,
+  );
+  if (verdict === "allowed") return { allowance: "platform-bind" };
+  if (verdict === "config-writable") {
     return {
-      rule: "bind-noncanonical-path",
-      detail: normalizeAbsolute(source),
+      violation: { rule: "platform-config-writable", detail: resolved },
     };
   }
-  let resolved: string;
-  try {
-    resolved = normalizeAbsolute(await resolvePath(source));
-  } catch {
-    resolved = normalizeAbsolute(source);
-  }
-  return bindViolation(resolved, config);
+  return undefined;
 }
 
-/** Sources of every bind the HostConfig asks for, as authored. */
-function bindSources(hostConfig: Record<string, unknown>): string[] {
-  const sources: string[] = [];
+async function resolvedSource(
+  source: string,
+  resolvePath: ResolvePath,
+): Promise<string> {
+  try {
+    return normalizeAbsolute(await resolvePath(source));
+  } catch {
+    return normalizeAbsolute(source);
+  }
+}
+
+async function checkBindSource(
+  entry: BindEntry,
+  ctx: BindContext,
+): Promise<BindOutcome> {
+  const { source } = entry;
+  if (!source.startsWith("/")) return {}; // a named volume
+  if (!pathIsCanonical(source)) {
+    return {
+      violation: {
+        rule: "bind-noncanonical-path",
+        detail: normalizeAbsolute(source),
+      },
+    };
+  }
+  const resolved = await resolvedSource(source, ctx.resolvePath);
+  const platform = platformOutcome(resolved, entry, ctx);
+  if (platform) return platform;
+  const violation = bindViolation(resolved, ctx.config);
+  return violation ? { violation } : {};
+}
+
+function bindIsReadOnly(spec: string): boolean {
+  const options = spec.split(":")[2] ?? "";
+  return options.split(",").includes("ro");
+}
+
+/** Every bind the HostConfig asks for, as authored. */
+function bindEntries(hostConfig: Record<string, unknown>): BindEntry[] {
+  const entries: BindEntry[] = [];
   for (const bind of stringList(hostConfig.Binds)) {
-    sources.push(bind.split(":")[0]);
+    entries.push({
+      source: bind.split(":")[0],
+      readOnly: bindIsReadOnly(bind),
+    });
   }
   if (Array.isArray(hostConfig.Mounts)) {
     for (const mount of hostConfig.Mounts) {
       if (isRecord(mount) && mount.Type === "bind") {
-        sources.push(typeof mount.Source === "string" ? mount.Source : "");
+        entries.push({
+          source: typeof mount.Source === "string" ? mount.Source : "",
+          readOnly: mount.ReadOnly === true,
+        });
       }
     }
   }
-  return sources;
+  return entries;
 }
 
 /**
@@ -327,7 +393,11 @@ async function checkVolumeDevice(
   const found = volumeDeviceOption(opts);
   if (!found) return [];
   if (!found.bind) return [{ rule: "volume-device", detail: found.device }];
-  const verdict = await checkBindSource(found.device, config, resolvePath);
+  const outcome = await checkBindSource(
+    { source: found.device, readOnly: false },
+    { config, resolvePath, platform: false },
+  );
+  const verdict = outcome.violation;
   if (!verdict) return [];
   return [{ rule: `volume-${verdict.rule}`, detail: verdict.detail }];
 }
@@ -346,25 +416,29 @@ function mountVolumeOptions(hostConfig: Record<string, unknown>): unknown[] {
   return out;
 }
 
+/** What the mounts of one create came to. */
+export type Verdict = { violations: Violation[]; allowances: string[] };
+
 async function checkMounts(
   hostConfig: Record<string, unknown>,
-  config: PolicyConfig,
-  resolvePath: ResolvePath,
-): Promise<Violation[]> {
-  const out: Violation[] = [];
-  const verdicts = await Promise.all(
-    bindSources(hostConfig).map((source) =>
-      checkBindSource(source, config, resolvePath)
-    ),
+  ctx: BindContext,
+): Promise<Verdict> {
+  const outcomes = await Promise.all(
+    bindEntries(hostConfig).map((entry) => checkBindSource(entry, ctx)),
   );
-  for (const verdict of verdicts) if (verdict) out.push(verdict);
+  const violations: Violation[] = [];
+  const allowances: string[] = [];
+  for (const outcome of outcomes) {
+    if (outcome.violation) violations.push(outcome.violation);
+    if (outcome.allowance) allowances.push(outcome.allowance);
+  }
   const volumes = await Promise.all(
     mountVolumeOptions(hostConfig).map((opts) =>
-      checkVolumeDevice(opts, config, resolvePath)
+      checkVolumeDevice(opts, ctx.config, ctx.resolvePath)
     ),
   );
-  for (const list of volumes) out.push(...list);
-  return out;
+  for (const list of volumes) violations.push(...list);
+  return { violations, allowances };
 }
 
 const WEAKENING_SECURITY_OPTS =
@@ -469,15 +543,26 @@ async function evaluateContainerCreate(
   body: unknown,
   config: PolicyConfig,
   resolvePath: ResolvePath,
-): Promise<Violation[]> {
-  if (!isRecord(body)) return [{ rule: "body-unparseable" }];
+): Promise<Verdict> {
+  if (!isRecord(body)) {
+    return { violations: [{ rule: "body-unparseable" }], allowances: [] };
+  }
   const hostConfig = isRecord(body.HostConfig) ? body.HostConfig : {};
-  return [
-    ...checkHostConfigFlags(hostConfig, config),
-    ...checkNamespaces(hostConfig),
-    ...checkSecurityOpt(hostConfig),
-    ...(await checkMounts(hostConfig, config, resolvePath)),
-  ];
+  const platform = isPlatformContainer(labelsOf(body.Labels));
+  const mounts = await checkMounts(hostConfig, {
+    config,
+    resolvePath,
+    platform,
+  });
+  return {
+    violations: [
+      ...checkHostConfigFlags(hostConfig, config),
+      ...checkNamespaces(hostConfig),
+      ...checkSecurityOpt(hostConfig),
+      ...mounts.violations,
+    ],
+    allowances: mounts.allowances,
+  };
 }
 
 function evaluateExecCreate(body: unknown): Violation[] {
@@ -517,37 +602,60 @@ function evaluateBuild(query: URLSearchParams): Violation[] {
   return out;
 }
 
+function plain(violations: Violation[]): Verdict {
+  return { violations, allowances: [] };
+}
+
 async function evaluateByRoute(
   route: string,
   facts: RequestFacts,
   config: PolicyConfig,
   resolvePath: ResolvePath,
-): Promise<Violation[]> {
+): Promise<Verdict> {
   switch (route) {
     case "containers.create":
       return await evaluateContainerCreate(facts.body, config, resolvePath);
     case "containers.exec.create":
-      return evaluateExecCreate(facts.body);
+      return plain(evaluateExecCreate(facts.body));
     case "networks.create":
-      return evaluateNetworkCreate(facts.body);
+      return plain(evaluateNetworkCreate(facts.body));
     case "volumes.create":
-      return await evaluateVolumeCreate(facts.body, config, resolvePath);
+      return plain(await evaluateVolumeCreate(facts.body, config, resolvePath));
     case "build":
-      return evaluateBuild(facts.query);
+      return plain(evaluateBuild(facts.query));
     case "containers.archive.put":
-      return [{ rule: "archive-put" }];
+      return plain([{ rule: "archive-put" }]);
     case "restricted-group":
-      return [{
+      return plain([{
         rule: "restricted-api-group",
         detail: firstSegment(facts.path),
-      }];
+      }]);
     default:
-      return [];
+      return plain([]);
   }
 }
 
 function firstSegment(path: string): string {
   return routePath(path).split("/")[1] ?? "";
+}
+
+/**
+ * Every strict-profile rule this request would break, and which platform
+ * allowances removed a finding (empty `violations` = clean).
+ */
+export async function evaluateDetailed(
+  facts: RequestFacts,
+  config: PolicyConfig,
+  resolvePath: ResolvePath,
+): Promise<Verdict> {
+  const out: Violation[] = [];
+  if (!pathIsCanonical(facts.path)) {
+    out.push({ rule: "path-noncanonical" });
+  }
+  const { route } = classifyRoute(facts.method, facts.path);
+  const found = await evaluateByRoute(route, facts, config, resolvePath);
+  out.push(...found.violations);
+  return { violations: out, allowances: found.allowances };
 }
 
 /** Every strict-profile rule this request would break (empty = clean). */
@@ -556,11 +664,5 @@ export async function evaluateRequest(
   config: PolicyConfig,
   resolvePath: ResolvePath,
 ): Promise<Violation[]> {
-  const out: Violation[] = [];
-  if (!pathIsCanonical(facts.path)) {
-    out.push({ rule: "path-noncanonical" });
-  }
-  const { route } = classifyRoute(facts.method, facts.path);
-  out.push(...(await evaluateByRoute(route, facts, config, resolvePath)));
-  return out;
+  return (await evaluateDetailed(facts, config, resolvePath)).violations;
 }

@@ -33,12 +33,33 @@ docker_gate_bind_roots:
 # /boot, /opt/turbopanel, /backup ...).
 docker_gate_deny_prefixes_extra:
   - "{{ turbopanel_install_root }}"
+# Trees the platform's own containers (ProxySQL, orchestrator, managed engines)
+# may bind: config trees read-only, state trees any mode. A false-positive
+# remover for observe mode, not a boundary (see AGENTS.md).
+docker_gate_platform_ro_roots:
+  - "{{ turbopanel_config_dir }}/proxysql"
+  - "{{ turbopanel_config_dir }}/orchestrator"
+docker_gate_platform_rw_roots:
+  - "{{ turbopanel_daemon_state_dir }}/proxysql"
+  - "{{ turbopanel_daemon_state_dir }}/orchestrator"
+  - "{{ turbopanel_daemon_state_dir }}/managed"
+# Control-plane approval PUBLIC key(s) for host-level Compose features: one raw
+# 32-byte Ed25519 key per line, base64url. Empty (the default) = signed
+# approvals are off and every host-level finding stands. Never a private key.
+docker_gate_approval_pubkeys: ""
+# Root-owned, inside the gate's own directory: NOT under /etc/turbopanel or
+# /run/turbopanel, which the daemon account can write (it could swap the key).
+docker_gate_approval_pubkey_file: "{{ docker_gate_dir }}/approval.pub"
 # The gate's own source files, in the order they are copied.
 docker_gate_files:
   - http.ts
+  - approval.ts
+  - inspect.ts
+  - platform.ts
   - policy.ts
   - proxy.ts
   - resolve.ts
+  - review.ts
   - stats.ts
   - util.ts
   - main.ts

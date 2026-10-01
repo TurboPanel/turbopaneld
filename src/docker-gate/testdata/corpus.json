@@ -1518,266 +1518,6 @@
     "expect": []
   },
   {
-    "name": "system-config-bind",
-    "flow": "platform",
-    "method": "POST",
-    "path": "/containers/create",
-    "body": {
-      "Hostname": "",
-      "Domainname": "",
-      "User": "",
-      "AttachStdin": false,
-      "AttachStdout": false,
-      "AttachStderr": false,
-      "ExposedPorts": {
-        "80/tcp": {}
-      },
-      "Tty": false,
-      "OpenStdin": false,
-      "StdinOnce": false,
-      "Env": [
-        "APP_MODE=production"
-      ],
-      "Cmd": [
-        "sleep",
-        "30"
-      ],
-      "Image": "alpine:3.22",
-      "Volumes": {},
-      "WorkingDir": "",
-      "Entrypoint": null,
-      "Labels": {
-        "com.example.env": "production",
-        "io.turbopanel.owner": "test"
-      },
-      "HostConfig": {
-        "Binds": [
-          "/etc/turbopanel/proxysql/proxysql.cnf:/etc/proxysql.cnf:ro"
-        ],
-        "ContainerIDFile": "",
-        "LogConfig": {
-          "Type": "",
-          "Config": {}
-        },
-        "NetworkMode": "tpg-net",
-        "PortBindings": {
-          "80/tcp": [
-            {
-              "HostIp": "127.0.0.1",
-              "HostPort": "18080"
-            }
-          ]
-        },
-        "RestartPolicy": {
-          "Name": "no",
-          "MaximumRetryCount": 0
-        },
-        "AutoRemove": true,
-        "VolumeDriver": "",
-        "VolumesFrom": null,
-        "ConsoleSize": [
-          0,
-          0
-        ],
-        "CapAdd": null,
-        "CapDrop": [
-          "ALL"
-        ],
-        "CgroupnsMode": "",
-        "Dns": null,
-        "DnsOptions": [],
-        "DnsSearch": [],
-        "ExtraHosts": null,
-        "GroupAdd": null,
-        "IpcMode": "",
-        "Cgroup": "",
-        "Links": null,
-        "OomScoreAdj": 0,
-        "PidMode": "",
-        "Privileged": false,
-        "PublishAllPorts": false,
-        "ReadonlyRootfs": false,
-        "SecurityOpt": [
-          "no-new-privileges"
-        ],
-        "Tmpfs": {
-          "/run": "rw,noexec,nosuid"
-        },
-        "UTSMode": "",
-        "UsernsMode": "",
-        "ShmSize": 0,
-        "Isolation": "",
-        "CpuShares": 0,
-        "Memory": 134217728,
-        "NanoCpus": 500000000,
-        "CgroupParent": "",
-        "BlkioWeight": 0,
-        "BlkioWeightDevice": [],
-        "BlkioDeviceReadBps": [],
-        "BlkioDeviceWriteBps": [],
-        "BlkioDeviceReadIOps": [],
-        "BlkioDeviceWriteIOps": [],
-        "CpuPeriod": 0,
-        "CpuQuota": 0,
-        "CpuRealtimePeriod": 0,
-        "CpuRealtimeRuntime": 0,
-        "CpusetCpus": "",
-        "CpusetMems": "",
-        "Devices": [],
-        "DeviceCgroupRules": null,
-        "DeviceRequests": null,
-        "MemoryReservation": 0,
-        "MemorySwap": 0,
-        "MemorySwappiness": -1,
-        "OomKillDisable": false,
-        "PidsLimit": 100,
-        "Ulimits": [],
-        "CpuCount": 0,
-        "CpuPercent": 0,
-        "IOMaximumIOps": 0,
-        "IOMaximumBandwidth": 0,
-        "MaskedPaths": null,
-        "ReadonlyPaths": null
-      },
-      "NetworkingConfig": {
-        "EndpointsConfig": {}
-      }
-    },
-    "expect": [
-      "bind-forbidden-path"
-    ]
-  },
-  {
-    "name": "system-state-bind",
-    "flow": "platform",
-    "method": "POST",
-    "path": "/containers/create",
-    "body": {
-      "Hostname": "",
-      "Domainname": "",
-      "User": "",
-      "AttachStdin": false,
-      "AttachStdout": false,
-      "AttachStderr": false,
-      "ExposedPorts": {
-        "80/tcp": {}
-      },
-      "Tty": false,
-      "OpenStdin": false,
-      "StdinOnce": false,
-      "Env": [
-        "APP_MODE=production"
-      ],
-      "Cmd": [
-        "sleep",
-        "30"
-      ],
-      "Image": "alpine:3.22",
-      "Volumes": {},
-      "WorkingDir": "",
-      "Entrypoint": null,
-      "Labels": {
-        "com.example.env": "production",
-        "io.turbopanel.owner": "test"
-      },
-      "HostConfig": {
-        "Binds": [
-          "/var/lib/turbopanel/proxysql:/var/lib/proxysql"
-        ],
-        "ContainerIDFile": "",
-        "LogConfig": {
-          "Type": "",
-          "Config": {}
-        },
-        "NetworkMode": "tpg-net",
-        "PortBindings": {
-          "80/tcp": [
-            {
-              "HostIp": "127.0.0.1",
-              "HostPort": "18080"
-            }
-          ]
-        },
-        "RestartPolicy": {
-          "Name": "no",
-          "MaximumRetryCount": 0
-        },
-        "AutoRemove": true,
-        "VolumeDriver": "",
-        "VolumesFrom": null,
-        "ConsoleSize": [
-          0,
-          0
-        ],
-        "CapAdd": null,
-        "CapDrop": [
-          "ALL"
-        ],
-        "CgroupnsMode": "",
-        "Dns": null,
-        "DnsOptions": [],
-        "DnsSearch": [],
-        "ExtraHosts": null,
-        "GroupAdd": null,
-        "IpcMode": "",
-        "Cgroup": "",
-        "Links": null,
-        "OomScoreAdj": 0,
-        "PidMode": "",
-        "Privileged": false,
-        "PublishAllPorts": false,
-        "ReadonlyRootfs": false,
-        "SecurityOpt": [
-          "no-new-privileges"
-        ],
-        "Tmpfs": {
-          "/run": "rw,noexec,nosuid"
-        },
-        "UTSMode": "",
-        "UsernsMode": "",
-        "ShmSize": 0,
-        "Isolation": "",
-        "CpuShares": 0,
-        "Memory": 134217728,
-        "NanoCpus": 500000000,
-        "CgroupParent": "",
-        "BlkioWeight": 0,
-        "BlkioWeightDevice": [],
-        "BlkioDeviceReadBps": [],
-        "BlkioDeviceWriteBps": [],
-        "BlkioDeviceReadIOps": [],
-        "BlkioDeviceWriteIOps": [],
-        "CpuPeriod": 0,
-        "CpuQuota": 0,
-        "CpuRealtimePeriod": 0,
-        "CpuRealtimeRuntime": 0,
-        "CpusetCpus": "",
-        "CpusetMems": "",
-        "Devices": [],
-        "DeviceCgroupRules": null,
-        "DeviceRequests": null,
-        "MemoryReservation": 0,
-        "MemorySwap": 0,
-        "MemorySwappiness": -1,
-        "OomKillDisable": false,
-        "PidsLimit": 100,
-        "Ulimits": [],
-        "CpuCount": 0,
-        "CpuPercent": 0,
-        "IOMaximumIOps": 0,
-        "IOMaximumBandwidth": 0,
-        "MaskedPaths": null,
-        "ReadonlyPaths": null
-      },
-      "NetworkingConfig": {
-        "EndpointsConfig": {}
-      }
-    },
-    "expect": [
-      "bind-outside-roots"
-    ]
-  },
-  {
     "name": "ingress-socket-proxy",
     "flow": "platform",
     "method": "POST",
@@ -1807,8 +1547,8 @@
       "WorkingDir": "",
       "Entrypoint": null,
       "Labels": {
-        "com.example.env": "production",
-        "io.turbopanel.owner": "test"
+        "com.docker.compose.project": "ingress-net",
+        "com.docker.compose.service": "docker-socket-proxy"
       },
       "HostConfig": {
         "Binds": [
@@ -1905,6 +1645,556 @@
     },
     "expect": [
       "bind-docker-socket"
+    ]
+  },
+  {
+    "name": "proxysql-compose",
+    "flow": "platform",
+    "method": "POST",
+    "path": "/containers/create",
+    "body": {
+      "Hostname": "",
+      "Domainname": "",
+      "User": "",
+      "AttachStdin": false,
+      "AttachStdout": true,
+      "AttachStderr": true,
+      "Tty": false,
+      "OpenStdin": false,
+      "StdinOnce": false,
+      "Env": null,
+      "Cmd": null,
+      "Image": "alpine:3.22",
+      "Volumes": null,
+      "WorkingDir": "",
+      "Entrypoint": null,
+      "Labels": {
+        "com.docker.compose.config-hash": "0afbde6f0edc058da4048d761f30a5566f763d213d33ff1faea58458dc0f1e92",
+        "com.docker.compose.container-number": "1",
+        "com.docker.compose.depends_on": "",
+        "com.docker.compose.image": "sha256:3e9b4b680bfc9fb5269227cffbd6d42be39fbf7c0b908123913864aa4447e764",
+        "com.docker.compose.oneoff": "False",
+        "com.docker.compose.project": "00000000-0000-4000-8000-0000000000aa",
+        "com.docker.compose.project.config_files": "/etc/turbopanel/proxysql/compose.yml",
+        "com.docker.compose.project.working_dir": "/etc/turbopanel/proxysql",
+        "com.docker.compose.service": "proxysql",
+        "com.docker.compose.version": "5.5.0",
+        "com.turbopanel.system.component": "managed-ingress",
+        "turbopanel.role": "ingress"
+      },
+      "HostConfig": {
+        "Binds": [
+          "/etc/turbopanel/proxysql/proxysql.cnf:/etc/proxysql.cnf:ro",
+          "/etc/turbopanel/proxysql/admin.cnf:/etc/proxysql-admin.cnf:ro",
+          "/etc/turbopanel/proxysql/tls:/var/lib/proxysql/certs:ro",
+          "00000000-0000-4000-8000-0000000000aa_proxysql-data:/var/lib/proxysql:rw"
+        ],
+        "ContainerIDFile": "",
+        "LogConfig": {
+          "Type": "",
+          "Config": null
+        },
+        "NetworkMode": "tprecnet",
+        "PortBindings": {},
+        "RestartPolicy": {
+          "Name": "unless-stopped",
+          "MaximumRetryCount": 0
+        },
+        "AutoRemove": false,
+        "VolumeDriver": "",
+        "VolumesFrom": null,
+        "ConsoleSize": [
+          0,
+          0
+        ],
+        "CapAdd": null,
+        "CapDrop": null,
+        "CgroupnsMode": "",
+        "Dns": null,
+        "DnsOptions": null,
+        "DnsSearch": null,
+        "ExtraHosts": [],
+        "GroupAdd": null,
+        "IpcMode": "",
+        "Cgroup": "",
+        "Links": null,
+        "OomScoreAdj": 0,
+        "PidMode": "",
+        "Privileged": false,
+        "PublishAllPorts": false,
+        "ReadonlyRootfs": false,
+        "SecurityOpt": null,
+        "UTSMode": "",
+        "UsernsMode": "",
+        "ShmSize": 0,
+        "Isolation": "",
+        "CpuShares": 0,
+        "Memory": 0,
+        "NanoCpus": 0,
+        "CgroupParent": "",
+        "BlkioWeight": 0,
+        "BlkioWeightDevice": null,
+        "BlkioDeviceReadBps": null,
+        "BlkioDeviceWriteBps": null,
+        "BlkioDeviceReadIOps": null,
+        "BlkioDeviceWriteIOps": null,
+        "CpuPeriod": 0,
+        "CpuQuota": 0,
+        "CpuRealtimePeriod": 0,
+        "CpuRealtimeRuntime": 0,
+        "CpusetCpus": "",
+        "CpusetMems": "",
+        "Devices": null,
+        "DeviceCgroupRules": null,
+        "DeviceRequests": null,
+        "MemoryReservation": 0,
+        "MemorySwap": 0,
+        "MemorySwappiness": null,
+        "OomKillDisable": false,
+        "PidsLimit": null,
+        "Ulimits": null,
+        "CpuCount": 0,
+        "CpuPercent": 0,
+        "IOMaximumIOps": 0,
+        "IOMaximumBandwidth": 0,
+        "MaskedPaths": null,
+        "ReadonlyPaths": null
+      },
+      "NetworkingConfig": {
+        "EndpointsConfig": {
+          "tprecnet": {
+            "IPAMConfig": {},
+            "Links": null,
+            "Aliases": [
+              "tprec-in",
+              "proxysql"
+            ],
+            "DriverOpts": null,
+            "GwPriority": 0,
+            "NetworkID": "",
+            "EndpointID": "",
+            "Gateway": "",
+            "IPAddress": "",
+            "MacAddress": "",
+            "IPPrefixLen": 0,
+            "IPv6Gateway": "",
+            "GlobalIPv6Address": "",
+            "GlobalIPv6PrefixLen": 0,
+            "DNSNames": null
+          }
+        }
+      }
+    },
+    "expect": []
+  },
+  {
+    "name": "orchestrator-compose",
+    "flow": "platform",
+    "method": "POST",
+    "path": "/containers/create",
+    "body": {
+      "Hostname": "",
+      "Domainname": "",
+      "User": "",
+      "AttachStdin": false,
+      "AttachStdout": true,
+      "AttachStderr": true,
+      "Tty": false,
+      "OpenStdin": false,
+      "StdinOnce": false,
+      "Env": null,
+      "Cmd": [
+        "sleep",
+        "5"
+      ],
+      "Image": "alpine:3.22",
+      "Volumes": null,
+      "WorkingDir": "",
+      "Entrypoint": null,
+      "Labels": {
+        "com.docker.compose.config-hash": "18baeface2d5559d162a3b580661457122a771f243cc1e82f46d89e8b7312e5c",
+        "com.docker.compose.container-number": "1",
+        "com.docker.compose.depends_on": "",
+        "com.docker.compose.image": "sha256:3e9b4b680bfc9fb5269227cffbd6d42be39fbf7c0b908123913864aa4447e764",
+        "com.docker.compose.oneoff": "False",
+        "com.docker.compose.project": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        "com.docker.compose.project.config_files": "/etc/turbopanel/orchestrator/compose.yml",
+        "com.docker.compose.project.working_dir": "/etc/turbopanel/orchestrator",
+        "com.docker.compose.service": "orchestrator",
+        "com.docker.compose.version": "5.5.0",
+        "com.turbopanel.system.component": "managed-ha",
+        "turbopanel.role": "turbopanel"
+      },
+      "HostConfig": {
+        "Binds": [
+          "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee_orchestrator-data:/var/lib/orchestrator:rw",
+          "/etc/turbopanel/orchestrator/orchestrator.conf.json:/etc/orchestrator.conf.json:ro",
+          "/etc/turbopanel/orchestrator/tls:/etc/orchestrator/tls:ro"
+        ],
+        "ContainerIDFile": "",
+        "LogConfig": {
+          "Type": "",
+          "Config": null
+        },
+        "NetworkMode": "tprecnet",
+        "PortBindings": {},
+        "RestartPolicy": {
+          "Name": "unless-stopped",
+          "MaximumRetryCount": 0
+        },
+        "AutoRemove": false,
+        "VolumeDriver": "",
+        "VolumesFrom": null,
+        "ConsoleSize": [
+          0,
+          0
+        ],
+        "CapAdd": null,
+        "CapDrop": null,
+        "CgroupnsMode": "",
+        "Dns": null,
+        "DnsOptions": null,
+        "DnsSearch": null,
+        "ExtraHosts": [],
+        "GroupAdd": null,
+        "IpcMode": "",
+        "Cgroup": "",
+        "Links": null,
+        "OomScoreAdj": 0,
+        "PidMode": "",
+        "Privileged": false,
+        "PublishAllPorts": false,
+        "ReadonlyRootfs": false,
+        "SecurityOpt": null,
+        "UTSMode": "",
+        "UsernsMode": "",
+        "ShmSize": 0,
+        "Isolation": "",
+        "CpuShares": 0,
+        "Memory": 0,
+        "NanoCpus": 0,
+        "CgroupParent": "",
+        "BlkioWeight": 0,
+        "BlkioWeightDevice": null,
+        "BlkioDeviceReadBps": null,
+        "BlkioDeviceWriteBps": null,
+        "BlkioDeviceReadIOps": null,
+        "BlkioDeviceWriteIOps": null,
+        "CpuPeriod": 0,
+        "CpuQuota": 0,
+        "CpuRealtimePeriod": 0,
+        "CpuRealtimeRuntime": 0,
+        "CpusetCpus": "",
+        "CpusetMems": "",
+        "Devices": null,
+        "DeviceCgroupRules": null,
+        "DeviceRequests": null,
+        "MemoryReservation": 0,
+        "MemorySwap": 0,
+        "MemorySwappiness": null,
+        "OomKillDisable": false,
+        "PidsLimit": null,
+        "Ulimits": null,
+        "CpuCount": 0,
+        "CpuPercent": 0,
+        "IOMaximumIOps": 0,
+        "IOMaximumBandwidth": 0,
+        "MaskedPaths": null,
+        "ReadonlyPaths": null
+      },
+      "NetworkingConfig": {
+        "EndpointsConfig": {
+          "tprecnet": {
+            "IPAMConfig": null,
+            "Links": null,
+            "Aliases": [
+              "tprec-ha",
+              "orchestrator"
+            ],
+            "DriverOpts": null,
+            "GwPriority": 0,
+            "NetworkID": "",
+            "EndpointID": "",
+            "Gateway": "",
+            "IPAddress": "",
+            "MacAddress": "",
+            "IPPrefixLen": 0,
+            "IPv6Gateway": "",
+            "GlobalIPv6Address": "",
+            "GlobalIPv6PrefixLen": 0,
+            "DNSNames": null
+          }
+        }
+      }
+    },
+    "expect": []
+  },
+  {
+    "name": "managed-engine-compose",
+    "flow": "platform",
+    "method": "POST",
+    "path": "/containers/create",
+    "body": {
+      "Hostname": "",
+      "Domainname": "",
+      "User": "",
+      "AttachStdin": false,
+      "AttachStdout": true,
+      "AttachStderr": true,
+      "Tty": false,
+      "OpenStdin": false,
+      "StdinOnce": false,
+      "Env": null,
+      "Cmd": [
+        "sleep",
+        "5"
+      ],
+      "Image": "alpine:3.22",
+      "Volumes": null,
+      "WorkingDir": "",
+      "Entrypoint": null,
+      "Labels": {
+        "com.docker.compose.config-hash": "650dd159b67a9e4716e907cedc9e05d40aa4933542c097dce6e1754d83a1d405",
+        "com.docker.compose.container-number": "1",
+        "com.docker.compose.depends_on": "",
+        "com.docker.compose.image": "sha256:3e9b4b680bfc9fb5269227cffbd6d42be39fbf7c0b908123913864aa4447e764",
+        "com.docker.compose.oneoff": "False",
+        "com.docker.compose.project": "tprecmanaged",
+        "com.docker.compose.project.config_files": "/var/lib/turbopanel/managed/compose.yml",
+        "com.docker.compose.project.working_dir": "/var/lib/turbopanel/managed",
+        "com.docker.compose.service": "engine",
+        "com.docker.compose.version": "5.5.0",
+        "tp.managed.engine": "postgres"
+      },
+      "HostConfig": {
+        "Binds": [
+          "/var/lib/turbopanel/managed/00000000-0000-4000-8000-0000000000cc/config:/etc/engine/config:ro",
+          "tprec_engine_data:/var/lib/engine:rw"
+        ],
+        "ContainerIDFile": "",
+        "LogConfig": {
+          "Type": "",
+          "Config": null
+        },
+        "NetworkMode": "tprecmanaged_default",
+        "PortBindings": {},
+        "RestartPolicy": {
+          "Name": "",
+          "MaximumRetryCount": 0
+        },
+        "AutoRemove": false,
+        "VolumeDriver": "",
+        "VolumesFrom": null,
+        "ConsoleSize": [
+          0,
+          0
+        ],
+        "CapAdd": null,
+        "CapDrop": null,
+        "CgroupnsMode": "",
+        "Dns": null,
+        "DnsOptions": null,
+        "DnsSearch": null,
+        "ExtraHosts": [],
+        "GroupAdd": null,
+        "IpcMode": "",
+        "Cgroup": "",
+        "Links": null,
+        "OomScoreAdj": 0,
+        "PidMode": "",
+        "Privileged": false,
+        "PublishAllPorts": false,
+        "ReadonlyRootfs": false,
+        "SecurityOpt": null,
+        "UTSMode": "",
+        "UsernsMode": "",
+        "ShmSize": 0,
+        "Isolation": "",
+        "CpuShares": 0,
+        "Memory": 0,
+        "NanoCpus": 0,
+        "CgroupParent": "",
+        "BlkioWeight": 0,
+        "BlkioWeightDevice": null,
+        "BlkioDeviceReadBps": null,
+        "BlkioDeviceWriteBps": null,
+        "BlkioDeviceReadIOps": null,
+        "BlkioDeviceWriteIOps": null,
+        "CpuPeriod": 0,
+        "CpuQuota": 0,
+        "CpuRealtimePeriod": 0,
+        "CpuRealtimeRuntime": 0,
+        "CpusetCpus": "",
+        "CpusetMems": "",
+        "Devices": null,
+        "DeviceCgroupRules": null,
+        "DeviceRequests": null,
+        "MemoryReservation": 0,
+        "MemorySwap": 0,
+        "MemorySwappiness": null,
+        "OomKillDisable": false,
+        "PidsLimit": null,
+        "Ulimits": null,
+        "CpuCount": 0,
+        "CpuPercent": 0,
+        "IOMaximumIOps": 0,
+        "IOMaximumBandwidth": 0,
+        "MaskedPaths": null,
+        "ReadonlyPaths": null
+      },
+      "NetworkingConfig": {
+        "EndpointsConfig": {
+          "tprecmanaged_default": {
+            "IPAMConfig": null,
+            "Links": null,
+            "Aliases": [
+              "tprecmanaged-engine-1",
+              "engine"
+            ],
+            "DriverOpts": null,
+            "GwPriority": 0,
+            "NetworkID": "",
+            "EndpointID": "",
+            "Gateway": "",
+            "IPAddress": "",
+            "MacAddress": "",
+            "IPPrefixLen": 0,
+            "IPv6Gateway": "",
+            "GlobalIPv6Address": "",
+            "GlobalIPv6PrefixLen": 0,
+            "DNSNames": null
+          }
+        }
+      }
+    },
+    "expect": []
+  },
+  {
+    "name": "managed-root-helper",
+    "flow": "platform",
+    "method": "POST",
+    "path": "/containers/create",
+    "body": {
+      "Hostname": "",
+      "Domainname": "",
+      "User": "0",
+      "AttachStdin": false,
+      "AttachStdout": false,
+      "AttachStderr": false,
+      "Tty": false,
+      "OpenStdin": false,
+      "StdinOnce": false,
+      "Env": null,
+      "Cmd": [
+        "sleep",
+        "5"
+      ],
+      "Image": "alpine:3.22",
+      "Volumes": {},
+      "WorkingDir": "",
+      "Entrypoint": [
+        "sh"
+      ],
+      "Labels": {},
+      "HostConfig": {
+        "Binds": [
+          "/var/lib/turbopanel/managed:/managed"
+        ],
+        "ContainerIDFile": "",
+        "LogConfig": {
+          "Type": "",
+          "Config": {}
+        },
+        "NetworkMode": "default",
+        "PortBindings": {},
+        "RestartPolicy": {
+          "Name": "no",
+          "MaximumRetryCount": 0
+        },
+        "AutoRemove": true,
+        "VolumeDriver": "",
+        "VolumesFrom": null,
+        "ConsoleSize": [
+          0,
+          0
+        ],
+        "CapAdd": null,
+        "CapDrop": null,
+        "CgroupnsMode": "",
+        "Dns": null,
+        "DnsOptions": [],
+        "DnsSearch": [],
+        "ExtraHosts": null,
+        "GroupAdd": null,
+        "IpcMode": "",
+        "Cgroup": "",
+        "Links": null,
+        "OomScoreAdj": 0,
+        "PidMode": "",
+        "Privileged": false,
+        "PublishAllPorts": false,
+        "ReadonlyRootfs": false,
+        "SecurityOpt": null,
+        "UTSMode": "",
+        "UsernsMode": "",
+        "ShmSize": 0,
+        "Isolation": "",
+        "CpuShares": 0,
+        "Memory": 0,
+        "NanoCpus": 0,
+        "CgroupParent": "",
+        "BlkioWeight": 0,
+        "BlkioWeightDevice": [],
+        "BlkioDeviceReadBps": [],
+        "BlkioDeviceWriteBps": [],
+        "BlkioDeviceReadIOps": [],
+        "BlkioDeviceWriteIOps": [],
+        "CpuPeriod": 0,
+        "CpuQuota": 0,
+        "CpuRealtimePeriod": 0,
+        "CpuRealtimeRuntime": 0,
+        "CpusetCpus": "",
+        "CpusetMems": "",
+        "Devices": [],
+        "DeviceCgroupRules": null,
+        "DeviceRequests": null,
+        "MemoryReservation": 0,
+        "MemorySwap": 0,
+        "MemorySwappiness": -1,
+        "OomKillDisable": false,
+        "PidsLimit": 0,
+        "Ulimits": [],
+        "CpuCount": 0,
+        "CpuPercent": 0,
+        "IOMaximumIOps": 0,
+        "IOMaximumBandwidth": 0,
+        "MaskedPaths": null,
+        "ReadonlyPaths": null
+      },
+      "NetworkingConfig": {
+        "EndpointsConfig": {
+          "default": {
+            "IPAMConfig": null,
+            "Links": null,
+            "Aliases": null,
+            "DriverOpts": null,
+            "GwPriority": 0,
+            "NetworkID": "",
+            "EndpointID": "",
+            "Gateway": "",
+            "IPAddress": "",
+            "MacAddress": "",
+            "IPPrefixLen": 0,
+            "IPv6Gateway": "",
+            "GlobalIPv6Address": "",
+            "GlobalIPv6PrefixLen": 0,
+            "DNSNames": null
+          }
+        }
+      }
+    },
+    "expect": [
+      "bind-outside-roots"
     ]
   }
 ]

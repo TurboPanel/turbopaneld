@@ -36,13 +36,11 @@ import {
 } from "./http.ts";
 import {
   classifyRoute,
-  evaluateRequest,
   type PolicyConfig,
   type RequestFacts,
   type ResolvePath,
-  routePath,
-  type Violation,
 } from "./policy.ts";
+import { review } from "./review.ts";
 import type { GateStats } from "./stats.ts";
 import { describeError, repeatSequential } from "./util.ts";
 
@@ -61,6 +59,10 @@ export type ProxyDeps = {
   stats: GateStats;
   /** Largest JSON body held in memory for policy (create calls only). */
   maxBodyBytes: number;
+  /** Trusted approval keys (empty / absent: signed approvals are off). */
+  approvalKeys?: readonly CryptoKey[];
+  /** Seconds since the epoch; tests inject a fixed clock. */
+  nowSec?: () => number;
 };
 
 export const DEFAULT_MAX_BODY_BYTES = 4 * 1024 * 1024;
@@ -129,26 +131,6 @@ async function bufferBody(
     };
   }
   throw new HttpError(400, "request body without framing");
-}
-
-function logViolations(
-  deps: ProxyDeps,
-  facts: RequestFacts,
-  route: string,
-  violations: readonly Violation[],
-): void {
-  for (const violation of violations) {
-    deps.stats.violation(violation.rule);
-    deps.log({
-      level: "warn",
-      event: "docker-gate.would-deny",
-      rule: violation.rule,
-      ...(violation.detail === undefined ? {} : { detail: violation.detail }),
-      method: facts.method,
-      route,
-      path: routePath(facts.path),
-    });
-  }
 }
 
 type ResponseOutcome = {
@@ -275,8 +257,7 @@ async function judge(
     buffered = await bufferBody(clientReader, framing, deps.maxBodyBytes);
     facts.body = buffered.json;
   }
-  const found = await evaluateRequest(facts, deps.policy, deps.resolvePath);
-  logViolations(deps, facts, route, found);
+  await review(facts, route, deps);
   return { route, buffered };
 }
 

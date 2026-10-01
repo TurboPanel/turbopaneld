@@ -2,6 +2,7 @@ import { assert, assertEquals, assertFalse } from "@std/assert";
 import {
   classifyRoute,
   DEFAULT_POLICY_CONFIG,
+  evaluateDetailed,
   evaluateRequest,
   pathIsCanonical,
   type PolicyConfig,
@@ -107,21 +108,38 @@ test("the corpus covers every platform flow and the attack shapes", () => {
   }
 });
 
-test("tenant-facing flows are clean; the platform's own mounts are known stage-1 findings", () => {
+test("tenant-facing flows are clean; the platform's own containers are clean except two known gaps", async () => {
   const clean = ["backup", "deploy", "managed", "fabric", "compose"];
   for (const entry of CORPUS.filter((e) => clean.includes(e.flow))) {
     assertEquals(entry.expect, [], entry.name);
   }
-  // The platform's own containers bind /etc/turbopanel and /var/lib/turbopanel
-  // paths and (until stage 3) the real Docker socket. The strict profile in
-  // this stage has no platform allowance, so these are logged on every host:
-  // the exact list stage 2 turns into an ownership rule.
+  // Real ProxySQL / orchestrator / managed-engine creates pass through the
+  // platform allowance. Two findings remain on purpose: the ingress socket
+  // proxy mounts the Docker socket until stage 3 deletes it, and the
+  // managed-file helper is a plain `docker run` with no platform label, so
+  // its bind of the managed state root is outside the tenant roots (it needs
+  // a label from the daemon before enforcement).
   const platform = CORPUS.filter((e) => e.flow === "platform");
-  assertEquals(platform.map((e) => e.expect), [
-    ["bind-forbidden-path"],
-    ["bind-outside-roots"],
-    ["bind-docker-socket"],
+  assertEquals(platform.map((e) => [e.name, e.expect]), [
+    ["ingress-socket-proxy", ["bind-docker-socket"]],
+    ["proxysql-compose", []],
+    ["orchestrator-compose", []],
+    ["managed-engine-compose", []],
+    ["managed-root-helper", ["bind-outside-roots"]],
   ]);
+  for (const entry of platform.filter((e) => e.name.endsWith("-compose"))) {
+    const found = await evaluateDetailed(
+      {
+        method: entry.method,
+        path: entry.path,
+        query: new URLSearchParams(),
+        body: entry.body,
+      },
+      DEFAULT_POLICY_CONFIG,
+      identity,
+    );
+    assert(found.allowances.length > 0, `${entry.name} used an allowance`);
+  }
 });
 
 test("privileged, host network, capabilities", async () => {
