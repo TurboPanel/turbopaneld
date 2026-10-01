@@ -670,3 +670,53 @@ test("readDefaultRouteInterfaces keeps a family empty when its table has no defa
     },
   );
 });
+
+type IpAddrInfo = { family: string; local: string; prefixlen: number };
+type IpLink = { ifname: string; addr_info?: IpAddrInfo[] };
+
+/** Real `ip -j addr` of this host: the ground truth the Addresses page must match. */
+async function readIpAddr(): Promise<IpLink[]> {
+  const out = await new Deno.Command("ip", { args: ["-j", "addr"] }).output();
+  if (!out.success) throw new Error("ip -j addr failed");
+  return JSON.parse(new TextDecoder().decode(out.stdout)) as IpLink[];
+}
+
+test({
+  name:
+    "collectServerIps on this real host reports only addresses `ip addr` shows, with its interface and prefix",
+  ignore: Deno.build.os !== "linux",
+  fn: async () => {
+    const links = await readIpAddr();
+    const reported = collectServerIps(readDefaultRouteInterfaces());
+
+    assertEquals(
+      reported.length > 0,
+      true,
+      "a host with a usable address must report at least one",
+    );
+    for (const ip of reported) {
+      const link = links.find((entry) =>
+        (entry.addr_info ?? []).some((info) =>
+          info.local.toLowerCase() === ip.address.toLowerCase()
+        )
+      );
+      assertEquals(
+        link !== undefined,
+        true,
+        `${ip.address} is reported but not in ip addr`,
+      );
+      assertEquals(ip.interface, link?.ifname);
+      const info = (link?.addr_info ?? []).find((entry) =>
+        entry.local.toLowerCase() === ip.address.toLowerCase()
+      );
+      assertEquals(ip.version, info?.family === "inet6" ? 6 : 4);
+      if (ip.cidr !== undefined) {
+        assertEquals(Number(ip.cidr.split("/")[1]), info?.prefixlen);
+      }
+      // Never a loopback, link-local or virtual-bridge address.
+      assertEquals(ip.address.startsWith("127."), false);
+      assertEquals(ip.address.toLowerCase().startsWith("fe80:"), false);
+      assertEquals(/^(docker|br-|veth|virbr)/.test(ip.interface ?? ""), false);
+    }
+  },
+});

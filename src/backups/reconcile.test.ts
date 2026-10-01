@@ -412,3 +412,102 @@ test("a set with no enabled copy policy never touches the helper image", async (
     assertEquals(pulls, 0);
   });
 });
+
+function volumePolicy(
+  policyId: string,
+  overrides: Partial<BackupPolicyWireEntry> = {},
+): BackupPolicyWireEntry {
+  return policy(policyId, {
+    targetKind: "copy",
+    managedId: undefined,
+    engine: undefined,
+    artifactExtension: undefined,
+    copyId: C,
+    copyProvider: "docker",
+    volumeName: "shop_uploads",
+    ...overrides,
+  });
+}
+
+const noPull = () => Promise.resolve(undefined);
+
+function reconcileWithImage(host: Host, policies: BackupPolicyWireEntry[]) {
+  return handleBackupsReconcile({ policies }, "", {
+    resolveLayout: () => host.layout,
+    run: host.run,
+    systemdUnitDir: host.unitDir,
+    ensureHelperImage: noPull,
+  });
+}
+
+test("a managed database hourly and a volume daily keep independent timers on one host", async () => {
+  await withHost(async (host) => {
+    await reconcileWithImage(host, [
+      policy(A, { onCalendar: "hourly" }),
+      volumePolicy(B, { onCalendar: "*-*-* 02:00:00" }),
+    ]);
+
+    const read = (id: string, ext: "timer" | "service") =>
+      Deno.readTextFile(join(host.unitDir, `${backupUnitName(id)}.${ext}`));
+    const [timerA, timerB, serviceA, serviceB] = await Promise.all([
+      read(A, "timer"),
+      read(B, "timer"),
+      read(A, "service"),
+      read(B, "service"),
+    ]);
+
+    // Each timer carries only its own calendar and starts only its own service.
+    assert(timerA.includes("OnCalendar=hourly\n"));
+    assert(timerB.includes("OnCalendar=*-*-* 02:00:00\n"));
+    assert(timerA.includes(`Unit=${backupUnitName(A)}.service\n`));
+    assert(timerB.includes(`Unit=${backupUnitName(B)}.service\n`));
+    assertEquals(timerA.includes(B), false);
+    assertEquals(timerB.includes(A), false);
+    // Each service runs only its own policy, so two never share a process.
+    assert(serviceA.includes(`/tp-backup-run ${A}\n`));
+    assert(serviceB.includes(`/tp-backup-run ${B}\n`));
+    assertEquals(serviceA.includes(B), false);
+    assertEquals(serviceB.includes(A), false);
+
+    // Re-timing one leaves the other's files and next firing alone.
+    host.calls.length = 0;
+    const result = await reconcileWithImage(host, [
+      policy(A, { onCalendar: "hourly" }),
+      volumePolicy(B, { onCalendar: "*-*-* 05:00:00" }),
+    ]);
+    assertEquals(result.unitsChanged, [B]);
+    assertEquals(await read(A, "timer"), timerA);
+    assertEquals(
+      sudoSystemctl(host).some((call) => call.includes(backupUnitName(A))),
+      false,
+    );
+  });
+});
+
+test("deleting a policy removes its units and its policies-file entry and leaves the others", async () => {
+  await withHost(async (host) => {
+    await reconcileWithImage(host, [policy(A), volumePolicy(B)]);
+    const keptTimer = await Deno.readTextFile(
+      join(host.unitDir, `${backupUnitName(A)}.timer`),
+    );
+    host.calls.length = 0;
+
+    const result = await reconcileWithImage(host, [policy(A)]);
+
+    assertEquals(result.unitsRemoved, [B]);
+    assert(
+      sudoSystemctl(host).includes(`disable --now ${backupUnitName(B)}.timer`),
+    );
+    const left: string[] = [];
+    for await (const entry of Deno.readDir(host.unitDir)) left.push(entry.name);
+    assertEquals(left.filter((name) => name.includes(B)), []);
+    assertEquals(
+      (await readBackupPoliciesFile(host.layout)).map((p) => p.policyId),
+      [A],
+    );
+    assertEquals(
+      await Deno.readTextFile(join(host.unitDir, `${backupUnitName(A)}.timer`)),
+      keptTimer,
+    );
+  });
+});
