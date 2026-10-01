@@ -368,6 +368,24 @@ stays up either way. Wildcards are upload-only: the stock Caddy binary
 speaks HTTP-01, and DNS-01 needs a provider module that build does not
 include.
 
+### instance-launch systemd sandbox
+
+`turbopanel-instance.service.j2` sandboxes the **production compiled** instance
+(`turbopanel_dev_user` empty): `ProtectSystem=strict` + `ReadWritePaths`
+(run dir, state, metrics, runtime/config dirs, instance log dir, plus
+`/run/sudo`, `/var/lib/sudo`, `/run/faillock` for the root children of
+`sudo pamtester`), `ProtectHome`, `PrivateTmp`, `PrivateDevices`,
+`ProtectKernel*`/`ProtectControlGroups`/`ProtectClock`/`ProtectHostname`,
+`RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK`,
+`RestrictNamespaces/Realtime/SUIDSGID`, `LockPersonality`, and a deny-list
+`CapabilityBoundingSet`. Left out on purpose: `NoNewPrivileges` (the instance
+still runs `sudo`; see `tasks/upgrade-sudoers.yml`), `MemoryDenyWriteExecute`
+(V8), `SystemCallFilter` and a positive capability set (the sudo targets run as
+root and are unproven under them). Rollback: delete the sandbox block and
+converge (`instance-launch`); no data is touched.
+`src/orchestration/instance-unit-sandbox.test.ts` renders the unit and pins all
+of it. `scripts/canary-instance-sandbox-proof.sh` is the on-host proof.
+
 ### instance-launch secret keyring
 
 The `instance-launch` role persists the control-plane root secret keyring under
