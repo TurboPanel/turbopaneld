@@ -1,0 +1,9 @@
+---
+- name: Reload systemd for the Docker gate
+  ansible.builtin.systemd:
+    daemon_reload: true
+
+- name: Restart Docker gate
+  ansible.builtin.systemd:
+    name: "{{ docker_gate_service_name }}"
+    state: restarted

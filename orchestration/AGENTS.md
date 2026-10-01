@@ -74,6 +74,12 @@ fast-path when the binary is present and the service active. The role
   addresses and existing networks keep their subnets — pools only affect
   networks created afterwards.
 
+### Docker gate (`docker-gate`)
+
+Moved to `roles/docker-gate/AGENTS.md`. Included at the end of the `docker`
+role and run by `daemon-converge.yml`; managed hosts with Docker only, observe
+mode, never fatal in stage 1.
+
 ### RAPL sysfs (`rapl-access`)
 
 Kernel RAPL `energy_uj` is **0400** (root-only). The daemon collector reads it

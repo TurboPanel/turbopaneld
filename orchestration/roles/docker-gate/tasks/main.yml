@@ -1,0 +1,38 @@
+---
+# Stage 1 of closing the Docker-socket route to root (observe mode). Installed
+# wherever Docker is, on managed hosts only. Nothing routes through the gate
+# yet: the daemon still talks to the real socket and `tp` is still in the
+# `docker` group, so a failure here must never block the Docker install or a
+# converge: the whole install is a block with a rescue that only warns. A later
+# stage that depends on the gate makes this fatal.
+
+- name: Check for the Docker binary
+  ansible.builtin.stat:
+    path: /usr/bin/docker
+  register: _docker_gate_docker_bin
+
+- name: Install the Docker gate
+  when:
+    - docker_gate_enabled | bool
+    - (turbopanel_dev_user | default('')) | length == 0
+    - _docker_gate_docker_bin.stat.exists
+  block:
+    - name: Check for the vendored Deno runtime
+      ansible.builtin.stat:
+        path: "{{ docker_gate_deno_bin }}"
+      register: _docker_gate_deno
+
+    - name: Skip the gate when the vendored Deno is missing
+      ansible.builtin.debug:
+        msg: "Docker gate not installed: {{ docker_gate_deno_bin }} is missing"
+      when: not _docker_gate_deno.stat.exists
+
+    - name: Install the gate service and files
+      ansible.builtin.include_tasks: install.yml
+      when: _docker_gate_deno.stat.exists
+  rescue:
+    - name: Report that the Docker gate could not be installed
+      ansible.builtin.debug:
+        msg: >-
+          Docker gate not installed (observe mode, nothing depends on it):
+          {{ ansible_failed_result.msg | default('unknown error') }}

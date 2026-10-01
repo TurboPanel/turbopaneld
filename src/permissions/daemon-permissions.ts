@@ -40,7 +40,20 @@ import {
 
 const VENDOR = PROD_RUNTIME_DIR_DEFAULT;
 const PRINCIPAL_HOME_ROOT = "/srv/users";
-const DOCKER_SOCKETS = ["/run/docker.sock", "/var/run/docker.sock"];
+/**
+ * The Docker gate's socket directory (`orchestration/roles/docker-gate`):
+ * `root:tp 0750`, holding only the gate's listening socket. Deno gates a Unix
+ * `connect()` on read and write access to the socket path, so the daemon needs
+ * both here for the in-process Docker client to reach the gate once
+ * `TURBOPANEL_DOCKER_SOCKET` points at it. The directory is root-owned: the
+ * grant cannot be used to create or replace anything in it.
+ */
+export const DOCKER_GATE_SOCKET_DIR = "/run/turbopanel-gate";
+const DOCKER_SOCKETS = [
+  "/run/docker.sock",
+  "/var/run/docker.sock",
+  DOCKER_GATE_SOCKET_DIR,
+];
 
 /**
  * Vendor subtrees the daemon process itself writes at runtime: uv's download
