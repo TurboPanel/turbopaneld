@@ -445,6 +445,24 @@ test("parseManagedLifecyclePayload and parseManagedDestroyPayload reject optiona
     }).engine,
     "postgres",
   );
+  assertEquals(
+    parseManagedLifecyclePayload({
+      managedId: "m1",
+      action: "stop",
+      role: "replica",
+    }).role,
+    "replica",
+  );
+  assertThrows(
+    () =>
+      parseManagedLifecyclePayload({
+        managedId: "m1",
+        action: "stop",
+        role: "leader",
+      }),
+    TypeError,
+    "Invalid managed.lifecycle payload",
+  );
   assertThrows(
     () => parseManagedDestroyPayload(null),
     TypeError,
