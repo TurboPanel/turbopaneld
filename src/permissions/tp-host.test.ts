@@ -379,6 +379,9 @@ test("the daemon's own unit files pass; privileged or foreign units do not", asy
       ["an empty Group=", service.replace(/^Group=.*$/m, "Group=")],
       ["no Slice=", service.replace(/^Slice=.*\n/m, "")],
       ["an empty Slice=", service.replace(/^Slice=.*$/m, "Slice=")],
+      // "-" stands for an empty field in the hand-off, so a literal one is refused.
+      ["a Slice= of -", service.replace(/^Slice=.*$/m, "Slice=-")],
+      ["a Group= of -", service.replace(/^Group=.*$/m, "Group=-")],
       [
         "no NoNewPrivileges=",
         service.replace(/^NoNewPrivileges=.*\n/m, ""),
