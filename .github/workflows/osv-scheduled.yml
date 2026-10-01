@@ -1,0 +1,34 @@
+# osv-scheduled: weekly dependency sweep that files or updates ONE issue titled
+# "Dependency advisories" for warning-level advisories. The pull request gate
+# (osv-scan, mode gate) is unchanged. Calls the shared action in TurboPanel/dev
+# pinned by sha with `mode: issue`.
+name: Dependency Advisory Sweep
+
+on:
+  schedule:
+    - cron: "27 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: osv-scheduled
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    name: sweep
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Scan and update the tracking issue
+        uses: TurboPanel/dev/.github/actions/osv-scan@8512d65091c662383a4aa6ff2848e16230ccc5e1 # dev#55
+        with:
+          mode: issue
+        env:
+          GH_TOKEN: ${{ github.token }}
