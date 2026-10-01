@@ -31,17 +31,28 @@
  * `DOCKER-USER` on restart, so the jump has to be put back the way the fabric
  * jump already is.
  *
- * **Durable copy.** The applied documents are written to
- * `<configDir>/firewall.v4` and `firewall.v6` (world-readable — they hold no
- * secret and an operator should be able to read what the host enforces). The
- * boot unit that restores them lands with `fw-boot-persistence`; this module
- * only writes them.
+ * **Not durable until confirmed.** Applying arms the root rollback guard and
+ * loads the rules, but writes only *pending* documents; the durable
+ * `<configDir>/firewall.v4` / `firewall.v6` (world-readable — they hold no
+ * secret and an operator should be able to read what the host enforces) change
+ * only when `./confirm.ts` promotes the pending ones. See `./pending.ts` for
+ * why and for the files involved. The boot unit loads the durable documents
+ * only.
  */
 
 import { join } from "@std/path";
 import { type LayoutPaths, resolveLayout } from "../paths/layout.ts";
 import { errorText, logInfo, logWarn, sanitizeForLog } from "../util/logger.ts";
 import { forEachSequential } from "../util/sequential.ts";
+import {
+  type ArmedPendingFirewall,
+  armPendingFirewall,
+  clearPendingFirewall,
+  disarmGuardTimer,
+  recordPendingV6,
+  removeIfPresent,
+  rollbackRecordPath,
+} from "./pending.ts";
 import {
   FIREWALL_FORWARD_CHAIN,
   FIREWALL_INPUT_CHAIN,
@@ -68,6 +79,9 @@ const DOCKER_USER_CHAIN = "DOCKER-USER";
 export type FirewallApplyOptions = {
   run?: FirewallRunFn;
   layout?: LayoutPaths;
+  /** The payload's generation, recorded in the pending marker. */
+  generation?: number;
+  now?: () => Date;
 };
 
 function binaryFor(family: FirewallFamily, tool: "" | "-restore" | "-save") {
@@ -187,13 +201,21 @@ async function restoreDocument(
   const bin = binaryFor(family, "-restore");
   const tested = await run(bin, ["--noflush", "--test"], { stdin: document });
   if (!tested.success) {
-    throw new Error(
+    throw new FirewallRulesetRefusedError(
       `${bin} --test refused the ruleset: ${failureText(tested)}`,
     );
   }
   const applied = await run(bin, ["--noflush"], { stdin: document });
   if (!applied.success) {
     throw new Error(`${bin} failed: ${failureText(applied)}`);
+  }
+}
+
+/** `--test` refused the document: nothing was loaded. */
+export class FirewallRulesetRefusedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "FirewallRulesetRefusedError";
   }
 }
 
@@ -217,11 +239,18 @@ export type FirewallApplyOutcome = {
   ipv6Applied: boolean;
   forwardApplied: boolean;
   warnings: string[];
+  /** The ruleset is loaded but not durable: confirm it before this deadline. */
+  confirmation: ArmedPendingFirewall;
 };
 
 /**
  * Apply both documents. `includeForward` must be the same value the renderer
  * was given — it says which jumps to ensure.
+ *
+ * Stages the ruleset and arms the rollback guard *first*; when the guard cannot
+ * be armed nothing is loaded. The rules are then loaded but only pending: they
+ * become durable when `confirmPendingFirewall` promotes them, and the guard
+ * restores the last confirmed rules when the window runs out first.
  */
 export async function applyRenderedFirewall(
   rendered: RenderedFirewall,
@@ -231,9 +260,51 @@ export async function applyRenderedFirewall(
 ): Promise<FirewallApplyOutcome> {
   const run = options.run ?? runFirewallHost;
   const layout = options.layout ?? resolveLayout(Deno.env.toObject());
+  const armed = await armPendingFirewall(
+    {
+      digest: rendered.digest,
+      generation: options.generation ?? 0,
+      v4: rendered.v4,
+    },
+    { run, layout, now: options.now },
+  );
+  const progress = { v4Loaded: false };
+  try {
+    return await loadStagedRuleset(
+      rendered,
+      includeForward,
+      probe,
+      { run, layout, armed, progress },
+    );
+  } catch (err) {
+    // Nothing reached the kernel: forget the stage. Anything loaded stays
+    // under the guard, which restores the confirmed rules at the deadline.
+    if (!progress.v4Loaded) {
+      await clearPendingFirewall(layout);
+      await disarmGuardTimer(run);
+    }
+    throw err;
+  }
+}
+
+type StagedLoad = {
+  run: FirewallRunFn;
+  layout: LayoutPaths;
+  armed: ArmedPendingFirewall;
+  progress: { v4Loaded: boolean };
+};
+
+async function loadStagedRuleset(
+  rendered: RenderedFirewall,
+  includeForward: Record<FirewallFamily, boolean>,
+  probe: XtablesProbe,
+  staged: StagedLoad,
+): Promise<FirewallApplyOutcome> {
+  const { run, layout, armed, progress } = staged;
   const warnings: string[] = [];
 
   await restoreDocument(4, rendered.v4, run);
+  progress.v4Loaded = true;
   await ensureJump(4, INPUT_BUILTIN, FIREWALL_INPUT_CHAIN, run);
   if (includeForward[4]) {
     await ensureJump(4, DOCKER_USER_CHAIN, FIREWALL_FORWARD_CHAIN, run);
@@ -258,14 +329,24 @@ export async function applyRenderedFirewall(
     }
   }
 
-  // v6 durable document: a failed apply leaves the file alone, a successful
-  // one records the rendered document, and no apply forgets it.
-  let durableV6: DurableV6Document = KEEP_V6_DOCUMENT;
-  if (ipv6Failure === null) durableV6 = ipv6Applied ? rendered.v6 : null;
-  await writeDurableDocuments(layout, rendered.v4, durableV6);
-
-  if (ipv6Failure !== null) throw new FirewallIpv6ApplyError(ipv6Failure);
-  return { ipv6Applied, forwardApplied: includeForward[4], warnings };
+  // What a confirm does to the durable v6 document: a failed apply leaves it
+  // alone, a successful one records the rendered document, and no apply
+  // forgets it.
+  if (ipv6Failure !== null) {
+    await recordPendingV6(layout, "keep", null);
+    throw new FirewallIpv6ApplyError(ipv6Failure);
+  }
+  await recordPendingV6(
+    layout,
+    ipv6Applied ? "replace" : "forget",
+    ipv6Applied ? rendered.v6 : null,
+  );
+  return {
+    ipv6Applied,
+    forwardApplied: includeForward[4],
+    warnings,
+    confirmation: armed,
+  };
 }
 
 async function applyIpv6(
@@ -281,42 +362,10 @@ async function applyIpv6(
 }
 
 /**
- * What to do with the durable v6 document: the document text to keep, `null`
- * to forget it, or the {@link KEEP_V6_DOCUMENT} sentinel to leave the existing
- * file alone (the v6 kernel state did not change).
- */
-type DurableV6Document = string | null | typeof KEEP_V6_DOCUMENT;
-const KEEP_V6_DOCUMENT: unique symbol = Symbol("keep-v6-document");
-
-async function writeDurableDocuments(
-  layout: LayoutPaths,
-  v4: string,
-  v6: DurableV6Document,
-): Promise<void> {
-  await Deno.mkdir(layout.configDir, { recursive: true });
-  const v4Path = join(layout.configDir, FIREWALL_V4_FILENAME);
-  const v6Path = join(layout.configDir, FIREWALL_V6_FILENAME);
-  await Deno.writeTextFile(v4Path, v4, { mode: 0o644 });
-  if (v6 === KEEP_V6_DOCUMENT) return;
-  if (v6 === null) {
-    await removeIfPresent(v6Path);
-  } else {
-    await Deno.writeTextFile(v6Path, v6, { mode: 0o644 });
-  }
-}
-
-async function removeIfPresent(path: string): Promise<void> {
-  try {
-    await Deno.remove(path);
-  } catch (err) {
-    if (!(err instanceof Deno.errors.NotFound)) throw err;
-  }
-}
-
-/**
  * `mode: off` — take the jumps out, flush and delete both chains in both
- * families, forget the durable documents. Best-effort throughout: a chain that
- * is already gone is the desired state, not an error.
+ * families, forget the durable and pending documents and stop the guard.
+ * Best-effort throughout: a chain that is already gone is the desired state,
+ * not an error. Also the `turbopaneld firewall off` break-glass.
  */
 export async function removeFirewall(
   options: FirewallApplyOptions = {},
@@ -329,6 +378,9 @@ export async function removeFirewall(
   );
   await removeIfPresent(join(layout.configDir, FIREWALL_V4_FILENAME));
   await removeIfPresent(join(layout.configDir, FIREWALL_V6_FILENAME));
+  await clearPendingFirewall(layout);
+  await removeIfPresent(rollbackRecordPath(layout));
+  await disarmGuardTimer(run);
   logInfo("firewall", "TurboPanel firewall chains removed (mode off)");
 }
 

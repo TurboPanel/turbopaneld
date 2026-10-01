@@ -51,3 +51,12 @@ turbopanel_update_guard_deadline_sec: 600
 # Follow-up after a restored daemon fails to come back. The guard stops the
 # timer on recovery and after the attention threshold.
 turbopanel_update_guard_retry_sec: 30
+# Root rollback guard for an unconfirmed host firewall ruleset (commit-confirm):
+# a timer the daemon arms before it loads rules. Kept under <install>/lib beside
+# tp-update-guard so a rollback to an older package cannot delete the only copy.
+turbopanel_firewall_guard_script: "{{ turbopanel_orchestration_dir }}/scripts/tp-firewall-guard"
+turbopanel_firewall_guard_bin: "{{ turbopanel_install_root }}/lib/tp-firewall-guard"
+# The daemon's confirm window is 120 s (FIREWALL_CONFIRM_WINDOW_SECONDS); the
+# timer's first fire lands just after it.
+turbopanel_firewall_guard_deadline_sec: 125
+turbopanel_firewall_guard_retry_sec: 10

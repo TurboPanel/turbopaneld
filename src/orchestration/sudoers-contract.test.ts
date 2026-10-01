@@ -63,6 +63,21 @@ test("tp-update-guard is not granted via sudoers (root systemd only)", async () 
   }
 });
 
+test("tp-firewall-guard is not granted via sudoers (root systemd only)", async () => {
+  const template = await Deno.readTextFile(join(orch, SUDOERS_TEMPLATE));
+  assertStringIncludes(
+    template,
+    "tp-firewall-guard runs only as root via its systemd timer",
+  );
+  for (const line of template.split("\n")) {
+    if (line.includes("tp-firewall-guard") && line.includes("Cmnd_Alias")) {
+      throw new TypeError(
+        `tp-firewall-guard must not appear in a Cmnd_Alias: ${line}`,
+      );
+    }
+  }
+});
+
 test("production sudoers never grants NOPASSWD:ALL as root", async () => {
   const template = await Deno.readTextFile(join(orch, SUDOERS_TEMPLATE));
   for (const line of template.split("\n")) {

@@ -1,0 +1,14 @@
+[Unit]
+Description=TurboPanel host firewall confirm deadline
+
+[Timer]
+# Armed only by the daemon (`systemctl restart` of this timer when it loads a
+# ruleset); not enabled at boot, and a reboot forgets any pending ruleset. The
+# first fire lands just after the 120 s confirm window the daemon writes into
+# the marker (FIREWALL_CONFIRM_WINDOW_SECONDS); while the marker is still
+# pending but not yet due, OnUnitInactiveSec retries. The guard stops this
+# timer when nothing is pending and after a rollback.
+OnActiveSec={{ turbopanel_firewall_guard_deadline_sec | default(125) }}
+OnUnitInactiveSec={{ turbopanel_firewall_guard_retry_sec | default(10) }}
+AccuracySec=1s
+Unit=turbopanel-firewall-guard.service

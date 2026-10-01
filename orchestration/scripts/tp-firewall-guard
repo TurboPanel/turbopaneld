@@ -1,0 +1,306 @@
+#!/bin/sh
+# Root rollback guard for an unconfirmed host firewall ruleset.
+#
+# Invoked by turbopanel-firewall-guard.service, which the daemon's firewall
+# apply arms through turbopanel-firewall-guard.timer *before* it loads a
+# ruleset. The ruleset is "pending" while <run>/firewall-pending.json exists:
+# loaded in the kernel but not durable. `server.firewall.confirm` (or
+# `turbopaneld firewall confirm`) removes the marker; if the marker is still
+# there when its deadline passes, this script restores the last CONFIRMED rules
+# (<config>/firewall.v4|.v6) or, when there are none, removes TurboPanel's
+# chains. It runs as root, independent of the daemon, because the failure it
+# exists for is a host nobody can SSH into and a daemon that cannot help.
+#
+# Outbound is open and ESTABLISHED is always accepted, so "the daemon can still
+# reach the control plane" can never prove a ruleset is safe; only a human or
+# an outside probe can, which is why confirmation is explicit.
+#
+# FAILS OPEN. The first thing a rollback does is take TurboPanel's jumps out of
+# INPUT / DOCKER-USER, which disables every TurboPanel rule at once; only then
+# does it try to put the confirmed rules back. Any error after that leaves the
+# host with fewer restrictions, never more.
+set -eu
+
+tp_die() {
+  printf 'tp-firewall-guard: %s\n' "$1" >&2
+  exit 1
+}
+
+[ "$(id -u)" = "0" ] || tp_die "must run as root"
+
+# A copy under <install>/lib survives replacing share/orchestration with a
+# build from before this script existed. The systemd unit runs that copy.
+_script_dir="$(CDPATH='' cd "$(dirname "$0")" && pwd -P)"
+_script="$_script_dir/$(basename "$0")"
+case "$_script" in
+  */orchestration/scripts/tp-firewall-guard)
+    ORCH_DIR="$(CDPATH='' cd "$_script_dir/.." && pwd -P)"
+    INSTALL_ROOT="${TURBOPANEL_INSTALL_ROOT:-$(CDPATH='' cd "$ORCH_DIR/../.." && pwd -P)}"
+    ;;
+  *)
+    INSTALL_ROOT="${TURBOPANEL_INSTALL_ROOT:-/opt/turbopanel}"
+    ;;
+esac
+_stable_guard="$INSTALL_ROOT/lib/tp-firewall-guard"
+if [ "$_script" != "$_stable_guard" ] && [ -d "$INSTALL_ROOT/lib" ]; then
+  cp -f "$_script" "$_stable_guard" 2>/dev/null && chmod 0750 "$_stable_guard" || true
+fi
+
+RUN_DIR="${TURBOPANEL_RUN_DIR:-/run/turbopanel}"
+STATE_DIR="${TURBOPANEL_STATE_DIR:-/var/lib/turbopanel}"
+CONFIG_DIR="${TURBOPANEL_CONFIG_DIR:-/etc/turbopanel}"
+MARKER="$RUN_DIR/firewall-pending.json"
+ROLLBACK_RECORD="$STATE_DIR/firewall-rollback.json"
+DURABLE_V4="$CONFIG_DIR/firewall.v4"
+DURABLE_V6="$CONFIG_DIR/firewall.v6"
+PENDING_V4="$CONFIG_DIR/firewall.pending.v4"
+PENDING_V6="$CONFIG_DIR/firewall.pending.v6"
+GUARD_TIMER="turbopanel-firewall-guard.timer"
+INPUT_CHAIN="TP-INPUT"
+FORWARD_CHAIN="TP-FWD"
+WORK_DIR=""
+
+tp_cleanup() {
+  [ -n "$WORK_DIR" ] && rm -rf "$WORK_DIR"
+  return 0
+}
+trap tp_cleanup EXIT
+
+tp_read_json_field() {
+  _file="$1"
+  _key="$2"
+  # The daemon owns this directory; a symlink here is not ours to follow.
+  [ -L "$_file" ] && return 0
+  sed -n "s/.*\"$_key\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p" "$_file" | head -1
+}
+
+# Write <content> to <path> as root without following a symlink anywhere.
+# The daemon owns RUN_DIR and STATE_DIR, so it can rename any entry in them at
+# any moment: writing by name there can be redirected through a symlink it
+# swaps in. Instead, pin the directory with `cd -P`, create a root-only 0700
+# subdirectory (the daemon cannot add entries inside it), check that the
+# working directory really is that subdirectory, write the file there, and
+# rename it over <path> with `mv -T` — rename(2) replaces a symlink entry, it
+# never writes through one. Same helper as tp-update-guard.
+# Usage: tp_write_file <path> <content> <mode> [group]
+tp_write_file() (
+  set -e
+  _wf_name="$(basename -- "$1")"
+  cd -P -- "$(dirname -- "$1")"
+  _wf_real="$(pwd -P)"
+  _wf_priv="$(mktemp -d "./.tp-firewall-guard.XXXXXX")"
+  _wf_priv="${_wf_priv#./}"
+  cd -P -- "$_wf_priv"
+  if [ "$(pwd -P)" != "$_wf_real/$_wf_priv" ] || {
+      # shellcheck disable=SC3067 # dash (Debian's /bin/sh) implements -O
+      [ ! -O . ]
+    } ||
+    [ "$(stat -c '%a' .)" != "700" ]; then
+    printf 'tp-firewall-guard: %s moved while writing %s; not writing\n' \
+      "$_wf_priv" "$1" >&2
+    exit 1
+  fi
+  printf '%s\n' "$2" > ./f
+  chmod "$3" ./f
+  if [ -n "${4:-}" ]; then
+    chown "root:$4" ./f 2>/dev/null || chgrp "$4" ./f 2>/dev/null || true
+  fi
+  mv -T -f -- ./f "../$_wf_name"
+  cd ..
+  rmdir -- "$_wf_priv" 2>/dev/null || true
+)
+
+tp_daemon_file_group() {
+  if [ -n "${TURBOPANEL_DAEMON_GROUP:-}" ]; then
+    printf '%s' "$TURBOPANEL_DAEMON_GROUP"
+    return 0
+  fi
+  _g="$(stat -c '%G' "$STATE_DIR" 2>/dev/null || true)"
+  if [ -n "$_g" ]; then
+    printf '%s' "$_g"
+    return 0
+  fi
+  printf '%s' "tp"
+}
+
+tp_stop_guard_timer() {
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl stop "$GUARD_TIMER" 2>/dev/null || true
+  fi
+}
+
+# Nothing pending: the guard has nothing to do, and the timer would only keep
+# waking it.
+if [ ! -e "$MARKER" ] && [ ! -L "$MARKER" ]; then
+  tp_stop_guard_timer
+  exit 0
+fi
+
+_digest="$(tp_read_json_field "$MARKER" digest)"
+_deadline="$(tp_read_json_field "$MARKER" deadlineAt)"
+case "$_digest" in
+  ''|*[!0123456789abcdef]*) _digest="unknown" ;;
+esac
+
+_deadline_epoch=0
+if [ -n "$_deadline" ]; then
+  _deadline_epoch="$(date -u -d "$_deadline" +%s 2>/dev/null || echo 0)"
+fi
+_now_epoch="$(date -u +%s 2>/dev/null || echo 0)"
+
+# Not yet: the timer retries shortly. An unreadable marker (no parseable
+# deadline) is rolled back at once: a guard that cannot tell when the window
+# ends must not leave rules loaded.
+# A clock that cannot be read counts as "the window is over".
+if [ "$_now_epoch" -gt 0 ] && [ "$_deadline_epoch" -gt 0 ] &&
+  [ "$_now_epoch" -lt "$_deadline_epoch" ]; then
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Rollback from here on.
+# ---------------------------------------------------------------------------
+
+# A restore document may only declare and fill TurboPanel's own two chains, with
+# the terminal targets the renderer uses. The files live in a daemon-writable
+# directory and root loads them, so they are validated rather than trusted
+# (the daemon can already load arbitrary rules through tp-host; this keeps the
+# guard from being a way to do more than that). Prints nothing on success.
+tp_validate_document() {
+  awk '
+    BEGIN { safe = "^[-A-Za-z0-9 ._:,/+\"]+$" }
+    /^[ \t]*$/ { next }
+    /^#/ { next }
+    /^\*filter$/ { next }
+    /^COMMIT$/ { next }
+    /^:TP-INPUT - \[0:0\]$/ { next }
+    /^:TP-FWD - \[0:0\]$/ { next }
+    /^-A (TP-INPUT|TP-FWD) / {
+      if ($0 !~ safe) { bad = 1; exit }
+      n = split($0, parts, " ")
+      for (i = 1; i <= n; i++) {
+        if (parts[i] == "-g" || parts[i] == "--goto" || parts[i] == "--jump") { bad = 1; exit }
+        if (parts[i] == "-j") {
+          t = parts[i + 1]
+          if (t != "ACCEPT" && t != "DROP" && t != "REJECT" && t != "RETURN" && t != "TP-INPUT" && t != "TP-FWD") { bad = 1; exit }
+        }
+      }
+      next
+    }
+    { bad = 1; exit }
+    END { exit bad ? 1 : 0 }
+  ' "$1"
+}
+
+# Copy a durable document into a root-only work dir (never loading by the
+# daemon-writable name) and validate the copy. Prints the copy path on success.
+tp_stage_document() {
+  _sd_src="$1"
+  _sd_name="$2"
+  [ -f "$_sd_src" ] || return 1
+  [ -L "$_sd_src" ] && return 1
+  [ -n "$WORK_DIR" ] || return 1
+  cat -- "$_sd_src" > "$WORK_DIR/$_sd_name" 2>/dev/null || return 1
+  tp_validate_document "$WORK_DIR/$_sd_name" || return 1
+  printf '%s' "$WORK_DIR/$_sd_name"
+}
+
+# Take every TurboPanel jump out. This alone disables all TurboPanel rules.
+tp_drop_jumps() {
+  _dj_ipt="$1"
+  command -v "$_dj_ipt" >/dev/null 2>&1 || return 0
+  _dj_try=0
+  while [ "$_dj_try" -lt 8 ]; do
+    "$_dj_ipt" -w 5 -D INPUT -j "$INPUT_CHAIN" 2>/dev/null || break
+    _dj_try=$((_dj_try + 1))
+  done
+  _dj_try=0
+  while [ "$_dj_try" -lt 8 ]; do
+    "$_dj_ipt" -w 5 -D DOCKER-USER -j "$FORWARD_CHAIN" 2>/dev/null || break
+    _dj_try=$((_dj_try + 1))
+  done
+  return 0
+}
+
+# Flush and delete both TurboPanel chains (the jumps are already gone).
+tp_delete_chains() {
+  _dc_ipt="$1"
+  command -v "$_dc_ipt" >/dev/null 2>&1 || return 0
+  for _dc_chain in "$INPUT_CHAIN" "$FORWARD_CHAIN"; do
+    "$_dc_ipt" -w 5 -F "$_dc_chain" 2>/dev/null || true
+    "$_dc_ipt" -w 5 -X "$_dc_chain" 2>/dev/null || true
+  done
+  return 0
+}
+
+tp_ensure_jump() {
+  _ej_ipt="$1"
+  _ej_parent="$2"
+  _ej_child="$3"
+  "$_ej_ipt" -w 5 -C "$_ej_parent" -j "$_ej_child" 2>/dev/null && return 0
+  "$_ej_ipt" -w 5 -I "$_ej_parent" 1 -j "$_ej_child"
+}
+
+# Load one family's confirmed document. Returns non-zero on any problem.
+tp_restore_confirmed() {
+  _rc_ipt="$1"
+  _rc_restore="$2"
+  _rc_doc="$3"
+  "$_rc_restore" -w 5 --noflush --test < "$_rc_doc" || return 1
+  "$_rc_restore" -w 5 --noflush < "$_rc_doc" || return 1
+  tp_ensure_jump "$_rc_ipt" INPUT "$INPUT_CHAIN" || return 1
+  if grep -q "^:$FORWARD_CHAIN " "$_rc_doc" && "$_rc_ipt" -w 5 -S DOCKER-USER >/dev/null 2>&1; then
+    tp_ensure_jump "$_rc_ipt" DOCKER-USER "$FORWARD_CHAIN" || return 1
+  fi
+  return 0
+}
+
+# One family: jumps out first (open), then the confirmed rules back if there
+# are any. Prints durable | none | open.
+tp_rollback_family() {
+  _rf_ipt="$1"
+  _rf_restore="$2"
+  _rf_durable="$3"
+  _rf_name="$4"
+  command -v "$_rf_ipt" >/dev/null 2>&1 || { printf 'none'; return 0; }
+  tp_drop_jumps "$_rf_ipt"
+  if [ ! -e "$_rf_durable" ]; then
+    tp_delete_chains "$_rf_ipt"
+    printf 'none'
+    return 0
+  fi
+  if _rf_doc="$(tp_stage_document "$_rf_durable" "$_rf_name")" &&
+    tp_restore_confirmed "$_rf_ipt" "$_rf_restore" "$_rf_doc"; then
+    printf 'durable'
+    return 0
+  fi
+  # The confirmed rules would not load: stay open rather than half-restored.
+  tp_drop_jumps "$_rf_ipt"
+  tp_delete_chains "$_rf_ipt"
+  printf 'open'
+}
+
+# Created here, not inside the functions: they run in command substitutions,
+# which cannot hand a variable back. No work dir means nothing can be staged,
+# and every family then ends open.
+WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/tp-firewall-guard.XXXXXX" 2>/dev/null)" || WORK_DIR=""
+
+_restored_v4="$(tp_rollback_family iptables iptables-restore "$DURABLE_V4" durable.v4)"
+_restored_v6="$(tp_rollback_family ip6tables ip6tables-restore "$DURABLE_V6" durable.v6)"
+case "$_restored_v4" in
+  durable|none|open) ;;
+  *) _restored_v4="open" ;;
+esac
+
+_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || echo unknown)"
+mkdir -p "$STATE_DIR" 2>/dev/null || true
+tp_write_file "$ROLLBACK_RECORD" \
+  "$(printf '{"digest":"%s","at":"%s","restored":"%s"}' "$_digest" "$_at" "$_restored_v4")" \
+  0640 "$(tp_daemon_file_group)" || true
+
+# The marker last: it is what tells a late confirm "nothing is pending".
+rm -f "$PENDING_V4" "$PENDING_V6" "$MARKER"
+tp_stop_guard_timer
+printf 'tp-firewall-guard: rolled back unconfirmed ruleset %s (v4 %s, v6 %s)\n' \
+  "$_digest" "$_restored_v4" "$_restored_v6" >&2
+exit 0

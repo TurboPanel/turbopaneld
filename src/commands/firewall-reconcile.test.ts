@@ -10,6 +10,11 @@ import { resolveLayout } from "../paths/layout.ts";
 import type { FirewallRunFn, FirewallRunResult } from "../firewall/run.ts";
 import { FIREWALL_V4_FILENAME } from "../firewall/apply.ts";
 import {
+  FIREWALL_CONFIRM_WINDOW_SECONDS,
+  FIREWALL_PENDING_V4_FILENAME,
+  readPendingMarker,
+} from "../firewall/pending.ts";
+import {
   type CommandDispatchMessage,
   type FirewallReconcilePayload,
   parseFirewallReconcileResult,
@@ -100,6 +105,7 @@ async function withLayout<T>(
       TURBOPANEL_CONFIG_DIR: join(root, "etc"),
       TURBOPANEL_STATE_DIR: join(root, "state"),
       TURBOPANEL_DAEMON_STATE_DIR: join(root, "state"),
+      TURBOPANEL_RUN_DIR: join(root, "run"),
     }));
   } finally {
     await Deno.remove(root, { recursive: true });
@@ -124,7 +130,17 @@ test("managed + inputDefault accept: renders, applies v4 and v6, reports the ssh
     assertEquals(result.sshPorts, [22]);
     assertEquals(result.digest.length, 64);
     assertEquals(result.warnings, []);
-    assertStringIncludes(result.summary, "applied: 1 rules");
+    assertStringIncludes(result.summary, "pending confirmation until");
+    assertStringIncludes(result.summary, "1 rules");
+    // Applied means pending: the result names the deadline, and the digest the
+    // confirm must echo back is the one the marker holds.
+    assertEquals(result.confirmation?.state, "pending");
+    assertEquals(
+      result.confirmation?.windowSeconds,
+      FIREWALL_CONFIRM_WINDOW_SECONDS,
+    );
+    assertEquals((await readPendingMarker(layout))?.digest, result.digest);
+    assertEquals((await readPendingMarker(layout))?.generation, 11);
     const keys = host.calls.map((c) => `${c.cmd} ${c.args.join(" ")}`);
     // probes first, sshd, DOCKER-USER per family, then the apply
     assertEquals(keys.slice(0, 5), [
@@ -141,10 +157,14 @@ test("managed + inputDefault accept: renders, applies v4 and v6, reports the ssh
       !keys.includes("systemctl is-active turbopanel-instance.service"),
       "co-location is only consulted for a default-drop apply",
     );
-    const durable = await Deno.readTextFile(
-      join(layout.configDir, FIREWALL_V4_FILENAME),
+    const pending = await Deno.readTextFile(
+      join(layout.configDir, FIREWALL_PENDING_V4_FILENAME),
     );
-    assertStringIncludes(durable, "--ctorigdstport 443");
+    assertStringIncludes(pending, "--ctorigdstport 443");
+    await assertRejects(
+      () => Deno.readTextFile(join(layout.configDir, FIREWALL_V4_FILENAME)),
+      Deno.errors.NotFound,
+    );
   });
 });
 
@@ -188,6 +208,8 @@ test("observe renders and reports without touching the host", async () => {
       { run: host.run, resolveLayout: () => layout },
     );
     assertEquals(result.applied, false);
+    assertEquals(result.confirmation, undefined);
+    assertEquals(await readPendingMarker(layout), null);
     assertEquals(result.mode, "observe");
     assertEquals(result.ruleCount, 1);
     assertEquals(result.digest.length, 64);
@@ -203,7 +225,7 @@ test("observe renders and reports without touching the host", async () => {
   });
 });
 
-test("inputDefault drop is rendered, then refused with the held-until-commit-confirm sentence", async () => {
+test("inputDefault drop is rendered, then refused with the default-drop-held sentence", async () => {
   await withLayout(async (layout) => {
     const host = fakeHost(HEALTHY);
     const result = await handleFirewallReconcile(
@@ -384,6 +406,59 @@ test({
         1,
         "a malformed payload never reaches the handler",
       );
+    } finally {
+      setCommandRouterHandlersForTests(null);
+    }
+  },
+});
+
+test({
+  name:
+    "handleCommandDispatch routes server.firewall.confirm through the handler override and refuses a malformed digest",
+  permissions: { env: true, sys: ["hostname"], read: true },
+  fn: async () => {
+    const { handleCommandDispatch, setCommandRouterHandlersForTests } =
+      await import("./command-router.ts");
+    const seen: string[] = [];
+    setCommandRouterHandlersForTests({
+      handleFirewallConfirm: (p) => {
+        seen.push(p.digest);
+        return Promise.resolve({
+          state: "confirmed" as const,
+          digest: p.digest,
+          summary: "stubbed",
+        });
+      },
+    });
+    const confirmMessage = (payloadValue: unknown): CommandDispatchMessage => ({
+      ...dispatchMessage(payloadValue),
+      id: "cmd-fw-2",
+      commandId: "cmd-fw-2",
+      commandType: "server.firewall.confirm",
+    });
+    try {
+      const ws = new MockWebSocket() as unknown as WebSocket;
+      await handleCommandDispatch(
+        confirmMessage({ digest: "c".repeat(64) }),
+        ws,
+      );
+      const frames = (ws as unknown as MockWebSocket).sentFrames.map((f) =>
+        JSON.parse(f) as Record<string, unknown>
+      );
+      assertEquals(frames[1]?.ok, true);
+      assertEquals(
+        (frames[1]?.result as Record<string, unknown>).state,
+        "confirmed",
+      );
+      assertEquals(seen, ["c".repeat(64)]);
+
+      const bad = new MockWebSocket() as unknown as WebSocket;
+      await handleCommandDispatch(confirmMessage({ digest: "NOPE" }), bad);
+      const badFrames = (bad as unknown as MockWebSocket).sentFrames.map((f) =>
+        JSON.parse(f) as Record<string, unknown>
+      );
+      assertEquals(badFrames[1]?.ok, false);
+      assertEquals(seen.length, 1, "a malformed digest never reaches the host");
     } finally {
       setCommandRouterHandlersForTests(null);
     }

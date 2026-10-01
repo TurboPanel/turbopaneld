@@ -16,6 +16,7 @@ export const COMMAND_TYPES = [
   "server.tls.trust.reconcile",
   "server.principals.reconcile",
   "server.firewall.reconcile",
+  "server.firewall.confirm",
   "server.backups.reconcile",
   "environment.deploy",
   "environment.lifecycle",
@@ -281,6 +282,54 @@ export type FirewallReconcileResult = {
    */
   sshPorts: number[];
   warnings: string[];
+  /**
+   * Present when this apply loaded rules that are not yet durable: the root
+   * guard rolls them back at `deadlineAt` unless a `server.firewall.confirm`
+   * for `digest` arrives first. Absent for observe, off and refused applies.
+   */
+  confirmation?: FirewallPendingConfirmation;
+  summary: string;
+};
+
+/**
+ * A ruleset that was applied and is waiting to be confirmed (commit-confirm).
+ * Must stay in sync with the instance canonical shape.
+ */
+export type FirewallPendingConfirmation = {
+  state: "pending";
+  /** ISO time after which the host's root guard rolls the ruleset back. */
+  deadlineAt: string;
+  /** The confirm window the host armed, in seconds. */
+  windowSeconds: number;
+};
+
+/**
+ * `server.firewall.confirm`: promote the pending ruleset named by `digest` (the
+ * reconcile result's digest, lower-case sha256 hex) to durable. Must stay in
+ * sync with the instance canonical shape.
+ */
+export type FirewallConfirmPayload = {
+  digest: string;
+};
+
+export type FirewallConfirmState =
+  | "confirmed"
+  | "nothing_pending"
+  | "digest_mismatch"
+  | "expired"
+  | "rolled_back";
+
+/**
+ * - `confirmed`: the pending ruleset is now durable (it survives a reboot).
+ * - `nothing_pending`: no unconfirmed ruleset (already confirmed, or none).
+ * - `digest_mismatch`: a different ruleset is pending; `pendingDigest` names it.
+ * - `expired`: the window ran out; the host is rolling back, not promoting.
+ * - `rolled_back`: the guard already restored the previous rules.
+ */
+export type FirewallConfirmResult = {
+  state: FirewallConfirmState;
+  digest: string;
+  pendingDigest?: string;
   summary: string;
 };
 
@@ -2508,8 +2557,99 @@ export function parseFirewallReconcileResult(
     forwardApplied: value.forwardApplied as boolean,
     sshPorts: parseFirewallPortList(value.sshPorts, "sshPorts"),
     warnings: [...value.warnings],
+    ...(value.confirmation === undefined
+      ? {}
+      : { confirmation: parseFirewallPendingConfirmation(value.confirmation) }),
     summary: value.summary,
   };
+}
+
+function parseFirewallPendingConfirmation(
+  value: unknown,
+): FirewallPendingConfirmation {
+  if (!isRecord(value) || value.state !== "pending") {
+    throw new Error("confirmation must be a pending confirmation");
+  }
+  if (
+    typeof value.deadlineAt !== "string" ||
+    Number.isNaN(Date.parse(value.deadlineAt))
+  ) {
+    throw new TypeError("confirmation.deadlineAt must be an ISO time");
+  }
+  if (
+    typeof value.windowSeconds !== "number" ||
+    !Number.isInteger(value.windowSeconds) || value.windowSeconds < 1 ||
+    value.windowSeconds > 3600
+  ) {
+    throw new Error(
+      "confirmation.windowSeconds must be an integer from 1 to 3600",
+    );
+  }
+  return {
+    state: "pending",
+    deadlineAt: value.deadlineAt,
+    windowSeconds: value.windowSeconds,
+  };
+}
+
+const FIREWALL_DIGEST_RE = /^[a-f0-9]{64}$/;
+const FIREWALL_CONFIRM_STATES = new Set<FirewallConfirmState>([
+  "confirmed",
+  "nothing_pending",
+  "digest_mismatch",
+  "expired",
+  "rolled_back",
+]);
+
+/** Parse `server.firewall.confirm`. Byte-for-byte the instance's rules. */
+export function parseFirewallConfirmPayload(
+  value: unknown,
+): FirewallConfirmPayload {
+  if (!isRecord(value)) {
+    throw new Error("Invalid firewall confirm payload");
+  }
+  if (
+    typeof value.digest !== "string" || !FIREWALL_DIGEST_RE.test(value.digest)
+  ) {
+    throw new Error("digest must be a lower-case sha256 hex string");
+  }
+  return { digest: value.digest };
+}
+
+export function parseFirewallConfirmResult(
+  value: unknown,
+): FirewallConfirmResult {
+  if (!isRecord(value)) {
+    throw new Error("Invalid firewall confirm result");
+  }
+  if (!FIREWALL_CONFIRM_STATES.has(value.state as FirewallConfirmState)) {
+    throw new Error(
+      "state must be confirmed, nothing_pending, digest_mismatch, expired or rolled_back",
+    );
+  }
+  if (
+    typeof value.digest !== "string" || !FIREWALL_DIGEST_RE.test(value.digest)
+  ) {
+    throw new Error("digest must be a lower-case sha256 hex string");
+  }
+  if (typeof value.summary !== "string") {
+    throw new TypeError("summary must be a string");
+  }
+  const result: FirewallConfirmResult = {
+    state: value.state as FirewallConfirmState,
+    digest: value.digest,
+    summary: value.summary,
+  };
+  if (value.pendingDigest !== undefined) {
+    if (
+      typeof value.pendingDigest !== "string" ||
+      !FIREWALL_DIGEST_RE.test(value.pendingDigest)
+    ) {
+      throw new Error("pendingDigest must be a lower-case sha256 hex string");
+    }
+    result.pendingDigest = value.pendingDigest;
+  }
+  return result;
 }
 
 function parseOptionalNtpServerList(
