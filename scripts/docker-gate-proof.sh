@@ -22,6 +22,11 @@
 # the finding stands), and, when buildx is installed, a summary that shows both
 # BuildKit upgrades (`grpc` and `session`).
 #
+# Stage 3 adds: the read-only listener Traefik may mount (root:root, its own
+# directory) answers ping / version / container list and refuses a create, an
+# export and /info with a 403; the daemon account cannot open it; and when the
+# switch file is on, the shared Traefik mounts it and no socket-proxy remains.
+#
 # The containers are `true` / `echo` on a pinned Alpine image and are removed.
 # A BuildKit upgrade (Compose `build:`) is exercised when the buildx plugin is
 # installed; the summary then shows `grpc` and `session` upgrades.
@@ -30,6 +35,9 @@ set -u
 GATE_UNIT=turbopanel-docker-gate.service
 GATE_DIR=/run/turbopanel-gate
 GATE_SOCKET="$GATE_DIR/docker.sock"
+RO_DIR="$GATE_DIR/ro"
+RO_SOCKET="$RO_DIR/docker.sock"
+INGRESS_SWITCH=/opt/turbopanel/lib/docker-gate/ingress-socket.on
 DAEMON_ACCOUNT=tp
 DAEMON_ENV=/etc/turbopanel/daemon.env
 IMAGE=docker.io/library/alpine:3.22@sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8
@@ -66,6 +74,14 @@ check() {
 gate_docker() {
   sudo -n -u "$DAEMON_ACCOUNT" env "DOCKER_HOST=unix://$GATE_SOCKET" docker "$@"
   return $?
+}
+
+# HTTP status of one request to the read-only socket ("000" = no connection).
+ro_status() {
+  _ro_method=$1
+  _ro_path=$2
+  curl -s -o /dev/null -w '%{http_code}' -X "$_ro_method" --unix-socket "$RO_SOCKET" "http://docker$_ro_path"
+  return 0
 }
 
 cleanup() {
@@ -158,6 +174,25 @@ if grep -Eq '^(export )?(DOCKER_HOST|TURBOPANEL_DOCKER_SOCKET)=' "$DAEMON_ENV" 2
   echo "NOTE  $DAEMON_ENV sets DOCKER_HOST / TURBOPANEL_DOCKER_SOCKET (an opt-in canary flip, not the default)"
 else
   pass "$DAEMON_ENV sets neither DOCKER_HOST nor TURBOPANEL_DOCKER_SOCKET"
+fi
+
+echo "== 5. stage 3: the read-only socket for Traefik"
+if [[ "$(stat -c '%U:%G %a' "$RO_DIR" 2>/dev/null)" == "root:root 755" ]]; then pass "$RO_DIR is root:root 0755"; else fail "$RO_DIR is not root:root 0755"; fi
+if [[ "$(stat -c '%U:%G %a' "$RO_SOCKET" 2>/dev/null)" == "root:root 660" ]]; then pass "$RO_SOCKET is root:root 0660"; else fail "$RO_SOCKET is not root:root 0660"; fi
+for _ok in /_ping /version /containers/json; do
+  if [[ "$(ro_status GET "$_ok")" == "200" ]]; then pass "read-only socket answers GET $_ok"; else fail "read-only socket did not answer GET $_ok"; fi
+done
+for _refused in "POST /containers/create" "GET /containers/$PROJECT/export" "GET /info" "GET /images/json"; do
+  _r_method=${_refused%% *}
+  _r_path=${_refused#* }
+  if [[ "$(ro_status "$_r_method" "$_r_path")" == "403" ]]; then pass "read-only socket refuses $_refused (403)"; else fail "read-only socket did not refuse $_refused"; fi
+done
+if [[ "$(sudo -n -u "$DAEMON_ACCOUNT" curl -s -o /dev/null -w '%{http_code}' --unix-socket "$RO_SOCKET" http://docker/_ping)" == "200" ]]; then fail "the daemon account can open the read-only socket"; else pass "the daemon account cannot open the read-only socket"; fi
+if [[ -f "$INGRESS_SWITCH" ]]; then
+  if docker ps -q | xargs -r docker inspect --format '{{range .Mounts}}{{.Source}} {{end}}' | grep -q "$RO_DIR"; then pass "a Traefik mounts $RO_DIR (switch on)"; else fail "switch on but no container mounts $RO_DIR (deploy once to re-render ingress)"; fi
+  if docker ps --format '{{.Image}}' | grep -q 'docker-socket-proxy'; then echo "NOTE  the socket-proxy is still running: a TCP/UDP service Traefik rendered before the switch still uses it (redeploy that service)"; else pass "no socket-proxy container is running"; fi
+else
+  echo "NOTE  $INGRESS_SWITCH is absent: Traefik still uses the socket-proxy (the default)"
 fi
 
 echo "== gate summary (final counters are written when the unit stops or every summary interval)"

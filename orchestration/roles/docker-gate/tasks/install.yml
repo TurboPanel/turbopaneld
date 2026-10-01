@@ -55,6 +55,7 @@
     content: |
       # Managed by TurboPanel daemon orchestration (docker-gate role).
       d {{ docker_gate_run_dir }} 0750 root {{ docker_gate_group }} -
+      d {{ docker_gate_ro_run_dir }} 0755 root root -
 
 - name: Ensure the gate socket directory exists
   ansible.builtin.file:
@@ -63,6 +64,37 @@
     owner: root
     group: "{{ docker_gate_group }}"
     mode: "0750"
+
+# Stage 3: the read-only listener's own directory (what a Traefik mounts).
+- name: Ensure the read-only socket directory exists
+  ansible.builtin.file:
+    path: "{{ docker_gate_ro_run_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+# The daemon's switch to the read-only socket for Traefik. Root-owned in the
+# gate's own directory, so the daemon can read it and never write it. Sticky:
+# an empty variable leaves it as it is.
+- name: Turn on Traefik's read-only gate socket
+  ansible.builtin.copy:
+    content: "on\n"
+    dest: "{{ docker_gate_ingress_switch_file }}"
+    owner: root
+    group: "{{ docker_gate_group }}"
+    mode: "0640"
+  when:
+    - (docker_gate_ingress_socket | string | length) > 0
+    - docker_gate_ingress_socket | bool
+
+- name: Turn off Traefik's read-only gate socket
+  ansible.builtin.file:
+    path: "{{ docker_gate_ingress_switch_file }}"
+    state: absent
+  when:
+    - (docker_gate_ingress_socket | string | length) > 0
+    - not (docker_gate_ingress_socket | bool)
 
 - name: Install the gate systemd unit
   ansible.builtin.template:

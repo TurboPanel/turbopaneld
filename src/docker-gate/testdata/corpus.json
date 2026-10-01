@@ -2938,5 +2938,67 @@
     "expect": [
       "platform-config-writable"
     ]
+  },
+  {
+    "name": "ro-socket-dir-tenant",
+    "flow": "attack",
+    "method": "POST",
+    "path": "/containers/create",
+    "body": {
+      "Image": "traefik:v3.6.6",
+      "Labels": {
+        "com.docker.compose.project": "tenantapp"
+      },
+      "HostConfig": {
+        "Binds": [
+          "/run/turbopanel-gate/ro:/var/run/turbopanel-gate:ro"
+        ]
+      }
+    },
+    "expect": [
+      "bind-forbidden-path"
+    ]
+  },
+  {
+    "name": "ro-socket-parent-ingress",
+    "flow": "attack",
+    "method": "POST",
+    "path": "/containers/create",
+    "body": {
+      "Image": "traefik:v3.6.6",
+      "Labels": {
+        "com.docker.compose.project": "p",
+        "turbopanel.role": "ingress"
+      },
+      "HostConfig": {
+        "Binds": [
+          "/run/turbopanel-gate:/var/run/turbopanel-gate:ro"
+        ]
+      }
+    },
+    "expect": [
+      "bind-forbidden-path"
+    ]
+  },
+  {
+    "name": "ro-socket-dir-ingress-writable",
+    "flow": "attack",
+    "method": "POST",
+    "path": "/containers/create",
+    "body": {
+      "Image": "traefik:v3.6.6",
+      "Labels": {
+        "com.docker.compose.project": "p",
+        "turbopanel.role": "ingress"
+      },
+      "HostConfig": {
+        "Binds": [
+          "/run/turbopanel-gate/ro:/var/run/turbopanel-gate"
+        ]
+      }
+    },
+    "expect": [
+      "bind-forbidden-path"
+    ]
   }
 ]

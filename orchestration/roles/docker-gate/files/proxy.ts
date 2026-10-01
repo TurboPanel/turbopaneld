@@ -40,6 +40,7 @@ import {
   type RequestFacts,
   type ResolvePath,
 } from "./policy.ts";
+import { readOnlyRefusal } from "./readonly.ts";
 import { review } from "./review.ts";
 import type { GateStats } from "./stats.ts";
 import { describeError, repeatSequential } from "./util.ts";
@@ -63,6 +64,11 @@ export type ProxyDeps = {
   approvalKeys?: readonly CryptoKey[];
   /** Seconds since the epoch; tests inject a fixed clock. */
   nowSec?: () => number;
+  /**
+   * The read-only listener (readonly.ts): anything outside its exact list is
+   * refused with a 403 before the engine is reached.
+   */
+  readOnly?: boolean;
 };
 
 export const DEFAULT_MAX_BODY_BYTES = 4 * 1024 * 1024;
@@ -261,6 +267,20 @@ async function judge(
   return { route, buffered };
 }
 
+/** On the read-only listener: refuse (403) whatever is not on its list. */
+function refuseOutsideReadOnly(head: RequestHead, deps: ProxyDeps): void {
+  const reason = readOnlyRefusal(head);
+  if (reason === undefined) return;
+  deps.log({
+    level: "warn",
+    event: "docker-gate.ro-refused",
+    method: head.method,
+    path: parseTarget(head.target).path,
+    reason,
+  });
+  throw new HttpError(403, reason);
+}
+
 async function openUpstream(deps: ProxyDeps): Promise<GateConn> {
   try {
     return await deps.connectUpstream();
@@ -287,6 +307,7 @@ async function exchange(
   if (hasExpect(head.headers)) {
     throw new HttpError(417, "Expect is not supported by the gate");
   }
+  if (deps.readOnly) refuseOutsideReadOnly(head, deps);
   const framing = requestFraming(head);
   const { route, buffered } = await judge(head, clientReader, framing, deps);
   const upstreamConn = await openUpstream(deps);
@@ -314,7 +335,7 @@ async function exchange(
     const request = response.keepAlive || response.upgraded
       ? await requestSide
       : { complete: false };
-    if (response.upgraded && request.complete) {
+    if (response.upgraded && request.complete && !deps.readOnly) {
       deps.stats.upgrade(route);
       await splice(client, clientReader, upstreamConn, upstream);
     }

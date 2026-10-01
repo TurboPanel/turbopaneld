@@ -543,6 +543,17 @@ per-service raw-TCP/UDP Traefik point at it with
 network they already join; the per-service files mount nothing at all, so the
 proxy count stays one per host rather than one per service.
 
+**Docker gate stage 3 (per-host switch, off by default).** When the root-owned
+`/opt/turbopanel/lib/docker-gate/ingress-socket.on` and the gate's
+`/run/turbopanel-gate/ro` both exist (`ingressDockerGateEnabled`), both
+Traefiks instead mount that directory read-only at `/var/run/turbopanel-gate`
+and use `unix:///var/run/turbopanel-gate/docker.sock`: the root-owned gate's
+read-only listener, which answers only ping / version / events / container list
+and inspect. The shared project then drops the proxy service (`--remove-orphans`
+deletes the container) once no per-service compose file on disk still names
+`tcp://docker-socket-proxy:2375` (`serviceIngressUsesSocketProxy`). Without
+the switch nothing changes. See `orchestration/roles/docker-gate/AGENTS.md`.
+
 Proven on a real Docker daemon (2026-09-18): Traefik's own
 `GET /containers/json` succeeds through the proxy, `/images/json`,
 `/networks`, `/volumes`, `/info` and `POST /containers/create` all answer 403,

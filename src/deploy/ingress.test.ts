@@ -1,4 +1,5 @@
 import {
+  assert,
   assertEquals,
   assertRejects,
   assertStringIncludes,
@@ -24,6 +25,9 @@ import {
   formatCaddyPathMatcher,
   hostingIngressComposePath,
   hostingIngressDir,
+  INGRESS_GATE_SOCKET_DIR,
+  INGRESS_GATE_SWITCH_FILE,
+  ingressDockerGateEnabled,
   inspectHostingIngressContainer,
   listPersistedTcpUdpServiceIds,
   readAcmeModeHostnames,
@@ -36,6 +40,7 @@ import {
   serviceIngressComposePath,
   serviceIngressDir,
   serviceIngressProject,
+  serviceIngressUsesSocketProxy,
   serviceTraefikCompose,
   setIngressHostCommandForTest,
   siteSnippet,
@@ -2805,4 +2810,233 @@ test("no Traefik sees the Docker socket; only the host's socket proxy does", () 
   assertEquals(shared.includes('CONTAINERS: "1"'), true);
   assertEquals(shared.includes('EVENTS: "1"'), true);
   assertEquals(shared.includes('POST: "0"'), true);
+});
+
+// Docker gate stage 3: Traefik on the gate's read-only socket (opt-in).
+
+const GATE_MOUNT = "/run/turbopanel-gate/ro:/var/run/turbopanel-gate:ro";
+const GATE_ENDPOINT =
+  "--providers.docker.endpoint=unix:///var/run/turbopanel-gate/docker.sock";
+const TCP_ENTRY = [{
+  hostingId: "00000000-0000-4000-8000-0000000000cd",
+  protocol: "tcp" as const,
+  publishedPort: 15432,
+}];
+
+test("by default both Traefiks keep today's socket-proxy shape, byte for byte", () => {
+  assertEquals(
+    traefikCompose(HOSTING_INGRESS_NETWORK, SYSTEM_INGRESS_IDENTITY, {
+      source: "socket-proxy",
+    }),
+    traefikCompose(HOSTING_INGRESS_NETWORK, SYSTEM_INGRESS_IDENTITY),
+  );
+  assertEquals(
+    serviceTraefikCompose(
+      TCP_ENTRY,
+      SERVICE_INGRESS_IDENTITY,
+      HOSTING_INGRESS_NETWORK,
+      "socket-proxy",
+    ),
+    serviceTraefikCompose(
+      TCP_ENTRY,
+      SERVICE_INGRESS_IDENTITY,
+      HOSTING_INGRESS_NETWORK,
+    ),
+  );
+});
+
+test("gate mode: the shared Traefik mounts only the read-only socket directory and the socket proxy is gone", () => {
+  const yaml = traefikCompose(
+    HOSTING_INGRESS_NETWORK,
+    SYSTEM_INGRESS_IDENTITY,
+    { source: "gate", keepSocketProxy: false },
+  );
+  assertStringIncludes(yaml, GATE_ENDPOINT);
+  assertStringIncludes(yaml, `      - ${GATE_MOUNT}`);
+  assertEquals(yaml.includes("docker.sock:/"), false, "no engine socket");
+  assertEquals(yaml.includes("docker-socket-proxy"), false);
+  assertEquals(yaml.includes("tecnativa"), false);
+  assertEquals(yaml.includes("depends_on"), false);
+  // The mount is the directory of its own, never the gate's main socket dir.
+  assertEquals(
+    yaml.split("\n").some((line) =>
+      line.trim().startsWith("- /run/turbopanel-gate:")
+    ),
+    false,
+  );
+  assertEquals(INGRESS_GATE_SOCKET_DIR, "/run/turbopanel-gate/ro");
+});
+
+test("gate mode keeps the socket proxy (without Traefik depending on it) while an older service Traefik still uses it", () => {
+  const yaml = traefikCompose(
+    HOSTING_INGRESS_NETWORK,
+    SYSTEM_INGRESS_IDENTITY,
+    { source: "gate", keepSocketProxy: true },
+  );
+  assertStringIncludes(yaml, GATE_ENDPOINT);
+  assertStringIncludes(yaml, "  docker-socket-proxy:");
+  assertEquals(yaml.includes("depends_on"), false);
+});
+
+test("gate mode: a service Traefik mounts the read-only socket directory and keeps its constraint", () => {
+  const yaml = serviceTraefikCompose(
+    TCP_ENTRY,
+    SERVICE_INGRESS_IDENTITY,
+    HOSTING_INGRESS_NETWORK,
+    "gate",
+  );
+  assertStringIncludes(yaml, GATE_ENDPOINT);
+  assertStringIncludes(yaml, `      - ${GATE_MOUNT}`);
+  assertStringIncludes(yaml, "--providers.docker.constraints=");
+  assertEquals(yaml.includes("docker-socket-proxy"), false);
+});
+
+test("ingressDockerGateEnabled needs the root-owned switch file AND the gate's read-only directory", async () => {
+  assertEquals(
+    INGRESS_GATE_SWITCH_FILE,
+    "/opt/turbopanel/lib/docker-gate/ingress-socket.on",
+  );
+  const dir = { isDirectory: true, isFile: false } as Deno.FileInfo;
+  const file = { isDirectory: false, isFile: true } as Deno.FileInfo;
+  const host = (present: Record<string, Deno.FileInfo>) => (path: string) =>
+    path in present
+      ? Promise.resolve(present[path])
+      : Promise.reject(new Deno.errors.NotFound(path));
+  const cases: Array<[Record<string, Deno.FileInfo>, boolean]> = [
+    [{}, false],
+    [{ [INGRESS_GATE_SOCKET_DIR]: dir }, false],
+    [{ [INGRESS_GATE_SWITCH_FILE]: file }, false],
+    [
+      { [INGRESS_GATE_SWITCH_FILE]: dir, [INGRESS_GATE_SOCKET_DIR]: dir },
+      false,
+    ],
+    [
+      { [INGRESS_GATE_SWITCH_FILE]: file, [INGRESS_GATE_SOCKET_DIR]: file },
+      false,
+    ],
+    [
+      { [INGRESS_GATE_SWITCH_FILE]: file, [INGRESS_GATE_SOCKET_DIR]: dir },
+      true,
+    ],
+  ];
+  for (const [present, want] of cases) {
+    assertEquals(
+      await ingressDockerGateEnabled(host(present)),
+      want,
+      Object.keys(present).join(" + ") || "nothing",
+    );
+  }
+});
+
+test("serviceIngressUsesSocketProxy reads the per-service compose files on disk", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  try {
+    assertEquals(await serviceIngressUsesSocketProxy(layout), false);
+    const write = async (serviceId: string, yaml: string) => {
+      await Deno.mkdir(serviceIngressDir(layout, serviceId), {
+        recursive: true,
+      });
+      await Deno.writeTextFile(
+        serviceIngressComposePath(layout, serviceId),
+        yaml,
+      );
+    };
+    const gated = { ...SERVICE_INGRESS_IDENTITY };
+    await write(
+      gated.serviceId,
+      serviceTraefikCompose(TCP_ENTRY, gated, HOSTING_INGRESS_NETWORK, "gate"),
+    );
+    assertEquals(await serviceIngressUsesSocketProxy(layout), false);
+    const legacyId = "00000000-0000-4000-8000-0000000000ab";
+    await write(
+      legacyId,
+      serviceTraefikCompose(TCP_ENTRY, {
+        serviceId: legacyId,
+        composeServiceName: "traefik",
+        containerName: `${legacyId}-in`,
+      }, HOSTING_INGRESS_NETWORK),
+    );
+    assertEquals(await serviceIngressUsesSocketProxy(layout), true);
+    // A directory without a compose file is not a user of the proxy.
+    await Deno.mkdir(
+      serviceIngressDir(layout, "00000000-0000-4000-8000-0000000000ac"),
+      { recursive: true },
+    );
+    await Deno.remove(serviceIngressDir(layout, legacyId), { recursive: true });
+    assertEquals(await serviceIngressUsesSocketProxy(layout), false);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("ensureHostingIngress in gate mode writes the gate shape and compose removes the orphaned proxy", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const calls: string[][] = [];
+  try {
+    await writeSystemComponentDescriptor(layout, SYSTEM_INGRESS_IDENTITY);
+    await ensureHostingIngress(layout, HOSTING_INGRESS_NETWORK, {
+      runDocker: (args) => {
+        calls.push([...args]);
+        return Promise.resolve(fakeDockerOk());
+      },
+      ensureHostingCaddyRuntime: () => Promise.resolve(),
+      ingressDockerGate: () => Promise.resolve(true),
+    });
+    const compose = await Deno.readTextFile(hostingIngressComposePath(layout));
+    assertStringIncludes(compose, GATE_ENDPOINT);
+    assertEquals(compose.includes("docker-socket-proxy"), false);
+    const up = calls.find((a) => a[0] === "compose" && a.includes("up"));
+    assert(up?.includes("--remove-orphans"), "the old proxy is removed");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("ensureHostingIngress without the flag keeps the socket proxy", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  try {
+    await ensureHostingIngress(layout, HOSTING_INGRESS_NETWORK, {
+      runDocker: () => Promise.resolve(fakeDockerOk()),
+      ensureHostingCaddyRuntime: () => Promise.resolve(),
+      ingressDockerGate: () => Promise.resolve(false),
+    });
+    const compose = await Deno.readTextFile(hostingIngressComposePath(layout));
+    assertStringIncludes(
+      compose,
+      "--providers.docker.endpoint=tcp://docker-socket-proxy:2375",
+    );
+    assertStringIncludes(
+      compose,
+      "/var/run/docker.sock:/var/run/docker.sock:ro",
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test("ensureServiceIngress follows the same switch", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const serviceId = SERVICE_INGRESS_IDENTITY.serviceId;
+  try {
+    for (const gate of [false, true]) {
+      await ensureServiceIngress(
+        layout,
+        serviceId,
+        TCP_ENTRY,
+        SERVICE_INGRESS_IDENTITY,
+        HOSTING_INGRESS_NETWORK,
+        {
+          runDocker: () => Promise.resolve(fakeDockerOk()),
+          ingressDockerGate: () => Promise.resolve(gate),
+        },
+      );
+      const yaml = await Deno.readTextFile(
+        serviceIngressComposePath(layout, serviceId),
+      );
+      assertEquals(yaml.includes(GATE_ENDPOINT), gate, `gate=${gate}`);
+      assertEquals(yaml.includes("docker-socket-proxy"), !gate, `gate=${gate}`);
+    }
+  } finally {
+    await cleanup();
+  }
 });

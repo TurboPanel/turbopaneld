@@ -11,7 +11,9 @@
  */
 
 import {
+  DEFAULT_INGRESS_SOCKET_DIR,
   DEFAULT_PLATFORM_ROOTS,
+  isIngressContainer,
   isPlatformContainer,
   labelsOf,
   platformBindVerdict,
@@ -35,6 +37,8 @@ export type PolicyConfig = {
   capAllowlist: readonly string[];
   /** Trees the platform's own containers may bind (see platform.ts). */
   platform: PlatformRoots;
+  /** The read-only listener's directory: a Traefik may bind exactly it, read-only. */
+  ingressSocketDir: string;
 };
 
 export const DEFAULT_POLICY_CONFIG: PolicyConfig = {
@@ -54,6 +58,7 @@ export const DEFAULT_POLICY_CONFIG: PolicyConfig = {
   dockerSockets: ["/var/run/docker.sock", "/run/docker.sock"],
   capAllowlist: [],
   platform: DEFAULT_PLATFORM_ROOTS,
+  ingressSocketDir: DEFAULT_INGRESS_SOCKET_DIR,
 };
 
 /** Resolve symlinks of the deepest existing ancestor (injected so tests need no disk). */
@@ -290,7 +295,19 @@ type BindContext = {
   config: PolicyConfig;
   resolvePath: ResolvePath;
   platform: boolean;
+  /** A Traefik: the only kind of container that may bind the read-only socket. */
+  ingress: boolean;
 };
+
+/** A Traefik binding exactly the read-only listener's directory, read-only. */
+function isIngressSocketBind(
+  resolved: string,
+  entry: BindEntry,
+  ctx: BindContext,
+): boolean {
+  return ctx.ingress && entry.readOnly &&
+    resolved === ctx.config.ingressSocketDir;
+}
 
 function platformOutcome(
   resolved: string,
@@ -338,6 +355,9 @@ async function checkBindSource(
     };
   }
   const resolved = await resolvedSource(source, ctx.resolvePath);
+  if (isIngressSocketBind(resolved, entry, ctx)) {
+    return { allowance: "ingress-socket" };
+  }
   const platform = platformOutcome(resolved, entry, ctx);
   if (platform) return platform;
   const violation = bindViolation(resolved, ctx.config);
@@ -395,7 +415,7 @@ async function checkVolumeDevice(
   if (!found.bind) return [{ rule: "volume-device", detail: found.device }];
   const outcome = await checkBindSource(
     { source: found.device, readOnly: false },
-    { config, resolvePath, platform: false },
+    { config, resolvePath, platform: false, ingress: false },
   );
   const verdict = outcome.violation;
   if (!verdict) return [];
@@ -548,11 +568,12 @@ async function evaluateContainerCreate(
     return { violations: [{ rule: "body-unparseable" }], allowances: [] };
   }
   const hostConfig = isRecord(body.HostConfig) ? body.HostConfig : {};
-  const platform = isPlatformContainer(labelsOf(body.Labels));
+  const labels = labelsOf(body.Labels);
   const mounts = await checkMounts(hostConfig, {
     config,
     resolvePath,
-    platform,
+    platform: isPlatformContainer(labels),
+    ingress: isIngressContainer(labels),
   });
   return {
     violations: [
