@@ -1027,6 +1027,14 @@ daemon's own update path (`runScriptUrlForChannel` in
 from a non-release host when `TURBOPANEL_UPDATE_CHANNEL` says so, which is why
 the control plane's install command always carries the channel.
 
+**One channel rule (owner decision 2026-10-01):** every component follows the
+channel it was installed from — daemon, instance, UI and the co-located daemon.
+An installer run with no channel given uses `release` (`tp_default_update_channel`
+in `run.sh`, `turbopanel_update_channel` in the `daemon-config` defaults, the
+`default('release')` in the env templates, `resolveUpdateChannelConfig`). The
+single exception is a development overlay (`TURBOPANEL_DL_BASE`), whose catalog
+only carries trunk. Pinned by `src/instance/default-update-channel.test.ts`.
+
 `live` is the branch a release promotion fast-forwards, so an installer change
 reaches new installs at release cadence, matching the `release` channel the
 script installs by default. **Keep `scripts/run.sh` at that path on `live`** —

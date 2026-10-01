@@ -9,14 +9,14 @@ import { resolveUpdateChannelConfig } from "./config.ts";
  */
 const test = Deno.test.bind(Deno);
 
-test("resolveUpdateChannelConfig defaults to trunk", () => {
+test("resolveUpdateChannelConfig defaults to release", () => {
   assertEquals(resolveUpdateChannelConfig({}), {
     app: "daemon",
-    channel: "trunk",
+    channel: "release",
   });
   assertEquals(
     resolveUpdateChannelConfig({ TURBOPANEL_UPDATE_CHANNEL: "  " }),
-    { app: "daemon", channel: "trunk" },
+    { app: "daemon", channel: "release" },
   );
 });
 

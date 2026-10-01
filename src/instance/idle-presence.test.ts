@@ -25,8 +25,8 @@ function openMockSocket(): MockWebSocket {
 }
 
 // Not annotated `: BuildInfo` — `channel` is a placement fact sourced live
-// from resolveUpdateChannelConfig() (defaults to "trunk" absent
-// TURBOPANEL_UPDATE_CHANNEL, matching the literal below), never part of
+// from resolveUpdateChannelConfig() (injected as "trunk" below; the
+// real default absent TURBOPANEL_UPDATE_CHANNEL is "release"), never part of
 // BuildInfo itself, and `version` is the semver src/version.ts reads from
 // deno.json. Kept here as the wire-shape callers compare against.
 function makeDaemonBuild(commit: string) {

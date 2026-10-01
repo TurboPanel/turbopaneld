@@ -21,7 +21,7 @@
 #
 # Typical install (production):
 #   curl -fsSL turbopanel.sh | TURBOPANEL_LICENSE=<b64> sh
-# Optional: TURBOPANEL_HOST, TURBOPANEL_INSECURE_TLS=1, TURBOPANEL_UPDATE_CHANNEL,
+# Optional: TURBOPANEL_HOST, TURBOPANEL_INSECURE_TLS=1, TURBOPANEL_UPDATE_CHANNEL (default release),
 # TURBOPANEL_DL_BASE (dev overlay catalog; never falls back to the public CDN).
 # Flags (--license, --host, …) remain supported for scripts and sudo re-exec.
 #
@@ -1143,6 +1143,19 @@ PY
   ln -sfn "../current/deno" "$RUNTIMES_DIR/deno/bin/deno"
 }
 
+# The channel an install follows when the caller named none: the stable
+# release rail. Every component (daemon, instance, UI, co-located daemon)
+# follows the channel it was installed from, so there is exactly one fallback.
+# The one exception is a development overlay (TURBOPANEL_DL_BASE): its catalog
+# only ever carries trunk builds.
+tp_default_update_channel() {
+  if [ -n "${TURBOPANEL_DL_BASE:-}" ]; then
+    printf '%s' trunk
+  else
+    printf '%s' release
+  fi
+}
+
 # Built-in manifest location per advertised channel and artifact kind, used
 # when no overlay catalog is configured. Mirrors src/update/urls.ts
 # builtinChannelManifestUrl (urls.test.ts pins this copy against that one) —
@@ -1294,7 +1307,7 @@ tp_builtin_repo_manifest_url() {
 }
 
 tp_fetch_channel_manifest() {
-  _channel="${TURBOPANEL_UPDATE_CHANNEL:-trunk}"
+  _channel="${TURBOPANEL_UPDATE_CHANNEL:-$(tp_default_update_channel)}"
   _dl_base="${TURBOPANEL_DL_BASE:-}"
   if [ -n "$_dl_base" ]; then
     _catalog_url="${_dl_base}/channels.json"
@@ -2319,7 +2332,7 @@ fi
 if [ -n "$MANIFEST_URL" ]; then
   tp_print_ok "Release manifest resolved (pinned to $MANIFEST_URL, arch ${_linux_arch:-unknown})"
 else
-  tp_print_ok "Release manifest resolved (channel ${TURBOPANEL_UPDATE_CHANNEL:-trunk}, arch ${_linux_arch:-unknown})"
+  tp_print_ok "Release manifest resolved (channel ${TURBOPANEL_UPDATE_CHANNEL:-$(tp_default_update_channel)}, arch ${_linux_arch:-unknown})"
 fi
 tp_print_step "  " "Binary (${_linux_arch:-unknown}): $_binary_artifact_url"
 tp_print_step "  " "JS bundle (if needed): $_js_fallback_artifact_url"
@@ -2535,7 +2548,7 @@ trap 'rm -f "$VARS_FILE"' EXIT
       printf 'turbopanel_instance_ca_fingerprint: %s\n' "$_ca_fp"
     fi
   fi
-  printf 'turbopanel_update_channel: %s\n' "${TURBOPANEL_UPDATE_CHANNEL:-trunk}"
+  printf 'turbopanel_update_channel: %s\n' "${TURBOPANEL_UPDATE_CHANNEL:-$(tp_default_update_channel)}"
   if [ -n "$DL_BASE" ]; then
     printf 'turbopanel_dl_base: %s\n' "$DL_BASE"
   fi
