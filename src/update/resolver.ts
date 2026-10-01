@@ -1,8 +1,11 @@
 import { fetchWithPlatformCa } from "../instance/sockets.ts";
 import { errorText } from "../util/logger.ts";
+import { getBuildInfo } from "../build-info.ts";
 import { detectInstallMode, type InstallMode } from "../paths/layout.ts";
+import { DAEMON_VERSION } from "../version.ts";
 import type { UpdateChannelConfig } from "./config.ts";
 import { MalformedManifestError, MissingChannelError } from "./errors.ts";
+import { assertNotRollback, type InstalledBuild } from "./freshness.ts";
 import { unsignedManifestBypass, verifyManifestSignature } from "./signing.ts";
 import type { LinuxArch, UpdateInfo } from "./types.ts";
 import {
@@ -130,7 +133,21 @@ export type ResolveUpdateOptions = {
   installMode?: InstallMode;
   /** Test seam — pin a different verification key. */
   publicKeyHex?: string;
+  /**
+   * Test seam — the build the freshness check compares against. Defaults to
+   * the running daemon (`DAEMON_VERSION` + the stamped build identity).
+   */
+  installed?: InstalledBuild;
 };
+
+function runningBuild(): InstalledBuild {
+  const info = getBuildInfo();
+  return {
+    commit: info.commit,
+    version: DAEMON_VERSION,
+    builtAt: info.builtAt,
+  };
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -201,6 +218,14 @@ export async function resolveUpdate(
     absolutizeChannelManifestJson(verified, manifestUrl),
   );
 
+  // A signature proves who made the manifest, not that it is current: refuse
+  // a replayed older build before anything is downloaded.
+  assertNotRollback(
+    options.installed ?? runningBuild(),
+    manifest,
+    env,
+  );
+
   const arch = resolveLinuxArch();
   const binaryArtifact = manifest.binaryArtifacts[arch];
 
@@ -209,6 +234,7 @@ export async function resolveUpdate(
     buildId: manifest.buildId,
     commit: manifest.commit,
     builtAt: manifest.builtAt,
+    ...(manifest.version === undefined ? {} : { version: manifest.version }),
     binaryArtifact,
     jsFallbackArtifact: manifest.jsFallbackArtifact,
     orchestrationArtifact: manifest.orchestrationArtifact,

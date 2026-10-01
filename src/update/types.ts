@@ -61,6 +61,8 @@ export interface UpdateInfo {
   commit: string;
   buildId: string;
   builtAt: string;
+  /** Semver of a tagged release build; absent from the trunk drop. */
+  version?: string;
   binaryArtifact: ArtifactEntry;
   jsFallbackArtifact: ArtifactEntry;
   orchestrationArtifact: ArtifactEntry;

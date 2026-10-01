@@ -94,6 +94,7 @@ import {
   MalformedManifestError,
   ManifestSignatureError,
   MissingChannelError,
+  RollbackRefusedError,
   UnsupportedSchemaVersionError,
 } from "../update/errors.ts";
 import { resolveUpdate } from "../update/resolver.ts";
@@ -2118,6 +2119,7 @@ export class InstanceClient {
       err instanceof MalformedManifestError ||
       err instanceof MissingChannelError ||
       err instanceof ManifestSignatureError ||
+      err instanceof RollbackRefusedError ||
       err instanceof UnsupportedSchemaVersionError ||
       err instanceof InsecureOverlayBaseError
     ) {
@@ -2439,6 +2441,7 @@ export class InstanceClient {
       err instanceof MalformedManifestError ||
       err instanceof MissingChannelError ||
       err instanceof ManifestSignatureError ||
+      err instanceof RollbackRefusedError ||
       err instanceof UnsupportedSchemaVersionError ||
       err instanceof InsecureOverlayBaseError
     ) {
