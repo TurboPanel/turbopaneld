@@ -312,10 +312,29 @@ entry. There is no `composeYaml` fallback on `environment.deploy`.
   deployment dir, write `deployment.json`, and prune leftover layered
   `*.yml`/`*.yaml`. A failed
   redeploy therefore leaves the previous live files intact.
+- **Generations, `previous/` and the health gate (deploy-strategy stage 2,
+  no behavior change):** `deployment.json` v3 adds `generations[]`
+  (`{color, generation, projectName, state: live|candidate|draining|retired}`;
+  today always one `blue` `live` row named by `projectName`) and `previous`
+  (index of the files kept in `<deploymentDir>/previous/`: `compose.yaml`,
+  `.env`, `deployment.json` of the deploy the last publish replaced, one
+  generation back only, retained by `publishStagedRuntimeCompose`). Lifecycle
+  consumers resolve project names through `deployment-generations.ts`:
+  `projectsForCommand()` for `environment.lifecycle` / `environment.stop`
+  (live for start/restart, all for stop; the payload's project name is used
+  when no manifest knows it), `liveProjects()` for reboot rehydrate,
+  `allProjects()` for log-tail ownership. Host-path confinement refuses any
+  mount inside `previous/` (like `.staging`), read-only included; a v2
+  manifest reads as one live blue generation. `health-gate.ts`
+  (`waitForHealthGate`) judges `compose ps -a --format json`: healthy passes,
+  unhealthy / non-zero exit / crash loop fail at once, a service with no
+  healthcheck must stay `running` for the stable window, exit code 0 is a
+  finished one-shot, timeout names what was pending. It is **not called by
+  `environment.deploy` yet**; the sequential strategy (stage 3) wires it.
 - **Deployment-dir layout:**
   `<stateDir>/deployments/<projectId>/<environmentId>/compose.yaml` +
   `.env` (non-secrets, `0640`) +
-  `deployment.json` (`DEPLOYMENT_MANIFEST_FILENAME`, version 2: project /
+  `deployment.json` (`DEPLOYMENT_MANIFEST_FILENAME`, version 3 — version 2 is still read: project /
   environment / server ids, generation, project name, compose sha256, replica
   counts, optional `secrets[]` plan, optional `serviceIds` map — compose service
   name → service UUID, which is what lets the on-demand log tail check container

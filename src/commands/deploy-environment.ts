@@ -4,9 +4,9 @@ import { encodeHex } from "@std/encoding/hex";
 import { join } from "@std/path";
 import {
   composeFileArgs,
+  type DeploymentManifest,
   type DeploymentManifestRelease,
   type DeploymentManifestSecret,
-  type DeploymentManifestV2,
   environmentDeploymentDir,
   pruneStaleComposeLayerFiles,
   publishStagedRuntimeCompose,
@@ -19,6 +19,7 @@ import {
   writeComposeFileSecure,
   writeDeploymentManifest,
 } from "../deploy/compose-files.ts";
+import { singleGeneration } from "../deploy/deployment-generations.ts";
 import {
   applyRailpackImagesToComposeYaml,
   mergeComposeOverlayFragments,
@@ -988,12 +989,12 @@ async function buildDeploymentManifest(
   composeYaml: string,
   serviceNames: readonly string[],
   appliedReleases: readonly AppliedRelease[] = [],
-): Promise<DeploymentManifestV2> {
+): Promise<DeploymentManifest> {
   const secrets = secretPlanToManifest(payload.secretPlan ?? []);
   const serviceIds = serviceIdsForManifest(payload);
   const releases = releasesForManifest(payload, appliedReleases);
   return {
-    version: 2,
+    version: 3,
     projectId: payload.projectId,
     environmentId: payload.environmentId,
     serverId: payload.serverId ?? "",
@@ -1001,6 +1002,9 @@ async function buildDeploymentManifest(
     projectName: payload.projectName,
     composeSha256: await sha256HexUtf8(composeYaml),
     services: replicaCountsForManifest(payload, serviceNames),
+    generations: [
+      singleGeneration(payload.projectName, payload.generation ?? 0),
+    ],
     ...(secrets.length > 0 ? { secrets } : {}),
     ...(Object.keys(serviceIds).length > 0 ? { serviceIds } : {}),
     ...(releases.length > 0 ? { releases } : {}),

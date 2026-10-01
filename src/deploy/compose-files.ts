@@ -6,11 +6,19 @@
  */
 
 import { basename, join } from "@std/path";
+import {
+  type DeploymentGeneration,
+  type DeploymentPrevious,
+  parseGenerations,
+  parsePrevious,
+} from "./deployment-generations.ts";
 
 export const DAEMON_COMPOSE_FILENAME = "docker-compose.turbopanel.daemon.yml";
 export const RUNTIME_COMPOSE_FILENAME = "compose.yaml";
 export const COMPOSE_ENV_FILENAME = ".env";
 export const DEPLOYMENT_MANIFEST_FILENAME = "deployment.json";
+/** Where the previous deploy's files are kept under a deployment. */
+export const COMPOSE_PREVIOUS_DIRNAME = "previous";
 /** Staging subdir under a deployment for transactional publish. */
 export const COMPOSE_STAGE_DIRNAME = ".staging";
 
@@ -141,8 +149,12 @@ export type DeploymentManifestRelease = {
   username?: string;
 };
 
-export type DeploymentManifestV2 = {
-  version: 2;
+/**
+ * `deployment.json`. Version 2 is the original single-project shape; version 3
+ * adds `generations` and `previous` and is what new deploys write. Both are read.
+ */
+export type DeploymentManifest = {
+  version: 2 | 3;
   projectId: string;
   environmentId: string;
   serverId: string;
@@ -171,16 +183,24 @@ export type DeploymentManifestV2 = {
    * optional rather than as evidence the deploy predates the field.
    */
   releases?: DeploymentManifestRelease[];
+  /**
+   * Compose projects this deployment runs (version 3). Absent on version 2,
+   * which implies one live blue generation named by `projectName`; read through
+   * `liveProjects()` / `allProjects()` rather than directly.
+   */
+  generations?: DeploymentGeneration[];
+  /** Index of the files kept under `previous/` (version 3). */
+  previous?: DeploymentPrevious;
 };
 
-function isDeploymentManifestV2(
+function isDeploymentManifest(
   value: unknown,
-): value is DeploymentManifestV2 {
+): value is DeploymentManifest {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     return false;
   }
   const record = value as Record<string, unknown>;
-  if (record.version !== 2) return false;
+  if (record.version !== 2 && record.version !== 3) return false;
   if (typeof record.projectId !== "string" || record.projectId.length === 0) {
     return false;
   }
@@ -346,7 +366,7 @@ function parseManifestSecrets(value: unknown): DeploymentManifestSecret[] {
 
 export async function writeDeploymentManifest(
   dir: string,
-  manifest: DeploymentManifestV2,
+  manifest: DeploymentManifest,
 ): Promise<void> {
   const body = JSON.stringify(manifest, null, 2) + "\n";
   await writeComposeFileSecure(join(dir, DEPLOYMENT_MANIFEST_FILENAME), body);
@@ -354,7 +374,7 @@ export async function writeDeploymentManifest(
 
 export async function readDeploymentManifest(
   dir: string,
-): Promise<DeploymentManifestV2 | null> {
+): Promise<DeploymentManifest | null> {
   const path = join(dir, DEPLOYMENT_MANIFEST_FILENAME);
   let text: string;
   try {
@@ -369,7 +389,7 @@ export async function readDeploymentManifest(
   } catch {
     return null;
   }
-  if (!isDeploymentManifestV2(parsed)) return null;
+  if (!isDeploymentManifest(parsed)) return null;
   const record = parsed as unknown as Record<string, unknown>;
   const secrets = parseManifestSecrets(record.secrets);
   const serviceIds = parseManifestServiceIds(record.serviceIds);
@@ -377,12 +397,14 @@ export async function readDeploymentManifest(
   // rejected one — the field stays absent and every existing reader is
   // unaffected.
   const releases = parseManifestReleases(record.releases);
+  const generations = parseGenerations(record.generations);
+  const previous = parsePrevious(record.previous);
   // Rebuilt field by field rather than spread from `parsed`: the optional
   // arrays/maps must be the *parsed* ones, and spreading the raw document would
   // let an unvalidated `secrets` / `serviceIds` / `releases` survive whenever
   // parsing dropped every entry.
   return {
-    version: 2,
+    version: parsed.version,
     projectId: parsed.projectId,
     environmentId: parsed.environmentId,
     serverId: parsed.serverId,
@@ -393,12 +415,14 @@ export async function readDeploymentManifest(
     ...(secrets.length > 0 ? { secrets } : {}),
     ...(Object.keys(serviceIds).length > 0 ? { serviceIds } : {}),
     ...(releases.length > 0 ? { releases } : {}),
+    ...(generations.length > 0 ? { generations } : {}),
+    ...(previous ? { previous } : {}),
   };
 }
 
 export type LocalDeploymentManifest = {
   dir: string;
-  manifest: DeploymentManifestV2;
+  manifest: DeploymentManifest;
 };
 
 /** `null` when `path` does not exist; rethrows any other `readDir` error. */
@@ -429,8 +453,8 @@ async function readLocalManifest(
 }
 
 /**
- * Scan `<stateDir>/deployments/<projectId>/<environmentId>/` for version-2
- * `deployment.json` files.
+ * Scan `<stateDir>/deployments/<projectId>/<environmentId>/` for version-2 and
+ * version-3 `deployment.json` files.
  */
 export async function listLocalDeploymentManifests(
   layout: { stateDir: string },
@@ -499,20 +523,91 @@ export async function pruneStaleComposeLayerFiles(
   }
 }
 
+async function copyIfPresent(from: string, to: string): Promise<boolean> {
+  let content: string;
+  try {
+    content = await Deno.readTextFile(from);
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) return false;
+    throw err;
+  }
+  await writeComposeFileSecure(to, content);
+  return true;
+}
+
+async function removePreviousDir(deploymentDir: string): Promise<string> {
+  const previousDir = join(deploymentDir, COMPOSE_PREVIOUS_DIRNAME);
+  try {
+    await Deno.remove(previousDir, { recursive: true });
+  } catch (err) {
+    if (!(err instanceof Deno.errors.NotFound)) throw err;
+  }
+  return previousDir;
+}
+
+async function resetPreviousDir(deploymentDir: string): Promise<string> {
+  const previousDir = await removePreviousDir(deploymentDir);
+  await Deno.mkdir(previousDir, { recursive: true, mode: 0o750 });
+  return previousDir;
+}
+
+/**
+ * Copy the live `compose.yaml`, `.env` and `deployment.json` into
+ * `<deploymentDir>/previous/` (replacing whatever was there) and return their
+ * index, or `null` when there is no readable earlier deploy to keep.
+ *
+ * Called by {@link publishStagedRuntimeCompose} just before it overwrites the
+ * live files, so `previous/` always holds the deploy this one replaced. Only
+ * one generation back is kept.
+ */
+export async function retainPreviousDeployment(
+  deploymentDir: string,
+): Promise<DeploymentPrevious | null> {
+  const live = await readDeploymentManifest(deploymentDir);
+  const composePath = join(deploymentDir, RUNTIME_COMPOSE_FILENAME);
+  if (live === null || !(await fileExists(composePath))) {
+    // Nothing readable to keep: drop any older copy so `previous/` and the
+    // manifest's `previous` index never disagree.
+    await removePreviousDir(deploymentDir);
+    return null;
+  }
+  const previousDir = await resetPreviousDir(deploymentDir);
+  await copyIfPresent(composePath, join(previousDir, RUNTIME_COMPOSE_FILENAME));
+  await copyIfPresent(
+    join(deploymentDir, COMPOSE_ENV_FILENAME),
+    join(previousDir, COMPOSE_ENV_FILENAME),
+  );
+  await copyIfPresent(
+    join(deploymentDir, DEPLOYMENT_MANIFEST_FILENAME),
+    join(previousDir, DEPLOYMENT_MANIFEST_FILENAME),
+  );
+  return {
+    generation: live.generation,
+    projectName: live.projectName,
+    composeSha256: live.composeSha256,
+  };
+}
+
 /**
  * Publish a single compiled `compose.yaml` plus `deployment.json`, then prune
- * leftover compose files.
+ * leftover compose files. The files being replaced are kept under `previous/`
+ * first and indexed in the manifest's `previous` field.
  */
 export async function publishStagedRuntimeCompose(
   deploymentDir: string,
   stageDir: string,
-  manifest: DeploymentManifestV2,
+  manifest: DeploymentManifest,
 ): Promise<string[]> {
   const staged = join(stageDir, RUNTIME_COMPOSE_FILENAME);
   const live = join(deploymentDir, RUNTIME_COMPOSE_FILENAME);
   const content = await Deno.readTextFile(staged);
+  const previous = await retainPreviousDeployment(deploymentDir);
+  const { previous: _stale, ...rest } = manifest;
   await writeComposeFileSecure(live, content);
-  await writeDeploymentManifest(deploymentDir, manifest);
+  await writeDeploymentManifest(
+    deploymentDir,
+    previous ? { ...rest, previous } : rest,
+  );
   await pruneStaleComposeLayerFiles(
     deploymentDir,
     new Set([RUNTIME_COMPOSE_FILENAME]),

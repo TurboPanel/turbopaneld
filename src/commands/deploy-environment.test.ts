@@ -577,8 +577,12 @@ test({
         projectName: string;
         composeSha256: string;
         services: Record<string, { replicas: number }>;
+        generations: unknown;
       };
-      assertEquals(manifest.version, 2);
+      assertEquals(manifest.version, 3);
+      assertEquals(manifest.generations, [
+        { color: "blue", generation: 3, projectName, state: "live" },
+      ]);
       assertEquals(manifest.projectId, projectId);
       assertEquals(manifest.environmentId, environmentId);
       assertEquals(manifest.serverId, "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee");
@@ -738,7 +742,7 @@ test({
           join(deploymentDir, DEPLOYMENT_MANIFEST_FILENAME),
         ),
       ) as { version: number; services: Record<string, { replicas: number }> };
-      assertEquals(manifest.version, 2);
+      assertEquals(manifest.version, 3);
       assertEquals(manifest.services, { web: { replicas: 1 } });
 
       const buildCall = calls.find((argv) =>

@@ -808,4 +808,202 @@ describe("compose-files", () => {
       await Deno.remove(tmp, { recursive: true });
     }
   });
+
+  describe("manifest v3 and previous retention", () => {
+    const base = {
+      projectId: "proj-1",
+      environmentId: "env-1",
+      serverId: "srv-1",
+      projectName: "demo",
+      services: { web: { replicas: 1 } },
+    };
+
+    async function withDir(
+      fn: (dir: string, stage: string) => Promise<void>,
+    ): Promise<void> {
+      const tmp = await Deno.makeTempDir({ prefix: "tp-v3-" });
+      try {
+        const dir = join(tmp, "dep");
+        await Deno.mkdir(dir, { recursive: true, mode: 0o750 });
+        const stage = await resetComposeStageDir(dir);
+        await fn(dir, stage);
+      } finally {
+        await Deno.remove(tmp, { recursive: true });
+      }
+    }
+
+    it("round-trips generations and previous on a version-3 manifest", async () => {
+      await withDir(async (dir) => {
+        const generations = [
+          { color: "blue", generation: 3, projectName: "demo", state: "live" },
+        ] as const;
+        await writeDeploymentManifest(dir, {
+          ...base,
+          version: 3,
+          generation: 3,
+          composeSha256: "b".repeat(64),
+          generations: [...generations],
+          previous: {
+            generation: 2,
+            projectName: "demo",
+            composeSha256: "a".repeat(64),
+          },
+        });
+        const read = await readDeploymentManifest(dir);
+        assertEquals(read?.version, 3);
+        assertEquals(read?.generations, [...generations]);
+        assertEquals(read?.previous?.generation, 2);
+      });
+    });
+
+    it("still reads a version-2 manifest, with no generations or previous", async () => {
+      await withDir(async (dir) => {
+        await writeDeploymentManifest(dir, {
+          ...base,
+          version: 2,
+          generation: 1,
+          composeSha256: "a".repeat(64),
+        });
+        const read = await readDeploymentManifest(dir);
+        assertEquals(read?.version, 2);
+        assertEquals(read?.generations, undefined);
+        assertEquals(read?.previous, undefined);
+      });
+    });
+
+    it("rejects an unknown manifest version", async () => {
+      await withDir(async (dir) => {
+        await writeComposeFileSecure(
+          join(dir, "deployment.json"),
+          JSON.stringify({ ...base, version: 4, generation: 1 }),
+        );
+        assertEquals(await readDeploymentManifest(dir), null);
+      });
+    });
+
+    it("first publish keeps nothing; the second keeps the first under previous/", async () => {
+      await withDir(async (dir, stage) => {
+        await writeComposeFileSecure(
+          join(stage, RUNTIME_COMPOSE_FILENAME),
+          "v1\n",
+        );
+        await publishStagedRuntimeCompose(dir, stage, {
+          ...base,
+          version: 3,
+          generation: 1,
+          composeSha256: "a".repeat(64),
+        });
+        assertEquals((await readDeploymentManifest(dir))?.previous, undefined);
+        await assertRejects(() => Deno.stat(join(dir, "previous")));
+
+        await writeComposeEnvFile(dir, "A=1\n");
+        await writeComposeFileSecure(
+          join(stage, RUNTIME_COMPOSE_FILENAME),
+          "v2\n",
+        );
+        await publishStagedRuntimeCompose(dir, stage, {
+          ...base,
+          version: 3,
+          generation: 2,
+          composeSha256: "b".repeat(64),
+        });
+        assertEquals(
+          await Deno.readTextFile(join(dir, "compose.yaml")),
+          "v2\n",
+        );
+        assertEquals(
+          await Deno.readTextFile(join(dir, "previous", "compose.yaml")),
+          "v1\n",
+        );
+        assertEquals(
+          await Deno.readTextFile(join(dir, "previous", ".env")),
+          "A=1\n",
+        );
+        const prevManifest = await readDeploymentManifest(
+          join(dir, "previous"),
+        );
+        assertEquals(prevManifest?.generation, 1);
+        const live = await readDeploymentManifest(dir);
+        assertEquals(live?.previous, {
+          generation: 1,
+          projectName: "demo",
+          composeSha256: "a".repeat(64),
+        });
+
+        // A third deploy replaces previous/ (one generation back only) and
+        // never carries a stale `previous` from the caller's manifest.
+        await writeComposeFileSecure(
+          join(stage, RUNTIME_COMPOSE_FILENAME),
+          "v3\n",
+        );
+        await publishStagedRuntimeCompose(dir, stage, {
+          ...base,
+          version: 3,
+          generation: 3,
+          composeSha256: "c".repeat(64),
+          previous: {
+            generation: 99,
+            projectName: "stale",
+            composeSha256: "f".repeat(64),
+          },
+        });
+        assertEquals(
+          await Deno.readTextFile(join(dir, "previous", "compose.yaml")),
+          "v2\n",
+        );
+        assertEquals(
+          (await readDeploymentManifest(dir))?.previous?.generation,
+          2,
+        );
+      });
+    });
+
+    it("clears a stale previous/ when there is no readable earlier deploy", async () => {
+      await withDir(async (dir, stage) => {
+        await Deno.mkdir(join(dir, "previous"));
+        await writeComposeFileSecure(
+          join(dir, "previous", "compose.yaml"),
+          "old\n",
+        );
+        await writeComposeFileSecure(
+          join(stage, RUNTIME_COMPOSE_FILENAME),
+          "v1\n",
+        );
+        await publishStagedRuntimeCompose(dir, stage, {
+          ...base,
+          version: 3,
+          generation: 1,
+          composeSha256: "a".repeat(64),
+        });
+        await assertRejects(() => Deno.stat(join(dir, "previous")));
+        assertEquals((await readDeploymentManifest(dir))?.previous, undefined);
+      });
+    });
+
+    it("previous/ is not mistaken for a deployment by the local scan", async () => {
+      const tmp = await Deno.makeTempDir({ prefix: "tp-v3-scan-" });
+      try {
+        const dir = join(tmp, "deployments", "proj-1", "env-1");
+        await Deno.mkdir(dir, { recursive: true });
+        const stage = await resetComposeStageDir(dir);
+        for (const gen of [1, 2]) {
+          await writeComposeFileSecure(
+            join(stage, RUNTIME_COMPOSE_FILENAME),
+            `v${gen}\n`,
+          );
+          await publishStagedRuntimeCompose(dir, stage, {
+            ...base,
+            version: 3,
+            generation: gen,
+            composeSha256: "a".repeat(64),
+          });
+        }
+        const listed = await listLocalDeploymentManifests({ stateDir: tmp });
+        assertEquals(listed.length, 1);
+        assertEquals(listed[0]?.manifest.generation, 2);
+      } finally {
+        await Deno.remove(tmp, { recursive: true });
+      }
+    });
+  });
 });

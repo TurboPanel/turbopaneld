@@ -395,3 +395,42 @@ test("collectContainerLogs redacts via the process-wide deny-set when no redacto
     resetSharedSecretRedactorForTests();
   }
 });
+
+test("collectContainerLogs accepts a container of a second (green) generation project", async () => {
+  const [owned] = ownedManifests();
+  const manifests: LocalDeploymentManifest[] = [{
+    dir: owned!.dir,
+    manifest: {
+      ...owned!.manifest,
+      version: 3,
+      generations: [
+        {
+          color: "blue",
+          generation: 1,
+          projectName: PROJECT,
+          state: "draining",
+        },
+        {
+          color: "green",
+          generation: 2,
+          projectName: `${PROJECT}-green`,
+          state: "live",
+        },
+      ],
+    },
+  }];
+  const text = await collectContainerLogs(
+    OWNED_ID,
+    { stateDir: "/var/lib/turbopanel" },
+    {
+      listManifests: () => Promise.resolve(manifests),
+      runDocker: (args) => {
+        if (args[0] === "inspect") {
+          return Promise.resolve(ok(inspectStdout(`${PROJECT}-green`)));
+        }
+        return Promise.resolve(ok("line\n"));
+      },
+    },
+  );
+  assertEquals(text.includes("line"), true);
+});

@@ -1,8 +1,10 @@
 import {
   composeFileArgs,
+  readDeploymentManifest,
   resolveDeployedComposePaths,
   resolveEnvironmentDeploymentDir,
 } from "../deploy/compose-files.ts";
+import { projectsForCommand } from "../deploy/deployment-generations.ts";
 import { hostSudoArgs } from "../permissions/host-sudo.ts";
 import { removeSecretTree } from "../deploy/secret-runtime.ts";
 import {
@@ -196,11 +198,16 @@ export async function handleEnvironmentStop(
   const hasCompose = composePaths !== null;
 
   if (hasCompose) {
-    await composeDown(
+    // Every generation the deployment owns comes down, not just the named one.
+    const projects = projectsForCommand(
+      await readDeploymentManifest(deploymentDir),
       parsedPayload.projectName,
-      composePaths,
-      runStreamed,
-      logSink,
+      "all",
+    );
+    await forEachSequential(
+      projects,
+      (projectName) =>
+        composeDown(projectName, composePaths, runStreamed, logSink),
     );
   } else {
     // Already torn down — still clear hosting site and report empty containers.

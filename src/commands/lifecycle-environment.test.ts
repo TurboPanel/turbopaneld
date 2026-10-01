@@ -537,3 +537,102 @@ test({
     }
   },
 });
+
+const TWO_GENERATIONS = [
+  {
+    color: "blue",
+    generation: 1,
+    projectName: "tp-demo-gen",
+    state: "draining",
+  },
+  {
+    color: "green",
+    generation: 2,
+    projectName: "tp-demo-gen-green",
+    state: "live",
+  },
+] as const;
+
+/** A deployment dir with a two-generation v3 manifest; returns the env + dir. */
+async function withTwoGenerationDeployment(
+  fn: (deploymentDir: string) => Promise<void>,
+): Promise<void> {
+  const root = await Deno.makeTempDir({ prefix: "tp-gen-cmd-" });
+  const previous = {
+    TURBOPANEL_STATE_DIR: Deno.env.get("TURBOPANEL_STATE_DIR"),
+    TURBOPANEL_CONFIG_DIR: Deno.env.get("TURBOPANEL_CONFIG_DIR"),
+  };
+  const stateDir = join(root, "state");
+  Deno.env.set("TURBOPANEL_STATE_DIR", stateDir);
+  Deno.env.set("TURBOPANEL_CONFIG_DIR", join(root, "config"));
+  const dir = join(stateDir, "deployments", "proj-1", "envgen001");
+  try {
+    await Deno.mkdir(dir, { recursive: true, mode: 0o750 });
+    await writeComposeFileSecure(
+      join(dir, RUNTIME_COMPOSE_FILENAME),
+      "services: {}\n",
+    );
+    await writeDeploymentManifest(dir, {
+      version: 3,
+      projectId: "proj-1",
+      environmentId: "envgen001",
+      serverId: "srv-1",
+      generation: 2,
+      projectName: "tp-demo-gen",
+      composeSha256: "a".repeat(64),
+      services: {},
+      generations: [...TWO_GENERATIONS],
+    });
+    await fn(dir);
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) Deno.env.delete(key);
+      else Deno.env.set(key, value);
+    }
+    await Deno.remove(root, { recursive: true });
+  }
+}
+
+function recordingRun(calls: string[][]) {
+  return (args: string[]): Promise<DockerCliResult> => {
+    calls.push([...args]);
+    return Promise.resolve({
+      success: true,
+      stdout: "[]",
+      stderr: "",
+      code: 0,
+    });
+  };
+}
+
+function projectOf(argv: string[]): string {
+  return argv[argv.indexOf("-p") + 1]!;
+}
+
+test({
+  name: "lifecycle start and restart act on the live generation, stop on all",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: () =>
+    withTwoGenerationDeployment(async () => {
+      const seen: Record<string, string[]> = {};
+      for (const action of ["start", "restart", "stop"] as const) {
+        const calls: string[][] = [];
+        await handleEnvironmentLifecycle(
+          {
+            environmentId: "envgen001",
+            projectId: "proj-1",
+            projectName: "tp-demo-gen",
+            action,
+          },
+          new Date().toISOString(),
+          { runDocker: recordingRun(calls) },
+        );
+        seen[action] = calls.filter((argv) => argv.includes(action)).map(
+          projectOf,
+        );
+      }
+      assertEquals(seen.start, ["tp-demo-gen-green"]);
+      assertEquals(seen.restart, ["tp-demo-gen-green"]);
+      assertEquals(seen.stop, ["tp-demo-gen", "tp-demo-gen-green"]);
+    }),
+});

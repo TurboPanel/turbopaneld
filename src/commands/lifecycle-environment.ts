@@ -17,6 +17,7 @@ import {
   resolveDeployedComposePaths,
   resolveEnvironmentDeploymentDir,
 } from "../deploy/compose-files.ts";
+import { projectsForCommand } from "../deploy/deployment-generations.ts";
 import {
   ensureDeploymentSecretFiles,
   type RehydrateDeploymentSecretsFn,
@@ -174,6 +175,23 @@ async function collectLifecycleContainers(
   }
 }
 
+/** One project's containers per live project, or `undefined` if any collect failed. */
+async function collectAllLifecycleContainers(
+  projects: readonly string[],
+  composePaths: readonly string[],
+  run: RunDockerFn,
+): Promise<EnvironmentDeployContainer[] | undefined> {
+  const perProject = await Promise.all(
+    projects.map((p) => collectLifecycleContainers(p, composePaths, run)),
+  );
+  const out: EnvironmentDeployContainer[] = [];
+  for (const rows of perProject) {
+    if (rows === undefined) return undefined;
+    out.push(...rows);
+  }
+  return out;
+}
+
 /**
  * Run `docker compose start|stop|restart` for a deployed environment.
  * Missing compose file fails (deploy first) — unlike idempotent `environment.stop`.
@@ -205,8 +223,8 @@ export async function handleEnvironmentLifecycle(
     );
   }
 
+  const manifest = await readDeploymentManifest(deploymentDir);
   if (parsedPayload.action === "start" || parsedPayload.action === "restart") {
-    const manifest = await readDeploymentManifest(deploymentDir);
     const plan = manifest?.secrets ?? [];
     if (plan.length > 0) {
       await ensureDeploymentSecretFiles({
@@ -221,23 +239,31 @@ export async function handleEnvironmentLifecycle(
     }
   }
 
-  const result = await runStreamed([
-    ...composeFileArgs(parsedPayload.projectName, composePaths),
-    parsedPayload.action,
-  ], {
-    onLine: (event) => logSink.onLine(event.stream, event.line),
+  // start / restart act on the live generation; stop on every generation.
+  const projects = projectsForCommand(
+    manifest,
+    parsedPayload.projectName,
+    parsedPayload.action === "stop" ? "all" : "live",
+  );
+  await forEachSequential(projects, async (projectName) => {
+    const result = await runStreamed([
+      ...composeFileArgs(projectName, composePaths),
+      parsedPayload.action,
+    ], {
+      onLine: (event) => logSink.onLine(event.stream, event.line),
+    });
+    if (!result.success) {
+      // Redact before sanitizing: the deny-set matches raw plaintext, and
+      // sanitizeForLog would otherwise rewrite the newlines a multiline secret
+      // (a PEM body) is matched on.
+      throw new Error(
+        sanitizeForLog(
+          logSink.redactSummary(result.stderr) ||
+            `compose ${parsedPayload.action} failed`,
+        ),
+      );
+    }
   });
-  if (!result.success) {
-    // Redact before sanitizing: the deny-set matches raw plaintext, and
-    // sanitizeForLog would otherwise rewrite the newlines a multiline secret
-    // (a PEM body) is matched on.
-    throw new Error(
-      sanitizeForLog(
-        logSink.redactSummary(result.stderr) ||
-          `compose ${parsedPayload.action} failed`,
-      ),
-    );
-  }
 
   // Best-effort parity with managed.lifecycle: keep per-service Traefik in
   // step so stopped stacks do not leave published ports listening with no
@@ -266,8 +292,8 @@ export async function handleEnvironmentLifecycle(
     );
   }
 
-  const containers = await collectLifecycleContainers(
-    parsedPayload.projectName,
+  const containers = await collectAllLifecycleContainers(
+    projectsForCommand(manifest, parsedPayload.projectName, "live"),
     composePaths,
     run,
   );
