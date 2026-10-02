@@ -79,8 +79,11 @@ type ParsedTarget = { path: string; query: URLSearchParams };
 
 /** Split the request target into the path the engine routes and its query. */
 export function parseTarget(target: string): ParsedTarget {
-  const hash = target.indexOf("#");
-  const clean = hash === -1 ? target : target.slice(0, hash);
+  // parseRequestHead refuses a `#`; never strip one here as a fragment.
+  if (target.includes("#")) {
+    throw new HttpError(400, "invalid request target");
+  }
+  const clean = target;
   const question = clean.indexOf("?");
   const rawPath = question === -1 ? clean : clean.slice(0, question);
   const rawQuery = question === -1 ? "" : clean.slice(question + 1);

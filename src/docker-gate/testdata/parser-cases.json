@@ -250,5 +250,13 @@
   {
     "name": "expect continue",
     "raw": "POST /x HTTP/1.1\r\nHost: d\r\nExpect: 100-continue\r\nContent-Length: 2\r\n\r\n{}"
+  },
+  {
+    "name": "fragment hides a form field",
+    "raw": "POST /build?q=1#&networkmode=host HTTP/1.1\r\nHost: d\r\nContent-Length: 0\r\n\r\n"
+  },
+  {
+    "name": "fragment before the query",
+    "raw": "POST /build#?networkmode=host HTTP/1.1\r\nHost: d\r\nContent-Length: 0\r\n\r\n"
   }
 ]

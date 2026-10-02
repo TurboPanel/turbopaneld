@@ -244,7 +244,10 @@ export async function writeAll(
 
 const TOKEN = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
 const METHOD = /^[A-Z]+$/;
-const TARGET = /^\/[\x21-\x7e]*$/;
+// Visible ASCII but `#`: Go keeps a `#` in the path and query as data (it is
+// never a fragment on the wire), so a target holding one is refused rather
+// than read two ways (`/build?q=1#&networkmode=host`).
+const TARGET = /^\/[\x21\x22\x24-\x7e]*$/;
 const VERSION = /^HTTP\/1\.[01]$/;
 
 function splitHeadLines(raw: Uint8Array): string[] {

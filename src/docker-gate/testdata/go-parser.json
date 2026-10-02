@@ -725,6 +725,39 @@
       "leftover": 0,
       "form": {},
       "formErr": false
+    },
+    {
+      "name": "fragment hides a form field",
+      "ok": true,
+      "method": "POST",
+      "path": "/build",
+      "bodyLen": 0,
+      "chunked": false,
+      "leftover": 0,
+      "form": {
+        "networkmode": [
+          "host"
+        ],
+        "q": [
+          "1#"
+        ]
+      },
+      "formErr": false
+    },
+    {
+      "name": "fragment before the query",
+      "ok": true,
+      "method": "POST",
+      "path": "/build#",
+      "bodyLen": 0,
+      "chunked": false,
+      "leftover": 0,
+      "form": {
+        "networkmode": [
+          "host"
+        ]
+      },
+      "formErr": false
     }
   ]
 }

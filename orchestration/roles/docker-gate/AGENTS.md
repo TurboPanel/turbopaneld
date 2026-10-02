@@ -323,4 +323,6 @@ leftover bytes, form fields). `DOCKER_GATE_GO_DIFF=1 deno test` re-runs the harn
 `docker run --rm -v "$PWD":/w -w /w/src/testing/docker-gate-diff golang:1.23 go run . ../../docker-gate/testdata/parser-cases.json > src/docker-gate/testdata/go-parser.json`.
 Gaps it found and the gate now closes: Transfer-Encoding on an HTTP/1.0 request is refused (Go ignores it and reads the
 chunks as the next request), and a form-encoded body is an `form-encoded-body` finding (Go merges it into the form
-ahead of the query, so `networkmode=host` could ride in the body of `POST /build`).
+ahead of the query, so `networkmode=host` could ride in the body of `POST /build`), and a request target holding
+`#` is refused (Go keeps `#` as data: `/build?q=1#&networkmode=host` sets `networkmode`; the gate used to drop it as a
+fragment).

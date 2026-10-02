@@ -118,7 +118,7 @@ function checkAgreement(gate: GateView, go: GoResult): string[] {
   const problems: string[] = [];
   const target = parseTarget(gate.head.target);
   if (gate.head.method !== go.method) problems.push("method");
-  if (!gate.head.target.includes("#") && target.path !== go.path) {
+  if (target.path !== go.path) {
     problems.push("path");
   }
   if ((gate.framing.kind === "chunked") !== go.chunked) {
@@ -129,9 +129,7 @@ function checkAgreement(gate: GateView, go: GoResult): string[] {
   }
   if (gate.leftover !== go.leftover) problems.push("leftover bytes");
   const formBody = carriesFormBody(gate.head, gate.framing);
-  // The gate drops a `#fragment` Go keeps in the query: it over-reads (harmless).
-  const fields = gate.head.target.includes("#") ? [] : Object.entries(go.form);
-  for (const [key, values] of fields) {
+  for (const [key, values] of Object.entries(go.form)) {
     const seen = target.query.getAll(key);
     const same = seen.length === values.length &&
       seen.every((value, i) => value === values[i]);
