@@ -262,9 +262,11 @@ async function releaseDirStatPrivileged(
     throw new Error(result.stderr || `Failed to stat release ${path}`);
   }
   const raw = result.stdout.trim();
-  const mode = /^[0-9a-f]{1,8}$/i.test(raw) ? Number.parseInt(raw, 16) : NaN;
+  const mode = /^[0-9a-f]{1,8}$/i.test(raw)
+    ? Number.parseInt(raw, 16)
+    : Number.NaN;
   if (Number.isNaN(mode)) {
-    throw new Error(`Unexpected stat output for release ${path}: ${raw}`);
+    throw new TypeError(`Unexpected stat output for release ${path}: ${raw}`);
   }
   return { isDirectory: (mode & S_IFMT) === S_IFDIR, mode };
 }
