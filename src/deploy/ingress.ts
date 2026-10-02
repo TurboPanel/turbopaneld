@@ -22,7 +22,11 @@ import {
   runDocker as defaultRunDocker,
   type RunDockerOptions,
 } from "./docker-cli.ts";
-import { ensureHostingCaddy } from "./ensure-hosting-caddy.ts";
+import {
+  ensureHostingCaddy,
+  type EnsureHostingCaddyDeps,
+  HOSTING_CADDY_USER,
+} from "./ensure-hosting-caddy.ts";
 import {
   assertSafeIngressIdentity,
   type IngressIdentity,
@@ -656,10 +660,13 @@ export function serviceTraefikCompose(
   return lines.join("\n");
 }
 
-/** Caddy storage root (internal CA + leaf certs) for the hosting unit. */
-export function hostingCaddyDataDir(layout: LayoutPaths): string {
-  return join(layout.stateDir, "hosting-caddy");
-}
+/**
+ * The hosting unit's systemd `StateDirectory=`: `/var/lib/<name>`, created
+ * and owned by {@link HOSTING_CADDY_USER}. It holds the ACME account, the
+ * internal CA and every leaf certificate. Top level on purpose: never inside
+ * the `tp`-owned state tree, so `tp` cannot swap it out from under Caddy.
+ */
+export const HOSTING_CADDY_STATE_DIRECTORY = "turbopanel-hosting-caddy";
 
 /**
  * Bounded shutdown for the hosting Caddy. Without it Caddy waits forever for
@@ -677,9 +684,13 @@ export function caddyfile(configDir: string): string {
   // ACME client can issue on :80/:443.
   // Future: optional `email {acmeEmail}` in this global block when the
   // deploy payload carries an ACME contact address.
+  // `skip_install_trust`: Caddy runs as an unprivileged account, so it must
+  // never try to add its internal CA to the host's trust store (it would
+  // shell out to sudo, and as root it used to succeed).
   return `{
   admin ${HOSTING_CADDY_ADMIN_ADDR}
   auto_https disable_redirects
+  skip_install_trust
   grace_period ${HOSTING_CADDY_GRACE_PERIOD}
   servers {
     protocols h1 h2 h3
@@ -692,14 +703,14 @@ import ${join(configDir, "hosting", "sites", "*.caddy")}
 export function caddyUnit(layout: LayoutPaths): string {
   const caddy = join(layout.runtimesDir, "caddy", "current", "caddy");
   const configDir = join(layout.configDir, "hosting");
-  // systemd gives the unit no $HOME, so Caddy would fall back to `./caddy`
-  // under WorkingDirectory — i.e. internal-CA roots and leaf certs written
-  // into the config tree. Pin storage to the state dir instead.
-  // XDG_DATA_HOME is this process's ACME account and certificate storage.
-  // It must stay distinct from control-plane Caddy
+  // Without HOME and the XDG paths Caddy falls back to `./caddy` under
+  // WorkingDirectory, i.e. certificates and autosave written into the config
+  // tree. `%S` is systemd's state root (/var/lib), so all of it lands in the
+  // unit's own StateDirectory. XDG_DATA_HOME is this process's ACME account
+  // and certificate storage. It must stay distinct from control-plane Caddy
   // (`<state>/caddy/.local/share`) and from site Caddy (`<state>/site-caddy`).
   // The processes must never share an account, contact, or on-disk storage.
-  const dataDir = hostingCaddyDataDir(layout);
+  const state = `%S/${HOSTING_CADDY_STATE_DIRECTORY}`;
   return `[Unit]
 Description=TurboPanel hosting Caddy ingress
 After=network-online.target docker.service
@@ -711,7 +722,17 @@ Wants=network-online.target
 # ACME writes the HTTP-01 site before the first start and does not reload
 # that window; an already-running unit still reloads.
 Type=simple
-Environment=XDG_DATA_HOME=${dataDir}
+# Not root: ${HOSTING_CADDY_USER} (not in group tp) with one capability, binding
+# :80/:443. tp-host refuses this unit in any other shape.
+User=${HOSTING_CADDY_USER}
+Group=${HOSTING_CADDY_USER}
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=yes
+StateDirectory=${HOSTING_CADDY_STATE_DIRECTORY}
+Environment=HOME=${state}
+Environment=XDG_DATA_HOME=${state}/data
+Environment=XDG_CONFIG_HOME=${state}/config
 WorkingDirectory=${configDir}
 ExecStart=${caddy} run --config ${
     join(configDir, "Caddyfile")
@@ -730,6 +751,7 @@ WantedBy=multi-user.target
 
 async function installAndStartCaddy(
   unitSource: string,
+  unitChanged: boolean,
 ): Promise<boolean> {
   const install = await run(
     "sudo",
@@ -758,6 +780,19 @@ async function installAndStartCaddy(
     );
     return false;
   }
+  // `enable --now` leaves a running Caddy alone, so a changed unit (a new
+  // account, capability or store) would only apply on the next reboot.
+  // Restart it now; on a host where it is stopped this starts it.
+  if (unitChanged) {
+    const restart = await run(
+      "sudo",
+      hostSudoArgs(["-n", "systemctl", "restart", CADDY_SERVICE]),
+    );
+    if (!restart.success) {
+      logWarn("deploy", `hosting Caddy restart failed: ${restart.stderr}`);
+      return false;
+    }
+  }
   const enable = await run(
     "sudo",
     hostSudoArgs([
@@ -778,12 +813,9 @@ async function installAndStartCaddy(
 /** Ensure hosting Caddy binary, Caddyfile, sites dir, and systemd unit. */
 export async function ensureHostingCaddyRuntime(
   layout: LayoutPaths,
+  deps?: EnsureHostingCaddyDeps,
 ): Promise<void> {
-  await ensureHostingCaddy(layout);
-  await Deno.mkdir(hostingCaddyDataDir(layout), {
-    recursive: true,
-    mode: 0o750,
-  });
+  await ensureHostingCaddy(layout, deps);
   const hostingDir = join(layout.configDir, "hosting");
   const sitesDir = join(hostingDir, "sites");
   await Deno.mkdir(sitesDir, { recursive: true, mode: 0o750 });
@@ -800,12 +832,16 @@ export async function ensureHostingCaddyRuntime(
     },
   );
   const unitSource = join(hostingDir, CADDY_SERVICE);
-  await Deno.writeTextFile(unitSource, caddyUnit(layout), { mode: 0o640 });
+  const unit = caddyUnit(layout);
+  // The staged copy is the last unit that was installed and started.
+  const unitChanged = (await readTextIfPresent(unitSource)) !== unit;
+  await Deno.writeTextFile(unitSource, unit, { mode: 0o640 });
 
-  // A non-root daemon cannot install a system unit. Keep the generated config
-  // so test and dev environments can grant sudo later without redeploying.
-  const started = await installAndStartCaddy(unitSource);
+  const started = await installAndStartCaddy(unitSource, unitChanged);
   if (!started) {
+    // Drop the staged copy so the next attempt still sees a changed unit and
+    // restarts Caddy once it installs.
+    await Deno.remove(unitSource).catch(() => {});
     throw new Error("hosting Caddy could not be installed or started");
   }
 }

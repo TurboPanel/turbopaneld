@@ -10,9 +10,10 @@
       - runtime_registry.accessGroups.sftp is defined
       - runtime_registry.accessGroups.shell is defined
       - runtime_registry.accessGroups.password is defined
+      - runtime_registry.accessGroups.principal is defined
     fail_msg: >-
       runtime-registry.json is missing accessGroups.sftp/accessGroups.shell/
-      accessGroups.password. The daemon resolves the sshd Match groups from the
+      accessGroups.password/accessGroups.principal. The daemon resolves the sshd Match groups from the
       same keys, so a host provisioned without them would match no account.
 
 - name: Ensure the SSH access groups
@@ -25,6 +26,11 @@
     - "{{ runtime_registry.accessGroups.sftp }}"
     - "{{ runtime_registry.accessGroups.shell }}"
     - "{{ runtime_registry.accessGroups.password }}"
+    # Every principal joins this one, whatever its level: it selects the
+    # drop-in's backstop block. The daemon refuses to materialize a principal
+    # without it, so it must exist before the first deploy. It gets no ACL on
+    # the key directory below — the backstop reads no key file.
+    - "{{ runtime_registry.accessGroups.principal }}"
   loop_control:
     label: "{{ item.group }} ({{ item.gid }})"
 

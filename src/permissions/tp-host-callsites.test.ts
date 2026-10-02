@@ -315,7 +315,10 @@ async function makeHost(): Promise<Host> {
 
 const at = (prefix: string, value: string) => value.replaceAll("{P}", prefix);
 
-async function prepare(prefix: string, setup: CallSiteSetup | undefined) {
+async function prepare(
+  prefix: string,
+  setup: CallSiteSetup | undefined,
+): Promise<Deno.Listener[]> {
   for (const d of setup?.dirs ?? []) {
     await Deno.mkdir(at(prefix, d), { recursive: true });
   }
@@ -333,6 +336,11 @@ async function prepare(prefix: string, setup: CallSiteSetup | undefined) {
     await Deno.mkdir(dirname(at(prefix, link)), { recursive: true });
     await Deno.symlink(target, at(prefix, link));
   }
+  // Deno unlinks a Unix socket when its listener closes, so the caller keeps
+  // these open until the sample has run.
+  return (setup?.sockets ?? []).map((socket) =>
+    Deno.listen({ transport: "unix", path: at(prefix, socket) })
+  );
 }
 
 /** The argv a managed host really sends: `{P}` is the host's `/`. */
@@ -342,8 +350,9 @@ function onHost(argv: readonly string[]): string[] {
 
 async function runSample(sample: TpHostSample): Promise<string | undefined> {
   const host = await makeHost();
+  let sockets: Deno.Listener[] = [];
   try {
-    await prepare(host.prefix, sample.setup);
+    sockets = await prepare(host.prefix, sample.setup);
     const argv = sample.argv.map((a) => at(host.prefix, a));
     const stdin = sample.stdin === undefined
       ? undefined
@@ -357,6 +366,7 @@ async function runSample(sample: TpHostSample): Promise<string | undefined> {
     }
     return undefined;
   } finally {
+    for (const socket of sockets) socket.close();
     await host.cleanup();
   }
 }

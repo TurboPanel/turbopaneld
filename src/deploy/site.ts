@@ -65,7 +65,7 @@ import {
   siteWebrootDir,
 } from "../paths/layout.ts";
 import type { EnvironmentDeploySite } from "../contracts/commands-contracts.ts";
-import { currentReleasePathExists } from "./release/promote.ts";
+import { currentReleaseDirExists } from "./release/promote.ts";
 import {
   ConfigValueError,
   hasLineBreakOrControl,
@@ -208,13 +208,17 @@ function assertSafeId(value: string, field: string): void {
   }
 }
 
+/**
+ * Validates the root exactly as it will be joined into paths: a value that
+ * only passes once trimmed (the payload parser trims) is refused rather than
+ * served from a directory whose name carries the whitespace.
+ */
 function assertSafeRoot(value: string): void {
-  const trimmed = value.trim();
   if (
-    trimmed.length === 0 ||
-    trimmed.startsWith("/") ||
-    trimmed.includes("..") ||
-    !SAFE_ROOT_RE.test(trimmed)
+    value.length === 0 ||
+    value.startsWith("/") ||
+    value.includes("..") ||
+    !SAFE_ROOT_RE.test(value)
   ) {
     throw new Error(`site root is unsafe: ${value}`);
   }
@@ -485,6 +489,8 @@ export function nginxSiteConfig(
   listen [::1]:${site.listenPort};${dockerListen}
   server_name _;
   root ${documentRoot};
+  # Links below the root are followed only when link and target share an owner.
+  disable_symlinks if_not_owner from=$document_root;
   index ${indexFiles};
 
   location / {
@@ -988,8 +994,8 @@ Listen 127.0.0.1:${site.listenPort}${dockerListen}
   ServerName localhost
   DocumentRoot "${documentRoot}"
   <Directory "${documentRoot}">
-    Options Indexes FollowSymLinks
-    AllowOverride All
+    Options Indexes SymLinksIfOwnerMatch
+    AllowOverride AuthConfig FileInfo Indexes Limit Options=Indexes,MultiViews,SymLinksIfOwnerMatch
     Require all granted
   </Directory>${phpBlock}${setenvBlock}
 </VirtualHost>
@@ -1142,7 +1148,7 @@ export function openlitespeedSiteFragment(
     : "";
   return `virtualHost ${name}{
   vhRoot                    ${documentRoot}/
-  allowSymbolLink           1
+  allowSymbolLink           2
   enableScript              ${opts?.php ? 1 : 0}
   restrained                0${openlitespeedVhostIdentityLines(opts?.identity)}
   configFile                ${vhConfigPath}
@@ -1479,39 +1485,31 @@ async function ensureDocumentRoot(
 }
 
 /**
- * `Deno.stat` with "the path is absent" as a return value rather than an
- * exception, so callers separate *missing* from *wrong kind* with plain `if`s.
- */
-async function statOrNull(path: string): Promise<Deno.FileInfo | null> {
-  try {
-    return await Deno.stat(path);
-  } catch (err) {
-    if (err instanceof Deno.errors.NotFound) return null;
-    throw err;
-  }
-}
-
-/**
- * `stat` of a release-backed document root, `"present"` when the daemon may
- * not traverse the principal's home to stat it, or `null` when it is absent.
+ * `lstat` of a release-backed document root, `"directory"` when the daemon may
+ * not traverse the principal's home to look itself, or `null` when it is
+ * absent.
  *
- * The escalated answer is presence only, through the release engine's own
- * `readlink`/`test -e` calls: the principal owns that tree, so nothing in it
- * is read as root, and `current` is resolved rather than traversed.
+ * `lstat`, not `stat`: a document root that is itself a symlink is reported
+ * as what it is, never as the directory it points at. The escalated answer
+ * goes through the release engine's own `readlink` plus tp-host `test -d`,
+ * which refuses a symlink as the last component the same way; the principal
+ * owns that tree, so nothing in it is read as root, and `current` is resolved
+ * rather than traversed.
  */
 async function releaseDocumentRootStat(
   layout: LayoutPaths,
   documentRoot: string,
   site: SiteApplySpec,
   release: SiteRelease,
-): Promise<Deno.FileInfo | "present" | null> {
+): Promise<Deno.FileInfo | "directory" | null> {
   try {
-    return await statOrNull(documentRoot);
+    return await Deno.lstat(documentRoot);
   } catch (err) {
+    if (err instanceof Deno.errors.NotFound) return null;
     if (!(err instanceof Deno.errors.PermissionDenied)) throw err;
   }
   const home = principalHomePath(layout, release.username);
-  const exists = await currentReleasePathExists(
+  const isDirectory = await currentReleaseDirExists(
     {
       currentLink: siteCurrentSymlink(home, release.serviceId),
       releasesDir: siteReleasesDir(home, release.serviceId),
@@ -1519,7 +1517,7 @@ async function releaseDocumentRootStat(
     site.root,
     run,
   );
-  return exists ? "present" : null;
+  return isDirectory ? "directory" : null;
 }
 
 /**
@@ -1548,7 +1546,7 @@ async function assertReleaseDocumentRoot(
       `site release document root missing for ${site.composeServiceName}: ${documentRoot} (no promoted release, or the build did not emit "${site.root}")`,
     );
   }
-  if (stat !== "present" && !stat.isDirectory) {
+  if (stat !== "directory" && !stat.isDirectory) {
     throw new Error(
       `site release document root is not a directory for ${site.composeServiceName}: ${documentRoot}`,
     );
@@ -1749,25 +1747,25 @@ async function tryRemoveSiteConfigFile(
 
 /**
  * Remove every `prefix*` entry of a root-owned engine config dir via sudo and
- * count the `*.conf` ones; anything else is a staging leftover (`.tpnew`,
- * `.tpprev`) removed best-effort. A missing dir is not an error.
+ * return the `*.conf` names removed; anything else is a staging leftover
+ * (`.tpnew`, `.tpprev`) removed best-effort. A missing dir is not an error.
  */
 async function removePrefixedConfFiles(
   dir: string,
   prefix: string,
   label: string,
-): Promise<number> {
+): Promise<string[]> {
   const names = (await listEngineConfigDir(dir) ?? []).filter((name) =>
     name.startsWith(prefix)
   );
-  let removed = 0;
+  const removed: string[] = [];
   await forEachSequential(names, async (name) => {
     const path = join(dir, name);
     if (!name.endsWith(".conf")) {
       await run("sudo", hostSudoArgs(["-n", "rm", "-f", path]));
       return;
     }
-    if (await tryRemoveSiteConfigFile(path, label)) removed += 1;
+    if (await tryRemoveSiteConfigFile(path, label)) removed.push(name);
   });
   return removed;
 }
@@ -2871,7 +2869,8 @@ async function removePhpFpmEngineSites(
 ): Promise<RemovedSites> {
   const prefix = `tp-${environmentId}-`;
   const sitesDir = join(layout.configDir, engine, "sites");
-  const sitesRemoved = await removePrefixedConfFiles(sitesDir, prefix, engine);
+  const sitesRemoved =
+    (await removePrefixedConfFiles(sitesDir, prefix, engine)).length;
 
   // Sweep every installed series, not just the default: the environment being
   // torn down may have pinned any of them, and this function is called once per
@@ -2880,11 +2879,11 @@ async function removePhpFpmEngineSites(
   const touchedSeries = new Set<string>();
   await forEachSequential(await installedPhpSeries(layout), async (series) => {
     const poolsDir = phpFpmPoolsDir(layout, series);
-    const removed = await removePrefixedConfFiles(
+    const removed = (await removePrefixedConfFiles(
       poolsDir,
       prefix,
       `php-fpm ${series} pool`,
-    );
+    )).length;
     if (removed > 0) touchedSeries.add(series);
     poolsRemoved += removed;
   });
@@ -2960,6 +2959,12 @@ async function tryRemoveOpenLiteSpeedVhostDir(vhostDir: string): Promise<void> {
  * Remove OpenLiteSpeed site fragments + vhost dirs for an environment, then
  * regenerate the aggregated main config from whatever sites remain across
  * all environments on this host. Returns count removed.
+ *
+ * Fragment first, aggregate next, vhost dir last: a vhost dir only goes once
+ * its fragment is gone and `httpd_config.conf` no longer names it, so a
+ * fragment that could not be removed never leaves the aggregate pointing at a
+ * deleted `vhconf.conf` (OpenLiteSpeed would refuse the whole config on its
+ * next restart).
  */
 async function removeOpenLiteSpeedSites(
   layout: LayoutPaths,
@@ -2968,24 +2973,20 @@ async function removeOpenLiteSpeedSites(
   const prefix = `tp-${environmentId}-`;
   const sitesDir = join(layout.configDir, "openlitespeed", "sites");
   const vhostsDir = openlitespeedVhostsDir(layout);
-  const fragments = (await listEngineConfigDir(sitesDir) ?? []).filter((
-    name,
-  ) => name.startsWith(prefix) && name.endsWith(".conf"));
-  await forEachSequential(fragments, async (name) => {
-    const composeServiceName = stripConfSuffix(name.slice(prefix.length));
-    const olsName = openlitespeedSiteName(environmentId, composeServiceName);
-    await tryRemoveOpenLiteSpeedVhostDir(join(vhostsDir, olsName));
-  });
-  const removed = await removePrefixedConfFiles(
+  const removedFragments = await removePrefixedConfFiles(
     sitesDir,
     prefix,
     "OpenLiteSpeed",
   );
+  if (removedFragments.length === 0) return 0;
 
-  if (removed > 0) {
-    await regenerateOpenLiteSpeedMainConfig(layout, sitesDir);
-  }
-  return removed;
+  await regenerateOpenLiteSpeedMainConfig(layout, sitesDir);
+  await forEachSequential(removedFragments, async (name) => {
+    const composeServiceName = stripConfSuffix(name.slice(prefix.length));
+    const olsName = openlitespeedSiteName(environmentId, composeServiceName);
+    await tryRemoveOpenLiteSpeedVhostDir(join(vhostsDir, olsName));
+  });
+  return removedFragments.length;
 }
 
 async function tryReloadAfterSiteRemoval(

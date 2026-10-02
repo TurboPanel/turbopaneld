@@ -1547,8 +1547,10 @@ tp_fetch_repo_manifest() {
   fi
   # Same rule as the daemon package: the manifest must carry a valid
   # signature by the pinned release key before any field of it is read. Only
-  # a development overlay (tp_manifest_signature_bypass) skips it.
-  if tp_manifest_signature_bypass; then
+  # a development overlay (tp_manifest_signature_bypass) skips it, and never
+  # for a pin: --instance-manifest-url / --ui-manifest-url (an upgrade or a
+  # rollback to one exact release) always verifies.
+  if [ -z "$_pin" ] && tp_manifest_signature_bypass; then
     tp_print_styled_line "1;33" "*** DEVELOPMENT OVERLAY: ${_repo} manifest signature not verified (TURBOPANEL_DL_BASE=${TURBOPANEL_DL_BASE}) ***" >&2
     tp_manifest_strict_canonical "$_manifest_json" || return 1
   else
@@ -1890,54 +1892,153 @@ tp_run_instance_install() {
     tp_print_error "Control plane provisioning failed"
     return "$_rc"
   fi
+  # The co-located refresh reads its channel from this root-only file, not
+  # from daemon.env. The install wrote no control-plane pins into daemon.env,
+  # so none are recorded here either.
+  if ! tp_write_control_plane_refresh "${TURBOPANEL_UPDATE_CHANNEL:-release}" "" ""; then
+    tp_print_error "Could not write $(tp_control_plane_refresh_file)"
+    return 1
+  fi
   tp_print_ok "Self-hosted control plane installed — open the wizard URL printed above (https://<this host>:8443/install); this host's daemon enrols itself once the wizard has issued the first license"
   return 0
 }
 
-# An existing self-hosted control plane dials the instance Unix socket: the
-# instance binary is installed and daemon.env does not name a remote URL.
-# Works before INSTALL_ROOT / ENV_FILE are assigned (the --daemon-only
+# An existing self-hosted control plane dials the instance Unix socket. Decided
+# from root-owned files only, never from daemon.env: the control-plane binary
+# is installed and the update-origin pin says colocated=1. A control-plane
+# host installed before run.sh wrote a pin has none and still counts (as in
+# tp-orchestrate). Works before INSTALL_ROOT is assigned (the --daemon-only
 # argument checks run earlier than the layout constants).
 tp_colocated_control_plane_host() {
   _ccp_root="${INSTALL_ROOT:-/opt/turbopanel}"
-  _ccp_env="${ENV_FILE:-/etc/turbopanel/daemon.env}"
-  [ -e "$_ccp_root/bin/turbopanel" ] || return 1
-  [ -f "$_ccp_env" ] || return 1
-  if grep -q '^TURBOPANEL_INSTANCE_URL=' "$_ccp_env"; then
-    return 1
+  _ccp_pin="$_ccp_root/lib/update-origin"
+  [ -f "$_ccp_root/bin/turbopanel" ] && [ ! -L "$_ccp_root/bin/turbopanel" ] || return 1
+  if [ ! -e "$_ccp_pin" ] && [ ! -L "$_ccp_pin" ]; then
+    return 0
   fi
+  [ -f "$_ccp_pin" ] && [ ! -L "$_ccp_pin" ] || return 1
+  [ "$(sed -n 's/^colocated=//p' "$_ccp_pin" | head -1)" = 1 ]
+}
+
+# The co-located refresh's own settings: lib/control-plane-refresh, root:root
+# 0600 beside lib/update-origin in the root-owned lib/ directory. The refresh
+# runs as root and keeps only the channel and the two control-plane manifest
+# pins there; daemon.env is the daemon's file (tp:tp 0600) and the refresh
+# never reads it — except once, below, to migrate a host that predates this
+# file.
+tp_control_plane_refresh_file() {
+  printf '%s/lib/control-plane-refresh' "${INSTALL_ROOT:-/opt/turbopanel}"
+}
+
+tp_refresh_channel_ok() {
+  _rco_channel="$1"
+  case "$_rco_channel" in
+    trunk|edge|canary|rc|release) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Prints a validated value or nothing. $1: channel | instance | ui.
+tp_refresh_value_ok() {
+  _rvo_kind="$1"
+  _rvo_value="$2"
+  if [ "$_rvo_kind" = channel ]; then
+    tp_refresh_channel_ok "$_rvo_value"
+  else
+    tp_release_manifest_url_ok "$_rvo_kind" "$_rvo_value"
+  fi
+}
+
+# Fill _cpr_channel, _cpr_instance_manifest_url and _cpr_ui_manifest_url,
+# each validated (an invalid value reads as empty). The root file is the only
+# source once it exists. Without it — a host installed before this file — the
+# values are read from daemon.env one last time, validated the same way, and
+# tp_write_control_plane_refresh then records them so no later run reads
+# daemon.env again.
+tp_load_control_plane_refresh() {
+  _cpr_file="$(tp_control_plane_refresh_file)"
+  _cpr_channel=""
+  _cpr_instance_manifest_url=""
+  _cpr_ui_manifest_url=""
+  if [ -L "$_cpr_file" ]; then
+    return 0
+  fi
+  if [ -f "$_cpr_file" ]; then
+    _cpr_raw_channel="$(sed -n 's/^channel=//p' "$_cpr_file" | head -1)"
+    _cpr_raw_instance="$(sed -n 's/^instance_manifest_url=//p' "$_cpr_file" | head -1)"
+    _cpr_raw_ui="$(sed -n 's/^ui_manifest_url=//p' "$_cpr_file" | head -1)"
+  else
+    _cpr_env="${ENV_FILE:-/etc/turbopanel/daemon.env}"
+    [ -f "$_cpr_env" ] && [ ! -L "$_cpr_env" ] || return 0
+    _cpr_raw_channel="$(sed -n 's/^TURBOPANEL_UPDATE_CHANNEL=//p' "$_cpr_env" | head -1)"
+    _cpr_raw_instance="$(sed -n 's/^TURBOPANEL_INSTANCE_MANIFEST_URL=//p' "$_cpr_env" | head -1)"
+    _cpr_raw_ui="$(sed -n 's/^TURBOPANEL_UI_MANIFEST_URL=//p' "$_cpr_env" | head -1)"
+  fi
+  tp_refresh_value_ok channel "$_cpr_raw_channel" && _cpr_channel="$_cpr_raw_channel"
+  tp_refresh_value_ok instance "$_cpr_raw_instance" && _cpr_instance_manifest_url="$_cpr_raw_instance"
+  tp_refresh_value_ok ui "$_cpr_raw_ui" && _cpr_ui_manifest_url="$_cpr_raw_ui"
   return 0
+}
+
+# Install a scratch file as a root-only file (root:root 0600).
+tp_install_root_only() {
+  _iro_src="$1"
+  _iro_dest="$2"
+  install -m 0600 -o root -g root "$_iro_src" "$_iro_dest"
+}
+
+tp_write_control_plane_refresh() {
+  _cpw_channel="$1"
+  _cpw_instance="$2"
+  _cpw_ui="$3"
+  _cpw_file="$(tp_control_plane_refresh_file)"
+  mkdir -p "${_cpw_file%/*}"
+  _cpw_tmp="$(mktemp)"
+  printf 'channel=%s\ninstance_manifest_url=%s\nui_manifest_url=%s\n' \
+    "$_cpw_channel" "$_cpw_instance" "$_cpw_ui" > "$_cpw_tmp"
+  _cpw_rc=0
+  tp_install_root_only "$_cpw_tmp" "$_cpw_file" || _cpw_rc=$?
+  rm -f "$_cpw_tmp"
+  return "$_cpw_rc"
 }
 
 # --daemon-only on a self-hosted control-plane host refreshes the co-located
 # daemon (daemon-colocated-refresh.yml). It needs no license (the play does
-# not enrol) and no manifest pin: the channel comes from daemon.env when the
-# caller names none, and the manifest from that channel's built-in rail —
-# signature-verified by tp_fetch_channel_manifest like every other install.
+# not enrol) and no manifest pin: the channel comes from
+# lib/control-plane-refresh when the caller names none, and the manifest from
+# that channel's built-in rail — signature-verified by
+# tp_fetch_channel_manifest like every other install.
 tp_prepare_colocated_daemon_only() {
   tp_colocated_control_plane_host || return 1
   if [ -z "${TURBOPANEL_UPDATE_CHANNEL:-}" ]; then
-    _cdo_channel="$(sed -n 's/^TURBOPANEL_UPDATE_CHANNEL=//p' "${ENV_FILE:-/etc/turbopanel/daemon.env}" | head -1)"
-    TURBOPANEL_UPDATE_CHANNEL="${_cdo_channel:-release}"
+    tp_load_control_plane_refresh
+    TURBOPANEL_UPDATE_CHANNEL="${_cpr_channel:-release}"
     export TURBOPANEL_UPDATE_CHANNEL
   fi
   return 0
 }
 
-tp_daemon_env_value() {
-  _key="$1"
-  sed -n "s/^${_key}=//p" "$ENV_FILE" | head -1
-}
-
 # Refresh the co-located daemon without daemon-install.yml. That play would
 # write a remote instance URL and recursively chown state and config.
+#
+# Its settings come from lib/control-plane-refresh (root-owned), never from
+# daemon.env: the daemon can write daemon.env, and root must not take paths
+# or origins from it. The instance CA and DL_BASE are not carried at all — a
+# control-plane host has neither (run.sh --instance refuses both). A caller's
+# --instance-manifest-url / --ui-manifest-url (already validated) replaces the
+# recorded pin; the file is rewritten on every refresh.
 tp_run_colocated_daemon_refresh() {
-  _vars="$(mktemp)"
+  tp_load_control_plane_refresh
   _channel="${TURBOPANEL_UPDATE_CHANNEL:-}"
-  if [ -z "$_channel" ]; then
-    _channel="$(tp_daemon_env_value TURBOPANEL_UPDATE_CHANNEL)"
-  fi
+  [ -n "$_channel" ] || _channel="$_cpr_channel"
   [ -n "$_channel" ] || _channel=release
+  _instance_pin="${INSTANCE_MANIFEST_URL:-$_cpr_instance_manifest_url}"
+  _ui_pin="${UI_MANIFEST_URL:-$_cpr_ui_manifest_url}"
+  if ! tp_write_control_plane_refresh "$_channel" "$_instance_pin" "$_ui_pin"; then
+    tp_print_error "Could not write $(tp_control_plane_refresh_file)"
+    return 1
+  fi
+  _vars="$(mktemp)"
   {
     printf 'turbopanel_instance_url: ""\n'
     printf 'turbopanel_after_instance_service: true\n'
@@ -1961,21 +2062,11 @@ tp_run_colocated_daemon_refresh() {
     if [ -n "$MANIFEST_URL" ]; then
       printf 'turbopanel_manifest_url: "%s"\n' "$MANIFEST_URL"
     fi
-    _kept="$(tp_daemon_env_value TURBOPANEL_INSTANCE_CA)"
-    if [ -n "$_kept" ]; then
-      printf 'turbopanel_instance_ca: "%s"\n' "$_kept"
+    if [ -n "$_instance_pin" ]; then
+      printf 'turbopanel_instance_manifest_url: "%s"\n' "$_instance_pin"
     fi
-    _kept="$(tp_daemon_env_value TURBOPANEL_DL_BASE)"
-    if [ -n "$_kept" ]; then
-      printf 'turbopanel_dl_base: "%s"\n' "$_kept"
-    fi
-    _kept="$(tp_daemon_env_value TURBOPANEL_INSTANCE_MANIFEST_URL)"
-    if [ -n "$_kept" ]; then
-      printf 'turbopanel_instance_manifest_url: "%s"\n' "$_kept"
-    fi
-    _kept="$(tp_daemon_env_value TURBOPANEL_UI_MANIFEST_URL)"
-    if [ -n "$_kept" ]; then
-      printf 'turbopanel_ui_manifest_url: "%s"\n' "$_kept"
+    if [ -n "$_ui_pin" ]; then
+      printf 'turbopanel_ui_manifest_url: "%s"\n' "$_ui_pin"
     fi
   } > "$_vars"
   tp_print_step "▸" "Refreshing the co-located daemon (socket mode; control plane, web app, and database unchanged)…"

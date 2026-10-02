@@ -979,7 +979,8 @@ async function defaultInstanceUpdateRun(
 /**
  * How an instance or UI manifest's signature is checked. The rule is the
  * daemon package's (`unsignedManifestBypass`): required everywhere except a
- * source checkout or an opted-in `--dl-base` overlay host.
+ * source checkout or an opted-in `--dl-base` overlay host, and always for a
+ * pinned manifest URL.
  */
 type ManifestSignaturePolicy = {
   required: boolean;
@@ -991,12 +992,14 @@ function manifestSignaturePolicy(options: {
   installMode?: InstallMode;
   env?: Record<string, string | undefined>;
   publicKeyHex?: string;
+  pinned?: boolean;
 }): ManifestSignaturePolicy {
   const env = options.env ?? Deno.env.toObject();
   const bypass = unsignedManifestBypass({
     installMode: options.installMode ?? detectInstallMode(env),
     overlay: resolveOverlayDlBase(env) !== null,
     env,
+    pinned: options.pinned,
   });
   return { required: !bypass, publicKeyHex: options.publicKeyHex };
 }
@@ -1088,8 +1091,8 @@ export async function assertControlPlaneManifestPreflight(options: {
   publicKeyHex?: string;
 }): Promise<VerifiedPackageManifest> {
   const fetchText = options.fetchText ?? defaultFetchManifestText;
-  const policy = manifestSignaturePolicy(options);
   const pinned = options.manifestUrl?.trim();
+  const policy = manifestSignaturePolicy({ ...options, pinned: !!pinned });
   if (pinned) assertReleaseManifestUrl("instance", pinned, "manifestUrl");
   const uiUrl = options.uiManifestUrl?.trim();
   if (uiUrl) assertReleaseManifestUrl("ui", uiUrl, "uiManifestUrl");
@@ -1130,7 +1133,13 @@ export async function assertControlPlaneManifestPreflight(options: {
     );
   }
   if (uiUrl) {
-    await fetchVerifiedManifest(uiUrl, "ui", fetchText, policy, options.retry);
+    await fetchVerifiedManifest(
+      uiUrl,
+      "ui",
+      fetchText,
+      manifestSignaturePolicy({ ...options, pinned: true }),
+      options.retry,
+    );
   }
   return { url, commit, version };
 }

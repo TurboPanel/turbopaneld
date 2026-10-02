@@ -1,0 +1,64 @@
+---
+# Restore every managed path from .prev (or remove it if it did not exist
+# before the swap), then bring the previous gate back and prove it answers.
+- name: Look at the snapshot
+  ansible.builtin.stat:
+    path: "{{ docker_gate_prev_dir }}/{{ item | basename }}"
+  loop: "{{ docker_gate_managed_paths }}"
+  register: _docker_gate_snapshot
+
+- name: Restore what the snapshot holds
+  ansible.builtin.copy:
+    remote_src: true
+    src: "{{ docker_gate_prev_dir }}/{{ item.item | basename }}"
+    dest: "{{ item.item }}"
+    owner: root
+    group: "{{ 'root' if item.item is search('[.]service$') else docker_gate_group }}"
+    mode: "0640"
+  loop: "{{ _docker_gate_snapshot.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: item.stat.exists
+
+- name: Remove what did not exist before
+  ansible.builtin.file:
+    path: "{{ item.item }}"
+    state: absent
+  loop: "{{ _docker_gate_snapshot.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: not item.stat.exists
+
+- name: Record whether a previous gate was restored
+  ansible.builtin.set_fact:
+    _docker_gate_had_previous: "{{ (_docker_gate_snapshot.results | selectattr('item', 'search', '/main[.]ts$') | first).stat.exists }}"
+
+- name: Restart the previous gate
+  ansible.builtin.systemd:
+    name: "{{ docker_gate_service_name }}"
+    state: restarted
+    daemon_reload: true
+  when: _docker_gate_had_previous
+
+- name: Stop a gate that never had a working version
+  ansible.builtin.systemd:
+    name: "{{ docker_gate_service_name }}"
+    state: stopped
+    enabled: false
+    daemon_reload: true
+  when: not _docker_gate_had_previous
+  failed_when: false
+
+# Only a gate that answered before the swap is expected to answer again; one
+# that was already down is restored all the same but not waited for.
+- name: Prove the restored gate answers
+  ansible.builtin.uri:
+    url: http://localhost/_ping
+    unix_socket: "{{ docker_gate_socket }}"
+  register: _docker_gate_restored
+  until: _docker_gate_restored.status == 200
+  retries: 15
+  delay: 2
+  when:
+    - _docker_gate_had_previous
+    - _docker_gate_before.status | default(0) == 200
