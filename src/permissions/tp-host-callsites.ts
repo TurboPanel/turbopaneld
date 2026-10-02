@@ -178,6 +178,13 @@ const SITES: CallSite[] = [
     argv: ["rm", "-rf", "--", SITE],
     setup: dir(SITE),
   }),
+  tpHost(
+    'src/commands/stop-environment.ts|["-n","rm","-rf","--",deploymentDir]',
+    {
+      argv: ["rm", "-rf", "--", `${STATE}/deployments/proj1/env1`],
+      setup: dir(`${STATE}/deployments/proj1/env1/data`),
+    },
+  ),
 
   // --- systemd unit sets (tenant cron, scheduled backups) ------------------
   tpHost(
