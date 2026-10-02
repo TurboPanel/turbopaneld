@@ -641,14 +641,6 @@ const SITES: CallSite[] = [
       setup: dir(`${RELEASE}/config`),
     },
   ),
-  tpHost(
-    'src/deploy/release/promote.ts|["-n","stat","-c","%f","--",path]',
-    { argv: ["stat", "-c", "%f", "--", RELEASE], setup: dir(RELEASE) },
-  ),
-  tpHost('src/deploy/release/deployment-json.ts|["-n","cat","--",path]', {
-    argv: ["cat", "--", `${RELEASE}/.turbopanel/release.json`],
-    setup: file(`${RELEASE}/.turbopanel/release.json`),
-  }),
   tpHost('src/deploy/release/promote.ts|["-n","test","-e",currentLink]', {
     argv: ["test", "-e", `${SITE}/current`],
     setup: {

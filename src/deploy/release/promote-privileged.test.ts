@@ -19,11 +19,7 @@ import {
   stageRelease,
   swapCurrentSymlink,
 } from "./promote.ts";
-import {
-  readReleaseManifest,
-  releaseManifestPath,
-  type ReleaseManifestV1,
-} from "./deployment-json.ts";
+import type { ReleaseManifestV1 } from "./deployment-json.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -1203,24 +1199,19 @@ async function withStatDenied(
   }
 }
 
-function statRun(
-  stat: { success: boolean; stdout?: string; stderr?: string },
-  calls: string[][],
-) {
+function testRun(exists: boolean, calls: string[][]) {
   return (_command: string, args: string[]) => {
     calls.push(args);
-    if (args.includes("stat")) {
-      return Promise.resolve({
-        success: stat.success,
-        stdout: stat.stdout ?? "",
-        stderr: stat.stderr ?? "",
-      });
-    }
-    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+    const probe = args.includes("test");
+    return Promise.resolve({
+      success: probe ? exists : true,
+      stdout: "",
+      stderr: "",
+    });
   };
 }
 
-test("promoteExistingRelease stats a sealed release through tp-host when denied", async () => {
+test("promoteExistingRelease checks a denied release only for presence", async () => {
   await withTempRelease(async (root) => {
     const paths = resolveReleasePaths(
       { principalHomeRoot: root, daemonStateDir: join(root, "state") },
@@ -1232,129 +1223,43 @@ test("promoteExistingRelease stats a sealed release through tp-host when denied"
       const dir = await promoteExistingRelease({
         paths,
         releaseId: "rel-1",
-        // 0o040550: a directory, sealed.
-        runFn: statRun({ success: true, stdout: "4168\n" }, calls),
+        runFn: testRun(true, calls),
       });
       assertEquals(dir, paths.releaseDir);
     });
+    // tp-host's existing `test -e` is the only privileged look at the tree:
+    // nothing in it is read, opened, or stat'd for metadata.
+    assertEquals(calls[0], ["-n", "test", "-e", paths.releaseDir]);
     assertEquals(
       calls.some((args) =>
-        args.join(" ").endsWith(`stat -c %f -- ${paths.releaseDir}`)
+        args.includes("cat") || args.includes("stat") ||
+        args.includes("find") || args.includes("ls")
       ),
-      true,
+      false,
     );
     assertEquals(await Deno.readLink(paths.currentLink), "releases/rel-1");
   });
 });
 
-test("promoteExistingRelease still refuses an unsealed or missing tree via tp-host", async () => {
+test("promoteExistingRelease refuses a denied release that is absent", async () => {
   await withTempRelease(async (root) => {
     const paths = resolveReleasePaths(
       { principalHomeRoot: root, daemonStateDir: join(root, "state") },
       { username: "appuser", serviceId: "svc-1", releaseId: "rel-1" },
     );
+    const calls: string[][] = [];
     await withStatDenied(paths.releaseDir, async () => {
       await assertRejects(
         () =>
           promoteExistingRelease({
             paths,
             releaseId: "rel-1",
-            runFn: statRun({ success: true, stdout: "41e8" }, []),
-          }),
-        Error,
-        "not a sealed published release (mode 0750)",
-      );
-      await assertRejects(
-        () =>
-          promoteExistingRelease({
-            paths,
-            releaseId: "rel-1",
-            runFn: statRun({ success: true, stdout: "8168" }, []),
-          }),
-        Error,
-        "is not a directory",
-      );
-      await assertRejects(
-        () =>
-          promoteExistingRelease({
-            paths,
-            releaseId: "rel-1",
-            runFn: statRun({
-              success: false,
-              stderr: `tp-host: no such file ${paths.releaseDir}`,
-            }, []),
+            runFn: testRun(false, calls),
           }),
         Error,
         "is not present on this host",
       );
-      await assertRejects(
-        () =>
-          promoteExistingRelease({
-            paths,
-            releaseId: "rel-1",
-            runFn: statRun({ success: true, stdout: "garbage" }, []),
-          }),
-        Error,
-        "Unexpected stat output",
-      );
-      await assertRejects(
-        () =>
-          promoteExistingRelease({
-            paths,
-            releaseId: "rel-1",
-            runFn: statRun({ success: false, stderr: "tp-host: refusing" }, []),
-          }),
-        Error,
-        "tp-host: refusing",
-      );
     });
-  });
-});
-
-test("readReleaseManifest reads a sealed manifest through tp-host when denied", async () => {
-  await withTempRelease(async (root) => {
-    const releaseDir = join(root, "releases", "rel-1");
-    const manifestPath = releaseManifestPath(releaseDir);
-    const originalRead = Deno.readTextFile;
-    Deno.readTextFile = (path, ...rest) =>
-      String(path) === manifestPath
-        ? Promise.reject(denied("read"))
-        : originalRead(path, ...rest);
-    try {
-      const calls: string[][] = [];
-      const read = await readReleaseManifest(releaseDir, (_command, args) => {
-        calls.push(args);
-        return Promise.resolve({
-          success: true,
-          stdout: JSON.stringify(MANIFEST),
-          stderr: "",
-        });
-      });
-      assertEquals(read, MANIFEST);
-      assertEquals(calls, [["-n", "cat", "--", manifestPath]]);
-
-      const missing = await readReleaseManifest(
-        releaseDir,
-        () =>
-          Promise.resolve({
-            success: false,
-            stdout: "",
-            stderr: `tp-host: no such directory for ${manifestPath}`,
-          }),
-      );
-      assertEquals(missing, null);
-
-      await assertRejects(
-        () =>
-          readReleaseManifest(
-            releaseDir,
-            () => Promise.resolve({ success: false, stdout: "", stderr: "" }),
-          ),
-        Error,
-        `Failed to read release manifest ${manifestPath}`,
-      );
-    } finally {
-      Deno.readTextFile = originalRead;
-    }
+    assertEquals(calls, [["-n", "test", "-e", paths.releaseDir]]);
   });
 });

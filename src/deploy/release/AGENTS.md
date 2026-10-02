@@ -102,17 +102,28 @@ keep working unchanged, and the generation-supersede rule still applies. That
 branch skips `ensureReleaseTree`, the scratch dir, checkout, and build entirely
 — `ensureReleaseTree` in particular would `install -d` the sealed release back
 to staging mode and hand the runtime user a writable copy of the code it runs —
-and calls `promoteExistingRelease` (verify the tree exists and is sealed at
-`0550` → optional health probe → `swapCurrentSymlink`) instead of
-`promoteRelease`. Only the `release-promote` phase is emitted; there is no
-`fetch` or `build` line, because neither happened. A missing target directory
-**fails** rather than skipping: "the release you asked for was pruned on this
-host" is exactly what the operator needs told. `commitSha`, `standaloneOutput`,
-and `staticExport` in the returned `AppliedRelease` are read back from the
-target release's `.turbopanel/release.json` — the payload's `commitSha` is a
-placeholder on a rollback, and `staticExport` decides whether the service is
-supervised as a unit or served as files, so guessing it would put the service on
-the wrong lane.
+and calls `promoteExistingRelease` (verify the tree exists — and, where the
+daemon account can stat it, that it is sealed at `0550` → optional health probe
+→ `swapCurrentSymlink`) instead of `promoteRelease`. Only the `release-promote`
+phase is emitted; there is no `fetch` or `build` line, because neither happened.
+A missing target directory **fails** rather than skipping: "the release you
+asked for was pruned on this host" is exactly what the operator needs told.
+
+**A rollback trusts only the daemon's own release record.** Every successful
+promote — native or Railpack — leaves a copy of its manifest under the
+daemon-owned `<daemonStateDir>/release-records/` root
+(`resolveDaemonReleasePaths`); for the native lane it is written after the seal
+and swap succeed, so its existence is this host's statement that the release was
+published. `resolveRollbackTarget` reads that record and nothing else: the copy
+inside a native release tree sits in the principal's home, which the principal
+owns, so neither the lane (`imageTag`), the commit, nor the runtime shape is
+ever taken from it, and no privileged read of that tree exists. A release with
+no record (published before records were kept) **fails** with "redeploy that
+release" rather than falling back to the tree. `commitSha`, `standaloneOutput`,
+and `staticExport` in the returned `AppliedRelease` come from that record — the
+payload's `commitSha` is a placeholder on a rollback, and `staticExport` decides
+whether the service is supervised as a unit or served as files, so guessing it
+would put the service on the wrong lane.
 
 **Staged build, atomic promote** — the same staged-write / validated-cutover
 contract `compose-files.ts` uses for `compose.yaml`. The clone lands in an
@@ -293,10 +304,9 @@ is **not** host-native and never appears in `hostNativeComposeServiceNames()` /
 `sites[]` / `nativeAppServices[]`.
 
 **Rollback** rides the existing `rollbackToReleaseId` field with no new command
-type. Which root holds the target release identifies its lane: the record root
-is probed first, and a manifest carrying `imageTag` short-circuits the whole
-promote — no checkout, no build, no symlink swap, just that tag written back
-into compose. Probing the manifest rather than the payload's `build.kind` is
+type. The daemon record identifies the lane: a record carrying `imageTag`
+short-circuits the whole promote — no checkout, no build, no symlink swap, just that tag written back
+into compose. Reading the record rather than the payload's `build.kind` is
 what lets a service that switched build modes still roll back to a release built
 the old way.
 
