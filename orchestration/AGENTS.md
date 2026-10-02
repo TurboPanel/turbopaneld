@@ -55,6 +55,9 @@ fast-path when the binary is present and the service active. The role
   (`turbopanel_docker_deny_builder_entitlements`, default true), so the engine's own builder refuses a build that asks
   for either ("granting entitlement network.host is not allowed by build daemon configuration"), whatever the Docker
   gate sees. Other `builder` keys and entitlements are kept. A real diff restarts dockerd like any daemon.json change.
+  On a co-located instance host (never auto-restarted by the handler) a change leaves
+  `/etc/docker/turbopanel-restart-pending`; this and every later converge restart dockerd once the running dockerd
+  reports live-restore, then clear the marker, and otherwise warn that a restart is pending.
 - **Strict no-op when both are empty and nothing is being cleared** (and
   when `turbopanel_docker_manage_daemon_json: false`): `daemon-json.yml` is
   not even included, so an unrelated converge never reads, writes or

@@ -42,3 +42,6 @@ turbopanel_docker_manage_daemon_json: true  # noqa: var-naming[no-role-prefix]
 # operator's builder section alone. Changing daemon.json restarts dockerd
 # (live-restore keeps containers up) except on a co-located instance host.
 turbopanel_docker_deny_builder_entitlements: true  # noqa: var-naming[no-role-prefix]
+# Marker for a daemon.json change dockerd has not been restarted for (a
+# co-located instance host, where the handler never restarts it).
+turbopanel_docker_restart_pending_file: /etc/docker/turbopanel-restart-pending  # noqa: var-naming[no-role-prefix]

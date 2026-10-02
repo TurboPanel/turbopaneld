@@ -2553,3 +2553,33 @@ test("docker role denies the network.host and security.insecure build entitlemen
     true,
   );
 });
+
+test("a co-located instance host gets a pending dockerd restart, applied once live-restore is running", async () => {
+  const roleDir = join(CHECKOUT_ORCHESTRATION_DIR, "roles/docker");
+  const daemonJson = await Deno.readTextFile(
+    join(roleDir, "tasks/daemon-json.yml"),
+  );
+  const defaults = await Deno.readTextFile(join(roleDir, "defaults/main.yml"));
+  assertEquals(
+    defaults.includes(
+      "turbopanel_docker_restart_pending_file: /etc/docker/turbopanel-restart-pending",
+    ),
+    true,
+  );
+  for (
+    const name of [
+      "Mark a dockerd restart pending on a co-located instance host",
+      "Ask the running dockerd whether live-restore is in effect",
+      "Restart dockerd now that live-restore keeps containers running",
+      "Clear the pending dockerd restart",
+      "Warn that dockerd still needs a restart",
+    ]
+  ) {
+    assertEquals(daemonJson.includes(`- name: ${name}`), true, name);
+  }
+  assertEquals(
+    daemonJson.includes("register: _docker_daemon_json_write"),
+    true,
+  );
+  assertEquals(daemonJson.includes(".LiveRestoreEnabled"), true);
+});
