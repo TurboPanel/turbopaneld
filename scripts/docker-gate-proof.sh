@@ -286,9 +286,12 @@ if [[ -n "$SHARED_TRAEFIK" ]]; then
   ROUTE_SINCE=$(date +%s)
   if start_route_app tpgate-proof-route "$ROUTE_HOST" "$SHARED_NET" && route_answers "$ROUTE_HOST"; then pass "a labelled app is routed by the shared Traefik on the gate"; else fail "the labelled app is not routed by the shared Traefik"; fi
   if _tlog=$(docker logs --since "$ROUTE_SINCE" "$SHARED_TRAEFIK" 2>&1); then
-    if printf '%s\n' "$_tlog" | grep -iE 'provider connection error|providerName=docker' | grep -qE ' ERR |level=error|"level":"error"'; then
+    # Only the provider's own connection failures: a tenant label naming a
+    # missing entrypoint is a config error, not a gate one.
+    _perr='Provider (connection )?error|Failed to retrieve information of the docker client|Error response from daemon|cannot connect to the Docker daemon'
+    if printf '%s\n' "$_tlog" | grep -qiE "$_perr"; then
       fail "Traefik logged a Docker provider error (see below)"
-      printf '%s\n' "$_tlog" | grep -iE 'provider connection error|providerName=docker' | head -5
+      printf '%s\n' "$_tlog" | grep -iE "$_perr" | head -5
     else
       pass "Traefik logged no Docker provider error"
     fi
