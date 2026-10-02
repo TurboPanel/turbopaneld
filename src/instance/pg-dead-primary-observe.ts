@@ -16,8 +16,12 @@
  *   `managed-ha-probe-v1` (an older one would fail over whatever member it
  *   currently calls primary, without checking who reported);
  * - suppressed while a platform intent marker is active (`ha-intent.ts`);
- * - never sends after `detach()` (daemon SIGTERM) or while systemd reports
- *   the host `stopping`.
+ * - never sends after `detach()` (daemon SIGTERM) or unless systemd positively
+ *   reports the host `running`/`degraded` (2 s timeout, fails closed);
+ * - streaks/graces/back-off run on a monotonic clock; a tick gap over 3
+ *   intervals, attach and detach all reset the streaks;
+ * - a held stop/destroy marker is released (and logged) after the engine has
+ *   been healthy for 10 minutes; a transient marker's expiry is logged.
  */
 
 import { logInfo, logWarn, sanitizeForLog } from "../util/logger.ts";
@@ -28,9 +32,11 @@ import {
   type ManagedHaMemberRecord,
 } from "../managed/ha-member.ts";
 import {
+  clearManagedIntent,
   HOST_WIDE_INTENT_ID,
-  isManagedIntentActive,
-  readManagedIntent,
+  isHeldIntent,
+  isIntentLookupActive,
+  lookupManagedIntent,
 } from "../managed/ha-intent.ts";
 import {
   DeadPrimaryDetector,
@@ -51,6 +57,12 @@ const DOCKER_STILL_BUSY: ProbeSample = {
   },
 };
 
+/** A held stop/destroy is released after the engine is healthy this long. */
+export const HELD_INTENT_HEALTHY_RELEASE_MS = 10 * 60_000;
+/** A tick gap above this many intervals (suspend, stall) resets streaks. */
+const GAP_RESET_INTERVALS = 3;
+const SYSTEMCTL_TIMEOUT_MS = 2_000;
+
 export type PgDeadPrimaryEventMessage = {
   type: "managed-ha-event";
   managedId: string;
@@ -60,22 +72,34 @@ export type PgDeadPrimaryEventMessage = {
   at: string;
 };
 
+export type IntentState = {
+  /** A marker (cluster or host-wide) suppresses the probe. */
+  active: boolean;
+  /** The CLUSTER marker is a held stop/destroy (eligible for auto-release). */
+  heldClusterMarker: boolean;
+};
+
 export type PgDeadPrimaryObserverOptions = {
   /** Returns true only when the event reached an open socket. */
   send: (message: PgDeadPrimaryEventMessage) => boolean;
   /** Control plane advertised `managed-ha-probe-v1`. */
   peerSupportsProbe: () => boolean;
   config?: Partial<PgDeadPrimaryConfig>;
-  nowMs?: () => number;
+  /** Monotonic ms for streaks/graces/back-off. Defaults to `performance.now`. */
+  monoMs?: () => number;
+  /** Wall ms for marker expiry, Docker `StartedAt` and the event `at`. */
+  wallMs?: () => number;
   /** Test seam — defaults to the `TURBOPANEL_MANAGED_PG_PROBE` env switch. */
   globallyEnabled?: () => boolean;
   /** Test seam — defaults to {@link listManagedHaMembers}. */
   listMembers?: () => Promise<ManagedHaMemberRecord[]>;
   /** Test seam — defaults to {@link sampleManagedPostgres}. */
   sample?: (containerName: string) => Promise<ProbeSample>;
-  /** Test seam — defaults to the on-disk/in-memory intent marker. */
-  intentActive?: (managedId: string, nowMs: number) => Promise<boolean>;
-  /** Test seam — defaults to `systemctl is-system-running` == `stopping`. */
+  /** Test seam — defaults to the cluster + host-wide intent markers. */
+  intentState?: (managedId: string, wallMs: number) => Promise<IntentState>;
+  /** Test seam — defaults to {@link clearManagedIntent}. */
+  releaseHeld?: (managedId: string, reason: string) => Promise<void>;
+  /** Test seam — defaults to {@link systemdHostBlocksEmit} (fails closed). */
   hostStopping?: () => Promise<boolean>;
   runDocker?: RunDockerFn;
   layout?: LayoutPaths;
@@ -93,44 +117,73 @@ export function isWatchedPrimary(record: ManagedHaMemberRecord): boolean {
     record.replicaPeerCount > 0;
 }
 
-export async function systemdHostStopping(): Promise<boolean> {
+/**
+ * True unless systemd positively reports `running` or `degraded`. Fails
+ * closed: a timeout, a missing `systemctl`, `starting`, `stopping` or any
+ * other state blocks sending.
+ */
+export async function systemdHostBlocksEmit(
+  timeoutMs: number = SYSTEMCTL_TIMEOUT_MS,
+): Promise<boolean> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const out = await new Deno.Command("systemctl", {
       args: ["is-system-running"],
       stdout: "piped",
       stderr: "null",
+      signal: controller.signal,
     }).output();
-    return new TextDecoder().decode(out.stdout).trim() === "stopping";
+    const state = new TextDecoder().decode(out.stdout).trim();
+    return state !== "running" && state !== "degraded";
   } catch {
-    return false;
+    return true;
+  } finally {
+    clearTimeout(timer);
   }
+}
+
+type ClusterWatch = {
+  detector: DeadPrimaryDetector;
+  intentWasActive: boolean;
+  healthySinceMono: number | null;
+};
+
+function isHealthySample(sample: ProbeSample): boolean {
+  return sample.container.kind === "present" &&
+    sample.container.state.status === "running" &&
+    sample.pgReady?.kind === "exit" && sample.pgReady.code === 0;
 }
 
 export class PgDeadPrimaryObserver {
   readonly #config: PgDeadPrimaryConfig;
   readonly #send: PgDeadPrimaryObserverOptions["send"];
   readonly #peerSupportsProbe: () => boolean;
-  readonly #nowMs: () => number;
+  readonly #monoMs: () => number;
+  readonly #wallMs: () => number;
   readonly #globallyEnabled: () => boolean;
   readonly #listMembers: () => Promise<ManagedHaMemberRecord[]>;
   readonly #sample: (containerName: string) => Promise<ProbeSample>;
-  readonly #intentActive: (
+  readonly #intentState: (
     managedId: string,
-    nowMs: number,
-  ) => Promise<boolean>;
+    wallMs: number,
+  ) => Promise<IntentState>;
+  readonly #releaseHeld: (managedId: string, reason: string) => Promise<void>;
   readonly #hostStopping: () => Promise<boolean>;
-  readonly #detectors = new Map<string, DeadPrimaryDetector>();
+  readonly #watches = new Map<string, ClusterWatch>();
   /** Docker CLI calls still running per container (a timeout does not kill them). */
   readonly #dockerInFlight = new Map<string, number>();
   #timer: ReturnType<typeof setInterval> | undefined;
   #inFlight = false;
   #stopped = true;
+  #lastPollMono: number | null = null;
 
   constructor(options: PgDeadPrimaryObserverOptions) {
     this.#config = { ...DEFAULT_PG_DEAD_PRIMARY_CONFIG, ...options.config };
     this.#send = options.send;
     this.#peerSupportsProbe = options.peerSupportsProbe;
-    this.#nowMs = options.nowMs ?? (() => Date.now());
+    this.#monoMs = options.monoMs ?? (() => performance.now());
+    this.#wallMs = options.wallMs ?? (() => Date.now());
     this.#globallyEnabled = options.globallyEnabled ??
       (() =>
         pgProbeGloballyEnabled(Deno.env.get("TURBOPANEL_MANAGED_PG_PROBE")));
@@ -141,16 +194,24 @@ export class PgDeadPrimaryObserver {
     this.#sample = options.sample ??
       ((name) =>
         sampleManagedPostgres(name, this.#trackedRun(name, run), this.#config));
-    this.#intentActive = options.intentActive ??
-      (async (managedId, nowMs) => {
+    this.#intentState = options.intentState ??
+      (async (managedId, wallMs) => {
         const stateDir = layout().stateDir;
-        const intents = await Promise.all([
-          readManagedIntent(stateDir, managedId),
-          readManagedIntent(stateDir, HOST_WIDE_INTENT_ID),
+        const [cluster, host] = await Promise.all([
+          lookupManagedIntent(stateDir, managedId),
+          lookupManagedIntent(stateDir, HOST_WIDE_INTENT_ID),
         ]);
-        return intents.some((intent) => isManagedIntentActive(intent, nowMs));
+        return {
+          active: isIntentLookupActive(cluster, wallMs) ||
+            isIntentLookupActive(host, wallMs),
+          heldClusterMarker: isHeldIntent(cluster),
+        };
       });
-    this.#hostStopping = options.hostStopping ?? systemdHostStopping;
+    this.#releaseHeld = options.releaseHeld ??
+      ((managedId, reason) =>
+        clearManagedIntent(layout().stateDir, managedId, reason));
+    this.#hostStopping = options.hostStopping ??
+      (() => systemdHostBlocksEmit());
   }
 
   attach(): void {
@@ -164,10 +225,20 @@ export class PgDeadPrimaryObserver {
   /** Stops polling AND blocks any send from a tick already in flight. */
   detach(): void {
     this.#stopped = true;
+    this.#resetStreaks();
     if (this.#timer !== undefined) {
       clearInterval(this.#timer);
       this.#timer = undefined;
     }
+  }
+
+  /** Forget every failure run (keeps incident/back-off so nothing re-fires). */
+  #resetStreaks(): void {
+    for (const watch of this.#watches.values()) {
+      watch.detector.resetStreak();
+      watch.healthySinceMono = null;
+    }
+    this.#lastPollMono = null;
   }
 
   /**
@@ -189,13 +260,17 @@ export class PgDeadPrimaryObserver {
     };
   }
 
-  #detectorFor(managedId: string): DeadPrimaryDetector {
-    let detector = this.#detectors.get(managedId);
-    if (!detector) {
-      detector = new DeadPrimaryDetector(this.#config);
-      this.#detectors.set(managedId, detector);
+  #watchFor(managedId: string): ClusterWatch {
+    let watch = this.#watches.get(managedId);
+    if (!watch) {
+      watch = {
+        detector: new DeadPrimaryDetector(this.#config),
+        intentWasActive: false,
+        healthySinceMono: null,
+      };
+      this.#watches.set(managedId, watch);
     }
-    return detector;
+    return watch;
   }
 
   /** One tick. Never overlaps itself; never throws. */
@@ -211,39 +286,92 @@ export class PgDeadPrimaryObserver {
     }
   }
 
+  /** A stalled loop (suspend, starved event loop) must not stitch a streak. */
+  #noteTickGap(): void {
+    const mono = this.#monoMs();
+    const last = this.#lastPollMono;
+    if (
+      last !== null &&
+      mono - last > GAP_RESET_INTERVALS * this.#config.intervalMs
+    ) {
+      this.#resetStreaks();
+      logInfo(
+        "managed",
+        `pg dead-primary probe: ${
+          Math.round(mono - last)
+        } ms tick gap, streaks reset`,
+      );
+    }
+    this.#lastPollMono = mono;
+  }
+
   async #pollOnce(): Promise<void> {
     if (!this.#globallyEnabled()) {
-      this.#detectors.clear();
+      this.#watches.clear();
       return;
     }
+    this.#noteTickGap();
     const watched = (await this.#listMembers()).filter(isWatchedPrimary);
     const ids = new Set(watched.map((record) => record.managedId));
-    for (const id of this.#detectors.keys()) {
-      if (!ids.has(id)) this.#detectors.delete(id);
+    for (const id of this.#watches.keys()) {
+      if (!ids.has(id)) this.#watches.delete(id);
     }
     await Promise.all(watched.map((record) => this.#probeOne(record)));
   }
 
+  async #trackIntent(
+    record: ManagedHaMemberRecord,
+    watch: ClusterWatch,
+    sample: ProbeSample,
+    intent: IntentState,
+  ): Promise<void> {
+    const mono = this.#monoMs();
+    if (watch.intentWasActive && !intent.active) {
+      logInfo(
+        "managed",
+        `intent marker expired managedId=${record.managedId}; probe re-armed`,
+      );
+    }
+    watch.intentWasActive = intent.active;
+    if (!intent.heldClusterMarker || !isHealthySample(sample)) {
+      watch.healthySinceMono = null;
+      return;
+    }
+    watch.healthySinceMono ??= mono;
+    if (mono - watch.healthySinceMono < HELD_INTENT_HEALTHY_RELEASE_MS) return;
+    watch.healthySinceMono = null;
+    await this.#releaseHeld(
+      record.managedId,
+      `engine healthy for ${HELD_INTENT_HEALTHY_RELEASE_MS / 60_000} min`,
+    );
+  }
+
   async #probeOne(record: ManagedHaMemberRecord): Promise<void> {
-    const detector = this.#detectorFor(record.managedId);
+    const watch = this.#watchFor(record.managedId);
     const sample = this.#dockerInFlight.has(record.containerName)
       ? DOCKER_STILL_BUSY
       : await this.#sample(record.containerName);
-    const nowMs = this.#nowMs();
-    const intentActive = await this.#intentActive(record.managedId, nowMs);
-    const verdict = detector.step(sample, { nowMs, intentActive });
+    const wallMs = this.#wallMs();
+    const intent = await this.#intentState(record.managedId, wallMs);
+    await this.#trackIntent(record, watch, sample, intent);
+    const monoMs = this.#monoMs();
+    const verdict = watch.detector.step(sample, {
+      nowMs: monoMs,
+      wallMs,
+      intentActive: intent.active,
+    });
     if (!verdict.fire) return;
-    if (!(await this.#mayEmit(record, detector))) return;
+    if (!(await this.#mayEmit(record, watch.detector))) return;
     const delivered = this.#send({
       type: "managed-ha-event",
       managedId: record.managedId,
       sourceMemberId: record.memberId,
       detector: POSTGRES_PROBE_DETECTOR,
       evidence: verdict.evidence,
-      at: new Date(nowMs).toISOString(),
+      at: new Date(this.#wallMs()).toISOString(),
     });
     if (!delivered) return;
-    detector.markEmitted(nowMs);
+    watch.detector.markEmitted(monoMs);
     logInfo(
       "managed",
       `managed-ha-event emitted managedId=${record.managedId} detector=${POSTGRES_PROBE_DETECTOR} failures=${verdict.evidence.failures}`,
@@ -259,13 +387,13 @@ export class PgDeadPrimaryObserver {
       detector.resetStreak();
       logInfo(
         "managed",
-        `pg dead-primary suppressed (host stopping) managedId=${record.managedId}`,
+        `pg dead-primary suppressed (host not confirmed running) managedId=${record.managedId}`,
       );
       return false;
     }
     if (!this.#peerSupportsProbe()) {
       // Close the incident locally so this logs once, not every tick.
-      detector.markEmitted(this.#nowMs());
+      detector.markEmitted(this.#monoMs());
       logWarn(
         "managed",
         `pg dead-primary detected but control plane lacks managed-ha-probe-v1; not sent managedId=${record.managedId}`,

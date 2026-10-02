@@ -27,12 +27,17 @@
  *   `pg_controldata` says "in crash recovery"; "in archive recovery" means
  *   this node is a standby, so the probe never fires;
  * - "no response" right after a container (re)start is soft for
- *   `startGraceMs` (the postmaster is not listening yet);
+ *   `startGraceMs` (the postmaster is not listening yet); later it is hard
+ *   only when `pg_ctl status` confirms the postmaster is gone, otherwise
+ *   soft for `unresponsiveGraceMs` (an overloaded primary is not dead);
+ * - a failed `pg_controldata` read keeps the long crash-recovery grace;
  * - one event per incident, a new incident no sooner than `backoffMs` after
  *   the last event, reset when the primary answers again.
  *
- * Only read-only probes run: `docker inspect`, `pg_isready`,
- * `pg_controldata`. No SQL, no credentials (the image's local socket).
+ * Only read-only probes run, as the `postgres` user: `docker inspect`,
+ * `pg_isready`, `pg_ctl status`, `pg_controldata`. No SQL, no credentials
+ * (the image's local socket). Streaks, graces and back-off use a monotonic
+ * clock; only Docker's `StartedAt` is compared with wall time.
  */
 
 import type {
@@ -52,6 +57,12 @@ export type PgDeadPrimaryConfig = {
   rejectingGraceMs: number;
   crashRecoveryGraceMs: number;
   startGraceMs: number;
+  /**
+   * A RUNNING container whose postmaster is still there (or cannot be read)
+   * but does not answer `pg_isready` (exit 2: overloaded, wedged, slow
+   * accept): soft this long. Only a postmaster confirmed gone is hard fast.
+   */
+  unresponsiveGraceMs: number;
   backoffMs: number;
   dockerTimeoutMs: number;
   pgReadyTimeoutSeconds: number;
@@ -64,6 +75,7 @@ export const DEFAULT_PG_DEAD_PRIMARY_CONFIG: Readonly<PgDeadPrimaryConfig> = {
   rejectingGraceMs: 10 * 60_000,
   crashRecoveryGraceMs: 30 * 60_000,
   startGraceMs: 60_000,
+  unresponsiveGraceMs: 5 * 60_000,
   backoffMs: 5 * 60_000,
   dockerTimeoutMs: 10_000,
   pgReadyTimeoutSeconds: 3,
@@ -95,12 +107,18 @@ export type ControlDataState =
   | "shut down"
   | "shut down in recovery"
   | "shutting down"
-  | "unknown";
+  | "unknown"
+  /** `pg_controldata` failed or timed out. */
+  | "unreadable";
+
+/** `pg_ctl status`: 0 running, 3 not running; anything else unknown. */
+export type PostmasterState = "running" | "stopped" | "unknown";
 
 export type ProbeSample = {
   container: ContainerRead;
   pgReady?: PgReadyRead;
   controlData?: ControlDataState;
+  postmaster?: PostmasterState;
 };
 
 export type Observation =
@@ -126,6 +144,38 @@ function containerAgeMs(state: ContainerSnapshot, nowMs: number): number {
   return Number.isFinite(started) ? nowMs - started : Number.POSITIVE_INFINITY;
 }
 
+const CRASH_RECOVERY_GRACE_STATES: ReadonlySet<ControlDataState> = new Set<
+  ControlDataState
+>(["in crash recovery", "unknown", "unreadable"]);
+
+function classifyNoResponse(
+  sample: ProbeSample,
+  state: ContainerSnapshot,
+  wallMs: number,
+  config: PgDeadPrimaryConfig,
+): Observation {
+  if (containerAgeMs(state, wallMs) < config.startGraceMs) {
+    return {
+      kind: "soft",
+      reason: "postgres not answering yet after container start",
+      graceMs: config.startGraceMs,
+    };
+  }
+  if (sample.postmaster === "stopped") {
+    return {
+      kind: "hard",
+      reason: "postgres not answering and postmaster gone",
+    };
+  }
+  return {
+    kind: "soft",
+    reason: `postgres not answering (pg_isready 2), postmaster ${
+      sample.postmaster ?? "unknown"
+    }`,
+    graceMs: config.unresponsiveGraceMs,
+  };
+}
+
 function classifyRejecting(
   sample: ProbeSample,
   config: PgDeadPrimaryConfig,
@@ -133,10 +183,14 @@ function classifyRejecting(
   if (sample.controlData === "in archive recovery") {
     return { kind: "not-primary", reason: "engine is in archive recovery" };
   }
-  if (sample.controlData === "in crash recovery") {
+  // Crash recovery, or no reading at all: assume the long recovery grace.
+  // A failed pg_controldata must never shorten the grace mid-recovery.
+  if (CRASH_RECOVERY_GRACE_STATES.has(sample.controlData ?? "unreadable")) {
     return {
       kind: "soft",
-      reason: "postgres in crash recovery (57P03)",
+      reason: `postgres rejecting connections (57P03), control data: ${
+        sample.controlData ?? "not read"
+      }`,
       graceMs: config.crashRecoveryGraceMs,
     };
   }
@@ -162,16 +216,7 @@ function classifyPgReady(
   }
   if (ready.code === 0) return { kind: "healthy" };
   if (ready.code === 1) return classifyRejecting(sample, config);
-  if (ready.code === 2) {
-    if (containerAgeMs(state, nowMs) < config.startGraceMs) {
-      return {
-        kind: "soft",
-        reason: "postgres not answering yet after container start",
-        graceMs: config.startGraceMs,
-      };
-    }
-    return { kind: "hard", reason: "postgres not answering (pg_isready 2)" };
-  }
+  if (ready.code === 2) return classifyNoResponse(sample, state, nowMs, config);
   // 3 = no attempt (bad parameters); 125-127 = docker exec plumbing.
   return {
     kind: "inconclusive",
@@ -179,7 +224,7 @@ function classifyPgReady(
   };
 }
 
-/** Pure: one sample → one observation. */
+/** Pure: one sample → one observation. `nowMs` is WALL time (container start). */
 export function classifyProbeSample(
   sample: ProbeSample,
   nowMs: number,
@@ -222,7 +267,13 @@ export type DeadPrimaryEvidence = {
 };
 
 export type DetectorStepContext = {
+  /**
+   * MONOTONIC ms (`performance.now()`): streaks, graces and back-off. A wall
+   * clock step must never shorten or stretch them.
+   */
   nowMs: number;
+  /** Wall-clock ms, only for comparing with Docker's `StartedAt`. */
+  wallMs?: number;
   /** A platform action holds an intent marker for this cluster. */
   intentActive: boolean;
 };
@@ -321,7 +372,11 @@ export class DeadPrimaryDetector {
       this.#lastContainer = sample.container.state;
     }
     this.#apply(
-      classifyProbeSample(sample, context.nowMs, this.#config),
+      classifyProbeSample(
+        sample,
+        context.wallMs ?? context.nowMs,
+        this.#config,
+      ),
       context.nowMs,
     );
     if (!this.#canFire(context.nowMs)) return { fire: false };
@@ -440,6 +495,8 @@ export async function readPgReady(
   const result = await withTimeout<DockerCliResult | null>(
     run([
       "exec",
+      "-u",
+      "postgres",
       containerName,
       "pg_isready",
       "-q",
@@ -491,12 +548,40 @@ export async function readControlData(
   timeoutMs: number,
 ): Promise<ControlDataState> {
   const result = await withTimeout<DockerCliResult | null>(
-    run(["exec", "-e", "LC_ALL=C", containerName, "pg_controldata"]),
+    run([
+      "exec",
+      "-u",
+      "postgres",
+      "-e",
+      "LC_ALL=C",
+      containerName,
+      "pg_controldata",
+    ]),
     timeoutMs,
     () => null,
   );
-  if (!result?.success) return "unknown";
+  if (!result?.success) return "unreadable";
   return parseControlDataState(result.stdout);
+}
+
+/** `pg_ctl status` (read-only; PGDATA from the image env). */
+export async function readPostmaster(
+  containerName: string,
+  run: RunDockerFn,
+  timeoutMs: number,
+): Promise<PostmasterState> {
+  const result = await withTimeout<DockerCliResult | null>(
+    run(["exec", "-u", "postgres", containerName, "pg_ctl", "status"]),
+    timeoutMs,
+    () => null,
+  );
+  if (!result) return "unknown";
+  if (result.code === 0) return "running";
+  // 3 = "no server running"; only trust it when Docker itself said nothing.
+  if (result.code === 3 && !/error response from daemon/i.test(result.stderr)) {
+    return "stopped";
+  }
+  return "unknown";
 }
 
 /** One full sample: container first, Postgres only when it is running. */
@@ -514,6 +599,14 @@ export async function sampleManagedPostgres(
     return { container };
   }
   const pgReady = await readPgReady(containerName, run, config);
+  if (pgReady.kind === "exit" && pgReady.code === 2) {
+    const postmaster = await readPostmaster(
+      containerName,
+      run,
+      config.dockerTimeoutMs,
+    );
+    return { container, pgReady, postmaster };
+  }
   if (pgReady.kind !== "exit" || pgReady.code !== 1) {
     return { container, pgReady };
   }

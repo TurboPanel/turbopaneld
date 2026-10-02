@@ -8,7 +8,9 @@ import {
   parseInspectState,
   type ProbeSample,
   readContainerState,
+  readControlData,
   readPgReady,
+  readPostmaster,
   sampleManagedPostgres,
 } from "./pg-dead-primary.ts";
 
@@ -132,7 +134,11 @@ test("unreadable docker state never fires and resets the streak", () => {
 test("57P03 rejecting is soft for the grace, then counts", () => {
   const detector = new DeadPrimaryDetector();
   const graceTicks = CONFIG.rejectingGraceMs / CONFIG.intervalMs;
-  const fired = runUntilFire(detector, () => REJECTING, 2_000);
+  const inProduction: ProbeSample = {
+    ...REJECTING,
+    controlData: "in production",
+  };
+  const fired = runUntilFire(detector, () => inProduction, 2_000);
   assertEquals(fired, graceTicks + CONFIG.failureThreshold - 1);
 });
 
@@ -171,8 +177,19 @@ test("no response right after a container (re)start is soft", () => {
     pgReady: { kind: "exit", code: 2, output: "" },
   };
   assertEquals(classifyProbeSample(sample, T0 + 10_000).kind, "soft");
+  // Past the start grace: hard only once the postmaster is confirmed gone.
+  const later = T0 + CONFIG.startGraceMs;
+  assertEquals(classifyProbeSample(sample, later).kind, "soft");
   assertEquals(
-    classifyProbeSample(sample, T0 + CONFIG.startGraceMs).kind,
+    classifyProbeSample({ ...sample, postmaster: "running" }, later).kind,
+    "soft",
+  );
+  assertEquals(
+    classifyProbeSample({ ...sample, postmaster: "unknown" }, later).kind,
+    "soft",
+  );
+  assertEquals(
+    classifyProbeSample({ ...sample, postmaster: "stopped" }, later).kind,
     "hard",
   );
 });
@@ -337,8 +354,7 @@ test("readPgReady: docker stderr is never an engine verdict", async () => {
 /** The program a recorded Docker call runs: `inspect`, or the exec'd binary. */
 function probeBinary(args: string[]): string | undefined {
   if (args[0] === "inspect") return "inspect";
-  if (args[1] === "-e") return args[4];
-  return args[2];
+  return args[args.indexOf("c-1") + 1];
 }
 
 test("sampleManagedPostgres runs read-only probes only", async () => {
@@ -373,5 +389,77 @@ test("sampleManagedPostgres runs read-only probes only", async () => {
   assertEquals(binaries, ["inspect", "pg_isready", "pg_controldata"]);
   for (const args of calls) {
     assert(!args.some((arg) => /password|psql/i.test(arg)));
+    if (args[0] === "exec") {
+      assertEquals(args.slice(1, 3), ["-u", "postgres"]);
+    }
   }
+});
+
+test("exit 2 on a live, overloaded primary (postmaster running) does not fire quickly", () => {
+  const overloaded: ProbeSample = {
+    container: { kind: "present", state: running() },
+    pgReady: { kind: "exit", code: 2, output: "" },
+    postmaster: "running",
+  };
+  const detector = new DeadPrimaryDetector();
+  // 4.5 minutes of "no response" while the postmaster is there: no event.
+  assertEquals(runUntilFire(detector, () => overloaded, 54), -1);
+  // Past the unresponsive grace it is treated as dead.
+  const graceTicks = CONFIG.unresponsiveGraceMs / CONFIG.intervalMs;
+  assertEquals(
+    runUntilFire(new DeadPrimaryDetector(), () => overloaded, 1_000),
+    graceTicks + CONFIG.failureThreshold - 1,
+  );
+});
+
+test("exit 2 with the postmaster confirmed gone fires after N failures", () => {
+  const gone: ProbeSample = {
+    container: { kind: "present", state: running() },
+    pgReady: { kind: "exit", code: 2, output: "" },
+    postmaster: "stopped",
+  };
+  assertEquals(
+    runUntilFire(new DeadPrimaryDetector(), () => gone, 100),
+    CONFIG.failureThreshold - 1,
+  );
+});
+
+test("pg_controldata failing mid-recovery keeps the long crash-recovery grace", () => {
+  const failingRead: ProbeSample = { ...REJECTING, controlData: "unreadable" };
+  const detector = new DeadPrimaryDetector();
+  // 25 minutes: well past the 10 min rejecting grace.
+  assertEquals(runUntilFire(detector, () => failingRead, 300), -1);
+  const mixed = (i: number): ProbeSample =>
+    i % 2 === 0
+      ? { ...REJECTING, controlData: "in crash recovery" }
+      : failingRead;
+  assertEquals(runUntilFire(new DeadPrimaryDetector(), mixed, 300), -1);
+});
+
+test("readPostmaster: pg_ctl 0 running, 3 stopped, docker errors unknown", async () => {
+  const result = (code: number, stderr = "") => () =>
+    Promise.resolve({ success: code === 0, code, stdout: "", stderr });
+  assertEquals(await readPostmaster("c-1", result(0), 1_000), "running");
+  assertEquals(await readPostmaster("c-1", result(3), 1_000), "stopped");
+  assertEquals(
+    await readPostmaster(
+      "c-1",
+      result(3, "Error response from daemon: container is not running"),
+      1_000,
+    ),
+    "unknown",
+  );
+  assertEquals(await readPostmaster("c-1", result(4), 1_000), "unknown");
+});
+
+test("readControlData: a failed or hung read is 'unreadable', never 'in production'", async () => {
+  assertEquals(
+    await readControlData(
+      "c-1",
+      () =>
+        Promise.resolve({ success: false, code: 1, stdout: "", stderr: "x" }),
+      1_000,
+    ),
+    "unreadable",
+  );
 });

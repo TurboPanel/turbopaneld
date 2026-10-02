@@ -19,6 +19,7 @@ import type {
 } from "../contracts/commands-contracts.ts";
 import { logWarn, sanitizeForLog } from "../util/logger.ts";
 import { managedDir, SAFE_MANAGED_ID_RE } from "./engine-paths.ts";
+import { writeFileAtomic } from "./ha-intent.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 
 export type ManagedHaMemberRecord = {
@@ -63,10 +64,9 @@ async function writeRecord(
   layout: LayoutPaths,
   record: ManagedHaMemberRecord,
 ): Promise<void> {
-  await Deno.writeTextFile(
+  await writeFileAtomic(
     managedHaMemberPath(layout, record.managedId),
     `${JSON.stringify(record)}\n`,
-    { mode: 0o600 },
   );
 }
 

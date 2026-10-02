@@ -41,6 +41,7 @@ import {
   endManagedCommandIntent,
   noteManagedApplySucceeded,
   noteManagedDestroySucceeded,
+  noteManagedFailoverSucceeded,
   noteManagedPromoteSucceeded,
 } from "../managed/ha-command-hooks.ts";
 import {
@@ -220,6 +221,7 @@ export async function handleCommandDispatch(
     message.commandType,
     message.payload,
   );
+  let commandSucceeded = false;
 
   try {
     let ok: boolean;
@@ -474,6 +476,7 @@ export async function handleCommandDispatch(
           daemonReceivedAt,
           { decryptSecrets: deps?.decryptSecrets },
         );
+        await noteManagedFailoverSucceeded(payload);
         ok = true;
         daemonRespondedAt = new Date().toISOString();
         break;
@@ -518,6 +521,7 @@ export async function handleCommandDispatch(
         break;
     }
 
+    commandSucceeded = ok;
     sendOutcome(ws, {
       type: "command-outcome",
       id: message.id,
@@ -540,7 +544,7 @@ export async function handleCommandDispatch(
       daemonRespondedAt,
     });
   } finally {
-    await endManagedCommandIntent(managedIntent);
+    await endManagedCommandIntent(managedIntent, commandSucceeded);
     // Transcript upload is never load-bearing — finalize() never throws.
     await logSink.finalize();
   }

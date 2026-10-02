@@ -7,6 +7,7 @@ import {
   PgDeadPrimaryObserver,
   type PgDeadPrimaryObserverOptions,
   pgProbeGloballyEnabled,
+  systemdHostBlocksEmit,
 } from "./pg-dead-primary-observe.ts";
 
 /**
@@ -59,14 +60,17 @@ function harness(
     },
     peerSupportsProbe: () => true,
     config: { intervalMs: 3_600_000 },
-    nowMs: () => clock.now,
+    monoMs: () => clock.now,
+    wallMs: () => clock.now,
     globallyEnabled: () => true,
     listMembers: () => Promise.resolve(members),
     sample: (name) => {
       sampled.push(name);
       return Promise.resolve(DEAD);
     },
-    intentActive: () => Promise.resolve(false),
+    intentState: () =>
+      Promise.resolve({ active: false, heldClusterMarker: false }),
+    releaseHeld: () => Promise.resolve(),
     hostStopping: () => Promise.resolve(false),
     ...overrides,
   });
@@ -112,7 +116,10 @@ test("dead primary emits one managed-ha-event with detector and evidence", async
 });
 
 test("active intent marker suppresses the event", async () => {
-  const h = harness({ intentActive: () => Promise.resolve(true) });
+  const h = harness({
+    intentState: () =>
+      Promise.resolve({ active: true, heldClusterMarker: false }),
+  });
   await withAttached(h, () => pollTicks(h, 50));
   assertEquals(h.sent.length, 0);
 });
@@ -227,4 +234,127 @@ test("a hung docker call is not stacked: later ticks are inconclusive", async ()
   await hung.catch(() => undefined);
   assertEquals(calls.length, 1);
   assertEquals(h.sent.length, 0);
+});
+
+const HEALTHY: ProbeSample = {
+  container: {
+    kind: "present",
+    state: {
+      status: "running",
+      exitCode: 0,
+      restartCount: 0,
+      startedAt: "2026-09-01T00:00:00Z",
+    },
+  },
+  pgReady: { kind: "exit", code: 0, output: "" },
+};
+
+test("reattach discards a stale streak (5 failures, reconnect, 1 failure: no event)", async () => {
+  const h = harness();
+  h.observer.attach();
+  await pollTicks(h, 5);
+  h.observer.attach(); // reconnect: attach() detaches first
+  try {
+    await pollTicks(h, 1);
+    assertEquals(h.sent.length, 0);
+    await pollTicks(h, 5);
+    assertEquals(h.sent.length, 1);
+  } finally {
+    h.observer.detach();
+  }
+});
+
+test("a tick gap over 3 intervals resets the streak", async () => {
+  const h = harness({ config: { intervalMs: 5_000 } });
+  await withAttached(h, async () => {
+    await pollTicks(h, 5);
+    h.clock.now += 60_000; // suspended / stalled loop
+    await pollTicks(h, 1);
+    assertEquals(h.sent.length, 0);
+    await pollTicks(h, 5);
+    assertEquals(h.sent.length, 1);
+  });
+});
+
+test("a wall-clock step does not shorten graces (monotonic clock drives the detector)", async () => {
+  let wall = Date.parse("2026-10-01T00:00:00Z");
+  let mono = 0;
+  const rejecting: ProbeSample = {
+    container: HEALTHY.container,
+    pgReady: { kind: "exit", code: 1, output: "" },
+    controlData: "in production",
+  };
+  const sent: PgDeadPrimaryEventMessage[] = [];
+  const observer = new PgDeadPrimaryObserver({
+    send: (m) => {
+      sent.push(m);
+      return true;
+    },
+    peerSupportsProbe: () => true,
+    config: { intervalMs: 3_600_000 },
+    monoMs: () => mono,
+    wallMs: () => wall,
+    globallyEnabled: () => true,
+    listMembers: () => Promise.resolve([PRIMARY]),
+    sample: () => Promise.resolve(rejecting),
+    intentState: () =>
+      Promise.resolve({ active: false, heldClusterMarker: false }),
+    releaseHeld: () => Promise.resolve(),
+    hostStopping: () => Promise.resolve(false),
+  });
+  observer.attach();
+  try {
+    await Array.from({ length: 30 }).reduce<Promise<void>>(async (prev) => {
+      await prev;
+      await observer.poll();
+      mono += 5_000;
+      wall += 3_600_000; // NTP step / VM resume: wall jumps an hour per tick
+    }, Promise.resolve());
+  } finally {
+    observer.detach();
+  }
+  // 30 ticks = 150 s of monotonic time: inside the 10 min rejecting grace.
+  assertEquals(sent.length, 0);
+});
+
+test("a held marker is released (and logged) after a sustained healthy run", async () => {
+  const released: string[] = [];
+  const h = harness({
+    sample: () => Promise.resolve(HEALTHY),
+    intentState: () =>
+      Promise.resolve({ active: true, heldClusterMarker: true }),
+    releaseHeld: (id, reason) => {
+      released.push(`${id}:${reason}`);
+      return Promise.resolve();
+    },
+  });
+  await withAttached(h, async () => {
+    await pollTicks(h, 100); // 500 s: not yet
+    assertEquals(released.length, 0);
+    await pollTicks(h, 30); // past 10 min
+  });
+  assertEquals(released.length, 1);
+  assert(released[0]!.startsWith(MANAGED_ID));
+});
+
+test("a held marker is never released while the engine is down", async () => {
+  const released: string[] = [];
+  const h = harness({
+    intentState: () =>
+      Promise.resolve({ active: true, heldClusterMarker: true }),
+    releaseHeld: (id) => {
+      released.push(id);
+      return Promise.resolve();
+    },
+  });
+  await withAttached(h, () => pollTicks(h, 300));
+  assertEquals(released.length, 0);
+  assertEquals(h.sent.length, 0);
+});
+
+test("systemdHostBlocksEmit fails closed when systemctl is unusable", async () => {
+  // On a host without systemd (or when the call cannot run) the answer must
+  // be "do not send".
+  if (Deno.build.os === "linux") return;
+  assertEquals(await systemdHostBlocksEmit(500), true);
 });

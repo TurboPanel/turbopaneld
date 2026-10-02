@@ -21,7 +21,7 @@
 
 import { join } from "@std/path";
 import type { CommandType } from "../contracts/commands-contracts.ts";
-import { logWarn, sanitizeForLog } from "../util/logger.ts";
+import { logInfo, logWarn, sanitizeForLog } from "../util/logger.ts";
 import { SAFE_MANAGED_ID_RE } from "./engine-paths.ts";
 
 export type ManagedIntentKind =
@@ -35,6 +35,8 @@ export type ManagedIntentKind =
   | "restore";
 
 export type ManagedIntent = {
+  /** Unique per write: lets a command recognise its own marker. */
+  id: string;
   managedId: string;
   kind: ManagedIntentKind;
   /** Epoch ms the marker was (re)written. */
@@ -106,12 +108,7 @@ export const HOST_WIDE_COMMAND_INTENT_KINDS: Readonly<
   "server.reboot": "restart",
 };
 
-/** A `stop` is a desired state, not a transient action: hold it. */
-function intentUntil(kind: ManagedIntentKind, nowMs: number): number | null {
-  return kind === "stop" ? null : nowMs + MANAGED_INTENT_TTL_MS;
-}
-
-const memory = new Map<string, ManagedIntent>();
+const memory = new Map<string, ManagedIntent | "cleared">();
 
 export function managedIntentPath(stateDir: string, managedId: string): string {
   return join(stateDir, "managed-intent", `${managedId}.json`);
@@ -139,30 +136,47 @@ export function managedCommandIntent(
   return kind ? { managedId, kind } : null;
 }
 
+/** Write `text` to `path` via a temp file + rename, so a reader never sees half a file. */
+export async function writeFileAtomic(
+  path: string,
+  text: string,
+): Promise<void> {
+  const temp = `${path}.tmp-${crypto.randomUUID()}`;
+  try {
+    await Deno.writeTextFile(temp, text, { mode: 0o600 });
+    await Deno.rename(temp, path);
+  } catch (err) {
+    await Deno.remove(temp).catch(() => undefined);
+    throw err;
+  }
+}
+
 /**
- * Record (or refresh) a marker. Memory first so the probe in this process
- * sees it even when the disk write fails; the disk copy survives a daemon
+ * Write a marker. Memory first (authoritative in this process, so the probe
+ * sees it even when the disk write fails); the disk copy survives a daemon
  * restart. Never throws — a marker failure must not block the command.
  */
 export async function recordManagedIntent(
   stateDir: string,
   managedId: string,
   kind: ManagedIntentKind,
-  nowMs: number = Date.now(),
+  options: { held?: boolean; nowMs?: number } = {},
 ): Promise<ManagedIntent> {
+  const nowMs = options.nowMs ?? Date.now();
   const intent: ManagedIntent = {
+    id: crypto.randomUUID(),
     managedId,
     kind,
     setAtMs: nowMs,
-    untilMs: intentUntil(kind, nowMs),
+    untilMs: options.held ? null : nowMs + MANAGED_INTENT_TTL_MS,
   };
   memory.set(managedId, intent);
   try {
-    const path = managedIntentPath(stateDir, managedId);
     await Deno.mkdir(join(stateDir, "managed-intent"), { recursive: true });
-    await Deno.writeTextFile(path, `${JSON.stringify(intent)}\n`, {
-      mode: 0o600,
-    });
+    await writeFileAtomic(
+      managedIntentPath(stateDir, managedId),
+      `${JSON.stringify(intent)}\n`,
+    );
   } catch (err) {
     logWarn(
       "managed",
@@ -173,15 +187,44 @@ export async function recordManagedIntent(
   return intent;
 }
 
+/** Remove a marker (memory and disk) and say why. Never throws. */
+export async function clearManagedIntent(
+  stateDir: string,
+  managedId: string,
+  reason: string,
+): Promise<void> {
+  memory.set(managedId, "cleared");
+  try {
+    await Deno.remove(managedIntentPath(stateDir, managedId));
+  } catch (err) {
+    if (!(err instanceof Deno.errors.NotFound)) {
+      logWarn(
+        "managed",
+        `intent marker remove failed managedId=${managedId}:`,
+        sanitizeForLog(err),
+      );
+    }
+  }
+  logInfo("managed", `intent marker cleared managedId=${managedId}: ${reason}`);
+}
+
+export type IntentLookup =
+  | { status: "none" }
+  | { status: "found"; intent: ManagedIntent }
+  /** A marker file exists but cannot be read/parsed: treat as active. */
+  | { status: "unreadable"; reason: string };
+
 function parseIntent(text: string, managedId: string): ManagedIntent | null {
   try {
     const value = JSON.parse(text) as Record<string, unknown>;
     if (value.managedId !== managedId) return null;
+    if (typeof value.id !== "string") return null;
     if (typeof value.kind !== "string") return null;
     if (typeof value.setAtMs !== "number") return null;
     const untilMs = value.untilMs;
     if (untilMs !== null && typeof untilMs !== "number") return null;
     return {
+      id: value.id,
       managedId,
       kind: value.kind as ManagedIntentKind,
       setAtMs: value.setAtMs,
@@ -192,24 +235,34 @@ function parseIntent(text: string, managedId: string): ManagedIntent | null {
   }
 }
 
-/** The newest marker for a cluster (memory or disk), or `null`. */
+/** The current marker: this process's own write wins, else the disk copy. */
+export async function lookupManagedIntent(
+  stateDir: string,
+  managedId: string,
+): Promise<IntentLookup> {
+  const inMemory = memory.get(managedId);
+  if (inMemory === "cleared") return { status: "none" };
+  if (inMemory) return { status: "found", intent: inMemory };
+  let text: string;
+  try {
+    text = await Deno.readTextFile(managedIntentPath(stateDir, managedId));
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) return { status: "none" };
+    return { status: "unreadable", reason: sanitizeForLog(err) };
+  }
+  const intent = parseIntent(text, managedId);
+  return intent
+    ? { status: "found", intent }
+    : { status: "unreadable", reason: "marker file does not parse" };
+}
+
+/** The marker as an object, or `null` (none or unreadable). Test helper. */
 export async function readManagedIntent(
   stateDir: string,
   managedId: string,
 ): Promise<ManagedIntent | null> {
-  const inMemory = memory.get(managedId) ?? null;
-  let onDisk: ManagedIntent | null = null;
-  try {
-    onDisk = parseIntent(
-      await Deno.readTextFile(managedIntentPath(stateDir, managedId)),
-      managedId,
-    );
-  } catch {
-    onDisk = null;
-  }
-  if (!inMemory) return onDisk;
-  if (!onDisk) return inMemory;
-  return onDisk.setAtMs > inMemory.setAtMs ? onDisk : inMemory;
+  const lookup = await lookupManagedIntent(stateDir, managedId);
+  return lookup.status === "found" ? lookup.intent : null;
 }
 
 /** True while `intent` suppresses the probe (held, or TTL + grace not past). */
@@ -221,6 +274,89 @@ export function isManagedIntentActive(
   if (!intent) return false;
   if (intent.untilMs === null) return true;
   return nowMs < intent.untilMs + graceMs;
+}
+
+/** Fail closed: an unreadable marker suppresses like an active one. */
+export function isIntentLookupActive(
+  lookup: IntentLookup,
+  nowMs: number,
+): boolean {
+  if (lookup.status === "unreadable") return true;
+  return lookup.status === "found" &&
+    isManagedIntentActive(lookup.intent, nowMs);
+}
+
+export function isHeldIntent(lookup: IntentLookup): boolean {
+  return lookup.status === "found" && lookup.intent.untilMs === null;
+}
+
+/** Kinds whose SUCCESS releases a held stop/destroy (the engine is wanted up). */
+const RELEASES_HELD: ReadonlySet<ManagedIntentKind> = new Set<
+  ManagedIntentKind
+>(["start", "restart", "apply", "promote", "failover"]);
+
+export type ManagedIntentToken = {
+  managedId: string;
+  kind: ManagedIntentKind;
+  /** Id of the marker this command wrote, or `null` (a held one was kept). */
+  ownId: string | null;
+};
+
+/**
+ * Before a command runs. A transient marker never replaces a held one; a
+ * `destroy` is held from the start (a failed destroy must not let the probe
+ * fire on a half-removed cluster later). A `stop` is held only after it
+ * succeeded (`endManagedIntent`).
+ */
+export async function beginManagedIntent(
+  stateDir: string,
+  managedId: string,
+  kind: ManagedIntentKind,
+): Promise<ManagedIntentToken> {
+  const current = await lookupManagedIntent(stateDir, managedId);
+  if (kind !== "destroy" && isHeldIntent(current)) {
+    return { managedId, kind, ownId: null };
+  }
+  const written = await recordManagedIntent(stateDir, managedId, kind, {
+    held: kind === "destroy",
+  });
+  return { managedId, kind, ownId: written.id };
+}
+
+/**
+ * After a command ran. Only the command that owns the current marker
+ * refreshes it (concurrent commands: the last to finish must not overwrite a
+ * newer marker); a successful stop becomes held; a successful start /
+ * restart / apply / promote / failover releases a held marker.
+ */
+export async function endManagedIntent(
+  stateDir: string,
+  token: ManagedIntentToken,
+  succeeded: boolean,
+): Promise<void> {
+  const current = await lookupManagedIntent(stateDir, token.managedId);
+  if (succeeded && token.kind === "stop") {
+    await recordManagedIntent(stateDir, token.managedId, "stop", {
+      held: true,
+    });
+    logInfo(
+      "managed",
+      `intent marker held managedId=${token.managedId}: stopped`,
+    );
+    return;
+  }
+  if (succeeded && RELEASES_HELD.has(token.kind) && isHeldIntent(current)) {
+    await recordManagedIntent(stateDir, token.managedId, token.kind);
+    logInfo(
+      "managed",
+      `held intent marker released managedId=${token.managedId} by ${token.kind}`,
+    );
+    return;
+  }
+  const owned = current.status === "found" && token.ownId !== null &&
+    current.intent.id === token.ownId;
+  if (!owned || token.kind === "destroy") return;
+  await recordManagedIntent(stateDir, token.managedId, token.kind);
 }
 
 /** Test seam: forget in-memory markers. */

@@ -6,19 +6,25 @@ import {
 import { resolveLayout } from "../paths/layout.ts";
 import { withTempLayout } from "../testing/temp-layout.ts";
 import {
+  beginManagedIntent,
+  clearManagedIntent,
+  endManagedIntent,
   HOST_WIDE_INTENT_ID,
+  isIntentLookupActive,
   isManagedIntentActive,
+  lookupManagedIntent,
   MANAGED_COMMAND_INTENT_EXEMPT,
   MANAGED_COMMAND_INTENT_KINDS,
   MANAGED_INTENT_GRACE_MS,
   MANAGED_INTENT_TTL_MS,
   managedCommandIntent,
+  managedIntentPath,
   readManagedIntent,
   recordManagedIntent,
   resetManagedIntentsForTests,
 } from "./ha-intent.ts";
 import { setManagedCommandHooksLayoutForTests } from "./ha-command-hooks.ts";
-import { readManagedHaMember } from "./ha-member.ts";
+import { readManagedHaMember, saveManagedHaMember } from "./ha-member.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -63,7 +69,9 @@ test("the router records the intent before dispatch and refreshes it after", asy
   );
   const begin = source.indexOf("await beginManagedCommandIntent(");
   const dispatch = source.indexOf("switch (message.commandType)");
-  const end = source.indexOf("await endManagedCommandIntent(");
+  const end = source.indexOf(
+    "await endManagedCommandIntent(managedIntent, commandSucceeded)",
+  );
   assert(begin > 0 && dispatch > 0 && end > 0);
   assert(begin < dispatch, "intent must be recorded before any handler runs");
   assert(
@@ -104,24 +112,22 @@ test("managedCommandIntent maps lifecycle actions and skips exempt/invalid", () 
   );
 });
 
-test("a stop is held; transient markers expire after TTL plus grace", async () => {
+test("a held marker never expires; transient markers expire after TTL plus grace", async () => {
   await withTempLayout(async ({ dirs }) => {
     resetManagedIntentsForTests();
     const t0 = 1_000_000;
-    const stop = await recordManagedIntent(
-      dirs.stateDir,
-      MANAGED_ID,
-      "stop",
-      t0,
-    );
-    assertEquals(stop.untilMs, null);
-    assert(isManagedIntentActive(stop, t0 + 365 * 86_400_000));
+    const held = await recordManagedIntent(dirs.stateDir, MANAGED_ID, "stop", {
+      held: true,
+      nowMs: t0,
+    });
+    assertEquals(held.untilMs, null);
+    assert(isManagedIntentActive(held, t0 + 365 * 86_400_000));
 
     const restart = await recordManagedIntent(
       dirs.stateDir,
       MANAGED_ID,
       "restart",
-      t0 + 1,
+      { nowMs: t0 + 1 },
     );
     const expiry = t0 + 1 + MANAGED_INTENT_TTL_MS;
     assert(isManagedIntentActive(restart, expiry));
@@ -136,11 +142,144 @@ test("a stop is held; transient markers expire after TTL plus grace", async () =
 test("markers survive a daemon restart through the disk copy", async () => {
   await withTempLayout(async ({ dirs }) => {
     resetManagedIntentsForTests();
-    await recordManagedIntent(dirs.stateDir, MANAGED_ID, "stop", 5);
+    await recordManagedIntent(dirs.stateDir, MANAGED_ID, "stop", {
+      held: true,
+    });
     resetManagedIntentsForTests();
     const read = await readManagedIntent(dirs.stateDir, MANAGED_ID);
     assertEquals(read?.kind, "stop");
     assertEquals(read?.untilMs, null);
+  });
+});
+
+test("a torn/unparseable marker file reads as unreadable and suppresses", async () => {
+  await withTempLayout(async ({ dirs }) => {
+    resetManagedIntentsForTests();
+    await Deno.mkdir(`${dirs.stateDir}/managed-intent`, { recursive: true });
+    await Deno.writeTextFile(
+      managedIntentPath(dirs.stateDir, MANAGED_ID),
+      '{"managedId":"',
+    );
+    const lookup = await lookupManagedIntent(dirs.stateDir, MANAGED_ID);
+    assertEquals(lookup.status, "unreadable");
+    assert(isIntentLookupActive(lookup, Date.now()));
+    assertEquals(
+      (await lookupManagedIntent(dirs.stateDir, "absent-cluster")).status,
+      "none",
+    );
+  });
+});
+
+test("marker race: a command finishing late never overwrites a newer marker", async () => {
+  await withTempLayout(async ({ dirs }) => {
+    resetManagedIntentsForTests();
+    const restart = await beginManagedIntent(
+      dirs.stateDir,
+      MANAGED_ID,
+      "restart",
+    );
+    const apply = await beginManagedIntent(dirs.stateDir, MANAGED_ID, "apply");
+    // The older restart finishes after the apply began: apply's marker stays.
+    await endManagedIntent(dirs.stateDir, restart, true);
+    const current = await readManagedIntent(dirs.stateDir, MANAGED_ID);
+    assertEquals(current?.id, apply.ownId);
+    assertEquals(current?.kind, "apply");
+  });
+});
+
+test("a stop is held only after it succeeded; a failed stop stays transient", async () => {
+  await withTempLayout(async ({ dirs }) => {
+    resetManagedIntentsForTests();
+    const failed = await beginManagedIntent(dirs.stateDir, MANAGED_ID, "stop");
+    assert((await readManagedIntent(dirs.stateDir, MANAGED_ID))?.untilMs);
+    await endManagedIntent(dirs.stateDir, failed, false);
+    assert(
+      (await readManagedIntent(dirs.stateDir, MANAGED_ID))?.untilMs !== null,
+    );
+
+    const ok = await beginManagedIntent(dirs.stateDir, MANAGED_ID, "stop");
+    await endManagedIntent(dirs.stateDir, ok, true);
+    assertEquals(
+      (await readManagedIntent(dirs.stateDir, MANAGED_ID))?.untilMs,
+      null,
+    );
+  });
+});
+
+test("a transient marker never replaces a held stop; only a successful start releases it", async () => {
+  await withTempLayout(async ({ dirs }) => {
+    resetManagedIntentsForTests();
+    await recordManagedIntent(dirs.stateDir, MANAGED_ID, "stop", {
+      held: true,
+    });
+
+    const failedStart = await beginManagedIntent(
+      dirs.stateDir,
+      MANAGED_ID,
+      "start",
+    );
+    assertEquals(
+      (await readManagedIntent(dirs.stateDir, MANAGED_ID))?.kind,
+      "stop",
+    );
+    await endManagedIntent(dirs.stateDir, failedStart, false);
+    assertEquals(
+      (await readManagedIntent(dirs.stateDir, MANAGED_ID))?.untilMs,
+      null,
+      "a failed start keeps the cluster held",
+    );
+
+    const restore = await beginManagedIntent(
+      dirs.stateDir,
+      MANAGED_ID,
+      "restore",
+    );
+    await endManagedIntent(dirs.stateDir, restore, true);
+    assertEquals(
+      (await readManagedIntent(dirs.stateDir, MANAGED_ID))?.untilMs,
+      null,
+      "restore does not release a held stop",
+    );
+
+    const start = await beginManagedIntent(dirs.stateDir, MANAGED_ID, "start");
+    await endManagedIntent(dirs.stateDir, start, true);
+    const after = await readManagedIntent(dirs.stateDir, MANAGED_ID);
+    assertEquals(after?.kind, "start");
+    assert(after?.untilMs !== null);
+  });
+});
+
+test("destroy is held from the start, so a failed destroy never re-arms the probe", async () => {
+  await withTempLayout(async ({ dirs }) => {
+    resetManagedIntentsForTests();
+    const destroy = await beginManagedIntent(
+      dirs.stateDir,
+      MANAGED_ID,
+      "destroy",
+    );
+    await endManagedIntent(dirs.stateDir, destroy, false);
+    const current = await readManagedIntent(dirs.stateDir, MANAGED_ID);
+    assertEquals(current?.kind, "destroy");
+    assertEquals(current?.untilMs, null);
+  });
+});
+
+test("clearManagedIntent removes memory and disk copies", async () => {
+  await withTempLayout(async ({ dirs }) => {
+    resetManagedIntentsForTests();
+    await recordManagedIntent(dirs.stateDir, MANAGED_ID, "stop", {
+      held: true,
+    });
+    await clearManagedIntent(dirs.stateDir, MANAGED_ID, "test");
+    assertEquals(
+      (await lookupManagedIntent(dirs.stateDir, MANAGED_ID)).status,
+      "none",
+    );
+    resetManagedIntentsForTests();
+    assertEquals(
+      (await lookupManagedIntent(dirs.stateDir, MANAGED_ID)).status,
+      "none",
+    );
   });
 });
 
@@ -366,6 +505,57 @@ test("apply records the member; promote flips it; destroy removes it", async () 
         removeVolumes: false,
       });
       assertEquals(await readManagedHaMember(layout, MANAGED_ID), null);
+    } finally {
+      setCommandRouterHandlersForTests(null);
+      setManagedCommandHooksLayoutForTests(null);
+    }
+  });
+});
+
+test("managed.ha.failover recover flips the local target member to primary", async () => {
+  const { handleCommandDispatch, setCommandRouterHandlersForTests } =
+    await import("../commands/command-router.ts");
+  await withTempLayout(async (fixture) => {
+    const layout = resolveLayout(fixture.env);
+    await Deno.mkdir(`${layout.stateDir}/managed/${MANAGED_ID}`, {
+      recursive: true,
+    });
+    await saveManagedHaMember(layout, {
+      managedId: MANAGED_ID,
+      memberId: MEMBER_ID,
+      engine: "postgres",
+      role: "replica",
+      containerName: "svc-2",
+      replicaPeerCount: 1,
+      updatedAt: new Date().toISOString(),
+    });
+    setManagedCommandHooksLayoutForTests(layout);
+    setCommandRouterHandlersForTests({
+      handleManagedHaFailover: () =>
+        Promise.resolve({ summary: "recovered", phase: "recover" }),
+    });
+    try {
+      await handleCommandDispatch(
+        {
+          type: "command-dispatch",
+          id: "req-recover",
+          commandId: "cmd-recover",
+          commandType: "managed.ha.failover",
+          payload: {
+            managedId: MANAGED_ID,
+            sourceMemberId: "00000000-0000-4000-8000-0000000000a9",
+            targetMemberId: MEMBER_ID,
+            phase: "recover",
+          },
+          at: new Date().toISOString(),
+        },
+        new MockWebSocket() as unknown as WebSocket,
+        { decryptSecrets: (c) => Promise.resolve(c) },
+      );
+      assertEquals(
+        (await readManagedHaMember(layout, MANAGED_ID))?.role,
+        "primary",
+      );
     } finally {
       setCommandRouterHandlersForTests(null);
       setManagedCommandHooksLayoutForTests(null);

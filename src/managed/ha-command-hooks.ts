@@ -10,14 +10,16 @@
 import type {
   ManagedApplyPayload,
   ManagedDestroyPayload,
+  ManagedHaFailoverPayload,
   ManagedPromotePayload,
 } from "../contracts/commands-contracts.ts";
 import { logWarn, sanitizeForLog } from "../util/logger.ts";
 import { type LayoutPaths, resolveLayout } from "../paths/layout.ts";
 import {
+  beginManagedIntent,
+  endManagedIntent,
   managedCommandIntent,
-  type ManagedIntentKind,
-  recordManagedIntent,
+  type ManagedIntentToken,
 } from "./ha-intent.ts";
 import {
   haMemberRecordFromApply,
@@ -26,10 +28,7 @@ import {
   saveManagedHaMember,
 } from "./ha-member.ts";
 
-export type ManagedCommandIntentToken = {
-  managedId: string;
-  kind: ManagedIntentKind;
-};
+export type ManagedCommandIntentToken = ManagedIntentToken;
 
 let layoutOverride: LayoutPaths | null = null;
 
@@ -59,27 +58,25 @@ export async function beginManagedCommandIntent(
 ): Promise<ManagedCommandIntentToken | null> {
   const intent = managedCommandIntent(commandType, payload);
   if (!intent) return null;
+  let token: ManagedCommandIntentToken = { ...intent, ownId: null };
   await guarded("intent marker", async () => {
-    await recordManagedIntent(
+    token = await beginManagedIntent(
       hookLayout().stateDir,
       intent.managedId,
       intent.kind,
     );
   });
-  return intent;
+  return token;
 }
 
-/** Refresh the marker when the handler returns, so its TTL starts now. */
+/** After the handler returned (or threw): see `endManagedIntent`. */
 export async function endManagedCommandIntent(
   token: ManagedCommandIntentToken | null,
+  succeeded: boolean,
 ): Promise<void> {
   if (!token) return;
   await guarded("intent marker refresh", async () => {
-    await recordManagedIntent(
-      hookLayout().stateDir,
-      token.managedId,
-      token.kind,
-    );
+    await endManagedIntent(hookLayout().stateDir, token, succeeded);
   });
 }
 
@@ -102,6 +99,25 @@ export async function noteManagedPromoteSucceeded(
       hookLayout(),
       payload.managedId,
       payload.memberId,
+      new Date().toISOString(),
+    );
+  });
+}
+
+/**
+ * After `managed.ha.failover` `recover` succeeded (Orchestrator recover-to or
+ * its internal `managed.promote` fallback): the target member on this host
+ * is now the primary and must be watched.
+ */
+export async function noteManagedFailoverSucceeded(
+  payload: ManagedHaFailoverPayload,
+): Promise<void> {
+  if (payload.phase !== "recover") return;
+  await guarded("ha-member failover", async () => {
+    await markManagedHaMemberPromoted(
+      hookLayout(),
+      payload.managedId,
+      payload.targetMemberId,
       new Date().toISOString(),
     );
   });
