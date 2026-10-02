@@ -100,6 +100,16 @@ async function decryptTopologyPassword(
   return plain;
 }
 
+/**
+ * Engines the bundled Orchestrator can monitor. It speaks only the MySQL
+ * protocol: a Postgres member answers `/api/discover` with HTTP 500
+ * `invalid connection`, which aborted the whole reconcile, so no MySQL or
+ * MariaDB cluster after it on the same server registered either.
+ */
+export function orchestratorMonitorsEngine(engine: string): boolean {
+  return engine === "mysql" || engine === "mariadb";
+}
+
 async function registerClusters(
   clusters: readonly ManagedHaCluster[],
   api: OrchestratorApiDeps,
@@ -215,9 +225,20 @@ export async function handleManagedHaReconcile(
     ...deps?.orchestratorApi,
     credentials: httpAuth,
   };
-  const registeredClusters = payload.clusters.length === 0
+  const monitored = payload.clusters.filter((cluster) =>
+    orchestratorMonitorsEngine(cluster.engine)
+  );
+  if (monitored.length < payload.clusters.length) {
+    logInfo(
+      "commands",
+      `managed.ha.reconcile skipped ${
+        payload.clusters.length - monitored.length
+      } cluster(s) Orchestrator cannot monitor serverId=${payload.serverId}`,
+    );
+  }
+  const registeredClusters = monitored.length === 0
     ? []
-    : await registerClusters(payload.clusters, api);
+    : await registerClusters(monitored, api);
 
   let containers: EnvironmentDeployContainer[] | undefined;
   const observed = await inspectOrchestratorContainer(layout, descriptor, {
