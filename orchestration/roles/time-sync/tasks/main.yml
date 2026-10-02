@@ -19,8 +19,8 @@
 
 - name: Set timesyncd.conf group fact
   ansible.builtin.set_fact:
-    # systemd-timesyncd runs as User=systemd-timesync; mode 0640 must be
-    # group-readable by that account (not root-only).
+    # systemd-timesyncd runs as User=systemd-timesync; the file stays
+    # group-owned by that account.
     turbopanel_timesyncd_conf_group: >-
       {{
         'systemd-timesync'
@@ -37,7 +37,9 @@
     dest: /etc/systemd/timesyncd.conf
     owner: root
     group: "{{ turbopanel_timesyncd_conf_group }}"
-    mode: "0640"
+    # World-readable (Debian default, no secrets): the unprivileged daemon
+    # reads the NTP servers back from it to report the applied state.
+    mode: "0644"
   notify: Restart systemd-timesyncd
   when: turbopanel_apply_ntp_config | bool
 
