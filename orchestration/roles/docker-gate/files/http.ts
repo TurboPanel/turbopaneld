@@ -244,7 +244,10 @@ export async function writeAll(
 
 const TOKEN = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
 const METHOD = /^[A-Z]+$/;
-const TARGET = /^\/[\x21-\x7e]*$/;
+// Visible ASCII but `#`: Go keeps a `#` in the path and query as data (it is
+// never a fragment on the wire), so a target holding one is refused rather
+// than read two ways (`/build?q=1#&networkmode=host`).
+const TARGET = /^\/[\x21\x22\x24-\x7e]*$/;
 const VERSION = /^HTTP\/1\.[01]$/;
 
 function splitHeadLines(raw: Uint8Array): string[] {
@@ -373,8 +376,33 @@ function sharedFraming(headers: readonly Header[]): Framing | undefined {
 }
 
 export function requestFraming(head: RequestHead): Framing {
+  // Go's server ignores Transfer-Encoding on an HTTP/1.0 request and reads the
+  // chunks as the next request on the connection: refuse rather than relay.
+  if (
+    head.version === "HTTP/1.0" &&
+    headerTokens(head.headers, "transfer-encoding").length > 0
+  ) {
+    throw new HttpError(400, "Transfer-Encoding on an HTTP/1.0 request");
+  }
   return sharedFraming(head.headers) ?? { kind: "none" };
 }
+
+/**
+ * Whether the engine would read this request's body as form fields: Go's
+ * ParseForm merges an `application/x-www-form-urlencoded` body into the form
+ * (ahead of the query) on POST, PUT and PATCH. Any Content-Type value that
+ * says so counts, on any method, and an empty body does not.
+ */
+export function carriesFormBody(head: RequestHead, framing: Framing): boolean {
+  if (framing.kind === "none") return false;
+  if (framing.kind === "length" && framing.length === 0) return false;
+  return head.headers.some(([name, value]) =>
+    name.toLowerCase() === "content-type" &&
+    trimOws(value).toLowerCase().startsWith(FORM_CONTENT_TYPE)
+  );
+}
+
+const FORM_CONTENT_TYPE = "application/x-www-form-urlencoded";
 
 export function responseFraming(method: string, head: ResponseHead): Framing {
   const { status } = head;
