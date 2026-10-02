@@ -1,0 +1,18 @@
+---
+# Tenant build commands run as this account inside the transient
+# turbopanel-build-<id>.service that `tp-host build-run` starts. It is never in
+# docker or tp and has no sudo grant: tp-host refuses to start a build when it
+# holds any supplementary group other than a tpnode<series> runtime group.
+# 9994 is the free slot in the 9980-9999 service-identity band;
+# src/orchestration/service-accounts.test.ts enforces that it stays unique.
+build_user: tpbuild
+build_group: tpbuild
+build_uid: 9994
+build_gid: 9994
+# Root of the build sandbox. tp-host checks this exact layout on every run:
+# the root 0711, work/ root:tp 1770 (tp creates work/<id>, the sticky bit stops
+# it swapping one out), cache/ root 0700 (per-project dirs created by tp-host).
+build_root: /var/lib/turbopanel-build
+# Pinned by name in tp-host; not turbopanel-*, which tp may install units under.
+build_slice: tpbuild.slice
+turbopanel_group: tp
