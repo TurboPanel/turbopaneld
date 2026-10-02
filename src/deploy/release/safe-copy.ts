@@ -86,8 +86,7 @@ export type ContainedDirState = "directory" | "missing" | "not-directory";
  * Split a tenant-supplied relative path, refusing anything that could name a
  * place outside the root before a single `lstat` runs.
  */
-export function containedSegments(relative: string | undefined): string[] {
-  const value = relative ?? "";
+export function containedSegments(value = ""): string[] {
   if (value.startsWith("/")) {
     throw new UnsafeTreeError(`refusing absolute path ${value}`);
   }
@@ -369,7 +368,8 @@ async function copyDirectory(
       `refusing ${dir.source}: it changed while being copied`,
     );
   }
-  const names = entries.map((entry) => entry.name).sort();
+  const names = entries.map((entry) => entry.name)
+    .sort((a, b) => a.localeCompare(b));
   await forEachSequential(names, (name) => copyEntry(dir, name, state));
 }
 
