@@ -434,3 +434,73 @@ test("collectContainerLogs accepts a container of a second (green) generation pr
   );
   assertEquals(text.includes("line"), true);
 });
+
+const MANAGED_PROJECT = "01a0fca4-71fb-756a-842f-969404ef4385";
+
+test("collectContainerLogs allows a managed engine container with a managed compose file", async () => {
+  const checked: string[] = [];
+  const logs = await collectContainerLogs(
+    OWNED_ID,
+    { stateDir: "/var/lib/turbopanel" },
+    {
+      runDocker: (args) => {
+        if (args[0] === "inspect") {
+          return Promise.resolve(
+            ok(inspectStdout(MANAGED_PROJECT, "postgres")),
+          );
+        }
+        return Promise.resolve(ok("engine ready\n"));
+      },
+      listManifests: () => Promise.resolve([]),
+      managedComposeExists: (path) => {
+        checked.push(path);
+        return Promise.resolve(true);
+      },
+    },
+  );
+  assertEquals(logs.includes("engine ready"), true);
+  assertEquals(checked, [
+    `/var/lib/turbopanel/managed/${MANAGED_PROJECT}/docker-compose.yml`,
+  ]);
+});
+
+test("collectContainerLogs rejects a project with no managed compose file", async () => {
+  await assertRejects(
+    () =>
+      collectContainerLogs(FOREIGN_ID, { stateDir: "/var/lib/turbopanel" }, {
+        runDocker: (args) =>
+          Promise.resolve(
+            args[0] === "inspect"
+              ? ok(inspectStdout("other-managed", "postgres"))
+              : ok("should-not-run\n"),
+          ),
+        listManifests: () => Promise.resolve([]),
+        managedComposeExists: () => Promise.resolve(false),
+      }),
+    Error,
+    "not owned by this host",
+  );
+});
+
+test("collectContainerLogs never probes the managed dir for a traversal project label", async () => {
+  let probed = false;
+  await assertRejects(
+    () =>
+      collectContainerLogs(FOREIGN_ID, { stateDir: "/var/lib/turbopanel" }, {
+        runDocker: (args) =>
+          Promise.resolve(
+            args[0] === "inspect"
+              ? ok(inspectStdout("../deployments/x", "postgres"))
+              : ok("should-not-run\n"),
+          ),
+        listManifests: () => Promise.resolve([]),
+        managedComposeExists: () => {
+          probed = true;
+          return Promise.resolve(true);
+        },
+      }),
+    Error,
+    "not owned by this host",
+  );
+  assertEquals(probed, false);
+});
