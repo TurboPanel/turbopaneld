@@ -29,6 +29,8 @@ Certificate authorities: `../../../turbopanel/src/lib/tls/AGENTS.md`.
 | `orchestrator.ts` / `orchestrator-api.ts` | Per-org Orchestrator compose (project = the `managed-ha` `serviceId`, written into the compose file's own `name:` key so the stack unit needs no `-p`) + local HTTP (`:33001`); `Recover: false`; Raft `:33002` on advertise address only |
 | `../commands/managed-ha-reconcile.ts` / `managed-ha-failover.ts` | `managed.ha.reconcile` (whole-server HA stack) + `managed.ha.failover` (`drain` / `recover`). Designated Orchestrator recover-to; on HTTP/API failure **or** absent stack, falls back to `managed.promote` so fencing is not stranded. `Recover: false` stays — TurboPanel picks the candidate. `Future:` fail-closed HA lease when Raft is unreachable. |
 | `../instance/ha-observe.ts` | Poll local Orchestrator `/api/problems` when `configDir/orchestrator/docker-compose.yml` exists; emit unsolicited `managed-ha-event` |
+| `pg-dead-primary.ts` / `../instance/pg-dead-primary-observe.ts` | Postgres dead-primary probe on the primary's **own** host (Orchestrator cannot see Postgres). See **Postgres dead-primary detection** below |
+| `ha-intent.ts` / `ha-member.ts` / `ha-command-hooks.ts` | Probe inputs kept by `command-router.ts`: operator-intent markers around every engine-touching managed verb, and the per-host member record (`managed/<id>/ha-member.json`) |
 | `backup.ts` | `managed.backup` (`create`/`delete`) + `managed.restore` — streamed dump/restore, checksum, prune; exports the shared core (`createManagedBackupArtifact`, `restoreManagedBackupArtifact`, `resolveBackupEngine`) for scheduled runs |
 | `target-lock.ts` | Per-engine `flock` (`withManagedTargetLock`, `ManagedTargetBusyError`) shared by the backup/restore handlers and the scheduled `backup-run` process |
 | `logs.ts` | Bounded `compose logs`; cell `managed-logs-request` / `managed-logs-result` (not a command) |
@@ -402,3 +404,54 @@ Physical / GTID streaming is **engine → engine**, never through ProxySQL.
 | Standby SQL | not used (config-file primary_conninfo) | Optional `configureStandby` hook — replication channel setup is not user-data mutation |
 | Promote | Operator switchover, DR route, or TurboPanel-gated auto-failover after fence (Orchestrator designated recover-to, else `managed.promote` fallback) | same (`STOP REPLICA` / `STOP SLAVE` + clear read_only) |
 | Health | `streaming` requires active WAL receiver | `streaming` requires both IO + SQL threads running |
+
+## Postgres dead-primary detection
+
+Orchestrator's image only has the MySQL driver, so it never sees Postgres and
+`ha-observe.ts` only ever reports MySQL/MariaDB. For Postgres the daemon on the
+**primary's own host** runs `PgDeadPrimaryObserver` and sends the same
+`managed-ha-event`, plus `sourceMemberId`, `detector: 'postgres-probe'` and
+bounded `evidence`. The control plane's failover pipeline is unchanged (raft
+leader, same-DC `failover` replica, fresh lag observation, fence, promote).
+
+- **Scope** (`DEAD_PRIMARY_DETECTION_SCOPE = 'engine-dead-host-alive'`): the
+  engine container/process is dead while the host and daemon are alive, so the
+  old primary can still be fenced. **Whole-host loss is not detected** — it
+  stays manual with an alert. Widening it (Option A) is a control-plane policy
+  switch (`turbopanel/src/features/managed/ha-policy.ts` →
+  `AUTOMATIC_FAILOVER_DETECTORS`) plus a host-loss detector there, never a
+  change to this probe.
+- **Watched**: a Postgres member recorded `primary` in `ha-member.json` with at
+  least one replica peer. The daemon cannot see `replicaClass`; the control
+  plane still requires a healthy same-DC `failover` replica and otherwise
+  records a `blocked` recovery. Global kill switch:
+  `TURBOPANEL_MANAGED_PG_PROBE=off`. A cluster applied before this daemon has
+  no record until its next `managed.apply`.
+- **Probe** every 5 s, read-only: `docker inspect` (state, exit code, start,
+  health), then `pg_isready -q -t 3` over the image's local socket (no
+  credentials, no SQL), then `pg_controldata` only when Postgres rejects.
+  Every Docker call is bounded; a timeout or socket error is *inconclusive*.
+- **Classification**: exited/dead/restarting/created/paused/absent → hard;
+  `pg_isready` 0 → alive (PQping reports OK for every server error except
+  57P03, so 53300 "too many connections" is alive); 1 (57P03 starting up /
+  recovery / shutdown) → soft for 10 min, 30 min while `pg_controldata` says
+  `in crash recovery`; `in archive recovery` → this node is a standby, never
+  fire; 2 → hard, soft for 60 s after a container (re)start; 3 / Docker
+  stderr / exec plumbing → inconclusive (resets the streak).
+- **Fires** after 6 consecutive hard failures spanning ≥ 20 s. One event per
+  incident; a new incident no sooner than 5 min after the last event; healthy
+  resets. Only delivered events count as emitted.
+- **Intent markers**: `command-router.ts` records one **before** dispatch for
+  every verb in `MANAGED_COMMAND_INTENT_KINDS` (apply = update/upgrade/resync,
+  lifecycle start/stop/restart, destroy, promote, restore, ha.failover) and
+  refreshes it when the handler returns. Transient markers suppress for 10 min
+  + 30 s grace; a `stop` is **held** until the next start/restart/apply (a
+  stopped cluster, or a fenced old primary, never fails over by itself). A
+  container stopped *without* a marker still counts as dead. A new `managed.*`
+  verb must be added to `MANAGED_COMMAND_INTENT_KINDS` or
+  `MANAGED_COMMAND_INTENT_EXEMPT` (`ha-intent.test.ts` fails otherwise).
+- **Never sends** after `detach()` (daemon SIGTERM, including a tick already in
+  flight), while `systemctl is-system-running` says `stopping`, or to a control
+  plane that does not advertise `managed-ha-probe-v1` (only that one checks the
+  reporter is the current primary's own host).
+

@@ -37,6 +37,13 @@ import {
 import { handleEnvironmentDeploy } from "./deploy-environment.ts";
 import { handleManagedApply } from "../managed/apply.ts";
 import {
+  beginManagedCommandIntent,
+  endManagedCommandIntent,
+  noteManagedApplySucceeded,
+  noteManagedDestroySucceeded,
+  noteManagedPromoteSucceeded,
+} from "../managed/ha-command-hooks.ts";
+import {
   handleManagedBackup,
   handleManagedRestore,
 } from "../managed/backup.ts";
@@ -207,6 +214,12 @@ export async function handleCommandDispatch(
   }
 
   const logSink = createDispatchLogSink(message, deps);
+  // Before any handler runs: the dead-primary probe must see the platform's
+  // own stop/restart/re-apply/promote/restore/destroy as intent, not a crash.
+  const managedIntent = await beginManagedCommandIntent(
+    message.commandType,
+    message.payload,
+  );
 
   try {
     let ok: boolean;
@@ -358,6 +371,7 @@ export async function handleCommandDispatch(
           decryptSecrets: deps?.decryptSecrets,
           logSink,
         });
+        await noteManagedApplySucceeded(payload);
         ok = true;
         daemonRespondedAt = new Date().toISOString();
         break;
@@ -382,6 +396,7 @@ export async function handleCommandDispatch(
         )(payload, daemonReceivedAt, {
           decryptSecrets: deps?.decryptSecrets,
         });
+        await noteManagedDestroySucceeded(payload);
         ok = true;
         daemonRespondedAt = new Date().toISOString();
         break;
@@ -394,6 +409,7 @@ export async function handleCommandDispatch(
         )(payload, daemonReceivedAt, {
           decryptSecrets: deps?.decryptSecrets,
         });
+        await noteManagedPromoteSucceeded(payload);
         ok = true;
         daemonRespondedAt = new Date().toISOString();
         break;
@@ -524,6 +540,7 @@ export async function handleCommandDispatch(
       daemonRespondedAt,
     });
   } finally {
+    await endManagedCommandIntent(managedIntent);
     // Transcript upload is never load-bearing — finalize() never throws.
     await logSink.finalize();
   }
