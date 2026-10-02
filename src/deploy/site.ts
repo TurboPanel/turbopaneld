@@ -2847,17 +2847,14 @@ async function removePhpFpmEngineSites(
  * swept on teardown.
  */
 async function installedPhpSeries(layout: LayoutPaths): Promise<string[]> {
-  const root = join(layout.configDir, "php");
-  const series: string[] = [];
+  // `root:tpapache` `0750` on a host: listed through tp-host, like the pools.
+  let names: string[] | null;
   try {
-    for await (const entry of Deno.readDir(root)) {
-      if (entry.isDirectory && PHP_VERSION_RE.test(entry.name)) {
-        series.push(entry.name);
-      }
-    }
+    names = await listEngineConfigDir(join(layout.configDir, "php"));
   } catch {
     return [];
   }
+  const series = (names ?? []).filter((name) => PHP_VERSION_RE.test(name));
   return series.sort((a, b) =>
     a.localeCompare(b, undefined, { numeric: true })
   );

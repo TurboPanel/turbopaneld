@@ -2510,6 +2510,30 @@ test("removeSites swallows an engine reload failure after a successful site dele
   }
 });
 
+test("removeSites removes php-fpm pools when the daemon cannot enter the php config dir", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const { run } = createSiteRunMock();
+  const { runPlaybook } = capturePlaybooks();
+  const phpDir = join(layout.configDir, "php");
+  const pool = join(phpDir, "8.4", "pools", "tp-envphpdeny-phpsite.conf");
+  try {
+    await applySites(layout, "envphpdeny", [nginxPhpSite], {
+      run,
+      runPlaybook,
+    });
+    await rootFs.stat(pool);
+    const restore = denyDaemonFs(phpDir);
+    try {
+      await removeSites(layout, "envphpdeny", { run });
+    } finally {
+      restore();
+    }
+    await assertRejects(() => rootFs.stat(pool), Deno.errors.NotFound);
+  } finally {
+    await cleanup();
+  }
+});
+
 test("removeSites warns and keeps the aggregate when an OLS fragment cannot be removed", async () => {
   const { layout, cleanup } = await makeTestLayout();
   const { run } = createSiteRunMock();
