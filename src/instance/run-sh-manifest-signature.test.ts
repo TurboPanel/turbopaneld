@@ -4,6 +4,7 @@ import {
   signWithTestKey,
   TEST_RELEASE_SIGNING_PUBLIC_KEY_HEX,
 } from "../testing/release-signing-fixture.ts";
+import { signManifest } from "../update/signing.ts";
 import {
   extractShellFunction,
   hostCanVerify,
@@ -154,45 +155,34 @@ function repoManifest(repo: "turbopanel" | "ui"): Record<string, unknown> {
   };
 }
 
+/** The signature helpers every run.sh manifest fetch goes through. */
+const VERIFY_HELPERS = [
+  "tp_manifest_canonical_python",
+  "tp_manifest_signature_material_python",
+  "tp_verify_manifest_signature",
+  "tp_manifest_strict_canonical",
+  "tp_manifest_signature_bypass",
+] as const;
+
 /**
- * Run run.sh's real `tp_fetch_repo_manifest` (the `--instance` fetch of the
- * control-plane / UI manifest) against a local manifest file: only curl is
- * stubbed, every verification helper is the one run.sh ships.
+ * Run `lines` (run.sh functions plus a call) with curl stubbed to serve
+ * `manifestJson` and the test key standing in for the release key.
  */
-async function fetchRepoManifestWithRunSh(
-  repo: "turbopanel" | "ui",
+async function runFetchScript(
+  lines: string[],
   manifestJson: string,
-  env: Record<string, string> = {},
-  after = "",
+  env: Record<string, string>,
 ): Promise<{ status: number; stderr: string }> {
-  const source = await Deno.readTextFile(runShPath);
-  const helpers = [
-    "tp_manifest_canonical_python",
-    "tp_manifest_signature_material_python",
-    "tp_verify_manifest_signature",
-    "tp_manifest_strict_canonical",
-    "tp_manifest_signature_bypass",
-    "tp_manifest_compact",
-    "tp_fetch_repo_manifest",
-  ].map((name) => extractShellFunction(source, name)).join("\n") + "\n" +
-    sliceShellFunction(source, "tp_manifest_binary_artifact_field");
   const dir = await Deno.makeTempDir({ prefix: "tp-run-sh-repo-" });
   try {
     const manifestPath = join(dir, "manifest.json");
     await Deno.writeTextFile(manifestPath, manifestJson);
-    const pinVar = repo === "turbopanel"
-      ? "TURBOPANEL_INSTANCE_MANIFEST_URL"
-      : "TURBOPANEL_UI_MANIFEST_URL";
     const script = [
       `TP_RELEASE_SIGNING_PUBLIC_KEY="${TEST_RELEASE_SIGNING_PUBLIC_KEY_HEX}"`,
       `tp_print_styled_line() { printf '%s\\n' "$2"; }`,
       `tp_release_curl() { printf 'fake_curl'; }`,
       `fake_curl() { cat "$MANIFEST_PATH"; }`,
-      helpers,
-      `${pinVar}="https://github.com/TurboPanel/${repo}/releases/download/v0.1.2/manifest.json"`,
-      after
-        ? `tp_fetch_repo_manifest ${repo} && ${after}`
-        : `tp_fetch_repo_manifest ${repo}`,
+      ...lines,
     ].join("\n");
     const out = await new Deno.Command("sh", {
       args: ["-u", "-c", script],
@@ -213,6 +203,87 @@ async function fetchRepoManifestWithRunSh(
   } finally {
     await Deno.remove(dir, { recursive: true });
   }
+}
+
+/**
+ * Run run.sh's real `tp_fetch_repo_manifest` (the `--instance` fetch of the
+ * control-plane / UI manifest) against a local manifest file: only curl is
+ * stubbed, every verification helper is the one run.sh ships. The package is
+ * pinned (`--instance-manifest-url` / `--ui-manifest-url`) unless
+ * `opts.pinned` is false, when the channel's built-in URL is used.
+ */
+async function fetchRepoManifestWithRunSh(
+  repo: "turbopanel" | "ui",
+  manifestJson: string,
+  env: Record<string, string> = {},
+  after = "",
+  opts: { pinned?: boolean } = {},
+): Promise<{ status: number; stderr: string }> {
+  const source = await Deno.readTextFile(runShPath);
+  const helpers = [
+    ...VERIFY_HELPERS,
+    "tp_manifest_compact",
+    "tp_fetch_repo_manifest",
+  ].map((name) => extractShellFunction(source, name)).join("\n") + "\n" +
+    sliceShellFunction(source, "tp_manifest_binary_artifact_field");
+  const pinVar = repo === "turbopanel"
+    ? "TURBOPANEL_INSTANCE_MANIFEST_URL"
+    : "TURBOPANEL_UI_MANIFEST_URL";
+  const pin = opts.pinned === false
+    ? `tp_builtin_repo_manifest_url() { printf 'https://github.com/TurboPanel/%s/releases/latest/download/manifest.json' "$1"; }`
+    : `${pinVar}="https://github.com/TurboPanel/${repo}/releases/download/v0.1.2/manifest.json"`;
+  return await runFetchScript(
+    [
+      helpers,
+      pin,
+      after
+        ? `tp_fetch_repo_manifest ${repo} && ${after}`
+        : `tp_fetch_repo_manifest ${repo}`,
+    ],
+    manifestJson,
+    env,
+  );
+}
+
+/**
+ * Run run.sh's real `tp_fetch_channel_manifest` for a daemon pinned with
+ * `--manifest-url` (TURBOPANEL_MANIFEST_URL), up to the point the verified
+ * manifest is handed on: `VERIFIED` is printed only past the signature check.
+ */
+async function fetchPinnedDaemonManifestWithRunSh(
+  manifestJson: string,
+  env: Record<string, string> = {},
+): Promise<{ status: number; stderr: string }> {
+  const source = await Deno.readTextFile(runShPath);
+  return await runFetchScript(
+    [
+      VERIFY_HELPERS.map((name) => extractShellFunction(source, name)).join(
+        "\n",
+      ),
+      sliceShellFunction(source, "tp_fetch_channel_manifest"),
+      "tp_resolve_channel_manifest() { printf 'VERIFIED\\n'; }",
+      "tp_fetch_channel_manifest",
+    ],
+    manifestJson,
+    {
+      TURBOPANEL_UPDATE_CHANNEL: "release",
+      TURBOPANEL_MANIFEST_URL:
+        "https://github.com/TurboPanel/turbopaneld/releases/download/v0.1.0/manifest.json",
+      ...env,
+    },
+  );
+}
+
+/** A key generated for this run: it signs validly, but it is not ours. */
+async function signWithForeignKey(
+  body: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const pair = await crypto.subtle.generateKey(
+    { name: "Ed25519" },
+    true,
+    ["sign", "verify"],
+  ) as CryptoKeyPair;
+  return await signManifest(body, pair.privateKey);
 }
 
 for (const repo of ["turbopanel", "ui"] as const) {
@@ -249,27 +320,96 @@ for (const repo of ["turbopanel", "ui"] as const) {
   });
 }
 
-test("run.sh --instance skips the signature only for an overlay that also opted in", async () => {
+test("run.sh --instance skips the signature only for an unpinned overlay that also opted in", async () => {
   if (!(await hostCanVerify())) return;
   const unsigned = JSON.stringify(repoManifest("turbopanel"));
-  const overlay = await fetchRepoManifestWithRunSh("turbopanel", unsigned, {
+  const optIn = {
     TURBOPANEL_DL_BASE: "https://dev.example.lan:8443",
     TURBOPANEL_DEV_ALLOW_UNSIGNED_MANIFEST: "1",
-  });
+  };
+  const overlay = await fetchRepoManifestWithRunSh(
+    "turbopanel",
+    unsigned,
+    optIn,
+    "",
+    { pinned: false },
+  );
   assertEquals(overlay.status, 0, overlay.stderr);
   assertStringIncludes(overlay.stderr, "DEVELOPMENT OVERLAY");
+  // A pin (an upgrade or rollback to one release) always verifies, even there.
+  const pinned = await fetchRepoManifestWithRunSh(
+    "turbopanel",
+    unsigned,
+    optIn,
+  );
+  assertEquals(pinned.status, 1, pinned.stderr);
+  assertStringIncludes(pinned.stderr, "unsigned");
   // A stray overlay variable alone (ambient env, a pasted one-liner) still
   // verifies the signature and fails closed on an unsigned manifest.
-  const ambient = await fetchRepoManifestWithRunSh("turbopanel", unsigned, {
-    TURBOPANEL_DL_BASE: "https://dev.example.lan:8443",
-  });
+  const ambient = await fetchRepoManifestWithRunSh(
+    "turbopanel",
+    unsigned,
+    {
+      TURBOPANEL_DL_BASE: "https://dev.example.lan:8443",
+    },
+    "",
+    { pinned: false },
+  );
   assertEquals(ambient.status, 1, ambient.stderr);
   assertStringIncludes(ambient.stderr, "unsigned");
   // The opt-in without an overlay is not the bypass either.
-  const other = await fetchRepoManifestWithRunSh("turbopanel", unsigned, {
-    TURBOPANEL_DEV_ALLOW_UNSIGNED_MANIFEST: "1",
-  });
+  const other = await fetchRepoManifestWithRunSh(
+    "turbopanel",
+    unsigned,
+    {
+      TURBOPANEL_DEV_ALLOW_UNSIGNED_MANIFEST: "1",
+    },
+    "",
+    { pinned: false },
+  );
   assertEquals(other.status, 1, other.stderr);
+});
+
+test("run.sh --instance refuses a pinned manifest signed by another key, and rolls back to an older release-signed one", async () => {
+  if (!(await hostCanVerify())) return;
+  const [foreign, older] = await Promise.all([
+    signWithForeignKey(repoManifest("ui")),
+    signWithTestKey({ ...repoManifest("ui"), version: "0.0.9" }),
+  ]);
+  const optIn = {
+    TURBOPANEL_DL_BASE: "https://dev.example.lan:8443",
+    TURBOPANEL_DEV_ALLOW_UNSIGNED_MANIFEST: "1",
+  };
+  const [refused, rolledBack] = await Promise.all([
+    fetchRepoManifestWithRunSh("ui", JSON.stringify(foreign), optIn),
+    fetchRepoManifestWithRunSh("ui", JSON.stringify(older)),
+  ]);
+  assertEquals(refused.status, 1, refused.stderr);
+  assertStringIncludes(refused.stderr, "invalid signature");
+  assertEquals(rolledBack.status, 0, rolledBack.stderr);
+});
+
+test("run.sh --manifest-url installs only a daemon manifest signed by the release key, older releases included", async () => {
+  if (!(await hostCanVerify())) return;
+  const [foreign, older] = await Promise.all([
+    signWithForeignKey(manifest()),
+    signWithTestKey({ ...manifest(), version: "0.0.9" }),
+  ]);
+  const optIn = { TURBOPANEL_DEV_ALLOW_UNSIGNED_MANIFEST: "1" };
+  const [unsigned, unsignedOptIn, foreignKey, rollback] = await Promise.all([
+    fetchPinnedDaemonManifestWithRunSh(JSON.stringify(manifest())),
+    fetchPinnedDaemonManifestWithRunSh(JSON.stringify(manifest()), optIn),
+    fetchPinnedDaemonManifestWithRunSh(JSON.stringify(foreign)),
+    fetchPinnedDaemonManifestWithRunSh(JSON.stringify(older)),
+  ]);
+  for (const refused of [unsigned, unsignedOptIn, foreignKey]) {
+    assertEquals(refused.status, 1, refused.stderr);
+    assertEquals(refused.stderr.includes("VERIFIED"), false);
+  }
+  assertStringIncludes(unsigned.stderr, "unsigned");
+  assertStringIncludes(foreignKey.stderr, "invalid");
+  assertEquals(rollback.status, 0, rollback.stderr);
+  assertStringIncludes(rollback.stderr, "VERIFIED");
 });
 
 test("run.sh carries --dev-allow-unsigned through the sudo re-exec and the root helper, and extracts archives without their recorded owner", async () => {

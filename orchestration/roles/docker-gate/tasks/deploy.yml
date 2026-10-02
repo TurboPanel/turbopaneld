@@ -1,0 +1,129 @@
+---
+# Atomic deploy of the gate, whatever the Traefik switch says. Order:
+#   1. stage the new source in .next and load-check it with the vendored Deno
+#      (imports resolve, config parses); a failure here touches nothing;
+#   2. record whether the running gate answers, and snapshot every file a swap
+#      can change into .prev;
+#   3. swap, restart, and probe the main socket (and the read-only socket while
+#      the switch is on) -- install.yml;
+#   4. on any failure after the snapshot, restore the snapshot, restart, probe
+#      again, and fail with the original error (never a silent warning).
+- name: Ensure the gate source directory exists
+  ansible.builtin.file:
+    path: "{{ docker_gate_dir }}"
+    state: directory
+    owner: root
+    group: "{{ docker_gate_group }}"
+    mode: "0750"
+
+- name: Start a clean staging directory
+  ansible.builtin.file:
+    path: "{{ docker_gate_stage_dir }}"
+    state: "{{ item }}"
+    owner: root
+    group: root
+    mode: "0700"
+  loop: [absent, directory]
+
+- name: Stage the new gate source
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: "{{ docker_gate_stage_dir }}/{{ item }}"
+    owner: root
+    group: root
+    mode: "0600"
+  loop: "{{ docker_gate_files }}"
+
+# Same flags as the unit minus the sockets; TP_DOCKER_GATE_LOAD_CHECK makes
+# main.ts exit 0 after importing everything and parsing its configuration.
+- name: Load-check the staged gate
+  ansible.builtin.command:
+    argv:
+      - "{{ docker_gate_deno_bin }}"
+      - run
+      - --no-prompt
+      - --no-remote
+      - --no-config
+      - --no-lock
+      - --allow-read
+      - --allow-env=TP_DOCKER_GATE_*
+      - "{{ docker_gate_stage_dir }}/main.ts"
+  environment:
+    TP_DOCKER_GATE_LOAD_CHECK: "1"
+    TP_DOCKER_GATE_MODE: observe
+    DENO_DIR: "{{ docker_gate_cache_dir }}"
+    DENO_NO_UPDATE_CHECK: "1"
+    NO_COLOR: "1"
+  changed_when: false
+
+- name: Look for a running gate before the swap
+  ansible.builtin.uri:
+    url: http://localhost/_ping
+    unix_socket: "{{ docker_gate_socket }}"
+    return_content: true
+  register: _docker_gate_before
+  failed_when: false
+
+- name: Clear the previous snapshot
+  ansible.builtin.file:
+    path: "{{ docker_gate_prev_dir }}"
+    state: "{{ item }}"
+    owner: root
+    group: root
+    mode: "0700"
+  loop: [absent, directory]
+
+- name: Look for the files a swap can change
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop: "{{ docker_gate_managed_paths }}"
+  register: _docker_gate_managed
+
+- name: Snapshot them
+  ansible.builtin.copy:
+    remote_src: true
+    src: "{{ item.item }}"
+    dest: "{{ docker_gate_prev_dir }}/{{ item.item | basename }}"
+    owner: root
+    group: root
+    mode: "0600"
+  loop: "{{ _docker_gate_managed.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: item.stat.exists
+
+- name: Swap in the staged gate and prove it answers
+  block:
+    - name: Install, restart, and probe
+      ansible.builtin.include_tasks: install.yml
+  rescue:
+    - name: Keep the failure for the report
+      ansible.builtin.set_fact:
+        _docker_gate_swap_error: "{{ ansible_failed_result.msg | default('unknown error') }}"
+        _docker_gate_had_previous: false
+        _docker_gate_rollback_error: ""
+
+    # A rollback that itself fails must not hide why the swap failed.
+    - name: Roll back
+      block:
+        - name: Restore the previous gate
+          ansible.builtin.include_tasks: rollback.yml
+      rescue:
+        - name: Keep the rollback failure for the report
+          ansible.builtin.set_fact:
+            _docker_gate_rollback_error: "{{ ansible_failed_result.msg | default('unknown error') }}"
+
+    - name: Fail the deploy after the rollback
+      ansible.builtin.fail:
+        msg: >-
+          Docker gate swap failed
+          ({{ 'previous gate restored and answering' if (_docker_gate_had_previous and (_docker_gate_rollback_error | length) == 0)
+          else 'previous gate restored but NOT confirmed: ' ~ _docker_gate_rollback_error if (_docker_gate_had_previous and (_docker_gate_rollback_error | length) > 0)
+          else 'no previous gate: stopped' if (_docker_gate_rollback_error | length) == 0
+          else 'rollback failed: ' ~ _docker_gate_rollback_error }}):
+          {{ _docker_gate_swap_error }}
+
+- name: Drop the staging directory
+  ansible.builtin.file:
+    path: "{{ docker_gate_stage_dir }}"
+    state: absent
