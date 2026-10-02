@@ -899,11 +899,18 @@ tp_verb_readlink() {
   readlink -- "./$PIN_NAME"
 }
 
+# `-d` answers for a real directory only: a symlink as the last component is
+# "no" even when it points at one, so a tenant-planted link cannot pass as a
+# document root (`test -d` alone follows it).
 tp_verb_test() {
-  [ "$#" -eq 2 ] || tp_die "test: only test -e|-L PATH"
-  case "$1" in -e|-L) ;; *) tp_die "test: only -e or -L" ;; esac
+  [ "$#" -eq 2 ] || tp_die "test: only test -e|-d|-L PATH"
+  case "$1" in -e|-d|-L) ;; *) tp_die "test: only -e, -d or -L" ;; esac
   tp_require_class "$2" principal tree
   tp_pin_parent "$2" || exit 1
+  if [ "$1" = "-d" ]; then
+    [ ! -L "./$PIN_NAME" ] && [ -d "./$PIN_NAME" ]
+    return
+  fi
   test "$1" "./$PIN_NAME"
 }
 

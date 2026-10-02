@@ -771,6 +771,31 @@ test("root reads go through a verified descriptor, not a planted symlink", async
   });
 });
 
+test("test -d answers for a real directory, never a symlink to one", async () => {
+  await withHost(async (host) => {
+    const release = host.path("srv/users/alice/sites/web/releases/r1");
+    await Deno.mkdir(join(release, "public"), { recursive: true });
+    await Deno.mkdir(host.path("srv/users/bob/sites/web/public"), {
+      recursive: true,
+    });
+    await Deno.symlink(
+      host.path("srv/users/bob/sites/web/public"),
+      join(release, "linked"),
+    );
+    await Deno.writeTextFile(join(release, "file"), "x");
+    const real = await host.run(["test", "-d", join(release, "public")]);
+    assertEquals(real.code, 0, real.stderr);
+    for (const name of ["linked", "file", "missing"]) {
+      const answer = await host.run(["test", "-d", join(release, name)]);
+      assertEquals(answer.code === 0, false, name);
+    }
+    // `-e` still follows the last component, as the `current` check needs.
+    const exists = await host.run(["test", "-e", join(release, "linked")]);
+    assertEquals(exists.code, 0, exists.stderr);
+    await refused(host, ["test", "-f", join(release, "file")]);
+  });
+});
+
 test("systemctl, journalctl, sysctl, ip, xtables and wg accept only the daemon's shapes", async () => {
   await withHost(async (host) => {
     const ok = await host.run([
