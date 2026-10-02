@@ -156,8 +156,15 @@ deps only: `build-essential`, `libssl-dev`, `libpcre2-dev`, … — not
 `apache2`), and points `current` at that tree. Main config is
 `/etc/turbopanel/apache/httpd.conf` with `IncludeOptional …/sites/*.conf`
 and loads `mod_proxy` + `mod_proxy_fcgi` for PHP. Driven by
-**`turbopanel-apache.service`** (master starts as root and drops to
-`tpapache` via `User`/`Group` in `httpd.conf`). Main config includes a
+**`turbopanel-apache.service`**, which runs the whole server, master
+included, as `tpapache` (`User=`/`Group=` in the unit, none in
+`httpd.conf`). Logs and the pidfile live in the unit's top-level
+`LogsDirectory=turbopanel-apache` / `RuntimeDirectory=turbopanel-apache`
+(`/var/log/turbopanel-apache`, `/run/turbopanel-apache`), never in the
+`tp`-owned trees. A changed unit restarts a running server (`try-restart`);
+a reload would keep the old master. The daemon's config test is
+`sudo -n -u tpapache -- httpd -t -f /etc/turbopanel/apache/httpd.conf`,
+pinned in sudoers. Main config includes a
 bootstrap `Listen 127.0.0.1:19080` so httpd can start before any site
 fragment exists (Apache refuses zero-Listen configs). ASF httpd has **no**
 mod_php — PHP is the sibling `php-fpm` role below.

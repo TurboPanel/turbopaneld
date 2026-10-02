@@ -578,13 +578,12 @@ controls below do not close:
    to any path as root. tp-host pins that unit's exec lines, not the config.
    Closing it needs the unit to run as `tpcaddy` with
    `CAP_NET_BIND_SERVICE` and a config directory `tp` cannot rewrite.
-3. **Engine config tests run as root** — `httpd -t -f
-   /etc/turbopanel/apache/httpd.conf` and `php-fpm<x.y> --fpm-config
+3. **php-fpm's config test runs as root** — `php-fpm<x.y> --fpm-config
    /etc/turbopanel/php/<x.y>/php-fpm.conf --test` (`TP_ENGINE_VALIDATE`,
-   pinned to exactly those files). `/etc/turbopanel` is `tp`-owned, so `tp`
-   can replace those files, and both engines load modules while testing.
-   Closing it needs those tests to run as the engine account, or the config
-   directories to be root-owned.
+   pinned to exactly that file). `/etc/turbopanel` is `tp`-owned, so `tp`
+   can replace it, and php-fpm loads extensions while testing. Apache's
+   `httpd -t` no longer does: it runs as `tpapache` (pinned arguments, no
+   `env`), and `turbopanel-apache.service` runs its master as `tpapache`.
 
 The controls below remove every direct root escape through sudo and keep a
 daemon bug or an injected argument from reaching arbitrary host paths,
