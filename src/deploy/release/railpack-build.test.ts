@@ -7,6 +7,7 @@ import {
   ensureBuildkitRailpack,
   type EnsureBuildkitRailpackDeps,
   RAILPACK_FRONTEND_IMAGE,
+  RAILPACK_FRONTEND_TAG,
   RAILPACK_FRONTEND_VERSION,
   RAILPACK_VERSION,
   railpackBinaryPath,
@@ -508,11 +509,58 @@ test({
       assertEquals(
         record.some((line) =>
           line.includes(
-            `docker pull ${RAILPACK_FRONTEND_IMAGE}:${RAILPACK_FRONTEND_VERSION}`,
+            `docker pull ${RAILPACK_FRONTEND_IMAGE}:v${RAILPACK_FRONTEND_VERSION}`,
           )
         ),
         true,
       );
+    });
+  },
+});
+
+test("the frontend tag is v-prefixed in the daemon and the buildkit role", async () => {
+  assertEquals(RAILPACK_FRONTEND_TAG, `v${RAILPACK_FRONTEND_VERSION}`);
+  const roles = new URL(
+    "../../../orchestration/roles/buildkit/",
+    import.meta.url,
+  );
+  const defaults = await Deno.readTextFile(new URL("defaults/main.yml", roles));
+  const tasks = await Deno.readTextFile(new URL("tasks/main.yml", roles));
+  assertEquals(
+    /^railpack_frontend_tag: "(.+)"$/m.exec(defaults)?.[1],
+    "v{{ railpack_frontend_version }}",
+  );
+  assertEquals(
+    /^railpack_frontend_version: "(.+)"$/m.exec(defaults)?.[1],
+    RAILPACK_FRONTEND_VERSION,
+  );
+  assertEquals(
+    tasks.includes(
+      'REF="{{ railpack_frontend_image }}:{{ railpack_frontend_tag }}"',
+    ),
+    true,
+  );
+});
+
+test({
+  name:
+    "ensureBuildkitRailpack reports the playbook failure when the fallback fails too",
+  permissions: { read: true, write: true, run: ["ln"] },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      const layout = layoutOf(fixture.env);
+      const err = await assertRejects(
+        () =>
+          ensureBuildkitRailpack(layout, {
+            runBuildkitSetup: () =>
+              Promise.reject(new Error("frontend task: non-zero return code")),
+            resolveArch: () => "amd64",
+            runCommand: mockDownloadCommands({ fail: "buildkit-curl" }),
+          }),
+        Error,
+        "buildkit-setup playbook failed: frontend task: non-zero return code",
+      );
+      assertEquals(err.message.includes("direct download fallback"), true);
     });
   },
 });

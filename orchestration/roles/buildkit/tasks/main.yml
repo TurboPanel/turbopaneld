@@ -122,7 +122,7 @@
       if [ -n "$SRC_DIGEST" ]; then
         REF="{{ railpack_frontend_image }}@${SRC_DIGEST}"
       else
-        REF="{{ railpack_frontend_image }}:{{ railpack_frontend_version }}"
+        REF="{{ railpack_frontend_image }}:{{ railpack_frontend_tag }}"
       fi
       TMP="$(mktemp -d)"
       trap 'rm -rf "$TMP"' EXIT
