@@ -461,31 +461,39 @@ const SHARED_PROPAGATION = /^(?:r?shared|r?slave)$/;
  * tmpfs (npipe, cluster, image...), and a bind propagation that lets a mount
  * made inside the container show up on the host.
  */
-function checkMountKinds(hostConfig: Record<string, unknown>): Violation[] {
+function checkBindStrings(hostConfig: Record<string, unknown>): Violation[] {
+  return stringList(hostConfig.Binds)
+    .filter((bind) =>
+      (bind.split(":")[2] ?? "").split(",").some((option) =>
+        SHARED_PROPAGATION.test(option)
+      )
+    )
+    .map(() => ({ rule: "bind-propagation" }));
+}
+
+function checkMountEntry(mount: Record<string, unknown>): Violation[] {
   const out: Violation[] = [];
-  for (const bind of stringList(hostConfig.Binds)) {
-    const options = (bind.split(":")[2] ?? "").split(",");
-    if (options.some((option) => SHARED_PROPAGATION.test(option))) {
-      out.push({ rule: "bind-propagation" });
-    }
+  const type = mount.Type;
+  if (typeof type !== "string" || !SAFE_MOUNT_TYPES.has(type)) {
+    out.push({
+      rule: "mount-type",
+      detail: typeof type === "string" ? fieldDetail(type) : "<non-string>",
+    });
   }
-  if (!Array.isArray(hostConfig.Mounts)) return out;
-  for (const mount of hostConfig.Mounts) {
-    if (!isRecord(mount)) continue;
-    const type = mount.Type;
-    if (typeof type !== "string" || !SAFE_MOUNT_TYPES.has(type)) {
-      out.push({
-        rule: "mount-type",
-        detail: typeof type === "string" ? fieldDetail(type) : "<non-string>",
-      });
-    }
-    const bindOptions = mount.BindOptions;
-    const propagation = isRecord(bindOptions) ? bindOptions.Propagation : "";
-    if (typeof propagation !== "string" || !SAFE_PROPAGATION.has(propagation)) {
-      out.push({ rule: "bind-propagation" });
-    }
+  const bindOptions = mount.BindOptions;
+  const propagation = isRecord(bindOptions) ? bindOptions.Propagation : "";
+  if (typeof propagation !== "string" || !SAFE_PROPAGATION.has(propagation)) {
+    out.push({ rule: "bind-propagation" });
   }
   return out;
+}
+
+function checkMountKinds(hostConfig: Record<string, unknown>): Violation[] {
+  const mounts = Array.isArray(hostConfig.Mounts) ? hostConfig.Mounts : [];
+  return [
+    ...checkBindStrings(hostConfig),
+    ...mounts.filter(isRecord).flatMap(checkMountEntry),
+  ];
 }
 
 /** What the mounts of one create came to. */
@@ -700,12 +708,8 @@ function checkUnknownFields(hostConfig: Record<string, unknown>): Violation[] {
     }));
 }
 
-function checkHostConfigFlags(
-  hostConfig: Record<string, unknown>,
-  config: PolicyConfig,
-): Violation[] {
+function checkPresentFields(hostConfig: Record<string, unknown>): Violation[] {
   const out: Violation[] = [];
-  if (hostConfig.Privileged === true) out.push({ rule: "privileged" });
   for (const [field, rule] of BANNED_HOSTCONFIG_FIELDS) {
     if (isPresent(hostConfig[field])) out.push({ rule });
   }
@@ -718,6 +722,12 @@ function checkHostConfigFlags(
     const value = hostConfig[field];
     if (typeof value === "number" && value > 0) out.push({ rule });
   }
+  return out;
+}
+
+function checkScalarFields(hostConfig: Record<string, unknown>): Violation[] {
+  const out: Violation[] = [];
+  if (hostConfig.Privileged === true) out.push({ rule: "privileged" });
   const score = hostConfig.OomScoreAdj;
   if (typeof score === "number" && score < 0) {
     out.push({ rule: "oom-score-adj" });
@@ -726,19 +736,30 @@ function checkHostConfigFlags(
   if (typeof runtime === "string" && runtime !== "" && runtime !== "runc") {
     out.push({ rule: "runtime", detail: runtime });
   }
-  for (
-    const cap of [
-      ...stringList(hostConfig.CapAdd),
-      ...stringList(hostConfig.Capabilities),
-    ]
-  ) {
-    const name = cap.toUpperCase().replace(/^CAP_/, "");
-    if (!config.capAllowlist.includes(name)) {
-      out.push({ rule: "cap-add", detail: name });
-    }
-  }
+  return out;
+}
+
+function checkCapabilities(
+  hostConfig: Record<string, unknown>,
+  config: PolicyConfig,
+): Violation[] {
   return [
-    ...out,
+    ...stringList(hostConfig.CapAdd),
+    ...stringList(hostConfig.Capabilities),
+  ]
+    .map((cap) => cap.toUpperCase().replace(/^CAP_/, ""))
+    .filter((name) => !config.capAllowlist.includes(name))
+    .map((name) => ({ rule: "cap-add", detail: name }));
+}
+
+function checkHostConfigFlags(
+  hostConfig: Record<string, unknown>,
+  config: PolicyConfig,
+): Violation[] {
+  return [
+    ...checkScalarFields(hostConfig),
+    ...checkPresentFields(hostConfig),
+    ...checkCapabilities(hostConfig, config),
     ...checkLogConfig(hostConfig),
     ...checkUnknownFields(hostConfig),
   ];
