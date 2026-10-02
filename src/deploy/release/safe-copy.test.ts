@@ -203,6 +203,25 @@ test("a link planted at a destination directory or file is refused, not followed
   });
 });
 
+test("a copy merges into real destination directories and replaces regular files", async () => {
+  await withTree(async (tree) => {
+    await Deno.mkdir(join(tree.src, "static"));
+    await Deno.writeTextFile(join(tree.src, "static/app.js"), "new");
+    await Deno.mkdir(join(tree.dest, "static"), { recursive: true });
+    await Deno.writeTextFile(join(tree.dest, "static/app.js"), "old");
+    await copy(tree);
+    assertEquals(
+      await Deno.readTextFile(join(tree.dest, "static/app.js")),
+      "new",
+    );
+
+    // A destination name that is a file where a directory belongs.
+    await Deno.remove(join(tree.dest, "static"), { recursive: true });
+    await Deno.writeTextFile(join(tree.dest, "static"), "file");
+    await assertRejects(() => copy(tree), UnsafeTreeError, "not a directory");
+  });
+});
+
 test("FIFOs and sockets are dropped; set-id and group/other-write bits are stripped", async () => {
   await withTree(async (tree) => {
     const fifo = await new Deno.Command("mkfifo", {
