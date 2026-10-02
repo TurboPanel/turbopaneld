@@ -44,6 +44,8 @@ export type CallSiteSetup = {
   links?: Array<[string, string]>;
   /** `/etc/group` lines to add. */
   groups?: string[];
+  /** Unix sockets to bind (left in place, unlistened). */
+  sockets?: string[];
 };
 
 export type TpHostSample = {
@@ -193,6 +195,13 @@ const SITES: CallSite[] = [
     argv: ["rm", "-rf", "--", SITE],
     setup: dir(SITE),
   }),
+  tpHost(
+    'src/commands/stop-environment.ts|["-n","rm","-rf","--",deploymentDir]',
+    {
+      argv: ["rm", "-rf", "--", `${STATE}/deployments/proj1/env1`],
+      setup: dir(`${STATE}/deployments/proj1/env1/data`),
+    },
+  ),
 
   // --- systemd unit sets (tenant cron, scheduled backups) ------------------
   tpHost(
@@ -400,6 +409,9 @@ const SITES: CallSite[] = [
       ],
     },
   ),
+  tpHost('src/deploy/ingress.ts|["-n","systemctl","restart",CADDY_SERVICE]', {
+    argv: ["systemctl", "restart", "turbopanel-hosting-caddy.service"],
+  }),
   tpHost('src/deploy/ingress.ts|["-n","systemctl","reload",CADDY_SERVICE]', {
     argv: ["systemctl", "reload", "turbopanel-hosting-caddy.service"],
   }),
@@ -444,6 +456,19 @@ const SITES: CallSite[] = [
   tpHost(
     'src/deploy/instance-acme-http01.ts|["-n","systemctl","start",INSTANCE_ACME_SERVICE]',
     { argv: ["systemctl", "start", "turbopanel-instance-acme.service"] },
+  ),
+  tpHost(
+    'src/deploy/instance-acme-http01.ts|["-n","setfacl","-P","-m",INSTANCE_ACME_SOCKET_ACL,socketPath]',
+    {
+      argv: [
+        "setfacl",
+        "-P",
+        "-m",
+        "u:tpedge:rw",
+        `${P}/run/turbopanel/instance-acme.sock`,
+      ],
+      setup: { sockets: [`${P}/run/turbopanel/instance-acme.sock`] },
+    },
   ),
   tpHost(
     'src/deploy/instance-acme-http01.ts|["-n","systemctl","stop",INSTANCE_ACME_SERVICE]',
@@ -695,6 +720,10 @@ const SITES: CallSite[] = [
     argv: ["test", "-e", `${SITE}/shared`],
     setup: dir(`${SITE}/shared`),
   }),
+  tpHost('src/deploy/release/promote.ts|["-n","test","-d",target]', {
+    argv: ["test", "-d", `${RELEASE}/public`],
+    setup: dir(`${RELEASE}/public`),
+  }),
   tpHost('src/deploy/release/promote.ts|["-n","rm","-rf","--",linkPath]', {
     argv: ["rm", "-rf", "--", `${RELEASE}/storage`],
     setup: dir(`${RELEASE}/storage`),
@@ -821,6 +850,25 @@ const SITES: CallSite[] = [
         "+",
       ],
       setup: dir(`${SITE}/webroot`),
+    },
+  ),
+  tpHost(
+    'src/deploy/release/release-links.ts|["-n",...releaseLinkTargetsFindArgs(releaseDir)]',
+    {
+      argv: [
+        "find",
+        RELEASE,
+        "-type",
+        "l",
+        "-exec",
+        "realpath",
+        "-m",
+        "-z",
+        "--",
+        "{}",
+        "+",
+      ],
+      setup: dir(RELEASE),
     },
   ),
   tpHost('src/deploy/site.ts|["-n","ls","-A","--",documentRoot]', {
@@ -951,8 +999,9 @@ const SITES: CallSite[] = [
     },
   ),
   sudo(
-    'src/deploy/site/engine-driver.ts|["-n",apacheBinaryPath(layout),"-t","-f",apacheMainConfigPath(layout)]',
+    'src/deploy/site/engine-driver.ts|["-n","-u","tpapache","--",apacheBinaryPath(layout),"-t","-f",apacheMainConfigPath(layout)]',
     {
+      runas: "tpapache",
       argv: [
         `${VENDOR}/apache/current/bin/httpd`,
         "-t",
@@ -1000,6 +1049,16 @@ const SITES: CallSite[] = [
       ],
     },
   ),
+
+  // --- Reads behind closed trees ---------------------------------------------
+  tpHost('src/permissions/privileged-read.ts|["-n","cat","--",path]', {
+    argv: ["cat", "--", `${CONF}/caddy/instance-acme-settings.json`],
+    setup: file(`${CONF}/caddy/instance-acme-settings.json`),
+  }),
+  tpHost('src/permissions/privileged-read.ts|["-n","test","-e",path]', {
+    argv: ["test", "-e", `${HOME}/volumes/stor-1`],
+    setup: dir(`${HOME}/volumes/stor-1`),
+  }),
 
   // --- SSH ------------------------------------------------------------------
   tpHost('src/deploy/ssh/apply.ts|["-n","cat","--",path]', {

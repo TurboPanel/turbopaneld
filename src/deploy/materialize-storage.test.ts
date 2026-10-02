@@ -416,6 +416,37 @@ function fileEntry(name: string, content = "fresh") {
   };
 }
 
+/** Deny the daemon's `mkdir` under `prefix`, as a root-owned parent does. */
+async function withDeniedMkdir(
+  prefix: string,
+  fn: () => Promise<void>,
+): Promise<void> {
+  const mkdir = Deno.mkdir;
+  Deno.mkdir =
+    ((path: string | URL, options?: Deno.MkdirOptions) =>
+      String(path).startsWith(prefix)
+        ? Promise.reject(new Deno.errors.PermissionDenied(String(path)))
+        : mkdir(path, options)) as typeof Deno.mkdir;
+  try {
+    await fn();
+  } finally {
+    Deno.mkdir = mkdir;
+  }
+}
+
+function unownedDirectory(sourcePath: string) {
+  return {
+    storageId: "stor-op",
+    locationId: "loc-op",
+    kind: "directory" as const,
+    name: "data",
+    provider: "path" as const,
+    serverId: "srv",
+    sourcePath,
+    mounts: [],
+  };
+}
+
 test("a file copy replaces a planted link instead of writing through it", async () => {
   await withTempLayout(async (layout) => {
     const victim = join(layout.stateDir, "victim.txt");
@@ -528,5 +559,42 @@ test("a directory copy refuses a source path that is a link", async () => {
       Error,
       "is not a directory",
     );
+  });
+});
+
+test("materializeLocation accepts an existing operator directory the daemon cannot create in", async () => {
+  await withTempLayout(async (layout) => {
+    const operatorDir = join(layout.stateDir, "operator", "data");
+    await Deno.mkdir(operatorDir, { recursive: true });
+    await withDeniedMkdir(join(layout.stateDir, "operator"), async () => {
+      const hostPath = await materializeLocation(
+        layout,
+        "org-1",
+        unownedDirectory(operatorDir),
+        undefined,
+        "",
+      );
+      assertEquals(hostPath, operatorDir);
+    });
+  });
+});
+
+test("materializeLocation names a missing unowned directory it may not create", async () => {
+  await withTempLayout(async (layout) => {
+    const operatorDir = join(layout.stateDir, "operator", "data");
+    await withDeniedMkdir(join(layout.stateDir, "operator"), async () => {
+      await assertRejects(
+        () =>
+          materializeLocation(
+            layout,
+            "org-1",
+            unownedDirectory(operatorDir),
+            undefined,
+            "",
+          ),
+        Error,
+        "has no principal to own it",
+      );
+    });
   });
 });

@@ -947,7 +947,7 @@ test("ensureSystemPrincipals grants the runtimes its spec carries", async () => 
   const added = calls
     .filter((c) => c.args.includes("usermod") && c.args.includes("-aG"))
     .map((c) => c.args[3]);
-  assertEquals(added.sort(), ["tpnode24", "tpphp84"]);
+  assertEquals(added.sort(), ["tpnode24", "tpphp84", "tpprincipal"]);
 });
 
 test("ensureSystemPrincipals grants the access group its spec carries", async () => {
@@ -967,7 +967,7 @@ test("ensureSystemPrincipals grants the access group its spec carries", async ()
     .filter((c) => c.args.includes("usermod") && c.args.includes("-aG"))
     .map((c) => c.args[3]);
   // Entitlements and access are one reconcile pass, so both land together.
-  assertEquals(added.sort(), ["tpphp84", "tpshell"]);
+  assertEquals(added.sort(), ["tpphp84", "tpprincipal", "tpshell"]);
 });
 
 test("downgrading from shell to files-only revokes the shell group", async () => {
@@ -1001,7 +1001,11 @@ test("switching access level revokes the old group before granting the new one",
   const membership = calls
     .filter((c) => c.args.includes("gpasswd") || c.args.includes("-aG"))
     .map((c) => c.args.slice(-2).join(" "));
-  assertEquals(membership, ["appuser tpshell", "tpsftp appuser"]);
+  assertEquals(membership, [
+    "appuser tpshell",
+    "tpprincipal appuser",
+    "tpsftp appuser",
+  ]);
 });
 
 test("ensureSystemPrincipals refuses sftp and shell together before any host call", async () => {
@@ -1034,7 +1038,7 @@ test("the password group still rides along with one access level", async () => {
   const added = calls
     .filter((c) => c.args.includes("-aG"))
     .map((c) => c.args.at(-2));
-  assertEquals(added, ["tppasswd", "tpshell"]);
+  assertEquals(added, ["tppasswd", "tpprincipal", "tpshell"]);
 });
 
 test("a suspended account keeps its groups revoked and nothing else touched", async () => {
@@ -1063,8 +1067,52 @@ test("an access group the registry does not define is dropped, not created", asy
   );
   // Inventing the group would hand out an `sshd` Match block nobody wrote.
   assertEquals(
-    calls.filter((c) => c.args.includes("usermod") && c.args.includes("-aG")),
-    [],
+    calls
+      .filter((c) => c.args.includes("usermod") && c.args.includes("-aG"))
+      .map((c) => c.args[3]),
+    ["tpprincipal"],
+  );
+});
+
+test("every principal joins the every-principal group, even with no SSH level", async () => {
+  // A site owner with no access level matched no sshd block, so a key it put
+  // in its own ~/.ssh/authorized_keys authenticated and TCP forwarding reached
+  // the host's loopback. tpprincipal selects the drop-in's backstop block.
+  const { run, calls } = captureRun({});
+  await ensureSystemPrincipals(
+    stubLayout(),
+    [{ principalId: "pr-1", username: "appuser", accessGroups: [] }],
+    run,
+  );
+  assertEquals(
+    calls
+      .filter((c) => c.args.includes("usermod") && c.args.includes("-aG"))
+      .map((c) => c.args[3]),
+    ["tpprincipal"],
+  );
+});
+
+test("a principal that cannot join the every-principal group fails the reconcile", async () => {
+  // Best-effort is right for a runtime group, wrong here: a silent miss leaves
+  // the account on the host's sshd defaults.
+  const { run: base } = captureRun({});
+  const run: RunFn = (command, args, stdin) =>
+    args.includes("-aG") && args.includes("tpprincipal")
+      ? Promise.resolve({
+        success: false,
+        stdout: "",
+        stderr: "usermod: group 'tpprincipal' does not exist",
+      })
+      : base(command, args, stdin);
+  await assertRejects(
+    () =>
+      ensureSystemPrincipals(
+        stubLayout(),
+        [{ principalId: "pr-1", username: "appuser" }],
+        run,
+      ),
+    Error,
+    "tpprincipal",
   );
 });
 
@@ -1307,8 +1355,10 @@ test("ensureSystemPrincipals drops an unknown runtime instead of failing", async
     runtimes: [{ runtime: "python", series: "3.12" }],
   }], run);
   assertEquals(
-    calls.filter((c) => c.args.includes("usermod") && c.args.includes("-aG")),
-    [],
+    calls
+      .filter((c) => c.args.includes("usermod") && c.args.includes("-aG"))
+      .map((c) => c.args[3]),
+    ["tpprincipal"],
   );
 });
 
@@ -1840,10 +1890,13 @@ test("ensureSystemPrincipals adopts an account below the floor when its uid is a
     home: defaultHome,
     shell: "/bin/bash",
   }], run);
+  // Supplementary-group joins (`usermod -aG`) are membership, not a change to
+  // the adopted account itself.
   assertEquals(
     calls.some((call) =>
       call.command === "sudo" &&
-      (call.args.includes("useradd") || call.args.includes("usermod"))
+      (call.args.includes("useradd") ||
+        (call.args.includes("usermod") && !call.args.includes("-aG")))
     ),
     false,
   );

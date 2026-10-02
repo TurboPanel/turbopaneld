@@ -51,7 +51,7 @@ import {
 } from "../logs/contracts.ts";
 import { ensureDocker as defaultEnsureDocker } from "../deploy/ensure-docker.ts";
 import { ensureSystemPrincipals } from "../deploy/ensure-principal.ts";
-import { applySshAccess } from "../deploy/ssh/apply.ts";
+import { applySshAccess, type PrincipalSshSpec } from "../deploy/ssh/apply.ts";
 import {
   buildTcpUdpIngressEntries,
   cleanupStaleTcpUdpServiceIngress,
@@ -563,38 +563,54 @@ async function ensureDeployPrincipals(
     })),
   );
 
-  // Key files, but **never** the removal sweep: this payload describes one
-  // environment and the host serves many, so pruning here would revoke every
-  // other environment's access. `server.principals.reconcile` is the caller
-  // that holds the whole server and is allowed to delete.
-  //
-  // Skipped entirely when no principal declared keys, so a deploy from a
-  // control plane that predates the key subsystem does not touch `sshd`.
+  await applyDeploySshAccess(principalMaterial);
+}
+
+/**
+ * Key files and the `sshd` drop-in for the principals a deploy materialized.
+ *
+ * Runs on **every** deploy that materializes a principal, keys or not. The
+ * drop-in's backstop block is what stops a principal with no SSH level from
+ * signing in with a key it planted in its own home and tunnelling into the
+ * host; gating this on declared keys left that drop-in off every host whose
+ * tenants never asked for SSH — the default case.
+ *
+ * Key files, but **never** the removal sweep: this payload describes one
+ * environment and the host serves many, so pruning here would revoke every
+ * other environment's access. `server.principals.reconcile` is the caller that
+ * holds the whole server and is allowed to delete. A principal whose material
+ * says nothing about keys (`sshKeys` absent) gets no key file written.
+ */
+export async function applyDeploySshAccess(
+  principalMaterial: readonly EnvironmentDeployPrincipalMaterial[],
+  apply: (
+    principals: readonly PrincipalSshSpec[],
+  ) => Promise<unknown> = applySshAccess,
+): Promise<void> {
+  if (principalMaterial.length === 0) return;
   const withKeys = principalMaterial.filter(
     (principal) => principal.sshKeys !== undefined,
   );
-  if (withKeys.length > 0) {
-    try {
-      await applySshAccess(
-        withKeys.map((principal) => ({
-          username: principal.username,
-          keys: principal.sshKeys ?? [],
-        })),
-      );
-    } catch (err) {
-      // Warn, do not fail. A host whose `sshd_config` has no `Include` line
-      // cannot take the drop-in, and that is a real problem — but it is not a
-      // reason to refuse to deploy an application. The key files themselves are
-      // written before that check, so the account is left correct-but-not-yet
-      // -consulted, and `server.principals.reconcile` is where the operator
-      // sees the failure as a failure.
-      logWarn(
-        "deploy",
-        `ssh access could not be applied: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      );
-    }
+  try {
+    await apply(
+      withKeys.map((principal) => ({
+        username: principal.username,
+        keys: principal.sshKeys ?? [],
+      })),
+    );
+  } catch (err) {
+    // Warn, do not fail. A host whose `sshd_config` has no `Include` line
+    // cannot take the drop-in, and that is a real problem — but it is not a
+    // reason to refuse to deploy an application. The key files themselves are
+    // written before that check, so the account is left correct-but-not-yet
+    // -consulted, and `server.principals.reconcile` is where the operator
+    // sees the failure as a failure.
+    logWarn(
+      "deploy",
+      `ssh access could not be applied: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
   }
 }
 
