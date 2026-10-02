@@ -8,7 +8,8 @@ import { logError, logInfo, logWarn } from "../util/logger.ts";
  *
  * Each `*.token` file in {@link TUNNELS_DIR} describes one tunnel: the file holds
  * a tunnel token (paste it in) and the basename is the tunnel's name. Every
- * configured tunnel is run with `cloudflared tunnel run --token <token>` and
+ * configured tunnel is run with `cloudflared tunnel run` with the token in `TUNNEL_TOKEN` (never argv,
+ * which any local user can read via `ps`) and
  * restarted if it exits. Multiple tunnels run side by side -- drop in more files
  * to add accounts/tunnels later.
  */
@@ -35,6 +36,7 @@ export type TunnelsTestHooks = {
     bin: string,
     args: string[],
     signal: AbortSignal,
+    env: Record<string, string>,
   ) => Promise<{ code: number }>;
 };
 
@@ -105,16 +107,17 @@ function superviseTunnel(
       "--no-autoupdate",
       "tunnel",
       "run",
-      "--token",
-      config.token,
     ];
+    // cloudflared reads the token from TUNNEL_TOKEN; keep it out of argv.
+    const env = { TUNNEL_TOKEN: config.token };
 
     let status: { code: number };
     if (testHooks?.runTunnel) {
-      status = await testHooks.runTunnel(bin, args, signal);
+      status = await testHooks.runTunnel(bin, args, signal, env);
     } else {
       const command = new Deno.Command(bin, {
         args,
+        env,
         stdout: "inherit",
         stderr: "inherit",
       });

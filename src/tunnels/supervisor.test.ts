@@ -116,13 +116,15 @@ test("startTunnels supervises configured tunnels until aborted", async () => {
     await Deno.writeTextFile(join(dir, "b.token"), "token-b\n");
 
     const runs: string[] = [];
+    const tokens: string[] = [];
     setTunnelsTestHooks({
       enabled: true,
       tunnelsDir: dir,
       delay: () => Promise.resolve(),
       ensureCloudflared: () => Promise.resolve("/opt/fake/cloudflared"),
-      runTunnel: (bin, args, signal) => {
+      runTunnel: (bin, args, signal, env) => {
         runs.push(`${bin} ${args.join(" ")}`);
+        tokens.push(env.TUNNEL_TOKEN ?? "");
         return new Promise((resolve) => {
           if (signal.aborted) {
             resolve({ code: 0 });
@@ -141,14 +143,9 @@ test("startTunnels supervises configured tunnels until aborted", async () => {
       const controller = new AbortController();
       await startTunnels(controller.signal);
       assertEquals(runs.length, 2);
-      assertEquals(
-        runs.some((line) => line.includes("--token token-a")),
-        true,
-      );
-      assertEquals(
-        runs.some((line) => line.includes("--token token-b")),
-        true,
-      );
+      assertEquals(runs.some((line) => line.includes("--token")), false);
+      assertEquals(runs.some((line) => line.includes("token-")), false);
+      assertEquals(tokens.sort(), ["token-a", "token-b"]);
       controller.abort();
       await new Promise((resolve) => setTimeout(resolve, 20));
     } finally {
