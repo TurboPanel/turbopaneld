@@ -481,7 +481,9 @@ function checkMountEntry(mount: Record<string, unknown>): Violation[] {
     });
   }
   const bindOptions = mount.BindOptions;
-  const propagation = isRecord(bindOptions) ? bindOptions.Propagation : "";
+  const propagation = isRecord(bindOptions)
+    ? bindOptions.Propagation ?? ""
+    : "";
   if (typeof propagation !== "string" || !SAFE_PROPAGATION.has(propagation)) {
     out.push({ rule: "bind-propagation" });
   }
@@ -684,7 +686,8 @@ const SAFE_LOG_DRIVERS = new Set(["", "json-file", "local", "none"]);
 function checkLogConfig(hostConfig: Record<string, unknown>): Violation[] {
   const logConfig = hostConfig.LogConfig;
   if (!isRecord(logConfig)) return [];
-  const type = logConfig.Type;
+  // No Type (or null) is the engine's default driver.
+  const type = logConfig.Type ?? "";
   if (typeof type === "string" && SAFE_LOG_DRIVERS.has(type)) return [];
   // syslog, fluentd, gelf... dial an address the container's author picks.
   return [{

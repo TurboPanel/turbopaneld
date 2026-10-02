@@ -761,3 +761,19 @@ test("an unknown HostConfig key is reported by a harmless name only", async () =
     ["<odd>", "SomeFutureField"],
   );
 });
+
+test("optional fields left out are their defaults, not findings", async () => {
+  assertEquals(
+    await createVerdict({
+      Mounts: [{
+        Type: "bind",
+        Source: "/srv/users/a/d",
+        Target: "/d",
+        BindOptions: { NonRecursive: true },
+      }],
+    }),
+    [],
+  );
+  assertEquals(await createVerdict({ LogConfig: { Config: {} } }), []);
+  assertEquals(await createVerdict({ LogConfig: { Type: null } }), []);
+});
