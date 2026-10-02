@@ -30,10 +30,13 @@ test("every automatic-update consumer fetches run.sh with -L, so the redirect is
   );
   assertStringIncludes(reconcile, 'const curlArgs = ["-fsSL"];');
   const runSh = await Deno.readTextFile(join(ROOT, "scripts", "run.sh"));
-  assertStringIncludes(runSh, 'TP_CURL_FETCH="curl -fsSL $TP_CURL_RETRY"');
   assertStringIncludes(
     runSh,
-    'TP_CURL_FETCH_INSECURE="curl -fsSLk $TP_CURL_RETRY"',
+    'TP_CURL_FETCH="tp_curl_net_retry -fsSL $TP_CURL_RETRY"',
+  );
+  assertStringIncludes(
+    runSh,
+    'TP_CURL_FETCH_INSECURE="tp_curl_net_retry -fsSLk $TP_CURL_RETRY"',
   );
 });
 

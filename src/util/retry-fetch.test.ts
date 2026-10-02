@@ -34,12 +34,12 @@ test("503 then 200 succeeds after one retry with the first backoff", async () =>
   await res.body?.cancel();
 });
 
-test("three 504s stop at three attempts and return the last response", async () => {
+test("four 504s stop at four attempts and return the last response", async () => {
   const s = scripted([reply(504)]);
   const res = await fetchWithRetry(s.doFetch, { sleep: s.sleep });
   assertEquals(res.status, 504);
-  assertEquals(s.calls.n, 3);
-  assertEquals(s.waits, [2000, 6000]);
+  assertEquals(s.calls.n, 4);
+  assertEquals(s.waits, [2000, 4000, 8000]);
   await res.body?.cancel();
 });
 
@@ -90,14 +90,29 @@ test("a connection reset is retried; a certificate failure is not", async () => 
   assertEquals(tls.calls.n, 1);
 });
 
-test("persistent resets rethrow the original error after three attempts", async () => {
+test("a Deno DNS lookup failure is retried like EAI_AGAIN", async () => {
+  const dns = scripted([
+    new TypeError("error sending request for url (https://github.com/x)", {
+      cause: new Error(
+        "dns error: failed to lookup address information: Temporary failure in name resolution",
+      ),
+    }),
+    reply(200),
+  ]);
+  const res = await fetchWithRetry(dns.doFetch, { sleep: dns.sleep });
+  assertEquals(res.status, 200);
+  assertEquals(dns.calls.n, 2);
+  await res.body?.cancel();
+});
+
+test("persistent resets rethrow the original error after four attempts", async () => {
   const s = scripted([new TypeError("connection reset by peer")]);
   await assertRejects(
     () => fetchWithRetry(s.doFetch, { sleep: s.sleep }),
     TypeError,
     "connection reset by peer",
   );
-  assertEquals(s.calls.n, 3);
+  assertEquals(s.calls.n, 4);
 });
 
 test("parseRetryAfterMs reads seconds and dates and ignores junk", () => {

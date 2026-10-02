@@ -1352,7 +1352,7 @@ test("assertControlPlaneManifestPreflight retries a 503 and then verifies", asyn
   assertEquals(flaky.calls.n, 2);
 });
 
-test("assertControlPlaneManifestPreflight gives up after three 504s with the original text", async () => {
+test("assertControlPlaneManifestPreflight gives up after four 504s with the original text", async () => {
   const flaky = flakyManifests([504], "");
   await assertRejects(
     () =>
@@ -1366,7 +1366,7 @@ test("assertControlPlaneManifestPreflight gives up after three 504s with the ori
     UpdatePreflightError,
     "failed to fetch instance manifest: HTTP 504",
   );
-  assertEquals(flaky.calls.n, 3);
+  assertEquals(flaky.calls.n, 4);
 });
 
 test("assertControlPlaneManifestPreflight does not retry a 404", async () => {

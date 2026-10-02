@@ -53,9 +53,30 @@
 # --retry is used (not --retry-all-errors, curl >= 7.71) so old distro curls
 # keep working. 4xx other than 408/429 are never retried; the SHA-256 check
 # after the download is outside curl and is not retried here.
+#
+# curl's --retry never covers a failed name lookup (exit 6) or a refused
+# connection (exit 7), so a one-off DNS blip (EAI_AGAIN) failed the whole run.
+# tp_curl_net_retry wraps curl and retries only those two exits, 4 attempts
+# with 2 s / 4 s / 8 s waits (TP_CURL_NET_RETRY_UNIT, default 2, is for tests).
+# It works on any curl; a 4xx or a signature/checksum failure is never retried.
+tp_curl_net_retry() {
+  _tp_net_try=1
+  while :; do
+    _tp_net_rc=0
+    curl "$@" || _tp_net_rc=$? # not a bare call: run.sh runs under set -e
+    case "$_tp_net_rc" in
+      0) return 0 ;;
+      6 | 7) ;;
+      *) return "$_tp_net_rc" ;;
+    esac
+    [ "$_tp_net_try" -ge 4 ] && return "$_tp_net_rc"
+    sleep $((${TP_CURL_NET_RETRY_UNIT:-2} * (1 << (_tp_net_try - 1))))
+    _tp_net_try=$((_tp_net_try + 1))
+  done
+}
 TP_CURL_RETRY='--retry 2 --retry-delay 3 --retry-max-time 60'
-TP_CURL_FETCH="curl -fsSL $TP_CURL_RETRY"
-TP_CURL_FETCH_INSECURE="curl -fsSLk $TP_CURL_RETRY"
+TP_CURL_FETCH="tp_curl_net_retry -fsSL $TP_CURL_RETRY"
+TP_CURL_FETCH_INSECURE="tp_curl_net_retry -fsSLk $TP_CURL_RETRY"
 
 # Release artifact downloads (channel manifest, verified binary/orchestration/JS
 # artifacts, and the Deno runtime zip) always verify TLS against public trust.
@@ -411,7 +432,7 @@ tp_artifact_curl() {
     _cacert="/etc/turbopanel/instance-ca.pem"
   fi
   if [ -n "$_cacert" ]; then
-    printf 'curl -fsSL %s --cacert %s' "$TP_CURL_RETRY" "$_cacert"
+    printf 'tp_curl_net_retry -fsSL %s --cacert %s' "$TP_CURL_RETRY" "$_cacert"
     return 0
   fi
   printf '%s' "$TP_CURL_FETCH"
@@ -737,7 +758,7 @@ tp_download_verified_artifact() {
     rm -f "$_dest"
     # shellcheck disable=SC2086
     if ! $_curl "$_fetch_url" -o "$_dest"; then
-      echo "run.sh: failed to download $_fetch_url" >&2
+      echo "run.sh: failed to download ${_fetch_url%%[?#]*} (query string omitted: it can carry a signed token)" >&2
       return 1
     fi
     if printf '%s  %s\n' "$_sha256" "$_dest" | sha256sum -c - >/dev/null 2>&1; then
