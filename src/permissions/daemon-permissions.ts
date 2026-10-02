@@ -296,13 +296,42 @@ export const DAEMON_DENY_NET: readonly string[] = [
  *   listens on a configured bind — Deno has no wildcard or CIDR host grant,
  *   so a static list cannot express it. `--deny-net` closes the metadata
  *   endpoints instead.
- * - `env`: `Deno.env.toObject()` (the daemon's env plumbing) requires the
- *   unscoped grant — Deno rejects it under any `--allow-env=<list>`.
+ *
+ * `env` is scoped: see {@link DAEMON_ENV_NAMES}.
  */
-export const DAEMON_UNSCOPED_GRANTS: Readonly<Record<"net" | "env", string>> = {
+export const DAEMON_UNSCOPED_GRANTS: Readonly<Record<"net", string>> = {
   net: "operator-configured origins; no wildcard host grant exists",
-  env: "Deno.env.toObject() requires the unscoped env grant",
 };
+
+/**
+ * Environment variables the daemon (and the installer and backup runner that
+ * share its bundle) may read. Every name the source reads is project-owned
+ * `TURBOPANEL_*` except the account basics `HOME` (dev layout root, git/ansible
+ * homes), `PATH` (the minimal env handed to clearEnv build/git children), and
+ * `USER` / `LOGNAME` (dev-mode account detection).
+ * `src/permissions/env-allowlist.test.ts` scans the source and fails on a
+ * read this list does not cover.
+ *
+ * Paired with a bare `--ignore-env`: a read of any other name returns
+ * `undefined` (as if unset) instead of throwing, and `Deno.env.toObject()` —
+ * which Deno refuses outright under a scoped grant — returns just the allowed
+ * names. Children still inherit the full process environment (Deno does not
+ * filter it), so this narrows what the daemon's own JavaScript can see, not
+ * what its spawned tools get. The `*` is Deno's prefix wildcard; shells leave
+ * it literal because no file is named like the whole flag.
+ */
+export const DAEMON_ENV_NAMES: readonly string[] = [
+  "TURBOPANEL_*",
+  "HOME",
+  "PATH",
+  "USER",
+  "LOGNAME",
+];
+
+/** `--allow-env=<names>` plus the `--ignore-env` that makes it workable. */
+export function renderEnvFlags(): string[] {
+  return [`--allow-env=${DAEMON_ENV_NAMES.join(",")}`, "--ignore-env"];
+}
 
 /** Render the flags in canonical order for `deno run` / `deno compile`. */
 export function renderDaemonPermissionFlags(): string[] {
@@ -310,7 +339,7 @@ export function renderDaemonPermissionFlags(): string[] {
     `--allow-read=${DAEMON_READ_PATHS.join(",")}`,
     `--allow-write=${DAEMON_WRITE_PATHS.join(",")}`,
     `--allow-run=${DAEMON_RUN_PROGRAMS.join(",")}`,
-    "--allow-env",
+    ...renderEnvFlags(),
     "--allow-net",
     `--deny-net=${DAEMON_DENY_NET.join(",")}`,
     `--allow-sys=${DAEMON_SYS_APIS.join(",")}`,
@@ -337,8 +366,8 @@ export function renderDaemonPermissionFlags(): string[] {
  * - run: the Docker CLI only. Not `sudo`: a timer-started process has fresh
  *   credentials, and `docker-cli.ts` reports the real socket error when it
  *   may not run the sudo fallback.
- * - env: `Deno.env.toObject()` (layout resolution) needs the unscoped grant,
- *   which is harmless here because there is no network grant to send it over.
+ * - env: the daemon's scoped set ({@link renderEnvFlags}) — layout
+ *   resolution reads `TURBOPANEL_*` overrides.
  * - sys: `statfs` for the free-space check.
  * - no net, no ffi.
  *
@@ -377,7 +406,7 @@ export function renderBackupRunnerPermissionFlags(): string[] {
     `--allow-read=${BACKUP_RUNNER_READ_PATHS.join(",")}`,
     `--allow-write=${BACKUP_RUNNER_WRITE_PATHS.join(",")}`,
     `--allow-run=${BACKUP_RUNNER_RUN_PROGRAMS.join(",")}`,
-    "--allow-env",
+    ...renderEnvFlags(),
     `--allow-sys=${BACKUP_RUNNER_SYS_APIS.join(",")}`,
   ];
 }
@@ -457,7 +486,7 @@ export function renderInstallerPermissionFlags(): string[] {
     `--allow-read=${read.join(",")}`,
     `--allow-write=${write.join(",")}`,
     `--allow-run=${run.join(",")}`,
-    "--allow-env",
+    ...renderEnvFlags(),
     "--allow-net",
     `--deny-net=${DAEMON_DENY_NET.join(",")}`,
     `--allow-sys=${DAEMON_SYS_APIS.join(",")}`,

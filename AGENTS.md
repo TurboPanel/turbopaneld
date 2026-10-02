@@ -612,12 +612,18 @@ it regresses:
   target (`UV_INSTALL_DIR`, `PYTHON_RUNTIME_DIR`, `ANSIBLE_INSTALL_DIR`, the
   Galaxy dirs, the stamps) onto that grant, which is what the first canary
   install after this hardening tripped over (`Requires write access to
-  "/opt/turbopanel/vendor/uv/<version>"`). Two
-  grants stay unscoped and are documented as `DAEMON_UNSCOPED_GRANTS`:
+  "/opt/turbopanel/vendor/uv/<version>"`). One
+  grant stays unscoped and is documented in `DAEMON_UNSCOPED_GRANTS`:
   `--allow-net` (operator-configured control-plane origin, ACME probes to
   tenant domains, container-address scrapes, ProxySQL bind — Deno has no
   wildcard/CIDR host grant) paired with `--deny-net` for the cloud metadata
-  endpoints, and `--allow-env` (`Deno.env.toObject()` needs it). Bumping
+  endpoints. Env is scoped to `DAEMON_ENV_NAMES` (`TURBOPANEL_*`, `HOME`,
+  `PATH`, `USER`, `LOGNAME`) plus a bare `--ignore-env`, which turns a read of
+  any other name into `undefined` and lets `Deno.env.toObject()` return just
+  the allowed names (without it Deno refuses `toObject()` under a scoped
+  grant). `src/permissions/env-allowlist.test.ts` scans `src/` and fails on a
+  read the list does not cover — add the name there, never go back to a bare
+  `--allow-env`. Bumping
   `UV_VERSION` / `ANSIBLE_CORE_VERSION` / `CLOUDFLARED_VERSION` changes the
   rendered `--allow-run` paths: re-render (see the test failure) and commit
   all copies. NVML is opened by absolute path first (`NVML_LIBRARY_CANDIDATES`)
