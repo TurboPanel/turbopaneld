@@ -2521,3 +2521,35 @@ test(
     );
   },
 );
+
+test("docker role denies the network.host and security.insecure build entitlements in daemon.json, keeping other builder keys", async () => {
+  const roleDir = join(CHECKOUT_ORCHESTRATION_DIR, "roles/docker");
+  const daemonJson = await Deno.readTextFile(
+    join(roleDir, "tasks/daemon-json.yml"),
+  );
+  const defaults = await Deno.readTextFile(join(roleDir, "defaults/main.yml"));
+  assertEquals(
+    daemonJson.includes(
+      "combine({'network-host': false, 'security-insecure': false})",
+    ),
+    true,
+  );
+  // The existing builder section and entitlements are the base, never replaced.
+  assertEquals(
+    daemonJson.includes("_docker_daemon_json_current.builder.entitlements"),
+    true,
+  );
+  assertEquals(
+    daemonJson.includes("{'builder': _docker_builder_merged}"),
+    true,
+  );
+  // The only gate on it is the opt-out variable, default on.
+  assertEquals(
+    defaults.includes("turbopanel_docker_deny_builder_entitlements: true"),
+    true,
+  );
+  assertEquals(
+    daemonJson.includes("turbopanel_docker_deny_builder_entitlements | bool"),
+    true,
+  );
+});
