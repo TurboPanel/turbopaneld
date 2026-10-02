@@ -587,6 +587,103 @@ function projectOf(argv: string[]): string {
 }
 
 test({
+  name:
+    "handleEnvironmentStop removes unreadable root-owned data via the privileged runner only",
+  permissions: { read: true, write: true, env: true, run: true },
+  async fn() {
+    const root = await Deno.makeTempDir({ prefix: "tp-stop-rootdata-" });
+    const previous = Deno.env.get("TURBOPANEL_STATE_DIR");
+    Deno.env.set("TURBOPANEL_STATE_DIR", join(root, "state"));
+    const outside = join(root, "outside");
+    await Deno.mkdir(outside);
+    await Deno.writeTextFile(join(outside, "keep"), "keep");
+    const deploymentDir = join(
+      root,
+      "state",
+      "deployments",
+      "proj-1",
+      "envrd0001",
+    );
+    const locked = join(deploymentDir, "data", "locked");
+    await Deno.mkdir(locked, { recursive: true });
+    await Deno.writeTextFile(join(locked, "f"), "x");
+    await Deno.symlink(outside, join(deploymentDir, "data", "escape"));
+    await Deno.chmod(locked, 0o500);
+    const removed: string[] = [];
+    try {
+      await handleEnvironmentStop(
+        {
+          environmentId: "envrd0001",
+          projectId: "proj-1",
+          projectName: "tp-demo-rd",
+        },
+        new Date().toISOString(),
+        {
+          runPrivileged: async (command, args) => {
+            assertEquals(command, "sudo");
+            assertEquals(args.slice(-4, -1), ["rm", "-rf", "--"]);
+            const path = args.at(-1)!;
+            removed.push(path);
+            await Deno.chmod(locked, 0o700);
+            await Deno.remove(path, { recursive: true });
+            return { success: true, stdout: "", stderr: "" };
+          },
+        },
+      );
+      assertEquals(removed, [deploymentDir]);
+      await assertRejects(() => Deno.stat(deploymentDir), Deno.errors.NotFound);
+      assertEquals(await Deno.readTextFile(join(outside, "keep")), "keep");
+    } finally {
+      await Deno.chmod(locked, 0o700).catch(() => undefined);
+      if (previous === undefined) Deno.env.delete("TURBOPANEL_STATE_DIR");
+      else Deno.env.set("TURBOPANEL_STATE_DIR", previous);
+      await Deno.remove(root, { recursive: true });
+    }
+  },
+});
+
+test({
+  name:
+    "handleEnvironmentStop never hands a symlinked deployment dir to the privileged runner",
+  permissions: { read: true, write: true, env: true, run: true },
+  async fn() {
+    const root = await Deno.makeTempDir({ prefix: "tp-stop-symlink-" });
+    const previous = Deno.env.get("TURBOPANEL_STATE_DIR");
+    Deno.env.set("TURBOPANEL_STATE_DIR", join(root, "state"));
+    const target = join(root, "etc");
+    await Deno.mkdir(target);
+    await Deno.mkdir(join(root, "state", "deployments", "proj-1"), {
+      recursive: true,
+    });
+    const link = join(root, "state", "deployments", "proj-1", "envsl0001");
+    await Deno.symlink(target, link);
+    let called = false;
+    try {
+      await handleEnvironmentStop(
+        {
+          environmentId: "envsl0001",
+          projectId: "proj-1",
+          projectName: "tp-demo-sl",
+        },
+        new Date().toISOString(),
+        {
+          runPrivileged: () => {
+            called = true;
+            return Promise.resolve({ success: true, stdout: "", stderr: "" });
+          },
+        },
+      );
+      assertEquals(called, false);
+      await Deno.stat(target);
+    } finally {
+      if (previous === undefined) Deno.env.delete("TURBOPANEL_STATE_DIR");
+      else Deno.env.set("TURBOPANEL_STATE_DIR", previous);
+      await Deno.remove(root, { recursive: true });
+    }
+  },
+});
+
+test({
   name: "environment.stop brings down every generation of the deployment",
   permissions: { env: true, read: true, write: true, run: true },
   fn: () =>
