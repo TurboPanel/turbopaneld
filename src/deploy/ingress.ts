@@ -936,8 +936,22 @@ async function ensureSharedSocketProxy(
   ingressNetwork: string,
   run: RunDockerFn,
 ): Promise<void> {
-  const applied = await readTextIfPresent(hostingIngressComposePath(layout));
-  if (applied === undefined || declaresSocketProxy(applied)) return;
+  const composePath = hostingIngressComposePath(layout);
+  const applied = await readTextIfPresent(composePath);
+  if (applied === undefined) return;
+  if (declaresSocketProxy(applied)) {
+    // Declared is not running: a leftover pending file (a failed `up` may have
+    // removed the proxy as an orphan) or a missing container means the proxy
+    // is gone. Re-up the applied file as it is; compose only starts the proxy.
+    const trusted = !(await exists(pendingComposePath(composePath))) &&
+      await socketProxyRunning(ingressNetwork, run);
+    if (!trusted) await upSharedTraefik(layout, applied, run);
+    return;
+  }
+  // A legacy shared file (Traefik on docker.sock directly, no proxy service)
+  // is not ours to recreate from a TCP/UDP deploy: only a file that already
+  // uses the gate endpoint may be re-rendered in gate mode.
+  if (!applied.includes(INGRESS_GATE_ENDPOINT)) return;
   const descriptor = await loadHostingIngressDescriptor(layout);
   // No descriptor: the anonymous shape, which is always on the proxy (it has
   // no ingress label for the gate's allowance), as ensureHostingIngress does.
@@ -949,6 +963,32 @@ async function ensureSharedSocketProxy(
     traefikCompose(ingressNetwork, descriptor, docker),
     run,
   );
+}
+
+async function exists(path: string): Promise<boolean> {
+  try {
+    await Deno.stat(path);
+    return true;
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) return false;
+    throw err;
+  }
+}
+
+/** True when the shared project's socket-proxy container is running. */
+async function socketProxyRunning(
+  ingressNetwork: string,
+  run: RunDockerFn,
+): Promise<boolean> {
+  const result = await run([
+    "ps",
+    "-q",
+    "--filter",
+    `label=com.docker.compose.project=${ingressNetwork}`,
+    "--filter",
+    `label=com.docker.compose.service=${SOCKET_PROXY_COMPOSE_SERVICE_NAME}`,
+  ]);
+  return result.success && result.stdout.trim() !== "";
 }
 
 /**

@@ -5,7 +5,7 @@ import {
   assertStringIncludes,
   assertThrows,
 } from "@std/assert";
-import { join } from "@std/path";
+import { dirname, join } from "@std/path";
 import { INSTANCE_ACME_HTTP01_SITE } from "./instance-acme-http01.ts";
 import {
   assertSafeComposeProjectName,
@@ -3066,6 +3066,8 @@ const PROXY_SERVICE_KEY = "\n  docker-socket-proxy:\n";
 function recordingDocker(calls: string[][], failUp?: RegExp) {
   return (args: readonly string[]) => {
     calls.push([...args]);
+    // The shared proxy container is running unless a test says otherwise.
+    if (args[0] === "ps") return Promise.resolve(fakeDockerOk("abc123\n"));
     const isUp = args.includes("up");
     const failing = isUp && failUp !== undefined &&
       args.some((arg) => failUp.test(arg));
@@ -3253,6 +3255,74 @@ test("F1: with the descriptor gone, the proxy comes back as the anonymous proxy-
       await Deno.readTextFile(hostingIngressComposePath(layout)),
       traefikCompose(HOSTING_INGRESS_NETWORK),
     );
+  } finally {
+    await cleanup();
+  }
+});
+
+test("a legacy proxy-less shared file (docker.sock mounted directly) is left untouched by a TCP/UDP deploy with the switch off", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  try {
+    await writeSystemComponentDescriptor(layout, SYSTEM_INGRESS_IDENTITY);
+    const sharedPath = hostingIngressComposePath(layout);
+    await Deno.mkdir(dirname(sharedPath), { recursive: true });
+    const legacy = [
+      "name: hosting-ingress",
+      "services:",
+      "  traefik:",
+      "    image: traefik:v3",
+      "    volumes:",
+      "      - /var/run/docker.sock:/var/run/docker.sock:ro",
+      "",
+    ].join("\n");
+    await Deno.writeTextFile(sharedPath, legacy);
+
+    const calls: string[][] = [];
+    await deployTcpService(layout, false, recordingDocker(calls));
+    assertEquals(await Deno.readTextFile(sharedPath), legacy);
+    const ups = calls.filter((a) => a.includes("up"));
+    assertEquals(ups.length, 1, "only the service up; shared not recreated");
+    assert(ups[0].includes(SERVICE_INGRESS_IDENTITY.serviceId));
+  } finally {
+    await cleanup();
+  }
+});
+
+test("a leftover shared pending file or a missing proxy container counts as proxy not declared", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  try {
+    await writeSystemComponentDescriptor(layout, SYSTEM_INGRESS_IDENTITY);
+    await deployShared(layout, false, recordingDocker([]));
+    const sharedPath = hostingIngressComposePath(layout);
+    const applied = await Deno.readTextFile(sharedPath);
+    assertStringIncludes(applied, PROXY_SERVICE_KEY);
+
+    // Missing proxy container: the applied file is brought up again.
+    const missing: string[][] = [];
+    const noProxy = (args: readonly string[]) => {
+      missing.push([...args]);
+      return Promise.resolve(fakeDockerOk());
+    };
+    await deployTcpService(layout, false, noProxy);
+    const sharedUps = missing.filter((a) =>
+      a.includes("up") &&
+      a.some((arg) => arg.includes(join("ingress", "traefik")))
+    );
+    assertEquals(sharedUps.length, 1);
+    assertEquals(await Deno.readTextFile(sharedPath), applied);
+
+    // Leftover pending file from a failed shared up, container reported up.
+    await Deno.writeTextFile(sharedPath.replace(/\.yml$/, ".pending.yml"), "x");
+    const leftover: string[][] = [];
+    await deployTcpService(layout, false, recordingDocker(leftover));
+    assertEquals(
+      leftover.filter((a) =>
+        a.includes("up") &&
+        a.some((arg) => arg.includes(join("ingress", "traefik")))
+      ).length,
+      1,
+    );
+    assertEquals(await Deno.readTextFile(sharedPath), applied);
   } finally {
     await cleanup();
   }

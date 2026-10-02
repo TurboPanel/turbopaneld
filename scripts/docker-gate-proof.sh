@@ -265,6 +265,14 @@ for _deny in /networks /volumes /info; do
 done
 _code=$(ro_status POST /containers/create)
 if [[ "$_code" == 403 ]]; then pass "read-only socket refuses POST /containers/create (403)"; else fail "POST /containers/create answered '$_code', want 403"; fi
+_code=$(ro_status POST /containers/0000000000000000/exec)
+if [[ "$_code" == 403 ]]; then pass "read-only socket refuses POST /containers/{id}/exec (403)"; else fail "POST /containers/{id}/exec answered '$_code', want 403"; fi
+_code=$(ro_status POST /build)
+if [[ "$_code" == 403 ]]; then pass "read-only socket refuses POST /build (403)"; else fail "POST /build answered '$_code', want 403"; fi
+_code=$(ro_status POST "/images/create?fromImage=alpine")
+if [[ "$_code" == 403 ]]; then pass "read-only socket refuses POST /images/create (403)"; else fail "POST /images/create answered '$_code', want 403"; fi
+_code=$(ro_status POST "/containers%2Fcreate")
+if [[ "$_code" =~ ^(400|403|404)$ ]]; then pass "read-only socket refuses a %2F-encoded POST /containers%2Fcreate ($_code)"; else fail "POST /containers%2Fcreate answered '$_code', want 400/403/404"; fi
 if journalctl -u "$GATE_UNIT" --since "$SINCE" --no-pager -o cat | grep -q '"event":"docker-gate.ro-refused"'; then pass "journal has docker-gate.ro-refused"; else fail "journal has no docker-gate.ro-refused"; fi
 if sudo -n -u "$DAEMON_ACCOUNT" docker -H "unix://$RO_SOCKET" version >/dev/null 2>&1; then fail "the daemon account can open the read-only socket"; else pass "the daemon account cannot open the read-only socket"; fi
 SHARED_TRAEFIK=""
@@ -302,9 +310,16 @@ if [[ -n "$SHARED_TRAEFIK" ]]; then
   else
     fail "could not read the shared Traefik's log"
   fi
-  if [[ "$PROXY_RUNNING" == false ]]; then
-    _reach=$(docker run --rm --network "$SHARED_NET" "$IMAGE" sh -c 'if wget -q -T 3 -O /dev/null http://docker-socket-proxy:2375/_ping; then echo reachable; else echo unreachable; fi' 2>/dev/null)
-    if [[ "$_reach" == unreachable ]]; then pass "a container on the ingress network cannot reach docker-socket-proxy:2375"; else fail "docker-socket-proxy:2375 from the ingress network: '$_reach', want unreachable"; fi
+  # Reachability of the proxy name is meaningful whether or not a proxy runs:
+  # with none running, nothing may answer; with one running (an older service
+  # Traefik still uses it) the result is informational only.
+  _reach=$(docker run --rm --network "$SHARED_NET" "$IMAGE" sh -c 'if wget -q -T 3 -O /dev/null http://docker-socket-proxy:2375/_ping; then echo reachable; else echo unreachable; fi' 2>/dev/null)
+  if [[ "$PROXY_RUNNING" == true ]]; then
+    echo "NOTE  a socket-proxy is running: reachability from the ingress network is informational ('$_reach')"
+  elif [[ "$_reach" == unreachable ]]; then
+    pass "a container on the ingress network cannot reach docker-socket-proxy:2375 (no proxy is running)"
+  else
+    fail "docker-socket-proxy:2375 from the ingress network: '$_reach', want unreachable"
   fi
 fi
 
@@ -337,8 +352,8 @@ fi
 _unexpected=$(journalctl -u "$GATE_UNIT" --since "$SINCE" --no-pager -o cat 2>/dev/null |
   grep '"event":"docker-gate.ro-refused"' |
   sed -n 's/.*"path":"\([^"]*\)".*/\1/p' |
-  sed -E 's#^/v[0-9.]+/#/#; s#^/containers/[^/]+/(export|logs|archive)$#/containers/ID/\1#' |
-  grep -vxE '/info|/images/json|/containers/create|/networks|/volumes|/containers/ID/(export|logs|archive)' | sort -u)
+  sed -E 's#^/v[0-9.]+/#/#; s#^/containers/[^/]+/(export|logs|archive|exec)$#/containers/ID/\1#' |
+  grep -vxE '/info|/images/json|/containers/create|/build|/images/create|/containers%2Fcreate|/networks|/volumes|/containers/ID/(export|logs|archive|exec)' | sort -u)
 if [[ -z "$_unexpected" ]]; then pass "every read-only refusal is one the proof sent (Traefik was refused nothing)"; else fail "the read-only socket refused paths the proof did not send: $(printf '%s' "$_unexpected" | tr '\n' ' ')"; fi
 
 if [[ "$FAILED" -ne 0 ]]; then
