@@ -96,6 +96,7 @@ fail=0
 while IFS= read -r rule || [ -n "$rule" ]; do
   case "$rule" in
     "#"*|"") continue ;;
+    *) ;;
   esac
   kind=${rule%% *}
   rest=${rule#* }
@@ -137,6 +138,7 @@ while IFS= read -r entry || [ -n "$entry" ]; do
       continue
       ;;
     "#"*) continue ;;
+    *) ;;
   esac
   case "$entry" in
     *[![:space:]]*) ;;
@@ -165,17 +167,20 @@ while IFS= read -r entry || [ -n "$entry" ]; do
       fail=1
       continue
       ;;
+    *) ;;
   esac
   printf '%s\n' "$entry" | sed -e 's/^\([^:@][^:]*\):[0-9][0-9]*:/\1:/' >> "$ALLOWED"
 done < "$ALLOWLIST"
 
 entry_allowed() {
-  grep -Fxq -- "$1" "$ALLOWED"
+  wanted=$1
+  grep -Fxq -- "$wanted" "$ALLOWED"
 }
 
 # --- helpers -----------------------------------------------------------------
 skip_file() {
-  case "$1" in
+  name=$1
+  case "$name" in
     .secretscan-allowlist|scripts/scan-secrets.sh|scripts/scan-secrets.patterns)
       # The allowlist echoes the exact flagged lines and the patterns file
       # holds the regexes themselves; neither is scanned.
@@ -190,12 +195,13 @@ skip_file() {
 
 # The rule id for a path that must never be committed; returns 1 otherwise.
 forbidden_path() {
-  if [ -s "$PATHOK_RE" ] && printf '%s\n' "$1" | grep -Eq -f "$PATHOK_RE"; then
+  candidate=$1
+  if [ -s "$PATHOK_RE" ] && printf '%s\n' "$candidate" | grep -Eq -f "$PATHOK_RE"; then
     return 1
   fi
   while IFS= read -r prule || [ -n "$prule" ]; do
     [ -n "$prule" ] || continue
-    if printf '%s\n' "$1" | grep -Eq -e "${prule#* }"; then
+    if printf '%s\n' "$candidate" | grep -Eq -e "${prule#* }"; then
       printf '%s\n' "${prule%% *}"
       return 0
     fi
@@ -222,7 +228,8 @@ check_paths() {
 # The generic assignment rules only count a value that looks random: 24+
 # characters, a letter and a digit, no placeholder word.
 looks_random() {
-  value="$(printf '%s\n' "$1" | grep -Eo '[A-Za-z0-9+/=_-]{24,}' | tail -n 1)"
+  text=$1
+  value="$(printf '%s\n' "$text" | grep -Eo '[A-Za-z0-9+/=_-]{24,}' | tail -n 1)"
   [ -n "$value" ] || return 1
   printf '%s\n' "$value" | grep -Eq '[0-9]' || return 1
   printf '%s\n' "$value" | grep -Eq '[A-Za-z]' || return 1
@@ -242,12 +249,13 @@ next_is_key_body() {
 
 # The first rule id that flags this line; returns 1 when none does.
 line_rule() {
+  text=$1
   while IFS= read -r lrule || [ -n "$lrule" ]; do
     lid=${lrule%% *}
     lre=${lrule#* }
-    if printf '%s\n' "$1" | grep -Eq -e "$lre"; then
+    if printf '%s\n' "$text" | grep -Eq -e "$lre"; then
       case "$lid" in
-        generic-*) looks_random "$1" || continue ;;
+        generic-*) looks_random "$text" || continue ;;
         pem-header-line) next_is_key_body || continue ;;
         *) ;;
       esac
@@ -260,12 +268,15 @@ line_rule() {
 
 # Handle one candidate line: $1 path, $2 where to report it, $3 the line text.
 check_line() {
-  id="$(line_rule "$3")" || return 0
-  printf '%s:%s\n' "$1" "$3" >> "$FLAGGED"
-  if entry_allowed "$1:$3"; then
+  cl_path=$1
+  cl_where=$2
+  cl_text=$3
+  id="$(line_rule "$cl_text")" || return 0
+  printf '%s:%s\n' "$cl_path" "$cl_text" >> "$FLAGGED"
+  if entry_allowed "$cl_path:$cl_text"; then
     return 0
   fi
-  echo "scan-secrets: suspected secret in $2 ($id)" >&2
+  echo "scan-secrets: suspected secret in $cl_where ($id)" >&2
   fail=1
 }
 
@@ -290,6 +301,7 @@ scan_files() {
         fail=1
         continue
         ;;
+      *) ;;
     esac
     CTX_FILE=$file
     CTX_N=$((lineno + 1))
