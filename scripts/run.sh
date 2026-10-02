@@ -2185,8 +2185,11 @@ done
 
 # Piped install form prefers env vars so the copy-paste command stays clean:
 #   curl -fsSL turbopanel.sh | TURBOPANEL_LICENSE=… sh
-# Explicit flags win when both are set (sudo re-exec always uses flags).
+# Explicit flags win when both are set. The sudo re-exec hands the license and
+# tunnel token over in these variables, never as flags: argv is world-readable
+# (ps, /proc) and sudo logs it.
 [ -n "$LICENSE" ] || LICENSE="${TURBOPANEL_LICENSE:-}"
+[ -n "$TUNNEL_TOKEN" ] || TUNNEL_TOKEN="${TURBOPANEL_TUNNEL_TOKEN:-}"
 [ -n "$HOST_URL" ] || HOST_URL="${TURBOPANEL_HOST:-}"
 [ -n "$DL_BASE" ] || DL_BASE="${TURBOPANEL_DL_BASE:-}"
 DL_BASE="$(tp_strip_trailing_slashes "$DL_BASE")"
@@ -2366,7 +2369,16 @@ if ! tp_is_root; then
     _REEXEC_SCRIPT_URL="https://$(tp_installer_host_for_channel "${TURBOPANEL_UPDATE_CHANNEL:-release}")"
   fi
   set --
-  [ -n "$LICENSE" ] && set -- "$@" --license "$LICENSE"
+  # Secrets travel in the environment (sudo --preserve-env), not in argv.
+  _sudo_keep=""
+  if [ -n "$LICENSE" ]; then
+    export TURBOPANEL_LICENSE="$LICENSE"
+    _sudo_keep="TURBOPANEL_LICENSE"
+  fi
+  if [ -n "$TUNNEL_TOKEN" ]; then
+    export TURBOPANEL_TUNNEL_TOKEN="$TUNNEL_TOKEN"
+    _sudo_keep="${_sudo_keep:+${_sudo_keep},}TURBOPANEL_TUNNEL_TOKEN"
+  fi
   [ "$INSTANCE_INSTALL" = true ] && set -- "$@" --instance
   [ "$DAEMON_ONLY" = true ] && set -- "$@" --daemon-only
   [ -n "$MANIFEST_URL" ] && set -- "$@" --manifest-url "$MANIFEST_URL"
@@ -2376,7 +2388,6 @@ if ! tp_is_root; then
   [ -n "$DL_BASE" ] && set -- "$@" --dl-base "$DL_BASE"
   [ -n "$DL_BASE" ] && [ "${TURBOPANEL_DEV_ALLOW_UNSIGNED_MANIFEST:-}" = "1" ] && set -- "$@" --dev-allow-unsigned
   [ -n "$INSTANCE_CA" ] && set -- "$@" --instance-ca "$INSTANCE_CA"
-  [ -n "$TUNNEL_TOKEN" ] && set -- "$@" --tunnel-token "$TUNNEL_TOKEN"
   [ "$INSECURE_TLS" = true ] && set -- "$@" --insecure-tls
   [ "$NO_START" = true ] && set -- "$@" --no-start
   [ "$SKIP_DAEMON_PACKAGE" = true ] && set -- "$@" --skip-daemon-package
@@ -2389,8 +2400,13 @@ if ! tp_is_root; then
   # curl subshell, not this shell — leaving the original non-root shell to
   # fall through and fail on the privileged mkdir calls below. Run the
   # pipeline, then exit with its status so the parent shell never continues.
-  # shellcheck disable=SC2086
-  $_curl "$_REEXEC_SCRIPT_URL" | sudo sh -s -- "$@"
+  if [ -n "$_sudo_keep" ]; then
+    # shellcheck disable=SC2086
+    $_curl "$_REEXEC_SCRIPT_URL" | sudo --preserve-env="$_sudo_keep" sh -s -- "$@"
+  else
+    # shellcheck disable=SC2086
+    $_curl "$_REEXEC_SCRIPT_URL" | sudo sh -s -- "$@"
+  fi
   exit $?
 fi
 
