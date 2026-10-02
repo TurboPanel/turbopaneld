@@ -3,15 +3,14 @@ import { assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { resolveLayout } from "../../paths/layout.ts";
 import { withTempLayout } from "../../testing/temp-layout.ts";
 import {
-  BUILDKIT_VERSION,
   ensureBuildkitRailpack,
   type EnsureBuildkitRailpackDeps,
   RAILPACK_FRONTEND_IMAGE,
   RAILPACK_FRONTEND_TAG,
   RAILPACK_FRONTEND_VERSION,
   RAILPACK_VERSION,
+  railpackAssetName,
   railpackBinaryPath,
-  railpackCacheDir,
   railpackFrontendDigestPath,
   railpackFrontendLayoutDir,
   railpackImageTag,
@@ -51,8 +50,6 @@ async function plantVendorTools(
   opts: {
     digest?: string;
     skipRailpack?: boolean;
-    skipBuildctl?: boolean;
-    skipBuildkitd?: boolean;
     skipIndex?: boolean;
     skipDigest?: boolean;
     railpackIsDir?: boolean;
@@ -68,17 +65,6 @@ async function plantVendorTools(
     }
     await linkCurrent(join(runtimesDir, "railpack"), versionDir);
   }
-  const buildkitVersionDir = join(runtimesDir, "buildkit", BUILDKIT_VERSION);
-  if (!opts.skipBuildctl) {
-    await writeFile(join(buildkitVersionDir, "buildctl"));
-  }
-  if (!opts.skipBuildkitd) {
-    await writeFile(join(buildkitVersionDir, "buildkitd"));
-  }
-  if (!opts.skipBuildctl || !opts.skipBuildkitd) {
-    await linkCurrent(join(runtimesDir, "buildkit"), buildkitVersionDir);
-  }
-
   const frontendVersionDir = join(
     runtimesDir,
     "railpack-frontend",
@@ -110,8 +96,6 @@ function layoutOf(env: Record<string, string>) {
 
 function mockDownloadCommands(opts: {
   fail?:
-    | "buildkit-curl"
-    | "buildkit-tar"
     | "railpack-curl"
     | "railpack-tar"
     | "docker-pull"
@@ -132,11 +116,7 @@ function mockDownloadCommands(opts: {
       if (typeof url !== "string") {
         throw new TypeError("curl mock expected a URL argument");
       }
-      const isBuildkit = url.includes("buildkit");
-      const fail = isBuildkit
-        ? opts.fail === "buildkit-curl"
-        : opts.fail === "railpack-curl";
-      if (fail) {
+      if (opts.fail === "railpack-curl") {
         return {
           success: false,
           stderr: stderrFor("connection refused"),
@@ -157,21 +137,10 @@ function mockDownloadCommands(opts: {
         throw new TypeError("tar mock expected -C <dir>");
       }
       if (args.includes("-xzf")) {
-        const isBuildkit = dest.endsWith("/buildkit") ||
-          dest.endsWith("buildkit");
-        const fail = isBuildkit
-          ? opts.fail === "buildkit-tar"
-          : opts.fail === "railpack-tar";
-        if (fail) {
+        if (opts.fail === "railpack-tar") {
           return { success: false, stderr: stderrFor("not a gzip") };
         }
-        if (isBuildkit) {
-          await Deno.mkdir(join(dest, "bin"), { recursive: true });
-          await Deno.writeTextFile(join(dest, "bin", "buildctl"), "");
-          await Deno.writeTextFile(join(dest, "bin", "buildkitd"), "");
-        } else {
-          await Deno.writeTextFile(join(dest, "railpack"), "");
-        }
+        await Deno.writeTextFile(join(dest, "railpack"), "");
         return { success: true, stderr: "" };
       }
       if (opts.fail === "frontend-tar") {
@@ -237,36 +206,9 @@ test("railpackImageTag refuses a serviceId with no usable repository", () => {
   assertThrows(() => railpackImageTag("___", "rel-1"));
 });
 
-test("railpackCacheDir isolates one project's layers from another's", () => {
-  const layout = { daemonStateDir: "/var/lib/turbopanel" };
-  const a = railpackCacheDir(layout, "project-a");
-  const b = railpackCacheDir(layout, "project-b");
-  assertEquals(
-    a,
-    "/var/lib/turbopanel/release-build/buildkit-cache/project-a",
-  );
-  assertEquals(a === b, false);
-});
-
-test("railpackCacheDir refuses a traversal in the project segment", () => {
-  assertThrows(() =>
-    railpackCacheDir({ daemonStateDir: "/var/lib/turbopanel" }, "../../etc")
-  );
-});
-
-test("railpackCacheDir refuses an empty or hyphen-led segment", () => {
-  assertThrows(() =>
-    railpackCacheDir({ daemonStateDir: "/var/lib/turbopanel" }, "")
-  );
-  assertThrows(() =>
-    railpackCacheDir({ daemonStateDir: "/var/lib/turbopanel" }, "-project")
-  );
-});
-
 test("the gateway frontend resolves inside the vendored runtime tree", () => {
-  // The build lane may never name a registry: `--opt source=` addresses this
-  // directory by the digest recorded next to it, so a repointed upstream tag
-  // cannot change what a host builds.
+  // The build names the frontend by the digest recorded next to this layout,
+  // so a repointed upstream tag cannot change what a host builds.
   assertEquals(
     railpackFrontendLayoutDir("/opt/turbopanel/vendor"),
     "/opt/turbopanel/vendor/railpack-frontend/current/image",
@@ -419,7 +361,7 @@ test({
 });
 
 test({
-  name: "ensureBuildkitRailpack requires all three binaries as files",
+  name: "ensureBuildkitRailpack requires the railpack binary as a file",
   permissions: { read: true, write: true, run: ["ln"] },
   fn: async () => {
     await withTempLayout(async (fixture) => {
@@ -468,11 +410,11 @@ test({
   fn: async () => {
     await withTempLayout(async (fixture) => {
       const layout = layoutOf(fixture.env);
-      const stale = join(layout.runtimesDir, "buildkit", "stale");
+      const stale = join(layout.runtimesDir, "railpack", "stale");
       await Deno.mkdir(stale, { recursive: true });
       await Deno.symlink(
         stale,
-        join(layout.runtimesDir, "buildkit", "current"),
+        join(layout.runtimesDir, "railpack", "current"),
       );
       await Deno.mkdir(
         join(
@@ -490,14 +432,9 @@ test({
         runCommand: mockDownloadCommands({ record }),
       });
       assertEquals(tools.frontendDigest, VALID_DIGEST);
-      assertEquals(
-        record.some((line) =>
-          line.includes(
-            `buildkit-v${BUILDKIT_VERSION}.linux-amd64.tar.gz`,
-          )
-        ),
-        true,
-      );
+      // BuildKit itself is no longer vendored by the daemon: the Engine's own
+      // builder runs the frontend.
+      assertEquals(record.some((line) => line.includes("buildkit")), false);
       assertEquals(
         record.some((line) =>
           line.includes(
@@ -555,7 +492,7 @@ test({
             runBuildkitSetup: () =>
               Promise.reject(new Error("frontend task: non-zero return code")),
             resolveArch: () => "amd64",
-            runCommand: mockDownloadCommands({ fail: "buildkit-curl" }),
+            runCommand: mockDownloadCommands({ fail: "railpack-curl" }),
           }),
         Error,
         "buildkit-setup playbook failed: frontend task: non-zero return code",
@@ -616,7 +553,7 @@ test({
         runCommand: mockDownloadCommands({ record }),
       });
       assertEquals(
-        record.some((line) => line.includes(`linux-${expectedArch}`)),
+        record.some((line) => line.includes(railpackAssetName(expectedArch))),
         true,
       );
     });
@@ -682,20 +619,18 @@ test({
       message: string;
       empty?: boolean;
     }> = [
-      { fail: "buildkit-curl", message: "curl failed: connection refused" },
+      { fail: "railpack-curl", message: "curl failed: connection refused" },
       {
-        fail: "buildkit-curl",
+        fail: "railpack-curl",
         message: "curl failed: download error",
         empty: true,
       },
-      { fail: "buildkit-tar", message: "tar failed: not a gzip" },
+      { fail: "railpack-tar", message: "tar failed: not a gzip" },
       {
-        fail: "buildkit-tar",
+        fail: "railpack-tar",
         message: "tar failed: extract error",
         empty: true,
       },
-      { fail: "railpack-curl", message: "curl failed: connection refused" },
-      { fail: "railpack-tar", message: "tar failed: not a gzip" },
       { fail: "docker-pull", message: "docker pull failed: pull denied" },
       {
         fail: "docker-pull",

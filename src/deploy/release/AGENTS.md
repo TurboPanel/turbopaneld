@@ -258,27 +258,44 @@ Concretely (`release/railpack-build.ts`, branch in `apply-source-releases.ts`):
 
 - Checkout is identical — `checkout.ts` unchanged, same scratch dir, same
   credential handling.
-- `railpack prepare` writes a build plan; `buildctl` hands that plan to the
-  pinned Railpack **BuildKit gateway frontend** against a vendored `buildkitd`
-  on a private socket under `<daemonStateDir>/release-build/`.
-- The frontend is **vendored, not pulled**. `buildkit-setup` installs it as a
-  local OCI image layout at
-  `<runtimesDir>/railpack-frontend/<version>/image` (with a `current` symlink,
-  like the binaries) and records the layout's manifest digest beside it; the
-  build passes `--oci-layout <name>=<dir> --opt source=oci-layout://<name>@<digest>`.
-  Naming `ghcr.io/railwayapp/railpack-frontend:<tag>` at build time would put
-  live registry egress on the deploy path and let a repointed upstream tag
-  change what two releases recorded with the same `railpackFrontendVersion`
-  were actually built by.
-- Output handoff is a **`type=docker` tarball plus `docker load`**, not a shared
-  containerd/moby store. The vendored BuildKit is its own daemon and is not
-  wired into Docker's storage, so the tarball is the one handoff that works on
-  every host we install on; the cost is one extra copy through the filesystem,
-  which is deleted as soon as the load succeeds.
-- Build cache is **per project**:
-  `<daemonStateDir>/release-build/buildkit-cache/<projectId>/`, passed as
-  `--import-cache` / `--export-cache local`. One tenant's build can never warm
-  from another's layers.
+- `railpack prepare` writes a build plan; `docker buildx build` hands that
+  plan to the pinned Railpack **BuildKit gateway frontend** on the **Docker
+  Engine's own BuildKit** (`--builder default`, `BUILDKIT_SYNTAX=<frontend>`,
+  `-f <plan>`, `--load`), through the same `docker` CLI path and sudo ladder as
+  compose builds (`runDockerStreamed`). A `docker buildx version` preflight
+  names `docker-buildx-plugin` when the plugin is missing; a failed build
+  reports the redacted tail of BuildKit's own output.
+- **No private `buildkitd`.** The daemon runs as `tp`, and a non-root
+  `buildkitd` demands rootless mode (rootlesskit, newuidmap/newgidmap,
+  subuid/subgid for `tp`): on adrastea it exited with "rootless mode requires to
+  be executed as the mapped root in a user namespace" and the lane only ever saw
+  a readiness timeout. A root `buildkitd` socket would be a second privileged
+  build API the Docker gate cannot observe. The Engine's builder already exists
+  for compose builds, and its `/session` / `/grpc` upgrades already pass through
+  the gate. `buildctl` / `buildkitd` are no longer on the daemon's `--allow-run`.
+- The docker CLI **never** gets the build environment: tenant `build.env` and
+  `HOME=<checkout>` go to `railpack prepare` only. The CLI resolves plugins from
+  `$DOCKER_CONFIG` / `$HOME/.docker/cli-plugins`, so a checkout shipping
+  `.docker/cli-plugins/docker-buildx` would otherwise run as the daemon user.
+- The frontend is **pinned by digest**. `buildkit-setup` vendors it as a local
+  OCI layout at `<runtimesDir>/railpack-frontend/<version>/image` (with a
+  `current` symlink) plus its manifest digest, and its `docker pull` leaves the
+  same image in Docker's store. The build names
+  `ghcr.io/railwayapp/railpack-frontend@<digest>`, so a repointed upstream tag
+  cannot change what two releases recorded with the same
+  `railpackFrontendVersion` were built by. If the store lost the image, the
+  vendored layout is `docker load`ed back first; if even that fails the Engine
+  can only fetch exactly that digest.
+- Output goes straight into the image store (`--load`): no tarball handoff.
+- **Tenant isolation is `cache-key=<projectId>`**, which Railpack prefixes to
+  every mount cache id (package-manager stores, `node_modules`). Mount caches
+  are writable and shared by id, so without it one tenant could read or poison
+  another's. The Engine's layer cache is per host, as it is for compose builds
+  (and as it was for the old private `buildkitd`).
+- Build env is **not** passed to the frontend: it reads only `cache-key`,
+  `secrets-hash` and `github-token` build args, so the old `--opt env:K=V` never
+  reached a build. Build secrets need `railpack prepare --env` plus `--secret`
+  (follow-up), never values on argv.
 - Everything the native lane does *after* the build is skipped. Nothing is
   staged, sealed, or linked, and `current` never moves. There is no promoted
   tree, so a Railpack release needs **no project principal** — the guard that
@@ -319,10 +336,11 @@ be rolled back to, which is the same guarantee the native lane gives.
 
 **Provisioning is on demand.** `ensureBuildkitRailpack` follows the
 `ensureDocker` / `ensureHostingCaddy` pattern exactly: check the vendor tree →
-`buildkit-setup.yml` (`runBuildkitSetup`) → direct binary download → re-check →
-throw. It is called only when a `railpack` build is actually requested, never
-from `daemon-converge` or `instance-dev-install`. `BUILDKIT_VERSION` /
-`RAILPACK_VERSION` in `railpack-build.ts` are pinned in step with
+`buildkit-setup.yml` (`runBuildkitSetup`) → direct download of railpack and the
+frontend → re-check → throw. It is called only when a `railpack` build is
+actually requested, never from `daemon-converge` or `instance-dev-install`.
+`RAILPACK_VERSION` in `railpack-build.ts` is pinned in step with
 `orchestration/roles/buildkit/defaults/main.yml`; bumping one without the other
-leaves the daemon looking for a version directory that was never vendored.
+leaves the daemon looking for a version directory that was never vendored. The
+role still vendors `buildctl` / `buildkitd`; the daemon no longer runs them.
 

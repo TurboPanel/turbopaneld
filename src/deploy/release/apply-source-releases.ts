@@ -55,7 +55,7 @@ import {
 } from "../native/unit.ts";
 import {
   ensureBuildkitRailpack,
-  railpackCacheDir,
+  railpackCacheKey,
   railpackImageTag,
   runRailpackBuild,
 } from "./railpack-build.ts";
@@ -379,10 +379,9 @@ async function applyRailpackRelease(
     build: entry.build,
     workingDir: params.buildWorkingDir,
     scratchDir: paths.scratchDir,
-    cacheDir: railpackCacheDir(layout, payload.projectId),
+    cacheKey: railpackCacheKey(payload.projectId),
     imageTag,
     tools,
-    layout,
     onOutput,
     redactSummary: (text) => logSink.redactSummary(text),
   });

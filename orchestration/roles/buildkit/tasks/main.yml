@@ -102,9 +102,11 @@
 #   mutable tag. Two releases recorded with the same `railpackFrontendVersion`
 #   must have been produced by the same frontend bytes, which is only true when
 #   the bytes are the thing kept. The layout's own manifest digest is written to
-#   `digest` and is what `buildctl` addresses
-#   (`--oci-layout … --opt source=oci-layout://…@sha256:…`), so a repointed
-#   upstream tag cannot change build output on a host that already vendored it.
+#   `digest`, and the daemon's `docker buildx build` names the frontend by it
+#   (`BUILDKIT_SYNTAX=<image>@sha256:…`), so a repointed upstream tag cannot
+#   change build output on a host that already vendored it. The `docker pull`
+#   below also leaves that image in Docker's store, where the Engine's BuildKit
+#   resolves it; the daemon reloads the layout if the store lost it.
 - name: Check vendored Railpack frontend image layout
   ansible.builtin.stat:
     path: "{{ turbopanel_vendor_dir }}/railpack-frontend/{{ railpack_frontend_version }}/digest"
