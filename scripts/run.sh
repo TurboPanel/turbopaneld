@@ -724,7 +724,7 @@ tp_download_verified_artifact() {
     rm -f "$_dest"
     # shellcheck disable=SC2086
     if ! $_curl "$_fetch_url" -o "$_dest"; then
-      echo "run.sh: failed to download $_fetch_url" >&2
+      echo "run.sh: failed to download ${_fetch_url%%[?#]*} (query string omitted: it can carry a signed token)" >&2
       return 1
     fi
     if printf '%s  %s\n' "$_sha256" "$_dest" | sha256sum -c - >/dev/null 2>&1; then

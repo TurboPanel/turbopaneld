@@ -167,3 +167,23 @@ test("run.sh curl does not retry a 404", async () => {
     await s.server.shutdown();
   }
 });
+
+test("run.sh never prints a download URL's query string on failure", async () => {
+  const source = await Deno.readTextFile(runShPath);
+  const lib = await Deno.readTextFile(
+    join(here, "../../scripts/lib/release-artifacts.sh"),
+  );
+  for (const text of [source, lib]) {
+    assertStringIncludes(text, "failed to download ${_fetch_url%%[?#]*}");
+    assertEquals(text.includes("failed to download $_fetch_url"), false);
+  }
+  // The expansion itself drops a signed query and fragment.
+  const out = await new Deno.Command("sh", {
+    args: [
+      "-c",
+      '_fetch_url="https://h.test/a?X-Amz-Signature=abc&token=t#f"; printf %s "${_fetch_url%%[?#]*}"',
+    ],
+    stdout: "piped",
+  }).output();
+  assertEquals(new TextDecoder().decode(out.stdout), "https://h.test/a");
+});
