@@ -14,6 +14,18 @@ export type DecryptSecretsFn = (
 ) => Promise<(string | null)[]>;
 
 /**
+ * Mode for a private key under `tlsDir`. `roles/hosting-caddy` makes the TLS
+ * directory setgid to the hosting Caddy's own group, so everything written
+ * below it carries that group: 0640 then lets exactly that account read the
+ * key. Without the setgid directory the group would be the daemon's, so the
+ * key stays 0600.
+ */
+async function privateKeyMode(tlsDir: string): Promise<number> {
+  const info = await Deno.stat(tlsDir);
+  return ((info.mode ?? 0) & 0o2000) === 0 ? 0o600 : 0o640;
+}
+
+/**
  * Decrypt sealed private keys and write PEM files under `layout.tlsDir/<tlsId>/`.
  * Returns the set of tlsIds successfully materialized for Caddy site snippets.
  */
@@ -26,6 +38,7 @@ export async function materializeTlsCertificates(
   if (material.length === 0) return written;
 
   await Deno.mkdir(layout.tlsDir, { recursive: true, mode: 0o750 });
+  const keyMode = await privateKeyMode(layout.tlsDir);
 
   const envelopes = material.map((entry) => entry.privateKeyEnvelope);
   const plaintexts = await decryptSecrets(envelopes);
@@ -49,7 +62,7 @@ export async function materializeTlsCertificates(
       mode: 0o640,
     });
     await Deno.writeTextFile(join(dir, "privkey.pem"), privateKeyPem, {
-      mode: 0o600,
+      mode: keyMode,
     });
     written.add(entry.tlsId);
   });

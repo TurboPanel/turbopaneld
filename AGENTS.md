@@ -576,12 +576,14 @@ controls below do not close:
    behind a per-host switch, off by default; nothing of the daemon's own is
    routed through it yet and `tp` is still in the group) — see
    `orchestration/roles/docker-gate/AGENTS.md` for the stages.
-2. **Hosting Caddy runs as root** (`turbopanel-hosting-caddy.service`, no
-   `User=`, it binds :80/:443) with its Caddyfile and working directory in
-   `/etc/turbopanel/hosting`, which `tp` owns. A Caddyfile can serve or log
-   to any path as root. tp-host pins that unit's exec lines, not the config.
-   Closing it needs the unit to run as `tpcaddy` with
-   `CAP_NET_BIND_SERVICE` and a config directory `tp` cannot rewrite.
+2. **Closed: the hosting Caddy no longer runs as root.**
+   `turbopanel-hosting-caddy.service` runs as `tpedge` (not in group `tp`)
+   with `AmbientCapabilities=`/`CapabilityBoundingSet=CAP_NET_BIND_SERVICE`
+   and `NoNewPrivileges=yes`, its certificates in the top-level
+   `StateDirectory=turbopanel-hosting-caddy`. tp-host refuses the unit in any
+   other shape. Its Caddyfile is still `tp`-written (`/etc/turbopanel/hosting`,
+   read through a per-user ACL), so a hostile config now lands as `tpedge`,
+   not root; `stripPrefix` and the other inputs still need validation.
 3. **php-fpm's config test runs as root** — `php-fpm<x.y> --fpm-config
    /etc/turbopanel/php/<x.y>/php-fpm.conf --test` (`TP_ENGINE_VALIDATE`,
    pinned to exactly that file). `/etc/turbopanel` is `tp`-owned, so `tp`
@@ -699,8 +701,11 @@ it regresses:
     capability sets, no `+`/`!`/`:` exec prefixes, no line ending in a
     backslash (systemd would join it onto the next line, hiding e.g. `User=`
     from this line-by-line check), a timer may only start its own service;
-    the root hosting-Caddy unit may only exec the vendored Caddy against the
-    hosting Caddyfile; the `turbopanel-backup-` prefix is reserved for
+    the hosting-Caddy unit must run as `tpedge:tpedge` with
+    `NoNewPrivileges=yes`, exactly `CAP_NET_BIND_SERVICE` in both capability
+    sets, `StateDirectory=turbopanel-hosting-caddy` and only the
+    `HOME`/`XDG_*` environment that points into it, and may only exec the
+    vendored Caddy against the hosting Caddyfile; the `turbopanel-backup-` prefix is reserved for
     scheduled backups — a name under it must be exactly
     `turbopanel-backup-<lower-case uuid>.service|.timer`, and the service
     must run as `tp:tp` (`DAEMON_ACCOUNT`), with exactly one
