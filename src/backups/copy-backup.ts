@@ -220,9 +220,11 @@ export async function ensureCopyBackupImage(
     COPY_BACKUP_HELPER_IMAGE,
   ]);
   if (inspect.success) return undefined;
-  const pull = await runDocker(["pull", COPY_BACKUP_HELPER_IMAGE]);
+  let pull = await runDocker(["pull", COPY_BACKUP_HELPER_IMAGE]);
+  // One bounded retry: a registry or network blip should not fail a backup.
+  if (!pull.success) pull = await runDocker(["pull", COPY_BACKUP_HELPER_IMAGE]);
   if (pull.success) return undefined;
-  return `could not pull the backup helper image: ${
+  return `could not pull the backup helper image ${COPY_BACKUP_HELPER_IMAGE}: ${
     sanitizeForLog(pull.stderr || "docker pull failed")
   }`;
 }
@@ -294,6 +296,10 @@ export async function createCopyBackupArtifact(
     request.policyId,
   );
   const mount = resolveCopyMount(layout, source);
+  // The archive run uses `--pull never`, so the pinned image must already be
+  // here; checked before anything is written so a failed pull leaves no trace.
+  const imageIssue = await ensureCopyBackupImage(deps);
+  if (imageIssue) throw new Error(imageIssue);
   await assertVolumeExists(mount, deps.runDocker ?? defaultRunDocker);
 
   const dir = copyBackupArtifactDir(layout, source.copyId, request.policyId);

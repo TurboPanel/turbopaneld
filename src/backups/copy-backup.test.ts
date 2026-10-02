@@ -70,7 +70,10 @@ function fakeDeps(
   return {
     runDocker: (args) => {
       calls.push(args);
-      return Promise.resolve(dockerResult(options.volumeExists ?? true));
+      const success = args[0] === "volume"
+        ? options.volumeExists ?? true
+        : true;
+      return Promise.resolve(dockerResult(success));
     },
     runArchive: async (argv, destination) => {
       calls.push(argv);
@@ -248,7 +251,8 @@ test("a missing volume is refused before the helper runs (docker would create it
       Error,
       "not found on this host",
     );
-    assertEquals(calls, [["volume", "inspect", "shop_uploads"]]);
+    assertEquals(calls.at(-1), ["volume", "inspect", "shop_uploads"]);
+    assertEquals(calls.some((args) => args[0] === "run"), false);
   });
 });
 
@@ -301,6 +305,84 @@ test("ensureCopyBackupImage pulls only a missing image and reports a failed pull
   });
   assertEquals(
     failed,
-    "could not pull the backup helper image: registry unreachable",
+    `could not pull the backup helper image ${COPY_BACKUP_HELPER_IMAGE}: registry unreachable`,
   );
+});
+
+test("ensureCopyBackupImage retries a failed pull once", async () => {
+  const calls: string[][] = [];
+  let pulls = 0;
+  const result = await ensureCopyBackupImage({
+    runDocker: (args) => {
+      calls.push(args);
+      if (args[0] === "pull") pulls += 1;
+      return Promise.resolve(dockerResult(args[0] === "pull" && pulls > 1));
+    },
+  });
+  assertEquals(result, undefined);
+  assertEquals(calls.map((args) => args[0]), ["image", "pull", "pull"]);
+});
+
+test("a backup pulls the missing helper image before the archive runs", async () => {
+  await withLayout(async (layout) => {
+    const calls: string[][] = [];
+    let present = false;
+    const base = fakeDeps(new TextEncoder().encode("data"), calls);
+    await createCopyBackupArtifact(
+      layout,
+      { source: volumeSource(), backupId: "bk_1" },
+      {
+        ...base,
+        runDocker: (args) => {
+          if (args[0] === "image") {
+            return Promise.resolve(dockerResult(present));
+          }
+          if (args[0] === "pull") present = true;
+          return base.runDocker!(args);
+        },
+      },
+    );
+    assertEquals(calls.map((args) => args[0]), ["pull", "volume", "run"]);
+  });
+});
+
+test("a backup with the image present does not pull", async () => {
+  await withLayout(async (layout) => {
+    const calls: string[][] = [];
+    await createCopyBackupArtifact(
+      layout,
+      { source: volumeSource(), backupId: "bk_1" },
+      fakeDeps(new TextEncoder().encode("data"), calls),
+    );
+    assertEquals(calls.some((args) => args[0] === "pull"), false);
+  });
+});
+
+test("a failed pull errors clearly and leaves no artifact or directory", async () => {
+  await withLayout(async (layout) => {
+    const calls: string[][] = [];
+    const base = fakeDeps(new Uint8Array(), calls);
+    await assertRejects(
+      () =>
+        createCopyBackupArtifact(
+          layout,
+          { source: volumeSource(), backupId: "bk_1" },
+          {
+            ...base,
+            runDocker: (args) => {
+              calls.push(args);
+              return Promise.resolve(
+                dockerResult(false, args[0] === "pull" ? "offline" : ""),
+              );
+            },
+          },
+        ),
+      Error,
+      "could not pull the backup helper image docker.io/library/alpine:3.22@sha256:",
+    );
+    assertEquals(calls.some((args) => args[0] === "run"), false);
+    await assertRejects(() =>
+      Deno.stat(join(layout.backupDir, "copies", COPY))
+    );
+  });
 });
