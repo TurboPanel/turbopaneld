@@ -12,6 +12,9 @@
   gather_facts: true
 
   vars:
+    # Site-engine config trees under turbopanel_config_dir that their roles
+    # keep root:<engine group>; post_tasks never hands them to tp.
+    turbopanel_engine_config_dirs: [apache, nginx, openlitespeed, php]
     turbopanel_install_root: /opt/turbopanel
     # Production/managed-node install (run.sh). Roles key turbopanel_vendor_dir
     # off this flag; co-located dev playbooks leave it unset (defaults false).
@@ -70,16 +73,50 @@
     # content root executes (tp-orchestrate runs playbooks from it), and the
     # daemon must not be able to rewrite them — see roles/turbopanel-user and
     # roles/daemon-layout.
-    - name: Ensure tp owns state and config trees
+    - name: Ensure tp owns the state tree
       ansible.builtin.file:
-        path: "{{ item }}"
+        path: "{{ turbopanel_daemon_state_dir }}"
         state: directory
         owner: "{{ turbopanel_user }}"
         group: "{{ turbopanel_group }}"
         recurse: true
-      loop:
-        - "{{ turbopanel_daemon_state_dir }}"
-        - "{{ turbopanel_config_dir }}"
+
+    # The config tree is re-owned entry by entry so the site-engine trees stay
+    # root:<engine group> (roles apache/nginx/openlitespeed/php-fpm; the daemon
+    # writes them through tp-host). A recursive tp:tp here left them owned by
+    # the daemon account after every update, which the engines' service users
+    # cannot read (OpenLiteSpeed lost mime.properties and its vhost configs).
+    - name: Ensure tp owns the config directory
+      ansible.builtin.file:
+        path: "{{ turbopanel_config_dir }}"
+        state: directory
+        owner: "{{ turbopanel_user }}"
+        group: "{{ turbopanel_group }}"
+
+    - name: List the config directory entries
+      ansible.builtin.find:
+        paths: "{{ turbopanel_config_dir }}"
+        file_type: any
+        hidden: true
+      register: _tp_config_entries
+
+    - name: Ensure tp owns the config tree except root-owned engine trees
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: "{{ 'directory' if item.isdir else 'file' }}"
+        owner: "{{ turbopanel_user }}"
+        group: "{{ turbopanel_group }}"
+        recurse: "{{ item.isdir }}"
+      loop: >-
+        {{
+          _tp_config_entries.files
+          | rejectattr('islnk')
+          | rejectattr('path', 'in', turbopanel_engine_config_dirs
+              | map('regex_replace', '^', turbopanel_config_dir ~ '/') | list)
+          | list
+        }}
+      loop_control:
+        label: "{{ item.path }}"
 
     # Galaxy install uses ANSIBLE_HOME=/tmp/turbopanel-ansible (see paths.ts).
     # Roles/collections are already in FHS paths; drop the disposable cache and
