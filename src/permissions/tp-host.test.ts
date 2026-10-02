@@ -854,6 +854,30 @@ test("accounts: only principals are created or changed, and only into registry g
       "carol",
     ]);
     assertEquals(add.code, 0, add.stderr);
+    // The id range must reach useradd: dropping it leaves login.defs in
+    // charge, which on a host with a 9999 account yields uid 10000/10001.
+    assertStringIncludes(
+      add.stdout,
+      "EXEC [useradd] [-K] [UID_MIN=15001] [-K] [UID_MAX=60000] [-g] [carol-grp]",
+    );
+    const addU = await host.run([
+      "useradd",
+      "-u",
+      "15555",
+      "-g",
+      "carol-grp",
+      "-d",
+      home,
+      "-M",
+      "-s",
+      "/bin/bash",
+      "carol",
+    ]);
+    assertEquals(addU.code, 0, addU.stderr);
+    assertStringIncludes(
+      addU.stdout,
+      "EXEC [useradd] [-u] [15555] [-g] [carol-grp]",
+    );
     for (
       const args of [
         [

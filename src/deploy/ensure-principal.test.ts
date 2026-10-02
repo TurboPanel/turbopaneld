@@ -1832,3 +1832,30 @@ test("ensureSystemPrincipals adopts an account below the floor when its uid is a
     false,
   );
 });
+
+test("ensureSystemPrincipals fails when useradd lands below the uid floor (Debian 13 behaviour)", async () => {
+  const base = captureRun({}).run;
+  let created = false;
+  const run: RunFn = (command, args, stdin) => {
+    if (command === "sudo" && args.includes("useradd")) created = true;
+    if (command === "getent" && args[0] === "passwd" && created) {
+      return Promise.resolve({
+        success: true,
+        stdout: "appuser:x:10000:15002::/srv/users/appuser:/bin/bash",
+        stderr: "",
+      });
+    }
+    return base(command, args, stdin);
+  };
+  const err = await assertRejects(
+    () =>
+      ensureSystemPrincipals(stubLayout(), [{
+        ...baseSpec,
+        home: defaultHome,
+        shell: "/bin/bash",
+      }], run),
+    Error,
+    "uid=10000",
+  );
+  assert(err.message.includes("usermod -u"));
+});
