@@ -311,3 +311,16 @@ Break-glass at every stage: `systemctl stop turbopanel-docker-gate` as root.
 - The label-less helpers (managed-file normalisation, **backup and restore**)
   would be denied until the daemon stamps a platform label on them: backups and
   restores stop working. This is the most critical gap to close before stage 4.
+
+## Framing and form parity (Go differential)
+
+The engine parses with Go's `net/http`. `scripts/docker-gate-diff/main.go` (standard library only) runs
+`http.ReadRequest` + `ParseForm` over `src/docker-gate/testdata/parser-cases.json`; its recorded output is
+`testdata/go-parser.json` and `src/docker-gate/parser-differential.test.ts` checks the gate against it: the gate may
+refuse what Go accepts, but must never pass a request Go reads differently (method, path, body length and framing,
+leftover bytes, form fields). `DOCKER_GATE_GO_DIFF=1 deno test` re-runs the harness (local `go`, else
+`docker run golang:1.23`) and checks the record is current. Regenerate with
+`docker run --rm -v "$PWD":/w -w /w/scripts/docker-gate-diff golang:1.23 go run . ../../src/docker-gate/testdata/parser-cases.json > src/docker-gate/testdata/go-parser.json`.
+Gaps it found and the gate now closes: Transfer-Encoding on an HTTP/1.0 request is refused (Go ignores it and reads the
+chunks as the next request), and a form-encoded body is an `form-encoded-body` finding (Go merges it into the form
+ahead of the query, so `networkmode=host` could ride in the body of `POST /build`).

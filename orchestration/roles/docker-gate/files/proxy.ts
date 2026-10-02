@@ -18,6 +18,7 @@ import {
   BufferedReader,
   type ByteSink,
   type ByteSource,
+  carriesFormBody,
   concatBytes,
   errorResponse,
   type Framing,
@@ -250,7 +251,12 @@ async function judge(
 ): Promise<Judged> {
   const { path, query } = parseTarget(head.target);
   const { route, needsBody } = classifyRoute(head.method, path);
-  const facts: RequestFacts = { method: head.method, path, query };
+  const facts: RequestFacts = {
+    method: head.method,
+    path,
+    query,
+    formBody: carriesFormBody(head, framing),
+  };
   let buffered: BufferedBody | undefined;
   if (needsBody) {
     buffered = await bufferBody(clientReader, framing, deps.maxBodyBytes);

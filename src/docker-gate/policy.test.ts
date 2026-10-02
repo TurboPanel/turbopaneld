@@ -676,3 +676,17 @@ test("only one /v<major>.<minor> prefix is canonical; every other prefix the eng
     ["path-version-prefix", "exec-privileged"],
   );
 });
+
+test("a form-encoded body is a finding: the engine merges it into the form ahead of the query", async () => {
+  const found = await evaluateRequest(
+    {
+      method: "POST",
+      path: "/build",
+      query: new URLSearchParams(),
+      formBody: true,
+    },
+    DEFAULT_POLICY_CONFIG,
+    (p) => Promise.resolve(p),
+  );
+  assertEquals(found.map((v) => v.rule), ["form-encoded-body"]);
+});

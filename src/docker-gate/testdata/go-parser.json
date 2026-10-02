@@ -1,0 +1,730 @@
+{
+  "go": "go1.23.12",
+  "results": [
+    {
+      "name": "plain GET",
+      "ok": true,
+      "method": "GET",
+      "path": "/containers/json",
+      "bodyLen": 0,
+      "chunked": false,
+      "leftover": 0,
+      "form": {},
+      "formErr": false
+    },
+    {
+      "name": "plain GET versioned",
+      "ok": true,
+      "method": "GET",
+      "path": "/v1.47/containers/json",
+      "bodyLen": 0,
+      "chunked": false,
+      "leftover": 0,
+      "form": {},
+      "formErr": false
+    },
+    {
+      "name": "query form",
+      "ok": true,
+      "method": "GET",
+      "path": "/build",
+      "bodyLen": 0,
+      "chunked": false,
+      "leftover": 0,
+      "form": {
+        "networkmode": [
+          "host"
+        ],
+        "x": [
+          "1"
+        ]
+      },
+      "formErr": false
+    },
+    {
+      "name": "semicolon in query",
+      "ok": true,
+      "method": "GET",
+      "path": "/build",
+      "bodyLen": 0,
+      "chunked": false,
+      "leftover": 0,
+      "form": {},
+      "formErr": true
+    },
+    {
+      "name": "bad escape in query",
+      "ok": true,
+      "method": "GET",
+      "path": "/build",
+      "bodyLen": 0,
+      "chunked": false,
+      "leftover": 0,
+      "form": {
+        "networkmode": [
+          "host"
+        ]
+      },
+      "formErr": true
+    },
+    {
+      "name": "repeated key",
+      "ok": true,
+      "method": "POST",
+      "path": "/build",
+      "bodyLen": 0,
+      "chunked": false,
+      "leftover": 0,
+      "form": {
+        "networkmode": [
+          "bridge",
+          "host"
+        ]
+      },
+      "formErr": false
+    },
+    {
+      "name": "fragment kept by engine",
+      "ok": true,
+      "method": "GET",
+      "path": "/build",
+      "bodyLen": 0,
+      "chunked": false,
+      "leftover": 0,
+      "form": {
+        "networkmode": [
+          "host#x"
+        ]
+      },
+      "formErr": false
+    },
+    {
+      "name": "encoded path",
+      "ok": true,
+      "method": "GET",
+      "path": "/containers/json",
+      "bodyLen": 0,
+      "chunked": false,
+      "leftover": 0,
+      "form": {},
+      "formErr": false
+    },
+    {
+      "name": "encoded slash",
+      "ok": true,
+      "method": "GET",
+      "path": "/containers/json",
+      "bodyLen": 0,
+      "chunked": false,
+      "leftover": 0,
+      "form": {},
+      "formErr": false
+    },
+    {
+      "name": "post json length",
+      "ok": true,
+      "method": "POST",
+      "path": "/containers/create",
+      "bodyLen": 2,
+      "chunked": false,
+      "leftover": 0,
+      "form": {},
+      "formErr": false
+    },
+    {
+      "name": "post chunked",
+      "ok": true,
+      "method": "POST",
+      "path": "/containers/create",
+      "bodyLen": 2,
+      "chunked": true,
+      "leftover": 0,
+      "form": {},
+      "formErr": false
+    },
+    {
+      "name": "chunked with extension",
+      "ok": true,
+      "method": "POST",
+      "path": "/x",
+      "bodyLen": 2,
+      "chunked": true,
+      "leftover": 0,
+      "form": {},
+      "formErr": false
+    },
+    {
+      "name": "chunked with trailer",
+      "ok": true,
+      "method": "POST",
+      "path": "/x",
+      "bodyLen": 2,
+      "chunked": true,
+      "leftover": 0,
+      "form": {},
+      "formErr": false
+    },
+    {
+      "name": "chunked capitalised",
+      "ok": true,
+      "method": "POST",
+      "path": "/x",
+      "bodyLen": 2,
+      "chunked": true,
+      "leftover": 0,
+      "form": {},
+      "formErr": false
+    },
+    {
+      "name": "CL and TE",
+      "ok": true,
+      "method": "POST",
+      "path": "/x",
+      "bodyLen": 2,
+      "chunked": true,
+      "leftover": 0,
+      "form": {},
+      "formErr": false
+    },
+    {
+      "name": "duplicate CL equal",
+      "ok": true,
+      "method": "POST",
+      "path": "/x",
+      "bodyLen": 2,
+      "chunked": false,
+      "leftover": 0,
+      "form": {},
+      "formErr": false
+    },
+    {
+      "name": "duplicate CL differing",
+      "ok": false,
+      "error": "http: message cannot contain multiple Content-Length headers; got [\"2\" \"3\"]",
+      "bodyLen": 0,
+      "chunked": false,
+      "leftover": 0,
+      "form": {},
+      "formErr": false
+    },
+    {
+      "name": "CL list",
+      "ok": false,
+      "error": "bad Content-Length \"2, 2\"",
+      "bodyLen": 0,
+      "chunked": false,
+      "leftover": 0,
+      "form": {},
+      "formErr": false
+    },
+    {
+      "name": "CL plus sign",
+      "ok": false,
+      "error": "bad Content-Length \"+2\"",
+      "bodyLen": 0,
+      "chunked": false,
+      "leftover": 0,
+      "form": {},
+      "formErr": false
+    },
+    {
+      "name": "CL leading space in value",
+      "ok": true,
+      "method": "POST",
+      "path": "/x",
+      "bodyLen": 2,
+      "chunked": false,
+      "leftover": 0,
+      "form": {},
+      "formErr": false
+    },
+    {
+      "name": "CL negative",
+      "ok": false,
+      "error": "bad Content-Length \"-1\"",
+      "bodyLen": 0,
+      "chunked": false,
+      "leftover": 0,
+      "form": {},
+      "formErr": false
+    },
+    {
+      "name": "TE identity",
+      "ok": false,
+      "error": "unsupported transfer encoding: \"identity\"",
+      "bodyLen": 0,
+      "chunked": false,
+      "leftover": 0,
+      "form": {},
+      "formErr": false
+    },
+    {
+      "name": "TE gzip chunked",
+      "ok": false,
+      "error": "unsupported transfer encoding: \"gzip, chunked\"",
+      "bodyLen": 0,
+      "chunked": false,
+      "leftover": 0,
+      "form": {},
+      "formErr": false
+    },
+    {
+      "name": "TE chunked twice",
+      "ok": false,
+      "error": "too many transfer encodings: [\"chunked\" \"chunked\"]",
+      "bodyLen": 0,
+      "chunked": false,
+      "leftover": 0,
+      "form": {},
+      "formErr": false
+    },
+    {
+      "name": "HTTP/1.0 chunked ignored by Go",
+      "ok": true,
+      "method": "POST",
+      "path": "/containers/create",
+      "bodyLen": 0,
+      "chunked": false,
+      "leftover": 29,
+      "form": {},
+      "formErr": false
+    },
+    {
+      "name": "HTTP/1.0 length",
+      "ok": true,
+      "method": "POST",
+      "path": "/x",
+      "bodyLen": 2,
+      "chunked": false,
+      "leftover": 0,
+      "form": {},
+      "formErr": false
+    },
+    {
+      "name": "HTTP/1.0 no Host",
+      "ok": true,
+      "method": "GET",
+      "path": "/containers/json",
+      "bodyLen": 0,
+      "chunked": false,
+      "leftover": 0,
+      "form": {},
+      "formErr": false
+    },
+    {
+      "name": "HTTP/1.1 no Host",
+      "ok": false,
+      "error": "missing Host",
+      "bodyLen": 0,
+      "chunked": false,
+      "leftover": 0,
+      "form": {},
+      "formErr": false
+    },
+    {
+      "name": "two Host",
+      "ok": false,
+      "error": "too many Host headers",
+      "bodyLen": 0,
+      "chunked": false,
+      "leftover": 0,
+      "form": {},
+      "formErr": false
+    },
+    {
+      "name": "HTTP/1.2",
+      "ok": true,
+      "method": "GET",
+      "path": "/x",
+      "bodyLen": 0,
+      "chunked": false,
+      "leftover": 0,
+      "form": {},
+      "formErr": false
+    },
+    {
+      "name": "HTTP/2.0 line",
+      "ok": true,
+      "method": "GET",
+      "path": "/x",
+      "bodyLen": 0,
+      "chunked": false,
+      "leftover": 0,
+      "form": {},
+      "formErr": false
+    },
+    {
+      "name": "lowercase method",
+      "ok": true,
+      "method": "get",
+      "path": "/x",
+      "bodyLen": 0,
+      "chunked": false,
+      "leftover": 0,
+      "form": {},
+      "formErr": false
+    },
+    {
+      "name": "odd method",
+      "ok": true,
+      "method": "BREW",
+      "path": "/x",
+      "bodyLen": 0,
+      "chunked": false,
+      "leftover": 0,
+      "form": {},
+      "formErr": false
+    },
+    {
+      "name": "absolute-form target",
+      "ok": true,
+      "method": "GET",
+      "path": "/containers/json",
+      "bodyLen": 0,
+      "chunked": false,
+      "leftover": 0,
+      "form": {},
+      "formErr": false
+    },
+    {
+      "name": "asterisk target",
+      "ok": true,
+      "method": "OPTIONS",
+      "path": "*",
+      "bodyLen": 0,
+      "chunked": false,
+      "leftover": 0,
+      "form": {},
+      "formErr": false
+    },
+    {
+      "name": "no leading slash",
+      "ok": false,
+      "error": "parse \"containers/json\": invalid URI for request",
+      "bodyLen": 0,
+      "chunked": false,
+      "leftover": 0,
+      "form": {},
+      "formErr": false
+    },
+    {
+      "name": "double slash path",
+      "ok": true,
+      "method": "GET",
+      "path": "//containers/json",
+      "bodyLen": 0,
+      "chunked": false,
+      "leftover": 0,
+      "form": {},
+      "formErr": false
+    },
+    {
+      "name": "dot segments",
+      "ok": true,
+      "method": "GET",
+      "path": "/a/../containers/json",
+      "bodyLen": 0,
+      "chunked": false,
+      "leftover": 0,
+      "form": {},
+      "formErr": false
+    },
+    {
+      "name": "space in target",
+      "ok": false,
+      "error": "malformed HTTP version \"b HTTP/1.1\"",
+      "bodyLen": 0,
+      "chunked": false,
+      "leftover": 0,
+      "form": {},
+      "formErr": false
+    },
+    {
+      "name": "tab in target",
+      "ok": false,
+      "error": "parse \"/a\\tb\": net/url: invalid control character in URL",
+      "bodyLen": 0,
+      "chunked": false,
+      "leftover": 0,
+      "form": {},
+      "formErr": false
+    },
+    {
+      "name": "header folding",
+      "ok": true,
+      "method": "GET",
+      "path": "/x",
+      "bodyLen": 0,
+      "chunked": false,
+      "leftover": 0,
+      "form": {},
+      "formErr": false
+    },
+    {
+      "name": "leading space header",
+      "ok": true,
+      "method": "GET",
+      "path": "/x",
+      "bodyLen": 0,
+      "chunked": false,
+      "leftover": 0,
+      "form": {},
+      "formErr": false
+    },
+    {
+      "name": "space before colon",
+      "ok": true,
+      "method": "GET",
+      "path": "/x",
+      "bodyLen": 0,
+      "chunked": false,
+      "leftover": 0,
+      "form": {},
+      "formErr": false
+    },
+    {
+      "name": "bare LF line endings",
+      "ok": true,
+      "method": "GET",
+      "path": "/x",
+      "bodyLen": 0,
+      "chunked": false,
+      "leftover": 0,
+      "form": {},
+      "formErr": false
+    },
+    {
+      "name": "bare LF in header",
+      "ok": true,
+      "method": "GET",
+      "path": "/x",
+      "bodyLen": 0,
+      "chunked": false,
+      "leftover": 0,
+      "form": {},
+      "formErr": false
+    },
+    {
+      "name": "bare CR in value",
+      "ok": false,
+      "error": "malformed MIME header line: X-A: 1\rX-B: 2",
+      "bodyLen": 0,
+      "chunked": false,
+      "leftover": 0,
+      "form": {},
+      "formErr": false
+    },
+    {
+      "name": "NUL in header",
+      "ok": false,
+      "error": "malformed MIME header line: X-A: a\u0000b",
+      "bodyLen": 0,
+      "chunked": false,
+      "leftover": 0,
+      "form": {},
+      "formErr": false
+    },
+    {
+      "name": "NUL in target",
+      "ok": false,
+      "error": "parse \"/a\\x00b\": net/url: invalid control character in URL",
+      "bodyLen": 0,
+      "chunked": false,
+      "leftover": 0,
+      "form": {},
+      "formErr": false
+    },
+    {
+      "name": "non-ASCII header value",
+      "ok": true,
+      "method": "GET",
+      "path": "/x",
+      "bodyLen": 0,
+      "chunked": false,
+      "leftover": 0,
+      "form": {},
+      "formErr": false
+    },
+    {
+      "name": "vertical tab in CL",
+      "ok": false,
+      "error": "malformed MIME header line: Content-Length: 2\u000b",
+      "bodyLen": 0,
+      "chunked": false,
+      "leftover": 0,
+      "form": {},
+      "formErr": false
+    },
+    {
+      "name": "Connection upgrade",
+      "ok": true,
+      "method": "POST",
+      "path": "/containers/c/attach",
+      "bodyLen": 0,
+      "chunked": false,
+      "leftover": 0,
+      "form": {},
+      "formErr": false
+    },
+    {
+      "name": "form body build",
+      "ok": true,
+      "method": "POST",
+      "path": "/build",
+      "bodyLen": 16,
+      "chunked": false,
+      "leftover": 0,
+      "form": {
+        "networkmode": [
+          "host"
+        ]
+      },
+      "formErr": false
+    },
+    {
+      "name": "form body charset",
+      "ok": true,
+      "method": "POST",
+      "path": "/build",
+      "bodyLen": 16,
+      "chunked": false,
+      "leftover": 0,
+      "form": {
+        "networkmode": [
+          "host"
+        ]
+      },
+      "formErr": false
+    },
+    {
+      "name": "form body upper case type",
+      "ok": true,
+      "method": "POST",
+      "path": "/build",
+      "bodyLen": 16,
+      "chunked": false,
+      "leftover": 0,
+      "form": {
+        "networkmode": [
+          "host"
+        ]
+      },
+      "formErr": false
+    },
+    {
+      "name": "form body chunked",
+      "ok": true,
+      "method": "POST",
+      "path": "/build",
+      "bodyLen": 16,
+      "chunked": true,
+      "leftover": 0,
+      "form": {
+        "networkmode": [
+          "host"
+        ]
+      },
+      "formErr": false
+    },
+    {
+      "name": "form body on PUT",
+      "ok": true,
+      "method": "PUT",
+      "path": "/containers/c/archive",
+      "bodyLen": 7,
+      "chunked": false,
+      "leftover": 0,
+      "form": {
+        "a": [
+          "b"
+        ],
+        "c": [
+          "d"
+        ]
+      },
+      "formErr": false
+    },
+    {
+      "name": "form body on DELETE",
+      "ok": true,
+      "method": "DELETE",
+      "path": "/containers/c",
+      "bodyLen": 7,
+      "chunked": false,
+      "leftover": 0,
+      "form": {},
+      "formErr": false
+    },
+    {
+      "name": "form body tar type",
+      "ok": true,
+      "method": "POST",
+      "path": "/build",
+      "bodyLen": 16,
+      "chunked": false,
+      "leftover": 0,
+      "form": {},
+      "formErr": false
+    },
+    {
+      "name": "two content types",
+      "ok": true,
+      "method": "POST",
+      "path": "/build",
+      "bodyLen": 16,
+      "chunked": false,
+      "leftover": 0,
+      "form": {},
+      "formErr": false
+    },
+    {
+      "name": "form body and query",
+      "ok": true,
+      "method": "POST",
+      "path": "/build",
+      "bodyLen": 16,
+      "chunked": false,
+      "leftover": 0,
+      "form": {
+        "networkmode": [
+          "host",
+          "bridge"
+        ]
+      },
+      "formErr": false
+    },
+    {
+      "name": "pipelined second request",
+      "ok": true,
+      "method": "GET",
+      "path": "/x",
+      "bodyLen": 0,
+      "chunked": false,
+      "leftover": 28,
+      "form": {},
+      "formErr": false
+    },
+    {
+      "name": "body shorter than CL",
+      "ok": true,
+      "method": "POST",
+      "path": "/x",
+      "bodyLen": 2,
+      "chunked": false,
+      "leftover": 0,
+      "form": {},
+      "formErr": false
+    },
+    {
+      "name": "expect continue",
+      "ok": true,
+      "method": "POST",
+      "path": "/x",
+      "bodyLen": 2,
+      "chunked": false,
+      "leftover": 0,
+      "form": {},
+      "formErr": false
+    }
+  ]
+}
