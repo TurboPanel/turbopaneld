@@ -71,8 +71,9 @@ export type ApprovalResult =
 function toBase64Url(bytes: Uint8Array): string {
   let binary = "";
   for (const byte of bytes) binary += String.fromCodePoint(byte);
-  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(
-    /=+$/,
+  // `=` only ever appears as trailing padding in base64.
+  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replaceAll(
+    "=",
     "",
   );
 }
@@ -85,8 +86,9 @@ function toBase64Url(bytes: Uint8Array): string {
 export function canonicalJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
   if (typeof value === "object" && value !== null) {
-    // Array.prototype.sort() on strings orders by UTF-16 code unit, as RFC 8785 asks.
-    const members = Object.keys(value).sort().map((key) =>
+    // `<` and `>` compare UTF-16 code units, the order RFC 8785 asks for.
+    const byCodeUnit = (a: string, b: string) => Number(a > b) - Number(a < b);
+    const members = Object.keys(value).sort(byCodeUnit).map((key) =>
       `${JSON.stringify(key)}:${
         canonicalJson((value as Record<string, unknown>)[key])
       }`
