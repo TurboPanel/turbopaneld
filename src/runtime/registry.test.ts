@@ -42,9 +42,10 @@ test("accessGroup and allAccessGroups cover SSH levels", () => {
   assertEquals(accessGroup("sftp"), "tpsftp");
   assertEquals(accessGroup("shell"), "tpshell");
   assertEquals(accessGroup("password"), "tppasswd");
+  assertEquals(accessGroup("principal"), "tpprincipal");
   assertEquals(
     [...allAccessGroups()].sort((a, b) => a.localeCompare(b)),
-    ["tppasswd", "tpsftp", "tpshell"],
+    ["tppasswd", "tpprincipal", "tpsftp", "tpshell"],
   );
 });
 
@@ -90,6 +91,7 @@ test("allRuntimeGroups and allManagedGroups are the containment sets", () => {
     "tppasswd",
     "tpphp83",
     "tpphp84",
+    "tpprincipal",
     "tpsftp",
     "tpshell",
   ]);

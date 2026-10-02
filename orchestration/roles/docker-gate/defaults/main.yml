@@ -79,3 +79,13 @@ docker_gate_files:
   - stats.ts
   - util.ts
   - main.ts
+# Atomic deploy: new source is staged here and load-checked before anything is
+# replaced; the previous files (and unit, key, switch state) are kept in .prev
+# so a failed swap is rolled back. Both are root-only directories.
+docker_gate_stage_dir: "{{ docker_gate_dir }}/.next"
+docker_gate_prev_dir: "{{ docker_gate_dir }}/.prev"
+docker_gate_unit_file: "/etc/systemd/system/{{ docker_gate_service_name }}.service"
+# Everything a swap can change, restored (or removed if it did not exist) on rollback.
+docker_gate_managed_paths: >-
+  {{ (docker_gate_files | map('regex_replace', '^', docker_gate_dir ~ '/') | list)
+  + [docker_gate_approval_pubkey_file, docker_gate_ingress_switch_file, docker_gate_unit_file] }}
