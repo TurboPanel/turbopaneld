@@ -15,6 +15,7 @@ import {
   INSTALLER_VENDOR_DIRS,
   renderBackupRunnerPermissionFlags,
   renderDaemonPermissionFlags,
+  renderEnvFlags,
   renderInstallerPermissionFlags,
   RUN_TARGETS_INSIDE_WRITE_GRANT,
 } from "./daemon-permissions.ts";
@@ -148,8 +149,24 @@ test("no production daemon path carries a bare read/write/run/ffi/sys grant", as
   }
 });
 
-test("unscoped net/env grants appear only with their documented reason, and net carries --deny-net", async () => {
-  assertEquals(Object.keys(DAEMON_UNSCOPED_GRANTS).sort(), ["env", "net"]);
+/** Permission flags: grants, denials, and the `--ignore-env` paired with env. */
+function isGrantFlag(flag: string): boolean {
+  return flag.startsWith("--allow-") || flag.startsWith("--deny-") ||
+    flag.startsWith("--ignore-");
+}
+
+test("every production daemon path scopes env to the allowlist", async () => {
+  const [allowEnv, ignoreEnv] = renderEnvFlags();
+  for (const { source, flags } of await productionInvocations()) {
+    if (source.startsWith("run.sh:")) continue; // carries the variable only
+    assertEquals(flags.includes("--allow-env"), false, `${source} bare env`);
+    assertEquals(flags.includes(allowEnv), true, `${source} ${allowEnv}`);
+    assertEquals(flags.includes(ignoreEnv), true, `${source} ${ignoreEnv}`);
+  }
+});
+
+test("unscoped net grant appears only with its documented reason, and carries --deny-net", async () => {
+  assertEquals(Object.keys(DAEMON_UNSCOPED_GRANTS), ["net"]);
   for (const reason of Object.values(DAEMON_UNSCOPED_GRANTS)) {
     assertEquals(reason.length > 20, true);
   }
@@ -187,9 +204,7 @@ test("deno.json compile tasks and the JS ExecStart render the same daemon contra
   ) {
     const found = invocations.find((entry) => entry.source === name);
     if (!found) throw new TypeError(`missing invocation ${name}`);
-    const granted = found.flags.filter((f) =>
-      f.startsWith("--allow-") || f.startsWith("--deny-")
-    );
+    const granted = found.flags.filter((f) => isGrantFlag(f));
     assertEquals(granted, expected, name);
   }
 });
@@ -204,9 +219,7 @@ test("the scheduled-backup wrapper renders the backup runner contract, not the d
     entry.source === BACKUP_RUN_SOURCE
   );
   if (!found) throw new TypeError(`missing invocation ${BACKUP_RUN_SOURCE}`);
-  const granted = found.flags.filter((f) =>
-    f.startsWith("--allow-") || f.startsWith("--deny-")
-  );
+  const granted = found.flags.filter((f) => isGrantFlag(f));
   assertEquals(granted, renderBackupRunnerPermissionFlags());
   // The line ends by running the bundle's backup-run verb on its one argument.
   assertEquals(found.flags.at(-1), '"$policy_id"');
