@@ -44,8 +44,11 @@ export function resolveUpdateHealthTimeoutMs(
 export const CONTROL_PLANE_INSTANCE_UNIT = "turbopanel-instance";
 
 export type ControlPlaneHealthSnapshot = {
+  /** The binary's plain base version (`0.1.7`), whichever channel published it. */
   version: string;
   commit: string;
+  /** The release label of the installed bytes (`0.1.7-canary.56`), when known. */
+  build?: string;
 };
 
 export class InstanceHealthError extends Error {
@@ -78,13 +81,44 @@ function healthAccepted(
   return healthMatches(health, options.target);
 }
 
+/** `0.1.7-canary.56` → `0.1.7`: the part before any pre-release or build label. */
+function baseVersion(version: string): string {
+  return version.split(/[-+]/, 1)[0];
+}
+
+/**
+ * The commit is the build's identity. The version is a sanity check, and only
+ * its base counts: a binary reports its plain base version (`0.1.7`) while the
+ * manifest carries the channel label (`0.1.7-canary.56`), so a strict compare
+ * never matched a canary or rc build and every such update timed out and
+ * rolled back (canary, 2026-10-01).
+ */
 function healthMatches(
   health: ControlPlaneHealthSnapshot,
   target: InstanceHealthTarget,
 ): boolean {
   if (health.commit !== target.commit) return false;
-  if (target.version && health.version !== target.version) return false;
-  return true;
+  if (!target.version) return true;
+  if (health.build === target.version) return true;
+  return baseVersion(health.version) === baseVersion(target.version);
+}
+
+/**
+ * The build an `/api/health` body names, or `null` without a version and a
+ * known commit. `build` is the release label the instance reports.
+ */
+export function parseInstanceHealth(
+  body: unknown,
+): ControlPlaneHealthSnapshot | null {
+  if (!isRecord(body)) return null;
+  const version = typeof body.version === "string" ? body.version : "";
+  const revision = isRecord(body.revision) ? body.revision : null;
+  const commit = revision && typeof revision.commit === "string"
+    ? revision.commit
+    : "";
+  if (!version || !commit || commit === "unknown") return null;
+  const build = typeof body.build === "string" ? body.build.trim() : "";
+  return build ? { version, commit, build } : { version, commit };
 }
 
 /**
@@ -101,15 +135,7 @@ export async function readInstanceHealth(
     });
     const response = await fetch("http://localhost/api/health", { client });
     if (!response.ok) return null;
-    const body: unknown = await response.json();
-    if (!isRecord(body)) return null;
-    const version = typeof body.version === "string" ? body.version : "";
-    const revision = isRecord(body.revision) ? body.revision : null;
-    const commit = revision && typeof revision.commit === "string"
-      ? revision.commit
-      : "";
-    if (!version || !commit || commit === "unknown") return null;
-    return { version, commit };
+    return parseInstanceHealth(await response.json());
   } catch {
     return null;
   } finally {

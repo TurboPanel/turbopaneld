@@ -74,7 +74,7 @@ test({
       ]
     ) {
       const text = await Deno.readTextFile(f);
-      assertEquals(text.includes("default('release')"), true, f);
+      assertEquals(/default\('release'(, true)?\)/.test(text), true, f);
       assertEquals(text.includes("default('trunk')"), false, f);
     }
   },

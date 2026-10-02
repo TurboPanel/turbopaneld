@@ -72,10 +72,11 @@
     turbopanel_optional_mailpit: false
     turbopanel_optional_redis_insight: false
     turbopanel_optional_stripe_listen: false
-    # Which channel this instance resolves daemon updates on
-    # (TURBOPANEL_UPDATE_CHANNEL in the runtime env). run.sh passes the
-    # channel it installed from.
-    turbopanel_update_channel: release
+    # Which channel this instance resolves updates on
+    # (TURBOPANEL_UPDATE_CHANNEL in the runtime env): run.sh passes the channel
+    # it installed from. No play-level default here: instance-launch keeps the
+    # channel already in runtime.env when none is passed and falls back to
+    # release only when there is none.
     # The compiled unit's LD_LIBRARY_PATH: the package ships libduckdb.so in
     # lib/ (instance-build stages it into the vendor tree in co-located dev).
     turbopanel_duckdb_lib_dir: "{{ turbopanel_lib_dir }}"

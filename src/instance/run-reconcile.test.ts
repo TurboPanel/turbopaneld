@@ -1594,6 +1594,41 @@ test("executeInstanceUpdateReconcile warns and carries on when the unit refresh 
   );
 });
 
+test("executeInstanceUpdateReconcile finishes a canary update: the manifest names the label, the binary its base version", async () => {
+  // canary update #2 (2026-10-01): the new build served the target commit as
+  // `0.1.7` (build `0.1.7-canary.56`), the manifest said `0.1.7-canary.56`,
+  // and the strict version compare waited out the health budget and rolled back.
+  const canaryManifest = JSON.stringify(
+    await signWithTestKey({
+      commit: "newcommit",
+      version: "0.1.7-canary.56",
+      channel: "canary",
+    }),
+  );
+  const calls: Array<{ bin: string; args: string[] }> = [];
+  const stages: string[] = [];
+  await executeInstanceUpdateReconcile({
+    channel: "canary",
+    upgradeId: "up-canary",
+    onStage: (stage) => stages.push(stage),
+    hooks: managedUpdateHooks(calls, {
+      fetchText: () =>
+        Promise.resolve({ ok: true, status: 200, body: canaryManifest }),
+      readHealth: () =>
+        Promise.resolve({
+          version: "0.1.7",
+          commit: "newcommit",
+          build: "0.1.7-canary.56",
+        }),
+    }),
+  });
+  assertEquals(stages.at(-1), "done");
+  assertEquals(
+    calls.some((call) => call.args.includes("instance-rollback.yml")),
+    false,
+  );
+});
+
 test("executeInstanceUpdateReconcile names the running build in the backup playbook", async () => {
   const calls: Array<{ bin: string; args: string[] }> = [];
   await executeInstanceUpdateReconcile({
