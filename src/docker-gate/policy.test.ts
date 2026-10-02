@@ -712,6 +712,25 @@ test("container create breadth: fields that reach the host are findings, deny by
   }
 });
 
+test("the orchestrator's numeric group_add is fine for a platform container only", async () => {
+  const labels = {
+    "turbopanel.role": "turbopanel",
+    "com.turbopanel.system.component": "managed-ha",
+  };
+  const create = async (groups: string[], withLabels: boolean) => {
+    const body = baseCreate() as Record<string, unknown>;
+    body.Labels = withLabels ? labels : { "com.docker.compose.project": "p" };
+    Object.assign(body.HostConfig as Record<string, unknown>, {
+      GroupAdd: groups,
+    });
+    return ruleNames(await verdict({ body }, DEFAULT_POLICY_CONFIG, identity));
+  };
+  assertEquals(await create(["993"], true), []);
+  assertEquals(await create(["993"], false), ["group-add"]);
+  assertEquals(await create(["docker"], true), ["group-add"]);
+  assertEquals(await create(["0"], true), ["group-add"]);
+});
+
 test("the zero values a real client sends are clean", async () => {
   assertEquals(
     await createVerdict({

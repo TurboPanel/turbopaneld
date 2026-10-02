@@ -584,11 +584,10 @@ const BANNED_HOSTCONFIG_FIELDS: ReadonlyArray<[field: string, rule: string]> = [
   ["CgroupParent", "cgroup-parent"],
   ["Sysctls", "sysctls"],
   ["VolumesFrom", "volumes-from"],
-  // Another container's cgroup, legacy links, extra groups (docker, disk...)
-  // and OCI annotations (some runtimes act on them) are never needed.
+  // Another container's cgroup, legacy links and OCI annotations (some
+  // runtimes act on them) are never needed. GroupAdd has its own check.
   ["Cgroup", "cgroup-join"],
   ["Links", "links"],
-  ["GroupAdd", "group-add"],
   ["Annotations", "annotations"],
 ];
 
@@ -664,6 +663,7 @@ const RULED_HOSTCONFIG_FIELDS: ReadonlySet<string> = new Set([
   "CapAdd",
   "Capabilities",
   "CgroupnsMode",
+  "GroupAdd",
   "IpcMode",
   "LogConfig",
   "Mounts",
@@ -725,6 +725,23 @@ function checkPresentFields(hostConfig: Record<string, unknown>): Violation[] {
   return out;
 }
 
+/**
+ * Extra groups (docker, disk...) widen what a container can read. The
+ * orchestrator container joins the daemon's numeric gid to read its config, so
+ * a platform container may add numeric gids; nothing else may add any.
+ */
+function checkGroupAdd(
+  hostConfig: Record<string, unknown>,
+  platform: boolean,
+): Violation[] {
+  const groups = stringList(hostConfig.GroupAdd);
+  if (groups.length === 0) return [];
+  if (platform && groups.every((group) => /^[1-9]\d{0,9}$/.test(group))) {
+    return [];
+  }
+  return [{ rule: "group-add" }];
+}
+
 function checkScalarFields(hostConfig: Record<string, unknown>): Violation[] {
   const out: Violation[] = [];
   if (hostConfig.Privileged === true) out.push({ rule: "privileged" });
@@ -755,9 +772,11 @@ function checkCapabilities(
 function checkHostConfigFlags(
   hostConfig: Record<string, unknown>,
   config: PolicyConfig,
+  platform: boolean,
 ): Violation[] {
   return [
     ...checkScalarFields(hostConfig),
+    ...checkGroupAdd(hostConfig, platform),
     ...checkPresentFields(hostConfig),
     ...checkCapabilities(hostConfig, config),
     ...checkLogConfig(hostConfig),
@@ -775,15 +794,16 @@ async function evaluateContainerCreate(
   }
   const hostConfig = isRecord(body.HostConfig) ? body.HostConfig : {};
   const labels = labelsOf(body.Labels);
+  const platform = isPlatformContainer(labels);
   const mounts = await checkMounts(hostConfig, {
     config,
     resolvePath,
-    platform: isPlatformContainer(labels),
+    platform,
     ingress: isIngressContainer(labels),
   });
   return {
     violations: [
-      ...checkHostConfigFlags(hostConfig, config),
+      ...checkHostConfigFlags(hostConfig, config, platform),
       ...checkNamespaces(hostConfig),
       ...checkSecurityOpt(hostConfig),
       ...checkMountKinds(hostConfig),
