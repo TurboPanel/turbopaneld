@@ -102,7 +102,7 @@ ro_docker() {
 ro_status() {
   _ro_method=$1
   _ro_path=$2
-  curl -s -o /dev/null -w '%{http_code}' --max-time 5 -X "$_ro_method" --unix-socket "$RO_SOCKET" "http://gate$_ro_path"
+  curl -s -o /dev/null -w '%{http_code}' --max-time 5 -X "$_ro_method" --unix-socket "$RO_SOCKET" "http://localhost$_ro_path"
   return 0
 }
 
