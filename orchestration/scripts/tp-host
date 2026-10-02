@@ -476,6 +476,43 @@ tp_mode_ok() {
 
 # --- systemd units -------------------------------------------------------------
 
+# Parse the `user=`/`group=`/`slice=`/`nnp=` lines tp_unit_ok's awk emits into
+# _uk_user/_uk_group/_uk_slice/_uk_nnp. Exactly these four keys, each once, in
+# any order; anything else (unknown key, repeat, line without `=`, missing key)
+# is refused, so no field can shift into another.
+tp_unit_meta_parse() {
+  _um_seen=""
+  _um_count=0
+  _uk_user="" _uk_group="" _uk_slice="" _uk_nnp=""
+  while IFS= read -r _um_line; do
+    case "$_um_line" in
+      *=*) ;;
+      *) return 1 ;;
+    esac
+    _um_key="${_um_line%%=*}"
+    _um_val="${_um_line#*=}"
+    case "$_um_key" in
+      user | group | slice | nnp) ;;
+      *) return 1 ;;
+    esac
+    case " $_um_seen " in
+      *" $_um_key "*) return 1 ;;
+      *) ;;
+    esac
+    _um_seen="$_um_seen $_um_key"
+    _um_count=$((_um_count + 1))
+    case "$_um_key" in
+      user) _uk_user="$_um_val" ;;
+      group) _uk_group="$_um_val" ;;
+      slice) _uk_slice="$_um_val" ;;
+      *) _uk_nnp="$_um_val" ;;
+    esac
+  done <<META
+$1
+META
+  [ "$_um_count" -eq 4 ]
+}
+
 # The daemon renders tenant units (native apps, cron jobs, slices) and the
 # hosting Caddy unit. Installing a unit is starting a process, so its content
 # is checked: known directives only, tenant services pinned to the principal
@@ -493,7 +530,7 @@ tp_unit_ok() {
       ;;
     *) ;;
   esac
-  awk -v name="$_uk_name" -v min="$PRINCIPAL_ID_MIN" -v backup="${_uk_backup:+1}" '
+  _uk_meta="$(awk -v name="$_uk_name" -v min="$PRINCIPAL_ID_MIN" -v backup="${_uk_backup:+1}" '
     function fail(msg) { print "tp-host: unit " name ": " msg > "/dev/stderr"; bad = 1; exit 1 }
     BEGIN {
       split("Description After Before Wants Requires PartOf StartLimitBurst StartLimitIntervalSec", a, " ");
@@ -557,13 +594,14 @@ tp_unit_ok() {
         exit 0
       }
       if (seen["Timer"] || seen["Slice"]) exit 1
-      # `read` collapses an empty tab-separated field (tab is IFS whitespace)
-      # and shifts the rest left, so an empty field is written as "-" and a
-      # literal "-" is refused; the shell maps "-" back to empty.
-      if (user == "-" || group == "-" || slice == "-" || nnp == "-") fail("a field of \"-\"")
-      print (user == "" ? "-" : user) "\t" (group == "" ? "-" : group) "\t" (slice == "" ? "-" : slice) "\t" (nnp == "" ? "-" : nnp)
+      # One `key=value` per line, parsed by key in the shell: an empty value
+      # stays empty and can never shift another field.
+      print "user=" user
+      print "group=" group
+      print "slice=" slice
+      print "nnp=" nnp
     }
-  ' "$_uk_file" > "$_uk_file.meta" || return 1
+  ' "$_uk_file")" || return 1
   case "$_uk_name" in
     *.slice|*.timer) return 0 ;;
   esac
@@ -571,11 +609,7 @@ tp_unit_ok() {
     tp_backup_unit_ok "$_uk_file" "$_uk_backup"
     return
   fi
-  IFS="	" read -r _uk_user _uk_group _uk_slice _uk_nnp < "$_uk_file.meta" || return 1
-  [ "$_uk_user" != "-" ] || _uk_user=""
-  [ "$_uk_group" != "-" ] || _uk_group=""
-  [ "$_uk_slice" != "-" ] || _uk_slice=""
-  [ "$_uk_nnp" != "-" ] || _uk_nnp=""
+  tp_unit_meta_parse "$_uk_meta" || return 1
   if [ "$_uk_name" = "turbopanel-hosting-caddy.service" ]; then
     # Runs as root today (binds :80/:443) — see AGENTS.md residual risks. Its
     # exec lines must be the vendored Caddy against the hosting config.

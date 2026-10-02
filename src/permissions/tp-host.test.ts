@@ -1011,3 +1011,84 @@ test("find: every daemon-built find argv is accepted; anything else is refused",
     }
   });
 });
+
+/** Run tp_unit_meta_parse over `meta` and report the parsed fields. */
+async function parseUnitMeta(meta: string) {
+  const source = await Deno.readTextFile(SCRIPT);
+  const start = source.indexOf("tp_unit_meta_parse() {");
+  const end = source.indexOf("\n}\n", start);
+  const fn = source.slice(start, end + 3);
+  const script = `${fn}
+if tp_unit_meta_parse "$1"; then
+  printf 'ok [%s] [%s] [%s] [%s]\\n' "$_uk_user" "$_uk_group" "$_uk_slice" "$_uk_nnp"
+else
+  echo refused
+fi`;
+  const out = await new Deno.Command("sh", {
+    args: ["-c", script, "sh", meta],
+    stdout: "piped",
+  }).output();
+  return new TextDecoder().decode(out.stdout).trim();
+}
+
+test("tp-host unit metadata is parsed by key and never shifts on an empty field", async () => {
+  const meta = (u: string, g: string, s: string, n: string) =>
+    `user=${u}\ngroup=${g}\nslice=${s}\nnnp=${n}`;
+  assertEquals(
+    await parseUnitMeta(meta("a", "a-grp", "a.slice", "yes")),
+    "ok [a] [a-grp] [a.slice] [yes]",
+  );
+  // Empty first, middle and last fields stay in place.
+  assertEquals(
+    await parseUnitMeta(meta("", "g", "s", "yes")),
+    "ok [] [g] [s] [yes]",
+  );
+  assertEquals(
+    await parseUnitMeta(meta("u", "", "s", "yes")),
+    "ok [u] [] [s] [yes]",
+  );
+  assertEquals(
+    await parseUnitMeta(meta("u", "g", "s", "")),
+    "ok [u] [g] [s] []",
+  );
+  // The previously shifted case: empty user with the rest populated.
+  assertEquals(
+    await parseUnitMeta(meta("", "alice-grp", "turbopanel-alice.slice", "yes")),
+    "ok [] [alice-grp] [turbopanel-alice.slice] [yes]",
+  );
+  // A value may hold `=` and a literal "-".
+  assertEquals(
+    await parseUnitMeta(meta("-", "a=b", "s", "yes")),
+    "ok [-] [a=b] [s] [yes]",
+  );
+  // Malformed input is refused outright.
+  for (
+    const bad of [
+      "user=u\ngroup=g\nslice=s\nnnp=yes\nextra=1",
+      "user=u\ngroup=g\nslice=s",
+      "user=u\ngroup=g\nslice=s\nnnp=yes\nuser=v",
+      "user=u\ngroup=g\nslice=s\nnope=yes",
+      "u\tg\ts\tyes",
+      "user=u\ngroup=g\n\nslice=s\nnnp=yes",
+      "",
+    ]
+  ) {
+    assertEquals(await parseUnitMeta(bad), "refused", JSON.stringify(bad));
+  }
+});
+
+test("tp-host refuses a tenant unit whose User= is empty", async () => {
+  await withHost(async (host) => {
+    await Deno.mkdir(host.path("tmp"), { recursive: true });
+    const unit = [
+      "[Service]",
+      "User=",
+      "Group=alice-grp",
+      "Slice=turbopanel-alice.slice",
+      "NoNewPrivileges=yes",
+      "ExecStart=/bin/true",
+      "",
+    ].join("\n");
+    await refusedUnit(host, "turbopanel-app-alice-web.service", unit);
+  });
+});
