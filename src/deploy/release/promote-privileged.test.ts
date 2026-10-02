@@ -1263,3 +1263,32 @@ test("promoteExistingRelease refuses a denied release that is absent", async () 
     assertEquals(calls, [["-n", "test", "-e", paths.releaseDir]]);
   });
 });
+
+test("promoteExistingRelease surfaces a stat failure other than denial", async () => {
+  await withTempRelease(async (root) => {
+    const paths = resolveReleasePaths(
+      { principalHomeRoot: root, daemonStateDir: join(root, "state") },
+      { username: "appuser", serviceId: "svc-1", releaseId: "rel-1" },
+    );
+    const calls: string[][] = [];
+    const originalStat = Deno.stat;
+    Deno.stat = (target, ...rest) =>
+      String(target) === paths.releaseDir
+        ? Promise.reject(new Deno.errors.Interrupted("io"))
+        : originalStat(target, ...rest);
+    try {
+      await assertRejects(
+        () =>
+          promoteExistingRelease({
+            paths,
+            releaseId: "rel-1",
+            runFn: testRun(true, calls),
+          }),
+        Deno.errors.Interrupted,
+      );
+    } finally {
+      Deno.stat = originalStat;
+    }
+    assertEquals(calls, []);
+  });
+});

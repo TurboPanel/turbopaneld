@@ -70,9 +70,9 @@ export const RELEASE_METADATA_DIRNAME = ".turbopanel";
  * which is the same shape {@link resolveReleasePaths} produces so retention and
  * the manifest readers stay lane-agnostic.
  *
- * A Railpack service that *does* have a principal keeps using the principal
- * home tree — one service should not move its history between two roots
- * depending on an unrelated assignment.
+ * A Railpack service keeps its history here whether or not it has a principal
+ * — one service should not move its history between two roots depending on an
+ * unrelated assignment.
  */
 export const RELEASE_RECORDS_DIRNAME = "release-records";
 
