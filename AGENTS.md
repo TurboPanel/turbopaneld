@@ -580,13 +580,12 @@ controls below do not close:
    other shape. Its Caddyfile is still `tp`-written (`/etc/turbopanel/hosting`,
    read through a per-user ACL), so a hostile config now lands as `tpedge`,
    not root; `stripPrefix` and the other inputs still need validation.
-3. **Engine config tests run as root** — `httpd -t -f
-   /etc/turbopanel/apache/httpd.conf` and `php-fpm<x.y> --fpm-config
+3. **php-fpm's config test runs as root** — `php-fpm<x.y> --fpm-config
    /etc/turbopanel/php/<x.y>/php-fpm.conf --test` (`TP_ENGINE_VALIDATE`,
-   pinned to exactly those files). `/etc/turbopanel` is `tp`-owned, so `tp`
-   can replace those files, and both engines load modules while testing.
-   Closing it needs those tests to run as the engine account, or the config
-   directories to be root-owned.
+   pinned to exactly that file). `/etc/turbopanel` is `tp`-owned, so `tp`
+   can replace it, and php-fpm loads extensions while testing. Apache's
+   `httpd -t` no longer does: it runs as `tpapache` (pinned arguments, no
+   `env`), and `turbopanel-apache.service` runs its master as `tpapache`.
 
 The controls below remove every direct root escape through sudo and keep a
 daemon bug or an injected argument from reaching arbitrary host paths,

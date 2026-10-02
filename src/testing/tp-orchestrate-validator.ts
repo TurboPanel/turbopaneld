@@ -43,13 +43,24 @@ function extractAssignment(source: string, name: string): string {
   return line;
 }
 
-/** The validator functions plus `TP_JSON_EXTRA_VAR_KEYS`, as sh source. */
+/**
+ * The validator functions plus `TP_JSON_EXTRA_VAR_KEYS` and
+ * `TP_PLAYBOOK_ALLOWLIST`, as sh source.
+ */
 export async function tpOrchestrateValidatorSource(): Promise<string> {
   const source = await Deno.readTextFile(TP_ORCHESTRATE_PATH);
   return [
     extractAssignment(source, "TP_JSON_EXTRA_VAR_KEYS"),
+    extractAssignment(source, "TP_PLAYBOOK_ALLOWLIST"),
     ...VALIDATOR_FUNCTIONS.map((name) => extractShellFunction(source, name)),
   ].join("\n");
+}
+
+/** The playbook basenames on the helper's `TP_PLAYBOOK_ALLOWLIST`. */
+export async function tpOrchestratePlaybookAllowlist(): Promise<string[]> {
+  const source = await Deno.readTextFile(TP_ORCHESTRATE_PATH);
+  const line = extractAssignment(source, "TP_PLAYBOOK_ALLOWLIST");
+  return line.slice(line.indexOf('"') + 1, line.lastIndexOf('"')).split(" ");
 }
 
 async function hostPython3(): Promise<string> {

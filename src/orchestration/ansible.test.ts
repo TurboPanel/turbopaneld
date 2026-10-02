@@ -1825,6 +1825,56 @@ test("site apply playbooks vendor engines (never apt nginx/apache2)", async () =
   );
 });
 
+test("Apache runs as tpapache with its own top-level log and runtime dirs", async () => {
+  const role = (rel: string) =>
+    Deno.readTextFile(join(CHECKOUT_ORCHESTRATION_DIR, "roles/apache", rel));
+  const unit = await role("templates/turbopanel-apache.service.j2");
+  const conf = await role("templates/httpd.conf.j2");
+  const tasks = await role("tasks/main.yml");
+  const defaults = await role("defaults/main.yml");
+  const lines = unit.split("\n");
+  for (
+    const line of [
+      "User={{ apache_service_user }}",
+      "Group={{ apache_service_group }}",
+      "LogsDirectory={{ apache_logs_directory }}",
+      "RuntimeDirectory={{ apache_runtime_directory }}",
+      "PIDFile=/run/{{ apache_runtime_directory }}/httpd.pid",
+    ]
+  ) {
+    assertEquals(lines.includes(line), true, line);
+  }
+  assertMatch(defaults, /apache_service_user:\s*tpapache\n/, "service user");
+  // Top level: never inside the tp-owned /var/log/turbopanel or /run/turbopanel.
+  assertMatch(
+    defaults,
+    /apache_logs_directory:\s*turbopanel-apache\n/,
+    "logs directory",
+  );
+  assertMatch(
+    defaults,
+    /apache_runtime_directory:\s*turbopanel-apache\n/,
+    "runtime directory",
+  );
+  // No root master: httpd.conf names no account to switch to.
+  assertEquals(/^\s*(User|Group)\s/m.test(conf), false);
+  assertEquals(
+    conf.includes('PidFile "/run/{{ apache_runtime_directory }}/httpd.pid"'),
+    true,
+  );
+  assertEquals(
+    conf.includes('ErrorLog "/var/log/{{ apache_logs_directory }}/error.log"'),
+    true,
+  );
+  assertEquals(conf.includes("turbopanel_log_dir"), false);
+  assertEquals(conf.includes("turbopanel_run_dir"), false);
+  // A changed unit restarts a running master; a reload would keep root.
+  assertEquals(
+    tasks.includes("systemctl try-restart turbopanel-apache.service"),
+    true,
+  );
+});
+
 test("devOwnershipPlaybookExtraArgs emits user uid gid and root", () => {
   assertEquals(
     devOwnershipPlaybookExtraArgs({

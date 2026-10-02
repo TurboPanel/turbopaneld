@@ -958,8 +958,9 @@ const SITES: CallSite[] = [
     },
   ),
   sudo(
-    'src/deploy/site/engine-driver.ts|["-n",apacheBinaryPath(layout),"-t","-f",apacheMainConfigPath(layout)]',
+    'src/deploy/site/engine-driver.ts|["-n","-u","tpapache","--",apacheBinaryPath(layout),"-t","-f",apacheMainConfigPath(layout)]',
     {
+      runas: "tpapache",
       argv: [
         `${VENDOR}/apache/current/bin/httpd`,
         "-t",
