@@ -21,7 +21,7 @@ const test = Deno.test.bind(Deno);
 
 /**
  * Differential test of the gate's request parser against Go's net/http, the
- * parser the Docker engine runs (scripts/docker-gate-diff/main.go). The rule
+ * parser the Docker engine runs (src/testing/docker-gate-diff/main.go). The rule
  * is one-sided: the gate may refuse what Go accepts (it fails closed), but a
  * request the gate lets through must be read by Go as the gate read it: same
  * method and path, same body length and framing, nothing left over for Go to
@@ -189,7 +189,7 @@ test("the cases that were real gaps are refused or flagged", async () => {
 });
 
 async function runHarness(): Promise<GoOutput | undefined> {
-  const dir = new URL("../../scripts/docker-gate-diff/", import.meta.url)
+  const dir = new URL("../testing/docker-gate-diff/", import.meta.url)
     .pathname;
   const file = dataUrl("parser-cases.json").pathname;
   const attempts: Array<[string, string[]]> = [

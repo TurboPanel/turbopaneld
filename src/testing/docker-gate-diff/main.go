@@ -8,7 +8,7 @@
 // test src/docker-gate/parser-differential.test.ts compares that with the
 // gate's parser; testdata/go-parser.json is this program's recorded output.
 //
-// Usage: go run main.go ../../src/docker-gate/testdata/parser-cases.json
+// Usage: go run main.go ../../docker-gate/testdata/parser-cases.json
 package main
 
 import (
