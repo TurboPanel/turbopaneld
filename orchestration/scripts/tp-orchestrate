@@ -774,6 +774,12 @@ tp_verb_update() {
   [ -n "$_host" ] || _host="$_pin_host"
   [ -n "$_dl_base" ] || _dl_base="$_pin_dl_base"
   [ -n "$_ca" ] || _ca="$_pin_ca"
+  # An overlay host installs with --dev-allow-unsigned; a --manifest-url pin
+  # (an upgrade or a rollback to one exact release) must always verify against
+  # the release key, so the two never travel together (run.sh agrees).
+  if [ -n "$_manifest_url" ] && [ -n "$_dl_base" ]; then
+    tp_die "refusing --manifest-url on an overlay host: a pinned manifest must be signed by the release key"
+  fi
 
   # Where run.sh comes from, and how it is trusted — the same three answers
   # as the daemon's resolveAutomaticUpdateTrust, decided here from the pinned

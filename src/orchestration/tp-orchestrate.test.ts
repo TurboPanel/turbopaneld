@@ -414,6 +414,25 @@ test("tp-orchestrate update refuses origins that differ from the pin", async () 
   }
 });
 
+test("tp-orchestrate update pins a signed release only off an overlay, which would skip the signature", async () => {
+  const pin =
+    "https://github.com/TurboPanel/turbopaneld/releases/download/v0.1.0/manifest.json";
+  const args = ["--license", "abc", "--manifest-url", pin, "--no-start"];
+  const [overlay, release] = await Promise.all([
+    runUpdateVerb(args, OVERLAY_PIN),
+    runUpdateVerb(args, PUBLIC_PIN),
+  ]);
+  assertEquals(overlay.status, 1, overlay.stderr);
+  assertStringIncludes(
+    overlay.stderr,
+    "a pinned manifest must be signed by the release key",
+  );
+  assertEquals(overlay.stdout.includes("RUNSH"), false);
+  assertEquals(release.status, 0, release.stderr);
+  assertStringIncludes(release.stdout, `[--manifest-url] [${pin}]`);
+  assertEquals(release.stdout.includes("--dev-allow-unsigned"), false);
+});
+
 test("tp-orchestrate update uses the pinned overlay host with the pinned Platform CA, never -k", async () => {
   const result = await runUpdateVerb(
     [

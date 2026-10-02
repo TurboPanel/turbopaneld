@@ -1547,8 +1547,10 @@ tp_fetch_repo_manifest() {
   fi
   # Same rule as the daemon package: the manifest must carry a valid
   # signature by the pinned release key before any field of it is read. Only
-  # a development overlay (tp_manifest_signature_bypass) skips it.
-  if tp_manifest_signature_bypass; then
+  # a development overlay (tp_manifest_signature_bypass) skips it, and never
+  # for a pin: --instance-manifest-url / --ui-manifest-url (an upgrade or a
+  # rollback to one exact release) always verifies.
+  if [ -z "$_pin" ] && tp_manifest_signature_bypass; then
     tp_print_styled_line "1;33" "*** DEVELOPMENT OVERLAY: ${_repo} manifest signature not verified (TURBOPANEL_DL_BASE=${TURBOPANEL_DL_BASE}) ***" >&2
     tp_manifest_strict_canonical "$_manifest_json" || return 1
   else
