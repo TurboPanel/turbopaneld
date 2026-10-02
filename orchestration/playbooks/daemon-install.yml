@@ -94,7 +94,45 @@
         state: directory
         owner: "{{ turbopanel_user }}"
         group: "{{ turbopanel_group }}"
-        recurse: true
+
+    # Everything below it too, except the per-site PHP config (php/sites/,
+    # root:<owner>-grp, read by the owner's PHP) and the attached-lsphp
+    # registry (php-sites/, root:root): tp-host keeps those out of tp's hands,
+    # and a tp:tp pass would leave every PHP site unable to read its php.ini.
+    - name: Ensure tp owns the config tree's contents
+      ansible.builtin.command:
+        argv:
+          - find
+          - "{{ turbopanel_config_dir }}"
+          - -mindepth
+          - "1"
+          - (
+          - -path
+          - "{{ turbopanel_config_dir }}/php/sites"
+          - -o
+          - -path
+          - "{{ turbopanel_config_dir }}/php-sites"
+          - )
+          - -prune
+          - -o
+          - (
+          - "!"
+          - -user
+          - "{{ turbopanel_user }}"
+          - -o
+          - "!"
+          - -group
+          - "{{ turbopanel_group }}"
+          - )
+          - -print
+          - -exec
+          - chown
+          - -h
+          - "{{ turbopanel_user }}:{{ turbopanel_group }}"
+          - "{}"
+          - +
+      register: _config_tree_owner
+      changed_when: _config_tree_owner.stdout | length > 0
 
     # Galaxy install uses ANSIBLE_HOME=/tmp/turbopanel-ansible (see paths.ts).
     # Roles/collections are already in FHS paths; drop the disposable cache and
