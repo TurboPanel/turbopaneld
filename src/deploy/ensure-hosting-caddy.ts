@@ -195,7 +195,25 @@ async function downloadHostingCaddy(
   await Deno.mkdir(dirname(currentLink), { recursive: true }).catch(() => {});
 }
 
+let accountCheckOverride: (() => Promise<boolean>) | undefined;
+
+/**
+ * Test-only: replace the `getent passwd` account check for callers that reach
+ * {@link ensureHostingCaddy} without deps (the deploy handler). Returns a
+ * restore function.
+ */
+export function setHostingCaddyAccountCheckForTest(
+  fn?: () => Promise<boolean>,
+): () => void {
+  const previous = accountCheckOverride;
+  accountCheckOverride = fn;
+  return () => {
+    accountCheckOverride = previous;
+  };
+}
+
 async function hostingCaddyAccountExists(): Promise<boolean> {
+  if (accountCheckOverride) return await accountCheckOverride();
   const result = await runDefault("getent", ["passwd", HOSTING_CADDY_USER]);
   return result.success;
 }
