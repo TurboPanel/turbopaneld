@@ -6,6 +6,7 @@ import {
   DEFAULT_UPSTREAM_SOCKET,
   GATE_ENV_KEYS,
   jsonLogger,
+  loadCheckPassed,
   loadConfig,
   startGate,
 } from "../../orchestration/roles/docker-gate/files/main.ts";
@@ -351,4 +352,20 @@ test({
       await Deno.remove(run.dir, { recursive: true });
     }
   },
+});
+
+test("loadCheckPassed is off unless asked, passes on a good config and throws on a bad one", () => {
+  const logs: Array<Record<string, unknown>> = [];
+  const log = (record: Record<string, unknown>) => logs.push(record);
+  assertEquals(loadCheckPassed({}, log), false);
+  assertEquals(loadCheckPassed({ TP_DOCKER_GATE_LOAD_CHECK: "0" }, log), false);
+  assertEquals(logs, []);
+  assertEquals(loadCheckPassed({ TP_DOCKER_GATE_LOAD_CHECK: "1" }, log), true);
+  assertEquals(logs.map((l) => l.event), ["docker-gate.load-check-ok"]);
+  assertThrows(() =>
+    loadCheckPassed(
+      { TP_DOCKER_GATE_LOAD_CHECK: "1", TP_DOCKER_GATE_MODE: "enforce" },
+      log,
+    )
+  );
 });
