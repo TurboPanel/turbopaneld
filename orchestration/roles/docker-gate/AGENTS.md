@@ -161,8 +161,16 @@ the Tecnativa proxy it replaces (`CONTAINERS=1` there also passed `logs`,
 `export`, `archive` reads). These refusals are what this socket is, **not**
 strict-profile enforcement: the main socket and `TP_DOCKER_GATE_MODE` stay
 observe-only. The listener opens on every gate host (nothing connects to it
-until the switch is on); if it cannot open, the gate logs
-`docker-gate.ro-socket-unavailable` and keeps serving the main socket.
+until the switch is on). If it cannot open, the gate logs
+`docker-gate.ro-socket-unavailable` (level error). With the switch off it keeps
+serving the main socket. With the switch on (`TP_DOCKER_GATE_INGRESS_SWITCH`
+names the file; the gate checks it at start) the start FAILS and
+`Restart=always` retries, because Traefik is rendered against this socket and
+would lose every route at its next restart. Flipping the switch restarts the
+gate, and a converge with the switch on fails unless the read-only socket
+answers `/_ping` (`state: started` alone passes a crash-looping unit); the
+block's rescue only warns while the switch is off. A switch value other than
+yes/no fails the converge before anything changes (a typo never turns it off).
 
 **The switch** (off by default): `docker_gate_ingress_socket: true` writes the
 root-owned `<install>/lib/docker-gate/ingress-socket.on`; `false` removes it;
@@ -250,7 +258,13 @@ Break-glass at every stage: `systemctl stop turbopanel-docker-gate` as root.
   check `serviceIngressUsesSocketProxy` is false).
 - Turning the switch off again re-renders the shared Traefik on its next
   deploy; service Traefiks already on the gate keep working (the listener is
-  always on) until their own redeploy.
+  always on) until their own redeploy, which first puts the proxy back into
+  the shared project. Flipping the switch never re-renders Traefik by itself:
+  it takes effect at the next deploy or `system.reconcile`.
+- Code rollback (an older daemon package on a host where the switch was on):
+  the older gate opens no read-only socket, so every gate-mode Traefik loses
+  discovery at its next restart. Turn the switch off and redeploy the ingress
+  first.
 - `/containers/{id}/json` still hands Traefik every container's `Config.Env`,
   as Tecnativa did: redacting it needs response rewriting (a separate change).
 - The `ingress-socket` allowance trusts `turbopanel.role=ingress`, a label the

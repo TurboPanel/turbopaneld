@@ -76,7 +76,9 @@
 
 # The daemon's switch to the read-only socket for Traefik. Root-owned in the
 # gate's own directory, so the daemon can read it and never write it. Sticky:
-# an empty variable leaves it as it is.
+# an empty variable leaves it as it is (its value is checked in main.yml).
+# The gate reads the switch at start (a read-only listener that cannot open is
+# fatal while it is on), so flipping it restarts the gate.
 - name: Turn on Traefik's read-only gate socket
   ansible.builtin.copy:
     content: "on\n"
@@ -87,6 +89,7 @@
   when:
     - (docker_gate_ingress_socket | string | length) > 0
     - docker_gate_ingress_socket | bool
+  notify: Restart Docker gate
 
 - name: Turn off Traefik's read-only gate socket
   ansible.builtin.file:
@@ -95,6 +98,7 @@
   when:
     - (docker_gate_ingress_socket | string | length) > 0
     - not (docker_gate_ingress_socket | bool)
+  notify: Restart Docker gate
 
 - name: Install the gate systemd unit
   ansible.builtin.template:
@@ -116,3 +120,26 @@
     enabled: true
     state: started
     daemon_reload: true
+
+# With the switch on, Traefik is rendered against the read-only socket: a
+# converge must not report success while it is not answering. `state: started`
+# alone passes even while a Type=simple unit crash-loops, and a crash can leave
+# a stale socket file, so ask the socket itself.
+- name: Make sure the gate restart (if any) has happened before probing
+  ansible.builtin.meta: flush_handlers
+
+- name: Look for Traefik's switch file
+  ansible.builtin.stat:
+    path: "{{ docker_gate_ingress_switch_file }}"
+  register: _docker_gate_switch
+
+- name: Prove the read-only socket answers while Traefik's switch is on
+  ansible.builtin.uri:
+    url: http://localhost/_ping
+    unix_socket: "{{ docker_gate_ro_socket }}"
+    return_content: true
+  register: _docker_gate_ro_ping
+  until: _docker_gate_ro_ping.status == 200
+  retries: 15
+  delay: 2
+  when: _docker_gate_switch.stat.exists

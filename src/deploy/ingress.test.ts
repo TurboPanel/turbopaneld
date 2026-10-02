@@ -3057,3 +3057,187 @@ test("ensureServiceIngress follows the same switch", async () => {
     await cleanup();
   }
 });
+
+// Review fixes F1 / F2: the proxy stays until no Traefik really uses it.
+
+const PROXY_SERVICE_KEY = "\n  docker-socket-proxy:\n";
+
+/** Records every docker call; `up` on a path matching `failUp` fails. */
+function recordingDocker(calls: string[][], failUp?: RegExp) {
+  return (args: readonly string[]) => {
+    calls.push([...args]);
+    const isUp = args.includes("up");
+    const failing = isUp && failUp !== undefined &&
+      args.some((arg) => failUp.test(arg));
+    return Promise.resolve(
+      failing ? fakeDockerFail("up failed") : fakeDockerOk(),
+    );
+  };
+}
+
+function deployTcpService(
+  layout: Parameters<typeof ensureServiceIngress>[0],
+  gate: boolean,
+  runDocker: (args: readonly string[]) => Promise<DockerCliResult>,
+) {
+  return ensureServiceIngress(
+    layout,
+    SERVICE_INGRESS_IDENTITY.serviceId,
+    TCP_ENTRY,
+    SERVICE_INGRESS_IDENTITY,
+    HOSTING_INGRESS_NETWORK,
+    { runDocker, ingressDockerGate: () => Promise.resolve(gate) },
+  );
+}
+
+function deployShared(
+  layout: Parameters<typeof ensureHostingIngress>[0],
+  gate: boolean,
+  runDocker: (args: readonly string[]) => Promise<DockerCliResult>,
+) {
+  return ensureHostingIngress(layout, HOSTING_INGRESS_NETWORK, {
+    runDocker,
+    ensureHostingCaddyRuntime: () => Promise.resolve(),
+    ingressDockerGate: () => Promise.resolve(gate),
+  });
+}
+
+async function exists(path: string): Promise<boolean> {
+  try {
+    await Deno.stat(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+test("F2: a failed service up keeps the applied compose file, so the proxy stays in use", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const serviceId = SERVICE_INGRESS_IDENTITY.serviceId;
+  const applied = serviceIngressComposePath(layout, serviceId);
+  try {
+    await deployTcpService(layout, false, recordingDocker([]));
+    const before = await Deno.readTextFile(applied);
+    assertStringIncludes(before, "tcp://docker-socket-proxy:2375");
+
+    await assertRejects(() =>
+      deployTcpService(layout, true, recordingDocker([], /pending/))
+    );
+    assertEquals(await Deno.readTextFile(applied), before);
+    assertEquals(await serviceIngressUsesSocketProxy(layout), true);
+
+    await deployTcpService(layout, true, recordingDocker([]));
+    assertStringIncludes(await Deno.readTextFile(applied), GATE_ENDPOINT);
+    assertEquals(await serviceIngressUsesSocketProxy(layout), false);
+    const leftovers = await Array.fromAsync(
+      Deno.readDir(serviceIngressDir(layout, serviceId)),
+    );
+    assertEquals(leftovers.map((e) => e.name), ["docker-compose.yml"]);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("F2: a first service deploy whose up fails still counts as a proxy user", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  try {
+    await assertRejects(() =>
+      deployTcpService(layout, false, recordingDocker([], /pending/))
+    );
+    assertEquals(
+      await exists(
+        serviceIngressComposePath(layout, SERVICE_INGRESS_IDENTITY.serviceId),
+      ),
+      false,
+    );
+    assertEquals(await serviceIngressUsesSocketProxy(layout), true);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("F2: compose up runs on the pending file and the shared file is replaced only after it succeeds", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  try {
+    await writeSystemComponentDescriptor(layout, SYSTEM_INGRESS_IDENTITY);
+    await deployShared(layout, false, recordingDocker([]));
+    const before = await Deno.readTextFile(hostingIngressComposePath(layout));
+    assertStringIncludes(before, PROXY_SERVICE_KEY);
+
+    await assertRejects(() =>
+      deployShared(layout, true, recordingDocker([], /pending/))
+    );
+    assertEquals(
+      await Deno.readTextFile(hostingIngressComposePath(layout)),
+      before,
+    );
+
+    const calls: string[][] = [];
+    await deployShared(layout, true, recordingDocker(calls));
+    const up = calls.find((a) => a.includes("up"));
+    assert(up?.some((arg) => arg.endsWith(".pending.yml")), "up on pending");
+    const after = await Deno.readTextFile(hostingIngressComposePath(layout));
+    assertStringIncludes(after, GATE_ENDPOINT);
+    assertEquals(after.includes(PROXY_SERVICE_KEY), false);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("F1: a service Traefik on the proxy puts the proxy back into a gate-mode shared project first", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  try {
+    await writeSystemComponentDescriptor(layout, SYSTEM_INGRESS_IDENTITY);
+    await deployShared(layout, true, recordingDocker([]));
+    const gated = await Deno.readTextFile(hostingIngressComposePath(layout));
+    assertEquals(gated.includes(PROXY_SERVICE_KEY), false);
+
+    // Switch removed: a TCP/UDP-only deploy (no shared HTTP render).
+    const calls: string[][] = [];
+    await deployTcpService(layout, false, recordingDocker(calls));
+    const ups = calls.filter((a) => a.includes("up"));
+    assertEquals(ups.length, 2, "shared up, then the service up");
+    assert(
+      ups[0].some((arg) => arg.includes(join("ingress", "traefik"))),
+      "the shared project comes up first",
+    );
+    assert(ups[1].includes(SERVICE_INGRESS_IDENTITY.serviceId));
+
+    const shared = await Deno.readTextFile(hostingIngressComposePath(layout));
+    assertStringIncludes(shared, PROXY_SERVICE_KEY);
+    // The shared Traefik itself is untouched (still the gate): no recreate.
+    assertStringIncludes(shared, GATE_ENDPOINT);
+    assertEquals(
+      shared,
+      traefikCompose(HOSTING_INGRESS_NETWORK, SYSTEM_INGRESS_IDENTITY, {
+        source: "gate",
+        keepSocketProxy: true,
+      }),
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test("F1: no extra shared up when the shared project already has the proxy or does not exist", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  try {
+    const none: string[][] = [];
+    await deployTcpService(layout, false, recordingDocker(none));
+    assertEquals(none.filter((a) => a.includes("up")).length, 1);
+
+    await writeSystemComponentDescriptor(layout, SYSTEM_INGRESS_IDENTITY);
+    await deployShared(layout, false, recordingDocker([]));
+    const withProxy: string[][] = [];
+    await deployTcpService(layout, false, recordingDocker(withProxy));
+    assertEquals(withProxy.filter((a) => a.includes("up")).length, 1);
+
+    // Gate mode never touches the shared project.
+    await deployShared(layout, true, recordingDocker([]));
+    const gate: string[][] = [];
+    await deployTcpService(layout, true, recordingDocker(gate));
+    assertEquals(gate.filter((a) => a.includes("up")).length, 1);
+  } finally {
+    await cleanup();
+  }
+});

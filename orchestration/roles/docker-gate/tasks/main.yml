@@ -3,8 +3,18 @@
 # wherever Docker is, on managed hosts only. Nothing routes through the gate
 # yet: the daemon still talks to the real socket and `tp` is still in the
 # `docker` group, so a failure here must never block the Docker install or a
-# converge: the whole install is a block with a rescue that only warns. A later
-# stage that depends on the gate makes this fatal.
+# converge: the whole install is a block with a rescue that only warns. Stage 3
+# exception: while Traefik's switch is on, Traefik depends on the gate's
+# read-only socket, so the rescue fails the converge instead.
+
+# Outside the block, so a typo ("ture") fails loudly instead of being rescued,
+# and never quietly turns the switch off.
+- name: Refuse a switch value that is not a clear yes or no
+  ansible.builtin.assert:
+    that:
+      - (docker_gate_ingress_socket | string | lower) in ['', 'true', 'false', 'yes', 'no', '1', '0', 'on', 'off']
+    fail_msg: "docker_gate_ingress_socket must be true or false (or empty to leave the switch as it is)"
+    quiet: true
 
 - name: Check for the Docker binary
   ansible.builtin.stat:
@@ -36,3 +46,16 @@
         msg: >-
           Docker gate not installed (observe mode, nothing depends on it):
           {{ ansible_failed_result.msg | default('unknown error') }}
+
+    - name: Look for Traefik's switch file after the failure
+      ansible.builtin.stat:
+        path: "{{ docker_gate_ingress_switch_file }}"
+      register: _docker_gate_switch_after
+
+    - name: Fail the converge when Traefik depends on the gate
+      ansible.builtin.fail:
+        msg: >-
+          Docker gate failed while Traefik's switch is on (Traefik reads
+          Docker through the gate's read-only socket):
+          {{ ansible_failed_result.msg | default('unknown error') }}
+      when: _docker_gate_switch_after.stat.exists

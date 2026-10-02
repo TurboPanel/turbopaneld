@@ -819,9 +819,43 @@ export type EnsureHostingIngressDeps = {
 };
 
 /**
- * True while a service Traefik rendered before the gate switch still reaches
- * Docker through the shared socket proxy (its compose file on disk names the
- * proxy). The shared project keeps the proxy until none does.
+ * Where a compose document waits while `compose up` runs on it. It replaces
+ * the applied `docker-compose.yml` only after `up` succeeds, so the applied
+ * file always describes what last came up (never mere intent). A failed `up`
+ * leaves it behind: it may describe containers that did get (re)created.
+ */
+function pendingComposePath(composePath: string): string {
+  return composePath.replace(/\.yml$/, ".pending.yml");
+}
+
+/** Write `yaml` pending, run `up` on it, then make it the applied file. */
+async function applyCompose(
+  composePath: string,
+  yaml: string,
+  up: (file: string) => Promise<DockerCliResult>,
+  what: string,
+): Promise<void> {
+  const pending = pendingComposePath(composePath);
+  await Deno.writeTextFile(pending, yaml, { mode: 0o640 });
+  const result = await up(pending);
+  if (!result.success) throw commandError(what, result);
+  await Deno.rename(pending, composePath);
+}
+
+async function readTextIfPresent(path: string): Promise<string | undefined> {
+  try {
+    return await Deno.readTextFile(path);
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) return undefined;
+    throw err;
+  }
+}
+
+/**
+ * True while a service Traefik may still reach Docker through the shared
+ * socket proxy: its applied compose file names the proxy, or a pending one
+ * does (an `up` that failed part-way may have left a container on it). The
+ * shared project keeps the proxy until none does.
  */
 export async function serviceIngressUsesSocketProxy(
   layout: LayoutPaths,
@@ -834,21 +868,82 @@ export async function serviceIngressUsesSocketProxy(
     if (err instanceof Deno.errors.NotFound) return false;
     throw err;
   }
-  const uses = await Promise.all(
-    entries.filter((entry) => entry.isDirectory).map((entry) =>
-      composeNamesSocketProxy(join(root, entry.name, "docker-compose.yml"))
-    ),
+  const files = entries.filter((entry) => entry.isDirectory).flatMap(
+    (entry) => {
+      const applied = join(root, entry.name, "docker-compose.yml");
+      return [applied, pendingComposePath(applied)];
+    },
   );
+  const uses = await Promise.all(files.map(composeNamesSocketProxy));
   return uses.includes(true);
 }
 
 async function composeNamesSocketProxy(path: string): Promise<boolean> {
+  const yaml = await readTextIfPresent(path);
+  return yaml?.includes(SOCKET_PROXY_ENDPOINT) === true;
+}
+
+/** True when a shared compose document runs the socket-proxy service. */
+function declaresSocketProxy(yaml: string): boolean {
+  return yaml.includes(`\n  ${SOCKET_PROXY_COMPOSE_SERVICE_NAME}:\n`);
+}
+
+async function loadHostingIngressDescriptor(
+  layout: LayoutPaths,
+): Promise<SystemComponentDescriptor | undefined> {
   try {
-    return (await Deno.readTextFile(path)).includes(SOCKET_PROXY_ENDPOINT);
+    const loaded = await readSystemComponentDescriptor(
+      layout,
+      SYSTEM_HOSTING_INGRESS_COMPONENT,
+    );
+    return loaded ?? undefined;
   } catch (err) {
-    if (err instanceof Deno.errors.NotFound) return false;
-    throw err;
+    const message = err instanceof Error ? err.message : String(err);
+    logWarn(
+      "deploy",
+      `hosting ingress descriptor unreadable; using anonymous Traefik: ${message}`,
+    );
+    return undefined;
   }
+}
+
+/** `compose up` the shared project from `yaml` (applied only on success). */
+function upSharedTraefik(
+  layout: LayoutPaths,
+  yaml: string,
+  run: RunDockerFn,
+): Promise<void> {
+  // No `-p`: the compose file declares its own project through `name:`.
+  return applyCompose(
+    hostingIngressComposePath(layout),
+    yaml,
+    (file) => run(["compose", "-f", file, "up", "-d", "--remove-orphans"]),
+    "Starting Traefik ingress",
+  );
+}
+
+/**
+ * A service Traefik about to use the socket proxy needs it running. After the
+ * switch is turned off, a TCP/UDP-only deploy re-renders its Traefik onto the
+ * proxy without rendering the shared project, which may still be in gate mode
+ * (no proxy). Add the proxy back to it: same gate-mode Traefik plus the proxy
+ * service, so compose only starts the proxy and the shared Traefik (every
+ * HTTP route) is not recreated. No shared project: nothing to add it to (a
+ * TCP/UDP-only host has never had a proxy; unchanged).
+ */
+async function ensureSharedSocketProxy(
+  layout: LayoutPaths,
+  ingressNetwork: string,
+  run: RunDockerFn,
+): Promise<void> {
+  const applied = await readTextIfPresent(hostingIngressComposePath(layout));
+  if (applied === undefined || declaresSocketProxy(applied)) return;
+  const descriptor = await loadHostingIngressDescriptor(layout);
+  const yaml = traefikCompose(ingressNetwork, descriptor, {
+    source: "gate",
+    keepSocketProxy: true,
+  });
+  await upSharedTraefik(layout, yaml, run);
 }
 
 /**
@@ -886,45 +981,18 @@ export async function ensureHostingIngress(
 
   const ingressDir = hostingIngressDir(layout);
   await Deno.mkdir(ingressDir, { recursive: true, mode: 0o750 });
-  const composePath = hostingIngressComposePath(layout);
 
-  let descriptor: SystemComponentDescriptor | undefined;
-  try {
-    const loaded = await readSystemComponentDescriptor(
-      layout,
-      SYSTEM_HOSTING_INGRESS_COMPONENT,
-    );
-    if (loaded !== null) descriptor = loaded;
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    logWarn(
-      "deploy",
-      `hosting ingress descriptor unreadable; using anonymous Traefik: ${message}`,
-    );
-  }
-
+  const descriptor = await loadHostingIngressDescriptor(layout);
   const docker = await sharedTraefikDocker(
     layout,
     descriptor !== undefined,
     deps?.ingressDockerGate ?? (() => ingressDockerGateEnabled()),
   );
-  await Deno.writeTextFile(
-    composePath,
+  await upSharedTraefik(
+    layout,
     traefikCompose(ingressNetwork, descriptor, docker),
-    { mode: 0o640 },
+    run,
   );
-  // No `-p`: the compose file declares its own project through `name:`.
-  const composeUp = await run([
-    "compose",
-    "-f",
-    composePath,
-    "up",
-    "-d",
-    "--remove-orphans",
-  ]);
-  if (!composeUp.success) {
-    throw commandError("Starting Traefik ingress", composeUp);
-  }
 
   const ensureCaddy = deps?.ensureHostingCaddyRuntime ??
     ensureHostingCaddyRuntime;
@@ -1068,25 +1136,26 @@ export async function ensureServiceIngress(
   const docker: TraefikDockerSource = (await gateEnabled())
     ? "gate"
     : "socket-proxy";
-  await Deno.writeTextFile(
+  if (docker === "socket-proxy") {
+    await ensureSharedSocketProxy(layout, ingressNetwork, run);
+  }
+  const project = serviceIngressProject(serviceId);
+  await applyCompose(
     composePath,
     serviceTraefikCompose(entries, identity, ingressNetwork, docker),
-    { mode: 0o640 },
+    (file) =>
+      run([
+        "compose",
+        "-p",
+        project,
+        "-f",
+        file,
+        "up",
+        "-d",
+        "--remove-orphans",
+      ]),
+    "Starting service Traefik ingress",
   );
-  const project = serviceIngressProject(serviceId);
-  const composeUp = await run([
-    "compose",
-    "-p",
-    project,
-    "-f",
-    composePath,
-    "up",
-    "-d",
-    "--remove-orphans",
-  ]);
-  if (!composeUp.success) {
-    throw commandError("Starting service Traefik ingress", composeUp);
-  }
 }
 
 /** Optional test seams for {@link removeServiceIngress}. */

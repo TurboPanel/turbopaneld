@@ -268,3 +268,87 @@ test({
     }
   },
 });
+
+// Review fix F3: with Traefik's switch on, a read-only listener that cannot
+// open must fail the gate's start (Restart=always retries), not just log.
+
+async function roUnavailableStart(switchOn: boolean) {
+  const dir = await Deno.makeTempDir({ prefix: "tp-gate-ro-" });
+  const socket = join(dir, "gate.sock");
+  const switchFile = join(dir, "ingress-socket.on");
+  if (switchOn) await Deno.writeTextFile(switchFile, "on\n");
+  const config = loadConfig({
+    TP_DOCKER_GATE_SOCKET: socket,
+    // Its directory does not exist, so listen() fails.
+    TP_DOCKER_GATE_RO_SOCKET: join(dir, "missing", "docker.sock"),
+    TP_DOCKER_GATE_INGRESS_SWITCH: switchFile,
+    TP_DOCKER_GATE_UPSTREAM: join(dir, "none.sock"),
+    TP_DOCKER_GATE_SUMMARY_SEC: "3600",
+  });
+  const logs: Array<Record<string, unknown>> = [];
+  return {
+    dir,
+    socket,
+    config,
+    logs,
+    log: (r: Record<string, unknown>) => logs.push(r),
+  };
+}
+
+test("loadConfig reads the Traefik switch file path", () => {
+  assertEquals(loadConfig({}).ingressSwitchFile, undefined);
+  assertEquals(
+    loadConfig({ TP_DOCKER_GATE_INGRESS_SWITCH: "/opt/x/ingress-socket.on" })
+      .ingressSwitchFile,
+    "/opt/x/ingress-socket.on",
+  );
+});
+
+test({
+  name:
+    "F3: switch on + read-only listener unavailable = the gate refuses to start and leaves no socket",
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const run = await roUnavailableStart(true);
+    try {
+      await assertRejects(
+        () => startGate(run.config, run.log),
+        Error,
+        "read-only socket",
+      );
+      const loud = run.logs.find((r) =>
+        r.event === "docker-gate.ro-socket-unavailable"
+      );
+      assertEquals(loud?.level, "error");
+      assertEquals(loud?.fatal, true);
+      await assertRejects(() => Deno.lstat(run.socket), Deno.errors.NotFound);
+    } finally {
+      await Deno.remove(run.dir, { recursive: true });
+    }
+  },
+});
+
+test({
+  name:
+    "F3: switch off + read-only listener unavailable = logged loudly, the main socket keeps serving",
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const run = await roUnavailableStart(false);
+    try {
+      const gate = await startGate(run.config, run.log);
+      const loud = run.logs.find((r) =>
+        r.event === "docker-gate.ro-socket-unavailable"
+      );
+      assertEquals(loud?.level, "error");
+      assertEquals(loud?.fatal, false);
+      const started = run.logs.find((r) => r.event === "docker-gate.started");
+      assertEquals(started?.roSocket, null);
+      assert((await Deno.lstat(run.socket)).isSocket);
+      await gate.stop();
+    } finally {
+      await Deno.remove(run.dir, { recursive: true });
+    }
+  },
+});
