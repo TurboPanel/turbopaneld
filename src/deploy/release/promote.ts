@@ -235,6 +235,53 @@ async function statOrNull(path: string): Promise<Deno.FileInfo | null> {
   }
 }
 
+/** What {@link promoteExistingRelease} needs to know about a release dir. */
+type ReleaseDirStat = Pick<Deno.FileInfo, "isDirectory" | "mode">;
+
+/** `S_IFMT` / `S_IFDIR` of a raw `st_mode`. */
+const S_IFMT = 0o170000;
+const S_IFDIR = 0o040000;
+
+/**
+ * `lstat` of a published release through tp-host (`stat -c %f`, the raw hex
+ * `st_mode`): the release sits in the principal's home, which the daemon
+ * account cannot traverse. `null` when the path is absent.
+ */
+async function releaseDirStatPrivileged(
+  path: string,
+  runFn: RunFn,
+): Promise<ReleaseDirStat | null> {
+  const result = await runFn(
+    "sudo",
+    hostSudoArgs(["-n", "stat", "-c", "%f", "--", path]),
+  );
+  if (!result.success) {
+    const missing = isMissingPrivilegedPathError(result.stderr) ||
+      /no such directory/i.test(result.stderr);
+    if (missing) return null;
+    throw new Error(result.stderr || `Failed to stat release ${path}`);
+  }
+  const raw = result.stdout.trim();
+  const mode = /^[0-9a-f]{1,8}$/i.test(raw) ? Number.parseInt(raw, 16) : NaN;
+  if (Number.isNaN(mode)) {
+    throw new Error(`Unexpected stat output for release ${path}: ${raw}`);
+  }
+  return { isDirectory: (mode & S_IFMT) === S_IFDIR, mode };
+}
+
+/** Unprivileged `stat`, escalating through tp-host when it is denied. */
+async function releaseDirStat(
+  path: string,
+  runFn: RunFn,
+): Promise<ReleaseDirStat | null> {
+  try {
+    return await statOrNull(path);
+  } catch (err) {
+    if (!(err instanceof Deno.errors.PermissionDenied)) throw err;
+    return await releaseDirStatPrivileged(path, runFn);
+  }
+}
+
 /**
  * Validation gate between staging and cutover.
  *
@@ -503,10 +550,12 @@ export async function promoteExistingRelease(
     paths: ReleasePaths;
     releaseId: string;
     healthProbe?: ReleaseHealthProbe;
+    runFn?: RunFn;
   },
 ): Promise<string> {
+  const runFn = params.runFn ?? runPrivileged;
   const releaseDir = params.paths.releaseDir;
-  const stat = await statOrNull(releaseDir);
+  const stat = await releaseDirStat(releaseDir, runFn);
   if (stat === null) {
     throw new Error(
       `release ${params.releaseId} is not present on this host ` +
@@ -528,7 +577,7 @@ export async function promoteExistingRelease(
   }
 
   if (params.healthProbe) await params.healthProbe(releaseDir);
-  await swapCurrentSymlink(params.paths);
+  await swapCurrentSymlink(params.paths, runFn);
   return releaseDir;
 }
 

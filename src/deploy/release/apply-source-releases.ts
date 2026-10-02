@@ -267,7 +267,10 @@ async function rollbackOneRelease(
   // being restored was built, not what the payload asks for now, so flipping a
   // service's build mode never breaks rollback to a release from before the
   // switch.
-  const recordedManifest = await readReleaseManifest(paths.releaseDir);
+  const recordedManifest = await readReleaseManifest(
+    paths.releaseDir,
+    deps.runFn,
+  );
   if (recordedManifest?.imageTag) {
     logSink.onLine(
       "stdout",
@@ -306,8 +309,9 @@ async function rollbackOneRelease(
     await (deps.promoteExistingReleaseFn ?? promoteExistingRelease)({
       paths,
       releaseId: params.releaseId,
+      ...(deps.runFn === undefined ? {} : { runFn: deps.runFn }),
     });
-  const manifest = await readReleaseManifest(releaseDir);
+  const manifest = await readReleaseManifest(releaseDir, deps.runFn);
   logSink.onLine(
     "stdout",
     `rolled ${entry.composeServiceName} back to release ${params.releaseId}` +

@@ -15,7 +15,9 @@
 
 import { join } from "@std/path";
 import { writeComposeFileSecure } from "../compose-files.ts";
-import { RELEASE_METADATA_DIRNAME } from "./release-layout.ts";
+import { hostSudoArgs } from "../../permissions/host-sudo.ts";
+import type { RunFn } from "../ensure-principal.ts";
+import { RELEASE_METADATA_DIRNAME, runPrivileged } from "./release-layout.ts";
 
 export const RELEASE_MANIFEST_FILENAME = "release.json";
 
@@ -137,17 +139,50 @@ export async function writeReleaseManifest(
   await writeComposeFileSecure(releaseManifestPath(releaseDir), body);
 }
 
+/**
+ * The manifest text read through tp-host, or `null` when the file is absent.
+ *
+ * A published release lives in the principal's home (`root:<principal-grp>`,
+ * sealed `0550`), which the daemon account cannot traverse; tp-host reads it on
+ * a verified descriptor instead.
+ */
+async function readReleaseManifestPrivileged(
+  path: string,
+  runFn: RunFn,
+): Promise<string | null> {
+  const result = await runFn("sudo", hostSudoArgs(["-n", "cat", "--", path]));
+  if (result.success) return result.stdout;
+  if (/no such (file|directory)/i.test(result.stderr)) return null;
+  throw new Error(
+    result.stderr || `Failed to read release manifest ${path}`,
+  );
+}
+
+async function readReleaseManifestText(
+  path: string,
+  runFn: RunFn,
+): Promise<string | null> {
+  try {
+    return await Deno.readTextFile(path);
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) return null;
+    if (err instanceof Deno.errors.PermissionDenied) {
+      return await readReleaseManifestPrivileged(path, runFn);
+    }
+    throw err;
+  }
+}
+
 /** `null` when absent or not a version-1 manifest. */
 export async function readReleaseManifest(
   releaseDir: string,
+  runFn: RunFn = runPrivileged,
 ): Promise<ReleaseManifestV1 | null> {
-  let text: string;
-  try {
-    text = await Deno.readTextFile(releaseManifestPath(releaseDir));
-  } catch (err) {
-    if (err instanceof Deno.errors.NotFound) return null;
-    throw err;
-  }
+  const text = await readReleaseManifestText(
+    releaseManifestPath(releaseDir),
+    runFn,
+  );
+  if (text === null) return null;
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);

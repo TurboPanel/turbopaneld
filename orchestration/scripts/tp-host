@@ -907,11 +907,47 @@ tp_verb_test() {
   test "$1" "./$PIN_NAME"
 }
 
+# A published release's own manifest inside a principal's home:
+# <home>/.../releases/<id>/.turbopanel/release.json and nothing else.
+tp_release_manifest_ok() {
+  case "$1" in
+    */releases/*/.turbopanel/release.json) ;;
+    *) return 1 ;;
+  esac
+  _rm_id="${1%/.turbopanel/release.json}"
+  _rm_id="${_rm_id##*/}"
+  case "$_rm_id" in
+    ''|.|..|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+  return 0
+}
+
 tp_verb_cat() {
   [ "$#" -eq 2 ] && [ "$1" = "--" ] || tp_die "cat: only cat -- PATH"
-  tp_require_class "$2" tree
+  tp_require_class "$2" tree principal
+  _ct_class="$(tp_path_class "$2")"
+  if [ "$_ct_class" = "principal" ]; then
+    tp_release_manifest_ok "$2" || tp_die "cat: refusing $2"
+  fi
   tp_open_verified "$2" || tp_die "no such file $2"
+  if [ "$_ct_class" = "principal" ]; then
+    # A tenant cannot hard-link a root-only file into its tree and have it
+    # read back here: the manifest must be a regular file with one link.
+    [ "$(stat -L -c '%F %h' /proc/self/fd/3)" = "regular file 1" ] ||
+      tp_die "cat: refusing $2: not a plain file"
+  fi
   cat <&3
+}
+
+# The type and permission bits of one entry in a principal's home, without
+# following a symlink: `stat -c %f -- PATH` (raw hex st_mode) and nothing else.
+tp_verb_stat() {
+  [ "$#" -eq 4 ] && [ "$1" = "-c" ] && [ "$2" = "%f" ] && [ "$3" = "--" ] ||
+    tp_die "stat: only stat -c %f -- PATH"
+  tp_require_class "$4" principal
+  tp_pin_parent "$4" || tp_die "no such directory for $4"
+  [ -e "./$PIN_NAME" ] || [ -L "./$PIN_NAME" ] || tp_die "no such file $4"
+  stat -c '%f' -- "./$PIN_NAME"
 }
 
 tp_verb_cmp() {
@@ -1415,6 +1451,7 @@ case "$_verb" in
   readlink) tp_verb_readlink "$@" ;;
   test) tp_verb_test "$@" ;;
   cat) tp_verb_cat "$@" ;;
+  stat) tp_verb_stat "$@" ;;
   cmp) tp_verb_cmp "$@" ;;
   ls) tp_verb_ls "$@" ;;
   find) tp_verb_find "$@" ;;

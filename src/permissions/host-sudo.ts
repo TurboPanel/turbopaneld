@@ -23,6 +23,7 @@ export const TP_HOST_VERBS: ReadonlySet<string> = new Set([
   "readlink",
   "test",
   "cat",
+  "stat",
   "cmp",
   "ls",
   "find",
