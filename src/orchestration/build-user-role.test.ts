@@ -15,8 +15,8 @@ const test = Deno.test.bind(Deno);
  * The build-user role (`orchestration/roles/build-user`): the account, tree and
  * slice `tp-host build-run` runs sandboxed tenant builds in. tp-host checks the
  * same shape on every run and refuses to build otherwise, so these pin what it
- * expects: tpbuild outside docker and tp, `/var/lib/turbopanel-build` root
- * 0711, `work/` root:tp 1770, `cache/` root 0700, and `tpbuild.slice`.
+ * expects: tpbuild outside docker and tp, `/var/lib/turbopanel-build` root:tp
+ * 0710 (root-owned, not group/world-writable), `work/` root:tp 1770, `cache/` root 0700, and `tpbuild.slice`.
  */
 const ORCHESTRATION = join(DAEMON_ROOT, "orchestration");
 const ROLE = join(ORCHESTRATION, "roles/build-user");
@@ -93,7 +93,11 @@ test("the build tree matches what tp-host build-run checks", async () => {
     moduleArgs(task, "file")
   );
   const expected = [
-    { path: "{{ build_root }}", group: "root", mode: "0711" },
+    {
+      path: "{{ build_root }}",
+      group: "{{ turbopanel_group }}",
+      mode: "0710",
+    },
     {
       path: "{{ build_root }}/work",
       group: "{{ turbopanel_group }}",
@@ -118,7 +122,7 @@ test("the role installs tpbuild.slice root-owned with no limits of its own", asy
   assertEquals(args.src, "tpbuild.slice.j2");
   assertEquals(args.dest, "/etc/systemd/system/{{ build_slice }}");
   assertEquals(args.owner, "root");
-  assertEquals(args.mode, "0644");
+  assertEquals(args.mode, "0640");
   assertEquals(slice.notify, "Reload systemd for the build slice");
 
   const unit = await Deno.readTextFile(

@@ -10,7 +10,7 @@ build_group: tpbuild
 build_uid: 9994
 build_gid: 9994
 # Root of the build sandbox. tp-host checks this exact layout on every run:
-# the root 0711, work/ root:tp 1770 (tp creates work/<id>, the sticky bit stops
+# the root root:tp 0710, work/ root:tp 1770 (tp creates work/<id>, the sticky bit stops
 # it swapping one out), cache/ root 0700 (per-project dirs created by tp-host).
 build_root: /var/lib/turbopanel-build
 # Pinned by name in tp-host; not turbopanel-*, which tp may install units under.

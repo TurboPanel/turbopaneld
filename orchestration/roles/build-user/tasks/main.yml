@@ -61,13 +61,15 @@
     - sudo
     - wheel
 
+# Only tp needs to traverse the root (to reach work/). The build account never
+# does: inside its unit the root is a tmpfs with its own dirs bound in.
 - name: Ensure the build sandbox root
   ansible.builtin.file:
     path: "{{ build_root }}"
     state: directory
     owner: root
-    group: root
-    mode: "0711"
+    group: "{{ turbopanel_group }}"
+    mode: "0710"
 
 - name: Ensure the build work directory
   ansible.builtin.file:
@@ -91,5 +93,5 @@
     dest: "/etc/systemd/system/{{ build_slice }}"
     owner: root
     group: root
-    mode: "0644"
+    mode: "0640"
   notify: Reload systemd for the build slice
