@@ -413,6 +413,7 @@ test("caddyfile disables auto_https redirects and advertises h1 h2 h3", () => {
   const config = caddyfile(CONFIG_DIR);
   // Redirects only — `auto_https off` would also kill `tls internal` issuance.
   assertStringIncludes(config, "auto_https disable_redirects");
+  assertStringIncludes(config, "skip_install_trust");
   assertStringIncludes(config, "protocols h1 h2 h3");
 });
 

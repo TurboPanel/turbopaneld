@@ -684,9 +684,13 @@ export function caddyfile(configDir: string): string {
   // ACME client can issue on :80/:443.
   // Future: optional `email {acmeEmail}` in this global block when the
   // deploy payload carries an ACME contact address.
+  // `skip_install_trust`: Caddy runs as an unprivileged account, so it must
+  // never try to add its internal CA to the host's trust store (it would
+  // shell out to sudo, and as root it used to succeed).
   return `{
   admin ${HOSTING_CADDY_ADMIN_ADDR}
   auto_https disable_redirects
+  skip_install_trust
   grace_period ${HOSTING_CADDY_GRACE_PERIOD}
   servers {
     protocols h1 h2 h3
