@@ -71,6 +71,8 @@ export type RequestFacts = {
   query: URLSearchParams;
   /** Parsed JSON body for the body-checked routes, otherwise `undefined`. */
   body?: unknown;
+  /** Why the body was refused by the strict parser (body.ts), if it was. */
+  bodyError?: string;
 };
 
 export type RouteInfo = {
@@ -80,11 +82,25 @@ export type RouteInfo = {
   needsBody: boolean;
 };
 
-const VERSION_PREFIX = /^\/v\d+(?:\.\d+)?(?=\/)/;
+/** What the engine's router strips: `/v{version:[0-9.]+}` (moby api/server). */
+const ENGINE_VERSION_PREFIX = /^\/v[0-9.]+(?=\/)/;
+/** The only prefix a client sends: `/v<major>.<minor>`. */
+const CANONICAL_VERSION_PREFIX = /^\/v\d+\.\d+\//;
 
 /** Path as the engine routes it: decoded, without the API version prefix. */
 export function routePath(rawPath: string): string {
-  return rawPath.replace(VERSION_PREFIX, "");
+  return rawPath.replace(ENGINE_VERSION_PREFIX, "");
+}
+
+/**
+ * No version prefix, or exactly one `/v<major>.<minor>`. Anything else the
+ * engine still strips (`/v1/`, `/v1.47.0/`, `/v1.47./`, a second prefix) is
+ * odd: no client sends it.
+ */
+export function versionPrefixIsCanonical(rawPath: string): boolean {
+  if (!ENGINE_VERSION_PREFIX.test(rawPath)) return true;
+  if (!CANONICAL_VERSION_PREFIX.test(rawPath)) return false;
+  return !ENGINE_VERSION_PREFIX.test(routePath(rawPath));
 }
 
 type RouteRule = {
@@ -672,6 +688,13 @@ export async function evaluateDetailed(
   const out: Violation[] = [];
   if (!pathIsCanonical(facts.path)) {
     out.push({ rule: "path-noncanonical" });
+  }
+  if (!versionPrefixIsCanonical(facts.path)) {
+    out.push({ rule: "path-version-prefix" });
+  }
+  if (facts.bodyError !== undefined) {
+    out.push({ rule: "body-unparseable", detail: facts.bodyError });
+    return { violations: out, allowances: [] };
   }
   const { route } = classifyRoute(facts.method, facts.path);
   const found = await evaluateByRoute(route, facts, config, resolvePath);

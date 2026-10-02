@@ -21,12 +21,12 @@ import {
   requestFraming,
   type RequestHead,
 } from "./http.ts";
-import { routePath } from "./policy.ts";
+import { routePath, versionPrefixIsCanonical } from "./policy.ts";
 
 /** A container id or name, as Docker allows them (no dots or dashes first). */
 const CONTAINER_REF = String.raw`[A-Za-z\d][A-Za-z\d_.-]*`;
 
-/** Every route the read-only socket answers (after the API version prefix). */
+/** Every route the read-only socket answers (after an optional `/v<major>.<minor>`). */
 export const READ_ONLY_ROUTES: readonly RegExp[] = [
   /^\/(?:_ping|version|events)$/,
   /^\/containers\/json$/,
@@ -69,7 +69,9 @@ export function readOnlyRefusal(head: RequestHead): string | undefined {
   if (asksUpgrade(head)) return "read-only socket: no upgrade";
   if (hasBody(requestFraming(head))) return "read-only socket: no request body";
   const rawPath = rawPathOf(head.target);
-  if (!pathIsPlain(rawPath)) return "read-only socket: path not allowed";
+  if (!pathIsPlain(rawPath) || !versionPrefixIsCanonical(rawPath)) {
+    return "read-only socket: path not allowed";
+  }
   const route = routePath(rawPath);
   if (!READ_ONLY_ROUTES.some((pattern) => pattern.test(route))) {
     return "read-only socket: route not allowed";

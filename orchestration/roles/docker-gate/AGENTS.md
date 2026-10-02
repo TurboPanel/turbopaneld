@@ -28,6 +28,7 @@ A later stage that routes traffic through it flips this to fatal.
 | File | Job |
 | ---- | --- |
 | `http.ts` | Strict HTTP/1.1 framing: head parse, `Content-Length` / chunked bodies, refusal of every ambiguity (both lengths, repeated lengths, folding, bare LF, `Transfer-Encoding` other than `chunked`) |
+| `body.ts` | Strict JSON parse of create bodies, read the way the engine's Go decoder reads them (see "Paths and bodies as the engine reads them") |
 | `proxy.ts` | One client connection: request in, fresh engine connection, response back. Upgrades (`attach`, `exec start`, Compose `/session` + `/grpc`) are spliced raw **only after the engine answers 101** |
 | `readonly.ts` | Stage 3: the exact list the read-only listener answers (GET/HEAD `/_ping`, `/version`, `/events`, `/containers/json`, `/containers/{id}/json`); everything else is a 403 |
 | `platform.ts` | Ownership classes (`platform` / `tenant` / `unlabeled`) from labels, and the narrow bind allowance of platform containers |
@@ -63,7 +64,32 @@ outside the bind roots (`/srv/users`, `<state>/storage`); non-bridge network
 drivers and non-`local` volume drivers; `build` with host network or a cgroup
 parent; any `PUT /containers/{id}/archive`; mutating calls on `/plugins`,
 `/swarm`, `/nodes`, `/services`, `/tasks`, `/secrets`, `/configs`; paths the
-engine would clean (`..`, `//`).
+engine would clean (`..`, `//`); an API version prefix other than one
+`/v<major>.<minor>` (`path-version-prefix`); a create body the strict parser
+refuses (`body-unparseable` with `empty`, `invalid-utf8`, `invalid-json`,
+`too-deep`, `duplicate-key` or `non-ascii-key`).
+
+## Paths and bodies as the engine reads them
+
+Rules only hold if the gate reads a request exactly as the engine does.
+
+- **Version prefix.** The engine's router strips `/v{version:[0-9.]+}`, so
+  `/v1/`, `/v1.47.0/` and `/v1.47./` all route. `routePath` strips that same
+  prefix, so classification (and the body rules) always run on the engine's
+  route. `versionPrefixIsCanonical` accepts only no prefix or exactly one
+  `/v<major>.<minor>`: anything else is a `path-version-prefix` finding on the
+  main socket and a 403 on the read-only socket.
+- **Body field names.** Go's `encoding/json` matches struct fields
+  case-insensitively (and through Unicode folding: `ſ` is `s`, the Kelvin sign
+  is `k`), and decodes a repeated field into the same struct, so the first
+  copy's fields survive. `body.ts` therefore refuses a body whose struct field
+  names are not printable ASCII or repeat case-insensitively, and rewrites every
+  field the policy reads to its canonical spelling (`CANONICAL_FIELDS`). Keys of
+  Go maps (`Labels`, `DriverOpts`, `Options`, ... in `MAP_FIELDS`) are matched
+  exactly by the engine and kept exactly. A BOM, invalid UTF-8, trailing data
+  or nesting deeper than 64 fails closed. **A new field the policy reads must
+  be added to `CANONICAL_FIELDS`** (`body.test.ts` scans the policy source for
+  it).
 
 **Expected findings on every host in this stage** (not bugs): the platform's
 own containers bind `/etc/turbopanel/...` and `/var/lib/turbopanel/...`
@@ -154,7 +180,7 @@ socket, `/run/turbopanel-gate/ro/docker.sock`, in a directory of its own
 (`root:root 0750`, socket `root:root 0660`: root and a container's root reach
 it, the daemon account does not). It answers only GET/HEAD `/_ping`,
 `/version`, `/events`, `/containers/json` and `/containers/{id}/json` (optional
-API version prefix; id `[A-Za-z\d][A-Za-z\d_.-]*`), with no body and no
+`/v<major>.<minor>` prefix, no other; id `[A-Za-z\d][A-Za-z\d_.-]*`), with no body and no
 upgrade, and refuses anything else, and any path holding `%`, `..`, `//` or
 `\`, with a **403** and a `docker-gate.ro-refused` line. It is narrower than
 the Tecnativa proxy it replaces (`CONTAINERS=1` there also passed `logs`,
