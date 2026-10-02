@@ -63,6 +63,7 @@ export const DAEMON_WIRE_FEATURES = [
   "update-progress-v1",
   "sealed-instance-secrets-v1",
   "managed-health-v1",
+  "managed-ha-probe-v1",
 ] as const;
 
 export type DaemonWireFeature = (typeof DAEMON_WIRE_FEATURES)[number];
@@ -81,6 +82,15 @@ export const SEALED_INSTANCE_SECRETS_FEATURE: DaemonWireFeature =
  * the request only to a daemon that lists this feature.
  */
 export const MANAGED_HEALTH_FEATURE: DaemonWireFeature = "managed-health-v1";
+
+/**
+ * This daemon may send `managed-ha-event` with `detector: 'postgres-probe'`
+ * (its own dead-primary probe for managed Postgres). It sends one only to a
+ * control plane that lists this feature, because only such a control plane
+ * checks that the reporter is the current primary's own host.
+ */
+export const MANAGED_HA_PROBE_FEATURE: DaemonWireFeature =
+  "managed-ha-probe-v1";
 
 /** Features that need an instance at or above a semver. Empty until one lands. */
 export const INSTANCE_FEATURE_MIN_VERSIONS: Readonly<Record<string, string>> =

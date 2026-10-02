@@ -67,6 +67,7 @@ docker_gate_approval_pubkey_file: "{{ docker_gate_dir }}/approval.pub"
 # The gate's own source files, in the order they are copied.
 docker_gate_files:
   - http.ts
+  - body.ts
   - approval.ts
   - inspect.ts
   - platform.ts

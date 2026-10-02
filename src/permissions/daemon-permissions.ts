@@ -63,8 +63,8 @@ const DOCKER_SOCKETS = [
  * (`orchestration/roles/turbopanel-user`, mirrored as
  * `turbopanel_daemon_vendor_cache_dirs`), so a compromised daemon cannot
  * replace its binary, the orchestration tree root executes, a Galaxy role,
- * or a runtime it is launched from. buildkit/railpack are installed by the
- * `buildkit` role (root); the Galaxy Docker role by `tp-orchestrate`.
+ * or a runtime it is launched from. railpack and its frontend are installed
+ * by the `buildkit` role (root); the Galaxy Docker role by `tp-orchestrate`.
  */
 export const DAEMON_WRITABLE_VENDOR_DIRS: readonly string[] = [
   `${VENDOR}/uv/cache`,
@@ -238,8 +238,6 @@ export const DAEMON_RUN_PROGRAMS: readonly string[] = [
   // containers and image builds
   "docker",
   "/usr/bin/docker",
-  `${VENDOR}/buildkit/current/buildctl`,
-  `${VENDOR}/buildkit/current/buildkitd`,
   `${VENDOR}/railpack/current/railpack`,
   // the daemon itself (dev-sync cache warm, restart) and its runtime
   `${PROD_BIN_DIR_DEFAULT}/turbopaneld`,

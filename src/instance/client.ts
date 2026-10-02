@@ -131,11 +131,15 @@ import {
 } from "../update/urls.ts";
 import { installOriginNeedsInsecureTls } from "./install-tls.ts";
 import { ManagedHaObserver } from "./ha-observe.ts";
+import { PgDeadPrimaryObserver } from "./pg-dead-primary-observe.ts";
 import { BackupResultReporter } from "../backups/result-reporter.ts";
 import { AcmeIssuanceObserver } from "./acme-observe.ts";
 import { InstanceAcmeRenewalScheduler } from "./instance-acme-renew.ts";
 import { DAEMON_VERSION } from "../version.ts";
-import { resolveDaemonCapabilities } from "./version-wire.ts";
+import {
+  MANAGED_HA_PROBE_FEATURE,
+  resolveDaemonCapabilities,
+} from "./version-wire.ts";
 import { TopologyReporter } from "./topology-reporter.ts";
 import type { TopologySnapshot } from "../contracts/topology-types.ts";
 import type {
@@ -422,6 +426,7 @@ export class InstanceClient {
   #licenseStamp: string | undefined;
   #idlePresence: IdlePresence | undefined;
   #haObserver: ManagedHaObserver | undefined;
+  #pgProbeObserver: PgDeadPrimaryObserver | undefined;
   #backupReporter: BackupResultReporter | undefined;
   #acmeObserver: AcmeIssuanceObserver | undefined;
   /** Panel certificate renewal. Independent of `#acmeObserver`. */
@@ -843,6 +848,7 @@ export class InstanceClient {
     this.#idlePresence?.detach();
     this.#idlePresence = undefined;
     this.#haObserver?.detach();
+    this.#pgProbeObserver?.detach();
     this.#haObserver = undefined;
     this.#backupReporter?.detach();
     this.#backupReporter = undefined;
@@ -925,6 +931,7 @@ export class InstanceClient {
     this.#closeActiveSocket();
     this.#idlePresence?.detach();
     this.#haObserver?.detach();
+    this.#pgProbeObserver?.detach();
     this.#backupReporter?.detach();
     this.#acmeObserver?.detach();
     this.#metricsScheduler?.detach();
@@ -1345,6 +1352,8 @@ export class InstanceClient {
     this.#idlePresence?.attach(ws);
     this.#ensureHaObserver();
     this.#haObserver?.attach();
+    this.#ensurePgProbeObserver();
+    this.#pgProbeObserver?.attach();
     this.#ensureBackupReporter().attach();
     this.#ensureAcmeObserver();
     this.#acmeObserver?.attach();
@@ -1390,6 +1399,7 @@ export class InstanceClient {
       this.#peerFeatures = [];
       this.#idlePresence?.detach();
       this.#haObserver?.detach();
+      this.#pgProbeObserver?.detach();
       this.#backupReporter?.detach();
       this.#acmeObserver?.detach();
       this.#metricsScheduler?.detach();
@@ -1436,6 +1446,18 @@ export class InstanceClient {
         if (!this.#ws || this.#ws.readyState !== WebSocket.OPEN) return;
         this.#ws.send(JSON.stringify(message));
       },
+    });
+  }
+
+  #ensurePgProbeObserver(): void {
+    if (this.#pgProbeObserver) return;
+    this.#pgProbeObserver = new PgDeadPrimaryObserver({
+      send: (message) => {
+        if (!this.#ws || this.#ws.readyState !== WebSocket.OPEN) return false;
+        this.#ws.send(JSON.stringify(message));
+        return true;
+      },
+      peerSupportsProbe: () => this.instanceSupports(MANAGED_HA_PROBE_FEATURE),
     });
   }
 

@@ -1,0 +1,11 @@
+:18081 {
+  bind 127.0.0.1 ::1
+  root * /srv/x/public
+  encode zstd gzip
+  php_fastcgi unix//run/x.sock {
+    env APP_ENV "production"
+    env EMPTY ""
+    env URL "https://x.example/a?b=c&d=%20"
+  }
+  file_server
+}

@@ -59,11 +59,20 @@ import { isAllowedExtension } from "../runtime/registry.ts";
 import {
   principalHomePath,
   siteCurrentSymlink,
+  siteReleasesDir,
   siteRoot,
   siteSharedDir,
   siteWebrootDir,
 } from "../paths/layout.ts";
 import type { EnvironmentDeploySite } from "../contracts/commands-contracts.ts";
+import { currentReleasePathExists } from "./release/promote.ts";
+import {
+  ConfigValueError,
+  hasLineBreakOrControl,
+  safeEnvName,
+  safeEnvValue,
+  safePhpIniValue,
+} from "../contracts/config-values.ts";
 import {
   ensureDirectoryWithOwner,
   ensureEngineGroupMembership,
@@ -387,7 +396,7 @@ export type CaddySiteConfigOpts = Readonly<{
  * drop — never escape, never interpolate.
  */
 function isSafeCaddyEnvValue(value: string): boolean {
-  return !/[{}"\\\r\n]/.test(value);
+  return !/[{}"\\]/.test(value) && !hasLineBreakOrControl(value);
 }
 
 /**
@@ -425,7 +434,8 @@ export function caddySiteConfig(
     // non-existent-`.php`-passthrough hole nginx has to guard by hand.
     const env = Object.entries(site.webEnv ?? {})
       .filter(([key, value]) =>
-        isSafeCaddyEnvValue(key) && isSafeCaddyEnvValue(value)
+        safeEnvName(`sites.${site.composeServiceName}.webEnv`, key) &&
+        isSafeCaddyEnvValue(value)
       )
       .sort(([a], [b]) => a.localeCompare(b));
     if (env.length > 0) {
@@ -604,8 +614,10 @@ export type PhpAdminValue = Readonly<{ key: string; value: string }>;
  * `releaseSymlinkSwap` is scoped the same way, for the reasons on
  * {@link RELEASE_SYMLINK_SWAP_PHP_VALUES}.
  *
- * Anything that fails validation is **dropped**, not escaped: these values land
- * in a config file the web server parses, so a `memory_limit` of
+ * An unknown key, an empty value or an over-long one is **dropped**. A value
+ * outside the {@link safePhpIniValue} alphabet is **refused** (the apply fails
+ * naming the setting), never escaped: these values land in a php-fpm pool and
+ * an OpenLiteSpeed vhconf that root-run masters parse, so a `memory_limit` of
  * `"256M; rm -rf /"` must never round-trip in any syntax.
  */
 export function phpAdminValues(
@@ -627,8 +639,7 @@ export function phpAdminValues(
     if (!isSettablePhpDirective(key) || typeof raw !== "string") continue;
     const value = raw.trim();
     if (value.length === 0 || value.length > 512) continue;
-    if (/[\r\n]/.test(value)) continue;
-    values.push({ key, value });
+    values.push({ key, value: safePhpIniValue(`php.settings.${key}`, value) });
   }
   const openBasedir = opts?.openBasedir;
   if (openBasedir && openBasedir.length > 0) {
@@ -911,6 +922,32 @@ export type ApacheSiteConfigOpts = Readonly<{
   phpFpmSocket?: string | null;
 }>;
 
+/**
+ * One `SetEnv` line, or a refusal naming the variable (never its value: it may
+ * be a decrypted secret).
+ *
+ * The root Apache master reads this file, so the name must be an environment
+ * variable name, the value must stay on its line, and the value must not hold
+ * `${`: Apache expands `${NAME}` from its own environment on every config
+ * line, quoted or not, and has no escape for it.
+ */
+function apacheSetEnvLine(
+  service: string,
+  key: string,
+  raw: string,
+): string {
+  const name = safeEnvName(`sites.${service}.webEnv`, key);
+  const field = `sites.${service}.webEnv.${name}`;
+  const value = safeEnvValue(field, raw);
+  if (value.includes("${")) {
+    throw new ConfigValueError(field, "must not contain ${ in an Apache site");
+  }
+  const escaped = value
+    .replaceAll("\\", String.raw`\\`)
+    .replaceAll('"', String.raw`\"`);
+  return `  SetEnv ${name} "${escaped}"`;
+}
+
 export function apacheSiteConfig(
   site: SiteApplySpec,
   documentRoot: string,
@@ -928,11 +965,9 @@ export function apacheSiteConfig(
   if (site.webEnv) {
     const keys = Object.keys(site.webEnv).sort((a, b) => a.localeCompare(b));
     for (const key of keys) {
-      const raw = site.webEnv[key] ?? "";
-      const escaped = raw
-        .replaceAll("\\", String.raw`\\`)
-        .replaceAll('"', String.raw`\"`);
-      envLines.push(`  SetEnv ${key} "${escaped}"`);
+      envLines.push(
+        apacheSetEnvLine(site.composeServiceName, key, site.webEnv[key] ?? ""),
+      );
     }
   }
   const phpBlock = buildApachePhpBlock(
@@ -1438,6 +1473,37 @@ async function statOrNull(path: string): Promise<Deno.FileInfo | null> {
 }
 
 /**
+ * `stat` of a release-backed document root, `"present"` when the daemon may
+ * not traverse the principal's home to stat it, or `null` when it is absent.
+ *
+ * The escalated answer is presence only, through the release engine's own
+ * `readlink`/`test -e` calls: the principal owns that tree, so nothing in it
+ * is read as root, and `current` is resolved rather than traversed.
+ */
+async function releaseDocumentRootStat(
+  layout: LayoutPaths,
+  documentRoot: string,
+  site: SiteApplySpec,
+  release: SiteRelease,
+): Promise<Deno.FileInfo | "present" | null> {
+  try {
+    return await statOrNull(documentRoot);
+  } catch (err) {
+    if (!(err instanceof Deno.errors.PermissionDenied)) throw err;
+  }
+  const home = principalHomePath(layout, release.username);
+  const exists = await currentReleasePathExists(
+    {
+      currentLink: siteCurrentSymlink(home, release.serviceId),
+      releasesDir: siteReleasesDir(home, release.serviceId),
+    },
+    site.root,
+    run,
+  );
+  return exists ? "present" : null;
+}
+
+/**
  * Release-backed document roots are populated by the release engine and are
  * read-only by the time this runs — so this asserts rather than creates.
  *
@@ -1447,16 +1513,23 @@ async function statOrNull(path: string): Promise<Deno.FileInfo | null> {
  * ready" page over what the operator believes is their application.
  */
 async function assertReleaseDocumentRoot(
+  layout: LayoutPaths,
   documentRoot: string,
   site: SiteApplySpec,
+  release: SiteRelease,
 ): Promise<void> {
-  const stat = await statOrNull(documentRoot);
+  const stat = await releaseDocumentRootStat(
+    layout,
+    documentRoot,
+    site,
+    release,
+  );
   if (stat === null) {
     throw new Error(
       `site release document root missing for ${site.composeServiceName}: ${documentRoot} (no promoted release, or the build did not emit "${site.root}")`,
     );
   }
-  if (!stat.isDirectory) {
+  if (stat !== "present" && !stat.isDirectory) {
     throw new Error(
       `site release document root is not a directory for ${site.composeServiceName}: ${documentRoot}`,
     );
@@ -1560,23 +1633,26 @@ async function renderOpenLiteSpeedMainConfig(
   layout: LayoutPaths,
   sitesDir: string,
 ): Promise<string> {
-  const fragments: string[] = [];
-  try {
-    const names = [];
-    for await (const entry of Deno.readDir(sitesDir)) {
-      if (entry.isFile && entry.name.endsWith(".conf")) names.push(entry.name);
-    }
-    names.sort((a, b) => a.localeCompare(b));
-    // Independent reads; `Promise.all` keeps the sorted fragment order.
-    fragments.push(
-      ...await Promise.all(
-        names.map((name) => Deno.readTextFile(join(sitesDir, name))),
-      ),
-    );
-  } catch (err) {
-    if (!(err instanceof Deno.errors.NotFound)) throw err;
-  }
+  const names = (await listEngineConfigDir(sitesDir) ?? [])
+    .filter((name) => name.endsWith(".conf"))
+    .sort((a, b) => a.localeCompare(b));
+  // Independent reads; `Promise.all` keeps the sorted fragment order.
+  const fragments = await Promise.all(
+    names.map((name) => readEngineConfigFile(join(sitesDir, name))),
+  );
   return openlitespeedMainConfig(layout, fragments);
+}
+
+/**
+ * Contents of one root-owned engine config file, read through tp-host (the
+ * daemon is not in the engine's group). Only the daemon writes these files.
+ */
+async function readEngineConfigFile(path: string): Promise<string> {
+  const read = await run("sudo", hostSudoArgs(["-n", "cat", "--", path]));
+  if (!read.success) {
+    throw new Error(read.stderr || `Failed to read ${path}`);
+  }
+  return read.stdout;
 }
 
 function openlitespeedMainConfigPath(layout: LayoutPaths): string {
@@ -1617,14 +1693,6 @@ async function regenerateOpenLiteSpeedMainConfig(
 
 function stripConfSuffix(name: string): string {
   return name.endsWith(".conf") ? name.slice(0, -".conf".length) : name;
-}
-
-function isPrefixedConfFile(entry: Deno.DirEntry, prefix: string): boolean {
-  return (
-    entry.isFile &&
-    entry.name.startsWith(prefix) &&
-    entry.name.endsWith(".conf")
-  );
 }
 
 /**
@@ -1999,8 +2067,7 @@ async function ensureSiteConfigDirs(
   sitesDirs: SiteConfigDirs,
   phpSeries: readonly string[],
 ): Promise<void> {
-  // Engines whose site files are root-owned get their dir through tp-host;
-  // OpenLiteSpeed fragments are daemon-owned (no config group).
+  // Engines whose site files are root-owned get their dir through tp-host.
   await forEachSequential(SITE_ENGINE_ORDER, async (engine) => {
     if (!needs[engine]) return;
     const group = SITE_ENGINE_DRIVERS[engine].configGroup;
@@ -2584,7 +2651,7 @@ async function applyOneSite(
   let restartEngine: SiteApplySpec["engine"] | undefined;
   if (release) {
     // The release engine owns the tree; assert it, never create or seed it.
-    await assertReleaseDocumentRoot(documentRoot, site);
+    await assertReleaseDocumentRoot(layout, documentRoot, site, release);
     await writeReleaseHostingWebMetadata(layout, environmentId, site, release);
     if (await ensureEngineCanReadPrincipalTree(site, release.username)) {
       restartEngine = site.engine;
@@ -2813,17 +2880,14 @@ async function removePhpFpmEngineSites(
  * swept on teardown.
  */
 async function installedPhpSeries(layout: LayoutPaths): Promise<string[]> {
-  const root = join(layout.configDir, "php");
-  const series: string[] = [];
+  // `root:tpapache` `0750` on a host: listed through tp-host, like the pools.
+  let names: string[] | null;
   try {
-    for await (const entry of Deno.readDir(root)) {
-      if (entry.isDirectory && PHP_VERSION_RE.test(entry.name)) {
-        series.push(entry.name);
-      }
-    }
+    names = await listEngineConfigDir(join(layout.configDir, "php"));
   } catch {
     return [];
   }
+  const series = (names ?? []).filter((name) => PHP_VERSION_RE.test(name));
   return series.sort((a, b) =>
     a.localeCompare(b, undefined, { numeric: true })
   );
@@ -2885,26 +2949,19 @@ async function removeOpenLiteSpeedSites(
   const prefix = `tp-${environmentId}-`;
   const sitesDir = join(layout.configDir, "openlitespeed", "sites");
   const vhostsDir = openlitespeedVhostsDir(layout);
-  let removed = 0;
-
-  try {
-    for await (const entry of Deno.readDir(sitesDir)) {
-      if (!isPrefixedConfFile(entry, prefix)) continue;
-      const composeServiceName = stripConfSuffix(
-        entry.name.slice(prefix.length),
-      );
-      const olsName = openlitespeedSiteName(environmentId, composeServiceName);
-      await tryRemoveOpenLiteSpeedVhostDir(join(vhostsDir, olsName));
-      try {
-        await Deno.remove(join(sitesDir, entry.name));
-        removed += 1;
-      } catch (err) {
-        if (!(err instanceof Deno.errors.NotFound)) throw err;
-      }
-    }
-  } catch (err) {
-    if (!(err instanceof Deno.errors.NotFound)) throw err;
-  }
+  const fragments = (await listEngineConfigDir(sitesDir) ?? []).filter((
+    name,
+  ) => name.startsWith(prefix) && name.endsWith(".conf"));
+  await forEachSequential(fragments, async (name) => {
+    const composeServiceName = stripConfSuffix(name.slice(prefix.length));
+    const olsName = openlitespeedSiteName(environmentId, composeServiceName);
+    await tryRemoveOpenLiteSpeedVhostDir(join(vhostsDir, olsName));
+  });
+  const removed = await removePrefixedConfFiles(
+    sitesDir,
+    prefix,
+    "OpenLiteSpeed",
+  );
 
   if (removed > 0) {
     await regenerateOpenLiteSpeedMainConfig(layout, sitesDir);

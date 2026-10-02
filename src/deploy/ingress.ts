@@ -10,6 +10,7 @@ import {
   isValidIpv6Literal,
 } from "../contracts/commands-contracts.ts";
 import { type LayoutPaths, PROD_HOME_DEFAULT } from "../paths/layout.ts";
+import { safeConfigToken, safeUrlPath } from "../contracts/config-values.ts";
 import { isDaemonReservedHostingSite } from "./instance-acme-http01.ts";
 import {
   parseComposePsEntries,
@@ -1296,8 +1297,9 @@ function hostingTlsDirective(
 ): string {
   if (tlsMode === "acme") return "";
   if (tlsId) {
-    return `  tls ${join(tlsDir, tlsId, "fullchain.pem")} ${
-      join(tlsDir, tlsId, "privkey.pem")
+    const id = safeConfigToken("hostings[].tlsId", tlsId);
+    return `  tls ${join(tlsDir, id, "fullchain.pem")} ${
+      join(tlsDir, id, "privkey.pem")
     }`;
   }
   return "  tls internal";
@@ -1316,9 +1318,7 @@ function emitHttpsSite(
 }
 
 export function assertSafeHostingPathPrefix(pathPrefix: string): void {
-  if (pathPrefix.includes("`") || /[\r\n]/.test(pathPrefix)) {
-    throw new Error("hostings[].pathPrefix contains an unsupported character");
-  }
+  safeUrlPath("hostings[].pathPrefix", pathPrefix);
 }
 
 export function formatCaddyPathMatcher(pathPrefix: string): string {
@@ -1355,8 +1355,9 @@ function formatRouteHandleBlock(
     return `  handle {\n    ${upstreamLine}\n  }\n`;
   }
   const match = formatCaddyPathMatcher(route.pathPrefix);
-  const strip = route.stripPrefix?.trim();
-  if (strip && strip.length > 0) {
+  const raw = route.stripPrefix?.trim();
+  if (raw && raw.length > 0) {
+    const strip = safeUrlPath("hostings[].proxy.stripPrefix", raw);
     return `  handle ${match} {\n    uri strip_prefix ${strip}\n    ${upstreamLine}\n  }\n`;
   }
   return `  handle ${match} {\n    ${upstreamLine}\n  }\n`;

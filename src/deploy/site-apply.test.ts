@@ -49,6 +49,23 @@ async function makeTestLayout(): Promise<
   };
 }
 
+/**
+ * The filesystem as root sees it. The sudo seam below acts through these, so a
+ * test can deny the daemon's own `Deno.*` calls without denying tp-host's.
+ */
+const rootFs = {
+  copyFile: Deno.copyFile.bind(Deno),
+  lstat: Deno.lstat.bind(Deno),
+  mkdir: Deno.mkdir.bind(Deno),
+  readDir: Deno.readDir.bind(Deno),
+  readFile: Deno.readFile.bind(Deno),
+  readLink: Deno.readLink.bind(Deno),
+  readTextFile: Deno.readTextFile.bind(Deno),
+  remove: Deno.remove.bind(Deno),
+  rename: Deno.rename.bind(Deno),
+  stat: Deno.stat.bind(Deno),
+};
+
 function ok(): SiteRunResult {
   return { success: true, stdout: "", stderr: "" };
 }
@@ -61,13 +78,60 @@ function fail(stderr: string): SiteRunResult {
 async function filesMatch(a: string, b: string): Promise<boolean> {
   try {
     const [left, right] = await Promise.all([
-      Deno.readFile(a),
-      Deno.readFile(b),
+      rootFs.readFile(a),
+      rootFs.readFile(b),
     ]);
     if (left.length !== right.length) return false;
     return left.every((byte, index) => byte === right[index]);
   } catch {
     return false;
+  }
+}
+
+/**
+ * tp-host's read-only verbs. `test` pins the parent directory and refuses a
+ * symlink anywhere in it, so a path *through* `current` answers "absent" here
+ * exactly as it does on a host.
+ */
+async function privilegedReadVerb(
+  args: readonly string[],
+): Promise<SiteRunResult | null> {
+  const path = args.at(-1);
+  if (typeof path !== "string") return null;
+  if (args.includes("cat")) {
+    try {
+      return {
+        success: true,
+        stdout: await rootFs.readTextFile(path),
+        stderr: "",
+      };
+    } catch {
+      return fail(`no such file ${path}`);
+    }
+  }
+  if (args.includes("readlink")) {
+    try {
+      return {
+        success: true,
+        stdout: `${await rootFs.readLink(path)}\n`,
+        stderr: "",
+      };
+    } catch {
+      return fail(`readlink: ${path}`);
+    }
+  }
+  if (!args.includes("test")) return null;
+  if (dirname(path).split("/").includes("current")) {
+    return fail(`refusing ${path}: a component is a symlink`);
+  }
+  try {
+    if (args.includes("-L")) {
+      return (await rootFs.lstat(path)).isSymlink ? ok() : fail("not a link");
+    }
+    await rootFs.stat(path);
+    return ok();
+  } catch {
+    return fail("");
   }
 }
 
@@ -97,12 +161,15 @@ function createSiteRunMock(): {
       return (await filesMatch(left, right)) ? ok() : fail("files differ");
     }
 
+    const privilegedRead = await privilegedReadVerb(args);
+    if (privilegedRead !== null) return privilegedRead;
+
     if (args.includes("install") && args.includes("-d")) {
       const path = args.at(-1);
       if (typeof path !== "string") {
         throw new TypeError("expected install -d path");
       }
-      await Deno.mkdir(path, { recursive: true, mode: 0o750 });
+      await rootFs.mkdir(path, { recursive: true, mode: 0o750 });
       return ok();
     }
 
@@ -112,8 +179,8 @@ function createSiteRunMock(): {
       if (typeof src !== "string" || typeof dest !== "string") {
         throw new TypeError("expected install src dest");
       }
-      await Deno.mkdir(dirname(dest), { recursive: true });
-      await Deno.copyFile(src, dest);
+      await rootFs.mkdir(dirname(dest), { recursive: true });
+      await rootFs.copyFile(src, dest);
       return ok();
     }
 
@@ -127,7 +194,7 @@ function createSiteRunMock(): {
       }
       try {
         const names: string[] = [];
-        for await (const entry of Deno.readDir(path)) names.push(entry.name);
+        for await (const entry of rootFs.readDir(path)) names.push(entry.name);
         return { success: true, stdout: names.join("\n"), stderr: "" };
       } catch {
         return fail("No such file or directory");
@@ -140,7 +207,7 @@ function createSiteRunMock(): {
         throw new TypeError("expected rm path");
       }
       try {
-        await Deno.remove(path, { recursive: true });
+        await rootFs.remove(path, { recursive: true });
       } catch (err) {
         if (!(err instanceof Deno.errors.NotFound)) throw err;
       }
@@ -156,7 +223,7 @@ function createSiteRunMock(): {
         throw new TypeError("expected cp src dest");
       }
       try {
-        await Deno.copyFile(src, dest);
+        await rootFs.copyFile(src, dest);
       } catch {
         return fail(`cp: cannot stat '${src}'`);
       }
@@ -170,7 +237,7 @@ function createSiteRunMock(): {
         throw new TypeError("expected mv src dest");
       }
       try {
-        await Deno.rename(src, dest);
+        await rootFs.rename(src, dest);
       } catch {
         return fail(`mv: cannot move '${src}'`);
       }
@@ -2318,32 +2385,108 @@ test("applySites rethrows a non-NotFound document-root index stat", async () => 
   }
 });
 
-test("applySites rethrows a non-NotFound release document-root stat", async () => {
+/**
+ * Deny the daemon's own `Deno.*` calls under `prefix`, the way a `0750` dir it
+ * cannot enter does on a host. The sudo seam keeps acting through `rootFs`.
+ */
+function denyDaemonFs(prefix: string): () => void {
+  const names = [
+    "copyFile",
+    "lstat",
+    "mkdir",
+    "readDir",
+    "readLink",
+    "readTextFile",
+    "remove",
+    "rename",
+    "stat",
+    "writeTextFile",
+  ] as const;
+  const denied = (path: unknown) => String(path).startsWith(prefix);
+  const saved = names.map((name) => [name, Deno[name]] as const);
+  for (const name of names) {
+    const original = Deno[name] as (...args: unknown[]) => unknown;
+    (Deno as unknown as Record<string, unknown>)[name] = (
+      ...args: unknown[]
+    ) => {
+      if (args.slice(0, 2).some(denied)) {
+        if (name === "readDir") {
+          // deno-lint-ignore require-yield
+          return (async function* () {
+            throw new Deno.errors.PermissionDenied(String(args[0]));
+          })();
+        }
+        return Promise.reject(
+          new Deno.errors.PermissionDenied(String(args[0])),
+        );
+      }
+      return original.apply(Deno, args);
+    };
+  }
+  return () => {
+    for (const [name, original] of saved) {
+      (Deno as unknown as Record<string, unknown>)[name] = original;
+    }
+  };
+}
+
+test("applySites checks a release document root it cannot enter through tp-host", async () => {
   const { layout, cleanup } = await makeTestLayout();
   const mock = createSiteRunMock();
   const run = withGroupMembership(mock.run, { tpnginx: ["tpnginx"] });
   const { runPlaybook } = capturePlaybooks();
-  const originalStat = Deno.stat.bind(Deno);
-  Deno.stat = ((path: string | URL) => {
-    if (String(path).endsWith("/current/public")) {
-      return Promise.reject(new Deno.errors.PermissionDenied("docroot"));
-    }
-    return originalStat(path);
-  }) as typeof Deno.stat;
   try {
     await seedRelease(layout, "rel-1", "public", "<h1>one</h1>");
-    await assertRejects(
-      () =>
-        applySites(layout, "envstat", [nginxSite], {
-          run,
-          runPlaybook,
-          releaseBindings: releaseBindingsFor("www"),
-        }),
-      Deno.errors.PermissionDenied,
-      "docroot",
+    const restore = denyDaemonFs(layout.principalHomeRoot);
+    try {
+      const result = await applySites(layout, "envstat", [nginxSite], {
+        run,
+        runPlaybook,
+        releaseBindings: releaseBindingsFor("www"),
+      });
+      assertEquals(result.applied, ["www"]);
+    } finally {
+      restore();
+    }
+    const tests = mock.calls.filter((c) => c.args.includes("test"));
+    // `current` is resolved with readlink, never traversed by a root check.
+    assertEquals(
+      tests.some((c) => dirname(c.args.at(-1) ?? "").includes("/current")),
+      false,
+    );
+    assert(
+      tests.some((c) =>
+        c.args.at(-1) === join(siteTreeRoot(layout), "releases/rel-1/public")
+      ),
     );
   } finally {
-    Deno.stat = originalStat;
+    await cleanup();
+  }
+});
+
+test("applySites reports a missing release document root it cannot enter", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const mock = createSiteRunMock();
+  const run = withGroupMembership(mock.run, { tpnginx: ["tpnginx"] });
+  const { runPlaybook } = capturePlaybooks();
+  try {
+    await seedRelease(layout, "rel-1", "dist", "<h1>one</h1>");
+    const restore = denyDaemonFs(layout.principalHomeRoot);
+    try {
+      await assertRejects(
+        () =>
+          applySites(layout, "envstat2", [nginxSite], {
+            run,
+            runPlaybook,
+            releaseBindings: releaseBindingsFor("www"),
+          }),
+        Error,
+        "release document root missing for www",
+      );
+    } finally {
+      restore();
+    }
+  } finally {
     await cleanup();
   }
 });
@@ -2367,48 +2510,49 @@ test("removeSites swallows an engine reload failure after a successful site dele
   }
 });
 
-test("removeSites swallows a missing OLS fragment and rethrows a denied one", async () => {
+test("removeSites removes php-fpm pools when the daemon cannot enter the php config dir", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const { run } = createSiteRunMock();
+  const { runPlaybook } = capturePlaybooks();
+  const phpDir = join(layout.configDir, "php");
+  const pool = join(phpDir, "8.4", "pools", "tp-envphpdeny-phpsite.conf");
+  try {
+    await applySites(layout, "envphpdeny", [nginxPhpSite], {
+      run,
+      runPlaybook,
+    });
+    await rootFs.stat(pool);
+    const restore = denyDaemonFs(phpDir);
+    try {
+      await removeSites(layout, "envphpdeny", { run });
+    } finally {
+      restore();
+    }
+    await assertRejects(() => rootFs.stat(pool), Deno.errors.NotFound);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("removeSites warns and keeps the aggregate when an OLS fragment cannot be removed", async () => {
   const { layout, cleanup } = await makeTestLayout();
   const { run } = createSiteRunMock();
   const { runPlaybook } = capturePlaybooks();
   const environmentId = "envolsrm";
+  const olsDir = join(layout.configDir, "openlitespeed");
   try {
     await applySites(layout, environmentId, [olsSite], { run, runPlaybook });
-    const fragment = join(
-      layout.configDir,
-      "openlitespeed",
-      "sites",
-      `tp-${environmentId}-static.conf`,
+    const fragment = join(olsDir, "sites", `tp-${environmentId}-static.conf`);
+    const before = await rootFs.readTextFile(join(olsDir, "httpd_config.conf"));
+    const remove: SiteRunFn = (command, args) =>
+      args.includes("rm") && args.at(-1) === fragment
+        ? Promise.resolve(fail("rm: denied"))
+        : run(command, args);
+    await removeSites(layout, environmentId, { run: remove });
+    assertEquals(
+      await rootFs.readTextFile(join(olsDir, "httpd_config.conf")),
+      before,
     );
-    const originalRemove = Deno.remove.bind(Deno);
-    Deno.remove = ((path: string | URL, options?: Deno.RemoveOptions) => {
-      if (String(path) === fragment) {
-        return Promise.reject(new Deno.errors.NotFound("already gone"));
-      }
-      return originalRemove(path, options);
-    }) as typeof Deno.remove;
-    try {
-      await removeSites(layout, environmentId, { run });
-    } finally {
-      Deno.remove = originalRemove;
-    }
-
-    await applySites(layout, environmentId, [olsSite], { run, runPlaybook });
-    Deno.remove = ((path: string | URL, options?: Deno.RemoveOptions) => {
-      if (String(path) === fragment) {
-        return Promise.reject(new Deno.errors.PermissionDenied("fragment"));
-      }
-      return originalRemove(path, options);
-    }) as typeof Deno.remove;
-    try {
-      await assertRejects(
-        () => removeSites(layout, environmentId, { run }),
-        Deno.errors.PermissionDenied,
-        "fragment",
-      );
-    } finally {
-      Deno.remove = originalRemove;
-    }
   } finally {
     await cleanup();
   }
@@ -2608,28 +2752,30 @@ test("removeSites reloads site Caddy after tearing down a Caddy vhost", async ()
   }
 });
 
-test("applySites rethrows a non-NotFound OpenLiteSpeed sites listing", async () => {
+test("OpenLiteSpeed apply and removal work when the daemon cannot enter its config dir", async () => {
   const { layout, cleanup } = await makeTestLayout();
   const { run } = createSiteRunMock();
   const { runPlaybook } = capturePlaybooks();
-  const originalReadDir = Deno.readDir.bind(Deno);
-  Deno.readDir = ((path: string | URL) => {
-    if (String(path).includes("/openlitespeed/sites")) {
-      // deno-lint-ignore require-yield
-      return (async function* () {
-        throw new Deno.errors.PermissionDenied("ols sites");
-      })();
-    }
-    return originalReadDir(path);
-  }) as typeof Deno.readDir;
+  const olsDir = join(layout.configDir, "openlitespeed");
+  const mainConfig = join(olsDir, "httpd_config.conf");
   try {
-    await assertRejects(
-      () => applySites(layout, "envolsrd", [olsSite], { run, runPlaybook }),
-      Deno.errors.PermissionDenied,
-      "ols sites",
-    );
+    const restore = denyDaemonFs(olsDir);
+    try {
+      await applySites(layout, "envolsa", [olsSite], { run, runPlaybook });
+      await applySites(layout, "envolsb", [olsSite], { run, runPlaybook });
+      // A teardown of an environment with no OLS site must not trip on it.
+      await removeSites(layout, "envnone", { run });
+      await removeSites(layout, "envolsa", { run });
+    } finally {
+      restore();
+    }
+    const aggregate = await rootFs.readTextFile(mainConfig);
+    assertStringIncludes(aggregate, "tp_envolsb_static");
+    assertEquals(aggregate.includes("tp_envolsa_static"), false);
+    assertEquals(await listConfigDirEntries(join(olsDir, "sites")), [
+      "tp-envolsb-static.conf",
+    ]);
   } finally {
-    Deno.readDir = originalReadDir;
     await cleanup();
   }
 });
