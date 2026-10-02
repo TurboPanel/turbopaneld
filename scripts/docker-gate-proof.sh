@@ -54,6 +54,8 @@ DAEMON_ACCOUNT=tp
 DAEMON_ENV=/etc/turbopanel/daemon.env
 IMAGE=docker.io/library/alpine:3.22@sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8
 PROJECT=tpgateproof
+# Alpine's busybox has no httpd applet; the busybox image does.
+ROUTE_IMAGE=docker.io/library/busybox:1.37.0@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e
 ROUTE_HOST=tpgate-proof.invalid
 ROUTE_HOST_AFTER=tpgate-proof-after.invalid
 ROUTE_BODY=gate-proof-ok
@@ -119,7 +121,7 @@ start_route_app() {
     --label "traefik.http.routers.$_app_name.rule=Host(\`$_app_host\`)" \
     --label "traefik.http.routers.$_app_name.entrypoints=web" \
     --label "traefik.http.services.$_app_name.loadbalancer.server.port=8080" \
-    "$IMAGE" sh -c "mkdir -p /www && echo $ROUTE_BODY > /www/index.html && exec httpd -f -p 8080 -h /www" >/dev/null 2>&1
+    "$ROUTE_IMAGE" sh -c "mkdir -p /www && echo $ROUTE_BODY > /www/index.html && exec httpd -f -p 8080 -h /www" >/dev/null 2>&1
   return $?
 }
 
