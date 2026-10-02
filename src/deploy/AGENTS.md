@@ -60,9 +60,12 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    under `layout.principalHomeRoot` (default `/srv/users/<username>`):
    the home root is `0750` root:root plus an `other:x` ACL (traverse
    without list — a `0751` world bit trips `ansible:S2612`, and `0755`
-   would let a tenant `ls` every account). home `0750`, `.ssh` `0700`
-   (reserved for `authorized_keys`), and `volumes`
-   `0750`, all owned `username:<username>-grp`. Host-picked UID/GID come from
+   would let a tenant `ls` every account). The home itself, `sites/` and
+   `volumes/` are `0750` **root**:`<username>-grp` (an owner can rename its
+   entries, so nothing root writes into may sit in a tenant-owned directory);
+   `home/` (the passwd home, `useradd -d <root>/<username>/home`), `data/` and
+   `tmp/` are `0700` `username:<username>-grp`. SSH keys live in
+   `/etc/ssh/turbopanel/authorized_keys`, never the home. Host-picked UID/GID come from
    **15001–60000** (`-K` on that `useradd` / `groupadd` only; `/etc/login.defs`
    is not edited). An explicit operator override must be ≥ **15001**, and every
    override in the batch is checked before the first host call so a later id

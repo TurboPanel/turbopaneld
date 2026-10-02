@@ -483,6 +483,8 @@ tp_home_tenant_dir() {
 # the tenant directories the principal's, and either carries only the
 # principal's own group. An empty owner or group is left as it is.
 tp_home_owner_ok() {
+  # The home root itself belongs to no principal: the generic rules apply.
+  [ "$1" != "$R_PRINCIPALS" ] || return 0
   _hw_p="$(tp_home_owner_of "$1")" || return 1
   if tp_home_structural "$1"; then
     [ -z "$2" ] || [ "$2" = "root" ] || return 1

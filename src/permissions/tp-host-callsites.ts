@@ -163,6 +163,20 @@ const file = (path: string, contents = "x\n"): CallSiteSetup => ({
 });
 const dir = (...paths: string[]): CallSiteSetup => ({ dirs: paths });
 
+/** `install -d -m MODE -o USER -g GROUP PATH`, under an existing `parent`. */
+function installDir(
+  mode: string,
+  owner: string,
+  path: string,
+  parent?: string,
+): TpHostSample {
+  const [user, group] = owner.split(":");
+  return {
+    argv: ["install", "-d", "-m", mode, "-o", user, "-g", group, path],
+    ...(parent === undefined ? {} : { setup: dir(parent) }),
+  };
+}
+
 const SITES: CallSite[] = [
   // --- commands -------------------------------------------------------------
   tpHost(
@@ -279,19 +293,19 @@ const SITES: CallSite[] = [
   }),
   tpHost(
     'src/deploy/ensure-principal.ts|["-n","install","-d","-m",mode,"-o",user,"-g",group,path]',
-    {
-      argv: [
-        "install",
-        "-d",
-        "-m",
-        "0750",
-        "-o",
-        "alice",
-        "-g",
-        "alice-grp",
-        `${HOME}/sites`,
-      ],
-    },
+    // The home root, then the principal home skeleton, parent before child.
+    installDir("0750", "root:root", `${P}/srv/users`),
+    installDir("0750", "root:alice-grp", HOME, `${P}/srv/users`),
+    installDir("0700", "alice:alice-grp", `${HOME}/home`, HOME),
+    installDir("0700", "alice:alice-grp", `${HOME}/data`, HOME),
+    installDir("0700", "alice:alice-grp", `${HOME}/tmp`, HOME),
+    installDir("0750", "root:alice-grp", `${HOME}/sites`, HOME),
+    installDir("0750", "root:alice-grp", `${HOME}/volumes`, HOME),
+    // Managed lane (site.ts) and release lane (release-layout.ts).
+    installDir("0750", "root:alice-grp", SITE, `${HOME}/sites`),
+    installDir("0750", "alice:tpnginx", `${SITE}/webroot`, SITE),
+    installDir("0750", "alice:alice-grp", `${SITE}/shared`, SITE),
+    installDir("0750", "root:alice-grp", `${SITE}/releases`, SITE),
   ),
   tpHost(
     "src/deploy/ensure-principal.ts|args",
@@ -316,7 +330,7 @@ const SITES: CallSite[] = [
         "-g",
         "bob-grp",
         "-d",
-        `${P}/srv/users/bob`,
+        `${P}/srv/users/bob/home`,
         "-M",
         "-s",
         "/bin/bash",
@@ -356,10 +370,6 @@ const SITES: CallSite[] = [
       argv: ["gpasswd", "-d", "alice", "tpsftp"],
     },
   ),
-  tpHost('src/deploy/ensure-principal.ts|["-n","chown",owner,path]', {
-    argv: ["chown", "alice:alice-grp", `${HOME}/sites`],
-    setup: dir(`${HOME}/sites`),
-  }),
 
   // --- hosting ingress ------------------------------------------------------
   tpHost(
@@ -1536,21 +1546,7 @@ export type KnownBug =
   | { why: string; refusal: string }
   | { why: string; pending: string };
 
-const HOME_LAYOUT_WHY =
-  "tp-host enforces the root-owned principal home (Principal Home Redesign WP-A); ensure-principal.ts still builds the old tenant-owned home until WP-B";
-
-const KNOWN_BUGS: Record<string, KnownBug> = {
-  'src/deploy/ensure-principal.ts|["-n","install","-d","-m",mode,"-o",user,"-g",group,path]':
-    { why: HOME_LAYOUT_WHY, refusal: "refusing owner alice:alice-grp" },
-  "src/deploy/ensure-principal.ts|args": {
-    why: HOME_LAYOUT_WHY,
-    refusal: "useradd: home must be",
-  },
-  'src/deploy/ensure-principal.ts|["-n","chown",owner,path]': {
-    why: HOME_LAYOUT_WHY,
-    refusal: "refusing owner alice:alice-grp",
-  },
-};
+const KNOWN_BUGS: Record<string, KnownBug> = {};
 
 export const CALL_SITES: readonly CallSite[] = SITES.map((site) =>
   KNOWN_BUGS[site.key] === undefined
