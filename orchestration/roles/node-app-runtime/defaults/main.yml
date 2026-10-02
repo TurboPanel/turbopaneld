@@ -22,6 +22,9 @@ node_app_root: "{{ turbopanel_vendor_dir }}/node-app"
 # appends this account to each series group so `sudo -n -u <self>` can exec the
 # 0750 tree without a daemon re-login (`sg` execs /usr/sbin/nologin).
 turbopanel_user: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tp' }}"
+# Sandboxed builds (tp-host build-run) run as this account; the build-user role
+# creates it, and this role appends it to each series it vendors.
+node_app_build_user: tpbuild
 
 # Entitlement groups come from the shared registry
 # (`orchestration/runtime-registry.json`) via the `runtime-entitlement` role,

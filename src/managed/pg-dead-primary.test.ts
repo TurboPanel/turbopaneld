@@ -217,15 +217,15 @@ test("a crash loop (dead / starting / dead) still accumulates", () => {
   assert(runUntilFire(detector, loop, 200) > 0);
 });
 
-test("one event per incident, back-off before the next, reset on healthy", () => {
+test("no re-send before the first back-off; a new incident waits for the back-off; healthy resets", () => {
   const detector = new DeadPrimaryDetector();
   const first = runUntilFire(detector, () => EXITED, 100);
   assert(first >= 0);
   const firstAt = T0 + first * CONFIG.intervalMs;
   detector.markEmitted(firstAt);
-  // Same incident: never again.
+  // Same incident: nothing before the first re-send is due (5 min).
   assertEquals(
-    runUntilFire(detector, () => EXITED, 500, { start: firstAt + 5_000 }),
+    runUntilFire(detector, () => EXITED, 50, { start: firstAt + 5_000 }),
     -1,
   );
   // Healthy closes the incident; a new one inside the back-off waits.
@@ -462,4 +462,38 @@ test("readControlData: a failed or hung read is 'unreadable', never 'in producti
     ),
     "unreadable",
   );
+});
+
+test("a still-dead primary is re-sent with exponential back-off, bounded per incident", () => {
+  const detector = new DeadPrimaryDetector();
+  const fired: number[] = [];
+  // 4 hours of a dead primary, every event delivered.
+  for (let i = 0; i < (4 * 3_600_000) / CONFIG.intervalMs; i++) {
+    const nowMs = T0 + i * CONFIG.intervalMs;
+    const verdict = detector.step(EXITED, { nowMs, intentActive: false });
+    if (!verdict.fire) continue;
+    assertEquals(verdict.evidence.attempt, fired.length + 1);
+    fired.push(nowMs - T0);
+    detector.markEmitted(nowMs);
+  }
+  const first = (CONFIG.failureThreshold - 1) * CONFIG.intervalMs;
+  const minutes = (ms: number) => ms / 60_000;
+  // 25 s, then +5, +10, +20, +40 min; then nothing (5 events max).
+  assertEquals(fired.map((ms) => minutes(ms - first)), [0, 5, 15, 35, 75]);
+  assertEquals(fired.length, CONFIG.maxEventsPerIncident);
+});
+
+test("a re-send lands after a 15 min control-plane cooldown that refused the first event", () => {
+  const detector = new DeadPrimaryDetector();
+  const sent: number[] = [];
+  for (let i = 0; i < (30 * 60_000) / CONFIG.intervalMs; i++) {
+    const nowMs = T0 + i * CONFIG.intervalMs;
+    const verdict = detector.step(EXITED, { nowMs, intentActive: false });
+    if (!verdict.fire) continue;
+    sent.push(nowMs);
+    detector.markEmitted(nowMs);
+  }
+  // Worst case: the cooldown started just before the first event, so it
+  // ends 15 min later; some re-send must come after that.
+  assert(sent.some((ms) => ms - sent[0]! >= 15 * 60_000));
 });

@@ -4,6 +4,7 @@ import { logWarn } from "../util/logger.ts";
 import { forEachSequential } from "../util/sequential.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 import {
+  accessGroup,
   allAccessGroups,
   allManagedGroups,
   isRuntimeName,
@@ -753,7 +754,22 @@ function resolveManagedGroups(principal: PrincipalEnsureSpec): Set<string> {
   for (const group of principal.accessGroups ?? []) {
     if (known.has(group)) groups.add(group);
   }
+  // Every principal, whatever the wire says about its level. This group is
+  // what the drop-in's backstop `Match` selects on; an account outside it with
+  // no level group falls through to the host's global sshd defaults — its own
+  // `~/.ssh/authorized_keys`, and TCP forwarding into the host.
+  const everyPrincipal = accessGroup("principal");
+  if (everyPrincipal) groups.add(everyPrincipal);
   return groups;
+}
+
+/**
+ * Whether a failure to join `group` must fail the reconcile rather than be
+ * logged. Only the every-principal group: missing it silently re-opens the
+ * in-home-key and port-forwarding path the backstop block exists to close.
+ */
+function isRequiredManagedGroup(group: string): boolean {
+  return group === accessGroup("principal");
 }
 
 /**
@@ -839,7 +855,9 @@ async function removeSupplementaryGroupMembership(
  *
  * Adds are best-effort and logged (a host provisioned some other way may
  * legitimately not have the group yet, and the unit's own health probe is what
- * catches a genuinely unreachable runtime). A failed **revoke** is loud: an
+ * catches a genuinely unreachable runtime) — except the every-principal group
+ * (`accessGroup("principal")`), whose add is loud like a revoke: without it the
+ * sshd backstop block does not apply. A failed **revoke** is loud: an
  * entitlement or a login that silently outlives its grant is a security
  * problem, not an inconvenience.
  */
@@ -863,6 +881,7 @@ export async function ensurePrincipalManagedGroups(
     try {
       await ensureSupplementaryGroupMembership(username, group, runFn);
     } catch (err) {
+      if (isRequiredManagedGroup(group)) throw err;
       logWarn(
         "deploy",
         `could not add ${username} to ${group}: ${

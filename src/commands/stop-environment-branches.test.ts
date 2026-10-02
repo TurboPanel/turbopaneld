@@ -204,7 +204,7 @@ test({
 
 test({
   name:
-    "handleEnvironmentStop rethrows non-NotFound errors when removing the deployment dir",
+    "handleEnvironmentStop surfaces a failed privileged removal of the deployment dir",
   permissions: { env: true, read: true, write: true, run: true },
   fn: async () => {
     const root = await Deno.makeTempDir({ prefix: "tp-stop-rm-denied-" });
@@ -223,6 +223,7 @@ test({
       "services:\n  web: {}\n",
     );
     await Deno.chmod(projectDir, 0o500);
+    const privileged: string[][] = [];
 
     try {
       await assertRejects(
@@ -238,12 +239,67 @@ test({
                   stderr: "",
                   code: 0,
                 }),
+              // PermissionDenied takes the tp-host path; its failure rethrows.
+              runPrivileged: (command, args) => {
+                privileged.push([command, ...args.slice(-4)]);
+                return Promise.resolve({
+                  success: false,
+                  stdout: "",
+                  stderr: "refused",
+                });
+              },
             },
           ),
-        Deno.errors.PermissionDenied,
+        Error,
+        "deployment dir removal failed: refused",
       );
+      assertEquals(privileged, [["sudo", "rm", "-rf", "--", deploymentDir]]);
     } finally {
       await Deno.chmod(projectDir, 0o750).catch(() => undefined);
+      restoreEnv(previous);
+      await Deno.remove(root, { recursive: true });
+    }
+  },
+});
+
+test({
+  name:
+    "handleEnvironmentStop rethrows non-NotFound, non-PermissionDenied errors without going privileged",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: async () => {
+    const root = await Deno.makeTempDir({ prefix: "tp-stop-rm-other-" });
+    const previous = snapshotEnv();
+    const stateDir = join(root, "state");
+    Deno.env.set("TURBOPANEL_STATE_DIR", stateDir);
+    Deno.env.set("TURBOPANEL_CONFIG_DIR", join(root, "config"));
+    // `deployments/proj-1` is a file, so removing beneath it fails with ENOTDIR.
+    await Deno.mkdir(join(stateDir, "deployments"), { recursive: true });
+    await Deno.writeTextFile(join(stateDir, "deployments", "proj-1"), "x");
+    let privilegedCalls = 0;
+    try {
+      await assertRejects(
+        () =>
+          handleEnvironmentStop(
+            {
+              environmentId: "envstop05",
+              projectId: "proj-1",
+              projectName: "tp-demo-envstop5",
+            },
+            new Date().toISOString(),
+            {
+              runPrivileged: () => {
+                privilegedCalls++;
+                return Promise.resolve({
+                  success: true,
+                  stdout: "",
+                  stderr: "",
+                });
+              },
+            },
+          ),
+      );
+      assertEquals(privilegedCalls, 0);
+    } finally {
       restoreEnv(previous);
       await Deno.remove(root, { recursive: true });
     }
