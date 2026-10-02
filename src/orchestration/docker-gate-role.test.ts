@@ -93,6 +93,7 @@ type UnitVars = {
   docker_gate_socket: string;
   docker_gate_ro_run_dir: string;
   docker_gate_ro_socket: string;
+  docker_gate_ingress_switch_file: string;
   docker_gate_upstream_socket: string;
   docker_gate_cache_dir: string;
   docker_gate_group: string;
@@ -110,6 +111,8 @@ const DEFAULT_VARS: UnitVars = {
   docker_gate_socket: "/run/turbopanel-gate/docker.sock",
   docker_gate_ro_run_dir: "/run/turbopanel-gate/ro",
   docker_gate_ro_socket: "/run/turbopanel-gate/ro/docker.sock",
+  docker_gate_ingress_switch_file:
+    "/opt/turbopanel/lib/docker-gate/ingress-socket.on",
   docker_gate_upstream_socket: "/var/run/docker.sock",
   docker_gate_cache_dir: "/var/cache/turbopanel-docker-gate",
   docker_gate_group: "tp",
@@ -597,4 +600,59 @@ test("nothing routes through the gate yet: no DOCKER_HOST or socket override is 
     );
     assertFalse(/DOCKER_HOST|TURBOPANEL_DOCKER_SOCKET/.test(body), unit);
   }
+});
+
+// Review fix F3: the gate knows the switch, a switch change restarts it, and
+// a converge with the switch on fails unless the read-only socket answers.
+
+jinjaTest(
+  "F3: the unit tells the gate where Traefik's switch file is",
+  async () => {
+    const service = directives(await renderUnit(), "Service");
+    assert(
+      service.includes(
+        "Environment=TP_DOCKER_GATE_INGRESS_SWITCH=/opt/turbopanel/lib/docker-gate/ingress-socket.on",
+      ),
+    );
+  },
+);
+
+test("F3: flipping the switch restarts the gate, and a converge with it on proves the read-only socket answers", async () => {
+  const install = await read("tasks/install.yml");
+  const task = (name: string) => {
+    const start = install.indexOf(`- name: ${name}`);
+    assert(start >= 0, name);
+    const next = install.indexOf("\n- name:", start + 1);
+    return install.slice(start, next < 0 ? undefined : next);
+  };
+  for (
+    const name of [
+      "Turn on Traefik's read-only gate socket",
+      "Turn off Traefik's read-only gate socket",
+    ]
+  ) {
+    assertStringIncludes(task(name), "notify: Restart Docker gate");
+  }
+  // The value check runs outside the rescued block: a typo fails loudly.
+  const main = await read("tasks/main.yml");
+  const guardAt = main.indexOf(
+    "- name: Refuse a switch value that is not a clear yes or no",
+  );
+  assert(guardAt >= 0 && guardAt < main.indexOf("block:"), "guard first");
+  assertStringIncludes(main.slice(guardAt), "docker_gate_ingress_socket");
+  // A failure while the switch is on is not rescued into a warning.
+  const rescue = main.slice(main.indexOf("rescue:"));
+  assertStringIncludes(rescue, "{{ docker_gate_ingress_switch_file }}");
+  assertStringIncludes(rescue, "ansible.builtin.fail");
+  const probe = task(
+    "Prove the read-only socket answers while Traefik's switch is on",
+  );
+  assertStringIncludes(probe, 'unix_socket: "{{ docker_gate_ro_socket }}"');
+  assertStringIncludes(probe, "/_ping");
+  assertStringIncludes(probe, "retries:");
+  assert(
+    install.indexOf("Prove the read-only socket answers") >
+      install.indexOf("Enable and start the Docker gate"),
+    "probed after the gate is started",
+  );
 });

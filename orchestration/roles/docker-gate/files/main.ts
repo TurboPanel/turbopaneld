@@ -41,6 +41,12 @@ export type GateConfig = {
   socket: string;
   /** The read-only listener for Traefik; unset = no such listener. */
   roSocket?: string;
+  /**
+   * Traefik's switch file (the role writes it when Traefik uses the
+   * read-only listener). While it exists, a read-only listener that cannot
+   * open fails the start instead of being logged and skipped.
+   */
+  ingressSwitchFile?: string;
   upstream: string;
   /** Numeric group that may open the gate socket; unset leaves it as created. */
   socketGid?: number;
@@ -101,6 +107,7 @@ export function loadConfig(env: Env): GateConfig {
   return {
     socket: env.TP_DOCKER_GATE_SOCKET || DEFAULT_GATE_SOCKET,
     roSocket: pathList(env.TP_DOCKER_GATE_RO_SOCKET)[0],
+    ingressSwitchFile: pathList(env.TP_DOCKER_GATE_INGRESS_SWITCH)[0],
     upstream: env.TP_DOCKER_GATE_UPSTREAM || DEFAULT_UPSTREAM_SOCKET,
     socketGid: Number.isInteger(gid) && gid > 0 ? gid : undefined,
     approvalKeyFile: pathList(env.TP_DOCKER_GATE_APPROVAL_PUBKEY)[0],
@@ -159,13 +166,27 @@ async function openListener(
   return listener;
 }
 
+/** True when Traefik's switch file exists (Traefik is on the read-only socket). */
+async function ingressSwitchOn(file: string | undefined): Promise<boolean> {
+  if (file === undefined) return false;
+  try {
+    return (await Deno.stat(file)).isFile;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * The read-only listener, root-only (`root:root 0660`: only root and a
- * container's root reach it). A failure to open it is logged and the gate
- * keeps serving the main socket: nothing routes through either yet.
+ * container's root reach it). A failure to open it is always an error line.
+ * With Traefik's switch on it is fatal: Traefik is rendered against this
+ * socket, so a gate without it would let every hosted route vanish at the
+ * next Traefik restart. Throwing fails the start; `Restart=always` retries.
+ * With the switch off nothing uses it, and the main socket keeps serving.
  */
 async function openReadOnlyListener(
   path: string | undefined,
+  required: boolean,
   log: (record: LogRecord) => void,
 ): Promise<Deno.Listener | undefined> {
   if (path === undefined) return undefined;
@@ -176,9 +197,15 @@ async function openReadOnlyListener(
       level: "error",
       event: "docker-gate.ro-socket-unavailable",
       socket: path,
+      fatal: required,
       error: describeError(err),
     });
-    return undefined;
+    if (!required) return undefined;
+    throw new Error(
+      `the read-only socket ${path} could not open while Traefik's switch is on: ${
+        describeError(err)
+      }`,
+    );
   }
 }
 
@@ -250,8 +277,19 @@ export async function startGate(
     nowSec: config.nowSec,
   };
   const listener = await openListener(config.socket, config.socketGid);
+  let roListener: Deno.Listener | undefined;
+  try {
+    roListener = await openReadOnlyListener(
+      config.roSocket,
+      await ingressSwitchOn(config.ingressSwitchFile),
+      log,
+    );
+  } catch (err) {
+    listener.close();
+    await removeStaleSocket(config.socket);
+    throw err;
+  }
   const serving = serve(listener, deps);
-  const roListener = await openReadOnlyListener(config.roSocket, log);
   const roServing = roListener
     ? serve(roListener, { ...deps, readOnly: true })
     : Promise.resolve();
@@ -299,6 +337,7 @@ export const GATE_ENV_KEYS = [
   "TP_DOCKER_GATE_MODE",
   "TP_DOCKER_GATE_SOCKET",
   "TP_DOCKER_GATE_RO_SOCKET",
+  "TP_DOCKER_GATE_INGRESS_SWITCH",
   "TP_DOCKER_GATE_UPSTREAM",
   "TP_DOCKER_GATE_SOCKET_GID",
   "TP_DOCKER_GATE_BIND_ROOTS",

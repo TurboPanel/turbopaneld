@@ -27,6 +27,17 @@
 # info, images and a create with a 403; the daemon account cannot open it; and when the
 # switch file is on, the shared Traefik mounts it and no socket-proxy remains.
 #
+# Stage 3 review (F4) adds, every run: Traefik's endpoints (ping, version,
+# container list and inspect, events) answer 200 on the read-only socket and
+# unrelated ones (info, images, networks, volumes, a container's export, logs
+# and archive) get a 403; every read-only refusal in the journal is one this
+# script sent itself (anything else is an endpoint Traefik needed and was
+# refused). With the switch on and a shared Traefik on the gate, it also
+# starts a labelled test app and proves: it is routed; Traefik logged no
+# Docker provider error; a container on the ingress network cannot reach the
+# old docker-socket-proxy; after the gate's own restart the route still
+# answers and a NEW app is routed (Traefik reconnected to the new socket).
+#
 # The containers are `true` / `echo` on a pinned Alpine image and are removed.
 # A BuildKit upgrade (Compose `build:`) is exercised when the buildx plugin is
 # installed; the summary then shows `grpc` and `session` upgrades.
@@ -43,6 +54,12 @@ DAEMON_ACCOUNT=tp
 DAEMON_ENV=/etc/turbopanel/daemon.env
 IMAGE=docker.io/library/alpine:3.22@sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8
 PROJECT=tpgateproof
+# Alpine's busybox has no httpd applet; the busybox image does.
+ROUTE_IMAGE=docker.io/library/busybox:1.37.0@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e
+ROUTE_HOST=tpgate-proof.invalid
+ROUTE_HOST_AFTER=tpgate-proof-after.invalid
+ROUTE_BODY=gate-proof-ok
+TRAEFIK_WEB=http://127.0.0.1:7080/
 WORK=$(mktemp -d /tmp/tpgate-proof.XXXXXX)
 FAILED=0
 SINCE=$(date '+%Y-%m-%d %H:%M:%S')
@@ -83,8 +100,48 @@ ro_docker() {
   return $?
 }
 
+# curl over the read-only socket; prints only the HTTP status. The request
+# never leaves the host (a Unix socket), so no scheme is written: curl reads a
+# scheme-less URL as plain HTTP, which is what the Docker API speaks.
+ro_status() {
+  _ro_method=$1
+  _ro_path=$2
+  curl -s -o /dev/null -w '%{http_code}' --max-time 5 -X "$_ro_method" --unix-socket "$RO_SOCKET" "localhost$_ro_path"
+  return 0
+}
+
+# A labelled test app on the ingress network, routed by the shared Traefik.
+start_route_app() {
+  _app_name=$1
+  _app_host=$2
+  _app_net=$3
+  docker run -d --name "$_app_name" --network "$_app_net" \
+    --label traefik.enable=true \
+    --label "traefik.docker.network=$_app_net" \
+    --label "traefik.http.routers.$_app_name.rule=Host(\`$_app_host\`)" \
+    --label "traefik.http.routers.$_app_name.entrypoints=web" \
+    --label "traefik.http.services.$_app_name.loadbalancer.server.port=8080" \
+    "$ROUTE_IMAGE" sh -c "mkdir -p /www && echo $ROUTE_BODY > /www/index.html && exec httpd -f -p 8080 -h /www" >/dev/null 2>&1
+  return $?
+}
+
+# True once Traefik answers the test app's body for this Host (30 s budget).
+# The hosting Caddy speaks PROXY protocol to Traefik; plain requests are tried
+# too, so a PROXY-protocol mismatch is never mistaken for a gate failure.
+route_answers() {
+  _route_host=$1
+  for _route_try in $(seq 1 30); do
+    if curl -s --max-time 2 -H "Host: $_route_host" "$TRAEFIK_WEB" 2>/dev/null | grep -qx "$ROUTE_BODY"; then return 0; fi
+    if curl -s --max-time 2 --haproxy-protocol -H "Host: $_route_host" "$TRAEFIK_WEB" 2>/dev/null | grep -qx "$ROUTE_BODY"; then return 0; fi
+    sleep 1
+  done
+  echo "  (no answer for $_route_host after $_route_try tries)" >&2
+  return 1
+}
+
 cleanup() {
   gate_docker compose -p "$PROJECT" down -v >/dev/null 2>&1 || true
+  docker rm -f tpgate-proof-route tpgate-proof-route-after >/dev/null 2>&1 || true
   rm -rf "$WORK"
   return 0
 }
@@ -187,13 +244,83 @@ for _refused in info images "run --rm $IMAGE true"; do
   read -r -a _ro_argv <<<"$_refused"
   if ro_docker "${_ro_argv[@]}" >/dev/null 2>&1; then fail "read-only socket allowed docker $_refused"; else pass "read-only socket refuses docker $_refused"; fi
 done
+# What Traefik's Docker provider calls: each must be a 200 through the gate.
+_now=$(date +%s)
+for _need in /_ping /version /containers/json "/containers/json?all=1" "/events?since=$((_now - 60))&until=$_now"; do
+  _code=$(ro_status GET "$_need")
+  if [[ "$_code" == 200 ]]; then pass "Traefik endpoint GET $_need answers 200"; else fail "Traefik endpoint GET $_need answered '$_code', want 200"; fi
+done
+if [[ -n "$_ro_any" ]]; then
+  _code=$(ro_status GET "/containers/$_ro_any/json")
+  if [[ "$_code" == 200 ]]; then pass "Traefik endpoint GET /containers/{id}/json answers 200"; else fail "GET /containers/{id}/json answered '$_code', want 200"; fi
+  # Unrelated reads a compromised Traefik must not get (Tecnativa allowed them).
+  for _deny in export "logs?stdout=1" "archive?path=/etc"; do
+    _code=$(ro_status GET "/containers/$_ro_any/$_deny")
+    if [[ "$_code" == 403 ]]; then pass "read-only socket refuses GET /containers/{id}/$_deny (403)"; else fail "GET /containers/{id}/$_deny answered '$_code', want 403"; fi
+  done
+fi
+for _deny in /networks /volumes /info; do
+  _code=$(ro_status GET "$_deny")
+  if [[ "$_code" == 403 ]]; then pass "read-only socket refuses GET $_deny (403)"; else fail "GET $_deny answered '$_code', want 403"; fi
+done
+_code=$(ro_status POST /containers/create)
+if [[ "$_code" == 403 ]]; then pass "read-only socket refuses POST /containers/create (403)"; else fail "POST /containers/create answered '$_code', want 403"; fi
+_code=$(ro_status POST /containers/0000000000000000/exec)
+if [[ "$_code" == 403 ]]; then pass "read-only socket refuses POST /containers/{id}/exec (403)"; else fail "POST /containers/{id}/exec answered '$_code', want 403"; fi
+_code=$(ro_status POST /build)
+if [[ "$_code" == 403 ]]; then pass "read-only socket refuses POST /build (403)"; else fail "POST /build answered '$_code', want 403"; fi
+_code=$(ro_status POST "/images/create?fromImage=alpine")
+if [[ "$_code" == 403 ]]; then pass "read-only socket refuses POST /images/create (403)"; else fail "POST /images/create answered '$_code', want 403"; fi
+_code=$(ro_status POST "/containers%2Fcreate")
+if [[ "$_code" =~ ^(400|403|404)$ ]]; then pass "read-only socket refuses a %2F-encoded POST /containers%2Fcreate ($_code)"; else fail "POST /containers%2Fcreate answered '$_code', want 400/403/404"; fi
 if journalctl -u "$GATE_UNIT" --since "$SINCE" --no-pager -o cat | grep -q '"event":"docker-gate.ro-refused"'; then pass "journal has docker-gate.ro-refused"; else fail "journal has no docker-gate.ro-refused"; fi
 if sudo -n -u "$DAEMON_ACCOUNT" docker -H "unix://$RO_SOCKET" version >/dev/null 2>&1; then fail "the daemon account can open the read-only socket"; else pass "the daemon account cannot open the read-only socket"; fi
+SHARED_TRAEFIK=""
+SHARED_NET=""
+PROXY_RUNNING=false
+if docker ps --format '{{.Image}}' | grep -q 'docker-socket-proxy'; then PROXY_RUNNING=true; fi
 if [[ -f "$INGRESS_SWITCH" ]]; then
   if docker ps -q | xargs -r docker inspect --format '{{range .Mounts}}{{.Source}} {{end}}' | grep -q "$RO_DIR"; then pass "a Traefik mounts $RO_DIR (switch on)"; else fail "switch on but no container mounts $RO_DIR (deploy once to re-render ingress)"; fi
-  if docker ps --format '{{.Image}}' | grep -q 'docker-socket-proxy'; then echo "NOTE  the socket-proxy is still running: a TCP/UDP service Traefik rendered before the switch still uses it (redeploy that service)"; else pass "no socket-proxy container is running"; fi
+  if [[ "$PROXY_RUNNING" == true ]]; then echo "NOTE  the socket-proxy is still running: a TCP/UDP service Traefik rendered before the switch still uses it (redeploy that service)"; else pass "no socket-proxy container is running"; fi
+  SHARED_TRAEFIK=$(docker ps -q --filter label=com.turbopanel.system.component=hosting-ingress | sed -n 1p)
+  if [[ -n "$SHARED_TRAEFIK" ]] && docker inspect --format '{{range .Mounts}}{{.Source}} {{end}}' "$SHARED_TRAEFIK" | grep -q "$RO_DIR"; then
+    SHARED_NET=$(docker inspect --format '{{range $net, $cfg := .NetworkSettings.Networks}}{{$net}} {{end}}' "$SHARED_TRAEFIK" | awk '{print $1}')
+  else
+    SHARED_TRAEFIK=""
+    echo "NOTE  no shared Traefik on the gate yet: route checks skipped (deploy an HTTP app once with the switch on)"
+  fi
 else
   echo "NOTE  $INGRESS_SWITCH is absent: Traefik still uses the socket-proxy (the default)"
+fi
+
+if [[ -n "$SHARED_TRAEFIK" ]]; then
+  echo "== 6. stage 3: routes through Traefik on the gate"
+  ROUTE_SINCE=$(date +%s)
+  if start_route_app tpgate-proof-route "$ROUTE_HOST" "$SHARED_NET" && route_answers "$ROUTE_HOST"; then pass "a labelled app is routed by the shared Traefik on the gate"; else fail "the labelled app is not routed by the shared Traefik"; fi
+  if _tlog=$(docker logs --since "$ROUTE_SINCE" "$SHARED_TRAEFIK" 2>&1); then
+    # Only the provider's own connection failures: a tenant label naming a
+    # missing entrypoint is a config error, not a gate one.
+    _perr='Provider (connection )?error|Failed to retrieve information of the docker client|Error response from daemon|cannot connect to the Docker daemon'
+    if printf '%s\n' "$_tlog" | grep -qiE "$_perr"; then
+      fail "Traefik logged a Docker provider error (see below)"
+      printf '%s\n' "$_tlog" | grep -iE "$_perr" | head -5
+    else
+      pass "Traefik logged no Docker provider error"
+    fi
+  else
+    fail "could not read the shared Traefik's log"
+  fi
+  # Reachability of the proxy name is meaningful whether or not a proxy runs:
+  # with none running, nothing may answer; with one running (an older service
+  # Traefik still uses it) the result is informational only.
+  _reach=$(docker run --rm --network "$SHARED_NET" "$IMAGE" sh -c 'if wget -q -T 3 -O /dev/null http://docker-socket-proxy:2375/_ping; then echo reachable; else echo unreachable; fi' 2>/dev/null)
+  if [[ "$PROXY_RUNNING" == true ]]; then
+    echo "NOTE  a socket-proxy is running: reachability from the ingress network is informational ('$_reach')"
+  elif [[ "$_reach" == unreachable ]]; then
+    pass "a container on the ingress network cannot reach docker-socket-proxy:2375 (no proxy is running)"
+  else
+    fail "docker-socket-proxy:2375 from the ingress network: '$_reach', want unreachable"
+  fi
 fi
 
 echo "== gate summary (final counters are written when the unit stops or every summary interval)"
@@ -214,6 +341,20 @@ else
   echo "NOTE  buildx is not installed: grpc/session upgrades not exercised"
 fi
 if [[ "$_came_back" == true ]]; then pass "unit restarted itself after the stop (Restart=always)"; else fail "unit did not come back within 10 s"; fi
+if [[ -n "$SHARED_TRAEFIK" ]]; then
+  if route_answers "$ROUTE_HOST"; then pass "the route still answers after the gate restart"; else fail "the route stopped answering after the gate restart"; fi
+  if start_route_app tpgate-proof-route-after "$ROUTE_HOST_AFTER" "$SHARED_NET" && route_answers "$ROUTE_HOST_AFTER"; then pass "an app started after the gate restart is routed (Traefik reconnected)"; else fail "an app started after the gate restart is not routed (Traefik did not reconnect)"; fi
+fi
+
+# Every read-only refusal in the run (including across the restart) must be
+# one this script sent: any other path is an endpoint Traefik needed and the
+# gate refused.
+_unexpected=$(journalctl -u "$GATE_UNIT" --since "$SINCE" --no-pager -o cat 2>/dev/null |
+  grep '"event":"docker-gate.ro-refused"' |
+  sed -n 's/.*"path":"\([^"]*\)".*/\1/p' |
+  sed -E 's#^/v[0-9.]+/#/#; s#^/containers/[^/]+/(export|logs|archive|exec)$#/containers/ID/\1#' |
+  grep -vxE '/info|/images/json|/containers/create|/build|/images/create|/containers%2Fcreate|/networks|/volumes|/containers/ID/(export|logs|archive|exec)' | sort -u)
+if [[ -z "$_unexpected" ]]; then pass "every read-only refusal is one the proof sent (Traefik was refused nothing)"; else fail "the read-only socket refused paths the proof did not send: $(printf '%s' "$_unexpected" | tr '\n' ' ')"; fi
 
 if [[ "$FAILED" -ne 0 ]]; then
   echo "RESULT: $FAILED check(s) failed"

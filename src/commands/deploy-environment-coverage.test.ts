@@ -1189,12 +1189,13 @@ test({
       ) as { serviceId: string };
       assertEquals(descriptor.serviceId, ingressServiceId);
       // The shared proxy is brought up by `-f <path>` alone — its compose file
-      // declares `name: <serviceId>` so no `-p` is passed.
+      // declares `name: <serviceId>` so no `-p` is passed. `up` runs on the
+      // pending file, which becomes docker-compose.yml only once it succeeds.
       assertEquals(
         calls.some((argv) =>
           argv.includes("up") &&
           argv.some((arg) =>
-            arg.endsWith("/ingress/traefik/docker-compose.yml")
+            arg.endsWith("/ingress/traefik/docker-compose.pending.yml")
           )
         ),
         true,

@@ -555,6 +555,18 @@ deletes the container) once no per-service compose file on disk still names
 anonymous shared Traefik (no descriptor, so no ingress label) keeps the proxy.
 Without the switch nothing changes. See `orchestration/roles/docker-gate/AGENTS.md`.
 
+Both Traefik compose files are applied, not just written: the document goes to
+`docker-compose.pending.yml`, `compose up` runs on it, and only a successful
+`up` renames it over `docker-compose.yml`. So the applied file is what last
+came up, and the proxy check reads reality, not intent (a failed `up` leaves the
+pending file, which also counts as a proxy user: it may have created a
+container). Switch turned off again: a service Traefik that goes back to the
+proxy first puts the proxy back into a gate-mode shared project
+(`ensureSharedSocketProxy`: same gate Traefik plus the proxy, so the shared
+Traefik is not recreated). That covers a TCP/UDP-only deploy, which never
+renders the shared project. A host with no shared project at all has never had
+a proxy (unchanged).
+
 Proven on a real Docker daemon (2026-09-18): Traefik's own
 `GET /containers/json` succeeds through the proxy, `/images/json`,
 `/networks`, `/volumes`, `/info` and `POST /containers/create` all answer 403,
