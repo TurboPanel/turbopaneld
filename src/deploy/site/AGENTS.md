@@ -112,9 +112,10 @@ Docker Compose. The daemon:
    validate — lives behind one interface in
    **`site/engine-driver.ts`**, which is the single place a new
    engine plugs in. Per-engine differences are data on the driver, not branches
-   at the call site: `stageSiteConfig` (privileged `sudo -n install` for
-   nginx/Apache; a daemon-owned write for OpenLiteSpeed fragments, which have to
-   be **read back** to regenerate `httpd_config.conf`), `configTest` (`nginx -t`
+   at the call site: `stageSiteConfig` (privileged `sudo -n install` into the
+   engine's `root:<group>` `0750` config dir for every engine; OpenLiteSpeed
+   fragments are **read back** through tp-host `cat` to regenerate
+   `httpd_config.conf`), `configTest` (`nginx -t`
    as `tpnginx`, `httpd -t` as root, `openlitespeed -t` as `tpols`), and
    `reload`. php-fpm is expressed as a driver too (`PHP_FPM_DRIVER`) but is
    reloaded explicitly first, since the engines' config-tests reference sockets

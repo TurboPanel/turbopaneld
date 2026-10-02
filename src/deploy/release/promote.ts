@@ -32,6 +32,7 @@ import {
   ScopedWriteError,
 } from "../../permissions/scoped-writes.ts";
 import {
+  assertSafeReleaseId,
   RELEASE_METADATA_DIRNAME,
   RELEASE_PUBLISHED_MODE,
   type ReleasePaths,
@@ -459,7 +460,7 @@ export async function swapCurrentSymlink(
 
 /** Release `current` currently resolves to, or `null` when unpublished. */
 export async function readCurrentReleaseId(
-  paths: ReleasePaths,
+  paths: Pick<ReleasePaths, "currentLink">,
   runFn: RunFn = runPrivileged,
 ): Promise<string | null> {
   try {
@@ -476,6 +477,26 @@ export async function readCurrentReleaseId(
     }
     throw err;
   }
+}
+
+/**
+ * Whether `relative` exists inside the release `current` resolves to, for a
+ * caller the principal's home keeps out.
+ *
+ * Never asked through `current` itself: tp-host refuses any path with a
+ * symlink component, so the link is resolved with its existing `readlink`
+ * call and the presence check names `releases/<id>/<relative>` directly. Only
+ * presence is answered — nothing in the principal's tree is read.
+ */
+export async function currentReleasePathExists(
+  paths: Pick<ReleasePaths, "currentLink" | "releasesDir">,
+  relative: string,
+  runFn: RunFn = runPrivileged,
+): Promise<boolean> {
+  const releaseId = await readCurrentReleaseId(paths, runFn);
+  if (releaseId === null) return false;
+  const releaseDir = join(paths.releasesDir, assertSafeReleaseId(releaseId));
+  return await releasePathExists(join(releaseDir, relative), runFn);
 }
 
 /**
