@@ -64,7 +64,7 @@ async function setUpBuildHost(
   await Deno.chmod(host.path("var/lib/turbopanel-build/work"), 0o1770);
   await Deno.chmod(host.path("var/lib/turbopanel-build/cache"), 0o700);
   await Deno.copyFile(RUNNER, host.path("opt/turbopanel/lib/tp-build-runner"));
-  await Deno.chmod(host.path("opt/turbopanel/lib/tp-build-runner"), 0o755);
+  await Deno.chmod(host.path("opt/turbopanel/lib/tp-build-runner"), 0o750);
   await Deno.writeTextFile(
     host.path("etc/resolv.conf"),
     options.resolvConf ?? "nameserver 10.10.0.1\n",
@@ -135,7 +135,7 @@ function expectedSystemdRun(
       "PrivateTmp=yes",
       "PrivateDevices=yes",
       `TemporaryFileSystem=${build}:ro`,
-      `BindReadOnlyPaths=${prefix}/opt/turbopanel/lib/tp-build-runner:${build}/.runner`,
+      `LoadCredential=tp-build-runner:${prefix}/opt/turbopanel/lib/tp-build-runner`,
       `BindPaths=${work}`,
       `BindPaths=${build}/cache/p1`,
     ].flatMap((property) => ["-p", property]),
@@ -178,7 +178,7 @@ function expectedSystemdRun(
     ].flatMap((property) => ["-p", property]),
     "--",
     "/bin/sh",
-    `${build}/.runner`,
+    "${CREDENTIALS_DIRECTORY}/tp-build-runner",
     work,
   ];
 }
@@ -276,7 +276,7 @@ test("build-run keeps the build unprivileged below the OS floor, with a warning"
       ),
     );
 
-    await Deno.writeTextFile(host.path("run/systemd-version"), "241\n");
+    await Deno.writeTextFile(host.path("run/systemd-version"), "246\n");
     const stderr = await refused(host, ["build-run", "b1", "p1"]);
     assertStringIncludes(stderr, "cannot sandbox a build");
   });
@@ -348,7 +348,7 @@ test("build-run refuses a symlinked or missing work tree and a loosened build la
     await Deno.chmod(work, 0o1770);
 
     const runner = host.path("opt/turbopanel/lib/tp-build-runner");
-    await Deno.chmod(runner, 0o775);
+    await Deno.chmod(runner, 0o770);
     assertStringIncludes(
       await refused(host, ["build-run", "b1", "p1"]),
       "writable by others",

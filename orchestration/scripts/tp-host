@@ -1421,8 +1421,9 @@ BUILD_ACCOUNT="tpbuild"
 # `build` would own turbopanel-build.slice.
 BUILD_SLICE="tpbuild.slice"
 BUILD_LOCK="$P/run/tpbuild.lock"
-# Bind-mounted read-only into the unit and read by /bin/sh there (systemd-run
-# looks an executable up on the host, where the bind target does not exist).
+# root:tp 0750 like this script. PID 1 reads it as root and hands it to the
+# unit as a credential (a private, read-only copy owned by the unit's user),
+# which /bin/sh then runs: the build account never reaches /opt/turbopanel.
 BUILD_RUNNER="$INSTALL_ROOT/lib/tp-build-runner"
 BUILD_LOCK_WAIT_SEC=2100
 # Owner decision: the same limits for every plan.
@@ -1432,7 +1433,7 @@ BUILD_RUNTIME_MAX_SEC=1800
 # Debian 13 / Ubuntu 24.04. Below it: a warning and a reduced sandbox (still
 # the build account, still confined); below the minimum: no build.
 BUILD_SYSTEMD_FLOOR=255
-BUILD_SYSTEMD_MIN=242
+BUILD_SYSTEMD_MIN=247
 # Loopback, private (10/8 covers the tp0 fabric), CGNAT, link-local (cloud
 # metadata), benchmark, multicast and reserved ranges. The host's own
 # resolvers are allowed back in (systemd lets IPAddressAllow= win).
@@ -1569,7 +1570,7 @@ tp_verb_build_run() {
     -p NoNewPrivileges=yes -p CapabilityBoundingSet= -p AmbientCapabilities= \
     -p RestrictSUIDSGID=yes -p ProtectSystem=strict -p ProtectHome=yes \
     -p PrivateTmp=yes -p PrivateDevices=yes -p TemporaryFileSystem="$R_BUILD:ro" \
-    -p BindReadOnlyPaths="$BUILD_RUNNER:$R_BUILD/.runner" \
+    -p LoadCredential="tp-build-runner:$BUILD_RUNNER" \
     -p BindPaths="$_br_work" -p BindPaths="$_br_cache"
   for _br_hide in "$R_CONFIG" "$R_STATE" "$R_LOG" "$R_RUN" "$R_PRINCIPALS" "$P/srv" \
     "$P/backup" "$P/run/docker.sock" "$P/var/run/docker.sock" "$P/run/containerd" \
@@ -1597,7 +1598,7 @@ tp_verb_build_run() {
     -p CPUQuota="$BUILD_CPU_QUOTA" -p TasksMax=1024 -p IOWeight=50 -p LimitFSIZE=4G \
     -p LimitNOFILE=65536 -p LimitCORE=0 -p RuntimeMaxSec="$BUILD_RUNTIME_MAX_SEC" \
     -p KillMode=control-group -p OOMPolicy=continue -p UMask=0022 \
-    -- /bin/sh "$R_BUILD/.runner" "$_br_work"
+    -- /bin/sh '${CREDENTIALS_DIRECTORY}/tp-build-runner' "$_br_work"
   tp_exec systemd-run "$@"
 }
 

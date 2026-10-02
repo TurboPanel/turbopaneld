@@ -724,10 +724,11 @@ it regresses:
     principal homes, Docker/containerd/gate sockets and `/etc/ssh` made
     inaccessible, loopback/private/link-local/CGNAT egress denied except the
     host's literal nameservers, 4G memory, 200% CPU, 1800 s, `tpbuild.slice`)
-    whose only command is `/bin/sh` on `lib/tp-build-runner`, bind-mounted in
-    read-only; the spec rides
+    whose only command is `/bin/sh` on `lib/tp-build-runner`, loaded as a
+    systemd credential (PID 1 reads it; the build account gets a private
+    copy); the spec rides
     stdin to the runner (format in its header). Below systemd 255 (Debian 13 /
-    Ubuntu 24.04 floor) it warns and drops the newer properties, below 242 it
+    Ubuntu 24.04 floor) it warns and drops the newer properties, below 247 it
     refuses. `build-return <build-id>` chowns the tree back to the caller only
     once `turbopanel-build-<id>.service` is inactive; abort is
     `systemctl stop turbopanel-build-<id>.service`. `turbopanel-build-*.service`

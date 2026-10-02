@@ -1,12 +1,13 @@
 #!/bin/sh
 # tp-build-runner — runs one tenant build's commands inside the build sandbox
-# (POSIX sh, root:root 0755 at <install>/lib/tp-build-runner).
+# (POSIX sh, root:tp 0750 at <install>/lib/tp-build-runner).
 #
 # Only `tp-host build-run` starts it: as the unprivileged build account, as the
 # ExecStart of a transient turbopanel-build-<id>.service whose sandbox and
-# limits tp-host fixes. tp-host bind-mounts this file into the unit, so the
-# build account never needs to traverse /opt/turbopanel. Its one argument is
-# the work directory tp-host derived from the build id.
+# limits tp-host fixes. systemd hands this file to the unit as a credential
+# and /bin/sh runs that copy, so the build account never needs to traverse
+# /opt/turbopanel. Its one argument is the work directory tp-host derived from
+# the build id.
 #
 # Interface (the daemon writes the spec; WP4 of the unprivileged-builds
 # design):

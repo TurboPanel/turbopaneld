@@ -24,16 +24,16 @@
     remote_src: true
   when: turbopanel_dev_user | default('') | length == 0
 
-# tp-build-runner is the only thing a build unit execs (tp-host build-run
-# bind-mounts it into the sandbox). root:root 0755: the build account must be
-# able to execute it, and nobody but root may change it.
+# tp-build-runner is the only thing a build unit runs: tp-host build-run has
+# systemd load it as a credential (read by PID 1, handed to the build account
+# as a private copy), so it keeps tp-host's own root-owned 0750 shape.
 - name: Install tp-build-runner
   ansible.builtin.copy:
     src: "{{ turbopanel_orchestration_dir }}/scripts/tp-build-runner"
     dest: "{{ turbopanel_install_root }}/lib/tp-build-runner"
     owner: root
-    group: root
-    mode: "0755"
+    group: "{{ turbopanel_group }}"
+    mode: "0750"
     remote_src: true
   when: turbopanel_dev_user | default('') | length == 0
 
