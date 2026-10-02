@@ -584,6 +584,9 @@ test("openlitespeedMainConfig assembles a single httpd_config.conf from fragment
     const conf = openlitespeedMainConfig(layout, [fragment]);
     assertStringIncludes(conf, "user                              tpols");
     assertStringIncludes(conf, "disableWebAdmin                   1");
+    // Site files are shared with tpols by group (0640); without this OLS
+    // demands the world-read bit and answers 403.
+    assertStringIncludes(conf, "requiredPermissionMask    000");
     assertStringIncludes(
       conf,
       `swappingDir                       ${layout.stateDir}/openlitespeed/swap`,

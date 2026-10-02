@@ -1251,6 +1251,15 @@ showVersionNumber                 0
 indexFiles                        index.html
 disableWebAdmin                   1
 
+# OLS refuses a static file without the world-read bit unless told otherwise;
+# site files are principal-owned and shared with tpols by group, never world.
+fileAccessControl {
+        followSymbolLink          1
+        checkSymbolLink           0
+        requiredPermissionMask    000
+        restrictedPermissionMask  000
+}
+
 errorlog ${join(layout.logDir, "openlitespeed", "error.log")} {
         logLevel             NOTICE
         rollingSize          10M

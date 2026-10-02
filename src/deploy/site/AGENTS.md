@@ -42,7 +42,9 @@ Docker Compose. The daemon:
    `php_admin_value <key> <value>`, and the site fragment flips
    `enableScript 1`. Every `context /` renders `allowBrowse 1`: in OLS that is
    the context's "Accessible" flag (`0` is a 403 for everything); listing is
-   `autoIndex 0`.
+   `autoIndex 0`. `httpd_config.conf` sets `fileAccessControl`
+   `requiredPermissionMask 000`: by default OLS answers 403 for any static file
+   without the world-read bit, and site files are shared with `tpols` by group.
 
    **Several PHP series can run side by side.** `resolveSitePhpSeries` picks per
    site (`web.php.version`, else `DEFAULT_PHP_SERIES`), and
