@@ -212,8 +212,11 @@ export function createMutableTranscriptRedactor(
  * and leak previously decrypted plaintext into retained logs, so the deny-set
  * outlives every collector instance.
  *
- * It only ever grows within a process — a daemon restart is the only thing that
- * clears it, and after one nothing on the host holds the old plaintext either.
+ * It only ever grows within a process — a daemon restart clears it. Plaintext
+ * does NOT disappear with the process: `/run` secret files and running
+ * containers keep the values. `DaemonApiClient.decryptSecrets` re-registers
+ * every value it decrypts, and rehydrate after a restart decrypts through it,
+ * so the deny-set is repopulated before container output is collected.
  */
 let sharedRedactor: MutableTranscriptRedactor | undefined;
 

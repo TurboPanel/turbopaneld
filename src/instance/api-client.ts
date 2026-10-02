@@ -1,4 +1,5 @@
 import { encodeBase64 } from "@std/encoding/base64";
+import { rememberSecretPlaintexts } from "../logs/redactor.ts";
 import { type InstanceConfig, instanceUrl } from "./sockets.ts";
 import { INSTANCE_VERSION_HEADER } from "./version-wire.ts";
 
@@ -273,6 +274,10 @@ export class DaemonApiClient {
   /**
    * Batch-decrypt daemon-recipient sealed envelopes (`tpdaemon.…`).
    * Returns one plaintext (or null) per input ciphertext, in order.
+   *
+   * Every decrypted value is registered with the process-wide redaction
+   * deny-set here, so no caller (fabric, ingress, HA, lifecycle, rehydrate)
+   * can decrypt a secret that error text or container tails would then leak.
    */
   async decryptSecrets(ciphertexts: string[]): Promise<(string | null)[]> {
     if (
@@ -306,9 +311,11 @@ export class DaemonApiClient {
     if (!Array.isArray(body.plaintexts)) {
       throw new DaemonApiError(500, "Invalid secrets/decrypt response");
     }
-    return body.plaintexts.map((entry) =>
+    const plaintexts = body.plaintexts.map((entry) =>
       typeof entry === "string" ? entry : null
     );
+    rememberSecretPlaintexts(plaintexts);
+    return plaintexts;
   }
 
   /**
