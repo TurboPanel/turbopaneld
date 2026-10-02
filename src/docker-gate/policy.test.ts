@@ -676,3 +676,69 @@ test("only one /v<major>.<minor> prefix is canonical; every other prefix the eng
     ["path-version-prefix", "exec-privileged"],
   );
 });
+
+test("container create breadth: fields that reach the host are findings, deny by default", async () => {
+  const cases: Array<[Record<string, unknown>, string[]]> = [
+    [{ Cgroup: "container:abc" }, ["cgroup-join"]],
+    [{ Links: ["db:db"] }, ["links"]],
+    [{ GroupAdd: ["docker"] }, ["group-add"]],
+    [{ Annotations: { "run.oci.handler": "wasm" } }, ["annotations"]],
+    [{ CpuRealtimeRuntime: 950000 }, ["cpu-realtime"]],
+    [{ OomScoreAdj: -1000 }, ["oom-score-adj"]],
+    [{ Capabilities: ["CAP_SYS_ADMIN"] }, ["cap-add"]],
+    [{ LogConfig: { Type: "syslog", Config: { "syslog-address": "x" } } }, [
+      "log-driver",
+    ]],
+    [{ Binds: ["/srv/users/a/d:/d:rshared"] }, ["bind-propagation"]],
+    [{ Mounts: [{ Type: "npipe", Source: "a", Target: "b" }] }, ["mount-type"]],
+    [{ Mounts: [{ Type: "image", Source: "a", Target: "b" }] }, ["mount-type"]],
+    [{
+      Mounts: [{
+        Type: "bind",
+        Source: "/srv/users/a/d",
+        Target: "/d",
+        BindOptions: { Propagation: "rshared" },
+      }],
+    }, ["bind-propagation"]],
+    [{ SomeFutureField: 1 }, ["hostconfig-unknown-field"]],
+    [{ privileged: true }, ["hostconfig-unknown-field"]],
+  ];
+  for (const [patch, expected] of cases) {
+    assertEquals(
+      ruleNames(await createVerdict(patch)),
+      expected,
+      JSON.stringify(patch),
+    );
+  }
+});
+
+test("the zero values a real client sends are clean", async () => {
+  assertEquals(
+    await createVerdict({
+      Cgroup: "",
+      Links: null,
+      GroupAdd: null,
+      Annotations: {},
+      CpuRealtimePeriod: 0,
+      CpuRealtimeRuntime: 0,
+      OomScoreAdj: 0,
+      Capabilities: null,
+      LogConfig: { Type: "json-file", Config: { "max-size": "10m" } },
+      Binds: ["/srv/users/a/d:/d:ro,rprivate"],
+      Init: true,
+      PidsLimit: -1,
+    }),
+    [],
+  );
+});
+
+test("an unknown HostConfig key is reported by a harmless name only", async () => {
+  const found = await createVerdict({
+    "Odd\\u0001Name": 1,
+    SomeFutureField: 1,
+  });
+  assertEquals(
+    found.map((v) => v.detail).toSorted(),
+    ["<odd>", "SomeFutureField"],
+  );
+});
