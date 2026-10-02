@@ -856,6 +856,7 @@ tp_discover_paths() {
   # a partial install can disagree with itself, so every distinct path is kept.
   tp_discover_add config /etc/turbopanel default
   tp_discover_add state /var/lib/turbopanel default
+  tp_discover_add state /var/lib/turbopanel-build default
   tp_discover_add log /var/log/turbopanel default
   tp_discover_add runtimes /opt/turbopanel/vendor default
   tp_discover_add run /run/turbopanel default
@@ -1030,7 +1031,7 @@ tp_inventory_units() {
     tp_note_unit "$_iu_path"
   done < "$_iu_files"
   # shellcheck disable=SC2086
-  for _iu_legacy in $TP_LEGACY_UNITS; do
+  for _iu_legacy in $TP_LEGACY_UNITS $TP_OTHER_UNITS; do
     if tp_unit_present "$_iu_legacy"; then
       tp_note_unit "$_iu_legacy"
     fi
@@ -1927,7 +1928,7 @@ tp_collect_unit_names() {
     done < "$_cun_list"
   fi
   # shellcheck disable=SC2086
-  for _cun_legacy in $TP_LEGACY_UNITS wg-quick@tp0.service wg-quick@tp0; do
+  for _cun_legacy in $TP_LEGACY_UNITS $TP_OTHER_UNITS wg-quick@tp0.service wg-quick@tp0; do
     if tp_unit_present "$_cun_legacy"; then
       case $_cun_legacy in
         wg-quick@tp0) tp_file_add "$TP_TMP/work.unitnames" "wg-quick@tp0.service" ;;
@@ -2001,6 +2002,11 @@ tp_remove_unit_files() {
   for _ruf_dir in $TP_SYSTEMD_DIRS; do
     [ -d "$_ruf_dir" ] || continue
     find "$_ruf_dir" -maxdepth 3 \( -name 'turbopanel*' -o -name 'turbopaneld*' \) >> "$_ruf_list" 2>/dev/null || true
+    for _ruf_other in $TP_OTHER_UNITS; do
+      if [ -e "$_ruf_dir/$_ruf_other" ]; then
+        printf '%s\n' "$_ruf_dir/$_ruf_other" >> "$_ruf_list"
+      fi
+    done
   done
   while IFS= read -r _ruf_path; do
     [ -n "$_ruf_path" ] || continue
@@ -3449,13 +3455,15 @@ TP_OTHER_DIRS=
 TP_LEGACY_ACCOUNTS="turbopanel turbopaneli turbopanelc"
 TP_LEGACY_ACCOUNT_IDS="9999 9998 9997"
 TP_LEGACY_UNITS="turbopanel-mailer.service turbopanel-php-fpm.service"
+# Current units whose names the turbopanel* scans miss.
+TP_OTHER_UNITS="tpbuild.slice"
 TP_LEGACY_CONTAINER_NAMES="turbopanel-database turbopanel-queue"
 TP_LEGACY_OPT_PATHS="runtimes platform share/ansible lib/instance vendor/duckdb share/caddy bin/turbopanel-instance bin/turbopanel-mailer"
 TP_LEGACY_SHELL_RC_NEEDLE='/opt/turbopanel/runtimes/deno/.install/env'
 # Every tree this script may delete: what TurboPanel creates, plus Docker's
 # default state it purges. tp_path_is_safe refuses anything else, including a
 # folder configured elsewhere in daemon.env; those are listed as kept.
-TP_OWNED_TREES="/opt/turbopanel /etc/turbopanel /etc/ssh/turbopanel /var/lib/turbopanel /var/log/turbopanel /run/turbopanel /var/run/turbopanel /backup /srv/users /tmp/turbopanel-ansible /tmp/turbopanel-orchestrate /root/.ansible /var/lib/docker /var/lib/containerd /etc/docker /var/lib/turbopanel-purge"
+TP_OWNED_TREES="/opt/turbopanel /etc/turbopanel /etc/ssh/turbopanel /var/lib/turbopanel /var/log/turbopanel /run/turbopanel /var/run/turbopanel /backup /srv/users /tmp/turbopanel-ansible /tmp/turbopanel-orchestrate /root/.ansible /var/lib/docker /var/lib/containerd /etc/docker /var/lib/turbopanel-purge /var/lib/turbopanel-build"
 TP_SYSTEMD_DIRS="/etc/systemd/system /usr/local/lib/systemd/system /lib/systemd/system /usr/lib/systemd/system"
 TP_DAEMON_ENV=/etc/turbopanel/daemon.env
 TP_RESUME_DIR=/var/lib/turbopanel-purge

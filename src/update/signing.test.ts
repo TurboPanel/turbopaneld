@@ -277,5 +277,23 @@ test("unsignedManifestBypass is development-only and host-side", () => {
       env: { [DEV_UNSIGNED_MANIFEST_ENV]: "true" },
     }),
     false,
+  ); // A pinned manifest (--manifest-url) is never exempt, in any mode.
+  assertEquals(
+    unsignedManifestBypass({
+      installMode: "development",
+      overlay: false,
+      env: {},
+      pinned: true,
+    }),
+    false,
+  );
+  assertEquals(
+    unsignedManifestBypass({
+      installMode: "production",
+      overlay: true,
+      env: on,
+      pinned: true,
+    }),
+    false,
   );
 });

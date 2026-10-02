@@ -34,6 +34,20 @@ function extractShellFunction(source: string, name: string): string {
   throw new TypeError(`unclosed ${name} in run.sh`);
 }
 
+/** run.sh helpers that read and write lib/control-plane-refresh. */
+const REFRESH_FILE_HELPERS = [
+  "tp_release_manifest_url_ok",
+  "tp_control_plane_refresh_file",
+  "tp_refresh_channel_ok",
+  "tp_refresh_value_ok",
+  "tp_load_control_plane_refresh",
+  "tp_install_root_only",
+  "tp_write_control_plane_refresh",
+];
+
+/** Tests run unprivileged: install the root-only file without the chown. */
+const INSTALL_AS_USER = 'tp_install_root_only() { install -m 0600 "$1" "$2"; }';
+
 async function ownership(
   path: string,
 ): Promise<{ uid: number; gid: number; mode: number }> {
@@ -140,7 +154,7 @@ exit 0
     "tp_daemon_binary_path",
     "tp_daemon_js_fallback_path",
     "tp_colocated_control_plane_host",
-    "tp_daemon_env_value",
+    ...REFRESH_FILE_HELPERS,
     "tp_run_colocated_daemon_refresh",
   ].map((name) => extractShellFunction(source, name)).join("\n");
   const script = [
@@ -157,6 +171,7 @@ exit 0
     "MANIFEST_URL=https://github.com/TurboPanel/turbopaneld/releases/download/v0.1.1/manifest.json",
     "DAEMON_ONLY=true",
     helpers,
+    INSTALL_AS_USER,
     `tp_prod_home() { printf '%s' "${installRoot}"; }`,
     'tp_colocated_control_plane_host || { echo "not detected as co-located" >&2; exit 1; }',
     "tp_run_colocated_daemon_refresh",
@@ -211,7 +226,15 @@ exit 0
 
 /** Run extracted run.sh functions in a scratch layout; prints `$@`'s result. */
 async function runPrepare(
-  opts: { controlPlane: boolean; envChannel?: string; callerChannel?: string },
+  opts: {
+    controlPlane: boolean;
+    envChannel?: string;
+    callerChannel?: string;
+    /** Contents of lib/control-plane-refresh; absent = a pre-migration host. */
+    refreshFile?: string;
+    /** Contents of lib/update-origin; absent = a host installed before pins. */
+    originPin?: string;
+  },
 ): Promise<{ status: number; stdout: string; stderr: string }> {
   const source = await Deno.readTextFile(runShPath);
   const root = await Deno.makeTempDir({ prefix: "tp-colo-prepare-" });
@@ -219,9 +242,22 @@ async function runPrepare(
     const installRoot = join(root, "opt");
     const configDir = join(root, "etc");
     await Deno.mkdir(join(installRoot, "bin"), { recursive: true });
+    await Deno.mkdir(join(installRoot, "lib"), { recursive: true });
     await Deno.mkdir(configDir, { recursive: true });
     if (opts.controlPlane) {
       await Deno.writeTextFile(join(installRoot, "bin", "turbopanel"), "");
+    }
+    if (opts.refreshFile !== undefined) {
+      await Deno.writeTextFile(
+        join(installRoot, "lib", "control-plane-refresh"),
+        opts.refreshFile,
+      );
+    }
+    if (opts.originPin !== undefined) {
+      await Deno.writeTextFile(
+        join(installRoot, "lib", "update-origin"),
+        opts.originPin,
+      );
     }
     const envLines = ["TURBOPANEL_CONFIG_DIR=/etc/turbopanel"];
     if (opts.envChannel) {
@@ -242,6 +278,7 @@ async function runPrepare(
         ? `TURBOPANEL_UPDATE_CHANNEL="${opts.callerChannel}"; export TURBOPANEL_UPDATE_CHANNEL`
         : "unset TURBOPANEL_UPDATE_CHANNEL",
       extractShellFunction(source, "tp_colocated_control_plane_host"),
+      ...REFRESH_FILE_HELPERS.map((name) => extractShellFunction(source, name)),
       extractShellFunction(source, "tp_prepare_colocated_daemon_only"),
       'if tp_prepare_colocated_daemon_only; then echo "colocated channel=$TURBOPANEL_UPDATE_CHANNEL"; else echo remote; fi',
     ].join("\n");
@@ -260,7 +297,39 @@ async function runPrepare(
   }
 }
 
-test("--daemon-only on a control-plane host needs no license or manifest pin: the channel comes from daemon.env", async () => {
+test("--daemon-only on a control-plane host needs no license or manifest pin: the channel comes from lib/control-plane-refresh", async () => {
+  const fromFile = await runPrepare({
+    controlPlane: true,
+    envChannel: "trunk",
+    refreshFile: "channel=canary\ninstance_manifest_url=\nui_manifest_url=\n",
+  });
+  assertEquals(fromFile.status, 0, fromFile.stderr);
+  assertEquals(fromFile.stdout, "colocated channel=canary");
+
+  // A channel outside the allowlist reads as none.
+  const badFile = await runPrepare({
+    controlPlane: true,
+    envChannel: "canary",
+    refreshFile: "channel=nightly\n",
+  });
+  assertEquals(badFile.stdout, "colocated channel=release");
+
+  // Detection reads the root-owned update-origin pin, not daemon.env.
+  const pinned = await runPrepare({
+    controlPlane: true,
+    originPin: "host=\ndl_base=\ninstance_ca=\nuploaded_trust=\ncolocated=1\n",
+    refreshFile: "channel=rc\n",
+  });
+  assertEquals(pinned.stdout, "colocated channel=rc");
+  const remotePin = await runPrepare({
+    controlPlane: true,
+    originPin:
+      "host=https://panel.example.com\ndl_base=\ninstance_ca=\nuploaded_trust=\n",
+  });
+  assertEquals(remotePin.stdout, "remote");
+});
+
+test("--daemon-only on a control-plane host that predates lib/control-plane-refresh takes the channel from daemon.env once", async () => {
   const fromEnv = await runPrepare({
     controlPlane: true,
     envChannel: "canary",
@@ -353,6 +422,7 @@ async function runArgumentChecks(
       'INSTANCE_MANIFEST_URL=""; UI_MANIFEST_URL=""',
       "SKIP_DAEMON_PACKAGE=false; NO_START=false",
       extractShellFunction(source, "tp_colocated_control_plane_host"),
+      ...REFRESH_FILE_HELPERS.map((name) => extractShellFunction(source, name)),
       extractShellFunction(source, "tp_prepare_colocated_daemon_only"),
       source.slice(start, end),
       'echo "passed colocated=$COLOCATED_DAEMON_ONLY channel=$TURBOPANEL_UPDATE_CHANNEL license_id=$LICENSE_ID"',
@@ -416,4 +486,179 @@ test("--daemon-only on a remote daemon still needs a pinned manifest and a licen
   });
   assertEquals(noLicense.status, 1);
   assertStringIncludes(noLicense.stdout, "needs TURBOPANEL_LICENSE");
+});
+
+const INSTANCE_PIN =
+  "https://github.com/TurboPanel/turbopanel/releases/download/v0.2.0/manifest.json";
+const UI_PIN =
+  "https://github.com/TurboPanel/ui/releases/download/v0.2.0/manifest.json";
+
+/**
+ * Run tp_run_colocated_daemon_refresh against a scratch layout and return the
+ * vars file it hands the playbook, plus the root-only settings file after.
+ */
+async function runRefresh(
+  root: string,
+  opts: { daemonEnv: string; refreshFile?: string; channel?: string },
+): Promise<{ vars: string; refreshFile: string; refreshMode: number }> {
+  const source = await Deno.readTextFile(runShPath);
+  const installRoot = join(root, "opt");
+  const configDir = join(root, "etc");
+  const captured = join(root, "vars.yml");
+  const refreshPath = join(installRoot, "lib", "control-plane-refresh");
+  await Deno.mkdir(join(installRoot, "bin"), { recursive: true });
+  await Deno.mkdir(join(installRoot, "lib"), { recursive: true });
+  await Deno.mkdir(configDir, { recursive: true });
+  await Deno.writeTextFile(join(installRoot, "bin", "turbopanel"), "");
+  await Deno.writeTextFile(join(configDir, "daemon.env"), opts.daemonEnv);
+  if (opts.refreshFile !== undefined) {
+    await Deno.writeTextFile(refreshPath, opts.refreshFile);
+  }
+  const stub = join(installRoot, "bin", "turbopaneld");
+  await Deno.writeTextFile(
+    stub,
+    `#!/bin/sh\nwhile [ $# -gt 0 ]; do\n  if [ "$1" = --vars-file ]; then cp "$2" "${captured}"; fi\n  shift\ndone\n`,
+  );
+  await Deno.chmod(stub, 0o755);
+  const script = [
+    "set -eu",
+    `INSTALL_ROOT="${installRoot}"`,
+    `CONFIG_DIR="${configDir}"`,
+    `STATE_DIR="${join(root, "var")}"`,
+    `ENV_FILE="${join(configDir, "daemon.env")}"`,
+    `RUNTIMES_DIR="${join(installRoot, "vendor")}"`,
+    `ORCHESTRATION_DIR="${join(installRoot, "share", "orchestration")}"`,
+    "DAEMON_EXEC_MODE=native",
+    "TP_EXEC_MODE_NATIVE=native",
+    "NO_START=true",
+    'MANIFEST_URL=""',
+    'INSTANCE_MANIFEST_URL=""',
+    'UI_MANIFEST_URL=""',
+    opts.channel === undefined
+      ? "unset TURBOPANEL_UPDATE_CHANNEL"
+      : `TURBOPANEL_UPDATE_CHANNEL=${opts.channel}`,
+    'tp_print_step() { :; }; tp_print_ok() { :; }; tp_print_error() { printf "%s\\n" "$*" >&2; }',
+    `tp_daemon_binary_name() { printf turbopaneld; }`,
+    `tp_daemon_binary_path() { printf '%s' "${stub}"; }`,
+    `tp_daemon_js_fallback_path() { printf '%s' "${stub}.js"; }`,
+    ...REFRESH_FILE_HELPERS.map((name) => extractShellFunction(source, name)),
+    extractShellFunction(source, "tp_run_colocated_daemon_refresh"),
+    INSTALL_AS_USER,
+    "tp_run_colocated_daemon_refresh",
+  ].join("\n");
+  const out = await new Deno.Command("sh", {
+    args: ["-c", script],
+    env: { TMPDIR: root },
+    stdin: "null",
+    stdout: "piped",
+    stderr: "piped",
+  }).output();
+  assertEquals(out.code, 0, new TextDecoder().decode(out.stderr));
+  return {
+    vars: await Deno.readTextFile(captured),
+    refreshFile: await Deno.readTextFile(refreshPath),
+    refreshMode: (await ownership(refreshPath)).mode,
+  };
+}
+
+/** A daemon.env the daemon account could have rewritten, built at run time. */
+function poisonedDaemonEnv(root: string): string {
+  return [
+    "TURBOPANEL_UPDATE_CHANNEL=trunk",
+    `TURBOPANEL_INSTANCE_CA=${join(root, "not-a-ca")}`,
+    "TURBOPANEL_DL_BASE=https://overlay.invalid/dl",
+    "TURBOPANEL_INSTANCE_MANIFEST_URL=https://overlay.invalid/manifest.json",
+    `TURBOPANEL_UI_MANIFEST_URL=${UI_PIN}`,
+    "",
+  ].join("\n");
+}
+
+test("the co-located refresh reads lib/control-plane-refresh, never daemon.env", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-colo-cpr-" });
+  try {
+    const out = await runRefresh(root, {
+      daemonEnv: poisonedDaemonEnv(root),
+      refreshFile:
+        `channel=canary\ninstance_manifest_url=${INSTANCE_PIN}\nui_manifest_url=\n`,
+    });
+    assertStringIncludes(out.vars, "turbopanel_update_channel: canary\n");
+    assertStringIncludes(
+      out.vars,
+      `turbopanel_instance_manifest_url: "${INSTANCE_PIN}"`,
+    );
+    for (const absent of ["instance_ca", "dl_base", "ui_manifest_url"]) {
+      assertEquals(out.vars.includes(`turbopanel_${absent}:`), false, absent);
+    }
+    assertEquals(out.vars.includes("overlay.invalid"), false);
+    assertEquals(out.refreshMode, 0o600);
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+test("a host without lib/control-plane-refresh migrates validated values from daemon.env once", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-colo-cpr-" });
+  try {
+    const first = await runRefresh(root, {
+      daemonEnv: [
+        "TURBOPANEL_UPDATE_CHANNEL=canary",
+        `TURBOPANEL_INSTANCE_CA=${join(root, "not-a-ca")}`,
+        "TURBOPANEL_DL_BASE=https://overlay.invalid/dl",
+        `TURBOPANEL_INSTANCE_MANIFEST_URL=${INSTANCE_PIN}`,
+        "TURBOPANEL_UI_MANIFEST_URL=https://overlay.invalid/manifest.json",
+        "",
+      ].join("\n"),
+    });
+    assertEquals(
+      first.refreshFile,
+      `channel=canary\ninstance_manifest_url=${INSTANCE_PIN}\nui_manifest_url=\n`,
+    );
+    assertEquals(first.refreshMode, 0o600);
+    assertStringIncludes(first.vars, "turbopanel_update_channel: canary\n");
+    assertEquals(first.vars.includes("turbopanel_instance_ca:"), false);
+    assertEquals(first.vars.includes("turbopanel_dl_base:"), false);
+    assertEquals(first.vars.includes("overlay.invalid"), false);
+
+    // After the migration a rewritten daemon.env changes nothing.
+    const second = await runRefresh(root, {
+      daemonEnv: poisonedDaemonEnv(root),
+    });
+    assertEquals(second.refreshFile, first.refreshFile);
+    assertStringIncludes(second.vars, "turbopanel_update_channel: canary\n");
+    assertEquals(second.vars.includes(UI_PIN), false);
+
+    // The daemon's own update names the channel; the file follows it.
+    const third = await runRefresh(root, {
+      daemonEnv: poisonedDaemonEnv(root),
+      channel: "rc",
+    });
+    assertStringIncludes(third.refreshFile, "channel=rc\n");
+    assertStringIncludes(third.vars, "turbopanel_update_channel: rc\n");
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+test("daemon.env is daemon-only and the control-plane install records the refresh file", async () => {
+  const tasks = await Deno.readTextFile(
+    join(here, "../../orchestration/roles/daemon-config/tasks/main.yml"),
+  );
+  const start = tasks.indexOf("- name: Write daemon environment file");
+  const task = tasks.slice(start, tasks.indexOf("\n- name:", start + 1));
+  assertStringIncludes(task, 'mode: "0600"');
+
+  const source = await Deno.readTextFile(runShPath);
+  assertStringIncludes(
+    extractShellFunction(source, "tp_install_root_only"),
+    "install -m 0600 -o root -g root",
+  );
+  assertStringIncludes(
+    extractShellFunction(source, "tp_run_instance_install"),
+    "tp_write_control_plane_refresh",
+  );
+  const refreshFn = extractShellFunction(
+    source,
+    "tp_run_colocated_daemon_refresh",
+  );
+  assertEquals(refreshFn.includes("daemon.env"), false);
 });

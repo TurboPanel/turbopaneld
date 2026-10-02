@@ -164,7 +164,8 @@ async function instanceInstallVars(
 
 /**
  * The vars file `tp_run_colocated_daemon_refresh` hands
- * daemon-colocated-refresh.yml, reading the host's current daemon.env.
+ * daemon-colocated-refresh.yml. The first run on a host migrates the channel
+ * from daemon.env into lib/control-plane-refresh; later runs read only that.
  */
 async function colocatedRefreshVars(
   root: string,
@@ -183,9 +184,19 @@ async function colocatedRefreshVars(
   await Deno.chmod(installer, 0o755);
   const script = [
     "set -eu",
-    shellFunction(source, "tp_daemon_env_value"),
-    shellFunction(source, "tp_run_colocated_daemon_refresh"),
+    ...[
+      "tp_release_manifest_url_ok",
+      "tp_control_plane_refresh_file",
+      "tp_refresh_channel_ok",
+      "tp_refresh_value_ok",
+      "tp_load_control_plane_refresh",
+      "tp_write_control_plane_refresh",
+      "tp_run_colocated_daemon_refresh",
+    ].map((name) => shellFunction(source, name)),
     STUBS,
+    // Unprivileged test: the root-only file without the chown.
+    'tp_install_root_only() { install -m 0600 "$1" "$2"; }',
+    'INSTANCE_MANIFEST_URL=""; UI_MANIFEST_URL=""',
     layoutAssignments(root),
     `MANIFEST_URL=${quote(options.manifestUrl ?? "")}`,
     options.channel === undefined
