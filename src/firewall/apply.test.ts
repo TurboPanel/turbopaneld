@@ -743,6 +743,201 @@ test("reinstallFirewallForwardingIfEnabled: a pending marker with no pending doc
   });
 });
 
+/** Both families rendered with `TP-FWD`, as on a Docker 28+ host. */
+function renderBothForward(port = "8080") {
+  return renderFirewall({
+    payload: payload({
+      rules: [{
+        id: `drop-${port}`,
+        scope: "published",
+        action: "drop",
+        proto: "tcp",
+        ports: port,
+        sources: ["any"],
+        origin: "user",
+      }],
+    }),
+    sshPorts: [22],
+    includeForward: { 4: true, 6: true },
+  });
+}
+
+async function writeConfigDocument(
+  layout: ReturnType<typeof resolveLayout>,
+  filename: string,
+  document: string,
+): Promise<void> {
+  await Deno.mkdir(layout.configDir, { recursive: true });
+  await Deno.writeTextFile(join(layout.configDir, filename), document);
+}
+
+async function writePendingMarker(
+  layout: ReturnType<typeof resolveLayout>,
+  v6: "replace" | "forget" | "keep",
+): Promise<void> {
+  await Deno.mkdir(layout.runDir, { recursive: true });
+  await Deno.writeTextFile(
+    pendingMarkerPath(layout),
+    JSON.stringify({
+      version: 1,
+      digest: "e".repeat(64),
+      generation: 3,
+      armedAt: "2026-10-01T12:00:00.000Z",
+      deadlineAt: "2026-10-01T12:02:00.000Z",
+      windowSeconds: 120,
+      v6,
+    }),
+  );
+}
+
+const callLines = (calls: Call[]) =>
+  calls.map((c) => `${c.cmd} ${c.args.join(" ")}`);
+
+test("reinstallFirewallForwardingIfEnabled: re-hangs IPv6 TP-FWD off DOCKER-USER exactly like IPv4, and a second run inserts nothing", async () => {
+  await withTempLayout(async (layout) => {
+    const rendered = renderBothForward();
+    await writeConfigDocument(layout, FIREWALL_V4_FILENAME, rendered.v4);
+    await writeConfigDocument(layout, FIREWALL_V6_FILENAME, rendered.v6!);
+
+    // dockerd restarted: both DOCKER-USER chains are back without our jump.
+    const restarted = fakeHost({
+      "iptables -C DOCKER-USER -j TP-FWD": fail("Bad rule"),
+      "ip6tables -C DOCKER-USER -j TP-FWD": fail("Bad rule"),
+    });
+    await reinstallFirewallForwardingIfEnabled({ run: restarted.run, layout });
+    assertEquals(callLines(restarted.calls), [
+      "iptables -S DOCKER-USER",
+      "iptables-restore --noflush --test",
+      "iptables-restore --noflush",
+      "iptables -C DOCKER-USER -j TP-FWD",
+      "iptables -I DOCKER-USER 1 -j TP-FWD",
+      "ip6tables -S DOCKER-USER",
+      "ip6tables-restore --noflush --test",
+      "ip6tables-restore --noflush",
+      "ip6tables -C DOCKER-USER -j TP-FWD",
+      "ip6tables -I DOCKER-USER 1 -j TP-FWD",
+    ]);
+    const v6Restore = restarted.calls.find((c) =>
+      c.cmd === "ip6tables-restore" && !c.args.includes("--test")
+    );
+    assertEquals(v6Restore?.stdin, rendered.v6);
+
+    // Idempotent: the jump is already there, so nothing is inserted twice.
+    const steady = fakeHost();
+    await reinstallFirewallForwardingIfEnabled({ run: steady.run, layout });
+    assert(!callLines(steady.calls).some((line) => line.includes(" -I ")));
+    assertEquals(
+      callLines(steady.calls).filter((line) => line.includes(" -C ")),
+      [
+        "iptables -C DOCKER-USER -j TP-FWD",
+        "ip6tables -C DOCKER-USER -j TP-FWD",
+      ],
+    );
+    // Never flushes, deletes or re-declares a Docker chain.
+    assert(
+      !callLines(steady.calls).some((line) =>
+        / -[FXN] /.test(` ${line} `) || line.includes("-D DOCKER-USER")
+      ),
+    );
+  });
+});
+
+test("reinstallFirewallForwardingIfEnabled: under a pending ruleset IPv6 follows only a recorded replace", async () => {
+  await withTempLayout(async (layout) => {
+    const confirmed = renderBothForward("1111");
+    const pending = renderBothForward("2222");
+    await writeConfigDocument(layout, FIREWALL_V4_FILENAME, confirmed.v4);
+    await writeConfigDocument(layout, FIREWALL_V6_FILENAME, confirmed.v6!);
+    await writeConfigDocument(layout, FIREWALL_PENDING_V4_FILENAME, pending.v4);
+    await writeConfigDocument(
+      layout,
+      FIREWALL_PENDING_V6_FILENAME,
+      pending.v6!,
+    );
+
+    await writePendingMarker(layout, "replace");
+    const replaced = fakeHost();
+    await reinstallFirewallForwardingIfEnabled({ run: replaced.run, layout });
+    const v6Restores = replaced.calls.filter((c) =>
+      c.cmd === "ip6tables-restore" && !c.args.includes("--test")
+    );
+    assertEquals(v6Restores.length, 1);
+    assertEquals(v6Restores[0]!.stdin, pending.v6);
+
+    // keep (apply in flight or failed) and forget: v6 is the guard's, not ours.
+    for (const intent of ["keep", "forget"] as const) {
+      await writePendingMarker(layout, intent);
+      const host = fakeHost();
+      await reinstallFirewallForwardingIfEnabled({ run: host.run, layout });
+      assertEquals(host.calls.filter((c) => c.cmd.startsWith("ip6")), []);
+      const v4Restore = host.calls.find((c) =>
+        c.cmd === "iptables-restore" && !c.args.includes("--test")
+      );
+      assertEquals(v4Restore?.stdin, pending.v4);
+    }
+  });
+});
+
+test("reinstallFirewallForwardingIfEnabled: each family stands alone — a missing IPv6 DOCKER-USER or a failing family never stops the other, and nothing throws", async () => {
+  await withTempLayout(async (layout) => {
+    const rendered = renderBothForward();
+    await writeConfigDocument(layout, FIREWALL_V4_FILENAME, rendered.v4);
+    await writeConfigDocument(layout, FIREWALL_V6_FILENAME, rendered.v6!);
+
+    // Docker with ip6tables off: probe v6, apply nothing there.
+    const noV6Chain = fakeHost({
+      "ip6tables -S DOCKER-USER": fail("No chain/target/match by that name."),
+    });
+    await reinstallFirewallForwardingIfEnabled({ run: noV6Chain.run, layout });
+    assertEquals(
+      callLines(noV6Chain.calls).filter((line) => line.startsWith("ip6")),
+      ["ip6tables -S DOCKER-USER"],
+    );
+    assert(callLines(noV6Chain.calls).includes("iptables-restore --noflush"));
+
+    // v6 restore refused: v4 already done, the hook still resolves.
+    const v6Refused = fakeHost({
+      "ip6tables-restore --noflush --test": fail("line 3 failed"),
+    });
+    await reinstallFirewallForwardingIfEnabled({ run: v6Refused.run, layout });
+    assert(
+      callLines(v6Refused.calls).includes("iptables -C DOCKER-USER -j TP-FWD"),
+    );
+    assert(!callLines(v6Refused.calls).includes("ip6tables-restore --noflush"));
+
+    // v4 jump fails: v6 is still re-hung.
+    const v4Broken = fakeHost({
+      "iptables -C DOCKER-USER -j TP-FWD": fail("Bad rule"),
+      "iptables -I DOCKER-USER 1 -j TP-FWD": fail("Resource busy"),
+    });
+    await reinstallFirewallForwardingIfEnabled({ run: v4Broken.run, layout });
+    assert(callLines(v4Broken.calls).includes("ip6tables-restore --noflush"));
+    assert(
+      callLines(v4Broken.calls).includes("ip6tables -C DOCKER-USER -j TP-FWD"),
+    );
+  });
+});
+
+test("reinstallFirewallForwardingIfEnabled: an unreadable document skips that family, an unreadable marker skips both", async () => {
+  await withTempLayout(async (layout) => {
+    const rendered = renderBothForward();
+    // A directory where the v4 document should be: unreadable, not missing.
+    await Deno.mkdir(join(layout.configDir, FIREWALL_V4_FILENAME), {
+      recursive: true,
+    });
+    await writeConfigDocument(layout, FIREWALL_V6_FILENAME, rendered.v6!);
+    const host = fakeHost();
+    await reinstallFirewallForwardingIfEnabled({ run: host.run, layout });
+    assert(host.calls.every((c) => c.cmd.startsWith("ip6")));
+    assert(callLines(host.calls).includes("ip6tables-restore --noflush"));
+
+    await Deno.mkdir(pendingMarkerPath(layout), { recursive: true });
+    const blocked = fakeHost();
+    await reinstallFirewallForwardingIfEnabled({ run: blocked.run, layout });
+    assertEquals(blocked.calls, []);
+  });
+});
+
 test("parseSshdEffectivePorts reads port and pinned listenaddress lines", () => {
   const output = [
     "port 22",

@@ -275,6 +275,40 @@ test("without DOCKER-USER the forward chain is left out and published rules are 
   assertStringIncludes(out.warnings[0]!, "DOCKER-USER is absent");
 });
 
+test("with an IPv6 DOCKER-USER the v6 document declares TP-FWD like v4 and never declares, flushes or jumps from a Docker chain", () => {
+  const out = renderFirewall({
+    payload: payload({
+      rules: [
+        rule({
+          id: "p",
+          scope: "published",
+          action: "drop",
+          ports: "8080",
+          origin: "user",
+        }),
+      ],
+    }),
+    sshPorts: [22],
+    includeForward: BOTH,
+  });
+  for (const doc of [out.v4, out.v6!]) {
+    assert(lines(doc).includes(`:${FIREWALL_FORWARD_CHAIN} - [0:0]`));
+    for (const line of lines(doc)) {
+      assert(!/^:(DOCKER|FORWARD|INPUT)/.test(line), line);
+      assert(!/^-[FXNAI] (DOCKER|FORWARD|INPUT)\b/.test(line), line);
+      assert(!line.includes(`-j ${FIREWALL_FORWARD_CHAIN}`), line);
+    }
+  }
+  const forwardRules = (doc: string) =>
+    lines(doc).filter((line) =>
+      line.startsWith(`-A ${FIREWALL_FORWARD_CHAIN} `)
+    );
+  assertEquals(forwardRules(out.v6!).length, forwardRules(out.v4).length);
+  assert(
+    forwardRules(out.v6!).some((line) => line.includes("--ctorigdstport 8080")),
+  );
+});
+
 test("sshd and control-plane ports are guaranteed ACCEPTs, deduplicated and sorted; no ssh port at all keeps 22 with a warning", () => {
   const out = renderFirewall({
     payload: payload({
