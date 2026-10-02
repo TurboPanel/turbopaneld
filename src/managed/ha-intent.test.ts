@@ -6,6 +6,7 @@ import {
 import { resolveLayout } from "../paths/layout.ts";
 import { withTempLayout } from "../testing/temp-layout.ts";
 import {
+  HOST_WIDE_INTENT_ID,
   isManagedIntentActive,
   MANAGED_COMMAND_INTENT_EXEMPT,
   MANAGED_COMMAND_INTENT_KINDS,
@@ -92,6 +93,15 @@ test("managedCommandIntent maps lifecycle actions and skips exempt/invalid", () 
     null,
   );
   assertEquals(managedCommandIntent("environment.deploy", {}), null);
+  // Commands that may stop any engine container record a host-wide marker.
+  assertEquals(
+    managedCommandIntent("storage.restore", { copyId: "c" }),
+    { managedId: HOST_WIDE_INTENT_ID, kind: "restore" },
+  );
+  assertEquals(
+    managedCommandIntent("server.reboot", {})?.managedId,
+    HOST_WIDE_INTENT_ID,
+  );
 });
 
 test("a stop is held; transient markers expire after TTL plus grace", async () => {
@@ -182,6 +192,7 @@ const INTENT_DISPATCHES: Array<{
   handlerKey: string;
   payload: Record<string, unknown>;
   result: Record<string, unknown>;
+  markerId?: string;
 }> = [
   {
     commandType: "managed.apply",
@@ -220,6 +231,19 @@ const INTENT_DISPATCHES: Array<{
     result: { backupId: "bk_1700000000000" },
   },
   {
+    commandType: "storage.restore",
+    handlerKey: "handleStorageRestore",
+    payload: {
+      copyId: "00000000-0000-4000-8000-0000000000c1",
+      copyProvider: "docker",
+      volumeName: "managed_data",
+      backupId: "bk_0123abcd",
+      checksum: "a".repeat(64),
+    },
+    result: { backupId: "bk_0123abcd" },
+    markerId: HOST_WIDE_INTENT_ID,
+  },
+  {
     commandType: "managed.ha.failover",
     handlerKey: "handleManagedHaFailover",
     payload: {
@@ -252,7 +276,10 @@ test("every intent verb's handler runs with the marker already active", async ()
         let activeAtHandler = false;
         setCommandRouterHandlersForTests({
           [dispatch.handlerKey]: async () => {
-            const intent = await readManagedIntent(layout.stateDir, MANAGED_ID);
+            const intent = await readManagedIntent(
+              layout.stateDir,
+              dispatch.markerId ?? MANAGED_ID,
+            );
             activeAtHandler = isManagedIntentActive(intent, Date.now());
             return dispatch.result;
           },

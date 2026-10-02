@@ -28,6 +28,7 @@ import {
   type ManagedHaMemberRecord,
 } from "../managed/ha-member.ts";
 import {
+  HOST_WIDE_INTENT_ID,
   isManagedIntentActive,
   readManagedIntent,
 } from "../managed/ha-intent.ts";
@@ -43,6 +44,14 @@ import {
 } from "../managed/pg-dead-primary.ts";
 
 export const PG_PROBE_ENV = "TURBOPANEL_MANAGED_PG_PROBE";
+
+/** A previous tick's Docker call is still running: inconclusive, never dead. */
+const DOCKER_STILL_BUSY: ProbeSample = {
+  container: {
+    kind: "unreadable",
+    reason: "previous docker call still running",
+  },
+};
 
 export type PgDeadPrimaryEventMessage = {
   type: "managed-ha-event";
@@ -113,6 +122,8 @@ export class PgDeadPrimaryObserver {
   ) => Promise<boolean>;
   readonly #hostStopping: () => Promise<boolean>;
   readonly #detectors = new Map<string, DeadPrimaryDetector>();
+  /** Docker CLI calls still running per container (a timeout does not kill them). */
+  readonly #dockerInFlight = new Map<string, number>();
   #timer: ReturnType<typeof setInterval> | undefined;
   #inFlight = false;
   #stopped = true;
@@ -129,13 +140,17 @@ export class PgDeadPrimaryObserver {
       (() => listManagedHaMembers(layout()));
     const run = options.runDocker ?? defaultRunDocker;
     this.#sample = options.sample ??
-      ((name) => sampleManagedPostgres(name, run, this.#config));
+      ((name) =>
+        sampleManagedPostgres(name, this.#trackedRun(name, run), this.#config));
     this.#intentActive = options.intentActive ??
-      (async (managedId, nowMs) =>
-        isManagedIntentActive(
-          await readManagedIntent(layout().stateDir, managedId),
-          nowMs,
-        ));
+      (async (managedId, nowMs) => {
+        const stateDir = layout().stateDir;
+        const intents = await Promise.all([
+          readManagedIntent(stateDir, managedId),
+          readManagedIntent(stateDir, HOST_WIDE_INTENT_ID),
+        ]);
+        return intents.some((intent) => isManagedIntentActive(intent, nowMs));
+      });
     this.#hostStopping = options.hostStopping ?? systemdHostStopping;
   }
 
@@ -154,6 +169,25 @@ export class PgDeadPrimaryObserver {
       clearInterval(this.#timer);
       this.#timer = undefined;
     }
+  }
+
+  /**
+   * Count each Docker call until its process really ends. A probe timeout
+   * only stops waiting; with dockerd wedged, starting another call every tick
+   * would pile up hung CLI processes.
+   */
+  #trackedRun(containerName: string, run: RunDockerFn): RunDockerFn {
+    return (args, options) => {
+      const count = (delta: number) => {
+        const next = (this.#dockerInFlight.get(containerName) ?? 0) + delta;
+        if (next > 0) this.#dockerInFlight.set(containerName, next);
+        else this.#dockerInFlight.delete(containerName);
+      };
+      count(1);
+      const pending = run(args, options);
+      pending.then(() => count(-1), () => count(-1));
+      return pending;
+    };
   }
 
   #detectorFor(managedId: string): DeadPrimaryDetector {
@@ -193,7 +227,9 @@ export class PgDeadPrimaryObserver {
 
   async #probeOne(record: ManagedHaMemberRecord): Promise<void> {
     const detector = this.#detectorFor(record.managedId);
-    const sample = await this.#sample(record.containerName);
+    const sample = this.#dockerInFlight.has(record.containerName)
+      ? DOCKER_STILL_BUSY
+      : await this.#sample(record.containerName);
     const nowMs = this.#nowMs();
     const intentActive = await this.#intentActive(record.managedId, nowMs);
     const verdict = detector.step(sample, { nowMs, intentActive });

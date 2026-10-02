@@ -450,6 +450,13 @@ leader, same-DC `failover` replica, fresh lag observation, fence, promote).
   container stopped *without* a marker still counts as dead. A new `managed.*`
   verb must be added to `MANAGED_COMMAND_INTENT_KINDS` or
   `MANAGED_COMMAND_INTENT_EXEMPT` (`ha-intent.test.ts` fails otherwise).
+  Commands outside `managed.*` that can stop an engine container without
+  naming a cluster record a **host-wide** marker (`HOST_WIDE_INTENT_ID`,
+  honoured for every watched primary): `storage.restore` (stops every running
+  container that mounts the restored copy) and `server.reboot`.
+- **No stacking on a wedged Docker**: a probe timeout only stops waiting, so
+  while a previous tick's Docker call for that container is still running the
+  tick is inconclusive instead of spawning another CLI process.
 - **Never sends** after `detach()` (daemon SIGTERM, including a tick already in
   flight), while `systemctl is-system-running` says `stopping`, or to a control
   plane that does not advertise `managed-ha-probe-v1` (only that one checks the

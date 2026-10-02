@@ -207,3 +207,24 @@ test("poll before attach (daemon not connected) does nothing", async () => {
   await pollTicks(h, 30);
   assertEquals(h.sampled.length, 0);
 });
+
+test("a hung docker call is not stacked: later ticks are inconclusive", async () => {
+  const calls: string[][] = [];
+  let release: () => void = () => {};
+  const hung = new Promise<never>((_, reject) => {
+    release = () => reject(new Error("released"));
+  });
+  const h = harness({
+    sample: undefined,
+    config: { intervalMs: 3_600_000, dockerTimeoutMs: 5 },
+    runDocker: (args) => {
+      calls.push(args);
+      return hung;
+    },
+  });
+  await withAttached(h, () => pollTicks(h, 20));
+  release();
+  await hung.catch(() => undefined);
+  assertEquals(calls.length, 1);
+  assertEquals(h.sent.length, 0);
+});

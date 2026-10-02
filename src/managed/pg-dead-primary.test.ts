@@ -334,6 +334,13 @@ test("readPgReady: docker stderr is never an engine verdict", async () => {
   assertEquals(ok, { kind: "exit", code: 2, output: "" });
 });
 
+/** The program a recorded Docker call runs: `inspect`, or the exec'd binary. */
+function probeBinary(args: string[]): string | undefined {
+  if (args[0] === "inspect") return "inspect";
+  if (args[1] === "-e") return args[4];
+  return args[2];
+}
+
 test("sampleManagedPostgres runs read-only probes only", async () => {
   const calls: string[][] = [];
   const sample = await sampleManagedPostgres("c-1", (args) => {
@@ -362,11 +369,7 @@ test("sampleManagedPostgres runs read-only probes only", async () => {
     });
   });
   assertEquals(sample.controlData, "in production");
-  const binaries = calls.map((args) =>
-    args[0] === "inspect"
-      ? "inspect"
-      : args.at(args[0] === "exec" && args[1] === "-e" ? 4 : 2)
-  );
+  const binaries = calls.map(probeBinary);
   assertEquals(binaries, ["inspect", "pg_isready", "pg_controldata"]);
   for (const args of calls) {
     assert(!args.some((arg) => /password|psql/i.test(arg)));

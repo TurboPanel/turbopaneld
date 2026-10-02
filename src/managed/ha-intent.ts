@@ -87,6 +87,25 @@ export const MANAGED_COMMAND_INTENT_EXEMPT: Readonly<
     "whole-server Orchestrator stack; never touches engine containers",
 };
 
+/**
+ * Marker key for commands that may stop ANY container on this host without
+ * naming a cluster. The probe honours it for every watched primary.
+ */
+export const HOST_WIDE_INTENT_ID = "_host";
+
+/**
+ * Non-`managed.*` commands that can stop a managed engine container:
+ * `storage.restore` stops every running container mounting the restored
+ * copy (which may be an engine's data volume); `server.reboot` takes the
+ * whole host down before systemd reports `stopping`.
+ */
+export const HOST_WIDE_COMMAND_INTENT_KINDS: Readonly<
+  Partial<Record<CommandType, ManagedIntentKind>>
+> = {
+  "storage.restore": "restore",
+  "server.reboot": "restart",
+};
+
 /** A `stop` is a desired state, not a transient action: hold it. */
 function intentUntil(kind: ManagedIntentKind, nowMs: number): number | null {
   return kind === "stop" ? null : nowMs + MANAGED_INTENT_TTL_MS;
@@ -106,6 +125,8 @@ export function managedCommandIntent(
   commandType: string,
   payload: unknown,
 ): { managedId: string; kind: ManagedIntentKind } | null {
+  const hostWide = HOST_WIDE_COMMAND_INTENT_KINDS[commandType as CommandType];
+  if (hostWide) return { managedId: HOST_WIDE_INTENT_ID, kind: hostWide };
   const resolver = MANAGED_COMMAND_INTENT_KINDS[commandType as CommandType];
   if (!resolver) return null;
   if (typeof payload !== "object" || payload === null) return null;
