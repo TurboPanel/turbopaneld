@@ -71,13 +71,18 @@
     mode: "0640"
   notify: Restart turbopanel daemon
 
+# Daemon-only: 0600, never group-readable. On a self-hosted control-plane host
+# the control-plane accounts share group tp; they must not read the daemon's
+# settings. The co-located refresh keeps its own root-only file
+# (lib/control-plane-refresh, written by run.sh). systemd reads
+# EnvironmentFile= as root, so the units are unaffected.
 - name: Write daemon environment file
   ansible.builtin.template:
     src: dotenv.j2
     dest: "{{ turbopanel_daemon_env_file }}"
     owner: "{{ turbopanel_user }}"
     group: "{{ turbopanel_group }}"
-    mode: "0640"
+    mode: "0600"
   notify: Restart turbopanel daemon
 
 - name: Ensure Cloudflare tunnel token directory

@@ -400,6 +400,20 @@ test("parsePrincipalsReconcilePayload round-trips a password hash", () => {
   assertEquals(payload.principals[0].passwordHash, passwordHash);
 });
 
+test("parseEnvironmentDeployPayload trims a site document root", () => {
+  const payload = parseEnvironmentDeployPayload({
+    ...DEPLOY_BASE,
+    sites: [{
+      composeServiceName: "site",
+      engine: "nginx",
+      root: " public\n",
+      listenPort: 18080,
+      principal: SITE_PRINCIPAL,
+    }],
+  });
+  assertEquals(payload.sites?.[0].root, "public");
+});
+
 test("parseEnvironmentDeployPayload rejects sites engine cron and sourceKind", () => {
   rejectDeploy({ sites: [null] }, "Invalid sites entry");
   rejectDeploy(

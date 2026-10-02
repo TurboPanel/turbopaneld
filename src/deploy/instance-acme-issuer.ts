@@ -15,6 +15,10 @@ import { X509Certificate } from "node:crypto";
 import type { InstanceAcmeWireSettings } from "../contracts/cell-messages.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 import { join } from "@std/path";
+import {
+  type PrivilegedReadRun,
+  readTextFileOrNull,
+} from "../permissions/privileged-read.ts";
 
 export const INSTANCE_ACME_SERVICE = "turbopanel-instance-acme.service";
 export const HOSTING_CADDY_SERVICE = "turbopanel-hosting-caddy.service";
@@ -292,17 +296,17 @@ export function parseInstanceAcmeSettings(
   };
 }
 
+/**
+ * The saved instance ACME settings, or `null` when none were saved. The file
+ * sits in `/etc/turbopanel/caddy`, which the site Caddy role makes
+ * `root:tpcaddysite` `0750`; behind that it is read through tp-host.
+ */
 export async function readInstanceAcmeSettings(
   layout: LayoutPaths,
+  run?: PrivilegedReadRun,
 ): Promise<InstanceAcmeWireSettings | null> {
-  let raw: string;
-  try {
-    raw = await Deno.readTextFile(instanceAcmeSettingsPath(layout));
-  } catch (err) {
-    if (err instanceof Deno.errors.NotFound) return null;
-    throw err;
-  }
-  return parseInstanceAcmeSettings(raw);
+  const raw = await readTextFileOrNull(instanceAcmeSettingsPath(layout), run);
+  return raw === null ? null : parseInstanceAcmeSettings(raw);
 }
 
 function isInstanceAcmeSettings(

@@ -1,0 +1,150 @@
+---
+# The hosting Caddy runs as {{ hosting_caddy_user }}, not root and not in group
+# tp. Its unit (rendered by the daemon, pinned by tp-host) gives it exactly
+# CAP_NET_BIND_SERVICE and a top-level StateDirectory for certificates. This
+# role creates the account and grants it read access, as ACL entries for this
+# one user, to what Caddy loads from trees the daemon owns. Nothing else about
+# those trees changes.
+- name: Ensure the hosting Caddy group
+  ansible.builtin.group:
+    name: "{{ hosting_caddy_user }}"
+    gid: "{{ hosting_caddy_uid }}"
+    state: present
+    system: true
+
+- name: Ensure the hosting Caddy account (no login, no home, not in tp)
+  ansible.builtin.user:
+    name: "{{ hosting_caddy_user }}"
+    uid: "{{ hosting_caddy_uid }}"
+    group: "{{ hosting_caddy_user }}"
+    groups: []
+    shell: /usr/sbin/nologin
+    home: /nonexistent
+    create_home: false
+    system: true
+
+# setfacl, for the grants below. daemon-prereqs installs it too; it is
+# Priority: optional on Debian, so do not rely on the image.
+- name: Ensure ACL tooling is installed
+  ansible.builtin.apt:
+    name: acl
+    state: present
+
+# Traverse only (no listing) through the root:tp and tp:tp parents. The vendor
+# tree's caddy directories are root:root 0755 already.
+- name: Grant the hosting Caddy traversal of the install, vendor and config roots
+  ansible.posix.acl:
+    path: "{{ item }}"
+    etype: user
+    entity: "{{ hosting_caddy_user }}"
+    permissions: x
+    state: present
+  loop:
+    - "{{ turbopanel_install_root }}"
+    - "{{ turbopanel_vendor_dir }}"
+    - "{{ turbopanel_config_dir }}"
+
+# A co-located control plane on Let's Encrypt has hosting Caddy proxy HTTP-01
+# challenges to <run dir>/instance-acme.sock. Traverse only (no listing) on the
+# tp:tp 2770 run directory; the socket is re-created on every bind, so its one
+# ACL entry (u:tpedge:rw) comes from tp-host right after the daemon or the
+# issuer binds it. Never group tp. /run is tmpfs: the tmpfiles.d line puts the
+# entry back on every boot, after runtime-sockets' line creates the directory.
+- name: Persist the hosting Caddy traversal of the run directory across boots
+  ansible.builtin.copy:
+    dest: /etc/tmpfiles.d/turbopanel-hosting-caddy.conf
+    owner: root
+    group: root
+    mode: "0640"
+    content: |
+      # Managed by TurboPanel daemon orchestration (hosting-caddy role).
+      a+ {{ turbopanel_run_dir }} - - - - u:{{ hosting_caddy_user }}:x
+
+- name: Check the run directory exists
+  ansible.builtin.stat:
+    path: "{{ turbopanel_run_dir }}"
+  register: _hosting_caddy_run_dir
+
+- name: Grant the hosting Caddy traversal of the run directory
+  when: _hosting_caddy_run_dir.stat.isdir | default(false)
+  ansible.posix.acl:
+    path: "{{ turbopanel_run_dir }}"
+    etype: user
+    entity: "{{ hosting_caddy_user }}"
+    permissions: x
+    state: present
+
+# The binary is root:tp 0750; follows the `current` symlink to the pinned file.
+- name: Grant the hosting Caddy execute on the vendored Caddy binary
+  ansible.posix.acl:
+    path: "{{ turbopanel_vendor_dir }}/caddy/current/caddy"
+    etype: user
+    entity: "{{ hosting_caddy_user }}"
+    permissions: rx
+    state: present
+
+- name: Ensure the hosting config directories
+  ansible.builtin.file:
+    path: "{{ turbopanel_config_dir }}/hosting/{{ item }}"
+    state: directory
+    owner: "{{ hosting_caddy_config_owner }}"
+    group: "{{ hosting_caddy_config_owner }}"
+    mode: "0750"
+  loop:
+    - ""
+    - sites
+
+# The daemon writes the Caddyfile and site snippets 0640; a default ACL entry
+# makes every new file readable by the hosting Caddy and nobody else new.
+- name: Grant the hosting Caddy read on the hosting config directories
+  ansible.posix.acl:
+    path: "{{ turbopanel_config_dir }}/hosting/{{ item.0 }}"
+    etype: user
+    entity: "{{ hosting_caddy_user }}"
+    permissions: rx
+    default: "{{ item.1 }}"
+    state: present
+  loop: "{{ ['', 'sites'] | product([false, true]) | list }}"
+  loop_control:
+    label: "hosting/{{ item.0 }} default={{ item.1 }}"
+
+- name: Find hosting config files written before this account existed
+  ansible.builtin.find:
+    paths:
+      - "{{ turbopanel_config_dir }}/hosting"
+      - "{{ turbopanel_config_dir }}/hosting/sites"
+    patterns:
+      - Caddyfile
+      - "*.caddy"
+  register: _hosting_caddy_config_files
+
+- name: Grant the hosting Caddy read on existing hosting config files
+  ansible.posix.acl:
+    path: "{{ item.path }}"
+    etype: user
+    entity: "{{ hosting_caddy_user }}"
+    permissions: r
+    state: present
+  loop: "{{ _hosting_caddy_config_files.files }}"
+  loop_control:
+    label: "{{ item.path }}"
+
+# Uploaded certificates: the daemon writes <tls>/<id>/privkey.pem. The setgid
+# directory hands every file below it to the hosting Caddy's group, and the
+# daemon then writes the key 0640 (materialize-tls.ts checks for the setgid
+# bit), so exactly this account, and not group tp, can read private keys.
+- name: Ensure the TLS directory belongs to the hosting Caddy's group (setgid)
+  ansible.builtin.file:
+    path: "{{ turbopanel_config_dir }}/tls"
+    state: directory
+    owner: "{{ hosting_caddy_config_owner }}"
+    group: "{{ hosting_caddy_user }}"
+    mode: "2750"
+
+# Certificates and the ACME account now live in the unit's own StateDirectory
+# (/var/lib/turbopanel-hosting-caddy). The old store inside the tp-owned state
+# tree held files root wrote; it is replaced, not migrated.
+- name: Remove the old root-written hosting Caddy store
+  ansible.builtin.file:
+    path: "{{ turbopanel_state_dir }}/hosting-caddy"
+    state: absent

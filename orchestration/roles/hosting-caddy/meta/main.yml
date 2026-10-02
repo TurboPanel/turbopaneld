@@ -1,0 +1,15 @@
+---
+galaxy_info:
+  author: turbopanel
+  description: >-
+    The unprivileged account the hosting Caddy (public :80/:443) runs as,
+    and read access to exactly what it loads: the vendored binary, the
+    hosting Caddyfile and site snippets, and the TLS files.
+  license: AGPL-3.0
+  min_ansible_version: "2.14"
+  platforms:
+    - name: Debian
+      versions:
+        - all
+
+dependencies: []

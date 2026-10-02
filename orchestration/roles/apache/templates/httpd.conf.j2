@@ -3,12 +3,12 @@
 # (written by the daemon site apply path).
 
 ServerRoot "{{ turbopanel_vendor_dir }}/apache/current"
-PidFile "{{ turbopanel_run_dir }}/apache/httpd.pid"
+PidFile "/run/{{ apache_runtime_directory }}/httpd.pid"
 ServerName localhost
 ServerAdmin turbopanel@localhost
 
-User {{ apache_service_user }}
-Group {{ apache_service_group }}
+# No User/Group: the unit starts httpd as {{ apache_service_user }}, so there is
+# no root master to switch from.
 
 # MPM is built as a shared module (--enable-mpms-shared=event).
 # Remaining modules are shared (--enable-mods-shared=most).
@@ -34,9 +34,9 @@ AddType application/x-gzip .gz .tgz
 
 DirectoryIndex index.html
 
-ErrorLog "{{ turbopanel_log_dir }}/apache/error.log"
+ErrorLog "/var/log/{{ apache_logs_directory }}/error.log"
 LogLevel notice
-CustomLog "{{ turbopanel_log_dir }}/apache/access.log" combined
+CustomLog "/var/log/{{ apache_logs_directory }}/access.log" combined
 
 # Dummy document root (unused — each site sets its own DocumentRoot).
 DocumentRoot "{{ turbopanel_state_dir }}/apache/empty"

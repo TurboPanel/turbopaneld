@@ -11,7 +11,7 @@ import {
   RollbackRefusedError,
 } from "./errors.ts";
 import { resolveUpdate } from "./resolver.ts";
-import { DEV_UNSIGNED_MANIFEST_ENV } from "./signing.ts";
+import { DEV_UNSIGNED_MANIFEST_ENV, signManifest } from "./signing.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -172,8 +172,13 @@ test("resolveUpdate follows rc and release to GitHub Releases", async () => {
   }
 });
 
+const PINNED_MANIFEST_URL =
+  "https://github.com/TurboPanel/turbopaneld/releases/download/v0.1.0/manifest.json";
+
 test("resolveUpdate honours a pinned manifest over the channel, but not over an overlay", async () => {
   const fetched: string[] = [];
+  const signed = await signWithTestKey(channelManifest());
+  const keyed = { publicKeyHex: TEST_RELEASE_SIGNING_PUBLIC_KEY_HEX };
   const restore = installFetch((url) => {
     fetched.push(url);
     if (url.endsWith("/channels.json")) {
@@ -183,22 +188,21 @@ test("resolveUpdate honours a pinned manifest over the channel, but not over an 
         channels: { trunk: { manifestUrl: "./manifest.json" } },
       });
     }
-    return Response.json(channelManifest());
+    return Response.json(signed);
   });
-  const pin =
-    "https://github.com/TurboPanel/turbopaneld/releases/download/v0.1.0/manifest.json";
+  const pin = PINNED_MANIFEST_URL;
   try {
     // Pinned: the channel is ignored, the pin is fetched directly.
     await resolveUpdate({ app: "daemon", channel: "release" }, {
       TURBOPANEL_MANIFEST_URL: pin,
-    });
+    }, keyed);
     assertEquals(fetched, [pin]);
     // An overlay catalog still wins — a dev host is never pinned past it.
     fetched.length = 0;
     await resolveUpdate({ app: "daemon", channel: "trunk" }, {
       TURBOPANEL_MANIFEST_URL: pin,
       TURBOPANEL_DL_BASE: "https://dev.example/downloads/daemon",
-    });
+    }, keyed);
     assertEquals(
       fetched[0],
       "https://dev.example/downloads/daemon/channels.json",
@@ -207,7 +211,7 @@ test("resolveUpdate honours a pinned manifest over the channel, but not over an 
     fetched.length = 0;
     await resolveUpdate({ app: "daemon", channel: "trunk" }, {
       TURBOPANEL_MANIFEST_URL: "http://evil.example/manifest.json",
-    });
+    }, keyed);
     assertEquals(fetched, ["https://dl.trbp.nl/channels/trunk/manifest.json"]);
   } finally {
     restore();
@@ -769,6 +773,82 @@ test("resolveUpdate (production) accepts a newer canary of the installed base, a
   } finally {
     restore();
   }
+});
+
+// --- pinned manifests (--manifest-url): upgrade and rollback ---------------
+
+/** A key generated for this run: it signs validly, but it is not ours. */
+async function foreignSigningKey(): Promise<CryptoKey> {
+  const pair = await crypto.subtle.generateKey(
+    { name: "Ed25519" },
+    true,
+    ["sign", "verify"],
+  ) as CryptoKeyPair;
+  return pair.privateKey;
+}
+
+/** Resolve the daemon pin against `body`, as a source checkout or a host. */
+async function resolvePinned(
+  body: unknown,
+  installMode: "development" | "production",
+  env: Record<string, string> = {},
+) {
+  const restore = serveManifest(body);
+  try {
+    return await resolveUpdate(
+      { app: "daemon", channel: "release" },
+      { TURBOPANEL_MANIFEST_URL: PINNED_MANIFEST_URL, ...env },
+      {
+        installMode,
+        publicKeyHex: TEST_RELEASE_SIGNING_PUBLIC_KEY_HEX,
+        installed: NEWER_BUILD,
+      },
+    );
+  } finally {
+    restore();
+  }
+}
+
+test("resolveUpdate refuses an unsigned or foreign-signed pinned manifest, even in a source checkout", async () => {
+  const foreign = await signManifest(
+    channelManifest(),
+    await foreignSigningKey(),
+  );
+  const optIn = { [DEV_UNSIGNED_MANIFEST_ENV]: "1" };
+  await assertRejects(
+    () => resolvePinned(channelManifest(), "development", optIn),
+    ManifestSignatureError,
+    "unsigned",
+  );
+  await assertRejects(
+    () => resolvePinned(channelManifest(), "production", optIn),
+    ManifestSignatureError,
+    "unsigned",
+  );
+  await assertRejects(
+    () => resolvePinned(foreign, "development", optIn),
+    ManifestSignatureError,
+    "invalid",
+  );
+  await assertRejects(
+    () => resolvePinned(foreign, "production"),
+    ManifestSignatureError,
+    "invalid",
+  );
+});
+
+test("resolveUpdate rolls back to an older release-signed pinned manifest", async () => {
+  // channelManifest() is older than NEWER_BUILD; the host break-glass is the
+  // existing downgrade switch, and the signature is still required.
+  const older = await signWithTestKey({
+    ...channelManifest(),
+    version: "0.1.0",
+  });
+  const info = await resolvePinned(older, "production", {
+    TURBOPANEL_ALLOW_DOWNGRADE: "1",
+  });
+  assertEquals(info.version, "0.1.0");
+  assertEquals(info.commit, "abc1234");
 });
 
 const noWaitRetry = { sleep: () => Promise.resolve() };

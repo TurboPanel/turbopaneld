@@ -9,17 +9,12 @@
   ansible.builtin.set_fact:
     docker_gate_gid: "{{ (getent_group[docker_gate_group] | default(['', ''], true))[1] | default('') }}"
 
-- name: Ensure the gate source directory exists
-  ansible.builtin.file:
-    path: "{{ docker_gate_dir }}"
-    state: directory
-    owner: root
-    group: "{{ docker_gate_group }}"
-    mode: "0750"
-
+# deploy.yml has already staged the files in .next and load-checked them: this
+# only moves checked files into place.
 - name: Install the gate source (root-owned, never writable by the daemon)
   ansible.builtin.copy:
-    src: "{{ item }}"
+    remote_src: true
+    src: "{{ docker_gate_stage_dir }}/{{ item }}"
     dest: "{{ docker_gate_dir }}/{{ item }}"
     owner: root
     group: "{{ docker_gate_group }}"
@@ -103,7 +98,7 @@
 - name: Install the gate systemd unit
   ansible.builtin.template:
     src: turbopanel-docker-gate.service.j2
-    dest: "/etc/systemd/system/{{ docker_gate_service_name }}.service"
+    dest: "{{ docker_gate_unit_file }}"
     owner: root
     group: root
     mode: "0640"
@@ -120,6 +115,19 @@
     enabled: true
     state: started
     daemon_reload: true
+
+# The main socket must answer whatever the switch says: it is what the daemon's
+# own tooling reads once routed through the gate, and a Type=simple unit that
+# crash-loops still passes `state: started`.
+- name: Prove the main gate socket answers
+  ansible.builtin.uri:
+    url: http://localhost/_ping
+    unix_socket: "{{ docker_gate_socket }}"
+    return_content: true
+  register: _docker_gate_main_ping
+  until: _docker_gate_main_ping.status == 200
+  retries: 15
+  delay: 2
 
 # With the switch on, Traefik is rendered against the read-only socket: a
 # converge must not report success while it is not answering. `state: started`

@@ -1421,6 +1421,64 @@ test("assertControlPlaneManifestPreflight accepts signed instance and UI manifes
   assertEquals(verified.commit, "newcommit");
 });
 
+test("assertControlPlaneManifestPreflight never skips the signature for a pinned instance or UI manifest", async () => {
+  const unsigned = serveManifests(JSON.stringify(INSTANCE_MANIFEST));
+  const instancePin =
+    "https://github.com/TurboPanel/turbopanel/releases/download/v0.1.1/manifest.json";
+  const overlayEnv = {
+    TURBOPANEL_DL_BASE: "https://dev.example.lan:8443",
+    TURBOPANEL_DEV_ALLOW_UNSIGNED_MANIFEST: "1",
+  };
+  await assertRejects(
+    () =>
+      assertControlPlaneManifestPreflight({
+        channel: "release",
+        manifestUrl: instancePin,
+        installMode: "development",
+        fetchText: unsigned,
+      }),
+    UpdatePreflightError,
+    "unsigned",
+  );
+  await assertRejects(
+    () =>
+      assertControlPlaneManifestPreflight({
+        channel: "release",
+        manifestUrl: instancePin,
+        installMode: "production",
+        env: overlayEnv,
+        fetchText: unsigned,
+      }),
+    UpdatePreflightError,
+    "unsigned",
+  );
+  // The channel's instance manifest may take the bypass; the UI pin may not.
+  await assertRejects(
+    () =>
+      assertControlPlaneManifestPreflight({
+        channel: "release",
+        uiManifestUrl: UI_PIN,
+        installMode: "production",
+        env: overlayEnv,
+        fetchText: serveManifests(
+          JSON.stringify(INSTANCE_MANIFEST),
+          JSON.stringify(UI_MANIFEST),
+        ),
+      }),
+    UpdatePreflightError,
+    "ui manifest is unsigned",
+  );
+  // A release-signed pin still verifies on such a host.
+  const pinned = await assertControlPlaneManifestPreflight({
+    channel: "release",
+    manifestUrl: instancePin,
+    installMode: "development",
+    publicKeyHex: TEST_RELEASE_SIGNING_PUBLIC_KEY_HEX,
+    fetchText: serveManifests(SIGNED_INSTANCE_MANIFEST_BODY),
+  });
+  assertEquals(pinned.commit, "newcommit");
+});
+
 test("assertControlPlaneManifestPreflight skips signatures only under the development bypass", async () => {
   const unsigned = serveManifests(JSON.stringify(INSTANCE_MANIFEST));
   // Source checkout: the one unconditional bypass.
