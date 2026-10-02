@@ -1502,9 +1502,11 @@ tp_verb_php_site_register() {
     [1-9]|[1-5][0-9]|6[0-4]) ;;
     *) tp_die "php-site-register: children must be 1-64" ;;
   esac
-  _pg_home="$R_PRINCIPALS/$_pg_user"
-  [ "$(tp_getent passwd "$_pg_user" | cut -d: -f6)" = "$_pg_home" ] ||
-    tp_die "php-site-register: $_pg_user's home is not $_pg_home"
+  # The passwd home is home/ inside the root-owned principal home; tmp/ sits
+  # beside it (tp_principal_home_ok, the shape useradd accepts).
+  _pg_home="$(tp_getent passwd "$_pg_user" | cut -d: -f6)"
+  tp_principal_home_ok "$_pg_home" "$_pg_user" ||
+    tp_die "php-site-register: $_pg_user's home is not $R_PRINCIPALS/$_pg_user/home"
   tp_mkdir_pinned "$R_CONFIG/php-sites" 0755
   # shellcheck disable=SC3067 # dash (Debian's /bin/sh) implements -O
   [ -O . ] && [ "$(stat -c '%a' .)" = "755" ] ||
@@ -1518,7 +1520,7 @@ tp_verb_php_site_register() {
     "group=$_pg_user-grp" \
     "gid=$(tp_gid_of_group "$_pg_user-grp")" \
     "home=$_pg_home" \
-    "tmp=$_pg_home/tmp" \
+    "tmp=$R_PRINCIPALS/$_pg_user/tmp" \
     "php=$4" \
     "bin=$INSTALL_ROOT/vendor/lsphp/$4/current/bin/lsphp" \
     "ini=$R_CONFIG/php/sites/$_pg_site/php.ini" \

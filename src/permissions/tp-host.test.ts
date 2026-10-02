@@ -2389,17 +2389,30 @@ test("php-test runs the installed unit's binary on its own config, as the owner"
 test("php-site-register writes the launcher registry from the account database only", async () => {
   await withPhpHost(async (host) => {
     const entry = host.path(`etc/turbopanel/php-sites/${PHP_SITE}`);
-    const ok = await host.run([
+    const register = [
       "php-site-register",
       PHP_SITE,
       "alice",
       "lsphp-attached",
       "8.3",
       "10",
-    ]);
+    ];
+    // An account whose passwd home is the principal home itself (the layout
+    // before home/) is refused: the home comes from the account database.
+    const root = host.path("srv/users/alice");
+    assertStringIncludes(await refused(host, register), "home is not");
+    const passwd = host.path("etc/passwd");
+    await Deno.writeTextFile(
+      passwd,
+      (await Deno.readTextFile(passwd)).replace(
+        `::${root}:`,
+        `::${root}/home:`,
+      ),
+    );
+    const ok = await host.run(register);
     assertEquals(ok.code, 0, ok.stderr);
     assertStringIncludes(ok.stdout, "EXEC [chown] [-h] [--] [root:root] [./f]");
-    const home = host.path("srv/users/alice");
+    const home = `${root}/home`;
     assertEquals(
       await Deno.readTextFile(entry),
       [
@@ -2411,7 +2424,7 @@ test("php-site-register writes the launcher registry from the account database o
         "group=alice-grp",
         "gid=15001",
         `home=${home}`,
-        `tmp=${home}/tmp`,
+        `tmp=${root}/tmp`,
         "php=8.3",
         `bin=${phpExec(host, "lsphp")}`,
         `ini=${phpConfDir(host)}/php.ini`,
