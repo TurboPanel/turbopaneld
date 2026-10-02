@@ -479,6 +479,45 @@ export async function readCurrentReleaseId(
 }
 
 /**
+ * `stat` of a release directory, or `"present"` when the daemon account may not
+ * stat it, or `null` when it is absent.
+ *
+ * The daemon account cannot traverse a principal's home, and the escalated
+ * fallback is deliberately nothing more than tp-host's existing `test -e`:
+ * whether the release was published and sealed by this host is answered by the
+ * daemon-owned release record the rollback caller already required, never by
+ * reading metadata out of the principal's tree.
+ */
+async function releaseDirPresence(
+  path: string,
+  runFn: RunFn,
+): Promise<Deno.FileInfo | "present" | null> {
+  try {
+    return await statOrNull(path);
+  } catch (err) {
+    if (!(err instanceof Deno.errors.PermissionDenied)) throw err;
+    return await releasePathExists(path, runFn) ? "present" : null;
+  }
+}
+
+/**
+ * Published releases are sealed; an unsealed tree at this path is a half-staged
+ * directory from a promote that died, never something to run.
+ */
+function assertSealedReleaseDir(stat: Deno.FileInfo, releaseId: string): void {
+  if (!stat.isDirectory) {
+    throw new Error(`release ${releaseId} is not a directory`);
+  }
+  const mode = stat.mode === null ? null : stat.mode & 0o7777;
+  if (mode !== null && mode !== RELEASE_PUBLISHED_MODE) {
+    throw new Error(
+      `release ${releaseId} is not a sealed published release ` +
+        `(mode ${mode.toString(8).padStart(4, "0")})`,
+    );
+  }
+}
+
+/**
  * Cut `current` over to a release that is **already published**.
  *
  * The rollback half of the engine. Nothing is fetched, built, staged, sealed,
@@ -503,10 +542,12 @@ export async function promoteExistingRelease(
     paths: ReleasePaths;
     releaseId: string;
     healthProbe?: ReleaseHealthProbe;
+    runFn?: RunFn;
   },
 ): Promise<string> {
+  const runFn = params.runFn ?? runPrivileged;
   const releaseDir = params.paths.releaseDir;
-  const stat = await statOrNull(releaseDir);
+  const stat = await releaseDirPresence(releaseDir, runFn);
   if (stat === null) {
     throw new Error(
       `release ${params.releaseId} is not present on this host ` +
@@ -514,21 +555,10 @@ export async function promoteExistingRelease(
         `already removed it`,
     );
   }
-  if (!stat.isDirectory) {
-    throw new Error(`release ${params.releaseId} is not a directory`);
-  }
-  // Published releases are sealed; an unsealed tree at this path is a
-  // half-staged directory from a promote that died, never something to run.
-  const mode = stat.mode === null ? null : stat.mode & 0o7777;
-  if (mode !== null && mode !== RELEASE_PUBLISHED_MODE) {
-    throw new Error(
-      `release ${params.releaseId} is not a sealed published release ` +
-        `(mode ${mode.toString(8).padStart(4, "0")})`,
-    );
-  }
+  if (stat !== "present") assertSealedReleaseDir(stat, params.releaseId);
 
   if (params.healthProbe) await params.healthProbe(releaseDir);
-  await swapCurrentSymlink(params.paths);
+  await swapCurrentSymlink(params.paths, runFn);
   return releaseDir;
 }
 

@@ -1181,3 +1181,114 @@ test("readCurrentReleaseId privileged path throws when sudo is not allowed", asy
     }
   });
 });
+
+/** Run `fn` with `Deno.stat` denied for exactly `path`. */
+async function withStatDenied(
+  path: string,
+  fn: () => Promise<void>,
+): Promise<void> {
+  const originalStat = Deno.stat;
+  Deno.stat = (target, ...rest) =>
+    String(target) === path
+      ? Promise.reject(denied("stat"))
+      : originalStat(target, ...rest);
+  try {
+    await fn();
+  } finally {
+    Deno.stat = originalStat;
+  }
+}
+
+function testRun(exists: boolean, calls: string[][]) {
+  return (_command: string, args: string[]) => {
+    calls.push(args);
+    const probe = args.includes("test");
+    return Promise.resolve({
+      success: probe ? exists : true,
+      stdout: "",
+      stderr: "",
+    });
+  };
+}
+
+test("promoteExistingRelease checks a denied release only for presence", async () => {
+  await withTempRelease(async (root) => {
+    const paths = resolveReleasePaths(
+      { principalHomeRoot: root, daemonStateDir: join(root, "state") },
+      { username: "appuser", serviceId: "svc-1", releaseId: "rel-1" },
+    );
+    await Deno.mkdir(paths.releasesDir, { recursive: true });
+    const calls: string[][] = [];
+    await withStatDenied(paths.releaseDir, async () => {
+      const dir = await promoteExistingRelease({
+        paths,
+        releaseId: "rel-1",
+        runFn: testRun(true, calls),
+      });
+      assertEquals(dir, paths.releaseDir);
+    });
+    // tp-host's existing `test -e` is the only privileged look at the tree:
+    // nothing in it is read, opened, or stat'd for metadata.
+    assertEquals(calls[0], ["-n", "test", "-e", paths.releaseDir]);
+    assertEquals(
+      calls.some((args) =>
+        args.includes("cat") || args.includes("stat") ||
+        args.includes("find") || args.includes("ls")
+      ),
+      false,
+    );
+    assertEquals(await Deno.readLink(paths.currentLink), "releases/rel-1");
+  });
+});
+
+test("promoteExistingRelease refuses a denied release that is absent", async () => {
+  await withTempRelease(async (root) => {
+    const paths = resolveReleasePaths(
+      { principalHomeRoot: root, daemonStateDir: join(root, "state") },
+      { username: "appuser", serviceId: "svc-1", releaseId: "rel-1" },
+    );
+    const calls: string[][] = [];
+    await withStatDenied(paths.releaseDir, async () => {
+      await assertRejects(
+        () =>
+          promoteExistingRelease({
+            paths,
+            releaseId: "rel-1",
+            runFn: testRun(false, calls),
+          }),
+        Error,
+        "is not present on this host",
+      );
+    });
+    assertEquals(calls, [["-n", "test", "-e", paths.releaseDir]]);
+  });
+});
+
+test("promoteExistingRelease surfaces a stat failure other than denial", async () => {
+  await withTempRelease(async (root) => {
+    const paths = resolveReleasePaths(
+      { principalHomeRoot: root, daemonStateDir: join(root, "state") },
+      { username: "appuser", serviceId: "svc-1", releaseId: "rel-1" },
+    );
+    const calls: string[][] = [];
+    const originalStat = Deno.stat;
+    Deno.stat = (target, ...rest) =>
+      String(target) === paths.releaseDir
+        ? Promise.reject(new Deno.errors.Interrupted("io"))
+        : originalStat(target, ...rest);
+    try {
+      await assertRejects(
+        () =>
+          promoteExistingRelease({
+            paths,
+            releaseId: "rel-1",
+            runFn: testRun(true, calls),
+          }),
+        Deno.errors.Interrupted,
+      );
+    } finally {
+      Deno.stat = originalStat;
+    }
+    assertEquals(calls, []);
+  });
+});

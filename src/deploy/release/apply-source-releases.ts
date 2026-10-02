@@ -71,6 +71,7 @@ import { forEachSequential } from "../../util/sequential.ts";
 import {
   readReleaseManifest,
   type ReleaseManifestV1,
+  writeReleaseManifest,
 } from "./deployment-json.ts";
 import {
   ensureDaemonReleaseRecordDir,
@@ -241,14 +242,16 @@ export type ApplySourceReleasesDeps = {
  * `deployment.json`, and retention consume a rollback exactly as they consume a
  * fresh deploy.
  *
- * The commit and the build-output shape are read back from the target release's
- * own `.turbopanel/release.json` rather than from the payload: the payload's
- * `commitSha` is a wire-shape placeholder on a rollback, and what the result has
- * to report is which commit — and which runtime lane — is now live.
+ * The commit and the build-output shape come from the daemon-owned record of
+ * the target release ({@link resolveRollbackTarget}) rather than from the
+ * payload: the payload's `commitSha` is a wire-shape placeholder on a rollback,
+ * and what the result has to report is which commit — and which runtime lane —
+ * is now live. Nothing is read back out of the principal's tree, which its
+ * owner can rewrite.
  */
 async function rollbackOneRelease(
   entry: EnvironmentDeploySource,
-  paths: ReleasePaths,
+  target: RollbackTarget,
   params: {
     serviceId: string;
     releaseId: string;
@@ -257,18 +260,17 @@ async function rollbackOneRelease(
   },
 ): Promise<AppliedRelease> {
   const { logSink, deps } = params;
+  const { paths, manifest: recordedManifest } = target;
   logSink.setPhase(COMMAND_LOG_PHASES.RELEASE_PROMOTE);
   const previousReleaseId = await readCurrentReleaseId(paths, deps.runFn);
 
   // A Railpack release published no tree, so there is no sealed directory to
-  // validate and no `current` to swap: the manifest read straight off the
-  // record directory *is* the rollback. Deciding from the manifest rather than
-  // from `entry.build.kind` is deliberate — what matters is how the release
-  // being restored was built, not what the payload asks for now, so flipping a
-  // service's build mode never breaks rollback to a release from before the
-  // switch.
-  const recordedManifest = await readReleaseManifest(paths.releaseDir);
-  if (recordedManifest?.imageTag) {
+  // validate and no `current` to swap: the daemon record *is* the rollback.
+  // Deciding from the record rather than from `entry.build.kind` is deliberate
+  // — what matters is how the release being restored was built, not what the
+  // payload asks for now, so flipping a service's build mode never breaks
+  // rollback to a release from before the switch.
+  if (recordedManifest.imageTag) {
     logSink.onLine(
       "stdout",
       `rolled ${entry.composeServiceName} back to release ${params.releaseId} ` +
@@ -306,26 +308,25 @@ async function rollbackOneRelease(
     await (deps.promoteExistingReleaseFn ?? promoteExistingRelease)({
       paths,
       releaseId: params.releaseId,
+      ...(deps.runFn === undefined ? {} : { runFn: deps.runFn }),
     });
-  const manifest = await readReleaseManifest(releaseDir);
   logSink.onLine(
     "stdout",
-    `rolled ${entry.composeServiceName} back to release ${params.releaseId}` +
-      (manifest ? ` (${manifest.commitSha})` : ""),
+    `rolled ${entry.composeServiceName} back to release ${params.releaseId} ` +
+      `(${recordedManifest.commitSha})`,
   );
 
-  // The target release's own manifest is the authority on what is now live; the
-  // payload only carries a stored copy of it for the control plane's benefit,
-  // and carries nothing at all for a release published before this metadata
-  // existed.
-  const commitMessage = manifest?.commitMessage ?? entry.commitMessage;
-  const commitAuthor = manifest?.commitAuthor ?? entry.commitAuthor;
+  // The daemon's record of the target release is the authority on what is now
+  // live; the payload only carries a stored copy of it for the control plane's
+  // benefit, and carries nothing at all for metadata recorded before it existed.
+  const commitMessage = recordedManifest.commitMessage ?? entry.commitMessage;
+  const commitAuthor = recordedManifest.commitAuthor ?? entry.commitAuthor;
 
   return {
     composeServiceName: entry.composeServiceName,
     serviceId: params.serviceId,
     releaseId: params.releaseId,
-    commitSha: manifest?.commitSha ?? entry.commitSha,
+    commitSha: recordedManifest.commitSha,
     ...(commitMessage === undefined ? {} : { commitMessage }),
     ...(commitAuthor === undefined ? {} : { commitAuthor }),
     releaseDir,
@@ -335,8 +336,8 @@ async function rollbackOneRelease(
     // being re-derived (nothing was built here to derive them from). A
     // pre-manifest-field release reads back as `false`, which is the behavior
     // those releases already had.
-    standaloneOutput: manifest?.standaloneOutput ?? false,
-    staticExport: manifest?.staticExport ?? false,
+    standaloneOutput: recordedManifest.standaloneOutput ?? false,
+    staticExport: recordedManifest.staticExport ?? false,
   };
 }
 
@@ -455,31 +456,84 @@ async function applyRailpackRelease(
   };
 }
 
+/** What a rollback restores: the release paths and the daemon's record of it. */
+type RollbackTarget = { paths: ReleasePaths; manifest: ReleaseManifestV1 };
+
 /**
- * Which root holds the release a rollback is addressing.
+ * The release a rollback is addressing, as this host's daemon recorded it.
  *
- * A Railpack release's history lives in the daemon-owned record root and a
- * native one's in the principal home, and the payload cannot say which: a
- * service that switched build modes since must still be able to roll back to a
- * release built the old way. So the record root is probed first and the
- * principal home is the fallback — the release that actually exists identifies
- * its own lane.
+ * Every published release — native or Railpack — leaves a manifest under the
+ * daemon-owned record root ({@link resolveDaemonReleasePaths}), and that record
+ * is the **only** thing a rollback trusts. The copy inside a native release
+ * tree lives in the principal's home, which the principal owns and can
+ * rearrange, so neither the lane (`imageTag`) nor the commit is ever taken from
+ * it. A release with no record — one published before records were kept, or on
+ * another host — fails here with the fix spelled out, rather than falling back
+ * to that tree.
+ *
+ * The record also identifies the lane: an `imageTag` means a Railpack release,
+ * restored from the record root itself; anything else is a native tree in the
+ * principal home (`null` when there is no principal to own one).
  */
-async function resolveRollbackPaths(
+async function resolveRollbackTarget(
   layout: LayoutPaths,
   params: {
+    composeServiceName: string;
     serviceId: string;
     releaseId: string;
     principalPaths: ReleasePaths | null;
   },
-): Promise<ReleasePaths | null> {
+): Promise<RollbackTarget | null> {
   const recordPaths = resolveDaemonReleasePaths(layout, {
     serviceId: params.serviceId,
     releaseId: params.releaseId,
   });
-  const recorded = await readReleaseManifest(recordPaths.releaseDir);
-  if (recorded?.imageTag) return recordPaths;
-  return params.principalPaths;
+  const manifest = await readReleaseManifest(recordPaths.releaseDir);
+  const matches = manifest?.serviceId === params.serviceId &&
+    manifest.releaseId === params.releaseId;
+  if (!manifest || !matches) {
+    throw new Error(
+      `cannot roll ${params.composeServiceName} back to release ` +
+        `${params.releaseId}: this host has no release record for it — ` +
+        `redeploy that release instead`,
+    );
+  }
+  if (manifest.imageTag) return { paths: recordPaths, manifest };
+  return params.principalPaths
+    ? { paths: params.principalPaths, manifest }
+    : null;
+}
+
+/**
+ * Record a promoted native release under the daemon-owned record root, so a
+ * later rollback can restore it without reading the principal's tree.
+ *
+ * Written only after the promote succeeded — the record is this host's
+ * statement that the release was sealed and published. The cutover has already
+ * happened by then, so a failure is reported rather than failing a deploy that
+ * is live; a rollback to this release then says its record is missing.
+ */
+async function recordNativeRelease(
+  layout: LayoutPaths,
+  manifest: ReleaseManifestV1,
+  deps: ApplySourceReleasesDeps,
+): Promise<void> {
+  const recordPaths = resolveDaemonReleasePaths(layout, {
+    serviceId: manifest.serviceId,
+    releaseId: manifest.releaseId,
+  });
+  try {
+    await (deps.ensureDaemonReleaseRecordDirFn ?? ensureDaemonReleaseRecordDir)(
+      recordPaths,
+    );
+    await writeReleaseManifest(recordPaths.releaseDir, manifest);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    deps.logSink.onLine(
+      "stderr",
+      `release ${manifest.releaseId} is live but its rollback record could not be written: ${message}`,
+    );
+  }
 }
 
 /** Clone one release's source into its scratch dir — identical on both lanes. */
@@ -667,6 +721,7 @@ async function buildNativeRelease(
       "stdout",
       `promoted release ${entry.releaseId} (${checkout.commitSha}) for ${entry.composeServiceName}`,
     );
+    await recordNativeRelease(layout, manifest, deps);
 
     const pruned = await (deps.pruneReleasesFn ?? pruneReleases)(definedFields({
       paths,
@@ -747,19 +802,20 @@ async function applyOneRelease(
     : principalPaths;
 
   if (entry.rollbackToReleaseId) {
-    const rollbackPaths = await resolveRollbackPaths(layout, {
+    const rollbackTarget = await resolveRollbackTarget(layout, {
+      composeServiceName: entry.composeServiceName,
       serviceId,
       releaseId: entry.rollbackToReleaseId,
       principalPaths,
     });
-    if (!rollbackPaths) {
+    if (!rollbackTarget) {
       logSink.onLine(
         "stderr",
         `rollback skipped for ${entry.composeServiceName}: no project principal assigned`,
       );
       return null;
     }
-    return await rollbackOneRelease(entry, rollbackPaths, {
+    return await rollbackOneRelease(entry, rollbackTarget, {
       serviceId,
       releaseId: entry.rollbackToReleaseId,
       logSink,

@@ -12,7 +12,11 @@ import type {
 import type { DecryptSecretsFn } from "../materialize-tls.ts";
 import { resolveLayout } from "../../paths/layout.ts";
 import { createTempLayout } from "../../testing/temp-layout.ts";
-import { writeReleaseManifest } from "./deployment-json.ts";
+import {
+  readReleaseManifest,
+  type ReleaseManifestV1,
+  writeReleaseManifest,
+} from "./deployment-json.ts";
 import {
   RELEASE_METADATA_DIRNAME,
   resolveDaemonReleasePaths,
@@ -130,6 +134,52 @@ const PRINCIPAL = {
   gid: 2001,
 } as const;
 
+function recordManifest(
+  serviceId: string,
+  releaseId: string,
+): ReleaseManifestV1 {
+  return {
+    version: 1,
+    serviceId,
+    composeServiceName: "web",
+    releaseId,
+    sourceId: "src-1",
+    commitSha: "recorded-commit",
+    ref: "main",
+    promotedAt: "2025-12-01T00:00:00.000Z",
+  };
+}
+
+/** Seed the daemon-owned record a promote leaves behind. */
+async function seedRecord(
+  layout: ReturnType<typeof layoutFromFixture>,
+  ids: { serviceId: string; releaseId: string },
+): Promise<void> {
+  const recordDir = resolveDaemonReleasePaths(layout, ids).releaseDir;
+  await Deno.mkdir(recordDir, { recursive: true });
+  await writeReleaseManifest(
+    recordDir,
+    recordManifest(ids.serviceId, ids.releaseId),
+  );
+}
+
+function nativeDeps(sink: ReturnType<typeof fakeLogSink>["sink"]) {
+  return {
+    logSink: sink,
+    decryptSecrets: undefined,
+    ensureReleaseTreeFn: mkdirReleaseTree,
+    checkoutReleaseFn: async (params: { scratchDir: string }) => {
+      const workingDir = join(params.scratchDir, "source");
+      await Deno.mkdir(workingDir, { recursive: true });
+      return { workingDir, commitSha: "site-commit" };
+    },
+    runReleaseBuildFn: () => Promise.resolve(),
+    promoteReleaseFn: (params: { paths: { releaseDir: string } }) =>
+      Promise.resolve(params.paths.releaseDir),
+    pruneReleasesFn: () => Promise.resolve([]),
+  };
+}
+
 test("resolveReleaseServiceId skips a hosting with an empty serviceId", () => {
   const payload = basePayload({
     hostings: [{
@@ -147,17 +197,45 @@ test("resolveReleaseServiceId skips a hosting with an empty serviceId", () => {
   assertEquals(resolveReleaseServiceId(payload, "web"), "svc-ingress");
 });
 
-test("applySourceReleases skips a railpack rollback with no record and no principal", async () => {
+test("applySourceReleases fails a railpack rollback with no release record", async () => {
   await createTempLayout().then(async (fixture) => {
     try {
       const layout = layoutFromFixture(fixture);
+      await assertRejects(
+        () =>
+          applySourceReleases(
+            layout,
+            basePayload({
+              sourceMaterial: [
+                baseSource({
+                  rollbackToReleaseId: "rel-missing",
+                  build: { kind: "railpack" },
+                }),
+              ],
+            }),
+            { logSink: fakeLogSink().sink, decryptSecrets: undefined },
+          ),
+        Error,
+        "this host has no release record for it — redeploy that release",
+      );
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+});
+
+test("applySourceReleases skips a rollback to a native release once no principal owns it", async () => {
+  await createTempLayout().then(async (fixture) => {
+    try {
+      const layout = layoutFromFixture(fixture);
+      await seedRecord(layout, { serviceId: "web", releaseId: "rel-old" });
       const log = fakeLogSink();
       const applied = await applySourceReleases(
         layout,
         basePayload({
           sourceMaterial: [
             baseSource({
-              rollbackToReleaseId: "rel-missing",
+              rollbackToReleaseId: "rel-old",
               build: { kind: "railpack" },
             }),
           ],
@@ -180,6 +258,113 @@ test("applySourceReleases skips a railpack rollback with no record and no princi
   });
 });
 
+test("applySourceReleases never trusts a manifest planted in the principal tree", async () => {
+  await createTempLayout().then(async (fixture) => {
+    try {
+      const layout = layoutFromFixture(fixture);
+      const serviceId = "svc-forged";
+      const paths = resolveReleasePaths(layout, {
+        username: PRINCIPAL.username,
+        serviceId,
+        releaseId: "rel-forged",
+      });
+      // A tree the principal could build in its own home: a sealed-looking
+      // release whose manifest names another service's image.
+      await mkdirReleaseTree(paths);
+      await writeReleaseManifest(paths.releaseDir, {
+        ...recordManifest(serviceId, "rel-forged"),
+        imageTag: "turbopanel-app/other-svc:rel-1",
+      });
+      await Deno.chmod(paths.releaseDir, 0o550);
+
+      const privileged: string[][] = [];
+      let promoteExistingCalled = false;
+      try {
+        await assertRejects(
+          () =>
+            applySourceReleases(
+              layout,
+              basePayload({
+                sourceMaterial: [
+                  baseSource({
+                    rollbackToReleaseId: "rel-forged",
+                    principal: PRINCIPAL,
+                  }),
+                ],
+                hostings: [{
+                  hostingId: "host-forged",
+                  composeServiceName: "web",
+                  serviceId,
+                  hostnames: ["forged.example.com"],
+                }],
+              }),
+              {
+                logSink: fakeLogSink().sink,
+                decryptSecrets: undefined,
+                runFn: (_command, args) => {
+                  privileged.push(args);
+                  return Promise.resolve({
+                    success: true,
+                    stdout: "",
+                    stderr: "",
+                  });
+                },
+                promoteExistingReleaseFn: (params) => {
+                  promoteExistingCalled = true;
+                  return Promise.resolve(params.paths.releaseDir);
+                },
+              },
+            ),
+          Error,
+          "no release record",
+        );
+      } finally {
+        await Deno.chmod(paths.releaseDir, 0o750);
+      }
+      assertEquals(promoteExistingCalled, false);
+      assertEquals(privileged, []);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+});
+
+test("applySourceReleases refuses a release record for another service", async () => {
+  await createTempLayout().then(async (fixture) => {
+    try {
+      const layout = layoutFromFixture(fixture);
+      const recordDir = resolveDaemonReleasePaths(layout, {
+        serviceId: "web",
+        releaseId: "rel-old",
+      }).releaseDir;
+      await Deno.mkdir(recordDir, { recursive: true });
+      await writeReleaseManifest(
+        recordDir,
+        recordManifest("other-svc", "rel-old"),
+      );
+      await assertRejects(
+        () =>
+          applySourceReleases(
+            layout,
+            basePayload({
+              sourceMaterial: [
+                baseSource({
+                  rollbackToReleaseId: "rel-old",
+                  principal: PRINCIPAL,
+                }),
+              ],
+            }),
+            { logSink: fakeLogSink().sink, decryptSecrets: undefined },
+          ),
+        Error,
+        "no release record",
+      );
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+});
+
 test("applySourceReleases rollback restores standaloneOutput and commit metadata", async () => {
   await createTempLayout().then(async (fixture) => {
     try {
@@ -191,7 +376,12 @@ test("applySourceReleases rollback restores standaloneOutput and commit metadata
         releaseId: "rel-old",
       });
       await mkdirReleaseTree(paths);
-      await writeReleaseManifest(paths.releaseDir, {
+      const recordDir = resolveDaemonReleasePaths(layout, {
+        serviceId,
+        releaseId: "rel-old",
+      }).releaseDir;
+      await Deno.mkdir(recordDir, { recursive: true });
+      await writeReleaseManifest(recordDir, {
         version: 1,
         serviceId,
         composeServiceName: "web",
@@ -512,6 +702,65 @@ test("applySourceReleases native without nativeAppServices ships the tree as-is"
       assertEquals(nativeRuntimePresent, false);
       assertEquals(row.standaloneOutput, false);
       assertEquals(row.staticExport, false);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+});
+
+test("applySourceReleases records a promoted native release for rollback", async () => {
+  await createTempLayout().then(async (fixture) => {
+    try {
+      const layout = layoutFromFixture(fixture);
+      const applied = await applySourceReleases(
+        layout,
+        basePayload({
+          sourceMaterial: [baseSource({ principal: PRINCIPAL })],
+        }),
+        nativeDeps(fakeLogSink().sink),
+      );
+      assertEquals(applied.length, 1);
+      const record = await readReleaseManifest(
+        resolveDaemonReleasePaths(layout, {
+          serviceId: "web",
+          releaseId: "rel-1",
+        }).releaseDir,
+      );
+      assertEquals(record?.serviceId, "web");
+      assertEquals(record?.releaseId, "rel-1");
+      assertEquals(record?.commitSha, "site-commit");
+      assertEquals(record?.imageTag, undefined);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+});
+
+test("applySourceReleases keeps a live native deploy when its record cannot be written", async () => {
+  await createTempLayout().then(async (fixture) => {
+    try {
+      const layout = layoutFromFixture(fixture);
+      const log = fakeLogSink();
+      const applied = await applySourceReleases(
+        layout,
+        basePayload({
+          sourceMaterial: [baseSource({ principal: PRINCIPAL })],
+        }),
+        {
+          ...nativeDeps(log.sink),
+          ensureDaemonReleaseRecordDirFn: () =>
+            Promise.reject(new Error("disk full")),
+        },
+      );
+      assertEquals(applied.length, 1);
+      assertEquals(
+        log.lines.some((line) =>
+          line.stream === "stderr" &&
+          line.message.includes("rollback record could not be written") &&
+          line.message.includes("disk full")
+        ),
+        true,
+      );
     } finally {
       await fixture.cleanup();
     }

@@ -54,7 +54,13 @@ export const RELEASE_SCRATCH_DIRNAME = "release-build";
 export const RELEASE_METADATA_DIRNAME = ".turbopanel";
 
 /**
- * Daemon-owned release-history root, for releases that publish **no tree**.
+ * Daemon-owned release-history root: the authoritative record of every release
+ * this host published, and the home of releases that publish **no tree**.
+ *
+ * Every lane writes its manifest here, and rollback reads only this root. A
+ * native release also keeps a copy inside its tree, but that tree sits in the
+ * principal's home, which the principal owns — nothing privileged or
+ * trust-bearing is ever read back out of it.
  *
  * A Railpack release produces an OCI image; nothing is copied into a directory
  * and no runtime user ever reads one, so it needs no principal home — and
@@ -64,9 +70,9 @@ export const RELEASE_METADATA_DIRNAME = ".turbopanel";
  * which is the same shape {@link resolveReleasePaths} produces so retention and
  * the manifest readers stay lane-agnostic.
  *
- * A Railpack service that *does* have a principal keeps using the principal
- * home tree — one service should not move its history between two roots
- * depending on an unrelated assignment.
+ * A Railpack service keeps its history here whether or not it has a principal
+ * — one service should not move its history between two roots depending on an
+ * unrelated assignment.
  */
 export const RELEASE_RECORDS_DIRNAME = "release-records";
 
@@ -159,8 +165,8 @@ export function resolveReleasePaths(
  *
  * Same path shape, no principal home and no privileged ownership: every
  * directory here is created by the daemon user with {@link
- * ensureDaemonReleaseRecordDir}. Use this only for a lane that publishes no
- * tree — anything a runtime user reads belongs in the principal home, under the
+ * ensureDaemonReleaseRecordDir}. It holds release *records* (manifests) only —
+ * anything a runtime user reads belongs in the principal home, under the
  * root-owned ownership rules this module documents.
  */
 export function resolveDaemonReleasePaths(
