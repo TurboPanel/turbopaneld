@@ -172,14 +172,13 @@ function grantAllows(entry: string, command: string): boolean {
   return wantArgs === null || glob(wantArgs).test(cArgs);
 }
 
-test("the root grant is tp-host, tp-orchestrate and two pinned engine checks — nothing else", async () => {
+test("the root grant is tp-host, tp-orchestrate and the pinned php-fpm check — nothing else", async () => {
   const entries = (await rootGrantEntries()).sort((a, b) => a.localeCompare(b));
   assertEquals(
     entries,
     [
       "/opt/turbopanel/lib/tp-host",
       "/opt/turbopanel/share/orchestration/scripts/tp-orchestrate",
-      "/opt/turbopanel/vendor/apache/current/bin/httpd -t -f /etc/turbopanel/apache/httpd.conf",
       "/usr/sbin/php-fpm[0-9].[0-9] --fpm-config /etc/turbopanel/php/[0-9].[0-9]/php-fpm.conf --test",
     ].sort((a, b) => a.localeCompare(b)),
   );
@@ -209,6 +208,7 @@ test("known root escapes are refused by the sudoers grant", async () => {
     "/usr/bin/docker run -v /:/h alpine",
     "/usr/bin/journalctl",
     "/opt/turbopanel/vendor/apache/current/bin/httpd -t -f /tmp/evil.conf",
+    "/opt/turbopanel/vendor/apache/current/bin/httpd -t -f /etc/turbopanel/apache/httpd.conf",
     "/usr/sbin/php-fpm8.4 --fpm-config /tmp/x/php-fpm.conf --test",
     "/usr/sbin/php-fpm8.4 --fpm-config /etc/turbopanel/php/8.4/../../../tmp/php-fpm.conf --test",
     "/bin/sh -c id",
@@ -222,7 +222,6 @@ test("known root escapes are refused by the sudoers grant", async () => {
     const command of [
       "/opt/turbopanel/lib/tp-host install -m 0640 a b",
       "/opt/turbopanel/share/orchestration/scripts/tp-orchestrate playbook -i localhost, -c local x.yml",
-      "/opt/turbopanel/vendor/apache/current/bin/httpd -t -f /etc/turbopanel/apache/httpd.conf",
       "/usr/sbin/php-fpm8.4 --fpm-config /etc/turbopanel/php/8.4/php-fpm.conf --test",
     ]
   ) {
@@ -232,6 +231,49 @@ test("known root escapes are refused by the sudoers grant", async () => {
       command,
     );
   }
+});
+
+/** The commands one `tp ALL=(<runas>) NOPASSWD: …` line grants, Jinja rendered. */
+async function runasGrantEntries(runas: string): Promise<string[]> {
+  const template = await Deno.readTextFile(join(orch, SUDOERS_TEMPLATE));
+  const lines = template.split("\n").filter((line) =>
+    line.startsWith(`{{ turbopanel_user }} ALL=(${runas}) NOPASSWD:`)
+  );
+  assertEquals(lines.length, 1, `exactly one grant runs as ${runas}`);
+  return lines[0]!.split("NOPASSWD:")[1]!.split(",").map((raw) =>
+    raw.trim().replaceAll(
+      "{{ turbopanel_vendor_dir }}",
+      "/opt/turbopanel/vendor",
+    )
+  );
+}
+
+test("Apache's config test runs as tpapache with every argument pinned and no env", async () => {
+  const httpd = "/opt/turbopanel/vendor/apache/current/bin/httpd";
+  const config = "/etc/turbopanel/apache/httpd.conf";
+  const entries = await runasGrantEntries("tpapache");
+  assertEquals(entries, [`${httpd} -t -f ${config}`]);
+  const allowed = (command: string) =>
+    entries.some((entry) => grantAllows(entry, command));
+  assertEquals(allowed(`${httpd} -t -f ${config}`), true);
+  for (
+    const command of [
+      `${httpd} -t -f /tmp/evil.conf`,
+      `${httpd} -f ${config} -k start`,
+      `${httpd} -t -f ${config} -C LoadModule`,
+      `${httpd} -t -f ${config} -d /tmp`,
+      `/usr/bin/env ${httpd} -t -f ${config}`,
+      "/bin/sh -c id",
+    ]
+  ) {
+    assertEquals(allowed(command), false, command);
+  }
+  // tpapache is never on the shared engine line, which carries `env`.
+  const template = await Deno.readTextFile(join(orch, SUDOERS_TEMPLATE));
+  const shared = template.split("\n").find((line) =>
+    line.includes("NOPASSWD:") && line.includes("/usr/bin/env")
+  );
+  assertEquals(shared?.includes("tpapache"), false);
 });
 
 test("tp-host is installed root:tp 0750 (never writable by tp) before the sudoers file that names it", async () => {
