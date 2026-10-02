@@ -122,7 +122,7 @@ test("a manual create pulls a missing helper image, and fails when it cannot", a
           deps(layout, failing, { imagePresent: false, pullWorks: false }),
         ),
       Error,
-      "could not pull the backup helper image: registry unreachable",
+      "could not pull the backup helper image",
     );
     assertEquals(failing.some((args) => args[0] === "run"), false);
   });

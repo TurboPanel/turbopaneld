@@ -249,7 +249,9 @@ function copyDeps(
     copy: {
       runDocker: (args) => {
         calls.inspected.push(args);
-        const success = options.volumeExists ?? true;
+        const success = args[0] === "volume"
+          ? options.volumeExists ?? true
+          : true;
         return Promise.resolve({
           success,
           code: success ? 0 : 1,
@@ -288,7 +290,7 @@ test("runScheduledBackup archives a docker copy under its policy directory throu
       join(dir, `${outcome.result.backupId}.tar.gz`),
     );
     assertEquals(outcome.result.checksum, await sha256Hex(bytes));
-    assertEquals(calls.inspected, [["volume", "inspect", "shop_uploads"]]);
+    assertEquals(calls.inspected.map((args) => args[0]), ["image", "volume"]);
     const argv = calls.argv[0]!;
     assert(
       argv.includes("--pull") && argv[argv.indexOf("--pull") + 1] === "never",

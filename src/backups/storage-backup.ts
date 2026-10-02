@@ -17,7 +17,6 @@ import {
   copyBackupArtifactPath,
   type CopyBackupDeps,
   createCopyBackupArtifact,
-  ensureCopyBackupImage,
 } from "./copy-backup.ts";
 
 export type StorageBackupHandlerDeps = CopyBackupDeps & {
@@ -48,9 +47,6 @@ export async function handleStorageBackup(
       completedAt: now().toISOString(),
     };
   }
-
-  const imageIssue = await ensureCopyBackupImage(deps);
-  if (imageIssue) throw new Error(imageIssue);
 
   const artifact = await withCopyTargetLock(
     layout,
