@@ -1165,11 +1165,14 @@ tp_php_fpm_conf_ok() {
       for (i = 1; i <= n; i++) if (index(" " web " ", " " trim(p[i]) " ") == 0) return 0
       return n > 0
     }
-    function log_ok(v) { return v == "syslog" || (path_ok(v) && index(v, "/tmp") != 1) || (index(v, run "/") == 1 && v !~ /\.\./) }
+    # Logs go to syslog (the journal) or a file in the owner home: the runtime
+    # directory does not exist yet when php-test runs, and the owner cannot
+    # reopen a stderr root or systemd handed it.
+    function log_ok(v) { return v == "syslog" || (path_ok(v) && index(v, home "/") == 1) }
     function global_ok(key, val) {
       if (key == "daemonize") { if (val != "no") fail("daemonize=" val); return }
       if (key == "error_log") { if (!log_ok(val)) fail("error_log=" val); return }
-      if (key ~ /^(log_level|emergency_restart_threshold|emergency_restart_interval|process_control_timeout|process.max|log_limit)$/) {
+      if (key ~ /^(log_level|emergency_restart_threshold|emergency_restart_interval|process_control_timeout|process.max|log_limit|syslog.ident|syslog.facility)$/) {
         if (val !~ /^[A-Za-z0-9.]+$/) fail(key "=" val)
         return
       }
@@ -1322,7 +1325,25 @@ tp_verb_php_test() {
     *) set -- "$@" "$_pt_bin" -c /proc/self/fd/3 -v ;;
   esac
   cd /
-  tp_exec "$@"
+  tp_php_test_run "$@"
+}
+
+# Run the config test. php-cgi and lsphp exit 0 on an ini they could not parse
+# or an extension they could not load, and only print it, so those lines fail
+# the test too (php-fpm also exits non-zero).
+tp_php_test_run() {
+  if [ -n "$TP_TEST" ]; then
+    tp_run "$@"
+    exit 0
+  fi
+  _pr_rc=0
+  _pr_out="$("$@" 2>&1)" || _pr_rc=$?
+  printf '%s\n' "$_pr_out"
+  [ "$_pr_rc" -eq 0 ] || exit "$_pr_rc"
+  case "$_pr_out" in
+    *"PHP:  "*|*"PHP Warning"*|*"PHP Fatal"*|*"PHP Parse"*|*"PHP Startup"*|*"Cannot load"*) exit 1 ;;
+  esac
+  exit 0
 }
 
 # php-site-register <siteId> <user> lsphp-attached <series> <children>: the

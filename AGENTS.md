@@ -705,6 +705,23 @@ it regresses:
     `IOSchedulingClass=idle` (those three directives exist for no other
     unit), and no `Environment=`, `Slice=` or `ExecReload=`
     (`tp_backup_unit_ok`);
+  - reserves `turbopanel-php-<siteId>.service|.socket` for per-site PHP
+    running as the site's owner (`tp_php_unit_ok`): FastCGI (`php-cgi<series>`
+    on a socket), php-fpm (`Type=notify`, its own runtime directory) or
+    detached lsphp (vendored, `PHPRC=` its php.ini, on a socket). Every line is
+    pinned: the owner, its group and slice, no capabilities, the exec line per
+    mode and series, `BindPaths=<home>/tmp:/tmp`, `ProtectSystem=strict` with
+    writes only inside the home, and `TemporaryFileSystem=/etc/turbopanel:ro`
+    plus `BindReadOnlyPaths=` of the site's config directory (the owner cannot
+    traverse tp's 0750 tree otherwise). Sockets sit at
+    `/run/turbopanel-php-<siteId>/`, the owner's, group a web server's, 0660.
+    Config lives in `/etc/turbopanel/php/sites/<siteId>/` (dir 0750, files
+    0640, root:<owner>-grp, directive allowlist; php-fpm pools take
+    `listen.acl_users`, never `user`/`group`/`listen.group`);
+    `php-test <siteId>` runs the installed unit's binary on that config as
+    the owner, and `php-site-register` writes the attached-lsphp launcher's
+    registry (`/etc/turbopanel/php-sites/<siteId>`, root:root, this verb
+    only). daemon-install's tp:tp pass over the config tree skips both;
   - changes only principal accounts (uid ≥ 15001, `<name>-grp`, home under
     the principal root, a listed shell), adds principals only to groups
     `runtime-registry.json` defines and engine accounts only to principal

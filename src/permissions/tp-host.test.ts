@@ -1663,7 +1663,7 @@ opcache.validate_root = 1
 function phpFpmConf(host: Host): string {
   const run = `/run/turbopanel-php-${PHP_SITE}`;
   return `[global]
-error_log = ${run}/php-fpm.log
+error_log = syslog
 daemonize = no
 
 [${PHP_SITE}]
@@ -1847,6 +1847,18 @@ test("per-site PHP config: root:<owner>-grp, 0750/0640, directives on an allowli
       ["env[]", add(PHP_SITE, "env[LD_PRELOAD] = /tmp/x.so")],
       ["a slowlog outside the home", add(PHP_SITE, "slowlog = /etc/x")],
       ["an error log in /var/log", line("error_log", "error_log = /var/log/x")],
+      ["an error log in /tmp", line("error_log", "error_log = /tmp/fpm.log")],
+      [
+        "an error log on stderr",
+        line("error_log", "error_log = /proc/self/fd/2"),
+      ],
+      [
+        "an error log in the runtime directory",
+        line(
+          "error_log",
+          `error_log = /run/turbopanel-php-${PHP_SITE}/fpm.log`,
+        ),
+      ],
       ["an access log in /tmp", add(PHP_SITE, "access.log = /tmp/x")],
       ["daemonize", line("daemonize", "daemonize = yes")],
       ["rlimit_core", add(PHP_SITE, "rlimit_core = unlimited")],
