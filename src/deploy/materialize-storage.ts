@@ -11,6 +11,7 @@ import {
   principalUnixGroupName,
 } from "./ensure-principal.ts";
 import { runDocker } from "./docker-cli.ts";
+import { directoryExists } from "../permissions/privileged-read.ts";
 
 const STORAGE_ROOT = "storage";
 
@@ -50,12 +51,24 @@ async function ensureParentDirectory(hostPath: string): Promise<void> {
   await Deno.mkdir(parent, { recursive: true, mode: 0o750 });
 }
 
-async function materializeDirectory(
-  hostPath: string,
-  ownership: EnvironmentDeployPrincipalMaterial | undefined,
-): Promise<void> {
-  await Deno.mkdir(hostPath, { recursive: true, mode: 0o750 });
-  await maybeChown(hostPath, ownership);
+/**
+ * A path storage directory with no principal to own it. The daemon creates it
+ * where it may (its own storage root); anywhere it may not — a principal home,
+ * an operator mount — it must already exist, because root has nobody to hand
+ * a new directory to. An existing one the daemon cannot traverse is confirmed
+ * through tp-host rather than failing the deploy.
+ */
+async function materializeUnownedDirectory(hostPath: string): Promise<void> {
+  try {
+    await Deno.mkdir(hostPath, { recursive: true, mode: 0o750 });
+    return;
+  } catch (err) {
+    if (!(err instanceof Deno.errors.PermissionDenied)) throw err;
+  }
+  if (await directoryExists(hostPath)) return;
+  throw new Error(
+    `storage directory ${hostPath} does not exist and has no principal to own it; assign the storage to a principal or create the directory on the host`,
+  );
 }
 
 async function materializeFile(
@@ -105,7 +118,7 @@ async function materializeHostPathEntry(
         principalUnixGroupName(ownership.username),
       );
     } else {
-      await materializeDirectory(hostPath, ownership);
+      await materializeUnownedDirectory(hostPath);
     }
   } else if (entry.kind === "file") {
     hostPath = await materializeFile(baseDir, entry, ownership, fileContent);

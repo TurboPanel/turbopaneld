@@ -14,6 +14,7 @@ import { createTempLayout } from "../testing/temp-layout.ts";
 import { resolveLayout } from "../paths/layout.ts";
 import { readSystemComponentDescriptor } from "../deploy/system-component.ts";
 import {
+  applyDeploySshAccess,
   buildDeployServiceNames,
   buildDeploySummary,
   containerHostingsNeedSharedHttpIngress,
@@ -2010,4 +2011,42 @@ test({
       await fixture.cleanup();
     }
   },
+});
+
+test("a deploy ensures the sshd drop-in even when no principal declared keys", async () => {
+  // The drop-in's backstop is what makes a key planted in a principal's own
+  // home inert. Gating it on declared keys left it off every host whose tenants
+  // never asked for SSH, so those principals fell through to the host defaults.
+  const seen: string[][] = [];
+  await applyDeploySshAccess(
+    [{ principalId: "pr-1", username: "siteowner" }],
+    (principals) => {
+      seen.push(principals.map((principal) => principal.username));
+      return Promise.resolve();
+    },
+  );
+  // Called, with no key file to write for the keyless principal.
+  assertEquals(seen, [[]]);
+});
+
+test("a deploy passes only principals that declared keys, and none for no principals", async () => {
+  const seen: string[][] = [];
+  const record = (principals: readonly { username: string }[]) => {
+    seen.push(principals.map((principal) => principal.username));
+    return Promise.resolve();
+  };
+  await applyDeploySshAccess([], record);
+  assertEquals(seen, []);
+  await applyDeploySshAccess([
+    { principalId: "pr-1", username: "withkeys", sshKeys: [] },
+    { principalId: "pr-2", username: "silent" },
+  ], record);
+  assertEquals(seen, [["withkeys"]]);
+});
+
+test("a deploy warns rather than fails when ssh access cannot be applied", async () => {
+  await applyDeploySshAccess(
+    [{ principalId: "pr-1", username: "siteowner" }],
+    () => Promise.reject(new Error("no Include line")),
+  );
 });

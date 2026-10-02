@@ -31,7 +31,10 @@
  *   only when `pg_ctl status` confirms the postmaster is gone, otherwise
  *   soft for `unresponsiveGraceMs` (an overloaded primary is not dead);
  * - a failed `pg_controldata` read keeps the long crash-recovery grace;
- * - one event per incident, a new incident no sooner than `backoffMs` after
+ * - while one incident lasts the event is re-sent with exponential back-off
+ *   (`resendBaseMs` doubling to `resendMaxMs`, at most `maxEventsPerIncident`
+ *   events) so a refusal (e.g. inside the control plane's 15 min cooldown)
+ *   is retried after it; a new incident no sooner than `backoffMs` after
  *   the last event, reset when the primary answers again.
  *
  * Only read-only probes run, as the `postgres` user: `docker inspect`,
@@ -64,6 +67,12 @@ export type PgDeadPrimaryConfig = {
    */
   unresponsiveGraceMs: number;
   backoffMs: number;
+  /** First re-send of a still-dead incident; doubles each time. */
+  resendBaseMs: number;
+  /** Ceiling for the re-send interval. */
+  resendMaxMs: number;
+  /** Events per incident, including the first. */
+  maxEventsPerIncident: number;
   dockerTimeoutMs: number;
   pgReadyTimeoutSeconds: number;
 };
@@ -77,6 +86,9 @@ export const DEFAULT_PG_DEAD_PRIMARY_CONFIG: Readonly<PgDeadPrimaryConfig> = {
   startGraceMs: 60_000,
   unresponsiveGraceMs: 5 * 60_000,
   backoffMs: 5 * 60_000,
+  resendBaseMs: 5 * 60_000,
+  resendMaxMs: 60 * 60_000,
+  maxEventsPerIncident: 5,
   dockerTimeoutMs: 10_000,
   pgReadyTimeoutSeconds: 3,
 };
@@ -264,6 +276,8 @@ export type DeadPrimaryEvidence = {
   lastError: string;
   container?: ContainerSnapshot;
   scope: typeof DEAD_PRIMARY_DETECTION_SCOPE;
+  /** 1 for the first event of an incident, 2+ for re-sends. */
+  attempt: number;
 };
 
 export type DetectorStepContext = {
@@ -293,7 +307,8 @@ export class DeadPrimaryDetector {
   #softSinceMs: number | null = null;
   #lastError = "";
   #lastContainer: ContainerSnapshot | undefined;
-  #incidentEmitted = false;
+  #incidentEvents = 0;
+  #nextResendMs: number | null = null;
   #lastEmitMs: number | null = null;
 
   constructor(config: PgDeadPrimaryConfig = DEFAULT_PG_DEAD_PRIMARY_CONFIG) {
@@ -333,7 +348,8 @@ export class DeadPrimaryDetector {
     switch (observation.kind) {
       case "healthy":
         this.resetStreak();
-        this.#incidentEmitted = false;
+        this.#incidentEvents = 0;
+        this.#nextResendMs = null;
         return;
       case "inconclusive":
       case "not-primary":
@@ -355,7 +371,10 @@ export class DeadPrimaryDetector {
     if (nowMs - this.#streakStartMs < this.#config.minFailureSpanMs) {
       return false;
     }
-    if (this.#incidentEmitted) return false;
+    if (this.#incidentEvents > 0) {
+      return this.#incidentEvents < this.#config.maxEventsPerIncident &&
+        nowMs >= (this.#nextResendMs ?? Number.POSITIVE_INFINITY);
+    }
     return this.#lastEmitMs === null ||
       nowMs - this.#lastEmitMs >= this.#config.backoffMs;
   }
@@ -388,13 +407,19 @@ export class DeadPrimaryDetector {
         lastError: sanitizeForLog(this.#lastError).slice(0, 300),
         ...(this.#lastContainer ? { container: this.#lastContainer } : {}),
         scope: DEAD_PRIMARY_DETECTION_SCOPE,
+        attempt: this.#incidentEvents + 1,
       },
     };
   }
 
   markEmitted(nowMs: number): void {
-    this.#incidentEmitted = true;
+    this.#incidentEvents += 1;
     this.#lastEmitMs = nowMs;
+    const interval = Math.min(
+      this.#config.resendBaseMs * 2 ** (this.#incidentEvents - 1),
+      this.#config.resendMaxMs,
+    );
+    this.#nextResendMs = nowMs + interval;
   }
 }
 

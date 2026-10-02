@@ -116,7 +116,7 @@ Docker Compose. The daemon:
    engine's `root:<group>` `0750` config dir for every engine; OpenLiteSpeed
    fragments are **read back** through tp-host `cat` to regenerate
    `httpd_config.conf`), `configTest` (`nginx -t`
-   as `tpnginx`, `httpd -t` as root, `openlitespeed -t` as `tpols`), and
+   as `tpnginx`, `httpd -t` as `tpapache`, `openlitespeed -t` as `tpols`), and
    `reload`. php-fpm is expressed as a driver too (`PHP_FPM_DRIVER`) but is
    reloaded explicitly first, since the engines' config-tests reference sockets
    it owns.

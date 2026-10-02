@@ -128,6 +128,10 @@ async function privilegedReadVerb(
     if (args.includes("-L")) {
       return (await rootFs.lstat(path)).isSymlink ? ok() : fail("not a link");
     }
+    if (args.includes("-d")) {
+      // tp-host's `-d` never follows a symlink as the last component.
+      return (await rootFs.lstat(path)).isDirectory ? ok() : fail("not a dir");
+    }
     await rootFs.stat(path);
     return ok();
   } catch {
@@ -608,6 +612,24 @@ test("applySites fails when apache reload and start both fail", async () => {
         }),
       Error,
       "reload failed",
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test("applySites rejects a document root that is only safe once trimmed", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const { run } = createSiteRunMock();
+  try {
+    await assertRejects(
+      () =>
+        applySites(layout, "envtrim", [{ ...nginxSite, root: " public" }], {
+          run,
+          runPlaybook: () => Promise.resolve(),
+        }),
+      Error,
+      "site root is unsafe",
     );
   } finally {
     await cleanup();
@@ -2192,6 +2214,69 @@ test("applySites fails when a release document root is not a directory", async (
   }
 });
 
+/** Replace the release's `public` with a link to a directory outside it. */
+async function linkReleaseDocumentRootOut(
+  layout: LayoutPaths,
+  releaseDir: string,
+): Promise<void> {
+  const foreign = join(layout.principalHomeRoot, "bob", "public");
+  await Deno.mkdir(foreign, { recursive: true });
+  await Deno.writeTextFile(join(foreign, "index.html"), "bob");
+  await Deno.remove(join(releaseDir, "public"), { recursive: true });
+  await Deno.symlink(foreign, join(releaseDir, "public"));
+}
+
+test("applySites refuses a release document root that is a symlink", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const mock = createSiteRunMock();
+  const run = withGroupMembership(mock.run, { tpnginx: ["tpnginx"] });
+  const { runPlaybook } = capturePlaybooks();
+  try {
+    const releaseDir = await seedRelease(layout, "rel-1", "public", "one");
+    await linkReleaseDocumentRootOut(layout, releaseDir);
+    await assertRejects(
+      () =>
+        applySites(layout, "envlinkroot", [nginxSite], {
+          run,
+          runPlaybook,
+          releaseBindings: releaseBindingsFor("www"),
+        }),
+      Error,
+      "is not a directory",
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test("applySites refuses a symlinked release document root it cannot enter", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const mock = createSiteRunMock();
+  const run = withGroupMembership(mock.run, { tpnginx: ["tpnginx"] });
+  const { runPlaybook } = capturePlaybooks();
+  try {
+    const releaseDir = await seedRelease(layout, "rel-1", "public", "one");
+    await linkReleaseDocumentRootOut(layout, releaseDir);
+    const restore = denyDaemonFs(siteTreeRoot(layout));
+    try {
+      await assertRejects(
+        () =>
+          applySites(layout, "envlinkroot2", [nginxSite], {
+            run,
+            runPlaybook,
+            releaseBindings: releaseBindingsFor("www"),
+          }),
+        Error,
+        "release document root missing for www",
+      );
+    } finally {
+      restore();
+    }
+  } finally {
+    await cleanup();
+  }
+});
+
 test("applySites skips a managed placeholder when index install fails", async () => {
   const { layout, cleanup } = await makeTestLayout();
   const base = createSiteRunMock();
@@ -2553,6 +2638,35 @@ test("removeSites warns and keeps the aggregate when an OLS fragment cannot be r
       await rootFs.readTextFile(join(olsDir, "httpd_config.conf")),
       before,
     );
+    // The aggregate still names this vhost, so its vhconf must survive too.
+    await rootFs.stat(
+      join(olsDir, "vhosts", `tp_${environmentId}_static`, "vhconf.conf"),
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test("removeSites drops an OLS vhost dir only after the aggregate stops naming it", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const { run, calls } = createSiteRunMock();
+  const { runPlaybook } = capturePlaybooks();
+  const environmentId = "envolsorder";
+  const olsDir = join(layout.configDir, "openlitespeed");
+  try {
+    await applySites(layout, environmentId, [olsSite], { run, runPlaybook });
+    const start = calls.length;
+    await removeSites(layout, environmentId, { run });
+    const teardown = calls.slice(start).map((c) => c.args.at(-1) ?? "");
+    const fragmentRm = teardown.indexOf(
+      join(olsDir, "sites", `tp-${environmentId}-static.conf`),
+    );
+    const aggregate = teardown.indexOf(join(olsDir, "httpd_config.conf"));
+    const vhostRm = teardown.indexOf(
+      join(olsDir, "vhosts", `tp_${environmentId}_static`),
+    );
+    assert(fragmentRm >= 0 && aggregate > fragmentRm, teardown.join("\n"));
+    assert(vhostRm > aggregate, teardown.join("\n"));
   } finally {
     await cleanup();
   }

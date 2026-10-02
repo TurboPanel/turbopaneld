@@ -67,6 +67,38 @@ test({
 });
 
 test({
+  name:
+    "materializeTlsCertificates lets the setgid TLS directory's group read the key",
+  // Linux keeps a directory's setgid bit for its owner; macOS may drop it.
+  ignore: Deno.build.os !== "linux",
+  permissions: { read: true, write: true },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      const layout = resolveLayout(fixture.env, {
+        skipDiscovery: true,
+        forceMode: "production",
+      });
+      await Deno.mkdir(layout.tlsDir, { recursive: true });
+      await Deno.chmod(layout.tlsDir, 0o2750);
+      await materializeTlsCertificates(
+        layout,
+        [{
+          tlsId: TLS_ID,
+          certificatePem: CERT_PEM,
+          privateKeyEnvelope: "tpdaemon.v1.fake",
+        }],
+        () => Promise.resolve([KEY_PEM]),
+      );
+      assertEquals(
+        (await Deno.stat(join(layout.tlsDir, TLS_ID, "privkey.pem"))).mode! &
+          0o777,
+        0o640,
+      );
+    });
+  },
+});
+
+test({
   name: "materializeTlsCertificates returns empty for empty material",
   permissions: { read: true, write: true },
   fn: async () => {

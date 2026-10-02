@@ -397,10 +397,22 @@ export class PgDeadPrimaryObserver {
     intent: IntentState,
   ): Promise<void> {
     if (this.#startupChecked.has(record.managedId)) return;
+    // Only a conclusive Docker read counts as "checked": an unreadable one
+    // (dockerd still starting) is retried on the next tick.
+    if (sample.container.kind === "unreadable") return;
     this.#startupChecked.add(record.managedId);
     if (!isEngineDown(sample)) return;
     if (intent.runningKind === "stop") {
-      await this.#holdStop(record.managedId);
+      try {
+        await this.#holdStop(record.managedId);
+      } catch (err) {
+        logWarn(
+          "managed",
+          `could not hold the interrupted stop of managedId=${record.managedId}:`,
+          sanitizeForLog(err),
+        );
+        return;
+      }
       logInfo(
         "managed",
         `stop of managedId=${record.managedId} was interrupted by a daemon restart and the engine is down: holding the stop marker`,
@@ -568,7 +580,7 @@ export class PgDeadPrimaryObserver {
     watch.detector.markEmitted(monoMs);
     logInfo(
       "managed",
-      `managed-ha-event emitted managedId=${record.managedId} detector=${POSTGRES_PROBE_DETECTOR} failures=${verdict.evidence.failures}`,
+      `managed-ha-event emitted managedId=${record.managedId} detector=${POSTGRES_PROBE_DETECTOR} failures=${verdict.evidence.failures} attempt=${verdict.evidence.attempt}`,
     );
   }
 
@@ -586,7 +598,8 @@ export class PgDeadPrimaryObserver {
       return false;
     }
     if (!this.#peerSupportsProbe()) {
-      // Close the incident locally so this logs once, not every tick.
+      // Count it as an event so the re-send back-off applies: logged a few
+      // times per incident, never every tick.
       detector.markEmitted(this.#monoMs());
       logWarn(
         "managed",
