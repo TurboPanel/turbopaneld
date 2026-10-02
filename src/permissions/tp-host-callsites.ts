@@ -607,19 +607,14 @@ const SITES: CallSite[] = [
     argv: ["mkdir", "-p", "--", RELEASE],
   }),
   tpHost('src/deploy/release/promote.ts|["-n","cp","-a","--",`${from}/.`,to]', {
-    argv: ["cp", "-a", "--", `${STATE}/builds/svc1/.`, RELEASE],
+    argv: ["cp", "-a", "--", `${STATE}/release-handoff/svc1/.`, RELEASE],
     setup: {
-      files: { [`${STATE}/builds/svc1/index.html`]: "<h1>hi</h1>\n" },
+      files: {
+        [`${STATE}/release-handoff/svc1/index.html`]: "<h1>hi</h1>\n",
+      },
       dirs: [RELEASE],
     },
   }),
-  tpHost(
-    'src/deploy/release/promote.ts|["-n","rm","-rf","--",join(to,".git")]',
-    {
-      argv: ["rm", "-rf", "--", `${RELEASE}/.git`],
-      setup: dir(`${RELEASE}/.git`),
-    },
-  ),
   tpHost('src/deploy/release/promote.ts|["-n","mkdir","-p","--",destDir]', {
     argv: ["mkdir", "-p", "--", `${RELEASE}/config`],
   }),
