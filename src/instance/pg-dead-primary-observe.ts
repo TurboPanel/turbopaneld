@@ -43,8 +43,6 @@ import {
   sampleManagedPostgres,
 } from "../managed/pg-dead-primary.ts";
 
-export const PG_PROBE_ENV = "TURBOPANEL_MANAGED_PG_PROBE";
-
 /** A previous tick's Docker call is still running: inconclusive, never dead. */
 const DOCKER_STILL_BUSY: ProbeSample = {
   container: {
@@ -134,7 +132,8 @@ export class PgDeadPrimaryObserver {
     this.#peerSupportsProbe = options.peerSupportsProbe;
     this.#nowMs = options.nowMs ?? (() => Date.now());
     this.#globallyEnabled = options.globallyEnabled ??
-      (() => pgProbeGloballyEnabled(Deno.env.get(PG_PROBE_ENV)));
+      (() =>
+        pgProbeGloballyEnabled(Deno.env.get("TURBOPANEL_MANAGED_PG_PROBE")));
     const layout = () => options.layout ?? resolveLayout(Deno.env.toObject());
     this.#listMembers = options.listMembers ??
       (() => listManagedHaMembers(layout()));
