@@ -23,11 +23,84 @@ export function redactSecretValues(
   plaintexts: readonly string[],
 ): string {
   let out = text;
-  for (const secret of plaintexts) {
-    if (secret.length === 0) continue;
+  for (const secret of expandedDenySet(plaintexts)) {
     out = out.replaceAll(secret, REDACTED);
   }
   return out;
+}
+
+/** Shorter secrets are not expanded: their encodings would shred ordinary output. */
+const MIN_ENCODED_SECRET_LENGTH = 8;
+
+const derivedBySecret = new Map<string, readonly string[]>();
+const DERIVED_CACHE_MAX = 2048;
+
+function base64Of(value: string): string {
+  let binary = "";
+  for (const byte of new TextEncoder().encode(value)) {
+    binary += String.fromCodePoint(byte);
+  }
+  return btoa(binary);
+}
+
+function hexOf(value: string): string {
+  let hex = "";
+  for (const byte of new TextEncoder().encode(value)) {
+    hex += byte.toString(16).padStart(2, "0");
+  }
+  return hex;
+}
+
+/** Encoded copies of one secret as they show up in logs, URLs and JSON. */
+function deriveEncodings(secret: string): readonly string[] {
+  const b64 = base64Of(secret);
+  const b64url = b64.replaceAll("+", "-").replaceAll("/", "_");
+  const url = encodeURIComponent(secret);
+  const hex = hexOf(secret);
+  const candidates = [
+    b64,
+    b64.replaceAll("=", ""),
+    b64url,
+    b64url.replaceAll("=", ""),
+    url,
+    url.replaceAll("%20", "+"),
+    JSON.stringify(secret).slice(1, -1),
+    hex,
+    hex.toUpperCase(),
+  ];
+  return candidates.filter((c) =>
+    c !== secret && c.length >= MIN_ENCODED_SECRET_LENGTH
+  );
+}
+
+function encodingsOf(secret: string): readonly string[] {
+  if (secret.length < MIN_ENCODED_SECRET_LENGTH) return [];
+  let derived = derivedBySecret.get(secret);
+  if (derived === undefined) {
+    derived = deriveEncodings(secret);
+    if (derivedBySecret.size >= DERIVED_CACHE_MAX) derivedBySecret.clear();
+    derivedBySecret.set(secret, derived);
+  }
+  return derived;
+}
+
+const expandedByList = new WeakMap<readonly string[], readonly string[]>();
+
+/** The deny-set plus derived encodings, longest first; cached per list identity. */
+function expandedDenySet(plaintexts: readonly string[]): readonly string[] {
+  const cached = expandedByList.get(plaintexts);
+  if (cached !== undefined) return cached;
+  const unique = new Set<string>();
+  for (const secret of plaintexts) {
+    if (secret.length === 0) continue;
+    unique.add(secret);
+    for (const encoded of encodingsOf(secret)) unique.add(encoded);
+  }
+  const expanded = [...unique].sort(
+    (a, b) => b.length - a.length || byCodePoint(a, b),
+  );
+  expandedByList.set(plaintexts, expanded);
+  return expanded;
 }
 
 /** Single characters would shred ordinary output for no security gain. */
