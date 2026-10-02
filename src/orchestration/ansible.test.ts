@@ -908,6 +908,30 @@ test(
       true,
       "handle_errors follows the site routes",
     );
+    const uiHandle = caddyfile.slice(
+      caddyfile.lastIndexOf("handle {", caddyfile.indexOf("file_server")),
+      caddyfile.indexOf("file_server"),
+    );
+    for (
+      const line of [
+        `Content-Security-Policy "frame-ancestors 'none'"`,
+        `Referrer-Policy "strict-origin-when-cross-origin"`,
+        "Permissions-Policy ",
+        "Content-Security-Policy-Report-Only ",
+      ]
+    ) {
+      assertEquals(
+        uiHandle.includes(line),
+        true,
+        `UI handle sets ${line}`,
+      );
+    }
+    // Report-only: the script policy must never ride the enforced header.
+    assertEquals(
+      /^\s*Content-Security-Policy "[^"]*script-src/m.test(caddyfile),
+      false,
+      "script-src stays report-only",
+    );
     assertEquals(caddyfile.includes("handle_errors"), true);
     assertEquals(caddyfile.includes("updating.html"), true);
     assertEquals(caddyfile.includes("control_plane_updating"), true);
