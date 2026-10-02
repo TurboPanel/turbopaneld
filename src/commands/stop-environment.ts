@@ -1,3 +1,4 @@
+import { dirname } from "node:path";
 import {
   composeFileArgs,
   readDeploymentManifest,
@@ -138,6 +139,27 @@ async function removeEnvironmentNativeApps(
   }
 }
 
+/**
+ * `deployments/<projectId>/<environmentId>` is gone by now; drop the
+ * `<projectId>` parent too once no other environment lives in it. A plain
+ * (non-recursive) remove, so a sibling environment's tree is never touched.
+ */
+async function removeEmptyProjectDeploymentDir(
+  deploymentDir: string,
+): Promise<void> {
+  try {
+    await Deno.remove(dirname(deploymentDir));
+  } catch (err) {
+    // Not empty (sibling environment) or already gone: both are fine.
+    logInfo(
+      "commands",
+      `environment.stop project deployment dir kept: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+}
+
 function assertSafeStopIdentifiers(payload: EnvironmentStopPayload): void {
   if (!SAFE_PATH_ID_RE.test(payload.environmentId)) {
     throw new Error("environmentId contains unsupported characters");
@@ -161,6 +183,10 @@ async function composeDown(
     "down",
     "--remove-orphans",
     "--volumes",
+    // Only images built for this stack (no `image:` tag of their own); pulled
+    // or explicitly tagged images (base/shared) are never touched.
+    "--rmi",
+    "local",
   ], {
     onLine: (event) => logSink.onLine(event.stream, event.line),
   });
@@ -269,6 +295,8 @@ export async function handleEnvironmentStop(
       throw err;
     }
   }
+
+  await removeEmptyProjectDeploymentDir(deploymentDir);
 
   await removeSecretTree(
     layout,
