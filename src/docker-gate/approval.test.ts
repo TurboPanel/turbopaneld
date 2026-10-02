@@ -6,6 +6,7 @@ import {
   canonicalJson,
   importApprovalKeys,
   MAX_APPROVAL_TTL_SEC,
+  ReplayCache,
   splitApproved,
   verifyApproval,
 } from "../../orchestration/roles/docker-gate/files/approval.ts";
@@ -309,4 +310,26 @@ test("canonical JSON is RFC 8785: sorted keys, no whitespace, nested", () => {
   );
   // Key order of the input never changes the digest.
   assertEquals(canonicalJson({ a: 1, b: 2 }), canonicalJson({ b: 2, a: 1 }));
+});
+
+test("a token is single-use: its jti is remembered until exp, and a payload without one is malformed", async () => {
+  const cache = new ReplayCache();
+  assert(cache.claim("a", NOW + 10, NOW));
+  assertEquals(cache.claim("a", NOW + 10, NOW + 5), false);
+  assert(cache.claim("b", NOW + 10, NOW));
+  // After exp the id is forgotten (the token itself is expired by then).
+  assert(cache.claim("a", NOW + 20, NOW + 10));
+  const { keys, trusted } = await setup();
+  for (const jti of [undefined, "", 7, "x".repeat(129)]) {
+    const bad = await signToken(
+      keys,
+      JSON.stringify({ ...payloadFor(NOW), jti }),
+    );
+    assertEquals(
+      reason(
+        await verifyApproval(bad, trusted, PROJECT, TEST_BODY_DIGEST, NOW),
+      ),
+      "malformed",
+    );
+  }
 });

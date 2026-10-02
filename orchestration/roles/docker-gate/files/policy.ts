@@ -71,6 +71,8 @@ export type RequestFacts = {
   query: URLSearchParams;
   /** Parsed JSON body for the body-checked routes, otherwise `undefined`. */
   body?: unknown;
+  /** The body as a plain `JSON.parse` reads it (field names as sent). */
+  plainBody?: unknown;
   /** Why the body was refused by the strict parser (body.ts), if it was. */
   bodyError?: string;
 };

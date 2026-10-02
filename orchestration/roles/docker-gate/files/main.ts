@@ -22,7 +22,7 @@ import {
 } from "./proxy.ts";
 import { DEFAULT_POLICY_CONFIG, type PolicyConfig } from "./policy.ts";
 import { DEFAULT_PLATFORM_ROOTS } from "./platform.ts";
-import { importApprovalKeys } from "./approval.ts";
+import { importApprovalKeys, ReplayCache } from "./approval.ts";
 import { resolveBindPath } from "./resolve.ts";
 import { GateStats } from "./stats.ts";
 import { describeError } from "./util.ts";
@@ -274,6 +274,7 @@ export async function startGate(
     stats,
     maxBodyBytes: DEFAULT_MAX_BODY_BYTES,
     approvalKeys,
+    approvalReplay: new ReplayCache(),
     nowSec: config.nowSec,
   };
   const listener = await openListener(config.socket, config.socketGid);

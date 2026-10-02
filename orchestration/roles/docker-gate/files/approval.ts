@@ -13,15 +13,19 @@
  *   `com.turbopanel.approval` = `v2.<base64url(payload JSON)>.<base64url(signature)>`
  * The signature covers `DOMAIN + <base64url(payload)>` (the exact text, so no
  * re-serialisation question). Payload:
- *   { deployId, project, composeDigest, bodyDigest, features[], iat, exp }  (seconds)
+ *   { deployId, project, composeDigest, bodyDigest, jti, features[], iat, exp }  (seconds)
  * `composeDigest` is recorded in the audit line but is NOT checked: the gate
  * never sees the compose file. `bodyDigest` IS checked: it binds the token to
  * one container-create body, so a still-valid token cannot be replayed on a
  * different create of the same project. It is the base64url (no padding)
- * SHA-256 of the RFC 8785 (JCS) canonical JSON of the create body with the
- * `com.turbopanel.approval` label removed (the token cannot cover itself);
- * field names in their canonical Docker spelling (body.ts). A v1 token (no
- * body binding) is refused as `unsupported-version`.
+ * SHA-256 of the RFC 8785 (JCS) canonical JSON of the create body AS THE
+ * CLIENT SENT IT (a plain JSON.parse of the payload: field names exactly as
+ * written, never the strict parser's canonical spelling, so no gate version
+ * changes it) with the `com.turbopanel.approval` label removed (the token
+ * cannot cover itself). `jti` makes a token single-use: the gate remembers
+ * every accepted one until its `exp` and refuses it again as `replayed` (the
+ * memory is per gate process: a gate restart forgets, bounded by `exp`). A v1
+ * token (no body binding) is refused as `unsupported-version`.
  *
  * Dependency-free on purpose (see http.ts): WebCrypto only.
  */
@@ -59,6 +63,8 @@ export type ApprovalPayload = {
   composeDigest: string;
   /** Base64url SHA-256 of the canonical create body (see the file header). */
   bodyDigest: string;
+  /** Unique token id: an accepted token is never accepted again. */
+  jti: string;
   features: string[];
   iat: number;
   exp: number;
@@ -147,7 +153,8 @@ function parsePayload(bytes: Uint8Array): ApprovalPayload | undefined {
   if (
     !featuresOk || !timesOk || !isShortString(p.deployId, 128) ||
     !isShortString(p.project, 128) || typeof p.composeDigest !== "string" ||
-    typeof p.bodyDigest !== "string" || !DIGEST.test(p.bodyDigest)
+    typeof p.bodyDigest !== "string" || !DIGEST.test(p.bodyDigest) ||
+    !isShortString(p.jti, 128)
   ) {
     return undefined;
   }
@@ -156,6 +163,7 @@ function parsePayload(bytes: Uint8Array): ApprovalPayload | undefined {
     project: p.project,
     composeDigest: p.composeDigest.slice(0, 128),
     bodyDigest: p.bodyDigest,
+    jti: p.jti,
     features: features as string[],
     iat: p.iat as number,
     exp: p.exp as number,
@@ -259,6 +267,25 @@ export async function verifyApproval(
     };
   }
   return { ok: true, payload };
+}
+
+/** Most token ids remembered at once; beyond it new tokens are refused. */
+export const MAX_REMEMBERED_APPROVALS = 10_000;
+
+/** Ids of accepted tokens, each kept until its `exp` (single-use tokens). */
+export class ReplayCache {
+  readonly #seen = new Map<string, number>();
+
+  /** True the first time `jti` is claimed before `exp`; false on any reuse. */
+  claim(jti: string, exp: number, nowSec: number): boolean {
+    for (const [id, until] of this.#seen) {
+      if (until <= nowSec) this.#seen.delete(id);
+    }
+    if (this.#seen.has(jti)) return false;
+    if (this.#seen.size >= MAX_REMEMBERED_APPROVALS) return false;
+    this.#seen.set(jti, exp);
+    return true;
+  }
 }
 
 export type ApprovalSplit = {

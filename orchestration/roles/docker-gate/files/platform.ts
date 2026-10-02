@@ -132,7 +132,7 @@ export function platformBindVerdict(
  * request costs an inspect round trip, and the daemon polls those.
  */
 const OWNED_TARGET =
-  /^\/containers\/([^/]+)\/(?:start|stop|restart|kill|pause|unpause|rename|update|exec|attach|archive|wait|resize|export)$/;
+  /^\/containers\/([^/]+)\/(?:start|stop|restart|kill|pause|unpause|rename|update|exec|attach|archive|wait|resize|export|attach\/ws)$/;
 const OWNED_REMOVE = /^\/containers\/([^/]+)$/;
 
 /** Container id/name an owned-only route addresses, otherwise `undefined`. */

@@ -51,6 +51,7 @@ export function payloadFor(
     project: "tenantapp",
     composeDigest: "sha256:0000",
     bodyDigest: TEST_BODY_DIGEST,
+    jti: crypto.randomUUID(),
     features: ["privileged"],
     iat: nowSec,
     exp: nowSec + 300,

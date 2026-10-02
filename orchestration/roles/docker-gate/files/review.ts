@@ -14,6 +14,7 @@ import {
   APPROVAL_LABEL,
   approvalBodyDigest,
   type ApprovalResult,
+  ReplayCache,
   splitApproved,
   verifyApproval,
 } from "./approval.ts";
@@ -42,6 +43,8 @@ export type ReviewDeps =
   & {
     /** Trusted approval keys; `undefined` or empty = approvals are off. */
     approvalKeys?: readonly CryptoKey[];
+    /** Accepted token ids (single use); a process-wide one when absent. */
+    approvalReplay?: ReplayCache;
     /** Seconds since the epoch (injected so tests control the clock). */
     nowSec?: () => number;
   };
@@ -111,13 +114,22 @@ async function applyApproval(
 ): Promise<Violation[]> {
   const token = labels[APPROVAL_LABEL];
   if (token === undefined) return violations;
-  const result = await verifyApproval(
+  const nowSec = (deps.nowSec ?? defaultNowSec)();
+  const verified = await verifyApproval(
     token,
     deps.approvalKeys ?? [],
     labels[LABEL_COMPOSE_PROJECT] ?? "",
-    await approvalBodyDigest(facts.body),
-    (deps.nowSec ?? defaultNowSec)(),
+    await approvalBodyDigest(facts.plainBody),
+    nowSec,
   );
+  const result = verified.ok &&
+      !(deps.approvalReplay ?? SHARED_REPLAY).claim(
+        verified.payload.jti,
+        verified.payload.exp,
+        nowSec,
+      )
+    ? { ok: false as const, reason: "replayed", ...whoFrom(verified.payload) }
+    : verified;
   if (!result.ok) {
     logApproval(deps, result, []);
     return violations;
@@ -126,6 +138,13 @@ async function applyApproval(
   logApproval(deps, result, approved);
   for (const violation of approved) deps.stats.approvedRule(violation.rule);
   return remaining;
+}
+
+/** Used when the caller keeps no cache of its own (every gate does). */
+const SHARED_REPLAY = new ReplayCache();
+
+function whoFrom(payload: { deployId: string; project: string }) {
+  return { deployId: payload.deployId, project: payload.project };
 }
 
 function defaultNowSec(): number {
@@ -167,7 +186,12 @@ async function unownedFinding(
     subject.kind,
     subject.name,
   );
-  if (labels === undefined || ownerOf(labels) !== "unlabeled") return [];
+  // Fail closed: a target whose labels cannot be read (gone, engine error,
+  // odd name) is a finding of its own, never assumed owned.
+  if (labels === undefined) {
+    return [{ rule: "owner-unknown", detail: subject.name.slice(0, 64) }];
+  }
+  if (ownerOf(labels) !== "unlabeled") return [];
   return [{
     rule: `unowned-${subject.kind}`,
     detail: subject.name.slice(0, 64),

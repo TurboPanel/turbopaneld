@@ -136,6 +136,7 @@ test("ownedTarget names the container of the routes that must act on owned ones"
     assertEquals(ownedTarget("POST", `/containers/abc/${verb}`), "abc");
   }
   assertEquals(ownedTarget("GET", "/containers/abc/export"), "abc");
+  assertEquals(ownedTarget("GET", "/containers/abc/attach/ws"), "abc");
   // Polled reads would double the engine traffic for no ownership value.
   for (const verb of ["stats", "logs", "top", "changes"]) {
     assertEquals(ownedTarget("GET", `/containers/abc/${verb}`), undefined);

@@ -511,7 +511,9 @@ e2e(
       ),
     );
     assertEquals(await timeout(readResponse(reader, "POST")), OK_EMPTY);
-    assertEquals(wouldDeny(h.logs), ["privileged"]);
+    // The attach's inspect answers no labels (this engine has none): that
+    // fails closed as owner-unknown; the create is still judged.
+    assertEquals(wouldDeny(h.logs), ["owner-unknown", "privileged"]);
     // The attach is first looked up (inspect), then relayed; then the create.
     assertEquals(seen.filter((line) => !line.includes("/json")).length, 2);
     client.close();
@@ -786,6 +788,42 @@ test({
     }),
 });
 
+test({
+  name:
+    "the digest covers the body as the client sent it, and a token is good for one create only",
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: () =>
+    withApprovals(async (h, keys) => {
+      // A field spelled as Go also accepts it: the strict parser renames it,
+      // the signer only ever saw what the client sent.
+      const sent = (token: string) => ({
+        Image: "alpine",
+        Labels: {
+          "com.docker.compose.project": "tenantapp",
+          [APPROVAL_LABEL]: token,
+        },
+        hostconfig: { Privileged: true },
+      });
+      const token = await signToken(
+        keys,
+        payloadFor(NOW, {
+          features: ["privileged"],
+          bodyDigest: await approvalBodyDigest(sent("")),
+        }),
+      );
+      await sendCreate(h, sent(token));
+      assertEquals(wouldDeny(h.logs), []);
+      h.logs.length = 0;
+      await sendCreate(h, sent(token));
+      assertEquals(wouldDeny(h.logs), ["privileged"]);
+      assertEquals(h.gate.stats.snapshot().approvals, {
+        accepted: 1,
+        "rejected:replayed": 1,
+      });
+    }),
+});
+
 e2e(
   "without a trusted key a token is refused and findings stand",
   async (h) => {
@@ -917,7 +955,7 @@ async function post(h: Harness, path: string, json = ""): Promise<void> {
 }
 
 e2e(
-  "actions on containers nothing owns are flagged; owned and unknown ones are not",
+  "actions on containers nothing owns are flagged, and so are ones whose owner cannot be read",
   async (h) => {
     const relayed = scriptEngine(h, {
       human: { status: 200, labels: {} },
@@ -932,7 +970,12 @@ e2e(
     await post(h, "/containers/system/kill");
     await post(h, "/containers/ghost/start");
     await post(h, "/containers/human/exec", '{"Cmd":["true"]}');
-    assertEquals(wouldDeny(h.logs), ["unowned-container", "unowned-container"]);
+    // A target whose labels cannot be read is not given the benefit of the doubt.
+    assertEquals(wouldDeny(h.logs), [
+      "unowned-container",
+      "owner-unknown",
+      "unowned-container",
+    ]);
     assertEquals(
       h.logs.filter((l) => l.rule === "unowned-container").map((l) => l.detail),
       ["human", "human"],
@@ -953,7 +996,7 @@ async function del(h: Harness, path: string): Promise<void> {
 }
 
 e2e(
-  "removing or attaching to a volume or network nothing owns is flagged; owned and unknown ones are not",
+  "removing or attaching to a volume or network nothing owns, or whose owner cannot be read, is flagged",
   async (h) => {
     const relayed = scriptEngine(h, {}, {
       "volumes/human": { status: 200, labels: {} },
@@ -970,11 +1013,13 @@ e2e(
     await del(h, "/v1.55/volumes/human");
     await del(h, "/volumes/tenant");
     await del(h, "/volumes/ghost");
+    // (ghost: owner-unknown, failing closed)
     await del(h, "/networks/human");
     await del(h, "/networks/tenant");
     await post(h, "/networks/human/connect", '{"Container":"c"}');
     assertEquals(wouldDeny(h.logs), [
       "unowned-volume",
+      "owner-unknown",
       "unowned-network",
       "unowned-network",
     ]);
