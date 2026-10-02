@@ -3,6 +3,10 @@
 TurboPanel **daemon** — Ansible-driven host daemon; connects to the instance over
 HTTPS/WSS (or Unix socket when co-located).
 
+## Releases
+
+How changes ship: squash-merge into `trunk`, then two bot-opened pull requests (`trunk` to `staging`, `staging` to `live`) that a maintainer merges with merge commits. Hotfixes land on `trunk` first, and the daemon ships before the control plane. See [How changes ship](https://github.com/TurboPanel/.github/blob/trunk/CONTRIBUTING.md#how-changes-ship) and [How to ship](https://turbopanel.io/docs/development/how-to-ship).
+
 ## Documentation discipline
 
 **Keep this file current.** When you learn something durable about daemon ↔
