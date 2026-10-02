@@ -521,10 +521,21 @@ TP_RELEASE_SIGNING_PUBLIC_KEY="e854267676c6700a79ff19b89211b76d609af142f4c2c1cb0
 
 # The canonicaliser, printed so it can be run here and byte-compared in tests
 # (src/update/signing.test.ts). stdin: manifest JSON; stdout: canonical bytes.
+# Both python programs parse strictly: a key repeated in any object is refused,
+# so there is exactly one reading of a manifest and it is the signed one.
 tp_manifest_canonical_python() {
   cat <<'PY'
 import json, sys
-manifest = json.load(sys.stdin)
+
+def unique_keys(pairs):
+    obj = {}
+    for key, value in pairs:
+        if key in obj:
+            raise SystemExit("manifest has a duplicate key %r" % key)
+        obj[key] = value
+    return obj
+
+manifest = json.load(sys.stdin, object_pairs_hook=unique_keys)
 if not isinstance(manifest, dict):
     raise SystemExit("manifest root must be an object")
 manifest.pop("signature", None)
@@ -543,8 +554,16 @@ tp_manifest_signature_material_python() {
 import base64, binascii, json, sys
 from pathlib import Path
 
+def unique_keys(pairs):
+    obj = {}
+    for key, value in pairs:
+        if key in obj:
+            raise SystemExit("manifest has a duplicate key %r" % key)
+        obj[key] = value
+    return obj
+
 pub_hex, out = sys.argv[1], Path(sys.argv[2])
-manifest = json.load(sys.stdin)
+manifest = json.load(sys.stdin, object_pairs_hook=unique_keys)
 if not isinstance(manifest, dict):
     raise SystemExit("manifest root must be an object")
 signature = manifest.pop("signature", None)
@@ -578,8 +597,11 @@ PY
 }
 
 # Verify $1 (manifest JSON) against the pinned release key. Returns 0 only for
-# a well-formed signature by that key over exactly these bytes.
+# a well-formed signature by that key over exactly these bytes, and leaves the
+# verified canonical bytes in $_tp_verified_manifest: every field is read from
+# those, never from the downloaded text.
 tp_verify_manifest_signature() {
+  _tp_verified_manifest=""
   _sig_json="$1"
   _sig_key="${2:-$TP_RELEASE_SIGNING_PUBLIC_KEY}"
   if ! command -v openssl >/dev/null 2>&1; then
@@ -598,8 +620,20 @@ tp_verify_manifest_signature() {
     rm -rf "$_sig_dir"
     return 1
   fi
+  _tp_verified_manifest="$(cat "$_sig_dir/canonical")"
   rm -rf "$_sig_dir"
-  return 0
+  [ -n "$_tp_verified_manifest" ]
+}
+
+# The development overlay's unsigned manifest still goes through the same
+# strict parse, and fields are read from its canonical form.
+tp_manifest_strict_canonical() {
+  _tp_verified_manifest=""
+  if ! _tp_verified_manifest="$(printf '%s' "$1" | python3 -c "$(tp_manifest_canonical_python)")"; then
+    echo "run.sh: release manifest rejected (not strict JSON)" >&2
+    return 1
+  fi
+  [ -n "$_tp_verified_manifest" ]
 }
 
 # The development-only bypass: a TURBOPANEL_DL_BASE overlay is a contributor's
@@ -1421,11 +1455,12 @@ tp_fetch_channel_manifest() {
   # Signature first — nothing in the manifest is read before it is trusted.
   if tp_manifest_signature_bypass; then
     tp_print_styled_line "1;33" "*** DEVELOPMENT OVERLAY: release manifest signature not verified (TURBOPANEL_DL_BASE=${_dl_base}) ***" >&2
+    tp_manifest_strict_canonical "$_manifest_json" || return 1
   elif ! tp_verify_manifest_signature "$_manifest_json"; then
     return 1
   fi
 
-  if ! tp_resolve_channel_manifest "$_manifest_json"; then
+  if ! tp_resolve_channel_manifest "$_tp_verified_manifest"; then
     return 1
   fi
 
@@ -1475,6 +1510,7 @@ tp_fetch_repo_manifest() {
   # a development overlay (tp_manifest_signature_bypass) skips it.
   if tp_manifest_signature_bypass; then
     tp_print_styled_line "1;33" "*** DEVELOPMENT OVERLAY: ${_repo} manifest signature not verified (TURBOPANEL_DL_BASE=${TURBOPANEL_DL_BASE}) ***" >&2
+    tp_manifest_strict_canonical "$_manifest_json" || return 1
   else
     case "$_manifest_json" in
       *'"signature"'*) ;;
@@ -1488,7 +1524,7 @@ tp_fetch_repo_manifest() {
       return 1
     fi
   fi
-  _repo_manifest_compact="$(tp_manifest_compact "$_manifest_json")"
+  _repo_manifest_compact="$(tp_manifest_compact "$_tp_verified_manifest")"
   [ -n "$_repo_manifest_compact" ]
 }
 

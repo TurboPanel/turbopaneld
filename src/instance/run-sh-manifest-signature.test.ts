@@ -125,6 +125,17 @@ test("run.sh verifies the daemon manifest before reading any field, and only byp
   assertEquals(bypass.includes("MANIFEST_URL"), false);
 });
 
+/**
+ * A function whose body holds `[^}]` grep classes, which defeat brace
+ * matching: its body ends at the first line that is exactly `}`.
+ */
+function sliceShellFunction(source: string, name: string): string {
+  const start = source.indexOf(`${name}() {`);
+  const end = source.indexOf("\n}\n", start);
+  if (start < 0 || end < 0) throw new TypeError(`missing ${name} in run.sh`);
+  return source.slice(start, end + 2);
+}
+
 function repoManifest(repo: "turbopanel" | "ui"): Record<string, unknown> {
   return {
     schema: 1,
@@ -152,16 +163,19 @@ async function fetchRepoManifestWithRunSh(
   repo: "turbopanel" | "ui",
   manifestJson: string,
   env: Record<string, string> = {},
+  after = "",
 ): Promise<{ status: number; stderr: string }> {
   const source = await Deno.readTextFile(runShPath);
   const helpers = [
     "tp_manifest_canonical_python",
     "tp_manifest_signature_material_python",
     "tp_verify_manifest_signature",
+    "tp_manifest_strict_canonical",
     "tp_manifest_signature_bypass",
     "tp_manifest_compact",
     "tp_fetch_repo_manifest",
-  ].map((name) => extractShellFunction(source, name)).join("\n");
+  ].map((name) => extractShellFunction(source, name)).join("\n") + "\n" +
+    sliceShellFunction(source, "tp_manifest_binary_artifact_field");
   const dir = await Deno.makeTempDir({ prefix: "tp-run-sh-repo-" });
   try {
     const manifestPath = join(dir, "manifest.json");
@@ -176,7 +190,9 @@ async function fetchRepoManifestWithRunSh(
       `fake_curl() { cat "$MANIFEST_PATH"; }`,
       helpers,
       `${pinVar}="https://github.com/TurboPanel/${repo}/releases/download/v0.1.2/manifest.json"`,
-      `tp_fetch_repo_manifest ${repo}`,
+      after
+        ? `tp_fetch_repo_manifest ${repo} && ${after}`
+        : `tp_fetch_repo_manifest ${repo}`,
     ].join("\n");
     const out = await new Deno.Command("sh", {
       args: ["-u", "-c", script],
@@ -272,4 +288,59 @@ test("run.sh carries --dev-allow-unsigned through the sudo re-exec and the root 
   for (const line of extractions) {
     assertStringIncludes(line, "--no-same-owner");
   }
+});
+
+/**
+ * Splice a raw duplicate `url`/`sha256` pair ahead of the signed ones in the
+ * artifact object named by `key`. A last-wins JSON parse still sees the
+ * signed values, so only a strict parse can tell the two apart.
+ */
+function withDuplicateArtifactUrl(signedJson: string, key: string): string {
+  const marker = `"${key}":{`;
+  const at = signedJson.indexOf(marker);
+  if (at < 0) throw new TypeError(`fixture lost ${key}`);
+  const insertAt = at + marker.length;
+  return signedJson.slice(0, insertAt) +
+    `"url":"https://evil.example/payload","sha256":"${"e".repeat(64)}",` +
+    signedJson.slice(insertAt);
+}
+
+test("run.sh refuses a signed manifest that repeats a key", async () => {
+  if (!(await hostCanVerify())) return;
+  const signed = JSON.stringify(await signWithTestKey(manifest()));
+  const result = await verifyWithRunSh(
+    withDuplicateArtifactUrl(signed, "linux-amd64"),
+  );
+  assertEquals(result.status, 1, result.stderr);
+  assertStringIncludes(result.stderr, "duplicate key");
+});
+
+test("run.sh --instance never reads an artifact url the signature did not cover", async () => {
+  if (!(await hostCanVerify())) return;
+  const signed = JSON.stringify(await signWithTestKey(repoManifest("ui")));
+  const result = await fetchRepoManifestWithRunSh(
+    "ui",
+    withDuplicateArtifactUrl(signed, "linux-amd64"),
+    {},
+    `tp_manifest_binary_artifact_field "$_repo_manifest_compact" linux-amd64 url`,
+  );
+  assertEquals(result.stderr.includes("evil.example"), false, result.stderr);
+  assertEquals(result.status, 1, result.stderr);
+  assertStringIncludes(result.stderr, "duplicate key");
+});
+
+test("run.sh --instance reads artifact fields from the verified manifest", async () => {
+  if (!(await hostCanVerify())) return;
+  const signed = await signWithTestKey(repoManifest("turbopanel"));
+  const result = await fetchRepoManifestWithRunSh(
+    "turbopanel",
+    JSON.stringify(signed, null, 2),
+    {},
+    `tp_manifest_binary_artifact_field "$_repo_manifest_compact" linux-amd64 url`,
+  );
+  assertEquals(result.status, 0, result.stderr);
+  assertStringIncludes(
+    result.stderr,
+    "https://github.com/TurboPanel/turbopanel/releases/download/v0.1.2/a.tar.zst",
+  );
 });
