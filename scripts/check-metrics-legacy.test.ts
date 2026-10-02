@@ -41,6 +41,19 @@ test("isAllowedPath admits only managed-engine code paths", () => {
     isAllowedPath("ui/design-system/turbopanel/pages/project-create.md"),
     true,
   );
+  // Deploy stateful-database detection names catalog engines (exact files).
+  assertEquals(
+    isAllowedPath("turbopanel/src/features/deploy/deploy-strategy.ts"),
+    true,
+  );
+  assertEquals(
+    isAllowedPath("turbopanel/src/features/deploy/deploy-strategy.test.ts"),
+    true,
+  );
+  assertEquals(
+    isAllowedPath("turbopanel/src/features/deploy/deploy-other.ts"),
+    false,
+  );
   // Metrics plumbing is never allowed back.
   assertEquals(
     isAllowedPath("turbopanel/src/daemon/metrics/backends/duckdb/store.ts"),

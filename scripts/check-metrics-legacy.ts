@@ -99,6 +99,10 @@ export const ALLOWED_PATH_PREFIXES = [
   // the website data dictionary) name the managed catalog engine exactly as
   // schema.ts does for `managed.engine` / `principal.provider`.
   "turbopanel/src/db/schema-descriptions.ts",
+  // turbopanel: deploy strategy's stateful-database detection (image names and
+  // data dirs) names catalog engines, `clickhouse` included. Exact files only.
+  "turbopanel/src/features/deploy/deploy-strategy.ts",
+  "turbopanel/src/features/deploy/deploy-strategy.test.ts",
   // website: generated data dictionary — renders those CHECK constraints and
   // descriptions verbatim (never hand-edited; see website/AGENTS.md).
   "website/docs/database/",
