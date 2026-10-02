@@ -713,6 +713,25 @@ it regresses:
   - allows `systemctl` verbs on `turbopanel*` / `wg-quick@tp0` / `ssh(d)`
     units, fixed `journalctl`/`ss`/`sshd -t|-T`/`sysctl`/`ip`/`wg` shapes, and
     xtables without `--modprobe` or rule files.
+  - starts tenant builds only through `build-run <build-id> <project-id>`
+    (ids `[a-z0-9-]{1,64}`, nothing else in argv): it checks the `tpbuild`
+    account (service band, own group, only `tpnode*` supplementary groups)
+    and the root-owned `/var/lib/turbopanel-build/{work,cache}` layout, takes
+    a host-wide lock (one build at a time), hands the pinned `work/<id>` to
+    `tpbuild` (`chown -R -h -P`), and execs `systemd-run --wait --pipe` with a
+    fixed property set (`NoNewPrivileges`, no capabilities,
+    `ProtectSystem=strict`, private tmp/devices/IPC/PIDs, the daemon's trees,
+    principal homes, Docker/containerd/gate sockets and `/etc/ssh` made
+    inaccessible, loopback/private/link-local/CGNAT egress denied except the
+    host's literal nameservers, 4G memory, 200% CPU, 1800 s, `tpbuild.slice`)
+    whose only command is `/bin/sh` on `lib/tp-build-runner`, bind-mounted in
+    read-only; the spec rides
+    stdin to the runner (format in its header). Below systemd 255 (Debian 13 /
+    Ubuntu 24.04 floor) it warns and drops the newer properties, below 242 it
+    refuses. `build-return <build-id>` chowns the tree back to the caller only
+    once `turbopanel-build-<id>.service` is inactive; abort is
+    `systemctl stop turbopanel-build-<id>.service`. `turbopanel-build-*.service`
+    unit files are refused at install;
   `src/permissions/tp-host.test.ts` runs it unprivileged in its test mode
   (`TP_HOST_TEST_PREFIX`, ignored as root) against the daemon's own rendered
   units and a hostile corpus. Known gap: it is TOCTOU-safe for paths it pins,

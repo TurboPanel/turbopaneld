@@ -525,6 +525,7 @@ tp_unit_ok() {
   # the backup check below, or it is refused.
   _uk_backup=""
   case "$_uk_name" in
+    turbopanel-build-*.service) return 1 ;;
     turbopanel-backup-*)
       _uk_backup="$(tp_backup_unit_id "$_uk_name")" || return 1
       ;;
@@ -1395,6 +1396,227 @@ tp_verb_getent() {
   tp_exec getent shadow -- "$3"
 }
 
+# --- builds ------------------------------------------------------------------
+# Tenant build commands run as BUILD_ACCOUNT (not in docker or tp, no sudo) in
+# a transient turbopanel-build-<id>.service whose every property is fixed
+# here. The daemon passes only ids; the spec rides stdin straight through to
+# lib/tp-build-runner, which reads it as the build account (root never parses
+# it, and it never becomes an EnvironmentFile PID 1 would read as root).
+#
+# Layout (the build-user role creates it; checked on every run):
+#   /var/lib/turbopanel-build          root, not group/world-writable
+#   /var/lib/turbopanel-build/work     root:tp 1770 (sticky: tp cannot swap
+#                                      out a work dir it handed over)
+#   /var/lib/turbopanel-build/cache    root:root 0700
+#   work/<build-id>                    checked out by tp, handed to the build
+#                                      account for the run, returned after
+#   cache/<project-id>                 build account 0700, one project's cache
+#
+# One build at a time per host: build-run holds a root-only lock while the
+# unit runs and refuses to start while another build unit is still active,
+# so builds that share one uid never see each other's processes.
+R_BUILD="$P/var/lib/turbopanel-build"
+BUILD_ACCOUNT="tpbuild"
+# Not turbopanel-*: tp may install turbopanel-* units, and a principal named
+# `build` would own turbopanel-build.slice.
+BUILD_SLICE="tpbuild.slice"
+BUILD_LOCK="$P/run/tpbuild.lock"
+# Bind-mounted read-only into the unit and read by /bin/sh there (systemd-run
+# looks an executable up on the host, where the bind target does not exist).
+BUILD_RUNNER="$INSTALL_ROOT/lib/tp-build-runner"
+BUILD_LOCK_WAIT_SEC=2100
+# Owner decision: the same limits for every plan.
+BUILD_MEMORY_MAX=4G
+BUILD_CPU_QUOTA=200%
+BUILD_RUNTIME_MAX_SEC=1800
+# Debian 13 / Ubuntu 24.04. Below it: a warning and a reduced sandbox (still
+# the build account, still confined); below the minimum: no build.
+BUILD_SYSTEMD_FLOOR=255
+BUILD_SYSTEMD_MIN=242
+# Loopback, private (10/8 covers the tp0 fabric), CGNAT, link-local (cloud
+# metadata), benchmark, multicast and reserved ranges. The host's own
+# resolvers are allowed back in (systemd lets IPAddressAllow= win).
+BUILD_DENY_V4="0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 169.254.0.0/16 172.16.0.0/12 192.0.0.0/24 192.168.0.0/16 198.18.0.0/15 224.0.0.0/3"
+BUILD_DENY_V6="::/128 ::1/128 fc00::/7 fe80::/10 ff00::/8"
+
+tp_build_id_ok() {
+  case "$1" in
+    ''|-*|*[!a-z0-9-]*) return 1 ;;
+  esac
+  [ "${#1}" -le 64 ]
+}
+
+tp_group_db() {
+  if [ -n "$TP_TEST" ]; then
+    cat -- "$P/etc/group"
+    return
+  fi
+  getent group
+}
+
+tp_in_service_band() {
+  case "$1" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$1" -ge "$SERVICE_ID_MIN" ] && [ "$1" -le "$SERVICE_ID_MAX" ]
+}
+
+# Sets BUILD_UID/BUILD_GID. The account must be a service-band system user
+# with its own group whose only supplementary groups are runtime groups
+# (tpnode*): never docker, tp, sudo or anything else that grants reach.
+tp_build_account_ok() {
+  _ba_line="$(tp_getent passwd "$BUILD_ACCOUNT")" || return 1
+  BUILD_UID="$(printf '%s' "$_ba_line" | cut -d: -f3)"
+  BUILD_GID="$(printf '%s' "$_ba_line" | cut -d: -f4)"
+  tp_in_service_band "$BUILD_UID" && tp_in_service_band "$BUILD_GID" || return 1
+  [ "$(tp_gid_of_group "$BUILD_ACCOUNT")" = "$BUILD_GID" ] || return 1
+  _ba_extra="$(tp_group_db | awk -F: -v u="$BUILD_ACCOUNT" '
+    { n = split($4, m, ","); for (i = 1; i <= n; i++) if (m[i] == u && $1 !~ /^tpnode[a-z0-9]*$/) print $1 }')"
+  [ -z "$_ba_extra" ] || tp_die "build-run: $BUILD_ACCOUNT is in group(s) $_ba_extra; refusing"
+}
+
+# The build tree: root-owned, never world-writable, group-writable only with
+# the sticky bit.
+tp_build_tree_ok() {
+  for _bt in "$R_BUILD" "$R_BUILD/work" "$R_BUILD/cache"; do
+    tp_pin_dir "$_bt" || tp_die "no build directory $_bt (run the build-user role)"
+    [ "$(stat -c '%u' .)" = "$(id -u)" ] || tp_die "refusing $_bt: not owned by root"
+    case "$(stat -c '%A' .)" in
+      ????????w?) tp_die "refusing $_bt: world-writable" ;;
+      ?????w???[!tT]) tp_die "refusing $_bt: group-writable without the sticky bit" ;;
+    esac
+  done
+  tp_pin_parent "$BUILD_RUNNER" || tp_die "no runner directory"
+  [ -f "./$PIN_NAME" ] && [ ! -L "./$PIN_NAME" ] || tp_die "no build runner at $BUILD_RUNNER"
+  [ "$(stat -c '%u' "./$PIN_NAME")" = "$(id -u)" ] || tp_die "refusing $BUILD_RUNNER: not owned by root"
+  case "$(stat -c '%A' "./$PIN_NAME")" in
+    ?????w????|????????w?) tp_die "refusing $BUILD_RUNNER: writable by others" ;;
+  esac
+}
+
+# Pin work/<id>; it must be a real directory owned by the caller or the build
+# account (a re-run). Leaves the working directory in it.
+tp_build_work_pin() {
+  tp_pin_dir "$R_BUILD/work/$1" || tp_die "no work directory $R_BUILD/work/$1"
+  _bw_owner="$(stat -c '%u' .)"
+  [ "$_bw_owner" = "$CALLER_UID" ] || [ "$_bw_owner" = "$BUILD_UID" ] ||
+    tp_die "refusing $R_BUILD/work/$1: owned by uid $_bw_owner"
+}
+
+tp_systemd_major() {
+  if [ -n "$TP_TEST" ]; then
+    cat -- "$P/run/systemd-version" 2>/dev/null || echo 257
+    return
+  fi
+  systemctl --version | sed -n '1s/^systemd \([0-9][0-9]*\).*/\1/p'
+}
+
+tp_build_unit_state() {
+  if [ -n "$TP_TEST" ]; then
+    cat -- "$P/run/unit-state/$1" 2>/dev/null || echo inactive
+    return
+  fi
+  systemctl show -p ActiveState --value -- "$1"
+}
+
+# The host's nameservers as /32 or /128, one per line: literal addresses only.
+tp_build_resolvers() {
+  [ -f "$P/etc/resolv.conf" ] || return 0
+  awk '$1 == "nameserver" { sub(/%.*/, "", $2); print $2 }' "$P/etc/resolv.conf" |
+    while IFS= read -r _rs; do
+      case "$_rs" in
+        ''|*[!0-9A-Fa-f:.]*) ;;
+        *:*) printf '%s/128\n' "$_rs" ;;
+        *.*.*.*) printf '%s/32\n' "$_rs" ;;
+      esac
+    done
+}
+
+# One host-wide build at a time (root-only lock), and never alongside a build
+# unit whose client went away. Not exercised in test mode (no flock there).
+tp_build_lock() {
+  [ -z "$TP_TEST" ] || return 0
+  exec 9>>"$BUILD_LOCK"
+  flock -w "$BUILD_LOCK_WAIT_SEC" 9 || tp_die "build-run: timed out waiting for the running build"
+  _bl_active="$(systemctl list-units --plain --no-legend --all \
+    --state=activating,active,deactivating,reloading -- 'turbopanel-build-*.service')"
+  [ -z "$_bl_active" ] || tp_die "build-run: another build unit is still running"
+  [ "$(cat /proc/sys/fs/protected_hardlinks)" = "1" ] ||
+    tp_die "build-run: fs.protected_hardlinks must be 1 before handing a tree over"
+}
+
+tp_verb_build_run() {
+  [ $# -eq 2 ] || tp_die "build-run: only build-run BUILD-ID PROJECT-ID"
+  tp_build_id_ok "$1" || tp_die "build-run: refusing build id $1"
+  tp_build_id_ok "$2" || tp_die "build-run: refusing project id $2"
+  tp_build_account_ok || tp_die "build-run: no confined $BUILD_ACCOUNT account (run the build-user role)"
+  tp_build_tree_ok
+  _br_v="$(tp_systemd_major)"
+  case "$_br_v" in ''|*[!0-9]*) tp_die "build-run: cannot read the systemd version" ;; esac
+  [ "$_br_v" -ge "$BUILD_SYSTEMD_MIN" ] ||
+    tp_die "build-run: systemd $_br_v cannot sandbox a build; the supported floor is Debian 13 / Ubuntu 24.04"
+  tp_build_lock
+  _br_work="$R_BUILD/work/$1"
+  _br_cache="$R_BUILD/cache/$2"
+  tp_build_work_pin "$1"
+  tp_pin_dir "$R_BUILD/cache"
+  mkdir -m 0700 -- "./$2" 2>/dev/null || [ -d "./$2" ] || tp_die "cannot create $_br_cache"
+  tp_pin_dir "$_br_cache" || tp_die "refusing $_br_cache"
+  tp_run chown -h -- "$BUILD_UID:$BUILD_GID" .
+  tp_build_work_pin "$1"
+  tp_run chown -R -h -P -- "$BUILD_UID:$BUILD_GID" .
+  cd /
+  set -- --unit="turbopanel-build-$1" --service-type=exec --wait --pipe --quiet --collect \
+    -p User="$BUILD_ACCOUNT" -p Group="$BUILD_ACCOUNT" -p WorkingDirectory="$_br_work" \
+    -p NoNewPrivileges=yes -p CapabilityBoundingSet= -p AmbientCapabilities= \
+    -p RestrictSUIDSGID=yes -p ProtectSystem=strict -p ProtectHome=yes \
+    -p PrivateTmp=yes -p PrivateDevices=yes -p TemporaryFileSystem="$R_BUILD:ro" \
+    -p BindReadOnlyPaths="$BUILD_RUNNER:$R_BUILD/.runner" \
+    -p BindPaths="$_br_work" -p BindPaths="$_br_cache"
+  for _br_hide in "$R_CONFIG" "$R_STATE" "$R_LOG" "$R_RUN" "$R_PRINCIPALS" "$P/srv" \
+    "$P/backup" "$P/run/docker.sock" "$P/var/run/docker.sock" "$P/run/containerd" \
+    "$P/run/turbopanel-gate" "$P/var/lib/docker" "$P/etc/ssh" "$P/etc/wireguard"; do
+    set -- "$@" -p InaccessiblePaths="-$_br_hide"
+  done
+  set -- "$@" -p ProtectKernelTunables=yes -p ProtectKernelModules=yes \
+    -p ProtectKernelLogs=yes -p ProtectControlGroups=yes -p ProtectHostname=yes \
+    -p LockPersonality=yes -p RestrictRealtime=yes -p RestrictNamespaces=yes \
+    -p RemoveIPC=yes -p SystemCallFilter=@system-service -p SystemCallErrorNumber=EPERM \
+    -p SystemCallArchitectures=native
+  if [ "$_br_v" -ge "$BUILD_SYSTEMD_FLOOR" ]; then
+    set -- "$@" -p ProtectClock=yes -p ProtectProc=invisible -p PrivateIPC=yes
+  else
+    printf 'tp-host: warning: systemd %s is below the supported floor (Debian 13 / Ubuntu 24.04); this build runs as %s with a reduced sandbox (other processes visible, shared IPC)\n' \
+      "$_br_v" "$BUILD_ACCOUNT" >&2
+  fi
+  [ "$_br_v" -lt 257 ] || set -- "$@" -p PrivatePIDs=yes
+  set -- "$@" -p RestrictAddressFamilies="AF_INET AF_INET6 AF_UNIX" \
+    -p IPAddressDeny="$BUILD_DENY_V4 $BUILD_DENY_V6"
+  _br_allow="$(tp_build_resolvers | tr '\n' ' ')"
+  _br_allow="${_br_allow% }"
+  [ -z "$_br_allow" ] || set -- "$@" -p IPAddressAllow="$_br_allow"
+  set -- "$@" -p Slice="$BUILD_SLICE" -p MemoryMax="$BUILD_MEMORY_MAX" -p MemorySwapMax=0 \
+    -p CPUQuota="$BUILD_CPU_QUOTA" -p TasksMax=1024 -p IOWeight=50 -p LimitFSIZE=4G \
+    -p LimitNOFILE=65536 -p LimitCORE=0 -p RuntimeMaxSec="$BUILD_RUNTIME_MAX_SEC" \
+    -p KillMode=control-group -p OOMPolicy=continue -p UMask=0022 \
+    -- /bin/sh "$R_BUILD/.runner" "$_br_work"
+  tp_exec systemd-run "$@"
+}
+
+# Hand a finished work tree back to the caller, only once its unit is gone
+# (cgroup empty, so nothing the build left behind can race the copy).
+tp_verb_build_return() {
+  [ $# -eq 1 ] || tp_die "build-return: only build-return BUILD-ID"
+  tp_build_id_ok "$1" || tp_die "build-return: refusing build id $1"
+  tp_build_account_ok || tp_die "build-return: no confined $BUILD_ACCOUNT account"
+  _bt_state="$(tp_build_unit_state "turbopanel-build-$1.service")"
+  case "$_bt_state" in
+    inactive|failed) ;;
+    *) tp_die "build-return: turbopanel-build-$1.service is still $_bt_state" ;;
+  esac
+  tp_pin_dir "$R_BUILD/work" || tp_die "no build directory $R_BUILD/work"
+  tp_build_work_pin "$1"
+  tp_run chown -R -h -P -- "$CALLER_UID:$CALLER_GID" .
+}
+
 # --- dispatch ----------------------------------------------------------------
 
 [ $# -ge 1 ] || tp_die "usage: tp-host <verb> [args…]"
@@ -1438,5 +1660,7 @@ case "$_verb" in
   chpasswd) tp_verb_chpasswd "$@" ;;
   getent) tp_verb_getent "$@" ;;
   modprobe) tp_verb_modprobe "$@" ;;
+  build-run) tp_verb_build_run "$@" ;;
+  build-return) tp_verb_build_return "$@" ;;
   *) tp_die "refusing verb $_verb" ;;
 esac

@@ -1,0 +1,177 @@
+#!/bin/sh
+# tp-build-runner — runs one tenant build's commands inside the build sandbox
+# (POSIX sh, root:root 0755 at <install>/lib/tp-build-runner).
+#
+# Only `tp-host build-run` starts it: as the unprivileged build account, as the
+# ExecStart of a transient turbopanel-build-<id>.service whose sandbox and
+# limits tp-host fixes. tp-host bind-mounts this file into the unit, so the
+# build account never needs to traverse /opt/turbopanel. Its one argument is
+# the work directory tp-host derived from the build id.
+#
+# Interface (the daemon writes the spec; WP4 of the unprivileged-builds
+# design):
+#
+#   stdin  The whole spec, then EOF. Read before any tenant command runs; the
+#          runner then reopens stdin on /dev/null. At most 1 MiB. One field
+#          per line, values base64 (RFC 4648, no line breaks):
+#
+#            tp-build-spec 1        first line, exactly
+#            cwd <relative path>    optional, once; default `.`; no `..`
+#            env <NAME> <base64>    any number; NAME is [A-Za-z_][A-Za-z0-9_]*
+#            run <base64>           1–64 commands, run in order with `sh -c`
+#            end                    last line, exactly
+#
+#          Every command starts from an empty environment holding
+#          HOME=<work dir>, PATH=/usr/local/bin:/usr/bin:/bin and TMPDIR=/tmp
+#          (a private /tmp), then the spec's env in order (a later NAME wins).
+#   stdout/stderr  The commands' own streams, unbuffered by the runner.
+#   exit   0 when every command succeeded; otherwise the first failing
+#          command's status (the rest are not run), after a
+#          `tp-build-runner: step N of M failed (exit S)` line on stderr.
+#          64: bad arguments or run as root. 65: a malformed spec.
+#          systemd ends the unit (status from systemd-run) on RuntimeMaxSec.
+set -eu
+umask 022
+LC_ALL=C
+export LC_ALL
+PATH=/usr/local/bin:/usr/bin:/bin
+
+SPEC_MAX_BYTES=1048576
+MAX_STEPS=64
+DEFAULT_PATH=/usr/local/bin:/usr/bin:/bin
+
+rn_usage() {
+  printf 'tp-build-runner: %s\n' "$*" >&2
+  exit 64
+}
+
+rn_bad_spec() {
+  printf 'tp-build-runner: bad spec: %s\n' "$*" >&2
+  exit 65
+}
+
+_nl="$(printf '\nx')"
+_nl="${_nl%x}"
+
+[ "$(id -u)" != "0" ] || rn_usage "refusing to run as root"
+[ $# -eq 1 ] || rn_usage "usage: tp-build-runner WORK-DIR"
+WORK="$1"
+case "$WORK" in
+  /*) ;;
+  *) rn_usage "the work directory must be absolute" ;;
+esac
+CDPATH='' cd -P -- "$WORK" 2>/dev/null || rn_usage "no work directory $WORK"
+[ "$(pwd -P)" = "$WORK" ] || rn_usage "the work directory $WORK is reached through a symlink"
+
+# The spec, then nothing more from the caller.
+_spec="$(head -c $((SPEC_MAX_BYTES + 1)))"
+exec </dev/null
+[ "${#_spec}" -le "$SPEC_MAX_BYTES" ] || rn_bad_spec "larger than $SPEC_MAX_BYTES bytes"
+
+rn_b64_ok() {
+  case "$1" in
+    *[!A-Za-z0-9+/=]*) return 1 ;;
+  esac
+  return 0
+}
+
+# Decoded value of base64 $1 in _decoded (trailing newlines kept).
+rn_decode() {
+  _decoded="$(printf '%s' "$1" | base64 -d 2>/dev/null && printf x)" ||
+    rn_bad_spec "a value is not base64"
+  _decoded="${_decoded%x}"
+}
+
+rn_rel_ok() {
+  case "$1" in
+    .) return 0 ;;
+    ''|/*|*//*|*/|..|../*|*/..|*/../*) return 1 ;;
+    *[!A-Za-z0-9._@+,=/-]*) return 1 ;;
+  esac
+  return 0
+}
+
+_cwd=.
+_cwd_seen=""
+_envs=""
+_runs=""
+_steps=0
+_line_no=0
+_ended=""
+while IFS= read -r _line; do
+  _line_no=$((_line_no + 1))
+  [ -z "$_ended" ] || rn_bad_spec "line $_line_no follows end"
+  if [ "$_line_no" -eq 1 ]; then
+    [ "$_line" = "tp-build-spec 1" ] || rn_bad_spec "the first line must be: tp-build-spec 1"
+    continue
+  fi
+  _key="${_line%% *}"
+  _rest="${_line#"$_key"}"
+  _rest="${_rest# }"
+  case "$_key" in
+    cwd)
+      [ -z "$_cwd_seen" ] || rn_bad_spec "cwd given twice"
+      rn_rel_ok "$_rest" || rn_bad_spec "cwd must be a relative path inside the work directory"
+      _cwd="$_rest"
+      _cwd_seen=1
+      ;;
+    env)
+      _name="${_rest%% *}"
+      _value="${_rest#"$_name"}"
+      _value="${_value# }"
+      case "$_name" in
+        ''|[0-9]*|*[!A-Za-z0-9_]*) rn_bad_spec "line $_line_no: bad variable name" ;;
+      esac
+      rn_b64_ok "$_value" || rn_bad_spec "line $_line_no: the value is not base64"
+      _envs="$_envs$_name $_value$_nl"
+      ;;
+    run)
+      [ -n "$_rest" ] && rn_b64_ok "$_rest" || rn_bad_spec "line $_line_no: the command is not base64"
+      _steps=$((_steps + 1))
+      [ "$_steps" -le "$MAX_STEPS" ] || rn_bad_spec "more than $MAX_STEPS commands"
+      _runs="$_runs$_rest$_nl"
+      ;;
+    end)
+      [ -z "$_rest" ] || rn_bad_spec "line $_line_no: end takes nothing"
+      _ended=1
+      ;;
+    *) rn_bad_spec "line $_line_no: unknown field" ;;
+  esac
+done <<EOF
+$_spec
+EOF
+[ -n "$_ended" ] || rn_bad_spec "no end line (truncated?)"
+[ "$_steps" -ge 1 ] || rn_bad_spec "no command to run"
+
+set -f
+_step=0
+_old_ifs="$IFS"
+IFS="$_nl"
+for _run in $_runs; do
+  IFS="$_old_ifs"
+  _step=$((_step + 1))
+  rn_decode "$_run"
+  _command="$_decoded"
+  CDPATH='' cd -P -- "$WORK/$_cwd" 2>/dev/null || rn_bad_spec "no directory $_cwd in the work directory"
+  case "$(pwd -P)" in
+    "$WORK"|"$WORK"/*) ;;
+    *) rn_bad_spec "cwd $_cwd leaves the work directory" ;;
+  esac
+  # The spec env, in order, as `NAME=value` arguments for env(1).
+  set --
+  while IFS=' ' read -r _e_name _e_value; do
+    [ -n "$_e_name" ] || continue
+    rn_decode "$_e_value"
+    set -- "$@" "$_e_name=$_decoded"
+  done <<EOF
+$_envs
+EOF
+  _status=0
+  env -i "HOME=$WORK" "PATH=$DEFAULT_PATH" "TMPDIR=/tmp" "$@" sh -c "$_command" || _status=$?
+  if [ "$_status" -ne 0 ]; then
+    printf 'tp-build-runner: step %s of %s failed (exit %s)\n' "$_step" "$_steps" "$_status" >&2
+    exit "$_status"
+  fi
+  IFS="$_nl"
+done
+exit 0
