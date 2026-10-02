@@ -1274,20 +1274,33 @@ tp_verb_groupadd() {
   tp_exec groupadd "$@"
 }
 
+# Checks the fixed tail of a useradd line. Takes the id-arg count, the new
+# name, then the full argv; shifts only its own copy, so the caller still holds
+# the id args (`-u N` / `-K UID_MIN=... -K UID_MAX=...`) it must hand to useradd.
+tp_useradd_tail_ok() {
+  _ut_n="$1"
+  _ut_name="$2"
+  shift 2
+  shift "$_ut_n"
+  [ "$#" -eq 8 ] && [ "$1" = "-g" ] && [ "$3" = "-d" ] && [ "$5" = "-M" ] &&
+    [ "$6" = "-s" ] || tp_die "useradd: unsupported form"
+  [ "$2" = "${_ut_name}-grp" ] && tp_is_principal_group "$2" ||
+    tp_die "useradd: primary group must be ${_ut_name}-grp"
+  tp_principal_home_ok "$4" "$_ut_name" || tp_die "useradd: home must be $R_PRINCIPALS/$_ut_name"
+  tp_shell_ok "$7" || tp_die "useradd: refusing shell $7"
+}
+
 tp_verb_useradd() {
   for _ua_name in "$@"; do :; done
   tp_new_name_ok "$_ua_name" || tp_die "useradd: refusing name $_ua_name"
   case "$1" in
-    -u) tp_id_args_ok UID "$1" "$2" || tp_die "useradd: uid outside the principal band"; shift 2 ;;
-    -K) tp_id_args_ok UID "$1" "$2" "$3" "$4" || tp_die "useradd: unsupported range"; shift 4 ;;
+    -u) tp_id_args_ok UID "$1" "$2" || tp_die "useradd: uid outside the principal band"; _ua_n=2 ;;
+    -K) tp_id_args_ok UID "$1" "$2" "$3" "$4" || tp_die "useradd: unsupported range"; _ua_n=4 ;;
     *) tp_die "useradd: an id or the principal range is required" ;;
   esac
-  [ "$#" -eq 8 ] && [ "$1" = "-g" ] && [ "$3" = "-d" ] && [ "$5" = "-M" ] &&
-    [ "$6" = "-s" ] || tp_die "useradd: unsupported form"
-  [ "$2" = "${_ua_name}-grp" ] && tp_is_principal_group "$2" ||
-    tp_die "useradd: primary group must be ${_ua_name}-grp"
-  tp_principal_home_ok "$4" "$_ua_name" || tp_die "useradd: home must be $R_PRINCIPALS/$_ua_name"
-  tp_shell_ok "$7" || tp_die "useradd: refusing shell $7"
+  tp_useradd_tail_ok "$_ua_n" "$_ua_name" "$@"
+  # "$@" still carries the id args: dropping them leaves useradd on login.defs
+  # (UID_MIN 1000), which is how principals landed at uid 10000/10001.
   tp_exec useradd "$@"
 }
 

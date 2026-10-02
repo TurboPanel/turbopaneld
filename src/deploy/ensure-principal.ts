@@ -395,6 +395,29 @@ async function createPrincipalUser(
   if (!userAdd.success) {
     throw new Error(userAdd.stderr || "Failed to create principal user");
   }
+  if (principal.uid === undefined) {
+    await assertCreatedUidAboveFloor(principal.username, runFn);
+  }
+}
+
+/**
+ * Never trust the allocator alone: re-read the account `useradd` just made and
+ * refuse one that landed below the floor (login.defs fallthrough, or a wrapper
+ * that dropped the `-K` range). The daemon holds no `userdel` grant, so the
+ * account is left for the operator, with the repair spelled out.
+ */
+async function assertCreatedUidAboveFloor(
+  username: string,
+  runFn: RunFn,
+): Promise<void> {
+  const created = await runFn("getent", ["passwd", username]);
+  if (!created.success) return;
+  const entry = parsePasswdHomeShell(created.stdout);
+  if (entry && entry.uid < PRINCIPAL_ID_MIN) {
+    throw new Error(
+      `Principal user ${username} was created with uid=${entry.uid}, below PRINCIPAL_ID_MIN=${PRINCIPAL_ID_MIN} — the host ignored the requested uid range (check tp-host useradd passes -K through). Repair: usermod -u <free uid in [${PRINCIPAL_ID_MIN}, ${PRINCIPAL_ID_MAX}]> ${username}; chown -R the principal's home tree and group to match (find / -xdev -uid ${entry.uid} -exec chown -h <new uid> {} +), then retry`,
+    );
+  }
 }
 
 /** Explicit uid/gid overrides must still match the existing account. */
