@@ -218,7 +218,7 @@ export class PgDeadPrimaryObserver {
     }
     const watched = (await this.#listMembers()).filter(isWatchedPrimary);
     const ids = new Set(watched.map((record) => record.managedId));
-    for (const id of [...this.#detectors.keys()]) {
+    for (const id of this.#detectors.keys()) {
       if (!ids.has(id)) this.#detectors.delete(id);
     }
     await Promise.all(watched.map((record) => this.#probeOne(record)));
