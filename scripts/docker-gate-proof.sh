@@ -98,11 +98,13 @@ ro_docker() {
   return $?
 }
 
-# curl over the read-only socket; prints only the HTTP status.
+# curl over the read-only socket; prints only the HTTP status. The request
+# never leaves the host (a Unix socket), so no scheme is written: curl reads a
+# scheme-less URL as plain HTTP, which is what the Docker API speaks.
 ro_status() {
   _ro_method=$1
   _ro_path=$2
-  curl -s -o /dev/null -w '%{http_code}' --max-time 5 -X "$_ro_method" --unix-socket "$RO_SOCKET" "http://localhost$_ro_path"
+  curl -s -o /dev/null -w '%{http_code}' --max-time 5 -X "$_ro_method" --unix-socket "$RO_SOCKET" "localhost$_ro_path"
   return 0
 }
 
