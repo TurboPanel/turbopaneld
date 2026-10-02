@@ -25,8 +25,7 @@
 #   prefix.
 #
 # What this does not contain (see AGENTS.md → Managed-host privilege
-# boundary): Docker (the daemon account is in the `docker` group), the root
-# hosting Caddy whose config lives in the daemon-owned config tree, and root
+# boundary): Docker (the daemon account is in the `docker` group) and root
 # engine config validation.
 set -eu
 umask 077
@@ -87,6 +86,12 @@ ENGINE_USERS="tpnginx tpapache tpols tpcaddysite"
 # The daemon's own account and group: the only User=/Group= a scheduled backup
 # unit (turbopanel-backup-<uuid>.service) may name.
 DAEMON_ACCOUNT="tp"
+# The hosting Caddy (public :80/:443) account: not in group tp, and its unit's
+# only privilege is CAP_NET_BIND_SERVICE. Kept in step with
+# roles/hosting-caddy/defaults/main.yml and HOSTING_CADDY_USER in ingress.ts.
+HOSTING_CADDY_USER="tpedge"
+HOSTING_CADDY_CAP="CAP_NET_BIND_SERVICE"
+HOSTING_CADDY_STATE="turbopanel-hosting-caddy"
 
 # --- running the real thing ------------------------------------------------
 # Privileged commands. In test mode they are printed, one argv element per
@@ -524,13 +529,15 @@ tp_unit_ok() {
   # either exactly turbopanel-backup-<lower-case uuid>.service|.timer and gets
   # the backup check below, or it is refused.
   _uk_backup=""
+  _uk_hosting=""
+  [ "$_uk_name" = "turbopanel-hosting-caddy.service" ] && _uk_hosting=1
   case "$_uk_name" in
     turbopanel-backup-*)
       _uk_backup="$(tp_backup_unit_id "$_uk_name")" || return 1
       ;;
     *) ;;
   esac
-  _uk_meta="$(awk -v name="$_uk_name" -v min="$PRINCIPAL_ID_MIN" -v backup="${_uk_backup:+1}" '
+  _uk_meta="$(awk -v name="$_uk_name" -v min="$PRINCIPAL_ID_MIN" -v backup="${_uk_backup:+1}" -v hosting="$_uk_hosting" -v hostcap="$HOSTING_CADDY_CAP" '
     function fail(msg) { print "tp-host: unit " name ": " msg > "/dev/stderr"; bad = 1; exit 1 }
     BEGIN {
       split("Description After Before Wants Requires PartOf StartLimitBurst StartLimitIntervalSec", a, " ");
@@ -549,6 +556,9 @@ tp_unit_ok() {
         ok["Service", "Nice"] = 1
         ok["Service", "IOSchedulingClass"] = 1
       }
+      # Only the hosting Caddy keeps state in a systemd StateDirectory=;
+      # tp_hosting_caddy_unit_ok pins its value.
+      if (hosting == "1") ok["Service", "StateDirectory"] = 1
       section = ""
     }
     # systemd joins a line ending in a backslash onto the next one, so a
@@ -574,8 +584,9 @@ tp_unit_ok() {
       if (key == "User") user = val
       if (key == "Group") group = val
       if (key == "Slice") slice = val
-      if (key == "CapabilityBoundingSet" && val != "") fail("CapabilityBoundingSet=" val)
-      if (key == "AmbientCapabilities" && val != "") fail("AmbientCapabilities=" val)
+      # Tenant units get no capability. The hosting Caddy gets exactly one:
+      # binding :80/:443.
+      if (key ~ /^(CapabilityBoundingSet|AmbientCapabilities)$/ && val != "" && !(hosting == "1" && val == hostcap)) fail(key "=" val)
       if (key == "NoNewPrivileges") nnp = val
       if (key == "Unit" && section == "Timer") timerunit = val
     }
@@ -610,10 +621,11 @@ tp_unit_ok() {
     return
   fi
   tp_unit_meta_parse "$_uk_meta" || return 1
-  if [ "$_uk_name" = "turbopanel-hosting-caddy.service" ]; then
-    # Runs as root today (binds :80/:443) — see AGENTS.md residual risks. Its
-    # exec lines must be the vendored Caddy against the hosting config.
-    [ -z "$_uk_user" ] || return 1
+  if [ -n "$_uk_hosting" ]; then
+    # Never root: its own account, its one capability, no new privileges.
+    [ "$_uk_user" = "$HOSTING_CADDY_USER" ] || return 1
+    [ "$_uk_group" = "$HOSTING_CADDY_USER" ] || return 1
+    [ "$_uk_nnp" = "yes" ] || return 1
     tp_hosting_caddy_unit_ok "$_uk_file"
     return
   fi
@@ -624,9 +636,19 @@ tp_unit_ok() {
   return 0
 }
 
+# The hosting Caddy unit, beyond the account checks in tp_unit_ok: the vendored
+# Caddy against the hosting config, exactly CAP_NET_BIND_SERVICE in both the
+# bounding and the ambient set (a missing bounding set would keep every
+# capability bounded), its store in its own top-level StateDirectory, and
+# only the environment that points Caddy at that store. Read from the file the
+# awk pass above already shape-checked; every repeated key is checked.
 tp_hosting_caddy_unit_ok() {
   _hc_bin="$INSTALL_ROOT/vendor/caddy/current/caddy"
   _hc_cfg="$R_CONFIG/hosting/Caddyfile"
+  _hc_state="%S/$HOSTING_CADDY_STATE"
+  _hc_bound=""
+  _hc_ambient=""
+  _hc_dir=""
   while IFS= read -r _hc_line || [ -n "$_hc_line" ]; do
     case "$_hc_line" in
       ExecStart=*)
@@ -639,9 +661,22 @@ tp_hosting_caddy_unit_ok() {
           *) return 1 ;;
         esac
         ;;
-      User=*|Group=*) return 1 ;;
+      CapabilityBoundingSet=*) _hc_bound="${_hc_line#*=}" ;;
+      AmbientCapabilities=*) _hc_ambient="${_hc_line#*=}" ;;
+      StateDirectory=*) _hc_dir="${_hc_line#*=}" ;;
+      Environment=*)
+        case "$_hc_line" in
+          "Environment=HOME=$_hc_state" | \
+            "Environment=XDG_DATA_HOME=$_hc_state/data" | \
+            "Environment=XDG_CONFIG_HOME=$_hc_state/config") ;;
+          *) return 1 ;;
+        esac
+        ;;
     esac
   done < "$1"
+  [ "$_hc_bound" = "$HOSTING_CADDY_CAP" ] || return 1
+  [ "$_hc_ambient" = "$HOSTING_CADDY_CAP" ] || return 1
+  [ "$_hc_dir" = "$HOSTING_CADDY_STATE" ] || return 1
 }
 
 # The policy id in turbopanel-backup-<id>.service|.timer, printed; fails unless

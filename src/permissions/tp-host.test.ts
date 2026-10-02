@@ -484,6 +484,100 @@ async function refusedUnit(host: Host, name: string, content: string) {
   ]);
 }
 
+test("the hosting Caddy unit passes only as tpedge with CAP_NET_BIND_SERVICE alone", async () => {
+  await withHost(async (host) => {
+    const layout = resolveLayout({
+      TURBOPANEL_HOME: host.path("opt/turbopanel"),
+      TURBOPANEL_LIB_DIR: host.path("opt/turbopanel/lib"),
+      TURBOPANEL_RUNTIMES_DIR: host.path("opt/turbopanel/vendor"),
+      TURBOPANEL_CONFIG_DIR: host.path("etc/turbopanel"),
+      TURBOPANEL_STATE_DIR: host.path("var/lib/turbopanel"),
+      TURBOPANEL_PRINCIPAL_HOME_ROOT: host.path("srv/users"),
+    }, { forceMode: "production" });
+    const name = "turbopanel-hosting-caddy.service";
+    const unit = caddyUnit(layout);
+    const result = await installUnit(host, name, unit);
+    assertEquals(result.code, 0, result.stderr);
+
+    const drop = (pattern: RegExp) => unit.replace(pattern, "");
+    const hostile: Array<[string, string]> = [
+      ["root (no User=)", drop(/^User=.*\n/m)],
+      ["User=root", unit.replace(/^User=.*$/m, "User=root")],
+      ["the daemon account", unit.replace(/^User=.*$/m, "User=tp")],
+      ["Group=tp", unit.replace(/^Group=.*$/m, "Group=tp")],
+      ["no Group=", drop(/^Group=.*\n/m)],
+      ["no NoNewPrivileges=", drop(/^NoNewPrivileges=.*\n/m)],
+      [
+        "NoNewPrivileges=no",
+        unit.replace(/^NoNewPrivileges=.*$/m, "NoNewPrivileges=no"),
+      ],
+      [
+        "a second ambient capability",
+        unit.replace(
+          /^AmbientCapabilities=.*$/m,
+          "AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_SYS_ADMIN",
+        ),
+      ],
+      [
+        "another bounding capability",
+        unit.replace(
+          /^CapabilityBoundingSet=.*$/m,
+          "CapabilityBoundingSet=CAP_SYS_ADMIN",
+        ),
+      ],
+      ["no bounding set (keeps every capability)", drop(/^Capability.*\n/m)],
+      ["no ambient capability", drop(/^AmbientCapabilities=.*\n/m)],
+      [
+        "a store inside the tp-owned tree",
+        unit.replace(/^StateDirectory=.*$/m, "StateDirectory=turbopanel"),
+      ],
+      [
+        "an extra environment variable",
+        unit.replace(
+          "[Service]",
+          "[Service]\nEnvironment=LD_PRELOAD=/tmp/x.so",
+        ),
+      ],
+      [
+        "a data store the daemon owns",
+        unit.replace(
+          /^Environment=XDG_DATA_HOME=.*$/m,
+          "Environment=XDG_DATA_HOME=/var/lib/turbopanel/hosting-caddy",
+        ),
+      ],
+      [
+        "another command",
+        unit.replace(/^ExecStart=.*$/m, "ExecStart=/bin/sh -c id"),
+      ],
+      [
+        "a privileged pre-start",
+        unit.replace("[Service]", "[Service]\nExecStartPre=+/bin/true"),
+      ],
+    ];
+    for (const [label, content] of hostile) {
+      assertEquals(content === unit, false, `${label}: corpus did not change`);
+      await refusedUnit(host, name, content);
+    }
+    // A tenant unit cannot borrow the hosting Caddy's capability.
+    const tenant = cronServiceContent({
+      layout,
+      environmentId: "env1",
+      composeServiceName: "web",
+      job: {
+        name: "nightly",
+        schedule: "*-*-* 03:00:00",
+        command: ["/bin/true"],
+      } as unknown as EnvironmentDeployCronJob,
+      username: "alice",
+      workingDirectory: host.path("srv/users/alice/sites/web/current"),
+    }).replace(
+      /^AmbientCapabilities=.*$/m,
+      "AmbientCapabilities=CAP_NET_BIND_SERVICE",
+    );
+    await refusedUnit(host, "turbopanel-cron-env1-web-nightly.service", tenant);
+  });
+});
+
 test("scheduled-backup units pass only in their exact shape; tenant units gain nothing", async () => {
   await withHost(async (host) => {
     const layout = resolveLayout({

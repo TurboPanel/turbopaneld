@@ -1,5 +1,7 @@
+import { assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import { parse } from "yaml";
+import { HOSTING_CADDY_USER } from "../deploy/ensure-hosting-caddy.ts";
 import { DAEMON_ROOT } from "./assets.ts";
 
 const CHECKOUT_ORCHESTRATION_DIR = join(DAEMON_ROOT, "orchestration");
@@ -205,6 +207,20 @@ test("role default production branches match canonical tp* allocation", async ()
   }
 });
 
+test("the hosting Caddy account is its own identity, outside group tp", async () => {
+  const defaults = parse(
+    await readRole("roles/hosting-caddy/defaults/main.yml"),
+  ) as { hosting_caddy_user: string; hosting_caddy_uid: number };
+  assertEquals(defaults.hosting_caddy_user, HOSTING_CADDY_USER);
+  assertEquals(defaults.hosting_caddy_uid, 9983);
+  const tasks = await readRole("roles/hosting-caddy/tasks/main.yml");
+  // No supplementary groups at all: never tp.
+  assertMatch(tasks, /^\s+groups: \[\]$/m, "hosting Caddy groups");
+  assertEquals(/groups:.*turbopanel_group/.test(tasks), false);
+  const tpHost = await readRole("scripts/tp-host");
+  assertStringIncludes(tpHost, `HOSTING_CADDY_USER="${HOSTING_CADDY_USER}"`);
+});
+
 test("web-service-user map pins optional web server identities", async () => {
   const yaml = await readRole("roles/web-service-user/defaults/main.yml");
   const map = parseWebServiceUserMap(yaml);
@@ -301,7 +317,16 @@ test("converge and web-service account ids are globally unique", async () => {
 
   const convergeIds = ACCOUNTS.map((entry) => entry.id);
   const webIds = Object.values(webServiceMap).map((entry) => entry.uid);
-  const ids = [...convergeIds, ...webIds, ...entitlementIds, ...accessGroupIds];
+  const hostingCaddy = parse(
+    await readRole("roles/hosting-caddy/defaults/main.yml"),
+  ) as { hosting_caddy_uid: number };
+  const ids = [
+    ...convergeIds,
+    ...webIds,
+    ...entitlementIds,
+    ...accessGroupIds,
+    hostingCaddy.hosting_caddy_uid,
+  ];
 
   const seen = new Set<number>();
   const collisions: number[] = [];

@@ -259,8 +259,34 @@ second `@api` (`matcher is defined more than once`) and the unit crash-loops.
 template fails the play instead of starting that loop.
 
 Control-plane `XDG_DATA_HOME` is `{{ turbopanel_caddy_runtime_dir }}/share`
-(`<state>/caddy/.local/share`). Hosting Caddy uses `<state>/hosting-caddy`.
+(`<state>/caddy/.local/share`). Hosting Caddy uses its own top-level
+`StateDirectory=turbopanel-hosting-caddy` (`/var/lib/turbopanel-hosting-caddy`).
 Those stores must not be the same directory.
+
+### Hosting Caddy account (`hosting-caddy`)
+
+`turbopanel-hosting-caddy.service` (public `:80`/`:443`, unit rendered by
+`src/deploy/ingress.ts`, pinned by tp-host) runs as **`tpedge`** (uid/gid
+9983), which is deliberately **not** in group `tp`: its only privilege is
+`CAP_NET_BIND_SERVICE` (ambient and bounding), with `NoNewPrivileges=yes`.
+Certificates, the ACME account, the internal CA and Caddy's autosave live in
+the unit's `StateDirectory=turbopanel-hosting-caddy`, which systemd creates
+owned by `tpedge`; the old root-written `<state>/hosting-caddy` store is
+removed, not migrated (the internal CA and ACME account are recreated).
+`caddy-setup.yml` runs this role after `caddy`; the daemon runs that playbook
+whenever the binary **or** the account is missing (`ensureHostingCaddy`). The
+role grants `tpedge` exactly what Caddy loads, as ACL entries for that one
+user: traverse (`x`) on `/opt/turbopanel`, `vendor/` and `/etc/turbopanel`,
+`rx` on the vendored binary, `rx` plus a default `rx` entry on
+`/etc/turbopanel/hosting{,/sites}` (so every Caddyfile and snippet the daemon
+writes is readable), and `r` on the files already there. `/etc/turbopanel/tls`
+is `tp:tpedge` `2750`: the setgid bit gives every uploaded certificate the
+`tpedge` group, and `materialize-tls.ts` writes the private key `0640` only
+under that setgid directory (otherwise `0600`), so group `tp` never reads a
+key. The daemon restarts the unit when its rendered content changes
+(`enable --now` alone would keep the old process). Not yet covered: the
+control-plane Let's Encrypt window proxies to `unix/<run dir>/instance-acme.sock`,
+which `tpedge` cannot reach (follow-up).
 
 Vars (both roles; extra-vars win):
 

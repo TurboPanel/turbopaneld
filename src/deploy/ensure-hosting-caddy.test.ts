@@ -10,6 +10,7 @@ import {
 } from "./ensure-hosting-caddy.ts";
 
 const skipTarballDigestVerify = () => Promise.resolve();
+const accountPresent = () => Promise.resolve(true);
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -112,6 +113,7 @@ test({
 
       let setupCalls = 0;
       const resolved = await ensureHostingCaddy(layout, {
+        accountExists: accountPresent,
         runCaddySetup: () => {
           setupCalls += 1;
           return Promise.resolve();
@@ -138,6 +140,7 @@ test({
       });
       let setupCalls = 0;
       const resolved = await ensureHostingCaddy(layout, {
+        accountExists: accountPresent,
         runCaddySetup: async () => {
           setupCalls += 1;
           await plantVendorCaddy(layout.runtimesDir, "#!/bin/from-setup\n");
@@ -163,6 +166,7 @@ test({
       });
       const commands: string[] = [];
       const resolved = await ensureHostingCaddy(layout, {
+        accountExists: accountPresent,
         runCaddySetup: () => Promise.reject(new Error("playbook missing")),
         resolveArch: () => "amd64",
         runCommand: (command, args, opts) => {
@@ -202,6 +206,7 @@ test({
       await Deno.remove(join(staleDir, "caddy"));
 
       const resolved = await ensureHostingCaddy(layout, {
+        accountExists: accountPresent,
         runCaddySetup: () => Promise.resolve(),
         resolveArch: () => "arm64",
         runCommand: mockDownloadCommands({
@@ -246,6 +251,7 @@ test({
       await assertRejects(
         () =>
           ensureHostingCaddy(layout, {
+            accountExists: accountPresent,
             runCaddySetup: () => Promise.resolve(),
             resolveArch: () => "amd64",
             runCommand: mockDownloadCommands({}),
@@ -271,6 +277,7 @@ test({
       await assertRejects(
         () =>
           ensureHostingCaddy(layout, {
+            accountExists: accountPresent,
             runCaddySetup: () => Promise.resolve(),
             resolveArch: () => "amd64",
             runCommand: mockDownloadCommands({
@@ -298,6 +305,7 @@ test({
       await assertRejects(
         () =>
           ensureHostingCaddy(layout, {
+            accountExists: accountPresent,
             runCaddySetup: () => Promise.resolve(),
             resolveArch: () => "amd64",
             runCommand: mockDownloadCommands({ curlOk: false, curlStderr: "" }),
@@ -322,6 +330,7 @@ test({
       await assertRejects(
         () =>
           ensureHostingCaddy(layout, {
+            accountExists: accountPresent,
             runCaddySetup: () => Promise.resolve(),
             resolveArch: () => "amd64",
             runCommand: mockDownloadCommands({
@@ -349,6 +358,7 @@ test({
       await assertRejects(
         () =>
           ensureHostingCaddy(layout, {
+            accountExists: accountPresent,
             runCaddySetup: () => Promise.resolve(),
             resolveArch: () => "amd64",
             runCommand: mockDownloadCommands({ tarOk: false, tarStderr: "" }),
@@ -374,6 +384,7 @@ test({
       await assertRejects(
         () =>
           ensureHostingCaddy(layout, {
+            accountExists: accountPresent,
             runCaddySetup: () => Promise.resolve(),
             resolveArch: () => "amd64",
             runCommand: async (command, args, opts) => {
@@ -473,6 +484,7 @@ test({
       try {
         // No resolveArch / runCommand inject — exercises defaults.
         const resolved = await ensureHostingCaddy(layout, {
+          accountExists: accountPresent,
           runCaddySetup: () => Promise.resolve(),
           verifyTarballSha256: skipTarballDigestVerify,
         });
@@ -495,6 +507,7 @@ test({
         forceMode: "production",
       });
       const resolved = await ensureHostingCaddy(layout, {
+        accountExists: accountPresent,
         runCaddySetup: () => Promise.reject("setup blew up"),
         resolveArch: () => "amd64",
         runCommand: mockDownloadCommands({
@@ -520,6 +533,7 @@ test({
       await assertRejects(
         () =>
           ensureHostingCaddy(layout, {
+            accountExists: accountPresent,
             runCaddySetup: () => Promise.resolve(),
             resolveArch: () => {
               throw new Error(
@@ -558,6 +572,7 @@ test({
         await assertRejects(
           () =>
             ensureHostingCaddy(layout, {
+              accountExists: accountPresent,
               runCaddySetup: () => Promise.resolve(),
             }),
           Deno.errors.PermissionDenied,
@@ -595,6 +610,7 @@ test({
         await assertRejects(
           () =>
             ensureHostingCaddy(layout, {
+              accountExists: accountPresent,
               runCaddySetup: () => Promise.resolve(),
               resolveArch: () => "amd64",
               runCommand: mockDownloadCommands({}),
@@ -606,6 +622,56 @@ test({
       } finally {
         Deno.remove = originalRemove;
       }
+    });
+  },
+});
+
+test({
+  name:
+    "ensureHostingCaddy runs caddy-setup when the binary exists but the account does not",
+  permissions: { read: true, write: true, run: ["ln"] },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      const layout = resolveLayout(fixture.env, {
+        skipDiscovery: true,
+        forceMode: "production",
+      });
+      const bin = await plantVendorCaddy(layout.runtimesDir);
+      let account = false;
+      let setupCalls = 0;
+      const resolved = await ensureHostingCaddy(layout, {
+        accountExists: () => Promise.resolve(account),
+        runCaddySetup: () => {
+          setupCalls += 1;
+          account = true;
+          return Promise.resolve();
+        },
+      });
+      assertEquals(resolved, bin);
+      assertEquals(setupCalls, 1);
+    });
+  },
+});
+
+test({
+  name: "ensureHostingCaddy refuses when caddy-setup leaves no account",
+  permissions: { read: true, write: true, run: ["ln"] },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      const layout = resolveLayout(fixture.env, {
+        skipDiscovery: true,
+        forceMode: "production",
+      });
+      await plantVendorCaddy(layout.runtimesDir);
+      await assertRejects(
+        () =>
+          ensureHostingCaddy(layout, {
+            accountExists: () => Promise.resolve(false),
+            runCaddySetup: () => Promise.resolve(),
+          }),
+        Error,
+        "Hosting Caddy account tpedge is missing",
+      );
     });
   },
 });

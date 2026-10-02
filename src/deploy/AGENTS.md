@@ -53,7 +53,8 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    over an identity-bearing Traefik.
 3. Ensure vendored hosting Caddy (`ensureHostingCaddy` — Ansible `caddy-setup`
    then direct GitHub download) when
-   `/opt/turbopanel/vendor/caddy/current/caddy` is missing. On-demand like
+   `/opt/turbopanel/vendor/caddy/current/caddy` or the `tpedge` account it
+   runs as is missing (only the playbook can create the account). On-demand like
    Docker; daemon-converge does not install it. Required for hostname ingress.
 4. When `principalMaterial[]` is present, ensure Linux users/groups on the host
    (`ensureSystemPrincipals` in `src/deploy/ensure-principal.ts`). Homes live
@@ -151,7 +152,9 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    attaches to all interfaces — sourced at deploy-prepare time from hosting
    `bind` scope: **public** pinned `ip` row, **datacenter** private `ip`
    (`scope = 'datacenter'` on the target server), or **local** loopback
-   `127.0.0.1`. Unit `turbopanel-hosting-caddy.service` when sudo allows.
+   `127.0.0.1`. Unit `turbopanel-hosting-caddy.service` when sudo allows; it
+   runs as `tpedge` with only `CAP_NET_BIND_SERVICE`, and a changed unit is
+   restarted (see `orchestration/AGENTS.md` → Hosting Caddy account).
    Control-plane Caddy binds only `:8443` and never public `:443`, so hosting
    Caddy can take `:80`/`:443` without a control-plane release step.
    **Distinct**

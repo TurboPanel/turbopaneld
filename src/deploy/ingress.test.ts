@@ -1674,7 +1674,7 @@ test("ensureHostingCaddyRuntime writes unit and attempts install via host comman
     if (args.includes("install") && args.includes("0640")) {
       return Promise.resolve({ success: true, stderr: "" });
     }
-    if (args.includes("daemon-reload")) {
+    if (args.includes("daemon-reload") || args.includes("restart")) {
       return Promise.resolve({ success: true, stderr: "" });
     }
     if (args.includes("enable")) {
@@ -1684,7 +1684,7 @@ test("ensureHostingCaddyRuntime writes unit and attempts install via host comman
   });
   try {
     await assertRejects(
-      () => ensureHostingCaddyRuntime(layout),
+      () => ensureHostingCaddyRuntime(layout, CADDY_ACCOUNT_PRESENT),
       Error,
       "hosting Caddy could not be installed or started",
     );
@@ -1796,7 +1796,7 @@ test("installAndStartCaddy returns early when unit install fails", async () => {
     });
     try {
       await assertRejects(
-        () => ensureHostingCaddyRuntime(layout),
+        () => ensureHostingCaddyRuntime(layout, CADDY_ACCOUNT_PRESENT),
         Error,
         "hosting Caddy could not be installed or started",
       );
@@ -1820,7 +1820,7 @@ test("installAndStartCaddy returns early when daemon-reload fails", async () => 
     });
     try {
       await assertRejects(
-        () => ensureHostingCaddyRuntime(layout),
+        () => ensureHostingCaddyRuntime(layout, CADDY_ACCOUNT_PRESENT),
         Error,
         "hosting Caddy could not be installed or started",
       );
@@ -1835,7 +1835,12 @@ test("installAndStartCaddy succeeds when enable --now works", async () => {
     const stages: string[] = [];
     const restore = recordHostingUnitStages(stages);
     try {
-      await ensureHostingCaddyRuntime(layout);
+      await ensureHostingCaddyRuntime(layout, CADDY_ACCOUNT_PRESENT);
+      // A new unit restarts Caddy: enable --now keeps a running process.
+      assertEquals(stages, ["install", "daemon-reload", "restart", "enable"]);
+      stages.length = 0;
+      await ensureHostingCaddyRuntime(layout, CADDY_ACCOUNT_PRESENT);
+      // The same unit again leaves the running Caddy alone.
       assertEquals(stages, ["install", "daemon-reload", "enable"]);
     } finally {
       restore();
@@ -1843,8 +1848,42 @@ test("installAndStartCaddy succeeds when enable --now works", async () => {
   });
 });
 
+test("a failed hosting Caddy restart is retried on the next deploy", async () => {
+  await withCaddyRuntimeLayout(async (layout) => {
+    let restartOk = false;
+    const stages: string[] = [];
+    const restore = setIngressHostCommandForTest((_command, args) => {
+      const stage = args.find((arg) => STAGES.has(arg)) ?? args.join(" ");
+      stages.push(stage);
+      const success = stage !== "restart" || restartOk;
+      return Promise.resolve({ success, stderr: success ? "" : "203/EXEC" });
+    });
+    try {
+      await assertRejects(
+        () => ensureHostingCaddyRuntime(layout, CADDY_ACCOUNT_PRESENT),
+        Error,
+        "hosting Caddy could not be installed or started",
+      );
+      restartOk = true;
+      stages.length = 0;
+      await ensureHostingCaddyRuntime(layout, CADDY_ACCOUNT_PRESENT);
+      assertEquals(stages, ["install", "daemon-reload", "restart", "enable"]);
+    } finally {
+      restore();
+    }
+  });
+});
+
+const STAGES = new Set(["install", "daemon-reload", "restart", "enable"]);
+
+const CADDY_ACCOUNT_PRESENT = { accountExists: () => Promise.resolve(true) };
+
 function recordHostingUnitStages(stages: string[]): () => void {
   return setIngressHostCommandForTest((_command, args) => {
+    if (args.includes("restart")) {
+      stages.push("restart");
+      return Promise.resolve({ success: true, stderr: "" });
+    }
     if (args.includes("install")) {
       stages.push("install");
       return Promise.resolve({ success: true, stderr: "" });

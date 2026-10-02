@@ -389,6 +389,9 @@ const SITES: CallSite[] = [
       ],
     },
   ),
+  tpHost('src/deploy/ingress.ts|["-n","systemctl","restart",CADDY_SERVICE]', {
+    argv: ["systemctl", "restart", "turbopanel-hosting-caddy.service"],
+  }),
   tpHost('src/deploy/ingress.ts|["-n","systemctl","reload",CADDY_SERVICE]', {
     argv: ["systemctl", "reload", "turbopanel-hosting-caddy.service"],
   }),

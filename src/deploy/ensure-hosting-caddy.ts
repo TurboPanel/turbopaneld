@@ -1,8 +1,12 @@
 /**
- * Ensure the hosting Caddy binary exists under the vendor tree.
+ * Ensure the hosting Caddy binary and its account exist.
  *
  * Called from environment.deploy (not daemon-converge). Managed hosts often
- * have no Caddy until the first deploy that needs hostname ingress.
+ * have no Caddy until the first deploy that needs hostname ingress. The
+ * `caddy-setup` playbook (root) vendors the binary and provisions
+ * {@link HOSTING_CADDY_USER} with read access to what Caddy loads; it runs
+ * whenever either is missing, so a host that already has the binary from an
+ * older release still gets the account.
  */
 
 import { encodeHex } from "@std/encoding/hex";
@@ -12,6 +16,14 @@ import { logInfo, logWarn } from "../util/logger.ts";
 import { createSymlink } from "../permissions/scoped-writes.ts";
 import { runCaddySetup as defaultRunCaddySetup } from "../orchestration/ansible.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
+
+/**
+ * The account the hosting Caddy runs as. It is not in group `tp`, and its
+ * unit's only privilege is `CAP_NET_BIND_SERVICE`. Keep in step with
+ * `hosting_caddy_user` in orchestration/roles/hosting-caddy/defaults/main.yml
+ * and `HOSTING_CADDY_USER` in tp-host, which pins the unit to it.
+ */
+export const HOSTING_CADDY_USER = "tpedge";
 
 /** Keep in step with orchestration/roles/caddy/defaults/main.yml */
 export const HOSTING_CADDY_VERSION = "2.11.4";
@@ -88,6 +100,8 @@ export type EnsureHostingCaddyDeps = {
     opts?: { cwd?: string },
   ) => Promise<{ success: boolean; stderr: string }>;
   resolveArch?: () => "arm64" | "amd64";
+  /** Whether the hosting Caddy account exists (`getent passwd`). */
+  accountExists?: () => Promise<boolean>;
   verifyTarballSha256?: (
     arch: "arm64" | "amd64",
     tarballPath: string,
@@ -181,8 +195,14 @@ async function downloadHostingCaddy(
   await Deno.mkdir(dirname(currentLink), { recursive: true }).catch(() => {});
 }
 
+async function hostingCaddyAccountExists(): Promise<boolean> {
+  const result = await runDefault("getent", ["passwd", HOSTING_CADDY_USER]);
+  return result.success;
+}
+
 /**
- * Ensure `<runtimesDir>/caddy/current/caddy` exists for hosting ingress.
+ * Ensure `<runtimesDir>/caddy/current/caddy` and the hosting Caddy account
+ * exist for hosting ingress.
  */
 export async function ensureHostingCaddy(
   layout: LayoutPaths,
@@ -193,9 +213,10 @@ export async function ensureHostingCaddy(
   const resolveArch = deps?.resolveArch ?? resolveCaddyArchDefault;
   const verifyTarballSha256 = deps?.verifyTarballSha256 ??
     verifyHostingCaddyTarballSha256;
+  const accountExists = deps?.accountExists ?? hostingCaddyAccountExists;
 
   const caddy = caddyBinaryPath(layout.runtimesDir);
-  if (await caddyBinaryPresent(caddy)) return caddy;
+  if (await caddyBinaryPresent(caddy) && await accountExists()) return caddy;
 
   try {
     await runSetup();
@@ -208,15 +229,22 @@ export async function ensureHostingCaddy(
     );
   }
 
-  if (await caddyBinaryPresent(caddy)) return caddy;
+  if (!(await caddyBinaryPresent(caddy))) {
+    await downloadHostingCaddy(layout.runtimesDir, {
+      runCommand,
+      resolveArch,
+      verifyTarballSha256,
+    });
+  }
 
-  await downloadHostingCaddy(layout.runtimesDir, {
-    runCommand,
-    resolveArch,
-    verifyTarballSha256,
-  });
-
-  if (await caddyBinaryPresent(caddy)) return caddy;
-
-  throw new Error(`Hosting Caddy runtime is missing: ${caddy}`);
+  if (!(await caddyBinaryPresent(caddy))) {
+    throw new Error(`Hosting Caddy runtime is missing: ${caddy}`);
+  }
+  // Only the playbook can create the account; a direct download cannot.
+  if (!(await accountExists())) {
+    throw new Error(
+      `Hosting Caddy account ${HOSTING_CADDY_USER} is missing: the caddy-setup playbook did not complete`,
+    );
+  }
+  return caddy;
 }
