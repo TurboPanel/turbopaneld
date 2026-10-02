@@ -35,10 +35,73 @@ function commonDirectives(authorizedKeysDir: string): readonly string[] {
     // Never consult the account's own `~/.ssh/authorized_keys`, and never run a
     // helper: the panel-managed file is the whole answer.
     "AuthorizedKeysCommand none",
+    ...forwardingDirectives(),
+    "PermitUserRC no",
+  ];
+}
+
+/**
+ * Every way an authenticated session could carry traffic other than its own
+ * files or shell. `AllowTcpForwarding no` alone leaves Unix-socket forwarding
+ * (`AllowStreamLocalForwarding`) open, and `PermitOpen` / `PermitListen` are
+ * the second lock should a later block or an administrator's `Match` turn TCP
+ * forwarding back on for one of these accounts.
+ */
+function forwardingDirectives(): readonly string[] {
+  return [
     "AllowTcpForwarding no",
+    "AllowStreamLocalForwarding no",
+    "PermitOpen none",
+    "PermitListen none",
     "AllowAgentForwarding no",
     "X11Forwarding no",
     "PermitTunnel no",
+  ];
+}
+
+/**
+ * The files-only level.
+ *
+ * Its own function so the principal-home redesign can add `ChrootDirectory`
+ * here, to this block only: a chroot on the shell level would need a populated
+ * root, and on the backstop it would apply to shell members too (see
+ * {@link principalBackstopDirectives}).
+ */
+function sftpLevelDirectives(authorizedKeysDir: string): readonly string[] {
+  return [
+    ...commonDirectives(authorizedKeysDir),
+    // Required, not optional: the host's `Subsystem sftp` may point at
+    // `/usr/lib/openssh/sftp-server`, which is exec'd through the account's
+    // login shell and therefore dies on `/usr/sbin/nologin`. `internal-sftp`
+    // runs in the `sshd` process and needs no shell at all.
+    "ForceCommand internal-sftp",
+  ];
+}
+
+/**
+ * The backstop for every principal, matched on a group every principal holds.
+ *
+ * It comes **after** the level blocks, and `sshd` keeps the first value it
+ * sees for each keyword across all matching blocks. So for a `tpsftp` /
+ * `tpshell` member every keyword here was already decided by the level block
+ * and this block changes nothing. For a principal with **no** level — the
+ * default for a site owner — this is the only block that applies, and it
+ * refuses every authentication method: without it that account falls through
+ * to the host's global defaults, which on Debian means its own
+ * `~/.ssh/authorized_keys` is honoured and TCP forwarding is on, so a key
+ * planted in the home is a tunnel into the host's loopback and LAN.
+ *
+ * Never put a keyword here that a level block leaves unset (`ForceCommand`,
+ * later `ChrootDirectory`): it would apply to that level's members as well.
+ */
+function principalBackstopDirectives(): readonly string[] {
+  return [
+    "PubkeyAuthentication no",
+    "PasswordAuthentication no",
+    "KbdInteractiveAuthentication no",
+    "AuthorizedKeysFile none",
+    "AuthorizedKeysCommand none",
+    ...forwardingDirectives(),
     "PermitUserRC no",
   ];
 }
@@ -54,6 +117,11 @@ export type SshdDropInOpts = {
    * tenant restrictions.
    */
   passwordGroup: string;
+  /**
+   * Group every principal holds, whatever its level. Selects the backstop
+   * block that refuses authentication to a principal with no level.
+   */
+  principalGroup: string;
   /** Managed key directory; defaulted so tests can render against a temp tree. */
   authorizedKeysDir?: string;
 };
@@ -76,9 +144,8 @@ export type SshdDropInOpts = {
  * decision a hosting panel should make on someone's SSH daemon.
  */
 export function sshdDropInContent(opts: SshdDropInOpts): string {
-  const directives = commonDirectives(
-    opts.authorizedKeysDir ?? AUTHORIZED_KEYS_DIR,
-  );
+  const keysDir = opts.authorizedKeysDir ?? AUTHORIZED_KEYS_DIR;
+  const indent = (lines: readonly string[]) => lines.map((line) => `  ${line}`);
   const lines: string[] = [
     "# Managed by TurboPanel. Edits are overwritten on the next reconcile.",
     "#",
@@ -94,15 +161,15 @@ export function sshdDropInContent(opts: SshdDropInOpts): string {
     "  PasswordAuthentication yes",
     "",
     `Match Group ${opts.sftpGroup}`,
-    ...directives.map((line) => `  ${line}`),
-    // Required, not optional: the host's `Subsystem sftp` may point at
-    // `/usr/lib/openssh/sftp-server`, which is exec'd through the account's
-    // login shell and therefore dies on `/usr/sbin/nologin`. `internal-sftp`
-    // runs in the `sshd` process and needs no shell at all.
-    "  ForceCommand internal-sftp",
+    ...indent(sftpLevelDirectives(keysDir)),
     "",
     `Match Group ${opts.shellGroup}`,
-    ...directives.map((line) => `  ${line}`),
+    ...indent(commonDirectives(keysDir)),
+    "",
+    "# Every principal. Last on purpose: a level member above already has every",
+    "# keyword set, so this refuses sign-in only to principals with no level.",
+    `Match Group ${opts.principalGroup}`,
+    ...indent(principalBackstopDirectives()),
     "",
     "# Reset the parser to global scope. Without this, every directive after",
     "# the Include line in sshd_config would be swallowed by the block above.",

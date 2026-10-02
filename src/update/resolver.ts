@@ -82,12 +82,12 @@ async function resolveManifestLocation(
   config: UpdateChannelConfig,
   env: Record<string, string | undefined>,
   retry?: RetryFetchOptions,
-): Promise<{ manifestUrl: string; overlay: boolean }> {
+): Promise<{ manifestUrl: string; overlay: boolean; pinned?: boolean }> {
   const overlayBase = resolveOverlayDlBase(env);
   if (overlayBase === null) {
     const pinned = resolvePinnedManifestUrl(env);
     if (pinned !== null) {
-      return { manifestUrl: pinned, overlay: false };
+      return { manifestUrl: pinned, overlay: false, pinned: true };
     }
     const manifestUrl = builtinChannelManifestUrl(config.channel);
     if (manifestUrl === null) {
@@ -172,6 +172,7 @@ async function parseSignedManifestBody(
     env: Record<string, string | undefined>;
     installMode: InstallMode;
     overlay: boolean;
+    pinned?: boolean;
     publicKeyHex?: string;
   },
 ): Promise<Record<string, unknown>> {
@@ -188,6 +189,7 @@ async function parseSignedManifestBody(
     installMode: options.installMode,
     overlay: options.overlay,
     env: options.env,
+    pinned: options.pinned,
   });
   if (!bypass) {
     await verifyManifestSignature(raw, options.publicKeyHex);
@@ -200,7 +202,7 @@ export async function resolveUpdate(
   env: Record<string, string | undefined> = Deno.env.toObject(),
   options: ResolveUpdateOptions = {},
 ): Promise<UpdateInfo> {
-  const { manifestUrl, overlay } = await resolveManifestLocation(
+  const { manifestUrl, overlay, pinned } = await resolveManifestLocation(
     config,
     env,
     options.retry,
@@ -220,7 +222,7 @@ export async function resolveUpdate(
   const installMode = options.installMode ?? detectInstallMode(env);
   const verified = await parseSignedManifestBody(
     await manifestResponse.text(),
-    { env, installMode, overlay, publicKeyHex: options.publicKeyHex },
+    { env, installMode, overlay, pinned, publicKeyHex: options.publicKeyHex },
   );
   const manifest = parseChannelManifest(
     absolutizeChannelManifestJson(verified, manifestUrl),

@@ -18,6 +18,7 @@ import { caddyUnit } from "../deploy/ingress.ts";
 import { backupServiceContent, backupTimerContent } from "../backups/units.ts";
 import { issuedCertificateFindArgs } from "../deploy/instance-acme-http01.ts";
 import { setgidDirectoriesFindArgs } from "../deploy/site.ts";
+import { releaseLinkTargetsFindArgs } from "../deploy/release/release-links.ts";
 import type {
   EnvironmentDeployCronJob,
   EnvironmentDeployNativeAppService,
@@ -484,6 +485,138 @@ async function refusedUnit(host: Host, name: string, content: string) {
   ]);
 }
 
+test("the hosting Caddy unit passes only as tpedge with CAP_NET_BIND_SERVICE alone", async () => {
+  await withHost(async (host) => {
+    const layout = resolveLayout({
+      TURBOPANEL_HOME: host.path("opt/turbopanel"),
+      TURBOPANEL_LIB_DIR: host.path("opt/turbopanel/lib"),
+      TURBOPANEL_RUNTIMES_DIR: host.path("opt/turbopanel/vendor"),
+      TURBOPANEL_CONFIG_DIR: host.path("etc/turbopanel"),
+      TURBOPANEL_STATE_DIR: host.path("var/lib/turbopanel"),
+      TURBOPANEL_PRINCIPAL_HOME_ROOT: host.path("srv/users"),
+    }, { forceMode: "production" });
+    const name = "turbopanel-hosting-caddy.service";
+    const unit = caddyUnit(layout);
+    const result = await installUnit(host, name, unit);
+    assertEquals(result.code, 0, result.stderr);
+
+    const drop = (pattern: RegExp) => unit.replace(pattern, "");
+    const hostile: Array<[string, string]> = [
+      ["root (no User=)", drop(/^User=.*\n/m)],
+      ["User=root", unit.replace(/^User=.*$/m, "User=root")],
+      ["the daemon account", unit.replace(/^User=.*$/m, "User=tp")],
+      ["Group=tp", unit.replace(/^Group=.*$/m, "Group=tp")],
+      ["no Group=", drop(/^Group=.*\n/m)],
+      ["no NoNewPrivileges=", drop(/^NoNewPrivileges=.*\n/m)],
+      [
+        "NoNewPrivileges=no",
+        unit.replace(/^NoNewPrivileges=.*$/m, "NoNewPrivileges=no"),
+      ],
+      [
+        "a second ambient capability",
+        unit.replace(
+          /^AmbientCapabilities=.*$/m,
+          "AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_SYS_ADMIN",
+        ),
+      ],
+      [
+        "another bounding capability",
+        unit.replace(
+          /^CapabilityBoundingSet=.*$/m,
+          "CapabilityBoundingSet=CAP_SYS_ADMIN",
+        ),
+      ],
+      ["no bounding set (keeps every capability)", drop(/^Capability.*\n/m)],
+      ["no ambient capability", drop(/^AmbientCapabilities=.*\n/m)],
+      [
+        "a store inside the tp-owned tree",
+        unit.replace(/^StateDirectory=.*$/m, "StateDirectory=turbopanel"),
+      ],
+      [
+        "an extra environment variable",
+        unit.replace(
+          "[Service]",
+          "[Service]\nEnvironment=LD_PRELOAD=/tmp/x.so",
+        ),
+      ],
+      [
+        "a data store the daemon owns",
+        unit.replace(
+          /^Environment=XDG_DATA_HOME=.*$/m,
+          "Environment=XDG_DATA_HOME=/var/lib/turbopanel/hosting-caddy",
+        ),
+      ],
+      [
+        "another command",
+        unit.replace(/^ExecStart=.*$/m, "ExecStart=/bin/sh -c id"),
+      ],
+      [
+        "a privileged pre-start",
+        unit.replace("[Service]", "[Service]\nExecStartPre=+/bin/true"),
+      ],
+    ];
+    for (const [label, content] of hostile) {
+      assertEquals(content === unit, false, `${label}: corpus did not change`);
+      await refusedUnit(host, name, content);
+    }
+    // A tenant unit cannot borrow the hosting Caddy's capability.
+    const tenant = cronServiceContent({
+      layout,
+      environmentId: "env1",
+      composeServiceName: "web",
+      job: {
+        name: "nightly",
+        schedule: "*-*-* 03:00:00",
+        command: ["/bin/true"],
+      } as unknown as EnvironmentDeployCronJob,
+      username: "alice",
+      workingDirectory: host.path("srv/users/alice/sites/web/current"),
+    }).replace(
+      /^AmbientCapabilities=.*$/m,
+      "AmbientCapabilities=CAP_NET_BIND_SERVICE",
+    );
+    await refusedUnit(host, "turbopanel-cron-env1-web-nightly.service", tenant);
+  });
+});
+
+test("setfacl grants tpedge the instance ACME socket and nothing else", async () => {
+  await withHost(async (host) => {
+    const sock = host.path("run/turbopanel/instance-acme.sock");
+    const other = host.path("run/turbopanel/instance.sock");
+    const listeners = [sock, other].map((path) =>
+      Deno.listen({ transport: "unix", path })
+    );
+    try {
+      const ok = await host.run(["setfacl", "-P", "-m", "u:tpedge:rw", sock]);
+      assertEquals(ok.code, 0, ok.stderr);
+      assertEquals(
+        ok.stdout.trim(),
+        "EXEC [setfacl] [-P] [-m] [u:tpedge:rw] [--] [instance-acme.sock]",
+      );
+      // Another socket in the run directory, another entity or permission,
+      // and the form without -P are all refused.
+      await refused(host, ["setfacl", "-P", "-m", "u:tpedge:rw", other]);
+      await refused(host, ["setfacl", "-P", "-m", "u:tp:rw", sock]);
+      await refused(host, ["setfacl", "-P", "-m", "u:tpedge:rwx", sock]);
+      await refused(host, ["setfacl", "-m", "u:tpedge:rw", sock]);
+      await refused(host, ["setfacl", "-P", "-m", "g:tpedge:rw", sock]);
+      // A symlink swapped in for the socket is never acted on.
+      await Deno.remove(sock);
+      await Deno.symlink(other, sock);
+      const stderr = await refused(host, [
+        "setfacl",
+        "-P",
+        "-m",
+        "u:tpedge:rw",
+        sock,
+      ]);
+      assertStringIncludes(stderr, "is not a socket");
+    } finally {
+      for (const listener of listeners) listener.close();
+    }
+  });
+});
+
 test("scheduled-backup units pass only in their exact shape; tenant units gain nothing", async () => {
   await withHost(async (host) => {
     const layout = resolveLayout({
@@ -773,6 +906,31 @@ test("root reads go through a verified descriptor, not a planted symlink", async
   });
 });
 
+test("test -d answers for a real directory, never a symlink to one", async () => {
+  await withHost(async (host) => {
+    const release = host.path("srv/users/alice/sites/web/releases/r1");
+    await Deno.mkdir(join(release, "public"), { recursive: true });
+    await Deno.mkdir(host.path("srv/users/bob/sites/web/public"), {
+      recursive: true,
+    });
+    await Deno.symlink(
+      host.path("srv/users/bob/sites/web/public"),
+      join(release, "linked"),
+    );
+    await Deno.writeTextFile(join(release, "file"), "x");
+    const real = await host.run(["test", "-d", join(release, "public")]);
+    assertEquals(real.code, 0, real.stderr);
+    for (const name of ["linked", "file", "missing"]) {
+      const answer = await host.run(["test", "-d", join(release, name)]);
+      assertEquals(answer.code === 0, false, name);
+    }
+    // `-e` still follows the last component, as the `current` check needs.
+    const exists = await host.run(["test", "-e", join(release, "linked")]);
+    assertEquals(exists.code, 0, exists.stderr);
+    await refused(host, ["test", "-f", join(release, "file")]);
+  });
+});
+
 test("systemctl, journalctl, sysctl, ip, xtables and wg accept only the daemon's shapes", async () => {
   await withHost(async (host) => {
     const ok = await host.run([
@@ -1010,9 +1168,27 @@ test("find: every daemon-built find argv is accepted; anything else is refused",
     const setgid = await host.run(setgidDirectoriesFindArgs(webroot));
     assertEquals(setgid.code, 0, setgid.stderr);
 
+    // release-links.ts: where each link under a sealed release resolves,
+    // physically — through a chain that leaves the tree and comes back.
+    const release = host.path("srv/users/alice/sites/web/releases/r1");
+    await Deno.mkdir(join(release, "public"), { recursive: true });
+    await Deno.symlink(host.path("outside/hop"), join(release, "public/x"));
+    await Deno.symlink(host.path("srv/users/bob"), host.path("outside/hop"));
+    await Deno.symlink("../shared", join(release, "public/up"));
+    const links = await host.run(releaseLinkTargetsFindArgs(release));
+    assertEquals(links.code, 0, links.stderr);
+    assertEquals(links.stdout.split("\0").filter(Boolean).sort(), [
+      host.path("srv/users/alice/sites/web/releases/r1/shared"),
+      host.path("srv/users/bob"),
+    ]);
+    const linkArgs = releaseLinkTargetsFindArgs(release);
+
     const lookup = issuedCertificateFindArgs(root, "canary.example.com");
     for (
       const args of [
+        releaseLinkTargetsFindArgs(host.path("outside")),
+        [...linkArgs.slice(0, -1), ";"],
+        linkArgs.map((arg) => arg === "realpath" ? "cat" : arg),
         [...lookup, "-print"],
         lookup.slice(0, -1),
         issuedCertificateFindArgs(root, "*.example.com"),
@@ -1296,5 +1472,983 @@ test("useradd: the passwd home is <root>/<name>/home and nothing else", async ()
     ) {
       await refused(host, useradd(home));
     }
+  });
+});
+
+// --- per-site PHP (turbopanel-php-<siteId>) ----------------------------------
+
+const PHP_SITE = "shop-1";
+type PhpMode = "fastcgi" | "fpm" | "lsphp";
+type Mutation = [label: string, mutate: (unit: string) => string];
+
+/** A second principal and the web server groups the PHP shapes name. */
+async function addPhpAccounts(host: Host) {
+  for (const user of ["alice", "bob"]) {
+    await Deno.mkdir(host.path(`srv/users/${user}/tmp`), { recursive: true });
+  }
+  await Deno.mkdir(host.path("etc/turbopanel/php/sites"), { recursive: true });
+  const bob = `bob:x:15002:15002::${host.prefix}/srv/users/bob:/bin/bash\n`;
+  await Deno.writeTextFile(host.path("etc/passwd"), bob, { append: true });
+  await Deno.writeTextFile(
+    host.path("etc/group"),
+    "bob-grp:x:15002:\ntpapache:x:9991:\ntpols:x:9992:\n",
+    { append: true },
+  );
+}
+
+async function withPhpHost(fn: (host: Host) => Promise<void>): Promise<void> {
+  await withHost(async (host) => {
+    await addPhpAccounts(host);
+    await fn(host);
+  });
+}
+
+function phpConfDir(host: Host, site = PHP_SITE): string {
+  return host.path(`etc/turbopanel/php/sites/${site}`);
+}
+
+function phpExec(host: Host, mode: PhpMode, site = PHP_SITE): string {
+  const cfg = phpConfDir(host, site);
+  if (mode === "fastcgi") return `/usr/bin/php-cgi8.4 -c ${cfg}/php.ini`;
+  if (mode === "fpm") {
+    return `/usr/sbin/php-fpm8.4 --nodaemonize --fpm-config ${cfg}/php-fpm.conf -c ${cfg}/php.ini`;
+  }
+  return host.path("opt/turbopanel/vendor/lsphp/8.3/current/bin/lsphp");
+}
+
+/** The shape WP4's renderers will write for one site, per mode. */
+function phpService(host: Host, mode: PhpMode): string {
+  const home = host.path("srv/users/alice");
+  const byMode: Record<PhpMode, string[]> = {
+    fastcgi: [
+      "StandardInput=socket",
+      "Environment=PHP_FCGI_CHILDREN=4",
+      "Environment=PHP_FCGI_MAX_REQUESTS=10000",
+    ],
+    fpm: [
+      "Type=notify",
+      "ExecReload=/bin/kill -USR2 $MAINPID",
+      `RuntimeDirectory=turbopanel-php-${PHP_SITE}`,
+      "RuntimeDirectoryMode=0711",
+    ],
+    lsphp: [
+      "StandardInput=socket",
+      `Environment=PHPRC=${phpConfDir(host)}/php.ini`,
+      "Environment=LSAPI_CHILDREN=10",
+      "Environment=LSAPI_PGRP_MAX_IDLE=15",
+    ],
+  };
+  const socket = `turbopanel-php-${PHP_SITE}.socket`;
+  return [
+    "[Unit]",
+    `Description=PHP for site ${PHP_SITE}`,
+    ...(mode === "fpm" ? [] : [`Requires=${socket}`, `After=${socket}`]),
+    "",
+    "[Service]",
+    `ExecStart=${phpExec(host, mode)}`,
+    ...byMode[mode],
+    "User=alice",
+    "Group=alice-grp",
+    "Slice=turbopanel-alice.slice",
+    "NoNewPrivileges=yes",
+    "CapabilityBoundingSet=",
+    "AmbientCapabilities=",
+    "ProtectSystem=strict",
+    "ProtectHome=yes",
+    "PrivateDevices=yes",
+    `BindPaths=${home}/tmp:/tmp`,
+    `TemporaryFileSystem=${host.path("etc/turbopanel")}:ro`,
+    `BindReadOnlyPaths=${phpConfDir(host)}`,
+    `ReadWritePaths=${home}/tmp ${home}/sites/${PHP_SITE}/shared`,
+    "StandardOutput=journal",
+    "StandardError=journal",
+    "Restart=on-failure",
+    "MemoryMax=512M",
+    ...(mode === "fpm" ? ["", "[Install]", "WantedBy=multi-user.target"] : []),
+    "",
+  ].join("\n");
+}
+
+function phpSocket(name = "php.sock"): string {
+  return [
+    "[Unit]",
+    `Description=PHP socket for site ${PHP_SITE}`,
+    "",
+    "[Socket]",
+    `ListenStream=/run/turbopanel-php-${PHP_SITE}/${name}`,
+    "SocketUser=alice",
+    "SocketGroup=tpnginx",
+    "SocketMode=0660",
+    "DirectoryMode=0711",
+    "Accept=no",
+    "",
+    "[Install]",
+    "WantedBy=sockets.target",
+    "",
+  ].join("\n");
+}
+
+const phpServiceName = `turbopanel-php-${PHP_SITE}.service`;
+const phpSocketName = `turbopanel-php-${PHP_SITE}.socket`;
+
+/** Replace one whole line (`key=` prefix) or drop it with `null`. */
+function line(key: string, next: string | null): (unit: string) => string {
+  return (unit) => {
+    const re = new RegExp(`^${key.replaceAll("$", "\\$")}.*\\n`, "m");
+    if (!re.test(unit)) throw new Error(`no ${key} line`);
+    return unit.replace(re, next === null ? "" : `${next}\n`);
+  };
+}
+
+/** Add lines right after the section header. */
+function add(section: string, ...lines: string[]): (unit: string) => string {
+  return (unit) =>
+    unit.replace(`[${section}]\n`, `[${section}]\n${lines.join("\n")}\n`);
+}
+
+test("per-site PHP units: each mode's pinned shape installs, with its socket", async () => {
+  await withPhpHost(async (host) => {
+    for (const mode of ["fastcgi", "fpm", "lsphp"] as const) {
+      const result = await installUnit(
+        host,
+        phpServiceName,
+        phpService(host, mode),
+      );
+      assertEquals(result.code, 0, `${mode}: ${result.stderr}`);
+    }
+    for (const name of ["php.sock", "lsphp.sock"]) {
+      const result = await installUnit(host, phpSocketName, phpSocket(name));
+      assertEquals(result.code, 0, `${name}: ${result.stderr}`);
+    }
+    // systemctl takes the socket and the service by name.
+    const start = await host.run(["systemctl", "start", phpSocketName]);
+    assertStringIncludes(
+      start.stdout,
+      `EXEC [systemctl] [--no-pager] [start] [${phpSocketName}]`,
+    );
+  });
+});
+
+test("per-site PHP services: a hostile corpus is refused in every mode", async () => {
+  await withPhpHost(async (host) => {
+    const home = host.path("srv/users/alice");
+    const bobHome = host.path("srv/users/bob");
+    const otherCfg = phpConfDir(host, "other-site");
+    const common: Mutation[] = [
+      ["runs as root", line("User=", "User=root")],
+      ["runs as a web server account", line("User=", "User=tpnginx")],
+      ["runs as another principal", line("User=", "User=bob")],
+      ["root group", line("Group=", "Group=root")],
+      ["web server group", line("Group=", "Group=tpnginx")],
+      ["another principal's group", line("Group=", "Group=bob-grp")],
+      [
+        "another principal's slice",
+        line("Slice=", "Slice=turbopanel-bob.slice"),
+      ],
+      ["no slice", line("Slice=", null)],
+      ["NoNewPrivileges=no", line("NoNewPrivileges=", "NoNewPrivileges=no")],
+      ["no NoNewPrivileges", line("NoNewPrivileges=", null)],
+      [
+        "a bounding capability",
+        line("CapabilityBoundingSet=", "CapabilityBoundingSet=CAP_SETUID"),
+      ],
+      [
+        "an ambient capability",
+        line(
+          "AmbientCapabilities=",
+          "AmbientCapabilities=CAP_NET_BIND_SERVICE",
+        ),
+      ],
+      ["no CapabilityBoundingSet", line("CapabilityBoundingSet=", null)],
+      ["no AmbientCapabilities", line("AmbientCapabilities=", null)],
+      ["a shell instead of PHP", line("ExecStart=", "ExecStart=/bin/sh -c id")],
+      [
+        "a privileged exec prefix",
+        (u) => u.replace("ExecStart=", "ExecStart=+"),
+      ],
+      [
+        "an ignore-failure exec prefix",
+        (u) => u.replace("ExecStart=", "ExecStart=-"),
+      ],
+      [
+        "an extra exec argument",
+        (u) => u.replace(/^(ExecStart=.*)$/m, "$1 -d auto_prepend_file=/tmp/x"),
+      ],
+      [
+        "another site's config",
+        (u) => u.replaceAll(phpConfDir(host), otherCfg),
+      ],
+      ["a second ExecStart", add("Service", "ExecStart=/bin/true")],
+      ["an ExecStartPre", add("Service", "ExecStartPre=/bin/sh -c id")],
+      ["WorkingDirectory", add("Service", "WorkingDirectory=/root")],
+      ["PrivateTmp", add("Service", "PrivateTmp=yes")],
+      [
+        "another owner's tmp on /tmp",
+        line("BindPaths=", `BindPaths=${bobHome}/tmp:/tmp`),
+      ],
+      ["the root on /tmp", line("BindPaths=", "BindPaths=/:/tmp")],
+      ["no BindPaths", line("BindPaths=", null)],
+      ["no tmpfs over the config tree", line("TemporaryFileSystem=", null)],
+      [
+        "a writable tmpfs",
+        line(
+          "TemporaryFileSystem=",
+          `TemporaryFileSystem=${host.path("etc/turbopanel")}`,
+        ),
+      ],
+      [
+        "a tmpfs over the root",
+        line("TemporaryFileSystem=", "TemporaryFileSystem=/:ro"),
+      ],
+      [
+        "a tmpfs over the homes",
+        line(
+          "TemporaryFileSystem=",
+          `TemporaryFileSystem=${host.path("srv/users")}:ro`,
+        ),
+      ],
+      ["a second tmpfs", add("Service", "TemporaryFileSystem=/var:ro")],
+      ["no config bind", line("BindReadOnlyPaths=", null)],
+      [
+        "another site's config bound",
+        line("BindReadOnlyPaths=", `BindReadOnlyPaths=${otherCfg}`),
+      ],
+      [
+        "the whole config tree bound",
+        line(
+          "BindReadOnlyPaths=",
+          `BindReadOnlyPaths=${host.path("etc/turbopanel")}`,
+        ),
+      ],
+      [
+        "/etc/shadow bound",
+        line("BindReadOnlyPaths=", "BindReadOnlyPaths=/etc/shadow"),
+      ],
+      [
+        "a remapped config bind",
+        line(
+          "BindReadOnlyPaths=",
+          `BindReadOnlyPaths=${phpConfDir(host)}:/srv`,
+        ),
+      ],
+      [
+        "a second read-only bind",
+        add("Service", "BindReadOnlyPaths=/etc/shadow"),
+      ],
+      ["a second BindPaths", add("Service", "BindPaths=/etc:/srv/etc")],
+      ["ProtectSystem=full", line("ProtectSystem=", "ProtectSystem=full")],
+      ["no ProtectSystem", line("ProtectSystem=", null)],
+      ["PrivateDevices=no", line("PrivateDevices=", "PrivateDevices=no")],
+      [
+        "ReadWritePaths=/etc",
+        line("ReadWritePaths=", `ReadWritePaths=${home}/tmp /etc`),
+      ],
+      [
+        "writes into another home",
+        line("ReadWritePaths=", `ReadWritePaths=${home}/tmp ${bobHome}/sites`),
+      ],
+      [
+        "writes the whole home",
+        line("ReadWritePaths=", `ReadWritePaths=${home}/tmp ${home}`),
+      ],
+      [
+        "writes without tmp",
+        line("ReadWritePaths=", `ReadWritePaths=${home}/sites`),
+      ],
+      [
+        "a glob in ReadWritePaths",
+        line("ReadWritePaths=", `ReadWritePaths=${home}/tmp ${home}/*`),
+      ],
+      [
+        "a dot-dot in ReadWritePaths",
+        line("ReadWritePaths=", `ReadWritePaths=${home}/tmp ${home}/../bob`),
+      ],
+      ["an empty ReadWritePaths reset", add("Service", "ReadWritePaths=")],
+      ["LD_PRELOAD", add("Service", "Environment=LD_PRELOAD=/tmp/x.so")],
+      [
+        "two assignments in one Environment",
+        add("Service", "Environment=A=1 B=2"),
+      ],
+      [
+        "StandardOutput to the socket",
+        line("StandardOutput=", "StandardOutput=socket"),
+      ],
+      ["a dependency on another unit", add("Unit", "Wants=emergency.target")],
+      [
+        "a dependency on another site",
+        add("Unit", "Requires=turbopanel-php-other.socket"),
+      ],
+      [
+        "a [Socket] section",
+        (u) => `${u}\n[Socket]\nListenStream=/run/x.sock\n`,
+      ],
+      [
+        "a line continuation",
+        (u) => u.replace("User=alice", "Description=x \\\nUser=alice"),
+      ],
+      ["spaces around =", line("User=", "User = alice")],
+    ];
+    const perMode: Record<PhpMode, Mutation[]> = {
+      fastcgi: [
+        ["an unknown PHP series", (u) => u.replace("php-cgi8.4", "php-cgi9.1")],
+        [
+          "a patch-level series",
+          (u) => u.replace("php-cgi8.4", "php-cgi8.4.1"),
+        ],
+        [
+          "PHPRC on FastCGI",
+          add("Service", `Environment=PHPRC=${phpConfDir(host)}/php.ini`),
+        ],
+        [
+          "a non-numeric child count",
+          line(
+            "Environment=PHP_FCGI_CHILDREN",
+            "Environment=PHP_FCGI_CHILDREN=4x",
+          ),
+        ],
+        ["no StandardInput=socket", line("StandardInput=", null)],
+        ["Type=notify", add("Service", "Type=notify")],
+        [
+          "a runtime directory in /run/turbopanel",
+          add("Service", "RuntimeDirectory=turbopanel"),
+        ],
+        [
+          "started at boot",
+          (u) => `${u}\n[Install]\nWantedBy=multi-user.target\n`,
+        ],
+      ],
+      fpm: [
+        ["Type=simple", line("Type=", "Type=simple")],
+        ["no Type", line("Type=", null)],
+        [
+          "php-fpm allowed to run as root (-R)",
+          (u) => u.replace("--nodaemonize", "--nodaemonize -R"),
+        ],
+        [
+          "a config from /tmp",
+          (u) =>
+            u.replace(`${phpConfDir(host)}/php-fpm.conf`, "/tmp/evil.conf"),
+        ],
+        [
+          "a runtime directory of /run/turbopanel",
+          line("RuntimeDirectory=", "RuntimeDirectory=turbopanel"),
+        ],
+        [
+          "another site's runtime directory",
+          line("RuntimeDirectory=", "RuntimeDirectory=turbopanel-php-other"),
+        ],
+        [
+          "a world-writable runtime directory",
+          line("RuntimeDirectoryMode=", "RuntimeDirectoryMode=0777"),
+        ],
+        ["no RuntimeDirectory", line("RuntimeDirectory=", null)],
+        ["a shell reload", line("ExecReload=", "ExecReload=/bin/sh -c id")],
+        ["StandardInput=socket", add("Service", "StandardInput=socket")],
+        ["an environment", add("Service", "Environment=PHP_FCGI_CHILDREN=4")],
+        [
+          "started by another target",
+          line("WantedBy=", "WantedBy=sysinit.target"),
+        ],
+      ],
+      lsphp: [
+        [
+          "another site's PHPRC",
+          line("Environment=PHPRC", `Environment=PHPRC=${otherCfg}/php.ini`),
+        ],
+        ["no PHPRC", line("Environment=PHPRC", null)],
+        [
+          "lsphp from outside the vendor tree",
+          line("ExecStart=", "ExecStart=/usr/local/lsws/lsphp83/bin/lsphp"),
+        ],
+        [
+          "a path through the series",
+          (u) =>
+            u.replace(
+              "lsphp/8.3/current",
+              "lsphp/8.3/../../../outside/current",
+            ),
+        ],
+        [
+          "a non-numeric LSAPI value",
+          line("Environment=LSAPI_CHILDREN", "Environment=LSAPI_CHILDREN=ten"),
+        ],
+        ["no StandardInput=socket", line("StandardInput=", null)],
+      ],
+    };
+    for (const mode of ["fastcgi", "fpm", "lsphp"] as const) {
+      const base = phpService(host, mode);
+      // The corpus means something only while the pinned shape itself passes.
+      assertEquals((await installUnit(host, phpServiceName, base)).code, 0);
+      for (const [label, mutate] of [...common, ...perMode[mode]]) {
+        const content = mutate(base);
+        assertEquals(
+          content === base,
+          false,
+          `${mode}: ${label} changed nothing`,
+        );
+        const result = await installUnit(host, phpServiceName, content);
+        assertEquals(result.code === 0, false, `${mode}: accepted ${label}`);
+      }
+    }
+  });
+});
+
+test("per-site PHP units: only exact names, and the generic tenant shape gains nothing", async () => {
+  await withPhpHost(async (host) => {
+    const fpm = phpService(host, "fpm");
+    for (
+      const name of [
+        "turbopanel-php-Shop.service",
+        "turbopanel-php-.service",
+        "turbopanel-php--x.service",
+        "turbopanel-php-a.b.service",
+        `turbopanel-php-${"a".repeat(65)}.service`,
+        "turbopanel-php-other-site.service",
+        `turbopanel-php-${PHP_SITE}.timer`,
+        `turbopanel-php-${PHP_SITE}.slice`,
+        "turbopanel-app-alice.socket",
+      ]
+    ) {
+      await refusedUnit(host, name, fpm);
+    }
+    // A unit the generic tenant check accepts gets no php name.
+    const tenant = [
+      "[Service]",
+      "User=alice",
+      "Group=alice-grp",
+      "Slice=turbopanel-alice.slice",
+      "NoNewPrivileges=yes",
+      "ExecStart=/bin/sh -c id",
+      "",
+    ].join("\n");
+    assertEquals(
+      (await installUnit(host, "turbopanel-app-alice-x.service", tenant)).code,
+      0,
+    );
+    await refusedUnit(host, phpServiceName, tenant);
+  });
+});
+
+test("per-site PHP sockets: a hostile corpus is refused", async () => {
+  await withPhpHost(async (host) => {
+    const corpus: Mutation[] = [
+      [
+        "inside /run/turbopanel",
+        line(
+          "ListenStream=",
+          `ListenStream=/run/turbopanel/php/${PHP_SITE}.sock`,
+        ),
+      ],
+      [
+        "another site's directory",
+        line(
+          "ListenStream=",
+          "ListenStream=/run/turbopanel-php-other/php.sock",
+        ),
+      ],
+      [
+        "another file name",
+        line(
+          "ListenStream=",
+          `ListenStream=/run/turbopanel-php-${PHP_SITE}/x.sock`,
+        ),
+      ],
+      ["a TCP port", line("ListenStream=", "ListenStream=127.0.0.1:9000")],
+      [
+        "a second ListenStream",
+        add(
+          "Socket",
+          `ListenStream=/run/turbopanel-php-${PHP_SITE}/lsphp.sock`,
+        ),
+      ],
+      ["no ListenStream", line("ListenStream=", null)],
+      ["owned by root", line("SocketUser=", "SocketUser=root")],
+      ["owned by a web server", line("SocketUser=", "SocketUser=tpnginx")],
+      ["group tp", line("SocketGroup=", "SocketGroup=tp")],
+      ["group root", line("SocketGroup=", "SocketGroup=root")],
+      ["the owner's group", line("SocketGroup=", "SocketGroup=alice-grp")],
+      [
+        "the Caddy site account",
+        line("SocketGroup=", "SocketGroup=tpcaddysite"),
+      ],
+      ["no SocketGroup", line("SocketGroup=", null)],
+      ["world-writable", line("SocketMode=", "SocketMode=0666")],
+      ["no SocketMode", line("SocketMode=", null)],
+      [
+        "a world-writable directory",
+        line("DirectoryMode=", "DirectoryMode=0777"),
+      ],
+      ["per-connection instances", line("Accept=", "Accept=yes")],
+      [
+        "another service",
+        add("Socket", "Service=turbopanel-app-alice.service"),
+      ],
+      ["an exec line", add("Socket", "ExecStartPre=/bin/sh -c id")],
+      ["a FIFO", add("Socket", "ListenFIFO=/run/x")],
+      ["a symlink", add("Socket", "Symlinks=/etc/turbopanel/x.sock")],
+      ["a [Service] section", (u) => `${u}\n[Service]\nUser=root\n`],
+      [
+        "started by another target",
+        line("WantedBy=", "WantedBy=multi-user.target"),
+      ],
+    ];
+    const base = phpSocket();
+    assertEquals((await installUnit(host, phpSocketName, base)).code, 0);
+    for (const [label, mutate] of corpus) {
+      const content = mutate(base);
+      assertEquals(content === base, false, `${label} changed nothing`);
+      const result = await installUnit(host, phpSocketName, content);
+      assertEquals(result.code === 0, false, `accepted ${label}`);
+    }
+  });
+});
+
+const PHP_INI = `[PHP]
+memory_limit = 256M
+error_reporting = E_ALL & ~E_DEPRECATED
+disable_functions = "exec,passthru,shell_exec"
+session.save_path = /tmp
+upload_tmp_dir = /tmp
+expose_php = 0
+
+[opcache]
+opcache.enable = 1
+opcache.memory_consumption = 128
+opcache.validate_permission = 1
+opcache.validate_root = 1
+`;
+
+function phpFpmConf(host: Host): string {
+  const run = `/run/turbopanel-php-${PHP_SITE}`;
+  return `[global]
+error_log = syslog
+daemonize = no
+
+[${PHP_SITE}]
+listen = ${run}/php.sock
+listen.mode = 0660
+listen.acl_users = tpnginx
+pm = ondemand
+pm.max_children = 20
+pm.process_idle_timeout = 30s
+chdir = ${host.path("srv/users/alice/sites")}/${PHP_SITE}/current
+catch_workers_output = yes
+clear_env = no
+php_admin_value[open_basedir] = ${
+    host.path("srv/users/alice/sites")
+  }/${PHP_SITE}:/tmp
+php_admin_value[memory_limit] = 256M
+`;
+}
+
+async function installPhpConf(
+  host: Host,
+  name: string,
+  content: string,
+  opts: { mode?: string; owner?: string; group?: string } = {},
+) {
+  await Deno.writeTextFile(host.path("tmp/conf"), content);
+  return host.run([
+    "install",
+    "-m",
+    opts.mode ?? "0640",
+    "-o",
+    opts.owner ?? "root",
+    "-g",
+    opts.group ?? "alice-grp",
+    host.path("tmp/conf"),
+    `${phpConfDir(host)}/${name}`,
+  ]);
+}
+
+test("per-site PHP config: root:<owner>-grp, 0750/0640, directives on an allowlist", async () => {
+  await withPhpHost(async (host) => {
+    const dir = phpConfDir(host);
+    const mkdir = (
+      path: string,
+      mode = "0750",
+      owner = "root",
+      group = "alice-grp",
+    ) =>
+      host.run(["install", "-d", "-m", mode, "-o", owner, "-g", group, path]);
+    const made = await mkdir(dir);
+    assertEquals(made.code, 0, made.stderr);
+    assertStringIncludes(
+      made.stdout,
+      "EXEC [chown] [-h] [--] [root:alice-grp] [.]",
+    );
+    for (
+      const [mode, owner, group, path] of [
+        ["0755", "root", "alice-grp", dir],
+        ["0770", "root", "alice-grp", dir],
+        ["0750", "alice", "alice-grp", dir],
+        ["0750", "tp", "alice-grp", dir],
+        ["0750", "root", "tpnginx", dir],
+        ["0750", "root", "carol-grp", dir],
+        ["0750", "root", "alice-grp", phpConfDir(host, "Shop")],
+        ["0750", "root", "alice-grp", `${dir}/deeper`],
+        ["0755", "root", "root", host.path("etc/turbopanel/php/sites")],
+        ["0755", "root", "root", host.path("etc/turbopanel/php-sites")],
+      ]
+    ) {
+      assertEquals(
+        (await mkdir(path, mode, owner, group)).code === 0,
+        false,
+        `${mode} ${owner}:${group} ${path}`,
+      );
+    }
+
+    for (
+      const [name, content] of [["php.ini", PHP_INI], [
+        "php-fpm.conf",
+        phpFpmConf(host),
+      ]]
+    ) {
+      const ok = await installPhpConf(host, name, content);
+      assertEquals(ok.code, 0, `${name}: ${ok.stderr}`);
+      assertStringIncludes(
+        ok.stdout,
+        "EXEC [chown] [-h] [--] [root:alice-grp] [./f]",
+      );
+      assertEquals(await Deno.readTextFile(`${dir}/${name}`), content);
+      for (
+        const opts of [{ mode: "0644" }, { mode: "0660" }, { owner: "alice" }, {
+          owner: "tp",
+        }, {
+          group: "tpnginx",
+        }, { group: "root" }]
+      ) {
+        assertEquals(
+          (await installPhpConf(host, name, content, opts)).code === 0,
+          false,
+          JSON.stringify(opts),
+        );
+      }
+    }
+    assertEquals(
+      (await installPhpConf(host, "php.ini.tpprev", PHP_INI)).code === 0,
+      false,
+      ".tpprev",
+    );
+    assertEquals(
+      (await installPhpConf(host, "pool.conf", PHP_INI)).code === 0,
+      false,
+      "pool.conf",
+    );
+
+    const home = host.path("srv/users/alice");
+    const badIni = [
+      "extension = /tmp/evil.so",
+      "extension = redis",
+      "zend_extension = /tmp/evil.so",
+      "auto_prepend_file = /tmp/x.php",
+      "sendmail_path = /bin/sh -c id",
+      "include_path = .:/etc",
+      "[PATH=/srv/users/alice]\nmemory_limit = 1G",
+      "[HOST=example.com]",
+      "opcache.validate_permission = 0",
+      "opcache.validate_root = Off",
+      "error_log = /etc/cron.d/x",
+      `session.save_path = ${host.path("srv/users/bob/tmp")}`,
+      "session.save_path = 2;/tmp",
+      "upload_tmp_dir = /tmp/../etc",
+      "open_basedir = /",
+      `open_basedir = ${home}:/etc`,
+      "memory_limit = ${HOME}",
+      "memory_limit = `id`",
+      'memory_limit = "1G" ; x',
+      "extension_dir = /tmp",
+      "no equals sign",
+    ];
+    for (const bad of badIni) {
+      assertEquals(
+        (await installPhpConf(host, "php.ini", `${PHP_INI}${bad}\n`)).code ===
+          0,
+        false,
+        bad,
+      );
+    }
+
+    const fpm = phpFpmConf(host);
+    const badFpm: Mutation[] = [
+      ["user", add(PHP_SITE, "user = root")],
+      ["group", add(PHP_SITE, "group = root")],
+      ["listen.owner", add(PHP_SITE, "listen.owner = tpnginx")],
+      ["listen.group", add(PHP_SITE, "listen.group = tpnginx")],
+      [
+        "a socket in /run/turbopanel",
+        line("listen = ", `listen = /run/turbopanel/php/8.4/${PHP_SITE}.sock`),
+      ],
+      ["a TCP listener", line("listen = ", "listen = 127.0.0.1:9000")],
+      [
+        "a second listen",
+        add(PHP_SITE, "listen = /run/turbopanel-php-shop-1/php.sock"),
+      ],
+      [
+        "the daemon on the ACL",
+        line("listen.acl_users", "listen.acl_users = tp"),
+      ],
+      ["a world-writable socket", line("listen.mode", "listen.mode = 0666")],
+      ["include", add("global", "include = /etc/turbopanel/*.conf")],
+      ["chroot", add(PHP_SITE, "chroot = /")],
+      ["prefix", add(PHP_SITE, "prefix = /")],
+      [
+        "another pool",
+        (u) => `${u}[other]\nlisten = /run/turbopanel-php-other/php.sock\n`,
+      ],
+      ["a second pool for the site", (u) => `${u}[${PHP_SITE}]\npm = static\n`],
+      [
+        "an admin value off the list",
+        add(PHP_SITE, "php_admin_value[auto_prepend_file] = /tmp/x.php"),
+      ],
+      ["an extension", add(PHP_SITE, "php_admin_value[extension] = /tmp/x.so")],
+      ["env[]", add(PHP_SITE, "env[LD_PRELOAD] = /tmp/x.so")],
+      ["a slowlog outside the home", add(PHP_SITE, "slowlog = /etc/x")],
+      ["an error log in /var/log", line("error_log", "error_log = /var/log/x")],
+      ["an error log in /tmp", line("error_log", "error_log = /tmp/fpm.log")],
+      [
+        "an error log on stderr",
+        line("error_log", "error_log = /proc/self/fd/2"),
+      ],
+      [
+        "an error log in the runtime directory",
+        line(
+          "error_log",
+          `error_log = /run/turbopanel-php-${PHP_SITE}/fpm.log`,
+        ),
+      ],
+      ["an access log in /tmp", add(PHP_SITE, "access.log = /tmp/x")],
+      ["daemonize", line("daemonize", "daemonize = yes")],
+      ["rlimit_core", add(PHP_SITE, "rlimit_core = unlimited")],
+      ["process.dumpable", add(PHP_SITE, "process.dumpable = yes")],
+      ["a variable", line("pm.max_children", "pm.max_children = ${pool}")],
+      ["chdir outside the home", line("chdir", "chdir = /etc")],
+    ];
+    for (const [label, mutate] of badFpm) {
+      const content = mutate(fpm);
+      assertEquals(content === fpm, false, `${label} changed nothing`);
+      assertEquals(
+        (await installPhpConf(host, "php-fpm.conf", content)).code === 0,
+        false,
+        label,
+      );
+    }
+  });
+});
+
+test("per-site PHP config: symlinks, other verbs and the rollout copy", async () => {
+  await withPhpHost(async (host) => {
+    const dir = phpConfDir(host);
+    const ini = `${dir}/php.ini`;
+    // A symlinked site directory is never entered.
+    await Deno.symlink(host.path("outside"), dir);
+    await refused(host, [
+      "install",
+      "-d",
+      "-m",
+      "0750",
+      "-o",
+      "root",
+      "-g",
+      "alice-grp",
+      dir,
+    ]);
+    assertEquals(
+      (await installPhpConf(host, "php.ini", PHP_INI)).code === 0,
+      false,
+      "through a symlinked dir",
+    );
+    await Deno.remove(dir);
+    await Deno.mkdir(dir);
+    // A symlink at the file is replaced, never written through.
+    await Deno.symlink(host.path("outside/secret"), ini);
+    assertEquals((await installPhpConf(host, "php.ini", PHP_INI)).code, 0);
+    assertEquals(
+      await Deno.readTextFile(host.path("outside/secret")),
+      "root-only secret\n",
+    );
+    assertEquals((await Deno.lstat(ini)).isSymlink, false);
+
+    const staged = host.path("tmp/staged");
+    for (
+      const args of [
+        ["tee", ini],
+        ["chmod", "0666", ini],
+        ["chown", "alice:alice-grp", ini],
+        ["chown", "tp", dir],
+        ["chmod", "0777", dir],
+        ["cp", "-p", "--", ini, `${dir}/php-fpm.conf`],
+        ["mv", "-f", "--", `${dir}/php-fpm.conf`, ini],
+        ["mkdir", "-p", `${dir}/sub`],
+        [
+          "install",
+          "-m",
+          "0644",
+          "-o",
+          "root",
+          "-g",
+          "root",
+          staged,
+          `${dir}/x.conf`,
+        ],
+        [
+          "install",
+          "-m",
+          "0640",
+          "-o",
+          "root",
+          "-g",
+          "root",
+          staged,
+          host.path("etc/turbopanel/php-sites/shop-1"),
+        ],
+        ["tee", host.path("etc/turbopanel/php-sites/shop-1")],
+      ]
+    ) {
+      await refused(host, args, args[0] === "tee" ? "x\n" : undefined);
+    }
+    // The rollout: keep a copy, restore it, remove it.
+    const keep = await host.run(["cp", "-p", "--", ini, `${ini}.tpprev`]);
+    assertEquals(keep.code, 0, keep.stderr);
+    const restore = await host.run(["mv", "-f", "--", `${ini}.tpprev`, ini]);
+    assertEquals(restore.code, 0, restore.stderr);
+    assertEquals(
+      (await host.run(["cmp", "-s", "--", host.path("tmp/conf"), ini])).code,
+      0,
+    );
+    assertEquals((await host.run(["rm", "-f", "--", ini])).code, 0);
+    assertEquals((await host.run(["rm", "-rf", "--", dir])).code, 0);
+    // Nor is a whole new php/ renamed over the one holding sites/.
+    await Deno.remove(host.path("etc/turbopanel/php"), { recursive: true });
+    await Deno.mkdir(host.path("etc/turbopanel/php.new/sites/shop-1"), {
+      recursive: true,
+    });
+    await refused(host, [
+      "mv",
+      "-f",
+      "--",
+      host.path("etc/turbopanel/php.new"),
+      host.path("etc/turbopanel/php"),
+    ]);
+  });
+});
+
+test("php-test runs the installed unit's binary on its own config, as the owner", async () => {
+  await withPhpHost(async (host) => {
+    const cfg = phpConfDir(host);
+    const prefix =
+      "EXEC [timeout] [30] [setpriv] [--reuid=15001] [--regid=15001] [--clear-groups] " +
+      "[--no-new-privs] [--] [env] [-i] [PATH=/usr/bin:/bin]";
+    const want: Record<PhpMode, string> = {
+      fastcgi: `${prefix} [/usr/bin/php-cgi8.4] [-c] [/proc/self/fd/3] [-v]`,
+      fpm:
+        `${prefix} [/usr/sbin/php-fpm8.4] [--test] [--fpm-config] [/proc/self/fd/4] [-c] [/proc/self/fd/3]`,
+      lsphp: `${prefix} [PHPRC=/proc/self/fd/3] [${
+        phpExec(host, "lsphp")
+      }] [-v]`,
+    };
+    await refused(host, ["php-test", PHP_SITE]);
+    await Deno.mkdir(cfg);
+    await Deno.writeTextFile(`${cfg}/php.ini`, PHP_INI);
+    await Deno.writeTextFile(`${cfg}/php-fpm.conf`, phpFpmConf(host));
+    for (const mode of ["fastcgi", "fpm", "lsphp"] as const) {
+      assertEquals(
+        (await installUnit(host, phpServiceName, phpService(host, mode))).code,
+        0,
+      );
+      const result = await host.run(["php-test", PHP_SITE]);
+      assertEquals(result.code, 0, result.stderr);
+      assertEquals(result.stdout.trim(), want[mode]);
+    }
+    // A config file that is a symlink is not opened for the test.
+    await Deno.remove(`${cfg}/php.ini`);
+    await Deno.symlink(host.path("outside/secret"), `${cfg}/php.ini`);
+    await refused(host, ["php-test", PHP_SITE]);
+    const unit = host.path(`etc/systemd/system/${phpServiceName}`);
+    // A unit changed behind tp-host's back is checked again, not trusted.
+    await Deno.writeTextFile(
+      unit,
+      phpService(host, "fpm").replace("User=alice", "User=root"),
+    );
+    await refused(host, ["php-test", PHP_SITE]);
+    await Deno.remove(unit);
+    await Deno.symlink(host.path("outside/secret"), unit);
+    await refused(host, ["php-test", PHP_SITE]);
+    for (
+      const args of [["php-test"], ["php-test", "Shop"], ["php-test", "../x"], [
+        "php-test",
+        PHP_SITE,
+        "x",
+      ]]
+    ) {
+      await refused(host, args);
+    }
+  });
+});
+
+test("php-site-register writes the launcher registry from the account database only", async () => {
+  await withPhpHost(async (host) => {
+    const entry = host.path(`etc/turbopanel/php-sites/${PHP_SITE}`);
+    const ok = await host.run([
+      "php-site-register",
+      PHP_SITE,
+      "alice",
+      "lsphp-attached",
+      "8.3",
+      "10",
+    ]);
+    assertEquals(ok.code, 0, ok.stderr);
+    assertStringIncludes(ok.stdout, "EXEC [chown] [-h] [--] [root:root] [./f]");
+    const home = host.path("srv/users/alice");
+    assertEquals(
+      await Deno.readTextFile(entry),
+      [
+        "version=1",
+        `site=${PHP_SITE}`,
+        "mode=lsphp-attached",
+        "user=alice",
+        "uid=15001",
+        "group=alice-grp",
+        "gid=15001",
+        `home=${home}`,
+        `tmp=${home}/tmp`,
+        "php=8.3",
+        `bin=${phpExec(host, "lsphp")}`,
+        `ini=${phpConfDir(host)}/php.ini`,
+        "children=10",
+        "",
+      ].join("\n"),
+    );
+    for (
+      const args of [
+        [PHP_SITE, "root", "lsphp-attached", "8.3", "10"],
+        [PHP_SITE, "tpnginx", "lsphp-attached", "8.3", "10"],
+        [PHP_SITE, "carol", "lsphp-attached", "8.3", "10"],
+        [PHP_SITE, "alice", "php-fpm", "8.3", "10"],
+        [PHP_SITE, "alice", "lsphp-attached", "9.1", "10"],
+        [PHP_SITE, "alice", "lsphp-attached", "8.3.1", "10"],
+        [PHP_SITE, "alice", "lsphp-attached", "8.3", "0"],
+        [PHP_SITE, "alice", "lsphp-attached", "8.3", "65"],
+        [PHP_SITE, "alice", "lsphp-attached", "8.3", "010"],
+        ["Shop", "alice", "lsphp-attached", "8.3", "10"],
+        ["../x", "alice", "lsphp-attached", "8.3", "10"],
+        [PHP_SITE, "alice", "lsphp-attached", "8.3"],
+        [PHP_SITE, "alice", "lsphp-attached", "8.3", "10", "uid=0"],
+      ]
+    ) {
+      await refused(host, ["php-site-register", ...args]);
+    }
+    for (
+      const args of [["chown", "tp", entry], ["chmod", "0666", entry], [
+        "cp",
+        "-p",
+        "--",
+        entry,
+        `${entry}.x`,
+      ]]
+    ) {
+      await refused(host, args);
+    }
+    assertEquals((await host.run(["rm", "-f", "--", entry])).code, 0);
   });
 });

@@ -656,3 +656,77 @@ test("F3: flipping the switch restarts the gate, and a converge with it on prove
     "probed after the gate is started",
   );
 });
+
+test("atomic deploy: staged load check, snapshot, probes, and a rollback that ends in a failure", async () => {
+  const deploy = await read("tasks/deploy.yml");
+  const at = (needle: string) => {
+    const i = deploy.indexOf(needle);
+    assert(i >= 0, needle);
+    return i;
+  };
+  // Order: stage, load-check, probe before, snapshot, then the swap.
+  const order = [
+    "Stage the new gate source",
+    "Load-check the staged gate",
+    "Look for a running gate before the swap",
+    "Snapshot them",
+    "Swap in the staged gate",
+  ].map(at);
+  assertEquals(order, order.toSorted((a, b) => a - b));
+  assertStringIncludes(deploy, 'TP_DOCKER_GATE_LOAD_CHECK: "1"');
+  // Nothing in the pre-flight is conditioned on the Traefik switch.
+  assertFalse(
+    deploy.slice(0, at("Swap in the staged gate")).includes(
+      "docker_gate_ingress",
+    ),
+  );
+  const rescue = deploy.slice(at("rescue:"));
+  assertStringIncludes(rescue, "rollback.yml");
+  assertStringIncludes(rescue, "ansible.builtin.fail");
+  const rollback = await read("tasks/rollback.yml");
+  assertStringIncludes(rollback, "Prove the restored gate answers");
+  assertStringIncludes(rollback, "state: absent");
+  // The swap itself moves only checked files, and a failure under the switch
+  // (or a converge turning it on) still fails the converge.
+  const install = await read("tasks/install.yml");
+  assertStringIncludes(install, "remote_src: true");
+  assertStringIncludes(install, "Prove the main gate socket answers");
+  assertStringIncludes(
+    await read("tasks/main.yml"),
+    "(docker_gate_ingress_socket | string | length) > 0",
+  );
+  const defaults = await read("defaults/main.yml");
+  for (const key of ["docker_gate_stage_dir", "docker_gate_prev_dir"]) {
+    assertStringIncludes(defaults, `${key}: "{{ docker_gate_dir }}/.`);
+  }
+});
+
+test("the gate's load check exits 0 on good source and fails on bad configuration", async () => {
+  const main = join(ROLE, "files/main.ts");
+  const run = async (env: Record<string, string>) => {
+    const { code } = await new Deno.Command(Deno.execPath(), {
+      args: [
+        "run",
+        "--no-prompt",
+        "--no-remote",
+        "--no-config",
+        "--no-lock",
+        "--allow-read",
+        "--allow-env=TP_DOCKER_GATE_*",
+        main,
+      ],
+      env: { NO_COLOR: "1", ...env },
+      clearEnv: true,
+      stdout: "null",
+      stderr: "null",
+    }).output();
+    return code;
+  };
+  assertEquals(await run({ TP_DOCKER_GATE_LOAD_CHECK: "1" }), 0);
+  assert(
+    await run({
+      TP_DOCKER_GATE_LOAD_CHECK: "1",
+      TP_DOCKER_GATE_MODE: "enforce",
+    }) !== 0,
+  );
+});
