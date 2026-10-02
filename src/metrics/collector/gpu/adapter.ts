@@ -43,7 +43,7 @@ export type GpuReadContext = {
   seconds: number;
 };
 
-export type GpuAdapterId = "sysfs" | "nvml" | "dcgm";
+export type GpuAdapterId = "sysfs" | "nvml" | "dcgm" | "nvidia-smi";
 
 /**
  * One telemetry source. `read` returning `null` means "nothing for this GPU
@@ -58,11 +58,18 @@ export type GpuAdapter = {
   /** One-time availability probe (library present, endpoint reachable). Memoized — never re-probed per tick. */
   probe(): Promise<void>;
   read(gpu: GpuTopology, ctx: GpuReadContext): Promise<GpuReading | null>;
+  /**
+   * Consulted only when no earlier adapter in the chain returned a reading —
+   * for sources that cost a subprocess per tick (`nvidia-smi`).
+   */
+  readonly fallbackOnly?: boolean;
 };
 
-/** The three adapters `buildGpuSamples` picks from, per GPU vendor. */
+/** The adapters `buildGpuSamples` picks from, per GPU vendor/driver. */
 export type GpuAdapterSet = {
   dcgm: GpuAdapter;
   nvml: GpuAdapter;
   sysfs: GpuAdapter;
+  /** Last-resort NVIDIA source; absent sets simply skip it. */
+  nvidiaSmi?: GpuAdapter;
 };
