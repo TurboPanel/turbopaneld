@@ -771,6 +771,86 @@ describe("host-inventory", () => {
     }
   });
 
+  it("readHostResources lists DRM cards via ls when Deno.readDirSync is NotCapable", () => {
+    // Deno 2 refuses readDir under /sys inside the daemon's scoped
+    // --allow-read=/sys; file reads still work. Fixture mirrors an RTX 5060 Ti
+    // on driver 595.80 (Debian 13, headless with nvidia-drm loaded).
+    resetHostResourcesCacheForTests();
+    const { procRoot, sysRoot, root } = buildFixtureRoots();
+    const originalReadDir = Deno.readDirSync;
+    const listed: string[] = [];
+    Deno.readDirSync = (path) => {
+      throw new Deno.errors.NotCapable(
+        `Requires all access to "${String(path)}"`,
+      );
+    };
+    try {
+      const resources = readHostResources({
+        procRoot,
+        sysRoot,
+        architecture: "x86_64",
+        nvidiaSmiCsv: () => "00000000:01:00.0, 8151\n",
+        runLs: (path) => {
+          listed.push(path);
+          return {
+            code: 0,
+            stdout: new TextEncoder().encode(
+              "card0\ncard0-DP-1\ncard0-DP-2\ncard0-DP-3\ncard0-HDMI-A-1\nrenderD128\nversion\n",
+            ),
+          };
+        },
+      });
+      assertEquals(listed, [`${sysRoot}/class/drm`]);
+      assertEquals(resources?.gpus, [
+        {
+          vendorId: "0x10de",
+          driver: "nvidia",
+          pciSlot: "0000:01:00.0",
+          pciId: "10de:2d04",
+          name: "NVIDIA GeForce RTX Fixture",
+          memoryBytes: 8151 * 1024 * 1024,
+        },
+      ]);
+    } finally {
+      Deno.readDirSync = originalReadDir;
+      Deno.removeSync(root, { recursive: true });
+      resetHostResourcesCacheForTests();
+    }
+  });
+
+  it("readHostResources reports no GPUs when both readDirSync and ls fail", () => {
+    resetHostResourcesCacheForTests();
+    const { procRoot, sysRoot, root } = buildFixtureRoots();
+    const originalReadDir = Deno.readDirSync;
+    Deno.readDirSync = () => {
+      throw new Deno.errors.NotCapable("blocked");
+    };
+    try {
+      const failing = readHostResources({
+        procRoot,
+        sysRoot,
+        architecture: "x86_64",
+        nvidiaSmiCsv: () => undefined,
+        runLs: () => ({ code: 2, stdout: new Uint8Array() }),
+      });
+      assertEquals(failing?.gpus, undefined);
+      const throwing = readHostResources({
+        procRoot,
+        sysRoot,
+        architecture: "x86_64",
+        nvidiaSmiCsv: () => undefined,
+        runLs: () => {
+          throw new Error("no ls");
+        },
+      });
+      assertEquals(throwing?.gpus, undefined);
+    } finally {
+      Deno.readDirSync = originalReadDir;
+      Deno.removeSync(root, { recursive: true });
+      resetHostResourcesCacheForTests();
+    }
+  });
+
   it("readHostResources spawns nvidia-smi from PATH when nvidiaSmiCsv is omitted", () => {
     resetHostResourcesCacheForTests();
     const { procRoot, sysRoot, root } = buildFixtureRoots();

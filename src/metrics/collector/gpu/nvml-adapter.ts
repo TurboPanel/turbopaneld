@@ -44,49 +44,54 @@ const NVML_SYMBOLS = {
     result: "i32",
   },
   nvmlDeviceGetUtilizationRates: {
-    parameters: ["pointer", "buffer"],
+    parameters: ["usize", "buffer"],
     result: "i32",
   },
   nvmlDeviceGetMemoryInfo_v2: {
-    parameters: ["pointer", "buffer"],
+    parameters: ["usize", "buffer"],
     result: "i32",
   },
   nvmlDeviceGetTemperature: {
-    parameters: ["pointer", "u32", "buffer"],
+    parameters: ["usize", "u32", "buffer"],
     result: "i32",
   },
   nvmlDeviceGetPowerUsage: {
-    parameters: ["pointer", "buffer"],
+    parameters: ["usize", "buffer"],
     result: "i32",
   },
   nvmlDeviceGetPcieThroughput: {
-    parameters: ["pointer", "u32", "buffer"],
+    parameters: ["usize", "u32", "buffer"],
     result: "i32",
   },
   nvmlDeviceGetViolationStatus: {
-    parameters: ["pointer", "u32", "buffer"],
+    parameters: ["usize", "u32", "buffer"],
     result: "i32",
   },
   nvmlDeviceGetTotalEccErrors: {
-    parameters: ["pointer", "u32", "u32", "buffer"],
+    parameters: ["usize", "u32", "u32", "buffer"],
     result: "i32",
   },
   nvmlDeviceGetFieldValues: {
-    parameters: ["pointer", "i32", "buffer"],
+    parameters: ["usize", "i32", "buffer"],
     result: "i32",
   },
   nvmlDeviceGetRemappedRows: {
-    parameters: ["pointer", "buffer", "buffer", "buffer", "buffer"],
+    parameters: ["usize", "buffer", "buffer", "buffer", "buffer"],
     result: "i32",
   },
   nvmlDeviceGetRetiredPagesPendingStatus: {
-    parameters: ["pointer", "buffer"],
+    parameters: ["usize", "buffer"],
     result: "i32",
   },
 } as const;
 
-/** Opaque `nvmlDevice_t` handle, reconstructed from the FFI out-param bytes. */
-export type NvmlDeviceHandle = Deno.PointerValue;
+/**
+ * Opaque `nvmlDevice_t` handle: the raw address from the FFI out-param bytes,
+ * passed back to NVML as a `usize`. It is never turned into a
+ * `Deno.UnsafePointer` — `UnsafePointer.create` demands an unscoped
+ * `--allow-ffi`, and the compiled daemon only holds a path-scoped grant.
+ */
+export type NvmlDeviceHandle = bigint;
 
 /**
  * Vendor-neutral surface over the raw FFI symbol table — the injectable
@@ -124,9 +129,10 @@ export type NvmlRemappedRows = {
   failureOccurred: boolean;
 };
 
-function readPointer(buf: Uint8Array): Deno.PointerValue {
+function readHandle(buf: Uint8Array): NvmlDeviceHandle | null {
   const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
-  return Deno.UnsafePointer.create(view.getBigUint64(0, true));
+  const address = view.getBigUint64(0, true);
+  return address === 0n ? null : address;
 }
 
 function pciBusIdBuffer(pciBusId: string): Uint8Array {
@@ -226,7 +232,7 @@ export function createNvmlBindingFromLibrary(lib: NvmlLibrary): NvmlBinding {
         out,
       );
       if (rc !== NVML_SUCCESS) return null;
-      return readPointer(out);
+      return readHandle(out);
     },
     getUtilizationRates(handle) {
       const out = new Uint8Array(8);
@@ -247,7 +253,8 @@ export function createNvmlBindingFromLibrary(lib: NvmlLibrary): NvmlBinding {
       view.setUint32(0, STRUCT_SIZE | (2 << 24), true);
       const rc = sym.nvmlDeviceGetMemoryInfo_v2(handle, out);
       if (rc !== NVML_SUCCESS) return null;
-      return Number(view.getBigUint64(24, true));
+      // `used` sits after `free` (offset 24) — reading 24 reports free memory.
+      return Number(view.getBigUint64(32, true));
     },
     getTemperatureCelsius(handle) {
       const out = new Uint8Array(4);

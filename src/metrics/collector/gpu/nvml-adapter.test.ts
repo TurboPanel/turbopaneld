@@ -16,7 +16,7 @@ import type { GpuTopology } from "../../../contracts/topology-types.ts";
 
 const test = Deno.test.bind(Deno);
 
-const FAKE_HANDLE = {} as NvmlDeviceHandle;
+const FAKE_HANDLE: NvmlDeviceHandle = 0x100n;
 
 function gpu(overrides: Partial<GpuTopology> = {}): GpuTopology {
   return {
@@ -376,7 +376,11 @@ function fakeLibrary(
         return 0;
       },
       nvmlDeviceGetMemoryInfo_v2: (_handle, out) => {
-        writeU64(out, 24, 8n * 1024n * 1024n * 1024n);
+        // nvmlMemory_v2_t: total @8, reserved @16, free @24, used @32.
+        writeU64(out, 8, 16n * 1024n * 1024n * 1024n);
+        writeU64(out, 16, 512n * 1024n * 1024n);
+        writeU64(out, 24, 7n * 1024n * 1024n * 1024n);
+        writeU64(out, 32, 8n * 1024n * 1024n * 1024n);
         return 0;
       },
       nvmlDeviceGetTemperature: (_handle, _sensor, out) => {
@@ -475,6 +479,48 @@ test("createNvmlBindingFromLibrary decodes every NVML field from the FFI out-buf
   assertEquals(closed, true);
 });
 
+test({
+  name:
+    "createNvmlBindingFromLibrary resolves a handle under the daemon's path-scoped --allow-ffi",
+  // The compiled daemon only holds `--allow-ffi=/usr/lib,...`; a handle decode
+  // that needs an unscoped FFI grant (Deno.UnsafePointer.create) throws
+  // NotCapable there and every NVML field reads as unavailable.
+  permissions: { ffi: ["/usr/lib"] },
+  fn() {
+    const seenHandles: NvmlDeviceHandle[] = [];
+    const binding = createNvmlBindingFromLibrary(fakeLibrary({
+      nvmlDeviceGetHandleByPciBusId_v2: (_bus, out) => {
+        writeU64(out, 0, 0x7f00_1234_5000n);
+        return 0;
+      },
+      nvmlDeviceGetUtilizationRates: (handle, out) => {
+        seenHandles.push(handle);
+        writeU32(out, 0, 9);
+        writeU32(out, 4, 3);
+        return 0;
+      },
+    }));
+    const handle = binding.getHandleByPciBusId("0000:01:00.0");
+    assertEquals(handle, 0x7f00_1234_5000n);
+    if (handle === null) throw new TypeError("expected a decoded NVML handle");
+    assertEquals(binding.getUtilizationRates(handle), {
+      gpuPercent: 9,
+      memoryPercent: 3,
+    });
+    assertEquals(seenHandles, [0x7f00_1234_5000n]);
+  },
+});
+
+test("createNvmlBindingFromLibrary treats a null nvmlDevice_t as no handle", () => {
+  const binding = createNvmlBindingFromLibrary(fakeLibrary({
+    nvmlDeviceGetHandleByPciBusId_v2: (_bus, out) => {
+      writeU64(out, 0, 0n);
+      return 0;
+    },
+  }));
+  assertEquals(binding.getHandleByPciBusId("0000:01:00.0"), null);
+});
+
 test("createNvmlBindingFromLibrary nulls a field when that NVML call returns non-success", () => {
   const binding = createNvmlBindingFromLibrary(fakeLibrary({
     nvmlDeviceGetHandleByPciBusId_v2: () => NVML_FAIL,
@@ -489,7 +535,7 @@ test("createNvmlBindingFromLibrary nulls a field when that NVML call returns non
     nvmlDeviceGetRemappedRows: () => NVML_FAIL,
     nvmlDeviceGetRetiredPagesPendingStatus: () => NVML_FAIL,
   }));
-  const dummy = {} as NvmlDeviceHandle;
+  const dummy: NvmlDeviceHandle = 0x100n;
   assertEquals(binding.getHandleByPciBusId("0000:01:00.0"), null);
   assertEquals(binding.getUtilizationRates(dummy), null);
   assertEquals(binding.getMemoryUsedBytes(dummy), null);
@@ -532,7 +578,7 @@ test("createNvmlBindingFromLibrary treats a per-field XID nvmlReturn as missing"
       return 0;
     },
   }));
-  const dummy = {} as NvmlDeviceHandle;
+  const dummy: NvmlDeviceHandle = 0x100n;
   assertEquals(binding.getLastXidErrorCode(dummy), null);
 });
 
@@ -550,7 +596,7 @@ test("createNvmlBindingFromLibrary reports remapped-row failure and no pending r
       return 0;
     },
   }));
-  const dummy = {} as NvmlDeviceHandle;
+  const dummy: NvmlDeviceHandle = 0x100n;
   assertEquals(binding.getRemappedRows(dummy), {
     correctable: 0,
     uncorrectable: 2,
@@ -570,7 +616,7 @@ test("createNvmlBindingFromLibrary nulls PCIe when only one direction succeeds",
       return NVML_FAIL;
     },
   }));
-  const dummy = {} as NvmlDeviceHandle;
+  const dummy: NvmlDeviceHandle = 0x100n;
   assertEquals(binding.getPcieThroughputBytesPerSecond(dummy), null);
 });
 
