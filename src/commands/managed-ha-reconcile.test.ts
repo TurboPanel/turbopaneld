@@ -72,13 +72,13 @@ function presentPayload(
     clusters: [{
       managedId: MANAGED_ID,
       clusterAlias: MANAGED_ID,
-      engine: "postgres",
+      engine: "mysql",
       members: [{
         memberId: MEMBER_ID,
         role: "primary",
         replicaClass: null,
         host: "db-1",
-        port: 5432,
+        port: 3306,
         promotionRule: "prefer",
       }],
       replicationUsername: "tp_repl",
@@ -201,6 +201,59 @@ test({
 
 test({
   name:
+    "handleManagedHaReconcile skips Postgres clusters Orchestrator cannot monitor",
+  permissions: { env: true, read: true, write: true, run: false },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      const layout = resolveLayout(fixture.env);
+      await seedOrchestratorHostPrep(layout, { raftToken: true });
+      applyLayoutEnv(fixture);
+      const apiCalls: string[] = [];
+      const [mysql] = presentPayload().clusters;
+      const postgres = {
+        ...mysql,
+        managedId: "00000000-0000-4000-8000-0000000000f1",
+        clusterAlias: "00000000-0000-4000-8000-0000000000f1",
+        engine: "postgres" as const,
+        members: mysql.members.map((member) => ({
+          ...member,
+          host: "pg-1",
+          port: 5432,
+        })),
+      };
+      try {
+        const result = await handleManagedHaReconcile(
+          presentPayload({ clusters: [postgres, mysql] }),
+          new Date().toISOString(),
+          {
+            runDocker: fakeRunWithRunningOrchestrator(),
+            ensureDocker: () => Promise.resolve(),
+            decryptSecrets: decryptSecretsEcho,
+            orchestratorApi: {
+              fetch: (url) => {
+                apiCalls.push(url);
+                // What Orchestrator answers for a Postgres member.
+                const status = url.includes("pg-1") ? 500 : 200;
+                return Promise.resolve(new Response("", { status }));
+              },
+            },
+          },
+        );
+        assertEquals(result.registeredClusters, [MANAGED_ID]);
+        assertEquals(apiCalls.some((url) => url.includes("pg-1")), false);
+        assertEquals(
+          apiCalls.some((url) => url.includes("/api/discover/db-1/3306")),
+          true,
+        );
+      } finally {
+        clearLayoutEnv();
+      }
+    });
+  },
+});
+
+test({
+  name:
     "handleManagedHaReconcile writes Recover:false config and registers clusters",
   permissions: { env: true, read: true, write: true, run: false },
   fn: async () => {
@@ -229,12 +282,12 @@ test({
         assertEquals(result.registeredClusters, [MANAGED_ID]);
         assertEquals(result.containers?.length, 1);
         assertEquals(
-          apiCalls.some((url) => url.includes("/api/discover/db-1/5432")),
+          apiCalls.some((url) => url.includes("/api/discover/db-1/3306")),
           true,
         );
         assertEquals(
           apiCalls.some((url) =>
-            url.includes("/api/register-candidate/db-1/5432/prefer")
+            url.includes("/api/register-candidate/db-1/3306/prefer")
           ),
           true,
         );
