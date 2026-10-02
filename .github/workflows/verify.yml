@@ -119,6 +119,20 @@ jobs:
       - name: Scan for secrets (every tracked file)
         run: sh scripts/scan-secrets.sh --all
 
+      # The commits a PR adds, not just its final tree: a secret committed and
+      # removed again inside the PR still sits in the history that gets merged.
+      # PRs into staging/live carry trunk commits that were already scanned on
+      # their own PRs, so only PRs into trunk are scanned by range.
+      - name: Scan pull request commits for secrets
+        if: github.event_name == 'pull_request' && github.base_ref == 'trunk'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: sh scripts/scan-secrets.sh --range "$BASE_SHA..$HEAD_SHA"
+
+      - name: Secret scanner self-test
+        run: sh scripts/scan-secrets.selftest.sh
+
       - name: Check third-party notices
         run: deno task notices:check
 
