@@ -782,7 +782,7 @@ tp_php_unit_lines() {
       } else {
         ok["Unit", "StartLimitBurst"] = 1
         ok["Unit", "StartLimitIntervalSec"] = 1
-        split("Type User Group Slice ExecStart ExecReload Environment Restart RestartSec NoNewPrivileges CapabilityBoundingSet AmbientCapabilities ProtectSystem ProtectHome PrivateDevices ProtectKernelTunables ProtectKernelModules ProtectControlGroups RestrictSUIDSGID RestrictRealtime LockPersonality BindPaths ReadWritePaths RuntimeDirectory RuntimeDirectoryMode StandardInput StandardOutput StandardError SyslogIdentifier CPUQuota MemoryMax MemoryHigh TasksMax TimeoutStartSec TimeoutStopSec", b, " ")
+        split("Type User Group Slice ExecStart ExecReload Environment Restart RestartSec NoNewPrivileges CapabilityBoundingSet AmbientCapabilities ProtectSystem ProtectHome PrivateDevices ProtectKernelTunables ProtectKernelModules ProtectControlGroups RestrictSUIDSGID RestrictRealtime LockPersonality BindPaths BindReadOnlyPaths TemporaryFileSystem ReadWritePaths RuntimeDirectory RuntimeDirectoryMode StandardInput StandardOutput StandardError SyslogIdentifier CPUQuota MemoryMax MemoryHigh TasksMax TimeoutStartSec TimeoutStopSec", b, " ")
         for (i in b) ok["Service", b[i]] = 1
       }
       body = (kind == "socket") ? "Socket" : "Service"
@@ -946,6 +946,10 @@ tp_php_service_pinned_ok() {
     Service.CapabilityBoundingSet=*|Service.AmbientCapabilities=*) [ -z "${1#*=}" ] ;;
     Service.ProtectSystem=*) [ "${1#*=}" = "strict" ] ;;
     Service.BindPaths=*) [ "${1#*=}" = "$_pl_home/tmp:/tmp" ] ;;
+    # The daemon's config tree is tp's alone (0750); inside the unit it is an
+    # empty tmpfs holding only this site's config directory, read-only.
+    Service.TemporaryFileSystem=*) [ "${1#*=}" = "$R_CONFIG:ro" ] ;;
+    Service.BindReadOnlyPaths=*) [ "${1#*=}" = "$R_CONFIG/php/sites/$_ps_site" ] ;;
     Service.ReadWritePaths=*) tp_php_rw_ok "${1#*=}" "$_pl_home" ;;
     Service.ExecStart=*) [ "${1#*=}" = "$_ps_exec" ] ;;
     Service.StandardOutput=*|Service.StandardError=*) [ "${1#*=}" = "journal" ] ;;
@@ -995,8 +999,9 @@ tp_php_service_ok() {
   _ps_file="$1"
   _ps_site="$2"
   _ps_lines="$(tp_php_unit_lines "$_ps_file" service)" || return 1
-  [ "$(printf '%s\n' "$_ps_lines" | grep -c '^Service\.ExecStart=')" -eq 1 ] || return 1
-  [ "$(printf '%s\n' "$_ps_lines" | grep -c '^Service\.BindPaths=')" -eq 1 ] || return 1
+  for _ps_key in ExecStart BindPaths TemporaryFileSystem BindReadOnlyPaths; do
+    [ "$(printf '%s\n' "$_ps_lines" | grep -c "^Service\.$_ps_key=")" -le 1 ] || return 1
+  done
   _ps_user="$(printf '%s\n' "$_ps_lines" | sed -n 's/^Service\.User=//p' | head -1)"
   tp_is_principal "$_ps_user" || return 1
   tp_is_principal_group "$_ps_user-grp" || return 1
@@ -1017,7 +1022,7 @@ LINES
   [ -n "$_ps_rwtmp" ] || { printf 'tp-host: php unit: ReadWritePaths= lacks the owner tmp/\n' >&2; return 1; }
   [ "$_ps_mode" != "lsphp" ] || [ -n "$_ps_phprc" ] ||
     { printf 'tp-host: php unit: lsphp needs Environment=PHPRC=<its php.ini>\n' >&2; return 1; }
-  _ps_need="User Group Slice NoNewPrivileges CapabilityBoundingSet AmbientCapabilities ProtectSystem BindPaths ExecStart StandardOutput StandardError"
+  _ps_need="User Group Slice NoNewPrivileges CapabilityBoundingSet AmbientCapabilities ProtectSystem BindPaths TemporaryFileSystem BindReadOnlyPaths ExecStart StandardOutput StandardError"
   case "$_ps_mode" in
     fpm) _ps_need="$_ps_need Type RuntimeDirectory RuntimeDirectoryMode" ;;
     *) _ps_need="$_ps_need StandardInput" ;;
@@ -1288,7 +1293,10 @@ tp_php_install() {
 
 # php-test <siteId>: the site's PHP binary checks its own config, as the site's
 # owner. Mode, series, owner and config paths come from the installed unit
-# (re-checked here), never from the caller.
+# (re-checked here), never from the caller. The owner cannot traverse the
+# daemon's config tree outside its unit, so root opens the config files
+# (verified, no symlink) and the binary reads them through /proc/self/fd —
+# which checks the file's own mode, root:<owner>-grp 0640.
 tp_verb_php_test() {
   [ $# -eq 1 ] || tp_die "php-test: only php-test <siteId>"
   tp_php_site_id_ok "$1" || tp_die "php-test: refusing site id $1"
@@ -1298,36 +1306,23 @@ tp_verb_php_test() {
   exec 3<&-
   tp_php_service_ok "$TP_STAGE/unit" "$1" ||
     tp_die "php-test: turbopanel-php-$1.service is outside the allowed shape"
-  _pt_uid="$(tp_uid_of "$_ps_user")"
-  _pt_gid="$(tp_gid_of_group "$_ps_user-grp")"
   _pt_cfg="$R_CONFIG/php/sites/$1"
+  if [ "$_ps_mode" = "fpm" ]; then
+    tp_open_verified "$_pt_cfg/php-fpm.conf" || tp_die "php-test: no $_pt_cfg/php-fpm.conf"
+    exec 4<&3 3<&-
+  fi
+  tp_open_verified "$_pt_cfg/php.ini" || tp_die "php-test: no $_pt_cfg/php.ini"
   _pt_bin="${_ps_exec%% *}"
-  set -- timeout 30 setpriv --reuid="$_pt_uid" --regid="$_pt_gid" --clear-groups \
-    --no-new-privs -- env -i PATH=/usr/bin:/bin
+  set -- timeout 30 setpriv --reuid="$(tp_uid_of "$_ps_user")" \
+    --regid="$(tp_gid_of_group "$_ps_user-grp")" --clear-groups --no-new-privs -- \
+    env -i PATH=/usr/bin:/bin
   case "$_ps_mode" in
-    fpm) set -- "$@" "$_pt_bin" --test --fpm-config "$_pt_cfg/php-fpm.conf" -c "$_pt_cfg/php.ini" ;;
-    lsphp) set -- "$@" "PHPRC=$_pt_cfg/php.ini" "$_pt_bin" -v ;;
-    *) set -- "$@" "$_pt_bin" -c "$_pt_cfg/php.ini" -v ;;
+    fpm) set -- "$@" "$_pt_bin" --test --fpm-config /proc/self/fd/4 -c /proc/self/fd/3 ;;
+    lsphp) set -- "$@" PHPRC=/proc/self/fd/3 "$_pt_bin" -v ;;
+    *) set -- "$@" "$_pt_bin" -c /proc/self/fd/3 -v ;;
   esac
   cd /
-  tp_php_test_run "$@"
-}
-
-# Run the config test; besides its exit status, a startup diagnostic PHP prints
-# but does not fail on (an ini syntax error, a missing extension) fails it.
-tp_php_test_run() {
-  if [ -n "$TP_TEST" ]; then
-    tp_run "$@"
-    exit 0
-  fi
-  _pr_rc=0
-  _pr_out="$("$@" 2>&1)" || _pr_rc=$?
-  printf '%s\n' "$_pr_out"
-  [ "$_pr_rc" -eq 0 ] || exit "$_pr_rc"
-  case "$_pr_out" in
-    *"PHP Warning"*|*"PHP Fatal"*|*"PHP Parse"*|*"PHP:  "*|*"ERROR: "*) exit 1 ;;
-  esac
-  exit 0
+  tp_exec "$@"
 }
 
 # php-site-register <siteId> <user> lsphp-attached <series> <children>: the

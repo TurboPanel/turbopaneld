@@ -1199,6 +1199,8 @@ function phpService(host: Host, mode: PhpMode): string {
     "ProtectHome=yes",
     "PrivateDevices=yes",
     `BindPaths=${home}/tmp:/tmp`,
+    `TemporaryFileSystem=${host.path("etc/turbopanel")}:ro`,
+    `BindReadOnlyPaths=${phpConfDir(host)}`,
     `ReadWritePaths=${home}/tmp ${home}/sites/${PHP_SITE}/shared`,
     "StandardOutput=journal",
     "StandardError=journal",
@@ -1328,6 +1330,53 @@ test("per-site PHP services: a hostile corpus is refused in every mode", async (
       ],
       ["the root on /tmp", line("BindPaths=", "BindPaths=/:/tmp")],
       ["no BindPaths", line("BindPaths=", null)],
+      ["no tmpfs over the config tree", line("TemporaryFileSystem=", null)],
+      [
+        "a writable tmpfs",
+        line(
+          "TemporaryFileSystem=",
+          `TemporaryFileSystem=${host.path("etc/turbopanel")}`,
+        ),
+      ],
+      [
+        "a tmpfs over the root",
+        line("TemporaryFileSystem=", "TemporaryFileSystem=/:ro"),
+      ],
+      [
+        "a tmpfs over the homes",
+        line(
+          "TemporaryFileSystem=",
+          `TemporaryFileSystem=${host.path("srv/users")}:ro`,
+        ),
+      ],
+      ["a second tmpfs", add("Service", "TemporaryFileSystem=/var:ro")],
+      ["no config bind", line("BindReadOnlyPaths=", null)],
+      [
+        "another site's config bound",
+        line("BindReadOnlyPaths=", `BindReadOnlyPaths=${otherCfg}`),
+      ],
+      [
+        "the whole config tree bound",
+        line(
+          "BindReadOnlyPaths=",
+          `BindReadOnlyPaths=${host.path("etc/turbopanel")}`,
+        ),
+      ],
+      [
+        "/etc/shadow bound",
+        line("BindReadOnlyPaths=", "BindReadOnlyPaths=/etc/shadow"),
+      ],
+      [
+        "a remapped config bind",
+        line(
+          "BindReadOnlyPaths=",
+          `BindReadOnlyPaths=${phpConfDir(host)}:/srv`,
+        ),
+      ],
+      [
+        "a second read-only bind",
+        add("Service", "BindReadOnlyPaths=/etc/shadow"),
+      ],
       ["a second BindPaths", add("Service", "BindPaths=/etc:/srv/etc")],
       ["ProtectSystem=full", line("ProtectSystem=", "ProtectSystem=full")],
       ["no ProtectSystem", line("ProtectSystem=", null)],
@@ -1470,6 +1519,8 @@ test("per-site PHP services: a hostile corpus is refused in every mode", async (
     };
     for (const mode of ["fastcgi", "fpm", "lsphp"] as const) {
       const base = phpService(host, mode);
+      // The corpus means something only while the pinned shape itself passes.
+      assertEquals((await installUnit(host, phpServiceName, base)).code, 0);
       for (const [label, mutate] of [...common, ...perMode[mode]]) {
         const content = mutate(base);
         assertEquals(
@@ -1584,6 +1635,7 @@ test("per-site PHP sockets: a hostile corpus is refused", async () => {
       ],
     ];
     const base = phpSocket();
+    assertEquals((await installUnit(host, phpSocketName, base)).code, 0);
     for (const [label, mutate] of corpus) {
       const content = mutate(base);
       assertEquals(content === base, false, `${label} changed nothing`);
@@ -1918,14 +1970,17 @@ test("php-test runs the installed unit's binary on its own config, as the owner"
       "EXEC [timeout] [30] [setpriv] [--reuid=15001] [--regid=15001] [--clear-groups] " +
       "[--no-new-privs] [--] [env] [-i] [PATH=/usr/bin:/bin]";
     const want: Record<PhpMode, string> = {
-      fastcgi: `${prefix} [/usr/bin/php-cgi8.4] [-c] [${cfg}/php.ini] [-v]`,
+      fastcgi: `${prefix} [/usr/bin/php-cgi8.4] [-c] [/proc/self/fd/3] [-v]`,
       fpm:
-        `${prefix} [/usr/sbin/php-fpm8.4] [--test] [--fpm-config] [${cfg}/php-fpm.conf] [-c] [${cfg}/php.ini]`,
-      lsphp: `${prefix} [PHPRC=${cfg}/php.ini] [${
+        `${prefix} [/usr/sbin/php-fpm8.4] [--test] [--fpm-config] [/proc/self/fd/4] [-c] [/proc/self/fd/3]`,
+      lsphp: `${prefix} [PHPRC=/proc/self/fd/3] [${
         phpExec(host, "lsphp")
       }] [-v]`,
     };
     await refused(host, ["php-test", PHP_SITE]);
+    await Deno.mkdir(cfg);
+    await Deno.writeTextFile(`${cfg}/php.ini`, PHP_INI);
+    await Deno.writeTextFile(`${cfg}/php-fpm.conf`, phpFpmConf(host));
     for (const mode of ["fastcgi", "fpm", "lsphp"] as const) {
       assertEquals(
         (await installUnit(host, phpServiceName, phpService(host, mode))).code,
@@ -1935,6 +1990,10 @@ test("php-test runs the installed unit's binary on its own config, as the owner"
       assertEquals(result.code, 0, result.stderr);
       assertEquals(result.stdout.trim(), want[mode]);
     }
+    // A config file that is a symlink is not opened for the test.
+    await Deno.remove(`${cfg}/php.ini`);
+    await Deno.symlink(host.path("outside/secret"), `${cfg}/php.ini`);
+    await refused(host, ["php-test", PHP_SITE]);
     const unit = host.path(`etc/systemd/system/${phpServiceName}`);
     // A unit changed behind tp-host's back is checked again, not trusted.
     await Deno.writeTextFile(
