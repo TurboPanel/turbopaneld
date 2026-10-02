@@ -2,8 +2,11 @@
 Description=TurboPanel daemon
 {# Inline expressions, never an if/endif block tag at the end of a line: Ansible
    renders with trim_blocks, which eats the newline after a block tag and ran
-   After=, Wants= and OnFailure= together on one line on every host. #}
-After=network-online.target{{ ' turbopanel-instance.service' if (turbopanel_after_instance_service | bool) else '' }}
+   After=, Wants= and OnFailure= together on one line on every host.
+   docker.service is ordering only (After=, never Wants=): at shutdown the
+   daemon stops before Docker kills the engine containers, so the managed
+   Postgres probe never watches a host shutdown as a dead primary. #}
+After=network-online.target docker.service{{ ' turbopanel-instance.service' if (turbopanel_after_instance_service | bool) else '' }}
 Wants=network-online.target{{ ' turbopanel-instance.service' if (turbopanel_after_instance_service | bool) else '' }}
 OnFailure=turbopaneld-update-guard.service
 StartLimitIntervalSec=300
