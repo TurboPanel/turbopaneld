@@ -691,6 +691,10 @@ const SITES: CallSite[] = [
     argv: ["test", "-e", `${SITE}/shared`],
     setup: dir(`${SITE}/shared`),
   }),
+  tpHost('src/deploy/release/promote.ts|["-n","test","-d",target]', {
+    argv: ["test", "-d", `${RELEASE}/public`],
+    setup: dir(`${RELEASE}/public`),
+  }),
   tpHost('src/deploy/release/promote.ts|["-n","rm","-rf","--",linkPath]', {
     argv: ["rm", "-rf", "--", `${RELEASE}/storage`],
     setup: dir(`${RELEASE}/storage`),

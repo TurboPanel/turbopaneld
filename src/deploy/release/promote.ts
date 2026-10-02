@@ -480,15 +480,17 @@ export async function readCurrentReleaseId(
 }
 
 /**
- * Whether `relative` exists inside the release `current` resolves to, for a
- * caller the principal's home keeps out.
+ * Whether `relative` is a real directory inside the release `current`
+ * resolves to, for a caller the principal's home keeps out.
  *
  * Never asked through `current` itself: tp-host refuses any path with a
  * symlink component, so the link is resolved with its existing `readlink`
- * call and the presence check names `releases/<id>/<relative>` directly. Only
- * presence is answered — nothing in the principal's tree is read.
+ * call and the check names `releases/<id>/<relative>` directly. A symlink as
+ * the last component is "no" (`test -d` there refuses it), so a link a build
+ * shipped cannot stand in for the document root. Only the answer comes back —
+ * nothing in the principal's tree is read.
  */
-export async function currentReleasePathExists(
+export async function currentReleaseDirExists(
   paths: Pick<ReleasePaths, "currentLink" | "releasesDir">,
   relative: string,
   runFn: RunFn = runPrivileged,
@@ -496,7 +498,12 @@ export async function currentReleasePathExists(
   const releaseId = await readCurrentReleaseId(paths, runFn);
   if (releaseId === null) return false;
   const releaseDir = join(paths.releasesDir, assertSafeReleaseId(releaseId));
-  return await releasePathExists(join(releaseDir, relative), runFn);
+  const target = join(releaseDir, relative);
+  const result = await runFn(
+    "sudo",
+    hostSudoArgs(["-n", "test", "-d", target]),
+  );
+  return result.success;
 }
 
 /**
