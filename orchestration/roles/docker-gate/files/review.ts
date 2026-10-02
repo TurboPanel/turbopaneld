@@ -12,11 +12,12 @@
 
 import {
   APPROVAL_LABEL,
+  approvalBodyDigest,
   type ApprovalResult,
   splitApproved,
   verifyApproval,
 } from "./approval.ts";
-import { fetchContainerLabels } from "./inspect.ts";
+import { fetchLabels, type InspectKind } from "./inspect.ts";
 import {
   evaluateDetailed,
   type RequestFacts,
@@ -26,6 +27,7 @@ import {
 import {
   LABEL_COMPOSE_PROJECT,
   labelsOf,
+  ownedObject,
   ownedTarget,
   ownerOf,
 } from "./platform.ts";
@@ -102,6 +104,7 @@ function logApproval(
 
 /** Findings left after the create's signed approval (if it carries one). */
 async function applyApproval(
+  facts: RequestFacts,
   labels: Record<string, string>,
   violations: Violation[],
   deps: ReviewDeps,
@@ -112,6 +115,7 @@ async function applyApproval(
     token,
     deps.approvalKeys ?? [],
     labels[LABEL_COMPOSE_PROJECT] ?? "",
+    await approvalBodyDigest(facts.body),
     (deps.nowSec ?? defaultNowSec)(),
   );
   if (!result.ok) {
@@ -139,18 +143,35 @@ async function createFindings(
   const withOwner = owner === "unlabeled"
     ? [...found, { rule: "unlabeled-create" }]
     : found;
-  return await applyApproval(labels, withOwner, deps);
+  return await applyApproval(facts, labels, withOwner, deps);
+}
+
+/** The object a request acts on, when it must be one the platform stamped. */
+function ownedSubject(
+  facts: RequestFacts,
+): { kind: InspectKind; name: string } | undefined {
+  const path = routePath(facts.path);
+  const container = ownedTarget(facts.method, path);
+  if (container !== undefined) return { kind: "container", name: container };
+  return ownedObject(facts.method, path);
 }
 
 async function unownedFinding(
   facts: RequestFacts,
   deps: ReviewDeps,
 ): Promise<Violation[]> {
-  const target = ownedTarget(facts.method, routePath(facts.path));
-  if (target === undefined) return [];
-  const labels = await fetchContainerLabels(deps.connectUpstream, target);
+  const subject = ownedSubject(facts);
+  if (subject === undefined) return [];
+  const labels = await fetchLabels(
+    deps.connectUpstream,
+    subject.kind,
+    subject.name,
+  );
   if (labels === undefined || ownerOf(labels) !== "unlabeled") return [];
-  return [{ rule: "unowned-container", detail: target.slice(0, 64) }];
+  return [{
+    rule: `unowned-${subject.kind}`,
+    detail: subject.name.slice(0, 64),
+  }];
 }
 
 /** Judge one request: findings, allowances, approval, ownership; log and count. */

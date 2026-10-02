@@ -39,6 +39,9 @@ export async function generateKeys(): Promise<TestKeys> {
   };
 }
 
+/** A well-formed body digest for tests that do not care which body it binds. */
+export const TEST_BODY_DIGEST = "A".repeat(43);
+
 export function payloadFor(
   nowSec: number,
   patch: Partial<ApprovalPayload> = {},
@@ -47,6 +50,7 @@ export function payloadFor(
     deployId: "deploy-1",
     project: "tenantapp",
     composeDigest: "sha256:0000",
+    bodyDigest: TEST_BODY_DIGEST,
     features: ["privileged"],
     iat: nowSec,
     exp: nowSec + 300,

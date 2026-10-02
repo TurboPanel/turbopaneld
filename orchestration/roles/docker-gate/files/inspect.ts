@@ -39,22 +39,38 @@ class LimitedSink implements ByteSink {
   }
 }
 
-function labelsFromInspect(bytes: Uint8Array): Labels | undefined {
+/** What the gate can look up: where the object lives and where its labels are. */
+export type InspectKind = "container" | "volume" | "network";
+
+function inspectPath(kind: InspectKind, target: string): string {
+  const name = encodeURIComponent(target);
+  if (kind === "container") return `/containers/${name}/json`;
+  return kind === "volume" ? `/volumes/${name}` : `/networks/${name}`;
+}
+
+function labelsFromInspect(
+  bytes: Uint8Array,
+  kind: InspectKind,
+): Labels | undefined {
   try {
     const doc = JSON.parse(new TextDecoder().decode(bytes));
-    return labelsOf(doc?.Config?.Labels);
+    return labelsOf(kind === "container" ? doc?.Config?.Labels : doc?.Labels);
   } catch {
     return undefined;
   }
 }
 
-async function readInspect(conn: GateConn, target: string) {
+async function readInspect(
+  conn: GateConn,
+  kind: InspectKind,
+  target: string,
+) {
   await writeAll(
     conn,
     encodeText(
-      `GET /containers/${
-        encodeURIComponent(target)
-      }/json HTTP/1.1\r\nHost: docker\r\nConnection: close\r\n\r\n`,
+      `GET ${
+        inspectPath(kind, target)
+      } HTTP/1.1\r\nHost: docker\r\nConnection: close\r\n\r\n`,
     ),
   );
   const reader = new BufferedReader(conn);
@@ -67,16 +83,25 @@ async function readInspect(conn: GateConn, target: string) {
     // The engine answers inspect chunked: take the decoded payload.
     const capture = { chunks: [] as Uint8Array[], maxBytes: MAX_INSPECT_BYTES };
     await relayChunked(reader, null, capture);
-    return labelsFromInspect(concatBytes(capture.chunks));
+    return labelsFromInspect(concatBytes(capture.chunks), kind);
   }
   const sink = new LimitedSink();
   await relayBody(reader, framing, sink);
-  return labelsFromInspect(concatBytes(sink.parts));
+  return labelsFromInspect(concatBytes(sink.parts), kind);
 }
 
 /** Labels of a container, or `undefined` when it cannot be told (gone, error). */
-export async function fetchContainerLabels(
+export function fetchContainerLabels(
   connect: () => Promise<GateConn>,
+  target: string,
+): Promise<Labels | undefined> {
+  return fetchLabels(connect, "container", target);
+}
+
+/** Labels of a container, volume or network; `undefined` when it cannot be told. */
+export async function fetchLabels(
+  connect: () => Promise<GateConn>,
+  kind: InspectKind,
   target: string,
 ): Promise<Labels | undefined> {
   let conn: GateConn;
@@ -86,7 +111,7 @@ export async function fetchContainerLabels(
     return undefined;
   }
   try {
-    return await readInspect(conn, target);
+    return await readInspect(conn, kind, target);
   } catch {
     return undefined;
   } finally {

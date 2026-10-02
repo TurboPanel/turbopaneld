@@ -15,6 +15,7 @@ import {
   LABEL_MANAGED_ENGINE,
   LABEL_ROLE,
   LABEL_SYSTEM_COMPONENT,
+  ownedObject,
   ownedTarget,
   ownerOf,
   PLATFORM_COMPONENTS,
@@ -131,6 +132,45 @@ test("ownedTarget names the container of the routes that must act on owned ones"
   assertEquals(ownedTarget("POST", "/containers/create"), undefined);
   assertEquals(ownedTarget("GET", "/containers/abc/json"), undefined);
   assertEquals(ownedTarget("GET", "/containers/json"), undefined);
+  for (const verb of ["wait", "resize"]) {
+    assertEquals(ownedTarget("POST", `/containers/abc/${verb}`), "abc");
+  }
+  assertEquals(ownedTarget("GET", "/containers/abc/export"), "abc");
+  // Polled reads would double the engine traffic for no ownership value.
+  for (const verb of ["stats", "logs", "top", "changes"]) {
+    assertEquals(ownedTarget("GET", `/containers/abc/${verb}`), undefined);
+  }
+});
+
+test("ownedObject names the volume or network a request removes or attaches to", () => {
+  assertEquals(ownedObject("DELETE", "/volumes/v1"), {
+    kind: "volume",
+    name: "v1",
+  });
+  assertEquals(ownedObject("DELETE", "/networks/n1"), {
+    kind: "network",
+    name: "n1",
+  });
+  assertEquals(ownedObject("POST", "/networks/n1/connect"), {
+    kind: "network",
+    name: "n1",
+  });
+  assertEquals(ownedObject("POST", "/networks/n1/disconnect"), {
+    kind: "network",
+    name: "n1",
+  });
+  for (
+    const [method, path] of [
+      ["POST", "/networks/create"],
+      ["POST", "/networks/prune"],
+      ["POST", "/volumes/prune"],
+      ["GET", "/volumes/v1"],
+      ["GET", "/networks/n1"],
+      ["DELETE", "/images/x"],
+    ]
+  ) {
+    assertEquals(ownedObject(method, path), undefined, `${method} ${path}`);
+  }
 });
 
 type Service = Record<string, unknown>;

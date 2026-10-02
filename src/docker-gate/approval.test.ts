@@ -2,6 +2,8 @@ import { assert, assertEquals, assertRejects } from "@std/assert";
 import {
   APPROVABLE_RULES,
   APPROVAL_CLOCK_SKEW_SEC,
+  approvalBodyDigest,
+  canonicalJson,
   importApprovalKeys,
   MAX_APPROVAL_TTL_SEC,
   splitApproved,
@@ -11,6 +13,7 @@ import {
   generateKeys,
   payloadFor,
   signToken,
+  TEST_BODY_DIGEST,
 } from "../testing/docker-gate-approval.ts";
 
 /**
@@ -37,7 +40,13 @@ function reason(result: Awaited<ReturnType<typeof verifyApproval>>): string {
 test("a token signed by the trusted key verifies and carries its claims", async () => {
   const { keys, trusted } = await setup();
   const token = await signToken(keys, payloadFor(NOW));
-  const result = await verifyApproval(token, trusted, PROJECT, NOW);
+  const result = await verifyApproval(
+    token,
+    trusted,
+    PROJECT,
+    TEST_BODY_DIGEST,
+    NOW,
+  );
   assert(result.ok);
   assertEquals(result.payload.deployId, "deploy-1");
   assertEquals(result.payload.features, ["privileged"]);
@@ -48,7 +57,9 @@ test("a key the gate does not trust, a tampered payload and a stripped signature
   const other = await generateKeys();
   const forged = await signToken(other, payloadFor(NOW));
   assertEquals(
-    reason(await verifyApproval(forged, trusted, PROJECT, NOW)),
+    reason(
+      await verifyApproval(forged, trusted, PROJECT, TEST_BODY_DIGEST, NOW),
+    ),
     "bad-signature",
   );
   const good = await signToken(keys, payloadFor(NOW));
@@ -59,7 +70,9 @@ test("a key the gate does not trust, a tampered payload and a stripped signature
   );
   const swapped = `${version}.${widened.split(".")[1]}.${signature}`;
   assertEquals(
-    reason(await verifyApproval(swapped, trusted, PROJECT, NOW)),
+    reason(
+      await verifyApproval(swapped, trusted, PROJECT, TEST_BODY_DIGEST, NOW),
+    ),
     "bad-signature",
   );
   assertEquals(
@@ -68,6 +81,7 @@ test("a key the gate does not trust, a tampered payload and a stripped signature
         `${version}.${good.split(".")[1]}.`,
         trusted,
         PROJECT,
+        TEST_BODY_DIGEST,
         NOW,
       ),
     ),
@@ -81,7 +95,9 @@ test("a signature made for another purpose does not verify (domain separation)",
     domain: "something-else\n",
   });
   assertEquals(
-    reason(await verifyApproval(token, trusted, PROJECT, NOW)),
+    reason(
+      await verifyApproval(token, trusted, PROJECT, TEST_BODY_DIGEST, NOW),
+    ),
     "bad-signature",
   );
 });
@@ -98,6 +114,7 @@ test("expiry, clock skew, lifetime cap and project binding are enforced", async 
         await signToken(keys, payloadFor(NOW, patch)),
         trusted,
         project,
+        TEST_BODY_DIGEST,
         now,
       ),
     );
@@ -120,13 +137,15 @@ test("expiry, clock skew, lifetime cap and project binding are enforced", async 
 test("malformed tokens and payloads are refused without throwing", async () => {
   const { keys, trusted } = await setup();
   const check = async (token: string) =>
-    reason(await verifyApproval(token, trusted, PROJECT, NOW));
+    reason(
+      await verifyApproval(token, trusted, PROJECT, TEST_BODY_DIGEST, NOW),
+    );
   assertEquals(await check(""), "malformed");
-  assertEquals(await check("v1.only-two"), "malformed");
-  assertEquals(await check("v1.a.b.c"), "malformed");
-  assertEquals(await check("v2.AAAA.AAAA"), "unsupported-version");
-  assertEquals(await check("v1.not base64!.AAAA"), "malformed");
-  assertEquals(await check(`v1.${"A".repeat(5000)}.AAAA`), "malformed");
+  assertEquals(await check("v2.only-two"), "malformed");
+  assertEquals(await check("v2.a.b.c"), "malformed");
+  assertEquals(await check("v3.AAAA.AAAA"), "unsupported-version");
+  assertEquals(await check("v2.not base64!.AAAA"), "malformed");
+  assertEquals(await check(`v2.${"A".repeat(5000)}.AAAA`), "malformed");
   assertEquals(await check(await signToken(keys, "not json")), "malformed");
   assertEquals(await check(await signToken(keys, "[1,2]")), "malformed");
   assertEquals(
@@ -153,7 +172,7 @@ test("with no trusted keys every token is refused", async () => {
   const keys = await generateKeys();
   const token = await signToken(keys, payloadFor(NOW));
   assertEquals(
-    reason(await verifyApproval(token, [], PROJECT, NOW)),
+    reason(await verifyApproval(token, [], PROJECT, TEST_BODY_DIGEST, NOW)),
     "approvals-off",
   );
 });
@@ -164,7 +183,9 @@ test("a rotation overlap trusts both keys", async () => {
   assertEquals(trusted.length, 2);
   for (const keys of [a, b]) {
     const token = await signToken(keys, payloadFor(NOW));
-    assert((await verifyApproval(token, trusted, PROJECT, NOW)).ok);
+    assert(
+      (await verifyApproval(token, trusted, PROJECT, TEST_BODY_DIGEST, NOW)).ok,
+    );
   }
 });
 
@@ -184,6 +205,7 @@ test("an approval relaxes only the rules its features name", async () => {
     ),
     trusted,
     PROJECT,
+    TEST_BODY_DIGEST,
     NOW,
   );
   assert(result.ok);
@@ -221,4 +243,70 @@ test("the approvable set never includes the unconditional rules", () => {
   ) {
     assertEquals(APPROVABLE_RULES[rule], undefined, rule);
   }
+});
+
+test("a token binds one create body: any other body, or a v1 token, is refused", async () => {
+  const { keys, trusted } = await setup();
+  const body = {
+    Image: "alpine",
+    Labels: { "com.docker.compose.project": PROJECT },
+    HostConfig: { Privileged: true },
+  };
+  const digest = await approvalBodyDigest(body);
+  const token = await signToken(
+    keys,
+    payloadFor(NOW, { bodyDigest: digest }),
+  );
+  assert((await verifyApproval(token, trusted, PROJECT, digest, NOW)).ok);
+  // The token rides in the body's own label; the digest ignores it.
+  const withToken = structuredClone(body);
+  Object.assign(withToken.Labels, { "com.turbopanel.approval": token });
+  assertEquals(await approvalBodyDigest(withToken), digest);
+  for (
+    const other of [
+      { ...body, Image: "busybox" },
+      { ...body, HostConfig: { Privileged: true, PidMode: "host" } },
+      { ...body, Labels: { ...body.Labels, extra: "x" } },
+    ]
+  ) {
+    assertEquals(
+      reason(
+        await verifyApproval(
+          token,
+          trusted,
+          PROJECT,
+          await approvalBodyDigest(other),
+          NOW,
+        ),
+      ),
+      "wrong-body",
+    );
+  }
+  const v1 = await signToken(keys, payloadFor(NOW, { bodyDigest: digest }), {
+    version: "v1",
+  });
+  assertEquals(
+    reason(await verifyApproval(v1, trusted, PROJECT, digest, NOW)),
+    "unsupported-version",
+  );
+  // A payload with no (or a malformed) digest is not a token at all.
+  for (const bodyDigest of [undefined, "short", 7]) {
+    const bad = await signToken(
+      keys,
+      JSON.stringify({ ...payloadFor(NOW), bodyDigest }),
+    );
+    assertEquals(
+      reason(await verifyApproval(bad, trusted, PROJECT, digest, NOW)),
+      "malformed",
+    );
+  }
+});
+
+test("canonical JSON is RFC 8785: sorted keys, no whitespace, nested", () => {
+  assertEquals(
+    canonicalJson({ b: [1, { z: null, a: "x\n" }], a: true, c: 1.5, d: -0 }),
+    '{"a":true,"b":[1,{"a":"x\\n","z":null}],"c":1.5,"d":0}',
+  );
+  // Key order of the input never changes the digest.
+  assertEquals(canonicalJson({ a: 1, b: 2 }), canonicalJson({ b: 2, a: 1 }));
 });

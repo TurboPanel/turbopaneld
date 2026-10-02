@@ -22,7 +22,10 @@ import {
   startGate,
 } from "../../orchestration/roles/docker-gate/files/main.ts";
 import type { LogRecord } from "../../orchestration/roles/docker-gate/files/proxy.ts";
-import { APPROVAL_LABEL } from "../../orchestration/roles/docker-gate/files/approval.ts";
+import {
+  APPROVAL_LABEL,
+  approvalBodyDigest,
+} from "../../orchestration/roles/docker-gate/files/approval.ts";
 import {
   generateKeys,
   payloadFor,
@@ -706,6 +709,9 @@ const privilegedCreate = (token: string, project = "tenantapp") => ({
   HostConfig: { Privileged: true, Binds: ["/var/run/docker.sock:/s"] },
 });
 
+/** The digest an approval for `privilegedCreate` must carry (its own token excluded). */
+const privilegedDigest = () => approvalBodyDigest(privilegedCreate(""));
+
 const approvalLogs = (logs: LogRecord[]) =>
   logs.filter((l) => l.event === "docker-gate.approval");
 
@@ -717,7 +723,10 @@ test({
     withApprovals(async (h, keys) => {
       const token = await signToken(
         keys,
-        payloadFor(NOW, { features: ["privileged"] }),
+        payloadFor(NOW, {
+          features: ["privileged"],
+          bodyDigest: await privilegedDigest(),
+        }),
       );
       await sendCreate(h, privilegedCreate(token));
       // `privileged` is covered; the socket mount is a different feature.
@@ -741,19 +750,28 @@ test({
   fn: () =>
     withApprovals(async (h, keys) => {
       const features = ["privileged", "docker-socket"];
+      const bodyDigest = await privilegedDigest();
       const wrongProject = await signToken(
         keys,
-        payloadFor(NOW, { features, project: "otherapp" }),
+        payloadFor(NOW, { features, bodyDigest, project: "otherapp" }),
       );
       const expired = await signToken(
         keys,
-        payloadFor(NOW - 1000, { features, exp: NOW - 10 }),
+        payloadFor(NOW - 1000, { features, bodyDigest, exp: NOW - 10 }),
       );
       const forged = await signToken(
         await generateKeys(),
-        payloadFor(NOW, { features }),
+        payloadFor(NOW, { features, bodyDigest }),
       );
-      for (const token of [wrongProject, expired, forged]) {
+      // Valid for another body: replayed on this create it covers nothing.
+      const otherBody = await signToken(
+        keys,
+        payloadFor(NOW, {
+          features,
+          bodyDigest: await approvalBodyDigest({ Image: "busybox" }),
+        }),
+      );
+      for (const token of [wrongProject, expired, forged, otherBody]) {
         h.logs.length = 0;
         await sendCreate(h, privilegedCreate(token));
         assertEquals(wouldDeny(h.logs), ["privileged", "bind-docker-socket"]);
@@ -761,6 +779,7 @@ test({
       assertEquals(h.gate.stats.snapshot().approvals, {
         "rejected:bad-signature": 1,
         "rejected:expired": 1,
+        "rejected:wrong-body": 1,
         "rejected:wrong-project": 1,
       });
       assertEquals(h.gate.stats.snapshot().approvedRules, {});
@@ -850,15 +869,24 @@ function chunked(doc: string): string {
 function scriptEngine(
   h: Harness,
   containers: Record<string, InspectAnswer>,
+  objects: Record<string, InspectAnswer> = {},
 ): string[] {
   const lines: string[] = [];
   h.engine(async (conn) => {
     const { head } = await readRequest(conn);
     const line = head.split("\r\n")[0];
     const match = /^GET \/containers\/([^/]+)\/json /.exec(line);
-    if (match) {
-      const found = containers[decodeURIComponent(match[1])] ?? { status: 404 };
-      const doc = JSON.stringify({ Config: { Labels: found.labels ?? null } });
+    const object = /^GET \/(volumes|networks)\/([^/ ]+) /.exec(line);
+    if (match || object) {
+      const found = match
+        ? containers[decodeURIComponent(match[1])] ?? { status: 404 }
+        : objects[`${object![1]}/${decodeURIComponent(object![2])}`] ??
+          { status: 404 };
+      const doc = JSON.stringify(
+        match
+          ? { Config: { Labels: found.labels ?? null } }
+          : { Labels: found.labels ?? null },
+      );
       await conn.write(
         encodeText(
           found.status === 200
@@ -911,6 +939,47 @@ e2e(
     );
     // Every action still reached the engine.
     assertEquals(relayed.length, 5);
+  },
+);
+
+async function del(h: Harness, path: string): Promise<void> {
+  const client = await h.connect();
+  await client.write(
+    encodeText(
+      `DELETE ${path} HTTP/1.1\r\nHost: d\r\nConnection: close\r\n\r\n`,
+    ),
+  );
+  await timeout(readUntilEof(client));
+}
+
+e2e(
+  "removing or attaching to a volume or network nothing owns is flagged; owned and unknown ones are not",
+  async (h) => {
+    const relayed = scriptEngine(h, {}, {
+      "volumes/human": { status: 200, labels: {} },
+      "volumes/tenant": {
+        status: 200,
+        labels: { "com.docker.compose.project": "app" },
+      },
+      "networks/human": { status: 200, labels: {} },
+      "networks/tenant": {
+        status: 200,
+        labels: { "com.docker.compose.project": "app" },
+      },
+    });
+    await del(h, "/v1.55/volumes/human");
+    await del(h, "/volumes/tenant");
+    await del(h, "/volumes/ghost");
+    await del(h, "/networks/human");
+    await del(h, "/networks/tenant");
+    await post(h, "/networks/human/connect", '{"Container":"c"}');
+    assertEquals(wouldDeny(h.logs), [
+      "unowned-volume",
+      "unowned-network",
+      "unowned-network",
+    ]);
+    // Every request still reached the engine.
+    assertEquals(relayed.length, 6);
   },
 );
 
