@@ -96,6 +96,19 @@ export async function removeStagedFile(path: string): Promise<void> {
 }
 
 /**
+ * Write `contents` to a daemon-private temp file that a privileged `install`
+ * then reads (tp-host reads the source as the calling account).
+ *
+ * Never beside the live path: the engine config dirs are `root:<engineGroup>`
+ * `0750`, which the daemon can neither enter nor write.
+ */
+async function writeStagingSource(contents: string): Promise<string> {
+  const tmp = await Deno.makeTempFile({ prefix: "tp-site-config-" });
+  await Deno.writeTextFile(tmp, contents, { mode: 0o600 });
+  return tmp;
+}
+
+/**
  * True when `configPath` already holds exactly the staged bytes.
  *
  * Compared through the privileged `run` seam rather than `Deno.readTextFile`:
@@ -174,8 +187,7 @@ export async function writeOwnedConfigFile(
   contents: string,
   group: string,
 ): Promise<boolean> {
-  const tmp = `${configPath}.tmp`;
-  await Deno.writeTextFile(tmp, contents, { mode: 0o640 });
+  const tmp = await writeStagingSource(contents);
   if (await ownedConfigFileMatches(run, tmp, configPath)) {
     await removeStagedFile(tmp);
     return false;
@@ -218,8 +230,7 @@ export async function stageOwnedConfigFile(
   contents: string,
   group: string,
 ): Promise<StagedConfigWrite | null> {
-  const tmp = `${configPath}.tmp`;
-  await Deno.writeTextFile(tmp, contents, { mode: 0o640 });
+  const tmp = await writeStagingSource(contents);
   if (await ownedConfigFileMatches(run, tmp, configPath)) {
     await removeStagedFile(tmp);
     return null;

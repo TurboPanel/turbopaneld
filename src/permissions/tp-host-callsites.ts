@@ -760,7 +760,7 @@ const SITES: CallSite[] = [
     },
   ),
   tpHost(
-    'src/deploy/site.ts|["-n","install","-d","-m","0750","-o","root","-g","tpols",path]',
+    'src/deploy/site.ts|["-n","install","-d","-m","0750","-o","root","-g",group,path]',
     {
       argv: [
         "install",
@@ -770,11 +770,16 @@ const SITES: CallSite[] = [
         "-o",
         "root",
         "-g",
-        "tpols",
-        `${CONF}/openlitespeed/vhosts/svc1`,
+        "tpnginx",
+        `${CONF}/nginx/sites`,
       ],
+      setup: dir(`${CONF}/nginx`),
     },
   ),
+  tpHost('src/deploy/site.ts|["-n","ls","-A","--",dir]', {
+    argv: ["ls", "-A", "--", `${CONF}/nginx/sites`],
+    setup: dir(`${CONF}/nginx/sites`),
+  }),
   tpHost('src/deploy/site.ts|["-n","rm","-f",path]', {
     argv: ["rm", "-f", `${CONF}/php/8.4/pool.d/svc1.conf`],
   }),
