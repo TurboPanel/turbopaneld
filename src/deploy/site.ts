@@ -59,11 +59,13 @@ import { isAllowedExtension } from "../runtime/registry.ts";
 import {
   principalHomePath,
   siteCurrentSymlink,
+  siteReleasesDir,
   siteRoot,
   siteSharedDir,
   siteWebrootDir,
 } from "../paths/layout.ts";
 import type { EnvironmentDeploySite } from "../contracts/commands-contracts.ts";
+import { currentReleasePathExists } from "./release/promote.ts";
 import {
   ensureDirectoryWithOwner,
   ensureEngineGroupMembership,
@@ -1438,6 +1440,37 @@ async function statOrNull(path: string): Promise<Deno.FileInfo | null> {
 }
 
 /**
+ * `stat` of a release-backed document root, `"present"` when the daemon may
+ * not traverse the principal's home to stat it, or `null` when it is absent.
+ *
+ * The escalated answer is presence only, through the release engine's own
+ * `readlink`/`test -e` calls: the principal owns that tree, so nothing in it
+ * is read as root, and `current` is resolved rather than traversed.
+ */
+async function releaseDocumentRootStat(
+  layout: LayoutPaths,
+  documentRoot: string,
+  site: SiteApplySpec,
+  release: SiteRelease,
+): Promise<Deno.FileInfo | "present" | null> {
+  try {
+    return await statOrNull(documentRoot);
+  } catch (err) {
+    if (!(err instanceof Deno.errors.PermissionDenied)) throw err;
+  }
+  const home = principalHomePath(layout, release.username);
+  const exists = await currentReleasePathExists(
+    {
+      currentLink: siteCurrentSymlink(home, release.serviceId),
+      releasesDir: siteReleasesDir(home, release.serviceId),
+    },
+    site.root,
+    run,
+  );
+  return exists ? "present" : null;
+}
+
+/**
  * Release-backed document roots are populated by the release engine and are
  * read-only by the time this runs — so this asserts rather than creates.
  *
@@ -1447,16 +1480,23 @@ async function statOrNull(path: string): Promise<Deno.FileInfo | null> {
  * ready" page over what the operator believes is their application.
  */
 async function assertReleaseDocumentRoot(
+  layout: LayoutPaths,
   documentRoot: string,
   site: SiteApplySpec,
+  release: SiteRelease,
 ): Promise<void> {
-  const stat = await statOrNull(documentRoot);
+  const stat = await releaseDocumentRootStat(
+    layout,
+    documentRoot,
+    site,
+    release,
+  );
   if (stat === null) {
     throw new Error(
       `site release document root missing for ${site.composeServiceName}: ${documentRoot} (no promoted release, or the build did not emit "${site.root}")`,
     );
   }
-  if (!stat.isDirectory) {
+  if (stat !== "present" && !stat.isDirectory) {
     throw new Error(
       `site release document root is not a directory for ${site.composeServiceName}: ${documentRoot}`,
     );
@@ -1560,23 +1600,26 @@ async function renderOpenLiteSpeedMainConfig(
   layout: LayoutPaths,
   sitesDir: string,
 ): Promise<string> {
-  const fragments: string[] = [];
-  try {
-    const names = [];
-    for await (const entry of Deno.readDir(sitesDir)) {
-      if (entry.isFile && entry.name.endsWith(".conf")) names.push(entry.name);
-    }
-    names.sort((a, b) => a.localeCompare(b));
-    // Independent reads; `Promise.all` keeps the sorted fragment order.
-    fragments.push(
-      ...await Promise.all(
-        names.map((name) => Deno.readTextFile(join(sitesDir, name))),
-      ),
-    );
-  } catch (err) {
-    if (!(err instanceof Deno.errors.NotFound)) throw err;
-  }
+  const names = (await listEngineConfigDir(sitesDir) ?? [])
+    .filter((name) => name.endsWith(".conf"))
+    .sort((a, b) => a.localeCompare(b));
+  // Independent reads; `Promise.all` keeps the sorted fragment order.
+  const fragments = await Promise.all(
+    names.map((name) => readEngineConfigFile(join(sitesDir, name))),
+  );
   return openlitespeedMainConfig(layout, fragments);
+}
+
+/**
+ * Contents of one root-owned engine config file, read through tp-host (the
+ * daemon is not in the engine's group). Only the daemon writes these files.
+ */
+async function readEngineConfigFile(path: string): Promise<string> {
+  const read = await run("sudo", hostSudoArgs(["-n", "cat", "--", path]));
+  if (!read.success) {
+    throw new Error(read.stderr || `Failed to read ${path}`);
+  }
+  return read.stdout;
 }
 
 function openlitespeedMainConfigPath(layout: LayoutPaths): string {
@@ -1617,14 +1660,6 @@ async function regenerateOpenLiteSpeedMainConfig(
 
 function stripConfSuffix(name: string): string {
   return name.endsWith(".conf") ? name.slice(0, -".conf".length) : name;
-}
-
-function isPrefixedConfFile(entry: Deno.DirEntry, prefix: string): boolean {
-  return (
-    entry.isFile &&
-    entry.name.startsWith(prefix) &&
-    entry.name.endsWith(".conf")
-  );
 }
 
 /**
@@ -1999,8 +2034,7 @@ async function ensureSiteConfigDirs(
   sitesDirs: SiteConfigDirs,
   phpSeries: readonly string[],
 ): Promise<void> {
-  // Engines whose site files are root-owned get their dir through tp-host;
-  // OpenLiteSpeed fragments are daemon-owned (no config group).
+  // Engines whose site files are root-owned get their dir through tp-host.
   await forEachSequential(SITE_ENGINE_ORDER, async (engine) => {
     if (!needs[engine]) return;
     const group = SITE_ENGINE_DRIVERS[engine].configGroup;
@@ -2584,7 +2618,7 @@ async function applyOneSite(
   let restartEngine: SiteApplySpec["engine"] | undefined;
   if (release) {
     // The release engine owns the tree; assert it, never create or seed it.
-    await assertReleaseDocumentRoot(documentRoot, site);
+    await assertReleaseDocumentRoot(layout, documentRoot, site, release);
     await writeReleaseHostingWebMetadata(layout, environmentId, site, release);
     if (await ensureEngineCanReadPrincipalTree(site, release.username)) {
       restartEngine = site.engine;
@@ -2885,26 +2919,19 @@ async function removeOpenLiteSpeedSites(
   const prefix = `tp-${environmentId}-`;
   const sitesDir = join(layout.configDir, "openlitespeed", "sites");
   const vhostsDir = openlitespeedVhostsDir(layout);
-  let removed = 0;
-
-  try {
-    for await (const entry of Deno.readDir(sitesDir)) {
-      if (!isPrefixedConfFile(entry, prefix)) continue;
-      const composeServiceName = stripConfSuffix(
-        entry.name.slice(prefix.length),
-      );
-      const olsName = openlitespeedSiteName(environmentId, composeServiceName);
-      await tryRemoveOpenLiteSpeedVhostDir(join(vhostsDir, olsName));
-      try {
-        await Deno.remove(join(sitesDir, entry.name));
-        removed += 1;
-      } catch (err) {
-        if (!(err instanceof Deno.errors.NotFound)) throw err;
-      }
-    }
-  } catch (err) {
-    if (!(err instanceof Deno.errors.NotFound)) throw err;
-  }
+  const fragments = (await listEngineConfigDir(sitesDir) ?? []).filter((
+    name,
+  ) => name.startsWith(prefix) && name.endsWith(".conf"));
+  await forEachSequential(fragments, async (name) => {
+    const composeServiceName = stripConfSuffix(name.slice(prefix.length));
+    const olsName = openlitespeedSiteName(environmentId, composeServiceName);
+    await tryRemoveOpenLiteSpeedVhostDir(join(vhostsDir, olsName));
+  });
+  const removed = await removePrefixedConfFiles(
+    sitesDir,
+    prefix,
+    "OpenLiteSpeed",
+  );
 
   if (removed > 0) {
     await regenerateOpenLiteSpeedMainConfig(layout, sitesDir);

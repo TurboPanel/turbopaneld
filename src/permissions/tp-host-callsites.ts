@@ -780,6 +780,10 @@ const SITES: CallSite[] = [
     argv: ["ls", "-A", "--", `${CONF}/nginx/sites`],
     setup: dir(`${CONF}/nginx/sites`),
   }),
+  tpHost('src/deploy/site.ts|["-n","cat","--",path]', {
+    argv: ["cat", "--", `${CONF}/openlitespeed/sites/tp-env1-www.conf`],
+    setup: file(`${CONF}/openlitespeed/sites/tp-env1-www.conf`),
+  }),
   tpHost('src/deploy/site.ts|["-n","rm","-f",path]', {
     argv: ["rm", "-f", `${CONF}/php/8.4/pool.d/svc1.conf`],
   }),
