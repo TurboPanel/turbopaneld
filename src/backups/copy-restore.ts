@@ -39,6 +39,7 @@ import {
 import { digestFileSha256 } from "../managed/backup.ts";
 import { withCopyTargetLock } from "../managed/target-lock.ts";
 import { type LayoutPaths, resolveLayout } from "../paths/layout.ts";
+import { directoryExists } from "../permissions/privileged-read.ts";
 import { sanitizeForLog } from "../util/logger.ts";
 import { mapSequential } from "../util/sequential.ts";
 import {
@@ -232,14 +233,6 @@ function restoreFailure(result: DockerCliResult): string {
   }`;
 }
 
-async function defaultDirectoryExists(path: string): Promise<boolean> {
-  try {
-    return (await Deno.stat(path)).isDirectory;
-  } catch {
-    return false;
-  }
-}
-
 /** Step 1: everything that can fail before a single container is stopped. */
 async function preflight(
   layout: LayoutPaths,
@@ -329,7 +322,9 @@ export async function handleStorageRestore(
   const { mount, artifactPath } = await preflight(layout, payload, {
     runDocker,
     digest: deps.digest ?? digestFileSha256,
-    directoryExists: deps.directoryExists ?? defaultDirectoryExists,
+    // A copy under a principal home the daemon cannot enter is checked
+    // through tp-host instead of reading as "not on this host".
+    directoryExists: deps.directoryExists ?? ((path) => directoryExists(path)),
   });
 
   const { stopped, notRestarted } = await withCopyTargetLock(
