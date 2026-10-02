@@ -55,6 +55,7 @@ export const CANONICAL_FIELDS: readonly string[] = [
   "Labels",
   "MaskedPaths",
   "Mounts",
+  "Name",
   "NetworkMode",
   "Options",
   "PidMode",
@@ -68,6 +69,7 @@ export const CANONICAL_FIELDS: readonly string[] = [
   "Type",
   "UTSMode",
   "UsernsMode",
+  "VolumeDriver",
   "VolumeOptions",
   "VolumesFrom",
 ];

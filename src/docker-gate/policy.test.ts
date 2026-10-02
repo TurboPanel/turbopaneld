@@ -420,7 +420,7 @@ test("volume create: drivers, bind devices and block devices", async () => {
       Name: "v",
       DriverOpts: { type: "nfs", o: "addr=10.0.0.5", device: ":/export" },
     }),
-    [],
+    [{ rule: "volume-mount-type", detail: "nfs" }],
   );
   assertEquals(ruleNames(await create("nope")), ["body-unparseable"]);
 });
@@ -674,5 +674,64 @@ test("only one /v<major>.<minor> prefix is canonical; every other prefix the eng
       }),
     ),
     ["path-version-prefix", "exec-privileged"],
+  );
+});
+
+test("volume driver and mount options: deny by default, tmpfs and a checked bind pass", async () => {
+  const create = (body: unknown) => verdict({ path: "/volumes/create", body });
+  const rules = async (opts: unknown) =>
+    ruleNames(await create({ Name: "v", DriverOpts: opts }));
+  assertEquals(await rules({}), []);
+  assertEquals(
+    await rules({ type: "tmpfs", device: "tmpfs", o: "size=1m" }),
+    [],
+  );
+  // rbind is a bind too: it must not skip the path check.
+  assertEquals(
+    await rules({ type: "none", o: "rbind", device: "/" }),
+    ["volume-bind-host-root"],
+  );
+  assertEquals(
+    await rules({ type: "none", o: "rw,rbind", device: "/etc" }),
+    ["volume-bind-forbidden-path"],
+  );
+  // Layered or remote filesystems read host paths without a `/` device.
+  assertEquals(
+    await rules({ type: "overlay", device: "overlay", o: "lowerdir=/etc" }),
+    ["volume-mount-type"],
+  );
+  assertEquals(await rules({ o: "bind" }), ["volume-mount-type"]);
+  assertEquals(await rules({ type: "none", o: "bind" }), ["volume-mount-type"]);
+});
+
+test("a container's VolumeDriver and a volume mount's DriverConfig.Name must be local", async () => {
+  assertEquals(await createVerdict({ VolumeDriver: "local" }), []);
+  assertEquals(await createVerdict({ VolumeDriver: "" }), []);
+  assertEquals(await createVerdict({ VolumeDriver: "rexray" }), [
+    { rule: "volume-driver", detail: "rexray" },
+  ]);
+  const mount = (Name: unknown, Options?: unknown) => ({
+    Type: "volume",
+    Source: "v",
+    Target: "/m",
+    VolumeOptions: { DriverConfig: { Name, Options } },
+  });
+  assertEquals(await createVerdict({ Mounts: [mount("local")] }), []);
+  assertEquals(await createVerdict({ Mounts: [mount("")] }), []);
+  assertEquals(await createVerdict({ Mounts: [mount("sshfs")] }), [
+    { rule: "volume-driver", detail: "sshfs" },
+  ]);
+  assertEquals(
+    ruleNames(await createVerdict({ Mounts: [mount(7)] })),
+    ["volume-driver"],
+  );
+  // Options of a non-local driver are not local's: the driver is the finding.
+  assertEquals(
+    ruleNames(
+      await createVerdict({
+        Mounts: [mount("sshfs", { type: "none", o: "bind", device: "/" })],
+      }),
+    ),
+    ["volume-driver", "volume-bind-host-root"],
   );
 });
