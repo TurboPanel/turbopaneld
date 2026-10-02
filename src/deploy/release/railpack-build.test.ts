@@ -499,7 +499,9 @@ test({
       );
       assertEquals(
         record.some((line) =>
-          line.includes(`railpack-v${RAILPACK_VERSION}-linux-amd64.tar.gz`)
+          line.includes(
+            `railpack-v${RAILPACK_VERSION}-x86_64-unknown-linux-musl.tar.gz`,
+          )
         ),
         true,
       );
