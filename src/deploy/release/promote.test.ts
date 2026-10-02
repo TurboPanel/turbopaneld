@@ -110,7 +110,7 @@ test("stageRelease refuses an output directory that is a link or climbs out", as
     const outside = join(root, "daemon-state");
     await Deno.mkdir(workingDir, { recursive: true });
     await Deno.mkdir(outside, { recursive: true });
-    await Deno.writeTextFile(join(outside, "license.token"), "secret");
+    await Deno.writeTextFile(join(outside, "state.json"), "secret");
     await Deno.symlink(outside, join(workingDir, "dist"));
     await Deno.mkdir(join(workingDir, "apps"), { recursive: true });
     await Deno.symlink(outside, join(workingDir, "apps", "web"));
@@ -130,7 +130,7 @@ test("stageRelease refuses an output directory that is a link or climbs out", as
       );
     }
     await assertRejects(
-      () => Deno.lstat(join(paths.releaseDir, "license.token")),
+      () => Deno.lstat(join(paths.releaseDir, "state.json")),
       Deno.errors.NotFound,
     );
   } finally {
