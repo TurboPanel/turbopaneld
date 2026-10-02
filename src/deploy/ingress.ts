@@ -939,11 +939,16 @@ async function ensureSharedSocketProxy(
   const applied = await readTextIfPresent(hostingIngressComposePath(layout));
   if (applied === undefined || declaresSocketProxy(applied)) return;
   const descriptor = await loadHostingIngressDescriptor(layout);
-  const yaml = traefikCompose(ingressNetwork, descriptor, {
-    source: "gate",
-    keepSocketProxy: true,
-  });
-  await upSharedTraefik(layout, yaml, run);
+  // No descriptor: the anonymous shape, which is always on the proxy (it has
+  // no ingress label for the gate's allowance), as ensureHostingIngress does.
+  const docker: SharedTraefikDocker = descriptor === undefined
+    ? VIA_SOCKET_PROXY
+    : { source: "gate", keepSocketProxy: true };
+  await upSharedTraefik(
+    layout,
+    traefikCompose(ingressNetwork, descriptor, docker),
+    run,
+  );
 }
 
 /**

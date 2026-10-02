@@ -3241,3 +3241,19 @@ test("F1: no extra shared up when the shared project already has the proxy or do
     await cleanup();
   }
 });
+
+test("F1: with the descriptor gone, the proxy comes back as the anonymous proxy-mode shared Traefik", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  try {
+    await writeSystemComponentDescriptor(layout, SYSTEM_INGRESS_IDENTITY);
+    await deployShared(layout, true, recordingDocker([]));
+    await Deno.remove(join(layout.stateDir, "system", "hosting-ingress.json"));
+    await deployTcpService(layout, false, recordingDocker([]));
+    assertEquals(
+      await Deno.readTextFile(hostingIngressComposePath(layout)),
+      traefikCompose(HOSTING_INGRESS_NETWORK),
+    );
+  } finally {
+    await cleanup();
+  }
+});
