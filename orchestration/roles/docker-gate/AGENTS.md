@@ -311,3 +311,11 @@ Break-glass at every stage: `systemctl stop turbopanel-docker-gate` as root.
 - The label-less helpers (managed-file normalisation, **backup and restore**)
   would be denied until the daemon stamps a platform label on them: backups and
   restores stop working. This is the most critical gap to close before stage 4.
+
+## Route parity
+
+`policy.ts` `ROUTES` / `READ_ROUTES` mirror the engine's router (moby `api/server/router`); `ENGINE_ROUTES` in
+`src/docker-gate/policy.test.ts` lists every route the engine serves and the gate's class for it, bare and under every
+version prefix the engine strips. Container, network and volume names match `.+` because the engine registers them as
+`{name:.*}`. Mutating routes no flow uses (`PUT /volumes/{name}`, checkpoints, `/debug`) are `restricted-group`; any path
+the table does not know is an `unclassified-route` finding (deny by default).
