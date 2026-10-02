@@ -773,6 +773,20 @@ test("a volume mount's Subpath must stay inside the volume, and tmpfs mount opti
   );
 });
 
+test("a form-encoded body is a finding: the engine merges it into the form ahead of the query", async () => {
+  const found = await evaluateRequest(
+    {
+      method: "POST",
+      path: "/build",
+      query: new URLSearchParams(),
+      formBody: true,
+    },
+    DEFAULT_POLICY_CONFIG,
+    (p) => Promise.resolve(p),
+  );
+  assertEquals(found.map((v) => v.rule), ["form-encoded-body"]);
+});
+
 /**
  * The engine's router table (moby api/server/router, API 1.4x): every method
  * and path template it serves, as [method, example path, the gate's route].

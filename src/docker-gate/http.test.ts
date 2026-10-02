@@ -314,3 +314,14 @@ test("optional whitespace is only space and tab: a vertical tab is not trimmed",
   const odd = head("POST / HTTP/1.1\r\nContent-Length: \u000b5\r\n\r\n");
   assertThrows(() => requestFraming(odd), HttpError, "invalid Content-Length");
 });
+
+test("a request target holding '#' is refused: Go reads it as data, not a fragment", () => {
+  for (
+    const target of ["/build?q=1#&networkmode=host", "/build#?networkmode=host"]
+  ) {
+    assertThrows(
+      () => parseRequestHead(encodeText(`POST ${target} HTTP/1.1\r\n\r\n`)),
+      HttpError,
+    );
+  }
+});

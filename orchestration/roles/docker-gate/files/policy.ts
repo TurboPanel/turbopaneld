@@ -71,6 +71,8 @@ export type RequestFacts = {
   query: URLSearchParams;
   /** Parsed JSON body for the body-checked routes, otherwise `undefined`. */
   body?: unknown;
+  /** The engine would read the body as form fields (see `carriesFormBody`). */
+  formBody?: boolean;
   /** Why the body was refused by the strict parser (body.ts), if it was. */
   bodyError?: string;
 };
@@ -797,6 +799,7 @@ export async function evaluateDetailed(
   if (!versionPrefixIsCanonical(facts.path)) {
     out.push({ rule: "path-version-prefix" });
   }
+  if (facts.formBody === true) out.push({ rule: "form-encoded-body" });
   if (facts.bodyError !== undefined) {
     out.push({ rule: "body-unparseable", detail: facts.bodyError });
     return { violations: out, allowances: [] };
