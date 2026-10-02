@@ -61,9 +61,11 @@
   ansible.builtin.shell: |
     set -euo pipefail
     RP_VER="{{ railpack_version }}"
-    RP_ARCH="{{ buildkit_arch }}"
+    # Railpack names Linux assets by Rust target triple, not linux-<arch>
+    # (keep in step with railpackAssetName in src/deploy/release/railpack-build.ts).
+    RP_ARCH="{{ 'x86_64' if buildkit_arch == 'amd64' else 'arm64' }}"
     TMP="$(mktemp -d)"
-    ASSET="railpack-v${RP_VER}-linux-${RP_ARCH}.tar.gz"
+    ASSET="railpack-v${RP_VER}-${RP_ARCH}-unknown-linux-musl.tar.gz"
     curl -fsSL -o "$TMP/$ASSET" \
       "https://github.com/railwayapp/railpack/releases/download/v${RP_VER}/${ASSET}"
     tar -xzf "$TMP/$ASSET" -C "$TMP"

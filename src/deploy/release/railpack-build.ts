@@ -466,6 +466,17 @@ async function installBuildkit(
   await refreshCurrentSymlink(toolDir, versionDir);
 }
 
+/**
+ * Railpack's release asset for `arch`. Upstream names Linux builds by Rust
+ * target triple (`x86_64-unknown-linux-musl`), not Go-style `linux-amd64`
+ * like BuildKit; the old `-linux-<arch>` name 404'd. Keep in step with the
+ * `Install Railpack` task in orchestration/roles/buildkit/tasks/main.yml.
+ */
+export function railpackAssetName(arch: "arm64" | "amd64"): string {
+  const triple = arch === "amd64" ? "x86_64" : "arm64";
+  return `railpack-v${RAILPACK_VERSION}-${triple}-unknown-linux-musl.tar.gz`;
+}
+
 async function installRailpack(
   runtimesDir: string,
   arch: "arm64" | "amd64",
@@ -474,7 +485,7 @@ async function installRailpack(
     Pick<EnsureBuildkitRailpackDeps, "runCommand" | "resolveArch">
   >,
 ): Promise<void> {
-  const asset = `railpack-v${RAILPACK_VERSION}-linux-${arch}.tar.gz`;
+  const asset = railpackAssetName(arch);
   const url =
     `https://github.com/railwayapp/railpack/releases/download/v${RAILPACK_VERSION}/${asset}`;
   const tarball = join(tmp, asset);
