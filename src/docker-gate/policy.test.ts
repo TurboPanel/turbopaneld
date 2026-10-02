@@ -735,3 +735,39 @@ test("a container's VolumeDriver and a volume mount's DriverConfig.Name must be 
     ["volume-driver", "volume-bind-host-root"],
   );
 });
+
+test("a volume mount's Subpath must stay inside the volume, and tmpfs mount options are allowlisted", async () => {
+  const volume = (Subpath: unknown) => ({
+    Type: "volume",
+    Source: "v",
+    Target: "/m",
+    VolumeOptions: { Subpath },
+  });
+  assertEquals(await createVerdict({ Mounts: [volume("data/app")] }), []);
+  assertEquals(await createVerdict({ Mounts: [volume("")] }), []);
+  for (const subpath of ["../other", "a/../../b", "/etc", 7]) {
+    assertEquals(
+      ruleNames(await createVerdict({ Mounts: [volume(subpath)] })),
+      ["volume-subpath"],
+      String(subpath),
+    );
+  }
+  const tmpfs = (Options: unknown) => ({
+    Type: "tmpfs",
+    Target: "/t",
+    TmpfsOptions: { SizeBytes: 1024, Mode: 448, Options },
+  });
+  assertEquals(
+    await createVerdict({ Mounts: [tmpfs([["noexec"], ["nosuid"]])] }),
+    [],
+  );
+  assertEquals(await createVerdict({ Mounts: [tmpfs(undefined)] }), []);
+  assertEquals(
+    ruleNames(await createVerdict({ Mounts: [tmpfs([["suid"], ["dev"]])] })),
+    ["tmpfs-options", "tmpfs-options"],
+  );
+  assertEquals(
+    ruleNames(await createVerdict({ Mounts: [tmpfs("exec")] })),
+    ["tmpfs-options"],
+  );
+});

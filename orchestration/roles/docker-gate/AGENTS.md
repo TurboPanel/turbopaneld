@@ -318,5 +318,7 @@ Break-glass at every stage: `systemctl stop turbopanel-docker-gate` as root.
 (`volume-driver`), like `POST /volumes/create`'s `Driver`. A `local` volume's `type`/`o`/`device` options are deny by
 default: `o=bind` or `o=rbind` (or `type=none`) with an absolute device is judged as a bind path; a `/` device otherwise
 is `volume-device`; tmpfs passes; every other type (nfs, cifs, overlay, ...) or option set without a device is
-`volume-mount-type`. Previously `rbind` skipped the path check and overlay/nfs passed. A host that deliberately uses
+`volume-mount-type`. Previously `rbind` skipped the path check and overlay/nfs passed. A volume mount's `VolumeOptions.Subpath` must be relative
+with no `..` (`volume-subpath`); a tmpfs mount's `TmpfsOptions.Options` may only hold noexec/exec/nosuid/nodev/ro/rw
+(`tmpfs-options`). A host that deliberately uses
 NFS volumes will see findings until the profile grows an allowance.

@@ -491,6 +491,46 @@ function volumeMounts(
   return out;
 }
 
+/** A volume Subpath the engine joins under the volume: relative, no `..`. */
+function subpathViolation(mount: Record<string, unknown>): Violation[] {
+  const options = mount.VolumeOptions;
+  const subpath = isRecord(options) ? options.Subpath ?? "" : "";
+  if (subpath === "") return [];
+  const escapes = typeof subpath !== "string" || subpath.startsWith("/") ||
+    subpath.split("/").includes("..");
+  return escapes ? [{ rule: "volume-subpath" }] : [];
+}
+
+/** tmpfs mount flags that only narrow (or restore the defaults of) the mount. */
+const SAFE_TMPFS_OPTIONS = new Set([
+  "noexec",
+  "exec",
+  "nosuid",
+  "nodev",
+  "ro",
+  "rw",
+]);
+
+function tmpfsOptionViolations(mount: Record<string, unknown>): Violation[] {
+  const tmpfs = mount.TmpfsOptions;
+  const options = isRecord(tmpfs) ? tmpfs.Options ?? [] : [];
+  if (!Array.isArray(options)) return [{ rule: "tmpfs-options" }];
+  return options
+    .filter((option) =>
+      !Array.isArray(option) || !SAFE_TMPFS_OPTIONS.has(String(option[0]))
+    )
+    .map(() => ({ rule: "tmpfs-options" }));
+}
+
+/** Subpath and tmpfs options of every `Mounts` entry. */
+function checkMountOptions(hostConfig: Record<string, unknown>): Violation[] {
+  const mounts = Array.isArray(hostConfig.Mounts) ? hostConfig.Mounts : [];
+  return mounts.filter(isRecord).flatMap((mount) => [
+    ...subpathViolation(mount),
+    ...tmpfsOptionViolations(mount),
+  ]);
+}
+
 /** What the mounts of one create came to. */
 export type Verdict = { violations: Violation[]; allowances: string[] };
 
@@ -522,6 +562,7 @@ async function checkMounts(
     ),
   );
   for (const list of volumes) violations.push(...list);
+  violations.push(...checkMountOptions(hostConfig));
   return { violations, allowances };
 }
 
