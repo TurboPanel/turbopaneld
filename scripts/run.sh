@@ -1929,7 +1929,8 @@ tp_control_plane_refresh_file() {
 }
 
 tp_refresh_channel_ok() {
-  case "$1" in
+  _rco_channel="$1"
+  case "$_rco_channel" in
     trunk|edge|canary|rc|release) return 0 ;;
     *) return 1 ;;
   esac
@@ -1937,10 +1938,12 @@ tp_refresh_channel_ok() {
 
 # Prints a validated value or nothing. $1: channel | instance | ui.
 tp_refresh_value_ok() {
-  if [ "$1" = channel ]; then
-    tp_refresh_channel_ok "$2"
+  _rvo_kind="$1"
+  _rvo_value="$2"
+  if [ "$_rvo_kind" = channel ]; then
+    tp_refresh_channel_ok "$_rvo_value"
   else
-    tp_release_manifest_url_ok "$1" "$2"
+    tp_release_manifest_url_ok "$_rvo_kind" "$_rvo_value"
   fi
 }
 
@@ -1977,15 +1980,20 @@ tp_load_control_plane_refresh() {
 
 # Install a scratch file as a root-only file (root:root 0600).
 tp_install_root_only() {
-  install -m 0600 -o root -g root "$1" "$2"
+  _iro_src="$1"
+  _iro_dest="$2"
+  install -m 0600 -o root -g root "$_iro_src" "$_iro_dest"
 }
 
 tp_write_control_plane_refresh() {
+  _cpw_channel="$1"
+  _cpw_instance="$2"
+  _cpw_ui="$3"
   _cpw_file="$(tp_control_plane_refresh_file)"
   mkdir -p "${_cpw_file%/*}"
   _cpw_tmp="$(mktemp)"
   printf 'channel=%s\ninstance_manifest_url=%s\nui_manifest_url=%s\n' \
-    "$1" "$2" "$3" > "$_cpw_tmp"
+    "$_cpw_channel" "$_cpw_instance" "$_cpw_ui" > "$_cpw_tmp"
   _cpw_rc=0
   tp_install_root_only "$_cpw_tmp" "$_cpw_file" || _cpw_rc=$?
   rm -f "$_cpw_tmp"
