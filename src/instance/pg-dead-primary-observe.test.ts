@@ -496,3 +496,41 @@ test("a hung primary (no response, postmaster alive) is logged but not reported 
   });
   assertEquals(h.sent.length, 0);
 });
+
+test("the observer re-sends while the primary stays dead, then stops at the per-incident bound", async () => {
+  const h = harness();
+  await withAttached(h, () => pollTicks(h, (3 * 3_600_000) / 5_000));
+  assertEquals(h.sent.map((e) => e.evidence.attempt), [1, 2, 3, 4, 5]);
+});
+
+test("startup check waits for a conclusive Docker read and survives a failing holdStop", async () => {
+  let reads = 0;
+  const held: string[] = [];
+  const h = harness({
+    sample: () => {
+      reads += 1;
+      return Promise.resolve(
+        reads === 1
+          ? { container: { kind: "unreadable", reason: "dockerd starting" } }
+          : DEAD,
+      );
+    },
+    intentState: () =>
+      Promise.resolve(
+        intent({
+          active: true,
+          heldClusterMarker: true,
+          runningKind: "stop",
+          noClusterMarker: false,
+        }),
+      ),
+    holdStop: (id) => {
+      held.push(id);
+      return Promise.reject(new Error("disk full"));
+    },
+  });
+  await withAttached(h, () => pollTicks(h, 3));
+  // First tick unreadable: not checked; second tick: checked once, error caught.
+  assertEquals(held, [MANAGED_ID]);
+  assertEquals(h.sent.length, 0);
+});

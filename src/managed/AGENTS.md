@@ -464,8 +464,11 @@ there is no raft-leader check on that path.
 - **Fires** after 6 consecutive hard failures spanning ≥ 20 s on a
   **monotonic** clock (wall time only for marker expiry and Docker's
   `StartedAt`). Attach, detach and a tick gap over 3 intervals reset streaks.
-  One event per incident; a new incident no sooner than 5 min after the last
-  event; healthy resets. Only delivered events count as emitted.
+  While the primary stays dead the event is re-sent at +5, +10, +20, +40 min
+  (doubling, capped at 60 min, at most 5 events per incident), so a refusal
+  inside the control plane's 15 min cooldown is retried after it; the
+  control plane dedupes in-flight recoveries. A new incident no sooner than
+  5 min after the last event; healthy resets. Only delivered events count.
 - **Intent markers** (`ha-intent.ts`, written atomically; an unreadable marker
   file suppresses like an active one): `command-router.ts` begins one before
   every verb in `MANAGED_COMMAND_INTENT_KINDS` (apply = update/upgrade/resync,
