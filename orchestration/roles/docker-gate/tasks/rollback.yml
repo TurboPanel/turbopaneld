@@ -49,6 +49,8 @@
   when: not _docker_gate_had_previous
   failed_when: false
 
+# Only a gate that answered before the swap is expected to answer again; one
+# that was already down is restored all the same but not waited for.
 - name: Prove the restored gate answers
   ansible.builtin.uri:
     url: http://localhost/_ping
@@ -57,4 +59,6 @@
   until: _docker_gate_restored.status == 200
   retries: 15
   delay: 2
-  when: _docker_gate_had_previous
+  when:
+    - _docker_gate_had_previous
+    - _docker_gate_before.status | default(0) == 200

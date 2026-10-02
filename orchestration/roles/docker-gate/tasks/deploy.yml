@@ -100,15 +100,27 @@
     - name: Keep the failure for the report
       ansible.builtin.set_fact:
         _docker_gate_swap_error: "{{ ansible_failed_result.msg | default('unknown error') }}"
+        _docker_gate_had_previous: false
+        _docker_gate_rollback_error: ""
 
+    # A rollback that itself fails must not hide why the swap failed.
     - name: Roll back
-      ansible.builtin.include_tasks: rollback.yml
+      block:
+        - name: Restore the previous gate
+          ansible.builtin.include_tasks: rollback.yml
+      rescue:
+        - name: Keep the rollback failure for the report
+          ansible.builtin.set_fact:
+            _docker_gate_rollback_error: "{{ ansible_failed_result.msg | default('unknown error') }}"
 
     - name: Fail the deploy after the rollback
       ansible.builtin.fail:
         msg: >-
-          Docker gate swap failed and was rolled back
-          ({{ 'previous gate restored' if _docker_gate_had_previous else 'no previous gate: stopped' }}):
+          Docker gate swap failed
+          ({{ 'previous gate restored and answering' if (_docker_gate_had_previous and (_docker_gate_rollback_error | length) == 0)
+          else 'previous gate restored but NOT confirmed: ' ~ _docker_gate_rollback_error if (_docker_gate_had_previous and (_docker_gate_rollback_error | length) > 0)
+          else 'no previous gate: stopped' if (_docker_gate_rollback_error | length) == 0
+          else 'rollback failed: ' ~ _docker_gate_rollback_error }}):
           {{ _docker_gate_swap_error }}
 
 - name: Drop the staging directory
