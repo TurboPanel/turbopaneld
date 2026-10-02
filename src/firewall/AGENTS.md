@@ -9,7 +9,7 @@ page carries the build order; this is the `fw-daemon-reconcile` row.
 | File | Role |
 | --- | --- |
 | `render.ts` | **Pure.** `FirewallReconcilePayload` → `iptables-restore` / `ip6tables-restore` documents + sha256 digest. Invariants first (lo, `ESTABLISHED,RELATED`, ICMP / ICMPv6, DHCP client, every sshd port, the co-located control plane's ports), then `drop`/`reject` rows, then `accept` rows, then the default. Never emits `OUTPUT`, a builtin policy line, or a jump. |
-| `apply.ts` | Host side. `probeXtables`, `hasDockerUserChain`, `isControlPlaneColocated`; `applyRenderedFirewall` = arm the rollback guard and stage the documents (`pending.ts`) → `--test` → `--noflush` restore per family → `-C`/`-I` jumps, **pending, not durable**; `removeFirewall` (mode `off`, and the `turbopaneld firewall off` break-glass); `snapshotFirewallChains` (unused so far); `reinstallFirewallForwardingIfEnabled` (the Docker-monitor hook, wired in `../entry/run.ts` beside the fabric one: at startup and on every Docker reachability change; while a ruleset is pending it re-applies the *pending* document, never the older confirmed one). |
+| `apply.ts` | Host side. `probeXtables`, `hasDockerUserChain`, `isControlPlaneColocated`; `applyRenderedFirewall` = arm the rollback guard and stage the documents (`pending.ts`) → `--test` → `--noflush` restore per family → `-C`/`-I` jumps, **pending, not durable**; `removeFirewall` (mode `off`, and the `turbopaneld firewall off` break-glass); `snapshotFirewallChains` (unused so far); `reinstallFirewallForwardingIfEnabled` (the Docker-monitor hook, wired in `../entry/run.ts` beside the fabric one: at startup and on every Docker reachability change, v4 and v6; while a ruleset is pending it re-applies the *pending* document, never the older confirmed one). |
 | `pending.ts` | Commit-confirm state: the marker (`<runDir>/firewall-pending.json`), the pending documents (`<configDir>/firewall.pending.v4|.v6`), the rollback record the guard writes (`<stateDir>/firewall-rollback.json`), `armPendingFirewall` (arms `turbopanel-firewall-guard.timer` **before** anything is loaded; no guard, no rules) and `clearPendingFirewall`. |
 | `confirm.ts` | `confirmPendingFirewall(digest)`: promotes the pending documents to the durable `<configDir>/firewall.v4|.v6`, clears the stage, stops the guard. States `confirmed`, `nothing_pending` (idempotent), `digest_mismatch`, `expired`, `rolled_back`. Behind `server.firewall.confirm` and `turbopaneld firewall confirm`. |
 | `fold.ts` | Stage 6 (`fw-fold-existing`). Folds the legacy `TP-MANAGED-PUB` / `TP-MGD-*` chains (`../managed/firewall.ts`) into `TP-FWD`: reads the **live** `iptables -S`, and removes the legacy chain only when every legacy listener is covered (same `--ctorigdst`/port `DROP`, and a `RETURN` containing each source it admitted). Never adds a rule. `deferred` while a ruleset is pending; runs after a confirm and on `turbopaneld firewall fold`. `isManagedListenerCovered` is the same test the legacy installer uses to stop rebuilding a folded listener. TurboFabric's `TP-FORWARD` is left alone. |
@@ -92,8 +92,10 @@ and the same fail-open handling as a rollback, and writes no rollback record.
 place before Docker starts; `TP-FWD` needs `DOCKER-USER`, which only exists once
 dockerd is up, so the daemon's Docker monitor re-hangs it
 (`reinstallFirewallForwardingIfEnabled`) at startup and whenever Docker becomes
-reachable again. IPv6's `DOCKER-USER` is not re-hung (Docker's own ip6tables is
-off by default).
+reachable again, in both families: Docker 28+ builds the IPv6 `DOCKER-USER`
+by default (Docker 29.8.1 on the fleet, checked 2026-10-01), so v6 is re-hung
+exactly like v4, each family on its own. Under a pending ruleset v6 is re-hung
+only when the marker records `replace`; `keep` / `forget` leave v6 to the guard.
 `turbopaneld firewall off` (root, over SSH) removes every chain, jump, stored
 document and the pending state: the break-glass when the panel is unreachable.
 The default-drop hold below stays until the guard has been proven on a real

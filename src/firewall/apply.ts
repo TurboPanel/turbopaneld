@@ -24,8 +24,8 @@
  * the kernel holds. No `ip6tables` at all is still a warning: there is
  * nothing to apply against.
  *
- * **`DOCKER-USER` may not exist** (Docker not installed yet; `ip6tables` unless
- * Docker's own ip6tables is on). The renderer is told per family and leaves
+ * **`DOCKER-USER` may not exist** (Docker not installed yet; `ip6tables` on a
+ * Docker older than 28 or one with `"ip6tables": false`). The renderer is told per family and leaves
  * `TP-FWD` out; {@link reinstallFirewallForwardingIfEnabled} is the hook for
  * the Docker monitor to call when dockerd (re)appears — dockerd rebuilds
  * `DOCKER-USER` on restart, so the jump has to be put back the way the fabric
@@ -50,6 +50,8 @@ import {
   clearPendingFirewall,
   disarmGuardTimer,
   FIREWALL_PENDING_V4_FILENAME,
+  FIREWALL_PENDING_V6_FILENAME,
+  type PendingFirewallMarker,
   readPendingMarker,
   recordPendingV6,
   removeIfPresent,
@@ -487,31 +489,75 @@ export async function snapshotFirewallChains(
 }
 
 /**
- * Re-hang `TP-FWD` off `DOCKER-USER` (and re-apply the v4 document) when
- * dockerd becomes reachable — the Docker monitor's hook, mirroring
+ * Re-hang `TP-FWD` off `DOCKER-USER` (and re-apply that family's document)
+ * when dockerd becomes reachable — the Docker monitor's hook, mirroring
  * `reinstallFabricForwardingIfEnabled`. dockerd rebuilds `DOCKER-USER` on
- * restart, so the jump has to be put back.
+ * restart, so the jump has to be put back. Both families, v4 then v6, each on
+ * its own: one failing never stops the other. Docker 28+ builds the IPv6
+ * `DOCKER-USER` by default (verified on Docker 29.8.1, 2026-10-01), so IPv6
+ * needs the same re-hang as IPv4.
  *
  * **Which document.** While a ruleset is pending (loaded, not yet confirmed)
  * the kernel holds the *pending* document, so that is the one re-applied: the
  * durable document is the last *confirmed* rules and loading it here would
  * silently undo a ruleset that is still inside its confirm window. With
- * nothing pending it is the durable document. No document at all means the
- * firewall is not managed here, and nothing happens. Never throws. (IPv6's
- * `DOCKER-USER` is not re-hung here; Docker's own ip6tables is off by default.)
+ * nothing pending it is the durable document. For IPv6 under a pending
+ * ruleset only a recorded `replace` names a document; `keep` (apply still in
+ * flight, or it failed) and `forget` re-hang nothing, since loading the
+ * durable v6 there could overwrite a v6 apply that just landed — the guard
+ * restores v6 at the deadline anyway. No document at all means the firewall
+ * is not managed here, and nothing happens. Never throws.
  */
 export async function reinstallFirewallForwardingIfEnabled(
   options: FirewallApplyOptions = {},
 ): Promise<void> {
   const run = options.run ?? runFirewallHost;
   const layout = options.layout ?? resolveLayout(Deno.env.toObject());
-  let v4: string;
+  let pending: PendingFirewallMarker | null;
   try {
-    const pending = await readPendingMarker(layout);
-    const filename = pending === null
-      ? FIREWALL_V4_FILENAME
-      : FIREWALL_PENDING_V4_FILENAME;
-    v4 = await Deno.readTextFile(join(layout.configDir, filename));
+    pending = await readPendingMarker(layout);
+  } catch (err) {
+    logWarn(
+      "firewall",
+      `firewall pending marker unreadable: ${sanitizeForLog(err)}`,
+    );
+    return;
+  }
+  await forEachSequential(
+    [4, 6] as const,
+    (family) =>
+      rehangForwardChain(
+        family,
+        forwardDocumentFilename(family, pending),
+        run,
+        layout,
+      ),
+  );
+}
+
+/** The document the kernel holds for this family, or null when none applies. */
+function forwardDocumentFilename(
+  family: FirewallFamily,
+  pending: PendingFirewallMarker | null,
+): string | null {
+  if (pending === null) {
+    return family === 4 ? FIREWALL_V4_FILENAME : FIREWALL_V6_FILENAME;
+  }
+  if (family === 4) return FIREWALL_PENDING_V4_FILENAME;
+  return pending.v6 === "replace" ? FIREWALL_PENDING_V6_FILENAME : null;
+}
+
+/** One family's half of {@link reinstallFirewallForwardingIfEnabled}. */
+async function rehangForwardChain(
+  family: FirewallFamily,
+  filename: string | null,
+  run: FirewallRunFn,
+  layout: LayoutPaths,
+): Promise<void> {
+  if (filename === null) return;
+  let document: string;
+  try {
+    document = await Deno.readTextFile(join(layout.configDir, filename));
   } catch (err) {
     if (err instanceof Deno.errors.NotFound) return;
     logWarn(
@@ -520,19 +566,19 @@ export async function reinstallFirewallForwardingIfEnabled(
     );
     return;
   }
-  if (!v4.includes(`:${FIREWALL_FORWARD_CHAIN} `)) return;
+  if (!document.includes(`:${FIREWALL_FORWARD_CHAIN} `)) return;
   try {
-    if (!(await hasDockerUserChain(4, run))) return;
-    await restoreDocument(4, v4, run);
-    await ensureJump(4, DOCKER_USER_CHAIN, FIREWALL_FORWARD_CHAIN, run);
+    if (!(await hasDockerUserChain(family, run))) return;
+    await restoreDocument(family, document, run);
+    await ensureJump(family, DOCKER_USER_CHAIN, FIREWALL_FORWARD_CHAIN, run);
     logInfo(
       "firewall",
-      "TP-FWD re-hung off DOCKER-USER after dockerd came back",
+      `TP-FWD re-hung off DOCKER-USER (IPv${family}) after dockerd came back`,
     );
   } catch (err) {
     logWarn(
       "firewall",
-      `TP-FWD reinstall failed: ${sanitizeForLog(err)}`,
+      `TP-FWD reinstall failed (IPv${family}): ${sanitizeForLog(err)}`,
     );
   }
 }
