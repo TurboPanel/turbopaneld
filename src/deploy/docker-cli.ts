@@ -348,6 +348,8 @@ export async function resolveDockerInvocation(): Promise<DockerInvocation> {
 export type SpawnDockerStreamingOptions = {
   stdin?: "piped" | "null";
   stdout?: "piped" | "inherit";
+  /** Kills the child when aborted (a bounded build, say). */
+  signal?: AbortSignal;
 };
 
 /**
@@ -372,6 +374,7 @@ export async function spawnDockerStreaming(
     stdin: options?.stdin ?? "null",
     stdout: options?.stdout ?? "piped",
     stderr: "piped",
+    ...(options?.signal === undefined ? {} : { signal: options.signal }),
   }).spawn();
 }
 
@@ -386,6 +389,8 @@ export type DockerLineHandler = (event: DockerStreamEvent) => void;
 export type RunDockerStreamedOptions = RunDockerOptions & {
   /** Called once per decoded line while docker is still running. */
   onLine?: DockerLineHandler;
+  /** Kills docker when aborted; the result then reports the killed exit. */
+  signal?: AbortSignal;
 };
 
 /** Buffered `runDocker`-shaped callable (the handler test seam). */
@@ -428,6 +433,7 @@ export async function runDockerStreamed(
     const child = await spawnDockerStreaming(args, {
       stdin: hasInput ? "piped" : "null",
       stdout: "piped",
+      ...(options?.signal === undefined ? {} : { signal: options.signal }),
     });
 
     if (hasInput) {
