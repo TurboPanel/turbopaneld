@@ -14,6 +14,7 @@
  * viewer instead of a redirect the operator has to invent.
  */
 
+import { safeConfigToken } from "../../contracts/config-values.ts";
 import { principalHomePath } from "../../paths/layout.ts";
 import type { LayoutPaths } from "../../paths/layout.ts";
 import { principalUnixGroupName } from "../ensure-principal.ts";
@@ -43,8 +44,17 @@ export type CronUnitIdentity = {
 };
 
 /** `turbopanel-cron-<environmentId>-<service>-<job>` — no extension. */
+/** The compose service name, refused unless it is one bare config token. */
+function cronServiceToken(identity: { composeServiceName: string }): string {
+  return safeConfigToken(
+    "cron composeServiceName",
+    identity.composeServiceName,
+  );
+}
+
 export function cronUnitName(identity: CronUnitIdentity): string {
-  return `${CRON_UNIT_PREFIX}${identity.environmentId}-${identity.composeServiceName}-${identity.jobName}`;
+  const service = cronServiceToken(identity);
+  return `${CRON_UNIT_PREFIX}${identity.environmentId}-${service}-${identity.jobName}`;
 }
 
 export function cronServicePath(
@@ -73,10 +83,16 @@ const SYSTEMD_QUOTE_ESCAPE = String.raw`\$&`;
  * about which characters are "safe" here.
  *
  * The wire contract already refuses NUL, CR, and LF in an argument, so what is
- * left cannot terminate the directive.
+ * left cannot terminate the directive. `$` and `%` are doubled so systemd
+ * passes them through literally instead of expanding a variable or a
+ * specifier (`%h`, `%u`, ...) before the job sees its own argument.
  */
 function quoteExecArg(arg: string): string {
-  return `"${arg.replaceAll(/["\\]/g, SYSTEMD_QUOTE_ESCAPE)}"`;
+  const escaped = arg
+    .replaceAll(/["\\]/g, SYSTEMD_QUOTE_ESCAPE)
+    .replaceAll("$", () => "$$")
+    .replaceAll("%", () => "%%");
+  return `"${escaped}"`;
 }
 
 export type CronUnitOpts = {
@@ -111,7 +127,7 @@ export function cronServiceContent(opts: CronUnitOpts): string {
   return [
     "# Managed by TurboPanel — regenerated on deploy; edits are overwritten.",
     "[Unit]",
-    `Description=TurboPanel job ${opts.job.name} (${opts.composeServiceName})`,
+    `Description=TurboPanel job ${opts.job.name} (${cronServiceToken(opts)})`,
     `X-TurboPanel-Environment=${opts.environmentId}`,
     "",
     "[Service]",
@@ -179,7 +195,9 @@ export function cronTimerContent(opts: CronUnitOpts): string {
   return [
     "# Managed by TurboPanel — regenerated on deploy; edits are overwritten.",
     "[Unit]",
-    `Description=TurboPanel schedule for ${opts.job.name} (${opts.composeServiceName})`,
+    `Description=TurboPanel schedule for ${opts.job.name} (${
+      cronServiceToken(opts)
+    })`,
     `X-TurboPanel-Environment=${opts.environmentId}`,
     "",
     "[Timer]",

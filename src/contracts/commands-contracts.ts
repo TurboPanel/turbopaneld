@@ -5,6 +5,7 @@
  * inline instance-only imports.
  */
 import type { SensorCapabilities } from "../metrics/collector/sensors/discovery.ts";
+import { ConfigValueError, safeUrlPath } from "./config-values.ts";
 
 export const COMMAND_TYPES = [
   "daemon.ping",
@@ -3366,7 +3367,17 @@ function parseHostingPathPrefix(value: unknown): string | undefined {
   if (typeof value !== "string" || !value.startsWith("/")) {
     throw new TypeError("hostings[].pathPrefix must start with /");
   }
-  return value;
+  return parseUrlPathField("hostings[].pathPrefix", value);
+}
+
+/** {@link safeUrlPath}, reported as the wire contract's TypeError. */
+function parseUrlPathField(field: string, value: string): string {
+  try {
+    return safeUrlPath(field, value);
+  } catch (err) {
+    if (err instanceof ConfigValueError) throw new TypeError(err.message);
+    throw err;
+  }
 }
 
 function parseHostingTargetPort(value: unknown): number | undefined {
@@ -3471,7 +3482,10 @@ function parseHostingProxy(
   if (typeof value.gzip === "boolean") proxy.gzip = value.gzip;
   if (typeof value.brotli === "boolean") proxy.brotli = value.brotli;
   if (typeof value.stripPrefix === "string") {
-    proxy.stripPrefix = value.stripPrefix;
+    proxy.stripPrefix = parseUrlPathField(
+      "hostings[].proxy.stripPrefix",
+      value.stripPrefix,
+    );
   }
   return Object.keys(proxy).length === 0 ? undefined : proxy;
 }

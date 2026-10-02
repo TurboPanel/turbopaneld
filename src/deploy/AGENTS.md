@@ -723,3 +723,43 @@ units.
 
 Moved to [`ssh/AGENTS.md`](./ssh/AGENTS.md) — tenant sshd config, authorized
 keys, key types.
+
+## Tenant values in root-loaded configs
+
+Any project member can set hosting options, web env and runtime variables, so
+every value below is **tenant input** reaching a file a root-run or root-loaded
+engine parses (hosting Caddy, the Apache and php-fpm masters, systemd). The
+named validators live in `src/contracts/config-values.ts`. They **refuse,
+never sanitize**: a renderer that gets a value outside the allowlist fails the
+apply with an error naming the field, never the value (it may be a decrypted
+secret). The control plane runs the same rules at its API boundary (400
+`invalid_hosting_option`). `src/deploy/config-injection.test.ts` holds the
+goldens (`testdata/config-goldens/`, byte-identical to the pre-validator
+output), one refusal test per sink, and a source scan (`SINKS`): a renderer may
+not interpolate `stripPrefix`, `pathPrefix`, `webEnv`, `settings`,
+`startCommand` or `tlsId` directly, and every registered sink must still call its
+validator. The scan is textual: it cannot follow a value through an alias, so a
+new sink still needs a `SINKS` row and a refusal test.
+
+| Source field | Sink | Validator |
+| --- | --- | --- |
+| `hostings[].proxy.stripPrefix` | hosting Caddyfile `uri strip_prefix`, Traefik `stripprefix.prefixes` | `safeUrlPath` (also at contract parse) |
+| `hostings[].pathPrefix` | hosting Caddyfile `handle`, Traefik `PathPrefix` | `safeUrlPath` (also at contract parse) |
+| `hostings[].tlsId` | hosting Caddyfile `tls` paths | `safeConfigToken` |
+| `hostings[].hostnames` | hosting Caddyfile site addresses, Traefik `Host` | `isValidHostname` (contract parse) |
+| `hostings[].bindAddress` | hosting Caddyfile `bind` | IP literal (contract parse, `assertValidBindAddress`) |
+| `sites[].webEnv` key / value | Apache `SetEnv` | `safeEnvName` / `safeEnvValue`, and no `${` (Apache expands it on every line, with no escape) |
+| `sites[].webEnv` key / value | site Caddy `php_fastcgi env` | `safeEnvName` (refused) / `isSafeCaddyEnvValue` (dropped: a multi-line PEM is legitimate and other engines carry it) |
+| `sites[].php.settings` | php-fpm `php_admin_value[...]`, OpenLiteSpeed `phpIniOverride{}` | key allowlist (unknown keys dropped), `safePhpIniValue` |
+| `sites[].php.pool` | php-fpm pool tuning | key allowlist, `^[A-Za-z0-9._-]+$` |
+| `sites[].root` | every engine's document root | `assertSafeRoot` |
+| `nativeAppServices[].startCommand` | unit `ExecStart=/bin/sh -c '...'` | `safeConfigLine` |
+| `nativeAppServices[].composeServiceName` | unit `Description=` | `safeConfigToken` |
+| `cron[].command` | unit `ExecStart=` | contract parse (no NUL/CR/LF), `quoteExecArg` (`"`/`\` escaped, `$`/`%` doubled) |
+| cron `composeServiceName` | unit name, path, `Description=` | `safeConfigToken` |
+| `cron[].schedule` / `name` | `OnCalendar=` / unit name | `ON_CALENDAR_RE` / `CRON_JOB_NAME_RE` |
+
+Not tenant-editable, so not in the scan: ProxySQL backend addresses and
+credentials (control-plane managed, rendered in a container), platform paths,
+ports and ids (`SAFE_ID_RE`, `SAFE_PATH_ID_RE`). `hosting.env` escapes for its
+own reader and is not loaded by any engine.
