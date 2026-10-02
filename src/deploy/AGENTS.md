@@ -1,6 +1,6 @@
 # Tenant deploy & hosting ingress — AGENTS.md
 
-The `environment.deploy` / `environment.lifecycle` / `environment.stop` command handlers: Docker Compose bring-up with Traefik labels, hosting Caddy (`:80`/`:443`, distinct from control-plane Caddy on `:8443` only), org TLS materialization from `tpdaemon` envelopes, non-destructive start/stop/restart, and best-effort container reporting. While the control plane obtains a Let's Encrypt certificate, hosting Caddy forwards only `/.well-known/acme-challenge/*` for those names to the issuer socket (`00-instance-acme-http01.caddy`). That file is written **before** the first `enable --now`: the unit is `Type=simple`, so systemd reports it active before admin `127.0.0.1:2029` exists, and an immediate `systemctl reload` fails with connection refused then rolls the unit back. A first start loads the snippet as the initial config and does not reload; an already-running hosting Caddy still reloads. The file is removed when issuance finishes. Hosting Caddy does not terminate panel HTTPS.
+The `environment.deploy` / `environment.lifecycle` / `environment.stop` command handlers: Docker Compose bring-up with Traefik labels, hosting Caddy (`:80`/`:443`, distinct from control-plane Caddy on `:8443` only), org TLS materialization from `tpdaemon` envelopes, non-destructive start/stop/restart, and best-effort container reporting. While the control plane obtains a Let's Encrypt certificate, hosting Caddy forwards only `/.well-known/acme-challenge/*` for those names to the issuer socket (`00-instance-acme-http01.caddy`). That file is written **before** the first `enable --now`: the unit is `Type=simple`, so systemd reports it active before admin `127.0.0.1:2029` exists, and an immediate `systemctl reload` fails with connection refused then rolls the unit back. A first start loads the snippet as the initial config and does not reload; an already-running hosting Caddy still reloads. The file is removed when issuance finishes. Hosting Caddy runs as `tpedge` (not in group `tp`), so each time the socket is bound (preflight listener, then the issuer) the daemon has tp-host add `u:tpedge:rw` to that one socket (`grantInstanceAcmeSocket`); the hosting-caddy role grants traverse on the run directory. Hosting Caddy does not terminate panel HTTPS.
 
 **Managed engines are a separate path** (`../managed/AGENTS.md`): platform-owned
 compose + config under `<stateDir>/managed/<managedId>/`, native ports only, no
@@ -53,7 +53,8 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    over an identity-bearing Traefik.
 3. Ensure vendored hosting Caddy (`ensureHostingCaddy` — Ansible `caddy-setup`
    then direct GitHub download) when
-   `/opt/turbopanel/vendor/caddy/current/caddy` is missing. On-demand like
+   `/opt/turbopanel/vendor/caddy/current/caddy` or the `tpedge` account it
+   runs as is missing (only the playbook can create the account). On-demand like
    Docker; daemon-converge does not install it. Required for hostname ingress.
 4. When `principalMaterial[]` is present, ensure Linux users/groups on the host
    (`ensureSystemPrincipals` in `src/deploy/ensure-principal.ts`). Homes live
@@ -151,7 +152,9 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    attaches to all interfaces — sourced at deploy-prepare time from hosting
    `bind` scope: **public** pinned `ip` row, **datacenter** private `ip`
    (`scope = 'datacenter'` on the target server), or **local** loopback
-   `127.0.0.1`. Unit `turbopanel-hosting-caddy.service` when sudo allows.
+   `127.0.0.1`. Unit `turbopanel-hosting-caddy.service` when sudo allows; it
+   runs as `tpedge` with only `CAP_NET_BIND_SERVICE`, and a changed unit is
+   restarted (see `orchestration/AGENTS.md` → Hosting Caddy account).
    Control-plane Caddy binds only `:8443` and never public `:443`, so hosting
    Caddy can take `:80`/`:443` without a control-plane release step.
    **Distinct**

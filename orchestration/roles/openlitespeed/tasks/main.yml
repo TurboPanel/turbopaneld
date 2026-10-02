@@ -115,13 +115,6 @@
         path: "{{ _openlitespeed_tmp.path }}"
         state: absent
 
-    - name: Create litespeed exec name expected by lswsctrl
-      ansible.builtin.file:
-        src: "./openlitespeed"
-        dest: "{{ turbopanel_vendor_dir }}/openlitespeed/{{ openlitespeed_version }}/bin/litespeed"
-        state: link
-        force: true
-
     - name: Create writable server-root-relative runtime dirs (OLS writes these unconditionally; not config-relocatable)
       ansible.builtin.file:
         path: "{{ turbopanel_vendor_dir }}/openlitespeed/{{ openlitespeed_version }}/{{ item }}"
@@ -145,6 +138,34 @@
     owner: "{{ openlitespeed_service_user }}"
     group: "{{ openlitespeed_service_group }}"
     mode: "0750"
+
+# Outside the first-install block on purpose: a host upgraded over an older
+# vendored 1.9.1 tree skips the install above and would never get the link,
+# leaving lswsctrl ("Cannot find .../bin/litespeed") crash-looping the service.
+- name: Re-check vendored OpenLiteSpeed binary
+  ansible.builtin.stat:
+    path: "{{ turbopanel_vendor_dir }}/openlitespeed/{{ openlitespeed_version }}/bin/openlitespeed"
+    follow: false
+  register: _openlitespeed_bin
+
+- name: Assert vendored OpenLiteSpeed binary is a regular file
+  ansible.builtin.assert:
+    that:
+      - _openlitespeed_bin.stat.exists
+      - _openlitespeed_bin.stat.isreg
+    fail_msg: >-
+      {{ turbopanel_vendor_dir }}/openlitespeed/{{ openlitespeed_version }}/bin/openlitespeed
+      is missing or not a regular file; refusing to link litespeed to it.
+
+- name: Create litespeed exec name expected by lswsctrl
+  ansible.builtin.file:
+    src: "openlitespeed"
+    dest: "{{ turbopanel_vendor_dir }}/openlitespeed/{{ openlitespeed_version }}/bin/litespeed"
+    state: link
+    follow: false
+    force: true
+    owner: root
+    group: "{{ turbopanel_group }}"
 
 - name: Harden OpenLiteSpeed binary permissions
   ansible.builtin.file:

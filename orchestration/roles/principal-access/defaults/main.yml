@@ -1,6 +1,7 @@
 ---
-# Host prerequisites for tenant SSH access: the two Match groups the daemon's
-# sshd drop-in selects on, and the root-owned directory the panel writes
+# Host prerequisites for tenant SSH access: the Match groups the daemon's
+# sshd drop-in selects on (including tpprincipal, which every principal holds),
+# and the root-owned directory the panel writes
 # authorized_keys files into.
 #
 # The groups are read from the shared registry at

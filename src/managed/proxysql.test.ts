@@ -9,6 +9,7 @@ import {
   assertThrows,
 } from "@std/assert";
 import { join } from "@std/path";
+import { parse as parseYaml } from "yaml";
 import {
   assertManagedIngressPortsBindable,
   assertNoFrontendUserConflict,
@@ -666,6 +667,45 @@ test("buildProxySqlAdminStatements sets monitor variables when provided", () => 
   assertStringIncludes(joined, "SET pgsql-monitor_password='mon-s3cret'");
   assertStringIncludes(joined, "SET mysql-monitor_username='tp_monitor'");
   assertStringIncludes(joined, "LOAD PGSQL VARIABLES TO RUNTIME");
+});
+
+test("proxysqlCompose links the Organization CA leaf as ProxySQL's frontend TLS before start", () => {
+  // ProxySQL serves client TLS only from <datadir>/proxysql-{cert,key,ca}.pem
+  // and auto-generates a self-signed pair when they are absent, which breaks
+  // sslmode=verify-full against the Organization CA.
+  const service = parseYaml(
+    proxysqlCompose(null, ["0.0.0.0"], [], null, MANAGED_NETWORK),
+  ).services.proxysql;
+  assertEquals(service.command.slice(0, 2), ["/bin/sh", "-c"]);
+  const script: string = service.command[2];
+  for (
+    const link of [
+      "ln -sf certs/fullchain.pem /var/lib/proxysql/proxysql-cert.pem",
+      "ln -sf certs/privkey.pem /var/lib/proxysql/proxysql-key.pem",
+      "ln -sf certs/ca.pem /var/lib/proxysql/proxysql-ca.pem",
+    ]
+  ) {
+    assertStringIncludes(script, `${link} && `);
+  }
+  assertEquals(
+    script.endsWith(
+      "&& exec proxysql -f --idle-threads -D /var/lib/proxysql",
+    ),
+    true,
+  );
+  // Directory mount (not per-file) so a rewritten PEM is visible to RELOAD TLS.
+  assertEquals(
+    service.volumes.includes("./tls:/var/lib/proxysql/certs:ro"),
+    true,
+  );
+});
+
+test("buildProxySqlAdminStatements reloads frontend TLS last", () => {
+  const statements = buildProxySqlAdminStatements({
+    bindAddresses: ["0.0.0.0"],
+    clusters: [clusterDesired()],
+  }, { monitor: { user: "tp_monitor", password: "mon-s3cret" } });
+  assertEquals(statements.at(-1), "PROXYSQL RELOAD TLS");
 });
 
 test("proxysqlCompose mounts admin.cnf at the admin defaults path", () => {

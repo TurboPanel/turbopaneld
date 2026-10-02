@@ -42,6 +42,7 @@ const CONSTANTS = [
   "TP_LEGACY_SHELL_RC_NEEDLE",
   "TP_OWNED_TREES",
   "TP_DOCKER_PACKAGES",
+  "TP_OTHER_UNITS",
 ];
 
 function extractFunction(source: string, name: string): string | null {
@@ -225,6 +226,8 @@ const OWNED_PATHS = [
   "/etc/ssh/turbopanel",
   "/var/lib/turbopanel",
   "/var/lib/turbopanel/state",
+  "/var/lib/turbopanel-build",
+  "/var/lib/turbopanel-build/work/b1",
   "/var/log/turbopanel",
   "/run/turbopanel",
   "/backup",
@@ -601,4 +604,24 @@ test("the Docker gate stage-1 folders are owned trees and are removed with the o
     assertStringIncludes(trees, dir);
     assertStringIncludes(remove, `tp_safe_rm_tree ${dir}`);
   }
+});
+
+test("the build slice is stopped and its unit file removed although it is not turbopanel*", async () => {
+  const units = await Deno.makeTempDir({ prefix: "tp-purge-units-" });
+  await Deno.writeTextFile(join(units, "tpbuild.slice"), "[Slice]\n");
+  await Deno.writeTextFile(join(units, "tpother.slice"), "[Slice]\n");
+  const result = await runPurgeSh(
+    ["tp_unit_present", "tp_collect_unit_names", "tp_remove_unit_files"],
+    [
+      `TP_SYSTEMD_DIRS=${units}`,
+      // No systemctl: discovery falls back to the unit directories.
+      'tp_has_tool() { [ "$1" != systemctl ] && command -v "$1" >/dev/null 2>&1; }',
+      "tp_collect_unit_names",
+      'cat "$TP_TMP/work.unitnames"',
+      "tp_remove_unit_files",
+    ].join("\n"),
+  );
+  assertStringIncludes(result.stdout, "tpbuild.slice\n", result.stderr);
+  assertEquals(await exists(join(units, "tpbuild.slice")), false);
+  assertEquals(await exists(join(units, "tpother.slice")), true);
 });

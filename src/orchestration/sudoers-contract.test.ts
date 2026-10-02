@@ -172,14 +172,13 @@ function grantAllows(entry: string, command: string): boolean {
   return wantArgs === null || glob(wantArgs).test(cArgs);
 }
 
-test("the root grant is tp-host, tp-orchestrate and two pinned engine checks — nothing else", async () => {
+test("the root grant is tp-host, tp-orchestrate and the pinned php-fpm check — nothing else", async () => {
   const entries = (await rootGrantEntries()).sort((a, b) => a.localeCompare(b));
   assertEquals(
     entries,
     [
       "/opt/turbopanel/lib/tp-host",
       "/opt/turbopanel/share/orchestration/scripts/tp-orchestrate",
-      "/opt/turbopanel/vendor/apache/current/bin/httpd -t -f /etc/turbopanel/apache/httpd.conf",
       "/usr/sbin/php-fpm[0-9].[0-9] --fpm-config /etc/turbopanel/php/[0-9].[0-9]/php-fpm.conf --test",
     ].sort((a, b) => a.localeCompare(b)),
   );
@@ -209,6 +208,7 @@ test("known root escapes are refused by the sudoers grant", async () => {
     "/usr/bin/docker run -v /:/h alpine",
     "/usr/bin/journalctl",
     "/opt/turbopanel/vendor/apache/current/bin/httpd -t -f /tmp/evil.conf",
+    "/opt/turbopanel/vendor/apache/current/bin/httpd -t -f /etc/turbopanel/apache/httpd.conf",
     "/usr/sbin/php-fpm8.4 --fpm-config /tmp/x/php-fpm.conf --test",
     "/usr/sbin/php-fpm8.4 --fpm-config /etc/turbopanel/php/8.4/../../../tmp/php-fpm.conf --test",
     "/bin/sh -c id",
@@ -222,7 +222,6 @@ test("known root escapes are refused by the sudoers grant", async () => {
     const command of [
       "/opt/turbopanel/lib/tp-host install -m 0640 a b",
       "/opt/turbopanel/share/orchestration/scripts/tp-orchestrate playbook -i localhost, -c local x.yml",
-      "/opt/turbopanel/vendor/apache/current/bin/httpd -t -f /etc/turbopanel/apache/httpd.conf",
       "/usr/sbin/php-fpm8.4 --fpm-config /etc/turbopanel/php/8.4/php-fpm.conf --test",
     ]
   ) {
@@ -232,6 +231,49 @@ test("known root escapes are refused by the sudoers grant", async () => {
       command,
     );
   }
+});
+
+/** The commands one `tp ALL=(<runas>) NOPASSWD: …` line grants, Jinja rendered. */
+async function runasGrantEntries(runas: string): Promise<string[]> {
+  const template = await Deno.readTextFile(join(orch, SUDOERS_TEMPLATE));
+  const lines = template.split("\n").filter((line) =>
+    line.startsWith(`{{ turbopanel_user }} ALL=(${runas}) NOPASSWD:`)
+  );
+  assertEquals(lines.length, 1, `exactly one grant runs as ${runas}`);
+  return lines[0]!.split("NOPASSWD:")[1]!.split(",").map((raw) =>
+    raw.trim().replaceAll(
+      "{{ turbopanel_vendor_dir }}",
+      "/opt/turbopanel/vendor",
+    )
+  );
+}
+
+test("Apache's config test runs as tpapache with every argument pinned and no env", async () => {
+  const httpd = "/opt/turbopanel/vendor/apache/current/bin/httpd";
+  const config = "/etc/turbopanel/apache/httpd.conf";
+  const entries = await runasGrantEntries("tpapache");
+  assertEquals(entries, [`${httpd} -t -f ${config}`]);
+  const allowed = (command: string) =>
+    entries.some((entry) => grantAllows(entry, command));
+  assertEquals(allowed(`${httpd} -t -f ${config}`), true);
+  for (
+    const command of [
+      `${httpd} -t -f /tmp/evil.conf`,
+      `${httpd} -f ${config} -k start`,
+      `${httpd} -t -f ${config} -C LoadModule`,
+      `${httpd} -t -f ${config} -d /tmp`,
+      `/usr/bin/env ${httpd} -t -f ${config}`,
+      "/bin/sh -c id",
+    ]
+  ) {
+    assertEquals(allowed(command), false, command);
+  }
+  // tpapache is never on the shared engine line, which carries `env`.
+  const template = await Deno.readTextFile(join(orch, SUDOERS_TEMPLATE));
+  const shared = template.split("\n").find((line) =>
+    line.includes("NOPASSWD:") && line.includes("/usr/bin/env")
+  );
+  assertEquals(shared?.includes("tpapache"), false);
 });
 
 test("tp-host is installed root:tp 0750 (never writable by tp) before the sudoers file that names it", async () => {
@@ -399,6 +441,59 @@ test("daemon-install.yml no longer hands the vendor or orchestration trees to tp
       );
     }
   }
+});
+
+test("daemon-install.yml never recursively re-owns the daemon state tree", async () => {
+  // managed/<id>/{config,tls} are engine bind mounts owned by the engine
+  // user/group; a recursive tp:tp on update made MySQL skip its config.
+  const doc = parseYaml(await Deno.readTextFile(join(orch, DAEMON_INSTALL)));
+  const play = (doc as Array<Record<string, unknown>>)[0]!;
+  const tasks = ["pre_tasks", "tasks", "post_tasks"].flatMap((key) =>
+    Array.isArray(play[key]) ? play[key] as Task[] : []
+  );
+  for (const task of tasks) {
+    const file = task["ansible.builtin.file"];
+    if (!file || file.recurse !== true) continue;
+    const loop = Array.isArray(task.loop) ? task.loop.map(String) : [];
+    for (const path of [String(file.path), ...loop]) {
+      assertEquals(
+        path.includes("turbopanel_daemon_state_dir") ||
+          path.includes("/var/lib/turbopanel"),
+        false,
+        `${task.name}: ${path}`,
+      );
+    }
+  }
+});
+
+test("daemon-install.yml leaves per-site PHP config and the lsphp registry to tp-host", async () => {
+  // php/sites/<id>/ is root:<owner>-grp so the owner's PHP can read it and not
+  // change it; a recursive tp:tp on update left every PHP site without config.
+  const doc = parseYaml(await Deno.readTextFile(join(orch, DAEMON_INSTALL)));
+  const play = (doc as Array<Record<string, unknown>>)[0]!;
+  const tasks = ["pre_tasks", "tasks", "post_tasks"].flatMap((key) =>
+    Array.isArray(play[key]) ? play[key] as Task[] : []
+  );
+  for (const task of tasks) {
+    const file = task["ansible.builtin.file"];
+    if (!file || file.recurse !== true) continue;
+    assertEquals(
+      String(file.path).includes("turbopanel_config_dir"),
+      false,
+      `${task.name}: recursive chown of the config tree`,
+    );
+  }
+  const contents = tasks.find((t) =>
+    t.name === "Ensure tp owns the config tree's contents"
+  );
+  const argv = (contents?.["ansible.builtin.command"] as
+    | { argv?: string[] }
+    | undefined)?.argv ?? [];
+  for (const pruned of ["php/sites", "php-sites"]) {
+    const at = argv.indexOf(`{{ turbopanel_config_dir }}/${pruned}`);
+    assertEquals(argv[at - 1], "-path", pruned);
+  }
+  assertEquals(argv.indexOf("-prune") > argv.indexOf("-path"), true);
 });
 
 test("daemon-layout keeps the orchestration tree, binaries and helper root-owned", async () => {
