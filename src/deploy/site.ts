@@ -489,6 +489,8 @@ export function nginxSiteConfig(
   listen [::1]:${site.listenPort};${dockerListen}
   server_name _;
   root ${documentRoot};
+  # Links below the root are followed only when link and target share an owner.
+  disable_symlinks if_not_owner from=$document_root;
   index ${indexFiles};
 
   location / {
@@ -992,8 +994,8 @@ Listen 127.0.0.1:${site.listenPort}${dockerListen}
   ServerName localhost
   DocumentRoot "${documentRoot}"
   <Directory "${documentRoot}">
-    Options Indexes FollowSymLinks
-    AllowOverride All
+    Options Indexes SymLinksIfOwnerMatch
+    AllowOverride AuthConfig FileInfo Indexes Limit Options=Indexes,MultiViews,SymLinksIfOwnerMatch
     Require all granted
   </Directory>${phpBlock}${setenvBlock}
 </VirtualHost>
@@ -1139,7 +1141,7 @@ export function openlitespeedSiteFragment(
     : "";
   return `virtualHost ${name}{
   vhRoot                    ${documentRoot}/
-  allowSymbolLink           1
+  allowSymbolLink           2
   enableScript              ${opts?.php ? 1 : 0}
   restrained                0${openlitespeedVhostIdentityLines(opts?.identity)}
   configFile                ${vhConfigPath}

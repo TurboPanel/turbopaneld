@@ -964,6 +964,18 @@ tp_verb_find() {
       sed "s|^\\.|$_fd_base|"
     return 0
   fi
+  # Where every symlink under a sealed release resolves, physically and as
+  # root (release-links.ts releaseLinkTargetsFindArgs): the daemon refuses a
+  # release whose links land in another principal's home. Only resolved paths
+  # come back, NUL-separated; nothing a link points at is opened.
+  if [ "$#" -eq 9 ] && [ "$1" = "-type" ] && [ "$2" = "l" ] && [ "$3" = "-exec" ] &&
+    [ "$4" = "realpath" ] && [ "$5" = "-m" ] && [ "$6" = "-z" ] && [ "$7" = "--" ] &&
+    [ "$8" = "{}" ] && [ "$9" = "+" ]; then
+    tp_require_class "$_fd_base" principal
+    tp_pin_dir "$_fd_base" || tp_die "no such directory $_fd_base"
+    find -P . -type l -exec realpath -m -z -- {} +
+    return
+  fi
   if [ "$#" -eq 7 ] && [ "$1" = "-type" ] && [ "$2" = "d" ] && [ "$3" = "-exec" ] &&
     [ "$4" = "chmod" ] && [ "$5" = "g+s" ] && [ "$6" = "{}" ] && [ "$7" = "+" ]; then
     tp_require_class "$_fd_base" principal
