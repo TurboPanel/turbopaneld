@@ -110,9 +110,17 @@ type RouteRule = {
   needsBody?: boolean;
 };
 
-const ID = "[^/]+";
+// The engine registers these as `{name:.*}`, so a name may hold slashes (it
+// then names no container, but the engine still routes it): match as it does.
+const ID = ".+";
 
 const ROUTES: readonly RouteRule[] = [
+  // Before the `{name:.*}` container routes, which would swallow them.
+  {
+    method: /^(GET|POST|DELETE)$/,
+    pattern: new RegExp(`^/(containers/${ID}/)?checkpoints(?:/.*)?$`),
+    route: "restricted-group",
+  },
   {
     method: "POST",
     pattern: /^\/containers\/create$/,
@@ -197,10 +205,16 @@ const ROUTES: readonly RouteRule[] = [
     route: "prune",
   },
   { method: "POST", pattern: /^\/auth$/, route: "auth" },
+  // Mutating routes the engine serves that no flow uses: each one is a finding.
+  {
+    method: "PUT",
+    pattern: new RegExp(`^/volumes/${ID}$`),
+    route: "restricted-group",
+  },
 ];
 
 const MUTATING_GROUPS =
-  /^\/(plugins|swarm|nodes|services|tasks|secrets|configs)(?:\/|$)/;
+  /^\/(plugins|swarm|nodes|services|tasks|secrets|configs|debug)(?:\/|$)/;
 /** Read-only API paths (GET/HEAD), one small pattern each. */
 const READ_ROUTES: readonly RegExp[] = [
   /^\/(?:_ping|version|info|events|networks|volumes|plugins)$/,
@@ -749,6 +763,10 @@ async function evaluateByRoute(
       return plain(evaluateBuild(facts.query));
     case "containers.archive.put":
       return plain([{ rule: "archive-put" }]);
+    // Deny by default: a path the table does not know is a finding, whatever
+    // the engine does with it (it may serve a route this table has missed).
+    case "unclassified":
+      return plain([{ rule: "unclassified-route" }]);
     case "restricted-group":
       return plain([{
         rule: "restricted-api-group",

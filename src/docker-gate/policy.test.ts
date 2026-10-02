@@ -504,7 +504,8 @@ test("a path the engine would clean is flagged", async () => {
     ruleNames(
       await verdict({ path: "/containers/../containers/create", body: {} }),
     ),
-    ["path-noncanonical"],
+    // The engine would clean it to a real route; the gate cannot classify the raw path.
+    ["path-noncanonical", "unclassified-route"],
   );
 });
 
@@ -770,4 +771,133 @@ test("a volume mount's Subpath must stay inside the volume, and tmpfs mount opti
     ruleNames(await createVerdict({ Mounts: [tmpfs("exec")] })),
     ["tmpfs-options"],
   );
+});
+
+/**
+ * The engine's router table (moby api/server/router, API 1.4x): every method
+ * and path template it serves, as [method, example path, the gate's route].
+ * `route: undefined` is a read the gate classes `read`. A route the engine
+ * serves and the gate calls `unclassified` must be listed with that name and
+ * is then a finding of its own.
+ */
+const ENGINE_ROUTES: ReadonlyArray<[string, string, string]> = [
+  ["HEAD", "/_ping", "read"],
+  ["GET", "/_ping", "read"],
+  ["GET", "/events", "read"],
+  ["GET", "/info", "read"],
+  ["GET", "/version", "read"],
+  ["GET", "/system/df", "read"],
+  ["POST", "/auth", "auth"],
+  ["GET", "/distribution/alpine/json", "read"],
+  ["GET", "/containers/json", "read"],
+  ["HEAD", "/containers/c1/archive", "containers.archive.get"],
+  ["GET", "/containers/c1/archive", "containers.archive.get"],
+  ["PUT", "/containers/c1/archive", "containers.archive.put"],
+  ["GET", "/containers/c1/export", "read"],
+  ["GET", "/containers/c1/changes", "read"],
+  ["GET", "/containers/c1/json", "read"],
+  ["GET", "/containers/c1/top", "read"],
+  ["GET", "/containers/c1/logs", "read"],
+  ["GET", "/containers/c1/stats", "read"],
+  ["GET", "/containers/c1/attach/ws", "read"],
+  ["GET", "/exec/e1/json", "read"],
+  ["POST", "/containers/create", "containers.create"],
+  ["POST", "/containers/c1/kill", "containers.action"],
+  ["POST", "/containers/c1/pause", "containers.action"],
+  ["POST", "/containers/c1/unpause", "containers.action"],
+  ["POST", "/containers/c1/restart", "containers.action"],
+  ["POST", "/containers/c1/start", "containers.action"],
+  ["POST", "/containers/c1/stop", "containers.action"],
+  ["POST", "/containers/c1/wait", "containers.action"],
+  ["POST", "/containers/c1/resize", "containers.action"],
+  ["POST", "/containers/c1/rename", "containers.action"],
+  ["POST", "/containers/c1/update", "containers.action"],
+  ["POST", "/containers/c1/attach", "containers.attach"],
+  ["POST", "/containers/c1/exec", "containers.exec.create"],
+  ["POST", "/exec/e1/start", "exec.start"],
+  ["POST", "/exec/e1/resize", "exec.start"],
+  ["POST", "/containers/prune", "prune"],
+  ["DELETE", "/containers/c1", "containers.remove"],
+  ["GET", "/containers/c1/checkpoints", "restricted-group"],
+  ["POST", "/containers/c1/checkpoints", "restricted-group"],
+  ["DELETE", "/containers/c1/checkpoints/cp", "restricted-group"],
+  ["GET", "/images/json", "read"],
+  ["GET", "/images/search", "read"],
+  ["GET", "/images/get", "read"],
+  ["GET", "/images/alpine/get", "read"],
+  ["GET", "/images/alpine/history", "read"],
+  ["GET", "/images/alpine/json", "read"],
+  ["POST", "/commit", "commit"],
+  ["POST", "/images/load", "images.load"],
+  ["POST", "/images/create", "images.pull"],
+  ["POST", "/images/alpine/push", "images.write"],
+  ["POST", "/images/alpine/tag", "images.write"],
+  ["POST", "/images/prune", "prune"],
+  ["DELETE", "/images/alpine", "object.remove"],
+  ["POST", "/build", "build"],
+  ["POST", "/build/prune", "prune"],
+  ["GET", "/networks", "read"],
+  ["GET", "/networks/n1", "read"],
+  ["POST", "/networks/create", "networks.create"],
+  ["POST", "/networks/n1/connect", "networks.attach"],
+  ["POST", "/networks/n1/disconnect", "networks.attach"],
+  ["POST", "/networks/prune", "prune"],
+  ["DELETE", "/networks/n1", "object.remove"],
+  ["GET", "/volumes", "read"],
+  ["GET", "/volumes/v1", "read"],
+  ["POST", "/volumes/create", "volumes.create"],
+  ["PUT", "/volumes/v1", "restricted-group"],
+  ["POST", "/volumes/prune", "prune"],
+  ["DELETE", "/volumes/v1", "object.remove"],
+  ["GET", "/plugins", "read"],
+  ["GET", "/plugins/privileges", "restricted-group"],
+  ["POST", "/plugins/pull", "restricted-group"],
+  ["DELETE", "/plugins/p1", "restricted-group"],
+  ["POST", "/swarm/init", "restricted-group"],
+  ["POST", "/services/create", "restricted-group"],
+  ["POST", "/secrets/create", "restricted-group"],
+  ["POST", "/configs/create", "restricted-group"],
+  ["GET", "/nodes", "restricted-group"],
+  ["GET", "/tasks", "restricted-group"],
+  ["GET", "/debug/vars", "restricted-group"],
+  ["GET", "/debug/pprof/heap", "restricted-group"],
+  ["POST", "/session", "session"],
+  ["POST", "/grpc", "grpc"],
+  // `{name:.*}` in the engine: a slash inside the name is still routed.
+  ["POST", "/containers/a/b/start", "containers.action"],
+  ["POST", "/containers/a/b/exec", "containers.exec.create"],
+  ["DELETE", "/containers/a/b", "containers.remove"],
+  ["GET", "/networks/a/b", "read"],
+  ["GET", "/volumes/a/b", "read"],
+];
+
+test("every route the engine serves is classified as intended, bare and under any version prefix", () => {
+  for (const [method, path, expected] of ENGINE_ROUTES) {
+    for (const prefix of ["", ...ENGINE_PREFIXES]) {
+      assertEquals(
+        classifyRoute(method, `${prefix}${path}`).route,
+        expected,
+        `${method} ${prefix}${path}`,
+      );
+    }
+  }
+});
+
+test("an unknown path, or a known path under the wrong method, is a finding (deny by default)", async () => {
+  for (
+    const [method, path] of [
+      ["GET", "/something/new"],
+      ["POST", "/containers/json"],
+      ["PATCH", "/containers/c1/json"],
+      ["GET", "/containers/c1/start"],
+      ["DELETE", "/_ping"],
+    ]
+  ) {
+    const found = await evaluateRequest(
+      { method, path, query: new URLSearchParams() },
+      DEFAULT_POLICY_CONFIG,
+      (p) => Promise.resolve(p),
+    );
+    assertEquals(found.map((v) => v.rule), ["unclassified-route"], path);
+  }
 });
