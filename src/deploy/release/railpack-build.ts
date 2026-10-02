@@ -81,6 +81,12 @@ export const RAILPACK_FRONTEND_IMAGE = "ghcr.io/railwayapp/railpack-frontend";
  */
 export const RAILPACK_FRONTEND_VERSION = RAILPACK_VERSION;
 /**
+ * Registry tag of {@link RAILPACK_FRONTEND_VERSION}. Upstream publishes the
+ * frontend as `v<version>` only; the bare version is a 404 on ghcr.io. Keep in
+ * step with `railpack_frontend_tag` in orchestration/roles/buildkit.
+ */
+export const RAILPACK_FRONTEND_TAG = `v${RAILPACK_FRONTEND_VERSION}`;
+/**
  * `buildctl --oci-layout <name>=<dir>` mount name for the vendored frontend.
  * Purely local to one `buildctl` invocation; it never leaves the build.
  */
@@ -370,7 +376,7 @@ async function installRailpackFrontend(
   tmp: string,
   deps: Required<Pick<EnsureBuildkitRailpackDeps, "runCommand">>,
 ): Promise<void> {
-  const ref = `${RAILPACK_FRONTEND_IMAGE}:${RAILPACK_FRONTEND_VERSION}`;
+  const ref = `${RAILPACK_FRONTEND_IMAGE}:${RAILPACK_FRONTEND_TAG}`;
   logInfo("deploy", `vendoring Railpack frontend ${ref}`);
   const pull = await deps.runCommand("docker", ["pull", ref]);
   if (!pull.success) {
@@ -546,24 +552,36 @@ export async function ensureBuildkitRailpack(
   const present = await resolveTools(layout.runtimesDir);
   if (present) return present;
 
+  let setupError: string | undefined;
   try {
     await runSetup();
   } catch (err) {
+    setupError = err instanceof Error ? err.message : String(err);
     logWarn(
       "deploy",
-      `buildkit-setup playbook failed, trying direct download: ${
-        err instanceof Error ? err.message : String(err)
-      }`,
+      `buildkit-setup playbook failed, trying direct download: ${setupError}`,
     );
   }
 
   const installed = await resolveTools(layout.runtimesDir);
   if (installed) return installed;
 
-  await downloadBuildkitRailpack(layout.runtimesDir, {
-    runCommand,
-    resolveArch,
-  });
+  try {
+    await downloadBuildkitRailpack(layout.runtimesDir, {
+      runCommand,
+      resolveArch,
+    });
+  } catch (err) {
+    // On a managed host the vendor tree is root-owned and outside the daemon's
+    // write allowlist, so the fallback can only fail there; report the playbook
+    // failure that actually needs fixing rather than the fallback's.
+    if (setupError === undefined) throw err;
+    throw new Error(
+      `buildkit-setup playbook failed: ${setupError} (direct download fallback also failed: ${
+        err instanceof Error ? err.message : String(err)
+      })`,
+    );
+  }
 
   const downloaded = await resolveTools(layout.runtimesDir);
   if (downloaded) return downloaded;

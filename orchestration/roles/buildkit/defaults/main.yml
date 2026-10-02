@@ -11,6 +11,9 @@ railpack_version: "0.9.0"
 # RAILPACK_FRONTEND_VERSION in src/deploy/release/railpack-build.ts.
 railpack_frontend_version: "0.9.0"
 railpack_frontend_image: "ghcr.io/railwayapp/railpack-frontend"
+# Upstream tags the frontend `v<version>`; the bare version does not exist on
+# ghcr.io. Keep in step with RAILPACK_FRONTEND_TAG in railpack-build.ts.
+railpack_frontend_tag: "v{{ railpack_frontend_version }}"
 # Optional upstream pin. Empty means "resolve the tag once, at install time, and
 # then never look at the registry again" — the vendored bytes are the pin from
 # that point on. Set it to a `sha256:…` manifest digest to make the *fetch*
