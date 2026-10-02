@@ -86,6 +86,21 @@ async function readAmdVramUsedBytes(
  * temperature, though `mem` never legitimately collides with `edge`/
  * `junction` on real hardware.
  */
+/** amdgpu `mem_busy_percent` — VRAM controller busy, the NVML `utilization.memory` twin. */
+async function readAmdMemoryBusyPercent(
+  device: GpuDeviceCandidates,
+  io: SensorIo,
+): Promise<number | null> {
+  if (device.chip !== AMD_HWMON_CHIP) return null;
+  const raw = (await io.readFile(`${device.path}/device/mem_busy_percent`))
+    ?.trim();
+  if (!raw) return null;
+  const percent = Number(raw);
+  return Number.isFinite(percent) && percent >= 0
+    ? Math.min(100, percent)
+    : null;
+}
+
 async function readMemoryTemperatureCelsius(
   device: GpuDeviceCandidates,
   primarySensor: string | undefined,
@@ -248,13 +263,19 @@ export class SysfsGpuAdapter implements GpuAdapter {
       );
       if (!device) return null;
 
-      const [temperature, power, utilization, memoryUsedBytes] = await Promise
-        .all([
-          resolveTemperature(device.temperature, undefined, this.#io),
-          readGpuPower(device.power, undefined, this.#io),
-          readGpuUtilization(device.utilization, undefined, this.#io),
-          readAmdVramUsedBytes(device, this.#io),
-        ]);
+      const [
+        temperature,
+        power,
+        utilization,
+        memoryUsedBytes,
+        memoryActivityPercent,
+      ] = await Promise.all([
+        resolveTemperature(device.temperature, undefined, this.#io),
+        readGpuPower(device.power, undefined, this.#io),
+        readGpuUtilization(device.utilization, undefined, this.#io),
+        readAmdVramUsedBytes(device, this.#io),
+        readAmdMemoryBusyPercent(device, this.#io),
+      ]);
 
       const memoryTemperatureCelsius = await readMemoryTemperatureCelsius(
         device,
@@ -280,7 +301,7 @@ export class SysfsGpuAdapter implements GpuAdapter {
       return {
         utilizationPercent,
         memoryUsedBytes,
-        memoryActivityPercent: null,
+        memoryActivityPercent,
         temperatureCelsius: temperature.celsius,
         memoryTemperatureCelsius,
         powerWatts,

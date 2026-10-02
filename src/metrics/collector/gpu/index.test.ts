@@ -246,3 +246,52 @@ test("buildGpuSamples keeps temperature/power off the sample — they are hardwa
     assertEquals(Object.hasOwn(samples[0], field), false);
   }
 });
+
+test("buildGpuSamples: an NVIDIA card on nouveau takes the sysfs chain, not DCGM/NVML", async () => {
+  const adapters: GpuAdapterSet = {
+    dcgm: fakeAdapter("dcgm", () => {
+      throw new Error("dcgm must never be consulted for nouveau");
+    }),
+    nvml: fakeAdapter("nvml", () => {
+      throw new Error("nvml must never be consulted for nouveau");
+    }),
+    sysfs: fakeAdapter("sysfs", () => ({ utilizationPercent: 9 })),
+  };
+  const { samples } = await buildGpuSamples(
+    [gpu({ vendor: "nvidia", chip: "nouveau" })],
+    adapters,
+    ctx(),
+  );
+  assertEquals(samples[0].utilizationPercent, 9);
+});
+
+test("buildGpuSamples consults a fallback-only NVIDIA adapter only when DCGM and NVML both had nothing", async () => {
+  let smiCalls = 0;
+  const smi: GpuAdapter = {
+    ...fakeAdapter("nvidia-smi", () => {
+      smiCalls++;
+      return { utilizationPercent: 3, memoryUsedBytes: 34 * 1024 * 1024 };
+    }),
+    fallbackOnly: true,
+  };
+  const nvidia = gpu({ vendor: "nvidia", chip: "nvidia" });
+
+  const withNvml = await buildGpuSamples([nvidia], {
+    dcgm: nullAdapter("dcgm"),
+    nvml: fakeAdapter("nvml", () => ({ utilizationPercent: 40 })),
+    sysfs: nullAdapter("sysfs"),
+    nvidiaSmi: smi,
+  }, ctx());
+  assertEquals(withNvml.samples[0].utilizationPercent, 40);
+  assertEquals(smiCalls, 0);
+
+  const withoutNvml = await buildGpuSamples([nvidia], {
+    dcgm: nullAdapter("dcgm"),
+    nvml: nullAdapter("nvml"),
+    sysfs: nullAdapter("sysfs"),
+    nvidiaSmi: smi,
+  }, ctx());
+  assertEquals(withoutNvml.samples[0].utilizationPercent, 3);
+  assertEquals(withoutNvml.samples[0].memoryUsedBytes, 34 * 1024 * 1024);
+  assertEquals(smiCalls, 1);
+});

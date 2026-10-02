@@ -192,6 +192,8 @@ const TEMP_INPUT_RE = /^temp(\d+)_input$/;
 const FAN_INPUT_RE = /^fan(\d+)_input$/;
 const RAPL_PACKAGE_DIR_RE = /^intel-rapl:\d+$/;
 const RAPL_SUBDOMAIN_RE = /^intel-rapl:\d+:\d+$/;
+/** hwmon GPU power gauges in preference order (microwatts). */
+const GPU_POWER_FILENAMES = ["power1_average", "power1_input"] as const;
 /** RAPL PP1 — client GPU power plane. Kernel sysfs name is `uncore`; perf RAPL event is `energy-gpu`. */
 const RAPL_GPU_DOMAIN_NAMES: ReadonlySet<string> = new Set([
   "uncore",
@@ -267,12 +269,15 @@ async function hwmonGpuDevice(
     PREFERRED_GPU_TEMP_LABELS,
   );
   const power: SensorCandidate[] = [];
-  if (files.includes("power1_average")) {
+  // amdgpu on newer ASICs (RDNA3+/APUs on 6.x kernels) exposes only the
+  // instantaneous `power1_input`; older ones only `power1_average`.
+  const powerFile = GPU_POWER_FILENAMES.find((name) => files.includes(name));
+  if (powerFile) {
     const labelRaw = await io.readFile(`${dir}/power1_label`);
     power.push({
       chip,
       label: labelRaw?.trim() || "power1",
-      path: `${dir}/power1_average`,
+      path: `${dir}/${powerFile}`,
     });
   }
   const fan = await hwmonFanCandidates(dir, chip, files, io);
@@ -421,6 +426,36 @@ function engineSort(a: string, b: string): number {
 }
 
 const GT_DIR_RE = /^gt\d+$/;
+const TILE_DIR_RE = /^tile\d+$/;
+
+/**
+ * Xe (`xe` driver: Lunar Lake, Battlemage, Meteor Lake on xe) has no
+ * `gt/gtN/rc6_residency_ms`; its GT-C6 residency lives at
+ * `device/tileN/gtM/gtidle/idle_residency_ms` (kernel `xe_gt_idle.c`), in the
+ * same milliseconds-in-C6 unit, so it feeds the same awake-ratio fallback.
+ */
+async function findXeIdleResidencyPath(
+  cardPath: string,
+  io: SensorIo,
+): Promise<string | undefined> {
+  const deviceRoot = `${cardPath}/device`;
+  const tiles = [...await io.listDir(deviceRoot)]
+    .filter((name) => TILE_DIR_RE.test(name))
+    .sort((a, b) => a.localeCompare(b));
+  const candidates = (await Promise.all(
+    tiles.map(async (tile) =>
+      [...await io.listDir(`${deviceRoot}/${tile}`)]
+        .filter((name) => GT_DIR_RE.test(name))
+        .sort((a, b) => a.localeCompare(b))
+        .map((gt) => `${deviceRoot}/${tile}/${gt}/gtidle/idle_residency_ms`)
+    ),
+  )).flat();
+  const reads = await Promise.all(
+    candidates.map(async (path) => await io.readFile(path)),
+  );
+  const index = reads.findIndex((text) => text !== undefined);
+  return index >= 0 ? candidates[index] : undefined;
+}
 
 /**
  * World-readable i915/Xe RC6 residency, used as a GT-awake utilization
@@ -441,7 +476,7 @@ export async function findIntelRc6ResidencyPath(
   }
   const legacy = `${cardPath}/power/rc6_residency_ms`;
   if ((await io.readFile(legacy)) !== undefined) return legacy;
-  return undefined;
+  return await findXeIdleResidencyPath(cardPath, io);
 }
 
 /**

@@ -20,6 +20,7 @@ import { ProxySqlDatabaseProxyAdapter } from "./database-proxy/proxysql.ts";
 import { EventCollectorSet } from "./events/index.ts";
 import type { GpuAdapterSet } from "./gpu/adapter.ts";
 import { DcgmGpuAdapter } from "./gpu/dcgm-adapter.ts";
+import { NvidiaSmiGpuAdapter } from "./gpu/nvidia-smi-adapter.ts";
 import { NvmlGpuAdapter } from "./gpu/nvml-adapter.ts";
 import { SysfsGpuAdapter } from "./gpu/sysfs-adapter.ts";
 import type { IngressAdapterSet } from "./ingress/adapter.ts";
@@ -116,6 +117,7 @@ export {
   buildGpuSamples,
   DCGM_EXPORTER_ADDR,
   DcgmGpuAdapter,
+  NvidiaSmiGpuAdapter,
   NvmlGpuAdapter,
   SysfsGpuAdapter,
 } from "./gpu/index.ts";
@@ -227,6 +229,7 @@ function defaultGpuAdapters(): GpuAdapterSet {
       dcgm: new DcgmGpuAdapter(),
       nvml: new NvmlGpuAdapter(),
       sysfs: new SysfsGpuAdapter(),
+      nvidiaSmi: new NvidiaSmiGpuAdapter(),
     };
   }
   return cachedGpuAdapters;

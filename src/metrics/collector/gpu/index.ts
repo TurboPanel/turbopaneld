@@ -49,6 +49,7 @@ export type {
   GpuThermalReading,
 } from "./adapter.ts";
 export { DCGM_EXPORTER_ADDR, DcgmGpuAdapter } from "./dcgm-adapter.ts";
+export { NvidiaSmiGpuAdapter } from "./nvidia-smi-adapter.ts";
 export { NvmlGpuAdapter } from "./nvml-adapter.ts";
 export { SysfsGpuAdapter } from "./sysfs-adapter.ts";
 
@@ -127,11 +128,20 @@ function mergeReadings(
 }
 
 /** Vendor-scoped adapter precedence chain — never mixed per GPU (see module doc). */
+/**
+ * NVIDIA's proprietary driver answers through DCGM, then NVML, then
+ * nvidia-smi. An NVIDIA card on `nouveau` has none of those — its telemetry
+ * is the nouveau hwmon chip — so it takes the sysfs chain like AMD/Intel.
+ */
 function adapterChainFor(
-  vendor: string,
+  gpu: GpuTopology,
   adapters: GpuAdapterSet,
 ): GpuAdapter[] {
-  if (vendor === "nvidia") return [adapters.dcgm, adapters.nvml];
+  if (gpu.vendor === "nvidia" && gpu.chip !== "nouveau") {
+    const chain = [adapters.dcgm, adapters.nvml];
+    if (adapters.nvidiaSmi) chain.push(adapters.nvidiaSmi);
+    return chain;
+  }
   return [adapters.sysfs];
 }
 
@@ -170,11 +180,16 @@ export async function buildGpuSamples(
   const readCtx: GpuReadContext = ctx;
 
   const merged = await Promise.all(topology.map(async (gpu) => {
-    const chain = adapterChainFor(gpu.vendor, adapters);
-    // Adapters for one GPU run one after another, in precedence order.
+    const chain = adapterChainFor(gpu, adapters);
+    // Adapters for one GPU run one after another, in precedence order; a
+    // fallback-only adapter is skipped once an earlier one answered.
+    let answered = false;
     const attempts = await mapSequential(chain, async (adapter) => {
+      if (adapter.fallbackOnly && answered) return null;
       try {
-        return await adapter.read(gpu, readCtx);
+        const reading = await adapter.read(gpu, readCtx);
+        if (reading !== null) answered = true;
+        return reading;
       } catch {
         return null;
       }
