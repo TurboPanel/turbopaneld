@@ -347,7 +347,23 @@ export const GATE_ENV_KEYS = [
   "TP_DOCKER_GATE_PLATFORM_RW_ROOTS",
   "TP_DOCKER_GATE_APPROVAL_PUBKEY",
   "TP_DOCKER_GATE_SUMMARY_SEC",
+  "TP_DOCKER_GATE_LOAD_CHECK",
 ] as const;
+
+/**
+ * Deploy pre-flight (`TP_DOCKER_GATE_LOAD_CHECK=1`): by the time this runs every
+ * import has resolved; parse the configuration too (it throws on a bad one)
+ * and report whether the process should exit instead of serving.
+ */
+export function loadCheckPassed(
+  env: Env,
+  log: (record: LogRecord) => void,
+): boolean {
+  if (env.TP_DOCKER_GATE_LOAD_CHECK !== "1") return false;
+  loadConfig(env);
+  log({ level: "info", event: "docker-gate.load-check-ok" });
+  return true;
+}
 
 if (import.meta.main) {
   const log = jsonLogger();
@@ -355,6 +371,7 @@ if (import.meta.main) {
     const env = Object.fromEntries(
       GATE_ENV_KEYS.map((key) => [key, Deno.env.get(key)]),
     );
+    if (loadCheckPassed(env, log)) Deno.exit(0);
     const gate = await startGate(loadConfig(env), log);
     const shutdown = async () => {
       await gate.stop();

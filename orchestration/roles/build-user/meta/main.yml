@@ -1,0 +1,15 @@
+---
+galaxy_info:
+  author: turbopanel
+  description: >-
+    Provision the tpbuild system account (uid/gid 9994, not in docker or tp),
+    the root-owned /var/lib/turbopanel-build tree and tpbuild.slice that
+    tp-host build-run runs sandboxed tenant builds in.
+  license: AGPL-3.0
+  min_ansible_version: "2.14"
+  platforms:
+    - name: Debian
+      versions:
+        - all
+
+dependencies: []

@@ -85,6 +85,9 @@
   roles:
     - role: daemon-layout
     - role: principal-access
+    # tpbuild, /var/lib/turbopanel-build and tpbuild.slice for tp-host
+    # build-run's sandboxed builds.
+    - role: build-user
     - role: deno-runtime
     - role: daemon-config
     - role: daemon-launch

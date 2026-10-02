@@ -344,20 +344,40 @@ still pipes the downloaded script through `sudo sh -s`. Flags (`--license`,
 separate update binary installed under `/opt/turbopanel/bin/`.
 
 `run.sh --daemon-only` on a host that already has the control-plane binary
-and a socket-mode `daemon.env` (no `TURBOPANEL_INSTANCE_URL`) runs
-`daemon-colocated-refresh.yml`. That play refreshes the daemon unit, keeps
+and a `colocated=1` update-origin pin (or no pin: a host installed before
+pins) runs `daemon-colocated-refresh.yml`. Detection reads root-owned files
+only (`tp_colocated_control_plane_host`), never `daemon.env`. That play refreshes the daemon unit, keeps
 `After=turbopanel-instance.service`, and does not recurse-chown state or
 config. It does not run `daemon-install.yml`. It does re-install the root
 helpers from the new orchestration tree first (`turbopanel-user`
 `tasks_from: root-helpers` — `lib/tp-host`, `lib/tp-host.conf` and
 `/etc/sudoers.d/tp`, `visudo -cf`-validated), so a tp-host fix reaches a
 self-hosted panel host; every play that replaces the daemon binary ships the
-matching tp-host (`sudoers-contract.test.ts` pins this). A remote node, or a `daemon.env`
-that already dials a URL, still uses the remote installer.
+matching tp-host (`sudoers-contract.test.ts` pins this). A remote node still
+uses the remote installer, and the play refuses a `daemon.env` that already
+dials a URL.
+
+**The refresh never takes settings from `daemon.env`.** It runs as root and
+the daemon can rewrite `daemon.env`, so its settings live in
+`/opt/turbopanel/lib/control-plane-refresh` (`root:root 0600`, beside
+`lib/update-origin`): `channel=` (allowlisted), `instance_manifest_url=` and
+`ui_manifest_url=` (each `tp_release_manifest_url_ok`-validated on read; an
+invalid value reads as empty). The instance CA and `DL_BASE` are not carried —
+a control-plane host has neither. `run.sh --instance` writes the file at
+install; every refresh rewrites it (a caller's channel and
+`--instance-manifest-url`/`--ui-manifest-url` replace the recorded values).
+**Migration:** a host installed before this file has none, so its first
+refresh reads those three keys from `daemon.env` once, validates them the same
+way, records them, and never reads `daemon.env` again
+(`tp_load_control_plane_refresh`). `daemon.env` itself is daemon-only:
+`daemon-config` writes it `0600` (was `0640`), so the control-plane accounts in
+group `tp` cannot read it; the next refresh or converge tightens existing
+hosts.
 
 On such a host `--daemon-only` needs **no license and no manifest pin**
 (`tp_prepare_colocated_daemon_only`): the play does not enrol, the channel
-comes from `daemon.env` when the caller names none (default `release`), and
+comes from `lib/control-plane-refresh` when the caller names none (default
+`release`), and
 the manifest from that channel's built-in rail — signature-verified by
 `tp_fetch_channel_manifest` like every install. A remote daemon still needs
 `TURBOPANEL_LICENSE` (or `license.id`/`license.token`) and a pinned manifest.

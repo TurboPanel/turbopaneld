@@ -60,6 +60,9 @@
     - role: principal-access
     - role: rapl-access
     - role: time-sync
+    # tpbuild, /var/lib/turbopanel-build and tpbuild.slice for tp-host
+    # build-run's sandboxed builds.
+    - role: build-user
     # Existing Docker hosts get the observe-mode gate on their next converge;
     # the role is a no-op where Docker is absent (docker-setup installs it
     # there, via the docker role).

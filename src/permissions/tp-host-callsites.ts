@@ -178,6 +178,13 @@ const SITES: CallSite[] = [
     argv: ["rm", "-rf", "--", SITE],
     setup: dir(SITE),
   }),
+  tpHost(
+    'src/commands/stop-environment.ts|["-n","rm","-rf","--",deploymentDir]',
+    {
+      argv: ["rm", "-rf", "--", `${STATE}/deployments/proj1/env1`],
+      setup: dir(`${STATE}/deployments/proj1/env1/data`),
+    },
+  ),
 
   // --- systemd unit sets (tenant cron, scheduled backups) ------------------
   tpHost(
@@ -940,8 +947,9 @@ const SITES: CallSite[] = [
     },
   ),
   sudo(
-    'src/deploy/site/engine-driver.ts|["-n",apacheBinaryPath(layout),"-t","-f",apacheMainConfigPath(layout)]',
+    'src/deploy/site/engine-driver.ts|["-n","-u","tpapache","--",apacheBinaryPath(layout),"-t","-f",apacheMainConfigPath(layout)]',
     {
+      runas: "tpapache",
       argv: [
         `${VENDOR}/apache/current/bin/httpd`,
         "-t",

@@ -195,7 +195,18 @@ names the file; the gate checks it at start) the start FAILS and
 would lose every route at its next restart. Flipping the switch restarts the
 gate, and a converge with the switch on fails unless the read-only socket
 answers `/_ping` (`state: started` alone passes a crash-looping unit); the
-block's rescue only warns while the switch is off. A switch value other than
+block's rescue only warns while the switch is off (and not being turned on).
+
+**Atomic deploy** (`tasks/deploy.yml`, `rollback.yml`; independent of the switch): the new source is staged in
+`.next` and load-checked (`TP_DOCKER_GATE_LOAD_CHECK=1` makes `main.ts` exit 0 after importing everything and parsing
+its configuration) before anything is replaced; a failure there touches nothing. Then the running gate is probed and
+every file a swap can change (sources, unit, approval key, switch) is snapshotted into `.prev`. After the swap the
+main socket must answer `/_ping` (and the read-only one while the switch is on). Any failure restores the snapshot
+(removing what did not exist), restarts, re-probes, and fails the converge with the original error; with no previous
+gate the unit is stopped and disabled. A rollback that itself fails does not hide the swap's error (both are in the
+failure message), and the restored gate is only waited for when it answered before the swap. `.next`/`.prev` are
+`root:root 0700`. The flow was run in a Linux container against a stub install step: failed swap restores the old files,
+a good swap replaces them and drops `.next`, a broken staged `main.ts` is refused by the load check with nothing replaced. A switch value other than
 yes/no fails the converge before anything changes (a typo never turns it off).
 
 **The switch** (off by default): `docker_gate_ingress_socket: true` writes the
@@ -326,3 +337,11 @@ chunks as the next request), and a form-encoded body is an `form-encoded-body` f
 ahead of the query, so `networkmode=host` could ride in the body of `POST /build`), and a request target holding
 `#` is refused (Go keeps `#` as data: `/build?q=1#&networkmode=host` sets `networkmode`; the gate used to drop it as a
 fragment).
+
+## Route parity
+
+`policy.ts` `ROUTES` / `READ_ROUTES` mirror the engine's router (moby `api/server/router`); `ENGINE_ROUTES` in
+`src/docker-gate/policy.test.ts` lists every route the engine serves and the gate's class for it, bare and under every
+version prefix the engine strips. Container, network and volume names match `.+` because the engine registers them as
+`{name:.*}`. Mutating routes no flow uses (`PUT /volumes/{name}`, checkpoints, `/debug`) are `restricted-group`; any path
+the table does not know is an `unclassified-route` finding (deny by default).

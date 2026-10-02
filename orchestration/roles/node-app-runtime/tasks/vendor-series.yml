@@ -78,3 +78,18 @@
     name: "{{ turbopanel_user }}"
     groups: "{{ node_app_series_group }}"
     append: true
+
+# Sandboxed builds run as tpbuild (the build-user role). This play can run on
+# demand before that role has converged, so the append waits for the account.
+- name: Look up the build account
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ node_app_build_user }}"
+    fail_key: false
+
+- name: Allow the build account to execute this tenant Node series
+  ansible.builtin.user:
+    name: "{{ node_app_build_user }}"
+    groups: "{{ node_app_series_group }}"
+    append: true
+  when: ansible_facts.getent_passwd[node_app_build_user] is not none

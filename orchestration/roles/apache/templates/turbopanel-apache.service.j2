@@ -6,11 +6,18 @@ Conflicts=apache2.service
 
 [Service]
 Type=forking
-# Master starts as root and drops to User/Group from httpd.conf (tpapache).
-# Running the whole unit as tpapache cannot open ErrorLog when the file was
-# root-created, and matches neither the distro apache2 model nor our need to
-# open FHS paths owned root:tpapache mode 0640.
-PIDFile={{ turbopanel_run_dir }}/apache/httpd.pid
+# The whole unit runs as tpapache: no root master. Apache needs no privilege —
+# every site listens on a loopback high port behind the hosting Caddy, and PHP
+# runs elsewhere. systemd creates the log and pidfile directories owned by
+# tpapache. They are top level, outside the tp-owned /var/log/turbopanel and
+# /run/turbopanel, so Apache does not need to be in group tp to reach them.
+User={{ apache_service_user }}
+Group={{ apache_service_group }}
+LogsDirectory={{ apache_logs_directory }}
+LogsDirectoryMode=0750
+RuntimeDirectory={{ apache_runtime_directory }}
+RuntimeDirectoryMode=0750
+PIDFile=/run/{{ apache_runtime_directory }}/httpd.pid
 ExecStart={{ turbopanel_vendor_dir }}/apache/current/bin/httpd -f {{ turbopanel_config_dir }}/apache/httpd.conf -k start
 ExecReload={{ turbopanel_vendor_dir }}/apache/current/bin/httpd -f {{ turbopanel_config_dir }}/apache/httpd.conf -k graceful
 ExecStop={{ turbopanel_vendor_dir }}/apache/current/bin/httpd -f {{ turbopanel_config_dir }}/apache/httpd.conf -k graceful-stop

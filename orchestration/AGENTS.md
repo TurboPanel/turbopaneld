@@ -156,8 +156,15 @@ deps only: `build-essential`, `libssl-dev`, `libpcre2-dev`, … — not
 `apache2`), and points `current` at that tree. Main config is
 `/etc/turbopanel/apache/httpd.conf` with `IncludeOptional …/sites/*.conf`
 and loads `mod_proxy` + `mod_proxy_fcgi` for PHP. Driven by
-**`turbopanel-apache.service`** (master starts as root and drops to
-`tpapache` via `User`/`Group` in `httpd.conf`). Main config includes a
+**`turbopanel-apache.service`**, which runs the whole server, master
+included, as `tpapache` (`User=`/`Group=` in the unit, none in
+`httpd.conf`). Logs and the pidfile live in the unit's top-level
+`LogsDirectory=turbopanel-apache` / `RuntimeDirectory=turbopanel-apache`
+(`/var/log/turbopanel-apache`, `/run/turbopanel-apache`), never in the
+`tp`-owned trees. A changed unit restarts a running server (`try-restart`);
+a reload would keep the old master. The daemon's config test is
+`sudo -n -u tpapache -- httpd -t -f /etc/turbopanel/apache/httpd.conf`,
+pinned in sudoers. Main config includes a
 bootstrap `Listen 127.0.0.1:19080` so httpd can start before any site
 fragment exists (Apache refuses zero-Listen configs). ASF httpd has **no**
 mod_php — PHP is the sibling `php-fpm` role below.
@@ -186,7 +193,8 @@ engine serves the site.
 
 gids are hand-assigned in the registry, never computed from the version string
 (that breaks the day `8.10` exists). Band **9900–9979** is entitlements;
-**9980–9999** is service identities. `../src/orchestration/service-accounts.test.ts`
+**9980–9999** is service identities (`tpbuild`, the sandboxed build account
+from the `build-user` role, is 9994). `../src/orchestration/service-accounts.test.ts`
 enforces uniqueness across both and that entitlement gids stay inside their band.
 
 **Membership is reconciled by the daemon, not by this role.** The role only

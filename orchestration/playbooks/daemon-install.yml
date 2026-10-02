@@ -61,6 +61,9 @@
     - role: daemon-logs
     - role: principal-access
     - role: rapl-access
+    # tpbuild, /var/lib/turbopanel-build and tpbuild.slice for tp-host
+    # build-run's sandboxed builds.
+    - role: build-user
     - role: daemon-config
     - role: daemon-launch
 
@@ -70,16 +73,28 @@
     # content root executes (tp-orchestrate runs playbooks from it), and the
     # daemon must not be able to rewrite them — see roles/turbopanel-user and
     # roles/daemon-layout.
-    - name: Ensure tp owns state and config trees
+    #
+    # The state directory itself only, never recursively: it holds trees the
+    # daemon deliberately hands to other owners — managed engine bind mounts
+    # (`managed/<id>/{config,tls}`, normalized to root:<engineGroup> and
+    # <engineUser>:<engineGroup>) and tenant-owned deployment trees. A
+    # recursive tp:tp on every `tp-orchestrate update` left MySQL unable to
+    # read its my.cnf and replication CA, falling back to auto-generated TLS
+    # on its next restart.
+    - name: Ensure tp owns the state directory
       ansible.builtin.file:
-        path: "{{ item }}"
+        path: "{{ turbopanel_daemon_state_dir }}"
+        state: directory
+        owner: "{{ turbopanel_user }}"
+        group: "{{ turbopanel_group }}"
+
+    - name: Ensure tp owns the config tree
+      ansible.builtin.file:
+        path: "{{ turbopanel_config_dir }}"
         state: directory
         owner: "{{ turbopanel_user }}"
         group: "{{ turbopanel_group }}"
         recurse: true
-      loop:
-        - "{{ turbopanel_daemon_state_dir }}"
-        - "{{ turbopanel_config_dir }}"
 
     # Galaxy install uses ANSIBLE_HOME=/tmp/turbopanel-ansible (see paths.ts).
     # Roles/collections are already in FHS paths; drop the disposable cache and
