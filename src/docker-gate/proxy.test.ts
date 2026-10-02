@@ -293,6 +293,73 @@ e2e(
   },
 );
 
+/** `text` as a chunked body split in two. */
+function chunkedBody(text: string): string {
+  const half = Math.floor(text.length / 2);
+  return `${half.toString(16)}\r\n${text.slice(0, half)}\r\n` +
+    `${(text.length - half).toString(16)}\r\n${text.slice(half)}\r\n0\r\n\r\n`;
+}
+
+/** POST `body` (raw text) chunked to `path`; the would-deny lines it caused. */
+async function postChunked(
+  h: Harness,
+  path: string,
+  body: string,
+): Promise<LogRecord[]> {
+  h.engine(async (conn) => {
+    await readRequest(conn);
+    await conn.write(encodeText(OK_EMPTY));
+  });
+  const client = await h.connect();
+  await client.write(
+    encodeText(
+      `POST ${path} HTTP/1.1\r\nHost: d\r\nTransfer-Encoding: chunked\r\n` +
+        `Connection: close\r\n\r\n${chunkedBody(body)}`,
+    ),
+  );
+  assertStringIncludes(await timeout(readUntilEof(client)), "200 OK");
+  return h.logs.filter((l) => l.event === "docker-gate.would-deny");
+}
+
+e2e(
+  "a chunked create body with odd-case and escaped field names is judged as the engine reads it",
+  async (h) => {
+    const body = String.raw`{"labels":{"com.docker.compose.project":"p"},` +
+      String.raw`"hostconfig":{"PRIVILEGED":true,"\u0062inds":["/:/h"]}}`;
+    await postChunked(h, "/v1.47/containers/create", body);
+    assertEquals(wouldDeny(h.logs), ["privileged", "bind-host-root"]);
+  },
+);
+
+e2e(
+  "a chunked create body repeating a field is flagged unparseable and still relayed",
+  async (h) => {
+    const body = `{"Labels":{"com.docker.compose.project":"p"},` +
+      `"HostConfig":{"Privileged":true},"HostConfig":{}}`;
+    const lines = await postChunked(h, "/containers/create", body);
+    assertEquals(
+      lines.map((l) => [l.rule, l.detail]),
+      [["body-unparseable", "duplicate-key"], ["unlabeled-create", undefined]],
+    );
+  },
+);
+
+e2e(
+  "a version prefix the engine accepts but clients never send is still judged, and flagged",
+  async (h) => {
+    const body = JSON.stringify({
+      Labels: PROJECT_LABELS,
+      HostConfig: { Privileged: true },
+    });
+    await postChunked(h, "/v1.47.0/containers/create", body);
+    assertEquals(wouldDeny(h.logs), ["path-version-prefix", "privileged"]);
+    assertEquals(
+      h.gate.stats.snapshot().requests[0].route,
+      "containers.create",
+    );
+  },
+);
+
 e2e(
   "a create body over the cap is refused with 413 before the engine is contacted",
   async (h) => {

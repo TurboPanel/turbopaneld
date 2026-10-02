@@ -34,6 +34,7 @@ import {
   wantsClose,
   writeAll,
 } from "./http.ts";
+import { type ParsedBody, parseRequestBody } from "./body.ts";
 import {
   classifyRoute,
   type PolicyConfig,
@@ -100,16 +101,7 @@ class MemorySink implements ByteSink {
   }
 }
 
-type BufferedBody = { raw: Uint8Array; json: unknown };
-
-function parseJson(bytes: Uint8Array): unknown {
-  if (bytes.length === 0) return undefined;
-  try {
-    return JSON.parse(new TextDecoder().decode(bytes));
-  } catch {
-    return undefined;
-  }
-}
+type BufferedBody = { raw: Uint8Array; parsed: ParsedBody };
 
 /** Read a policy-relevant body fully: raw bytes (to relay) and parsed JSON. */
 async function bufferBody(
@@ -118,14 +110,15 @@ async function bufferBody(
   maxBytes: number,
 ): Promise<BufferedBody> {
   if (framing.kind === "none") {
-    return { raw: new Uint8Array(0), json: undefined };
+    const raw = new Uint8Array(0);
+    return { raw, parsed: parseRequestBody(raw) };
   }
   if (framing.kind === "length") {
     if (framing.length > maxBytes) {
       throw new HttpError(413, "request body too large");
     }
     const raw = await reader.readExact(framing.length);
-    return { raw, json: parseJson(raw) };
+    return { raw, parsed: parseRequestBody(raw) };
   }
   if (framing.kind === "chunked") {
     const sink = new MemorySink();
@@ -133,7 +126,7 @@ async function bufferBody(
     await relayChunked(reader, sink, capture);
     return {
       raw: concatBytes(sink.parts),
-      json: parseJson(concatBytes(capture.chunks)),
+      parsed: parseRequestBody(concatBytes(capture.chunks)),
     };
   }
   throw new HttpError(400, "request body without framing");
@@ -261,7 +254,8 @@ async function judge(
   let buffered: BufferedBody | undefined;
   if (needsBody) {
     buffered = await bufferBody(clientReader, framing, deps.maxBodyBytes);
-    facts.body = buffered.json;
+    facts.body = buffered.parsed.json;
+    facts.bodyError = buffered.parsed.error;
   }
   await review(facts, route, deps);
   return { route, buffered };

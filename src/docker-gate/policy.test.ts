@@ -9,6 +9,7 @@ import {
   type RequestFacts,
   type ResolvePath,
   routePath,
+  versionPrefixIsCanonical,
   type Violation,
 } from "../../orchestration/roles/docker-gate/files/policy.ts";
 
@@ -535,6 +536,9 @@ test("violations never carry environment, commands, labels or auth", async () =>
 test("routePath strips only a leading API version", () => {
   assertEquals(routePath("/v1.43/containers/json"), "/containers/json");
   assertEquals(routePath("/v1/containers/json"), "/containers/json");
+  // The engine's router strips `/v[0-9.]+`, so these route too.
+  assertEquals(routePath("/v1.47.0/containers/json"), "/containers/json");
+  assertEquals(routePath("/v1.47./containers/json"), "/containers/json");
   assertEquals(routePath("/containers/json"), "/containers/json");
   assertEquals(routePath("/images/v1.2/json"), "/images/v1.2/json");
 });
@@ -603,5 +607,72 @@ test("only create calls need their body held for the policy", () => {
       "networks.create",
       "volumes.create",
     ]),
+  );
+});
+
+/** Every spelling of a version prefix the engine's router strips (`/v[0-9.]+`). */
+const ENGINE_PREFIXES = [
+  "/v1.47",
+  "/v1.47.0",
+  "/v1.47.",
+  "/v1",
+  "/v1..47",
+  "/v.",
+];
+
+test("a version-prefixed path classifies exactly like the unprefixed one, allowed and denied routes alike", () => {
+  for (const [method, path] of ROUTE_TABLE) {
+    const bare = routePath(path);
+    for (const prefix of ENGINE_PREFIXES) {
+      assertEquals(
+        classifyRoute(method, `${prefix}${bare}`),
+        classifyRoute(method, bare),
+        `${method} ${prefix}${bare}`,
+      );
+    }
+  }
+});
+
+test("only one /v<major>.<minor> prefix is canonical; every other prefix the engine strips is flagged", async () => {
+  for (
+    const path of [
+      "/containers/create",
+      "/v1.47/containers/create",
+      "/version",
+      "/volumes/v1.2",
+      "/images/v1.2/json",
+    ]
+  ) {
+    assert(versionPrefixIsCanonical(path), path);
+  }
+  for (
+    const path of [
+      "/v1.47.0/containers/create",
+      "/v1.47./containers/create",
+      "/v1/containers/create",
+      "/v./containers/create",
+      "/v1.47/v1.47/containers/create",
+    ]
+  ) {
+    assertFalse(versionPrefixIsCanonical(path), path);
+  }
+  const body = baseCreate();
+  body.HostConfig.Privileged = true;
+  assertEquals(
+    ruleNames(await verdict({ path: "/v1.47.0/containers/create", body })),
+    ["path-version-prefix", "privileged"],
+  );
+  assertEquals(
+    ruleNames(await verdict({ path: "/v1.47/containers/create", body })),
+    ["privileged"],
+  );
+  assertEquals(
+    ruleNames(
+      await verdict({
+        path: "/v1.47./containers/abc/exec",
+        body: { Privileged: true },
+      }),
+    ),
+    ["path-version-prefix", "exec-privileged"],
   );
 });

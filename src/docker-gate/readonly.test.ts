@@ -110,6 +110,46 @@ test("the read-only socket refuses upgrades and request bodies", () => {
   );
 });
 
+/** Reads Traefik makes, and reads and writes the socket must never answer. */
+const RO_TABLE: Array<[string, string]> = [
+  ["GET", "/_ping"],
+  ["HEAD", "/_ping"],
+  ["GET", "/version"],
+  ["GET", "/events"],
+  ["GET", "/containers/json"],
+  ["GET", "/containers/abc/json"],
+  ["GET", "/containers/abc/export"],
+  ["GET", "/containers/abc/logs"],
+  ["GET", "/info"],
+  ["POST", "/containers/create"],
+  ["POST", "/containers/abc/exec"],
+  ["POST", "/exec/abc/start"],
+];
+
+test("the read-only allowlist is the same function with and without a version prefix", () => {
+  for (const [method, path] of RO_TABLE) {
+    assertEquals(
+      readOnlyRefusal(head(method, `/v1.47${path}`)),
+      readOnlyRefusal(head(method, path)),
+      `${method} ${path}`,
+    );
+  }
+});
+
+test("the read-only socket refuses every version prefix but /v<major>.<minor>", () => {
+  const odd = ["/v1.47.0", "/v1.47.", "/v1", "/v.", "/v1.47/v1.47"];
+  for (const [method, path] of RO_TABLE) {
+    for (const prefix of odd) {
+      const reason = readOnlyRefusal(head(method, `${prefix}${path}`));
+      assert(reason !== undefined, `${method} ${prefix}${path}`);
+    }
+  }
+  assertStringIncludes(
+    readOnlyRefusal(head("GET", "/v1.47.0/containers/json")) ?? "",
+    "path",
+  );
+});
+
 /** Read until the peer closes. */
 async function readAll(conn: Deno.Conn): Promise<string> {
   const chunks: string[] = [];
