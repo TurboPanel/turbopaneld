@@ -450,7 +450,9 @@ async function findXeIdleResidencyPath(
         .map((gt) => `${deviceRoot}/${tile}/${gt}/gtidle/idle_residency_ms`)
     ),
   )).flat();
-  const reads = await Promise.all(candidates.map((path) => io.readFile(path)));
+  const reads = await Promise.all(
+    candidates.map(async (path) => await io.readFile(path)),
+  );
   const index = reads.findIndex((text) => text !== undefined);
   return index >= 0 ? candidates[index] : undefined;
 }
