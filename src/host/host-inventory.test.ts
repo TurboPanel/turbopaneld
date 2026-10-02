@@ -771,6 +771,41 @@ describe("host-inventory", () => {
     }
   });
 
+  it("readHostResources leaves virtual display adapters out of the GPU list", () => {
+    resetHostResourcesCacheForTests();
+    const root = Deno.makeTempDirSync({ prefix: "tp-host-virt-gpu-" });
+    const files = new Map<string, string>([
+      [`${root}/sys/class/drm/card0/device/vendor`, "0x1234\n"],
+      [`${root}/sys/class/drm/card0/device/device`, "0x1111\n"],
+      [
+        `${root}/sys/class/drm/card0/device/uevent`,
+        "DRIVER=bochs-drm\nPCI_SLOT_NAME=0000:00:01.0\n",
+      ],
+    ]);
+    try {
+      const resources = readHostResources({
+        procRoot: `${root}/proc`,
+        sysRoot: `${root}/sys`,
+        architecture: "x86_64",
+        nvidiaSmiCsv: () => undefined,
+        readTextFile: (path) => files.get(path),
+        readDirSync: () => [{ name: "card0" }],
+      });
+      assertEquals(resources?.gpus, undefined);
+    } finally {
+      Deno.removeSync(root, { recursive: true });
+      resetHostResourcesCacheForTests();
+    }
+  });
+
+  it("normalizePciSlot lower-cases nvidia-smi hex bus ids", () => {
+    assertEquals(normalizePciSlot("00000000:0A:00.0"), "0000:0a:00.0");
+    assertEquals(
+      parseNvidiaSmiMemoryCsv("00000000:0A:00.0, 16303\n").get("0000:0a:00.0"),
+      16303 * 1024 * 1024,
+    );
+  });
+
   it("readHostResources lists DRM cards via ls when Deno.readDirSync is NotCapable", () => {
     // Deno 2 refuses readDir under /sys inside the daemon's scoped
     // --allow-read=/sys; file reads still work. Fixture mirrors an RTX 5060 Ti

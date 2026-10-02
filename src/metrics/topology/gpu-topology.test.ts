@@ -91,7 +91,7 @@ test("collectGpuTopology: a DRM card without PCI falls back to a drm: hash and u
   const gpus = await collectGpuTopology({
     sysRoot: root,
     io: memoryIo({
-      [`${root}/class/drm/card9/device/vendor`]: "0x1234\n",
+      [`${root}/class/drm/card9/device/vendor`]: "0xabcd\n",
     }, {
       [`${root}/class/drm`]: ["card9"],
       [`${root}/class/hwmon`]: [],
@@ -101,7 +101,7 @@ test("collectGpuTopology: a DRM card without PCI falls back to a drm: hash and u
     gpuId: `drm:${fnv1aHex("card9:unknown")}`,
     kind: "drm",
     pciPath: "",
-    vendor: "0x1234",
+    vendor: "0xabcd",
     chip: "unknown",
   }]);
 });
@@ -212,4 +212,57 @@ test("collectGpuTopology: defaults sysRoot to /sys when omitted", async () => {
   assertEquals(gpus, []);
   assertEquals(listed.includes("/sys/class/drm"), true);
   assertEquals(listed.includes("/sys/class/hwmon"), true);
+});
+
+test("collectGpuTopology: virtual and BMC displays are not GPUs", async () => {
+  const root = "/sys";
+  const card = (n: number) => `${root}/class/drm/card${n}/device`;
+  const gpus = await collectGpuTopology({
+    sysRoot: root,
+    io: memoryIo({
+      // QEMU std-vga on a renamed driver: caught by vendor id.
+      [`${card(0)}/vendor`]: "0x1234\n",
+      [`${card(0)}/uevent`]: "DRIVER=bochs\nPCI_SLOT_NAME=0000:00:01.0\n",
+      [`${card(1)}/vendor`]: "0x1af4\n",
+      [`${card(1)}/uevent`]: "DRIVER=virtio-pci\nPCI_SLOT_NAME=0000:00:02.0\n",
+      // ASPEED BMC VGA: real silicon, no telemetry — caught by driver.
+      [`${card(2)}/vendor`]: "0x1a03\n",
+      [`${card(2)}/uevent`]: "DRIVER=ast\nPCI_SLOT_NAME=0000:05:00.0\n",
+      [`${card(3)}/vendor`]: "0x8086\n",
+      [`${card(3)}/uevent`]: "DRIVER=i915\nPCI_SLOT_NAME=0000:00:03.0\n",
+    }, {
+      [`${root}/class/drm`]: ["card0", "card1", "card2", "card3"],
+      [`${root}/class/hwmon`]: [],
+    }),
+  });
+  assertEquals(gpus.map((g) => g.gpuId), ["pci:0000:00:03.0"]);
+});
+
+test("collectGpuTopology: a legacy radeon card is a GPU only when it registered hwmon", async () => {
+  const root = "/sys";
+  const files = {
+    [`${root}/class/drm/card0/device/vendor`]: "0x1002\n",
+    [`${root}/class/drm/card0/device/uevent`]:
+      "DRIVER=radeon\nPCI_SLOT_NAME=0000:01:05.0\n",
+  };
+  const sensorless = await collectGpuTopology({
+    sysRoot: root,
+    io: memoryIo(files, {
+      [`${root}/class/drm`]: ["card0"],
+      [`${root}/class/hwmon`]: [],
+    }),
+  });
+  assertEquals(sensorless, []);
+
+  const withHwmon = await collectGpuTopology({
+    sysRoot: root,
+    io: memoryIo(files, {
+      [`${root}/class/drm`]: ["card0"],
+      [`${root}/class/drm/card0/device/hwmon`]: ["hwmon2"],
+      [`${root}/class/hwmon`]: [],
+    }),
+  });
+  assertEquals(withHwmon.map((g) => [g.gpuId, g.vendor, g.chip]), [
+    ["pci:0000:01:05.0", "amd", "radeon"],
+  ]);
 });

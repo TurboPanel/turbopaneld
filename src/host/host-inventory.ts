@@ -1,3 +1,4 @@
+import { isNoTelemetryDisplay } from "./display-devices.ts";
 import type { ServerReportedIp } from "./server-addresses.ts";
 
 /**
@@ -1012,7 +1013,8 @@ function nvidiaModelForSlot(
  * (exported for fixture tests).
  */
 export function normalizePciSlot(slot: string): string {
-  const trimmed = slot.trim();
+  // nvidia-smi prints upper-case hex (`00000000:0A:00.0`); sysfs is lower.
+  const trimmed = slot.trim().toLowerCase();
   const colon = trimmed.indexOf(":");
   if (colon <= 0) return trimmed;
   const domain = trimmed.slice(0, colon);
@@ -1110,6 +1112,7 @@ function readGpuFromCard(
   const uevent = parseUeventMap(layout.readTextFile(`${deviceDir}/uevent`));
   const slot = uevent.get("PCI_SLOT_NAME");
   const driver = uevent.get("DRIVER");
+  if (isNoTelemetryDisplay(vendorRaw, driver)) return undefined;
   const gpu: HostGpu = {};
   if (vendorRaw) gpu.vendorId = vendorRaw;
   if (driver) gpu.driver = driver;
