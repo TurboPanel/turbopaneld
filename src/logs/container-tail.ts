@@ -22,6 +22,7 @@ import {
   type LocalDeploymentManifest,
 } from "../deploy/compose-files.ts";
 import { allProjects } from "../deploy/deployment-generations.ts";
+import { SAFE_MANAGED_ID_RE } from "../managed/engine-paths.ts";
 import { sanitizeForLog } from "../util/logger.ts";
 import {
   type MutableTranscriptRedactor,
@@ -56,6 +57,8 @@ export type CollectContainerLogsOptions = {
 export type CollectContainerLogsDeps = {
   runDocker?: RunDockerFn;
   listManifests?: ListManifestsFn;
+  /** Whether `<stateDir>/managed/<project>/docker-compose.yml` exists. */
+  managedComposeExists?: (composePath: string) => Promise<boolean>;
   redactor?: MutableTranscriptRedactor;
   now?: () => number;
 };
@@ -133,9 +136,33 @@ function isOwnedByLocalManifests(
   return false;
 }
 
+async function defaultManagedComposeExists(path: string): Promise<boolean> {
+  try {
+    return (await Deno.stat(path)).isFile;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * A managed engine container: its compose project is the bare managed id and
+ * this daemon wrote that engine's compose file under `<stateDir>/managed`.
+ * Compose stamps the project label itself, so a tenant cannot forge it.
+ */
+async function isOwnedByManagedEngine(
+  composeProject: string,
+  stateDir: string,
+  exists: NonNullable<CollectContainerLogsDeps["managedComposeExists"]>,
+): Promise<boolean> {
+  if (!SAFE_MANAGED_ID_RE.test(composeProject)) return false;
+  return await exists(
+    `${stateDir}/managed/${composeProject}/docker-compose.yml`,
+  );
+}
+
 /**
  * `docker container logs --tail <N> --timestamps`, after confirming the
- * container belongs to a `deployment.json` this daemon wrote.
+ * container belongs to a `deployment.json` or managed engine this daemon wrote.
  */
 export async function collectContainerLogs(
   containerId: string,
@@ -172,7 +199,16 @@ export async function collectContainerLogs(
 
   const { composeProject, composeService } = parseComposeLabels(inspect.stdout);
   const manifests = await listManifests({ stateDir: options.stateDir });
-  if (!isOwnedByLocalManifests(composeProject, composeService, manifests)) {
+  const owned = isOwnedByLocalManifests(
+    composeProject,
+    composeService,
+    manifests,
+  ) || await isOwnedByManagedEngine(
+    composeProject,
+    options.stateDir,
+    deps.managedComposeExists ?? defaultManagedComposeExists,
+  );
+  if (!owned) {
     throw new Error("container is not owned by this host");
   }
 
