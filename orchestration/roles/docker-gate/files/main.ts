@@ -347,6 +347,7 @@ export const GATE_ENV_KEYS = [
   "TP_DOCKER_GATE_PLATFORM_RW_ROOTS",
   "TP_DOCKER_GATE_APPROVAL_PUBKEY",
   "TP_DOCKER_GATE_SUMMARY_SEC",
+  "TP_DOCKER_GATE_LOAD_CHECK",
 ] as const;
 
 if (import.meta.main) {
@@ -355,7 +356,13 @@ if (import.meta.main) {
     const env = Object.fromEntries(
       GATE_ENV_KEYS.map((key) => [key, Deno.env.get(key)]),
     );
-    const gate = await startGate(loadConfig(env), log);
+    const config = loadConfig(env);
+    // Deploy pre-flight: every import resolved and the configuration parsed.
+    if (env.TP_DOCKER_GATE_LOAD_CHECK === "1") {
+      log({ level: "info", event: "docker-gate.load-check-ok" });
+      Deno.exit(0);
+    }
+    const gate = await startGate(config, log);
     const shutdown = async () => {
       await gate.stop();
       Deno.exit(0);
