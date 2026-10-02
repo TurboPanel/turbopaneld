@@ -12,23 +12,23 @@
  */
 
 export type RetryFetchOptions = {
-  /** Total attempts including the first. Default 3. */
+  /** Total attempts including the first. Default 4. */
   attempts?: number;
-  /** Wait before retry n (1-based). Default 2 s, then 6 s. */
+  /** Wait before retry n (1-based). Default 2 s, 4 s, 8 s. */
   delayMs?: (retry: number) => number;
   /** Longest wait a `Retry-After` header may impose. Default 10 s. */
   maxRetryAfterMs?: number;
   sleep?: (ms: number) => Promise<void>;
 };
 
-const DEFAULT_ATTEMPTS = 3;
+const DEFAULT_ATTEMPTS = 4;
 const DEFAULT_MAX_RETRY_AFTER_MS = 10_000;
 const TRANSIENT_STATUSES = new Set([429, 502, 503, 504]);
 const TRANSIENT_NETWORK_RE =
-  /ECONNRESET|ETIMEDOUT|EAI_AGAIN|EPIPE|connection (?:reset|closed)|timed? ?out|timeout|broken pipe/i;
+  /ECONNRESET|ETIMEDOUT|EAI_AGAIN|EPIPE|connection (?:reset|closed)|timed? ?out|timeout|broken pipe|temporary failure in name resolution|dns error/i;
 
 function defaultDelayMs(retry: number): number {
-  return retry === 1 ? 2000 : 6000;
+  return 2000 * 2 ** (retry - 1);
 }
 
 function defaultSleep(ms: number): Promise<void> {

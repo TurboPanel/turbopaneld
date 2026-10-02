@@ -788,7 +788,7 @@ test("resolveUpdate retries a 504 on the manifest and keeps the HTTP text when i
       MalformedManifestError,
       "Failed to fetch channel manifest: HTTP 504",
     );
-    assertEquals(calls, 3);
+    assertEquals(calls, 4);
   } finally {
     restore();
   }
