@@ -11,6 +11,10 @@
  */
 
 import { join } from "@std/path";
+import {
+  safeConfigLine,
+  safeConfigToken,
+} from "../../contracts/config-values.ts";
 import type { LayoutPaths } from "../../paths/layout.ts";
 import {
   principalHomePath,
@@ -219,7 +223,7 @@ export function resolveExecStart(params: {
 }): string {
   if (params.startCommand && params.startCommand.trim().length > 0) {
     const command = resolveNativeAppRuntimeStartCommand(
-      params.startCommand.trim(),
+      safeConfigLine("startCommand", params.startCommand.trim()),
       params.nodeBinary,
     );
     return `/bin/sh -c ${quoteSystemdArgument(command)}`;
@@ -408,7 +412,12 @@ export function nativeAppUnitContent(opts: NativeAppUnitOpts): string {
   const lines = [
     "# Managed by TurboPanel — regenerated on deploy; edits are overwritten.",
     "[Unit]",
-    `Description=TurboPanel app ${app.composeServiceName} (${app.serviceId})`,
+    `Description=TurboPanel app ${
+      safeConfigToken(
+        "nativeAppServices[].composeServiceName",
+        app.composeServiceName,
+      )
+    } (${app.serviceId})`,
     `X-TurboPanel-Environment=${opts.environmentId}`,
     ...(labelsLine === null ? [] : [labelsLine]),
     "After=network-online.target",

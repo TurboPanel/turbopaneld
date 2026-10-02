@@ -224,14 +224,16 @@ test("apacheSiteConfig listens on loopback and proxies PHP to php-fpm", () => {
 });
 
 test("phpFpmPoolAdminDirectives drops what it cannot vouch for", () => {
-  // The security property, asserted directly: a value the daemon has not
-  // validated is DROPPED, never escaped. Both render targets are line-oriented
-  // and unquoted, so a dropped value has no escaping bug to have.
-  assertEquals(
-    phpFpmPoolAdminDirectives({
-      settings: { memory_limit: "256M\nevil = 1" },
-    }),
-    [],
+  // The security property, asserted directly: a value outside the allowlist is
+  // REFUSED, never escaped. Both render targets are line-oriented and
+  // unquoted, so a refused value has no escaping bug to have.
+  assertThrows(
+    () =>
+      phpFpmPoolAdminDirectives({
+        settings: { memory_limit: "256M\nevil = 1" },
+      }),
+    Error,
+    "php.settings.memory_limit must use only",
   );
   // An unknown directive never renders, however well-formed it looks.
   assertEquals(
@@ -281,17 +283,21 @@ test("phpFpmPoolOverrides gates pool tuning and drops the rest", () => {
   );
 });
 
-test("phpAdminValues drops empty, over-long, and newline settings", () => {
+test("phpAdminValues drops empty and over-long settings, refuses a newline", () => {
   assertEquals(
     phpAdminValues({
       settings: {
         memory_limit: "   ",
         max_execution_time: "x".repeat(513),
-        display_errors: "Off\nOn",
         upload_max_filesize: "32M",
       },
     }),
     [{ key: "upload_max_filesize", value: "32M" }],
+  );
+  assertThrows(
+    () => phpAdminValues({ settings: { display_errors: "Off\nOn" } }),
+    Error,
+    "php.settings.display_errors must use only",
   );
 });
 

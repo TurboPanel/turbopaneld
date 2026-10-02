@@ -470,7 +470,7 @@ test("buildHostingLabelsFragment rejects unsafe router ids and pathPrefix", () =
         resolved: appResolved,
       }),
     Error,
-    "unsupported character",
+    "hostings[].pathPrefix must be",
   );
 });
 

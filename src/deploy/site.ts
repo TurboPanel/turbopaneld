@@ -65,6 +65,13 @@ import {
 } from "../paths/layout.ts";
 import type { EnvironmentDeploySite } from "../contracts/commands-contracts.ts";
 import {
+  ConfigValueError,
+  hasLineBreakOrControl,
+  safeEnvName,
+  safeEnvValue,
+  safePhpIniValue,
+} from "../contracts/config-values.ts";
+import {
   ensureDirectoryWithOwner,
   ensureEngineGroupMembership,
   principalUnixGroupName,
@@ -387,7 +394,7 @@ export type CaddySiteConfigOpts = Readonly<{
  * drop — never escape, never interpolate.
  */
 function isSafeCaddyEnvValue(value: string): boolean {
-  return !/[{}"\\\r\n]/.test(value);
+  return !/[{}"\\]/.test(value) && !hasLineBreakOrControl(value);
 }
 
 /**
@@ -425,7 +432,8 @@ export function caddySiteConfig(
     // non-existent-`.php`-passthrough hole nginx has to guard by hand.
     const env = Object.entries(site.webEnv ?? {})
       .filter(([key, value]) =>
-        isSafeCaddyEnvValue(key) && isSafeCaddyEnvValue(value)
+        safeEnvName(`sites.${site.composeServiceName}.webEnv`, key) &&
+        isSafeCaddyEnvValue(value)
       )
       .sort(([a], [b]) => a.localeCompare(b));
     if (env.length > 0) {
@@ -604,8 +612,10 @@ export type PhpAdminValue = Readonly<{ key: string; value: string }>;
  * `releaseSymlinkSwap` is scoped the same way, for the reasons on
  * {@link RELEASE_SYMLINK_SWAP_PHP_VALUES}.
  *
- * Anything that fails validation is **dropped**, not escaped: these values land
- * in a config file the web server parses, so a `memory_limit` of
+ * An unknown key, an empty value or an over-long one is **dropped**. A value
+ * outside the {@link safePhpIniValue} alphabet is **refused** (the apply fails
+ * naming the setting), never escaped: these values land in a php-fpm pool and
+ * an OpenLiteSpeed vhconf that root-run masters parse, so a `memory_limit` of
  * `"256M; rm -rf /"` must never round-trip in any syntax.
  */
 export function phpAdminValues(
@@ -627,8 +637,7 @@ export function phpAdminValues(
     if (!isSettablePhpDirective(key) || typeof raw !== "string") continue;
     const value = raw.trim();
     if (value.length === 0 || value.length > 512) continue;
-    if (/[\r\n]/.test(value)) continue;
-    values.push({ key, value });
+    values.push({ key, value: safePhpIniValue(`php.settings.${key}`, value) });
   }
   const openBasedir = opts?.openBasedir;
   if (openBasedir && openBasedir.length > 0) {
@@ -911,6 +920,32 @@ export type ApacheSiteConfigOpts = Readonly<{
   phpFpmSocket?: string | null;
 }>;
 
+/**
+ * One `SetEnv` line, or a refusal naming the variable (never its value: it may
+ * be a decrypted secret).
+ *
+ * The root Apache master reads this file, so the name must be an environment
+ * variable name, the value must stay on its line, and the value must not hold
+ * `${`: Apache expands `${NAME}` from its own environment on every config
+ * line, quoted or not, and has no escape for it.
+ */
+function apacheSetEnvLine(
+  service: string,
+  key: string,
+  raw: string,
+): string {
+  const name = safeEnvName(`sites.${service}.webEnv`, key);
+  const field = `sites.${service}.webEnv.${name}`;
+  const value = safeEnvValue(field, raw);
+  if (value.includes("${")) {
+    throw new ConfigValueError(field, "must not contain ${ in an Apache site");
+  }
+  const escaped = value
+    .replaceAll("\\", String.raw`\\`)
+    .replaceAll('"', String.raw`\"`);
+  return `  SetEnv ${name} "${escaped}"`;
+}
+
 export function apacheSiteConfig(
   site: SiteApplySpec,
   documentRoot: string,
@@ -928,11 +963,9 @@ export function apacheSiteConfig(
   if (site.webEnv) {
     const keys = Object.keys(site.webEnv).sort((a, b) => a.localeCompare(b));
     for (const key of keys) {
-      const raw = site.webEnv[key] ?? "";
-      const escaped = raw
-        .replaceAll("\\", String.raw`\\`)
-        .replaceAll('"', String.raw`\"`);
-      envLines.push(`  SetEnv ${key} "${escaped}"`);
+      envLines.push(
+        apacheSetEnvLine(site.composeServiceName, key, site.webEnv[key] ?? ""),
+      );
     }
   }
   const phpBlock = buildApachePhpBlock(

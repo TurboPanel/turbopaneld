@@ -141,12 +141,12 @@ test("assertSafeHostingPathPrefix and formatCaddyPathMatcher handle path matcher
   assertThrows(
     () => assertSafeHostingPathPrefix("/api`evil"),
     Error,
-    "unsupported character",
+    "hostings[].pathPrefix must be",
   );
   assertThrows(
     () => formatCaddyPathMatcher("/api\n"),
     Error,
-    "unsupported character",
+    "hostings[].pathPrefix must be",
   );
 });
 
