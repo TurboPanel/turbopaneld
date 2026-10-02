@@ -81,6 +81,8 @@ const baseSpec: PrincipalEnsureSpec = {
 };
 
 const defaultHome = "/srv/users/appuser";
+/** The passwd home: the tenant's `home/` inside the root-owned home. */
+const loginHome = `${defaultHome}/home`;
 
 test("ensureSystemPrincipals fresh create without ids uses group name and omits -u", async () => {
   const { run, calls } = captureRun({});
@@ -121,7 +123,7 @@ test("ensureSystemPrincipals fresh create without ids uses group name and omits 
     "-g",
     "appuser-grp",
     "-d",
-    defaultHome,
+    loginHome,
     "-M",
     "-s",
     "/bin/bash",
@@ -129,15 +131,28 @@ test("ensureSystemPrincipals fresh create without ids uses group name and omits 
   ]);
   assertEquals(useradd?.args.includes("-u"), false);
 
-  const installHome = calls.find((c) =>
-    c.command === "sudo" &&
-    c.args.includes("install") &&
-    c.args.includes(defaultHome) &&
-    c.args.includes("0750")
+  // The home is root's (the tenant could otherwise rename what root writes
+  // into); the principal owns only home/, data/ and tmp/. Parent before child.
+  const homeInstalls = calls
+    .filter((c) =>
+      c.command === "sudo" && c.args[1] === "install" &&
+      c.args[c.args.length - 1].startsWith(defaultHome)
+    )
+    .map((c) => c.args.slice(4).join(" "));
+  assertEquals(homeInstalls, [
+    `0750 -o root -g appuser-grp ${defaultHome}`,
+    `0700 -o appuser -g appuser-grp ${defaultHome}/home`,
+    `0700 -o appuser -g appuser-grp ${defaultHome}/data`,
+    `0700 -o appuser -g appuser-grp ${defaultHome}/tmp`,
+    `0750 -o root -g appuser-grp ${defaultHome}/sites`,
+    `0750 -o root -g appuser-grp ${defaultHome}/volumes`,
+  ]);
+  // The account is created before its tenant directories are chowned to it.
+  const useraddAt = calls.findIndex((c) => c.args.includes("useradd"));
+  const firstHomeAt = calls.findIndex((c) =>
+    c.args[1] === "install" && c.args.includes(`${defaultHome}/home`)
   );
-  assertEquals(installHome?.args.includes("-o"), true);
-  assertEquals(installHome?.args.includes("appuser"), true);
-  assertEquals(installHome?.args.includes("appuser-grp"), true);
+  assert(useraddAt < firstHomeAt);
 });
 
 test("ensureSystemPrincipals fresh create with explicit uid/gid passes -u and groupadd -g", async () => {
@@ -172,7 +187,7 @@ test("ensureSystemPrincipals fresh create with explicit uid/gid passes -u and gr
     "-g",
     "appuser-grp",
     "-d",
-    defaultHome,
+    loginHome,
     "-M",
     "-s",
     "/bin/bash",
@@ -243,7 +258,8 @@ test("ensureSystemPrincipals adopts matching home and reconciles shell only", as
     getentGroup: { success: true, stdout: "appuser-grp:x:15001:", stderr: "" },
     getentPasswd: {
       success: true,
-      stdout: "appuser:x:15001:15001::/srv/users/appuser:/usr/sbin/nologin",
+      stdout:
+        "appuser:x:15001:15001::/srv/users/appuser/home:/usr/sbin/nologin",
       stderr: "",
     },
   });
@@ -318,7 +334,8 @@ test("ensureSystemPrincipals rejects an adopted user below the current UID/GID f
     getentGroup: { success: true, stdout: "appuser-grp:x:15001:", stderr: "" },
     getentPasswd: {
       success: true,
-      stdout: "appuser:x:10001:15001::/srv/users/appuser:/usr/sbin/nologin",
+      stdout:
+        "appuser:x:10001:15001::/srv/users/appuser/home:/usr/sbin/nologin",
       stderr: "",
     },
   });
@@ -357,7 +374,7 @@ test("ensureSystemPrincipals refuses foreign home without usermod or install", a
         shell: "/bin/bash",
       }], run),
     Error,
-    "refusing to adopt existing account `appuser` — home `/var/www` does not match `/srv/users/appuser`",
+    "refusing to adopt existing account `appuser` — home `/var/www` does not match `/srv/users/appuser/home`",
   );
   assertEquals(
     calls.some((c) => c.command === "sudo" && c.args.includes("usermod")),
@@ -378,7 +395,7 @@ test("ensureSystemPrincipals rejects existing username with mismatched uid overr
     getentGroup: { success: true, stdout: "appuser-grp:x:15001:", stderr: "" },
     getentPasswd: {
       success: true,
-      stdout: "appuser:x:33:33::/srv/users/appuser:/usr/sbin/nologin",
+      stdout: "appuser:x:33:33::/srv/users/appuser/home:/usr/sbin/nologin",
       stderr: "",
     },
   });
@@ -435,7 +452,7 @@ test("ensureSystemPrincipals adopts existing group when gid override matches", a
     "-g",
     "appuser-grp",
     "-d",
-    defaultHome,
+    loginHome,
     "-M",
     "-s",
     "/bin/bash",
@@ -551,7 +568,8 @@ test("ensureSystemPrincipals rejects home with .. segment", async () => {
   );
 });
 
-test("ensureDirectoryOwnedByPrincipal chowns when mkdir succeeds", async () => {
+test("ensureDirectoryOwnedByPrincipal goes through install -d, never mkdir + chown", async () => {
+  // A writable parent: the daemon could mkdir here, and must not.
   const root = await Deno.makeTempDir({ prefix: "tp-principal-dir-" });
   const path = `${root}/owned`;
   const calls: Array<{ command: string; args: string[] }> = [];
@@ -565,44 +583,22 @@ test("ensureDirectoryOwnedByPrincipal chowns when mkdir succeeds", async () => {
         return Promise.resolve({ success: true, stdout: "", stderr: "" });
       },
     );
-    const st = await Deno.stat(path);
-    assertEquals(st.isDirectory, true);
-    assertEquals(
-      calls.some((c) =>
-        c.command === "sudo" && c.args.includes("chown") &&
-        c.args.includes("appuser:appuser-grp")
-      ),
-      true,
-    );
-  } finally {
-    await Deno.remove(root, { recursive: true });
-  }
-});
-
-test("ensureDirectoryOwnedByPrincipal throws when chown fails", async () => {
-  const root = await Deno.makeTempDir({ prefix: "tp-principal-chown-" });
-  const path = `${root}/owned`;
-  try {
-    await assertRejects(
-      () =>
-        ensureDirectoryOwnedByPrincipal(
-          path,
-          "appuser",
-          "appuser-grp",
-          (command, args) => {
-            if (command === "sudo" && args.includes("chown")) {
-              return Promise.resolve({
-                success: false,
-                stdout: "",
-                stderr: "chown denied",
-              });
-            }
-            return Promise.resolve({ success: true, stdout: "", stderr: "" });
-          },
-        ),
-      Error,
-      "chown denied",
-    );
+    assertEquals(calls, [{
+      command: "sudo",
+      args: [
+        "-n",
+        "install",
+        "-d",
+        "-m",
+        "0750",
+        "-o",
+        "appuser",
+        "-g",
+        "appuser-grp",
+        path,
+      ],
+    }]);
+    await assertRejects(() => Deno.stat(path), Deno.errors.NotFound);
   } finally {
     await Deno.remove(root, { recursive: true });
   }
@@ -705,7 +701,7 @@ test("ensureSystemPrincipals fails when existing passwd line is unparsable", asy
     },
     getentPasswd: {
       success: true,
-      stdout: "appuser:x:bad:bad::/srv/users/appuser:/bin/bash",
+      stdout: "appuser:x:bad:bad::/srv/users/appuser/home:/bin/bash",
       stderr: "",
     },
   });
@@ -732,7 +728,7 @@ test("ensureSystemPrincipals fails when usermod -s fails", async () => {
     if (command === "getent" && args[0] === "passwd") {
       return Promise.resolve({
         success: true,
-        stdout: `appuser:x:15001:15001::${defaultHome}:/bin/false`,
+        stdout: `appuser:x:15001:15001::${loginHome}:/bin/false`,
         stderr: "",
       });
     }
@@ -1318,7 +1314,7 @@ test("ensureSystemPrincipals rejects existing username with mismatched gid overr
     getentGroup: { success: true, stdout: "appuser-grp:x:15001:", stderr: "" },
     getentPasswd: {
       success: true,
-      stdout: `appuser:x:15001:33::${defaultHome}:/usr/sbin/nologin`,
+      stdout: `appuser:x:15001:33::${loginHome}:/usr/sbin/nologin`,
       stderr: "",
     },
   });
@@ -1340,7 +1336,7 @@ test("ensureSystemPrincipals skips usermod when the adopted shell already matche
     getentGroup: { success: true, stdout: "appuser-grp:x:15001:", stderr: "" },
     getentPasswd: {
       success: true,
-      stdout: `appuser:x:15001:15001::${defaultHome}:/bin/bash`,
+      stdout: `appuser:x:15001:15001::${loginHome}:/bin/bash`,
       stderr: "",
     },
   });
@@ -1427,7 +1423,7 @@ test("ensureSystemPrincipals uses generic errors when sudo stderr is empty", asy
     if (command === "getent" && args[0] === "passwd") {
       return Promise.resolve({
         success: true,
-        stdout: `appuser:x:15001:15001::${defaultHome}:/bin/false`,
+        stdout: `appuser:x:15001:15001::${loginHome}:/bin/false`,
         stderr: "",
       });
     }
@@ -1706,35 +1702,6 @@ test("ensurePrincipalPassword uses generic errors when sudo stderr is empty", as
   );
 });
 
-test("ensureDirectoryOwnedByPrincipal uses a generic chown error when stderr is empty", async () => {
-  const root = await Deno.makeTempDir({ prefix: "tp-principal-chown-empty-" });
-  const path = `${root}/owned`;
-  try {
-    await assertRejects(
-      () =>
-        ensureDirectoryOwnedByPrincipal(
-          path,
-          "appuser",
-          "appuser-grp",
-          (command, args) => {
-            if (command === "sudo" && args.includes("chown")) {
-              return Promise.resolve({
-                success: false,
-                stdout: "",
-                stderr: "",
-              });
-            }
-            return Promise.resolve({ success: true, stdout: "", stderr: "" });
-          },
-        ),
-      Error,
-      `Failed to chown ${path}`,
-    );
-  } finally {
-    await Deno.remove(root, { recursive: true });
-  }
-});
-
 test("ensureDirectoryWithOwner default runner pipes stdin and reports output", async () => {
   const original = Deno.Command;
   let wroteStdin = "";
@@ -1794,7 +1761,7 @@ const ADOPTED_USER_CASES: Array<{
   },
   {
     label: "gid override mismatch alone",
-    passwd: "appuser:x:15001:15009::/srv/users/appuser:/usr/sbin/nologin",
+    passwd: "appuser:x:15001:15009::/srv/users/appuser/home:/usr/sbin/nologin",
     spec: { gid: 15001 },
     group: "appuser-grp:x:15001:",
     error:
@@ -1802,7 +1769,7 @@ const ADOPTED_USER_CASES: Array<{
   },
   {
     label: "both overrides mismatched",
-    passwd: "appuser:x:15002:15003::/srv/users/appuser:/usr/sbin/nologin",
+    passwd: "appuser:x:15002:15003::/srv/users/appuser/home:/usr/sbin/nologin",
     spec: { uid: 15001, gid: 15001 },
     group: "appuser-grp:x:15001:",
     error:
@@ -1822,7 +1789,7 @@ const ADOPTED_USER_CASES: Array<{
     spec: {},
     group: "appuser-grp:x:15001:",
     error:
-      "refusing to adopt existing account `appuser` — home `/srv/users/other` does not match `/srv/users/appuser`",
+      "refusing to adopt existing account `appuser` — home `/srv/users/other` does not match `/srv/users/appuser/home`",
   },
 ];
 
@@ -1859,7 +1826,7 @@ test("ensureSystemPrincipals adopts an account below the floor when its uid is a
     getentGroup: { success: true, stdout: "appuser-grp:x:15001:", stderr: "" },
     getentPasswd: {
       success: true,
-      stdout: `appuser:x:15001:15001::${defaultHome}:/bin/bash`,
+      stdout: `appuser:x:15001:15001::${loginHome}:/bin/bash`,
       stderr: "",
     },
   });
@@ -1890,7 +1857,7 @@ test("ensureSystemPrincipals fails when useradd lands below the uid floor (Debia
     if (command === "getent" && args[0] === "passwd" && created) {
       return Promise.resolve({
         success: true,
-        stdout: "appuser:x:10000:15002::/srv/users/appuser:/bin/bash",
+        stdout: "appuser:x:10000:15002::/srv/users/appuser/home:/bin/bash",
         stderr: "",
       });
     }

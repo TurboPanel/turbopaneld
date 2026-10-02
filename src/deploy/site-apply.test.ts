@@ -1835,6 +1835,23 @@ test("a managed-directory site serves from a principal-owned webroot", async () 
     assertEquals(mkdir.args[mkdir.args.indexOf("-g") + 1], "tpnginx");
     assertEquals(mkdir.args[mkdir.args.indexOf("-m") + 1], "0750");
 
+    // `sites/<serviceId>/` itself is root's: the tenant must not be able to
+    // rename the leaves the engine serves (tp-host refuses anything else).
+    const siteRootMkdir = mock.calls.find((c) =>
+      c.args.includes("install") && c.args.includes("-d") &&
+      c.args.at(-1) === siteTreeRoot(layout)
+    );
+    assert(siteRootMkdir);
+    assertEquals(siteRootMkdir.args.slice(-7), [
+      "-m",
+      "0750",
+      "-o",
+      "root",
+      "-g",
+      RELEASE_GROUP,
+      siteTreeRoot(layout),
+    ]);
+
     // The engine joins the principal's group and therefore restarts.
     assertEquals(
       usermodCalls(mock.calls)[0]?.args.slice(-3),

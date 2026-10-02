@@ -2546,12 +2546,15 @@ async function userSupplementaryGroups(user: string): Promise<Set<string>> {
  * caller escalates to a restart for that engine only.
  */
 /**
- * Create a managed-directory site's tree, owned by the principal.
+ * Create a managed-directory site's tree.
  *
- * `0750` with the engine's group, matching the release lane exactly: the owner
- * writes, the serving engine reads through its group membership, and nothing
- * else can traverse in. `install -d` also *repairs*, so a tree left by an
- * earlier layout converges on the next deploy.
+ * `sites/<serviceId>/` is root-owned, group `<username>-grp`, `0750` — the same
+ * shape as the release lane: the tenant cannot rename what sits in it, and the
+ * serving engine traverses it through its membership of the principal's group.
+ * The leaves below it (`webroot/`, `shared/`, the document root) are the
+ * principal's, `0750` with the engine's group: the owner writes, the engine
+ * reads, nothing else can traverse in. `install -d` also *repairs*, so a tree
+ * left by an earlier layout converges on the next deploy.
  *
  * `shared/` is created alongside because `open_basedir` names it — a PHP app
  * that writes uploads or caches outside the document root has one place to put
@@ -2570,9 +2573,14 @@ async function ensureManagedDirectory(
 ): Promise<void> {
   const principalHome = principalHomePath(layout, managed.username);
   const owner = `${managed.username}:${siteEngineUnixUser(site.engine)}`;
+  await ensureDirectoryWithOwner(
+    siteRoot(principalHome, managed.serviceId),
+    "0750",
+    `root:${principalUnixGroupName(managed.username)}`,
+    run,
+  );
   // Parent before child: the directories are created in this order.
   await forEachSequential([
-    siteRoot(principalHome, managed.serviceId),
     siteWebrootDir(principalHome, managed.serviceId),
     siteSharedDir(principalHome, managed.serviceId),
     documentRoot,

@@ -89,7 +89,7 @@ for (const name of [PLAIN, PARTIAL, RANDOM]) {
     const add = calls.find((c) => c.includes("useradd"));
     assert(add, "useradd was not called");
     assert(add.includes(name), "useradd must carry the given name");
-    assert(add.includes(`/srv/users/${name}`));
+    assert(add.includes(`/srv/users/${name}/home`));
     const group = calls.find((c) => c.includes("groupadd"));
     assert(group?.includes(`${name}-grp`));
   });
