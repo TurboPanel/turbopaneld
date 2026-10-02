@@ -149,6 +149,14 @@ tp_path_class() {
   _pc="$1"
   tp_path_shape_ok "$_pc" || return 1
   if tp_under "$_pc" "$R_PRINCIPALS"; then echo principal; return 0; fi
+  # Per-site PHP config and the launcher registry sit inside the config tree
+  # but are never `tree`: only their own verbs and checks write them.
+  case "$_pc" in
+    "$R_CONFIG/php/sites"|"$R_CONFIG/php/sites"/*|"$R_CONFIG/php-sites"|"$R_CONFIG/php-sites"/*)
+      tp_php_path_class "$_pc"
+      return
+      ;;
+  esac
   for _pc_root in "$R_CONFIG" "$R_STATE" "$R_LOG" "$R_RUN" "$R_SSHKEYS"; do
     if tp_under "$_pc" "$_pc_root"; then echo tree; return 0; fi
   done
@@ -158,6 +166,7 @@ tp_path_class() {
   if [ "$_pc_parent" = "$R_UNITS" ]; then
     case "$_pc_name" in
       turbopanel-*.service|turbopanel-*.timer|turbopanel-*.slice) echo unit; return 0 ;;
+      turbopanel-php-*.socket) echo unit; return 0 ;;
     esac
     return 1
   fi
@@ -525,6 +534,10 @@ tp_unit_ok() {
   # the backup check below, or it is refused.
   _uk_backup=""
   case "$_uk_name" in
+    turbopanel-php-*)
+      tp_php_unit_ok "$_uk_file" "$_uk_name"
+      return
+      ;;
     turbopanel-backup-*)
       _uk_backup="$(tp_backup_unit_id "$_uk_name")" || return 1
       ;;
@@ -702,6 +715,663 @@ tp_backup_unit_ok() {
   [ "$_bk_execs" -eq 1 ]
 }
 
+# --- per-site PHP (turbopanel-php-<siteId>) ------------------------------------
+# A site's PHP runs as the site's owner (a principal), started by systemd, never
+# by a root master: FastCGI (php-cgi on a systemd socket), php-fpm (one master
+# per site, Type=notify) or detached lsphp (on a systemd socket). The unit names
+# turbopanel-php-<siteId>.service|.socket are reserved for these shapes, and
+# every line is pinned: the owner, its group and slice, no capabilities, the
+# exec line for the mode and PHP series, the owner's tmp/ bound on /tmp, a
+# read-only system with writes only inside the owner's home, and sockets at the
+# top of /run (never in the daemon's /run/turbopanel). The site's PHP config
+# lives in $R_CONFIG/php/sites/<siteId>/ (root:<owner>-grp, directive
+# allowlist), and $R_CONFIG/php-sites/<siteId> is the registry the attached
+# lsphp launcher reads (written only by `php-site-register`).
+
+# Web server accounts that talk to a site's PHP socket (Caddy serves no PHP).
+PHP_WEB_GROUPS="tpnginx tpapache tpols"
+
+# A site id: lower-case letters, digits and dashes, at most 64, no leading dash.
+tp_php_site_id_ok() {
+  case "$1" in
+    ''|-*|*[!a-z0-9-]*) return 1 ;;
+  esac
+  [ "${#1}" -le 64 ]
+}
+
+# A PHP series, e.g. 8.4.
+tp_php_series_ok() {
+  case "$1" in
+    [78].[0-9]) return 0 ;;
+  esac
+  return 1
+}
+
+tp_php_web_group_ok() {
+  case " $PHP_WEB_GROUPS " in
+    *" $1 "*) tp_gid_of_group "$1" >/dev/null ;;
+    *) return 1 ;;
+  esac
+}
+
+# The site id in turbopanel-php-<siteId>.service|.socket, printed.
+tp_php_unit_site() {
+  case "$1" in
+    turbopanel-php-*.service) _pu_site="${1%.service}" ;;
+    turbopanel-php-*.socket) _pu_site="${1%.socket}" ;;
+    *) return 1 ;;
+  esac
+  _pu_site="${_pu_site#turbopanel-php-}"
+  tp_php_site_id_ok "$_pu_site" || return 1
+  printf '%s' "$_pu_site"
+}
+
+# Shape pass over a per-site PHP unit: known sections and directives only, no
+# continuation, no exec prefix. Prints one `Section.Key=value` line per
+# directive for the value checks below.
+tp_php_unit_lines() {
+  awk -v kind="$2" '
+    function fail(msg) { print "tp-host: php unit: " msg > "/dev/stderr"; bad = 1; exit 1 }
+    BEGIN {
+      split("Description After Before Wants Requires PartOf", a, " ")
+      for (i in a) ok["Unit", a[i]] = 1
+      ok["Install", "WantedBy"] = 1
+      if (kind == "socket") {
+        split("ListenStream SocketUser SocketGroup SocketMode DirectoryMode Accept RemoveOnStop", b, " ")
+        for (i in b) ok["Socket", b[i]] = 1
+      } else {
+        ok["Unit", "StartLimitBurst"] = 1
+        ok["Unit", "StartLimitIntervalSec"] = 1
+        split("Type User Group Slice ExecStart ExecReload Environment Restart RestartSec NoNewPrivileges CapabilityBoundingSet AmbientCapabilities ProtectSystem ProtectHome PrivateDevices ProtectKernelTunables ProtectKernelModules ProtectControlGroups RestrictSUIDSGID RestrictRealtime LockPersonality BindPaths ReadWritePaths RuntimeDirectory RuntimeDirectoryMode StandardInput StandardOutput StandardError SyslogIdentifier CPUQuota MemoryMax MemoryHigh TasksMax TimeoutStartSec TimeoutStopSec", b, " ")
+        for (i in b) ok["Service", b[i]] = 1
+      }
+      body = (kind == "socket") ? "Socket" : "Service"
+    }
+    /\\[ \t\r]*$/ { fail("line continuation") }
+    /^[ \t]*$/ || /^[ \t]*[#;]/ { next }
+    /^\[[A-Za-z]+\][ \t]*$/ {
+      section = $0; gsub(/[\[\] \t]/, "", section)
+      if (section != "Unit" && section != body && section != "Install") fail("section [" section "]")
+      next
+    }
+    {
+      eq = index($0, "=")
+      if (eq < 2) fail("line without a key: " $0)
+      key = substr($0, 1, eq - 1); val = substr($0, eq + 1)
+      if (section == "") fail("directive outside a section: " key)
+      if (!((section, key) in ok)) fail("directive " section "." key)
+      if (key ~ /^Exec/ && val ~ /^[-+!:@|]/) fail(key " with an exec prefix")
+      print section "." key "=" val
+    }
+    END { if (bad) exit 1 }
+  ' "$1"
+}
+
+# A dependency list names only this site's own units and standard targets.
+tp_php_deps_ok() {
+  case "$1" in
+    *[!A-Za-z0-9._@' '-]*) return 1 ;;
+  esac
+  for _pd in $1; do
+    case "$_pd" in
+      "turbopanel-php-$2.socket"|"turbopanel-php-$2.service") ;;
+      network.target|network-online.target|sockets.target|local-fs.target) ;;
+      *) return 1 ;;
+    esac
+  done
+}
+
+# Lines common to the service and the socket: the [Unit] block and the
+# [Install] target. Returns 2 for a line that is not one of these.
+tp_php_common_line_ok() {
+  case "$1" in
+    Unit.Description=*) return 0 ;;
+    Unit.After=*|Unit.Before=*|Unit.Wants=*|Unit.Requires=*|Unit.PartOf=*)
+      tp_php_deps_ok "${1#*=}" "$2"
+      return
+      ;;
+    Install.WantedBy=*) [ "${1#*=}" = "$3" ]; return ;;
+  esac
+  return 2
+}
+
+# The mode and series the pinned exec line names, as `mode series`; nothing for
+# any other exec line. FastCGI and lsphp take the socket on stdin.
+tp_php_exec_mode() {
+  _pe_exec="$1"
+  _pe_cfg="$R_CONFIG/php/sites/$2"
+  _pe_lsphp="$INSTALL_ROOT/vendor/lsphp/"
+  case "$_pe_exec" in
+    /usr/bin/php-cgi*)
+      _pe_series="${_pe_exec#/usr/bin/php-cgi}"
+      _pe_series="${_pe_series%% *}"
+      _pe_mode=fastcgi
+      _pe_want="/usr/bin/php-cgi$_pe_series -c $_pe_cfg/php.ini"
+      ;;
+    /usr/sbin/php-fpm*)
+      _pe_series="${_pe_exec#/usr/sbin/php-fpm}"
+      _pe_series="${_pe_series%% *}"
+      _pe_mode=fpm
+      _pe_want="/usr/sbin/php-fpm$_pe_series --nodaemonize --fpm-config $_pe_cfg/php-fpm.conf -c $_pe_cfg/php.ini"
+      ;;
+    "$_pe_lsphp"*)
+      _pe_series="${_pe_exec#"$_pe_lsphp"}"
+      _pe_series="${_pe_series%%/*}"
+      _pe_mode=lsphp
+      _pe_want="$_pe_lsphp$_pe_series/current/bin/lsphp"
+      ;;
+    *) return 1 ;;
+  esac
+  tp_php_series_ok "$_pe_series" || return 1
+  [ "$_pe_exec" = "$_pe_want" ] || return 1
+  printf '%s %s' "$_pe_mode" "$_pe_series"
+}
+
+# One `Environment=` line: a single NAME=value the mode knows, numeric except
+# lsphp's PHPRC, which must name the site's own php.ini.
+tp_php_env_ok() {
+  _pv_name="${1%%=*}"
+  _pv_val="${1#*=}"
+  if [ "$2" = "lsphp" ] && [ "$_pv_name" = "PHPRC" ]; then
+    [ "$_pv_val" = "$R_CONFIG/php/sites/$3/php.ini" ] || return 1
+    _ps_phprc=1
+    return 0
+  fi
+  case "$2:$_pv_name" in
+    fastcgi:PHP_FCGI_CHILDREN|fastcgi:PHP_FCGI_MAX_REQUESTS) ;;
+    lsphp:LSAPI_CHILDREN|lsphp:LSAPI_PGRP_MAX_IDLE|lsphp:LSAPI_MAX_IDLE) ;;
+    lsphp:LSAPI_MAX_REQS|lsphp:LSAPI_MAX_PROCESS_TIME|lsphp:LSAPI_AVOID_FORK) ;;
+    *) return 1 ;;
+  esac
+  case "$_pv_val" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "${#_pv_val}" -le 9 ]
+}
+
+# Every ReadWritePaths= entry is inside the owner's home (never the home itself).
+tp_php_rw_ok() {
+  case "$1" in
+    *[!A-Za-z0-9._@:+,=/' '-]*) return 1 ;;
+  esac
+  for _pw in $1; do
+    _pw="${_pw#-}"
+    tp_path_shape_ok "$_pw" || return 1
+    case "$_pw" in
+      "$2"/?*) ;;
+      *) return 1 ;;
+    esac
+    [ "$_pw" != "$2/tmp" ] || _ps_rwtmp=1
+  done
+  [ -n "$1" ]
+}
+
+# Resource and restart values: a closed alphabet, nothing that could carry a path.
+tp_php_tuning_ok() {
+  case "$1" in
+    Service.Restart=*)
+      case "${1#*=}" in no|on-failure|on-abnormal|always) return 0 ;; esac
+      return 1
+      ;;
+    Service.RestartSec=*|Service.TimeoutStartSec=*|Service.TimeoutStopSec=*|\
+Service.CPUQuota=*|Service.MemoryMax=*|Service.MemoryHigh=*|Service.TasksMax=*|\
+Unit.StartLimitBurst=*|Unit.StartLimitIntervalSec=*)
+      case "${1#*=}" in ''|*[!0-9A-Za-z%.]*) return 1 ;; esac
+      return 0
+      ;;
+    Service.SyslogIdentifier=*) tp_name_shape_ok "${1#*=}"; return ;;
+    Service.ProtectHome=*)
+      case "${1#*=}" in yes|read-only|tmpfs) return 0 ;; esac
+      return 1
+      ;;
+    Service.PrivateDevices=*|Service.ProtectKernelTunables=*|Service.ProtectKernelModules=*|\
+Service.ProtectControlGroups=*|Service.RestrictSUIDSGID=*|Service.RestrictRealtime=*|\
+Service.LockPersonality=*)
+      [ "${1#*=}" = "yes" ]
+      return
+      ;;
+  esac
+  return 2
+}
+
+# The lines every per-site PHP service carries the same way, whatever its mode.
+# Sets _ps_seen as it goes; returns 2 for a line that is not one of these.
+tp_php_service_pinned_ok() {
+  _pl_home="$R_PRINCIPALS/$_ps_user"
+  case "$1" in
+    Service.User=*) [ "${1#*=}" = "$_ps_user" ] ;;
+    Service.Group=*) [ "${1#*=}" = "$_ps_user-grp" ] ;;
+    Service.Slice=*) [ "${1#*=}" = "turbopanel-$_ps_user.slice" ] ;;
+    Service.NoNewPrivileges=*) [ "${1#*=}" = "yes" ] ;;
+    Service.CapabilityBoundingSet=*|Service.AmbientCapabilities=*) [ -z "${1#*=}" ] ;;
+    Service.ProtectSystem=*) [ "${1#*=}" = "strict" ] ;;
+    Service.BindPaths=*) [ "${1#*=}" = "$_pl_home/tmp:/tmp" ] ;;
+    Service.ReadWritePaths=*) tp_php_rw_ok "${1#*=}" "$_pl_home" ;;
+    Service.ExecStart=*) [ "${1#*=}" = "$_ps_exec" ] ;;
+    Service.StandardOutput=*|Service.StandardError=*) [ "${1#*=}" = "journal" ] ;;
+    *) return 2 ;;
+  esac || return 1
+  _pl_key="${1%%=*}"
+  _ps_seen="$_ps_seen ${_pl_key#Service.}"
+}
+
+# The lines that differ by mode: php-fpm is Type=notify with its own runtime
+# directory; FastCGI and lsphp take their socket on stdin.
+tp_php_service_mode_ok() {
+  case "$_ps_mode:$1" in
+    fpm:Service.Type=notify|fpm:"Service.ExecReload=/bin/kill -USR2 \$MAINPID") ;;
+    fpm:Service.RuntimeDirectory=turbopanel-php-"$_ps_site"|fpm:Service.RuntimeDirectoryMode=0711) ;;
+    fastcgi:Service.Type=simple|lsphp:Service.Type=simple) ;;
+    fastcgi:Service.StandardInput=socket|lsphp:Service.StandardInput=socket) ;;
+    *:Service.Environment=*) tp_php_env_ok "${1#*=}" "$_ps_mode" "$_ps_site" || return 1 ;;
+    *) return 1 ;;
+  esac
+  _pm_key="${1%%=*}"
+  _ps_seen="$_ps_seen ${_pm_key#Service.}"
+}
+
+tp_php_service_line_ok() {
+  _psl_rc=0
+  tp_php_common_line_ok "$1" "$_ps_site" "multi-user.target" || _psl_rc=$?
+  if [ "$_psl_rc" -eq 0 ]; then
+    # Only php-fpm starts at boot; FastCGI and lsphp start from their socket.
+    case "$1" in Install.*) [ "$_ps_mode" = "fpm" ] ;; esac
+    return
+  fi
+  [ "$_psl_rc" -eq 2 ] || return 1
+  _psl_rc=0
+  tp_php_tuning_ok "$1" || _psl_rc=$?
+  [ "$_psl_rc" -ne 2 ] && return "$_psl_rc"
+  _psl_rc=0
+  tp_php_service_pinned_ok "$1" || _psl_rc=$?
+  [ "$_psl_rc" -ne 2 ] && return "$_psl_rc"
+  tp_php_service_mode_ok "$1"
+}
+
+# A per-site PHP service: who it runs as and what it runs come from its
+# User= and ExecStart= (each exactly once), then every line is checked against
+# that owner, mode and series, and the lines that make the shape are required.
+tp_php_service_ok() {
+  _ps_file="$1"
+  _ps_site="$2"
+  _ps_lines="$(tp_php_unit_lines "$_ps_file" service)" || return 1
+  [ "$(printf '%s\n' "$_ps_lines" | grep -c '^Service\.ExecStart=')" -eq 1 ] || return 1
+  [ "$(printf '%s\n' "$_ps_lines" | grep -c '^Service\.BindPaths=')" -eq 1 ] || return 1
+  _ps_user="$(printf '%s\n' "$_ps_lines" | sed -n 's/^Service\.User=//p' | head -1)"
+  tp_is_principal "$_ps_user" || return 1
+  tp_is_principal_group "$_ps_user-grp" || return 1
+  _ps_exec="$(printf '%s\n' "$_ps_lines" | sed -n 's/^Service\.ExecStart=//p')"
+  _ps_mode="$(tp_php_exec_mode "$_ps_exec" "$_ps_site")" || return 1
+  _ps_mode="${_ps_mode%% *}"
+  _ps_seen=""
+  _ps_rwtmp=""
+  _ps_phprc=""
+  while IFS= read -r _ps_line; do
+    tp_php_service_line_ok "$_ps_line" || {
+      printf 'tp-host: php unit: refusing %s\n' "$_ps_line" >&2
+      return 1
+    }
+  done <<LINES
+$_ps_lines
+LINES
+  [ -n "$_ps_rwtmp" ] || { printf 'tp-host: php unit: ReadWritePaths= lacks the owner tmp/\n' >&2; return 1; }
+  [ "$_ps_mode" != "lsphp" ] || [ -n "$_ps_phprc" ] ||
+    { printf 'tp-host: php unit: lsphp needs Environment=PHPRC=<its php.ini>\n' >&2; return 1; }
+  _ps_need="User Group Slice NoNewPrivileges CapabilityBoundingSet AmbientCapabilities ProtectSystem BindPaths ExecStart StandardOutput StandardError"
+  case "$_ps_mode" in
+    fpm) _ps_need="$_ps_need Type RuntimeDirectory RuntimeDirectoryMode" ;;
+    *) _ps_need="$_ps_need StandardInput" ;;
+  esac
+  for _ps_key in $_ps_need; do
+    case " $_ps_seen " in
+      *" $_ps_key "*) ;;
+      *) printf 'tp-host: php unit: missing %s=\n' "$_ps_key" >&2; return 1 ;;
+    esac
+  done
+}
+
+tp_php_socket_line_ok() {
+  _pkl_rc=0
+  tp_php_common_line_ok "$1" "$_pk_site" "sockets.target" || _pkl_rc=$?
+  [ "$_pkl_rc" -ne 2 ] && return "$_pkl_rc"
+  case "$1" in
+    Socket.ListenStream=*)
+      case "${1#*=}" in
+        "/run/turbopanel-php-$_pk_site/php.sock"|"/run/turbopanel-php-$_pk_site/lsphp.sock") ;;
+        *) return 1 ;;
+      esac
+      ;;
+    Socket.SocketUser=*) tp_is_principal "${1#*=}" || return 1 ;;
+    Socket.SocketGroup=*) tp_php_web_group_ok "${1#*=}" || return 1 ;;
+    Socket.SocketMode=0660|Socket.DirectoryMode=0711|Socket.DirectoryMode=0755) ;;
+    Socket.Accept=no|Socket.RemoveOnStop=yes|Socket.RemoveOnStop=no) ;;
+    *) return 1 ;;
+  esac
+  _pkl_key="${1%%=*}"
+  _pk_seen="$_pk_seen ${_pkl_key#Socket.}"
+}
+
+# A per-site PHP socket: one stream socket at /run/turbopanel-php-<siteId>/,
+# owned by a principal, group the web server's, mode 0660, no per-connection
+# instances.
+tp_php_socket_ok() {
+  _pk_site="$2"
+  _pk_lines="$(tp_php_unit_lines "$1" socket)" || return 1
+  [ "$(printf '%s\n' "$_pk_lines" | grep -c '^Socket\.ListenStream=')" -eq 1 ] || return 1
+  _pk_seen=""
+  while IFS= read -r _pk_line; do
+    tp_php_socket_line_ok "$_pk_line" || {
+      printf 'tp-host: php socket: refusing %s\n' "$_pk_line" >&2
+      return 1
+    }
+  done <<LINES
+$_pk_lines
+LINES
+  for _pk_key in ListenStream SocketUser SocketGroup SocketMode; do
+    case " $_pk_seen " in
+      *" $_pk_key "*) ;;
+      *) printf 'tp-host: php socket: missing %s=\n' "$_pk_key" >&2; return 1 ;;
+    esac
+  done
+}
+
+tp_php_unit_ok() {
+  _pn_site="$(tp_php_unit_site "$2")" || return 1
+  case "$2" in
+    *.socket) tp_php_socket_ok "$1" "$_pn_site" ;;
+    *) tp_php_service_ok "$1" "$_pn_site" ;;
+  esac
+}
+
+# --- per-site PHP config ($R_CONFIG/php/sites/<siteId>/) ---------------------
+
+# The principal a per-site config group belongs to (`alice` for alice-grp).
+tp_php_conf_owner() {
+  case "$1" in
+    ?*-grp) ;;
+    *) return 1 ;;
+  esac
+  tp_is_principal_group "$1" || return 1
+  tp_is_principal "${1%-grp}" || return 1
+  printf '%s' "${1%-grp}"
+}
+
+# php.ini, or the ini lines of a php-fpm pool (php_value[…] and friends): known
+# directives only, a closed value alphabet, paths only inside the owner's home
+# or /tmp (the owner's tmp/ in the unit's namespace).
+tp_php_ini_awk='
+  function fail(msg) { print "tp-host: php config: " msg > "/dev/stderr"; bad = 1; exit 1 }
+  function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
+  function unquote(s) { if (s ~ /^".*"$/) s = substr(s, 2, length(s) - 2); return s }
+  function path_ok(p) {
+    if (p ~ /\/\/|\/\.\.?(\/|$)/ || p !~ /^\//) return 0
+    # Under the principal root, only the owner home; /tmp is the owner tmp/
+    # inside the unit.
+    if (index(p, principals "/") == 1) return index(p, home "/") == 1
+    return p == "/tmp" || index(p, "/tmp/") == 1
+  }
+  function ini_init(   a, i) {
+    split("memory_limit upload_max_filesize post_max_size max_execution_time max_input_time max_input_vars max_file_uploads default_socket_timeout session.gc_maxlifetime session.gc_probability session.gc_divisor display_errors display_startup_errors log_errors allow_url_fopen file_uploads expose_php short_open_tag session.cookie_secure session.cookie_httponly session.use_strict_mode session.cookie_samesite session.cookie_lifetime session.name opcache.enable opcache.enable_cli opcache.memory_consumption opcache.interned_strings_buffer opcache.max_accelerated_files opcache.revalidate_freq opcache.revalidate_path opcache.validate_timestamps opcache.validate_permission opcache.validate_root error_reporting date.timezone disable_functions realpath_cache_size realpath_cache_ttl output_buffering default_charset variables_order request_order zend.exception_ignore_args mail.add_x_header open_basedir error_log session.save_path upload_tmp_dir sys_temp_dir extension_dir zend_extension", a, " ")
+    for (i in a) inikey[a[i]] = 1
+    split("error_log session.save_path upload_tmp_dir sys_temp_dir", a, " ")
+    for (i in a) pathkey[a[i]] = 1
+  }
+  function ini_ok(key, val,   n, parts, i) {
+    if (!(key in inikey)) fail("directive " key)
+    val = unquote(trim(val))
+    if (val !~ /^[A-Za-z0-9 _.,:\/@=+~&|!^*%-]*$/) fail(key ": value outside the allowed characters")
+    if ((key in pathkey) && !path_ok(val)) fail(key "=" val)
+    if (key == "open_basedir") {
+      n = split(val, parts, ":")
+      for (i = 1; i <= n; i++) if (!path_ok(parts[i])) fail("open_basedir entry " parts[i])
+    }
+    if (key == "extension_dir" && index(val, lsphp) != 1 && val !~ /^\/usr\/lib\/php\/[0-9]+$/) fail("extension_dir=" val)
+    if (key == "extension_dir" && val ~ /\.\./) fail("extension_dir=" val)
+    if (key == "zend_extension" && val != "opcache.so" && val != "opcache") fail("zend_extension=" val)
+    if ((key == "opcache.validate_permission" || key == "opcache.validate_root") && val !~ /^(1|[Oo]n|true|yes)$/) fail(key " must stay on")
+  }
+'
+
+tp_php_ini_ok() {
+  awk -v home="$2" -v principals="$R_PRINCIPALS" -v lsphp="$INSTALL_ROOT/vendor/lsphp/" "$tp_php_ini_awk"'
+    BEGIN { ini_init() }
+    /\\[ \t\r]*$/ { fail("line continuation") }
+    /^[ \t]*$/ || /^[ \t]*;/ { next }
+    /^\[/ { if ($0 !~ /^\[[A-Za-z]+\][ \t]*$/) fail("section " $0); next }
+    {
+      eq = index($0, "=")
+      if (eq < 2) fail("line without a key")
+      ini_ok(trim(substr($0, 1, eq - 1)), substr($0, eq + 1))
+    }
+    END { if (bad) exit 1 }
+  ' "$1"
+}
+
+# php-fpm.conf for one site: a [global] block and the one pool named after the
+# site. The master runs as the owner, so user/group/listen.owner/listen.group
+# are refused; the web server reaches the socket through listen.acl_users (or
+# acl_groups) naming a web server account, and the socket sits in the unit's
+# runtime directory.
+tp_php_fpm_conf_ok() {
+  awk -v home="$2" -v principals="$R_PRINCIPALS" -v site="$3" -v run="/run/turbopanel-php-$3" -v web="$PHP_WEB_GROUPS" \
+    -v lsphp="$INSTALL_ROOT/vendor/lsphp/" "$tp_php_ini_awk"'
+    function web_ok(v,   n, p, i) {
+      n = split(v, p, ",")
+      for (i = 1; i <= n; i++) if (index(" " web " ", " " trim(p[i]) " ") == 0) return 0
+      return n > 0
+    }
+    function log_ok(v) { return v == "syslog" || (path_ok(v) && index(v, "/tmp") != 1) || (index(v, run "/") == 1 && v !~ /\.\./) }
+    function global_ok(key, val) {
+      if (key == "daemonize") { if (val != "no") fail("daemonize=" val); return }
+      if (key == "error_log") { if (!log_ok(val)) fail("error_log=" val); return }
+      if (key ~ /^(log_level|emergency_restart_threshold|emergency_restart_interval|process_control_timeout|process.max|log_limit)$/) {
+        if (val !~ /^[A-Za-z0-9.]+$/) fail(key "=" val)
+        return
+      }
+      fail("directive [global] " key)
+    }
+    function pool_ok(key, val) {
+      if (key ~ /^php_(admin_)?(value|flag)\[[A-Za-z0-9_.]+\]$/) {
+        sub(/^php_(admin_)?(value|flag)\[/, "", key); sub(/\]$/, "", key)
+        ini_ok(key, val)
+        return
+      }
+      if (key == "listen") { if (val != run "/php.sock") fail("listen=" val); return }
+      if (key == "listen.mode") { if (val != "0660") fail("listen.mode=" val); return }
+      if (key == "listen.acl_users" || key == "listen.acl_groups") { if (!web_ok(val)) fail(key "=" val); return }
+      if (key == "slowlog" || key == "access.log") { if (!log_ok(val)) fail(key "=" val); return }
+      if (key == "chdir") { if (!path_ok(val) || index(val, home "/") != 1) fail("chdir=" val); return }
+      if (key == "security.limit_extensions") { if (val !~ /^(\.[a-z0-9]+ ?)+$/) fail(key "=" val); return }
+      if (key ~ /^(pm|pm\.[a-z_]+|listen\.backlog|request_slowlog_timeout|request_terminate_timeout|pm\.status_path|ping\.path|ping\.response|catch_workers_output|decorate_workers_output|clear_env)$/) {
+        if (val !~ /^[A-Za-z0-9._\/-]+$/) fail(key "=" val)
+        return
+      }
+      fail("directive [" site "] " key)
+    }
+    BEGIN { ini_init() }
+    /\\[ \t\r]*$/ { fail("line continuation") }
+    /^[ \t]*$/ || /^[ \t]*;/ { next }
+    /^\[/ {
+      section = $0; gsub(/[\[\] \t]/, "", section)
+      if (section != "global" && section != site) fail("section [" section "]")
+      if (section == site) pools++
+      next
+    }
+    {
+      eq = index($0, "=")
+      if (eq < 2) fail("line without a key")
+      if (section == "") fail("directive outside a section")
+      key = trim(substr($0, 1, eq - 1)); val = trim(substr($0, eq + 1))
+      if (val ~ /\$/) fail(key ": variable expansion")
+      if (section == "global") global_ok(key, val); else pool_ok(key, val)
+      if (key == "listen") listens++
+    }
+    END {
+      if (bad) exit 1
+      if (pools != 1 || listens != 1) { print "tp-host: php config: exactly one pool [" site "] with one listen" > "/dev/stderr"; exit 1 }
+    }
+  ' "$1"
+}
+
+# Check FILE (staged) as the content of a per-site config path for owner GROUP.
+tp_php_conf_ok() {
+  _pf_conf_site="${2%/*}"
+  _pf_conf_site="${_pf_conf_site##*/}"
+  _pf_conf_user="$(tp_php_conf_owner "$3")" || return 1
+  case "${2##*/}" in
+    php.ini) tp_php_ini_ok "$1" "$R_PRINCIPALS/$_pf_conf_user" ;;
+    php-fpm.conf) tp_php_fpm_conf_ok "$1" "$R_PRINCIPALS/$_pf_conf_user" "$_pf_conf_site" ;;
+    *) return 1 ;;
+  esac
+}
+
+# phproot: $R_CONFIG/php/sites or $R_CONFIG/php-sites; phpconfdir: one site's
+# config directory; phpconf: a config file in it (or its .tpprev); phpreg: one
+# site's launcher registry entry. Nothing deeper.
+tp_php_path_class() {
+  case "$1" in
+    "$R_CONFIG/php/sites"|"$R_CONFIG/php-sites") echo phproot; return 0 ;;
+    "$R_CONFIG/php-sites"/*)
+      tp_php_site_id_ok "${1#"$R_CONFIG/php-sites/"}" || return 1
+      echo phpreg
+      return 0
+      ;;
+  esac
+  _pp_rest="${1#"$R_CONFIG/php/sites/"}"
+  case "$_pp_rest" in
+    */*/*) return 1 ;;
+    */*) ;;
+    *)
+      tp_php_site_id_ok "$_pp_rest" || return 1
+      echo phpconfdir
+      return 0
+      ;;
+  esac
+  tp_php_site_id_ok "${_pp_rest%/*}" || return 1
+  case "${_pp_rest#*/}" in
+    php.ini|php-fpm.conf|php.ini.tpprev|php-fpm.conf.tpprev) echo phpconf; return 0 ;;
+  esac
+  return 1
+}
+
+# install into a per-site PHP config path: the directory root:<owner>-grp 0750,
+# a config file root:<owner>-grp 0640 whose content passes the allowlist. The
+# owner can read its config and change none of it.
+tp_php_install() {
+  _pi_dir="$1"
+  _pi_mode="$2"
+  _pi_owner="$3"
+  _pi_group="$4"
+  shift 4
+  _pi_dest=""
+  for _pi_dest in "$@"; do :; done
+  _pi_class="$(tp_path_class "$_pi_dest")" || tp_die "refusing path $_pi_dest"
+  [ "$_pi_owner" = "root" ] || tp_die "refusing owner $_pi_owner for $_pi_dest"
+  tp_php_conf_owner "$_pi_group" >/dev/null || tp_die "refusing group $_pi_group for $_pi_dest"
+  if [ -n "$_pi_dir" ]; then
+    [ "$_pi_class" = "phpconfdir" ] && [ $# -eq 1 ] || tp_die "refusing path $_pi_dest ($_pi_class)"
+    case "$_pi_mode" in 0750|750) ;; *) tp_die "refusing mode $_pi_mode for $_pi_dest" ;; esac
+    tp_mkdir_pinned "$_pi_dest" 0755
+    chmod 0750 .
+    tp_run chown -h -- "root:$_pi_group" .
+    return 0
+  fi
+  [ "$_pi_class" = "phpconf" ] && [ $# -eq 2 ] || tp_die "refusing path $_pi_dest ($_pi_class)"
+  case "$_pi_dest" in *.tpprev) tp_die "refusing path $_pi_dest (written by cp -p only)" ;; esac
+  case "$_pi_mode" in 0640|640) ;; *) tp_die "refusing mode $_pi_mode for $_pi_dest" ;; esac
+  tp_stage_dir
+  tp_read_as_caller "$1" > "$TP_STAGE/src"
+  tp_php_conf_ok "$TP_STAGE/src" "$_pi_dest" "$_pi_group" ||
+    tp_die "refusing ${_pi_dest##*/}: content outside the allowed directives"
+  tp_put_file "$_pi_dest" 0640 root "$_pi_group" < "$TP_STAGE/src"
+}
+
+# php-test <siteId>: the site's PHP binary checks its own config, as the site's
+# owner. Mode, series, owner and config paths come from the installed unit
+# (re-checked here), never from the caller.
+tp_verb_php_test() {
+  [ $# -eq 1 ] || tp_die "php-test: only php-test <siteId>"
+  tp_php_site_id_ok "$1" || tp_die "php-test: refusing site id $1"
+  tp_open_verified "$R_UNITS/turbopanel-php-$1.service" || tp_die "php-test: no unit for $1"
+  tp_stage_dir
+  cat <&3 > "$TP_STAGE/unit"
+  exec 3<&-
+  tp_php_service_ok "$TP_STAGE/unit" "$1" ||
+    tp_die "php-test: turbopanel-php-$1.service is outside the allowed shape"
+  _pt_uid="$(tp_uid_of "$_ps_user")"
+  _pt_gid="$(tp_gid_of_group "$_ps_user-grp")"
+  _pt_cfg="$R_CONFIG/php/sites/$1"
+  _pt_bin="${_ps_exec%% *}"
+  set -- timeout 30 setpriv --reuid="$_pt_uid" --regid="$_pt_gid" --clear-groups \
+    --no-new-privs -- env -i PATH=/usr/bin:/bin
+  case "$_ps_mode" in
+    fpm) set -- "$@" "$_pt_bin" --test --fpm-config "$_pt_cfg/php-fpm.conf" -c "$_pt_cfg/php.ini" ;;
+    lsphp) set -- "$@" "PHPRC=$_pt_cfg/php.ini" "$_pt_bin" -v ;;
+    *) set -- "$@" "$_pt_bin" -c "$_pt_cfg/php.ini" -v ;;
+  esac
+  cd /
+  tp_php_test_run "$@"
+}
+
+# Run the config test; besides its exit status, a startup diagnostic PHP prints
+# but does not fail on (an ini syntax error, a missing extension) fails it.
+tp_php_test_run() {
+  if [ -n "$TP_TEST" ]; then
+    tp_run "$@"
+    exit 0
+  fi
+  _pr_rc=0
+  _pr_out="$("$@" 2>&1)" || _pr_rc=$?
+  printf '%s\n' "$_pr_out"
+  [ "$_pr_rc" -eq 0 ] || exit "$_pr_rc"
+  case "$_pr_out" in
+    *"PHP Warning"*|*"PHP Fatal"*|*"PHP Parse"*|*"PHP:  "*|*"ERROR: "*) exit 1 ;;
+  esac
+  exit 0
+}
+
+# php-site-register <siteId> <user> lsphp-attached <series> <children>: the
+# registry entry the attached-lsphp launcher reads. Identity comes from the
+# account database, never from the caller; the file is root:root 0644 and only
+# this verb writes it.
+tp_verb_php_site_register() {
+  [ $# -eq 5 ] ||
+    tp_die "php-site-register: only <siteId> <user> lsphp-attached <series> <children>"
+  _pg_site="$1"
+  _pg_user="$2"
+  tp_php_site_id_ok "$_pg_site" || tp_die "php-site-register: refusing site id $_pg_site"
+  tp_is_principal "$_pg_user" || tp_die "php-site-register: $_pg_user is not a principal"
+  tp_is_principal_group "$_pg_user-grp" || tp_die "php-site-register: no group $_pg_user-grp"
+  [ "$3" = "lsphp-attached" ] || tp_die "php-site-register: only mode lsphp-attached"
+  tp_php_series_ok "$4" || tp_die "php-site-register: refusing PHP series $4"
+  case "$5" in
+    [1-9]|[1-5][0-9]|6[0-4]) ;;
+    *) tp_die "php-site-register: children must be 1-64" ;;
+  esac
+  _pg_home="$R_PRINCIPALS/$_pg_user"
+  [ "$(tp_getent passwd "$_pg_user" | cut -d: -f6)" = "$_pg_home" ] ||
+    tp_die "php-site-register: $_pg_user's home is not $_pg_home"
+  tp_mkdir_pinned "$R_CONFIG/php-sites" 0755
+  # shellcheck disable=SC3067 # dash (Debian's /bin/sh) implements -O
+  [ -O . ] && [ "$(stat -c '%a' .)" = "755" ] ||
+    tp_die "php-site-register: $R_CONFIG/php-sites is not root-owned 0755"
+  printf '%s\n' \
+    "version=1" \
+    "site=$_pg_site" \
+    "mode=lsphp-attached" \
+    "user=$_pg_user" \
+    "uid=$(tp_uid_of "$_pg_user")" \
+    "group=$_pg_user-grp" \
+    "gid=$(tp_gid_of_group "$_pg_user-grp")" \
+    "home=$_pg_home" \
+    "tmp=$_pg_home/tmp" \
+    "php=$4" \
+    "bin=$INSTALL_ROOT/vendor/lsphp/$4/current/bin/lsphp" \
+    "ini=$R_CONFIG/php/sites/$_pg_site/php.ini" \
+    "children=$5" |
+    tp_put_file "$R_CONFIG/php-sites/$_pg_site" 0644 root root
+}
+
 # --- verbs -------------------------------------------------------------------
 
 tp_verb_install() {
@@ -727,6 +1397,13 @@ tp_verb_install() {
   if [ -n "$_in_group" ]; then
     _in_group="$(tp_canon_group "$_in_group")" || tp_die "refusing group id $_in_group"
   fi
+  for _in_last in "$@"; do :; done
+  case "$(tp_path_class "${_in_last:-}" || true)" in
+    php*)
+      tp_php_install "$_in_dir" "$_in_mode" "$_in_owner" "$_in_group" "$@"
+      return 0
+      ;;
+  esac
   if [ -n "$_in_dir" ]; then
     [ $# -eq 1 ] || tp_die "install -d takes one directory"
     _in_path="$1"
@@ -805,7 +1482,12 @@ tp_verb_cp() {
       [ "${_cp_src%/*}" = "${_cp_dest%/*}" ] ||
         tp_die "cp -p: source and destination must share a directory"
       _cp_class="$(tp_path_class "$_cp_dest")" || tp_die "refusing path $_cp_dest"
-      case "$_cp_class" in tree|sshd) ;; *) tp_die "refusing path $_cp_dest" ;; esac
+      case "$_cp_class" in
+        tree|sshd) ;;
+        # A rollout keeps the live per-site PHP config as <name>.tpprev.
+        phpconf) [ "$_cp_dest" = "$_cp_src.tpprev" ] || tp_die "refusing path $_cp_dest" ;;
+        *) tp_die "refusing path $_cp_dest" ;;
+      esac
       tp_path_class "$_cp_src" >/dev/null || tp_die "refusing path $_cp_src"
       tp_open_verified "$_cp_src" || tp_die "no such file $_cp_src"
       _cp_meta="$(stat -L -c '%a %U %G' /proc/self/fd/3)"
@@ -836,7 +1518,15 @@ tp_verb_mv() {
   [ $# -eq 2 ] || tp_die "mv takes two paths"
   [ "${1%/*}" = "${2%/*}" ] || tp_die "mv: both paths must share a directory"
   _mv_class="$(tp_path_class "$2")" || tp_die "refusing path $2"
-  case "$_mv_class" in tree|principal|sshd) ;; *) tp_die "refusing path $2" ;; esac
+  case "$_mv_class" in
+    tree|principal|sshd) ;;
+    # Only a rollback: <name>.tpprev back over <name>.
+    phpconf) [ "$1" = "$2.tpprev" ] || tp_die "refusing path $2" ;;
+    *) tp_die "refusing path $2" ;;
+  esac
+  # Renaming a directory over the one holding php/sites would swap in config
+  # no check has seen.
+  [ "$2" != "$R_CONFIG/php" ] || tp_die "refusing path $2"
   tp_path_class "$1" >/dev/null || tp_die "refusing path $1"
   tp_pin_parent "$1" || tp_die "no such directory for $1"
   # Both names live in the pinned directory (checked above); PIN_NAME is the
@@ -858,7 +1548,7 @@ tp_verb_rm() {
   [ $# -eq 1 ] || tp_die "rm takes one path"
   _rm_class="$(tp_path_class "$1")" || tp_die "refusing path $1"
   case "$_rm_class" in
-    tree|principal|unit|sshd|sysctl) ;;
+    tree|principal|unit|sshd|sysctl|phpconf|phpconfdir|phpreg) ;;
     # TurboFabric teardown removes the tp0 config, never the directory.
     wireguard) [ "$1" = "$R_WG/tp0.conf" ] || tp_die "refusing path $1" ;;
     *) tp_die "refusing path $1" ;;
@@ -919,7 +1609,7 @@ tp_verb_cmp() {
   _cm_staged="$3"
   _cm_path="$4"
   _cm_class="$(tp_path_class "$_cm_path")" || tp_die "refusing path $_cm_path"
-  case "$_cm_class" in tree|unit|sshd) ;; *) tp_die "refusing path $_cm_path" ;; esac
+  case "$_cm_class" in tree|unit|sshd|phpconf|phpreg) ;; *) tp_die "refusing path $_cm_path" ;; esac
   tp_stage_dir
   _cm_tmp="$TP_STAGE/staged"
   tp_read_as_caller "$_cm_staged" > "$_cm_tmp"
@@ -1438,5 +2128,7 @@ case "$_verb" in
   chpasswd) tp_verb_chpasswd "$@" ;;
   getent) tp_verb_getent "$@" ;;
   modprobe) tp_verb_modprobe "$@" ;;
+  php-test) tp_verb_php_test "$@" ;;
+  php-site-register) tp_verb_php_site_register "$@" ;;
   *) tp_die "refusing verb $_verb" ;;
 esac
