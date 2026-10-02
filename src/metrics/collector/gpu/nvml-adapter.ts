@@ -86,14 +86,6 @@ const NVML_SYMBOLS = {
 } as const;
 
 /**
- * Opaque `nvmlDevice_t` handle: the raw address from the FFI out-param bytes,
- * passed back to NVML as a `usize`. It is never turned into a
- * `Deno.UnsafePointer` — `UnsafePointer.create` demands an unscoped
- * `--allow-ffi`, and the compiled daemon only holds a path-scoped grant.
- */
-export type NvmlDeviceHandle = bigint;
-
-/**
  * Vendor-neutral surface over the raw FFI symbol table — the injectable
  * seam tests use to exercise adapter logic without `Deno.dlopen` or a real
  * NVIDIA driver. {@link openDefaultNvmlBinding} is the only implementation
@@ -102,23 +94,23 @@ export type NvmlDeviceHandle = bigint;
 export type NvmlBinding = {
   init(): boolean;
   shutdown(): void;
-  getHandleByPciBusId(pciBusId: string): NvmlDeviceHandle | null;
+  getHandleByPciBusId(pciBusId: string): bigint | null;
   getUtilizationRates(
-    handle: NvmlDeviceHandle,
+    handle: bigint,
   ): { gpuPercent: number; memoryPercent: number } | null;
-  getMemoryUsedBytes(handle: NvmlDeviceHandle): number | null;
-  getTemperatureCelsius(handle: NvmlDeviceHandle): number | null;
-  getPowerWatts(handle: NvmlDeviceHandle): number | null;
+  getMemoryUsedBytes(handle: bigint): number | null;
+  getTemperatureCelsius(handle: bigint): number | null;
+  getPowerWatts(handle: bigint): number | null;
   getPcieThroughputBytesPerSecond(
-    handle: NvmlDeviceHandle,
+    handle: bigint,
   ): { rx: number; tx: number } | null;
-  getThermalViolationNanoseconds(handle: NvmlDeviceHandle): number | null;
-  getEccDoubleBitAggregateTotal(handle: NvmlDeviceHandle): number | null;
+  getThermalViolationNanoseconds(handle: bigint): number | null;
+  getEccDoubleBitAggregateTotal(handle: bigint): number | null;
   /** Last Xid critical-error code observed for this device, `null` when none has been recorded. */
-  getLastXidErrorCode(handle: NvmlDeviceHandle): number | null;
-  getRemappedRows(handle: NvmlDeviceHandle): NvmlRemappedRows | null;
+  getLastXidErrorCode(handle: bigint): number | null;
+  getRemappedRows(handle: bigint): NvmlRemappedRows | null;
   /** Whether a row-retirement (page-retirement) event is pending a reboot to take effect. */
-  getRetiredPagesPending(handle: NvmlDeviceHandle): boolean | null;
+  getRetiredPagesPending(handle: bigint): boolean | null;
 };
 
 /** `nvmlDeviceGetRemappedRows` — row-remapping ECC-repair state (Ampere+). */
@@ -129,7 +121,13 @@ export type NvmlRemappedRows = {
   failureOccurred: boolean;
 };
 
-function readHandle(buf: Uint8Array): NvmlDeviceHandle | null {
+/**
+ * Decode an opaque `nvmlDevice_t` handle: the raw address from the FFI
+ * out-param bytes, passed back to NVML as a `usize` bigint. It is never turned
+ * into a `Deno.UnsafePointer` — `UnsafePointer.create` demands an unscoped
+ * `--allow-ffi`, and the compiled daemon only holds a path-scoped grant.
+ */
+function readHandle(buf: Uint8Array): bigint | null {
   const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
   const address = view.getBigUint64(0, true);
   return address === 0n ? null : address;
@@ -153,52 +151,52 @@ export type NvmlLibrary = {
       out: Uint8Array,
     ) => number;
     nvmlDeviceGetUtilizationRates: (
-      handle: NvmlDeviceHandle,
+      handle: bigint,
       out: Uint8Array,
     ) => number;
     nvmlDeviceGetMemoryInfo_v2: (
-      handle: NvmlDeviceHandle,
+      handle: bigint,
       out: Uint8Array,
     ) => number;
     nvmlDeviceGetTemperature: (
-      handle: NvmlDeviceHandle,
+      handle: bigint,
       sensor: number,
       out: Uint8Array,
     ) => number;
     nvmlDeviceGetPowerUsage: (
-      handle: NvmlDeviceHandle,
+      handle: bigint,
       out: Uint8Array,
     ) => number;
     nvmlDeviceGetPcieThroughput: (
-      handle: NvmlDeviceHandle,
+      handle: bigint,
       counter: number,
       out: Uint8Array,
     ) => number;
     nvmlDeviceGetViolationStatus: (
-      handle: NvmlDeviceHandle,
+      handle: bigint,
       policy: number,
       out: Uint8Array,
     ) => number;
     nvmlDeviceGetTotalEccErrors: (
-      handle: NvmlDeviceHandle,
+      handle: bigint,
       bitType: number,
       counterType: number,
       out: Uint8Array,
     ) => number;
     nvmlDeviceGetFieldValues: (
-      handle: NvmlDeviceHandle,
+      handle: bigint,
       count: number,
       out: Uint8Array,
     ) => number;
     nvmlDeviceGetRemappedRows: (
-      handle: NvmlDeviceHandle,
+      handle: bigint,
       corr: Uint8Array,
       unc: Uint8Array,
       pending: Uint8Array,
       failure: Uint8Array,
     ) => number;
     nvmlDeviceGetRetiredPagesPendingStatus: (
-      handle: NvmlDeviceHandle,
+      handle: bigint,
       out: Uint8Array,
     ) => number;
   };
@@ -225,7 +223,7 @@ export function createNvmlBindingFromLibrary(lib: NvmlLibrary): NvmlBinding {
         // Best-effort — the process is likely exiting anyway.
       }
     },
-    getHandleByPciBusId(pciBusId: string): NvmlDeviceHandle | null {
+    getHandleByPciBusId(pciBusId: string): bigint | null {
       const out = new Uint8Array(8);
       const rc = sym.nvmlDeviceGetHandleByPciBusId_v2(
         pciBusIdBuffer(pciBusId),
@@ -398,7 +396,7 @@ export class NvmlGpuAdapter implements GpuAdapter {
   readonly id = "nvml" as const;
   readonly #openBinding: () => NvmlBinding | null;
   #binding: NvmlBinding | null | undefined = undefined;
-  readonly #handles = new Map<string, NvmlDeviceHandle | null>();
+  readonly #handles = new Map<string, bigint | null>();
 
   constructor(deps?: { openBinding?: () => NvmlBinding | null }) {
     this.#openBinding = deps?.openBinding ?? openDefaultNvmlBinding;

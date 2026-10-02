@@ -6,17 +6,13 @@ import {
   NvmlGpuAdapter,
   openDefaultNvmlBinding,
 } from "./nvml-adapter.ts";
-import type {
-  NvmlBinding,
-  NvmlDeviceHandle,
-  NvmlLibrary,
-} from "./nvml-adapter.ts";
+import type { NvmlBinding, NvmlLibrary } from "./nvml-adapter.ts";
 import type { GpuReadContext } from "./adapter.ts";
 import type { GpuTopology } from "../../../contracts/topology-types.ts";
 
 const test = Deno.test.bind(Deno);
 
-const FAKE_HANDLE: NvmlDeviceHandle = 0x100n;
+const FAKE_HANDLE: bigint = 0x100n;
 
 function gpu(overrides: Partial<GpuTopology> = {}): GpuTopology {
   return {
@@ -487,7 +483,7 @@ test({
   // NotCapable there and every NVML field reads as unavailable.
   permissions: { ffi: ["/usr/lib"] },
   fn() {
-    const seenHandles: NvmlDeviceHandle[] = [];
+    const seenHandles: bigint[] = [];
     const binding = createNvmlBindingFromLibrary(fakeLibrary({
       nvmlDeviceGetHandleByPciBusId_v2: (_bus, out) => {
         writeU64(out, 0, 0x7f00_1234_5000n);
@@ -535,7 +531,7 @@ test("createNvmlBindingFromLibrary nulls a field when that NVML call returns non
     nvmlDeviceGetRemappedRows: () => NVML_FAIL,
     nvmlDeviceGetRetiredPagesPendingStatus: () => NVML_FAIL,
   }));
-  const dummy: NvmlDeviceHandle = 0x100n;
+  const dummy: bigint = 0x100n;
   assertEquals(binding.getHandleByPciBusId("0000:01:00.0"), null);
   assertEquals(binding.getUtilizationRates(dummy), null);
   assertEquals(binding.getMemoryUsedBytes(dummy), null);
@@ -578,7 +574,7 @@ test("createNvmlBindingFromLibrary treats a per-field XID nvmlReturn as missing"
       return 0;
     },
   }));
-  const dummy: NvmlDeviceHandle = 0x100n;
+  const dummy: bigint = 0x100n;
   assertEquals(binding.getLastXidErrorCode(dummy), null);
 });
 
@@ -596,7 +592,7 @@ test("createNvmlBindingFromLibrary reports remapped-row failure and no pending r
       return 0;
     },
   }));
-  const dummy: NvmlDeviceHandle = 0x100n;
+  const dummy: bigint = 0x100n;
   assertEquals(binding.getRemappedRows(dummy), {
     correctable: 0,
     uncorrectable: 2,
@@ -616,7 +612,7 @@ test("createNvmlBindingFromLibrary nulls PCIe when only one direction succeeds",
       return NVML_FAIL;
     },
   }));
-  const dummy: NvmlDeviceHandle = 0x100n;
+  const dummy: bigint = 0x100n;
   assertEquals(binding.getPcieThroughputBytesPerSecond(dummy), null);
 });
 
