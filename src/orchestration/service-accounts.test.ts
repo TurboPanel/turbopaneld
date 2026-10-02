@@ -299,9 +299,23 @@ test("converge and web-service account ids are globally unique", async () => {
     }
   }
 
+  // tpbuild (build-user) takes the 9994 slot, uid and gid alike.
+  const buildDefaults = parse(
+    await readRole("roles/build-user/defaults/main.yml"),
+  ) as { build_uid: number; build_gid: number };
+  if (buildDefaults.build_uid !== 9994 || buildDefaults.build_gid !== 9994) {
+    throw new Error("build-user: tpbuild must be uid/gid 9994");
+  }
+
   const convergeIds = ACCOUNTS.map((entry) => entry.id);
   const webIds = Object.values(webServiceMap).map((entry) => entry.uid);
-  const ids = [...convergeIds, ...webIds, ...entitlementIds, ...accessGroupIds];
+  const ids = [
+    ...convergeIds,
+    ...webIds,
+    buildDefaults.build_uid,
+    ...entitlementIds,
+    ...accessGroupIds,
+  ];
 
   const seen = new Set<number>();
   const collisions: number[] = [];
