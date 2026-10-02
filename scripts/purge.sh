@@ -965,8 +965,32 @@ tp_print_group() {
   done < "$_pg_file"
 }
 
+# wg-quick@.service is a stock template: systemd reports any instance of it as
+# loaded, so tp0 only counts as ours once it was enabled, started or linked.
+tp_wg_tp0_present() {
+  for _wp_dir in $TP_SYSTEMD_DIRS; do
+    if [ -e "$_wp_dir/wg-quick@tp0.service" ] || [ -L "$_wp_dir/multi-user.target.wants/wg-quick@tp0.service" ]; then
+      return 0
+    fi
+  done
+  tp_has_tool systemctl || return 1
+  _wp_active=$(systemctl is-active wg-quick@tp0.service 2>/dev/null || true)
+  case $_wp_active in
+    inactive|unknown|"") ;;
+    *) return 0 ;;
+  esac
+  _wp_enabled=$(systemctl is-enabled wg-quick@tp0.service 2>/dev/null || true)
+  case $_wp_enabled in
+    enabled|enabled-runtime|alias|indirect) return 0 ;;
+  esac
+  return 1
+}
+
 tp_unit_present() {
   _up_unit=$1
+  case $_up_unit in
+    wg-quick@tp0|wg-quick@tp0.service) tp_wg_tp0_present; return ;;
+  esac
   if tp_has_tool systemctl; then
     _up_load=$(systemctl show -p LoadState --value "$_up_unit" 2>/dev/null || true)
     if [ -n "$_up_load" ] && [ "$_up_load" != not-found ]; then
@@ -2433,6 +2457,8 @@ tp_remove_folders_and_shell() {
   done
   tp_safe_rm_tree /tmp/turbopanel-ansible
   tp_safe_rm_tree /tmp/turbopanel-orchestrate
+  tp_safe_rm_tree /run/turbopanel-gate
+  tp_safe_rm_tree /var/cache/turbopanel-docker-gate
   tp_safe_rm_tree /root/.ansible
   tp_strip_shell_rcs
 }
@@ -3455,7 +3481,7 @@ TP_LEGACY_SHELL_RC_NEEDLE='/opt/turbopanel/runtimes/deno/.install/env'
 # Every tree this script may delete: what TurboPanel creates, plus Docker's
 # default state it purges. tp_path_is_safe refuses anything else, including a
 # folder configured elsewhere in daemon.env; those are listed as kept.
-TP_OWNED_TREES="/opt/turbopanel /etc/turbopanel /etc/ssh/turbopanel /var/lib/turbopanel /var/log/turbopanel /run/turbopanel /var/run/turbopanel /backup /srv/users /tmp/turbopanel-ansible /tmp/turbopanel-orchestrate /root/.ansible /var/lib/docker /var/lib/containerd /etc/docker /var/lib/turbopanel-purge"
+TP_OWNED_TREES="/opt/turbopanel /etc/turbopanel /etc/ssh/turbopanel /var/lib/turbopanel /var/log/turbopanel /run/turbopanel /var/run/turbopanel /backup /srv/users /tmp/turbopanel-ansible /tmp/turbopanel-orchestrate /root/.ansible /var/lib/docker /var/lib/containerd /etc/docker /var/lib/turbopanel-purge /run/turbopanel-gate /var/cache/turbopanel-docker-gate"
 TP_SYSTEMD_DIRS="/etc/systemd/system /usr/local/lib/systemd/system /lib/systemd/system /usr/lib/systemd/system"
 TP_DAEMON_ENV=/etc/turbopanel/daemon.env
 TP_RESUME_DIR=/var/lib/turbopanel-purge

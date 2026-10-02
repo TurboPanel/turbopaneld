@@ -554,3 +554,51 @@ test("the purge scope warns that no inbound firewall remains and that other pack
   assertStringIncludes(result.stdout.toLowerCase(), "no inbound firewall");
   assertStringIncludes(result.stdout, "does not remove any other package");
 });
+
+async function stubSystemctl(active: string, enabled: string): Promise<string> {
+  const dir = await Deno.makeTempDir({ prefix: "tp-purge-stub-" });
+  await Deno.writeTextFile(
+    join(dir, "systemctl"),
+    [
+      "#!/bin/sh",
+      'case "$1" in',
+      "  show) echo loaded ;;",
+      `  is-active) echo ${active}; exit 3 ;;`,
+      `  is-enabled) echo ${enabled}; exit 1 ;;`,
+      "esac",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  return dir;
+}
+
+async function wgPresent(active: string, enabled: string): Promise<string> {
+  const stub = await stubSystemctl(active, enabled);
+  const empty = await Deno.makeTempDir({ prefix: "tp-purge-units-" });
+  const result = await runPurgeSh(
+    ["tp_unit_present", "tp_wg_tp0_present"],
+    `TP_SYSTEMD_DIRS=${empty}\n` +
+      "if tp_unit_present wg-quick@tp0.service; then echo present; else echo absent; fi",
+    { PATH: `${stub}:${Deno.env.get("PATH") ?? ""}` },
+  );
+  return result.stdout.trim();
+}
+
+test("the stock wg-quick template is not ours until tp0 was enabled or started", async () => {
+  assertEquals(await wgPresent("inactive", "disabled"), "absent");
+  assertEquals(await wgPresent("active", "disabled"), "present");
+  assertEquals(await wgPresent("inactive", "enabled"), "present");
+});
+
+test("the Docker gate stage-1 folders are owned trees and are removed with the other folders", async () => {
+  const source = await Deno.readTextFile(purgePath);
+  const trees = extractConstant(source, "TP_OWNED_TREES") ?? "";
+  const remove = extractFunction(source, "tp_remove_folders_and_shell") ?? "";
+  for (
+    const dir of ["/run/turbopanel-gate", "/var/cache/turbopanel-docker-gate"]
+  ) {
+    assertStringIncludes(trees, dir);
+    assertStringIncludes(remove, `tp_safe_rm_tree ${dir}`);
+  }
+});
