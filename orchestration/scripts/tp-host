@@ -788,15 +788,27 @@ tp_verb_cp() {
         *) tp_die "cp -a: the source must end in /." ;;
       esac
       tp_require_class "$_cp_dest" principal
-      _cp_src_class="$(tp_path_class "$_cp_src")" || tp_die "refusing source $_cp_src"
-      case "$_cp_src_class" in tree|principal) ;; *) tp_die "refusing source $_cp_src" ;; esac
+      # Only the daemon's own hand-off copy (release/safe-copy.ts), never a
+      # tree a build or a tenant wrote.
+      tp_require_class "$_cp_src" tree
       tp_pin_dir "$_cp_dest" || tp_die "no such directory $_cp_dest"
       # The source directory is opened and checked on a descriptor; cp reads
       # it through /proc/self/fd/3, never by a name the caller controls.
       exec 3<"$_cp_src" || tp_die "cannot open $_cp_src"
       [ "$(readlink /proc/self/fd/3)" = "$_cp_src" ] ||
         tp_die "refusing $_cp_src: it resolves elsewhere"
-      tp_run cp -a --no-dereference -- /proc/self/fd/3/. .
+      # Root's cp -R would mknod a device or FIFO, keep a set-id bit, and read
+      # a hard link to a file the caller cannot. Checked as the caller, from /
+      # (the caller cannot enter the pinned destination).
+      _cp_bad="$(cd / && tp_as "$CALLER_UID" "$CALLER_GID" find /proc/self/fd/3/. \
+        \( \( ! -type f ! -type d ! -type l \) -o -perm /6000 \
+        -o ! -user "$CALLER_UID" \) -print -quit)" ||
+        tp_die "cannot inspect $_cp_src as the calling account"
+      [ -z "$_cp_bad" ] ||
+        tp_die "refusing $_cp_src: special, set-id or foreign entry ${_cp_bad#/proc/self/fd/3/.}"
+      # Nothing of the source's ownership survives; the seal sets it.
+      tp_run cp -R --no-dereference --preserve=mode,timestamps \
+        --no-preserve=ownership -- /proc/self/fd/3/. .
       ;;
     -p)
       [ "$#" -eq 4 ] && [ "$2" = "--" ] || tp_die "cp: only cp -p -- SRC DEST"

@@ -50,6 +50,14 @@ import {
 /** Scratch root for ephemeral checkouts — never inside the release tree. */
 export const RELEASE_SCRATCH_DIRNAME = "release-build";
 
+/**
+ * Hand-off root: where the daemon puts its checked copy of a build's output
+ * before root copies it into a release it cannot write itself. Outside the
+ * scratch root on purpose — the build controls every name under its own tree,
+ * so a hand-off directory there could be a link the build planted.
+ */
+export const RELEASE_HANDOFF_DIRNAME = "release-handoff";
+
 /** Per-release metadata directory written inside the published release. */
 export const RELEASE_METADATA_DIRNAME = ".turbopanel";
 
@@ -127,6 +135,8 @@ export type ReleasePaths = {
   sharedDir: string;
   /** Ephemeral checkout/build directory — removed after promote. */
   scratchDir: string;
+  /** Daemon-only hand-off copy for the privileged stage — removed after it. */
+  handoffDir: string;
 };
 
 /**
@@ -154,6 +164,12 @@ export function resolveReleasePaths(
     scratchDir: join(
       layout.daemonStateDir,
       RELEASE_SCRATCH_DIRNAME,
+      serviceId,
+      releaseId,
+    ),
+    handoffDir: join(
+      layout.daemonStateDir,
+      RELEASE_HANDOFF_DIRNAME,
       serviceId,
       releaseId,
     ),
@@ -187,6 +203,12 @@ export function resolveDaemonReleasePaths(
     scratchDir: join(
       layout.daemonStateDir,
       RELEASE_SCRATCH_DIRNAME,
+      serviceId,
+      releaseId,
+    ),
+    handoffDir: join(
+      layout.daemonStateDir,
+      RELEASE_HANDOFF_DIRNAME,
       serviceId,
       releaseId,
     ),

@@ -137,6 +137,33 @@ atomic on the same filesystem, so a reader sees the old release or the new one,
 never a missing link. **Any failure before the rename leaves `current`
 untouched** and removes the staged directory; there is no partial publish.
 
+**Symlink-safe hand-off** (`safe-copy.ts`). The build controls every name in
+its tree, so every copy out of it — the stage into `releases/<releaseId>/` and
+the Next fold — goes through `copyContainedTree`, never a plain recursive copy:
+the source directory is reached from the checkout one `lstat`ed component at a
+time (a symlinked, absolute or `..` `subdirectory` / `outputDirectory` /
+`.next/standalone` / `.next/static` / `public` / `out` is refused, and the real
+path must stay under the root's); entries are never followed; a regular file is
+checked on its opened handle (same inode and device as the `lstat`, so a swap
+is refused, not read); a symlink is kept only when it is relative and its `..`
+run, all leading, stays within its own depth (`linkStaysInside`), otherwise
+dropped; FIFOs, sockets and devices are dropped; set-id, sticky and
+group/other-write bits are stripped; nothing is chowned; an entry owned by
+anyone but the source root's owner (a hard link to a root file) is refused;
+destinations are created one component at a time and files with `O_EXCL`, so a
+link planted at a destination is refused; entries (500 000), bytes (16 GiB) and
+depth (128) are capped. On a managed host the daemon cannot write the release,
+so it first makes that checked copy in `<daemonStateDir>/release-handoff/<serviceId>/<releaseId>`
+(daemon-only, recreated fresh, outside the build's tree, removed afterwards)
+and `tp-host cp -a -- <handoff>/. <releaseDir>` copies only that: tp-host takes
+the source only from the daemon's trees, refuses it (checked as the caller)
+when it holds a special, set-id or foreign-owned entry, and runs
+`cp -R --no-dereference --preserve=mode,timestamps --no-preserve=ownership`.
+Root never walks the tree a build wrote. Deno has no `openat2`, so a directory
+swapped and swapped back between two calls is out of reach of these checks; the
+unprivileged-builds design closes that by handing the tree back only once the
+build unit's processes are gone and the tree belongs to the daemon again.
+
 **Sandboxed build, containerless runtime.** `build.ts` is explicitly not
 container isolation and does not claim to be. It guarantees: the command runs in
 the scratch checkout (never the live tree or the principal home); no daemon
