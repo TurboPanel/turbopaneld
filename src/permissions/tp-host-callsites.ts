@@ -698,7 +698,7 @@ const SITES: CallSite[] = [
   tpHost(
     'src/deploy/release/release-layout.ts|["-n","chown","-R",owner,releaseDir]',
     {
-      argv: ["chown", "-R", "alice:alice-grp", RELEASE],
+      argv: ["chown", "-R", "root:alice-grp", RELEASE],
       setup: dir(RELEASE),
     },
   ),
@@ -1536,7 +1536,21 @@ export type KnownBug =
   | { why: string; refusal: string }
   | { why: string; pending: string };
 
-const KNOWN_BUGS: Record<string, KnownBug> = {};
+const HOME_LAYOUT_WHY =
+  "tp-host enforces the root-owned principal home (Principal Home Redesign WP-A); ensure-principal.ts still builds the old tenant-owned home until WP-B";
+
+const KNOWN_BUGS: Record<string, KnownBug> = {
+  'src/deploy/ensure-principal.ts|["-n","install","-d","-m",mode,"-o",user,"-g",group,path]':
+    { why: HOME_LAYOUT_WHY, refusal: "refusing owner alice:alice-grp" },
+  "src/deploy/ensure-principal.ts|args": {
+    why: HOME_LAYOUT_WHY,
+    refusal: "useradd: home must be",
+  },
+  'src/deploy/ensure-principal.ts|["-n","chown",owner,path]': {
+    why: HOME_LAYOUT_WHY,
+    refusal: "refusing owner alice:alice-grp",
+  },
+};
 
 export const CALL_SITES: readonly CallSite[] = SITES.map((site) =>
   KNOWN_BUGS[site.key] === undefined

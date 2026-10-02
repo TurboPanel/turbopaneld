@@ -16,7 +16,10 @@ import {
   hasDaemonCheckout,
   isCompiledStubRoot,
   pathExists,
+  principalDataDir,
   principalHomePath,
+  principalTmpDir,
+  principalUserHome,
   probeExists,
   PROD_BACKUP_DIR_DEFAULT,
   PROD_BIN_DIR_DEFAULT,
@@ -582,6 +585,9 @@ test("site and spool helpers join under principal home and daemon state", () => 
     "/custom/state/spool/execution-logs",
   );
   assertEquals(principalHomePath(layout, "alice"), "/srv/tenants/alice");
+  assertEquals(principalUserHome(layout, "alice"), "/srv/tenants/alice/home");
+  assertEquals(principalDataDir(layout, "alice"), "/srv/tenants/alice/data");
+  assertEquals(principalTmpDir(layout, "alice"), "/srv/tenants/alice/tmp");
   assertEquals(
     siteRoot("/srv/tenants/alice", "svc-1"),
     "/srv/tenants/alice/sites/svc-1",

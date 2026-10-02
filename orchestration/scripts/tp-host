@@ -48,6 +48,7 @@ if [ "$(id -u)" = "0" ]; then
   P=""
   CALLER_UID="${SUDO_UID:-}"
   CALLER_GID="${SUDO_GID:-}"
+  ROOT_UID=0
   case "$CALLER_UID" in ''|*[!0-9]*) tp_die "must be run through sudo" ;; esac
   case "$CALLER_GID" in ''|*[!0-9]*) tp_die "must be run through sudo" ;; esac
 else
@@ -56,6 +57,9 @@ else
   P="$TP_HOST_TEST_PREFIX"
   CALLER_UID="$(id -u)"
   CALLER_GID="$(id -g)"
+  # The test prefix belongs to the account running the tests; it stands in
+  # for root as the owner of root-owned directories.
+  ROOT_UID="$CALLER_UID"
 fi
 
 _self_dir="$(CDPATH='' cd -P -- "$(dirname -- "$0")" && pwd -P)"
@@ -425,6 +429,93 @@ tp_home_owner_of() {
   printf '%s' "${_ho%%/*}"
 }
 
+# --- the principal home layout ------------------------------------------------
+# <home> = $R_PRINCIPALS/<p>. A directory's owner can rename its entries even
+# when it does not own them, so every directory that holds a root-owned path
+# is itself root-owned and never group- or world-writable (the principal's
+# group holds the engine accounts). The tenant writes only into leaves:
+#
+#   <home>                                  root:<p>-grp 0750  structural
+#   <home>/home|data|tmp                    <p>:<p>-grp  0700  tenant dir
+#   <home>/sites, <home>/volumes            root:<p>-grp 0750  structural
+#   <home>/sites/<svc>                      root:<p>-grp 0750  structural
+#   <home>/sites/<svc>/releases[/<id>]      root:<p>-grp       structural
+#   <home>/sites/<svc>/shared|webroot, <home>/volumes/<id>   tenant leaves
+
+# PATH relative to its principal's home: empty for the home itself.
+tp_home_rel() {
+  _hr="${1#"$R_PRINCIPALS"/}"
+  [ "$_hr" != "$1" ] || return 1
+  case "$_hr" in
+    */*) printf '%s' "${_hr#*/}" ;;
+    *) ;;
+  esac
+}
+
+# A root-owned directory of a home's skeleton.
+tp_home_structural() {
+  _hs_rel="$(tp_home_rel "$1")" || return 1
+  case "$_hs_rel" in
+    ''|sites|volumes) return 0 ;;
+    sites/*) ;;
+    *) return 1 ;;
+  esac
+  _hs_rest="${_hs_rel#sites/}"
+  _hs_rest="${_hs_rest#*/}"
+  [ "$_hs_rest" != "${_hs_rel#sites/}" ] || return 0
+  case "$_hs_rest" in
+    releases) return 0 ;;
+    releases/*/*) return 1 ;;
+    releases/?*) return 0 ;;
+  esac
+  return 1
+}
+
+# One of the principal's own top-level directories (home/, data/, tmp/).
+tp_home_tenant_dir() {
+  case "$(tp_home_rel "$1")" in
+    home|data|tmp) return 0 ;;
+  esac
+  return 1
+}
+
+# Who may own the fixed parts of a home: structural directories are root's,
+# the tenant directories the principal's, and either carries only the
+# principal's own group. An empty owner or group is left as it is.
+tp_home_owner_ok() {
+  _hw_p="$(tp_home_owner_of "$1")" || return 1
+  if tp_home_structural "$1"; then
+    [ -z "$2" ] || [ "$2" = "root" ] || return 1
+  elif tp_home_tenant_dir "$1"; then
+    [ -z "$2" ] || [ "$2" = "$_hw_p" ] || return 1
+  else
+    return 0
+  fi
+  [ -z "$3" ] || [ "$3" = "root" ] || [ "$3" = "${_hw_p}-grp" ]
+}
+
+# The directory the shell is in (a pinned structural or tenant directory) must
+# sit in a sealed parent: root-owned, not group- or world-writable. Otherwise
+# the tenant could rename it away between this run and the next.
+tp_home_parent_sealed() {
+  _hp="$(stat -c '%u %a' ..)" || return 1
+  [ "${_hp%% *}" = "$ROOT_UID" ] || return 1
+  case "${_hp#* }" in
+    *[2367]?|*[2367]) return 1 ;;
+  esac
+  return 0
+}
+
+# Recursive operations never start at a structural directory above a release:
+# root would walk the tenant leaves below it (shared/, webroot/, home/, …).
+tp_home_recursion_ok() {
+  tp_home_structural "$1" || return 0
+  case "$(tp_home_rel "$1")" in
+    sites/*/releases/?*) return 0 ;;
+  esac
+  return 1
+}
+
 # Who may own PATH: inside a principal's home, that principal (or root / a
 # service account); anywhere else, root or a service account only — a tenant
 # owning a file root or an engine reads would be a way in.
@@ -433,6 +524,9 @@ tp_owner_ok() {
   _oo_owner="$2"
   _oo_group="$3"
   _oo_class="$(tp_path_class "$_oo_path")" || return 1
+  if [ "$_oo_class" = "principal" ]; then
+    tp_home_owner_ok "$_oo_path" "$_oo_owner" "$_oo_group" || return 1
+  fi
   if [ -n "$_oo_owner" ]; then
     if [ "$_oo_class" = "principal" ] &&
       [ "$_oo_owner" = "$(tp_home_owner_of "$_oo_path")" ]; then
@@ -454,7 +548,9 @@ tp_owner_ok() {
 }
 
 # Octal only, no setuid/setgid/sticky, never group- or world-writable
-# outside a principal's home.
+# outside a principal's home or on its structural directories (which give
+# others nothing at all); a tenant directory (home/, data/, tmp/) is the
+# principal's alone.
 tp_mode_ok() {
   _mo_mode="$1"
   _mo_path="$2"
@@ -464,13 +560,20 @@ tp_mode_ok() {
   esac
   _mo_last3="${_mo_mode#0}"
   [ "${#_mo_last3}" -eq 3 ] || _mo_last3="${_mo_mode#?}"
-  if [ "$(tp_path_class "$_mo_path")" != "principal" ]; then
-    _mo_g="${_mo_last3#?}"
-    _mo_g="${_mo_g%?}"
-    _mo_o="${_mo_last3#??}"
-    case "$_mo_g" in 2|3|6|7) return 1 ;; esac
-    case "$_mo_o" in 2|3|6|7) return 1 ;; esac
+  _mo_g="${_mo_last3#?}"
+  _mo_g="${_mo_g%?}"
+  _mo_o="${_mo_last3#??}"
+  if [ "$(tp_path_class "$_mo_path")" = "principal" ]; then
+    if tp_home_tenant_dir "$_mo_path"; then
+      [ "$_mo_g$_mo_o" = "00" ]
+      return
+    fi
+    tp_home_structural "$_mo_path" || return 0
+    # Other principals never even traverse another's skeleton.
+    [ "$_mo_o" = "0" ] || return 1
   fi
+  case "$_mo_g" in 2|3|6|7) return 1 ;; esac
+  case "$_mo_o" in 2|3|6|7) return 1 ;; esac
   return 0
 }
 
@@ -737,6 +840,9 @@ tp_verb_install() {
     tp_owner_ok "$_in_path" "$_in_owner" "$_in_group" ||
       tp_die "refusing owner $_in_owner:$_in_group for $_in_path"
     tp_mkdir_pinned "$_in_path" 0755
+    if tp_home_structural "$_in_path" || tp_home_tenant_dir "$_in_path"; then
+      tp_home_parent_sealed || tp_die "refusing $_in_path: its parent is not sealed (root-owned, not group- or world-writable)"
+    fi
     # Operate on the pinned directory itself, never by name.
     chmod "$_in_mode" .
     if [ -n "$_in_owner$_in_group" ]; then
@@ -960,6 +1066,7 @@ tp_verb_find() {
   if [ "$#" -eq 7 ] && [ "$1" = "-type" ] && [ "$2" = "d" ] && [ "$3" = "-exec" ] &&
     [ "$4" = "chmod" ] && [ "$5" = "g+s" ] && [ "$6" = "{}" ] && [ "$7" = "+" ]; then
     tp_require_class "$_fd_base" principal
+    tp_home_recursion_ok "$_fd_base" || tp_die "find: refusing to walk $_fd_base"
     tp_pin_dir "$_fd_base" || tp_die "no such directory $_fd_base"
     # As the tree's owner: a tenant can only race its own directories.
     _fd_owner="$(stat -c '%u %g' .)"
@@ -1001,6 +1108,8 @@ tp_verb_chown() {
     *) tp_die "refusing path $_co_path" ;;
   esac
   tp_is_root_path "$_co_path" && tp_die "refusing to re-own $_co_path"
+  [ -z "$_co_rec" ] || tp_home_recursion_ok "$_co_path" ||
+    tp_die "chown -R: refusing to walk $_co_path"
   tp_owner_ok "$_co_path" "$_co_owner" "$_co_group" ||
     tp_die "refusing owner $_co_spec for $_co_path"
   tp_pin_parent "$_co_path" || tp_die "no such directory for $_co_path"
@@ -1020,9 +1129,14 @@ tp_verb_chmod() {
   _ch_class="$(tp_path_class "$_ch_path")" || tp_die "refusing path $_ch_path"
   case "$_ch_class" in tree|principal|wireguard|sysctl) ;; *) tp_die "refusing path $_ch_path" ;; esac
   case "$_ch_mode" in
-    u=rwX,g=rX,o=) [ "$_ch_class" = "principal" ] || tp_die "refusing mode $_ch_mode" ;;
+    u=rwX,g=rX,o=)
+      [ "$_ch_class" = "principal" ] && ! tp_home_structural "$_ch_path" &&
+        ! tp_home_tenant_dir "$_ch_path" || tp_die "refusing mode $_ch_mode for $_ch_path"
+      ;;
     *) tp_mode_ok "$_ch_mode" "$_ch_path" || tp_die "refusing mode $_ch_mode for $_ch_path" ;;
   esac
+  [ -z "$_cm_rec" ] || tp_home_recursion_ok "$_ch_path" ||
+    tp_die "chmod -R: refusing to walk $_ch_path"
   tp_pin_parent "$_ch_path" || tp_die "no such directory for $_ch_path"
   [ -L "./$PIN_NAME" ] && tp_die "refusing to chmod through a symlink: $_ch_path"
   if [ -d "./$PIN_NAME" ]; then
@@ -1260,8 +1374,9 @@ tp_registry_group() {
   grep -Eq "\"group\"[[:space:]]*:[[:space:]]*\"$1\"" "$_rg_file"
 }
 
+# The passwd home is the tenant directory home/ inside the root-owned home.
 tp_principal_home_ok() {
-  [ "$1" = "$R_PRINCIPALS/$2" ]
+  [ "$1" = "$R_PRINCIPALS/$2/home" ]
 }
 
 tp_shell_ok() {
@@ -1320,7 +1435,7 @@ tp_useradd_tail_ok() {
     [ "$6" = "-s" ] || tp_die "useradd: unsupported form"
   [ "$2" = "${_ut_name}-grp" ] && tp_is_principal_group "$2" ||
     tp_die "useradd: primary group must be ${_ut_name}-grp"
-  tp_principal_home_ok "$4" "$_ut_name" || tp_die "useradd: home must be $R_PRINCIPALS/$_ut_name"
+  tp_principal_home_ok "$4" "$_ut_name" || tp_die "useradd: home must be $R_PRINCIPALS/$_ut_name/home"
   tp_shell_ok "$7" || tp_die "useradd: refusing shell $7"
 }
 
