@@ -2217,27 +2217,28 @@ test("removeSites skips idle disable when another pool remains and swallows a st
   }
 });
 
-test("removeSites rethrows a non-NotFound config-dir read", async () => {
+test("removeSites rethrows a refused config-dir listing", async () => {
   const { layout, cleanup } = await makeTestLayout();
-  const { run } = createSiteRunMock();
-  const originalReadDir = Deno.readDir.bind(Deno);
-  Deno.readDir = ((path: string | URL) => {
-    if (String(path).includes(`${layout.configDir}/nginx/sites`)) {
-      // deno-lint-ignore require-yield
-      return (async function* () {
-        throw new Deno.errors.PermissionDenied("sites dir");
-      })();
+  const base = createSiteRunMock();
+  const run: SiteRunFn = async (command, args) => {
+    if (
+      args.includes("ls") &&
+      String(args.at(-1)).includes(`${layout.configDir}/nginx/sites`)
+    ) {
+      return fail("tp-host: refusing path sites dir");
     }
-    return originalReadDir(path);
-  }) as typeof Deno.readDir;
+    return await base.run(command, args);
+  };
   try {
+    await Deno.mkdir(join(layout.configDir, "nginx", "sites"), {
+      recursive: true,
+    });
     await assertRejects(
       () => removeSites(layout, "envrd", { run }),
-      Deno.errors.PermissionDenied,
-      "sites dir",
+      Error,
+      "refusing path sites dir",
     );
   } finally {
-    Deno.readDir = originalReadDir;
     await cleanup();
   }
 });
@@ -2413,23 +2414,35 @@ test("removeSites swallows a missing OLS fragment and rethrows a denied one", as
   }
 });
 
-test("removeSites best-effort-cleans a leftover staging directory", async () => {
+test("removeSites lists and removes root-owned engine configs through sudo", async () => {
   const { layout, cleanup } = await makeTestLayout();
-  const { run } = createSiteRunMock();
+  const { run, calls } = createSiteRunMock();
   const { runPlaybook } = capturePlaybooks();
   const environmentId = "envstage";
+  const sitesDir = join(layout.configDir, "nginx", "sites");
   try {
     await applySites(layout, environmentId, [nginxSite], { run, runPlaybook });
-    const leftover = join(
-      layout.configDir,
-      "nginx",
-      "sites",
-      `tp-${environmentId}-stale.tmp`,
-    );
-    await Deno.mkdir(leftover);
-    await Deno.writeTextFile(join(leftover, "keep"), "x");
+    const leftover = join(sitesDir, `tp-${environmentId}-www.conf.tpprev`);
+    await Deno.writeTextFile(leftover, "stale\n");
+    calls.length = 0;
     await removeSites(layout, environmentId, { run });
-    await Deno.stat(leftover);
+    // The daemon cannot enter `root:tpnginx 0750`: list and unlink via tp-host.
+    assertEquals(
+      calls.some((c) =>
+        c.command === "sudo" && c.args.includes("ls") &&
+        c.args.at(-1) === sitesDir
+      ),
+      true,
+    );
+    const removed = calls
+      .filter((c) => c.command === "sudo" && c.args.includes("rm"))
+      .map((c) => c.args.at(-1));
+    assertEquals(removed.includes(leftover), true);
+    assertEquals(
+      removed.includes(join(sitesDir, `tp-${environmentId}-www.conf`)),
+      true,
+    );
+    assertEquals(await listConfigDirEntries(sitesDir), []);
   } finally {
     await cleanup();
   }
@@ -2481,38 +2494,30 @@ test("removeSites reloads both PHP series an environment owned", async () => {
 
 test("removeSites skips idle disable when the pools directory vanishes", async () => {
   const { layout, cleanup } = await makeTestLayout();
-  const { run } = createSiteRunMock();
+  const base = createSiteRunMock();
   const { runPlaybook } = capturePlaybooks();
   const environmentId = "envnopools";
   const poolsDir = join(layout.configDir, "php", "8.4", "pools");
-  const originalReadDir = Deno.readDir.bind(Deno);
+  let poolListings = 0;
+  const run: SiteRunFn = async (command, args) => {
+    if (args.includes("ls") && args.at(-1) === poolsDir) {
+      poolListings += 1;
+      // The removal sweep sees the pools; the idle check finds them gone.
+      if (poolListings >= 2) return fail("No such file or directory");
+    }
+    if (args.includes("disable") && args.includes("--now")) {
+      throw new TypeError("disable must not run when the pools dir is gone");
+    }
+    return await base.run(command, args);
+  };
   try {
     await applySites(layout, environmentId, [nginxPhpSite], {
       run,
       runPlaybook,
     });
-    Deno.readDir = ((path: string | URL) => {
-      if (String(path) !== poolsDir) return originalReadDir(path);
-      const inner = originalReadDir(path);
-      return (async function* () {
-        let count = 0;
-        for await (const entry of inner) {
-          count += 1;
-          yield entry;
-        }
-        if (count === 0) {
-          Deno.readDir = ((later: string | URL) => {
-            if (String(later) === poolsDir) {
-              throw new Deno.errors.NotFound("pools gone");
-            }
-            return originalReadDir(later);
-          }) as typeof Deno.readDir;
-        }
-      })();
-    }) as typeof Deno.readDir;
     await removeSites(layout, environmentId, { run });
+    assertEquals(poolListings >= 2, true);
   } finally {
-    Deno.readDir = originalReadDir;
     await cleanup();
   }
 });
@@ -2543,30 +2548,25 @@ test("removeSites skips leftover OLS files that are not this environment's fragm
 
 test("removeSites swallows a leftover staging file that cannot be unlinked", async () => {
   const { layout, cleanup } = await makeTestLayout();
-  const { run } = createSiteRunMock();
+  const base = createSiteRunMock();
   const { runPlaybook } = capturePlaybooks();
   const environmentId = "envstagefile";
+  const leftover = join(
+    layout.configDir,
+    "nginx",
+    "sites",
+    `tp-${environmentId}-www.conf.tpnew`,
+  );
+  const run: SiteRunFn = async (command, args) => {
+    if (args.includes("rm") && args.at(-1) === leftover) {
+      return fail("rm denied");
+    }
+    return await base.run(command, args);
+  };
   try {
     await applySites(layout, environmentId, [nginxSite], { run, runPlaybook });
-    const leftover = join(
-      layout.configDir,
-      "nginx",
-      "sites",
-      `tp-${environmentId}-www.conf.tpnew`,
-    );
     await Deno.writeTextFile(leftover, "stale\n");
-    const originalRemove = Deno.remove.bind(Deno);
-    Deno.remove = ((path: string | URL, options?: Deno.RemoveOptions) => {
-      if (String(path) === leftover) {
-        return Promise.reject(new Deno.errors.PermissionDenied("staged"));
-      }
-      return originalRemove(path, options);
-    }) as typeof Deno.remove;
-    try {
-      await removeSites(layout, environmentId, { run });
-    } finally {
-      Deno.remove = originalRemove;
-    }
+    await removeSites(layout, environmentId, { run });
   } finally {
     await cleanup();
   }
@@ -2634,37 +2634,61 @@ test("applySites rethrows a non-NotFound OpenLiteSpeed sites listing", async () 
   }
 });
 
-test("removeSites rethrows a non-NotFound leftover staging listing", async () => {
+test("applySites creates root-owned engine config dirs through tp-host", async () => {
   const { layout, cleanup } = await makeTestLayout();
-  const { run } = createSiteRunMock();
+  const { run, calls } = createSiteRunMock();
   const { runPlaybook } = capturePlaybooks();
-  const environmentId = "envstagerd";
-  const originalReadDir = Deno.readDir.bind(Deno);
-  let nginxSitesReads = 0;
   try {
-    await applySites(layout, environmentId, [nginxSite], {
+    await applySites(layout, "envdirs", [nginxPhpSite, caddySite], {
       run,
       runPlaybook,
     });
-    Deno.readDir = ((path: string | URL) => {
-      if (String(path).includes("/nginx/sites")) {
-        nginxSitesReads += 1;
-        if (nginxSitesReads >= 2) {
-          // deno-lint-ignore require-yield
-          return (async function* () {
-            throw new Deno.errors.PermissionDenied("staging list");
-          })();
-        }
-      }
-      return originalReadDir(path);
-    }) as typeof Deno.readDir;
-    await assertRejects(
-      () => removeSites(layout, environmentId, { run }),
-      Deno.errors.PermissionDenied,
-      "staging list",
+    await applySites(layout, "envdirs2", [apachePhpSite], {
+      run,
+      runPlaybook,
+    });
+    const dirGroups = new Map(
+      calls
+        .filter((c) =>
+          c.command === "sudo" && c.args.includes("install") &&
+          c.args.includes("-d")
+        )
+        .map((c) => [
+          String(c.args.at(-1)),
+          c.args[c.args.indexOf("-g") + 1],
+        ]),
+    );
+    const conf = layout.configDir;
+    assertEquals(dirGroups.get(join(conf, "nginx", "sites")), "tpnginx");
+    assertEquals(dirGroups.get(join(conf, "caddy", "sites")), "tpcaddysite");
+    assertEquals(dirGroups.get(join(conf, "apache", "sites")), "tpapache");
+    // php-fpm role's php_fpm_service_group, whichever engine asked.
+    assertEquals(
+      dirGroups.get(join(conf, "php", "8.4", "pools")),
+      "tpapache",
     );
   } finally {
-    Deno.readDir = originalReadDir;
+    await cleanup();
+  }
+});
+
+test("applySites never stages a root-owned config inside its config dir", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const { run, calls } = createSiteRunMock();
+  const { runPlaybook } = capturePlaybooks();
+  try {
+    await applySites(layout, "envsrc", [nginxPhpSite], { run, runPlaybook });
+    const sources = calls
+      .filter((c) =>
+        c.command === "sudo" && c.args.includes("install") &&
+        !c.args.includes("-d") && String(c.args.at(-1)).endsWith(".tpnew")
+      )
+      .map((c) => String(c.args.at(-2)));
+    assertEquals(sources.length >= 2, true);
+    for (const source of sources) {
+      assertEquals(source.startsWith(layout.configDir), false, source);
+    }
+  } finally {
     await cleanup();
   }
 });

@@ -1513,7 +1513,21 @@ async function reloadPhpFpm(
   await phpFpmDriver(series).reload(run, layout);
 }
 
-async function ensureOpenLiteSpeedDir(path: string): Promise<void> {
+/**
+ * Group of every php-fpm `pools/` dir — the php-fpm role's
+ * `php_fpm_service_group`, shared by nginx and Apache sites.
+ */
+const PHP_FPM_POOLS_GROUP = "tpapache";
+
+/**
+ * Create (or re-assert) a root-owned engine config dir `root:<group>` `0750`
+ * through tp-host. The daemon is not in the engine groups, so it can neither
+ * enter nor create these dirs itself.
+ */
+async function ensureEngineConfigDir(
+  path: string,
+  group: string,
+): Promise<void> {
   const install = await run(
     "sudo",
     hostSudoArgs([
@@ -1525,7 +1539,7 @@ async function ensureOpenLiteSpeedDir(path: string): Promise<void> {
       "-o",
       "root",
       "-g",
-      "tpols",
+      group,
       path,
     ]),
   );
@@ -1613,22 +1627,27 @@ function isPrefixedConfFile(entry: Deno.DirEntry, prefix: string): boolean {
   );
 }
 
-async function removeStagingPrefixedFiles(
-  stagingDir: string,
-  prefix: string,
-): Promise<void> {
+/**
+ * Entry names of a root-owned engine config dir, listed through tp-host (the
+ * daemon cannot enter it). `null` when the dir does not exist.
+ */
+async function listEngineConfigDir(dir: string): Promise<string[] | null> {
+  // An engine that was never installed has no dir: no root call needed. A
+  // dir the daemon cannot enter stats as PermissionDenied and is listed below.
   try {
-    for await (const entry of Deno.readDir(stagingDir)) {
-      if (!entry.isFile || !entry.name.startsWith(prefix)) continue;
-      try {
-        await Deno.remove(join(stagingDir, entry.name));
-      } catch {
-        // best-effort
-      }
-    }
+    await Deno.stat(dir);
   } catch (err) {
-    if (!(err instanceof Deno.errors.NotFound)) throw err;
+    if (err instanceof Deno.errors.NotFound) return null;
   }
+  const listing = await run(
+    "sudo",
+    hostSudoArgs(["-n", "ls", "-A", "--", dir]),
+  );
+  if (!listing.success) {
+    if (/no such (file or )?directory/i.test(listing.stderr)) return null;
+    throw new Error(listing.stderr || `Failed to list ${dir}`);
+  }
+  return listing.stdout.split("\n").filter((name) => name.length > 0);
 }
 
 async function tryRemoveSiteConfigFile(
@@ -1641,23 +1660,28 @@ async function tryRemoveSiteConfigFile(
   return false;
 }
 
-/** Remove `prefix*.conf` files under `dir` via sudo; missing dir is not an error. */
+/**
+ * Remove every `prefix*` entry of a root-owned engine config dir via sudo and
+ * count the `*.conf` ones; anything else is a staging leftover (`.tpnew`,
+ * `.tpprev`) removed best-effort. A missing dir is not an error.
+ */
 async function removePrefixedConfFiles(
   dir: string,
   prefix: string,
   label: string,
 ): Promise<number> {
+  const names = (await listEngineConfigDir(dir) ?? []).filter((name) =>
+    name.startsWith(prefix)
+  );
   let removed = 0;
-  try {
-    for await (const entry of Deno.readDir(dir)) {
-      if (!isPrefixedConfFile(entry, prefix)) continue;
-      if (await tryRemoveSiteConfigFile(join(dir, entry.name), label)) {
-        removed += 1;
-      }
+  await forEachSequential(names, async (name) => {
+    const path = join(dir, name);
+    if (!name.endsWith(".conf")) {
+      await run("sudo", hostSudoArgs(["-n", "rm", "-f", path]));
+      return;
     }
-  } catch (err) {
-    if (!(err instanceof Deno.errors.NotFound)) throw err;
-  }
+    if (await tryRemoveSiteConfigFile(path, label)) removed += 1;
+  });
   return removed;
 }
 
@@ -1975,28 +1999,24 @@ async function ensureSiteConfigDirs(
   sitesDirs: SiteConfigDirs,
   phpSeries: readonly string[],
 ): Promise<void> {
-  if (needs.caddy) {
-    await Deno.mkdir(sitesDirs.caddy, { recursive: true, mode: 0o750 });
-  }
-  if (needs.nginx) {
-    await Deno.mkdir(sitesDirs.nginx, { recursive: true, mode: 0o750 });
-  }
-  if (needs.apache) {
-    await Deno.mkdir(sitesDirs.apache, { recursive: true, mode: 0o750 });
-  }
-  if (needs.openlitespeed) {
-    await Deno.mkdir(sitesDirs.openlitespeed, { recursive: true, mode: 0o750 });
-  }
+  // Engines whose site files are root-owned get their dir through tp-host;
+  // OpenLiteSpeed fragments are daemon-owned (no config group).
+  await forEachSequential(SITE_ENGINE_ORDER, async (engine) => {
+    if (!needs[engine]) return;
+    const group = SITE_ENGINE_DRIVERS[engine].configGroup;
+    if (group === null) {
+      await Deno.mkdir(sitesDirs[engine], { recursive: true, mode: 0o750 });
+      return;
+    }
+    await ensureEngineConfigDir(sitesDirs[engine], group);
+  });
   if (needs.phpFpm) {
-    // Distinct per-series directories: no ordering between the mkdirs.
-    await Promise.all(
-      phpSeries.map((series) =>
-        Deno.mkdir(phpFpmPoolsDir(layout, series), {
-          recursive: true,
-          mode: 0o750,
-        })
-      ),
-    );
+    await forEachSequential(phpSeries, async (series) => {
+      await ensureEngineConfigDir(
+        phpFpmPoolsDir(layout, series),
+        PHP_FPM_POOLS_GROUP,
+      );
+    });
   }
 }
 
@@ -2394,7 +2414,7 @@ async function applyOpenLiteSpeedSite(
   const olsName = openlitespeedSiteName(environmentId, site.composeServiceName);
   const vhostDir = join(openlitespeedVhostsDir(layout), olsName);
   const vhConfigPath = join(vhostDir, "vhconf.conf");
-  await ensureOpenLiteSpeedDir(vhostDir);
+  await ensureEngineConfigDir(vhostDir, "tpols");
   const php = resolveOpenLiteSpeedVhostPhp(layout, site, paths, olsName);
   const vhostStaged = await stageOwnedConfigFile(
     vhConfigPath,
@@ -2755,7 +2775,7 @@ type RemovedSites = {
  * same `tp-<environmentId>-` prefix, and pool ids are unique per compose
  * service, so whichever engine's pass runs first sweeps every pool the
  * environment owned. The second pass simply finds none — `rm -f` and a
- * `readDir` of a directory whose entries are already gone are both non-errors,
+ * listing of a directory whose entries are already gone are both non-errors,
  * and the caller reloads php-fpm when *either* pass removed something.
  */
 async function removePhpFpmEngineSites(
@@ -2766,7 +2786,6 @@ async function removePhpFpmEngineSites(
   const prefix = `tp-${environmentId}-`;
   const sitesDir = join(layout.configDir, engine, "sites");
   const sitesRemoved = await removePrefixedConfFiles(sitesDir, prefix, engine);
-  await removeStagingPrefixedFiles(sitesDir, prefix);
 
   // Sweep every installed series, not just the default: the environment being
   // torn down may have pinned any of them, and this function is called once per
@@ -2780,7 +2799,6 @@ async function removePhpFpmEngineSites(
       prefix,
       `php-fpm ${series} pool`,
     );
-    await removeStagingPrefixedFiles(poolsDir, prefix);
     if (removed > 0) touchedSeries.add(series);
     poolsRemoved += removed;
   });
@@ -2822,14 +2840,16 @@ async function disableIdlePhpSeries(
   layout: LayoutPaths,
   series: string,
 ): Promise<void> {
-  const poolsDir = phpFpmPoolsDir(layout, series);
+  let pools: string[] | null;
   try {
-    for await (const entry of Deno.readDir(poolsDir)) {
-      // `default.conf` is the bootstrap pool the role installs; anything else
-      // means a site still runs on this series.
-      if (entry.isFile && entry.name !== "default.conf") return;
-    }
+    pools = await listEngineConfigDir(phpFpmPoolsDir(layout, series));
   } catch {
+    return;
+  }
+  if (pools === null) return;
+  // `default.conf` is the bootstrap pool the role installs; any other pool
+  // means a site still runs on this series.
+  if (pools.some((name) => name.endsWith(".conf") && name !== "default.conf")) {
     return;
   }
   const unit = phpFpmDriver(series).unit;
