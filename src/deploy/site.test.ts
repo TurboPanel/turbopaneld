@@ -562,7 +562,9 @@ test("openlitespeedVhostConfig serves a static document root with no directory l
   const conf = openlitespeedVhostConfig();
   assertStringIncludes(conf, "docRoot $VH_ROOT/");
   assertStringIncludes(conf, "autoIndex 0");
-  assertStringIncludes(conf, "allowBrowse 0");
+  // `allowBrowse` is OpenLiteSpeed's "Accessible" flag: 0 answers 403 for `/`.
+  assertStringIncludes(conf, "allowBrowse 1");
+  assertEquals(conf.includes("allowBrowse 0"), false);
 });
 
 test("openlitespeedMainConfig assembles a single httpd_config.conf from fragments", async () => {
@@ -787,6 +789,12 @@ test("openlitespeedVhostConfig runs PHP through a suEXEC LSAPI processor", () =>
     ],
   });
   assertEquals(processorName, "lsphp_tp_env1_phpapp");
+  assertStringIncludes(
+    conf,
+    "address                   uds:///run/turbopanel-ols/lsphp_tp_env1_phpapp.sock",
+  );
+  assertEquals(conf.includes("uds://tmp/"), false);
+  assertEquals(conf.includes("allowBrowse 0"), false);
   assertStringIncludes(conf, "extprocessor lsphp_tp_env1_phpapp{");
   assertStringIncludes(conf, "type                      lsapi");
   assertStringIncludes(

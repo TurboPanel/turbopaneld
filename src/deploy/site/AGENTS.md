@@ -34,12 +34,15 @@ Docker Compose. The daemon:
    vendored **lsphp** on `turbopanel_lsphp_install=true` when an OLS site wants
    PHP. OpenLiteSpeed does not use php-fpm: `openlitespeedVhostConfig` gives the
    vhost its own LSAPI `extprocessor` (`path` → `<runtimesDir>/lsphp/<series>/current/bin/lsphp`,
-   `address uds://tmp/lshttpd/<name>.sock`, on-demand via `runOnStartUp 0` +
-   `autoStart 2`) under **suEXEC** — `extUser`/`extGroup` resolved from the site
+   `address uds:///run/turbopanel-ols/<name>.sock` — `OPENLITESPEED_LSAPI_SOCKET_DIR`,
+   the unit's `RuntimeDirectory`; a relative `uds://tmp/…` is the host `/tmp` —
+   on-demand via `runOnStartUp 0` + `autoStart 2`) under **suEXEC** — `extUser`/`extGroup` resolved from the site
    principal exactly the way a pool's `user`/`group` are, falling back to
    `tpols`. Hosting hints render into the vhost's `phpIniOverride{}` as
    `php_admin_value <key> <value>`, and the site fragment flips
-   `enableScript 1`.
+   `enableScript 1`. Every `context /` renders `allowBrowse 1`: in OLS that is
+   the context's "Accessible" flag (`0` is a 403 for everything); listing is
+   `autoIndex 0`.
 
    **Several PHP series can run side by side.** `resolveSitePhpSeries` picks per
    site (`web.php.version`, else `DEFAULT_PHP_SERIES`), and

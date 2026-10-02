@@ -1021,6 +1021,13 @@ export function openlitespeedLsphpBinaryPath(
   return join(layout.runtimesDir, "lsphp", series, "current", "bin", "lsphp");
 }
 
+/**
+ * LSAPI socket directory: the `turbopanel-openlitespeed.service`
+ * `RuntimeDirectory` (roles/openlitespeed), owned by `tpols`. A relative
+ * `uds://tmp/…` resolves against `/`, i.e. the shared host `/tmp`.
+ */
+export const OPENLITESPEED_LSAPI_SOCKET_DIR = "/run/turbopanel-ols";
+
 /** `extprocessor` name for one site — also what its `scripthandler` maps to. */
 export function openlitespeedLsapiProcessorName(olsSiteName: string): string {
   return `lsphp_${olsSiteName}`;
@@ -1051,7 +1058,7 @@ export function openlitespeedLsapiExtProcessorFragment(
 ): string {
   return `extprocessor ${opts.processorName}{
   type                      lsapi
-  address                   uds://tmp/lshttpd/${opts.processorName}.sock
+  address                   uds://${OPENLITESPEED_LSAPI_SOCKET_DIR}/${opts.processorName}.sock
   maxConns                  10
   env                       PHP_LSAPI_CHILDREN=10
   env                       PATH=/usr/local/bin:/usr/bin:/bin
@@ -1168,6 +1175,9 @@ function formatOpenLiteSpeedAdminValue(value: PhpAdminValue): string {
 /**
  * Per-site `vhconf.conf`.
  *
+ * `allowBrowse` is OpenLiteSpeed's "Accessible" switch for the context, not
+ * directory listing (that is `autoIndex`): `0` answers 403 for everything.
+ *
  * Static document root only (no directory listing) unless `php` is supplied, in
  * which case the vhost also carries its own suEXEC LSAPI processor, a `.php`
  * script handler bound to it, and a `phpIniOverride{}` holding the same hosting
@@ -1183,7 +1193,7 @@ index {
   autoIndex 0
 }
 context / {
-  allowBrowse 0
+  allowBrowse 1
   location $DOC_ROOT/
 }
 `;
@@ -1206,7 +1216,7 @@ scripthandler {
 }
 ${overrideBlock}
 context / {
-  allowBrowse 0
+  allowBrowse 1
   location $DOC_ROOT/
 }
 `;
