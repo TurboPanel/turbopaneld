@@ -81,11 +81,23 @@
       loop_control:
         label: "{{ item }}"
 
+    # The pruned copy above omits fcgi-bin, and `copy` to a file dest does not
+    # create a missing parent directory (fails: destination directory does not exist).
+    - name: Create fcgi-bin directory in the versioned tree
+      ansible.builtin.file:
+        path: "{{ turbopanel_vendor_dir }}/openlitespeed/{{ openlitespeed_version }}/fcgi-bin"
+        state: directory
+        owner: root
+        group: "{{ turbopanel_group }}"
+        mode: "0750"
+
     - name: Install lsperld.fpl only (drop node/ruby fcgi helpers — unused, unvendored runtimes)
       ansible.builtin.copy:
         remote_src: true
         src: "{{ _openlitespeed_tmp.path }}/openlitespeed/fcgi-bin/lsperld.fpl"
         dest: "{{ turbopanel_vendor_dir }}/openlitespeed/{{ openlitespeed_version }}/fcgi-bin/lsperld.fpl"
+        owner: root
+        group: "{{ turbopanel_group }}"
         mode: "0750"
 
     - name: Seed FHS mime.properties from the release tree (first install only)
