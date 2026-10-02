@@ -990,6 +990,16 @@ const SITES: CallSite[] = [
     },
   ),
 
+  // --- Reads behind closed trees ---------------------------------------------
+  tpHost('src/permissions/privileged-read.ts|["-n","cat","--",path]', {
+    argv: ["cat", "--", `${CONF}/caddy/instance-acme-settings.json`],
+    setup: file(`${CONF}/caddy/instance-acme-settings.json`),
+  }),
+  tpHost('src/permissions/privileged-read.ts|["-n","test","-e",path]', {
+    argv: ["test", "-e", `${HOME}/volumes/stor-1`],
+    setup: dir(`${HOME}/volumes/stor-1`),
+  }),
+
   // --- SSH ------------------------------------------------------------------
   tpHost('src/deploy/ssh/apply.ts|["-n","cat","--",path]', {
     argv: ["cat", "--", `${SSH_KEYS}/alice`],
