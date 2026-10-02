@@ -410,6 +410,14 @@ export type DaemonMessage =
     type: "managed-ha-event";
     managedId: string;
     sourceMemberId?: string;
+    /**
+     * Who decided the primary is dead. Absent = the Orchestrator poller
+     * (`ha-observe.ts`); `postgres-probe` = `pg-dead-primary-observe.ts`,
+     * sent only to a control plane advertising `managed-ha-probe-v1`.
+     */
+    detector?: "orchestrator" | "postgres-probe";
+    /** Bounded detector evidence (failure count, last error, container state). */
+    evidence?: Record<string, unknown>;
     at: string;
   }
   | {

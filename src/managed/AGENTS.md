@@ -29,6 +29,8 @@ Certificate authorities: `../../../turbopanel/src/lib/tls/AGENTS.md`.
 | `orchestrator.ts` / `orchestrator-api.ts` | Per-org Orchestrator compose (project = the `managed-ha` `serviceId`, written into the compose file's own `name:` key so the stack unit needs no `-p`) + local HTTP (`:33001`); `Recover: false`; Raft `:33002` on advertise address only |
 | `../commands/managed-ha-reconcile.ts` / `managed-ha-failover.ts` | `managed.ha.reconcile` (whole-server HA stack) + `managed.ha.failover` (`drain` / `recover`). Designated Orchestrator recover-to; on HTTP/API failure **or** absent stack, falls back to `managed.promote` so fencing is not stranded. `Recover: false` stays — TurboPanel picks the candidate. `Future:` fail-closed HA lease when Raft is unreachable. |
 | `../instance/ha-observe.ts` | Poll local Orchestrator `/api/problems` when `configDir/orchestrator/docker-compose.yml` exists; emit unsolicited `managed-ha-event` |
+| `pg-dead-primary.ts` / `../instance/pg-dead-primary-observe.ts` | Postgres dead-primary probe on the primary's **own** host (Orchestrator cannot see Postgres). See **Postgres dead-primary detection** below |
+| `ha-intent.ts` / `ha-member.ts` / `ha-command-hooks.ts` | Probe inputs kept by `command-router.ts`: operator-intent markers around every engine-touching managed verb, and the per-host member record (`managed/<id>/ha-member.json`) |
 | `backup.ts` | `managed.backup` (`create`/`delete`) + `managed.restore` — streamed dump/restore, checksum, prune; exports the shared core (`createManagedBackupArtifact`, `restoreManagedBackupArtifact`, `resolveBackupEngine`) for scheduled runs |
 | `target-lock.ts` | Per-engine `flock` (`withManagedTargetLock`, `ManagedTargetBusyError`) shared by the backup/restore handlers and the scheduled `backup-run` process |
 | `logs.ts` | Bounded `compose logs`; cell `managed-logs-request` / `managed-logs-result` (not a command) |
@@ -402,3 +404,94 @@ Physical / GTID streaming is **engine → engine**, never through ProxySQL.
 | Standby SQL | not used (config-file primary_conninfo) | Optional `configureStandby` hook — replication channel setup is not user-data mutation |
 | Promote | Operator switchover, DR route, or TurboPanel-gated auto-failover after fence (Orchestrator designated recover-to, else `managed.promote` fallback) | same (`STOP REPLICA` / `STOP SLAVE` + clear read_only) |
 | Health | `streaming` requires active WAL receiver | `streaming` requires both IO + SQL threads running |
+
+## Postgres dead-primary detection
+
+Orchestrator's image only has the MySQL driver, so it never sees Postgres and
+`ha-observe.ts` only ever reports MySQL/MariaDB. For Postgres the daemon on the
+**primary's own host** runs `PgDeadPrimaryObserver` and sends the same
+`managed-ha-event`, plus `sourceMemberId`, `detector: 'postgres-probe'` and
+bounded `evidence`. What the control plane then checks (same-org member
+reporter, current primary, cooldown, lag gate, fence, promote) is listed in
+`turbopanel/src/features/managed/AGENTS.md` → **Dead-primary detectors**;
+there is no raft-leader check on that path.
+
+- **Scope** (`DEAD_PRIMARY_DETECTION_SCOPE = 'engine-dead-host-alive'`): the
+  engine container/process is dead while the host and daemon are alive, so the
+  old primary can still be fenced. **Whole-host loss is not detected** — it
+  stays manual with an alert. Widening it (Option A) is a control-plane policy
+  switch (`turbopanel/src/features/managed/ha-policy.ts` →
+  `AUTOMATIC_FAILOVER_DETECTORS`) plus a host-loss detector there, never a
+  change to this probe.
+- **Watched**: a Postgres member recorded `primary` in `ha-member.json` with at
+  least one replica peer. The daemon cannot see `replicaClass`; the control
+  plane still requires a healthy same-DC `failover` replica and otherwise
+  records a `blocked` recovery. Global kill switch:
+  `TURBOPANEL_MANAGED_PG_PROBE=off`. A cluster applied before this daemon has
+  no record until its next `managed.apply`. `managed.promote` and a successful
+  `managed.ha.failover` `recover` flip the local record to `primary` and count
+  every other member (the old primary resyncs as a replica), so a 1+1
+  cluster's new primary is watched at once; the flip is logged.
+- **Probe** every 5 s, read-only, every `docker exec` as `-u postgres`:
+  `docker inspect` (state, exit code, start, health), then
+  `pg_isready -q -t 3` over the image's local socket (no credentials, no SQL),
+  `pg_ctl status` only on "no response", `pg_controldata` only when Postgres
+  rejects. Every Docker call is bounded; a timeout or socket error is
+  *inconclusive*, and while a previous call for that container is still
+  running the tick is inconclusive instead of spawning another CLI process.
+- **Classification**: exited/dead/restarting/created/paused/absent → hard
+  (Docker must answer every tick of the streak — any unreadable tick, e.g. a
+  dockerd restart without live-restore, resets it); `pg_isready` 0 → alive
+  (PQping reports OK for every server error except 57P03, so 53300 "too many
+  connections" is alive); 1 (57P03) → soft for 10 min, 30 min while
+  `pg_controldata` says `in crash recovery` **or cannot be read**;
+  `in archive recovery` → this node is a standby, never fire; 2 → soft for
+  60 s after a container (re)start, then hard only when `pg_ctl status`
+  confirms the postmaster is gone, otherwise soft for 5 min (an overloaded
+  primary is not dead; every soft state is logged on entry/exit and each
+  minute so a hung primary is visible); 3 / Docker stderr / exec plumbing → inconclusive
+  (resets the streak).
+- **Fires** after 6 consecutive hard failures spanning ≥ 20 s on a
+  **monotonic** clock (wall time only for marker expiry and Docker's
+  `StartedAt`). Attach, detach and a tick gap over 3 intervals reset streaks.
+  One event per incident; a new incident no sooner than 5 min after the last
+  event; healthy resets. Only delivered events count as emitted.
+- **Intent markers** (`ha-intent.ts`, written atomically; an unreadable marker
+  file suppresses like an active one): `command-router.ts` begins one before
+  every verb in `MANAGED_COMMAND_INTENT_KINDS` (apply = update/upgrade/resync,
+  lifecycle start/stop/restart, destroy, promote, restore, ha.failover) and
+  ends it when the handler returns:
+  - while the command runs its marker is `running`: it suppresses for the
+    whole duration (a major-upgrade apply or a restore that keeps the engine
+    down for an hour stays suppressed) up to a 6 h ceiling, at which it stops
+    suppressing with a WARN; when the command ends it becomes transient and
+    suppresses 10 min + 30 s from THEN; only the command that owns the
+    current marker refreshes it (concurrent commands: the last to finish
+    never overwrites a newer marker);
+  - a `stop` is **held** only after it succeeded; `destroy` is held from the
+    start (a failed destroy never re-arms the probe);
+  - a transient marker never replaces a held one; only a **successful**
+    start/restart/apply/promote/failover releases it;
+  - the probe releases a held marker, a `running` marker left on disk by an
+    earlier daemon run (never one a command of this process owns), or an
+    unreadable marker after the engine has been healthy for 10 min, and logs
+    every release and every expiry;
+  - an unreadable (torn) marker file suppresses like an active one, with a
+    WARN when that starts and every 10 min; it is cleared after 10 healthy
+    minutes or 6 h, whichever comes first;
+  - at daemon start: a `running` stop left by a restart mid-stop is turned
+    into a held stop when the engine is down; a stopped primary with **no**
+    marker is logged as a WARN and probed as dead (the daemon keeps no command
+    journal, so a lost held-stop write cannot be told from a crash).
+  A container stopped *without* a marker still counts as dead. A new
+  `managed.*` verb must be added to `MANAGED_COMMAND_INTENT_KINDS` or
+  `MANAGED_COMMAND_INTENT_EXEMPT` (`ha-intent.test.ts` fails otherwise).
+  Commands outside `managed.*` that can stop an engine container without
+  naming a cluster record a **host-wide** marker (`HOST_WIDE_INTENT_ID`):
+  `storage.restore` (stops every running container that mounts the restored
+  copy) and `server.reboot`.
+- **Never sends** after `detach()` (daemon SIGTERM, including a tick already in
+  flight), unless `systemctl is-system-running` answers `running`/`degraded`
+  within 2 s (fails closed), or to a control plane that does not advertise
+  `managed-ha-probe-v1`. `turbopaneld.service` is ordered `After=docker.service`
+  so at shutdown the daemon stops before Docker kills the engines.
