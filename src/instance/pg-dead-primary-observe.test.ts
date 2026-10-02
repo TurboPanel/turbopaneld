@@ -2,6 +2,7 @@ import { assert, assertEquals } from "@std/assert";
 import type { ManagedHaMemberRecord } from "../managed/ha-member.ts";
 import type { ProbeSample } from "../managed/pg-dead-primary.ts";
 import {
+  type IntentState,
   isWatchedPrimary,
   type PgDeadPrimaryEventMessage,
   PgDeadPrimaryObserver,
@@ -31,6 +32,18 @@ const PRIMARY: ManagedHaMemberRecord = {
   replicaPeerCount: 1,
   updatedAt: "2026-10-01T00:00:00Z",
 };
+
+function intent(overrides: Partial<IntentState>): IntentState {
+  return {
+    active: false,
+    heldClusterMarker: false,
+    runningKind: null,
+    runningOverdue: false,
+    unreadableReason: null,
+    noClusterMarker: true,
+    ...overrides,
+  };
+}
 
 const DEAD: ProbeSample = {
   container: {
@@ -68,9 +81,9 @@ function harness(
       sampled.push(name);
       return Promise.resolve(DEAD);
     },
-    intentState: () =>
-      Promise.resolve({ active: false, heldClusterMarker: false }),
+    intentState: () => Promise.resolve(intent({})),
     releaseHeld: () => Promise.resolve(),
+    holdStop: () => Promise.resolve(),
     hostStopping: () => Promise.resolve(false),
     ...overrides,
   });
@@ -117,8 +130,7 @@ test("dead primary emits one managed-ha-event with detector and evidence", async
 
 test("active intent marker suppresses the event", async () => {
   const h = harness({
-    intentState: () =>
-      Promise.resolve({ active: true, heldClusterMarker: false }),
+    intentState: () => Promise.resolve(intent({ active: true })),
   });
   await withAttached(h, () => pollTicks(h, 50));
   assertEquals(h.sent.length, 0);
@@ -297,9 +309,9 @@ test("a wall-clock step does not shorten graces (monotonic clock drives the dete
     globallyEnabled: () => true,
     listMembers: () => Promise.resolve([PRIMARY]),
     sample: () => Promise.resolve(rejecting),
-    intentState: () =>
-      Promise.resolve({ active: false, heldClusterMarker: false }),
+    intentState: () => Promise.resolve(intent({})),
     releaseHeld: () => Promise.resolve(),
+    holdStop: () => Promise.resolve(),
     hostStopping: () => Promise.resolve(false),
   });
   observer.attach();
@@ -322,7 +334,7 @@ test("a held marker is released (and logged) after a sustained healthy run", asy
   const h = harness({
     sample: () => Promise.resolve(HEALTHY),
     intentState: () =>
-      Promise.resolve({ active: true, heldClusterMarker: true }),
+      Promise.resolve(intent({ active: true, heldClusterMarker: true })),
     releaseHeld: (id, reason) => {
       released.push(`${id}:${reason}`);
       return Promise.resolve();
@@ -341,7 +353,7 @@ test("a held marker is never released while the engine is down", async () => {
   const released: string[] = [];
   const h = harness({
     intentState: () =>
-      Promise.resolve({ active: true, heldClusterMarker: true }),
+      Promise.resolve(intent({ active: true, heldClusterMarker: true })),
     releaseHeld: (id) => {
       released.push(id);
       return Promise.resolve();
@@ -357,4 +369,130 @@ test("systemdHostBlocksEmit fails closed when systemctl is unusable", async () =
   // be "do not send".
   if (Deno.build.os === "linux") return;
   assertEquals(await systemdHostBlocksEmit(500), true);
+});
+
+test("a stop interrupted by a daemon restart is held once the engine is seen down", async () => {
+  const held: string[] = [];
+  const h = harness({
+    intentState: () =>
+      Promise.resolve(
+        intent({
+          active: true,
+          heldClusterMarker: true,
+          runningKind: "stop",
+          noClusterMarker: false,
+        }),
+      ),
+    holdStop: (id) => {
+      held.push(id);
+      return Promise.resolve();
+    },
+  });
+  await withAttached(h, () => pollTicks(h, 20));
+  assertEquals(held, [MANAGED_ID]);
+  assertEquals(h.sent.length, 0);
+});
+
+test("a stopped primary with no marker at start is not silently held (probed as dead)", async () => {
+  const held: string[] = [];
+  const h = harness({
+    holdStop: (id) => {
+      held.push(id);
+      return Promise.resolve();
+    },
+  });
+  await withAttached(h, () => pollTicks(h, 20));
+  assertEquals(held.length, 0);
+  assertEquals(h.sent.length, 1);
+});
+
+test("an unreadable marker is released after a sustained healthy run", async () => {
+  const released: string[] = [];
+  const h = harness({
+    sample: () => Promise.resolve(HEALTHY),
+    intentState: () =>
+      Promise.resolve(
+        intent({
+          active: true,
+          heldClusterMarker: true,
+          unreadableReason: "torn",
+          noClusterMarker: false,
+        }),
+      ),
+    releaseHeld: (id, reason) => {
+      released.push(`${id}:${reason}`);
+      return Promise.resolve();
+    },
+  });
+  await withAttached(h, () => pollTicks(h, 130));
+  assertEquals(released.length, 1);
+});
+
+test("an unreadable marker is released after 6 h even while the engine is down", async () => {
+  const released: string[] = [];
+  const h = harness({
+    intentState: () =>
+      Promise.resolve(
+        intent({
+          active: true,
+          heldClusterMarker: true,
+          unreadableReason: "torn",
+          noClusterMarker: false,
+        }),
+      ),
+    releaseHeld: (id, reason) => {
+      released.push(`${id}:${reason}`);
+      return Promise.resolve();
+    },
+  });
+  await withAttached(h, async () => {
+    await pollTicks(h, 2);
+    assertEquals(released.length, 0);
+    h.clock.now += 6 * 3_600_000;
+    await pollTicks(h, 1);
+  });
+  assertEquals(released.length, 1);
+  assert(released[0]!.includes("unreadable"));
+});
+
+test("a running marker owned by this process is not released by a healthy run", async () => {
+  // The default intentState marks only disk-left running markers as
+  // releasable; an in-process running marker reports heldClusterMarker=false.
+  const released: string[] = [];
+  const h = harness({
+    sample: () => Promise.resolve(HEALTHY),
+    intentState: () =>
+      Promise.resolve(
+        intent({
+          active: true,
+          heldClusterMarker: false,
+          runningKind: "apply",
+          noClusterMarker: false,
+        }),
+      ),
+    releaseHeld: (id) => {
+      released.push(id);
+      return Promise.resolve();
+    },
+  });
+  await withAttached(h, () => pollTicks(h, 200));
+  assertEquals(released.length, 0);
+});
+
+test("a hung primary (no response, postmaster alive) is logged but not reported inside its grace", async () => {
+  const hung: ProbeSample = {
+    container: HEALTHY.container,
+    pgReady: { kind: "exit", code: 2, output: "" },
+    postmaster: "running",
+  };
+  let healthy = false;
+  const h = harness({
+    sample: () => Promise.resolve(healthy ? HEALTHY : hung),
+  });
+  await withAttached(h, async () => {
+    await pollTicks(h, 50); // ~4 min: soft, logged each minute
+    healthy = true;
+    await pollTicks(h, 2); // leaves the soft state
+  });
+  assertEquals(h.sent.length, 0);
 });

@@ -36,12 +36,18 @@ import {
   HOST_WIDE_INTENT_ID,
   isHeldIntent,
   isIntentLookupActive,
+  isOverdueRunningIntent,
+  isRunningIntent,
   lookupManagedIntent,
+  MANAGED_INTENT_MAX_RUNNING_MS,
+  recordManagedIntent,
 } from "../managed/ha-intent.ts";
 import {
+  classifyProbeSample,
   DeadPrimaryDetector,
   type DeadPrimaryEvidence,
   DEFAULT_PG_DEAD_PRIMARY_CONFIG,
+  type Observation,
   type PgDeadPrimaryConfig,
   POSTGRES_PROBE_DETECTOR,
   type ProbeSample,
@@ -59,6 +65,10 @@ const DOCKER_STILL_BUSY: ProbeSample = {
 
 /** A held stop/destroy is released after the engine is healthy this long. */
 export const HELD_INTENT_HEALTHY_RELEASE_MS = 10 * 60_000;
+/** WARN cadence while a marker file stays unreadable. */
+const UNREADABLE_WARN_EVERY_MS = 10 * 60_000;
+/** WARN cadence while a primary stays in a soft (not-yet-dead) state. */
+const SOFT_LOG_EVERY_MS = 60_000;
 /** A tick gap above this many intervals (suspend, stall) resets streaks. */
 const GAP_RESET_INTERVALS = 3;
 const SYSTEMCTL_TIMEOUT_MS = 2_000;
@@ -75,8 +85,21 @@ export type PgDeadPrimaryEventMessage = {
 export type IntentState = {
   /** A marker (cluster or host-wide) suppresses the probe. */
   active: boolean;
-  /** The CLUSTER marker is a held stop/destroy (eligible for auto-release). */
+  /**
+   * The CLUSTER marker does not expire on its own and no command of this
+   * process owns it: a held stop/destroy, a running marker left by an earlier
+   * daemon run, or an unreadable file. Eligible for release after a
+   * sustained healthy run.
+   */
   heldClusterMarker: boolean;
+  /** Kind of a still-running cluster marker (`null` otherwise). */
+  runningKind: string | null;
+  /** A running cluster marker hit its 6 h ceiling (no longer suppressing). */
+  runningOverdue: boolean;
+  /** Why the cluster marker file cannot be read (`null` when it can). */
+  unreadableReason: string | null;
+  /** No cluster marker at all. */
+  noClusterMarker: boolean;
 };
 
 export type PgDeadPrimaryObserverOptions = {
@@ -99,6 +122,8 @@ export type PgDeadPrimaryObserverOptions = {
   intentState?: (managedId: string, wallMs: number) => Promise<IntentState>;
   /** Test seam — defaults to {@link clearManagedIntent}. */
   releaseHeld?: (managedId: string, reason: string) => Promise<void>;
+  /** Test seam — defaults to writing a held `stop` marker. */
+  holdStop?: (managedId: string) => Promise<void>;
   /** Test seam — defaults to {@link systemdHostBlocksEmit} (fails closed). */
   hostStopping?: () => Promise<boolean>;
   runDocker?: RunDockerFn;
@@ -147,7 +172,19 @@ type ClusterWatch = {
   detector: DeadPrimaryDetector;
   intentWasActive: boolean;
   healthySinceMono: number | null;
+  unreadableSinceMono: number | null;
+  unreadableWarnedMono: number | null;
+  overdueWarned: boolean;
+  lastObservation: string | null;
+  lastSoftLogMono: number | null;
 };
+
+/** The engine container is not running (exited, dead, absent...). */
+function isEngineDown(sample: ProbeSample): boolean {
+  if (sample.container.kind === "absent") return true;
+  return sample.container.kind === "present" &&
+    sample.container.state.status !== "running";
+}
 
 function isHealthySample(sample: ProbeSample): boolean {
   return sample.container.kind === "present" &&
@@ -169,6 +206,9 @@ export class PgDeadPrimaryObserver {
     wallMs: number,
   ) => Promise<IntentState>;
   readonly #releaseHeld: (managedId: string, reason: string) => Promise<void>;
+  readonly #holdStop: (managedId: string) => Promise<void>;
+  /** Clusters already checked once since this process started. */
+  readonly #startupChecked = new Set<string>();
   readonly #hostStopping: () => Promise<boolean>;
   readonly #watches = new Map<string, ClusterWatch>();
   /** Docker CLI calls still running per container (a timeout does not kill them). */
@@ -204,8 +244,28 @@ export class PgDeadPrimaryObserver {
         return {
           active: isIntentLookupActive(cluster, wallMs) ||
             isIntentLookupActive(host, wallMs),
-          heldClusterMarker: isHeldIntent(cluster),
+          // A running marker of a command in THIS process is never released
+          // early (the command still runs); one left on disk by an earlier
+          // run (crash mid-command) is treated like a held marker.
+          heldClusterMarker: isHeldIntent(cluster) ||
+            (isRunningIntent(cluster) && cluster.status === "found" &&
+              cluster.fromDisk) ||
+            cluster.status === "unreadable",
+          runningKind: isRunningIntent(cluster) && cluster.status === "found"
+            ? cluster.intent.kind
+            : null,
+          runningOverdue: isOverdueRunningIntent(cluster, wallMs),
+          unreadableReason: cluster.status === "unreadable"
+            ? cluster.reason
+            : null,
+          noClusterMarker: cluster.status === "none",
         };
+      });
+    this.#holdStop = options.holdStop ??
+      (async (managedId) => {
+        await recordManagedIntent(layout().stateDir, managedId, "stop", {
+          mode: "held",
+        });
       });
     this.#releaseHeld = options.releaseHeld ??
       ((managedId, reason) =>
@@ -267,6 +327,11 @@ export class PgDeadPrimaryObserver {
         detector: new DeadPrimaryDetector(this.#config),
         intentWasActive: false,
         healthySinceMono: null,
+        unreadableSinceMono: null,
+        unreadableWarnedMono: null,
+        overdueWarned: false,
+        lastObservation: null,
+        lastSoftLogMono: null,
       };
       this.#watches.set(managedId, watch);
     }
@@ -319,13 +384,70 @@ export class PgDeadPrimaryObserver {
     await Promise.all(watched.map((record) => this.#probeOne(record)));
   }
 
-  async #trackIntent(
+  /**
+   * Once per cluster per process start. A daemon restart in the middle of a
+   * stop leaves its `running` stop marker: if the engine is indeed down, hold
+   * it. A stopped primary with no marker at all cannot be told apart from a
+   * crash (the daemon keeps no command journal and a failed held-stop write
+   * leaves nothing on disk): it is probed as dead, and said so loudly.
+   */
+  async #startupCheck(
     record: ManagedHaMemberRecord,
-    watch: ClusterWatch,
     sample: ProbeSample,
     intent: IntentState,
   ): Promise<void> {
-    const mono = this.#monoMs();
+    if (this.#startupChecked.has(record.managedId)) return;
+    this.#startupChecked.add(record.managedId);
+    if (!isEngineDown(sample)) return;
+    if (intent.runningKind === "stop") {
+      await this.#holdStop(record.managedId);
+      logInfo(
+        "managed",
+        `stop of managedId=${record.managedId} was interrupted by a daemon restart and the engine is down: holding the stop marker`,
+      );
+      return;
+    }
+    if (intent.noClusterMarker) {
+      logWarn(
+        "managed",
+        `primary managedId=${record.managedId} is stopped at daemon start with no intent marker: it will be treated as dead (a platform stop whose marker was lost looks the same)`,
+      );
+    }
+  }
+
+  #warnUnreadable(
+    record: ManagedHaMemberRecord,
+    watch: ClusterWatch,
+    reason: string,
+    mono: number,
+  ): void {
+    watch.unreadableSinceMono ??= mono;
+    const last = watch.unreadableWarnedMono;
+    if (last !== null && mono - last < UNREADABLE_WARN_EVERY_MS) return;
+    watch.unreadableWarnedMono = mono;
+    logWarn(
+      "managed",
+      `intent marker for managedId=${record.managedId} is unreadable (${reason}); probe suppressed until it is healthy for ${
+        HELD_INTENT_HEALTHY_RELEASE_MS / 60_000
+      } min or ${MANAGED_INTENT_MAX_RUNNING_MS / 3_600_000} h pass`,
+    );
+  }
+
+  #noteIntentTransitions(
+    record: ManagedHaMemberRecord,
+    watch: ClusterWatch,
+    intent: IntentState,
+  ): void {
+    if (intent.runningOverdue && !watch.overdueWarned) {
+      watch.overdueWarned = true;
+      logWarn(
+        "managed",
+        `intent marker for managedId=${record.managedId} (${intent.runningKind}) hit its ${
+          MANAGED_INTENT_MAX_RUNNING_MS / 3_600_000
+        } h ceiling without its command ending; probe re-armed`,
+      );
+    }
+    if (!intent.runningOverdue) watch.overdueWarned = false;
     if (watch.intentWasActive && !intent.active) {
       logInfo(
         "managed",
@@ -333,6 +455,33 @@ export class PgDeadPrimaryObserver {
       );
     }
     watch.intentWasActive = intent.active;
+  }
+
+  async #trackIntent(
+    record: ManagedHaMemberRecord,
+    watch: ClusterWatch,
+    sample: ProbeSample,
+    intent: IntentState,
+  ): Promise<void> {
+    const mono = this.#monoMs();
+    this.#noteIntentTransitions(record, watch, intent);
+    if (intent.unreadableReason === null) {
+      watch.unreadableSinceMono = null;
+      watch.unreadableWarnedMono = null;
+    } else {
+      this.#warnUnreadable(record, watch, intent.unreadableReason, mono);
+      const since = watch.unreadableSinceMono ?? mono;
+      if (mono - since >= MANAGED_INTENT_MAX_RUNNING_MS) {
+        watch.unreadableSinceMono = null;
+        await this.#releaseHeld(
+          record.managedId,
+          `unreadable marker older than ${
+            MANAGED_INTENT_MAX_RUNNING_MS / 3_600_000
+          } h`,
+        );
+        return;
+      }
+    }
     if (!intent.heldClusterMarker || !isHealthySample(sample)) {
       watch.healthySinceMono = null;
       return;
@@ -346,6 +495,42 @@ export class PgDeadPrimaryObserver {
     );
   }
 
+  /** Make a hung or recovering primary visible: transitions + every minute. */
+  #logSoftPhase(
+    record: ManagedHaMemberRecord,
+    watch: ClusterWatch,
+    observation: Observation,
+    mono: number,
+  ): void {
+    const key = observation.kind === "soft" ? observation.reason : null;
+    if (key === watch.lastObservation) {
+      if (key === null) return;
+      if (
+        watch.lastSoftLogMono !== null &&
+        mono - watch.lastSoftLogMono < SOFT_LOG_EVERY_MS
+      ) return;
+      watch.lastSoftLogMono = mono;
+      logWarn(
+        "managed",
+        `primary managedId=${record.managedId} still not healthy: ${key}`,
+      );
+      return;
+    }
+    if (key === null) {
+      logInfo(
+        "managed",
+        `primary managedId=${record.managedId} left soft state (${watch.lastObservation}) -> ${observation.kind}`,
+      );
+    } else {
+      logInfo(
+        "managed",
+        `primary managedId=${record.managedId} soft failure: ${key}`,
+      );
+    }
+    watch.lastObservation = key;
+    watch.lastSoftLogMono = mono;
+  }
+
   async #probeOne(record: ManagedHaMemberRecord): Promise<void> {
     const watch = this.#watchFor(record.managedId);
     const sample = this.#dockerInFlight.has(record.containerName)
@@ -353,8 +538,17 @@ export class PgDeadPrimaryObserver {
       : await this.#sample(record.containerName);
     const wallMs = this.#wallMs();
     const intent = await this.#intentState(record.managedId, wallMs);
+    await this.#startupCheck(record, sample, intent);
     await this.#trackIntent(record, watch, sample, intent);
     const monoMs = this.#monoMs();
+    if (!intent.active) {
+      this.#logSoftPhase(
+        record,
+        watch,
+        classifyProbeSample(sample, wallMs, this.#config),
+        monoMs,
+      );
+    }
     const verdict = watch.detector.step(sample, {
       nowMs: monoMs,
       wallMs,

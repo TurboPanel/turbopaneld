@@ -12,10 +12,13 @@ import {
   HOST_WIDE_INTENT_ID,
   isIntentLookupActive,
   isManagedIntentActive,
+  isOverdueRunningIntent,
+  isRunningIntent,
   lookupManagedIntent,
   MANAGED_COMMAND_INTENT_EXEMPT,
   MANAGED_COMMAND_INTENT_KINDS,
   MANAGED_INTENT_GRACE_MS,
+  MANAGED_INTENT_MAX_RUNNING_MS,
   MANAGED_INTENT_TTL_MS,
   managedCommandIntent,
   managedIntentPath,
@@ -24,7 +27,12 @@ import {
   resetManagedIntentsForTests,
 } from "./ha-intent.ts";
 import { setManagedCommandHooksLayoutForTests } from "./ha-command-hooks.ts";
-import { readManagedHaMember, saveManagedHaMember } from "./ha-member.ts";
+import {
+  haMemberRecordFromApply,
+  markManagedHaMemberPromoted,
+  readManagedHaMember,
+  saveManagedHaMember,
+} from "./ha-member.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -117,7 +125,7 @@ test("a held marker never expires; transient markers expire after TTL plus grace
     resetManagedIntentsForTests();
     const t0 = 1_000_000;
     const held = await recordManagedIntent(dirs.stateDir, MANAGED_ID, "stop", {
-      held: true,
+      mode: "held",
       nowMs: t0,
     });
     assertEquals(held.untilMs, null);
@@ -143,7 +151,7 @@ test("markers survive a daemon restart through the disk copy", async () => {
   await withTempLayout(async ({ dirs }) => {
     resetManagedIntentsForTests();
     await recordManagedIntent(dirs.stateDir, MANAGED_ID, "stop", {
-      held: true,
+      mode: "held",
     });
     resetManagedIntentsForTests();
     const read = await readManagedIntent(dirs.stateDir, MANAGED_ID);
@@ -191,7 +199,9 @@ test("a stop is held only after it succeeded; a failed stop stays transient", as
   await withTempLayout(async ({ dirs }) => {
     resetManagedIntentsForTests();
     const failed = await beginManagedIntent(dirs.stateDir, MANAGED_ID, "stop");
-    assert((await readManagedIntent(dirs.stateDir, MANAGED_ID))?.untilMs);
+    const running = await readManagedIntent(dirs.stateDir, MANAGED_ID);
+    assertEquals(running?.untilMs, null);
+    assert(running?.maxUntilMs !== null, "running, not held");
     await endManagedIntent(dirs.stateDir, failed, false);
     assert(
       (await readManagedIntent(dirs.stateDir, MANAGED_ID))?.untilMs !== null,
@@ -210,7 +220,7 @@ test("a transient marker never replaces a held stop; only a successful start rel
   await withTempLayout(async ({ dirs }) => {
     resetManagedIntentsForTests();
     await recordManagedIntent(dirs.stateDir, MANAGED_ID, "stop", {
-      held: true,
+      mode: "held",
     });
 
     const failedStart = await beginManagedIntent(
@@ -268,7 +278,7 @@ test("clearManagedIntent removes memory and disk copies", async () => {
   await withTempLayout(async ({ dirs }) => {
     resetManagedIntentsForTests();
     await recordManagedIntent(dirs.stateDir, MANAGED_ID, "stop", {
-      held: true,
+      mode: "held",
     });
     await clearManagedIntent(dirs.stateDir, MANAGED_ID, "test");
     assertEquals(
@@ -560,5 +570,93 @@ test("managed.ha.failover recover flips the local target member to primary", asy
       setCommandRouterHandlersForTests(null);
       setManagedCommandHooksLayoutForTests(null);
     }
+  });
+});
+
+test("a running command's marker suppresses for its whole duration (TTL starts at the end, 6 h ceiling)", async () => {
+  await withTempLayout(async ({ dirs }) => {
+    resetManagedIntentsForTests();
+    const begun = Date.now();
+    const token = await beginManagedIntent(dirs.stateDir, MANAGED_ID, "apply");
+    const running = await readManagedIntent(dirs.stateDir, MANAGED_ID);
+    // A major upgrade keeping the engine down 11 min is still suppressed.
+    assert(isManagedIntentActive(running, begun + 11 * 60_000));
+    assert(isManagedIntentActive(running, begun + 5 * 3_600_000));
+    assert(
+      !isManagedIntentActive(
+        running,
+        begun + MANAGED_INTENT_MAX_RUNNING_MS + 1_000,
+      ),
+    );
+    const overdue = await lookupManagedIntent(dirs.stateDir, MANAGED_ID);
+    assert(
+      isOverdueRunningIntent(
+        overdue,
+        begun + MANAGED_INTENT_MAX_RUNNING_MS + 1_000,
+      ),
+    );
+    await endManagedIntent(dirs.stateDir, token, true);
+    const ended = await readManagedIntent(dirs.stateDir, MANAGED_ID);
+    assert(ended?.untilMs !== null && ended?.untilMs !== undefined);
+    assert(ended.untilMs >= begun + MANAGED_INTENT_TTL_MS);
+    assertEquals(ended.maxUntilMs, null);
+  });
+});
+
+test("a running marker left on disk by an earlier daemon run reads as fromDisk", async () => {
+  await withTempLayout(async ({ dirs }) => {
+    resetManagedIntentsForTests();
+    await beginManagedIntent(dirs.stateDir, MANAGED_ID, "stop");
+    const live = await lookupManagedIntent(dirs.stateDir, MANAGED_ID);
+    assert(live.status === "found" && !live.fromDisk && isRunningIntent(live));
+    resetManagedIntentsForTests(); // daemon restart
+    const left = await lookupManagedIntent(dirs.stateDir, MANAGED_ID);
+    assert(left.status === "found" && left.fromDisk && isRunningIntent(left));
+    assertEquals(left.status === "found" ? left.intent.kind : null, "stop");
+  });
+});
+
+test("1+1 cluster: the promoted replica is watched at once (old primary counted as a peer)", async () => {
+  await withTempLayout(async (fixture) => {
+    const layout = resolveLayout(fixture.env);
+    await Deno.mkdir(`${layout.stateDir}/managed/${MANAGED_ID}`, {
+      recursive: true,
+    });
+    const record = haMemberRecordFromApply(
+      {
+        ...APPLY_PAYLOAD,
+        memberRole: "replica",
+        peers: [{ ...APPLY_PAYLOAD.peers[0], role: "primary" }],
+      } as unknown as Parameters<typeof haMemberRecordFromApply>[0],
+      new Date().toISOString(),
+    );
+    assertEquals([record.replicaPeerCount, record.peerCount], [0, 1]);
+    await saveManagedHaMember(layout, record);
+    await markManagedHaMemberPromoted(
+      layout,
+      MANAGED_ID,
+      MEMBER_ID,
+      new Date().toISOString(),
+    );
+    const promoted = await readManagedHaMember(layout, MANAGED_ID);
+    assertEquals(promoted?.role, "primary");
+    assertEquals(promoted?.replicaPeerCount, 1);
+
+    // A record written before peerCount existed still counts the old primary.
+    await saveManagedHaMember(layout, {
+      ...record,
+      peerCount: undefined,
+      role: "replica",
+    });
+    await markManagedHaMemberPromoted(
+      layout,
+      MANAGED_ID,
+      MEMBER_ID,
+      new Date().toISOString(),
+    );
+    assertEquals(
+      (await readManagedHaMember(layout, MANAGED_ID))?.replicaPeerCount,
+      1,
+    );
   });
 });

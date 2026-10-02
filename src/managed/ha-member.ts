@@ -17,7 +17,7 @@ import type {
   ManagedApplyPayload,
   ManagedEngineCode,
 } from "../contracts/commands-contracts.ts";
-import { logWarn, sanitizeForLog } from "../util/logger.ts";
+import { logInfo, logWarn, sanitizeForLog } from "../util/logger.ts";
 import { managedDir, SAFE_MANAGED_ID_RE } from "./engine-paths.ts";
 import { writeFileAtomic } from "./ha-intent.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
@@ -30,6 +30,12 @@ export type ManagedHaMemberRecord = {
   containerName: string;
   /** Peers that are replicas (never this member). */
   replicaPeerCount: number;
+  /**
+   * Every other member of the cluster. After a promote the old primary is a
+   * replica-to-be (it resyncs), so the new primary counts it at once.
+   * Absent in records written before this field.
+   */
+  peerCount?: number;
   updatedAt: string;
 };
 
@@ -56,6 +62,9 @@ export function haMemberRecordFromApply(
       payload.peers.filter((peer) =>
         peer.role === "replica" && peer.memberId !== payload.memberId
       ).length,
+    peerCount:
+      payload.peers.filter((peer) => peer.memberId !== payload.memberId)
+        .length,
     updatedAt: now,
   };
 }
@@ -130,11 +139,26 @@ export async function markManagedHaMemberPromoted(
 ): Promise<void> {
   const record = await readManagedHaMember(layout, managedId);
   if (record?.memberId !== memberId) return;
+  // The old primary becomes a replica of this one once it resyncs: count it
+  // now, or a 1+1 cluster's new primary would stay unwatched until the next
+  // managed.apply.
+  const replicaPeerCount = Math.max(
+    record.replicaPeerCount,
+    record.peerCount ?? record.replicaPeerCount + 1,
+  );
   await saveManagedHaMember(layout, {
     ...record,
     role: "primary",
+    replicaPeerCount,
     updatedAt: now,
   });
+  const watched = record.engine === "postgres" && replicaPeerCount > 0;
+  logInfo(
+    "managed",
+    `managedId=${managedId} member ${memberId} is now primary on this host; dead-primary probe ${
+      watched ? "watching" : "not watching"
+    } (replica peers ${replicaPeerCount})`,
+  );
 }
 
 export async function removeManagedHaMember(

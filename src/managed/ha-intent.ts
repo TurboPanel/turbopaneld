@@ -41,9 +41,25 @@ export type ManagedIntent = {
   kind: ManagedIntentKind;
   /** Epoch ms the marker was (re)written. */
   setAtMs: number;
-  /** Epoch ms the marker stops suppressing; `null` = held until replaced. */
+  /**
+   * Epoch ms the marker stops suppressing (TTL, started when the command
+   * ENDED). `null` while the command is still running (`maxUntilMs` set) or
+   * for a held stop/destroy (`maxUntilMs` null).
+   */
   untilMs: number | null;
+  /**
+   * Hard ceiling for a marker whose command is still running: a command
+   * that never ends (daemon crash mid-command, hung handler) stops
+   * suppressing here, loudly. `null` for held and finished markers.
+   */
+  maxUntilMs: number | null;
 };
+
+/** How a marker is written: see {@link ManagedIntent}. */
+export type ManagedIntentMode = "running" | "transient" | "held";
+
+/** Ceiling for a running command's marker (6 h). */
+export const MANAGED_INTENT_MAX_RUNNING_MS = 6 * 60 * 60_000;
 
 /** How long a transient marker suppresses the probe after it was written. */
 export const MANAGED_INTENT_TTL_MS = 10 * 60_000;
@@ -160,15 +176,19 @@ export async function recordManagedIntent(
   stateDir: string,
   managedId: string,
   kind: ManagedIntentKind,
-  options: { held?: boolean; nowMs?: number } = {},
+  options: { mode?: ManagedIntentMode; nowMs?: number } = {},
 ): Promise<ManagedIntent> {
   const nowMs = options.nowMs ?? Date.now();
+  const mode = options.mode ?? "transient";
   const intent: ManagedIntent = {
     id: crypto.randomUUID(),
     managedId,
     kind,
     setAtMs: nowMs,
-    untilMs: options.held ? null : nowMs + MANAGED_INTENT_TTL_MS,
+    untilMs: mode === "transient" ? nowMs + MANAGED_INTENT_TTL_MS : null,
+    maxUntilMs: mode === "running"
+      ? nowMs + MANAGED_INTENT_MAX_RUNNING_MS
+      : null,
   };
   memory.set(managedId, intent);
   try {
@@ -210,7 +230,11 @@ export async function clearManagedIntent(
 
 export type IntentLookup =
   | { status: "none" }
-  | { status: "found"; intent: ManagedIntent }
+  /**
+   * `fromDisk`: no write by THIS process (left by an earlier daemon run, e.g.
+   * a command interrupted by a crash).
+   */
+  | { status: "found"; intent: ManagedIntent; fromDisk: boolean }
   /** A marker file exists but cannot be read/parsed: treat as active. */
   | { status: "unreadable"; reason: string };
 
@@ -223,12 +247,15 @@ function parseIntent(text: string, managedId: string): ManagedIntent | null {
     if (typeof value.setAtMs !== "number") return null;
     const untilMs = value.untilMs;
     if (untilMs !== null && typeof untilMs !== "number") return null;
+    const maxUntilMs = value.maxUntilMs ?? null;
+    if (maxUntilMs !== null && typeof maxUntilMs !== "number") return null;
     return {
       id: value.id,
       managedId,
       kind: value.kind as ManagedIntentKind,
       setAtMs: value.setAtMs,
       untilMs,
+      maxUntilMs,
     };
   } catch {
     return null;
@@ -242,7 +269,7 @@ export async function lookupManagedIntent(
 ): Promise<IntentLookup> {
   const inMemory = memory.get(managedId);
   if (inMemory === "cleared") return { status: "none" };
-  if (inMemory) return { status: "found", intent: inMemory };
+  if (inMemory) return { status: "found", intent: inMemory, fromDisk: false };
   let text: string;
   try {
     text = await Deno.readTextFile(managedIntentPath(stateDir, managedId));
@@ -252,7 +279,7 @@ export async function lookupManagedIntent(
   }
   const intent = parseIntent(text, managedId);
   return intent
-    ? { status: "found", intent }
+    ? { status: "found", intent, fromDisk: true }
     : { status: "unreadable", reason: "marker file does not parse" };
 }
 
@@ -272,8 +299,8 @@ export function isManagedIntentActive(
   graceMs: number = MANAGED_INTENT_GRACE_MS,
 ): boolean {
   if (!intent) return false;
-  if (intent.untilMs === null) return true;
-  return nowMs < intent.untilMs + graceMs;
+  if (intent.untilMs !== null) return nowMs < intent.untilMs + graceMs;
+  return intent.maxUntilMs === null || nowMs < intent.maxUntilMs;
 }
 
 /** Fail closed: an unreadable marker suppresses like an active one. */
@@ -286,8 +313,25 @@ export function isIntentLookupActive(
     isManagedIntentActive(lookup.intent, nowMs);
 }
 
+/** A held stop/destroy (never expires on its own). */
 export function isHeldIntent(lookup: IntentLookup): boolean {
-  return lookup.status === "found" && lookup.intent.untilMs === null;
+  return lookup.status === "found" && lookup.intent.untilMs === null &&
+    lookup.intent.maxUntilMs === null;
+}
+
+/** A marker whose command has not ended (or never will: daemon crash). */
+export function isRunningIntent(lookup: IntentLookup): boolean {
+  return lookup.status === "found" && lookup.intent.untilMs === null &&
+    lookup.intent.maxUntilMs !== null;
+}
+
+/** A running marker past its 6 h ceiling: no longer suppressing. */
+export function isOverdueRunningIntent(
+  lookup: IntentLookup,
+  nowMs: number,
+): boolean {
+  return isRunningIntent(lookup) && lookup.status === "found" &&
+    nowMs >= (lookup.intent.maxUntilMs ?? Number.POSITIVE_INFINITY);
 }
 
 /** Kinds whose SUCCESS releases a held stop/destroy (the engine is wanted up). */
@@ -303,10 +347,11 @@ export type ManagedIntentToken = {
 };
 
 /**
- * Before a command runs. A transient marker never replaces a held one; a
- * `destroy` is held from the start (a failed destroy must not let the probe
- * fire on a half-removed cluster later). A `stop` is held only after it
- * succeeded (`endManagedIntent`).
+ * Before a command runs: a `running` marker that suppresses for the whole
+ * command (TTL only starts when it ends; 6 h ceiling). A transient marker
+ * never replaces a held one; a `destroy` is held from the start (a failed
+ * destroy must not let the probe fire on a half-removed cluster later). A
+ * `stop` is held only after it succeeded (`endManagedIntent`).
  */
 export async function beginManagedIntent(
   stateDir: string,
@@ -318,7 +363,7 @@ export async function beginManagedIntent(
     return { managedId, kind, ownId: null };
   }
   const written = await recordManagedIntent(stateDir, managedId, kind, {
-    held: kind === "destroy",
+    mode: kind === "destroy" ? "held" : "running",
   });
   return { managedId, kind, ownId: written.id };
 }
@@ -337,7 +382,7 @@ export async function endManagedIntent(
   const current = await lookupManagedIntent(stateDir, token.managedId);
   if (succeeded && token.kind === "stop") {
     await recordManagedIntent(stateDir, token.managedId, "stop", {
-      held: true,
+      mode: "held",
     });
     logInfo(
       "managed",

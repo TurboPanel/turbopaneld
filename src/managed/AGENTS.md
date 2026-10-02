@@ -429,7 +429,9 @@ there is no raft-leader check on that path.
   records a `blocked` recovery. Global kill switch:
   `TURBOPANEL_MANAGED_PG_PROBE=off`. A cluster applied before this daemon has
   no record until its next `managed.apply`. `managed.promote` and a successful
-  `managed.ha.failover` `recover` flip the local record to `primary`.
+  `managed.ha.failover` `recover` flip the local record to `primary` and count
+  every other member (the old primary resyncs as a replica), so a 1+1
+  cluster's new primary is watched at once; the flip is logged.
 - **Probe** every 5 s, read-only, every `docker exec` as `-u postgres`:
   `docker inspect` (state, exit code, start, health), then
   `pg_isready -q -t 3` over the image's local socket (no credentials, no SQL),
@@ -446,7 +448,8 @@ there is no raft-leader check on that path.
   `in archive recovery` → this node is a standby, never fire; 2 → soft for
   60 s after a container (re)start, then hard only when `pg_ctl status`
   confirms the postmaster is gone, otherwise soft for 5 min (an overloaded
-  primary is not dead); 3 / Docker stderr / exec plumbing → inconclusive
+  primary is not dead; every soft state is logged on entry/exit and each
+  minute so a hung primary is visible); 3 / Docker stderr / exec plumbing → inconclusive
   (resets the streak).
 - **Fires** after 6 consecutive hard failures spanning ≥ 20 s on a
   **monotonic** clock (wall time only for marker expiry and Docker's
@@ -458,16 +461,28 @@ there is no raft-leader check on that path.
   every verb in `MANAGED_COMMAND_INTENT_KINDS` (apply = update/upgrade/resync,
   lifecycle start/stop/restart, destroy, promote, restore, ha.failover) and
   ends it when the handler returns:
-  - transient markers suppress for 10 min + 30 s grace; only the command that
-    owns the current marker refreshes it (concurrent commands: the last to
-    finish never overwrites a newer marker);
+  - while the command runs its marker is `running`: it suppresses for the
+    whole duration (a major-upgrade apply or a restore that keeps the engine
+    down for an hour stays suppressed) up to a 6 h ceiling, at which it stops
+    suppressing with a WARN; when the command ends it becomes transient and
+    suppresses 10 min + 30 s from THEN; only the command that owns the
+    current marker refreshes it (concurrent commands: the last to finish
+    never overwrites a newer marker);
   - a `stop` is **held** only after it succeeded; `destroy` is held from the
     start (a failed destroy never re-arms the probe);
   - a transient marker never replaces a held one; only a **successful**
     start/restart/apply/promote/failover releases it;
-  - the probe releases a held marker after the engine has been healthy for
-    10 min (someone started it out of band), and logs every release and every
-    transient expiry.
+  - the probe releases a held marker, a `running` marker left on disk by an
+    earlier daemon run (never one a command of this process owns), or an
+    unreadable marker after the engine has been healthy for 10 min, and logs
+    every release and every expiry;
+  - an unreadable (torn) marker file suppresses like an active one, with a
+    WARN when that starts and every 10 min; it is cleared after 10 healthy
+    minutes or 6 h, whichever comes first;
+  - at daemon start: a `running` stop left by a restart mid-stop is turned
+    into a held stop when the engine is down; a stopped primary with **no**
+    marker is logged as a WARN and probed as dead (the daemon keeps no command
+    journal, so a lost held-stop write cannot be told from a crash).
   A container stopped *without* a marker still counts as dead. A new
   `managed.*` verb must be added to `MANAGED_COMMAND_INTENT_KINDS` or
   `MANAGED_COMMAND_INTENT_EXEMPT` (`ha-intent.test.ts` fails otherwise).
