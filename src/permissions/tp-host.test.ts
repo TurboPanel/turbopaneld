@@ -578,6 +578,44 @@ test("the hosting Caddy unit passes only as tpedge with CAP_NET_BIND_SERVICE alo
   });
 });
 
+test("setfacl grants tpedge the instance ACME socket and nothing else", async () => {
+  await withHost(async (host) => {
+    const sock = host.path("run/turbopanel/instance-acme.sock");
+    const other = host.path("run/turbopanel/instance.sock");
+    const listeners = [sock, other].map((path) =>
+      Deno.listen({ transport: "unix", path })
+    );
+    try {
+      const ok = await host.run(["setfacl", "-P", "-m", "u:tpedge:rw", sock]);
+      assertEquals(ok.code, 0, ok.stderr);
+      assertEquals(
+        ok.stdout.trim(),
+        "EXEC [setfacl] [-P] [-m] [u:tpedge:rw] [--] [instance-acme.sock]",
+      );
+      // Another socket in the run directory, another entity or permission,
+      // and the form without -P are all refused.
+      await refused(host, ["setfacl", "-P", "-m", "u:tpedge:rw", other]);
+      await refused(host, ["setfacl", "-P", "-m", "u:tp:rw", sock]);
+      await refused(host, ["setfacl", "-P", "-m", "u:tpedge:rwx", sock]);
+      await refused(host, ["setfacl", "-m", "u:tpedge:rw", sock]);
+      await refused(host, ["setfacl", "-P", "-m", "g:tpedge:rw", sock]);
+      // A symlink swapped in for the socket is never acted on.
+      await Deno.remove(sock);
+      await Deno.symlink(other, sock);
+      const stderr = await refused(host, [
+        "setfacl",
+        "-P",
+        "-m",
+        "u:tpedge:rw",
+        sock,
+      ]);
+      assertStringIncludes(stderr, "is not a socket");
+    } finally {
+      for (const listener of listeners) listener.close();
+    }
+  });
+});
+
 test("scheduled-backup units pass only in their exact shape; tenant units gain nothing", async () => {
   await withHost(async (host) => {
     const layout = resolveLayout({

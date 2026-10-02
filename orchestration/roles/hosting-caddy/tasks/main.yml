@@ -44,6 +44,36 @@
     - "{{ turbopanel_vendor_dir }}"
     - "{{ turbopanel_config_dir }}"
 
+# A co-located control plane on Let's Encrypt has hosting Caddy proxy HTTP-01
+# challenges to <run dir>/instance-acme.sock. Traverse only (no listing) on the
+# tp:tp 2770 run directory; the socket is re-created on every bind, so its one
+# ACL entry (u:tpedge:rw) comes from tp-host right after the daemon or the
+# issuer binds it. Never group tp. /run is tmpfs: the tmpfiles.d line puts the
+# entry back on every boot, after runtime-sockets' line creates the directory.
+- name: Persist the hosting Caddy traversal of the run directory across boots
+  ansible.builtin.copy:
+    dest: /etc/tmpfiles.d/turbopanel-hosting-caddy.conf
+    owner: root
+    group: root
+    mode: "0640"
+    content: |
+      # Managed by TurboPanel daemon orchestration (hosting-caddy role).
+      a+ {{ turbopanel_run_dir }} - - - - u:{{ hosting_caddy_user }}:x
+
+- name: Check the run directory exists
+  ansible.builtin.stat:
+    path: "{{ turbopanel_run_dir }}"
+  register: _hosting_caddy_run_dir
+
+- name: Grant the hosting Caddy traversal of the run directory
+  when: _hosting_caddy_run_dir.stat.isdir | default(false)
+  ansible.posix.acl:
+    path: "{{ turbopanel_run_dir }}"
+    etype: user
+    entity: "{{ hosting_caddy_user }}"
+    permissions: x
+    state: present
+
 # The binary is root:tp 0750; follows the `current` symlink to the pinned file.
 - name: Grant the hosting Caddy execute on the vendored Caddy binary
   ansible.posix.acl:

@@ -212,13 +212,31 @@ test("the hosting Caddy account is its own identity, outside group tp", async ()
     await readRole("roles/hosting-caddy/defaults/main.yml"),
   ) as { hosting_caddy_user: string; hosting_caddy_uid: number };
   assertEquals(defaults.hosting_caddy_user, HOSTING_CADDY_USER);
-  assertEquals(defaults.hosting_caddy_uid, 9983);
+  assertEquals(defaults.hosting_caddy_uid, 9982);
   const tasks = await readRole("roles/hosting-caddy/tasks/main.yml");
   // No supplementary groups at all: never tp.
   assertMatch(tasks, /^\s+groups: \[\]$/m, "hosting Caddy groups");
   assertEquals(/groups:.*turbopanel_group/.test(tasks), false);
   const tpHost = await readRole("scripts/tp-host");
   assertStringIncludes(tpHost, `HOSTING_CADDY_USER="${HOSTING_CADDY_USER}"`);
+});
+
+test("the hosting Caddy may only traverse the run directory, at every boot", async () => {
+  const tasks = await readRole("roles/hosting-caddy/tasks/main.yml");
+  // tmpfs: the entry is re-applied by tmpfiles.d, traverse only.
+  assertStringIncludes(
+    tasks,
+    "a+ {{ turbopanel_run_dir }} - - - - u:{{ hosting_caddy_user }}:x",
+  );
+  const grant =
+    /- name: Grant the hosting Caddy traversal of the run directory\n([\s\S]*?)\n\n/
+      .exec(tasks)?.[1] ?? "";
+  assertStringIncludes(grant, 'path: "{{ turbopanel_run_dir }}"');
+  assertStringIncludes(grant, "permissions: x\n");
+  // No default entry: that would reach every socket and lock file created
+  // there. The issuer socket gets its own entry from tp-host instead.
+  assertEquals(grant.includes("default:"), false);
+  assertEquals(/run_dir[\s\S]*permissions: r/.test(grant), false);
 });
 
 test("web-service-user map pins optional web server identities", async () => {
@@ -320,6 +338,15 @@ test("converge and web-service account ids are globally unique", async () => {
   const hostingCaddy = parse(
     await readRole("roles/hosting-caddy/defaults/main.yml"),
   ) as { hosting_caddy_uid: number };
+  // tpedge (uid == gid) is a service identity, never an entitlement gid.
+  if (
+    hostingCaddy.hosting_caddy_uid >= registry.gidBand.min &&
+    hostingCaddy.hosting_caddy_uid <= registry.gidBand.max
+  ) {
+    throw new Error(
+      `hosting Caddy id ${hostingCaddy.hosting_caddy_uid} is inside the runtime entitlement band; it belongs in the 9980+ identity band`,
+    );
+  }
   const ids = [
     ...convergeIds,
     ...webIds,
@@ -342,7 +369,47 @@ test("converge and web-service account ids are globally unique", async () => {
       `duplicate service-account ids: ${collisions.join(", ")}`,
     );
   }
+
+  // Every literal 99xx a role default gives a `*_uid`/`*_gid` must be one of
+  // the ids checked above. Without this a new account's role could allocate
+  // an id (tpedge once took 9983 while an open PR gave it to tpprincipal) and
+  // only the list above, which it never joined, would be checked.
+  const unregistered = (await roleDefaultServiceIds()).filter(([, id]) =>
+    !seen.has(id)
+  );
+  if (unregistered.length > 0) {
+    throw new Error(
+      `role defaults allocate ids the uniqueness check does not see: ${
+        unregistered.map(([where, id]) => `${where}=${id}`).join(", ")
+      }`,
+    );
+  }
 });
+
+/** `[<role>:<var>, id]` for every literal 99xx in a role's `*_uid`/`*_gid` default. */
+async function roleDefaultServiceIds(): Promise<Array<[string, number]>> {
+  const rolesDir = join(CHECKOUT_ORCHESTRATION_DIR, "roles");
+  const roles: string[] = [];
+  for await (const entry of Deno.readDir(rolesDir)) {
+    if (entry.isDirectory) roles.push(entry.name);
+  }
+  const texts = await Promise.all(
+    roles.map((role) =>
+      Deno.readTextFile(join(rolesDir, role, "defaults", "main.yml")).catch(
+        () => "",
+      )
+    ),
+  );
+  return roles.flatMap((role, index) =>
+    [...texts[index].matchAll(/^\s*(\w+_(?:uid|gid)):(.*)$/gm)].flatMap((
+      [, name, value],
+    ) =>
+      [...value.matchAll(/\b(99\d\d)\b/g)].map((
+        [, id],
+      ): [string, number] => [`${role}:${name}`, Number(id)])
+    )
+  );
+}
 
 test("systemd units and docker wrappers bind the expected identity variables", async () => {
   const daemonUnit = await readRole(

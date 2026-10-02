@@ -44,6 +44,8 @@ export type CallSiteSetup = {
   links?: Array<[string, string]>;
   /** `/etc/group` lines to add. */
   groups?: string[];
+  /** Unix sockets to bind (left in place, unlistened). */
+  sockets?: string[];
 };
 
 export type TpHostSample = {
@@ -436,6 +438,19 @@ const SITES: CallSite[] = [
   tpHost(
     'src/deploy/instance-acme-http01.ts|["-n","systemctl","start",INSTANCE_ACME_SERVICE]',
     { argv: ["systemctl", "start", "turbopanel-instance-acme.service"] },
+  ),
+  tpHost(
+    'src/deploy/instance-acme-http01.ts|["-n","setfacl","-P","-m",INSTANCE_ACME_SOCKET_ACL,socketPath]',
+    {
+      argv: [
+        "setfacl",
+        "-P",
+        "-m",
+        "u:tpedge:rw",
+        `${P}/run/turbopanel/instance-acme.sock`,
+      ],
+      setup: { sockets: [`${P}/run/turbopanel/instance-acme.sock`] },
+    },
   ),
   tpHost(
     'src/deploy/instance-acme-http01.ts|["-n","systemctl","stop",INSTANCE_ACME_SERVICE]',

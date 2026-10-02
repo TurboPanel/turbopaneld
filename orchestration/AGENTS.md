@@ -267,7 +267,7 @@ Those stores must not be the same directory.
 
 `turbopanel-hosting-caddy.service` (public `:80`/`:443`, unit rendered by
 `src/deploy/ingress.ts`, pinned by tp-host) runs as **`tpedge`** (uid/gid
-9983), which is deliberately **not** in group `tp`: its only privilege is
+9982), which is deliberately **not** in group `tp`: its only privilege is
 `CAP_NET_BIND_SERVICE` (ambient and bounding), with `NoNewPrivileges=yes`.
 Certificates, the ACME account, the internal CA and Caddy's autosave live in
 the unit's `StateDirectory=turbopanel-hosting-caddy`, which systemd creates
@@ -284,9 +284,23 @@ is `tp:tpedge` `2750`: the setgid bit gives every uploaded certificate the
 `tpedge` group, and `materialize-tls.ts` writes the private key `0640` only
 under that setgid directory (otherwise `0600`), so group `tp` never reads a
 key. The daemon restarts the unit when its rendered content changes
-(`enable --now` alone would keep the old process). Not yet covered: the
-control-plane Let's Encrypt window proxies to `unix/<run dir>/instance-acme.sock`,
-which `tpedge` cannot reach (follow-up).
+(`enable --now` alone would keep the old process).
+
+The control-plane Let's Encrypt window (co-located instance) proxies
+HTTP-01 challenges to `unix/<run dir>/instance-acme.sock`. Connecting needs
+`x` on `/run/turbopanel` (`tp:tp` `2770`) and `w` on the socket. The role
+grants `tpedge` traverse only (`u:tpedge:x`, no listing, no default entry) on
+the run directory, and because `/run` is tmpfs it also writes
+`/etc/tmpfiles.d/turbopanel-hosting-caddy.conf` (`a+ … u:tpedge:x`) so the
+entry returns at every boot. The socket is re-created on every bind, by the
+daemon's preflight listener (as `tp`) or the issuer Caddy (as `tpcaddy`),
+neither of which can name another user in an ACL, so the daemon then calls
+`tp-host setfacl -P -m u:tpedge:rw <run dir>/instance-acme.sock`. That shape
+accepts only that path and that entry, waits up to 5 s for the issuer to
+bind, refuses a symlink, and never follows one (`-P`). `tpedge` is never put
+in group `tp`. Residual: traverse lets `tpedge` open anything directly in
+the run directory whose own mode grants "other" access (today the empty
+`daemon.lock`, `0644`); no socket there is world-writable.
 
 Vars (both roles; extra-vars win):
 

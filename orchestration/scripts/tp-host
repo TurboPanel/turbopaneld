@@ -1076,8 +1076,30 @@ tp_verb_chmod() {
   fi
 }
 
+# The control plane's HTTP-01 issuer socket. Hosting Caddy (not in group tp)
+# proxies challenges to it; whoever binds it (the daemon's preflight listener,
+# or the issuer Caddy as tpcaddy) cannot name another user in an ACL, so root
+# adds exactly this one entry. The issuer binds shortly after systemd reports
+# it started, hence the bounded wait. -P never follows a swapped-in symlink.
+tp_setfacl_acme_socket() {
+  [ "$1" = "$R_RUN/instance-acme.sock" ] || tp_die "setfacl: only the instance ACME socket"
+  tp_pin_parent "$1" || tp_die "no such directory ${1%/*}"
+  _sa_wait=0
+  until [ -S "$PIN_NAME" ] && [ ! -L "$PIN_NAME" ]; do
+    [ "$_sa_wait" -lt 50 ] || tp_die "setfacl: $1 is not a socket"
+    sleep 0.1
+    _sa_wait=$((_sa_wait + 1))
+  done
+  tp_run setfacl -P -m "u:$HOSTING_CADDY_USER:rw" -- "$PIN_NAME"
+}
+
 tp_verb_setfacl() {
-  [ "$#" -eq 3 ] && [ "$1" = "-m" ] && [ "$2" = "o::x" ] || tp_die "setfacl: only -m o::x PATH"
+  if [ "$#" -eq 4 ] && [ "$1" = "-P" ] && [ "$2" = "-m" ] &&
+    [ "$3" = "u:$HOSTING_CADDY_USER:rw" ]; then
+    tp_setfacl_acme_socket "$4"
+    return
+  fi
+  [ "$#" -eq 3 ] && [ "$1" = "-m" ] && [ "$2" = "o::x" ] || tp_die "setfacl: only -m o::x PATH or -P -m u:$HOSTING_CADDY_USER:rw SOCKET"
   [ "$3" = "$R_PRINCIPALS" ] || tp_die "setfacl: only the principal home root"
   tp_pin_dir "$3" || tp_die "no such directory $3"
   tp_run setfacl -m o::x .
