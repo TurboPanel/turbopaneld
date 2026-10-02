@@ -812,6 +812,25 @@ const SITES: CallSite[] = [
       setup: dir(`${SITE}/webroot`),
     },
   ),
+  tpHost(
+    'src/deploy/release/release-links.ts|["-n",...releaseLinkTargetsFindArgs(releaseDir)]',
+    {
+      argv: [
+        "find",
+        RELEASE,
+        "-type",
+        "l",
+        "-exec",
+        "realpath",
+        "-m",
+        "-z",
+        "--",
+        "{}",
+        "+",
+      ],
+      setup: dir(RELEASE),
+    },
+  ),
   tpHost('src/deploy/site.ts|["-n","ls","-A","--",documentRoot]', {
     argv: ["ls", "-A", "--", `${SITE}/webroot`],
     setup: dir(`${SITE}/webroot`),

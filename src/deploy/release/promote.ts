@@ -27,6 +27,7 @@ import { basename, join } from "@std/path";
 import { hostSudoArgs } from "../../permissions/host-sudo.ts";
 import type { RunFn } from "../ensure-principal.ts";
 import { forEachSequential } from "../../util/sequential.ts";
+import { assertReleaseLinksStayHome } from "./release-links.ts";
 import {
   createSymlink,
   ScopedWriteError,
@@ -622,7 +623,8 @@ export type PromoteReleaseParams = StageReleaseParams & {
 };
 
 /**
- * Stage → `shared` link → manifest → probe → seal → cut over. Returns the
+ * Stage → `shared` link → manifest → probe → seal → link check → cut over.
+ * Returns the
  * release directory.
  *
  * On any failure the staged directory is removed and `current` is left
@@ -651,6 +653,8 @@ export async function promoteRelease(
       expectedPathsProbe([RELEASE_METADATA_DIRNAME], runFn);
     await probe(releaseDir);
     await sealPublishedRelease(releaseDir, params.username, runFn);
+    // Only once sealed: the build can no longer change a link after the check.
+    await assertReleaseLinksStayHome(params.paths, releaseDir, runFn);
     await swapCurrentSymlink(params.paths, runFn);
     return releaseDir;
   } catch (err) {

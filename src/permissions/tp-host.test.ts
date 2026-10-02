@@ -18,6 +18,7 @@ import { caddyUnit } from "../deploy/ingress.ts";
 import { backupServiceContent, backupTimerContent } from "../backups/units.ts";
 import { issuedCertificateFindArgs } from "../deploy/instance-acme-http01.ts";
 import { setgidDirectoriesFindArgs } from "../deploy/site.ts";
+import { releaseLinkTargetsFindArgs } from "../deploy/release/release-links.ts";
 import type {
   EnvironmentDeployCronJob,
   EnvironmentDeployNativeAppService,
@@ -1008,9 +1009,27 @@ test("find: every daemon-built find argv is accepted; anything else is refused",
     );
     assertEquals(setgid.code, 0, setgid.stderr);
 
+    // release-links.ts: where each link under a sealed release resolves,
+    // physically — through a chain that leaves the tree and comes back.
+    const release = host.path("srv/users/alice/sites/web/releases/r1");
+    await Deno.mkdir(join(release, "public"), { recursive: true });
+    await Deno.symlink(host.path("outside/hop"), join(release, "public/x"));
+    await Deno.symlink(host.path("srv/users/bob"), host.path("outside/hop"));
+    await Deno.symlink("../shared", join(release, "public/up"));
+    const links = await host.run(releaseLinkTargetsFindArgs(release));
+    assertEquals(links.code, 0, links.stderr);
+    assertEquals(links.stdout.split("\0").filter(Boolean).sort(), [
+      host.path("srv/users/alice/sites/web/releases/r1/shared"),
+      host.path("srv/users/bob"),
+    ]);
+    const linkArgs = releaseLinkTargetsFindArgs(release);
+
     const lookup = issuedCertificateFindArgs(root, "canary.example.com");
     for (
       const args of [
+        releaseLinkTargetsFindArgs(host.path("outside")),
+        [...linkArgs.slice(0, -1), ";"],
+        linkArgs.map((arg) => arg === "realpath" ? "cat" : arg),
         [...lookup, "-print"],
         lookup.slice(0, -1),
         issuedCertificateFindArgs(root, "*.example.com"),
