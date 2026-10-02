@@ -210,8 +210,16 @@ test({
       assertEquals(downCall !== undefined, true);
       assertEquals(downCall!.includes("--remove-orphans"), true);
       assertEquals(downCall!.includes("--volumes"), true);
+      // Only locally built images go; never pulled/tagged base images.
+      const rmi = downCall!.indexOf("--rmi");
+      assertEquals(downCall![rmi + 1], "local");
       assertEquals(pathsInOrder(downCall!, [composePath]), true);
       await assertRejects(() => Deno.stat(deploymentDir), Deno.errors.NotFound);
+      // The now-empty project dir goes too.
+      await assertRejects(
+        () => Deno.stat(join(stateDir, "deployments", "proj-1")),
+        Deno.errors.NotFound,
+      );
     } finally {
       if (previous.TURBOPANEL_STATE_DIR === undefined) {
         Deno.env.delete("TURBOPANEL_STATE_DIR");
@@ -222,6 +230,49 @@ test({
         Deno.env.delete("TURBOPANEL_CONFIG_DIR");
       } else {
         Deno.env.set("TURBOPANEL_CONFIG_DIR", previous.TURBOPANEL_CONFIG_DIR);
+      }
+      await Deno.remove(root, { recursive: true }).catch(() => undefined);
+    }
+  },
+});
+
+test({
+  name:
+    "handleEnvironmentStop keeps the project dir while a sibling environment still lives in it",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: async () => {
+    const root = await Deno.makeTempDir({ prefix: "tp-stop-sibling-" });
+    const previous = {
+      TURBOPANEL_STATE_DIR: Deno.env.get("TURBOPANEL_STATE_DIR"),
+      TURBOPANEL_CONFIG_DIR: Deno.env.get("TURBOPANEL_CONFIG_DIR"),
+    };
+    const stateDir = join(root, "state");
+    Deno.env.set("TURBOPANEL_STATE_DIR", stateDir);
+    Deno.env.set("TURBOPANEL_CONFIG_DIR", join(root, "config"));
+    const projectDir = join(stateDir, "deployments", "proj-1");
+    const deploymentDir = join(projectDir, "envstop01");
+    const sibling = join(projectDir, "envother1");
+    await Deno.mkdir(deploymentDir, { recursive: true, mode: 0o750 });
+    await Deno.mkdir(sibling, { recursive: true, mode: 0o750 });
+    try {
+      await handleEnvironmentStop(
+        {
+          environmentId: "envstop01",
+          projectId: "proj-1",
+          projectName: "tp-demo-envstop1",
+        },
+        new Date().toISOString(),
+        {
+          runDocker: (): Promise<DockerCliResult> =>
+            Promise.resolve({ success: true, stdout: "", stderr: "", code: 0 }),
+        },
+      );
+      await assertRejects(() => Deno.stat(deploymentDir), Deno.errors.NotFound);
+      assertEquals((await Deno.stat(sibling)).isDirectory, true);
+    } finally {
+      for (const [k, v] of Object.entries(previous)) {
+        if (v === undefined) Deno.env.delete(k);
+        else Deno.env.set(k, v);
       }
       await Deno.remove(root, { recursive: true }).catch(() => undefined);
     }
