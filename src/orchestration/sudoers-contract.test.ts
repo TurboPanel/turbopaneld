@@ -401,6 +401,29 @@ test("daemon-install.yml no longer hands the vendor or orchestration trees to tp
   }
 });
 
+test("daemon-install.yml never recursively re-owns the daemon state tree", async () => {
+  // managed/<id>/{config,tls} are engine bind mounts owned by the engine
+  // user/group; a recursive tp:tp on update made MySQL skip its config.
+  const doc = parseYaml(await Deno.readTextFile(join(orch, DAEMON_INSTALL)));
+  const play = (doc as Array<Record<string, unknown>>)[0]!;
+  const tasks = ["pre_tasks", "tasks", "post_tasks"].flatMap((key) =>
+    Array.isArray(play[key]) ? play[key] as Task[] : []
+  );
+  for (const task of tasks) {
+    const file = task["ansible.builtin.file"];
+    if (!file || file.recurse !== true) continue;
+    const loop = Array.isArray(task.loop) ? task.loop.map(String) : [];
+    for (const path of [String(file.path), ...loop]) {
+      assertEquals(
+        path.includes("turbopanel_daemon_state_dir") ||
+          path.includes("/var/lib/turbopanel"),
+        false,
+        `${task.name}: ${path}`,
+      );
+    }
+  }
+});
+
 test("daemon-layout keeps the orchestration tree, binaries and helper root-owned", async () => {
   const tasks = await readTasks(LAYOUT_TASKS);
   const layout = tasks.find((t) =>
