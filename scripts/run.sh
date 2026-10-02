@@ -170,6 +170,28 @@ tp_trust_has_distinct_issuer() {
   return "$_distinct"
 }
 
+# Copy every certificate of TRUST except the presented leaf (by fingerprint)
+# to OUT, so -partial_chain can never anchor the leaf on itself.
+tp_trust_issuers_only() {
+  _trust="$1"
+  _leaf_fp="$2"
+  _out="$3"
+  _dir="$(mktemp -d)"
+  awk -v dir="$_dir" '
+    /-----BEGIN CERTIFICATE-----/ { n++; file = dir "/c" n ".pem" }
+    n > 0 { print >> file }
+    /-----END CERTIFICATE-----/ { if (file != "") close(file) }
+  ' "$_trust"
+  : >"$_out"
+  for _cert in "$_dir"/c*.pem; do
+    [ -f "$_cert" ] || continue
+    if [ "$(tp_ca_fingerprint "$_cert")" != "$_leaf_fp" ]; then
+      cat "$_cert" >>"$_out"
+    fi
+  done
+  rm -rf "$_dir"
+}
+
 tp_uploaded_trust_verifies() {
   _trust="$1"
   _leaf="$2"
@@ -187,7 +209,14 @@ tp_uploaded_trust_verifies() {
   if ! tp_trust_has_distinct_issuer "$_trust" "$_leaf_fp"; then
     return 1
   fi
-  openssl verify -verify_hostname "$_host" -partial_chain -CAfile "$_trust" "$_leaf" >/dev/null 2>&1
+  _issuers="$(mktemp)"
+  tp_trust_issuers_only "$_trust" "$_leaf_fp" "$_issuers"
+  _verified=1
+  if openssl verify -verify_hostname "$_host" -partial_chain -CAfile "$_issuers" "$_leaf" >/dev/null 2>&1; then
+    _verified=0
+  fi
+  rm -f "$_issuers"
+  return "$_verified"
 }
 
 tp_url_host() {
@@ -293,16 +322,13 @@ tp_fetch_uploaded_trust() {
       rm -f "$UPLOADED_TRUST_PATH"
       ;;
     000)
+      # The stored issuer could not verify the control plane. It is never
+      # replaced from an unverified (-k) fetch: an on-path attacker would
+      # pick the replacement. Keep it and stop.
       if [ -f "$UPLOADED_TRUST_PATH" ]; then
-        _retry="$(mktemp)"
-        _retry_code=$(tp_curl_http_code curl -sSLk -o "$_retry" "${HOST_URL%/}/api/daemon/v1/instance/uploaded-trust")
-        if [ "$_retry_code" = "200" ] && tp_install_verified_uploaded_trust "$_retry"; then
-          rm -f "$_retry"
-        else
-          rm -f "$_trust_tmp" "$_retry"
-          tp_print_error "private uploaded issuer changed and could not be verified"
-          return 1
-        fi
+        rm -f "$_trust_tmp"
+        tp_print_error "Could not reach or verify ${HOST_URL} with the stored private uploaded issuer ($(tp_ca_fingerprint "$UPLOADED_TRUST_PATH")) — keeping it. If the control plane's issuer really changed, confirm the new issuer's fingerprint out of band, then re-run with --insecure-tls to re-bootstrap trust."
+        return 1
       fi
       ;;
     *)
@@ -368,8 +394,10 @@ tp_fetch_instance_ca() {
 # The pinned fetch could not verify the control plane. Most often it moved to
 # a publicly trusted certificate (Let's Encrypt, a public upload, Cloudflare)
 # and no longer presents a Platform CA leaf, so ask again with the system
-# roots first; only then fall back to one unpinned fetch of the CA document.
-# Whatever happens, the existing CA stays unless a replacement verifies.
+# roots. Nothing else is tried: the pin is never replaced from an unverified
+# (-k) fetch, since an on-path attacker would choose the replacement and its
+# leaf. The existing CA stays unless public trust authenticates a new one; a
+# real rotation is applied by the operator with --instance-ca.
 tp_refetch_instance_ca_unpinned() {
   _old_fp="$(tp_ca_fingerprint "$CA_PATH")"
   _ca_retry="$(mktemp)"
@@ -387,22 +415,13 @@ tp_refetch_instance_ca_unpinned() {
         return 0
       fi
       ;;
-    000)
-      # Unpinned fetch of the CA document only; acceptance is gated below.
-      _ca_retry_code=$(tp_curl_http_code curl -sSLk -o "$_ca_retry" "${HOST_URL%/}/api/daemon/v1/instance/ca")
-      if [ "$_ca_retry_code" = "200" ] && tp_ca_parses "$_ca_retry" && tp_ca_validates_leaf "$_ca_retry"; then
-        tp_install_instance_ca "$_ca_retry"
-        rm -f "$_ca_retry"
-        return 0
-      fi
-      ;;
     *) ;;
   esac
   _new_fp=""
   if [ -f "$_ca_retry" ] && tp_ca_parses "$_ca_retry"; then
     _new_fp="$(tp_ca_fingerprint "$_ca_retry")"
   fi
-  tp_print_step "~" "Could not verify the control plane's Platform CA (existing ${_old_fp:-unknown}; fetched ${_new_fp:-unknown}) — keeping the existing CA; the daemon trusts it alongside the system roots"
+  tp_print_step "~" "Could not verify the control plane's Platform CA (existing ${_old_fp:-unknown}; fetched ${_new_fp:-unknown}) — keeping the existing CA; the daemon trusts it alongside the system roots. If the control plane's CA was rotated, confirm the new CA's fingerprint out of band and re-run with --instance-ca <pem>."
   rm -f "$_ca_retry"
   return 0
 }
