@@ -532,13 +532,14 @@ async function resolveRollbackTarget(
 }
 
 /**
- * Record a promoted native release under the daemon-owned record root, so a
- * later rollback can restore it without reading the principal's tree.
+ * Record a native release under the daemon-owned record root, so a later
+ * rollback can restore it without reading the principal's tree.
  *
- * Written only after the promote succeeded — the record is this host's
- * statement that the release was sealed and published. The cutover has already
- * happened by then, so a failure is reported rather than failing a deploy that
- * is live; a rollback to this release then says its record is missing.
+ * Written **before** the promote, and a failure fails the deploy: once the
+ * cutover has happened a missing record could only be logged, and the release
+ * would be live but impossible to roll back to. Writing first means the
+ * failure is seen at deploy time with `current` untouched. {@link
+ * discardNativeRecord} removes it again when the promote then fails.
  */
 async function recordNativeRelease(
   layout: LayoutPaths,
@@ -556,9 +557,33 @@ async function recordNativeRelease(
     await writeReleaseManifest(recordPaths.releaseDir, manifest);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
+    throw new Error(
+      `release ${manifest.releaseId} was not published: its rollback record ` +
+        `could not be written: ${message}`,
+      { cause: err },
+    );
+  }
+}
+
+/** Remove a release's record; best-effort, a leftover is only a stale record. */
+async function discardNativeRecord(
+  layout: LayoutPaths,
+  serviceId: string,
+  releaseId: string,
+  deps: ApplySourceReleasesDeps,
+): Promise<void> {
+  const { releaseDir } = resolveDaemonReleasePaths(layout, {
+    serviceId,
+    releaseId,
+  });
+  try {
+    await Deno.remove(releaseDir, { recursive: true });
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) return;
+    const message = err instanceof Error ? err.message : String(err);
     deps.logSink.onLine(
       "stderr",
-      `release ${manifest.releaseId} is live but its rollback record could not be written: ${message}`,
+      `could not remove the rollback record for ${releaseId}: ${message}`,
     );
   }
 }
@@ -711,24 +736,30 @@ async function buildNativeRelease(
       standaloneOutput: nativeOutput.standaloneOutput,
       staticExport: nativeOutput.staticExport,
     });
-    const releaseDir = await (deps.promoteReleaseFn ?? promoteRelease)(
-      definedFields({
-        paths,
-        workingDir: checkout.workingDir,
-        username,
-        manifest,
-        subdirectory: entry.subdirectory,
-        outputDirectory: entry.build.outputDirectory ??
-          nativeOutput.outputDirectory,
-        containmentRoot: work?.workDir,
-        runFn: deps.runFn,
-      }),
-    );
+    await recordNativeRelease(layout, manifest, deps);
+    let releaseDir: string;
+    try {
+      releaseDir = await (deps.promoteReleaseFn ?? promoteRelease)(
+        definedFields({
+          paths,
+          workingDir: checkout.workingDir,
+          username,
+          manifest,
+          subdirectory: entry.subdirectory,
+          outputDirectory: entry.build.outputDirectory ??
+            nativeOutput.outputDirectory,
+          containmentRoot: work?.workDir,
+          runFn: deps.runFn,
+        }),
+      );
+    } catch (err) {
+      await discardNativeRecord(layout, serviceId, entry.releaseId, deps);
+      throw err;
+    }
     logSink.onLine(
       "stdout",
       `promoted release ${entry.releaseId} (${checkout.commitSha}) for ${entry.composeServiceName}`,
     );
-    await recordNativeRelease(layout, manifest, deps);
 
     const pruned = await (deps.pruneReleasesFn ?? pruneReleases)(definedFields({
       paths,
@@ -738,6 +769,12 @@ async function buildNativeRelease(
     if (pruned.length > 0) {
       logSink.onLine("stdout", `pruned ${pruned.length} superseded release(s)`);
     }
+    // A record lives exactly as long as the tree it describes: a rollback to a
+    // pruned release has nothing to restore, so its record would only mislead.
+    await forEachSequential(
+      pruned,
+      (releaseId) => discardNativeRecord(layout, serviceId, releaseId, deps),
+    );
 
     return definedFields({
       composeServiceName: entry.composeServiceName,

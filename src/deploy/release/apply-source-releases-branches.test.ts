@@ -736,31 +736,101 @@ test("applySourceReleases records a promoted native release for rollback", async
   });
 });
 
-test("applySourceReleases keeps a live native deploy when its record cannot be written", async () => {
+test("applySourceReleases fails a native deploy before cutover when its record cannot be written", async () => {
   await createTempLayout().then(async (fixture) => {
     try {
       const layout = layoutFromFixture(fixture);
-      const log = fakeLogSink();
-      const applied = await applySourceReleases(
+      let promoted = false;
+      await assertRejects(
+        () =>
+          applySourceReleases(
+            layout,
+            basePayload({
+              sourceMaterial: [baseSource({ principal: PRINCIPAL })],
+            }),
+            {
+              ...nativeDeps(fakeLogSink().sink),
+              ensureDaemonReleaseRecordDirFn: () =>
+                Promise.reject(new Error("disk full")),
+              promoteReleaseFn: (params) => {
+                promoted = true;
+                return Promise.resolve(params.paths.releaseDir);
+              },
+            },
+          ),
+        Error,
+        "rollback record could not be written: disk full",
+      );
+      assertEquals(promoted, false);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+});
+
+test("applySourceReleases removes the record again when the promote fails", async () => {
+  await createTempLayout().then(async (fixture) => {
+    try {
+      const layout = layoutFromFixture(fixture);
+      await assertRejects(
+        () =>
+          applySourceReleases(
+            layout,
+            basePayload({
+              sourceMaterial: [baseSource({ principal: PRINCIPAL })],
+            }),
+            {
+              ...nativeDeps(fakeLogSink().sink),
+              promoteReleaseFn: () => Promise.reject(new Error("link escape")),
+            },
+          ),
+        Error,
+        "link escape",
+      );
+      const record = await readReleaseManifest(
+        resolveDaemonReleasePaths(layout, {
+          serviceId: "web",
+          releaseId: "rel-1",
+        }).releaseDir,
+      );
+      assertEquals(record, null);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+});
+
+test("applySourceReleases prunes the records of the native releases it prunes", async () => {
+  await createTempLayout().then(async (fixture) => {
+    try {
+      const layout = layoutFromFixture(fixture);
+      const old = resolveDaemonReleasePaths(layout, {
+        serviceId: "web",
+        releaseId: "rel-old",
+      });
+      await Deno.mkdir(old.releaseDir, { recursive: true });
+      await Deno.writeTextFile(join(old.releaseDir, "release.json"), "{}");
+      await applySourceReleases(
         layout,
         basePayload({
           sourceMaterial: [baseSource({ principal: PRINCIPAL })],
         }),
         {
-          ...nativeDeps(log.sink),
-          ensureDaemonReleaseRecordDirFn: () =>
-            Promise.reject(new Error("disk full")),
+          ...nativeDeps(fakeLogSink().sink),
+          pruneReleasesFn: () => Promise.resolve(["rel-old"]),
         },
       );
-      assertEquals(applied.length, 1);
-      assertEquals(
-        log.lines.some((line) =>
-          line.stream === "stderr" &&
-          line.message.includes("rollback record could not be written") &&
-          line.message.includes("disk full")
-        ),
-        true,
+      await assertRejects(
+        () => Deno.stat(old.releaseDir),
+        Deno.errors.NotFound,
       );
+      const kept = await readReleaseManifest(
+        resolveDaemonReleasePaths(layout, {
+          serviceId: "web",
+          releaseId: "rel-1",
+        }).releaseDir,
+      );
+      assertEquals(kept?.releaseId, "rel-1");
     } finally {
       await fixture.cleanup();
     }
