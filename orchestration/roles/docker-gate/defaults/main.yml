@@ -32,6 +32,11 @@ docker_gate_ro_socket: "{{ docker_gate_ro_run_dir }}/docker.sock"
 # update converge that does not pass the variable never flips it. Off until
 # someone turns it on.
 docker_gate_ingress_socket: ""
+# The gate's mode: observe (log findings, refuse nothing) or enforce (stage 4:
+# refuse a request with findings). Once it is enforce, a gate that cannot be
+# installed or swapped in fails the converge: an older, laxer gate must never
+# stay behind with only a warning.
+docker_gate_mode: observe
 docker_gate_ingress_switch_file: "{{ docker_gate_dir }}/ingress-socket.on"
 docker_gate_upstream_socket: /var/run/docker.sock
 docker_gate_cache_dir: /var/cache/turbopanel-docker-gate

@@ -82,6 +82,7 @@ const JINJA_PYTHON = await findJinjaPython();
 const RENDER_REQUIRED = Deno.env.get("CI") === "true";
 
 type UnitVars = {
+  docker_gate_mode: string;
   docker_gate_platform_ro_roots: string[];
   docker_gate_platform_rw_roots: string[];
   docker_gate_approval_pubkeys: string;
@@ -108,6 +109,7 @@ type UnitVars = {
 };
 
 const DEFAULT_VARS: UnitVars = {
+  docker_gate_mode: "observe",
   docker_gate_gid: "9999",
   docker_gate_dir: "/opt/turbopanel/lib/docker-gate",
   docker_gate_deno_bin: "/opt/turbopanel/vendor/deno/current/deno",
@@ -183,6 +185,15 @@ const jinjaTest = (name: string, fn: () => Promise<void>) =>
     ignore: JINJA_PYTHON === undefined && !RENDER_REQUIRED,
     fn,
   });
+
+jinjaTest("the unit's mode comes from docker_gate_mode", async () => {
+  const unit = await renderUnit({ docker_gate_mode: "enforce" });
+  assert(
+    directives(unit, "Service").includes(
+      "Environment=TP_DOCKER_GATE_MODE=enforce",
+    ),
+  );
+});
 
 jinjaTest(
   "the unit is observe-only, root-owned and pinned to the gate's own socket",
@@ -704,6 +715,14 @@ test("F3: flipping the switch restarts the gate, and a converge with it on prove
   const rescue = main.slice(main.indexOf("rescue:"));
   assertStringIncludes(rescue, "{{ docker_gate_ingress_switch_file }}");
   assertStringIncludes(rescue, "ansible.builtin.fail");
+  // Enforce mode never rescues a failed install into a warning, and the mode
+  // is checked outside the rescued block.
+  assertStringIncludes(rescue, "docker_gate_mode");
+  assertStringIncludes(rescue, "== 'enforce'");
+  assertStringIncludes(
+    main.slice(0, main.indexOf("block:")),
+    "docker_gate_mode must be observe or enforce",
+  );
   const probe = task(
     "Prove the read-only socket answers while Traefik's switch is on",
   );
