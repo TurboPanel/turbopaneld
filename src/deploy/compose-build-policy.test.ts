@@ -117,6 +117,21 @@ const REFUSED: Array<
     "build_extra_host_internal",
   ],
   [
+    "a public remote context",
+    "https://github.com/example/api.git#main",
+    "build_remote_source_refused",
+  ],
+  [
+    "a git@ context on a public host",
+    { context: "git@github.com:x/y.git" },
+    "build_remote_source_refused",
+  ],
+  [
+    "github.com shorthand",
+    { context: "github.com/x/y" },
+    "build_remote_source_refused",
+  ],
+  [
     "a remote context on metadata",
     "http://169.254.169.254/latest/",
     "build_context_internal_url",
@@ -196,8 +211,6 @@ const ALLOWED: Array<[string, unknown, Record<string, unknown>?]> = [
     "extra hosts on public and private addresses",
     { extra_hosts: ["a=203.0.113.7", "b:10.1.2.3", "c=[2001:db8::1]"] },
   ],
-  ["a public remote context", "https://github.com/example/api.git#main"],
-  ["a git@ context on a public host", { context: "git@github.com:x/y.git" }],
   [
     "image and layout additional contexts",
     {
@@ -215,6 +228,23 @@ for (const [what, build, extra] of ALLOWED) {
     assertEquals(codes(model(build, extra)), []);
   });
 }
+
+test("an approved organization may use a public remote context, never an internal one", () => {
+  const approved = (build: unknown) =>
+    collectBuildPolicyFindings(model(build), {
+      stageDir: STAGE,
+      remoteBuildSourcesApproved: true,
+    }).map((f) => f.code);
+  assertEquals(approved("https://github.com/example/api.git#main"), []);
+  assertEquals(approved({ context: "git@github.com:x/y.git" }), []);
+  assertEquals(
+    approved({ additional_contexts: { a: "https://example.com/x.tar" } }),
+    [],
+  );
+  assertEquals(approved("https://10.0.0.5/x.git"), [
+    "build_context_internal_url",
+  ]);
+});
 
 test("a secret the daemon rewrote to its run directory is exempt", () => {
   const doc = model({ secrets: ["DB"] }, {

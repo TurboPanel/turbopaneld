@@ -34,6 +34,7 @@
  */
 
 import { join } from "@std/path";
+import { unsupportedSeriesMessage } from "../../runtime/registry.ts";
 import { hostSudoArgs } from "../../permissions/host-sudo.ts";
 import { logInfo, logWarn } from "../../util/logger.ts";
 import { forEachSequential } from "../../util/sequential.ts";
@@ -669,6 +670,10 @@ export async function ensureNativeAppRuntime(
 ): Promise<void> {
   if (apps.length === 0) return;
   const versions = nativeAppNodeVersions(apps);
+  for (const version of versions) {
+    const message = unsupportedSeriesMessage("node", version);
+    if (message) throw new Error(message);
+  }
   const runPlaybook = opts?.runPlaybook ?? runPlaybookDefault;
   await runPlaybook(
     NODE_APP_RUNTIME_APPLY_PLAYBOOK,

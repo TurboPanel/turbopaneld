@@ -169,10 +169,10 @@ tp_path_class() {
   # publish reach it, and no generic verb accepts the class.
   if tp_under "$_pc" "$R_STAGING"; then echo staging; return 0; fi
   if tp_under "$_pc" "$R_PRINCIPALS"; then echo principal; return 0; fi
-  # Per-site PHP config and the launcher registry sit inside the config tree
-  # but are never `tree`: only their own verbs and checks write them.
+  # Per-site PHP config sits inside the config tree but is never `tree`: only
+  # its own verbs and checks write it.
   case "$_pc" in
-    "$R_CONFIG/php/sites"|"$R_CONFIG/php/sites"/*|"$R_CONFIG/php-sites"|"$R_CONFIG/php-sites"/*)
+    "$R_CONFIG/php/sites"|"$R_CONFIG/php/sites"/*)
       tp_php_path_class "$_pc"
       return
       ;;
@@ -902,8 +902,7 @@ tp_backup_unit_ok() {
 # read-only system with writes only inside the owner's home, and sockets at the
 # top of /run (never in the daemon's /run/turbopanel). The site's PHP config
 # lives in $R_CONFIG/php/sites/<siteId>/ (root:<owner>-grp, directive
-# allowlist), and $R_CONFIG/php-sites/<siteId> is the registry the attached
-# lsphp launcher reads (written only by `php-site-register`).
+# allowlist).
 
 # Web server accounts that talk to a site's PHP socket (Caddy serves no PHP).
 PHP_WEB_GROUPS="tpnginx tpapache tpols"
@@ -1428,17 +1427,11 @@ tp_php_conf_ok() {
   esac
 }
 
-# phproot: $R_CONFIG/php/sites or $R_CONFIG/php-sites; phpconfdir: one site's
-# config directory; phpconf: a config file in it (or its .tpprev); phpreg: one
-# site's launcher registry entry. Nothing deeper.
+# phproot: $R_CONFIG/php/sites; phpconfdir: one site's config directory;
+# phpconf: a config file in it (or its .tpprev). Nothing deeper.
 tp_php_path_class() {
   case "$1" in
-    "$R_CONFIG/php/sites"|"$R_CONFIG/php-sites") echo phproot; return 0 ;;
-    "$R_CONFIG/php-sites"/*)
-      tp_php_site_id_ok "${1#"$R_CONFIG/php-sites/"}" || return 1
-      echo phpreg
-      return 0
-      ;;
+    "$R_CONFIG/php/sites") echo phproot; return 0 ;;
   esac
   _pp_rest="${1#"$R_CONFIG/php/sites/"}"
   case "$_pp_rest" in
@@ -1550,50 +1543,6 @@ tp_php_test_run() {
     *"PHP:  "*|*"PHP Warning"*|*"PHP Fatal"*|*"PHP Parse"*|*"PHP Startup"*|*"Cannot load"*) exit 1 ;;
   esac
   exit 0
-}
-
-# php-site-register <siteId> <user> lsphp-attached <series> <children>: the
-# registry entry the attached-lsphp launcher reads. Identity comes from the
-# account database, never from the caller; the file is root:root 0644 and only
-# this verb writes it.
-tp_verb_php_site_register() {
-  [ $# -eq 5 ] ||
-    tp_die "php-site-register: only <siteId> <user> lsphp-attached <series> <children>"
-  _pg_site="$1"
-  _pg_user="$2"
-  tp_php_site_id_ok "$_pg_site" || tp_die "php-site-register: refusing site id $_pg_site"
-  tp_is_principal "$_pg_user" || tp_die "php-site-register: $_pg_user is not a principal"
-  tp_is_principal_group "$_pg_user-grp" || tp_die "php-site-register: no group $_pg_user-grp"
-  [ "$3" = "lsphp-attached" ] || tp_die "php-site-register: only mode lsphp-attached"
-  tp_php_series_ok "$4" || tp_die "php-site-register: refusing PHP series $4"
-  case "$5" in
-    [1-9]|[1-5][0-9]|6[0-4]) ;;
-    *) tp_die "php-site-register: children must be 1-64" ;;
-  esac
-  # The passwd home is home/ inside the root-owned principal home; tmp/ sits
-  # beside it (tp_principal_home_ok, the shape useradd accepts).
-  _pg_home="$(tp_getent passwd "$_pg_user" | cut -d: -f6)"
-  tp_principal_home_ok "$_pg_home" "$_pg_user" ||
-    tp_die "php-site-register: $_pg_user's home is not $R_PRINCIPALS/$_pg_user/home"
-  tp_mkdir_pinned "$R_CONFIG/php-sites" 0755
-  # shellcheck disable=SC3067 # dash (Debian's /bin/sh) implements -O
-  [ -O . ] && [ "$(stat -c '%a' .)" = "755" ] ||
-    tp_die "php-site-register: $R_CONFIG/php-sites is not root-owned 0755"
-  printf '%s\n' \
-    "version=1" \
-    "site=$_pg_site" \
-    "mode=lsphp-attached" \
-    "user=$_pg_user" \
-    "uid=$(tp_uid_of "$_pg_user")" \
-    "group=$_pg_user-grp" \
-    "gid=$(tp_gid_of_group "$_pg_user-grp")" \
-    "home=$_pg_home" \
-    "tmp=$R_PRINCIPALS/$_pg_user/tmp" \
-    "php=$4" \
-    "bin=$INSTALL_ROOT/vendor/lsphp/$4/current/bin/lsphp" \
-    "ini=$R_CONFIG/php/sites/$_pg_site/php.ini" \
-    "children=$5" |
-    tp_put_file "$R_CONFIG/php-sites/$_pg_site" 0644 root root
 }
 
 # --- verbs -------------------------------------------------------------------
@@ -1765,7 +1714,7 @@ tp_verb_rm() {
   [ $# -eq 1 ] || tp_die "rm takes one path"
   _rm_class="$(tp_path_class "$1")" || tp_die "refusing path $1"
   case "$_rm_class" in
-    tree|principal|unit|sshd|sysctl|phpconf|phpconfdir|phpreg) ;;
+    tree|principal|unit|sshd|sysctl|phpconf|phpconfdir) ;;
     # TurboFabric teardown removes the tp0 config, never the directory.
     wireguard) [ "$1" = "$R_WG/tp0.conf" ] || tp_die "refusing path $1" ;;
     *) tp_die "refusing path $1" ;;
@@ -1834,7 +1783,7 @@ tp_verb_cmp() {
   _cm_staged="$3"
   _cm_path="$4"
   _cm_class="$(tp_path_class "$_cm_path")" || tp_die "refusing path $_cm_path"
-  case "$_cm_class" in tree|unit|sshd|phpconf|phpreg) ;; *) tp_die "refusing path $_cm_path" ;; esac
+  case "$_cm_class" in tree|unit|sshd|phpconf) ;; *) tp_die "refusing path $_cm_path" ;; esac
   tp_stage_dir
   _cm_tmp="$TP_STAGE/staged"
   tp_read_as_caller "$_cm_staged" > "$_cm_tmp"
@@ -2695,15 +2644,18 @@ BUILD_RUNTIME_MAX_SEC=1800
 # the build account, still confined); below the minimum: no build.
 BUILD_SYSTEMD_FLOOR=255
 BUILD_SYSTEMD_MIN=247
-# Loopback, private (10/8 covers the tp0 fabric), CGNAT, link-local (cloud
-# metadata), benchmark, multicast and reserved ranges, on every port. Nothing
-# is allowed back in (an IPAddressAllow= wins over the deny for every port):
-# the build resolves through its own resolv.conf naming only public
-# nameservers, which public egress already reaches.
-BUILD_DENY_V4="0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 169.254.0.0/16 172.16.0.0/12 192.0.0.0/24 192.168.0.0/16 198.18.0.0/15 224.0.0.0/3"
+# Private (10/8 covers the tp0 fabric), CGNAT, link-local (cloud metadata),
+# benchmark, multicast and reserved ranges, on every port. Nothing is allowed
+# back in (an IPAddressAllow= wins over the deny for every port): the build
+# resolves through its own resolv.conf naming only public nameservers, which
+# public egress already reaches. Loopback (127.0.0.0/8, ::1) is NOT denied here:
+# Turbopack's helper processes talk to each other over it. lib/tp-build-loopback
+# (nftables, per tpbuild uid) refuses the platform's loopback ports instead.
+BUILD_LOOPBACK="$INSTALL_ROOT/lib/tp-build-loopback"
+BUILD_DENY_V4="0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 169.254.0.0/16 172.16.0.0/12 192.0.0.0/24 192.168.0.0/16 198.18.0.0/15 224.0.0.0/3"
 # NAT64 (64:ff9b::/96) and 6to4 (2002::/16) embed IPv4 addresses, private
 # ones included, so both are denied whole.
-BUILD_DENY_V6="::/128 ::1/128 64:ff9b::/96 2002::/16 fc00::/7 fe80::/10 ff00::/8"
+BUILD_DENY_V6="::/128 64:ff9b::/96 2002::/16 fc00::/7 fe80::/10 ff00::/8"
 # Used when the host names no public nameserver (a loopback stub with
 # private upstreams, a LAN router): never a loopback, private or link-local
 # resolver, which would open that address to the build.
@@ -2884,6 +2836,10 @@ tp_verb_build_run() {
   tp_run chown -h -- "$BUILD_UID:$BUILD_GID" .
   tp_build_work_pin "$1"
   tp_run chown -R -h -P -- "$BUILD_UID:$BUILD_GID" .
+  # Fail closed: without the port filter the build would reach host services
+  # on loopback, so it does not start (the unit re-runs this as ExecStartPre).
+  tp_run "$BUILD_LOOPBACK" sync ||
+    tp_die "build-run: the build's network rules could not be loaded (is nftables installed?); builds are stopped until they can"
   cd /
   set -- --unit="turbopanel-build-$1" --service-type=exec --wait --pipe --quiet --collect \
     -p User="$BUILD_ACCOUNT" -p Group="$BUILD_ACCOUNT" -p WorkingDirectory="$_br_work" \
@@ -2914,7 +2870,8 @@ tp_verb_build_run() {
   fi
   [ "$_br_v" -lt 257 ] || set -- "$@" -p PrivatePIDs=yes
   set -- "$@" -p RestrictAddressFamilies="AF_INET AF_INET6 AF_UNIX" \
-    -p IPAddressDeny="$BUILD_DENY_V4 $BUILD_DENY_V6"
+    -p IPAddressDeny="$BUILD_DENY_V4 $BUILD_DENY_V6" \
+    -p ExecStartPre="+$BUILD_LOOPBACK sync"
   set -- "$@" -p Slice="$BUILD_SLICE" -p MemoryMax="$BUILD_MEMORY_MAX" -p MemorySwapMax=0 \
     -p CPUQuota="$BUILD_CPU_QUOTA" -p TasksMax=1024 -p IOWeight=50 -p LimitFSIZE=4G \
     -p LimitNOFILE=65536 -p LimitCORE=0 -p RuntimeMaxSec="$BUILD_RUNTIME_MAX_SEC" \
@@ -3205,6 +3162,5 @@ case "$_verb" in
   publish) tp_verb_publish "$@" ;;
   php-test) tp_verb_php_test "$@" ;;
   php-loopback-sync) tp_verb_php_loopback_sync "$@" ;;
-  php-site-register) tp_verb_php_site_register "$@" ;;
   *) tp_die "refusing verb $_verb" ;;
 esac
