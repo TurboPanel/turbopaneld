@@ -83,7 +83,10 @@ as a whole, a site's `.turbopanel-hosting`, `.tp-staging`) is a
 `bind-principal-path` finding. Outside `/srv/users` the older rules stand
 (root-owned bind roots such as `<state>/storage`, the deny list). The gate does
 not know which owner a container belongs to, so `alice/data` for bob's
-container is not caught here.
+container is not caught here. An operator-chosen storage path under a home
+(`sourcePath`, "explicit operator paths still win") outside those places is
+refused too, backup and restore helpers included. `principalRoots` is the
+built-in `/srv/users` (it does not follow `TP_DOCKER_GATE_BIND_ROOTS`).
 
 **Start / restart re-check.** The engine resolves a bind source again at
 `start`, so a clean create can be stale (source swapped for a symlink, a
@@ -93,7 +96,9 @@ needed), then applies the same bind policy to the live `HostConfig.Binds`,
 `HostConfig.Mounts` and the live bind `Mounts`. Findings are the create rules
 prefixed `start-` (`start-bind-principal-path`...). A container's own signed
 approval label still covers its approved features (signature and project only:
-expiry, body digest and single use were enforced at create). An inspect that
+expiry, body digest and single use were enforced at create; the digest no
+longer pins the exact paths, so an approved feature covers whatever binds the
+container has at restart). An inspect that
 fails is `owner-unknown`, as before.
 
 Both checks follow the gate's mode: observe logs `docker-gate.would-deny`,
