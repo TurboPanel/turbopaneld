@@ -29,6 +29,12 @@ export type Violation = {
 export type PolicyConfig = {
   /** Host directories a tenant bind mount may resolve under. */
   bindRoots: readonly string[];
+  /**
+   * Principal home roots (the site owners' Linux users, `/srv/users`): below
+   * one, only the locations the home layout hands to containers may be bound
+   * (see `principalViolation`). Applies on top of `bindRoots`.
+   */
+  principalRoots: readonly string[];
   /** Host paths (and everything under them) a bind mount may never reach. */
   denyPrefixes: readonly string[];
   /** The engine socket in every spelling the host uses. */
@@ -43,6 +49,7 @@ export type PolicyConfig = {
 
 export const DEFAULT_POLICY_CONFIG: PolicyConfig = {
   bindRoots: ["/srv/users", "/var/lib/turbopanel/storage"],
+  principalRoots: ["/srv/users"],
   denyPrefixes: [
     "/etc",
     "/var/run",
@@ -300,6 +307,39 @@ function within(path: string, root: string): boolean {
   return path === root || path.startsWith(`${root}/`);
 }
 
+/** Directories of `<home>/` a container may bind: the owner's own data. */
+const PRINCIPAL_DATA_AREAS = new Set(["data", "tmp"]);
+/** Per-site directories (`sites/<serviceId>/<name>`) a container may bind. */
+const PRINCIPAL_SITE_AREAS = new Set(["shared", "webroot", "releases"]);
+
+/**
+ * Below a principal home root only the places the home layout makes for
+ * containers: the owner's `data/` and `tmp/`, path storage under
+ * `volumes/<id>`, and per site `shared/`, `webroot/` and the root-owned
+ * `releases/`. Everything else (the home itself, `home/`, `.tp-staging`, a
+ * site's hosting config, `sites/` as a whole) is outside. `resolved` is
+ * already symlink-resolved, so a link out of an allowed place lands on its
+ * real target and is judged there.
+ */
+function principalViolation(
+  resolved: string,
+  config: PolicyConfig,
+): Violation | undefined {
+  const root = config.principalRoots.find((r) => within(resolved, r));
+  if (root === undefined) return undefined;
+  const [owner, area, ...tail] = resolved.slice(root.length).split("/")
+    .filter((part) => part !== "");
+  const allowed = owner !== undefined && !owner.startsWith(".") && (
+    PRINCIPAL_DATA_AREAS.has(area ?? "") ||
+    (area === "volumes" && tail.length >= 1) ||
+    (area === "sites" && tail.length >= 2 &&
+      PRINCIPAL_SITE_AREAS.has(tail[1]))
+  );
+  return allowed
+    ? undefined
+    : { rule: "bind-principal-path", detail: resolved };
+}
+
 /** The cases a bind source can break, most specific first. */
 function bindViolation(
   resolved: string,
@@ -315,7 +355,7 @@ function bindViolation(
   if (!config.bindRoots.some((root) => within(resolved, root))) {
     return { rule: "bind-outside-roots", detail: resolved };
   }
-  return undefined;
+  return principalViolation(resolved, config);
 }
 
 /** One bind as authored: its source and whether it was asked read-only. */
@@ -921,6 +961,46 @@ async function evaluateContainerCreate(
     ],
     allowances: mounts.allowances,
   };
+}
+
+/** The inspect answer's pieces the start check judges (see inspect.ts). */
+export type StartDoc = {
+  labels: Record<string, string>;
+  hostConfig: Record<string, unknown>;
+  /** The live bind mounts, in the spec form `HostConfig.Mounts` uses. */
+  mounts: readonly unknown[];
+};
+
+/**
+ * The bind policy applied to a container as it exists now (the engine
+ * resolves bind sources again at `start`, so a create-time verdict can be
+ * stale): its `HostConfig.Binds` / `Mounts` plus the live bind `Mounts`.
+ * Rules carry a `start-` prefix so the log tells the two moments apart.
+ */
+export async function evaluateStartBinds(
+  doc: StartDoc,
+  config: PolicyConfig,
+  resolvePath: ResolvePath,
+): Promise<Verdict> {
+  const specs = Array.isArray(doc.hostConfig.Mounts)
+    ? doc.hostConfig.Mounts
+    : [];
+  const hostConfig = { ...doc.hostConfig, Mounts: [...specs, ...doc.mounts] };
+  const result = await checkMounts(hostConfig, {
+    config,
+    resolvePath,
+    platform: isPlatformContainer(doc.labels),
+    ingress: isIngressContainer(doc.labels),
+  });
+  const seen = new Set<string>();
+  const violations: Violation[] = [];
+  for (const v of result.violations) {
+    const key = `${v.rule}\0${v.detail ?? ""}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    violations.push({ ...v, rule: `start-${v.rule}` });
+  }
+  return { violations, allowances: result.allowances };
 }
 
 function evaluateExecCreate(body: unknown): Violation[] {

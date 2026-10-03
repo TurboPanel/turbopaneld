@@ -45,7 +45,7 @@ import type {
 } from "../../contracts/commands-contracts.ts";
 import type { DecryptSecretsFn } from "../materialize-tls.ts";
 import type { RunFn } from "../ensure-principal.ts";
-import { dirname } from "@std/path";
+import { dirname, join } from "@std/path";
 import {
   assertCheckoutCredentialsRemoved,
   checkoutRelease,
@@ -83,6 +83,7 @@ import {
   promoteRelease,
   readCurrentReleaseId,
   recordRailpackRelease,
+  releasePathExists,
 } from "./promote.ts";
 import { pruneReleases } from "./retention.ts";
 import { definedFields } from "../../util/optional-fields.ts";
@@ -100,6 +101,7 @@ import {
   resetReleaseScratchDir,
   resolveDaemonReleasePaths,
   resolveReleasePaths,
+  runPrivileged,
 } from "./release-layout.ts";
 
 export type AppliedRelease = {
@@ -487,6 +489,37 @@ async function applyRailpackRelease(
 type RollbackTarget = { paths: ReleasePaths; manifest: ReleaseManifestV1 };
 
 /**
+ * A re-sent deploy of a native release this host already published — the same
+ * release id and the same commit in the daemon's own record, and the tree still
+ * there. tp-host `publish` never stages over an existing release, so it is cut
+ * over to again like a rollback instead of being rebuilt.
+ */
+async function resentPublishedRelease(
+  layout: LayoutPaths,
+  entry: EnvironmentDeploySource,
+  serviceId: string,
+  params: { principalPaths: ReleasePaths | null; runFn: RunFn | undefined },
+): Promise<RollbackTarget | null> {
+  const paths = params.principalPaths;
+  if (!paths || entry.build.kind === "railpack") return null;
+  const record = await readFinalizedRecord(
+    resolveDaemonReleasePaths(layout, {
+      serviceId,
+      releaseId: entry.releaseId,
+    }).releaseDir,
+  );
+  const same = record !== null && !record.imageTag &&
+    record.serviceId === serviceId && record.releaseId === entry.releaseId &&
+    record.commitSha === entry.commitSha;
+  if (!same) return null;
+  const present = await releasePathExists(
+    paths.releaseDir,
+    params.runFn ?? runPrivileged,
+  );
+  return present ? { paths, manifest: record } : null;
+}
+
+/**
  * The release a rollback is addressing, as this host's daemon recorded it.
  *
  * Every published release — native or Railpack — leaves a manifest under the
@@ -515,7 +548,7 @@ async function resolveRollbackTarget(
     serviceId: params.serviceId,
     releaseId: params.releaseId,
   });
-  const manifest = await readReleaseManifest(recordPaths.releaseDir);
+  const manifest = await readFinalizedRecord(recordPaths.releaseDir);
   const matches = manifest?.serviceId === params.serviceId &&
     manifest.releaseId === params.releaseId;
   if (!manifest || !matches) {
@@ -531,14 +564,38 @@ async function resolveRollbackTarget(
     : null;
 }
 
+/** Present in a record dir from before the promote until it has finished. */
+const PENDING_RECORD_MARKER = ".pending";
+
 /**
- * Record a promoted native release under the daemon-owned record root, so a
- * later rollback can restore it without reading the principal's tree.
+ * The record at `recordDir`, unless it is still pending: a pending record was
+ * written ahead of a promote that never finished (the daemon died mid-way), so
+ * its tree may be partial and neither a re-send nor a rollback may trust it.
+ */
+async function readFinalizedRecord(
+  recordDir: string,
+): Promise<ReleaseManifestV1 | null> {
+  try {
+    await Deno.stat(join(recordDir, PENDING_RECORD_MARKER));
+    return null;
+  } catch (err) {
+    if (!(err instanceof Deno.errors.NotFound)) throw err;
+  }
+  return await readReleaseManifest(recordDir);
+}
+
+/**
+ * Record a native release under the daemon-owned record root, so a later
+ * rollback can restore it without reading the principal's tree.
  *
- * Written only after the promote succeeded — the record is this host's
- * statement that the release was sealed and published. The cutover has already
- * happened by then, so a failure is reported rather than failing a deploy that
- * is live; a rollback to this release then says its record is missing.
+ * Written **before** the promote, and a failure fails the deploy: once the
+ * cutover has happened a missing record could only be logged, and the release
+ * would be live but impossible to roll back to. Writing first means the
+ * failure is seen at deploy time with `current` untouched. It is written
+ * **pending** (marker first, then the manifest) and {@link
+ * finalizeNativeRecord} clears the marker once the promote has succeeded, so a
+ * kill between the two leaves a record nothing trusts. {@link
+ * discardNativeRecord} removes it when the promote fails.
  */
 async function recordNativeRelease(
   layout: LayoutPaths,
@@ -553,12 +610,68 @@ async function recordNativeRelease(
     await (deps.ensureDaemonReleaseRecordDirFn ?? ensureDaemonReleaseRecordDir)(
       recordPaths,
     );
+    await Deno.writeTextFile(
+      join(recordPaths.releaseDir, PENDING_RECORD_MARKER),
+      "",
+    );
     await writeReleaseManifest(recordPaths.releaseDir, manifest);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
+    throw new Error(
+      `release ${manifest.releaseId} was not published: its rollback record ` +
+        `could not be written: ${message}`,
+      { cause: err },
+    );
+  }
+}
+
+/**
+ * Mark a recorded release as published, once its promote has finished. The
+ * deploy is already cut over to it, so a failure here is only logged: the
+ * release stays live and the record stays pending (not rollback-able, and a
+ * re-send rebuilds it).
+ */
+async function finalizeNativeRecord(
+  layout: LayoutPaths,
+  serviceId: string,
+  releaseId: string,
+  deps: ApplySourceReleasesDeps,
+): Promise<void> {
+  const { releaseDir } = resolveDaemonReleasePaths(layout, {
+    serviceId,
+    releaseId,
+  });
+  try {
+    await Deno.remove(join(releaseDir, PENDING_RECORD_MARKER));
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) return;
+    const message = err instanceof Error ? err.message : String(err);
     deps.logSink.onLine(
       "stderr",
-      `release ${manifest.releaseId} is live but its rollback record could not be written: ${message}`,
+      `could not finalize the rollback record for ${releaseId}: ${message}`,
+    );
+  }
+}
+
+/** Remove a release's record; best-effort, a leftover is only a stale record. */
+async function discardNativeRecord(
+  layout: LayoutPaths,
+  serviceId: string,
+  releaseId: string,
+  deps: ApplySourceReleasesDeps,
+): Promise<void> {
+  const { releaseDir } = resolveDaemonReleasePaths(layout, {
+    serviceId,
+    releaseId,
+  });
+  try {
+    await Deno.remove(releaseDir, { recursive: true });
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) return;
+    const message = err instanceof Error ? err.message : String(err);
+    deps.logSink.onLine(
+      "stderr",
+      `could not remove the rollback record for ${releaseId}: ${message}`,
     );
   }
 }
@@ -711,24 +824,31 @@ async function buildNativeRelease(
       standaloneOutput: nativeOutput.standaloneOutput,
       staticExport: nativeOutput.staticExport,
     });
-    const releaseDir = await (deps.promoteReleaseFn ?? promoteRelease)(
-      definedFields({
-        paths,
-        workingDir: checkout.workingDir,
-        username,
-        manifest,
-        subdirectory: entry.subdirectory,
-        outputDirectory: entry.build.outputDirectory ??
-          nativeOutput.outputDirectory,
-        containmentRoot: work?.workDir,
-        runFn: deps.runFn,
-      }),
-    );
+    await recordNativeRelease(layout, manifest, deps);
+    let releaseDir: string;
+    try {
+      releaseDir = await (deps.promoteReleaseFn ?? promoteRelease)(
+        definedFields({
+          paths,
+          workingDir: checkout.workingDir,
+          username,
+          manifest,
+          subdirectory: entry.subdirectory,
+          outputDirectory: entry.build.outputDirectory ??
+            nativeOutput.outputDirectory,
+          containmentRoot: work?.workDir,
+          runFn: deps.runFn,
+        }),
+      );
+    } catch (err) {
+      await discardNativeRecord(layout, serviceId, entry.releaseId, deps);
+      throw err;
+    }
+    await finalizeNativeRecord(layout, serviceId, entry.releaseId, deps);
     logSink.onLine(
       "stdout",
       `promoted release ${entry.releaseId} (${checkout.commitSha}) for ${entry.composeServiceName}`,
     );
-    await recordNativeRelease(layout, manifest, deps);
 
     const pruned = await (deps.pruneReleasesFn ?? pruneReleases)(definedFields({
       paths,
@@ -738,6 +858,12 @@ async function buildNativeRelease(
     if (pruned.length > 0) {
       logSink.onLine("stdout", `pruned ${pruned.length} superseded release(s)`);
     }
+    // A record lives exactly as long as the tree it describes: a rollback to a
+    // pruned release has nothing to restore, so its record would only mislead.
+    await forEachSequential(
+      pruned,
+      (releaseId) => discardNativeRecord(layout, serviceId, releaseId, deps),
+    );
 
     return definedFields({
       composeServiceName: entry.composeServiceName,
@@ -924,6 +1050,24 @@ async function applyOneRelease(
     throw new Error(
       `release for ${entry.composeServiceName} has no release paths`,
     );
+  }
+
+  const resent = await resentPublishedRelease(layout, entry, serviceId, {
+    principalPaths,
+    runFn: deps.runFn,
+  });
+  if (resent) {
+    logSink.onLine(
+      "stdout",
+      `release ${entry.releaseId} is already published on this host; ` +
+        `cutting ${entry.composeServiceName} over to it without a rebuild`,
+    );
+    return await rollbackOneRelease(entry, resent, {
+      serviceId,
+      releaseId: entry.releaseId,
+      logSink,
+      deps,
+    });
   }
 
   if (railpack) {

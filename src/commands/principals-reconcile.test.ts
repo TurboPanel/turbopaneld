@@ -132,3 +132,27 @@ test("handlePrincipalsReconcile treats empty sshKeys as none and empty payload a
   assertEquals(result.keysRemoved, []);
   assertEquals(result.sshdReloaded, false);
 });
+
+test("handlePrincipalsReconcile reports a failed runtime group grant as a warning", async () => {
+  const result = await handlePrincipalsReconcile(
+    { principals: [{ principalId: "p4", username: "erin", sshKeys: [] }] },
+    "2026-01-01T00:00:00.000Z",
+    {
+      resolveLayout: () => LAYOUT,
+      ensureSystemPrincipals: () =>
+        Promise.resolve(["could not add erin to tpphp84: no such group"]),
+      applySshAccess: () =>
+        Promise.resolve({
+          changedPrincipals: [],
+          removedPrincipals: [],
+          sshdReloaded: false,
+          sftpChroot: false,
+          warnings: ["AllowUsers is set"],
+        }),
+    },
+  );
+  assertEquals(result.warnings, [
+    "could not add erin to tpphp84: no such group",
+    "AllowUsers is set",
+  ]);
+});

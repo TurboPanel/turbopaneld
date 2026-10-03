@@ -169,3 +169,21 @@ test("readReleaseManifest rethrows a non-NotFound read error", async () => {
     );
   });
 });
+
+test("writeReleaseManifest replaces atomically and leaves no temp file", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "tp-rel-atomic-" });
+  try {
+    await writeReleaseManifest(dir, { ...BASE, commitSha: "aaa" });
+    await writeReleaseManifest(dir, { ...BASE, commitSha: "bbb" });
+    assertEquals((await readReleaseManifest(dir))?.commitSha, "bbb");
+    const names = [];
+    for await (
+      const e of Deno.readDir(join(dir, RELEASE_METADATA_DIRNAME))
+    ) names.push(e.name);
+    assertEquals(names, ["release.json"]);
+    const mode = (await Deno.stat(releaseManifestPath(dir))).mode! & 0o777;
+    assertEquals(mode, 0o640);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});

@@ -92,6 +92,19 @@ module and CI guard are the only places allowed to reference it.
 | Managed-engine backups (`backupDir`, one subdir per `managedId`)   | `/backup`                             |
 | Runtime (sockets, `daemon.lock`)                                  | `/run/turbopanel`                     |
 
+**Files at the root of the config and state trees (P1-1).** `/etc/turbopanel`
+and `/var/lib/turbopanel` end up root-owned: the daemon (`tp`) writes only its own
+folders below them (`DAEMON_CONFIG_LEAVES` / `DAEMON_STATE_LEAVES` in
+`src/paths/layout.ts`, created by the `daemon-layout` role). The few files that
+live at the root itself (`instance-ca.pem`, `firewall*.v4|v6`, `server.id`,
+the server key and key-id files, `update-guard-disarm.json`) go through
+`writeDaemonFile` / `removeDaemonFile` / `ensureDaemonDir`
+(`src/permissions/daemon-files.ts`): rename in directly when the folder is
+writable, otherwise `tp-host install -o tp` / `rm`. Never `Deno.rename` or
+`Deno.mkdir` a new entry straight into those two roots. Root Ansible never
+recurses or follows links inside a leaf (pinned by
+`src/orchestration/root-tasks-platform-parents.test.ts`).
+
 `backupDir` is deliberately **outside** the FHS state tree and carries the same
 `/backup` default in development and production: backups are the one artifact
 an operator is expected to point at other storage (a second disk, a NAS mount,
@@ -193,7 +206,10 @@ support in `features[]` (`DAEMON_WIRE_FEATURES`, kept equal in both
 `version-wire.ts` files) and the daemon checks `InstanceClient.instanceSupports()`
 before treating the peer as able to speak it. `update-progress`
 (`update-progress-v1`) is the worked example — fire-and-forget progress,
-ignored by a peer that does not list the feature. `managed-health-v1` is the
+ignored by a peer that does not list the feature. `php-site-modes-v1` is advertised by a daemon that runs each PHP site in its
+`php.mode` (FastCGI or php-fpm on nginx and Apache); the control plane refuses to
+deploy any mode but php-fpm to a daemon without it. OpenLiteSpeed and Caddy sites
+still ignore `php.mode` (the lsphp work is turbopaneld#250). `managed-health-v1` is the
 worked example of a control-plane-initiated correlated request
 (`managed-health-request` / `managed-health-result`): this daemon advertises it
 in `DAEMON_WIRE_FEATURES`, and the control plane sends the request only to a
@@ -360,10 +376,6 @@ compile toolchain).
   production source (`src/**`, excluding `*.test.ts` and `src/paths/layout.ts`)
   references `/opt/turbopanel/platform` or the retired `share/ansible`. Wired
   into `publish-daemon-trunk.yml`.
-- `deno task check:metrics-legacy` (`scripts/check-metrics-legacy.ts`) — fails
-  on any ClickHouse/Tabix reference outside the managed-engine allowlist (the
-  metrics store is DuckDB + Parquet / Analytics Engine); scans this repo plus
-  the co-located `turbopanel`/`dev`/`ui` `src` trees when present.
 - `deno task test` / `test:coverage` / `lint` / `fmt:check` / `check` / `notices:check` — quality
   surface in `deno.json`. `notices:generate` writes `THIRD_PARTY_NOTICES.md` from
   `deno.lock` and orchestration pins
@@ -433,7 +445,7 @@ compile toolchain).
 
 Local commands: **`deno task verify:ci`** is the guest mirror of `verify.yml`
 minus the Sonar upload: `verify:static` (`fmt:check`, `lint`, `check`,
-`check:layout`, `check:vocabulary`, `check:metrics-legacy`) then
+`check:layout`, `check:vocabulary`, `check:contract-drift`) then
 `notices:check`, `check:orchestration` (needs `ansible-playbook` /
 `ansible-lint` on PATH — prepend `/opt/turbopanel/vendor/ansible/current/bin`
 in the guest), and **`test:coverage`** (the LCOV Sonar imports).
@@ -728,13 +740,17 @@ it regresses:
     on a socket), php-fpm (`Type=notify`, its own runtime directory) or
     detached lsphp (vendored, `PHPRC=` its php.ini, on a socket). Every line is
     pinned: the owner, its group and slice, no capabilities, the exec line per
-    mode and series, `BindPaths=<home>/tmp:/tmp`, `ProtectSystem=strict` with
+    mode and series, `IPAddressDeny=localhost link-local multicast
+    0.0.0.0/8 fc00::/7` with only `IPAddressAllow=127.0.0.53` (required,
+    exact),
+    `BindPaths=<home>/tmp:/tmp`, `ProtectSystem=strict` with
     writes only inside the home, and `TemporaryFileSystem=/etc/turbopanel:ro`
     plus `BindReadOnlyPaths=` of the site's config directory (the owner cannot
     traverse tp's 0750 tree otherwise). Sockets sit at
     `/run/turbopanel-php-<siteId>/`, the owner's, group a web server's, 0660.
     Config lives in `/etc/turbopanel/php/sites/<siteId>/` (dir 0750, files
-    0640, root:<owner>-grp, directive allowlist; php-fpm pools take
+    0640, root:<owner>-grp, directive allowlist; php.ini's only non-plain
+    section is `[PATH=<owner home>]`, the locked limits; php-fpm pools take
     `listen.acl_users`, never `user`/`group`/`listen.group`);
     `php-test <siteId>` runs the installed unit's binary on that config as
     the owner, and `php-site-register` writes the attached-lsphp launcher's
@@ -770,6 +786,17 @@ it regresses:
     every native/static release build through it
     (`src/deploy/release/build-sandbox.ts`), so no tenant build command runs
     as `tp`;
+  - brings a release into `<home>/sites/<svc>/releases/<id>` only through
+    `publish-open <user> <svc> <id>` (a fresh daemon-owned leaf under
+    `<principal root>/.tp-staging`, `root:tp 0710`, a class no generic verb
+    accepts) and `publish <user> <svc> <id>`: it takes the leaf, refuses hard
+    links, special files and a shipped `shared`, seals it recursively
+    (`root:<user>-grp`, no set-id, nothing group/other-writable), refuses a
+    symlink that resolves outside it, renames it in through a root-owned chain
+    on the same filesystem, links `shared`, sets the top to `0550` and swaps
+    `current` (a directory at `current` or `current.tmp.<id>` is refused).
+    `install -d` / `mkdir -p` under `releases/<id>` are refused, `cp -a` is
+    gone, and `ln` uses `-T`;
   `src/permissions/tp-host.test.ts` runs it unprivileged in its test mode
   (`TP_HOST_TEST_PREFIX`, ignored as root) against the daemon's own rendered
   units and a hostile corpus. Known gap: it is TOCTOU-safe for paths it pins,
