@@ -2707,14 +2707,16 @@ async function runDockerRestartGate(
   try {
     const bin = join(dir, "bin");
     await Deno.mkdir(bin);
-    if (dockerInfoOutput !== null) {
-      // Stand-in `docker info --format {{.LiveRestoreEnabled}}`.
-      await Deno.writeTextFile(
-        join(bin, "docker"),
-        `#!/bin/sh\necho ${dockerInfoOutput}\n`,
-        { mode: 0o755 },
-      );
-    }
+    // Stand-in `docker info --format {{.LiveRestoreEnabled}}`; null = docker
+    // cannot answer (no daemon). Listed first on PATH so a real docker on the
+    // runner is never consulted.
+    await Deno.writeTextFile(
+      join(bin, "docker"),
+      dockerInfoOutput === null
+        ? "#!/bin/sh\nexit 1\n"
+        : `#!/bin/sh\necho ${dockerInfoOutput}\n`,
+      { mode: 0o755 },
+    );
     const gate = join(
       CHECKOUT_ORCHESTRATION_DIR,
       "roles/docker/tasks/restart-gate.yml",
@@ -2733,8 +2735,7 @@ async function runDockerRestartGate(
     await Deno.writeTextFile(join(dir, "vars.json"), JSON.stringify(vars));
     const out = await new Deno.Command("ansible-playbook", {
       args: ["-e", `@${join(dir, "vars.json")}`, join(dir, "play.yml")],
-      // Only the stub directory: no real docker is ever consulted.
-      env: { PATH: `${bin}:/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin` },
+      env: { PATH: `${bin}:${Deno.env.get("PATH") ?? ""}` },
       stdout: "piped",
       stderr: "piped",
     }).output();
