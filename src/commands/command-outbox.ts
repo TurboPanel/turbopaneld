@@ -86,7 +86,7 @@ async function journalOutcome(outcome: OutcomeMessage): Promise<void> {
 }
 
 function trySend(ws: OutboxSocket | undefined, message: object): boolean {
-  if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+  if (ws?.readyState !== WebSocket.OPEN) return false;
   try {
     ws.send(JSON.stringify(message));
     return true;
@@ -130,51 +130,65 @@ async function readJournaledOutcome(
   }
 }
 
+/** Ids journaled on disk that this process is neither running nor holding. */
+async function orphanedIds(): Promise<string[]> {
+  try {
+    const names = await Array.fromAsync(
+      Deno.readDir(journalDir()),
+      (e) => e.name,
+    );
+    return names
+      .filter((name) => name.endsWith(".json"))
+      .map((name) => name.slice(0, -".json".length))
+      .filter((id) => !running.has(id) && !held.has(id));
+  } catch (err) {
+    if (!(err instanceof Deno.errors.NotFound)) {
+      logWarn("commands", `in-flight journal unreadable: ${err}`);
+    }
+    return [];
+  }
+}
+
+/**
+ * A final outcome journaled before the daemon died is the real answer; only a
+ * command with no recorded outcome was truly interrupted.
+ */
+async function orphanReply(id: string): Promise<OutcomeMessage> {
+  const now = new Date().toISOString();
+  const journaled = await readJournaledOutcome(id);
+  if (journaled) return { ...journaled, at: now };
+  return {
+    type: "command-outcome",
+    id,
+    ok: false,
+    error:
+      "The daemon restarted while this command was running; the host may be partly changed. Run it again.",
+    at: now,
+    daemonRespondedAt: now,
+  };
+}
+
 /**
  * On a new session: send held outcomes, then answer journaled commands that
- * are neither running nor held (their daemon died mid-command) as interrupted.
+ * are neither running nor held (their daemon died mid-command) with their
+ * journaled outcome, or as interrupted when none was recorded.
  */
 export async function flushCommandOutcomes(ws: OutboxSocket): Promise<void> {
   currentSocket = ws;
   const sent: string[] = [];
   for (const [id, outcome] of held) {
-    if (ws.readyState !== WebSocket.OPEN) break;
     if (!trySend(ws, { ...outcome, at: new Date().toISOString() })) break;
     held.delete(id);
     sent.push(id);
   }
   await Promise.all(sent.map(removeJournal));
   if (ws.readyState !== WebSocket.OPEN) return;
-  let names: string[];
-  try {
-    names = await Array.fromAsync(Deno.readDir(journalDir()), (e) => e.name);
-  } catch (err) {
-    if (err instanceof Deno.errors.NotFound) return;
-    logWarn("commands", `in-flight journal unreadable: ${err}`);
-    return;
-  }
-  const orphans = names
-    .filter((name) => name.endsWith(".json"))
-    .map((name) => name.slice(0, -".json".length))
-    .filter((id) => !running.has(id) && !held.has(id));
+  const orphans = await orphanedIds();
+  const replies = await Promise.all(orphans.map(orphanReply));
   const answered: string[] = [];
-  for (const id of orphans) {
-    if (ws.readyState !== WebSocket.OPEN) break;
-    const now = new Date().toISOString();
-    // A final outcome journaled before the daemon died is the real answer;
-    // only a command with no recorded outcome was truly interrupted.
-    const journaled = await readJournaledOutcome(id);
-    const reply = journaled ? { ...journaled, at: now } : {
-      type: "command-outcome",
-      id,
-      ok: false,
-      error:
-        "The daemon restarted while this command was running; the host may be partly changed. Run it again.",
-      at: now,
-      daemonRespondedAt: now,
-    };
+  for (const reply of replies) {
     if (!trySend(ws, reply)) break;
-    answered.push(id);
+    answered.push(reply.id);
   }
   await Promise.all(answered.map(removeJournal));
 }
