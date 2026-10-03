@@ -15,6 +15,7 @@
  * sequences stay monotonic. Attach-scoped generation tokens ignore stale
  * in-flight emits across detach/reconnect.
  */
+import { METRICS_SCHEMA_VERSION } from "../contracts/metrics-contract.ts";
 import { logInfo, logWarn, sanitizeForLog } from "../util/logger.ts";
 import type { MetricsCollector } from "./collector/index.ts";
 
@@ -255,7 +256,11 @@ export class MetricsScheduler {
     }
     const metadata = (sample as { metadata?: Record<string, unknown> })
       .metadata;
-    if (metadata) metadata.durable = durable;
+    if (metadata) {
+      // metrics-v7 negotiated: this is a v7 sample (durable flag, extended).
+      metadata.version = METRICS_SCHEMA_VERSION;
+      metadata.durable = durable;
+    }
     return sample;
   }
 

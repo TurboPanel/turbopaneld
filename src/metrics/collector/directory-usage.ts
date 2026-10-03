@@ -30,6 +30,7 @@
  */
 import type { StorageSample } from "../../contracts/metrics-contract.ts";
 import type { StatfsResult } from "./types.ts";
+import type { SiteSize, SiteUsageReading } from "./site-usage.ts";
 
 /**
  * How often the walk runs. Deliberately far slower than the metrics tick:
@@ -68,6 +69,8 @@ export type DirectoryUsageSnapshot = {
   logs: DirectoryUsageReading;
   /** When the walk that produced this finished, or `null` before the first one. */
   computedAtMs: number | null;
+  /** Largest sites (ids and sizes), when `tp-host site-usage` answered. */
+  topSites?: SiteSize[];
 };
 
 /** The empty snapshot a walker reports before its first walk completes. */
@@ -113,6 +116,12 @@ export type DirectoryUsageDeps = {
   resolveHostingPath: () => string | Promise<string>;
   resolveBackupPath: () => string;
   resolveLogsPath: () => string;
+  /**
+   * Sizes of the root-owned principal homes (`tp-host site-usage`). Supplies
+   * the hosting total when the daemon cannot walk the tree itself, and the
+   * largest sites. Optional: absent means no top sites.
+   */
+  readSiteUsage?: () => Promise<SiteUsageReading | null>;
   io: DirectoryUsageIo;
   now?: () => number;
   intervalMs?: number;
@@ -408,15 +417,28 @@ export async function collectDirectoryUsage(
     .then(() => deps.resolveHostingPath())
     .catch(() => null);
 
-  const [hosting, backup, logs] = await Promise.all([
+  const [hostingWalked, backup, logs, sites] = await Promise.all([
     hostingPath === null
       ? Promise.resolve({ ...MISSING_READING })
       : measureDirectoryUsage(hostingPath, deps),
     measureDirectoryUsage(deps.resolveBackupPath(), deps),
     measureDirectoryUsage(deps.resolveLogsPath(), deps),
+    deps.readSiteUsage?.().catch(() => null) ?? Promise.resolve(null),
   ]);
+  // Homes are root-owned 0750: the daemon's own walk fails on them, so the
+  // verb's sum stands in for a hosting total it could not measure.
+  const hosting = hostingWalked.usedBytes === null && sites
+    ? { ...hostingWalked, usedBytes: sites.hostingBytes }
+    : hostingWalked;
 
-  return { hosting, backup, logs, computedAtMs: now() };
+  const snapshot: DirectoryUsageSnapshot = {
+    hosting,
+    backup,
+    logs,
+    computedAtMs: now(),
+  };
+  if (sites) snapshot.topSites = sites.topSites;
+  return snapshot;
 }
 
 /**

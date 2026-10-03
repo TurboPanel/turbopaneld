@@ -25,6 +25,7 @@ import {
   ensureServiceIngress,
   formatCaddyPathMatcher,
   HOSTING_CADDY_ADMIN_SOCKET,
+  HOSTING_CADDY_METRICS_ADDR,
   HOSTING_CADDY_RUNTIME_DIRECTORY,
   hostingIngressComposePath,
   hostingIngressDir,
@@ -510,7 +511,15 @@ test("caddyfile serves the admin API on a private unix socket only", () => {
     config.match(/^\s*admin\s.*$/gm)?.map((line) => line.trim()),
     [`admin unix/${HOSTING_CADDY_ADMIN_SOCKET}|0600`],
   );
-  assertEquals(/\b127\.0\.0\.1:|localhost:|:20[0-9]9\b/.test(config), false);
+  // The one loopback listener is the metrics-only site block, not the admin.
+  const withoutMetrics = config.replace(
+    `http://${HOSTING_CADDY_METRICS_ADDR} {`,
+    "",
+  );
+  assertEquals(
+    /\b127\.0\.0\.1:|localhost:|:20[0-9]9\b/.test(withoutMetrics),
+    false,
+  );
 });
 
 test("caddyUnit reloads through the admin socket in a 0700 runtime directory", () => {
@@ -3517,4 +3526,14 @@ test("a leftover shared pending file or a missing proxy container counts as prox
   } finally {
     await cleanup();
   }
+});
+
+Deno.test("the hosting Caddyfile exposes totals-only metrics on loopback, with no per_host and no admin TCP", () => {
+  const text = caddyfile("/etc/turbopanel");
+  assertStringIncludes(
+    text,
+    "http://127.0.0.1:18110 {\n  bind 127.0.0.1\n  metrics\n}",
+  );
+  assertStringIncludes(text, "  metrics\n  servers {");
+  assertEquals(text.includes("per_host"), false);
 });

@@ -1209,3 +1209,51 @@ it("extended text is stripped on the v6 wire and kept under metrics-v7", async (
     );
   }
 });
+
+it("metrics-v7 stamps sample version 7; the v6 wire keeps 6 and no extended", async () => {
+  for (const v7 of [false, true]) {
+    const clock = new FakeClock();
+    const sent: unknown[] = [];
+    const scheduler = makeScheduler({
+      clock,
+      durabilityFlag: () => v7,
+      collectorFactory: () =>
+        createFakeCollector((sequence) => {
+          const r = supportedSample(sequence);
+          if (r.supported) {
+            r.sample.extended = { docker: { containersRunning: 2 } };
+          }
+          return r;
+        }),
+    });
+    scheduler.attach(capturingSink(sent));
+    await clock.advance(0);
+    const frame = sent[0] as {
+      metadata: { version: number };
+      extended?: unknown;
+    };
+    assertEquals(frame.metadata.version, v7 ? 7 : METRICS_LEGACY_WIRE_VERSION);
+    assertEquals(frame.extended !== undefined, v7);
+  }
+});
+
+it("a control plane that negotiates metrics-v7 later flips the same scheduler from v6 to v7", async () => {
+  const clock = new FakeClock();
+  const sent: unknown[] = [];
+  let v7 = false;
+  const scheduler = makeScheduler({
+    clock,
+    intervalMs: 1_000,
+    durabilityFlag: () => v7,
+    collectorFactory: () =>
+      createFakeCollector((sequence) => supportedSample(sequence)),
+  });
+  scheduler.attach(capturingSink(sent));
+  await clock.advance(0);
+  v7 = true;
+  await clock.advance(1_000);
+  const versions = sent.map((s) =>
+    (s as { metadata: { version: number } }).metadata.version
+  );
+  assertEquals(versions, [6, 7]);
+});
