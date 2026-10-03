@@ -117,31 +117,6 @@ test({
             nodeEnv: "production",
             runtimeGroup: "tpnode24",
           },
-          hasPrlimit: () => Promise.resolve(false),
-        });
-      });
-    } finally {
-      restore();
-    }
-  },
-});
-
-test({
-  name: "runReleaseBuild wraps the group-refresh argv with prlimit",
-  permissions: { read: true, write: true, run: true, env: true },
-  fn: async () => {
-    const restore = stubCommandAndEnv({});
-    try {
-      await withWorkingDir(async (workingDir) => {
-        await runReleaseBuild({
-          build: { kind: "native", buildCommand: "true" },
-          workingDir,
-          nativeRuntime: {
-            nodeBinDir: "/opt/turbopanel/vendor/node-app/24/current/bin",
-            nodeEnv: "production",
-            runtimeGroup: "tpnode24",
-          },
-          hasPrlimit: () => Promise.resolve(true),
         });
       });
     } finally {
@@ -165,7 +140,6 @@ test({
             nodeEnv: "production",
             runtimeGroup: "tpnode24",
           },
-          hasPrlimit: () => Promise.resolve(false),
         });
       });
     } finally {
@@ -196,7 +170,6 @@ test({
                 nodeEnv: "production",
                 runtimeGroup: "tpnode24",
               },
-              hasPrlimit: () => Promise.resolve(false),
             }),
           Error,
           "cannot resolve daemon username",

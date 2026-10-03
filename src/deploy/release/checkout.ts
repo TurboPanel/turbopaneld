@@ -62,8 +62,18 @@ export type CheckoutParams = {
   cloneUrl: string;
   ref: string;
   commitSha: string;
-  /** Working directory the clone is created in (must already exist, 0700). */
+  /**
+   * Daemon-only directory for git's HOME and the credential files (must
+   * already exist, 0700). The clone lands in `<scratchDir>/source` unless
+   * {@link checkoutDir} says otherwise.
+   */
   scratchDir: string;
+  /**
+   * Where the clone lands instead (a sandboxed build's work tree). Its parent
+   * must exist; the credential files never go there, because that tree is
+   * handed to the build account.
+   */
+  checkoutDir?: string;
   /** Decrypted clone credential (PAT / installation token / deploy key). */
   credential?: string;
   /**
@@ -235,6 +245,32 @@ export async function writeCheckoutCredentialFiles(
   return { askpassPath, sshKeyPath: null, knownHostsPath: null };
 }
 
+/** Names of the files {@link writeCheckoutCredentialFiles} may create. */
+const CREDENTIAL_FILE_NAMES = [".git-askpass", ".git-ssh-key"] as const;
+
+/**
+ * Refuse to go on while a clone credential file is still on disk. Called
+ * before a build is handed anything: by then git is done, and `finally` in
+ * {@link checkoutRelease} must already have unlinked them.
+ */
+export async function assertCheckoutCredentialsRemoved(
+  scratchDir: string,
+): Promise<void> {
+  await Promise.all(CREDENTIAL_FILE_NAMES.map(async (name) => {
+    try {
+      await Deno.lstat(join(scratchDir, name));
+    } catch (err) {
+      if (err instanceof Deno.errors.NotFound) return;
+      throw err;
+    }
+    throw new Error(
+      `clone credential ${
+        join(scratchDir, name)
+      } is still on disk; refusing to build`,
+    );
+  }));
+}
+
 /** Best-effort unlink of every credential file this checkout wrote. */
 export async function removeCheckoutCredentialFiles(
   files: CheckoutCredentialFiles,
@@ -365,7 +401,7 @@ export async function checkoutRelease(
 ): Promise<CheckoutResult> {
   const redactSummary = params.redactSummary ?? defaultSummaryRedactor;
   const git = params.runGit ?? runGit;
-  const workingDir = join(params.scratchDir, "source");
+  const workingDir = params.checkoutDir ?? join(params.scratchDir, "source");
   const credentialFiles = await writeCheckoutCredentialFiles(params);
   const env = gitEnvironment(credentialFiles, params.scratchDir);
   try {

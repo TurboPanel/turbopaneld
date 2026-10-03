@@ -23,7 +23,13 @@
  * against a tree that was already published by an earlier promote.
  */
 
-import { basename, dirname, join } from "@std/path";
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative as relativePath,
+} from "@std/path";
 import { hostSudoArgs } from "../../permissions/host-sudo.ts";
 import type { RunFn } from "../ensure-principal.ts";
 import { forEachSequential } from "../../util/sequential.ts";
@@ -301,6 +307,12 @@ export type StageReleaseParams = {
   subdirectory?: string;
   /** Build output directory relative to the checkout root (or subdirectory). */
   outputDirectory?: string;
+  /**
+   * The sandboxed build's `work/<id>`, which holds `workingDir`. The payload
+   * is then reached from here, one checked component at a time, because the
+   * build could rename anything below it, the checkout itself included.
+   */
+  containmentRoot?: string;
 };
 
 /**
@@ -316,10 +328,15 @@ export function resolveReleaseSourceDir(params: StageReleaseParams): string {
 
 /** The release payload as a directory contained in the checkout. */
 function releaseSource(params: StageReleaseParams): ContainedPath {
-  const relative = [params.subdirectory, params.outputDirectory]
+  const root = params.containmentRoot ?? params.workingDir;
+  const checkout = relativePath(root, params.workingDir);
+  if (checkout.startsWith("..") || isAbsolute(checkout)) {
+    throw new Error(`checkout ${params.workingDir} is outside ${root}`);
+  }
+  const relative = [checkout, params.subdirectory, params.outputDirectory]
     .filter((part): part is string => Boolean(part))
     .join("/");
-  return { root: params.workingDir, relative };
+  return { root, relative };
 }
 
 async function removeTreeIfPresent(path: string): Promise<void> {
