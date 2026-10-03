@@ -7,7 +7,6 @@ import {
 } from "@std/assert";
 import { join } from "@std/path";
 import { DAEMON_ROOT } from "../../orchestration/assets.ts";
-import { hostSudoArgs } from "../../permissions/host-sudo.ts";
 import type { RunFn } from "../ensure-principal.ts";
 import {
   buildSandboxEnabled,
@@ -19,6 +18,7 @@ import {
   resolveBuildWork,
   runSandboxedBuild,
   type SandboxSpawn,
+  sweepStaleBuildWork,
 } from "./build-sandbox.ts";
 
 /**
@@ -29,6 +29,12 @@ const test = Deno.test.bind(Deno);
 
 const RUNNER = join(DAEMON_ROOT, "orchestration/scripts/tp-build-runner");
 const PROJECT = "01a0e39d-0418-7852-bc47-bc2f8422d404";
+const TP_HOST = "/opt/turbopanel/lib/tp-host";
+
+/** What the daemon sends: always the managed tp-host, whatever the layout guess. */
+function managed(...argv: string[]): string[] {
+  return ["-n", "--", TP_HOST, ...argv];
+}
 
 async function work(root = "/var/lib/turbopanel-build"): Promise<BuildWork> {
   return await resolveBuildWork(
@@ -48,6 +54,7 @@ type FakeChild = {
 function fakeChild(
   result: { code: number; stdout?: string; stderr?: string },
   gate: Promise<void> = Promise.resolve(),
+  onKill?: () => void,
 ): FakeChild {
   const argv: string[][] = [];
   const killed: string[] = [];
@@ -75,7 +82,10 @@ function fakeChild(
         code: result.code,
         signal: null,
       })),
-      kill: (signal: string) => killed.push(signal),
+      kill: (signal: string) => {
+        killed.push(signal);
+        onKill?.();
+      },
     } as unknown as Deno.ChildProcess;
   };
   return {
@@ -103,9 +113,30 @@ function recordingRunFn(
   return { runFn, calls };
 }
 
-test("the sandbox is on for every managed install, with no opt-out", () => {
-  assertEquals(buildSandboxEnabled("production"), true);
-  assertEquals(buildSandboxEnabled("development"), false);
+test("the sandbox is decided by root-owned facts, not by the guessed install mode", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "tp-sandbox-markers-" });
+  try {
+    const passwd = join(dir, "passwd");
+    const tpHost = join(dir, "tp-host");
+    const markers = { passwd, tpHost };
+    await Deno.writeTextFile(passwd, "root:x:0:0::/root:/bin/sh\n");
+    // A developer's machine: no build account, no managed tp-host.
+    assertEquals(await buildSandboxEnabled(markers), false);
+    // This suite runs in a "development" layout (what a planted main.ts or
+    // ansible.cfg would make the daemon guess); the account alone wins.
+    await Deno.writeTextFile(
+      passwd,
+      "tpbuild:x:9994:9994::/nonexistent:/usr/sbin/nologin\n",
+      { append: true },
+    );
+    assertEquals(await buildSandboxEnabled(markers), true);
+    // So does the managed tp-host alone (the role not yet converged).
+    await Deno.writeTextFile(passwd, "root:x:0:0::/root:/bin/sh\n");
+    await Deno.writeTextFile(tpHost, "#!/bin/sh\n");
+    assertEquals(await buildSandboxEnabled(markers), true);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
 });
 
 test("a build's work tree is derived from its release and named the way tp-host accepts", async () => {
@@ -208,23 +239,11 @@ test("a build is the fixed build-run argv with the spec on stdin, then build-ret
     onOutput: (_stream, line) => lines.push(line),
   });
   assertEquals(child.argv, [
-    hostSudoArgs(["-n", "build-run", target.buildId, PROJECT]),
+    managed("build-run", target.buildId, PROJECT),
   ]);
   assertEquals(child.stdin(), "tp-build-spec 1\nrun dHJ1ZQ==\nend\n");
   assertEquals(lines, ["built"]);
-  assertEquals(calls, [hostSudoArgs(["-n", "build-return", target.buildId])]);
-});
-
-test("on a managed host build-run and build-return go to tp-host", () => {
-  const managed = { installMode: "production" as const, uid: 9999 };
-  const run = hostSudoArgs(["-n", "build-run", "b1", "p1"], managed);
-  assertEquals(run.slice(0, 2), ["-n", "--"]);
-  assert(run[2].endsWith("/lib/tp-host"));
-  assertEquals(run.slice(3), ["build-run", "b1", "p1"]);
-  assertEquals(
-    hostSudoArgs(["-n", "build-return", "b1"], managed).slice(3),
-    ["build-return", "b1"],
-  );
+  assertEquals(calls, [managed("build-return", target.buildId)]);
 });
 
 test("a failed build reports its own stderr, and the tree still comes back", async () => {
@@ -241,7 +260,7 @@ test("a failed build reports its own stderr, and the tree still comes back", asy
     Error,
     "missing script: build",
   );
-  assertEquals(calls, [hostSudoArgs(["-n", "build-return", target.buildId])]);
+  assertEquals(calls, [managed("build-return", target.buildId)]);
 });
 
 test("a spec the runner refuses is reported as the sandbox's refusal", async () => {
@@ -265,11 +284,12 @@ test("a timed-out build stops its unit before the tree is taken back", async () 
   const gate = new Promise<void>((resolve) => {
     finish = resolve;
   });
-  const child = fakeChild({ code: 143 }, gate);
+  // The client (sudo tp-host, maybe still waiting on the host lock) exits
+  // only when it is killed.
+  const child = fakeChild({ code: 143 }, gate, finish);
   const calls: string[][] = [];
   const runFn: RunFn = (_command, args) => {
     calls.push(args);
-    if (args.includes("stop")) finish();
     return Promise.resolve({ success: true, stdout: "", stderr: "" });
   };
   await assertRejects(
@@ -284,14 +304,10 @@ test("a timed-out build stops its unit before the tree is taken back", async () 
     Error,
     "build timed out after 10ms; the build unit was stopped",
   );
+  assertEquals(child.killed, ["SIGTERM"]);
   assertEquals(calls, [
-    hostSudoArgs([
-      "-n",
-      "systemctl",
-      "stop",
-      `turbopanel-build-${target.buildId}.service`,
-    ]),
-    hostSudoArgs(["-n", "build-return", target.buildId]),
+    managed("systemctl", "stop", `turbopanel-build-${target.buildId}.service`),
+    managed("build-return", target.buildId),
   ]);
 });
 
@@ -391,7 +407,14 @@ test("the work tree is created fresh, a stale one is taken back first, and a mis
 
     await Deno.writeTextFile(join(target.workDir, "left-behind"), "x");
     await createBuildWorkDir(target, runFn);
-    assertEquals(calls, [hostSudoArgs(["-n", "build-return", target.buildId])]);
+    assertEquals(calls, [
+      managed(
+        "systemctl",
+        "stop",
+        `turbopanel-build-${target.buildId}.service`,
+      ),
+      managed("build-return", target.buildId),
+    ]);
     assertEquals([...Deno.readDirSync(target.workDir)], []);
 
     await removeBuildWork(target);
@@ -402,6 +425,45 @@ test("the work tree is created fresh, a stale one is taken back first, and a mis
       Error,
       "run the build-user role",
     );
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+test("trees left by a dead daemon are stopped, taken back and removed; live ones are left", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-build-sweep-" });
+  try {
+    const old = join(root, "work", "0ld");
+    const fresh = join(root, "work", "fresh");
+    await Deno.mkdir(old, { recursive: true });
+    await Deno.mkdir(fresh);
+    await Deno.mkdir(join(root, "work", "Not-An-Id"));
+    await Deno.writeTextFile(join(old, "left"), "x");
+    const hourAgo = new Date(Date.now() - 4 * 60 * 60 * 1000);
+    await Deno.utime(old, hourAgo, hourAgo);
+    const { runFn, calls } = recordingRunFn();
+    const lines: string[] = [];
+    await sweepStaleBuildWork(root, {
+      runFn,
+      onOutput: (_stream, line) => lines.push(line),
+    });
+    assertEquals(calls, [
+      managed("systemctl", "stop", "turbopanel-build-0ld.service"),
+      managed("build-return", "0ld"),
+    ]);
+    assertEquals(await Deno.lstat(old).then(() => true, () => false), false);
+    assertEquals((await Deno.lstat(fresh)).isDirectory, true);
+    assertEquals(lines, [`reclaimed a stale build tree ${old}`]);
+
+    // A tree tp-host will not hand back is reported and left.
+    await Deno.utime(fresh, hourAgo, hourAgo);
+    const refusing = recordingRunFn({ "build-return": "still active" });
+    await sweepStaleBuildWork(root, {
+      runFn: refusing.runFn,
+      onOutput: (_stream, line) => lines.push(line),
+    });
+    assertStringIncludes(lines.at(-1) ?? "", "could not reclaim");
+    assertEquals((await Deno.lstat(fresh)).isDirectory, true);
   } finally {
     await Deno.remove(root, { recursive: true });
   }

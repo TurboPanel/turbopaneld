@@ -59,11 +59,13 @@ import {
 } from "./build.ts";
 import {
   buildSandboxEnabled,
+  type BuildSandboxMarkers,
   buildSpecCwd,
   type BuildWork,
   createBuildWorkDir,
   removeBuildWork,
   resolveBuildWork,
+  sweepStaleBuildWork,
 } from "./build-sandbox.ts";
 import {
   nativeAppNodeBinary,
@@ -250,6 +252,8 @@ export type ApplySourceReleasesDeps = {
    * {@link buildSandboxEnabled} (every managed host).
    */
   sandboxedBuilds?: boolean;
+  /** Test seam — the root-owned facts {@link buildSandboxEnabled} checks. */
+  buildSandboxMarkers?: BuildSandboxMarkers;
   /** Test seam — the build-user role's tree (`/var/lib/turbopanel-build`). */
   buildSandboxRoot?: string;
 };
@@ -763,7 +767,13 @@ async function prepareBuildWork(
   serviceId: string,
   deps: ApplySourceReleasesDeps,
 ): Promise<BuildWork | null> {
-  if (!(deps.sandboxedBuilds ?? buildSandboxEnabled())) return null;
+  const sandboxed = deps.sandboxedBuilds ??
+    await buildSandboxEnabled(deps.buildSandboxMarkers);
+  if (!sandboxed) return null;
+  await sweepStaleBuildWork(deps.buildSandboxRoot, {
+    runFn: deps.runFn,
+    onOutput: (stream, line) => deps.logSink.onLine(stream, line),
+  });
   const work = await resolveBuildWork(
     { serviceId, releaseId: entry.releaseId, projectId: payload.projectId },
     deps.buildSandboxRoot,

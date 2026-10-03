@@ -652,7 +652,7 @@ const SITES: CallSite[] = [
 
   // --- release promotion ----------------------------------------------------
   tpHost(
-    'src/deploy/release/build-sandbox.ts|["-n","build-run",work.buildId,work.projectKey]',
+    'src/deploy/release/build-sandbox.ts|["-n","build-run",work.buildId,work.projectKey],MANAGED',
     {
       argv: ["build-run", BUILD_ID, PROJECT_ID],
       stdin: "tp-build-spec 1\ncwd source\nrun dHJ1ZQ==\nend\n",
@@ -660,11 +660,11 @@ const SITES: CallSite[] = [
     },
   ),
   tpHost(
-    'src/deploy/release/build-sandbox.ts|["-n","build-return",work.buildId]',
+    'src/deploy/release/build-sandbox.ts|["-n","build-return",work.buildId],MANAGED',
     { argv: ["build-return", BUILD_ID], setup: BUILD_TREE },
   ),
   tpHost(
-    'src/deploy/release/build-sandbox.ts|["-n","systemctl","stop",`turbopanel-build-${work.buildId}.service`]',
+    'src/deploy/release/build-sandbox.ts|["-n","systemctl","stop",`turbopanel-build-${work.buildId}.service`],MANAGED',
     { argv: ["systemctl", "stop", `turbopanel-build-${BUILD_ID}.service`] },
   ),
   tpHost('src/deploy/release/promote.ts|["-n","mkdir","-p","--",to]', {

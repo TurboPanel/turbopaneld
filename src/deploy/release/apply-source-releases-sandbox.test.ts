@@ -111,7 +111,8 @@ async function withSandboxRoot(
     ensureReleaseTreeFn: () => Promise.resolve(),
     checkoutReleaseFn: async (params) => {
       seen.checkoutDir = params.checkoutDir;
-      const workingDir = params.checkoutDir ?? "";
+      const workingDir = params.checkoutDir ??
+        join(params.scratchDir, "source");
       await Deno.mkdir(workingDir);
       await Deno.writeTextFile(join(workingDir, "package.json"), "{}");
       return { workingDir, commitSha: "abc123" };
@@ -360,5 +361,31 @@ test("a build that swapped its checkout for a link is refused at hand-off", asyn
     );
   } finally {
     await Deno.remove(root, { recursive: true });
+  }
+});
+
+test("with no explicit setting, a host with the build account sandboxes its builds", async () => {
+  const fixture = await createTempLayout();
+  try {
+    await withSandboxRoot(async (root, deps, seen) => {
+      const passwd = join(root, "passwd");
+      await Deno.writeTextFile(
+        passwd,
+        "tpbuild:x:9994:9994::/nonexistent:/usr/sbin/nologin\n",
+      );
+      delete deps.sandboxedBuilds;
+      deps.buildSandboxMarkers = { passwd, tpHost: join(root, "no-tp-host") };
+      await applySourceReleases(resolveLayout(fixture.env), payload(), deps);
+      assertEquals(seen.spawnedSh, 0);
+      assertEquals(seen.sandboxRuns.length, 1);
+
+      // A machine with neither marker is a developer's checkout.
+      await Deno.writeTextFile(passwd, "root:x:0:0::/root:/bin/sh\n");
+      await applySourceReleases(resolveLayout(fixture.env), payload(), deps);
+      assertEquals(seen.sandboxRuns.length, 1);
+      assertEquals(seen.spawnedSh, 2);
+    });
+  } finally {
+    await fixture.cleanup();
   }
 });

@@ -22,11 +22,12 @@ import { join } from "@std/path";
 import type { CommandSummaryRedactor } from "../../logs/contracts.ts";
 import { pumpLines } from "../../logs/line-stream.ts";
 import { redactCommandSummary } from "../../logs/redactor.ts";
-import { ORCHESTRATION_LAYOUT } from "../../orchestration/assets.ts";
+import { PROD_LIB_DIR_DEFAULT } from "../../paths/layout.ts";
 import { hostSudoArgs } from "../../permissions/host-sudo.ts";
 import type { RunFn } from "../ensure-principal.ts";
 import type { ReleaseOutputHandler } from "./checkout.ts";
 import { runPrivileged } from "./release-layout.ts";
+import { forEachSequential } from "../../util/sequential.ts";
 
 /** The build-user role's tree; tp-host pins the same path. */
 export const BUILD_SANDBOX_ROOT = "/var/lib/turbopanel-build";
@@ -60,16 +61,48 @@ export type BuildWork = {
   cacheDir: string;
 };
 
+/** Root-owned facts that mark a host whose builds must be sandboxed. */
+export type BuildSandboxMarkers = {
+  /** The account database the build account is looked up in. */
+  passwd: string;
+  /** The managed install's root helper. */
+  tpHost: string;
+};
+
+const HOST_MARKERS: BuildSandboxMarkers = {
+  passwd: "/etc/passwd",
+  tpHost: join(PROD_LIB_DIR_DEFAULT, "tp-host"),
+};
+
 /**
- * Whether tenant builds go through the sandbox: on every managed
- * (production) install, with no opt-out, because nothing tenant-defined may
- * run as the daemon account there. A development install builds as the
- * developer, unsandboxed.
+ * `hostSudoArgs` options for the build verbs: always the managed tp-host,
+ * never a layout guessed from the daemon's working directory or HOME.
  */
-export function buildSandboxEnabled(
-  installMode: "development" | "production" = ORCHESTRATION_LAYOUT.mode,
-): boolean {
-  return installMode === "production";
+const MANAGED = {
+  installMode: "production" as const,
+  env: { TURBOPANEL_LIB_DIR: PROD_LIB_DIR_DEFAULT },
+};
+
+/**
+ * Whether tenant builds go through the sandbox. A **positive** check on
+ * root-owned facts, never on the guessed install mode (a planted
+ * `main.ts` or `ansible.cfg` under the daemon's working directory must not
+ * turn a managed host into a "development" one): the sandbox is on wherever
+ * the build account exists or the managed tp-host is installed, with no
+ * opt-out. Only a machine with neither (a developer's checkout) builds
+ * unsandboxed, as the developer.
+ */
+export async function buildSandboxEnabled(
+  markers: BuildSandboxMarkers = HOST_MARKERS,
+): Promise<boolean> {
+  const [account, helper] = await Promise.all([
+    Deno.readTextFile(markers.passwd).then(
+      (text) => text.split("\n").some((line) => line.startsWith("tpbuild:")),
+      () => false,
+    ),
+    lstatOrNull(markers.tpHost).then((info) => info !== null, () => true),
+  ]);
+  return account || helper;
 }
 
 /**
@@ -152,6 +185,9 @@ export async function createBuildWorkDir(
   runFn: RunFn = runPrivileged,
 ): Promise<void> {
   if (await lstatOrNull(work.workDir)) {
+    // A crashed run's unit may still be running: stop it before the tree
+    // can be handed back (build-return refuses an active unit).
+    await stopBuildUnit(work, runFn);
     await returnBuildWork(work, runFn);
     await Deno.remove(work.workDir, { recursive: true });
   }
@@ -164,6 +200,76 @@ export async function createBuildWorkDir(
       );
     }
     throw err;
+  }
+}
+
+/** A work tree older than this belongs to no live build (30 min + lock wait). */
+export const STALE_BUILD_WORK_MS = 3 * 60 * 60 * 1000;
+
+/**
+ * Reclaim work trees no build will come back for (the daemon died mid-build):
+ * stop any unit still named after one, take the tree back, remove it.
+ * Best-effort; a tree that will not go is reported and left.
+ */
+export async function sweepStaleBuildWork(
+  root: string = BUILD_SANDBOX_ROOT,
+  options: {
+    runFn?: RunFn;
+    onOutput?: ReleaseOutputHandler;
+    now?: number;
+    maxAgeMs?: number;
+  } = {},
+): Promise<void> {
+  const runFn = options.runFn ?? runPrivileged;
+  const cutoff = (options.now ?? Date.now()) -
+    (options.maxAgeMs ?? STALE_BUILD_WORK_MS);
+  const workRoot = join(root, "work");
+  let names: string[];
+  try {
+    names = (await Array.fromAsync(Deno.readDir(workRoot)))
+      .filter((entry) => entry.isDirectory && SANDBOX_ID_RE.test(entry.name))
+      .map((entry) => entry.name);
+  } catch {
+    return;
+  }
+  const ages = await Promise.all(
+    names.map((name) => lstatOrNull(join(workRoot, name)).catch(() => null)),
+  );
+  const stale: BuildWork[] = names
+    .filter((_, index) => (ages[index]?.mtime?.getTime() ?? cutoff) < cutoff)
+    .map((name) => {
+      const workDir = join(workRoot, name);
+      return {
+        buildId: name,
+        projectKey: "",
+        workDir,
+        checkoutDir: join(workDir, "source"),
+        cacheDir: "",
+      };
+    });
+  // One at a time: each goes through tp-host's host-wide lock anyway.
+  await forEachSequential(
+    stale,
+    (work) => reclaimStaleWork(work, runFn, options.onOutput),
+  );
+}
+
+async function reclaimStaleWork(
+  work: BuildWork,
+  runFn: RunFn,
+  onOutput?: ReleaseOutputHandler,
+): Promise<void> {
+  try {
+    await stopBuildUnit(work, runFn);
+    await returnBuildWork(work, runFn);
+    await Deno.remove(work.workDir, { recursive: true });
+    onOutput?.("stdout", `reclaimed a stale build tree ${work.workDir}`);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    onOutput?.(
+      "stderr",
+      `could not reclaim the stale build tree ${work.workDir}: ${message}`,
+    );
   }
 }
 
@@ -191,7 +297,7 @@ export async function returnBuildWork(
 ): Promise<void> {
   const result = await runFn(
     "sudo",
-    hostSudoArgs(["-n", "build-return", work.buildId]),
+    hostSudoArgs(["-n", "build-return", work.buildId], MANAGED),
   );
   if (!result.success) {
     throw new Error(
@@ -215,7 +321,7 @@ export async function stopBuildUnit(
         "systemctl",
         "stop",
         `turbopanel-build-${work.buildId}.service`,
-      ]),
+      ], MANAGED),
     );
   } catch {
     // The unit ends at RuntimeMaxSec regardless.
@@ -325,12 +431,13 @@ async function runBuildUnit(
     ((text: string) => redactCommandSummary(text));
   const timeoutMs = params.timeoutMs ?? SANDBOX_BUILD_TIMEOUT_MS;
   const child = (params.spawn ?? spawnSudo)(
-    hostSudoArgs(["-n", "build-run", work.buildId, work.projectKey]),
+    hostSudoArgs(["-n", "build-run", work.buildId, work.projectKey], MANAGED),
   );
-  let timedOut = false;
+  let aborted: Promise<void> | null = null;
   const timer = setTimeout(() => {
-    timedOut = true;
-    void stopBuildUnit(work, runFn);
+    // Kill the client first, so a tp-host still waiting on the host lock
+    // cannot start the unit after the stop.
+    aborted = abortBuildUnit(child, work, runFn);
   }, timeoutMs);
   let outcome: [Deno.CommandStatus, string, string, void];
   try {
@@ -348,7 +455,8 @@ async function runBuildUnit(
     clearTimeout(timer);
   }
   const [status, stdout, stderr] = outcome;
-  if (timedOut) {
+  if (aborted) {
+    await aborted;
     throw new Error(
       `build timed out after ${timeoutMs}ms; the build unit was stopped`,
     );
@@ -363,13 +471,13 @@ async function abortBuildUnit(
   work: BuildWork,
   runFn: RunFn,
 ): Promise<void> {
-  await stopBuildUnit(work, runFn);
   try {
     child.kill("SIGTERM");
   } catch {
     // Already gone.
   }
   await child.status.catch(() => undefined);
+  await stopBuildUnit(work, runFn);
 }
 
 /**

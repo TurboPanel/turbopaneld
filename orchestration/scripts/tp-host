@@ -2353,7 +2353,9 @@ BUILD_SYSTEMD_MIN=247
 # the build resolves through its own resolv.conf naming only public
 # nameservers, which public egress already reaches.
 BUILD_DENY_V4="0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 169.254.0.0/16 172.16.0.0/12 192.0.0.0/24 192.168.0.0/16 198.18.0.0/15 224.0.0.0/3"
-BUILD_DENY_V6="::/128 ::1/128 fc00::/7 fe80::/10 ff00::/8"
+# NAT64 (64:ff9b::/96) and 6to4 (2002::/16) embed IPv4 addresses, private
+# ones included, so both are denied whole.
+BUILD_DENY_V6="::/128 ::1/128 64:ff9b::/96 2002::/16 fc00::/7 fe80::/10 ff00::/8"
 # Used when the host names no public nameserver (a loopback stub with
 # private upstreams, a LAN router): never a loopback, private or link-local
 # resolver, which would open that address to the build.
@@ -2443,7 +2445,7 @@ tp_build_ip_public() {
   case "$1" in
     *:*)
       case "$(printf '%s' "$1" | tr 'A-F' 'a-f')" in
-        ::*|fc*|fd*|fe8*|fe9*|fea*|feb*|ff*) return 1 ;;
+        ::*|64:ff9b:*|2002:*|fc*|fd*|fe8*|fe9*|fea*|feb*|ff*) return 1 ;;
       esac
       return 0
       ;;
@@ -2543,9 +2545,12 @@ tp_verb_build_run() {
     -p LoadCredential="tp-build-runner:$BUILD_RUNNER" \
     -p BindPaths="$_br_work" -p BindPaths="$_br_cache" \
     -p BindReadOnlyPaths="$BUILD_RESOLV_DIR/resolv.conf:$P/etc/resolv.conf"
+  # systemd-resolved's varlink socket (nss-resolve) and the system bus would
+  # resolve, and talk, through the host instead of the build's resolv.conf.
   for _br_hide in "$R_CONFIG" "$R_STATE" "$R_LOG" "$R_RUN" "$R_PRINCIPALS" "$P/srv" \
     "$P/backup" "$P/run/docker.sock" "$P/var/run/docker.sock" "$P/run/containerd" \
-    "$P/run/turbopanel-gate" "$P/var/lib/docker" "$P/etc/ssh" "$P/etc/wireguard"; do
+    "$P/run/turbopanel-gate" "$P/var/lib/docker" "$P/etc/ssh" "$P/etc/wireguard" \
+    "$P/run/systemd/resolve/io.systemd.Resolve" "$P/run/dbus/system_bus_socket"; do
     set -- "$@" -p InaccessiblePaths="-$_br_hide"
   done
   set -- "$@" -p ProtectKernelTunables=yes -p ProtectKernelModules=yes \

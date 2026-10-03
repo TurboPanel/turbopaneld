@@ -107,6 +107,8 @@ function expectedSystemdRun(
     "var/lib/docker",
     "etc/ssh",
     "etc/wireguard",
+    "run/systemd/resolve/io.systemd.Resolve",
+    "run/dbus/system_bus_socket",
   ].flatMap((rel) => ["-p", `InaccessiblePaths=-${prefix}/${rel}`]);
   const floor = tier.floor ?? true;
   return [
@@ -156,7 +158,8 @@ function expectedSystemdRun(
       "RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX",
       "IPAddressDeny=0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 " +
       "169.254.0.0/16 172.16.0.0/12 192.0.0.0/24 192.168.0.0/16 " +
-      "198.18.0.0/15 224.0.0.0/3 ::/128 ::1/128 fc00::/7 fe80::/10 ff00::/8",
+      "198.18.0.0/15 224.0.0.0/3 ::/128 ::1/128 64:ff9b::/96 2002::/16 " +
+      "fc00::/7 fe80::/10 ff00::/8",
       "Slice=tpbuild.slice",
       "MemoryMax=4G",
       "MemorySwapMax=0",
@@ -222,6 +225,8 @@ test("build-run never opens a resolver through the private-range deny, on any po
         "nameserver 100.100.100.100",
         "nameserver ::1",
         "nameserver fd00::53",
+        "nameserver 64:ff9b::a00:1",
+        "nameserver 2002:a00:1::1",
         "nameserver evil.example",
         "nameserver 9.9.9.9",
         "nameserver 2620:fe::fe",
@@ -236,6 +241,24 @@ test("build-run never opens a resolver through the private-range deny, on any po
     assertEquals(run, execLine(expectedSystemdRun(host.prefix)));
     // Allow wins over deny for every port, so nothing is ever allowed back.
     assertEquals(run.includes("IPAddressAllow"), false);
+    // Name lookups cannot go around the bound resolv.conf: nss-resolve's
+    // varlink socket and the system bus are out of the namespace.
+    for (
+      const socket of [
+        "run/systemd/resolve/io.systemd.Resolve",
+        "run/dbus/system_bus_socket",
+      ]
+    ) {
+      assertStringIncludes(
+        run,
+        `[InaccessiblePaths=-${host.prefix}/${socket}]`,
+      );
+    }
+    assertStringIncludes(
+      run,
+      `[BindReadOnlyPaths=${host.prefix}/run/tpbuild/resolv.conf:${host.prefix}/etc/resolv.conf]`,
+    );
+    assertStringIncludes(run, "64:ff9b::/96 2002::/16");
     assertEquals(
       await buildResolvConf(host),
       "nameserver 9.9.9.9\nnameserver 2620:fe::fe\n",
