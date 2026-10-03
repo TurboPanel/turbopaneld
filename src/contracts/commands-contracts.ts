@@ -6602,6 +6602,27 @@ export function parseManagedReplicationHealth(
   ) {
     health.lagSeconds = value.lagSeconds;
   }
+  return withStandbyPositions(health, value);
+}
+
+/** Standby WAL positions and receive lag, when present and well-formed. */
+function withStandbyPositions(
+  health: ManagedReplicationHealth,
+  value: Record<string, unknown>,
+): ManagedReplicationHealth {
+  if (typeof value.receivedLsn === "string" && value.receivedLsn.length <= 32) {
+    health.receivedLsn = value.receivedLsn;
+  }
+  if (typeof value.replayLsn === "string" && value.replayLsn.length <= 32) {
+    health.replayLsn = value.replayLsn;
+  }
+  if (
+    typeof value.receiveLagBytes === "number" &&
+    Number.isFinite(value.receiveLagBytes) &&
+    value.receiveLagBytes >= 0
+  ) {
+    health.receiveLagBytes = value.receiveLagBytes;
+  }
   return health;
 }
 

@@ -455,6 +455,7 @@ export function standbyHealthFromRow(
     receivedRaw,
     replayRaw,
     receiveLagRaw,
+    receiptAgeRaw,
   ] = row;
   const health: ManagedReplicationObservedHealth = {
     state: state || "unknown",
@@ -470,6 +471,10 @@ export function standbyHealthFromRow(
   if (replayLsn) health.replayLsn = replayLsn;
   const receiveLagBytes = optionalNumber(receiveLagRaw);
   if (receiveLagBytes !== undefined) health.receiveLagBytes = receiveLagBytes;
+  const receiptAgeSeconds = optionalNumber(receiptAgeRaw);
+  if (receiptAgeSeconds !== undefined) {
+    health.receiptAgeSeconds = receiptAgeSeconds;
+  }
   return health;
 }
 

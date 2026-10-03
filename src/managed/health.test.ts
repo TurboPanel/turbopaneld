@@ -172,7 +172,12 @@ test("a replica answer carries the last streaming read from the tracker", async 
   const tracker = new StandbyStreamingTracker();
   tracker.record(
     MEMBER_ID,
-    { state: "streaming", observedAt: "2026-10-03T00:00:00.000Z", lagBytes: 0 },
+    {
+      state: "streaming",
+      observedAt: "2026-10-03T00:00:00.000Z",
+      lagBytes: 0,
+      receiptAgeSeconds: 0,
+    },
     1_000,
   );
   let mono = 7_000;
@@ -208,11 +213,12 @@ test("a streaming replica answer refreshes the tracker; a primary has none", asy
   };
   const replica = await probeManagedMemberHealth(
     request,
-    fakeDocker("streaming\t0\t0\t0/5\t0/5\n"),
+    fakeDocker("streaming\t0\t0\t0/5\t0/5\t0\t0.5\n"),
     { tracker, monoMs: () => 500 },
   );
   if (!replica.ok) throw new Error(replica.error);
-  assertEquals(replica.member.replication?.lastStreaming?.ageMs, 0);
+  // Stamped at the last receipt: 0.5 s before the read.
+  assertEquals(replica.member.replication?.lastStreaming?.ageMs, 500);
   const primary = await probeManagedMemberHealth(
     { ...request, role: "primary" },
     fakeDocker("streaming\t0\n"),

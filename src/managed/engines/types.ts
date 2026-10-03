@@ -228,6 +228,12 @@ export type ManagedReplicationObservedHealth = {
    * WAL end (`latest_end_lsn`) and what this standby has received.
    */
   receiveLagBytes?: number;
+  /**
+   * Standby only, while streaming: seconds since the receiver last heard from
+   * the primary (`now() - last_msg_receipt_time`, same host). Daemon-internal:
+   * the streaming tracker uses it to refuse a stale "streaming" read.
+   */
+  receiptAgeSeconds?: number;
   /** Standby only, on `managed-health-result`. */
   lastStreaming?: ManagedLastStreamingObservation;
 };

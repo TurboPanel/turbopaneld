@@ -55,6 +55,7 @@ test("poll records streaming standbys, stamped before the read", async () => {
         state: name === "c-r1" ? "streaming" : "stopped",
         observedAt: AT,
         lagBytes: 4,
+        receiptAgeSeconds: 0,
       });
     },
   });
@@ -94,4 +95,32 @@ test("a failed read records nothing and never throws", async () => {
   });
   await sampler.poll();
   assertEquals(tracker.lastStreaming("r1", 0), undefined);
+});
+
+test("a read past its deadline records nothing and is not doubled while it hangs", async () => {
+  const tracker = new StandbyStreamingTracker();
+  let reads = 0;
+  let release: (() => void) | undefined;
+  const sampler = new PgStandbySampler({
+    tracker,
+    timeoutMs: 10,
+    globallyEnabled: () => true,
+    listMembers: () => Promise.resolve([member("r1", "replica")]),
+    readStandby: () => {
+      reads += 1;
+      return new Promise((resolve) => {
+        release = () =>
+          resolve({ state: "streaming", observedAt: AT, receiptAgeSeconds: 0 });
+      });
+    },
+  });
+  await sampler.poll(); // times out
+  await sampler.poll(); // previous docker exec still running: skipped
+  assertEquals(reads, 1);
+  assertEquals(tracker.lastStreaming("r1", 0), undefined);
+  release?.();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await sampler.poll(); // the hung read ended: sampling resumes
+  assertEquals(reads, 2);
+  release?.();
 });

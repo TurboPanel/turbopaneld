@@ -40,10 +40,14 @@ type RunDockerFn = (
 
 /** Sample cadence. Must stay well under the control plane's receipt margin. */
 export const STANDBY_SAMPLE_INTERVAL_MS = 2_000;
+/** A read slower than this is abandoned and records nothing. */
+export const STANDBY_SAMPLE_TIMEOUT_MS = 5_000;
 const WARN_EVERY_MS = 10 * 60_000;
 
 export type PgStandbySamplerOptions = {
   intervalMs?: number;
+  /** Per-read deadline (default {@link STANDBY_SAMPLE_TIMEOUT_MS}). */
+  timeoutMs?: number;
   tracker?: StandbyStreamingTracker;
   /** Monotonic ms. Defaults to `performance.now`. */
   monoMs?: () => number;
@@ -101,12 +105,16 @@ export class PgStandbySampler {
   readonly #readStandby: (
     containerName: string,
   ) => Promise<ManagedReplicationObservedHealth>;
+  readonly #timeoutMs: number;
+  /** Containers whose previous read (possibly timed out) is still running. */
+  readonly #busy = new Set<string>();
   #timer: ReturnType<typeof setInterval> | undefined;
   #inFlight = false;
   #lastWarnMono: number | null = null;
 
   constructor(options: PgStandbySamplerOptions = {}) {
     this.#intervalMs = options.intervalMs ?? STANDBY_SAMPLE_INTERVAL_MS;
+    this.#timeoutMs = options.timeoutMs ?? STANDBY_SAMPLE_TIMEOUT_MS;
     this.#tracker = options.tracker ?? standbyStreamingTracker;
     this.#monoMs = options.monoMs ?? (() => performance.now());
     this.#globallyEnabled = options.globallyEnabled ??
@@ -154,12 +162,14 @@ export class PgStandbySampler {
   }
 
   async #sampleOne(record: ManagedHaMemberRecord): Promise<void> {
-    // Stamp BEFORE the read: the receiver was streaming no earlier than
-    // this, so the reported age only ever errs on the old (refusing) side. A
-    // hung read holds the next poll back, which only makes the record older.
+    // Stamp BEFORE the read: the receipt age is then subtracted from a time
+    // no later than the query ran, so the age only errs on the old side.
+    // A docker exec that outlived its deadline keeps running (the timeout only
+    // stops waiting): never start a second one beside it.
+    if (this.#busy.has(record.containerName)) return;
     const startedMono = this.#monoMs();
     try {
-      const health = await this.#readStandby(record.containerName);
+      const health = await this.#readWithDeadline(record.containerName);
       this.#tracker.record(record.memberId, health, startedMono);
     } catch (err) {
       this.#warn(
@@ -168,6 +178,25 @@ export class PgStandbySampler {
         }`,
       );
     }
+  }
+
+  #readWithDeadline(
+    containerName: string,
+  ): Promise<ManagedReplicationObservedHealth> {
+    this.#busy.add(containerName);
+    const read = this.#readStandby(containerName);
+    read.then(
+      () => this.#busy.delete(containerName),
+      () => this.#busy.delete(containerName),
+    );
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error(`read timed out after ${this.#timeoutMs} ms`)),
+        this.#timeoutMs,
+      );
+    });
+    return Promise.race([read, deadline]).finally(() => clearTimeout(timer));
   }
 
   #warn(message: string): void {

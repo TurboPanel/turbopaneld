@@ -22,6 +22,14 @@ import type {
   ManagedReplicationObservedHealth,
 } from "./engines/types.ts";
 
+/**
+ * A `streaming` read counts only when the receiver heard from the primary at
+ * most this long ago. After a silent link drop the receiver keeps reporting
+ * `streaming` (with zero lag) until `wal_receiver_timeout`; without this the
+ * tracker would keep stamping a dead link as fresh.
+ */
+export const MAX_STREAMING_RECEIPT_AGE_MS = 5_000;
+
 type StreamingRecord = {
   monoMs: number;
   at: string;
@@ -33,20 +41,38 @@ type StreamingRecord = {
 export class StandbyStreamingTracker {
   readonly #records = new Map<string, StreamingRecord>();
 
-  /** Remember `health` when it reads `streaming`; anything else is ignored. */
+  /**
+   * Remember `health` when it reads `streaming` with a receipt no older than
+   * {@link MAX_STREAMING_RECEIPT_AGE_MS}; anything else is ignored. The stamp
+   * is moved back by the receipt age, so it marks the last message actually
+   * received, not the moment of the read.
+   */
   record(
     memberId: string,
     health: Pick<
       ManagedReplicationObservedHealth,
-      "state" | "lagBytes" | "lagSeconds" | "observedAt" | "receiveLagBytes"
+      | "state"
+      | "lagBytes"
+      | "lagSeconds"
+      | "observedAt"
+      | "receiveLagBytes"
+      | "receiptAgeSeconds"
     >,
     monoMs: number,
   ): void {
     if (health.state !== "streaming") return;
+    const receiptAgeMs = (health.receiptAgeSeconds ?? Number.NaN) * 1000;
+    if (
+      !Number.isFinite(receiptAgeMs) || receiptAgeMs < 0 ||
+      receiptAgeMs > MAX_STREAMING_RECEIPT_AGE_MS
+    ) {
+      return;
+    }
+    const receivedMono = monoMs - receiptAgeMs;
     const previous = this.#records.get(memberId);
-    if (previous && previous.monoMs > monoMs) return;
+    if (previous && previous.monoMs > receivedMono) return;
     this.#records.set(memberId, {
-      monoMs,
+      monoMs: receivedMono,
       at: health.observedAt,
       ...(health.lagBytes === undefined ? {} : { lagBytes: health.lagBytes }),
       ...(health.lagSeconds === undefined
