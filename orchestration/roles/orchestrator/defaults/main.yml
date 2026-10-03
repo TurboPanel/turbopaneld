@@ -1,6 +1,10 @@
 ---
 orchestrator_image: ghcr.io/proxysql/orchestrator:v4.30.2
 orchestrator_config_dir: "{{ turbopanel_config_dir }}/orchestrator"
+# Root runs the readiness script from the unit, so it lives in a root-only
+# directory, never under the daemon-writable config dir.
+orchestrator_libexec_dir: "{{ turbopanel_install_root }}/libexec"
+orchestrator_wait_ready_script: "{{ orchestrator_libexec_dir }}/orchestrator-wait-ready.sh"
 orchestrator_tls_dir: "{{ orchestrator_config_dir }}/tls"
 orchestrator_data_dir: "{{ turbopanel_state_dir }}/orchestrator"
 orchestrator_service_name: turbopanel-orchestrator-stack
@@ -14,3 +18,4 @@ turbopanel_group: >-  # noqa: var-naming[no-role-prefix]
   {{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tp' }}
 turbopanel_user: >-  # noqa: var-naming[no-role-prefix]
   {{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tp' }}
+turbopanel_install_root: /opt/turbopanel  # noqa: var-naming[no-role-prefix]
