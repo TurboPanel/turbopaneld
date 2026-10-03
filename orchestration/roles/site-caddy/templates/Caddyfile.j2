@@ -14,7 +14,7 @@
 	# The global `metrics` option turns on HTTP instrumentation for every
 	# server; `servers { metrics }` alone leaves the counters empty. The
 	# Prometheus text is served read-only by the `metrics` handler on
-	# `site_caddy_metrics_addr` below, which the daemon's traffic collector
+	# `site_caddy_metrics_port` below, which the daemon's traffic collector
 	# (`src/metrics/collector/ingress/caddy.ts`) scrapes at `/metrics`.
 	metrics
 	servers {
@@ -23,8 +23,10 @@
 }
 
 # Metrics only: this server has no other handler, and the admin API is not
-# on it. Each scrape is itself one request on this server.
-http://{{ site_caddy_metrics_addr }} {
+# on it. Each scrape is itself one request on this server. `bind` keeps it on
+# loopback; a site address alone listens on every interface.
+http://127.0.0.1:{{ site_caddy_metrics_port }} {
+	bind 127.0.0.1
 	metrics
 }
 

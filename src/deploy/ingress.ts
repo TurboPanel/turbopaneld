@@ -727,9 +727,9 @@ Wants=network-online.target
 
 [Service]
 # Type=simple is active as soon as ExecStart is forked. ExecReload POSTs to
-# the admin socket ${HOSTING_CADDY_ADMIN_SOCKET}, which does not exist yet.
-# Instance ACME writes the HTTP-01 site before the first start and does not
-# reload that window; an already-running unit still reloads.
+# the admin socket, which does not exist yet. Instance ACME writes the
+# HTTP-01 site before the first start and does not reload that window; an
+# already-running unit still reloads.
 Type=simple
 # Not root: ${HOSTING_CADDY_USER} (not in group tp) with one capability, binding
 # :80/:443. tp-host refuses this unit in any other shape.

@@ -30,11 +30,11 @@ site_caddy_service_group: tpcaddysite
 site_caddy_runtime_dir: turbopanel-site-caddy
 site_caddy_admin_socket: "/run/{{ site_caddy_runtime_dir }}/admin.sock"
 # Read-only Prometheus text from Caddy's `metrics` handler, the only thing on
-# this loopback port (it used to be the admin listener). Mirrored by
+# 127.0.0.1:<this port> (it used to be the admin listener). Mirrored by
 # SITE_CADDY_ADMIN_ADDR in src/metrics/collector/ingress/caddy.ts, which
-# scrapes /metrics here. 2019 and 2029 were the other Caddy admin ports, so keep
-# it off those.
-site_caddy_metrics_addr: "127.0.0.1:2039"
+# scrapes /metrics there. 2019 and 2029 were the other Caddy admin ports, so
+# keep it off those.
+site_caddy_metrics_port: 2039
 
 turbopanel_config_dir: "/etc/turbopanel"  # noqa: var-naming[no-role-prefix]
 turbopanel_log_dir: "/var/log/turbopanel"  # noqa: var-naming[no-role-prefix]

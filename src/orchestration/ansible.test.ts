@@ -1758,8 +1758,20 @@ test("site apply playbooks vendor engines (never apt nginx/apache2)", async () =
   );
   assertMatch(
     siteCaddyDefaults,
-    /site_caddy_metrics_addr:\s*"127\.0\.0\.1:2039"/,
+    /^site_caddy_metrics_port:\s*2039$/m,
     "site caddy metrics port",
+  );
+  // The metrics server stays on loopback: a site address alone binds every
+  // interface.
+  assertMatch(
+    await Deno.readTextFile(
+      join(
+        CHECKOUT_ORCHESTRATION_DIR,
+        "roles/site-caddy/templates/Caddyfile.j2",
+      ),
+    ),
+    /^http:\/\/127\.0\.0\.1:\{\{ site_caddy_metrics_port \}\} \{\n\tbind 127\.0\.0\.1\n\tmetrics\n\}$/m,
+    "site caddy metrics server is loopback-only and serves metrics alone",
   );
   assertMatch(
     siteCaddyUnit,
