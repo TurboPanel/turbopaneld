@@ -1,4 +1,4 @@
-import { assertEquals, assertStringIncludes } from "@std/assert";
+import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { dirname, fromFileUrl, join } from "@std/path";
 import { parse as parseYaml } from "yaml";
 import { DAEMON_WRITABLE_VENDOR_DIRS } from "../permissions/daemon-permissions.ts";
@@ -495,6 +495,37 @@ test("the daemon-writable vendor cache matches DAEMON_WRITABLE_VENDOR_DIRS", asy
         dir,
       );
     }
+  }
+});
+
+test("daemon-install.yml leaves the root-owned engine config trees alone", async () => {
+  const doc = parseYaml(await Deno.readTextFile(join(orch, DAEMON_INSTALL)));
+  const play = (doc as Array<Record<string, unknown>>)[0]!;
+  const engines = (play.vars as Record<string, unknown>)
+    .turbopanel_engine_config_dirs as string[];
+  for (const engine of ["apache", "nginx", "openlitespeed", "php"]) {
+    assert(engines.includes(engine), `${engine} must be excluded`);
+  }
+  for (const task of play.post_tasks as Task[]) {
+    const file = task["ansible.builtin.file"];
+    if (!file || file.owner !== "{{ turbopanel_user }}") continue;
+    const loop = Array.isArray(task.loop) ? task.loop.map(String) : [];
+    const paths = [String(file.path), ...loop];
+    const configRecurse = file.recurse === true &&
+      paths.some((path) => path.includes("turbopanel_config_dir"));
+    assertEquals(configRecurse, false, `${task.name}: recursive config chown`);
+  }
+  const contents = (play.post_tasks as Task[]).find((task) =>
+    task.name === "Ensure tp owns the config tree's contents"
+  );
+  const argv = (contents?.["ansible.builtin.command"] as
+    | { argv?: string[] }
+    | undefined)?.argv ?? [];
+  for (const engine of engines) {
+    const at = argv.indexOf(`{{ turbopanel_config_dir }}/${engine}`);
+    assert(at > 0, `${engine} must be pruned from the config re-own`);
+    assertEquals(argv[at - 1], "-path", engine);
+    assert(at < argv.indexOf("-prune"), `${engine} pruned`);
   }
 });
 

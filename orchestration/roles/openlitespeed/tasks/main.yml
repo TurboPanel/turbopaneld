@@ -100,44 +100,28 @@
         group: "{{ turbopanel_group }}"
         mode: "0750"
 
-    - name: Seed FHS mime.properties from the release tree (first install only)
-      ansible.builtin.copy:
-        remote_src: true
-        src: "{{ _openlitespeed_tmp.path }}/openlitespeed/conf/mime.properties"
-        dest: "{{ turbopanel_config_dir }}/openlitespeed/mime.properties"
-        owner: root
-        group: "{{ openlitespeed_service_group }}"
-        mode: "0640"
-        force: false
-
     - name: Remove temp download dir
       ansible.builtin.file:
         path: "{{ _openlitespeed_tmp.path }}"
         state: absent
 
-    - name: Create writable server-root-relative runtime dirs (OLS writes these unconditionally; not config-relocatable)
-      ansible.builtin.file:
-        path: "{{ turbopanel_vendor_dir }}/openlitespeed/{{ openlitespeed_version }}/{{ item }}"
-        state: directory
-        owner: "{{ openlitespeed_service_user }}"
-        group: "{{ openlitespeed_service_group }}"
-        mode: "0750"
-      loop:
-        - cachedata
-        - autoupdate
-        - tmp
-        - tmp/ocspcache
-
-# Separate from the first-install block above: an existing vendored tree needs
-# this the moment a site first asks for PHP. `uds://tmp/lshttpd/<name>.sock` in
-# each vhost's extprocessor resolves relative to the server root.
-- name: Ensure LSAPI socket directory
+# Outside the first-install block on purpose: a host upgraded over an older
+# vendored tree skips the install above. OpenLiteSpeed writes these relative to
+# its server root (they are not config-relocatable) and fails to serve without
+# them. LSAPI sockets do not live here: `uds://tmp/…` resolves to the host /tmp,
+# so the vhosts name an absolute path under the unit's RuntimeDirectory.
+- name: Ensure writable server-root-relative runtime dirs
   ansible.builtin.file:
-    path: "{{ turbopanel_vendor_dir }}/openlitespeed/{{ openlitespeed_version }}/tmp/lshttpd"
+    path: "{{ turbopanel_vendor_dir }}/openlitespeed/{{ openlitespeed_version }}/{{ item }}"
     state: directory
     owner: "{{ openlitespeed_service_user }}"
     group: "{{ openlitespeed_service_group }}"
     mode: "0750"
+  loop:
+    - cachedata
+    - autoupdate
+    - tmp
+    - tmp/ocspcache
 
 # Outside the first-install block on purpose: a host upgraded over an older
 # vendored 1.9.1 tree skips the install above and would never get the link,
@@ -192,7 +176,7 @@
   loop_control:
     loop_var: lsphp_series
 
-- name: Ensure FHS config dir for OpenLiteSpeed (vhosts sub-dir)
+- name: Ensure FHS config dirs for OpenLiteSpeed (sites + vhosts)
   ansible.builtin.file:
     path: "{{ turbopanel_config_dir }}/openlitespeed/{{ item }}"
     state: directory
@@ -201,7 +185,30 @@
     mode: "0750"
   loop:
     - ""
+    - sites
     - vhosts
+
+# Root-owned with the engine's group, like every engine config tree since #191:
+# the daemon writes it only through tp-host. An install or upgrade that chowns
+# the whole config dir to the daemon account leaves this tree `tp:tp`, which
+# tpols cannot read; ownership only (the daemon sets each file's mode).
+- name: Keep the OpenLiteSpeed config tree root-owned
+  ansible.builtin.file:
+    path: "{{ turbopanel_config_dir }}/openlitespeed"
+    state: directory
+    owner: root
+    group: "{{ openlitespeed_service_group }}"
+    recurse: true
+
+# Shipped with the role (the v1.9.1 release's conf/mime.properties), so a host
+# whose vendored tree predates this task still gets it without a re-download.
+- name: Install OpenLiteSpeed mime.properties
+  ansible.builtin.copy:
+    src: mime.properties
+    dest: "{{ turbopanel_config_dir }}/openlitespeed/mime.properties"
+    owner: root
+    group: "{{ openlitespeed_service_group }}"
+    mode: "0640"
 
 - name: Ensure OpenLiteSpeed log directory
   ansible.builtin.file:
@@ -221,6 +228,16 @@
   loop:
     - ""
     - swap
+
+# The unit's RuntimeDirectory creates this at start; a server that is already
+# running when the unit first gains it is only reloaded, so create it now too.
+- name: Ensure OpenLiteSpeed LSAPI socket directory
+  ansible.builtin.file:
+    path: /run/turbopanel-ols
+    state: directory
+    owner: "{{ openlitespeed_service_user }}"
+    group: "{{ openlitespeed_service_group }}"
+    mode: "0750"
 
 - name: Install turbopanel-openlitespeed systemd unit
   ansible.builtin.template:

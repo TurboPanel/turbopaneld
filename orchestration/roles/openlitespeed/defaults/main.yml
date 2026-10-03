@@ -23,21 +23,88 @@ openlitespeed_service_group: tpols
 #
 # Per-series data lives in a map because a series needs more than a version
 # string here: the role builds a `.deb` URL from the package basename and the
-# deb version, and litespeedtech drops the dot from the series in both.
+# version, and litespeedtech drops the dot from the series in both. The pool is
+# per Debian suite (`pool/main/<suite>/`), and a bookworm build does not run on
+# trixie (it links libzip.so.4), so the suite follows the host release.
 openlitespeed_lsphp_default_series: "8.4"
 openlitespeed_lsphp_versions: ["{{ openlitespeed_lsphp_default_series }}"]
-openlitespeed_lsphp_repo_base: "https://rpms.litespeedtech.com/debian/pool/main/l"
+openlitespeed_lsphp_repo_base: "https://rpms.litespeedtech.com/debian/pool/main"
+openlitespeed_lsphp_suite: "{{ ansible_facts['distribution_release'] | default('') }}"
+openlitespeed_lsphp_deb_revision: "1"
 openlitespeed_lsphp_series_map:
   "8.3":
-    version: "8.3.26"
+    version: "8.3.33"
     pkg: lsphp83
-    deb_version: "8.3.26-1+bookworm"
     packages: [lsphp83, lsphp83-common, lsphp83-mysql, lsphp83-opcache, lsphp83-curl]
+    # Architecture-independent packages (`_all.deb`).
+    arch_all: [lsphp83-common]
   "8.4":
-    version: "8.4.13"
+    version: "8.4.25"
     pkg: lsphp84
-    deb_version: "8.4.13-1+bookworm"
     packages: [lsphp84, lsphp84-common, lsphp84-mysql, lsphp84-opcache, lsphp84-curl]
+    arch_all: [lsphp84-common]
+
+# sha256 of every pinned `.deb`, keyed by file name (from the suite's
+# `dists/<suite>/main/binary-<arch>/Packages` index). A pin bump without its
+# digests fails the role before anything is downloaded.
+openlitespeed_lsphp_sha256:
+  "lsphp83-common_8.3.33-1+bookworm_all.deb": "d4b56ecb4b3a8c9acb3b4273040f7129422cdc3b0a28a88faaf3423710e8b1da"
+  "lsphp83-common_8.3.33-1+trixie_all.deb": "58ae3d3ad9293a24a6875ccf0f0d330f8fa075149976d29e911eb24bfbbf686f"
+  "lsphp83-curl_8.3.33-1+bookworm_amd64.deb": "dba1e12ce0537a9e8b7e04bfe19a3b47977bcca50778de119ee480a041ee9069"
+  "lsphp83-curl_8.3.33-1+bookworm_arm64.deb": "d4b7648419388b3bcab82ed7f6bd14cd9e67f23643b112fd7019b59cdef6d896"
+  "lsphp83-curl_8.3.33-1+trixie_amd64.deb": "582b4ccb970c17b32077a32f13ae7b4198229788c69135ad8cea9cef3cbf5099"
+  "lsphp83-curl_8.3.33-1+trixie_arm64.deb": "6d4733f876ddc2355f93b4897b2baa70d13f7fb03a4dce8054bb20e8d92c7d2e"
+  "lsphp83-mysql_8.3.33-1+bookworm_amd64.deb": "0d8803b750d5559d64413db9080f78d834e5598981ec2853b16b9e0c23d466b2"
+  "lsphp83-mysql_8.3.33-1+bookworm_arm64.deb": "d5dbfdfc8a869ccb6a421fdd3b9c6f0de4ebb1f55d302ded614d4b2dd967411c"
+  "lsphp83-mysql_8.3.33-1+trixie_amd64.deb": "27aae5884efbd066872deb3fdbfc01d283294b95b33f6c254ed7af92bdc11986"
+  "lsphp83-mysql_8.3.33-1+trixie_arm64.deb": "b1ff9028e19bdbacf88fc293ad324a6d8281774c6550b05a48d96daab8ea461c"
+  "lsphp83-opcache_8.3.33-1+bookworm_amd64.deb": "f038f60db6a951a0dbe08fb30867d37aeb94ad29b54a244e596409a98c163ef0"
+  "lsphp83-opcache_8.3.33-1+bookworm_arm64.deb": "1dac58abc4cc54ce12a7b80ba136579d40a726838dc172a8a521b5e2ff650153"
+  "lsphp83-opcache_8.3.33-1+trixie_amd64.deb": "2c241562744ddc490c2e68590c37b93ae580263e3aee09bbc814694a6f4ba9ab"
+  "lsphp83-opcache_8.3.33-1+trixie_arm64.deb": "d672863361b54a0e2de92c42e748a9ff6fa6707ca43922d51e51c351ca7530d5"
+  "lsphp83_8.3.33-1+bookworm_amd64.deb": "eee5a4a9ae20588b5d070e5d628271069782b2a51965541e4b466d97d9513169"
+  "lsphp83_8.3.33-1+bookworm_arm64.deb": "46f9741b6bf3953ab2a0b681b9b5dac855fe10b2838f05760e8da77910024589"
+  "lsphp83_8.3.33-1+trixie_amd64.deb": "f359c937c23c3758eea502d8d3dbf652c6ce220971e323af5588c1b9666ffc6d"
+  "lsphp83_8.3.33-1+trixie_arm64.deb": "3d1942cf191b39d77f5f46922a0ffb3ebe618f2bd9a034fdc9a00a35bf53312a"
+  "lsphp84-common_8.4.25-1+bookworm_all.deb": "a3defd4c7dca045885244a02cbb60af20301ede57ae3e91fa5f302cbc5c4f9f4"
+  "lsphp84-common_8.4.25-1+trixie_all.deb": "058637af9a3ba87f3423712521f975ba049f23d7051cd4b4d26a73fe57e37530"
+  "lsphp84-curl_8.4.25-1+bookworm_amd64.deb": "026014a0d4cbc86e496553027e0d32a10218c319c18cc618db13677aa357911b"
+  "lsphp84-curl_8.4.25-1+bookworm_arm64.deb": "f1fad6af6ff51d1b43d3e66a21b6a2831ffe8f1d48157e469f19c8d62661690f"
+  "lsphp84-curl_8.4.25-1+trixie_amd64.deb": "bb6b7a98b8ed399f0b809b1e43b3e03d09ad1f05d444a1950784190a4b2d07cf"
+  "lsphp84-curl_8.4.25-1+trixie_arm64.deb": "0bc7dd5c015882293a516873e065c7b3640f5e306c884f5c787f222a96979a7a"
+  "lsphp84-mysql_8.4.25-1+bookworm_amd64.deb": "aa5ca187e9005ebda4ad91a4b3137edf9518a26929defa03375718a9a9b32845"
+  "lsphp84-mysql_8.4.25-1+bookworm_arm64.deb": "a39333c9de354728162688a8171bef825c36f9ad9969e889d2abe21cb1c8e4e2"
+  "lsphp84-mysql_8.4.25-1+trixie_amd64.deb": "bca98ef7a0b0f4c9ffe5faf2c2a238ba54a984012b6d460259ca6297e5d32470"
+  "lsphp84-mysql_8.4.25-1+trixie_arm64.deb": "2a5388c7dd7c040104b8fb0f06b91d200abb6750da5aafe478aa36133d3653f5"
+  "lsphp84-opcache_8.4.25-1+bookworm_amd64.deb": "116b90b7f994f26b0f838931198ca89753cb5c3b5c44e5546cc42ee4eece7829"
+  "lsphp84-opcache_8.4.25-1+bookworm_arm64.deb": "5d21fb6bee664efc8431807c73673b4a433d98aa6a371d3425ebc3ae526487a5"
+  "lsphp84-opcache_8.4.25-1+trixie_amd64.deb": "3b9e33a879d7e528ad23fd14848ca8cf51ec386e5ff77b6899f69881a22333a1"
+  "lsphp84-opcache_8.4.25-1+trixie_arm64.deb": "37b2fb1ba6241e999ba362071b52f801e0239d9069d53403d8226fdae650e100"
+  "lsphp84_8.4.25-1+bookworm_amd64.deb": "5e0c55e28642b2523262d78493ca7eb75654cfcc45b5b5d706f73a863a1966e1"
+  "lsphp84_8.4.25-1+bookworm_arm64.deb": "b2e7e5ea42de2374f36d731e5e0ec247f5a8a530c12892fc63fde90ad4c2884f"
+  "lsphp84_8.4.25-1+trixie_amd64.deb": "5d2988ff053997b8794c241d7774452045843cbec7ca629c74c26c6eec5dcca1"
+  "lsphp84_8.4.25-1+trixie_arm64.deb": "b6080560ec886e9d59a05d03c57df9950f9ddc517c490440d0179afe046a6f59"
+
+# Shared libraries the pinned packages declare in `Depends:`. `dpkg-deb -x`
+# never resolves dependencies, and lsphp will not start without these (the
+# extension .so files only add libcurl). Distro libraries, not PHP.
+openlitespeed_lsphp_runtime_packages:
+  bookworm: [libargon2-1, libbz2-1.0, libcurl4, libedit2, libenchant-2-2, libfreetype6,
+             libgmp10, libjpeg62-turbo, libmagic1, libonig5, libpng16-16, libsodium23,
+             libssl3, libwebp7, libxml2, libxpm4, libxslt1.1, libzip4, zlib1g]
+  trixie: [libargon2-1, libbz2-1.0, libcurl4t64, libedit2, libenchant-2-2, libfreetype6,
+           libgmp10, libjpeg62-turbo, libmagic1, libonig5, libpng16-16t64, libsodium23,
+           libssl3t64, libwebp7, libxml2, libxpm4, libxslt1.1, libzip5, zlib1g]
+
+# Extensions the pinned packages ship. The package postinst scripts would
+# enable these under /usr/local/lsws/…; an extracted tree has no postinst, so
+# the role writes them into the relocated php.ini instead.
+openlitespeed_lsphp_ini_extensions:
+  - zend_extension=opcache.so
+  - extension=curl.so
+  - extension=mysqli.so
+  - extension=pdo_mysql.so
+
 # Back-compat alias for callers that still pass a single series.
 openlitespeed_lsphp_series: "{{ openlitespeed_lsphp_default_series }}"
 
