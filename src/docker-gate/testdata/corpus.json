@@ -101,7 +101,7 @@
         "Mounts": [
           {
             "Type": "bind",
-            "Source": "/srv/users/alice/app",
+            "Source": "/srv/users/alice/volumes/0b6f1c2e",
             "Target": "/src",
             "ReadOnly": true
           }
@@ -192,7 +192,7 @@
       "HostConfig": {
         "Binds": [
           "tpg-vol:/data",
-          "/srv/users/alice/app:/hostdata:ro"
+          "/srv/users/alice/data/app:/hostdata:ro"
         ],
         "ContainerIDFile": "",
         "LogConfig": {
@@ -339,7 +339,7 @@
     "body": {
       "Driver": "local",
       "DriverOpts": {
-        "device": "/srv/users/alice/app",
+        "device": "/srv/users/alice/data/app",
         "o": "bind",
         "type": "none"
       },
@@ -1412,15 +1412,15 @@
         "com.docker.compose.image": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
         "com.docker.compose.oneoff": "False",
         "com.docker.compose.project": "tpgdump",
-        "com.docker.compose.project.config_files": "/srv/users/alice/app/compose.yml",
-        "com.docker.compose.project.working_dir": "/srv/users/alice/app",
+        "com.docker.compose.project.config_files": "/srv/users/alice/data/app/compose.yml",
+        "com.docker.compose.project.working_dir": "/srv/users/alice/data/app",
         "com.docker.compose.service": "web",
         "com.docker.compose.version": "5.5.0",
         "com.example.k": "v"
       },
       "HostConfig": {
         "Binds": [
-          "/srv/users/alice/app/data:/data:rw"
+          "/srv/users/alice/data/app/data:/data:rw"
         ],
         "ContainerIDFile": "",
         "LogConfig": {
@@ -2303,7 +2303,7 @@
         "Mounts": [
           {
             "Type": "bind",
-            "Source": "/srv/users/alice/app",
+            "Source": "/srv/users/alice/volumes/0b6f1c2e",
             "Target": "/dst",
             "ReadOnly": false
           },
@@ -2793,7 +2793,7 @@
         "Mounts": [
           {
             "Type": "bind",
-            "Source": "/srv/users/alice/app",
+            "Source": "/srv/users/alice/volumes/0b6f1c2e",
             "Target": "/dst",
             "ReadOnly": false
           },
@@ -2917,7 +2917,7 @@
         "Mounts": [
           {
             "Type": "bind",
-            "Source": "/srv/users/alice/app",
+            "Source": "/srv/users/alice/volumes/0b6f1c2e",
             "Target": "/dst",
             "ReadOnly": false
           },
