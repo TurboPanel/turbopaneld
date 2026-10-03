@@ -64,6 +64,7 @@ export const DAEMON_WIRE_FEATURES = [
   "sealed-instance-secrets-v1",
   "managed-health-v1",
   "managed-ha-probe-v1",
+  "metrics-v7",
   "php-site-modes-v1",
 ] as const;
 
@@ -92,6 +93,16 @@ export const MANAGED_HEALTH_FEATURE: DaemonWireFeature = "managed-health-v1";
  */
 export const MANAGED_HA_PROBE_FEATURE: DaemonWireFeature =
   "managed-ha-probe-v1";
+
+/**
+/**
+ * Metrics schema v7. This daemon can produce v7 samples (`metadata.version`
+ * 7: the `extended` section and the `durable` flag). It stamps
+ * `METRICS_LEGACY_WIRE_VERSION` until the control plane it is attached to
+ * lists this feature, so a daemon updated ahead of the control plane keeps
+ * sending samples the old control plane accepts.
+ */
+export const METRICS_V7_FEATURE: DaemonWireFeature = "metrics-v7";
 
 /**
  * This daemon runs each PHP site in the mode its deploy asks for (`php.mode`:

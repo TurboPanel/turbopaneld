@@ -17,7 +17,10 @@
 import { assertEquals, assertRejects, assertThrows } from "@std/assert";
 import type { ManagedApplyCredential } from "../../contracts/commands-contracts.ts";
 import { getManagedEngineRuntime } from "./index.ts";
-import { postgresManagedEngineRuntime } from "./postgres.ts";
+import {
+  postgresManagedEngineRuntime,
+  standbyHealthFromRow,
+} from "./postgres.ts";
 import type { ManagedEngineContext, ManagedEngineExec } from "./types.ts";
 
 /**
@@ -917,4 +920,49 @@ Deno.test("readCensus: a passing pg_isready plus the census row is healthy with 
       connectionsMax: null,
     },
   );
+});
+
+test("standbyHealthFromRow keeps the received and replayed LSNs of a stopped receiver", () => {
+  const at = "2026-10-03T00:00:00.000Z";
+  assertEquals(
+    standbyHealthFromRow(["stopped", "", "", "0/3000148", "0/3000148"], at),
+    {
+      state: "stopped",
+      observedAt: at,
+      receivedLsn: "0/3000148",
+      replayLsn: "0/3000148",
+    },
+  );
+  assertEquals(
+    standbyHealthFromRow(
+      ["streaming", "16", "0.5", "1A/FF", "1a/f0", "4096", "1.5"],
+      at,
+    ),
+    {
+      state: "streaming",
+      observedAt: at,
+      lagBytes: 16,
+      lagSeconds: 0.5,
+      receivedLsn: "1A/FF",
+      replayLsn: "1A/F0",
+      receiveLagBytes: 4096,
+      receiptAgeSeconds: 1.5,
+    },
+  );
+});
+
+test("standbyHealthFromRow drops NULL or malformed LSNs", () => {
+  const at = "2026-10-03T00:00:00.000Z";
+  assertEquals(standbyHealthFromRow(["stopped"], at), {
+    state: "stopped",
+    observedAt: at,
+  });
+  assertEquals(
+    standbyHealthFromRow(["stopped", "", "", "", "0/1; DROP"], at),
+    { state: "stopped", observedAt: at },
+  );
+  assertEquals(standbyHealthFromRow(["", "x", "y"], at), {
+    state: "unknown",
+    observedAt: at,
+  });
 });

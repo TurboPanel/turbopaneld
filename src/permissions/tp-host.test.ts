@@ -1475,6 +1475,7 @@ function phpService(host: Host, mode: PhpMode): string {
     ...(mode === "fpm" ? [] : [`Requires=${socket}`, `After=${socket}`]),
     "",
     "[Service]",
+    `ExecStartPre=+${host.path("opt/turbopanel/lib")}/tp-php-loopback sync`,
     `ExecStart=${phpExec(host, mode)}`,
     ...byMode[mode],
     "User=alice",
@@ -1486,6 +1487,8 @@ function phpService(host: Host, mode: PhpMode): string {
     "ProtectSystem=strict",
     "ProtectHome=yes",
     "PrivateDevices=yes",
+    "IPAddressDeny=localhost link-local multicast 0.0.0.0/8 fc00::/7",
+    "IPAddressAllow=127.0.0.1 127.0.0.53",
     `BindPaths=${home}/tmp:/tmp`,
     `TemporaryFileSystem=${host.path("etc/turbopanel")}:ro`,
     `BindReadOnlyPaths=${phpConfDir(host)}`,
@@ -1669,6 +1672,66 @@ test("per-site PHP services: a hostile corpus is refused in every mode", async (
       ["ProtectSystem=full", line("ProtectSystem=", "ProtectSystem=full")],
       ["no ProtectSystem", line("ProtectSystem=", null)],
       ["PrivateDevices=no", line("PrivateDevices=", "PrivateDevices=no")],
+      ["no IPAddressDeny", line("IPAddressDeny=", null)],
+      [
+        "loopback left open",
+        line("IPAddressDeny=", "IPAddressDeny=link-local"),
+      ],
+      [
+        "the whole of loopback allowed back",
+        line("IPAddressAllow=", "IPAddressAllow=127.0.0.0/8"),
+      ],
+      [
+        "link-local allowed back",
+        line("IPAddressAllow=", "IPAddressAllow=127.0.0.53 169.254.169.254"),
+      ],
+      [
+        "another loopback address allowed back",
+        line(
+          "IPAddressAllow=",
+          "IPAddressAllow=127.0.0.1 127.0.0.2 127.0.0.53",
+        ),
+      ],
+      [
+        "127.0.0.1 without the resolver stub",
+        line("IPAddressAllow=", "IPAddressAllow=127.0.0.1"),
+      ],
+      // 127.0.0.1 is open, so the loopback guard that closes its other ports
+      // must be there, exact, and the only root hook.
+      ["no loopback guard", line("ExecStartPre=", null)],
+      [
+        "a guard without the root prefix",
+        line(
+          "ExecStartPre=",
+          `ExecStartPre=${
+            host.path("opt/turbopanel/lib")
+          }/tp-php-loopback sync`,
+        ),
+      ],
+      [
+        "a root hook elsewhere",
+        line("ExecStartPre=", "ExecStartPre=+/bin/sh -c true"),
+      ],
+      [
+        "a guard with another verb",
+        line(
+          "ExecStartPre=",
+          `ExecStartPre=+${
+            host.path("opt/turbopanel/lib")
+          }/tp-php-loopback flush`,
+        ),
+      ],
+      [
+        "a second root hook",
+        add("Service", "ExecStartPre=+/bin/true"),
+      ],
+      ["a root stop hook", add("Service", "ExecStopPost=+/bin/true")],
+      [
+        "ULA (IPv6 metadata) left open",
+        line("IPAddressDeny=", "IPAddressDeny=localhost link-local"),
+      ],
+      ["an allow reset", add("Service", "IPAddressAllow=any")],
+      ["a second deny", add("Service", "IPAddressDeny=")],
       [
         "ReadWritePaths=/etc",
         line("ReadWritePaths=", `ReadWritePaths=${home}/tmp /etc`),
@@ -2075,6 +2138,10 @@ test("per-site PHP config: root:<owner>-grp, 0750/0640, directives on an allowli
       "sendmail_path = /bin/sh -c id",
       "include_path = .:/etc",
       "[PATH=/srv/users/alice]\nmemory_limit = 1G",
+      `[PATH=${host.path("srv/users/bob")}]\nmemory_limit = 1G`,
+      `[PATH=${home}/sites]\nmemory_limit = 1G`,
+      `[PATH=${home}/../bob]`,
+      `[PATH=${home}]\nextension = /tmp/evil.so`,
       "[HOST=example.com]",
       "opcache.validate_permission = 0",
       "opcache.validate_root = Off",
@@ -2331,6 +2398,7 @@ test("per-site PHP: what the daemon renders for each mode and web server passes 
           group: "alice-grp",
           home,
           configDir: host.path("etc/turbopanel"),
+          libDir: host.path("opt/turbopanel/lib"),
           webAccount,
         };
         const dir = sitePhpConfigDir(spec.configDir, id);
@@ -2353,7 +2421,7 @@ test("per-site PHP: what the daemon renders for each mode and web server passes 
             { key: "open_basedir", value: `${site}/current/public:/tmp` },
             { key: "realpath_cache_ttl", value: "0" },
             { key: "session.save_path", value: "/var/lib/php/sessions" },
-          ]),
+          ], home),
         ]];
         if (mode === "fpm") {
           configs.push([
@@ -2650,5 +2718,18 @@ test("sftp-chroot checks an account whose primary group is tpsftp", async () => 
     assertEquals(check.code === 0, false);
     assertStringIncludes(check.stdout, "dave: passwd home is not");
     assertEquals(check.stdout.includes("alice:"), false, check.stdout);
+  });
+});
+
+test("php-loopback-sync runs the installed guard with sync and nothing else", async () => {
+  await withHost(async (host) => {
+    const ok = await host.run(["php-loopback-sync"]);
+    assertEquals(ok.code, 0, ok.stderr);
+    assertEquals(
+      ok.stdout.trim(),
+      `EXEC [${host.path("opt/turbopanel/lib")}/tp-php-loopback] [sync]`,
+    );
+    const extra = await host.run(["php-loopback-sync", "alice"]);
+    assertEquals(extra.code, 1);
   });
 });
