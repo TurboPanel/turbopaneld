@@ -1196,6 +1196,12 @@ export type EnvironmentDeployDockerNetwork = {
  */
 export type EnvironmentDeployHostAccess = {
   hostLevelApproved?: boolean;
+  /**
+   * True only when the organization allows a build to fetch its source from a
+   * public remote (a URL or git `build.context`). Absent reads as `false`; the
+   * daemon then refuses such a context. Internal hosts are refused either way.
+   */
+  remoteBuildSourcesApproved?: boolean;
 };
 
 export type EnvironmentDeployPayload = EnvironmentDeployHostAccess & {
@@ -5359,6 +5365,10 @@ export function parseEnvironmentDeployPayload(
       hostLevelApproved: parseOptionalBoolean(
         value.hostLevelApproved,
         "hostLevelApproved",
+      ),
+      remoteBuildSourcesApproved: parseOptionalBoolean(
+        value.remoteBuildSourcesApproved,
+        "remoteBuildSourcesApproved",
       ),
       tlsMaterial: parseOptionalMaterialArray(
         value.tlsMaterial,
