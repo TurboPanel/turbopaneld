@@ -119,26 +119,32 @@ test("production sudoers never grants NOPASSWD:ALL as root", async () => {
   }
 });
 
-/** Every `Cmnd_Alias` entry the root grant names, Jinja rendered to defaults. */
-async function rootGrantEntries(): Promise<string[]> {
-  const template = await Deno.readTextFile(join(orch, SUDOERS_TEMPLATE));
+/** `{{ … }}` in a sudoers.j2 entry, rendered to the production defaults. */
+function renderEntry(raw: string): string {
+  return raw.trim()
+    .replaceAll(
+      "{{ turbopanel_orchestration_dir }}",
+      "/opt/turbopanel/share/orchestration",
+    )
+    .replaceAll("{{ turbopanel_install_root }}", "/opt/turbopanel")
+    .replaceAll("{{ turbopanel_vendor_dir }}", "/opt/turbopanel/vendor");
+}
+
+/** Every `Cmnd_Alias` in sudoers.j2, Jinja rendered to defaults. */
+function cmndAliases(template: string): Map<string, string[]> {
   const aliases = new Map<string, string[]>();
   for (const line of template.split("\n")) {
     const alias = /^Cmnd_Alias\s+(\w+)\s*=\s*(.+)$/.exec(line);
     if (!alias) continue;
-    aliases.set(
-      alias[1]!,
-      alias[2]!.split(",").map((raw) =>
-        raw.trim()
-          .replaceAll(
-            "{{ turbopanel_orchestration_dir }}",
-            "/opt/turbopanel/share/orchestration",
-          )
-          .replaceAll("{{ turbopanel_install_root }}", "/opt/turbopanel")
-          .replaceAll("{{ turbopanel_vendor_dir }}", "/opt/turbopanel/vendor")
-      ),
-    );
+    aliases.set(alias[1]!, alias[2]!.split(",").map(renderEntry));
   }
+  return aliases;
+}
+
+/** Every `Cmnd_Alias` entry the root grant names, Jinja rendered to defaults. */
+async function rootGrantEntries(): Promise<string[]> {
+  const template = await Deno.readTextFile(join(orch, SUDOERS_TEMPLATE));
+  const aliases = cmndAliases(template);
   const grant = template.split("\n").find((line) =>
     /ALL=\(root\) NOPASSWD:/.test(line)
   );
@@ -148,6 +154,29 @@ async function rootGrantEntries(): Promise<string[]> {
     if (!entries) throw new TypeError(`root grant names unknown alias ${name}`);
     return entries;
   });
+}
+
+/**
+ * Every command `tp` may run as `runas`, across every grant line whose run-as
+ * list names it: aliases expanded, literal commands kept, Jinja rendered.
+ */
+async function runasGrantEntries(runas: string): Promise<string[]> {
+  const template = await Deno.readTextFile(join(orch, SUDOERS_TEMPLATE));
+  const aliases = cmndAliases(template);
+  const entries: string[] = [];
+  for (const line of template.split("\n")) {
+    const grant =
+      /^\{\{ turbopanel_user \}\} ALL=\(([^)]*)\)\s*NOPASSWD:\s*(.+)$/.exec(
+        line,
+      );
+    if (!grant) continue;
+    const users = grant[1]!.split(",").map((user) => user.trim());
+    if (!users.includes(runas)) continue;
+    for (const name of grant[2]!.split(",")) {
+      entries.push(...(aliases.get(name.trim()) ?? [renderEntry(name)]));
+    }
+  }
+  return entries;
 }
 
 /**
@@ -233,20 +262,65 @@ test("known root escapes are refused by the sudoers grant", async () => {
   }
 });
 
-/** The commands one `tp ALL=(<runas>) NOPASSWD: …` line grants, Jinja rendered. */
-async function runasGrantEntries(runas: string): Promise<string[]> {
-  const template = await Deno.readTextFile(join(orch, SUDOERS_TEMPLATE));
-  const lines = template.split("\n").filter((line) =>
-    line.startsWith(`{{ turbopanel_user }} ALL=(${runas}) NOPASSWD:`)
-  );
-  assertEquals(lines.length, 1, `exactly one grant runs as ${runas}`);
-  return lines[0]!.split("NOPASSWD:")[1]!.split(",").map((raw) =>
-    raw.trim().replaceAll(
-      "{{ turbopanel_vendor_dir }}",
-      "/opt/turbopanel/vendor",
-    )
-  );
-}
+const VENDOR = "/opt/turbopanel/vendor";
+/** The one config test each unprivileged engine account may run, pinned. */
+const ENGINE_VALIDATE: Record<string, string> = {
+  tpnginx:
+    `${VENDOR}/nginx/current/sbin/nginx -t -c /etc/turbopanel/nginx/nginx.conf`,
+  tpols:
+    `${VENDOR}/openlitespeed/current/bin/openlitespeed -t -c /etc/turbopanel/openlitespeed/httpd_config.conf`,
+  tpcaddysite:
+    `${VENDOR}/caddy/current/caddy validate --adapter caddyfile --config /etc/turbopanel/caddy/Caddyfile`,
+};
+
+test("each engine account grants exactly its own pinned config test (P2-8)", async () => {
+  for (const [runas, command] of Object.entries(ENGINE_VALIDATE)) {
+    assertEquals(await runasGrantEntries(runas), [command], runas);
+  }
+});
+
+test("engine accounts refuse env, other engines' binaries and free arguments (P2-8)", async () => {
+  const escapes: Record<string, string[]> = {
+    tpnginx: [
+      "/usr/bin/env id",
+      "/usr/bin/env /bin/sh -c id",
+      `${VENDOR}/nginx/current/sbin/nginx -c /tmp/evil.conf`,
+      `${VENDOR}/nginx/current/sbin/nginx -t -c /etc/turbopanel/nginx/nginx.conf -g load_module /tmp/x.so;`,
+      `${VENDOR}/nginx/1.28.3/sbin/nginx -t -c /tmp/evil.conf`,
+      `${VENDOR}/caddy/current/caddy run --config /tmp/x`,
+      "/bin/sh -c id",
+    ],
+    tpols: [
+      "/usr/bin/env id",
+      `${VENDOR}/openlitespeed/current/bin/openlitespeed -n`,
+      `${VENDOR}/openlitespeed/current/bin/openlitespeed -t -c /tmp/evil.conf`,
+      `${VENDOR}/nginx/current/sbin/nginx -t -c /etc/turbopanel/nginx/nginx.conf`,
+    ],
+    tpcaddysite: [
+      "/usr/bin/env id",
+      `/usr/bin/env XDG_DATA_HOME=/tmp ${VENDOR}/caddy/current/caddy validate --adapter caddyfile --config /etc/turbopanel/caddy/Caddyfile`,
+      `${VENDOR}/caddy/current/caddy run --config /tmp/x`,
+      `${VENDOR}/caddy/current/caddy validate --adapter caddyfile --config /tmp/x`,
+      `${VENDOR}/caddy/2.11.4/caddy validate --config /tmp/x`,
+    ],
+    tpapache: ["/usr/bin/env id", "/bin/sh -c id"],
+  };
+  for (const [runas, commands] of Object.entries(escapes)) {
+    const entries = await runasGrantEntries(runas);
+    const allowed = commands.filter((command) =>
+      entries.some((entry) => grantAllows(entry, command))
+    );
+    assertEquals(allowed, [], `sudoers still lets tp run these as ${runas}`);
+  }
+  for (const [runas, command] of Object.entries(ENGINE_VALIDATE)) {
+    const entries = await runasGrantEntries(runas);
+    assertEquals(
+      entries.some((entry) => grantAllows(entry, command)),
+      true,
+      `${runas}: ${command}`,
+    );
+  }
+});
 
 test("Apache's config test runs as tpapache with every argument pinned and no env", async () => {
   const httpd = "/opt/turbopanel/vendor/apache/current/bin/httpd";
@@ -268,12 +342,12 @@ test("Apache's config test runs as tpapache with every argument pinned and no en
   ) {
     assertEquals(allowed(command), false, command);
   }
-  // tpapache is never on the shared engine line, which carries `env`.
+  // No grant line carries `env`, so no engine account can reach it.
   const template = await Deno.readTextFile(join(orch, SUDOERS_TEMPLATE));
-  const shared = template.split("\n").find((line) =>
+  const withEnv = template.split("\n").find((line) =>
     line.includes("NOPASSWD:") && line.includes("/usr/bin/env")
   );
-  assertEquals(shared?.includes("tpapache"), false);
+  assertEquals(withEnv, undefined);
 });
 
 test("tp-host is installed root:tp 0750 (never writable by tp) before the sudoers file that names it", async () => {

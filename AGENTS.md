@@ -590,6 +590,15 @@ controls below do not close:
    can replace it, and php-fpm loads extensions while testing. Apache's
    `httpd -t` no longer does: it runs as `tpapache` (pinned arguments, no
    `env`), and `turbopanel-apache.service` runs its master as `tpapache`.
+4. **Engine-account config tests load configs `tp` writes.** `tp` may run
+   exactly one command as each of `tpnginx`, `tpols` and `tpcaddysite`: that
+   engine's config test with the binary (`<vendor>/<engine>/current/…`), every
+   argument and the main config path pinned (`TP_NGINX_VALIDATE`,
+   `TP_OLS_VALIDATE`, `TP_CADDY_VALIDATE`; no `env`, no wildcard — audit
+   P2-8, pinned by `src/orchestration/sudoers-contract.test.ts`). The config
+   those tests parse is still daemon-written, so a config `tp` installs
+   (e.g. nginx `load_module`) runs as the engine account — no more than the
+   running service already does after a reload.
 
 The controls below remove every direct root escape through sudo and keep a
 daemon bug or an injected argument from reaching arbitrary host paths,
