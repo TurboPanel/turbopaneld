@@ -63,8 +63,8 @@ export type GateConfig = {
   nowSec?: () => number;
   /** The build listener (build.ts); unset = no build session passes. */
   buildSocket?: string;
-  /** The daemon account's uid, the only one that may open it; unset = root. */
-  buildUid?: number;
+  /** The build group (only the daemon account); required with buildSocket. */
+  buildGid?: number;
 };
 
 const MODES: readonly GateMode[] = ["observe", "enforce"];
@@ -129,7 +129,7 @@ export function loadConfig(env: Env): GateConfig {
     mode,
     socket: env.TP_DOCKER_GATE_SOCKET || DEFAULT_GATE_SOCKET,
     buildSocket: pathList(env.TP_DOCKER_GATE_BUILD_SOCKET)[0],
-    buildUid: positiveIdOrUndefined(env.TP_DOCKER_GATE_BUILD_UID),
+    buildGid: positiveIdOrUndefined(env.TP_DOCKER_GATE_BUILD_GID),
     roSocket: pathList(env.TP_DOCKER_GATE_RO_SOCKET)[0],
     ingressSwitchFile: pathList(env.TP_DOCKER_GATE_INGRESS_SWITCH)[0],
     upstream: env.TP_DOCKER_GATE_UPSTREAM || DEFAULT_UPSTREAM_SOCKET,
@@ -279,19 +279,26 @@ export async function loadApprovalKeys(
 }
 
 /**
- * The build listener, `0600` for the daemon uid (build.ts). A failure to open
- * it is an error line: builds through the gate then fail, every other request
- * is still served.
+ * The build listener, `root:<build group> 0660` (build.ts). Without a build
+ * group, or when it cannot open, it is an error line and no listener (never a
+ * root-only socket nobody notices): builds through the gate then fail, every
+ * other request is still served.
  */
 async function openBuildListener(
   config: GateConfig,
   log: (record: LogRecord) => void,
 ): Promise<Deno.Listener | undefined> {
-  if (config.buildSocket === undefined) return undefined;
+  const { buildSocket, buildGid } = config;
+  if (buildSocket === undefined) return undefined;
   try {
+    if (buildGid === undefined) {
+      throw new Error(
+        "TP_DOCKER_GATE_BUILD_GID is not set: no group may open the build socket",
+      );
+    }
     return await listenBuildSocket(
-      config.buildSocket,
-      config.buildUid,
+      buildSocket,
+      buildGid,
       (path) => openListener(path, undefined),
     );
   } catch (err) {
@@ -410,7 +417,7 @@ export const GATE_ENV_KEYS = [
   "TP_DOCKER_GATE_SUMMARY_SEC",
   "TP_DOCKER_GATE_LOAD_CHECK",
   "TP_DOCKER_GATE_BUILD_SOCKET",
-  "TP_DOCKER_GATE_BUILD_UID",
+  "TP_DOCKER_GATE_BUILD_GID",
 ] as const;
 
 /**

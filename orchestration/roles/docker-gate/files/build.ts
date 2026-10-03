@@ -7,9 +7,11 @@
  * SO_PEERCRED), and the Docker CLI does not send its `HttpHeaders` on the
  * hijacked `/grpc` request buildx opens, so neither a uid check nor a header
  * token can carry the proof. The gate opens a third listener instead, the
- * build socket: `0600`, owned by the daemon account's uid, in a root-owned
- * directory. `connect()` on it succeeds only for that uid (and root), which the
- * kernel checks; the daemon's builds point their Docker context at it.
+ * build socket: `root:<build group> 0660`, in a `root:<build group> 0750`
+ * directory. The build group (`tpgatebuild`) holds the daemon account and no
+ * one else, and since root owns the socket and its directory, the daemon
+ * cannot widen either. `connect()` succeeds only for members (and root), which
+ * the kernel checks; the daemon's builds point their Docker context at it.
  *
  * On the build socket every other request is judged exactly as on the main
  * socket. Anywhere else (the main socket, which the whole daemon group and a
@@ -47,25 +49,26 @@ function parentOf(path: string): string {
 }
 
 /**
- * Open the build listener with `open`, then restrict it to `uid` (the daemon
- * account) and root: `0600`, owned by `uid`. With no uid it stays root-only.
- * While the socket is created and not yet restricted its directory is closed
- * (`0700`), so no other account can connect in between; it is reopened to
- * `0750` (the unit makes it `root:tp`) once the socket is `0600`.
+ * Open the build listener with `open`, then restrict it to the build group:
+ * `0660`, group `gid`, owner left as the gate's (root). While the socket is
+ * created and not yet restricted its directory is closed (`0700`), so no other
+ * account can connect in between; it is reopened to `0750` (the unit makes it
+ * `root:<build group>`) once the socket is restricted.
  */
 export async function listenBuildSocket(
   path: string,
-  uid: number | undefined,
+  gid: number,
   open: (path: string) => Promise<Deno.Listener>,
 ): Promise<Deno.Listener> {
   const dir = parentOf(path);
   await Deno.chmod(dir, 0o700);
   const listener = await open(path);
   try {
-    await Deno.chmod(path, 0o600);
-    if (uid !== undefined) await Deno.chown(path, uid, null);
+    await Deno.chown(path, null, gid);
+    await Deno.chmod(path, 0o660);
   } catch (err) {
     listener.close();
+    await Deno.remove(path).catch(() => {});
     throw err;
   }
   await Deno.chmod(dir, 0o750);

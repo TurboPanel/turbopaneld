@@ -66,7 +66,12 @@ type Harness = {
   connectBuild: Connect;
 };
 
-type Options = { mode: "observe" | "enforce"; build?: boolean };
+type Options = {
+  mode: "observe" | "enforce";
+  build?: boolean;
+  /** The build group's id; default: this process's own group. */
+  gid?: string;
+};
 
 /**
  * A gate in front of an engine that answers every upgrade with a 101 and every
@@ -100,7 +105,7 @@ async function withGate(
       TP_DOCKER_GATE_RO_SOCKET: roSocket,
       TP_DOCKER_GATE_UPSTREAM: engineSocket,
       TP_DOCKER_GATE_SUMMARY_SEC: "3600",
-      TP_DOCKER_GATE_BUILD_UID: String(Deno.uid()),
+      TP_DOCKER_GATE_BUILD_GID: options.gid ?? String(Deno.gid()),
       ...(options.build === false ? {} : {
         TP_DOCKER_GATE_BUILD_SOCKET: buildSocket,
       }),
@@ -212,7 +217,7 @@ test({
 
 test({
   name:
-    "the build socket is 0600 for the build uid only, and is gone when the gate stops",
+    "the build socket is root's (the gate's), 0660 for the build group, and gone when the gate stops",
   sanitizeOps: false,
   sanitizeResources: false,
   fn: async () => {
@@ -221,8 +226,11 @@ test({
       path = h.buildSocket;
       const info = await Deno.stat(h.buildSocket);
       assert(info.isSocket);
-      assertEquals(info.mode! & 0o777, 0o600);
+      assertEquals(info.mode! & 0o777, 0o660);
+      // Owned by the gate's account (root on a host), so the daemon cannot
+      // chmod it wider; reachable through the build group only.
       assertEquals(info.uid, Deno.uid());
+      assertEquals(info.gid, Deno.gid());
       // Closed while the socket was created, reopened for the daemon group.
       const dir = await Deno.stat(join(h.buildSocket, ".."));
       assertEquals(dir.mode! & 0o777, 0o750);
@@ -375,4 +383,98 @@ test("buildSessionFindings judges only the two BuildKit routes", () => {
       { rule: "build-session", detail: "not-build-socket" },
     ]);
   }
+});
+
+test({
+  name:
+    "without a build group the build listener does not open: an error line, never a root-only socket",
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: () =>
+    withGate({ mode: "enforce", gid: "" }, async (h) => {
+      const errors = events(h.logs, "docker-gate.build-socket-unavailable");
+      assertEquals(errors.length, 1);
+      assertStringIncludes(String(errors[0].error), "TP_DOCKER_GATE_BUILD_GID");
+      assertEquals(events(h.logs, "docker-gate.started")[0].buildSocket, null);
+      await Deno.stat(h.buildSocket).then(
+        () => assert(false, "a build socket was left behind"),
+        (err) => assert(err instanceof Deno.errors.NotFound),
+      );
+      const reply = await upgradeExchange(h.connect, upgradeTo("/session"));
+      assertStringIncludes(reply, "HTTP/1.1 403");
+    }),
+});
+
+/** Every spelling of the two routes a client might try. */
+const PATH_VARIANTS = [
+  "/session",
+  "/grpc",
+  "/v1.47/session",
+  "/v1.55/grpc",
+  "/%73ession",
+  "/v1.47/%67rpc",
+  "/session?x=1",
+  "/session/",
+  "/v1.47/grpc/",
+  "//session",
+  "/v1.47//grpc",
+  "/v1/session",
+  "/v1.47.0/grpc",
+  "/./session",
+  "/x/../grpc",
+  "/SESSION",
+];
+
+test({
+  name:
+    "enforce mode: no spelling of /session or /grpc reaches the engine from the main socket",
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: () =>
+    withGate({ mode: "enforce" }, async (h) => {
+      const replies = await Promise.all(
+        PATH_VARIANTS.map((path) =>
+          upgradeExchange(h.connect, upgradeTo(path))
+        ),
+      );
+      replies.forEach((reply, i) =>
+        assertStringIncludes(reply, "HTTP/1.1 403", PATH_VARIANTS[i])
+      );
+      assertEquals(h.engineSaw, []);
+    }),
+});
+
+test({
+  name:
+    "enforce mode: on the build socket only canonical spellings open; odd ones stay refused",
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: () =>
+    withGate({ mode: "enforce" }, async (h) => {
+      const canonical = [
+        "/session",
+        "/grpc",
+        "/v1.47/session",
+        "/v1.55/grpc",
+        "/%73ession",
+        "/v1.47/%67rpc",
+        "/session?x=1",
+      ];
+      const odd = PATH_VARIANTS.filter((path) => !canonical.includes(path));
+      const opened = await Promise.all(
+        canonical.map((path) =>
+          upgradeExchange(h.connectBuild, upgradeTo(path))
+        ),
+      );
+      opened.forEach((reply, i) =>
+        assertStringIncludes(reply, "101 UPGRADED", canonical[i])
+      );
+      const refused = await Promise.all(
+        odd.map((path) => upgradeExchange(h.connectBuild, upgradeTo(path))),
+      );
+      refused.forEach((reply, i) =>
+        assertStringIncludes(reply, "HTTP/1.1 403", odd[i])
+      );
+      assertEquals(h.engineSaw.length, canonical.length);
+    }),
 });

@@ -103,7 +103,8 @@ type UnitVars = {
   docker_gate_deny_prefixes_extra: string[];
   docker_gate_build_run_dir: string;
   docker_gate_build_socket: string;
-  docker_gate_build_uid: string;
+  docker_gate_build_group: string;
+  docker_gate_build_gid: string;
 };
 
 const DEFAULT_VARS: UnitVars = {
@@ -137,7 +138,8 @@ const DEFAULT_VARS: UnitVars = {
     "/opt/turbopanel/lib/docker-gate/approval.pub",
   docker_gate_build_run_dir: "/run/turbopanel-gate/build",
   docker_gate_build_socket: "/run/turbopanel-gate/build/docker.sock",
-  docker_gate_build_uid: "999",
+  docker_gate_build_group: "tpgatebuild",
+  docker_gate_build_gid: "998",
 };
 
 async function renderUnit(overrides: Partial<UnitVars> = {}): Promise<string> {
@@ -205,7 +207,7 @@ jinjaTest(
 );
 
 jinjaTest(
-  "stage 4: the build listener lives in a root:tp directory of its own, for the daemon uid",
+  "stage 4: the build listener lives in a root-owned directory of its own, for a group holding only the daemon",
   async () => {
     const service = directives(await renderUnit(), "Service");
     assert(
@@ -215,26 +217,36 @@ jinjaTest(
     );
     assert(
       service.includes(
-        "ExecStartPre=+/usr/bin/install -d -m 0750 -o root -g tp /run/turbopanel-gate/build",
+        "ExecStartPre=+/usr/bin/install -d -m 0750 -o root -g tpgatebuild /run/turbopanel-gate/build",
       ),
     );
-    assert(service.includes("Environment=TP_DOCKER_GATE_BUILD_UID=999"));
+    assert(service.includes("Environment=TP_DOCKER_GATE_BUILD_GID=998"));
     const defaults = await read("defaults/main.yml");
     assertStringIncludes(
       defaults,
       'docker_gate_build_run_dir: "{{ docker_gate_run_dir }}/build"',
     );
     assertStringIncludes(defaults, "docker_gate_build_user: tp");
+    assertStringIncludes(defaults, "docker_gate_build_group: tpgatebuild");
     const tasks = await read("tasks/install.yml");
     assertStringIncludes(
       tasks,
-      "d {{ docker_gate_build_run_dir }} 0750 root {{ docker_gate_group }} -",
+      "d {{ docker_gate_build_run_dir }} 0750 root {{ docker_gate_build_group }} -",
     );
-    const noUid = directives(
-      await renderUnit({ docker_gate_build_uid: "" }),
-      "Service",
+    // A missing build user or group fails the install; it never falls back to
+    // a socket nobody can open.
+    const lookups = tasks.slice(
+      tasks.indexOf(
+        "Look up the daemon account that may open the build socket",
+      ),
+      tasks.indexOf("Refuse a build socket group"),
     );
-    assertFalse(noUid.some((d) => d.includes("BUILD_UID")), "root-only token");
+    assertEquals(lookups.match(/fail_key: true/g)?.length, 2);
+    assertFalse(/build token/i.test(tasks));
+    assertStringIncludes(
+      tasks,
+      "reject('equalto', '') | list == [docker_gate_build_user]",
+    );
   },
 );
 
@@ -490,7 +502,7 @@ jinjaTest(
       docker_gate_ro_socket: roSocket,
       docker_gate_build_run_dir: join(runDir, "build"),
       docker_gate_build_socket: buildSocket,
-      docker_gate_build_uid: String(Deno.uid()),
+      docker_gate_build_gid: String(Deno.gid()),
       docker_gate_gid: "",
       docker_gate_dir: join(ROLE, "files"),
       docker_gate_deno_bin: Deno.execPath(),
@@ -569,8 +581,8 @@ jinjaTest(
         "403 Forbidden",
       );
       const build = await Deno.stat(buildSocket);
-      assertEquals(build.mode! & 0o777, 0o600);
-      assertEquals(build.uid, Deno.uid());
+      assertEquals(build.mode! & 0o777, 0o660);
+      assertEquals(build.gid, Deno.gid());
     } finally {
       child.kill("SIGTERM");
       const out = await child.output();

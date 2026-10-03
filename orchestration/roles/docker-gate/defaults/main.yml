@@ -65,9 +65,12 @@ docker_gate_approval_pubkeys: ""
 # /run/turbopanel, which the daemon account can write (it could swap the key).
 docker_gate_approval_pubkey_file: "{{ docker_gate_dir }}/approval.pub"
 # Stage 4: BuildKit's /session and /grpc open only on the BUILD listener
-# (build.ts): socket 0600 owned by this account (the daemon), in a root:tp 0750
-# directory of its own, so the kernel lets only that uid (and root) connect.
+# (build.ts): socket root:<build group> 0660 in a root:<build group> 0750
+# directory of its own. The build group holds only the build user (the daemon
+# account); root owns both, so the daemon cannot widen them. The kernel lets
+# only group members (and root) connect.
 docker_gate_build_user: tp
+docker_gate_build_group: tpgatebuild
 docker_gate_build_run_dir: "{{ docker_gate_run_dir }}/build"
 docker_gate_build_socket: "{{ docker_gate_build_run_dir }}/docker.sock"
 # The gate's own source files, in the order they are copied.

@@ -4,8 +4,10 @@
  * a request acts on carry anything the platform stamped?
  *
  * Only labels are read from the answer, and never logged. Failure of any kind
- * yields `undefined` ("could not tell"), which the caller skips: observe mode
- * must never turn an inspect problem into noise or a refusal.
+ * (no engine, a non-200 answer, an answer over 1 MiB, unparseable JSON, or no
+ * answer within `INSPECT_TIMEOUT_MS`) yields `undefined` ("could not tell"),
+ * which the caller turns into an `owner-unknown` finding: the ownership check
+ * fails closed.
  *
  * Dependency-free on purpose (see http.ts).
  */
@@ -25,6 +27,8 @@ import { type Labels, labelsOf } from "./platform.ts";
 import type { GateConn } from "./proxy.ts";
 
 export const MAX_INSPECT_BYTES = 1024 * 1024;
+/** How long one ownership lookup may take before it counts as failed. */
+export const INSPECT_TIMEOUT_MS = 5000;
 
 class LimitedSink implements ByteSink {
   readonly parts: Uint8Array[] = [];
@@ -74,24 +78,40 @@ async function readInspect(conn: GateConn, target: string) {
   return labelsFromInspect(concatBytes(sink.parts));
 }
 
-/** Labels of a container, or `undefined` when it cannot be told (gone, error). */
+function closeQuietly(conn: GateConn | undefined): void {
+  try {
+    conn?.close();
+  } catch { /* already closed */ }
+}
+
+/**
+ * Labels of a container, or `undefined` when they cannot be told (gone, engine
+ * error, oversize or malformed answer, or no answer within `timeoutMs`).
+ */
 export async function fetchContainerLabels(
   connect: () => Promise<GateConn>,
   target: string,
+  timeoutMs = INSPECT_TIMEOUT_MS,
 ): Promise<Labels | undefined> {
-  let conn: GateConn;
-  try {
-    conn = await connect();
-  } catch {
-    return undefined;
-  }
-  try {
-    return await readInspect(conn, target);
-  } catch {
-    return undefined;
-  } finally {
+  let conn: GateConn | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<undefined>((resolve) => {
+    timer = setTimeout(() => resolve(undefined), timeoutMs);
+  });
+  const lookup = (async () => {
+    const opened = await connect();
+    conn = opened;
     try {
-      conn.close();
-    } catch { /* already closed */ }
+      return await readInspect(opened, target);
+    } finally {
+      closeQuietly(opened);
+    }
+  })().catch(() => undefined);
+  try {
+    return await Promise.race([lookup, expired]);
+  } finally {
+    clearTimeout(timer);
+    // A lookup still waiting on the engine ends here (its read then fails).
+    closeQuietly(conn);
   }
 }

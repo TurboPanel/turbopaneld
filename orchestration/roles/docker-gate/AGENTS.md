@@ -35,7 +35,7 @@ A later stage that routes traffic through it flips this to fatal.
 | `approval.ts` | Verifier for the control plane's signed per-deploy approval (Ed25519 via WebCrypto); no signer, no private key |
 | `inspect.ts` | Root-side `GET /containers/{id}/json` for the ownership check (labels only, never logged) |
 | `review.ts` | Per request: policy findings, allowance hits, approval check, ownership check; logs + counters |
-| `build.ts` | Stage 4: BuildKit's `/session` and `/grpc` only on the build listener (`0600` for the daemon uid) |
+| `build.ts` | Stage 4: BuildKit's `/session` and `/grpc` only on the build listener (`root:tpgatebuild 0660`) |
 | `policy.ts` | Route classification and the strict-profile rules (see below); returns findings, secret-free |
 | `resolve.ts` | Resolves a bind source by hand, component by component, following symlinks (including dangling ones, which Docker creates the target of) |
 | `stats.ts` | Counters for the periodic summary line |
@@ -136,7 +136,8 @@ unlabeled one is `unlabeled-create`. For start / stop / restart / kill / pause /
 rename / update / exec-create / attach / archive / remove, the gate inspects the
 target as root and logs `unowned-container` when it carries neither a Compose
 project, a TurboPanel label nor `tp.managed.engine`. An inspect that fails (gone,
-engine error) is skipped, never a finding.
+engine error, a non-200 or over-1-MiB answer, no answer within 5 s) fails closed:
+an `owner-unknown` finding.
 
 **Signed approvals** (`approval.ts`). Host-level Compose features cannot rest on
 the daemon's own `hostLevelApproved` flag (the daemon account sets it). The
@@ -316,8 +317,9 @@ Break-glass at every stage: `systemctl stop turbopanel-docker-gate` as root.
   denied. Ship the new key alongside the old one, then retire the old one.
 - Clock skew between control plane and host beyond 60 s (or a token older than
   its `exp`): approvals read as `expired` / `not-yet-valid`.
-- An inspect round trip that fails would deny the action once ownership is
-  enforced: stage 4 must decide fail-open vs fail-closed per route.
+- An inspect round trip that fails denies the action in enforce mode
+  (`owner-unknown`, fail closed on every route): a container removed in a race,
+  or an engine slower than 5 s, refuses the action.
 - Renaming a system component label (or an emitter changing a bind path)
   makes platform containers lose the allowance; the emitter test guards the
   paths, the label constants are pinned to `src/deploy/labels.ts`.
@@ -379,11 +381,15 @@ mounts) rides inside them. They open only on the **build listener** (`build.ts`)
   `/run/turbopanel-gate` and both Docker sockets inaccessible. Deno cannot read a Unix peer's credentials (no
   SO_PEERCRED), and a header token does not work either: the Docker CLI's `HttpHeaders` are not sent on the hijacked
   `/grpc` request buildx opens (seen on adrastea, Engine 29.8 / buildx 0.37: the header was missing on every `/grpc`).
-  So the kernel checks the uid at `connect()`: `TP_DOCKER_GATE_BUILD_SOCKET` (`/run/turbopanel-gate/build/docker.sock`)
-  is `0600`, owned by `TP_DOCKER_GATE_BUILD_UID` (the `docker_gate_build_user` uid; unset = root only), in a
-  directory `root:tp 0750` of its own. caddy (in group tp) can traverse but not connect; a container never gets it
-  (`/run` is a denied, unapprovable bind). A failure to open it is a `docker-gate.build-socket-unavailable` error
-  line; the gate keeps serving the other sockets.
+  So the kernel checks the caller at `connect()`: `TP_DOCKER_GATE_BUILD_SOCKET` (`/run/turbopanel-gate/build/docker.sock`)
+  is `root:tpgatebuild 0660` in a `root:tpgatebuild 0750` directory of its own. `tpgatebuild`
+  (`docker_gate_build_group`, its gid in `TP_DOCKER_GATE_BUILD_GID`) holds only `docker_gate_build_user` (`tp`): the
+  role creates it, adds tp, and fails if it holds anyone else. Root owns socket and directory, so tp cannot chmod
+  either wider. caddy (in group tp, not tpgatebuild) cannot even traverse; a container never gets it (`/run` is a
+  denied, unapprovable bind). The daemon process picks up the new group at its next restart. A missing build user or
+  group fails the install task (the block's rescue reports it). With no gid, or when the socket cannot open, the gate
+  logs `docker-gate.build-socket-unavailable` and opens no build listener (never a silent root-only socket); the
+  other sockets keep serving.
 - **Check.** `/session` or `/grpc` anywhere but the build listener is a `build-session` finding. No header lifts it.
   On the build listener every other request is judged exactly as on the main socket.
 - **Modes.** Observe logs the finding as `would-deny` and relays. Enforce answers 403 with a `docker-gate.denied`

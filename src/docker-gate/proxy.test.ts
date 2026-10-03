@@ -508,7 +508,8 @@ e2e(
       ),
     );
     assertEquals(await timeout(readResponse(reader, "POST")), OK_EMPTY);
-    assertEquals(wouldDeny(h.logs), ["privileged"]);
+    // The attach target's inspect answer is empty: its owner cannot be told.
+    assertEquals(wouldDeny(h.logs), ["owner-unknown", "privileged"]);
     // The attach is first looked up (inspect), then relayed; then the create.
     assertEquals(seen.filter((line) => !line.includes("/json")).length, 2);
     client.close();
@@ -889,7 +890,7 @@ async function post(h: Harness, path: string, json = ""): Promise<void> {
 }
 
 e2e(
-  "actions on containers nothing owns are flagged; owned and unknown ones are not",
+  "actions on containers nothing owns are flagged, and so are ones that cannot be looked up; owned ones are not",
   async (h) => {
     const relayed = scriptEngine(h, {
       human: { status: 200, labels: {} },
@@ -904,7 +905,12 @@ e2e(
     await post(h, "/containers/system/kill");
     await post(h, "/containers/ghost/start");
     await post(h, "/containers/human/exec", '{"Cmd":["true"]}');
-    assertEquals(wouldDeny(h.logs), ["unowned-container", "unowned-container"]);
+    // ghost: the inspect answers 404, so the owner cannot be told (fail closed).
+    assertEquals(wouldDeny(h.logs), [
+      "unowned-container",
+      "owner-unknown",
+      "unowned-container",
+    ]);
     assertEquals(
       h.logs.filter((l) => l.rule === "unowned-container").map((l) => l.detail),
       ["human", "human"],

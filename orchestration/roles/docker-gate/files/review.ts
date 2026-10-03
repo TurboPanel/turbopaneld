@@ -149,7 +149,12 @@ async function unownedFinding(
   const target = ownedTarget(facts.method, routePath(facts.path));
   if (target === undefined) return [];
   const labels = await fetchContainerLabels(deps.connectUpstream, target);
-  if (labels === undefined || ownerOf(labels) !== "unlabeled") return [];
+  // Fail closed: a target whose labels cannot be read (gone, engine error,
+  // oversize answer, timeout) is a finding of its own, never assumed owned.
+  if (labels === undefined) {
+    return [{ rule: "owner-unknown", detail: target.slice(0, 64) }];
+  }
+  if (ownerOf(labels) !== "unlabeled") return [];
   return [{ rule: "unowned-container", detail: target.slice(0, 64) }];
 }
 
