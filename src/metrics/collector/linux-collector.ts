@@ -26,7 +26,6 @@ import {
   type DiagnosticsSample,
   type DockerUsageSample,
   type GpuSample,
-  type HardwareSignalSample,
   type HostMetrics,
   METRICS_LEGACY_WIRE_VERSION,
   type MetricsSample,
@@ -712,26 +711,6 @@ function gpuHasValue(gpu: GpuSample): boolean {
   ].some((value) => value !== null);
 }
 
-/**
- * The topology snapshot slot allocation sees: GPUs and sensor signals that
- * went quiet (see `presence.ts`) are removed first, so a slot is never spent
- * on an entity that reports nothing.
- */
-export function presentSnapshot(
-  snapshot: TopologySnapshot,
-  reported: { gpus: GpuSample[]; signals: HardwareSignalSample[] },
-): TopologySnapshot {
-  const gpuIds = new Set(reported.gpus.map((gpu) => gpu.gpuId));
-  const signalIds = new Set(reported.signals.map((signal) => signal.signalId));
-  return {
-    ...snapshot,
-    gpus: snapshot.gpus.filter((gpu) => gpuIds.has(gpu.gpuId)),
-    hardwareSignals: snapshot.hardwareSignals.filter((signal) =>
-      signalIds.has(signal.signalId)
-    ),
-  };
-}
-
 export class LinuxMetricsCollector implements MetricsCollector {
   #previous: PreviousCpuSnapshot | undefined;
   readonly #tracker = new CounterBaselineTracker();
@@ -940,13 +919,17 @@ export class LinuxMetricsCollector implements MetricsCollector {
     const storedPlan = this.#deps.resolveCapabilityPlan
       ? await this.#deps.resolveCapabilityPlan()
       : undefined;
+    // Truncation numbers slots over the FULL snapshot, exactly what the
+    // topology fingerprint (generation) and the topology sent upstream use, so
+    // a slot never changes meaning without a generation bump. Presence only
+    // decides what is reported, never which slot an entity occupies.
     // Self-hosted never caps outbound samples — ignore a leftover plan so
     // enroll/reconnect cannot start dropping GPUs, filesystems, or signals.
     const outgoing = storedPlan && !this.#deps.skipCapabilityPlanTruncation
       ? truncateSampleToCapabilityPlan(
         sample,
         storedPlan.plan,
-        computeSlotMapping(presentSnapshot(snapshot, reported), overrides),
+        computeSlotMapping(snapshot, overrides),
       )
       : sample;
 
