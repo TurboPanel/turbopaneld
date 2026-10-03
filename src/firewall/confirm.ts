@@ -11,6 +11,7 @@
  * from outside that the host is reachable.
  */
 
+import { ensureDaemonDir } from "../permissions/daemon-files.ts";
 import { join } from "@std/path";
 import { type LayoutPaths, resolveLayout } from "../paths/layout.ts";
 import { logInfo } from "../util/logger.ts";
@@ -24,6 +25,7 @@ import {
   readPendingMarker,
   readRollbackRecord,
   removeIfPresent,
+  rollbackRecordPath,
   writeFileAtomic,
 } from "./pending.ts";
 import { foldManagedPublicChainBestEffort } from "./fold.ts";
@@ -52,7 +54,7 @@ async function promoteDurable(
   v6: "replace" | "forget" | "keep",
   v4Document: string,
 ): Promise<void> {
-  await Deno.mkdir(layout.configDir, { recursive: true });
+  await ensureDaemonDir(layout.configDir, 0o755);
   await writeFileAtomic(
     join(layout.configDir, FIREWALL_V4_FILENAME),
     v4Document,
@@ -138,6 +140,8 @@ export async function confirmPendingFirewall(
   await promoteDurable(layout, marker.v6, v4Document);
   await clearPendingFirewall(layout);
   await disarmGuardTimer(run);
+  // An earlier rollback is history once a ruleset is confirmed.
+  await removeIfPresent(rollbackRecordPath(layout));
   // Stage 6: the ruleset is confirmed, so the legacy managed public chain can
   // go if (and only if) it now covers every listener that chain restricted.
   await foldManagedPublicChainBestEffort({ run, layout });

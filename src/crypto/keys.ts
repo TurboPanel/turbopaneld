@@ -1,6 +1,10 @@
 import { decodeBase64Url, encodeBase64Url } from "@std/encoding/base64url";
 import { encodeHex } from "@std/encoding/hex";
 import { dirname } from "@std/path";
+import {
+  ensureDaemonDir,
+  writeDaemonFile,
+} from "../permissions/daemon-files.ts";
 
 const textEncoder = new TextEncoder();
 
@@ -147,7 +151,6 @@ export async function saveDaemonKeyFile(
   keyFile: DaemonKeyFile,
 ): Promise<void> {
   const directoryPath = dirname(path);
-  await Deno.mkdir(directoryPath, { recursive: true });
-  const content = JSON.stringify(keyFile);
-  await Deno.writeTextFile(path, content, { mode: 0o600 });
+  await ensureDaemonDir(directoryPath, 0o750);
+  await writeDaemonFile(path, JSON.stringify(keyFile), 0o600);
 }

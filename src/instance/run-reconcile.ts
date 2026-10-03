@@ -107,7 +107,8 @@ export const MIN_INSTANCE_UPDATE_FREE_BACKUP_BYTES = 1024 * 1024 * 1024;
 export const CONTROL_PLANE_DATABASE_CONTAINER = "turbopanel-database";
 const DOCKER_HEALTH_FORMAT =
   "{{.State.Running}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}";
-const UPGRADE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,80}$/;
+// Must match tp-orchestrate's turbopanel_upgrade_id shape (no dots, <=80).
+const UPGRADE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/;
 
 export class UpdatePreflightError extends Error {
   readonly code: string;

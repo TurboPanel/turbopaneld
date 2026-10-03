@@ -30,6 +30,11 @@
  */
 
 import { join } from "@std/path";
+import {
+  ensureDaemonDir,
+  removeDaemonFile,
+  writeDaemonFile,
+} from "../permissions/daemon-files.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 import { logWarn, sanitizeForLog } from "../util/logger.ts";
 import { type FirewallRunFn, runFirewallHost } from "./run.ts";
@@ -101,29 +106,14 @@ export function rollbackRecordPath(layout: LayoutPaths): string {
   return join(layout.stateDir, FIREWALL_ROLLBACK_RECORD_FILENAME);
 }
 
-/** Write `text` to `path` by rename, so a reader never sees half a file. */
-export async function writeFileAtomic(
-  path: string,
-  text: string,
-  mode: number,
-): Promise<void> {
-  const tmp = `${path}.tmp-${crypto.randomUUID().slice(0, 8)}`;
-  try {
-    await Deno.writeTextFile(tmp, text, { mode });
-    await Deno.rename(tmp, path);
-  } catch (err) {
-    await removeIfPresent(tmp);
-    throw err;
-  }
-}
+/**
+ * Write `text` to `path` by rename, so a reader never sees half a file. The
+ * durable and pending documents sit in the root-owned config directory, so the
+ * write falls back to `tp-host` there (see `src/permissions/daemon-files.ts`).
+ */
+export const writeFileAtomic = writeDaemonFile;
 
-export async function removeIfPresent(path: string): Promise<void> {
-  try {
-    await Deno.remove(path);
-  } catch (err) {
-    if (!(err instanceof Deno.errors.NotFound)) throw err;
-  }
-}
+export const removeIfPresent = removeDaemonFile;
 
 async function readTextIfPresent(path: string): Promise<string | null> {
   try {
@@ -243,7 +233,7 @@ export async function armPendingFirewall(
     // Until the IPv6 outcome is known, a confirm leaves the durable v6 alone.
     v6: "keep",
   };
-  await Deno.mkdir(options.layout.configDir, { recursive: true });
+  await ensureDaemonDir(options.layout.configDir, 0o755);
   await Deno.mkdir(options.layout.runDir, { recursive: true });
   // A new apply supersedes any earlier rollback story and any old v6 document.
   await removeIfPresent(rollbackRecordPath(options.layout));
