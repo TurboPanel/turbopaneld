@@ -69,8 +69,7 @@ export type GateConfig = {
 
 const MODES: readonly GateMode[] = ["observe", "enforce"];
 
-function modeOf(value: string | undefined): GateMode {
-  const mode = value ?? "observe";
+function modeOf(mode = "observe"): GateMode {
   const known = MODES.find((candidate) => candidate === mode);
   if (known === undefined) {
     throw new Error(
