@@ -55,13 +55,13 @@ export type HostTextIo = {
 
 export function shortName(raw: string | undefined): string | undefined {
   const cleaned = raw?.trim().replaceAll(/[^\w.+-]/g, "").slice(0, MAX_NAME);
-  return cleaned ? cleaned : undefined;
+  return cleaned || undefined;
 }
 
 export function parseOs(text: string | undefined): string | undefined {
   if (!text) return undefined;
   const field = (key: string) =>
-    new RegExp(`^${key}=("?)([^"\\n]*)\\1$`, "m").exec(text)?.[2];
+    new RegExp(String.raw`^${key}=("?)([^"\n]*)\1$`, "m").exec(text)?.[2];
   const id = shortName(field("ID"));
   const version = shortName(field("VERSION_ID"));
   if (!id) return undefined;
@@ -240,7 +240,7 @@ export class HostTextCollector {
 
   async #run(cmd: string, args: string[]): Promise<string | undefined> {
     const result = await this.#io.run(cmd, args);
-    return result && result.code === 0 ? result.stdout : undefined;
+    return result?.code === 0 ? result.stdout : undefined;
   }
 
   async #readFiles(): Promise<HostTextSample> {
