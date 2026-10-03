@@ -404,7 +404,13 @@ export async function rollbackSitePhpRuntime(
 ): Promise<void> {
   const { spec } = prepared.files;
   if (prepared.created) {
-    await removeSitePhpRuntimes(io, spec.configDir, [spec.id], new Map());
+    const units = { service: true, socket: spec.mode === "fastcgi" };
+    await removeSitePhpRuntimes(
+      io,
+      spec.configDir,
+      [spec.id],
+      new Map([[spec.id, units]]),
+    );
     return;
   }
   if (!prepared.changed) return;

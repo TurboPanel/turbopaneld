@@ -3285,6 +3285,11 @@ test("per-site PHP: a failed probe keeps the old runtime and removes the one the
       await exists(join(h.unitDir, `turbopanel-php-${oldId}.service`)),
       true,
     );
+    // An fpm runtime has no socket unit to stop.
+    assertEquals(
+      systemctlCalls(h.calls).filter((c) => c.startsWith("stop")),
+      [`stop turbopanel-php-${newId}.service`],
+    );
   } finally {
     await h.cleanup();
   }
