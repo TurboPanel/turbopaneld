@@ -20,6 +20,9 @@ export const PLATFORM_COMPONENTS: readonly string[] = [
   "hosting-ingress",
   "managed-ingress",
   "managed-ha",
+  // The self-hosted system stack (`system-compose` role): Postgres and RabbitMQ.
+  "database",
+  "queue",
   // Throwaway helper containers the daemon starts with a plain `docker run`
   // (`HELPER_COMPONENTS` in `src/deploy/labels.ts`; a test pins the match).
   "backup-copy",
