@@ -142,6 +142,11 @@ export type PrincipalsReconcileResult = {
   keysChanged: string[];
   keysRemoved: string[];
   sshdReloaded: boolean;
+  /**
+   * True when `tpsftp` members are jailed in their principal home (the host's
+   * SFTP chroot switch is on). Additive: older control planes ignore it.
+   */
+  sftpChroot: boolean;
   warnings: string[];
 };
 

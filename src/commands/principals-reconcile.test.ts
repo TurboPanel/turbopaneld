@@ -28,6 +28,7 @@ test("handlePrincipalsReconcile maps optional fields and defaults ssh keys", asy
     changedPrincipals: ["alice"],
     removedPrincipals: ["bob"],
     sshdReloaded: true,
+    sftpChroot: true,
     warnings: ["AllowUsers is set"],
   };
 
@@ -96,6 +97,7 @@ test("handlePrincipalsReconcile maps optional fields and defaults ssh keys", asy
     keysChanged: ["alice"],
     keysRemoved: ["bob"],
     sshdReloaded: true,
+    sftpChroot: true,
     warnings: ["AllowUsers is set"],
   });
 });
@@ -118,6 +120,7 @@ test("handlePrincipalsReconcile treats empty sshKeys as none and empty payload a
           changedPrincipals: [],
           removedPrincipals: [],
           sshdReloaded: false,
+          sftpChroot: false,
           warnings: [],
         });
       },
