@@ -1016,6 +1016,21 @@ and the mount kept). There is one copy of that function. A Docker apt
 `Signed-By` keyring is only removed when it is a file directly in
 `/etc/apt/keyrings`, `/usr/share/keyrings`, or `/etc/apt/trusted.gpg.d`.
 
+**Post-check rules (what "left over" means).** The final inventory must
+match what can exist after the purge. A `.slice` unit that systemd still
+reports as loaded but with no unit file and inactive (`tpbuild.slice`) is gone
+(`tp_unit_present`). Once Docker Engine was purged (`TP_DOCKER_ENGINE_GONE`)
+the final inventory skips Docker, so the `<id>-in` containers removed with it
+are not reported. Anything else still on disk stays a failure. The purge also
+removes `/var/lib/turbopanel-hosting-caddy` (the hosting Caddy's
+`StateDirectory`, beside `/var/lib/turbopanel`, in `TP_OWNED_TREES`),
+`/etc/tmpfiles.d/turbopanel-hosting-caddy.conf`, and the `tpgatebuild` group
+(`TP_OTHER_GROUPS`, matched by exact name because its gid is outside the
+9900 band). The resume marker clears whenever the remaining failures are
+benign, so a clean run leaves `/var/lib/turbopanel-purge` gone. A role that
+adds a group or state folder outside the `tp*`/`/var/lib/turbopanel` naming
+must be added to these lists.
+
 **Shell startup files** (`.bashrc` and friends) are scanned in root's home
 and in every UID ≥ 1000 home except principal homes (those are purged whole
 by the purge). A symlinked file is left alone. The
@@ -1071,8 +1086,16 @@ Purge order:
    data root, and `/etc/docker` even when the packages are already gone.
    Remove any file in `/etc/apt/sources.list.d` that references
    `download.docker.com`, and the keyring named in that file's `Signed-By`
-   (usually `/etc/apt/keyrings/docker.asc`). `groupdel docker`, and delete
-   the `docker0` bridge when it is present.
+   (usually `/etc/apt/keyrings/docker.asc`). `groupdel docker`. Once
+   Docker Engine is gone (no `dockerd`, no `docker-ce`/`docker.io`;
+   `tp_docker_engine_gone`), `tp_purge_docker_network_state` deletes the
+   `docker0` and `br-<12 hex>` bridges, the rules in the filter, nat and raw
+   tables that name those bridges or jump to a `DOCKER*` chain (rules with
+   quoted words are never touched), and the `DOCKER*` chains. `DOCKER-USER`
+   is kept when it holds anything but Docker's default `RETURN`. The
+   iptables-nft tables themselves belong to the host and stay. Whatever
+   cannot be removed sets `TP_NET_LEFT`, which is the only time the summary
+   asks for a reboot.
 3. **Data folders.** Every discovered config, state, log, run, and backup
    path, plus `/etc/ssh/turbopanel`.
 4. **PHP packages TurboPanel added**, last, and only when TurboPanel's own
@@ -1102,8 +1125,8 @@ remove" list from the second scan: hosted data that is still present
 mountpoints kept on purpose are left off that list. It also lists packages
 kept and why (a Docker or PHP package whose purge would have dragged others
 along); a note that other packages stay installed by design; that
-`/etc/systemd/timesyncd.conf` is left as written; a reboot so leftover kernel
-state (bridges, NAT rules) is cleared; and the commands to install a daemon or
+`/etc/systemd/timesyncd.conf` is left as written; a reboot only when Docker
+bridges or chains could not be removed; and the commands to install a daemon or
 a self-hosted control plane again.
 
 ## Installer script hosting
