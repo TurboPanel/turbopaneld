@@ -323,6 +323,16 @@ Break-glass at every stage: `systemctl stop turbopanel-docker-gate` as root.
   would be denied until the daemon stamps a platform label on them: backups and
   restores stop working. This is the most critical gap to close before stage 4.
 
+## Container-create breadth (deny by default)
+
+Besides the earlier rules (privileged, devices, namespaces, security options, binds, mounts), a create now also flags:
+`Cgroup` (join another container's cgroup), `Links`, `GroupAdd`, `Annotations`, positive `CpuRealtime*`, negative
+`OomScoreAdj`, `Capabilities` (same allowlist as `CapAdd`), a `LogConfig.Type` outside json-file/local/none (syslog,
+fluentd, gelf dial an address the author picks), mount types other than bind/volume/tmpfs, and bind propagation other
+than private/rprivate (`Binds` options and `BindOptions.Propagation`). Every other `HostConfig` key must be in
+`BENIGN_HOSTCONFIG_FIELDS` or `RULED_HOSTCONFIG_FIELDS` in `policy.ts`, else `hostconfig-unknown-field`: a field a newer
+engine adds is denied until reviewed. When a real flow trips it, add the field to the benign list with a corpus entry.
+
 ## Volume drivers and mount options
 
 `HostConfig.VolumeDriver` and each volume mount's `VolumeOptions.DriverConfig.Name` must be empty or `local`
