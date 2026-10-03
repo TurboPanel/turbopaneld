@@ -903,3 +903,60 @@ test("applySourceReleases rejects a clone credential decrypt that returns nothin
     }
   });
 });
+
+test("applySourceReleases cuts over to a re-sent release this host already published", async () => {
+  await createTempLayout().then(async (fixture) => {
+    try {
+      const layout = layoutFromFixture(fixture);
+      const serviceId = "svc-resent";
+      const paths = resolveReleasePaths(layout, {
+        username: PRINCIPAL.username,
+        serviceId,
+        releaseId: "rel-1",
+      });
+      await mkdirReleaseTree(paths);
+      await seedRecord(layout, { serviceId, releaseId: "rel-1" });
+      const payload = (commitSha: string) =>
+        basePayload({
+          hostings: [{
+            hostingId: "host-resent",
+            composeServiceName: "web",
+            serviceId,
+            hostnames: ["resent.example.com"],
+          }],
+          sourceMaterial: [baseSource({ commitSha, principal: PRINCIPAL })],
+        });
+      const calls: string[] = [];
+      const deps = {
+        ...nativeDeps(fakeLogSink().sink),
+        promoteReleaseFn: (params: { paths: { releaseDir: string } }) => {
+          calls.push("promote");
+          return Promise.resolve(params.paths.releaseDir);
+        },
+        promoteExistingReleaseFn: (
+          params: { paths: { releaseDir: string } },
+        ) => {
+          calls.push("existing");
+          return Promise.resolve(params.paths.releaseDir);
+        },
+      };
+
+      // Same id, same commit: no rebuild, no publish over the live release.
+      const [row] = await applySourceReleases(
+        layout,
+        payload("recorded-commit"),
+        deps,
+      );
+      assertEquals(calls, ["existing"]);
+      assertEquals(row?.commitSha, "recorded-commit");
+
+      // Same id, another commit: built and published as before (and refused
+      // by tp-host there, never merged in).
+      calls.length = 0;
+      await applySourceReleases(layout, payload("other-commit"), deps);
+      assertEquals(calls, ["promote"]);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+});

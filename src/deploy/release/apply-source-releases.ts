@@ -83,6 +83,7 @@ import {
   promoteRelease,
   readCurrentReleaseId,
   recordRailpackRelease,
+  releasePathExists,
 } from "./promote.ts";
 import { pruneReleases } from "./retention.ts";
 import { definedFields } from "../../util/optional-fields.ts";
@@ -100,6 +101,7 @@ import {
   resetReleaseScratchDir,
   resolveDaemonReleasePaths,
   resolveReleasePaths,
+  runPrivileged,
 } from "./release-layout.ts";
 
 export type AppliedRelease = {
@@ -485,6 +487,37 @@ async function applyRailpackRelease(
 
 /** What a rollback restores: the release paths and the daemon's record of it. */
 type RollbackTarget = { paths: ReleasePaths; manifest: ReleaseManifestV1 };
+
+/**
+ * A re-sent deploy of a native release this host already published — the same
+ * release id and the same commit in the daemon's own record, and the tree still
+ * there. tp-host `publish` never stages over an existing release, so it is cut
+ * over to again like a rollback instead of being rebuilt.
+ */
+async function resentPublishedRelease(
+  layout: LayoutPaths,
+  entry: EnvironmentDeploySource,
+  serviceId: string,
+  params: { principalPaths: ReleasePaths | null; runFn: RunFn | undefined },
+): Promise<RollbackTarget | null> {
+  const paths = params.principalPaths;
+  if (!paths || entry.build.kind === "railpack") return null;
+  const record = await readReleaseManifest(
+    resolveDaemonReleasePaths(layout, {
+      serviceId,
+      releaseId: entry.releaseId,
+    }).releaseDir,
+  );
+  const same = record !== null && !record.imageTag &&
+    record.serviceId === serviceId && record.releaseId === entry.releaseId &&
+    record.commitSha === entry.commitSha;
+  if (!same) return null;
+  const present = await releasePathExists(
+    paths.releaseDir,
+    params.runFn ?? runPrivileged,
+  );
+  return present ? { paths, manifest: record } : null;
+}
 
 /**
  * The release a rollback is addressing, as this host's daemon recorded it.
@@ -961,6 +994,24 @@ async function applyOneRelease(
     throw new Error(
       `release for ${entry.composeServiceName} has no release paths`,
     );
+  }
+
+  const resent = await resentPublishedRelease(layout, entry, serviceId, {
+    principalPaths,
+    runFn: deps.runFn,
+  });
+  if (resent) {
+    logSink.onLine(
+      "stdout",
+      `release ${entry.releaseId} is already published on this host; ` +
+        `cutting ${entry.composeServiceName} over to it without a rebuild`,
+    );
+    return await rollbackOneRelease(entry, resent, {
+      serviceId,
+      releaseId: entry.releaseId,
+      logSink,
+      deps,
+    });
   }
 
   if (railpack) {

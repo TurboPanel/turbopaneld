@@ -68,7 +68,31 @@ const RESERVED_BUILD_ENV_KEYS = new Set([
   "LD_LIBRARY_PATH",
   "PATH",
   "HOME",
+  // Shell start-up files and options: `sh -c` reads `ENV` / `BASH_ENV`, and
+  // `SHELLOPTS` / `BASHOPTS` / `PS4` / `PROMPT_COMMAND` run code or reshape it.
+  "ENV",
+  "BASH_ENV",
+  "SHELLOPTS",
+  "BASHOPTS",
+  "PS4",
+  "PROMPT_COMMAND",
+  "IFS",
+  // libc and git lookups that load code from a tenant-chosen path.
+  "GCONV_PATH",
+  "GLIBC_TUNABLES",
+  "LOCPATH",
+  "NLSPATH",
+  "HOSTALIASES",
+  "GIT_EXEC_PATH",
+  "GIT_CONFIG_GLOBAL",
+  "GIT_CONFIG_SYSTEM",
+  "GIT_CONFIG_COUNT",
 ]);
+
+/** `LD_*` is the dynamic loader's namespace (`LD_AUDIT`, `LD_DEBUG_OUTPUT`, …). */
+function isReservedBuildEnvKey(key: string): boolean {
+  return RESERVED_BUILD_ENV_KEYS.has(key) || key.startsWith("LD_");
+}
 
 const defaultSummaryRedactor: CommandSummaryRedactor = (text) =>
   redactCommandSummary(text);
@@ -164,7 +188,11 @@ export function buildEnvironment(
     env.COREPACK_HOME = join(workingDir, ".corepack");
     env.COREPACK_ENABLE_DOWNLOAD_PROMPT = "0";
   }
-  return { ...env, ...tenantBuildEnv(build) };
+  // A name no shell can carry also cannot ride an `env NAME=value` argv.
+  const tenant = Object.fromEntries(
+    Object.entries(tenantBuildEnv(build)).filter(([key]) => isSpecEnvName(key)),
+  );
+  return { ...env, ...tenant };
 }
 
 /** The tenant's own `build.env`, minus the keys that are the sandbox. */
@@ -173,7 +201,7 @@ function tenantBuildEnv(
 ): Record<string, string> {
   return Object.fromEntries(
     Object.entries(build.env ?? {}).filter(([key]) =>
-      !RESERVED_BUILD_ENV_KEYS.has(key)
+      !isReservedBuildEnvKey(key)
     ),
   );
 }
@@ -237,6 +265,8 @@ export function buildInvocation(
       identity.username,
       "--",
       ENV_BIN,
+      // Without `--`, a name that starts with `-` would be read as an option.
+      "--",
       ...Object.entries(identity.env).map(([key, value]) => `${key}=${value}`),
       "sh",
       "-c",
