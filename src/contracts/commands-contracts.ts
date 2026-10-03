@@ -1406,6 +1406,14 @@ export type EnvironmentStopPayload = {
    * that named these, so the payload is the only remaining copy for this host.
    */
   siteReleases?: Array<{ serviceId: string; username: string }>;
+  /**
+   * Principals no project, site or app on this host uses once this delete
+   * commits: the daemon retires each through `tp-host principal-remove`
+   * (slice, processes, key file, group memberships, home tree, account and
+   * group) after everything above is reclaimed. Only ever set by a delete
+   * teardown; a plain stop never carries it.
+   */
+  retirePrincipals?: Array<{ username: string }>;
 };
 
 export type EnvironmentStopResult = {
@@ -5427,6 +5435,16 @@ function parseStopSiteRelease(
   return { serviceId: value.serviceId, username: value.username };
 }
 
+function parseStopRetirePrincipal(value: unknown): { username: string } {
+  if (
+    !isRecord(value) || typeof value.username !== "string" ||
+    !STOP_SITE_RELEASE_USERNAME_RE.test(value.username)
+  ) {
+    throw new TypeError("Invalid environment.stop retirePrincipals entry");
+  }
+  return { username: value.username };
+}
+
 function parseStopFabricNetworks(value: unknown): string[] | undefined {
   if (value === undefined) return undefined;
   if (!Array.isArray(value)) {
@@ -5463,6 +5481,11 @@ export function parseEnvironmentStopPayload(
     "siteReleases",
     parseStopSiteRelease,
   );
+  const retirePrincipals = parseOptionalMaterialArray(
+    value.retirePrincipals,
+    "retirePrincipals",
+    parseStopRetirePrincipal,
+  );
   return {
     environmentId: parseNonEmptyString(value, "environmentId"),
     projectId: parseNonEmptyString(value, "projectId"),
@@ -5470,6 +5493,7 @@ export function parseEnvironmentStopPayload(
     ...(ingressServices === undefined ? {} : { ingressServices }),
     ...(fabricNetworks === undefined ? {} : { fabricNetworks }),
     ...(siteReleases === undefined ? {} : { siteReleases }),
+    ...(retirePrincipals === undefined ? {} : { retirePrincipals }),
   };
 }
 
