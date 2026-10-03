@@ -2058,10 +2058,24 @@ tp_verb_journalctl() {
   tp_exec journalctl "$@"
 }
 
+# `-t`, `-T`, or exactly `-T -C user=<name>,host=localhost,addr=127.0.0.1`
+# (the daemon's forwarding assertion): <name> a plain account name, no other
+# -C key, no other arguments.
 tp_verb_sshd() {
-  [ "$#" -eq 1 ] || tp_die "sshd: only -t or -T"
-  case "$1" in -t|-T) tp_exec /usr/sbin/sshd "$1" ;; esac
-  tp_die "sshd: only -t or -T"
+  case "$#" in
+    1) case "$1" in -t|-T) tp_exec /usr/sbin/sshd "$1" ;; esac ;;
+    3)
+      if [ "$1" = "-T" ] && [ "$2" = "-C" ]; then
+        _ss_user="${3#user=}"
+        _ss_user="${_ss_user%,host=localhost,addr=127.0.0.1}"
+        if [ "$3" = "user=$_ss_user,host=localhost,addr=127.0.0.1" ] &&
+          tp_name_shape_ok "$_ss_user"; then
+          tp_exec /usr/sbin/sshd -T -C "$3"
+        fi
+      fi
+      ;;
+  esac
+  tp_die "sshd: only -t, -T or -T -C user=<name>,host=localhost,addr=127.0.0.1"
 }
 
 # --- the SFTP chroot ---------------------------------------------------------

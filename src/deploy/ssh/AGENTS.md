@@ -108,4 +108,19 @@ When on, each reconcile re-runs `check` (findings become warnings and the jail
 stays — fail closed for that member), and after `sshd -t` runs
 `sftp-chroot verify`, which asks `sshd -T -C user=<member>` whether the jail
 is really effective; a refusal rolls the drop-in back like a failed `-t`.
+
+**Forwarding is asserted, not assumed** (an administrator's earlier drop-in
+with `Match all` + `AllowTcpForwarding yes` outranks ours). After `sshd -t`,
+and before any reload, the daemon runs `tp-host sshd -T -C
+user=<u>,host=localhost,addr=127.0.0.1` for one real account per level: the
+first `tpsftp` member, the first `tpshell` member, and the first principal in
+neither (`getent`, no root). `Match Group` resolves groups from the account
+database, so a made-up user would match nothing; a level with no account is
+skipped. Every one of AllowTcpForwarding, AllowStreamLocalForwarding,
+AllowAgentForwarding, X11Forwarding, PermitTunnel, GatewayPorts must be `no`
+and PermitOpen / PermitListen `none` (a keyword sshd does not report fails
+too). Any other value restores the previous drop-in and does not reload.
+`tp-host sshd` accepts `-t`, `-T`, or exactly `-T -C user=<name>,host=localhost,addr=127.0.0.1`
+(plain account name, no other `-C` key, no other arguments). The check runs only
+when the drop-in changes.
 `server.principals.reconcile` reports `sftpChroot`.

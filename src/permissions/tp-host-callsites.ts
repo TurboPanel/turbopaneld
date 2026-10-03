@@ -1348,6 +1348,12 @@ const SITES: CallSite[] = [
   tpHost('src/deploy/ssh/apply.ts|["-n","sshd","-t"]', {
     argv: ["sshd", "-t"],
   }),
+  tpHost(
+    'src/deploy/ssh/apply.ts|["-n","sshd","-T","-C",sshdEffectiveSpec(user)]',
+    {
+      argv: ["sshd", "-T", "-C", "user=alice,host=localhost,addr=127.0.0.1"],
+    },
+  ),
   tpHost('src/deploy/ssh/apply.ts|["-n","systemctl","reload",unit]', {
     argv: ["systemctl", "reload", "ssh.service"],
   }),

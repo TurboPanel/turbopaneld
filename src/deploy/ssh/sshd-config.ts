@@ -266,3 +266,61 @@ export function sshdAccessRestrictions(sshdConfig: string): string[] {
   }
   return found;
 }
+
+/**
+ * Account names the root helper will pass to `sshd -T -C user=<name>`. The same
+ * shape `tp-host` enforces (`tp_name_shape_ok`): no leading `-`, at most 32
+ * characters of `[A-Za-z0-9_.-]`.
+ */
+export const SSHD_SAMPLE_NAME = /^[A-Za-z0-9_.][A-Za-z0-9_.-]{0,31}$/;
+
+/**
+ * The only connection spec `tp-host sshd -T -C` accepts. Match `Group` needs a
+ * real account (sshd resolves the user's groups from the account database), so
+ * a sample is always an existing member of the group under test.
+ */
+export function sshdEffectiveSpec(user: string): string {
+  if (!SSHD_SAMPLE_NAME.test(user)) {
+    throw new Error(`not a valid account name for sshd -T: ${user}`);
+  }
+  return `user=${user},host=localhost,addr=127.0.0.1`;
+}
+
+/**
+ * What `sshd -T` must report for every managed account, whatever its level.
+ * `PermitOpen` / `PermitListen` are `none` because that is the intent
+ * {@link forwardingDirectives} states; the rest are plain `no`.
+ */
+const REQUIRED_EFFECTIVE: ReadonlyArray<readonly [string, string]> = [
+  ["allowtcpforwarding", "no"],
+  ["allowstreamlocalforwarding", "no"],
+  ["allowagentforwarding", "no"],
+  ["x11forwarding", "no"],
+  ["permittunnel", "no"],
+  ["gatewayports", "no"],
+  ["permitopen", "none"],
+  ["permitlisten", "none"],
+];
+
+/**
+ * Findings for one account's `sshd -T` output: every forwarding keyword whose
+ * effective value is not the forbidden-off value. A keyword `sshd` did not
+ * report counts too — an assertion that cannot see the setting has not passed.
+ */
+export function sshdForwardingViolations(effective: string): string[] {
+  const seen = new Map<string, string>();
+  for (const raw of effective.split("\n")) {
+    const line = raw.trim().toLowerCase();
+    const space = line.indexOf(" ");
+    if (space > 0 && !seen.has(line.slice(0, space))) {
+      seen.set(line.slice(0, space), line.slice(space + 1).trim());
+    }
+  }
+  const found: string[] = [];
+  for (const [keyword, wanted] of REQUIRED_EFFECTIVE) {
+    const value = seen.get(keyword);
+    if (value === undefined) found.push(`${keyword} not reported`);
+    else if (value !== wanted) found.push(`${keyword} is ${value}`);
+  }
+  return found;
+}
