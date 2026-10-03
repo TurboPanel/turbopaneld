@@ -1,5 +1,6 @@
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import type { LayoutPaths } from "../paths/layout.ts";
+import { accessGroup } from "../runtime/registry.ts";
 import {
   DEFAULT_PRINCIPAL_SHELL,
   ensureDirectoryOwnedByPrincipal,
@@ -13,6 +14,7 @@ import {
   parsePasswdHomeShell,
   type PrincipalEnsureSpec,
   principalUnixGroupName,
+  resolveManagedGroups,
   type RunFn,
   type RunResult,
   userSupplementaryGroups,
@@ -854,6 +856,19 @@ function groupMutations(
     .filter((c) => c.args.includes("usermod") || c.args.includes("gpasswd"))
     .map((c) => c.args);
 }
+
+test("resolveManagedGroups grants the password group only alongside an SSH level", () => {
+  const base = { username: "appuser" } as PrincipalEnsureSpec;
+  const withGroups = (...accessGroups: string[]) =>
+    resolveManagedGroups({ ...base, accessGroups });
+  const password = accessGroup("password")!;
+  const sftp = accessGroup("sftp")!;
+  const shell = accessGroup("shell")!;
+  assert(!withGroups(password).has(password));
+  assert(withGroups(password, sftp).has(password));
+  assert(withGroups(password, shell).has(password));
+  assert(withGroups(sftp).has(sftp));
+});
 
 test("ensurePrincipalManagedGroups adds only the missing groups", async () => {
   const { run, calls } = runtimeGroupRun(["appuser-grp", "tpphp84"]);

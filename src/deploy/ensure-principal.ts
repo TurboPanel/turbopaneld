@@ -762,7 +762,9 @@ async function ensureOnePrincipal(
  * of them, so a third name is a control-plane bug, and inventing the group
  * would hand out an `sshd` Match block nobody wrote.
  */
-function resolveManagedGroups(principal: PrincipalEnsureSpec): Set<string> {
+export function resolveManagedGroups(
+  principal: PrincipalEnsureSpec,
+): Set<string> {
   const groups = new Set<string>();
   for (const entry of principal.runtimes ?? []) {
     if (!isRuntimeName(entry.runtime)) continue;
@@ -772,6 +774,15 @@ function resolveManagedGroups(principal: PrincipalEnsureSpec): Set<string> {
   const known = allAccessGroups();
   for (const group of principal.accessGroups ?? []) {
     if (known.has(group)) groups.add(group);
+  }
+  // The password group is additive: its sshd block sets only
+  // `PasswordAuthentication yes` and comes first, so on its own it would
+  // sign in an account with no level and a full shell. Without a level the
+  // group is never granted, and the reconcile revokes one already held.
+  const password = accessGroup("password");
+  const levels = [accessGroup("sftp"), accessGroup("shell")];
+  if (password && !levels.some((level) => level && groups.has(level))) {
+    groups.delete(password);
   }
   // Every principal, whatever the wire says about its level. This group is
   // what the drop-in's backstop `Match` selects on; an account outside it with
