@@ -33,36 +33,59 @@ const SEAL_KEYS = [
   "turbopanel_state_root_owner",
 ];
 
-test("the roles that own a root agree on who owns it", async () => {
-  const sets = await Promise.all([
-    "roles/daemon-layout",
-    "roles/daemon-config",
-    "roles/turbopanel-user",
-  ].map((role) => yaml<Args>(`${role}/defaults/main.yml`)));
-  const [first, ...rest] = sets;
-  for (const key of SEAL_KEYS) assert(typeof first[key] === "string", key);
-  for (const other of rest) {
-    for (const key of SEAL_KEYS) assertEquals(other[key], first[key], key);
-  }
+test("only daemon-seal defines who owns a root, and daemon-logs agrees", async () => {
+  const seal = await yaml<Args>("roles/daemon-seal/defaults/main.yml");
+  for (const key of SEAL_KEYS) assert(typeof seal[key] === "string", key);
   // Dev (a dev user set) keeps its own ownership; managed hosts are root.
-  assert(String(first.turbopanel_seal_config_root).includes("length == 0"));
-  assert(String(first.turbopanel_config_root_owner).startsWith("{{ 'root' if"));
+  assert(String(seal.turbopanel_seal_config_root).includes("length == 0"));
+  assert(String(seal.turbopanel_config_root_owner).startsWith("{{ 'root' if"));
+  for (
+    const role of ["daemon-layout", "daemon-config", "turbopanel-user"]
+  ) {
+    const defaults = await yaml<Args>(`roles/${role}/defaults/main.yml`);
+    for (const key of SEAL_KEYS) assert(!(key in defaults), `${role}: ${key}`);
+  }
   const logs = await yaml<Args>("roles/daemon-logs/defaults/main.yml");
   assert(String(logs.daemon_log_dir_owner).startsWith("{{ 'root' if"));
 });
 
-test("daemon-layout seals the roots, sweeps planted links, then creates the leaves", async () => {
-  const tasks = await yaml<Task[]>("roles/daemon-layout/tasks/main.yml");
+test("the seal and the planted-link sweep run together, last before the daemon starts", async () => {
+  // daemon-launch (the last role of every playbook) pulls daemon-seal in.
+  const meta = await yaml<{ dependencies: Array<{ role: string }> }>(
+    "roles/daemon-launch/meta/main.yml",
+  );
+  assert(meta.dependencies.some((dep) => dep.role === "daemon-seal"));
+
+  // No role or play before it re-owns a root: they must leave the owner alone.
+  const early: Array<[string, string]> = [
+    ["roles/turbopanel-user/tasks/main.yml", "Ensure FHS state directories"],
+    ["roles/daemon-config/tasks/main.yml", "Ensure daemon state directory"],
+    ["roles/daemon-config/tasks/main.yml", "Ensure config directory"],
+  ];
+  for (const [path, name] of early) {
+    const file = findTask(await yaml<unknown>(path), name)![
+      "ansible.builtin.file"
+    ] as Args;
+    assertEquals(file.follow, false, name);
+    assert(
+      !/root_owner/.test(String(file.owner)) && file.owner !== "root",
+      `${name} must not flip a root early`,
+    );
+  }
+  const fhs = findTask(
+    await yaml<unknown>("roles/turbopanel-user/tasks/main.yml"),
+    "Ensure FHS state directories",
+  )!["ansible.builtin.file"] as Args;
+  assertEquals(fhs.owner, "{{ item.owner | default(omit) }}");
+
+  const tasks = await yaml<Task[]>("roles/daemon-seal/tasks/main.yml");
   const names = tasks.map((task) => String(task.name));
+  const check = names.indexOf("Check the config and state roots are not links");
   const roots = names.indexOf("Ensure the config and state roots");
   const sweep = names.indexOf(
     "Remove links planted at the top of the config and state roots",
   );
-  const fhs = names.indexOf("Ensure production FHS directories exist");
-  const config = names.indexOf("Ensure the daemon-writable config folders");
-  const state = names.indexOf("Ensure the daemon-writable state folders");
-  assert(roots === 0, "the roots come first");
-  assert(roots < sweep && sweep < fhs && fhs < config && config < state);
+  assert(check === 0 && check < roots && roots < sweep);
 
   const file = tasks[roots]["ansible.builtin.file"] as Args;
   assertEquals(file.owner, "{{ item.owner }}");
@@ -72,38 +95,47 @@ test("daemon-layout seals the roots, sweeps planted links, then creates the leav
     "{{ turbopanel_config_root_owner }}",
     "{{ turbopanel_state_root_owner }}",
   ]);
+});
 
-  const argv = (tasks[sweep]["ansible.builtin.command"] as { argv: string[] })
-    .argv;
+test("the sweep only removes links the daemon planted, never an administrator's", async () => {
+  const tasks = await yaml<Task[]>("roles/daemon-seal/tasks/sweep.yml");
+  const task = tasks.find((t) => "ansible.builtin.command" in t)!;
+  const argv = (task["ansible.builtin.command"] as { argv: string[] }).argv;
   assertEquals(argv.slice(0, 1), ["find"]);
   for (const part of ["-maxdepth", "-type", "l", "-delete"]) {
     assert(argv.includes(part), part);
   }
+  // `! -user root`, before -delete: an admin's link (root-owned) stays.
+  const not = argv.indexOf("!");
+  assertEquals(argv.slice(not, not + 3), ["!", "-user", "root"]);
+  assert(not < argv.indexOf("-delete"));
   assert(!argv.includes("-L") && !argv.includes("-follow"));
+
+  // daemon-layout runs the same sweep before it creates the leaves.
+  const layout = await yaml<Task[]>("roles/daemon-layout/tasks/main.yml");
+  const include = layout[0]["ansible.builtin.include_role"] as Args;
+  assertEquals(include, { name: "daemon-seal", tasks_from: "sweep" });
 });
 
-test("the flip does not leave tp as owner of a root anywhere on the managed path", async () => {
-  const rootOwnerTasks: Array<[string, string]> = [
-    ["roles/daemon-config/tasks/main.yml", "Ensure daemon state directory"],
-    ["roles/daemon-config/tasks/main.yml", "Ensure config directory"],
-    ["playbooks/daemon-install.yml", "Keep the state directory root-owned"],
-    ["playbooks/daemon-install.yml", "Keep the config tree root-owned"],
-  ];
-  for (const [path, name] of rootOwnerTasks) {
-    const doc = await yaml<unknown>(path);
-    const found = findTask(doc, name);
-    assert(found, `${path}: ${name}`);
-    const file = found["ansible.builtin.file"] as Args;
-    assert(
-      /root_owner/.test(String(file.owner)),
-      `${name}: owner ${file.owner}`,
-    );
-    assertEquals(file.follow, false, name);
-  }
+test("a root that is a symbolic link aborts the converge with a message", async () => {
+  const tasks = await yaml<Task[]>(
+    "roles/daemon-seal/tasks/roots-not-links.yml",
+  );
+  const stat = tasks.find((t) => "ansible.builtin.stat" in t)!;
+  assertEquals((stat["ansible.builtin.stat"] as Args).follow, false);
+  const gate = tasks.find((t) => "ansible.builtin.assert" in t)!;
+  const assertion = gate["ansible.builtin.assert"] as Args;
+  assert(JSON.stringify(assertion.that).includes("islnk"));
+  assert(String(assertion.fail_msg).includes("symbolic link"));
+});
+
+test("daemon-install seals both roots through the variables, like the other playbooks", async () => {
   const play = (await yaml<Array<Args>>("playbooks/daemon-install.yml"))[0];
   const vars = play.vars as Args;
-  assertEquals(vars.turbopanel_config_root_owner, "root");
-  assertEquals(vars.turbopanel_state_root_owner, "root");
+  assertEquals(vars.turbopanel_seal_config_root, true);
+  assertEquals(vars.turbopanel_seal_state_root, true);
+  assert(!("turbopanel_config_root_owner" in vars));
+  assert(!("turbopanel_state_root_owner" in vars));
 });
 
 test("co-located control-plane playbooks keep the state root shared until the hand-off is reworked", async () => {

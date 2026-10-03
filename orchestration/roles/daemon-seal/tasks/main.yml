@@ -1,0 +1,25 @@
+---
+# The last step before the daemon starts (a dependency of daemon-launch). Until
+# here the roots keep their owner, so a daemon that is still running can keep
+# renaming files into them while the leaves, the runtime and the config are
+# prepared. Then seal and sweep together: the sweep is only race-free once the
+# roots are root-owned.
+- name: Check the config and state roots are not links
+  ansible.builtin.include_tasks: roots-not-links.yml
+
+- name: Ensure the config and state roots
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ item.owner }}"
+    group: "{{ turbopanel_group }}"
+    mode: "0750"
+    follow: false
+  loop:
+    - { path: "{{ turbopanel_config_dir }}", owner: "{{ turbopanel_config_root_owner }}" }
+    - { path: "{{ turbopanel_daemon_state_dir }}", owner: "{{ turbopanel_state_root_owner }}" }
+  loop_control:
+    label: "{{ item.path }}"
+
+- name: Remove links planted at the top of the config and state roots
+  ansible.builtin.include_tasks: sweep.yml

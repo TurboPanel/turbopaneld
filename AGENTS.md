@@ -93,7 +93,9 @@ module and CI guard are the only places allowed to reference it.
 | Runtime (sockets, `daemon.lock`)                                  | `/run/turbopanel`                     |
 
 **Files at the root of the config and state trees (P1-1).** `/etc/turbopanel`
-and `/var/lib/turbopanel` end up root-owned: the daemon (`tp`) writes only its own
+and `/var/lib/turbopanel` end up root-owned (the `daemon-seal` role, last before
+the daemon restarts, with a sweep of links the daemon planted; an administrator's
+root-owned links stay): the daemon (`tp`) writes only its own
 folders below them (`DAEMON_CONFIG_LEAVES` / `DAEMON_STATE_LEAVES` in
 `src/paths/layout.ts`, created by the `daemon-layout` role). The few files that
 live at the root itself (`instance-ca.pem`, `firewall*.v4|v6`, `server.id`,

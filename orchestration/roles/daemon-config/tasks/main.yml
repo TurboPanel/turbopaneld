@@ -8,7 +8,6 @@
   ansible.builtin.file:
     path: "{{ turbopanel_daemon_state_dir }}"
     state: directory
-    owner: "{{ turbopanel_state_root_owner }}"
     group: "{{ turbopanel_group }}"
     mode: "0750"
     follow: false
@@ -43,7 +42,6 @@
   ansible.builtin.file:
     path: "{{ turbopanel_config_dir }}"
     state: directory
-    owner: "{{ turbopanel_config_root_owner }}"
     group: "{{ turbopanel_group }}"
     mode: "0750"
     follow: false

@@ -2,48 +2,14 @@
 # Managed-node FHS layout. run.sh installs bin/turbopaneld, share/orchestration/,
 # and optionally bin/turbopaneld.js (JS-fallback path only) before this playbook runs.
 
-# The config and state roots first (P1-1: root-owned on managed hosts, so the
-# daemon can no longer rename or swap any entry in them), then everything that
-# lives below them.
-- name: Ensure the config and state roots
-  ansible.builtin.file:
-    path: "{{ item.path }}"
-    state: directory
-    owner: "{{ item.owner }}"
-    group: "{{ turbopanel_group }}"
-    mode: "0750"
-    follow: false
-  loop:
-    - { path: "{{ turbopanel_config_dir }}", owner: "{{ turbopanel_config_root_owner }}" }
-    - { path: "{{ turbopanel_daemon_state_dir }}", owner: "{{ turbopanel_state_root_owner }}" }
-  loop_control:
-    label: "{{ item.path }}"
-
-# The two roots are root-owned now, so the daemon can no longer rename or swap
-# any entry in them. A link a compromised daemon planted at the top of either
-# root before this converge is removed first (find -delete never follows, and
-# the root cannot change under us any more), so nothing below acts through it.
+# The config and state roots are sealed (root-owned) later, by the daemon-seal
+# role just before the daemon starts; until then a running daemon can still
+# write into them. A link the daemon planted at the top of a root is removed
+# first, so the tasks below (which never follow links) do not trip over it.
 - name: Remove links planted at the top of the config and state roots
-  ansible.builtin.command:
-    argv:
-      - find
-      - "{{ item.path }}"
-      - -mindepth
-      - "1"
-      - -maxdepth
-      - "1"
-      - -type
-      - l
-      - -print
-      - -delete
-  when: item.seal | bool
-  loop:
-    - { path: "{{ turbopanel_config_dir }}", seal: "{{ turbopanel_seal_config_root }}" }
-    - { path: "{{ turbopanel_daemon_state_dir }}", seal: "{{ turbopanel_seal_state_root }}" }
-  loop_control:
-    label: "{{ item.path }}"
-  register: _planted_root_links
-  changed_when: _planted_root_links.stdout | default('') | length > 0
+  ansible.builtin.include_role:
+    name: daemon-seal
+    tasks_from: sweep
 
 - name: Ensure production FHS directories exist
   ansible.builtin.file:
