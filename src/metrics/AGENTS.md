@@ -85,7 +85,6 @@ The two halves degrade independently: a tick that can read `/proc/stat` but not 
 deno test src/metrics/
 deno fmt && deno lint && deno check
 deno task check:layout
-deno task check:metrics-legacy
 ```
 
 Network-topology fixtures (`topology/testdata/net-topology-bond/`, `net-topology-bridge-over-bond/`) model sysfs `lower_*` / `bonding/` / `bridge/` as empty directories — put a `.gitkeep` in each or Git drops them, and CI then classifies physical-backed bonds/bridges as `container-bridge`.
