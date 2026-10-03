@@ -423,18 +423,44 @@ function bindEntries(hostConfig: Record<string, unknown>): BindEntry[] {
   return entries;
 }
 
+/** The only volume driver the strict profile allows: the engine's own. */
+function isLocalDriver(name: unknown): boolean {
+  return name === undefined || name === null || name === "" || name === "local";
+}
+
+function driverViolation(name: unknown): Violation | undefined {
+  if (isLocalDriver(name)) return undefined;
+  return {
+    rule: "volume-driver",
+    detail: typeof name === "string" ? name : "<non-string>",
+  };
+}
+
 /**
- * A `local`-driver volume can mount a host path or block device: through
- * `o=bind,device=<path>` or any `device=/dev/...`. Returns the device when so.
+ * What a `local`-driver volume would mount, from its `type`, `o` and `device`
+ * options (the only keys the driver accepts): a host path through
+ * `o=bind` / `o=rbind` (or `type=none`), a block device, or a remote or
+ * layered filesystem. Only a plain volume, tmpfs and a bind are not findings.
  */
-function volumeDeviceOption(
-  opts: unknown,
-): { device: string; bind: boolean } | undefined {
-  if (!isRecord(opts)) return undefined;
-  const device = typeof opts.device === "string" ? opts.device : "";
-  if (!device.startsWith("/")) return undefined;
-  const options = typeof opts.o === "string" ? opts.o.split(",") : [];
-  return { device, bind: options.includes("bind") || opts.type === "none" };
+type VolumeMount = {
+  device: string;
+  type: string;
+  bind: boolean;
+  present: boolean;
+};
+
+function volumeMountOptions(opts: unknown): VolumeMount {
+  const none = { device: "", type: "", bind: false, present: false };
+  if (!isRecord(opts)) return none;
+  const text = (value: unknown) => typeof value === "string" ? value : "";
+  const device = text(opts.device);
+  const type = text(opts.type);
+  const options = text(opts.o).split(",").map((option) => option.trim());
+  const bind =
+    options.some((option) => option === "bind" || option === "rbind") ||
+    type === "none";
+  const present = device !== "" || type !== "" || options.some((o) => o !== "");
+  return { device, type, bind, present };
 }
 
 async function checkVolumeDevice(
@@ -442,30 +468,83 @@ async function checkVolumeDevice(
   config: PolicyConfig,
   resolvePath: ResolvePath,
 ): Promise<Violation[]> {
-  const found = volumeDeviceOption(opts);
-  if (!found) return [];
-  if (!found.bind) return [{ rule: "volume-device", detail: found.device }];
-  const outcome = await checkBindSource(
-    { source: found.device, readOnly: false },
-    { config, resolvePath, platform: false, ingress: false },
-  );
-  const verdict = outcome.violation;
-  if (!verdict) return [];
-  return [{ rule: `volume-${verdict.rule}`, detail: verdict.detail }];
+  const mount = volumeMountOptions(opts);
+  if (!mount.present) return [];
+  if (mount.bind && mount.device.startsWith("/")) {
+    const outcome = await checkBindSource(
+      { source: mount.device, readOnly: false },
+      { config, resolvePath, platform: false, ingress: false },
+    );
+    const verdict = outcome.violation;
+    if (!verdict) return [];
+    return [{ rule: `volume-${verdict.rule}`, detail: verdict.detail }];
+  }
+  if (mount.device.startsWith("/")) {
+    return [{ rule: "volume-device", detail: mount.device }];
+  }
+  // Deny by default: nfs, cifs, overlay and every other type, and options
+  // with no type (a bind with no device path mounts nothing legitimate).
+  if (mount.bind || mount.type !== "tmpfs") {
+    return [{ rule: "volume-mount-type", detail: mount.type || "<none>" }];
+  }
+  return [];
 }
 
-function mountVolumeOptions(hostConfig: Record<string, unknown>): unknown[] {
+/** Every `Mounts` entry of type volume, with its driver name and options. */
+function volumeMounts(
+  hostConfig: Record<string, unknown>,
+): Array<{ driver: unknown; options: unknown }> {
   if (!Array.isArray(hostConfig.Mounts)) return [];
-  const out: unknown[] = [];
+  const out: Array<{ driver: unknown; options: unknown }> = [];
   for (const mount of hostConfig.Mounts) {
     if (!isRecord(mount) || mount.Type !== "volume") continue;
-    const volumeOptions = mount.VolumeOptions;
-    if (!isRecord(volumeOptions) || !isRecord(volumeOptions.DriverConfig)) {
-      continue;
-    }
-    out.push(volumeOptions.DriverConfig.Options);
+    const config = isRecord(mount.VolumeOptions) &&
+        isRecord(mount.VolumeOptions.DriverConfig)
+      ? mount.VolumeOptions.DriverConfig
+      : {};
+    out.push({ driver: config.Name, options: config.Options });
   }
   return out;
+}
+
+/** A volume Subpath the engine joins under the volume: relative, no `..`. */
+function subpathViolation(mount: Record<string, unknown>): Violation[] {
+  const options = mount.VolumeOptions;
+  const subpath = isRecord(options) ? options.Subpath ?? "" : "";
+  if (subpath === "") return [];
+  const escapes = typeof subpath !== "string" || subpath.startsWith("/") ||
+    subpath.split("/").includes("..");
+  return escapes ? [{ rule: "volume-subpath" }] : [];
+}
+
+/** tmpfs mount flags that only narrow (or restore the defaults of) the mount. */
+const SAFE_TMPFS_OPTIONS = new Set([
+  "noexec",
+  "exec",
+  "nosuid",
+  "nodev",
+  "ro",
+  "rw",
+]);
+
+function tmpfsOptionViolations(mount: Record<string, unknown>): Violation[] {
+  const tmpfs = mount.TmpfsOptions;
+  const options = isRecord(tmpfs) ? tmpfs.Options ?? [] : [];
+  if (!Array.isArray(options)) return [{ rule: "tmpfs-options" }];
+  return options
+    .filter((option) =>
+      !Array.isArray(option) || !SAFE_TMPFS_OPTIONS.has(String(option[0]))
+    )
+    .map(() => ({ rule: "tmpfs-options" }));
+}
+
+/** Subpath and tmpfs options of every `Mounts` entry. */
+function checkMountOptions(hostConfig: Record<string, unknown>): Violation[] {
+  const mounts = Array.isArray(hostConfig.Mounts) ? hostConfig.Mounts : [];
+  return mounts.filter(isRecord).flatMap((mount) => [
+    ...subpathViolation(mount),
+    ...tmpfsOptionViolations(mount),
+  ]);
 }
 
 /** What the mounts of one create came to. */
@@ -484,12 +563,22 @@ async function checkMounts(
     if (outcome.violation) violations.push(outcome.violation);
     if (outcome.allowance) allowances.push(outcome.allowance);
   }
+  // The default driver for volumes this container creates implicitly, and the
+  // driver of each volume mount: a plugin driver can mount anything.
+  const defaultDriver = driverViolation(hostConfig.VolumeDriver);
+  if (defaultDriver) violations.push(defaultDriver);
+  const mounts = volumeMounts(hostConfig);
+  for (const mount of mounts) {
+    const found = driverViolation(mount.driver);
+    if (found) violations.push(found);
+  }
   const volumes = await Promise.all(
-    mountVolumeOptions(hostConfig).map((opts) =>
-      checkVolumeDevice(opts, ctx.config, ctx.resolvePath)
+    mounts.map((mount) =>
+      checkVolumeDevice(mount.options, ctx.config, ctx.resolvePath)
     ),
   );
   for (const list of volumes) violations.push(...list);
+  violations.push(...checkMountOptions(hostConfig));
   return { violations, allowances };
 }
 
@@ -639,10 +728,8 @@ async function evaluateVolumeCreate(
   resolvePath: ResolvePath,
 ): Promise<Violation[]> {
   if (!isRecord(body)) return [{ rule: "body-unparseable" }];
-  const driver = typeof body.Driver === "string" ? body.Driver : "";
-  if (driver !== "" && driver !== "local") {
-    return [{ rule: "volume-driver", detail: driver }];
-  }
+  const driver = driverViolation(body.Driver);
+  if (driver) return [driver];
   return await checkVolumeDevice(body.DriverOpts, config, resolvePath);
 }
 
