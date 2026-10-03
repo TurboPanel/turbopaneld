@@ -12,6 +12,8 @@
       Invalid PHP series '{{ php_fpm_series_item }}'. Expected major.minor,
       e.g. '8.4'.
 
+# php-cgi is the FastCGI per-site runtime (`turbopanel-php-<siteId>`, run by
+# systemd as the site's principal on a socket); php-fpm also runs per site.
 # Baseline extensions always, plus whatever sites on THIS series opted into.
 # Union, not intersection: extensions are host-global per series (`extension=`
 # is PHP_INI_SYSTEM and there is no per-pool loading), so one site opting in
@@ -22,7 +24,8 @@
   ansible.builtin.apt:
     name: >-
       {{
-        (['php' ~ php_fpm_series_item ~ '-fpm', 'php' ~ php_fpm_series_item ~ '-cli']
+        (['php' ~ php_fpm_series_item ~ '-fpm', 'php' ~ php_fpm_series_item ~ '-cli',
+          'php' ~ php_fpm_series_item ~ '-cgi']
           + ((php_fpm_baseline_extensions
               + (php_fpm_extensions[php_fpm_series_item] | default([])))
              | unique | sort
@@ -75,6 +78,7 @@
   loop:
     - "/usr/sbin/php-fpm{{ php_fpm_series_item }}"
     - "/usr/bin/php{{ php_fpm_series_item }}"
+    - "/usr/bin/php-cgi{{ php_fpm_series_item }}"
   register: _php_statoverride
   changed_when: _php_statoverride.rc == 0
   failed_when: false

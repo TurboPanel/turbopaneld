@@ -95,6 +95,30 @@ import type {
   SiteValidationTarget,
   StagedConfigWrite,
 } from "./site/engine-driver.ts";
+import {
+  sitePhpFpmConf,
+  sitePhpIni,
+  sitePhpKey,
+  sitePhpRuntimeId,
+  type SitePhpRuntimeMode,
+  sitePhpRuntimeMode,
+  type SitePhpRuntimeSpec,
+  sitePhpServiceUnit,
+  sitePhpSocketPath,
+  sitePhpSocketUnit,
+} from "./site/php-runtime.ts";
+import {
+  installSitePhpRuntime,
+  listSitePhpUnits,
+  type PreparedSitePhpRuntime,
+  removeSitePhpRuntimes,
+  rollbackSitePhpRuntime,
+  settleSitePhpRuntimes,
+  type SitePhpRuntimeFiles,
+  type SitePhpRuntimeIo,
+  type SitePhpUnitListing,
+} from "./site/php-runtime-apply.ts";
+import { SYSTEMD_UNIT_DIR } from "./native/unit.ts";
 
 const SAFE_ID_RE = /^[A-Za-z0-9_-]+$/;
 const SAFE_ROOT_RE = /^[A-Za-z0-9._/-]+$/;
@@ -156,6 +180,9 @@ export type SitePlaybookFn = (
 type SiteIo = {
   run: SiteRunFn;
   runPlaybook: SitePlaybookFn;
+  /** Where per-site PHP units live (`/etc/systemd/system` on a host). */
+  unitDir?: string;
+  sleep?: (ms: number) => Promise<void>;
 };
 
 let activeIo: SiteIo | undefined;
@@ -868,13 +895,20 @@ export function phpSeriesForDeploy(
   );
 }
 
-function buildApachePhpBlock(phpFpmSocket: string | null): string {
+function buildApachePhpBlock(
+  phpFpmSocket: string | null,
+  genericBackend = false,
+): string {
   if (!phpFpmSocket) {
     return `
   DirectoryIndex index.html`;
   }
   const lines = [
     "  DirectoryIndex index.php index.html",
+    // php-cgi, unlike php-fpm, does not strip the `proxy:fcgi://` prefix from
+    // SCRIPT_FILENAME: without this every script is "No input file
+    // specified" (WP0).
+    ...(genericBackend ? ["  ProxyFCGIBackendType GENERIC"] : []),
     String.raw`  <FilesMatch \.php$>`,
     `    SetHandler "proxy:unix:${phpFpmSocket}|fcgi://localhost/"`,
     "  </FilesMatch>",
@@ -997,6 +1031,7 @@ export function apacheSiteConfig(
   }
   const phpBlock = buildApachePhpBlock(
     siteNeedsPhp(site) ? phpFpmSocket : null,
+    sitePhpRuntimeMode(site) === "fastcgi",
   );
   const setenvBlock = envLines.length > 0 ? `\n${envLines.join("\n")}` : "";
   const dockerListen = dockerBindAddress
@@ -1933,22 +1968,43 @@ export type ApplySiteOpts = {
   run?: SiteRunFn;
   /** Test seam: Ansible playbook runner (vendor nginx/apache/OLS). */
   runPlaybook?: SitePlaybookFn;
+  /** Test seam: the systemd unit directory per-site PHP units go to. */
+  systemdUnitDir?: string;
+  /** Test seam: the pause before a started PHP runtime is checked. */
+  sleep?: (ms: number) => Promise<void>;
 };
 
 /** Optional test seams for {@link removeSites}. */
 export type RemoveSiteDeps = {
   run?: SiteRunFn;
+  systemdUnitDir?: string;
 };
 
 function resolveSiteIo(
-  opts?: Readonly<
-    { run?: SiteRunFn; runPlaybook?: SitePlaybookFn }
-  >,
+  opts?: Readonly<{
+    run?: SiteRunFn;
+    runPlaybook?: SitePlaybookFn;
+    systemdUnitDir?: string;
+    sleep?: (ms: number) => Promise<void>;
+  }>,
 ): SiteIo | undefined {
   if (!opts?.run && !opts?.runPlaybook) return undefined;
   return {
     run: opts.run ?? runDefault,
     runPlaybook: opts.runPlaybook ?? runSitePlaybookDefault,
+    ...(opts.systemdUnitDir === undefined
+      ? {}
+      : { unitDir: opts.systemdUnitDir }),
+    ...(opts.sleep === undefined ? {} : { sleep: opts.sleep }),
+  };
+}
+
+/** Host seams for per-site PHP runtimes, from the active apply's seams. */
+function sitePhpIo(): SitePhpRuntimeIo {
+  return {
+    run,
+    unitDir: activeIo?.unitDir ?? SYSTEMD_UNIT_DIR,
+    ...(activeIo?.sleep === undefined ? {} : { sleep: activeIo.sleep }),
   };
 }
 
@@ -1957,6 +2013,8 @@ type SiteConfigDirs = {
   nginx: string;
   apache: string;
   openlitespeed: string;
+  /** Per-site PHP runtimes on the host before this apply. */
+  phpUnits?: SitePhpUnitListing;
 };
 
 /**
@@ -2153,6 +2211,56 @@ function emptyValidationTargets(): SiteValidationTargets {
   return { caddy: [], nginx: [], apache: [], openlitespeed: [] };
 }
 
+function emptyPhpRuntimes(): Record<
+  SiteApplySpec["engine"],
+  PreparedSitePhpRuntime[]
+> {
+  return { caddy: [], nginx: [], apache: [], openlitespeed: [] };
+}
+
+/** nginx and Apache run per-site PHP runtimes (OpenLiteSpeed: WP6). */
+function sitePhpRuntimeEngine(site: SiteApplySpec): boolean {
+  return site.engine === "nginx" || site.engine === "apache";
+}
+
+/**
+ * A failed apply puts back every runtime whose engine did not roll out: one it
+ * created goes, one it changed gets its previous files. The engines' own
+ * rollback has already pointed their vhosts back at the old sockets.
+ */
+async function rollbackUnsettledPhpRuntimes(
+  plan: SiteReloadPlan,
+): Promise<void> {
+  const unsettled = SITE_ENGINE_ORDER
+    .flatMap((engine) => plan.phpRuntimes[engine])
+    .filter((runtime) => !plan.settled.has(runtime))
+    .reverse();
+  await forEachSequential(
+    unsettled,
+    (runtime) => rollbackSitePhpRuntime(sitePhpIo(), runtime),
+  );
+}
+
+/**
+ * Remove each applied site's runtimes other than the one it now uses (all of
+ * them for a site back on the shared master or without PHP).
+ */
+async function removeReplacedPhpRuntimes(
+  layout: LayoutPaths,
+  phpUnits: SitePhpUnitListing,
+  desired: ReadonlyMap<string, string | null>,
+): Promise<void> {
+  const replaced = [...phpUnits.keys()].filter((id) =>
+    [...desired].some(([key, keep]) => id.startsWith(`${key}-`) && id !== keep)
+  );
+  await removeSitePhpRuntimes(
+    sitePhpIo(),
+    layout.configDir,
+    replaced,
+    phpUnits,
+  );
+}
+
 /**
  * What one apply actually staged, and therefore what has to be rolled out.
  *
@@ -2166,10 +2274,16 @@ type SiteReloadPlan = Readonly<{
   /** Candidates waiting to be swapped in, per unit. */
   staged: SiteStagedConfigs;
   /** Engines that newly joined a principal group (restart, not reload). */
-  restartEngines: ReadonlySet<SiteApplySpec["engine"]>;
+  restartEngines: Set<SiteApplySpec["engine"]>;
   /** Post-reload HTTP probes, per engine. */
   validationTargets: SiteValidationTargets;
   openlitespeedSitesDir: string;
+  /** Per-site PHP runtimes this apply started, by the engine serving them. */
+  phpRuntimes: Readonly<
+    Record<SiteApplySpec["engine"], PreparedSitePhpRuntime[]>
+  >;
+  /** Runtimes whose engine rolled out: kept, never rolled back. */
+  settled: Set<PreparedSitePhpRuntime>;
 }>;
 
 /**
@@ -2220,27 +2334,44 @@ async function reloadSiteEngines(
     },
   );
   await forEachSequential(SITE_ENGINE_ORDER, async (engine) => {
-    if (!engineNeedsReload(engine, plan)) return;
-    await rolloutSiteConfigs({
-      run,
-      layout,
-      target: SITE_ENGINE_DRIVERS[engine],
-      restart: plan.restartEngines.has(engine),
-      staged: plan.staged[engine],
-      validationTargets: plan.validationTargets[engine],
-      // OpenLiteSpeed has no sites-enabled convention: its aggregated main
-      // config is rebuilt from every currently-active fragment, which means
-      // after this apply's fragments are live and before the config-test.
-      ...(engine === "openlitespeed"
-        ? {
-          afterPublish: () =>
-            stageOpenLiteSpeedMainConfig(layout, plan.openlitespeedSitesDir),
-        }
-        : {}),
+    const reload = engineNeedsReload(engine, plan);
+    if (reload) await rolloutEngine(layout, plan, engine);
+    if (reload) touched.push(engine);
+    // The engine serves the new sockets now (or never changed vhosts): keep
+    // its sites' runtimes, probing those no rollout probed.
+    const runtimes = plan.phpRuntimes[engine];
+    await settleSitePhpRuntimes(sitePhpIo(), runtimes, {
+      engineProbed: reload,
+      label: SITE_ENGINE_DRIVERS[engine].label,
     });
-    touched.push(engine);
+    for (const runtime of runtimes) plan.settled.add(runtime);
   });
   return touched;
+}
+
+/** One engine's swap → test → reload → probe, rolled back on failure. */
+async function rolloutEngine(
+  layout: LayoutPaths,
+  plan: SiteReloadPlan,
+  engine: SiteApplySpec["engine"],
+): Promise<void> {
+  await rolloutSiteConfigs({
+    run,
+    layout,
+    target: SITE_ENGINE_DRIVERS[engine],
+    restart: plan.restartEngines.has(engine),
+    staged: plan.staged[engine],
+    validationTargets: plan.validationTargets[engine],
+    // OpenLiteSpeed has no sites-enabled convention: its aggregated main
+    // config is rebuilt from every currently-active fragment, which means
+    // after this apply's fragments are live and before the config-test.
+    ...(engine === "openlitespeed"
+      ? {
+        afterPublish: () =>
+          stageOpenLiteSpeedMainConfig(layout, plan.openlitespeedSitesDir),
+      }
+      : {}),
+  });
 }
 
 type SitePaths = {
@@ -2253,6 +2384,8 @@ type SitePaths = {
   release?: SiteRelease;
   /** Set when this site serves out of a principal-owned `webroot/`. */
   managed?: SiteManagedDirectory;
+  /** Per-site PHP runtimes on the host before this apply, by runtime id. */
+  phpUnits?: SitePhpUnitListing;
 };
 
 /** What one site's apply staged — the only two reasons anything reloads. */
@@ -2263,6 +2396,8 @@ type ApplySiteResult = {
   phpFpmStaged: StagedConfigWrite[];
   /** Series that owns `phpFpmStaged`, when the site runs PHP. */
   phpSeries?: string;
+  /** The site's own PHP runtime, already started, when it runs per-site. */
+  phpRuntime?: PreparedSitePhpRuntime;
 };
 
 /**
@@ -2347,6 +2482,141 @@ function stagedList(
   return staged.filter((entry): entry is StagedConfigWrite => entry !== null);
 }
 
+/** The socket a site's vhost hands PHP to, and what reaching it took. */
+type SitePhpBackend = {
+  socket: string | null;
+  result: Omit<ApplySiteResult, "staged">;
+};
+
+/**
+ * Bring up whatever serves this site's PHP and name its socket.
+ *
+ * A site with a per-site mode gets its own runtime, started (and checked) here
+ * — before its vhost is staged, so the vhost only ever switches to a socket
+ * that already answers. Any other PHP site keeps a pool on the shared php-fpm
+ * master of its series.
+ */
+async function applySitePhpBackend(
+  layout: LayoutPaths,
+  environmentId: string,
+  site: SiteApplySpec,
+  paths: SitePaths,
+): Promise<SitePhpBackend> {
+  const series = resolveSitePhpSeries(site);
+  if (!series) return { socket: null, result: { phpFpmStaged: [] } };
+  const mode = sitePhpRuntimeMode(site);
+  if (mode !== null) {
+    const phpRuntime = await installSitePhpRuntime(
+      sitePhpIo(),
+      sitePhpRuntimeFiles(layout, environmentId, site, paths, mode, series),
+      { existing: paths.phpUnits ?? new Map(), probe: siteProbeTarget(site) },
+    );
+    return {
+      socket: sitePhpSocketPath(phpRuntime.files.spec.id),
+      result: { phpFpmStaged: [], phpRuntime },
+    };
+  }
+  const socket = phpFpmSocketPath(
+    layout,
+    series,
+    environmentId,
+    site.composeServiceName,
+  );
+  const pool = await applyPhpFpmPool(
+    layout,
+    environmentId,
+    site,
+    paths,
+    socket,
+    series,
+  );
+  return {
+    socket,
+    result: { phpFpmStaged: stagedList(pool), phpSeries: series },
+  };
+}
+
+/** The loopback endpoint a site has to keep answering on. */
+function siteProbeTarget(site: SiteApplySpec): SiteValidationTarget {
+  return {
+    label: site.composeServiceName,
+    url: `http://127.0.0.1:${site.listenPort}/`,
+  };
+}
+
+/**
+ * Directories PHP may write besides the owner `tmp/`: a release's `shared/`,
+ * a managed directory's `webroot/` and `shared/`. `-` lets the unit start
+ * before a directory exists.
+ */
+function sitePhpWritablePaths(
+  layout: LayoutPaths,
+  paths: SitePaths,
+): string[] {
+  if (paths.release) {
+    const home = principalHomePath(layout, paths.release.username);
+    return [`-${siteSharedDir(home, paths.release.serviceId)}`];
+  }
+  if (paths.managed) {
+    const home = principalHomePath(layout, paths.managed.username);
+    return [
+      `-${siteWebrootDir(home, paths.managed.serviceId)}`,
+      `-${siteSharedDir(home, paths.managed.serviceId)}`,
+    ];
+  }
+  return [];
+}
+
+/** Render one site's per-site PHP runtime (units and config). */
+function sitePhpRuntimeFiles(
+  layout: LayoutPaths,
+  environmentId: string,
+  site: SiteApplySpec,
+  paths: SitePaths,
+  mode: SitePhpRuntimeMode,
+  series: string,
+): SitePhpRuntimeFiles {
+  if (!site.principal) {
+    throw new Error(
+      `site ${site.composeServiceName}: PHP mode ${mode} runs as the site's principal, and the site has none`,
+    );
+  }
+  // Validates the username shape, the same gate as the site chown.
+  const user = resolveSiteOwnership(site).user;
+  const home = principalHomePath(layout, user);
+  const spec: SitePhpRuntimeSpec = {
+    id: sitePhpRuntimeId(
+      sitePhpKey(environmentId, site.composeServiceName),
+      mode,
+      series,
+    ),
+    mode,
+    series,
+    user,
+    group: principalUnixGroupName(user),
+    home,
+    configDir: layout.configDir,
+    webAccount: site.engine === "apache" ? "tpapache" : "tpnginx",
+  };
+  const values = site.php
+    ? phpAdminValues(site.php, sitePhpAdminOpts(layout, paths))
+    : [];
+  const chdir = paths.documentRoot.startsWith(`${home}/`)
+    ? { chdir: paths.documentRoot }
+    : {};
+  return {
+    spec,
+    service: sitePhpServiceUnit(spec, {
+      writablePaths: sitePhpWritablePaths(layout, paths),
+    }),
+    socket: mode === "fastcgi" ? sitePhpSocketUnit(spec) : null,
+    ini: sitePhpIni(values),
+    fpmConf: mode === "fpm"
+      ? sitePhpFpmConf(spec, { pool: phpFpmPoolOverrides(site.php), ...chdir })
+      : null,
+  };
+}
+
 async function applyCaddySite(
   layout: LayoutPaths,
   environmentId: string,
@@ -2356,37 +2626,15 @@ async function applyCaddySite(
 ): Promise<ApplySiteResult> {
   // Live include dir is FHS `/etc/turbopanel/caddy/sites/` (the site Caddy's
   // main Caddyfile imports this glob).
-  const phpSeries = resolveSitePhpSeries(site);
-  const phpFpmSocket = phpSeries
-    ? phpFpmSocketPath(
-      layout,
-      phpSeries,
-      environmentId,
-      site.composeServiceName,
-    )
-    : null;
-  const phpFpmStaged = phpSeries && phpFpmSocket
-    ? await applyPhpFpmPool(
-      layout,
-      environmentId,
-      site,
-      paths,
-      phpFpmSocket,
-      phpSeries,
-    )
-    : null;
+  const php = await applySitePhpBackend(layout, environmentId, site, paths);
   const configPath = join(paths.sitesDir, paths.configName);
   const contents = caddySiteConfig(site, paths.documentRoot, dockerBind, {
-    phpFpmSocket,
+    phpFpmSocket: php.socket,
   });
   const staged = await SITE_ENGINE_DRIVERS.caddy
     .stageSiteConfig(run, configPath, contents);
   await applySiteTreeOwnership(site, paths);
-  return {
-    staged: stagedList(staged),
-    phpFpmStaged: stagedList(phpFpmStaged),
-    ...(phpSeries ? { phpSeries } : {}),
-  };
+  return { staged: stagedList(staged), ...php.result };
 }
 
 async function applyNginxSite(
@@ -2398,39 +2646,17 @@ async function applyNginxSite(
 ): Promise<ApplySiteResult> {
   // Live include dir is FHS `/etc/turbopanel/nginx/sites/` (main nginx.conf
   // Include's this path) — no distro sites-enabled / a2ensite equivalent.
-  const phpSeries = resolveSitePhpSeries(site);
-  const phpFpmSocket = phpSeries
-    ? phpFpmSocketPath(
-      layout,
-      phpSeries,
-      environmentId,
-      site.composeServiceName,
-    )
-    : null;
-  const phpFpmStaged = phpSeries && phpFpmSocket
-    ? await applyPhpFpmPool(
-      layout,
-      environmentId,
-      site,
-      paths,
-      phpFpmSocket,
-      phpSeries,
-    )
-    : null;
+  const php = await applySitePhpBackend(layout, environmentId, site, paths);
   const configPath = join(paths.sitesDir, paths.configName);
   const contents = nginxSiteConfig(site, paths.documentRoot, dockerBind, {
-    phpFpmSocket,
+    phpFpmSocket: php.socket,
     fastcgiParamsPath: nginxFastcgiParamsPath(layout),
     releaseBacked: paths.release !== undefined,
   });
   const staged = await SITE_ENGINE_DRIVERS.nginx
     .stageSiteConfig(run, configPath, contents);
   await applySiteTreeOwnership(site, paths);
-  return {
-    staged: stagedList(staged),
-    phpFpmStaged: stagedList(phpFpmStaged),
-    ...(phpSeries ? { phpSeries } : {}),
-  };
+  return { staged: stagedList(staged), ...php.result };
 }
 
 async function applyApacheSite(
@@ -2442,38 +2668,16 @@ async function applyApacheSite(
 ): Promise<ApplySiteResult> {
   // Live include dir is FHS `/etc/turbopanel/apache/sites/` (main httpd.conf
   // IncludeOptional's this path) — no distro a2ensite.
-  const phpSeries = resolveSitePhpSeries(site);
-  const phpFpmSocket = phpSeries
-    ? phpFpmSocketPath(
-      layout,
-      phpSeries,
-      environmentId,
-      site.composeServiceName,
-    )
-    : null;
-  const phpFpmStaged = phpSeries && phpFpmSocket
-    ? await applyPhpFpmPool(
-      layout,
-      environmentId,
-      site,
-      paths,
-      phpFpmSocket,
-      phpSeries,
-    )
-    : null;
+  const php = await applySitePhpBackend(layout, environmentId, site, paths);
   const configPath = join(paths.sitesDir, paths.configName);
   const contents = apacheSiteConfig(site, paths.documentRoot, {
     dockerBindAddress: dockerBind,
-    phpFpmSocket,
+    phpFpmSocket: php.socket,
   });
   const staged = await SITE_ENGINE_DRIVERS.apache
     .stageSiteConfig(run, configPath, contents);
   await applySiteTreeOwnership(site, paths);
-  return {
-    staged: stagedList(staged),
-    phpFpmStaged: stagedList(phpFpmStaged),
-    ...(phpSeries ? { phpSeries } : {}),
-  };
+  return { staged: stagedList(staged), ...php.result };
 }
 
 /**
@@ -2727,6 +2931,9 @@ async function applyOneSite(
     base,
     documentRoot,
     configName,
+    ...(sitesDirs.phpUnits === undefined
+      ? {}
+      : { phpUnits: sitesDirs.phpUnits }),
     ...(release === undefined ? {} : { release }),
     ...(managed === undefined ? {} : { managed }),
   };
@@ -2772,6 +2979,25 @@ async function applyOneSite(
   return { ...applied, ...restart };
 }
 
+/** Fold one site's apply into the plan the engines are rolled out from. */
+function recordSiteResult(
+  plan: SiteReloadPlan,
+  site: SiteApplySpec,
+  result: ApplyOneSiteResult,
+): void {
+  if (result.phpSeries && result.phpFpmStaged.length > 0) {
+    const forSeries = plan.staged.phpFpm.get(result.phpSeries) ?? [];
+    forSeries.push(...result.phpFpmStaged);
+    plan.staged.phpFpm.set(result.phpSeries, forSeries);
+  }
+  plan.staged[site.engine].push(...result.staged);
+  if (result.restartEngine) plan.restartEngines.add(result.restartEngine);
+  if (result.phpRuntime) plan.phpRuntimes[site.engine].push(result.phpRuntime);
+  // Probed after the reload: the site has to still answer on its own
+  // loopback listener, changed config or not.
+  plan.validationTargets[site.engine].push(siteProbeTarget(site));
+}
+
 /**
  * Apply sites for one environment (nginx, Apache, and/or
  * OpenLiteSpeed — all three serve PHP).
@@ -2798,7 +3024,10 @@ export async function applySites(
     const needs = resolveSiteEngineNeeds(sites);
     // Validate every site's series before vendoring or writing anything, so a
     // bad version fails the deploy rather than half-applying.
-    for (const site of sites) resolveSitePhpSeries(site);
+    for (const site of sites) {
+      resolveSitePhpSeries(site);
+      sitePhpRuntimeMode(site);
+    }
 
     await installSiteEngines(
       needs,
@@ -2823,42 +3052,48 @@ export async function applySites(
     const releaseBindings = opts?.releaseBindings;
     const managedDirectoryBindings = opts?.managedDirectoryBindings;
     const applied: string[] = [];
-    const restartEngines: SiteEngineSet = new Set();
-    const staged = emptyStagedConfigs();
-    const validationTargets = emptyValidationTargets();
-    await forEachSequential(sites, async (site) => {
-      const result = await applyOneSite(
-        layout,
-        environmentId,
-        site,
-        sitesDirs,
-        dockerBind,
-        releaseBindings?.get(site.composeServiceName),
-        managedDirectoryBindings?.get(site.composeServiceName),
-      );
-      if (result.phpSeries && result.phpFpmStaged.length > 0) {
-        const forSeries = staged.phpFpm.get(result.phpSeries) ?? [];
-        forSeries.push(...result.phpFpmStaged);
-        staged.phpFpm.set(result.phpSeries, forSeries);
-      }
-      staged[site.engine].push(...result.staged);
-      if (result.restartEngine) restartEngines.add(result.restartEngine);
-      // Probed after the reload: the site has to still answer on its own
-      // loopback listener, changed config or not.
-      validationTargets[site.engine].push({
-        label: site.composeServiceName,
-        url: `http://127.0.0.1:${site.listenPort}/`,
-      });
-      applied.push(site.composeServiceName);
-    });
-
-    const reloaded = await reloadSiteEngines(layout, {
+    const phpUnits = sites.some(sitePhpRuntimeEngine)
+      ? await listSitePhpUnits(sitePhpIo())
+      : new Map();
+    const desiredPhpRuntimes = new Map<string, string | null>();
+    const plan: SiteReloadPlan = {
       needs,
-      staged,
-      restartEngines,
-      validationTargets,
+      staged: emptyStagedConfigs(),
+      restartEngines: new Set(),
+      validationTargets: emptyValidationTargets(),
       openlitespeedSitesDir: sitesDirs.openlitespeed,
-    });
+      phpRuntimes: emptyPhpRuntimes(),
+      settled: new Set(),
+    };
+    let reloaded: string[];
+    try {
+      await forEachSequential(sites, async (site) => {
+        const result = await applyOneSite(
+          layout,
+          environmentId,
+          site,
+          { ...sitesDirs, phpUnits },
+          dockerBind,
+          releaseBindings?.get(site.composeServiceName),
+          managedDirectoryBindings?.get(site.composeServiceName),
+        );
+        recordSiteResult(plan, site, result);
+        if (sitePhpRuntimeEngine(site)) {
+          desiredPhpRuntimes.set(
+            sitePhpKey(environmentId, site.composeServiceName),
+            result.phpRuntime?.files.spec.id ?? null,
+          );
+        }
+        applied.push(site.composeServiceName);
+      });
+      reloaded = await reloadSiteEngines(layout, plan);
+    } catch (err) {
+      await rollbackUnsettledPhpRuntimes(plan);
+      throw err;
+    }
+    // Every vhost now names its new socket and answered: only now do the
+    // runtimes it no longer names go.
+    await removeReplacedPhpRuntimes(layout, phpUnits, desiredPhpRuntimes);
 
     // `reloaded=` empty is the expected shape of a release promote that only
     // moved `current` — say so, or a skipped reload looks like a lost step.
@@ -2875,6 +3110,8 @@ export async function applySites(
 /** What one engine's removal pass took off this host. */
 type RemovedSites = {
   sitesRemoved: number;
+  /** Compose services whose site config this pass removed. */
+  services: string[];
   poolsRemoved: number;
   /** PHP series this removal actually touched — what has to be reloaded. */
   touchedSeries: Set<string>;
@@ -2897,8 +3134,10 @@ async function removePhpFpmEngineSites(
 ): Promise<RemovedSites> {
   const prefix = `tp-${environmentId}-`;
   const sitesDir = join(layout.configDir, engine, "sites");
-  const sitesRemoved =
-    (await removePrefixedConfFiles(sitesDir, prefix, engine)).length;
+  const removedNames = await removePrefixedConfFiles(sitesDir, prefix, engine);
+  const services = removedNames.map((name) =>
+    stripConfSuffix(name.slice(prefix.length))
+  );
 
   // Sweep every installed series, not just the default: the environment being
   // torn down may have pinned any of them, and this function is called once per
@@ -2915,7 +3154,12 @@ async function removePhpFpmEngineSites(
     if (removed > 0) touchedSeries.add(series);
     poolsRemoved += removed;
   });
-  return { sitesRemoved, poolsRemoved, touchedSeries };
+  return {
+    sitesRemoved: removedNames.length,
+    services,
+    poolsRemoved,
+    touchedSeries,
+  };
 }
 
 /**
@@ -3092,5 +3336,25 @@ export async function removeSites(
         );
       },
     );
+    // Last: no vhost names these sockets any more.
+    await removeEnvironmentPhpRuntimes(layout, environmentId, [
+      ...nginxRemoved.services,
+      ...apacheRemoved.services,
+    ]);
   });
+}
+
+/** Remove the per-site PHP runtimes of the given services of one environment. */
+async function removeEnvironmentPhpRuntimes(
+  layout: LayoutPaths,
+  environmentId: string,
+  services: readonly string[],
+): Promise<void> {
+  if (services.length === 0) return;
+  const keys = services.map((service) => sitePhpKey(environmentId, service));
+  const listing = await listSitePhpUnits(sitePhpIo());
+  const ids = [...listing.keys()].filter((id) =>
+    keys.some((key) => id.startsWith(`${key}-`))
+  );
+  await removeSitePhpRuntimes(sitePhpIo(), layout.configDir, ids, listing);
 }

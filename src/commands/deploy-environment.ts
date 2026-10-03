@@ -88,10 +88,12 @@ import {
 import {
   applySites,
   resolveSiteDocumentRoot,
+  resolveSitePhpSeries,
   type SiteManagedDirectory,
   type SiteRelease,
 } from "../deploy/site.ts";
 import { detectSiteApps } from "../deploy/site-apps.ts";
+import { sitePhpRuntimeMode } from "../deploy/site/php-runtime.ts";
 import { applyCronJobs, type CronApplySpec } from "../deploy/cron/apply.ts";
 import {
   type AppliedRelease,
@@ -515,8 +517,8 @@ async function ensureDeployIngress(
  * has to be created before the release engine runs — even when nothing else in
  * the payload references that principal.
  */
-function deployPrincipalSpecs(
-  parsedPayload: EnvironmentDeployPayload,
+export function deployPrincipalSpecs(
+  parsedPayload: Pick<EnvironmentDeployPayload, "sourceMaterial" | "sites">,
   principalMaterial: EnvironmentDeployPrincipalMaterial[],
 ): EnvironmentDeployPrincipalMaterial[] {
   const byId = new Map<string, EnvironmentDeployPrincipalMaterial>();
@@ -533,7 +535,42 @@ function deployPrincipalSpecs(
       ...(principal.gid === undefined ? {} : { gid: principal.gid }),
     });
   }
-  return [...byId.values()];
+  return withSitePhpRuntimes([...byId.values()], parsedPayload.sites ?? []);
+}
+
+/**
+ * A per-site PHP runtime runs `php-cgi<series>` / `php-fpm<series>` as the
+ * site's principal, and those binaries are `0750 root:tpphp<series>`: the
+ * principal must hold that series' entitlement or its unit dies `203/EXEC`.
+ * The wire grants runtimes for what the tenant runs by hand; a site the
+ * daemon itself runs as the principal implies its own, the way a native app
+ * implies its Node series.
+ */
+function withSitePhpRuntimes(
+  principals: EnvironmentDeployPrincipalMaterial[],
+  sites: readonly EnvironmentDeploySite[],
+): EnvironmentDeployPrincipalMaterial[] {
+  const implied = new Map<string, Set<string>>();
+  for (const site of sites) {
+    if (!site.principal || sitePhpRuntimeMode(site) === null) continue;
+    const series = resolveSitePhpSeries(site);
+    if (!series) continue;
+    const set = implied.get(site.principal.principalId) ?? new Set<string>();
+    set.add(series);
+    implied.set(site.principal.principalId, set);
+  }
+  return principals.map((principal) => {
+    const series = implied.get(principal.principalId);
+    if (!series) return principal;
+    const runtimes = [...(principal.runtimes ?? [])];
+    for (const entry of series) {
+      const held = runtimes.some((r) =>
+        r.runtime === "php" && r.series === entry
+      );
+      if (!held) runtimes.push({ runtime: "php", series: entry });
+    }
+    return { ...principal, runtimes };
+  });
 }
 
 async function ensureDeployPrincipals(

@@ -981,6 +981,7 @@ test({
         keysChanged: [],
         keysRemoved: [],
         sshdReloaded: false,
+        sftpChroot: false,
         warnings: [],
         summary: "principals stub",
       },

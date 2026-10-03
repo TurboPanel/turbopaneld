@@ -766,7 +766,10 @@ it regresses:
     refuses. `build-return <build-id>` chowns the tree back to the caller only
     once `turbopanel-build-<id>.service` is inactive; abort is
     `systemctl stop turbopanel-build-<id>.service`. `turbopanel-build-*.service`
-    unit files are refused at install;
+    unit files are refused at install. On a managed host the daemon sends
+    every native/static release build through it
+    (`src/deploy/release/build-sandbox.ts`), so no tenant build command runs
+    as `tp`;
   `src/permissions/tp-host.test.ts` runs it unprivileged in its test mode
   (`TP_HOST_TEST_PREFIX`, ignored as root) against the daemon's own rendered
   units and a hostile corpus. Known gap: it is TOCTOU-safe for paths it pins,
