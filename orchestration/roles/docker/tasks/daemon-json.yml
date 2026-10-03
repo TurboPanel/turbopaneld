@@ -32,6 +32,9 @@
   ansible.builtin.set_fact:
     _docker_colocated_instance_host: "{{ _docker_instance_unit_stat.stat.exists }}"
 
+- name: Decide whether dockerd may be restarted automatically
+  ansible.builtin.include_tasks: restart-gate.yml
+
 - name: Check for an existing daemon.json
   ansible.builtin.stat:
     path: /etc/docker/daemon.json
@@ -104,6 +107,15 @@
 # written value instead of leaving it behind; everything else passes through
 # as-is. live-restore is always forced true — never conditionally combined
 # — since it has no "clear" case the way the address-pool keys do.
+# Converge on an already-provisioned host (tasks/converge-builder.yml) knows
+# neither the org's address pools nor whether this host applied any, so it must
+# not strip or rewrite them: only the builder section is merged there.
+- name: Build the merged daemon.json (builder entitlements only)
+  ansible.builtin.set_fact:
+    _docker_daemon_json_merged: >-
+      {{ _docker_daemon_json_current | combine({'builder': _docker_builder_merged}) }}
+  when: turbopanel_docker_builder_only | bool
+
 - name: Build the merged daemon.json (owned keys only; other keys preserved)
   ansible.builtin.set_fact:
     _docker_daemon_json_merged: >-
@@ -132,6 +144,7 @@
               if (turbopanel_docker_deny_builder_entitlements | bool) else {})
           )
       }}
+  when: not (turbopanel_docker_builder_only | bool)
 
 - name: Ensure /etc/docker exists
   ansible.builtin.file:
@@ -149,8 +162,8 @@
           if (turbopanel_docker_address_pools | length == 0
               and turbopanel_docker_default_bridge_cidr | length == 0)
           else ', setting default-address-pools/bip' }}).
-      {{ 'This host runs the co-located instance — dockerd will NOT be restarted automatically; restart it by hand once you have confirmed the new file.'
-          if _docker_colocated_instance_host
+      {{ 'dockerd will NOT be restarted automatically (co-located instance host, or the running dockerd has no live-restore); a pending marker is left and a later converge restarts it once live-restore is running.'
+          if _docker_restart_deferred
           else 'dockerd RESTARTS. Existing containers keep their current addresses and existing networks keep their subnets — the pools only affect networks created afterwards.' }}
   when: >-
     (_docker_daemon_json_merged | to_nice_json)
@@ -167,12 +180,12 @@
   register: _docker_daemon_json_write
   notify: Restart docker
 
-# The handler never restarts dockerd on a co-located instance host, so a change
-# there would otherwise never take effect. Leave a root-owned marker instead,
+# The handler never restarts dockerd while the restart is deferred (see
+# restart-gate.yml), so a change there would otherwise never take effect. Leave a root-owned marker instead,
 # and on this and every later converge restart dockerd once the RUNNING dockerd
 # already has live-restore (containers, the instance's included, keep running
 # across the restart). Until then every converge says a restart is pending.
-- name: Mark a dockerd restart pending on a co-located instance host
+- name: Mark a dockerd restart pending when the restart is deferred
   ansible.builtin.copy:
     dest: "{{ turbopanel_docker_restart_pending_file }}"
     content: "daemon.json changed; dockerd has not been restarted to apply it\n"
@@ -181,7 +194,7 @@
     mode: "0640"
   when:
     - _docker_daemon_json_write is changed
-    - _docker_colocated_instance_host | bool
+    - _docker_restart_deferred | bool
 
 - name: Look for a pending dockerd restart
   ansible.builtin.stat:
