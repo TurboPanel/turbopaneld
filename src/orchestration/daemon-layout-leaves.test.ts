@@ -38,11 +38,13 @@ test("the role's leaf lists equal the layout tables", async () => {
   ]);
 });
 
-test("leaf names are single path segments with no duplicates", () => {
+test("leaf names are plain folder names (one nested level at most) with no duplicates", () => {
   for (const leaves of [DAEMON_CONFIG_LEAVES, DAEMON_STATE_LEAVES]) {
     const names = leaves.map((leaf) => leaf.name);
     assertEquals(new Set(names).size, names.length);
-    for (const name of names) assert(/^[a-z][a-z0-9-]*$/.test(name), name);
+    for (const name of names) {
+      assert(/^[a-z][a-z0-9-]*(\/[a-z][a-z0-9-]*)?$/.test(name), name);
+    }
   }
 });
 

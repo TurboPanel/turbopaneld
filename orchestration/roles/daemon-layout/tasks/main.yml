@@ -36,9 +36,13 @@
       }
     - { path: "{{ turbopanel_config_dir }}", mode: "0750" }
     - { path: "{{ turbopanel_daemon_state_dir }}", mode: "0750" }
+    # Only the tunnels folder below it is the daemon's (a leaf); this one is
+    # root's, so the daemon cannot swap it.
     - {
-        path: "{{ turbopanel_daemon_state_dir }}/cloudflared/tunnels",
+        path: "{{ turbopanel_daemon_state_dir }}/cloudflared",
         mode: "0750",
+        owner: "root",
+        group: "{{ turbopanel_group }}",
       }
     - {
         path: "{{ turbopanel_run_dir | default('/run/turbopanel') }}",

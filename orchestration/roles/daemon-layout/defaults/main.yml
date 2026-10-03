@@ -8,6 +8,7 @@ turbopanel_daemon_config_leaves:
   - { name: proxysql, mode: "0750" }
   - { name: orchestrator, mode: "0750" }
   - { name: node-apps, mode: "0750" }
+  - { name: hosting, mode: "0750" }
 turbopanel_daemon_state_leaves:
   - { name: update, mode: "0750" }
   - { name: system, mode: "0750" }
@@ -20,5 +21,6 @@ turbopanel_daemon_state_leaves:
   - { name: backup, mode: "0750" }
   - { name: spool, mode: "0700" }
   - { name: network, mode: "0700" }
-  - { name: cloudflared, mode: "0750" }
+  - { name: cloudflared/tunnels, mode: "0750" }
+  - { name: tls, mode: "0750" }
   - { name: orchestrator, mode: "0750" }

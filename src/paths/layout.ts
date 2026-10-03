@@ -503,6 +503,8 @@ export const DAEMON_CONFIG_LEAVES: readonly DaemonLeaf[] = [
   { name: "proxysql", mode: "0750" },
   { name: "orchestrator", mode: "0750" },
   { name: "node-apps", mode: "0750" },
+  // The hosting Caddy's config; the hosting-caddy role adds its default ACL.
+  { name: "hosting", mode: "0750" },
 ];
 
 export const DAEMON_STATE_LEAVES: readonly DaemonLeaf[] = [
@@ -517,7 +519,8 @@ export const DAEMON_STATE_LEAVES: readonly DaemonLeaf[] = [
   { name: "backup", mode: "0750" },
   { name: "spool", mode: "0700" },
   { name: "network", mode: "0700" },
-  { name: "cloudflared", mode: "0750" },
+  { name: "cloudflared/tunnels", mode: "0750" },
+  { name: "tls", mode: "0750" },
   { name: "orchestrator", mode: "0750" },
 ];
 
