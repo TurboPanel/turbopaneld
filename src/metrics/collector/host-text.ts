@@ -13,6 +13,10 @@
  * drive) has its own slower TTL. Every source degrades to "absent".
  */
 import { parseVmstat } from "./parse-vmstat.ts";
+import type {
+  MetricsExtended,
+  MetricsTextFields,
+} from "../../contracts/metrics-contract.ts";
 import { parseMdstat } from "./events/mdstat.ts";
 import { parseSmartctlJson } from "./events/smart.ts";
 import { parseProcMounts } from "./mounts.ts";
@@ -212,6 +216,23 @@ export function parsePhpPool(cgroup: string | undefined): string | undefined {
   return shortName(cgroup ? PHP_POOL_RE.exec(cgroup)?.[1] : undefined);
 }
 
+const SHARED_FPM_RE = /turbopanel-php-fpm@[\w.-]+?(?:\.service|\/|$)/m;
+const FPM_WORKER_POOL_RE = /^php-fpm: pool ([\w.-]+)/;
+
+/**
+ * Pool (site id) of a worker under a shared `turbopanel-php-fpm@<series>`
+ * master (nginx and Apache sites): the cgroup is the shared unit, so the pool
+ * comes from the worker's process title, `php-fpm: pool <site id>`.
+ */
+export function parseSharedFpmPool(
+  cgroup: string | undefined,
+  cmdline: string | undefined,
+): string | undefined {
+  if (!cgroup || !cmdline || !SHARED_FPM_RE.test(cgroup)) return undefined;
+  const title = cmdline.split("\0")[0].trim();
+  return shortName(FPM_WORKER_POOL_RE.exec(title)?.[1]);
+}
+
 const ENGINE_PACKAGES = ["caddy", "nginx", "openlitespeed", "apache2"];
 
 /** `name version` for installed web-engine packages from a dpkg status file. */
@@ -380,7 +401,14 @@ export class HostTextCollector {
     if (!parsed) return undefined;
     const row: ProcRow = { pid, ...parsed, rss: parseStatmRss(statm) };
     if (parsed.comm.startsWith("php-fpm")) {
-      row.pool = parsePhpPool(await this.#io.readFile(`/proc/${pid}/cgroup`));
+      const cgroup = await this.#io.readFile(`/proc/${pid}/cgroup`);
+      row.pool = parsePhpPool(cgroup) ??
+        (SHARED_FPM_RE.test(cgroup ?? "")
+          ? parseSharedFpmPool(
+            cgroup,
+            await this.#io.readFile(`/proc/${pid}/cmdline`),
+          )
+          : undefined);
     }
     return row;
   }
@@ -457,6 +485,56 @@ function maxBy<T>(rows: T[], score: (row: T) => number): T | undefined {
     }
   }
   return best;
+}
+
+/** The contract's text blocks (`extended.text`, `extended.blockDeviceText`). */
+export type HostTextExtended = Pick<
+  MetricsExtended,
+  "text" | "blockDeviceText"
+>;
+
+const joinList = (list: string[] | undefined) =>
+  list?.length ? list.join(",") : undefined;
+
+/**
+ * Map the collected facts onto the #256 contract's text keys (string values).
+ * Keys the contract does not name are never emitted: the control plane drops
+ * them silently.
+ */
+export function hostTextToExtended(sample: HostTextSample): HostTextExtended {
+  const text: MetricsTextFields = {};
+  const set = (key: keyof MetricsTextFields, value: string | undefined) => {
+    if (value) text[key] = value;
+  };
+  set("kernel", sample.kernel);
+  set("os", sample.os);
+  set("virt", sample.virt);
+  set("cloudProvider", sample.cloudProvider);
+  set("failedUnits", joinList(sample.unhealthyUnits));
+  set("raidState", sample.raidState);
+  if (sample.rebootRequired !== undefined) {
+    set("rebootRequired", sample.rebootRequired ? "yes" : "no");
+  }
+  if (sample.clockSynced !== undefined) {
+    set("timeSync", sample.clockSynced ? "synced" : "unsynced");
+  }
+  if (sample.pendingUpdates !== undefined) {
+    set("pendingUpdates", String(sample.pendingUpdates));
+  }
+  set("phpVersions", joinList(sample.phpVersions));
+  set("topCpu", sample.topCpuProcess);
+  set("topMem", sample.topMemProcess);
+  set("fsReadOnly", joinList(sample.readOnlyFilesystems));
+  set("lastOom", sample.lastOomVictim);
+  set("webEngines", joinList(sample.webEngines));
+  set("fpmBusiest", sample.fpmBusiest);
+  const out: HostTextExtended = {};
+  if (Object.keys(text).length > 0) out.text = text;
+  const drives = Object.entries(sample.smart ?? {}).map((
+    [deviceId, smart],
+  ) => ({ deviceId, smart }));
+  if (drives.length > 0) out.blockDeviceText = drives;
+  return out;
 }
 
 function dropEmpty(sample: HostTextSample): HostTextSample {

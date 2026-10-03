@@ -1,14 +1,17 @@
 import { assertEquals } from "@std/assert";
+import { METRICS_TEXT_FIELD_NAMES } from "../../contracts/metrics-contract.ts";
 import {
   HOST_TEXT_TTL_MS,
   HostTextCollector,
   type HostTextIo,
+  hostTextToExtended,
   parseCloudProvider,
   parseFailedUnits,
   parseLastOomVictim,
   parseOs,
   parsePhpPool,
   parseProcStat,
+  parseSharedFpmPool,
   parseVirt,
   parseWebEngines,
   raidStateFromMdstat,
@@ -244,4 +247,78 @@ test("OOM victim: dmesg only runs when the kernel counter moved, victim sticks",
   clock.t *= 3;
   assertEquals((await collector.read()).lastOomVictim, "php-fpm8.3");
   assertEquals(dmesgRuns, 1);
+});
+
+Deno.test("hostTextToExtended uses exactly the contract's text keys", () => {
+  const { text, blockDeviceText } = hostTextToExtended({
+    kernel: "6.1",
+    unhealthyUnits: ["a.service", "b.service"],
+    rebootRequired: true,
+    clockSynced: false,
+    pendingUpdates: 4,
+    phpVersions: ["8.2", "8.3"],
+    topCpuProcess: "php-fpm",
+    topMemProcess: "mysqld",
+    readOnlyFilesystems: ["/data"],
+    lastOomVictim: "node",
+    smart: { sda: "ok" },
+  });
+  assertEquals(text, {
+    kernel: "6.1",
+    failedUnits: "a.service,b.service",
+    rebootRequired: "yes",
+    timeSync: "unsynced",
+    pendingUpdates: "4",
+    phpVersions: "8.2,8.3",
+    topCpu: "php-fpm",
+    topMem: "mysqld",
+    fsReadOnly: "/data",
+    lastOom: "node",
+  });
+  assertEquals(blockDeviceText, [{ deviceId: "sda", smart: "ok" }]);
+  for (const key of Object.keys(text ?? {})) {
+    assertEquals(
+      (METRICS_TEXT_FIELD_NAMES as readonly string[]).includes(key),
+      true,
+    );
+  }
+  assertEquals(hostTextToExtended({}), {});
+});
+
+Deno.test("shared php-fpm masters attribute workers to the pool in the process title", () => {
+  const cg =
+    "0::/system.slice/system-turbopanel\\x2dphp\\x2dfpm.slice/turbopanel-php-fpm@8.3.service\n";
+  assertEquals(parsePhpPool(cg), undefined);
+  assertEquals(parseSharedFpmPool(cg, "php-fpm: pool site42\0"), "site42");
+  assertEquals(
+    parseSharedFpmPool(cg, "php-fpm: master process (/x.conf)\0"),
+    undefined,
+  );
+  assertEquals(
+    parseSharedFpmPool("0::/other.service\n", "php-fpm: pool a\0"),
+    undefined,
+  );
+});
+
+Deno.test("fpmBusiest includes workers of a shared php-fpm master", async () => {
+  const stat = `1 (php-fpm8.3) S 1 1 1 0 -1 0 0 0 0 0 1 0 0 0`;
+  const io: HostTextIo = {
+    readFile: (p) => {
+      if (p.endsWith("/stat")) return stat;
+      if (p === "/proc/21/statm") return "1 900 0";
+      if (p === "/proc/22/statm") return "1 100 0";
+      if (p.endsWith("/cgroup")) return "0::/turbopanel-php-fpm@8.3.service";
+      if (p === "/proc/21/cmdline") return "php-fpm: pool shared-a\0";
+      if (p === "/proc/22/cmdline") return "php-fpm: pool shared-b\0";
+      return undefined;
+    },
+    listPids: () => Promise.resolve(["21", "22"]),
+    run: () => Promise.resolve(null),
+    clockSynced: () => undefined,
+    phpVersions: () => [],
+    blockDisks: () => Promise.resolve([]),
+    now: () => 0,
+    pageSizeBytes: 4096,
+  };
+  assertEquals((await new HostTextCollector(io).read()).fpmBusiest, "shared-a");
 });
