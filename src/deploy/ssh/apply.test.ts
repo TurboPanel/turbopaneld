@@ -1213,3 +1213,32 @@ test("a world-readable sshd_config is read without asking tp-host", async () => 
     await host.cleanup();
   }
 });
+
+test("a refused rewrite restores the previous drop-in tp-host would not cat", async () => {
+  const host = await makeHost();
+  try {
+    await apply(host, [{ username: "appuser", keys: [ED25519] }]);
+    const good = await Deno.readTextFile(host.dropInPath);
+    // tp-host's `cat` serves only TurboPanel's trees and refuses the drop-in.
+    const fake = host.run;
+    host.run = (command, args) =>
+      args.includes(host.dropInPath) && args.includes("cat")
+        ? Promise.resolve(fail(`tp-host: refusing path ${host.dropInPath}`))
+        : fake(command, args);
+    host.sshdTestError = "line 3: Bad configuration option";
+    await assertRejects(() =>
+      applySshAccess(
+        [{ username: "appuser", keys: [ED25519] }],
+        {
+          authorizedKeysDir: join(host.root, "etc/ssh/turbopanel/moved"),
+          sshdConfigPath: host.sshdConfigPath,
+          sshdDropInPath: host.dropInPath,
+        },
+        host.run,
+      )
+    );
+    assertEquals(await Deno.readTextFile(host.dropInPath), good);
+  } finally {
+    await host.cleanup();
+  }
+});

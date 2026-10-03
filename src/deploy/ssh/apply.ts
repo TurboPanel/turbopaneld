@@ -117,14 +117,16 @@ async function readPrivileged(
 }
 
 /**
- * The administrator's `sshd_config`, read directly when it is readable (Debian
- * ships it `root:root 0644`) and through `sudo` only when it is not.
+ * An `sshd` config file — the administrator's `sshd_config` or our drop-in —
+ * read directly when it is readable (both are `root:root 0644`) and through
+ * `sudo` only when it is not.
  *
  * Direct first because tp-host's `cat` serves only TurboPanel's own trees and
- * refuses `/etc/ssh/sshd_config`, so the privileged read alone failed every
- * SSH reconcile on a managed host.
+ * refuses both paths: the privileged read alone failed every SSH reconcile on
+ * a managed host, and made every existing drop-in look absent, so a refused
+ * rewrite "rolled back" by deleting it.
  */
-async function readSshdConfig(
+async function readSshdFile(
   runFn: RunFn,
   path: string,
 ): Promise<string | null> {
@@ -361,7 +363,7 @@ async function reconcileDropIn(
   verify?: () => Promise<RunResult>,
 ): Promise<boolean> {
   const backup = `${dropInPath}.tpprev`;
-  const existing = await readPrivileged(runFn, dropInPath);
+  const existing = await readSshdFile(runFn, dropInPath);
   if (existing !== null) {
     const snapshot = await runFn(
       "sudo",
@@ -514,7 +516,7 @@ export async function applySshAccess(
   );
 
   const warnings: string[] = [];
-  const sshdConfig = await readSshdConfig(runFn, sshdConfigPath);
+  const sshdConfig = await readSshdFile(runFn, sshdConfigPath);
   if (sshdConfig === null) {
     throw new Error(
       `Could not read ${sshdConfigPath}; SSH access cannot be configured on this host`,
