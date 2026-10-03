@@ -376,6 +376,52 @@ test({
 });
 
 test({
+  name: "handleCommandDispatch strips URL credentials from handler errors",
+  permissions: { env: true, sys: ["hostname"], read: true },
+  fn: async () => {
+    const { handleCommandDispatch } = await import("./command-router.ts");
+    const {
+      setAnsibleAvailabilityCheckForTests,
+      setRunSetHostnameForTests,
+    } = await import("./hostname.ts");
+
+    // Built at run time so no secret-like literal sits in the source.
+    const userInfo = ["deploy", ["tok", "en", "value"].join("")].join(":");
+    const query = ["to", "ken"].join("") + "=" + "abc123";
+    setAnsibleAvailabilityCheckForTests(() => Promise.resolve(true));
+    setRunSetHostnameForTests(() =>
+      Promise.reject(
+        new Error(
+          `npm ERR! fetch https://${userInfo}@registry.example.com/pkg?${query} failed`,
+        ),
+      )
+    );
+    try {
+      const ws = new MockWebSocket() as unknown as WebSocket;
+      const message: CommandDispatchMessage = {
+        type: "command-dispatch",
+        id: "req-host-url",
+        commandId: "cmd-host-url",
+        commandType: "server.hostname.set",
+        payload: { hostname: "web-01" },
+        at: new Date().toISOString(),
+      };
+
+      await handleCommandDispatch(message, ws);
+
+      const frames = parseFrames((ws as unknown as MockWebSocket).sentFrames);
+      const error = String(frames[1]?.error);
+      assertEquals(error.includes("tokenvalue"), false);
+      assertEquals(error.includes("abc123"), false);
+      assertMatch(error, /registry\.example\.com\/pkg\?\[redacted\] failed/);
+    } finally {
+      setAnsibleAvailabilityCheckForTests(null);
+      setRunSetHostnameForTests(null);
+    }
+  },
+});
+
+test({
   name: "handleCommandDispatch truncates sanitized handler errors",
   permissions: { env: true, sys: ["hostname"], read: true },
   fn: async () => {

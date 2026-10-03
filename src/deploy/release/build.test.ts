@@ -452,6 +452,21 @@ test("deriveNodeInstallCommand picks pnpm dev-deps flags by pinned major", async
   }
 });
 
+test("deriveNodeInstallCommand ignores a pin for a different manager than packageManager=pnpm", async () => {
+  for (const pin of ["yarn@4.5.0", "npm@10.8.0"]) {
+    await withWorkingDir(async (workingDir) => {
+      await Deno.writeTextFile(
+        join(workingDir, "package.json"),
+        JSON.stringify({ packageManager: pin }),
+      );
+      assertEquals(
+        await deriveNodeInstallCommand({ packageManager: "pnpm", workingDir }),
+        "corepack pnpm install --config.production=false",
+      );
+    });
+  }
+});
+
 test("deriveNodeInstallCommand treats Yarn Berry as immutable-by-CI", async () => {
   // Berry via the package.json packageManager pin.
   await withWorkingDir(async (workingDir) => {
