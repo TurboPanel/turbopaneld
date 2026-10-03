@@ -599,6 +599,10 @@ const SITES: CallSite[] = [
     },
   ),
   tpHost(
+    'src/deploy/retire-principals.ts|["-n","principal-remove",username]',
+    { argv: ["principal-remove", "alice"] },
+  ),
+  tpHost(
     'src/deploy/ensure-principal.ts|["-n","gpasswd","-d",user,groupName]',
     {
       argv: ["gpasswd", "-d", "alice", "tpsftp"],
