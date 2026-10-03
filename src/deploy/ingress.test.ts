@@ -3410,7 +3410,7 @@ Deno.test("the hosting Caddyfile exposes totals-only metrics on loopback, with n
   const text = caddyfile("/etc/turbopanel");
   assertStringIncludes(
     text,
-    "http://127.0.0.1:2049 {\n  bind 127.0.0.1\n  metrics\n}",
+    "http://127.0.0.1:18110 {\n  bind 127.0.0.1\n  metrics\n}",
   );
   assertStringIncludes(text, "  metrics\n  servers {");
   assertEquals(text.includes("per_host"), false);

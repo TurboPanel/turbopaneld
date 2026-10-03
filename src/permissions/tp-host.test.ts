@@ -2828,6 +2828,23 @@ test("site-usage prints home and site sizes only, never follows a symlink and ta
       rows.every((r) => r.length === 3 && /^\d+$/.test(r[1]!)),
       true,
     );
+    // One walk per home: each home and each site appears exactly once.
+    assertEquals(
+      rows.filter((r) => r[0] === "home" && r[2] === "alice").length,
+      1,
+    );
+    assertEquals(
+      rows.filter((r) => r[0] === "site" && r[2] === "web").length,
+      1,
+    );
+    const script = await Deno.readTextFile(
+      new URL("../../orchestration/scripts/tp-host", import.meta.url),
+    );
+    assertEquals(/ionice -c3 nice -n 19 du /.test(script), true);
+    assertEquals(
+      /timeout -k 5 "\$TP_SITE_USAGE_HOME_SECONDS"/.test(script),
+      true,
+    );
     await refused(host, ["site-usage", "/etc"]);
   });
 });

@@ -295,7 +295,7 @@ test("CaddyIngressAdapter scrapes the hosting Caddy's metrics listener, not the 
     },
   });
   await adapter.read(ctx());
-  assertEquals(addrs, ["127.0.0.1:2049"]);
+  assertEquals(addrs, ["127.0.0.1:18110"]);
 });
 
 test("parseCaddyExposition does not count the metrics listener's own scrapes", () => {

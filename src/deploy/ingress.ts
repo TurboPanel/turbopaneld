@@ -165,10 +165,12 @@ const HOSTING_CADDY_ADMIN_ADDR = `unix/${HOSTING_CADDY_ADMIN_SOCKET}`;
  * Loopback port of the hosting Caddy's metrics-only listener: Prometheus text
  * from the `metrics` handler and nothing else (the admin API stays a unix
  * socket). Totals only: `metrics` is rendered without `per_host`, so no
- * per-site label ever leaves Caddy. 2019, 2029 and 2039 are taken by the dev
- * panel Caddy, the old hosting admin and the site Caddy's listener.
+ * per-site label ever leaves Caddy. Not 2049 (NFS: a host running an NFS server
+ * would stop the whole hosting Caddy from binding), and not the 2019/2029/2039
+ * Caddy admin ports; 18110 sits beside the other platform loopback ports
+ * (18080, 18081, 18099, 18100, 18300).
  */
-export const HOSTING_CADDY_METRICS_PORT = 2049;
+export const HOSTING_CADDY_METRICS_PORT = 18110;
 /** Loopback address `metrics/collector/ingress/caddy.ts` scrapes. */
 export const HOSTING_CADDY_METRICS_ADDR =
   `127.0.0.1:${HOSTING_CADDY_METRICS_PORT}`;

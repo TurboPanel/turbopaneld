@@ -2971,34 +2971,55 @@ tp_verb_cert_dates() {
 # directory names only, `home <bytes> <name>` / `site <bytes> <id>`; no file
 # name or content is printed. Nothing follows a symlink: each directory is
 # pinned with `cd -P`, and `du -P` never follows one.
-tp_site_usage_kib() {
-  nice -n 19 du -skxP -- "$1" 2>/dev/null | cut -f1
+# One bounded walk per home: `du -d 2` reports the home itself (depth 0) and
+# every directory two levels down, which includes `sites/<id>`, so no file is
+# visited twice. Idle I/O class and lowest CPU priority where the tools exist,
+# a hard per-home limit, and a time budget for the whole verb so a home with
+# millions of files cannot hold root busy: a home that times out is skipped.
+TP_SITE_USAGE_HOME_SECONDS=120
+TP_SITE_USAGE_TOTAL_SECONDS=600
+
+tp_site_usage_walk() {
+  if command -v ionice >/dev/null 2>&1; then
+    set -- ionice -c3 nice -n 19 du -kxP -d 2 -- .
+  else
+    set -- nice -n 19 du -kxP -d 2 -- .
+  fi
+  if command -v timeout >/dev/null 2>&1; then
+    timeout -k 5 "$TP_SITE_USAGE_HOME_SECONDS" "$@" 2>/dev/null
+  else
+    "$@" 2>/dev/null
+  fi
 }
 
-tp_site_usage_sites() {
-  _ss_name="$1"
-  tp_pin_dir "$R_PRINCIPALS/$_ss_name/sites" 2>/dev/null || return 0
-  for _ss_site in ./*; do
-    [ -d "$_ss_site" ] && [ ! -L "$_ss_site" ] || continue
-    _ss_id="${_ss_site#./}"
-    tp_name_shape_ok "$_ss_id" || continue
-    _ss_kib="$(tp_site_usage_kib "$_ss_site")"
-    case "$_ss_kib" in ''|*[!0-9]*) continue ;; esac
-    printf 'site %s %s\n' "$((_ss_kib * 1024))" "$_ss_id"
-  done
+# Reads `du` rows from stdin, prints the home row first, then each site row.
+tp_site_usage_rows() {
+  _sr_name="$1"
+  _sr_rows="$(cat)"
+  _sr_home="$(printf '%s\n' "$_sr_rows" | awk -F'\t' '$2 == "." { print $1; exit }')"
+  case "$_sr_home" in ''|*[!0-9]*) return 1 ;; esac
+  printf 'home %s %s\n' "$((_sr_home * 1024))" "$_sr_name"
+  printf '%s\n' "$_sr_rows" | awk -F'\t' '$2 ~ /^\.\/sites\/[^\/]+$/ { print $1 "\t" substr($2, 9) }' |
+    while IFS="$(printf '\t')" read -r _sr_kib _sr_id; do
+      case "$_sr_kib" in ''|*[!0-9]*) continue ;; esac
+      tp_name_shape_ok "$_sr_id" || continue
+      printf 'site %s %s\n' "$((_sr_kib * 1024))" "$_sr_id"
+    done
 }
 
 tp_verb_site_usage() {
   [ "$#" -eq 0 ] || tp_die "site-usage: takes no arguments"
   tp_pin_dir "$R_PRINCIPALS" 2>/dev/null || return 0
+  _su_started="$(date +%s)"
   for _su_home in ./*; do
     [ -d "$_su_home" ] && [ ! -L "$_su_home" ] || continue
     _su_name="${_su_home#./}"
     tp_name_shape_ok "$_su_name" || continue
-    _su_kib="$(tp_site_usage_kib "$_su_home")"
-    case "$_su_kib" in ''|*[!0-9]*) continue ;; esac
-    printf 'home %s %s\n' "$((_su_kib * 1024))" "$_su_name"
-    (tp_site_usage_sites "$_su_name") || true
+    [ "$(($(date +%s) - _su_started))" -lt "$TP_SITE_USAGE_TOTAL_SECONDS" ] || break
+    (
+      tp_pin_dir "$R_PRINCIPALS/$_su_name" 2>/dev/null || exit 0
+      tp_site_usage_walk | tp_site_usage_rows "$_su_name"
+    ) || true
   done
 }
 
