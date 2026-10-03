@@ -12,12 +12,15 @@
  * Everything is cached for {@link HOST_TEXT_TTL_MS}; SMART (a subprocess per
  * drive) has its own slower TTL. Every source degrades to "absent".
  */
+import { parseVmstat } from "./parse-vmstat.ts";
 import { parseMdstat } from "./events/mdstat.ts";
 import { parseSmartctlJson } from "./events/smart.ts";
 import { parseProcMounts } from "./mounts.ts";
 
 export const HOST_TEXT_TTL_MS = 5 * 60_000;
 export const HOST_TEXT_SMART_TTL_MS = 30 * 60_000;
+/** dpkg status is a few MB: re-read it slowly. */
+export const HOST_TEXT_ENGINES_TTL_MS = 30 * 60_000;
 const MAX_LIST = 5;
 const MAX_NAME = 64;
 
@@ -37,6 +40,10 @@ export type HostTextSample = {
   readOnlyFilesystems?: string[];
   smart?: Record<string, "ok" | "failing">;
   lastOomVictim?: string;
+  /** Installed web engines, e.g. `nginx 1.26.3`. */
+  webEngines?: string[];
+  /** Site id whose PHP-FPM pool did the most work (or holds the most memory). */
+  fpmBusiest?: string;
 };
 
 export type HostTextIo = {
@@ -190,7 +197,59 @@ export function parseStatmRss(text: string | undefined): number {
   return Number.isFinite(pages) ? pages : 0;
 }
 
-type ProcRow = { pid: string; comm: string; ticks: number; rss: number };
+type ProcRow = {
+  pid: string;
+  comm: string;
+  ticks: number;
+  rss: number;
+  pool?: string;
+};
+
+const PHP_POOL_RE = /turbopanel-php-([\w-]+?)(?:\.service|\.socket|\/|$)/m;
+
+/** Site id from a php-fpm process's `/proc/<pid>/cgroup` (its systemd unit). */
+export function parsePhpPool(cgroup: string | undefined): string | undefined {
+  return shortName(cgroup ? PHP_POOL_RE.exec(cgroup)?.[1] : undefined);
+}
+
+const ENGINE_PACKAGES = ["caddy", "nginx", "openlitespeed", "apache2"];
+
+/** `name version` for installed web-engine packages from a dpkg status file. */
+export function parseWebEngines(status: string | undefined): string[] {
+  if (!status) return [];
+  const found: string[] = [];
+  for (const stanza of status.split("\n\n")) {
+    const name = /^Package: (\S+)$/m.exec(stanza)?.[1];
+    if (!name || !ENGINE_PACKAGES.includes(name)) continue;
+    if (!/^Status: install ok installed$/m.test(stanza)) continue;
+    const raw = /^Version: (\S+)$/m.exec(stanza)?.[1];
+    const version = shortName(raw?.replace(/^\d+:/, "").split(/[-~]/)[0]);
+    found.push(version ? `${name} ${version}` : name);
+  }
+  return found.slice(0, MAX_LIST);
+}
+
+/** Pool (site id) with the highest score; ties and empty input give none. */
+export function busiestPool(
+  rows: readonly ProcRow[],
+  score: (row: ProcRow) => number,
+): string | undefined {
+  const totals = new Map<string, number>();
+  for (const row of rows) {
+    if (row.pool) {
+      totals.set(row.pool, (totals.get(row.pool) ?? 0) + score(row));
+    }
+  }
+  let best: string | undefined;
+  let bestScore = 0;
+  for (const [pool, total] of totals) {
+    if (total > bestScore) {
+      best = pool;
+      bestScore = total;
+    }
+  }
+  return best;
+}
 
 export class HostTextCollector {
   readonly #io: HostTextIo;
@@ -198,6 +257,8 @@ export class HostTextCollector {
   #smart: { at: number; value: Record<string, "ok" | "failing"> } | undefined;
   readonly #ticksByPid = new Map<string, number>();
   #lastScanMs: number | undefined;
+  #engines: { at: number; value: string[] } | undefined;
+  #oom: { count: number | null; victim: string | undefined } | undefined;
 
   constructor(io: HostTextIo) {
     this.#io = io;
@@ -215,7 +276,7 @@ export class HostTextCollector {
 
   async #collect(now: number): Promise<HostTextSample> {
     const io = this.#io;
-    const [files, units, dmesg, procs, smart] = await Promise.all([
+    const [files, units, procs, smart, webEngines] = await Promise.all([
       this.#readFiles(),
       this.#run("systemctl", [
         "--failed",
@@ -223,16 +284,17 @@ export class HostTextCollector {
         "--no-legend",
         "--no-pager",
       ]),
-      this.#run("dmesg", []),
       this.#scanProcesses(now),
       this.#smartVerdicts(now),
+      this.#webEngines(now),
     ]);
     return dropEmpty({
       ...files,
       unhealthyUnits: units ? parseFailedUnits(units) : undefined,
       clockSynced: io.clockSynced(),
       phpVersions: io.phpVersions().slice(0, MAX_LIST),
-      lastOomVictim: dmesg ? parseLastOomVictim(dmesg) : undefined,
+      lastOomVictim: await this.#oomVictim(),
+      webEngines,
       ...procs,
       smart,
     });
@@ -241,6 +303,35 @@ export class HostTextCollector {
   async #run(cmd: string, args: string[]): Promise<string | undefined> {
     const result = await this.#io.run(cmd, args);
     return result?.code === 0 ? result.stdout : undefined;
+  }
+
+  /**
+   * The kernel's `oom_kill` counter is a free read; `dmesg` (a subprocess) only
+   * runs when it moved (or is unreadable) and the victim is remembered, since
+   * the ring buffer eventually forgets it.
+   */
+  async #oomVictim(): Promise<string | undefined> {
+    const count = parseVmstat(await this.#io.readFile("/proc/vmstat") ?? "")
+      .oomKill;
+    const prior = this.#oom;
+    if (count === 0 && !prior?.victim) return undefined;
+    if (count !== null && prior && prior.count === count) return prior.victim;
+    const dmesg = await this.#run("dmesg", []);
+    const victim = (dmesg ? parseLastOomVictim(dmesg) : undefined) ??
+      prior?.victim;
+    this.#oom = { count, victim };
+    return victim;
+  }
+
+  async #webEngines(now: number): Promise<string[]> {
+    if (this.#engines && now - this.#engines.at < HOST_TEXT_ENGINES_TTL_MS) {
+      return this.#engines.value;
+    }
+    const value = parseWebEngines(
+      await this.#io.readFile("/var/lib/dpkg/status"),
+    );
+    this.#engines = { at: now, value };
+    return value;
   }
 
   async #readFiles(): Promise<HostTextSample> {
@@ -287,12 +378,18 @@ export class HostTextCollector {
     ]);
     const parsed = parseProcStat(stat);
     if (!parsed) return undefined;
-    return { pid, ...parsed, rss: parseStatmRss(statm) };
+    const row: ProcRow = { pid, ...parsed, rss: parseStatmRss(statm) };
+    if (parsed.comm.startsWith("php-fpm")) {
+      row.pool = parsePhpPool(await this.#io.readFile(`/proc/${pid}/cgroup`));
+    }
+    return row;
   }
 
   async #scanProcesses(
     now: number,
-  ): Promise<Pick<HostTextSample, "topCpuProcess" | "topMemProcess">> {
+  ): Promise<
+    Pick<HostTextSample, "topCpuProcess" | "topMemProcess" | "fpmBusiest">
+  > {
     const pids = (await this.#io.listPids()).filter((p) => /^\d+$/.test(p));
     const rows = (await Promise.all(pids.map((p) => this.#readProc(p))))
       .filter((r): r is ProcRow => r !== undefined);
@@ -303,16 +400,22 @@ export class HostTextCollector {
     this.#lastScanMs = now;
 
     const topMem = maxBy(rows, (r) => r.rss);
-    if (firstScan) return { topMemProcess: topMem?.comm };
+    const fpmBusiest = busiestPool(rows, (r) => r.rss);
+    if (firstScan) return { topMemProcess: topMem?.comm, fpmBusiest };
     const topCpu = maxBy(
       rows,
       (r) => r.ticks - (priorTicks.get(r.pid) ?? r.ticks),
     );
     const busy = topCpu &&
       topCpu.ticks - (priorTicks.get(topCpu.pid) ?? topCpu.ticks) > 0;
+    const fpmCpu = busiestPool(
+      rows,
+      (r) => r.ticks - (priorTicks.get(r.pid) ?? r.ticks),
+    );
     return {
       topCpuProcess: busy ? topCpu.comm : undefined,
       topMemProcess: topMem?.comm,
+      fpmBusiest: fpmCpu ?? fpmBusiest,
     };
   }
 
