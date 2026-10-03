@@ -302,6 +302,12 @@ export type FirewallReconcileResult = {
    */
   confirmation?: FirewallPendingConfirmation;
   /**
+   * Set when the host's guard rolled a ruleset back and nothing has been
+   * confirmed since (only while no ruleset is pending). Lets the control plane
+   * report "rolled back" without ever asking.
+   */
+  lastRollback?: FirewallLastRollback;
+  /**
    * The kernel's verdict on the rendered ruleset when this result did not
    * apply it: observe (a preview) or a refused apply. Absent when the rules
    * were loaded (the load itself is the verdict).
@@ -312,16 +318,34 @@ export type FirewallReconcileResult = {
   summary: string;
 };
 
+/** The guard's record of an undone ruleset. */
+export type FirewallLastRollback = {
+  digest: string;
+  at: string;
+  restored: "durable" | "none" | "open";
+};
+
 /**
  * A ruleset that was applied and is waiting to be confirmed (commit-confirm).
  * Must stay in sync with the instance canonical shape.
  */
 export type FirewallPendingConfirmation = {
-  state: "pending";
+  /**
+   * `pending`: loaded, rolls back at `deadlineAt` unless confirmed.
+   * `confirmed`: the daemon confirmed its own change (see `autoConfirm`).
+   */
+  state: "pending" | "confirmed";
   /** ISO time after which the host's root guard rolls the ruleset back. */
   deadlineAt: string;
   /** The confirm window the host armed, in seconds. */
   windowSeconds: number;
+  /**
+   * The daemon's own confirm attempt: after the rules went live it made an
+   * authenticated round trip to the control plane and, if that worked,
+   * confirmed. `ok: false` means it did nothing and the host rolls back at
+   * `deadlineAt`. `reason` says why, in plain words.
+   */
+  autoConfirm?: { ok: boolean; reason: string };
 };
 
 /**
@@ -2715,6 +2739,9 @@ export function parseFirewallReconcileResult(
     ...(value.confirmation === undefined
       ? {}
       : { confirmation: parseFirewallPendingConfirmation(value.confirmation) }),
+    ...(value.lastRollback === undefined
+      ? {}
+      : { lastRollback: parseFirewallLastRollback(value.lastRollback) }),
     ...(value.validation === undefined
       ? {}
       : { validation: parseFirewallValidation(value.validation) }),
@@ -2782,11 +2809,39 @@ function parseFirewallRendered(value: unknown): FirewallRendered {
   return rendered;
 }
 
+function parseFirewallLastRollback(value: unknown): FirewallLastRollback {
+  if (
+    !isRecord(value) || typeof value.digest !== "string" ||
+    !/^[a-f0-9]{64}$/.test(value.digest) || typeof value.at !== "string" ||
+    Number.isNaN(Date.parse(value.at)) ||
+    (value.restored !== "durable" && value.restored !== "none" &&
+      value.restored !== "open")
+  ) {
+    throw new Error("lastRollback must be a rollback record");
+  }
+  return { digest: value.digest, at: value.at, restored: value.restored };
+}
+
+function parseFirewallAutoConfirm(
+  value: unknown,
+): { ok: boolean; reason: string } {
+  if (
+    !isRecord(value) || typeof value.ok !== "boolean" ||
+    typeof value.reason !== "string"
+  ) {
+    throw new Error("confirmation.autoConfirm must be { ok, reason }");
+  }
+  return { ok: value.ok, reason: value.reason };
+}
+
 function parseFirewallPendingConfirmation(
   value: unknown,
 ): FirewallPendingConfirmation {
-  if (!isRecord(value) || value.state !== "pending") {
-    throw new Error("confirmation must be a pending confirmation");
+  if (
+    !isRecord(value) ||
+    (value.state !== "pending" && value.state !== "confirmed")
+  ) {
+    throw new Error("confirmation must be a pending or confirmed confirmation");
   }
   if (
     typeof value.deadlineAt !== "string" ||
@@ -2804,9 +2859,12 @@ function parseFirewallPendingConfirmation(
     );
   }
   return {
-    state: "pending",
+    state: value.state,
     deadlineAt: value.deadlineAt,
     windowSeconds: value.windowSeconds,
+    ...(value.autoConfirm === undefined
+      ? {}
+      : { autoConfirm: parseFirewallAutoConfirm(value.autoConfirm) }),
   };
 }
 

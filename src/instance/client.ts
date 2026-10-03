@@ -156,6 +156,7 @@ import type {
  * module never imports handlers.
  */
 export type CommandDispatchDeps = {
+  verifyControlPlane?: () => Promise<void>;
   decryptSecrets?: (ciphertexts: string[]) => Promise<(string | null)[]>;
   sendCommandLogChunk?: SendCommandLogChunkFn;
   rehydrateDeploymentSecrets?: (
@@ -1747,6 +1748,7 @@ export class InstanceClient {
     if (!apiClient) return undefined;
     return {
       decryptSecrets: (ciphertexts) => apiClient.decryptSecrets(ciphertexts),
+      verifyControlPlane: () => apiClient.ping(),
       rehydrateDeploymentSecrets: (deployments) =>
         apiClient.rehydrateDeploymentSecrets(deployments),
       sendCommandLogChunk: (params) => apiClient.sendCommandLogChunk(params),
