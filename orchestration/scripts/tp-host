@@ -959,7 +959,7 @@ tp_php_unit_lines() {
       } else {
         ok["Unit", "StartLimitBurst"] = 1
         ok["Unit", "StartLimitIntervalSec"] = 1
-        split("Type User Group Slice ExecStart ExecReload Environment Restart RestartSec NoNewPrivileges CapabilityBoundingSet AmbientCapabilities ProtectSystem ProtectHome PrivateDevices ProtectKernelTunables ProtectKernelModules ProtectControlGroups IPAddressDeny IPAddressAllow RestrictSUIDSGID RestrictRealtime LockPersonality BindPaths BindReadOnlyPaths TemporaryFileSystem ReadWritePaths RuntimeDirectory RuntimeDirectoryMode StandardInput StandardOutput StandardError SyslogIdentifier CPUQuota MemoryMax MemoryHigh TasksMax TimeoutStartSec TimeoutStopSec", b, " ")
+        split("Type User Group Slice ExecStartPre ExecStart ExecReload Environment Restart RestartSec NoNewPrivileges CapabilityBoundingSet AmbientCapabilities ProtectSystem ProtectHome PrivateDevices ProtectKernelTunables ProtectKernelModules ProtectControlGroups IPAddressDeny IPAddressAllow RestrictSUIDSGID RestrictRealtime LockPersonality BindPaths BindReadOnlyPaths TemporaryFileSystem ReadWritePaths RuntimeDirectory RuntimeDirectoryMode StandardInput StandardOutput StandardError SyslogIdentifier CPUQuota MemoryMax MemoryHigh TasksMax TimeoutStartSec TimeoutStopSec", b, " ")
         for (i in b) ok["Service", b[i]] = 1
       }
       body = (kind == "socket") ? "Socket" : "Service"
@@ -977,7 +977,10 @@ tp_php_unit_lines() {
       key = substr($0, 1, eq - 1); val = substr($0, eq + 1)
       if (section == "") fail("directive outside a section: " key)
       if (!((section, key) in ok)) fail("directive " section "." key)
-      if (key ~ /^Exec/ && val ~ /^[-+!:@|]/) fail(key " with an exec prefix")
+      # The one root hook a PHP service has is its loopback guard; the shell
+      # side pins its exact text. Every other Exec line takes no prefix.
+      if (key == "ExecStartPre" && val !~ /^\+/) fail(key " must be the loopback guard")
+      if (key != "ExecStartPre" && key ~ /^Exec/ && val ~ /^[-+!:@|]/) fail(key " with an exec prefix")
       print section "." key "=" val
     }
     END { if (bad) exit 1 }
@@ -1123,9 +1126,13 @@ tp_php_service_pinned_ok() {
     Service.CapabilityBoundingSet=*|Service.AmbientCapabilities=*) [ -z "${1#*=}" ] ;;
     Service.ProtectSystem=*) [ "${1#*=}" = "strict" ] ;;
     # Loopback, link-local, multicast, 0/8 and ULA closed (php-runtime.ts
-    # SITE_PHP_IP_DENY); only systemd-resolved's stub reopened.
+    # SITE_PHP_IP_DENY); 127.0.0.1 (the database proxy) and systemd-resolved's
+    # stub reopened. systemd cannot filter by port: tp-php-loopback does, per
+    # site owner, and the unit only starts once it has loaded its rules.
     Service.IPAddressDeny=*) [ "${1#*=}" = "localhost link-local multicast 0.0.0.0/8 fc00::/7" ] ;;
-    Service.IPAddressAllow=*) [ "${1#*=}" = "127.0.0.53" ] ;;
+    Service.IPAddressAllow=*) [ "${1#*=}" = "127.0.0.1 127.0.0.53" ] ;;
+    # The only root hook (`+`): the loopback guard, from this script's own lib/.
+    Service.ExecStartPre=*) [ "${1#*=}" = "+$INSTALL_ROOT/lib/tp-php-loopback sync" ] ;;
     Service.BindPaths=*) [ "${1#*=}" = "$_pl_home/tmp:/tmp" ] ;;
     # The daemon's config tree is tp's alone (0750); inside the unit it is an
     # empty tmpfs holding only this site's config directory, read-only.
@@ -1180,7 +1187,7 @@ tp_php_service_ok() {
   _ps_file="$1"
   _ps_site="$2"
   _ps_lines="$(tp_php_unit_lines "$_ps_file" service)" || return 1
-  for _ps_key in ExecStart BindPaths TemporaryFileSystem BindReadOnlyPaths IPAddressDeny IPAddressAllow; do
+  for _ps_key in ExecStartPre ExecStart BindPaths TemporaryFileSystem BindReadOnlyPaths IPAddressDeny IPAddressAllow; do
     [ "$(printf '%s\n' "$_ps_lines" | grep -c "^Service\.$_ps_key=")" -le 1 ] || return 1
   done
   _ps_user="$(printf '%s\n' "$_ps_lines" | sed -n 's/^Service\.User=//p' | head -1)"
@@ -1203,7 +1210,7 @@ LINES
   [ -n "$_ps_rwtmp" ] || { printf 'tp-host: php unit: ReadWritePaths= lacks the owner tmp/\n' >&2; return 1; }
   [ "$_ps_mode" != "lsphp" ] || [ -n "$_ps_phprc" ] ||
     { printf 'tp-host: php unit: lsphp needs Environment=PHPRC=<its php.ini>\n' >&2; return 1; }
-  _ps_need="User Group Slice NoNewPrivileges CapabilityBoundingSet AmbientCapabilities ProtectSystem IPAddressDeny BindPaths TemporaryFileSystem BindReadOnlyPaths ExecStart StandardOutput StandardError"
+  _ps_need="User Group Slice NoNewPrivileges CapabilityBoundingSet AmbientCapabilities ProtectSystem IPAddressDeny IPAddressAllow ExecStartPre BindPaths TemporaryFileSystem BindReadOnlyPaths ExecStart StandardOutput StandardError"
   case "$_ps_mode" in
     fpm) _ps_need="$_ps_need Type RuntimeDirectory RuntimeDirectoryMode" ;;
     *) _ps_need="$_ps_need StandardInput" ;;
@@ -1480,6 +1487,14 @@ tp_php_install() {
   tp_php_conf_ok "$TP_STAGE/src" "$_pi_dest" "$_pi_group" ||
     tp_die "refusing ${_pi_dest##*/}: content outside the allowed directives"
   tp_put_file "$_pi_dest" 0640 root "$_pi_group" < "$TP_STAGE/src"
+}
+
+# php-loopback-sync: rebuild the nftables table that keeps site PHP off every
+# loopback port but the database proxy's (lib/tp-php-loopback), from the PHP
+# units on disk. The daemon runs it after installing or removing a runtime.
+tp_verb_php_loopback_sync() {
+  [ $# -eq 0 ] || tp_die "php-loopback-sync: takes no arguments"
+  tp_run "$INSTALL_ROOT/lib/tp-php-loopback" sync
 }
 
 # php-test <siteId>: the site's PHP binary checks its own config, as the site's
@@ -3048,6 +3063,7 @@ case "$_verb" in
   publish-open) tp_verb_publish_open "$@" ;;
   publish) tp_verb_publish "$@" ;;
   php-test) tp_verb_php_test "$@" ;;
+  php-loopback-sync) tp_verb_php_loopback_sync "$@" ;;
   php-site-register) tp_verb_php_site_register "$@" ;;
   *) tp_die "refusing verb $_verb" ;;
 esac
