@@ -10,6 +10,8 @@
  * ignores must not let the client talk past the parser.
  *
  * Observe mode: policy findings are logged and counted, never enforced.
+ * Enforce mode: a request with any finding left is refused (403) before the
+ * engine is reached.
  *
  * Dependency-free on purpose (see http.ts).
  */
@@ -41,8 +43,10 @@ import {
   type PolicyConfig,
   type RequestFacts,
   type ResolvePath,
+  type Violation,
 } from "./policy.ts";
 import { readOnlyRefusal } from "./readonly.ts";
+import { buildSessionFindings } from "./build.ts";
 import { review } from "./review.ts";
 import type { GateStats } from "./stats.ts";
 import { describeError, repeatSequential } from "./util.ts";
@@ -71,7 +75,13 @@ export type ProxyDeps = {
    * refused with a 403 before the engine is reached.
    */
   readOnly?: boolean;
+  /** `enforce` refuses a request with findings; absent / `observe` logs them. */
+  mode?: GateMode;
+  /** The build listener (build.ts): only here may `/session` and `/grpc` open. */
+  buildSocket?: boolean;
 };
+
+export type GateMode = "observe" | "enforce";
 
 export const DEFAULT_MAX_BODY_BYTES = 4 * 1024 * 1024;
 
@@ -266,8 +276,30 @@ async function judge(
     facts.body = buffered.parsed.json;
     facts.bodyError = buffered.parsed.error;
   }
-  await review(facts, route, deps);
+  const extra = buildSessionFindings(route, deps.buildSocket === true);
+  const findings = await review(facts, route, deps, extra);
+  if (deps.mode === "enforce" && findings.length > 0) {
+    refuse(findings, head.method, route, deps);
+  }
   return { route, buffered };
+}
+
+/** Enforce mode: one `docker-gate.denied` line, then a 403 for the client. */
+function refuse(
+  findings: readonly Violation[],
+  method: string,
+  route: string,
+  deps: ProxyDeps,
+): never {
+  const rules = [...new Set(findings.map((finding) => finding.rule))];
+  deps.log({
+    level: "warn",
+    event: "docker-gate.denied",
+    method,
+    route,
+    rules,
+  });
+  throw new HttpError(403, `refused by the Docker gate: ${rules.join(", ")}`);
 }
 
 /** On the read-only listener: refuse (403) whatever is not on its list. */

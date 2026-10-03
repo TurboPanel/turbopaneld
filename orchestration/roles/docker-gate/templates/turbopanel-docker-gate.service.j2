@@ -13,8 +13,8 @@ StartLimitIntervalSec=0
 Type=simple
 User=root
 Group=root
-# Observe is the only mode this build has: the gate refuses to start on any
-# other value. It never refuses a request; findings go to the journal.
+# Observe: the gate never refuses a policy finding; findings go to the
+# journal. The refusing stage-4 mode exists in the source; no host runs it yet.
 Environment=TP_DOCKER_GATE_MODE=observe
 Environment=TP_DOCKER_GATE_SOCKET={{ docker_gate_socket }}
 # Stage 3: the read-only listener Traefik may mount (readonly.ts). It refuses
@@ -35,17 +35,24 @@ Environment=TP_DOCKER_GATE_PLATFORM_RW_ROOTS={{ docker_gate_platform_rw_roots | 
 Environment=TP_DOCKER_GATE_APPROVAL_PUBKEY={{ docker_gate_approval_pubkey_file }}
 {% endif %}
 Environment=TP_DOCKER_GATE_SUMMARY_SEC={{ docker_gate_summary_seconds }}
+# Stage 4: the build listener, the only socket BuildKit's /session and /grpc
+# may open on; 0600 for the daemon account's uid (build.ts).
+Environment=TP_DOCKER_GATE_BUILD_SOCKET={{ docker_gate_build_socket }}
+{% if (docker_gate_build_uid | default('') | string | length) > 0 %}
+Environment=TP_DOCKER_GATE_BUILD_UID={{ docker_gate_build_uid }}
+{% endif %}
 Environment=DENO_DIR={{ docker_gate_cache_dir }}
 Environment=DENO_NO_UPDATE_CHECK=1
 Environment=NO_COLOR=1
 # The gate's own permissions: read anywhere (it resolves symlinks of bind
 # sources), write only its socket directory and the engine socket, no network
-# beyond the two Unix sockets, no subprocesses, only its own variables.
+# beyond its own Unix sockets, no subprocesses, only its own variables.
 # `--allow-net=unix:` is what Deno gates `listen()` on; `connect()` is gated on
 # read and write of the socket path.
 ExecStartPre=+/usr/bin/install -d -m 0750 -o root -g {{ docker_gate_group }} {{ docker_gate_run_dir }}
 ExecStartPre=+/usr/bin/install -d -m 0750 -o root -g root {{ docker_gate_ro_run_dir }}
-ExecStart={{ docker_gate_deno_bin }} run --no-prompt --no-remote --no-config --no-lock --allow-read --allow-write={{ docker_gate_run_dir }},{{ docker_gate_upstream_socket }} --allow-net=unix:{{ docker_gate_socket }},unix:{{ docker_gate_ro_socket }},unix:{{ docker_gate_upstream_socket }} --allow-env=TP_DOCKER_GATE_* {{ docker_gate_dir }}/main.ts
+ExecStartPre=+/usr/bin/install -d -m 0750 -o root -g {{ docker_gate_group }} {{ docker_gate_build_run_dir }}
+ExecStart={{ docker_gate_deno_bin }} run --no-prompt --no-remote --no-config --no-lock --allow-read --allow-write={{ docker_gate_run_dir }},{{ docker_gate_upstream_socket }} --allow-net=unix:{{ docker_gate_socket }},unix:{{ docker_gate_ro_socket }},unix:{{ docker_gate_build_socket }},unix:{{ docker_gate_upstream_socket }} --allow-env=TP_DOCKER_GATE_* {{ docker_gate_dir }}/main.ts
 SyslogIdentifier={{ docker_gate_service_name }}
 Restart=always
 RestartSec=2

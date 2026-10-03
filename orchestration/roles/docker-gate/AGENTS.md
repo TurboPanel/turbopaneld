@@ -35,6 +35,7 @@ A later stage that routes traffic through it flips this to fatal.
 | `approval.ts` | Verifier for the control plane's signed per-deploy approval (Ed25519 via WebCrypto); no signer, no private key |
 | `inspect.ts` | Root-side `GET /containers/{id}/json` for the ownership check (labels only, never logged) |
 | `review.ts` | Per request: policy findings, allowance hits, approval check, ownership check; logs + counters |
+| `build.ts` | Stage 4: BuildKit's `/session` and `/grpc` only on the build listener (`0600` for the daemon uid) |
 | `policy.ts` | Route classification and the strict-profile rules (see below); returns findings, secret-free |
 | `resolve.ts` | Resolves a bind source by hand, component by component, following symlinks (including dangling ones, which Docker creates the target of) |
 | `stats.ts` | Counters for the periodic summary line |
@@ -258,8 +259,9 @@ registry auth, query strings, request bodies, the approval token itself. An
 - The socket directory is **not** under `/run/turbopanel` (daemon-owned,
   `tp` could swap a directory there). It is `root:tp 0750`, created by
   tmpfiles.d and `ExecStartPre=+`.
-- `TP_DOCKER_GATE_MODE` accepts only `observe`; the unit pins it. Enforcement
-  is a later stage and must arrive with its own tests.
+- `TP_DOCKER_GATE_MODE` accepts `observe` and `enforce` (anything else fails
+  the start); the unit pins `observe`. No host runs `enforce` until the
+  lockouts below are closed and the daemon builds through the build socket.
 - The read-only listener's directory holds nothing but its socket, and never
   becomes a parent of (or the same as) the main socket's directory: a Traefik
   mounts it.
@@ -366,3 +368,35 @@ fragment).
 version prefix the engine strips. Container, network and volume names match `.+` because the engine registers them as
 `{name:.*}`. Mutating routes no flow uses (`PUT /volumes/{name}`, checkpoints, `/debug`) are `restricted-group`; any path
 the table does not know is an `unclassified-route` finding (deny by default).
+
+## Stage 4: build sessions for the daemon's own builds only
+
+BuildKit's `/session` and `/grpc` upgrade to HTTP/2 the gate cannot read: every build choice (entitlements, network,
+mounts) rides inside them. They open only on the **build listener** (`build.ts`):
+
+- **Identity.** The client is the daemon account `tp` (`railpack-build.ts` runs `docker buildx build` as tp; Compose
+  builds too). The sandboxed build runner (`tpbuild`, `tp-host build-run`) never speaks Docker: its unit makes
+  `/run/turbopanel-gate` and both Docker sockets inaccessible. Deno cannot read a Unix peer's credentials (no
+  SO_PEERCRED), and a header token does not work either: the Docker CLI's `HttpHeaders` are not sent on the hijacked
+  `/grpc` request buildx opens (seen on adrastea, Engine 29.8 / buildx 0.37: the header was missing on every `/grpc`).
+  So the kernel checks the uid at `connect()`: `TP_DOCKER_GATE_BUILD_SOCKET` (`/run/turbopanel-gate/build/docker.sock`)
+  is `0600`, owned by `TP_DOCKER_GATE_BUILD_UID` (the `docker_gate_build_user` uid; unset = root only), in a
+  directory `root:tp 0750` of its own. caddy (in group tp) can traverse but not connect; a container never gets it
+  (`/run` is a denied, unapprovable bind). A failure to open it is a `docker-gate.build-socket-unavailable` error
+  line; the gate keeps serving the other sockets.
+- **Check.** `/session` or `/grpc` anywhere but the build listener is a `build-session` finding. No header lifts it.
+  On the build listener every other request is judged exactly as on the main socket.
+- **Modes.** Observe logs the finding as `would-deny` and relays. Enforce answers 403 with a `docker-gate.denied`
+  line (method, route, rules) **before the engine is reached**, for this finding and every other one left after
+  allowances and approvals. The read-only listener refuses both routes as before.
+- **Daemon side (not wired yet, needed before enforce):** every buildx / Compose build call must use a Docker context
+  whose host is the build socket (`docker context create ... --docker host=unix://<build socket>`, then
+  `--context`). `DOCKER_HOST` alone is not enough: with it set, buildx's `default` builder becomes a
+  `docker-container` builder that creates a privileged BuildKit container (refused).
+- **Proof (adrastea, a separate enforce-mode gate on its own sockets):** buildx as tp through the build socket built
+  and loaded an image; through the main socket `/grpc` was refused and the fallback BuildKit container's create too;
+  tpbuild and uid 65534 with gid tp could not connect to the build socket; spoofed headers, and a container handed
+  the main socket, got 403 on `/session` and `/grpc`; a create binding the build directory was refused
+  (`bind-forbidden-path`). In observe mode the same `/session` was relayed (101) and logged.
+
+Tests: `src/docker-gate/build.test.ts`.

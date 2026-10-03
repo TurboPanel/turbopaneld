@@ -101,6 +101,9 @@ type UnitVars = {
   docker_gate_summary_seconds: number;
   docker_gate_bind_roots: string[];
   docker_gate_deny_prefixes_extra: string[];
+  docker_gate_build_run_dir: string;
+  docker_gate_build_socket: string;
+  docker_gate_build_uid: string;
 };
 
 const DEFAULT_VARS: UnitVars = {
@@ -132,6 +135,9 @@ const DEFAULT_VARS: UnitVars = {
   docker_gate_approval_pubkeys: "",
   docker_gate_approval_pubkey_file:
     "/opt/turbopanel/lib/docker-gate/approval.pub",
+  docker_gate_build_run_dir: "/run/turbopanel-gate/build",
+  docker_gate_build_socket: "/run/turbopanel-gate/build/docker.sock",
+  docker_gate_build_uid: "999",
 };
 
 async function renderUnit(overrides: Partial<UnitVars> = {}): Promise<string> {
@@ -195,6 +201,40 @@ jinjaTest(
     assert(service.includes("Environment=TP_DOCKER_GATE_SOCKET_GID=9999"));
     assert(service.includes("Restart=always"));
     assertEquals(directives(unit, "Install"), ["WantedBy=multi-user.target"]);
+  },
+);
+
+jinjaTest(
+  "stage 4: the build listener lives in a root:tp directory of its own, for the daemon uid",
+  async () => {
+    const service = directives(await renderUnit(), "Service");
+    assert(
+      service.includes(
+        "Environment=TP_DOCKER_GATE_BUILD_SOCKET=/run/turbopanel-gate/build/docker.sock",
+      ),
+    );
+    assert(
+      service.includes(
+        "ExecStartPre=+/usr/bin/install -d -m 0750 -o root -g tp /run/turbopanel-gate/build",
+      ),
+    );
+    assert(service.includes("Environment=TP_DOCKER_GATE_BUILD_UID=999"));
+    const defaults = await read("defaults/main.yml");
+    assertStringIncludes(
+      defaults,
+      'docker_gate_build_run_dir: "{{ docker_gate_run_dir }}/build"',
+    );
+    assertStringIncludes(defaults, "docker_gate_build_user: tp");
+    const tasks = await read("tasks/install.yml");
+    assertStringIncludes(
+      tasks,
+      "d {{ docker_gate_build_run_dir }} 0750 root {{ docker_gate_group }} -",
+    );
+    const noUid = directives(
+      await renderUnit({ docker_gate_build_uid: "" }),
+      "Service",
+    );
+    assertFalse(noUid.some((d) => d.includes("BUILD_UID")), "root-only token");
   },
 );
 
@@ -336,7 +376,7 @@ jinjaTest(
     );
     assert(
       argv.includes(
-        "--allow-net=unix:/run/turbopanel-gate/docker.sock,unix:/run/turbopanel-gate/ro/docker.sock,unix:/var/run/docker.sock",
+        "--allow-net=unix:/run/turbopanel-gate/docker.sock,unix:/run/turbopanel-gate/ro/docker.sock,unix:/run/turbopanel-gate/build/docker.sock,unix:/var/run/docker.sock",
       ),
     );
     assert(argv.includes("--allow-env=TP_DOCKER_GATE_*"));
@@ -443,9 +483,14 @@ jinjaTest(
     const socket = join(runDir, "docker.sock");
     await Deno.mkdir(join(runDir, "ro"));
     const roSocket = join(runDir, "ro", "docker.sock");
+    await Deno.mkdir(join(runDir, "build"));
+    const buildSocket = join(runDir, "build", "docker.sock");
     const unit = await renderUnit({
       docker_gate_ro_run_dir: join(runDir, "ro"),
       docker_gate_ro_socket: roSocket,
+      docker_gate_build_run_dir: join(runDir, "build"),
+      docker_gate_build_socket: buildSocket,
+      docker_gate_build_uid: String(Deno.uid()),
       docker_gate_gid: "",
       docker_gate_dir: join(ROLE, "files"),
       docker_gate_deno_bin: Deno.execPath(),
@@ -523,6 +568,9 @@ jinjaTest(
         new TextDecoder().decode(refused.slice(0, n ?? 0)),
         "403 Forbidden",
       );
+      const build = await Deno.stat(buildSocket);
+      assertEquals(build.mode! & 0o777, 0o600);
+      assertEquals(build.uid, Deno.uid());
     } finally {
       child.kill("SIGTERM");
       const out = await child.output();
@@ -726,7 +774,7 @@ test("the gate's load check exits 0 on good source and fails on bad configuratio
   assert(
     await run({
       TP_DOCKER_GATE_LOAD_CHECK: "1",
-      TP_DOCKER_GATE_MODE: "enforce",
+      TP_DOCKER_GATE_MODE: "refuse-all",
     }) !== 0,
   );
 });

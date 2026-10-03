@@ -153,12 +153,17 @@ async function unownedFinding(
   return [{ rule: "unowned-container", detail: target.slice(0, 64) }];
 }
 
-/** Judge one request: findings, allowances, approval, ownership; log and count. */
+/**
+ * Judge one request: findings, allowances, approval, ownership; log and count.
+ * `extra` holds findings judged outside the policy (the build credential).
+ * Returns every finding left, for the caller to refuse on in enforce mode.
+ */
 export async function review(
   facts: RequestFacts,
   route: string,
   deps: ReviewDeps,
-): Promise<void> {
+  extra: readonly Violation[] = [],
+): Promise<Violation[]> {
   const detail = await evaluateDetailed(
     facts,
     deps.policy,
@@ -177,5 +182,7 @@ export async function review(
     ? await createFindings(facts, detail.violations, deps)
     : detail.violations;
   const unowned = await unownedFinding(facts, deps);
-  logViolations(deps, facts, route, [...findings, ...unowned]);
+  const all = [...findings, ...unowned, ...extra];
+  logViolations(deps, facts, route, all);
+  return all;
 }

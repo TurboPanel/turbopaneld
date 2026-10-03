@@ -957,6 +957,8 @@ e2e(
     ]);
     const snapshot = h.gate.stats.snapshot();
     assertEquals(snapshot.upgrades, { grpc: 1, session: 1 });
-    assertEquals(wouldDeny(h.logs), []);
+    // Observe mode relays them, but off the build socket (build.ts) each is
+    // what enforce mode refuses.
+    assertEquals(wouldDeny(h.logs), ["build-session", "build-session"]);
   },
 );

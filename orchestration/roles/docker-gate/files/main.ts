@@ -1,10 +1,12 @@
 /**
  * `turbopanel-docker-gate`: the root-side filter in front of the Docker socket.
  *
- * Stage 1 (observe mode): listens on a socket only the daemon group can open,
- * forwards every request to the real engine socket and logs what the strict
- * profile would refuse. Nothing is ever refused. `TP_DOCKER_GATE_MODE` accepts
- * only `observe`; the unit pins it, and a later stage adds enforcement.
+ * Listens on a socket only the daemon group can open, forwards every request
+ * to the real engine socket and logs what the strict profile would refuse.
+ * `TP_DOCKER_GATE_MODE` is `observe` (the default, and what the unit pins:
+ * nothing is refused) or `enforce` (stage 4: a request with findings is
+ * refused with a 403). A third listener, the build socket (build.ts), is the
+ * only place BuildKit's `/session` and `/grpc` may open.
  *
  * Run by the vendored Deno with scoped permissions (see the unit template):
  * unscoped read for symlink resolution, write only to the gate's own socket
@@ -16,6 +18,7 @@
 import {
   DEFAULT_MAX_BODY_BYTES,
   type GateConn,
+  type GateMode,
   handleConnection,
   type LogRecord,
   type ProxyDeps,
@@ -26,6 +29,7 @@ import { importApprovalKeys } from "./approval.ts";
 import { resolveBindPath } from "./resolve.ts";
 import { GateStats } from "./stats.ts";
 import { describeError } from "./util.ts";
+import { listenBuildSocket } from "./build.ts";
 
 export const DEFAULT_GATE_SOCKET = "/run/turbopanel-gate/docker.sock";
 /**
@@ -38,6 +42,7 @@ export const DEFAULT_SUMMARY_SECONDS = 300;
 export const MAX_CONNECTIONS = 512;
 
 export type GateConfig = {
+  mode: GateMode;
   socket: string;
   /** The read-only listener for Traefik; unset = no such listener. */
   roSocket?: string;
@@ -56,7 +61,29 @@ export type GateConfig = {
   approvalKeyFile?: string;
   /** Test hook: the clock approvals are judged against (seconds). */
   nowSec?: () => number;
+  /** The build listener (build.ts); unset = no build session passes. */
+  buildSocket?: string;
+  /** The daemon account's uid, the only one that may open it; unset = root. */
+  buildUid?: number;
 };
+
+const MODES: readonly GateMode[] = ["observe", "enforce"];
+
+function modeOf(value: string | undefined): GateMode {
+  const mode = value ?? "observe";
+  const known = MODES.find((candidate) => candidate === mode);
+  if (known === undefined) {
+    throw new Error(
+      `TP_DOCKER_GATE_MODE=${mode} is not supported: use observe or enforce`,
+    );
+  }
+  return known;
+}
+
+function positiveIdOrUndefined(value: string | undefined): number | undefined {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
+}
 
 type Env = Record<string, string | undefined>;
 
@@ -88,14 +115,9 @@ function ingressSocketDirOf(roSocket: string | undefined): string {
     : DEFAULT_POLICY_CONFIG.ingressSocketDir;
 }
 
-/** Read the gate's settings; throws on a mode other than `observe`. */
+/** Read the gate's settings; throws on a mode other than observe / enforce. */
 export function loadConfig(env: Env): GateConfig {
-  const mode = env.TP_DOCKER_GATE_MODE ?? "observe";
-  if (mode !== "observe") {
-    throw new Error(
-      `TP_DOCKER_GATE_MODE=${mode} is not supported: this build only observes`,
-    );
-  }
+  const mode = modeOf(env.TP_DOCKER_GATE_MODE);
   const roots = pathList(env.TP_DOCKER_GATE_BIND_ROOTS);
   const denyExtra = pathList(env.TP_DOCKER_GATE_DENY_PREFIXES);
   const caps = (env.TP_DOCKER_GATE_CAP_ALLOW ?? "").split(",").map((cap) =>
@@ -105,7 +127,10 @@ export function loadConfig(env: Env): GateConfig {
   const platformRw = pathList(env.TP_DOCKER_GATE_PLATFORM_RW_ROOTS);
   const gid = Number(env.TP_DOCKER_GATE_SOCKET_GID);
   return {
+    mode,
     socket: env.TP_DOCKER_GATE_SOCKET || DEFAULT_GATE_SOCKET,
+    buildSocket: pathList(env.TP_DOCKER_GATE_BUILD_SOCKET)[0],
+    buildUid: positiveIdOrUndefined(env.TP_DOCKER_GATE_BUILD_UID),
     roSocket: pathList(env.TP_DOCKER_GATE_RO_SOCKET)[0],
     ingressSwitchFile: pathList(env.TP_DOCKER_GATE_INGRESS_SWITCH)[0],
     upstream: env.TP_DOCKER_GATE_UPSTREAM || DEFAULT_UPSTREAM_SOCKET,
@@ -254,6 +279,33 @@ export async function loadApprovalKeys(
   }
 }
 
+/**
+ * The build listener, `0600` for the daemon uid (build.ts). A failure to open
+ * it is an error line: builds through the gate then fail, every other request
+ * is still served.
+ */
+async function openBuildListener(
+  config: GateConfig,
+  log: (record: LogRecord) => void,
+): Promise<Deno.Listener | undefined> {
+  if (config.buildSocket === undefined) return undefined;
+  try {
+    return await listenBuildSocket(
+      config.buildSocket,
+      config.buildUid,
+      (path) => openListener(path, undefined),
+    );
+  } catch (err) {
+    log({
+      level: "error",
+      event: "docker-gate.build-socket-unavailable",
+      socket: config.buildSocket,
+      error: describeError(err),
+    });
+    return undefined;
+  }
+}
+
 export type RunningGate = {
   stats: GateStats;
   stop(): Promise<void>;
@@ -267,6 +319,7 @@ export async function startGate(
   const stats = new GateStats();
   const approvalKeys = await loadApprovalKeys(config.approvalKeyFile, log);
   const deps: ProxyDeps = {
+    mode: config.mode,
     connectUpstream: connectUpstream(config.upstream),
     policy: config.policy,
     resolvePath: resolveBindPath,
@@ -289,7 +342,11 @@ export async function startGate(
     await removeStaleSocket(config.socket);
     throw err;
   }
+  const buildListener = await openBuildListener(config, log);
   const serving = serve(listener, deps);
+  const buildServing = buildListener
+    ? serve(buildListener, { ...deps, buildSocket: true })
+    : Promise.resolve();
   const roServing = roListener
     ? serve(roListener, { ...deps, readOnly: true })
     : Promise.resolve();
@@ -302,8 +359,9 @@ export async function startGate(
   log({
     level: "info",
     event: "docker-gate.started",
-    mode: "observe",
+    mode: config.mode,
     socket: config.socket,
+    buildSocket: buildListener ? config.buildSocket : null,
     roSocket: roListener ? config.roSocket : null,
     upstream: config.upstream,
     bindRoots: config.policy.bindRoots,
@@ -323,10 +381,14 @@ export async function startGate(
       });
       listener.close();
       roListener?.close();
-      await Promise.all([serving, roServing]);
+      buildListener?.close();
+      await Promise.all([serving, roServing, buildServing]);
       await removeStaleSocket(config.socket);
       if (roListener && config.roSocket) {
         await removeStaleSocket(config.roSocket);
+      }
+      if (buildListener && config.buildSocket) {
+        await removeStaleSocket(config.buildSocket);
       }
     },
   };
@@ -348,6 +410,8 @@ export const GATE_ENV_KEYS = [
   "TP_DOCKER_GATE_APPROVAL_PUBKEY",
   "TP_DOCKER_GATE_SUMMARY_SEC",
   "TP_DOCKER_GATE_LOAD_CHECK",
+  "TP_DOCKER_GATE_BUILD_SOCKET",
+  "TP_DOCKER_GATE_BUILD_UID",
 ] as const;
 
 /**

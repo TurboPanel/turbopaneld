@@ -9,6 +9,16 @@
   ansible.builtin.set_fact:
     docker_gate_gid: "{{ (getent_group[docker_gate_group] | default(['', ''], true))[1] | default('') }}"
 
+- name: Look up the daemon account that may read the build token
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ docker_gate_build_user }}"
+    fail_key: false
+
+- name: Record the build token's owner uid
+  ansible.builtin.set_fact:
+    docker_gate_build_uid: "{{ (getent_passwd[docker_gate_build_user] | default(['', ''], true))[1] | default('') }}"
+
 # deploy.yml has already staged the files in .next and load-checked them: this
 # only moves checked files into place.
 - name: Install the gate source (root-owned, never writable by the daemon)
@@ -51,6 +61,7 @@
       # Managed by TurboPanel daemon orchestration (docker-gate role).
       d {{ docker_gate_run_dir }} 0750 root {{ docker_gate_group }} -
       d {{ docker_gate_ro_run_dir }} 0750 root root -
+      d {{ docker_gate_build_run_dir }} 0750 root {{ docker_gate_group }} -
 
 - name: Ensure the gate socket directory exists
   ansible.builtin.file:
@@ -67,6 +78,16 @@
     state: directory
     owner: root
     group: root
+    mode: "0750"
+
+# Stage 4: the build listener's own directory (build.ts); the socket in it is
+# 0600 for the daemon uid.
+- name: Ensure the build socket directory exists
+  ansible.builtin.file:
+    path: "{{ docker_gate_build_run_dir }}"
+    state: directory
+    owner: root
+    group: "{{ docker_gate_group }}"
     mode: "0750"
 
 # The daemon's switch to the read-only socket for Traefik. Root-owned in the
