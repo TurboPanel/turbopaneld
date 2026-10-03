@@ -686,22 +686,23 @@ export async function ensureSystemPrincipals(
   layout: LayoutPaths,
   principals: PrincipalEnsureSpec[],
   runFn: RunFn = runDefault,
-): Promise<void> {
+): Promise<string[]> {
   for (const principal of principals) {
     assertPrincipalIdOverrides(principal);
     assertSingleAccessLevel(principal);
   }
-  await forEachSequential(
-    principals,
-    (principal) => ensureOnePrincipal(layout, principal, runFn),
-  );
+  const warnings: string[] = [];
+  await forEachSequential(principals, async (principal) => {
+    warnings.push(...await ensureOnePrincipal(layout, principal, runFn));
+  });
+  return warnings;
 }
 
 async function ensureOnePrincipal(
   layout: LayoutPaths,
   principal: PrincipalEnsureSpec,
   runFn: RunFn,
-): Promise<void> {
+): Promise<string[]> {
   assertSafePrincipalUsername(principal.username);
   const groupName = principalUnixGroupName(principal.username);
   const home = assertSafeAbsolutePath(
@@ -736,7 +737,7 @@ async function ensureOnePrincipal(
   // Runs here, before any unit is installed or pool staged: systemd resolves
   // supplementary groups at `execve`, so a unit started before its principal
   // joined the runtime group dies `203/EXEC`.
-  await ensurePrincipalManagedGroups(
+  const warnings = await ensurePrincipalManagedGroups(
     principal.username,
     resolveManagedGroups(principal),
     runFn,
@@ -746,6 +747,7 @@ async function ensureOnePrincipal(
     principal.passwordHash,
     runFn,
   );
+  return warnings;
 }
 
 /**
@@ -890,12 +892,17 @@ async function removeSupplementaryGroupMembership(
  * sshd backstop block does not apply. A failed **revoke** is loud: an
  * entitlement or a login that silently outlives its grant is a security
  * problem, not an inconvenience.
+ *
+ * Returns one warning per add that failed, so a caller that has somewhere to
+ * report (the principals reconcile command result) can say so rather than
+ * leave the grant looking applied.
  */
 export async function ensurePrincipalManagedGroups(
   username: string,
   desiredGroups: ReadonlySet<string>,
   runFn: RunFn = runDefault,
-): Promise<void> {
+): Promise<string[]> {
+  const warnings: string[] = [];
   const registryGroups = allManagedGroups();
   for (const group of desiredGroups) {
     if (!registryGroups.has(group)) {
@@ -920,14 +927,14 @@ export async function ensurePrincipalManagedGroups(
       await ensureSupplementaryGroupMembership(username, group, runFn);
     } catch (err) {
       if (isRequiredManagedGroup(group)) throw err;
-      logWarn(
-        "deploy",
-        `could not add ${username} to ${group}: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      );
+      const warning = `could not add ${username} to ${group}: ${
+        err instanceof Error ? err.message : String(err)
+      } (is that runtime installed on this host?)`;
+      logWarn("deploy", warning);
+      warnings.push(warning);
     }
   });
+  return warnings;
 }
 
 /**
