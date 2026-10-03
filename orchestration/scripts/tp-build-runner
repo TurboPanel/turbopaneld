@@ -171,6 +171,18 @@ EOF
   env -i "HOME=$WORK" "PATH=$DEFAULT_PATH" "TMPDIR=/tmp" "$@" sh -c "$_command" || _status=$?
   if [ "$_status" -ne 0 ]; then
     printf 'tp-build-runner: step %s of %s failed (exit %s)\n' "$_step" "$_steps" "$_status" >&2
+    # 127 is "command not found". pnpm and yarn are not on the build PATH by
+    # themselves: the daemon runs them as `corepack pnpm ...`.
+    if [ "$_status" -eq 127 ]; then
+      case "$_command" in
+        *pnpm*|*yarn*)
+          printf '%s\n' \
+            "tp-build-runner: hint: pnpm and yarn are not installed on the build machine by themselves." \
+            "tp-build-runner: hint: TurboPanel already installs your packages, so set the build command to just 'pnpm run build' (or 'yarn build'), without 'pnpm install &&' in front." \
+            "tp-build-runner: hint: if you must call it yourself, write 'corepack pnpm ...' instead of 'pnpm ...'." >&2
+          ;;
+      esac
+    fi
     exit "$_status"
   fi
   IFS="$_nl"
