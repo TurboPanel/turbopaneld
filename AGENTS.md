@@ -106,7 +106,10 @@ writable, otherwise `tp-host install -o tp` / `rm`. Never `Deno.rename` or
 `Deno.mkdir` a new entry straight into those two roots. `/var/log/turbopanel`
 is root-owned too (the daemon writes nothing there). On a host that also runs
 the control plane the state root stays shared with the instance for now
-(`turbopanel_seal_state_root: false` in the co-located playbooks). Root Ansible never
+(`turbopanel_seal_state_root: false` in the co-located playbooks). `tp-host` treats every other entry directly under those two roots as root's: `rm`, `mv`,
+`chown` and `install -d -o` refuse it, and `install`/`tee`/`cp -p` refuse a root-owned
+regular file there (`tp_refuse_root_entry`, `tp_put_file`; the leaf and loose-file lists
+mirror `layout.ts`, pinned by `tp-host.test.ts`). Root Ansible never
 recurses or follows links inside a leaf (pinned by
 `src/orchestration/root-tasks-platform-parents.test.ts`).
 
