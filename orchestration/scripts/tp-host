@@ -2041,9 +2041,15 @@ tp_verb_sshd() {
 # a member still on the tenant-owned home layout could not sign in at all.
 # `on` therefore runs the layout check first and refuses on any finding; `off`
 # is never gated, because it is the rollback.
+#
+# The switch sits outside every managed tree (no path class), so no generic
+# verb — install, tee, rm, … — can write or remove it: only `sftp-chroot on`
+# (after the check) and `off`. `status` names the chroot root as this script
+# resolves it, so the daemon renders the same root the check validated.
 SFTP_GROUP="tpsftp"
 SHELL_GROUP="tpshell"
-SFTP_CHROOT_SWITCH="$R_SSHKEYS/sftp-chroot"
+SFTP_CHROOT_SWITCH="$P/etc/ssh/turbopanel-sftp-chroot"
+SFTP_START_DIR="/home"
 
 # A directory sshd accepts as part of a chroot path.
 tp_chroot_dir_ok() {
@@ -2070,6 +2076,19 @@ tp_chroot_parents_check() {
 
 tp_group_members() {
   tp_getent group "$1" | cut -d: -f4 | tr ',' '\n'
+}
+
+# Every account in tpsftp: supplementary members and those whose primary
+# group it is (sshd's Match Group matches both).
+tp_sftp_members() {
+  tp_group_members "$SFTP_GROUP"
+  _sf_gid="$(tp_gid_of_group "$SFTP_GROUP")" || return 0
+  [ -n "$_sf_gid" ] || return 0
+  if [ -n "$TP_TEST" ]; then
+    cat "$P/etc/passwd"
+  else
+    getent passwd
+  fi | awk -F: -v g="$_sf_gid" '$4 == g { print $1 }'
 }
 
 # One member: a principal on the new layout, and in the files-only level only.
@@ -2102,7 +2121,7 @@ tp_sftp_member_check() {
 tp_sftp_chroot_check() {
   _sc_out="$(
     tp_chroot_parents_check
-    tp_group_members "$SFTP_GROUP" | while IFS= read -r _sc_user; do
+    tp_sftp_members | sort -u | while IFS= read -r _sc_user; do
       [ -z "$_sc_user" ] || tp_sftp_member_check "$_sc_user"
     done
   )"
@@ -2111,17 +2130,49 @@ tp_sftp_chroot_check() {
   return 1
 }
 
+tp_sftp_chroot_is_on() {
+  [ -f "$SFTP_CHROOT_SWITCH" ] && [ ! -L "$SFTP_CHROOT_SWITCH" ]
+}
+
+# The effective sshd config jails every member: an administrator's earlier
+# Match, or a drop-in sorted before ours, could otherwise silently win.
+tp_sftp_chroot_verify() {
+  _sv_out="$(
+    tp_sftp_members | sort -u | while IFS= read -r _sv_user; do
+      [ -n "$_sv_user" ] || continue
+      tp_name_shape_ok "$_sv_user" || { echo "$_sv_user: not a valid account name"; continue; }
+      _sv_spec="user=$_sv_user,host=localhost,addr=127.0.0.1"
+      if [ -n "$TP_TEST" ]; then
+        tp_run /usr/sbin/sshd -T -C "$_sv_spec" >&2
+        continue
+      fi
+      _sv_eff="$(/usr/sbin/sshd -T -C "$_sv_spec" 2>&1)" || { echo "$_sv_user: sshd -T failed"; continue; }
+      printf '%s\n' "$_sv_eff" | grep -qx "chrootdirectory $R_PRINCIPALS/%u" ||
+        echo "$_sv_user: effective ChrootDirectory is not $R_PRINCIPALS/%u"
+      printf '%s\n' "$_sv_eff" | grep -qx "forcecommand internal-sftp -d $SFTP_START_DIR" ||
+        echo "$_sv_user: effective ForceCommand is not internal-sftp -d $SFTP_START_DIR"
+    done
+  )"
+  [ -n "$_sv_out" ] || return 0
+  printf '%s\n' "$_sv_out"
+  return 1
+}
+
 tp_verb_sftp_chroot() {
-  [ "$#" -eq 1 ] || tp_die "sftp-chroot: only check, on, off or status"
+  [ "$#" -eq 1 ] || tp_die "sftp-chroot: only check, verify, on, off or status"
   case "$1" in
     status)
-      if [ -f "$SFTP_CHROOT_SWITCH" ] && [ ! -L "$SFTP_CHROOT_SWITCH" ]; then
-        echo on
+      if tp_sftp_chroot_is_on; then
+        echo "on $R_PRINCIPALS"
       else
         echo off
       fi
       ;;
     check) tp_sftp_chroot_check ;;
+    verify)
+      tp_sftp_chroot_is_on || tp_die "sftp-chroot: verify needs the switch on"
+      tp_sftp_chroot_verify
+      ;;
     on)
       tp_sftp_chroot_check >&2 ||
         tp_die "sftp-chroot: refusing to switch on until every $SFTP_GROUP member is on the new home layout"
@@ -2131,7 +2182,7 @@ tp_verb_sftp_chroot() {
       tp_pin_parent "$SFTP_CHROOT_SWITCH" || tp_die "no such directory for $SFTP_CHROOT_SWITCH"
       rm -f -- "./$PIN_NAME"
       ;;
-    *) tp_die "sftp-chroot: only check, on, off or status" ;;
+    *) tp_die "sftp-chroot: only check, verify, on, off or status" ;;
   esac
 }
 

@@ -1096,6 +1096,13 @@ const SITES: CallSite[] = [
   tpHost('src/deploy/ssh/apply.ts|["-n","rm","-f","--",`${dir}/${name}`]', {
     argv: ["rm", "-f", "--", `${SSH_KEYS}/bob`],
   }),
+  tpHost('src/deploy/ssh/apply.ts|["-n","sftp-chroot","status"]', {
+    argv: ["sftp-chroot", "status"],
+  }),
+  tpHost('src/deploy/ssh/apply.ts|["-n","sftp-chroot","verify"]', {
+    argv: ["sftp-chroot", "verify"],
+    setup: file(`${P}/etc/ssh/turbopanel-sftp-chroot`, "on\n"),
+  }),
   tpHost('src/deploy/ssh/apply.ts|["-n","sftp-chroot","check"]', {
     argv: ["sftp-chroot", "check"],
     // alice is in tpsftp; on the new layout the check is clean.

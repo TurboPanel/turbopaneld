@@ -90,19 +90,22 @@ never rides the wire), applied by `ensurePrincipalPassword` in
 `ps` can read. A material with no `passwordHash` locks the account password
 (`usermod -p !`), the state `useradd` created it in.
 
-**The SFTP chroot is a per-host switch, on last.** With
-`/etc/ssh/turbopanel/sftp-chroot` present (content `on`), the `tpsftp` block
-gets `ChrootDirectory <principal home root>/%u` and
+**The SFTP chroot is a per-host switch, on last.** With the switch on, the
+`tpsftp` block gets `ChrootDirectory <root>/%u` and
 `ForceCommand internal-sftp -d /home`: the jail is the root-owned principal
-home, the session starts in `home/`, and `sites/` is visible read-only.
-`%u`, not `%h`, because the passwd home is `home/` one level down. Only
-`tp-host sftp-chroot on` writes the switch, and it refuses while any member
-fails `tp-host sftp-chroot check` (a chroot path component not root-owned or
-group/world-writable, no principal-owned `home/`, a passwd home other than
-`<root>/<p>/home`, or `tpshell` held as well — sshd would refuse that
-member's every login, or jail a shell). `sftp-chroot off` is the rollback and
-is never gated; the next reconcile renders the unjailed block. The daemon
-only reads the switch: when it is on, every reconcile re-runs the check and
-turns findings into warnings, keeping the jail (fail closed for that member,
-not open for everyone). The drop-in rollout is unchanged — `sshd -t` and
-rollback on refusal. `server.principals.reconcile` reports `sftpChroot`.
+home, the session starts in `home/`, and `sites/` is visible read-only. `%u`,
+not `%h`, because the passwd home is `home/` one level down. The switch is
+`/etc/ssh/turbopanel-sftp-chroot`, outside every tp-host tree, so no generic
+verb can write or remove it: only `tp-host sftp-chroot on` (which refuses
+while any member — supplementary or primary `tpsftp` — fails
+`sftp-chroot check`: a chroot path component not root-owned or group/world
+writable, no principal-owned `home/`, a passwd home other than
+`<root>/<p>/home`, or `tpshell` held as well) and `off`, the ungated
+rollback. The daemon asks `sftp-chroot status` (`on <root>` | `off`) and
+renders the root tp-host validated, never its own environment's; an
+unreadable or malformed answer aborts the reconcile rather than unjailing.
+When on, each reconcile re-runs `check` (findings become warnings and the jail
+stays — fail closed for that member), and after `sshd -t` runs
+`sftp-chroot verify`, which asks `sshd -T -C user=<member>` whether the jail
+is really effective; a refusal rolls the drop-in back like a failed `-t`.
+`server.principals.reconcile` reports `sftpChroot`.

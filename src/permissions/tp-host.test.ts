@@ -2416,7 +2416,7 @@ async function newLayoutAlice(host: Host, groups: string[] = []) {
   );
 }
 
-const SWITCH = "etc/ssh/turbopanel/sftp-chroot";
+const SWITCH = "etc/ssh/turbopanel-sftp-chroot";
 
 test("sftp-chroot switches on only when every tpsftp member is on the new layout", async () => {
   await withHost(async (host) => {
@@ -2429,7 +2429,17 @@ test("sftp-chroot switches on only when every tpsftp member is on the new layout
     assertEquals(on.code, 0, on.stderr);
     assertEquals(await Deno.readTextFile(host.path(SWITCH)), "on\n");
     assertStringIncludes(on.stdout, "EXEC [chown] [-h] [--] [root:root] [./f]");
-    assertEquals((await host.run(["sftp-chroot", "status"])).stdout, "on\n");
+    // The status names the root it validated, for the daemon to render.
+    assertEquals(
+      (await host.run(["sftp-chroot", "status"])).stdout,
+      `on ${host.path("srv/users")}\n`,
+    );
+    const verify = await host.run(["sftp-chroot", "verify"]);
+    assertEquals(verify.code, 0, verify.stderr);
+    assertStringIncludes(
+      verify.stderr,
+      "EXEC [/usr/sbin/sshd] [-T] [-C] [user=alice,host=localhost,addr=127.0.0.1]",
+    );
 
     // Off is the rollback and is never gated.
     assertEquals((await host.run(["sftp-chroot", "off"])).code, 0);
@@ -2504,5 +2514,49 @@ test("sftp-chroot accepts only check, on, off and status", async () => {
     ) {
       await refused(host, ["sftp-chroot", ...args]);
     }
+  });
+});
+
+test("only sftp-chroot on and off can write or remove the switch", async () => {
+  await withHost(async (host) => {
+    const sw = host.path(SWITCH);
+    await refused(host, [
+      "install",
+      "-m",
+      "0644",
+      "-o",
+      "root",
+      "-g",
+      "root",
+      host.path("tmp/staged"),
+      sw,
+    ]);
+    await refused(host, ["tee", sw], "on\n");
+    await Deno.writeTextFile(sw, "on\n");
+    await refused(host, ["rm", "-f", "--", sw]);
+    await refused(host, ["cat", "--", sw]);
+  });
+});
+
+test("sftp-chroot verify refuses while the switch is off", async () => {
+  await withHost(async (host) => {
+    await newLayoutAlice(host);
+    const stderr = await refused(host, ["sftp-chroot", "verify"]);
+    assertStringIncludes(stderr, "needs the switch on");
+  });
+});
+
+test("sftp-chroot checks an account whose primary group is tpsftp", async () => {
+  await withHost(async (host) => {
+    await newLayoutAlice(host);
+    const passwd = await Deno.readTextFile(host.path("etc/passwd"));
+    await Deno.writeTextFile(
+      host.path("etc/passwd"),
+      passwd + `dave:x:15004:9986::${host.prefix}/srv/users/dave:/bin/sh\n`,
+    );
+    const check = await host.run(["sftp-chroot", "check"]);
+    assertEquals(check.code === 0, false);
+    assertStringIncludes(check.stdout, "dave: passwd home is not");
+    assertEquals(check.stdout.includes("alice:"), false, check.stdout);
   });
 });

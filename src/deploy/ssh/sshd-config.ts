@@ -19,13 +19,13 @@ export const SSHD_DROPIN_DIR = "/etc/ssh/sshd_config.d";
 export const SSHD_DROPIN_PATH = `${SSHD_DROPIN_DIR}/60-turbopanel.conf`;
 
 /**
- * The host's SFTP chroot switch: present (content `on`) means `tpsftp` members
- * are jailed in their principal home. Root-owned, beside the key directory,
- * and written only by `tp-host sftp-chroot on`, which refuses while any member
- * is not on the root-owned home layout (sshd would refuse that member's every
- * login). The daemon only reads it.
+ * The host's SFTP chroot switch. Root-owned and outside every tree tp-host's
+ * generic verbs may write, so only `tp-host sftp-chroot on` (which refuses
+ * while any `tpsftp` member is off the root-owned home layout) and
+ * `sftp-chroot off` change it. The daemon asks `tp-host sftp-chroot status`,
+ * which also names the chroot root it validated.
  */
-export const SFTP_CHROOT_SWITCH_PATH = "/etc/ssh/turbopanel/sftp-chroot";
+export const SFTP_CHROOT_SWITCH_PATH = "/etc/ssh/turbopanel-sftp-chroot";
 
 /** Where a jailed SFTP session starts, relative to its chroot. */
 export const SFTP_CHROOT_START_DIR = "home";
