@@ -184,6 +184,8 @@
         group: "{{ turbopanel_group | default('tp') }}"
         mode: "2770"
         recurse: true
+        # Group-tp writable tree: re-own links themselves, never their targets.
+        follow: false
 
     - name: Platform CA, server leaf, units and the first migration
       ansible.builtin.include_role:
