@@ -9,6 +9,10 @@
 
 import { join } from "@std/path";
 import type { LayoutPaths } from "../paths/layout.ts";
+import {
+  type PrivilegedReadRun,
+  readTextFileOrNull,
+} from "../permissions/privileged-read.ts";
 
 export const INSTANCE_HOSTNAME_SIDECAR = "instance-hostnames.json";
 
@@ -66,14 +70,15 @@ export function instanceSiteHostname(host: string): string | null {
  */
 export async function readInstanceEdgeHostnames(
   layout: LayoutPaths,
+  run?: PrivilegedReadRun,
 ): Promise<InstanceEdgeHostname[]> {
-  let raw: string;
-  try {
-    raw = await Deno.readTextFile(instanceHostnameSidecarPath(layout));
-  } catch (err) {
-    if (err instanceof Deno.errors.NotFound) return [];
-    throw err;
-  }
+  // `/etc/turbopanel/caddy` is `root:tpcaddysite` `0750` once the site Caddy
+  // role runs; behind that the sidecar is read through tp-host.
+  const raw = await readTextFileOrNull(
+    instanceHostnameSidecarPath(layout),
+    run,
+  );
+  if (raw === null) return [];
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);

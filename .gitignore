@@ -1,4 +1,24 @@
+# env and secret-bearing dotenv variants (runtime env lives under platform config)
 .env
+.env.*
+.env-*
+.envrc
+!.env.example
+.dev.vars
+.dev.vars*
+!.dev.vars.example
+
+# keys, certs, tokens, and passwords
+*.pem
+*.key
+*.p12
+*.jks
+*.mobileprovision
+*.token
+*.secret
+*.pass
+server-key.json
+license.token
 # Runtime log output at the repo root only — never the `src/logs/` module.
 /logs/
 # Deno V8 profiles + HTML/LCOV (`deno test --coverage=…`). Official task uses

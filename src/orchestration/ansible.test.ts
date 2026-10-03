@@ -2571,3 +2571,31 @@ test(
     );
   },
 );
+
+test("principal-access creates every SSH access group the registry defines", async () => {
+  // The daemon refuses to materialize a principal that cannot join
+  // tpprincipal, and sshd matches nothing for a group that does not exist — so
+  // a registry access group the role does not create is an outage or a hole.
+  const registry = JSON.parse(
+    await Deno.readTextFile(
+      join(CHECKOUT_ORCHESTRATION_DIR, "runtime-registry.json"),
+    ),
+  ) as { accessGroups: Record<string, unknown> };
+  const tasks = await Deno.readTextFile(
+    join(CHECKOUT_ORCHESTRATION_DIR, "roles/principal-access/tasks/main.yml"),
+  );
+  const ensure = tasks.slice(
+    tasks.indexOf("- name: Ensure the SSH access groups"),
+    tasks.indexOf("- name: Ensure the panel-managed authorized_keys directory"),
+  );
+  for (const key of Object.keys(registry.accessGroups)) {
+    assert(
+      ensure.includes(`runtime_registry.accessGroups.${key} }}`),
+      `principal-access does not create accessGroups.${key}`,
+    );
+    assert(
+      tasks.includes(`runtime_registry.accessGroups.${key} is defined`),
+      `principal-access does not assert accessGroups.${key}`,
+    );
+  }
+});

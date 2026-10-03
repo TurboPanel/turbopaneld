@@ -60,6 +60,25 @@ entitlements — one containment set (`allManagedGroups`), or a principal
 downgraded from shell to files-only would keep `tpshell` because the entitlement
 pass did not recognize it.
 
+**Every principal is matched, including one with no level.** `tpprincipal`
+(registry `accessGroups.principal`) is joined by every principal in
+`resolveManagedGroups`, whatever the wire says, and a failed join fails the
+reconcile instead of being logged. Its `Match` block comes after the level
+blocks and refuses every sign-in method (`PubkeyAuthentication no`,
+`AuthorizedKeysFile none`, …) and every forward. Because `sshd` keeps the
+first value of each keyword, a level member is untouched; the block only
+decides for a principal with no level, which before matched nothing and fell
+through to the host defaults — its own `~/.ssh/authorized_keys` and
+`AllowTcpForwarding yes`, so a planted key was a tunnel into the host's
+loopback and LAN (found live 2026-10-02). Rule: the backstop may only set
+keywords **every** level block already sets (`apply.test.ts` pins it); a
+`ForceCommand` or `ChrootDirectory` there would leak onto `tpshell` members.
+The principal-home redesign's SFTP chroot belongs in `sftpLevelDirectives`.
+For the same reason the drop-in is ensured on **every** deploy that
+materializes a principal (`applyDeploySshAccess`), not only when keys are
+declared; a keyless principal gets no key file. Every level block also sets
+`AllowStreamLocalForwarding no`, `PermitOpen none` and `PermitListen none`.
+
 **Password sign-in is a third group plus a shadow hash.** `tppasswd` is
 additive — its `Match` block sets only `PasswordAuthentication yes` and sits
 **first** in the drop-in, because when several `Match` blocks apply `sshd`

@@ -176,6 +176,38 @@ test("nginxSiteConfig listens on loopback only", () => {
   assertStringIncludes(conf, "root /var/lib/turbopanel/sites/env/site/public;");
 });
 
+test("site engines follow a symlink only when its owner matches the target's", () => {
+  const site = {
+    composeServiceName: "site",
+    root: "public",
+    listenPort: 18080,
+  } as const;
+  const docroot = "/srv/users/alice/sites/web/current/public";
+  const nginx = nginxSiteConfig({ ...site, engine: "nginx" }, docroot);
+  assertStringIncludes(
+    nginx,
+    "disable_symlinks if_not_owner from=$document_root;",
+  );
+
+  const apache = apacheSiteConfig({ ...site, engine: "apache" }, docroot);
+  assertStringIncludes(apache, "Options Indexes SymLinksIfOwnerMatch\n");
+  assertEquals(apache.includes("FollowSymLinks"), false);
+  // `.htaccess` may not turn FollowSymLinks back on.
+  assertEquals(apache.includes("AllowOverride All"), false);
+  assertStringIncludes(
+    apache,
+    "Options=Indexes,MultiViews,SymLinksIfOwnerMatch\n",
+  );
+
+  const ols = openlitespeedSiteFragment(
+    "env",
+    { ...site, engine: "openlitespeed" },
+    "/etc/turbopanel/openlitespeed/vhosts/tp_env_site/vhconf.conf",
+    docroot,
+  );
+  assertStringIncludes(ols, "allowSymbolLink           2\n");
+});
+
 test("apacheSiteConfig refuses a PHP site with no fpm socket", () => {
   assertThrows(
     () =>
