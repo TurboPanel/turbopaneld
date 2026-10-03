@@ -58,6 +58,9 @@ fast-path when the binary is present and the service active. The role
   On a co-located instance host (never auto-restarted by the handler) a change leaves
   `/etc/docker/turbopanel-restart-pending`; this and every later converge restart dockerd once the running dockerd
   reports live-restore, then clear the marker, and otherwise warn that a restart is pending.
+  `daemon-converge` re-applies just this deny (`tasks/converge-builder.yml`, `turbopanel_docker_builder_only`) on
+  hosts the role provisioned earlier: address pools, `bip` and `live-restore` are left as found, and it reads
+  `daemon.json` back and fails if the deny is not on disk.
 - **Strict no-op when both are empty and nothing is being cleared** (and
   when `turbopanel_docker_manage_daemon_json: false`): `daemon-json.yml` is
   not even included, so an unrelated converge never reads, writes or
