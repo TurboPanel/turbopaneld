@@ -326,27 +326,6 @@ async function reconcileKeyFiles(
 }
 
 /**
- * Put the host back exactly as it was before a refused swap. Leaving a
- * rejected drop-in in place would break the next unrelated
- * `systemctl reload ssh`, by anyone, for any reason.
- */
-async function restoreDropIn(
-  runFn: RunFn,
-  dropInPath: string,
-  backup: string,
-  hadPrevious: boolean,
-): Promise<void> {
-  if (hadPrevious) {
-    await runFn(
-      "sudo",
-      hostSudoArgs(["-n", "mv", "-f", "--", backup, dropInPath]),
-    );
-  } else {
-    await runFn("sudo", hostSudoArgs(["-n", "rm", "-f", "--", dropInPath]));
-  }
-}
-
-/**
  * Stage, test, publish, and reload the drop-in — rolling back to the previous
  * bytes if `sshd -t` refuses the result.
  *
@@ -403,9 +382,20 @@ async function reconcileDropIn(
     return false;
   }
 
+  // Put the host back exactly as it was before a refused swap. Leaving a
+  // rejected drop-in in place would break the next unrelated
+  // `systemctl reload ssh`, by anyone, for any reason.
+  const restore = () =>
+    existing === null
+      ? runFn("sudo", hostSudoArgs(["-n", "rm", "-f", "--", dropInPath]))
+      : runFn(
+        "sudo",
+        hostSudoArgs(["-n", "mv", "-f", "--", backup, dropInPath]),
+      );
+
   const test = await sshdConfigTest(runFn);
   if (!test.success) {
-    await restoreDropIn(runFn, dropInPath, backup, existing !== null);
+    await restore();
     throw new Error(
       `sshd rejected the TurboPanel configuration, and it has been rolled back: ${
         test.stderr || test.stdout || "sshd -t failed"
@@ -415,7 +405,7 @@ async function reconcileDropIn(
   if (verify) {
     const effective = await verify();
     if (!effective.success) {
-      await restoreDropIn(runFn, dropInPath, backup, existing !== null);
+      await restore();
       throw new Error(
         `sshd would not jail SFTP members as configured, and the change has been rolled back: ${
           effective.stdout || effective.stderr || "sftp-chroot verify failed"
@@ -435,7 +425,7 @@ type SftpChroot = { root: string | null; warnings: string[] };
 function parseSftpChrootStatus(stdout: string): string | null | undefined {
   const status = stdout.trim();
   if (status === "off") return null;
-  const match = /^on (\/[A-Za-z0-9._\/-]+)$/.exec(status);
+  const match = /^on (\/[A-Za-z0-9._/-]+)$/.exec(status);
   return match ? match[1] : undefined;
 }
 
