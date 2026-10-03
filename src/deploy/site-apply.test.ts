@@ -447,6 +447,65 @@ test("applySites applies nginx+apache+ols together", async () => {
   }
 });
 
+test("removeSites stops the OpenLiteSpeed unit when its last site goes, and keeps it for another environment", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const { run, calls } = createSiteRunMock();
+  const { runPlaybook } = capturePlaybooks();
+  const unitCalls = () =>
+    calls.filter((call) => call.args.includes("turbopanel-openlitespeed"))
+      .map((call) => call.args.filter((arg) => arg !== "-n").join(" "))
+      .filter((line) => line.includes("systemctl"));
+  try {
+    await applySites(layout, "envolsa", [olsSite], { run, runPlaybook });
+    await applySites(layout, "envolsb", [olsSite], { run, runPlaybook });
+
+    calls.length = 0;
+    await removeSites(layout, "envolsa", { run });
+    const kept = unitCalls();
+    assertEquals(kept.some((line) => line.includes("disable --now")), false);
+    assertEquals(kept.some((line) => line.includes("reload")), true);
+
+    calls.length = 0;
+    await removeSites(layout, "envolsb", { run });
+    const idle = unitCalls();
+    assertEquals(idle.some((line) => line.includes("disable --now")), true);
+    assertEquals(idle.some((line) => line.includes("reload")), false);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("applySites restarts the OpenLiteSpeed unit after it was stopped for idleness", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const { run, calls } = createSiteRunMock();
+  const { runPlaybook } = capturePlaybooks();
+  const isUnit = (args: string[], verb: string) =>
+    args.includes("turbopanel-openlitespeed") && args.includes(verb);
+  // A stopped unit refuses `reload`, as systemd does.
+  const stoppedRun: SiteRunFn = (command, args) =>
+    command === "sudo" && isUnit(args, "reload")
+      ? Promise.resolve(
+        fail("Unit turbopanel-openlitespeed.service is not active"),
+      )
+      : run(command, args);
+  try {
+    await applySites(layout, "envolsx", [olsSite], { run, runPlaybook });
+    await removeSites(layout, "envolsx", { run });
+
+    calls.length = 0;
+    await applySites(layout, "envolsy", [olsSite], {
+      run: stoppedRun,
+      runPlaybook,
+    });
+    const enabled = calls.some((call) =>
+      isUnit(call.args, "enable") && call.args.includes("--now")
+    );
+    assertEquals(enabled, true);
+  } finally {
+    await cleanup();
+  }
+});
+
 test("removeSites removes nginx/apache/ols configs via mocked sudo", async () => {
   const { layout, cleanup } = await makeTestLayout();
   const { run } = createSiteRunMock();
