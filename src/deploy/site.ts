@@ -96,6 +96,7 @@ import type {
   StagedConfigWrite,
 } from "./site/engine-driver.ts";
 import {
+  isSitePhpRuntimeOf,
   sitePhpFpmConf,
   sitePhpIni,
   sitePhpKey,
@@ -108,8 +109,10 @@ import {
   sitePhpSocketUnit,
 } from "./site/php-runtime.ts";
 import {
+  holdSitePhpRuntime,
   installSitePhpRuntime,
   listSitePhpUnits,
+  orphanSitePhpRuntimes,
   type PreparedSitePhpRuntime,
   removeSitePhpRuntimes,
   rollbackSitePhpRuntime,
@@ -2272,7 +2275,9 @@ async function removeReplacedPhpRuntimes(
   desired: ReadonlyMap<string, string | null>,
 ): Promise<void> {
   const replaced = [...phpUnits.keys()].filter((id) =>
-    [...desired].some(([key, keep]) => id.startsWith(`${key}-`) && id !== keep)
+    [...desired].some(([key, keep]) =>
+      isSitePhpRuntimeOf(id, key) && id !== keep
+    )
   );
   await removeSitePhpRuntimes(
     sitePhpIo(),
@@ -2280,6 +2285,83 @@ async function removeReplacedPhpRuntimes(
     replaced,
     phpUnits,
   );
+}
+
+/**
+ * Hold the runtime a site is about to install, so a concurrent removal's
+ * orphan sweep cannot take it before its vhost names it.
+ */
+function holdSiteRuntime(
+  environmentId: string,
+  site: SiteApplySpec,
+): (() => void) | null {
+  if (!sitePhpRuntimeEngine(site)) return null;
+  const mode = sitePhpRuntimeMode(site);
+  const series = resolveSitePhpSeries(site);
+  if (mode === null || !series) return null;
+  const key = sitePhpKey(environmentId, site.composeServiceName);
+  return holdSitePhpRuntime(sitePhpRuntimeId(key, mode, series));
+}
+
+/** A pool file of one of `pools`, or a staging leftover of one. */
+function isPoolFileOf(name: string, pools: ReadonlySet<string>): boolean {
+  const conf = name.replace(/\.(tpnew|tpprev)$/, "");
+  return pools.has(conf);
+}
+
+/** Remove one series' pools for `pools`; whether a live `.conf` went. */
+async function removeSeriesPools(
+  layout: LayoutPaths,
+  series: string,
+  pools: ReadonlySet<string>,
+): Promise<boolean> {
+  const dir = phpFpmPoolsDir(layout, series);
+  const names = (await listEngineConfigDir(dir) ?? []).filter((name) =>
+    isPoolFileOf(name, pools)
+  );
+  let removedLive = false;
+  await forEachSequential(names, async (name) => {
+    const removed = await tryRemoveSiteConfigFile(
+      join(dir, name),
+      `php-fpm ${series} pool`,
+    );
+    if (removed && name.endsWith(".conf")) removedLive = true;
+  });
+  return removedLive;
+}
+
+/**
+ * Sites now on their own runtime give up their pool on the shared php-fpm
+ * master, whatever series it was on: the pool still ran their code as a
+ * second, stale PHP. Called once their vhosts serve the new sockets. Each
+ * series that lost a pool is reloaded, and stopped when only the bootstrap
+ * pool is left. Best-effort: the apply itself has already succeeded.
+ */
+async function retireSharedPhpPools(
+  layout: LayoutPaths,
+  environmentId: string,
+  services: readonly string[],
+): Promise<void> {
+  if (services.length === 0) return;
+  const pools = new Set(
+    services.map((service) => `${phpFpmPoolId(environmentId, service)}.conf`),
+  );
+  await forEachSequential(await installedPhpSeries(layout), async (series) => {
+    let removed: boolean;
+    try {
+      removed = await removeSeriesPools(layout, series, pools);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      logWarn("deploy", `php-fpm ${series} shared pools kept: ${message}`);
+      return;
+    }
+    if (!removed) return;
+    await tryReloadAfterSiteRemoval(
+      `php-fpm ${series}`,
+      () => reloadPhpFpm(layout, series),
+    );
+    await disableIdlePhpSeries(layout, series);
+  });
 }
 
 /**
@@ -2622,18 +2704,25 @@ function sitePhpRuntimeFiles(
   const values = site.php
     ? phpAdminValues(site.php, sitePhpAdminOpts(layout, paths))
     : [];
-  const chdir = paths.documentRoot.startsWith(`${home}/`)
-    ? { chdir: paths.documentRoot }
-    : {};
+  // The runtime runs as the owner, who cannot enter the daemon's state tree
+  // (`tp:tp 0750`), and its limits are locked for scripts under the home.
+  if (!paths.documentRoot.startsWith(`${home}/`)) {
+    throw new Error(
+      `site ${site.composeServiceName}: PHP mode ${mode} serves only from the owner's home (a release or a managed directory)`,
+    );
+  }
   return {
     spec,
     service: sitePhpServiceUnit(spec, {
       writablePaths: sitePhpWritablePaths(layout, paths),
     }),
     socket: mode === "fastcgi" ? sitePhpSocketUnit(spec) : null,
-    ini: sitePhpIni(values),
+    ini: sitePhpIni(values, home),
     fpmConf: mode === "fpm"
-      ? sitePhpFpmConf(spec, { pool: phpFpmPoolOverrides(site.php), ...chdir })
+      ? sitePhpFpmConf(spec, {
+        pool: phpFpmPoolOverrides(site.php),
+        chdir: paths.documentRoot,
+      })
       : null,
   };
 }
@@ -3077,6 +3166,7 @@ export async function applySites(
       ? await listSitePhpUnits(sitePhpIo())
       : new Map();
     const desiredPhpRuntimes = new Map<string, string | null>();
+    const holds: Array<() => void> = [];
     const plan: SiteReloadPlan = {
       needs,
       staged: emptyStagedConfigs(),
@@ -3089,6 +3179,8 @@ export async function applySites(
     let reloaded: string[];
     try {
       await forEachSequential(sites, async (site) => {
+        const hold = holdSiteRuntime(environmentId, site);
+        if (hold) holds.push(hold);
         const result = await applyOneSite(
           layout,
           environmentId,
@@ -3111,10 +3203,23 @@ export async function applySites(
     } catch (err) {
       await rollbackUnsettledPhpRuntimes(plan);
       throw err;
+    } finally {
+      for (const release of holds) release();
     }
     // Every vhost now names its new socket and answered: only now do the
-    // runtimes it no longer names go.
+    // runtimes and shared pools it no longer names go.
     await removeReplacedPhpRuntimes(layout, phpUnits, desiredPhpRuntimes);
+    await retireSharedPhpPools(
+      layout,
+      environmentId,
+      sites
+        .filter((site) =>
+          desiredPhpRuntimes.get(
+            sitePhpKey(environmentId, site.composeServiceName),
+          )
+        )
+        .map((site) => site.composeServiceName),
+    );
 
     // `reloaded=` empty is the expected shape of a release promote that only
     // moved `current` — say so, or a skipped reload looks like a lost step.
@@ -3365,17 +3470,35 @@ export async function removeSites(
   });
 }
 
-/** Remove the per-site PHP runtimes of the given services of one environment. */
+/**
+ * Remove the per-site PHP runtimes of the given services of one environment,
+ * and every runtime no vhost names any more (a site removed while its runtime
+ * stayed, an interrupted apply). A runtime id is a hash, so an orphan cannot
+ * be traced back to its environment; it is found by what no vhost references.
+ * When a vhost cannot be read only the named services' runtimes go.
+ */
 async function removeEnvironmentPhpRuntimes(
   layout: LayoutPaths,
   environmentId: string,
   services: readonly string[],
 ): Promise<void> {
-  if (services.length === 0) return;
-  const keys = services.map((service) => sitePhpKey(environmentId, service));
   const listing = await listSitePhpUnits(sitePhpIo());
-  const ids = [...listing.keys()].filter((id) =>
-    keys.some((key) => id.startsWith(`${key}-`))
+  if (listing.size === 0) return;
+  const keys = services.map((service) => sitePhpKey(environmentId, service));
+  const named = [...listing.keys()].filter((id) =>
+    keys.some((key) => isSitePhpRuntimeOf(id, key))
   );
+  const orphans = await orphanSitePhpRuntimes(
+    sitePhpIo(),
+    layout.configDir,
+    listing,
+  );
+  if (orphans === null) {
+    logWarn(
+      "deploy",
+      "orphaned PHP runtimes kept: a vhost could not be read",
+    );
+  }
+  const ids = [...new Set([...named, ...(orphans ?? [])])];
   await removeSitePhpRuntimes(sitePhpIo(), layout.configDir, ids, listing);
 }

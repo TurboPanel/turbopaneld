@@ -23,6 +23,7 @@
  */
 
 import { join } from "@std/path";
+import { resolveLayout } from "../../paths/layout.ts";
 import { hostSudoArgs } from "../../permissions/host-sudo.ts";
 import { logInfo, logWarn } from "../../util/logger.ts";
 import { forEachSequential } from "../../util/sequential.ts";
@@ -38,7 +39,9 @@ import {
   validateSiteEndpoints,
 } from "./engine-driver.ts";
 import {
+  isSitePhpRuntimeId,
   sitePhpConfigDir,
+  sitePhpRuntimeIdsIn,
   type SitePhpRuntimeSpec,
   sitePhpServiceName,
   sitePhpSocketName,
@@ -487,44 +490,187 @@ export async function removeSitePhpRuntimes(
 }
 
 /**
- * Boot reconcile: start every installed runtime that is not running.
+ * Runtimes an apply in this process has installed and not yet settled or
+ * rolled back. Its vhost may not name it yet, so no orphan sweep may take it.
+ */
+const inFlight = new Map<string, number>();
+
+/** Mark `id` in flight until `release` is called. */
+export function holdSitePhpRuntime(id: string): () => void {
+  inFlight.set(id, (inFlight.get(id) ?? 0) + 1);
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    const left = (inFlight.get(id) ?? 1) - 1;
+    if (left > 0) inFlight.set(id, left);
+    else inFlight.delete(id);
+  };
+}
+
+/**
+ * The vhost directories whose sites hand PHP to a per-site runtime. nginx and
+ * Apache keep one file per site; OpenLiteSpeed names the socket in a
+ * directory per site (`vhosts/<site>/vhconf.conf`; its `sites/` fragments
+ * name none), which {@link referencesIn} enters one level deep.
+ */
+export function sitePhpVhostDirs(configDir: string): string[] {
+  return [
+    join(configDir, "nginx", "sites"),
+    join(configDir, "apache", "sites"),
+    join(configDir, "openlitespeed", "vhosts"),
+  ];
+}
+
+/**
+ * One vhost directory's entries; `null` unread. A missing top-level directory
+ * (that engine is not installed) is `[]`; a missing nested one is `null`: the
+ * entry `cat` could not read is then a file it could not read, never an empty
+ * directory.
+ */
+async function listVhostDir(
+  io: SitePhpRuntimeIo,
+  dir: string,
+  missingIsEmpty: boolean,
+): Promise<string[] | null> {
+  const ls = await sudo(io, ["ls", "-A", "--", dir]);
+  if (ls.success) return ls.stdout.split("\n").filter((n) => n.length > 0);
+  return missingIsEmpty && /no such (file or )?directory/i.test(ls.stderr)
+    ? []
+    : null;
+}
+
+/**
+ * Adds every runtime id the vhosts in `dir` name. An entry `cat` cannot read
+ * is entered as a directory while `depth` allows (OpenLiteSpeed's per-site
+ * directories); `false` when anything could not be read.
+ */
+async function referencesIn(
+  io: SitePhpRuntimeIo,
+  dir: string,
+  into: Set<string>,
+  depth = 1,
+): Promise<boolean> {
+  const names = await listVhostDir(io, dir, depth === 1);
+  if (names === null) return false;
+  let readAll = true;
+  // Live configs and staged / snapshot copies alike: a rollout in progress
+  // may swap either back in.
+  await forEachSequential(names, async (name) => {
+    const cat = await sudo(io, ["cat", "--", join(dir, name)]);
+    if (cat.success) {
+      for (const id of sitePhpRuntimeIdsIn(cat.stdout)) into.add(id);
+      return;
+    }
+    if (depth > 0 && await referencesIn(io, join(dir, name), into, depth - 1)) {
+      return;
+    }
+    readAll = false;
+  });
+  return readAll;
+}
+
+/**
+ * Every runtime id a vhost on this host names, or `null` when any vhost could
+ * not be read — the caller then removes nothing and starts nothing on the
+ * strength of a reference it could not see.
+ */
+export async function referencedSitePhpRuntimes(
+  io: SitePhpRuntimeIo,
+  configDir: string,
+): Promise<Set<string> | null> {
+  const ids = new Set<string>();
+  let readAll = true;
+  await forEachSequential(sitePhpVhostDirs(configDir), async (dir) => {
+    if (!await referencesIn(io, dir, ids)) readAll = false;
+  });
+  return readAll ? ids : null;
+}
+
+/**
+ * Installed runtimes no vhost names and no apply holds: what a removed site,
+ * an interrupted apply or a crashed daemon left behind. `null` when the
+ * vhosts could not all be read.
+ */
+export async function orphanSitePhpRuntimes(
+  io: SitePhpRuntimeIo,
+  configDir: string,
+  listing: SitePhpUnitListing,
+): Promise<string[] | null> {
+  if (listing.size === 0) return [];
+  const referenced = await referencedSitePhpRuntimes(io, configDir);
+  if (referenced === null) return null;
+  return [...listing.keys()].filter((id) =>
+    isSitePhpRuntimeId(id) && !referenced.has(id) && !inFlight.has(id)
+  );
+}
+
+async function startIfDown(
+  io: SitePhpRuntimeIo,
+  id: string,
+  has: Readonly<{ socket: boolean }>,
+): Promise<string | null> {
+  const unit = has.socket ? sitePhpSocketName(id) : sitePhpServiceName(id);
+  const active = await sudo(io, ["systemctl", "is-active", "--quiet", unit]);
+  if (active.success) return null;
+  await sudoQuietly(io, ["systemctl", "reset-failed", unit], `reset ${unit}`);
+  const start = await sudo(io, ["systemctl", "start", unit]);
+  if (start.success) return unit;
+  logWarn("deploy", `PHP runtime ${unit} did not start: ${start.stderr}`);
+  return null;
+}
+
+/**
+ * Boot reconcile: remove the runtimes no vhost names, then start every one a
+ * vhost does name that is not running.
  *
  * systemd already starts what is enabled (a FastCGI socket from
  * `sockets.target`, a php-fpm master from `multi-user.target`), and recreates
  * the `/run` directories as it does. This is the daemon's check of that at its
  * own start: a runtime that failed at boot (its home was not mounted yet, its
  * owner's group was missing) or whose enable an interrupted apply never
- * reached is started again. A FastCGI service is left to its socket.
- * Best-effort and logged: a runtime that still will not start is the next
- * deploy's failure, with its config test, not the daemon's.
+ * reached is started again. A FastCGI service is left to its socket. An orphan
+ * is never started: nothing would reach it, and it still runs site code.
+ *
+ * When a vhost cannot be read nothing is removed or started — systemd's own
+ * start stands. Best-effort and logged: a runtime that still will not start is
+ * the next deploy's failure, with its config test, not the daemon's.
  */
 export async function reconcileSitePhpRuntimes(
   io: SitePhpRuntimeIo,
-): Promise<string[]> {
+  configDir: string,
+): Promise<{ started: string[]; removed: string[] }> {
   const listing = await listSitePhpUnits(io);
+  const orphans = await orphanSitePhpRuntimes(io, configDir, listing);
+  if (orphans === null) {
+    logWarn(
+      "deploy",
+      "PHP runtime reconcile skipped: a vhost could not be read",
+    );
+    return { started: [], removed: [] };
+  }
+  await removeSitePhpRuntimes(io, configDir, orphans, listing);
+  const live = [...listing].filter(([id]) =>
+    isSitePhpRuntimeId(id) && !orphans.includes(id)
+  );
   const started: string[] = [];
-  await forEachSequential(listing, async ([id, has]) => {
-    const unit = has.socket ? sitePhpSocketName(id) : sitePhpServiceName(id);
-    const active = await sudo(io, ["systemctl", "is-active", "--quiet", unit]);
-    if (active.success) return;
-    await sudoQuietly(io, ["systemctl", "reset-failed", unit], `reset ${unit}`);
-    const start = await sudo(io, ["systemctl", "start", unit]);
-    if (start.success) {
-      started.push(unit);
-      return;
-    }
-    logWarn("deploy", `PHP runtime ${unit} did not start: ${start.stderr}`);
+  await forEachSequential(live, async ([id, has]) => {
+    const unit = await startIfDown(io, id, has);
+    if (unit) started.push(unit);
   });
-  return started;
+  return { started, removed: orphans };
 }
 
 /** {@link reconcileSitePhpRuntimes} on the host, at daemon start. Never throws. */
 export async function reconcileSitePhpRuntimesAtBoot(): Promise<void> {
   try {
-    const started = await reconcileSitePhpRuntimes({
-      run: runHostCommand,
-      unitDir: SYSTEMD_UNIT_DIR,
-    });
+    const { started, removed } = await reconcileSitePhpRuntimes(
+      { run: runHostCommand, unitDir: SYSTEMD_UNIT_DIR },
+      resolveLayout().configDir,
+    );
+    if (removed.length > 0) {
+      logInfo("deploy", `orphaned PHP runtimes removed: ${removed.join(",")}`);
+    }
     if (started.length > 0) {
       logInfo("deploy", `PHP runtimes started at boot: ${started.join(",")}`);
     }
