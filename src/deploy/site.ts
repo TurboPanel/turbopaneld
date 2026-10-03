@@ -1249,12 +1249,12 @@ function formatOpenLiteSpeedAdminValue(value: PhpAdminValue): string {
 function openlitespeedScriptDenyRewrite(phpHandled: boolean): string {
   const family = "php[0-9]+|phtml|phar|phps|pht|phpt|inc|cgi";
   const denied = phpHandled ? family : `php|${family}`;
-  const backups = "~|\\.(bak|old|orig|save|swp|swo|tmp|dist|txt)";
-  return `rewrite {
+  const backups = String.raw`~|\.(bak|old|orig|save|swp|swo|tmp|dist|txt)`;
+  return String.raw`rewrite {
   enable                    1
   rules                     <<<END_rules
-RewriteRule \\.(${denied})(/.*)?$ - [F,L,NC]
-RewriteRule \\.(php|${family})(${backups})$ - [F,L,NC]
+RewriteRule \.(${denied})(/.*)?$ - [F,L,NC]
+RewriteRule \.(php|${family})(${backups})$ - [F,L,NC]
 END_rules
 }
 `;
