@@ -159,7 +159,7 @@ test({
     assertEquals(frames[1]?.result, undefined);
     assertMatch(String(frames[1]?.error), /Invalid hostname/);
     assertEquals(String(frames[1]?.error).includes("\n"), false);
-    assert(String(frames[1]?.error).length <= 500);
+    assert(String(frames[1]?.error).length <= 4096);
   },
 });
 
@@ -386,7 +386,9 @@ test({
     } = await import("./hostname.ts");
 
     setAnsibleAvailabilityCheckForTests(() => Promise.resolve(true));
-    setRunSetHostnameForTests(() => Promise.reject(new Error("x".repeat(600))));
+    setRunSetHostnameForTests(() =>
+      Promise.reject(new Error(`${"a".repeat(5000)}END`))
+    );
     try {
       const ws = new MockWebSocket() as unknown as WebSocket;
       const message: CommandDispatchMessage = {
@@ -403,7 +405,10 @@ test({
       const frames = parseFrames((ws as unknown as MockWebSocket).sentFrames);
       assertEquals(frames[1]?.ok, false);
       const error = String(frames[1]?.error);
-      assertEquals(error.length, 500);
+      // Tail kept (the cause is last), within the 4096-char wire cap.
+      assert(error.length <= 4096);
+      assert(error.startsWith("[...truncated] "));
+      assert(error.endsWith("END"));
       assertEquals(error.includes("\n"), false);
     } finally {
       setAnsibleAvailabilityCheckForTests(null);

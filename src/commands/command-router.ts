@@ -173,9 +173,26 @@ function createDispatchLogSink(
   });
 }
 
-function sanitizeError(value: unknown, maxLen = 500): string {
+/**
+ * Longest `command-outcome.error` the daemon sends. The control plane rejects
+ * anything over 4096 characters (`MAX_DAEMON_WS_ERROR_CHARS`), so this leaves
+ * room for the truncation marker.
+ */
+const MAX_OUTCOME_ERROR_CHARS = 4000;
+const TRUNCATED_MARKER = "[...truncated] ";
+
+/**
+ * Keep the **tail**: a failed build prints the cause last, and the head is
+ * usually progress output. The full transcript stays on the command log
+ * endpoint.
+ */
+function sanitizeError(
+  value: unknown,
+  maxLen = MAX_OUTCOME_ERROR_CHARS,
+): string {
   const text = sanitizeForLog(value);
-  return text.length > maxLen ? text.slice(0, maxLen) : text;
+  if (text.length <= maxLen) return text;
+  return `${TRUNCATED_MARKER}${text.slice(text.length - maxLen)}`;
 }
 
 /**
