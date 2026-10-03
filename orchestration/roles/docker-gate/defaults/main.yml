@@ -66,7 +66,11 @@ docker_gate_approval_pubkeys: ""
 docker_gate_approval_pubkey_file: "{{ docker_gate_dir }}/approval.pub"
 # Used approval token ids, kept across gate restarts (root-owned 0700 state
 # directory the unit creates; the file is 0600, pruned at token expiry).
-docker_gate_approval_state_file: /var/lib/turbopanel-docker-gate/approval-used.json
+# The unit's StateDirectory=turbopanel-docker-gate, and the one place besides
+# the run dir the gate may write (Deno --allow-write): the temp file and the
+# rename both live there.
+docker_gate_approval_state_dir: /var/lib/turbopanel-docker-gate
+docker_gate_approval_state_file: "{{ docker_gate_approval_state_dir }}/approval-used.json"
 # Stage 4: BuildKit's /session and /grpc open only on the BUILD listener
 # (build.ts): socket root:<build group> 0660 in a root:<build group> 0750
 # directory of its own. The build group holds only the build user (the daemon
