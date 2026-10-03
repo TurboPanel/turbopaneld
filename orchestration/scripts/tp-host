@@ -1182,7 +1182,8 @@ tp_php_service_line_ok() {
 # One owner per site: the owner named in a site's config directory group, its
 # service User= and its socket SocketUser= must agree, so a unit cannot pair
 # one site id with a second owner's account. Whatever of the three already
-# exists is the reference; the first piece written fixes the owner. Argv: SITE-ID OWNER. Returns 1 on a clash.
+# exists is the reference; the first piece written fixes the owner.
+# Argv: SITE-ID OWNER. Returns 1 on a clash.
 tp_php_site_owner_ok() {
   _po_site="$1"
   _po_owner="$2"
@@ -2958,7 +2959,7 @@ tp_verb_build_run() {
   [ "$_br_v" -lt 257 ] || set -- "$@" -p PrivatePIDs=yes
   _br_host_deny="$(tp_build_host_deny | tr '\n' ' ')"
   set -- "$@" -p RestrictAddressFamilies="AF_INET AF_INET6 AF_UNIX" \
-    -p IPAddressDeny="$BUILD_DENY_V4 $BUILD_DENY_V6" \
+    -p IPAddressDeny="$BUILD_DENY_V4 $BUILD_DENY_V6${_br_host_deny:+ ${_br_host_deny% }}" \
     -p ExecStartPre="+$BUILD_LOOPBACK sync"
   set -- "$@" -p Slice="$BUILD_SLICE" -p MemoryMax="$BUILD_MEMORY_MAX" -p MemorySwapMax=0 \
     -p CPUQuota="$BUILD_CPU_QUOTA" -p TasksMax=1024 -p IOWeight=50 -p LimitFSIZE=4G \
