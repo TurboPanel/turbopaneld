@@ -141,6 +141,34 @@ test("the first failing command ends the build with its own status", async () =>
   });
 });
 
+test("a missing pnpm gets a plain-words hint, other failures do not", async () => {
+  await withWork(async (work) => {
+    const missing = await runRunner(
+      work,
+      specText({ run: ["pnpm-not-here-xyz run build; exit 127"] }),
+    );
+    assertEquals(missing.code, 127);
+    assertStringIncludes(
+      missing.stderr,
+      "hint: pnpm/yarn were not found on the build PATH",
+    );
+    assertStringIncludes(missing.stderr, "corepack pnpm");
+    const other = await runRunner(
+      work,
+      specText({ run: ["pnpm_x=1; exit 127"] }),
+    );
+    assertEquals(other.code, 127);
+    assert(other.stderr.includes("hint:"), "pnpm in the text still hints");
+    const plain = await runRunner(work, specText({ run: ["exit 127"] }));
+    assert(!plain.stderr.includes("hint:"));
+    const seven = await runRunner(
+      work,
+      specText({ run: ["echo pnpm; exit 7"] }),
+    );
+    assert(!seven.stderr.includes("hint:"));
+  });
+});
+
 test("the runner refuses a malformed spec before running anything", async () => {
   await withWork(async (work) => {
     await Deno.symlink("/", join(work, "up"));
