@@ -88,6 +88,8 @@ export interface CommandRouterDeps {
    * with the no-op sink and no transcript is captured.
    */
   sendCommandLogChunk?: SendCommandLogChunkFn;
+  /** One authenticated round trip to the control plane (`GET /api/daemon/v1/ping`); the firewall auto-confirm check. */
+  verifyControlPlane?: () => Promise<void>;
   /** Fetch last-applied secret plans + envelopes for boot/lifecycle rehydrate. */
   rehydrateDeploymentSecrets?: (
     deployments: ReadonlyArray<{
@@ -288,7 +290,9 @@ export async function handleCommandDispatch(
         result = await pickCommandRouterHandler(
           "handleFirewallReconcile",
           handleFirewallReconcile,
-        )(payload, daemonReceivedAt);
+        )(payload, daemonReceivedAt, {
+          verifyControlPlane: deps?.verifyControlPlane,
+        });
         ok = true;
         daemonRespondedAt = new Date().toISOString();
         break;

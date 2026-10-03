@@ -67,6 +67,7 @@ import { runDocker as defaultRunDocker } from "../deploy/docker-cli.ts";
 import { syncHostDockerNetworking } from "../deploy/docker-networking-sync.ts";
 import { runDockerSetup } from "../orchestration/ansible.ts";
 import { resolveLayout } from "../paths/layout.ts";
+import { removeDaemonFile } from "../permissions/daemon-files.ts";
 import { sweepOrphanCommandLogs } from "../logs/orphan-sweep.ts";
 import { classifyConnectFailure } from "./connect-failure.ts";
 import { DaemonJwksClient } from "./jwks-client.ts";
@@ -158,6 +159,7 @@ import type {
  * module never imports handlers.
  */
 export type CommandDispatchDeps = {
+  verifyControlPlane?: () => Promise<void>;
   decryptSecrets?: (ciphertexts: string[]) => Promise<(string | null)[]>;
   sendCommandLogChunk?: SendCommandLogChunkFn;
   rehydrateDeploymentSecrets?: (
@@ -371,7 +373,7 @@ function parseMessage(raw: string): DaemonMessage | null {
 export async function clearDaemonKeyState(stateDir: string): Promise<void> {
   await forEachSequential([SERVER_KEY_FILE, KEY_ID_FILE], async (file) => {
     try {
-      await Deno.remove(`${stateDir}/${file}`);
+      await removeDaemonFile(`${stateDir}/${file}`);
     } catch {
       // Missing files are fine.
     }
@@ -1765,6 +1767,7 @@ export class InstanceClient {
     if (!apiClient) return undefined;
     return {
       decryptSecrets: (ciphertexts) => apiClient.decryptSecrets(ciphertexts),
+      verifyControlPlane: () => apiClient.ping(),
       rehydrateDeploymentSecrets: (deployments) =>
         apiClient.rehydrateDeploymentSecrets(deployments),
       sendCommandLogChunk: (params) => apiClient.sendCommandLogChunk(params),
