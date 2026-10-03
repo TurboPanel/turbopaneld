@@ -1090,8 +1090,8 @@ async function persistComposeEnvFile(
  * and `tmp/`: `shared/` in the release lane, `webroot/` and `shared/` in the
  * managed lane, nothing for a tree outside the principal's home.
  */
-function siteCronWritableDirs(
-  layout: LayoutPaths,
+export function siteCronWritableDirs(
+  layout: Pick<LayoutPaths, "principalHomeRoot">,
   release: SiteRelease | undefined,
   managed: SiteManagedDirectory | undefined,
 ): string[] {

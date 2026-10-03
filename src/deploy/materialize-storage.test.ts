@@ -485,6 +485,22 @@ test("a file copy is rewritten in place on the next deploy", async () => {
   });
 });
 
+test("a file copy refuses a directory in its place and leaves no temporary file", async () => {
+  await withTempLayout(async (layout) => {
+    const baseDir = storageHostPath(layout, "org-1", "stor-file", "loc-file");
+    await Deno.mkdir(join(baseDir, "notes.txt"), { recursive: true });
+
+    await assertRejects(
+      () =>
+        materializeStorageEntries(layout, "org-1", [fileEntry("notes.txt")]),
+      Error,
+      "is a directory",
+    );
+    const names = await Array.fromAsync(Deno.readDir(baseDir));
+    assertEquals(names.map((e) => e.name), ["notes.txt"]);
+  });
+});
+
 test("a file copy never walks through a planted directory link", async () => {
   await withTempLayout(async (layout) => {
     const outside = join(layout.stateDir, "outside");
