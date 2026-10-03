@@ -86,6 +86,8 @@ type UnitVars = {
   docker_gate_platform_rw_roots: string[];
   docker_gate_approval_pubkeys: string;
   docker_gate_approval_pubkey_file: string;
+  docker_gate_approval_state_dir: string;
+  docker_gate_approval_state_file: string;
   docker_gate_gid: string;
   docker_gate_dir: string;
   docker_gate_deno_bin: string;
@@ -134,6 +136,9 @@ const DEFAULT_VARS: UnitVars = {
     "/var/lib/turbopanel/managed",
   ],
   docker_gate_approval_pubkeys: "",
+  docker_gate_approval_state_dir: "/var/lib/turbopanel-docker-gate",
+  docker_gate_approval_state_file:
+    "/var/lib/turbopanel-docker-gate/approval-used.json",
   docker_gate_approval_pubkey_file:
     "/opt/turbopanel/lib/docker-gate/approval.pub",
   docker_gate_build_run_dir: "/run/turbopanel-gate/build",
@@ -264,6 +269,11 @@ jinjaTest(
       line,
       "Environment=TP_DOCKER_GATE_APPROVAL_PUBKEY=/opt/turbopanel/lib/docker-gate/approval.pub",
     );
+    assert(
+      on.includes(
+        "Environment=TP_DOCKER_GATE_APPROVAL_STATE=/var/lib/turbopanel-docker-gate/approval-used.json",
+      ),
+    );
     const defaults = await read("defaults/main.yml");
     assertStringIncludes(
       defaults,
@@ -383,7 +393,7 @@ jinjaTest(
     assert(argv.includes("--allow-read"), "symlink resolution reads anywhere");
     assert(
       argv.includes(
-        "--allow-write=/run/turbopanel-gate,/var/run/docker.sock",
+        "--allow-write=/run/turbopanel-gate,/var/run/docker.sock,/var/lib/turbopanel-docker-gate",
       ),
     );
     assert(
@@ -392,6 +402,17 @@ jinjaTest(
       ),
     );
     assert(argv.includes("--allow-env=TP_DOCKER_GATE_*"));
+    // The approval-token state file is written under Deno's permission model:
+    // the directory must be writable, and the file must live inside it.
+    const write = argv.find((a) => a.startsWith("--allow-write="))!;
+    const writable = write.slice("--allow-write=".length).split(",");
+    assert(
+      writable.some((p) =>
+        DEFAULT_VARS.docker_gate_approval_state_file.startsWith(p + "/")
+      ),
+      "ExecStart must grant write on the approval state directory",
+    );
+    assert(unit.includes("StateDirectory=turbopanel-docker-gate"));
     assertEquals(argv.at(-1), "/opt/turbopanel/lib/docker-gate/main.ts");
     for (const arg of argv) {
       assert(
