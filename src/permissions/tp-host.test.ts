@@ -2277,7 +2277,7 @@ test("php-test runs the installed unit's binary on its own config, as the owner"
   await withPhpHost(async (host) => {
     const cfg = phpConfDir(host);
     const prefix =
-      "EXEC [timeout] [30] [setpriv] [--reuid=15001] [--regid=15001] [--clear-groups] " +
+      "EXEC [timeout] [30] [setpriv] [--reuid=15001] [--regid=15001] [--init-groups] " +
       "[--no-new-privs] [--] [env] [-i] [PATH=/usr/bin:/bin]";
     const want: Record<PhpMode, string> = {
       fastcgi: `${prefix} [/usr/bin/php-cgi8.4] [-c] [/proc/self/fd/3] [-v]`,

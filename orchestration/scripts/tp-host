@@ -1440,7 +1440,10 @@ tp_php_install() {
 # (re-checked here), never from the caller. The owner cannot traverse the
 # daemon's config tree outside its unit, so root opens the config files
 # (verified, no symlink) and the binary reads them through /proc/self/fd —
-# which checks the file's own mode, root:<owner>-grp 0640.
+# which checks the file's own mode, root:<owner>-grp 0640. The owner keeps its
+# supplementary groups, as systemd gives them to the unit: the PHP binaries are
+# 0750 root:tpphp<series>, so without its entitlement group the owner could not
+# even exec the binary the unit runs.
 tp_verb_php_test() {
   [ $# -eq 1 ] || tp_die "php-test: only php-test <siteId>"
   tp_php_site_id_ok "$1" || tp_die "php-test: refusing site id $1"
@@ -1458,7 +1461,7 @@ tp_verb_php_test() {
   tp_open_verified "$_pt_cfg/php.ini" || tp_die "php-test: no $_pt_cfg/php.ini"
   _pt_bin="${_ps_exec%% *}"
   set -- timeout 30 setpriv --reuid="$(tp_uid_of "$_ps_user")" \
-    --regid="$(tp_gid_of_group "$_ps_user-grp")" --clear-groups --no-new-privs -- \
+    --regid="$(tp_gid_of_group "$_ps_user-grp")" --init-groups --no-new-privs -- \
     env -i PATH=/usr/bin:/bin
   case "$_ps_mode" in
     fpm) set -- "$@" "$_pt_bin" --test --fpm-config /proc/self/fd/4 -c /proc/self/fd/3 ;;
