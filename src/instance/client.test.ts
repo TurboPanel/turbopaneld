@@ -6784,6 +6784,50 @@ it({
 });
 
 it({
+  name: "a repeated command-dispatch is acked again",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const restoreHooks = installClientTestHooks({
+      restartDaemonService: () => Promise.resolve(true),
+    });
+    const { socket, restore } = await startConnectedClient();
+    try {
+      const frame = {
+        type: "command-dispatch",
+        id: "cmd-repeat",
+        commandId: "00000000-0000-4000-8000-000000000097",
+        commandType: "daemon.ping",
+        payload: {},
+        at: new Date().toISOString(),
+      };
+      const count = (type: string) =>
+        framesOfType(socket, type).filter((f) =>
+          (f as { id?: string }).id === "cmd-repeat"
+        ).length;
+      socket.receive(frame);
+      await waitFor("first ack", () => count("command-ack") || undefined);
+      const acksBefore = count("command-ack");
+      socket.receive(frame);
+      await waitFor(
+        "re-ack",
+        () => count("command-ack") > acksBefore || undefined,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    } finally {
+      restore();
+      restoreHooks();
+    }
+  },
+});
+
+it({
   name: "parked connect loop exits when stopped during parked wait",
   permissions: {
     env: true,
