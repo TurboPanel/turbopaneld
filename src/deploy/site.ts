@@ -80,6 +80,7 @@ import {
 } from "./ensure-principal.ts";
 import {
   DEFAULT_PHP_FPM_SERIES,
+  openSiteRollout,
   ownedConfigFileMatches as ownedConfigFileMatchesVia,
   phpFpmDriver,
   removeStagedFile,
@@ -90,11 +91,25 @@ import {
   writeOwnedConfigFile as writeOwnedConfigFileVia,
 } from "./site/engine-driver.ts";
 import type {
+  PendingSiteRollout,
+  SiteEngineId,
   SiteRunFn,
   SiteRunResult,
   SiteValidationTarget,
   StagedConfigWrite,
 } from "./site/engine-driver.ts";
+import {
+  defaultProbeHostPort,
+  type ProbeHostPortFn,
+} from "../managed/proxysql.ts";
+import {
+  apacheBehindNginxLines,
+  isNginxApacheSite,
+  nginxApacheBackendProbe,
+  nginxApacheLocations,
+  siteFrontEngine,
+  siteServingEngines,
+} from "./site/nginx-apache.ts";
 import {
   sitePhpFpmConf,
   sitePhpIni,
@@ -200,13 +215,16 @@ async function withSiteIo<T>(
   }
 }
 
-/** Engine service account for the FHS vendor tree (web-service-user role). */
+/**
+ * Engine service account for the FHS vendor tree (web-service-user role).
+ * For nginx in front of Apache it is Apache's: the engine that talks to PHP.
+ */
 export function siteEngineUnixUser(
   engine: SiteApplySpec["engine"],
 ): string {
   if (engine === "caddy") return "tpcaddysite";
   if (engine === "nginx") return "tpnginx";
-  if (engine === "apache") return "tpapache";
+  if (engine === "apache" || engine === "nginx+apache") return "tpapache";
   return "tpols";
 }
 
@@ -226,7 +244,12 @@ export function resolveSiteOwnership(
       `site principal username is unsafe: ${principal.username}`,
     );
   }
-  return { user: principal.username, group: engineUser };
+  // Two engines read a paired site, so its tree carries the principal's group,
+  // which both join, rather than either engine's own.
+  const group = isNginxApacheSite(site)
+    ? principalUnixGroupName(principal.username)
+    : engineUser;
+  return { user: principal.username, group };
 }
 
 function assertSafeId(value: string, field: string): void {
@@ -494,6 +517,11 @@ export type NginxSiteConfigOpts = Readonly<{
    * a rollback brings back) from serving a second hop through `shared/`.
    */
   releaseBacked?: boolean;
+  /**
+   * nginx in front of Apache: serve common static types, refuse dotfiles, and
+   * proxy everything else to Apache on this loopback port. No PHP location.
+   */
+  apacheBackendPort?: number | null;
 }>;
 
 /**
@@ -518,6 +546,18 @@ export function nginxSiteConfig(
   const dockerListen = dockerBindAddress
     ? `\n  listen ${dockerBindAddress}:${site.listenPort};`
     : "";
+  const backendPort = opts?.apacheBackendPort ?? null;
+  if (backendPort !== null) {
+    return `server {
+  listen 127.0.0.1:${site.listenPort};
+  listen [::1]:${site.listenPort};${dockerListen}
+  server_name _;
+  root ${documentRoot};
+  ${nginxDisableSymlinks(opts?.releaseBacked ?? false)}
+${nginxApacheLocations(backendPort)}
+}
+`;
+  }
   const phpFpmSocket = opts?.phpFpmSocket ?? null;
   const needsPhp = siteNeedsPhp(site);
   if (needsPhp && !phpFpmSocket) {
@@ -979,6 +1019,12 @@ export type ApacheSiteConfigOpts = Readonly<{
   dockerBindAddress?: string | null;
   /** Absolute unix socket path for proxy_fcgi when the site needs PHP. */
   phpFpmSocket?: string | null;
+  /**
+   * Apache behind nginx: listen on this loopback port only (never `::1` or the
+   * docker bridge, which nginx owns) and take the client address from
+   * nginx's `X-Forwarded-For`.
+   */
+  behindNginxPort?: number | null;
 }>;
 
 /**
@@ -1005,6 +1051,35 @@ function apacheSetEnvLine(
     .replaceAll("\\", String.raw`\\`)
     .replaceAll('"', String.raw`\"`);
   return `  SetEnv ${name} "${escaped}"`;
+}
+
+/**
+ * Comment, `Listen` lines, `<VirtualHost>` and `ServerName` of a site vhost.
+ * Behind nginx: the backend port on loopback only, plus mod_remoteip.
+ */
+function apacheVhostHead(
+  site: SiteApplySpec,
+  dockerBindAddress: string | null,
+  behindNginxPort: number | null,
+): string {
+  const name = site.composeServiceName;
+  if (behindNginxPort !== null) {
+    return [
+      `# TurboPanel site ${name} (behind nginx)`,
+      `Listen 127.0.0.1:${behindNginxPort}`,
+      `<VirtualHost 127.0.0.1:${behindNginxPort}>`,
+      "  ServerName localhost",
+      ...apacheBehindNginxLines(),
+    ].join("\n");
+  }
+  const addrs = [`127.0.0.1:${site.listenPort}`];
+  if (dockerBindAddress) addrs.push(`${dockerBindAddress}:${site.listenPort}`);
+  return [
+    `# TurboPanel site ${name}`,
+    ...addrs.map((addr) => `Listen ${addr}`),
+    `<VirtualHost ${addrs.join(" ")}>`,
+    "  ServerName localhost",
+  ].join("\n");
 }
 
 export function apacheSiteConfig(
@@ -1034,18 +1109,13 @@ export function apacheSiteConfig(
     sitePhpRuntimeMode(site) === "fastcgi",
   );
   const setenvBlock = envLines.length > 0 ? `\n${envLines.join("\n")}` : "";
-  const dockerListen = dockerBindAddress
-    ? `\nListen ${dockerBindAddress}:${site.listenPort}`
-    : "";
-  const vhostAddrs = [`127.0.0.1:${site.listenPort}`];
-  if (dockerBindAddress) {
-    vhostAddrs.push(`${dockerBindAddress}:${site.listenPort}`);
-  }
+  const head = apacheVhostHead(
+    site,
+    dockerBindAddress,
+    opts?.behindNginxPort ?? null,
+  );
 
-  return `# TurboPanel site ${site.composeServiceName}
-Listen 127.0.0.1:${site.listenPort}${dockerListen}
-<VirtualHost ${vhostAddrs.join(" ")}>
-  ServerName localhost
+  return `${head}
   DocumentRoot "${documentRoot}"
   <Directory "${documentRoot}">
     Options Indexes SymLinksIfOwnerMatch
@@ -1498,6 +1568,7 @@ const SITE_ENGINE_LABELS: Record<
   nginx: "nginx",
   apache: "Apache",
   openlitespeed: "OpenLiteSpeed",
+  "nginx+apache": "nginx + Apache",
 };
 
 export function defaultIndexHtml(
@@ -1857,9 +1928,10 @@ async function runSitePlaybook(
 function assertSite(site: SiteApplySpec): void {
   assertSafeId(site.composeServiceName, "composeServiceName");
   assertSafeRoot(site.root);
-  if (!(site.engine in SITE_ENGINE_DRIVERS)) {
+  if (!(site.engine in SITE_ENGINE_DRIVERS) && !isNginxApacheSite(site)) {
     throw new Error(`site engine "${site.engine}" is not supported`);
   }
+  if (isNginxApacheSite(site)) assertNginxApacheSite(site);
   if (
     !Number.isInteger(site.listenPort) ||
     site.listenPort < 1024 ||
@@ -1872,6 +1944,27 @@ function assertSite(site: SiteApplySpec): void {
   if (site.principal) {
     // Validates username shape used by chown / php-fpm pool user lines.
     resolveSiteOwnership(site);
+  }
+}
+
+/**
+ * nginx in front of Apache needs Apache's own loopback port, and an owner: both
+ * engines read the tree through the principal's group.
+ */
+function assertNginxApacheSite(site: SiteApplySpec): void {
+  const port = site.backendPort;
+  if (
+    port === undefined || !Number.isInteger(port) || port < 1024 ||
+    port > 65_535 || port === site.listenPort
+  ) {
+    throw new Error(
+      `site ${site.composeServiceName}: nginx+apache needs a backendPort other than listenPort`,
+    );
+  }
+  if (!site.principal) {
+    throw new Error(
+      `site ${site.composeServiceName}: nginx+apache needs a principal to own its tree`,
+    );
   }
 }
 
@@ -1972,6 +2065,8 @@ export type ApplySiteOpts = {
   systemdUnitDir?: string;
   /** Test seam: the pause before a started PHP runtime is checked. */
   sleep?: (ms: number) => Promise<void>;
+  /** Test seam: whether a loopback port could be bound right now. */
+  probeHostPort?: ProbeHostPortFn;
 };
 
 /** Optional test seams for {@link removeSites}. */
@@ -2022,7 +2117,7 @@ type SiteConfigDirs = {
  * actually changed" and for "this engine's service account joined a principal
  * group", which are the only two reasons to reload or restart anything.
  */
-type SiteEngineSet = Set<SiteApplySpec["engine"]>;
+type SiteEngineSet = Set<SiteEngineId>;
 
 /**
  * Engines that reach PHP through a php-fpm pool (not LSAPI). Caddy's
@@ -2054,18 +2149,19 @@ export function resolveSiteEngineNeeds(
   const phpFpmEngines = new Set<PhpFpmEngine>();
   for (const site of sites) {
     if (!siteNeedsPhp(site)) continue;
-    if (
-      site.engine === "caddy" || site.engine === "nginx" ||
-      site.engine === "apache"
-    ) {
-      phpFpmEngines.add(site.engine);
+    // nginx in front of Apache reaches PHP through Apache only.
+    const engine = isNginxApacheSite(site) ? "apache" : site.engine;
+    if (engine === "caddy" || engine === "nginx" || engine === "apache") {
+      phpFpmEngines.add(engine);
     }
   }
+  const serves = (engine: SiteEngineId) =>
+    sites.some((site) => siteServingEngines(site).includes(engine));
   return {
-    caddy: sites.some((site) => site.engine === "caddy"),
-    nginx: sites.some((site) => site.engine === "nginx"),
-    apache: sites.some((site) => site.engine === "apache"),
-    openlitespeed: sites.some((site) => site.engine === "openlitespeed"),
+    caddy: serves("caddy"),
+    nginx: serves("nginx"),
+    apache: serves("apache"),
+    openlitespeed: serves("openlitespeed"),
     phpFpm: phpFpmEngines.size > 0,
     phpFpmEngines,
     openlitespeedLsphp: sites.some((site) =>
@@ -2202,25 +2298,20 @@ function emptyStagedConfigs(): SiteStagedConfigs {
 }
 
 /** Loopback endpoints each engine has to answer on once it is back. */
-type SiteValidationTargets = Record<
-  SiteApplySpec["engine"],
-  SiteValidationTarget[]
->;
+type SiteValidationTargets = Record<SiteEngineId, SiteValidationTarget[]>;
 
 function emptyValidationTargets(): SiteValidationTargets {
   return { caddy: [], nginx: [], apache: [], openlitespeed: [] };
 }
 
-function emptyPhpRuntimes(): Record<
-  SiteApplySpec["engine"],
-  PreparedSitePhpRuntime[]
-> {
+function emptyPhpRuntimes(): Record<SiteEngineId, PreparedSitePhpRuntime[]> {
   return { caddy: [], nginx: [], apache: [], openlitespeed: [] };
 }
 
 /** nginx and Apache run per-site PHP runtimes (OpenLiteSpeed: WP6). */
 function sitePhpRuntimeEngine(site: SiteApplySpec): boolean {
-  return site.engine === "nginx" || site.engine === "apache";
+  return site.engine === "nginx" || site.engine === "apache" ||
+    isNginxApacheSite(site);
 }
 
 /**
@@ -2274,16 +2365,16 @@ type SiteReloadPlan = Readonly<{
   /** Candidates waiting to be swapped in, per unit. */
   staged: SiteStagedConfigs;
   /** Engines that newly joined a principal group (restart, not reload). */
-  restartEngines: Set<SiteApplySpec["engine"]>;
+  restartEngines: SiteEngineSet;
   /** Post-reload HTTP probes, per engine. */
   validationTargets: SiteValidationTargets;
   openlitespeedSitesDir: string;
   /** Per-site PHP runtimes this apply started, by the engine serving them. */
-  phpRuntimes: Readonly<
-    Record<SiteApplySpec["engine"], PreparedSitePhpRuntime[]>
-  >;
+  phpRuntimes: Readonly<Record<SiteEngineId, PreparedSitePhpRuntime[]>>;
   /** Runtimes whose engine rolled out: kept, never rolled back. */
   settled: Set<PreparedSitePhpRuntime>;
+  /** Some site is nginx in front of Apache: Apache commits after nginx. */
+  paired: boolean;
 }>;
 
 /**
@@ -2291,7 +2382,7 @@ type SiteReloadPlan = Readonly<{
  * its config changed or its group membership newly requires a restart.
  */
 function engineNeedsReload(
-  engine: SiteApplySpec["engine"],
+  engine: SiteEngineId,
   plan: SiteReloadPlan,
 ): boolean {
   if (!plan.needs[engine]) return false;
@@ -2333,29 +2424,66 @@ async function reloadSiteEngines(
       touched.push(`php-fpm ${series}`);
     },
   );
-  await forEachSequential(SITE_ENGINE_ORDER, async (engine) => {
-    const reload = engineNeedsReload(engine, plan);
-    if (reload) await rolloutEngine(layout, plan, engine);
-    if (reload) touched.push(engine);
-    // The engine serves the new sockets now (or never changed vhosts): keep
-    // its sites' runtimes, probing those no rollout probed.
-    const runtimes = plan.phpRuntimes[engine];
-    await settleSitePhpRuntimes(sitePhpIo(), runtimes, {
-      engineProbed: reload,
-      label: SITE_ENGINE_DRIVERS[engine].label,
+  // nginx in front of Apache: Apache rolls out first but stays revertible, and
+  // its runtimes unsettled, until nginx has answered through it as well.
+  const held: EngineRolloutStep[] = [];
+  try {
+    await forEachSequential(SITE_ENGINE_ORDER, async (engine) => {
+      const reload = engineNeedsReload(engine, plan);
+      const rollout = reload
+        ? await openEngineRollout(layout, plan, engine)
+        : null;
+      if (reload) touched.push(engine);
+      const step = { engine, reload, rollout };
+      if (engine === "apache" && plan.paired) {
+        held.push(step);
+        return;
+      }
+      await settleEngineRollout(plan, step);
+      await forEachSequential(
+        held.splice(0),
+        (heldStep) => settleEngineRollout(plan, heldStep),
+      );
     });
-    for (const runtime of runtimes) plan.settled.add(runtime);
-  });
+  } catch (err) {
+    await forEachSequential(held, (step) => step.rollout?.rollback());
+    throw err;
+  }
   return touched;
 }
 
+/** One engine's rollout, awaiting its commit and its runtimes' settling. */
+type EngineRolloutStep = Readonly<{
+  engine: SiteEngineId;
+  reload: boolean;
+  rollout: PendingSiteRollout | null;
+}>;
+
+/**
+ * Keep an engine's rollout and its sites' runtimes: the engine serves the new
+ * sockets now (or never changed vhosts), and runtimes no rollout probed are
+ * probed here.
+ */
+async function settleEngineRollout(
+  plan: SiteReloadPlan,
+  step: EngineRolloutStep,
+): Promise<void> {
+  await step.rollout?.commit();
+  const runtimes = plan.phpRuntimes[step.engine];
+  await settleSitePhpRuntimes(sitePhpIo(), runtimes, {
+    engineProbed: step.reload,
+    label: SITE_ENGINE_DRIVERS[step.engine].label,
+  });
+  for (const runtime of runtimes) plan.settled.add(runtime);
+}
+
 /** One engine's swap → test → reload → probe, rolled back on failure. */
-async function rolloutEngine(
+async function openEngineRollout(
   layout: LayoutPaths,
   plan: SiteReloadPlan,
-  engine: SiteApplySpec["engine"],
-): Promise<void> {
-  await rolloutSiteConfigs({
+  engine: SiteEngineId,
+): Promise<PendingSiteRollout> {
+  return await openSiteRollout({
     run,
     layout,
     target: SITE_ENGINE_DRIVERS[engine],
@@ -2392,6 +2520,8 @@ type SitePaths = {
 type ApplySiteResult = {
   /** Candidate engine configs for this site, in dependency order. */
   staged: StagedConfigWrite[];
+  /** nginx in front of Apache: Apache's own vhost, rolled out before nginx. */
+  backendStaged?: StagedConfigWrite[];
   /** Candidate php-fpm pool — the only reason to reload FPM. */
   phpFpmStaged: StagedConfigWrite[];
   /** Series that owns `phpFpmStaged`, when the site runs PHP. */
@@ -2596,7 +2726,9 @@ function sitePhpRuntimeFiles(
     group: principalUnixGroupName(user),
     home,
     configDir: layout.configDir,
-    webAccount: site.engine === "apache" ? "tpapache" : "tpnginx",
+    webAccount: siteEngineUnixUser(site.engine) === "tpapache"
+      ? "tpapache"
+      : "tpnginx",
   };
   const values = site.php
     ? phpAdminValues(site.php, sitePhpAdminOpts(layout, paths))
@@ -2678,6 +2810,45 @@ async function applyApacheSite(
     .stageSiteConfig(run, configPath, contents);
   await applySiteTreeOwnership(site, paths);
   return { staged: stagedList(staged), ...php.result };
+}
+
+/**
+ * nginx in front of Apache: Apache's vhost on the backend port runs PHP the way
+ * a plain Apache site does; nginx's vhost on `listenPort` serves static types
+ * and proxies the rest. Both are staged here and rolled out Apache first.
+ */
+async function applyNginxApacheSite(
+  layout: LayoutPaths,
+  environmentId: string,
+  site: SiteApplySpec,
+  paths: SitePaths,
+  dockerBind: string | null,
+  sitesDirs: SiteConfigDirs,
+): Promise<ApplySiteResult> {
+  const backendPort = site.backendPort as number;
+  const php = await applySitePhpBackend(layout, environmentId, site, paths);
+  const backend = await SITE_ENGINE_DRIVERS.apache.stageSiteConfig(
+    run,
+    join(sitesDirs.apache, paths.configName),
+    apacheSiteConfig(site, paths.documentRoot, {
+      phpFpmSocket: php.socket,
+      behindNginxPort: backendPort,
+    }),
+  );
+  const front = await SITE_ENGINE_DRIVERS.nginx.stageSiteConfig(
+    run,
+    join(sitesDirs.nginx, paths.configName),
+    nginxSiteConfig(site, paths.documentRoot, dockerBind, {
+      releaseBacked: paths.release !== undefined,
+      apacheBackendPort: backendPort,
+    }),
+  );
+  await applySiteTreeOwnership(site, paths);
+  return {
+    staged: stagedList(front),
+    backendStaged: stagedList(backend),
+    ...php.result,
+  };
 }
 
 /**
@@ -2796,7 +2967,7 @@ async function ensureManagedDirectory(
   documentRoot: string,
 ): Promise<void> {
   const principalHome = principalHomePath(layout, managed.username);
-  const owner = `${managed.username}:${siteEngineUnixUser(site.engine)}`;
+  const owner = `${managed.username}:${resolveSiteOwnership(site).group}`;
   await ensureDirectoryWithOwner(
     siteRoot(principalHome, managed.serviceId),
     "0750",
@@ -2858,21 +3029,47 @@ async function seedManagedIndexHtml(
   }
 }
 
-async function ensureEngineCanReadPrincipalTree(
+/**
+ * Join every engine serving this site to the principal's group; returns those
+ * whose membership is new (a restart, not a reload, picks it up).
+ */
+async function ensureEnginesCanReadPrincipalTree(
   site: SiteApplySpec,
   username: string,
-): Promise<boolean> {
-  const engineUser = siteEngineUnixUser(site.engine);
+): Promise<SiteEngineId[]> {
   const group = principalUnixGroupName(username);
-  const existing = await userSupplementaryGroups(engineUser);
-  if (existing.has(group)) return false;
-  await ensureEngineGroupMembership(engineUser, group, run);
-  return true;
+  const joined: SiteEngineId[] = [];
+  await forEachSequential(siteServingEngines(site), async (engine) => {
+    const engineUser = siteEngineUnixUser(engine);
+    const existing = await userSupplementaryGroups(engineUser);
+    if (existing.has(group)) return;
+    await ensureEngineGroupMembership(engineUser, group, run);
+    joined.push(engine);
+  });
+  return joined;
+}
+
+/**
+ * The daemon-owned tree of a site with no source. A paired site's tree carries
+ * the principal's group, so both its engines join it; returns those that did.
+ */
+async function prepareDaemonOwnedTree(
+  site: SiteApplySpec,
+  base: string,
+  documentRoot: string,
+): Promise<SiteEngineId[]> {
+  await ensureDocumentRoot(documentRoot, site.composeServiceName, site.engine);
+  await writeHostingWebMetadata(base, site);
+  if (!isNginxApacheSite(site) || !site.principal) return [];
+  return await ensureEnginesCanReadPrincipalTree(
+    site,
+    site.principal.username,
+  );
 }
 
 type ApplyOneSiteResult = ApplySiteResult & {
-  /** Engine whose group membership changed — needs a restart, not a reload. */
-  restartEngine?: SiteApplySpec["engine"];
+  /** Engines whose group membership changed — a restart, not a reload. */
+  restartEngines?: SiteEngineId[];
 };
 
 async function applyOneSite(
@@ -2897,14 +3094,15 @@ async function applyOneSite(
     managed,
   );
 
-  let restartEngine: SiteApplySpec["engine"] | undefined;
+  let restartEngines: SiteEngineId[] = [];
   if (release) {
     // The release engine owns the tree; assert it, never create or seed it.
     await assertReleaseDocumentRoot(layout, documentRoot, site, release);
     await writeReleaseHostingWebMetadata(layout, environmentId, site, release);
-    if (await ensureEngineCanReadPrincipalTree(site, release.username)) {
-      restartEngine = site.engine;
-    }
+    restartEngines = await ensureEnginesCanReadPrincipalTree(
+      site,
+      release.username,
+    );
   } else if (managed) {
     // Nobody else creates this tree — there is no release engine on this lane,
     // so the directory the tenant uploads into has to exist before the vhost
@@ -2914,16 +3112,12 @@ async function applyOneSite(
       serviceId: managed.serviceId,
       username: managed.username,
     });
-    if (await ensureEngineCanReadPrincipalTree(site, managed.username)) {
-      restartEngine = site.engine;
-    }
-  } else {
-    await ensureDocumentRoot(
-      documentRoot,
-      site.composeServiceName,
-      site.engine,
+    restartEngines = await ensureEnginesCanReadPrincipalTree(
+      site,
+      managed.username,
     );
-    await writeHostingWebMetadata(base, site);
+  } else {
+    restartEngines = await prepareDaemonOwnedTree(site, base, documentRoot);
   }
 
   const configName = `tp-${environmentId}-${site.composeServiceName}.conf`;
@@ -2937,8 +3131,19 @@ async function applyOneSite(
     ...(release === undefined ? {} : { release }),
     ...(managed === undefined ? {} : { managed }),
   };
-  const restart = restartEngine === undefined ? {} : { restartEngine };
+  const restart = restartEngines.length === 0 ? {} : { restartEngines };
 
+  if (isNginxApacheSite(site)) {
+    const applied = await applyNginxApacheSite(
+      layout,
+      environmentId,
+      site,
+      { ...pathBase, sitesDir: sitesDirs.nginx },
+      dockerBind,
+      sitesDirs,
+    );
+    return { ...applied, ...restart };
+  }
   if (site.engine === "caddy") {
     const applied = await applyCaddySite(
       layout,
@@ -2990,12 +3195,206 @@ function recordSiteResult(
     forSeries.push(...result.phpFpmStaged);
     plan.staged.phpFpm.set(result.phpSeries, forSeries);
   }
-  plan.staged[site.engine].push(...result.staged);
-  if (result.restartEngine) plan.restartEngines.add(result.restartEngine);
-  if (result.phpRuntime) plan.phpRuntimes[site.engine].push(result.phpRuntime);
+  const front = siteFrontEngine(site);
+  plan.staged[front].push(...result.staged);
+  for (const engine of result.restartEngines ?? []) {
+    plan.restartEngines.add(engine);
+  }
+  // Under the front engine: a paired site's runtime is kept only once nginx,
+  // rolled out last, answers through Apache.
+  if (result.phpRuntime) plan.phpRuntimes[front].push(result.phpRuntime);
   // Probed after the reload: the site has to still answer on its own
   // loopback listener, changed config or not.
-  plan.validationTargets[site.engine].push(siteProbeTarget(site));
+  plan.validationTargets[front].push(siteProbeTarget(site));
+  if (isNginxApacheSite(site) && site.backendPort !== undefined) {
+    plan.staged.apache.push(...(result.backendStaged ?? []));
+    plan.validationTargets.apache.push(
+      nginxApacheBackendProbe(site.composeServiceName, site.backendPort),
+    );
+  }
+}
+
+/** Engines whose site vhost is one `<configName>` file in its sites dir. */
+const FILE_VHOST_ENGINES: readonly SiteEngineId[] = Object.freeze(
+  ["caddy", "nginx", "apache"] as const,
+);
+
+/** Every site vhost on this host (all environments), read once per apply. */
+type HostSiteVhosts = Readonly<{
+  /** `*.conf` names per engine sites dir. */
+  names: Readonly<Record<SiteEngineId, readonly string[]>>;
+  /** Loopback port -> `<engine>/<name>` of every vhost that binds or proxies it. */
+  ports: ReadonlyMap<number, readonly string[]>;
+}>;
+
+/**
+ * Ports a rendered vhost listens on or proxies to, from its directive lines
+ * only (`listen`/`Listen`/`address`, Caddy's `:<port> {`, nginx's
+ * `proxy_pass`). Values such as `SetEnv` never start a line with these, so a
+ * tenant's environment cannot claim another tenant's port.
+ */
+export function siteVhostPorts(contents: string): number[] {
+  const ports = new Set<number>();
+  const patterns = [
+    /^\s*(?:listen|Listen|address)\s+\S*:(\d+)\b/gm,
+    /^\s*proxy_pass\s+https?:\/\/[^\s/]*:(\d+)\b/gm,
+    /^:(\d+)\s*\{/gm,
+  ];
+  for (const pattern of patterns) {
+    for (const match of contents.matchAll(pattern)) ports.add(Number(match[1]));
+  }
+  return [...ports];
+}
+
+async function scanHostSiteVhosts(
+  sitesDirs: SiteConfigDirs,
+): Promise<HostSiteVhosts> {
+  const names = {
+    caddy: [],
+    nginx: [],
+    apache: [],
+    openlitespeed: [],
+  } as Record<
+    SiteEngineId,
+    string[]
+  >;
+  const ports = new Map<number, string[]>();
+  await forEachSequential(SITE_ENGINE_ORDER, async (engine) => {
+    const confs = (await listEngineConfigDir(sitesDirs[engine]) ?? [])
+      .filter((name) => name.endsWith(".conf"));
+    names[engine] = confs;
+    await forEachSequential(confs, async (name) => {
+      const contents = await readEngineConfigFile(
+        join(sitesDirs[engine], name),
+      );
+      for (const port of siteVhostPorts(contents)) {
+        const owners = ports.get(port) ?? [];
+        owners.push(`${engine}/${name}`);
+        ports.set(port, owners);
+      }
+    });
+  });
+  return { names, ports };
+}
+
+/** The loopback ports a site claims: `listenPort`, plus Apache's behind nginx. */
+function siteClaimedPorts(site: SiteApplySpec): number[] {
+  return isNginxApacheSite(site) && site.backendPort !== undefined
+    ? [site.listenPort, site.backendPort]
+    : [site.listenPort];
+}
+
+/**
+ * Refuse a site whose port is taken: by another site of this apply, by any
+ * vhost of another environment on this host (the control plane's port ledger
+ * is per environment), or, for a port no vhost of this environment holds yet,
+ * by anything else listening on loopback. Runs before anything is written, so
+ * a refused apply changes nothing and Caddy never routes one site's domain to
+ * another tenant's listener.
+ */
+async function assertSitePortsFree(
+  environmentId: string,
+  sites: readonly SiteApplySpec[],
+  host: HostSiteVhosts,
+  probe: ProbeHostPortFn,
+): Promise<void> {
+  const prefix = `tp-${environmentId}-`;
+  const claimed = new Map<number, string>();
+  await forEachSequential(sites, async (site) => {
+    const name = site.composeServiceName;
+    await forEachSequential(siteClaimedPorts(site), async (port) => {
+      const other = claimed.get(port);
+      if (other !== undefined) {
+        throw new Error(
+          `site ${name}: port ${port} is also claimed by site ${other} in this deploy`,
+        );
+      }
+      claimed.set(port, name);
+      const owners = host.ports.get(port) ?? [];
+      const foreign = owners.find((owner) =>
+        !owner.slice(owner.indexOf("/") + 1).startsWith(prefix)
+      );
+      if (foreign !== undefined) {
+        throw new Error(
+          `site ${name}: port ${port} is already used by ${foreign} (another environment on this host); refusing to apply`,
+        );
+      }
+      if (owners.length > 0) return;
+      if (!(await probe("127.0.0.1", port))) {
+        throw new Error(
+          `site ${name}: port ${port} is already in use on this host; refusing to apply`,
+        );
+      }
+    });
+  });
+}
+
+/**
+ * Remove this environment's vhosts of a site from every engine it no longer
+ * uses (nginx+apache -> apache leaves nginx on `listenPort`; -> nginx leaves
+ * Apache on the old backend port), and reload those engines so they let go of
+ * the ports before the site's own engine binds them. A failed removal or
+ * reload stops the apply: rolling out onto a port still held would fail the
+ * new engine's restart host-wide.
+ *
+ * Outside the rollout transaction: a later rollout failure does not bring the
+ * old engine's vhost back (the switch is the operator's change; redeploy).
+ * OpenLiteSpeed keeps fragment, vhost dir and aggregate in step on removal
+ * and is not swept here.
+ */
+async function retireStaleSiteVhosts(
+  layout: LayoutPaths,
+  environmentId: string,
+  sites: readonly SiteApplySpec[],
+  sitesDirs: SiteConfigDirs,
+  host: HostSiteVhosts,
+): Promise<string[]> {
+  const retired = new Set<SiteEngineId>();
+  await forEachSequential(sites, async (site) => {
+    const name = `tp-${environmentId}-${site.composeServiceName}.conf`;
+    const serving = siteServingEngines(site);
+    await forEachSequential(FILE_VHOST_ENGINES, async (engine) => {
+      if (serving.includes(engine) || !host.names[engine].includes(name)) {
+        return;
+      }
+      const path = join(sitesDirs[engine], name);
+      const rm = await run("sudo", hostSudoArgs(["-n", "rm", "-f", path]));
+      if (!rm.success) {
+        throw new Error(rm.stderr || `Failed to remove stale vhost ${path}`);
+      }
+      logInfo(
+        "deploy",
+        `site ${site.composeServiceName} left ${engine}: removed ${path}`,
+      );
+      retired.add(engine);
+    });
+  });
+  const touched: string[] = [];
+  await forEachSequential(
+    SITE_ENGINE_ORDER.filter((engine) => retired.has(engine)),
+    async (engine) => {
+      const driver = SITE_ENGINE_DRIVERS[engine];
+      await driver.configTest(run, layout);
+      // An engine that is not running holds no port: nothing to reload.
+      const active = await run(
+        "sudo",
+        hostSudoArgs(["-n", "systemctl", "is-active", "--quiet", driver.unit]),
+      );
+      if (!active.success) return;
+      const reload = await run(
+        "sudo",
+        hostSudoArgs(["-n", "systemctl", "reload", driver.unit]),
+      );
+      if (!reload.success) {
+        throw new Error(
+          reload.stderr ||
+            `Failed to reload ${driver.label} after removing a stale vhost`,
+        );
+      }
+      touched.push(engine);
+    },
+  );
+  return touched;
 }
 
 /**
@@ -3029,18 +3428,28 @@ export async function applySites(
       sitePhpRuntimeMode(site);
     }
 
-    await installSiteEngines(
-      needs,
-      phpSeriesForDeploy(sites),
-      phpExtensionsForDeploy(sites),
-    );
-
     const sitesDirs: SiteConfigDirs = {
       caddy: join(layout.configDir, "caddy", "sites"),
       nginx: join(layout.configDir, "nginx", "sites"),
       apache: join(layout.configDir, "apache", "sites"),
       openlitespeed: join(layout.configDir, "openlitespeed", "sites"),
     };
+    // Before anything is installed or written: a port another environment's
+    // vhost (or anything else) holds is refused, never shared.
+    const hostVhosts = await scanHostSiteVhosts(sitesDirs);
+    await assertSitePortsFree(
+      environmentId,
+      sites,
+      hostVhosts,
+      opts?.probeHostPort ?? defaultProbeHostPort,
+    );
+
+    await installSiteEngines(
+      needs,
+      phpSeriesForDeploy(sites),
+      phpExtensionsForDeploy(sites),
+    );
+
     await ensureSiteConfigDirs(
       layout,
       needs,
@@ -3064,6 +3473,7 @@ export async function applySites(
       openlitespeedSitesDir: sitesDirs.openlitespeed,
       phpRuntimes: emptyPhpRuntimes(),
       settled: new Set(),
+      paired: sites.some(isNginxApacheSite),
     };
     let reloaded: string[];
     try {
@@ -3086,7 +3496,16 @@ export async function applySites(
         }
         applied.push(site.composeServiceName);
       });
-      reloaded = await reloadSiteEngines(layout, plan);
+      // Every candidate is staged: the engines a site left let go of its
+      // ports before the engine it moved to binds them.
+      const retired = await retireStaleSiteVhosts(
+        layout,
+        environmentId,
+        sites,
+        sitesDirs,
+        hostVhosts,
+      );
+      reloaded = [...retired, ...await reloadSiteEngines(layout, plan)];
     } catch (err) {
       await rollbackUnsettledPhpRuntimes(plan);
       throw err;

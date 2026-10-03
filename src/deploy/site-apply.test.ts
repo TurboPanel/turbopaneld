@@ -17,6 +17,7 @@ import {
   type SiteRelease,
   type SiteRunFn,
   type SiteRunResult,
+  siteVhostPorts,
 } from "./site.ts";
 import { sitePhpKey, sitePhpRuntimeId } from "./site/php-runtime.ts";
 
@@ -2144,7 +2145,11 @@ test("applySites warns and continues when legacy chown/chmod/setgid fail", async
       return await modeBase.run(command, args);
     };
     assertEquals(
-      (await applySites(layout, "envchmod", [nginxSite], {
+      // Another environment: its own port (the host refuses a shared one).
+      (await applySites(layout, "envchmod", [{
+        ...nginxSite,
+        listenPort: nginxSite.listenPort + 100,
+      }], {
         run: modeRun,
         runPlaybook,
       })).applied,
@@ -2894,7 +2899,10 @@ test("OpenLiteSpeed apply and removal work when the daemon cannot enter its conf
     const restore = denyDaemonFs(olsDir);
     try {
       await applySites(layout, "envolsa", [olsSite], { run, runPlaybook });
-      await applySites(layout, "envolsb", [olsSite], { run, runPlaybook });
+      await applySites(layout, "envolsb", [{
+        ...olsSite,
+        listenPort: olsSite.listenPort + 100,
+      }], { run, runPlaybook });
       // A teardown of an environment with no OLS site must not trip on it.
       await removeSites(layout, "envnone", { run });
       await removeSites(layout, "envolsa", { run });
@@ -2978,7 +2986,7 @@ test("applySites never stages a root-owned config inside its config dir", async 
 const PHP_PRINCIPAL = { principalId: "pr-1", username: RELEASE_USERNAME };
 
 function perSitePhpSite(
-  engine: "nginx" | "apache",
+  engine: "nginx" | "apache" | "nginx+apache",
   mode: "fastcgi" | "fpm",
   settings: Record<string, string> = { memory_limit: "256M" },
 ): SiteApplySpec {
@@ -2987,6 +2995,7 @@ function perSitePhpSite(
     engine,
     root: "public",
     listenPort: 18090,
+    ...(engine === "nginx+apache" ? { backendPort: 18091 } : {}),
     principal: PHP_PRINCIPAL,
     php: { version: "8.4", mode, settings },
   };
@@ -3003,6 +3012,12 @@ type PerSitePhpHarness = {
   apply: (site: SiteApplySpec, env?: string) => Promise<unknown>;
   failProbe: (on: boolean) => void;
   failPhpTest: (on: boolean) => void;
+  /** Fail the config test of the engine whose binary path ends with this. */
+  failEngineTest: (binary: string | null) => void;
+  /** Loopback ports the bind probe reports as taken by something else. */
+  busyPorts: Set<number>;
+  /** Ports the bind probe was asked about, in order. */
+  probedPorts: number[];
   cleanup: () => Promise<void>;
 };
 
@@ -3013,9 +3028,17 @@ async function perSitePhpHarness(): Promise<PerSitePhpHarness> {
   const base = createSiteRunMock();
   let probeFails = false;
   let phpTestFails = false;
+  let failingEngine: string | null = null;
   const run = withGroupMembership(async (command, args) => {
     if (probeFails && command === "curl") {
       return { success: true, stdout: "502", stderr: "" };
+    }
+    if (
+      failingEngine !== null && args.includes("-t") &&
+      args.some((arg) => arg.endsWith(failingEngine as string))
+    ) {
+      base.calls.push({ command, args: [...args] });
+      return fail(`${failingEngine}: config test failed`);
     }
     if (phpTestFails && args.includes("php-test")) {
       base.calls.push({ command, args: [...args] });
@@ -3027,6 +3050,8 @@ async function perSitePhpHarness(): Promise<PerSitePhpHarness> {
     tpapache: ["tpapache", RELEASE_GROUP],
   });
   await seedRelease(layout, "rel-1", "public", "<?php echo 1;");
+  const busyPorts = new Set<number>();
+  const probedPorts: number[] = [];
   return {
     layout,
     unitDir,
@@ -3038,12 +3063,21 @@ async function perSitePhpHarness(): Promise<PerSitePhpHarness> {
         releaseBindings: releaseBindingsFor("shop"),
         systemdUnitDir: unitDir,
         sleep: () => Promise.resolve(),
+        probeHostPort: (_address, port) => {
+          probedPorts.push(port);
+          return Promise.resolve(!busyPorts.has(port));
+        },
       }),
+    busyPorts,
+    probedPorts,
     failProbe: (on) => {
       probeFails = on;
     },
     failPhpTest: (on) => {
       phpTestFails = on;
+    },
+    failEngineTest: (binary) => {
+      failingEngine = binary;
     },
     cleanup,
   };
@@ -3400,7 +3434,10 @@ test("removeSites removes the environment's per-site PHP runtimes after the vhos
   const h = await perSitePhpHarness();
   try {
     await h.apply(perSitePhpSite("nginx", "fastcgi"));
-    await h.apply(perSitePhpSite("nginx", "fpm"), "envother");
+    await h.apply(
+      { ...perSitePhpSite("nginx", "fpm"), listenPort: 18190 },
+      "envother",
+    );
     const id = phpRuntimeId("fastcgi");
     const other = phpRuntimeId("fpm", "envother");
     const mock = createSiteRunMock();
@@ -3429,6 +3466,421 @@ test("removeSites removes the environment's per-site PHP runtimes after the vhos
       (a) => a.includes("stop") && a.includes(`turbopanel-php-${id}.service`),
     );
     assert(nginxReload < stopped, "vhost gone before its runtime");
+  } finally {
+    await h.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// nginx in front of Apache: two engines, Apache rolled out first.
+// ---------------------------------------------------------------------------
+
+function pairedConfPaths(layout: LayoutPaths): {
+  apache: string;
+  nginx: string;
+} {
+  return {
+    apache: join(layout.configDir, "apache", "sites", "tp-envphp-shop.conf"),
+    nginx: join(layout.configDir, "nginx", "sites", "tp-envphp-shop.conf"),
+  };
+}
+
+/** The probed URLs, in order. */
+function probedUrls(
+  calls: ReadonlyArray<{ command: string; args: string[] }>,
+): string[] {
+  return calls.filter((c) => c.command === "curl").map((c) =>
+    String(c.args.at(-1))
+  );
+}
+
+test("nginx+apache: Apache runs PHP behind nginx and is rolled out and probed first", async () => {
+  const h = await perSitePhpHarness();
+  try {
+    await h.apply(perSitePhpSite("nginx+apache", "fastcgi"));
+    const id = phpRuntimeId("fastcgi");
+    const paths = pairedConfPaths(h.layout);
+    const backend = await Deno.readTextFile(paths.apache);
+    assertStringIncludes(backend, "<VirtualHost 127.0.0.1:18091>");
+    assertStringIncludes(backend, "RemoteIPInternalProxy 127.0.0.2\n");
+    assertStringIncludes(
+      backend,
+      `SetHandler "proxy:unix:/run/turbopanel-php-${id}/php.sock|fcgi://localhost/"`,
+    );
+    const front = await Deno.readTextFile(paths.nginx);
+    assertStringIncludes(front, "proxy_bind 127.0.0.2;");
+    assertStringIncludes(front, "listen 127.0.0.1:18090;");
+    assertStringIncludes(front, "proxy_pass http://127.0.0.1:18091;");
+    assertEquals(front.includes("fastcgi_pass"), false);
+    // The socket is Apache's to connect to, not nginx's.
+    const socket = await Deno.readTextFile(
+      join(h.unitDir, `turbopanel-php-${id}.socket`),
+    );
+    assertStringIncludes(socket, "SocketGroup=tpapache");
+
+    const apacheTest = callIndex(
+      h.calls,
+      (a) => a.some((x) => x.endsWith("/httpd")),
+    );
+    const nginxTest = callIndex(
+      h.calls,
+      (a) => a.some((x) => x.endsWith("/nginx")),
+    );
+    assert(apacheTest >= 0 && apacheTest < nginxTest, "Apache before nginx");
+    const urls = probedUrls(h.calls);
+    const backendProbe = urls.indexOf("http://127.0.0.1:18091/");
+    const frontProbe = urls.lastIndexOf("http://127.0.0.1:18090/");
+    assert(backendProbe >= 0 && backendProbe < frontProbe, urls.join(" "));
+    assertEquals(
+      await listConfigDirEntries(dirname(paths.apache)),
+      ["tp-envphp-shop.conf"],
+    );
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("nginx+apache: nginx failing after Apache rolled out puts both back", async () => {
+  const h = await perSitePhpHarness();
+  try {
+    await h.apply(perSitePhpSite("nginx+apache", "fastcgi"));
+    const paths = pairedConfPaths(h.layout);
+    const lastGood = {
+      apache: await Deno.readTextFile(paths.apache),
+      nginx: await Deno.readTextFile(paths.nginx),
+    };
+    const oldId = phpRuntimeId("fastcgi");
+    const newId = phpRuntimeId("fpm");
+
+    h.failEngineTest("/nginx");
+    const before = h.calls.length;
+    await assertRejects(
+      // A new backend port: both vhosts change, so both engines roll out.
+      () =>
+        h.apply({
+          ...perSitePhpSite("nginx+apache", "fpm"),
+          backendPort: 18092,
+        }),
+      Error,
+      "config test failed",
+    );
+    // Apache did roll out (and reload) on the new socket before nginx failed…
+    const calls = h.calls.slice(before);
+    assert(
+      callIndex(calls, (a) => a.some((x) => x.endsWith("/httpd"))) >= 0,
+      "Apache rolled out first",
+    );
+    // …and is back on the previous vhost, as is nginx: nothing left staged.
+    assertEquals(await Deno.readTextFile(paths.apache), lastGood.apache);
+    assertEquals(await Deno.readTextFile(paths.nginx), lastGood.nginx);
+    assertEquals(
+      await listConfigDirEntries(dirname(paths.apache)),
+      ["tp-envphp-shop.conf"],
+    );
+    assertEquals(
+      await listConfigDirEntries(dirname(paths.nginx)),
+      ["tp-envphp-shop.conf"],
+    );
+    // The old runtime still serves; the one this apply created is gone.
+    assertEquals(
+      await exists(join(h.unitDir, `turbopanel-php-${oldId}.service`)),
+      true,
+    );
+    assertEquals(
+      await exists(join(h.unitDir, `turbopanel-php-${newId}.service`)),
+      false,
+    );
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("nginx+apache: a failed Apache rollout never touches nginx", async () => {
+  const h = await perSitePhpHarness();
+  try {
+    h.failEngineTest("/httpd");
+    await assertRejects(
+      () => h.apply(perSitePhpSite("nginx+apache", "fastcgi")),
+      Error,
+      "config test failed",
+    );
+    assertEquals(
+      callIndex(h.calls, (a) => a.some((x) => x.endsWith("/nginx"))),
+      -1,
+    );
+    const paths = pairedConfPaths(h.layout);
+    assertEquals(await exists(paths.apache), false);
+    assertEquals(await exists(paths.nginx), false);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("nginx+apache: both engines join the owner's group and restart", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const mock = createSiteRunMock();
+  try {
+    await seedRelease(layout, "rel-1", "public", "<?php echo 1;");
+    await applySites(layout, "envpair", [{
+      composeServiceName: "shop",
+      engine: "nginx+apache",
+      root: "public",
+      listenPort: 18090,
+      backendPort: 18091,
+      principal: PHP_PRINCIPAL,
+    }], {
+      run: mock.run,
+      runPlaybook: () => Promise.resolve(),
+      releaseBindings: releaseBindingsFor("shop"),
+    });
+    const joined = usermodCalls(mock.calls).map((c) => c.args.at(-1));
+    assertEquals(joined.sort(), ["tpapache", "tpnginx"]);
+    assertEquals(
+      systemctlActions(mock.calls, "turbopanel-apache")[0],
+      "restart",
+    );
+    assertEquals(
+      systemctlActions(mock.calls, "turbopanel-nginx")[0],
+      "restart",
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test("nginx+apache: refused without a backend port or an owner", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const mock = createSiteRunMock();
+  const site: SiteApplySpec = {
+    composeServiceName: "shop",
+    engine: "nginx+apache",
+    root: "public",
+    listenPort: 18090,
+    backendPort: 18091,
+    principal: PHP_PRINCIPAL,
+  };
+  try {
+    for (
+      const [bad, message] of [
+        [{ ...site, backendPort: undefined }, "needs a backendPort"],
+        [{ ...site, backendPort: 18090 }, "needs a backendPort"],
+        [{ ...site, principal: undefined }, "needs a principal"],
+      ] as const
+    ) {
+      await assertRejects(
+        () => applySites(layout, "envpair", [bad], { run: mock.run }),
+        Error,
+        message,
+      );
+    }
+    assertEquals(mock.calls.length, 0);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("removeSites drops both vhosts of a paired site and its runtime", async () => {
+  const h = await perSitePhpHarness();
+  try {
+    await h.apply(perSitePhpSite("nginx+apache", "fastcgi"));
+    const id = phpRuntimeId("fastcgi");
+    const mock = createSiteRunMock();
+    await removeSites(h.layout, "envphp", {
+      run: mock.run,
+      systemdUnitDir: h.unitDir,
+    });
+    const paths = pairedConfPaths(h.layout);
+    assertEquals(await exists(paths.apache), false);
+    assertEquals(await exists(paths.nginx), false);
+    assertEquals(
+      await exists(join(h.unitDir, `turbopanel-php-${id}.service`)),
+      false,
+    );
+  } finally {
+    await h.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Host-wide ports and engine switches.
+// ---------------------------------------------------------------------------
+
+test("a port another environment's vhost holds is refused before anything is written", async () => {
+  const h = await perSitePhpHarness();
+  try {
+    await h.apply(perSitePhpSite("nginx+apache", "fastcgi"));
+    const paths = pairedConfPaths(h.layout);
+    const lastGood = await Deno.readTextFile(paths.apache);
+    const otherConf = (engine: string) =>
+      join(h.layout.configDir, engine, "sites", "tp-envb-shop.conf");
+    for (
+      const [clash, port] of [
+        [{ listenPort: 18090, backendPort: 18191 }, 18090],
+        // Apache's backend port is a port too: nginx proxies to it.
+        [{ listenPort: 18190, backendPort: 18091 }, 18091],
+        // A plain site on another environment's backend port.
+        [{ engine: "apache" as const, listenPort: 18091 }, 18091],
+      ] as const
+    ) {
+      const before = h.calls.length;
+      await assertRejects(
+        () =>
+          h.apply(
+            { ...perSitePhpSite("nginx+apache", "fpm"), ...clash },
+            "envb",
+          ),
+        Error,
+        `port ${port} is already used by`,
+      );
+      // Refused before the engines were installed, staged or reloaded.
+      const calls = h.calls.slice(before);
+      assertEquals(
+        calls.some((c) =>
+          c.args.includes("install") || c.args.includes("reload") ||
+          c.args.includes("useradd")
+        ),
+        false,
+      );
+    }
+    assertEquals(await exists(otherConf("nginx")), false);
+    assertEquals(await exists(otherConf("apache")), false);
+    assertEquals(await Deno.readTextFile(paths.apache), lastGood);
+    // The environment that owns the ports redeploys on them.
+    await h.apply(perSitePhpSite("nginx+apache", "fpm"));
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("a newly claimed port held by anything else is refused; the site's own ports are not probed", async () => {
+  const h = await perSitePhpHarness();
+  try {
+    h.busyPorts.add(18091);
+    await assertRejects(
+      () => h.apply(perSitePhpSite("nginx+apache", "fastcgi")),
+      Error,
+      "port 18091 is already in use on this host",
+    );
+    assertEquals(await exists(pairedConfPaths(h.layout).nginx), false);
+
+    h.busyPorts.clear();
+    await h.apply(perSitePhpSite("nginx+apache", "fastcgi"));
+    // Held by the site's own engines now: a redeploy must not trip on them.
+    h.busyPorts.add(18090);
+    h.busyPorts.add(18091);
+    h.probedPorts.length = 0;
+    await h.apply(perSitePhpSite("nginx+apache", "fpm"));
+    assertEquals(h.probedPorts, []);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("two sites of one deploy cannot claim the same port", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const mock = createSiteRunMock();
+  try {
+    await assertRejects(
+      () =>
+        applySites(layout, "envdup", [
+          { ...nginxSite, composeServiceName: "a" },
+          { ...nginxSite, composeServiceName: "b" },
+        ], { run: mock.run, runPlaybook: () => Promise.resolve() }),
+      Error,
+      "also claimed by site a",
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test("siteVhostPorts reads directive lines only", () => {
+  assertEquals(
+    siteVhostPorts(
+      [
+        ":18080 {",
+        "  bind 127.0.0.1 ::1",
+        "  env FOO 127.0.0.1:18500",
+        "}",
+        "listen 127.0.0.1:18081;",
+        "  listen [::1]:18081;",
+        "  proxy_pass http://127.0.0.1:18082;",
+        "Listen 172.17.0.1:18083",
+        '  SetEnv TARGET "127.0.0.1:18501"',
+        "  fastcgi_param X 127.0.0.1:18502;",
+        "  address                   127.0.0.1:18084",
+      ].join("\n"),
+    ).sort(),
+    [18080, 18081, 18082, 18083, 18084],
+  );
+});
+
+test("nginx+apache -> apache: nginx drops the site's vhost and reloads before Apache binds listenPort", async () => {
+  const h = await perSitePhpHarness();
+  try {
+    await h.apply(perSitePhpSite("nginx+apache", "fastcgi"));
+    const paths = pairedConfPaths(h.layout);
+    const before = h.calls.length;
+    await h.apply(perSitePhpSite("apache", "fastcgi"));
+    const calls = h.calls.slice(before);
+
+    assertEquals(await exists(paths.nginx), false);
+    const apache = await Deno.readTextFile(paths.apache);
+    assertStringIncludes(apache, "Listen 127.0.0.1:18090\n");
+    assertEquals(apache.includes("18091"), false);
+
+    const nginxReload = callIndex(
+      calls,
+      (a) => a.includes("reload") && a.includes("turbopanel-nginx"),
+    );
+    const apacheTest = callIndex(
+      calls,
+      (a) => a.some((x) => x.endsWith("/httpd")),
+    );
+    assert(nginxReload >= 0, "nginx reloaded without the vhost");
+    assert(nginxReload < apacheTest, "nginx let go before Apache rolled out");
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("nginx+apache -> nginx: Apache drops the backend vhost, and PHP's socket moves to nginx", async () => {
+  const h = await perSitePhpHarness();
+  try {
+    await h.apply(perSitePhpSite("nginx+apache", "fastcgi"));
+    const paths = pairedConfPaths(h.layout);
+    const before = h.calls.length;
+    await h.apply(perSitePhpSite("nginx", "fastcgi"));
+    const calls = h.calls.slice(before);
+
+    assertEquals(await exists(paths.apache), false);
+    const nginx = await Deno.readTextFile(paths.nginx);
+    assertEquals(nginx.includes("proxy_pass"), false);
+    assertStringIncludes(nginx, "fastcgi_pass");
+    const apacheReload = callIndex(
+      calls,
+      (a) => a.includes("reload") && a.includes("turbopanel-apache"),
+    );
+    const nginxTest = callIndex(
+      calls,
+      (a) => a.some((x) => x.endsWith("/nginx")),
+    );
+    assert(
+      apacheReload >= 0 && apacheReload < nginxTest,
+      "Apache let go first",
+    );
+    const id = phpRuntimeId("fastcgi");
+    const socket = await Deno.readTextFile(
+      join(h.unitDir, `turbopanel-php-${id}.socket`),
+    );
+    assertStringIncludes(socket, "SocketGroup=tpnginx");
+    // Same runtime id, new group: the live socket is restarted, or it keeps
+    // tpapache and nginx cannot connect.
+    const socketRestart = callIndex(
+      calls,
+      (a) => a.includes("restart") && a.includes(`turbopanel-php-${id}.socket`),
+    );
+    assert(socketRestart >= 0 && socketRestart < nginxTest, "socket restarted");
   } finally {
     await h.cleanup();
   }

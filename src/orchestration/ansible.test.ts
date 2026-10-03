@@ -1902,6 +1902,27 @@ test("Apache runs as tpapache with its own top-level log and runtime dirs", asyn
   );
 });
 
+test("Apache loads mod_remoteip and logs the client address for nginx in front", async () => {
+  const conf = await Deno.readTextFile(
+    join(CHECKOUT_ORCHESTRATION_DIR, "roles/apache/templates/httpd.conf.j2"),
+  );
+  const lines = conf.split("\n");
+  assertEquals(
+    lines.includes("LoadModule remoteip_module modules/mod_remoteip.so"),
+    true,
+  );
+  // `combined` must be defined before use, with `%a`: the address mod_remoteip
+  // takes from nginx's X-Forwarded-For (WP5 proof: the undefined format logged
+  // the literal word).
+  const format = lines.findIndex((line) =>
+    line.startsWith('LogFormat "%a ') && line.endsWith('" combined')
+  );
+  const custom = lines.findIndex((line) =>
+    line.startsWith("CustomLog ") && line.endsWith(" combined")
+  );
+  assertEquals(format >= 0 && format < custom, true);
+});
+
 test("devOwnershipPlaybookExtraArgs emits user uid gid and root", () => {
   assertEquals(
     devOwnershipPlaybookExtraArgs({

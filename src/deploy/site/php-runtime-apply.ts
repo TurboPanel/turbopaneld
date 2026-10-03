@@ -251,6 +251,14 @@ async function writeRuntimeFiles(
   }
 }
 
+/** This apply rewrote the runtime's existing `.socket` unit. */
+function socketUnitChanged(prepared: PreparedSitePhpRuntime): boolean {
+  const socket = sitePhpSocketName(prepared.files.spec.id);
+  return prepared.units.some((unit) =>
+    unit.previous !== null && unit.path.endsWith(`/${socket}`)
+  );
+}
+
 /**
  * Start (or restart) a runtime whose files changed. FastCGI: its socket is
  * enabled, then the service is started so php-cgi really boots now rather than
@@ -270,6 +278,15 @@ async function startRuntime(
       ["systemctl", "enable", "--now", socket],
       `PHP runtime ${spec.id}: socket`,
     );
+    // A running socket keeps its old owner and group until it is restarted
+    // (the site moved between nginx and Apache: `SocketGroup` changed).
+    if (socketUnitChanged(prepared)) {
+      await sudoOrThrow(
+        io,
+        ["systemctl", "restart", socket],
+        `PHP runtime ${spec.id}: socket restart`,
+      );
+    }
     await sudoOrThrow(
       io,
       ["systemctl", "restart", service],
@@ -418,6 +435,14 @@ export async function rollbackSitePhpRuntime(
   await forEachSequential(prepared.units, (u) => restoreUnit(io, u));
   if (prepared.units.length > 0) {
     await sudoQuietly(io, ["systemctl", "daemon-reload"], "daemon-reload");
+  }
+  if (socketUnitChanged(prepared)) {
+    const socket = sitePhpSocketName(spec.id);
+    await sudoQuietly(
+      io,
+      ["systemctl", "restart", socket],
+      `could not restart ${socket} on its previous config`,
+    );
   }
   await sudoQuietly(
     io,

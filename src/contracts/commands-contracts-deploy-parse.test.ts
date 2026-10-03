@@ -414,6 +414,33 @@ test("parseEnvironmentDeployPayload trims a site document root", () => {
   assertEquals(payload.sites?.[0].root, "public");
 });
 
+test("parseEnvironmentDeployPayload carries nginx+apache with its backend port", () => {
+  const site = {
+    composeServiceName: "site",
+    engine: "nginx+apache",
+    root: "public",
+    listenPort: 18080,
+    principal: SITE_PRINCIPAL,
+  };
+  const payload = parseEnvironmentDeployPayload({
+    ...DEPLOY_BASE,
+    sites: [{ ...site, backendPort: 18090 }],
+  });
+  assertEquals(payload.sites?.[0].engine, "nginx+apache");
+  assertEquals(payload.sites?.[0].backendPort, 18090);
+  rejectDeploy({ sites: [site] }, "Invalid sites entry");
+  rejectDeploy(
+    { sites: [{ ...site, backendPort: 18080 }] },
+    "backendPort must differ from listenPort",
+  );
+  // Another engine has nothing listening on a second port: dropped.
+  const nginx = parseEnvironmentDeployPayload({
+    ...DEPLOY_BASE,
+    sites: [{ ...site, engine: "nginx", backendPort: 18090 }],
+  });
+  assertEquals(nginx.sites?.[0].backendPort, undefined);
+});
+
 test("parseEnvironmentDeployPayload rejects sites engine cron and sourceKind", () => {
   rejectDeploy({ sites: [null] }, "Invalid sites entry");
   rejectDeploy(
