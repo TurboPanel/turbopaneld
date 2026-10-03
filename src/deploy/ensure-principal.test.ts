@@ -1,4 +1,9 @@
-import { assert, assertEquals, assertRejects } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertRejects,
+  assertStringIncludes,
+} from "@std/assert";
 import type { LayoutPaths } from "../paths/layout.ts";
 import {
   DEFAULT_PRINCIPAL_SHELL,
@@ -1598,12 +1603,16 @@ test("ensurePrincipalManagedGroups adds in sorted order and keeps going after a 
         : { success: true, stdout: "", stderr: "" },
     );
   };
-  await ensurePrincipalManagedGroups(
+  const warnings = await ensurePrincipalManagedGroups(
     "appuser",
     new Set(["tpphp84", "tpnode24", "tpnode22"]),
     run,
   );
   assertEquals(calls.map((a) => a.at(-2)), ["tpnode22", "tpnode24", "tpphp84"]);
+  // The failed add is reported, not swallowed (a runtime not installed here).
+  assertEquals(warnings.length, 1);
+  assertStringIncludes(warnings[0], "could not add appuser to tpnode24");
+  assertStringIncludes(warnings[0], "no such group");
 });
 
 test("ensurePrincipalManagedGroups revokes in sorted order and stops at the first failed revoke", async () => {
