@@ -257,6 +257,8 @@ test("tp-orchestrate refuses keys and values that would steer root Ansible", asy
       "turbopanel_ui_mode=prod",
       "postgres_expose_port=5432",
       "turbopanel_upgrade_id=../x",
+      "turbopanel_upgrade_id=-x",
+      `turbopanel_upgrade_id=${"a".repeat(81)}`,
       // JSON: unknown or Ansible keys, templated or spaced strings, non-objects.
       '{"ansible_become":true}',
       "{\"turbopanel_timezone\":\"{{lookup('pipe','id')}}\"}",
