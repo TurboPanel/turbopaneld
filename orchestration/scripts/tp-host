@@ -96,6 +96,10 @@ DAEMON_ACCOUNT="tp"
 HOSTING_CADDY_USER="tpedge"
 HOSTING_CADDY_CAP="CAP_NET_BIND_SERVICE"
 HOSTING_CADDY_STATE="turbopanel-hosting-caddy"
+# Its admin API is a unix socket in /run/<this> (0700, tpedge), never loopback
+# TCP: a tenant process can dial loopback and load a config that reads every
+# TLS key tpedge can (audit P0-1). Kept in step with ingress.ts.
+HOSTING_CADDY_RUNTIME="turbopanel-hosting-caddy"
 
 # --- running the real thing ------------------------------------------------
 # Privileged commands. In test mode they are printed, one argv element per
@@ -675,9 +679,14 @@ tp_unit_ok() {
         ok["Service", "Nice"] = 1
         ok["Service", "IOSchedulingClass"] = 1
       }
-      # Only the hosting Caddy keeps state in a systemd StateDirectory=;
-      # tp_hosting_caddy_unit_ok pins its value.
-      if (hosting == "1") ok["Service", "StateDirectory"] = 1
+      # Only the hosting Caddy keeps state in a systemd StateDirectory= and
+      # its admin socket in a RuntimeDirectory=; tp_hosting_caddy_unit_ok pins
+      # each value.
+      if (hosting == "1") {
+        ok["Service", "StateDirectory"] = 1
+        ok["Service", "RuntimeDirectory"] = 1
+        ok["Service", "RuntimeDirectoryMode"] = 1
+      }
       section = ""
     }
     # systemd joins a line ending in a backslash onto the next one, so a
@@ -758,16 +767,21 @@ tp_unit_ok() {
 # The hosting Caddy unit, beyond the account checks in tp_unit_ok: the vendored
 # Caddy against the hosting config, exactly CAP_NET_BIND_SERVICE in both the
 # bounding and the ambient set (a missing bounding set would keep every
-# capability bounded), its store in its own top-level StateDirectory, and
-# only the environment that points Caddy at that store. Read from the file the
-# awk pass above already shape-checked; every repeated key is checked.
+# capability bounded), its store in its own top-level StateDirectory, only
+# the environment that points Caddy at that store, and reloads through the
+# admin unix socket in its own 0700 RuntimeDirectory (never a TCP address).
+# Read from the file the awk pass above already shape-checked; every repeated
+# key is checked.
 tp_hosting_caddy_unit_ok() {
   _hc_bin="$INSTALL_ROOT/vendor/caddy/current/caddy"
   _hc_cfg="$R_CONFIG/hosting/Caddyfile"
   _hc_state="%S/$HOSTING_CADDY_STATE"
+  _hc_admin="unix//run/$HOSTING_CADDY_RUNTIME/admin.sock"
   _hc_bound=""
   _hc_ambient=""
   _hc_dir=""
+  _hc_run=""
+  _hc_run_mode=""
   while IFS= read -r _hc_line || [ -n "$_hc_line" ]; do
     case "$_hc_line" in
       ExecStart=*)
@@ -775,14 +789,14 @@ tp_hosting_caddy_unit_ok() {
           return 1
         ;;
       ExecReload=*)
-        case "$_hc_line" in
-          "ExecReload=$_hc_bin reload --config $_hc_cfg --adapter caddyfile --address "*) ;;
-          *) return 1 ;;
-        esac
+        [ "$_hc_line" = "ExecReload=$_hc_bin reload --config $_hc_cfg --adapter caddyfile --address $_hc_admin" ] ||
+          return 1
         ;;
       CapabilityBoundingSet=*) _hc_bound="${_hc_line#*=}" ;;
       AmbientCapabilities=*) _hc_ambient="${_hc_line#*=}" ;;
       StateDirectory=*) _hc_dir="${_hc_line#*=}" ;;
+      RuntimeDirectory=*) _hc_run="${_hc_line#*=}" ;;
+      RuntimeDirectoryMode=*) _hc_run_mode="${_hc_line#*=}" ;;
       Environment=*)
         case "$_hc_line" in
           "Environment=HOME=$_hc_state" | \
@@ -796,6 +810,8 @@ tp_hosting_caddy_unit_ok() {
   [ "$_hc_bound" = "$HOSTING_CADDY_CAP" ] || return 1
   [ "$_hc_ambient" = "$HOSTING_CADDY_CAP" ] || return 1
   [ "$_hc_dir" = "$HOSTING_CADDY_STATE" ] || return 1
+  [ "$_hc_run" = "$HOSTING_CADDY_RUNTIME" ] || return 1
+  [ "$_hc_run_mode" = "0700" ] || return 1
 }
 
 # The policy id in turbopanel-backup-<id>.service|.timer, printed; fails unless

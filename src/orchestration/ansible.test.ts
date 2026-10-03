@@ -1749,12 +1749,27 @@ test("site apply playbooks vendor engines (never apt nginx/apache2)", async () =
     /site_caddy_service_user:\s*tpcaddysite/,
     "site caddy service user",
   );
-  // Three Caddy admin endpoints now exist (2019 dev control plane, 2029 edge,
-  // 2039 sites); a collision crash-loops the unit.
+  // Audit P0-1: the admin API is a unix socket in the unit's 0700
+  // RuntimeDirectory, never loopback TCP. 2039 now serves read-only metrics.
   assertMatch(
     siteCaddyDefaults,
-    /site_caddy_admin_addr:\s*"127\.0\.0\.1:2039"/,
-    "site caddy admin port",
+    /site_caddy_admin_socket:\s*"\/run\/\{\{ site_caddy_runtime_dir \}\}\/admin\.sock"/,
+    "site caddy admin socket",
+  );
+  assertMatch(
+    siteCaddyDefaults,
+    /site_caddy_metrics_addr:\s*"127\.0\.0\.1:2039"/,
+    "site caddy metrics port",
+  );
+  assertMatch(
+    siteCaddyUnit,
+    /^RuntimeDirectory=\{\{ site_caddy_runtime_dir \}\}\nRuntimeDirectoryMode=0700$/m,
+    "site caddy admin socket directory",
+  );
+  assertMatch(
+    siteCaddyUnit,
+    / --adapter caddyfile --address unix\/\{\{ site_caddy_admin_socket \}\}$/m,
+    "site caddy reloads through the admin socket",
   );
 
   // A zero-match import glob is an error in Caddy, so the placeholder has to

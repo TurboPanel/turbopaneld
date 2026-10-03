@@ -143,14 +143,23 @@ const TRAEFIK_METRICS_PORT = 7081;
 export const TRAEFIK_METRICS_ADDR =
   `${TRAEFIK_LOOPBACK}:${TRAEFIK_METRICS_PORT}`;
 /**
- * Dedicated admin endpoint for the hosting Caddy.
- *
- * Caddy defaults to `127.0.0.1:2019`, which the co-located dev panel Caddy
- * (`orchestration/Caddyfile`) already binds. Without an explicit override the
- * hosting unit crash-loops on "address already in use" on every dev box.
- * `ExecReload` must dial the same address (see {@link caddyUnit}).
+ * systemd `RuntimeDirectory=` of the hosting Caddy unit: `/run/<this>`, created
+ * `tpedge:tpedge 0700` on every start and removed on stop.
  */
-const HOSTING_CADDY_ADMIN_ADDR = "127.0.0.1:2029";
+export const HOSTING_CADDY_RUNTIME_DIRECTORY = "turbopanel-hosting-caddy";
+/**
+ * The hosting Caddy's admin API, a unix socket only `tpedge` (and root) can
+ * reach. Never a TCP listener: any local process (tenant PHP, native app, cron,
+ * SSH shell) can dial loopback TCP, and the admin API loads arbitrary config
+ * as `tpedge`, which reads every uploaded TLS key (audit P0-1). Nothing in the
+ * daemon dials it; reloads go through `systemctl reload`, whose `ExecReload`
+ * runs as `tpedge` (see {@link caddyUnit}). Caddy's default `127.0.0.1:2019`
+ * would also collide with the dev panel Caddy.
+ */
+export const HOSTING_CADDY_ADMIN_SOCKET =
+  `/run/${HOSTING_CADDY_RUNTIME_DIRECTORY}/admin.sock`;
+/** Caddy's spelling of {@link HOSTING_CADDY_ADMIN_SOCKET} as an address. */
+const HOSTING_CADDY_ADMIN_ADDR = `unix/${HOSTING_CADDY_ADMIN_SOCKET}`;
 const SAFE_FILE_ID_RE = /^[A-Za-z0-9_-]+$/;
 /** Compose Spec `name:` charset — lowercase alphanumerics, `-`, and `_`. */
 const COMPOSE_PROJECT_NAME_RE = /^[a-z0-9][a-z0-9_-]*$/;
@@ -688,7 +697,7 @@ export function caddyfile(configDir: string): string {
   // never try to add its internal CA to the host's trust store (it would
   // shell out to sudo, and as root it used to succeed).
   return `{
-  admin ${HOSTING_CADDY_ADMIN_ADDR}
+  admin ${HOSTING_CADDY_ADMIN_ADDR}|0600
   auto_https disable_redirects
   skip_install_trust
   grace_period ${HOSTING_CADDY_GRACE_PERIOD}
@@ -718,9 +727,9 @@ Wants=network-online.target
 
 [Service]
 # Type=simple is active as soon as ExecStart is forked. ExecReload POSTs to
-# admin ${HOSTING_CADDY_ADMIN_ADDR}, which is not listening yet. Instance
-# ACME writes the HTTP-01 site before the first start and does not reload
-# that window; an already-running unit still reloads.
+# the admin socket ${HOSTING_CADDY_ADMIN_SOCKET}, which does not exist yet.
+# Instance ACME writes the HTTP-01 site before the first start and does not
+# reload that window; an already-running unit still reloads.
 Type=simple
 # Not root: ${HOSTING_CADDY_USER} (not in group tp) with one capability, binding
 # :80/:443. tp-host refuses this unit in any other shape.
@@ -730,6 +739,9 @@ AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 NoNewPrivileges=yes
 StateDirectory=${HOSTING_CADDY_STATE_DIRECTORY}
+# The admin socket's directory: ${HOSTING_CADDY_USER} only. tp-host pins both.
+RuntimeDirectory=${HOSTING_CADDY_RUNTIME_DIRECTORY}
+RuntimeDirectoryMode=0700
 Environment=HOME=${state}
 Environment=XDG_DATA_HOME=${state}/data
 Environment=XDG_CONFIG_HOME=${state}/config
