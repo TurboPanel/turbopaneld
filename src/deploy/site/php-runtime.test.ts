@@ -1,17 +1,20 @@
 import { assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
 import {
   isSitePhpRuntimeOf,
+  phpIniBytes,
   SITE_PHP_ID_RE,
   SITE_PHP_LOCKED_INI_KEYS,
   sitePhpFpmConf,
   sitePhpIni,
   sitePhpKey,
+  sitePhpLockedValues,
   sitePhpRuntimeId,
   sitePhpRuntimeIdsIn,
   sitePhpRuntimeMode,
   type SitePhpRuntimeSpec,
   sitePhpServiceUnit,
   sitePhpSocketPath,
+  sitePhpUnitLimits,
 } from "./php-runtime.ts";
 import {
   holdSitePhpRuntime,
@@ -457,4 +460,41 @@ test("a runtime an apply still holds is never an orphan", async () => {
   assertEquals(await orphanSitePhpRuntimes(io, "/etc/tp", listing), [
     "new-fpm84",
   ]);
+});
+
+Deno.test("phpIniBytes reads shorthand and treats -1 as unlimited", () => {
+  assertEquals(phpIniBytes("64M"), 64 * 1024 ** 2);
+  assertEquals(phpIniBytes("1G"), 1024 ** 3);
+  assertEquals(phpIniBytes("-1"), null);
+});
+
+Deno.test("sitePhpUnitLimits derives MemoryMax from memory_limit and workers", () => {
+  const limits = sitePhpUnitLimits([{ key: "memory_limit", value: "64M" }], 4);
+  assertEquals(limits.memoryMaxBytes, 4 * 64 * 1024 ** 2 + 256 * 1024 ** 2);
+  assertEquals(limits.tasksMax, 128);
+  // Baseline 128M when the site sets nothing.
+  assertEquals(
+    sitePhpUnitLimits([], 1).memoryMaxBytes,
+    (128 + 256) * 1024 ** 2,
+  );
+  assertEquals(
+    sitePhpUnitLimits([{ key: "memory_limit", value: "-1" }], 4)
+      .memoryMaxBytes,
+    null,
+  );
+});
+
+Deno.test("the service unit carries MemoryMax and TasksMax when limits are given", () => {
+  const unit = sitePhpServiceUnit(SPEC, {
+    writablePaths: [],
+    limits: { memoryMaxBytes: 536870912, tasksMax: 128 },
+  });
+  assertStringIncludes(unit, "MemoryMax=536870912");
+  assertStringIncludes(unit, "TasksMax=128");
+});
+
+Deno.test("php-fpm pool locks memory_limit as php_admin_value", () => {
+  const admin = sitePhpLockedValues([{ key: "memory_limit", value: "64M" }]);
+  const conf = sitePhpFpmConf({ ...SPEC, mode: "fpm" }, { pool: [], admin });
+  assertStringIncludes(conf, "php_admin_value[memory_limit] = 64M");
 });

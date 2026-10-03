@@ -35,9 +35,11 @@ import { nativeAppUnitContent } from "../deploy/native/unit.ts";
 import {
   sitePhpFpmConf,
   sitePhpIni,
+  sitePhpLockedValues,
   type SitePhpRuntimeSpec,
   sitePhpServiceUnit,
   sitePhpSocketUnit,
+  sitePhpUnitLimits,
 } from "../deploy/site/php-runtime.ts";
 import { resolveLayout } from "../paths/layout.ts";
 
@@ -191,7 +193,10 @@ const PHP_FPM_SPEC: SitePhpRuntimeSpec = {
   id: PHP_FPM_ID,
   mode: "fpm",
 };
-const PHP_WRITABLE = { writablePaths: ["-/srv/users/alice/sites/svc1/shared"] };
+const PHP_WRITABLE = {
+  writablePaths: ["-/srv/users/alice/sites/svc1/shared"],
+  limits: sitePhpUnitLimits([], 4),
+};
 const PHP_INI_TEXT = underPrefix(sitePhpIni([], PHP_SPEC.home));
 const PHP_SERVICE_TEXT = underPrefix(
   sitePhpServiceUnit(PHP_SPEC, PHP_WRITABLE),
@@ -200,7 +205,10 @@ const PHP_FPM_SERVICE_TEXT = underPrefix(
   sitePhpServiceUnit(PHP_FPM_SPEC, PHP_WRITABLE),
 );
 const PHP_SOCKET_TEXT = sitePhpSocketUnit(PHP_SPEC);
-const PHP_FPM_CONF_TEXT = sitePhpFpmConf(PHP_FPM_SPEC, { pool: [] });
+const PHP_FPM_CONF_TEXT = sitePhpFpmConf(PHP_FPM_SPEC, {
+  pool: [],
+  admin: sitePhpLockedValues([]),
+});
 /** What `php-test` needs on disk: the installed unit and its php.ini. */
 const PHP_TEST_SETUP: CallSiteSetup = {
   files: {

@@ -189,7 +189,56 @@ export type SitePhpServiceOpts = Readonly<{
    * everything else read-only). The owner `tmp/` is always added.
    */
   writablePaths: readonly string[];
+  /** Cgroup caps for the unit; see {@link sitePhpUnitLimits}. */
+  limits?: SitePhpUnitLimits;
 }>;
+
+/** `MemoryMax` (bytes) and `TasksMax` for one per-site PHP unit. */
+export type SitePhpUnitLimits = Readonly<{
+  memoryMaxBytes: number | null;
+  tasksMax: number;
+}>;
+
+const MEMORY_UNITS: Readonly<Record<string, number>> = {
+  "": 1,
+  K: 1024,
+  M: 1024 ** 2,
+  G: 1024 ** 3,
+};
+
+/** php.ini shorthand (`64M`, `1G`, `-1`) in bytes; null when unlimited. */
+export function phpIniBytes(value: string): number | null {
+  const m = /^\s*(\d+)\s*([KMG]?)\s*$/i.exec(value);
+  if (!m) return null;
+  return Number(m[1]) * MEMORY_UNITS[m[2].toUpperCase()];
+}
+
+/** Room above `workers * memory_limit` for opcache, the master and shell-outs. */
+const MEMORY_HEADROOM_BYTES = 256 * 1024 ** 2;
+const TASKS_PER_WORKER = 8;
+const TASKS_FLOOR = 128;
+
+/**
+ * Cgroup caps behind the PHP `memory_limit`, which only bounds one request:
+ * `MemoryMax` is every worker at its limit plus headroom, so a runaway script
+ * (or `exec()`) is killed instead of taking the box. An unlimited
+ * `memory_limit` (`-1`, set deliberately by the operator) leaves it uncapped.
+ * No per-site size setting exists (plans are box size only), hence derived.
+ */
+export function sitePhpUnitLimits(
+  values: readonly SitePhpIniValue[],
+  workers: number,
+): SitePhpUnitLimits {
+  const configured = values.findLast((v) => v.key === "memory_limit")?.value ??
+    BASELINE_INI.find((v) => v.key === "memory_limit")?.value ?? "128M";
+  const perWorker = phpIniBytes(configured);
+  return {
+    memoryMaxBytes: perWorker === null || perWorker === 0
+      ? null
+      : perWorker * workers + MEMORY_HEADROOM_BYTES,
+    tasksMax: Math.max(TASKS_FLOOR, workers * TASKS_PER_WORKER),
+  };
+}
 
 function phpCgiExec(spec: SitePhpRuntimeSpec): string {
   const cfg = sitePhpConfigDir(spec.configDir, spec.id);
@@ -280,6 +329,14 @@ export function sitePhpServiceUnit(
     `User=${spec.user}`,
     `Group=${spec.group}`,
     `Slice=${principalSliceName(spec.user)}`,
+    ...(opts.limits
+      ? [
+        ...(opts.limits.memoryMaxBytes === null
+          ? []
+          : [`MemoryMax=${opts.limits.memoryMaxBytes}`]),
+        `TasksMax=${opts.limits.tasksMax}`,
+      ]
+      : []),
     "NoNewPrivileges=yes",
     "CapabilityBoundingSet=",
     "AmbientCapabilities=",
@@ -436,6 +493,28 @@ export function sitePhpIni(
   if (!LOCK_ROOT_RE.test(lockRoot) || /\/\.\.?(\/|$)/.test(lockRoot)) {
     throw new Error(`per-site PHP cannot lock its limits under ${lockRoot}`);
   }
+  const merged = mergedIni(values);
+  const lines = [...merged].map(([key, value]) => `${key} = ${value}`);
+  return [
+    "; TurboPanel per-site PHP",
+    "[PHP]",
+    ...lines,
+    ...lockedIniSection(merged, lockRoot),
+    "",
+  ].join("\n");
+}
+
+/** The locked limits with the site's values applied, for `php_admin_value`. */
+export function sitePhpLockedValues(
+  values: readonly SitePhpIniValue[],
+): SitePhpIniValue[] {
+  const merged = mergedIni(values);
+  return SITE_PHP_LOCKED_INI_KEYS
+    .filter((key) => merged.has(key))
+    .map((key) => ({ key, value: merged.get(key) as string }));
+}
+
+function mergedIni(values: readonly SitePhpIniValue[]): Map<string, string> {
   const merged = new Map<string, string>();
   for (const { key, value } of BASELINE_INI) merged.set(key, value);
   for (const { key, value } of values) {
@@ -447,14 +526,7 @@ export function sitePhpIni(
     }
     merged.set(key, value);
   }
-  const lines = [...merged].map(([key, value]) => `${key} = ${value}`);
-  return [
-    "; TurboPanel per-site PHP",
-    "[PHP]",
-    ...lines,
-    ...lockedIniSection(merged, lockRoot),
-    "",
-  ].join("\n");
+  return merged;
 }
 
 /** Pool tuning the operator may set (already validated by the caller). */
@@ -468,7 +540,12 @@ export type SitePhpPoolValue = Readonly<{ key: string; value: string }>;
  */
 export function sitePhpFpmConf(
   spec: SitePhpRuntimeSpec,
-  opts: Readonly<{ pool: readonly SitePhpPoolValue[]; chdir?: string }>,
+  opts: Readonly<{
+    pool: readonly SitePhpPoolValue[];
+    chdir?: string;
+    /** Limits scripts must not raise, as `php_admin_value[...]`. */
+    admin?: readonly SitePhpIniValue[];
+  }>,
 ): string {
   const tuning = new Map<string, string>([
     ["pm", "ondemand"],
@@ -490,6 +567,9 @@ export function sitePhpFpmConf(
     `listen.acl_users = ${spec.webAccount}`,
     ...[...tuning].map(([key, value]) => `${key} = ${value}`),
     ...(opts.chdir ? [`chdir = ${opts.chdir}`] : []),
+    ...(opts.admin ?? []).map(({ key, value }) =>
+      `php_admin_value[${key}] = ${value}`
+    ),
     "catch_workers_output = yes",
     "decorate_workers_output = no",
     "clear_env = no",
