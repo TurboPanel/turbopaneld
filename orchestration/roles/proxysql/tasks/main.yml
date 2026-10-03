@@ -281,7 +281,7 @@
     follow: false
     owner: root
     group: root
-    mode: "0755"
+    mode: "0750"
 
 - name: Remove the old readiness script from the daemon-writable config directory
   ansible.builtin.file:
@@ -295,7 +295,7 @@
     dest: "{{ proxysql_wait_ready_script }}"
     owner: root
     group: root
-    mode: "0755"
+    mode: "0750"
 
 - name: Install turbopanel-proxysql-stack systemd unit
   ansible.builtin.template:

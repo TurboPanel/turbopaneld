@@ -220,8 +220,8 @@ test("root-run readiness scripts live in a root-only directory, not the daemon-w
     const file = dir?.["ansible.builtin.file"] as Record<string, unknown>;
     assert(
       file && file.owner === "root" && file.group === "root" &&
-        file.mode === "0755",
-      `${role} libexec dir must be root:root 0755`,
+        file.mode === "0750",
+      `${role} libexec dir must be root:root 0750`,
     );
   }
 });
