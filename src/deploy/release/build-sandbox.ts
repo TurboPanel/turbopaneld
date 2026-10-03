@@ -159,7 +159,7 @@ export async function createBuildWorkDir(
     await Deno.mkdir(work.workDir, { mode: 0o700 });
   } catch (err) {
     if (err instanceof Deno.errors.NotFound) {
-      throw new Error(
+      throw new TypeError(
         `no build tree at ${work.workDir}: run the build-user role (daemon-converge)`,
       );
     }
