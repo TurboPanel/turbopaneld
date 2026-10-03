@@ -15,6 +15,8 @@ import {
 import { reinstallFirewallForwardingIfEnabled } from "../firewall/apply.ts";
 import { reconcileSitePhpRuntimesAtBoot } from "../deploy/site/php-runtime-apply.ts";
 import { logInfo, logWarn } from "../util/logger.ts";
+import { resolveLayout } from "../paths/layout.ts";
+import { reportLiveReleaseLinks } from "../deploy/release/live-release-scan.ts";
 import { createSentinel, type SentinelOptions } from "../monitor/index.ts";
 import {
   initOrchestration,
@@ -48,6 +50,8 @@ export type SentinelLike = {
 export type DaemonRunIo = {
   initOrchestration?: () => Promise<boolean>;
   restoreFabricFromPersistedState?: () => Promise<void>;
+  /** Boot-time live-release link scan; defaults to {@link scanLiveReleases}. */
+  scanLiveReleases?: () => Promise<void>;
   reinstallFabricForwardingIfEnabled?: () => Promise<void>;
   reinstallFirewallForwardingIfEnabled?: () => Promise<void>;
   /** Start any per-site PHP runtime that is installed but not running. */
@@ -150,6 +154,16 @@ async function maybeAttachDocker(
 }
 
 /**
+ * Check every live release for links that leave it or reach into `shared/`
+ * (`live-release-scan.ts`), logging each finding.
+ */
+async function scanLiveReleases(): Promise<void> {
+  await reportLiveReleaseLinks(resolveLayout(Deno.env.toObject()), {
+    warn: (message) => logWarn("release", message),
+  });
+}
+
+/**
  * Long-running daemon loop. `main.ts` / `prod-main.ts` call this after CLI
  * verbs. Tests inject {@link DaemonRunIo} so startup branches stay isolated.
  */
@@ -187,6 +201,17 @@ export async function runDaemon(io: DaemonRunIo = {}): Promise<void> {
       restoreFabricFromPersistedState)();
     await reinstallForwardingJumps();
     await (io.reconcileSitePhpRuntimes ?? reconcileSitePhpRuntimesAtBoot)();
+  }
+  // In the background: a slow tree walk must not hold up the connection, and
+  // a failure is only ever reported.
+  if (orchestrationReady) {
+    (io.scanLiveReleases ?? scanLiveReleases)().catch((err) => {
+      (io.logWarn ?? logWarn)(
+        "release",
+        "live release link scan failed:",
+        err instanceof Error ? err.message : String(err),
+      );
+    });
   }
 
   const abort = new AbortController();

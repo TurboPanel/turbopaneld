@@ -44,3 +44,11 @@ node_app_build_user: tpbuild
 # through a POSIX ACL rather than by loosening the mode, so a tenant principal
 # can reach `node-app/` without being able to list either parent.
 turbopanel_install_root: /opt/turbopanel  # noqa: var-naming[no-role-prefix]
+
+# Node 25+ tarballs ship no corepack. Every series gets the same pinned
+# standalone corepack when its tarball lacks one, then pnpm/yarn shims in the
+# series' own bin/ so a bare `pnpm` works in build commands. The registry
+# tarball is SHA-256 verified before npm touches it (same pin as node-runtime).
+corepack_version: "0.36.0"
+corepack_sha256:
+  "0.36.0": "9128cfe26aee0c99f4fc68c15c6b8b12309a68be0de2c012cdfea2a463cb722f"

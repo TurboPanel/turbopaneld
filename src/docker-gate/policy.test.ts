@@ -267,11 +267,14 @@ test("the Docker socket is refused in every spelling, even through a symlink", a
   }
   const resolve: ResolvePath = (path) =>
     Promise.resolve(
-      path === "/srv/users/alice/app/sock" ? "/run/docker.sock" : path,
+      path === "/srv/users/alice/data/app/sock" ? "/run/docker.sock" : path,
     );
   assertEquals(
     ruleNames(
-      await createVerdict({ Binds: ["/srv/users/alice/app/sock:/s"] }, resolve),
+      await createVerdict(
+        { Binds: ["/srv/users/alice/data/app/sock:/s"] },
+        resolve,
+      ),
     ),
     ["bind-docker-socket"],
   );
@@ -306,8 +309,8 @@ test("forbidden host trees, and everything outside the allowed roots", async () 
 test("the allowed roots, and named volumes, pass", async () => {
   for (
     const source of [
-      "/srv/users/alice/app/data",
-      "/srv/users",
+      "/srv/users/alice/data/app/data",
+      "/srv/users/alice/tmp",
       "/var/lib/turbopanel/storage",
       "/var/lib/turbopanel/storage/vol-1",
       "named-volume",
@@ -345,7 +348,10 @@ test("a resolver that throws falls back to the path as written", async () => {
     ruleNames(await createVerdict({ Binds: ["/etc/x:/x"] }, broken)),
     ["bind-forbidden-path"],
   );
-  assertEquals(await createVerdict({ Binds: ["/srv/users/a:/x"] }, broken), []);
+  assertEquals(
+    await createVerdict({ Binds: ["/srv/users/a/data:/x"] }, broken),
+    [],
+  );
 });
 
 test("non-canonical bind sources are refused with the cleaned path", async () => {
@@ -389,7 +395,7 @@ test("a named volume that is a bind to a host path is judged like a bind", async
     ["volume-bind-forbidden-path"],
   );
   assertEquals(
-    await createVerdict({ Mounts: [bindOpts("/srv/users/a/d")] }),
+    await createVerdict({ Mounts: [bindOpts("/srv/users/a/data/d")] }),
     [],
   );
 });
@@ -690,13 +696,13 @@ test("container create breadth: fields that reach the host are findings, deny by
     [{ LogConfig: { Type: "syslog", Config: { "syslog-address": "x" } } }, [
       "log-driver",
     ]],
-    [{ Binds: ["/srv/users/a/d:/d:rshared"] }, ["bind-propagation"]],
+    [{ Binds: ["/srv/users/a/data/d:/d:rshared"] }, ["bind-propagation"]],
     [{ Mounts: [{ Type: "npipe", Source: "a", Target: "b" }] }, ["mount-type"]],
     [{ Mounts: [{ Type: "image", Source: "a", Target: "b" }] }, ["mount-type"]],
     [{
       Mounts: [{
         Type: "bind",
-        Source: "/srv/users/a/d",
+        Source: "/srv/users/a/data/d",
         Target: "/d",
         BindOptions: { Propagation: "rshared" },
       }],
@@ -744,7 +750,7 @@ test("the zero values a real client sends are clean", async () => {
       OomScoreAdj: 0,
       Capabilities: null,
       LogConfig: { Type: "json-file", Config: { "max-size": "10m" } },
-      Binds: ["/srv/users/a/d:/d:ro,rprivate"],
+      Binds: ["/srv/users/a/data/d:/d:ro,rprivate"],
       Init: true,
       PidsLimit: -1,
     }),
@@ -768,7 +774,7 @@ test("optional fields left out are their defaults, not findings", async () => {
     await createVerdict({
       Mounts: [{
         Type: "bind",
-        Source: "/srv/users/a/d",
+        Source: "/srv/users/a/data/d",
         Target: "/d",
         BindOptions: { NonRecursive: true },
       }],

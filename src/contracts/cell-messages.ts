@@ -416,6 +416,13 @@ export type DaemonMessage =
      * sent only to a control plane advertising `managed-ha-probe-v1`.
      */
     detector?: "orchestrator" | "postgres-probe";
+    /**
+     * Orchestrator's key for the dead instance (`ha-observe.ts` only; feature
+     * `managed-ha-instance-v1`). Both or neither. The control plane fences
+     * only when they match the cluster's current primary.
+     */
+    instanceHost?: string;
+    instancePort?: number;
     /** Bounded detector evidence (failure count, last error, container state). */
     evidence?: Record<string, unknown>;
     at: string;

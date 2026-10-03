@@ -3393,7 +3393,8 @@ test("per-site PHP: a settings change restores the previous config when the site
       "did not serve shop",
     );
     // The vhost did not change, so nginx was never reloaded; the runtime was
-    // reloaded in place, probed, and put back.
+    // restarted (a new memory_limit moves the unit's MemoryMax, which a
+    // reload cannot apply), probed, and put back.
     assertEquals(h.calls.some((c) => c.args.includes("-t")), false);
     assertEquals(await Deno.readTextFile(iniPath), lastGood);
     assertEquals(await exists(`${iniPath}.tpprev`), false);
@@ -3402,7 +3403,7 @@ test("per-site PHP: a settings change restores the previous config when the site
       [
         `enable turbopanel-php-${id}.service`,
         `is-active --quiet turbopanel-php-${id}.service`,
-        `reload turbopanel-php-${id}.service`,
+        `restart turbopanel-php-${id}.service`,
         `is-active --quiet turbopanel-php-${id}.service`,
         `restart turbopanel-php-${id}.service`,
       ],

@@ -32,7 +32,11 @@ type Volume = Record<string, unknown>;
 async function deployWithVolumes(
   prepare: (deploymentDir: string) => Promise<void>,
   volumes: (stageDir: string) => Volume[],
-  payloadExtra: { hostLevelApproved?: boolean } = {},
+  payloadExtra: {
+    hostLevelApproved?: boolean;
+    remoteBuildSourcesApproved?: boolean;
+  } = {},
+  serviceExtra: Record<string, unknown> = {},
 ): Promise<{ upRan: boolean; error: Error | null }> {
   const root = await Deno.makeTempDir({ prefix: "tp-deploy-hostpaths-" });
   const previous = {
@@ -56,7 +60,11 @@ async function deployWithVolumes(
     if (args.includes("config") && args.includes("--format")) {
       return ok(JSON.stringify({
         services: {
-          web: { image: "nginx:alpine", volumes: volumes(stageDir) },
+          web: {
+            image: "nginx:alpine",
+            volumes: volumes(stageDir),
+            ...serviceExtra,
+          },
         },
       }));
     }
@@ -213,4 +221,34 @@ test("host-level approval never excuses a symlink escape from inside the deploym
     true,
     error?.message,
   );
+});
+
+const REMOTE_BUILD = {
+  build: { context: "https://github.com/example/api.git" },
+};
+
+test("the deploy handler refuses a public remote build context when the approval flag is absent", async () => {
+  const { upRan, error } = await deployWithVolumes(
+    () => Promise.resolve(),
+    () => [],
+    {},
+    REMOTE_BUILD,
+  );
+  assertEquals(upRan, false, "compose up must not run");
+  assertEquals(
+    error?.message.includes("build_remote_source_refused"),
+    true,
+    error?.message,
+  );
+});
+
+test("the deploy handler allows a public remote build context when remoteBuildSourcesApproved is true", async () => {
+  const { upRan, error } = await deployWithVolumes(
+    () => Promise.resolve(),
+    () => [],
+    { remoteBuildSourcesApproved: true },
+    REMOTE_BUILD,
+  );
+  assertEquals(error, null);
+  assertEquals(upRan, true);
 });

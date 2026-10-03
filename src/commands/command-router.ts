@@ -1,8 +1,11 @@
+import {
+  deliverCommandOutcome,
+  markCommandInFlight,
+} from "./command-outbox.ts";
 import { errorText, sanitizeForLog } from "../util/logger.ts";
 import type {
   CommandAckMessage,
   CommandDispatchMessage,
-  CommandOutcomeMessage,
   PingResult,
   RebootPayload,
 } from "../contracts/commands-contracts.ts";
@@ -88,6 +91,8 @@ export interface CommandRouterDeps {
    * with the no-op sink and no transcript is captured.
    */
   sendCommandLogChunk?: SendCommandLogChunkFn;
+  /** One authenticated round trip to the control plane (`GET /api/daemon/v1/ping`); the firewall auto-confirm check. */
+  verifyControlPlane?: () => Promise<void>;
   /** Fetch last-applied secret plans + envelopes for boot/lifecycle rehydrate. */
   rehydrateDeploymentSecrets?: (
     deployments: ReadonlyArray<{
@@ -188,15 +193,6 @@ function sanitizeOutcomeError(
   return sanitizeError(logSink.redactSummary(errorText(value)));
 }
 
-function sendOutcome(
-  ws: WebSocket,
-  outcome: CommandOutcomeMessage,
-): void {
-  if (ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify(outcome));
-  }
-}
-
 export async function handleCommandDispatch(
   message: CommandDispatchMessage,
   ws: WebSocket,
@@ -214,6 +210,7 @@ export async function handleCommandDispatch(
     ws.send(JSON.stringify(ack));
   }
 
+  await markCommandInFlight(message.id);
   const logSink = createDispatchLogSink(message, deps);
   // Before any handler runs: the dead-primary probe must see the platform's
   // own stop/restart/re-apply/promote/restore/destroy as intent, not a crash.
@@ -288,7 +285,9 @@ export async function handleCommandDispatch(
         result = await pickCommandRouterHandler(
           "handleFirewallReconcile",
           handleFirewallReconcile,
-        )(payload, daemonReceivedAt);
+        )(payload, daemonReceivedAt, {
+          verifyControlPlane: deps?.verifyControlPlane,
+        });
         ok = true;
         daemonRespondedAt = new Date().toISOString();
         break;
@@ -522,7 +521,7 @@ export async function handleCommandDispatch(
     }
 
     commandSucceeded = ok;
-    sendOutcome(ws, {
+    await deliverCommandOutcome(ws, {
       type: "command-outcome",
       id: message.id,
       ok,
@@ -534,7 +533,7 @@ export async function handleCommandDispatch(
     });
   } catch (err) {
     const daemonRespondedAt = new Date().toISOString();
-    sendOutcome(ws, {
+    await deliverCommandOutcome(ws, {
       type: "command-outcome",
       id: message.id,
       ok: false,

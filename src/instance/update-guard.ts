@@ -1,4 +1,9 @@
 import { join } from "@std/path";
+import {
+  ensureDaemonDir,
+  removeDaemonFile,
+  writeDaemonFile,
+} from "../permissions/daemon-files.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 import { resolveLayout } from "../paths/layout.ts";
 
@@ -63,8 +68,8 @@ export async function writeUpdateGuardDisarm(
     targetCommit: targetCommit.trim(),
     at: new Date().toISOString(),
   });
-  await Deno.mkdir(resolved.stateDir, { recursive: true });
-  await Deno.writeTextFile(path, body);
+  await ensureDaemonDir(resolved.stateDir);
+  await writeDaemonFile(path, body, 0o640);
 }
 
 export async function readUpdateRollback(
@@ -85,7 +90,7 @@ export async function readUpdateRollback(
 export async function clearUpdateRollback(layout?: LayoutPaths): Promise<void> {
   const resolved = currentLayout(layout);
   try {
-    await Deno.remove(updateRollbackPath(resolved));
+    await removeDaemonFile(updateRollbackPath(resolved));
   } catch {
     // Absent is fine.
   }
