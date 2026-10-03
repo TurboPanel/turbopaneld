@@ -251,7 +251,7 @@ export async function startApprovalFeatures(
   if (!payloadBytes || !signature) return [];
   if (!(await signatureValid(keys, signature, parts[1]))) return [];
   const payload = parsePayload(payloadBytes);
-  return payload && payload.project === project ? payload.features : [];
+  return payload?.project === project ? payload.features : [];
 }
 
 /**
