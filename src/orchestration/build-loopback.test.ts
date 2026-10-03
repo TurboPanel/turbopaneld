@@ -2,11 +2,11 @@ import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { dirname, fromFileUrl, join } from "@std/path";
 import { ADMIN_PORT, MYSQL_PORT, REST_API_PORT } from "../managed/proxysql.ts";
 import {
+  HOSTING_CADDY_METRICS_ADDR,
   MANAGED_HA_RESERVED_PUBLISHED_PORTS,
   PROXYSQL_RESERVED_PUBLISHED_PORTS,
   TRAEFIK_METRICS_ADDR,
 } from "../deploy/ingress.ts";
-import { SITE_CADDY_ADMIN_ADDR } from "../metrics/collector/ingress/caddy.ts";
 import { DCGM_EXPORTER_ADDR } from "../metrics/collector/gpu/dcgm-adapter.ts";
 
 /**
@@ -73,12 +73,13 @@ test("the build account is refused every platform loopback port the code owns", 
     "proxysql MYSQL_PORT": MYSQL_PORT,
     "proxysql ADMIN_PORT": ADMIN_PORT,
     "proxysql REST_API_PORT": REST_API_PORT,
-    "site Caddy admin": portOf(SITE_CADDY_ADMIN_ADDR),
+    "hosting Caddy metrics": portOf(HOSTING_CADDY_METRICS_ADDR),
     "shared router metrics": portOf(TRAEFIK_METRICS_ADDR),
     "GPU metrics": portOf(DCGM_EXPORTER_ADDR),
     // Not exported as constants: pinned from the Caddy/Traefik/panel setup.
     "panel": 8443,
     "hosting Caddy admin (tcp, if ever enabled)": 2029,
+    "site Caddy admin (orchestration role default)": 2039,
     "shared router http": 7080,
     "shared router https": 7443,
     "Apache bootstrap": 19080,

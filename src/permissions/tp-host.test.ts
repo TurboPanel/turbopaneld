@@ -2648,6 +2648,134 @@ test("sftp-chroot checks an account whose primary group is tpsftp", async () => 
   });
 });
 
+async function selfSignedCert(
+  dir: string,
+  host: string,
+  days: number,
+): Promise<void> {
+  await Deno.mkdir(dir, { recursive: true });
+  const made = await new Deno.Command("openssl", {
+    args: [
+      "req",
+      "-x509",
+      "-newkey",
+      "rsa:2048",
+      "-nodes",
+      "-subj",
+      `/CN=${host}`,
+      "-days",
+      String(days),
+      "-keyout",
+      join(dir, `${host}.key`),
+      "-out",
+      join(dir, `${host}.crt`),
+    ],
+    stdout: "null",
+    stderr: "null",
+  }).output();
+  assertEquals(made.success, true);
+}
+
+test("cert-dates prints only notAfter dates, skips internal certs, symlinks and takes no arguments", async () => {
+  await withHost(async (host) => {
+    const passwd = await Deno.readTextFile(host.path("etc/passwd"));
+    await Deno.writeTextFile(
+      host.path("etc/passwd"),
+      passwd + `tpedge:x:${Deno.uid}:${Deno.gid}::/nonexistent:/bin/false\n`,
+    );
+    const group = await Deno.readTextFile(host.path("etc/group"));
+    await Deno.writeTextFile(
+      host.path("etc/group"),
+      group + `tpedge:x:${Deno.gid}:\n`,
+    );
+    const certs = host.path(
+      "var/lib/turbopanel-hosting-caddy/data/caddy/certificates",
+    );
+    await selfSignedCert(
+      join(certs, "acme-v02.api.letsencrypt.org-directory", "shop.example.com"),
+      "shop.example.com",
+      30,
+    );
+    await selfSignedCert(
+      join(certs, "local", "intranet.test"),
+      "intranet.test",
+      10,
+    );
+    await Deno.symlink(
+      host.path("outside"),
+      join(certs, "acme-v02.api.letsencrypt.org-directory", "linked"),
+    );
+    const result = await host.run(["cert-dates"]);
+    assertEquals(result.code, 0, result.stderr);
+    const lines = result.stdout.trim().split("\n");
+    assertEquals(lines.length, 1, result.stdout);
+    assertEquals(
+      /^[A-Z][a-z]{2} \d{1,2} \d{2}:\d{2}:\d{2} \d{4} GMT$/.test(lines[0]!),
+      true,
+      lines[0],
+    );
+    assertEquals(result.stdout.includes("example.com"), false);
+    await refused(host, ["cert-dates", "x"]);
+  });
+});
+
+test("cert-dates prints nothing when the hosting Caddy has issued no certificates", async () => {
+  await withHost(async (host) => {
+    const result = await host.run(["cert-dates"]);
+    assertEquals(result.code, 0, result.stderr);
+    assertEquals(result.stdout, "");
+  });
+});
+
+test("site-usage prints home and site sizes only, never follows a symlink and takes no arguments", async () => {
+  await withHost(async (host) => {
+    const sites = host.path("srv/users/alice/sites");
+    await Deno.mkdir(join(sites, "web"), { recursive: true });
+    await Deno.writeFile(join(sites, "web", "blob"), new Uint8Array(200_000));
+    await Deno.mkdir(join(sites, "tiny"), { recursive: true });
+    await Deno.writeTextFile(join(sites, "tiny", "a"), "x");
+    await Deno.mkdir(host.path("outside/big"), { recursive: true });
+    await Deno.writeFile(
+      host.path("outside/big/huge"),
+      new Uint8Array(5_000_000),
+    );
+    await Deno.symlink(host.path("outside/big"), join(sites, "escape"));
+    await Deno.symlink(host.path("outside"), host.path("srv/users/mallory"));
+    const result = await host.run(["site-usage"]);
+    assertEquals(result.code, 0, result.stderr);
+    const rows = result.stdout.trim().split("\n").map((l) => l.split(" "));
+    const bytes = (kind: string, name: string) =>
+      Number(rows.find((r) => r[0] === kind && r[2] === name)?.[1]);
+    assertEquals(bytes("site", "web") >= 200_000, true, result.stdout);
+    assertEquals(bytes("site", "web") < 400_000, true, result.stdout);
+    assertEquals(bytes("home", "alice") >= bytes("site", "web"), true);
+    assertEquals(rows.some((r) => r[2] === "escape"), false, result.stdout);
+    assertEquals(rows.some((r) => r[2] === "mallory"), false, result.stdout);
+    assertEquals(
+      rows.every((r) => r.length === 3 && /^\d+$/.test(r[1]!)),
+      true,
+    );
+    // One walk per home: each home and each site appears exactly once.
+    assertEquals(
+      rows.filter((r) => r[0] === "home" && r[2] === "alice").length,
+      1,
+    );
+    assertEquals(
+      rows.filter((r) => r[0] === "site" && r[2] === "web").length,
+      1,
+    );
+    const script = await Deno.readTextFile(
+      new URL("../../orchestration/scripts/tp-host", import.meta.url),
+    );
+    assertEquals(/ionice -c3 nice -n 19 du /.test(script), true);
+    assertEquals(
+      /timeout -k 5 "\$TP_SITE_USAGE_HOME_SECONDS"/.test(script),
+      true,
+    );
+    await refused(host, ["site-usage", "/etc"]);
+  });
+});
+
 test("sshd accepts -t, -T and exactly -T -C user=<name>,host=localhost,addr=127.0.0.1", async () => {
   await withHost(async (host) => {
     for (const argv of [["-t"], ["-T"]]) {

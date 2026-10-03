@@ -18,6 +18,7 @@ import type { GpuAdapterSet } from "./gpu/adapter.ts";
 import type { IngressAdapterSet } from "./ingress/adapter.ts";
 import type { RouterAdapterSet } from "./router/adapter.ts";
 import type { SensorIo } from "./sensors/discovery.ts";
+import type { TlsExpiryReading } from "./tls-expiry.ts";
 
 /** Outcome of a single collect() invocation: an entity-grouped `MetricsSample`. */
 export type MetricsCollectResult =
@@ -378,6 +379,13 @@ export type CollectorDeps = {
    * matching every adapter set's absent-default convention.
    */
   directoryUsage?: () => DirectoryUsageSnapshot;
+  /**
+   * Cached hosting-Caddy certificate expiry (`tls-expiry.ts`), polled every
+   * few hours through `tp-host cert-dates`. Same getter discipline as
+   * {@link CollectorDeps.directoryUsage}; `null` until the first poll lands
+   * or when no Caddy-issued certificate exists.
+   */
+  tlsExpiry?: () => TlsExpiryReading | null;
   /**
    * Cached Docker `GET /system/df` rollup — the `managed.docker` family, plus
    * the `dockerUsedBytes` total `managed.storage` carries. Same getter

@@ -32,7 +32,7 @@ export type {
   IngressReadContext,
   IngressReading,
 } from "./adapter.ts";
-export { CaddyIngressAdapter, SITE_CADDY_ADMIN_ADDR } from "./caddy.ts";
+export { CADDY_METRICS_ADDR, CaddyIngressAdapter } from "./caddy.ts";
 
 const EMPTY_INGRESS_FIELDS: Omit<
   IngressSourceSample,

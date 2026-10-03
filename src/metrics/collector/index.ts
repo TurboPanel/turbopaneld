@@ -27,6 +27,8 @@ import type { IngressAdapterSet } from "./ingress/adapter.ts";
 import { CaddyIngressAdapter } from "./ingress/caddy.ts";
 import type { RouterAdapterSet } from "./router/adapter.ts";
 import { TraefikRouterAdapter } from "./router/traefik.ts";
+import { readSiteUsage } from "./site-usage.ts";
+import { TlsExpirySampler } from "./tls-expiry.ts";
 import {
   createDirectoryUsageWalker,
   type DirectoryUsageWalker,
@@ -135,8 +137,8 @@ export type {
 } from "./ingress/index.ts";
 export {
   buildIngressSources,
+  CADDY_METRICS_ADDR,
   CaddyIngressAdapter,
-  SITE_CADDY_ADMIN_ADDR,
 } from "./ingress/index.ts";
 export type {
   RouterAdapter,
@@ -328,10 +330,21 @@ function defaultDirectoryUsageWalker(): DirectoryUsageWalker {
       resolveHostingPath: () => resolveHostingPath(),
       resolveBackupPath: () => resolveLayout(Deno.env.toObject()).backupDir,
       resolveLogsPath: () => resolveLayout(Deno.env.toObject()).logDir,
+      readSiteUsage: () => readSiteUsage(),
     });
     cachedDirectoryUsageWalker.start();
   }
   return cachedDirectoryUsageWalker;
+}
+
+let cachedTlsExpirySampler: TlsExpirySampler | undefined;
+/** Hosting-Caddy certificate expiry, polled every few hours (`tls-expiry.ts`). */
+function defaultTlsExpirySampler(): TlsExpirySampler {
+  if (!cachedTlsExpirySampler) {
+    cachedTlsExpirySampler = new TlsExpirySampler();
+    cachedTlsExpirySampler.start();
+  }
+  return cachedTlsExpirySampler;
 }
 
 let cachedContainerSampler: ContainerHealthSampler | undefined;
@@ -408,6 +421,7 @@ function defaultManagedEngineSampler(): ManagedEngineSampler {
  */
 export function stopHostStorageSamplers(): void {
   cachedDirectoryUsageWalker?.stop();
+  cachedTlsExpirySampler?.stop();
   cachedDockerUsageSampler?.stop();
   cachedContainerSampler?.stop();
   cachedManagedEngineSampler?.stop();
@@ -441,6 +455,7 @@ function defaultDeps(): CollectorDeps {
     databaseProxyAdapters: defaultDatabaseProxyAdapters(),
     eventCollectors: defaultEventCollectors(),
     directoryUsage: () => defaultDirectoryUsageWalker().latest(),
+    tlsExpiry: () => defaultTlsExpirySampler().latest(),
     dockerUsage: () => defaultDockerUsageSampler().latest(),
     containers: () => defaultContainerSampler().latest(),
     managedEngines: () => defaultManagedEngineSampler().latest(),
