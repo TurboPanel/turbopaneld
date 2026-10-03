@@ -54,6 +54,8 @@ export const TP_HOST_VERBS: ReadonlySet<string> = new Set([
   "build-run",
   "build-return",
   "php-test",
+  "publish-open",
+  "publish",
 ]);
 
 export type HostSudoOptions = Parameters<typeof playbooksNeedRootHelper>[0] & {
