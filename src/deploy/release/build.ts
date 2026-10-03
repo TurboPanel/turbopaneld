@@ -26,7 +26,7 @@ import type {
 } from "../../contracts/commands-contracts.ts";
 import type { ReleaseOutputHandler } from "./checkout.ts";
 import { normalizeNodePackageManagerCommand } from "../node-package-manager.ts";
-import { copyTree } from "./promote.ts";
+import { copyContainedTree, inspectContainedDir } from "./safe-copy.ts";
 import { forEachSequential } from "../../util/sequential.ts";
 
 /** Build ceiling. Long enough for a cold dependency install, not unbounded. */
@@ -493,19 +493,32 @@ const NEXT_PUBLIC_DIR = "public";
  */
 export const NEXT_EXPORT_DIR = "out";
 
-async function directoryExists(path: string): Promise<boolean> {
-  try {
-    const stat = await Deno.stat(path);
-    return stat.isDirectory;
-  } catch {
-    return false;
-  }
+/**
+ * Whether `relative` is a real directory of the build tree. A symlink on the
+ * way is refused outright (`./safe-copy.ts`): the build controls these names,
+ * and following one would let it pick what the daemon reads or writes.
+ */
+async function buildDirExists(
+  workingDir: string,
+  relative: string,
+): Promise<boolean> {
+  return await inspectContainedDir({ root: workingDir, relative }) ===
+    "directory";
 }
 
 async function fileExists(path: string): Promise<boolean> {
   try {
     const stat = await Deno.stat(path);
     return stat.isFile;
+  } catch {
+    return false;
+  }
+}
+
+/** A regular file, not a link to one. */
+async function regularFileExists(path: string): Promise<boolean> {
+  try {
+    return (await Deno.lstat(path)).isFile;
   } catch {
     return false;
   }
@@ -521,9 +534,10 @@ async function fileExists(path: string): Promise<boolean> {
  * the caller checks standalone first.
  */
 async function hasNextStaticExport(workingDir: string): Promise<boolean> {
-  const exportDir = join(workingDir, NEXT_EXPORT_DIR);
-  if (!(await directoryExists(exportDir))) return false;
-  return await fileExists(join(exportDir, "index.html"));
+  if (!(await buildDirExists(workingDir, NEXT_EXPORT_DIR))) return false;
+  return await regularFileExists(
+    join(workingDir, NEXT_EXPORT_DIR, "index.html"),
+  );
 }
 
 export type NativeAppBuildContext = {
@@ -577,8 +591,7 @@ export async function prepareNativeAppBuildOutput(
     return { standaloneOutput: false, staticExport: false };
   }
 
-  const standaloneDir = join(context.workingDir, NEXT_STANDALONE_DIR);
-  if (!(await directoryExists(standaloneDir))) {
+  if (!(await buildDirExists(context.workingDir, NEXT_STANDALONE_DIR))) {
     if (await hasNextStaticExport(context.workingDir)) {
       context.onOutput?.(
         "stdout",
@@ -603,9 +616,13 @@ export async function prepareNativeAppBuildOutput(
     [NEXT_STATIC_DIR, join(NEXT_STANDALONE_DIR, NEXT_STATIC_DIR)],
     [NEXT_PUBLIC_DIR, join(NEXT_STANDALONE_DIR, NEXT_PUBLIC_DIR)],
   ], async ([from, to]) => {
-    const source = join(context.workingDir, from);
-    if (!(await directoryExists(source))) return;
-    await copyTree(source, join(context.workingDir, to));
+    if (!(await buildDirExists(context.workingDir, from))) return;
+    // Destination components are created or checked one at a time, so a
+    // planted `.next/standalone/.next -> elsewhere` is refused, not followed.
+    await copyContainedTree({
+      source: { root: context.workingDir, relative: from },
+      dest: { root: context.workingDir, relative: to },
+    });
   });
 
   context.onOutput?.(

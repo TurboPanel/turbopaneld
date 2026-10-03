@@ -643,19 +643,14 @@ const SITES: CallSite[] = [
     argv: ["mkdir", "-p", "--", RELEASE],
   }),
   tpHost('src/deploy/release/promote.ts|["-n","cp","-a","--",`${from}/.`,to]', {
-    argv: ["cp", "-a", "--", `${STATE}/builds/svc1/.`, RELEASE],
+    argv: ["cp", "-a", "--", `${STATE}/release-handoff/svc1/.`, RELEASE],
     setup: {
-      files: { [`${STATE}/builds/svc1/index.html`]: "<h1>hi</h1>\n" },
+      files: {
+        [`${STATE}/release-handoff/svc1/index.html`]: "<h1>hi</h1>\n",
+      },
       dirs: [RELEASE],
     },
   }),
-  tpHost(
-    'src/deploy/release/promote.ts|["-n","rm","-rf","--",join(to,".git")]',
-    {
-      argv: ["rm", "-rf", "--", `${RELEASE}/.git`],
-      setup: dir(`${RELEASE}/.git`),
-    },
-  ),
   tpHost('src/deploy/release/promote.ts|["-n","mkdir","-p","--",destDir]', {
     argv: ["mkdir", "-p", "--", `${RELEASE}/config`],
   }),
@@ -991,7 +986,7 @@ const SITES: CallSite[] = [
     {
       runas: "tpnginx",
       argv: [
-        `${VENDOR}/nginx/1.28.0/sbin/nginx`,
+        `${VENDOR}/nginx/current/sbin/nginx`,
         "-t",
         "-c",
         "/etc/turbopanel/nginx/nginx.conf",
@@ -1015,7 +1010,7 @@ const SITES: CallSite[] = [
     {
       runas: "tpols",
       argv: [
-        `${VENDOR}/openlitespeed/1.8.3/bin/openlitespeed`,
+        `${VENDOR}/openlitespeed/current/bin/openlitespeed`,
         "-t",
         "-c",
         "/etc/turbopanel/openlitespeed/httpd_config.conf",
@@ -1023,18 +1018,16 @@ const SITES: CallSite[] = [
     },
   ),
   sudo(
-    'src/deploy/site/engine-driver.ts|["-n","-u","tpcaddysite","--","env",`XDG_DATA_HOME=${siteCaddyDataDir(layout)}`,siteCaddyBinaryPath(layout),"validate","--adapter","caddyfile","--config",siteCaddyMainConfigPath(layout)]',
+    'src/deploy/site/engine-driver.ts|["-n","-u","tpcaddysite","--",siteCaddyBinaryPath(layout),"validate","--adapter","caddyfile","--config",siteCaddyMainConfigPath(layout)]',
     {
       runas: "tpcaddysite",
       argv: [
-        "/usr/bin/env",
-        "XDG_DATA_HOME=/var/lib/turbopanel/site-caddy",
-        `${VENDOR}/caddy/2.11.4/caddy`,
+        `${VENDOR}/caddy/current/caddy`,
         "validate",
         "--adapter",
         "caddyfile",
         "--config",
-        "/etc/turbopanel/site-caddy/Caddyfile",
+        "/etc/turbopanel/caddy/Caddyfile",
       ],
     },
   ),

@@ -1,0 +1,262 @@
+[
+  {
+    "name": "plain GET",
+    "raw": "GET /containers/json HTTP/1.1\r\nHost: d\r\n\r\n"
+  },
+  {
+    "name": "plain GET versioned",
+    "raw": "GET /v1.47/containers/json HTTP/1.1\r\nHost: d\r\n\r\n"
+  },
+  {
+    "name": "query form",
+    "raw": "GET /build?networkmode=host&x=1 HTTP/1.1\r\nHost: d\r\n\r\n"
+  },
+  {
+    "name": "semicolon in query",
+    "raw": "GET /build?x=1;networkmode=host HTTP/1.1\r\nHost: d\r\n\r\n"
+  },
+  {
+    "name": "bad escape in query",
+    "raw": "GET /build?a=%zz&networkmode=host HTTP/1.1\r\nHost: d\r\n\r\n"
+  },
+  {
+    "name": "repeated key",
+    "raw": "POST /build?networkmode=bridge&networkmode=host HTTP/1.1\r\nHost: d\r\nContent-Length: 0\r\n\r\n"
+  },
+  {
+    "name": "fragment kept by engine",
+    "raw": "GET /build?networkmode=host#x HTTP/1.1\r\nHost: d\r\n\r\n"
+  },
+  {
+    "name": "encoded path",
+    "raw": "GET /containers/%6ason HTTP/1.1\r\nHost: d\r\n\r\n"
+  },
+  {
+    "name": "encoded slash",
+    "raw": "GET /containers%2fjson HTTP/1.1\r\nHost: d\r\n\r\n"
+  },
+  {
+    "name": "post json length",
+    "raw": "POST /containers/create HTTP/1.1\r\nHost: d\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}"
+  },
+  {
+    "name": "post chunked",
+    "raw": "POST /containers/create HTTP/1.1\r\nHost: d\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n{}\r\n0\r\n\r\n"
+  },
+  {
+    "name": "chunked with extension",
+    "raw": "POST /x HTTP/1.1\r\nHost: d\r\nTransfer-Encoding: chunked\r\n\r\n2;a=b\r\n{}\r\n0\r\n\r\n"
+  },
+  {
+    "name": "chunked with trailer",
+    "raw": "POST /x HTTP/1.1\r\nHost: d\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n{}\r\n0\r\nX: y\r\n\r\n"
+  },
+  {
+    "name": "chunked capitalised",
+    "raw": "POST /x HTTP/1.1\r\nHost: d\r\nTransfer-Encoding: Chunked\r\n\r\n2\r\n{}\r\n0\r\n\r\n"
+  },
+  {
+    "name": "CL and TE",
+    "raw": "POST /x HTTP/1.1\r\nHost: d\r\nContent-Length: 2\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n{}\r\n0\r\n\r\n"
+  },
+  {
+    "name": "duplicate CL equal",
+    "raw": "POST /x HTTP/1.1\r\nHost: d\r\nContent-Length: 2\r\nContent-Length: 2\r\n\r\n{}"
+  },
+  {
+    "name": "duplicate CL differing",
+    "raw": "POST /x HTTP/1.1\r\nHost: d\r\nContent-Length: 2\r\nContent-Length: 3\r\n\r\n{}x"
+  },
+  {
+    "name": "CL list",
+    "raw": "POST /x HTTP/1.1\r\nHost: d\r\nContent-Length: 2, 2\r\n\r\n{}"
+  },
+  {
+    "name": "CL plus sign",
+    "raw": "POST /x HTTP/1.1\r\nHost: d\r\nContent-Length: +2\r\n\r\n{}"
+  },
+  {
+    "name": "CL leading space in value",
+    "raw": "POST /x HTTP/1.1\r\nHost: d\r\nContent-Length:  2\r\n\r\n{}"
+  },
+  {
+    "name": "CL negative",
+    "raw": "POST /x HTTP/1.1\r\nHost: d\r\nContent-Length: -1\r\n\r\n"
+  },
+  {
+    "name": "TE identity",
+    "raw": "POST /x HTTP/1.1\r\nHost: d\r\nTransfer-Encoding: identity\r\nContent-Length: 2\r\n\r\n{}"
+  },
+  {
+    "name": "TE gzip chunked",
+    "raw": "POST /x HTTP/1.1\r\nHost: d\r\nTransfer-Encoding: gzip, chunked\r\n\r\n0\r\n\r\n"
+  },
+  {
+    "name": "TE chunked twice",
+    "raw": "POST /x HTTP/1.1\r\nHost: d\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n"
+  },
+  {
+    "name": "HTTP/1.0 chunked ignored by Go",
+    "raw": "POST /containers/create HTTP/1.0\r\nTransfer-Encoding: chunked\r\nConnection: keep-alive\r\n\r\n0\r\n\r\nGET /secret HTTP/1.0\r\n\r\n"
+  },
+  {
+    "name": "HTTP/1.0 length",
+    "raw": "POST /x HTTP/1.0\r\nContent-Length: 2\r\n\r\n{}"
+  },
+  {
+    "name": "HTTP/1.0 no Host",
+    "raw": "GET /containers/json HTTP/1.0\r\n\r\n"
+  },
+  {
+    "name": "HTTP/1.1 no Host",
+    "raw": "GET /containers/json HTTP/1.1\r\n\r\n"
+  },
+  {
+    "name": "two Host",
+    "raw": "GET /x HTTP/1.1\r\nHost: a\r\nHost: b\r\n\r\n"
+  },
+  {
+    "name": "HTTP/1.2",
+    "raw": "GET /x HTTP/1.2\r\nHost: d\r\n\r\n"
+  },
+  {
+    "name": "HTTP/2.0 line",
+    "raw": "GET /x HTTP/2.0\r\nHost: d\r\n\r\n"
+  },
+  {
+    "name": "lowercase method",
+    "raw": "get /x HTTP/1.1\r\nHost: d\r\n\r\n"
+  },
+  {
+    "name": "odd method",
+    "raw": "BREW /x HTTP/1.1\r\nHost: d\r\n\r\n"
+  },
+  {
+    "name": "absolute-form target",
+    "raw": "GET http://h/containers/json HTTP/1.1\r\nHost: d\r\n\r\n"
+  },
+  {
+    "name": "asterisk target",
+    "raw": "OPTIONS * HTTP/1.1\r\nHost: d\r\n\r\n"
+  },
+  {
+    "name": "no leading slash",
+    "raw": "GET containers/json HTTP/1.1\r\nHost: d\r\n\r\n"
+  },
+  {
+    "name": "double slash path",
+    "raw": "GET //containers/json HTTP/1.1\r\nHost: d\r\n\r\n"
+  },
+  {
+    "name": "dot segments",
+    "raw": "GET /a/../containers/json HTTP/1.1\r\nHost: d\r\n\r\n"
+  },
+  {
+    "name": "space in target",
+    "raw": "GET /a b HTTP/1.1\r\nHost: d\r\n\r\n"
+  },
+  {
+    "name": "tab in target",
+    "raw": "GET /a\tb HTTP/1.1\r\nHost: d\r\n\r\n"
+  },
+  {
+    "name": "header folding",
+    "raw": "GET /x HTTP/1.1\r\nHost: d\r\nX-A: 1\r\n  folded\r\n\r\n"
+  },
+  {
+    "name": "leading space header",
+    "raw": "GET /x HTTP/1.1\r\nHost: d\r\n X-A: 1\r\n\r\n"
+  },
+  {
+    "name": "space before colon",
+    "raw": "GET /x HTTP/1.1\r\nHost: d\r\nX-A : 1\r\n\r\n"
+  },
+  {
+    "name": "bare LF line endings",
+    "raw": "GET /x HTTP/1.1\nHost: d\n\n"
+  },
+  {
+    "name": "bare LF in header",
+    "raw": "GET /x HTTP/1.1\r\nHost: d\r\nX-A: 1\nX-B: 2\r\n\r\n"
+  },
+  {
+    "name": "bare CR in value",
+    "raw": "GET /x HTTP/1.1\r\nHost: d\r\nX-A: 1\rX-B: 2\r\n\r\n"
+  },
+  {
+    "name": "NUL in header",
+    "raw": "GET /x HTTP/1.1\r\nHost: d\r\nX-A: a\u0000b\r\n\r\n"
+  },
+  {
+    "name": "NUL in target",
+    "raw": "GET /a\u0000b HTTP/1.1\r\nHost: d\r\n\r\n"
+  },
+  {
+    "name": "non-ASCII header value",
+    "raw": "GET /x HTTP/1.1\r\nHost: d\r\nX-A: caf\u00e9\r\n\r\n"
+  },
+  {
+    "name": "vertical tab in CL",
+    "raw": "POST /x HTTP/1.1\r\nHost: d\r\nContent-Length: 2\u000b\r\n\r\n{}"
+  },
+  {
+    "name": "Connection upgrade",
+    "raw": "POST /containers/c/attach HTTP/1.1\r\nHost: d\r\nConnection: Upgrade\r\nUpgrade: tcp\r\nContent-Length: 0\r\n\r\n"
+  },
+  {
+    "name": "form body build",
+    "raw": "POST /build HTTP/1.1\r\nHost: d\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 16\r\n\r\nnetworkmode=host"
+  },
+  {
+    "name": "form body charset",
+    "raw": "POST /build HTTP/1.1\r\nHost: d\r\nContent-Type: application/x-www-form-urlencoded; charset=utf-8\r\nContent-Length: 16\r\n\r\nnetworkmode=host"
+  },
+  {
+    "name": "form body upper case type",
+    "raw": "POST /build HTTP/1.1\r\nHost: d\r\nContent-Type: Application/X-WWW-Form-Urlencoded\r\nContent-Length: 16\r\n\r\nnetworkmode=host"
+  },
+  {
+    "name": "form body chunked",
+    "raw": "POST /build HTTP/1.1\r\nHost: d\r\nContent-Type: application/x-www-form-urlencoded\r\nTransfer-Encoding: chunked\r\n\r\n10\r\nnetworkmode=host\r\n0\r\n\r\n"
+  },
+  {
+    "name": "form body on PUT",
+    "raw": "PUT /containers/c/archive HTTP/1.1\r\nHost: d\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 7\r\n\r\na=b&c=d"
+  },
+  {
+    "name": "form body on DELETE",
+    "raw": "DELETE /containers/c HTTP/1.1\r\nHost: d\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 7\r\n\r\nforce=1"
+  },
+  {
+    "name": "form body tar type",
+    "raw": "POST /build HTTP/1.1\r\nHost: d\r\nContent-Type: application/x-tar\r\nContent-Length: 16\r\n\r\nnetworkmode=host"
+  },
+  {
+    "name": "two content types",
+    "raw": "POST /build HTTP/1.1\r\nHost: d\r\nContent-Type: application/x-tar\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 16\r\n\r\nnetworkmode=host"
+  },
+  {
+    "name": "form body and query",
+    "raw": "POST /build?networkmode=bridge HTTP/1.1\r\nHost: d\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 16\r\n\r\nnetworkmode=host"
+  },
+  {
+    "name": "pipelined second request",
+    "raw": "GET /x HTTP/1.1\r\nHost: d\r\n\r\nGET /y HTTP/1.1\r\nHost: d\r\n\r\n"
+  },
+  {
+    "name": "body shorter than CL",
+    "raw": "POST /x HTTP/1.1\r\nHost: d\r\nContent-Length: 10\r\n\r\n{}"
+  },
+  {
+    "name": "expect continue",
+    "raw": "POST /x HTTP/1.1\r\nHost: d\r\nExpect: 100-continue\r\nContent-Length: 2\r\n\r\n{}"
+  },
+  {
+    "name": "fragment hides a form field",
+    "raw": "POST /build?q=1#&networkmode=host HTTP/1.1\r\nHost: d\r\nContent-Length: 0\r\n\r\n"
+  },
+  {
+    "name": "fragment before the query",
+    "raw": "POST /build#?networkmode=host HTTP/1.1\r\nHost: d\r\nContent-Length: 0\r\n\r\n"
+  }
+]

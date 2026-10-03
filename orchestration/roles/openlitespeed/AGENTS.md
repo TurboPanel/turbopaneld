@@ -22,10 +22,19 @@ The role also provisions FHS-compliant config/log/state directories (mirroring
 
 | Path | Owner | Mode | Purpose |
 | ---- | ----- | ---- | ------- |
-| `/etc/turbopanel/openlitespeed/` | `root:tpols` | `0750` | `httpd_config.conf` (daemon-owned, regenerated whole on every apply — no `sites-enabled` convention) + `mime.properties` + per-site fragments (`sites/`) + per-vhost `vhconf.conf` (`vhosts/<name>/`) |
+| `/etc/turbopanel/openlitespeed/` | `root:tpols` (whole tree, re-applied on every converge) | `0750` | `httpd_config.conf` (daemon-owned, regenerated whole on every apply — no `sites-enabled` convention) + `mime.properties` (shipped in `files/`, from the v1.9.1 release) + per-site fragments (`sites/`) + per-vhost `vhconf.conf` (`vhosts/<name>/`) |
 | `/var/log/turbopanel/openlitespeed/` | `tpols:tpols` | `0750` | `error.log` / `access.log` |
 | `/var/lib/turbopanel/openlitespeed/` | `tpols:tpols` | `0750` | PID file (`lshttpd.pid`), `swap/` (`swappingDir`) |
 | `{{ turbopanel_vendor_dir }}/openlitespeed/<version>/{cachedata,autoupdate,tmp,tmp/ocspcache}` | `tpols:tpols` | `0750` | OLS's own writable runtime dirs, kept inside the vendored tree since the binary resolves paths relative to its own `bin/` |
+| `/run/turbopanel-ols/` | `tpols:tpols` | `0750` | LSAPI sockets; the unit's `RuntimeDirectory` (the role also creates it for an already-running server) |
+
+Everything above is ensured on **every** converge, not only on first install: a
+host upgraded over an older vendored tree skips the install block. Installs used to
+chown the whole `/etc/turbopanel` to `tp:tp`; `daemon-install.yml` now skips the
+engine trees (`turbopanel_engine_config_dirs`), and the role still puts the
+OpenLiteSpeed config tree back to `root:tpols` on hosts that were already
+flipped (owner and group only — the daemon sets each file's mode through
+tp-host).
 
 Identity comes from `web-service-user` (`tpols`, uid/gid **9990** — see the
 table above); the **`site-openlitespeed-apply`** playbook
@@ -54,13 +63,24 @@ generated vhost:
 
 | Path | Owner | Mode | Purpose |
 | ---- | ----- | ---- | ------- |
-| `{{ turbopanel_vendor_dir }}/lsphp/<series>/<version>/` | `root:tp` | `0750` | extracted `bin/lsphp` + `lib/` extensions |
+| `{{ turbopanel_vendor_dir }}/lsphp/<series>/<version>/` | `root:tpphp<series>` | `0750` | extracted `bin/lsphp` + `lib/` extensions; `bin/php.ini` (relocated config, below) |
 | `{{ turbopanel_vendor_dir }}/lsphp/<series>/current` | symlink | — | what generated `extprocessor path` lines point at |
-| `{{ turbopanel_vendor_dir }}/openlitespeed/<version>/tmp/lshttpd/` | `tpols:tpols` | `0750` | `uds://tmp/lshttpd/<name>.sock` LSAPI sockets |
 
 `openlitespeed_lsphp_series_map` carries per-series package data (version,
-package basename, deb version) because a series needs more than a version string
-to build its `.deb` URL. `lsphp` and `php-fpm` are different binaries from
+package list, which packages are `_all`) because a series needs more than a
+version string to build its `.deb` URLs. Packages come from
+`pool/main/<suite>/`, where the suite is the host's Debian release (a bookworm
+build links `libzip.so.4`, which trixie lacks); every `.deb` is fetched with
+`get_url` against its sha256 in `openlitespeed_lsphp_sha256` (from the suite's
+`dists/<suite>/main/binary-<arch>/Packages`). `dpkg-deb -x` resolves no
+dependencies, so `openlitespeed_lsphp_runtime_packages[<suite>]` lists the
+shared libraries from the packages' `Depends:` and the role installs them on
+every converge. The binary was built for `/usr/local/lsws/<pkg>/`, so its
+compiled php.ini and extension paths do not exist here: the role writes
+`bin/php.ini` from `php.ini-production` plus `extension_dir` and the shipped
+extensions (PHP also reads php.ini next to its executable, so the vhosts need
+no flag), then runs `lsphp -i` and fails unless that file is loaded with
+OPcache and mysqli. `lsphp` and `php-fpm` are different binaries from
 different sources, but a series string means the same thing to both, and one
 entitlement group (`tpphp<series>`) covers whichever engine serves the site. Hosting `web.php` hints land in the vhost's `phpIniOverride{}` block as
 `php_admin_value <key> <value>` — the OLS spelling of what an FPM pool writes as

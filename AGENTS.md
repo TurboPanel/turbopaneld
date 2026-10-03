@@ -424,7 +424,7 @@ compile toolchain).
   here, and a stale `.secretscan-allowlist` entry is warned about). Its `contract-drift` job checks out
   `TurboPanel/turbopanel` (same-named branch, else trunk) beside this repo and
   runs `check:contract-drift` with `TURBOPANEL_REQUIRE_SIBLING=1`, so a missing
-  sibling fails instead of skipping. `scripts/scan-secrets.sh` is byte-identical in turbopanel, turbopaneld, ui, website and dev — change all five together. It refuses a committed secret-bearing file (`license.token`, `server-key.json`, `.pgpass`, `.rabbitmq_pass`, …), flags credential URLs (`amqp(s)`/`postgres(ql)` with `user:pass@`) and `TURBOPANEL_SECRET(S)` bindings, and flags any line that names a secret-bearing file unless that exact path and full line text is in `.secretscan-allowlist` as `path:line text` (no line number, so edits elsewhere in the file do not break it; the old `path:lineno:text` form is deprecated but still accepted, and with `--all` an entry that allows nothing is warned about as stale). dev's `src/lib/scan-secrets.test.ts` tests the rules and, with the siblings checked out in dev CI, fails if any copy drifts.
+  sibling fails instead of skipping. `scripts/scan-secrets.sh`, `scripts/scan-secrets.patterns` and `scripts/scan-secrets.selftest.sh` are byte-identical in turbopanel, turbopaneld, ui, website and dev: change all five together (each repo keeps a copy because the pre-commit hook runs it locally). The rules in the patterns file cover private key blocks, vendor tokens, JWTs, connection URLs with credentials, secret-looking assignments and forbidden file names (dotenv files, `*.pem`, `*.key`, daemon identity files, …); the scanner reports the rule id and location, never the matching text. `--all` scans the tree; `--range BASE..HEAD` scans every line the PR's commits added, so a secret added and removed inside a PR is still caught (CI runs it on PRs into trunk). Allowlist entries in `.secretscan-allowlist` are `path:full line text` (or `@path exact/file` for a forbidden file name), each needs a `# reason:` comment above it, and wildcards are rejected. The self-test builds its fixtures at run time from fragments; dev's `src/lib/scan-secrets.test.ts` runs it and, with the siblings checked out in dev CI, fails if any copy drifts.
 - **CI gate:** `.github/workflows/verify.yml` is the canonical quality gate —
   reusable via `workflow_call`, the trunk `publish` job `needs: verify`, and
   promotion re-verifies artifact hashes only (no new compile from source).
@@ -590,6 +590,15 @@ controls below do not close:
    can replace it, and php-fpm loads extensions while testing. Apache's
    `httpd -t` no longer does: it runs as `tpapache` (pinned arguments, no
    `env`), and `turbopanel-apache.service` runs its master as `tpapache`.
+4. **Engine-account config tests load configs `tp` writes.** `tp` may run
+   exactly one command as each of `tpnginx`, `tpols` and `tpcaddysite`: that
+   engine's config test with the binary (`<vendor>/<engine>/current/…`), every
+   argument and the main config path pinned (`TP_NGINX_VALIDATE`,
+   `TP_OLS_VALIDATE`, `TP_CADDY_VALIDATE`; no `env`, no wildcard — audit
+   P2-8, pinned by `src/orchestration/sudoers-contract.test.ts`). The config
+   those tests parse is still daemon-written, so a config `tp` installs
+   (e.g. nginx `load_module`) runs as the engine account — no more than the
+   running service already does after a reload.
 
 The controls below remove every direct root escape through sudo and keep a
 daemon bug or an injected argument from reaching arbitrary host paths,
@@ -738,6 +747,26 @@ it regresses:
   - allows `systemctl` verbs on `turbopanel*` / `wg-quick@tp0` / `ssh(d)`
     units, fixed `journalctl`/`ss`/`sshd -t|-T`/`sysctl`/`ip`/`wg` shapes, and
     xtables without `--modprobe` or rule files.
+  - starts tenant builds only through `build-run <build-id> <project-id>`
+    (ids `[a-z0-9-]{1,64}`, nothing else in argv): it checks the `tpbuild`
+    account (service band, own group, only `tpnode*` supplementary groups)
+    and the root-owned `/var/lib/turbopanel-build/{work,cache}` layout, takes
+    a host-wide lock (one build at a time), hands the pinned `work/<id>` to
+    `tpbuild` (`chown -R -h -P`), and execs `systemd-run --wait --pipe` with a
+    fixed property set (`NoNewPrivileges`, no capabilities,
+    `ProtectSystem=strict`, private tmp/devices/IPC/PIDs, the daemon's trees,
+    principal homes, Docker/containerd/gate sockets and `/etc/ssh` made
+    inaccessible, loopback/private/link-local/CGNAT egress denied except the
+    host's literal nameservers, 4G memory, 200% CPU, 1800 s, `tpbuild.slice`)
+    whose only command is `/bin/sh` on `lib/tp-build-runner`, loaded as a
+    systemd credential (PID 1 reads it; the build account gets a private
+    copy); the spec rides
+    stdin to the runner (format in its header). Below systemd 255 (Debian 13 /
+    Ubuntu 24.04 floor) it warns and drops the newer properties, below 247 it
+    refuses. `build-return <build-id>` chowns the tree back to the caller only
+    once `turbopanel-build-<id>.service` is inactive; abort is
+    `systemctl stop turbopanel-build-<id>.service`. `turbopanel-build-*.service`
+    unit files are refused at install;
   `src/permissions/tp-host.test.ts` runs it unprivileged in its test mode
   (`TP_HOST_TEST_PREFIX`, ignored as root) against the daemon's own rendered
   units and a hostile corpus. Known gap: it is TOCTOU-safe for paths it pins,
