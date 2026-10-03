@@ -34,9 +34,12 @@ import {
 import {
   SSHD_CONFIG_PATH,
   SSHD_DROPIN_PATH,
+  SSHD_SAMPLE_NAME,
   sshdAccessRestrictions,
   sshdConfigIncludesDropIns,
   sshdDropInContent,
+  sshdEffectiveSpec,
+  sshdForwardingViolations,
 } from "./sshd-config.ts";
 
 /** One account's desired key set. `keys: []` is a revocation, not a no-op. */
@@ -325,6 +328,87 @@ async function reconcileKeyFiles(
   return { changed, removed };
 }
 
+/** An effective-config assertion run after `sshd -t`, before any reload. */
+type Verifier = {
+  run: () => Promise<RunResult>;
+  refusal: string;
+  fallback: string;
+};
+
+/** Members of `group`: supplementary (`getent group`) and primary (`getent passwd`). */
+function groupMembers(
+  group: string,
+  groupLine: string,
+  passwd: string,
+): string[] {
+  const parts = groupLine.trim().split(":");
+  if (parts[0] !== group) return [];
+  const members = (parts[3] ?? "").split(",");
+  for (const entry of passwd.split("\n")) {
+    const fields = entry.split(":");
+    if (fields[3] === parts[2]) members.push(fields[0]);
+  }
+  return members.filter((name) => SSHD_SAMPLE_NAME.test(name)).sort((a, b) =>
+    a.localeCompare(b)
+  );
+}
+
+/**
+ * One real account per access level to ask `sshd -T` about: the first sftp
+ * member, the first shell member, and the first principal in neither. `Match
+ * Group` resolves groups from the account database, so a made-up user name
+ * would match nothing and prove nothing; a level with no account has nothing
+ * to leak and is skipped. Read with plain `getent`, no root needed.
+ */
+async function sampleAccounts(runFn: RunFn): Promise<string[]> {
+  const sftp = accessGroup("sftp");
+  const shell = accessGroup("shell");
+  const principal = accessGroup("principal");
+  if (!sftp || !shell || !principal) return [];
+  const passwd = (await runFn("getent", ["passwd"])).stdout;
+  const members = async (group: string) => {
+    const line = await runFn("getent", ["group", group]);
+    return line.success ? groupMembers(group, line.stdout, passwd) : [];
+  };
+  const [sftpOnes, shellOnes, principalOnes] = await Promise.all([
+    members(sftp),
+    members(shell),
+    members(principal),
+  ]);
+  const leveled = new Set([...sftpOnes, ...shellOnes]);
+  const bare = principalOnes.find((name) => !leveled.has(name));
+  return [sftpOnes[0], shellOnes[0], bare].filter((name) => name !== undefined);
+}
+
+/**
+ * Refuse a drop-in (or an administrator's earlier one that outranks it) under
+ * which any sampled account would still be able to forward. Fails closed: an
+ * `sshd -T` that cannot answer is a refusal, not a pass.
+ */
+async function assertForwardingOff(runFn: RunFn): Promise<RunResult> {
+  const findings: string[] = [];
+  const samples = [...new Set(await sampleAccounts(runFn))];
+  const results = await Promise.all(samples.map(async (user) => ({
+    user,
+    result: await runFn(
+      "sudo",
+      hostSudoArgs(["-n", "sshd", "-T", "-C", sshdEffectiveSpec(user)]),
+    ),
+  })));
+  for (const { user, result } of results) {
+    if (!result.success) {
+      findings.push(`${user}: sshd -T failed`);
+      continue;
+    }
+    for (const finding of sshdForwardingViolations(result.stdout)) {
+      findings.push(`${user}: ${finding}`);
+    }
+  }
+  return findings.length === 0
+    ? { success: true, stdout: "", stderr: "" }
+    : { success: false, stdout: findings.join("; "), stderr: "" };
+}
+
 /**
  * Stage, test, publish, and reload the drop-in — rolling back to the previous
  * bytes if `sshd -t` refuses the result.
@@ -339,7 +423,7 @@ async function reconcileDropIn(
   runFn: RunFn,
   dropInPath: string,
   contents: string,
-  verify?: () => Promise<RunResult>,
+  verifiers: readonly Verifier[] = [],
 ): Promise<boolean> {
   const backup = `${dropInPath}.tpprev`;
   const existing = await readSshdFile(runFn, dropInPath);
@@ -402,16 +486,19 @@ async function reconcileDropIn(
       }`,
     );
   }
-  if (verify) {
-    const effective = await verify();
-    if (!effective.success) {
-      await restore();
+  try {
+    await forEachSequential(verifiers, async (verifier) => {
+      const effective = await verifier.run();
+      if (effective.success) return;
       throw new Error(
-        `sshd would not jail SFTP members as configured, and the change has been rolled back: ${
-          effective.stdout || effective.stderr || "sftp-chroot verify failed"
+        `${verifier.refusal}, and the change has been rolled back: ${
+          effective.stdout || effective.stderr || verifier.fallback
         }`,
       );
-    }
+    });
+  } catch (error) {
+    await restore();
+    throw error;
   }
 
   await reloadSshd(runFn);
@@ -554,9 +641,18 @@ export async function applySshAccess(
       authorizedKeysDir: dir,
       ...(chroot.root === null ? {} : { sftpChrootRoot: chroot.root }),
     }),
-    chroot.root === null
-      ? undefined
-      : () => runFn("sudo", hostSudoArgs(["-n", "sftp-chroot", "verify"])),
+    [
+      {
+        run: () => assertForwardingOff(runFn),
+        refusal: "sshd would still allow forwarding as configured",
+        fallback: "forwarding check failed",
+      },
+      ...(chroot.root === null ? [] : [{
+        run: () => runFn("sudo", hostSudoArgs(["-n", "sftp-chroot", "verify"])),
+        refusal: "sshd would not jail SFTP members as configured",
+        fallback: "sftp-chroot verify failed",
+      }]),
+    ],
   );
 
   for (const warning of warnings) logWarn("deploy", warning);

@@ -5,9 +5,11 @@ import {
   DAEMON_FEATURE_MIN_VERSIONS,
   DAEMON_WIRE_FEATURES,
   instanceUnsupportedReason,
+  MANAGED_HA_INSTANCE_FEATURE,
   MANAGED_HEALTH_FEATURE,
   MIN_SUPPORTED_INSTANCE_VERSION,
   parseSemver,
+  PHP_SITE_MODES_FEATURE,
   resolveDaemonCapabilities,
   resolveInstanceCapabilities,
   resolveInstanceSupport,
@@ -122,4 +124,26 @@ test("site-engine-nginx-apache-v1 is advertised on the wire", () => {
     ),
     true,
   );
+});
+
+test("managed-ha-instance-v1 is advertised on the wire and raised no floor", () => {
+  assertEquals(MANAGED_HA_INSTANCE_FEATURE, "managed-ha-instance-v1");
+  assertEquals(
+    (DAEMON_WIRE_FEATURES as readonly string[]).includes(
+      MANAGED_HA_INSTANCE_FEATURE,
+    ),
+    true,
+  );
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+});
+
+test("php-site-modes-v1 is advertised on the wire and raised no floor", () => {
+  assertEquals(PHP_SITE_MODES_FEATURE, "php-site-modes-v1");
+  assertEquals(
+    (DAEMON_WIRE_FEATURES as readonly string[]).includes(
+      PHP_SITE_MODES_FEATURE,
+    ),
+    true,
+  );
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
 });

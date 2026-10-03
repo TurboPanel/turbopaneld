@@ -15,8 +15,10 @@
  * - nginx connects to Apache from its own loopback source address,
  *   `127.0.0.2` (`proxy_bind`), and Apache trusts `X-Forwarded-For` from that
  *   address only (mod_remoteip). Apache still listens on `127.0.0.1` (Linux
- *   routes all of 127/8 to `lo`), so any other local caller reaches it as
- *   itself and cannot pick its own client address.
+ *   routes all of 127/8 to `lo`), so a caller that connects from its own
+ *   address is not trusted. This is not a security boundary: a local user can
+ *   bind `127.0.0.2` too and claim any client address, so `.htaccess` IP
+ *   rules must not be relied on for security.
  * - nginx sends Apache exactly one address: the visitor, taken (realip) from
  *   the site-edge Caddy's `X-Forwarded-For` when the connection is from
  *   loopback, the peer itself otherwise (docker bridge). The hosting Caddy
@@ -88,7 +90,8 @@ export const NGINX_APACHE_BACKEND_HOST = "127.0.0.1";
 /**
  * nginx's source address toward Apache (`proxy_bind`), and the only address
  * Apache accepts a forwarded client address from. Nothing else on the host
- * binds it; site PHP cannot reach any loopback address but DNS.
+ * binds it by convention; site PHP cannot reach any loopback address but
+ * DNS, but a local user's own process could bind it.
  */
 export const NGINX_APACHE_TRUSTED_PROXY = "127.0.0.2";
 

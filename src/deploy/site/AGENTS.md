@@ -281,6 +281,15 @@ root-owned `0550` by design:
   scripts read the release and write through `shared/` — reachable as
   `current/shared` — and nothing else on the filesystem. Daemon-owned sites
   (no release binding) stay unrestricted.
+- **nginx follows no link below a release-backed document root.** It serves
+  one with `disable_symlinks on from=$document_root`, so **every** symlink under
+  the root answers 403 — including links that stay inside the release, such as
+  `public/build -> ../dist` or Laravel's `public/storage` (`artisan
+  storage:link`). Builds that need those paths must copy the files rather than
+  link them, or serve them through the app. Apache and OpenLiteSpeed keep
+  owner-match link following (`.htaccess` `RewriteRule` needs it); the
+  publish-time link checks in `../release/release-links.ts` are what keeps
+  those engines safe.
 - **PHP is told the symlink moved.** PHP is the one runtime that would keep
   serving the old release after a promote even though the document-root *string*
   never changed, because two caches hide the swap: the realpath cache still
@@ -370,8 +379,9 @@ listens there only, honours `.htaccess`, runs PHP in the site's mode exactly
 as a plain Apache site (socket group `tpapache`), and takes the client address
 from `X-Forwarded-For` through mod_remoteip trusting `127.0.0.2` alone:
 nginx connects from that address (`proxy_bind`), while Apache still listens
-on `127.0.0.1` (Linux routes all of 127/8 to `lo`), so any other local caller
-reaches it as itself. nginx sends exactly one address, `$remote_addr` after
+on `127.0.0.1` (Linux routes all of 127/8 to `lo`). That is not a security
+boundary: a local user can bind `127.0.0.2` too and claim any client address on
+loopback, so `.htaccess` IP rules must not be relied on for security. nginx sends exactly one address, `$remote_addr` after
 realip from loopback (the hosting Caddy, which replaces an inbound
 `X-Forwarded-For` because it trusts no proxies); a local process calling nginx
 directly can still claim any address. Apache's backend vhost also refuses

@@ -131,7 +131,10 @@ function isOwnedByLocalManifests(
   if (composeProject.length === 0 || composeService.length === 0) return false;
   for (const { manifest } of manifests) {
     if (!allProjects(manifest).includes(composeProject)) continue;
+    // `serviceIds` is only written when the deploy payload named hostings; a
+    // plain compose deploy still lists its services in `services`.
     if (manifest.serviceIds?.[composeService]) return true;
+    if (manifest.services?.[composeService]) return true;
   }
   return false;
 }

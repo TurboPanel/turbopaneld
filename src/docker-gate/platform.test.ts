@@ -18,6 +18,7 @@ import {
   ownedObject,
   ownedTarget,
   ownerOf,
+  PLATFORM_ATTACH_ALLOWLIST,
   PLATFORM_COMPONENTS,
   PLATFORM_ROLES,
   platformBindVerdict,
@@ -73,6 +74,13 @@ test("the gate's label names are the ones the platform stamps", () => {
       ...Object.keys(SYSTEM_COMPONENT_CONTRACTS),
       ...HELPER_COMPONENTS,
     ].toSorted(),
+  );
+});
+
+test("the attach allowlist is exactly the docker run helpers", () => {
+  assertEquals(
+    [...PLATFORM_ATTACH_ALLOWLIST].toSorted(),
+    [...HELPER_COMPONENTS].toSorted(),
   );
 });
 
