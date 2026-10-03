@@ -101,7 +101,10 @@ the server key and key-id files, `update-guard-disarm.json`) go through
 `writeDaemonFile` / `removeDaemonFile` / `ensureDaemonDir`
 (`src/permissions/daemon-files.ts`): rename in directly when the folder is
 writable, otherwise `tp-host install -o tp` / `rm`. Never `Deno.rename` or
-`Deno.mkdir` a new entry straight into those two roots. Root Ansible never
+`Deno.mkdir` a new entry straight into those two roots. `/var/log/turbopanel`
+is root-owned too (the daemon writes nothing there). On a host that also runs
+the control plane the state root stays shared with the instance for now
+(`turbopanel_seal_state_root: false` in the co-located playbooks). Root Ansible never
 recurses or follows links inside a leaf (pinned by
 `src/orchestration/root-tasks-platform-parents.test.ts`).
 
