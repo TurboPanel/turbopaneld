@@ -3238,6 +3238,35 @@ async function tryRemoveOpenLiteSpeedVhostDir(vhostDir: string): Promise<void> {
  * deleted `vhconf.conf` (OpenLiteSpeed would refuse the whole config on its
  * next restart).
  */
+/**
+ * Stop and disable the OpenLiteSpeed unit once no OpenLiteSpeed site remains.
+ * An idle unit has nothing to serve and, with an empty config, crash-loops;
+ * the next OpenLiteSpeed deploy starts it again (`systemctlReloadOrStart`
+ * falls back to `enable --now`). Returns true when it was stopped.
+ */
+async function disableIdleOpenLiteSpeed(
+  layout: LayoutPaths,
+  unit: string,
+): Promise<boolean> {
+  let sites: string[] | null;
+  try {
+    sites = await listEngineConfigDir(
+      join(layout.configDir, "openlitespeed", "sites"),
+    );
+  } catch {
+    return false;
+  }
+  if (sites?.some((name) => name.endsWith(".conf"))) return false;
+  const stop = await run(
+    "sudo",
+    hostSudoArgs(["-n", "systemctl", "disable", "--now", unit]),
+  );
+  if (!stop.success) {
+    logWarn("deploy", `could not disable idle ${unit}: ${stop.stderr}`);
+  }
+  return stop.success;
+}
+
 async function removeOpenLiteSpeedSites(
   layout: LayoutPaths,
   environmentId: string,
@@ -3330,6 +3359,12 @@ export async function removeSites(
       async ([engine, removed]) => {
         if (removed === 0) return;
         const driver = SITE_ENGINE_DRIVERS[engine];
+        if (
+          engine === "openlitespeed" &&
+          await disableIdleOpenLiteSpeed(layout, driver.unit)
+        ) {
+          return;
+        }
         await tryReloadAfterSiteRemoval(
           driver.label,
           () => driver.reload(run, layout, false),
