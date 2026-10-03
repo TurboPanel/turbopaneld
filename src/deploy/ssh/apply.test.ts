@@ -8,12 +8,14 @@ import { dirname, join } from "@std/path";
 import type { RunFn, RunResult } from "../ensure-principal.ts";
 import { applySshAccess } from "./apply.ts";
 import {
+  AUTHORIZED_KEYS_DIR,
   authorizedKeysContent,
   authorizedKeysPath,
   MAX_KEYS_PER_PRINCIPAL,
 } from "./authorized-keys.ts";
 import { ALLOWED_SSH_KEY_TYPES, isCanonicalSshPublicKey } from "./key-types.ts";
 import {
+  SFTP_CHROOT_SWITCH_PATH,
   sshdAccessRestrictions,
   sshdConfigIncludesDropIns,
   sshdDropInContent,
@@ -60,6 +62,8 @@ type Host = {
   /** Set to fail `sshd -t`, as a real host would on a bad config. */
   sshdTestError: string | null;
   reloads: string[];
+  /** What `tp-host sftp-chroot check` answers. */
+  sftpCheck: RunResult;
   cleanup: () => Promise<void>;
 };
 
@@ -103,6 +107,7 @@ async function makeHost(
     modes: new Map(),
     sshdTestError: null,
     reloads: [],
+    sftpCheck: ok("ok"),
     run: () => Promise.resolve(ok()),
     cleanup: () => Deno.remove(root, { recursive: true }),
   };
@@ -113,6 +118,7 @@ async function makeHost(
     const rest = args[0] === "-n" ? args.slice(1) : args;
     const [tool, ...tail] = rest;
 
+    if (tool === "sftp-chroot") return host.sftpCheck;
     if (tool === "sshd") {
       return host.sshdTestError === null ? ok() : fail(host.sshdTestError);
     }
@@ -987,6 +993,145 @@ test("a failed key-directory listing leaves existing files in place", async () =
     const result = await apply(host, []);
     assertEquals(result.removedPrincipals, []);
     await Deno.stat(authorizedKeysPath("appuser", host.keysDir));
+  } finally {
+    await host.cleanup();
+  }
+});
+
+// --- SFTP chroot ------------------------------------------------------------
+
+async function writeSwitch(host: Host, contents: string): Promise<void> {
+  await Deno.mkdir(dirname(host.keysDir), { recursive: true });
+  await Deno.writeTextFile(
+    join(dirname(host.keysDir), "sftp-chroot"),
+    contents,
+  );
+}
+
+function switchOn(host: Host): Promise<void> {
+  return writeSwitch(host, "on\n");
+}
+
+function applyJailed(host: Host) {
+  return applySshAccess(
+    [{ username: "appuser", keys: [ED25519] }],
+    {
+      authorizedKeysDir: host.keysDir,
+      sshdConfigPath: host.sshdConfigPath,
+      sshdDropInPath: host.dropInPath,
+      principalHomeRoot: "/srv/users",
+    },
+    host.run,
+  );
+}
+
+async function appliedDirectives(host: Host): Promise<string[]> {
+  return (await Deno.readTextFile(host.dropInPath)).split("\n").map((line) =>
+    line.trim()
+  ).filter((line) => line.length > 0 && !line.startsWith("#"));
+}
+
+test("the switch sits beside the default key directory", () => {
+  assertEquals(
+    join(dirname(AUTHORIZED_KEYS_DIR), "sftp-chroot"),
+    SFTP_CHROOT_SWITCH_PATH,
+  );
+});
+
+test("with the switch off nothing is jailed and no layout check runs", async () => {
+  const host = await makeHost();
+  try {
+    const result = await applyJailed(host);
+    assertEquals(result.sftpChroot, false);
+    const directives = await appliedDirectives(host);
+    assert(!directives.some((line) => line.startsWith("ChrootDirectory")));
+    assert(
+      blockOf(directives, "Match Group tpsftp").includes(
+        "ForceCommand internal-sftp",
+      ),
+    );
+    assert(!host.calls.some((call) => call.args.includes("sftp-chroot")));
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("with the switch on, tpsftp members are jailed in their home root and start in home/", async () => {
+  const host = await makeHost();
+  try {
+    await switchOn(host);
+    const result = await applyJailed(host);
+    assertEquals(result.sftpChroot, true);
+    assertEquals(result.warnings, []);
+    const directives = await appliedDirectives(host);
+    const sftp = blockOf(directives, "Match Group tpsftp");
+    // %u, not %h: the passwd home is <root>/<user>/home, below the jail.
+    assert(sftp.includes("ChrootDirectory /srv/users/%u"));
+    assert(sftp.includes("ForceCommand internal-sftp -d /home"));
+    // A shell needs a userland inside a jail, and the backstop would carry
+    // the chroot onto shell members too.
+    for (const other of ["Match Group tpshell", "Match Group tpprincipal"]) {
+      assert(
+        !blockOf(directives, other).some((line) =>
+          line.startsWith("ChrootDirectory")
+        ),
+        `${other} must never be jailed`,
+      );
+    }
+    assert(host.calls.some((call) => call.args.includes("sftp-chroot")));
+    assertEquals(host.reloads, ["ssh.service"]);
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("a switch file that does not say on leaves the jail off", async () => {
+  const host = await makeHost();
+  try {
+    await writeSwitch(host, "");
+    assertEquals((await applyJailed(host)).sftpChroot, false);
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("a member that drifts off the layout keeps the jail and is reported", async () => {
+  const host = await makeHost();
+  try {
+    await switchOn(host);
+    host.sftpCheck = {
+      success: false,
+      stdout: "bob: passwd home is not /srv/users/bob/home\n",
+      stderr: "",
+    };
+    const result = await applyJailed(host);
+    // Failing closed for bob, not open for everyone.
+    assertEquals(result.sftpChroot, true);
+    assert(
+      blockOf(await appliedDirectives(host), "Match Group tpsftp").includes(
+        "ChrootDirectory /srv/users/%u",
+      ),
+    );
+    assertEquals(result.warnings.length, 1);
+    assertStringIncludes(result.warnings[0], "bob: passwd home is not");
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("a jailed drop-in sshd refuses is rolled back to the unjailed one", async () => {
+  const host = await makeHost();
+  try {
+    await applyJailed(host);
+    const unjailed = await Deno.readTextFile(host.dropInPath);
+    host.reloads.length = 0;
+
+    await switchOn(host);
+    host.sshdTestError = "ChrootDirectory: bad ownership or modes";
+    const error = await assertRejects(() => applyJailed(host));
+    assertStringIncludes(String(error), "rolled back");
+    assertEquals(await Deno.readTextFile(host.dropInPath), unjailed);
+    assertEquals(host.reloads, []);
   } finally {
     await host.cleanup();
   }

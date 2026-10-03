@@ -73,7 +73,7 @@ through to the host defaults — its own `~/.ssh/authorized_keys` and
 loopback and LAN (found live 2026-10-02). Rule: the backstop may only set
 keywords **every** level block already sets (`apply.test.ts` pins it); a
 `ForceCommand` or `ChrootDirectory` there would leak onto `tpshell` members.
-The principal-home redesign's SFTP chroot belongs in `sftpLevelDirectives`.
+The SFTP chroot lives in `sftpLevelDirectives` for that reason.
 For the same reason the drop-in is ensured on **every** deploy that
 materializes a principal (`applyDeploySshAccess`), not only when keys are
 declared; a keyless principal gets no key file. Every level block also sets
@@ -89,3 +89,20 @@ never rides the wire), applied by `ensurePrincipalPassword` in
 `ensure-principal.ts` via `chpasswd -e` over **stdin** — never argv, which
 `ps` can read. A material with no `passwordHash` locks the account password
 (`usermod -p !`), the state `useradd` created it in.
+
+**The SFTP chroot is a per-host switch, on last.** With
+`/etc/ssh/turbopanel/sftp-chroot` present (content `on`), the `tpsftp` block
+gets `ChrootDirectory <principal home root>/%u` and
+`ForceCommand internal-sftp -d /home`: the jail is the root-owned principal
+home, the session starts in `home/`, and `sites/` is visible read-only.
+`%u`, not `%h`, because the passwd home is `home/` one level down. Only
+`tp-host sftp-chroot on` writes the switch, and it refuses while any member
+fails `tp-host sftp-chroot check` (a chroot path component not root-owned or
+group/world-writable, no principal-owned `home/`, a passwd home other than
+`<root>/<p>/home`, or `tpshell` held as well — sshd would refuse that
+member's every login, or jail a shell). `sftp-chroot off` is the rollback and
+is never gated; the next reconcile renders the unjailed block. The daemon
+only reads the switch: when it is on, every reconcile re-runs the check and
+turns findings into warnings, keeping the jail (fail closed for that member,
+not open for everyone). The drop-in rollout is unchanged — `sshd -t` and
+rollback on refusal. `server.principals.reconcile` reports `sftpChroot`.

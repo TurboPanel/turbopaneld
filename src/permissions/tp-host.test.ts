@@ -2393,3 +2393,116 @@ test("php-site-register writes the launcher registry from the account database o
     assertEquals((await host.run(["rm", "-f", "--", entry])).code, 0);
   });
 });
+
+// --- sftp-chroot ---------------------------------------------------------------
+
+/** Put alice on the new layout (root-owned 0750 home, home/, passwd home). */
+async function newLayoutAlice(host: Host, groups: string[] = []) {
+  await Deno.mkdir(host.path("srv/users/alice/home"), { recursive: true });
+  await Deno.chmod(host.path("srv/users/alice"), 0o750);
+  const passwd = await Deno.readTextFile(host.path("etc/passwd"));
+  await Deno.writeTextFile(
+    host.path("etc/passwd"),
+    passwd.replace(
+      `${host.prefix}/srv/users/alice:`,
+      `${host.prefix}/srv/users/alice/home:`,
+    ),
+  );
+  const group = await Deno.readTextFile(host.path("etc/group"));
+  await Deno.writeTextFile(
+    host.path("etc/group"),
+    group.replace("tpsftp:x:9986:", "tpsftp:x:9986:alice") +
+      groups.join("\n") + (groups.length > 0 ? "\n" : ""),
+  );
+}
+
+const SWITCH = "etc/ssh/turbopanel/sftp-chroot";
+
+test("sftp-chroot switches on only when every tpsftp member is on the new layout", async () => {
+  await withHost(async (host) => {
+    await newLayoutAlice(host);
+    assertEquals((await host.run(["sftp-chroot", "status"])).stdout, "off\n");
+    const check = await host.run(["sftp-chroot", "check"]);
+    assertEquals(check.code, 0, check.stdout + check.stderr);
+
+    const on = await host.run(["sftp-chroot", "on"]);
+    assertEquals(on.code, 0, on.stderr);
+    assertEquals(await Deno.readTextFile(host.path(SWITCH)), "on\n");
+    assertStringIncludes(on.stdout, "EXEC [chown] [-h] [--] [root:root] [./f]");
+    assertEquals((await host.run(["sftp-chroot", "status"])).stdout, "on\n");
+
+    // Off is the rollback and is never gated.
+    assertEquals((await host.run(["sftp-chroot", "off"])).code, 0);
+    assertEquals((await host.run(["sftp-chroot", "status"])).stdout, "off\n");
+  });
+});
+
+test("sftp-chroot refuses a member still on the tenant-owned layout", async () => {
+  await withHost(async (host) => {
+    // The fixture's alice: passwd home is the home root, no home/ inside it.
+    const group = await Deno.readTextFile(host.path("etc/group"));
+    await Deno.writeTextFile(
+      host.path("etc/group"),
+      group.replace("tpsftp:x:9986:", "tpsftp:x:9986:alice"),
+    );
+    const check = await host.run(["sftp-chroot", "check"]);
+    assertEquals(check.code === 0, false);
+    assertStringIncludes(check.stdout, "alice: passwd home is not");
+    assertStringIncludes(
+      check.stdout,
+      "/srv/users/alice/home is not a directory",
+    );
+
+    const stderr = await refused(host, ["sftp-chroot", "on"]);
+    assertStringIncludes(stderr, "refusing to switch on");
+    await Deno.stat(host.path(SWITCH)).then(
+      () => {
+        throw new Error("switch written despite the refusal");
+      },
+      () => {},
+    );
+  });
+});
+
+test("sftp-chroot refuses a home or parent sshd would reject as a chroot", async () => {
+  await withHost(async (host) => {
+    await newLayoutAlice(host);
+    await Deno.chmod(host.path("srv/users/alice"), 0o770);
+    let check = await host.run(["sftp-chroot", "check"]);
+    assertStringIncludes(
+      check.stdout,
+      "alice: " + host.path("srv/users/alice") + " is not a root-owned",
+    );
+
+    await Deno.chmod(host.path("srv/users/alice"), 0o750);
+    await Deno.chmod(host.path("srv/users"), 0o757);
+    check = await host.run(["sftp-chroot", "check"]);
+    assertStringIncludes(
+      check.stdout,
+      host.path("srv/users") + ": not a root-owned",
+    );
+    assertEquals(check.code === 0, false);
+  });
+});
+
+test("sftp-chroot refuses a member that also holds the shell level", async () => {
+  await withHost(async (host) => {
+    await newLayoutAlice(host, ["tpshell:x:9985:alice"]);
+    const check = await host.run(["sftp-chroot", "check"]);
+    assertEquals(check.code === 0, false);
+    assertStringIncludes(check.stdout, "alice: in both tpsftp and tpshell");
+  });
+});
+
+test("sftp-chroot accepts only check, on, off and status", async () => {
+  await withHost(async (host) => {
+    for (
+      const args of [[], ["enable"], ["on", "now"], ["status", "-v"], [
+        "--",
+        "on",
+      ]]
+    ) {
+      await refused(host, ["sftp-chroot", ...args]);
+    }
+  });
+});

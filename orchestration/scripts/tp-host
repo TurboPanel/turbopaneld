@@ -2034,6 +2034,107 @@ tp_verb_sshd() {
   tp_die "sshd: only -t or -T"
 }
 
+# --- the SFTP chroot ---------------------------------------------------------
+# The sshd drop-in jails tpsftp members at $R_PRINCIPALS/<p> only while this
+# host's switch is on. sshd refuses a login unless every component of the
+# chroot path is a root-owned directory that group and others cannot write, so
+# a member still on the tenant-owned home layout could not sign in at all.
+# `on` therefore runs the layout check first and refuses on any finding; `off`
+# is never gated, because it is the rollback.
+SFTP_GROUP="tpsftp"
+SHELL_GROUP="tpshell"
+SFTP_CHROOT_SWITCH="$R_SSHKEYS/sftp-chroot"
+
+# A directory sshd accepts as part of a chroot path.
+tp_chroot_dir_ok() {
+  [ -d "$1" ] && [ ! -L "$1" ] || return 1
+  _cd_meta="$(stat -c '%u %a' -- "$1")" || return 1
+  [ "${_cd_meta%% *}" = "$ROOT_UID" ] || return 1
+  case "${_cd_meta#* }" in
+    *[2367]?|*[2367]) return 1 ;;
+  esac
+  return 0
+}
+
+# Every directory above the homes, up to / (up to the prefix in test mode).
+tp_chroot_parents_check() {
+  _cp_dir="$R_PRINCIPALS"
+  while [ -n "$_cp_dir" ] && [ "$_cp_dir" != "$P" ]; do
+    tp_chroot_dir_ok "$_cp_dir" ||
+      echo "$_cp_dir: not a root-owned directory closed to group and world writes"
+    _cp_dir="${_cp_dir%/*}"
+  done
+  [ -n "$P" ] || tp_chroot_dir_ok / ||
+    echo "/: not a root-owned directory closed to group and world writes"
+}
+
+tp_group_members() {
+  tp_getent group "$1" | cut -d: -f4 | tr ',' '\n'
+}
+
+# One member: a principal on the new layout, and in the files-only level only.
+tp_sftp_member_check() {
+  _sm_user="$1"
+  if ! tp_is_principal "$_sm_user"; then
+    echo "$_sm_user: in $SFTP_GROUP but not a principal, so it has no home to be jailed in"
+    return 0
+  fi
+  _sm_home="$R_PRINCIPALS/$_sm_user"
+  tp_chroot_dir_ok "$_sm_home" ||
+    echo "$_sm_user: $_sm_home is not a root-owned directory closed to group and world writes"
+  # The tenant directory belongs to the principal (to the caller in test mode,
+  # which owns every file there, as ROOT_UID does for the root-owned ones).
+  _sm_uid="$(tp_uid_of "$_sm_user")"
+  [ -z "$TP_TEST" ] || _sm_uid="$CALLER_UID"
+  if [ ! -d "$_sm_home/home" ] || [ -L "$_sm_home/home" ] ||
+    [ "$(stat -c '%u' -- "$_sm_home/home")" != "$_sm_uid" ]; then
+    echo "$_sm_user: $_sm_home/home is not a directory the principal owns"
+  fi
+  tp_principal_home_ok "$(tp_getent passwd "$_sm_user" | cut -d: -f6)" "$_sm_user" ||
+    echo "$_sm_user: passwd home is not $_sm_home/home"
+  if tp_group_members "$SHELL_GROUP" | grep -qx -- "$_sm_user"; then
+    echo "$_sm_user: in both $SFTP_GROUP and $SHELL_GROUP; the jail would leave it no shell"
+  fi
+  return 0
+}
+
+# Prints one line per finding; fails if there is any.
+tp_sftp_chroot_check() {
+  _sc_out="$(
+    tp_chroot_parents_check
+    tp_group_members "$SFTP_GROUP" | while IFS= read -r _sc_user; do
+      [ -z "$_sc_user" ] || tp_sftp_member_check "$_sc_user"
+    done
+  )"
+  [ -n "$_sc_out" ] || return 0
+  printf '%s\n' "$_sc_out"
+  return 1
+}
+
+tp_verb_sftp_chroot() {
+  [ "$#" -eq 1 ] || tp_die "sftp-chroot: only check, on, off or status"
+  case "$1" in
+    status)
+      if [ -f "$SFTP_CHROOT_SWITCH" ] && [ ! -L "$SFTP_CHROOT_SWITCH" ]; then
+        echo on
+      else
+        echo off
+      fi
+      ;;
+    check) tp_sftp_chroot_check ;;
+    on)
+      tp_sftp_chroot_check >&2 ||
+        tp_die "sftp-chroot: refusing to switch on until every $SFTP_GROUP member is on the new home layout"
+      printf 'on\n' | tp_put_file "$SFTP_CHROOT_SWITCH" 0644 root root
+      ;;
+    off)
+      tp_pin_parent "$SFTP_CHROOT_SWITCH" || tp_die "no such directory for $SFTP_CHROOT_SWITCH"
+      rm -f -- "./$PIN_NAME"
+      ;;
+    *) tp_die "sftp-chroot: only check, on, off or status" ;;
+  esac
+}
+
 tp_verb_ss() {
   [ "$#" -eq 3 ] && [ "$1" = "-H" ] && [ "$2" = "-ltnp" ] && [ "$3" = "sport = :80" ] ||
     tp_die "ss: only -H -ltnp 'sport = :80'"
@@ -2561,6 +2662,7 @@ case "$_verb" in
   systemctl) tp_verb_systemctl "$@" ;;
   journalctl) tp_verb_journalctl "$@" ;;
   sshd) tp_verb_sshd "$@" ;;
+  sftp-chroot) tp_verb_sftp_chroot "$@" ;;
   ss) tp_verb_ss "$@" ;;
   sysctl) tp_verb_sysctl "$@" ;;
   iptables|ip6tables|iptables-restore|ip6tables-restore|iptables-save|ip6tables-save)

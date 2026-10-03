@@ -18,11 +18,12 @@
  * operator who is watching it happen.
  */
 
-import { dirname } from "@std/path";
+import { basename, dirname, join } from "@std/path";
 import { hostSudoArgs } from "../../permissions/host-sudo.ts";
 import { logInfo, logWarn } from "../../util/logger.ts";
 import { forEachSequential } from "../../util/sequential.ts";
 import { accessGroup } from "../../runtime/registry.ts";
+import { resolveLayout } from "../../paths/layout.ts";
 import type { RunFn, RunResult } from "../ensure-principal.ts";
 import {
   AUTHORIZED_KEYS_DIR,
@@ -31,6 +32,7 @@ import {
   isKeyFileUsername,
 } from "./authorized-keys.ts";
 import {
+  SFTP_CHROOT_SWITCH_PATH,
   SSHD_CONFIG_PATH,
   SSHD_DROPIN_PATH,
   sshdAccessRestrictions,
@@ -65,6 +67,14 @@ export type SshApplyPaths = {
    * about it is "do not delete anything".
    */
   prune?: boolean;
+  /**
+   * The host's SFTP chroot switch. Defaults to `sftp-chroot` beside the key
+   * directory, which for the default directory is
+   * {@link SFTP_CHROOT_SWITCH_PATH}.
+   */
+  sftpChrootSwitchPath?: string;
+  /** Where the principal homes (the chroots) live; defaults to the layout's. */
+  principalHomeRoot?: string;
 };
 
 export type SshApplyResult = {
@@ -74,6 +84,8 @@ export type SshApplyResult = {
   removedPrincipals: string[];
   /** True when the drop-in changed and `sshd` was reloaded. */
   sshdReloaded: boolean;
+  /** True when the drop-in jails `tpsftp` members (the host's switch is on). */
+  sftpChroot: boolean;
   /**
    * Host conditions that will stop a valid key from working and that TurboPanel
    * must not edit its way around. Surfaced, never silently repaired.
@@ -376,6 +388,39 @@ async function reconcileDropIn(
 }
 
 /**
+ * Is this host's SFTP chroot switch on, and does every `tpsftp` member still
+ * pass the layout check `tp-host sftp-chroot on` ran?
+ *
+ * Only `tp-host` turns the switch on, and only after that check passes, so the
+ * daemon never decides to jail anyone. A later finding (a member whose home
+ * drifted off the layout) keeps the jail and becomes a warning: dropping the
+ * chroot for everyone because one home is wrong would fail open, while that
+ * member's own logins fail closed until the home is fixed.
+ */
+async function readSftpChroot(
+  runFn: RunFn,
+  switchPath: string,
+): Promise<{ on: boolean; warnings: string[] }> {
+  const state = await readPrivileged(runFn, switchPath);
+  if (state?.trim() !== "on") return { on: false, warnings: [] };
+  const check = await runFn(
+    "sudo",
+    hostSudoArgs(["-n", "sftp-chroot", "check"]),
+  );
+  if (check.success) return { on: true, warnings: [] };
+  const findings = (check.stdout || check.stderr || "layout check failed")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  return {
+    on: true,
+    warnings: findings.map((finding) =>
+      `SFTP chroot is on, but ${finding}. That member cannot sign in until its home is back on the layout.`
+    ),
+  };
+}
+
+/**
  * Reconcile this host's SSH access to exactly what the payload describes.
  *
  * With `prune: true`, `principals` is the **complete** managed set for this
@@ -426,6 +471,13 @@ export async function applySshAccess(
     );
   }
 
+  const chroot = await readSftpChroot(
+    runFn,
+    paths.sftpChrootSwitchPath ??
+      join(dirname(dir), basename(SFTP_CHROOT_SWITCH_PATH)),
+  );
+  warnings.push(...chroot.warnings);
+
   const sftpGroup = accessGroup("sftp");
   const shellGroup = accessGroup("shell");
   const passwordGroup = accessGroup("password");
@@ -443,6 +495,12 @@ export async function applySshAccess(
       passwordGroup,
       principalGroup,
       authorizedKeysDir: dir,
+      ...(chroot.on
+        ? {
+          sftpChrootRoot: paths.principalHomeRoot ??
+            resolveLayout().principalHomeRoot,
+        }
+        : {}),
     }),
   );
 
@@ -460,6 +518,7 @@ export async function applySshAccess(
     changedPrincipals: changed,
     removedPrincipals: removed,
     sshdReloaded,
+    sftpChroot: chroot.on,
     warnings,
   };
 }

@@ -1096,6 +1096,11 @@ const SITES: CallSite[] = [
   tpHost('src/deploy/ssh/apply.ts|["-n","rm","-f","--",`${dir}/${name}`]', {
     argv: ["rm", "-f", "--", `${SSH_KEYS}/bob`],
   }),
+  tpHost('src/deploy/ssh/apply.ts|["-n","sftp-chroot","check"]', {
+    argv: ["sftp-chroot", "check"],
+    // alice is in tpsftp; on the new layout the check is clean.
+    setup: dir(`${P}/srv/users/alice/home`),
+  }),
   tpHost('src/deploy/ssh/apply.ts|["-n","sshd","-t"]', {
     argv: ["sshd", "-t"],
   }),
