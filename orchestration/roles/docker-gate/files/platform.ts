@@ -176,6 +176,19 @@ export const PLATFORM_EXEC_ALLOWLIST: readonly ExecAllowance[] = [
   { component: "managed-ingress", commands: ["mysql"] },
 ];
 
+/**
+ * Helper containers the daemon starts with a foreground `docker run --rm`,
+ * which always attaches (backup tar on stdout, restore, file ownership, volume
+ * bootstrap). Attach is allowed for these only; exec and archive stay refused.
+ * Mirrors `HELPER_COMPONENTS` in `src/deploy/labels.ts` (a test pins the match).
+ */
+export const PLATFORM_ATTACH_ALLOWLIST: readonly string[] = [
+  "backup-copy",
+  "backup-restore",
+  "managed-files",
+  "volume-copy",
+];
+
 const PLATFORM_ACCESS =
   /^\/containers\/[^/]+\/(exec|attach|attach\/ws|archive)$/;
 
@@ -211,8 +224,13 @@ export function platformAccessRule(
 ): string | undefined {
   const kind = PLATFORM_ACCESS.exec(path)?.[1];
   if (kind === undefined || !isPlatformContainer(labels)) return undefined;
+  if (kind === "archive") return "platform-archive";
   if (kind !== "exec") {
-    return `platform-${kind === "archive" ? "archive" : "attach"}`;
+    return PLATFORM_ATTACH_ALLOWLIST.includes(
+        labels[LABEL_SYSTEM_COMPONENT] ?? "",
+      )
+      ? undefined
+      : "platform-attach";
   }
   const command = execCommand(body);
   return PLATFORM_EXEC_ALLOWLIST.some((a) =>

@@ -1006,7 +1006,16 @@ e2e(
       },
       engine: { status: 200, labels: { "tp.managed.engine": "postgres" } },
       app: { status: 200, labels: { "com.docker.compose.project": "app" } },
+      helper: {
+        status: 200,
+        labels: {
+          "turbopanel.role": "turbopanel",
+          "com.turbopanel.system.component": "backup-copy",
+        },
+      },
     });
+    // A foreground `docker run --rm` helper attaches: not a finding.
+    await post(h, "/containers/helper/attach");
     await post(h, "/containers/proxysql/exec", '{"Cmd":["mysql","-P6032"]}');
     await post(h, "/containers/engine/exec", '{"Cmd":["pg_ctl","status"]}');
     await post(h, "/containers/app/exec", '{"Cmd":["sh"]}');
@@ -1029,7 +1038,7 @@ e2e(
       "platform-archive",
     ]);
     // Observe mode still relays every request.
-    assertEquals(relayed.length, 8);
+    assertEquals(relayed.length, 9);
   },
 );
 

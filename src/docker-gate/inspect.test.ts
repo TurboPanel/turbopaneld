@@ -4,6 +4,7 @@ import {
   BufferedReader,
   encodeText,
 } from "../../orchestration/roles/docker-gate/files/http.ts";
+import { HELPER_COMPONENTS } from "../deploy/labels.ts";
 import {
   fetchContainerLabels,
   MAX_INSPECT_BYTES,
@@ -175,6 +176,34 @@ test({
       assertEquals(ws, "platform-attach");
       const cp = rule("/containers/c/archive", labels, undefined);
       assertEquals(cp, "platform-archive");
+    }
+  },
+});
+
+test({
+  name: "platformAccessRule allows attach only on the four docker run helpers",
+  ...opts,
+  fn: () => {
+    for (const component of HELPER_COMPONENTS) {
+      const labels = {
+        "turbopanel.role": "turbopanel",
+        "com.turbopanel.system.component": component,
+      };
+      for (const path of ["attach", "attach/ws"]) {
+        assertEquals(
+          platformAccessRule(`/containers/c/${path}`, labels, undefined),
+          undefined,
+          component,
+        );
+      }
+      assertEquals(
+        platformAccessRule("/containers/c/exec", labels, { Cmd: ["sh"] }),
+        "platform-exec",
+      );
+      assertEquals(
+        platformAccessRule("/containers/c/archive", labels, undefined),
+        "platform-archive",
+      );
     }
   },
 });
