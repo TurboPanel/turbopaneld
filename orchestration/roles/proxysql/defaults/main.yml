@@ -4,6 +4,10 @@
 # client_addr ACL bypass). Both are fixed in ProxySQL 3.0.9.
 proxysql_image: proxysql/proxysql:3.0.9
 proxysql_config_dir: "{{ turbopanel_config_dir }}/proxysql"
+# Root runs the readiness script from the unit, so it lives in a root-only
+# directory, never under the daemon-writable config dir.
+proxysql_libexec_dir: "{{ turbopanel_install_root }}/libexec"
+proxysql_wait_ready_script: "{{ proxysql_libexec_dir }}/proxysql-wait-ready.sh"
 proxysql_tls_dir: "{{ proxysql_config_dir }}/tls"
 proxysql_data_dir: "{{ turbopanel_state_dir }}/proxysql"
 proxysql_service_name: turbopanel-proxysql-stack
@@ -26,3 +30,4 @@ turbopanel_state_dir: /var/lib/turbopanel  # noqa: var-naming[no-role-prefix]
 turbopanel_dev_user: ""  # noqa: var-naming[no-role-prefix]
 turbopanel_group: >-  # noqa: var-naming[no-role-prefix]
   {{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tp' }}
+turbopanel_install_root: /opt/turbopanel  # noqa: var-naming[no-role-prefix]
