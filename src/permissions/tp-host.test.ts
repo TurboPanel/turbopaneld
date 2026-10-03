@@ -435,6 +435,25 @@ test("the hosting Caddy unit passes only as tpedge with CAP_NET_BIND_SERVICE alo
         "another command",
         unit.replace(/^ExecStart=.*$/m, "ExecStart=/bin/sh -c id"),
       ],
+      // Audit P0-1: a loopback TCP admin API is reachable by every tenant.
+      [
+        "a reload through a loopback TCP admin",
+        unit.replace(/--address \S+$/m, "--address localhost:2029"),
+      ],
+      [
+        "a reload through a socket outside the runtime directory",
+        unit.replace(/--address \S+$/m, "--address unix//tmp/admin.sock"),
+      ],
+      ["no runtime directory", drop(/^RuntimeDirectory=.*\n/m)],
+      [
+        "a runtime directory the daemon owns",
+        unit.replace(/^RuntimeDirectory=.*$/m, "RuntimeDirectory=turbopanel"),
+      ],
+      ["no runtime directory mode", drop(/^RuntimeDirectoryMode=.*\n/m)],
+      [
+        "a world-traversable runtime directory",
+        unit.replace(/^RuntimeDirectoryMode=.*$/m, "RuntimeDirectoryMode=0755"),
+      ],
       [
         "a privileged pre-start",
         unit.replace("[Service]", "[Service]\nExecStartPre=+/bin/true"),

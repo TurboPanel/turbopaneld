@@ -140,8 +140,8 @@ Deno.test("the pinned Caddy accepts the grace period in every global block", asy
   await t.step("site", async () => {
     const text = globalOptions(
       (await readRole("site-caddy/templates/Caddyfile.j2")).replaceAll(
-        "{{ site_caddy_admin_addr }}",
-        "127.0.0.1:2039",
+        "{{ site_caddy_admin_socket }}",
+        "/tmp/tp-grace-test-site-admin.sock",
       ),
     );
     const result = await validate(caddy, text + MINIMAL_SITE);
