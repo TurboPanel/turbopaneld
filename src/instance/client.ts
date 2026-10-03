@@ -1,3 +1,5 @@
+import { SeenCommandIds } from "./dispatch-dedupe.ts";
+import { closeAndAbandon } from "./socket-close.ts";
 import { restartDaemonService } from "./restart-daemon-service.ts";
 import { describeUnknown } from "../util/describe-unknown.ts";
 import { redactUrlSecrets } from "../util/redact-url-secrets.ts";
@@ -427,6 +429,8 @@ export class InstanceClient {
   #loggedUnsupportedInstanceVersion: string | undefined;
   #licenseStamp: string | undefined;
   #idlePresence: IdlePresence | undefined;
+  /** Command ids already dispatched, so a repeated frame never runs twice. */
+  readonly #seenDispatchIds = new SeenCommandIds();
   #haObserver: ManagedHaObserver | undefined;
   #pgProbeObserver: PgDeadPrimaryObserver | undefined;
   #pgStandbySampler: PgStandbySampler | undefined;
@@ -1090,11 +1094,7 @@ export class InstanceClient {
     ) {
       return;
     }
-    try {
-      ws.close();
-    } catch {
-      // Socket may already be gone.
-    }
+    closeAndAbandon(ws);
     if (this.#ws === ws) this.#ws = undefined;
   }
 
@@ -1637,6 +1637,24 @@ export class InstanceClient {
         this.#echoMessage(message, ws);
         break;
       case "command-dispatch": {
+        if (this.#seenDispatchIds.seenBefore(message.id)) {
+          logWarn(
+            "instance",
+            "ignored repeated command-dispatch",
+            sanitizeForLog(message.id),
+          );
+          // Re-ack so the control plane stops waiting on an ack it missed.
+          if (ws.readyState === WebSocket.OPEN) {
+            const at = new Date().toISOString();
+            ws.send(JSON.stringify({
+              type: "command-ack",
+              id: message.id,
+              at,
+              daemonReceivedAt: at,
+            }));
+          }
+          break;
+        }
         const dispatch = this.#resolveCommandDispatch();
         if (!dispatch) {
           logWarn("instance", "command-dispatch handler not registered");
