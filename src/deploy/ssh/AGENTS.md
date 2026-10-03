@@ -84,6 +84,9 @@ additive — its `Match` block sets only `PasswordAuthentication yes` and sits
 **first** in the drop-in, because when several `Match` blocks apply `sshd`
 takes the first instance of each keyword; everything else still comes from the
 member's level block, and non-members keep the level blocks' explicit `no`.
+Because that block cannot be conditioned on a level, `resolveManagedGroups`
+never grants `tppasswd` without `tpsftp` or `tpshell` (and revokes it): a
+password group alone would sign in a no-level account with a full shell.
 The hash itself is sha512-crypt, computed control-plane side (the plaintext
 never rides the wire), applied by `ensurePrincipalPassword` in
 `ensure-principal.ts` via `chpasswd -e` over **stdin** — never argv, which

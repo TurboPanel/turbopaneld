@@ -959,7 +959,7 @@ tp_php_unit_lines() {
       } else {
         ok["Unit", "StartLimitBurst"] = 1
         ok["Unit", "StartLimitIntervalSec"] = 1
-        split("Type User Group Slice ExecStart ExecReload Environment Restart RestartSec NoNewPrivileges CapabilityBoundingSet AmbientCapabilities ProtectSystem ProtectHome PrivateDevices ProtectKernelTunables ProtectKernelModules ProtectControlGroups RestrictSUIDSGID RestrictRealtime LockPersonality BindPaths BindReadOnlyPaths TemporaryFileSystem ReadWritePaths RuntimeDirectory RuntimeDirectoryMode StandardInput StandardOutput StandardError SyslogIdentifier CPUQuota MemoryMax MemoryHigh TasksMax TimeoutStartSec TimeoutStopSec", b, " ")
+        split("Type User Group Slice ExecStart ExecReload Environment Restart RestartSec NoNewPrivileges CapabilityBoundingSet AmbientCapabilities ProtectSystem ProtectHome PrivateDevices ProtectKernelTunables ProtectKernelModules ProtectControlGroups IPAddressDeny IPAddressAllow RestrictSUIDSGID RestrictRealtime LockPersonality BindPaths BindReadOnlyPaths TemporaryFileSystem ReadWritePaths RuntimeDirectory RuntimeDirectoryMode StandardInput StandardOutput StandardError SyslogIdentifier CPUQuota MemoryMax MemoryHigh TasksMax TimeoutStartSec TimeoutStopSec", b, " ")
         for (i in b) ok["Service", b[i]] = 1
       }
       body = (kind == "socket") ? "Socket" : "Service"
@@ -1122,6 +1122,10 @@ tp_php_service_pinned_ok() {
     Service.NoNewPrivileges=*) [ "${1#*=}" = "yes" ] ;;
     Service.CapabilityBoundingSet=*|Service.AmbientCapabilities=*) [ -z "${1#*=}" ] ;;
     Service.ProtectSystem=*) [ "${1#*=}" = "strict" ] ;;
+    # Loopback, link-local, multicast, 0/8 and ULA closed (php-runtime.ts
+    # SITE_PHP_IP_DENY); only systemd-resolved's stub reopened.
+    Service.IPAddressDeny=*) [ "${1#*=}" = "localhost link-local multicast 0.0.0.0/8 fc00::/7" ] ;;
+    Service.IPAddressAllow=*) [ "${1#*=}" = "127.0.0.53" ] ;;
     Service.BindPaths=*) [ "${1#*=}" = "$_pl_home/tmp:/tmp" ] ;;
     # The daemon's config tree is tp's alone (0750); inside the unit it is an
     # empty tmpfs holding only this site's config directory, read-only.
@@ -1176,7 +1180,7 @@ tp_php_service_ok() {
   _ps_file="$1"
   _ps_site="$2"
   _ps_lines="$(tp_php_unit_lines "$_ps_file" service)" || return 1
-  for _ps_key in ExecStart BindPaths TemporaryFileSystem BindReadOnlyPaths; do
+  for _ps_key in ExecStart BindPaths TemporaryFileSystem BindReadOnlyPaths IPAddressDeny IPAddressAllow; do
     [ "$(printf '%s\n' "$_ps_lines" | grep -c "^Service\.$_ps_key=")" -le 1 ] || return 1
   done
   _ps_user="$(printf '%s\n' "$_ps_lines" | sed -n 's/^Service\.User=//p' | head -1)"
@@ -1199,7 +1203,7 @@ LINES
   [ -n "$_ps_rwtmp" ] || { printf 'tp-host: php unit: ReadWritePaths= lacks the owner tmp/\n' >&2; return 1; }
   [ "$_ps_mode" != "lsphp" ] || [ -n "$_ps_phprc" ] ||
     { printf 'tp-host: php unit: lsphp needs Environment=PHPRC=<its php.ini>\n' >&2; return 1; }
-  _ps_need="User Group Slice NoNewPrivileges CapabilityBoundingSet AmbientCapabilities ProtectSystem BindPaths TemporaryFileSystem BindReadOnlyPaths ExecStart StandardOutput StandardError"
+  _ps_need="User Group Slice NoNewPrivileges CapabilityBoundingSet AmbientCapabilities ProtectSystem IPAddressDeny BindPaths TemporaryFileSystem BindReadOnlyPaths ExecStart StandardOutput StandardError"
   case "$_ps_mode" in
     fpm) _ps_need="$_ps_need Type RuntimeDirectory RuntimeDirectoryMode" ;;
     *) _ps_need="$_ps_need StandardInput" ;;
@@ -1319,6 +1323,13 @@ tp_php_ini_ok() {
     BEGIN { ini_init() }
     /\\[ \t\r]*$/ { fail("line continuation") }
     /^[ \t]*$/ || /^[ \t]*;/ { next }
+    # [PATH=<owner home>] is the admin form php-cgi has: its directives are
+    # locked (PHP_INI_SYSTEM) for every script under the home. No other path.
+    /^\[PATH=/ {
+      section = $0; sub(/[ \t]+$/, "", section)
+      if (section != "[PATH=" home "]") fail("section " $0)
+      next
+    }
     /^\[/ { if ($0 !~ /^\[[A-Za-z]+\][ \t]*$/) fail("section " $0); next }
     {
       eq = index($0, "=")
