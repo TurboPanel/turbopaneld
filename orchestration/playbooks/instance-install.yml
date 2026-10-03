@@ -183,8 +183,10 @@
         owner: "{{ instance_user | default('tpctrl') }}"
         group: "{{ turbopanel_group | default('tp') }}"
         mode: "2770"
-        recurse: true
-        # Group-tp writable tree: re-own links themselves, never their targets.
+        # The directory only, never its contents: the tree is group-tp
+        # writable, so a root walk would chown whatever a tp member swapped in.
+        # run.sh unpacked the files as root and they are world-readable, which
+        # is all the instance needs to serve them.
         follow: false
 
     - name: Platform CA, server leaf, units and the first migration

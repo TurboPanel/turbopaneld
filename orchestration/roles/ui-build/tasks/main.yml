@@ -64,7 +64,7 @@
     curl -fsSL -o "$TMP/ui.tar.gz" "{{ turbopanel_ui_artifact_url }}"
     rm -rf "{{ turbopanel_ui_dist_dir }}"
     mkdir -p "{{ turbopanel_ui_dist_dir }}"
-    tar -xzf "$TMP/ui.tar.gz" -C "{{ turbopanel_ui_dist_dir }}"
+    tar -xzf "$TMP/ui.tar.gz" --no-same-owner -C "{{ turbopanel_ui_dist_dir }}"
     rm -rf "$TMP"
   register: _ui_cdn_build
 
@@ -76,6 +76,8 @@
     owner: "{{ instance_user }}"
     group: "{{ turbopanel_group }}"
     mode: "2770"
-    recurse: true
-    # The tree is group-tp writable: re-own links themselves, never their targets.
+    # The directory only, never its contents: the tree is group-tp writable, so
+    # a root walk would chown whatever a tp member swapped in. The publish steps
+    # above already leave the files readable (the cp -a keeps the build user's
+    # owner, the CDN tar extracts as root) and the instance only reads them.
     follow: false
