@@ -766,7 +766,10 @@ it regresses:
     refuses. `build-return <build-id>` chowns the tree back to the caller only
     once `turbopanel-build-<id>.service` is inactive; abort is
     `systemctl stop turbopanel-build-<id>.service`. `turbopanel-build-*.service`
-    unit files are refused at install;
+    unit files are refused at install. On a managed host the daemon sends
+    every native/static release build through it
+    (`src/deploy/release/build-sandbox.ts`), so no tenant build command runs
+    as `tp`;
   - brings a release into `<home>/sites/<svc>/releases/<id>` only through
     `publish-open <user> <svc> <id>` (a fresh daemon-owned leaf under
     `<principal root>/.tp-staging`, `root:tp 0710`, a class no generic verb

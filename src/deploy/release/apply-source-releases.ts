@@ -46,8 +46,27 @@ import type {
 import type { DecryptSecretsFn } from "../materialize-tls.ts";
 import type { RunFn } from "../ensure-principal.ts";
 import { dirname } from "@std/path";
-import { checkoutRelease, type ReleaseOutputHandler } from "./checkout.ts";
-import { prepareNativeAppBuildOutput, runReleaseBuild } from "./build.ts";
+import {
+  assertCheckoutCredentialsRemoved,
+  checkoutRelease,
+  type CheckoutResult,
+  type ReleaseOutputHandler,
+} from "./checkout.ts";
+import {
+  type NativeAppBuildOutput,
+  prepareNativeAppBuildOutput,
+  runReleaseBuild,
+} from "./build.ts";
+import {
+  buildSandboxEnabled,
+  type BuildSandboxMarkers,
+  buildSpecCwd,
+  type BuildWork,
+  createBuildWorkDir,
+  removeBuildWork,
+  resolveBuildWork,
+  sweepStaleBuildWork,
+} from "./build-sandbox.ts";
 import {
   nativeAppNodeBinary,
   nativeAppRuntimeGroup,
@@ -230,6 +249,15 @@ export type ApplySourceReleasesDeps = {
   ensureReleaseTreeFn?: typeof ensureReleaseTree;
   /** Test seam — defaults to {@link ensureDaemonReleaseRecordDir}. */
   ensureDaemonReleaseRecordDirFn?: typeof ensureDaemonReleaseRecordDir;
+  /**
+   * Whether native builds run in the build sandbox. Defaults to
+   * {@link buildSandboxEnabled} (every managed host).
+   */
+  sandboxedBuilds?: boolean;
+  /** Test seam — the root-owned facts {@link buildSandboxEnabled} checks. */
+  buildSandboxMarkers?: BuildSandboxMarkers;
+  /** Test seam — the build-user role's tree (`/var/lib/turbopanel-build`). */
+  buildSandboxRoot?: string;
 };
 
 /**
@@ -574,6 +602,7 @@ async function checkoutForEntry(
   paths: ReleasePaths,
   deps: ApplySourceReleasesDeps,
   onOutput: ReleaseOutputHandler,
+  checkoutDir?: string,
 ) {
   const credential = await decryptCloneCredential(
     entry.credential,
@@ -584,6 +613,7 @@ async function checkoutForEntry(
     ref: entry.ref,
     commitSha: entry.commitSha,
     scratchDir: paths.scratchDir,
+    checkoutDir,
     onOutput,
     redactSummary: (text: string) => deps.logSink.redactSummary(text),
     credential,
@@ -668,7 +698,6 @@ async function buildNativeRelease(
 ): Promise<AppliedRelease> {
   const { deps, onOutput, serviceId, username } = params;
   const { logSink } = deps;
-  const nativeApp = nativeAppForService(payload, entry.composeServiceName);
 
   await (deps.ensureReleaseTreeFn ?? ensureReleaseTree)(
     paths,
@@ -676,48 +705,26 @@ async function buildNativeRelease(
     deps.runFn,
   );
   await resetReleaseScratchDir(paths);
+  let work: BuildWork | null = null;
   try {
+    work = await prepareBuildWork(payload, entry, serviceId, deps);
     logSink.setPhase(COMMAND_LOG_PHASES.FETCH);
-    const checkout = await checkoutForEntry(entry, paths, deps, onOutput);
+    const checkout = await checkoutForEntry(
+      entry,
+      paths,
+      deps,
+      onOutput,
+      work?.checkoutDir,
+    );
 
     logSink.setPhase(COMMAND_LOG_PHASES.BUILD);
-    const buildWorkingDir = buildWorkingDirFor(entry, checkout.workingDir);
-    await (deps.runReleaseBuildFn ?? runReleaseBuild)(definedFields({
-      build: entry.build,
-      workingDir: buildWorkingDir,
-      // A native app builds with its own runtime on PATH and its declared
-      // NODE_ENV, so the derived install command and the build both run on
-      // the series the app will execute on.
-      nativeRuntime: nativeApp
-        ? definedFields({
-          nodeBinDir: dirname(nativeAppNodeBinary(
-            layout,
-            resolveNativeAppNodeVersion(nativeApp),
-          )),
-          nodeEnv: nativeApp.appMode ?? "production",
-          runtimeGroup: nativeAppRuntimeGroup(
-            resolveNativeAppNodeVersion(nativeApp),
-          ),
-        })
-        : undefined,
+    if (work) await assertCheckoutCredentialsRemoved(paths.scratchDir);
+    const nativeOutput = await buildNativeTree(layout, payload, entry, {
+      checkout,
+      work,
+      deps,
       onOutput,
-      redactSummary: (text: string) => logSink.redactSummary(text),
-    }));
-
-    // An operator-declared `outputDirectory` always wins: they said where the
-    // payload is, and second-guessing that would make the field a suggestion.
-    const nativeOutput = nativeApp && entry.build.outputDirectory === undefined
-      ? await (deps.prepareNativeAppBuildOutputFn ??
-        prepareNativeAppBuildOutput)({
-          framework: nativeApp.framework,
-          workingDir: buildWorkingDir,
-          onOutput,
-        })
-      : {
-        standaloneOutput: false as boolean,
-        staticExport: false as boolean,
-        outputDirectory: undefined,
-      };
+    });
 
     logSink.setPhase(COMMAND_LOG_PHASES.RELEASE_PROMOTE);
     const previousReleaseId = await readCurrentReleaseId(paths, deps.runFn);
@@ -746,6 +753,7 @@ async function buildNativeRelease(
         subdirectory: entry.subdirectory,
         outputDirectory: entry.build.outputDirectory ??
           nativeOutput.outputDirectory,
+        containmentRoot: work?.workDir,
         runFn: deps.runFn,
       }),
     );
@@ -777,8 +785,96 @@ async function buildNativeRelease(
       staticExport: nativeOutput.staticExport,
     });
   } finally {
+    if (work) await removeBuildWork(work, onOutput);
     await removeReleaseScratchDir(paths);
   }
+}
+
+/**
+ * The sandbox work tree for a native build, created empty for the clone, or
+ * `null` where builds run unsandboxed (a development install).
+ */
+async function prepareBuildWork(
+  payload: EnvironmentDeployPayload,
+  entry: EnvironmentDeploySource,
+  serviceId: string,
+  deps: ApplySourceReleasesDeps,
+): Promise<BuildWork | null> {
+  const sandboxed = deps.sandboxedBuilds ??
+    await buildSandboxEnabled(deps.buildSandboxMarkers);
+  if (!sandboxed) return null;
+  await sweepStaleBuildWork(deps.buildSandboxRoot, {
+    runFn: deps.runFn,
+    onOutput: (stream, line) => deps.logSink.onLine(stream, line),
+  });
+  const work = await resolveBuildWork(
+    { serviceId, releaseId: entry.releaseId, projectId: payload.projectId },
+    deps.buildSandboxRoot,
+  );
+  await createBuildWorkDir(work, deps.runFn);
+  return work;
+}
+
+/**
+ * Run the build (sandboxed when `work` is set), then decide what the release
+ * payload is. Only after the sandbox handed the tree back does anything here
+ * read it.
+ */
+async function buildNativeTree(
+  layout: LayoutPaths,
+  payload: EnvironmentDeployPayload,
+  entry: EnvironmentDeploySource,
+  params: {
+    checkout: CheckoutResult;
+    work: BuildWork | null;
+    deps: ApplySourceReleasesDeps;
+    onOutput: ReleaseOutputHandler;
+  },
+): Promise<NativeAppBuildOutput> {
+  const { checkout, work, deps, onOutput } = params;
+  const nativeApp = nativeAppForService(payload, entry.composeServiceName);
+  const buildWorkingDir = buildWorkingDirFor(entry, checkout.workingDir);
+  await (deps.runReleaseBuildFn ?? runReleaseBuild)(definedFields({
+    build: entry.build,
+    workingDir: buildWorkingDir,
+    // A native app builds with its own runtime on PATH and its declared
+    // NODE_ENV, so the derived install command and the build both run on
+    // the series the app will execute on.
+    nativeRuntime: nativeApp
+      ? definedFields({
+        nodeBinDir: dirname(nativeAppNodeBinary(
+          layout,
+          resolveNativeAppNodeVersion(nativeApp),
+        )),
+        nodeEnv: nativeApp.appMode ?? "production",
+        runtimeGroup: nativeAppRuntimeGroup(
+          resolveNativeAppNodeVersion(nativeApp),
+        ),
+      })
+      : undefined,
+    sandbox: work
+      ? definedFields({
+        work,
+        cwd: buildSpecCwd(entry.subdirectory),
+        runFn: deps.runFn,
+      })
+      : undefined,
+    onOutput,
+    redactSummary: (text: string) => deps.logSink.redactSummary(text),
+  }));
+
+  // An operator-declared `outputDirectory` always wins: they said where the
+  // payload is, and second-guessing that would make the field a suggestion.
+  if (!nativeApp || entry.build.outputDirectory !== undefined) {
+    return { standaloneOutput: false, staticExport: false };
+  }
+  return await (deps.prepareNativeAppBuildOutputFn ??
+    prepareNativeAppBuildOutput)(definedFields({
+      framework: nativeApp.framework,
+      workingDir: buildWorkingDir,
+      containmentRoot: work?.workDir,
+      onOutput,
+    }));
 }
 
 async function applyOneRelease(
