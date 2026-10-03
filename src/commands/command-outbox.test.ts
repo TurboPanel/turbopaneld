@@ -95,3 +95,42 @@ test("a still-running command is not reported interrupted on reconnect", async (
     assertEquals(open.sent.length, 0);
   });
 });
+
+test("a command that finishes after a reconnect during the run is sent on the new socket", async () => {
+  await withState(async () => {
+    await markCommandInFlight("cmd-5");
+    const oldWs = socket(WebSocket.OPEN);
+    oldWs.ws.readyState = WebSocket.CLOSED; // dropped while the command ran
+    const fresh = socket(WebSocket.OPEN);
+    await flushCommandOutcomes(fresh.ws); // reconnect: command still running
+    assertEquals(fresh.sent.length, 0);
+    await deliverCommandOutcome(oldWs.ws, {
+      type: "command-outcome",
+      id: "cmd-5",
+      ok: true,
+    });
+    assertEquals(oldWs.sent.length, 0);
+    assertEquals(fresh.sent.map((m) => [m.id, m.ok]), [["cmd-5", true]]);
+    assertEquals(await journalNames(), []);
+  });
+});
+
+test("a held outcome survives a daemon kill and is answered from the journal", async () => {
+  await withState(async () => {
+    await markCommandInFlight("cmd-6");
+    const closed = socket(WebSocket.CLOSED);
+    await deliverCommandOutcome(closed.ws, {
+      type: "command-outcome",
+      id: "cmd-6",
+      ok: true,
+      result: { done: 1 },
+    });
+    resetCommandOutboxForTests(); // daemon killed before any reconnect
+    const open = socket(WebSocket.OPEN);
+    await flushCommandOutcomes(open.ws);
+    assertEquals(open.sent.length, 1);
+    assertEquals(open.sent[0].ok, true);
+    assertEquals(open.sent[0].result, { done: 1 });
+    assertEquals(await journalNames(), []);
+  });
+});

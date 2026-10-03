@@ -8,8 +8,8 @@
  * Now an outcome that cannot be sent is held and delivered when the next
  * session attaches. Each acknowledged command is also journaled on disk until
  * its outcome has been sent; a journal entry left behind by a killed daemon is
- * answered on the next attach with a failed outcome that says the command was
- * interrupted, instead of letting it time out with no explanation.
+ * answered on the next attach with its journaled final outcome, or, if none was
+ * recorded, a failed outcome that says the command was interrupted, instead of letting it time out with no explanation.
  */
 import { join } from "@std/path";
 import { resolveLayout } from "../paths/layout.ts";
@@ -28,6 +28,8 @@ const UNSAFE_ID = /[^A-Za-z0-9_-]/;
 
 const held = new Map<string, OutcomeMessage>();
 const running = new Set<string>();
+/** The most recently attached session socket; it outlives any one command. */
+let currentSocket: OutboxSocket | undefined;
 
 function journalDir(): string {
   return join(
@@ -66,18 +68,66 @@ export async function markCommandInFlight(id: string): Promise<void> {
   }
 }
 
-/** Send `outcome` now, or hold it for the next session when `ws` is not open. */
+async function journalOutcome(outcome: OutcomeMessage): Promise<void> {
+  const file = journalFile(outcome.id);
+  if (!file) return;
+  try {
+    await Deno.mkdir(journalDir(), { recursive: true, mode: 0o750 });
+    await Deno.writeTextFile(
+      file,
+      JSON.stringify({ id: outcome.id, outcome }),
+      {
+        mode: 0o640,
+      },
+    );
+  } catch (err) {
+    logWarn("commands", `outcome journal write failed: ${err}`);
+  }
+}
+
+function trySend(ws: OutboxSocket | undefined, message: object): boolean {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+  try {
+    ws.send(JSON.stringify(message));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Journal the final outcome, then send it on the live session socket (the one
+ * attached most recently, which may be newer than `ws` if the daemon
+ * reconnected while the command ran), falling back to `ws`. When neither is
+ * open the outcome is held for the next attach.
+ */
 export async function deliverCommandOutcome(
   ws: OutboxSocket,
   outcome: OutcomeMessage,
 ): Promise<void> {
   running.delete(outcome.id);
-  if (ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify(outcome));
+  await journalOutcome(outcome);
+  if (trySend(currentSocket, outcome) || trySend(ws, outcome)) {
     await removeJournal(outcome.id);
     return;
   }
   held.set(outcome.id, outcome);
+}
+
+async function readJournaledOutcome(
+  id: string,
+): Promise<OutcomeMessage | undefined> {
+  const file = journalFile(id);
+  if (!file) return undefined;
+  try {
+    const parsed = JSON.parse(await Deno.readTextFile(file));
+    const outcome = parsed?.outcome;
+    return outcome?.type === "command-outcome" && outcome.id === id
+      ? outcome
+      : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -85,10 +135,11 @@ export async function deliverCommandOutcome(
  * are neither running nor held (their daemon died mid-command) as interrupted.
  */
 export async function flushCommandOutcomes(ws: OutboxSocket): Promise<void> {
+  currentSocket = ws;
   const sent: string[] = [];
   for (const [id, outcome] of held) {
     if (ws.readyState !== WebSocket.OPEN) break;
-    ws.send(JSON.stringify({ ...outcome, at: new Date().toISOString() }));
+    if (!trySend(ws, { ...outcome, at: new Date().toISOString() })) break;
     held.delete(id);
     sent.push(id);
   }
@@ -110,7 +161,10 @@ export async function flushCommandOutcomes(ws: OutboxSocket): Promise<void> {
   for (const id of orphans) {
     if (ws.readyState !== WebSocket.OPEN) break;
     const now = new Date().toISOString();
-    ws.send(JSON.stringify({
+    // A final outcome journaled before the daemon died is the real answer;
+    // only a command with no recorded outcome was truly interrupted.
+    const journaled = await readJournaledOutcome(id);
+    const reply = journaled ? { ...journaled, at: now } : {
       type: "command-outcome",
       id,
       ok: false,
@@ -118,7 +172,8 @@ export async function flushCommandOutcomes(ws: OutboxSocket): Promise<void> {
         "The daemon restarted while this command was running; the host may be partly changed. Run it again.",
       at: now,
       daemonRespondedAt: now,
-    }));
+    };
+    if (!trySend(ws, reply)) break;
     answered.push(id);
   }
   await Promise.all(answered.map(removeJournal));
@@ -128,4 +183,5 @@ export async function flushCommandOutcomes(ws: OutboxSocket): Promise<void> {
 export function resetCommandOutboxForTests(): void {
   held.clear();
   running.clear();
+  currentSocket = undefined;
 }
