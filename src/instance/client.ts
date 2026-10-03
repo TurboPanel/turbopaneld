@@ -194,6 +194,8 @@ export type CommandPorts = {
   handleCommandDispatch?: CommandDispatchHandler;
   handleFabricPathProbe?: FabricPathProbeHandler;
   handleDrivetempEnable?: DrivetempEnableHandler;
+  /** Runs when a session attaches: delivers held command outcomes. */
+  handleSessionAttach?: (ws: WebSocket) => Promise<void>;
 };
 
 let commandPorts: CommandPorts = {};
@@ -561,6 +563,10 @@ export class InstanceClient {
   }
 
   async #afterAttachVersion(ws: WebSocket): Promise<void> {
+    const sessionAttach = commandPorts.handleSessionAttach;
+    if (sessionAttach) {
+      this.#runSocketHandler("session-attach", sessionAttach(ws));
+    }
     const pending = this.#pendingInstanceUpdateResult;
     if (pending && ws.readyState === WebSocket.OPEN) {
       this.#pendingInstanceUpdateResult = null;
