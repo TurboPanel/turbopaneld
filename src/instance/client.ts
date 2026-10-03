@@ -1526,7 +1526,9 @@ export class InstanceClient {
       existingServerId: this.#metricsSchedulerServerId,
       serverId,
       collectorFactory: this.#metricsCollectorFactory,
-      schedulerOptions: {},
+      schedulerOptions: {
+        durabilityFlag: () => this.instanceSupports("metrics-v7"),
+      },
     });
     this.#metricsScheduler = rebound.scheduler;
     this.#metricsSchedulerServerId = rebound.serverId;

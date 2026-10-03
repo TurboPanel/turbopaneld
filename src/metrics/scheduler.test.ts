@@ -342,6 +342,7 @@ function makeScheduler(options: {
   jitterMaxMs?: number;
   primeMs?: number;
   logRateLimitMs?: number;
+  durabilityFlag?: () => boolean;
   onLog?: (level: "info" | "warn", message: string) => void;
 }): MetricsScheduler {
   return new MetricsScheduler({
@@ -359,6 +360,7 @@ function makeScheduler(options: {
     clearIntervalFn: options.clock
       .clearIntervalFn as unknown as typeof clearInterval,
     logRateLimitMs: options.logRateLimitMs,
+    durabilityFlag: options.durabilityFlag,
     onLog: options.onLog,
   });
 }
@@ -1134,4 +1136,50 @@ it({
     assertEquals(typeof primed[1].host.cpu.busyPercent, "number");
     assertEquals(primed[1].host.cpu.busyPercent !== null, true);
   },
+});
+
+it("v7 live stream runs beside the baseline on its own collector; only the baseline is durable", async () => {
+  const clock = new FakeClock();
+  const sent: unknown[] = [];
+  let collectors = 0;
+  const scheduler = makeScheduler({
+    clock,
+    intervalMs: 60_000,
+    durabilityFlag: () => true,
+    collectorFactory: () => {
+      collectors += 1;
+      return createFakeCollector((sequence) => supportedSample(sequence));
+    },
+  });
+  scheduler.attach(capturingSink(sent));
+  await clock.advance(0);
+  scheduler.setStreamIntervalMs(10_000);
+  await clock.advance(60_000);
+  const flags = sent.map((s) =>
+    (s as { metadata: { durable?: boolean } }).metadata.durable
+  );
+  assertEquals(collectors, 2);
+  assertEquals(flags.filter((d) => d === true).length, 2);
+  assertEquals(flags.filter((d) => d === false).length, 7);
+  scheduler.setStreamIntervalMs(null);
+  sent.length = 0;
+  await clock.advance(60_000);
+  assertEquals(sent.length, 1);
+});
+
+it("closed durability flag leaves samples unflagged and no stream collector", async () => {
+  const clock = new FakeClock();
+  const sent: unknown[] = [];
+  const scheduler = makeScheduler({
+    clock,
+    collectorFactory: () =>
+      createFakeCollector((sequence) => supportedSample(sequence)),
+  });
+  scheduler.attach(capturingSink(sent));
+  await clock.advance(0);
+  assertEquals(scheduler.splitsLiveStream(), false);
+  assertEquals(
+    (sent[0] as { metadata: { durable?: boolean } }).metadata.durable,
+    undefined,
+  );
 });

@@ -238,3 +238,25 @@ it("full 10s live session against a real scheduler-shaped stub", () => {
     METRICS_INTERVAL_MS,
   ]);
 });
+
+it("under the v7 wire a lease keeps the baseline cadence and starts the stream sampler", () => {
+  const clock = new FakeClock(1_000);
+  const intervals: number[] = [];
+  const streams: Array<number | null> = [];
+  const manager = new LiveLeaseManager({
+    scheduler: {
+      setIntervalMs: (ms) => intervals.push(ms),
+      splitsLiveStream: () => true,
+      setStreamIntervalMs: (ms) => streams.push(ms),
+    },
+    now: clock.now,
+    setTimeoutFn: clock.setTimeoutFn as unknown as typeof setTimeout,
+    clearTimeoutFn: clock.clearTimeoutFn as unknown as typeof clearTimeout,
+  });
+  manager.start("a", 100_000);
+  assertEquals(intervals.at(-1), METRICS_INTERVAL_MS);
+  assertEquals(streams.at(-1), LIVE_METRICS_INTERVAL_MS);
+  manager.stop("a");
+  assertEquals(intervals.at(-1), METRICS_INTERVAL_MS);
+  assertEquals(streams.at(-1), null);
+});
