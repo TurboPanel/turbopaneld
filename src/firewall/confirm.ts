@@ -11,6 +11,7 @@
  * from outside that the host is reachable.
  */
 
+import { ensureDaemonDir } from "../permissions/daemon-files.ts";
 import { join } from "@std/path";
 import { type LayoutPaths, resolveLayout } from "../paths/layout.ts";
 import { logInfo } from "../util/logger.ts";
@@ -53,7 +54,7 @@ async function promoteDurable(
   v6: "replace" | "forget" | "keep",
   v4Document: string,
 ): Promise<void> {
-  await Deno.mkdir(layout.configDir, { recursive: true });
+  await ensureDaemonDir(layout.configDir, 0o755);
   await writeFileAtomic(
     join(layout.configDir, FIREWALL_V4_FILENAME),
     v4Document,

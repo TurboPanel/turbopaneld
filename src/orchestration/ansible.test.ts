@@ -2439,7 +2439,7 @@ test("docker role merges daemon.json address pools and live-restore, skipping th
   // outage risk, not just a database blip.
   assertEquals(
     handlers.includes(
-      "when: not (_docker_colocated_instance_host | default(false) | bool)",
+      "when: not (_docker_restart_deferred | default(true) | bool)",
     ),
     true,
   );
@@ -2631,6 +2631,44 @@ test("docker role denies the network.host and security.insecure build entitlemen
   );
 });
 
+test("daemon-converge re-applies only the builder entitlement deny to already-provisioned Docker hosts", async () => {
+  const roleDir = join(CHECKOUT_ORCHESTRATION_DIR, "roles/docker");
+  const converge = await Deno.readTextFile(
+    join(CHECKOUT_ORCHESTRATION_DIR, "playbooks/daemon-converge.yml"),
+  );
+  const entry = await Deno.readTextFile(
+    join(roleDir, "tasks/converge-builder.yml"),
+  );
+  const daemonJson = await Deno.readTextFile(
+    join(roleDir, "tasks/daemon-json.yml"),
+  );
+  const defaults = await Deno.readTextFile(join(roleDir, "defaults/main.yml"));
+  // The converge runs the entry file, ahead of the gate, never the whole role.
+  assertEquals(
+    /- role: docker\n\s+tasks_from: converge-builder\n\s+- role: docker-gate/
+      .test(converge),
+    true,
+  );
+  assertEquals(entry.includes("turbopanel_docker_builder_only: true"), true);
+  assertEquals(entry.includes("/usr/bin/docker"), true);
+  // It reads the file back and refuses to pass if the deny is not on disk.
+  assertEquals(entry.includes("['network-host'] == false"), true);
+  assertEquals(entry.includes("['security-insecure'] == false"), true);
+  // Builder-only mode leaves pools, bip and live-restore as found.
+  assertEquals(
+    daemonJson.includes("when: turbopanel_docker_builder_only | bool"),
+    true,
+  );
+  assertEquals(
+    daemonJson.includes("when: not (turbopanel_docker_builder_only | bool)"),
+    true,
+  );
+  assertEquals(
+    defaults.includes("turbopanel_docker_builder_only: false"),
+    true,
+  );
+});
+
 test("a co-located instance host gets a pending dockerd restart, applied once live-restore is running", async () => {
   const roleDir = join(CHECKOUT_ORCHESTRATION_DIR, "roles/docker");
   const daemonJson = await Deno.readTextFile(
@@ -2645,7 +2683,7 @@ test("a co-located instance host gets a pending dockerd restart, applied once li
   );
   for (
     const name of [
-      "Mark a dockerd restart pending on a co-located instance host",
+      "Mark a dockerd restart pending when the restart is deferred",
       "Ask the running dockerd whether live-restore is in effect",
       "Restart dockerd now that live-restore keeps containers running",
       "Clear the pending dockerd restart",
@@ -2659,6 +2697,89 @@ test("a co-located instance host gets a pending dockerd restart, applied once li
     true,
   );
   assertEquals(daemonJson.includes(".LiveRestoreEnabled"), true);
+});
+
+async function runDockerRestartGate(
+  vars: Record<string, unknown>,
+  dockerInfoOutput: string | null,
+): Promise<boolean> {
+  const dir = await Deno.makeTempDir();
+  try {
+    const bin = join(dir, "bin");
+    await Deno.mkdir(bin);
+    // Stand-in `docker info --format {{.LiveRestoreEnabled}}`; null = docker
+    // cannot answer (no daemon). Listed first on PATH so a real docker on the
+    // runner is never consulted.
+    await Deno.writeTextFile(
+      join(bin, "docker"),
+      dockerInfoOutput === null
+        ? "#!/bin/sh\nexit 1\n"
+        : `#!/bin/sh\necho ${dockerInfoOutput}\n`,
+      { mode: 0o755 },
+    );
+    const gate = join(
+      CHECKOUT_ORCHESTRATION_DIR,
+      "roles/docker/tasks/restart-gate.yml",
+    );
+    await Deno.writeTextFile(
+      join(dir, "play.yml"),
+      `- hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - ansible.builtin.include_tasks: ${gate}
+    - ansible.builtin.debug:
+        msg: "DEFERRED={{ _docker_restart_deferred | bool }}"
+`,
+    );
+    await Deno.writeTextFile(join(dir, "vars.json"), JSON.stringify(vars));
+    const out = await new Deno.Command("ansible-playbook", {
+      args: ["-e", `@${join(dir, "vars.json")}`, join(dir, "play.yml")],
+      env: { PATH: `${bin}:${Deno.env.get("PATH") ?? ""}` },
+      stdout: "piped",
+      stderr: "piped",
+    }).output();
+    const text = new TextDecoder().decode(out.stdout);
+    assert(out.success, text + new TextDecoder().decode(out.stderr));
+    return text.includes("DEFERRED=True");
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+}
+
+let ansibleAvailable = false;
+try {
+  ansibleAvailable =
+    (await new Deno.Command("ansible-playbook", { args: ["--version"] })
+      .output()).success;
+} catch { /* ansible not installed: the gating test is skipped */ }
+
+Deno.test({
+  name:
+    "daemon.json restart gate defers the dockerd restart unless it is live-restored",
+  ignore: !ansibleAvailable,
+  fn: async () => {
+    const full = { turbopanel_docker_builder_only: false };
+    const builder = { turbopanel_docker_builder_only: true };
+    const colo = (v: Record<string, unknown>) => ({
+      ...v,
+      _docker_colocated_instance_host: true,
+    });
+    const plain = (v: Record<string, unknown>) => ({
+      ...v,
+      _docker_colocated_instance_host: false,
+    });
+    // Full role run enforces live-restore itself: restart allowed.
+    assertEquals(await runDockerRestartGate(plain(full), null), false);
+    // Co-located instance host is always deferred.
+    assertEquals(await runDockerRestartGate(colo(full), null), true);
+    assertEquals(await runDockerRestartGate(colo(builder), "true"), true);
+    // Builder-only: restart only when the running dockerd is live-restored.
+    assertEquals(await runDockerRestartGate(plain(builder), "true"), false);
+    assertEquals(await runDockerRestartGate(plain(builder), "false"), true);
+    // No daemon.json / docker info failing or empty: deferred.
+    assertEquals(await runDockerRestartGate(plain(builder), null), true);
+  },
 });
 
 test("principal-access creates every SSH access group the registry defines", async () => {
