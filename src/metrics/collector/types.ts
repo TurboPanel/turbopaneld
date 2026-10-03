@@ -26,9 +26,9 @@ export type MetricsCollectResult =
     supported: true;
     sample: MetricsSample;
     /**
-     * v7 semantic fields not yet part of the wire contract (container health,
-     * Traefik backends); the packer consumes them once `metrics-v7` lands.
-     * Absent when Docker is not readable.
+     * The container health reading behind `sample.extended.docker` (and its
+     * unhealthy-name text), kept for callers that want the raw sample. Absent
+     * when Docker is not readable.
      */
     containers?: ContainerHealthSample;
   }

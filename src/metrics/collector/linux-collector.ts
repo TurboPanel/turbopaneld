@@ -102,6 +102,7 @@ import {
   type VmstatRates,
   vmstatRates,
 } from "./parse-vmstat.ts";
+import { buildCollectedExtended, mergeExtended } from "./extended-v7.ts";
 import { type HostTextSample, hostTextToExtended } from "./host-text.ts";
 import type {
   CollectorDeps,
@@ -943,25 +944,27 @@ export class LinuxMetricsCollector implements MetricsCollector {
     };
     const hostText = await this.#readHostText();
     const containerReading = this.#deps.containers?.() ?? null;
+    const containers = containerReading
+      ? toContainerHealthSample(containerReading, this.#tracker, bootGeneration)
+      : undefined;
+    // Everything v7 adds rides in the contract's `extended` block: host text,
+    // container health, Docker reclaimable bytes, TLS expiry and the largest
+    // sites. The scheduler strips `extended` (and stamps v6) unless metrics-v7
+    // is negotiated. Added after plan truncation, so no plan gates it.
+    const extended = mergeExtended(
+      outgoing.extended,
+      hostText ? hostTextToExtended(hostText) : undefined,
+      buildCollectedExtended({
+        containers,
+        dockerUsage: dockerUsageReading?.usage,
+        tlsExpiry: this.#deps.tlsExpiry?.(),
+        topSites: directoryUsage?.topSites,
+      }),
+    );
     return {
       supported: true,
-      // Host text rides in the contract's `extended` block (v7 only; the
-      // scheduler strips `extended` unless metrics-v7 is negotiated).
-      sample: hostText
-        ? {
-          ...outgoing,
-          extended: { ...outgoing.extended, ...hostTextToExtended(hostText) },
-        }
-        : outgoing,
-      ...(containerReading
-        ? {
-          containers: toContainerHealthSample(
-            containerReading,
-            this.#tracker,
-            bootGeneration,
-          ),
-        }
-        : {}),
+      sample: extended ? { ...outgoing, extended } : outgoing,
+      ...(containers ? { containers } : {}),
     };
   }
 
