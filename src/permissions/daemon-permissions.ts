@@ -39,6 +39,13 @@ import {
 } from "../paths/layout.ts";
 
 const VENDOR = PROD_RUNTIME_DIR_DEFAULT;
+/**
+ * The build-user role's tree (`BUILD_SANDBOX_ROOT` in
+ * `src/deploy/release/build-sandbox.ts`, pinned in tp-host): the daemon
+ * creates `work/<id>`, clones into it, and reads and removes it once
+ * `tp-host build-return` has handed it back.
+ */
+const BUILD_SANDBOX_ROOT = "/var/lib/turbopanel-build";
 const PRINCIPAL_HOME_ROOT = "/srv/users";
 /**
  * The Docker gate's socket directory (`orchestration/roles/docker-gate`):
@@ -126,6 +133,7 @@ export const DAEMON_READ_PATHS: readonly string[] = [
   PROD_HOME_DEFAULT,
   PROD_CONFIG_DIR_DEFAULT,
   PROD_STATE_DIR_DEFAULT,
+  BUILD_SANDBOX_ROOT,
   PROD_LOG_DIR_DEFAULT,
   PROD_RUN_DIR_DEFAULT,
   PROD_BACKUP_DIR_DEFAULT,
@@ -170,6 +178,7 @@ export const DAEMON_READ_PATHS: readonly string[] = [
 export const DAEMON_WRITE_PATHS: readonly string[] = [
   PROD_CONFIG_DIR_DEFAULT,
   PROD_STATE_DIR_DEFAULT,
+  BUILD_SANDBOX_ROOT,
   PROD_LOG_DIR_DEFAULT,
   PROD_RUN_DIR_DEFAULT,
   PROD_BACKUP_DIR_DEFAULT,
@@ -234,7 +243,6 @@ export const DAEMON_RUN_PROGRAMS: readonly string[] = [
   "openssl",
   "/usr/bin/openssl",
   "/usr/bin/env",
-  "/usr/bin/prlimit",
   // containers and image builds
   "docker",
   "/usr/bin/docker",

@@ -164,6 +164,8 @@ import {
   principalHomePath,
   resolveLayout,
   siteCurrentSymlink,
+  siteSharedDir,
+  siteWebrootDir,
 } from "../paths/layout.ts";
 
 const SAFE_PATH_ID_RE = /^[A-Za-z0-9_-]+$/;
@@ -1120,6 +1122,34 @@ async function persistComposeEnvFile(
  * `applyCronJobs` call would treat the first lane's timers as stale and remove
  * the ones it had just installed.
  */
+/**
+ * What a site's cron job may write besides the principal's `home/`, `data/`
+ * and `tmp/`: `shared/` in the release lane, `webroot/` and `shared/` in the
+ * managed lane, nothing for a tree outside the principal's home.
+ */
+export function siteCronWritableDirs(
+  layout: Pick<LayoutPaths, "principalHomeRoot">,
+  release: SiteRelease | undefined,
+  managed: SiteManagedDirectory | undefined,
+): string[] {
+  if (release) {
+    return [
+      siteSharedDir(
+        principalHomePath(layout, release.username),
+        release.serviceId,
+      ),
+    ];
+  }
+  if (managed) {
+    const home = principalHomePath(layout, managed.username);
+    return [
+      siteWebrootDir(home, managed.serviceId),
+      siteSharedDir(home, managed.serviceId),
+    ];
+  }
+  return [];
+}
+
 async function applyDeployCronJobs(
   layout: LayoutPaths,
   parsedPayload: EnvironmentDeployPayload,
@@ -1145,6 +1175,11 @@ async function applyDeployCronJobs(
         releaseBindings.get(site.composeServiceName),
         managedBindings.get(site.composeServiceName),
       ),
+      siteWritableDirs: siteCronWritableDirs(
+        layout,
+        releaseBindings.get(site.composeServiceName),
+        managedBindings.get(site.composeServiceName),
+      ),
       jobs: site.cron,
     });
   }
@@ -1164,6 +1199,12 @@ async function applyDeployCronJobs(
         principalHomePath(layout, binding.username),
         app.serviceId,
       ),
+      siteWritableDirs: [
+        siteSharedDir(
+          principalHomePath(layout, binding.username),
+          app.serviceId,
+        ),
+      ],
       username: binding.username,
       jobs: app.cron,
     });

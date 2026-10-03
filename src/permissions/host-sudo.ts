@@ -51,6 +51,8 @@ export const TP_HOST_VERBS: ReadonlySet<string> = new Set([
   "chpasswd",
   "getent",
   "modprobe",
+  "build-run",
+  "build-return",
   "php-test",
 ]);
 
