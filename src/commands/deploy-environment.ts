@@ -1614,13 +1614,16 @@ async function deployContainerServices(
     assertNoReservedOwnerLabels(resolved.document ?? {});
     // Build options no deploy may carry (host network, privileges, SSH agent,
     // internal extra_hosts or remote contexts, secret files outside); no
-    // approval reaches these. Build paths are confined just below.
+    // approval reaches these, bar a public remote context the organization
+    // allowed (`remoteBuildSourcesApproved`). Build paths are confined just below.
     const daemonSecretNames = new Set(
       (parsedPayload.secretPlan ?? []).map((e) => e.source),
     );
     assertComposeBuildPolicy(resolved.document ?? {}, {
       stageDir,
       exemptSecretNames: daemonSecretNames,
+      remoteBuildSourcesApproved:
+        parsedPayload.remoteBuildSourcesApproved === true,
     });
     // The control plane's host-level gate is lexical; only the host can see
     // where a bind source really resolves. `hostLevelApproved` (absent reads
