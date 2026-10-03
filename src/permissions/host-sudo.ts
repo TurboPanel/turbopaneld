@@ -50,6 +50,8 @@ export const TP_HOST_VERBS: ReadonlySet<string> = new Set([
   "chpasswd",
   "getent",
   "modprobe",
+  "publish-open",
+  "publish",
 ]);
 
 export type HostSudoOptions = Parameters<typeof playbooksNeedRootHelper>[0] & {

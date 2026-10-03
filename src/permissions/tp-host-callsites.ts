@@ -76,6 +76,7 @@ const STATE = `${P}/var/lib/turbopanel`;
 const HOME = `${P}/srv/users/alice`;
 const SITE = `${HOME}/sites/svc1`;
 const RELEASE = `${SITE}/releases/20260927-120000`;
+const STAGING = `${P}/srv/users/.tp-staging/alice.svc1.20260927-120000`;
 const STAGED = `${P}/tmp/staged`;
 const SSH_KEYS = `${P}/etc/ssh/turbopanel/authorized_keys`;
 const DROP_IN = `${P}/etc/ssh/sshd_config.d/60-turbopanel.conf`;
@@ -638,37 +639,16 @@ const SITES: CallSite[] = [
   ),
 
   // --- release promotion ----------------------------------------------------
-  tpHost('src/deploy/release/promote.ts|["-n","mkdir","-p","--",to]', {
-    argv: ["mkdir", "-p", "--", RELEASE],
-  }),
-  tpHost('src/deploy/release/promote.ts|["-n","cp","-a","--",`${from}/.`,to]', {
-    argv: ["cp", "-a", "--", `${STATE}/release-handoff/svc1/.`, RELEASE],
-    setup: {
-      files: {
-        [`${STATE}/release-handoff/svc1/index.html`]: "<h1>hi</h1>\n",
-      },
-      dirs: [RELEASE],
-    },
-  }),
-  tpHost('src/deploy/release/promote.ts|["-n","mkdir","-p","--",destDir]', {
-    argv: ["mkdir", "-p", "--", `${RELEASE}/config`],
-  }),
+  // tp-host builds every path from the ids; the staging leaf is the daemon's.
   tpHost(
-    'src/deploy/release/promote.ts|["-n","install","-m","0640","-o","root","-g","root","--",staged,dest]',
+    'src/deploy/release/promote.ts|["-n",verb,username,serviceId,releaseId]',
+    { argv: ["publish-open", "alice", "svc1", "20260927-120000"] },
     {
-      argv: [
-        "install",
-        "-m",
-        "0640",
-        "-o",
-        "root",
-        "-g",
-        "root",
-        "--",
-        STAGED,
-        `${RELEASE}/config/app.env`,
-      ],
-      setup: dir(`${RELEASE}/config`),
+      argv: ["publish", "alice", "svc1", "20260927-120000"],
+      setup: {
+        files: { [`${STAGING}/index.html`]: "<h1>hi</h1>\n" },
+        dirs: [`${SITE}/releases`, `${SITE}/shared`],
+      },
     },
   ),
   tpHost('src/deploy/release/promote.ts|["-n","test","-e",currentLink]', {

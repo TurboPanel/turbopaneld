@@ -767,6 +767,17 @@ it regresses:
     once `turbopanel-build-<id>.service` is inactive; abort is
     `systemctl stop turbopanel-build-<id>.service`. `turbopanel-build-*.service`
     unit files are refused at install;
+  - brings a release into `<home>/sites/<svc>/releases/<id>` only through
+    `publish-open <user> <svc> <id>` (a fresh daemon-owned leaf under
+    `<principal root>/.tp-staging`, `root:tp 0710`, a class no generic verb
+    accepts) and `publish <user> <svc> <id>`: it takes the leaf, refuses hard
+    links, special files and a shipped `shared`, seals it recursively
+    (`root:<user>-grp`, no set-id, nothing group/other-writable), refuses a
+    symlink that resolves outside it, renames it in through a root-owned chain
+    on the same filesystem, links `shared`, sets the top to `0550` and swaps
+    `current` (a directory at `current` or `current.tmp.<id>` is refused).
+    `install -d` / `mkdir -p` under `releases/<id>` are refused, `cp -a` is
+    gone, and `ln` uses `-T`;
   `src/permissions/tp-host.test.ts` runs it unprivileged in its test mode
   (`TP_HOST_TEST_PREFIX`, ignored as root) against the daemon's own rendered
   units and a hostile corpus. Known gap: it is TOCTOU-safe for paths it pins,

@@ -44,10 +44,12 @@ allow-list.
 serving change in the next phase addresses the same tree without restating it):
 
 ```
+<principalHomeRoot>/.tp-staging/                 root:tp 0710 (publish-open)
+  <username>.<serviceId>.<releaseId>/            tp 0700 until tp-host publish
 <principalHomeRoot>/<username>/sites/            root:<username>-grp 0750
   <serviceId>/                                   root:<username>-grp 0750
     releases/                                    root:<username>-grp 0750
-      <releaseId>/        staging 0750 → published 0550, root:<username>-grp
+      <releaseId>/        root:<username>-grp, top 0550, nothing g/o-writable
       <releaseId>/.turbopanel/release.json        per-release manifest
       <releaseId>/shared -> ../../shared              relative convenience link
     current -> releases/<releaseId>
@@ -56,7 +58,8 @@ serving change in the next phase addresses the same tree without restating it):
 ```
 
 Every published release carries a relative **`shared` symlink** at its root
-(`promoteRelease` → `linkReleaseSharedDir`), so `current/shared` is a stable
+(tp-host `publish`, or `linkReleaseSharedDir` where the daemon owns the
+tree), so `current/shared` is a stable
 writable path for *any* release-backed service. That is generic on purpose: the
 site serving path pins PHP `open_basedir` to it, and the
 native runtime relies on the same convention rather than inventing a
@@ -69,19 +72,18 @@ process that can rewrite its own code turns any RCE into persistence. That is an
 root-owned too, so the principal cannot create, rename, or unlink inside them —
 it could otherwise plant a release directory or repoint `current` regardless of
 how tight each published release is. `shared/` is the one principal-owned,
-principal-writable path, and a staging release is root-writable only until the
-seal. Directory creation reuses the single `sudo -n install -d` seam in
-`ensure-principal.ts` (`ensureDirectoryWithOwner` for the root-owned side,
-`ensureDirectoryOwnedByPrincipal` for `shared/`); sealing (`chown -R root:<grp>`
-+ `chmod 0550`) and retention removal go through the same `sudo -n` runner seam,
-never a second mkdir helper. The daemon is **not** in `<username>-grp`, so it
-cannot traverse the root-owned `0750` site tree: unprivileged `readlink` of
-`current`, staging copy, the `shared` link, the per-release manifest, the health
-probe, and the atomic `current` swap all fall back to that same `sudo -n` runner
-when Deno returns EACCES. Tests that own a temp tree keep the Deno path.
-`install -d` repairs an existing directory's owner
-and mode, so a tree from the earlier principal-owned layout converges on the
-next deploy.
+principal-writable path. A release directory is never created unsealed under
+`releases/`: tp-host refuses `install -d` / `mkdir -p` there, and only
+`publish` (below) renames a sealed tree in. Directory creation for the rest
+reuses the single `sudo -n install -d` seam in `ensure-principal.ts`
+(`ensureDirectoryWithOwner` for the root-owned side,
+`ensureDirectoryOwnedByPrincipal` for `shared/`); retention removal goes
+through the same `sudo -n` runner seam, never a second mkdir helper. The daemon
+is **not** in `<username>-grp`, so it cannot traverse the root-owned `0750`
+site tree: unprivileged `readlink` of `current`, the rollback swap and the
+probes fall back to that same `sudo -n` runner when Deno returns EACCES. Tests
+that own a temp tree keep the Deno path (copy, link, manifest, probe, seal,
+link check and swap in place).
 
 **Order per entry** (`apply-source-releases.ts`): ensure tree → `resetReleaseScratchDir`
 → **checkout** (`fetch` phase) → **build** (`build` phase) → **stage / manifest /
@@ -100,8 +102,6 @@ the ordinary `environment.deploy` payload, so compose apply, ingress, TLS,
 retention, `deployment.json`, and the native / site promote hooks all
 keep working unchanged, and the generation-supersede rule still applies. That
 branch skips `ensureReleaseTree`, the scratch dir, checkout, and build entirely
-— `ensureReleaseTree` in particular would `install -d` the sealed release back
-to staging mode and hand the runtime user a writable copy of the code it runs —
 and calls `promoteExistingRelease` (verify the tree exists — and, where the
 daemon account can stat it, that it is sealed at `0550` → optional health probe
 → `swapCurrentSymlink`) instead of `promoteRelease`. Only the `release-promote`
@@ -128,14 +128,37 @@ would put the service on the wrong lane.
 **Staged build, atomic promote** — the same staged-write / validated-cutover
 contract `compose-files.ts` uses for `compose.yaml`. The clone lands in an
 ephemeral scratch dir under `<daemonStateDir>/release-build/`, never inside the
-release tree. Only after the build succeeds is the output copied into
-`releases/<releaseId>/`, the manifest written, and the health probe run (this
-phase: "the expected paths exist"; later phases swap in a real runtime probe).
-Then the tree is sealed and `current` is swapped by creating
-`current.tmp.<releaseId>` as a symlink and `rename()`-ing it over `current` —
-atomic on the same filesystem, so a reader sees the old release or the new one,
-never a missing link. **Any failure before the rename leaves `current`
-untouched** and removes the staged directory; there is no partial publish.
+release tree. Only after the build succeeds is the output staged, the manifest
+written, and the health probe run against the staged tree (this phase: "the
+expected paths exist"; later phases swap in a real runtime probe). Then the
+tree is sealed and `current` is swapped by creating `current.tmp.<releaseId>`
+as a symlink and `rename()`-ing it over `current` — atomic on the same
+filesystem, so a reader sees the old release or the new one, never a missing
+link. **Any failure before the rename leaves `current` untouched** and removes
+the staged tree; there is no partial publish.
+
+**Sealed publish** (managed hosts). `tp-host publish-open <user> <svc> <id>`
+makes a fresh leaf `<principalHomeRoot>/.tp-staging/<user>.<svc>.<id>`, owned by
+the daemon (0700) under a `root:tp 0710` parent that no tenant or build can
+reach, on the homes' filesystem. The daemon copies the build output into it
+(the hand-off below), drops any `shared` entry, writes the manifest and runs
+the probe. `tp-host publish <user> <svc> <id>` then, as root and with every
+path built from the ids: takes the leaf (`root:root 0700`), refuses hard-linked
+files (before any `chown -R`, so no outside inode is re-owned), FIFOs,
+sockets, devices and a shipped `shared`, seals it
+(`chown -R -h -P root:<user>-grp`, `chmod -R u-s,g-s,go-w,g+rX,o-rwx`) and
+re-checks that nothing is left foreign-owned, set-id or group/other-writable,
+resolves every symlink physically (`realpath -m`) and refuses one that lands
+outside the leaf (so the two-link `s1/s2/up → ../..` + `s1/s2/s3/x → ../up/..`
+chain is caught), requires the home, `sites/`, `sites/<svc>/` and `releases/`
+to be root-owned and not group/other-writable, the leaf and `releases/` to
+share `st_dev`, and `releases/<id>` not to exist, then `mv -T`s the leaf into
+place, links `shared → ../../shared`, drops the top to `0550` and swaps
+`current`. A directory planted at `current` or `current.tmp.<id>` is refused
+(and the generic `ln` uses `-T`, so the rollback swap never links into one).
+Any refusal before the rename removes the leaf. The publish-time containment
+check is stricter than `release-links.ts` (which only keeps links out of other
+homes) and replaces it on this path; the in-place path still runs that one.
 
 **Symlink-safe hand-off** (`safe-copy.ts`). The build controls every name in
 its tree, so every copy out of it — the stage into `releases/<releaseId>/` and
@@ -152,14 +175,13 @@ group/other-write bits are stripped; nothing is chowned; an entry owned by
 anyone but the source root's owner (a hard link to a root file) is refused;
 destinations are created one component at a time and files with `O_EXCL`, so a
 link planted at a destination is refused; entries (500 000), bytes (16 GiB) and
-depth (128) are capped. On a managed host the daemon cannot write the release,
-so it first makes that checked copy in `<daemonStateDir>/release-handoff/<serviceId>/<releaseId>`
-(daemon-only, recreated fresh, outside the build's tree, removed afterwards)
-and `tp-host cp -a -- <handoff>/. <releaseDir>` copies only that: tp-host takes
-the source only from the daemon's trees, refuses it (checked as the caller)
-when it holds a special, set-id or foreign-owned entry, and runs
-`cp -R --no-dereference --preserve=mode,timestamps --no-preserve=ownership`.
-Root never walks the tree a build wrote. Deno has no `openat2`, so a directory
+depth (128) are capped. On a managed host the checked copy lands in the
+daemon's staging leaf (`ReleasePaths.stagingDir`, recreated fresh by
+`publish-open`, outside the build's tree) and root only ever operates on that
+leaf once it has taken it from the daemon: root never walks a tree a build
+wrote, and never reads a name another account can still change. (The earlier
+`<daemonStateDir>/release-handoff/` copy and the root `cp -a` into the release
+are gone.) Deno has no `openat2`, so a directory
 swapped and swapped back between two calls is out of reach of these checks; the
 unprivileged-builds design closes that by handing the tree back only once the
 build unit's processes are gone and the tree belongs to the daemon again.

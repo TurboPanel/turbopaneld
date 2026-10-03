@@ -83,7 +83,7 @@ test("stageRelease keeps in-tree links, drops escaping ones and skips .git", asy
     await Deno.writeTextFile(join(workingDir, ".git", "HEAD"), "ref");
     await Deno.writeTextFile(join(workingDir, "app.js"), "export {}");
 
-    await stageRelease({ paths, workingDir });
+    await stageRelease({ paths, username: "appuser", workingDir });
 
     const to = paths.releaseDir;
     assertEquals(await Deno.readTextFile(join(to, "app.js")), "export {}");
@@ -124,7 +124,8 @@ test("stageRelease refuses an output directory that is a link or climbs out", as
       ]
     ) {
       await assertRejects(
-        () => stageRelease({ paths, workingDir, ...params }),
+        () =>
+          stageRelease({ paths, username: "appuser", workingDir, ...params }),
         Error,
         "refusing",
       );
@@ -165,7 +166,12 @@ test("stageRelease copies output and rejects a missing or non-dir source", async
     await Deno.mkdir(join(workingDir, "dist"), { recursive: true });
     await Deno.writeTextFile(join(workingDir, "dist", "index.html"), "built");
 
-    await stageRelease({ paths, workingDir, outputDirectory: "dist" });
+    await stageRelease({
+      paths,
+      username: "appuser",
+      workingDir,
+      outputDirectory: "dist",
+    });
     assertEquals(
       await Deno.readTextFile(join(paths.releaseDir, "index.html")),
       "built",
@@ -174,6 +180,7 @@ test("stageRelease copies output and rejects a missing or non-dir source", async
     await assertRejects(
       () =>
         stageRelease({
+          username: "appuser",
           paths,
           workingDir,
           outputDirectory: "nope",
@@ -186,6 +193,7 @@ test("stageRelease copies output and rejects a missing or non-dir source", async
     await assertRejects(
       () =>
         stageRelease({
+          username: "appuser",
           paths,
           workingDir,
           outputDirectory: "file-only",

@@ -3,27 +3,36 @@
  *
  * Same staged-write / validated-cutover contract `../compose-files.ts` uses for
  * `compose.yaml`: everything is assembled off to the side, validated, and only
- * then published in one indivisible step. Concretely:
+ * then published in one indivisible step.
  *
- * 1. copy the build output from the ephemeral checkout into
- *    `releases/<releaseId>/` (still writable at this point);
- * 2. link `shared` at the release root to the site's `shared/` directory, so
- *    `current/shared` is a stable writable path for every release-backed
- *    service;
- * 3. run the health probe against the staged tree;
- * 4. seal the tree (`root:<username>-grp`, mode `0550`);
- * 5. create `current.tmp.<releaseId>` as a symlink and `rename()` it over
- *    `current` — atomic within the filesystem, so a reader either sees the old
- *    release or the new one, never a missing link.
+ * On a managed host the daemon cannot write `releases/` (root-owned), so:
  *
- * Any failure before step 5 leaves `current` exactly where it was. There is no
- * partial publish.
+ * 1. tp-host `publish-open` gives the daemon a fresh staging leaf beside the
+ *    principal homes (`ReleasePaths.stagingDir`), which nobody else reaches;
+ * 2. the daemon copies the build output into it with the symlink-safe hand-off
+ *    copy (`./safe-copy.ts`), drops any `shared` entry the build shipped and
+ *    writes the release manifest;
+ * 3. the health probe runs against the staged tree;
+ * 4. tp-host `publish` takes the leaf away from the daemon, seals it
+ *    recursively (`root:<username>-grp`, no set-id, nothing group- or
+ *    world-writable), refuses hard links, special files and symlinks that
+ *    resolve outside it, renames it to `releases/<releaseId>` (same
+ *    filesystem), links `shared`, drops the top to `0550` and renames
+ *    `current.tmp.<releaseId>` over `current` — atomic, so a reader sees the
+ *    old release or the new one, never a missing link.
  *
- * {@link promoteExistingRelease} is the rollback entry point: step 5 alone,
+ * Where the daemon owns the release tree itself (a development layout), the
+ * same steps run in place: copy into `releases/<releaseId>/`, link, manifest,
+ * probe, seal, link check, swap.
+ *
+ * Any failure before the swap leaves `current` exactly where it was. There is
+ * no partial publish.
+ *
+ * {@link promoteExistingRelease} is the rollback entry point: the swap alone,
  * against a tree that was already published by an earlier promote.
  */
 
-import { basename, dirname, join } from "@std/path";
+import { basename, join } from "@std/path";
 import { hostSudoArgs } from "../../permissions/host-sudo.ts";
 import type { RunFn } from "../ensure-principal.ts";
 import { forEachSequential } from "../../util/sequential.ts";
@@ -42,7 +51,6 @@ import {
   sealPublishedRelease,
 } from "./release-layout.ts";
 import {
-  RELEASE_MANIFEST_FILENAME,
   type ReleaseManifestV1,
   writeReleaseManifest,
 } from "./deployment-json.ts";
@@ -75,74 +83,26 @@ function isMissingPrivilegedPathError(stderr: string): boolean {
 }
 
 /**
- * Root's half of the stage: copy the daemon's checked hand-off tree into the
- * root-owned release. tp-host refuses special and set-id entries and anything
- * the daemon does not own, and copies without preserving ownership.
+ * tp-host's release verbs take the principal, the service and the release by
+ * id and build every path themselves: `publish-open` makes the daemon's
+ * staging leaf, `publish` seals it into `releases/<id>` and swaps `current`.
  */
-async function copyTreePrivileged(
-  from: string,
-  to: string,
+async function runPublishVerb(
+  verb: "publish-open" | "publish",
+  paths: Pick<ReleasePaths, "siteDir" | "releaseDir">,
+  username: string,
   runFn: RunFn,
 ): Promise<void> {
-  const mkdir = await runFn(
+  const serviceId = basename(paths.siteDir);
+  const releaseId = basename(paths.releaseDir);
+  const result = await runFn(
     "sudo",
-    hostSudoArgs(["-n", "mkdir", "-p", "--", to]),
+    hostSudoArgs(["-n", verb, username, serviceId, releaseId]),
   );
-  if (!mkdir.success) {
-    throw new Error(mkdir.stderr || `Failed to mkdir ${to}`);
-  }
-  const cp = await runFn(
-    "sudo",
-    hostSudoArgs(["-n", "cp", "-a", "--", `${from}/.`, to]),
-  );
-  if (!cp.success) {
-    throw new Error(cp.stderr || `Failed to copy ${from} to ${to}`);
-  }
-}
-
-async function writeReleaseManifestPrivileged(
-  releaseDir: string,
-  manifest: ReleaseManifestV1,
-  runFn: RunFn,
-): Promise<void> {
-  const staged = await Deno.makeTempFile({ prefix: "tp-rel-manifest-" });
-  try {
-    const body = `${JSON.stringify(manifest, null, 2)}\n`;
-    await Deno.writeTextFile(staged, body);
-    const destDir = join(releaseDir, RELEASE_METADATA_DIRNAME);
-    const mkdir = await runFn(
-      "sudo",
-      hostSudoArgs(["-n", "mkdir", "-p", "--", destDir]),
+  if (!result.success) {
+    throw new Error(
+      result.stderr || `tp-host ${verb} failed for release ${releaseId}`,
     );
-    if (!mkdir.success) {
-      throw new Error(mkdir.stderr || `Failed to mkdir ${destDir}`);
-    }
-    const dest = join(destDir, RELEASE_MANIFEST_FILENAME);
-    const install = await runFn(
-      "sudo",
-      hostSudoArgs([
-        "-n",
-        "install",
-        "-m",
-        "0640",
-        "-o",
-        "root",
-        "-g",
-        "root",
-        "--",
-        staged,
-        dest,
-      ]),
-    );
-    if (!install.success) {
-      throw new Error(install.stderr || `Failed to install ${dest}`);
-    }
-  } finally {
-    try {
-      await Deno.remove(staged);
-    } catch {
-      // Temp file is under /tmp; leaving it is harmless.
-    }
   }
 }
 
@@ -330,39 +290,28 @@ async function removeTreeIfPresent(path: string): Promise<void> {
   }
 }
 
-/**
- * The managed-host stage: the daemon cannot write the root-owned release, so
- * it first makes its own checked copy in a fresh daemon-only directory, and
- * root copies only that. Root never walks the tree the build wrote.
- */
-async function stageReleasePrivileged(
-  source: ContainedPath,
-  paths: ReleasePaths,
-  runFn: RunFn,
-): Promise<void> {
-  const handoff = paths.handoffDir;
-  await removeTreeIfPresent(handoff);
-  await Deno.mkdir(dirname(handoff), { recursive: true, mode: 0o700 });
-  // Not recursive: anything that reappeared at this name is refused.
-  await Deno.mkdir(handoff, { mode: 0o700 });
-  try {
-    await copyContainedTree({ source, dest: { root: handoff } });
-    await copyTreePrivileged(handoff, paths.releaseDir, runFn);
-  } finally {
-    await removeTreeIfPresent(handoff);
-  }
-}
+/** Where {@link stageRelease} put the tree, and how it gets published. */
+export type StagedRelease = {
+  dir: string;
+  /** True: a staging leaf for tp-host `publish`; false: the release itself. */
+  viaPublish: boolean;
+};
 
 /**
- * Copy the build output into the (still writable) release directory.
+ * Copy the build output to where it is staged.
  *
  * The output directory must be reached from the checkout without a symlink,
  * and the copy follows none (`./safe-copy.ts`): a build cannot point the
  * release at, or smuggle into it, anything outside its own tree.
+ *
+ * Where the daemon may create `releases/<releaseId>` itself, the copy lands
+ * there. On a managed host `releases/` is root's, so the copy lands in the
+ * daemon's own staging leaf instead (tp-host `publish-open`), and only
+ * `publish` ever brings the release into `releases/`.
  */
 export async function stageRelease(
-  params: StageReleaseParams & { runFn?: RunFn },
-): Promise<string> {
+  params: StageReleaseParams & { username: string; runFn?: RunFn },
+): Promise<StagedRelease> {
   const source = releaseSource(params);
   await requireContainedDir(source);
   try {
@@ -370,15 +319,21 @@ export async function stageRelease(
       source,
       dest: { root: params.paths.releaseDir },
     });
+    return { dir: params.paths.releaseDir, viaPublish: false };
   } catch (err) {
     if (!isUnprivilegedFailure(err)) throw err;
-    await stageReleasePrivileged(
-      source,
-      params.paths,
-      params.runFn ?? runPrivileged,
-    );
   }
-  return params.paths.releaseDir;
+  await runPublishVerb(
+    "publish-open",
+    params.paths,
+    params.username,
+    params.runFn ?? runPrivileged,
+  );
+  await copyContainedTree({
+    source,
+    dest: { root: params.paths.stagingDir },
+  });
+  return { dir: params.paths.stagingDir, viaPublish: true };
 }
 
 /**
@@ -647,52 +602,92 @@ export type PromoteReleaseParams = StageReleaseParams & {
   runFn?: RunFn;
 };
 
+/** Manifest, then probe, against the staged tree — before anything is sealed. */
+async function prepareStagedTree(
+  params: PromoteReleaseParams,
+  dir: string,
+  runFn: RunFn,
+): Promise<void> {
+  if (params.manifest) await writeReleaseManifest(dir, params.manifest);
+  const probe = params.healthProbe ??
+    expectedPathsProbe([RELEASE_METADATA_DIRNAME], runFn);
+  await probe(dir);
+}
+
 /**
- * Stage → `shared` link → manifest → probe → seal → link check → cut over.
- * Returns the
- * release directory.
+ * The managed-host publish: the staged leaf becomes `releases/<releaseId>`
+ * and `current`, in one tp-host call that seals and checks the frozen tree
+ * as root (see this module's header). A `shared` entry the build shipped is
+ * dropped first — the layout links `shared` itself, after the checks.
+ */
+async function publishStagedRelease(
+  params: PromoteReleaseParams,
+  stagingDir: string,
+  runFn: RunFn,
+): Promise<void> {
+  await removeTreeIfPresent(join(stagingDir, RELEASE_SHARED_LINK_NAME));
+  await prepareStagedTree(params, stagingDir, runFn);
+  await runPublishVerb("publish", params.paths, params.username, runFn);
+}
+
+/** The daemon-owned layout: the same steps, run on the release in place. */
+async function sealReleaseInPlace(
+  params: PromoteReleaseParams,
+  runFn: RunFn,
+): Promise<void> {
+  const releaseDir = params.paths.releaseDir;
+  await linkReleaseSharedDir(releaseDir, runFn);
+  await prepareStagedTree(params, releaseDir, runFn);
+  await sealPublishedRelease(releaseDir, params.username, runFn);
+  // Only once sealed: the build can no longer change a link after the check.
+  await assertReleaseLinksStayHome(params.paths, releaseDir, runFn);
+  await swapCurrentSymlink(params.paths, runFn);
+}
+
+/** Best-effort removal of everything a failed promote may have left. */
+async function discardFailedPromote(
+  paths: ReleasePaths,
+  runFn: RunFn,
+): Promise<void> {
+  try {
+    // The daemon's own leaf; a failed `publish` already removed its own.
+    await removeTreeIfPresent(paths.stagingDir);
+  } catch {
+    // Already taken over by root — tp-host removes it on the next open.
+  }
+  try {
+    await Deno.remove(paths.releaseDir, { recursive: true });
+  } catch {
+    try {
+      await removePublishedRelease(paths.releaseDir, runFn);
+    } catch {
+      // Already sealed root-owned, or never created — nothing more to do here.
+    }
+  }
+}
+
+/**
+ * Stage → manifest → probe → seal and checks → cut over. Returns the release
+ * directory.
  *
- * On any failure the staged directory is removed and `current` is left
- * untouched, so a failed promote is indistinguishable from one that never ran.
+ * On any failure the staged tree is removed and `current` is left untouched,
+ * so a failed promote is indistinguishable from one that never ran.
  */
 export async function promoteRelease(
   params: PromoteReleaseParams,
 ): Promise<string> {
   const runFn = params.runFn ?? runPrivileged;
   try {
-    const releaseDir = await stageRelease(params);
-    await linkReleaseSharedDir(releaseDir, runFn);
-    if (params.manifest) {
-      try {
-        await writeReleaseManifest(releaseDir, params.manifest);
-      } catch (err) {
-        if (!(err instanceof Deno.errors.PermissionDenied)) throw err;
-        await writeReleaseManifestPrivileged(
-          releaseDir,
-          params.manifest,
-          runFn,
-        );
-      }
+    const staged = await stageRelease({ ...params, runFn });
+    if (staged.viaPublish) {
+      await publishStagedRelease(params, staged.dir, runFn);
+    } else {
+      await sealReleaseInPlace(params, runFn);
     }
-    const probe = params.healthProbe ??
-      expectedPathsProbe([RELEASE_METADATA_DIRNAME], runFn);
-    await probe(releaseDir);
-    await sealPublishedRelease(releaseDir, params.username, runFn);
-    // Only once sealed: the build can no longer change a link after the check.
-    await assertReleaseLinksStayHome(params.paths, releaseDir, runFn);
-    await swapCurrentSymlink(params.paths, runFn);
-    return releaseDir;
+    return params.paths.releaseDir;
   } catch (err) {
     // Never leave a half-staged release visible under `releases/`.
-    try {
-      await Deno.remove(params.paths.releaseDir, { recursive: true });
-    } catch {
-      try {
-        await removePublishedRelease(params.paths.releaseDir, runFn);
-      } catch {
-        // Already sealed root-owned, or never created — nothing more to do here.
-      }
-    }
+    await discardFailedPromote(params.paths, runFn);
     throw err;
   }
 }
