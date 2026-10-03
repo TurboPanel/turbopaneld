@@ -3,6 +3,7 @@ import {
   markCommandInFlight,
 } from "./command-outbox.ts";
 import { errorText, sanitizeForLog } from "../util/logger.ts";
+import { redactUrlSecrets } from "../util/redact-url-secrets.ts";
 import type {
   CommandAckMessage,
   CommandDispatchMessage,
@@ -173,9 +174,26 @@ function createDispatchLogSink(
   });
 }
 
-function sanitizeError(value: unknown, maxLen = 500): string {
+/**
+ * Longest `command-outcome.error` the daemon sends. The control plane rejects
+ * anything over 4096 characters (`MAX_DAEMON_WS_ERROR_CHARS`), so this leaves
+ * room for the truncation marker.
+ */
+const MAX_OUTCOME_ERROR_CHARS = 4000;
+const TRUNCATED_MARKER = "[...truncated] ";
+
+/**
+ * Keep the **tail**: a failed build prints the cause last, and the head is
+ * usually progress output. The full transcript stays on the command log
+ * endpoint.
+ */
+function sanitizeError(
+  value: unknown,
+  maxLen = MAX_OUTCOME_ERROR_CHARS,
+): string {
   const text = sanitizeForLog(value);
-  return text.length > maxLen ? text.slice(0, maxLen) : text;
+  if (text.length <= maxLen) return text;
+  return `${TRUNCATED_MARKER}${text.slice(text.length - maxLen)}`;
 }
 
 /**
@@ -184,13 +202,17 @@ function sanitizeError(value: unknown, maxLen = 500): string {
  * A handler error message is very often raw process stderr, and the outcome is
  * persisted in command history where the transcript's redaction does not
  * reach. Redact against the sink's deny-set *before* sanitizing, so multiline
- * plaintext still matches the raw text it was captured from.
+ * plaintext still matches the raw text it was captured from. URLs are then
+ * stripped of user info and query strings (registry or release-asset links
+ * quoted in build output carry tokens the deny-set cannot know about).
  */
 function sanitizeOutcomeError(
   value: unknown,
   logSink: CommandOutputSink,
 ): string {
-  return sanitizeError(logSink.redactSummary(errorText(value)));
+  return sanitizeError(
+    redactUrlSecrets(logSink.redactSummary(errorText(value))),
+  );
 }
 
 export async function handleCommandDispatch(

@@ -269,6 +269,12 @@ const SITES: CallSite[] = [
     { argv: ["ip", "-o", "-4", "addr", "show", "dev", "tp0"] },
     { argv: ["wg", "show", "tp0", "dump"] },
   ),
+  tpHost('src/metrics/collector/tls-expiry.ts|["-n","cert-dates"]', {
+    argv: ["cert-dates"],
+  }),
+  tpHost('src/metrics/collector/site-usage.ts|["-n","site-usage"]', {
+    argv: ["site-usage"],
+  }),
   tpHost('src/commands/reboot.ts|["-n","systemctl","reboot"]', {
     argv: ["systemctl", "reboot"],
   }),
@@ -388,6 +394,14 @@ const SITES: CallSite[] = [
   tpHost(
     `${PHP_APPLY}sudoOrThrow(io,["systemctl","enable","--now",socket],\`PHPruntime\${spec.id}:socket\`)`,
     { argv: ["systemctl", "enable", "--now", `${PHP_UNIT}.socket`] },
+  ),
+  tpHost(
+    `${PHP_APPLY}sudoOrThrow(io,["systemctl","restart",socket],\`PHPruntime\${spec.id}:socketrestart\`)`,
+    { argv: ["systemctl", "restart", `${PHP_UNIT}.socket`] },
+  ),
+  tpHost(
+    `${PHP_APPLY}sudoQuietly(io,["systemctl","restart",socket],\`couldnotrestart\${socket}onitspreviousconfig\`)`,
+    { argv: ["systemctl", "restart", `${PHP_UNIT}.socket`] },
   ),
   tpHost(
     `${PHP_APPLY}sudoOrThrow(io,["systemctl","enable",service],\`PHPruntime\${spec.id}:enable\`)`,
@@ -1063,6 +1077,16 @@ const SITES: CallSite[] = [
       ],
       setup: dir(`${CONF}/nginx`),
     },
+  ),
+  tpHost(
+    'src/deploy/site.ts|["-n","systemctl","is-active","--quiet",driver.unit]',
+    { argv: ["systemctl", "is-active", "--quiet", "turbopanel-nginx"] },
+    { argv: ["systemctl", "is-active", "--quiet", "turbopanel-apache"] },
+  ),
+  tpHost(
+    'src/deploy/site.ts|["-n","systemctl","reload",driver.unit]',
+    { argv: ["systemctl", "reload", "turbopanel-nginx"] },
+    { argv: ["systemctl", "reload", "turbopanel-apache"] },
   ),
   tpHost('src/deploy/site.ts|["-n","ls","-A","--",dir]', {
     argv: ["ls", "-A", "--", `${CONF}/nginx/sites`],

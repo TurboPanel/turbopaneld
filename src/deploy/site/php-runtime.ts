@@ -178,11 +178,12 @@ type SitePhpModeSite = Pick<
  * names no mode (the control plane always sends one once it has resolved it),
  * or a Caddy site (Caddy serves no PHP in the new layout).
  *
- * nginx and Apache cannot run lsphp; asking for it is refused rather than
- * quietly served some other way. OpenLiteSpeed has no shared master to fall
- * back on, so a PHP site without a mode runs FastCGI (the control plane's
- * default) with a warning; attached lsphp is not offered and runs as detached lsphp (with a
- * warning), so one such site never fails the whole deploy.
+ * nginx, Apache and nginx in front of Apache cannot run lsphp; asking for it
+ * is refused rather than quietly served some other way. OpenLiteSpeed has no
+ * shared master to fall back on, so a PHP site without a mode runs FastCGI
+ * (the control plane's default) with a warning; attached lsphp is not offered
+ * and runs as detached lsphp (with a warning), so one such site never fails
+ * the whole deploy.
  */
 export function sitePhpRuntimeMode(
   site: SitePhpModeSite,
@@ -193,7 +194,12 @@ export function sitePhpRuntimeMode(
   }
   const mode = site.php?.mode;
   if (mode === undefined) return null;
-  if (site.engine !== "nginx" && site.engine !== "apache") return null;
+  if (
+    site.engine !== "nginx" && site.engine !== "apache" &&
+    site.engine !== "nginx+apache"
+  ) {
+    return null;
+  }
   if (mode === "fastcgi" || mode === "fpm") return mode;
   throw new Error(
     `site ${site.composeServiceName}: PHP mode ${mode} needs OpenLiteSpeed, not ${site.engine}`,

@@ -1906,6 +1906,27 @@ test("Apache runs as tpapache with its own top-level log and runtime dirs", asyn
   );
 });
 
+test("Apache loads mod_remoteip and logs the client address for nginx in front", async () => {
+  const conf = await Deno.readTextFile(
+    join(CHECKOUT_ORCHESTRATION_DIR, "roles/apache/templates/httpd.conf.j2"),
+  );
+  const lines = conf.split("\n");
+  assertEquals(
+    lines.includes("LoadModule remoteip_module modules/mod_remoteip.so"),
+    true,
+  );
+  // `combined` must be defined before use, with `%a`: the address mod_remoteip
+  // takes from nginx's X-Forwarded-For (WP5 proof: the undefined format logged
+  // the literal word).
+  const format = lines.findIndex((line) =>
+    line.startsWith('LogFormat "%a ') && line.endsWith('" combined')
+  );
+  const custom = lines.findIndex((line) =>
+    line.startsWith("CustomLog ") && line.endsWith(" combined")
+  );
+  assertEquals(format >= 0 && format < custom, true);
+});
+
 test("devOwnershipPlaybookExtraArgs emits user uid gid and root", () => {
   assertEquals(
     devOwnershipPlaybookExtraArgs({
@@ -2403,6 +2424,27 @@ test("docker role merges daemon.json address pools and live-restore, skipping th
     ),
     true,
     "strip owned keys before merging the current values back on",
+  );
+  // Dedicated cgroup parent for the container metrics reads: owned with the
+  // systemd driver, preserved on a cgroupfs-pinned host, rides the same
+  // restart / pending-marker rules as live-restore.
+  assertEquals(
+    daemonJson.includes(
+      "combine({'cgroup-parent': turbopanel_docker_cgroup_parent}",
+    ) ||
+      daemonJson.includes("{'cgroup-parent': turbopanel_docker_cgroup_parent}"),
+    true,
+  );
+  assertEquals(
+    daemonJson.includes("native.cgroupdriver=cgroupfs"),
+    true,
+    "a cgroupfs-driver host keeps its own cgroup-parent",
+  );
+  assertEquals(
+    defaults.includes(
+      "turbopanel_docker_cgroup_parent: turbopanel-containers.slice",
+    ),
+    true,
   );
   assertEquals(
     daemonJson.includes("_docker_daemon_json_current is mapping"),

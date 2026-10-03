@@ -2273,6 +2273,8 @@ test("per-site PHP config: root:<owner>-grp, 0750/0640, directives on an allowli
       ["rlimit_core", add(PHP_SITE, "rlimit_core = unlimited")],
       ["process.dumpable", add(PHP_SITE, "process.dumpable = yes")],
       ["a variable", line("pm.max_children", "pm.max_children = ${pool}")],
+      ["a status listener", add(PHP_SITE, "pm.status_listen = 0.0.0.0:9000")],
+      ["an unlisted pm key", add(PHP_SITE, "pm.unknown = 1")],
       ["chdir outside the home", line("chdir", "chdir = /etc")],
     ];
     for (const [label, mutate] of badFpm) {
@@ -2529,6 +2531,35 @@ test("per-site PHP: what the daemon renders for each mode and web server passes 
   });
 });
 
+test("one site is bound to one owner across its service, socket and config", async () => {
+  await withPhpHost(async (host) => {
+    assertEquals(
+      (await installUnit(host, phpServiceName, phpService(host, "fastcgi")))
+        .code,
+      0,
+    );
+    // The service names alice; a socket for the same site owned by bob and a
+    // config group of bob's are all refused.
+    const other = phpSocket().replace("SocketUser=alice", "SocketUser=bob");
+    assertEquals(
+      (await installUnit(host, phpSocketName, other)).code === 0,
+      false,
+    );
+    assertEquals((await installUnit(host, phpSocketName, phpSocket())).code, 0);
+    await refused(host, [
+      "install",
+      "-d",
+      "-m",
+      "0750",
+      "-o",
+      "root",
+      "-g",
+      "bob-grp",
+      phpConfDir(host),
+    ]);
+  });
+});
+
 // --- sftp-chroot ---------------------------------------------------------------
 
 /** Put alice on the new layout (root-owned 0750 home, home/, passwd home). */
@@ -2693,6 +2724,134 @@ test("sftp-chroot checks an account whose primary group is tpsftp", async () => 
     assertEquals(check.code === 0, false);
     assertStringIncludes(check.stdout, "dave: passwd home is not");
     assertEquals(check.stdout.includes("alice:"), false, check.stdout);
+  });
+});
+
+async function selfSignedCert(
+  dir: string,
+  host: string,
+  days: number,
+): Promise<void> {
+  await Deno.mkdir(dir, { recursive: true });
+  const made = await new Deno.Command("openssl", {
+    args: [
+      "req",
+      "-x509",
+      "-newkey",
+      "rsa:2048",
+      "-nodes",
+      "-subj",
+      `/CN=${host}`,
+      "-days",
+      String(days),
+      "-keyout",
+      join(dir, `${host}.key`),
+      "-out",
+      join(dir, `${host}.crt`),
+    ],
+    stdout: "null",
+    stderr: "null",
+  }).output();
+  assertEquals(made.success, true);
+}
+
+test("cert-dates prints only notAfter dates, skips internal certs, symlinks and takes no arguments", async () => {
+  await withHost(async (host) => {
+    const passwd = await Deno.readTextFile(host.path("etc/passwd"));
+    await Deno.writeTextFile(
+      host.path("etc/passwd"),
+      passwd + `tpedge:x:${Deno.uid}:${Deno.gid}::/nonexistent:/bin/false\n`,
+    );
+    const group = await Deno.readTextFile(host.path("etc/group"));
+    await Deno.writeTextFile(
+      host.path("etc/group"),
+      group + `tpedge:x:${Deno.gid}:\n`,
+    );
+    const certs = host.path(
+      "var/lib/turbopanel-hosting-caddy/data/caddy/certificates",
+    );
+    await selfSignedCert(
+      join(certs, "acme-v02.api.letsencrypt.org-directory", "shop.example.com"),
+      "shop.example.com",
+      30,
+    );
+    await selfSignedCert(
+      join(certs, "local", "intranet.test"),
+      "intranet.test",
+      10,
+    );
+    await Deno.symlink(
+      host.path("outside"),
+      join(certs, "acme-v02.api.letsencrypt.org-directory", "linked"),
+    );
+    const result = await host.run(["cert-dates"]);
+    assertEquals(result.code, 0, result.stderr);
+    const lines = result.stdout.trim().split("\n");
+    assertEquals(lines.length, 1, result.stdout);
+    assertEquals(
+      /^[A-Z][a-z]{2} \d{1,2} \d{2}:\d{2}:\d{2} \d{4} GMT$/.test(lines[0]!),
+      true,
+      lines[0],
+    );
+    assertEquals(result.stdout.includes("example.com"), false);
+    await refused(host, ["cert-dates", "x"]);
+  });
+});
+
+test("cert-dates prints nothing when the hosting Caddy has issued no certificates", async () => {
+  await withHost(async (host) => {
+    const result = await host.run(["cert-dates"]);
+    assertEquals(result.code, 0, result.stderr);
+    assertEquals(result.stdout, "");
+  });
+});
+
+test("site-usage prints home and site sizes only, never follows a symlink and takes no arguments", async () => {
+  await withHost(async (host) => {
+    const sites = host.path("srv/users/alice/sites");
+    await Deno.mkdir(join(sites, "web"), { recursive: true });
+    await Deno.writeFile(join(sites, "web", "blob"), new Uint8Array(200_000));
+    await Deno.mkdir(join(sites, "tiny"), { recursive: true });
+    await Deno.writeTextFile(join(sites, "tiny", "a"), "x");
+    await Deno.mkdir(host.path("outside/big"), { recursive: true });
+    await Deno.writeFile(
+      host.path("outside/big/huge"),
+      new Uint8Array(5_000_000),
+    );
+    await Deno.symlink(host.path("outside/big"), join(sites, "escape"));
+    await Deno.symlink(host.path("outside"), host.path("srv/users/mallory"));
+    const result = await host.run(["site-usage"]);
+    assertEquals(result.code, 0, result.stderr);
+    const rows = result.stdout.trim().split("\n").map((l) => l.split(" "));
+    const bytes = (kind: string, name: string) =>
+      Number(rows.find((r) => r[0] === kind && r[2] === name)?.[1]);
+    assertEquals(bytes("site", "web") >= 200_000, true, result.stdout);
+    assertEquals(bytes("site", "web") < 400_000, true, result.stdout);
+    assertEquals(bytes("home", "alice") >= bytes("site", "web"), true);
+    assertEquals(rows.some((r) => r[2] === "escape"), false, result.stdout);
+    assertEquals(rows.some((r) => r[2] === "mallory"), false, result.stdout);
+    assertEquals(
+      rows.every((r) => r.length === 3 && /^\d+$/.test(r[1]!)),
+      true,
+    );
+    // One walk per home: each home and each site appears exactly once.
+    assertEquals(
+      rows.filter((r) => r[0] === "home" && r[2] === "alice").length,
+      1,
+    );
+    assertEquals(
+      rows.filter((r) => r[0] === "site" && r[2] === "web").length,
+      1,
+    );
+    const script = await Deno.readTextFile(
+      new URL("../../orchestration/scripts/tp-host", import.meta.url),
+    );
+    assertEquals(/ionice -c3 nice -n 19 du /.test(script), true);
+    assertEquals(
+      /timeout -k 5 "\$TP_SITE_USAGE_HOME_SECONDS"/.test(script),
+      true,
+    );
+    await refused(host, ["site-usage", "/etc"]);
   });
 });
 

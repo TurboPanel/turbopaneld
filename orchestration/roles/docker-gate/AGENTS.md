@@ -308,7 +308,8 @@ registry auth, query strings, request bodies, the approval token itself. An
   `tp` could swap a directory there). It is `root:tp 0750`, created by
   tmpfiles.d and `ExecStartPre=+`.
 - `TP_DOCKER_GATE_MODE` accepts `observe` and `enforce` (anything else fails
-  the start); the unit pins `observe`. No host runs `enforce` until the
+  the start); the unit sets it from `docker_gate_mode` (default `observe`; in
+  `enforce` a failed install or swap fails the converge). No host runs `enforce` until the
   lockouts below are closed and the daemon builds through the build socket.
 - The read-only listener's directory holds nothing but its socket, and never
   becomes a parent of (or the same as) the main socket's directory: a Traefik

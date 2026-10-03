@@ -15,7 +15,7 @@ import { dirname, join } from "@std/path";
 import { logInfo, logWarn } from "../util/logger.ts";
 import { createSymlink } from "../permissions/scoped-writes.ts";
 import { runCaddySetup as defaultRunCaddySetup } from "../orchestration/ansible.ts";
-import type { LayoutPaths } from "../paths/layout.ts";
+import { type LayoutPaths, PROD_LIB_DIR_DEFAULT } from "../paths/layout.ts";
 
 /**
  * The account the hosting Caddy runs as. It is not in group `tp`, and its
@@ -24,6 +24,33 @@ import type { LayoutPaths } from "../paths/layout.ts";
  * and `HOSTING_CADDY_USER` in tp-host, which pins the unit to it.
  */
 export const HOSTING_CADDY_USER = "tpedge";
+
+/**
+ * Version of the ingress guard ruleset the caddy-setup playbook installs at
+ * {@link INGRESS_GUARD_RULES_PATH} (`turbopanel-ingress-guard.service`): only root
+ * and {@link HOSTING_CADDY_USER} may connect to the shared Traefik's PROXY
+ * protocol entrypoints. Keep in step with `hosting_ingress_guard_version` in
+ * orchestration/roles/hosting-caddy/defaults/main.yml; bump both when the
+ * template changes so every host re-runs the playbook on its next deploy.
+ */
+export const INGRESS_GUARD_VERSION = "v2";
+
+/** The guard ruleset's first-lines marker (`# turbopanel-ingress-guard v2`). */
+export const INGRESS_GUARD_MARKER =
+  `# turbopanel-ingress-guard ${INGRESS_GUARD_VERSION}\n`;
+
+/**
+ * Where the playbook installs the guard ruleset (root-owned, daemon-readable):
+ * `<turbopanel_install_root>/lib`, which tp-orchestrate pins to the install
+ * root in every layout, so not `layout.libDir` (a dev layout's is under home).
+ */
+export const INGRESS_GUARD_RULES_PATH = join(
+  PROD_LIB_DIR_DEFAULT,
+  "ingress-guard.nft",
+);
+
+/** The systemd unit that loads {@link INGRESS_GUARD_RULES_PATH}. */
+export const INGRESS_GUARD_UNIT = "turbopanel-ingress-guard.service";
 
 /** Keep in step with orchestration/roles/caddy/defaults/main.yml */
 export const HOSTING_CADDY_VERSION = "2.11.4";
@@ -102,6 +129,10 @@ export type EnsureHostingCaddyDeps = {
   resolveArch?: () => "arm64" | "amd64";
   /** Whether the hosting Caddy account exists (`getent passwd`). */
   accountExists?: () => Promise<boolean>;
+  /** Whether the current ingress guard ruleset is installed. */
+  ingressGuardCurrent?: () => Promise<boolean>;
+  /** Whether {@link INGRESS_GUARD_UNIT} is active (`systemctl is-active`). */
+  ingressGuardActive?: () => Promise<boolean>;
   verifyTarballSha256?: (
     arch: "arm64" | "amd64",
     tarballPath: string,
@@ -212,6 +243,51 @@ export function setHostingCaddyAccountCheckForTest(
   };
 }
 
+let ingressGuardCheckOverride: (() => Promise<boolean>) | undefined;
+
+/**
+ * Test-only: replace the ingress guard checks (ruleset version and unit state)
+ * for callers that reach {@link ensureHostingCaddy} without deps. Returns a
+ * restore function.
+ */
+export function setIngressGuardCheckForTest(
+  fn?: () => Promise<boolean>,
+): () => void {
+  const previous = ingressGuardCheckOverride;
+  ingressGuardCheckOverride = fn;
+  return () => {
+    ingressGuardCheckOverride = previous;
+  };
+}
+
+/** True when the ruleset at `path` carries {@link INGRESS_GUARD_MARKER}. */
+export async function ingressGuardInstalled(
+  path: string = INGRESS_GUARD_RULES_PATH,
+): Promise<boolean> {
+  if (ingressGuardCheckOverride) return await ingressGuardCheckOverride();
+  try {
+    const rules = await Deno.readTextFile(path);
+    return rules.includes(INGRESS_GUARD_MARKER);
+  } catch {
+    return false;
+  }
+}
+
+/** True when {@link INGRESS_GUARD_UNIT} is active (its table is loaded). */
+async function ingressGuardUnitActive(): Promise<boolean> {
+  if (ingressGuardCheckOverride) return await ingressGuardCheckOverride();
+  try {
+    const result = await runDefault("systemctl", [
+      "is-active",
+      "--quiet",
+      INGRESS_GUARD_UNIT,
+    ]);
+    return result.success;
+  } catch {
+    return false;
+  }
+}
+
 async function hostingCaddyAccountExists(): Promise<boolean> {
   if (accountCheckOverride) return await accountCheckOverride();
   const result = await runDefault("getent", ["passwd", HOSTING_CADDY_USER]);
@@ -232,9 +308,17 @@ export async function ensureHostingCaddy(
   const verifyTarballSha256 = deps?.verifyTarballSha256 ??
     verifyHostingCaddyTarballSha256;
   const accountExists = deps?.accountExists ?? hostingCaddyAccountExists;
+  const guardCurrent = deps?.ingressGuardCurrent ??
+    (() => ingressGuardInstalled());
+  const guardActive = deps?.ingressGuardActive ?? ingressGuardUnitActive;
 
   const caddy = caddyBinaryPath(layout.runtimesDir);
-  if (await caddyBinaryPresent(caddy) && await accountExists()) return caddy;
+  if (
+    await caddyBinaryPresent(caddy) && await accountExists() &&
+    await guardCurrent() && await guardActive()
+  ) {
+    return caddy;
+  }
 
   try {
     await runSetup();
@@ -262,6 +346,19 @@ export async function ensureHostingCaddy(
   if (!(await accountExists())) {
     throw new Error(
       `Hosting Caddy account ${HOSTING_CADDY_USER} is missing: the caddy-setup playbook did not complete`,
+    );
+  }
+  // Fail closed: without the guard any local user can reach the shared
+  // Traefik's PROXY protocol entrypoints and claim any client address in every
+  // tenant's app. Only the playbook installs and starts it.
+  if (!(await guardCurrent())) {
+    throw new Error(
+      `Ingress guard ${INGRESS_GUARD_VERSION} is not installed at ${INGRESS_GUARD_RULES_PATH}: the caddy-setup playbook did not complete`,
+    );
+  }
+  if (!(await guardActive())) {
+    throw new Error(
+      `Ingress guard ${INGRESS_GUARD_UNIT} is not active: local users could reach the shared Traefik entrypoints`,
     );
   }
   return caddy;

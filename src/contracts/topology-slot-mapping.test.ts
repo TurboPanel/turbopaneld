@@ -121,6 +121,26 @@ test("computeSlotMapping: absent overrides monitor only the first sorted uplink 
   assertEquals(mapping.hardwareSignalPageOrder, ["sig:a", "sig:b"]);
 });
 
+test("computeSlotMapping: real whole disks, RAID members included, take drive slots; md arrays and partitions never do", () => {
+  const disk = (
+    deviceId: string,
+    deviceType: "physical" | "virtual" | "partition",
+  ) => ({ deviceId, kernelName: deviceId, deviceType, isServiceDevice: false });
+  const mapping = computeSlotMapping(
+    snapshot({
+      blockDevices: [
+        disk("md0", "virtual"),
+        disk("sdb", "physical"),
+        disk("sda1", "partition"),
+        disk("sda", "physical"),
+        disk("sdc", "physical"),
+      ],
+    }),
+    EMPTY_TOPOLOGY_OVERRIDES,
+  );
+  assertEquals(mapping.blockPageOrder, ["sda", "sdb", "sdc"]);
+});
+
 test("computeSlotMapping: the default-route uplink is the auto primary even when it sorts later", () => {
   const snap = snapshot();
   snap.networks = snap.networks.map((device) =>

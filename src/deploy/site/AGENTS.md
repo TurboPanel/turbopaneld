@@ -380,6 +380,57 @@ single org mesh (`server.fabric.reconcile` — see `src/commands/fabric.ts`
 and `../../orchestration/AGENTS.md`). `{ enabled: false }` is a teardown; the
 daemon owns apply (no Ansible apply playbook).
 
+## nginx in front of Apache (`engine: "nginx+apache"`, `nginx-apache.ts`)
+
+One site, two engines. nginx's vhost listens on `listenPort` (plus the docker
+bridge), refuses dotfiles itself, serves only `NGINX_APACHE_STATIC_EXTENSIONS`
+(images, CSS, JS, fonts, media) from disk, and proxies everything else, and
+any static path missing on disk, to `127.0.0.1:<backendPort>`. Apache's vhost
+listens there only, honours `.htaccess`, runs PHP in the site's mode exactly
+as a plain Apache site (socket group `tpapache`), and takes the client address
+from `X-Forwarded-For` through mod_remoteip trusting `127.0.0.2` alone:
+nginx connects from that address (`proxy_bind`), while Apache still listens
+on `127.0.0.1` (Linux routes all of 127/8 to `lo`). That is not a security
+boundary: a local user can bind `127.0.0.2` too and claim any client address on
+loopback, so `.htaccess` IP rules must not be relied on for security. nginx sends exactly one address, `$remote_addr` after
+realip from loopback (the hosting Caddy, which replaces an inbound
+`X-Forwarded-For` because it trusts no proxies); a local process calling nginx
+directly can still claim any address. Apache's backend vhost also refuses
+dotfiles (`<LocationMatch>`, except `/.well-known/`) for a caller that skips
+nginx. The role's `LogFormat combined` logs `%a`, so the access log shows the
+visitor.
+Files nginx serves skip `.htaccess`; that is the documented caveat, and why
+the static list stays short.
+
+- The control plane allocates `backendPort` from the same loopback ledger as
+  `listenPort`; the parser requires it (and a distinct value) for this engine.
+- A paired site needs a principal: its tree carries `<user>-grp`, which both
+  `tpnginx` and `tpapache` join (`resolveSiteOwnership`,
+  `ensureEnginesCanReadPrincipalTree`).
+- Rollout is Apache first (`SITE_ENGINE_ORDER`), probed on `backendPort`,
+  then nginx, probed on `listenPort` through Apache. Apache's rollout stays
+  open (`openSiteRollout`) until nginx passes: an nginx failure restores both
+  vhosts, and the site's PHP runtime, filed under nginx, settles only then.
+- Removal needs nothing new: both sites dirs are swept by prefix.
+- Engine switch: before any engine rolls out, `retireStaleSiteVhosts` removes
+  the site's `tp-<env>-<service>.conf` from every file-vhost engine (Caddy,
+  nginx, Apache) that no longer serves it, then config-tests and reloads that
+  engine (if active), so it lets go of the port first. A failure stops the
+  apply. This is outside the rollout transaction: a later failure does not
+  bring the old vhost back. OpenLiteSpeed is not swept.
+
+## Host-wide ports (`assertSitePortsFree`)
+
+The control plane's port ledger is per environment. Before installing or
+writing anything, `applySites` reads every `*.conf` in the four engine sites
+dirs (all environments, through tp-host) and takes the ports from directive
+lines only (`siteVhostPorts`). A site is refused when its `listenPort` or
+`backendPort` is named by another environment's vhost, by another site of the
+same deploy, or, when no vhost of this environment names it yet, when a bind
+probe on `127.0.0.1` fails. The post-apply probe is still status-only: this
+check, not the probe, is what keeps one tenant's domain off another's
+listener.
+
 ## Managed-directory sites
 
 A site's content comes from one of two lanes, named by `sourceKind` on the wire

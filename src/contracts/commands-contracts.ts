@@ -893,9 +893,19 @@ export type EnvironmentDeployCronJob = {
 
 export type EnvironmentDeploySite = {
   composeServiceName: string;
-  engine: "caddy" | "apache" | "nginx" | "openlitespeed";
+  /**
+   * `nginx+apache` is nginx in front of Apache: nginx serves common static
+   * types on `listenPort` and proxies everything else to Apache on
+   * `backendPort`, where `.htaccess` and the site's PHP mode apply.
+   */
+  engine: "caddy" | "apache" | "nginx" | "openlitespeed" | "nginx+apache";
   root: string;
   listenPort: number;
+  /**
+   * Apache's loopback port behind nginx. Required for `nginx+apache` (only
+   * nginx connects to it), absent for every other engine.
+   */
+  backendPort?: number;
   /** Omitted means `release`, which is the behavior every existing site had. */
   sourceKind?: EnvironmentDeploySiteSourceKind;
   /**
@@ -4103,6 +4113,7 @@ const SITE_ENGINES = new Set([
   "apache",
   "nginx",
   "openlitespeed",
+  "nginx+apache",
 ]);
 
 function parseSiteEngine(
@@ -4124,6 +4135,24 @@ function parseSiteListenPort(value: unknown): number {
     throw new TypeError("Invalid sites entry");
   }
   return value;
+}
+
+/**
+ * Apache's port behind nginx: required for `nginx+apache`, a distinct
+ * loopback port, and dropped for any other engine (nothing would listen on it).
+ */
+function parseSiteBackendPort(
+  site: EnvironmentDeploySite,
+  value: unknown,
+): number | undefined {
+  if (site.engine !== "nginx+apache") return undefined;
+  const port = parseSiteListenPort(value);
+  if (port === site.listenPort) {
+    throw new TypeError(
+      `sites.${site.composeServiceName}: backendPort must differ from listenPort`,
+    );
+  }
+  return port;
 }
 
 function parseSiteOptionalId(value: unknown): number | undefined {
@@ -4425,6 +4454,8 @@ function parseSite(
     root: parseNonEmptyString(value, "root").trim(),
     listenPort: parseSiteListenPort(value.listenPort),
   };
+  const backendPort = parseSiteBackendPort(site, value.backendPort);
+  if (backendPort !== undefined) site.backendPort = backendPort;
   const sourceKind = parseSiteSourceKind(value.sourceKind);
   if (sourceKind) site.sourceKind = sourceKind;
   const cron = parseCronJobs(value.cron, `sites.${site.composeServiceName}`);

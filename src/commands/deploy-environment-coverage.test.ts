@@ -8,7 +8,10 @@ import {
 } from "../deploy/compose-files.ts";
 import { writeReleaseManifest } from "../deploy/release/deployment-json.ts";
 import { createTempLayout } from "../testing/temp-layout.ts";
-import { setHostingCaddyAccountCheckForTest } from "../deploy/ensure-hosting-caddy.ts";
+import {
+  setHostingCaddyAccountCheckForTest,
+  setIngressGuardCheckForTest,
+} from "../deploy/ensure-hosting-caddy.ts";
 import { resolveLayout } from "../paths/layout.ts";
 import {
   COMMAND_LOG_PHASES,
@@ -162,6 +165,9 @@ async function withDeployEnv(
   const restoreAccountCheck = setHostingCaddyAccountCheckForTest(() =>
     Promise.resolve(true)
   );
+  const restoreGuardCheck = setIngressGuardCheckForTest(() =>
+    Promise.resolve(true)
+  );
   try {
     await fn({
       stateDir: fixture.dirs.stateDir,
@@ -171,6 +177,7 @@ async function withDeployEnv(
     });
   } finally {
     restoreAccountCheck();
+    restoreGuardCheck();
     for (const [key, value] of previous) {
       if (value === undefined) Deno.env.delete(key);
       else Deno.env.set(key, value);
@@ -1156,6 +1163,18 @@ test({
           return Promise.resolve({
             success: true,
             stdout: fakeConfigJson({ web: { image: "nginx:alpine" } }),
+            stderr: "",
+            code: 0,
+          });
+        }
+        if (args.includes("network") && args.includes("inspect")) {
+          return Promise.resolve({
+            success: true,
+            stdout: JSON.stringify([{
+              IPAM: {
+                Config: [{ Subnet: "172.30.0.0/16", Gateway: "172.30.0.1" }],
+              },
+            }]),
             stderr: "",
             code: 0,
           });

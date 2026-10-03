@@ -1,0 +1,7 @@
+# Managed by TurboPanel daemon orchestration (hosting-caddy role).
+# Docker (and so the shared Traefik's loopback publish) does not start until the
+# ingress guard table is loaded: a failed turbopanel-ingress-guard.service fails
+# closed instead of leaving the PROXY protocol entrypoints open to every local
+# user. A check, not Requires=, so restarting the guard never restarts Docker.
+[Service]
+ExecStartPre=/usr/sbin/nft list table inet turbopanel_ingress_guard

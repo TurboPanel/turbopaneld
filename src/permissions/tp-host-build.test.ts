@@ -88,7 +88,7 @@ function execLine(argv: string[]): string {
 /** The full systemd-run argv for build `b1` of project `p1`, systemd 257. */
 function expectedSystemdRun(
   prefix: string,
-  tier: { floor?: boolean; privatePids?: boolean } = {},
+  tier: { floor?: boolean; privatePids?: boolean; hostDeny?: string } = {},
 ): string[] {
   const build = `${prefix}/var/lib/turbopanel-build`;
   const work = `${build}/work/b1`;
@@ -160,7 +160,7 @@ function expectedSystemdRun(
       "IPAddressDeny=0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 " +
       "169.254.0.0/16 172.16.0.0/12 192.0.0.0/24 192.168.0.0/16 " +
       "198.18.0.0/15 224.0.0.0/3 ::/128 64:ff9b::/96 2002::/16 " +
-      "fc00::/7 fe80::/10 ff00::/8",
+      "fc00::/7 fe80::/10 ff00::/8" + (tier.hostDeny ?? ""),
       `ExecStartPre=+${prefix}/opt/turbopanel/lib/tp-build-loopback sync`,
       "Slice=tpbuild.slice",
       "MemoryMax=4G",
@@ -268,6 +268,34 @@ test("build-run never opens a resolver through the private-range deny, on any po
     );
     const info = await Deno.stat(host.path("run/tpbuild/resolv.conf"));
     assertEquals((info.mode ?? 0) & 0o777, 0o644);
+  });
+});
+
+test("build-run denies the host's own public addresses but never a resolver or a private one", async () => {
+  await withHost(async (host) => {
+    await setUpBuildHost(host);
+    await Deno.writeTextFile(
+      host.path("run/host-addrs"),
+      [
+        "203.0.113.7/24",
+        "9.9.9.9/32",
+        "10.1.2.3/8",
+        "2001:db8::5/64",
+        "fe80::1/64",
+        "bad;addr/1",
+        "",
+      ].join("\n"),
+    );
+    const result = await host.run(["build-run", "b1", "p1"]);
+    assertEquals(result.code, 0, result.stderr);
+    assertEquals(
+      execLines(result.stdout)[3],
+      execLine(
+        expectedSystemdRun(host.prefix, {
+          hostDeny: " 203.0.113.7/32 2001:db8::5/128",
+        }),
+      ),
+    );
   });
 });
 
