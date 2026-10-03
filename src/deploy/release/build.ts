@@ -375,10 +375,12 @@ async function yarnIsBerry(workingDir: string): Promise<boolean> {
   return await regularFileExists(join(workingDir, ".yarnrc.yml"));
 }
 
+type NodeManagerName = "pnpm" | "yarn" | "npm";
+
 /** The manager and major version `package.json`'s `packageManager` pins. */
 async function readPackageManagerPin(
   workingDir: string,
-): Promise<{ name: "pnpm" | "yarn" | "npm"; major: number } | undefined> {
+): Promise<{ name: NodeManagerName; major: number } | undefined> {
   try {
     const raw = await Deno.readTextFile(join(workingDir, "package.json"));
     const pin = JSON.parse(raw)?.packageManager;
@@ -387,7 +389,7 @@ async function readPackageManagerPin(
       : null;
     if (!match) return undefined;
     return {
-      name: match[1] as "pnpm" | "yarn" | "npm",
+      name: match[1] as NodeManagerName,
       major: Number(match[2]),
     };
   } catch {
@@ -435,7 +437,7 @@ export async function deriveNodeInstallCommand(params: {
 
   const hasPnpmLock = await has("pnpm-lock.yaml");
   const hasYarnLock = await has("yarn.lock");
-  let lockfileManager: "pnpm" | "yarn" | "npm" = "npm";
+  let lockfileManager: NodeManagerName = "npm";
   if (hasPnpmLock) lockfileManager = "pnpm";
   else if (hasYarnLock) lockfileManager = "yarn";
   const pin = await readPackageManagerPin(params.workingDir);
