@@ -589,6 +589,27 @@ export function principalHomePath(
   return join(layout.principalHomeRoot, username);
 }
 
+/** Release staging root, beside the principal homes (tp-host `publish-open`). */
+export const RELEASE_STAGING_DIRNAME = ".tp-staging";
+
+/**
+ * `<principalHomeRoot>/.tp-staging/<username>.<serviceId>.<releaseId>` — the
+ * daemon's own copy of a release, which tp-host `publish` seals in place and
+ * renames into `releases/<releaseId>`. It sits on the homes' filesystem so
+ * that step is a rename, and the leading dot keeps it apart from every
+ * principal name.
+ */
+export function releaseStagingDir(
+  layout: Pick<LayoutPaths, "principalHomeRoot">,
+  release: { username: string; serviceId: string; releaseId: string },
+): string {
+  return join(
+    layout.principalHomeRoot,
+    RELEASE_STAGING_DIRNAME,
+    `${release.username}.${release.serviceId}.${release.releaseId}`,
+  );
+}
+
 /**
  * `<home>/home` — the account's passwd home (`$HOME`): dotfiles, shell
  * history, tool caches. `<username>:<username>-grp 0700`.

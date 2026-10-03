@@ -728,13 +728,17 @@ it regresses:
     on a socket), php-fpm (`Type=notify`, its own runtime directory) or
     detached lsphp (vendored, `PHPRC=` its php.ini, on a socket). Every line is
     pinned: the owner, its group and slice, no capabilities, the exec line per
-    mode and series, `BindPaths=<home>/tmp:/tmp`, `ProtectSystem=strict` with
+    mode and series, `IPAddressDeny=localhost link-local multicast
+    0.0.0.0/8 fc00::/7` with only `IPAddressAllow=127.0.0.53` (required,
+    exact),
+    `BindPaths=<home>/tmp:/tmp`, `ProtectSystem=strict` with
     writes only inside the home, and `TemporaryFileSystem=/etc/turbopanel:ro`
     plus `BindReadOnlyPaths=` of the site's config directory (the owner cannot
     traverse tp's 0750 tree otherwise). Sockets sit at
     `/run/turbopanel-php-<siteId>/`, the owner's, group a web server's, 0660.
     Config lives in `/etc/turbopanel/php/sites/<siteId>/` (dir 0750, files
-    0640, root:<owner>-grp, directive allowlist; php-fpm pools take
+    0640, root:<owner>-grp, directive allowlist; php.ini's only non-plain
+    section is `[PATH=<owner home>]`, the locked limits; php-fpm pools take
     `listen.acl_users`, never `user`/`group`/`listen.group`);
     `php-test <siteId>` runs the installed unit's binary on that config as
     the owner, and `php-site-register` writes the attached-lsphp launcher's
@@ -770,6 +774,17 @@ it regresses:
     every native/static release build through it
     (`src/deploy/release/build-sandbox.ts`), so no tenant build command runs
     as `tp`;
+  - brings a release into `<home>/sites/<svc>/releases/<id>` only through
+    `publish-open <user> <svc> <id>` (a fresh daemon-owned leaf under
+    `<principal root>/.tp-staging`, `root:tp 0710`, a class no generic verb
+    accepts) and `publish <user> <svc> <id>`: it takes the leaf, refuses hard
+    links, special files and a shipped `shared`, seals it recursively
+    (`root:<user>-grp`, no set-id, nothing group/other-writable), refuses a
+    symlink that resolves outside it, renames it in through a root-owned chain
+    on the same filesystem, links `shared`, sets the top to `0550` and swaps
+    `current` (a directory at `current` or `current.tmp.<id>` is refused).
+    `install -d` / `mkdir -p` under `releases/<id>` are refused, `cp -a` is
+    gone, and `ln` uses `-T`;
   `src/permissions/tp-host.test.ts` runs it unprivileged in its test mode
   (`TP_HOST_TEST_PREFIX`, ignored as root) against the daemon's own rendered
   units and a hostile corpus. Known gap: it is TOCTOU-safe for paths it pins,

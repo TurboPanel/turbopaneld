@@ -92,9 +92,11 @@ from what is actually installed.
 `ProtectKernelTunables=yes`, `ProtectKernelModules=yes`,
 `ProtectControlGroups=yes`, `RestrictSUIDSGID=yes`, `RestrictRealtime=yes`,
 `LockPersonality=yes`, and an **empty** `CapabilityBoundingSet=` /
-`AmbientCapabilities=`. The single writable path is `ReadWritePaths=<siteShared>`
-— the release tree stays read-only to the runtime user, so a compromised app
-cannot rewrite the code it is running. No supplementary-group dance is needed
+`AmbientCapabilities=`. The writable paths are the site's own `shared/` plus
+the principal's `home/`, `data/` and `tmp/` (`ReadWritePaths=`, built by
+`principalReadWritePaths`), with `HOME=<home>/home` and `TMPDIR=<home>/tmp`.
+The home root, `sites/` and the release tree stay read-only to the runtime
+user, so a compromised app cannot rewrite the code it is running. No supplementary-group dance is needed
 here (unlike the web engines): the app *is* the principal that already has group
 read on its own tree.
 

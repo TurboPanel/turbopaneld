@@ -1,0 +1,138 @@
+#!/bin/sh
+# tp-php-loopback — keeps site PHP off every loopback port but the database
+# proxy's (POSIX sh, root:root, installed next to tp-host in lib/).
+#
+# A per-site PHP unit (turbopanel-php-<id>.service) may dial 127.0.0.1, but the
+# unit cannot say "port 13306 only" (systemd filters by address). This script
+# adds the port filter: one nftables table, `inet turbopanel_php`, whose output
+# hook (before Docker's NAT, so a published 127.0.0.1:<port> is still seen as
+# 127.0.0.1) refuses, for every site owner's Linux user that has a PHP unit,
+# anything bound for 127.0.0.0/8 or ::1 except
+#
+#   - 127.0.0.1 tcp 13306   the database proxy (src/managed/proxysql.ts MYSQL_PORT)
+#   - 127.0.0.53 port 53    systemd-resolved's stub
+#
+# so ProxySQL's admin (6032) and metrics (6070) ports, other sites' ports and
+# Apache's backend port are closed to PHP. Rules are matched by uid (`meta
+# skuid`), so they also bind that user's ssh and cron sessions.
+#
+# One verb, `sync`: the whole table is rebuilt from the unit files on disk (one
+# atomic nft transaction) and read back. Two callers:
+#   - every PHP unit's `ExecStartPre=+` (FAILS CLOSED: when this exits non-zero
+#     the unit does not start, so PHP never runs with open loopback);
+#   - the daemon, through `tp-host php-loopback-sync`, after it installs or
+#     removes PHP units (a removed runtime's user drops out of the set).
+# Because the set is derived from disk, start and sweep cannot disagree.
+#
+# Replies: the output hook also sees every packet a socket owned by the user
+# sends, including the SYN-ACK and data a local server of theirs (a native app
+# on 127.0.0.1:<port>) returns to its client. `ct state established,related
+# accept` comes first so those replies are never refused; PHP's own new
+# connections are `new` and still hit the port filter.
+#
+# Needs the `nft` and `flock` programs (Ansible installs the nftables and
+# util-linux packages in turbopanel-user/root-helpers.yml). When either is
+# missing the script exits non-zero with a message naming it, so a PHP unit
+# does not start with open loopback and the daemon's reconcile reports why.
+#
+# Not closed: someone running `nft flush ruleset` / `nft delete table inet
+# turbopanel_php` while PHP runs. The next unit start, the next deploy or the
+# daemon's boot reconcile restores it; until then loopback is open to PHP.
+set -eu
+umask 077
+
+PRINCIPAL_ID_MIN=15001
+DB_PORT=13306
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+tp_die() {
+  printf 'tp-php-loopback: %s\n' "$*" >&2
+  exit 1
+}
+
+if [ "$(id -u)" = "0" ]; then
+  TP_TEST=""
+  P=""
+else
+  [ -n "${TP_HOST_TEST_PREFIX:-}" ] || tp_die "must run as root"
+  TP_TEST=1
+  P="$TP_HOST_TEST_PREFIX"
+fi
+UNITS="$P/etc/systemd/system"
+
+[ "$#" -eq 1 ] && [ "$1" = "sync" ] || tp_die "only: sync"
+
+uid_of() {
+  if [ -n "$TP_TEST" ]; then
+    awk -F: -v n="$1" '$1 == n { print $3; exit }' "$P/etc/passwd"
+  else
+    getent passwd "$1" | cut -d: -f3
+  fi
+}
+
+# The distinct uids of the site owners that have a PHP unit.
+owner_uids() {
+  _acc=""
+  for _u in "$UNITS"/turbopanel-php-*.service; do
+    [ -f "$_u" ] && [ ! -L "$_u" ] || continue
+    _name="$(sed -n 's/^User=//p' "$_u" | head -1)"
+    case "$_name" in ''|-*|*[!A-Za-z0-9_.-]*) tp_die "$_u: bad User=" ;; esac
+    _uid="$(uid_of "$_name")"
+    # An account that no longer exists cannot run anything.
+    [ -n "$_uid" ] || continue
+    case "$_uid" in *[!0-9]*) tp_die "$_u: bad uid for $_name" ;; esac
+    [ "$_uid" -ge "$PRINCIPAL_ID_MIN" ] && [ "$_uid" -ne 65534 ] ||
+      tp_die "$_u: $_name is not a site owner's account"
+    _acc="$_acc$_uid
+"
+  done
+  printf '%s' "$_acc" | sort -un
+}
+
+ruleset() {
+  _elems=""
+  for _id in $1; do _elems="${_elems:+$_elems, }$_id"; done
+  _line=""
+  [ -z "$_elems" ] || _line="    elements = { $_elems }"
+  cat <<RULES
+add table inet turbopanel_php
+delete table inet turbopanel_php
+table inet turbopanel_php {
+  set owners {
+    type uid
+$_line
+  }
+  chain output {
+    type filter hook output priority -150; policy accept;
+    meta skuid @owners ct state established,related accept
+    meta skuid @owners ip daddr 127.0.0.1 tcp dport $DB_PORT accept
+    meta skuid @owners ip daddr 127.0.0.53 udp dport 53 accept
+    meta skuid @owners ip daddr 127.0.0.53 tcp dport 53 accept
+    meta skuid @owners ip daddr 127.0.0.0/8 meta l4proto tcp reject with tcp reset
+    meta skuid @owners ip daddr 127.0.0.0/8 reject
+    meta skuid @owners ip6 daddr ::1 meta l4proto tcp reject with tcp reset
+    meta skuid @owners ip6 daddr ::1 reject
+  }
+}
+RULES
+}
+
+_ids="$(owner_uids)"
+_rules="$(ruleset "$_ids")"
+
+if [ -n "$TP_TEST" ]; then
+  printf '%s\n' "$_rules"
+  exit 0
+fi
+
+command -v nft >/dev/null 2>&1 || tp_die "nft is not installed (apt install nftables); site PHP cannot start without its loopback rules"
+command -v flock >/dev/null 2>&1 || tp_die "flock is not installed"
+exec 9>/run/turbopanel-php-loopback.lock
+flock 9
+printf '%s\n' "$_rules" | nft -f - || tp_die "nft refused the ruleset"
+# Read it back: every owner must be in the live set.
+_live="$(nft list table inet turbopanel_php)" || tp_die "ruleset not loaded"
+for _id in $_ids; do
+  printf '%s\n' "$_live" | grep -Eq "(^|[ ,{])$_id([ ,}]|\$)" ||
+    tp_die "uid $_id missing from the loaded set"
+done

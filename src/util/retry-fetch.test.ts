@@ -105,6 +105,19 @@ test("a Deno DNS lookup failure is retried like EAI_AGAIN", async () => {
   await res.body?.cancel();
 });
 
+test("a refused connection is retried like run.sh's curl exit 7", async () => {
+  const s = scripted([
+    new TypeError("error sending request", {
+      cause: new Error("tcp connect error: Connection refused (os error 111)"),
+    }),
+    reply(200),
+  ]);
+  const res = await fetchWithRetry(s.doFetch, { sleep: s.sleep });
+  assertEquals(res.status, 200);
+  assertEquals(s.calls.n, 2);
+  await res.body?.cancel();
+});
+
 test("persistent resets rethrow the original error after four attempts", async () => {
   const s = scripted([new TypeError("connection reset by peer")]);
   await assertRejects(
