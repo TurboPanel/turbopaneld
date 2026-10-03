@@ -610,6 +610,22 @@ test("openlitespeedVhostConfig serves a static document root with no directory l
   assertEquals(conf.includes("allowBrowse 0"), false);
 });
 
+test("openlitespeedVhostConfig never serves script source as plain text", () => {
+  const staticConf = openlitespeedVhostConfig();
+  assertStringIncludes(staticConf, String.raw`RewriteRule \.(php[0-9]?|phtml|`);
+  assertStringIncludes(staticConf, "- [F,L,NC]");
+  const phpConf = openlitespeedVhostConfig({
+    processorName: "lsphp_x",
+    lsphpPath: "/opt/lsphp/bin/lsphp",
+    user: "u",
+    group: "g",
+    adminValues: [],
+  });
+  // `.php` runs through the handler; the other script suffixes are denied.
+  assertStringIncludes(phpConf, String.raw`RewriteRule \.(phtml|phar|`);
+  assertEquals(phpConf.includes("php[0-9]?"), false);
+});
+
 test("openlitespeedMainConfig assembles a single httpd_config.conf from fragments", async () => {
   const { layout, cleanup } = await makeTestLayout();
   try {

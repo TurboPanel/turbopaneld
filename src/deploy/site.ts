@@ -1233,6 +1233,25 @@ function formatOpenLiteSpeedAdminValue(value: PhpAdminValue): string {
 }
 
 /**
+ * Answer 403 for script files the vhost does not run. OpenLiteSpeed serves any
+ * file it has no handler for as plain text, so a `.php` file in a static site
+ * (or a `.phtml` next to a `.php` handler) would hand its source to anyone who
+ * asks. `.php` itself is left alone when the vhost has the LSAPI handler.
+ */
+function openlitespeedScriptDenyRewrite(phpHandled: boolean): string {
+  const exts = phpHandled
+    ? "phtml|phar|phps|pl|py|cgi|sh"
+    : "php[0-9]?|phtml|phar|phps|pl|py|cgi|sh";
+  return `rewrite {
+  enable                    1
+  rules                     <<<END_rules
+RewriteRule \\.(${exts})$ - [F,L,NC]
+END_rules
+}
+`;
+}
+
+/**
  * Per-site `vhconf.conf`.
  *
  * `allowBrowse` is OpenLiteSpeed's "Accessible" switch for the context, not
@@ -1252,6 +1271,7 @@ index {
   indexFiles index.html
   autoIndex 0
 }
+${openlitespeedScriptDenyRewrite(false)}
 context / {
   allowBrowse 1
   location $DOC_ROOT/
@@ -1275,6 +1295,7 @@ scripthandler {
   add                       lsapi:${php.processorName} php
 }
 ${overrideBlock}
+${openlitespeedScriptDenyRewrite(true)}
 context / {
   allowBrowse 1
   location $DOC_ROOT/
