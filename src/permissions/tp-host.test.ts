@@ -2238,6 +2238,8 @@ test("per-site PHP config: root:<owner>-grp, 0750/0640, directives on an allowli
       ["rlimit_core", add(PHP_SITE, "rlimit_core = unlimited")],
       ["process.dumpable", add(PHP_SITE, "process.dumpable = yes")],
       ["a variable", line("pm.max_children", "pm.max_children = ${pool}")],
+      ["a status listener", add(PHP_SITE, "pm.status_listen = 0.0.0.0:9000")],
+      ["an unlisted pm key", add(PHP_SITE, "pm.unknown = 1")],
       ["chdir outside the home", line("chdir", "chdir = /etc")],
     ];
     for (const [label, mutate] of badFpm) {
@@ -2478,6 +2480,35 @@ test("per-site PHP: what the daemon renders for each mode and web server passes 
         assertEquals(tested.code, 0, tested.stderr);
       }
     }
+  });
+});
+
+test("one site is bound to one owner across its service, socket and config", async () => {
+  await withPhpHost(async (host) => {
+    assertEquals(
+      (await installUnit(host, phpServiceName, phpService(host, "fastcgi")))
+        .code,
+      0,
+    );
+    // The service names alice; a socket for the same site owned by bob and a
+    // config group of bob's are all refused.
+    const other = phpSocket().replace("SocketUser=alice", "SocketUser=bob");
+    assertEquals(
+      (await installUnit(host, phpSocketName, other)).code === 0,
+      false,
+    );
+    assertEquals((await installUnit(host, phpSocketName, phpSocket())).code, 0);
+    await refused(host, [
+      "install",
+      "-d",
+      "-m",
+      "0750",
+      "-o",
+      "root",
+      "-g",
+      "bob-grp",
+      phpConfDir(host),
+    ]);
   });
 });
 

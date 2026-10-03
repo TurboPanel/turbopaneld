@@ -5,7 +5,8 @@
 # `docker` group, so a failure here must never block the Docker install or a
 # converge: the whole install is a block with a rescue that only warns. Stage 3
 # exception: while Traefik's switch is on (or this converge turns it on), Traefik depends on the gate's
-# read-only socket, so the rescue fails the converge instead.
+# read-only socket, so the rescue fails the converge instead. In enforce mode
+# (docker_gate_mode) the rescue always fails the converge.
 
 # Outside the block, so a typo ("ture") fails loudly instead of being rescued,
 # and never quietly turns the switch off.
@@ -14,6 +15,13 @@
     that:
       - (docker_gate_ingress_socket | string | lower) in ['', 'true', 'false', 'yes', 'no', '1', '0', 'on', 'off']
     fail_msg: "docker_gate_ingress_socket must be true or false (or empty to leave the switch as it is)"
+    quiet: true
+
+- name: Refuse a gate mode that is not observe or enforce
+  ansible.builtin.assert:
+    that:
+      - (docker_gate_mode | string) in ['observe', 'enforce']
+    fail_msg: "docker_gate_mode must be observe or enforce"
     quiet: true
 
 - name: Check for the Docker binary
@@ -46,6 +54,13 @@
         msg: >-
           Docker gate not installed (observe mode, nothing depends on it):
           {{ ansible_failed_result.msg | default('unknown error') }}
+
+    - name: Fail the converge when the gate is meant to enforce
+      ansible.builtin.fail:
+        msg: >-
+          Docker gate failed in enforce mode (a gate that is not the one just
+          staged must not keep running): {{ ansible_failed_result.msg | default('unknown error') }}
+      when: (docker_gate_mode | string) == 'enforce'
 
     - name: Look for Traefik's switch file after the failure
       ansible.builtin.stat:
