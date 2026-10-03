@@ -229,7 +229,27 @@ export function standbyReplicationStatusSql(): string {
     `    WHEN r.status = 'streaming' AND pg_catalog.pg_last_xact_replay_timestamp() IS NOT NULL`,
     `    THEN EXTRACT(EPOCH FROM (now() - pg_catalog.pg_last_xact_replay_timestamp()))`,
     `    ELSE NULL`,
-    `  END AS lag_seconds`,
+    `  END AS lag_seconds,`,
+    // Both stay readable after the WAL receiver exits (primary gone): the
+    // last position received and flushed, and the last position replayed.
+    // NULL (empty) when streaming never started since the server started.
+    `  pg_catalog.pg_last_wal_receive_lsn()::text AS received_lsn,`,
+    `  pg_catalog.pg_last_wal_replay_lsn()::text AS replay_lsn,`,
+    // How far the received WAL trails the primary's last reported WAL end,
+    // from the standby's own receiver state (no primary query, no clock).
+    `  CASE`,
+    `    WHEN r.status = 'streaming' AND r.latest_end_lsn IS NOT NULL AND r.flushed_lsn IS NOT NULL`,
+    `    THEN GREATEST(pg_catalog.pg_wal_lsn_diff(r.latest_end_lsn, r.flushed_lsn), 0)`,
+    `    ELSE NULL`,
+    `  END AS receive_lag_bytes,`,
+    // Seconds since the receiver last heard from the primary, on this host's
+    // clock. After a silent link drop the receiver stays 'streaming' until
+    // wal_receiver_timeout; this exposes it.
+    `  CASE`,
+    `    WHEN r.status = 'streaming' AND r.last_msg_receipt_time IS NOT NULL`,
+    `    THEN GREATEST(EXTRACT(EPOCH FROM (now() - r.last_msg_receipt_time)), 0)`,
+    `    ELSE NULL`,
+    `  END AS receipt_age_seconds`,
     `FROM (SELECT 1) AS _dummy`,
     `LEFT JOIN pg_catalog.pg_stat_wal_receiver r ON true;`,
   ].join("\n");

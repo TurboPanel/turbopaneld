@@ -42,6 +42,9 @@ export async function generateKeys(): Promise<TestKeys> {
 /** A well-formed body digest for tests that do not care which body it binds. */
 export const TEST_BODY_DIGEST = "A".repeat(43);
 
+/** The container name the default test payload approves. */
+export const TEST_CONTAINER_NAME = "tenantapp-web-1";
+
 export function payloadFor(
   nowSec: number,
   patch: Partial<ApprovalPayload> = {},
@@ -51,6 +54,7 @@ export function payloadFor(
     project: "tenantapp",
     composeDigest: "sha256:0000",
     bodyDigest: TEST_BODY_DIGEST,
+    containerName: TEST_CONTAINER_NAME,
     jti: crypto.randomUUID(),
     features: ["privileged"],
     iat: nowSec,

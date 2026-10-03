@@ -1406,6 +1406,14 @@ export type EnvironmentStopPayload = {
    * that named these, so the payload is the only remaining copy for this host.
    */
   siteReleases?: Array<{ serviceId: string; username: string }>;
+  /**
+   * Principals no project, site or app on this host uses once this delete
+   * commits: the daemon retires each through `tp-host principal-remove`
+   * (slice, processes, key file, group memberships, home tree, account and
+   * group) after everything above is reclaimed. Only ever set by a delete
+   * teardown; a plain stop never carries it.
+   */
+  retirePrincipals?: Array<{ username: string }>;
 };
 
 export type EnvironmentStopResult = {
@@ -1641,6 +1649,24 @@ export type ManagedReplicationHealth = {
   lagBytes?: number;
   lagSeconds?: number;
   observedAt: string;
+  /** Standby only: `pg_last_wal_receive_lsn()` text (absent when NULL). */
+  receivedLsn?: string;
+  /** Standby only: `pg_last_wal_replay_lsn()` text (absent when NULL). */
+  replayLsn?: string;
+  /** Standby only, while streaming: received-vs-primary byte lag. */
+  receiveLagBytes?: number;
+  /**
+   * Standby only, on `managed-health-result`: the daemon's last `streaming`
+   * read of this member. `ageMs` is measured on the daemon's monotonic clock
+   * when the result is built.
+   */
+  lastStreaming?: {
+    at: string;
+    ageMs: number;
+    lagBytes?: number;
+    lagSeconds?: number;
+    receiveLagBytes?: number;
+  };
 };
 
 /** Must stay in sync with the instance canonical `managed.apply` shape. */
@@ -5427,6 +5453,16 @@ function parseStopSiteRelease(
   return { serviceId: value.serviceId, username: value.username };
 }
 
+function parseStopRetirePrincipal(value: unknown): { username: string } {
+  if (
+    !isRecord(value) || typeof value.username !== "string" ||
+    !STOP_SITE_RELEASE_USERNAME_RE.test(value.username)
+  ) {
+    throw new TypeError("Invalid environment.stop retirePrincipals entry");
+  }
+  return { username: value.username };
+}
+
 function parseStopFabricNetworks(value: unknown): string[] | undefined {
   if (value === undefined) return undefined;
   if (!Array.isArray(value)) {
@@ -5463,6 +5499,11 @@ export function parseEnvironmentStopPayload(
     "siteReleases",
     parseStopSiteRelease,
   );
+  const retirePrincipals = parseOptionalMaterialArray(
+    value.retirePrincipals,
+    "retirePrincipals",
+    parseStopRetirePrincipal,
+  );
   return {
     environmentId: parseNonEmptyString(value, "environmentId"),
     projectId: parseNonEmptyString(value, "projectId"),
@@ -5470,6 +5511,7 @@ export function parseEnvironmentStopPayload(
     ...(ingressServices === undefined ? {} : { ingressServices }),
     ...(fabricNetworks === undefined ? {} : { fabricNetworks }),
     ...(siteReleases === undefined ? {} : { siteReleases }),
+    ...(retirePrincipals === undefined ? {} : { retirePrincipals }),
   };
 }
 
@@ -6616,6 +6658,27 @@ export function parseManagedReplicationHealth(
     value.lagSeconds >= 0
   ) {
     health.lagSeconds = value.lagSeconds;
+  }
+  return withStandbyPositions(health, value);
+}
+
+/** Standby WAL positions and receive lag, when present and well-formed. */
+function withStandbyPositions(
+  health: ManagedReplicationHealth,
+  value: Record<string, unknown>,
+): ManagedReplicationHealth {
+  if (typeof value.receivedLsn === "string" && value.receivedLsn.length <= 32) {
+    health.receivedLsn = value.receivedLsn;
+  }
+  if (typeof value.replayLsn === "string" && value.replayLsn.length <= 32) {
+    health.replayLsn = value.replayLsn;
+  }
+  if (
+    typeof value.receiveLagBytes === "number" &&
+    Number.isFinite(value.receiveLagBytes) &&
+    value.receiveLagBytes >= 0
+  ) {
+    health.receiveLagBytes = value.receiveLagBytes;
   }
   return health;
 }

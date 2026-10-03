@@ -1,6 +1,7 @@
 import { assertEquals } from "@std/assert";
 import type { DockerCliResult } from "../deploy/docker-cli.ts";
 import { probeManagedMemberHealth } from "./health.ts";
+import { StandbyStreamingTracker } from "./standby-streaming.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}; Sonar typescript:S2187 only
@@ -165,4 +166,64 @@ test("probe answers ok:false when the engine query fails", async () => {
     },
   );
   assertEquals(result.ok, false);
+});
+
+test("a replica answer carries the last streaming read from the tracker", async () => {
+  const tracker = new StandbyStreamingTracker();
+  tracker.record(
+    MEMBER_ID,
+    {
+      state: "streaming",
+      observedAt: "2026-10-03T00:00:00.000Z",
+      lagBytes: 0,
+      receiptAgeSeconds: 0,
+    },
+    1_000,
+  );
+  let mono = 7_000;
+  const result = await probeManagedMemberHealth(
+    {
+      managedId: MANAGED_ID,
+      memberId: MEMBER_ID,
+      role: "replica",
+      engine: "postgres",
+    },
+    fakeDocker("stopped\t\t\t0/3000148\t0/3000148\n"),
+    { tracker, monoMs: () => mono++ },
+  );
+  if (!result.ok) throw new Error(result.error);
+  const replication = result.member.replication;
+  assertEquals(replication?.state, "stopped");
+  assertEquals(replication?.receivedLsn, "0/3000148");
+  assertEquals(replication?.replayLsn, "0/3000148");
+  assertEquals(replication?.lastStreaming, {
+    at: "2026-10-03T00:00:00.000Z",
+    ageMs: 6_001,
+    lagBytes: 0,
+  });
+});
+
+test("a streaming replica answer refreshes the tracker; a primary has none", async () => {
+  const tracker = new StandbyStreamingTracker();
+  const request = {
+    managedId: MANAGED_ID,
+    memberId: MEMBER_ID,
+    role: "replica",
+    engine: "postgres",
+  };
+  const replica = await probeManagedMemberHealth(
+    request,
+    fakeDocker("streaming\t0\t0\t0/5\t0/5\t0\t0.5\n"),
+    { tracker, monoMs: () => 500 },
+  );
+  if (!replica.ok) throw new Error(replica.error);
+  // Stamped at the last receipt: 0.5 s before the read.
+  assertEquals(replica.member.replication?.lastStreaming?.ageMs, 500);
+  const primary = await probeManagedMemberHealth(
+    { ...request, role: "primary" },
+    fakeDocker("streaming\t0\n"),
+    { tracker, monoMs: () => 500 },
+  );
+  if (!primary.ok) throw new Error(primary.error);
+  assertEquals(primary.member.replication?.lastStreaming, undefined);
 });

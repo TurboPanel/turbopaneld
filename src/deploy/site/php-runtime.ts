@@ -95,6 +95,33 @@ export function sitePhpRuntimeId(
   return id;
 }
 
+const RUNTIME_SUFFIX_RE = /^(fcgi|fpm|lsd)\d+$/;
+
+/**
+ * `id` is one of this site's runtimes: exactly `<siteKey>-<fcgi|fpm|lsd><digits>`.
+ * A prefix match is not enough — another site's key can begin with this one's
+ * (`shop-<hash>` and a service slugged `shop-<hash>-x`).
+ */
+export function isSitePhpRuntimeOf(id: string, siteKey: string): boolean {
+  return id.startsWith(`${siteKey}-`) &&
+    RUNTIME_SUFFIX_RE.test(id.slice(siteKey.length + 1));
+}
+
+/**
+ * A per-site runtime: FastCGI, php-fpm or detached lsphp (`lsd`, which
+ * OpenLiteSpeed sites run). Other `turbopanel-php-*` units are not this
+ * module's to sweep or start.
+ */
+export function isSitePhpRuntimeId(id: string): boolean {
+  return /-(fcgi|fpm|lsd)\d+$/.test(id);
+}
+
+/** The runtime ids a vhost hands PHP to (`/run/turbopanel-php-<id>/php.sock`). */
+export function sitePhpRuntimeIdsIn(config: string): string[] {
+  const re = /\/run\/turbopanel-php-([a-z0-9][a-z0-9-]{0,63})\/php\.sock/g;
+  return [...config.matchAll(re)].map((m) => m[1]);
+}
+
 export function sitePhpServiceName(id: string): string {
   return `${SITE_PHP_UNIT_PREFIX}${id}.service`;
 }
@@ -152,6 +179,8 @@ export type SitePhpRuntimeSpec = Readonly<{
   home: string;
   /** The daemon's config root (`/etc/turbopanel`). */
   configDir: string;
+  /** The root-owned lib directory holding `tp-php-loopback` (`<install>/lib`). */
+  libDir: string;
   webAccount: SitePhpWebAccount;
 }>;
 
@@ -172,6 +201,49 @@ function phpCgiExec(spec: SitePhpRuntimeSpec): string {
 function phpFpmExec(spec: SitePhpRuntimeSpec): string {
   const cfg = sitePhpConfigDir(spec.configDir, spec.id);
   return `/usr/sbin/php-fpm${spec.series} --nodaemonize --fpm-config ${cfg}/php-fpm.conf -c ${cfg}/php.ini`;
+}
+
+/**
+ * What site PHP may not dial. `IPAddressAllow=` wins over the deny, so it
+ * reopens exactly two addresses.
+ *
+ * - `localhost` (127.0.0.0/8, ::1) is denied, with 127.0.0.1 allowed back so
+ *   site PHP can reach the database proxy (ProxySQL, port 13306, published on
+ *   127.0.0.1 for the `local` scope). systemd filters by address, never by
+ *   port, so that alone would also open ProxySQL's admin (6032) and REST
+ *   (6070) listeners, every site's vhost and Apache backend port (which would
+ *   bypass the edge and spoof `X-Forwarded-For`), Traefik's PROXY-protocol
+ *   entrypoints and the HA orchestrator API. The port filter is
+ *   `tp-php-loopback`: an nftables table that refuses, per site owner's Linux
+ *   user, every loopback destination but 127.0.0.1:13306 and the resolver
+ *   stub. The unit runs it as root in `ExecStartPre=+` and does not start when
+ *   it fails (fail closed); the daemon re-runs it after installing or
+ *   removing a runtime, so the user set follows the units on disk. It cannot
+ *   close the gap if someone flushes the nftables ruleset while PHP runs: the
+ *   next unit start, deploy or daemon boot restores it.
+ * - `link-local` (169.254/16, fe80::/10) and `fc00::/7` (ULA, which holds
+ *   AWS's IPv6 metadata `fd00:ec2::254`): cloud metadata.
+ * - `multicast` and `0.0.0.0/8` (which Linux routes to the host itself).
+ * - `127.0.0.53`, allowed: systemd-resolved's stub, the resolver
+ *   `/etc/resolv.conf` names on Ubuntu; without it a site resolves nothing.
+ *
+ * Not closed: RFC 1918 and CGNAT. A `datacenter`/`fabric` scope database
+ * (tp0 is in 10/8) and a VPC's own services live there, and Docker's bridge
+ * pools are operator-configured, so the host's private addresses and other
+ * containers' bridge IPs stay reachable. The systemd filter covers these
+ * units only and, without cgroup BPF, systemd only warns and does not filter;
+ * the nftables rules match the owner's uid, so they also bind that Linux
+ * user's ssh, cron and CLI processes on loopback.
+ *
+ * tp-host pins both strings (`tp_php_service_pinned_ok`).
+ */
+export const SITE_PHP_IP_DENY =
+  "localhost link-local multicast 0.0.0.0/8 fc00::/7";
+export const SITE_PHP_IP_ALLOW = "127.0.0.1 127.0.0.53";
+
+/** The root guard every PHP unit runs first; tp-host pins this exact line. */
+export function sitePhpLoopbackGuard(libDir: string): string {
+  return `+${libDir}/tp-php-loopback sync`;
 }
 
 /** The lines that differ by mode, in tp-host's pinned forms. */
@@ -218,6 +290,9 @@ export function sitePhpServiceUnit(
       : []),
     "",
     "[Service]",
+    // Root (`+`), before PHP starts: loads the per-user loopback rules. When it
+    // fails the unit does not start, so PHP never runs with open loopback.
+    `ExecStartPre=${sitePhpLoopbackGuard(spec.libDir)}`,
     ...serviceModeLines(spec),
     `User=${spec.user}`,
     `Group=${spec.group}`,
@@ -228,6 +303,8 @@ export function sitePhpServiceUnit(
     "ProtectSystem=strict",
     "ProtectHome=yes",
     "PrivateDevices=yes",
+    `IPAddressDeny=${SITE_PHP_IP_DENY}`,
+    `IPAddressAllow=${SITE_PHP_IP_ALLOW}`,
     `BindPaths=${tmp}:/tmp`,
     `TemporaryFileSystem=${spec.configDir}:ro`,
     `BindReadOnlyPaths=${sitePhpConfigDir(spec.configDir, spec.id)}`,
@@ -330,10 +407,52 @@ const PINNED_INI_KEYS: ReadonlySet<string> = new Set([
 const TP_HOST_INI_VALUE_RE = /^[A-Za-z0-9 _.,:/@=+~&|!^*%-]*$/;
 
 /**
- * The runtime's `php.ini`: the baseline, then the site's own values (hosting
- * settings, `open_basedir`, the release-swap values) on top, one line per key.
+ * The limits site code must not raise: `ini_set()` / `set_time_limit()` change
+ * the `PHP_INI_ALL` ones at runtime and a `.user.ini` the `PHP_INI_PERDIR`
+ * ones, so a limit the operator set would only be a default.
  */
-export function sitePhpIni(values: readonly SitePhpIniValue[]): string {
+export const SITE_PHP_LOCKED_INI_KEYS: readonly string[] = Object.freeze([
+  "memory_limit",
+  "max_execution_time",
+  "max_input_time",
+  "max_input_vars",
+  "post_max_size",
+  "upload_max_filesize",
+]);
+
+/**
+ * The locked limits again, in a `[PATH=<root>]` section. php-cgi has no
+ * `php_admin_value`; this is its admin form, and php-fpm honours it the same
+ * way: both SAPIs activate a matching `[PATH=]` section per request at system
+ * level, which marks each directive `PHP_INI_SYSTEM` for that request, so
+ * `ini_set()`, `set_time_limit()` and `.user.ini` all fail to change it. Every
+ * script the site serves sits under `root` (the owner home).
+ */
+function lockedIniSection(
+  merged: ReadonlyMap<string, string>,
+  root: string,
+): string[] {
+  const lines = SITE_PHP_LOCKED_INI_KEYS
+    .filter((key) => merged.has(key))
+    .map((key) => `${key} = ${merged.get(key)}`);
+  return [`[PATH=${root}]`, ...lines];
+}
+
+/** `[PATH=]` takes a plain absolute path; tp-host refuses anything else. */
+const LOCK_ROOT_RE = /^(\/[A-Za-z0-9._-]+)+$/;
+
+/**
+ * The runtime's `php.ini`: the baseline, then the site's own values (hosting
+ * settings, `open_basedir`, the release-swap values) on top, one line per key,
+ * then the limits locked for every script under `lockRoot`.
+ */
+export function sitePhpIni(
+  values: readonly SitePhpIniValue[],
+  lockRoot: string,
+): string {
+  if (!LOCK_ROOT_RE.test(lockRoot) || /\/\.\.?(\/|$)/.test(lockRoot)) {
+    throw new Error(`per-site PHP cannot lock its limits under ${lockRoot}`);
+  }
   const merged = new Map<string, string>();
   for (const { key, value } of BASELINE_INI) merged.set(key, value);
   for (const { key, value } of values) {
@@ -346,7 +465,13 @@ export function sitePhpIni(values: readonly SitePhpIniValue[]): string {
     merged.set(key, value);
   }
   const lines = [...merged].map(([key, value]) => `${key} = ${value}`);
-  return `; TurboPanel per-site PHP\n[PHP]\n${lines.join("\n")}\n`;
+  return [
+    "; TurboPanel per-site PHP",
+    "[PHP]",
+    ...lines,
+    ...lockedIniSection(merged, lockRoot),
+    "",
+  ].join("\n");
 }
 
 /** Pool tuning the operator may set (already validated by the caller). */

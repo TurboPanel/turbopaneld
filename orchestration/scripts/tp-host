@@ -80,6 +80,10 @@ if [ -f "$_self_dir/tp-host.conf" ] && [ ! -L "$_self_dir/tp-host.conf" ]; then
   _conf_root="$(sed -n 's/^principal_home_root=\(\/[A-Za-z0-9._\/-]*\)$/\1/p' "$_self_dir/tp-host.conf" | head -1)"
   [ -n "$_conf_root" ] && R_PRINCIPALS="$P$_conf_root"
 fi
+# Release staging (publish-open / publish): on the homes' filesystem, so a
+# sealed release reaches releases/<id> by rename. The dot keeps it apart from
+# every principal name (tp_new_name_ok refuses one).
+R_STAGING="$R_PRINCIPALS/.tp-staging"
 
 PRINCIPAL_ID_MIN=15001
 PRINCIPAL_ID_MAX=60000
@@ -161,6 +165,9 @@ tp_under() {
 tp_path_class() {
   _pc="$1"
   tp_path_shape_ok "$_pc" || return 1
+  # The release staging area is no principal's home: only publish-open and
+  # publish reach it, and no generic verb accepts the class.
+  if tp_under "$_pc" "$R_STAGING"; then echo staging; return 0; fi
   if tp_under "$_pc" "$R_PRINCIPALS"; then echo principal; return 0; fi
   # Per-site PHP config and the launcher registry sit inside the config tree
   # but are never `tree`: only their own verbs and checks write them.
@@ -518,12 +525,25 @@ tp_home_owner_ok() {
 # sit in a sealed parent: root-owned, not group- or world-writable. Otherwise
 # the tenant could rename it away between this run and the next.
 tp_home_parent_sealed() {
-  _hp="$(stat -c '%u %a' ..)" || return 1
+  tp_dir_sealed_at ..
+}
+
+# DIR is root-owned and neither group- nor world-writable.
+tp_dir_sealed_at() {
+  _hp="$(stat -c '%u %a' "$1")" || return 1
   [ "${_hp%% *}" = "$ROOT_UID" ] || return 1
   case "${_hp#* }" in
     *[2367]?|*[2367]) return 1 ;;
   esac
   return 0
+}
+
+# A release directory (or anything in one) appears only through publish.
+tp_release_path() {
+  case "$(tp_home_rel "$1" || true)" in
+    sites/*/releases/?*) return 0 ;;
+  esac
+  return 1
 }
 
 # Recursive operations never start at a structural directory above a release:
@@ -939,7 +959,7 @@ tp_php_unit_lines() {
       } else {
         ok["Unit", "StartLimitBurst"] = 1
         ok["Unit", "StartLimitIntervalSec"] = 1
-        split("Type User Group Slice ExecStart ExecReload Environment Restart RestartSec NoNewPrivileges CapabilityBoundingSet AmbientCapabilities ProtectSystem ProtectHome PrivateDevices ProtectKernelTunables ProtectKernelModules ProtectControlGroups RestrictSUIDSGID RestrictRealtime LockPersonality BindPaths BindReadOnlyPaths TemporaryFileSystem ReadWritePaths RuntimeDirectory RuntimeDirectoryMode StandardInput StandardOutput StandardError SyslogIdentifier CPUQuota MemoryMax MemoryHigh TasksMax TimeoutStartSec TimeoutStopSec", b, " ")
+        split("Type User Group Slice ExecStartPre ExecStart ExecReload Environment Restart RestartSec NoNewPrivileges CapabilityBoundingSet AmbientCapabilities ProtectSystem ProtectHome PrivateDevices ProtectKernelTunables ProtectKernelModules ProtectControlGroups IPAddressDeny IPAddressAllow RestrictSUIDSGID RestrictRealtime LockPersonality BindPaths BindReadOnlyPaths TemporaryFileSystem ReadWritePaths RuntimeDirectory RuntimeDirectoryMode StandardInput StandardOutput StandardError SyslogIdentifier CPUQuota MemoryMax MemoryHigh TasksMax TimeoutStartSec TimeoutStopSec", b, " ")
         for (i in b) ok["Service", b[i]] = 1
       }
       body = (kind == "socket") ? "Socket" : "Service"
@@ -957,7 +977,10 @@ tp_php_unit_lines() {
       key = substr($0, 1, eq - 1); val = substr($0, eq + 1)
       if (section == "") fail("directive outside a section: " key)
       if (!((section, key) in ok)) fail("directive " section "." key)
-      if (key ~ /^Exec/ && val ~ /^[-+!:@|]/) fail(key " with an exec prefix")
+      # The one root hook a PHP service has is its loopback guard; the shell
+      # side pins its exact text. Every other Exec line takes no prefix.
+      if (key == "ExecStartPre" && val !~ /^\+/) fail(key " must be the loopback guard")
+      if (key != "ExecStartPre" && key ~ /^Exec/ && val ~ /^[-+!:@|]/) fail(key " with an exec prefix")
       print section "." key "=" val
     }
     END { if (bad) exit 1 }
@@ -1102,6 +1125,14 @@ tp_php_service_pinned_ok() {
     Service.NoNewPrivileges=*) [ "${1#*=}" = "yes" ] ;;
     Service.CapabilityBoundingSet=*|Service.AmbientCapabilities=*) [ -z "${1#*=}" ] ;;
     Service.ProtectSystem=*) [ "${1#*=}" = "strict" ] ;;
+    # Loopback, link-local, multicast, 0/8 and ULA closed (php-runtime.ts
+    # SITE_PHP_IP_DENY); 127.0.0.1 (the database proxy) and systemd-resolved's
+    # stub reopened. systemd cannot filter by port: tp-php-loopback does, per
+    # site owner, and the unit only starts once it has loaded its rules.
+    Service.IPAddressDeny=*) [ "${1#*=}" = "localhost link-local multicast 0.0.0.0/8 fc00::/7" ] ;;
+    Service.IPAddressAllow=*) [ "${1#*=}" = "127.0.0.1 127.0.0.53" ] ;;
+    # The only root hook (`+`): the loopback guard, from this script's own lib/.
+    Service.ExecStartPre=*) [ "${1#*=}" = "+$INSTALL_ROOT/lib/tp-php-loopback sync" ] ;;
     Service.BindPaths=*) [ "${1#*=}" = "$_pl_home/tmp:/tmp" ] ;;
     # The daemon's config tree is tp's alone (0750); inside the unit it is an
     # empty tmpfs holding only this site's config directory, read-only.
@@ -1156,7 +1187,7 @@ tp_php_service_ok() {
   _ps_file="$1"
   _ps_site="$2"
   _ps_lines="$(tp_php_unit_lines "$_ps_file" service)" || return 1
-  for _ps_key in ExecStart BindPaths TemporaryFileSystem BindReadOnlyPaths; do
+  for _ps_key in ExecStartPre ExecStart BindPaths TemporaryFileSystem BindReadOnlyPaths IPAddressDeny IPAddressAllow; do
     [ "$(printf '%s\n' "$_ps_lines" | grep -c "^Service\.$_ps_key=")" -le 1 ] || return 1
   done
   _ps_user="$(printf '%s\n' "$_ps_lines" | sed -n 's/^Service\.User=//p' | head -1)"
@@ -1179,7 +1210,7 @@ LINES
   [ -n "$_ps_rwtmp" ] || { printf 'tp-host: php unit: ReadWritePaths= lacks the owner tmp/\n' >&2; return 1; }
   [ "$_ps_mode" != "lsphp" ] || [ -n "$_ps_phprc" ] ||
     { printf 'tp-host: php unit: lsphp needs Environment=PHPRC=<its php.ini>\n' >&2; return 1; }
-  _ps_need="User Group Slice NoNewPrivileges CapabilityBoundingSet AmbientCapabilities ProtectSystem BindPaths TemporaryFileSystem BindReadOnlyPaths ExecStart StandardOutput StandardError"
+  _ps_need="User Group Slice NoNewPrivileges CapabilityBoundingSet AmbientCapabilities ProtectSystem IPAddressDeny IPAddressAllow ExecStartPre BindPaths TemporaryFileSystem BindReadOnlyPaths ExecStart StandardOutput StandardError"
   case "$_ps_mode" in
     fpm) _ps_need="$_ps_need Type RuntimeDirectory RuntimeDirectoryMode" ;;
     *) _ps_need="$_ps_need StandardInput" ;;
@@ -1299,6 +1330,13 @@ tp_php_ini_ok() {
     BEGIN { ini_init() }
     /\\[ \t\r]*$/ { fail("line continuation") }
     /^[ \t]*$/ || /^[ \t]*;/ { next }
+    # [PATH=<owner home>] is the admin form php-cgi has: its directives are
+    # locked (PHP_INI_SYSTEM) for every script under the home. No other path.
+    /^\[PATH=/ {
+      section = $0; sub(/[ \t]+$/, "", section)
+      if (section != "[PATH=" home "]") fail("section " $0)
+      next
+    }
     /^\[/ { if ($0 !~ /^\[[A-Za-z]+\][ \t]*$/) fail("section " $0); next }
     {
       eq = index($0, "=")
@@ -1451,6 +1489,14 @@ tp_php_install() {
   tp_put_file "$_pi_dest" 0640 root "$_pi_group" < "$TP_STAGE/src"
 }
 
+# php-loopback-sync: rebuild the nftables table that keeps site PHP off every
+# loopback port but the database proxy's (lib/tp-php-loopback), from the PHP
+# units on disk. The daemon runs it after installing or removing a runtime.
+tp_verb_php_loopback_sync() {
+  [ $# -eq 0 ] || tp_die "php-loopback-sync: takes no arguments"
+  tp_run "$INSTALL_ROOT/lib/tp-php-loopback" sync
+}
+
 # php-test <siteId>: the site's PHP binary checks its own config, as the site's
 # owner. Mode, series, owner and config paths come from the installed unit
 # (re-checked here), never from the caller. The owner cannot traverse the
@@ -1586,8 +1632,16 @@ tp_verb_install() {
     [ $# -eq 1 ] || tp_die "install -d takes one directory"
     _in_path="$1"
     tp_require_class "$_in_path" tree principal sshddir wireguard storage
+    ! tp_release_path "$_in_path" || tp_die "refusing $_in_path: a release is created only by publish"
     tp_is_root_path "$_in_path" && [ -n "$_in_owner$_in_group" ] &&
       [ "$_in_path" != "$R_PRINCIPALS" ] && tp_die "refusing to re-own $_in_path"
+    # The home root holds every home and the release staging area: root's only.
+    if [ "$_in_path" = "$R_PRINCIPALS" ]; then
+      case "$_in_owner:$_in_group" in
+        :|root:|:root|root:root) ;;
+        *) tp_die "refusing to re-own $_in_path (root:root only)" ;;
+      esac
+    fi
     tp_mode_ok "$_in_mode" "$_in_path" || tp_die "refusing mode $_in_mode for $_in_path"
     tp_owner_ok "$_in_path" "$_in_owner" "$_in_group" ||
       tp_die "refusing owner $_in_owner:$_in_group for $_in_path"
@@ -1632,42 +1686,12 @@ tp_verb_mkdir() {
   [ $# -eq 1 ] || tp_die "mkdir: only mkdir -p [--] DIR"
   _md_path="$1"
   tp_require_class "$_md_path" tree principal wireguard
+  ! tp_release_path "$_md_path" || tp_die "refusing $_md_path: a release is created only by publish"
   tp_mkdir_pinned "$_md_path" 0755
 }
 
 tp_verb_cp() {
   case "$1" in
-    -a)
-      [ "$#" -eq 4 ] && [ "$2" = "--" ] || tp_die "cp: only cp -a -- SRC/. DEST"
-      _cp_src="$3"
-      _cp_dest="$4"
-      case "$_cp_src" in
-        */.) _cp_src="${_cp_src%/.}" ;;
-        *) tp_die "cp -a: the source must end in /." ;;
-      esac
-      tp_require_class "$_cp_dest" principal
-      # Only the daemon's own hand-off copy (release/safe-copy.ts), never a
-      # tree a build or a tenant wrote.
-      tp_require_class "$_cp_src" tree
-      tp_pin_dir "$_cp_dest" || tp_die "no such directory $_cp_dest"
-      # The source directory is opened and checked on a descriptor; cp reads
-      # it through /proc/self/fd/3, never by a name the caller controls.
-      exec 3<"$_cp_src" || tp_die "cannot open $_cp_src"
-      [ "$(readlink /proc/self/fd/3)" = "$_cp_src" ] ||
-        tp_die "refusing $_cp_src: it resolves elsewhere"
-      # Root's cp -R would mknod a device or FIFO, keep a set-id bit, and read
-      # a hard link to a file the caller cannot. Checked as the caller, from /
-      # (the caller cannot enter the pinned destination).
-      _cp_bad="$(cd / && tp_as "$CALLER_UID" "$CALLER_GID" find /proc/self/fd/3/. \
-        \( \( ! -type f ! -type d ! -type l \) -o -perm /6000 \
-        -o ! -user "$CALLER_UID" \) -print -quit)" ||
-        tp_die "cannot inspect $_cp_src as the calling account"
-      [ -z "$_cp_bad" ] ||
-        tp_die "refusing $_cp_src: special, set-id or foreign entry ${_cp_bad#/proc/self/fd/3/.}"
-      # Nothing of the source's ownership survives; the seal sets it.
-      tp_run cp -R --no-dereference --preserve=mode,timestamps \
-        --no-preserve=ownership -- /proc/self/fd/3/. .
-      ;;
     -p)
       [ "$#" -eq 4 ] && [ "$2" = "--" ] || tp_die "cp: only cp -p -- SRC DEST"
       _cp_src="$3"
@@ -1772,7 +1796,8 @@ tp_verb_ln() {
   esac
   tp_require_class "$_ln_link" principal
   tp_pin_parent "$_ln_link" || tp_die "no such directory for $_ln_link"
-  ln -s -- "$_ln_target" "./$PIN_NAME"
+  # -T: a directory planted at the name is refused, never linked into.
+  ln -s -T -- "$_ln_target" "./$PIN_NAME"
 }
 
 tp_verb_readlink() {
@@ -1854,9 +1879,21 @@ tp_verb_find() {
   if [ "$#" -eq 9 ] && [ "$1" = "-type" ] && [ "$2" = "l" ] && [ "$3" = "-exec" ] &&
     [ "$4" = "realpath" ] && [ "$5" = "-m" ] && [ "$6" = "-z" ] && [ "$7" = "--" ] &&
     [ "$8" = "{}" ] && [ "$9" = "+" ]; then
-    tp_require_class "$_fd_base" principal
-    tp_pin_dir "$_fd_base" || tp_die "no such directory $_fd_base"
-    find -P . -type l -exec realpath -m -z -- {} +
+    _fd_class="$(tp_path_class "$_fd_base")" || tp_die "refusing path $_fd_base"
+    case "$_fd_class" in
+      principal)
+        tp_pin_dir "$_fd_base" || tp_die "no such directory $_fd_base"
+        find -P . -type l -exec realpath -m -z -- {} +
+        ;;
+      staging)
+        # The daemon's own open leaf, walked as the daemon, never as root.
+        [ "${_fd_base%/*}" = "$R_STAGING" ] || tp_die "refusing path $_fd_base"
+        tp_pin_dir "$_fd_base" || tp_die "no such directory $_fd_base"
+        [ "$(stat -c '%u' .)" = "$CALLER_UID" ] || tp_die "refusing $_fd_base: not the caller's leaf"
+        tp_as "$CALLER_UID" "$CALLER_GID" find -P . -type l -exec realpath -m -z -- {} +
+        ;;
+      *) tp_die "refusing path $_fd_base ($_fd_class)" ;;
+    esac
     return
   fi
   # Every symlink under a sealed release with its unresolved text
@@ -2491,6 +2528,146 @@ tp_verb_getent() {
   tp_exec getent shadow -- "$3"
 }
 
+# --- retiring a principal -------------------------------------------------------
+# `principal-remove NAME` takes back what a principal held on this host once the
+# panel says no project, site or app here uses the account any more: its slice
+# and processes, its key file, its group memberships, its home tree, the
+# account and its <name>-grp group. One argument and no options; every step is
+# fixed here.
+#
+# Refused unless NAME is a TurboPanel principal: uid and <name>-grp gid both in
+# the principal band (an account outside it is never touched), that group is
+# the account's primary group, and the passwd home is <root>/<name>/home (the
+# root-owned layout) or <root>/<name> (the tenant-owned layout before it).
+# Refused before anything changes while this host still references the
+# account: a turbopanel-* unit that runs as it or in its slice, or a site tree
+# left under its home. An account that is already gone is not an error, so a
+# retried teardown finishes what an earlier one left behind.
+
+tp_in_principal_band() {
+  case "$1" in ''|*[!0-9]*) return 1 ;; esac
+  [ "${#1}" -le 10 ] && [ "$1" -ge "$PRINCIPAL_ID_MIN" ] && [ "$1" -le "$PRINCIPAL_ID_MAX" ]
+}
+
+# The same names useradd accepts, without its "must not exist yet".
+tp_retire_name_ok() {
+  case "$1" in
+    ''|-*|*[!A-Za-z0-9_-]*|root|tp|tp[a-z]*) return 1 ;;
+  esac
+  [ "${#1}" -le 28 ]
+}
+
+# The <name>-grp group's id, when it exists inside the principal band.
+tp_retire_group_gid() {
+  _rg_line="$(tp_getent group "$1-grp")" || return 1
+  _rg_gid="$(printf '%s' "$_rg_line" | cut -d: -f3)"
+  tp_in_principal_band "$_rg_gid" || tp_die "principal-remove: $1-grp is outside the principal band"
+  printf '%s' "$_rg_gid"
+}
+
+# A turbopanel-* unit (other than the slice itself) that still runs as NAME or
+# inside its slice.
+tp_retire_unit_ref() {
+  for _ru in "$R_UNITS"/turbopanel-*; do
+    [ -f "$_ru" ] || continue
+    [ "${_ru##*/}" != "turbopanel-$1.slice" ] || continue
+    if grep -qxF -e "User=$1" -e "Slice=turbopanel-$1.slice" -- "$_ru"; then
+      printf '%s' "${_ru##*/}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+tp_retire_refs_check() {
+  if _rr_unit="$(tp_retire_unit_ref "$1")"; then
+    tp_die "principal-remove: $1 is still referenced by $_rr_unit"
+  fi
+  tp_pin_dir "$R_PRINCIPALS" || return 0
+  if [ -d "./$1/sites" ] && [ -n "$(ls -A -- "./$1/sites")" ]; then
+    tp_die "principal-remove: $1 still has site trees under $R_PRINCIPALS/$1/sites"
+  fi
+}
+
+# The account is a principal this script created: ids in the band, its own
+# group as primary group, its home in the principal root.
+tp_retire_account_check() {
+  _ra_line="$(tp_getent passwd "$1")"
+  _ra_uid="$(printf '%s' "$_ra_line" | cut -d: -f3)"
+  _ra_gid="$(printf '%s' "$_ra_line" | cut -d: -f4)"
+  _ra_home="$(printf '%s' "$_ra_line" | cut -d: -f6)"
+  tp_in_principal_band "$_ra_uid" || tp_die "principal-remove: $1 is outside the principal band"
+  _ra_grp="$(tp_retire_group_gid "$1")" || tp_die "principal-remove: $1 has no $1-grp group"
+  [ "$_ra_gid" = "$_ra_grp" ] || tp_die "principal-remove: $1's primary group is not $1-grp"
+  case "$_ra_home" in
+    "$R_PRINCIPALS/$1/home"|"$R_PRINCIPALS/$1") ;;
+    *) tp_die "principal-remove: $1's home is not under $R_PRINCIPALS/$1" ;;
+  esac
+  RETIRE_UID="$_ra_uid"
+}
+
+# Every group that lists NAME as a supplementary member.
+tp_retire_member_groups() {
+  if [ -n "$TP_TEST" ]; then cat "$P/etc/group"; else getent group; fi |
+    awk -F: -v u="$1" '{ n = split($4, m, ","); for (i = 1; i <= n; i++) if (m[i] == u) { print $1; break } }'
+}
+
+# Key file and slice unit (installed and staged copies). Nothing here is a
+# principal-owned path, so a missing file is simply already gone.
+tp_retire_files() {
+  if tp_pin_dir "$R_SSHKEYS/authorized_keys"; then rm -f -- "./$1"; fi
+  if tp_pin_dir "$R_CONFIG/node-apps"; then rm -f -- "./slice-$1.slice"; fi
+  if tp_pin_dir "$R_UNITS"; then rm -f -- "./turbopanel-$1.slice"; fi
+  tp_run systemctl daemon-reload
+}
+
+# <root>/NAME, if present, is a real directory (not a symlink) owned by root
+# (the root-owned layout) or by the principal (the layout before it). Leaves
+# the shell in the pinned principal root; fails when there is no home to take.
+tp_retire_home_check() {
+  tp_pin_dir "$R_PRINCIPALS" || return 1
+  [ ! -L "./$1" ] || tp_die "principal-remove: $R_PRINCIPALS/$1 is a symlink"
+  [ -e "./$1" ] || return 1
+  [ -d "./$1" ] || tp_die "principal-remove: $R_PRINCIPALS/$1 is not a directory"
+  _rh_owner="$(stat -c '%u' -- "./$1")"
+  [ "$_rh_owner" = "$ROOT_UID" ] || [ "$_rh_owner" = "$2" ] ||
+    tp_die "principal-remove: $R_PRINCIPALS/$1 belongs to uid $_rh_owner"
+}
+
+# Remove the home from the pinned root, never following a symlink, and staying
+# on its file system (a mount under the home is refused, not emptied).
+tp_retire_home() {
+  tp_retire_home_check "$1" "$2" || return 0
+  rm -rf --one-file-system -- "./$1" || tp_die "principal-remove: could not remove $R_PRINCIPALS/$1"
+}
+
+tp_verb_principal_remove() {
+  [ "$#" -eq 1 ] || tp_die "principal-remove: only principal-remove NAME"
+  _pv="$1"
+  tp_retire_name_ok "$_pv" || tp_die "principal-remove: refusing name $_pv"
+  if ! tp_getent passwd "$_pv" >/dev/null 2>&1; then
+    # Already gone: finish the slice, group and files an earlier run left.
+    tp_retire_refs_check "$_pv"
+    tp_run systemctl --no-pager stop "turbopanel-$_pv.slice" || true
+    tp_retire_files "$_pv"
+    if tp_retire_group_gid "$_pv" >/dev/null; then tp_run groupdel "$_pv-grp"; fi
+    return 0
+  fi
+  tp_retire_account_check "$_pv"
+  tp_retire_refs_check "$_pv"
+  tp_retire_home_check "$_pv" "$RETIRE_UID" || true
+  tp_run systemctl --no-pager stop "turbopanel-$_pv.slice" || true
+  # pkill exits 1 when nothing matched.
+  tp_run pkill -KILL -u "$RETIRE_UID" || true
+  tp_retire_files "$_pv"
+  tp_retire_member_groups "$_pv" | while IFS= read -r _pv_group; do
+    tp_run gpasswd -d "$_pv" "$_pv_group"
+  done
+  tp_retire_home "$_pv" "$RETIRE_UID"
+  tp_run userdel "$_pv"
+  tp_run groupdel "$_pv-grp"
+}
+
 # --- builds ------------------------------------------------------------------
 # Tenant build commands run as BUILD_ACCOUNT (not in docker or tp, no sudo) in
 # a transient turbopanel-build-<id>.service whose every property is fixed
@@ -2773,6 +2950,221 @@ tp_verb_build_return() {
   tp_run chown -R -h -P -- "$CALLER_UID:$CALLER_GID" .
 }
 
+# --- release publish -----------------------------------------------------------
+# A release reaches <home>/sites/<svc>/releases/<id> only through here.
+#
+#   publish-open P SVC ID  makes $R_STAGING/P.SVC.ID afresh, the caller's 0700
+#                          leaf under root:<caller group> 0710; the daemon
+#                          copies the build's checked output into it
+#                          (release/safe-copy.ts) and writes its manifest.
+#   publish P SVC ID       takes the leaf from the caller (root 0700), refuses
+#                          hard links and special files, seals it
+#                          (chown -R -h -P root:P-grp, chmod -R
+#                          u-s,g-s,go-w,g+rX,o-rwx), refuses a symlink that
+#                          resolves outside it, renames it to releases/ID on
+#                          the same filesystem through a chain root owns, adds
+#                          the shared link, drops the top to 0550 and swaps
+#                          current.
+#
+# Root never reads a name another account can still change: the copy is the
+# caller's, and every check runs on the frozen, root-owned tree. The principal
+# cannot reach the staging area at all.
+
+PUBLISH_LOCK_WAIT_SEC=60
+# A leaf older than a build's runtime cap (1800 s) twice over is abandoned.
+PUBLISH_STALE_MIN=60
+
+tp_release_id_ok() {
+  case "$1" in
+    ''|[!0-9A-Za-z]*|*[!0-9A-Za-z_-]*) return 1 ;;
+  esac
+  [ "${#1}" -le 64 ]
+}
+
+# Sets PUB_USER, PUB_ID, PUB_NAME, PUB_LEAF and PUB_SITE.
+tp_publish_args() {
+  [ $# -eq 3 ] || tp_die "$_verb: only $_verb PRINCIPAL SERVICE-ID RELEASE-ID"
+  tp_is_principal "$1" || tp_die "$_verb: $1 is not a principal"
+  tp_is_principal_group "$1-grp" || tp_die "$_verb: no group $1-grp"
+  tp_release_id_ok "$2" || tp_die "$_verb: refusing service id $2"
+  tp_release_id_ok "$3" || tp_die "$_verb: refusing release id $3"
+  PUB_USER="$1"
+  PUB_ID="$3"
+  PUB_NAME="$1.$2.$3"
+  PUB_LEAF="$R_STAGING/$PUB_NAME"
+  PUB_SITE="$R_PRINCIPALS/$1/sites/$2"
+}
+
+# Enter the staging area, creating (or repairing) it root:<caller group> 0710:
+# the caller traverses to its own leaf, nobody else gets in. Only root can
+# create it (the home root is root's), so a foreign owner is refused.
+tp_staging_pin() {
+  tp_pin_dir "$R_PRINCIPALS" || tp_die "no principal home root $R_PRINCIPALS"
+  tp_dir_sealed_at . ||
+    tp_die "refusing $R_PRINCIPALS: not sealed (root-owned, not group- or world-writable)"
+  mkdir -m 0710 -- ./.tp-staging 2>/dev/null || true
+  tp_pin_dir "$R_STAGING" || tp_die "cannot enter $R_STAGING"
+  [ "$(stat -c '%u' .)" = "$ROOT_UID" ] || tp_die "refusing $R_STAGING: not root-owned"
+  chmod 0710 .
+  tp_run chown -h -- "root:$CALLER_GID" .
+}
+
+# One publish-open or publish per release name at a time, on a root-only lock.
+tp_publish_lock() {
+  _lk_dir="$P/run/tp-publish"
+  mkdir -m 0700 -- "$_lk_dir" 2>/dev/null || true
+  [ -d "$_lk_dir" ] && [ ! -L "$_lk_dir" ] &&
+    [ "$(stat -c '%u %a' "$_lk_dir")" = "$ROOT_UID 700" ] ||
+    tp_die "refusing lock directory $_lk_dir"
+  exec 8>>"$_lk_dir/$PUB_NAME.lock"
+  flock -w "$PUBLISH_LOCK_WAIT_SEC" 8 ||
+    tp_die "$_verb: $PUB_NAME is held by another publish"
+}
+
+tp_verb_publish_open() {
+  tp_publish_args "$@"
+  tp_publish_lock
+  tp_staging_pin
+  # Leaves no publish came back for (a daemon that died mid-deploy).
+  find . -mindepth 1 -maxdepth 1 -type d -name '?*.?*.?*' -mmin +"$PUBLISH_STALE_MIN" \
+    -exec rm -rf -- {} +
+  # A leaf a dead publish left behind is root's or the caller's: start clean.
+  rm -rf -- "./$PUB_NAME"
+  mkdir -m 0700 -- "./$PUB_NAME"
+  tp_run chown -h -- "$CALLER_UID:$CALLER_GID" "./$PUB_NAME"
+  printf '%s\n' "$PUB_LEAF"
+}
+
+tp_publish_abort() {
+  if tp_pin_dir "$R_STAGING" 2>/dev/null; then
+    rm -rf -- "./$PUB_NAME" 2>/dev/null || true
+  fi
+}
+
+# LABEL FIND-EXPRESSION…: refuse the first entry of the leaf that matches.
+tp_publish_refuse_found() {
+  _rf_label="$1"
+  shift
+  _rf_hit="$(find -P . "$@" -print -quit)" || tp_die "publish: cannot inspect $PUB_LEAF"
+  [ -z "$_rf_hit" ] || tp_die "publish: refusing $PUB_NAME: $_rf_label ${_rf_hit#./}"
+}
+
+# In the pinned leaf: lock it, refuse what a seal must not touch, seal it.
+tp_publish_seal() {
+  # From here the caller can no longer enter the leaf by name.
+  tp_run chown -h -- root:root .
+  chmod 0700 .
+  # The tree that must end up at releases/<id>, and nothing else.
+  PUB_INODE="$(stat -c '%d:%i' .)"
+  # Before any chown -R: a hard link would re-own an inode outside the tree.
+  tp_publish_refuse_found "hard-linked file" -type f -links +1
+  tp_publish_refuse_found "special file" ! -type f ! -type d ! -type l
+  # Absolute targets name the staging path, another home or the host; only a
+  # relative link can stay inside the release once it is renamed.
+  tp_publish_refuse_found "absolute symlink" -type l -lname '/*'
+  # The layout links shared/ itself, after every check.
+  [ ! -e ./shared ] && [ ! -L ./shared ] ||
+    tp_die "publish: refusing $PUB_NAME: it ships its own shared entry"
+  tp_run chown -R -h -P -- "root:$PUB_USER-grp" .
+  # GNU chmod -R does not follow a link met during the walk.
+  chmod -R u-s,g-s,a-t,go-w,g+rX,o-rwx .
+  tp_publish_refuse_found "unsealed entry" ! -type l \( ! -user "$ROOT_UID" -o -perm /7022 \)
+}
+
+# Every symlink, resolved physically on the frozen tree, must stay inside it
+# and out of <leaf>/shared, which becomes the tenant's writable shared/ once
+# the layout links it (release-links.ts). A lexical check is not enough
+# (s1/s2/up -> ../.. with s1/s2/s3/x -> ../up/.. names the release's parent).
+# A loop or unreadable link fails it.
+tp_publish_links() {
+  _pl_root="$(pwd -P)"
+  _pl_out="$(find -P . -type l -exec realpath -m -- {} + && echo :ok)" ||
+    tp_die "publish: refusing $PUB_NAME: a symlink cannot be resolved"
+  _pl_bad="$(printf '%s\n' "${_pl_out%:ok}" | awk -v r="$_pl_root" \
+    'length($0) && ($0 == r "/shared" || index($0, r "/shared/") == 1 ||
+      ($0 != r && index($0, r "/") != 1)) { print; exit }')"
+  [ -z "$_pl_bad" ] ||
+    tp_die "publish: refusing $PUB_NAME: a symlink resolves outside the release ($_pl_bad)"
+}
+
+# Enter releases/ through a chain root owns and nobody else can write: the
+# home, sites/, sites/<svc>/ and releases/.
+tp_publish_pin_releases() {
+  for _pr in "$R_PRINCIPALS/$PUB_USER" "$R_PRINCIPALS/$PUB_USER/sites" \
+    "$PUB_SITE" "$PUB_SITE/releases"; do
+    tp_pin_dir "$_pr" || tp_die "publish: no directory $_pr"
+    tp_dir_sealed_at . ||
+      tp_die "publish: refusing $_pr: not sealed (root-owned, not group- or world-writable)"
+  done
+}
+
+# A home on its own filesystem: the sealed leaf is root's and frozen, so root
+# copies it to a root-only name beside the release and renames that. Sets
+# PUB_INODE to the copy.
+tp_publish_copy_across() {
+  _ca_tmp=".tp-publish.$PUB_ID"
+  rm -rf -- "./$_ca_tmp"
+  mkdir -m 0700 -- "./$_ca_tmp"
+  PUB_INODE="$(stat -c '%d:%i' "./$_ca_tmp")"
+  cp -a -- "$PUB_LEAF/." "./$_ca_tmp/"
+  mv -T -- "./$_ca_tmp" "./$PUB_ID"
+  rm -rf -- "$PUB_LEAF"
+}
+
+# From the sealed leaf to releases/<id>: rename(2) on the same filesystem as
+# this home's releases/ (checked per home), a root copy of the frozen leaf
+# otherwise. Whatever lands at releases/<id> must be that tree (dev:ino)
+# before it is linked, opened up to 0550 or made current.
+tp_publish_place() {
+  _pp_dev="${PUB_INODE%%:*}"
+  tp_publish_pin_releases
+  [ ! -e "./$PUB_ID" ] && [ ! -L "./$PUB_ID" ] ||
+    tp_die "publish: refusing $PUB_SITE/releases/$PUB_ID: it already exists"
+  if [ "$(stat -c %d .)" = "$_pp_dev" ]; then
+    mv -T -- "$PUB_LEAF" "./$PUB_ID"
+  else
+    tp_publish_copy_across
+  fi
+  [ ! -L "./$PUB_ID" ] && [ "$(stat -c '%d:%i' "./$PUB_ID")" = "$PUB_INODE" ] ||
+    tp_die "publish: refusing $PUB_SITE/releases/$PUB_ID: not the sealed tree"
+  ln -s -T -- ../../shared "./$PUB_ID/shared"
+  tp_run chown -h -- "root:$PUB_USER-grp" "./$PUB_ID/shared"
+  chmod 0550 "./$PUB_ID"
+}
+
+# current.tmp.<id> -> releases/<id>, renamed over current. A directory at
+# either name is refused: linking into a planted current.tmp.<id>/ and
+# renaming it would publish whatever it holds.
+tp_publish_swap() {
+  tp_pin_dir "$PUB_SITE" || tp_die "publish: no directory $PUB_SITE"
+  _sw_tmp="current.tmp.$PUB_ID"
+  if [ -L "./$_sw_tmp" ] || [ -f "./$_sw_tmp" ]; then rm -f -- "./$_sw_tmp"; fi
+  [ ! -e "./$_sw_tmp" ] || tp_die "publish: refusing $PUB_SITE/$_sw_tmp: not a link"
+  if [ -d ./current ] && [ ! -L ./current ]; then
+    tp_die "publish: refusing $PUB_SITE/current: a directory, not a link"
+  fi
+  [ ! -L "./releases/$PUB_ID" ] &&
+    [ "$(stat -c '%d:%i' "./releases/$PUB_ID")" = "$PUB_INODE" ] ||
+    tp_die "publish: refusing $PUB_SITE/releases/$PUB_ID: not the sealed tree"
+  ln -s -T -- "releases/$PUB_ID" "./$_sw_tmp"
+  mv -T -f -- "./$_sw_tmp" ./current
+}
+
+tp_verb_publish() {
+  tp_publish_args "$@"
+  tp_publish_lock
+  tp_staging_pin
+  tp_pin_dir "$PUB_LEAF" || tp_die "publish: no staging directory $PUB_LEAF (publish-open first)"
+  [ "$(stat -c '%u' .)" = "$CALLER_UID" ] ||
+    tp_die "publish: refusing $PUB_LEAF: not the caller's open staging directory"
+  trap tp_publish_abort EXIT
+  tp_publish_seal
+  tp_publish_links
+  tp_publish_place
+  trap - EXIT
+  tp_publish_swap
+}
+
 # --- dispatch ----------------------------------------------------------------
 
 [ $# -ge 1 ] || tp_die "usage: tp-host <verb> [args…]"
@@ -2816,10 +3208,14 @@ case "$_verb" in
   gpasswd) tp_verb_gpasswd "$@" ;;
   chpasswd) tp_verb_chpasswd "$@" ;;
   getent) tp_verb_getent "$@" ;;
+  principal-remove) tp_verb_principal_remove "$@" ;;
   modprobe) tp_verb_modprobe "$@" ;;
   build-run) tp_verb_build_run "$@" ;;
   build-return) tp_verb_build_return "$@" ;;
+  publish-open) tp_verb_publish_open "$@" ;;
+  publish) tp_verb_publish "$@" ;;
   php-test) tp_verb_php_test "$@" ;;
+  php-loopback-sync) tp_verb_php_loopback_sync "$@" ;;
   php-site-register) tp_verb_php_site_register "$@" ;;
   *) tp_die "refusing verb $_verb" ;;
 esac
