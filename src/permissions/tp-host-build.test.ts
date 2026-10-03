@@ -289,7 +289,7 @@ test("build-run denies the host's own public addresses but never a resolver or a
     const result = await host.run(["build-run", "b1", "p1"]);
     assertEquals(result.code, 0, result.stderr);
     assertEquals(
-      execLines(result.stdout)[2],
+      execLines(result.stdout)[3],
       execLine(
         expectedSystemdRun(host.prefix, {
           hostDeny: " 203.0.113.7/32 2001:db8::5/128",
