@@ -11,7 +11,7 @@
     state: directory
     owner: root
     group: root
-    mode: "0755"
+    mode: "0750"
   when: turbopanel_docker_egress_guard | bool
 
 - name: Install the egress block script
@@ -20,7 +20,7 @@
     dest: "{{ turbopanel_docker_egress_script }}"
     owner: root
     group: root
-    mode: "0755"
+    mode: "0750"
   register: _docker_egress_script
   when: turbopanel_docker_egress_guard | bool
 
@@ -30,7 +30,7 @@
     dest: /etc/systemd/system/turbopanel-docker-egress.service
     owner: root
     group: root
-    mode: "0644"
+    mode: "0640"
   register: _docker_egress_unit
   when: turbopanel_docker_egress_guard | bool
 
