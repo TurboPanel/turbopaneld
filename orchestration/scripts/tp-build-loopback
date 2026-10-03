@@ -1,0 +1,111 @@
+#!/bin/sh
+# tp-build-loopback — keeps the build account off the platform's loopback ports
+# (POSIX sh, root:root, installed next to tp-host in lib/).
+#
+# A build (`tp-host build-run`) shares the host's network. Turbopack (Next.js)
+# starts helper processes that talk to each other over 127.0.0.1 on ports the
+# build picks itself, so the build unit may use loopback. systemd filters by
+# address only, so this script adds the port filter: one nftables table,
+# `inet turbopanel_build`, whose output hook (same hook and priority as
+# tp-php-loopback's table) refuses anything the build account (tpbuild) sends to
+# 127.0.0.0/8 or ::1 on a port in DENY_PORTS below: every fixed port the
+# platform listens on (database proxy and its admin and metrics ports, the
+# panel, the hosting web servers and their metrics and admin ports, the site and
+# app listen bands). Every other loopback port stays open, and so does the
+# resolver stub (53) because it is not listed.
+#
+# Residual risk, accepted by the owner: a loopback service on a port that is
+# NOT in DENY_PORTS (for example a Docker port a site owner published on
+# 127.0.0.1 with an ephemeral port) is reachable from a build. nftables cannot
+# tell "a port this build listens on" from "a port another service listens on".
+#
+# Replies: `ct state established,related accept` comes first so the build's own
+# local servers can answer their clients; its new connections hit the filter.
+#
+# One verb, `sync`, run as root by `tp-host build-run` before the unit is
+# created and again as the unit's `ExecStartPre=+` (FAILS CLOSED: when this
+# exits non-zero the build does not start). The whole table is replaced in one
+# atomic nft transaction and read back. The table is persistent and only
+# matches tpbuild's uid, so it is harmless between builds.
+#
+# Needs `nft` and `flock` (Ansible installs the nftables and util-linux
+# packages). When either is missing the script exits non-zero and says so.
+set -eu
+umask 077
+
+BUILD_ACCOUNT="tpbuild"
+# The one list of ports the build is refused on loopback, tcp and udp. Single
+# ports and inclusive ranges. Pinned to the code that owns each port by
+# src/orchestration/build-loopback.test.ts.
+#   22 ssh, 80 443 hosting web server, 2019 2029 2039 web server admin APIs,
+#   6032 6070 6132 database proxy admin and metrics, 7080 7081 7443 shared
+#   router and its metrics, 8443 the panel, 9400 GPU metrics, 13306 15432
+#   database proxy, 19080 19820 web server bootstrap and website, 33001 33002
+#   database HA, 18080-18999 and 19100-19799 site and app listen bands,
+#   45000-45999 managed private ports.
+DENY_PORTS="22 80 443 2019 2029 2039 6032 6070 6132 7080 7081 7443 8443 9400 13306 15432 19080 19820 33001 33002 18080-18999 19100-19799 45000-45999"
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+tp_die() {
+  printf 'tp-build-loopback: %s\n' "$*" >&2
+  exit 1
+}
+
+if [ "$(id -u)" = "0" ]; then
+  TP_TEST=""
+  P=""
+else
+  [ -n "${TP_HOST_TEST_PREFIX:-}" ] || tp_die "must run as root"
+  TP_TEST=1
+  P="$TP_HOST_TEST_PREFIX"
+fi
+
+[ "$#" -eq 1 ] && [ "$1" = "sync" ] || tp_die "only: sync"
+
+if [ -n "$TP_TEST" ]; then
+  _uid="$(awk -F: -v n="$BUILD_ACCOUNT" '$1 == n { print $3; exit }' "$P/etc/passwd")"
+else
+  _uid="$(getent passwd "$BUILD_ACCOUNT" | cut -d: -f3)"
+fi
+case "$_uid" in ''|*[!0-9]*) tp_die "no $BUILD_ACCOUNT account; builds cannot start" ;; esac
+[ "$_uid" -ge 100 ] && [ "$_uid" -ne 65534 ] || tp_die "$BUILD_ACCOUNT has uid $_uid; refusing"
+
+ruleset() {
+  _elems=""
+  for _p in $DENY_PORTS; do _elems="${_elems:+$_elems, }$_p"; done
+  cat <<RULES
+add table inet turbopanel_build
+delete table inet turbopanel_build
+table inet turbopanel_build {
+  set denied_ports {
+    type inet_service
+    flags interval
+    elements = { $_elems }
+  }
+  chain output {
+    type filter hook output priority -150; policy accept;
+    meta skuid $_uid ct state established,related accept
+    meta skuid $_uid ip daddr 127.0.0.0/8 tcp dport @denied_ports reject with tcp reset
+    meta skuid $_uid ip daddr 127.0.0.0/8 udp dport @denied_ports reject
+    meta skuid $_uid ip6 daddr ::1 tcp dport @denied_ports reject with tcp reset
+    meta skuid $_uid ip6 daddr ::1 udp dport @denied_ports reject
+  }
+}
+RULES
+}
+
+_rules="$(ruleset)"
+
+if [ -n "$TP_TEST" ]; then
+  printf '%s\n' "$_rules"
+  exit 0
+fi
+
+command -v nft >/dev/null 2>&1 || tp_die "nft is not installed (apt install nftables); builds cannot start without their network rules"
+command -v flock >/dev/null 2>&1 || tp_die "flock is not installed (apt install util-linux)"
+exec 9>/run/turbopanel-build-loopback.lock
+flock 9
+printf '%s\n' "$_rules" | nft -f - || tp_die "nft refused the build network rules; builds cannot start"
+_live="$(nft list table inet turbopanel_build)" || tp_die "build network rules did not load"
+printf '%s\n' "$_live" | grep -Eq "meta skuid $_uid " || tp_die "uid $_uid missing from the loaded build rules"
+printf '%s\n' "$_live" | grep -q "13306" || tp_die "build rules loaded without the port list"

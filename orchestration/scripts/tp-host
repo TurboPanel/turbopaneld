@@ -2695,15 +2695,18 @@ BUILD_RUNTIME_MAX_SEC=1800
 # the build account, still confined); below the minimum: no build.
 BUILD_SYSTEMD_FLOOR=255
 BUILD_SYSTEMD_MIN=247
-# Loopback, private (10/8 covers the tp0 fabric), CGNAT, link-local (cloud
-# metadata), benchmark, multicast and reserved ranges, on every port. Nothing
-# is allowed back in (an IPAddressAllow= wins over the deny for every port):
-# the build resolves through its own resolv.conf naming only public
-# nameservers, which public egress already reaches.
-BUILD_DENY_V4="0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 169.254.0.0/16 172.16.0.0/12 192.0.0.0/24 192.168.0.0/16 198.18.0.0/15 224.0.0.0/3"
+# Private (10/8 covers the tp0 fabric), CGNAT, link-local (cloud metadata),
+# benchmark, multicast and reserved ranges, on every port. Nothing is allowed
+# back in (an IPAddressAllow= wins over the deny for every port): the build
+# resolves through its own resolv.conf naming only public nameservers, which
+# public egress already reaches. Loopback (127.0.0.0/8, ::1) is NOT denied here:
+# Turbopack's helper processes talk to each other over it. lib/tp-build-loopback
+# (nftables, per tpbuild uid) refuses the platform's loopback ports instead.
+BUILD_LOOPBACK="$INSTALL_ROOT/lib/tp-build-loopback"
+BUILD_DENY_V4="0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 169.254.0.0/16 172.16.0.0/12 192.0.0.0/24 192.168.0.0/16 198.18.0.0/15 224.0.0.0/3"
 # NAT64 (64:ff9b::/96) and 6to4 (2002::/16) embed IPv4 addresses, private
 # ones included, so both are denied whole.
-BUILD_DENY_V6="::/128 ::1/128 64:ff9b::/96 2002::/16 fc00::/7 fe80::/10 ff00::/8"
+BUILD_DENY_V6="::/128 64:ff9b::/96 2002::/16 fc00::/7 fe80::/10 ff00::/8"
 # Used when the host names no public nameserver (a loopback stub with
 # private upstreams, a LAN router): never a loopback, private or link-local
 # resolver, which would open that address to the build.
@@ -2884,6 +2887,10 @@ tp_verb_build_run() {
   tp_run chown -h -- "$BUILD_UID:$BUILD_GID" .
   tp_build_work_pin "$1"
   tp_run chown -R -h -P -- "$BUILD_UID:$BUILD_GID" .
+  # Fail closed: without the port filter the build would reach host services
+  # on loopback, so it does not start (the unit re-runs this as ExecStartPre).
+  tp_run "$BUILD_LOOPBACK" sync ||
+    tp_die "build-run: the build's network rules could not be loaded (is nftables installed?); builds are stopped until they can"
   cd /
   set -- --unit="turbopanel-build-$1" --service-type=exec --wait --pipe --quiet --collect \
     -p User="$BUILD_ACCOUNT" -p Group="$BUILD_ACCOUNT" -p WorkingDirectory="$_br_work" \
@@ -2914,7 +2921,8 @@ tp_verb_build_run() {
   fi
   [ "$_br_v" -lt 257 ] || set -- "$@" -p PrivatePIDs=yes
   set -- "$@" -p RestrictAddressFamilies="AF_INET AF_INET6 AF_UNIX" \
-    -p IPAddressDeny="$BUILD_DENY_V4 $BUILD_DENY_V6"
+    -p IPAddressDeny="$BUILD_DENY_V4 $BUILD_DENY_V6" \
+    -p ExecStartPre="+$BUILD_LOOPBACK sync"
   set -- "$@" -p Slice="$BUILD_SLICE" -p MemoryMax="$BUILD_MEMORY_MAX" -p MemorySwapMax=0 \
     -p CPUQuota="$BUILD_CPU_QUOTA" -p TasksMax=1024 -p IOWeight=50 -p LimitFSIZE=4G \
     -p LimitNOFILE=65536 -p LimitCORE=0 -p RuntimeMaxSec="$BUILD_RUNTIME_MAX_SEC" \
