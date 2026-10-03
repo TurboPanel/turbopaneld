@@ -23,6 +23,10 @@ export function closeAndAbandon(
     ws.dispatchEvent(
       new CloseEvent("close", { code: 1006, reason: "stale socket abandoned" }),
     );
+    // The socket is given up on: a frame or close it delivers later must not
+    // reach the daemon, which has moved on to a new connection.
+    ws.onmessage = null;
+    ws.onclose = null;
   }, graceMs);
   ws.addEventListener("close", () => clearTimeout(timer), { once: true });
 }

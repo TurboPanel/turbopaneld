@@ -6734,6 +6734,56 @@ it({
 });
 
 it({
+  name:
+    "a socket that already closed cannot dispatch commands or clean up twice",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const restoreHooks = installClientTestHooks({
+      restartDaemonService: () => Promise.resolve(true),
+    });
+    const { socket, restore } = await startConnectedClient();
+    try {
+      const ping = (id: string) => ({
+        type: "command-dispatch",
+        id,
+        commandId: "00000000-0000-4000-8000-000000000098",
+        commandType: "daemon.ping",
+        payload: {},
+        at: new Date().toISOString(),
+      });
+      const acked = (id: string) =>
+        framesOfType(socket, "command-ack").some((f) =>
+          (f as { id?: string }).id === id
+        );
+      socket.receive(ping("cmd-live"));
+      await waitFor(
+        "ack on the live socket",
+        () => acked("cmd-live") || undefined,
+      );
+
+      // The synthetic close from closeAndAbandon, then the real one.
+      socket.dispatchEvent(new CloseEvent("close", { code: 1006 }));
+      socket.dispatchEvent(new CloseEvent("close", { code: 1006 }));
+      socket.readyState = MockWebSocket.OPEN;
+      socket.receive(ping("cmd-late"));
+      await flushMicrotasks();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      assertEquals(acked("cmd-late"), false);
+    } finally {
+      restore();
+      restoreHooks();
+    }
+  },
+});
+
+it({
   name: "parked connect loop exits when stopped during parked wait",
   permissions: {
     env: true,

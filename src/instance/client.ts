@@ -1380,6 +1380,9 @@ export class InstanceClient {
     this.#syncDockerNetworkingAfterConnect();
 
     ws.onmessage = (event) => {
+      // An abandoned or replaced socket may still wake up with buffered
+      // frames; only the current socket may drive the daemon.
+      if (this.#ws !== ws) return;
       this.#idlePresence?.noteInboundActivity();
       const raw = typeof event.data === "string"
         ? event.data
@@ -1395,7 +1398,14 @@ export class InstanceClient {
       this.#handleMessage(message, ws);
     };
 
+    let closeHandled = false;
     ws.onclose = (event) => {
+      // closeAndAbandon dispatches a synthetic close, and the real socket can
+      // still fire its own later. By then a new connection owns the shared
+      // state below, so each socket cleans up at most once, and only while it
+      // is still the current one.
+      if (closeHandled) return;
+      closeHandled = true;
       if (event.code === 4401) {
         logWarn("instance", "authentication rejected");
       }
@@ -1404,7 +1414,8 @@ export class InstanceClient {
       } else {
         logDebug("instance", "websocket closed before registration");
       }
-      if (this.#ws === ws) this.#ws = undefined;
+      if (this.#ws !== undefined && this.#ws !== ws) return;
+      this.#ws = undefined;
       this.#peerFeatures = [];
       this.#idlePresence?.detach();
       this.#haObserver?.detach();
@@ -1639,6 +1650,11 @@ export class InstanceClient {
         this.#echoMessage(message, ws);
         break;
       case "command-dispatch": {
+        const dispatch = this.#resolveCommandDispatch();
+        if (!dispatch) {
+          logWarn("instance", "command-dispatch handler not registered");
+          break;
+        }
         if (this.#seenDispatchIds.seenBefore(message.id)) {
           logWarn(
             "instance",
@@ -1655,11 +1671,6 @@ export class InstanceClient {
               daemonReceivedAt: at,
             }));
           }
-          break;
-        }
-        const dispatch = this.#resolveCommandDispatch();
-        if (!dispatch) {
-          logWarn("instance", "command-dispatch handler not registered");
           break;
         }
         this.#runSocketHandler(
