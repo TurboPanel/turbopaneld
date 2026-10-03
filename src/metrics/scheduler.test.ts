@@ -233,6 +233,7 @@ function createFixtureCollectorFactory(): () => MetricsCollector {
       // back to `ls`). FakeClock only drains microtasks, so a busy CI
       // runner never finishes the first collect before the assertion.
       countProcesses: () => 42,
+      hostText: () => Promise.resolve({}),
       // Unlike GPU adapters (only invoked per topology-enumerated GPU, and
       // this fixture's topology has none), the ingress/router/database-proxy
       // adapters are scrape-derived with no topology gate — `defaultDeps()`'s

@@ -911,7 +911,10 @@ export class LinuxMetricsCollector implements MetricsCollector {
     const hostText = await this.#readHostText();
     return {
       supported: true,
-      sample: hostText ? { ...outgoing, hostText } : outgoing,
+      // `hostText` is v7-only and absent from the v6-mirrored contract type.
+      sample: hostText
+        ? ({ ...outgoing, hostText } as typeof outgoing)
+        : outgoing,
     };
   }
 
