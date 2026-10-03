@@ -34,6 +34,10 @@ import {
   type DirectoryUsageWalker,
 } from "./directory-usage.ts";
 import { DockerUsageSampler } from "./docker-usage.ts";
+import {
+  ContainerHealthSampler,
+  defaultCgroupReader,
+} from "./docker-containers.ts";
 import { ManagedEngineSampler } from "./managed-engines.ts";
 import { resolveHostingPath } from "./hosting.ts";
 import { defaultSensorIo } from "./sensors/discovery.ts";
@@ -342,6 +346,21 @@ function defaultTlsExpirySampler(): TlsExpirySampler {
   return cachedTlsExpirySampler;
 }
 
+let cachedContainerSampler: ContainerHealthSampler | undefined;
+function defaultContainerSampler(): ContainerHealthSampler {
+  if (!cachedContainerSampler) {
+    const client = new DockerClient();
+    cachedContainerSampler = new ContainerHealthSampler({
+      listContainers: () => client.listContainers(true),
+      streamEvents: (signal) => client.streamEvents(signal),
+      readCgroupFile: defaultCgroupReader(),
+      cpuCount: () => navigator.hardwareConcurrency,
+    });
+    cachedContainerSampler.start();
+  }
+  return cachedContainerSampler;
+}
+
 let cachedDockerUsageSampler: DockerUsageSampler | undefined;
 function defaultDockerUsageSampler(): DockerUsageSampler {
   if (!cachedDockerUsageSampler) {
@@ -350,7 +369,7 @@ function defaultDockerUsageSampler(): DockerUsageSampler {
     // which omits the family rather than reporting zero bytes of Docker.
     const client = new DockerClient();
     cachedDockerUsageSampler = new DockerUsageSampler({
-      systemDf: () => client.systemDf(),
+      systemDf: (signal) => client.systemDf(signal),
     });
     cachedDockerUsageSampler.start();
   }
@@ -403,6 +422,7 @@ export function stopHostStorageSamplers(): void {
   cachedDirectoryUsageWalker?.stop();
   cachedTlsExpirySampler?.stop();
   cachedDockerUsageSampler?.stop();
+  cachedContainerSampler?.stop();
   cachedManagedEngineSampler?.stop();
 }
 
@@ -433,6 +453,7 @@ function defaultDeps(): CollectorDeps {
     directoryUsage: () => defaultDirectoryUsageWalker().latest(),
     tlsExpiry: () => defaultTlsExpirySampler().latest(),
     dockerUsage: () => defaultDockerUsageSampler().latest(),
+    containers: () => defaultContainerSampler().latest(),
     managedEngines: () => defaultManagedEngineSampler().latest(),
   };
 }

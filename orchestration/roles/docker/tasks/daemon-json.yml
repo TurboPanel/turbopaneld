@@ -85,7 +85,22 @@
       }}
   when: turbopanel_docker_deny_builder_entitlements | bool
 
-# Drop the three owned keys first so an empty var removes a previously
+# Dedicated cgroup parent for every container (metrics: one cgroup v2 read gives
+# the whole fleet's CPU, memory and OOM totals; see src/metrics/AGENTS.md).
+# Owned only with the systemd cgroup driver (the Debian default, a *.slice
+# name); a host pinned to the cgroupfs driver keeps its own value. Setting it
+# changes daemon.json, so it rides the same restart rules as live-restore:
+# restart on a normal host, pending marker on a co-located instance host.
+# Existing containers move over as they are recreated.
+- name: Decide whether this role owns cgroup-parent
+  ansible.builtin.set_fact:
+    _docker_cgroup_parent_owned: >-
+      {{
+        (turbopanel_docker_cgroup_parent | length > 0)
+        and ('native.cgroupdriver=cgroupfs' not in (_docker_daemon_json_current['exec-opts'] | default([])))
+      }}
+
+# Drop the owned keys first so an empty var removes a previously
 # written value instead of leaving it behind; everything else passes through
 # as-is. live-restore is always forced true — never conditionally combined
 # — since it has no "clear" case the way the address-pool keys do.
@@ -96,9 +111,14 @@
         _docker_daemon_json_current
         | dict2items
         | rejectattr('key', 'in', ['default-address-pools', 'bip', 'live-restore'])
+        | rejectattr('key', 'in', (['cgroup-parent'] if _docker_cgroup_parent_owned else []))
         | list
         | items2dict
         | combine({'live-restore': true})
+        | combine(
+            ({'cgroup-parent': turbopanel_docker_cgroup_parent}
+              if _docker_cgroup_parent_owned else {})
+          )
         | combine(
             ({'default-address-pools': turbopanel_docker_address_pools}
               if (turbopanel_docker_address_pools | length > 0) else {})

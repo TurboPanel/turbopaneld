@@ -21,6 +21,7 @@
  * (`events/index.ts`'s `EventCollectorSet`) when wired. Absent (e.g. a test
  * collector), each of these stays `[]`.
  */
+import { toContainerHealthSample } from "./docker-containers.ts";
 import {
   buildMetricsSample,
   type DiagnosticsSample,
@@ -907,6 +908,19 @@ export class LinuxMetricsCollector implements MetricsCollector {
       cpu: cpu.currentCpu,
       cores: cpu.currentCores,
     };
-    return { supported: true, sample: outgoing };
+    const containerReading = this.#deps.containers?.() ?? null;
+    return {
+      supported: true,
+      sample: outgoing,
+      ...(containerReading
+        ? {
+          containers: toContainerHealthSample(
+            containerReading,
+            this.#tracker,
+            bootGeneration,
+          ),
+        }
+        : {}),
+    };
   }
 }
