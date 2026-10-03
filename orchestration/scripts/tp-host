@@ -2480,6 +2480,146 @@ tp_verb_getent() {
   tp_exec getent shadow -- "$3"
 }
 
+# --- retiring a principal -------------------------------------------------------
+# `principal-remove NAME` takes back what a principal held on this host once the
+# panel says no project, site or app here uses the account any more: its slice
+# and processes, its key file, its group memberships, its home tree, the
+# account and its <name>-grp group. One argument and no options; every step is
+# fixed here.
+#
+# Refused unless NAME is a TurboPanel principal: uid and <name>-grp gid both in
+# the principal band (an account outside it is never touched), that group is
+# the account's primary group, and the passwd home is <root>/<name>/home (the
+# root-owned layout) or <root>/<name> (the tenant-owned layout before it).
+# Refused before anything changes while this host still references the
+# account: a turbopanel-* unit that runs as it or in its slice, or a site tree
+# left under its home. An account that is already gone is not an error, so a
+# retried teardown finishes what an earlier one left behind.
+
+tp_in_principal_band() {
+  case "$1" in ''|*[!0-9]*) return 1 ;; esac
+  [ "${#1}" -le 10 ] && [ "$1" -ge "$PRINCIPAL_ID_MIN" ] && [ "$1" -le "$PRINCIPAL_ID_MAX" ]
+}
+
+# The same names useradd accepts, without its "must not exist yet".
+tp_retire_name_ok() {
+  case "$1" in
+    ''|-*|*[!A-Za-z0-9_-]*|root|tp|tp[a-z]*) return 1 ;;
+  esac
+  [ "${#1}" -le 28 ]
+}
+
+# The <name>-grp group's id, when it exists inside the principal band.
+tp_retire_group_gid() {
+  _rg_line="$(tp_getent group "$1-grp")" || return 1
+  _rg_gid="$(printf '%s' "$_rg_line" | cut -d: -f3)"
+  tp_in_principal_band "$_rg_gid" || tp_die "principal-remove: $1-grp is outside the principal band"
+  printf '%s' "$_rg_gid"
+}
+
+# A turbopanel-* unit (other than the slice itself) that still runs as NAME or
+# inside its slice.
+tp_retire_unit_ref() {
+  for _ru in "$R_UNITS"/turbopanel-*; do
+    [ -f "$_ru" ] || continue
+    [ "${_ru##*/}" != "turbopanel-$1.slice" ] || continue
+    if grep -qxF -e "User=$1" -e "Slice=turbopanel-$1.slice" -- "$_ru"; then
+      printf '%s' "${_ru##*/}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+tp_retire_refs_check() {
+  if _rr_unit="$(tp_retire_unit_ref "$1")"; then
+    tp_die "principal-remove: $1 is still referenced by $_rr_unit"
+  fi
+  tp_pin_dir "$R_PRINCIPALS" || return 0
+  if [ -d "./$1/sites" ] && [ -n "$(ls -A -- "./$1/sites")" ]; then
+    tp_die "principal-remove: $1 still has site trees under $R_PRINCIPALS/$1/sites"
+  fi
+}
+
+# The account is a principal this script created: ids in the band, its own
+# group as primary group, its home in the principal root.
+tp_retire_account_check() {
+  _ra_line="$(tp_getent passwd "$1")"
+  _ra_uid="$(printf '%s' "$_ra_line" | cut -d: -f3)"
+  _ra_gid="$(printf '%s' "$_ra_line" | cut -d: -f4)"
+  _ra_home="$(printf '%s' "$_ra_line" | cut -d: -f6)"
+  tp_in_principal_band "$_ra_uid" || tp_die "principal-remove: $1 is outside the principal band"
+  _ra_grp="$(tp_retire_group_gid "$1")" || tp_die "principal-remove: $1 has no $1-grp group"
+  [ "$_ra_gid" = "$_ra_grp" ] || tp_die "principal-remove: $1's primary group is not $1-grp"
+  case "$_ra_home" in
+    "$R_PRINCIPALS/$1/home"|"$R_PRINCIPALS/$1") ;;
+    *) tp_die "principal-remove: $1's home is not under $R_PRINCIPALS/$1" ;;
+  esac
+  RETIRE_UID="$_ra_uid"
+}
+
+# Every group that lists NAME as a supplementary member.
+tp_retire_member_groups() {
+  if [ -n "$TP_TEST" ]; then cat "$P/etc/group"; else getent group; fi |
+    awk -F: -v u="$1" '{ n = split($4, m, ","); for (i = 1; i <= n; i++) if (m[i] == u) { print $1; break } }'
+}
+
+# Key file and slice unit (installed and staged copies). Nothing here is a
+# principal-owned path, so a missing file is simply already gone.
+tp_retire_files() {
+  if tp_pin_dir "$R_SSHKEYS/authorized_keys"; then rm -f -- "./$1"; fi
+  if tp_pin_dir "$R_CONFIG/node-apps"; then rm -f -- "./slice-$1.slice"; fi
+  if tp_pin_dir "$R_UNITS"; then rm -f -- "./turbopanel-$1.slice"; fi
+  tp_run systemctl daemon-reload
+}
+
+# <root>/NAME, if present, is a real directory (not a symlink) owned by root
+# (the root-owned layout) or by the principal (the layout before it). Leaves
+# the shell in the pinned principal root; fails when there is no home to take.
+tp_retire_home_check() {
+  tp_pin_dir "$R_PRINCIPALS" || return 1
+  [ ! -L "./$1" ] || tp_die "principal-remove: $R_PRINCIPALS/$1 is a symlink"
+  [ -e "./$1" ] || return 1
+  [ -d "./$1" ] || tp_die "principal-remove: $R_PRINCIPALS/$1 is not a directory"
+  _rh_owner="$(stat -c '%u' -- "./$1")"
+  [ "$_rh_owner" = "$ROOT_UID" ] || [ "$_rh_owner" = "$2" ] ||
+    tp_die "principal-remove: $R_PRINCIPALS/$1 belongs to uid $_rh_owner"
+}
+
+# Remove the home from the pinned root, never following a symlink, and staying
+# on its file system (a mount under the home is refused, not emptied).
+tp_retire_home() {
+  tp_retire_home_check "$1" "$2" || return 0
+  rm -rf --one-file-system -- "./$1" || tp_die "principal-remove: could not remove $R_PRINCIPALS/$1"
+}
+
+tp_verb_principal_remove() {
+  [ "$#" -eq 1 ] || tp_die "principal-remove: only principal-remove NAME"
+  _pv="$1"
+  tp_retire_name_ok "$_pv" || tp_die "principal-remove: refusing name $_pv"
+  if ! tp_getent passwd "$_pv" >/dev/null 2>&1; then
+    # Already gone: finish the slice, group and files an earlier run left.
+    tp_retire_refs_check "$_pv"
+    tp_run systemctl --no-pager stop "turbopanel-$_pv.slice" || true
+    tp_retire_files "$_pv"
+    if tp_retire_group_gid "$_pv" >/dev/null; then tp_run groupdel "$_pv-grp"; fi
+    return 0
+  fi
+  tp_retire_account_check "$_pv"
+  tp_retire_refs_check "$_pv"
+  tp_retire_home_check "$_pv" "$RETIRE_UID" || true
+  tp_run systemctl --no-pager stop "turbopanel-$_pv.slice" || true
+  # pkill exits 1 when nothing matched.
+  tp_run pkill -KILL -u "$RETIRE_UID" || true
+  tp_retire_files "$_pv"
+  tp_retire_member_groups "$_pv" | while IFS= read -r _pv_group; do
+    tp_run gpasswd -d "$_pv" "$_pv_group"
+  done
+  tp_retire_home "$_pv" "$RETIRE_UID"
+  tp_run userdel "$_pv"
+  tp_run groupdel "$_pv-grp"
+}
+
 # --- builds ------------------------------------------------------------------
 # Tenant build commands run as BUILD_ACCOUNT (not in docker or tp, no sudo) in
 # a transient turbopanel-build-<id>.service whose every property is fixed
@@ -2745,6 +2885,7 @@ case "$_verb" in
   gpasswd) tp_verb_gpasswd "$@" ;;
   chpasswd) tp_verb_chpasswd "$@" ;;
   getent) tp_verb_getent "$@" ;;
+  principal-remove) tp_verb_principal_remove "$@" ;;
   modprobe) tp_verb_modprobe "$@" ;;
   build-run) tp_verb_build_run "$@" ;;
   build-return) tp_verb_build_return "$@" ;;
