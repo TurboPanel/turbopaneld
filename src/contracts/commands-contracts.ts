@@ -1649,6 +1649,24 @@ export type ManagedReplicationHealth = {
   lagBytes?: number;
   lagSeconds?: number;
   observedAt: string;
+  /** Standby only: `pg_last_wal_receive_lsn()` text (absent when NULL). */
+  receivedLsn?: string;
+  /** Standby only: `pg_last_wal_replay_lsn()` text (absent when NULL). */
+  replayLsn?: string;
+  /** Standby only, while streaming: received-vs-primary byte lag. */
+  receiveLagBytes?: number;
+  /**
+   * Standby only, on `managed-health-result`: the daemon's last `streaming`
+   * read of this member. `ageMs` is measured on the daemon's monotonic clock
+   * when the result is built.
+   */
+  lastStreaming?: {
+    at: string;
+    ageMs: number;
+    lagBytes?: number;
+    lagSeconds?: number;
+    receiveLagBytes?: number;
+  };
 };
 
 /** Must stay in sync with the instance canonical `managed.apply` shape. */
@@ -6640,6 +6658,27 @@ export function parseManagedReplicationHealth(
     value.lagSeconds >= 0
   ) {
     health.lagSeconds = value.lagSeconds;
+  }
+  return withStandbyPositions(health, value);
+}
+
+/** Standby WAL positions and receive lag, when present and well-formed. */
+function withStandbyPositions(
+  health: ManagedReplicationHealth,
+  value: Record<string, unknown>,
+): ManagedReplicationHealth {
+  if (typeof value.receivedLsn === "string" && value.receivedLsn.length <= 32) {
+    health.receivedLsn = value.receivedLsn;
+  }
+  if (typeof value.replayLsn === "string" && value.replayLsn.length <= 32) {
+    health.replayLsn = value.replayLsn;
+  }
+  if (
+    typeof value.receiveLagBytes === "number" &&
+    Number.isFinite(value.receiveLagBytes) &&
+    value.receiveLagBytes >= 0
+  ) {
+    health.receiveLagBytes = value.receiveLagBytes;
   }
   return health;
 }
