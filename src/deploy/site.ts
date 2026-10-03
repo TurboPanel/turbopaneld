@@ -97,9 +97,11 @@ import type {
 } from "./site/engine-driver.ts";
 import {
   isSitePhpRuntimeOf,
+  SITE_PHP_FCGI_CHILDREN,
   sitePhpFpmConf,
   sitePhpIni,
   sitePhpKey,
+  sitePhpLockedValues,
   sitePhpRuntimeId,
   type SitePhpRuntimeMode,
   sitePhpRuntimeMode,
@@ -107,6 +109,7 @@ import {
   sitePhpServiceUnit,
   sitePhpSocketPath,
   sitePhpSocketUnit,
+  sitePhpUnitLimits,
 } from "./site/php-runtime.ts";
 import {
   holdSitePhpRuntime,
@@ -2691,17 +2694,27 @@ function sitePhpRuntimeFiles(
       `site ${site.composeServiceName}: PHP mode ${mode} serves only from the owner's home (a release or a managed directory)`,
     );
   }
+  const pool = phpFpmPoolOverrides(site.php);
+  const maxChildren = Number(
+    pool.find((p) => p.key === "pm.max_children")?.value,
+  );
+  const fpmWorkers = Number.isInteger(maxChildren) && maxChildren > 0
+    ? maxChildren
+    : 20;
+  const workers = mode === "fpm" ? fpmWorkers : SITE_PHP_FCGI_CHILDREN;
   return {
     spec,
     service: sitePhpServiceUnit(spec, {
       writablePaths: sitePhpWritablePaths(layout, paths),
+      limits: sitePhpUnitLimits(values, workers),
     }),
     socket: mode === "fastcgi" ? sitePhpSocketUnit(spec) : null,
     ini: sitePhpIni(values, home),
     fpmConf: mode === "fpm"
       ? sitePhpFpmConf(spec, {
-        pool: phpFpmPoolOverrides(site.php),
+        pool,
         chdir: paths.documentRoot,
+        admin: sitePhpLockedValues(values),
       })
       : null,
   };
