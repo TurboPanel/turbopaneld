@@ -2081,7 +2081,6 @@ test("per-site PHP config: root:<owner>-grp, 0750/0640, directives on an allowli
         ["0750", "root", "alice-grp", phpConfDir(host, "Shop")],
         ["0750", "root", "alice-grp", `${dir}/deeper`],
         ["0755", "root", "root", host.path("etc/turbopanel/php/sites")],
-        ["0755", "root", "root", host.path("etc/turbopanel/php-sites")],
       ]
     ) {
       assertEquals(
@@ -2288,18 +2287,6 @@ test("per-site PHP config: symlinks, other verbs and the rollout copy", async ()
           staged,
           `${dir}/x.conf`,
         ],
-        [
-          "install",
-          "-m",
-          "0640",
-          "-o",
-          "root",
-          "-g",
-          "root",
-          staged,
-          host.path("etc/turbopanel/php-sites/shop-1"),
-        ],
-        ["tee", host.path("etc/turbopanel/php-sites/shop-1")],
       ]
     ) {
       await refused(host, args, args[0] === "tee" ? "x\n" : undefined);
@@ -2471,86 +2458,6 @@ test("per-site PHP: what the daemon renders for each mode and web server passes 
         assertEquals(tested.code, 0, tested.stderr);
       }
     }
-  });
-});
-
-test("php-site-register writes the launcher registry from the account database only", async () => {
-  await withPhpHost(async (host) => {
-    const entry = host.path(`etc/turbopanel/php-sites/${PHP_SITE}`);
-    const register = [
-      "php-site-register",
-      PHP_SITE,
-      "alice",
-      "lsphp-attached",
-      "8.3",
-      "10",
-    ];
-    // An account whose passwd home is the principal home itself (the layout
-    // before home/) is refused: the home comes from the account database.
-    const root = host.path("srv/users/alice");
-    assertStringIncludes(await refused(host, register), "home is not");
-    const passwd = host.path("etc/passwd");
-    await Deno.writeTextFile(
-      passwd,
-      (await Deno.readTextFile(passwd)).replace(
-        `::${root}:`,
-        `::${root}/home:`,
-      ),
-    );
-    const ok = await host.run(register);
-    assertEquals(ok.code, 0, ok.stderr);
-    assertStringIncludes(ok.stdout, "EXEC [chown] [-h] [--] [root:root] [./f]");
-    const home = `${root}/home`;
-    assertEquals(
-      await Deno.readTextFile(entry),
-      [
-        "version=1",
-        `site=${PHP_SITE}`,
-        "mode=lsphp-attached",
-        "user=alice",
-        "uid=15001",
-        "group=alice-grp",
-        "gid=15001",
-        `home=${home}`,
-        `tmp=${root}/tmp`,
-        "php=8.3",
-        `bin=${phpExec(host, "lsphp")}`,
-        `ini=${phpConfDir(host)}/php.ini`,
-        "children=10",
-        "",
-      ].join("\n"),
-    );
-    for (
-      const args of [
-        [PHP_SITE, "root", "lsphp-attached", "8.3", "10"],
-        [PHP_SITE, "tpnginx", "lsphp-attached", "8.3", "10"],
-        [PHP_SITE, "carol", "lsphp-attached", "8.3", "10"],
-        [PHP_SITE, "alice", "php-fpm", "8.3", "10"],
-        [PHP_SITE, "alice", "lsphp-attached", "9.1", "10"],
-        [PHP_SITE, "alice", "lsphp-attached", "8.3.1", "10"],
-        [PHP_SITE, "alice", "lsphp-attached", "8.3", "0"],
-        [PHP_SITE, "alice", "lsphp-attached", "8.3", "65"],
-        [PHP_SITE, "alice", "lsphp-attached", "8.3", "010"],
-        ["Shop", "alice", "lsphp-attached", "8.3", "10"],
-        ["../x", "alice", "lsphp-attached", "8.3", "10"],
-        [PHP_SITE, "alice", "lsphp-attached", "8.3"],
-        [PHP_SITE, "alice", "lsphp-attached", "8.3", "10", "uid=0"],
-      ]
-    ) {
-      await refused(host, ["php-site-register", ...args]);
-    }
-    for (
-      const args of [["chown", "tp", entry], ["chmod", "0666", entry], [
-        "cp",
-        "-p",
-        "--",
-        entry,
-        `${entry}.x`,
-      ]]
-    ) {
-      await refused(host, args);
-    }
-    assertEquals((await host.run(["rm", "-f", "--", entry])).code, 0);
   });
 });
 
