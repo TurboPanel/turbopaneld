@@ -646,3 +646,35 @@ test("removeCronJobs issues exactly this host command sequence", async () => {
     await host.cleanup();
   }
 });
+
+test("a job's HOME and TMPDIR are the tenant dirs and the home root stays read-only", () => {
+  const service = cronServiceContent({
+    layout: resolveLayout(
+      { TURBOPANEL_PRINCIPAL_HOME_ROOT: "/srv/users" },
+      { skipDiscovery: true, forceMode: "production" },
+    ),
+    environmentId: ENV_ID,
+    composeServiceName: "blog",
+    job,
+    username: USERNAME,
+    workingDirectory: "/srv/users/appuser/sites/svc-1/webroot/public",
+    siteWritableDirs: [
+      "/srv/users/appuser/sites/svc-1/webroot",
+      "/srv/users/appuser/sites/svc-1/shared",
+    ],
+  });
+  const lines = service.split("\n");
+
+  assertStringIncludes(service, "Environment=HOME=/srv/users/appuser/home\n");
+  assertStringIncludes(service, "Environment=TMPDIR=/srv/users/appuser/tmp\n");
+  assertEquals(
+    lines.filter((line) => line.startsWith("ReadWritePaths=")),
+    [
+      "ReadWritePaths=/srv/users/appuser/sites/svc-1/webroot " +
+      "/srv/users/appuser/sites/svc-1/shared /srv/users/appuser/home " +
+      "/srv/users/appuser/data /srv/users/appuser/tmp",
+    ],
+  );
+  // The design's checklist: no unit may write the whole (now root-owned) home.
+  assertEquals(lines.includes("ReadWritePaths=/srv/users/appuser"), false);
+});

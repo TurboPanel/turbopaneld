@@ -385,3 +385,25 @@ test("authored deploy.labels are preserved on the generated unit", () => {
     'X-TurboPanel-Labels={"com.example.team":"platform"}',
   );
 });
+
+test("a native app's HOME and TMPDIR are its tenant dirs, never the sealed home root", () => {
+  const content = nativeAppUnitContent({
+    layout,
+    app,
+    username: "appuser",
+    environmentId: "env-1",
+  });
+  const lines = content.split("\n");
+
+  assertStringIncludes(content, "Environment=HOME=/srv/users/appuser/home\n");
+  assertStringIncludes(content, "Environment=TMPDIR=/srv/users/appuser/tmp\n");
+  // Only its own site's shared/ plus the principal's home/, data/ and tmp/.
+  assertEquals(
+    lines.filter((line) => line.startsWith("ReadWritePaths=")),
+    [
+      "ReadWritePaths=/srv/users/appuser/sites/svc-native-1/shared " +
+      "/srv/users/appuser/home /srv/users/appuser/data /srv/users/appuser/tmp",
+    ],
+  );
+  assertEquals(lines.includes("Environment=HOME=/srv/users/appuser"), false);
+});
