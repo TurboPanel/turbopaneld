@@ -45,6 +45,15 @@ turbopanel_docker_deny_builder_entitlements: true  # noqa: var-naming[no-role-pr
 # Marker for a daemon.json change dockerd has not been restarted for (a
 # co-located instance host, where the handler never restarts it).
 turbopanel_docker_restart_pending_file: /etc/docker/turbopanel-restart-pending  # noqa: var-naming[no-role-prefix]
+
+# Always-on egress block for containers and builds (audit P1-4): drops
+# link-local / cloud-metadata destinations entering from docker0 and br-+ in
+# DOCKER-USER (and INPUT for the host's own link-local addresses), IPv4 and
+# IPv6, with a DNS exception for link-local resolvers. See
+# files/turbopanel-docker-egress. Independent of the opt-in host firewall.
+turbopanel_docker_egress_guard: true  # noqa: var-naming[no-role-prefix]
+turbopanel_docker_egress_script: /usr/local/lib/turbopanel/turbopanel-docker-egress  # noqa: var-naming[no-role-prefix]
+
 # Merge only the builder entitlement deny and leave every other daemon.json key
 # (address pools, bip, live-restore) as found. Set by tasks/converge-builder.yml,
 # which daemon-converge runs on hosts the docker role provisioned earlier.
