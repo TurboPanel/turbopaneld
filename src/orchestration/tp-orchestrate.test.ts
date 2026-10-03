@@ -766,6 +766,15 @@ test("control-plane backup and rollback playbooks are shipped basenames", async 
   assertEquals(helper.includes("*.yml) ;;"), true);
 });
 
+test("rollback never installs the instance unit from the backup directory", async () => {
+  const play = await Deno.readTextFile(
+    join(here, "../../orchestration/playbooks/instance-rollback.yml"),
+  );
+  assertEquals(play.includes("remote_src"), false);
+  assertEquals(play.includes("turbopanel-instance.service"), false);
+  assertEquals(play.includes("tasks_from: units.yml"), true);
+});
+
 test("migrate reads the instance unit URL, not runtime.env or a caller URL", async () => {
   const source = await Deno.readTextFile(helperPath);
   const fn = extractShellFunction(source, "tp_verb_migrate");

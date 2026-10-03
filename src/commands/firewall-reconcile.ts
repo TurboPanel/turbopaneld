@@ -43,6 +43,11 @@
  */
 
 import { logInfo, sanitizeForLog } from "../util/logger.ts";
+import {
+  autoConfirmFirewall,
+  type FirewallAutoConfirmOptions,
+} from "../firewall/auto-confirm.ts";
+import { readPendingMarker, readRollbackRecord } from "../firewall/pending.ts";
 import { type LayoutPaths, resolveLayout } from "../paths/layout.ts";
 import {
   applyRenderedFirewall,
@@ -76,6 +81,10 @@ export const CONTROL_PLANE_PORTS_MISSING_WARNING =
 export type FirewallReconcileDeps = {
   run?: FirewallRunFn;
   resolveLayout?: () => LayoutPaths;
+  /** One authenticated round trip to the control plane; see `../firewall/auto-confirm.ts`. */
+  verifyControlPlane?: () => Promise<void>;
+  /** Test seams for the auto-confirm check. */
+  autoConfirm?: Partial<FirewallAutoConfirmOptions>;
 };
 
 function union(a: number[], b: number[]): number[] {
@@ -153,6 +162,40 @@ async function renderOnlyResult(
   };
 }
 
+/**
+ * The guard's rollback record, but only while no ruleset is pending: that is
+ * how the control plane learns "rolled back" without asking. Cleared by the
+ * next confirm.
+ */
+async function lastRollbackField(
+  layout: LayoutPaths,
+): Promise<Pick<FirewallReconcileResult, "lastRollback">> {
+  if (await readPendingMarker(layout) !== null) return {};
+  const record = await readRollbackRecord(layout);
+  return record === null ? {} : { lastRollback: record };
+}
+
+/** Run the daemon's own confirm and fold the answer into the pending confirmation. */
+async function selfConfirm(
+  digest: string,
+  confirmation: NonNullable<FirewallReconcileResult["confirmation"]>,
+  deps: FirewallReconcileDeps,
+  run: FirewallRunFn,
+  layout: LayoutPaths,
+): Promise<NonNullable<FirewallReconcileResult["confirmation"]>> {
+  const outcome = await autoConfirmFirewall(digest, {
+    ...deps.autoConfirm,
+    verifyControlPlane: deps.verifyControlPlane,
+    run,
+    layout,
+  });
+  return {
+    ...confirmation,
+    state: outcome.confirmed ? "confirmed" : "pending",
+    autoConfirm: { ok: outcome.confirmed, reason: outcome.reason },
+  };
+}
+
 export async function handleFirewallReconcile(
   payload: FirewallReconcilePayload,
   _daemonReceivedAt: string,
@@ -219,7 +262,7 @@ export async function handleFirewallReconcile(
   }
 
   if (payload.mode === "observe" || refusals.length > 0) {
-    return await renderOnlyResult({
+    const preview = await renderOnlyResult({
       payload,
       rendered,
       probe,
@@ -228,6 +271,7 @@ export async function handleFirewallReconcile(
       warnings,
       refusals,
     });
+    return { ...preview, ...await lastRollbackField(layout) };
   }
 
   const outcome = await applyRenderedFirewall(rendered, includeForward, probe, {
@@ -237,9 +281,25 @@ export async function handleFirewallReconcile(
   });
   warnings.push(...outcome.warnings);
 
+  const confirmation = await selfConfirm(
+    rendered.digest,
+    {
+      state: "pending",
+      deadlineAt: outcome.confirmation.deadlineAt,
+      windowSeconds: outcome.confirmation.windowSeconds,
+    },
+    deps,
+    run,
+    layout,
+  );
+
   logInfo(
     "command",
-    `firewall generation ${payload.generation} applied (pending confirmation): ${rendered.ruleCount} rules, v6=${outcome.ipv6Status}, forward=${outcome.forwardApplied}, digest ${
+    `firewall generation ${payload.generation} applied (${
+      confirmation.state === "confirmed"
+        ? "auto-confirmed"
+        : "pending confirmation"
+    }): ${rendered.ruleCount} rules, v6=${outcome.ipv6Status}, forward=${outcome.forwardApplied}, digest ${
       rendered.digest.slice(0, 12)
     }${
       warnings.length > 0
@@ -255,12 +315,9 @@ export async function handleFirewallReconcile(
     ipv6Status: outcome.ipv6Status,
     forwardApplied: outcome.forwardApplied,
     warnings,
-    confirmation: {
-      state: "pending",
-      deadlineAt: outcome.confirmation.deadlineAt,
-      windowSeconds: outcome.confirmation.windowSeconds,
-    },
-    summary:
-      `firewall generation ${payload.generation} applied, pending confirmation until ${outcome.confirmation.deadlineAt}: ${rendered.ruleCount} rules, ${probe.version}`,
+    confirmation,
+    summary: confirmation.state === "confirmed"
+      ? `firewall generation ${payload.generation} applied and confirmed by the daemon: ${rendered.ruleCount} rules, ${probe.version}`
+      : `firewall generation ${payload.generation} applied, pending confirmation until ${outcome.confirmation.deadlineAt} (${confirmation.autoConfirm?.reason}): ${rendered.ruleCount} rules, ${probe.version}`,
   };
 }

@@ -52,3 +52,8 @@ turbopanel_docker_restart_pending_file: /etc/docker/turbopanel-restart-pending  
 # src/metrics/collector/container-cgroup.ts. Empty = leave daemon.json alone
 # (an operator-set value is preserved).
 turbopanel_docker_cgroup_parent: turbopanel-containers.slice  # noqa: var-naming[no-role-prefix]
+
+# Merge only the builder entitlement deny and leave every other daemon.json key
+# (address pools, bip, live-restore) as found. Set by tasks/converge-builder.yml,
+# which daemon-converge runs on hosts the docker role provisioned earlier.
+turbopanel_docker_builder_only: false  # noqa: var-naming[no-role-prefix]
