@@ -110,8 +110,8 @@
       {{
         _docker_daemon_json_current
         | dict2items
-        | rejectattr('key', 'in', ['default-address-pools', 'bip', 'live-restore']
-            + (['cgroup-parent'] if _docker_cgroup_parent_owned else []))
+        | rejectattr('key', 'in', ['default-address-pools', 'bip', 'live-restore'])
+        | rejectattr('key', 'in', (['cgroup-parent'] if _docker_cgroup_parent_owned else []))
         | list
         | items2dict
         | combine({'live-restore': true})
