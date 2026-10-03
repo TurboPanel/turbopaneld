@@ -15,6 +15,7 @@ import type { ContainerSummary, DockerEvent } from "../../docker/client.ts";
 import type { CounterBaselineTracker } from "./baseline.ts";
 import {
   CGROUP_V2_ROOT,
+  cgroupSlicePath,
   CONTAINER_CGROUP_PARENT,
   containerCpuPercent,
   containerMemoryBytes,
@@ -146,7 +147,7 @@ export type ContainerHealthDeps = {
 
 /** Default cgroup reader rooted at the container slice. */
 export function defaultCgroupReader(
-  root = `${CGROUP_V2_ROOT}/${CONTAINER_CGROUP_PARENT}`,
+  root = cgroupSlicePath(CONTAINER_CGROUP_PARENT, CGROUP_V2_ROOT),
 ): (name: string) => Promise<string | undefined> {
   return async (name) => {
     try {

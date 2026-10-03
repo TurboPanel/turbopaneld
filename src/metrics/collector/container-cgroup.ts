@@ -17,6 +17,25 @@ export const CONTAINER_CGROUP_PARENT = "turbopanel-containers.slice";
 
 export const CGROUP_V2_ROOT = "/sys/fs/cgroup";
 
+/**
+ * Real cgroup v2 directory of a systemd slice. systemd treats each dash in a
+ * slice name as nesting, so `turbopanel-containers.slice` lives at
+ * `<root>/turbopanel.slice/turbopanel-containers.slice`, not directly under
+ * the root.
+ */
+export function cgroupSlicePath(
+  slice: string,
+  root = CGROUP_V2_ROOT,
+): string {
+  const base = slice.replace(/\.slice$/, "");
+  const parts = base.split("-");
+  const dirs: string[] = [];
+  for (let i = 1; i <= parts.length; i++) {
+    dirs.push(`${parts.slice(0, i).join("-")}.slice`);
+  }
+  return [root, ...dirs].join("/");
+}
+
 function keyedNumber(text: string, key: string): number | null {
   for (const line of text.split("\n")) {
     const [name, value] = line.trim().split(/\s+/);

@@ -1,6 +1,9 @@
 import { assertEquals } from "@std/assert";
 
+import { defaultCgroupReader } from "./docker-containers.ts";
 import {
+  cgroupSlicePath,
+  CONTAINER_CGROUP_PARENT,
   containerCpuPercent,
   containerMemoryBytes,
   parseCpuUsageUsec,
@@ -41,4 +44,33 @@ test("cpu percent is a share of the whole host over the counter's real elapsed t
     containerCpuPercent({ usageUsec: 10, atMs: 0 }, 5, 1000, 4),
     null,
   );
+});
+
+test("slice path nests under the dash prefix like systemd", () => {
+  assertEquals(
+    cgroupSlicePath("turbopanel-containers.slice", "/sys/fs/cgroup"),
+    "/sys/fs/cgroup/turbopanel.slice/turbopanel-containers.slice",
+  );
+  assertEquals(cgroupSlicePath("plain.slice", "/c"), "/c/plain.slice");
+  assertEquals(
+    cgroupSlicePath("a-b-c.slice", "/c"),
+    "/c/a.slice/a-b.slice/a-b-c.slice",
+  );
+});
+
+test("default reader finds files in a fake nested cgroup tree", async () => {
+  const root = await Deno.makeTempDir();
+  try {
+    const dir = cgroupSlicePath(CONTAINER_CGROUP_PARENT, root);
+    await Deno.mkdir(dir, { recursive: true });
+    await Deno.writeTextFile(`${dir}/cpu.stat`, "usage_usec 42\n");
+    const read = defaultCgroupReader(dir);
+    assertEquals(parseCpuUsageUsec((await read("cpu.stat")) ?? ""), 42);
+    assertEquals(await read("memory.current"), undefined);
+    // The old flat path must not be what the default points at.
+    const flat = defaultCgroupReader(`${root}/${CONTAINER_CGROUP_PARENT}`);
+    assertEquals(await flat("cpu.stat"), undefined);
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
 });
