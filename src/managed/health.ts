@@ -27,6 +27,10 @@ import { sanitizeForLog } from "../util/logger.ts";
 import { collectManagedMemberHealth } from "./containers.ts";
 import { managedComposeProject, SAFE_MANAGED_ID_RE } from "./engine-paths.ts";
 import { getManagedEngineRuntime } from "./engines/index.ts";
+import {
+  type StandbyStreamingTracker,
+  standbyStreamingTracker,
+} from "./standby-streaming.ts";
 
 type RunDockerFn = (
   args: string[],
@@ -41,6 +45,12 @@ export type ManagedHealthProbeRequest = {
   memberId: string;
   role: string;
   engine: string;
+};
+
+/** Seams for tests; production uses the daemon-wide tracker. */
+export type ManagedHealthProbeDeps = {
+  tracker?: StandbyStreamingTracker;
+  monoMs?: () => number;
 };
 
 export type ManagedHealthProbeResult =
@@ -59,6 +69,7 @@ function isEngineCode(value: string): value is ManagedEngineCode {
 export async function probeManagedMemberHealth(
   request: ManagedHealthProbeRequest,
   run: RunDockerFn = defaultRunDocker,
+  deps: ManagedHealthProbeDeps = {},
 ): Promise<ManagedHealthProbeResult> {
   if (!SAFE_MANAGED_ID_RE.test(request.managedId)) {
     return { ok: false, error: "managedId contains unsupported characters" };
@@ -73,6 +84,9 @@ export async function probeManagedMemberHealth(
     return { ok: false, error: "unsupported managed engine" };
   }
 
+  // Taken before the read so a `streaming` answer is stamped no later than
+  // it really was (the age only errs on the old side).
+  const startedMono = (deps.monoMs ?? (() => performance.now()))();
   try {
     const engine = getManagedEngineRuntime(request.engine);
     if (!engine.replication) {
@@ -101,7 +115,22 @@ export async function probeManagedMemberHealth(
           "answering)",
       };
     }
-    return { ok: true, member };
+    if (request.role !== "replica") return { ok: true, member };
+    // A replica's answer also carries the last time it was seen streaming,
+    // so the control plane can tell "stopped because its primary just died"
+    // from "stopped long ago".
+    const tracker = deps.tracker ?? standbyStreamingTracker;
+    tracker.record(request.memberId, member.replication, startedMono);
+    const lastStreaming = tracker.lastStreaming(
+      request.memberId,
+      (deps.monoMs ?? (() => performance.now()))(),
+    );
+    return {
+      ok: true,
+      member: lastStreaming
+        ? { ...member, replication: { ...member.replication, lastStreaming } }
+        : member,
+    };
   } catch (err) {
     return {
       ok: false,

@@ -1609,6 +1609,21 @@ export type ManagedReplicationHealth = {
   lagBytes?: number;
   lagSeconds?: number;
   observedAt: string;
+  /** Standby only: `pg_last_wal_receive_lsn()` text (absent when NULL). */
+  receivedLsn?: string;
+  /** Standby only: `pg_last_wal_replay_lsn()` text (absent when NULL). */
+  replayLsn?: string;
+  /**
+   * Standby only, on `managed-health-result`: the daemon's last `streaming`
+   * read of this member. `ageMs` is measured on the daemon's monotonic clock
+   * when the result is built.
+   */
+  lastStreaming?: {
+    at: string;
+    ageMs: number;
+    lagBytes?: number;
+    lagSeconds?: number;
+  };
 };
 
 /** Must stay in sync with the instance canonical `managed.apply` shape. */

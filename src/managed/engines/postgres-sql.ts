@@ -229,7 +229,12 @@ export function standbyReplicationStatusSql(): string {
     `    WHEN r.status = 'streaming' AND pg_catalog.pg_last_xact_replay_timestamp() IS NOT NULL`,
     `    THEN EXTRACT(EPOCH FROM (now() - pg_catalog.pg_last_xact_replay_timestamp()))`,
     `    ELSE NULL`,
-    `  END AS lag_seconds`,
+    `  END AS lag_seconds,`,
+    // Both stay readable after the WAL receiver exits (primary gone): the
+    // last position received and flushed, and the last position replayed.
+    // NULL (empty) when streaming never started since the server started.
+    `  pg_catalog.pg_last_wal_receive_lsn()::text AS received_lsn,`,
+    `  pg_catalog.pg_last_wal_replay_lsn()::text AS replay_lsn`,
     `FROM (SELECT 1) AS _dummy`,
     `LEFT JOIN pg_catalog.pg_stat_wal_receiver r ON true;`,
   ].join("\n");

@@ -198,11 +198,31 @@ export type ManagedEngineBootstrapContext = {
   ) => Promise<{ success: boolean; stdout: string; stderr: string }>;
 };
 
+/**
+ * The last time this daemon saw a standby's WAL receiver `streaming`, from
+ * the in-process tracker (`../standby-streaming.ts`). `ageMs` is measured on
+ * this host's monotonic clock when the result is built, so the control plane
+ * compares it with durations it measured itself and cross-host clock skew
+ * drops out. `at` is informational.
+ */
+export type ManagedLastStreamingObservation = {
+  at: string;
+  ageMs: number;
+  lagBytes?: number;
+  lagSeconds?: number;
+};
+
 export type ManagedReplicationObservedHealth = {
   state: string;
   lagBytes?: number;
   lagSeconds?: number;
   observedAt: string;
+  /** Standby only: `pg_last_wal_receive_lsn()` (absent when NULL). */
+  receivedLsn?: string;
+  /** Standby only: `pg_last_wal_replay_lsn()` (absent when NULL). */
+  replayLsn?: string;
+  /** Standby only, on `managed-health-result`. */
+  lastStreaming?: ManagedLastStreamingObservation;
 };
 
 export class ManagedEngineNotSupportedError extends Error {
