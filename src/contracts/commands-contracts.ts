@@ -770,8 +770,35 @@ export type EnvironmentDeployServiceHook = {
   buildDisableCache?: boolean;
 };
 
+/**
+ * How a site's PHP runs, always as the site's principal (never root, never a
+ * web server account): `fastcgi` is php-cgi on a systemd socket, `fpm` one
+ * php-fpm master per site, and the two `lsphp-*` forms are OpenLiteSpeed's.
+ */
+export type EnvironmentDeployPhpMode =
+  | "fastcgi"
+  | "fpm"
+  | "lsphp-detached"
+  | "lsphp-attached";
+
+/** Every {@link EnvironmentDeployPhpMode}, in the control plane's order. */
+export const ENVIRONMENT_DEPLOY_PHP_MODES: readonly EnvironmentDeployPhpMode[] =
+  Object.freeze(["fastcgi", "fpm", "lsphp-detached", "lsphp-attached"]);
+
+export function isEnvironmentDeployPhpMode(
+  value: unknown,
+): value is EnvironmentDeployPhpMode {
+  return typeof value === "string" &&
+    (ENVIRONMENT_DEPLOY_PHP_MODES as readonly string[]).includes(value);
+}
+
 export type EnvironmentDeployHostingPhp = {
   version?: string;
+  /**
+   * Omitted keeps the shared php-fpm master (the layout before per-site PHP);
+   * the control plane sends a mode for every PHP site it resolves one for.
+   */
+  mode?: EnvironmentDeployPhpMode;
   /** Validated `php_admin_value` directives, rendered to strings upstream. */
   settings?: Record<string, string>;
   /** Validated php-fpm pool directives (`pm`, `pm.max_children`, …). */
@@ -3512,6 +3539,7 @@ function parseHostingPhp(
   if (!isRecord(value)) return undefined;
   const php: EnvironmentDeployHostingPhp = {};
   if (typeof value.version === "string") php.version = value.version;
+  if (isEnvironmentDeployPhpMode(value.mode)) php.mode = value.mode;
   for (const field of ["settings", "pool"] as const) {
     const kept = parseStringRecord(value[field]);
     if (kept) php[field] = kept;

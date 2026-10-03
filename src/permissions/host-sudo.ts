@@ -51,6 +51,7 @@ export const TP_HOST_VERBS: ReadonlySet<string> = new Set([
   "chpasswd",
   "getent",
   "modprobe",
+  "php-test",
 ]);
 
 export type HostSudoOptions = Parameters<typeof playbooksNeedRootHelper>[0] & {
