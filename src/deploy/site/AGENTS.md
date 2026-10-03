@@ -104,10 +104,39 @@ Docker Compose. The daemon:
    `.tpprev` config for one it changed in place (PHP config cannot use
    `.tpnew`: tp-host's PHP path class takes only the live names and
    `.tpprev`). A runtime changed in place with no vhost change is probed on
-   its own. `removeSites` removes the environment's runtimes after its
-   vhosts; at daemon start `reconcileSitePhpRuntimesAtBoot` starts any
-   installed runtime that is down. The principal is implied the
-   `tpphp<series>` entitlement (the binaries are `0750 root:tpphp<series>`).
+   its own. A site's runtimes are matched by exact id
+   (`isSitePhpRuntimeOf`: `<key>-(fcgi|fpm|lsd)<digits>`), never by prefix — one
+   site's key can begin another's. A site moving onto a runtime gives up its
+   pool on the shared master (any series) once its vhost serves the new
+   socket; that series is reloaded, and stopped when only `default.conf` is
+   left. `removeSites` removes the environment's runtimes after its vhosts,
+   plus every runtime no nginx, Apache or OpenLiteSpeed vhost names
+   (`orphanSitePhpRuntimes`: an id is a hash, so an orphan cannot be traced
+   to its environment; OpenLiteSpeed's per-site `vhosts/<site>/vhconf.conf`
+   directories are entered one level); runtimes an apply in flight holds
+   (`holdSitePhpRuntime`) are never orphans, and only FastCGI, php-fpm and
+   detached lsphp (`lsd`) ids are considered. At daemon start
+   `reconcileSitePhpRuntimesAtBoot` removes the orphans and starts only what
+   a vhost names; if any vhost cannot be read it removes and starts nothing. The limits site code must not raise
+   (`SITE_PHP_LOCKED_INI_KEYS`: memory, execution and input time, input vars,
+   post/upload size) are repeated in a `[PATH=<owner home>]` section of
+   php.ini — php-cgi's admin form, honoured by php-fpm too — which makes them
+   `PHP_INI_SYSTEM` per request, so `ini_set`, `set_time_limit` and
+   `.user.ini` cannot change them. Hence per-site PHP serves only from the
+   owner's home (a release or managed directory); a daemon-owned document
+   root is refused (the owner cannot enter `tp:tp 0750` anyway). The unit
+   carries `IPAddressDeny=localhost link-local multicast 0.0.0.0/8 fc00::/7`
+   with only `IPAddressAllow=127.0.0.53` (systemd-resolved's stub). systemd
+   filters by address, not port, so 127.0.0.1 stays closed: reopening it for
+   a `local`-scope ProxySQL would reopen ProxySQL admin, every vhost and
+   Apache backend port too. Site PHP reaches a managed database by its
+   `datacenter`, `fabric` or `public` scope address. RFC 1918 stays open
+   (scope addresses, VPC services, operator-set Docker pools), so the host's
+   private addresses and other containers' bridge IPs are not closed by it.
+   The `tpphp<series>` entitlement (the binaries are
+   `0750 root:tpphp<series>`) is resolved control-plane side as a `deploy`
+   entitlement; the daemon also adds it on deploy only to
+   cover an older control plane.
    No mode keeps the shared master; a mode without a principal, or lsphp on
    nginx/Apache, is refused. OpenLiteSpeed and Caddy ignore `php.mode` here.
 
