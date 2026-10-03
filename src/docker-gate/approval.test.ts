@@ -15,6 +15,7 @@ import {
   payloadFor,
   signToken,
   TEST_BODY_DIGEST,
+  TEST_CONTAINER_NAME,
 } from "../testing/docker-gate-approval.ts";
 
 /**
@@ -46,6 +47,7 @@ test("a token signed by the trusted key verifies and carries its claims", async 
     trusted,
     PROJECT,
     TEST_BODY_DIGEST,
+    TEST_CONTAINER_NAME,
     NOW,
   );
   assert(result.ok);
@@ -59,7 +61,14 @@ test("a key the gate does not trust, a tampered payload and a stripped signature
   const forged = await signToken(other, payloadFor(NOW));
   assertEquals(
     reason(
-      await verifyApproval(forged, trusted, PROJECT, TEST_BODY_DIGEST, NOW),
+      await verifyApproval(
+        forged,
+        trusted,
+        PROJECT,
+        TEST_BODY_DIGEST,
+        TEST_CONTAINER_NAME,
+        NOW,
+      ),
     ),
     "bad-signature",
   );
@@ -72,7 +81,14 @@ test("a key the gate does not trust, a tampered payload and a stripped signature
   const swapped = `${version}.${widened.split(".")[1]}.${signature}`;
   assertEquals(
     reason(
-      await verifyApproval(swapped, trusted, PROJECT, TEST_BODY_DIGEST, NOW),
+      await verifyApproval(
+        swapped,
+        trusted,
+        PROJECT,
+        TEST_BODY_DIGEST,
+        TEST_CONTAINER_NAME,
+        NOW,
+      ),
     ),
     "bad-signature",
   );
@@ -83,6 +99,7 @@ test("a key the gate does not trust, a tampered payload and a stripped signature
         trusted,
         PROJECT,
         TEST_BODY_DIGEST,
+        TEST_CONTAINER_NAME,
         NOW,
       ),
     ),
@@ -97,7 +114,14 @@ test("a signature made for another purpose does not verify (domain separation)",
   });
   assertEquals(
     reason(
-      await verifyApproval(token, trusted, PROJECT, TEST_BODY_DIGEST, NOW),
+      await verifyApproval(
+        token,
+        trusted,
+        PROJECT,
+        TEST_BODY_DIGEST,
+        TEST_CONTAINER_NAME,
+        NOW,
+      ),
     ),
     "bad-signature",
   );
@@ -116,6 +140,7 @@ test("expiry, clock skew, lifetime cap and project binding are enforced", async 
         trusted,
         project,
         TEST_BODY_DIGEST,
+        TEST_CONTAINER_NAME,
         now,
       ),
     );
@@ -139,7 +164,14 @@ test("malformed tokens and payloads are refused without throwing", async () => {
   const { keys, trusted } = await setup();
   const check = async (token: string) =>
     reason(
-      await verifyApproval(token, trusted, PROJECT, TEST_BODY_DIGEST, NOW),
+      await verifyApproval(
+        token,
+        trusted,
+        PROJECT,
+        TEST_BODY_DIGEST,
+        TEST_CONTAINER_NAME,
+        NOW,
+      ),
     );
   assertEquals(await check(""), "malformed");
   assertEquals(await check("v2.only-two"), "malformed");
@@ -173,7 +205,16 @@ test("with no trusted keys every token is refused", async () => {
   const keys = await generateKeys();
   const token = await signToken(keys, payloadFor(NOW));
   assertEquals(
-    reason(await verifyApproval(token, [], PROJECT, TEST_BODY_DIGEST, NOW)),
+    reason(
+      await verifyApproval(
+        token,
+        [],
+        PROJECT,
+        TEST_BODY_DIGEST,
+        TEST_CONTAINER_NAME,
+        NOW,
+      ),
+    ),
     "approvals-off",
   );
 });
@@ -185,7 +226,14 @@ test("a rotation overlap trusts both keys", async () => {
   for (const keys of [a, b]) {
     const token = await signToken(keys, payloadFor(NOW));
     assert(
-      (await verifyApproval(token, trusted, PROJECT, TEST_BODY_DIGEST, NOW)).ok,
+      (await verifyApproval(
+        token,
+        trusted,
+        PROJECT,
+        TEST_BODY_DIGEST,
+        TEST_CONTAINER_NAME,
+        NOW,
+      )).ok,
     );
   }
 });
@@ -207,6 +255,7 @@ test("an approval relaxes only the rules its features name", async () => {
     trusted,
     PROJECT,
     TEST_BODY_DIGEST,
+    TEST_CONTAINER_NAME,
     NOW,
   );
   assert(result.ok);
@@ -258,7 +307,16 @@ test("a token binds one create body: any other body, or a v1 token, is refused",
     keys,
     payloadFor(NOW, { bodyDigest: digest }),
   );
-  assert((await verifyApproval(token, trusted, PROJECT, digest, NOW)).ok);
+  assert(
+    (await verifyApproval(
+      token,
+      trusted,
+      PROJECT,
+      digest,
+      TEST_CONTAINER_NAME,
+      NOW,
+    )).ok,
+  );
   // The token rides in the body's own label; the digest ignores it.
   const withToken = structuredClone(body);
   Object.assign(withToken.Labels, { "com.turbopanel.approval": token });
@@ -277,6 +335,7 @@ test("a token binds one create body: any other body, or a v1 token, is refused",
           trusted,
           PROJECT,
           await approvalBodyDigest(other),
+          TEST_CONTAINER_NAME,
           NOW,
         ),
       ),
@@ -287,7 +346,16 @@ test("a token binds one create body: any other body, or a v1 token, is refused",
     version: "v1",
   });
   assertEquals(
-    reason(await verifyApproval(v1, trusted, PROJECT, digest, NOW)),
+    reason(
+      await verifyApproval(
+        v1,
+        trusted,
+        PROJECT,
+        digest,
+        TEST_CONTAINER_NAME,
+        NOW,
+      ),
+    ),
     "unsupported-version",
   );
   // A payload with no (or a malformed) digest is not a token at all.
@@ -297,7 +365,16 @@ test("a token binds one create body: any other body, or a v1 token, is refused",
       JSON.stringify({ ...payloadFor(NOW), bodyDigest }),
     );
     assertEquals(
-      reason(await verifyApproval(bad, trusted, PROJECT, digest, NOW)),
+      reason(
+        await verifyApproval(
+          bad,
+          trusted,
+          PROJECT,
+          digest,
+          TEST_CONTAINER_NAME,
+          NOW,
+        ),
+      ),
       "malformed",
     );
   }
@@ -327,9 +404,53 @@ test("a token is single-use: its jti is remembered until exp, and a payload with
     );
     assertEquals(
       reason(
-        await verifyApproval(bad, trusted, PROJECT, TEST_BODY_DIGEST, NOW),
+        await verifyApproval(
+          bad,
+          trusted,
+          PROJECT,
+          TEST_BODY_DIGEST,
+          TEST_CONTAINER_NAME,
+          NOW,
+        ),
       ),
       "malformed",
     );
   }
+});
+
+test("a token for one container name is refused for another, or for none", async () => {
+  const { keys, trusted } = await setup();
+  const token = await signToken(keys, payloadFor(NOW));
+  for (const name of ["tenantapp-web-2", ""]) {
+    assertEquals(
+      reason(
+        await verifyApproval(
+          token,
+          trusted,
+          PROJECT,
+          TEST_BODY_DIGEST,
+          name,
+          NOW,
+        ),
+      ),
+      "wrong-name",
+    );
+  }
+  const unnamed = await signToken(
+    keys,
+    JSON.stringify({ ...payloadFor(NOW), containerName: undefined }),
+  );
+  assertEquals(
+    reason(
+      await verifyApproval(
+        unnamed,
+        trusted,
+        PROJECT,
+        TEST_BODY_DIGEST,
+        "",
+        NOW,
+      ),
+    ),
+    "malformed",
+  );
 });

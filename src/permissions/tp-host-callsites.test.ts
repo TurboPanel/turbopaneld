@@ -15,6 +15,7 @@
 import { assert, assertEquals } from "@std/assert";
 import { dirname, fromFileUrl, join, relative } from "@std/path";
 import { hostSudoArgs } from "./host-sudo.ts";
+import { removeHostPrefix } from "../testing/tp-host-fixture.ts";
 import {
   CALL_SITES,
   type CallSiteSetup,
@@ -312,7 +313,7 @@ async function makeHost(): Promise<Host> {
         stderr: new TextDecoder().decode(out.stderr),
       };
     },
-    cleanup: () => Deno.remove(prefix, { recursive: true }),
+    cleanup: () => removeHostPrefix(prefix),
   };
 }
 

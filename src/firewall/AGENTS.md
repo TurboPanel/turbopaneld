@@ -12,6 +12,7 @@ page carries the build order; this is the `fw-daemon-reconcile` row.
 | `apply.ts` | Host side. `probeXtables`, `hasDockerUserChain`, `isControlPlaneColocated`; `applyRenderedFirewall` = arm the rollback guard and stage the documents (`pending.ts`) → `--test` → `--noflush` restore per family → `-C`/`-I` jumps, **pending, not durable**; `removeFirewall` (mode `off`, and the `turbopaneld firewall off` break-glass); `snapshotFirewallChains` (unused so far); `reinstallFirewallForwardingIfEnabled` (the Docker-monitor hook, wired in `../entry/run.ts` beside the fabric one: at startup and on every Docker reachability change, v4 and v6; while a ruleset is pending it re-applies the *pending* document, never the older confirmed one). |
 | `pending.ts` | Commit-confirm state: the marker (`<runDir>/firewall-pending.json`), the pending documents (`<configDir>/firewall.pending.v4|.v6`), the rollback record the guard writes (`<stateDir>/firewall-rollback.json`), `armPendingFirewall` (arms `turbopanel-firewall-guard.timer` **before** anything is loaded; no guard, no rules) and `clearPendingFirewall`. |
 | `confirm.ts` | `confirmPendingFirewall(digest)`: promotes the pending documents to the durable `<configDir>/firewall.v4|.v6`, clears the stage, stops the guard. States `confirmed`, `nothing_pending` (idempotent), `digest_mismatch`, `expired`, `rolled_back`. Behind `server.firewall.confirm` and `turbopaneld firewall confirm`. |
+| `auto-confirm.ts` | `autoConfirmFirewall(digest, { verifyControlPlane })`: the daemon confirms its own change. After the rules are live it waits 2 s, makes one authenticated round trip to the control plane (`GET /api/daemon/v1/ping`, 20 s limit) and, only if that answers, runs `confirmPendingFirewall`. Fails, times out or no client: does nothing and the 120 s rollback fires. Called from `../commands/firewall-reconcile.ts`; the result carries `confirmation.autoConfirm { ok, reason }`. |
 | `fold.ts` | Stage 6 (`fw-fold-existing`). Folds the legacy `TP-MANAGED-PUB` / `TP-MGD-*` chains (`../managed/firewall.ts`) into `TP-FWD`: reads the **live** `iptables -S`, and removes the legacy chain only when every legacy listener is covered (same `--ctorigdst`/port `DROP`, and a `RETURN` containing each source it admitted). Never adds a rule. `deferred` while a ruleset is pending; runs after a confirm and on `turbopaneld firewall fold`. `isManagedListenerCovered` is the same test the legacy installer uses to stop rebuilding a folded listener. TurboFabric's `TP-FORWARD` is left alone. |
 | `run.ts` | Spawn + `sudo -n` fallback, with **`-w 5`** on every xtables binary (Docker holds the xtables lock while it mutates chains). Test seams `setFirewallRunForTests` / `setFirewallSkipRealSyscallsForTests`. |
 | `sshd-port.ts` | Effective sshd ports from `sshd -T` (`port` and pinned `listenaddress` lines). Fails **open**: no answer → the renderer keeps 22 with a warning. |
@@ -63,10 +64,19 @@ who reached the host from outside confirms it:
    `FirewallGuardUnavailableError` and **loads nothing**.
 2. It loads the rules (`--test` first; a refusal clears the stage again) and
    records the IPv6 intent in the marker (`replace` / `forget` / `keep`).
-3. The result carries `confirmation: { state: "pending", deadlineAt,
-   windowSeconds: 120 }`. The control plane sends `server.firewall.confirm`
-   `{ digest }` once it has reached the host from outside (stage 4 adds that
-   probe), or an operator runs `turbopaneld firewall confirm`.
+3. The result carries `confirmation: { state, deadlineAt, windowSeconds: 120,
+   autoConfirm }`. **The daemon confirms itself** (`auto-confirm.ts`, owner
+   decision 2026-10-03): when it can make a fresh authenticated round trip to
+   the control plane after the rules are live, it runs the confirm below and
+   reports `state: "confirmed"`, `autoConfirm.ok: true`. Otherwise
+   `state: "pending"`, `autoConfirm.ok: false` with the reason, and nothing
+   else happens. The control plane runs no test and no outside probe, and no
+   human clicks. `server.firewall.confirm` and `turbopaneld firewall confirm`
+   still work (same function, idempotent). **What this does not prove:**
+   outbound is never filtered, so the check cannot show inbound access (SSH,
+   public ports) survived; the invariant SSH/control-plane ACCEPTs are what
+   protect that. A rollback is reported as `lastRollback` on the next result
+   (only while nothing is pending; a confirm clears the record).
 4. `confirmPendingFirewall` promotes the pending documents to the durable ones,
    clears the marker and stops the timer. After the deadline it refuses
    (`expired`) and starts the guard service instead.
