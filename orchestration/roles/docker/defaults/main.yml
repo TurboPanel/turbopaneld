@@ -45,6 +45,14 @@ turbopanel_docker_deny_builder_entitlements: true  # noqa: var-naming[no-role-pr
 # Marker for a daemon.json change dockerd has not been restarted for (a
 # co-located instance host, where the handler never restarts it).
 turbopanel_docker_restart_pending_file: /etc/docker/turbopanel-restart-pending  # noqa: var-naming[no-role-prefix]
+
+# Dedicated cgroup parent written to daemon.json as `cgroup-parent` so the
+# metrics collector reads every container's CPU, memory and OOM kills from one
+# cgroup v2 slice. Must match CONTAINER_CGROUP_PARENT in
+# src/metrics/collector/container-cgroup.ts. Empty = leave daemon.json alone
+# (an operator-set value is preserved).
+turbopanel_docker_cgroup_parent: turbopanel-containers.slice  # noqa: var-naming[no-role-prefix]
+
 # Merge only the builder entitlement deny and leave every other daemon.json key
 # (address pools, bip, live-restore) as found. Set by tasks/converge-builder.yml,
 # which daemon-converge runs on hosts the docker role provisioned earlier.
