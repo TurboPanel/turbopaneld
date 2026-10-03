@@ -131,6 +131,10 @@ test("replication SQL builders use quoted identifiers and managed slot prefix", 
   assertEquals(standbySql.includes("pg_stat_wal_receiver"), true);
   assertEquals(standbySql.includes("status = 'streaming'"), true);
   assertEquals(standbySql.includes("'stopped'"), true);
+  assertEquals(standbySql.includes("pg_last_wal_receive_lsn()"), true);
+  assertEquals(standbySql.includes("pg_last_wal_replay_lsn()"), true);
+  assertEquals(standbySql.includes("r.latest_end_lsn, r.flushed_lsn"), true);
+  assertEquals(standbySql.includes("r.last_msg_receipt_time"), true);
   assertEquals(promoteSql().includes("pg_promote"), true);
 });
 

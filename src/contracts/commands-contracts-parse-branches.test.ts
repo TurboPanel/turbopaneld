@@ -342,6 +342,33 @@ test("parseEnvironmentStopPayload round-trips siteReleases", () => {
   );
 });
 
+test("parseEnvironmentStopPayload round-trips retirePrincipals and refuses unsafe names", () => {
+  const base = {
+    environmentId: "env-1",
+    projectId: "proj-1",
+    projectName: "tp-demo",
+  };
+  assertEquals(
+    parseEnvironmentStopPayload({
+      ...base,
+      retirePrincipals: [{ username: "app_x1" }],
+    }).retirePrincipals,
+    [{ username: "app_x1" }],
+  );
+  assertEquals(parseEnvironmentStopPayload(base).retirePrincipals, undefined);
+  for (const username of ["../root", "-r", "a b", "", 7]) {
+    assertThrows(
+      () =>
+        parseEnvironmentStopPayload({
+          ...base,
+          retirePrincipals: [{ username }],
+        }),
+      TypeError,
+      "Invalid environment.stop retirePrincipals entry",
+    );
+  }
+});
+
 test("parseEnvironmentStopPayload rejects unsafe siteReleases path segments", () => {
   // Both fields become path segments on the host; neither may traverse.
   assertThrows(
