@@ -7,6 +7,10 @@ import type {
 import type { DatabaseProxyAdapterSet } from "./database-proxy/adapter.ts";
 import type { DirectoryUsageSnapshot } from "./directory-usage.ts";
 import type { DockerUsageReading } from "./docker-usage.ts";
+import type {
+  ContainerHealthReading,
+  ContainerHealthSample,
+} from "./docker-containers.ts";
 import type { ManagedEngineCensusReading } from "./managed-engines.ts";
 import type { TopLevelEventCollector } from "./events/index.ts";
 import type { GpuAdapterSet } from "./gpu/adapter.ts";
@@ -16,7 +20,16 @@ import type { SensorIo } from "./sensors/discovery.ts";
 
 /** Outcome of a single collect() invocation: an entity-grouped `MetricsSample`. */
 export type MetricsCollectResult =
-  | { supported: true; sample: MetricsSample }
+  | {
+    supported: true;
+    sample: MetricsSample;
+    /**
+     * v7 semantic fields not yet part of the wire contract (container health,
+     * Traefik backends); the packer consumes them once `metrics-v7` lands.
+     * Absent when Docker is not readable.
+     */
+    containers?: ContainerHealthSample;
+  }
   | { supported: false; reason: string };
 
 /**
@@ -372,6 +385,11 @@ export type CollectorDeps = {
    * `storage.dockerUsedBytes` stays `null`.
    */
   dockerUsage?: () => DockerUsageReading | null;
+  /**
+   * Cached container health/resource reading (`docker-containers.ts`); same
+   * getter discipline. `null` when Docker is absent or not yet read.
+   */
+  containers?: () => ContainerHealthReading | null;
   /**
    * Cached managed-engine census — the twelve per-engine fields of
    * `managed.storage` (`managed-engines.ts`'s `ManagedEngineSampler`). Same
