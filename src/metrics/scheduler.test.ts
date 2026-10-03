@@ -1183,3 +1183,28 @@ it("closed durability flag leaves samples unflagged and no stream collector", as
     undefined,
   );
 });
+
+it("hostText is stripped on the v6 wire and kept under metrics-v7", async () => {
+  for (const v7 of [false, true]) {
+    const clock = new FakeClock();
+    const sent: unknown[] = [];
+    const scheduler = makeScheduler({
+      clock,
+      durabilityFlag: () => v7,
+      collectorFactory: () =>
+        createFakeCollector((sequence) => {
+          const r = supportedSample(sequence);
+          if (r.supported) {
+            (r.sample as { hostText?: unknown }).hostText = { kernel: "6.1" };
+          }
+          return r;
+        }),
+    });
+    scheduler.attach(capturingSink(sent));
+    await clock.advance(0);
+    assertEquals(
+      (sent[0] as { hostText?: unknown }).hostText !== undefined,
+      v7,
+    );
+  }
+});

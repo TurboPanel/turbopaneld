@@ -627,6 +627,8 @@ export type MetricsSample = {
   router?: RouterSample;
   storage?: StorageSample;
   dockerUsage?: DockerUsageSample;
+  /** v7 free-text host facts; only sent when `metrics-v7` is negotiated. */
+  hostText?: Record<string, unknown>;
 };
 
 /**
