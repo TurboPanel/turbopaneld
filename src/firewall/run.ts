@@ -68,11 +68,17 @@ export function resetFirewallRunOverrides(): void {
  * by an unprivileged user says `no hostkeys available -- exiting` — it could
  * not read `/etc/ssh/ssh_host_*_key`, which is a permission failure in sshd's
  * own words (proven on Debian 13: exit 0, that line on stderr, no config).
+ * `systemctl restart turbopanel-firewall-guard.timer` as `tp` is refused by
+ * polkit with `Access denied` (exit 4, Debian 13 host, 2026-10-03); without
+ * this spelling the guard was never armed through tp-host and every apply
+ * failed with nothing loaded.
  */
 export function isPermissionDeniedText(result: FirewallRunResult): boolean {
   const text = `${result.stderr} ${result.stdout}`.toLowerCase();
   return text.includes("permission denied") ||
     text.includes("operation not permitted") ||
+    text.includes("access denied") ||
+    text.includes("interactive authentication required") ||
     text.includes("no hostkeys available");
 }
 
