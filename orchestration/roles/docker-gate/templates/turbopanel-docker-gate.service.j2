@@ -13,9 +13,9 @@ StartLimitIntervalSec=0
 Type=simple
 User=root
 Group=root
-# Observe: the gate never refuses a policy finding; findings go to the
-# journal. The refusing stage-4 mode exists in the source; no host runs it yet.
-Environment=TP_DOCKER_GATE_MODE=observe
+# Observe (the default): the gate never refuses a policy finding; findings go
+# to the journal. docker_gate_mode switches on the refusing stage-4 mode.
+Environment=TP_DOCKER_GATE_MODE={{ docker_gate_mode }}
 Environment=TP_DOCKER_GATE_SOCKET={{ docker_gate_socket }}
 # Stage 3: the read-only listener Traefik may mount (readonly.ts). It refuses
 # everything but container list / inspect, events, version and ping.
