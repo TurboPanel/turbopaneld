@@ -544,9 +544,15 @@ export function deployPrincipalSpecs(
  * A per-site PHP runtime runs `php-cgi<series>` / `php-fpm<series>` as the
  * site's principal, and those binaries are `0750 root:tpphp<series>`: the
  * principal must hold that series' entitlement or its unit dies `203/EXEC`.
- * The wire grants runtimes for what the tenant runs by hand; a site the
- * daemon itself runs as the principal implies its own, the way a native app
- * implies its Node series.
+ *
+ * The grant belongs in the control plane's effective runtime set (see
+ * `PrincipalEnsureSpec.runtimes`: the daemon reconciles, it does not derive),
+ * which persists it as a `deploy` entitlement the way a native app's Node
+ * series is, so `server.principals.reconcile` and every other environment's
+ * deploy (both full-replace) carry it too. Adding it here as well only covers
+ * a control plane older than that, since the daemon ships first: a deploy
+ * from one still starts its runtime, though a later reconcile from it can
+ * still take the grant away.
  */
 function withSitePhpRuntimes(
   principals: EnvironmentDeployPrincipalMaterial[],

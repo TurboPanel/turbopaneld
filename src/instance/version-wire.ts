@@ -64,6 +64,7 @@ export const DAEMON_WIRE_FEATURES = [
   "sealed-instance-secrets-v1",
   "managed-health-v1",
   "managed-ha-probe-v1",
+  "site-engine-nginx-apache-v1",
 ] as const;
 
 export type DaemonWireFeature = (typeof DAEMON_WIRE_FEATURES)[number];
@@ -91,6 +92,15 @@ export const MANAGED_HEALTH_FEATURE: DaemonWireFeature = "managed-health-v1";
  */
 export const MANAGED_HA_PROBE_FEATURE: DaemonWireFeature =
   "managed-ha-probe-v1";
+
+/**
+ * This daemon deploys sites with `engine: 'nginx+apache'` (nginx in front of
+ * Apache, with a `backendPort`). An older daemon rejects the whole environment
+ * deploy at parse time, so the control plane sends that engine value only to a
+ * daemon that lists this feature.
+ */
+export const SITE_ENGINE_NGINX_APACHE_FEATURE: DaemonWireFeature =
+  "site-engine-nginx-apache-v1";
 
 /** Features that need an instance at or above a semver. Empty until one lands. */
 export const INSTANCE_FEATURE_MIN_VERSIONS: Readonly<Record<string, string>> =

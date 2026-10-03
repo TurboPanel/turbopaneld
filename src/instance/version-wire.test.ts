@@ -11,6 +11,7 @@ import {
   resolveDaemonCapabilities,
   resolveInstanceCapabilities,
   resolveInstanceSupport,
+  SITE_ENGINE_NGINX_APACHE_FEATURE,
 } from "./version-wire.ts";
 
 /**
@@ -111,4 +112,14 @@ test("managed-health-v1 is advertised on the wire and raised no floor", () => {
   );
   // A new wire message is feature-gated; it never moves the version floor.
   assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+});
+
+test("site-engine-nginx-apache-v1 is advertised on the wire", () => {
+  assertEquals(SITE_ENGINE_NGINX_APACHE_FEATURE, "site-engine-nginx-apache-v1");
+  assertEquals(
+    (DAEMON_WIRE_FEATURES as readonly string[]).includes(
+      SITE_ENGINE_NGINX_APACHE_FEATURE,
+    ),
+    true,
+  );
 });

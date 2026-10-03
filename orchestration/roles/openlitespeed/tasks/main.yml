@@ -188,18 +188,6 @@
     - sites
     - vhosts
 
-# Root-owned with the engine's group, like every engine config tree since #191:
-# the daemon writes it only through tp-host. An install or upgrade that chowns
-# the whole config dir to the daemon account leaves this tree `tp:tp`, which
-# tpols cannot read; ownership only (the daemon sets each file's mode).
-- name: Keep the OpenLiteSpeed config tree root-owned
-  ansible.builtin.file:
-    path: "{{ turbopanel_config_dir }}/openlitespeed"
-    state: directory
-    owner: root
-    group: "{{ openlitespeed_service_group }}"
-    recurse: true
-
 # Shipped with the role (the v1.9.1 release's conf/mime.properties), so a host
 # whose vendored tree predates this task still gets it without a re-download.
 - name: Install OpenLiteSpeed mime.properties

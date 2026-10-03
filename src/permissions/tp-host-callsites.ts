@@ -83,6 +83,7 @@ const STATE = `${P}/var/lib/turbopanel`;
 const HOME = `${P}/srv/users/alice`;
 const SITE = `${HOME}/sites/svc1`;
 const RELEASE = `${SITE}/releases/20260927-120000`;
+const STAGING = `${P}/srv/users/.tp-staging/alice.svc1.20260927-120000`;
 const STAGED = `${P}/tmp/staged`;
 const SSH_KEYS = `${P}/etc/ssh/turbopanel/authorized_keys`;
 /** A sandboxed build: `work/<id>` holding the clone, the runner installed. */
@@ -191,7 +192,7 @@ const PHP_FPM_SPEC: SitePhpRuntimeSpec = {
   mode: "fpm",
 };
 const PHP_WRITABLE = { writablePaths: ["-/srv/users/alice/sites/svc1/shared"] };
-const PHP_INI_TEXT = sitePhpIni([]);
+const PHP_INI_TEXT = underPrefix(sitePhpIni([], PHP_SPEC.home));
 const PHP_SERVICE_TEXT = underPrefix(
   sitePhpServiceUnit(PHP_SPEC, PHP_WRITABLE),
 );
@@ -289,6 +290,14 @@ const SITES: CallSite[] = [
       setup: { files: { [PHP_INI]: PHP_INI_TEXT } },
     },
   ),
+  tpHost(`${PHP_APPLY}sudo(io,["ls","-A","--",dir])`, {
+    argv: ["ls", "-A", "--", `${CONF}/apache/sites`],
+    setup: dir(`${CONF}/apache/sites`),
+  }),
+  tpHost(`${PHP_APPLY}sudo(io,["cat","--",join(dir,name)])`, {
+    argv: ["cat", "--", `${CONF}/nginx/sites/tp-env1-www.conf`],
+    setup: file(`${CONF}/nginx/sites/tp-env1-www.conf`),
+  }),
   tpHost(`${PHP_APPLY}sudo(io,["ls","-1","--",io.unitDir])`, {
     argv: ["ls", "-1", "--", UNITS],
   }),
@@ -870,6 +879,7 @@ const SITES: CallSite[] = [
   ),
 
   // --- release promotion ----------------------------------------------------
+  // tp-host builds every path from the ids; the staging leaf is the daemon's.
   tpHost(
     'src/deploy/release/build-sandbox.ts|["-n","build-run",work.buildId,work.projectKey],MANAGED',
     {
@@ -886,37 +896,15 @@ const SITES: CallSite[] = [
     'src/deploy/release/build-sandbox.ts|["-n","systemctl","stop",`turbopanel-build-${work.buildId}.service`],MANAGED',
     { argv: ["systemctl", "stop", `turbopanel-build-${BUILD_ID}.service`] },
   ),
-  tpHost('src/deploy/release/promote.ts|["-n","mkdir","-p","--",to]', {
-    argv: ["mkdir", "-p", "--", RELEASE],
-  }),
-  tpHost('src/deploy/release/promote.ts|["-n","cp","-a","--",`${from}/.`,to]', {
-    argv: ["cp", "-a", "--", `${STATE}/release-handoff/svc1/.`, RELEASE],
-    setup: {
-      files: {
-        [`${STATE}/release-handoff/svc1/index.html`]: "<h1>hi</h1>\n",
-      },
-      dirs: [RELEASE],
-    },
-  }),
-  tpHost('src/deploy/release/promote.ts|["-n","mkdir","-p","--",destDir]', {
-    argv: ["mkdir", "-p", "--", `${RELEASE}/config`],
-  }),
   tpHost(
-    'src/deploy/release/promote.ts|["-n","install","-m","0640","-o","root","-g","root","--",staged,dest]',
+    'src/deploy/release/promote.ts|["-n",verb,username,serviceId,releaseId]',
+    { argv: ["publish-open", "alice", "svc1", "20260927-120000"] },
     {
-      argv: [
-        "install",
-        "-m",
-        "0640",
-        "-o",
-        "root",
-        "-g",
-        "root",
-        "--",
-        STAGED,
-        `${RELEASE}/config/app.env`,
-      ],
-      setup: dir(`${RELEASE}/config`),
+      argv: ["publish", "alice", "svc1", "20260927-120000"],
+      setup: {
+        files: { [`${STAGING}/index.html`]: "<h1>hi</h1>\n" },
+        dirs: [`${SITE}/releases`, `${SITE}/shared`],
+      },
     },
   ),
   tpHost('src/deploy/release/promote.ts|["-n","test","-e",currentLink]', {
@@ -1121,6 +1109,23 @@ const SITES: CallSite[] = [
         "+",
       ],
       setup: dir(RELEASE),
+    },
+    // promote.ts: the daemon's own staging leaf, walked as the daemon.
+    {
+      argv: [
+        "find",
+        STAGING,
+        "-type",
+        "l",
+        "-exec",
+        "realpath",
+        "-m",
+        "-z",
+        "--",
+        "{}",
+        "+",
+      ],
+      setup: { files: { [`${STAGING}/index.html`]: "<h1>hi</h1>\n" } },
     },
   ),
   tpHost('src/deploy/site.ts|["-n","ls","-A","--",documentRoot]', {
