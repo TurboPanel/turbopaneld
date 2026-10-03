@@ -151,15 +151,20 @@ export function sitePhpConfigDir(configDir: string, id: string): string {
  * engine whose renderer is not per-site yet (OpenLiteSpeed: WP6; Caddy serves
  * no PHP in the new layout).
  *
- * nginx and Apache cannot run lsphp; asking for it is refused rather than
- * quietly served some other way.
+ * nginx, Apache and nginx in front of Apache cannot run lsphp; asking for it
+ * is refused rather than quietly served some other way.
  */
 export function sitePhpRuntimeMode(
   site: Pick<EnvironmentDeploySite, "composeServiceName" | "engine" | "php">,
 ): SitePhpRuntimeMode | null {
   const mode = site.php?.mode;
   if (mode === undefined) return null;
-  if (site.engine !== "nginx" && site.engine !== "apache") return null;
+  if (
+    site.engine !== "nginx" && site.engine !== "apache" &&
+    site.engine !== "nginx+apache"
+  ) {
+    return null;
+  }
   if (mode === "fastcgi" || mode === "fpm") return mode;
   throw new Error(
     `site ${site.composeServiceName}: PHP mode ${mode} needs OpenLiteSpeed, not ${site.engine}`,

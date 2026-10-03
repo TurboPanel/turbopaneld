@@ -475,7 +475,10 @@ export type ProbeHostPortFn = (
   port: number,
 ) => Promise<boolean>;
 
-const defaultProbeHostPort: ProbeHostPortFn = async (bindAddress, port) => {
+export const defaultProbeHostPort: ProbeHostPortFn = async (
+  bindAddress,
+  port,
+) => {
   // Deno.listen is synchronous but the seam is async so callers can inject a
   // probe; await keeps both shapes identical.
   await Promise.resolve();
