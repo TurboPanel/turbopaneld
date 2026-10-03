@@ -10,6 +10,7 @@ ARCH="${NODE_APP_ARCH:?}"
 RESOLVED="${NODE_APP_RESOLVED:?}"
 GROUP="${NODE_APP_GROUP:?}"
 SERIES_DIR="${NODE_APP_SERIES_DIR:?}"
+COREPACK_TGZ="${NODE_APP_COREPACK_TGZ:?}"
 DEST="${SERIES_DIR}/${RESOLVED}"
 
 if [[ ! -x "${DEST}/bin/node" ]]; then
@@ -19,12 +20,30 @@ if [[ ! -x "${DEST}/bin/node" ]]; then
   mkdir -p "$TMP"
   curl -fsSL --proto '=https' --tlsv1.2 -o "${TMP}/${NODE_DIR}.tar.gz" \
     "https://nodejs.org/dist/v${RESOLVED}/${NODE_DIR}.tar.gz"
+  # Verify the tarball against the release's published SHA-256 list.
+  curl -fsSL --proto '=https' --tlsv1.2 -o "${TMP}/SHASUMS256.txt" \
+    "https://nodejs.org/dist/v${RESOLVED}/SHASUMS256.txt"
+  (cd "$TMP" && grep -F " ${NODE_DIR}.tar.gz" SHASUMS256.txt | sha256sum -c -)
   tar -xzf "${TMP}/${NODE_DIR}.tar.gz" -C "$TMP"
   install -d "$DEST"
   cp -a "${TMP}/${NODE_DIR}/bin" "${TMP}/${NODE_DIR}/include" \
     "${TMP}/${NODE_DIR}/lib" "${TMP}/${NODE_DIR}/share" "$DEST/"
   rm -rf "$TMP"
   echo "turbopanel-installed ${SERIES} ${RESOLVED}"
+fi
+
+# Node 25+ ships no corepack: install the pinned, digest-verified standalone
+# package into this series' own prefix (the playbook already checked the
+# tarball's SHA-256). Then put pnpm/yarn shims in bin/ so a bare `pnpm` resolves
+# for the build user; corepack still honors the project's `packageManager`.
+# Done here, as root, so nothing is downloaded by the sandbox for this step.
+export PATH="${DEST}/bin:${PATH}"
+if [[ ! -e "${DEST}/bin/corepack" ]]; then
+  "${DEST}/bin/npm" install --global --prefix "$DEST" --no-fund --no-audit \
+    "$COREPACK_TGZ"
+fi
+if [[ ! -e "${DEST}/bin/pnpm" ]]; then
+  "${DEST}/bin/corepack" enable --install-directory "${DEST}/bin" pnpm yarn
 fi
 
 # Unconditional: cp -a keeps upstream 0755, and a tree vendored before the

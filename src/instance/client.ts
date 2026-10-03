@@ -1,3 +1,5 @@
+import { SeenCommandIds } from "./dispatch-dedupe.ts";
+import { closeAndAbandon } from "./socket-close.ts";
 import { restartDaemonService } from "./restart-daemon-service.ts";
 import { describeUnknown } from "../util/describe-unknown.ts";
 import { redactUrlSecrets } from "../util/redact-url-secrets.ts";
@@ -198,6 +200,8 @@ export type CommandPorts = {
   handleCommandDispatch?: CommandDispatchHandler;
   handleFabricPathProbe?: FabricPathProbeHandler;
   handleDrivetempEnable?: DrivetempEnableHandler;
+  /** Runs when a session attaches: delivers held command outcomes. */
+  handleSessionAttach?: (ws: WebSocket) => Promise<void>;
 };
 
 let commandPorts: CommandPorts = {};
@@ -429,6 +433,8 @@ export class InstanceClient {
   #loggedUnsupportedInstanceVersion: string | undefined;
   #licenseStamp: string | undefined;
   #idlePresence: IdlePresence | undefined;
+  /** Command ids already dispatched, so a repeated frame never runs twice. */
+  readonly #seenDispatchIds = new SeenCommandIds();
   #haObserver: ManagedHaObserver | undefined;
   #pgProbeObserver: PgDeadPrimaryObserver | undefined;
   #pgStandbySampler: PgStandbySampler | undefined;
@@ -566,6 +572,10 @@ export class InstanceClient {
   }
 
   async #afterAttachVersion(ws: WebSocket): Promise<void> {
+    const sessionAttach = commandPorts.handleSessionAttach;
+    if (sessionAttach) {
+      this.#runSocketHandler("session-attach", sessionAttach(ws));
+    }
     const pending = this.#pendingInstanceUpdateResult;
     if (pending && ws.readyState === WebSocket.OPEN) {
       this.#pendingInstanceUpdateResult = null;
@@ -1092,11 +1102,7 @@ export class InstanceClient {
     ) {
       return;
     }
-    try {
-      ws.close();
-    } catch {
-      // Socket may already be gone.
-    }
+    closeAndAbandon(ws);
     if (this.#ws === ws) this.#ws = undefined;
   }
 
@@ -1380,6 +1386,9 @@ export class InstanceClient {
     this.#syncDockerNetworkingAfterConnect();
 
     ws.onmessage = (event) => {
+      // An abandoned or replaced socket may still wake up with buffered
+      // frames; only the current socket may drive the daemon.
+      if (this.#ws !== ws) return;
       this.#idlePresence?.noteInboundActivity();
       const raw = typeof event.data === "string"
         ? event.data
@@ -1395,7 +1404,14 @@ export class InstanceClient {
       this.#handleMessage(message, ws);
     };
 
+    let closeHandled = false;
     ws.onclose = (event) => {
+      // closeAndAbandon dispatches a synthetic close, and the real socket can
+      // still fire its own later. By then a new connection owns the shared
+      // state below, so each socket cleans up at most once, and only while it
+      // is still the current one.
+      if (closeHandled) return;
+      closeHandled = true;
       if (event.code === 4401) {
         logWarn("instance", "authentication rejected");
       }
@@ -1404,7 +1420,8 @@ export class InstanceClient {
       } else {
         logDebug("instance", "websocket closed before registration");
       }
-      if (this.#ws === ws) this.#ws = undefined;
+      if (this.#ws !== undefined && this.#ws !== ws) return;
+      this.#ws = undefined;
       this.#peerFeatures = [];
       this.#idlePresence?.detach();
       this.#haObserver?.detach();
@@ -1642,6 +1659,24 @@ export class InstanceClient {
         const dispatch = this.#resolveCommandDispatch();
         if (!dispatch) {
           logWarn("instance", "command-dispatch handler not registered");
+          break;
+        }
+        if (this.#seenDispatchIds.seenBefore(message.id)) {
+          logWarn(
+            "instance",
+            "ignored repeated command-dispatch",
+            sanitizeForLog(message.id),
+          );
+          // Re-ack so the control plane stops waiting on an ack it missed.
+          if (ws.readyState === WebSocket.OPEN) {
+            const at = new Date().toISOString();
+            ws.send(JSON.stringify({
+              type: "command-ack",
+              id: message.id,
+              at,
+              daemonReceivedAt: at,
+            }));
+          }
           break;
         }
         this.#runSocketHandler(

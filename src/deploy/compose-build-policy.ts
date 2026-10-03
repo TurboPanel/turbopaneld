@@ -37,7 +37,8 @@ export type BuildPolicyCode =
   | "build_ssh_refused"
   | "build_secret_outside_project"
   | "build_extra_host_internal"
-  | "build_context_internal_url";
+  | "build_context_internal_url"
+  | "build_remote_source_refused";
 
 export type BuildPolicyFinding = { code: BuildPolicyCode; message: string };
 
@@ -55,6 +56,10 @@ export class ComposeBuildPolicyError extends Error {
 }
 
 const NO_OPT_IN = "builds may not do this, whatever the organization allows";
+
+/** The one rule an organization can lift: a public remote build source. */
+const REMOTE_OPT_IN =
+  "an organization owner can allow remote build sources under Manage Organization → Compose";
 
 const ALLOWED_BUILD_NETWORKS = new Set(["default", "none"]);
 
@@ -195,6 +200,7 @@ type Ctx = {
   topLevelSecrets: Record<string, unknown>;
   stageDir: string;
   exemptSecretNames: ReadonlySet<string>;
+  remoteBuildSourcesApproved: boolean;
 };
 
 function refuse(
@@ -202,8 +208,9 @@ function refuse(
   code: BuildPolicyCode,
   what: string,
   reason: string,
+  suffix = NO_OPT_IN,
 ): void {
-  ctx.findings.push({ code, message: `${what} ${reason} — ${NO_OPT_IN}` });
+  ctx.findings.push({ code, message: `${what} ${reason} — ${suffix}` });
 }
 
 function checkPrivileges(
@@ -371,6 +378,7 @@ function internalHostReason(rawHost: string): string | null {
 
 /** The host of a remote context, `undefined` unparseable, `null` not remote. */
 function remoteHost(value: string): string | null | undefined {
+  if (/^github\.com\//i.test(value)) return "github.com";
   if (value.startsWith("git@")) {
     const colon = value.indexOf(":");
     return colon === -1 ? undefined : value.slice("git@".length, colon);
@@ -397,6 +405,16 @@ function checkRemoteContext(ctx: Ctx, what: string, value: unknown): void {
     : internalHostReason(host);
   if (reason) {
     refuse(ctx, "build_context_internal_url", `${what} \`${value}\``, reason);
+    return;
+  }
+  if (!ctx.remoteBuildSourcesApproved) {
+    refuse(
+      ctx,
+      "build_remote_source_refused",
+      `${what} \`${value}\``,
+      "fetches the build source from a remote host, which cannot be vetted before deploy",
+      REMOTE_OPT_IN,
+    );
   }
 }
 
@@ -417,6 +435,11 @@ export type BuildPolicyOptions = {
   stageDir: string;
   /** Secrets the daemon rewrote to its own run directory. */
   exemptSecretNames?: ReadonlySet<string>;
+  /**
+   * `environment.deploy` `remoteBuildSourcesApproved`: the organization allows
+   * public remote contexts. Absent reads as false. Internal hosts stay refused.
+   */
+  remoteBuildSourcesApproved?: boolean;
 };
 
 /** Every refused build option in a resolved compose model. */
@@ -429,6 +452,7 @@ export function collectBuildPolicyFindings(
     topLevelSecrets: isRecord(document.secrets) ? document.secrets : {},
     stageDir: normalize(opts.stageDir),
     exemptSecretNames: opts.exemptSecretNames ?? new Set(),
+    remoteBuildSourcesApproved: opts.remoteBuildSourcesApproved === true,
   };
   const services = isRecord(document.services) ? document.services : {};
   for (const [name, service] of Object.entries(services)) {

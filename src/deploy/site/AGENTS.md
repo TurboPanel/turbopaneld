@@ -281,6 +281,15 @@ root-owned `0550` by design:
   scripts read the release and write through `shared/` — reachable as
   `current/shared` — and nothing else on the filesystem. Daemon-owned sites
   (no release binding) stay unrestricted.
+- **nginx follows no link below a release-backed document root.** It serves
+  one with `disable_symlinks on from=$document_root`, so **every** symlink under
+  the root answers 403 — including links that stay inside the release, such as
+  `public/build -> ../dist` or Laravel's `public/storage` (`artisan
+  storage:link`). Builds that need those paths must copy the files rather than
+  link them, or serve them through the app. Apache and OpenLiteSpeed keep
+  owner-match link following (`.htaccess` `RewriteRule` needs it); the
+  publish-time link checks in `../release/release-links.ts` are what keeps
+  those engines safe.
 - **PHP is told the symlink moved.** PHP is the one runtime that would keep
   serving the old release after a promote even though the document-root *string*
   never changed, because two caches hide the swap: the realpath cache still

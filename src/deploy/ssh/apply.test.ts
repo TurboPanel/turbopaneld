@@ -48,6 +48,17 @@ function fail(stderr: string): RunResult {
   return { success: false, stdout: "", stderr };
 }
 
+const SAFE_EFFECTIVE = [
+  "allowtcpforwarding no",
+  "allowstreamlocalforwarding no",
+  "allowagentforwarding no",
+  "x11forwarding no",
+  "permittunnel no",
+  "gatewayports no",
+  "permitopen none",
+  "permitlisten none",
+].join("\n");
+
 type Host = {
   root: string;
   keysDir: string;
@@ -64,6 +75,10 @@ type Host = {
   sftpStatus: RunResult;
   sftpCheck: RunResult;
   sftpVerify: RunResult;
+  /** `getent group` lines the fake answers with, by group name. */
+  groups: Map<string, string>;
+  /** `sshd -T -C user=<u>` output by user; absent means a clean answer. */
+  effective: Map<string, string>;
   cleanup: () => Promise<void>;
 };
 
@@ -110,12 +125,18 @@ async function makeHost(
     sftpStatus: ok("off"),
     sftpCheck: ok(),
     sftpVerify: ok(),
+    groups: new Map(),
+    effective: new Map(),
     run: () => Promise.resolve(ok()),
     cleanup: () => Deno.remove(root, { recursive: true }),
   };
 
   host.run = async (command, args) => {
     host.calls.push({ command, args: [...args] });
+    if (command === "getent" && args[0] === "group") {
+      const line = host.groups.get(args[1]);
+      return line === undefined ? fail("not found") : ok(line);
+    }
     if (command !== "sudo") return ok();
     const rest = args[0] === "-n" ? args.slice(1) : args;
     const [tool, ...tail] = rest;
@@ -127,6 +148,10 @@ async function makeHost(
         verify: host.sftpVerify,
       };
       return answers[tail[0]] ?? fail("tp-host: refusing");
+    }
+    if (tool === "sshd" && tail[0] === "-T") {
+      const user = tail[2].slice("user=".length).split(",")[0];
+      return ok(host.effective.get(user) ?? SAFE_EFFECTIVE);
     }
     if (tool === "sshd") {
       return host.sshdTestError === null ? ok() : fail(host.sshdTestError);
@@ -448,6 +473,7 @@ const NO_FORWARDING = [
   "AllowAgentForwarding no",
   "X11Forwarding no",
   "PermitTunnel no",
+  "GatewayPorts no",
 ];
 
 test("every principal is matched, after the levels and before `Match all`", () => {
@@ -1238,6 +1264,121 @@ test("a refused rewrite restores the previous drop-in tp-host would not cat", as
       )
     );
     assertEquals(await Deno.readTextFile(host.dropInPath), good);
+  } finally {
+    await host.cleanup();
+  }
+});
+
+function withLevels(host: Host) {
+  host.groups.set("tpsftp", "tpsftp:x:9986:zed,alice");
+  host.groups.set("tpshell", "tpshell:x:9987:bob");
+  host.groups.set("tpprincipal", "tpprincipal:x:9985:alice,bob,carol,zed");
+}
+
+const effectiveCalls = (host: Host) =>
+  host.calls.filter((call) => call.args.includes("-T")).map((call) =>
+    call.args.at(-1)
+  );
+
+test("forwarding is asserted for one sample per level before sshd reloads", async () => {
+  const host = await makeHost();
+  try {
+    withLevels(host);
+    await apply(host, [{ username: "alice", keys: [ED25519] }]);
+    assertEquals(effectiveCalls(host), [
+      "user=alice,host=localhost,addr=127.0.0.1",
+      "user=bob,host=localhost,addr=127.0.0.1",
+      "user=carol,host=localhost,addr=127.0.0.1",
+    ]);
+    assertEquals(host.reloads, ["ssh.service"]);
+  } finally {
+    await host.cleanup();
+  }
+});
+
+for (
+  const [level, user, setting] of [
+    ["sftp-only", "alice", "allowtcpforwarding yes"],
+    ["shell", "bob", "allowagentforwarding yes"],
+    ["principal-only", "carol", "x11forwarding yes"],
+    ["shell", "bob", "permitopen any"],
+    ["sftp-only", "alice", "gatewayports clientspecified"],
+    ["principal-only", "carol", "permittunnel point-to-point"],
+  ] as const
+) {
+  test(`${level} account with ${setting} refuses the apply and rolls back`, async () => {
+    const host = await makeHost();
+    try {
+      withLevels(host);
+      await apply(host, [{ username: "alice", keys: [ED25519] }]);
+      const before = await Deno.readTextFile(host.dropInPath);
+      host.reloads.length = 0;
+      host.effective.set(
+        user,
+        SAFE_EFFECTIVE.split("\n").filter((line) =>
+          !line.startsWith(setting.split(" ")[0] + " ")
+        ).concat(setting).join("\n"),
+      );
+      // A change that would be written, so the check runs.
+      host.groups.set("tpprincipal", "tpprincipal:x:9985:alice,bob,carol,zed");
+      await Deno.writeTextFile(host.dropInPath, before + "# drift\n");
+      const error = await assertRejects(
+        () => apply(host, [{ username: "alice", keys: [ED25519] }]),
+        Error,
+      );
+      assertStringIncludes(error.message, "rolled back");
+      assertStringIncludes(error.message, `${user}: ${setting.split(" ")[0]}`);
+      assertEquals(host.reloads, []);
+      assertEquals(
+        await Deno.readTextFile(host.dropInPath),
+        before + "# drift\n",
+      );
+    } finally {
+      await host.cleanup();
+    }
+  });
+}
+
+test("a missing forwarding keyword in sshd -T output fails closed", async () => {
+  const host = await makeHost();
+  try {
+    withLevels(host);
+    host.effective.set("alice", "allowtcpforwarding no");
+    const error = await assertRejects(
+      () => apply(host, [{ username: "alice", keys: [ED25519] }]),
+      Error,
+    );
+    assertStringIncludes(error.message, "alice: permitopen not reported");
+    assertEquals(host.reloads, []);
+    await Deno.stat(host.dropInPath).then(
+      () => {
+        throw new Error("drop-in left behind");
+      },
+      () => {},
+    );
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("hostile group members are never passed to sshd -T", async () => {
+  const host = await makeHost();
+  try {
+    host.groups.set("tpsftp", "tpsftp:x:9986:-oProxyCommand=x,a b,ok");
+    await apply(host, [{ username: "ok", keys: [ED25519] }]);
+    assertEquals(effectiveCalls(host), [
+      "user=ok,host=localhost,addr=127.0.0.1",
+    ]);
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("levels with no account are skipped", async () => {
+  const host = await makeHost();
+  try {
+    await apply(host, [{ username: "alice", keys: [ED25519] }]);
+    assertEquals(effectiveCalls(host), []);
   } finally {
     await host.cleanup();
   }

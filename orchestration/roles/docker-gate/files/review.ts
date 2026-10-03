@@ -11,16 +11,24 @@
  */
 
 import {
+  APPROVABLE_RULES,
   APPROVAL_LABEL,
   approvalBodyDigest,
   type ApprovalResult,
   ReplayCache,
   splitApproved,
+  startApprovalFeatures,
   verifyApproval,
 } from "./approval.ts";
-import { fetchLabels, type InspectKind } from "./inspect.ts";
+import {
+  type ContainerDoc,
+  fetchContainerDoc,
+  fetchLabels,
+  type InspectKind,
+} from "./inspect.ts";
 import {
   evaluateDetailed,
+  evaluateStartBinds,
   type RequestFacts,
   routePath,
   type Violation,
@@ -31,6 +39,7 @@ import {
   ownedObject,
   ownedTarget,
   ownerOf,
+  platformAccessRule,
 } from "./platform.ts";
 import type { ProxyDeps } from "./proxy.ts";
 
@@ -176,10 +185,65 @@ function ownedSubject(
   return ownedObject(facts.method, path);
 }
 
+/** The container a `start` or `restart` acts on (binds are re-checked then). */
+const START_PATH = /^\/containers\/([^/]+)\/(?:start|restart)$/;
+
+function startTarget(facts: RequestFacts): string | undefined {
+  if (facts.method !== "POST") return undefined;
+  return START_PATH.exec(routePath(facts.path))?.[1];
+}
+
+/** Findings left once the container's own (earlier signed) approval is applied. */
+async function applyStartApproval(
+  doc: ContainerDoc,
+  found: readonly Violation[],
+  deps: ReviewDeps,
+): Promise<Violation[]> {
+  const token = doc.labels[APPROVAL_LABEL];
+  if (found.length === 0 || token === undefined) return [...found];
+  const features = await startApprovalFeatures(
+    token,
+    deps.approvalKeys ?? [],
+    doc.labels[LABEL_COMPOSE_PROJECT] ?? "",
+  );
+  return found.filter((violation) => {
+    const feature = APPROVABLE_RULES[violation.rule.replace(/^start-/, "")];
+    return feature === undefined || !features.includes(feature);
+  });
+}
+
+/**
+ * Start / restart: one inspect gives both the ownership check and the bind
+ * policy over the container's live HostConfig. The engine resolves a bind
+ * source again at start, so a verdict from create time can be stale (the
+ * source swapped for a symlink since, or the container made before the gate
+ * enforced). Fails closed like the ownership check.
+ */
+async function startFindings(
+  name: string,
+  deps: ReviewDeps,
+): Promise<Violation[]> {
+  const doc = await fetchContainerDoc(deps.connectUpstream, name);
+  if (doc === undefined) {
+    return [{ rule: "owner-unknown", detail: name.slice(0, 64) }];
+  }
+  const owned = ownerOf(doc.labels) === "unlabeled"
+    ? [{ rule: "unowned-container", detail: name.slice(0, 64) }]
+    : [];
+  const binds = await evaluateStartBinds(doc, deps.policy, deps.resolvePath);
+  for (const allowance of binds.allowances) deps.stats.allowance(allowance);
+  return [
+    ...owned,
+    ...await applyStartApproval(doc, binds.violations, deps),
+  ];
+}
+
 async function unownedFinding(
   facts: RequestFacts,
   deps: ReviewDeps,
 ): Promise<Violation[]> {
+  const starting = startTarget(facts);
+  if (starting !== undefined) return await startFindings(starting, deps);
   const subject = ownedSubject(facts);
   if (subject === undefined) return [];
   const labels = await fetchLabels(
@@ -191,6 +255,12 @@ async function unownedFinding(
   // odd name) is a finding of its own, never assumed owned.
   if (labels === undefined) {
     return [{ rule: "owner-unknown", detail: subject.name.slice(0, 64) }];
+  }
+  const platformRule = subject.kind === "container"
+    ? platformAccessRule(routePath(facts.path), labels, facts.body)
+    : undefined;
+  if (platformRule !== undefined) {
+    return [{ rule: platformRule, detail: subject.name.slice(0, 64) }];
   }
   if (ownerOf(labels) !== "unlabeled") return [];
   return [{

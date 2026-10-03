@@ -23,15 +23,17 @@ const RESERVED_KEYS = new Set([
   "com.turbopanel.approval",
 ]);
 /** Whole namespaces no tenant writes into. */
-const RESERVED_PREFIXES = ["com.turbopanel.system.", "tp."];
+const RESERVED_PREFIXES = ["turbopanel.", "com.turbopanel.system.", "tp."];
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/** Compared in lower case so `Turbopanel.Role` cannot slip past a case-folding reader. */
 function isReserved(key: string): boolean {
-  return RESERVED_KEYS.has(key) ||
-    RESERVED_PREFIXES.some((prefix) => key.startsWith(prefix));
+  const folded = key.trim().toLowerCase();
+  return RESERVED_KEYS.has(folded) ||
+    RESERVED_PREFIXES.some((prefix) => folded.startsWith(prefix));
 }
 
 /** Label keys of a compose `labels:` value, map or `key=value` list form. */
@@ -61,15 +63,26 @@ export function reservedOwnerLabels(
   return found;
 }
 
+/** Machine-readable code of the refusal; the control plane keys off it, never the prose. */
+export const COMPOSE_RESERVED_LABEL_CODE = "compose_reserved_label";
+
+export class ComposeReservedLabelError extends Error {
+  readonly code = COMPOSE_RESERVED_LABEL_CODE;
+  constructor(found: string[]) {
+    super(
+      `[${COMPOSE_RESERVED_LABEL_CODE}] the compose file sets labels that only TurboPanel itself may set (${
+        found.join(", ")
+      }); remove those labels`,
+    );
+    this.name = "ComposeReservedLabelError";
+  }
+}
+
 /** Refuse a tenant compose document that claims a platform owner label. */
 export function assertNoReservedOwnerLabels(
   document: Record<string, unknown>,
 ): void {
   const found = reservedOwnerLabels(document);
   if (found.length === 0) return;
-  throw new Error(
-    `compose sets labels reserved for the platform's own containers (${
-      found.join(", ")
-    }); remove them`,
-  );
+  throw new ComposeReservedLabelError(found);
 }

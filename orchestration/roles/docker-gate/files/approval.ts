@@ -243,6 +243,30 @@ function claimsFailure(
 }
 
 /**
+ * The features a container's own approval label covers, for a later start or
+ * restart: signature and project are checked, but not the expiry, the create
+ * body digest or the single-use claim (those were enforced when the create was
+ * accepted; a restart days later must keep working). Empty = not covered.
+ */
+export async function startApprovalFeatures(
+  token: string,
+  keys: readonly CryptoKey[],
+  project: string,
+): Promise<readonly string[]> {
+  const parts = token.length <= MAX_APPROVAL_TOKEN_BYTES
+    ? token.split(".")
+    : [];
+  if (keys.length === 0 || parts.length !== 3) return [];
+  if (parts[0] !== APPROVAL_VERSION) return [];
+  const payloadBytes = fromBase64Url(parts[1]);
+  const signature = fromBase64Url(parts[2]);
+  if (!payloadBytes || !signature) return [];
+  if (!(await signatureValid(keys, signature, parts[1]))) return [];
+  const payload = parsePayload(payloadBytes);
+  return payload?.project === project ? payload.features : [];
+}
+
+/**
  * Check one token against the trusted keys, the container's Compose project,
  * the digest of the create body and the container name it arrived with, and the clock (seconds). Never throws; the reason is a short stable code.
  */
