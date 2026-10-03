@@ -2,6 +2,7 @@ import { join } from "@std/path";
 import { hostSudoArgs } from "../permissions/host-sudo.ts";
 import { errorText, logInfo, logWarn } from "../util/logger.ts";
 import { forEachSequential } from "../util/sequential.ts";
+import { removeStaleNetworkContainers } from "./ingress-stale-network.ts";
 import {
   type EnvironmentDeployContainer,
   type EnvironmentDeployHosting,
@@ -1156,6 +1157,7 @@ export async function ensureHostingIngress(
 ): Promise<void> {
   const run = deps?.runDocker ?? defaultRunDocker;
   await ensureIngressNetwork(ingressNetwork, run);
+  await removeStaleNetworkContainers(ingressNetwork, ingressNetwork, run);
   const gateways = await ingressNetworkGateways(ingressNetwork, run);
 
   const ingressDir = hostingIngressDir(layout);
@@ -1306,6 +1308,11 @@ export async function ensureServiceIngress(
   }
   const run = deps?.runDocker ?? defaultRunDocker;
   await ensureIngressNetwork(ingressNetwork, run);
+  await removeStaleNetworkContainers(
+    serviceIngressProject(serviceId),
+    ingressNetwork,
+    run,
+  );
 
   const ingressDir = serviceIngressDir(layout, serviceId);
   await Deno.mkdir(ingressDir, { recursive: true, mode: 0o750 });

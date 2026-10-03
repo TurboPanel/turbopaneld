@@ -77,6 +77,7 @@ function stubIo(overrides: Partial<DaemonRunIo> = {}): {
       if (signal === "SIGTERM") queueMicrotask(handler);
     },
     initOrchestration: () => Promise.resolve(false),
+    scanLiveReleases: () => Promise.resolve(),
     restoreFabricFromPersistedState: () => {
       fabricRestores += 1;
       return Promise.resolve();
@@ -178,6 +179,39 @@ test("runDaemon restores fabric and attaches Docker when the socket is up", asyn
   assertEquals(stub.dockerCloses, 1);
   assertEquals(stub.instanceStops, 1);
   assertEquals(stub.exits, [0]);
+});
+
+test("runDaemon scans live releases in the background and only warns on failure", async () => {
+  let scans = 0;
+  const stub = stubIo({
+    initOrchestration: () => Promise.resolve(true),
+    scanLiveReleases: () => {
+      scans += 1;
+      return Promise.reject(new Error("sudo: a password is required"));
+    },
+  });
+  await runDaemon(stub.io);
+  assertEquals(scans, 1);
+  assertEquals(stub.exits, [0]);
+  assertEquals(
+    stub.warns.some((line) =>
+      line.includes("live release link scan failed") &&
+      line.includes("password is required")
+    ),
+    true,
+  );
+});
+
+test("runDaemon skips the live release scan without orchestration", async () => {
+  let scans = 0;
+  const stub = stubIo({
+    scanLiveReleases: () => {
+      scans += 1;
+      return Promise.resolve();
+    },
+  });
+  await runDaemon(stub.io);
+  assertEquals(scans, 0);
 });
 
 test("runDaemon warns when Docker is present but the socket is down", async () => {

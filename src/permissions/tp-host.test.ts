@@ -24,7 +24,11 @@ import { caddyUnit } from "../deploy/ingress.ts";
 import { backupServiceContent, backupTimerContent } from "../backups/units.ts";
 import { issuedCertificateFindArgs } from "../deploy/instance-acme-http01.ts";
 import { setgidDirectoriesFindArgs } from "../deploy/site.ts";
-import { releaseLinkTargetsFindArgs } from "../deploy/release/release-links.ts";
+import {
+  parseReleaseLinkTexts,
+  releaseLinkTargetsFindArgs,
+  releaseLinkTextsFindArgs,
+} from "../deploy/release/release-links.ts";
 import type {
   EnvironmentDeployCronJob,
   EnvironmentDeployNativeAppService,
@@ -822,40 +826,6 @@ test("root reads go through a verified descriptor, not a planted symlink", async
   });
 });
 
-test("cp -a copies only a clean daemon hand-off tree, and no ownership", async () => {
-  await withHost(async (host) => {
-    const handoff = host.path("var/lib/turbopanel/release-handoff/svc/rel");
-    const release = host.path("srv/users/alice/sites/web/releases/rel");
-    await Deno.mkdir(handoff, { recursive: true });
-    await Deno.mkdir(release, { recursive: true });
-    await Deno.writeTextFile(join(handoff, "index.html"), "built");
-    const args = ["cp", "-a", "--", `${handoff}/.`, release];
-
-    const ok = await host.run(args);
-    assertEquals(ok.code, 0, ok.stderr);
-    assertStringIncludes(
-      ok.stdout,
-      "EXEC [cp] [-R] [--no-dereference] [--preserve=mode,timestamps] " +
-        "[--no-preserve=ownership] [--] [/proc/self/fd/3/.] [.]",
-    );
-
-    // Root would mknod a FIFO and keep a set-id bit: refused before copying.
-    const fifo = await new Deno.Command("mkfifo", {
-      args: [join(handoff, "pipe")],
-    }).output();
-    assertEquals(fifo.success, true);
-    assertStringIncludes(await refused(host, args), "special, set-id");
-    await Deno.remove(join(handoff, "pipe"));
-    await Deno.chmod(join(handoff, "index.html"), 0o4755);
-    assertStringIncludes(await refused(host, args), "special, set-id");
-
-    // A tree a tenant or a build wrote is never the source.
-    const tenantTree = host.path("srv/users/alice/sites/web/build");
-    await Deno.mkdir(tenantTree, { recursive: true });
-    await refused(host, ["cp", "-a", "--", `${tenantTree}/.`, release]);
-  });
-});
-
 test("test -d answers for a real directory, never a symlink to one", async () => {
   await withHost(async (host) => {
     const release = host.path("srv/users/alice/sites/web/releases/r1");
@@ -1132,11 +1102,27 @@ test("find: every daemon-built find argv is accepted; anything else is refused",
       host.path("srv/users/bob"),
     ]);
     const linkArgs = releaseLinkTargetsFindArgs(release);
+    // Rollback: the same links with their unresolved texts, relative paths.
+    const texts = await host.run(releaseLinkTextsFindArgs(release));
+    assertEquals(texts.code, 0, texts.stderr);
+    assertEquals(
+      parseReleaseLinkTexts(texts.stdout).sort((a, b) =>
+        a.path.localeCompare(b.path)
+      ),
+      [
+        { path: "public/up", text: "../shared" },
+        { path: "public/x", text: host.path("outside/hop") },
+      ],
+    );
+    const textArgs = releaseLinkTextsFindArgs(release);
 
     const lookup = issuedCertificateFindArgs(root, "canary.example.com");
     for (
       const args of [
         releaseLinkTargetsFindArgs(host.path("outside")),
+        releaseLinkTextsFindArgs(host.path("outside")),
+        [...textArgs.slice(0, -1), "%p\\0%l\\0"],
+        [...textArgs, "-quit"],
         [...linkArgs.slice(0, -1), ";"],
         linkArgs.map((arg) => arg === "realpath" ? "cat" : arg),
         [...lookup, "-print"],
@@ -1311,6 +1297,11 @@ test("principal home: the skeleton is root's, never group-writable, and only roo
       await refused(host, ["chmod", "0770", dir]);
       await refused(host, ["chmod", "0751", dir]);
       await refused(host, ["chmod", "-R", "u=rwX,g=rX,o=", dir]);
+      if (dir.endsWith("/releases/r1")) {
+        // A release directory appears only through publish, sealed.
+        await refused(host, installDir(dir, "0750", "root", "alice-grp"));
+        continue;
+      }
       const ok = await host.run(installDir(dir, "0750", "root", "alice-grp"));
       assertEquals(ok.code, 0, `${dir}: ${ok.stderr}`);
     }
@@ -1504,6 +1495,7 @@ function phpService(host: Host, mode: PhpMode): string {
     ...(mode === "fpm" ? [] : [`Requires=${socket}`, `After=${socket}`]),
     "",
     "[Service]",
+    `ExecStartPre=+${host.path("opt/turbopanel/lib")}/tp-php-loopback sync`,
     `ExecStart=${phpExec(host, mode)}`,
     ...byMode[mode],
     "User=alice",
@@ -1515,6 +1507,8 @@ function phpService(host: Host, mode: PhpMode): string {
     "ProtectSystem=strict",
     "ProtectHome=yes",
     "PrivateDevices=yes",
+    "IPAddressDeny=localhost link-local multicast 0.0.0.0/8 fc00::/7",
+    "IPAddressAllow=127.0.0.1 127.0.0.53",
     `BindPaths=${home}/tmp:/tmp`,
     `TemporaryFileSystem=${host.path("etc/turbopanel")}:ro`,
     `BindReadOnlyPaths=${phpConfDir(host)}`,
@@ -1698,6 +1692,66 @@ test("per-site PHP services: a hostile corpus is refused in every mode", async (
       ["ProtectSystem=full", line("ProtectSystem=", "ProtectSystem=full")],
       ["no ProtectSystem", line("ProtectSystem=", null)],
       ["PrivateDevices=no", line("PrivateDevices=", "PrivateDevices=no")],
+      ["no IPAddressDeny", line("IPAddressDeny=", null)],
+      [
+        "loopback left open",
+        line("IPAddressDeny=", "IPAddressDeny=link-local"),
+      ],
+      [
+        "the whole of loopback allowed back",
+        line("IPAddressAllow=", "IPAddressAllow=127.0.0.0/8"),
+      ],
+      [
+        "link-local allowed back",
+        line("IPAddressAllow=", "IPAddressAllow=127.0.0.53 169.254.169.254"),
+      ],
+      [
+        "another loopback address allowed back",
+        line(
+          "IPAddressAllow=",
+          "IPAddressAllow=127.0.0.1 127.0.0.2 127.0.0.53",
+        ),
+      ],
+      [
+        "127.0.0.1 without the resolver stub",
+        line("IPAddressAllow=", "IPAddressAllow=127.0.0.1"),
+      ],
+      // 127.0.0.1 is open, so the loopback guard that closes its other ports
+      // must be there, exact, and the only root hook.
+      ["no loopback guard", line("ExecStartPre=", null)],
+      [
+        "a guard without the root prefix",
+        line(
+          "ExecStartPre=",
+          `ExecStartPre=${
+            host.path("opt/turbopanel/lib")
+          }/tp-php-loopback sync`,
+        ),
+      ],
+      [
+        "a root hook elsewhere",
+        line("ExecStartPre=", "ExecStartPre=+/bin/sh -c true"),
+      ],
+      [
+        "a guard with another verb",
+        line(
+          "ExecStartPre=",
+          `ExecStartPre=+${
+            host.path("opt/turbopanel/lib")
+          }/tp-php-loopback flush`,
+        ),
+      ],
+      [
+        "a second root hook",
+        add("Service", "ExecStartPre=+/bin/true"),
+      ],
+      ["a root stop hook", add("Service", "ExecStopPost=+/bin/true")],
+      [
+        "ULA (IPv6 metadata) left open",
+        line("IPAddressDeny=", "IPAddressDeny=localhost link-local"),
+      ],
+      ["an allow reset", add("Service", "IPAddressAllow=any")],
+      ["a second deny", add("Service", "IPAddressDeny=")],
       [
         "ReadWritePaths=/etc",
         line("ReadWritePaths=", `ReadWritePaths=${home}/tmp /etc`),
@@ -2047,7 +2101,6 @@ test("per-site PHP config: root:<owner>-grp, 0750/0640, directives on an allowli
         ["0750", "root", "alice-grp", phpConfDir(host, "Shop")],
         ["0750", "root", "alice-grp", `${dir}/deeper`],
         ["0755", "root", "root", host.path("etc/turbopanel/php/sites")],
-        ["0755", "root", "root", host.path("etc/turbopanel/php-sites")],
       ]
     ) {
       assertEquals(
@@ -2104,6 +2157,10 @@ test("per-site PHP config: root:<owner>-grp, 0750/0640, directives on an allowli
       "sendmail_path = /bin/sh -c id",
       "include_path = .:/etc",
       "[PATH=/srv/users/alice]\nmemory_limit = 1G",
+      `[PATH=${host.path("srv/users/bob")}]\nmemory_limit = 1G`,
+      `[PATH=${home}/sites]\nmemory_limit = 1G`,
+      `[PATH=${home}/../bob]`,
+      `[PATH=${home}]\nextension = /tmp/evil.so`,
       "[HOST=example.com]",
       "opcache.validate_permission = 0",
       "opcache.validate_root = Off",
@@ -2250,18 +2307,6 @@ test("per-site PHP config: symlinks, other verbs and the rollout copy", async ()
           staged,
           `${dir}/x.conf`,
         ],
-        [
-          "install",
-          "-m",
-          "0640",
-          "-o",
-          "root",
-          "-g",
-          "root",
-          staged,
-          host.path("etc/turbopanel/php-sites/shop-1"),
-        ],
-        ["tee", host.path("etc/turbopanel/php-sites/shop-1")],
       ]
     ) {
       await refused(host, args, args[0] === "tee" ? "x\n" : undefined);
@@ -2360,6 +2405,7 @@ test("per-site PHP: what the daemon renders for each mode and web server passes 
           group: "alice-grp",
           home,
           configDir: host.path("etc/turbopanel"),
+          libDir: host.path("opt/turbopanel/lib"),
           webAccount,
         };
         const dir = sitePhpConfigDir(spec.configDir, id);
@@ -2382,7 +2428,7 @@ test("per-site PHP: what the daemon renders for each mode and web server passes 
             { key: "open_basedir", value: `${site}/current/public:/tmp` },
             { key: "realpath_cache_ttl", value: "0" },
             { key: "session.save_path", value: "/var/lib/php/sessions" },
-          ]),
+          ], home),
         ]];
         if (mode === "fpm") {
           configs.push([
@@ -2432,86 +2478,6 @@ test("per-site PHP: what the daemon renders for each mode and web server passes 
         assertEquals(tested.code, 0, tested.stderr);
       }
     }
-  });
-});
-
-test("php-site-register writes the launcher registry from the account database only", async () => {
-  await withPhpHost(async (host) => {
-    const entry = host.path(`etc/turbopanel/php-sites/${PHP_SITE}`);
-    const register = [
-      "php-site-register",
-      PHP_SITE,
-      "alice",
-      "lsphp-attached",
-      "8.3",
-      "10",
-    ];
-    // An account whose passwd home is the principal home itself (the layout
-    // before home/) is refused: the home comes from the account database.
-    const root = host.path("srv/users/alice");
-    assertStringIncludes(await refused(host, register), "home is not");
-    const passwd = host.path("etc/passwd");
-    await Deno.writeTextFile(
-      passwd,
-      (await Deno.readTextFile(passwd)).replace(
-        `::${root}:`,
-        `::${root}/home:`,
-      ),
-    );
-    const ok = await host.run(register);
-    assertEquals(ok.code, 0, ok.stderr);
-    assertStringIncludes(ok.stdout, "EXEC [chown] [-h] [--] [root:root] [./f]");
-    const home = `${root}/home`;
-    assertEquals(
-      await Deno.readTextFile(entry),
-      [
-        "version=1",
-        `site=${PHP_SITE}`,
-        "mode=lsphp-attached",
-        "user=alice",
-        "uid=15001",
-        "group=alice-grp",
-        "gid=15001",
-        `home=${home}`,
-        `tmp=${root}/tmp`,
-        "php=8.3",
-        `bin=${phpExec(host, "lsphp")}`,
-        `ini=${phpConfDir(host)}/php.ini`,
-        "children=10",
-        "",
-      ].join("\n"),
-    );
-    for (
-      const args of [
-        [PHP_SITE, "root", "lsphp-attached", "8.3", "10"],
-        [PHP_SITE, "tpnginx", "lsphp-attached", "8.3", "10"],
-        [PHP_SITE, "carol", "lsphp-attached", "8.3", "10"],
-        [PHP_SITE, "alice", "php-fpm", "8.3", "10"],
-        [PHP_SITE, "alice", "lsphp-attached", "9.1", "10"],
-        [PHP_SITE, "alice", "lsphp-attached", "8.3.1", "10"],
-        [PHP_SITE, "alice", "lsphp-attached", "8.3", "0"],
-        [PHP_SITE, "alice", "lsphp-attached", "8.3", "65"],
-        [PHP_SITE, "alice", "lsphp-attached", "8.3", "010"],
-        ["Shop", "alice", "lsphp-attached", "8.3", "10"],
-        ["../x", "alice", "lsphp-attached", "8.3", "10"],
-        [PHP_SITE, "alice", "lsphp-attached", "8.3"],
-        [PHP_SITE, "alice", "lsphp-attached", "8.3", "10", "uid=0"],
-      ]
-    ) {
-      await refused(host, ["php-site-register", ...args]);
-    }
-    for (
-      const args of [["chown", "tp", entry], ["chmod", "0666", entry], [
-        "cp",
-        "-p",
-        "--",
-        entry,
-        `${entry}.x`,
-      ]]
-    ) {
-      await refused(host, args);
-    }
-    assertEquals((await host.run(["rm", "-f", "--", entry])).code, 0);
   });
 });
 
@@ -2679,5 +2645,75 @@ test("sftp-chroot checks an account whose primary group is tpsftp", async () => 
     assertEquals(check.code === 0, false);
     assertStringIncludes(check.stdout, "dave: passwd home is not");
     assertEquals(check.stdout.includes("alice:"), false, check.stdout);
+  });
+});
+
+test("sshd accepts -t, -T and exactly -T -C user=<name>,host=localhost,addr=127.0.0.1", async () => {
+  await withHost(async (host) => {
+    for (const argv of [["-t"], ["-T"]]) {
+      const ok = await host.run(["sshd", ...argv]);
+      assertEquals(ok.code, 0, ok.stderr);
+    }
+    const spec = "user=alice,host=localhost,addr=127.0.0.1";
+    const ok = await host.run(["sshd", "-T", "-C", spec]);
+    assertEquals(ok.code, 0, ok.stderr);
+    assertStringIncludes(
+      ok.stdout,
+      `EXEC [/usr/sbin/sshd] [-T] [-C] [${spec}]`,
+    );
+  });
+});
+
+test("sshd -T -C refuses anything but the one fixed spec", async () => {
+  await withHost(async (host) => {
+    const tail = ",host=localhost,addr=127.0.0.1";
+    for (
+      const argv of [
+        ["-T", "-C", "user=alice,host=localhost,addr=127.0.0.1,laddr=1.2.3.4"],
+        ["-T", "-C", "user=alice,host=localhost"],
+        ["-T", "-C", "host=localhost,addr=127.0.0.1,user=alice"],
+        ["-T", "-C", "user=alice,addr=127.0.0.1,host=localhost"],
+        ["-T", "-C", "user=alice,host=example.com,addr=127.0.0.1"],
+        ["-T", "-C", "user=alice,host=localhost,addr=10.0.0.1"],
+        ["-T", "-C", "user=,host=localhost,addr=127.0.0.1"],
+        ["-T", "-C", `user=-oProxyCommand=x${tail}`],
+        ["-T", "-C", `user=-x${tail}`],
+        ["-T", "-C", `user=a b${tail}`],
+        ["-T", "-C", `user=a;id${tail}`],
+        ["-T", "-C", `user=a,user=b${tail}`],
+        ["-T", "-C", `user=${"a".repeat(33)}${tail}`],
+        ["-T", "-C", `user=a\nb${tail}`],
+        ["-T", "-C", "user=alice" + tail + "\n"],
+        ["-t", "-C", `user=alice${tail}`],
+        ["-C", `user=alice${tail}`, "-T"],
+        ["-T", "-C", `user=alice${tail}`, "-f", "/tmp/x"],
+        ["-T", "-f", "/tmp/x"],
+        ["-T", "-C"],
+        ["-f", "/tmp/x"],
+        ["-T", "-o", "AllowTcpForwarding=yes"],
+        [],
+      ]
+    ) {
+      const stderr = await refused(host, ["sshd", ...argv]);
+      // Refused either by the verb or earlier, by the newline guard.
+      assertEquals(
+        stderr.includes("refusing") || stderr.includes("sshd: only"),
+        true,
+        stderr,
+      );
+    }
+  });
+});
+
+test("php-loopback-sync runs the installed guard with sync and nothing else", async () => {
+  await withHost(async (host) => {
+    const ok = await host.run(["php-loopback-sync"]);
+    assertEquals(ok.code, 0, ok.stderr);
+    assertEquals(
+      ok.stdout.trim(),
+      `EXEC [${host.path("opt/turbopanel/lib")}/tp-php-loopback] [sync]`,
+    );
+    const extra = await host.run(["php-loopback-sync", "alice"]);
+    assertEquals(extra.code, 1);
   });
 });

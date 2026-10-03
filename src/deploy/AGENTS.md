@@ -337,7 +337,20 @@ entry. There is no `composeYaml` fallback on `environment.deploy`.
   `EnvironmentDeployHostAccess` twin, pinned in
   `scripts/contract-field-snapshot.json`; absent reads false, so an older
   control plane gets the strict reading). Approval never excuses the refusals
-  above.
+  above, and never excuses a build path (context, Dockerfile, additional
+  context, SSH key) outside the dir: those are refused outright
+  (`build_context_outside_project`).
+- **Build policy (`compose-build-policy.ts`):** on the same resolved model,
+  before host-path confinement, build options no deploy may carry are refused
+  with a code per rule and no approval: `build.network` other than
+  `default`/`none`, `privileged`, `entitlements`, `ssh` agent forwarding,
+  `secrets` whose top-level `file` is outside the dir (daemon-rewritten
+  secrets pass), `extra_hosts` to `host-gateway`, loopback, link-local,
+  unspecified, multicast or metadata addresses, and remote contexts on a
+  non-public IP, numeric, single-label or reserved host. A `RUN` step is root
+  on the engine until builds leave it (unprivileged-builds phase 2), and anyone
+  who can deploy may define one. The control plane runs the same rules
+  (`src/features/compose/build-policy.ts`).
 - **Staged write + validated cutover:** each deploy resets
   `<deploymentDir>/.staging/`, writes the compiled YAML there, resolves the
   merged Docker Compose model, merges the daemon overlay fragment into that

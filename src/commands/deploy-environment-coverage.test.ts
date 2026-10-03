@@ -27,6 +27,7 @@ import {
   resolveHostNativeLanes,
   resolveRuntimeComposeYaml,
   shapeEnvironmentDeployResult,
+  siteCronWritableDirs,
 } from "./deploy-environment.ts";
 import type { AppliedRelease } from "../deploy/release/apply-source-releases.ts";
 import type {
@@ -2202,4 +2203,17 @@ test({
       );
     });
   },
+});
+
+test("siteCronWritableDirs: shared/ for a release, webroot/ and shared/ for a managed tree, nothing otherwise", () => {
+  const layout = { principalHomeRoot: "/srv/users" };
+  const site = { serviceId: "svc1", username: "alice" };
+  assertEquals(siteCronWritableDirs(layout, site, undefined), [
+    "/srv/users/alice/sites/svc1/shared",
+  ]);
+  assertEquals(siteCronWritableDirs(layout, undefined, site), [
+    "/srv/users/alice/sites/svc1/webroot",
+    "/srv/users/alice/sites/svc1/shared",
+  ]);
+  assertEquals(siteCronWritableDirs(layout, undefined, undefined), []);
 });

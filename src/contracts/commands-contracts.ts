@@ -302,6 +302,12 @@ export type FirewallReconcileResult = {
    */
   confirmation?: FirewallPendingConfirmation;
   /**
+   * Set when the host's guard rolled a ruleset back and nothing has been
+   * confirmed since (only while no ruleset is pending). Lets the control plane
+   * report "rolled back" without ever asking.
+   */
+  lastRollback?: FirewallLastRollback;
+  /**
    * The kernel's verdict on the rendered ruleset when this result did not
    * apply it: observe (a preview) or a refused apply. Absent when the rules
    * were loaded (the load itself is the verdict).
@@ -312,16 +318,34 @@ export type FirewallReconcileResult = {
   summary: string;
 };
 
+/** The guard's record of an undone ruleset. */
+export type FirewallLastRollback = {
+  digest: string;
+  at: string;
+  restored: "durable" | "none" | "open";
+};
+
 /**
  * A ruleset that was applied and is waiting to be confirmed (commit-confirm).
  * Must stay in sync with the instance canonical shape.
  */
 export type FirewallPendingConfirmation = {
-  state: "pending";
+  /**
+   * `pending`: loaded, rolls back at `deadlineAt` unless confirmed.
+   * `confirmed`: the daemon confirmed its own change (see `autoConfirm`).
+   */
+  state: "pending" | "confirmed";
   /** ISO time after which the host's root guard rolls the ruleset back. */
   deadlineAt: string;
   /** The confirm window the host armed, in seconds. */
   windowSeconds: number;
+  /**
+   * The daemon's own confirm attempt: after the rules went live it made an
+   * authenticated round trip to the control plane and, if that worked,
+   * confirmed. `ok: false` means it did nothing and the host rolls back at
+   * `deadlineAt`. `reason` says why, in plain words.
+   */
+  autoConfirm?: { ok: boolean; reason: string };
 };
 
 /**
@@ -1196,6 +1220,12 @@ export type EnvironmentDeployDockerNetwork = {
  */
 export type EnvironmentDeployHostAccess = {
   hostLevelApproved?: boolean;
+  /**
+   * True only when the organization allows a build to fetch its source from a
+   * public remote (a URL or git `build.context`). Absent reads as `false`; the
+   * daemon then refuses such a context. Internal hosts are refused either way.
+   */
+  remoteBuildSourcesApproved?: boolean;
 };
 
 export type EnvironmentDeployPayload = EnvironmentDeployHostAccess & {
@@ -1406,6 +1436,14 @@ export type EnvironmentStopPayload = {
    * that named these, so the payload is the only remaining copy for this host.
    */
   siteReleases?: Array<{ serviceId: string; username: string }>;
+  /**
+   * Principals no project, site or app on this host uses once this delete
+   * commits: the daemon retires each through `tp-host principal-remove`
+   * (slice, processes, key file, group memberships, home tree, account and
+   * group) after everything above is reclaimed. Only ever set by a delete
+   * teardown; a plain stop never carries it.
+   */
+  retirePrincipals?: Array<{ username: string }>;
 };
 
 export type EnvironmentStopResult = {
@@ -1641,6 +1679,24 @@ export type ManagedReplicationHealth = {
   lagBytes?: number;
   lagSeconds?: number;
   observedAt: string;
+  /** Standby only: `pg_last_wal_receive_lsn()` text (absent when NULL). */
+  receivedLsn?: string;
+  /** Standby only: `pg_last_wal_replay_lsn()` text (absent when NULL). */
+  replayLsn?: string;
+  /** Standby only, while streaming: received-vs-primary byte lag. */
+  receiveLagBytes?: number;
+  /**
+   * Standby only, on `managed-health-result`: the daemon's last `streaming`
+   * read of this member. `ageMs` is measured on the daemon's monotonic clock
+   * when the result is built.
+   */
+  lastStreaming?: {
+    at: string;
+    ageMs: number;
+    lagBytes?: number;
+    lagSeconds?: number;
+    receiveLagBytes?: number;
+  };
 };
 
 /** Must stay in sync with the instance canonical `managed.apply` shape. */
@@ -2689,6 +2745,9 @@ export function parseFirewallReconcileResult(
     ...(value.confirmation === undefined
       ? {}
       : { confirmation: parseFirewallPendingConfirmation(value.confirmation) }),
+    ...(value.lastRollback === undefined
+      ? {}
+      : { lastRollback: parseFirewallLastRollback(value.lastRollback) }),
     ...(value.validation === undefined
       ? {}
       : { validation: parseFirewallValidation(value.validation) }),
@@ -2756,11 +2815,39 @@ function parseFirewallRendered(value: unknown): FirewallRendered {
   return rendered;
 }
 
+function parseFirewallLastRollback(value: unknown): FirewallLastRollback {
+  if (
+    !isRecord(value) || typeof value.digest !== "string" ||
+    !/^[a-f0-9]{64}$/.test(value.digest) || typeof value.at !== "string" ||
+    Number.isNaN(Date.parse(value.at)) ||
+    (value.restored !== "durable" && value.restored !== "none" &&
+      value.restored !== "open")
+  ) {
+    throw new Error("lastRollback must be a rollback record");
+  }
+  return { digest: value.digest, at: value.at, restored: value.restored };
+}
+
+function parseFirewallAutoConfirm(
+  value: unknown,
+): { ok: boolean; reason: string } {
+  if (
+    !isRecord(value) || typeof value.ok !== "boolean" ||
+    typeof value.reason !== "string"
+  ) {
+    throw new Error("confirmation.autoConfirm must be { ok, reason }");
+  }
+  return { ok: value.ok, reason: value.reason };
+}
+
 function parseFirewallPendingConfirmation(
   value: unknown,
 ): FirewallPendingConfirmation {
-  if (!isRecord(value) || value.state !== "pending") {
-    throw new Error("confirmation must be a pending confirmation");
+  if (
+    !isRecord(value) ||
+    (value.state !== "pending" && value.state !== "confirmed")
+  ) {
+    throw new Error("confirmation must be a pending or confirmed confirmation");
   }
   if (
     typeof value.deadlineAt !== "string" ||
@@ -2778,9 +2865,12 @@ function parseFirewallPendingConfirmation(
     );
   }
   return {
-    state: "pending",
+    state: value.state,
     deadlineAt: value.deadlineAt,
     windowSeconds: value.windowSeconds,
+    ...(value.autoConfirm === undefined
+      ? {}
+      : { autoConfirm: parseFirewallAutoConfirm(value.autoConfirm) }),
   };
 }
 
@@ -5360,6 +5450,10 @@ export function parseEnvironmentDeployPayload(
         value.hostLevelApproved,
         "hostLevelApproved",
       ),
+      remoteBuildSourcesApproved: parseOptionalBoolean(
+        value.remoteBuildSourcesApproved,
+        "remoteBuildSourcesApproved",
+      ),
       tlsMaterial: parseOptionalMaterialArray(
         value.tlsMaterial,
         "tlsMaterial",
@@ -5427,6 +5521,16 @@ function parseStopSiteRelease(
   return { serviceId: value.serviceId, username: value.username };
 }
 
+function parseStopRetirePrincipal(value: unknown): { username: string } {
+  if (
+    !isRecord(value) || typeof value.username !== "string" ||
+    !STOP_SITE_RELEASE_USERNAME_RE.test(value.username)
+  ) {
+    throw new TypeError("Invalid environment.stop retirePrincipals entry");
+  }
+  return { username: value.username };
+}
+
 function parseStopFabricNetworks(value: unknown): string[] | undefined {
   if (value === undefined) return undefined;
   if (!Array.isArray(value)) {
@@ -5463,6 +5567,11 @@ export function parseEnvironmentStopPayload(
     "siteReleases",
     parseStopSiteRelease,
   );
+  const retirePrincipals = parseOptionalMaterialArray(
+    value.retirePrincipals,
+    "retirePrincipals",
+    parseStopRetirePrincipal,
+  );
   return {
     environmentId: parseNonEmptyString(value, "environmentId"),
     projectId: parseNonEmptyString(value, "projectId"),
@@ -5470,6 +5579,7 @@ export function parseEnvironmentStopPayload(
     ...(ingressServices === undefined ? {} : { ingressServices }),
     ...(fabricNetworks === undefined ? {} : { fabricNetworks }),
     ...(siteReleases === undefined ? {} : { siteReleases }),
+    ...(retirePrincipals === undefined ? {} : { retirePrincipals }),
   };
 }
 
@@ -6616,6 +6726,27 @@ export function parseManagedReplicationHealth(
     value.lagSeconds >= 0
   ) {
     health.lagSeconds = value.lagSeconds;
+  }
+  return withStandbyPositions(health, value);
+}
+
+/** Standby WAL positions and receive lag, when present and well-formed. */
+function withStandbyPositions(
+  health: ManagedReplicationHealth,
+  value: Record<string, unknown>,
+): ManagedReplicationHealth {
+  if (typeof value.receivedLsn === "string" && value.receivedLsn.length <= 32) {
+    health.receivedLsn = value.receivedLsn;
+  }
+  if (typeof value.replayLsn === "string" && value.replayLsn.length <= 32) {
+    health.replayLsn = value.replayLsn;
+  }
+  if (
+    typeof value.receiveLagBytes === "number" &&
+    Number.isFinite(value.receiveLagBytes) &&
+    value.receiveLagBytes >= 0
+  ) {
+    health.receiveLagBytes = value.receiveLagBytes;
   }
   return health;
 }

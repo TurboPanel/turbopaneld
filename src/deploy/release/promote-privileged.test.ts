@@ -7,6 +7,7 @@ import { assertEquals, assertRejects } from "@std/assert";
 import { join } from "@std/path";
 import {
   RELEASE_METADATA_DIRNAME,
+  type ReleasePaths,
   resolveReleasePaths,
 } from "./release-layout.ts";
 import {
@@ -16,10 +17,15 @@ import {
   promoteRelease,
   readCurrentReleaseId,
   RELEASE_SHARED_LINK_TARGET,
+  type StagedRelease,
   stageRelease,
   swapCurrentSymlink,
 } from "./promote.ts";
 import type { ReleaseManifestV1 } from "./deployment-json.ts";
+import {
+  releaseLinkTargetsFindArgs,
+  releaseLinkTextsFindArgs,
+} from "./release-links.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -59,12 +65,13 @@ type SudoResult = { success: boolean; stdout: string; stderr: string };
 
 /**
  * Stage into a release directory this process may not create (the managed-host
- * case), recording every sudo argv and answering with `respond`.
+ * case), recording every sudo argv and answering with `respond`. A successful
+ * `publish-open` makes the staging leaf, as tp-host would.
  */
 async function stageWithDeniedReleaseDir(
   root: string,
   respond: (args: string[]) => SudoResult,
-): Promise<{ argv: string[][]; handoffDir: string }> {
+): Promise<{ argv: string[][]; paths: ReleasePaths; staged: StagedRelease }> {
   const paths = resolveReleasePaths(
     { principalHomeRoot: root, daemonStateDir: join(root, "state") },
     { username: "appuser", serviceId: "svc-1", releaseId: "rel-1" },
@@ -82,72 +89,60 @@ async function stageWithDeniedReleaseDir(
     return originalMkdir.apply(Deno, args);
   }) as typeof Deno.mkdir;
   try {
-    await stageRelease({
+    const staged = await stageRelease({
       paths,
+      username: "appuser",
       workingDir,
-      runFn: (_command, args) => {
+      runFn: async (_command, args) => {
         argv.push([...args]);
-        return Promise.resolve(respond([...args]));
+        const result = respond([...args]);
+        if (result.success && args.includes("publish-open")) {
+          await originalMkdir(paths.stagingDir, { recursive: true });
+        }
+        return result;
       },
     });
+    return { argv, paths, staged };
   } finally {
     Deno.mkdir = originalMkdir;
   }
-  return { argv, handoffDir: paths.handoffDir };
 }
 
 const SUDO_OK: SudoResult = { success: true, stdout: "", stderr: "" };
 
-test("stageRelease hands root only the daemon's checked copy", async () => {
+test("stageRelease copies into the daemon's own staging leaf, never into releases/", async () => {
   await withTempRelease(async (root) => {
-    const handoff = join(root, "state", "release-handoff", "svc-1", "rel-1");
-    let handoffSeen: string[] = [];
-    const { argv, handoffDir } = await stageWithDeniedReleaseDir(
+    const { argv, paths, staged } = await stageWithDeniedReleaseDir(
       root,
-      (args) => {
-        if (args.includes("cp")) {
-          handoffSeen = [...Deno.readDirSync(handoff)].map((e) => e.name);
-        }
-        return SUDO_OK;
-      },
+      () => SUDO_OK,
     );
-    assertEquals(handoffDir, handoff);
-    assertEquals(argv.some((args) => args.includes("mkdir")), true);
-    const cp = argv.find((args) => args.includes("cp")) ?? [];
-    assertEquals(cp.slice(-2)[0], `${handoffDir}/.`);
-    // The escaping link never reached the tree root copies.
-    assertEquals(handoffSeen, ["index.html"]);
-    await assertRejects(() => Deno.lstat(handoffDir), Deno.errors.NotFound);
+    assertEquals(argv, [["-n", "publish-open", "appuser", "svc-1", "rel-1"]]);
+    assertEquals(staged, { dir: paths.stagingDir, viaPublish: true });
+    assertEquals(
+      paths.stagingDir,
+      join(root, ".tp-staging", "appuser.svc-1.rel-1"),
+    );
+    // The escaping link never reached the staged tree.
+    const names = [...Deno.readDirSync(paths.stagingDir)].map((e) => e.name);
+    assertEquals(names, ["index.html"]);
+    await assertRejects(
+      () => Deno.lstat(paths.releaseDir),
+      Deno.errors.NotFound,
+    );
   });
 });
 
-test("stageRelease privileged copy reports sudo mkdir and cp failures", async () => {
-  for (
-    const [failing, stderr, message] of [
-      ["mkdir", "mkdir denied", "mkdir denied"],
-      ["cp", "cp denied", "cp denied"],
-      ["mkdir", "", "Failed to mkdir"],
-      ["cp", "", "Failed to copy"],
-    ]
-  ) {
+test("stageRelease reports a refused publish-open", async () => {
+  for (const [stderr, message] of [["no", "no"], ["", "publish-open failed"]]) {
     await withTempRelease(async (root) => {
       await assertRejects(
         () =>
           stageWithDeniedReleaseDir(
             root,
-            (args) =>
-              args.includes(failing)
-                ? { success: false, stdout: "", stderr }
-                : SUDO_OK,
+            () => ({ success: false, stdout: "", stderr }),
           ),
         Error,
         message,
-      );
-      // The hand-off copy never outlives the stage.
-      await assertRejects(
-        () =>
-          Deno.lstat(join(root, "state", "release-handoff", "svc-1", "rel-1")),
-        Deno.errors.NotFound,
       );
     });
   }
@@ -166,6 +161,7 @@ test("stageRelease rethrows a non-NotFound source lstat error", async () => {
         () =>
           stageRelease({
             paths,
+            username: "appuser",
             workingDir: join(root, "checkout"),
           }),
         TypeError,
@@ -189,7 +185,7 @@ test("stageRelease rethrows a non-PermissionDenied copy error", async () => {
     Deno.mkdir = () => Promise.reject(new TypeError("io"));
     try {
       await assertRejects(
-        () => stageRelease({ paths, workingDir }),
+        () => stageRelease({ paths, username: "appuser", workingDir }),
         TypeError,
         "io",
       );
@@ -587,90 +583,93 @@ test("promoteExistingRelease rejects a non-directory target", async () => {
   });
 });
 
-test("promoteRelease writes the manifest via sudo when the unprivileged write is denied", async () => {
-  await withTempRelease(async (root) => {
-    const paths = resolveReleasePaths(
-      { principalHomeRoot: root, daemonStateDir: join(root, "state") },
-      { username: "appuser", serviceId: "svc-1", releaseId: "rel-1" },
-    );
-    await Deno.mkdir(paths.releaseDir, { recursive: true });
-    await Deno.mkdir(paths.sharedDir, { recursive: true });
-    const workingDir = join(root, "checkout");
-    await Deno.mkdir(workingDir, { recursive: true });
-    await Deno.writeTextFile(join(workingDir, "index.html"), "v1");
+/** A managed-host promote: releases/ is root's, publish verbs answer `respond`. */
+async function promoteManaged(
+  root: string,
+  respond: (args: string[]) => SudoResult,
+  build: (workingDir: string) => Promise<void> = () => Promise.resolve(),
+): Promise<{ argv: string[][]; paths: ReleasePaths; seen: string[] }> {
+  const paths = resolveReleasePaths(
+    { principalHomeRoot: root, daemonStateDir: join(root, "state") },
+    { username: "appuser", serviceId: "svc-1", releaseId: "rel-1" },
+  );
+  await Deno.mkdir(paths.releasesDir, { recursive: true });
+  const workingDir = join(root, "checkout");
+  await Deno.mkdir(workingDir, { recursive: true });
+  await Deno.writeTextFile(join(workingDir, "index.html"), "v1");
+  await build(workingDir);
+  const argv: string[][] = [];
+  let seen: string[] = [];
+  await Deno.chmod(paths.releasesDir, 0o500);
+  try {
+    await promoteRelease({
+      paths,
+      workingDir,
+      username: "appuser",
+      manifest: MANIFEST,
+      runFn: async (_command, args) => {
+        argv.push([...args]);
+        const result = respond([...args]);
+        if (!result.success) return result;
+        if (args.includes("publish-open")) {
+          await Deno.mkdir(paths.stagingDir, { recursive: true });
+        }
+        if (args.includes("publish")) {
+          seen = [...Deno.readDirSync(paths.stagingDir)].map((e) => e.name)
+            .sort();
+        }
+        return result;
+      },
+    });
+  } finally {
+    await Deno.chmod(paths.releasesDir, 0o700);
+  }
+  return { argv, paths, seen };
+}
 
-    const argv: string[][] = [];
-    const originalWrite = Deno.writeTextFile;
-    Deno.writeTextFile = ((path, data, options) => {
-      if (String(path).includes(RELEASE_METADATA_DIRNAME)) {
-        return Promise.reject(denied("manifest"));
-      }
-      return originalWrite.call(Deno, path, data, options);
-    }) as typeof Deno.writeTextFile;
-    try {
-      await promoteRelease({
-        paths,
-        workingDir,
-        username: "appuser",
-        manifest: MANIFEST,
-        healthProbe: () => Promise.resolve(),
-        runFn: (_command, args) => {
-          argv.push([...args]);
-          return Promise.resolve({ success: true, stdout: "", stderr: "" });
-        },
-      });
-    } finally {
-      Deno.writeTextFile = originalWrite;
-    }
-    assertEquals(argv.some((args) => args.includes("install")), true);
+test("promoteRelease publishes a managed-host release through tp-host only", async () => {
+  await withTempRelease(async (root) => {
+    const { argv, paths, seen } = await promoteManaged(
+      root,
+      () => SUDO_OK,
+      async (workingDir) => {
+        // A build's own `shared` is dropped: the layout links it after the checks.
+        await Deno.mkdir(join(workingDir, "shared"));
+      },
+    );
+    assertEquals(argv, [
+      ["-n", "publish-open", "appuser", "svc-1", "rel-1"],
+      // #239's staged-link check, on the leaf, before anything is sealed.
+      ["-n", ...releaseLinkTargetsFindArgs(paths.stagingDir)],
+      ["-n", "publish", "appuser", "svc-1", "rel-1"],
+    ]);
+    // The manifest and the payload were staged before publish ran.
+    assertEquals(seen, [RELEASE_METADATA_DIRNAME, "index.html"]);
   });
 });
 
-test("promoteRelease privileged manifest write throws when install fails", async () => {
+test("promoteRelease removes its staging leaf when publish is refused", async () => {
   await withTempRelease(async (root) => {
     const paths = resolveReleasePaths(
       { principalHomeRoot: root, daemonStateDir: join(root, "state") },
       { username: "appuser", serviceId: "svc-1", releaseId: "rel-1" },
     );
-    await Deno.mkdir(paths.releaseDir, { recursive: true });
-    await Deno.mkdir(paths.sharedDir, { recursive: true });
-    const workingDir = join(root, "checkout");
-    await Deno.mkdir(workingDir, { recursive: true });
-    await Deno.writeTextFile(join(workingDir, "index.html"), "v1");
-
-    const originalWrite = Deno.writeTextFile;
-    Deno.writeTextFile = ((path, data, options) => {
-      if (String(path).includes(RELEASE_METADATA_DIRNAME)) {
-        return Promise.reject(denied("manifest"));
-      }
-      return originalWrite.call(Deno, path, data, options);
-    }) as typeof Deno.writeTextFile;
-    try {
-      await assertRejects(
-        () =>
-          promoteRelease({
-            paths,
-            workingDir,
-            username: "appuser",
-            manifest: MANIFEST,
-            healthProbe: () => Promise.resolve(),
-            runFn: (_command, args) => {
-              if (args.includes("install")) {
-                return Promise.resolve({
-                  success: false,
-                  stdout: "",
-                  stderr: "install denied",
-                });
-              }
-              return Promise.resolve({ success: true, stdout: "", stderr: "" });
-            },
-          }),
-        Error,
-        "install denied",
-      );
-    } finally {
-      Deno.writeTextFile = originalWrite;
-    }
+    await assertRejects(
+      () =>
+        promoteManaged(
+          root,
+          (args) =>
+            args.includes("publish")
+              ? { success: false, stdout: "", stderr: "refusing x" }
+              : SUDO_OK,
+        ),
+      Error,
+      "refusing x",
+    );
+    await assertRejects(
+      () => Deno.lstat(paths.stagingDir),
+      Deno.errors.NotFound,
+    );
   });
 });
 
@@ -680,7 +679,6 @@ test("promoteRelease privileged cleanup runs when unprivileged remove fails", as
       { principalHomeRoot: root, daemonStateDir: join(root, "state") },
       { username: "appuser", serviceId: "svc-1", releaseId: "rel-fail" },
     );
-    await Deno.mkdir(paths.releaseDir, { recursive: true });
     await Deno.mkdir(paths.sharedDir, { recursive: true });
     const workingDir = join(root, "checkout");
     await Deno.mkdir(workingDir, { recursive: true });
@@ -719,96 +717,6 @@ test("promoteRelease privileged cleanup runs when unprivileged remove fails", as
       ),
       true,
     );
-  });
-});
-
-test("promoteRelease privileged manifest write throws when mkdir fails", async () => {
-  await withTempRelease(async (root) => {
-    const paths = resolveReleasePaths(
-      { principalHomeRoot: root, daemonStateDir: join(root, "state") },
-      { username: "appuser", serviceId: "svc-1", releaseId: "rel-1" },
-    );
-    await Deno.mkdir(paths.releaseDir, { recursive: true });
-    await Deno.mkdir(paths.sharedDir, { recursive: true });
-    const workingDir = join(root, "checkout");
-    await Deno.mkdir(workingDir, { recursive: true });
-    await Deno.writeTextFile(join(workingDir, "index.html"), "v1");
-
-    const originalWrite = Deno.writeTextFile;
-    Deno.writeTextFile = ((path, data, options) => {
-      if (String(path).includes(RELEASE_METADATA_DIRNAME)) {
-        return Promise.reject(denied("manifest"));
-      }
-      return originalWrite.call(Deno, path, data, options);
-    }) as typeof Deno.writeTextFile;
-    try {
-      await assertRejects(
-        () =>
-          promoteRelease({
-            paths,
-            workingDir,
-            username: "appuser",
-            manifest: MANIFEST,
-            healthProbe: () => Promise.resolve(),
-            runFn: (_command, args) => {
-              if (args.includes("mkdir")) {
-                return Promise.resolve({
-                  success: false,
-                  stdout: "",
-                  stderr: "",
-                });
-              }
-              return Promise.resolve({ success: true, stdout: "", stderr: "" });
-            },
-          }),
-        Error,
-        "Failed to mkdir",
-      );
-    } finally {
-      Deno.writeTextFile = originalWrite;
-    }
-  });
-});
-
-test("promoteRelease privileged manifest still succeeds when temp cleanup fails", async () => {
-  await withTempRelease(async (root) => {
-    const paths = resolveReleasePaths(
-      { principalHomeRoot: root, daemonStateDir: join(root, "state") },
-      { username: "appuser", serviceId: "svc-1", releaseId: "rel-1" },
-    );
-    await Deno.mkdir(paths.releaseDir, { recursive: true });
-    await Deno.mkdir(paths.sharedDir, { recursive: true });
-    const workingDir = join(root, "checkout");
-    await Deno.mkdir(workingDir, { recursive: true });
-    await Deno.writeTextFile(join(workingDir, "index.html"), "v1");
-
-    const originalWrite = Deno.writeTextFile;
-    const originalRemove = Deno.remove;
-    Deno.writeTextFile = ((path, data, options) => {
-      if (String(path).includes(RELEASE_METADATA_DIRNAME)) {
-        return Promise.reject(denied("manifest"));
-      }
-      return originalWrite.call(Deno, path, data, options);
-    }) as typeof Deno.writeTextFile;
-    Deno.remove = ((path, options) => {
-      if (String(path).includes("tp-rel-manifest-")) {
-        return Promise.reject(denied("tmp"));
-      }
-      return originalRemove.call(Deno, path, options);
-    }) as typeof Deno.remove;
-    try {
-      await promoteRelease({
-        paths,
-        workingDir,
-        username: "appuser",
-        manifest: MANIFEST,
-        healthProbe: () => Promise.resolve(),
-        runFn: () => Promise.resolve({ success: true, stdout: "", stderr: "" }),
-      });
-    } finally {
-      Deno.writeTextFile = originalWrite;
-      Deno.remove = originalRemove;
-    }
   });
 });
 
@@ -858,7 +766,6 @@ test("promoteRelease swallows a failed privileged cleanup", async () => {
       { principalHomeRoot: root, daemonStateDir: join(root, "state") },
       { username: "appuser", serviceId: "svc-1", releaseId: "rel-fail" },
     );
-    await Deno.mkdir(paths.releaseDir, { recursive: true });
     await Deno.mkdir(paths.sharedDir, { recursive: true });
     const workingDir = join(root, "checkout");
     await Deno.mkdir(workingDir, { recursive: true });
@@ -997,6 +904,7 @@ test("promoteExistingRelease treats a missing mode as sealed", async () => {
         paths,
         releaseId: "rel-1",
         healthProbe: () => Promise.resolve(),
+        runFn: testRun(true, []),
       });
       assertEquals(
         await Deno.readLink(paths.currentLink),
@@ -1153,16 +1061,14 @@ test("promoteExistingRelease checks a denied release only for presence", async (
       });
       assertEquals(dir, paths.releaseDir);
     });
-    // tp-host's existing `test -e` is the only privileged look at the tree:
-    // nothing in it is read, opened, or stat'd for metadata.
-    assertEquals(calls[0], ["-n", "test", "-e", paths.releaseDir]);
-    assertEquals(
-      calls.some((args) =>
-        args.includes("cat") || args.includes("stat") ||
-        args.includes("find") || args.includes("ls")
-      ),
-      false,
-    );
+    // tp-host's `test -e` and the two link listings are the only privileged
+    // looks at the tree: no file in it is read, opened, or stat'd for
+    // metadata, and only link names, texts and resolved paths come back.
+    assertEquals(calls, [
+      ["-n", "test", "-e", paths.releaseDir],
+      ["-n", ...releaseLinkTextsFindArgs(paths.releaseDir)],
+      ["-n", ...releaseLinkTargetsFindArgs(paths.releaseDir)],
+    ]);
     assertEquals(await Deno.readLink(paths.currentLink), "releases/rel-1");
   });
 });
@@ -1216,5 +1122,31 @@ test("promoteExistingRelease surfaces a stat failure other than denial", async (
       Deno.stat = originalStat;
     }
     assertEquals(calls, []);
+  });
+});
+
+test("promoteRelease refuses a staged link into shared before publish runs", async () => {
+  await withTempRelease(async (root) => {
+    const paths = resolveReleasePaths(
+      { principalHomeRoot: root, daemonStateDir: join(root, "state") },
+      { username: "appuser", serviceId: "svc-1", releaseId: "rel-1" },
+    );
+    const argv: string[][] = [];
+    await assertRejects(
+      () =>
+        promoteManaged(root, (args) => {
+          argv.push(args);
+          return args.includes("find")
+            ? {
+              success: true,
+              stdout: `${paths.stagingDir}/shared/uploads\0`,
+              stderr: "",
+            }
+            : SUDO_OK;
+        }),
+      Error,
+      "reach into",
+    );
+    assertEquals(argv.some((args) => args.includes("publish")), false);
   });
 });

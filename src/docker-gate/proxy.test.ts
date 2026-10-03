@@ -30,6 +30,7 @@ import {
   generateKeys,
   payloadFor,
   signToken,
+  TEST_CONTAINER_NAME,
   type TestKeys,
 } from "../testing/docker-gate-approval.ts";
 
@@ -673,7 +674,7 @@ async function sendCreate(h: Harness, body: unknown): Promise<string> {
   });
   const json = JSON.stringify(body);
   const request =
-    `POST /containers/create HTTP/1.1\r\nHost: d\r\nContent-Length: ${json.length}\r\n` +
+    `POST /containers/create?name=${TEST_CONTAINER_NAME} HTTP/1.1\r\nHost: d\r\nContent-Length: ${json.length}\r\n` +
     `Connection: close\r\n\r\n${json}`;
   const client = await h.connect();
   await client.write(encodeText(request));
@@ -893,7 +894,13 @@ e2e(
   },
 );
 
-type InspectAnswer = { status: number; labels?: Record<string, string> };
+type InspectAnswer = {
+  status: number;
+  labels?: Record<string, string>;
+  /** What the engine lists for the container now (start-time bind check). */
+  hostConfig?: Record<string, unknown>;
+  mounts?: unknown[];
+};
 
 /** `doc` as a chunked body split in two. */
 function chunked(doc: string): string {
@@ -922,7 +929,11 @@ function scriptEngine(
           { status: 404 };
       const doc = JSON.stringify(
         match
-          ? { Config: { Labels: found.labels ?? null } }
+          ? {
+            Config: { Labels: found.labels ?? null },
+            HostConfig: found.hostConfig ?? {},
+            Mounts: found.mounts ?? [],
+          }
           : { Labels: found.labels ?? null },
       );
       await conn.write(
@@ -982,6 +993,62 @@ e2e(
     );
     // Every action still reached the engine.
     assertEquals(relayed.length, 5);
+  },
+);
+
+e2e(
+  "exec, attach and archive on a platform container are flagged unless it is the daemon's own pair",
+  async (h) => {
+    const relayed = scriptEngine(h, {
+      proxysql: {
+        status: 200,
+        labels: {
+          "turbopanel.role": "ingress",
+          "com.turbopanel.system.component": "managed-ingress",
+        },
+      },
+      traefik: {
+        status: 200,
+        labels: {
+          "turbopanel.role": "ingress",
+          "com.turbopanel.system.component": "hosting-ingress",
+        },
+      },
+      engine: { status: 200, labels: { "tp.managed.engine": "postgres" } },
+      app: { status: 200, labels: { "com.docker.compose.project": "app" } },
+      helper: {
+        status: 200,
+        labels: {
+          "turbopanel.role": "turbopanel",
+          "com.turbopanel.system.component": "backup-copy",
+        },
+      },
+    });
+    // A foreground `docker run --rm` helper attaches: not a finding.
+    await post(h, "/containers/helper/attach");
+    await post(h, "/containers/proxysql/exec", '{"Cmd":["mysql","-P6032"]}');
+    await post(h, "/containers/engine/exec", '{"Cmd":["pg_ctl","status"]}');
+    await post(h, "/containers/app/exec", '{"Cmd":["sh"]}');
+    await post(h, "/containers/proxysql/exec", '{"Cmd":["sh"]}');
+    await post(h, "/containers/traefik/exec", '{"Cmd":["sh"]}');
+    await post(h, "/containers/traefik/attach");
+    await post(h, "/containers/engine/attach");
+    const client = await h.connect();
+    await client.write(
+      encodeText(
+        "GET /containers/proxysql/archive?path=/ HTTP/1.1\r\nHost: d\r\nConnection: close\r\n\r\n",
+      ),
+    );
+    await timeout(readUntilEof(client));
+    assertEquals(wouldDeny(h.logs), [
+      "platform-exec",
+      "platform-exec",
+      "platform-attach",
+      "platform-attach",
+      "platform-archive",
+    ]);
+    // Observe mode still relays every request.
+    assertEquals(relayed.length, 9);
   },
 );
 
@@ -1075,4 +1142,80 @@ e2e(
     // what enforce mode refuses.
     assertEquals(wouldDeny(h.logs), ["build-session", "build-session"]);
   },
+);
+
+const TENANT_LABELS = { "com.docker.compose.project": "app" };
+
+e2e(
+  "observe mode: a start whose live binds break the policy is logged, never refused",
+  async (h) => {
+    const relayed = scriptEngine(h, {
+      swapped: {
+        status: 200,
+        labels: TENANT_LABELS,
+        hostConfig: { Binds: ["/root/x:/c:ro"] },
+      },
+      fine: {
+        status: 200,
+        labels: TENANT_LABELS,
+        hostConfig: {
+          Binds: [
+            "/srv/users/alice/data/x:/x",
+            "/srv/users/alice/tmp:/t",
+            "/srv/users/alice/sites/s1/shared:/s",
+            "/srv/users/alice/sites/s1/webroot:/w",
+          ],
+        },
+      },
+    });
+    await post(h, "/containers/fine/start");
+    await post(h, "/containers/swapped/start");
+    await post(h, "/containers/swapped/restart");
+    assertEquals(wouldDeny(h.logs), [
+      "start-bind-forbidden-path",
+      "start-bind-forbidden-path",
+    ]);
+    assertEquals(relayed.length, 3);
+  },
+);
+
+e2e(
+  "enforce mode: the swapped-target race is refused at start, allowed data binds start",
+  async (h) => {
+    const relayed = scriptEngine(h, {
+      // Clean at create time, now showing a bind the policy refuses.
+      swapped: {
+        status: 200,
+        labels: TENANT_LABELS,
+        hostConfig: { Binds: ["/srv/users/alice/home:/h"] },
+        mounts: [{ Type: "bind", Source: "/root", RW: true }],
+      },
+      fine: {
+        status: 200,
+        labels: TENANT_LABELS,
+        hostConfig: { Binds: ["/srv/users/alice/data:/d"] },
+        mounts: [{ Type: "bind", Source: "/srv/users/alice/data", RW: true }],
+      },
+    });
+    await post(h, "/containers/fine/start");
+    assertEquals(relayed, ["POST /containers/fine/start HTTP/1.1"]);
+    const client = await h.connect();
+    await client.write(
+      encodeText(
+        "POST /containers/swapped/start HTTP/1.1\r\nHost: d\r\nConnection: close\r\n\r\n",
+      ),
+    );
+    assertStringIncludes(await timeout(readUntilEof(client)), "403");
+    assertEquals(
+      relayed.length,
+      1,
+      "the refused start never reached the engine",
+    );
+    const denied = h.logs.find((l) => l.event === "docker-gate.denied");
+    assertEquals(denied?.rules, [
+      "start-bind-principal-path",
+      "start-bind-forbidden-path",
+    ]);
+  },
+  { env: { TP_DOCKER_GATE_MODE: "enforce" } },
 );

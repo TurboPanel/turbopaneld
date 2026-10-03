@@ -37,6 +37,51 @@
     remote_src: true
   when: turbopanel_dev_user | default('') | length == 0
 
+# tp-php-loopback keeps site PHP off every loopback port but the database
+# proxy's. Every per-site PHP unit runs it as root (`ExecStartPre=+`) before
+# PHP starts, and `tp-host php-loopback-sync` runs it after units change.
+- name: Install nft and flock for tp-php-loopback
+  ansible.builtin.apt:
+    name:
+      - nftables
+      - util-linux
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  when: turbopanel_dev_user | default('') | length == 0
+
+# The package's default /etc/nftables.conf starts with `flush ruleset`, which
+# would wipe tp-php-loopback's table; TurboPanel loads its own rules.
+- name: Keep nftables.service from flushing tp-php-loopback's rules
+  ansible.builtin.systemd:
+    name: nftables
+    enabled: false
+    state: stopped
+  failed_when: false
+  when: turbopanel_dev_user | default('') | length == 0
+
+- name: Install tp-php-loopback
+  ansible.builtin.copy:
+    src: "{{ turbopanel_orchestration_dir }}/scripts/tp-php-loopback"
+    dest: "{{ turbopanel_install_root }}/lib/tp-php-loopback"
+    owner: root
+    group: "{{ turbopanel_group }}"
+    mode: "0750"
+    remote_src: true
+  when: turbopanel_dev_user | default('') | length == 0
+
+# tp-build-loopback keeps the build account (tpbuild) off the platform's
+# loopback ports; tp-host build-run runs it before every build.
+- name: Install tp-build-loopback
+  ansible.builtin.copy:
+    src: "{{ turbopanel_orchestration_dir }}/scripts/tp-build-loopback"
+    dest: "{{ turbopanel_install_root }}/lib/tp-build-loopback"
+    owner: root
+    group: "{{ turbopanel_group }}"
+    mode: "0750"
+    remote_src: true
+  when: turbopanel_dev_user | default('') | length == 0
+
 - name: Record the principal home root for tp-host
   ansible.builtin.copy:
     content: "principal_home_root={{ principal_home_root | default('/srv/users') }}\n"
