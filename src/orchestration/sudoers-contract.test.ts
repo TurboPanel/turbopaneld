@@ -1,4 +1,4 @@
-import { assert, assertEquals, assertStringIncludes } from "@std/assert";
+import { assertEquals, assertStringIncludes } from "@std/assert";
 import { dirname, fromFileUrl, join } from "@std/path";
 import { parse as parseYaml } from "yaml";
 import { DAEMON_WRITABLE_VENDOR_DIRS } from "../permissions/daemon-permissions.ts";
@@ -463,13 +463,14 @@ test("the install root and vendor tree are root-owned on managed hosts", async (
     assertEquals(file.owner, "{{ turbopanel_install_owner }}", path);
     assertEquals(file.recurse ?? false, false, `${path} must not recurse`);
   }
-  // The only recursive daemon-owned write under vendor is the cache list.
+  // The daemon-owned cache folders are created on their own, never recursed:
+  // root must not walk what the daemon can rewrite (P1-1).
   for (const task of tasks) {
     const file = task["ansible.builtin.file"];
-    if (!file || file.recurse !== true) continue;
+    if (!file) continue;
     assertEquals(
-      task.loop,
-      "{{ turbopanel_daemon_vendor_cache_dirs }}",
+      file.recurse ?? false,
+      false,
       `unexpected recursive chown in task ${task.name}`,
     );
   }
@@ -498,34 +499,38 @@ test("the daemon-writable vendor cache matches DAEMON_WRITABLE_VENDOR_DIRS", asy
   }
 });
 
-test("daemon-install.yml leaves the root-owned engine config trees alone", async () => {
+test("daemon-install.yml never re-owns anything below the config tree", async () => {
+  // A root find/chown over tp's folders follows whatever tp swapped in
+  // between listing and chown (P1-1). Engine trees, per-site PHP config and
+  // the registry are root-owned and stay that way; the daemon's own folders
+  // are created by roles/daemon-layout.
   const doc = parseYaml(await Deno.readTextFile(join(orch, DAEMON_INSTALL)));
   const play = (doc as Array<Record<string, unknown>>)[0]!;
-  const engines = (play.vars as Record<string, unknown>)
-    .turbopanel_engine_config_dirs as string[];
-  for (const engine of ["apache", "nginx", "openlitespeed", "php"]) {
-    assert(engines.includes(engine), `${engine} must be excluded`);
-  }
-  for (const task of play.post_tasks as Task[]) {
-    const file = task["ansible.builtin.file"];
-    if (!file || file.owner !== "{{ turbopanel_user }}") continue;
-    const loop = Array.isArray(task.loop) ? task.loop.map(String) : [];
-    const paths = [String(file.path), ...loop];
-    const configRecurse = file.recurse === true &&
-      paths.some((path) => path.includes("turbopanel_config_dir"));
-    assertEquals(configRecurse, false, `${task.name}: recursive config chown`);
-  }
-  const contents = (play.post_tasks as Task[]).find((task) =>
-    task.name === "Ensure tp owns the config tree's contents"
+  const tasks = ["pre_tasks", "tasks", "post_tasks"].flatMap((key) =>
+    Array.isArray(play[key]) ? play[key] as Task[] : []
   );
-  const argv = (contents?.["ansible.builtin.command"] as
-    | { argv?: string[] }
-    | undefined)?.argv ?? [];
-  for (const engine of engines) {
-    const at = argv.indexOf(`{{ turbopanel_config_dir }}/${engine}`);
-    assert(at > 0, `${engine} must be pruned from the config re-own`);
-    assertEquals(argv[at - 1], "-path", engine);
-    assert(at < argv.indexOf("-prune"), `${engine} pruned`);
+  for (const task of tasks) {
+    const file = task["ansible.builtin.file"];
+    if (file) {
+      const loop = Array.isArray(task.loop) ? task.loop.map(String) : [];
+      const paths = [String(file.path), ...loop];
+      const configRecurse = file.recurse === true &&
+        paths.some((path) => path.includes("turbopanel_config_dir"));
+      assertEquals(
+        configRecurse,
+        false,
+        `${task.name}: recursive config chown`,
+      );
+    }
+    const command = task["ansible.builtin.command"] as
+      | { argv?: string[] }
+      | undefined;
+    const argv = command?.argv ?? [];
+    assertEquals(
+      argv.includes("chown") || argv[0] === "find",
+      false,
+      `${task.name}: root find/chown pass`,
+    );
   }
 });
 
@@ -588,17 +593,9 @@ test("daemon-install.yml leaves per-site PHP config and the lsphp registry to tp
       `${task.name}: recursive chown of the config tree`,
     );
   }
-  const contents = tasks.find((t) =>
-    t.name === "Ensure tp owns the config tree's contents"
-  );
-  const argv = (contents?.["ansible.builtin.command"] as
-    | { argv?: string[] }
-    | undefined)?.argv ?? [];
-  for (const pruned of ["php/sites", "php-sites"]) {
-    const at = argv.indexOf(`{{ turbopanel_config_dir }}/${pruned}`);
-    assertEquals(argv[at - 1], "-path", pruned);
-  }
-  assertEquals(argv.indexOf("-prune") > argv.indexOf("-path"), true);
+  const text = await Deno.readTextFile(join(orch, DAEMON_INSTALL));
+  assertEquals(text.includes("php-sites"), false);
+  assertEquals(text.includes("php/sites"), false);
 });
 
 test("daemon-layout keeps the orchestration tree, binaries and helper root-owned", async () => {

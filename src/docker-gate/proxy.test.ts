@@ -30,6 +30,7 @@ import {
   generateKeys,
   payloadFor,
   signToken,
+  TEST_CONTAINER_NAME,
   type TestKeys,
 } from "../testing/docker-gate-approval.ts";
 
@@ -673,7 +674,7 @@ async function sendCreate(h: Harness, body: unknown): Promise<string> {
   });
   const json = JSON.stringify(body);
   const request =
-    `POST /containers/create HTTP/1.1\r\nHost: d\r\nContent-Length: ${json.length}\r\n` +
+    `POST /containers/create?name=${TEST_CONTAINER_NAME} HTTP/1.1\r\nHost: d\r\nContent-Length: ${json.length}\r\n` +
     `Connection: close\r\n\r\n${json}`;
   const client = await h.connect();
   await client.write(encodeText(request));
