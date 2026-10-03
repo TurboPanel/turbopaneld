@@ -835,9 +835,11 @@ test("cp -a copies only a clean daemon hand-off tree, and no ownership", async (
     assertEquals(ok.code, 0, ok.stderr);
     assertStringIncludes(
       ok.stdout,
-      "EXEC [cp] [-R] [--no-dereference] [--preserve=mode,timestamps] " +
+      "EXEC [cp] [-R] [--no-dereference] [--remove-destination] " +
+        "[--preserve=mode,timestamps] " +
         "[--no-preserve=ownership] [--] [/proc/self/fd/3/.] [.]",
     );
+    assertStringIncludes(ok.stdout, "EXEC [chmod] [-R] [go-w,ug-s] [--] [.]");
 
     // Root would mknod a FIFO and keep a set-id bit: refused before copying.
     const fifo = await new Deno.Command("mkfifo", {
@@ -853,6 +855,47 @@ test("cp -a copies only a clean daemon hand-off tree, and no ownership", async (
     const tenantTree = host.path("srv/users/alice/sites/web/build");
     await Deno.mkdir(tenantTree, { recursive: true });
     await refused(host, ["cp", "-a", "--", `${tenantTree}/.`, release]);
+  });
+});
+
+test("cp -a only fills a fresh, empty, root-owned release directory", async () => {
+  await withHost(async (host) => {
+    const handoff = host.path("var/lib/turbopanel/release-handoff/svc/rel");
+    await Deno.mkdir(handoff, { recursive: true });
+    await Deno.writeTextFile(join(handoff, "index.html"), "built");
+    const cp = (dest: string) => ["cp", "-a", "--", `${handoff}/.`, dest];
+
+    // The home itself, a tenant leaf and a service directory are not releases.
+    for (
+      const rel of [
+        "srv/users/alice",
+        "srv/users/alice/home",
+        "srv/users/alice/sites/web",
+        "srv/users/alice/sites/web/releases",
+        "srv/users/alice/sites/web/shared",
+      ]
+    ) {
+      await Deno.mkdir(host.path(rel), { recursive: true });
+      assertStringIncludes(
+        await refused(host, cp(host.path(rel))),
+        "not a release directory",
+      );
+    }
+
+    const release = host.path("srv/users/alice/sites/web/releases/r2");
+    await Deno.mkdir(release, { recursive: true });
+    // Something already there, such as a planted symlink: refused.
+    await Deno.symlink("/etc/passwd", join(release, "passwd"));
+    assertStringIncludes(await refused(host, cp(release)), "not empty");
+    await Deno.remove(join(release, "passwd"));
+    // Writable by the group: refused.
+    await Deno.chmod(release, 0o775);
+    assertStringIncludes(
+      await refused(host, cp(release)),
+      "writable by group or others",
+    );
+    await Deno.chmod(release, 0o755);
+    assertEquals((await host.run(cp(release))).code, 0);
   });
 });
 

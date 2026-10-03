@@ -1646,10 +1646,27 @@ tp_verb_cp() {
         *) tp_die "cp -a: the source must end in /." ;;
       esac
       tp_require_class "$_cp_dest" principal
+      # Only a fresh release directory sites/<svc>/releases/<id>: a copy into
+      # any other principal directory would write through a symlink the
+      # tenant planted there, as root.
+      tp_home_structural "$_cp_dest" || tp_die "cp -a: refusing $_cp_dest: not a release directory"
+      case "$(tp_home_rel "$_cp_dest")" in
+        sites/*/releases/?*) ;;
+        *) tp_die "cp -a: refusing $_cp_dest: not a release directory" ;;
+      esac
       # Only the daemon's own hand-off copy (release/safe-copy.ts), never a
       # tree a build or a tenant wrote.
       tp_require_class "$_cp_src" tree
       tp_pin_dir "$_cp_dest" || tp_die "no such directory $_cp_dest"
+      # Root-owned, closed to group and world, and empty: nothing in it for a
+      # tenant to have planted.
+      [ "$(stat -c '%u' .)" = "$(id -u)" ] ||
+        tp_die "cp -a: refusing $_cp_dest: not owned by root"
+      case "$(stat -c '%A' .)" in
+        ?????w????|????????w?) tp_die "cp -a: refusing $_cp_dest: writable by group or others" ;;
+      esac
+      [ -z "$(find . -mindepth 1 -print -quit)" ] ||
+        tp_die "cp -a: refusing $_cp_dest: not empty"
       # The source directory is opened and checked on a descriptor; cp reads
       # it through /proc/self/fd/3, never by a name the caller controls.
       exec 3<"$_cp_src" || tp_die "cannot open $_cp_src"
@@ -1665,8 +1682,11 @@ tp_verb_cp() {
       [ -z "$_cp_bad" ] ||
         tp_die "refusing $_cp_src: special, set-id or foreign entry ${_cp_bad#/proc/self/fd/3/.}"
       # Nothing of the source's ownership survives; the seal sets it.
-      tp_run cp -R --no-dereference --preserve=mode,timestamps \
-        --no-preserve=ownership -- /proc/self/fd/3/. .
+      tp_run cp -R --no-dereference --remove-destination \
+        --preserve=mode,timestamps --no-preserve=ownership -- /proc/self/fd/3/. .
+      # The source is checked before the copy, and its owner can still change
+      # modes in between: strip group/world write and set-id from what landed.
+      tp_run chmod -R go-w,ug-s -- .
       ;;
     -p)
       [ "$#" -eq 4 ] && [ "$2" = "--" ] || tp_die "cp: only cp -p -- SRC DEST"
