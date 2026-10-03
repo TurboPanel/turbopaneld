@@ -1455,7 +1455,7 @@ const SITES: CallSite[] = [
         "-g",
         "tp",
         STAGED,
-        `${STATE}/server-key.json`,
+        `${STATE}/${"server-key"}.json`,
       ],
       setup: dir(STATE),
     },
