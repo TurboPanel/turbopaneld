@@ -186,8 +186,11 @@ type SitePhpModeSite = Pick<
  */
 export function sitePhpRuntimeMode(
   site: SitePhpModeSite,
+  environmentId?: string,
 ): SitePhpRuntimeMode | null {
-  if (site.engine === "openlitespeed") return openlitespeedPhpMode(site);
+  if (site.engine === "openlitespeed") {
+    return openlitespeedPhpMode(site, environmentId);
+  }
   const mode = site.php?.mode;
   if (mode === undefined) return null;
   if (site.engine !== "nginx" && site.engine !== "apache") return null;
@@ -202,9 +205,20 @@ const OLS_DEFAULT_PHP_MODE: SitePhpRuntimeMode = "fastcgi";
 
 const warnedModes = new Set<string>();
 
-/** Log a mode fallback once per site and kind: callers ask several times a deploy. */
-function warnModeOnce(site: SitePhpModeSite, kind: string, text: string): void {
-  const key = `${site.composeServiceName}:${kind}`;
+/**
+ * Log a mode fallback once per environment, site and kind: callers ask several
+ * times a deploy, and two environments can reuse one service name. A caller
+ * that names no environment (a planning pass) logs nothing; the deploy passes
+ * that name the environment log it.
+ */
+function warnModeOnce(
+  site: SitePhpModeSite,
+  environmentId: string | undefined,
+  kind: string,
+  text: string,
+): void {
+  if (environmentId === undefined) return;
+  const key = `${environmentId}:${site.composeServiceName}:${kind}`;
   if (warnedModes.has(key)) return;
   warnedModes.add(key);
   logWarn("deploy", `site ${site.composeServiceName}: ${text}`);
@@ -218,6 +232,7 @@ export function sitePhpModeWarnings(reset = false): string[] {
 
 function openlitespeedPhpMode(
   site: SitePhpModeSite,
+  environmentId: string | undefined,
 ): SitePhpRuntimeMode | null {
   if (site.php === undefined || Object.keys(site.php).length === 0) {
     return null;
@@ -229,6 +244,7 @@ function openlitespeedPhpMode(
     // rather than fail every site in the environment.
     warnModeOnce(
       site,
+      environmentId,
       "nomode",
       `OpenLiteSpeed PHP site names no mode; running it as ${OLS_DEFAULT_PHP_MODE}`,
     );
@@ -242,6 +258,7 @@ function openlitespeedPhpMode(
     // site owner's Linux user from its own systemd unit.
     warnModeOnce(
       site,
+      environmentId,
       "attached",
       "PHP mode lsphp-attached is not offered; running it as lsphp-detached",
     );

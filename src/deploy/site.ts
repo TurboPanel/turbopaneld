@@ -2272,7 +2272,7 @@ function holdSiteRuntime(
   site: SiteApplySpec,
 ): (() => void) | null {
   if (!sitePhpRuntimeEngine(site)) return null;
-  const mode = sitePhpRuntimeMode(site);
+  const mode = sitePhpRuntimeMode(site, environmentId);
   const series = resolveSitePhpSeries(site);
   if (mode === null || !series) return null;
   const key = sitePhpKey(environmentId, site.composeServiceName);
@@ -2583,7 +2583,7 @@ async function applySitePhpBackend(
 ): Promise<SitePhpBackend> {
   const series = resolveSitePhpSeries(site);
   if (!series) return { socket: null, result: { phpFpmStaged: [] } };
-  const mode = sitePhpRuntimeMode(site);
+  const mode = sitePhpRuntimeMode(site, environmentId);
   if (mode !== null) {
     const phpRuntime = await installSitePhpRuntime(
       sitePhpIo(),
@@ -3127,7 +3127,7 @@ export async function applySites(
     // bad version fails the deploy rather than half-applying.
     for (const site of sites) {
       resolveSitePhpSeries(site);
-      sitePhpRuntimeMode(site);
+      sitePhpRuntimeMode(site, environmentId);
     }
 
     await installSiteEngines(

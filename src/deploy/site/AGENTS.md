@@ -34,7 +34,8 @@ Docker Compose. The daemon:
    vendored **lsphp** on `turbopanel_lsphp_install=true` for a site in
    `lsphp-detached` mode, and the packaged php-cgi/php-fpm
    (`turbopanel_php_fpm_install`) for one in `fastcgi` or `fpm`. OpenLiteSpeed
-   runs as `tpols` and cannot switch users, so it never starts PHP: each PHP
+   runs as `tpols` and cannot switch users, so it never starts PHP (php-fpm's own
+   account is `tpols` there too, so the host gains no `tpapache`): each PHP
    site gets its per-site runtime (step 3 above, as the owner) and
    `openlitespeedVhostConfig` gives the vhost one `extprocessor` to its socket
    — `type fcgi` for FastCGI and php-fpm, `type lsapi` for detached lsphp (the

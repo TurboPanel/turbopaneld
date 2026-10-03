@@ -24,14 +24,14 @@
       ansible.builtin.include_role:
         name: openlitespeed
 
-    - name: Provision php-fpm service identity
-      when: turbopanel_php_fpm_install | default(false) | bool
-      ansible.builtin.include_role:
-        name: web-service-user
-      vars:
-        web_service_key: apache
-
+    # php-fpm's own identity (FPM master, bootstrap pool, FHS dirs) is tpols
+    # here, so an OpenLiteSpeed-only host never gains the tpapache account.
+    # The tpols identity above already exists. Per-site pools still run as the
+    # site owner's Linux user and listen on a tpols-owned socket.
     - name: Vendor php-fpm binary + FHS config/log/pools
       when: turbopanel_php_fpm_install | default(false) | bool
       ansible.builtin.include_role:
         name: php-fpm
+      vars:
+        php_fpm_service_user: tpols
+        php_fpm_service_group: tpols

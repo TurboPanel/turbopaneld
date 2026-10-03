@@ -143,20 +143,33 @@ test("the per-site mode: lsphp on OpenLiteSpeed only, none keeps the shared mast
   );
 });
 
-test("an OpenLiteSpeed mode fallback is logged once per site, however often the mode is asked", () => {
+test("an OpenLiteSpeed mode fallback is logged once per environment and site, however often the mode is asked", () => {
   sitePhpModeWarnings(true);
-  const ask = (name: string, mode?: "lsphp-attached") =>
+  const ask = (
+    env: string | undefined,
+    name: string,
+    mode?: "lsphp-attached",
+  ) =>
     sitePhpRuntimeMode({
       composeServiceName: name,
       engine: "openlitespeed",
       php: mode === undefined ? { version: "8.4" } : { version: "8.4", mode },
-    });
+    }, env);
   for (let i = 0; i < 5; i++) {
-    assertEquals(ask("a"), "fastcgi");
-    assertEquals(ask("b", "lsphp-attached"), "lsphp-detached");
+    assertEquals(ask("e1", "a"), "fastcgi");
+    assertEquals(ask("e1", "b", "lsphp-attached"), "lsphp-detached");
+    // The same service name in another environment warns on its own.
+    assertEquals(ask("e2", "b", "lsphp-attached"), "lsphp-detached");
+    // A planning pass that names no environment logs nothing.
+    assertEquals(ask(undefined, "c", "lsphp-attached"), "lsphp-detached");
   }
-  assertEquals(sitePhpModeWarnings(), ["a:nomode", "b:attached"]);
+  assertEquals(sitePhpModeWarnings(), [
+    "e1:a:nomode",
+    "e1:b:attached",
+    "e2:b:attached",
+  ]);
   sitePhpModeWarnings(true);
+  assertEquals(sitePhpModeWarnings(), []);
 });
 
 test("detached lsphp carries the same sandbox as the other modes: loopback filter, its guard, and the caps", () => {
