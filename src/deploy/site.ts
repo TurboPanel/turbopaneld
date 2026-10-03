@@ -3228,17 +3228,6 @@ async function tryRemoveOpenLiteSpeedVhostDir(vhostDir: string): Promise<void> {
 }
 
 /**
- * Remove OpenLiteSpeed site fragments + vhost dirs for an environment, then
- * regenerate the aggregated main config from whatever sites remain across
- * all environments on this host. Returns count removed.
- *
- * Fragment first, aggregate next, vhost dir last: a vhost dir only goes once
- * its fragment is gone and `httpd_config.conf` no longer names it, so a
- * fragment that could not be removed never leaves the aggregate pointing at a
- * deleted `vhconf.conf` (OpenLiteSpeed would refuse the whole config on its
- * next restart).
- */
-/**
  * Stop and disable the OpenLiteSpeed unit once no OpenLiteSpeed site remains.
  * An idle unit has nothing to serve and, with an empty config, crash-loops;
  * the next OpenLiteSpeed deploy starts it again (`systemctlReloadOrStart`
@@ -3253,7 +3242,12 @@ async function disableIdleOpenLiteSpeed(
     sites = await listEngineConfigDir(
       join(layout.configDir, "openlitespeed", "sites"),
     );
-  } catch {
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    logWarn(
+      "deploy",
+      `could not list OpenLiteSpeed sites for ${unit}: ${message}`,
+    );
     return false;
   }
   if (sites?.some((name) => name.endsWith(".conf"))) return false;
@@ -3267,6 +3261,17 @@ async function disableIdleOpenLiteSpeed(
   return stop.success;
 }
 
+/**
+ * Remove OpenLiteSpeed site fragments + vhost dirs for an environment, then
+ * regenerate the aggregated main config from whatever sites remain across
+ * all environments on this host. Returns count removed.
+ *
+ * Fragment first, aggregate next, vhost dir last: a vhost dir only goes once
+ * its fragment is gone and `httpd_config.conf` no longer names it, so a
+ * fragment that could not be removed never leaves the aggregate pointing at a
+ * deleted `vhconf.conf` (OpenLiteSpeed would refuse the whole config on its
+ * next restart).
+ */
 async function removeOpenLiteSpeedSites(
   layout: LayoutPaths,
   environmentId: string,
