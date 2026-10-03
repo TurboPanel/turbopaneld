@@ -1,5 +1,6 @@
 import { restartDaemonService } from "./restart-daemon-service.ts";
 import { describeUnknown } from "../util/describe-unknown.ts";
+import { redactUrlSecrets } from "../util/redact-url-secrets.ts";
 import { forEachSequential, repeatSequential } from "../util/sequential.ts";
 import {
   createInstanceHttpClient,
@@ -2167,7 +2168,7 @@ export class InstanceClient {
       type: "update-result",
       id,
       ok,
-      error,
+      error: error === undefined ? undefined : redactUrlSecrets(error),
       at: new Date().toISOString(),
       ...(extra.errorCode ? { errorCode: extra.errorCode } : {}),
       ...(extra.upgradeId ? { upgradeId: extra.upgradeId } : {}),
@@ -2330,7 +2331,7 @@ export class InstanceClient {
       type: "instance-update-result",
       id,
       ok,
-      error,
+      error: error === undefined ? undefined : redactUrlSecrets(error),
       at: new Date().toISOString(),
       ...(extra.errorCode ? { errorCode: extra.errorCode } : {}),
       ...(extra.upgradeId ? { upgradeId: extra.upgradeId } : {}),
