@@ -7,8 +7,9 @@
 # gate cannot see `network.host` inside a raw /session or /grpc stream). This
 # re-applies just that deny on every converge. Nothing is installed, and the
 # address pools, bip and live-restore are left as found. A real diff restarts
-# dockerd like any daemon.json change (see daemon-json.yml for the co-located
-# instance host, which is never restarted automatically).
+# dockerd only when the running dockerd reports live-restore; otherwise a
+# pending marker is left (tasks/restart-gate.yml), as on the co-located
+# instance host, which is never restarted automatically.
 
 - name: Check for the Docker binary
   ansible.builtin.stat:
