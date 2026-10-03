@@ -150,7 +150,7 @@ test("a missing pnpm gets a plain-words hint, other failures do not", async () =
     assertEquals(missing.code, 127);
     assertStringIncludes(
       missing.stderr,
-      "hint: pnpm and yarn are not installed",
+      "hint: pnpm/yarn were not found on the build PATH",
     );
     assertStringIncludes(missing.stderr, "corepack pnpm");
     const other = await runRunner(
