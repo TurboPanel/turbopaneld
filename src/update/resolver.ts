@@ -1,5 +1,6 @@
 import { fetchWithPlatformCa } from "../instance/sockets.ts";
 import { errorText } from "../util/logger.ts";
+import { redactUrlSecrets } from "../util/redact-url-secrets.ts";
 import { fetchWithRetry, type RetryFetchOptions } from "../util/retry-fetch.ts";
 import { getBuildInfo } from "../build-info.ts";
 import { detectInstallMode, type InstallMode } from "../paths/layout.ts";
@@ -38,9 +39,13 @@ function describeFetchError(
     const detail = err.message === "fetch failed" && cause
       ? `${err.message} (${cause})`
       : err.message;
-    return new MalformedManifestError(`${context}: ${detail}`);
+    return new MalformedManifestError(
+      redactUrlSecrets(`${context}: ${detail}`),
+    );
   }
-  return new MalformedManifestError(`${context}: ${errorText(err)}`);
+  return new MalformedManifestError(
+    redactUrlSecrets(`${context}: ${errorText(err)}`),
+  );
 }
 
 async function trustedFetch(

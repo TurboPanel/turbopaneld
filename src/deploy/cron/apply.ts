@@ -41,6 +41,8 @@ export type CronApplySpec = {
   composeServiceName: string;
   username: string;
   workingDirectory: string;
+  /** The site's tenant-writable dirs; see `CronUnitOpts.siteWritableDirs`. */
+  siteWritableDirs?: readonly string[];
   jobs: readonly EnvironmentDeployCronJob[];
 };
 
@@ -86,6 +88,7 @@ function cronMembers(
       job,
       username: spec.username,
       workingDirectory: spec.workingDirectory,
+      siteWritableDirs: spec.siteWritableDirs ?? [],
     };
     members.push({
       unit: cronUnitName(identity),

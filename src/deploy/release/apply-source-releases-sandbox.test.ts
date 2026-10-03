@@ -336,12 +336,13 @@ test("a build that swapped its checkout for a link is refused at hand-off", asyn
       currentLink: join(root, "current"),
       sharedDir: join(root, "shared"),
       scratchDir: join(root, "scratch"),
-      handoffDir: join(root, "handoff"),
+      stagingDir: join(root, "staging"),
     };
     await assertRejects(
       () =>
         stageRelease({
           paths,
+          username: "appuser",
           workingDir: join(workDir, "source"),
           containmentRoot: workDir,
         }),

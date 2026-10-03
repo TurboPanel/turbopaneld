@@ -28,7 +28,7 @@ import {
   type GpuSample,
   type HardwareSignalSample,
   type HostMetrics,
-  METRICS_SCHEMA_VERSION,
+  METRICS_LEGACY_WIRE_VERSION,
   type MetricsSample,
   type RouterSample,
   type StorageSample,
@@ -241,7 +241,7 @@ function emptySample(
 ): MetricsSample {
   return buildMetricsSample({
     metadata: {
-      version: METRICS_SCHEMA_VERSION,
+      version: METRICS_LEGACY_WIRE_VERSION,
       sampledAt: new Date(nowMs).toISOString(),
       intervalSeconds: seconds,
       sequence,
@@ -904,7 +904,7 @@ export class LinuxMetricsCollector implements MetricsCollector {
 
     const sample = buildMetricsSample({
       metadata: {
-        version: METRICS_SCHEMA_VERSION,
+        version: METRICS_LEGACY_WIRE_VERSION,
         sampledAt: new Date(nowMs).toISOString(),
         intervalSeconds: seconds,
         sequence,

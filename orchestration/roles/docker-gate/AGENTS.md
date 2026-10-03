@@ -145,7 +145,7 @@ control plane signs, the gate verifies with a public key. Token = container
 label `com.turbopanel.approval` = `v2.<b64url payload>.<b64url sig>`; the
 signature covers `turbopanel-docker-gate-approval-v2\n` + the payload text.
 Payload: `deployId`, `project`, `composeDigest` (audit only: the gate never sees
-the compose file), `bodyDigest`, `features[]`, `iat`, `exp` (seconds). `bodyDigest`
+the compose file), `bodyDigest`, `containerName` (the create's `?name=` query, which the body does not hold: another name is `rejected: wrong-name`), `features[]`, `iat`, `exp` (seconds). `bodyDigest`
 binds the token to ONE create body: base64url SHA-256 of the RFC 8785 canonical JSON of the body AS THE CLIENT SENT IT
 (a plain `JSON.parse` of the payload: field names as written, never the strict parser's canonical spelling, so no gate
 version shifts it), with the `com.turbopanel.approval` label removed. A different body is `rejected: wrong-body`; a v1

@@ -120,6 +120,7 @@ async function applyApproval(
     deps.approvalKeys ?? [],
     labels[LABEL_COMPOSE_PROJECT] ?? "",
     await approvalBodyDigest(facts.plainBody),
+    facts.query.get("name") ?? "",
     nowSec,
   );
   const result = verified.ok &&
