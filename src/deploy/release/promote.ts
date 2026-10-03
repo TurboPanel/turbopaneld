@@ -27,7 +27,10 @@ import { basename, dirname, join } from "@std/path";
 import { hostSudoArgs } from "../../permissions/host-sudo.ts";
 import type { RunFn } from "../ensure-principal.ts";
 import { forEachSequential } from "../../util/sequential.ts";
-import { assertReleaseLinksStayHome } from "./release-links.ts";
+import {
+  assertReleaseLinksStayHome,
+  assertStagedLinksStayInRelease,
+} from "./release-links.ts";
 import {
   createSymlink,
   ScopedWriteError,
@@ -392,6 +395,33 @@ export const RELEASE_SHARED_LINK_NAME = "shared";
 export const RELEASE_SHARED_LINK_TARGET = join("..", "..", "shared");
 
 /**
+ * Remove whatever `shared` entry the build shipped at the top of a staged
+ * release, before the link check runs. Left in place, a build-shipped
+ * `shared/evil -> ../public/index.html` would let `public/x -> ../shared/evil`
+ * resolve inside the release at check time and through the tenant's real
+ * `shared/` once {@link linkReleaseSharedDir} replaces it.
+ */
+export async function removeReleaseSharedEntry(
+  releaseDir: string,
+  runFn: RunFn = runPrivileged,
+): Promise<void> {
+  const linkPath = join(releaseDir, RELEASE_SHARED_LINK_NAME);
+  try {
+    await Deno.remove(linkPath, { recursive: true });
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) return;
+    if (!isUnprivilegedFailure(err)) throw err;
+    const rm = await runFn(
+      "sudo",
+      hostSudoArgs(["-n", "rm", "-rf", "--", linkPath]),
+    );
+    if (!rm.success) {
+      throw new Error(rm.stderr || `Failed to remove ${linkPath}`);
+    }
+  }
+}
+
+/**
  * Create the `shared` symlink at the top of a staged release.
  *
  * Generic on purpose — every release-backed service reaches its writable state
@@ -648,7 +678,7 @@ export type PromoteReleaseParams = StageReleaseParams & {
 };
 
 /**
- * Stage → `shared` link → manifest → probe → seal → link check → cut over.
+ * Stage → link check → `shared` link → manifest → probe → seal → link check → cut over.
  * Returns the
  * release directory.
  *
@@ -661,6 +691,10 @@ export async function promoteRelease(
   const runFn = params.runFn ?? runPrivileged;
   try {
     const releaseDir = await stageRelease(params);
+    // Before the `shared` link exists, so `../shared/…` cannot be resolved
+    // through what the tenant keeps in `shared/` (release-links.ts).
+    await removeReleaseSharedEntry(releaseDir, runFn);
+    await assertStagedLinksStayInRelease(releaseDir, runFn);
     await linkReleaseSharedDir(releaseDir, runFn);
     if (params.manifest) {
       try {

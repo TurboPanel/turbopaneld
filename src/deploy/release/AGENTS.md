@@ -63,6 +63,20 @@ native runtime relies on the same convention rather than inventing a
 second one. A build that ships its own `shared` entry is replaced — the link is
 part of the layout contract, not payload.
 
+**No release link may leave the release or reach into `shared`**
+(`release-links.ts`). `shared/` is tenant-writable, so a shipped
+`public/x -> ../shared/evil` is a second hop the tenant can repoint at another
+principal's sealed, root-owned file after publish; the engines' owner-match
+rules compare only the first link (root, from the seal) with the final target
+(root) and would serve it. `promoteRelease` therefore removes the build's own
+`shared` entry, lists every link with `realpath -m` **before** the layout link
+exists (so a `shared/…` tail resolves under `<releaseDir>/shared`, never through
+the tenant's real directory), and refuses the release if any target is outside
+the release or under `shared`. Apps reach `shared/` by path (`current/shared`,
+PHP `open_basedir`), not through a link the build ships. nginx additionally
+serves a release-backed document root with `disable_symlinks on`; Apache keeps
+`SymLinksIfOwnerMatch`, because `.htaccess` `RewriteRule` needs it.
+
 A published release is **read-only to the runtime user** on purpose: an app
 process that can rewrite its own code turns any RCE into persistence. That is an
 *ownership* rule, not only a mode: `sites/<serviceId>` and `releases/` are

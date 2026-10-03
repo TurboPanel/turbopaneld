@@ -879,7 +879,12 @@ test("promoteRelease swallows a failed privileged cleanup", async () => {
             workingDir,
             username: "appuser",
             healthProbe: () => Promise.reject(new Error("probe failed")),
-            runFn: () => Promise.reject(new TypeError("sudo rm failed")),
+            // The staged link listing succeeds (no links); only the cleanup's
+            // privileged remove fails.
+            runFn: (_command, args) =>
+              args.includes("rm")
+                ? Promise.reject(new TypeError("sudo rm failed"))
+                : Promise.resolve({ success: true, stdout: "", stderr: "" }),
           }),
         Error,
         "probe failed",
