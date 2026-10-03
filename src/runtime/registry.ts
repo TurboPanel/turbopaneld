@@ -127,6 +127,22 @@ export function runtimeGroup(
   return RUNTIMES[runtime].series[entitlementSeries(runtime, version)]?.group;
 }
 
+/**
+ * Clear error for a requested series this host does not offer, or `undefined`
+ * when it is supported. Checked before any playbook runs: an unknown series
+ * has no entitlement group, so the playbook would otherwise die with only
+ * "ansible-playbook failed".
+ */
+export function unsupportedSeriesMessage(
+  runtime: RuntimeName,
+  version: string,
+): string | undefined {
+  if (runtimeGroup(runtime, version)) return undefined;
+  return `${runtime} ${version} is not a supported ${runtime} version on this server. Supported series: ${
+    supportedSeries(runtime).join(", ")
+  }.`;
+}
+
 export function runtimeGid(
   runtime: RuntimeName,
   version: string,
