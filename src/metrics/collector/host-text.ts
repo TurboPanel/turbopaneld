@@ -233,7 +233,7 @@ export function parseSharedFpmPool(
   return shortName(FPM_WORKER_POOL_RE.exec(title)?.[1]);
 }
 
-const ENGINE_PACKAGES = ["caddy", "nginx", "openlitespeed", "apache2"];
+const ENGINE_PACKAGES = new Set(["caddy", "nginx", "openlitespeed", "apache2"]);
 
 /** `name version` for installed web-engine packages from a dpkg status file. */
 export function parseWebEngines(status: string | undefined): string[] {
@@ -241,7 +241,7 @@ export function parseWebEngines(status: string | undefined): string[] {
   const found: string[] = [];
   for (const stanza of status.split("\n\n")) {
     const name = /^Package: (\S+)$/m.exec(stanza)?.[1];
-    if (!name || !ENGINE_PACKAGES.includes(name)) continue;
+    if (!name || !ENGINE_PACKAGES.has(name)) continue;
     if (!/^Status: install ok installed$/m.test(stanza)) continue;
     const raw = /^Version: (\S+)$/m.exec(stanza)?.[1];
     const version = shortName(raw?.replace(/^\d+:/, "").split(/[-~]/)[0]);
@@ -336,7 +336,7 @@ export class HostTextCollector {
       .oomKill;
     const prior = this.#oom;
     if (count === 0 && !prior?.victim) return undefined;
-    if (count !== null && prior && prior.count === count) return prior.victim;
+    if (count !== null && prior?.count === count) return prior.victim;
     const dmesg = await this.#run("dmesg", []);
     const victim = (dmesg ? parseLastOomVictim(dmesg) : undefined) ??
       prior?.victim;
