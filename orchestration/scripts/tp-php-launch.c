@@ -157,10 +157,11 @@ static const char *parse_line(const char *buf, size_t len, size_t *at,
   return NULL;
 }
 
-/* VALUE must be exactly the path built from FORMAT and ARG. */
-static int derived(const char *value, const char *format, const char *arg) {
+/* VALUE must be exactly PREFIX, then MIDDLE, then SUFFIX. */
+static int derived(const char *value, const char *prefix, const char *middle,
+                   const char *suffix) {
   char want[VAL_MAX * 2];
-  snprintf(want, sizeof want, format, arg);
+  snprintf(want, sizeof want, "%s%s%s", prefix, middle, suffix);
   return is(value, want);
 }
 
@@ -176,14 +177,15 @@ static const char *check_values(const char *site, struct reg *r) {
   if (!number_in(r->v[K_GID], PRINCIPAL_ID_MIN, PRINCIPAL_ID_MAX, &r->gid))
     return "gid outside the principal band";
   if (!number_in(r->v[K_CHILDREN], 1, 64, &r->children)) return "children";
-  if (!derived(r->v[K_GROUP], "%s-grp", user)) return "group is not <user>-grp";
-  if (!derived(r->v[K_HOME], PRINCIPALS "/%s/home", user)) return "home";
-  if (!derived(r->v[K_TMP], PRINCIPALS "/%s/tmp", user)) return "tmp";
-  if (!derived(r->v[K_INI], PHP_SITE_CONF "/%s/php.ini", site)) return "ini";
+  if (!derived(r->v[K_GROUP], "", user, "-grp")) return "group is not <user>-grp";
+  if (!derived(r->v[K_HOME], PRINCIPALS "/", user, "/home")) return "home";
+  if (!derived(r->v[K_TMP], PRINCIPALS "/", user, "/tmp")) return "tmp";
+  if (!derived(r->v[K_INI], PHP_SITE_CONF "/", site, "/php.ini")) return "ini";
   for (size_t i = 0; i < sizeof SERIES / sizeof SERIES[0]; i++)
     if (is(r->v[K_PHP], SERIES[i].php)) r->series = &SERIES[i];
   if (!r->series) return "PHP series not in this build";
-  if (!derived(r->v[K_BIN], LSPHP_ROOT "/%s/current/bin/lsphp", r->series->php))
+  if (!derived(r->v[K_BIN], LSPHP_ROOT "/", r->series->php,
+               "/current/bin/lsphp"))
     return "bin";
   return NULL;
 }
@@ -558,8 +560,28 @@ static void fixed_process_state(void) {
   for (int s = 1; s < NSIG; s++) sigaction(s, &dfl, NULL);
   sigemptyset(&none);
   sigprocmask(SIG_SETMASK, &none, NULL);
-  umask(027);
   if (chdir("/")) fail("chdir");
+}
+
+/*
+ * The umask lsphp inherits from the caller must not let group or others write
+ * what the owner's PHP creates (OpenLiteSpeed's unit has the default 0022).
+ * Refused rather than changed, like every other input.
+ */
+static void check_umask(void) {
+  char buf[4096];
+  const char *field;
+  unsigned long mask;
+  int fd = open("/proc/self/status", O_RDONLY | O_CLOEXEC);
+  size_t len;
+  if (fd < 0) fail("/proc/self/status");
+  len = read_all(fd, buf, sizeof buf - 1);
+  close(fd);
+  buf[len] = 0;
+  field = strstr(buf, "\nUmask:");
+  if (!field) refuse("no Umask in /proc/self/status");
+  mask = strtoul(field + 7, NULL, 8);
+  if ((mask & 022) != 022) refuse("caller umask lets group or others write");
 }
 
 /* fd 0 must be open; 1 and 2 are filled so nothing else lands on them. */
@@ -619,6 +641,7 @@ int main(int argc, char **argv) {
   check_accounts(&r);
   entitled = entitlement(&r);
   check_stdin();
+  check_umask();
   bin = lsphp_binary(&r);
 
   private_mounts(&r, argv[2]);

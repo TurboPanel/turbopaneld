@@ -103,8 +103,10 @@ static size_t mutate(uint8_t *buf, size_t len) {
 static int load_seeds(int argc, char **argv, uint8_t seeds[][REG_MAX + 64],
                       size_t *lens) {
   int n = 0;
-  for (int i = 2; i < argc && n < MAX_SEEDS; i++) {
-    FILE *f = fopen(argv[i], "rb");
+  for (int i = 2; i < argc; i++) {
+    FILE *f;
+    if (n == MAX_SEEDS) break;
+    f = fopen(argv[i], "rb");
     if (!f) continue;
     lens[n] = fread(seeds[n], 1, REG_MAX + 64, f);
     fclose(f);

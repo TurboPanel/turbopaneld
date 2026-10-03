@@ -213,14 +213,14 @@ else
 	want "etc_turbopanel.secrets=0"
 	want "etc_turbopanel.writable=0"
 	want "stdin.listening=1"
-	want "status.Umask=027"
+	want "status.Umask=ok"
 	want "rlimit.core=0"
 	want "cwd=/"
 	want "setuid0=-1"
-	want "status.NoNewPrivs=1"
-	want "status.CapEff=0"
-	want "status.CapPrm=0"
-	want "status.CapAmb=0"
+	want "status.NoNewPrivs=ok"
+	want "status.CapEff=ok"
+	want "status.CapPrm=ok"
+	want "status.CapAmb=ok"
 	expect "good launch: only fds 0-2" test "$(grep '^fd=' "$R" | tr '\n' ' ')" = "fd=0 fd=1 fd=2 "
 	expect "good launch: report not alice's" test "$(stat -c %U "$R")" = alice
 fi
@@ -348,6 +348,13 @@ hostile "binary not root's" "$LSPHP_BINARY" "chown tpols $B"
 hostile "binary is a symlink" "$LSPHP_BINARY" "mv $B $B.real && ln -s lsphp.real $B"
 hostile "bin dir writable" "$VENDOR/8.4/current/bin/lsphp" "chmod 0770 $VENDOR/8.4/8.4.25/bin"
 hostile "vendor not root's" "$VENDOR/8.4/current/bin/lsphp" "chown tpols /opt/turbopanel/vendor"
+
+# --- inherited process state -------------------------------------------------------
+# shellcheck disable=SC2016 # expanded by the inner sh
+UMASK_WRAP='umask "$1"; shift; exec "$@"'
+hostile "caller umask 000" "caller umask" ":" listen -- /bin/sh -c "$UMASK_WRAP" sh 000 "$LAUNCH" lsapi "$SITE"
+hostile "caller umask 002" "caller umask" ":" listen -- /bin/sh -c "$UMASK_WRAP" sh 002 "$LAUNCH" lsapi "$SITE"
+hostile "caller umask 020" "caller umask" ":" listen -- /bin/sh -c "$UMASK_WRAP" sh 020 "$LAUNCH" lsapi "$SITE"
 
 # --- the binary itself ----------------------------------------------------------
 reset_world

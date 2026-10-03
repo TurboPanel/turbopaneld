@@ -21,25 +21,26 @@
 
 extern char **environ;
 
-/* NoNewPrivs, Umask and the capability sets, as numbers. */
+/* NoNewPrivs, Umask and the capability sets: `ok` when they hold what the
+ * launcher promises (no_new_privs on, umask 022, no capabilities). */
 static void status_fields(FILE *out) {
-  static const char *const FIELDS[] = {"NoNewPrivs", "Umask", "CapPrm",
-                                       "CapEff", "CapAmb"};
+  static const struct {
+    const char *name;
+    int base;
+    unsigned long long want;
+  } FIELDS[] = {{"NoNewPrivs", 10, 1}, {"Umask", 8, 022}, {"CapPrm", 16, 0},
+                {"CapEff", 16, 0}, {"CapAmb", 16, 0}};
   char line[256];
   FILE *f = fopen("/proc/self/status", "r");
   if (!f) return;
   while (fgets(line, sizeof line, f)) {
     for (size_t i = 0; i < sizeof FIELDS / sizeof FIELDS[0]; i++) {
-      size_t n = strlen(FIELDS[i]);
-      unsigned long long v = 0;
-      if (strncmp(line, FIELDS[i], n) != 0 || line[n] != ':') continue;
-      if (i == 1) {
-        v = strtoull(line + n + 1, NULL, 8);
-        fprintf(out, "status.%s=%03llo\n", FIELDS[i], v);
-      } else {
-        v = strtoull(line + n + 1, NULL, 16);
-        fprintf(out, "status.%s=%llx\n", FIELDS[i], v);
-      }
+      size_t n = strlen(FIELDS[i].name);
+      if (strncmp(line, FIELDS[i].name, n) != 0 || line[n] != ':') continue;
+      if (strtoull(line + n + 1, NULL, FIELDS[i].base) == FIELDS[i].want)
+        fprintf(out, "status.%s=ok\n", FIELDS[i].name);
+      else
+        fprintf(out, "status.%s=bad\n", FIELDS[i].name);
     }
   }
   fclose(f);
@@ -47,7 +48,7 @@ static void status_fields(FILE *out) {
 
 static void fd_lines(FILE *out) {
   DIR *d = opendir("/proc/self/fd");
-  struct dirent *e;
+  const struct dirent *e;
   if (!d) return;
   e = readdir(d);
   while (e) {
@@ -85,8 +86,10 @@ int main(int argc, char **argv) {
   char cwd[256];
   FILE *out;
   int root = open("/", O_RDONLY | O_DIRECTORY);
-  int fd = openat(root, "tmp/tp-php-launch-report",
-                  O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0600);
+  int fd;
+  if (root < 0) return 3;
+  fd = openat(root, "tmp/tp-php-launch-report",
+              O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0600);
   close(root);
   if (fd < 0) return 3;
   out = fdopen(fd, "w");
