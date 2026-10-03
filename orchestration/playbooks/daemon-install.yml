@@ -12,9 +12,6 @@
   gather_facts: true
 
   vars:
-    # Site-engine config trees under turbopanel_config_dir that their roles
-    # keep root:<engine group>; post_tasks never hands them to tp.
-    turbopanel_engine_config_dirs: [apache, nginx, openlitespeed, php]
     turbopanel_install_root: /opt/turbopanel
     # Production/managed-node install (run.sh). Roles key turbopanel_vendor_dir
     # off this flag; co-located dev playbooks leave it unset (defaults false).
@@ -98,60 +95,10 @@
         owner: "{{ turbopanel_user }}"
         group: "{{ turbopanel_group }}"
 
-    # Everything below it too, except the per-site PHP config (php/sites/,
-    # root:<owner>-grp, read by the owner's PHP), the attached-lsphp registry
-    # (php-sites/, root:root) and the site-engine trees
-    # (turbopanel_engine_config_dirs, root:<engine group>; roles
-    # apache/nginx/openlitespeed/php-fpm, written through tp-host): a tp:tp
-    # pass would leave every PHP site unable to read its php.ini and the
-    # engines' service users unable to read their configs (OpenLiteSpeed lost
-    # mime.properties and its vhost configs).
-    - name: Ensure tp owns the config tree's contents
-      ansible.builtin.command:
-        argv:
-          - find
-          - "{{ turbopanel_config_dir }}"
-          - -mindepth
-          - "1"
-          - (
-          - -path
-          - "{{ turbopanel_config_dir }}/php/sites"
-          - -o
-          - -path
-          - "{{ turbopanel_config_dir }}/php-sites"
-          - -o
-          - -path
-          - "{{ turbopanel_config_dir }}/apache"
-          - -o
-          - -path
-          - "{{ turbopanel_config_dir }}/nginx"
-          - -o
-          - -path
-          - "{{ turbopanel_config_dir }}/openlitespeed"
-          - -o
-          - -path
-          - "{{ turbopanel_config_dir }}/php"
-          - )
-          - -prune
-          - -o
-          - (
-          - "!"
-          - -user
-          - "{{ turbopanel_user }}"
-          - -o
-          - "!"
-          - -group
-          - "{{ turbopanel_group }}"
-          - )
-          - -print
-          - -exec
-          - chown
-          - -h
-          - "{{ turbopanel_user }}:{{ turbopanel_group }}"
-          - "{}"
-          - +
-      register: _config_tree_owner
-      changed_when: _config_tree_owner.stdout | length > 0
+    # Nothing below the config tree is re-owned here. A root pass over tp's
+    # folders would follow whatever tp swapped in (P1-1): the daemon creates
+    # and owns what it writes (the leaves in roles/daemon-layout), root-owned
+    # entries stay root-owned, and nothing needs repairing after the fact.
 
     # Galaxy install uses ANSIBLE_HOME=/tmp/turbopanel-ansible (see paths.ts).
     # Roles/collections are already in FHS paths; drop the disposable cache and
