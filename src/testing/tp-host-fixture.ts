@@ -50,6 +50,10 @@ export async function makeHost(): Promise<Host> {
   await Deno.copyFile(SCRIPT, path("opt/turbopanel/lib/tp-host"));
   await Deno.chmod(path("opt/turbopanel/lib/tp-host"), 0o755);
   await Deno.copyFile(
+    join(repo, "orchestration/scripts/tp-php-loopback"),
+    path("opt/turbopanel/lib/tp-php-loopback"),
+  );
+  await Deno.copyFile(
     REGISTRY,
     path("opt/turbopanel/share/orchestration/runtime-registry.json"),
   );

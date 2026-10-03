@@ -37,6 +37,19 @@
     remote_src: true
   when: turbopanel_dev_user | default('') | length == 0
 
+# tp-php-loopback keeps site PHP off every loopback port but the database
+# proxy's. Every per-site PHP unit runs it as root (`ExecStartPre=+`) before
+# PHP starts, and `tp-host php-loopback-sync` runs it after units change.
+- name: Install tp-php-loopback
+  ansible.builtin.copy:
+    src: "{{ turbopanel_orchestration_dir }}/scripts/tp-php-loopback"
+    dest: "{{ turbopanel_install_root }}/lib/tp-php-loopback"
+    owner: root
+    group: "{{ turbopanel_group }}"
+    mode: "0750"
+    remote_src: true
+  when: turbopanel_dev_user | default('') | length == 0
+
 - name: Record the principal home root for tp-host
   ansible.builtin.copy:
     content: "principal_home_root={{ principal_home_root | default('/srv/users') }}\n"

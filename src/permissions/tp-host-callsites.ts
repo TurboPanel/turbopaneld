@@ -183,6 +183,7 @@ const PHP_SPEC: SitePhpRuntimeSpec = {
   group: "alice-grp",
   home: "/srv/users/alice",
   configDir: "/etc/turbopanel",
+  libDir: "/opt/turbopanel/lib",
   webAccount: "tpnginx",
 };
 const PHP_FPM_SPEC: SitePhpRuntimeSpec = {
@@ -300,6 +301,18 @@ const SITES: CallSite[] = [
   tpHost(`${PHP_APPLY}sudo(io,["ls","-1","--",io.unitDir])`, {
     argv: ["ls", "-1", "--", UNITS],
   }),
+  tpHost(
+    `${PHP_APPLY}sudoOrThrow(io,["php-loopback-sync"],"PHPloopbackrules")`,
+    {
+      argv: ["php-loopback-sync"],
+    },
+  ),
+  tpHost(
+    `${PHP_APPLY}sudoQuietly(io,["php-loopback-sync"],"PHPloopbackrules")`,
+    {
+      argv: ["php-loopback-sync"],
+    },
+  ),
   tpHost(`${PHP_APPLY}sudo(io,["php-test",files.spec.id])`, {
     argv: ["php-test", PHP_ID],
     setup: PHP_TEST_SETUP,
