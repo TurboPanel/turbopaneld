@@ -1,8 +1,9 @@
 /**
  * Confirm the host's pending firewall ruleset (`server.firewall.confirm`).
  *
- * The control plane sends this after it has reached the host from outside
- * (stage 4 adds that probe), naming the digest the reconcile reported. All the
+ * Normally the daemon confirms itself (`../firewall/auto-confirm.ts`); this
+ * command stays for a manual or retried confirm, naming the digest the
+ * reconcile reported. All the
  * logic lives in `../firewall/confirm.ts`; this is the command wrapper, kept
  * beside `firewall-reconcile.ts` like the other command handlers.
  */

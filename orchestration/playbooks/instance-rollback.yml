@@ -16,6 +16,8 @@
     postgres_db: turbopanel
     postgres_container_name: turbopanel-database
     turbopanel_rollback_reason: health_timeout
+    # The caller restarts nothing here; this play starts the instance itself.
+    instance_start: false
 
   tasks:
     - name: Require a single-segment upgrade id
@@ -139,20 +141,43 @@
           docker exec -i "{{ postgres_container_name }}" pg_restore --clean --if-exists -U "{{ postgres_user }}" -d "{{ postgres_db }}" < "$dump"
         executable: /bin/bash
 
-    - name: Look for the instance unit saved by the backup
-      ansible.builtin.stat:
-        path: "{{ turbopanel_backup_dir }}/control-plane/{{ turbopanel_upgrade_id }}/turbopanel-instance.service"
-      register: saved_instance_unit
+    # The unit is rebuilt from this release's template, never copied back from
+    # the backup directory: that directory is writable by the daemon's Linux
+    # user, and this play runs as root. Nothing read below it (meta.json, the
+    # database dump) is installed as code.
+    - name: Rebuild the instance unit from the release tree
+      block:
+        - name: Gather facts the unit templates read
+          ansible.builtin.setup:
 
-    - name: Restore the instance unit the update replaced
-      when: saved_instance_unit.stat.exists
-      ansible.builtin.copy:
-        src: "{{ turbopanel_backup_dir }}/control-plane/{{ turbopanel_upgrade_id }}/turbopanel-instance.service"
-        dest: /etc/systemd/system/turbopanel-instance.service
-        remote_src: true
-        owner: root
-        group: root
-        mode: "0640"
+        - name: Provision tpctrl/tpcaddy before the units that name them
+          ansible.builtin.include_role:
+            name: instance-user
+
+        - name: Platform CA and server leaf the Caddy unit reads
+          ansible.builtin.include_role:
+            name: instance-certs
+
+        - name: Vendored runtimes the units ExecStart through
+          ansible.builtin.include_role:
+            name: "{{ item }}"
+          loop:
+            - deno-runtime
+            - node-runtime
+
+        - name: Instance, Caddy and ACME issuer units
+          ansible.builtin.include_role:
+            name: instance-launch
+            tasks_from: units.yml
+
+        - name: Apply the rendered units to systemd
+          ansible.builtin.meta: flush_handlers
+      rescue:
+        - name: Report that the unit could not be rebuilt
+          ansible.builtin.debug:
+            msg: >-
+              WARNING: instance unit not rebuilt, the installed unit stays:
+              {{ ansible_failed_result.msg | default('unknown error') }}
 
     - name: Reload systemd for the restored unit
       ansible.builtin.systemd:

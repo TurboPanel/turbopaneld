@@ -894,7 +894,13 @@ e2e(
   },
 );
 
-type InspectAnswer = { status: number; labels?: Record<string, string> };
+type InspectAnswer = {
+  status: number;
+  labels?: Record<string, string>;
+  /** What the engine lists for the container now (start-time bind check). */
+  hostConfig?: Record<string, unknown>;
+  mounts?: unknown[];
+};
 
 /** `doc` as a chunked body split in two. */
 function chunked(doc: string): string {
@@ -923,7 +929,11 @@ function scriptEngine(
           { status: 404 };
       const doc = JSON.stringify(
         match
-          ? { Config: { Labels: found.labels ?? null } }
+          ? {
+            Config: { Labels: found.labels ?? null },
+            HostConfig: found.hostConfig ?? {},
+            Mounts: found.mounts ?? [],
+          }
           : { Labels: found.labels ?? null },
       );
       await conn.write(
@@ -1076,4 +1086,80 @@ e2e(
     // what enforce mode refuses.
     assertEquals(wouldDeny(h.logs), ["build-session", "build-session"]);
   },
+);
+
+const TENANT_LABELS = { "com.docker.compose.project": "app" };
+
+e2e(
+  "observe mode: a start whose live binds break the policy is logged, never refused",
+  async (h) => {
+    const relayed = scriptEngine(h, {
+      swapped: {
+        status: 200,
+        labels: TENANT_LABELS,
+        hostConfig: { Binds: ["/root/x:/c:ro"] },
+      },
+      fine: {
+        status: 200,
+        labels: TENANT_LABELS,
+        hostConfig: {
+          Binds: [
+            "/srv/users/alice/data/x:/x",
+            "/srv/users/alice/tmp:/t",
+            "/srv/users/alice/sites/s1/shared:/s",
+            "/srv/users/alice/sites/s1/webroot:/w",
+          ],
+        },
+      },
+    });
+    await post(h, "/containers/fine/start");
+    await post(h, "/containers/swapped/start");
+    await post(h, "/containers/swapped/restart");
+    assertEquals(wouldDeny(h.logs), [
+      "start-bind-forbidden-path",
+      "start-bind-forbidden-path",
+    ]);
+    assertEquals(relayed.length, 3);
+  },
+);
+
+e2e(
+  "enforce mode: the swapped-target race is refused at start, allowed data binds start",
+  async (h) => {
+    const relayed = scriptEngine(h, {
+      // Clean at create time, now showing a bind the policy refuses.
+      swapped: {
+        status: 200,
+        labels: TENANT_LABELS,
+        hostConfig: { Binds: ["/srv/users/alice/home:/h"] },
+        mounts: [{ Type: "bind", Source: "/root", RW: true }],
+      },
+      fine: {
+        status: 200,
+        labels: TENANT_LABELS,
+        hostConfig: { Binds: ["/srv/users/alice/data:/d"] },
+        mounts: [{ Type: "bind", Source: "/srv/users/alice/data", RW: true }],
+      },
+    });
+    await post(h, "/containers/fine/start");
+    assertEquals(relayed, ["POST /containers/fine/start HTTP/1.1"]);
+    const client = await h.connect();
+    await client.write(
+      encodeText(
+        "POST /containers/swapped/start HTTP/1.1\r\nHost: d\r\nConnection: close\r\n\r\n",
+      ),
+    );
+    assertStringIncludes(await timeout(readUntilEof(client)), "403");
+    assertEquals(
+      relayed.length,
+      1,
+      "the refused start never reached the engine",
+    );
+    const denied = h.logs.find((l) => l.event === "docker-gate.denied");
+    assertEquals(denied?.rules, [
+      "start-bind-principal-path",
+      "start-bind-forbidden-path",
+    ]);
+  },
+  { env: { TP_DOCKER_GATE_MODE: "enforce" } },
 );
