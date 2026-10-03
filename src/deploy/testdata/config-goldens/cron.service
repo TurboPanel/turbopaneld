@@ -9,7 +9,8 @@ User=appuser
 Group=appuser-grp
 Slice=turbopanel-appuser.slice
 WorkingDirectory=/srv/users/appuser/x
-Environment=HOME=/srv/users/appuser
+Environment=HOME=/srv/users/appuser/home
+Environment=TMPDIR=/srv/users/appuser/tmp
 ExecStart="/usr/local/bin/php" "wp-cron.php" "a \"q\" b\\c"
 StandardOutput=journal
 StandardError=journal
@@ -26,4 +27,4 @@ RestrictRealtime=yes
 LockPersonality=yes
 CapabilityBoundingSet=
 AmbientCapabilities=
-ReadWritePaths=/srv/users/appuser
+ReadWritePaths=/srv/users/appuser/home /srv/users/appuser/data /srv/users/appuser/tmp

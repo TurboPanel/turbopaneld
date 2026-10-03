@@ -1,7 +1,6 @@
 import { assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { join } from "@std/path";
 import {
-  BUILD_RLIMIT_AS_BYTES,
   BUILD_TIMEOUT_MS,
   buildEnvironment,
   buildInvocation,
@@ -246,23 +245,11 @@ test("buildEnvironment drops reserved sandbox keys from payload env", () => {
   assertEquals(env.NODE_OPTIONS, "--max-old-space-size=512");
 });
 
-test("buildInvocation wraps with prlimit or falls back to bare sh -c", () => {
-  assertEquals(buildInvocation("npm run build", false), {
+test("buildInvocation is a bare sh -c without a runtime group", () => {
+  assertEquals(buildInvocation("npm run build"), {
     bin: "sh",
     args: ["-c", "npm run build"],
   });
-  const wrapped = buildInvocation("npm run build", true);
-  assertEquals(wrapped.bin, "/usr/bin/prlimit");
-  assertEquals(wrapped.args.includes("--"), true);
-  assertEquals(wrapped.args.includes("sh"), true);
-  assertEquals(wrapped.args.at(-1), "npm run build");
-  // 4 GiB AS cannot hold V8's pointer cage; keep the cap strictly above that.
-  assertEquals(
-    wrapped.args.includes(`--as=${BUILD_RLIMIT_AS_BYTES}`),
-    true,
-  );
-  // 16 GiB still fails pnpm registry fetches; keep room for worker isolates.
-  assertEquals(BUILD_RLIMIT_AS_BYTES >= 32 * 1024 * 1024 * 1024, true);
 });
 
 test("buildInvocation enters the tenant Node entitlement group via sudo -u self", () => {
@@ -275,7 +262,6 @@ test("buildInvocation enters the tenant Node entitlement group via sudo -u self"
   };
   const invoked = buildInvocation(
     "corepack pnpm install",
-    false,
     "tpnode24",
     identity,
   );
@@ -290,35 +276,23 @@ test("buildInvocation enters the tenant Node entitlement group via sudo -u self"
     true,
   );
   assertEquals(invoked.args.slice(-3), ["sh", "-c", "corepack pnpm install"]);
-  const wrapped = buildInvocation(
-    "corepack pnpm install",
-    true,
-    "tpnode24",
-    identity,
-  );
-  assertEquals(wrapped.bin, "/usr/bin/prlimit");
-  assertEquals(wrapped.args.includes("/usr/bin/sudo"), true);
-  assertEquals(wrapped.args.includes("/usr/bin/sg"), false);
-  assertEquals(wrapped.args.includes("tp"), true);
-  assertEquals(wrapped.args.at(-1), "corepack pnpm install");
 });
 
 test("buildInvocation refuses a native group wrap without the daemon username", () => {
   assertThrows(
-    () => buildInvocation("corepack pnpm install", false, "tpnode24"),
+    () => buildInvocation("corepack pnpm install", "tpnode24"),
     TypeError,
     "daemon username",
   );
 });
 
-test("runReleaseBuild notes when prlimit is unavailable and skips empty commands", async () => {
+test("runReleaseBuild skips empty commands and runs the rest in order", async () => {
   await withWorkingDir(async (workingDir) => {
     const lines: string[] = [];
     const ran: string[] = [];
     await runReleaseBuild({
       build: { kind: "native" },
       workingDir,
-      hasPrlimit: () => Promise.resolve(false),
       runCommand: (command) => {
         ran.push(command);
         return Promise.resolve();
@@ -337,34 +311,13 @@ test("runReleaseBuild notes when prlimit is unavailable and skips empty commands
         buildCommand: "npm run build",
       },
       workingDir,
-      hasPrlimit: () => Promise.resolve(false),
-      runCommand: (command, _cwd, _env, withPrlimit) => {
-        ran.push(`${withPrlimit ? "cap" : "bare"}:${command}`);
+      runCommand: (command) => {
+        ran.push(command);
         return Promise.resolve();
       },
       onOutput: (_stream, line) => lines.push(line),
     });
-    assertEquals(
-      lines.some((line) => line.includes("prlimit unavailable")),
-      true,
-    );
-    assertEquals(ran, ["bare:npm ci", "bare:npm run build"]);
-  });
-});
-
-test("runReleaseBuild uses prlimit when the host reports it available", async () => {
-  await withWorkingDir(async (workingDir) => {
-    const ran: Array<{ command: string; withPrlimit: boolean }> = [];
-    await runReleaseBuild({
-      build: { kind: "native", buildCommand: "make" },
-      workingDir,
-      hasPrlimit: () => Promise.resolve(true),
-      runCommand: (command, _cwd, _env, withPrlimit) => {
-        ran.push({ command, withPrlimit });
-        return Promise.resolve();
-      },
-    });
-    assertEquals(ran, [{ command: "make", withPrlimit: true }]);
+    assertEquals(ran, ["npm ci", "npm run build"]);
   });
 });
 
@@ -520,7 +473,6 @@ test("runReleaseBuild derives the install command for a native-app build", async
         nodeBinDir: "/opt/turbopanel/vendor/node-app/24/current/bin",
         nodeEnv: "production",
       },
-      hasPrlimit: () => Promise.resolve(false),
       runCommand: (command) => {
         ran.push(command);
         return Promise.resolve();
@@ -552,7 +504,6 @@ test("runReleaseBuild normalizes bare pnpm build commands for native-app builds"
         nodeBinDir: "/opt/turbopanel/vendor/node-app/24/current/bin",
         nodeEnv: "production",
       },
-      hasPrlimit: () => Promise.resolve(false),
       runCommand: (command) => {
         ran.push(command);
         return Promise.resolve();
@@ -585,7 +536,6 @@ test("runReleaseBuild prefers an explicit installCommand over the derived one", 
         nodeBinDir: "/opt/turbopanel/vendor/node-app/24/current/bin",
         nodeEnv: "production",
       },
-      hasPrlimit: () => Promise.resolve(false),
       runCommand: (command) => {
         ran.push(command);
         return Promise.resolve();
@@ -609,7 +559,6 @@ test("runReleaseBuild does not derive an install without a native runtime", asyn
     await runReleaseBuild({
       build: { kind: "native", buildCommand: "npm run build" },
       workingDir,
-      hasPrlimit: () => Promise.resolve(false),
       runCommand: (command) => {
         ran.push(command);
         return Promise.resolve();
@@ -633,7 +582,6 @@ test({
       await runReleaseBuild({
         build: { kind: "native", buildCommand: "printf 'built-ok\\n'" },
         workingDir,
-        hasPrlimit: () => Promise.resolve(false),
         onOutput: (_stream, line) => lines.push(line),
       });
       assertEquals(lines.some((line) => line.includes("built-ok")), true);
@@ -646,7 +594,6 @@ test({
               buildCommand: "printf 'boom\\n' >&2; exit 7",
             },
             workingDir,
-            hasPrlimit: () => Promise.resolve(false),
           }),
         Error,
         "boom",
@@ -666,24 +613,10 @@ test({
           runReleaseBuild({
             build: { kind: "native", buildCommand: "exit 3" },
             workingDir,
-            hasPrlimit: () => Promise.resolve(false),
           }),
         Error,
         "build command failed: exit 3",
       );
-    });
-  },
-});
-
-test({
-  name: "runReleaseBuild probes prlimit availability on the host",
-  permissions: { read: true, write: true, run: true, env: true },
-  fn: async () => {
-    await withWorkingDir(async (workingDir) => {
-      await runReleaseBuild({
-        build: { kind: "native", buildCommand: "true" },
-        workingDir,
-      });
     });
   },
 });
@@ -724,7 +657,6 @@ test({
             runReleaseBuild({
               build: { kind: "native", buildCommand: "true" },
               workingDir,
-              hasPrlimit: () => Promise.resolve(false),
             }),
           Error,
           `build command timed out after ${BUILD_TIMEOUT_MS}ms`,
@@ -760,7 +692,6 @@ test({
             runReleaseBuild({
               build: { kind: "native", buildCommand: "true" },
               workingDir,
-              hasPrlimit: () => Promise.resolve(false),
             }),
           Error,
           `build command timed out after ${BUILD_TIMEOUT_MS}ms`,
@@ -786,7 +717,6 @@ test({
             runReleaseBuild({
               build: { kind: "native", buildCommand: "true" },
               workingDir,
-              hasPrlimit: () => Promise.resolve(false),
             }),
           Error,
           "sh missing",
@@ -799,79 +729,18 @@ test({
 });
 
 test({
-  name: "runReleaseBuild default runner rethrows a prlimit spawn failure",
-  permissions: { read: true, write: true, run: true, env: true },
-  fn: async () => {
-    const restore = stubDenoCommand((cmd) => {
-      if (cmd === "/usr/bin/prlimit") {
-        throw new Error("prlimit denied");
-      }
-      throw new Error(`unexpected bin ${cmd}`);
-    });
-    try {
-      await withWorkingDir(async (workingDir) => {
-        await assertRejects(
-          () =>
-            runReleaseBuild({
-              build: { kind: "native", buildCommand: "true" },
-              workingDir,
-              hasPrlimit: () => Promise.resolve(true),
-            }),
-          Error,
-          "prlimit denied",
-        );
-      });
-    } finally {
-      restore();
-    }
-  },
-});
-
-test({
-  name:
-    "runReleaseBuild default runner succeeds under prlimit with a cleared env",
+  name: "runReleaseBuild default runner succeeds with a cleared env",
   permissions: { read: true, write: true, run: true, env: true },
   fn: async () => {
     await withWorkingDir(async (workingDir) => {
       const lines: string[] = [];
       await runReleaseBuild({
-        build: { kind: "native", buildCommand: "printf 'prlimit-ok\\n'" },
+        build: { kind: "native", buildCommand: "printf 'build-ok\\n'" },
         workingDir,
-        hasPrlimit: () => Promise.resolve(true),
         onOutput: (_stream, line) => lines.push(line),
       });
-      assertEquals(lines.some((line) => line.includes("prlimit-ok")), true);
+      assertEquals(lines.some((line) => line.includes("build-ok")), true);
     });
-  },
-});
-
-test({
-  name: "runReleaseBuild treats a missing prlimit binary as unavailable",
-  permissions: { read: true, write: true, run: true, env: true },
-  fn: async () => {
-    const originalStat = Deno.stat;
-    Deno.stat = (path) => {
-      if (String(path) === "/usr/bin/prlimit") {
-        return Promise.reject(new Deno.errors.NotFound("missing"));
-      }
-      return originalStat(path);
-    };
-    try {
-      await withWorkingDir(async (workingDir) => {
-        const lines: string[] = [];
-        await runReleaseBuild({
-          build: { kind: "native", buildCommand: "true" },
-          workingDir,
-          onOutput: (_stream, line) => lines.push(line),
-        });
-        assertEquals(
-          lines.some((line) => line.includes("prlimit unavailable")),
-          true,
-        );
-      });
-    } finally {
-      Deno.stat = originalStat;
-    }
   },
 });
 

@@ -67,7 +67,7 @@ async function setUpBuildHost(
   await Deno.chmod(host.path("opt/turbopanel/lib/tp-build-runner"), 0o750);
   await Deno.writeTextFile(
     host.path("etc/resolv.conf"),
-    options.resolvConf ?? "nameserver 10.10.0.1\n",
+    options.resolvConf ?? "nameserver 9.9.9.9\n",
   );
   if (options.systemdVersion !== undefined) {
     await Deno.writeTextFile(
@@ -85,15 +85,10 @@ function execLine(argv: string[]): string {
   return `EXEC ${argv.map((arg) => `[${arg}]`).join(" ")}`;
 }
 
-/** `IPAddressAllow=` for the given list; none when it is empty. */
-function allowProperty(allow: string): string[] {
-  return allow === "" ? [] : [`IPAddressAllow=${allow}`];
-}
-
 /** The full systemd-run argv for build `b1` of project `p1`, systemd 257. */
 function expectedSystemdRun(
   prefix: string,
-  tier: { allow?: string; floor?: boolean; privatePids?: boolean } = {},
+  tier: { floor?: boolean; privatePids?: boolean } = {},
 ): string[] {
   const build = `${prefix}/var/lib/turbopanel-build`;
   const work = `${build}/work/b1`;
@@ -112,6 +107,8 @@ function expectedSystemdRun(
     "var/lib/docker",
     "etc/ssh",
     "etc/wireguard",
+    "run/systemd/resolve/io.systemd.Resolve",
+    "run/dbus/system_bus_socket",
   ].flatMap((rel) => ["-p", `InaccessiblePaths=-${prefix}/${rel}`]);
   const floor = tier.floor ?? true;
   return [
@@ -138,6 +135,7 @@ function expectedSystemdRun(
       `LoadCredential=tp-build-runner:${prefix}/opt/turbopanel/lib/tp-build-runner`,
       `BindPaths=${work}`,
       `BindPaths=${build}/cache/p1`,
+      `BindReadOnlyPaths=${prefix}/run/tpbuild/resolv.conf:${prefix}/etc/resolv.conf`,
     ].flatMap((property) => ["-p", property]),
     ...hidden,
     ...[
@@ -160,8 +158,8 @@ function expectedSystemdRun(
       "RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX",
       "IPAddressDeny=0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 " +
       "169.254.0.0/16 172.16.0.0/12 192.0.0.0/24 192.168.0.0/16 " +
-      "198.18.0.0/15 224.0.0.0/3 ::/128 ::1/128 fc00::/7 fe80::/10 ff00::/8",
-      ...allowProperty(tier.allow ?? "10.10.0.1/32"),
+      "198.18.0.0/15 224.0.0.0/3 ::/128 ::1/128 64:ff9b::/96 2002::/16 " +
+      "fc00::/7 fe80::/10 ff00::/8",
       "Slice=tpbuild.slice",
       "MemoryMax=4G",
       "MemorySwapMax=0",
@@ -210,45 +208,103 @@ test("build-run hands the work tree to tpbuild and starts the runner in the fixe
   });
 });
 
-test("build-run lets only the host's literal nameservers through the private-range deny", async () => {
+async function buildResolvConf(host: { path: (rel: string) => string }) {
+  return await Deno.readTextFile(host.path("run/tpbuild/resolv.conf"));
+}
+
+test("build-run never opens a resolver through the private-range deny, on any port", async () => {
   await withHost(async (host) => {
     await setUpBuildHost(host, {
       resolvConf: [
         "# generated",
         "nameserver 127.0.0.53",
+        "nameserver 169.254.169.254",
         "nameserver fe80::1%eth0",
         "nameserver 192.168.1.1 ; trailing",
+        "nameserver 10.0.0.1",
+        "nameserver 100.100.100.100",
+        "nameserver ::1",
+        "nameserver fd00::53",
+        "nameserver 64:ff9b::a00:1",
+        "nameserver 2002:a00:1::1",
         "nameserver evil.example",
-        "nameserver 10.0.0.1/8",
+        "nameserver 9.9.9.9",
+        "nameserver 2620:fe::fe",
         "search lan",
         "",
       ].join("\n"),
     });
     const result = await host.run(["build-run", "b1", "p1"]);
     assertEquals(result.code, 0, result.stderr);
+    assertEquals(result.stderr, "");
+    const run = execLines(result.stdout)[2] ?? "";
+    assertEquals(run, execLine(expectedSystemdRun(host.prefix)));
+    // Allow wins over deny for every port, so nothing is ever allowed back.
+    assertEquals(run.includes("IPAddressAllow"), false);
+    // Name lookups cannot go around the bound resolv.conf: nss-resolve's
+    // varlink socket and the system bus are out of the namespace.
+    for (
+      const socket of [
+        "run/systemd/resolve/io.systemd.Resolve",
+        "run/dbus/system_bus_socket",
+      ]
+    ) {
+      assertStringIncludes(
+        run,
+        `[InaccessiblePaths=-${host.prefix}/${socket}]`,
+      );
+    }
+    assertStringIncludes(
+      run,
+      `[BindReadOnlyPaths=${host.prefix}/run/tpbuild/resolv.conf:${host.prefix}/etc/resolv.conf]`,
+    );
+    assertStringIncludes(run, "64:ff9b::/96 2002::/16");
+    assertEquals(
+      await buildResolvConf(host),
+      "nameserver 9.9.9.9\nnameserver 2620:fe::fe\n",
+    );
+    const info = await Deno.stat(host.path("run/tpbuild/resolv.conf"));
+    assertEquals((info.mode ?? 0) & 0o777, 0o644);
+  });
+});
+
+test("behind a loopback stub the build uses systemd-resolved's public upstreams", async () => {
+  await withHost(async (host) => {
+    await setUpBuildHost(host, { resolvConf: "nameserver 127.0.0.53\n" });
+    await Deno.mkdir(host.path("run/systemd/resolve"), { recursive: true });
+    await Deno.writeTextFile(
+      host.path("run/systemd/resolve/resolv.conf"),
+      "nameserver 192.168.1.1\nnameserver 1.0.0.1\n",
+    );
+    const result = await host.run(["build-run", "b1", "p1"]);
+    assertEquals(result.code, 0, result.stderr);
+    assertEquals(result.stderr, "");
+    assertEquals(await buildResolvConf(host), "nameserver 1.0.0.1\n");
+  });
+});
+
+test("a host with only local or private resolvers builds through the vetted public fallback", async () => {
+  await withHost(async (host) => {
+    await setUpBuildHost(host, {
+      resolvConf: "nameserver 127.0.0.53\nnameserver 192.168.1.1\n",
+    });
+    const result = await host.run(["build-run", "b1", "p1"]);
+    assertEquals(result.code, 0, result.stderr);
+    assertStringIncludes(result.stderr, "no public nameserver");
     assertEquals(
       execLines(result.stdout)[2],
-      execLine(
-        expectedSystemdRun(host.prefix, {
-          allow: "127.0.0.53/32 fe80::1/128 192.168.1.1/32",
-        }),
-      ),
+      execLine(expectedSystemdRun(host.prefix)),
     );
-
-    await Deno.writeTextFile(
-      host.path("etc/resolv.conf"),
-      "nameserver 1.1.1.1\n",
-    );
-    const pub = await host.run(["build-run", "b1", "p1"]);
     assertEquals(
-      execLines(pub.stdout)[2],
-      execLine(expectedSystemdRun(host.prefix, { allow: "1.1.1.1/32" })),
+      await buildResolvConf(host),
+      "nameserver 1.1.1.1\nnameserver 8.8.8.8\n",
     );
     await Deno.remove(host.path("etc/resolv.conf"));
     const none = await host.run(["build-run", "b1", "p1"]);
+    assertEquals(none.code, 0, none.stderr);
     assertEquals(
-      execLines(none.stdout)[2],
-      execLine(expectedSystemdRun(host.prefix, { allow: "" })),
+      await buildResolvConf(host),
+      "nameserver 1.1.1.1\nnameserver 8.8.8.8\n",
     );
   });
 });
