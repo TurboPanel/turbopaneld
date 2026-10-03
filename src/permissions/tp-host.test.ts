@@ -1232,6 +1232,15 @@ function installDir(
   ];
 }
 
+test("principal home: the home root itself is still root:root", async () => {
+  await withHost(async (host) => {
+    const root = host.path("srv/users");
+    const ok = await host.run(installDir(root, "0750", "root", "root"));
+    assertEquals(ok.code, 0, ok.stderr);
+    await refused(host, installDir(root, "0750", "alice", "alice-grp"));
+  });
+});
+
 test("principal home: the skeleton is root's, never group-writable, and only root:<p>-grp", async () => {
   await withHost(async (host) => {
     const home = host.path("srv/users/alice");
