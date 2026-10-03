@@ -256,6 +256,8 @@ test("promoteExistingRelease rejects missing and unsealed trees", async () => {
       paths,
       releaseId: "rel-1",
       healthProbe: () => Promise.resolve(),
+      // The resolved link listing: an empty release has none.
+      runFn: () => Promise.resolve({ success: true, stdout: "", stderr: "" }),
     });
     assertEquals(await readCurrentReleaseId(paths), "rel-1");
   } finally {

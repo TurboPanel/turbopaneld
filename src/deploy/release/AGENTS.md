@@ -77,6 +77,44 @@ PHP `open_basedir`), not through a link the build ships. nginx additionally
 serves a release-backed document root with `disable_symlinks on`; Apache keeps
 `SymLinksIfOwnerMatch`, because `.htaccess` `RewriteRule` needs it.
 
+What this refuses at publish, so builds that used to work need changing:
+WordPress `wp-content/uploads -> ../shared/uploads` (or any other link into
+`shared/`) fails the promote with "reach into shared/" (serve shared files
+through the app, not a link), and on nginx every link under the document root,
+even one that stays in the release (`public/build -> ../dist`, Laravel
+`public/storage`), answers 403 (`../site/AGENTS.md`).
+
+**A rollback re-checks the target's links, lexically and resolved**
+(`assertSealedLinksStayInRelease`). A release sealed before the publish-time
+check can still hold `x -> ../shared/evil`, and `promoteExistingRelease`
+publishes nothing, so it lists every link's unresolved text (tp-host
+`find <release> -type l -printf '%P\0%l\0'`) and follows each chain through
+the other links' texts only — never the filesystem, never into the top-level
+`shared` (whose layout link exists by then, so `realpath` would ask the tenant
+where it goes). A chain that lands in `shared` or leaves the release, an
+absolute link, or one past 40 hops refuses the rollback. The walk is O(total
+components): each link is resolved once and reused, and a release needing
+more than `LINK_WALK_STEP_BUDGET` steps is refused rather than walked.
+Then every link is also resolved with `realpath -m` against the live tree, `shared` link included,
+and any target outside the release or under its `shared` refuses it too (only
+the layout link's own resolution is excused, once). The publish-time checks
+compare `realpath` output with the release and home paths realpath'd first, so a
+homes root reached through a symlink neither flags every link nor misses a
+foreign one.
+
+**Live releases are scanned at daemon start** (`live-release-scan.ts`, from
+`runDaemon` once orchestration is ready, in the background). Every
+`<homes>/<user>/sites/<service>/current` is followed and its release checked the
+same lexical way — walked from the homes root, not the deployment manifests,
+which do not name the principal for older releases. It **reports only**: each
+hit is a `release` warning in the daemon log and an entry in
+`<daemonStateDir>/release-link-scan.json` (`{version, scannedAt, findings}`,
+replaced each start). A sealed release cannot be re-sealed without the link and
+the host has no per-site safe state short of taking the site down, which would
+break working sites whose only hit is a pre-check `uploads`/`storage` link;
+redeploying publishes a vetted release. Surfacing the findings in the control
+plane's server status needs a cell-protocol message and is a follow-up.
+
 A published release is **read-only to the runtime user** on purpose: an app
 process that can rewrite its own code turns any RCE into persistence. That is an
 *ownership* rule, not only a mode: `sites/<serviceId>` and `releases/` are

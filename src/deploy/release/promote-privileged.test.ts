@@ -20,7 +20,10 @@ import {
   swapCurrentSymlink,
 } from "./promote.ts";
 import type { ReleaseManifestV1 } from "./deployment-json.ts";
-import { releaseLinkTextsFindArgs } from "./release-links.ts";
+import {
+  releaseLinkTargetsFindArgs,
+  releaseLinkTextsFindArgs,
+} from "./release-links.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -998,6 +1001,7 @@ test("promoteExistingRelease treats a missing mode as sealed", async () => {
         paths,
         releaseId: "rel-1",
         healthProbe: () => Promise.resolve(),
+        runFn: testRun(true, []),
       });
       assertEquals(
         await Deno.readLink(paths.currentLink),
@@ -1154,21 +1158,14 @@ test("promoteExistingRelease checks a denied release only for presence", async (
       });
       assertEquals(dir, paths.releaseDir);
     });
-    // tp-host's `test -e` and the link-text listing are the only privileged
+    // tp-host's `test -e` and the two link listings are the only privileged
     // looks at the tree: no file in it is read, opened, or stat'd for
-    // metadata, and only link names and texts come back.
-    assertEquals(calls[0], ["-n", "test", "-e", paths.releaseDir]);
-    assertEquals(calls[1], [
-      "-n",
-      ...releaseLinkTextsFindArgs(paths.releaseDir),
+    // metadata, and only link names, texts and resolved paths come back.
+    assertEquals(calls, [
+      ["-n", "test", "-e", paths.releaseDir],
+      ["-n", ...releaseLinkTextsFindArgs(paths.releaseDir)],
+      ["-n", ...releaseLinkTargetsFindArgs(paths.releaseDir)],
     ]);
-    assertEquals(
-      calls.some((args) =>
-        args.includes("cat") || args.includes("stat") ||
-        args.includes("realpath") || args.includes("ls")
-      ),
-      false,
-    );
     assertEquals(await Deno.readLink(paths.currentLink), "releases/rel-1");
   });
 });

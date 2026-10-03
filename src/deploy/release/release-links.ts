@@ -118,7 +118,11 @@ async function physicalPath(path: string): Promise<string> {
   try {
     return await Deno.realPath(path);
   } catch (err) {
-    if (err instanceof Deno.errors.PermissionDenied) return path;
+    // An absent tree fails the listing that follows, closed.
+    if (
+      err instanceof Deno.errors.PermissionDenied ||
+      err instanceof Deno.errors.NotFound
+    ) return path;
     throw err;
   }
 }
@@ -206,82 +210,171 @@ export type ReleaseLink = { path: string; text: string };
 /** Links followed in one chain before it counts as a loop (as the kernel's). */
 const MAX_LINK_HOPS = 40;
 
+/**
+ * Path components a lexical check of one release may walk in total. Each link
+ * is resolved once and its text walked once, so a release needs about as many
+ * steps as its link texts have components; past this it is refused rather
+ * than walked, so a crafted release cannot hold the event loop.
+ */
+export const LINK_WALK_STEP_BUDGET = 1_000_000;
+
+/** Why a release is refused when its links need more than the budget. */
+const OVER_BUDGET = "too many link components to check";
+
 function segments(path: string): string[] {
   return path.split("/").filter((part) => part !== "" && part !== ".");
 }
 
-/** One component of a lexical walk: the new position and what is left. */
-type WalkState = { at: string[]; rest: string[]; hops: number };
+/** A link resolved to where its chain ends, and how many links it followed. */
+type Resolved = { at: PathNode; hops: number };
 
 /**
- * Advance a walk by one component. Returns why the chain is refused, or the
- * next state. A component naming another link in the release is replaced by
- * that link's text, so `..` after it climbs out of its target, as the kernel
- * would; the top-level `shared` is never entered.
+ * A path in the release, as a tree the walk moves through in O(1) a step: no
+ * path is joined, split or copied while walking. `text` marks a link;
+ * `result` is its resolution once known (or `"resolving"` while on the stack,
+ * so meeting it again is a cycle), so no link is walked twice.
  */
-function walkStep(
-  state: WalkState,
-  texts: ReadonlyMap<string, string>,
-): WalkState | string {
-  const [part, ...rest] = state.rest;
-  if (part === "..") {
-    if (state.at.length === 0) return "leaves the release";
-    return { at: state.at.slice(0, -1), rest, hops: state.hops };
+type PathNode = {
+  parent: PathNode | null;
+  children: Map<string, PathNode>;
+  text?: string;
+  result?: Resolved | string | "resolving";
+};
+
+function childNode(node: PathNode, name: string): PathNode {
+  let child = node.children.get(name);
+  if (child === undefined) {
+    child = { parent: node, children: new Map() };
+    node.children.set(name, child);
   }
-  const at = [...state.at, part];
-  if (at.length === 1 && part === RELEASE_SHARED_NAME) {
-    return "reaches into shared/";
-  }
-  const text = texts.get(at.join("/"));
-  if (text === undefined) return { at, rest, hops: state.hops };
-  if (text.startsWith("/")) return "leaves the release";
-  if (state.hops >= MAX_LINK_HOPS) return "loops";
-  return {
-    at: state.at,
-    rest: [...segments(text), ...rest],
-    hops: state.hops + 1,
-  };
+  return child;
 }
 
+/** One link being resolved: its text's components, from `i` on, left. */
+type Frame = {
+  link: PathNode;
+  at: PathNode;
+  parts: string[];
+  i: number;
+  hops: number;
+};
+
 /**
- * Why `link` fails the lexical check, or `null` when its whole chain stays in
- * the release and out of `shared`. Only the link texts recorded in `texts` are
- * followed — never the filesystem, so nothing the tenant keeps in `shared/`
- * (or anywhere else) can change the answer.
+ * Resolve `start` lexically: why its chain is refused, or where it ends. A
+ * component naming another link is resolved first (or taken from its
+ * `result`), so `..` after it climbs out of its target, as the kernel would;
+ * the top-level `shared` is never entered. Only the link texts are followed —
+ * never the filesystem, so nothing the tenant keeps in `shared/` (or anywhere
+ * else) can change the answer. Returns {@link OVER_BUDGET} once
+ * `budget.steps` runs out.
  */
-function lexicalLinkProblem(
-  link: ReleaseLink,
-  texts: ReadonlyMap<string, string>,
-): string | null {
-  if (link.text.startsWith("/")) return "leaves the release";
-  let state: WalkState | string = {
-    at: segments(dirname(link.path)),
-    rest: segments(link.text),
-    hops: 0,
+function resolveLink(
+  start: PathNode,
+  root: PathNode,
+  budget: { steps: number },
+): Resolved | string {
+  const stack: Frame[] = [];
+  let returned: Resolved | string | null = null;
+  const enter = (link: PathNode) => {
+    link.result = "resolving";
+    stack.push({
+      link,
+      at: link.parent!,
+      parts: segments(link.text!),
+      i: 0,
+      hops: 0,
+    });
   };
-  while (typeof state !== "string" && state.rest.length > 0) {
-    state = walkStep(state, texts);
+  const finish = (frame: Frame, result: Resolved | string) => {
+    frame.link.result = result;
+    stack.pop();
+    returned = result;
+  };
+  if (start.text!.startsWith("/")) return start.result = "leaves the release";
+  enter(start);
+  while (stack.length > 0) {
+    const frame = stack[stack.length - 1];
+    if (returned !== null) {
+      // A link the frame named has been resolved: continue from its end.
+      const sub: Resolved | string = returned;
+      returned = null;
+      if (typeof sub === "string") finish(frame, sub);
+      else if (frame.hops + 1 + sub.hops > MAX_LINK_HOPS) {
+        finish(frame, "loops");
+      } else {
+        frame.hops += 1 + sub.hops;
+        frame.at = sub.at;
+      }
+      continue;
+    }
+    if (frame.i === frame.parts.length) {
+      finish(frame, { at: frame.at, hops: frame.hops });
+      continue;
+    }
+    if (--budget.steps < 0) return OVER_BUDGET;
+    const part = frame.parts[frame.i++];
+    if (part === "..") {
+      if (frame.at.parent === null) finish(frame, "leaves the release");
+      else frame.at = frame.at.parent;
+      continue;
+    }
+    if (frame.at === root && part === RELEASE_SHARED_NAME) {
+      finish(frame, "reaches into shared/");
+      continue;
+    }
+    const next = childNode(frame.at, part);
+    if (next.text === undefined) {
+      frame.at = next;
+    } else if (next.text.startsWith("/")) {
+      finish(frame, "leaves the release");
+    } else if (frame.hops >= MAX_LINK_HOPS || next.result === "resolving") {
+      finish(frame, "loops");
+    } else if (next.result !== undefined) {
+      returned = next.result;
+    } else {
+      enter(next);
+    }
   }
-  return typeof state === "string" ? state : null;
+  return returned!;
 }
 
 /**
  * Links (other than the layout's own top-level `shared`) whose chain, followed
  * lexically inside the release, leaves it or lands in `shared`. Each is
- * reported as `<path> -> <text> (<why>)`.
+ * reported as `<path> -> <text> (<why>)`. O(total link-text components), and
+ * capped at `stepBudget` of them: a release over it is refused (fails closed),
+ * the link the budget ran out on reported and the rest left unchecked.
  */
 export function linksLeavingReleaseLexically(
   links: readonly ReleaseLink[],
+  stepBudget = LINK_WALK_STEP_BUDGET,
 ): string[] {
-  const texts = new Map(links.map((link) => [link.path, link.text]));
-  return links
-    .filter((link) => link.path !== RELEASE_SHARED_NAME)
-    .flatMap((link) => {
-      const problem = lexicalLinkProblem(link, texts);
-      return problem === null
-        ? []
-        : [`${link.path} -> ${link.text} (${problem})`];
-    });
+  const root: PathNode = { parent: null, children: new Map() };
+  const nodes = links.map((link) => {
+    let node = root;
+    for (const part of segments(link.path)) node = childNode(node, part);
+    node.text = link.text;
+    return node;
+  });
+  const budget = { steps: stepBudget };
+  const leaving: string[] = [];
+  for (const [index, link] of links.entries()) {
+    if (link.path === RELEASE_SHARED_NAME) continue;
+    const node = nodes[index];
+    const result = node.result !== undefined && node.result !== "resolving"
+      ? node.result
+      : resolveLink(node, root, budget);
+    if (result === OVER_BUDGET) {
+      leaving.push(
+        `${link.path} -> ${link.text} (${OVER_BUDGET}: over ${stepBudget})`,
+      );
+      break;
+    }
+    if (typeof result === "string") {
+      leaving.push(`${link.path} -> ${link.text} (${result})`);
+    }
+  }
+  return leaving;
 }
 
 /** Parse `<path>\0<text>\0…` as {@link releaseLinkTextsFindArgs} prints it. */
@@ -294,19 +387,45 @@ export function parseReleaseLinkTexts(stdout: string): ReleaseLink[] {
   return links;
 }
 
-/** Every symlink under `dir`, read as the daemon (no privilege). */
+/** Filesystem calls {@link readReleaseLinks} keeps in flight at once. */
+const READ_CONCURRENCY = 16;
+
+/** Run at most `limit` of the calls passed to the returned function at once. */
+function concurrencyLimit(limit: number) {
+  let active = 0;
+  const waiting: (() => void)[] = [];
+  return async <T>(call: () => Promise<T>): Promise<T> => {
+    while (active >= limit) await new Promise<void>((r) => waiting.push(r));
+    active++;
+    try {
+      return await call();
+    } finally {
+      active--;
+      waiting.shift()?.();
+    }
+  };
+}
+
+/**
+ * Every symlink under `dir`, read as the daemon (no privilege), with at most
+ * {@link READ_CONCURRENCY} directories or links open at once.
+ */
 async function readReleaseLinks(
   root: string,
   relative: string,
+  limit = concurrencyLimit(READ_CONCURRENCY),
 ): Promise<ReleaseLink[]> {
   const dir = relative === "" ? root : join(root, relative);
-  const entries = await Array.fromAsync(Deno.readDir(dir));
+  const entries = await limit(() => Array.fromAsync(Deno.readDir(dir)));
   const nested = await Promise.all(entries.map(async (entry) => {
     const path = relative === "" ? entry.name : `${relative}/${entry.name}`;
     if (entry.isSymlink) {
-      return [{ path, text: await Deno.readLink(join(root, path)) }];
+      return [{
+        path,
+        text: await limit(() => Deno.readLink(join(root, path))),
+      }];
     }
-    return entry.isDirectory ? await readReleaseLinks(root, path) : [];
+    return entry.isDirectory ? await readReleaseLinks(root, path, limit) : [];
   }));
   return nested.flat();
 }
@@ -343,19 +462,53 @@ export async function listReleaseLinks(
 }
 
 /**
+ * Resolved targets of a sealed release's links that leave it or land in
+ * `shared`, less the one resolution that belongs to the layout's own
+ * top-level `shared` link (`../../shared`, outside the release by design).
+ * Only one occurrence is excused, so a shipped link to the same place is
+ * still reported.
+ */
+function resolvedTargetsLeavingSealedRelease(
+  targets: readonly string[],
+  links: readonly ReleaseLink[],
+  physicalReleaseDir: string,
+): string[] {
+  const layoutLink = links.some((link) =>
+    link.path === RELEASE_SHARED_NAME && link.text === "../../shared"
+  );
+  const layoutTarget = join(
+    dirname(dirname(physicalReleaseDir)),
+    RELEASE_SHARED_NAME,
+  );
+  const index = layoutLink ? targets.indexOf(layoutTarget) : -1;
+  const rest = index === -1 ? targets : targets.toSpliced(index, 1);
+  return linkTargetsLeavingRelease(rest, physicalReleaseDir);
+}
+
+/**
  * Refuse an already-sealed release (a rollback target, a live release sealed
  * before {@link assertStagedLinksStayInRelease} existed) whose links leave it
- * or reach into `shared`. Lexical on purpose: its `shared` link exists, so
- * resolving through it would ask the tenant where the link goes.
+ * or reach into `shared`, checked both ways. Lexically first: its `shared`
+ * link exists, so resolving through it asks the tenant where the link goes,
+ * and only the texts cannot be steered. Then resolved as the tree stands,
+ * which by now sends any `../shared/…` tail into the site's real `shared/`,
+ * outside the release.
  */
 export async function assertSealedLinksStayInRelease(
   releaseDir: string,
   runFn: RunFn,
   asRoot = false,
 ): Promise<void> {
-  const leaving = linksLeavingReleaseLexically(
-    await listReleaseLinks(releaseDir, runFn, asRoot),
-  );
+  const links = await listReleaseLinks(releaseDir, runFn, asRoot);
+  const lexical = linksLeavingReleaseLexically(links);
+  const resolved = lexical.length > 0
+    ? []
+    : resolvedTargetsLeavingSealedRelease(
+      await releaseLinkTargets(releaseDir, runFn),
+      links,
+      await physicalPath(releaseDir),
+    );
+  const leaving = [...lexical, ...resolved];
   if (leaving.length === 0) return;
   throw new Error(
     `release ${releaseDir} has symlinks that leave the release or reach into ` +

@@ -347,6 +347,63 @@ test("linksLeavingReleaseLexically follows link texts, never shared/", () => {
   ]);
 });
 
+test("linksLeavingReleaseLexically refuses a release over its step budget", () => {
+  // 50 links of 4 components each: 200 steps.
+  const links = Array.from({ length: 50 }, (_, i) => ({
+    path: `d/l${i}`,
+    text: "../a/b/c",
+  }));
+  assertEquals(linksLeavingReleaseLexically(links), []);
+  assertEquals(linksLeavingReleaseLexically(links, 100), [
+    "d/l25 -> ../a/b/c (too many link components to check: over 100)",
+  ]);
+});
+
+test("linksLeavingReleaseLexically walks a chain many links share once", () => {
+  // chain/c0 -> c1 -> … -> c30 -> ../real, and 500 links into c0. Walked per
+  // link that is over 16k steps; resolved once and reused it is about 1.1k.
+  const chain = Array.from({ length: 31 }, (_, i) => ({
+    path: `chain/c${i}`,
+    text: i === 30 ? "../real" : `c${i + 1}`,
+  }));
+  const users = Array.from({ length: 500 }, (_, i) => ({
+    path: `users/u${i}`,
+    text: "../chain/c0",
+  }));
+  assertEquals(linksLeavingReleaseLexically([...users, ...chain], 2_000), []);
+  // A chain ending in shared/ is reported for every link through it.
+  const leaking = [...chain.slice(0, 30), {
+    path: "chain/c30",
+    text: "../shared/x",
+  }];
+  const found = linksLeavingReleaseLexically([...users, ...leaking], 2_000);
+  assertEquals(found.length, 531);
+  assert(found.every((line) => line.endsWith("(reaches into shared/)")));
+});
+
+test("linksLeavingReleaseLexically counts reused links' hops toward the limit", () => {
+  // c0 follows 38 more links, a 39, b 40 (the limit); c would follow 41.
+  const chain = Array.from({ length: 39 }, (_, i) => ({
+    path: `chain/c${i}`,
+    text: i === 38 ? "../real" : `c${i + 1}`,
+  }));
+  const links = [
+    { path: "c", text: "b" },
+    ...chain,
+    { path: "a", text: "chain/c0" },
+    { path: "b", text: "a" },
+  ];
+  assertEquals(linksLeavingReleaseLexically(links), ["c -> b (loops)"]);
+  // A long cycle loops for every link on it, each resolved once.
+  const ring = Array.from({ length: 1_000 }, (_, i) => ({
+    path: `ring/l${i}`,
+    text: `l${(i + 1) % 1_000}`,
+  }));
+  const looped = linksLeavingReleaseLexically(ring, 2_000);
+  assertEquals(looped.length, 1_000);
+  assert(looped.every((line) => line.endsWith("(loops)")));
+});
+
 test("parseReleaseLinkTexts reads find's NUL-separated pairs", () => {
   assertEquals(parseReleaseLinkTexts("public/x\0../shared/e\0a b\0c\n\0"), [
     { path: "public/x", text: "../shared/e" },
@@ -442,6 +499,29 @@ test("promoteExistingRelease rolls back to a release whose links stay inside", a
       runFn: runSeam,
     });
     assert((await Deno.lstat(paths.currentLink)).isSymlink);
+  });
+});
+
+test("promoteExistingRelease also refuses a link that resolves out of the release", async () => {
+  await withSealedRelease({ "public/build": "../dist" }, async (paths) => {
+    // The texts pass; resolved against the live tree, a link does not.
+    const outside = join(paths.sharedDir, "evil");
+    const runFn: RunFn = (_command, args) =>
+      Promise.resolve({
+        success: true,
+        stdout: args.includes("realpath") ? `${outside}\0` : "",
+        stderr: "",
+      });
+    const err = await assertRejects(() =>
+      promoteExistingRelease({
+        paths,
+        releaseId: "rel-1",
+        healthProbe: () => Promise.resolve(),
+        runFn,
+      })
+    );
+    assertStringIncludes(String(err), outside);
+    await assertRejects(() => Deno.lstat(paths.currentLink));
   });
 });
 

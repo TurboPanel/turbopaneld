@@ -611,9 +611,10 @@ function assertSealedReleaseDir(stat: Deno.FileInfo, releaseId: string): void {
  * site lane needs no probe at all because the swap is nothing but a
  * symlink move.
  *
- * Its links are checked lexically first ({@link assertSealedLinksStayInRelease}):
- * a release sealed before the publish-time checks existed can hold a link
- * through `shared/`, and rolling back to it must not re-serve that.
+ * Its links are checked first, lexically and resolved
+ * ({@link assertSealedLinksStayInRelease}): a release sealed
+ * before the publish-time checks existed can hold a link through `shared/`,
+ * and rolling back to it must not re-serve that.
  *
  * A missing target directory is an **error**, not a skip: "the release you
  * asked to roll back to was pruned on this host" is precisely the case an
@@ -639,7 +640,8 @@ export async function promoteExistingRelease(
   }
   if (stat !== "present") assertSealedReleaseDir(stat, params.releaseId);
   // A release sealed before the publish-time link checks can still carry a
-  // link through `shared/`; never put one back in service.
+  // link through `shared/`; never put one back in service. Checked both ways:
+  // each link's text followed lexically, and each link resolved as it stands.
   await assertSealedLinksStayInRelease(releaseDir, runFn, stat === "present");
 
   if (params.healthProbe) await params.healthProbe(releaseDir);
