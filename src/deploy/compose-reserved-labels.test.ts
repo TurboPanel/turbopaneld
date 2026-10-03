@@ -1,6 +1,7 @@
 import { assertEquals, assertThrows } from "@std/assert";
 import {
   assertNoReservedOwnerLabels,
+  ComposeReservedLabelError,
   reservedOwnerLabels,
 } from "./compose-reserved-labels.ts";
 
@@ -58,4 +59,40 @@ test("the control plane's identity labels and anything else stay allowed", () =>
   };
   assertNoReservedOwnerLabels(document);
   assertEquals(reservedOwnerLabels(document), []);
+});
+
+test("any turbopanel.* key is refused in every label location, whatever its case", () => {
+  for (
+    const labels of [
+      { "turbopanel.anything": "x" },
+      { "TurboPanel.Role": "ingress" },
+      { " turbopanel.project ": "p" },
+      ["TURBOPANEL.component=x"],
+      ["turbopanel.role"],
+    ]
+  ) {
+    for (const section of ["services", "volumes", "networks"]) {
+      const error = assertThrows(
+        () => assertNoReservedOwnerLabels({ [section]: { a: { labels } } }),
+        ComposeReservedLabelError,
+        "compose_reserved_label",
+      );
+      assertEquals(error.code, "compose_reserved_label");
+    }
+  }
+});
+
+test("only the turbopanel. prefix and the existing reserved names are refused", () => {
+  assertNoReservedOwnerLabels({
+    services: {
+      web: {
+        labels: {
+          "turbopanelx.role": "ok",
+          "my.turbopanel.role": "ok",
+          "com.turbopanel.project": "p",
+          "turbopanel": "bare",
+        },
+      },
+    },
+  });
 });
