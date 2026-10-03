@@ -71,6 +71,8 @@ export type RequestFacts = {
   query: URLSearchParams;
   /** Parsed JSON body for the body-checked routes, otherwise `undefined`. */
   body?: unknown;
+  /** The body as a plain `JSON.parse` reads it (field names as sent). */
+  plainBody?: unknown;
   /** The engine would read the body as form fields (see `carriesFormBody`). */
   formBody?: boolean;
   /** Why the body was refused by the strict parser (body.ts), if it was. */
@@ -507,6 +509,52 @@ function volumeMounts(
   return out;
 }
 
+const SAFE_MOUNT_TYPES = new Set(["bind", "volume", "tmpfs"]);
+const SAFE_PROPAGATION = new Set(["", "private", "rprivate"]);
+const SHARED_PROPAGATION = /^(?:r?shared|r?slave)$/;
+
+/**
+ * What a mount can do beyond its source: a type other than bind, volume or
+ * tmpfs (npipe, cluster, image...), and a bind propagation that lets a mount
+ * made inside the container show up on the host.
+ */
+function checkBindStrings(hostConfig: Record<string, unknown>): Violation[] {
+  return stringList(hostConfig.Binds)
+    .filter((bind) =>
+      (bind.split(":")[2] ?? "").split(",").some((option) =>
+        SHARED_PROPAGATION.test(option)
+      )
+    )
+    .map(() => ({ rule: "bind-propagation" }));
+}
+
+function checkMountEntry(mount: Record<string, unknown>): Violation[] {
+  const out: Violation[] = [];
+  const type = mount.Type;
+  if (typeof type !== "string" || !SAFE_MOUNT_TYPES.has(type)) {
+    out.push({
+      rule: "mount-type",
+      detail: typeof type === "string" ? fieldDetail(type) : "<non-string>",
+    });
+  }
+  const bindOptions = mount.BindOptions;
+  const propagation = isRecord(bindOptions)
+    ? bindOptions.Propagation ?? ""
+    : "";
+  if (typeof propagation !== "string" || !SAFE_PROPAGATION.has(propagation)) {
+    out.push({ rule: "bind-propagation" });
+  }
+  return out;
+}
+
+function checkMountKinds(hostConfig: Record<string, unknown>): Violation[] {
+  const mounts = Array.isArray(hostConfig.Mounts) ? hostConfig.Mounts : [];
+  return [
+    ...checkBindStrings(hostConfig),
+    ...mounts.filter(isRecord).flatMap(checkMountEntry),
+  ];
+}
+
 /** A volume Subpath the engine joins under the volume: relative, no `..`. */
 function subpathViolation(mount: Record<string, unknown>): Violation[] {
   const options = mount.VolumeOptions;
@@ -645,6 +693,11 @@ const BANNED_HOSTCONFIG_FIELDS: ReadonlyArray<[field: string, rule: string]> = [
   ["CgroupParent", "cgroup-parent"],
   ["Sysctls", "sysctls"],
   ["VolumesFrom", "volumes-from"],
+  // Another container's cgroup, legacy links and OCI annotations (some
+  // runtimes act on them) are never needed. GroupAdd has its own check.
+  ["Cgroup", "cgroup-join"],
+  ["Links", "links"],
+  ["Annotations", "annotations"],
 ];
 
 /** Banned when the key is sent at all: `[]` is how `systempaths=unconfined` arrives. */
@@ -653,12 +706,120 @@ const BANNED_IF_SENT: ReadonlyArray<[field: string, rule: string]> = [
   ["ReadonlyPaths", "readonly-paths"],
 ];
 
-function checkHostConfigFlags(
-  hostConfig: Record<string, unknown>,
-  config: PolicyConfig,
-): Violation[] {
+/** Real-time CPU scheduling can starve the host; the defaults are 0. */
+const BANNED_IF_POSITIVE: ReadonlyArray<[field: string, rule: string]> = [
+  ["CpuRealtimePeriod", "cpu-realtime"],
+  ["CpuRealtimeRuntime", "cpu-realtime"],
+];
+
+/**
+ * Every other HostConfig key a client may send, none of which reaches the
+ * host: resource limits, ports, DNS, restart, logging (its driver is checked),
+ * tmpfs. A key in neither this set nor the ruled one is a finding
+ * (`hostconfig-unknown-field`): a field a newer engine adds is denied until
+ * someone decides what it can do.
+ */
+const BENIGN_HOSTCONFIG_FIELDS: ReadonlySet<string> = new Set([
+  "AutoRemove",
+  "BlkioDeviceReadBps",
+  "BlkioDeviceReadIOps",
+  "BlkioDeviceWriteBps",
+  "BlkioDeviceWriteIOps",
+  "BlkioWeight",
+  "BlkioWeightDevice",
+  "CapDrop",
+  "ConsoleSize",
+  "ContainerIDFile",
+  "CpuCount",
+  "CpuPercent",
+  "CpuPeriod",
+  "CpuQuota",
+  "CpuShares",
+  "CpusetCpus",
+  "CpusetMems",
+  "Dns",
+  "DnsOptions",
+  "DnsSearch",
+  "ExtraHosts",
+  "IOMaximumBandwidth",
+  "IOMaximumIOps",
+  "Init",
+  "Isolation",
+  "KernelMemoryTCP",
+  "Memory",
+  "MemoryReservation",
+  "MemorySwap",
+  "MemorySwappiness",
+  "NanoCpus",
+  "OomKillDisable",
+  "PidsLimit",
+  "PortBindings",
+  "PublishAllPorts",
+  "ReadonlyRootfs",
+  "RestartPolicy",
+  "ShmSize",
+  "StorageOpt",
+  "Tmpfs",
+  "Ulimits",
+]);
+
+/** Keys with a rule of their own (here, in checkNamespaces, mounts or security options). */
+const RULED_HOSTCONFIG_FIELDS: ReadonlySet<string> = new Set([
+  ...BANNED_HOSTCONFIG_FIELDS.map(([field]) => field),
+  ...BANNED_IF_SENT.map(([field]) => field),
+  ...BANNED_IF_POSITIVE.map(([field]) => field),
+  "Binds",
+  "CapAdd",
+  "Capabilities",
+  "CgroupnsMode",
+  "GroupAdd",
+  "IpcMode",
+  "LogConfig",
+  "Mounts",
+  "NetworkMode",
+  "OomScoreAdj",
+  "PidMode",
+  "Privileged",
+  "Runtime",
+  "SecurityOpt",
+  "UTSMode",
+  "UsernsMode",
+  "VolumeDriver",
+]);
+
+/** Log drivers that stay on the host and open no connection. */
+const SAFE_LOG_DRIVERS = new Set(["", "json-file", "local", "none"]);
+
+function checkLogConfig(hostConfig: Record<string, unknown>): Violation[] {
+  const logConfig = hostConfig.LogConfig;
+  if (!isRecord(logConfig)) return [];
+  // No Type (or null) is the engine's default driver.
+  const type = logConfig.Type ?? "";
+  if (typeof type === "string" && SAFE_LOG_DRIVERS.has(type)) return [];
+  // syslog, fluentd, gelf... dial an address the container's author picks.
+  return [{
+    rule: "log-driver",
+    detail: typeof type === "string" ? type : "<non-string>",
+  }];
+}
+
+function fieldDetail(key: string): string {
+  return /^[A-Za-z]{1,40}$/.test(key) ? key : "<odd>";
+}
+
+function checkUnknownFields(hostConfig: Record<string, unknown>): Violation[] {
+  return Object.keys(hostConfig)
+    .filter((key) =>
+      !BENIGN_HOSTCONFIG_FIELDS.has(key) && !RULED_HOSTCONFIG_FIELDS.has(key)
+    )
+    .map((key) => ({
+      rule: "hostconfig-unknown-field",
+      detail: fieldDetail(key),
+    }));
+}
+
+function checkPresentFields(hostConfig: Record<string, unknown>): Violation[] {
   const out: Violation[] = [];
-  if (hostConfig.Privileged === true) out.push({ rule: "privileged" });
   for (const [field, rule] of BANNED_HOSTCONFIG_FIELDS) {
     if (isPresent(hostConfig[field])) out.push({ rule });
   }
@@ -667,17 +828,70 @@ function checkHostConfigFlags(
       out.push({ rule });
     }
   }
+  for (const [field, rule] of BANNED_IF_POSITIVE) {
+    const value = hostConfig[field];
+    if (typeof value === "number" && value > 0) out.push({ rule });
+  }
+  return out;
+}
+
+/**
+ * Extra groups (docker, disk...) widen what a container can read. The
+ * orchestrator container joins the daemon's numeric gid to read its config, so
+ * a platform container may add numeric gids; nothing else may add any.
+ */
+function checkGroupAdd(
+  hostConfig: Record<string, unknown>,
+  platform: boolean,
+): Violation[] {
+  const groups = stringList(hostConfig.GroupAdd);
+  if (groups.length === 0) return [];
+  if (platform && groups.every((group) => /^[1-9]\d{0,9}$/.test(group))) {
+    return [];
+  }
+  return [{ rule: "group-add" }];
+}
+
+function checkScalarFields(hostConfig: Record<string, unknown>): Violation[] {
+  const out: Violation[] = [];
+  if (hostConfig.Privileged === true) out.push({ rule: "privileged" });
+  const score = hostConfig.OomScoreAdj;
+  if (typeof score === "number" && score < 0) {
+    out.push({ rule: "oom-score-adj" });
+  }
   const runtime = hostConfig.Runtime;
   if (typeof runtime === "string" && runtime !== "" && runtime !== "runc") {
     out.push({ rule: "runtime", detail: runtime });
   }
-  for (const cap of stringList(hostConfig.CapAdd)) {
-    const name = cap.toUpperCase().replace(/^CAP_/, "");
-    if (!config.capAllowlist.includes(name)) {
-      out.push({ rule: "cap-add", detail: name });
-    }
-  }
   return out;
+}
+
+function checkCapabilities(
+  hostConfig: Record<string, unknown>,
+  config: PolicyConfig,
+): Violation[] {
+  return [
+    ...stringList(hostConfig.CapAdd),
+    ...stringList(hostConfig.Capabilities),
+  ]
+    .map((cap) => cap.toUpperCase().replace(/^CAP_/, ""))
+    .filter((name) => !config.capAllowlist.includes(name))
+    .map((name) => ({ rule: "cap-add", detail: name }));
+}
+
+function checkHostConfigFlags(
+  hostConfig: Record<string, unknown>,
+  config: PolicyConfig,
+  platform: boolean,
+): Violation[] {
+  return [
+    ...checkScalarFields(hostConfig),
+    ...checkGroupAdd(hostConfig, platform),
+    ...checkPresentFields(hostConfig),
+    ...checkCapabilities(hostConfig, config),
+    ...checkLogConfig(hostConfig),
+    ...checkUnknownFields(hostConfig),
+  ];
 }
 
 async function evaluateContainerCreate(
@@ -690,17 +904,19 @@ async function evaluateContainerCreate(
   }
   const hostConfig = isRecord(body.HostConfig) ? body.HostConfig : {};
   const labels = labelsOf(body.Labels);
+  const platform = isPlatformContainer(labels);
   const mounts = await checkMounts(hostConfig, {
     config,
     resolvePath,
-    platform: isPlatformContainer(labels),
+    platform,
     ingress: isIngressContainer(labels),
   });
   return {
     violations: [
-      ...checkHostConfigFlags(hostConfig, config),
+      ...checkHostConfigFlags(hostConfig, config, platform),
       ...checkNamespaces(hostConfig),
       ...checkSecurityOpt(hostConfig),
+      ...checkMountKinds(hostConfig),
       ...mounts.violations,
     ],
     allowances: mounts.allowances,

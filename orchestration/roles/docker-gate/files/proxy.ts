@@ -14,6 +14,7 @@
  * Dependency-free on purpose (see http.ts).
  */
 
+import type { ReplayCache } from "./approval.ts";
 import {
   BufferedReader,
   type ByteSink,
@@ -64,6 +65,8 @@ export type ProxyDeps = {
   maxBodyBytes: number;
   /** Trusted approval keys (empty / absent: signed approvals are off). */
   approvalKeys?: readonly CryptoKey[];
+  /** Approval ids already used (single-use tokens); one per running gate. */
+  approvalReplay?: ReplayCache;
   /** Seconds since the epoch; tests inject a fixed clock. */
   nowSec?: () => number;
   /**
@@ -105,7 +108,12 @@ class MemorySink implements ByteSink {
   }
 }
 
-type BufferedBody = { raw: Uint8Array; parsed: ParsedBody };
+/** raw: the bytes relayed (framing included); payload: the decoded body. */
+type BufferedBody = {
+  raw: Uint8Array;
+  payload: Uint8Array;
+  parsed: ParsedBody;
+};
 
 /** Read a policy-relevant body fully: raw bytes (to relay) and parsed JSON. */
 async function bufferBody(
@@ -115,22 +123,24 @@ async function bufferBody(
 ): Promise<BufferedBody> {
   if (framing.kind === "none") {
     const raw = new Uint8Array(0);
-    return { raw, parsed: parseRequestBody(raw) };
+    return { raw, payload: raw, parsed: parseRequestBody(raw) };
   }
   if (framing.kind === "length") {
     if (framing.length > maxBytes) {
       throw new HttpError(413, "request body too large");
     }
     const raw = await reader.readExact(framing.length);
-    return { raw, parsed: parseRequestBody(raw) };
+    return { raw, payload: raw, parsed: parseRequestBody(raw) };
   }
   if (framing.kind === "chunked") {
     const sink = new MemorySink();
     const capture = { chunks: [] as Uint8Array[], maxBytes };
     await relayChunked(reader, sink, capture);
+    const payload = concatBytes(capture.chunks);
     return {
       raw: concatBytes(sink.parts),
-      parsed: parseRequestBody(concatBytes(capture.chunks)),
+      payload,
+      parsed: parseRequestBody(payload),
     };
   }
   throw new HttpError(400, "request body without framing");
@@ -245,6 +255,16 @@ type Exchange = { keepAlive: boolean; upgraded: boolean };
 
 type Judged = { route: string; buffered?: BufferedBody };
 
+/**
+ * The body as a plain JSON.parse reads it (field names as the client wrote
+ * them), only when the strict parser accepted it: what an approval digest
+ * covers.
+ */
+function plainJson(buffered: BufferedBody): unknown {
+  if (buffered.parsed.error !== undefined) return undefined;
+  return JSON.parse(new TextDecoder().decode(buffered.payload));
+}
+
 /** Hold and judge the body of a create call; log what the strict profile would refuse. */
 async function judge(
   head: RequestHead,
@@ -264,6 +284,7 @@ async function judge(
   if (needsBody) {
     buffered = await bufferBody(clientReader, framing, deps.maxBodyBytes);
     facts.body = buffered.parsed.json;
+    facts.plainBody = plainJson(buffered);
     facts.bodyError = buffered.parsed.error;
   }
   await review(facts, route, deps);
