@@ -17,6 +17,7 @@
 - name: Ensure ProxySQL config directory exists
   ansible.builtin.file:
     path: "{{ proxysql_config_dir }}"
+    follow: false
     state: directory
     owner: root
     group: "{{ turbopanel_group }}"
@@ -25,6 +26,7 @@
 - name: Ensure ProxySQL TLS directory exists
   ansible.builtin.file:
     path: "{{ proxysql_tls_dir }}"
+    follow: false
     state: directory
     owner: root
     group: "{{ turbopanel_group }}"
@@ -33,6 +35,7 @@
 - name: Ensure ProxySQL data directory exists
   ansible.builtin.file:
     path: "{{ proxysql_data_dir }}"
+    follow: false
     state: directory
     owner: root
     group: "{{ turbopanel_group }}"
@@ -64,6 +67,7 @@
 - name: Mark ProxySQL data directory as pre-owned
   ansible.builtin.file:
     path: "{{ proxysql_data_dir }}/.turbopanel-owned"
+    follow: false
     state: touch
     owner: root
     group: "{{ turbopanel_group }}"
@@ -86,6 +90,7 @@
 - name: Remove Docker bind-mount scar directory for admin.cnf
   ansible.builtin.file:
     path: "{{ proxysql_config_dir }}/admin.cnf"
+    follow: false
     state: absent
   when:
     - _proxysql_admin_stat.stat.exists | default(false)
@@ -96,16 +101,23 @@
     cmd: |
       set -euo pipefail
       f='{{ proxysql_config_dir }}/admin.cnf'
-      # Require a non-empty regular file; remove stray dirs from bind scars.
+      # The directory is writable by the daemon user, so never trust what is at
+      # the name: drop a planted link (unlink does not follow it), then install
+      # a fresh file (install replaces the name and sets mode/owner on the new
+      # file, never on a link target).
+      if [ -L "$f" ]; then
+        rm -f "$f"
+      fi
       if [ -d "$f" ]; then
         rm -rf "$f"
       fi
       if [ ! -f "$f" ] || [ ! -s "$f" ]; then
         pass="$(openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c 32)"
         umask 077
-        printf '%s\n' '[client]' "user={{ proxysql_admin_user }}" "password=${pass}" > "$f"
-        chmod 0640 "$f"
-        chown root:{{ turbopanel_group }} "$f"
+        tmp="$(mktemp)"
+        trap 'rm -f "$tmp"' EXIT
+        printf '%s\n' '[client]' "user={{ proxysql_admin_user }}" "password=${pass}" > "$tmp"
+        install -m 0640 -o root -g {{ turbopanel_group }} "$tmp" "$f"
         echo created
       fi
     executable: /bin/bash
@@ -116,6 +128,7 @@
 - name: Ensure ProxySQL admin.cnf is group-readable for the daemon
   ansible.builtin.file:
     path: "{{ proxysql_config_dir }}/admin.cnf"
+    follow: false
     owner: root
     group: "{{ turbopanel_group }}"
     mode: "0640"
@@ -131,6 +144,7 @@
 - name: Remove Docker bind-mount scar directory for monitor.cnf
   ansible.builtin.file:
     path: "{{ proxysql_config_dir }}/monitor.cnf"
+    follow: false
     state: absent
   when:
     - _proxysql_monitor_stat.stat.exists | default(false)
@@ -141,15 +155,23 @@
     cmd: |
       set -euo pipefail
       f='{{ proxysql_config_dir }}/monitor.cnf'
+      # The directory is writable by the daemon user, so never trust what is at
+      # the name: drop a planted link (unlink does not follow it), then install
+      # a fresh file (install replaces the name and sets mode/owner on the new
+      # file, never on a link target).
+      if [ -L "$f" ]; then
+        rm -f "$f"
+      fi
       if [ -d "$f" ]; then
         rm -rf "$f"
       fi
       if [ ! -f "$f" ] || [ ! -s "$f" ]; then
         pass="$(openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c 32)"
         umask 077
-        printf '%s\n' '[client]' "user={{ proxysql_monitor_user }}" "password=${pass}" > "$f"
-        chmod 0640 "$f"
-        chown root:{{ turbopanel_group }} "$f"
+        tmp="$(mktemp)"
+        trap 'rm -f "$tmp"' EXIT
+        printf '%s\n' '[client]' "user={{ proxysql_monitor_user }}" "password=${pass}" > "$tmp"
+        install -m 0640 -o root -g {{ turbopanel_group }} "$tmp" "$f"
         echo created
       fi
     executable: /bin/bash
@@ -160,6 +182,7 @@
 - name: Ensure ProxySQL monitor.cnf is group-readable for the daemon
   ansible.builtin.file:
     path: "{{ proxysql_config_dir }}/monitor.cnf"
+    follow: false
     owner: root
     group: "{{ turbopanel_group }}"
     mode: "0640"
@@ -213,10 +236,18 @@
 - name: Remove Docker bind-mount scar directory for proxysql.cnf
   ansible.builtin.file:
     path: "{{ proxysql_config_dir }}/proxysql.cnf"
+    follow: false
     state: absent
   when:
     - _proxysql_cnf_stat.stat.exists | default(false)
     - _proxysql_cnf_stat.stat.isdir | default(false)
+
+- name: Remove a link planted at the proxysql.cnf path
+  ansible.builtin.file:
+    path: "{{ proxysql_config_dir }}/proxysql.cnf"
+    state: absent
+    follow: false
+  when: _proxysql_cnf_stat.stat.islnk | default(false)
 
 - name: Re-stat proxysql.cnf after scar cleanup
   ansible.builtin.stat:
@@ -237,18 +268,34 @@
 - name: Ensure existing proxysql.cnf is group-writable for the daemon
   ansible.builtin.file:
     path: "{{ proxysql_config_dir }}/proxysql.cnf"
+    follow: false
     owner: root
     group: "{{ turbopanel_group }}"
     mode: "0660"
   when: _proxysql_cnf_stat.stat.isreg | default(false)
 
+- name: Ensure the root-only libexec directory exists
+  ansible.builtin.file:
+    path: "{{ proxysql_libexec_dir }}"
+    state: directory
+    follow: false
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Remove the old readiness script from the daemon-writable config directory
+  ansible.builtin.file:
+    path: "{{ proxysql_config_dir }}/wait-ready.sh"
+    state: absent
+    follow: false
+
 - name: Install ProxySQL readiness wait script
   ansible.builtin.template:
     src: wait-ready.sh.j2
-    dest: "{{ proxysql_config_dir }}/wait-ready.sh"
+    dest: "{{ proxysql_wait_ready_script }}"
     owner: root
     group: root
-    mode: "0750"
+    mode: "0755"
 
 - name: Install turbopanel-proxysql-stack systemd unit
   ansible.builtin.template:

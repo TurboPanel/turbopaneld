@@ -31,7 +31,10 @@ function* tasksIn(node: Node): Generator<Record<string, unknown>> {
   }
   if (node === null || typeof node !== "object") return;
   const record = node as Record<string, unknown>;
-  if ("ansible.builtin.file" in record || "ansible.posix.acl" in record) {
+  if (
+    "ansible.builtin.file" in record || "ansible.posix.acl" in record ||
+    "ansible.builtin.shell" in record || "ansible.builtin.command" in record
+  ) {
     yield record;
   }
   for (const value of Object.values(record)) yield* tasksIn(value);
@@ -117,4 +120,108 @@ test("an ACL task below a platform parent never follows a link or recurses", asy
     }
   }
   assert(offenders.length === 0, offenders.join("\n"));
+});
+
+function commandText(task: Record<string, unknown>): string {
+  const body =
+    (task["ansible.builtin.shell"] ?? task["ansible.builtin.command"]) as
+      | string
+      | Record<string, unknown>
+      | undefined;
+  if (body === undefined) return "";
+  if (typeof body === "string") return body;
+  const argv = Array.isArray(body.argv) ? body.argv.join(" ") : "";
+  return `${body.cmd ?? ""} ${argv}`;
+}
+
+test("no shell or command task chowns or chmods recursively over a path", async () => {
+  const offenders: string[] = [];
+  for (const path of await yamlFiles()) {
+    const doc = parse(await Deno.readTextFile(path));
+    for (const task of tasksIn(doc)) {
+      if (task["ansible.builtin.file"] || task["ansible.posix.acl"]) continue;
+      // The proxysql pre-own runs chown -R inside a throwaway container, where
+      // -R does not follow links (it never touches the host's own files).
+      if (/docker\s+run/.test(commandText(task))) continue;
+      if (/\bch(own|mod)\s+(-[a-zA-Z]*R|--recursive)/.test(commandText(task))) {
+        offenders.push(`${relative(ORCHESTRATION, path)}: ${task.name}`);
+      }
+    }
+  }
+  assert(offenders.length === 0, offenders.join("\n"));
+});
+
+const DAEMON_WRITABLE_ROLES = ["orchestrator", "proxysql"];
+
+async function tasksOfRole(role: string) {
+  const path = join(ORCHESTRATION, "roles", role, "tasks", "main.yml");
+  return [...tasksIn(parse(await Deno.readTextFile(path)))];
+}
+
+test("orchestrator and proxysql tasks never chown/chmod through a name the daemon user can swap", async () => {
+  const offenders: string[] = [];
+  for (const role of DAEMON_WRITABLE_ROLES) {
+    for (const task of await tasksOfRole(role)) {
+      if (task["ansible.builtin.file"]) {
+        const file = task["ansible.builtin.file"] as Record<string, unknown>;
+        if (file.follow !== false) offenders.push(`${role}: ${task.name}`);
+      } else if (/\bch(own|mod)\b/.test(commandText(task))) {
+        // Shell tasks create files with `install`, which replaces the name.
+        if (!/docker\s+run/.test(commandText(task))) {
+          offenders.push(`${role}: ${task.name}`);
+        }
+      }
+    }
+  }
+  assert(offenders.length === 0, offenders.join("\n"));
+});
+
+test("shell tasks that write daemon-writable cnf files drop links first and use install", async () => {
+  const offenders: string[] = [];
+  for (const role of DAEMON_WRITABLE_ROLES) {
+    for (const task of await tasksOfRole(role)) {
+      const cmd = commandText(task);
+      if (!/\.cnf'/.test(cmd) || !task["ansible.builtin.shell"]) continue;
+      if (!/\[ -L "\$f" \]/.test(cmd) || !/\binstall -m/.test(cmd)) {
+        offenders.push(`${role}: ${task.name}`);
+      }
+    }
+  }
+  assert(offenders.length === 0, offenders.join("\n"));
+});
+
+test("root-run readiness scripts live in a root-only directory, not the daemon-writable config dir", async () => {
+  for (const role of DAEMON_WRITABLE_ROLES) {
+    const unit = await Deno.readTextFile(
+      join(
+        ORCHESTRATION,
+        "roles",
+        role,
+        "templates",
+        `turbopanel-${role}-stack.service.j2`,
+      ),
+    );
+    assert(
+      !/_config_dir \}\}\/wait-ready\.sh/.test(unit),
+      `${role} unit runs a script from its config dir`,
+    );
+    assert(
+      unit.includes(`${role}_wait_ready_script`),
+      `${role} unit must use the libexec script`,
+    );
+    const tasks = await tasksOfRole(role);
+    const dir = tasks.find((t) =>
+      String(
+        (t["ansible.builtin.file"] as Record<string, unknown> | undefined)
+          ?.path,
+      ) ===
+        `{{ ${role}_libexec_dir }}`
+    );
+    const file = dir?.["ansible.builtin.file"] as Record<string, unknown>;
+    assert(
+      file && file.owner === "root" && file.group === "root" &&
+        file.mode === "0755",
+      `${role} libexec dir must be root:root 0755`,
+    );
+  }
 });
