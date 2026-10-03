@@ -1236,19 +1236,25 @@ function formatOpenLiteSpeedAdminValue(value: PhpAdminValue): string {
 }
 
 /**
- * Answer 403 for script files the vhost does not run. OpenLiteSpeed serves any
- * file it has no handler for as plain text, so a `.php` file in a static site
- * (or a `.phtml` next to a `.php` handler) would hand its source to anyone who
- * asks. `.php` itself is left alone when the vhost has the LSAPI handler.
+ * Answer 403 for server-side script files the vhost does not run. OpenLiteSpeed
+ * serves any file it has no handler for as plain text, so a `.php3` (the
+ * handler only runs `.php`), a `.phtml`, or an editor backup such as
+ * `.php.bak` or `.php~` would hand its source to anyone who asks.
+ *
+ * `.php` itself (and `/a.php/extra` path-info) is left alone when the vhost has
+ * the LSAPI handler. `.sh`/`.py`/`.pl` are not listed: no scripthandler or CGI
+ * context in our config executes them, so they are ordinary static downloads
+ * and carry no hidden source. `.cgi` stays denied as a server-side type.
  */
 function openlitespeedScriptDenyRewrite(phpHandled: boolean): string {
-  const exts = phpHandled
-    ? "phtml|phar|phps|pl|py|cgi|sh"
-    : "php[0-9]?|phtml|phar|phps|pl|py|cgi|sh";
+  const family = "php[0-9]+|phtml|phar|phps|pht|phpt|inc|cgi";
+  const denied = phpHandled ? family : `php|${family}`;
+  const backups = "~|\\.(bak|old|orig|save|swp|swo|tmp|dist|txt)";
   return `rewrite {
   enable                    1
   rules                     <<<END_rules
-RewriteRule \\.(${exts})$ - [F,L,NC]
+RewriteRule \\.(${denied})(/.*)?$ - [F,L,NC]
+RewriteRule \\.(php|${family})(${backups})$ - [F,L,NC]
 END_rules
 }
 `;
