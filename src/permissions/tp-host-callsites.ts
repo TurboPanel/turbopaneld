@@ -85,6 +85,19 @@ const SITE = `${HOME}/sites/svc1`;
 const RELEASE = `${SITE}/releases/20260927-120000`;
 const STAGED = `${P}/tmp/staged`;
 const SSH_KEYS = `${P}/etc/ssh/turbopanel/authorized_keys`;
+/** A sandboxed build: `work/<id>` holding the clone, the runner installed. */
+const BUILD_ID = "0123456789abcdef0123456789abcdef";
+const PROJECT_ID = "01a0e39d-0418-7852-bc47-bc2f8422d404";
+const BUILD_TREE: CallSiteSetup = {
+  dirs: [
+    `${P}/var/lib/turbopanel-build/work/${BUILD_ID}/source`,
+    `${P}/var/lib/turbopanel-build/cache`,
+  ],
+  files: {
+    [`${P}/opt/turbopanel/lib/tp-build-runner`]: "#!/bin/sh\n",
+    [`${P}/etc/resolv.conf`]: "nameserver 9.9.9.9\n",
+  },
+};
 const DROP_IN = `${P}/etc/ssh/sshd_config.d/60-turbopanel.conf`;
 const ACME_CERTS = `${STATE}/instance-acme/caddy/certificates`;
 const ACME_CERT =
@@ -848,6 +861,22 @@ const SITES: CallSite[] = [
   ),
 
   // --- release promotion ----------------------------------------------------
+  tpHost(
+    'src/deploy/release/build-sandbox.ts|["-n","build-run",work.buildId,work.projectKey],MANAGED',
+    {
+      argv: ["build-run", BUILD_ID, PROJECT_ID],
+      stdin: "tp-build-spec 1\ncwd source\nrun dHJ1ZQ==\nend\n",
+      setup: BUILD_TREE,
+    },
+  ),
+  tpHost(
+    'src/deploy/release/build-sandbox.ts|["-n","build-return",work.buildId],MANAGED',
+    { argv: ["build-return", BUILD_ID], setup: BUILD_TREE },
+  ),
+  tpHost(
+    'src/deploy/release/build-sandbox.ts|["-n","systemctl","stop",`turbopanel-build-${work.buildId}.service`],MANAGED',
+    { argv: ["systemctl", "stop", `turbopanel-build-${BUILD_ID}.service`] },
+  ),
   tpHost('src/deploy/release/promote.ts|["-n","mkdir","-p","--",to]', {
     argv: ["mkdir", "-p", "--", RELEASE],
   }),

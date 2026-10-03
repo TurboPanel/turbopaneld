@@ -2519,10 +2519,19 @@ BUILD_RUNTIME_MAX_SEC=1800
 BUILD_SYSTEMD_FLOOR=255
 BUILD_SYSTEMD_MIN=247
 # Loopback, private (10/8 covers the tp0 fabric), CGNAT, link-local (cloud
-# metadata), benchmark, multicast and reserved ranges. The host's own
-# resolvers are allowed back in (systemd lets IPAddressAllow= win).
+# metadata), benchmark, multicast and reserved ranges, on every port. Nothing
+# is allowed back in (an IPAddressAllow= wins over the deny for every port):
+# the build resolves through its own resolv.conf naming only public
+# nameservers, which public egress already reaches.
 BUILD_DENY_V4="0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 169.254.0.0/16 172.16.0.0/12 192.0.0.0/24 192.168.0.0/16 198.18.0.0/15 224.0.0.0/3"
-BUILD_DENY_V6="::/128 ::1/128 fc00::/7 fe80::/10 ff00::/8"
+# NAT64 (64:ff9b::/96) and 6to4 (2002::/16) embed IPv4 addresses, private
+# ones included, so both are denied whole.
+BUILD_DENY_V6="::/128 ::1/128 64:ff9b::/96 2002::/16 fc00::/7 fe80::/10 ff00::/8"
+# Used when the host names no public nameserver (a loopback stub with
+# private upstreams, a LAN router): never a loopback, private or link-local
+# resolver, which would open that address to the build.
+BUILD_FALLBACK_RESOLVERS="1.1.1.1 8.8.8.8"
+BUILD_RESOLV_DIR="$P/run/tpbuild"
 
 tp_build_id_ok() {
   case "$1" in
@@ -2602,17 +2611,66 @@ tp_build_unit_state() {
   systemctl show -p ActiveState --value -- "$1"
 }
 
-# The host's nameservers as /32 or /128, one per line: literal addresses only.
-tp_build_resolvers() {
-  [ -f "$P/etc/resolv.conf" ] || return 0
-  awk '$1 == "nameserver" { sub(/%.*/, "", $2); print $2 }' "$P/etc/resolv.conf" |
+# True for a literal address outside every range in BUILD_DENY_V4/V6.
+tp_build_ip_public() {
+  case "$1" in
+    *:*)
+      case "$(printf '%s' "$1" | tr 'A-F' 'a-f')" in
+        ::*|64:ff9b:*|2002:*|fc*|fd*|fe8*|fe9*|fea*|feb*|ff*) return 1 ;;
+      esac
+      return 0
+      ;;
+    *.*.*.*)
+      printf '%s\n' "$1" | awk -F. '
+        NF != 4 { exit 1 }
+        {
+          for (i = 1; i <= 4; i++) if ($i !~ /^[0-9]+$/ || $i + 0 > 255) exit 1
+          a = $1 + 0; b = $2 + 0; c = $3 + 0
+          if (a == 0 || a == 10 || a == 127 || a >= 224) exit 1
+          if (a == 100 && b >= 64 && b <= 127) exit 1
+          if (a == 169 && b == 254) exit 1
+          if (a == 172 && b >= 16 && b <= 31) exit 1
+          if (a == 192 && (b == 168 || (b == 0 && c == 0))) exit 1
+          if (a == 198 && (b == 18 || b == 19)) exit 1
+        }'
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+# The public nameservers a resolv.conf names, one per line (literal
+# addresses only; zone ids dropped).
+tp_build_public_resolvers() {
+  [ -f "$1" ] || return 0
+  awk '$1 == "nameserver" { sub(/%.*/, "", $2); print $2 }' "$1" |
     while IFS= read -r _rs; do
       case "$_rs" in
-        ''|*[!0-9A-Fa-f:.]*) ;;
-        *:*) printf '%s/128\n' "$_rs" ;;
-        *.*.*.*) printf '%s/32\n' "$_rs" ;;
+        ''|*[!0-9A-Fa-f:.]*) continue ;;
       esac
+      if tp_build_ip_public "$_rs"; then printf '%s\n' "$_rs"; fi
     done
+}
+
+# Write the build's resolv.conf (root-owned 0644 under /run/tpbuild): the
+# host's public nameservers, else systemd-resolved's public upstreams (behind
+# the 127.0.0.53 stub), else BUILD_FALLBACK_RESOLVERS.
+tp_build_write_resolv() {
+  _rv="$(tp_build_public_resolvers "$P/etc/resolv.conf")"
+  [ -n "$_rv" ] || _rv="$(tp_build_public_resolvers "$P/run/systemd/resolve/resolv.conf")"
+  if [ -z "$_rv" ]; then
+    _rv="$(printf '%s\n' $BUILD_FALLBACK_RESOLVERS)"
+    printf 'tp-host: note: the host names no public nameserver; this build resolves through %s\n' \
+      "$BUILD_FALLBACK_RESOLVERS" >&2
+  fi
+  mkdir -m 0755 -- "$BUILD_RESOLV_DIR" 2>/dev/null || [ -d "$BUILD_RESOLV_DIR" ] ||
+    tp_die "cannot create $BUILD_RESOLV_DIR"
+  tp_pin_dir "$BUILD_RESOLV_DIR" || tp_die "refusing $BUILD_RESOLV_DIR"
+  [ "$(stat -c '%u' .)" = "$(id -u)" ] || tp_die "refusing $BUILD_RESOLV_DIR: not owned by root"
+  rm -f -- ./resolv.conf.new
+  printf '%s\n' "$_rv" | awk '{ print "nameserver " $0 }' >./resolv.conf.new
+  chmod 0644 ./resolv.conf.new
+  mv -f -- ./resolv.conf.new ./resolv.conf
+  cd /
 }
 
 # One host-wide build at a time (root-only lock), and never alongside a build
@@ -2639,6 +2697,7 @@ tp_verb_build_run() {
   [ "$_br_v" -ge "$BUILD_SYSTEMD_MIN" ] ||
     tp_die "build-run: systemd $_br_v cannot sandbox a build; the supported floor is Debian 13 / Ubuntu 24.04"
   tp_build_lock
+  tp_build_write_resolv
   _br_work="$R_BUILD/work/$1"
   _br_cache="$R_BUILD/cache/$2"
   tp_build_work_pin "$1"
@@ -2655,10 +2714,14 @@ tp_verb_build_run() {
     -p RestrictSUIDSGID=yes -p ProtectSystem=strict -p ProtectHome=yes \
     -p PrivateTmp=yes -p PrivateDevices=yes -p TemporaryFileSystem="$R_BUILD:ro" \
     -p LoadCredential="tp-build-runner:$BUILD_RUNNER" \
-    -p BindPaths="$_br_work" -p BindPaths="$_br_cache"
+    -p BindPaths="$_br_work" -p BindPaths="$_br_cache" \
+    -p BindReadOnlyPaths="$BUILD_RESOLV_DIR/resolv.conf:$P/etc/resolv.conf"
+  # systemd-resolved's varlink socket (nss-resolve) and the system bus would
+  # resolve, and talk, through the host instead of the build's resolv.conf.
   for _br_hide in "$R_CONFIG" "$R_STATE" "$R_LOG" "$R_RUN" "$R_PRINCIPALS" "$P/srv" \
     "$P/backup" "$P/run/docker.sock" "$P/var/run/docker.sock" "$P/run/containerd" \
-    "$P/run/turbopanel-gate" "$P/var/lib/docker" "$P/etc/ssh" "$P/etc/wireguard"; do
+    "$P/run/turbopanel-gate" "$P/var/lib/docker" "$P/etc/ssh" "$P/etc/wireguard" \
+    "$P/run/systemd/resolve/io.systemd.Resolve" "$P/run/dbus/system_bus_socket"; do
     set -- "$@" -p InaccessiblePaths="-$_br_hide"
   done
   set -- "$@" -p ProtectKernelTunables=yes -p ProtectKernelModules=yes \
@@ -2675,9 +2738,6 @@ tp_verb_build_run() {
   [ "$_br_v" -lt 257 ] || set -- "$@" -p PrivatePIDs=yes
   set -- "$@" -p RestrictAddressFamilies="AF_INET AF_INET6 AF_UNIX" \
     -p IPAddressDeny="$BUILD_DENY_V4 $BUILD_DENY_V6"
-  _br_allow="$(tp_build_resolvers | tr '\n' ' ')"
-  _br_allow="${_br_allow% }"
-  [ -z "$_br_allow" ] || set -- "$@" -p IPAddressAllow="$_br_allow"
   set -- "$@" -p Slice="$BUILD_SLICE" -p MemoryMax="$BUILD_MEMORY_MAX" -p MemorySwapMax=0 \
     -p CPUQuota="$BUILD_CPU_QUOTA" -p TasksMax=1024 -p IOWeight=50 -p LimitFSIZE=4G \
     -p LimitNOFILE=65536 -p LimitCORE=0 -p RuntimeMaxSec="$BUILD_RUNTIME_MAX_SEC" \
