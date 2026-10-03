@@ -56,6 +56,7 @@ export const TP_HOST_VERBS: ReadonlySet<string> = new Set([
   "php-test",
   "publish-open",
   "publish",
+  "php-loopback-sync",
 ]);
 
 export type HostSudoOptions = Parameters<typeof playbooksNeedRootHelper>[0] & {
