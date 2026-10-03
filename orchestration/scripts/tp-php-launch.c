@@ -168,6 +168,7 @@ static int derived(const char *value, const char *prefix, const char *middle,
 /* The values, once every key is present exactly once. */
 static const char *check_values(const char *site, struct reg *r) {
   const char *user = r->v[K_USER];
+  char principal[VAL_MAX];
   if (!is(r->v[K_VERSION], "1")) return "registry version";
   if (!site_id_ok(site) || !is(r->v[K_SITE], site)) return "registry site";
   if (!is(r->v[K_MODE], "lsphp-attached")) return "mode is not lsphp-attached";
@@ -178,8 +179,10 @@ static const char *check_values(const char *site, struct reg *r) {
     return "gid outside the principal band";
   if (!number_in(r->v[K_CHILDREN], 1, 64, &r->children)) return "children";
   if (!derived(r->v[K_GROUP], "", user, "-grp")) return "group is not <user>-grp";
-  if (!derived(r->v[K_HOME], PRINCIPALS "/", user, "/home")) return "home";
-  if (!derived(r->v[K_TMP], PRINCIPALS "/", user, "/tmp")) return "tmp";
+  /* The root-owned principal home holds home/ and tmp/ side by side. */
+  snprintf(principal, sizeof principal, PRINCIPALS "/%s/", user);
+  if (!derived(r->v[K_HOME], principal, "home", "")) return "home";
+  if (!derived(r->v[K_TMP], principal, "tmp", "")) return "tmp";
   if (!derived(r->v[K_INI], PHP_SITE_CONF "/", site, "/php.ini")) return "ini";
   for (size_t i = 0; i < sizeof SERIES / sizeof SERIES[0]; i++)
     if (is(r->v[K_PHP], SERIES[i].php)) r->series = &SERIES[i];
@@ -569,15 +572,14 @@ static void fixed_process_state(void) {
  * Refused rather than changed, like every other input.
  */
 static void check_umask(void) {
-  char buf[4096];
+  char buf[4096] = {0};
   const char *field;
   unsigned long mask;
   int fd = open("/proc/self/status", O_RDONLY | O_CLOEXEC);
-  size_t len;
   if (fd < 0) fail("/proc/self/status");
-  len = read_all(fd, buf, sizeof buf - 1);
+  /* One byte short of the buffer, so it stays NUL-terminated. */
+  read_all(fd, buf, sizeof buf - 1);
   close(fd);
-  buf[len] = 0;
   field = strstr(buf, "\nUmask:");
   if (!field) refuse("no Umask in /proc/self/status");
   mask = strtoul(field + 7, NULL, 8);

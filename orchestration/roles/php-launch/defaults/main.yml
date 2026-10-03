@@ -19,5 +19,5 @@ php_launch_arch_map:
 # (scripts/build-tp-php-launch.sh fails the release bundle on a mismatch; run
 # it with --print after a source change and update both pins in the same PR).
 php_launch_sha256:
-  amd64: "740e2b470cd418c29cf11638096f477ab5b6e175025a74a3e620eef682d3f6ed"
-  arm64: "852cd1ab4afe5dbfeaa0066ddbe1766a1e8a66cb6ddec76e403efb680bcf0c88"
+  amd64: "90926cc971fc7f157cede3f1891650f22795a1f083973a3a6dd5d0ce684b522a"
+  arm64: "ecd99ef2a0dc7eefc87002d9b25577b8d342de80dfc473efc70a8c9ad5698664"
