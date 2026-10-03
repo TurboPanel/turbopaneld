@@ -8,7 +8,10 @@ import {
 } from "../deploy/compose-files.ts";
 import { writeReleaseManifest } from "../deploy/release/deployment-json.ts";
 import { createTempLayout } from "../testing/temp-layout.ts";
-import { setHostingCaddyAccountCheckForTest } from "../deploy/ensure-hosting-caddy.ts";
+import {
+  setHostingCaddyAccountCheckForTest,
+  setIngressGuardCheckForTest,
+} from "../deploy/ensure-hosting-caddy.ts";
 import { resolveLayout } from "../paths/layout.ts";
 import {
   COMMAND_LOG_PHASES,
@@ -161,6 +164,9 @@ async function withDeployEnv(
   const restoreAccountCheck = setHostingCaddyAccountCheckForTest(() =>
     Promise.resolve(true)
   );
+  const restoreGuardCheck = setIngressGuardCheckForTest(() =>
+    Promise.resolve(true)
+  );
   try {
     await fn({
       stateDir: fixture.dirs.stateDir,
@@ -170,6 +176,7 @@ async function withDeployEnv(
     });
   } finally {
     restoreAccountCheck();
+    restoreGuardCheck();
     for (const [key, value] of previous) {
       if (value === undefined) Deno.env.delete(key);
       else Deno.env.set(key, value);

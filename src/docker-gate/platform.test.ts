@@ -57,6 +57,9 @@ const test = Deno.test.bind(Deno);
 
 const identity: ResolvePath = (path) => Promise.resolve(path);
 
+/** The ingress network's bridge gateway: the shared Traefik's PROXY peer. */
+const INGRESS_GATEWAYS = ["172.19.0.1"];
+
 test("the gate's label names are the ones the platform stamps", () => {
   assertEquals(LABEL_ROLE, DEPLOY_ROLE);
   assertEquals(LABEL_SYSTEM_COMPONENT, DEPLOY_SYSTEM_COMPONENT);
@@ -284,7 +287,7 @@ test("the same binds from a container without platform labels are findings", asy
 });
 
 test("the ingress socket-proxy service stays a finding until the stage-3 switch drops it", async () => {
-  const services = servicesOf(traefikCompose("ingress-net", {
+  const services = servicesOf(traefikCompose("ingress-net", INGRESS_GATEWAYS, {
     component: SYSTEM_HOSTING_INGRESS_COMPONENT,
     serviceId: "00000000-0000-4000-8000-0000000000bb",
     composeServiceName: "traefik",
@@ -421,7 +424,7 @@ test("the daemon mounts the directory the gate's read-only listener lives in", (
 
 test("in gate mode both real Traefik emitters pass with no finding and no socket proxy left", async () => {
   const shared = servicesOf(
-    traefikCompose("ingress-net", HOSTING_INGRESS, {
+    traefikCompose("ingress-net", INGRESS_GATEWAYS, HOSTING_INGRESS, {
       source: "gate",
       keepSocketProxy: false,
     }),

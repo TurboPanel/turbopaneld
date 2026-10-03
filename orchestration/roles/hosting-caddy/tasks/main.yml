@@ -148,3 +148,73 @@
   ansible.builtin.file:
     path: "{{ turbopanel_state_dir }}/hosting-caddy"
     state: absent
+
+# Ingress guard. Root-owned under <install>/lib, which the daemon cannot write
+# (it can write /etc/turbopanel), so the daemon cannot widen its own guard.
+# Readable by the daemon's group so it can tell which version is installed.
+# nft comes with the nftables package (kept for the iptables-nft shims; its
+# boot service stays disabled, see daemon-prereqs firewall-takeover.yml).
+- name: Ensure nft is installed
+  ansible.builtin.apt:
+    name: nftables
+    state: present
+
+- name: Install the ingress guard ruleset
+  ansible.builtin.template:
+    src: ingress-guard.nft.j2
+    dest: "{{ hosting_ingress_guard_rules }}"
+    owner: root
+    group: "{{ turbopanel_group }}"
+    mode: "0640"
+    validate: /usr/sbin/nft -c -f %s
+  register: _ingress_guard_rules
+
+- name: Install the ingress guard unit
+  ansible.builtin.template:
+    src: turbopanel-ingress-guard.service.j2
+    dest: /etc/systemd/system/turbopanel-ingress-guard.service
+    owner: root
+    group: root
+    mode: "0644"
+  register: _ingress_guard_unit
+
+# docker.service refuses to start without the guard table (fails closed), with
+# no Requires= that would restart Docker whenever the guard restarts.
+- name: Ensure the Docker drop-in directory exists
+  ansible.builtin.file:
+    path: /etc/systemd/system/docker.service.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Install the Docker ingress guard drop-in
+  ansible.builtin.template:
+    src: docker-ingress-guard.conf.j2
+    dest: /etc/systemd/system/docker.service.d/turbopanel-ingress-guard.conf
+    owner: root
+    group: root
+    mode: "0644"
+  register: _ingress_guard_dropin
+
+- name: Enable and start the ingress guard
+  ansible.builtin.systemd:
+    name: turbopanel-ingress-guard.service
+    enabled: true
+    state: started
+    daemon_reload: "{{ _ingress_guard_unit.changed or _ingress_guard_dropin.changed }}"
+
+# `enabled: true` is a no-op on a unit that is already enabled, so a changed
+# [Install] section (docker.service.wants/) needs a reenable.
+- name: Re-enable the ingress guard after a unit change  # noqa: command-instead-of-module
+  when: _ingress_guard_unit.changed
+  ansible.builtin.command: systemctl reenable turbopanel-ingress-guard.service
+  changed_when: true
+
+# A oneshot that already ran does not re-read the file on `started`; reload
+# (an atomic table replace) when the ruleset or the unit changed.
+- name: Reload the ingress guard after a change
+  when: _ingress_guard_rules.changed or _ingress_guard_unit.changed
+  ansible.builtin.systemd:
+    name: turbopanel-ingress-guard.service
+    state: reloaded
