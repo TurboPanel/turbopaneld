@@ -373,17 +373,15 @@ test("buildMetricsSample sanitizes GPU fields and clamps percents", () => {
 // Mirrored-contract parity — the actual drift gate between this file and its
 // twin in `turbopanel/src/daemon/metrics`. Deno tests in two repos cannot
 // import each other directly, so this reads the counterpart off the
-// co-located sibling checkout instead (`../turbopanel/...`, the same
-// sibling-checkout layout `scripts/check-metrics-legacy.ts` scans) and
+// co-located sibling checkout instead (`../turbopanel/...`) and
 // compares the mirrored surface area directly: schema version, event-kind
 // catalog, export set, and the file body itself. When the sibling repo isn't
-// checked out next to this one, the checks are skipped rather than failed
-// (matching `check-metrics-legacy.ts`'s absent-sibling handling) — this
-// repo's own suite still runs. No CI job currently checks out both repos and
-// runs tests (turbopanel's `metrics-legacy` job checks out both but only
-// runs the legacy-string guard, not this suite), so today these checks are
-// exercised in the co-located dev workspace, not CI; wiring a dual-checkout
-// CI job is a follow-up, not part of this change.
+// checked out next to this one, the checks are skipped rather than failed —
+// this repo's own suite still runs. No CI job here checks out both repos and
+// runs this suite (turbopanel's `contract-twin` job checks out both and runs
+// its own copy of the twin test), so today these checks are exercised in the
+// co-located dev workspace; wiring a dual-checkout CI job is a follow-up, not
+// part of this change.
 // ---------------------------------------------------------------------------
 
 const SIBLING_CONTRACT_URL = new URL(
