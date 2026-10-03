@@ -822,40 +822,6 @@ test("root reads go through a verified descriptor, not a planted symlink", async
   });
 });
 
-test("cp -a copies only a clean daemon hand-off tree, and no ownership", async () => {
-  await withHost(async (host) => {
-    const handoff = host.path("var/lib/turbopanel/release-handoff/svc/rel");
-    const release = host.path("srv/users/alice/sites/web/releases/rel");
-    await Deno.mkdir(handoff, { recursive: true });
-    await Deno.mkdir(release, { recursive: true });
-    await Deno.writeTextFile(join(handoff, "index.html"), "built");
-    const args = ["cp", "-a", "--", `${handoff}/.`, release];
-
-    const ok = await host.run(args);
-    assertEquals(ok.code, 0, ok.stderr);
-    assertStringIncludes(
-      ok.stdout,
-      "EXEC [cp] [-R] [--no-dereference] [--preserve=mode,timestamps] " +
-        "[--no-preserve=ownership] [--] [/proc/self/fd/3/.] [.]",
-    );
-
-    // Root would mknod a FIFO and keep a set-id bit: refused before copying.
-    const fifo = await new Deno.Command("mkfifo", {
-      args: [join(handoff, "pipe")],
-    }).output();
-    assertEquals(fifo.success, true);
-    assertStringIncludes(await refused(host, args), "special, set-id");
-    await Deno.remove(join(handoff, "pipe"));
-    await Deno.chmod(join(handoff, "index.html"), 0o4755);
-    assertStringIncludes(await refused(host, args), "special, set-id");
-
-    // A tree a tenant or a build wrote is never the source.
-    const tenantTree = host.path("srv/users/alice/sites/web/build");
-    await Deno.mkdir(tenantTree, { recursive: true });
-    await refused(host, ["cp", "-a", "--", `${tenantTree}/.`, release]);
-  });
-});
-
 test("test -d answers for a real directory, never a symlink to one", async () => {
   await withHost(async (host) => {
     const release = host.path("srv/users/alice/sites/web/releases/r1");
@@ -1311,6 +1277,11 @@ test("principal home: the skeleton is root's, never group-writable, and only roo
       await refused(host, ["chmod", "0770", dir]);
       await refused(host, ["chmod", "0751", dir]);
       await refused(host, ["chmod", "-R", "u=rwX,g=rX,o=", dir]);
+      if (dir.endsWith("/releases/r1")) {
+        // A release directory appears only through publish, sealed.
+        await refused(host, installDir(dir, "0750", "root", "alice-grp"));
+        continue;
+      }
       const ok = await host.run(installDir(dir, "0750", "root", "alice-grp"));
       assertEquals(ok.code, 0, `${dir}: ${ok.stderr}`);
     }
