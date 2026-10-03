@@ -29,6 +29,18 @@ import type {
   EnvironmentDeployCronJob,
   EnvironmentDeployNativeAppService,
 } from "../contracts/commands-contracts.ts";
+import {
+  sitePhpConfigDir,
+  sitePhpFpmConf,
+  sitePhpIni,
+  sitePhpKey,
+  sitePhpRuntimeId,
+  type SitePhpRuntimeSpec,
+  sitePhpServiceName,
+  sitePhpServiceUnit,
+  sitePhpSocketName,
+  sitePhpSocketUnit,
+} from "../deploy/site/php-runtime.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -2310,6 +2322,96 @@ test("php-test runs the installed unit's binary on its own config, as the owner"
       ]]
     ) {
       await refused(host, args);
+    }
+  });
+});
+
+test("per-site PHP: what the daemon renders for each mode and web server passes tp-host", async () => {
+  await withPhpHost(async (host) => {
+    const home = host.path("srv/users/alice");
+    const site = `${home}/sites/shop`;
+    for (const mode of ["fastcgi", "fpm"] as const) {
+      for (const webAccount of ["tpnginx", "tpapache"] as const) {
+        const id = sitePhpRuntimeId(sitePhpKey("env1", "shop"), mode, "8.4");
+        const spec: SitePhpRuntimeSpec = {
+          id,
+          mode,
+          series: "8.4",
+          user: "alice",
+          group: "alice-grp",
+          home,
+          configDir: host.path("etc/turbopanel"),
+          webAccount,
+        };
+        const dir = sitePhpConfigDir(spec.configDir, id);
+        const made = await host.run([
+          "install",
+          "-d",
+          "-m",
+          "0750",
+          "-o",
+          "root",
+          "-g",
+          "alice-grp",
+          dir,
+        ]);
+        assertEquals(made.code, 0, made.stderr);
+        const configs: Array<[string, string]> = [[
+          "php.ini",
+          sitePhpIni([
+            { key: "memory_limit", value: "256M" },
+            { key: "open_basedir", value: `${site}/current/public:/tmp` },
+            { key: "realpath_cache_ttl", value: "0" },
+            { key: "session.save_path", value: "/var/lib/php/sessions" },
+          ]),
+        ]];
+        if (mode === "fpm") {
+          configs.push([
+            "php-fpm.conf",
+            sitePhpFpmConf(spec, {
+              pool: [{ key: "pm.max_children", value: "8" }],
+              chdir: `${site}/current/public`,
+            }),
+          ]);
+        }
+        for (const [name, content] of configs) {
+          await Deno.writeTextFile(host.path("tmp/conf"), content);
+          const put = await host.run([
+            "install",
+            "-m",
+            "0640",
+            "-o",
+            "root",
+            "-g",
+            "alice-grp",
+            host.path("tmp/conf"),
+            `${dir}/${name}`,
+          ]);
+          assertEquals(put.code, 0, `${mode} ${name}: ${put.stderr}`);
+        }
+        if (mode === "fastcgi") {
+          const socket = await installUnit(
+            host,
+            sitePhpSocketName(id),
+            sitePhpSocketUnit(spec),
+          );
+          assertEquals(socket.code, 0, socket.stderr);
+        }
+        const service = await installUnit(
+          host,
+          sitePhpServiceName(id),
+          sitePhpServiceUnit(spec, {
+            writablePaths: [`-${site}/shared`, `-${site}/webroot`],
+          }),
+        );
+        assertEquals(
+          service.code,
+          0,
+          `${mode} ${webAccount}: ${service.stderr}`,
+        );
+        const tested = await host.run(["php-test", id]);
+        assertEquals(tested.code, 0, tested.stderr);
+      }
     }
   });
 });
