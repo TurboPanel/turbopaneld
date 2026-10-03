@@ -87,6 +87,8 @@ test("the build account is refused every platform loopback port the code owns", 
     "hosting Caddy admin/metrics": 18110,
     "app band start": 19100,
     "app band end": 19799,
+    "platform Postgres (postgres_expose_port)": 5432,
+    "legacy ProxySQL": 3306,
   };
   for (const port of PROXYSQL_RESERVED_PUBLISHED_PORTS) {
     owned[`database ingress ${port}`] = port;
@@ -102,7 +104,20 @@ test("the build account is refused every platform loopback port the code owns", 
 test("only platform ports are refused: ephemeral ports and the resolver stub stay open", async () => {
   const { stdout } = await run([TPBUILD], "sync");
   const ranges = deniedPorts(stdout);
-  for (const open of [53, 3000, 32768, 40000, 44999, 46000, 60999]) {
+  for (
+    const open of [
+      53,
+      3000,
+      32768,
+      40000,
+      44999,
+      45000,
+      45500,
+      45999,
+      46000,
+      60999,
+    ]
+  ) {
     assertEquals(
       ranges.some(([lo, hi]) => open >= lo && open <= hi),
       false,

@@ -42,8 +42,10 @@ BUILD_ACCOUNT="tpbuild"
 #   router and its metrics, 8443 the panel, 9400 GPU metrics, 13306 15432
 #   database proxy, 19080 19820 web server bootstrap and website, 33001 33002
 #   database HA, 18080-18999 and 19100-19799 site and app listen bands,
-#   45000-45999 managed private ports.
-DENY_PORTS="22 80 443 2019 2029 2039 6032 6070 6132 7080 7081 7443 8443 9400 13306 15432 19080 19820 33001 33002 18080-18999 19100-19799 45000-45999"
+#   5432 platform Postgres (when postgres_expose_port is true), 3306 legacy
+#   ProxySQL. Nothing is denied inside the kernel ephemeral range
+#   (32768-60999): a build worker may be handed any port there.
+DENY_PORTS="22 80 443 2019 2029 2039 6032 6070 6132 7080 7081 7443 8443 9400 13306 15432 19080 19820 33001 33002 5432 3306 18080-18999 19100-19799"
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 
 tp_die() {

@@ -796,9 +796,13 @@ it regresses:
     `src/orchestration/build-loopback.test.ts`): ssh 22, web 80/443, web
     server admin 2019/2029/2039, database proxy 6032/6070/6132/13306/15432,
     router 7080/7081/7443, panel 8443, GPU metrics 9400, 19080/19820, database
-    HA 33001/33002, site and app listen bands 18080-18999 and 19100-19799
-    (includes 18110), managed private ports 45000-45999. The resolver stub
-    (53) is not listed, so it stays reachable. **Residual risk, accepted by
+    HA 33001/33002, platform Postgres 5432 (when `postgres_expose_port` is
+    true), legacy ProxySQL 3306, site and app listen bands 18080-18999 and
+    19100-19799 (includes 18110). Nothing inside the kernel ephemeral range
+    (32768-60999) is listed, because a build's own workers may be handed any
+    port there; managed private ports (45000-45999) bind a non-loopback
+    address, so they are not listed either. The resolver stub (53) is not
+    listed, so it stays reachable. **Residual risk, accepted by
     the owner:** anything else listening on 127.0.0.1 on a port not in that
     list (for example a Docker port a site owner published on loopback with
     an ephemeral port) can be reached by a build, because nftables cannot
