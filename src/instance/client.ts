@@ -133,6 +133,7 @@ import {
 import { installOriginNeedsInsecureTls } from "./install-tls.ts";
 import { ManagedHaObserver } from "./ha-observe.ts";
 import { PgDeadPrimaryObserver } from "./pg-dead-primary-observe.ts";
+import { PgStandbySampler } from "./pg-standby-sampler.ts";
 import { BackupResultReporter } from "../backups/result-reporter.ts";
 import { AcmeIssuanceObserver } from "./acme-observe.ts";
 import { InstanceAcmeRenewalScheduler } from "./instance-acme-renew.ts";
@@ -155,6 +156,7 @@ import type {
  * module never imports handlers.
  */
 export type CommandDispatchDeps = {
+  verifyControlPlane?: () => Promise<void>;
   decryptSecrets?: (ciphertexts: string[]) => Promise<(string | null)[]>;
   sendCommandLogChunk?: SendCommandLogChunkFn;
   rehydrateDeploymentSecrets?: (
@@ -428,6 +430,7 @@ export class InstanceClient {
   #idlePresence: IdlePresence | undefined;
   #haObserver: ManagedHaObserver | undefined;
   #pgProbeObserver: PgDeadPrimaryObserver | undefined;
+  #pgStandbySampler: PgStandbySampler | undefined;
   #backupReporter: BackupResultReporter | undefined;
   #acmeObserver: AcmeIssuanceObserver | undefined;
   /** Panel certificate renewal. Independent of `#acmeObserver`. */
@@ -850,6 +853,7 @@ export class InstanceClient {
     this.#idlePresence = undefined;
     this.#haObserver?.detach();
     this.#pgProbeObserver?.detach();
+    this.#pgStandbySampler?.detach();
     this.#haObserver = undefined;
     this.#backupReporter?.detach();
     this.#backupReporter = undefined;
@@ -933,6 +937,7 @@ export class InstanceClient {
     this.#idlePresence?.detach();
     this.#haObserver?.detach();
     this.#pgProbeObserver?.detach();
+    this.#pgStandbySampler?.detach();
     this.#backupReporter?.detach();
     this.#acmeObserver?.detach();
     this.#metricsScheduler?.detach();
@@ -1355,6 +1360,8 @@ export class InstanceClient {
     this.#haObserver?.attach();
     this.#ensurePgProbeObserver();
     this.#pgProbeObserver?.attach();
+    this.#pgStandbySampler ??= new PgStandbySampler();
+    this.#pgStandbySampler.attach();
     this.#ensureBackupReporter().attach();
     this.#ensureAcmeObserver();
     this.#acmeObserver?.attach();
@@ -1401,6 +1408,7 @@ export class InstanceClient {
       this.#idlePresence?.detach();
       this.#haObserver?.detach();
       this.#pgProbeObserver?.detach();
+      this.#pgStandbySampler?.detach();
       this.#backupReporter?.detach();
       this.#acmeObserver?.detach();
       this.#metricsScheduler?.detach();
@@ -1740,6 +1748,7 @@ export class InstanceClient {
     if (!apiClient) return undefined;
     return {
       decryptSecrets: (ciphertexts) => apiClient.decryptSecrets(ciphertexts),
+      verifyControlPlane: () => apiClient.ping(),
       rehydrateDeploymentSecrets: (deployments) =>
         apiClient.rehydrateDeploymentSecrets(deployments),
       sendCommandLogChunk: (params) => apiClient.sendCommandLogChunk(params),
