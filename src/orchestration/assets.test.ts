@@ -1181,6 +1181,75 @@ test("node-runtime pins corepack by version and verified tarball digest", () => 
   );
 });
 
+function readNodeAppRuntimeFile(...parts: string[]): string {
+  return Deno.readTextFileSync(
+    join(fromMeta, "orchestration", "roles", "node-app-runtime", ...parts),
+  );
+}
+
+test("node-app-runtime pnpm plan: verified corepack, then pnpm/yarn shims in the series bin", () => {
+  const version = requireCapture(
+    readRoleDefaults("node-app-runtime"),
+    /^corepack_version:\s*"([\d.]+)"\s*$/m,
+    "corepack_version",
+  );
+  const table = readDigestTable(
+    readRoleDefaults("node-app-runtime"),
+    "corepack_sha256",
+  );
+  assertEquals(SHA256_HEX.test(table[version]?.[""] ?? ""), true);
+  // Same pin as the panel's own node-runtime role: one corepack everywhere.
+  assertEquals(
+    table[version]?.[""],
+    readDigestTable(readRoleDefaults("node-runtime"), "corepack_sha256")[
+      version
+    ]?.[""],
+  );
+  const tasks = readNodeAppRuntimeFile("tasks", "vendor-series.yml");
+  assertEquals(
+    tasks.includes(
+      'checksum: "sha256:{{ corepack_sha256[corepack_version] }}"',
+    ),
+    true,
+  );
+  const script = readNodeAppRuntimeFile("files", "install-series.sh");
+  // Only installs corepack when the tarball lacks one (Node 25+), from the
+  // verified local file, never a floating package spec.
+  assertEquals(script.includes('if [[ ! -e "${DEST}/bin/corepack" ]]'), true);
+  assertEquals(script.includes('"$COREPACK_TGZ"'), true);
+  assertEquals(/npm install[^\n]*corepack\s*$/m.test(script), false);
+  assertEquals(
+    script.includes(
+      'corepack" enable --install-directory "${DEST}/bin" pnpm yarn',
+    ),
+    true,
+  );
+  // Shims land before ownership is repaired so the build user can exec them,
+  // and the Node tarball is checked against the release's SHA-256 list.
+  assertEquals(
+    script.indexOf("enable --install-directory") < script.indexOf("chown -R"),
+    true,
+  );
+  assertEquals(script.includes("sha256sum -c"), true);
+});
+
+test("node-app-runtime scripts parse as bash", () => {
+  const result = new Deno.Command("bash", {
+    args: [
+      "-n",
+      join(
+        fromMeta,
+        "orchestration",
+        "roles",
+        "node-app-runtime",
+        "files",
+        "install-series.sh",
+      ),
+    ],
+  }).outputSync();
+  assertEquals(result.success, true);
+});
+
 test("caddy role pins an upstream SHA-256 for caddy_version on both architectures", () => {
   const yaml = readRoleDefaults("caddy");
   const version = /^caddy_version:\s*"([\d.]+)"\s*$/m.exec(yaml)?.[1];
