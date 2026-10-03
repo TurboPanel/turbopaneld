@@ -131,13 +131,23 @@ export function mergeExtended(
 ): MetricsExtended | undefined {
   const out: MetricsExtended = {};
   for (const part of parts) {
-    if (!part) continue;
-    if (part.host) out.host = { ...out.host, ...part.host };
-    if (part.docker) out.docker = { ...out.docker, ...part.docker };
-    if (part.ingress) out.ingress = { ...out.ingress, ...part.ingress };
-    if (part.text) out.text = { ...out.text, ...part.text };
-    if (part.blockDeviceText) out.blockDeviceText = part.blockDeviceText;
-    if (part.gpuText) out.gpuText = part.gpuText;
+    if (part) mergePart(out, part);
   }
   return Object.keys(out).length > 0 ? out : undefined;
+}
+
+const OBJECT_SECTIONS = ["host", "docker", "ingress", "text"] as const;
+
+function mergePart(out: MetricsExtended, part: MetricsExtended): void {
+  for (const key of OBJECT_SECTIONS) {
+    if (part[key]) out[key] = { ...out[key], ...part[key] };
+  }
+  Object.assign(out, pickArrays(part));
+}
+
+function pickArrays(part: MetricsExtended): MetricsExtended {
+  const arrays: MetricsExtended = {};
+  if (part.blockDeviceText) arrays.blockDeviceText = part.blockDeviceText;
+  if (part.gpuText) arrays.gpuText = part.gpuText;
+  return arrays;
 }
