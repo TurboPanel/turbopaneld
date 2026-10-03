@@ -483,6 +483,48 @@ export function resolveLayout(
 }
 
 /**
+ * The folders the daemon account (`tp`) writes directly under the config and
+ * state roots (P1-1 layout). `/etc/turbopanel` and `/var/lib/turbopanel` end up
+ * root-owned; these leaves are the only entries below them that `tp` owns, so
+ * it can create and rename inside them but cannot swap any root-owned sibling.
+ * `orchestration/roles/daemon-layout/defaults/main.yml` creates exactly this
+ * list (pinned by `src/orchestration/daemon-layout-leaves.test.ts`). Root
+ * tasks may touch a leaf itself, never anything inside it.
+ */
+export interface DaemonLeaf {
+  /** Path relative to the config or state root. */
+  name: string;
+  /** Octal mode string, as Ansible takes it. */
+  mode: string;
+}
+
+export const DAEMON_CONFIG_LEAVES: readonly DaemonLeaf[] = [
+  { name: "docker", mode: "0750" },
+  { name: "proxysql", mode: "0750" },
+  { name: "orchestrator", mode: "0750" },
+  { name: "node-apps", mode: "0750" },
+  // The hosting Caddy's config; the hosting-caddy role adds its default ACL.
+  { name: "hosting", mode: "0750" },
+];
+
+export const DAEMON_STATE_LEAVES: readonly DaemonLeaf[] = [
+  { name: "update", mode: "0750" },
+  { name: "system", mode: "0750" },
+  { name: "deployments", mode: "0750" },
+  { name: "ingress", mode: "0750" },
+  { name: "sites", mode: "0750" },
+  { name: "storage", mode: "0750" },
+  { name: "managed", mode: "0750" },
+  { name: "managed-intent", mode: "0700" },
+  { name: "backup", mode: "0750" },
+  { name: "spool", mode: "0700" },
+  { name: "network", mode: "0700" },
+  { name: "cloudflared/tunnels", mode: "0750" },
+  { name: "tls", mode: "0750" },
+  { name: "orchestrator", mode: "0750" },
+];
+
+/**
  * TurboFabric generated-state root (`<daemonStateDir>/network/`).
  * Private key lives at `wireguard/private.key` (mode 0600); reconcilable
  * facts at `state.json`. Never under `runDir`.

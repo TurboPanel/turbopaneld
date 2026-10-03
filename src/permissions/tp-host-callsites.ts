@@ -184,6 +184,7 @@ const PHP_SPEC: SitePhpRuntimeSpec = {
   group: "alice-grp",
   home: "/srv/users/alice",
   configDir: "/etc/turbopanel",
+  libDir: "/opt/turbopanel/lib",
   webAccount: "tpnginx",
 };
 const PHP_FPM_SPEC: SitePhpRuntimeSpec = {
@@ -301,6 +302,18 @@ const SITES: CallSite[] = [
   tpHost(`${PHP_APPLY}sudo(io,["ls","-1","--",io.unitDir])`, {
     argv: ["ls", "-1", "--", UNITS],
   }),
+  tpHost(
+    `${PHP_APPLY}sudoOrThrow(io,["php-loopback-sync"],"PHPloopbackrules")`,
+    {
+      argv: ["php-loopback-sync"],
+    },
+  ),
+  tpHost(
+    `${PHP_APPLY}sudoQuietly(io,["php-loopback-sync"],"PHPloopbackrules")`,
+    {
+      argv: ["php-loopback-sync"],
+    },
+  ),
   tpHost(`${PHP_APPLY}sudo(io,["php-test",files.spec.id])`, {
     argv: ["php-test", PHP_ID],
     setup: PHP_TEST_SETUP,
@@ -605,6 +618,10 @@ const SITES: CallSite[] = [
     {
       argv: ["usermod", "-aG", "tpsftp", "alice"],
     },
+  ),
+  tpHost(
+    'src/deploy/retire-principals.ts|["-n","principal-remove",username]',
+    { argv: ["principal-remove", "alice"] },
   ),
   tpHost(
     'src/deploy/ensure-principal.ts|["-n","gpasswd","-d",user,groupName]',
@@ -1420,6 +1437,62 @@ const SITES: CallSite[] = [
       "ACCEPT",
     ],
   }),
+
+  // Files the daemon keeps directly in the root-owned config and state roots
+  // (P1-1): created as the daemon account's own, replaced atomically.
+  tpHost(
+    'src/permissions/daemon-files.ts|["-n",...args]',
+    {
+      argv: [
+        "install",
+        "-m",
+        "0640",
+        "-o",
+        "tp",
+        "-g",
+        "tp",
+        STAGED,
+        `${CONF}/instance-ca.pem`,
+      ],
+      setup: dir(CONF),
+    },
+    {
+      argv: [
+        "install",
+        "-m",
+        "0644",
+        "-o",
+        "tp",
+        "-g",
+        "tp",
+        STAGED,
+        `${CONF}/firewall.v4`,
+      ],
+      setup: dir(CONF),
+    },
+    {
+      argv: [
+        "install",
+        "-m",
+        "0600",
+        "-o",
+        "tp",
+        "-g",
+        "tp",
+        STAGED,
+        `${STATE}/${"server-key"}.json`,
+      ],
+      setup: dir(STATE),
+    },
+    {
+      argv: ["rm", "-f", "--", `${CONF}/firewall.v4`],
+      setup: file(`${CONF}/firewall.v4`),
+    },
+    {
+      argv: ["rm", "-f", "--", `${STATE}/server-key-id`],
+      setup: file(`${STATE}/server-key-id`),
+    },
+  ),
 
   // --- control-plane settings and the co-located daemon --------------------
   tpHost(

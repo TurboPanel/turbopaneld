@@ -13,7 +13,7 @@
  *   `com.turbopanel.approval` = `v2.<base64url(payload JSON)>.<base64url(signature)>`
  * The signature covers `DOMAIN + <base64url(payload)>` (the exact text, so no
  * re-serialisation question). Payload:
- *   { deployId, project, composeDigest, bodyDigest, jti, features[], iat, exp }  (seconds)
+ *   { deployId, project, composeDigest, bodyDigest, containerName, jti, features[], iat, exp }  (seconds)
  * `composeDigest` is recorded in the audit line but is NOT checked: the gate
  * never sees the compose file. `bodyDigest` IS checked: it binds the token to
  * one container-create body, so a still-valid token cannot be replayed on a
@@ -24,7 +24,10 @@
  * changes it) with the `com.turbopanel.approval` label removed (the token
  * cannot cover itself). `jti` makes a token single-use: the gate remembers
  * every accepted one until its `exp` and refuses it again as `replayed` (the
- * memory is per gate process: a gate restart forgets, bounded by `exp`). A v1
+ * memory is per gate process: a gate restart forgets, bounded by `exp`).
+ * `containerName` binds the token to the create's `?name=` query value, which
+ * the body does not hold: the same approved body cannot be created again under
+ * another container name (`wrong-name`). A v1
  * token (no body binding) is refused as `unsupported-version`.
  *
  * Dependency-free on purpose (see http.ts): WebCrypto only.
@@ -63,6 +66,11 @@ export type ApprovalPayload = {
   composeDigest: string;
   /** Base64url SHA-256 of the canonical create body (see the file header). */
   bodyDigest: string;
+  /**
+   * The container name the create was approved for (the `name` query
+   * parameter, which the body digest does not cover).
+   */
+  containerName: string;
   /** Unique token id: an accepted token is never accepted again. */
   jti: string;
   features: string[];
@@ -153,7 +161,8 @@ function parsePayload(bytes: Uint8Array): ApprovalPayload | undefined {
   if (
     !featuresOk || !timesOk || !isShortString(p.deployId, 128) ||
     !isShortString(p.project, 128) || typeof p.composeDigest !== "string" ||
-    typeof p.bodyDigest !== "string" || !DIGEST.test(p.bodyDigest) ||
+    !isShortString(p.containerName, 255) || typeof p.bodyDigest !== "string" ||
+    !DIGEST.test(p.bodyDigest) ||
     !isShortString(p.jti, 128)
   ) {
     return undefined;
@@ -163,6 +172,7 @@ function parsePayload(bytes: Uint8Array): ApprovalPayload | undefined {
     project: p.project,
     composeDigest: p.composeDigest.slice(0, 128),
     bodyDigest: p.bodyDigest,
+    containerName: p.containerName,
     jti: p.jti,
     features: features as string[],
     iat: p.iat as number,
@@ -219,6 +229,7 @@ function claimsFailure(
   payload: ApprovalPayload,
   project: string,
   bodyDigest: string,
+  containerName: string,
   nowSec: number,
 ): string | undefined {
   if (payload.exp <= nowSec) return "expired";
@@ -226,19 +237,45 @@ function claimsFailure(
   if (payload.exp - payload.iat > MAX_APPROVAL_TTL_SEC) return "ttl-too-long";
   if (payload.project !== project) return "wrong-project";
   if (payload.bodyDigest !== bodyDigest) return "wrong-body";
+  if (payload.containerName !== containerName) return "wrong-name";
   if (payload.features.length === 0) return "no-features";
   return undefined;
 }
 
 /**
+ * The features a container's own approval label covers, for a later start or
+ * restart: signature and project are checked, but not the expiry, the create
+ * body digest or the single-use claim (those were enforced when the create was
+ * accepted; a restart days later must keep working). Empty = not covered.
+ */
+export async function startApprovalFeatures(
+  token: string,
+  keys: readonly CryptoKey[],
+  project: string,
+): Promise<readonly string[]> {
+  const parts = token.length <= MAX_APPROVAL_TOKEN_BYTES
+    ? token.split(".")
+    : [];
+  if (keys.length === 0 || parts.length !== 3) return [];
+  if (parts[0] !== APPROVAL_VERSION) return [];
+  const payloadBytes = fromBase64Url(parts[1]);
+  const signature = fromBase64Url(parts[2]);
+  if (!payloadBytes || !signature) return [];
+  if (!(await signatureValid(keys, signature, parts[1]))) return [];
+  const payload = parsePayload(payloadBytes);
+  return payload?.project === project ? payload.features : [];
+}
+
+/**
  * Check one token against the trusted keys, the container's Compose project,
- * the digest of the create body it arrived on and the clock (seconds). Never throws; the reason is a short stable code.
+ * the digest of the create body and the container name it arrived with, and the clock (seconds). Never throws; the reason is a short stable code.
  */
 export async function verifyApproval(
   token: string,
   keys: readonly CryptoKey[],
   project: string,
   bodyDigest: string,
+  containerName: string,
   nowSec: number,
 ): Promise<ApprovalResult> {
   if (keys.length === 0) return { ok: false, reason: "approvals-off" };
@@ -257,7 +294,13 @@ export async function verifyApproval(
   }
   const payload = parsePayload(payloadBytes);
   if (!payload) return { ok: false, reason: "malformed" };
-  const failure = claimsFailure(payload, project, bodyDigest, nowSec);
+  const failure = claimsFailure(
+    payload,
+    project,
+    bodyDigest,
+    containerName,
+    nowSec,
+  );
   if (failure) {
     return {
       ok: false,

@@ -1,5 +1,6 @@
 import { restartDaemonService } from "./restart-daemon-service.ts";
 import { describeUnknown } from "../util/describe-unknown.ts";
+import { redactUrlSecrets } from "../util/redact-url-secrets.ts";
 import { forEachSequential, repeatSequential } from "../util/sequential.ts";
 import {
   createInstanceHttpClient,
@@ -64,6 +65,7 @@ import { runDocker as defaultRunDocker } from "../deploy/docker-cli.ts";
 import { syncHostDockerNetworking } from "../deploy/docker-networking-sync.ts";
 import { runDockerSetup } from "../orchestration/ansible.ts";
 import { resolveLayout } from "../paths/layout.ts";
+import { removeDaemonFile } from "../permissions/daemon-files.ts";
 import { sweepOrphanCommandLogs } from "../logs/orphan-sweep.ts";
 import { classifyConnectFailure } from "./connect-failure.ts";
 import { DaemonJwksClient } from "./jwks-client.ts";
@@ -132,6 +134,7 @@ import {
 import { installOriginNeedsInsecureTls } from "./install-tls.ts";
 import { ManagedHaObserver } from "./ha-observe.ts";
 import { PgDeadPrimaryObserver } from "./pg-dead-primary-observe.ts";
+import { PgStandbySampler } from "./pg-standby-sampler.ts";
 import { BackupResultReporter } from "../backups/result-reporter.ts";
 import { AcmeIssuanceObserver } from "./acme-observe.ts";
 import { InstanceAcmeRenewalScheduler } from "./instance-acme-renew.ts";
@@ -154,6 +157,7 @@ import type {
  * module never imports handlers.
  */
 export type CommandDispatchDeps = {
+  verifyControlPlane?: () => Promise<void>;
   decryptSecrets?: (ciphertexts: string[]) => Promise<(string | null)[]>;
   sendCommandLogChunk?: SendCommandLogChunkFn;
   rehydrateDeploymentSecrets?: (
@@ -194,6 +198,8 @@ export type CommandPorts = {
   handleCommandDispatch?: CommandDispatchHandler;
   handleFabricPathProbe?: FabricPathProbeHandler;
   handleDrivetempEnable?: DrivetempEnableHandler;
+  /** Runs when a session attaches: delivers held command outcomes. */
+  handleSessionAttach?: (ws: WebSocket) => Promise<void>;
 };
 
 let commandPorts: CommandPorts = {};
@@ -367,7 +373,7 @@ function parseMessage(raw: string): DaemonMessage | null {
 export async function clearDaemonKeyState(stateDir: string): Promise<void> {
   await forEachSequential([SERVER_KEY_FILE, KEY_ID_FILE], async (file) => {
     try {
-      await Deno.remove(`${stateDir}/${file}`);
+      await removeDaemonFile(`${stateDir}/${file}`);
     } catch {
       // Missing files are fine.
     }
@@ -427,6 +433,7 @@ export class InstanceClient {
   #idlePresence: IdlePresence | undefined;
   #haObserver: ManagedHaObserver | undefined;
   #pgProbeObserver: PgDeadPrimaryObserver | undefined;
+  #pgStandbySampler: PgStandbySampler | undefined;
   #backupReporter: BackupResultReporter | undefined;
   #acmeObserver: AcmeIssuanceObserver | undefined;
   /** Panel certificate renewal. Independent of `#acmeObserver`. */
@@ -561,6 +568,10 @@ export class InstanceClient {
   }
 
   async #afterAttachVersion(ws: WebSocket): Promise<void> {
+    const sessionAttach = commandPorts.handleSessionAttach;
+    if (sessionAttach) {
+      this.#runSocketHandler("session-attach", sessionAttach(ws));
+    }
     const pending = this.#pendingInstanceUpdateResult;
     if (pending && ws.readyState === WebSocket.OPEN) {
       this.#pendingInstanceUpdateResult = null;
@@ -849,6 +860,7 @@ export class InstanceClient {
     this.#idlePresence = undefined;
     this.#haObserver?.detach();
     this.#pgProbeObserver?.detach();
+    this.#pgStandbySampler?.detach();
     this.#haObserver = undefined;
     this.#backupReporter?.detach();
     this.#backupReporter = undefined;
@@ -932,6 +944,7 @@ export class InstanceClient {
     this.#idlePresence?.detach();
     this.#haObserver?.detach();
     this.#pgProbeObserver?.detach();
+    this.#pgStandbySampler?.detach();
     this.#backupReporter?.detach();
     this.#acmeObserver?.detach();
     this.#metricsScheduler?.detach();
@@ -1354,6 +1367,8 @@ export class InstanceClient {
     this.#haObserver?.attach();
     this.#ensurePgProbeObserver();
     this.#pgProbeObserver?.attach();
+    this.#pgStandbySampler ??= new PgStandbySampler();
+    this.#pgStandbySampler.attach();
     this.#ensureBackupReporter().attach();
     this.#ensureAcmeObserver();
     this.#acmeObserver?.attach();
@@ -1400,6 +1415,7 @@ export class InstanceClient {
       this.#idlePresence?.detach();
       this.#haObserver?.detach();
       this.#pgProbeObserver?.detach();
+      this.#pgStandbySampler?.detach();
       this.#backupReporter?.detach();
       this.#acmeObserver?.detach();
       this.#metricsScheduler?.detach();
@@ -1739,6 +1755,7 @@ export class InstanceClient {
     if (!apiClient) return undefined;
     return {
       decryptSecrets: (ciphertexts) => apiClient.decryptSecrets(ciphertexts),
+      verifyControlPlane: () => apiClient.ping(),
       rehydrateDeploymentSecrets: (deployments) =>
         apiClient.rehydrateDeploymentSecrets(deployments),
       sendCommandLogChunk: (params) => apiClient.sendCommandLogChunk(params),
@@ -2167,7 +2184,7 @@ export class InstanceClient {
       type: "update-result",
       id,
       ok,
-      error,
+      error: error === undefined ? undefined : redactUrlSecrets(error),
       at: new Date().toISOString(),
       ...(extra.errorCode ? { errorCode: extra.errorCode } : {}),
       ...(extra.upgradeId ? { upgradeId: extra.upgradeId } : {}),
@@ -2330,7 +2347,7 @@ export class InstanceClient {
       type: "instance-update-result",
       id,
       ok,
-      error,
+      error: error === undefined ? undefined : redactUrlSecrets(error),
       at: new Date().toISOString(),
       ...(extra.errorCode ? { errorCode: extra.errorCode } : {}),
       ...(extra.upgradeId ? { upgradeId: extra.upgradeId } : {}),
