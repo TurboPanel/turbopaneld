@@ -64,6 +64,7 @@ export const DAEMON_WIRE_FEATURES = [
   "sealed-instance-secrets-v1",
   "managed-health-v1",
   "managed-ha-probe-v1",
+  "php-site-modes-v1",
 ] as const;
 
 export type DaemonWireFeature = (typeof DAEMON_WIRE_FEATURES)[number];
@@ -91,6 +92,14 @@ export const MANAGED_HEALTH_FEATURE: DaemonWireFeature = "managed-health-v1";
  */
 export const MANAGED_HA_PROBE_FEATURE: DaemonWireFeature =
   "managed-ha-probe-v1";
+
+/**
+ * This daemon runs each PHP site in the mode its deploy asks for (`php.mode`:
+ * FastCGI or php-fpm per site, on nginx and Apache). The control plane sends a
+ * mode other than php-fpm only to a daemon that lists this feature. OpenLiteSpeed
+ * and Caddy sites still ignore `php.mode`.
+ */
+export const PHP_SITE_MODES_FEATURE: DaemonWireFeature = "php-site-modes-v1";
 
 /** Features that need an instance at or above a semver. Empty until one lands. */
 export const INSTANCE_FEATURE_MIN_VERSIONS: Readonly<Record<string, string>> =

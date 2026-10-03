@@ -193,7 +193,10 @@ support in `features[]` (`DAEMON_WIRE_FEATURES`, kept equal in both
 `version-wire.ts` files) and the daemon checks `InstanceClient.instanceSupports()`
 before treating the peer as able to speak it. `update-progress`
 (`update-progress-v1`) is the worked example — fire-and-forget progress,
-ignored by a peer that does not list the feature. `managed-health-v1` is the
+ignored by a peer that does not list the feature. `php-site-modes-v1` is advertised by a daemon that runs each PHP site in its
+`php.mode` (FastCGI or php-fpm on nginx and Apache); the control plane refuses to
+deploy any mode but php-fpm to a daemon without it. OpenLiteSpeed and Caddy sites
+still ignore `php.mode` (the lsphp work is turbopaneld#250). `managed-health-v1` is the
 worked example of a control-plane-initiated correlated request
 (`managed-health-request` / `managed-health-result`): this daemon advertises it
 in `DAEMON_WIRE_FEATURES`, and the control plane sends the request only to a
