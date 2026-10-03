@@ -150,6 +150,7 @@ const CRON = {
   composeServiceName: "web",
   username: "alice",
   workingDirectory: "/srv/users/alice/sites/svc1/current",
+  siteWritableDirs: ["/srv/users/alice/sites/svc1/shared"],
   job: { name: "backup", schedule: "*-*-* 03:00:00", command: ["/bin/true"] },
 };
 const CRON_TIMER = cronTimerPath(
