@@ -119,6 +119,25 @@ async function readPrivileged(
 }
 
 /**
+ * The administrator's `sshd_config`, read directly when it is readable (Debian
+ * ships it `root:root 0644`) and through `sudo` only when it is not.
+ *
+ * Direct first because tp-host's `cat` serves only TurboPanel's own trees and
+ * refuses `/etc/ssh/sshd_config`, so the privileged read alone failed every
+ * SSH reconcile on a managed host.
+ */
+async function readSshdConfig(
+  runFn: RunFn,
+  path: string,
+): Promise<string | null> {
+  try {
+    return await Deno.readTextFile(path);
+  } catch {
+    return await readPrivileged(runFn, path);
+  }
+}
+
+/**
  * Install `contents` at `path` as `root:root <mode>`, skipping a byte-identical
  * rewrite.
  *
@@ -448,7 +467,7 @@ export async function applySshAccess(
   );
 
   const warnings: string[] = [];
-  const sshdConfig = await readPrivileged(runFn, sshdConfigPath);
+  const sshdConfig = await readSshdConfig(runFn, sshdConfigPath);
   if (sshdConfig === null) {
     throw new Error(
       `Could not read ${sshdConfigPath}; SSH access cannot be configured on this host`,

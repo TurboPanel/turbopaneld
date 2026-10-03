@@ -813,6 +813,7 @@ test("a missing sshd_config fails without writing a drop-in", async () => {
     return await inner(command, args);
   };
   try {
+    await Deno.remove(host.sshdConfigPath);
     const error = await assertRejects(() =>
       apply(host, [{ username: "appuser", keys: [ED25519] }])
     );
@@ -1132,6 +1133,25 @@ test("a jailed drop-in sshd refuses is rolled back to the unjailed one", async (
     assertStringIncludes(String(error), "rolled back");
     assertEquals(await Deno.readTextFile(host.dropInPath), unjailed);
     assertEquals(host.reloads, []);
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("a world-readable sshd_config is read without asking tp-host", async () => {
+  const host = await makeHost();
+  try {
+    // tp-host's `cat` serves only TurboPanel's trees and refuses sshd_config.
+    const fake = host.run;
+    host.run = (command, args) =>
+      args.includes(host.sshdConfigPath) && args.includes("cat")
+        ? Promise.resolve(fail(`tp-host: refusing path ${host.sshdConfigPath}`))
+        : fake(command, args);
+    const result = await apply(host, [{
+      username: "appuser",
+      keys: [ED25519],
+    }]);
+    assertEquals(result.sshdReloaded, true);
   } finally {
     await host.cleanup();
   }
