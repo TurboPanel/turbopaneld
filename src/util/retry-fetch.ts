@@ -4,7 +4,7 @@
  * same request succeeds seconds later.
  *
  * Only transient failures are retried: HTTP 502/503/504, 429 (honouring a
- * capped `Retry-After`), and connection reset / timeout style network errors.
+ * capped `Retry-After`), and connection reset / refused / timeout style network errors.
  * Every other response, including 4xx and anything wrong with the body or its
  * signature (which is checked after this returns), is handed back untouched,
  * and when the attempts run out the last response or error is returned as-is so
@@ -25,7 +25,7 @@ const DEFAULT_ATTEMPTS = 4;
 const DEFAULT_MAX_RETRY_AFTER_MS = 10_000;
 const TRANSIENT_STATUSES = new Set([429, 502, 503, 504]);
 const TRANSIENT_NETWORK_RE =
-  /ECONNRESET|ETIMEDOUT|EAI_AGAIN|EPIPE|connection (?:reset|closed)|timed? ?out|timeout|broken pipe|temporary failure in name resolution|dns error/i;
+  /ECONNRESET|ETIMEDOUT|EAI_AGAIN|ECONNREFUSED|connection refused|EPIPE|connection (?:reset|closed)|timed? ?out|timeout|broken pipe|temporary failure in name resolution|dns error/i;
 
 function defaultDelayMs(retry: number): number {
   return 2000 * 2 ** (retry - 1);

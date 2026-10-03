@@ -126,11 +126,29 @@ Docker Compose. The daemon:
    owner's home (a release or managed directory); a daemon-owned document
    root is refused (the owner cannot enter `tp:tp 0750` anyway). The unit
    carries `IPAddressDeny=localhost link-local multicast 0.0.0.0/8 fc00::/7`
-   with only `IPAddressAllow=127.0.0.53` (systemd-resolved's stub). systemd
-   filters by address, not port, so 127.0.0.1 stays closed: reopening it for
-   a `local`-scope ProxySQL would reopen ProxySQL admin, every vhost and
-   Apache backend port too. Site PHP reaches a managed database by its
-   `datacenter`, `fabric` or `public` scope address. RFC 1918 stays open
+   with `IPAddressAllow=127.0.0.1 127.0.0.53` (the database proxy and
+   systemd-resolved's stub). systemd filters by address, not port, so the port
+   filter is `lib/tp-php-loopback` (nftables table `inet turbopanel_php`): for
+   every site owner's Linux user with a PHP unit it refuses all loopback
+   destinations except 127.0.0.1:13306 (ProxySQL's MySQL port) and the stub
+   on port 53, so ProxySQL admin/metrics, other sites and Apache's backend
+   stay closed. The rules match the uid, so they also bind that user's ssh and
+   cron. Each unit runs it as root in `ExecStartPre=+` (the one root hook
+   tp-host pins; if it fails the unit does not start: fail closed) and the
+   daemon runs `tp-host php-loopback-sync` after installing (before starting)
+   or removing a runtime and at boot reconcile; the set is rebuilt from the
+   unit files on disk, so start and sweep cannot disagree. Replies of the owner's own local servers (a native app on 127.0.0.1) pass
+   through `ct state established,related accept` first. The `nft` and `flock`
+   programs are installed by `turbopanel-user/root-helpers.yml`; if still
+   missing the helper exits non-zero naming the program (units do not start,
+   boot reconcile logs the error). Known gap: an owner whose OLS PHP runs only
+   as attached lsphp (turbopaneld#250, spawned by OpenLiteSpeed, no unit) is
+   never in the rule set and stays unrestricted on loopback; handle when #250
+   merges. Not closed: an
+   `nft flush ruleset` while PHP runs leaves loopback open until the next
+   start, deploy or daemon boot. The ProxySQL MySQL port is fixed at 13306
+   in the script; a changed `listenerPorts` needs the script's `DB_PORT`
+   changed too. RFC 1918 stays open
    (scope addresses, VPC services, operator-set Docker pools), so the host's
    private addresses and other containers' bridge IPs are not closed by it.
    The `tpphp<series>` entitlement (the binaries are

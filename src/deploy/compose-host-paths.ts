@@ -18,6 +18,12 @@
  * gets the strict reading). Approval never excuses a source inside the
  * directory that resolves out of it through a symlink, a source nested in
  * another writable bind, or the staging directory.
+ *
+ * Build paths (contexts, Dockerfiles, additional contexts, SSH keys) are never
+ * host-level: a build's `RUN` steps run as root on the engine and anyone who
+ * can deploy may define one, so a build path outside the deployment directory
+ * is refused whatever was approved (`compose-build-policy.ts` holds the rest
+ * of the build rules).
  */
 
 import {
@@ -59,6 +65,8 @@ export type HostPathEntry = {
   path: string;
   kind: HostPathKind;
   readOnly: boolean;
+  /** Read by the builder: never excused by host-level approval. */
+  build?: true;
 };
 
 export type ComposeHostPathScan = {
@@ -77,6 +85,9 @@ export class ComposeHostPathError extends Error {
     this.name = "ComposeHostPathError";
   }
 }
+
+const BUILD_PATH_NOTE =
+  "builds may not read outside the project, whatever the organization allows (build_context_outside_project)";
 
 const HOST_LEVEL_NOTE =
   "host-level Compose features need an organization owner's opt-in and a manager's deploy";
@@ -177,6 +188,7 @@ function collectBuild(
       path: context,
       kind: "read",
       readOnly: true,
+      build: true,
     });
     if (typeof build.dockerfile === "string") {
       out.entries.push({
@@ -186,6 +198,7 @@ function collectBuild(
           : join(context, build.dockerfile),
         kind: "read",
         readOnly: true,
+        build: true,
       });
     }
   }
@@ -198,6 +211,7 @@ function collectBuild(
       path,
       kind: "read",
       readOnly: true,
+      build: true,
     });
   }
 }
@@ -342,6 +356,7 @@ function collectBuildSshEntries(
       path,
       kind: "read",
       readOnly: true,
+      build: true,
     });
   }
 }
@@ -456,9 +471,11 @@ const finding = (finding: string): EntryOutcome => ({
  * Rule: paths that are lexically outside the deployment directory, and the
  * engine socket, are host-level Compose features. `undefined` when the path is
  * inside (the later rules apply); otherwise the verdict is final: refused
- * unless the control plane approved host-level features.
+ * unless the control plane approved host-level features — and a build path is
+ * refused even then.
  */
 function hostLevelOutcome(
+  entry: HostPathEntry,
   label: string,
   staged: string,
   ctx: ConfinementContext,
@@ -471,6 +488,7 @@ function hostLevelOutcome(
   } else {
     return undefined;
   }
+  if (entry.build) return finding(`${label} ${reason} — ${BUILD_PATH_NOTE}`);
   return ctx.opts.hostLevelApproved
     ? { kind: "accepted" }
     : finding(`${label} ${reason} — ${HOST_LEVEL_NOTE}`);
@@ -517,7 +535,7 @@ async function confineEntry(
   const staged = normalize(
     isAbsolute(entry.path) ? entry.path : resolve(ctx.stageDir, entry.path),
   );
-  const hostLevel = hostLevelOutcome(label, staged, ctx);
+  const hostLevel = hostLevelOutcome(entry, label, staged, ctx);
   if (hostLevel) return hostLevel;
   const live = join(ctx.opts.deploymentDir, relative(ctx.stageDir, staged));
   let real: string;

@@ -360,10 +360,6 @@ compile toolchain).
   production source (`src/**`, excluding `*.test.ts` and `src/paths/layout.ts`)
   references `/opt/turbopanel/platform` or the retired `share/ansible`. Wired
   into `publish-daemon-trunk.yml`.
-- `deno task check:metrics-legacy` (`scripts/check-metrics-legacy.ts`) — fails
-  on any ClickHouse/Tabix reference outside the managed-engine allowlist (the
-  metrics store is DuckDB + Parquet / Analytics Engine); scans this repo plus
-  the co-located `turbopanel`/`dev`/`ui` `src` trees when present.
 - `deno task test` / `test:coverage` / `lint` / `fmt:check` / `check` / `notices:check` — quality
   surface in `deno.json`. `notices:generate` writes `THIRD_PARTY_NOTICES.md` from
   `deno.lock` and orchestration pins
@@ -433,7 +429,7 @@ compile toolchain).
 
 Local commands: **`deno task verify:ci`** is the guest mirror of `verify.yml`
 minus the Sonar upload: `verify:static` (`fmt:check`, `lint`, `check`,
-`check:layout`, `check:vocabulary`, `check:metrics-legacy`) then
+`check:layout`, `check:vocabulary`, `check:contract-drift`) then
 `notices:check`, `check:orchestration` (needs `ansible-playbook` /
 `ansible-lint` on PATH — prepend `/opt/turbopanel/vendor/ansible/current/bin`
 in the guest), and **`test:coverage`** (the LCOV Sonar imports).
