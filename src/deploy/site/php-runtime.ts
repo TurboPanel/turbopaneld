@@ -210,7 +210,7 @@ const MEMORY_UNITS: Readonly<Record<string, number>> = {
 
 /** php.ini shorthand (`64M`, `1G`, `-1`) in bytes; null when unlimited. */
 export function phpIniBytes(value: string): number | null {
-  const m = /^\s*(\d+)\s*([KMG]?)\s*$/i.exec(value);
+  const m = /^(\d+)([KMG]?)$/i.exec(value.trim());
   if (!m) return null;
   return Number(m[1]) * MEMORY_UNITS[m[2].toUpperCase()];
 }

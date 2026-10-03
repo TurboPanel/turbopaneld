@@ -2698,9 +2698,10 @@ function sitePhpRuntimeFiles(
   const maxChildren = Number(
     pool.find((p) => p.key === "pm.max_children")?.value,
   );
-  const workers = mode === "fpm"
-    ? (Number.isInteger(maxChildren) && maxChildren > 0 ? maxChildren : 20)
-    : SITE_PHP_FCGI_CHILDREN;
+  const fpmWorkers = Number.isInteger(maxChildren) && maxChildren > 0
+    ? maxChildren
+    : 20;
+  const workers = mode === "fpm" ? fpmWorkers : SITE_PHP_FCGI_CHILDREN;
   return {
     spec,
     service: sitePhpServiceUnit(spec, {

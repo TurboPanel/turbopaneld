@@ -582,6 +582,9 @@ Deno.test("phpIniBytes reads shorthand and treats -1 as unlimited", () => {
   assertEquals(phpIniBytes("64M"), 64 * 1024 ** 2);
   assertEquals(phpIniBytes("1G"), 1024 ** 3);
   assertEquals(phpIniBytes("-1"), null);
+  assertEquals(phpIniBytes(" 2m "), 2 * 1024 ** 2);
+  assertEquals(phpIniBytes("1 M"), null);
+  assertEquals(phpIniBytes("64X"), null);
 });
 
 Deno.test("sitePhpUnitLimits derives MemoryMax from memory_limit and workers", () => {
