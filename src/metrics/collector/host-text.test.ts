@@ -1,8 +1,10 @@
 import { assertEquals } from "@std/assert";
+import { METRICS_TEXT_FIELD_NAMES } from "../../contracts/metrics-contract.ts";
 import {
   HOST_TEXT_TTL_MS,
   HostTextCollector,
   type HostTextIo,
+  hostTextToExtended,
   parseCloudProvider,
   parseFailedUnits,
   parseLastOomVictim,
@@ -153,4 +155,40 @@ test("HostTextCollector serves the cache inside the TTL", async () => {
   const n = reads.length;
   await collector.read();
   assertEquals(reads.length, n);
+});
+
+Deno.test("hostTextToExtended uses exactly the contract's text keys", () => {
+  const { text, blockDeviceText } = hostTextToExtended({
+    kernel: "6.1",
+    unhealthyUnits: ["a.service", "b.service"],
+    rebootRequired: true,
+    clockSynced: false,
+    pendingUpdates: 4,
+    phpVersions: ["8.2", "8.3"],
+    topCpuProcess: "php-fpm",
+    topMemProcess: "mysqld",
+    readOnlyFilesystems: ["/data"],
+    lastOomVictim: "node",
+    smart: { sda: "ok" },
+  });
+  assertEquals(text, {
+    kernel: "6.1",
+    failedUnits: "a.service,b.service",
+    rebootRequired: "yes",
+    timeSync: "unsynced",
+    pendingUpdates: "4",
+    phpVersions: "8.2,8.3",
+    topCpu: "php-fpm",
+    topMem: "mysqld",
+    fsReadOnly: "/data",
+    lastOom: "node",
+  });
+  assertEquals(blockDeviceText, [{ deviceId: "sda", smart: "ok" }]);
+  for (const key of Object.keys(text ?? {})) {
+    assertEquals(
+      (METRICS_TEXT_FIELD_NAMES as readonly string[]).includes(key),
+      true,
+    );
+  }
+  assertEquals(hostTextToExtended({}), {});
 });

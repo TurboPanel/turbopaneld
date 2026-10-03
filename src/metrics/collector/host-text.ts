@@ -12,6 +12,10 @@
  * Everything is cached for {@link HOST_TEXT_TTL_MS}; SMART (a subprocess per
  * drive) has its own slower TTL. Every source degrades to "absent".
  */
+import type {
+  MetricsExtended,
+  MetricsTextFields,
+} from "../../contracts/metrics-contract.ts";
 import { parseMdstat } from "./events/mdstat.ts";
 import { parseSmartctlJson } from "./events/smart.ts";
 import { parseProcMounts } from "./mounts.ts";
@@ -354,6 +358,54 @@ function maxBy<T>(rows: T[], score: (row: T) => number): T | undefined {
     }
   }
   return best;
+}
+
+/** The contract's text blocks (`extended.text`, `extended.blockDeviceText`). */
+export type HostTextExtended = Pick<
+  MetricsExtended,
+  "text" | "blockDeviceText"
+>;
+
+const joinList = (list: string[] | undefined) =>
+  list?.length ? list.join(",") : undefined;
+
+/**
+ * Map the collected facts onto the #256 contract's text keys (string values).
+ * Keys the contract does not name are never emitted: the control plane drops
+ * them silently.
+ */
+export function hostTextToExtended(sample: HostTextSample): HostTextExtended {
+  const text: MetricsTextFields = {};
+  const set = (key: keyof MetricsTextFields, value: string | undefined) => {
+    if (value) text[key] = value;
+  };
+  set("kernel", sample.kernel);
+  set("os", sample.os);
+  set("virt", sample.virt);
+  set("cloudProvider", sample.cloudProvider);
+  set("failedUnits", joinList(sample.unhealthyUnits));
+  set("raidState", sample.raidState);
+  if (sample.rebootRequired !== undefined) {
+    set("rebootRequired", sample.rebootRequired ? "yes" : "no");
+  }
+  if (sample.clockSynced !== undefined) {
+    set("timeSync", sample.clockSynced ? "synced" : "unsynced");
+  }
+  if (sample.pendingUpdates !== undefined) {
+    set("pendingUpdates", String(sample.pendingUpdates));
+  }
+  set("phpVersions", joinList(sample.phpVersions));
+  set("topCpu", sample.topCpuProcess);
+  set("topMem", sample.topMemProcess);
+  set("fsReadOnly", joinList(sample.readOnlyFilesystems));
+  set("lastOom", sample.lastOomVictim);
+  const out: HostTextExtended = {};
+  if (Object.keys(text).length > 0) out.text = text;
+  const drives = Object.entries(sample.smart ?? {}).map((
+    [deviceId, smart],
+  ) => ({ deviceId, smart }));
+  if (drives.length > 0) out.blockDeviceText = drives;
+  return out;
 }
 
 function dropEmpty(sample: HostTextSample): HostTextSample {

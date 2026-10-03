@@ -99,7 +99,7 @@ import {
   type VmstatRates,
   vmstatRates,
 } from "./parse-vmstat.ts";
-import type { HostTextSample } from "./host-text.ts";
+import { type HostTextSample, hostTextToExtended } from "./host-text.ts";
 import type {
   CollectorDeps,
   CpuCounters,
@@ -911,9 +911,13 @@ export class LinuxMetricsCollector implements MetricsCollector {
     const hostText = await this.#readHostText();
     return {
       supported: true,
-      // `hostText` is v7-only and absent from the v6-mirrored contract type.
+      // Host text rides in the contract's `extended` block (v7 only; the
+      // scheduler strips `extended` unless metrics-v7 is negotiated).
       sample: hostText
-        ? ({ ...outgoing, hostText } as typeof outgoing)
+        ? {
+          ...outgoing,
+          extended: { ...outgoing.extended, ...hostTextToExtended(hostText) },
+        }
         : outgoing,
     };
   }

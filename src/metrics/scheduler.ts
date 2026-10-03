@@ -249,8 +249,8 @@ export class MetricsScheduler {
 
   #stampDurable<T>(sample: T, durable: boolean): T {
     if (!this.#durabilityFlag()) {
-      // v6 wire: the v7-only free-text block is never sent.
-      delete (sample as { hostText?: unknown }).hostText;
+      // v6 wire: the v7-only `extended` block (free text included) is never sent.
+      delete (sample as { extended?: unknown }).extended;
       return sample;
     }
     const metadata = (sample as { metadata?: Record<string, unknown> })

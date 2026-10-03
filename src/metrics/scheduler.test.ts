@@ -1185,7 +1185,7 @@ it("closed durability flag leaves samples unflagged and no stream collector", as
   );
 });
 
-it("hostText is stripped on the v6 wire and kept under metrics-v7", async () => {
+it("extended text is stripped on the v6 wire and kept under metrics-v7", async () => {
   for (const v7 of [false, true]) {
     const clock = new FakeClock();
     const sent: unknown[] = [];
@@ -1196,7 +1196,7 @@ it("hostText is stripped on the v6 wire and kept under metrics-v7", async () => 
         createFakeCollector((sequence) => {
           const r = supportedSample(sequence);
           if (r.supported) {
-            (r.sample as { hostText?: unknown }).hostText = { kernel: "6.1" };
+            r.sample.extended = { text: { kernel: "6.1" } };
           }
           return r;
         }),
@@ -1204,7 +1204,7 @@ it("hostText is stripped on the v6 wire and kept under metrics-v7", async () => 
     scheduler.attach(capturingSink(sent));
     await clock.advance(0);
     assertEquals(
-      (sent[0] as { hostText?: unknown }).hostText !== undefined,
+      (sent[0] as { extended?: unknown }).extended !== undefined,
       v7,
     );
   }
