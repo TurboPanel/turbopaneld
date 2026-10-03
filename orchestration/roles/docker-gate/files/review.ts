@@ -12,11 +12,13 @@
 
 import {
   APPROVAL_LABEL,
+  approvalBodyDigest,
   type ApprovalResult,
+  ReplayCache,
   splitApproved,
   verifyApproval,
 } from "./approval.ts";
-import { fetchContainerLabels } from "./inspect.ts";
+import { fetchLabels, type InspectKind } from "./inspect.ts";
 import {
   evaluateDetailed,
   type RequestFacts,
@@ -26,6 +28,7 @@ import {
 import {
   LABEL_COMPOSE_PROJECT,
   labelsOf,
+  ownedObject,
   ownedTarget,
   ownerOf,
 } from "./platform.ts";
@@ -40,6 +43,8 @@ export type ReviewDeps =
   & {
     /** Trusted approval keys; `undefined` or empty = approvals are off. */
     approvalKeys?: readonly CryptoKey[];
+    /** Accepted token ids (single use); a process-wide one when absent. */
+    approvalReplay?: ReplayCache;
     /** Seconds since the epoch (injected so tests control the clock). */
     nowSec?: () => number;
   };
@@ -102,18 +107,29 @@ function logApproval(
 
 /** Findings left after the create's signed approval (if it carries one). */
 async function applyApproval(
+  facts: RequestFacts,
   labels: Record<string, string>,
   violations: Violation[],
   deps: ReviewDeps,
 ): Promise<Violation[]> {
   const token = labels[APPROVAL_LABEL];
   if (token === undefined) return violations;
-  const result = await verifyApproval(
+  const nowSec = (deps.nowSec ?? defaultNowSec)();
+  const verified = await verifyApproval(
     token,
     deps.approvalKeys ?? [],
     labels[LABEL_COMPOSE_PROJECT] ?? "",
-    (deps.nowSec ?? defaultNowSec)(),
+    await approvalBodyDigest(facts.plainBody),
+    nowSec,
   );
+  const result = verified.ok &&
+      !(deps.approvalReplay ?? SHARED_REPLAY).claim(
+        verified.payload.jti,
+        verified.payload.exp,
+        nowSec,
+      )
+    ? { ok: false as const, reason: "replayed", ...whoFrom(verified.payload) }
+    : verified;
   if (!result.ok) {
     logApproval(deps, result, []);
     return violations;
@@ -122,6 +138,13 @@ async function applyApproval(
   logApproval(deps, result, approved);
   for (const violation of approved) deps.stats.approvedRule(violation.rule);
   return remaining;
+}
+
+/** Used when the caller keeps no cache of its own (every gate does). */
+const SHARED_REPLAY = new ReplayCache();
+
+function whoFrom(payload: { deployId: string; project: string }) {
+  return { deployId: payload.deployId, project: payload.project };
 }
 
 function defaultNowSec(): number {
@@ -139,26 +162,53 @@ async function createFindings(
   const withOwner = owner === "unlabeled"
     ? [...found, { rule: "unlabeled-create" }]
     : found;
-  return await applyApproval(labels, withOwner, deps);
+  return await applyApproval(facts, labels, withOwner, deps);
+}
+
+/** The object a request acts on, when it must be one the platform stamped. */
+function ownedSubject(
+  facts: RequestFacts,
+): { kind: InspectKind; name: string } | undefined {
+  const path = routePath(facts.path);
+  const container = ownedTarget(facts.method, path);
+  if (container !== undefined) return { kind: "container", name: container };
+  return ownedObject(facts.method, path);
 }
 
 async function unownedFinding(
   facts: RequestFacts,
   deps: ReviewDeps,
 ): Promise<Violation[]> {
-  const target = ownedTarget(facts.method, routePath(facts.path));
-  if (target === undefined) return [];
-  const labels = await fetchContainerLabels(deps.connectUpstream, target);
-  if (labels === undefined || ownerOf(labels) !== "unlabeled") return [];
-  return [{ rule: "unowned-container", detail: target.slice(0, 64) }];
+  const subject = ownedSubject(facts);
+  if (subject === undefined) return [];
+  const labels = await fetchLabels(
+    deps.connectUpstream,
+    subject.kind,
+    subject.name,
+  );
+  // Fail closed: a target whose labels cannot be read (gone, engine error,
+  // odd name) is a finding of its own, never assumed owned.
+  if (labels === undefined) {
+    return [{ rule: "owner-unknown", detail: subject.name.slice(0, 64) }];
+  }
+  if (ownerOf(labels) !== "unlabeled") return [];
+  return [{
+    rule: `unowned-${subject.kind}`,
+    detail: subject.name.slice(0, 64),
+  }];
 }
 
-/** Judge one request: findings, allowances, approval, ownership; log and count. */
+/**
+ * Judge one request: findings, allowances, approval, ownership; log and count.
+ * `extra` holds findings judged outside the policy (the build credential).
+ * Returns every finding left, for the caller to refuse on in enforce mode.
+ */
 export async function review(
   facts: RequestFacts,
   route: string,
   deps: ReviewDeps,
-): Promise<void> {
+  extra: readonly Violation[] = [],
+): Promise<Violation[]> {
   const detail = await evaluateDetailed(
     facts,
     deps.policy,
@@ -177,5 +227,7 @@ export async function review(
     ? await createFindings(facts, detail.violations, deps)
     : detail.violations;
   const unowned = await unownedFinding(facts, deps);
-  logViolations(deps, facts, route, [...findings, ...unowned]);
+  const all = [...findings, ...unowned, ...extra];
+  logViolations(deps, facts, route, all);
+  return all;
 }

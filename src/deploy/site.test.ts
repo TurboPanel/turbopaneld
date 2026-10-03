@@ -188,6 +188,17 @@ test("site engines follow a symlink only when its owner matches the target's", (
     nginx,
     "disable_symlinks if_not_owner from=$document_root;",
   );
+  // A sealed release follows no link below its root: owner-match cannot see a
+  // second hop through the tenant's `shared/` (`public/x -> ../shared/evil`,
+  // `shared/evil -> another tenant's root-owned file`).
+  const release = nginxSiteConfig(
+    { ...site, engine: "nginx" },
+    docroot,
+    null,
+    { releaseBacked: true },
+  );
+  assertStringIncludes(release, "disable_symlinks on from=$document_root;");
+  assertEquals(release.includes("if_not_owner"), false);
 
   const apache = apacheSiteConfig({ ...site, engine: "apache" }, docroot);
   assertStringIncludes(apache, "Options Indexes SymLinksIfOwnerMatch\n");

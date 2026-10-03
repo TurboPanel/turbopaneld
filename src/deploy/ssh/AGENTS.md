@@ -73,7 +73,7 @@ through to the host defaults — its own `~/.ssh/authorized_keys` and
 loopback and LAN (found live 2026-10-02). Rule: the backstop may only set
 keywords **every** level block already sets (`apply.test.ts` pins it); a
 `ForceCommand` or `ChrootDirectory` there would leak onto `tpshell` members.
-The principal-home redesign's SFTP chroot belongs in `sftpLevelDirectives`.
+The SFTP chroot lives in `sftpLevelDirectives` for that reason.
 For the same reason the drop-in is ensured on **every** deploy that
 materializes a principal (`applyDeploySshAccess`), not only when keys are
 declared; a keyless principal gets no key file. Every level block also sets
@@ -89,3 +89,23 @@ never rides the wire), applied by `ensurePrincipalPassword` in
 `ensure-principal.ts` via `chpasswd -e` over **stdin** — never argv, which
 `ps` can read. A material with no `passwordHash` locks the account password
 (`usermod -p !`), the state `useradd` created it in.
+
+**The SFTP chroot is a per-host switch, on last.** With the switch on, the
+`tpsftp` block gets `ChrootDirectory <root>/%u` and
+`ForceCommand internal-sftp -d /home`: the jail is the root-owned principal
+home, the session starts in `home/`, and `sites/` is visible read-only. `%u`,
+not `%h`, because the passwd home is `home/` one level down. The switch is
+`/etc/ssh/turbopanel-sftp-chroot`, outside every tp-host tree, so no generic
+verb can write or remove it: only `tp-host sftp-chroot on` (which refuses
+while any member — supplementary or primary `tpsftp` — fails
+`sftp-chroot check`: a chroot path component not root-owned or group/world
+writable, no principal-owned `home/`, a passwd home other than
+`<root>/<p>/home`, or `tpshell` held as well) and `off`, the ungated
+rollback. The daemon asks `sftp-chroot status` (`on <root>` | `off`) and
+renders the root tp-host validated, never its own environment's; an
+unreadable or malformed answer aborts the reconcile rather than unjailing.
+When on, each reconcile re-runs `check` (findings become warnings and the jail
+stays — fail closed for that member), and after `sshd -t` runs
+`sftp-chroot verify`, which asks `sshd -T -C user=<member>` whether the jail
+is really effective; a refusal rolls the drop-in back like a failed `-t`.
+`server.principals.reconcile` reports `sftpChroot`.

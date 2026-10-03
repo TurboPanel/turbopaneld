@@ -18,6 +18,7 @@ import {
   type SiteRunFn,
   type SiteRunResult,
 } from "./site.ts";
+import { sitePhpKey, sitePhpRuntimeId } from "./site/php-runtime.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -2967,5 +2968,468 @@ test("applySites never stages a root-owned config inside its config dir", async 
     }
   } finally {
     await cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Per-site PHP runtimes: FastCGI and php-fpm as the site's principal.
+// ---------------------------------------------------------------------------
+
+const PHP_PRINCIPAL = { principalId: "pr-1", username: RELEASE_USERNAME };
+
+function perSitePhpSite(
+  engine: "nginx" | "apache",
+  mode: "fastcgi" | "fpm",
+  settings: Record<string, string> = { memory_limit: "256M" },
+): SiteApplySpec {
+  return {
+    composeServiceName: "shop",
+    engine,
+    root: "public",
+    listenPort: 18090,
+    principal: PHP_PRINCIPAL,
+    php: { version: "8.4", mode, settings },
+  };
+}
+
+function phpRuntimeId(mode: "fastcgi" | "fpm", env = "envphp"): string {
+  return sitePhpRuntimeId(sitePhpKey(env, "shop"), mode, "8.4");
+}
+
+type PerSitePhpHarness = {
+  layout: LayoutPaths;
+  unitDir: string;
+  calls: Array<{ command: string; args: string[] }>;
+  apply: (site: SiteApplySpec, env?: string) => Promise<unknown>;
+  failProbe: (on: boolean) => void;
+  failPhpTest: (on: boolean) => void;
+  cleanup: () => Promise<void>;
+};
+
+async function perSitePhpHarness(): Promise<PerSitePhpHarness> {
+  const { layout, root, cleanup } = await makeTestLayout();
+  const unitDir = join(root, "units");
+  await Deno.mkdir(unitDir, { recursive: true });
+  const base = createSiteRunMock();
+  let probeFails = false;
+  let phpTestFails = false;
+  const run = withGroupMembership(async (command, args) => {
+    if (probeFails && command === "curl") {
+      return { success: true, stdout: "502", stderr: "" };
+    }
+    if (phpTestFails && args.includes("php-test")) {
+      base.calls.push({ command, args: [...args] });
+      return fail("PHP Startup: Unable to load dynamic library");
+    }
+    return await base.run(command, args);
+  }, {
+    tpnginx: ["tpnginx", RELEASE_GROUP],
+    tpapache: ["tpapache", RELEASE_GROUP],
+  });
+  await seedRelease(layout, "rel-1", "public", "<?php echo 1;");
+  return {
+    layout,
+    unitDir,
+    calls: base.calls,
+    apply: (site, env = "envphp") =>
+      applySites(layout, env, [site], {
+        run,
+        runPlaybook: () => Promise.resolve(),
+        releaseBindings: releaseBindingsFor("shop"),
+        systemdUnitDir: unitDir,
+        sleep: () => Promise.resolve(),
+      }),
+    failProbe: (on) => {
+      probeFails = on;
+    },
+    failPhpTest: (on) => {
+      phpTestFails = on;
+    },
+    cleanup,
+  };
+}
+
+async function exists(path: string): Promise<boolean> {
+  try {
+    await Deno.lstat(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function callIndex(
+  calls: ReadonlyArray<{ args: string[] }>,
+  match: (args: string[]) => boolean,
+): number {
+  return calls.findIndex((call) => match(call.args));
+}
+
+test("per-site FastCGI: the runtime is tested and started before the nginx vhost names its socket", async () => {
+  const h = await perSitePhpHarness();
+  try {
+    await h.apply(perSitePhpSite("nginx", "fastcgi"));
+    const id = phpRuntimeId("fastcgi");
+    const service = await Deno.readTextFile(
+      join(h.unitDir, `turbopanel-php-${id}.service`),
+    );
+    assertStringIncludes(
+      service,
+      `ExecStart=/usr/bin/php-cgi8.4 -c ${h.layout.configDir}/php/sites/${id}/php.ini`,
+    );
+    assertStringIncludes(service, `User=${RELEASE_USERNAME}`);
+    assertStringIncludes(service, "StandardInput=socket");
+    assertStringIncludes(
+      service,
+      `ReadWritePaths=${
+        join(h.layout.principalHomeRoot, RELEASE_USERNAME, "tmp")
+      } -${join(siteTreeRoot(h.layout), "shared")}`,
+    );
+    const socket = await Deno.readTextFile(
+      join(h.unitDir, `turbopanel-php-${id}.socket`),
+    );
+    assertStringIncludes(socket, "SocketGroup=tpnginx");
+    const ini = await Deno.readTextFile(
+      join(h.layout.configDir, "php", "sites", id, "php.ini"),
+    );
+    assertStringIncludes(ini, "memory_limit = 256M");
+    assertStringIncludes(ini, "opcache.memory_consumption = 128");
+    assertStringIncludes(ini, "opcache.validate_root = 1");
+    assertStringIncludes(ini, "session.save_path = /tmp");
+    assertStringIncludes(
+      ini,
+      `open_basedir = ${join(siteTreeRoot(h.layout), "current", "public")}:${
+        join(siteTreeRoot(h.layout), "shared")
+      }:/tmp`,
+    );
+
+    const vhost = await Deno.readTextFile(
+      join(h.layout.configDir, "nginx", "sites", "tp-envphp-shop.conf"),
+    );
+    assertStringIncludes(
+      vhost,
+      `fastcgi_pass unix:/run/turbopanel-php-${id}/php.sock;`,
+    );
+    // No pool on the shared master for this site.
+    assertEquals(
+      await exists(
+        join(h.layout.configDir, "php", "8.4", "pools", "tp-envphp-shop.conf"),
+      ),
+      false,
+    );
+
+    const phpTest = callIndex(h.calls, (a) => a.includes("php-test"));
+    const started = callIndex(
+      h.calls,
+      (a) =>
+        a.includes("restart") && a.includes(`turbopanel-php-${id}.service`),
+    );
+    const nginxTest = callIndex(h.calls, (a) => a.includes("-t"));
+    assert(phpTest >= 0 && phpTest < started, "php-test before start");
+    assert(started < nginxTest, "runtime up before the vhost is tested");
+    assertEquals(
+      systemctlCalls(h.calls).filter((c) => c.includes(`php-${id}`)),
+      [
+        `enable --now turbopanel-php-${id}.socket`,
+        `restart turbopanel-php-${id}.service`,
+        `is-active --quiet turbopanel-php-${id}.service`,
+      ],
+    );
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("per-site PHP: a redeploy with nothing changed touches no runtime", async () => {
+  const h = await perSitePhpHarness();
+  try {
+    await h.apply(perSitePhpSite("nginx", "fastcgi"));
+    h.calls.length = 0;
+    await h.apply(perSitePhpSite("nginx", "fastcgi"));
+    assertEquals(h.calls.some((c) => c.args.includes("php-test")), false);
+    assertEquals(
+      systemctlCalls(h.calls).filter((c) => c.includes("turbopanel-php-")),
+      [],
+    );
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("per-site php-fpm on Apache: a pool for the owner, reachable by tpapache through an ACL", async () => {
+  const h = await perSitePhpHarness();
+  try {
+    await h.apply(perSitePhpSite("apache", "fpm"));
+    const id = phpRuntimeId("fpm");
+    const fpm = await Deno.readTextFile(
+      join(h.layout.configDir, "php", "sites", id, "php-fpm.conf"),
+    );
+    assertStringIncludes(fpm, `[${id}]`);
+    assertStringIncludes(fpm, "listen.acl_users = tpapache");
+    assertEquals(fpm.includes("\nuser ="), false);
+    assertEquals(
+      await exists(join(h.unitDir, `turbopanel-php-${id}.socket`)),
+      false,
+    );
+    const vhost = await Deno.readTextFile(
+      join(h.layout.configDir, "apache", "sites", "tp-envphp-shop.conf"),
+    );
+    assertStringIncludes(
+      vhost,
+      `SetHandler "proxy:unix:/run/turbopanel-php-${id}/php.sock|fcgi://localhost/"`,
+    );
+    assertEquals(vhost.includes("ProxyFCGIBackendType"), false);
+    assertEquals(
+      systemctlCalls(h.calls).filter((c) => c.includes(`php-${id}`)),
+      [
+        `enable turbopanel-php-${id}.service`,
+        `is-active --quiet turbopanel-php-${id}.service`,
+        `restart turbopanel-php-${id}.service`,
+        `is-active --quiet turbopanel-php-${id}.service`,
+      ],
+    );
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("per-site FastCGI on Apache tells proxy_fcgi it talks to a generic backend", async () => {
+  const h = await perSitePhpHarness();
+  try {
+    await h.apply(perSitePhpSite("apache", "fastcgi"));
+    const vhost = await Deno.readTextFile(
+      join(h.layout.configDir, "apache", "sites", "tp-envphp-shop.conf"),
+    );
+    assertStringIncludes(vhost, "  ProxyFCGIBackendType GENERIC\n");
+    const socket = await Deno.readTextFile(
+      join(h.unitDir, `turbopanel-php-${phpRuntimeId("fastcgi")}.socket`),
+    );
+    assertStringIncludes(socket, "SocketGroup=tpapache");
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("per-site PHP: switching mode starts the new runtime first and removes the old only after the probe", async () => {
+  const h = await perSitePhpHarness();
+  try {
+    await h.apply(perSitePhpSite("nginx", "fastcgi"));
+    const oldId = phpRuntimeId("fastcgi");
+    const newId = phpRuntimeId("fpm");
+    h.calls.length = 0;
+    await h.apply(perSitePhpSite("nginx", "fpm"));
+
+    const newStarted = callIndex(
+      h.calls,
+      (a) =>
+        a.includes("restart") && a.includes(`turbopanel-php-${newId}.service`),
+    );
+    const probe = h.calls.findIndex((c) => c.command === "curl");
+    const oldStopped = callIndex(
+      h.calls,
+      (a) =>
+        a.includes("stop") && a.includes(`turbopanel-php-${oldId}.service`),
+    );
+    assert(newStarted >= 0 && newStarted < probe, "new runtime before probe");
+    assert(probe < oldStopped, "old runtime only after the probe");
+    assertEquals(
+      await exists(join(h.unitDir, `turbopanel-php-${oldId}.service`)),
+      false,
+    );
+    assertEquals(
+      await exists(join(h.unitDir, `turbopanel-php-${oldId}.socket`)),
+      false,
+    );
+    assertEquals(
+      await exists(join(h.layout.configDir, "php", "sites", oldId)),
+      false,
+    );
+    assertEquals(
+      await exists(join(h.unitDir, `turbopanel-php-${newId}.service`)),
+      true,
+    );
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("per-site PHP: a failed probe keeps the old runtime and removes the one the apply created", async () => {
+  const h = await perSitePhpHarness();
+  try {
+    await h.apply(perSitePhpSite("nginx", "fastcgi"));
+    const oldId = phpRuntimeId("fastcgi");
+    const newId = phpRuntimeId("fpm");
+    const vhostPath = join(
+      h.layout.configDir,
+      "nginx",
+      "sites",
+      "tp-envphp-shop.conf",
+    );
+    const lastGood = await Deno.readTextFile(vhostPath);
+    h.failProbe(true);
+    await assertRejects(
+      () => h.apply(perSitePhpSite("nginx", "fpm")),
+      Error,
+      "did not serve shop",
+    );
+    assertEquals(await Deno.readTextFile(vhostPath), lastGood);
+    assertEquals(
+      await exists(join(h.unitDir, `turbopanel-php-${newId}.service`)),
+      false,
+    );
+    assertEquals(
+      await exists(join(h.layout.configDir, "php", "sites", newId)),
+      false,
+    );
+    assertEquals(
+      await exists(join(h.unitDir, `turbopanel-php-${oldId}.service`)),
+      true,
+    );
+    // An fpm runtime has no socket unit to stop.
+    assertEquals(
+      systemctlCalls(h.calls).filter((c) => c.startsWith("stop")),
+      [`stop turbopanel-php-${newId}.service`],
+    );
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("per-site PHP: a failed config test stages no vhost and leaves no runtime", async () => {
+  const h = await perSitePhpHarness();
+  try {
+    h.failPhpTest(true);
+    await assertRejects(
+      () => h.apply(perSitePhpSite("nginx", "fastcgi")),
+      Error,
+      "failed its config test: PHP Startup",
+    );
+    const id = phpRuntimeId("fastcgi");
+    assertEquals(
+      await exists(join(h.unitDir, `turbopanel-php-${id}.service`)),
+      false,
+    );
+    assertEquals(
+      await listConfigDirEntries(join(h.layout.configDir, "nginx", "sites")),
+      [],
+    );
+    assertEquals(h.calls.some((c) => c.args.includes("-t")), false);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("per-site PHP: a settings change restores the previous config when the site stops answering", async () => {
+  const h = await perSitePhpHarness();
+  try {
+    await h.apply(perSitePhpSite("nginx", "fpm"));
+    const id = phpRuntimeId("fpm");
+    const iniPath = join(h.layout.configDir, "php", "sites", id, "php.ini");
+    const lastGood = await Deno.readTextFile(iniPath);
+    h.calls.length = 0;
+    h.failProbe(true);
+    await assertRejects(
+      () => h.apply(perSitePhpSite("nginx", "fpm", { memory_limit: "64M" })),
+      Error,
+      "did not serve shop",
+    );
+    // The vhost did not change, so nginx was never reloaded; the runtime was
+    // reloaded in place, probed, and put back.
+    assertEquals(h.calls.some((c) => c.args.includes("-t")), false);
+    assertEquals(await Deno.readTextFile(iniPath), lastGood);
+    assertEquals(await exists(`${iniPath}.tpprev`), false);
+    assertEquals(
+      systemctlCalls(h.calls).filter((c) => c.includes(`php-${id}`)),
+      [
+        `enable turbopanel-php-${id}.service`,
+        `is-active --quiet turbopanel-php-${id}.service`,
+        `reload turbopanel-php-${id}.service`,
+        `is-active --quiet turbopanel-php-${id}.service`,
+        `restart turbopanel-php-${id}.service`,
+      ],
+    );
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("per-site PHP is refused without a principal, and lsphp is refused on nginx", async () => {
+  const h = await perSitePhpHarness();
+  try {
+    const { principal: _none, ...ownerless } = perSitePhpSite(
+      "nginx",
+      "fastcgi",
+    );
+    await assertRejects(
+      () => h.apply(ownerless),
+      Error,
+      "runs as the site's principal, and the site has none",
+    );
+    await assertRejects(
+      () =>
+        h.apply({
+          ...perSitePhpSite("nginx", "fastcgi"),
+          php: { version: "8.4", mode: "lsphp-detached" },
+        }),
+      Error,
+      "PHP mode lsphp-detached needs OpenLiteSpeed, not nginx",
+    );
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("per-site PHP: a site that names no mode keeps the shared php-fpm pool", async () => {
+  const h = await perSitePhpHarness();
+  try {
+    const site = perSitePhpSite("nginx", "fastcgi");
+    await h.apply({ ...site, php: { version: "8.4" } });
+    assertEquals(
+      await exists(
+        join(h.layout.configDir, "php", "8.4", "pools", "tp-envphp-shop.conf"),
+      ),
+      true,
+    );
+    assertEquals(h.calls.some((c) => c.args.includes("php-test")), false);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("removeSites removes the environment's per-site PHP runtimes after the vhosts", async () => {
+  const h = await perSitePhpHarness();
+  try {
+    await h.apply(perSitePhpSite("nginx", "fastcgi"));
+    await h.apply(perSitePhpSite("nginx", "fpm"), "envother");
+    const id = phpRuntimeId("fastcgi");
+    const other = phpRuntimeId("fpm", "envother");
+    const mock = createSiteRunMock();
+    await removeSites(h.layout, "envphp", {
+      run: mock.run,
+      systemdUnitDir: h.unitDir,
+    });
+    assertEquals(
+      await exists(join(h.unitDir, `turbopanel-php-${id}.service`)),
+      false,
+    );
+    assertEquals(
+      await exists(join(h.layout.configDir, "php", "sites", id)),
+      false,
+    );
+    assertEquals(
+      await exists(join(h.unitDir, `turbopanel-php-${other}.service`)),
+      true,
+    );
+    const nginxReload = callIndex(
+      mock.calls,
+      (a) => a.includes("-t") || a.includes("reload"),
+    );
+    const stopped = callIndex(
+      mock.calls,
+      (a) => a.includes("stop") && a.includes(`turbopanel-php-${id}.service`),
+    );
+    assert(nginxReload < stopped, "vhost gone before its runtime");
+  } finally {
+    await h.cleanup();
   }
 });

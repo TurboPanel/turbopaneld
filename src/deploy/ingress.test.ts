@@ -17,12 +17,15 @@ import {
   caddyfile,
   caddyHttpUpstream,
   caddyTraefikUpstream,
+  caddyUnit,
   cleanupStaleTcpUdpServiceIngress,
   collectTcpUdpIngressEntries,
   ensureHostingCaddyRuntime,
   ensureHostingIngress,
   ensureServiceIngress,
   formatCaddyPathMatcher,
+  HOSTING_CADDY_ADMIN_SOCKET,
+  HOSTING_CADDY_RUNTIME_DIRECTORY,
   hostingIngressComposePath,
   hostingIngressDir,
   INGRESS_GATE_SOCKET_DIR,
@@ -417,11 +420,37 @@ test("caddyfile disables auto_https redirects and advertises h1 h2 h3", () => {
   assertStringIncludes(config, "protocols h1 h2 h3");
 });
 
-test("caddyfile pins an admin endpoint off Caddy's default 2019", () => {
-  // The co-located dev panel Caddy owns 127.0.0.1:2019; sharing it makes the
-  // hosting unit crash-loop with "address already in use".
+test("caddyfile serves the admin API on a private unix socket only", () => {
+  // Audit P0-1: a loopback TCP admin is reachable by every tenant process and
+  // loads config as tpedge, which reads every uploaded TLS key.
   const config = caddyfile(CONFIG_DIR);
-  assertStringIncludes(config, "admin 127.0.0.1:2029");
+  assertEquals(
+    HOSTING_CADDY_ADMIN_SOCKET,
+    "/run/turbopanel-hosting-caddy/admin.sock",
+  );
+  assertEquals(
+    config.match(/^\s*admin\s.*$/gm)?.map((line) => line.trim()),
+    [`admin unix/${HOSTING_CADDY_ADMIN_SOCKET}|0600`],
+  );
+  assertEquals(/\b127\.0\.0\.1:|localhost:|:20[0-9]9\b/.test(config), false);
+});
+
+test("caddyUnit reloads through the admin socket in a 0700 runtime directory", () => {
+  const unit = caddyUnit(
+    {
+      runtimesDir: "/opt/turbopanel/vendor",
+      configDir: CONFIG_DIR,
+    } as Parameters<typeof caddyUnit>[0],
+  );
+  assertStringIncludes(
+    unit,
+    `--adapter caddyfile --address unix/${HOSTING_CADDY_ADMIN_SOCKET}\n`,
+  );
+  assertStringIncludes(
+    unit,
+    `RuntimeDirectory=${HOSTING_CADDY_RUNTIME_DIRECTORY}\nRuntimeDirectoryMode=0700\n`,
+  );
+  assertEquals(/--address (?!unix\/)/.test(unit), false);
 });
 
 test("siteSnippet acme mode still emits HTTPS when forceHttps is false", () => {

@@ -35,6 +35,7 @@ A later stage that routes traffic through it flips this to fatal.
 | `approval.ts` | Verifier for the control plane's signed per-deploy approval (Ed25519 via WebCrypto); no signer, no private key |
 | `inspect.ts` | Root-side `GET /containers/{id}/json` for the ownership check (labels only, never logged) |
 | `review.ts` | Per request: policy findings, allowance hits, approval check, ownership check; logs + counters |
+| `build.ts` | Stage 4: BuildKit's `/session` and `/grpc` only on the build listener (`root:tpgatebuild 0660`) |
 | `policy.ts` | Route classification and the strict-profile rules (see below); returns findings, secret-free |
 | `resolve.ts` | Resolves a bind source by hand, component by component, following symlinks (including dangling ones, which Docker creates the target of) |
 | `stats.ts` | Counters for the periodic summary line |
@@ -135,15 +136,23 @@ unlabeled one is `unlabeled-create`. For start / stop / restart / kill / pause /
 rename / update / exec-create / attach / archive / remove, the gate inspects the
 target as root and logs `unowned-container` when it carries neither a Compose
 project, a TurboPanel label nor `tp.managed.engine`. An inspect that fails (gone,
-engine error) is skipped, never a finding.
+engine error, a non-200 or over-1-MiB answer, no answer within 5 s) fails closed:
+an `owner-unknown` finding.
 
 **Signed approvals** (`approval.ts`). Host-level Compose features cannot rest on
 the daemon's own `hostLevelApproved` flag (the daemon account sets it). The
 control plane signs, the gate verifies with a public key. Token = container
-label `com.turbopanel.approval` = `v1.<b64url payload>.<b64url sig>`; the
-signature covers `turbopanel-docker-gate-approval-v1\n` + the payload text.
+label `com.turbopanel.approval` = `v2.<b64url payload>.<b64url sig>`; the
+signature covers `turbopanel-docker-gate-approval-v2\n` + the payload text.
 Payload: `deployId`, `project`, `composeDigest` (audit only: the gate never sees
-the compose file), `features[]`, `iat`, `exp` (seconds). The gate checks the
+the compose file), `bodyDigest`, `features[]`, `iat`, `exp` (seconds). `bodyDigest`
+binds the token to ONE create body: base64url SHA-256 of the RFC 8785 canonical JSON of the body AS THE CLIENT SENT IT
+(a plain `JSON.parse` of the payload: field names as written, never the strict parser's canonical spelling, so no gate
+version shifts it), with the `com.turbopanel.approval` label removed. A different body is `rejected: wrong-body`; a v1
+token (no binding) is `unsupported-version`. `jti` makes a token single-use: an accepted id is remembered until its
+`exp` and a second use is `rejected: replayed` (memory is per gate process; at most 10 000 ids, beyond which new tokens
+are refused). The signer therefore has to sign the final create body Compose sends; the signer is not built, so that is
+its design constraint. The gate checks the
 signature (any trusted key: one raw base64url Ed25519 key per line, so rotation
 can overlap), `exp` not past, `iat` at most 60 s ahead, a lifetime of at most
 900 s, and `project` equal to the container's `com.docker.compose.project`.
@@ -159,8 +168,7 @@ every token is `rejected: approvals-off` and findings stand. The key lives
 root-owned in `<install>/lib/docker-gate/approval.pub`, never under
 `/etc/turbopanel` or `/run/turbopanel` (the daemon could swap it there). An
 unreadable key file turns approvals off with an error line; the gate keeps
-serving. Replay of a still-valid token by the daemon only repeats the same
-relaxation for the same project until `exp`. `docker-socket` is approvable
+serving. A token covers one create of one body in one project, once. `docker-socket` is approvable
 because the owner asked for it; plan finding B wanted socket mounts forbidden
 outright, so delete that one line in `APPROVABLE_RULES` to forbid it. The signer
 (control plane) is not built yet; tests sign with a key generated at run time.
@@ -258,8 +266,9 @@ registry auth, query strings, request bodies, the approval token itself. An
 - The socket directory is **not** under `/run/turbopanel` (daemon-owned,
   `tp` could swap a directory there). It is `root:tp 0750`, created by
   tmpfiles.d and `ExecStartPre=+`.
-- `TP_DOCKER_GATE_MODE` accepts only `observe`; the unit pins it. Enforcement
-  is a later stage and must arrive with its own tests.
+- `TP_DOCKER_GATE_MODE` accepts `observe` and `enforce` (anything else fails
+  the start); the unit pins `observe`. No host runs `enforce` until the
+  lockouts below are closed and the daemon builds through the build socket.
 - The read-only listener's directory holds nothing but its socket, and never
   becomes a parent of (or the same as) the main socket's directory: a Traefik
   mounts it.
@@ -314,14 +323,28 @@ Break-glass at every stage: `systemctl stop turbopanel-docker-gate` as root.
   denied. Ship the new key alongside the old one, then retire the old one.
 - Clock skew between control plane and host beyond 60 s (or a token older than
   its `exp`): approvals read as `expired` / `not-yet-valid`.
-- An inspect round trip that fails would deny the action once ownership is
-  enforced: stage 4 must decide fail-open vs fail-closed per route.
+- An inspect round trip that fails denies the action in enforce mode
+  (`owner-unknown`, fail closed on every route): a container removed in a race,
+  or an engine slower than 5 s, refuses the action.
 - Renaming a system component label (or an emitter changing a bind path)
   makes platform containers lose the allowance; the emitter test guards the
   paths, the label constants are pinned to `src/deploy/labels.ts`.
 - The label-less helpers (managed-file normalisation, **backup and restore**)
   would be denied until the daemon stamps a platform label on them: backups and
   restores stop working. This is the most critical gap to close before stage 4.
+
+## Ownership scope
+
+`unowned-container` / `unowned-volume` / `unowned-network` only say that a target carries none of a Compose project,
+a TurboPanel label or `tp.managed.engine`; a target whose labels cannot be read (gone, engine error, odd name) is
+`owner-unknown` (fail closed). A tenant deploy may not set the platform's owner labels at all (`turbopanel.role`,
+`com.turbopanel.system.*`, `tp.*`, the approval label): `src/deploy/compose-reserved-labels.ts` refuses the deploy
+before `compose up`. They are observations, not a boundary: any caller can add a compose-project
+label, and the gate cannot tell which tenant or project the daemon is acting for (the daemon account is the only client).
+Checked routes: container start/stop/restart/kill/pause/unpause/rename/update/exec/attach/archive/wait/resize/export and
+remove, volume and network remove, and network connect/disconnect (one engine inspect each). Polled reads (stats, logs,
+top, changes) are not checked on purpose: they would double the engine traffic. Real scoping needs the control plane to
+sign a per-project scope on non-create requests too; that is not built.
 
 ## Container-create breadth (deny by default)
 
@@ -366,3 +389,39 @@ fragment).
 version prefix the engine strips. Container, network and volume names match `.+` because the engine registers them as
 `{name:.*}`. Mutating routes no flow uses (`PUT /volumes/{name}`, checkpoints, `/debug`) are `restricted-group`; any path
 the table does not know is an `unclassified-route` finding (deny by default).
+
+## Stage 4: build sessions for the daemon's own builds only
+
+BuildKit's `/session` and `/grpc` upgrade to HTTP/2 the gate cannot read: every build choice (entitlements, network,
+mounts) rides inside them. They open only on the **build listener** (`build.ts`):
+
+- **Identity.** The client is the daemon account `tp` (`railpack-build.ts` runs `docker buildx build` as tp; Compose
+  builds too). The sandboxed build runner (`tpbuild`, `tp-host build-run`) never speaks Docker: its unit makes
+  `/run/turbopanel-gate` and both Docker sockets inaccessible. Deno cannot read a Unix peer's credentials (no
+  SO_PEERCRED), and a header token does not work either: the Docker CLI's `HttpHeaders` are not sent on the hijacked
+  `/grpc` request buildx opens (seen on adrastea, Engine 29.8 / buildx 0.37: the header was missing on every `/grpc`).
+  So the kernel checks the caller at `connect()`: `TP_DOCKER_GATE_BUILD_SOCKET` (`/run/turbopanel-gate/build/docker.sock`)
+  is `root:tpgatebuild 0660` in a `root:tpgatebuild 0750` directory of its own. `tpgatebuild`
+  (`docker_gate_build_group`, its gid in `TP_DOCKER_GATE_BUILD_GID`) holds only `docker_gate_build_user` (`tp`): the
+  role creates it, adds tp, and fails if it holds anyone else. Root owns socket and directory, so tp cannot chmod
+  either wider. caddy (in group tp, not tpgatebuild) cannot even traverse; a container never gets it (`/run` is a
+  denied, unapprovable bind). The daemon process picks up the new group at its next restart. A missing build user or
+  group fails the install task (the block's rescue reports it). With no gid, or when the socket cannot open, the gate
+  logs `docker-gate.build-socket-unavailable` and opens no build listener (never a silent root-only socket); the
+  other sockets keep serving.
+- **Check.** `/session` or `/grpc` anywhere but the build listener is a `build-session` finding. No header lifts it.
+  On the build listener every other request is judged exactly as on the main socket.
+- **Modes.** Observe logs the finding as `would-deny` and relays. Enforce answers 403 with a `docker-gate.denied`
+  line (method, route, rules) **before the engine is reached**, for this finding and every other one left after
+  allowances and approvals. The read-only listener refuses both routes as before.
+- **Daemon side (not wired yet, needed before enforce):** every buildx / Compose build call must use a Docker context
+  whose host is the build socket (`docker context create ... --docker host=unix://<build socket>`, then
+  `--context`). `DOCKER_HOST` alone is not enough: with it set, buildx's `default` builder becomes a
+  `docker-container` builder that creates a privileged BuildKit container (refused).
+- **Proof (adrastea, a separate enforce-mode gate on its own sockets):** buildx as tp through the build socket built
+  and loaded an image; through the main socket `/grpc` was refused and the fallback BuildKit container's create too;
+  tpbuild and uid 65534 with gid tp could not connect to the build socket; spoofed headers, and a container handed
+  the main socket, got 403 on `/session` and `/grpc`; a create binding the build directory was refused
+  (`bind-forbidden-path`). In observe mode the same `/session` was relayed (101) and logged.
+
+Tests: `src/docker-gate/build.test.ts`.

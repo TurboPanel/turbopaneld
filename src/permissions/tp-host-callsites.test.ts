@@ -264,7 +264,8 @@ async function makeHost(): Promise<Host> {
       "tpols:x:9992:9992::/nonexistent:/usr/sbin/nologin",
       "tpcaddysite:x:9993:9993::/nonexistent:/usr/sbin/nologin",
       "tpbuild:x:9994:9994::/nonexistent:/usr/sbin/nologin",
-      `alice:x:15001:15001::${prefix}/srv/users/alice:/bin/bash`,
+      // The passwd home is home/ inside the root-owned principal home.
+      `alice:x:15001:15001::${prefix}/srv/users/alice/home:/bin/bash`,
       "",
     ].join("\n"),
   );

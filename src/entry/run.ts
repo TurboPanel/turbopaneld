@@ -13,6 +13,7 @@ import {
   restoreFabricFromPersistedState,
 } from "../commands/fabric.ts";
 import { reinstallFirewallForwardingIfEnabled } from "../firewall/apply.ts";
+import { reconcileSitePhpRuntimesAtBoot } from "../deploy/site/php-runtime-apply.ts";
 import { logInfo, logWarn } from "../util/logger.ts";
 import { createSentinel, type SentinelOptions } from "../monitor/index.ts";
 import {
@@ -49,6 +50,8 @@ export type DaemonRunIo = {
   restoreFabricFromPersistedState?: () => Promise<void>;
   reinstallFabricForwardingIfEnabled?: () => Promise<void>;
   reinstallFirewallForwardingIfEnabled?: () => Promise<void>;
+  /** Start any per-site PHP runtime that is installed but not running. */
+  reconcileSitePhpRuntimes?: () => Promise<void>;
   shouldEnableDockerIntegration?: () => boolean;
   shouldConnectToInstance?: () => boolean;
   createDockerClient?: () => DockerClientLike;
@@ -183,6 +186,7 @@ export async function runDaemon(io: DaemonRunIo = {}): Promise<void> {
     await (io.restoreFabricFromPersistedState ??
       restoreFabricFromPersistedState)();
     await reinstallForwardingJumps();
+    await (io.reconcileSitePhpRuntimes ?? reconcileSitePhpRuntimesAtBoot)();
   }
 
   const abort = new AbortController();
