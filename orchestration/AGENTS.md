@@ -163,8 +163,15 @@ deps only: `build-essential`, `libssl-dev`, `libpcre2-dev`, … — not
 `apache2`), and points `current` at that tree. Main config is
 `/etc/turbopanel/apache/httpd.conf` with `IncludeOptional …/sites/*.conf`
 and loads `mod_proxy` + `mod_proxy_fcgi` for PHP. Driven by
-**`turbopanel-apache.service`** (master starts as root and drops to
-`tpapache` via `User`/`Group` in `httpd.conf`). Main config includes a
+**`turbopanel-apache.service`**, which runs the whole server, master
+included, as `tpapache` (`User=`/`Group=` in the unit, none in
+`httpd.conf`). Logs and the pidfile live in the unit's top-level
+`LogsDirectory=turbopanel-apache` / `RuntimeDirectory=turbopanel-apache`
+(`/var/log/turbopanel-apache`, `/run/turbopanel-apache`), never in the
+`tp`-owned trees. A changed unit restarts a running server (`try-restart`);
+a reload would keep the old master. The daemon's config test is
+`sudo -n -u tpapache -- httpd -t -f /etc/turbopanel/apache/httpd.conf`,
+pinned in sudoers. Main config includes a
 bootstrap `Listen 127.0.0.1:19080` so httpd can start before any site
 fragment exists (Apache refuses zero-Listen configs). ASF httpd has **no**
 mod_php — PHP is the sibling `php-fpm` role below.
@@ -193,7 +200,8 @@ engine serves the site.
 
 gids are hand-assigned in the registry, never computed from the version string
 (that breaks the day `8.10` exists). Band **9900–9979** is entitlements;
-**9980–9999** is service identities. `../src/orchestration/service-accounts.test.ts`
+**9980–9999** is service identities (`tpbuild`, the sandboxed build account
+from the `build-user` role, is 9994). `../src/orchestration/service-accounts.test.ts`
 enforces uniqueness across both and that entitlement gids stay inside their band.
 
 **Membership is reconciled by the daemon, not by this role.** The role only
@@ -266,8 +274,48 @@ second `@api` (`matcher is defined more than once`) and the unit crash-loops.
 template fails the play instead of starting that loop.
 
 Control-plane `XDG_DATA_HOME` is `{{ turbopanel_caddy_runtime_dir }}/share`
-(`<state>/caddy/.local/share`). Hosting Caddy uses `<state>/hosting-caddy`.
+(`<state>/caddy/.local/share`). Hosting Caddy uses its own top-level
+`StateDirectory=turbopanel-hosting-caddy` (`/var/lib/turbopanel-hosting-caddy`).
 Those stores must not be the same directory.
+
+### Hosting Caddy account (`hosting-caddy`)
+
+`turbopanel-hosting-caddy.service` (public `:80`/`:443`, unit rendered by
+`src/deploy/ingress.ts`, pinned by tp-host) runs as **`tpedge`** (uid/gid
+9982), which is deliberately **not** in group `tp`: its only privilege is
+`CAP_NET_BIND_SERVICE` (ambient and bounding), with `NoNewPrivileges=yes`.
+Certificates, the ACME account, the internal CA and Caddy's autosave live in
+the unit's `StateDirectory=turbopanel-hosting-caddy`, which systemd creates
+owned by `tpedge`; the old root-written `<state>/hosting-caddy` store is
+removed, not migrated (the internal CA and ACME account are recreated).
+`caddy-setup.yml` runs this role after `caddy`; the daemon runs that playbook
+whenever the binary **or** the account is missing (`ensureHostingCaddy`). The
+role grants `tpedge` exactly what Caddy loads, as ACL entries for that one
+user: traverse (`x`) on `/opt/turbopanel`, `vendor/` and `/etc/turbopanel`,
+`rx` on the vendored binary, `rx` plus a default `rx` entry on
+`/etc/turbopanel/hosting{,/sites}` (so every Caddyfile and snippet the daemon
+writes is readable), and `r` on the files already there. `/etc/turbopanel/tls`
+is `tp:tpedge` `2750`: the setgid bit gives every uploaded certificate the
+`tpedge` group, and `materialize-tls.ts` writes the private key `0640` only
+under that setgid directory (otherwise `0600`), so group `tp` never reads a
+key. The daemon restarts the unit when its rendered content changes
+(`enable --now` alone would keep the old process).
+
+The control-plane Let's Encrypt window (co-located instance) proxies
+HTTP-01 challenges to `unix/<run dir>/instance-acme.sock`. Connecting needs
+`x` on `/run/turbopanel` (`tp:tp` `2770`) and `w` on the socket. The role
+grants `tpedge` traverse only (`u:tpedge:x`, no listing, no default entry) on
+the run directory, and because `/run` is tmpfs it also writes
+`/etc/tmpfiles.d/turbopanel-hosting-caddy.conf` (`a+ … u:tpedge:x`) so the
+entry returns at every boot. The socket is re-created on every bind, by the
+daemon's preflight listener (as `tp`) or the issuer Caddy (as `tpcaddy`),
+neither of which can name another user in an ACL, so the daemon then calls
+`tp-host setfacl -P -m u:tpedge:rw <run dir>/instance-acme.sock`. That shape
+accepts only that path and that entry, waits up to 5 s for the issuer to
+bind, refuses a symlink, and never follows one (`-P`). `tpedge` is never put
+in group `tp`. Residual: traverse lets `tpedge` open anything directly in
+the run directory whose own mode grants "other" access (today the empty
+`daemon.lock`, `0644`); no socket there is world-writable.
 
 Vars (both roles; extra-vars win):
 

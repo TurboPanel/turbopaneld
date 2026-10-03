@@ -195,7 +195,18 @@ names the file; the gate checks it at start) the start FAILS and
 would lose every route at its next restart. Flipping the switch restarts the
 gate, and a converge with the switch on fails unless the read-only socket
 answers `/_ping` (`state: started` alone passes a crash-looping unit); the
-block's rescue only warns while the switch is off. A switch value other than
+block's rescue only warns while the switch is off (and not being turned on).
+
+**Atomic deploy** (`tasks/deploy.yml`, `rollback.yml`; independent of the switch): the new source is staged in
+`.next` and load-checked (`TP_DOCKER_GATE_LOAD_CHECK=1` makes `main.ts` exit 0 after importing everything and parsing
+its configuration) before anything is replaced; a failure there touches nothing. Then the running gate is probed and
+every file a swap can change (sources, unit, approval key, switch) is snapshotted into `.prev`. After the swap the
+main socket must answer `/_ping` (and the read-only one while the switch is on). Any failure restores the snapshot
+(removing what did not exist), restarts, re-probes, and fails the converge with the original error; with no previous
+gate the unit is stopped and disabled. A rollback that itself fails does not hide the swap's error (both are in the
+failure message), and the restored gate is only waited for when it answered before the swap. `.next`/`.prev` are
+`root:root 0700`. The flow was run in a Linux container against a stub install step: failed swap restores the old files,
+a good swap replaces them and drops `.next`, a broken staged `main.ts` is refused by the load check with nothing replaced. A switch value other than
 yes/no fails the converge before anything changes (a typo never turns it off).
 
 **The switch** (off by default): `docker_gate_ingress_socket: true` writes the
@@ -311,3 +322,37 @@ Break-glass at every stage: `systemctl stop turbopanel-docker-gate` as root.
 - The label-less helpers (managed-file normalisation, **backup and restore**)
   would be denied until the daemon stamps a platform label on them: backups and
   restores stop working. This is the most critical gap to close before stage 4.
+
+## Volume drivers and mount options
+
+`HostConfig.VolumeDriver` and each volume mount's `VolumeOptions.DriverConfig.Name` must be empty or `local`
+(`volume-driver`), like `POST /volumes/create`'s `Driver`. A `local` volume's `type`/`o`/`device` options are deny by
+default: `o=bind` or `o=rbind` (or `type=none`) with an absolute device is judged as a bind path; a `/` device otherwise
+is `volume-device`; tmpfs passes; every other type (nfs, cifs, overlay, ...) or option set without a device is
+`volume-mount-type`. Previously `rbind` skipped the path check and overlay/nfs passed. A volume mount's `VolumeOptions.Subpath` must be relative
+with no `..` (`volume-subpath`); a tmpfs mount's `TmpfsOptions.Options` may only hold noexec/exec/nosuid/nodev/ro/rw
+(`tmpfs-options`). A host that deliberately uses
+NFS volumes will see findings until the profile grows an allowance.
+
+## Framing and form parity (Go differential)
+
+The engine parses with Go's `net/http`. `src/testing/docker-gate-diff/main.go` (standard library only) runs
+`http.ReadRequest` + `ParseForm` over `src/docker-gate/testdata/parser-cases.json`; its recorded output is
+`testdata/go-parser.json` and `src/docker-gate/parser-differential.test.ts` checks the gate against it: the gate may
+refuse what Go accepts, but must never pass a request Go reads differently (method, path, body length and framing,
+leftover bytes, form fields). `DOCKER_GATE_GO_DIFF=1 deno test` re-runs the harness (local `go`, else
+`docker run golang:1.23`) and checks the record is current. Regenerate with
+`docker run --rm -v "$PWD":/w -w /w/src/testing/docker-gate-diff golang:1.23 go run . ../../docker-gate/testdata/parser-cases.json > src/docker-gate/testdata/go-parser.json`.
+Gaps it found and the gate now closes: Transfer-Encoding on an HTTP/1.0 request is refused (Go ignores it and reads the
+chunks as the next request), and a form-encoded body is an `form-encoded-body` finding (Go merges it into the form
+ahead of the query, so `networkmode=host` could ride in the body of `POST /build`), and a request target holding
+`#` is refused (Go keeps `#` as data: `/build?q=1#&networkmode=host` sets `networkmode`; the gate used to drop it as a
+fragment).
+
+## Route parity
+
+`policy.ts` `ROUTES` / `READ_ROUTES` mirror the engine's router (moby `api/server/router`); `ENGINE_ROUTES` in
+`src/docker-gate/policy.test.ts` lists every route the engine serves and the gate's class for it, bare and under every
+version prefix the engine strips. Container, network and volume names match `.+` because the engine registers them as
+`{name:.*}`. Mutating routes no flow uses (`PUT /volumes/{name}`, checkpoints, `/debug`) are `restricted-group`; any path
+the table does not know is an `unclassified-route` finding (deny by default).

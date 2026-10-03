@@ -126,6 +126,37 @@ test({
 });
 
 test({
+  name: "handleNtp reports the applied servers when the read-back is stale",
+  fn: async () => {
+    const {
+      handleNtp,
+      setAnsibleAvailabilityCheckForTests,
+      setTimeSyncApplyForTests,
+      setTimeSyncReaderForTests,
+    } = await import("./ntp.ts");
+
+    setAnsibleAvailabilityCheckForTests(() => Promise.resolve(true));
+    setTimeSyncApplyForTests(() => Promise.resolve({ summary: "" }));
+    setTimeSyncReaderForTests(() => ({ ntpEnabled: true, ntpServers: [] }));
+    try {
+      const result = await handleNtp(
+        {
+          servers: ["0.pool.ntp.org", "1.pool.ntp.org"],
+          fallbackServers: ["time.cloudflare.com"],
+        },
+        new Date().toISOString(),
+      );
+      assertEquals(result.ntpServers, ["0.pool.ntp.org", "1.pool.ntp.org"]);
+      assertEquals(result.fallbackNtpServers, ["time.cloudflare.com"]);
+    } finally {
+      setAnsibleAvailabilityCheckForTests(null);
+      setTimeSyncApplyForTests(null);
+      setTimeSyncReaderForTests(null);
+    }
+  },
+});
+
+test({
   name: "handleNtp applies NTP via injectable runner and reader",
   fn: async () => {
     const {

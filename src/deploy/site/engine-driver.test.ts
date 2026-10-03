@@ -244,6 +244,34 @@ test({
   },
 });
 
+test({
+  name: "Apache's config test runs httpd -t as tpapache, never as root",
+  permissions: { read: true, env: true },
+  fn: async () => {
+    const layout = resolveLayout({}, {
+      skipDiscovery: true,
+      forceMode: "production",
+    });
+    const calls: string[][] = [];
+    const run: SiteRunFn = (command, args) => {
+      calls.push([command, ...args]);
+      return Promise.resolve(ok());
+    };
+    await APACHE_DRIVER.configTest(run, layout);
+    assertEquals(calls, [[
+      "sudo",
+      "-n",
+      "-u",
+      "tpapache",
+      "--",
+      join(layout.runtimesDir, "apache", "current", "bin", "httpd"),
+      "-t",
+      "-f",
+      join(layout.configDir, "apache", "httpd.conf"),
+    ]]);
+  },
+});
+
 test("systemctlReloadOrStart falls back to enable --now then a generic error", async () => {
   const run: SiteRunFn = () => Promise.resolve(fail());
   await assertRejects(

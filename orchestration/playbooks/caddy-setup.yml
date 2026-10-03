@@ -1,7 +1,8 @@
 # On-demand Caddy binary for public ingress (environment.deploy).
-# Distinct from control-plane turbopanel-caddy (:8443) — this only vendors the
+# Distinct from control-plane turbopanel-caddy (:8443) — this vendors the
 # Caddy binary under {{ turbopanel_vendor_dir }}/caddy for
-# turbopanel-hosting-caddy.service.
+# turbopanel-hosting-caddy.service, and provisions the unprivileged account
+# that unit runs as (hosting-caddy role).
 - name: Ensure hosting Caddy runtime is installed
   hosts: localhost
   connection: local
@@ -9,3 +10,4 @@
   gather_facts: true
   roles:
     - role: caddy
+    - role: hosting-caddy

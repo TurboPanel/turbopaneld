@@ -17,6 +17,7 @@ export type HostTimeSync = {
 
 const TIMESYNCD_CONF_PATH = "/etc/systemd/timesyncd.conf";
 const ETC_TIMEZONE_PATH = "/etc/timezone";
+const ETC_LOCALTIME_PATH = "/etc/localtime";
 const TIMESYNC_SYNCHRONIZED_PATH = "/run/systemd/timesync/synchronized";
 
 function readTextFile(
@@ -247,6 +248,8 @@ export type TimeSyncIo = {
   runCat?: (path: string) => { code: number; stdout: Uint8Array };
   /** Override `/etc/systemd/timesyncd.conf` for host-free default-reader tests. */
   timesyncdConfPath?: string;
+  /** Injected `readlink` for `/etc/localtime` (host-free tests). */
+  readLink?: (path: string) => string | undefined;
   /** Override `/etc/timezone` for host-free default-reader tests. */
   etcTimezonePath?: string;
   /** Override `/run/systemd/timesync/synchronized` for mtime probes. */
@@ -279,6 +282,30 @@ function readTimedatectlStatus(
   const text = spawn("timedatectl", ["status"]);
   if (!text) return {};
   return parseTimedatectlStatus(text);
+}
+
+/**
+ * Timezone from the `/etc/localtime` symlink target (`…/zoneinfo/<Zone>`).
+ * `timedatectl set-timezone` rewrites the symlink immediately, whereas
+ * `timedatectl show` (timedated) and `/etc/timezone` can lag or stay stale
+ * right after an apply. Injected `io` skips the real link unless `readLink`
+ * is supplied.
+ */
+function readLocaltimeZone(io: TimeSyncIo | undefined): string | undefined {
+  const reader = io ? io.readLink : (path: string) => {
+    try {
+      return Deno.readLinkSync(path);
+    } catch {
+      return undefined;
+    }
+  };
+  const target = reader?.(ETC_LOCALTIME_PATH);
+  if (!target) return undefined;
+  const marker = "zoneinfo/";
+  const at = target.lastIndexOf(marker);
+  if (at < 0) return undefined;
+  const zone = target.slice(at + marker.length);
+  return zone.length > 0 ? zone : undefined;
 }
 
 function readEtcTimezone(
@@ -417,7 +444,7 @@ export function readTimeSync(io?: TimeSyncIo): HostTimeSync {
   const confPath = io?.timesyncdConfPath ?? TIMESYNCD_CONF_PATH;
 
   const show = readTimedatectlShow(spawn);
-  let timezone = show.timezone;
+  let timezone = readLocaltimeZone(io) ?? show.timezone;
   let ntpEnabled = show.ntpEnabled;
   let ntpSynced = show.ntpSynced;
 

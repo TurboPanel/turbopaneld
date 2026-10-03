@@ -360,6 +360,7 @@ test("the drop-in sets no global directive before its first Match", () => {
     sftpGroup: "tpsftp",
     shellGroup: "tpshell",
     passwordGroup: "tppasswd",
+    principalGroup: "tpprincipal",
   });
   const directives = contents.split("\n").map((line) => line.trim()).filter(
     (line) => line.length > 0 && !line.startsWith("#"),
@@ -375,6 +376,7 @@ test("the password block precedes the level blocks and sets only one keyword", (
     sftpGroup: "tpsftp",
     shellGroup: "tpshell",
     passwordGroup: "tppasswd",
+    principalGroup: "tpprincipal",
   });
   const directives = contents.split("\n").map((line) => line.trim()).filter(
     (line) => line.length > 0 && !line.startsWith("#"),
@@ -399,6 +401,103 @@ test("the password block precedes the level blocks and sets only one keyword", (
   );
   assert(sftpBlock.includes("PasswordAuthentication no"));
   assert(shellBlock.includes("PasswordAuthentication no"));
+});
+
+function renderedDirectives(): string[] {
+  return sshdDropInContent({
+    sftpGroup: "tpsftp",
+    shellGroup: "tpshell",
+    passwordGroup: "tppasswd",
+    principalGroup: "tpprincipal",
+  }).split("\n").map((line) => line.trim()).filter(
+    (line) => line.length > 0 && !line.startsWith("#"),
+  );
+}
+
+/** Directives of the block that `Match <header>` opens, up to the next Match. */
+function blockOf(directives: string[], header: string): string[] {
+  const start = directives.indexOf(header);
+  if (start < 0) throw new TypeError(`no block ${header}`);
+  const rest = directives.slice(start + 1);
+  const end = rest.findIndex((line) => line.startsWith("Match "));
+  return end < 0 ? rest : rest.slice(0, end);
+}
+
+const keyword = (line: string) => line.split(/\s+/)[0];
+
+const NO_FORWARDING = [
+  "AllowTcpForwarding no",
+  "AllowStreamLocalForwarding no",
+  "PermitOpen none",
+  "PermitListen none",
+  "AllowAgentForwarding no",
+  "X11Forwarding no",
+  "PermitTunnel no",
+];
+
+test("every principal is matched, after the levels and before `Match all`", () => {
+  const directives = renderedDirectives();
+  // A principal with no SSH level used to match nothing, so the host defaults
+  // applied: its own ~/.ssh/authorized_keys and TCP forwarding into the host.
+  const backstop = directives.indexOf("Match Group tpprincipal");
+  assert(backstop > directives.indexOf("Match Group tpsftp"));
+  assert(backstop > directives.indexOf("Match Group tpshell"));
+  assertEquals(directives.at(-1), "Match all");
+  assert(backstop < directives.indexOf("Match all"));
+});
+
+test("the backstop refuses every sign-in method and every forward", () => {
+  const block = blockOf(renderedDirectives(), "Match Group tpprincipal");
+  for (
+    const line of [
+      "PubkeyAuthentication no",
+      "PasswordAuthentication no",
+      "KbdInteractiveAuthentication no",
+      // Never the home: a key the tenant writes there must not be consulted.
+      "AuthorizedKeysFile none",
+      "AuthorizedKeysCommand none",
+      ...NO_FORWARDING,
+    ]
+  ) {
+    assert(block.includes(line), `backstop is missing \`${line}\``);
+  }
+});
+
+test("the backstop sets no keyword a level block leaves unset", () => {
+  // sshd keeps the first value per keyword across matching blocks, so a level
+  // member is unaffected by the backstop ONLY if each level block already set
+  // every keyword the backstop sets. A `ForceCommand` or `ChrootDirectory`
+  // added to the backstop would leak onto tpshell members.
+  const directives = renderedDirectives();
+  const backstop = blockOf(directives, "Match Group tpprincipal").map(keyword);
+  for (const level of ["Match Group tpsftp", "Match Group tpshell"]) {
+    const levelKeywords = new Set(blockOf(directives, level).map(keyword));
+    for (const word of backstop) {
+      assert(levelKeywords.has(word), `${level} does not set ${word}`);
+    }
+  }
+});
+
+test("both levels forbid every kind of forwarding", () => {
+  const directives = renderedDirectives();
+  for (const level of ["Match Group tpsftp", "Match Group tpshell"]) {
+    const block = blockOf(directives, level);
+    for (const line of NO_FORWARDING) {
+      assert(block.includes(line), `${level} is missing \`${line}\``);
+    }
+  }
+});
+
+test("the applied drop-in carries the registry's every-principal group", async () => {
+  const host = await makeHost();
+  try {
+    // No keys at all: the drop-in is still what makes in-home keys inert.
+    await apply(host, []);
+    const contents = await Deno.readTextFile(host.dropInPath);
+    assertStringIncludes(contents, "Match Group tpprincipal\n");
+  } finally {
+    await host.cleanup();
+  }
 });
 
 test("sshd reloads only when the drop-in changed, and never restarts", async () => {

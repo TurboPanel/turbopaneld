@@ -1,3 +1,4 @@
+import { dirname } from "node:path";
 import {
   composeFileArgs,
   readDeploymentManifest,
@@ -138,6 +139,64 @@ async function removeEnvironmentNativeApps(
   }
 }
 
+/**
+ * `deployments/<projectId>/<environmentId>` is gone by now; drop the
+ * `<projectId>` parent too once no other environment lives in it. A plain
+ * (non-recursive) remove, so a sibling environment's tree is never touched.
+ */
+async function removeEmptyProjectDeploymentDir(
+  deploymentDir: string,
+): Promise<void> {
+  try {
+    await Deno.remove(dirname(deploymentDir));
+  } catch (err) {
+    // Not empty (sibling environment) or already gone: both are fine.
+    logInfo(
+      "commands",
+      `environment.stop project deployment dir kept: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+}
+
+/**
+ * Remove `deployments/<projectId>/<environmentId>`.
+ *
+ * Containers write bind mounts (`./data`) as root, so the unprivileged daemon
+ * can hit EACCES on nested entries. Only then is the removal routed through
+ * `tp-host rm -rf`, which accepts the path only beneath the managed state root,
+ * pins the parent with `cd -P` and unlinks without following symlinks. A
+ * deployment dir that is itself a symlink is never handed to the privileged
+ * runner.
+ */
+async function removeDeploymentDir(
+  deploymentDir: string,
+  runFn: RunFn,
+): Promise<void> {
+  try {
+    await Deno.remove(deploymentDir, { recursive: true });
+    return;
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) return;
+    if (!(err instanceof Deno.errors.PermissionDenied)) throw err;
+  }
+  const info = await Deno.lstat(deploymentDir).catch(() => null);
+  if (info === null) return;
+  if (!info.isDirectory) {
+    throw new Error(`deployment path is not a directory: ${deploymentDir}`);
+  }
+  const result = await runFn(
+    "sudo",
+    hostSudoArgs(["-n", "rm", "-rf", "--", deploymentDir]),
+  );
+  if (!result.success) {
+    throw new Error(
+      `deployment dir removal failed: ${result.stderr || "tp-host rm failed"}`,
+    );
+  }
+}
+
 function assertSafeStopIdentifiers(payload: EnvironmentStopPayload): void {
   if (!SAFE_PATH_ID_RE.test(payload.environmentId)) {
     throw new Error("environmentId contains unsupported characters");
@@ -161,6 +220,10 @@ async function composeDown(
     "down",
     "--remove-orphans",
     "--volumes",
+    // Only images built for this stack (no `image:` tag of their own); pulled
+    // or explicitly tagged images (base/shared) are never touched.
+    "--rmi",
+    "local",
   ], {
     onLine: (event) => logSink.onLine(event.stream, event.line),
   });
@@ -262,13 +325,12 @@ export async function handleEnvironmentStop(
     { runDocker: run },
   );
 
-  try {
-    await Deno.remove(deploymentDir, { recursive: true });
-  } catch (err) {
-    if (!(err instanceof Deno.errors.NotFound)) {
-      throw err;
-    }
-  }
+  await removeDeploymentDir(
+    deploymentDir,
+    deps?.runPrivileged ?? runPrivileged,
+  );
+
+  await removeEmptyProjectDeploymentDir(deploymentDir);
 
   await removeSecretTree(
     layout,
