@@ -1856,6 +1856,17 @@ tp_verb_find() {
     find -P . -type l -exec realpath -m -z -- {} +
     return
   fi
+  # Every symlink under a sealed release with its unresolved text
+  # (release-links.ts releaseLinkTextsFindArgs): rollback follows the texts
+  # lexically and never through the tenant's shared/. Only names and link
+  # texts come back, NUL-separated; nothing a link points at is opened.
+  if [ "$#" -eq 4 ] && [ "$1" = "-type" ] && [ "$2" = "l" ] && [ "$3" = "-printf" ] &&
+    [ "$4" = '%P\0%l\0' ]; then
+    tp_require_class "$_fd_base" principal
+    tp_pin_dir "$_fd_base" || tp_die "no such directory $_fd_base"
+    find -P . -type l -printf '%P\0%l\0'
+    return
+  fi
   if [ "$#" -eq 7 ] && [ "$1" = "-type" ] && [ "$2" = "d" ] && [ "$3" = "-exec" ] &&
     [ "$4" = "chmod" ] && [ "$5" = "g+s" ] && [ "$6" = "{}" ] && [ "$7" = "+" ]; then
     tp_require_class "$_fd_base" principal

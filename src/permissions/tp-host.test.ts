@@ -24,7 +24,11 @@ import { caddyUnit } from "../deploy/ingress.ts";
 import { backupServiceContent, backupTimerContent } from "../backups/units.ts";
 import { issuedCertificateFindArgs } from "../deploy/instance-acme-http01.ts";
 import { setgidDirectoriesFindArgs } from "../deploy/site.ts";
-import { releaseLinkTargetsFindArgs } from "../deploy/release/release-links.ts";
+import {
+  parseReleaseLinkTexts,
+  releaseLinkTargetsFindArgs,
+  releaseLinkTextsFindArgs,
+} from "../deploy/release/release-links.ts";
 import type {
   EnvironmentDeployCronJob,
   EnvironmentDeployNativeAppService,
@@ -1120,11 +1124,27 @@ test("find: every daemon-built find argv is accepted; anything else is refused",
       host.path("srv/users/bob"),
     ]);
     const linkArgs = releaseLinkTargetsFindArgs(release);
+    // Rollback: the same links with their unresolved texts, relative paths.
+    const texts = await host.run(releaseLinkTextsFindArgs(release));
+    assertEquals(texts.code, 0, texts.stderr);
+    assertEquals(
+      parseReleaseLinkTexts(texts.stdout).sort((a, b) =>
+        a.path.localeCompare(b.path)
+      ),
+      [
+        { path: "public/up", text: "../shared" },
+        { path: "public/x", text: host.path("outside/hop") },
+      ],
+    );
+    const textArgs = releaseLinkTextsFindArgs(release);
 
     const lookup = issuedCertificateFindArgs(root, "canary.example.com");
     for (
       const args of [
         releaseLinkTargetsFindArgs(host.path("outside")),
+        releaseLinkTextsFindArgs(host.path("outside")),
+        [...textArgs.slice(0, -1), "%p\\0%l\\0"],
+        [...textArgs, "-quit"],
         [...linkArgs.slice(0, -1), ";"],
         linkArgs.map((arg) => arg === "realpath" ? "cat" : arg),
         [...lookup, "-print"],

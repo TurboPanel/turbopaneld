@@ -22,8 +22,15 @@
  * link the build shipped must resolve inside the release and not into a
  * `shared` entry ({@link assertStagedLinksStayInRelease}). Once sealed the
  * release is immutable, so links that pass can never be redirected.
+ *
+ * A release sealed before that check existed can still hold such a link, and a
+ * rollback re-serves it without publishing anything. Its `shared` link is in
+ * place by then, so `realpath` would resolve straight through the tenant's
+ * directory; rollback instead follows every link's **text** lexically inside
+ * the release, never through `shared`, and refuses any chain that lands in
+ * `shared` or outside the release ({@link assertSealedLinksStayInRelease}).
  */
-import { dirname } from "@std/path";
+import { dirname, join } from "@std/path";
 import { hostSudoArgs } from "../../permissions/host-sudo.ts";
 import type { RunFn } from "../ensure-principal.ts";
 import type { ReleasePaths } from "./release-layout.ts";
@@ -49,6 +56,16 @@ export function releaseLinkTargetsFindArgs(releaseDir: string): string[] {
     "{}",
     "+",
   ];
+}
+
+/**
+ * `find` argv printing every symlink under `releaseDir` as its path relative
+ * to `releaseDir` and its unresolved text, each NUL-terminated
+ * (`<path>\0<text>\0`). Nothing is resolved or opened. tp-host accepts
+ * exactly this shape.
+ */
+export function releaseLinkTextsFindArgs(releaseDir: string): string[] {
+  return ["find", releaseDir, "-type", "l", "-printf", "%P\\0%l\\0"];
 }
 
 function isWithin(path: string, dir: string): boolean {
@@ -91,6 +108,21 @@ export function linkTargetsLeavingRelease(
   );
 }
 
+/**
+ * The physical path of `releaseDir`, as `realpath` prints the targets it is
+ * compared with. When the daemon cannot traverse the principal's home the
+ * given path is kept: that only happens on a managed host, where tp-host
+ * refuses to list a directory whose path is not already physical.
+ */
+async function physicalPath(path: string): Promise<string> {
+  try {
+    return await Deno.realPath(path);
+  } catch (err) {
+    if (err instanceof Deno.errors.PermissionDenied) return path;
+    throw err;
+  }
+}
+
 /** Where every symlink under `releaseDir` resolves, as root. Fails closed. */
 async function releaseLinkTargets(
   releaseDir: string,
@@ -129,7 +161,10 @@ export async function assertReleaseLinksStayHome(
   runFn: RunFn,
 ): Promise<void> {
   const targets = await releaseLinkTargets(releaseDir, runFn);
-  const foreign = foreignLinkTargets(targets, paths.principalHome);
+  const foreign = foreignLinkTargets(
+    targets,
+    await physicalPath(paths.principalHome),
+  );
   if (foreign.length === 0) return;
   throw new Error(
     `release ${releaseDir} has symlinks into another account's files: ${
@@ -152,7 +187,175 @@ export async function assertStagedLinksStayInRelease(
   runFn: RunFn,
 ): Promise<void> {
   const targets = await releaseLinkTargets(releaseDir, runFn);
-  const leaving = linkTargetsLeavingRelease(targets, releaseDir);
+  const leaving = linkTargetsLeavingRelease(
+    targets,
+    await physicalPath(releaseDir),
+  );
+  if (leaving.length === 0) return;
+  throw new Error(
+    `release ${releaseDir} has symlinks that leave the release or reach into ` +
+      `shared/ (serve shared files through the app, not a link): ${
+        describeTargets(leaving)
+      }`,
+  );
+}
+
+/** A symlink in a release: its path relative to the release, and its text. */
+export type ReleaseLink = { path: string; text: string };
+
+/** Links followed in one chain before it counts as a loop (as the kernel's). */
+const MAX_LINK_HOPS = 40;
+
+function segments(path: string): string[] {
+  return path.split("/").filter((part) => part !== "" && part !== ".");
+}
+
+/** One component of a lexical walk: the new position and what is left. */
+type WalkState = { at: string[]; rest: string[]; hops: number };
+
+/**
+ * Advance a walk by one component. Returns why the chain is refused, or the
+ * next state. A component naming another link in the release is replaced by
+ * that link's text, so `..` after it climbs out of its target, as the kernel
+ * would; the top-level `shared` is never entered.
+ */
+function walkStep(
+  state: WalkState,
+  texts: ReadonlyMap<string, string>,
+): WalkState | string {
+  const [part, ...rest] = state.rest;
+  if (part === "..") {
+    if (state.at.length === 0) return "leaves the release";
+    return { at: state.at.slice(0, -1), rest, hops: state.hops };
+  }
+  const at = [...state.at, part];
+  if (at.length === 1 && part === RELEASE_SHARED_NAME) {
+    return "reaches into shared/";
+  }
+  const text = texts.get(at.join("/"));
+  if (text === undefined) return { at, rest, hops: state.hops };
+  if (text.startsWith("/")) return "leaves the release";
+  if (state.hops >= MAX_LINK_HOPS) return "loops";
+  return {
+    at: state.at,
+    rest: [...segments(text), ...rest],
+    hops: state.hops + 1,
+  };
+}
+
+/**
+ * Why `link` fails the lexical check, or `null` when its whole chain stays in
+ * the release and out of `shared`. Only the link texts recorded in `texts` are
+ * followed — never the filesystem, so nothing the tenant keeps in `shared/`
+ * (or anywhere else) can change the answer.
+ */
+function lexicalLinkProblem(
+  link: ReleaseLink,
+  texts: ReadonlyMap<string, string>,
+): string | null {
+  if (link.text.startsWith("/")) return "leaves the release";
+  let state: WalkState | string = {
+    at: segments(dirname(link.path)),
+    rest: segments(link.text),
+    hops: 0,
+  };
+  while (typeof state !== "string" && state.rest.length > 0) {
+    state = walkStep(state, texts);
+  }
+  return typeof state === "string" ? state : null;
+}
+
+/**
+ * Links (other than the layout's own top-level `shared`) whose chain, followed
+ * lexically inside the release, leaves it or lands in `shared`. Each is
+ * reported as `<path> -> <text> (<why>)`.
+ */
+export function linksLeavingReleaseLexically(
+  links: readonly ReleaseLink[],
+): string[] {
+  const texts = new Map(links.map((link) => [link.path, link.text]));
+  return links
+    .filter((link) => link.path !== RELEASE_SHARED_NAME)
+    .flatMap((link) => {
+      const problem = lexicalLinkProblem(link, texts);
+      return problem === null
+        ? []
+        : [`${link.path} -> ${link.text} (${problem})`];
+    });
+}
+
+/** Parse `<path>\0<text>\0…` as {@link releaseLinkTextsFindArgs} prints it. */
+export function parseReleaseLinkTexts(stdout: string): ReleaseLink[] {
+  const fields = stdout.split("\0");
+  const links: ReleaseLink[] = [];
+  for (let i = 0; i + 1 < fields.length; i += 2) {
+    if (fields[i] !== "") links.push({ path: fields[i], text: fields[i + 1] });
+  }
+  return links;
+}
+
+/** Every symlink under `dir`, read as the daemon (no privilege). */
+async function readReleaseLinks(
+  root: string,
+  relative: string,
+): Promise<ReleaseLink[]> {
+  const dir = relative === "" ? root : join(root, relative);
+  const entries = await Array.fromAsync(Deno.readDir(dir));
+  const nested = await Promise.all(entries.map(async (entry) => {
+    const path = relative === "" ? entry.name : `${relative}/${entry.name}`;
+    if (entry.isSymlink) {
+      return [{ path, text: await Deno.readLink(join(root, path)) }];
+    }
+    return entry.isDirectory ? await readReleaseLinks(root, path) : [];
+  }));
+  return nested.flat();
+}
+
+/**
+ * Every symlink in a sealed release with its unresolved text: read directly
+ * when the daemon can, else (or when `asRoot`, because the daemon already
+ * knows it cannot traverse the release) listed as root. Fails closed.
+ */
+export async function listReleaseLinks(
+  releaseDir: string,
+  runFn: RunFn,
+  asRoot = false,
+): Promise<ReleaseLink[]> {
+  if (!asRoot) {
+    try {
+      return await readReleaseLinks(releaseDir, "");
+    } catch (err) {
+      if (!(err instanceof Deno.errors.PermissionDenied)) throw err;
+    }
+  }
+  const result = await runFn(
+    "sudo",
+    hostSudoArgs(["-n", ...releaseLinkTextsFindArgs(releaseDir)]),
+  );
+  if (!result.success) {
+    throw new Error(
+      `could not list the symlinks in release ${releaseDir}: ${
+        result.stderr || "find failed"
+      }`,
+    );
+  }
+  return parseReleaseLinkTexts(result.stdout);
+}
+
+/**
+ * Refuse an already-sealed release (a rollback target, a live release sealed
+ * before {@link assertStagedLinksStayInRelease} existed) whose links leave it
+ * or reach into `shared`. Lexical on purpose: its `shared` link exists, so
+ * resolving through it would ask the tenant where the link goes.
+ */
+export async function assertSealedLinksStayInRelease(
+  releaseDir: string,
+  runFn: RunFn,
+  asRoot = false,
+): Promise<void> {
+  const leaving = linksLeavingReleaseLexically(
+    await listReleaseLinks(releaseDir, runFn, asRoot),
+  );
   if (leaving.length === 0) return;
   throw new Error(
     `release ${releaseDir} has symlinks that leave the release or reach into ` +

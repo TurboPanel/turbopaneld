@@ -20,6 +20,7 @@ import {
   swapCurrentSymlink,
 } from "./promote.ts";
 import type { ReleaseManifestV1 } from "./deployment-json.ts";
+import { releaseLinkTextsFindArgs } from "./release-links.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -1153,13 +1154,18 @@ test("promoteExistingRelease checks a denied release only for presence", async (
       });
       assertEquals(dir, paths.releaseDir);
     });
-    // tp-host's existing `test -e` is the only privileged look at the tree:
-    // nothing in it is read, opened, or stat'd for metadata.
+    // tp-host's `test -e` and the link-text listing are the only privileged
+    // looks at the tree: no file in it is read, opened, or stat'd for
+    // metadata, and only link names and texts come back.
     assertEquals(calls[0], ["-n", "test", "-e", paths.releaseDir]);
+    assertEquals(calls[1], [
+      "-n",
+      ...releaseLinkTextsFindArgs(paths.releaseDir),
+    ]);
     assertEquals(
       calls.some((args) =>
         args.includes("cat") || args.includes("stat") ||
-        args.includes("find") || args.includes("ls")
+        args.includes("realpath") || args.includes("ls")
       ),
       false,
     );
