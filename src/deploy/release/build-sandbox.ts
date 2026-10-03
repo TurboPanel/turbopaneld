@@ -455,7 +455,7 @@ async function runBuildUnit(
     clearTimeout(timer);
   }
   const [status, stdout, stderr] = outcome;
-  if (aborted) {
+  if (aborted !== null) {
     await aborted;
     throw new Error(
       `build timed out after ${timeoutMs}ms; the build unit was stopped`,
