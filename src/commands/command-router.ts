@@ -3,6 +3,7 @@ import {
   markCommandInFlight,
 } from "./command-outbox.ts";
 import { errorText, sanitizeForLog } from "../util/logger.ts";
+import { redactUrlSecrets } from "../util/redact-url-secrets.ts";
 import type {
   CommandAckMessage,
   CommandDispatchMessage,
@@ -201,13 +202,17 @@ function sanitizeError(
  * A handler error message is very often raw process stderr, and the outcome is
  * persisted in command history where the transcript's redaction does not
  * reach. Redact against the sink's deny-set *before* sanitizing, so multiline
- * plaintext still matches the raw text it was captured from.
+ * plaintext still matches the raw text it was captured from. URLs are then
+ * stripped of user info and query strings (registry or release-asset links
+ * quoted in build output carry tokens the deny-set cannot know about).
  */
 function sanitizeOutcomeError(
   value: unknown,
   logSink: CommandOutputSink,
 ): string {
-  return sanitizeError(logSink.redactSummary(errorText(value)));
+  return sanitizeError(
+    redactUrlSecrets(logSink.redactSummary(errorText(value))),
+  );
 }
 
 export async function handleCommandDispatch(
