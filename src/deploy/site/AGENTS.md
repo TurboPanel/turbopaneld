@@ -79,6 +79,38 @@ Docker Compose. The daemon:
    series string means the same thing to both, so one value still selects both.
    OLS has no per-series reload granularity — per-vhost series selection works,
    but the server restarts as a whole.
+   **Per-site PHP runtimes (nginx and Apache).** A site whose `php.mode` is
+   `fastcgi` or `fpm` gets no pool on the shared master: its PHP runs as the
+   site's principal under systemd, never as root and never as the web server
+   (`site/php-runtime.ts` renders, `site/php-runtime-apply.ts` writes through
+   tp-host, whose pinned shapes `tp_php_unit_ok` / `tp_php_conf_ok` check
+   every line; `tp-host.test.ts` runs the renderers through the real script).
+   FastCGI is `php-cgi<series>` on `turbopanel-php-<id>.socket`
+   (`StandardInput=socket`, `PHP_FCGI_CHILDREN=4`); php-fpm is one master per
+   site (`Type=notify`, `listen.acl_users = tpnginx|tpapache`). Both use
+   `/run/turbopanel-php-<id>/php.sock`, the owner's `tmp/` on `/tmp`
+   (sessions, uploads), `ProtectSystem=strict` with writes only to `tmp/`
+   and the site's `shared/` (and `webroot/` for a managed directory), and
+   `-c <configDir>/php/sites/<id>/php.ini` — which replaces the packaged
+   php.ini, so it carries the production baseline itself, with a 128 MB
+   opcache per runtime and `validate_permission`/`validate_root` on. Apache
+   adds `ProxyFCGIBackendType GENERIC` for php-cgi. `<id>` is
+   `<slug>-<sha256(env, service)[0..12]>-<fcgi|fpm><series>`: a mode or
+   series switch is a **second** runtime beside the first. The new one is
+   written, `php-test`ed (as the owner), started and checked before the vhost
+   is staged; the vhost then moves to its socket through the safe rollout
+   below; only after that probe passes do the site's other runtimes go. A
+   failed rollout removes a runtime the apply created and puts back
+   `.tpprev` config for one it changed in place (PHP config cannot use
+   `.tpnew`: tp-host's PHP path class takes only the live names and
+   `.tpprev`). A runtime changed in place with no vhost change is probed on
+   its own. `removeSites` removes the environment's runtimes after its
+   vhosts; at daemon start `reconcileSitePhpRuntimesAtBoot` starts any
+   installed runtime that is down. The principal is implied the
+   `tpphp<series>` entitlement (the binaries are `0750 root:tpphp<series>`).
+   No mode keeps the shared master; a mode without a principal, or lsphp on
+   nginx/Apache, is refused. OpenLiteSpeed and Caddy ignore `php.mode` here.
+
 4. Materializes document roots under
    `<stateDir>/sites/<environmentId>/<composeServiceName>/<root>/` (default
    `public`; writes a placeholder `index.html` when empty) — **unless the

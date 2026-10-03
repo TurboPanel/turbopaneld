@@ -19,6 +19,18 @@ export const SSHD_DROPIN_DIR = "/etc/ssh/sshd_config.d";
 export const SSHD_DROPIN_PATH = `${SSHD_DROPIN_DIR}/60-turbopanel.conf`;
 
 /**
+ * The host's SFTP chroot switch. Root-owned and outside every tree tp-host's
+ * generic verbs may write, so only `tp-host sftp-chroot on` (which refuses
+ * while any `tpsftp` member is off the root-owned home layout) and
+ * `sftp-chroot off` change it. The daemon asks `tp-host sftp-chroot status`,
+ * which also names the chroot root it validated.
+ */
+export const SFTP_CHROOT_SWITCH_PATH = "/etc/ssh/turbopanel-sftp-chroot";
+
+/** Where a jailed SFTP session starts, relative to its chroot. */
+export const SFTP_CHROOT_START_DIR = "home";
+
+/**
  * Directives shared by both access levels.
  *
  * Forwarding is off across the board: a tenant account is for reaching its own
@@ -62,19 +74,34 @@ function forwardingDirectives(): readonly string[] {
 /**
  * The files-only level.
  *
- * Its own function so the principal-home redesign can add `ChrootDirectory`
- * here, to this block only: a chroot on the shell level would need a populated
- * root, and on the backstop it would apply to shell members too (see
+ * With `chrootRoot` set (the host's SFTP chroot switch is on), members are
+ * jailed at `<chrootRoot>/<user>` — the root-owned principal home, which is
+ * what `sshd` demands of every component of a `ChrootDirectory` — and start in
+ * `home/`. `%u`, not `%h`: the passwd home is `<chrootRoot>/<user>/home`, one
+ * level below the jail. `-d` is resolved inside the chroot.
+ *
+ * Only this block ever carries the chroot: on the shell level it would need a
+ * populated root, and on the backstop it would apply to shell members too (see
  * {@link principalBackstopDirectives}).
  */
-function sftpLevelDirectives(authorizedKeysDir: string): readonly string[] {
+function sftpLevelDirectives(
+  authorizedKeysDir: string,
+  chrootRoot: string | undefined,
+): readonly string[] {
+  // Required, not optional: the host's `Subsystem sftp` may point at
+  // `/usr/lib/openssh/sftp-server`, which is exec'd through the account's
+  // login shell and therefore dies on `/usr/sbin/nologin`. `internal-sftp`
+  // runs in the `sshd` process and needs no shell at all.
+  if (chrootRoot === undefined) {
+    return [
+      ...commonDirectives(authorizedKeysDir),
+      "ForceCommand internal-sftp",
+    ];
+  }
   return [
     ...commonDirectives(authorizedKeysDir),
-    // Required, not optional: the host's `Subsystem sftp` may point at
-    // `/usr/lib/openssh/sftp-server`, which is exec'd through the account's
-    // login shell and therefore dies on `/usr/sbin/nologin`. `internal-sftp`
-    // runs in the `sshd` process and needs no shell at all.
-    "ForceCommand internal-sftp",
+    `ChrootDirectory ${chrootRoot}/%u`,
+    `ForceCommand internal-sftp -d /${SFTP_CHROOT_START_DIR}`,
   ];
 }
 
@@ -124,6 +151,12 @@ export type SshdDropInOpts = {
   principalGroup: string;
   /** Managed key directory; defaulted so tests can render against a temp tree. */
   authorizedKeysDir?: string;
+  /**
+   * The principal home root to jail `sftpGroup` members under, or absent for
+   * no chroot. Set only while the host's switch is on — see
+   * {@link SFTP_CHROOT_SWITCH_PATH}.
+   */
+  sftpChrootRoot?: string;
 };
 
 /**
@@ -161,7 +194,7 @@ export function sshdDropInContent(opts: SshdDropInOpts): string {
     "  PasswordAuthentication yes",
     "",
     `Match Group ${opts.sftpGroup}`,
-    ...indent(sftpLevelDirectives(keysDir)),
+    ...indent(sftpLevelDirectives(keysDir, opts.sftpChrootRoot)),
     "",
     `Match Group ${opts.shellGroup}`,
     ...indent(commonDirectives(keysDir)),

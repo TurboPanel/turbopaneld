@@ -33,6 +33,18 @@ import type {
   EnvironmentDeployCronJob,
   EnvironmentDeployNativeAppService,
 } from "../contracts/commands-contracts.ts";
+import {
+  sitePhpConfigDir,
+  sitePhpFpmConf,
+  sitePhpIni,
+  sitePhpKey,
+  sitePhpRuntimeId,
+  type SitePhpRuntimeSpec,
+  sitePhpServiceName,
+  sitePhpServiceUnit,
+  sitePhpSocketName,
+  sitePhpSocketUnit,
+} from "../deploy/site/php-runtime.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -2304,7 +2316,7 @@ test("php-test runs the installed unit's binary on its own config, as the owner"
   await withPhpHost(async (host) => {
     const cfg = phpConfDir(host);
     const prefix =
-      "EXEC [timeout] [30] [setpriv] [--reuid=15001] [--regid=15001] [--clear-groups] " +
+      "EXEC [timeout] [30] [setpriv] [--reuid=15001] [--regid=15001] [--init-groups] " +
       "[--no-new-privs] [--] [env] [-i] [PATH=/usr/bin:/bin]";
     const want: Record<PhpMode, string> = {
       fastcgi: `${prefix} [/usr/bin/php-cgi8.4] [-c] [/proc/self/fd/3] [-v]`,
@@ -2349,6 +2361,96 @@ test("php-test runs the installed unit's binary on its own config, as the owner"
       ]]
     ) {
       await refused(host, args);
+    }
+  });
+});
+
+test("per-site PHP: what the daemon renders for each mode and web server passes tp-host", async () => {
+  await withPhpHost(async (host) => {
+    const home = host.path("srv/users/alice");
+    const site = `${home}/sites/shop`;
+    for (const mode of ["fastcgi", "fpm"] as const) {
+      for (const webAccount of ["tpnginx", "tpapache"] as const) {
+        const id = sitePhpRuntimeId(sitePhpKey("env1", "shop"), mode, "8.4");
+        const spec: SitePhpRuntimeSpec = {
+          id,
+          mode,
+          series: "8.4",
+          user: "alice",
+          group: "alice-grp",
+          home,
+          configDir: host.path("etc/turbopanel"),
+          webAccount,
+        };
+        const dir = sitePhpConfigDir(spec.configDir, id);
+        const made = await host.run([
+          "install",
+          "-d",
+          "-m",
+          "0750",
+          "-o",
+          "root",
+          "-g",
+          "alice-grp",
+          dir,
+        ]);
+        assertEquals(made.code, 0, made.stderr);
+        const configs: Array<[string, string]> = [[
+          "php.ini",
+          sitePhpIni([
+            { key: "memory_limit", value: "256M" },
+            { key: "open_basedir", value: `${site}/current/public:/tmp` },
+            { key: "realpath_cache_ttl", value: "0" },
+            { key: "session.save_path", value: "/var/lib/php/sessions" },
+          ]),
+        ]];
+        if (mode === "fpm") {
+          configs.push([
+            "php-fpm.conf",
+            sitePhpFpmConf(spec, {
+              pool: [{ key: "pm.max_children", value: "8" }],
+              chdir: `${site}/current/public`,
+            }),
+          ]);
+        }
+        for (const [name, content] of configs) {
+          await Deno.writeTextFile(host.path("tmp/conf"), content);
+          const put = await host.run([
+            "install",
+            "-m",
+            "0640",
+            "-o",
+            "root",
+            "-g",
+            "alice-grp",
+            host.path("tmp/conf"),
+            `${dir}/${name}`,
+          ]);
+          assertEquals(put.code, 0, `${mode} ${name}: ${put.stderr}`);
+        }
+        if (mode === "fastcgi") {
+          const socket = await installUnit(
+            host,
+            sitePhpSocketName(id),
+            sitePhpSocketUnit(spec),
+          );
+          assertEquals(socket.code, 0, socket.stderr);
+        }
+        const service = await installUnit(
+          host,
+          sitePhpServiceName(id),
+          sitePhpServiceUnit(spec, {
+            writablePaths: [`-${site}/shared`, `-${site}/webroot`],
+          }),
+        );
+        assertEquals(
+          service.code,
+          0,
+          `${mode} ${webAccount}: ${service.stderr}`,
+        );
+        const tested = await host.run(["php-test", id]);
+        assertEquals(tested.code, 0, tested.stderr);
+      }
     }
   });
 });
@@ -2430,5 +2532,172 @@ test("php-site-register writes the launcher registry from the account database o
       await refused(host, args);
     }
     assertEquals((await host.run(["rm", "-f", "--", entry])).code, 0);
+  });
+});
+
+// --- sftp-chroot ---------------------------------------------------------------
+
+/** Put alice on the new layout (root-owned 0750 home, home/, passwd home). */
+async function newLayoutAlice(host: Host, groups: string[] = []) {
+  await Deno.mkdir(host.path("srv/users/alice/home"), { recursive: true });
+  await Deno.chmod(host.path("srv/users/alice"), 0o750);
+  const passwd = await Deno.readTextFile(host.path("etc/passwd"));
+  await Deno.writeTextFile(
+    host.path("etc/passwd"),
+    passwd.replace(
+      `${host.prefix}/srv/users/alice:`,
+      `${host.prefix}/srv/users/alice/home:`,
+    ),
+  );
+  const group = await Deno.readTextFile(host.path("etc/group"));
+  await Deno.writeTextFile(
+    host.path("etc/group"),
+    group.replace("tpsftp:x:9986:", "tpsftp:x:9986:alice") +
+      groups.join("\n") + (groups.length > 0 ? "\n" : ""),
+  );
+}
+
+const SWITCH = "etc/ssh/turbopanel-sftp-chroot";
+
+test("sftp-chroot switches on only when every tpsftp member is on the new layout", async () => {
+  await withHost(async (host) => {
+    await newLayoutAlice(host);
+    assertEquals((await host.run(["sftp-chroot", "status"])).stdout, "off\n");
+    const check = await host.run(["sftp-chroot", "check"]);
+    assertEquals(check.code, 0, check.stdout + check.stderr);
+
+    const on = await host.run(["sftp-chroot", "on"]);
+    assertEquals(on.code, 0, on.stderr);
+    assertEquals(await Deno.readTextFile(host.path(SWITCH)), "on\n");
+    assertStringIncludes(on.stdout, "EXEC [chown] [-h] [--] [root:root] [./f]");
+    // The status names the root it validated, for the daemon to render.
+    assertEquals(
+      (await host.run(["sftp-chroot", "status"])).stdout,
+      `on ${host.path("srv/users")}\n`,
+    );
+    const verify = await host.run(["sftp-chroot", "verify"]);
+    assertEquals(verify.code, 0, verify.stderr);
+    assertStringIncludes(
+      verify.stderr,
+      "EXEC [/usr/sbin/sshd] [-T] [-C] [user=alice,host=localhost,addr=127.0.0.1]",
+    );
+
+    // Off is the rollback and is never gated.
+    assertEquals((await host.run(["sftp-chroot", "off"])).code, 0);
+    assertEquals((await host.run(["sftp-chroot", "status"])).stdout, "off\n");
+  });
+});
+
+test("sftp-chroot refuses a member still on the tenant-owned layout", async () => {
+  await withHost(async (host) => {
+    // The fixture's alice: passwd home is the home root, no home/ inside it.
+    const group = await Deno.readTextFile(host.path("etc/group"));
+    await Deno.writeTextFile(
+      host.path("etc/group"),
+      group.replace("tpsftp:x:9986:", "tpsftp:x:9986:alice"),
+    );
+    const check = await host.run(["sftp-chroot", "check"]);
+    assertEquals(check.code === 0, false);
+    assertStringIncludes(check.stdout, "alice: passwd home is not");
+    assertStringIncludes(
+      check.stdout,
+      "/srv/users/alice/home is not a directory",
+    );
+
+    const stderr = await refused(host, ["sftp-chroot", "on"]);
+    assertStringIncludes(stderr, "refusing to switch on");
+    await Deno.stat(host.path(SWITCH)).then(
+      () => {
+        throw new Error("switch written despite the refusal");
+      },
+      () => {},
+    );
+  });
+});
+
+test("sftp-chroot refuses a home or parent sshd would reject as a chroot", async () => {
+  await withHost(async (host) => {
+    await newLayoutAlice(host);
+    await Deno.chmod(host.path("srv/users/alice"), 0o770);
+    let check = await host.run(["sftp-chroot", "check"]);
+    assertStringIncludes(
+      check.stdout,
+      "alice: " + host.path("srv/users/alice") + " is not a root-owned",
+    );
+
+    await Deno.chmod(host.path("srv/users/alice"), 0o750);
+    await Deno.chmod(host.path("srv/users"), 0o757);
+    check = await host.run(["sftp-chroot", "check"]);
+    assertStringIncludes(
+      check.stdout,
+      host.path("srv/users") + ": not a root-owned",
+    );
+    assertEquals(check.code === 0, false);
+  });
+});
+
+test("sftp-chroot refuses a member that also holds the shell level", async () => {
+  await withHost(async (host) => {
+    await newLayoutAlice(host, ["tpshell:x:9985:alice"]);
+    const check = await host.run(["sftp-chroot", "check"]);
+    assertEquals(check.code === 0, false);
+    assertStringIncludes(check.stdout, "alice: in both tpsftp and tpshell");
+  });
+});
+
+test("sftp-chroot accepts only check, on, off and status", async () => {
+  await withHost(async (host) => {
+    for (
+      const args of [[], ["enable"], ["on", "now"], ["status", "-v"], [
+        "--",
+        "on",
+      ]]
+    ) {
+      await refused(host, ["sftp-chroot", ...args]);
+    }
+  });
+});
+
+test("only sftp-chroot on and off can write or remove the switch", async () => {
+  await withHost(async (host) => {
+    const sw = host.path(SWITCH);
+    await refused(host, [
+      "install",
+      "-m",
+      "0644",
+      "-o",
+      "root",
+      "-g",
+      "root",
+      host.path("tmp/staged"),
+      sw,
+    ]);
+    await refused(host, ["tee", sw], "on\n");
+    await Deno.writeTextFile(sw, "on\n");
+    await refused(host, ["rm", "-f", "--", sw]);
+    await refused(host, ["cat", "--", sw]);
+  });
+});
+
+test("sftp-chroot verify refuses while the switch is off", async () => {
+  await withHost(async (host) => {
+    await newLayoutAlice(host);
+    const stderr = await refused(host, ["sftp-chroot", "verify"]);
+    assertStringIncludes(stderr, "needs the switch on");
+  });
+});
+
+test("sftp-chroot checks an account whose primary group is tpsftp", async () => {
+  await withHost(async (host) => {
+    await newLayoutAlice(host);
+    const passwd = await Deno.readTextFile(host.path("etc/passwd"));
+    await Deno.writeTextFile(
+      host.path("etc/passwd"),
+      passwd + `dave:x:15004:9986::${host.prefix}/srv/users/dave:/bin/sh\n`,
+    );
+    const check = await host.run(["sftp-chroot", "check"]);
+    assertEquals(check.code === 0, false);
+    assertStringIncludes(check.stdout, "dave: passwd home is not");
+    assertEquals(check.stdout.includes("alice:"), false, check.stdout);
   });
 });

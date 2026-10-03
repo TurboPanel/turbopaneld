@@ -137,6 +137,36 @@ test("empty hosting proxy and php objects are omitted rather than stored", () =>
   assertEquals(payload.sites?.[0]?.webEnv, undefined);
 });
 
+test("site php.mode keeps the four PHP modes and drops anything else", () => {
+  const site = (mode: unknown) => ({
+    composeServiceName: "site",
+    engine: "nginx",
+    root: "public",
+    listenPort: 18080,
+    php: { version: "8.4", mode },
+  });
+  const payload = parseEnvironmentDeployPayload({
+    ...DEPLOY_BASE,
+    hostings: [],
+    sites: [
+      site("fastcgi"),
+      site("fpm"),
+      site("lsphp-detached"),
+      site("lsphp-attached"),
+      site("cgi"),
+      site(1),
+    ],
+  });
+  assertEquals(payload.sites?.map((entry) => entry.php), [
+    { version: "8.4", mode: "fastcgi" },
+    { version: "8.4", mode: "fpm" },
+    { version: "8.4", mode: "lsphp-detached" },
+    { version: "8.4", mode: "lsphp-attached" },
+    { version: "8.4" },
+    { version: "8.4" },
+  ]);
+});
+
 test("isValidIpv6Literal parseSide inner null rejects bad hextets and misplaced IPv4", () => {
   assertEquals(isValidIpv6Literal("2001:db8::gggg"), false);
   assertEquals(isValidIpv6Literal("203.0.113.1:abcd:ef01"), false);

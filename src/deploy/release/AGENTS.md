@@ -216,19 +216,34 @@ swapped and swapped back between two calls is out of reach of these checks; the
 unprivileged-builds design closes that by handing the tree back only once the
 build unit's processes are gone and the tree belongs to the daemon again.
 
-**Sandboxed build, containerless runtime.** `build.ts` is explicitly not
-container isolation and does not claim to be. It guarantees: the command runs in
-the scratch checkout (never the live tree or the principal home); no daemon
-credential material is inherited (`clearEnv` + allow-list; build `env` is
-non-secret by contract — build secrets keep riding `variableMaterial[]` /
-`secretPlan[]`); and CPU / address-space / file-size caps via `prlimit` where the
-host has it, degrading to an unwrapped run with a transcript note where it does
-not. The address-space cap is **64 GiB virtual**, not 4 GiB: V8 pointer
-compression reserves a 4 GiB CodeRange per isolate, and Corepack/pnpm workers
-each need their own — `RLIMIT_AS=4G` dies with `Failed to reserve virtual
-memory for CodeRange`; `16G` lets Node start but pnpm's registry GETs fail
-with `error (unknown)` / `ERR_PNPM_META_FETCH_FAIL`. That cap is virtual
-size, not RSS.
+**Builds run in the build sandbox** (`build-sandbox.ts`, WP4 of the
+unprivileged-builds design). Install and build commands and `build.env` are
+tenant input — anyone who can deploy a project may set them — so on a managed
+host they never run as the daemon account. Per native/static release:
+`work/<buildId>` is created (0700, as the daemon) under
+`/var/lib/turbopanel-build/work` (the build-user role's tree; the id is a
+digest of service and release, so a crashed run's tree is taken back and
+removed on the rerun); git clones into `work/<id>/source` while git's HOME
+and the credential files stay in the daemon-only scratch dir, and the build
+refuses to start if a credential file is still there; the commands, the
+filtered env (`PATH`/`HOME`/`LD_*`/`GIT_*` reserved, Node `bin/` leading
+`PATH` for a native app, Corepack/npm/XDG caches in `cache/<projectId>`) and
+the cwd go to `sudo tp-host build-run <id> <projectId>` as a spec on stdin
+(`orchestration/scripts/tp-build-runner` documents the format). tp-host runs
+them as `tpbuild` in a transient `turbopanel-build-<id>.service` with a fixed
+sandbox: no docker or tp group, daemon trees and sockets inaccessible,
+private-range / metadata egress denied, 4G memory, 2 CPUs, 1024 tasks, 30
+minutes, one build per host (the daemon also queues its own builds and says
+so in the transcript). Output streams back line by line. On any abort (the
+daemon-side ceiling, a lost client) the daemon runs `tp-host systemctl stop
+turbopanel-build-<id>.service`; then, success or not, `tp-host build-return
+<id>` gives the tree back only once the unit is gone, and only after that do
+the Next fold and the stage read it, contained in `work/<id>` (so a build
+that swapped `source` itself for a link is refused). Systemd 247–254 hosts
+get tp-host's reduced sandbox and a warning; below 247 builds refuse. Docker
+and Railpack builds stay on the Docker lane. There is no opt-out on a managed
+host. A development install runs the commands as the developer with `clearEnv` and an explicit
+allow-list, and no resource caps.
 
 **Native-app builds run on the tenant runtime.** `ensureNativeAppRuntime`
 vendors `vendor/node-app/<series>/current` **before** `applySourceReleases`,
@@ -238,12 +253,15 @@ not after promote. When an entry belongs to a `nativeAppServices[]` row,
 series' `bin/` leads a **curated** `PATH` (`<bin>:/usr/bin:/bin`, never the
 daemon's PATH — Deno's `node_compat_bin` would shadow `node`, and an
 unreadable `/usr/local/sbin` makes dash report `corepack: Permission denied`
-for a missing binary). The child is `sudo -n -u <self> -- env … sh -c` so
+for a missing binary). In the sandbox `tpbuild` reaches the series through
+its own `tpnode<series>` membership (node-app-runtime role). Unsandboxed, the
+child is `sudo -n -u <self> -- env … sh -c` so
 `initgroups()` picks up `tpnode<series>` without a daemon re-login and
 without exec'ing the passwd shell (`sg` dies on `/usr/sbin/nologin` with
 "This account is currently not available" — the managed daemon user `tp`
-and tenant principals are both nologin). Corepack still caches under
-`<checkout>/.corepack` with its download prompt off — never a host-wide
+and tenant principals are both nologin). Corepack caches under the
+project's sandbox cache (unsandboxed: `<checkout>/.corepack`) with its download
+prompt off — never a host-wide
 Corepack install, never the daemon's home. `NODE_ENV` follows the app's
 `appMode` (default `production`) in the build exactly as in the generated unit.
 

@@ -13,6 +13,7 @@ import {
   restoreFabricFromPersistedState,
 } from "../commands/fabric.ts";
 import { reinstallFirewallForwardingIfEnabled } from "../firewall/apply.ts";
+import { reconcileSitePhpRuntimesAtBoot } from "../deploy/site/php-runtime-apply.ts";
 import { logInfo, logWarn } from "../util/logger.ts";
 import { resolveLayout } from "../paths/layout.ts";
 import { reportLiveReleaseLinks } from "../deploy/release/live-release-scan.ts";
@@ -53,6 +54,8 @@ export type DaemonRunIo = {
   scanLiveReleases?: () => Promise<void>;
   reinstallFabricForwardingIfEnabled?: () => Promise<void>;
   reinstallFirewallForwardingIfEnabled?: () => Promise<void>;
+  /** Start any per-site PHP runtime that is installed but not running. */
+  reconcileSitePhpRuntimes?: () => Promise<void>;
   shouldEnableDockerIntegration?: () => boolean;
   shouldConnectToInstance?: () => boolean;
   createDockerClient?: () => DockerClientLike;
@@ -197,6 +200,7 @@ export async function runDaemon(io: DaemonRunIo = {}): Promise<void> {
     await (io.restoreFabricFromPersistedState ??
       restoreFabricFromPersistedState)();
     await reinstallForwardingJumps();
+    await (io.reconcileSitePhpRuntimes ?? reconcileSitePhpRuntimesAtBoot)();
   }
   // In the background: a slow tree walk must not hold up the connection, and
   // a failure is only ever reported.

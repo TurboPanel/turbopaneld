@@ -33,6 +33,7 @@ export const TP_HOST_VERBS: ReadonlySet<string> = new Set([
   "systemctl",
   "journalctl",
   "sshd",
+  "sftp-chroot",
   "ss",
   "sysctl",
   "iptables",
@@ -50,6 +51,9 @@ export const TP_HOST_VERBS: ReadonlySet<string> = new Set([
   "chpasswd",
   "getent",
   "modprobe",
+  "build-run",
+  "build-return",
+  "php-test",
 ]);
 
 export type HostSudoOptions = Parameters<typeof playbooksNeedRootHelper>[0] & {

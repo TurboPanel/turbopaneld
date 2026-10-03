@@ -664,6 +664,24 @@ function assertPrincipalIdOverrides(principal: PrincipalEnsureSpec): void {
   }
 }
 
+/**
+ * A principal holds at most one SSH access level. `sshd` applies the first
+ * `Match Group` block that fits, so an account in both `tpsftp` and `tpshell`
+ * would get whichever block happens to come first (jailed with no shell, once
+ * SFTP is chrooted). The password group is a credential, not a level, and
+ * combines with either.
+ */
+function assertSingleAccessLevel(principal: PrincipalEnsureSpec): void {
+  const requested = new Set(principal.accessGroups ?? []);
+  const sftp = accessGroup("sftp");
+  const shell = accessGroup("shell");
+  if (sftp && shell && requested.has(sftp) && requested.has(shell)) {
+    throw new TypeError(
+      `${principal.username}: SSH access groups ${sftp} and ${shell} are exclusive`,
+    );
+  }
+}
+
 export async function ensureSystemPrincipals(
   layout: LayoutPaths,
   principals: PrincipalEnsureSpec[],
@@ -671,6 +689,7 @@ export async function ensureSystemPrincipals(
 ): Promise<void> {
   for (const principal of principals) {
     assertPrincipalIdOverrides(principal);
+    assertSingleAccessLevel(principal);
   }
   await forEachSequential(
     principals,
@@ -876,6 +895,14 @@ export async function ensurePrincipalManagedGroups(
   const sorted = (values: Iterable<string>) =>
     [...values].sort((a, b) => a.localeCompare(b));
 
+  // Revoke before granting, so a switch between access levels never leaves
+  // the account in both groups at once.
+  await forEachSequential(sorted(current), async (group) => {
+    // Never touch a group outside the registry, even if it looks like ours.
+    if (!registryGroups.has(group) || desiredGroups.has(group)) return;
+    await removeSupplementaryGroupMembership(username, group, runFn);
+  });
+
   await forEachSequential(sorted(desiredGroups), async (group) => {
     if (current.has(group)) return;
     try {
@@ -889,12 +916,6 @@ export async function ensurePrincipalManagedGroups(
         }`,
       );
     }
-  });
-
-  await forEachSequential(sorted(current), async (group) => {
-    // Never touch a group outside the registry, even if it looks like ours.
-    if (!registryGroups.has(group) || desiredGroups.has(group)) return;
-    await removeSupplementaryGroupMembership(username, group, runFn);
   });
 }
 

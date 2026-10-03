@@ -1456,7 +1456,10 @@ tp_php_install() {
 # (re-checked here), never from the caller. The owner cannot traverse the
 # daemon's config tree outside its unit, so root opens the config files
 # (verified, no symlink) and the binary reads them through /proc/self/fd —
-# which checks the file's own mode, root:<owner>-grp 0640.
+# which checks the file's own mode, root:<owner>-grp 0640. The owner keeps its
+# supplementary groups, as systemd gives them to the unit: the PHP binaries are
+# 0750 root:tpphp<series>, so without its entitlement group the owner could not
+# even exec the binary the unit runs.
 tp_verb_php_test() {
   [ $# -eq 1 ] || tp_die "php-test: only php-test <siteId>"
   tp_php_site_id_ok "$1" || tp_die "php-test: refusing site id $1"
@@ -1474,7 +1477,7 @@ tp_verb_php_test() {
   tp_open_verified "$_pt_cfg/php.ini" || tp_die "php-test: no $_pt_cfg/php.ini"
   _pt_bin="${_ps_exec%% *}"
   set -- timeout 30 setpriv --reuid="$(tp_uid_of "$_ps_user")" \
-    --regid="$(tp_gid_of_group "$_ps_user-grp")" --clear-groups --no-new-privs -- \
+    --regid="$(tp_gid_of_group "$_ps_user-grp")" --init-groups --no-new-privs -- \
     env -i PATH=/usr/bin:/bin
   case "$_ps_mode" in
     fpm) set -- "$@" "$_pt_bin" --test --fpm-config /proc/self/fd/4 -c /proc/self/fd/3 ;;
@@ -2061,6 +2064,158 @@ tp_verb_sshd() {
   tp_die "sshd: only -t or -T"
 }
 
+# --- the SFTP chroot ---------------------------------------------------------
+# The sshd drop-in jails tpsftp members at $R_PRINCIPALS/<p> only while this
+# host's switch is on. sshd refuses a login unless every component of the
+# chroot path is a root-owned directory that group and others cannot write, so
+# a member still on the tenant-owned home layout could not sign in at all.
+# `on` therefore runs the layout check first and refuses on any finding; `off`
+# is never gated, because it is the rollback.
+#
+# The switch sits outside every managed tree (no path class), so no generic
+# verb — install, tee, rm, … — can write or remove it: only `sftp-chroot on`
+# (after the check) and `off`. `status` names the chroot root as this script
+# resolves it, so the daemon renders the same root the check validated.
+SFTP_GROUP="tpsftp"
+SHELL_GROUP="tpshell"
+SFTP_CHROOT_SWITCH="$P/etc/ssh/turbopanel-sftp-chroot"
+SFTP_START_DIR="/home"
+
+# A directory sshd accepts as part of a chroot path.
+tp_chroot_dir_ok() {
+  [ -d "$1" ] && [ ! -L "$1" ] || return 1
+  _cd_meta="$(stat -c '%u %a' -- "$1")" || return 1
+  [ "${_cd_meta%% *}" = "$ROOT_UID" ] || return 1
+  case "${_cd_meta#* }" in
+    *[2367]?|*[2367]) return 1 ;;
+  esac
+  return 0
+}
+
+# Every directory above the homes, up to / (up to the prefix in test mode).
+tp_chroot_parents_check() {
+  _cp_dir="$R_PRINCIPALS"
+  while [ -n "$_cp_dir" ] && [ "$_cp_dir" != "$P" ]; do
+    tp_chroot_dir_ok "$_cp_dir" ||
+      echo "$_cp_dir: not a root-owned directory closed to group and world writes"
+    _cp_dir="${_cp_dir%/*}"
+  done
+  [ -n "$P" ] || tp_chroot_dir_ok / ||
+    echo "/: not a root-owned directory closed to group and world writes"
+}
+
+tp_group_members() {
+  tp_getent group "$1" | cut -d: -f4 | tr ',' '\n'
+}
+
+# Every account in tpsftp: supplementary members and those whose primary
+# group it is (sshd's Match Group matches both).
+tp_sftp_members() {
+  tp_group_members "$SFTP_GROUP"
+  _sf_gid="$(tp_gid_of_group "$SFTP_GROUP")" || return 0
+  [ -n "$_sf_gid" ] || return 0
+  if [ -n "$TP_TEST" ]; then
+    cat "$P/etc/passwd"
+  else
+    getent passwd
+  fi | awk -F: -v g="$_sf_gid" '$4 == g { print $1 }'
+}
+
+# One member: a principal on the new layout, and in the files-only level only.
+tp_sftp_member_check() {
+  _sm_user="$1"
+  if ! tp_is_principal "$_sm_user"; then
+    echo "$_sm_user: in $SFTP_GROUP but not a principal, so it has no home to be jailed in"
+    return 0
+  fi
+  _sm_home="$R_PRINCIPALS/$_sm_user"
+  tp_chroot_dir_ok "$_sm_home" ||
+    echo "$_sm_user: $_sm_home is not a root-owned directory closed to group and world writes"
+  # The tenant directory belongs to the principal (to the caller in test mode,
+  # which owns every file there, as ROOT_UID does for the root-owned ones).
+  _sm_uid="$(tp_uid_of "$_sm_user")"
+  [ -z "$TP_TEST" ] || _sm_uid="$CALLER_UID"
+  if [ ! -d "$_sm_home/home" ] || [ -L "$_sm_home/home" ] ||
+    [ "$(stat -c '%u' -- "$_sm_home/home")" != "$_sm_uid" ]; then
+    echo "$_sm_user: $_sm_home/home is not a directory the principal owns"
+  fi
+  tp_principal_home_ok "$(tp_getent passwd "$_sm_user" | cut -d: -f6)" "$_sm_user" ||
+    echo "$_sm_user: passwd home is not $_sm_home/home"
+  if tp_group_members "$SHELL_GROUP" | grep -qx -- "$_sm_user"; then
+    echo "$_sm_user: in both $SFTP_GROUP and $SHELL_GROUP; the jail would leave it no shell"
+  fi
+  return 0
+}
+
+# Prints one line per finding; fails if there is any.
+tp_sftp_chroot_check() {
+  _sc_out="$(
+    tp_chroot_parents_check
+    tp_sftp_members | sort -u | while IFS= read -r _sc_user; do
+      [ -z "$_sc_user" ] || tp_sftp_member_check "$_sc_user"
+    done
+  )"
+  [ -n "$_sc_out" ] || return 0
+  printf '%s\n' "$_sc_out"
+  return 1
+}
+
+tp_sftp_chroot_is_on() {
+  [ -f "$SFTP_CHROOT_SWITCH" ] && [ ! -L "$SFTP_CHROOT_SWITCH" ]
+}
+
+# The effective sshd config jails every member: an administrator's earlier
+# Match, or a drop-in sorted before ours, could otherwise silently win.
+tp_sftp_chroot_verify() {
+  _sv_out="$(
+    tp_sftp_members | sort -u | while IFS= read -r _sv_user; do
+      [ -n "$_sv_user" ] || continue
+      tp_name_shape_ok "$_sv_user" || { echo "$_sv_user: not a valid account name"; continue; }
+      _sv_spec="user=$_sv_user,host=localhost,addr=127.0.0.1"
+      if [ -n "$TP_TEST" ]; then
+        tp_run /usr/sbin/sshd -T -C "$_sv_spec" >&2
+        continue
+      fi
+      _sv_eff="$(/usr/sbin/sshd -T -C "$_sv_spec" 2>&1)" || { echo "$_sv_user: sshd -T failed"; continue; }
+      printf '%s\n' "$_sv_eff" | grep -qx "chrootdirectory $R_PRINCIPALS/%u" ||
+        echo "$_sv_user: effective ChrootDirectory is not $R_PRINCIPALS/%u"
+      printf '%s\n' "$_sv_eff" | grep -qx "forcecommand internal-sftp -d $SFTP_START_DIR" ||
+        echo "$_sv_user: effective ForceCommand is not internal-sftp -d $SFTP_START_DIR"
+    done
+  )"
+  [ -n "$_sv_out" ] || return 0
+  printf '%s\n' "$_sv_out"
+  return 1
+}
+
+tp_verb_sftp_chroot() {
+  [ "$#" -eq 1 ] || tp_die "sftp-chroot: only check, verify, on, off or status"
+  case "$1" in
+    status)
+      if tp_sftp_chroot_is_on; then
+        echo "on $R_PRINCIPALS"
+      else
+        echo off
+      fi
+      ;;
+    check) tp_sftp_chroot_check ;;
+    verify)
+      tp_sftp_chroot_is_on || tp_die "sftp-chroot: verify needs the switch on"
+      tp_sftp_chroot_verify
+      ;;
+    on)
+      tp_sftp_chroot_check >&2 ||
+        tp_die "sftp-chroot: refusing to switch on until every $SFTP_GROUP member is on the new home layout"
+      printf 'on\n' | tp_put_file "$SFTP_CHROOT_SWITCH" 0644 root root
+      ;;
+    off)
+      tp_pin_parent "$SFTP_CHROOT_SWITCH" || tp_die "no such directory for $SFTP_CHROOT_SWITCH"
+      rm -f -- "./$PIN_NAME"
+      ;;
+    *) tp_die "sftp-chroot: only check, verify, on, off or status" ;;
+  esac
+}
+
 tp_verb_ss() {
   [ "$#" -eq 3 ] && [ "$1" = "-H" ] && [ "$2" = "-ltnp" ] && [ "$3" = "sport = :80" ] ||
     tp_die "ss: only -H -ltnp 'sport = :80'"
@@ -2375,10 +2530,19 @@ BUILD_RUNTIME_MAX_SEC=1800
 BUILD_SYSTEMD_FLOOR=255
 BUILD_SYSTEMD_MIN=247
 # Loopback, private (10/8 covers the tp0 fabric), CGNAT, link-local (cloud
-# metadata), benchmark, multicast and reserved ranges. The host's own
-# resolvers are allowed back in (systemd lets IPAddressAllow= win).
+# metadata), benchmark, multicast and reserved ranges, on every port. Nothing
+# is allowed back in (an IPAddressAllow= wins over the deny for every port):
+# the build resolves through its own resolv.conf naming only public
+# nameservers, which public egress already reaches.
 BUILD_DENY_V4="0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 169.254.0.0/16 172.16.0.0/12 192.0.0.0/24 192.168.0.0/16 198.18.0.0/15 224.0.0.0/3"
-BUILD_DENY_V6="::/128 ::1/128 fc00::/7 fe80::/10 ff00::/8"
+# NAT64 (64:ff9b::/96) and 6to4 (2002::/16) embed IPv4 addresses, private
+# ones included, so both are denied whole.
+BUILD_DENY_V6="::/128 ::1/128 64:ff9b::/96 2002::/16 fc00::/7 fe80::/10 ff00::/8"
+# Used when the host names no public nameserver (a loopback stub with
+# private upstreams, a LAN router): never a loopback, private or link-local
+# resolver, which would open that address to the build.
+BUILD_FALLBACK_RESOLVERS="1.1.1.1 8.8.8.8"
+BUILD_RESOLV_DIR="$P/run/tpbuild"
 
 tp_build_id_ok() {
   case "$1" in
@@ -2458,17 +2622,66 @@ tp_build_unit_state() {
   systemctl show -p ActiveState --value -- "$1"
 }
 
-# The host's nameservers as /32 or /128, one per line: literal addresses only.
-tp_build_resolvers() {
-  [ -f "$P/etc/resolv.conf" ] || return 0
-  awk '$1 == "nameserver" { sub(/%.*/, "", $2); print $2 }' "$P/etc/resolv.conf" |
+# True for a literal address outside every range in BUILD_DENY_V4/V6.
+tp_build_ip_public() {
+  case "$1" in
+    *:*)
+      case "$(printf '%s' "$1" | tr 'A-F' 'a-f')" in
+        ::*|64:ff9b:*|2002:*|fc*|fd*|fe8*|fe9*|fea*|feb*|ff*) return 1 ;;
+      esac
+      return 0
+      ;;
+    *.*.*.*)
+      printf '%s\n' "$1" | awk -F. '
+        NF != 4 { exit 1 }
+        {
+          for (i = 1; i <= 4; i++) if ($i !~ /^[0-9]+$/ || $i + 0 > 255) exit 1
+          a = $1 + 0; b = $2 + 0; c = $3 + 0
+          if (a == 0 || a == 10 || a == 127 || a >= 224) exit 1
+          if (a == 100 && b >= 64 && b <= 127) exit 1
+          if (a == 169 && b == 254) exit 1
+          if (a == 172 && b >= 16 && b <= 31) exit 1
+          if (a == 192 && (b == 168 || (b == 0 && c == 0))) exit 1
+          if (a == 198 && (b == 18 || b == 19)) exit 1
+        }'
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+# The public nameservers a resolv.conf names, one per line (literal
+# addresses only; zone ids dropped).
+tp_build_public_resolvers() {
+  [ -f "$1" ] || return 0
+  awk '$1 == "nameserver" { sub(/%.*/, "", $2); print $2 }' "$1" |
     while IFS= read -r _rs; do
       case "$_rs" in
-        ''|*[!0-9A-Fa-f:.]*) ;;
-        *:*) printf '%s/128\n' "$_rs" ;;
-        *.*.*.*) printf '%s/32\n' "$_rs" ;;
+        ''|*[!0-9A-Fa-f:.]*) continue ;;
       esac
+      if tp_build_ip_public "$_rs"; then printf '%s\n' "$_rs"; fi
     done
+}
+
+# Write the build's resolv.conf (root-owned 0644 under /run/tpbuild): the
+# host's public nameservers, else systemd-resolved's public upstreams (behind
+# the 127.0.0.53 stub), else BUILD_FALLBACK_RESOLVERS.
+tp_build_write_resolv() {
+  _rv="$(tp_build_public_resolvers "$P/etc/resolv.conf")"
+  [ -n "$_rv" ] || _rv="$(tp_build_public_resolvers "$P/run/systemd/resolve/resolv.conf")"
+  if [ -z "$_rv" ]; then
+    _rv="$(printf '%s\n' $BUILD_FALLBACK_RESOLVERS)"
+    printf 'tp-host: note: the host names no public nameserver; this build resolves through %s\n' \
+      "$BUILD_FALLBACK_RESOLVERS" >&2
+  fi
+  mkdir -m 0755 -- "$BUILD_RESOLV_DIR" 2>/dev/null || [ -d "$BUILD_RESOLV_DIR" ] ||
+    tp_die "cannot create $BUILD_RESOLV_DIR"
+  tp_pin_dir "$BUILD_RESOLV_DIR" || tp_die "refusing $BUILD_RESOLV_DIR"
+  [ "$(stat -c '%u' .)" = "$(id -u)" ] || tp_die "refusing $BUILD_RESOLV_DIR: not owned by root"
+  rm -f -- ./resolv.conf.new
+  printf '%s\n' "$_rv" | awk '{ print "nameserver " $0 }' >./resolv.conf.new
+  chmod 0644 ./resolv.conf.new
+  mv -f -- ./resolv.conf.new ./resolv.conf
+  cd /
 }
 
 # One host-wide build at a time (root-only lock), and never alongside a build
@@ -2495,6 +2708,7 @@ tp_verb_build_run() {
   [ "$_br_v" -ge "$BUILD_SYSTEMD_MIN" ] ||
     tp_die "build-run: systemd $_br_v cannot sandbox a build; the supported floor is Debian 13 / Ubuntu 24.04"
   tp_build_lock
+  tp_build_write_resolv
   _br_work="$R_BUILD/work/$1"
   _br_cache="$R_BUILD/cache/$2"
   tp_build_work_pin "$1"
@@ -2511,10 +2725,14 @@ tp_verb_build_run() {
     -p RestrictSUIDSGID=yes -p ProtectSystem=strict -p ProtectHome=yes \
     -p PrivateTmp=yes -p PrivateDevices=yes -p TemporaryFileSystem="$R_BUILD:ro" \
     -p LoadCredential="tp-build-runner:$BUILD_RUNNER" \
-    -p BindPaths="$_br_work" -p BindPaths="$_br_cache"
+    -p BindPaths="$_br_work" -p BindPaths="$_br_cache" \
+    -p BindReadOnlyPaths="$BUILD_RESOLV_DIR/resolv.conf:$P/etc/resolv.conf"
+  # systemd-resolved's varlink socket (nss-resolve) and the system bus would
+  # resolve, and talk, through the host instead of the build's resolv.conf.
   for _br_hide in "$R_CONFIG" "$R_STATE" "$R_LOG" "$R_RUN" "$R_PRINCIPALS" "$P/srv" \
     "$P/backup" "$P/run/docker.sock" "$P/var/run/docker.sock" "$P/run/containerd" \
-    "$P/run/turbopanel-gate" "$P/var/lib/docker" "$P/etc/ssh" "$P/etc/wireguard"; do
+    "$P/run/turbopanel-gate" "$P/var/lib/docker" "$P/etc/ssh" "$P/etc/wireguard" \
+    "$P/run/systemd/resolve/io.systemd.Resolve" "$P/run/dbus/system_bus_socket"; do
     set -- "$@" -p InaccessiblePaths="-$_br_hide"
   done
   set -- "$@" -p ProtectKernelTunables=yes -p ProtectKernelModules=yes \
@@ -2531,9 +2749,6 @@ tp_verb_build_run() {
   [ "$_br_v" -lt 257 ] || set -- "$@" -p PrivatePIDs=yes
   set -- "$@" -p RestrictAddressFamilies="AF_INET AF_INET6 AF_UNIX" \
     -p IPAddressDeny="$BUILD_DENY_V4 $BUILD_DENY_V6"
-  _br_allow="$(tp_build_resolvers | tr '\n' ' ')"
-  _br_allow="${_br_allow% }"
-  [ -z "$_br_allow" ] || set -- "$@" -p IPAddressAllow="$_br_allow"
   set -- "$@" -p Slice="$BUILD_SLICE" -p MemoryMax="$BUILD_MEMORY_MAX" -p MemorySwapMax=0 \
     -p CPUQuota="$BUILD_CPU_QUOTA" -p TasksMax=1024 -p IOWeight=50 -p LimitFSIZE=4G \
     -p LimitNOFILE=65536 -p LimitCORE=0 -p RuntimeMaxSec="$BUILD_RUNTIME_MAX_SEC" \
@@ -2588,6 +2803,7 @@ case "$_verb" in
   systemctl) tp_verb_systemctl "$@" ;;
   journalctl) tp_verb_journalctl "$@" ;;
   sshd) tp_verb_sshd "$@" ;;
+  sftp-chroot) tp_verb_sftp_chroot "$@" ;;
   ss) tp_verb_ss "$@" ;;
   sysctl) tp_verb_sysctl "$@" ;;
   iptables|ip6tables|iptables-restore|ip6tables-restore|iptables-save|ip6tables-save)

@@ -88,10 +88,12 @@ import {
 import {
   applySites,
   resolveSiteDocumentRoot,
+  resolveSitePhpSeries,
   type SiteManagedDirectory,
   type SiteRelease,
 } from "../deploy/site.ts";
 import { detectSiteApps } from "../deploy/site-apps.ts";
+import { sitePhpRuntimeMode } from "../deploy/site/php-runtime.ts";
 import { applyCronJobs, type CronApplySpec } from "../deploy/cron/apply.ts";
 import {
   type AppliedRelease,
@@ -162,6 +164,8 @@ import {
   principalHomePath,
   resolveLayout,
   siteCurrentSymlink,
+  siteSharedDir,
+  siteWebrootDir,
 } from "../paths/layout.ts";
 
 const SAFE_PATH_ID_RE = /^[A-Za-z0-9_-]+$/;
@@ -515,8 +519,8 @@ async function ensureDeployIngress(
  * has to be created before the release engine runs — even when nothing else in
  * the payload references that principal.
  */
-function deployPrincipalSpecs(
-  parsedPayload: EnvironmentDeployPayload,
+export function deployPrincipalSpecs(
+  parsedPayload: Pick<EnvironmentDeployPayload, "sourceMaterial" | "sites">,
   principalMaterial: EnvironmentDeployPrincipalMaterial[],
 ): EnvironmentDeployPrincipalMaterial[] {
   const byId = new Map<string, EnvironmentDeployPrincipalMaterial>();
@@ -533,7 +537,42 @@ function deployPrincipalSpecs(
       ...(principal.gid === undefined ? {} : { gid: principal.gid }),
     });
   }
-  return [...byId.values()];
+  return withSitePhpRuntimes([...byId.values()], parsedPayload.sites ?? []);
+}
+
+/**
+ * A per-site PHP runtime runs `php-cgi<series>` / `php-fpm<series>` as the
+ * site's principal, and those binaries are `0750 root:tpphp<series>`: the
+ * principal must hold that series' entitlement or its unit dies `203/EXEC`.
+ * The wire grants runtimes for what the tenant runs by hand; a site the
+ * daemon itself runs as the principal implies its own, the way a native app
+ * implies its Node series.
+ */
+function withSitePhpRuntimes(
+  principals: EnvironmentDeployPrincipalMaterial[],
+  sites: readonly EnvironmentDeploySite[],
+): EnvironmentDeployPrincipalMaterial[] {
+  const implied = new Map<string, Set<string>>();
+  for (const site of sites) {
+    if (!site.principal || sitePhpRuntimeMode(site) === null) continue;
+    const series = resolveSitePhpSeries(site);
+    if (!series) continue;
+    const set = implied.get(site.principal.principalId) ?? new Set<string>();
+    set.add(series);
+    implied.set(site.principal.principalId, set);
+  }
+  return principals.map((principal) => {
+    const series = implied.get(principal.principalId);
+    if (!series) return principal;
+    const runtimes = [...(principal.runtimes ?? [])];
+    for (const entry of series) {
+      const held = runtimes.some((r) =>
+        r.runtime === "php" && r.series === entry
+      );
+      if (!held) runtimes.push({ runtime: "php", series: entry });
+    }
+    return { ...principal, runtimes };
+  });
 }
 
 async function ensureDeployPrincipals(
@@ -1083,6 +1122,34 @@ async function persistComposeEnvFile(
  * `applyCronJobs` call would treat the first lane's timers as stale and remove
  * the ones it had just installed.
  */
+/**
+ * What a site's cron job may write besides the principal's `home/`, `data/`
+ * and `tmp/`: `shared/` in the release lane, `webroot/` and `shared/` in the
+ * managed lane, nothing for a tree outside the principal's home.
+ */
+export function siteCronWritableDirs(
+  layout: Pick<LayoutPaths, "principalHomeRoot">,
+  release: SiteRelease | undefined,
+  managed: SiteManagedDirectory | undefined,
+): string[] {
+  if (release) {
+    return [
+      siteSharedDir(
+        principalHomePath(layout, release.username),
+        release.serviceId,
+      ),
+    ];
+  }
+  if (managed) {
+    const home = principalHomePath(layout, managed.username);
+    return [
+      siteWebrootDir(home, managed.serviceId),
+      siteSharedDir(home, managed.serviceId),
+    ];
+  }
+  return [];
+}
+
 async function applyDeployCronJobs(
   layout: LayoutPaths,
   parsedPayload: EnvironmentDeployPayload,
@@ -1108,6 +1175,11 @@ async function applyDeployCronJobs(
         releaseBindings.get(site.composeServiceName),
         managedBindings.get(site.composeServiceName),
       ),
+      siteWritableDirs: siteCronWritableDirs(
+        layout,
+        releaseBindings.get(site.composeServiceName),
+        managedBindings.get(site.composeServiceName),
+      ),
       jobs: site.cron,
     });
   }
@@ -1127,6 +1199,12 @@ async function applyDeployCronJobs(
         principalHomePath(layout, binding.username),
         app.serviceId,
       ),
+      siteWritableDirs: [
+        siteSharedDir(
+          principalHomePath(layout, binding.username),
+          app.serviceId,
+        ),
+      ],
       username: binding.username,
       jobs: app.cron,
     });

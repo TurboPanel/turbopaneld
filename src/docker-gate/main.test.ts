@@ -88,12 +88,15 @@ test("loadConfig falls back on unusable numbers", () => {
   assertEquals(config.summarySeconds, DEFAULT_SUMMARY_SECONDS);
 });
 
-test("loadConfig refuses every mode but observe: this build cannot enforce", () => {
-  for (const mode of ["enforce", "off", "", "OBSERVE"]) {
+test("loadConfig knows observe and enforce, and refuses every other mode", () => {
+  assertEquals(loadConfig({}).mode, "observe");
+  assertEquals(loadConfig({ TP_DOCKER_GATE_MODE: "observe" }).mode, "observe");
+  assertEquals(loadConfig({ TP_DOCKER_GATE_MODE: "enforce" }).mode, "enforce");
+  for (const mode of ["off", "", "OBSERVE", "Enforce", "enforce "]) {
     assertThrows(
       () => loadConfig({ TP_DOCKER_GATE_MODE: mode }),
       Error,
-      "only observes",
+      "use observe or enforce",
     );
   }
 });
@@ -364,7 +367,7 @@ test("loadCheckPassed is off unless asked, passes on a good config and throws on
   assertEquals(logs.map((l) => l.event), ["docker-gate.load-check-ok"]);
   assertThrows(() =>
     loadCheckPassed(
-      { TP_DOCKER_GATE_LOAD_CHECK: "1", TP_DOCKER_GATE_MODE: "enforce" },
+      { TP_DOCKER_GATE_LOAD_CHECK: "1", TP_DOCKER_GATE_MODE: "refuse-all" },
       log,
     )
   );
