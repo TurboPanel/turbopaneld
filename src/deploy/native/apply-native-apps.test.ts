@@ -888,6 +888,20 @@ test("ensureNativeAppRuntime vendors the distinct series before the Git build", 
   });
 });
 
+test("ensureNativeAppRuntime rejects an unsupported series with the supported list, before any playbook", async () => {
+  const playbook = createPlaybookMock();
+  const error = await assertRejects(() =>
+    ensureNativeAppRuntime([makeApp({ nodeVersion: "18" })], {
+      runPlaybook: playbook.runPlaybook,
+    })
+  );
+  assertStringIncludes(
+    (error as Error).message,
+    "node 18 is not a supported node version on this server. Supported series: 22, 24, 26.",
+  );
+  assertEquals(playbook.calls.length, 0);
+});
+
 test("applyNativeAppServices with an empty list is a no-op", async () => {
   const host = await makeTestHost();
   try {

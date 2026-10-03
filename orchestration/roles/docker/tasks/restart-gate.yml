@@ -1,0 +1,32 @@
+---
+# Decide whether a daemon.json change may restart dockerd automatically.
+# Sets _docker_restart_deferred (read by handlers/main.yml and the pending
+# marker in daemon-json.yml). A restart is deferred, never skipped, when:
+#   - this host runs the co-located instance (see daemon-json.yml), or
+#   - builder-only mode (daemon-converge) is merging into a host whose RUNNING
+#     dockerd does not report live-restore: that mode leaves live-restore as
+#     found, so a restart would stop every container on the host.
+# A deferred restart leaves the pending marker, which a later converge
+# applies once the running dockerd reports live-restore.
+- name: Ask the running dockerd whether live-restore is in effect (builder-only)
+  ansible.builtin.command:
+    argv:
+      - docker
+      - info
+      - --format
+      - "{{ '{{.LiveRestoreEnabled}}' }}"
+  register: _docker_gate_live_restore
+  changed_when: false
+  failed_when: false
+  when:
+    - turbopanel_docker_builder_only | bool
+    - not (_docker_colocated_instance_host | bool)
+
+- name: Decide whether dockerd may be restarted automatically
+  ansible.builtin.set_fact:
+    _docker_restart_deferred: >-
+      {{
+        (_docker_colocated_instance_host | bool)
+        or ((turbopanel_docker_builder_only | bool)
+            and ((_docker_gate_live_restore.stdout | default('') | trim) != 'true'))
+      }}

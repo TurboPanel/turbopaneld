@@ -156,10 +156,12 @@ function expectedSystemdRun(
         : []),
       ...((tier.privatePids ?? true) ? ["PrivatePIDs=yes"] : []),
       "RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX",
-      "IPAddressDeny=0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 " +
+      // No loopback here: lib/tp-build-loopback filters it by port instead.
+      "IPAddressDeny=0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 " +
       "169.254.0.0/16 172.16.0.0/12 192.0.0.0/24 192.168.0.0/16 " +
-      "198.18.0.0/15 224.0.0.0/3 ::/128 ::1/128 64:ff9b::/96 2002::/16 " +
+      "198.18.0.0/15 224.0.0.0/3 ::/128 64:ff9b::/96 2002::/16 " +
       "fc00::/7 fe80::/10 ff00::/8" + (tier.hostDeny ?? ""),
+      `ExecStartPre=+${prefix}/opt/turbopanel/lib/tp-build-loopback sync`,
       "Slice=tpbuild.slice",
       "MemoryMax=4G",
       "MemorySwapMax=0",
@@ -198,6 +200,7 @@ test("build-run hands the work tree to tpbuild and starts the runner in the fixe
         `${BUILD_UID}:${BUILD_UID}`,
         ".",
       ]),
+      execLine([`${host.prefix}/opt/turbopanel/lib/tp-build-loopback`, "sync"]),
       execLine(expectedSystemdRun(host.prefix)),
     ]);
     const cache = await Deno.stat(
@@ -237,7 +240,7 @@ test("build-run never opens a resolver through the private-range deny, on any po
     const result = await host.run(["build-run", "b1", "p1"]);
     assertEquals(result.code, 0, result.stderr);
     assertEquals(result.stderr, "");
-    const run = execLines(result.stdout)[2] ?? "";
+    const run = execLines(result.stdout)[3] ?? "";
     assertEquals(run, execLine(expectedSystemdRun(host.prefix)));
     // Allow wins over deny for every port, so nothing is ever allowed back.
     assertEquals(run.includes("IPAddressAllow"), false);
@@ -320,7 +323,7 @@ test("a host with only local or private resolvers builds through the vetted publ
     assertEquals(result.code, 0, result.stderr);
     assertStringIncludes(result.stderr, "no public nameserver");
     assertEquals(
-      execLines(result.stdout)[2],
+      execLines(result.stdout)[3],
       execLine(expectedSystemdRun(host.prefix)),
     );
     assertEquals(
@@ -344,7 +347,7 @@ test("build-run keeps the build unprivileged below the OS floor, with a warning"
     assertEquals(ubuntu.code, 0, ubuntu.stderr);
     assertEquals(ubuntu.stderr, "");
     assertEquals(
-      execLines(ubuntu.stdout)[2],
+      execLines(ubuntu.stdout)[3],
       execLine(expectedSystemdRun(host.prefix, { privatePids: false })),
     );
 
@@ -354,7 +357,7 @@ test("build-run keeps the build unprivileged below the OS floor, with a warning"
     assertStringIncludes(old.stderr, "below the supported floor");
     assertStringIncludes(old.stderr, "Debian 13 / Ubuntu 24.04");
     assertEquals(
-      execLines(old.stdout)[2],
+      execLines(old.stdout)[3],
       execLine(
         expectedSystemdRun(host.prefix, { floor: false, privatePids: false }),
       ),

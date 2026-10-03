@@ -18,6 +18,7 @@ import {
   ownedObject,
   ownedTarget,
   ownerOf,
+  PLATFORM_ATTACH_ALLOWLIST,
   PLATFORM_COMPONENTS,
   PLATFORM_ROLES,
   platformBindVerdict,
@@ -37,6 +38,7 @@ import {
   SYSTEM_MANAGED_INGRESS_COMPONENT,
   type SystemComponentDescriptor,
 } from "../deploy/system-component.ts";
+import { SYSTEM_COMPONENT_CONTRACTS } from "../deploy/system-component.ts";
 import { MANAGED_ENGINE_LABEL } from "../managed/compose.ts";
 import { ORCHESTRATOR_COMPOSE_SERVICE_NAME } from "../deploy/system-component.ts";
 import { orchestratorCompose } from "../managed/orchestrator.ts";
@@ -69,11 +71,16 @@ test("the gate's label names are the ones the platform stamps", () => {
   assertEquals(
     [...PLATFORM_COMPONENTS].toSorted(),
     [
-      SYSTEM_HOSTING_INGRESS_COMPONENT,
-      SYSTEM_MANAGED_HA_COMPONENT,
-      SYSTEM_MANAGED_INGRESS_COMPONENT,
+      ...Object.keys(SYSTEM_COMPONENT_CONTRACTS),
       ...HELPER_COMPONENTS,
     ].toSorted(),
+  );
+});
+
+test("the attach allowlist is exactly the docker run helpers", () => {
+  assertEquals(
+    [...PLATFORM_ATTACH_ALLOWLIST].toSorted(),
+    [...HELPER_COMPONENTS].toSorted(),
   );
 });
 
@@ -388,6 +395,40 @@ test("every `docker run` helper in src stamps the shared platform label", async 
     if (bare) offenders.push(rel);
   }
   assertEquals(offenders, []);
+});
+
+test("every platform system component the daemon knows is a platform container to the gate", () => {
+  for (
+    const [component, contract] of Object.entries(SYSTEM_COMPONENT_CONTRACTS)
+  ) {
+    const labels = {
+      [LABEL_ROLE]: contract.role,
+      [LABEL_SYSTEM_COMPONENT]: component,
+    };
+    assertEquals(ownerOf(labels), "platform", component);
+  }
+});
+
+test("the system-compose template stamps the platform labels the gate reads", async () => {
+  const path = new URL(
+    "../../orchestration/roles/system-compose/templates/docker-compose.yml.j2",
+    import.meta.url,
+  );
+  const text = await Deno.readTextFile(path);
+  const components = [
+    ...text.matchAll(/com\.turbopanel\.system\.component: (\w+)/g),
+  ].map((m) => m[1]);
+  assertEquals(components.sort(), ["database", "queue"]);
+  assertEquals(text.match(/^\s+turbopanel\.role: turbopanel$/gm)?.length, 2);
+  for (const component of components) {
+    assertEquals(
+      ownerOf({
+        [LABEL_ROLE]: "turbopanel",
+        [LABEL_SYSTEM_COMPONENT]: component,
+      }),
+      "platform",
+    );
+  }
 });
 
 async function* walkSource(dir: string): AsyncGenerator<string> {

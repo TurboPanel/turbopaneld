@@ -447,6 +447,65 @@ test("applySites applies nginx+apache+ols together", async () => {
   }
 });
 
+test("removeSites stops the OpenLiteSpeed unit when its last site goes, and keeps it for another environment", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const { run, calls } = createSiteRunMock();
+  const { runPlaybook } = capturePlaybooks();
+  const unitCalls = () =>
+    calls.filter((call) => call.args.includes("turbopanel-openlitespeed"))
+      .map((call) => call.args.filter((arg) => arg !== "-n").join(" "))
+      .filter((line) => line.includes("systemctl"));
+  try {
+    await applySites(layout, "envolsa", [olsSite], { run, runPlaybook });
+    await applySites(layout, "envolsb", [olsSite], { run, runPlaybook });
+
+    calls.length = 0;
+    await removeSites(layout, "envolsa", { run });
+    const kept = unitCalls();
+    assertEquals(kept.some((line) => line.includes("disable --now")), false);
+    assertEquals(kept.some((line) => line.includes("reload")), true);
+
+    calls.length = 0;
+    await removeSites(layout, "envolsb", { run });
+    const idle = unitCalls();
+    assertEquals(idle.some((line) => line.includes("disable --now")), true);
+    assertEquals(idle.some((line) => line.includes("reload")), false);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("applySites restarts the OpenLiteSpeed unit after it was stopped for idleness", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const { run, calls } = createSiteRunMock();
+  const { runPlaybook } = capturePlaybooks();
+  const isUnit = (args: string[], verb: string) =>
+    args.includes("turbopanel-openlitespeed") && args.includes(verb);
+  // A stopped unit refuses `reload`, as systemd does.
+  const stoppedRun: SiteRunFn = (command, args) =>
+    command === "sudo" && isUnit(args, "reload")
+      ? Promise.resolve(
+        fail("Unit turbopanel-openlitespeed.service is not active"),
+      )
+      : run(command, args);
+  try {
+    await applySites(layout, "envolsx", [olsSite], { run, runPlaybook });
+    await removeSites(layout, "envolsx", { run });
+
+    calls.length = 0;
+    await applySites(layout, "envolsy", [olsSite], {
+      run: stoppedRun,
+      runPlaybook,
+    });
+    const enabled = calls.some((call) =>
+      isUnit(call.args, "enable") && call.args.includes("--now")
+    );
+    assertEquals(enabled, true);
+  } finally {
+    await cleanup();
+  }
+});
+
 test("removeSites removes nginx/apache/ols configs via mocked sudo", async () => {
   const { layout, cleanup } = await makeTestLayout();
   const { run } = createSiteRunMock();
@@ -3035,7 +3094,7 @@ async function perSitePhpHarness(): Promise<PerSitePhpHarness> {
       applySites(layout, env, [site], {
         run,
         runPlaybook: () => Promise.resolve(),
-        releaseBindings: releaseBindingsFor("shop"),
+        releaseBindings: releaseBindingsFor(site.composeServiceName),
         systemdUnitDir: unitDir,
         sleep: () => Promise.resolve(),
       }),
@@ -3334,7 +3393,8 @@ test("per-site PHP: a settings change restores the previous config when the site
       "did not serve shop",
     );
     // The vhost did not change, so nginx was never reloaded; the runtime was
-    // reloaded in place, probed, and put back.
+    // restarted (a new memory_limit moves the unit's MemoryMax, which a
+    // reload cannot apply), probed, and put back.
     assertEquals(h.calls.some((c) => c.args.includes("-t")), false);
     assertEquals(await Deno.readTextFile(iniPath), lastGood);
     assertEquals(await exists(`${iniPath}.tpprev`), false);
@@ -3343,7 +3403,7 @@ test("per-site PHP: a settings change restores the previous config when the site
       [
         `enable turbopanel-php-${id}.service`,
         `is-active --quiet turbopanel-php-${id}.service`,
-        `reload turbopanel-php-${id}.service`,
+        `restart turbopanel-php-${id}.service`,
         `is-active --quiet turbopanel-php-${id}.service`,
         `restart turbopanel-php-${id}.service`,
       ],
@@ -3429,6 +3489,186 @@ test("removeSites removes the environment's per-site PHP runtimes after the vhos
       (a) => a.includes("stop") && a.includes(`turbopanel-php-${id}.service`),
     );
     assert(nginxReload < stopped, "vhost gone before its runtime");
+  } finally {
+    await h.cleanup();
+  }
+});
+
+function sharedPoolPath(layout: LayoutPaths, env = "envphp"): string {
+  return join(layout.configDir, "php", "8.4", "pools", `tp-${env}-shop.conf`);
+}
+
+test("per-site PHP: moving off the shared master removes the site's pool and stops the idle master", async () => {
+  const h = await perSitePhpHarness();
+  try {
+    const site = perSitePhpSite("nginx", "fastcgi");
+    await h.apply({ ...site, php: { version: "8.4" } });
+    assertEquals(await exists(sharedPoolPath(h.layout)), true);
+    h.calls.length = 0;
+    await h.apply(site);
+
+    assertEquals(await exists(sharedPoolPath(h.layout)), false);
+    const fpm = systemctlCalls(h.calls).filter((c) =>
+      c.includes("turbopanel-php-fpm@8.4")
+    );
+    assert(fpm.some((c) => c.startsWith("reload")), fpm.join("; "));
+    // Its only pool is gone: the master goes with it.
+    assertEquals(fpm.at(-1), "disable --now turbopanel-php-fpm@8.4");
+    const probe = h.calls.findIndex((c) => c.command === "curl");
+    const poolGone = callIndex(
+      h.calls,
+      (a) => a.includes("rm") && a.at(-1) === sharedPoolPath(h.layout),
+    );
+    assert(probe >= 0 && probe < poolGone, "pool only after the probe");
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("per-site PHP: the shared master keeps running while another site's pool is on it", async () => {
+  const h = await perSitePhpHarness();
+  try {
+    const site = perSitePhpSite("nginx", "fpm");
+    await h.apply({ ...site, php: { version: "8.4" } }, "envkeep");
+    await h.apply({ ...site, php: { version: "8.4" } });
+    h.calls.length = 0;
+    await h.apply(site);
+    assertEquals(await exists(sharedPoolPath(h.layout)), false);
+    assertEquals(await exists(sharedPoolPath(h.layout, "envkeep")), true);
+    assertEquals(
+      systemctlCalls(h.calls).filter((c) => c.startsWith("disable --now")),
+      [],
+    );
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("per-site PHP: moving back to the shared master installs the pool before the vhost and removes the runtime after", async () => {
+  const h = await perSitePhpHarness();
+  try {
+    const site = perSitePhpSite("nginx", "fastcgi");
+    await h.apply(site);
+    const id = phpRuntimeId("fastcgi");
+    h.calls.length = 0;
+    await h.apply({ ...site, php: { version: "8.4" } });
+
+    assertEquals(await exists(sharedPoolPath(h.layout)), true);
+    assertEquals(
+      await exists(join(h.unitDir, `turbopanel-php-${id}.service`)),
+      false,
+    );
+    assertEquals(
+      await exists(join(h.layout.configDir, "php", "sites", id)),
+      false,
+    );
+    const fpmUp = callIndex(
+      h.calls,
+      (a) => a.includes("systemctl") && a.includes("turbopanel-php-fpm@8.4"),
+    );
+    const nginxTest = callIndex(h.calls, (a) => a.includes("-t"));
+    const runtimeStopped = callIndex(
+      h.calls,
+      (a) => a.includes("stop") && a.includes(`turbopanel-php-${id}.service`),
+    );
+    assert(fpmUp >= 0 && fpmUp < nginxTest, "pool live before nginx -t");
+    assert(nginxTest < runtimeStopped, "runtime only after the vhost moved");
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("per-site PHP: a site whose key extends another's keeps its runtime when the other goes", async () => {
+  const h = await perSitePhpHarness();
+  try {
+    // Slugs to `<shop's key>-x`, so its runtime ids start with `<key>-`.
+    const lookalike = `${sitePhpKey("envphp", "shop")}-x`;
+    const longer = sitePhpRuntimeId(
+      sitePhpKey("envother", lookalike),
+      "fpm",
+      "8.4",
+    );
+    assert(longer.startsWith(`${sitePhpKey("envphp", "shop")}-`));
+    await h.apply({
+      ...perSitePhpSite("nginx", "fpm"),
+      composeServiceName: lookalike,
+    }, "envother");
+    await h.apply(perSitePhpSite("nginx", "fastcgi"));
+    // Switching shop's mode must not take the lookalike's runtime either.
+    await h.apply(perSitePhpSite("nginx", "fpm"));
+    assertEquals(
+      await exists(join(h.unitDir, `turbopanel-php-${longer}.service`)),
+      true,
+    );
+    await removeSites(h.layout, "envphp", {
+      run: createSiteRunMock().run,
+      systemdUnitDir: h.unitDir,
+    });
+    assertEquals(
+      await exists(
+        join(h.unitDir, `turbopanel-php-${phpRuntimeId("fpm")}.service`),
+      ),
+      false,
+    );
+    assertEquals(
+      await exists(join(h.unitDir, `turbopanel-php-${longer}.service`)),
+      true,
+    );
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("removeSites also removes a runtime no vhost names any more", async () => {
+  const h = await perSitePhpHarness();
+  try {
+    await h.apply(perSitePhpSite("nginx", "fpm"), "envkeep");
+    const kept = phpRuntimeId("fpm", "envkeep");
+    // Left by a site removed while its runtime stayed: no vhost names it.
+    const orphan = phpRuntimeId("fastcgi", "envgone");
+    await Deno.writeTextFile(
+      join(h.unitDir, `turbopanel-php-${orphan}.service`),
+      "",
+    );
+    await Deno.writeTextFile(
+      join(h.unitDir, `turbopanel-php-${orphan}.socket`),
+      "",
+    );
+    await removeSites(h.layout, "envphp", {
+      run: createSiteRunMock().run,
+      systemdUnitDir: h.unitDir,
+    });
+    assertEquals(
+      await exists(join(h.unitDir, `turbopanel-php-${orphan}.service`)),
+      false,
+    );
+    assertEquals(
+      await exists(join(h.unitDir, `turbopanel-php-${orphan}.socket`)),
+      false,
+    );
+    assertEquals(
+      await exists(join(h.unitDir, `turbopanel-php-${kept}.service`)),
+      true,
+    );
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("per-site PHP is refused for a document root outside the owner's home", async () => {
+  const h = await perSitePhpHarness();
+  try {
+    await assertRejects(
+      () =>
+        applySites(h.layout, "envphp", [perSitePhpSite("nginx", "fastcgi")], {
+          run: createSiteRunMock().run,
+          runPlaybook: () => Promise.resolve(),
+          systemdUnitDir: h.unitDir,
+          sleep: () => Promise.resolve(),
+        }),
+      Error,
+      "serves only from the owner's home",
+    );
   } finally {
     await h.cleanup();
   }

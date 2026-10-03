@@ -104,10 +104,57 @@ Docker Compose. The daemon:
    `.tpprev` config for one it changed in place (PHP config cannot use
    `.tpnew`: tp-host's PHP path class takes only the live names and
    `.tpprev`). A runtime changed in place with no vhost change is probed on
-   its own. `removeSites` removes the environment's runtimes after its
-   vhosts; at daemon start `reconcileSitePhpRuntimesAtBoot` starts any
-   installed runtime that is down. The principal is implied the
-   `tpphp<series>` entitlement (the binaries are `0750 root:tpphp<series>`).
+   its own. A site's runtimes are matched by exact id
+   (`isSitePhpRuntimeOf`: `<key>-(fcgi|fpm|lsd)<digits>`), never by prefix — one
+   site's key can begin another's. A site moving onto a runtime gives up its
+   pool on the shared master (any series) once its vhost serves the new
+   socket; that series is reloaded, and stopped when only `default.conf` is
+   left. `removeSites` removes the environment's runtimes after its vhosts,
+   plus every runtime no nginx, Apache or OpenLiteSpeed vhost names
+   (`orphanSitePhpRuntimes`: an id is a hash, so an orphan cannot be traced
+   to its environment; OpenLiteSpeed's per-site `vhosts/<site>/vhconf.conf`
+   directories are entered one level); runtimes an apply in flight holds
+   (`holdSitePhpRuntime`) are never orphans, and only FastCGI, php-fpm and
+   detached lsphp (`lsd`) ids are considered. At daemon start
+   `reconcileSitePhpRuntimesAtBoot` removes the orphans and starts only what
+   a vhost names; if any vhost cannot be read it removes and starts nothing. The limits site code must not raise
+   (`SITE_PHP_LOCKED_INI_KEYS`: memory, execution and input time, input vars,
+   post/upload size) are repeated in a `[PATH=<owner home>]` section of
+   php.ini — php-cgi's admin form, honoured by php-fpm too — which makes them
+   `PHP_INI_SYSTEM` per request, so `ini_set`, `set_time_limit` and
+   `.user.ini` cannot change them. Hence per-site PHP serves only from the
+   owner's home (a release or managed directory); a daemon-owned document
+   root is refused (the owner cannot enter `tp:tp 0750` anyway). The unit
+   carries `IPAddressDeny=localhost link-local multicast 0.0.0.0/8 fc00::/7`
+   with `IPAddressAllow=127.0.0.1 127.0.0.53` (the database proxy and
+   systemd-resolved's stub). systemd filters by address, not port, so the port
+   filter is `lib/tp-php-loopback` (nftables table `inet turbopanel_php`): for
+   every site owner's Linux user with a PHP unit it refuses all loopback
+   destinations except 127.0.0.1:13306 (ProxySQL's MySQL port) and the stub
+   on port 53, so ProxySQL admin/metrics, other sites and Apache's backend
+   stay closed. The rules match the uid, so they also bind that user's ssh and
+   cron. Each unit runs it as root in `ExecStartPre=+` (the one root hook
+   tp-host pins; if it fails the unit does not start: fail closed) and the
+   daemon runs `tp-host php-loopback-sync` after installing (before starting)
+   or removing a runtime and at boot reconcile; the set is rebuilt from the
+   unit files on disk, so start and sweep cannot disagree. Replies of the owner's own local servers (a native app on 127.0.0.1) pass
+   through `ct state established,related accept` first. The `nft` and `flock`
+   programs are installed by `turbopanel-user/root-helpers.yml`; if still
+   missing the helper exits non-zero naming the program (units do not start,
+   boot reconcile logs the error). Known gap: an owner whose OLS PHP runs only
+   as attached lsphp (turbopaneld#250, spawned by OpenLiteSpeed, no unit) is
+   never in the rule set and stays unrestricted on loopback; handle when #250
+   merges. Not closed: an
+   `nft flush ruleset` while PHP runs leaves loopback open until the next
+   start, deploy or daemon boot. The ProxySQL MySQL port is fixed at 13306
+   in the script; a changed `listenerPorts` needs the script's `DB_PORT`
+   changed too. RFC 1918 stays open
+   (scope addresses, VPC services, operator-set Docker pools), so the host's
+   private addresses and other containers' bridge IPs are not closed by it.
+   The `tpphp<series>` entitlement (the binaries are
+   `0750 root:tpphp<series>`) is resolved control-plane side as a `deploy`
+   entitlement; the daemon also adds it on deploy only to
+   cover an older control plane.
    No mode keeps the shared master; a mode without a principal, or lsphp on
    nginx/Apache, is refused. OpenLiteSpeed and Caddy ignore `php.mode` here.
 
@@ -234,6 +281,15 @@ root-owned `0550` by design:
   scripts read the release and write through `shared/` — reachable as
   `current/shared` — and nothing else on the filesystem. Daemon-owned sites
   (no release binding) stay unrestricted.
+- **nginx follows no link below a release-backed document root.** It serves
+  one with `disable_symlinks on from=$document_root`, so **every** symlink under
+  the root answers 403 — including links that stay inside the release, such as
+  `public/build -> ../dist` or Laravel's `public/storage` (`artisan
+  storage:link`). Builds that need those paths must copy the files rather than
+  link them, or serve them through the app. Apache and OpenLiteSpeed keep
+  owner-match link following (`.htaccess` `RewriteRule` needs it); the
+  publish-time link checks in `../release/release-links.ts` are what keeps
+  those engines safe.
 - **PHP is told the symlink moved.** PHP is the one runtime that would keep
   serving the old release after a promote even though the document-root *string*
   never changed, because two caches hide the swap: the realpath cache still

@@ -58,6 +58,33 @@ test("ManagedHaObserver.attach schedules poll and detach clears the timer", asyn
   assertEquals(sent.length, afterDetach);
   assertEquals(sent[0]?.type, "managed-ha-event");
   assertEquals(sent[0]?.managedId, MANAGED_ID);
+  assertEquals(sent[0]?.instanceHost, "db-1");
+  assertEquals(sent[0]?.instancePort, 5432);
+});
+
+test("ManagedHaObserver sends no instance when Orchestrator's key is incomplete", async () => {
+  const sent: ManagedHaEventMessage[] = [];
+  const observer = new ManagedHaObserver({
+    send: (message) => {
+      sent.push(message);
+    },
+    isStackPresent: () => Promise.resolve(true),
+    api: {
+      credentials: { user: "admin", password: "x" },
+      fetch: () =>
+        Promise.resolve(
+          problemResponse([{
+            clusterAlias: MANAGED_ID,
+            key: { hostname: "db-1" },
+            problems: ["DeadPrimary"],
+          }]),
+        ),
+    },
+  });
+  await observer.poll();
+  assertEquals(sent.length, 1);
+  assertEquals("instanceHost" in sent[0], false);
+  assertEquals("instancePort" in sent[0], false);
 });
 
 test("ManagedHaObserver ignores non-dead-primary problems and missing problem names", async () => {

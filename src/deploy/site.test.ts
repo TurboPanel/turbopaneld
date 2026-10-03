@@ -610,6 +610,72 @@ test("openlitespeedVhostConfig serves a static document root with no directory l
   assertEquals(conf.includes("allowBrowse 0"), false);
 });
 
+/** The deny rules as JS regexes, read back from the rendered vhost config. */
+function olsDenyRules(conf: string): RegExp[] {
+  return [...conf.matchAll(/^RewriteRule (\S+) - \[F,L,NC\]$/gm)].map(
+    (m) => new RegExp(m[1], "i"),
+  );
+}
+
+function olsDenied(conf: string, path: string): boolean {
+  return olsDenyRules(conf).some((re) => re.test(path));
+}
+
+test("openlitespeedVhostConfig never serves script source as plain text", () => {
+  const staticConf = openlitespeedVhostConfig();
+  const phpConf = openlitespeedVhostConfig({
+    processorName: "lsphp_x",
+    lsphpPath: "/opt/lsphp/bin/lsphp",
+    user: "u",
+    group: "g",
+    adminValues: [],
+  });
+  assertEquals(olsDenyRules(staticConf).length, 2);
+  const everywhere = [
+    "a.php3",
+    "a.php8",
+    "dir/a.PHP5",
+    "a.phtml",
+    "a.PhAr",
+    "a.phps",
+    "a.pht",
+    "a.inc",
+    "a.cgi",
+    "a.php.bak",
+    "a.php~",
+    "a.PHP.old",
+    "a.php3.bak",
+    "a.php3/x",
+  ];
+  for (const path of everywhere) {
+    assertEquals(olsDenied(staticConf, path), true, `static ${path}`);
+    assertEquals(olsDenied(phpConf, path), true, `php ${path}`);
+  }
+  // Static sites run no PHP, so `.php` (any case, with path-info) is denied.
+  for (const path of ["a.php", "a.PHP", "dir/a.php/x", "a.Php/x/y"]) {
+    assertEquals(olsDenied(staticConf, path), true, `static ${path}`);
+  }
+  // On a PHP site the handler runs `.php`, with or without path-info.
+  for (const path of ["a.php", "index.php/route", "dir/a.php/x"]) {
+    assertEquals(olsDenied(phpConf, path), false, `php ${path}`);
+  }
+  // Ordinary static files, including shell/python/perl downloads, are served.
+  for (
+    const path of [
+      "style.css",
+      "install.sh",
+      "tool.py",
+      "report.pl",
+      "phpinfo.txt",
+      "a.phpx",
+      "img/php.png",
+    ]
+  ) {
+    assertEquals(olsDenied(staticConf, path), false, `static ${path}`);
+    assertEquals(olsDenied(phpConf, path), false, `php ${path}`);
+  }
+});
+
 test("openlitespeedMainConfig assembles a single httpd_config.conf from fragments", async () => {
   const { layout, cleanup } = await makeTestLayout();
   try {

@@ -1,5 +1,8 @@
+import { SeenCommandIds } from "./dispatch-dedupe.ts";
+import { closeAndAbandon } from "./socket-close.ts";
 import { restartDaemonService } from "./restart-daemon-service.ts";
 import { describeUnknown } from "../util/describe-unknown.ts";
+import { redactUrlSecrets } from "../util/redact-url-secrets.ts";
 import { forEachSequential, repeatSequential } from "../util/sequential.ts";
 import {
   createInstanceHttpClient,
@@ -64,6 +67,7 @@ import { runDocker as defaultRunDocker } from "../deploy/docker-cli.ts";
 import { syncHostDockerNetworking } from "../deploy/docker-networking-sync.ts";
 import { runDockerSetup } from "../orchestration/ansible.ts";
 import { resolveLayout } from "../paths/layout.ts";
+import { removeDaemonFile } from "../permissions/daemon-files.ts";
 import { sweepOrphanCommandLogs } from "../logs/orphan-sweep.ts";
 import { classifyConnectFailure } from "./connect-failure.ts";
 import { DaemonJwksClient } from "./jwks-client.ts";
@@ -132,6 +136,7 @@ import {
 import { installOriginNeedsInsecureTls } from "./install-tls.ts";
 import { ManagedHaObserver } from "./ha-observe.ts";
 import { PgDeadPrimaryObserver } from "./pg-dead-primary-observe.ts";
+import { PgStandbySampler } from "./pg-standby-sampler.ts";
 import { BackupResultReporter } from "../backups/result-reporter.ts";
 import { AcmeIssuanceObserver } from "./acme-observe.ts";
 import { InstanceAcmeRenewalScheduler } from "./instance-acme-renew.ts";
@@ -154,6 +159,7 @@ import type {
  * module never imports handlers.
  */
 export type CommandDispatchDeps = {
+  verifyControlPlane?: () => Promise<void>;
   decryptSecrets?: (ciphertexts: string[]) => Promise<(string | null)[]>;
   sendCommandLogChunk?: SendCommandLogChunkFn;
   rehydrateDeploymentSecrets?: (
@@ -194,6 +200,8 @@ export type CommandPorts = {
   handleCommandDispatch?: CommandDispatchHandler;
   handleFabricPathProbe?: FabricPathProbeHandler;
   handleDrivetempEnable?: DrivetempEnableHandler;
+  /** Runs when a session attaches: delivers held command outcomes. */
+  handleSessionAttach?: (ws: WebSocket) => Promise<void>;
 };
 
 let commandPorts: CommandPorts = {};
@@ -367,7 +375,7 @@ function parseMessage(raw: string): DaemonMessage | null {
 export async function clearDaemonKeyState(stateDir: string): Promise<void> {
   await forEachSequential([SERVER_KEY_FILE, KEY_ID_FILE], async (file) => {
     try {
-      await Deno.remove(`${stateDir}/${file}`);
+      await removeDaemonFile(`${stateDir}/${file}`);
     } catch {
       // Missing files are fine.
     }
@@ -425,8 +433,11 @@ export class InstanceClient {
   #loggedUnsupportedInstanceVersion: string | undefined;
   #licenseStamp: string | undefined;
   #idlePresence: IdlePresence | undefined;
+  /** Command ids already dispatched, so a repeated frame never runs twice. */
+  readonly #seenDispatchIds = new SeenCommandIds();
   #haObserver: ManagedHaObserver | undefined;
   #pgProbeObserver: PgDeadPrimaryObserver | undefined;
+  #pgStandbySampler: PgStandbySampler | undefined;
   #backupReporter: BackupResultReporter | undefined;
   #acmeObserver: AcmeIssuanceObserver | undefined;
   /** Panel certificate renewal. Independent of `#acmeObserver`. */
@@ -561,6 +572,10 @@ export class InstanceClient {
   }
 
   async #afterAttachVersion(ws: WebSocket): Promise<void> {
+    const sessionAttach = commandPorts.handleSessionAttach;
+    if (sessionAttach) {
+      this.#runSocketHandler("session-attach", sessionAttach(ws));
+    }
     const pending = this.#pendingInstanceUpdateResult;
     if (pending && ws.readyState === WebSocket.OPEN) {
       this.#pendingInstanceUpdateResult = null;
@@ -849,6 +864,7 @@ export class InstanceClient {
     this.#idlePresence = undefined;
     this.#haObserver?.detach();
     this.#pgProbeObserver?.detach();
+    this.#pgStandbySampler?.detach();
     this.#haObserver = undefined;
     this.#backupReporter?.detach();
     this.#backupReporter = undefined;
@@ -932,6 +948,7 @@ export class InstanceClient {
     this.#idlePresence?.detach();
     this.#haObserver?.detach();
     this.#pgProbeObserver?.detach();
+    this.#pgStandbySampler?.detach();
     this.#backupReporter?.detach();
     this.#acmeObserver?.detach();
     this.#metricsScheduler?.detach();
@@ -1085,11 +1102,7 @@ export class InstanceClient {
     ) {
       return;
     }
-    try {
-      ws.close();
-    } catch {
-      // Socket may already be gone.
-    }
+    closeAndAbandon(ws);
     if (this.#ws === ws) this.#ws = undefined;
   }
 
@@ -1354,6 +1367,8 @@ export class InstanceClient {
     this.#haObserver?.attach();
     this.#ensurePgProbeObserver();
     this.#pgProbeObserver?.attach();
+    this.#pgStandbySampler ??= new PgStandbySampler();
+    this.#pgStandbySampler.attach();
     this.#ensureBackupReporter().attach();
     this.#ensureAcmeObserver();
     this.#acmeObserver?.attach();
@@ -1371,6 +1386,9 @@ export class InstanceClient {
     this.#syncDockerNetworkingAfterConnect();
 
     ws.onmessage = (event) => {
+      // An abandoned or replaced socket may still wake up with buffered
+      // frames; only the current socket may drive the daemon.
+      if (this.#ws !== ws) return;
       this.#idlePresence?.noteInboundActivity();
       const raw = typeof event.data === "string"
         ? event.data
@@ -1386,7 +1404,14 @@ export class InstanceClient {
       this.#handleMessage(message, ws);
     };
 
+    let closeHandled = false;
     ws.onclose = (event) => {
+      // closeAndAbandon dispatches a synthetic close, and the real socket can
+      // still fire its own later. By then a new connection owns the shared
+      // state below, so each socket cleans up at most once, and only while it
+      // is still the current one.
+      if (closeHandled) return;
+      closeHandled = true;
       if (event.code === 4401) {
         logWarn("instance", "authentication rejected");
       }
@@ -1395,11 +1420,13 @@ export class InstanceClient {
       } else {
         logDebug("instance", "websocket closed before registration");
       }
-      if (this.#ws === ws) this.#ws = undefined;
+      if (this.#ws !== undefined && this.#ws !== ws) return;
+      this.#ws = undefined;
       this.#peerFeatures = [];
       this.#idlePresence?.detach();
       this.#haObserver?.detach();
       this.#pgProbeObserver?.detach();
+      this.#pgStandbySampler?.detach();
       this.#backupReporter?.detach();
       this.#acmeObserver?.detach();
       this.#metricsScheduler?.detach();
@@ -1634,6 +1661,24 @@ export class InstanceClient {
           logWarn("instance", "command-dispatch handler not registered");
           break;
         }
+        if (this.#seenDispatchIds.seenBefore(message.id)) {
+          logWarn(
+            "instance",
+            "ignored repeated command-dispatch",
+            sanitizeForLog(message.id),
+          );
+          // Re-ack so the control plane stops waiting on an ack it missed.
+          if (ws.readyState === WebSocket.OPEN) {
+            const at = new Date().toISOString();
+            ws.send(JSON.stringify({
+              type: "command-ack",
+              id: message.id,
+              at,
+              daemonReceivedAt: at,
+            }));
+          }
+          break;
+        }
         this.#runSocketHandler(
           "command-dispatch",
           dispatch(message, ws, this.#commandRouterDeps()),
@@ -1739,6 +1784,7 @@ export class InstanceClient {
     if (!apiClient) return undefined;
     return {
       decryptSecrets: (ciphertexts) => apiClient.decryptSecrets(ciphertexts),
+      verifyControlPlane: () => apiClient.ping(),
       rehydrateDeploymentSecrets: (deployments) =>
         apiClient.rehydrateDeploymentSecrets(deployments),
       sendCommandLogChunk: (params) => apiClient.sendCommandLogChunk(params),
@@ -2167,7 +2213,7 @@ export class InstanceClient {
       type: "update-result",
       id,
       ok,
-      error,
+      error: error === undefined ? undefined : redactUrlSecrets(error),
       at: new Date().toISOString(),
       ...(extra.errorCode ? { errorCode: extra.errorCode } : {}),
       ...(extra.upgradeId ? { upgradeId: extra.upgradeId } : {}),
@@ -2330,7 +2376,7 @@ export class InstanceClient {
       type: "instance-update-result",
       id,
       ok,
-      error,
+      error: error === undefined ? undefined : redactUrlSecrets(error),
       at: new Date().toISOString(),
       ...(extra.errorCode ? { errorCode: extra.errorCode } : {}),
       ...(extra.upgradeId ? { upgradeId: extra.upgradeId } : {}),

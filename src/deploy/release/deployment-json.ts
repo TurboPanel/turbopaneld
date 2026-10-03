@@ -8,13 +8,14 @@
  * asking the control plane — a daemon that lost its connection still knows what
  * it is running.
  *
- * Written through {@link writeComposeFileSecure} so the mode is forced rather
- * than left to the process umask, the same rule every other daemon-authored
+ * Written through {@link writeComposeFileAtomic} (temp file, fsync, rename) so a
+ * crash never leaves a truncated record and the mode is forced rather than
+ * left to the process umask, the same rule every other daemon-authored
  * deployment file follows.
  */
 
 import { join } from "@std/path";
-import { writeComposeFileSecure } from "../compose-files.ts";
+import { writeComposeFileAtomic } from "../compose-files.ts";
 import { RELEASE_METADATA_DIRNAME } from "./release-layout.ts";
 
 export const RELEASE_MANIFEST_FILENAME = "release.json";
@@ -134,7 +135,7 @@ export async function writeReleaseManifest(
     mode: 0o750,
   });
   const body = JSON.stringify(manifest, null, 2) + "\n";
-  await writeComposeFileSecure(releaseManifestPath(releaseDir), body);
+  await writeComposeFileAtomic(releaseManifestPath(releaseDir), body);
 }
 
 /** `null` when absent or not a version-1 manifest. */
