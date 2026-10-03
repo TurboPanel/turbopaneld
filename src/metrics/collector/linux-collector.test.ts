@@ -3,6 +3,8 @@ import { fromFileUrl } from "@std/path";
 import { emptyDirectoryUsageSnapshot } from "./directory-usage.ts";
 import { EventCollectorSet } from "./events/index.ts";
 import { LinuxMetricsCollector } from "./linux-collector.ts";
+import { PRESENCE_WINDOW_SAMPLES } from "./presence.ts";
+import { computeTopologyFingerprint } from "../topology/generation.ts";
 import { defaultSensorIo } from "./sensors/discovery.ts";
 import type { CollectorDeps } from "./types.ts";
 import { collectTopology } from "../topology/topology.ts";
@@ -1289,4 +1291,36 @@ test("LinuxMetricsCollector falls back to the nominal interval when the clock go
     throw new TypeError("expected supported samples");
   }
   assertEquals(second.sample.metadata.intervalSeconds, 60);
+});
+
+test("quiet GPUs are dropped from the sample but keep their slot in the generation's mapping", async () => {
+  const snapshot = fullTopologySnapshot();
+  const plan = {
+    ...PLATFORM_DEFAULT_METRICS_CAPABILITY_PLAN,
+    gpuSlots: 8,
+    physicalHardwareSignalSlots: 8,
+  };
+  const collector = new LinuxMetricsCollector({
+    ...makeDeps(() => TICK_1, snapshot, () => 1_000_000),
+    gpuAdapters: NULL_GPU_ADAPTERS,
+    resolveCapabilityPlan: () => Promise.resolve({ generation: 2, plan }),
+  });
+  let last: Awaited<ReturnType<typeof collector.collect>> | undefined;
+  for (let seq = 1; seq <= PRESENCE_WINDOW_SAMPLES + 1; seq++) {
+    last = await collector.collect({
+      sequence: seq,
+      nowMs: 1_000_000 + seq * 60_000,
+    });
+  }
+  if (!last?.supported) throw new TypeError("expected a supported sample");
+  assertEquals(last.sample.gpus.length, 0);
+  // The mapping truncation uses is the one the fingerprint (generation) covers.
+  const fingerprint = computeTopologyFingerprint(
+    { ...snapshot, generation: 0 } as never,
+    EMPTY_TOPOLOGY_OVERRIDES,
+  );
+  assertEquals(
+    fingerprint.slotMapping,
+    computeSlotMapping(snapshot, EMPTY_TOPOLOGY_OVERRIDES),
+  );
 });
