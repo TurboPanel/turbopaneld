@@ -22,7 +22,7 @@ D=${dir}
 [ "$1" = -w ] && shift 2
 cmd=$1; chain=$2
 case $cmd in
-  -S) [ -f "$D/c.$chain" ] || exit 1; echo "-N $chain"; cat "$D/c.$chain" ;;
+  -S) [ -z "$chain" ] && exit 0; [ -f "$D/c.$chain" ] || exit 1; echo "-N $chain"; cat "$D/c.$chain" ;;
   -C) shift 2; [ -f "$D/c.$chain" ] || exit 1; grep -qxF -- "-A $chain $*" "$D/c.$chain" ;;
   -I) shift 3; [ -f "$D/c.$chain" ] || exit 1
       { echo "-A $chain $*"; cat "$D/c.$chain"; } > "$D/tmp"; mv "$D/tmp" "$D/c.$chain" ;;
@@ -173,7 +173,8 @@ Deno.test("platform traffic is never matched: only DNS RETURNs and the four meta
       assert(allowedDrops4.has(line.split(" ")[3]), line);
     } else {
       assert(
-        /--dport 53 -d 169\.254\.\d+\.\d+\/32 -j RETURN$/.test(line),
+        /--dport 53 -d (169\.254\.\d+\.\d+|168\.63\.129\.16)\/32 -j RETURN$/
+          .test(line),
         line,
       );
     }
@@ -314,4 +315,35 @@ Deno.test("the docker role installs the unit, script and wires it into main.yml"
   assertStringIncludes(main, "egress-guard.yml");
   const defaults = await Deno.readTextFile(join(role, "defaults/main.yml"));
   assertStringIncludes(defaults, "turbopanel_docker_egress_guard: true");
+});
+
+Deno.test("Azure wireserver DNS stays reachable while its other ports are dropped", async () => {
+  const h = await makeHost("nameserver 168.63.129.16\n");
+  const { code, out } = await h.run("print4");
+  assertEquals(code, 0);
+  for (const p of ["udp", "tcp"]) {
+    const ret =
+      `-A TP-EGRESS -p ${p} -m ${p} --dport 53 -d 168.63.129.16/32 -j RETURN`;
+    assertStringIncludes(out, ret);
+    assert(
+      out.indexOf(ret) < out.indexOf("-d 168.63.129.16/32 -j DROP"),
+      "DNS RETURN must precede the wireserver DROP",
+    );
+  }
+  assertStringIncludes(out, "-A TP-EGRESS -d 168.63.129.16/32 -j DROP");
+});
+
+Deno.test("apply and remove skip IPv6 when ip6tables has no filter table", async () => {
+  const h = await makeHost();
+  await Deno.writeTextFile(
+    join(h.root, "bin", "ipt6"),
+    "#!/bin/sh\necho 'ip6tables: can not initialize' >&2\nexit 3\n",
+  );
+  const a = await h.run("apply");
+  assertEquals(a.code, 0, a.err);
+  assertStringIncludes(a.err, "IPv6 rules skipped");
+  assertEquals(h.chain(4, "INPUT")?.slice(0, 2), JUMPS);
+  const r = await h.run("remove");
+  assertEquals(r.code, 0, r.err);
+  assertEquals(h.chain(4, "TP-EGRESS"), null);
 });

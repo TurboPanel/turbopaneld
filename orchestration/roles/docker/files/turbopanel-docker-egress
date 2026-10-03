@@ -21,8 +21,9 @@
 #   IPv6  fe80::/10 (ICMPv6 stays allowed so neighbour discovery works),
 #         fd00:ec2::254 (AWS metadata)
 # Exception: DNS (tcp/udp 53) to the link-local resolvers clouds hand out
-# (169.254.169.253 AWS, 169.254.169.254 GCP, fd00:ec2::253 AWS v6), plus any
-# link-local nameserver in the host's resolv.conf files. Metadata is HTTP, not 53.
+# (169.254.169.253 AWS, 169.254.169.254 GCP, 168.63.129.16 Azure, fd00:ec2::253
+# AWS v6), plus any nameserver in the host's resolv.conf files that sits on a
+# dropped address. Metadata is HTTP, not 53.
 #
 # Not covered, by design: fetches made by the BuildKit engine itself (`ADD
 # http://...`, remote/git build contexts) run in dockerd's own network namespace
@@ -55,10 +56,10 @@ die() {
 # Link-local nameservers: the fixed cloud resolvers plus the host's own.
 link_local_resolvers() {
   {
-    printf '%s\n' 169.254.169.253 169.254.169.254
+    printf '%s\n' 169.254.169.253 169.254.169.254 168.63.129.16
     for _f in $RESOLV_FILES; do
       [ -r "$_f" ] || continue
-      awk '$1 == "nameserver" && $2 ~ /^169\.254\.[0-9]+\.[0-9]+$/ { print $2 }' "$_f"
+      awk '$1 == "nameserver" && $2 ~ /^(169\.254\.[0-9]+\.[0-9]+|168\.63\.129\.16|100\.100\.100\.200)$/ { print $2 }' "$_f"
     done
   } | sort -u
 }
@@ -156,7 +157,13 @@ case "${1:-}" in
     command -v "$IPT4" >/dev/null 2>&1 || die "iptables is not installed; the egress block cannot be applied"
     apply_family "$IPT4" "$RESTORE4" print4
     if command -v "$IPT6" >/dev/null 2>&1; then
-      apply_family "$IPT6" "$RESTORE6" print6
+      # IPv6 disabled in the kernel (ipv6.disable=1): ip6tables exists but has no
+      # filter table. IPv4 is already applied; log and skip, never fail converge.
+      if "$IPT6" -w 5 -S >/dev/null 2>&1; then
+        apply_family "$IPT6" "$RESTORE6" print6
+      else
+        printf 'turbopanel-docker-egress: ip6tables has no usable filter table (IPv6 disabled?); IPv6 rules skipped\n' >&2
+      fi
     else
       printf 'turbopanel-docker-egress: ip6tables not installed; IPv6 rules skipped\n' >&2
     fi
@@ -164,7 +171,9 @@ case "${1:-}" in
   remove)
     need_root
     if command -v "$IPT4" >/dev/null 2>&1; then remove_family "$IPT4"; fi
-    if command -v "$IPT6" >/dev/null 2>&1; then remove_family "$IPT6"; fi
+    if command -v "$IPT6" >/dev/null 2>&1 && "$IPT6" -w 5 -S >/dev/null 2>&1; then
+      remove_family "$IPT6"
+    fi
     ;;
   *) die "usage: turbopanel-docker-egress apply|remove|print4|print6" ;;
 esac
