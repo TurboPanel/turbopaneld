@@ -65,7 +65,7 @@ export function releaseLinkTargetsFindArgs(releaseDir: string): string[] {
  * exactly this shape.
  */
 export function releaseLinkTextsFindArgs(releaseDir: string): string[] {
-  return ["find", releaseDir, "-type", "l", "-printf", "%P\\0%l\\0"];
+  return ["find", releaseDir, "-type", "l", "-printf", String.raw`%P\0%l\0`];
 }
 
 function isWithin(path: string, dir: string): boolean {
@@ -231,14 +231,15 @@ type Resolved = { at: PathNode; hops: number };
 /**
  * A path in the release, as a tree the walk moves through in O(1) a step: no
  * path is joined, split or copied while walking. `text` marks a link;
- * `result` is its resolution once known (or `"resolving"` while on the stack,
- * so meeting it again is a cycle), so no link is walked twice.
+ * `result` is its resolution once known (`resolving` is set while it is on the
+ * stack, so meeting it again is a cycle), so no link is walked twice.
  */
 type PathNode = {
   parent: PathNode | null;
   children: Map<string, PathNode>;
   text?: string;
-  result?: Resolved | string | "resolving";
+  result?: Resolved | string;
+  resolving?: boolean;
 };
 
 function childNode(node: PathNode, name: string): PathNode {
@@ -273,69 +274,86 @@ function resolveLink(
   root: PathNode,
   budget: { steps: number },
 ): Resolved | string {
-  const stack: Frame[] = [];
-  let returned: Resolved | string | null = null;
-  const enter = (link: PathNode) => {
-    link.result = "resolving";
-    stack.push({
-      link,
-      at: link.parent!,
-      parts: segments(link.text!),
-      i: 0,
-      hops: 0,
-    });
-  };
-  const finish = (frame: Frame, result: Resolved | string) => {
-    frame.link.result = result;
-    stack.pop();
-    returned = result;
-  };
-  if (start.text!.startsWith("/")) return start.result = "leaves the release";
-  enter(start);
-  while (stack.length > 0) {
-    const frame = stack[stack.length - 1];
-    if (returned !== null) {
-      // A link the frame named has been resolved: continue from its end.
-      const sub: Resolved | string = returned;
-      returned = null;
-      if (typeof sub === "string") finish(frame, sub);
-      else if (frame.hops + 1 + sub.hops > MAX_LINK_HOPS) {
-        finish(frame, "loops");
-      } else {
-        frame.hops += 1 + sub.hops;
-        frame.at = sub.at;
-      }
-      continue;
-    }
-    if (frame.i === frame.parts.length) {
-      finish(frame, { at: frame.at, hops: frame.hops });
-      continue;
-    }
-    if (--budget.steps < 0) return OVER_BUDGET;
-    const part = frame.parts[frame.i++];
-    if (part === "..") {
-      if (frame.at.parent === null) finish(frame, "leaves the release");
-      else frame.at = frame.at.parent;
-      continue;
-    }
-    if (frame.at === root && part === RELEASE_SHARED_NAME) {
-      finish(frame, "reaches into shared/");
-      continue;
-    }
-    const next = childNode(frame.at, part);
-    if (next.text === undefined) {
-      frame.at = next;
-    } else if (next.text.startsWith("/")) {
-      finish(frame, "leaves the release");
-    } else if (frame.hops >= MAX_LINK_HOPS || next.result === "resolving") {
-      finish(frame, "loops");
-    } else if (next.result !== undefined) {
-      returned = next.result;
-    } else {
-      enter(next);
-    }
+  if (start.text!.startsWith("/")) {
+    start.result = "leaves the release";
+    return start.result;
   }
-  return returned!;
+  const walk: Walk = { stack: [], returned: null };
+  enterLink(walk, start);
+  while (walk.stack.length > 0) {
+    const frame = walk.stack.at(-1)!;
+    if (walk.returned !== null) absorbReturned(walk, frame);
+    else if (frame.i === frame.parts.length) {
+      finishFrame(walk, frame, { at: frame.at, hops: frame.hops });
+    } else if (--budget.steps < 0) return OVER_BUDGET;
+    else stepFrame(walk, frame, root);
+  }
+  return walk.returned!;
+}
+
+/** The links being resolved, innermost last, and the result just produced. */
+type Walk = { stack: Frame[]; returned: Resolved | string | null };
+
+function enterLink(walk: Walk, link: PathNode): void {
+  link.resolving = true;
+  walk.stack.push({
+    link,
+    at: link.parent!,
+    parts: segments(link.text!),
+    i: 0,
+    hops: 0,
+  });
+}
+
+function finishFrame(
+  walk: Walk,
+  frame: Frame,
+  result: Resolved | string,
+): void {
+  frame.link.result = result;
+  frame.link.resolving = false;
+  walk.stack.pop();
+  walk.returned = result;
+}
+
+/** A link the frame named has been resolved: continue from its end. */
+function absorbReturned(walk: Walk, frame: Frame): void {
+  const sub = walk.returned!;
+  walk.returned = null;
+  if (typeof sub === "string") finishFrame(walk, frame, sub);
+  else if (frame.hops + 1 + sub.hops > MAX_LINK_HOPS) {
+    finishFrame(walk, frame, "loops");
+  } else {
+    frame.hops += 1 + sub.hops;
+    frame.at = sub.at;
+  }
+}
+
+/** Take the frame's next path component. */
+function stepFrame(walk: Walk, frame: Frame, root: PathNode): void {
+  const part = frame.parts[frame.i++];
+  if (part === "..") {
+    if (frame.at.parent === null) {
+      finishFrame(walk, frame, "leaves the release");
+    } else frame.at = frame.at.parent;
+    return;
+  }
+  if (frame.at === root && part === RELEASE_SHARED_NAME) {
+    finishFrame(walk, frame, "reaches into shared/");
+    return;
+  }
+  const next = childNode(frame.at, part);
+  if (next.text === undefined) {
+    frame.at = next;
+  } else if (next.text.startsWith("/")) {
+    finishFrame(walk, frame, "leaves the release");
+  } else if (frame.hops >= MAX_LINK_HOPS || next.resolving) {
+    finishFrame(walk, frame, "loops");
+  } else if (next.result !== undefined) {
+    walk.returned = next.result;
+  } else {
+    enterLink(walk, next);
+  }
 }
 
 /**
@@ -361,9 +379,7 @@ export function linksLeavingReleaseLexically(
   for (const [index, link] of links.entries()) {
     if (link.path === RELEASE_SHARED_NAME) continue;
     const node = nodes[index];
-    const result = node.result !== undefined && node.result !== "resolving"
-      ? node.result
-      : resolveLink(node, root, budget);
+    const result = node.result ?? resolveLink(node, root, budget);
     if (result === OVER_BUDGET) {
       leaving.push(
         `${link.path} -> ${link.text} (${OVER_BUDGET}: over ${stepBudget})`,
@@ -394,16 +410,22 @@ const READ_CONCURRENCY = 16;
 function concurrencyLimit(limit: number) {
   let active = 0;
   const waiting: (() => void)[] = [];
-  return async <T>(call: () => Promise<T>): Promise<T> => {
-    while (active >= limit) await new Promise<void>((r) => waiting.push(r));
+  const start = () => {
     active++;
-    try {
-      return await call();
-    } finally {
-      active--;
-      waiting.shift()?.();
-    }
   };
+  const done = () => {
+    active--;
+    waiting.shift()?.();
+  };
+  return <T>(call: () => Promise<T>): Promise<T> =>
+    new Promise<T>((resolve, reject) => {
+      const run = () => {
+        start();
+        Promise.resolve().then(call).then(resolve, reject).finally(done);
+      };
+      if (active < limit) run();
+      else waiting.push(run);
+    });
 }
 
 /**

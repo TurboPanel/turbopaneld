@@ -60,7 +60,7 @@ export type ReleaseLinkFinding = {
 type ScanLayout = Pick<LayoutPaths, "principalHomeRoot" | "daemonStateDir">;
 
 function errorText(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
+  return err instanceof Error ? err.message : Deno.inspect(err);
 }
 
 /**

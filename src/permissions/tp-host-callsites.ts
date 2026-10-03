@@ -1108,7 +1108,7 @@ const SITES: CallSite[] = [
   tpHost(
     'src/deploy/release/release-links.ts|["-n",...releaseLinkTextsFindArgs(releaseDir)]',
     {
-      argv: ["find", RELEASE, "-type", "l", "-printf", "%P\\0%l\\0"],
+      argv: ["find", RELEASE, "-type", "l", "-printf", String.raw`%P\0%l\0`],
       setup: dir(RELEASE),
     },
   ),
