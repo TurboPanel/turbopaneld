@@ -86,7 +86,7 @@ export async function deliverCommandOutcome(
  */
 export async function flushCommandOutcomes(ws: OutboxSocket): Promise<void> {
   const sent: string[] = [];
-  for (const [id, outcome] of [...held]) {
+  for (const [id, outcome] of held) {
     if (ws.readyState !== WebSocket.OPEN) break;
     ws.send(JSON.stringify({ ...outcome, at: new Date().toISOString() }));
     held.delete(id);
