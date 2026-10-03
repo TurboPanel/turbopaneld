@@ -1,6 +1,7 @@
 import { buildStorageVolumesFragment } from "../deploy/apply-storage-volumes.ts";
 import { buildHostingLabelsFragment } from "../deploy/compose-labels.ts";
 import { assertNoReservedOwnerLabels } from "../deploy/compose-reserved-labels.ts";
+import { assertComposeBuildPolicy } from "../deploy/compose-build-policy.ts";
 import { encodeHex } from "@std/encoding/hex";
 import { join } from "@std/path";
 import {
@@ -544,9 +545,15 @@ export function deployPrincipalSpecs(
  * A per-site PHP runtime runs `php-cgi<series>` / `php-fpm<series>` as the
  * site's principal, and those binaries are `0750 root:tpphp<series>`: the
  * principal must hold that series' entitlement or its unit dies `203/EXEC`.
- * The wire grants runtimes for what the tenant runs by hand; a site the
- * daemon itself runs as the principal implies its own, the way a native app
- * implies its Node series.
+ *
+ * The grant belongs in the control plane's effective runtime set (see
+ * `PrincipalEnsureSpec.runtimes`: the daemon reconciles, it does not derive),
+ * which persists it as a `deploy` entitlement the way a native app's Node
+ * series is, so `server.principals.reconcile` and every other environment's
+ * deploy (both full-replace) carry it too. Adding it here as well only covers
+ * a control plane older than that, since the daemon ships first: a deploy
+ * from one still starts its runtime, though a later reconcile from it can
+ * still take the grant away.
  */
 function withSitePhpRuntimes(
   principals: EnvironmentDeployPrincipalMaterial[],
@@ -1605,16 +1612,23 @@ async function deployContainerServices(
     // A tenant compose never carries the labels that mark the platform's own
     // containers (the Docker gate trusts them); refuse before anything runs.
     assertNoReservedOwnerLabels(resolved.document ?? {});
+    // Build options no deploy may carry (host network, privileges, SSH agent,
+    // internal extra_hosts or remote contexts, secret files outside); no
+    // approval reaches these. Build paths are confined just below.
+    const daemonSecretNames = new Set(
+      (parsedPayload.secretPlan ?? []).map((e) => e.source),
+    );
+    assertComposeBuildPolicy(resolved.document ?? {}, {
+      stageDir,
+      exemptSecretNames: daemonSecretNames,
+    });
     // The control plane's host-level gate is lexical; only the host can see
     // where a bind source really resolves. `hostLevelApproved` (absent reads
     // false) lets absolute and Docker-socket sources through; it never
     // excuses a symlink escape, a nested writable bind, or the staging dir.
     await assertComposeHostPathsConfined(
       [
-        collectResolvedHostPaths(
-          resolved.document ?? {},
-          new Set((parsedPayload.secretPlan ?? []).map((e) => e.source)),
-        ),
+        collectResolvedHostPaths(resolved.document ?? {}, daemonSecretNames),
         collectAuthoredHostPaths(yaml),
       ],
       {

@@ -92,6 +92,19 @@ module and CI guard are the only places allowed to reference it.
 | Managed-engine backups (`backupDir`, one subdir per `managedId`)   | `/backup`                             |
 | Runtime (sockets, `daemon.lock`)                                  | `/run/turbopanel`                     |
 
+**Files at the root of the config and state trees (P1-1).** `/etc/turbopanel`
+and `/var/lib/turbopanel` end up root-owned: the daemon (`tp`) writes only its own
+folders below them (`DAEMON_CONFIG_LEAVES` / `DAEMON_STATE_LEAVES` in
+`src/paths/layout.ts`, created by the `daemon-layout` role). The few files that
+live at the root itself (`instance-ca.pem`, `firewall*.v4|v6`, `server.id`,
+the server key and key-id files, `update-guard-disarm.json`) go through
+`writeDaemonFile` / `removeDaemonFile` / `ensureDaemonDir`
+(`src/permissions/daemon-files.ts`): rename in directly when the folder is
+writable, otherwise `tp-host install -o tp` / `rm`. Never `Deno.rename` or
+`Deno.mkdir` a new entry straight into those two roots. Root Ansible never
+recurses or follows links inside a leaf (pinned by
+`src/orchestration/root-tasks-platform-parents.test.ts`).
+
 `backupDir` is deliberately **outside** the FHS state tree and carries the same
 `/backup` default in development and production: backups are the one artifact
 an operator is expected to point at other storage (a second disk, a NAS mount,
@@ -360,10 +373,6 @@ compile toolchain).
   production source (`src/**`, excluding `*.test.ts` and `src/paths/layout.ts`)
   references `/opt/turbopanel/platform` or the retired `share/ansible`. Wired
   into `publish-daemon-trunk.yml`.
-- `deno task check:metrics-legacy` (`scripts/check-metrics-legacy.ts`) — fails
-  on any ClickHouse/Tabix reference outside the managed-engine allowlist (the
-  metrics store is DuckDB + Parquet / Analytics Engine); scans this repo plus
-  the co-located `turbopanel`/`dev`/`ui` `src` trees when present.
 - `deno task test` / `test:coverage` / `lint` / `fmt:check` / `check` / `notices:check` — quality
   surface in `deno.json`. `notices:generate` writes `THIRD_PARTY_NOTICES.md` from
   `deno.lock` and orchestration pins
@@ -433,7 +442,7 @@ compile toolchain).
 
 Local commands: **`deno task verify:ci`** is the guest mirror of `verify.yml`
 minus the Sonar upload: `verify:static` (`fmt:check`, `lint`, `check`,
-`check:layout`, `check:vocabulary`, `check:metrics-legacy`) then
+`check:layout`, `check:vocabulary`, `check:contract-drift`) then
 `notices:check`, `check:orchestration` (needs `ansible-playbook` /
 `ansible-lint` on PATH — prepend `/opt/turbopanel/vendor/ansible/current/bin`
 in the guest), and **`test:coverage`** (the LCOV Sonar imports).
@@ -728,13 +737,17 @@ it regresses:
     on a socket), php-fpm (`Type=notify`, its own runtime directory) or
     detached lsphp (vendored, `PHPRC=` its php.ini, on a socket). Every line is
     pinned: the owner, its group and slice, no capabilities, the exec line per
-    mode and series, `BindPaths=<home>/tmp:/tmp`, `ProtectSystem=strict` with
+    mode and series, `IPAddressDeny=localhost link-local multicast
+    0.0.0.0/8 fc00::/7` with only `IPAddressAllow=127.0.0.53` (required,
+    exact),
+    `BindPaths=<home>/tmp:/tmp`, `ProtectSystem=strict` with
     writes only inside the home, and `TemporaryFileSystem=/etc/turbopanel:ro`
     plus `BindReadOnlyPaths=` of the site's config directory (the owner cannot
     traverse tp's 0750 tree otherwise). Sockets sit at
     `/run/turbopanel-php-<siteId>/`, the owner's, group a web server's, 0660.
     Config lives in `/etc/turbopanel/php/sites/<siteId>/` (dir 0750, files
-    0640, root:<owner>-grp, directive allowlist; php-fpm pools take
+    0640, root:<owner>-grp, directive allowlist; php.ini's only non-plain
+    section is `[PATH=<owner home>]`, the locked limits; php-fpm pools take
     `listen.acl_users`, never `user`/`group`/`listen.group`);
     `php-test <siteId>` runs the installed unit's binary on that config as
     the owner, and `php-site-register` writes the attached-lsphp launcher's
