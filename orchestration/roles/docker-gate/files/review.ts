@@ -39,6 +39,7 @@ import {
   ownedObject,
   ownedTarget,
   ownerOf,
+  platformAccessRule,
 } from "./platform.ts";
 import type { ProxyDeps } from "./proxy.ts";
 
@@ -254,6 +255,12 @@ async function unownedFinding(
   // odd name) is a finding of its own, never assumed owned.
   if (labels === undefined) {
     return [{ rule: "owner-unknown", detail: subject.name.slice(0, 64) }];
+  }
+  const platformRule = subject.kind === "container"
+    ? platformAccessRule(routePath(facts.path), labels, facts.body)
+    : undefined;
+  if (platformRule !== undefined) {
+    return [{ rule: platformRule, detail: subject.name.slice(0, 64) }];
   }
   if (ownerOf(labels) !== "unlabeled") return [];
   return [{
