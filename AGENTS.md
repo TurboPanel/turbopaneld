@@ -772,8 +772,11 @@ it regresses:
     fixed property set (`NoNewPrivileges`, no capabilities,
     `ProtectSystem=strict`, private tmp/devices/IPC/PIDs, the daemon's trees,
     principal homes, Docker/containerd/gate sockets and `/etc/ssh` made
-    inaccessible, loopback/private/link-local/CGNAT egress denied except the
-    host's literal nameservers, 4G memory, 200% CPU, 1800 s, `tpbuild.slice`)
+    inaccessible, private/link-local/CGNAT egress denied except the host's
+    literal nameservers, loopback open but port-filtered per `tpbuild` uid by
+    `lib/tp-build-loopback` (nftables table `inet turbopanel_build`, loaded by
+    `build-run` and again as the unit's `ExecStartPre=+`; no `nft` or a load
+    failure means the build does not start), 4G memory, 200% CPU, 1800 s, `tpbuild.slice`)
     whose only command is `/bin/sh` on `lib/tp-build-runner`, loaded as a
     systemd credential (PID 1 reads it; the build account gets a private
     copy); the spec rides
@@ -786,6 +789,25 @@ it regresses:
     every native/static release build through it
     (`src/deploy/release/build-sandbox.ts`), so no tenant build command runs
     as `tp`;
+    **Build loopback (plain words):** Turbopack's helper processes talk over
+    127.0.0.1 on ports the build picks, so the build may use loopback. The
+    build is refused every known platform port (list in one place,
+    `DENY_PORTS` in `lib/tp-build-loopback`, pinned to the code constants by
+    `src/orchestration/build-loopback.test.ts`): ssh 22, web 80/443, web
+    server admin 2019/2029/2039, database proxy 6032/6070/6132/13306/15432,
+    router 7080/7081/7443, panel 8443, GPU metrics 9400, 19080/19820, database
+    HA 33001/33002, platform Postgres 5432 (when `postgres_expose_port` is
+    true), legacy ProxySQL 3306, site and app listen bands 18080-18999 and
+    19100-19799 (includes 18110). Nothing inside the kernel ephemeral range
+    (32768-60999) is listed, because a build's own workers may be handed any
+    port there; managed private ports (45000-45999) bind a non-loopback
+    address, so they are not listed either. The resolver stub (53) is not
+    listed, so it stays reachable. **Residual risk, accepted by
+    the owner:** anything else listening on 127.0.0.1 on a port not in that
+    list (for example a Docker port a site owner published on loopback with
+    an ephemeral port) can be reached by a build, because nftables cannot
+    tell the build's own listeners from another service's. Adding a new
+    fixed loopback port to the platform means adding it to `DENY_PORTS`;
   - brings a release into `<home>/sites/<svc>/releases/<id>` only through
     `publish-open <user> <svc> <id>` (a fresh daemon-owned leaf under
     `<principal root>/.tp-staging`, `root:tp 0710`, a class no generic verb
