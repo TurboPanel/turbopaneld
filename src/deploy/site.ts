@@ -460,7 +460,27 @@ export type NginxSiteConfigOpts = Readonly<{
   phpFpmSocket?: string | null;
   /** Absolute path to the vendored `fastcgi_params`; inlined when omitted. */
   fastcgiParamsPath?: string | null;
+  /**
+   * The document root is a sealed release (`…/current/<root>`). No link below
+   * it is followed at all: the publish check already confines a release's links
+   * to the release, and this keeps a release sealed before that check (or one
+   * a rollback brings back) from serving a second hop through `shared/`.
+   */
+  releaseBacked?: boolean;
 }>;
+
+/**
+ * `on` for a sealed release; `if_not_owner` where the tenant owns the tree
+ * (its own links never match a root- or other-tenant-owned target). `from=`
+ * keeps `current` and the path above the root followable either way.
+ */
+function nginxDisableSymlinks(releaseBacked: boolean): string {
+  return releaseBacked
+    ? `# A sealed release: no link below the root is followed.
+  disable_symlinks on from=$document_root;`
+    : `# Links below the root are followed only when link and target share an owner.
+  disable_symlinks if_not_owner from=$document_root;`;
+}
 
 export function nginxSiteConfig(
   site: SiteApplySpec,
@@ -489,8 +509,7 @@ export function nginxSiteConfig(
   listen [::1]:${site.listenPort};${dockerListen}
   server_name _;
   root ${documentRoot};
-  # Links below the root are followed only when link and target share an owner.
-  disable_symlinks if_not_owner from=$document_root;
+  ${nginxDisableSymlinks(opts?.releaseBacked ?? false)}
   index ${indexFiles};
 
   location / {
@@ -2402,6 +2421,7 @@ async function applyNginxSite(
   const contents = nginxSiteConfig(site, paths.documentRoot, dockerBind, {
     phpFpmSocket,
     fastcgiParamsPath: nginxFastcgiParamsPath(layout),
+    releaseBacked: paths.release !== undefined,
   });
   const staged = await SITE_ENGINE_DRIVERS.nginx
     .stageSiteConfig(run, configPath, contents);
