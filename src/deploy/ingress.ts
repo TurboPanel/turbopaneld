@@ -378,6 +378,21 @@ async function ensureIngressNetwork(
   }
 }
 
+/**
+ * Bridge gateway(s) of the ingress network: the PROXY protocol peers the
+ * shared Traefik trusts (see {@link traefikCompose}).
+ */
+async function ingressNetworkGateways(
+  network: string,
+  run: RunDockerFn,
+): Promise<string[]> {
+  const inspect = await run(["network", "inspect", network]);
+  if (!inspect.success) {
+    throw commandError("Inspecting ingress Docker network", inspect);
+  }
+  return parseIngressNetworkGateways(network, inspect.stdout);
+}
+
 /** Traefik entrypoint name for one raw TCP/UDP published port (must be a valid Traefik entrypoint name). */
 function tcpUdpEntrypointName(
   protocol: "tcp" | "udp",
@@ -433,6 +448,59 @@ function tcpUdpPortLines(entries: readonly TcpUdpIngressEntry[]): string[] {
   });
 }
 
+/**
+ * The `trustedIPs` value for the shared entrypoints: bare IPv4 / IPv6 literals
+ * only (no CIDR — one gateway, not the subnet its tenant containers live in),
+ * deduplicated, comma-joined. Empty is refused: without a trusted peer Caddy's
+ * PROXY header would be ignored and every site would see the gateway as its
+ * client, and `insecure` is never the fallback.
+ */
+export function proxyProtocolTrustedIps(ips: readonly string[]): string {
+  const unique = [...new Set(ips)];
+  if (unique.length === 0) {
+    throw new Error(
+      "Shared Traefik needs at least one trusted PROXY protocol peer (the ingress network gateway)",
+    );
+  }
+  for (const ip of unique) {
+    if (!isValidIpv4Literal(ip) && !isValidIpv6Literal(ip)) {
+      throw new Error(`Invalid PROXY protocol trusted address: ${ip}`);
+    }
+  }
+  return unique.join(",");
+}
+
+/**
+ * Bridge gateway address(es) from `docker network inspect <network>` output
+ * (a JSON array with one network object). Throws when there is none: the
+ * shared Traefik cannot be rendered safely without it.
+ */
+export function parseIngressNetworkGateways(
+  network: string,
+  inspectStdout: string,
+): string[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(inspectStdout);
+  } catch {
+    parsed = undefined;
+  }
+  const first = Array.isArray(parsed) ? parsed[0] : parsed;
+  const config = (first as { IPAM?: { Config?: unknown } } | undefined)?.IPAM
+    ?.Config;
+  const gateways = Array.isArray(config)
+    ? config
+      .map((entry) => (entry as { Gateway?: unknown } | null)?.Gateway)
+      .filter((gw): gw is string => typeof gw === "string" && gw !== "")
+    : [];
+  if (gateways.length === 0) {
+    throw new Error(
+      `Ingress Docker network ${network} reports no IPAM gateway; cannot pin the PROXY protocol trusted peer`,
+    );
+  }
+  return gateways;
+}
+
 /** Shared HTTP-only Traefik (loopback web/websecure). No tcp/udp entrypoints. */
 /**
  * Shared HTTP-only Traefik compose document.
@@ -452,13 +520,24 @@ function tcpUdpPortLines(entries: readonly TcpUdpIngressEntry[]): string[] {
  * never `traefik.enable`, HTTP router labels, or `com.turbopanel.raw-port`
  * (omitting raw-port keeps the shared container invisible to every tenant
  * Traefik provider constraint).
+ *
+ * `proxyTrustedIps` are the only peers whose PROXY protocol header Traefik
+ * believes: the ingress network's bridge gateway(s), which is where the
+ * hosting Caddy's connections arrive from (Docker's loopback publish relays
+ * them from the host side of the bridge). Every other peer — a tenant
+ * container on the ingress network above all — has its header read and
+ * ignored, so it cannot claim another client's address. Who on the host may
+ * reach the loopback publish at all is the ingress guard's job
+ * (`orchestration/roles/hosting-caddy`, `turbopanel-ingress-guard.service`).
  */
 export function traefikCompose(
   ingressNetwork: string,
+  proxyTrustedIps: readonly string[],
   identity?: SystemComponentDescriptor,
   docker: SharedTraefikDocker = VIA_SOCKET_PROXY,
 ): string {
   assertSafeComposeProjectName(ingressNetwork);
+  const trusted = proxyProtocolTrustedIps(proxyTrustedIps);
   if (identity !== undefined) {
     assertSafeSystemIngressIdentity(identity);
   }
@@ -500,9 +579,9 @@ export function traefikCompose(
     "      - --providers.docker.exposedbydefault=false",
     `      - --providers.docker.network=${ingressNetwork}`,
     `      - --entrypoints.web.address=:${TRAEFIK_HTTP_PORT}`,
-    "      - --entrypoints.web.proxyProtocol.insecure=true",
+    `      - --entrypoints.web.proxyProtocol.trustedIPs=${trusted}`,
     `      - --entrypoints.websecure.address=:${TRAEFIK_HTTPS_PORT}`,
-    "      - --entrypoints.websecure.proxyProtocol.insecure=true",
+    `      - --entrypoints.websecure.proxyProtocol.trustedIPs=${trusted}`,
     "      - --entrypoints.websecure.http.tls=true",
     `      - --entrypoints.metrics.address=:${TRAEFIK_METRICS_PORT}`,
     "      - --metrics.prometheus=true",
@@ -1010,7 +1089,12 @@ async function ensureSharedSocketProxy(
     : { source: "gate", keepSocketProxy: true };
   await upSharedTraefik(
     layout,
-    traefikCompose(ingressNetwork, descriptor, docker),
+    traefikCompose(
+      ingressNetwork,
+      await ingressNetworkGateways(ingressNetwork, run),
+      descriptor,
+      docker,
+    ),
     run,
   );
 }
@@ -1074,6 +1158,7 @@ export async function ensureHostingIngress(
   const run = deps?.runDocker ?? defaultRunDocker;
   await ensureIngressNetwork(ingressNetwork, run);
   await removeStaleNetworkContainers(ingressNetwork, ingressNetwork, run);
+  const gateways = await ingressNetworkGateways(ingressNetwork, run);
 
   const ingressDir = hostingIngressDir(layout);
   await Deno.mkdir(ingressDir, { recursive: true, mode: 0o750 });
@@ -1086,7 +1171,7 @@ export async function ensureHostingIngress(
   );
   await upSharedTraefik(
     layout,
-    traefikCompose(ingressNetwork, descriptor, docker),
+    traefikCompose(ingressNetwork, gateways, descriptor, docker),
     run,
   );
 

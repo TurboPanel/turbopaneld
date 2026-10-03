@@ -33,6 +33,7 @@ import {
   ingressDockerGateEnabled,
   inspectHostingIngressContainer,
   listPersistedTcpUdpServiceIds,
+  parseIngressNetworkGateways,
   readAcmeModeHostnames,
   readEnvironmentTcpUdpServiceIds,
   removeEnvironmentTcpUdpServiceIngress,
@@ -108,6 +109,15 @@ const SYSTEM_INGRESS_IDENTITY = {
 /** The shared ingress network / project *is* the hosting-ingress serviceId. */
 const HOSTING_INGRESS_NETWORK = SYSTEM_INGRESS_IDENTITY.serviceId;
 
+/** The ingress network's bridge gateway: the shared Traefik's PROXY peer. */
+const INGRESS_GATEWAYS = ["172.19.0.1"];
+
+/** `docker network inspect` output for the ingress network. */
+const INGRESS_NETWORK_INSPECT = JSON.stringify([{
+  Name: SYSTEM_INGRESS_IDENTITY.serviceId,
+  IPAM: { Config: [{ Subnet: "172.19.0.0/16", Gateway: "172.19.0.1" }] },
+}]);
+
 const MANAGED_INGRESS_SERVICE_ID = "00000000-0000-4000-8000-0000000000cc";
 const MANAGED_INGRESS_IDENTITY = {
   component: SYSTEM_MANAGED_INGRESS_COMPONENT,
@@ -154,20 +164,13 @@ test("assertSafeHostingPathPrefix and formatCaddyPathMatcher handle path matcher
 });
 
 test("traefikCompose publishes loopback ports with proxy protocol and TLS", () => {
-  const compose = traefikCompose(HOSTING_INGRESS_NETWORK);
+  const compose = traefikCompose(HOSTING_INGRESS_NETWORK, INGRESS_GATEWAYS);
   assertStringIncludes(compose, "127.0.0.1:7080:7080");
   assertStringIncludes(compose, "127.0.0.1:7443:7443");
   assertStringIncludes(compose, "--entrypoints.web.address=:7080");
   assertStringIncludes(compose, "--entrypoints.websecure.address=:7443");
   assertStringIncludes(compose, "--entrypoints.websecure.http.tls=true");
-  assertStringIncludes(
-    compose,
-    "--entrypoints.web.proxyProtocol.insecure=true",
-  );
-  assertStringIncludes(
-    compose,
-    "--entrypoints.websecure.proxyProtocol.insecure=true",
-  );
+  assertProxyProtocolTrustsOnly(compose, "172.19.0.1");
   if (compose.includes("socat")) {
     throw new TypeError("traefikCompose must not include socat");
   }
@@ -179,8 +182,88 @@ test("traefikCompose publishes loopback ports with proxy protocol and TLS", () =
   }
 });
 
+/**
+ * PROXY protocol on both shared entrypoints, believed only from `trusted`:
+ * never `insecure`, which let any tenant container or local process forge
+ * the client address every other tenant's app sees.
+ */
+function assertProxyProtocolTrustsOnly(compose: string, trusted: string) {
+  assertStringIncludes(
+    compose,
+    `--entrypoints.web.proxyProtocol.trustedIPs=${trusted}\n`,
+  );
+  assertStringIncludes(
+    compose,
+    `--entrypoints.websecure.proxyProtocol.trustedIPs=${trusted}\n`,
+  );
+  assertEquals(compose.includes("proxyProtocol.insecure"), false);
+}
+
+test("traefikCompose never trusts every PROXY protocol peer", () => {
+  for (
+    const docker of [
+      { source: "socket-proxy" },
+      { source: "gate", keepSocketProxy: false },
+      { source: "gate", keepSocketProxy: true },
+    ] as const
+  ) {
+    const compose = traefikCompose(
+      HOSTING_INGRESS_NETWORK,
+      ["172.19.0.1", "fd00:19::1", "172.19.0.1"],
+      SYSTEM_INGRESS_IDENTITY,
+      docker,
+    );
+    assertProxyProtocolTrustsOnly(compose, "172.19.0.1,fd00:19::1");
+  }
+});
+
+test("traefikCompose refuses a missing or malformed PROXY protocol peer", () => {
+  assertThrows(
+    () => traefikCompose(HOSTING_INGRESS_NETWORK, []),
+    Error,
+    "at least one trusted PROXY protocol peer",
+  );
+  for (
+    const bad of [
+      "172.19.0.0/16",
+      "0.0.0.0/0",
+      "172.19.0.1,1.2.3.4",
+      "172.19.0.1\n      - --api.insecure=true",
+      "",
+    ]
+  ) {
+    assertThrows(
+      () => traefikCompose(HOSTING_INGRESS_NETWORK, [bad]),
+      Error,
+      "Invalid PROXY protocol trusted address",
+    );
+  }
+});
+
+test("parseIngressNetworkGateways reads the bridge gateway from network inspect", () => {
+  assertEquals(
+    parseIngressNetworkGateways("net", INGRESS_NETWORK_INSPECT),
+    ["172.19.0.1"],
+  );
+  for (
+    const stdout of [
+      "",
+      "not json",
+      "[]",
+      JSON.stringify([{ IPAM: { Config: [] } }]),
+      JSON.stringify([{ IPAM: { Config: [{ Subnet: "172.19.0.0/16" }] } }]),
+    ]
+  ) {
+    assertThrows(
+      () => parseIngressNetworkGateways("net", stdout),
+      Error,
+      "reports no IPAM gateway",
+    );
+  }
+});
+
 test("traefikCompose publishes a loopback-only Prometheus metrics entrypoint", () => {
-  const compose = traefikCompose(HOSTING_INGRESS_NETWORK);
+  const compose = traefikCompose(HOSTING_INGRESS_NETWORK, INGRESS_GATEWAYS);
   assertStringIncludes(compose, "127.0.0.1:7081:7081");
   assertStringIncludes(compose, "--entrypoints.metrics.address=:7081");
   assertStringIncludes(compose, "--metrics.prometheus=true");
@@ -195,7 +278,7 @@ test("traefikCompose publishes a loopback-only Prometheus metrics entrypoint", (
 });
 
 test("traefikCompose without identity stays anonymous", () => {
-  const compose = traefikCompose(HOSTING_INGRESS_NETWORK);
+  const compose = traefikCompose(HOSTING_INGRESS_NETWORK, INGRESS_GATEWAYS);
   assertEquals(compose.includes("container_name:"), false);
   assertEquals(compose.includes("x-turbopanel:"), false);
   assertEquals(compose.includes("labels:"), false);
@@ -204,6 +287,7 @@ test("traefikCompose without identity stays anonymous", () => {
 test("traefikCompose with identity emits container_name, system x-turbopanel, and labels", () => {
   const compose = traefikCompose(
     HOSTING_INGRESS_NETWORK,
+    INGRESS_GATEWAYS,
     SYSTEM_INGRESS_IDENTITY,
   );
   assertStringIncludes(
@@ -230,14 +314,7 @@ test("traefikCompose with identity emits container_name, system x-turbopanel, an
   // Loopback / PROXY / TLS / socket / network unchanged vs anonymous shape.
   assertStringIncludes(compose, "127.0.0.1:7080:7080");
   assertStringIncludes(compose, "127.0.0.1:7443:7443");
-  assertStringIncludes(
-    compose,
-    "--entrypoints.web.proxyProtocol.insecure=true",
-  );
-  assertStringIncludes(
-    compose,
-    "--entrypoints.websecure.proxyProtocol.insecure=true",
-  );
+  assertProxyProtocolTrustsOnly(compose, "172.19.0.1");
   assertStringIncludes(compose, "--entrypoints.websecure.http.tls=true");
   assertStringIncludes(
     compose,
@@ -250,6 +327,7 @@ test("traefikCompose with identity emits container_name, system x-turbopanel, an
 test("traefikCompose declares its compose project through the name: key", () => {
   const compose = traefikCompose(
     HOSTING_INGRESS_NETWORK,
+    INGRESS_GATEWAYS,
     SYSTEM_INGRESS_IDENTITY,
   );
   // `name:` carries the project so every `docker compose -f <path> …` (and the
@@ -698,7 +776,7 @@ test("assertValidBindAddress rejects garbage before interpolation", () => {
 });
 
 test("traefikCompose is HTTP-only (no tcp/udp entrypoints or public ports)", () => {
-  const compose = traefikCompose(HOSTING_INGRESS_NETWORK);
+  const compose = traefikCompose(HOSTING_INGRESS_NETWORK, INGRESS_GATEWAYS);
   assertEquals(compose.includes("entrypoints.tcp"), false);
   assertEquals(compose.includes("entrypoints.udp"), false);
   assertEquals(compose.includes(":5432:5432"), false);
@@ -1120,6 +1198,13 @@ function fakeDockerOk(stdout = ""): DockerCliResult {
   return { success: true, code: 0, stdout, stderr: "" };
 }
 
+/** Success, with the ingress network's inspect JSON for `network inspect`. */
+function dockerOkFor(args: readonly string[]): DockerCliResult {
+  return args[0] === "network" && args[1] === "inspect"
+    ? fakeDockerOk(INGRESS_NETWORK_INSPECT)
+    : fakeDockerOk();
+}
+
 function fakeDockerFail(stderr: string): DockerCliResult {
   return { success: false, code: 1, stdout: "", stderr };
 }
@@ -1128,15 +1213,17 @@ test("ensureHostingIngress creates network + compose and skips real Caddy via de
   const { layout, cleanup } = await makeTestLayout();
   const calls: string[][] = [];
   let caddyCalls = 0;
+  let created = false;
   try {
     await writeSystemComponentDescriptor(layout, SYSTEM_INGRESS_IDENTITY);
     await ensureHostingIngress(layout, HOSTING_INGRESS_NETWORK, {
       runDocker: (args) => {
         calls.push([...args]);
-        if (args[0] === "network" && args[1] === "inspect") {
+        if (args[0] === "network" && args[1] === "create") created = true;
+        if (args[0] === "network" && args[1] === "inspect" && !created) {
           return Promise.resolve(fakeDockerFail("not found"));
         }
-        return Promise.resolve(fakeDockerOk());
+        return Promise.resolve(dockerOkFor(args));
       },
       ensureHostingCaddyRuntime: () => {
         caddyCalls += 1;
@@ -1159,6 +1246,8 @@ test("ensureHostingIngress creates network + compose and skips real Caddy via de
     const compose = await Deno.readTextFile(hostingIngressComposePath(layout));
     assertStringIncludes(compose, SYSTEM_INGRESS_IDENTITY.containerName);
     assertStringIncludes(compose, "traefik");
+    // The new network's gateway, read back after create, is the PROXY peer.
+    assertProxyProtocolTrustsOnly(compose, "172.19.0.1");
   } finally {
     await cleanup();
   }
@@ -1171,7 +1260,7 @@ test("ensureHostingIngress reuses existing ingress network", async () => {
     await ensureHostingIngress(layout, HOSTING_INGRESS_NETWORK, {
       runDocker: (args) => {
         calls.push([...args]);
-        return Promise.resolve(fakeDockerOk());
+        return Promise.resolve(dockerOkFor(args));
       },
       ensureHostingCaddyRuntime: () => Promise.resolve(),
     });
@@ -1194,7 +1283,7 @@ test("ensureHostingIngress throws when compose up fails", async () => {
             if (args[0] === "compose") {
               return Promise.resolve(fakeDockerFail("compose boom"));
             }
-            return Promise.resolve(fakeDockerOk());
+            return Promise.resolve(dockerOkFor(args));
           },
           ensureHostingCaddyRuntime: () => Promise.resolve(),
         }),
@@ -1216,7 +1305,11 @@ test("inspectHostingIngressContainer returns labelled Traefik row", async () => 
     });
     await Deno.writeTextFile(
       hostingIngressComposePath(layout),
-      traefikCompose(HOSTING_INGRESS_NETWORK, SYSTEM_INGRESS_IDENTITY),
+      traefikCompose(
+        HOSTING_INGRESS_NETWORK,
+        INGRESS_GATEWAYS,
+        SYSTEM_INGRESS_IDENTITY,
+      ),
       { mode: 0o640 },
     );
 
@@ -1254,7 +1347,7 @@ test("inspectHostingIngressContainer returns null without descriptor or compose 
   try {
     assertEquals(
       await inspectHostingIngressContainer(layout, {
-        runDocker: () => Promise.resolve(fakeDockerOk()),
+        runDocker: (args) => Promise.resolve(dockerOkFor(args)),
       }),
       null,
     );
@@ -1714,7 +1807,7 @@ test("ensureHostingCaddyRuntime writes unit and attempts install via host comman
   });
   try {
     await assertRejects(
-      () => ensureHostingCaddyRuntime(layout, CADDY_ACCOUNT_PRESENT),
+      () => ensureHostingCaddyRuntime(layout, CADDY_READY),
       Error,
       "hosting Caddy could not be installed or started",
     );
@@ -1826,7 +1919,7 @@ test("installAndStartCaddy returns early when unit install fails", async () => {
     });
     try {
       await assertRejects(
-        () => ensureHostingCaddyRuntime(layout, CADDY_ACCOUNT_PRESENT),
+        () => ensureHostingCaddyRuntime(layout, CADDY_READY),
         Error,
         "hosting Caddy could not be installed or started",
       );
@@ -1850,7 +1943,7 @@ test("installAndStartCaddy returns early when daemon-reload fails", async () => 
     });
     try {
       await assertRejects(
-        () => ensureHostingCaddyRuntime(layout, CADDY_ACCOUNT_PRESENT),
+        () => ensureHostingCaddyRuntime(layout, CADDY_READY),
         Error,
         "hosting Caddy could not be installed or started",
       );
@@ -1865,11 +1958,11 @@ test("installAndStartCaddy succeeds when enable --now works", async () => {
     const stages: string[] = [];
     const restore = recordHostingUnitStages(stages);
     try {
-      await ensureHostingCaddyRuntime(layout, CADDY_ACCOUNT_PRESENT);
+      await ensureHostingCaddyRuntime(layout, CADDY_READY);
       // A new unit restarts Caddy: enable --now keeps a running process.
       assertEquals(stages, ["install", "daemon-reload", "restart", "enable"]);
       stages.length = 0;
-      await ensureHostingCaddyRuntime(layout, CADDY_ACCOUNT_PRESENT);
+      await ensureHostingCaddyRuntime(layout, CADDY_READY);
       // The same unit again leaves the running Caddy alone.
       assertEquals(stages, ["install", "daemon-reload", "enable"]);
     } finally {
@@ -1890,13 +1983,13 @@ test("a failed hosting Caddy restart is retried on the next deploy", async () =>
     });
     try {
       await assertRejects(
-        () => ensureHostingCaddyRuntime(layout, CADDY_ACCOUNT_PRESENT),
+        () => ensureHostingCaddyRuntime(layout, CADDY_READY),
         Error,
         "hosting Caddy could not be installed or started",
       );
       restartOk = true;
       stages.length = 0;
-      await ensureHostingCaddyRuntime(layout, CADDY_ACCOUNT_PRESENT);
+      await ensureHostingCaddyRuntime(layout, CADDY_READY);
       assertEquals(stages, ["install", "daemon-reload", "restart", "enable"]);
     } finally {
       restore();
@@ -1906,7 +1999,12 @@ test("a failed hosting Caddy restart is retried on the next deploy", async () =>
 
 const STAGES = new Set(["install", "daemon-reload", "restart", "enable"]);
 
-const CADDY_ACCOUNT_PRESENT = { accountExists: () => Promise.resolve(true) };
+/** The hosting Caddy account exists and the ingress guard is current and active. */
+const CADDY_READY = {
+  accountExists: () => Promise.resolve(true),
+  ingressGuardCurrent: () => Promise.resolve(true),
+  ingressGuardActive: () => Promise.resolve(true),
+};
 
 function recordHostingUnitStages(stages: string[]): () => void {
   return setIngressHostCommandForTest((_command, args) => {
@@ -1959,7 +2057,7 @@ test("ensureHostingIngress falls back to anonymous Traefik when descriptor is co
     await ensureHostingIngress(layout, HOSTING_INGRESS_NETWORK, {
       runDocker: (args) => {
         if (args[0] === "network" && args[1] === "inspect") {
-          return Promise.resolve(fakeDockerOk());
+          return Promise.resolve(dockerOkFor(args));
         }
         if (args.includes("up")) {
           return Promise.resolve(fakeDockerOk());
@@ -1985,7 +2083,11 @@ test("inspectHostingIngressContainer skips mismatched or unlabelled rows", async
     });
     await Deno.writeTextFile(
       hostingIngressComposePath(layout),
-      traefikCompose(HOSTING_INGRESS_NETWORK, SYSTEM_INGRESS_IDENTITY),
+      traefikCompose(
+        HOSTING_INGRESS_NETWORK,
+        INGRESS_GATEWAYS,
+        SYSTEM_INGRESS_IDENTITY,
+      ),
       { mode: 0o640 },
     );
 
@@ -2038,7 +2140,7 @@ test("inspectHostingIngressContainer returns undefined when descriptor read thro
     );
     assertEquals(
       await inspectHostingIngressContainer(layout, {
-        runDocker: () => Promise.resolve(fakeDockerOk()),
+        runDocker: (args) => Promise.resolve(dockerOkFor(args)),
       }),
       undefined,
     );
@@ -2124,7 +2226,7 @@ test("removeServiceIngress rejects unsafe serviceId", async () => {
     await assertRejects(
       () =>
         removeServiceIngress(layout, "../evil", {
-          runDocker: () => Promise.resolve(fakeDockerOk()),
+          runDocker: (args) => Promise.resolve(dockerOkFor(args)),
         }),
       Error,
       "serviceId contains unsupported characters",
@@ -2550,7 +2652,11 @@ test("inspectHostingIngressContainer skips null compose-ps rows", async () => {
     });
     await Deno.writeTextFile(
       hostingIngressComposePath(layout),
-      traefikCompose(HOSTING_INGRESS_NETWORK, SYSTEM_INGRESS_IDENTITY),
+      traefikCompose(
+        HOSTING_INGRESS_NETWORK,
+        INGRESS_GATEWAYS,
+        SYSTEM_INGRESS_IDENTITY,
+      ),
       { mode: 0o640 },
     );
     // Missing Name/Service/State → readComposePsContainer returns null.
@@ -2580,7 +2686,7 @@ test("inspectHostingIngressContainer returns undefined when compose stat is deni
     }) as typeof Deno.stat;
     assertEquals(
       await inspectHostingIngressContainer(layout, {
-        runDocker: () => Promise.resolve(fakeDockerOk()),
+        runDocker: (args) => Promise.resolve(dockerOkFor(args)),
       }),
       undefined,
     );
@@ -2609,7 +2715,7 @@ test("removeServiceIngress rethrows when compose cannot be statted", async () =>
     await assertRejects(
       () =>
         removeServiceIngress(layout, serviceId, {
-          runDocker: () => Promise.resolve(fakeDockerOk()),
+          runDocker: (args) => Promise.resolve(dockerOkFor(args)),
         }),
       Deno.errors.PermissionDenied,
       "compose",
@@ -2805,7 +2911,7 @@ test("removeEnvironmentTcpUdpServiceIngress rethrows when the empty index cannot
     await assertRejects(
       () =>
         removeEnvironmentTcpUdpServiceIngress(layout, environmentId, [], {
-          runDocker: () => Promise.resolve(fakeDockerOk()),
+          runDocker: (args) => Promise.resolve(dockerOkFor(args)),
         }),
       Deno.errors.PermissionDenied,
       "index",
@@ -2846,7 +2952,7 @@ test("no Traefik sees the Docker socket; only the host's socket proxy does", () 
   // `:ro` blocks writes to the socket *file*, not Engine API calls, so a
   // remote-code bug in a Traefik that proxies live tenant traffic used to
   // mean full Docker control and every co-hosted tenant with it.
-  const shared = traefikCompose(HOSTING_INGRESS_NETWORK);
+  const shared = traefikCompose(HOSTING_INGRESS_NETWORK, INGRESS_GATEWAYS);
   const perService = serviceTraefikCompose(
     [{
       hostingId: "00000000-0000-4000-8000-0000000000cd",
@@ -2894,10 +3000,19 @@ const TCP_ENTRY = [{
 
 test("by default both Traefiks keep today's socket-proxy shape, byte for byte", () => {
   assertEquals(
-    traefikCompose(HOSTING_INGRESS_NETWORK, SYSTEM_INGRESS_IDENTITY, {
-      source: "socket-proxy",
-    }),
-    traefikCompose(HOSTING_INGRESS_NETWORK, SYSTEM_INGRESS_IDENTITY),
+    traefikCompose(
+      HOSTING_INGRESS_NETWORK,
+      INGRESS_GATEWAYS,
+      SYSTEM_INGRESS_IDENTITY,
+      {
+        source: "socket-proxy",
+      },
+    ),
+    traefikCompose(
+      HOSTING_INGRESS_NETWORK,
+      INGRESS_GATEWAYS,
+      SYSTEM_INGRESS_IDENTITY,
+    ),
   );
   assertEquals(
     serviceTraefikCompose(
@@ -2917,6 +3032,7 @@ test("by default both Traefiks keep today's socket-proxy shape, byte for byte", 
 test("gate mode: the shared Traefik mounts only the read-only socket directory and the socket proxy is gone", () => {
   const yaml = traefikCompose(
     HOSTING_INGRESS_NETWORK,
+    INGRESS_GATEWAYS,
     SYSTEM_INGRESS_IDENTITY,
     { source: "gate", keepSocketProxy: false },
   );
@@ -2939,6 +3055,7 @@ test("gate mode: the shared Traefik mounts only the read-only socket directory a
 test("gate mode keeps the socket proxy (without Traefik depending on it) while an older service Traefik still uses it", () => {
   const yaml = traefikCompose(
     HOSTING_INGRESS_NETWORK,
+    INGRESS_GATEWAYS,
     SYSTEM_INGRESS_IDENTITY,
     { source: "gate", keepSocketProxy: true },
   );
@@ -3046,7 +3163,7 @@ test("ensureHostingIngress in gate mode writes the gate shape and compose remove
     await ensureHostingIngress(layout, HOSTING_INGRESS_NETWORK, {
       runDocker: (args) => {
         calls.push([...args]);
-        return Promise.resolve(fakeDockerOk());
+        return Promise.resolve(dockerOkFor(args));
       },
       ensureHostingCaddyRuntime: () => Promise.resolve(),
       ingressDockerGate: () => Promise.resolve(true),
@@ -3065,13 +3182,13 @@ test("ensureHostingIngress keeps the socket proxy for the anonymous Traefik (no 
   const { layout, cleanup } = await makeTestLayout();
   try {
     await ensureHostingIngress(layout, HOSTING_INGRESS_NETWORK, {
-      runDocker: () => Promise.resolve(fakeDockerOk()),
+      runDocker: (args) => Promise.resolve(dockerOkFor(args)),
       ensureHostingCaddyRuntime: () => Promise.resolve(),
       ingressDockerGate: () => Promise.resolve(true),
     });
     assertEquals(
       await Deno.readTextFile(hostingIngressComposePath(layout)),
-      traefikCompose(HOSTING_INGRESS_NETWORK),
+      traefikCompose(HOSTING_INGRESS_NETWORK, INGRESS_GATEWAYS),
     );
   } finally {
     await cleanup();
@@ -3082,7 +3199,7 @@ test("ensureHostingIngress without the flag keeps the socket proxy", async () =>
   const { layout, cleanup } = await makeTestLayout();
   try {
     await ensureHostingIngress(layout, HOSTING_INGRESS_NETWORK, {
-      runDocker: () => Promise.resolve(fakeDockerOk()),
+      runDocker: (args) => Promise.resolve(dockerOkFor(args)),
       ensureHostingCaddyRuntime: () => Promise.resolve(),
       ingressDockerGate: () => Promise.resolve(false),
     });
@@ -3112,7 +3229,7 @@ test("ensureServiceIngress follows the same switch", async () => {
         SERVICE_INGRESS_IDENTITY,
         HOSTING_INGRESS_NETWORK,
         {
-          runDocker: () => Promise.resolve(fakeDockerOk()),
+          runDocker: (args) => Promise.resolve(dockerOkFor(args)),
           ingressDockerGate: () => Promise.resolve(gate),
         },
       );
@@ -3141,7 +3258,7 @@ function recordingDocker(calls: string[][], failUp?: RegExp) {
     const failing = isUp && failUp !== undefined &&
       args.some((arg) => failUp.test(arg));
     return Promise.resolve(
-      failing ? fakeDockerFail("up failed") : fakeDockerOk(),
+      failing ? fakeDockerFail("up failed") : dockerOkFor(args),
     );
   };
 }
@@ -3280,10 +3397,15 @@ test("F1: a service Traefik on the proxy puts the proxy back into a gate-mode sh
     assertStringIncludes(shared, GATE_ENDPOINT);
     assertEquals(
       shared,
-      traefikCompose(HOSTING_INGRESS_NETWORK, SYSTEM_INGRESS_IDENTITY, {
-        source: "gate",
-        keepSocketProxy: true,
-      }),
+      traefikCompose(
+        HOSTING_INGRESS_NETWORK,
+        INGRESS_GATEWAYS,
+        SYSTEM_INGRESS_IDENTITY,
+        {
+          source: "gate",
+          keepSocketProxy: true,
+        },
+      ),
     );
   } finally {
     await cleanup();
@@ -3322,7 +3444,7 @@ test("F1: with the descriptor gone, the proxy comes back as the anonymous proxy-
     await deployTcpService(layout, false, recordingDocker([]));
     assertEquals(
       await Deno.readTextFile(hostingIngressComposePath(layout)),
-      traefikCompose(HOSTING_INGRESS_NETWORK),
+      traefikCompose(HOSTING_INGRESS_NETWORK, INGRESS_GATEWAYS),
     );
   } finally {
     await cleanup();
