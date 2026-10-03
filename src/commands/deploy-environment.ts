@@ -1,6 +1,7 @@
 import { buildStorageVolumesFragment } from "../deploy/apply-storage-volumes.ts";
 import { buildHostingLabelsFragment } from "../deploy/compose-labels.ts";
 import { assertNoReservedOwnerLabels } from "../deploy/compose-reserved-labels.ts";
+import { assertComposeBuildPolicy } from "../deploy/compose-build-policy.ts";
 import { encodeHex } from "@std/encoding/hex";
 import { join } from "@std/path";
 import {
@@ -1527,16 +1528,23 @@ async function deployContainerServices(
     // A tenant compose never carries the labels that mark the platform's own
     // containers (the Docker gate trusts them); refuse before anything runs.
     assertNoReservedOwnerLabels(resolved.document ?? {});
+    // Build options no deploy may carry (host network, privileges, SSH agent,
+    // internal extra_hosts or remote contexts, secret files outside); no
+    // approval reaches these. Build paths are confined just below.
+    const daemonSecretNames = new Set(
+      (parsedPayload.secretPlan ?? []).map((e) => e.source),
+    );
+    assertComposeBuildPolicy(resolved.document ?? {}, {
+      stageDir,
+      exemptSecretNames: daemonSecretNames,
+    });
     // The control plane's host-level gate is lexical; only the host can see
     // where a bind source really resolves. `hostLevelApproved` (absent reads
     // false) lets absolute and Docker-socket sources through; it never
     // excuses a symlink escape, a nested writable bind, or the staging dir.
     await assertComposeHostPathsConfined(
       [
-        collectResolvedHostPaths(
-          resolved.document ?? {},
-          new Set((parsedPayload.secretPlan ?? []).map((e) => e.source)),
-        ),
+        collectResolvedHostPaths(resolved.document ?? {}, daemonSecretNames),
         collectAuthoredHostPaths(yaml),
       ],
       {
