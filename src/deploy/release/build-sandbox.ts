@@ -46,7 +46,7 @@ const SANDBOX_ID_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const SPEC_ENV_NAME_RE = /^[A-Za-z_]\w*$/;
 const SPEC_CWD_RE = /^[\w.@+,=/-]+$/;
 const SUDO_PATH = "/usr/sbin:/usr/bin:/sbin:/bin";
-const ERROR_TAIL_LINES = 20;
+const ERROR_TAIL_LINES = 80;
 
 export type BuildWork = {
   /** `turbopanel-build-<buildId>.service`; also the `work/` entry name. */
