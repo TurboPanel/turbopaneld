@@ -73,13 +73,18 @@ Deno.test("openlitespeed role ensures runtime dirs outside the install block", (
   }
 });
 
-Deno.test("openlitespeed role keeps the config tree root-owned", () => {
-  const body = topLevelTask("Keep the OpenLiteSpeed config tree root-owned");
-  assert(body, "missing recursive ownership task");
+Deno.test("openlitespeed role keeps the config folders root-owned without recursing", () => {
+  const body = topLevelTask(
+    "Ensure FHS config dirs for OpenLiteSpeed (sites + vhosts)",
+  );
+  assert(body, "missing config folder task");
   assert(body.includes("owner: root"));
-  assert(body.includes("recurse: true"));
-  assert(!body.includes("mode:"), "ownership only: the daemon sets modes");
+  assert(!body.includes("recurse"), "root never walks the config tree (P1-1)");
   assert(!/owner: (tp|"\{\{ turbopanel_user)/.test(tasks), "never tp-owned");
+  assert(
+    !tasks.includes("Keep the OpenLiteSpeed config tree root-owned"),
+    "the recursive re-own is gone",
+  );
 });
 
 Deno.test("openlitespeed unit owns the LSAPI socket dir the renderer names", async () => {

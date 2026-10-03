@@ -107,14 +107,7 @@ jobs:
         run: deno task check:vocabulary
 
       - name: Shellcheck the uninstall script and the root helpers
-        run: shellcheck -s sh --severity=warning scripts/purge.sh orchestration/scripts/tp-host orchestration/scripts/tp-build-runner orchestration/scripts/tp-update-guard orchestration/scripts/tp-firewall-guard
-
-      # ClickHouse/Tabix metrics infrastructure is retired (DuckDB + Parquet /
-      # Analytics Engine replaced it). Sibling repo trees are scanned too when
-      # the co-located workspace layout is present; a clean single-repo CI
-      # checkout still verifies this repo's own trees.
-      - name: Check metrics legacy (no ClickHouse/Tabix references)
-        run: deno task check:metrics-legacy
+        run: shellcheck -s sh --severity=warning scripts/purge.sh orchestration/scripts/tp-host orchestration/scripts/tp-php-loopback orchestration/scripts/tp-build-runner orchestration/scripts/tp-update-guard orchestration/scripts/tp-firewall-guard
 
       - name: Scan for secrets (every tracked file)
         run: sh scripts/scan-secrets.sh --all
@@ -264,7 +257,7 @@ jobs:
   # snapshot) are compared against the turbopanel checkout of the same-named
   # branch (else trunk; never turbopanel's staging or live), so a daemon-only change that drifts fails here rather
   # than turning turbopanel red after it merges. Mirrors turbopanel's
-  # metrics-legacy job.
+  # contract-twin job.
   #
   # PRs into staging/live (the automatic promotion PRs) have `staging` or
   # `trunk` as their head, carrying commits that were checked against

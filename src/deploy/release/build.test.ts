@@ -225,6 +225,12 @@ test("buildEnvironment drops reserved sandbox keys from payload env", () => {
         GIT_SSH_COMMAND: "ssh -i /evil",
         LD_PRELOAD: "/evil.so",
         LD_LIBRARY_PATH: "/evil",
+        LD_AUDIT: "/evil.so",
+        BASH_ENV: "/evil.sh",
+        ENV: "/evil.sh",
+        GIT_EXEC_PATH: "/evil",
+        "-S": "x",
+        "BAD NAME": "x",
         PATH: "/evil/bin",
         HOME: "/evil/home",
         APP_SECRET_NAME: "ok-name",
@@ -237,6 +243,12 @@ test("buildEnvironment drops reserved sandbox keys from payload env", () => {
   assertEquals(env.GIT_SSH_COMMAND, undefined);
   assertEquals(env.LD_PRELOAD, undefined);
   assertEquals(env.LD_LIBRARY_PATH, undefined);
+  assertEquals(env.LD_AUDIT, undefined);
+  assertEquals(env.BASH_ENV, undefined);
+  assertEquals(env.ENV, undefined);
+  assertEquals(env.GIT_EXEC_PATH, undefined);
+  assertEquals(env["-S"], undefined);
+  assertEquals(env["BAD NAME"], undefined);
   assertEquals(env.PATH?.includes("/evil"), false);
   assertEquals(env.HOME, "/work");
   assertEquals(env.CI, "1");
@@ -269,6 +281,8 @@ test("buildInvocation enters the tenant Node entitlement group via sudo -u self"
   assertEquals(invoked.args.slice(0, 4), ["-n", "-u", "tp", "--"]);
   assertEquals(invoked.args.includes("/usr/bin/sg"), false);
   assertEquals(invoked.args.includes("/usr/bin/env"), true);
+  // `env` gets `--` so no variable name can be read as one of its options.
+  assertEquals(invoked.args[invoked.args.indexOf("/usr/bin/env") + 1], "--");
   assertEquals(
     invoked.args.includes(
       "PATH=/opt/turbopanel/vendor/node-app/24/current/bin:/usr/bin:/bin",

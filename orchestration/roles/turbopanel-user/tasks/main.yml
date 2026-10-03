@@ -80,8 +80,8 @@
     state: directory
     owner: "{{ turbopanel_user }}"
     group: "{{ turbopanel_group }}"
-    recurse: true
     mode: "0750"
+    follow: false
   loop: "{{ turbopanel_daemon_vendor_cache_dirs }}"
 
 # The root helpers (tp-host, its conf, and the sudoers file that names it)

@@ -1,5 +1,11 @@
-import { assert, assertEquals, assertRejects } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertRejects,
+  assertStringIncludes,
+} from "@std/assert";
 import type { LayoutPaths } from "../paths/layout.ts";
+import { accessGroup } from "../runtime/registry.ts";
 import {
   DEFAULT_PRINCIPAL_SHELL,
   ensureDirectoryOwnedByPrincipal,
@@ -13,6 +19,7 @@ import {
   parsePasswdHomeShell,
   type PrincipalEnsureSpec,
   principalUnixGroupName,
+  resolveManagedGroups,
   type RunFn,
   type RunResult,
   userSupplementaryGroups,
@@ -855,6 +862,19 @@ function groupMutations(
     .map((c) => c.args);
 }
 
+test("resolveManagedGroups grants the password group only alongside an SSH level", () => {
+  const base = { username: "appuser" } as PrincipalEnsureSpec;
+  const withGroups = (...accessGroups: string[]) =>
+    resolveManagedGroups({ ...base, accessGroups });
+  const password = accessGroup("password")!;
+  const sftp = accessGroup("sftp")!;
+  const shell = accessGroup("shell")!;
+  assert(!withGroups(password).has(password));
+  assert(withGroups(password, sftp).has(password));
+  assert(withGroups(password, shell).has(password));
+  assert(withGroups(sftp).has(sftp));
+});
+
 test("ensurePrincipalManagedGroups adds only the missing groups", async () => {
   const { run, calls } = runtimeGroupRun(["appuser-grp", "tpphp84"]);
   await ensurePrincipalManagedGroups(
@@ -872,9 +892,10 @@ test("ensurePrincipalManagedGroups revokes a group that is no longer granted", a
   // principal that once deployed a Node app could execute Node forever.
   const { run, calls } = runtimeGroupRun(["appuser-grp", "tpnode24"]);
   await ensurePrincipalManagedGroups("appuser", new Set(["tpphp84"]), run);
+  // Revoke first, then grant.
   assertEquals(groupMutations(calls), [
-    ["-n", "usermod", "-aG", "tpphp84", "appuser"],
     ["-n", "gpasswd", "-d", "appuser", "tpnode24"],
+    ["-n", "usermod", "-aG", "tpphp84", "appuser"],
   ]);
 });
 
@@ -986,6 +1007,58 @@ test("downgrading from shell to files-only revokes the shell group", async () =>
     .filter((c) => c.args.includes("gpasswd") && c.args.includes("-d"))
     .map((c) => c.args.at(-1));
   assertEquals(removed, ["tpshell"]);
+});
+
+test("switching access level revokes the old group before granting the new one", async () => {
+  // Granting first would leave the account in tpsftp and tpshell at once,
+  // and sshd would match whichever block comes first.
+  const { run, calls } = captureRun({ groups: ["appuser-grp", "tpshell"] });
+  await ensureSystemPrincipals(
+    stubLayout(),
+    [{ principalId: "pr-1", username: "appuser", accessGroups: ["tpsftp"] }],
+    run,
+  );
+  const membership = calls
+    .filter((c) => c.args.includes("gpasswd") || c.args.includes("-aG"))
+    .map((c) => c.args.slice(-2).join(" "));
+  assertEquals(membership, [
+    "appuser tpshell",
+    "tpprincipal appuser",
+    "tpsftp appuser",
+  ]);
+});
+
+test("ensureSystemPrincipals refuses sftp and shell together before any host call", async () => {
+  // One access level per principal: sshd applies the first matching block,
+  // so an account in both would be jailed with no shell.
+  const { run, calls } = captureRun({});
+  await assertRejects(
+    () =>
+      ensureSystemPrincipals(stubLayout(), [
+        { ...baseSpec, accessGroups: ["tpsftp"] },
+        {
+          principalId: "pr-2",
+          username: "otheruser",
+          accessGroups: ["tpshell", "tpsftp"],
+        },
+      ], run),
+    TypeError,
+    "otheruser: SSH access groups tpsftp and tpshell are exclusive",
+  );
+  assertEquals(calls, []);
+});
+
+test("the password group still rides along with one access level", async () => {
+  const { run, calls } = captureRun({});
+  await ensureSystemPrincipals(
+    stubLayout(),
+    [{ ...baseSpec, accessGroups: ["tpshell", "tppasswd"] }],
+    run,
+  );
+  const added = calls
+    .filter((c) => c.args.includes("-aG"))
+    .map((c) => c.args.at(-2));
+  assertEquals(added, ["tppasswd", "tpprincipal", "tpshell"]);
 });
 
 test("a suspended account keeps its groups revoked and nothing else touched", async () => {
@@ -1545,12 +1618,16 @@ test("ensurePrincipalManagedGroups adds in sorted order and keeps going after a 
         : { success: true, stdout: "", stderr: "" },
     );
   };
-  await ensurePrincipalManagedGroups(
+  const warnings = await ensurePrincipalManagedGroups(
     "appuser",
     new Set(["tpphp84", "tpnode24", "tpnode22"]),
     run,
   );
   assertEquals(calls.map((a) => a.at(-2)), ["tpnode22", "tpnode24", "tpphp84"]);
+  // The failed add is reported, not swallowed (a runtime not installed here).
+  assertEquals(warnings.length, 1);
+  assertStringIncludes(warnings[0], "could not add appuser to tpnode24");
+  assertStringIncludes(warnings[0], "no such group");
 });
 
 test("ensurePrincipalManagedGroups revokes in sorted order and stops at the first failed revoke", async () => {
