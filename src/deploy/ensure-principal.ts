@@ -106,6 +106,11 @@ export const ALLOWED_PRINCIPAL_SHELLS: readonly string[] = [
   "/bin/bash",
 ];
 
+/** The principal's own directories in its home, `0700` and tenant-owned. */
+const PRINCIPAL_TENANT_DIRS = ["home", "data", "tmp"] as const;
+/** Root-owned directories of the home skeleton the engines traverse. */
+const PRINCIPAL_STRUCTURAL_DIRS = ["sites", "volumes"] as const;
+
 const PRINCIPAL_USERNAME_RE = /^[A-Za-z_][A-Za-z0-9_-]*$/;
 
 /**
@@ -601,16 +606,40 @@ export async function ensurePrincipalPassword(
   }
 }
 
+/**
+ * The principal home: root-owned, so the tenant can never rename what root
+ * later writes into (a directory's owner can rename its entries even when it
+ * does not own them). The principal writes only into its own leaves.
+ *
+ *   <home>                   root:<grp> 0750
+ *   <home>/home|data|tmp     <user>:<grp> 0700  (home/ is the passwd home)
+ *   <home>/sites, volumes    root:<grp> 0750
+ *
+ * The group bit lets the engines (members of `<grp>`) reach `sites/`; other
+ * principals get nothing. Parent before child: tp-host refuses a tenant or
+ * structural directory whose parent is not root-owned and sealed.
+ */
 async function ensurePrincipalHomeTree(
   home: string,
   username: string,
   groupName: string,
   runFn: RunFn,
 ): Promise<void> {
-  const owner = `${username}:${groupName}`;
-  await ensureDir(home, "0750", owner, runFn);
-  await ensureDir(join(home, ".ssh"), "0700", owner, runFn);
-  await ensureDir(join(home, "volumes"), "0750", owner, runFn);
+  const structural = `root:${groupName}`;
+  const tenant = `${username}:${groupName}`;
+  await forEachSequential<[string, string, string]>([
+    [home, "0750", structural],
+    ...PRINCIPAL_TENANT_DIRS.map((name): [string, string, string] => [
+      join(home, name),
+      "0700",
+      tenant,
+    ]),
+    ...PRINCIPAL_STRUCTURAL_DIRS.map((name): [string, string, string] => [
+      join(home, name),
+      "0750",
+      structural,
+    ]),
+  ], ([path, mode, owner]) => ensureDir(path, mode, owner, runFn));
 }
 
 /**
@@ -676,7 +705,14 @@ async function ensureOnePrincipal(
   await ensureDir(layout.principalHomeRoot, "0750", "root:root", runFn);
   await ensurePrincipalHomeRootTraverse(layout.principalHomeRoot, runFn);
   await ensurePrincipalGroup(principal, groupName, runFn);
-  await ensurePrincipalUser(principal, home, shell, groupName, runFn);
+  // The passwd home is the tenant's `home/`, never the root-owned home itself.
+  await ensurePrincipalUser(
+    principal,
+    join(home, "home"),
+    shell,
+    groupName,
+    runFn,
+  );
   await ensurePrincipalHomeTree(home, principal.username, groupName, runFn);
   // Runs here, before any unit is installed or pool staged: systemd resolves
   // supplementary groups at `execve`, so a unit started before its principal
@@ -879,22 +915,17 @@ export function ensureEngineGroupMembership(
   return ensureSupplementaryGroupMembership(user, groupName, runFn);
 }
 
+/**
+ * A principal-owned leaf (a site's `shared/`, a storage directory), always
+ * through tp-host's `install -d`. Never a `mkdir` as the daemon followed by a
+ * `chown`: the daemon cannot write inside the root-owned home anyway, and a
+ * chown by name could be raced onto whatever the tenant swapped in between.
+ */
 export async function ensureDirectoryOwnedByPrincipal(
   path: string,
   username: string,
   groupName: string,
   runFn: RunFn = runDefault,
 ): Promise<void> {
-  const owner = `${username}:${groupName}`;
-  // Fast path when the parent is already daemon-writable.
-  try {
-    await Deno.mkdir(path, { recursive: true, mode: 0o750 });
-  } catch {
-    await ensureDir(path, "0750", owner, runFn);
-    return;
-  }
-  const chown = await runFn("sudo", hostSudoArgs(["-n", "chown", owner, path]));
-  if (!chown.success) {
-    throw new Error(chown.stderr || `Failed to chown ${path}`);
-  }
+  await ensureDir(path, "0750", `${username}:${groupName}`, runFn);
 }

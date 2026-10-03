@@ -7,8 +7,9 @@ Type=simple
 User={{ site_caddy_service_user }}
 Group={{ site_caddy_service_group }}
 # Caddy writes its data (certificate cache, even with auto_https off) under
-# $XDG_DATA_HOME. Pin it so neither the unit nor a `sudo -u` config test falls
-# back to a home directory this account does not own.
+# $XDG_DATA_HOME. Pin it so the unit never falls back to a home directory this
+# account does not own. The `sudo -u` config test (`caddy validate`) runs
+# without it: sudoers pins that argv with no `env` (audit P2-8).
 Environment=XDG_DATA_HOME={{ turbopanel_state_dir }}/site-caddy
 Environment=XDG_CONFIG_HOME={{ turbopanel_state_dir }}/site-caddy
 ExecStart={{ turbopanel_vendor_dir }}/caddy/current/caddy run --config {{ turbopanel_config_dir }}/caddy/Caddyfile --adapter caddyfile

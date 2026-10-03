@@ -2572,6 +2572,68 @@ test(
   },
 );
 
+test("docker role denies the network.host and security.insecure build entitlements in daemon.json, keeping other builder keys", async () => {
+  const roleDir = join(CHECKOUT_ORCHESTRATION_DIR, "roles/docker");
+  const daemonJson = await Deno.readTextFile(
+    join(roleDir, "tasks/daemon-json.yml"),
+  );
+  const defaults = await Deno.readTextFile(join(roleDir, "defaults/main.yml"));
+  assertEquals(
+    daemonJson.includes(
+      "combine({'network-host': false, 'security-insecure': false})",
+    ),
+    true,
+  );
+  // The existing builder section and entitlements are the base, never replaced.
+  assertEquals(
+    daemonJson.includes("_docker_daemon_json_current.builder.entitlements"),
+    true,
+  );
+  assertEquals(
+    daemonJson.includes("{'builder': _docker_builder_merged}"),
+    true,
+  );
+  // The only gate on it is the opt-out variable, default on.
+  assertEquals(
+    defaults.includes("turbopanel_docker_deny_builder_entitlements: true"),
+    true,
+  );
+  assertEquals(
+    daemonJson.includes("turbopanel_docker_deny_builder_entitlements | bool"),
+    true,
+  );
+});
+
+test("a co-located instance host gets a pending dockerd restart, applied once live-restore is running", async () => {
+  const roleDir = join(CHECKOUT_ORCHESTRATION_DIR, "roles/docker");
+  const daemonJson = await Deno.readTextFile(
+    join(roleDir, "tasks/daemon-json.yml"),
+  );
+  const defaults = await Deno.readTextFile(join(roleDir, "defaults/main.yml"));
+  assertEquals(
+    defaults.includes(
+      "turbopanel_docker_restart_pending_file: /etc/docker/turbopanel-restart-pending",
+    ),
+    true,
+  );
+  for (
+    const name of [
+      "Mark a dockerd restart pending on a co-located instance host",
+      "Ask the running dockerd whether live-restore is in effect",
+      "Restart dockerd now that live-restore keeps containers running",
+      "Clear the pending dockerd restart",
+      "Warn that dockerd still needs a restart",
+    ]
+  ) {
+    assertEquals(daemonJson.includes(`- name: ${name}`), true, name);
+  }
+  assertEquals(
+    daemonJson.includes("register: _docker_daemon_json_write"),
+    true,
+  );
+  assertEquals(daemonJson.includes(".LiveRestoreEnabled"), true);
+});
+
 test("principal-access creates every SSH access group the registry defines", async () => {
   // The daemon refuses to materialize a principal that cannot join
   // tpprincipal, and sshd matches nothing for a group that does not exist — so

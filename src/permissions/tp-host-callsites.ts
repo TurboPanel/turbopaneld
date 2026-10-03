@@ -165,6 +165,20 @@ const file = (path: string, contents = "x\n"): CallSiteSetup => ({
 });
 const dir = (...paths: string[]): CallSiteSetup => ({ dirs: paths });
 
+/** `install -d -m MODE -o USER -g GROUP PATH`, under an existing `parent`. */
+function installDir(
+  mode: string,
+  owner: string,
+  path: string,
+  parent?: string,
+): TpHostSample {
+  const [user, group] = owner.split(":");
+  return {
+    argv: ["install", "-d", "-m", mode, "-o", user, "-g", group, path],
+    ...(parent === undefined ? {} : { setup: dir(parent) }),
+  };
+}
+
 const SITES: CallSite[] = [
   // --- commands -------------------------------------------------------------
   tpHost(
@@ -288,19 +302,19 @@ const SITES: CallSite[] = [
   }),
   tpHost(
     'src/deploy/ensure-principal.ts|["-n","install","-d","-m",mode,"-o",user,"-g",group,path]',
-    {
-      argv: [
-        "install",
-        "-d",
-        "-m",
-        "0750",
-        "-o",
-        "alice",
-        "-g",
-        "alice-grp",
-        `${HOME}/sites`,
-      ],
-    },
+    // The home root, then the principal home skeleton, parent before child.
+    installDir("0750", "root:root", `${P}/srv/users`),
+    installDir("0750", "root:alice-grp", HOME, `${P}/srv/users`),
+    installDir("0700", "alice:alice-grp", `${HOME}/home`, HOME),
+    installDir("0700", "alice:alice-grp", `${HOME}/data`, HOME),
+    installDir("0700", "alice:alice-grp", `${HOME}/tmp`, HOME),
+    installDir("0750", "root:alice-grp", `${HOME}/sites`, HOME),
+    installDir("0750", "root:alice-grp", `${HOME}/volumes`, HOME),
+    // Managed lane (site.ts) and release lane (release-layout.ts).
+    installDir("0750", "root:alice-grp", SITE, `${HOME}/sites`),
+    installDir("0750", "alice:tpnginx", `${SITE}/webroot`, SITE),
+    installDir("0750", "alice:alice-grp", `${SITE}/shared`, SITE),
+    installDir("0750", "root:alice-grp", `${SITE}/releases`, SITE),
   ),
   tpHost(
     "src/deploy/ensure-principal.ts|args",
@@ -325,7 +339,7 @@ const SITES: CallSite[] = [
         "-g",
         "bob-grp",
         "-d",
-        `${P}/srv/users/bob`,
+        `${P}/srv/users/bob/home`,
         "-M",
         "-s",
         "/bin/bash",
@@ -365,10 +379,6 @@ const SITES: CallSite[] = [
       argv: ["gpasswd", "-d", "alice", "tpsftp"],
     },
   ),
-  tpHost('src/deploy/ensure-principal.ts|["-n","chown",owner,path]', {
-    argv: ["chown", "alice:alice-grp", `${HOME}/sites`],
-    setup: dir(`${HOME}/sites`),
-  }),
 
   // --- hosting ingress ------------------------------------------------------
   tpHost(
@@ -632,19 +642,14 @@ const SITES: CallSite[] = [
     argv: ["mkdir", "-p", "--", RELEASE],
   }),
   tpHost('src/deploy/release/promote.ts|["-n","cp","-a","--",`${from}/.`,to]', {
-    argv: ["cp", "-a", "--", `${STATE}/builds/svc1/.`, RELEASE],
+    argv: ["cp", "-a", "--", `${STATE}/release-handoff/svc1/.`, RELEASE],
     setup: {
-      files: { [`${STATE}/builds/svc1/index.html`]: "<h1>hi</h1>\n" },
+      files: {
+        [`${STATE}/release-handoff/svc1/index.html`]: "<h1>hi</h1>\n",
+      },
       dirs: [RELEASE],
     },
   }),
-  tpHost(
-    'src/deploy/release/promote.ts|["-n","rm","-rf","--",join(to,".git")]',
-    {
-      argv: ["rm", "-rf", "--", `${RELEASE}/.git`],
-      setup: dir(`${RELEASE}/.git`),
-    },
-  ),
   tpHost('src/deploy/release/promote.ts|["-n","mkdir","-p","--",destDir]', {
     argv: ["mkdir", "-p", "--", `${RELEASE}/config`],
   }),
@@ -727,7 +732,7 @@ const SITES: CallSite[] = [
   tpHost(
     'src/deploy/release/release-layout.ts|["-n","chown","-R",owner,releaseDir]',
     {
-      argv: ["chown", "-R", "alice:alice-grp", RELEASE],
+      argv: ["chown", "-R", "root:alice-grp", RELEASE],
       setup: dir(RELEASE),
     },
   ),
@@ -980,7 +985,7 @@ const SITES: CallSite[] = [
     {
       runas: "tpnginx",
       argv: [
-        `${VENDOR}/nginx/1.28.0/sbin/nginx`,
+        `${VENDOR}/nginx/current/sbin/nginx`,
         "-t",
         "-c",
         "/etc/turbopanel/nginx/nginx.conf",
@@ -1004,7 +1009,7 @@ const SITES: CallSite[] = [
     {
       runas: "tpols",
       argv: [
-        `${VENDOR}/openlitespeed/1.8.3/bin/openlitespeed`,
+        `${VENDOR}/openlitespeed/current/bin/openlitespeed`,
         "-t",
         "-c",
         "/etc/turbopanel/openlitespeed/httpd_config.conf",
@@ -1012,18 +1017,16 @@ const SITES: CallSite[] = [
     },
   ),
   sudo(
-    'src/deploy/site/engine-driver.ts|["-n","-u","tpcaddysite","--","env",`XDG_DATA_HOME=${siteCaddyDataDir(layout)}`,siteCaddyBinaryPath(layout),"validate","--adapter","caddyfile","--config",siteCaddyMainConfigPath(layout)]',
+    'src/deploy/site/engine-driver.ts|["-n","-u","tpcaddysite","--",siteCaddyBinaryPath(layout),"validate","--adapter","caddyfile","--config",siteCaddyMainConfigPath(layout)]',
     {
       runas: "tpcaddysite",
       argv: [
-        "/usr/bin/env",
-        "XDG_DATA_HOME=/var/lib/turbopanel/site-caddy",
-        `${VENDOR}/caddy/2.11.4/caddy`,
+        `${VENDOR}/caddy/current/caddy`,
         "validate",
         "--adapter",
         "caddyfile",
         "--config",
-        "/etc/turbopanel/site-caddy/Caddyfile",
+        "/etc/turbopanel/caddy/Caddyfile",
       ],
     },
   ),

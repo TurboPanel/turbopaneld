@@ -1027,6 +1027,13 @@ export function openlitespeedLsphpBinaryPath(
   return join(layout.runtimesDir, "lsphp", series, "current", "bin", "lsphp");
 }
 
+/**
+ * LSAPI socket directory: the `turbopanel-openlitespeed.service`
+ * `RuntimeDirectory` (roles/openlitespeed), owned by `tpols`. A relative
+ * `uds://tmp/…` resolves against `/`, i.e. the shared host `/tmp`.
+ */
+export const OPENLITESPEED_LSAPI_SOCKET_DIR = "/run/turbopanel-ols";
+
 /** `extprocessor` name for one site — also what its `scripthandler` maps to. */
 export function openlitespeedLsapiProcessorName(olsSiteName: string): string {
   return `lsphp_${olsSiteName}`;
@@ -1057,7 +1064,7 @@ export function openlitespeedLsapiExtProcessorFragment(
 ): string {
   return `extprocessor ${opts.processorName}{
   type                      lsapi
-  address                   uds://tmp/lshttpd/${opts.processorName}.sock
+  address                   uds://${OPENLITESPEED_LSAPI_SOCKET_DIR}/${opts.processorName}.sock
   maxConns                  10
   env                       PHP_LSAPI_CHILDREN=10
   env                       PATH=/usr/local/bin:/usr/bin:/bin
@@ -1174,6 +1181,9 @@ function formatOpenLiteSpeedAdminValue(value: PhpAdminValue): string {
 /**
  * Per-site `vhconf.conf`.
  *
+ * `allowBrowse` is OpenLiteSpeed's "Accessible" switch for the context, not
+ * directory listing (that is `autoIndex`): `0` answers 403 for everything.
+ *
  * Static document root only (no directory listing) unless `php` is supplied, in
  * which case the vhost also carries its own suEXEC LSAPI processor, a `.php`
  * script handler bound to it, and a `phpIniOverride{}` holding the same hosting
@@ -1189,7 +1199,7 @@ index {
   autoIndex 0
 }
 context / {
-  allowBrowse 0
+  allowBrowse 1
   location $DOC_ROOT/
 }
 `;
@@ -1212,7 +1222,7 @@ scripthandler {
 }
 ${overrideBlock}
 context / {
-  allowBrowse 0
+  allowBrowse 1
   location $DOC_ROOT/
 }
 `;
@@ -1246,6 +1256,15 @@ mime                              ${join(configDir, "mime.properties")}
 showVersionNumber                 0
 indexFiles                        index.html
 disableWebAdmin                   1
+
+# OLS refuses a static file without the world-read bit unless told otherwise;
+# site files are principal-owned and shared with tpols by group, never world.
+fileAccessControl {
+        followSymbolLink          1
+        checkSymbolLink           0
+        requiredPermissionMask    000
+        restrictedPermissionMask  000
+}
 
 errorlog ${join(layout.logDir, "openlitespeed", "error.log")} {
         logLevel             NOTICE
@@ -2527,12 +2546,15 @@ async function userSupplementaryGroups(user: string): Promise<Set<string>> {
  * caller escalates to a restart for that engine only.
  */
 /**
- * Create a managed-directory site's tree, owned by the principal.
+ * Create a managed-directory site's tree.
  *
- * `0750` with the engine's group, matching the release lane exactly: the owner
- * writes, the serving engine reads through its group membership, and nothing
- * else can traverse in. `install -d` also *repairs*, so a tree left by an
- * earlier layout converges on the next deploy.
+ * `sites/<serviceId>/` is root-owned, group `<username>-grp`, `0750` — the same
+ * shape as the release lane: the tenant cannot rename what sits in it, and the
+ * serving engine traverses it through its membership of the principal's group.
+ * The leaves below it (`webroot/`, `shared/`, the document root) are the
+ * principal's, `0750` with the engine's group: the owner writes, the engine
+ * reads, nothing else can traverse in. `install -d` also *repairs*, so a tree
+ * left by an earlier layout converges on the next deploy.
  *
  * `shared/` is created alongside because `open_basedir` names it — a PHP app
  * that writes uploads or caches outside the document root has one place to put
@@ -2551,9 +2573,14 @@ async function ensureManagedDirectory(
 ): Promise<void> {
   const principalHome = principalHomePath(layout, managed.username);
   const owner = `${managed.username}:${siteEngineUnixUser(site.engine)}`;
+  await ensureDirectoryWithOwner(
+    siteRoot(principalHome, managed.serviceId),
+    "0750",
+    `root:${principalUnixGroupName(managed.username)}`,
+    run,
+  );
   // Parent before child: the directories are created in this order.
   await forEachSequential([
-    siteRoot(principalHome, managed.serviceId),
     siteWebrootDir(principalHome, managed.serviceId),
     siteSharedDir(principalHome, managed.serviceId),
     documentRoot,

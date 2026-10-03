@@ -599,15 +599,6 @@ function siteCaddyMainConfigPath(layout: LayoutPaths): string {
   return join(layout.configDir, "caddy", "Caddyfile");
 }
 
-/**
- * Caddy writes its own data (certificate cache, even with `auto_https off`)
- * under `$XDG_DATA_HOME`. Pin it so a `sudo -u` validate never falls back to a
- * home directory `tpcaddysite` does not own.
- */
-function siteCaddyDataDir(layout: LayoutPaths): string {
-  return join(layout.stateDir, "site-caddy");
-}
-
 export const NGINX_DRIVER: SiteEngineDriver = {
   engine: "nginx",
   label: "nginx",
@@ -733,7 +724,9 @@ export const CADDY_DRIVER: SiteEngineDriver = {
     // `caddy validate` parses the main Caddyfile *and* everything it imports,
     // and exits without binding a port — the property this interface requires
     // of every engine's test. Run it as the unit's own account so any path it
-    // resolves is one the service can actually reach.
+    // resolves is one the service can actually reach. sudoers pins this exact
+    // argv (no `env`, no XDG_DATA_HOME): with `auto_https off` validate never
+    // opens certificate storage, so it needs no data dir.
     const test = await run(
       "sudo",
       hostSudoArgs([
@@ -741,8 +734,6 @@ export const CADDY_DRIVER: SiteEngineDriver = {
         "-u",
         "tpcaddysite",
         "--",
-        "env",
-        `XDG_DATA_HOME=${siteCaddyDataDir(layout)}`,
         siteCaddyBinaryPath(layout),
         "validate",
         "--adapter",

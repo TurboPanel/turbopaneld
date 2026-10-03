@@ -47,6 +47,7 @@ if [ "$(id -u)" = "0" ]; then
   P=""
   CALLER_UID="${SUDO_UID:-}"
   CALLER_GID="${SUDO_GID:-}"
+  ROOT_UID=0
   case "$CALLER_UID" in ''|*[!0-9]*) tp_die "must be run through sudo" ;; esac
   case "$CALLER_GID" in ''|*[!0-9]*) tp_die "must be run through sudo" ;; esac
 else
@@ -55,6 +56,9 @@ else
   P="$TP_HOST_TEST_PREFIX"
   CALLER_UID="$(id -u)"
   CALLER_GID="$(id -g)"
+  # The test prefix belongs to the account running the tests; it stands in
+  # for root as the owner of root-owned directories.
+  ROOT_UID="$CALLER_UID"
 fi
 
 _self_dir="$(CDPATH='' cd -P -- "$(dirname -- "$0")" && pwd -P)"
@@ -439,6 +443,95 @@ tp_home_owner_of() {
   printf '%s' "${_ho%%/*}"
 }
 
+# --- the principal home layout ------------------------------------------------
+# <home> = $R_PRINCIPALS/<p>. A directory's owner can rename its entries even
+# when it does not own them, so every directory that holds a root-owned path
+# is itself root-owned and never group- or world-writable (the principal's
+# group holds the engine accounts). The tenant writes only into leaves:
+#
+#   <home>                                  root:<p>-grp 0750  structural
+#   <home>/home|data|tmp                    <p>:<p>-grp  0700  tenant dir
+#   <home>/sites, <home>/volumes            root:<p>-grp 0750  structural
+#   <home>/sites/<svc>                      root:<p>-grp 0750  structural
+#   <home>/sites/<svc>/releases[/<id>]      root:<p>-grp       structural
+#   <home>/sites/<svc>/shared|webroot, <home>/volumes/<id>   tenant leaves
+
+# PATH relative to its principal's home: empty for the home itself.
+tp_home_rel() {
+  _hr="${1#"$R_PRINCIPALS"/}"
+  [ "$_hr" != "$1" ] || return 1
+  case "$_hr" in
+    */*) printf '%s' "${_hr#*/}" ;;
+    *) ;;
+  esac
+}
+
+# A root-owned directory of a home's skeleton.
+tp_home_structural() {
+  _hs_rel="$(tp_home_rel "$1")" || return 1
+  case "$_hs_rel" in
+    ''|sites|volumes) return 0 ;;
+    sites/*) ;;
+    *) return 1 ;;
+  esac
+  _hs_rest="${_hs_rel#sites/}"
+  _hs_rest="${_hs_rest#*/}"
+  [ "$_hs_rest" != "${_hs_rel#sites/}" ] || return 0
+  case "$_hs_rest" in
+    releases) return 0 ;;
+    releases/*/*) return 1 ;;
+    releases/?*) return 0 ;;
+  esac
+  return 1
+}
+
+# One of the principal's own top-level directories (home/, data/, tmp/).
+tp_home_tenant_dir() {
+  case "$(tp_home_rel "$1")" in
+    home|data|tmp) return 0 ;;
+  esac
+  return 1
+}
+
+# Who may own the fixed parts of a home: structural directories are root's,
+# the tenant directories the principal's, and either carries only the
+# principal's own group. An empty owner or group is left as it is.
+tp_home_owner_ok() {
+  # The home root itself belongs to no principal: the generic rules apply.
+  [ "$1" != "$R_PRINCIPALS" ] || return 0
+  _hw_p="$(tp_home_owner_of "$1")" || return 1
+  if tp_home_structural "$1"; then
+    [ -z "$2" ] || [ "$2" = "root" ] || return 1
+  elif tp_home_tenant_dir "$1"; then
+    [ -z "$2" ] || [ "$2" = "$_hw_p" ] || return 1
+  else
+    return 0
+  fi
+  [ -z "$3" ] || [ "$3" = "root" ] || [ "$3" = "${_hw_p}-grp" ]
+}
+
+# The directory the shell is in (a pinned structural or tenant directory) must
+# sit in a sealed parent: root-owned, not group- or world-writable. Otherwise
+# the tenant could rename it away between this run and the next.
+tp_home_parent_sealed() {
+  _hp="$(stat -c '%u %a' ..)" || return 1
+  [ "${_hp%% *}" = "$ROOT_UID" ] || return 1
+  case "${_hp#* }" in
+    *[2367]?|*[2367]) return 1 ;;
+  esac
+  return 0
+}
+
+# Recursive operations never start at a structural directory above a release:
+# root would walk the tenant leaves below it (shared/, webroot/, home/, …).
+tp_home_recursion_ok() {
+  tp_home_structural "$1" || return 0
+  case "$(tp_home_rel "$1")" in
+    sites/*/releases/?*) return 0 ;;
+  esac
+  return 1
+}
+
 # Who may own PATH: inside a principal's home, that principal (or root / a
 # service account); anywhere else, root or a service account only — a tenant
 # owning a file root or an engine reads would be a way in.
@@ -447,6 +540,9 @@ tp_owner_ok() {
   _oo_owner="$2"
   _oo_group="$3"
   _oo_class="$(tp_path_class "$_oo_path")" || return 1
+  if [ "$_oo_class" = "principal" ]; then
+    tp_home_owner_ok "$_oo_path" "$_oo_owner" "$_oo_group" || return 1
+  fi
   if [ -n "$_oo_owner" ]; then
     if [ "$_oo_class" = "principal" ] &&
       [ "$_oo_owner" = "$(tp_home_owner_of "$_oo_path")" ]; then
@@ -468,7 +564,9 @@ tp_owner_ok() {
 }
 
 # Octal only, no setuid/setgid/sticky, never group- or world-writable
-# outside a principal's home.
+# outside a principal's home or on its structural directories (which give
+# others nothing at all); a tenant directory (home/, data/, tmp/) is the
+# principal's alone.
 tp_mode_ok() {
   _mo_mode="$1"
   _mo_path="$2"
@@ -478,13 +576,20 @@ tp_mode_ok() {
   esac
   _mo_last3="${_mo_mode#0}"
   [ "${#_mo_last3}" -eq 3 ] || _mo_last3="${_mo_mode#?}"
-  if [ "$(tp_path_class "$_mo_path")" != "principal" ]; then
-    _mo_g="${_mo_last3#?}"
-    _mo_g="${_mo_g%?}"
-    _mo_o="${_mo_last3#??}"
-    case "$_mo_g" in 2|3|6|7) return 1 ;; esac
-    case "$_mo_o" in 2|3|6|7) return 1 ;; esac
+  _mo_g="${_mo_last3#?}"
+  _mo_g="${_mo_g%?}"
+  _mo_o="${_mo_last3#??}"
+  if [ "$(tp_path_class "$_mo_path")" = "principal" ]; then
+    if tp_home_tenant_dir "$_mo_path"; then
+      [ "$_mo_g$_mo_o" = "00" ]
+      return
+    fi
+    tp_home_structural "$_mo_path" || return 0
+    # Other principals never even traverse another's skeleton.
+    [ "$_mo_o" = "0" ] || return 1
   fi
+  case "$_mo_g" in 2|3|6|7) return 1 ;; esac
+  case "$_mo_o" in 2|3|6|7) return 1 ;; esac
   return 0
 }
 
@@ -541,6 +646,7 @@ tp_unit_ok() {
   _uk_hosting=""
   [ "$_uk_name" = "turbopanel-hosting-caddy.service" ] && _uk_hosting=1
   case "$_uk_name" in
+    turbopanel-build-*.service) return 1 ;;
     turbopanel-php-*)
       tp_php_unit_ok "$_uk_file" "$_uk_name"
       return
@@ -1399,9 +1505,11 @@ tp_verb_php_site_register() {
     [1-9]|[1-5][0-9]|6[0-4]) ;;
     *) tp_die "php-site-register: children must be 1-64" ;;
   esac
-  _pg_home="$R_PRINCIPALS/$_pg_user"
-  [ "$(tp_getent passwd "$_pg_user" | cut -d: -f6)" = "$_pg_home" ] ||
-    tp_die "php-site-register: $_pg_user's home is not $_pg_home"
+  # The passwd home is home/ inside the root-owned principal home; tmp/ sits
+  # beside it (tp_principal_home_ok, the shape useradd accepts).
+  _pg_home="$(tp_getent passwd "$_pg_user" | cut -d: -f6)"
+  tp_principal_home_ok "$_pg_home" "$_pg_user" ||
+    tp_die "php-site-register: $_pg_user's home is not $R_PRINCIPALS/$_pg_user/home"
   tp_mkdir_pinned "$R_CONFIG/php-sites" 0755
   # shellcheck disable=SC3067 # dash (Debian's /bin/sh) implements -O
   [ -O . ] && [ "$(stat -c '%a' .)" = "755" ] ||
@@ -1415,7 +1523,7 @@ tp_verb_php_site_register() {
     "group=$_pg_user-grp" \
     "gid=$(tp_gid_of_group "$_pg_user-grp")" \
     "home=$_pg_home" \
-    "tmp=$_pg_home/tmp" \
+    "tmp=$R_PRINCIPALS/$_pg_user/tmp" \
     "php=$4" \
     "bin=$INSTALL_ROOT/vendor/lsphp/$4/current/bin/lsphp" \
     "ini=$R_CONFIG/php/sites/$_pg_site/php.ini" \
@@ -1465,6 +1573,9 @@ tp_verb_install() {
     tp_owner_ok "$_in_path" "$_in_owner" "$_in_group" ||
       tp_die "refusing owner $_in_owner:$_in_group for $_in_path"
     tp_mkdir_pinned "$_in_path" 0755
+    if tp_home_structural "$_in_path" || tp_home_tenant_dir "$_in_path"; then
+      tp_home_parent_sealed || tp_die "refusing $_in_path: its parent is not sealed (root-owned, not group- or world-writable)"
+    fi
     # Operate on the pinned directory itself, never by name.
     chmod "$_in_mode" .
     if [ -n "$_in_owner$_in_group" ]; then
@@ -1516,15 +1627,27 @@ tp_verb_cp() {
         *) tp_die "cp -a: the source must end in /." ;;
       esac
       tp_require_class "$_cp_dest" principal
-      _cp_src_class="$(tp_path_class "$_cp_src")" || tp_die "refusing source $_cp_src"
-      case "$_cp_src_class" in tree|principal) ;; *) tp_die "refusing source $_cp_src" ;; esac
+      # Only the daemon's own hand-off copy (release/safe-copy.ts), never a
+      # tree a build or a tenant wrote.
+      tp_require_class "$_cp_src" tree
       tp_pin_dir "$_cp_dest" || tp_die "no such directory $_cp_dest"
       # The source directory is opened and checked on a descriptor; cp reads
       # it through /proc/self/fd/3, never by a name the caller controls.
       exec 3<"$_cp_src" || tp_die "cannot open $_cp_src"
       [ "$(readlink /proc/self/fd/3)" = "$_cp_src" ] ||
         tp_die "refusing $_cp_src: it resolves elsewhere"
-      tp_run cp -a --no-dereference -- /proc/self/fd/3/. .
+      # Root's cp -R would mknod a device or FIFO, keep a set-id bit, and read
+      # a hard link to a file the caller cannot. Checked as the caller, from /
+      # (the caller cannot enter the pinned destination).
+      _cp_bad="$(cd / && tp_as "$CALLER_UID" "$CALLER_GID" find /proc/self/fd/3/. \
+        \( \( ! -type f ! -type d ! -type l \) -o -perm /6000 \
+        -o ! -user "$CALLER_UID" \) -print -quit)" ||
+        tp_die "cannot inspect $_cp_src as the calling account"
+      [ -z "$_cp_bad" ] ||
+        tp_die "refusing $_cp_src: special, set-id or foreign entry ${_cp_bad#/proc/self/fd/3/.}"
+      # Nothing of the source's ownership survives; the seal sets it.
+      tp_run cp -R --no-dereference --preserve=mode,timestamps \
+        --no-preserve=ownership -- /proc/self/fd/3/. .
       ;;
     -p)
       [ "$#" -eq 4 ] && [ "$2" = "--" ] || tp_die "cp: only cp -p -- SRC DEST"
@@ -1720,6 +1843,7 @@ tp_verb_find() {
   if [ "$#" -eq 7 ] && [ "$1" = "-type" ] && [ "$2" = "d" ] && [ "$3" = "-exec" ] &&
     [ "$4" = "chmod" ] && [ "$5" = "g+s" ] && [ "$6" = "{}" ] && [ "$7" = "+" ]; then
     tp_require_class "$_fd_base" principal
+    tp_home_recursion_ok "$_fd_base" || tp_die "find: refusing to walk $_fd_base"
     tp_pin_dir "$_fd_base" || tp_die "no such directory $_fd_base"
     # As the tree's owner: a tenant can only race its own directories.
     _fd_owner="$(stat -c '%u %g' .)"
@@ -1761,6 +1885,8 @@ tp_verb_chown() {
     *) tp_die "refusing path $_co_path" ;;
   esac
   tp_is_root_path "$_co_path" && tp_die "refusing to re-own $_co_path"
+  [ -z "$_co_rec" ] || tp_home_recursion_ok "$_co_path" ||
+    tp_die "chown -R: refusing to walk $_co_path"
   tp_owner_ok "$_co_path" "$_co_owner" "$_co_group" ||
     tp_die "refusing owner $_co_spec for $_co_path"
   tp_pin_parent "$_co_path" || tp_die "no such directory for $_co_path"
@@ -1780,9 +1906,14 @@ tp_verb_chmod() {
   _ch_class="$(tp_path_class "$_ch_path")" || tp_die "refusing path $_ch_path"
   case "$_ch_class" in tree|principal|wireguard|sysctl) ;; *) tp_die "refusing path $_ch_path" ;; esac
   case "$_ch_mode" in
-    u=rwX,g=rX,o=) [ "$_ch_class" = "principal" ] || tp_die "refusing mode $_ch_mode" ;;
+    u=rwX,g=rX,o=)
+      [ "$_ch_class" = "principal" ] && ! tp_home_structural "$_ch_path" &&
+        ! tp_home_tenant_dir "$_ch_path" || tp_die "refusing mode $_ch_mode for $_ch_path"
+      ;;
     *) tp_mode_ok "$_ch_mode" "$_ch_path" || tp_die "refusing mode $_ch_mode for $_ch_path" ;;
   esac
+  [ -z "$_cm_rec" ] || tp_home_recursion_ok "$_ch_path" ||
+    tp_die "chmod -R: refusing to walk $_ch_path"
   tp_pin_parent "$_ch_path" || tp_die "no such directory for $_ch_path"
   [ -L "./$PIN_NAME" ] && tp_die "refusing to chmod through a symlink: $_ch_path"
   if [ -d "./$PIN_NAME" ]; then
@@ -2042,8 +2173,9 @@ tp_registry_group() {
   grep -Eq "\"group\"[[:space:]]*:[[:space:]]*\"$1\"" "$_rg_file"
 }
 
+# The passwd home is the tenant directory home/ inside the root-owned home.
 tp_principal_home_ok() {
-  [ "$1" = "$R_PRINCIPALS/$2" ]
+  [ "$1" = "$R_PRINCIPALS/$2/home" ]
 }
 
 tp_shell_ok() {
@@ -2102,7 +2234,7 @@ tp_useradd_tail_ok() {
     [ "$6" = "-s" ] || tp_die "useradd: unsupported form"
   [ "$2" = "${_ut_name}-grp" ] && tp_is_principal_group "$2" ||
     tp_die "useradd: primary group must be ${_ut_name}-grp"
-  tp_principal_home_ok "$4" "$_ut_name" || tp_die "useradd: home must be $R_PRINCIPALS/$_ut_name"
+  tp_principal_home_ok "$4" "$_ut_name" || tp_die "useradd: home must be $R_PRINCIPALS/$_ut_name/home"
   tp_shell_ok "$7" || tp_die "useradd: refusing shell $7"
 }
 
@@ -2177,6 +2309,228 @@ tp_verb_getent() {
   tp_exec getent shadow -- "$3"
 }
 
+# --- builds ------------------------------------------------------------------
+# Tenant build commands run as BUILD_ACCOUNT (not in docker or tp, no sudo) in
+# a transient turbopanel-build-<id>.service whose every property is fixed
+# here. The daemon passes only ids; the spec rides stdin straight through to
+# lib/tp-build-runner, which reads it as the build account (root never parses
+# it, and it never becomes an EnvironmentFile PID 1 would read as root).
+#
+# Layout (the build-user role creates it; checked on every run):
+#   /var/lib/turbopanel-build          root, not group/world-writable
+#   /var/lib/turbopanel-build/work     root:tp 1770 (sticky: tp cannot swap
+#                                      out a work dir it handed over)
+#   /var/lib/turbopanel-build/cache    root:root 0700
+#   work/<build-id>                    checked out by tp, handed to the build
+#                                      account for the run, returned after
+#   cache/<project-id>                 build account 0700, one project's cache
+#
+# One build at a time per host: build-run holds a root-only lock while the
+# unit runs and refuses to start while another build unit is still active,
+# so builds that share one uid never see each other's processes.
+R_BUILD="$P/var/lib/turbopanel-build"
+BUILD_ACCOUNT="tpbuild"
+# Not turbopanel-*: tp may install turbopanel-* units, and a principal named
+# `build` would own turbopanel-build.slice.
+BUILD_SLICE="tpbuild.slice"
+BUILD_LOCK="$P/run/tpbuild.lock"
+# root:tp 0750 like this script. PID 1 reads it as root and hands it to the
+# unit as a credential (a private, read-only copy owned by the unit's user),
+# which /bin/sh then runs: the build account never reaches /opt/turbopanel.
+BUILD_RUNNER="$INSTALL_ROOT/lib/tp-build-runner"
+BUILD_LOCK_WAIT_SEC=2100
+# Owner decision: the same limits for every plan.
+BUILD_MEMORY_MAX=4G
+BUILD_CPU_QUOTA=200%
+BUILD_RUNTIME_MAX_SEC=1800
+# Debian 13 / Ubuntu 24.04. Below it: a warning and a reduced sandbox (still
+# the build account, still confined); below the minimum: no build.
+BUILD_SYSTEMD_FLOOR=255
+BUILD_SYSTEMD_MIN=247
+# Loopback, private (10/8 covers the tp0 fabric), CGNAT, link-local (cloud
+# metadata), benchmark, multicast and reserved ranges. The host's own
+# resolvers are allowed back in (systemd lets IPAddressAllow= win).
+BUILD_DENY_V4="0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 169.254.0.0/16 172.16.0.0/12 192.0.0.0/24 192.168.0.0/16 198.18.0.0/15 224.0.0.0/3"
+BUILD_DENY_V6="::/128 ::1/128 fc00::/7 fe80::/10 ff00::/8"
+
+tp_build_id_ok() {
+  case "$1" in
+    ''|-*|*[!a-z0-9-]*) return 1 ;;
+  esac
+  [ "${#1}" -le 64 ]
+}
+
+tp_group_db() {
+  if [ -n "$TP_TEST" ]; then
+    cat -- "$P/etc/group"
+    return
+  fi
+  getent group
+}
+
+tp_in_service_band() {
+  case "$1" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$1" -ge "$SERVICE_ID_MIN" ] && [ "$1" -le "$SERVICE_ID_MAX" ]
+}
+
+# Sets BUILD_UID/BUILD_GID. The account must be a service-band system user
+# with its own group whose only supplementary groups are runtime groups
+# (tpnode*): never docker, tp, sudo or anything else that grants reach.
+tp_build_account_ok() {
+  _ba_line="$(tp_getent passwd "$BUILD_ACCOUNT")" || return 1
+  BUILD_UID="$(printf '%s' "$_ba_line" | cut -d: -f3)"
+  BUILD_GID="$(printf '%s' "$_ba_line" | cut -d: -f4)"
+  tp_in_service_band "$BUILD_UID" && tp_in_service_band "$BUILD_GID" || return 1
+  [ "$(tp_gid_of_group "$BUILD_ACCOUNT")" = "$BUILD_GID" ] || return 1
+  _ba_extra="$(tp_group_db | awk -F: -v u="$BUILD_ACCOUNT" '
+    { n = split($4, m, ","); for (i = 1; i <= n; i++) if (m[i] == u && $1 !~ /^tpnode[a-z0-9]*$/) print $1 }')"
+  [ -z "$_ba_extra" ] || tp_die "build-run: $BUILD_ACCOUNT is in group(s) $_ba_extra; refusing"
+}
+
+# The build tree: root-owned, never world-writable, group-writable only with
+# the sticky bit.
+tp_build_tree_ok() {
+  for _bt in "$R_BUILD" "$R_BUILD/work" "$R_BUILD/cache"; do
+    tp_pin_dir "$_bt" || tp_die "no build directory $_bt (run the build-user role)"
+    [ "$(stat -c '%u' .)" = "$(id -u)" ] || tp_die "refusing $_bt: not owned by root"
+    case "$(stat -c '%A' .)" in
+      ????????w?) tp_die "refusing $_bt: world-writable" ;;
+      ?????w???[!tT]) tp_die "refusing $_bt: group-writable without the sticky bit" ;;
+    esac
+  done
+  tp_pin_parent "$BUILD_RUNNER" || tp_die "no runner directory"
+  [ -f "./$PIN_NAME" ] && [ ! -L "./$PIN_NAME" ] || tp_die "no build runner at $BUILD_RUNNER"
+  [ "$(stat -c '%u' "./$PIN_NAME")" = "$(id -u)" ] || tp_die "refusing $BUILD_RUNNER: not owned by root"
+  case "$(stat -c '%A' "./$PIN_NAME")" in
+    ?????w????|????????w?) tp_die "refusing $BUILD_RUNNER: writable by others" ;;
+  esac
+}
+
+# Pin work/<id>; it must be a real directory owned by the caller or the build
+# account (a re-run). Leaves the working directory in it.
+tp_build_work_pin() {
+  tp_pin_dir "$R_BUILD/work/$1" || tp_die "no work directory $R_BUILD/work/$1"
+  _bw_owner="$(stat -c '%u' .)"
+  [ "$_bw_owner" = "$CALLER_UID" ] || [ "$_bw_owner" = "$BUILD_UID" ] ||
+    tp_die "refusing $R_BUILD/work/$1: owned by uid $_bw_owner"
+}
+
+tp_systemd_major() {
+  if [ -n "$TP_TEST" ]; then
+    cat -- "$P/run/systemd-version" 2>/dev/null || echo 257
+    return
+  fi
+  systemctl --version | sed -n '1s/^systemd \([0-9][0-9]*\).*/\1/p'
+}
+
+tp_build_unit_state() {
+  if [ -n "$TP_TEST" ]; then
+    cat -- "$P/run/unit-state/$1" 2>/dev/null || echo inactive
+    return
+  fi
+  systemctl show -p ActiveState --value -- "$1"
+}
+
+# The host's nameservers as /32 or /128, one per line: literal addresses only.
+tp_build_resolvers() {
+  [ -f "$P/etc/resolv.conf" ] || return 0
+  awk '$1 == "nameserver" { sub(/%.*/, "", $2); print $2 }' "$P/etc/resolv.conf" |
+    while IFS= read -r _rs; do
+      case "$_rs" in
+        ''|*[!0-9A-Fa-f:.]*) ;;
+        *:*) printf '%s/128\n' "$_rs" ;;
+        *.*.*.*) printf '%s/32\n' "$_rs" ;;
+      esac
+    done
+}
+
+# One host-wide build at a time (root-only lock), and never alongside a build
+# unit whose client went away. Not exercised in test mode (no flock there).
+tp_build_lock() {
+  [ -z "$TP_TEST" ] || return 0
+  exec 9>>"$BUILD_LOCK"
+  flock -w "$BUILD_LOCK_WAIT_SEC" 9 || tp_die "build-run: timed out waiting for the running build"
+  _bl_active="$(systemctl list-units --plain --no-legend --all \
+    --state=activating,active,deactivating,reloading -- 'turbopanel-build-*.service')"
+  [ -z "$_bl_active" ] || tp_die "build-run: another build unit is still running"
+  [ "$(cat /proc/sys/fs/protected_hardlinks)" = "1" ] ||
+    tp_die "build-run: fs.protected_hardlinks must be 1 before handing a tree over"
+}
+
+tp_verb_build_run() {
+  [ $# -eq 2 ] || tp_die "build-run: only build-run BUILD-ID PROJECT-ID"
+  tp_build_id_ok "$1" || tp_die "build-run: refusing build id $1"
+  tp_build_id_ok "$2" || tp_die "build-run: refusing project id $2"
+  tp_build_account_ok || tp_die "build-run: no confined $BUILD_ACCOUNT account (run the build-user role)"
+  tp_build_tree_ok
+  _br_v="$(tp_systemd_major)"
+  case "$_br_v" in ''|*[!0-9]*) tp_die "build-run: cannot read the systemd version" ;; esac
+  [ "$_br_v" -ge "$BUILD_SYSTEMD_MIN" ] ||
+    tp_die "build-run: systemd $_br_v cannot sandbox a build; the supported floor is Debian 13 / Ubuntu 24.04"
+  tp_build_lock
+  _br_work="$R_BUILD/work/$1"
+  _br_cache="$R_BUILD/cache/$2"
+  tp_build_work_pin "$1"
+  tp_pin_dir "$R_BUILD/cache"
+  mkdir -m 0700 -- "./$2" 2>/dev/null || [ -d "./$2" ] || tp_die "cannot create $_br_cache"
+  tp_pin_dir "$_br_cache" || tp_die "refusing $_br_cache"
+  tp_run chown -h -- "$BUILD_UID:$BUILD_GID" .
+  tp_build_work_pin "$1"
+  tp_run chown -R -h -P -- "$BUILD_UID:$BUILD_GID" .
+  cd /
+  set -- --unit="turbopanel-build-$1" --service-type=exec --wait --pipe --quiet --collect \
+    -p User="$BUILD_ACCOUNT" -p Group="$BUILD_ACCOUNT" -p WorkingDirectory="$_br_work" \
+    -p NoNewPrivileges=yes -p CapabilityBoundingSet= -p AmbientCapabilities= \
+    -p RestrictSUIDSGID=yes -p ProtectSystem=strict -p ProtectHome=yes \
+    -p PrivateTmp=yes -p PrivateDevices=yes -p TemporaryFileSystem="$R_BUILD:ro" \
+    -p LoadCredential="tp-build-runner:$BUILD_RUNNER" \
+    -p BindPaths="$_br_work" -p BindPaths="$_br_cache"
+  for _br_hide in "$R_CONFIG" "$R_STATE" "$R_LOG" "$R_RUN" "$R_PRINCIPALS" "$P/srv" \
+    "$P/backup" "$P/run/docker.sock" "$P/var/run/docker.sock" "$P/run/containerd" \
+    "$P/run/turbopanel-gate" "$P/var/lib/docker" "$P/etc/ssh" "$P/etc/wireguard"; do
+    set -- "$@" -p InaccessiblePaths="-$_br_hide"
+  done
+  set -- "$@" -p ProtectKernelTunables=yes -p ProtectKernelModules=yes \
+    -p ProtectKernelLogs=yes -p ProtectControlGroups=yes -p ProtectHostname=yes \
+    -p LockPersonality=yes -p RestrictRealtime=yes -p RestrictNamespaces=yes \
+    -p RemoveIPC=yes -p SystemCallFilter=@system-service -p SystemCallErrorNumber=EPERM \
+    -p SystemCallArchitectures=native
+  if [ "$_br_v" -ge "$BUILD_SYSTEMD_FLOOR" ]; then
+    set -- "$@" -p ProtectClock=yes -p ProtectProc=invisible -p PrivateIPC=yes
+  else
+    printf 'tp-host: warning: systemd %s is below the supported floor (Debian 13 / Ubuntu 24.04); this build runs as %s with a reduced sandbox (other processes visible, shared IPC)\n' \
+      "$_br_v" "$BUILD_ACCOUNT" >&2
+  fi
+  [ "$_br_v" -lt 257 ] || set -- "$@" -p PrivatePIDs=yes
+  set -- "$@" -p RestrictAddressFamilies="AF_INET AF_INET6 AF_UNIX" \
+    -p IPAddressDeny="$BUILD_DENY_V4 $BUILD_DENY_V6"
+  _br_allow="$(tp_build_resolvers | tr '\n' ' ')"
+  _br_allow="${_br_allow% }"
+  [ -z "$_br_allow" ] || set -- "$@" -p IPAddressAllow="$_br_allow"
+  set -- "$@" -p Slice="$BUILD_SLICE" -p MemoryMax="$BUILD_MEMORY_MAX" -p MemorySwapMax=0 \
+    -p CPUQuota="$BUILD_CPU_QUOTA" -p TasksMax=1024 -p IOWeight=50 -p LimitFSIZE=4G \
+    -p LimitNOFILE=65536 -p LimitCORE=0 -p RuntimeMaxSec="$BUILD_RUNTIME_MAX_SEC" \
+    -p KillMode=control-group -p OOMPolicy=continue -p UMask=0022 \
+    -- /bin/sh '${CREDENTIALS_DIRECTORY}/tp-build-runner' "$_br_work"
+  tp_exec systemd-run "$@"
+}
+
+# Hand a finished work tree back to the caller, only once its unit is gone
+# (cgroup empty, so nothing the build left behind can race the copy).
+tp_verb_build_return() {
+  [ $# -eq 1 ] || tp_die "build-return: only build-return BUILD-ID"
+  tp_build_id_ok "$1" || tp_die "build-return: refusing build id $1"
+  tp_build_account_ok || tp_die "build-return: no confined $BUILD_ACCOUNT account"
+  _bt_state="$(tp_build_unit_state "turbopanel-build-$1.service")"
+  case "$_bt_state" in
+    inactive|failed) ;;
+    *) tp_die "build-return: turbopanel-build-$1.service is still $_bt_state" ;;
+  esac
+  tp_pin_dir "$R_BUILD/work" || tp_die "no build directory $R_BUILD/work"
+  tp_build_work_pin "$1"
+  tp_run chown -R -h -P -- "$CALLER_UID:$CALLER_GID" .
+}
+
 # --- dispatch ----------------------------------------------------------------
 
 [ $# -ge 1 ] || tp_die "usage: tp-host <verb> [args…]"
@@ -2220,6 +2574,8 @@ case "$_verb" in
   chpasswd) tp_verb_chpasswd "$@" ;;
   getent) tp_verb_getent "$@" ;;
   modprobe) tp_verb_modprobe "$@" ;;
+  build-run) tp_verb_build_run "$@" ;;
+  build-return) tp_verb_build_return "$@" ;;
   php-test) tp_verb_php_test "$@" ;;
   php-site-register) tp_verb_php_site_register "$@" ;;
   *) tp_die "refusing verb $_verb" ;;
