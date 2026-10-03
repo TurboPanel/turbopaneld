@@ -8,7 +8,7 @@ import {
 import type { CollectorDeps } from "./collector/types.ts";
 import {
   buildMetricsSample,
-  METRICS_SCHEMA_VERSION,
+  METRICS_LEGACY_WIRE_VERSION,
 } from "../contracts/metrics-contract.ts";
 import type { TopologySnapshot } from "../contracts/topology-types.ts";
 import {
@@ -280,7 +280,7 @@ function supportedSample(sequence: number): MetricsCollectResult {
     supported: true,
     sample: buildMetricsSample({
       metadata: {
-        version: METRICS_SCHEMA_VERSION,
+        version: METRICS_LEGACY_WIRE_VERSION,
         sampledAt: new Date(0).toISOString(),
         intervalSeconds: 60,
         sequence,
@@ -383,7 +383,7 @@ it("MetricsScheduler emits first metrics frame immediately on attach", async () 
   const frames = parseMetricsFrames(sent);
   assertEquals(frames.length, 1);
   assertEquals(frames[0].type, "metrics");
-  assertEquals(frames[0].metadata.version, METRICS_SCHEMA_VERSION);
+  assertEquals(frames[0].metadata.version, METRICS_LEGACY_WIRE_VERSION);
   assertEquals(typeof frames[0].metadata.sequence, "number");
 });
 

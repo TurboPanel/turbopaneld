@@ -9,7 +9,6 @@ import {
   RELEASE_DIR_MODE,
   RELEASE_PUBLISHED_MODE,
   RELEASE_RECORDS_DIRNAME,
-  RELEASE_STAGING_MODE,
   removePublishedRelease,
   removeReleaseScratchDir,
   resetReleaseScratchDir,
@@ -82,18 +81,19 @@ test("ensureReleaseTree makes the immutable tree root-owned", async () => {
   }
 });
 
-test("ensureReleaseTree leaves the staging release writable, not principal-owned", async () => {
+test("ensureReleaseTree never pre-creates the release directory", async () => {
   const root = await Deno.makeTempDir({ prefix: "tp-release-staging-" });
   const paths = stubPaths(root);
   const { run, calls } = captureRun();
   try {
     await ensureReleaseTree(paths, "appuser", run);
 
-    assertEquals(installCall(calls, paths.releaseDir), {
-      mode: RELEASE_STAGING_MODE,
-      owner: "root",
-      group: "appuser-grp",
-    });
+    // Only tp-host `publish` brings releases/<id> into existence, sealed.
+    assertEquals(installCall(calls, paths.releaseDir), null);
+    assertEquals(
+      calls.some((call) => call.args.includes(paths.releaseDir)),
+      false,
+    );
   } finally {
     await Deno.remove(root, { recursive: true });
   }
@@ -152,7 +152,11 @@ test("resolveReleasePaths puts scratch under daemon state, not the principal hom
   );
   assertEquals(paths.scratchDir, "/var/lib/tp/release-build/svc-1/rel-1");
   assertEquals(paths.scratchDir.startsWith(paths.principalHome), false);
-  assertEquals(paths.handoffDir, "/var/lib/tp/release-handoff/svc-1/rel-1");
+  assertEquals(
+    paths.stagingDir,
+    "/srv/users/.tp-staging/appuser.svc-1.rel-1",
+  );
+  assertEquals(paths.stagingDir.startsWith(paths.principalHome), false);
 });
 
 test("resolveDaemonReleasePaths uses the release-records root", () => {

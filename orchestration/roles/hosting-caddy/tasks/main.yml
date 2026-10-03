@@ -83,51 +83,33 @@
     permissions: rx
     state: present
 
-- name: Ensure the hosting config directories
+# The leaf itself (P1-1: /etc/turbopanel is sealed, hosting/ is the daemon's).
+# The daemon creates hosting/sites and writes the Caddyfile and site snippets
+# 0640 inside it; a default ACL entry on the leaf makes every new file and
+# folder readable by the hosting Caddy and nobody else new. Nothing below the
+# leaf is touched by root (no per-file ACLs, no existing-file backfill).
+- name: Ensure the hosting config directory belongs to the daemon
   ansible.builtin.file:
-    path: "{{ turbopanel_config_dir }}/hosting/{{ item }}"
+    path: "{{ turbopanel_config_dir }}/hosting"
     state: directory
     owner: "{{ hosting_caddy_config_owner }}"
     group: "{{ hosting_caddy_config_owner }}"
     mode: "0750"
-  loop:
-    - ""
-    - sites
+    follow: false
 
-# The daemon writes the Caddyfile and site snippets 0640; a default ACL entry
-# makes every new file readable by the hosting Caddy and nobody else new.
-- name: Grant the hosting Caddy read on the hosting config directories
+- name: Grant the hosting Caddy read on the hosting config directory
   ansible.posix.acl:
-    path: "{{ turbopanel_config_dir }}/hosting/{{ item.0 }}"
+    path: "{{ turbopanel_config_dir }}/hosting"
     etype: user
     entity: "{{ hosting_caddy_user }}"
     permissions: rx
-    default: "{{ item.1 }}"
+    default: "{{ item }}"
     state: present
-  loop: "{{ ['', 'sites'] | product([false, true]) | list }}"
+    recursive: false
+    follow: false
+  loop: [false, true]
   loop_control:
-    label: "hosting/{{ item.0 }} default={{ item.1 }}"
-
-- name: Find hosting config files written before this account existed
-  ansible.builtin.find:
-    paths:
-      - "{{ turbopanel_config_dir }}/hosting"
-      - "{{ turbopanel_config_dir }}/hosting/sites"
-    patterns:
-      - Caddyfile
-      - "*.caddy"
-  register: _hosting_caddy_config_files
-
-- name: Grant the hosting Caddy read on existing hosting config files
-  ansible.posix.acl:
-    path: "{{ item.path }}"
-    etype: user
-    entity: "{{ hosting_caddy_user }}"
-    permissions: r
-    state: present
-  loop: "{{ _hosting_caddy_config_files.files }}"
-  loop_control:
-    label: "{{ item.path }}"
+    label: "hosting default={{ item }}"
 
 # Uploaded certificates: the daemon writes <tls>/<id>/privkey.pem. The setgid
 # directory hands every file below it to the hosting Caddy's group, and the
@@ -140,6 +122,7 @@
     owner: "{{ hosting_caddy_config_owner }}"
     group: "{{ hosting_caddy_user }}"
     mode: "2750"
+    follow: false
 
 # Certificates and the ACME account now live in the unit's own StateDirectory
 # (/var/lib/turbopanel-hosting-caddy). The old store inside the tp-owned state
