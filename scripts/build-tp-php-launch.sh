@@ -19,7 +19,8 @@ PINS="$ROOT/orchestration/roles/php-launch/defaults/main.yml"
 ZIG_VERSION=0.16.0
 # sha256 of each host's Zig tarball (https://ziglang.org/download/index.json).
 zig_pin() {
-	case "$1" in
+	local zig_host="$1"
+	case "$zig_host" in
 	x86_64-linux) echo 70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00 ;;
 	aarch64-linux) echo ea4b09bfb22ec6f6c6ceac57ab63efb6b46e17ab08d21f69f3a48b38e1534f17 ;;
 	aarch64-macos) echo b23d70deaa879b5c2d486ed3316f7eaa53e84acf6fc9cc747de152450d401489 ;;
@@ -29,10 +30,11 @@ zig_pin() {
 }
 
 sha256() {
+	local file="$1"
 	if command -v sha256sum >/dev/null 2>&1; then
-		sha256sum "$1" | cut -d' ' -f1
+		sha256sum "$file" | cut -d' ' -f1
 	else
-		shasum -a 256 "$1" | cut -d' ' -f1
+		shasum -a 256 "$file" | cut -d' ' -f1
 	fi
 }
 
@@ -67,7 +69,10 @@ trap 'rm -rf "$WORK"' EXIT
 cp "$SRC" "$WORK/tp-php-launch.c"
 export ZIG_GLOBAL_CACHE_DIR="$WORK/zig-cache" ZIG_LOCAL_CACHE_DIR="$WORK/zig-cache"
 for arch in amd64 arm64; do
-	case "$arch" in amd64) target=x86_64-linux-musl ;; arm64) target=aarch64-linux-musl ;; esac
+	case "$arch" in
+	amd64) target=x86_64-linux-musl ;;
+	*) target=aarch64-linux-musl ;;
+	esac
 	(cd "$WORK" && "$ZIG_DIR/zig" cc -target "$target" -std=c11 -O2 \
 		-Wall -Wextra -Werror -Wconversion -Wshadow \
 		-fstack-protector-strong -fno-ident -static -s \

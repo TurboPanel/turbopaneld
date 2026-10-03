@@ -738,8 +738,15 @@ it regresses:
     `listen.acl_users`, never `user`/`group`/`listen.group`);
     `php-test <siteId>` runs the installed unit's binary on that config as
     the owner, and `php-site-register` writes the attached-lsphp launcher's
-    registry (`/etc/turbopanel/php-sites/<siteId>`, root:root, this verb
-    only). daemon-install's tp:tp pass over the config tree skips both;
+    registry (`/etc/turbopanel-php-sites/<siteId>`, root:root 0644 in a
+    root:root 0755 directory outside the tp-owned config tree, this verb
+    only; a managed root tp-host never removes). The setuid
+    `tp-php-launch lsapi <siteId>` (`orchestration/scripts/tp-php-launch.c`,
+    role `php-launch`, 4750 root:tpphplaunch, tpols the only member; needs an
+    outside security review before release) reads it, becomes the owner and
+    execs the vendored lsphp; its pins are the reproducible build's SHA-256
+    per architecture (`scripts/build-tp-php-launch.sh --print`).
+    daemon-install's tp:tp pass over the config tree skips `php/sites/`;
   - changes only principal accounts (uid ≥ 15001, `<name>-grp`, home under
     the principal root, a listed shell), adds principals only to groups
     `runtime-registry.json` defines and engine accounts only to principal

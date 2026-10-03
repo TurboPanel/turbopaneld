@@ -24,7 +24,7 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 CFLAGS=(-std=c11 -O2 -Wall -Wextra -Werror)
 cc "${CFLAGS[@]}" -o "$WORK/sockwrap" "$HERE/sockwrap.c"
-cc "${CFLAGS[@]}" -o "$WORK/fake-lsphp" "$HERE/fake-lsphp.c"
+cc "${CFLAGS[@]}" -DSITE_INI="\"/etc/turbopanel/php/sites/shop-1/php.ini\"" -o "$WORK/fake-lsphp" "$HERE/fake-lsphp.c"
 if [[ -n "${1:-}" ]]; then
 	cp "$1" "$WORK/tp-php-launch"
 else
@@ -41,11 +41,33 @@ SOCK=/run/tp-php-launch-test/lsphp.sock
 REPORT=tp-php-launch-report
 FAIL=0
 PASS=0
+# Refusal reasons the launcher logs, shared by several cases.
+UID_BAND="uid outside"
+NOT_ROOT_ENTRY="root:root"
+SITE_CONFIG="site config directory"
+SITE_INI="site php.ini"
+LSPHP_BINARY="lsphp binary"
+
+# The launcher refuses a parent that is not root-owned or is group/other
+# writable. CI runners ship some of these otherwise (/opt); this host is
+# disposable, so seal them and say so.
+for d in / /etc /opt /srv; do
+	[[ -d "$d" ]] || install -d -m 0755 -o root -g root "$d"
+	if [[ "$(stat -c %u "$d")" != 0 ]] || (($(stat -c '0%a' "$d") & 8#022)); then
+		echo "hostile-test: $d is $(stat -c '%U:%G %a' "$d") here; sealing it root-owned, not group/other writable"
+		chown root "$d"
+		chmod go-w "$d"
+	fi
+done
 
 # --- accounts (idempotent) ------------------------------------------------------
-group() { getent group "$1" >/dev/null || groupadd -g "$2" "$1"; }
+group() { # name gid
+	local name="$1" gid="$2"
+	getent group "$name" >/dev/null || groupadd -g "$gid" "$name"
+}
 account() { # name uid group home
-	getent passwd "$1" >/dev/null || useradd -u "$2" -g "$3" -d "$4" -M -s /usr/sbin/nologin "$1"
+	local name="$1" uid="$2" grp="$3" home="$4"
+	getent passwd "$name" >/dev/null || useradd -u "$uid" -g "$grp" -d "$home" -M -s /usr/sbin/nologin "$name"
 }
 group tpphplaunch 9981
 group tpols 9990
@@ -165,8 +187,14 @@ R="/srv/users/alice/tmp/$REPORT"
 if [[ "$LAST_RC" != 0 || ! -f "$R" ]]; then
 	bad "good launch: exit $LAST_RC, report missing ($LAST_ERR)"
 else
-	want() { if grep -qxF -- "$1" "$R"; then ok; else bad "good launch: no '$1' in report"; fi; }
-	never() { if grep -qE -- "$1" "$R"; then bad "good launch: report matches '$1'"; else ok; fi; }
+	want() {
+		local line="$1"
+		if grep -qxF -- "$line" "$R"; then ok; else bad "good launch: no '$line' in report"; fi
+	}
+	never() {
+		local pattern="$1"
+		if grep -qE -- "$pattern" "$R"; then bad "good launch: report matches '$pattern'"; else ok; fi
+	}
 	want "uid=15001,15001,15001"
 	want "gid=15001,15001,15001"
 	want "group=15001"
@@ -181,18 +209,18 @@ else
 	want "env=LSAPI_AVOID_FORK=200M"
 	expect "good launch: exactly five environment variables" test "$(grep -c '^env=' "$R")" = 5
 	never "LD_PRELOAD|/tmp/evil|=999|PHP_INI_SCAN_DIR"
-	want "phprc.readable=1"
-	want "etc_turbopanel=php"
-	expect "good launch: only php/ under /etc/turbopanel" test "$(grep -c '^etc_turbopanel=' "$R")" = 1
+	want "ini.readable=1"
+	want "etc_turbopanel.secrets=0"
+	want "etc_turbopanel.writable=0"
 	want "stdin.listening=1"
-	want "umask=022"
+	want "status.Umask=027"
 	want "rlimit.core=0"
 	want "cwd=/"
 	want "setuid0=-1"
-	want $'status.NoNewPrivs:\t1'
-	want $'status.CapEff:\t0000000000000000'
-	want $'status.CapPrm:\t0000000000000000'
-	want $'status.CapAmb:\t0000000000000000'
+	want "status.NoNewPrivs=1"
+	want "status.CapEff=0"
+	want "status.CapPrm=0"
+	want "status.CapAmb=0"
 	expect "good launch: only fds 0-2" test "$(grep '^fd=' "$R" | tr '\n' ' ')" = "fd=0 fd=1 fd=2 "
 	expect "good launch: report not alice's" test "$(stat -c %U "$R")" = alice
 fi
@@ -231,11 +259,11 @@ expect "alice ran the launcher" test "$LAST_RC" != 0 -a ! -e "/srv/users/alice/t
 E="$REG/$SITE"
 hostile "no entry" "no registry entry" "rm -f $E"
 hostile "mode php-fpm" "mode is not lsphp-attached" "registry mode=php-fpm > $E"
-hostile "uid 0" "uid outside" "registry uid=0 > $E"
-hostile "uid tp" "uid outside" "registry uid=9999 > $E"
-hostile "uid 60001" "uid outside" "registry uid=60001 > $E"
-hostile "uid leading zero" "uid outside" "registry uid=015001 > $E"
-hostile "uid sign" "uid outside" "registry uid=+15001 > $E"
+hostile "uid 0" "$UID_BAND" "registry uid=0 > $E"
+hostile "uid tp" "$UID_BAND" "registry uid=9999 > $E"
+hostile "uid 60001" "$UID_BAND" "registry uid=60001 > $E"
+hostile "uid leading zero" "$UID_BAND" "registry uid=015001 > $E"
+hostile "uid sign" "$UID_BAND" "registry uid=+15001 > $E"
 hostile "gid 0" "gid outside" "registry gid=0 > $E"
 hostile "tp user" "user name" "registry user=tpevil uid=15003 gid=15003 group=tpevil-grp home=/srv/users/tpevil/home tmp=/srv/users/tpevil/tmp > $E"
 hostile "root user" "group is not" "registry user=root > $E"
@@ -260,15 +288,15 @@ hostile "no final newline" "newline" "registry | head -c -1 > $E"
 hostile "empty file" "registry size" ": > $E"
 hostile "blank line" "without =" "{ echo; registry; } > $E"
 hostile "oversize" "registry" "{ registry; head -c 5000 /dev/zero | tr '\\0' a; echo; } > $E"
-hostile "group-writable entry" "root:root" "chmod 0664 $E"
-hostile "world-writable entry" "root:root" "chmod 0646 $E"
-hostile "entry owned by alice" "root:root" "chown alice $E"
-hostile "entry group alice" "root:root" "chgrp alice-grp $E"
-hostile "setuid entry" "root:root" "chmod 4644 $E"
+hostile "group-writable entry" "$NOT_ROOT_ENTRY" "chmod 0664 $E"
+hostile "world-writable entry" "$NOT_ROOT_ENTRY" "chmod 0646 $E"
+hostile "entry owned by alice" "$NOT_ROOT_ENTRY" "chown alice $E"
+hostile "entry group alice" "$NOT_ROOT_ENTRY" "chgrp alice-grp $E"
+hostile "setuid entry" "$NOT_ROOT_ENTRY" "chmod 4644 $E"
 hostile "hard-linked entry" "one link" "ln $E $REG/linked"
 hostile "symlinked entry" "no registry entry" "mv $E $REG/real && ln -s real $E"
-hostile "entry is a directory" "root:root" "rm $E && mkdir $E"
-hostile "entry is a fifo" "root:root" "rm $E && mkfifo -m 0644 $E"
+hostile "entry is a directory" "$NOT_ROOT_ENTRY" "rm $E && mkdir $E"
+hostile "entry is a fifo" "$NOT_ROOT_ENTRY" "rm $E && mkfifo -m 0644 $E"
 hostile "symlinked registry dir" "$REG" "mv $REG /etc/tp-reg-real && ln -s /etc/tp-reg-real $REG"
 hostile "registry dir not root's" "$REG" "chown tpols $REG"
 hostile "registry dir group-writable" "$REG" "chmod 0775 $REG"
@@ -288,17 +316,17 @@ hostile "principal root writable" "/srv/users/alice/tmp" "chmod 0777 /srv/users"
 
 # --- site config ------------------------------------------------------------------
 hostile "config dir missing" "$CONF" "rm -rf $CONF"
-hostile "config dir a symlink" "site config directory" "mv $CONF /etc/turbopanel/php/real && ln -s real $CONF"
-hostile "config dir bob's group" "site config directory" "chgrp bob-grp $CONF"
-hostile "config dir group-writable" "site config directory" "chmod 0770 $CONF"
-hostile "config dir tp-owned" "site config directory" "chown tp $CONF"
+hostile "config dir a symlink" "$SITE_CONFIG" "mv $CONF /etc/turbopanel/php/real && ln -s real $CONF"
+hostile "config dir bob's group" "$SITE_CONFIG" "chgrp bob-grp $CONF"
+hostile "config dir group-writable" "$SITE_CONFIG" "chmod 0770 $CONF"
+hostile "config dir tp-owned" "$SITE_CONFIG" "chown tp $CONF"
 hostile "php/ swapped by tp" "$CONF" "mv /etc/turbopanel/php /etc/turbopanel/php.old && runuser -u tp -- mkdir -p $CONF"
 hostile "sites/ tp-owned" "$CONF" "chown tp /etc/turbopanel/php/sites"
 hostile "config root a symlink" "$CONF" "mv /etc/turbopanel /etc/tp-real && ln -s tp-real /etc/turbopanel"
-hostile "php.ini missing" "site php.ini" "rm $CONF/php.ini"
-hostile "php.ini a symlink" "site php.ini" "mv $CONF/php.ini $CONF/real.ini && ln -s real.ini $CONF/php.ini"
-hostile "php.ini group-writable" "site php.ini" "chmod 0660 $CONF/php.ini"
-hostile "php.ini tp-owned" "site php.ini" "chown tp $CONF/php.ini"
+hostile "php.ini missing" "$SITE_INI" "rm $CONF/php.ini"
+hostile "php.ini a symlink" "$SITE_INI" "mv $CONF/php.ini $CONF/real.ini && ln -s real.ini $CONF/php.ini"
+hostile "php.ini group-writable" "$SITE_INI" "chmod 0660 $CONF/php.ini"
+hostile "php.ini tp-owned" "$SITE_INI" "chown tp $CONF/php.ini"
 rm -rf /etc/tp-real
 
 # --- stdin ----------------------------------------------------------------------
@@ -314,10 +342,10 @@ hostile "stdin tcp" "stdin not AF_UNIX" ":" tcp -- "$LAUNCH" lsapi "$SITE"
 B="$VENDOR/8.4/8.4.25/bin/lsphp"
 hostile "current escapes" "$VENDOR/8.4/current/bin/lsphp" "ln -sfn ../../x $VENDOR/8.4/current"
 hostile "current absolute" "$VENDOR/8.4/current/bin/lsphp" "ln -sfn /bin $VENDOR/8.4/current"
-hostile "binary group-writable" "lsphp binary" "chmod 0770 $B"
-hostile "binary setuid" "lsphp binary" "chmod 4750 $B"
-hostile "binary not root's" "lsphp binary" "chown tpols $B"
-hostile "binary is a symlink" "lsphp binary" "mv $B $B.real && ln -s lsphp.real $B"
+hostile "binary group-writable" "$LSPHP_BINARY" "chmod 0770 $B"
+hostile "binary setuid" "$LSPHP_BINARY" "chmod 4750 $B"
+hostile "binary not root's" "$LSPHP_BINARY" "chown tpols $B"
+hostile "binary is a symlink" "$LSPHP_BINARY" "mv $B $B.real && ln -s lsphp.real $B"
 hostile "bin dir writable" "$VENDOR/8.4/current/bin/lsphp" "chmod 0770 $VENDOR/8.4/8.4.25/bin"
 hostile "vendor not root's" "$VENDOR/8.4/current/bin/lsphp" "chown tpols /opt/turbopanel/vendor"
 

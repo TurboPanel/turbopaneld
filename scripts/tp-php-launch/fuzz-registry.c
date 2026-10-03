@@ -44,6 +44,9 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
 }
 
 #ifdef TP_FUZZ_STANDALONE
+#define MAX_SEEDS 64
+#define BUF_CAP (REG_MAX * 2)
+
 static uint64_t state = 0x9e3779b97f4a7c15ULL;
 static uint64_t next(void) {
   state ^= state << 13;
@@ -52,50 +55,81 @@ static uint64_t next(void) {
   return state;
 }
 
-int main(int argc, char **argv) {
-  static uint8_t seeds[64][REG_MAX + 64], buf[REG_MAX * 2];
-  static size_t lens[64];
-  int nseeds = 0;
-  long iterations = argc > 1 ? atol(argv[1]) : 100000;
-  for (int i = 2; i < argc && nseeds < 64; i++) {
+static size_t pick(size_t n) { return n ? (size_t)(next() % n) : 0; }
+
+static size_t delete_byte(uint8_t *buf, size_t len, size_t at) {
+  if (!len) return len;
+  memmove(buf + at, buf + at + 1, len - at - 1);
+  return len - 1;
+}
+
+static size_t insert_byte(uint8_t *buf, size_t len, size_t at) {
+  static const char INTERESTING[] = "=\n\r0-a/9";
+  if (len + 1 >= BUF_CAP) return len;
+  memmove(buf + at + 1, buf + at, len - at);
+  buf[at] = (uint8_t)INTERESTING[pick(sizeof INTERESTING)];
+  return len + 1;
+}
+
+/* Duplicate the span that starts at AT. */
+static size_t duplicate_span(uint8_t *buf, size_t len, size_t at) {
+  size_t n = pick(64);
+  if (at + n > len || len + n >= BUF_CAP) return len;
+  memmove(buf + at + n, buf + at, len - at);
+  return len + n;
+}
+
+/* One random edit; returns the new length. */
+static size_t mutate(uint8_t *buf, size_t len) {
+  size_t at = pick(len);
+  switch (next() % 6) {
+    case 0:
+      if (len) buf[at] = (uint8_t)next();
+      return len;
+    case 1:
+      if (len) buf[at] ^= (uint8_t)(1u << pick(8));
+      return len;
+    case 2:
+      return delete_byte(buf, len, at);
+    case 3:
+      return insert_byte(buf, len, at);
+    case 4:
+      return duplicate_span(buf, len, at);
+    default:
+      return pick(len + 1);
+  }
+}
+
+static int load_seeds(int argc, char **argv, uint8_t seeds[][REG_MAX + 64],
+                      size_t *lens) {
+  int n = 0;
+  for (int i = 2; i < argc && n < MAX_SEEDS; i++) {
     FILE *f = fopen(argv[i], "rb");
     if (!f) continue;
-    lens[nseeds] = fread(seeds[nseeds], 1, sizeof seeds[0], f);
+    lens[n] = fread(seeds[n], 1, REG_MAX + 64, f);
     fclose(f);
-    LLVMFuzzerTestOneInput(seeds[nseeds], lens[nseeds]);
-    nseeds++;
+    LLVMFuzzerTestOneInput(seeds[n], lens[n]);
+    n++;
   }
+  return n;
+}
+
+int main(int argc, char **argv) {
+  static uint8_t seeds[MAX_SEEDS][REG_MAX + 64];
+  static uint8_t buf[BUF_CAP];
+  static size_t lens[MAX_SEEDS];
+  long iterations = argc > 1 ? atol(argv[1]) : 100000;
+  int nseeds = load_seeds(argc, argv, seeds, lens);
   if (nseeds == 0) {
     fprintf(stderr, "fuzz-registry: no seed files\n");
     return 2;
   }
   for (long it = 0; it < iterations; it++) {
-    size_t s = (size_t)(next() % (uint64_t)nseeds), len = lens[s];
+    size_t s = pick((size_t)nseeds);
+    size_t len = lens[s];
+    size_t rounds = pick(8) + 1;
     memcpy(buf, seeds[s], len);
-    for (int m = (int)(next() % 8); m >= 0; m--) {
-      size_t at = len ? (size_t)(next() % len) : 0;
-      switch (next() % 6) {
-        case 0: if (len) buf[at] = (uint8_t)next(); break;
-        case 1: if (len) buf[at] ^= (uint8_t)(1u << (next() % 8)); break;
-        case 2: if (len) { memmove(buf + at, buf + at + 1, len - at - 1); len--; } break;
-        case 3:
-          if (len < sizeof buf - 1) {
-            memmove(buf + at + 1, buf + at, len - at);
-            buf[at] = "=\n\r0-a/9\0"[next() % 9];
-            len++;
-          }
-          break;
-        case 4: { /* duplicate a span */
-          size_t n = (size_t)(next() % 64);
-          if (at + n <= len && len + n < sizeof buf) {
-            memmove(buf + at + n, buf + at, len - at);
-            len += n;
-          }
-          break;
-        }
-        default: len = len ? (size_t)(next() % (len + 1)) : 0; break;
-      }
-    }
+    for (size_t m = 0; m < rounds; m++) len = mutate(buf, len);
     LLVMFuzzerTestOneInput(buf, len);
   }
   printf("fuzz-registry: %ld iterations, no crash or invariant violation\n",

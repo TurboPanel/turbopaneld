@@ -68,26 +68,6 @@
       {{ php_launch_group }} must hold only {{ php_launch_caller }}; it holds
       {{ ansible_facts.getent_group[php_launch_group][2] }}.
 
-- name: Check the registry directory is not a symlink
-  ansible.builtin.stat:
-    path: "{{ php_launch_registry_dir }}"
-    follow: false
-  register: _php_launch_registry
-
-- name: Refuse a symlinked registry directory
-  ansible.builtin.assert:
-    that:
-      - not (_php_launch_registry.stat.islnk | default(false))
-    fail_msg: "{{ php_launch_registry_dir }} is a symlink."
-
-- name: Ensure the root-owned launcher registry directory
-  ansible.builtin.file:
-    path: "{{ php_launch_registry_dir }}"
-    state: directory
-    owner: root
-    group: root
-    mode: "0755"
-
 - name: Install tp-php-launch
   ansible.builtin.copy:
     src: "tp-php-launch-{{ _php_launch_arch }}"

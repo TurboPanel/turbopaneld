@@ -1,10 +1,12 @@
 /*
  * Test stand-in for lsphp: records the process state tp-php-launch handed it
  * in /tmp/tp-php-launch-report (the owner's tmp/, if the bind mount worked),
- * one key=value per line, then exits 0.
+ * one key=value per line, then exits 0. SITE_INI (-DSITE_INI="...") is the
+ * php.ini the launcher should have made readable.
  */
 #define _GNU_SOURCE
 #include <dirent.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -13,15 +15,33 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#ifndef SITE_INI
+#define SITE_INI "/etc/turbopanel/php/sites/shop-1/php.ini"
+#endif
+
 extern char **environ;
 
-static void status_lines(FILE *out) {
+/* NoNewPrivs, Umask and the capability sets, as numbers. */
+static void status_fields(FILE *out) {
+  static const char *const FIELDS[] = {"NoNewPrivs", "Umask", "CapPrm",
+                                       "CapEff", "CapAmb"};
   char line[256];
   FILE *f = fopen("/proc/self/status", "r");
   if (!f) return;
-  while (fgets(line, sizeof line, f))
-    if (!strncmp(line, "NoNewPrivs:", 11) || !strncmp(line, "Cap", 3))
-      fprintf(out, "status.%s", line);
+  while (fgets(line, sizeof line, f)) {
+    for (size_t i = 0; i < sizeof FIELDS / sizeof FIELDS[0]; i++) {
+      size_t n = strlen(FIELDS[i]);
+      unsigned long long v = 0;
+      if (strncmp(line, FIELDS[i], n) != 0 || line[n] != ':') continue;
+      if (i == 1) {
+        v = strtoull(line + n + 1, NULL, 8);
+        fprintf(out, "status.%s=%03llo\n", FIELDS[i], v);
+      } else {
+        v = strtoull(line + n + 1, NULL, 16);
+        fprintf(out, "status.%s=%llx\n", FIELDS[i], v);
+      }
+    }
+  }
   fclose(f);
 }
 
@@ -29,24 +49,47 @@ static void fd_lines(FILE *out) {
   DIR *d = opendir("/proc/self/fd");
   struct dirent *e;
   if (!d) return;
-  while ((e = readdir(d)))
-    if (e->d_name[0] != '.' && atoi(e->d_name) != dirfd(d) &&
-        atoi(e->d_name) != fileno(out))
-      fprintf(out, "fd=%s\n", e->d_name);
+  e = readdir(d);
+  while (e) {
+    int fd = atoi(e->d_name);
+    if (e->d_name[0] != '.' && fd != dirfd(d) && fd != fileno(out))
+      fprintf(out, "fd=%d\n", fd);
+    e = readdir(d);
+  }
   closedir(d);
 }
 
+static void config_view(FILE *out) {
+  struct stat st;
+  int ini = open(SITE_INI, O_RDONLY);
+  fprintf(out, "ini.readable=%d\n", ini >= 0);
+  if (ini >= 0) close(ini);
+  fprintf(out, "etc_turbopanel.secrets=%d\n",
+          stat("/etc/turbopanel/secrets", &st) == 0);
+  fprintf(out, "etc_turbopanel.writable=%d\n",
+          access("/etc/turbopanel/php", W_OK) == 0);
+}
+
 int main(int argc, char **argv) {
-  uid_t r, e, s;
-  gid_t rg, eg, sg, groups[64];
-  int n, v = 0;
+  uid_t r;
+  uid_t e;
+  uid_t s;
+  gid_t rg;
+  gid_t eg;
+  gid_t sg;
+  gid_t groups[64];
+  int n;
+  int v = 0;
   socklen_t l = sizeof v;
-  mode_t mask = umask(0);
   struct rlimit core;
   char cwd[256];
   FILE *out;
-  umask(mask);
-  out = fopen("/tmp/tp-php-launch-report", "w");
+  int root = open("/", O_RDONLY | O_DIRECTORY);
+  int fd = openat(root, "tmp/tp-php-launch-report",
+                  O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0600);
+  close(root);
+  if (fd < 0) return 3;
+  out = fdopen(fd, "w");
   if (!out) return 3;
   getresuid(&r, &e, &s);
   getresgid(&rg, &eg, &sg);
@@ -57,23 +100,12 @@ int main(int argc, char **argv) {
   for (char **p = environ; *p; p++) fprintf(out, "env=%s\n", *p);
   getsockopt(0, SOL_SOCKET, SO_ACCEPTCONN, &v, &l);
   fprintf(out, "stdin.listening=%d\n", v);
-  fprintf(out, "umask=%03o\n", mask);
   getrlimit(RLIMIT_CORE, &core);
   fprintf(out, "rlimit.core=%llu\n", (unsigned long long)core.rlim_cur);
   fprintf(out, "cwd=%s\n", getcwd(cwd, sizeof cwd) ? cwd : "?");
   fprintf(out, "setuid0=%d\n", setuid(0));
-  {
-    const char *rc = getenv("PHPRC");
-    FILE *ini = rc ? fopen(rc, "r") : NULL;
-    DIR *d = opendir("/etc/turbopanel");
-    struct dirent *de;
-    fprintf(out, "phprc.readable=%d\n", ini != NULL);
-    if (ini) fclose(ini);
-    while (d && (de = readdir(d)))
-      if (de->d_name[0] != '.') fprintf(out, "etc_turbopanel=%s\n", de->d_name);
-    if (d) closedir(d);
-  }
-  status_lines(out);
+  config_view(out);
+  status_fields(out);
   fd_lines(out);
   fclose(out);
   return 0;

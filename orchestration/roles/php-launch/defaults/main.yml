@@ -9,8 +9,8 @@ php_launch_group: tpphplaunch
 php_launch_gid: 9981
 php_launch_caller: tpols
 php_launch_dest: "{{ turbopanel_install_root | default('/opt/turbopanel') }}/lib/tp-php-launch"
-# Written only by `tp-host php-site-register`; root-owned and outside the
-# tp-owned /etc/turbopanel. The launcher hardcodes this path.
+# Created and written only by `tp-host php-site-register` (root:root 0755,
+# outside the tp-owned /etc/turbopanel). The launcher hardcodes this path.
 php_launch_registry_dir: /etc/turbopanel-php-sites
 php_launch_arch_map:
   x86_64: amd64
@@ -19,5 +19,5 @@ php_launch_arch_map:
 # (scripts/build-tp-php-launch.sh fails the release bundle on a mismatch; run
 # it with --print after a source change and update both pins in the same PR).
 php_launch_sha256:
-  amd64: "c2c04ed4ddb3b5a57ba08063a7e792b4e653645b86ebb28b9a66b26ba44cbe43"
-  arm64: "8941761c0b4beb01f67ce9b7b448a6a82b85a5459b34237c45009676ae73592e"
+  amd64: "93a69633acf0f867f8867be27131eeb9fa71fb7306035342f63e0774f1373ea3"
+  arm64: "ee251c818cd69e73fe344d5536912844c816c0f0efef9d79e96c66587be52c23"
