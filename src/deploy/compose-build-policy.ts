@@ -28,6 +28,7 @@
  */
 
 import { isAbsolute, normalize, resolve } from "@std/path";
+import { describeUnknown } from "../util/describe-unknown.ts";
 
 export type BuildPolicyCode =
   | "build_network_refused"
@@ -72,7 +73,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function ipv4Bytes(value: string): number[] | null {
   const parts = value.split(".");
   if (parts.length !== 4) return null;
-  const bytes = parts.map((p) => (/^\d{1,3}$/.test(p) ? Number(p) : NaN));
+  const bytes = parts.map((
+    p,
+  ) => (/^\d{1,3}$/.test(p) ? Number(p) : Number.NaN));
   return bytes.every((b) => b >= 0 && b <= 255) ? bytes : null;
 }
 
@@ -89,7 +92,7 @@ function hextetBytes(groups: string[]): number[] | null {
 /** Hextet groups with an embedded IPv4 tail turned into two hextets. */
 function withIpv4Tail(groups: string[]): string[] | null {
   const last = groups.at(-1);
-  if (last === undefined || !last.includes(".")) return groups;
+  if (!last?.includes(".")) return groups;
   const v4 = ipv4Bytes(last);
   if (v4 === null) return null;
   return [
@@ -211,12 +214,12 @@ function checkPrivileges(
   const { network, privileged, entitlements } = build;
   if (
     network !== undefined && network !== null &&
-    !ALLOWED_BUILD_NETWORKS.has(String(network))
+    !(typeof network === "string" && ALLOWED_BUILD_NETWORKS.has(network))
   ) {
     refuse(
       ctx,
       "build_network_refused",
-      `service ${name} build network \`${String(network)}\``,
+      `service ${name} build network \`${describeUnknown(network)}\``,
       "is refused: only `default` and `none` keep the build off the host network",
     );
   }
@@ -296,7 +299,9 @@ function checkSecrets(ctx: Ctx, name: string, secrets: unknown): void {
       refuse(
         ctx,
         "build_secret_outside_project",
-        `service ${name} build secret \`${source}\` file \`${String(file)}\``,
+        `service ${name} build secret \`${source}\` file \`${
+          describeUnknown(file)
+        }\``,
         "is outside the deployment directory",
       );
     }
@@ -318,7 +323,7 @@ function extraHostEntries(value: unknown): HostEntry[] {
   if (!isRecord(value)) return [];
   return Object.entries(value).flatMap(([host, ips]) =>
     (Array.isArray(ips) ? ips : [ips]).map((ip) => ({
-      label: `${host}=${String(ip)}`,
+      label: `${host}=${describeUnknown(ip)}`,
       ip,
     }))
   );
