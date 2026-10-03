@@ -359,6 +359,22 @@ if not isinstance(doc, dict) or not doc:
     sys.exit(1)
 if any(k not in allowed for k in doc):
     sys.exit(1)
+# The PHP series and extension names become apt package names
+# (php<series>-<extension>=<version>): a name here is a package, never an apt
+# option, a version pin or a second package.
+series = re.compile(r"[0-9]\.[0-9]{1,2}")
+ext = re.compile(r"[a-z0-9][a-z0-9.+-]{0,31}")
+versions = doc.get("php_fpm_versions", [])
+if not (isinstance(versions, list) and all(isinstance(x, str) and series.fullmatch(x) for x in versions)):
+    sys.exit(1)
+exts = doc.get("php_fpm_extensions", {})
+if not isinstance(exts, dict):
+    sys.exit(1)
+for k, names in exts.items():
+    if not series.fullmatch(k) or not isinstance(names, list):
+        sys.exit(1)
+    if not all(isinstance(x, str) and ext.fullmatch(x) for x in names):
+        sys.exit(1)
 sys.exit(0 if all(leaf_ok(v) for v in doc.values()) else 1)
 ' "$_jv"
 }
