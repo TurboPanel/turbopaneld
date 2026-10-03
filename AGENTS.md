@@ -753,9 +753,7 @@ it regresses:
     section is `[PATH=<owner home>]`, the locked limits; php-fpm pools take
     `listen.acl_users`, never `user`/`group`/`listen.group`);
     `php-test <siteId>` runs the installed unit's binary on that config as
-    the owner, and `php-site-register` writes the attached-lsphp launcher's
-    registry (`/etc/turbopanel/php-sites/<siteId>`, root:root, this verb
-    only). daemon-install's tp:tp pass over the config tree skips both;
+    the owner. daemon-install's tp:tp pass over the config tree skips it;
   - changes only principal accounts (uid ≥ 15001, `<name>-grp`, home under
     the principal root, a listed shell), adds principals only to groups
     `runtime-registry.json` defines and engine accounts only to principal
