@@ -52,6 +52,21 @@
       - node_app_resolved_version | length > 0
     fail_msg: "no Node release found for series {{ node_app_series }}"
 
+- name: Require a pinned corepack digest
+  ansible.builtin.assert:
+    that:
+      - corepack_version in corepack_sha256
+      - corepack_sha256[corepack_version] | length == 64
+
+- name: Download corepack {{ corepack_version }} tarball (SHA-256 verified)
+  ansible.builtin.get_url:
+    url: "https://registry.npmjs.org/corepack/-/corepack-{{ corepack_version }}.tgz"
+    dest: "{{ node_app_root }}/corepack-{{ corepack_version }}.tgz"
+    checksum: "sha256:{{ corepack_sha256[corepack_version] }}"
+    owner: root
+    group: root
+    mode: "0600"
+
 # The installer lives in files/ so this task has no inline shell. Ansible 2.20
 # rejects a `shell: |` block that mixes Jinja `{{ }}` with nested quotes
 # (readlink) or backticks in comments — parse error, exit 4, no task runs.
@@ -66,6 +81,7 @@
     NODE_APP_RESOLVED: "{{ node_app_resolved_version }}"
     NODE_APP_GROUP: "{{ node_app_series_group }}"
     NODE_APP_SERIES_DIR: "{{ node_app_root }}/{{ node_app_series }}"
+    NODE_APP_COREPACK_TGZ: "{{ node_app_root }}/corepack-{{ corepack_version }}.tgz"
   register: _node_app_install
   changed_when: "'turbopanel-' in _node_app_install.stdout"
 
