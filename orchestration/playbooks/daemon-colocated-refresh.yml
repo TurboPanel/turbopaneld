@@ -27,6 +27,10 @@
     turbopanel_daemon_exec_mode: native
     turbopanel_service_name: turbopaneld
     turbopanel_user: tp
+    # The control plane shares the state root with the daemon on this host (the
+    # install wizard hands the license over through it), so it stays tp-owned
+    # here; the config root is sealed everywhere (P1-1, owner question Q2).
+    turbopanel_seal_state_root: false
     turbopanel_group: tp
     # Socket mode. A non-empty URL would make the daemon dial HTTPS instead of
     # /run/turbopanel/instance.sock.

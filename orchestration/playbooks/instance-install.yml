@@ -87,6 +87,10 @@
     # (native | js) and the binary paths; the binary and orchestration tree
     # are already under the install root — they carried this play.
     turbopanel_daemon_state_dir: "{{ turbopanel_state_dir }}"
+    # The control plane shares the state root with the daemon on this host (the
+    # install wizard hands the license over through it), so it stays tp-owned
+    # here; the config root is sealed everywhere (P1-1, owner question Q2).
+    turbopanel_seal_state_root: false
     turbopanel_daemon_env_file: "{{ turbopanel_config_dir }}/daemon.env"
     turbopanel_daemon_bin: "{{ turbopanel_install_root }}/bin/turbopaneld"
     turbopanel_daemon_js: "{{ turbopanel_install_root }}/bin/turbopaneld.js"

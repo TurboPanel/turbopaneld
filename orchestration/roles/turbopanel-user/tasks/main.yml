@@ -56,18 +56,24 @@
 # The mutable FHS dirs (config, state, logs, backups) belong to the resolved
 # identity — the dev user in co-located dev, the service account on managed
 # hosts.
+# The config and state roots and the log directory are root-owned on managed
+# hosts (P1-1); only the backup root stays the daemon's (it creates a folder
+# per managed engine in it and an operator may mount storage there).
 - name: Ensure FHS state directories
   ansible.builtin.file:
-    path: "{{ item }}"
+    path: "{{ item.path }}"
     state: directory
-    owner: "{{ turbopanel_user }}"
+    owner: "{{ item.owner }}"
     group: "{{ turbopanel_group }}"
     mode: "0750"
+    follow: false
   loop:
-    - /etc/turbopanel
-    - /var/lib/turbopanel
-    - /var/log/turbopanel
-    - "{{ turbopanel_backup_dir }}"
+    - { path: /etc/turbopanel, owner: "{{ turbopanel_config_root_owner }}" }
+    - { path: /var/lib/turbopanel, owner: "{{ turbopanel_state_root_owner }}" }
+    - { path: /var/log/turbopanel, owner: "{{ turbopanel_config_root_owner }}" }
+    - { path: "{{ turbopanel_backup_dir }}", owner: "{{ turbopanel_user }}" }
+  loop_control:
+    label: "{{ item.path }}"
 
 # The narrow vendor cache the daemon process writes at runtime — nothing it
 # is launched from, nothing root later executes. Keep in step with
