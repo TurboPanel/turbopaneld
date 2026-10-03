@@ -142,10 +142,17 @@ an `owner-unknown` finding.
 **Signed approvals** (`approval.ts`). Host-level Compose features cannot rest on
 the daemon's own `hostLevelApproved` flag (the daemon account sets it). The
 control plane signs, the gate verifies with a public key. Token = container
-label `com.turbopanel.approval` = `v1.<b64url payload>.<b64url sig>`; the
-signature covers `turbopanel-docker-gate-approval-v1\n` + the payload text.
+label `com.turbopanel.approval` = `v2.<b64url payload>.<b64url sig>`; the
+signature covers `turbopanel-docker-gate-approval-v2\n` + the payload text.
 Payload: `deployId`, `project`, `composeDigest` (audit only: the gate never sees
-the compose file), `features[]`, `iat`, `exp` (seconds). The gate checks the
+the compose file), `bodyDigest`, `features[]`, `iat`, `exp` (seconds). `bodyDigest`
+binds the token to ONE create body: base64url SHA-256 of the RFC 8785 canonical JSON of the body AS THE CLIENT SENT IT
+(a plain `JSON.parse` of the payload: field names as written, never the strict parser's canonical spelling, so no gate
+version shifts it), with the `com.turbopanel.approval` label removed. A different body is `rejected: wrong-body`; a v1
+token (no binding) is `unsupported-version`. `jti` makes a token single-use: an accepted id is remembered until its
+`exp` and a second use is `rejected: replayed` (memory is per gate process; at most 10 000 ids, beyond which new tokens
+are refused). The signer therefore has to sign the final create body Compose sends; the signer is not built, so that is
+its design constraint. The gate checks the
 signature (any trusted key: one raw base64url Ed25519 key per line, so rotation
 can overlap), `exp` not past, `iat` at most 60 s ahead, a lifetime of at most
 900 s, and `project` equal to the container's `com.docker.compose.project`.
@@ -161,8 +168,7 @@ every token is `rejected: approvals-off` and findings stand. The key lives
 root-owned in `<install>/lib/docker-gate/approval.pub`, never under
 `/etc/turbopanel` or `/run/turbopanel` (the daemon could swap it there). An
 unreadable key file turns approvals off with an error line; the gate keeps
-serving. Replay of a still-valid token by the daemon only repeats the same
-relaxation for the same project until `exp`. `docker-socket` is approvable
+serving. A token covers one create of one body in one project, once. `docker-socket` is approvable
 because the owner asked for it; plan finding B wanted socket mounts forbidden
 outright, so delete that one line in `APPROVABLE_RULES` to forbid it. The signer
 (control plane) is not built yet; tests sign with a key generated at run time.
@@ -326,6 +332,19 @@ Break-glass at every stage: `systemctl stop turbopanel-docker-gate` as root.
 - The label-less helpers (managed-file normalisation, **backup and restore**)
   would be denied until the daemon stamps a platform label on them: backups and
   restores stop working. This is the most critical gap to close before stage 4.
+
+## Ownership scope
+
+`unowned-container` / `unowned-volume` / `unowned-network` only say that a target carries none of a Compose project,
+a TurboPanel label or `tp.managed.engine`; a target whose labels cannot be read (gone, engine error, odd name) is
+`owner-unknown` (fail closed). A tenant deploy may not set the platform's owner labels at all (`turbopanel.role`,
+`com.turbopanel.system.*`, `tp.*`, the approval label): `src/deploy/compose-reserved-labels.ts` refuses the deploy
+before `compose up`. They are observations, not a boundary: any caller can add a compose-project
+label, and the gate cannot tell which tenant or project the daemon is acting for (the daemon account is the only client).
+Checked routes: container start/stop/restart/kill/pause/unpause/rename/update/exec/attach/archive/wait/resize/export and
+remove, volume and network remove, and network connect/disconnect (one engine inspect each). Polled reads (stats, logs,
+top, changes) are not checked on purpose: they would double the engine traffic. Real scoping needs the control plane to
+sign a per-project scope on non-create requests too; that is not built.
 
 ## Container-create breadth (deny by default)
 

@@ -10,12 +10,22 @@
  * private key anywhere in this tree.
  *
  * Wire format (a container label, because Compose cannot add HTTP headers):
- *   `com.turbopanel.approval` = `v1.<base64url(payload JSON)>.<base64url(signature)>`
+ *   `com.turbopanel.approval` = `v2.<base64url(payload JSON)>.<base64url(signature)>`
  * The signature covers `DOMAIN + <base64url(payload)>` (the exact text, so no
  * re-serialisation question). Payload:
- *   { deployId, project, composeDigest, features[], iat, exp }  (seconds)
+ *   { deployId, project, composeDigest, bodyDigest, jti, features[], iat, exp }  (seconds)
  * `composeDigest` is recorded in the audit line but is NOT checked: the gate
- * never sees the compose file.
+ * never sees the compose file. `bodyDigest` IS checked: it binds the token to
+ * one container-create body, so a still-valid token cannot be replayed on a
+ * different create of the same project. It is the base64url (no padding)
+ * SHA-256 of the RFC 8785 (JCS) canonical JSON of the create body AS THE
+ * CLIENT SENT IT (a plain JSON.parse of the payload: field names exactly as
+ * written, never the strict parser's canonical spelling, so no gate version
+ * changes it) with the `com.turbopanel.approval` label removed (the token
+ * cannot cover itself). `jti` makes a token single-use: the gate remembers
+ * every accepted one until its `exp` and refuses it again as `replayed` (the
+ * memory is per gate process: a gate restart forgets, bounded by `exp`). A v1
+ * token (no body binding) is refused as `unsupported-version`.
  *
  * Dependency-free on purpose (see http.ts): WebCrypto only.
  */
@@ -23,9 +33,9 @@
 import type { Violation } from "./policy.ts";
 
 export const APPROVAL_LABEL = "com.turbopanel.approval";
-export const APPROVAL_VERSION = "v1";
+export const APPROVAL_VERSION = "v2";
 /** Domain separation: a signature over anything else never verifies here. */
-export const APPROVAL_DOMAIN = "turbopanel-docker-gate-approval-v1\n";
+export const APPROVAL_DOMAIN = "turbopanel-docker-gate-approval-v2\n";
 export const MAX_APPROVAL_TTL_SEC = 900;
 export const APPROVAL_CLOCK_SKEW_SEC = 60;
 export const MAX_APPROVAL_TOKEN_BYTES = 4096;
@@ -51,6 +61,10 @@ export type ApprovalPayload = {
   deployId: string;
   project: string;
   composeDigest: string;
+  /** Base64url SHA-256 of the canonical create body (see the file header). */
+  bodyDigest: string;
+  /** Unique token id: an accepted token is never accepted again. */
+  jti: string;
   features: string[];
   iat: number;
   exp: number;
@@ -59,6 +73,51 @@ export type ApprovalPayload = {
 export type ApprovalResult =
   | { ok: true; payload: ApprovalPayload }
   | { ok: false; reason: string; deployId?: string; project?: string };
+
+function toBase64Url(bytes: Uint8Array): string {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCodePoint(byte);
+  // `=` only ever appears as trailing padding in base64.
+  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replaceAll(
+    "=",
+    "",
+  );
+}
+
+/**
+ * RFC 8785 canonical JSON of a parsed body: object keys sorted by UTF-16 code
+ * unit, no whitespace, ECMAScript number and string serialisation. Bodies the
+ * gate parsed hold only JSON values, so nothing else needs handling.
+ */
+export function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (typeof value === "object" && value !== null) {
+    // `<` and `>` compare UTF-16 code units, the order RFC 8785 asks for.
+    const byCodeUnit = (a: string, b: string) => Number(a > b) - Number(a < b);
+    const members = Object.keys(value).sort(byCodeUnit).map((key) =>
+      `${JSON.stringify(key)}:${
+        canonicalJson((value as Record<string, unknown>)[key])
+      }`
+    );
+    return `{${members.join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
+/** The `bodyDigest` an approval for this create body must carry. */
+export async function approvalBodyDigest(body: unknown): Promise<string> {
+  const copy = structuredClone(body);
+  if (typeof copy === "object" && copy !== null) {
+    const labels = (copy as Record<string, unknown>).Labels;
+    if (typeof labels === "object" && labels !== null) {
+      delete (labels as Record<string, unknown>)[APPROVAL_LABEL];
+    }
+  }
+  const bytes = new TextEncoder().encode(canonicalJson(copy));
+  return toBase64Url(
+    new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)),
+  );
+}
 
 function fromBase64Url(text: string): Uint8Array | undefined {
   if (!/^[A-Za-z0-9_-]*$/.test(text)) return undefined;
@@ -70,6 +129,9 @@ function fromBase64Url(text: string): Uint8Array | undefined {
     return undefined;
   }
 }
+
+/** Unpadded base64url of 32 bytes. */
+const DIGEST = /^[A-Za-z0-9_-]{43}$/;
 
 function isShortString(value: unknown, max: number): value is string {
   return typeof value === "string" && value.length > 0 && value.length <= max;
@@ -90,7 +152,9 @@ function parsePayload(bytes: Uint8Array): ApprovalPayload | undefined {
   const timesOk = Number.isSafeInteger(p.iat) && Number.isSafeInteger(p.exp);
   if (
     !featuresOk || !timesOk || !isShortString(p.deployId, 128) ||
-    !isShortString(p.project, 128) || typeof p.composeDigest !== "string"
+    !isShortString(p.project, 128) || typeof p.composeDigest !== "string" ||
+    typeof p.bodyDigest !== "string" || !DIGEST.test(p.bodyDigest) ||
+    !isShortString(p.jti, 128)
   ) {
     return undefined;
   }
@@ -98,6 +162,8 @@ function parsePayload(bytes: Uint8Array): ApprovalPayload | undefined {
     deployId: p.deployId,
     project: p.project,
     composeDigest: p.composeDigest.slice(0, 128),
+    bodyDigest: p.bodyDigest,
+    jti: p.jti,
     features: features as string[],
     iat: p.iat as number,
     exp: p.exp as number,
@@ -152,24 +218,27 @@ async function signatureValid(
 function claimsFailure(
   payload: ApprovalPayload,
   project: string,
+  bodyDigest: string,
   nowSec: number,
 ): string | undefined {
   if (payload.exp <= nowSec) return "expired";
   if (payload.iat > nowSec + APPROVAL_CLOCK_SKEW_SEC) return "not-yet-valid";
   if (payload.exp - payload.iat > MAX_APPROVAL_TTL_SEC) return "ttl-too-long";
   if (payload.project !== project) return "wrong-project";
+  if (payload.bodyDigest !== bodyDigest) return "wrong-body";
   if (payload.features.length === 0) return "no-features";
   return undefined;
 }
 
 /**
- * Check one token against the trusted keys, the container's Compose project
- * and the clock (seconds). Never throws; the reason is a short stable code.
+ * Check one token against the trusted keys, the container's Compose project,
+ * the digest of the create body it arrived on and the clock (seconds). Never throws; the reason is a short stable code.
  */
 export async function verifyApproval(
   token: string,
   keys: readonly CryptoKey[],
   project: string,
+  bodyDigest: string,
   nowSec: number,
 ): Promise<ApprovalResult> {
   if (keys.length === 0) return { ok: false, reason: "approvals-off" };
@@ -188,7 +257,7 @@ export async function verifyApproval(
   }
   const payload = parsePayload(payloadBytes);
   if (!payload) return { ok: false, reason: "malformed" };
-  const failure = claimsFailure(payload, project, nowSec);
+  const failure = claimsFailure(payload, project, bodyDigest, nowSec);
   if (failure) {
     return {
       ok: false,
@@ -198,6 +267,25 @@ export async function verifyApproval(
     };
   }
   return { ok: true, payload };
+}
+
+/** Most token ids remembered at once; beyond it new tokens are refused. */
+export const MAX_REMEMBERED_APPROVALS = 10_000;
+
+/** Ids of accepted tokens, each kept until its `exp` (single-use tokens). */
+export class ReplayCache {
+  readonly #seen = new Map<string, number>();
+
+  /** True the first time `jti` is claimed before `exp`; false on any reuse. */
+  claim(jti: string, exp: number, nowSec: number): boolean {
+    for (const [id, until] of this.#seen) {
+      if (until <= nowSec) this.#seen.delete(id);
+    }
+    if (this.#seen.has(jti)) return false;
+    if (this.#seen.size >= MAX_REMEMBERED_APPROVALS) return false;
+    this.#seen.set(jti, exp);
+    return true;
+  }
 }
 
 export type ApprovalSplit = {

@@ -1,5 +1,6 @@
 import { buildStorageVolumesFragment } from "../deploy/apply-storage-volumes.ts";
 import { buildHostingLabelsFragment } from "../deploy/compose-labels.ts";
+import { assertNoReservedOwnerLabels } from "../deploy/compose-reserved-labels.ts";
 import { encodeHex } from "@std/encoding/hex";
 import { join } from "@std/path";
 import {
@@ -1523,6 +1524,9 @@ async function deployContainerServices(
       [stagedPath],
       run,
     );
+    // A tenant compose never carries the labels that mark the platform's own
+    // containers (the Docker gate trusts them); refuse before anything runs.
+    assertNoReservedOwnerLabels(resolved.document ?? {});
     // The control plane's host-level gate is lexical; only the host can see
     // where a bind source really resolves. `hostLevelApproved` (absent reads
     // false) lets absolute and Docker-socket sources through; it never
