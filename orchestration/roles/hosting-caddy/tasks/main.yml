@@ -175,7 +175,7 @@
     dest: /etc/systemd/system/turbopanel-ingress-guard.service
     owner: root
     group: root
-    mode: "0644"
+    mode: "0640"
   register: _ingress_guard_unit
 
 # docker.service refuses to start without the guard table (fails closed), with
@@ -186,7 +186,7 @@
     state: directory
     owner: root
     group: root
-    mode: "0755"
+    mode: "0750"
 
 - name: Install the Docker ingress guard drop-in
   ansible.builtin.template:
@@ -194,7 +194,7 @@
     dest: /etc/systemd/system/docker.service.d/turbopanel-ingress-guard.conf
     owner: root
     group: root
-    mode: "0644"
+    mode: "0640"
   register: _ingress_guard_dropin
 
 - name: Enable and start the ingress guard
