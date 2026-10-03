@@ -664,6 +664,24 @@ function assertPrincipalIdOverrides(principal: PrincipalEnsureSpec): void {
   }
 }
 
+/**
+ * A principal holds at most one SSH access level. `sshd` applies the first
+ * `Match Group` block that fits, so an account in both `tpsftp` and `tpshell`
+ * would get whichever block happens to come first (jailed with no shell, once
+ * SFTP is chrooted). The password group is a credential, not a level, and
+ * combines with either.
+ */
+function assertSingleAccessLevel(principal: PrincipalEnsureSpec): void {
+  const requested = new Set(principal.accessGroups ?? []);
+  const sftp = accessGroup("sftp");
+  const shell = accessGroup("shell");
+  if (sftp && shell && requested.has(sftp) && requested.has(shell)) {
+    throw new TypeError(
+      `${principal.username}: SSH access groups ${sftp} and ${shell} are exclusive`,
+    );
+  }
+}
+
 export async function ensureSystemPrincipals(
   layout: LayoutPaths,
   principals: PrincipalEnsureSpec[],
@@ -671,6 +689,7 @@ export async function ensureSystemPrincipals(
 ): Promise<void> {
   for (const principal of principals) {
     assertPrincipalIdOverrides(principal);
+    assertSingleAccessLevel(principal);
   }
   await forEachSequential(
     principals,
@@ -743,7 +762,9 @@ async function ensureOnePrincipal(
  * of them, so a third name is a control-plane bug, and inventing the group
  * would hand out an `sshd` Match block nobody wrote.
  */
-function resolveManagedGroups(principal: PrincipalEnsureSpec): Set<string> {
+export function resolveManagedGroups(
+  principal: PrincipalEnsureSpec,
+): Set<string> {
   const groups = new Set<string>();
   for (const entry of principal.runtimes ?? []) {
     if (!isRuntimeName(entry.runtime)) continue;
@@ -753,6 +774,15 @@ function resolveManagedGroups(principal: PrincipalEnsureSpec): Set<string> {
   const known = allAccessGroups();
   for (const group of principal.accessGroups ?? []) {
     if (known.has(group)) groups.add(group);
+  }
+  // The password group is additive: its sshd block sets only
+  // `PasswordAuthentication yes` and comes first, so on its own it would
+  // sign in an account with no level and a full shell. Without a level the
+  // group is never granted, and the reconcile revokes one already held.
+  const password = accessGroup("password");
+  const levels = [accessGroup("sftp"), accessGroup("shell")];
+  if (password && !levels.some((level) => level && groups.has(level))) {
+    groups.delete(password);
   }
   // Every principal, whatever the wire says about its level. This group is
   // what the drop-in's backstop `Match` selects on; an account outside it with
@@ -876,6 +906,14 @@ export async function ensurePrincipalManagedGroups(
   const sorted = (values: Iterable<string>) =>
     [...values].sort((a, b) => a.localeCompare(b));
 
+  // Revoke before granting, so a switch between access levels never leaves
+  // the account in both groups at once.
+  await forEachSequential(sorted(current), async (group) => {
+    // Never touch a group outside the registry, even if it looks like ours.
+    if (!registryGroups.has(group) || desiredGroups.has(group)) return;
+    await removeSupplementaryGroupMembership(username, group, runFn);
+  });
+
   await forEachSequential(sorted(desiredGroups), async (group) => {
     if (current.has(group)) return;
     try {
@@ -889,12 +927,6 @@ export async function ensurePrincipalManagedGroups(
         }`,
       );
     }
-  });
-
-  await forEachSequential(sorted(current), async (group) => {
-    // Never touch a group outside the registry, even if it looks like ours.
-    if (!registryGroups.has(group) || desiredGroups.has(group)) return;
-    await removeSupplementaryGroupMembership(username, group, runFn);
   });
 }
 

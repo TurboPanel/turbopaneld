@@ -3,9 +3,13 @@ import {
   buildMetricsSample,
   clampPercent,
   isHardwareHealthEventKind,
+  isMetricsWireVersion,
+  MAX_METRICS_TEXT_LENGTH,
   METRIC_EVENT_KINDS,
   type MetricEvent,
+  METRICS_LEGACY_WIRE_VERSION,
   METRICS_SCHEMA_VERSION,
+  METRICS_WIRE_VERSIONS,
   type MetricsSampleInput,
   sanitizeFinite,
   storageEngineFieldName,
@@ -19,8 +23,14 @@ import {
  */
 const test = Deno.test.bind(Deno);
 
-test("METRICS_SCHEMA_VERSION is 6", () => {
-  assertEquals(METRICS_SCHEMA_VERSION, 6);
+test("METRICS_SCHEMA_VERSION is 7 and v6 samples are still accepted on the wire", () => {
+  assertEquals(METRICS_SCHEMA_VERSION, 7);
+  assertEquals(METRICS_LEGACY_WIRE_VERSION, 6);
+  assertEquals([...METRICS_WIRE_VERSIONS], [6, 7]);
+  assertEquals(isMetricsWireVersion(6), true);
+  assertEquals(isMetricsWireVersion(7), true);
+  assertEquals(isMetricsWireVersion(5), false);
+  assertEquals(isMetricsWireVersion("7"), false);
 });
 
 test("METRIC_EVENT_KINDS has no duplicates", () => {
@@ -86,7 +96,7 @@ test("storageEngineFieldName flattens engine + field into a camelCase leaf", () 
 function fixtureInput(): MetricsSampleInput {
   return {
     metadata: {
-      version: METRICS_SCHEMA_VERSION,
+      version: METRICS_LEGACY_WIRE_VERSION,
       sampledAt: "2020-01-01T00:00:00.000Z",
       intervalSeconds: 60,
       sequence: 1,
@@ -180,6 +190,7 @@ test("buildMetricsSample sanitizes the shared cross-repo fixture", () => {
 
   assertEquals(sample.type, "metrics");
   assertEquals(sample.metadata.version, 6);
+  assertEquals("extended" in sample, false);
   assertEquals(sample.host.cpu.pressureSomePercent, 100);
   assertEquals(sample.host.cpu.processCount, 42);
   assertEquals(sample.host.kernel.conntrackUsedPercent, null);
@@ -197,14 +208,72 @@ test("buildMetricsSample never coerces missing metrics to 0", () => {
   assertEquals(sample.host.storage.diskReadBytesPerSecond, null);
 });
 
-test("buildMetricsSample rejects a metadata.version that does not match METRICS_SCHEMA_VERSION", () => {
+test("buildMetricsSample accepts a v7-stamped sample and keeps its wire version", () => {
+  const input = fixtureInput();
+  input.metadata.version = METRICS_SCHEMA_VERSION;
+  input.metadata.durable = false;
+  const sample = buildMetricsSample(input);
+  assertEquals(sample.metadata.version, 7);
+  assertEquals(sample.metadata.durable, false);
+});
+
+test("buildMetricsSample sanitizes the v7 extended section without coercing missing to 0", () => {
+  const input = fixtureInput();
+  input.extended = {
+    host: {
+      oomKills: 3,
+      pidLimitUsedPercent: 140,
+      rootDiskQueueDepth: Number.NaN,
+      mdArraysDegraded: null,
+    },
+    docker: { containersCpuPercent: -5, containersRunning: 4 },
+    ingress: { tlsCertSoonestExpiryDays: 21 },
+    text: {
+      loadavg: "  0.52 0.61 0.70 2/431 12345  ",
+      kernel: "",
+      os: "a\u0000b\nc",
+      virt: "x".repeat(1000),
+    },
+    blockDeviceText: [{
+      deviceId: "nvme0n1",
+      model: " Samsung 990 ",
+      smart: "",
+    }],
+    gpuText: [{ gpuId: "gpu0", driver: "nvidia 570.1" }],
+  };
+  const { extended } = buildMetricsSample(input);
+  assertEquals(extended?.host, {
+    oomKills: 3,
+    pidLimitUsedPercent: 100,
+    rootDiskQueueDepth: null,
+    mdArraysDegraded: null,
+  });
+  assertEquals(extended?.docker, {
+    containersCpuPercent: 0,
+    containersRunning: 4,
+  });
+  assertEquals(extended?.ingress, { tlsCertSoonestExpiryDays: 21 });
+  assertEquals(extended?.text?.loadavg, "0.52 0.61 0.70 2/431 12345");
+  assertEquals("kernel" in (extended?.text ?? {}), false);
+  assertEquals(extended?.text?.os, "a b c");
+  assertEquals(extended?.text?.virt?.length, MAX_METRICS_TEXT_LENGTH);
+  assertEquals(extended?.blockDeviceText, [{
+    deviceId: "nvme0n1",
+    model: "Samsung 990",
+  }]);
+  assertEquals(extended?.gpuText, [{ gpuId: "gpu0", driver: "nvidia 570.1" }]);
+});
+
+test("buildMetricsSample rejects a metadata.version that is not an accepted wire version", () => {
   const input = fixtureInput();
   // deno-lint-ignore no-explicit-any
   input.metadata.version = 3 as any;
   assertThrows(
     () => buildMetricsSample(input),
     TypeError,
-    `metrics metadata.version must be ${METRICS_SCHEMA_VERSION}`,
+    `metrics metadata.version must be one of ${
+      METRICS_WIRE_VERSIONS.join(", ")
+    }`,
   );
 });
 

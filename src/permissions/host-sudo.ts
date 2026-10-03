@@ -50,12 +50,16 @@ export const TP_HOST_VERBS: ReadonlySet<string> = new Set([
   "gpasswd",
   "chpasswd",
   "getent",
+  "principal-remove",
   "modprobe",
   "build-run",
   "build-return",
   "php-test",
   "cert-dates",
   "site-usage",
+  "publish-open",
+  "publish",
+  "php-loopback-sync",
 ]);
 
 export type HostSudoOptions = Parameters<typeof playbooksNeedRootHelper>[0] & {

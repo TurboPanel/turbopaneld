@@ -64,7 +64,10 @@ is not a command: no command row, no outbox. Health was otherwise only
 observed when a `managed.apply` / `managed.lifecycle` result came back, so the
 promote gate's staleness window expired on an idle, healthy cluster. A control
 plane that predates the feature never sends the request; the message is
-additive and no floor moved.
+additive and no floor moved. A replica's `member.replication` also carries
+`receivedLsn` / `replayLsn` and, once `PgStandbySampler` has seen it streaming,
+`lastStreaming` (`at`, monotonic `ageMs`, lag); all optional, so an older
+control plane ignores them.
 
 ### Instance Let's Encrypt renewal (`src/instance/instance-acme-renew.ts`)
 

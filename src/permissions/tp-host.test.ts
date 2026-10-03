@@ -822,40 +822,6 @@ test("root reads go through a verified descriptor, not a planted symlink", async
   });
 });
 
-test("cp -a copies only a clean daemon hand-off tree, and no ownership", async () => {
-  await withHost(async (host) => {
-    const handoff = host.path("var/lib/turbopanel/release-handoff/svc/rel");
-    const release = host.path("srv/users/alice/sites/web/releases/rel");
-    await Deno.mkdir(handoff, { recursive: true });
-    await Deno.mkdir(release, { recursive: true });
-    await Deno.writeTextFile(join(handoff, "index.html"), "built");
-    const args = ["cp", "-a", "--", `${handoff}/.`, release];
-
-    const ok = await host.run(args);
-    assertEquals(ok.code, 0, ok.stderr);
-    assertStringIncludes(
-      ok.stdout,
-      "EXEC [cp] [-R] [--no-dereference] [--preserve=mode,timestamps] " +
-        "[--no-preserve=ownership] [--] [/proc/self/fd/3/.] [.]",
-    );
-
-    // Root would mknod a FIFO and keep a set-id bit: refused before copying.
-    const fifo = await new Deno.Command("mkfifo", {
-      args: [join(handoff, "pipe")],
-    }).output();
-    assertEquals(fifo.success, true);
-    assertStringIncludes(await refused(host, args), "special, set-id");
-    await Deno.remove(join(handoff, "pipe"));
-    await Deno.chmod(join(handoff, "index.html"), 0o4755);
-    assertStringIncludes(await refused(host, args), "special, set-id");
-
-    // A tree a tenant or a build wrote is never the source.
-    const tenantTree = host.path("srv/users/alice/sites/web/build");
-    await Deno.mkdir(tenantTree, { recursive: true });
-    await refused(host, ["cp", "-a", "--", `${tenantTree}/.`, release]);
-  });
-});
-
 test("test -d answers for a real directory, never a symlink to one", async () => {
   await withHost(async (host) => {
     const release = host.path("srv/users/alice/sites/web/releases/r1");
@@ -1311,6 +1277,11 @@ test("principal home: the skeleton is root's, never group-writable, and only roo
       await refused(host, ["chmod", "0770", dir]);
       await refused(host, ["chmod", "0751", dir]);
       await refused(host, ["chmod", "-R", "u=rwX,g=rX,o=", dir]);
+      if (dir.endsWith("/releases/r1")) {
+        // A release directory appears only through publish, sealed.
+        await refused(host, installDir(dir, "0750", "root", "alice-grp"));
+        continue;
+      }
       const ok = await host.run(installDir(dir, "0750", "root", "alice-grp"));
       assertEquals(ok.code, 0, `${dir}: ${ok.stderr}`);
     }
@@ -1504,6 +1475,7 @@ function phpService(host: Host, mode: PhpMode): string {
     ...(mode === "fpm" ? [] : [`Requires=${socket}`, `After=${socket}`]),
     "",
     "[Service]",
+    `ExecStartPre=+${host.path("opt/turbopanel/lib")}/tp-php-loopback sync`,
     `ExecStart=${phpExec(host, mode)}`,
     ...byMode[mode],
     "User=alice",
@@ -1515,6 +1487,8 @@ function phpService(host: Host, mode: PhpMode): string {
     "ProtectSystem=strict",
     "ProtectHome=yes",
     "PrivateDevices=yes",
+    "IPAddressDeny=localhost link-local multicast 0.0.0.0/8 fc00::/7",
+    "IPAddressAllow=127.0.0.1 127.0.0.53",
     `BindPaths=${home}/tmp:/tmp`,
     `TemporaryFileSystem=${host.path("etc/turbopanel")}:ro`,
     `BindReadOnlyPaths=${phpConfDir(host)}`,
@@ -1698,6 +1672,66 @@ test("per-site PHP services: a hostile corpus is refused in every mode", async (
       ["ProtectSystem=full", line("ProtectSystem=", "ProtectSystem=full")],
       ["no ProtectSystem", line("ProtectSystem=", null)],
       ["PrivateDevices=no", line("PrivateDevices=", "PrivateDevices=no")],
+      ["no IPAddressDeny", line("IPAddressDeny=", null)],
+      [
+        "loopback left open",
+        line("IPAddressDeny=", "IPAddressDeny=link-local"),
+      ],
+      [
+        "the whole of loopback allowed back",
+        line("IPAddressAllow=", "IPAddressAllow=127.0.0.0/8"),
+      ],
+      [
+        "link-local allowed back",
+        line("IPAddressAllow=", "IPAddressAllow=127.0.0.53 169.254.169.254"),
+      ],
+      [
+        "another loopback address allowed back",
+        line(
+          "IPAddressAllow=",
+          "IPAddressAllow=127.0.0.1 127.0.0.2 127.0.0.53",
+        ),
+      ],
+      [
+        "127.0.0.1 without the resolver stub",
+        line("IPAddressAllow=", "IPAddressAllow=127.0.0.1"),
+      ],
+      // 127.0.0.1 is open, so the loopback guard that closes its other ports
+      // must be there, exact, and the only root hook.
+      ["no loopback guard", line("ExecStartPre=", null)],
+      [
+        "a guard without the root prefix",
+        line(
+          "ExecStartPre=",
+          `ExecStartPre=${
+            host.path("opt/turbopanel/lib")
+          }/tp-php-loopback sync`,
+        ),
+      ],
+      [
+        "a root hook elsewhere",
+        line("ExecStartPre=", "ExecStartPre=+/bin/sh -c true"),
+      ],
+      [
+        "a guard with another verb",
+        line(
+          "ExecStartPre=",
+          `ExecStartPre=+${
+            host.path("opt/turbopanel/lib")
+          }/tp-php-loopback flush`,
+        ),
+      ],
+      [
+        "a second root hook",
+        add("Service", "ExecStartPre=+/bin/true"),
+      ],
+      ["a root stop hook", add("Service", "ExecStopPost=+/bin/true")],
+      [
+        "ULA (IPv6 metadata) left open",
+        line("IPAddressDeny=", "IPAddressDeny=localhost link-local"),
+      ],
+      ["an allow reset", add("Service", "IPAddressAllow=any")],
+      ["a second deny", add("Service", "IPAddressDeny=")],
       [
         "ReadWritePaths=/etc",
         line("ReadWritePaths=", `ReadWritePaths=${home}/tmp /etc`),
@@ -2104,6 +2138,10 @@ test("per-site PHP config: root:<owner>-grp, 0750/0640, directives on an allowli
       "sendmail_path = /bin/sh -c id",
       "include_path = .:/etc",
       "[PATH=/srv/users/alice]\nmemory_limit = 1G",
+      `[PATH=${host.path("srv/users/bob")}]\nmemory_limit = 1G`,
+      `[PATH=${home}/sites]\nmemory_limit = 1G`,
+      `[PATH=${home}/../bob]`,
+      `[PATH=${home}]\nextension = /tmp/evil.so`,
       "[HOST=example.com]",
       "opcache.validate_permission = 0",
       "opcache.validate_root = Off",
@@ -2360,6 +2398,7 @@ test("per-site PHP: what the daemon renders for each mode and web server passes 
           group: "alice-grp",
           home,
           configDir: host.path("etc/turbopanel"),
+          libDir: host.path("opt/turbopanel/lib"),
           webAccount,
         };
         const dir = sitePhpConfigDir(spec.configDir, id);
@@ -2382,7 +2421,7 @@ test("per-site PHP: what the daemon renders for each mode and web server passes 
             { key: "open_basedir", value: `${site}/current/public:/tmp` },
             { key: "realpath_cache_ttl", value: "0" },
             { key: "session.save_path", value: "/var/lib/php/sessions" },
-          ]),
+          ], home),
         ]];
         if (mode === "fpm") {
           configs.push([
@@ -2790,5 +2829,18 @@ test("site-usage prints home and site sizes only, never follows a symlink and ta
       true,
     );
     await refused(host, ["site-usage", "/etc"]);
+  });
+});
+
+test("php-loopback-sync runs the installed guard with sync and nothing else", async () => {
+  await withHost(async (host) => {
+    const ok = await host.run(["php-loopback-sync"]);
+    assertEquals(ok.code, 0, ok.stderr);
+    assertEquals(
+      ok.stdout.trim(),
+      `EXEC [${host.path("opt/turbopanel/lib")}/tp-php-loopback] [sync]`,
+    );
+    const extra = await host.run(["php-loopback-sync", "alice"]);
+    assertEquals(extra.code, 1);
   });
 });

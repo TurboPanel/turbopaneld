@@ -736,31 +736,233 @@ test("applySourceReleases records a promoted native release for rollback", async
   });
 });
 
-test("applySourceReleases keeps a live native deploy when its record cannot be written", async () => {
+test("applySourceReleases fails a native deploy before cutover when its record cannot be written", async () => {
   await createTempLayout().then(async (fixture) => {
     try {
       const layout = layoutFromFixture(fixture);
-      const log = fakeLogSink();
-      const applied = await applySourceReleases(
+      let promoted = false;
+      await assertRejects(
+        () =>
+          applySourceReleases(
+            layout,
+            basePayload({
+              sourceMaterial: [baseSource({ principal: PRINCIPAL })],
+            }),
+            {
+              ...nativeDeps(fakeLogSink().sink),
+              ensureDaemonReleaseRecordDirFn: () =>
+                Promise.reject(new Error("disk full")),
+              promoteReleaseFn: (params) => {
+                promoted = true;
+                return Promise.resolve(params.paths.releaseDir);
+              },
+            },
+          ),
+        Error,
+        "rollback record could not be written: disk full",
+      );
+      assertEquals(promoted, false);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+});
+
+test("applySourceReleases removes the record again when the promote fails", async () => {
+  await createTempLayout().then(async (fixture) => {
+    try {
+      const layout = layoutFromFixture(fixture);
+      await assertRejects(
+        () =>
+          applySourceReleases(
+            layout,
+            basePayload({
+              sourceMaterial: [baseSource({ principal: PRINCIPAL })],
+            }),
+            {
+              ...nativeDeps(fakeLogSink().sink),
+              promoteReleaseFn: () => Promise.reject(new Error("link escape")),
+            },
+          ),
+        Error,
+        "link escape",
+      );
+      const record = await readReleaseManifest(
+        resolveDaemonReleasePaths(layout, {
+          serviceId: "web",
+          releaseId: "rel-1",
+        }).releaseDir,
+      );
+      assertEquals(record, null);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+});
+
+test("applySourceReleases leaves no pending marker once the promote finished", async () => {
+  await createTempLayout().then(async (fixture) => {
+    try {
+      const layout = layoutFromFixture(fixture);
+      await applySourceReleases(
+        layout,
+        basePayload({
+          sourceMaterial: [baseSource({ principal: PRINCIPAL })],
+        }),
+        nativeDeps(fakeLogSink().sink),
+      );
+      const dir = resolveDaemonReleasePaths(layout, {
+        serviceId: "web",
+        releaseId: "rel-1",
+      }).releaseDir;
+      await assertRejects(
+        () => Deno.stat(join(dir, ".pending")),
+        Deno.errors.NotFound,
+      );
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+});
+
+test("applySourceReleases records pending before the promote (a kill mid-promote is untrusted)", async () => {
+  await createTempLayout().then(async (fixture) => {
+    try {
+      const layout = layoutFromFixture(fixture);
+      const serviceId = "svc-kill";
+      const dir = resolveDaemonReleasePaths(layout, {
+        serviceId,
+        releaseId: "rel-1",
+      }).releaseDir;
+      const hostings = [{
+        hostingId: "host-kill",
+        composeServiceName: "web",
+        serviceId,
+        hostnames: ["kill.example.com"],
+      }];
+      const payload = () =>
+        basePayload({
+          hostings,
+          sourceMaterial: [baseSource({
+            commitSha: "site-commit",
+            principal: PRINCIPAL,
+          })],
+        });
+      // The promote sees the pending record while it runs.
+      const paths = resolveReleasePaths(layout, {
+        username: PRINCIPAL.username,
+        serviceId,
+        releaseId: "rel-1",
+      });
+      let pendingDuringPromote = false;
+      await assertRejects(() =>
+        applySourceReleases(layout, payload(), {
+          ...nativeDeps(fakeLogSink().sink),
+          promoteReleaseFn: async () => {
+            await mkdirReleaseTree(paths);
+            await Deno.stat(join(dir, ".pending"));
+            pendingDuringPromote = true;
+            throw new Error("killed");
+          },
+        })
+      );
+      assertEquals(pendingDuringPromote, true);
+
+      // Failure discards the record; restore what a kill would have left
+      // instead: a pending record and a partial tree.
+      await Deno.mkdir(dir, { recursive: true });
+      await writeReleaseManifest(dir, recordManifest(serviceId, "rel-1"));
+      await Deno.writeTextFile(join(dir, ".pending"), "");
+      await mkdirReleaseTree(paths);
+
+      // Re-send: the pending record is not trusted, so it rebuilds + promotes.
+      const calls: string[] = [];
+      await applySourceReleases(layout, payload(), {
+        ...nativeDeps(fakeLogSink().sink),
+        promoteReleaseFn: (params: { paths: { releaseDir: string } }) => {
+          calls.push("promote");
+          return Promise.resolve(params.paths.releaseDir);
+        },
+        promoteExistingReleaseFn: (
+          params: { paths: { releaseDir: string } },
+        ) => {
+          calls.push("existing");
+          return Promise.resolve(params.paths.releaseDir);
+        },
+      });
+      assertEquals(calls, ["promote"]);
+      await assertRejects(
+        () => Deno.stat(join(dir, ".pending")),
+        Deno.errors.NotFound,
+      );
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+});
+
+test("applySourceReleases refuses to roll back to a pending record", async () => {
+  await createTempLayout().then(async (fixture) => {
+    try {
+      const layout = layoutFromFixture(fixture);
+      const dir = resolveDaemonReleasePaths(layout, {
+        serviceId: "web",
+        releaseId: "rel-1",
+      }).releaseDir;
+      await seedRecord(layout, { serviceId: "web", releaseId: "rel-1" });
+      await Deno.writeTextFile(join(dir, ".pending"), "");
+      await assertRejects(
+        () =>
+          applySourceReleases(
+            layout,
+            basePayload({
+              sourceMaterial: [baseSource({
+                rollbackToReleaseId: "rel-1",
+                principal: PRINCIPAL,
+              })],
+            }),
+            nativeDeps(fakeLogSink().sink),
+          ),
+        Error,
+        "no release record",
+      );
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+});
+
+test("applySourceReleases prunes the records of the native releases it prunes", async () => {
+  await createTempLayout().then(async (fixture) => {
+    try {
+      const layout = layoutFromFixture(fixture);
+      const old = resolveDaemonReleasePaths(layout, {
+        serviceId: "web",
+        releaseId: "rel-old",
+      });
+      await Deno.mkdir(old.releaseDir, { recursive: true });
+      await Deno.writeTextFile(join(old.releaseDir, "release.json"), "{}");
+      await applySourceReleases(
         layout,
         basePayload({
           sourceMaterial: [baseSource({ principal: PRINCIPAL })],
         }),
         {
-          ...nativeDeps(log.sink),
-          ensureDaemonReleaseRecordDirFn: () =>
-            Promise.reject(new Error("disk full")),
+          ...nativeDeps(fakeLogSink().sink),
+          pruneReleasesFn: () => Promise.resolve(["rel-old"]),
         },
       );
-      assertEquals(applied.length, 1);
-      assertEquals(
-        log.lines.some((line) =>
-          line.stream === "stderr" &&
-          line.message.includes("rollback record could not be written") &&
-          line.message.includes("disk full")
-        ),
-        true,
+      await assertRejects(
+        () => Deno.stat(old.releaseDir),
+        Deno.errors.NotFound,
       );
+      const kept = await readReleaseManifest(
+        resolveDaemonReleasePaths(layout, {
+          serviceId: "web",
+          releaseId: "rel-1",
+        }).releaseDir,
+      );
+      assertEquals(kept?.releaseId, "rel-1");
     } finally {
       await fixture.cleanup();
     }
@@ -828,6 +1030,63 @@ test("applySourceReleases rejects a clone credential decrypt that returns nothin
         Error,
         "clone credential could not be decrypted",
       );
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+});
+
+test("applySourceReleases cuts over to a re-sent release this host already published", async () => {
+  await createTempLayout().then(async (fixture) => {
+    try {
+      const layout = layoutFromFixture(fixture);
+      const serviceId = "svc-resent";
+      const paths = resolveReleasePaths(layout, {
+        username: PRINCIPAL.username,
+        serviceId,
+        releaseId: "rel-1",
+      });
+      await mkdirReleaseTree(paths);
+      await seedRecord(layout, { serviceId, releaseId: "rel-1" });
+      const payload = (commitSha: string) =>
+        basePayload({
+          hostings: [{
+            hostingId: "host-resent",
+            composeServiceName: "web",
+            serviceId,
+            hostnames: ["resent.example.com"],
+          }],
+          sourceMaterial: [baseSource({ commitSha, principal: PRINCIPAL })],
+        });
+      const calls: string[] = [];
+      const deps = {
+        ...nativeDeps(fakeLogSink().sink),
+        promoteReleaseFn: (params: { paths: { releaseDir: string } }) => {
+          calls.push("promote");
+          return Promise.resolve(params.paths.releaseDir);
+        },
+        promoteExistingReleaseFn: (
+          params: { paths: { releaseDir: string } },
+        ) => {
+          calls.push("existing");
+          return Promise.resolve(params.paths.releaseDir);
+        },
+      };
+
+      // Same id, same commit: no rebuild, no publish over the live release.
+      const [row] = await applySourceReleases(
+        layout,
+        payload("recorded-commit"),
+        deps,
+      );
+      assertEquals(calls, ["existing"]);
+      assertEquals(row?.commitSha, "recorded-commit");
+
+      // Same id, another commit: built and published as before (and refused
+      // by tp-host there, never merged in).
+      calls.length = 0;
+      await applySourceReleases(layout, payload("other-commit"), deps);
+      assertEquals(calls, ["promote"]);
     } finally {
       await fixture.cleanup();
     }

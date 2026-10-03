@@ -56,6 +56,40 @@ export async function writeComposeFileSecure(
 }
 
 /**
+ * {@link writeComposeFileSecure} that never exposes a half-written file: the
+ * body goes to a sibling temp file (mode forced, flushed to disk), then is
+ * renamed over `path`. A crash leaves the old file or the new one, never a
+ * truncated one. The temp file is removed if anything fails.
+ */
+export async function writeComposeFileAtomic(
+  path: string,
+  content: string,
+): Promise<void> {
+  const tmpPath = `${path}.${crypto.randomUUID()}.tmp`;
+  try {
+    await Deno.writeTextFile(tmpPath, content, {
+      createNew: true,
+      mode: COMPOSE_FILE_MODE,
+    });
+    const file = await Deno.open(tmpPath, { write: true });
+    try {
+      await file.sync();
+    } finally {
+      file.close();
+    }
+    await Deno.chmod(tmpPath, COMPOSE_FILE_MODE);
+    await Deno.rename(tmpPath, path);
+  } catch (err) {
+    try {
+      await Deno.remove(tmpPath);
+    } catch {
+      // Never created, or already renamed into place.
+    }
+    throw err;
+  }
+}
+
+/**
  * Build `docker compose -p <project> -f <p1> -f <p2> …` argv prefix.
  * Throws when `paths` is empty.
  */

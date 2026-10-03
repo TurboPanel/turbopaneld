@@ -894,3 +894,20 @@ test("resolveUpdate does not retry a 404 on the manifest", async () => {
     restore();
   }
 });
+
+test("resolveUpdate redacts a signed URL quoted by a failed manifest fetch", async () => {
+  const restore = installFetch(() => {
+    throw new TypeError(
+      "error sending request for url (https://release-assets.githubusercontent.com/m.json?X-Amz-Signature=secret)",
+    );
+  });
+  try {
+    const err = await assertRejects(
+      () => resolveUpdate({ app: "daemon", channel: "trunk" }, {}),
+      MalformedManifestError,
+    );
+    assertEquals(err.message.includes("secret"), false);
+  } finally {
+    restore();
+  }
+});
