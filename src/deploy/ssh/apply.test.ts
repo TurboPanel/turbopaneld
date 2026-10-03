@@ -60,6 +60,10 @@ type Host = {
   /** Set to fail `sshd -t`, as a real host would on a bad config. */
   sshdTestError: string | null;
   reloads: string[];
+  /** What `tp-host sftp-chroot status|check|verify` answer. */
+  sftpStatus: RunResult;
+  sftpCheck: RunResult;
+  sftpVerify: RunResult;
   cleanup: () => Promise<void>;
 };
 
@@ -103,6 +107,9 @@ async function makeHost(
     modes: new Map(),
     sshdTestError: null,
     reloads: [],
+    sftpStatus: ok("off"),
+    sftpCheck: ok(),
+    sftpVerify: ok(),
     run: () => Promise.resolve(ok()),
     cleanup: () => Deno.remove(root, { recursive: true }),
   };
@@ -113,6 +120,14 @@ async function makeHost(
     const rest = args[0] === "-n" ? args.slice(1) : args;
     const [tool, ...tail] = rest;
 
+    if (tool === "sftp-chroot") {
+      const answers: Record<string, RunResult> = {
+        status: host.sftpStatus,
+        check: host.sftpCheck,
+        verify: host.sftpVerify,
+      };
+      return answers[tail[0]] ?? fail("tp-host: refusing");
+    }
     if (tool === "sshd") {
       return host.sshdTestError === null ? ok() : fail(host.sshdTestError);
     }
@@ -807,6 +822,7 @@ test("a missing sshd_config fails without writing a drop-in", async () => {
     return await inner(command, args);
   };
   try {
+    await Deno.remove(host.sshdConfigPath);
     const error = await assertRejects(() =>
       apply(host, [{ username: "appuser", keys: [ED25519] }])
     );
@@ -987,6 +1003,241 @@ test("a failed key-directory listing leaves existing files in place", async () =
     const result = await apply(host, []);
     assertEquals(result.removedPrincipals, []);
     await Deno.stat(authorizedKeysPath("appuser", host.keysDir));
+  } finally {
+    await host.cleanup();
+  }
+});
+
+// --- SFTP chroot ------------------------------------------------------------
+
+function switchOn(host: Host, root = "/srv/users"): void {
+  host.sftpStatus = ok(`on ${root}`);
+}
+
+function applyJailed(host: Host, tpHostManaged = true) {
+  return applySshAccess(
+    [{ username: "appuser", keys: [ED25519] }],
+    {
+      authorizedKeysDir: host.keysDir,
+      sshdConfigPath: host.sshdConfigPath,
+      sshdDropInPath: host.dropInPath,
+      tpHostManaged,
+    },
+    host.run,
+  );
+}
+
+async function appliedDirectives(host: Host): Promise<string[]> {
+  return (await Deno.readTextFile(host.dropInPath)).split("\n").map((line) =>
+    line.trim()
+  ).filter((line) => line.length > 0 && !line.startsWith("#"));
+}
+
+const sftpCalls = (host: Host) =>
+  host.calls.filter((call) => call.args.includes("sftp-chroot")).map((call) =>
+    call.args.at(-1)
+  );
+
+test("with the switch off nothing is jailed and no layout check runs", async () => {
+  const host = await makeHost();
+  try {
+    const result = await applyJailed(host);
+    assertEquals(result.sftpChroot, false);
+    const directives = await appliedDirectives(host);
+    assert(!directives.some((line) => line.startsWith("ChrootDirectory")));
+    assert(
+      blockOf(directives, "Match Group tpsftp").includes(
+        "ForceCommand internal-sftp",
+      ),
+    );
+    assertEquals(sftpCalls(host), ["status"]);
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("a host without tp-host has no switch and is never asked", async () => {
+  const host = await makeHost();
+  try {
+    switchOn(host);
+    assertEquals((await applyJailed(host, false)).sftpChroot, false);
+    assertEquals(sftpCalls(host), []);
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("with the switch on, tpsftp members are jailed in their home root and start in home/", async () => {
+  const host = await makeHost();
+  try {
+    switchOn(host);
+    const result = await applyJailed(host);
+    assertEquals(result.sftpChroot, true);
+    assertEquals(result.warnings, []);
+    const directives = await appliedDirectives(host);
+    const sftp = blockOf(directives, "Match Group tpsftp");
+    // %u, not %h: the passwd home is <root>/<user>/home, below the jail.
+    assert(sftp.includes("ChrootDirectory /srv/users/%u"));
+    assert(sftp.includes("ForceCommand internal-sftp -d /home"));
+    // A shell needs a userland inside a jail, and the backstop would carry
+    // the chroot onto shell members too.
+    for (const other of ["Match Group tpshell", "Match Group tpprincipal"]) {
+      assert(
+        !blockOf(directives, other).some((line) =>
+          line.startsWith("ChrootDirectory")
+        ),
+        `${other} must never be jailed`,
+      );
+    }
+    // The effective config is verified before sshd is reloaded.
+    assertEquals(sftpCalls(host), ["status", "check", "verify"]);
+    assertEquals(host.reloads, ["ssh.service"]);
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("the chroot root is the one tp-host validated, not the daemon's environment", async () => {
+  const host = await makeHost();
+  try {
+    switchOn(host, "/data/homes");
+    await applyJailed(host);
+    assert(
+      blockOf(await appliedDirectives(host), "Match Group tpsftp").includes(
+        "ChrootDirectory /data/homes/%u",
+      ),
+    );
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("an unreadable switch aborts the reconcile instead of unjailing", async () => {
+  for (
+    const status of [
+      fail("sudo: a password is required"),
+      ok("on"),
+      ok("on relative/path"),
+      ok("on /srv/users\nextra"),
+      ok("maybe"),
+    ]
+  ) {
+    const host = await makeHost();
+    try {
+      host.sftpStatus = status;
+      const error = await assertRejects(() => applyJailed(host));
+      assertStringIncludes(String(error), "SFTP chroot switch");
+      await assertRejects(() => Deno.stat(host.dropInPath));
+      assertEquals(host.reloads, []);
+    } finally {
+      await host.cleanup();
+    }
+  }
+});
+
+test("a member that drifts off the layout keeps the jail and is reported", async () => {
+  const host = await makeHost();
+  try {
+    switchOn(host);
+    host.sftpCheck = fail("");
+    host.sftpCheck.stdout = "bob: passwd home is not /srv/users/bob/home\n";
+    const result = await applyJailed(host);
+    // Failing closed for bob, not open for everyone.
+    assertEquals(result.sftpChroot, true);
+    assert(
+      blockOf(await appliedDirectives(host), "Match Group tpsftp").includes(
+        "ChrootDirectory /srv/users/%u",
+      ),
+    );
+    assertEquals(result.warnings.length, 1);
+    assertStringIncludes(result.warnings[0], "bob: passwd home is not");
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("a jailed drop-in sshd refuses is rolled back to the unjailed one", async () => {
+  const host = await makeHost();
+  try {
+    await applyJailed(host);
+    const unjailed = await Deno.readTextFile(host.dropInPath);
+    host.reloads.length = 0;
+
+    switchOn(host);
+    host.sshdTestError = "ChrootDirectory: bad ownership or modes";
+    const error = await assertRejects(() => applyJailed(host));
+    assertStringIncludes(String(error), "rolled back");
+    assertEquals(await Deno.readTextFile(host.dropInPath), unjailed);
+    assertEquals(host.reloads, []);
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("a jail the effective sshd config does not apply is rolled back", async () => {
+  const host = await makeHost();
+  try {
+    await applyJailed(host);
+    const unjailed = await Deno.readTextFile(host.dropInPath);
+    host.reloads.length = 0;
+
+    switchOn(host);
+    host.sftpVerify = fail("");
+    host.sftpVerify.stdout =
+      "alice: effective ChrootDirectory is not /srv/users/%u\n";
+    const error = await assertRejects(() => applyJailed(host));
+    assertStringIncludes(String(error), "rolled back");
+    assertStringIncludes(String(error), "effective ChrootDirectory");
+    assertEquals(await Deno.readTextFile(host.dropInPath), unjailed);
+    assertEquals(host.reloads, []);
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("a world-readable sshd_config is read without asking tp-host", async () => {
+  const host = await makeHost();
+  try {
+    // tp-host's `cat` serves only TurboPanel's trees and refuses sshd_config.
+    const fake = host.run;
+    host.run = (command, args) =>
+      args.includes(host.sshdConfigPath) && args.includes("cat")
+        ? Promise.resolve(fail(`tp-host: refusing path ${host.sshdConfigPath}`))
+        : fake(command, args);
+    const result = await apply(host, [{
+      username: "appuser",
+      keys: [ED25519],
+    }]);
+    assertEquals(result.sshdReloaded, true);
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("a refused rewrite restores the previous drop-in tp-host would not cat", async () => {
+  const host = await makeHost();
+  try {
+    await apply(host, [{ username: "appuser", keys: [ED25519] }]);
+    const good = await Deno.readTextFile(host.dropInPath);
+    // tp-host's `cat` serves only TurboPanel's trees and refuses the drop-in.
+    const fake = host.run;
+    host.run = (command, args) =>
+      args.includes(host.dropInPath) && args.includes("cat")
+        ? Promise.resolve(fail(`tp-host: refusing path ${host.dropInPath}`))
+        : fake(command, args);
+    host.sshdTestError = "line 3: Bad configuration option";
+    await assertRejects(() =>
+      applySshAccess(
+        [{ username: "appuser", keys: [ED25519] }],
+        {
+          authorizedKeysDir: join(host.root, "etc/ssh/turbopanel/moved"),
+          sshdConfigPath: host.sshdConfigPath,
+          sshdDropInPath: host.dropInPath,
+        },
+        host.run,
+      )
+    );
+    assertEquals(await Deno.readTextFile(host.dropInPath), good);
   } finally {
     await host.cleanup();
   }

@@ -106,6 +106,7 @@ export async function handlePrincipalsReconcile(
     keysChanged: ssh.changedPrincipals,
     keysRemoved: ssh.removedPrincipals,
     sshdReloaded: ssh.sshdReloaded,
+    sftpChroot: ssh.sftpChroot,
     warnings: ssh.warnings,
   };
 }

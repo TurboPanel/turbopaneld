@@ -100,6 +100,10 @@ DAEMON_ACCOUNT="tp"
 HOSTING_CADDY_USER="tpedge"
 HOSTING_CADDY_CAP="CAP_NET_BIND_SERVICE"
 HOSTING_CADDY_STATE="turbopanel-hosting-caddy"
+# Its admin API is a unix socket in /run/<this> (0700, tpedge), never loopback
+# TCP: a tenant process can dial loopback and load a config that reads every
+# TLS key tpedge can (audit P0-1). Kept in step with ingress.ts.
+HOSTING_CADDY_RUNTIME="turbopanel-hosting-caddy"
 
 # --- running the real thing ------------------------------------------------
 # Privileged commands. In test mode they are printed, one argv element per
@@ -695,9 +699,14 @@ tp_unit_ok() {
         ok["Service", "Nice"] = 1
         ok["Service", "IOSchedulingClass"] = 1
       }
-      # Only the hosting Caddy keeps state in a systemd StateDirectory=;
-      # tp_hosting_caddy_unit_ok pins its value.
-      if (hosting == "1") ok["Service", "StateDirectory"] = 1
+      # Only the hosting Caddy keeps state in a systemd StateDirectory= and
+      # its admin socket in a RuntimeDirectory=; tp_hosting_caddy_unit_ok pins
+      # each value.
+      if (hosting == "1") {
+        ok["Service", "StateDirectory"] = 1
+        ok["Service", "RuntimeDirectory"] = 1
+        ok["Service", "RuntimeDirectoryMode"] = 1
+      }
       section = ""
     }
     # systemd joins a line ending in a backslash onto the next one, so a
@@ -778,16 +787,21 @@ tp_unit_ok() {
 # The hosting Caddy unit, beyond the account checks in tp_unit_ok: the vendored
 # Caddy against the hosting config, exactly CAP_NET_BIND_SERVICE in both the
 # bounding and the ambient set (a missing bounding set would keep every
-# capability bounded), its store in its own top-level StateDirectory, and
-# only the environment that points Caddy at that store. Read from the file the
-# awk pass above already shape-checked; every repeated key is checked.
+# capability bounded), its store in its own top-level StateDirectory, only
+# the environment that points Caddy at that store, and reloads through the
+# admin unix socket in its own 0700 RuntimeDirectory (never a TCP address).
+# Read from the file the awk pass above already shape-checked; every repeated
+# key is checked.
 tp_hosting_caddy_unit_ok() {
   _hc_bin="$INSTALL_ROOT/vendor/caddy/current/caddy"
   _hc_cfg="$R_CONFIG/hosting/Caddyfile"
   _hc_state="%S/$HOSTING_CADDY_STATE"
+  _hc_admin="unix//run/$HOSTING_CADDY_RUNTIME/admin.sock"
   _hc_bound=""
   _hc_ambient=""
   _hc_dir=""
+  _hc_run=""
+  _hc_run_mode=""
   while IFS= read -r _hc_line || [ -n "$_hc_line" ]; do
     case "$_hc_line" in
       ExecStart=*)
@@ -795,14 +809,14 @@ tp_hosting_caddy_unit_ok() {
           return 1
         ;;
       ExecReload=*)
-        case "$_hc_line" in
-          "ExecReload=$_hc_bin reload --config $_hc_cfg --adapter caddyfile --address "*) ;;
-          *) return 1 ;;
-        esac
+        [ "$_hc_line" = "ExecReload=$_hc_bin reload --config $_hc_cfg --adapter caddyfile --address $_hc_admin" ] ||
+          return 1
         ;;
       CapabilityBoundingSet=*) _hc_bound="${_hc_line#*=}" ;;
       AmbientCapabilities=*) _hc_ambient="${_hc_line#*=}" ;;
       StateDirectory=*) _hc_dir="${_hc_line#*=}" ;;
+      RuntimeDirectory=*) _hc_run="${_hc_line#*=}" ;;
+      RuntimeDirectoryMode=*) _hc_run_mode="${_hc_line#*=}" ;;
       Environment=*)
         case "$_hc_line" in
           "Environment=HOME=$_hc_state" | \
@@ -816,6 +830,8 @@ tp_hosting_caddy_unit_ok() {
   [ "$_hc_bound" = "$HOSTING_CADDY_CAP" ] || return 1
   [ "$_hc_ambient" = "$HOSTING_CADDY_CAP" ] || return 1
   [ "$_hc_dir" = "$HOSTING_CADDY_STATE" ] || return 1
+  [ "$_hc_run" = "$HOSTING_CADDY_RUNTIME" ] || return 1
+  [ "$_hc_run_mode" = "0700" ] || return 1
 }
 
 # The policy id in turbopanel-backup-<id>.service|.timer, printed; fails unless
@@ -1460,7 +1476,10 @@ tp_php_install() {
 # (re-checked here), never from the caller. The owner cannot traverse the
 # daemon's config tree outside its unit, so root opens the config files
 # (verified, no symlink) and the binary reads them through /proc/self/fd —
-# which checks the file's own mode, root:<owner>-grp 0640.
+# which checks the file's own mode, root:<owner>-grp 0640. The owner keeps its
+# supplementary groups, as systemd gives them to the unit: the PHP binaries are
+# 0750 root:tpphp<series>, so without its entitlement group the owner could not
+# even exec the binary the unit runs.
 tp_verb_php_test() {
   [ $# -eq 1 ] || tp_die "php-test: only php-test <siteId>"
   tp_php_site_id_ok "$1" || tp_die "php-test: refusing site id $1"
@@ -1478,7 +1497,7 @@ tp_verb_php_test() {
   tp_open_verified "$_pt_cfg/php.ini" || tp_die "php-test: no $_pt_cfg/php.ini"
   _pt_bin="${_ps_exec%% *}"
   set -- timeout 30 setpriv --reuid="$(tp_uid_of "$_ps_user")" \
-    --regid="$(tp_gid_of_group "$_ps_user-grp")" --clear-groups --no-new-privs -- \
+    --regid="$(tp_gid_of_group "$_ps_user-grp")" --init-groups --no-new-privs -- \
     env -i PATH=/usr/bin:/bin
   case "$_ps_mode" in
     fpm) set -- "$@" "$_pt_bin" --test --fpm-config /proc/self/fd/4 -c /proc/self/fd/3 ;;
@@ -1590,6 +1609,13 @@ tp_verb_install() {
     ! tp_release_path "$_in_path" || tp_die "refusing $_in_path: a release is created only by publish"
     tp_is_root_path "$_in_path" && [ -n "$_in_owner$_in_group" ] &&
       [ "$_in_path" != "$R_PRINCIPALS" ] && tp_die "refusing to re-own $_in_path"
+    # The home root holds every home and the release staging area: root's only.
+    if [ "$_in_path" = "$R_PRINCIPALS" ]; then
+      case "$_in_owner:$_in_group" in
+        :|root:|:root|root:root) ;;
+        *) tp_die "refusing to re-own $_in_path (root:root only)" ;;
+      esac
+    fi
     tp_mode_ok "$_in_mode" "$_in_path" || tp_die "refusing mode $_in_mode for $_in_path"
     tp_owner_ok "$_in_path" "$_in_owner" "$_in_group" ||
       tp_die "refusing owner $_in_owner:$_in_group for $_in_path"
@@ -1827,9 +1853,21 @@ tp_verb_find() {
   if [ "$#" -eq 9 ] && [ "$1" = "-type" ] && [ "$2" = "l" ] && [ "$3" = "-exec" ] &&
     [ "$4" = "realpath" ] && [ "$5" = "-m" ] && [ "$6" = "-z" ] && [ "$7" = "--" ] &&
     [ "$8" = "{}" ] && [ "$9" = "+" ]; then
-    tp_require_class "$_fd_base" principal
-    tp_pin_dir "$_fd_base" || tp_die "no such directory $_fd_base"
-    find -P . -type l -exec realpath -m -z -- {} +
+    _fd_class="$(tp_path_class "$_fd_base")" || tp_die "refusing path $_fd_base"
+    case "$_fd_class" in
+      principal)
+        tp_pin_dir "$_fd_base" || tp_die "no such directory $_fd_base"
+        find -P . -type l -exec realpath -m -z -- {} +
+        ;;
+      staging)
+        # The daemon's own open leaf, walked as the daemon, never as root.
+        [ "${_fd_base%/*}" = "$R_STAGING" ] || tp_die "refusing path $_fd_base"
+        tp_pin_dir "$_fd_base" || tp_die "no such directory $_fd_base"
+        [ "$(stat -c '%u' .)" = "$CALLER_UID" ] || tp_die "refusing $_fd_base: not the caller's leaf"
+        tp_as "$CALLER_UID" "$CALLER_GID" find -P . -type l -exec realpath -m -z -- {} +
+        ;;
+      *) tp_die "refusing path $_fd_base ($_fd_class)" ;;
+    esac
     return
   fi
   if [ "$#" -eq 7 ] && [ "$1" = "-type" ] && [ "$2" = "d" ] && [ "$3" = "-exec" ] &&
@@ -2024,6 +2062,158 @@ tp_verb_sshd() {
   [ "$#" -eq 1 ] || tp_die "sshd: only -t or -T"
   case "$1" in -t|-T) tp_exec /usr/sbin/sshd "$1" ;; esac
   tp_die "sshd: only -t or -T"
+}
+
+# --- the SFTP chroot ---------------------------------------------------------
+# The sshd drop-in jails tpsftp members at $R_PRINCIPALS/<p> only while this
+# host's switch is on. sshd refuses a login unless every component of the
+# chroot path is a root-owned directory that group and others cannot write, so
+# a member still on the tenant-owned home layout could not sign in at all.
+# `on` therefore runs the layout check first and refuses on any finding; `off`
+# is never gated, because it is the rollback.
+#
+# The switch sits outside every managed tree (no path class), so no generic
+# verb — install, tee, rm, … — can write or remove it: only `sftp-chroot on`
+# (after the check) and `off`. `status` names the chroot root as this script
+# resolves it, so the daemon renders the same root the check validated.
+SFTP_GROUP="tpsftp"
+SHELL_GROUP="tpshell"
+SFTP_CHROOT_SWITCH="$P/etc/ssh/turbopanel-sftp-chroot"
+SFTP_START_DIR="/home"
+
+# A directory sshd accepts as part of a chroot path.
+tp_chroot_dir_ok() {
+  [ -d "$1" ] && [ ! -L "$1" ] || return 1
+  _cd_meta="$(stat -c '%u %a' -- "$1")" || return 1
+  [ "${_cd_meta%% *}" = "$ROOT_UID" ] || return 1
+  case "${_cd_meta#* }" in
+    *[2367]?|*[2367]) return 1 ;;
+  esac
+  return 0
+}
+
+# Every directory above the homes, up to / (up to the prefix in test mode).
+tp_chroot_parents_check() {
+  _cp_dir="$R_PRINCIPALS"
+  while [ -n "$_cp_dir" ] && [ "$_cp_dir" != "$P" ]; do
+    tp_chroot_dir_ok "$_cp_dir" ||
+      echo "$_cp_dir: not a root-owned directory closed to group and world writes"
+    _cp_dir="${_cp_dir%/*}"
+  done
+  [ -n "$P" ] || tp_chroot_dir_ok / ||
+    echo "/: not a root-owned directory closed to group and world writes"
+}
+
+tp_group_members() {
+  tp_getent group "$1" | cut -d: -f4 | tr ',' '\n'
+}
+
+# Every account in tpsftp: supplementary members and those whose primary
+# group it is (sshd's Match Group matches both).
+tp_sftp_members() {
+  tp_group_members "$SFTP_GROUP"
+  _sf_gid="$(tp_gid_of_group "$SFTP_GROUP")" || return 0
+  [ -n "$_sf_gid" ] || return 0
+  if [ -n "$TP_TEST" ]; then
+    cat "$P/etc/passwd"
+  else
+    getent passwd
+  fi | awk -F: -v g="$_sf_gid" '$4 == g { print $1 }'
+}
+
+# One member: a principal on the new layout, and in the files-only level only.
+tp_sftp_member_check() {
+  _sm_user="$1"
+  if ! tp_is_principal "$_sm_user"; then
+    echo "$_sm_user: in $SFTP_GROUP but not a principal, so it has no home to be jailed in"
+    return 0
+  fi
+  _sm_home="$R_PRINCIPALS/$_sm_user"
+  tp_chroot_dir_ok "$_sm_home" ||
+    echo "$_sm_user: $_sm_home is not a root-owned directory closed to group and world writes"
+  # The tenant directory belongs to the principal (to the caller in test mode,
+  # which owns every file there, as ROOT_UID does for the root-owned ones).
+  _sm_uid="$(tp_uid_of "$_sm_user")"
+  [ -z "$TP_TEST" ] || _sm_uid="$CALLER_UID"
+  if [ ! -d "$_sm_home/home" ] || [ -L "$_sm_home/home" ] ||
+    [ "$(stat -c '%u' -- "$_sm_home/home")" != "$_sm_uid" ]; then
+    echo "$_sm_user: $_sm_home/home is not a directory the principal owns"
+  fi
+  tp_principal_home_ok "$(tp_getent passwd "$_sm_user" | cut -d: -f6)" "$_sm_user" ||
+    echo "$_sm_user: passwd home is not $_sm_home/home"
+  if tp_group_members "$SHELL_GROUP" | grep -qx -- "$_sm_user"; then
+    echo "$_sm_user: in both $SFTP_GROUP and $SHELL_GROUP; the jail would leave it no shell"
+  fi
+  return 0
+}
+
+# Prints one line per finding; fails if there is any.
+tp_sftp_chroot_check() {
+  _sc_out="$(
+    tp_chroot_parents_check
+    tp_sftp_members | sort -u | while IFS= read -r _sc_user; do
+      [ -z "$_sc_user" ] || tp_sftp_member_check "$_sc_user"
+    done
+  )"
+  [ -n "$_sc_out" ] || return 0
+  printf '%s\n' "$_sc_out"
+  return 1
+}
+
+tp_sftp_chroot_is_on() {
+  [ -f "$SFTP_CHROOT_SWITCH" ] && [ ! -L "$SFTP_CHROOT_SWITCH" ]
+}
+
+# The effective sshd config jails every member: an administrator's earlier
+# Match, or a drop-in sorted before ours, could otherwise silently win.
+tp_sftp_chroot_verify() {
+  _sv_out="$(
+    tp_sftp_members | sort -u | while IFS= read -r _sv_user; do
+      [ -n "$_sv_user" ] || continue
+      tp_name_shape_ok "$_sv_user" || { echo "$_sv_user: not a valid account name"; continue; }
+      _sv_spec="user=$_sv_user,host=localhost,addr=127.0.0.1"
+      if [ -n "$TP_TEST" ]; then
+        tp_run /usr/sbin/sshd -T -C "$_sv_spec" >&2
+        continue
+      fi
+      _sv_eff="$(/usr/sbin/sshd -T -C "$_sv_spec" 2>&1)" || { echo "$_sv_user: sshd -T failed"; continue; }
+      printf '%s\n' "$_sv_eff" | grep -qx "chrootdirectory $R_PRINCIPALS/%u" ||
+        echo "$_sv_user: effective ChrootDirectory is not $R_PRINCIPALS/%u"
+      printf '%s\n' "$_sv_eff" | grep -qx "forcecommand internal-sftp -d $SFTP_START_DIR" ||
+        echo "$_sv_user: effective ForceCommand is not internal-sftp -d $SFTP_START_DIR"
+    done
+  )"
+  [ -n "$_sv_out" ] || return 0
+  printf '%s\n' "$_sv_out"
+  return 1
+}
+
+tp_verb_sftp_chroot() {
+  [ "$#" -eq 1 ] || tp_die "sftp-chroot: only check, verify, on, off or status"
+  case "$1" in
+    status)
+      if tp_sftp_chroot_is_on; then
+        echo "on $R_PRINCIPALS"
+      else
+        echo off
+      fi
+      ;;
+    check) tp_sftp_chroot_check ;;
+    verify)
+      tp_sftp_chroot_is_on || tp_die "sftp-chroot: verify needs the switch on"
+      tp_sftp_chroot_verify
+      ;;
+    on)
+      tp_sftp_chroot_check >&2 ||
+        tp_die "sftp-chroot: refusing to switch on until every $SFTP_GROUP member is on the new home layout"
+      printf 'on\n' | tp_put_file "$SFTP_CHROOT_SWITCH" 0644 root root
+      ;;
+    off)
+      tp_pin_parent "$SFTP_CHROOT_SWITCH" || tp_die "no such directory for $SFTP_CHROOT_SWITCH"
+      rm -f -- "./$PIN_NAME"
+      ;;
+    *) tp_die "sftp-chroot: only check, verify, on, off or status" ;;
+  esac
 }
 
 tp_verb_ss() {
@@ -2543,6 +2733,10 @@ tp_verb_build_return() {
 # caller's, and every check runs on the frozen, root-owned tree. The principal
 # cannot reach the staging area at all.
 
+PUBLISH_LOCK_WAIT_SEC=60
+# A leaf older than a build's runtime cap (1800 s) twice over is abandoned.
+PUBLISH_STALE_MIN=60
+
 tp_release_id_ok() {
   case "$1" in
     ''|[!0-9A-Za-z]*|*[!0-9A-Za-z_-]*) return 1 ;;
@@ -2569,6 +2763,8 @@ tp_publish_args() {
 # create it (the home root is root's), so a foreign owner is refused.
 tp_staging_pin() {
   tp_pin_dir "$R_PRINCIPALS" || tp_die "no principal home root $R_PRINCIPALS"
+  tp_dir_sealed_at . ||
+    tp_die "refusing $R_PRINCIPALS: not sealed (root-owned, not group- or world-writable)"
   mkdir -m 0710 -- ./.tp-staging 2>/dev/null || true
   tp_pin_dir "$R_STAGING" || tp_die "cannot enter $R_STAGING"
   [ "$(stat -c '%u' .)" = "$ROOT_UID" ] || tp_die "refusing $R_STAGING: not root-owned"
@@ -2576,9 +2772,25 @@ tp_staging_pin() {
   tp_run chown -h -- "root:$CALLER_GID" .
 }
 
+# One publish-open or publish per release name at a time, on a root-only lock.
+tp_publish_lock() {
+  _lk_dir="$P/run/tp-publish"
+  mkdir -m 0700 -- "$_lk_dir" 2>/dev/null || true
+  [ -d "$_lk_dir" ] && [ ! -L "$_lk_dir" ] &&
+    [ "$(stat -c '%u %a' "$_lk_dir")" = "$ROOT_UID 700" ] ||
+    tp_die "refusing lock directory $_lk_dir"
+  exec 8>>"$_lk_dir/$PUB_NAME.lock"
+  flock -w "$PUBLISH_LOCK_WAIT_SEC" 8 ||
+    tp_die "$_verb: $PUB_NAME is held by another publish"
+}
+
 tp_verb_publish_open() {
   tp_publish_args "$@"
+  tp_publish_lock
   tp_staging_pin
+  # Leaves no publish came back for (a daemon that died mid-deploy).
+  find . -mindepth 1 -maxdepth 1 -type d -name '?*.?*.?*' -mmin +"$PUBLISH_STALE_MIN" \
+    -exec rm -rf -- {} +
   # A leaf a dead publish left behind is root's or the caller's: start clean.
   rm -rf -- "./$PUB_NAME"
   mkdir -m 0700 -- "./$PUB_NAME"
@@ -2605,27 +2817,35 @@ tp_publish_seal() {
   # From here the caller can no longer enter the leaf by name.
   tp_run chown -h -- root:root .
   chmod 0700 .
+  # The tree that must end up at releases/<id>, and nothing else.
+  PUB_INODE="$(stat -c '%d:%i' .)"
   # Before any chown -R: a hard link would re-own an inode outside the tree.
   tp_publish_refuse_found "hard-linked file" -type f -links +1
   tp_publish_refuse_found "special file" ! -type f ! -type d ! -type l
+  # Absolute targets name the staging path, another home or the host; only a
+  # relative link can stay inside the release once it is renamed.
+  tp_publish_refuse_found "absolute symlink" -type l -lname '/*'
   # The layout links shared/ itself, after every check.
   [ ! -e ./shared ] && [ ! -L ./shared ] ||
     tp_die "publish: refusing $PUB_NAME: it ships its own shared entry"
   tp_run chown -R -h -P -- "root:$PUB_USER-grp" .
   # GNU chmod -R does not follow a link met during the walk.
-  chmod -R u-s,g-s,go-w,g+rX,o-rwx .
+  chmod -R u-s,g-s,a-t,go-w,g+rX,o-rwx .
   tp_publish_refuse_found "unsealed entry" ! -type l \( ! -user "$ROOT_UID" -o -perm /7022 \)
 }
 
-# Every symlink, resolved physically on the frozen tree, must stay inside it.
-# A lexical check is not enough (s1/s2/up -> ../.. with s1/s2/s3/x ->
-# ../up/.. names the release's parent). A loop or unreadable link fails it.
+# Every symlink, resolved physically on the frozen tree, must stay inside it
+# and out of <leaf>/shared, which becomes the tenant's writable shared/ once
+# the layout links it (release-links.ts). A lexical check is not enough
+# (s1/s2/up -> ../.. with s1/s2/s3/x -> ../up/.. names the release's parent).
+# A loop or unreadable link fails it.
 tp_publish_links() {
   _pl_root="$(pwd -P)"
   _pl_out="$(find -P . -type l -exec realpath -m -- {} + && echo :ok)" ||
     tp_die "publish: refusing $PUB_NAME: a symlink cannot be resolved"
   _pl_bad="$(printf '%s\n' "${_pl_out%:ok}" | awk -v r="$_pl_root" \
-    'length($0) && $0 != r && index($0, r "/") != 1 { print; exit }')"
+    'length($0) && ($0 == r "/shared" || index($0, r "/shared/") == 1 ||
+      ($0 != r && index($0, r "/") != 1)) { print; exit }')"
   [ -z "$_pl_bad" ] ||
     tp_die "publish: refusing $PUB_NAME: a symlink resolves outside the release ($_pl_bad)"
 }
@@ -2641,15 +2861,35 @@ tp_publish_pin_releases() {
   done
 }
 
-# From the sealed leaf to releases/<id>: rename(2) only, never a copy.
+# A home on its own filesystem: the sealed leaf is root's and frozen, so root
+# copies it to a root-only name beside the release and renames that. Sets
+# PUB_INODE to the copy.
+tp_publish_copy_across() {
+  _ca_tmp=".tp-publish.$PUB_ID"
+  rm -rf -- "./$_ca_tmp"
+  mkdir -m 0700 -- "./$_ca_tmp"
+  PUB_INODE="$(stat -c '%d:%i' "./$_ca_tmp")"
+  cp -a -- "$PUB_LEAF/." "./$_ca_tmp/"
+  mv -T -- "./$_ca_tmp" "./$PUB_ID"
+  rm -rf -- "$PUB_LEAF"
+}
+
+# From the sealed leaf to releases/<id>: rename(2) on the same filesystem as
+# this home's releases/ (checked per home), a root copy of the frozen leaf
+# otherwise. Whatever lands at releases/<id> must be that tree (dev:ino)
+# before it is linked, opened up to 0550 or made current.
 tp_publish_place() {
-  _pp_dev="$(stat -c %d .)"
+  _pp_dev="${PUB_INODE%%:*}"
   tp_publish_pin_releases
-  [ "$(stat -c %d .)" = "$_pp_dev" ] ||
-    tp_die "publish: $R_STAGING and $PUB_SITE/releases are on different filesystems"
   [ ! -e "./$PUB_ID" ] && [ ! -L "./$PUB_ID" ] ||
     tp_die "publish: refusing $PUB_SITE/releases/$PUB_ID: it already exists"
-  mv -T -- "$PUB_LEAF" "./$PUB_ID"
+  if [ "$(stat -c %d .)" = "$_pp_dev" ]; then
+    mv -T -- "$PUB_LEAF" "./$PUB_ID"
+  else
+    tp_publish_copy_across
+  fi
+  [ ! -L "./$PUB_ID" ] && [ "$(stat -c '%d:%i' "./$PUB_ID")" = "$PUB_INODE" ] ||
+    tp_die "publish: refusing $PUB_SITE/releases/$PUB_ID: not the sealed tree"
   ln -s -T -- ../../shared "./$PUB_ID/shared"
   tp_run chown -h -- "root:$PUB_USER-grp" "./$PUB_ID/shared"
   chmod 0550 "./$PUB_ID"
@@ -2666,12 +2906,16 @@ tp_publish_swap() {
   if [ -d ./current ] && [ ! -L ./current ]; then
     tp_die "publish: refusing $PUB_SITE/current: a directory, not a link"
   fi
+  [ ! -L "./releases/$PUB_ID" ] &&
+    [ "$(stat -c '%d:%i' "./releases/$PUB_ID")" = "$PUB_INODE" ] ||
+    tp_die "publish: refusing $PUB_SITE/releases/$PUB_ID: not the sealed tree"
   ln -s -T -- "releases/$PUB_ID" "./$_sw_tmp"
   mv -T -f -- "./$_sw_tmp" ./current
 }
 
 tp_verb_publish() {
   tp_publish_args "$@"
+  tp_publish_lock
   tp_staging_pin
   tp_pin_dir "$PUB_LEAF" || tp_die "publish: no staging directory $PUB_LEAF (publish-open first)"
   [ "$(stat -c '%u' .)" = "$CALLER_UID" ] ||
@@ -2714,6 +2958,7 @@ case "$_verb" in
   systemctl) tp_verb_systemctl "$@" ;;
   journalctl) tp_verb_journalctl "$@" ;;
   sshd) tp_verb_sshd "$@" ;;
+  sftp-chroot) tp_verb_sftp_chroot "$@" ;;
   ss) tp_verb_ss "$@" ;;
   sysctl) tp_verb_sysctl "$@" ;;
   iptables|ip6tables|iptables-restore|ip6tables-restore|iptables-save|ip6tables-save)

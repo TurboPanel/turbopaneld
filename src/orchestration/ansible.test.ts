@@ -1749,12 +1749,39 @@ test("site apply playbooks vendor engines (never apt nginx/apache2)", async () =
     /site_caddy_service_user:\s*tpcaddysite/,
     "site caddy service user",
   );
-  // Three Caddy admin endpoints now exist (2019 dev control plane, 2029 edge,
-  // 2039 sites); a collision crash-loops the unit.
+  // Audit P0-1: the admin API is a unix socket in the unit's 0700
+  // RuntimeDirectory, never loopback TCP. 2039 now serves read-only metrics.
   assertMatch(
     siteCaddyDefaults,
-    /site_caddy_admin_addr:\s*"127\.0\.0\.1:2039"/,
-    "site caddy admin port",
+    /site_caddy_admin_socket:\s*"\/run\/\{\{ site_caddy_runtime_dir \}\}\/admin\.sock"/,
+    "site caddy admin socket",
+  );
+  assertMatch(
+    siteCaddyDefaults,
+    /^site_caddy_metrics_port:\s*2039$/m,
+    "site caddy metrics port",
+  );
+  // The metrics server stays on loopback: a site address alone binds every
+  // interface.
+  assertMatch(
+    await Deno.readTextFile(
+      join(
+        CHECKOUT_ORCHESTRATION_DIR,
+        "roles/site-caddy/templates/Caddyfile.j2",
+      ),
+    ),
+    /^http:\/\/127\.0\.0\.1:\{\{ site_caddy_metrics_port \}\} \{\n\tbind 127\.0\.0\.1\n\tmetrics\n\}$/m,
+    "site caddy metrics server is loopback-only and serves metrics alone",
+  );
+  assertMatch(
+    siteCaddyUnit,
+    /^RuntimeDirectory=\{\{ site_caddy_runtime_dir \}\}\nRuntimeDirectoryMode=0700$/m,
+    "site caddy admin socket directory",
+  );
+  assertMatch(
+    siteCaddyUnit,
+    / --adapter caddyfile --address unix\/\{\{ site_caddy_admin_socket \}\}$/m,
+    "site caddy reloads through the admin socket",
   );
 
   // A zero-match import glob is an error in Caddy, so the placeholder has to

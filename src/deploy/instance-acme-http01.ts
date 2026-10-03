@@ -104,7 +104,7 @@ const PREFLIGHT_TIMEOUT_MS = 8_000;
 const POLL_MS = 500;
 /**
  * `Type=simple` reports hosting Caddy active as soon as `caddy run` is
- * forked. `:80` (and admin `:2029`) bind a few milliseconds later. Bounded
+ * forked. `:80` (and the admin socket) bind a few milliseconds later. Bounded
  * by attempts so an injected `sleep` keeps tests instant.
  */
 const HOSTING_CADDY_READY_ATTEMPTS = 20;
@@ -291,7 +291,7 @@ export async function openInstanceAcmeWindow(
       throw new Error(port80HeldMessage(holder.process));
     }
     // Write before start: the unit is Type=simple, so enable --now returns
-    // before admin :2029 exists. ExecReload then fails with connection
+    // before the admin socket exists. ExecReload then fails with connection
     // refused. A first start must load this snippet as the initial config.
     wroteSite = true;
     await writeTextPrivileged(

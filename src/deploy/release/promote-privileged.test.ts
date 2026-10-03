@@ -22,6 +22,7 @@ import {
   swapCurrentSymlink,
 } from "./promote.ts";
 import type { ReleaseManifestV1 } from "./deployment-json.ts";
+import { releaseLinkTargetsFindArgs } from "./release-links.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -625,7 +626,7 @@ async function promoteManaged(
 
 test("promoteRelease publishes a managed-host release through tp-host only", async () => {
   await withTempRelease(async (root) => {
-    const { argv, seen } = await promoteManaged(
+    const { argv, paths, seen } = await promoteManaged(
       root,
       () => SUDO_OK,
       async (workingDir) => {
@@ -635,6 +636,8 @@ test("promoteRelease publishes a managed-host release through tp-host only", asy
     );
     assertEquals(argv, [
       ["-n", "publish-open", "appuser", "svc-1", "rel-1"],
+      // #239's staged-link check, on the leaf, before anything is sealed.
+      ["-n", ...releaseLinkTargetsFindArgs(paths.stagingDir)],
       ["-n", "publish", "appuser", "svc-1", "rel-1"],
     ]);
     // The manifest and the payload were staged before publish ran.
@@ -780,7 +783,12 @@ test("promoteRelease swallows a failed privileged cleanup", async () => {
             workingDir,
             username: "appuser",
             healthProbe: () => Promise.reject(new Error("probe failed")),
-            runFn: () => Promise.reject(new TypeError("sudo rm failed")),
+            // The staged link listing succeeds (no links); only the cleanup's
+            // privileged remove fails.
+            runFn: (_command, args) =>
+              args.includes("rm")
+                ? Promise.reject(new TypeError("sudo rm failed"))
+                : Promise.resolve({ success: true, stdout: "", stderr: "" }),
           }),
         Error,
         "probe failed",
@@ -1112,5 +1120,31 @@ test("promoteExistingRelease surfaces a stat failure other than denial", async (
       Deno.stat = originalStat;
     }
     assertEquals(calls, []);
+  });
+});
+
+test("promoteRelease refuses a staged link into shared before publish runs", async () => {
+  await withTempRelease(async (root) => {
+    const paths = resolveReleasePaths(
+      { principalHomeRoot: root, daemonStateDir: join(root, "state") },
+      { username: "appuser", serviceId: "svc-1", releaseId: "rel-1" },
+    );
+    const argv: string[][] = [];
+    await assertRejects(
+      () =>
+        promoteManaged(root, (args) => {
+          argv.push(args);
+          return args.includes("find")
+            ? {
+              success: true,
+              stdout: `${paths.stagingDir}/shared/uploads\0`,
+              stderr: "",
+            }
+            : SUDO_OK;
+        }),
+      Error,
+      "reach into",
+    );
+    assertEquals(argv.some((args) => args.includes("publish")), false);
   });
 });

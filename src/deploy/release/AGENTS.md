@@ -66,6 +66,20 @@ native runtime relies on the same convention rather than inventing a
 second one. A build that ships its own `shared` entry is replaced — the link is
 part of the layout contract, not payload.
 
+**No release link may leave the release or reach into `shared`**
+(`release-links.ts`). `shared/` is tenant-writable, so a shipped
+`public/x -> ../shared/evil` is a second hop the tenant can repoint at another
+principal's sealed, root-owned file after publish; the engines' owner-match
+rules compare only the first link (root, from the seal) with the final target
+(root) and would serve it. `promoteRelease` therefore removes the build's own
+`shared` entry, lists every link with `realpath -m` **before** the layout link
+exists (so a `shared/…` tail resolves under `<releaseDir>/shared`, never through
+the tenant's real directory), and refuses the release if any target is outside
+the release or under `shared`. Apps reach `shared/` by path (`current/shared`,
+PHP `open_basedir`), not through a link the build ships. nginx additionally
+serves a release-backed document root with `disable_symlinks on`; Apache keeps
+`SymLinksIfOwnerMatch`, because `.htaccess` `RewriteRule` needs it.
+
 A published release is **read-only to the runtime user** on purpose: an app
 process that can rewrite its own code turns any RCE into persistence. That is an
 *ownership* rule, not only a mode: `sites/<serviceId>` and `releases/` are
@@ -156,9 +170,21 @@ share `st_dev`, and `releases/<id>` not to exist, then `mv -T`s the leaf into
 place, links `shared → ../../shared`, drops the top to `0550` and swaps
 `current`. A directory planted at `current` or `current.tmp.<id>` is refused
 (and the generic `ln` uses `-T`, so the rollback swap never links into one).
-Any refusal before the rename removes the leaf. The publish-time containment
-check is stricter than `release-links.ts` (which only keeps links out of other
-homes) and replaces it on this path; the in-place path still runs that one.
+Any refusal before the rename removes the leaf. tp-host also refuses absolute
+link targets (a link to the staging path would dangle or reach another leaf
+once renamed) and links resolving to or under the leaf's `shared`, clears the
+sticky bit in the seal, holds a per-release `flock` (`/run/tp-publish/`) over
+`publish-open` and `publish`, requires the home root itself to be sealed,
+sweeps leaves older than an hour, and checks that `releases/<id>` is the
+sealed leaf (`dev:ino`) before it links, opens to `0550` or swaps `current`.
+When a home's `releases/` is on another filesystem than the staging area, the
+sealed, root-owned leaf is copied by root to a root-only name beside the
+release and renamed in. The daemon runs `release-links.ts`'s
+`assertStagedLinksStayInRelease` on the leaf before `publish` (the in-place
+path runs it plus `assertReleaseLinksStayHome` after the seal). A re-sent
+deploy of a release this host already published (same id and commit in the
+daemon's record, tree present) is cut over to like a rollback instead of
+being rebuilt.
 
 **Symlink-safe hand-off** (`safe-copy.ts`). The build controls every name in
 its tree, so every copy out of it — the stage into `releases/<releaseId>/` and

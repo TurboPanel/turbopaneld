@@ -96,10 +96,10 @@ test("publish seals every entry, not only the top, and swaps current", async () 
     await Deno.chmod(join(leaf, "cache/data"), 0o666);
     await Deno.writeTextFile(join(leaf, "tool"), "#!/bin/sh\n");
     await Deno.chmod(join(leaf, "tool"), 0o4755);
-    // In-tree links stay; `uploads -> shared/uploads` is checked before the
-    // layout's own shared link exists, so it resolves inside the leaf.
+    await Deno.mkdir(join(leaf, "drop"));
+    await Deno.chmod(join(leaf, "drop"), 0o1777);
+    // In-tree links stay.
     await Deno.symlink("index.html", join(leaf, "home.html"));
-    await Deno.symlink("shared/uploads", join(leaf, "uploads"));
 
     const result = await host.run(["publish", "alice", "web", "r1"]);
     assertEquals(result.code, 0, result.stderr);
@@ -111,6 +111,8 @@ test("publish seals every entry, not only the top, and swaps current", async () 
     const release = host.path(`${SITE}/releases/r1`);
     assertEquals(mode(await Deno.stat(release)), 0o550);
     assertEquals(await unsealedEntries(release), []);
+    // The sticky bit goes too, not only set-id and g/o write.
+    assertEquals(mode(await Deno.stat(join(release, "drop"))), 0o750);
     assertEquals(await Deno.readLink(join(release, "shared")), "../../shared");
     assertEquals(
       await Deno.readLink(host.path(`${SITE}/current`)),
@@ -123,8 +125,10 @@ test("publish seals every entry, not only the top, and swaps current", async () 
 
 test("publish refuses a symlink that resolves outside the release", async () => {
   const hostile: Array<[string, Array<[string, string]>]> = [
-    ["absolute", [["/etc/passwd", "passwd"]]],
     ["another home", [["../../../../bob/sites/app/current", "bob"]]],
+    // shared/ does not exist yet; once linked it is the tenant's to repoint.
+    ["into shared", [["shared/uploads", "uploads"]]],
+    ["shared itself", [["../shared", "public/s"]]],
     // Both look inside lexically; the kernel resolves x to the parent.
     ["two-link chain", [["../..", "s1/s2/up"], ["../up/..", "s1/s2/s3/x"]]],
   ];
@@ -143,6 +147,19 @@ test("publish refuses a symlink that resolves outside the release", async () => 
   }
 });
 
+test("publish refuses absolute symlinks, the staging path included", async () => {
+  await withHost(async (host) => {
+    // Inside the leaf at check time, dangling or another leaf once renamed.
+    const leaf = await openRelease(host);
+    await Deno.symlink(join(leaf, "index.html"), join(leaf, "self"));
+    assertStringIncludes(await publishRefused(host), "absolute symlink");
+
+    const leaf2 = await openRelease(host);
+    await Deno.symlink("/etc/passwd", join(leaf2, "passwd"));
+    assertStringIncludes(await publishRefused(host), "absolute symlink");
+  });
+});
+
 test("publish refuses hard links, special files and a shipped shared entry", async () => {
   await withHost(async (host) => {
     const leaf = await openRelease(host);
@@ -157,7 +174,7 @@ test("publish refuses hard links, special files and a shipped shared entry", asy
     assertStringIncludes(await publishRefused(host), "special file");
 
     const leaf3 = await openRelease(host);
-    await Deno.symlink("/srv/users/bob", join(leaf3, "shared"));
+    await Deno.symlink("index.html", join(leaf3, "shared"));
     assertStringIncludes(await publishRefused(host), "its own shared entry");
   });
 });
@@ -278,5 +295,76 @@ test("the staging area and release directories are closed to generic verbs", asy
       await refused(host, args);
     }
     assertEquals(await exists(release), false);
+  });
+});
+
+test("publish-open and publish wait for another call on the same release", async () => {
+  await withHost(async (host) => {
+    await openRelease(host);
+    const lock = host.path("run/tp-publish/alice.web.r1.lock");
+    assertEquals(await exists(lock), true);
+    const holder = new Deno.Command("flock", {
+      args: [lock, "sleep", "1.5"],
+    }).spawn();
+    // Let the holder take the lock first.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const started = Date.now();
+    const again = await host.run(["publish-open", "alice", "web", "r1"]);
+    const waited = Date.now() - started;
+    await holder.status;
+    assertEquals(again.code, 0, again.stderr);
+    assertEquals(waited >= 900, true, `did not wait (${waited} ms)`);
+  });
+});
+
+test("publish-open sweeps abandoned leaves and keeps fresh ones", async () => {
+  await withHost(async (host) => {
+    const fresh = await openRelease(host, "r1");
+    const stale = host.path("srv/users/.tp-staging/alice.web.old");
+    await Deno.mkdir(stale);
+    const old = new Date(Date.now() - 3 * 3600 * 1000);
+    await Deno.utime(stale, old, old);
+    const opened = await host.run(["publish-open", "alice", "web", "r2"]);
+    assertEquals(opened.code, 0, opened.stderr);
+    assertEquals(await exists(stale), false);
+    assertEquals(await exists(fresh), true);
+  });
+});
+
+test("publish-open refuses a home root others can write", async () => {
+  await withHost(async (host) => {
+    await Deno.mkdir(host.path(`${SITE}/releases`), { recursive: true });
+    await Deno.chmod(host.path("srv/users"), 0o777);
+    try {
+      const opened = await host.run(["publish-open", "alice", "web", "r1"]);
+      assertEquals(opened.code === 0, false, "opened under a writable root");
+      assertStringIncludes(opened.stderr, "not sealed");
+      assertEquals(await exists(host.path("srv/users/.tp-staging")), false);
+    } finally {
+      await Deno.chmod(host.path("srv/users"), 0o755);
+    }
+  });
+});
+
+test("the home root is never handed to anyone but root", async () => {
+  await withHost(async (host) => {
+    const root = host.path("srv/users");
+    for (const owner of [["tp"], ["tp", "tp"], ["root", "tp"], ["alice"]]) {
+      const args = ["install", "-d", "-m", "0750", "-o", owner[0]];
+      if (owner[1]) args.push("-g", owner[1]);
+      await refused(host, [...args, root]);
+    }
+    const ok = await host.run([
+      "install",
+      "-d",
+      "-m",
+      "0750",
+      "-o",
+      "root",
+      "-g",
+      "root",
+      root,
+    ]);
+    assertEquals(ok.code, 0, ok.stderr);
   });
 });

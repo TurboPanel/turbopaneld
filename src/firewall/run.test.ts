@@ -24,6 +24,25 @@ test("the sudo retry fires on the kernel spellings and on sshd's own 'no hostkey
   assertFalse(isPermissionDeniedText({ ...ok, stderr: "no such chain" }));
 });
 
+test("the sudo retry fires on systemctl's polkit refusals (arming the guard timer as tp)", () => {
+  // `systemctl restart turbopanel-firewall-guard.timer` as tp on Debian 13.
+  assert(isPermissionDeniedText({
+    success: false,
+    code: 4,
+    stdout: "",
+    stderr:
+      "Failed to restart turbopanel-firewall-guard.timer: Access denied\n" +
+      "See system logs and 'systemctl status turbopanel-firewall-guard.timer' for details.",
+  }));
+  assert(isPermissionDeniedText({
+    success: false,
+    code: 1,
+    stdout: "",
+    stderr:
+      "Failed to restart turbopanel-firewall-guard.timer: Interactive authentication required.",
+  }));
+});
+
 test("sshd -T that reached the caller still saying 'no hostkeys' is a detection failure, not an empty port set", async () => {
   const result = await readSshdEffectivePorts(() =>
     Promise.resolve({

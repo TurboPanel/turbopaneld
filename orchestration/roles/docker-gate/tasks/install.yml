@@ -9,6 +9,44 @@
   ansible.builtin.set_fact:
     docker_gate_gid: "{{ (getent_group[docker_gate_group] | default(['', ''], true))[1] | default('') }}"
 
+# Stage 4: the build socket's group. A missing build user is an error, never
+# a build socket nobody can open.
+- name: Look up the daemon account that may open the build socket
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ docker_gate_build_user }}"
+    fail_key: true
+
+- name: Ensure the build socket group exists
+  ansible.builtin.group:
+    name: "{{ docker_gate_build_group }}"
+    system: true
+
+- name: Add the daemon account to the build socket group
+  ansible.builtin.user:
+    name: "{{ docker_gate_build_user }}"
+    groups: "{{ docker_gate_build_group }}"
+    append: true
+
+- name: Look up the build socket group id
+  ansible.builtin.getent:
+    database: group
+    key: "{{ docker_gate_build_group }}"
+    fail_key: true
+
+- name: Record the build socket group id
+  ansible.builtin.set_fact:
+    docker_gate_build_gid: "{{ getent_group[docker_gate_build_group][1] }}"
+
+- name: Refuse a build socket group that is not exactly the build user
+  ansible.builtin.assert:
+    that:
+      - (docker_gate_build_gid | string | length) > 0
+      - (getent_group[docker_gate_build_group][2] | default('', true)).split(',') | reject('equalto', '') | list == [docker_gate_build_user]
+    fail_msg: >-
+      {{ docker_gate_build_group }} must hold only {{ docker_gate_build_user }}
+      (it holds: {{ getent_group[docker_gate_build_group][2] | default('', true) }})
+
 # deploy.yml has already staged the files in .next and load-checked them: this
 # only moves checked files into place.
 - name: Install the gate source (root-owned, never writable by the daemon)
@@ -51,6 +89,7 @@
       # Managed by TurboPanel daemon orchestration (docker-gate role).
       d {{ docker_gate_run_dir }} 0750 root {{ docker_gate_group }} -
       d {{ docker_gate_ro_run_dir }} 0750 root root -
+      d {{ docker_gate_build_run_dir }} 0750 root {{ docker_gate_build_group }} -
 
 - name: Ensure the gate socket directory exists
   ansible.builtin.file:
@@ -67,6 +106,16 @@
     state: directory
     owner: root
     group: root
+    mode: "0750"
+
+# Stage 4: the build listener's own directory (build.ts); the socket in it is
+# root:<build group> 0660.
+- name: Ensure the build socket directory exists
+  ansible.builtin.file:
+    path: "{{ docker_gate_build_run_dir }}"
+    state: directory
+    owner: root
+    group: "{{ docker_gate_build_group }}"
     mode: "0750"
 
 # The daemon's switch to the read-only socket for Traefik. Root-owned in the
