@@ -872,7 +872,7 @@ test("a co-located daemon refresh also installs the Docker gate", () => {
   }
 });
 
-test("a rollback puts the saved instance unit back, and the backup keeps it", () => {
+test("a rollback rebuilds the instance unit from the release, never from the backup", () => {
   const backup = readPlaybook("instance-backup.yml");
   const rollback = readPlaybook("instance-rollback.yml");
   if (
@@ -883,9 +883,14 @@ test("a rollback puts the saved instance unit back, and the backup keeps it", ()
     throw new TypeError("instance-backup.yml must keep the instance unit");
   }
   if (
-    !rollback.includes("dest: /etc/systemd/system/turbopanel-instance.service")
+    rollback.includes("dest: /etc/systemd/system/turbopanel-instance.service")
   ) {
-    throw new TypeError("instance-rollback.yml must restore the instance unit");
+    throw new TypeError(
+      "instance-rollback.yml must not copy the instance unit from the backup",
+    );
+  }
+  if (!rollback.includes("Rebuild the instance unit from the release tree")) {
+    throw new TypeError("instance-rollback.yml must rebuild the instance unit");
   }
 });
 
