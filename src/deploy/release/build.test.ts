@@ -153,6 +153,54 @@ test("framework next without standalone or export ships the tree with a warning"
   });
 });
 
+test("the Next fold refuses links the build planted at either end", async () => {
+  const cases: Array<(workingDir: string, outside: string) => Promise<void>> = [
+    // A link at the fold's destination directory.
+    async (workingDir, outside) => {
+      await seedStandalone(workingDir);
+      await Deno.symlink(
+        outside,
+        join(workingDir, NEXT_STANDALONE_DIR, ".next"),
+      );
+    },
+    // A link as the fold's source.
+    async (workingDir, outside) => {
+      await seedStandalone(workingDir);
+      await Deno.remove(join(workingDir, ".next", "static"), {
+        recursive: true,
+      });
+      await Deno.symlink(outside, join(workingDir, ".next", "static"));
+    },
+    // The standalone tree or the export itself is a link.
+    async (workingDir, outside) => {
+      await Deno.mkdir(join(workingDir, ".next"));
+      await Deno.symlink(outside, join(workingDir, NEXT_STANDALONE_DIR));
+    },
+    async (workingDir, outside) => {
+      await Deno.symlink(outside, join(workingDir, NEXT_EXPORT_DIR));
+    },
+  ];
+  for (const plant of cases) {
+    await withWorkingDir(async (root) => {
+      const workingDir = join(root, "build");
+      const outside = join(root, "daemon-state");
+      await Deno.mkdir(workingDir);
+      await Deno.mkdir(outside);
+      await Deno.writeTextFile(join(outside, "index.html"), "secret");
+      await plant(workingDir, outside);
+      await assertRejects(
+        () => prepareNativeAppBuildOutput({ framework: "next", workingDir }),
+        Error,
+        "symlink",
+      );
+      assertEquals(
+        [...Deno.readDirSync(outside)].map((entry) => entry.name),
+        ["index.html"],
+      );
+    });
+  }
+});
+
 test("standalone fold also copies public/ when present", async () => {
   await withWorkingDir(async (workingDir) => {
     await seedStandalone(workingDir);

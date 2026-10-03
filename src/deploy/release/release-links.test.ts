@@ -95,18 +95,19 @@ test("promoteRelease refuses a release that links into another principal's home"
     const workingDir = join(root, "checkout");
     await Deno.mkdir(join(workingDir, "public"), { recursive: true });
     await Deno.writeTextFile(join(workingDir, "public", "index.html"), "hi");
-    // Relative, so the copy keeps pointing at bob's tree from the release.
-    await Deno.symlink(
-      "../../../../../../bob/sites/app/config.php",
-      join(workingDir, "public", "leak.txt"),
-    );
-
+    // The hand-off copy already drops a link that leaves the checkout, so
+    // plant it in the staged release, as anything that writes there after the
+    // copy could: the post-seal check must still refuse it.
     const err = await assertRejects(() =>
       promoteRelease({
         paths,
         workingDir,
         username: "alice",
-        healthProbe: () => Promise.resolve(),
+        healthProbe: (releaseDir) =>
+          Deno.symlink(
+            "../../../../../../bob/sites/app/config.php",
+            join(releaseDir, "public", "leak.txt"),
+          ),
         runFn: runSeam,
       })
     );

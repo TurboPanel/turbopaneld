@@ -55,107 +55,124 @@ async function withTempRelease(
   }
 }
 
-test("stageRelease copies via sudo when the unprivileged copy is denied", async () => {
-  await withTempRelease(async (root) => {
-    const paths = resolveReleasePaths(
-      { principalHomeRoot: root, daemonStateDir: join(root, "state") },
-      { username: "appuser", serviceId: "svc-1", releaseId: "rel-1" },
-    );
-    await Deno.mkdir(paths.releaseDir, { recursive: true });
-    const workingDir = join(root, "checkout");
-    await Deno.mkdir(workingDir, { recursive: true });
-    await Deno.writeTextFile(join(workingDir, "index.html"), "built");
+type SudoResult = { success: boolean; stdout: string; stderr: string };
 
-    const argv: string[][] = [];
-    const originalMkdir = Deno.mkdir;
-    Deno.mkdir = ((...args: Parameters<typeof Deno.mkdir>) => {
-      if (String(args[0]) === paths.releaseDir) {
-        return Promise.reject(denied("mkdir"));
-      }
-      return originalMkdir.apply(Deno, args);
-    }) as typeof Deno.mkdir;
-    try {
-      await stageRelease({
-        paths,
-        workingDir,
-        runFn: (_command, args) => {
-          argv.push([...args]);
-          return Promise.resolve({ success: true, stdout: "", stderr: "" });
-        },
-      });
-    } finally {
-      Deno.mkdir = originalMkdir;
+/**
+ * Stage into a release directory this process may not create (the managed-host
+ * case), recording every sudo argv and answering with `respond`.
+ */
+async function stageWithDeniedReleaseDir(
+  root: string,
+  respond: (args: string[]) => SudoResult,
+): Promise<{ argv: string[][]; handoffDir: string }> {
+  const paths = resolveReleasePaths(
+    { principalHomeRoot: root, daemonStateDir: join(root, "state") },
+    { username: "appuser", serviceId: "svc-1", releaseId: "rel-1" },
+  );
+  const workingDir = join(root, "checkout");
+  await Deno.mkdir(workingDir, { recursive: true });
+  await Deno.writeTextFile(join(workingDir, "index.html"), "built");
+  await Deno.symlink("/etc", join(workingDir, "etc"));
+  const argv: string[][] = [];
+  const originalMkdir = Deno.mkdir;
+  Deno.mkdir = ((...args: Parameters<typeof Deno.mkdir>) => {
+    if (String(args[0]) === paths.releaseDir) {
+      return Promise.reject(denied("mkdir"));
     }
+    return originalMkdir.apply(Deno, args);
+  }) as typeof Deno.mkdir;
+  try {
+    await stageRelease({
+      paths,
+      workingDir,
+      runFn: (_command, args) => {
+        argv.push([...args]);
+        return Promise.resolve(respond([...args]));
+      },
+    });
+  } finally {
+    Deno.mkdir = originalMkdir;
+  }
+  return { argv, handoffDir: paths.handoffDir };
+}
 
+const SUDO_OK: SudoResult = { success: true, stdout: "", stderr: "" };
+
+test("stageRelease hands root only the daemon's checked copy", async () => {
+  await withTempRelease(async (root) => {
+    const handoff = join(root, "state", "release-handoff", "svc-1", "rel-1");
+    let handoffSeen: string[] = [];
+    const { argv, handoffDir } = await stageWithDeniedReleaseDir(
+      root,
+      (args) => {
+        if (args.includes("cp")) {
+          handoffSeen = [...Deno.readDirSync(handoff)].map((e) => e.name);
+        }
+        return SUDO_OK;
+      },
+    );
+    assertEquals(handoffDir, handoff);
     assertEquals(argv.some((args) => args.includes("mkdir")), true);
-    assertEquals(argv.some((args) => args.includes("cp")), true);
+    const cp = argv.find((args) => args.includes("cp")) ?? [];
+    assertEquals(cp.slice(-2)[0], `${handoffDir}/.`);
+    // The escaping link never reached the tree root copies.
+    assertEquals(handoffSeen, ["index.html"]);
+    await assertRejects(() => Deno.lstat(handoffDir), Deno.errors.NotFound);
   });
 });
 
-test("stageRelease privileged copy throws when sudo mkdir fails", async () => {
+test("stageRelease privileged copy reports sudo mkdir and cp failures", async () => {
+  for (
+    const [failing, stderr, message] of [
+      ["mkdir", "mkdir denied", "mkdir denied"],
+      ["cp", "cp denied", "cp denied"],
+      ["mkdir", "", "Failed to mkdir"],
+      ["cp", "", "Failed to copy"],
+    ]
+  ) {
+    await withTempRelease(async (root) => {
+      await assertRejects(
+        () =>
+          stageWithDeniedReleaseDir(
+            root,
+            (args) =>
+              args.includes(failing)
+                ? { success: false, stdout: "", stderr }
+                : SUDO_OK,
+          ),
+        Error,
+        message,
+      );
+      // The hand-off copy never outlives the stage.
+      await assertRejects(
+        () =>
+          Deno.lstat(join(root, "state", "release-handoff", "svc-1", "rel-1")),
+        Deno.errors.NotFound,
+      );
+    });
+  }
+});
+
+test("stageRelease rethrows a non-NotFound source lstat error", async () => {
   await withTempRelease(async (root) => {
     const paths = resolveReleasePaths(
       { principalHomeRoot: root, daemonStateDir: join(root, "state") },
       { username: "appuser", serviceId: "svc-1", releaseId: "rel-1" },
     );
-    const workingDir = join(root, "checkout");
-    await Deno.mkdir(workingDir, { recursive: true });
-    const originalMkdir = Deno.mkdir;
-    Deno.mkdir = () => Promise.reject(denied("mkdir"));
+    const originalLstat = Deno.lstat;
+    Deno.lstat = () => Promise.reject(new TypeError("lstat io"));
     try {
       await assertRejects(
         () =>
           stageRelease({
             paths,
-            workingDir,
-            runFn: () =>
-              Promise.resolve({
-                success: false,
-                stdout: "",
-                stderr: "mkdir denied",
-              }),
+            workingDir: join(root, "checkout"),
           }),
-        Error,
-        "mkdir denied",
+        TypeError,
+        "lstat io",
       );
     } finally {
-      Deno.mkdir = originalMkdir;
-    }
-  });
-});
-
-test("stageRelease privileged copy throws when sudo cp fails", async () => {
-  await withTempRelease(async (root) => {
-    const paths = resolveReleasePaths(
-      { principalHomeRoot: root, daemonStateDir: join(root, "state") },
-      { username: "appuser", serviceId: "svc-1", releaseId: "rel-1" },
-    );
-    const workingDir = join(root, "checkout");
-    await Deno.mkdir(workingDir, { recursive: true });
-    const originalMkdir = Deno.mkdir;
-    Deno.mkdir = () => Promise.reject(denied("mkdir"));
-    try {
-      await assertRejects(
-        () =>
-          stageRelease({
-            paths,
-            workingDir,
-            runFn: (_command, args) => {
-              if (args.includes("cp")) {
-                return Promise.resolve({
-                  success: false,
-                  stdout: "",
-                  stderr: "cp denied",
-                });
-              }
-              return Promise.resolve({ success: true, stdout: "", stderr: "" });
-            },
-          }),
-        Error,
-        "cp denied",
-      );
-    } finally {
-      Deno.mkdir = originalMkdir;
+      Deno.lstat = originalLstat;
     }
   });
 });
@@ -182,38 +199,6 @@ test("stageRelease rethrows a non-PermissionDenied copy error", async () => {
   });
 });
 
-test("stageRelease rethrows a non-NotFound source stat error", async () => {
-  await withTempRelease(async (root) => {
-    const paths = resolveReleasePaths(
-      { principalHomeRoot: root, daemonStateDir: join(root, "state") },
-      { username: "appuser", serviceId: "svc-1", releaseId: "rel-1" },
-    );
-    const originalStat = Deno.stat;
-    Deno.stat = () => Promise.reject(new TypeError("stat io"));
-    try {
-      await assertRejects(
-        () =>
-          stageRelease({
-            paths,
-            workingDir: join(root, "checkout"),
-          }),
-        TypeError,
-        "stat io",
-      );
-    } finally {
-      Deno.stat = originalStat;
-    }
-  });
-});
-
-/**
- * The unprivileged tier of these ladders is now an `ln` subprocess, not
- * `Deno.symlink` — that API refuses path-scoped grants outright, so the
- * compiled daemon could never have used it (`src/permissions/scoped-writes.ts`). There is
- * no Deno API left to stub, so the failure is produced the way a managed host
- * produces it: the link's parent directory is not writable by this process.
- * Leaving the site directory uncreated fails `ln` for any uid, root included.
- */
 test("linkReleaseSharedDir falls back to sudo when the unprivileged link fails", async () => {
   await withTempRelease(async (root) => {
     const releaseDir = join(root, "releases", "rel-1");
@@ -734,70 +719,6 @@ test("promoteRelease privileged cleanup runs when unprivileged remove fails", as
       ),
       true,
     );
-  });
-});
-
-test("stageRelease privileged copy uses default errors when sudo is silent", async () => {
-  await withTempRelease(async (root) => {
-    const paths = resolveReleasePaths(
-      { principalHomeRoot: root, daemonStateDir: join(root, "state") },
-      { username: "appuser", serviceId: "svc-1", releaseId: "rel-1" },
-    );
-    const workingDir = join(root, "checkout");
-    await Deno.mkdir(workingDir, { recursive: true });
-    const originalMkdir = Deno.mkdir;
-    Deno.mkdir = () => Promise.reject(denied("mkdir"));
-    try {
-      await assertRejects(
-        () =>
-          stageRelease({
-            paths,
-            workingDir,
-            runFn: () =>
-              Promise.resolve({ success: false, stdout: "", stderr: "" }),
-          }),
-        Error,
-        "Failed to mkdir",
-      );
-    } finally {
-      Deno.mkdir = originalMkdir;
-    }
-  });
-});
-
-test("stageRelease privileged copy uses a default error when cp is silent", async () => {
-  await withTempRelease(async (root) => {
-    const paths = resolveReleasePaths(
-      { principalHomeRoot: root, daemonStateDir: join(root, "state") },
-      { username: "appuser", serviceId: "svc-1", releaseId: "rel-1" },
-    );
-    const workingDir = join(root, "checkout");
-    await Deno.mkdir(workingDir, { recursive: true });
-    const originalMkdir = Deno.mkdir;
-    Deno.mkdir = () => Promise.reject(denied("mkdir"));
-    try {
-      await assertRejects(
-        () =>
-          stageRelease({
-            paths,
-            workingDir,
-            runFn: (_command, args) => {
-              if (args.includes("cp")) {
-                return Promise.resolve({
-                  success: false,
-                  stdout: "",
-                  stderr: "",
-                });
-              }
-              return Promise.resolve({ success: true, stdout: "", stderr: "" });
-            },
-          }),
-        Error,
-        "Failed to copy",
-      );
-    } finally {
-      Deno.mkdir = originalMkdir;
-    }
   });
 });
 

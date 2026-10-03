@@ -23,7 +23,7 @@
  * against a tree that was already published by an earlier promote.
  */
 
-import { basename, join } from "@std/path";
+import { basename, dirname, join } from "@std/path";
 import { hostSudoArgs } from "../../permissions/host-sudo.ts";
 import type { RunFn } from "../ensure-principal.ts";
 import { forEachSequential } from "../../util/sequential.ts";
@@ -46,9 +46,11 @@ import {
   type ReleaseManifestV1,
   writeReleaseManifest,
 } from "./deployment-json.ts";
-
-/** Never copied into a release — build metadata, not shipped artifacts. */
-const EXCLUDED_TREE_ENTRIES = new Set([".git"]);
+import {
+  type ContainedPath,
+  copyContainedTree,
+  requireContainedDir,
+} from "./safe-copy.ts";
 
 /**
  * True when the unprivileged attempt could not do the work and the `sudo`
@@ -72,6 +74,11 @@ function isMissingPrivilegedPathError(stderr: string): boolean {
   return text.includes("no such file") || text.includes("not found");
 }
 
+/**
+ * Root's half of the stage: copy the daemon's checked hand-off tree into the
+ * root-owned release. tp-host refuses special and set-id entries and anything
+ * the daemon does not own, and copies without preserving ownership.
+ */
 async function copyTreePrivileged(
   from: string,
   to: string,
@@ -91,10 +98,6 @@ async function copyTreePrivileged(
   if (!cp.success) {
     throw new Error(cp.stderr || `Failed to copy ${from} to ${to}`);
   }
-  await runFn(
-    "sudo",
-    hostSudoArgs(["-n", "rm", "-rf", "--", join(to, ".git")]),
-  );
 }
 
 async function writeReleaseManifestPrivileged(
@@ -290,33 +293,6 @@ async function releasePathExists(
   }
 }
 
-/**
- * Recursive copy without `@std/fs` (not a dependency of this daemon).
- * Symlinks are recreated as symlinks so a `node_modules/.bin` tree survives.
- *
- * Exported because the native-app build path reuses it to fold `.next/static`
- * and `public/` into a Next standalone tree — one copy implementation with one
- * symlink policy, rather than a second one that drifts.
- */
-export async function copyTree(from: string, to: string): Promise<void> {
-  await Deno.mkdir(to, { recursive: true, mode: 0o750 });
-  for await (const entry of Deno.readDir(from)) {
-    if (EXCLUDED_TREE_ENTRIES.has(entry.name)) continue;
-    const source = join(from, entry.name);
-    const target = join(to, entry.name);
-    if (entry.isSymlink) {
-      const linkTarget = await Deno.readLink(source);
-      await createSymlink(linkTarget, target);
-      continue;
-    }
-    if (entry.isDirectory) {
-      await copyTree(source, target);
-      continue;
-    }
-    await Deno.copyFile(source, target);
-  }
-}
-
 export type StageReleaseParams = {
   paths: ReleasePaths;
   /** Checked-out working tree from `checkoutRelease`. */
@@ -338,25 +314,67 @@ export function resolveReleaseSourceDir(params: StageReleaseParams): string {
   return dir;
 }
 
-/** Copy the build output into the (still writable) release directory. */
+/** The release payload as a directory contained in the checkout. */
+function releaseSource(params: StageReleaseParams): ContainedPath {
+  const relative = [params.subdirectory, params.outputDirectory]
+    .filter((part): part is string => Boolean(part))
+    .join("/");
+  return { root: params.workingDir, relative };
+}
+
+async function removeTreeIfPresent(path: string): Promise<void> {
+  try {
+    await Deno.remove(path, { recursive: true });
+  } catch (err) {
+    if (!(err instanceof Deno.errors.NotFound)) throw err;
+  }
+}
+
+/**
+ * The managed-host stage: the daemon cannot write the root-owned release, so
+ * it first makes its own checked copy in a fresh daemon-only directory, and
+ * root copies only that. Root never walks the tree the build wrote.
+ */
+async function stageReleasePrivileged(
+  source: ContainedPath,
+  paths: ReleasePaths,
+  runFn: RunFn,
+): Promise<void> {
+  const handoff = paths.handoffDir;
+  await removeTreeIfPresent(handoff);
+  await Deno.mkdir(dirname(handoff), { recursive: true, mode: 0o700 });
+  // Not recursive: anything that reappeared at this name is refused.
+  await Deno.mkdir(handoff, { mode: 0o700 });
+  try {
+    await copyContainedTree({ source, dest: { root: handoff } });
+    await copyTreePrivileged(handoff, paths.releaseDir, runFn);
+  } finally {
+    await removeTreeIfPresent(handoff);
+  }
+}
+
+/**
+ * Copy the build output into the (still writable) release directory.
+ *
+ * The output directory must be reached from the checkout without a symlink,
+ * and the copy follows none (`./safe-copy.ts`): a build cannot point the
+ * release at, or smuggle into it, anything outside its own tree.
+ */
 export async function stageRelease(
   params: StageReleaseParams & { runFn?: RunFn },
 ): Promise<string> {
-  const sourceDir = resolveReleaseSourceDir(params);
-  const stat = await statOrNull(sourceDir);
-  if (stat === null) {
-    throw new Error(`release output directory not found: ${sourceDir}`);
-  }
-  if (!stat.isDirectory) {
-    throw new Error(`release output is not a directory: ${sourceDir}`);
-  }
+  const source = releaseSource(params);
+  await requireContainedDir(source);
   try {
-    await copyTree(sourceDir, params.paths.releaseDir);
+    await copyContainedTree({
+      source,
+      dest: { root: params.paths.releaseDir },
+    });
   } catch (err) {
     if (!isUnprivilegedFailure(err)) throw err;
-    await copyTreePrivileged(
-      sourceDir,
-      params.paths.releaseDir,
+    await stageReleasePrivileged(
+      source,
+      params.paths,
       params.runFn ?? runPrivileged,
     );
   }

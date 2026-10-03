@@ -152,6 +152,7 @@ test("resolveReleasePaths puts scratch under daemon state, not the principal hom
   );
   assertEquals(paths.scratchDir, "/var/lib/tp/release-build/svc-1/rel-1");
   assertEquals(paths.scratchDir.startsWith(paths.principalHome), false);
+  assertEquals(paths.handoffDir, "/var/lib/tp/release-handoff/svc-1/rel-1");
 });
 
 test("resolveDaemonReleasePaths uses the release-records root", () => {
