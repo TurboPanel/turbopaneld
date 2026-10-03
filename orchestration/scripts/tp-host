@@ -1273,7 +1273,7 @@ tp_php_ini_awk='
     return p == "/tmp" || index(p, "/tmp/") == 1
   }
   function ini_init(   a, i) {
-    split("memory_limit upload_max_filesize post_max_size max_execution_time max_input_time max_input_vars max_file_uploads default_socket_timeout session.gc_maxlifetime session.gc_probability session.gc_divisor display_errors display_startup_errors log_errors allow_url_fopen file_uploads expose_php short_open_tag session.cookie_secure session.cookie_httponly session.use_strict_mode session.cookie_samesite session.cookie_lifetime session.name opcache.enable opcache.enable_cli opcache.memory_consumption opcache.interned_strings_buffer opcache.max_accelerated_files opcache.revalidate_freq opcache.revalidate_path opcache.validate_timestamps opcache.validate_permission opcache.validate_root error_reporting date.timezone disable_functions realpath_cache_size realpath_cache_ttl output_buffering default_charset variables_order request_order zend.exception_ignore_args mail.add_x_header open_basedir error_log session.save_path upload_tmp_dir sys_temp_dir extension_dir zend_extension", a, " ")
+    split("memory_limit upload_max_filesize post_max_size max_execution_time max_input_time max_input_vars max_file_uploads default_socket_timeout session.gc_maxlifetime session.gc_probability session.gc_divisor display_errors display_startup_errors log_errors allow_url_fopen file_uploads expose_php short_open_tag session.cookie_secure session.cookie_httponly session.use_strict_mode session.cookie_samesite session.cookie_lifetime session.name opcache.enable opcache.enable_cli opcache.memory_consumption opcache.interned_strings_buffer opcache.max_accelerated_files opcache.revalidate_freq opcache.revalidate_path opcache.validate_timestamps opcache.validate_permission opcache.validate_root error_reporting date.timezone disable_functions realpath_cache_size realpath_cache_ttl output_buffering default_charset variables_order request_order zend.exception_ignore_args mail.add_x_header open_basedir error_log session.save_path upload_tmp_dir sys_temp_dir extension_dir zend_extension extension", a, " ")
     for (i in a) inikey[a[i]] = 1
     split("error_log session.save_path upload_tmp_dir sys_temp_dir", a, " ")
     for (i in a) pathkey[a[i]] = 1
@@ -1290,6 +1290,9 @@ tp_php_ini_awk='
     if (key == "extension_dir" && index(val, lsphp) != 1 && val !~ /^\/usr\/lib\/php\/[0-9]+$/) fail("extension_dir=" val)
     if (key == "extension_dir" && val ~ /\.\./) fail("extension_dir=" val)
     if (key == "zend_extension" && val != "opcache.so" && val != "opcache") fail("zend_extension=" val)
+    # Only the modules the vendored lsphp ships as shared objects: PHPRC
+    # replaces its own php.ini, so the ini of a detached lsphp site loads them.
+    if (key == "extension" && val !~ /^(curl|mysqli|pdo_mysql)(\.so)?$/) fail("extension=" val)
     if ((key == "opcache.validate_permission" || key == "opcache.validate_root") && val !~ /^(1|[Oo]n|true|yes)$/) fail(key " must stay on")
   }
 '

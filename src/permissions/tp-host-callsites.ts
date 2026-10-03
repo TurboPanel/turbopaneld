@@ -39,7 +39,7 @@ import {
   sitePhpServiceUnit,
   sitePhpSocketUnit,
 } from "../deploy/site/php-runtime.ts";
-import { resolveLayout } from "../paths/layout.ts";
+import { PROD_RUNTIME_DIR_DEFAULT, resolveLayout } from "../paths/layout.ts";
 
 /** A path tp-host's test harness must create before the sample runs. */
 export type CallSiteSetup = {
@@ -169,6 +169,7 @@ const PHP_SPEC: SitePhpRuntimeSpec = {
   group: "alice-grp",
   home: "/srv/users/alice",
   configDir: "/etc/turbopanel",
+  runtimesDir: PROD_RUNTIME_DIR_DEFAULT,
   webAccount: "tpnginx",
 };
 const PHP_FPM_SPEC: SitePhpRuntimeSpec = {

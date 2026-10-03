@@ -98,13 +98,12 @@ function apacheWithEnv(webEnv: Record<string, string>): string {
   );
 }
 
-function olsWith(settings: Record<string, string>): string {
+function olsVhconf(): string {
   return openlitespeedVhostConfig({
-    processorName: "lsphp_x",
-    lsphpPath: "/opt/lsphp/bin/lsphp",
-    user: "u",
-    group: "g",
-    adminValues: phpAdminValues({ settings }),
+    processorName: "php_x",
+    mode: "lsphp-detached",
+    socket: "/run/turbopanel-php-x-0a1b2c3d4e5f-lsd84/php.sock",
+    children: 10,
   });
 }
 
@@ -162,7 +161,7 @@ test("valid input renders byte-identical configs (hosting Caddy, Apache, site Ca
     ),
     golden("caddy-site.caddy"),
   );
-  assertEquals(olsWith(PHP_SETTINGS), golden("openlitespeed-vhconf.conf"));
+  assertEquals(olsVhconf(), golden("openlitespeed-vhconf.conf"));
   assertEquals(cronServiceContent(cronOpts), golden("cron.service"));
 });
 
@@ -317,10 +316,10 @@ test("site Caddy refuses a webEnv key that is not a variable name", () => {
   );
 });
 
-test("php-fpm pool and OpenLiteSpeed phpIniOverride refuse ini and block syntax", () => {
+test("php-fpm pool and per-site php.ini settings refuse ini and block syntax", () => {
   for (const bad of ["256M\n}", "}", "{", "${HOME}", '"x', "1;x", "a b"]) {
     assertThrows(
-      () => olsWith({ memory_limit: bad }),
+      () => phpAdminValues({ settings: { memory_limit: bad } }),
       Error,
       "php.settings.memory_limit must use only",
     );

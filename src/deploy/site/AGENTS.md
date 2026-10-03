@@ -31,15 +31,24 @@ Docker Compose. The daemon:
    ownership to negotiate. Metadata still lands in `.turbopanel/php.json`.
 3. Runs `playbooks/site-openlitespeed-apply.yml` (vendor
    `openlitespeed` + `tpols`) when any site uses `engine: openlitespeed`, plus
-   vendored **lsphp** on `turbopanel_lsphp_install=true` when an OLS site wants
-   PHP. OpenLiteSpeed does not use php-fpm: `openlitespeedVhostConfig` gives the
-   vhost its own LSAPI `extprocessor` (`path` → `<runtimesDir>/lsphp/<series>/current/bin/lsphp`,
-   `address uds:///run/turbopanel-ols/<name>.sock` — `OPENLITESPEED_LSAPI_SOCKET_DIR`,
-   the unit's `RuntimeDirectory`; a relative `uds://tmp/…` is the host `/tmp` —
-   on-demand via `runOnStartUp 0` + `autoStart 2`) under **suEXEC** — `extUser`/`extGroup` resolved from the site
-   principal exactly the way a pool's `user`/`group` are, falling back to
-   `tpols`. Hosting hints render into the vhost's `phpIniOverride{}` as
-   `php_admin_value <key> <value>`, and the site fragment flips
+   vendored **lsphp** on `turbopanel_lsphp_install=true` for a site in
+   `lsphp-detached` mode, and the packaged php-cgi/php-fpm
+   (`turbopanel_php_fpm_install`) for one in `fastcgi` or `fpm`. OpenLiteSpeed
+   runs as `tpols` and cannot switch users, so it never starts PHP: each PHP
+   site gets its per-site runtime (step 3 above, as the owner) and
+   `openlitespeedVhostConfig` gives the vhost one `extprocessor` to its socket
+   — `type fcgi` for FastCGI and php-fpm, `type lsapi` for detached lsphp (the
+   vendored lsphp on a systemd socket, `PHPRC` = its own php.ini with the
+   module lines, since PHPRC replaces the relocated `bin/php.ini`), always
+   `autoStart 0`, `address uds:///run/turbopanel-php-<id>/php.sock`. Detached
+   lsphp therefore survives an OpenLiteSpeed restart. `httpdWorkers` is pinned
+   (`OPENLITESPEED_HTTPD_WORKERS`) because `maxConns` counts per worker:
+   `openlitespeedPhpMaxConns` keeps workers × maxConns within the runtime's
+   children, or requests stall on "Reached max children process limit"
+   (WP0). A PHP site with no mode (an older control plane) runs FastCGI, the
+   control plane's default, with a warning; `lsphp-attached` (its launcher
+   has not shipped) is refused. Hosting hints land in the runtime's php.ini, and the
+   site fragment flips
    `enableScript 1`. Every `context /` renders `allowBrowse 1`: in OLS that is
    the context's "Accessible" flag (`0` is a 403 for everything); listing is
    `autoIndex 0`. `httpd_config.conf` sets `fileAccessControl`
@@ -95,7 +104,7 @@ Docker Compose. The daemon:
    php.ini, so it carries the production baseline itself, with a 128 MB
    opcache per runtime and `validate_permission`/`validate_root` on. Apache
    adds `ProxyFCGIBackendType GENERIC` for php-cgi. `<id>` is
-   `<slug>-<sha256(env, service)[0..12]>-<fcgi|fpm><series>`: a mode or
+   `<slug>-<sha256(env, service)[0..12]>-<fcgi|fpm|lsd><series>`: a mode or
    series switch is a **second** runtime beside the first. The new one is
    written, `php-test`ed (as the owner), started and checked before the vhost
    is staged; the vhost then moves to its socket through the safe rollout
@@ -108,8 +117,10 @@ Docker Compose. The daemon:
    vhosts; at daemon start `reconcileSitePhpRuntimesAtBoot` starts any
    installed runtime that is down. The principal is implied the
    `tpphp<series>` entitlement (the binaries are `0750 root:tpphp<series>`).
-   No mode keeps the shared master; a mode without a principal, or lsphp on
-   nginx/Apache, is refused. OpenLiteSpeed and Caddy ignore `php.mode` here.
+   No mode keeps the shared master on nginx and Apache; a mode without a
+   principal, or lsphp on nginx/Apache, is refused. OpenLiteSpeed runs the same
+   runtimes (plus `-lsd<series>`, detached lsphp) behind `tpols`; Caddy ignores
+   `php.mode`.
 
 4. Materializes document roots under
    `<stateDir>/sites/<environmentId>/<composeServiceName>/<root>/` (default
@@ -124,10 +135,9 @@ Docker Compose. The daemon:
    nginx/Apache php-fpm pools run workers as the principal when pinned (`user` /
    `group = ${username}-grp` from `ensureSystemPrincipals`); the listen socket is
    owned by the serving engine (`tpnginx` / `tpapache`). An OpenLiteSpeed vhost
-   carries the same identity twice: as LSAPI `extUser`/`extGroup` on the vhost's
-   `extprocessor`, **and** as the vhost's own `user`/`group` (`setUIDMode 0`) in
-   the aggregated `httpd_config.conf`, so suEXEC covers everything the vhost
-   runs rather than the external processor alone. Multiple principals on one
+   declares no identity: its PHP runs as the owner through the per-site
+   runtime, and the old `extUser`/`extGroup`/`setUIDMode` lines never took
+   effect with OpenLiteSpeed as `tpols` (WP0). Multiple principals on one
    site service are rejected at deploy-prepare
    (`site_principal_ambiguous`).
 5. Installs loopback-only vhosts under FHS config — nginx

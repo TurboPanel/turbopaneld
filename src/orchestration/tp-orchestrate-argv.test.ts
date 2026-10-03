@@ -167,7 +167,11 @@ async function daemonExtraVars(): Promise<Array<[string, string[]]>> {
       { engine: "caddy", php: { version: "8.4" } },
       { engine: "nginx", php: { version: "8.3" } },
       { engine: "apache" },
-      { engine: "openlitespeed", php: { version: "8.4" } },
+      {
+        engine: "openlitespeed",
+        php: { version: "8.4", mode: "lsphp-detached" },
+      },
+      { engine: "openlitespeed", php: { version: "8.3", mode: "fastcgi" } },
     ] as unknown as Parameters<typeof resolveSiteEngineNeeds>[0],
   );
   for (const engine of ["caddy", "nginx", "apache", "openlitespeed"] as const) {

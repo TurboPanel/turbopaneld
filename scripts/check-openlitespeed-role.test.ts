@@ -1,6 +1,6 @@
 import { assert, assertEquals } from "@std/assert";
 import { parse } from "yaml";
-import { OPENLITESPEED_LSAPI_SOCKET_DIR } from "../src/deploy/site.ts";
+import { openlitespeedVhostConfig } from "../src/deploy/site.ts";
 
 const tasks = await Deno.readTextFile(
   new URL(
@@ -82,12 +82,23 @@ Deno.test("openlitespeed role keeps the config tree root-owned", () => {
   assert(!/owner: (tp|"\{\{ turbopanel_user)/.test(tasks), "never tp-owned");
 });
 
-Deno.test("openlitespeed unit owns the LSAPI socket dir the renderer names", async () => {
+Deno.test("openlitespeed holds no PHP sockets: the site's runtime does", async () => {
   const unit = await roleFile("templates/turbopanel-openlitespeed.service.j2");
-  const name = OPENLITESPEED_LSAPI_SOCKET_DIR.replace(/^\/run\//, "");
-  assert(unit.includes(`RuntimeDirectory=${name}\n`));
-  const body = topLevelTask("Ensure OpenLiteSpeed LSAPI socket directory");
-  assert(body?.includes(`path: ${OPENLITESPEED_LSAPI_SOCKET_DIR}\n`));
+  assert(!unit.includes("RuntimeDirectory="));
+  assert(!tasks.includes("/run/turbopanel-ols"));
+  const vhost = openlitespeedVhostConfig({
+    processorName: "php_x",
+    mode: "lsphp-detached",
+    socket: "/run/turbopanel-php-x-0a1b2c3d4e5f-lsd84/php.sock",
+    children: 10,
+  });
+  assert(vhost.includes("uds:///run/turbopanel-php-"));
+});
+
+Deno.test("the role links a stable lsphp extension directory for per-site php.ini", async () => {
+  const series = await roleFile("tasks/lsphp-series.yml");
+  assert(series.includes('dest: "{{ _lsphp_dest }}/lib/php/ext"'));
+  assert(series.includes("state: link"));
 });
 
 type LsphpSeries = {
