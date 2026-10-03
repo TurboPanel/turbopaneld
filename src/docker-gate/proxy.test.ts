@@ -986,6 +986,53 @@ e2e(
   },
 );
 
+e2e(
+  "exec, attach and archive on a platform container are flagged unless it is the daemon's own pair",
+  async (h) => {
+    const relayed = scriptEngine(h, {
+      proxysql: {
+        status: 200,
+        labels: {
+          "turbopanel.role": "ingress",
+          "com.turbopanel.system.component": "managed-ingress",
+        },
+      },
+      traefik: {
+        status: 200,
+        labels: {
+          "turbopanel.role": "ingress",
+          "com.turbopanel.system.component": "hosting-ingress",
+        },
+      },
+      engine: { status: 200, labels: { "tp.managed.engine": "postgres" } },
+      app: { status: 200, labels: { "com.docker.compose.project": "app" } },
+    });
+    await post(h, "/containers/proxysql/exec", '{"Cmd":["mysql","-P6032"]}');
+    await post(h, "/containers/engine/exec", '{"Cmd":["pg_ctl","status"]}');
+    await post(h, "/containers/app/exec", '{"Cmd":["sh"]}');
+    await post(h, "/containers/proxysql/exec", '{"Cmd":["sh"]}');
+    await post(h, "/containers/traefik/exec", '{"Cmd":["sh"]}');
+    await post(h, "/containers/traefik/attach");
+    await post(h, "/containers/engine/attach");
+    const client = await h.connect();
+    await client.write(
+      encodeText(
+        "GET /containers/proxysql/archive?path=/ HTTP/1.1\r\nHost: d\r\nConnection: close\r\n\r\n",
+      ),
+    );
+    await timeout(readUntilEof(client));
+    assertEquals(wouldDeny(h.logs), [
+      "platform-exec",
+      "platform-exec",
+      "platform-attach",
+      "platform-attach",
+      "platform-archive",
+    ]);
+    // Observe mode still relays every request.
+    assertEquals(relayed.length, 8);
+  },
+);
+
 async function del(h: Harness, path: string): Promise<void> {
   const client = await h.connect();
   await client.write(

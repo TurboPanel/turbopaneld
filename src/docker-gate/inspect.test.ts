@@ -9,6 +9,7 @@ import {
   MAX_INSPECT_BYTES,
 } from "../../orchestration/roles/docker-gate/files/inspect.ts";
 import { review } from "../../orchestration/roles/docker-gate/files/review.ts";
+import { platformAccessRule } from "../../orchestration/roles/docker-gate/files/platform.ts";
 import { DEFAULT_POLICY_CONFIG } from "../../orchestration/roles/docker-gate/files/policy.ts";
 import { GateStats } from "../../orchestration/roles/docker-gate/files/stats.ts";
 import type {
@@ -137,4 +138,104 @@ test({
         );
       },
     ),
+});
+
+const platformEngine = { "tp.managed.engine": "postgres" };
+const proxysql = {
+  "turbopanel.role": "ingress",
+  "com.turbopanel.system.component": "managed-ingress",
+};
+const traefik = {
+  "turbopanel.role": "ingress",
+  "com.turbopanel.system.component": "hosting-ingress",
+};
+const database = {
+  "turbopanel.role": "turbopanel",
+  "com.turbopanel.system.component": "database",
+};
+const tenant = { "com.docker.compose.project": "app" };
+
+test({
+  name: "platformAccessRule allows only the daemon's exec pairs",
+  ...opts,
+  fn: () => {
+    const exec = "/containers/c/exec";
+    const mysql = { Cmd: ["/usr/bin/mysql", "-h127.0.0.1"] };
+    const rule = platformAccessRule;
+    assertEquals(rule(exec, platformEngine, { Cmd: ["pg_ctl"] }), undefined);
+    assertEquals(rule(exec, proxysql, mysql), undefined);
+    assertEquals(rule(exec, proxysql, { Cmd: ["sh"] }), "platform-exec");
+    assertEquals(rule(exec, proxysql, undefined), "platform-exec");
+    assertEquals(rule(exec, traefik, mysql), "platform-exec");
+    assertEquals(rule(exec, database, mysql), "platform-exec");
+    for (const labels of [platformEngine, proxysql, traefik, database]) {
+      const attach = rule("/containers/c/attach", labels, undefined);
+      assertEquals(attach, "platform-attach");
+      const ws = rule("/containers/c/attach/ws", labels, undefined);
+      assertEquals(ws, "platform-attach");
+      const cp = rule("/containers/c/archive", labels, undefined);
+      assertEquals(cp, "platform-archive");
+    }
+  },
+});
+
+test({
+  name: "platformAccessRule leaves tenant containers and other routes alone",
+  ...opts,
+  fn: () => {
+    for (const path of ["exec", "attach", "archive"]) {
+      const found = platformAccessRule(
+        `/containers/c/${path}`,
+        tenant,
+        { Cmd: ["sh"] },
+      );
+      assertEquals(found, undefined);
+    }
+    const stop = platformAccessRule("/containers/c/stop", proxysql, undefined);
+    assertEquals(stop, undefined);
+  },
+});
+
+async function reviewExec(
+  labels: Record<string, string>,
+  path: string,
+  body: unknown,
+) {
+  let found: unknown;
+  await withEngine(json({ Config: { Labels: labels } }), async (connect) => {
+    found = await review(
+      {
+        method: "POST",
+        path,
+        query: new URLSearchParams(),
+        body,
+      },
+      "containers.exec.create",
+      {
+        policy: DEFAULT_POLICY_CONFIG,
+        resolvePath: (p) => Promise.resolve(p),
+        log: () => {},
+        stats: new GateStats(),
+        connectUpstream: connect,
+      },
+    );
+  });
+  return found;
+}
+
+test({
+  name: "review flags exec into a platform container, not a tenant's",
+  ...opts,
+  fn: async () => {
+    const body = { Cmd: ["sh"] };
+    assertEquals(
+      await reviewExec(traefik, "/containers/ingress/exec", body),
+      [{ rule: "platform-exec", detail: "ingress" }],
+    );
+    assertEquals(await reviewExec(tenant, "/containers/app/exec", body), []);
+    assertEquals(
+      await reviewExec(platformEngine, "/containers/db/exec", body),
+      [],
+    );
+  },
 });
