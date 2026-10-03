@@ -1,4 +1,10 @@
-import { assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertRejects,
+  assertStringIncludes,
+  assertThrows,
+} from "@std/assert";
 import {
   isSitePhpRuntimeOf,
   phpIniBytes,
@@ -18,8 +24,10 @@ import {
 } from "./php-runtime.ts";
 import {
   holdSitePhpRuntime,
+  installSitePhpRuntime,
   orphanSitePhpRuntimes,
   reconcileSitePhpRuntimes,
+  type SitePhpRuntimeFiles,
   type SitePhpRuntimeIo,
 } from "./php-runtime-apply.ts";
 
@@ -39,6 +47,7 @@ const SPEC: SitePhpRuntimeSpec = {
   group: "alice-grp",
   home: "/srv/users/alice",
   configDir: "/etc/turbopanel",
+  libDir: "/opt/turbopanel/lib",
   webAccount: "tpnginx",
 };
 
@@ -292,8 +301,19 @@ test("the unit closes loopback and link-local but for the database and resolver 
     unit,
     "\nIPAddressDeny=localhost link-local multicast 0.0.0.0/8 fc00::/7\n",
   );
-  // Only the resolver stub: 127.0.0.1 would reopen every loopback service.
-  assertStringIncludes(unit, "\nIPAddressAllow=127.0.0.53\n");
+  // 127.0.0.1 is allowed back for the database proxy; tp-php-loopback closes
+  // every port on it but the proxy's, per site owner.
+  assertStringIncludes(unit, "\nIPAddressAllow=127.0.0.1 127.0.0.53\n");
+});
+
+test("the unit loads its loopback rules as root before PHP starts, so a failed load stops it", () => {
+  for (const mode of ["fastcgi", "fpm"] as const) {
+    const unit = sitePhpServiceUnit({ ...SPEC, mode }, { writablePaths: [] });
+    const guard = "ExecStartPre=+/opt/turbopanel/lib/tp-php-loopback sync";
+    assertStringIncludes(unit, `\n${guard}\n`);
+    assertEquals(unit.split("ExecStartPre=").length, 2);
+    assert(unit.indexOf(guard) < unit.indexOf("ExecStart="), mode);
+  }
 });
 
 test("vhost references are read from the socket path, nothing else", () => {
@@ -313,6 +333,7 @@ function orphanIo(opts: {
   units: string[];
   vhosts: Record<string, string>;
   unreadable?: string;
+  syncFails?: string;
 }): SitePhpRuntimeIo & { calls: string[] } {
   const calls: string[] = [];
   return {
@@ -345,6 +366,9 @@ function orphanIo(opts: {
           return answer(false, "", `tp-host: no such file ${path}`);
         }
         return answer(true, opts.vhosts[path]);
+      }
+      if (argv[0] === "php-loopback-sync" && opts.syncFails) {
+        return answer(false, "", opts.syncFails);
       }
       return answer(argv[1] !== "is-active");
     },
@@ -388,6 +412,98 @@ test("boot reconcile removes a runtime no vhost names and never starts it", asyn
     true,
   );
   assertEquals(io.calls.some((c) => c.includes("ols-lsphp84")), false);
+});
+
+test("removing a runtime rebuilds the loopback rules only after its unit is gone", async () => {
+  const io = orphanIo({
+    units: ["turbopanel-php-gone-fcgi84.service"],
+    vhosts: { "/etc/tp/nginx/sites/tp-e-a.conf": "" },
+  });
+  await reconcileSitePhpRuntimes(io, "/etc/tp");
+  const at = (c: string) => io.calls.indexOf(c);
+  const sync = at("php-loopback-sync");
+  assert(sync > at("rm -f -- /units/turbopanel-php-gone-fcgi84.service"));
+  assert(sync > at("systemctl daemon-reload"));
+});
+
+test("boot reconcile rebuilds the loopback rules before it starts anything", async () => {
+  const io = orphanIo({
+    units: ["turbopanel-php-live-fpm84.service"],
+    vhosts: {
+      "/etc/tp/nginx/sites/tp-e-live.conf": socketLine("live-fpm84"),
+    },
+  });
+  await reconcileSitePhpRuntimes(io, "/etc/tp");
+  const sync = io.calls.indexOf("php-loopback-sync");
+  assert(sync >= 0);
+  assert(
+    sync <
+      io.calls.indexOf("systemctl start turbopanel-php-live-fpm84.service"),
+  );
+});
+
+/** A fake host that records each call and fails the ones `fails` names. */
+function installIo(fails: (argv: string[]) => boolean) {
+  const calls: string[] = [];
+  const io: SitePhpRuntimeIo = {
+    unitDir: "/units",
+    sleep: () => Promise.resolve(),
+    run: (_command, args) => {
+      const argv = args.slice(1);
+      calls.push(argv.join(" "));
+      // `cmp` failing means "the file differs", so everything gets written.
+      const success = argv[0] !== "cmp" && !fails(argv);
+      return Promise.resolve({ success, stdout: "", stderr: "refused" });
+    },
+  };
+  return { io, calls };
+}
+
+const FILES: SitePhpRuntimeFiles = {
+  spec: SPEC,
+  service: sitePhpServiceUnit(SPEC, { writablePaths: [] }),
+  socket: null,
+  ini: "",
+  fpmConf: null,
+};
+const PROBE = { label: "web", url: "http://127.0.0.1:1/" };
+
+test("a new runtime gets its loopback rules after its unit is written and before it starts", async () => {
+  const { io, calls } = installIo(() => false);
+  await installSitePhpRuntime(io, FILES, { existing: new Map(), probe: PROBE });
+  const sync = calls.indexOf("php-loopback-sync");
+  assert(sync > calls.findIndex((c) => c.startsWith("install -m 0644")));
+  assert(sync > calls.indexOf("systemctl daemon-reload"));
+  assert(sync < calls.findIndex((c) => c.startsWith("systemctl restart")));
+});
+
+test("when the loopback rules cannot be loaded the runtime is never started and is rolled back", async () => {
+  const { io, calls } = installIo((argv) => argv[0] === "php-loopback-sync");
+  await assertRejects(
+    () =>
+      installSitePhpRuntime(io, FILES, { existing: new Map(), probe: PROBE }),
+    Error,
+    "PHP loopback rules",
+  );
+  assertEquals(calls.some((c) => /^systemctl (re)?start/.test(c)), false);
+  assertEquals(calls.some((c) => c.startsWith("systemctl restart")), false);
+  assert(calls.some((c) => c.startsWith("rm -f -- /units/turbopanel-php-")));
+});
+
+test("reconcile with live runtimes fails loudly, and starts nothing, when the loopback rules cannot load", async () => {
+  const io = orphanIo({
+    units: ["turbopanel-php-live-fpm84.service"],
+    vhosts: {
+      "/etc/tp/nginx/sites/tp-e-live.conf": socketLine("live-fpm84"),
+    },
+    syncFails: "tp-php-loopback: nft is not installed",
+  });
+  await assertRejects(
+    () => reconcileSitePhpRuntimes(io, "/etc/tp"),
+    Error,
+    "nft is not installed",
+  );
+  assertEquals(io.calls.some((c) => /^systemctl (re)?start/.test(c)), false);
 });
 
 test("boot reconcile does nothing when a vhost cannot be read", async () => {

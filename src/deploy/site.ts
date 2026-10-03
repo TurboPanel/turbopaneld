@@ -2681,6 +2681,7 @@ function sitePhpRuntimeFiles(
     group: principalUnixGroupName(user),
     home,
     configDir: layout.configDir,
+    libDir: layout.libDir,
     webAccount: site.engine === "apache" ? "tpapache" : "tpnginx",
   };
   const values = site.php
