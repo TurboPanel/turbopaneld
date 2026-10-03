@@ -57,7 +57,9 @@ Deny: `Privileged`; host / `container:` `NetworkMode` `PidMode` `IpcMode`
 `DeviceRequests`; `CapAdd` outside the allowlist (default none);
 `SecurityOpt` other than `no-new-privileges`; `CgroupParent`; `Sysctls`;
 `VolumesFrom`; any `MaskedPaths` / `ReadonlyPaths`; a non-`runc` `Runtime`;
-privileged `exec`; binds (`Binds`, `Mounts` of type bind, and `local`-driver
+privileged `exec`; `exec`/`attach`/`archive` on a platform container (rules
+`platform-exec`, `platform-attach`, `platform-archive`) except the daemon's own
+pairs in `PLATFORM_EXEC_ALLOWLIST` (managed engines; ProxySQL `mysql` only); binds (`Binds`, `Mounts` of type bind, and `local`-driver
 volumes that are really `o=bind,device=<path>` or a `device=/dev/...`) whose
 resolved source is `/`, the Docker socket, a denied tree (`/etc`, `/run`,
 `/proc`, `/sys`, `/dev`, `/root`, `/boot`, `/opt/turbopanel`, `/backup`), or

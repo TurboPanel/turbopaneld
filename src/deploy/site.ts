@@ -97,9 +97,11 @@ import type {
 } from "./site/engine-driver.ts";
 import {
   isSitePhpRuntimeOf,
+  SITE_PHP_FCGI_CHILDREN,
   sitePhpFpmConf,
   sitePhpIni,
   sitePhpKey,
+  sitePhpLockedValues,
   sitePhpRuntimeId,
   type SitePhpRuntimeMode,
   sitePhpRuntimeMode,
@@ -107,6 +109,7 @@ import {
   sitePhpServiceUnit,
   sitePhpSocketPath,
   sitePhpSocketUnit,
+  sitePhpUnitLimits,
 } from "./site/php-runtime.ts";
 import {
   holdSitePhpRuntime,
@@ -1236,6 +1239,31 @@ function formatOpenLiteSpeedAdminValue(value: PhpAdminValue): string {
 }
 
 /**
+ * Answer 403 for server-side script files the vhost does not run. OpenLiteSpeed
+ * serves any file it has no handler for as plain text, so a `.php3` (the
+ * handler only runs `.php`), a `.phtml`, or an editor backup such as
+ * `.php.bak` or `.php~` would hand its source to anyone who asks.
+ *
+ * `.php` itself (and `/a.php/extra` path-info) is left alone when the vhost has
+ * the LSAPI handler. `.sh`/`.py`/`.pl` are not listed: no scripthandler or CGI
+ * context in our config executes them, so they are ordinary static downloads
+ * and carry no hidden source. `.cgi` stays denied as a server-side type.
+ */
+function openlitespeedScriptDenyRewrite(phpHandled: boolean): string {
+  const family = "php[0-9]+|phtml|phar|phps|pht|phpt|inc|cgi";
+  const denied = phpHandled ? family : `php|${family}`;
+  const backups = String.raw`~|\.(bak|old|orig|save|swp|swo|tmp|dist|txt)`;
+  return String.raw`rewrite {
+  enable                    1
+  rules                     <<<END_rules
+RewriteRule \.(${denied})(/.*)?$ - [F,L,NC]
+RewriteRule \.(php|${family})(${backups})$ - [F,L,NC]
+END_rules
+}
+`;
+}
+
+/**
  * Per-site `vhconf.conf`.
  *
  * `allowBrowse` is OpenLiteSpeed's "Accessible" switch for the context, not
@@ -1255,6 +1283,7 @@ index {
   indexFiles index.html
   autoIndex 0
 }
+${openlitespeedScriptDenyRewrite(false)}
 context / {
   allowBrowse 1
   location $DOC_ROOT/
@@ -1278,6 +1307,7 @@ scripthandler {
   add                       lsapi:${php.processorName} php
 }
 ${overrideBlock}
+${openlitespeedScriptDenyRewrite(true)}
 context / {
   allowBrowse 1
   location $DOC_ROOT/
@@ -2691,17 +2721,27 @@ function sitePhpRuntimeFiles(
       `site ${site.composeServiceName}: PHP mode ${mode} serves only from the owner's home (a release or a managed directory)`,
     );
   }
+  const pool = phpFpmPoolOverrides(site.php);
+  const maxChildren = Number(
+    pool.find((p) => p.key === "pm.max_children")?.value,
+  );
+  const fpmWorkers = Number.isInteger(maxChildren) && maxChildren > 0
+    ? maxChildren
+    : 20;
+  const workers = mode === "fpm" ? fpmWorkers : SITE_PHP_FCGI_CHILDREN;
   return {
     spec,
     service: sitePhpServiceUnit(spec, {
       writablePaths: sitePhpWritablePaths(layout, paths),
+      limits: sitePhpUnitLimits(values, workers),
     }),
     socket: mode === "fastcgi" ? sitePhpSocketUnit(spec) : null,
     ini: sitePhpIni(values, home),
     fpmConf: mode === "fpm"
       ? sitePhpFpmConf(spec, {
-        pool: phpFpmPoolOverrides(site.php),
+        pool,
         chdir: paths.documentRoot,
+        admin: sitePhpLockedValues(values),
       })
       : null,
   };

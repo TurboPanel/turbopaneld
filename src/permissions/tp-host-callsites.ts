@@ -35,9 +35,11 @@ import { nativeAppUnitContent } from "../deploy/native/unit.ts";
 import {
   sitePhpFpmConf,
   sitePhpIni,
+  sitePhpLockedValues,
   type SitePhpRuntimeSpec,
   sitePhpServiceUnit,
   sitePhpSocketUnit,
+  sitePhpUnitLimits,
 } from "../deploy/site/php-runtime.ts";
 import { resolveLayout } from "../paths/layout.ts";
 
@@ -192,7 +194,10 @@ const PHP_FPM_SPEC: SitePhpRuntimeSpec = {
   id: PHP_FPM_ID,
   mode: "fpm",
 };
-const PHP_WRITABLE = { writablePaths: ["-/srv/users/alice/sites/svc1/shared"] };
+const PHP_WRITABLE = {
+  writablePaths: ["-/srv/users/alice/sites/svc1/shared"],
+  limits: sitePhpUnitLimits([], 4),
+};
 const PHP_INI_TEXT = underPrefix(sitePhpIni([], PHP_SPEC.home));
 const PHP_SERVICE_TEXT = underPrefix(
   sitePhpServiceUnit(PHP_SPEC, PHP_WRITABLE),
@@ -201,7 +206,10 @@ const PHP_FPM_SERVICE_TEXT = underPrefix(
   sitePhpServiceUnit(PHP_FPM_SPEC, PHP_WRITABLE),
 );
 const PHP_SOCKET_TEXT = sitePhpSocketUnit(PHP_SPEC);
-const PHP_FPM_CONF_TEXT = sitePhpFpmConf(PHP_FPM_SPEC, { pool: [] });
+const PHP_FPM_CONF_TEXT = sitePhpFpmConf(PHP_FPM_SPEC, {
+  pool: [],
+  admin: sitePhpLockedValues([]),
+});
 /** What `php-test` needs on disk: the installed unit and its php.ini. */
 const PHP_TEST_SETUP: CallSiteSetup = {
   files: {
@@ -1133,10 +1141,22 @@ const SITES: CallSite[] = [
       setup: { files: { [`${STAGING}/index.html`]: "<h1>hi</h1>\n" } },
     },
   ),
+  tpHost(
+    'src/deploy/release/release-links.ts|["-n",...releaseLinkTextsFindArgs(releaseDir)]',
+    {
+      argv: ["find", RELEASE, "-type", "l", "-printf", String.raw`%P\0%l\0`],
+      setup: dir(RELEASE),
+    },
+  ),
   tpHost('src/deploy/site.ts|["-n","ls","-A","--",documentRoot]', {
     argv: ["ls", "-A", "--", `${SITE}/webroot`],
     setup: dir(`${SITE}/webroot`),
   }),
+  tpHost(
+    'src/deploy/release/live-release-scan.ts|["-n","ls","-A","--",dir]',
+    { argv: ["ls", "-A", "--", `${P}/srv/users`], setup: dir(HOME) },
+    { argv: ["ls", "-A", "--", `${HOME}/sites`], setup: dir(SITE) },
+  ),
   tpHost('src/deploy/site/app-detect.ts|["-n","ls","-A","--",path]', {
     argv: ["ls", "-A", "--", `${SITE}/webroot`],
     setup: dir(`${SITE}/webroot`),
@@ -1379,6 +1399,12 @@ const SITES: CallSite[] = [
   tpHost('src/deploy/ssh/apply.ts|["-n","sshd","-t"]', {
     argv: ["sshd", "-t"],
   }),
+  tpHost(
+    'src/deploy/ssh/apply.ts|["-n","sshd","-T","-C",sshdEffectiveSpec(user)]',
+    {
+      argv: ["sshd", "-T", "-C", "user=alice,host=localhost,addr=127.0.0.1"],
+    },
+  ),
   tpHost('src/deploy/ssh/apply.ts|["-n","systemctl","reload",unit]', {
     argv: ["systemctl", "reload", "ssh.service"],
   }),

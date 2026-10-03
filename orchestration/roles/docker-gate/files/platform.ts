@@ -144,11 +144,100 @@ export function ownedTarget(
   path: string,
 ): string | undefined {
   if (method === "DELETE") return OWNED_REMOVE.exec(path)?.[1];
-  if (method === "POST" || method === "PUT" || method === "GET") {
+  if (
+    method === "POST" || method === "PUT" || method === "GET" ||
+    method === "HEAD"
+  ) {
     const id = OWNED_TARGET.exec(path)?.[1];
     return id === "json" ? undefined : id;
   }
   return undefined;
+}
+
+/**
+ * Platform containers the daemon legitimately execs into (P2-5), and the
+ * commands it runs there. Everything else on a platform container (exec,
+ * attach, archive get/put) is refused. A false-positive remover for who the
+ * daemon is, not a boundary, like the rest of this file. Table and sources:
+ * `.cl-tmp/audits/p2-5-exec-allowlist.md`.
+ */
+export type ExecAllowance = {
+  /** Describes the container: a managed engine, or a system component. */
+  engine?: true;
+  component?: string;
+  /** Allowed first words of the exec command (basename); any when absent. */
+  commands?: readonly string[];
+};
+export const PLATFORM_EXEC_ALLOWLIST: readonly ExecAllowance[] = [
+  // Managed database engines: apply, promote, health, backup/restore, metrics,
+  // dead-primary probe and standby sampler all `docker exec` into them.
+  { engine: true },
+  // ProxySQL admin interface through the container's mysql client.
+  { component: "managed-ingress", commands: ["mysql"] },
+];
+
+/**
+ * Helper containers the daemon starts with a foreground `docker run --rm`,
+ * which always attaches (backup tar on stdout, restore, file ownership, volume
+ * bootstrap). Attach is allowed for these only; exec and archive stay refused.
+ * Mirrors `HELPER_COMPONENTS` in `src/deploy/labels.ts` (a test pins the match).
+ */
+export const PLATFORM_ATTACH_ALLOWLIST: readonly string[] = [
+  "backup-copy",
+  "backup-restore",
+  "managed-files",
+  "volume-copy",
+];
+
+const PLATFORM_ACCESS =
+  /^\/containers\/[^/]+\/(exec|attach|attach\/ws|archive)$/;
+
+function execCommand(body: unknown): string | undefined {
+  if (typeof body !== "object" || body === null) return undefined;
+  const cmd = (body as Record<string, unknown>).Cmd;
+  if (!Array.isArray(cmd) || typeof cmd[0] !== "string") return undefined;
+  return cmd[0].split("/").pop();
+}
+
+function allowanceMatches(
+  allowance: ExecAllowance,
+  labels: Labels,
+  command: string | undefined,
+): boolean {
+  const same = allowance.engine === true
+    ? (labels[LABEL_MANAGED_ENGINE] ?? "") !== ""
+    : labels[LABEL_SYSTEM_COMPONENT] === allowance.component;
+  if (!same) return false;
+  return allowance.commands === undefined ||
+    (command !== undefined && allowance.commands.includes(command));
+}
+
+/**
+ * Rule name when a request execs into, attaches to, or copies to or from a
+ * platform container outside the allowlist, otherwise `undefined`. `path` is
+ * the engine's route; only an exec create can be allowed.
+ */
+export function platformAccessRule(
+  path: string,
+  labels: Labels,
+  body: unknown,
+): string | undefined {
+  const kind = PLATFORM_ACCESS.exec(path)?.[1];
+  if (kind === undefined || !isPlatformContainer(labels)) return undefined;
+  if (kind === "archive") return "platform-archive";
+  if (kind !== "exec") {
+    return PLATFORM_ATTACH_ALLOWLIST.includes(
+        labels[LABEL_SYSTEM_COMPONENT] ?? "",
+      )
+      ? undefined
+      : "platform-attach";
+  }
+  const command = execCommand(body);
+  return PLATFORM_EXEC_ALLOWLIST.some((a) =>
+      allowanceMatches(a, labels, command)
+    )
+    ? undefined
+    : "platform-exec";
 }
 
 export type OwnedObject = { kind: "volume" | "network"; name: string };
