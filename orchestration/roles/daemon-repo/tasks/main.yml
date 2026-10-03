@@ -10,7 +10,10 @@
     state: directory
     owner: "{{ turbopanel_user }}"
     group: "{{ turbopanel_group }}"
-    recurse: true
+    # The directory only, never its contents: the checkout is tp-writable, so a
+    # root walk would chown whatever a tp member swapped in. The git task below
+    # runs as the service user and writes its own files.
+    follow: false
   when: _daemon_dir.stat.exists
 
 - name: Clone or update daemon repository

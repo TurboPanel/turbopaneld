@@ -257,10 +257,20 @@ test("tp-orchestrate refuses keys and values that would steer root Ansible", asy
       "turbopanel_ui_mode=prod",
       "postgres_expose_port=5432",
       "turbopanel_upgrade_id=../x",
+      "turbopanel_upgrade_id=-x",
+      `turbopanel_upgrade_id=${"a".repeat(81)}`,
       // JSON: unknown or Ansible keys, templated or spaced strings, non-objects.
       '{"ansible_become":true}',
       "{\"turbopanel_timezone\":\"{{lookup('pipe','id')}}\"}",
       '{"php_fpm_versions":["8.4 ; id"]}',
+      '{"php_fpm_versions":["8.4","--allow-unauthenticated"]}',
+      '{"php_fpm_extensions":{"8.4":["intl=1.0"]}}',
+      '{"php_fpm_extensions":{"8.4":["-oAPT::Get::AllowUnauthenticated=true"]}}',
+      '{"php_fpm_extensions":{"8.4":["intl","x y"]}}',
+      '{"php_fpm_extensions":{"8.4":["Intl"]}}',
+      '{"php_fpm_extensions":{"latest":["intl"]}}',
+      '{"php_fpm_extensions":["intl"]}',
+      '{"php_fpm_extensions":{"8.4":"intl"}}',
       '{"unknown_key":1}',
       '["php_fpm_versions"]',
       "{}",
@@ -270,6 +280,19 @@ test("tp-orchestrate refuses keys and values that would steer root Ansible", asy
     const verdicts = await checkExtraVars(hostile, { vendorDir });
     const accepted = verdicts.filter((v) => v.accepted).map((v) => v.value);
     assertEquals(accepted, [], "tp-orchestrate accepted hostile extra-vars");
+  } finally {
+    await Deno.remove(vendorDir, { recursive: true });
+  }
+});
+
+test("tp-orchestrate accepts PHP series and extension names that are apt package parts", async () => {
+  const vendorDir = await makeFakeVendorDir();
+  try {
+    const verdicts = await checkExtraVars(
+      ['{"php_fpm_versions":["8.3","8.4"],"php_fpm_extensions":{"8.4":["intl","redis","pdo-pgsql","imagick"]}}'],
+      { vendorDir },
+    );
+    assertEquals(verdicts.map((v) => v.accepted), [true]);
   } finally {
     await Deno.remove(vendorDir, { recursive: true });
   }
