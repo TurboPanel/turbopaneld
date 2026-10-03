@@ -64,6 +64,7 @@ export const DAEMON_WIRE_FEATURES = [
   "sealed-instance-secrets-v1",
   "managed-health-v1",
   "managed-ha-probe-v1",
+  "managed-ha-instance-v1",
   "metrics-v7",
 ] as const;
 
@@ -92,6 +93,16 @@ export const MANAGED_HEALTH_FEATURE: DaemonWireFeature = "managed-health-v1";
  */
 export const MANAGED_HA_PROBE_FEATURE: DaemonWireFeature =
   "managed-ha-probe-v1";
+
+/**
+ * This daemon's Orchestrator poller names the dead instance (`instanceHost` +
+ * `instancePort`, Orchestrator's own key) on `managed-ha-event`. A control
+ * plane that does not know the fields ignores them; one that does fences only
+ * when they match the cluster's current primary, and treats an event from
+ * this daemon that lacks them as stale.
+ */
+export const MANAGED_HA_INSTANCE_FEATURE: DaemonWireFeature =
+  "managed-ha-instance-v1";
 
 /**
  * Metrics schema v7. This daemon can produce v7 samples (`metadata.version`
