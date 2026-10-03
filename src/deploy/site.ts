@@ -2808,6 +2808,7 @@ function sitePhpRuntimeFiles(
     group: principalUnixGroupName(user),
     home,
     configDir: layout.configDir,
+    libDir: layout.libDir,
     webAccount: siteEngineUnixUser(site.engine) === "tpapache"
       ? "tpapache"
       : "tpnginx",

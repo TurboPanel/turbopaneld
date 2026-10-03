@@ -184,6 +184,8 @@ export type SitePhpRuntimeSpec = Readonly<{
   home: string;
   /** The daemon's config root (`/etc/turbopanel`). */
   configDir: string;
+  /** The root-owned lib directory holding `tp-php-loopback` (`<install>/lib`). */
+  libDir: string;
   webAccount: SitePhpWebAccount;
 }>;
 
@@ -208,16 +210,22 @@ function phpFpmExec(spec: SitePhpRuntimeSpec): string {
 
 /**
  * What site PHP may not dial. `IPAddressAllow=` wins over the deny, so it
- * reopens exactly one address.
+ * reopens exactly two addresses.
  *
- * - `localhost` (127.0.0.0/8, ::1): every loopback service is closed —
- *   ProxySQL's admin (6032) and REST (6070) listeners, every site's vhost and
- *   Apache backend port (which would bypass the edge and spoof
- *   `X-Forwarded-For`), Traefik's PROXY-protocol entrypoints, the HA
- *   orchestrator API. systemd filters by address, never by port, so a
- *   `local`-scope managed database (ProxySQL published on 127.0.0.1) cannot
- *   be reopened without reopening all of those; site PHP reaches a managed
- *   database through its `datacenter`, `fabric` or `public` scope address.
+ * - `localhost` (127.0.0.0/8, ::1) is denied, with 127.0.0.1 allowed back so
+ *   site PHP can reach the database proxy (ProxySQL, port 13306, published on
+ *   127.0.0.1 for the `local` scope). systemd filters by address, never by
+ *   port, so that alone would also open ProxySQL's admin (6032) and REST
+ *   (6070) listeners, every site's vhost and Apache backend port (which would
+ *   bypass the edge and spoof `X-Forwarded-For`), Traefik's PROXY-protocol
+ *   entrypoints and the HA orchestrator API. The port filter is
+ *   `tp-php-loopback`: an nftables table that refuses, per site owner's Linux
+ *   user, every loopback destination but 127.0.0.1:13306 and the resolver
+ *   stub. The unit runs it as root in `ExecStartPre=+` and does not start when
+ *   it fails (fail closed); the daemon re-runs it after installing or
+ *   removing a runtime, so the user set follows the units on disk. It cannot
+ *   close the gap if someone flushes the nftables ruleset while PHP runs: the
+ *   next unit start, deploy or daemon boot restores it.
  * - `link-local` (169.254/16, fe80::/10) and `fc00::/7` (ULA, which holds
  *   AWS's IPv6 metadata `fd00:ec2::254`): cloud metadata.
  * - `multicast` and `0.0.0.0/8` (which Linux routes to the host itself).
@@ -227,15 +235,21 @@ function phpFpmExec(spec: SitePhpRuntimeSpec): string {
  * Not closed: RFC 1918 and CGNAT. A `datacenter`/`fabric` scope database
  * (tp0 is in 10/8) and a VPC's own services live there, and Docker's bridge
  * pools are operator-configured, so the host's private addresses and other
- * containers' bridge IPs stay reachable. The filter also covers these units
- * only, not the same principal's ssh, cron or CLI, and without cgroup BPF
- * systemd only warns and does not filter.
+ * containers' bridge IPs stay reachable. The systemd filter covers these
+ * units only and, without cgroup BPF, systemd only warns and does not filter;
+ * the nftables rules match the owner's uid, so they also bind that Linux
+ * user's ssh, cron and CLI processes on loopback.
  *
  * tp-host pins both strings (`tp_php_service_pinned_ok`).
  */
 export const SITE_PHP_IP_DENY =
   "localhost link-local multicast 0.0.0.0/8 fc00::/7";
-export const SITE_PHP_IP_ALLOW = "127.0.0.53";
+export const SITE_PHP_IP_ALLOW = "127.0.0.1 127.0.0.53";
+
+/** The root guard every PHP unit runs first; tp-host pins this exact line. */
+export function sitePhpLoopbackGuard(libDir: string): string {
+  return `+${libDir}/tp-php-loopback sync`;
+}
 
 /** The lines that differ by mode, in tp-host's pinned forms. */
 function serviceModeLines(spec: SitePhpRuntimeSpec): string[] {
@@ -281,6 +295,9 @@ export function sitePhpServiceUnit(
       : []),
     "",
     "[Service]",
+    // Root (`+`), before PHP starts: loads the per-user loopback rules. When it
+    // fails the unit does not start, so PHP never runs with open loopback.
+    `ExecStartPre=${sitePhpLoopbackGuard(spec.libDir)}`,
     ...serviceModeLines(spec),
     `User=${spec.user}`,
     `Group=${spec.group}`,

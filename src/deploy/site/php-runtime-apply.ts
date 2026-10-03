@@ -329,6 +329,14 @@ async function assertRuntimeUp(
 }
 
 /**
+ * Rebuild the per-owner loopback rules from the PHP units on disk
+ * (`tp-host php-loopback-sync`). Throws: a runtime must not start without them.
+ */
+async function syncLoopbackRules(io: SitePhpRuntimeIo): Promise<void> {
+  await sudoOrThrow(io, ["php-loopback-sync"], "PHP loopback rules");
+}
+
+/**
  * Write, test and start one runtime. A runtime whose files are all unchanged
  * is left exactly as it is. On any failure the runtime is rolled back here and
  * the error rethrown, so the caller never sees a half-installed runtime.
@@ -360,6 +368,9 @@ export async function installSitePhpRuntime(
         }`,
       );
     }
+    // Rules first, then PHP: a failure here must leave the runtime stopped.
+    // (The unit's own ExecStartPre repeats this at every start.)
+    await syncLoopbackRules(io);
     await startRuntime(io, prepared());
     await assertRuntimeUp(io, files.spec);
   } catch (err) {
@@ -505,6 +516,9 @@ export async function removeSitePhpRuntimes(
     });
   });
   await sudoQuietly(io, ["systemctl", "daemon-reload"], "daemon-reload");
+  // Units are gone: an owner with no PHP left drops out of the rules. A stale
+  // owner only stays restricted, so a failure here is a warning.
+  await sudoQuietly(io, ["php-loopback-sync"], "PHP loopback rules");
   await forEachSequential(ids, async (id) => {
     await sudoQuietly(
       io,
@@ -675,9 +689,16 @@ export async function reconcileSitePhpRuntimes(
     return { started: [], removed: [] };
   }
   await removeSitePhpRuntimes(io, configDir, orphans, listing);
+  // The rules live in the kernel only: rebuild them after a reboot or flush,
+  // before anything below is started (each start also runs the guard).
   const live = [...listing].filter(([id]) =>
     isSitePhpRuntimeId(id) && !orphans.includes(id)
   );
+  // With PHP runtimes left this must not fail silently (a host without the
+  // `nft` package would otherwise only show unit start failures): reconcile
+  // fails with the helper's own message, and no runtime is started open.
+  if (live.length > 0) await syncLoopbackRules(io);
+  else await sudoQuietly(io, ["php-loopback-sync"], "PHP loopback rules");
   const started: string[] = [];
   await forEachSequential(live, async ([id, has]) => {
     const unit = await startIfDown(io, id, has);
