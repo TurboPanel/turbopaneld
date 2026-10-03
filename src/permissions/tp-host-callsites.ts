@@ -41,7 +41,7 @@ import {
   sitePhpSocketUnit,
   sitePhpUnitLimits,
 } from "../deploy/site/php-runtime.ts";
-import { resolveLayout } from "../paths/layout.ts";
+import { PROD_RUNTIME_DIR_DEFAULT, resolveLayout } from "../paths/layout.ts";
 
 /** A path tp-host's test harness must create before the sample runs. */
 export type CallSiteSetup = {
@@ -187,6 +187,7 @@ const PHP_SPEC: SitePhpRuntimeSpec = {
   home: "/srv/users/alice",
   configDir: "/etc/turbopanel",
   libDir: "/opt/turbopanel/lib",
+  runtimesDir: PROD_RUNTIME_DIR_DEFAULT,
   webAccount: "tpnginx",
 };
 const PHP_FPM_SPEC: SitePhpRuntimeSpec = {

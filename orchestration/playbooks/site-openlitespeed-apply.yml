@@ -3,10 +3,11 @@
 # site deploy. Per-site httpd_config.conf / vhost configs are
 # written by the daemon TypeScript apply path after this playbook runs.
 #
-# The daemon passes turbopanel_lsphp_install=true when any OpenLiteSpeed site
-# carries hosting web.php hints; the role then also vendors `lsphp` (LSAPI PHP)
-# under vendor/lsphp/<series>/. A static-only host never downloads it. Mirrors
-# turbopanel_php_fpm_install in the nginx/apache apply playbooks.
+# The daemon passes turbopanel_lsphp_install=true when an OpenLiteSpeed site
+# runs PHP in detached lsphp mode; the role then also vendors `lsphp` (LSAPI
+# PHP) under vendor/lsphp/<series>/. A site in the fastcgi or fpm mode instead
+# needs the packaged php-cgi / php-fpm (turbopanel_php_fpm_install, as in the
+# nginx/apache apply playbooks). A static-only host downloads neither.
 - name: TurboPanel site prerequisites (OpenLiteSpeed)
   hosts: localhost
   connection: local
@@ -22,3 +23,15 @@
     - name: Vendor OpenLiteSpeed binary + FHS config/log/state dirs
       ansible.builtin.include_role:
         name: openlitespeed
+
+    # php-fpm's own identity (FPM master, bootstrap pool, FHS dirs) is tpols
+    # here, so an OpenLiteSpeed-only host never gains the tpapache account.
+    # The tpols identity above already exists. Per-site pools still run as the
+    # site owner's Linux user and listen on a tpols-owned socket.
+    - name: Vendor php-fpm binary + FHS config/log/pools
+      when: turbopanel_php_fpm_install | default(false) | bool
+      ansible.builtin.include_role:
+        name: php-fpm
+      vars:
+        php_fpm_service_user: tpols
+        php_fpm_service_group: tpols

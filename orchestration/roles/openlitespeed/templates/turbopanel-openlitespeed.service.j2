@@ -8,10 +8,9 @@ User={{ openlitespeed_service_user }}
 Group={{ openlitespeed_service_group }}
 Environment=PIDFILE={{ turbopanel_state_dir }}/openlitespeed/lshttpd.pid
 PIDFile={{ turbopanel_state_dir }}/openlitespeed/lshttpd.pid
-# LSAPI sockets (`uds:///run/turbopanel-ols/lsphp_<vhost>.sock` in each
-# vhconf.conf, src/deploy/site.ts). Not `uds://tmp/…`, which is the host /tmp.
-RuntimeDirectory=turbopanel-ols
-RuntimeDirectoryMode=0750
+# No PHP sockets of its own: each site's PHP runtime listens at
+# /run/turbopanel-php-<id>/php.sock, run by systemd as the site owner
+# (src/deploy/site/php-runtime.ts), and OpenLiteSpeed only connects.
 ExecStart={{ turbopanel_vendor_dir }}/openlitespeed/current/bin/lswsctrl start
 ExecReload={{ turbopanel_vendor_dir }}/openlitespeed/current/bin/lswsctrl restart
 ExecStop={{ turbopanel_vendor_dir }}/openlitespeed/current/bin/lswsctrl delay-stop

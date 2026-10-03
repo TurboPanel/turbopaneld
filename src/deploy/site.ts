@@ -112,19 +112,22 @@ import {
 } from "./site/nginx-apache.ts";
 import {
   isSitePhpRuntimeOf,
-  SITE_PHP_FCGI_CHILDREN,
   sitePhpFpmConf,
   sitePhpIni,
   sitePhpKey,
   sitePhpLockedValues,
+  sitePhpLsphpBinary,
+  sitePhpRuntimeChildren,
   sitePhpRuntimeId,
   type SitePhpRuntimeMode,
   sitePhpRuntimeMode,
   type SitePhpRuntimeSpec,
   sitePhpServiceUnit,
+  sitePhpSocketActivated,
   sitePhpSocketPath,
   sitePhpSocketUnit,
   sitePhpUnitLimits,
+  type SitePhpWebAccount,
 } from "./site/php-runtime.ts";
 import {
   holdSitePhpRuntime,
@@ -1154,100 +1157,81 @@ export function openlitespeedLsphpBinaryPath(
   layout: LayoutPaths,
   series: string = DEFAULT_PHP_SERIES,
 ): string {
-  return join(layout.runtimesDir, "lsphp", series, "current", "bin", "lsphp");
+  return sitePhpLsphpBinary(layout.runtimesDir, series);
 }
 
 /**
- * LSAPI socket directory: the `turbopanel-openlitespeed.service`
- * `RuntimeDirectory` (roles/openlitespeed), owned by `tpols`. A relative
- * `uds://tmp/…` resolves against `/`, i.e. the shared host `/tmp`.
+ * Worker processes OpenLiteSpeed runs (`httpdWorkers`). Pinned rather than
+ * left to the CPU count, because `maxConns` counts per worker: the pairing in
+ * {@link openlitespeedPhpMaxConns} holds only if this is known (WP0 gotcha 5).
  */
-export const OPENLITESPEED_LSAPI_SOCKET_DIR = "/run/turbopanel-ols";
+export const OPENLITESPEED_HTTPD_WORKERS = 2;
 
-/** `extprocessor` name for one site — also what its `scripthandler` maps to. */
-export function openlitespeedLsapiProcessorName(olsSiteName: string): string {
-  return `lsphp_${olsSiteName}`;
+/**
+ * `maxConns` for one site's PHP processor: workers × maxConns never exceeds
+ * the runtime's children, or requests queue on a busy child for seconds
+ * ("Reached max children process limit").
+ */
+export function openlitespeedPhpMaxConns(children: number): number {
+  return Math.max(1, Math.floor(children / OPENLITESPEED_HTTPD_WORKERS));
 }
 
-/** suEXEC identity + binary one vhost's LSAPI processor runs as. */
-export type OpenLiteSpeedLsapiOpts = Readonly<{
+/** `extprocessor` name for one site — also what its `scripthandler` maps to. */
+export function openlitespeedPhpProcessorName(olsSiteName: string): string {
+  return `php_${olsSiteName}`;
+}
+
+/** OpenLiteSpeed's processor type for each per-site PHP mode. */
+const OPENLITESPEED_PHP_TYPE: Readonly<
+  Record<SitePhpRuntimeMode, "fcgi" | "lsapi">
+> = {
+  fastcgi: "fcgi",
+  fpm: "fcgi",
+  "lsphp-detached": "lsapi",
+};
+
+/** The site's own PHP runtime, as one vhost's processor reaches it. */
+export type OpenLiteSpeedVhostPhpOpts = Readonly<{
   processorName: string;
-  /** Vendored `lsphp` binary this processor execs. */
-  lsphpPath: string;
-  /** suEXEC user: the site principal when pinned, else `tpols`. */
-  user: string;
-  group: string;
+  mode: SitePhpRuntimeMode;
+  /** The runtime's socket (`/run/turbopanel-php-<id>/php.sock`). */
+  socket: string;
+  /** The runtime's children, which bound `maxConns`. */
+  children: number;
+  /** The limits site code must not raise ({@link sitePhpLockedValues}). */
+  lockedValues: readonly PhpAdminValue[];
 }>;
 
 /**
- * Per-vhost LSAPI `extprocessor`.
+ * Per-vhost `extprocessor` for the site's own runtime.
  *
- * OpenLiteSpeed's PHP model is deliberately not a shared pool: each vhost execs
- * its **own** `lsphp` under `extUser`/`extGroup` (suEXEC), so the process
- * identity *is* the isolation boundary — the OLS-native equivalent of a php-fpm
- * pool's `user`/`group`, resolved from the same site principal. `runOnStartUp 0`
- * with `autoStart 2` keeps that process on-demand, matching the `pm = ondemand`
- * the FPM pools use, so an idle site costs nothing.
+ * OpenLiteSpeed never starts PHP here (`autoStart 0`): systemd runs it as the
+ * site owner, on a socket (FastCGI, detached lsphp) or as a php-fpm master, so
+ * it outlives an OpenLiteSpeed restart. OpenLiteSpeed runs as `tpols` and
+ * cannot switch users, which is why the old per-vhost `extUser`/`extGroup`
+ * never took effect (WP0).
  */
-export function openlitespeedLsapiExtProcessorFragment(
-  opts: OpenLiteSpeedLsapiOpts,
+export function openlitespeedPhpExtProcessorFragment(
+  opts: OpenLiteSpeedVhostPhpOpts,
 ): string {
   return `extprocessor ${opts.processorName}{
-  type                      lsapi
-  address                   uds://${OPENLITESPEED_LSAPI_SOCKET_DIR}/${opts.processorName}.sock
-  maxConns                  10
-  env                       PHP_LSAPI_CHILDREN=10
-  env                       PATH=/usr/local/bin:/usr/bin:/bin
+  type                      ${OPENLITESPEED_PHP_TYPE[opts.mode]}
+  address                   uds://${opts.socket}
+  maxConns                  ${openlitespeedPhpMaxConns(opts.children)}
   initTimeout               60
   retryTimeout              0
   persistConn               1
   respBuffer                0
-  autoStart                 2
-  runOnStartUp              0
-  path                      ${opts.lsphpPath}
-  backlog                   100
-  instances                 1
-  extUser                   ${opts.user}
-  extGroup                  ${opts.group}
-  priority                  0
-  memSoftLimit              2047M
-  memHardLimit              2047M
-  procSoftLimit             1400
-  procHardLimit             1500
+  autoStart                 0
 }
 `;
 }
 
-/** Per-vhost suEXEC principal identity, as OpenLiteSpeed spells it. */
-export type OpenLiteSpeedVhostIdentity = Readonly<{
-  /** suEXEC user: the site principal when pinned, else `tpols`. */
-  user: string;
-  group: string;
-}>;
-
 /** Per-site OpenLiteSpeed rendering options (PHP is off unless supplied). */
 export type OpenLiteSpeedSiteFragmentOpts = Readonly<{
-  /** Enables script execution for the vhost — its `vhconf.conf` runs LSAPI PHP. */
+  /** Enables script execution for the vhost — its `vhconf.conf` hands PHP on. */
   php?: boolean;
-  /**
-   * Principal-scoped identity for the vhost itself. Set for PHP-enabled sites:
-   * the `extprocessor`'s `extUser`/`extGroup` is only half the shared-hosting
-   * model — the vhost has to declare the same principal so everything OLS runs
-   * for that site (LSAPI processor, CGI, suEXEC-launched helpers) lands on one
-   * uid/gid instead of falling back to the server-wide `tpols`.
-   */
-  identity?: OpenLiteSpeedVhostIdentity;
 }>;
-
-/** vhost-level `user`/`group` lines, or nothing for a static site. */
-function openlitespeedVhostIdentityLines(
-  identity?: OpenLiteSpeedVhostIdentity,
-): string {
-  if (!identity) return "";
-  return `\n  user                      ${identity.user}` +
-    `\n  group                     ${identity.group}` +
-    `\n  setUIDMode                0`;
-}
 
 /**
  * Per-site `virtualHost` + `listener` block(s) appended into the single
@@ -1255,14 +1239,8 @@ function openlitespeedVhostIdentityLines(
  * directory convention — the whole main config is regenerated from every
  * currently-active site's fragment on each apply).
  *
- * `enableScript` is the server-level gate: the vhost's own LSAPI processor and
+ * `enableScript` is the server-level gate: the vhost's PHP processor and
  * `.php` handler live in its `vhconf.conf`, but neither runs while this is `0`.
- *
- * A PHP site also carries `opts.identity` — the vhost's own `user`/`group`,
- * resolved from the site principal exactly the way a php-fpm pool's are. With
- * `setUIDMode 0` OpenLiteSpeed runs the vhost under that declared identity
- * rather than the server-wide account or the document root's owner, which is
- * what makes the per-vhost suEXEC boundary hold for shared hosting.
  */
 export function openlitespeedSiteFragment(
   environmentId: string,
@@ -1280,7 +1258,7 @@ export function openlitespeedSiteFragment(
   vhRoot                    ${documentRoot}/
   allowSymbolLink           2
   enableScript              ${opts?.php ? 1 : 0}
-  restrained                0${openlitespeedVhostIdentityLines(opts?.identity)}
+  restrained                0
   configFile                ${vhConfigPath}
 }
 
@@ -1290,22 +1268,6 @@ listener ${name}_lo{
   map                       ${name} *
 }${dockerListener}
 `;
-}
-
-/** Everything one vhost needs to serve PHP through its own LSAPI processor. */
-export type OpenLiteSpeedVhostPhpOpts = Readonly<
-  OpenLiteSpeedLsapiOpts & {
-    /** Hosting `web.php` hints, already validated by {@link phpAdminValues}. */
-    adminValues: readonly PhpAdminValue[];
-  }
->;
-
-/**
- * OpenLiteSpeed spells a `php_admin_value[k] = v` pool line `php_admin_value k v`
- * inside a vhost `phpIniOverride{}` — same setting, different syntax.
- */
-function formatOpenLiteSpeedAdminValue(value: PhpAdminValue): string {
-  return `php_admin_value ${value.key} ${value.value}`;
 }
 
 /**
@@ -1340,9 +1302,9 @@ END_rules
  * directory listing (that is `autoIndex`): `0` answers 403 for everything.
  *
  * Static document root only (no directory listing) unless `php` is supplied, in
- * which case the vhost also carries its own suEXEC LSAPI processor, a `.php`
- * script handler bound to it, and a `phpIniOverride{}` holding the same hosting
- * hints an FPM pool takes as `php_admin_value[…]`.
+ * which case the vhost also carries the processor for the site's own runtime
+ * and a `.php` script handler bound to it. The hosting PHP settings live in
+ * that runtime's `php.ini`, not here.
  */
 export function openlitespeedVhostConfig(
   php?: OpenLiteSpeedVhostPhpOpts,
@@ -1360,7 +1322,11 @@ context / {
 }
 `;
   }
-  const overrides = php.adminValues.map(formatOpenLiteSpeedAdminValue);
+  // OpenLiteSpeed's spelling of a pool's `php_admin_value[k] = v`: honoured
+  // for lsapi, and the same limits the runtime's php.ini locks per path.
+  const overrides = php.lockedValues.map((v) =>
+    `php_admin_value ${v.key} ${v.value}`
+  );
   const overrideBlock = overrides.length > 0
     ? `\nphpIniOverride {\n${
       overrides.map((line) => `  ${line}`).join("\n")
@@ -1372,9 +1338,11 @@ index {
   autoIndex 0
 }
 
-${openlitespeedLsapiExtProcessorFragment(php)}
+${openlitespeedPhpExtProcessorFragment(php)}
 scripthandler {
-  add                       lsapi:${php.processorName} php
+  add                       ${
+    OPENLITESPEED_PHP_TYPE[php.mode]
+  }:${php.processorName} php
 }
 ${overrideBlock}
 ${openlitespeedScriptDenyRewrite(true)}
@@ -1413,6 +1381,7 @@ mime                              ${join(configDir, "mime.properties")}
 showVersionNumber                 0
 indexFiles                        index.html
 disableWebAdmin                   1
+httpdWorkers                      ${OPENLITESPEED_HTTPD_WORKERS}
 
 # OLS refuses a static file without the world-read bit unless told otherwise;
 # site files are principal-owned and shared with tpols by group, never world.
@@ -2153,11 +2122,12 @@ type SiteConfigDirs = {
 type SiteEngineSet = Set<SiteEngineId>;
 
 /**
- * Engines that reach PHP through a php-fpm pool (not LSAPI). Caddy's
- * `php_fastcgi` talks to the same socket nginx's `fastcgi_pass` does, so it
- * joins this lane rather than needing anything of its own.
+ * Engines whose sites run the packaged PHP (`php-fpm` / `php-cgi`, from the
+ * php-fpm role). Caddy's `php_fastcgi` talks to the same socket nginx's
+ * `fastcgi_pass` does, so it joins this lane rather than needing anything of
+ * its own; an OpenLiteSpeed site joins it in the fastcgi and fpm modes.
  */
-type PhpFpmEngine = "caddy" | "nginx" | "apache";
+type PhpFpmEngine = SiteApplySpec["engine"];
 
 export type SiteEngineNeeds = {
   caddy: boolean;
@@ -2172,7 +2142,7 @@ export type SiteEngineNeeds = {
    * playbook — the Apache one never runs there.
    */
   phpFpmEngines: ReadonlySet<PhpFpmEngine>;
-  /** Any OpenLiteSpeed site needs a vendored `lsphp` LSAPI processor. */
+  /** An OpenLiteSpeed site in detached lsphp mode needs the vendored `lsphp`. */
   openlitespeedLsphp: boolean;
 };
 
@@ -2180,12 +2150,14 @@ export function resolveSiteEngineNeeds(
   sites: readonly SiteApplySpec[],
 ): SiteEngineNeeds {
   const phpFpmEngines = new Set<PhpFpmEngine>();
+  let openlitespeedLsphp = false;
   for (const site of sites) {
     if (!siteNeedsPhp(site)) continue;
     // nginx in front of Apache reaches PHP through Apache only.
-    const engine = isNginxApacheSite(site) ? "apache" : site.engine;
-    if (engine === "caddy" || engine === "nginx" || engine === "apache") {
-      phpFpmEngines.add(engine);
+    if (sitePhpRuntimeMode(site) === "lsphp-detached") {
+      openlitespeedLsphp = true;
+    } else {
+      phpFpmEngines.add(isNginxApacheSite(site) ? "apache" : site.engine);
     }
   }
   const serves = (engine: SiteEngineId) =>
@@ -2197,9 +2169,7 @@ export function resolveSiteEngineNeeds(
     openlitespeed: serves("openlitespeed"),
     phpFpm: phpFpmEngines.size > 0,
     phpFpmEngines,
-    openlitespeedLsphp: sites.some((site) =>
-      site.engine === "openlitespeed" && siteNeedsPhp(site)
-    ),
+    openlitespeedLsphp,
   };
 }
 
@@ -2214,23 +2184,22 @@ export function siteEngineApplyExtraArgs(
   phpSeries: readonly string[],
   phpExtensions: Record<string, string[]>,
 ): string[] {
+  const phpFpm = {
+    turbopanel_php_fpm_install: needs.phpFpmEngines.has(engine),
+    php_fpm_versions: phpSeries,
+    php_fpm_extensions: phpExtensions,
+  };
   if (engine === "openlitespeed") {
     return [
       "-e",
       JSON.stringify({
         turbopanel_lsphp_install: needs.openlitespeedLsphp,
         openlitespeed_lsphp_versions: phpSeries,
+        ...phpFpm,
       }),
     ];
   }
-  return [
-    "-e",
-    JSON.stringify({
-      turbopanel_php_fpm_install: needs.phpFpmEngines.has(engine),
-      php_fpm_versions: phpSeries,
-      php_fpm_extensions: phpExtensions,
-    }),
-  ];
+  return ["-e", JSON.stringify(phpFpm)];
 }
 
 /**
@@ -2267,7 +2236,7 @@ async function installSiteEngines(
       needs.openlitespeed,
       "openlitespeed",
       SITE_OPENLITESPEED_APPLY_PLAYBOOK,
-      "site-openlitespeed-apply (vendor + lsphp + identity)",
+      "site-openlitespeed-apply (vendor + lsphp/php-fpm + identity)",
     ],
   ] as const;
   // Host provisioning playbooks run one engine at a time, in this order.
@@ -2341,10 +2310,9 @@ function emptyPhpRuntimes(): Record<SiteEngineId, PreparedSitePhpRuntime[]> {
   return { caddy: [], nginx: [], apache: [], openlitespeed: [] };
 }
 
-/** nginx and Apache run per-site PHP runtimes (OpenLiteSpeed: WP6). */
+/** nginx, Apache and OpenLiteSpeed run per-site PHP runtimes. */
 function sitePhpRuntimeEngine(site: SiteApplySpec): boolean {
-  return site.engine === "nginx" || site.engine === "apache" ||
-    isNginxApacheSite(site);
+  return site.engine !== "caddy";
 }
 
 /**
@@ -2396,7 +2364,7 @@ function holdSiteRuntime(
   site: SiteApplySpec,
 ): (() => void) | null {
   if (!sitePhpRuntimeEngine(site)) return null;
-  const mode = sitePhpRuntimeMode(site);
+  const mode = sitePhpRuntimeMode(site, environmentId);
   const series = resolveSitePhpSeries(site);
   if (mode === null || !series) return null;
   const key = sitePhpKey(environmentId, site.composeServiceName);
@@ -2746,7 +2714,7 @@ async function applySitePhpBackend(
 ): Promise<SitePhpBackend> {
   const series = resolveSitePhpSeries(site);
   if (!series) return { socket: null, result: { phpFpmStaged: [] } };
-  const mode = sitePhpRuntimeMode(site);
+  const mode = sitePhpRuntimeMode(site, environmentId);
   if (mode !== null) {
     const phpRuntime = await installSitePhpRuntime(
       sitePhpIo(),
@@ -2809,6 +2777,19 @@ function sitePhpWritablePaths(
   return [];
 }
 
+/** The web server account that reaches a site's PHP socket. */
+const SITE_PHP_WEB_ACCOUNT: Readonly<
+  Record<SiteApplySpec["engine"], SitePhpWebAccount>
+> = {
+  // Caddy runs no per-site PHP (sitePhpRuntimeMode); nginx's account is inert.
+  caddy: "tpnginx",
+  nginx: "tpnginx",
+  apache: "tpapache",
+  // PHP runs behind Apache in the nginx+apache pair.
+  "nginx+apache": "tpapache",
+  openlitespeed: "tpols",
+};
+
 /** Render one site's per-site PHP runtime (units and config). */
 function sitePhpRuntimeFiles(
   layout: LayoutPaths,
@@ -2839,9 +2820,8 @@ function sitePhpRuntimeFiles(
     home,
     configDir: layout.configDir,
     libDir: layout.libDir,
-    webAccount: siteEngineUnixUser(site.engine) === "tpapache"
-      ? "tpapache"
-      : "tpnginx",
+    runtimesDir: layout.runtimesDir,
+    webAccount: SITE_PHP_WEB_ACCOUNT[site.engine],
   };
   const values = site.php
     ? phpAdminValues(site.php, sitePhpAdminOpts(layout, paths))
@@ -2854,21 +2834,15 @@ function sitePhpRuntimeFiles(
     );
   }
   const pool = phpFpmPoolOverrides(site.php);
-  const maxChildren = Number(
-    pool.find((p) => p.key === "pm.max_children")?.value,
-  );
-  const fpmWorkers = Number.isInteger(maxChildren) && maxChildren > 0
-    ? maxChildren
-    : 20;
-  const workers = mode === "fpm" ? fpmWorkers : SITE_PHP_FCGI_CHILDREN;
+  const workers = sitePhpRuntimeChildren(mode, pool);
   return {
     spec,
     service: sitePhpServiceUnit(spec, {
       writablePaths: sitePhpWritablePaths(layout, paths),
       limits: sitePhpUnitLimits(values, workers),
     }),
-    socket: mode === "fastcgi" ? sitePhpSocketUnit(spec) : null,
-    ini: sitePhpIni(values, home),
+    socket: sitePhpSocketActivated(mode) ? sitePhpSocketUnit(spec) : null,
+    ini: sitePhpIni(values, home, spec),
     fpmConf: mode === "fpm"
       ? sitePhpFpmConf(spec, {
         pool,
@@ -2982,37 +2956,35 @@ async function applyNginxApacheSite(
 }
 
 /**
- * The vhost's own LSAPI processor, or `undefined` for a static site.
- *
- * suEXEC identity is resolved exactly the way {@link phpFpmPoolConfig} resolves
- * a pool's `user`/`group` — the assigned principal when pinned, the engine
- * account otherwise — so "who runs this script" has one answer per site
- * regardless of which engine serves it.
+ * The vhost's processor for the site's own runtime, or `undefined` for a
+ * static site.
  */
-function resolveOpenLiteSpeedVhostPhp(
-  layout: LayoutPaths,
+function openlitespeedVhostPhp(
   site: SiteApplySpec,
-  paths: SitePaths,
   olsSiteName: string,
+  runtime: PreparedSitePhpRuntime | undefined,
+  adminOpts: PhpFpmPoolAdminOpts | undefined,
 ): OpenLiteSpeedVhostPhpOpts | undefined {
-  if (!site.php || !siteNeedsPhp(site)) return undefined;
-  const engineUser = siteEngineUnixUser(site.engine);
+  if (!runtime) return undefined;
+  const { spec } = runtime.files;
   return {
-    processorName: openlitespeedLsapiProcessorName(olsSiteName),
-    // Per vhost, so two OLS sites on one host can run different series.
-    lsphpPath: openlitespeedLsphpBinaryPath(
-      layout,
-      resolveSitePhpSeries(site) ?? DEFAULT_PHP_SERIES,
+    processorName: openlitespeedPhpProcessorName(olsSiteName),
+    mode: spec.mode,
+    socket: sitePhpSocketPath(spec.id),
+    children: sitePhpRuntimeChildren(
+      spec.mode,
+      phpFpmPoolOverrides(site.php),
     ),
-    user: site.principal?.username ?? engineUser,
-    group: site.principal
-      ? principalUnixGroupName(site.principal.username)
-      : engineUser,
-    adminValues: phpAdminValues(site.php, sitePhpAdminOpts(layout, paths)),
+    lockedValues: sitePhpLockedValues(
+      site.php ? phpAdminValues(site.php, adminOpts) : [],
+    ),
   };
 }
 
-/** Stages the vhost config and the aggregated fragment for one OLS site. */
+/**
+ * Starts the site's PHP runtime, then stages the vhost config and the
+ * aggregated fragment for one OLS site.
+ */
 async function applyOpenLiteSpeedSite(
   layout: LayoutPaths,
   environmentId: string,
@@ -3024,7 +2996,13 @@ async function applyOpenLiteSpeedSite(
   const vhostDir = join(openlitespeedVhostsDir(layout), olsName);
   const vhConfigPath = join(vhostDir, "vhconf.conf");
   await ensureEngineConfigDir(vhostDir, "tpols");
-  const php = resolveOpenLiteSpeedVhostPhp(layout, site, paths, olsName);
+  const backend = await applySitePhpBackend(layout, environmentId, site, paths);
+  const php = openlitespeedVhostPhp(
+    site,
+    olsName,
+    backend.result.phpRuntime,
+    sitePhpAdminOpts(layout, paths),
+  );
   const vhostStaged = await stageOwnedConfigFile(
     vhConfigPath,
     openlitespeedVhostConfig(php),
@@ -3036,22 +3014,16 @@ async function applyOpenLiteSpeedSite(
     vhConfigPath,
     paths.documentRoot,
     dockerBind,
-    php === undefined
-      ? { php: false }
-      // The vhost declares the same principal the LSAPI processor execs as, so
-      // suEXEC covers the whole vhost rather than the extprocessor alone.
-      : { php: true, identity: { user: php.user, group: php.group } },
+    { php: php !== undefined },
   );
   const fragmentPath = join(paths.sitesDir, paths.configName);
   const fragmentStaged = await SITE_ENGINE_DRIVERS.openlitespeed
     .stageSiteConfig(run, fragmentPath, fragment);
   await applySiteTreeOwnership(site, paths);
-  // lsphp runs out of the vendored tree, not a shared FPM pool, so an OLS PHP
-  // site never stages a pool — its reload is the engine's own. The vhost config
-  // is swapped in before the fragment that names it.
+  // The vhost config is swapped in before the fragment that names it.
   return {
     staged: stagedList(vhostStaged, fragmentStaged),
-    phpFpmStaged: [],
+    ...backend.result,
   };
 }
 
@@ -3584,7 +3556,7 @@ export async function applySites(
     // bad version fails the deploy rather than half-applying.
     for (const site of sites) {
       resolveSitePhpSeries(site);
-      sitePhpRuntimeMode(site);
+      sitePhpRuntimeMode(site, environmentId);
     }
 
     const sitesDirs: SiteConfigDirs = {

@@ -11,7 +11,9 @@ import {
   applySites,
   RELEASE_SYMLINK_SWAP_PHP_DIRECTIVES,
   removeSites,
+  resolveSiteEngineNeeds,
   type SiteApplySpec,
+  siteEngineApplyExtraArgs,
   type SiteManagedDirectory,
   type SitePlaybookFn,
   type SiteRelease,
@@ -19,7 +21,11 @@ import {
   type SiteRunResult,
   siteVhostPorts,
 } from "./site.ts";
-import { sitePhpKey, sitePhpRuntimeId } from "./site/php-runtime.ts";
+import {
+  sitePhpKey,
+  sitePhpRuntimeId,
+  type SitePhpRuntimeMode,
+} from "./site/php-runtime.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -1536,52 +1542,44 @@ test("applySites nginx+php vendors php-fpm and writes its pool", async () => {
   }
 });
 
-test("applySites openlitespeed+php vendors lsphp and wires LSAPI", async () => {
-  const { layout, cleanup } = await makeTestLayout();
-  const { run, calls } = createSiteRunMock();
-  const { runPlaybook, extraVars } = capturePlaybooks();
+test("OpenLiteSpeed vendors lsphp only for detached lsphp, and packaged PHP for fastcgi and fpm", () => {
+  const vars = (mode: SitePhpRuntimeMode) => {
+    const site = { ...olsPhpSite, php: { version: "8.4", mode } };
+    const [, json] = siteEngineApplyExtraArgs(
+      "openlitespeed",
+      resolveSiteEngineNeeds([site]),
+      ["8.4"],
+      {},
+    );
+    return JSON.parse(json ?? "{}");
+  };
+  assertEquals(vars("lsphp-detached"), {
+    turbopanel_lsphp_install: true,
+    openlitespeed_lsphp_versions: ["8.4"],
+    turbopanel_php_fpm_install: false,
+    php_fpm_versions: ["8.4"],
+    php_fpm_extensions: {},
+  });
+  for (const mode of ["fastcgi", "fpm"] as const) {
+    assertEquals(vars(mode).turbopanel_lsphp_install, false, mode);
+    assertEquals(vars(mode).turbopanel_php_fpm_install, true, mode);
+  }
+});
+
+test("per-site PHP on OpenLiteSpeed: a site without a mode runs FastCGI instead of failing the environment", async () => {
+  const h = await perSitePhpHarness();
   try {
-    await applySites(layout, "envols", [olsPhpSite], {
-      run,
-      runPlaybook,
-    });
-
-    assertEquals(playbookVars(extraVars, "openlitespeed"), {
-      turbopanel_lsphp_install: true,
-      openlitespeed_lsphp_versions: ["8.4"],
-    });
-
-    const vhost = await Deno.readTextFile(
-      join(
-        layout.configDir,
-        "openlitespeed",
-        "vhosts",
-        "tp_envols_olsphp",
-        "vhconf.conf",
-      ),
-    );
-    assertStringIncludes(vhost, "extprocessor lsphp_tp_envols_olsphp{");
+    const site = perSitePhpSite("openlitespeed", "fastcgi");
+    const { mode: _mode, ...php } = site.php ?? {};
+    await h.apply({ ...site, php });
+    const id = phpRuntimeId("fastcgi");
+    await Deno.stat(join(h.unitDir, `turbopanel-php-${id}.socket`));
     assertStringIncludes(
-      vhost,
-      `path                      ${layout.runtimesDir}/lsphp/8.4/current/bin/lsphp`,
+      await olsVhconf(h),
+      `uds:///run/turbopanel-php-${id}/php.sock`,
     );
-    assertStringIncludes(vhost, "extUser                   tpols");
-    assertStringIncludes(vhost, "php_admin_value memory_limit 192M");
-
-    const fragment = await Deno.readTextFile(
-      join(
-        layout.configDir,
-        "openlitespeed",
-        "sites",
-        "tp-envols-olsphp.conf",
-      ),
-    );
-    assertStringIncludes(fragment, "enableScript              1");
-
-    // No php-fpm anywhere: OLS runs its own lsphp.
-    assertEquals(systemctlActions(calls, "turbopanel-php-fpm@8.4"), []);
   } finally {
-    await cleanup();
+    await h.cleanup();
   }
 });
 
@@ -1786,57 +1784,6 @@ test("applySites fails when openlitespeed -t rejects the config", async () => {
       ),
       false,
     );
-  } finally {
-    await cleanup();
-  }
-});
-
-const olsPrincipalPhpSite: SiteApplySpec = {
-  composeServiceName: "olsowned",
-  engine: "openlitespeed",
-  root: "public",
-  listenPort: 18085,
-  php: { version: "8.4", settings: { memory_limit: "128M" } },
-  principal: { principalId: "prin-1", username: "siteowner" },
-};
-
-test("applySites scopes an OpenLiteSpeed PHP vhost to its principal", async () => {
-  const { layout, cleanup } = await makeTestLayout();
-  const { run } = createSiteRunMock();
-  const { runPlaybook } = capturePlaybooks();
-  try {
-    await applySites(layout, "envolsown", [olsPrincipalPhpSite], {
-      run,
-      runPlaybook,
-    });
-
-    const fragment = await Deno.readTextFile(
-      join(
-        layout.configDir,
-        "openlitespeed",
-        "sites",
-        "tp-envolsown-olsowned.conf",
-      ),
-    );
-    // suEXEC is declared on the vhost itself, not only on its extprocessor —
-    // that is what makes the shared-hosting boundary hold for everything the
-    // vhost runs.
-    assertStringIncludes(fragment, "user                      siteowner");
-    assertStringIncludes(fragment, "group                     siteowner-grp");
-    assertStringIncludes(fragment, "setUIDMode                0");
-    assertStringIncludes(fragment, "enableScript              1");
-
-    const vhost = await Deno.readTextFile(
-      join(
-        layout.configDir,
-        "openlitespeed",
-        "vhosts",
-        "tp_envolsown_olsowned",
-        "vhconf.conf",
-      ),
-    );
-    assertStringIncludes(vhost, "extUser                   siteowner");
-    assertStringIncludes(vhost, "extGroup                  siteowner-grp");
   } finally {
     await cleanup();
   }
@@ -3050,8 +2997,8 @@ test("applySites never stages a root-owned config inside its config dir", async 
 const PHP_PRINCIPAL = { principalId: "pr-1", username: RELEASE_USERNAME };
 
 function perSitePhpSite(
-  engine: "nginx" | "apache" | "nginx+apache",
-  mode: "fastcgi" | "fpm",
+  engine: "nginx" | "apache" | "nginx+apache" | "openlitespeed",
+  mode: SitePhpRuntimeMode,
   settings: Record<string, string> = { memory_limit: "256M" },
 ): SiteApplySpec {
   return {
@@ -3065,15 +3012,22 @@ function perSitePhpSite(
   };
 }
 
-function phpRuntimeId(mode: "fastcgi" | "fpm", env = "envphp"): string {
-  return sitePhpRuntimeId(sitePhpKey(env, "shop"), mode, "8.4");
+function phpRuntimeId(
+  mode: SitePhpRuntimeMode,
+  env = "envphp",
+  service = "shop",
+): string {
+  return sitePhpRuntimeId(sitePhpKey(env, service), mode, "8.4");
 }
 
 type PerSitePhpHarness = {
   layout: LayoutPaths;
   unitDir: string;
   calls: Array<{ command: string; args: string[] }>;
-  apply: (site: SiteApplySpec, env?: string) => Promise<unknown>;
+  apply: (
+    site: SiteApplySpec | SiteApplySpec[],
+    env?: string,
+  ) => Promise<unknown>;
   failProbe: (on: boolean) => void;
   failPhpTest: (on: boolean) => void;
   /** Fail the config test of the engine whose binary path ends with this. */
@@ -3112,6 +3066,7 @@ async function perSitePhpHarness(): Promise<PerSitePhpHarness> {
   }, {
     tpnginx: ["tpnginx", RELEASE_GROUP],
     tpapache: ["tpapache", RELEASE_GROUP],
+    tpols: ["tpols", RELEASE_GROUP],
   });
   await seedRelease(layout, "rel-1", "public", "<?php echo 1;");
   const busyPorts = new Set<number>();
@@ -3120,18 +3075,22 @@ async function perSitePhpHarness(): Promise<PerSitePhpHarness> {
     layout,
     unitDir,
     calls: base.calls,
-    apply: (site, env = "envphp") =>
-      applySites(layout, env, [site], {
+    apply: (site, env = "envphp") => {
+      const sites = Array.isArray(site) ? site : [site];
+      return applySites(layout, env, sites, {
         run,
         runPlaybook: () => Promise.resolve(),
-        releaseBindings: releaseBindingsFor(site.composeServiceName),
+        releaseBindings: releaseBindingsFor(
+          ...sites.map((s) => s.composeServiceName),
+        ),
         systemdUnitDir: unitDir,
         sleep: () => Promise.resolve(),
         probeHostPort: (_address, port) => {
           probedPorts.push(port);
           return Promise.resolve(!busyPorts.has(port));
         },
-      }),
+      });
+    },
     busyPorts,
     probedPorts,
     failProbe: (on) => {
@@ -3472,6 +3431,219 @@ test("per-site PHP is refused without a principal, and lsphp is refused on nginx
         }),
       Error,
       "PHP mode lsphp-detached needs OpenLiteSpeed, not nginx",
+    );
+  } finally {
+    await h.cleanup();
+  }
+});
+
+async function olsVhconf(h: PerSitePhpHarness, service = "shop") {
+  return await Deno.readTextFile(
+    join(
+      h.layout.configDir,
+      "openlitespeed",
+      "vhosts",
+      `tp_envphp_${service}`,
+      "vhconf.conf",
+    ),
+  );
+}
+
+const OLS_DEAD_LINES = [
+  "extUser",
+  "extGroup",
+  "setUIDMode",
+  "runOnStartUp",
+  "\n  user ",
+];
+
+test("per-site PHP on OpenLiteSpeed: fastcgi and fpm reach the owner's runtime through an fcgi processor", async () => {
+  for (const [mode, maxConns] of [["fastcgi", 2], ["fpm", 10]] as const) {
+    const h = await perSitePhpHarness();
+    try {
+      await h.apply(perSitePhpSite("openlitespeed", mode));
+      const id = phpRuntimeId(mode);
+      const service = await Deno.readTextFile(
+        join(h.unitDir, `turbopanel-php-${id}.service`),
+      );
+      assertStringIncludes(service, `User=${RELEASE_USERNAME}`);
+      if (mode === "fastcgi") {
+        const socket = await Deno.readTextFile(
+          join(h.unitDir, `turbopanel-php-${id}.socket`),
+        );
+        assertStringIncludes(socket, "SocketGroup=tpols");
+      } else {
+        const fpm = await Deno.readTextFile(
+          join(h.layout.configDir, "php", "sites", id, "php-fpm.conf"),
+        );
+        assertStringIncludes(fpm, "listen.acl_users = tpols");
+      }
+      const ini = await Deno.readTextFile(
+        join(h.layout.configDir, "php", "sites", id, "php.ini"),
+      );
+      assertStringIncludes(ini, "memory_limit = 256M");
+      const vhost = await olsVhconf(h);
+      assertStringIncludes(vhost, "type                      fcgi");
+      assertStringIncludes(
+        vhost,
+        `address                   uds:///run/turbopanel-php-${id}/php.sock`,
+      );
+      assertStringIncludes(vhost, `maxConns                  ${maxConns}`);
+      assertStringIncludes(vhost, "autoStart                 0");
+      assertStringIncludes(
+        vhost,
+        "add                       fcgi:php_tp_envphp_shop php",
+      );
+      const fragment = await Deno.readTextFile(
+        join(
+          h.layout.configDir,
+          "openlitespeed",
+          "sites",
+          "tp-envphp-shop.conf",
+        ),
+      );
+      for (const dead of OLS_DEAD_LINES) {
+        assertEquals(vhost.includes(dead), false, `${mode} vhost: ${dead}`);
+        assertEquals(
+          fragment.includes(dead),
+          false,
+          `${mode} fragment: ${dead}`,
+        );
+      }
+      // The runtime answers before OpenLiteSpeed is tested against its socket.
+      const started = callIndex(
+        h.calls,
+        (a) =>
+          a.includes("restart") && a.includes(`turbopanel-php-${id}.service`),
+      );
+      const olsTest = callIndex(h.calls, (a) => a.includes("-t"));
+      assert(started >= 0 && started < olsTest, `${mode}: runtime up first`);
+    } finally {
+      await h.cleanup();
+    }
+  }
+});
+
+test("detached lsphp on OpenLiteSpeed: systemd runs the vendored lsphp as the owner, OpenLiteSpeed only connects", async () => {
+  const h = await perSitePhpHarness();
+  try {
+    await h.apply(perSitePhpSite("openlitespeed", "lsphp-detached"));
+    const id = phpRuntimeId("lsphp-detached");
+    assertEquals(id.endsWith("-lsd84"), true, id);
+    const service = await Deno.readTextFile(
+      join(h.unitDir, `turbopanel-php-${id}.service`),
+    );
+    for (
+      const want of [
+        `ExecStart=${h.layout.runtimesDir}/lsphp/8.4/current/bin/lsphp\n`,
+        "StandardInput=socket\n",
+        `Environment=PHPRC=${h.layout.configDir}/php/sites/${id}/php.ini\n`,
+        "Environment=LSAPI_CHILDREN=10\n",
+        `User=${RELEASE_USERNAME}\n`,
+        "\nIPAddressDeny=localhost ",
+        "\nIPAddressAllow=127.0.0.1 127.0.0.53\n",
+        "tp-php-loopback sync\n",
+        "\nMemoryMax=",
+        "\nTasksMax=",
+      ]
+    ) {
+      assertStringIncludes(service, want);
+    }
+    const socket = await Deno.readTextFile(
+      join(h.unitDir, `turbopanel-php-${id}.socket`),
+    );
+    assertStringIncludes(
+      socket,
+      `ListenStream=/run/turbopanel-php-${id}/php.sock`,
+    );
+    assertStringIncludes(socket, "SocketGroup=tpols");
+    const ini = await Deno.readTextFile(
+      join(h.layout.configDir, "php", "sites", id, "php.ini"),
+    );
+    assertStringIncludes(
+      ini,
+      `extension_dir = ${h.layout.runtimesDir}/lsphp/8.4/current/lib/php/ext\n`,
+    );
+    assertStringIncludes(ini, "extension = mysqli.so\n");
+    assertStringIncludes(ini, "memory_limit = 256M\n");
+    const vhost = await olsVhconf(h);
+    assertStringIncludes(vhost, "type                      lsapi");
+    assertStringIncludes(
+      vhost,
+      `address                   uds:///run/turbopanel-php-${id}/php.sock`,
+    );
+    assertStringIncludes(vhost, "maxConns                  5");
+    assertStringIncludes(vhost, "autoStart                 0");
+    assertStringIncludes(
+      vhost,
+      "add                       lsapi:php_tp_envphp_shop php",
+    );
+    // #283's script-source deny rules sit beside the handler, and the locked
+    // limits go to lsphp as admin values.
+    assertStringIncludes(vhost, "rewrite {\n  enable                    1");
+    assertStringIncludes(vhost, "phpIniOverride {\n  php_admin_value ");
+    for (const dead of [...OLS_DEAD_LINES, "path "]) {
+      assertEquals(vhost.includes(dead), false, dead);
+    }
+    assertEquals(
+      systemctlCalls(h.calls).filter((c) => c.includes(`php-${id}`)),
+      [
+        `enable --now turbopanel-php-${id}.socket`,
+        `restart turbopanel-php-${id}.service`,
+        `is-active --quiet turbopanel-php-${id}.service`,
+      ],
+    );
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("per-site PHP on OpenLiteSpeed: a site asking for attached lsphp runs detached and does not fail the apply", async () => {
+  const h = await perSitePhpHarness();
+  try {
+    await h.apply([
+      perSitePhpSite("openlitespeed", "lsphp-detached"),
+      {
+        ...perSitePhpSite("openlitespeed", "fpm"),
+        composeServiceName: "attached",
+        listenPort: 18092,
+        php: { version: "8.4", mode: "lsphp-attached" },
+      },
+    ]);
+    const attached = phpRuntimeId("lsphp-detached", "envphp", "attached");
+    const service = await Deno.readTextFile(
+      join(h.unitDir, `turbopanel-php-${attached}.service`),
+    );
+    assertStringIncludes(service, "StandardInput=socket\n");
+    // Same sandbox as every per-site PHP unit: loopback filter, its root
+    // guard, and the memory and task caps.
+    assertStringIncludes(service, "\nIPAddressDeny=localhost ");
+    assertStringIncludes(service, "\nIPAddressAllow=127.0.0.1 127.0.0.53\n");
+    assertStringIncludes(service, "\nExecStartPre=+");
+    assertStringIncludes(service, "tp-php-loopback sync\n");
+    assertStringIncludes(service, "\nMemoryMax=");
+    assertStringIncludes(service, "\nTasksMax=");
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("two OpenLiteSpeed PHP sites in one apply restart OpenLiteSpeed once", async () => {
+  const h = await perSitePhpHarness();
+  try {
+    await h.apply([
+      perSitePhpSite("openlitespeed", "lsphp-detached"),
+      {
+        ...perSitePhpSite("openlitespeed", "fastcgi"),
+        composeServiceName: "blog",
+        listenPort: 18091,
+      },
+    ]);
+    assertEquals(
+      systemctlCalls(h.calls).filter((c) =>
+        c.includes("turbopanel-openlitespeed") && !c.startsWith("is-active")
+      ),
+      ["reload turbopanel-openlitespeed"],
     );
   } finally {
     await h.cleanup();

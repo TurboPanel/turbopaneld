@@ -1561,6 +1561,10 @@ test("site apply playbooks vendor engines (never apt nginx/apache2)", async () =
   assertEquals(apachePlaybook.includes("name: apache"), true);
   assertEquals(apachePlaybook.includes("name: php-fpm"), true);
   assertEquals(olsPlaybook.includes("name: openlitespeed"), true);
+  // An OpenLiteSpeed-only host must not gain the tpapache account: php-fpm
+  // runs as tpols there.
+  assertEquals(olsPlaybook.includes("web_service_key: apache"), false);
+  assertEquals(olsPlaybook.includes("php_fpm_service_user: tpols"), true);
 
   // Distro package installs must stay gone — engines come from vendor roles.
   for (
