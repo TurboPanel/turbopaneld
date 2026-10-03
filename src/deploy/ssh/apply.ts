@@ -348,7 +348,9 @@ function groupMembers(
     const fields = entry.split(":");
     if (fields[3] === parts[2]) members.push(fields[0]);
   }
-  return members.filter((name) => SSHD_SAMPLE_NAME.test(name)).sort();
+  return members.filter((name) => SSHD_SAMPLE_NAME.test(name)).sort((a, b) =>
+    a.localeCompare(b)
+  );
 }
 
 /**
@@ -374,10 +376,8 @@ async function sampleAccounts(runFn: RunFn): Promise<string[]> {
     members(principal),
   ]);
   const leveled = new Set([...sftpOnes, ...shellOnes]);
-  const bare = principalOnes.filter((name) => !leveled.has(name));
-  return [sftpOnes[0], shellOnes[0], bare[0]].filter((name) =>
-    name !== undefined
-  );
+  const bare = principalOnes.find((name) => !leveled.has(name));
+  return [sftpOnes[0], shellOnes[0], bare].filter((name) => name !== undefined);
 }
 
 /**
@@ -486,16 +486,19 @@ async function reconcileDropIn(
       }`,
     );
   }
-  for (const verifier of verifiers) {
-    const effective = await verifier.run();
-    if (!effective.success) {
-      await restore();
+  try {
+    await forEachSequential(verifiers, async (verifier) => {
+      const effective = await verifier.run();
+      if (effective.success) return;
       throw new Error(
         `${verifier.refusal}, and the change has been rolled back: ${
           effective.stdout || effective.stderr || verifier.fallback
         }`,
       );
-    }
+    });
+  } catch (error) {
+    await restore();
+    throw error;
   }
 
   await reloadSshd(runFn);
