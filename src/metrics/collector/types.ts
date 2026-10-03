@@ -1,3 +1,4 @@
+import type { HostTextSample } from "./host-text.ts";
 import type { MetricsCapabilityPlan } from "../capability-plan.ts";
 import type { MetricsSample } from "../../contracts/metrics-contract.ts";
 import type {
@@ -308,6 +309,8 @@ export type CollectorDeps = {
    * stub this so FakeClock microtask draining never waits on real directory
    * I/O (hundreds of PID entries, plus a possible `ls` fallback).
    */
+  /** v7 free-text host facts (`host-text.ts`); the scheduler strips them unless `metrics-v7` is negotiated. */
+  hostText?: () => Promise<HostTextSample>;
   countProcesses?: () => number | null | Promise<number | null>;
   /**
    * GPU telemetry adapters (sysfs/NVML/DCGM), constructed once at daemon

@@ -99,6 +99,7 @@ import {
   type VmstatRates,
   vmstatRates,
 } from "./parse-vmstat.ts";
+import { type HostTextSample, hostTextToExtended } from "./host-text.ts";
 import type {
   CollectorDeps,
   CpuCounters,
@@ -907,6 +908,27 @@ export class LinuxMetricsCollector implements MetricsCollector {
       cpu: cpu.currentCpu,
       cores: cpu.currentCores,
     };
-    return { supported: true, sample: outgoing };
+    const hostText = await this.#readHostText();
+    return {
+      supported: true,
+      // Host text rides in the contract's `extended` block (v7 only; the
+      // scheduler strips `extended` unless metrics-v7 is negotiated).
+      sample: hostText
+        ? {
+          ...outgoing,
+          extended: { ...outgoing.extended, ...hostTextToExtended(hostText) },
+        }
+        : outgoing,
+    };
+  }
+
+  /** Free-text facts never break a sample: any failure just omits them. */
+  async #readHostText(): Promise<HostTextSample | undefined> {
+    if (!this.#deps.hostText) return undefined;
+    try {
+      return await this.#deps.hostText();
+    } catch {
+      return undefined;
+    }
   }
 }

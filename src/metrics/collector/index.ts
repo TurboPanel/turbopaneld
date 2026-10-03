@@ -37,6 +37,7 @@ import { resolveHostingPath } from "./hosting.ts";
 import { defaultSensorIo } from "./sensors/discovery.ts";
 import { LinuxMetricsCollector } from "./linux-collector.ts";
 import { resolvePageSizeBytes } from "./parse-vmstat.ts";
+import { defaultHostTextCollector } from "./host-text-io.ts";
 import { countProcessesInProc } from "./processes.ts";
 import { readProcFile } from "./proc-read.ts";
 import type {
@@ -393,7 +394,10 @@ export function stopHostStorageSamplers(): void {
 }
 
 function defaultDeps(): CollectorDeps {
+  const pageSizeBytes = resolvePageSizeBytes();
+  const hostText = defaultHostTextCollector(pageSizeBytes);
   return {
+    hostText: () => hostText.read(),
     readProcFile,
     statfs: defaultStatfs,
     now: () => Date.now(),
@@ -409,7 +413,7 @@ function defaultDeps(): CollectorDeps {
       Deno.env.get("TURBOPANEL_INSTANCE_RUNTIME")?.trim() === "deno",
     io: defaultSensorIo(),
     // Resolved once here (construction time), never per tick.
-    pageSizeBytes: resolvePageSizeBytes(),
+    pageSizeBytes,
     countProcesses: () => countProcessesInProc(),
     gpuAdapters: defaultGpuAdapters(),
     ingressAdapters: defaultIngressAdapters(),
