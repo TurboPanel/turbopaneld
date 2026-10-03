@@ -885,11 +885,14 @@ async function engineGone(
       mode: 0o755,
     });
   }
+  // Hermetic PATH: only the stubs plus sh, so a runner that really has
+  // dockerd, docker-ce, snap or docker.service installed cannot leak in.
+  await Deno.symlink("/bin/sh", join(dir, "sh"));
   const result = await runPurgeSh(
     ["tp_docker_engine_gone", "tp_has_tool", "tp_pkg_installed"],
     "DRY_RUN=false; if tp_docker_engine_gone; then echo gone; else echo present; fi",
     {
-      PATH: `${dir}:${BASE_PATH}`,
+      PATH: dir,
       TP_DOCKER_SOCKETS: "/nonexistent/x.sock",
       ...env,
     },
@@ -906,6 +909,10 @@ test("Docker Engine counts as gone only when no daemon, snap, service or socket 
   );
   assertEquals(await engineGone({ snap: "exit 0" }), "present");
   assertEquals(await engineGone({ systemctl: "exit 0" }), "present");
+  assertEquals(
+    await engineGone({ "dpkg-query": 'printf "install ok installed"' }),
+    "present",
+  );
   const dir = await Deno.makeTempDir({ prefix: "tp-purge-sock-" });
   const sock = join(dir, "docker.sock");
   const listener = Deno.listen({ transport: "unix", path: sock });
