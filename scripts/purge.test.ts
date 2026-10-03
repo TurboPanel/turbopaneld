@@ -599,7 +599,11 @@ test("the Docker gate stage-1 folders are owned trees and are removed with the o
   const trees = extractConstant(source, "TP_OWNED_TREES") ?? "";
   const remove = extractFunction(source, "tp_remove_folders_and_shell") ?? "";
   for (
-    const dir of ["/run/turbopanel-gate", "/var/cache/turbopanel-docker-gate"]
+    const dir of [
+      "/run/turbopanel-gate",
+      "/var/cache/turbopanel-docker-gate",
+      "/var/lib/turbopanel-docker-gate",
+    ]
   ) {
     assertStringIncludes(trees, dir);
     assertStringIncludes(remove, `tp_safe_rm_tree ${dir}`);
@@ -754,6 +758,10 @@ test("only Docker's own firewall rules are matched for removal", async () => {
   assertEquals(await check("-A DOCKER -j RETURN"), "foreign");
   assertEquals(await check("-A INPUT -p tcp --dport 22 -j ACCEPT"), "foreign");
   assertEquals(await check("-A FORWARD -o br-lan -j ACCEPT"), "foreign");
+  assertEquals(await check("-A INPUT -i docker0 -j ACCEPT"), "foreign");
+  assertEquals(await check("-A INPUT -i br-0123456789ab -j ACCEPT"), "foreign");
+  assertEquals(await check("-A OUTPUT -o docker0 -j ACCEPT"), "foreign");
+  assertEquals(await check("-A OUTPUT -j DOCKER"), "ours");
   assertEquals(
     await check('-A FORWARD -o docker0 -m comment --comment "mine" -j ACCEPT'),
     "foreign",
@@ -803,4 +811,107 @@ test("the Docker network cleanup removes Docker bridges and chains and nothing e
   assertStringIncludes(log, "-t filter -D FORWARD -j DOCKER-USER");
   assertStringIncludes(log, "-t filter -X DOCKER");
   assert(!log.includes("-D INPUT"), log);
+});
+
+async function netCleanup(
+  forward: string,
+  extra: string,
+): Promise<{ log: string; dir: string; stdout: string }> {
+  const dir = await Deno.makeTempDir({ prefix: "tp-purge-net2-" });
+  const calls = join(dir, "calls");
+  await Deno.writeTextFile(
+    join(dir, "iptables"),
+    [
+      "#!/bin/sh",
+      `echo "iptables $*" >> ${calls}`,
+      'case "$*" in',
+      `  *"-t filter -S") printf -- "${forward}" ;;`,
+      "esac",
+    ].join("\n") + "\n",
+    { mode: 0o755 },
+  );
+  const result = await runPurgeSh(
+    [
+      "tp_purge_docker_net_table",
+      "tp_docker_net_rule",
+    ],
+    `tp_purge_docker_net_table iptables filter\n${extra}`,
+    { PATH: `${dir}:${BASE_PATH}` },
+  );
+  assertEquals(result.code, 0, result.stderr);
+  let log = "";
+  try {
+    log = await Deno.readTextFile(calls);
+  } catch { /* no calls */ }
+  return { log, dir, stdout: result.stdout };
+}
+
+const NET_KEPT =
+  "-N DOCKER\\n-N DOCKER-USER\\n-A DOCKER-USER -s 10.0.0.1 -j DROP\\n-A DOCKER-USER -j RETURN\\n-A FORWARD -j DOCKER-USER\\n-A FORWARD -o docker0 -j DOCKER\\n-A INPUT -i docker0 -j ACCEPT\\n";
+
+test("a kept DOCKER-USER chain keeps its FORWARD jump; Docker's other rules and an admin INPUT docker0 rule are handled", async () => {
+  const { log } = await netCleanup(NET_KEPT, "");
+  assert(!log.includes("-D FORWARD -j DOCKER-USER"), log);
+  assert(!log.includes("-D INPUT"), log);
+  assertStringIncludes(log, "-t filter -D FORWARD -o docker0 -j DOCKER");
+  assert(!log.includes("-X DOCKER-USER"), log);
+  assert(!log.includes("-F DOCKER-USER"), log);
+  assertStringIncludes(log, "-t filter -X DOCKER");
+});
+
+test("an inert DOCKER-USER chain (only RETURN) loses its jump and the chain", async () => {
+  const { log } = await netCleanup(
+    "-N DOCKER-USER\\n-A DOCKER-USER -j RETURN\\n-A FORWARD -j DOCKER-USER\\n",
+    "",
+  );
+  assertStringIncludes(log, "-t filter -D FORWARD -j DOCKER-USER");
+  assertStringIncludes(log, "-t filter -X DOCKER-USER");
+});
+
+test("running the network cleanup on an already clean table does nothing", async () => {
+  const { log } = await netCleanup("-A INPUT -p tcp -j ACCEPT\\n", "");
+  assert(!log.includes(" -D "), log);
+  assert(!log.includes(" -X "), log);
+  assert(!log.includes(" -F "), log);
+});
+
+async function engineGone(
+  stubs: Record<string, string>,
+  env: Record<string, string> = {},
+): Promise<string> {
+  const dir = await Deno.makeTempDir({ prefix: "tp-purge-eng-" });
+  for (const [name, body] of Object.entries(stubs)) {
+    await Deno.writeTextFile(join(dir, name), `#!/bin/sh\n${body}\n`, {
+      mode: 0o755,
+    });
+  }
+  const result = await runPurgeSh(
+    ["tp_docker_engine_gone", "tp_has_tool", "tp_pkg_installed"],
+    "DRY_RUN=false; if tp_docker_engine_gone; then echo gone; else echo present; fi",
+    {
+      PATH: `${dir}:${BASE_PATH}`,
+      TP_DOCKER_SOCKETS: "/nonexistent/x.sock",
+      ...env,
+    },
+  );
+  return result.stdout.trim();
+}
+
+test("Docker Engine counts as gone only when no daemon, snap, service or socket remains", async () => {
+  assertEquals(await engineGone({}), "gone");
+  assertEquals(await engineGone({ dockerd: "exit 0" }), "present");
+  assertEquals(
+    await engineGone({ "dockerd-rootless.sh": "exit 0" }),
+    "present",
+  );
+  assertEquals(await engineGone({ snap: "exit 0" }), "present");
+  assertEquals(await engineGone({ systemctl: "exit 0" }), "present");
+  const dir = await Deno.makeTempDir({ prefix: "tp-purge-sock-" });
+  const sock = join(dir, "docker.sock");
+  const listener = Deno.listen({ transport: "unix", path: sock });
+  try {
+    assertEquals(await engineGone({}, { TP_DOCKER_SOCKETS: sock }), "present");
+  } finally {
+    listener.close();
+  }
 });

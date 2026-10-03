@@ -1593,6 +1593,7 @@ tp_inventory_folders() {
   # The Docker gate's socket directory and Deno transpile cache.
   tp_add_existing "$TP_TMP/inv.folders_remove" /run/turbopanel-gate ""
   tp_add_existing "$TP_TMP/inv.folders_remove" /var/cache/turbopanel-docker-gate ""
+  tp_add_existing "$TP_TMP/inv.folders_remove" /var/lib/turbopanel-docker-gate ""
   # The hosting Caddy's StateDirectory. It sits beside /var/lib/turbopanel, not
   # under it, and is owned by the hosting Caddy account.
   tp_add_existing "$TP_TMP/inv.folders_remove" /var/lib/turbopanel-hosting-caddy ""
@@ -2491,6 +2492,7 @@ tp_remove_folders_and_shell() {
   tp_safe_rm_tree /tmp/turbopanel-orchestrate
   tp_safe_rm_tree /run/turbopanel-gate
   tp_safe_rm_tree /var/cache/turbopanel-docker-gate
+  tp_safe_rm_tree /var/lib/turbopanel-docker-gate
   tp_safe_rm_tree /var/lib/turbopanel-hosting-caddy
   tp_safe_rm_tree /root/.ansible
   tp_strip_shell_rcs
@@ -3077,29 +3079,57 @@ tp_purge_docker_engine() {
   fi
 }
 
-# Docker Engine is gone when neither its daemon binary nor its packages remain.
+# Docker Engine is gone only when nothing of it remains: no daemon binary
+# (also the snap and rootless ones), no engine package, no active or installed
+# service, and no live socket. Anything uncertain counts as still present.
 # Dry runs change nothing, so they never count as gone.
 tp_docker_engine_gone() {
   [ "$DRY_RUN" = true ] && return 1
   tp_has_tool dockerd && return 1
+  tp_has_tool dockerd-rootless.sh && return 1
+  [ -x /snap/bin/docker.dockerd ] && return 1
+  [ -d /snap/docker ] && return 1
+  if tp_has_tool snap && snap list docker >/dev/null 2>&1; then
+    return 1
+  fi
   if tp_has_tool dpkg-query; then
-    for _deg in docker-ce docker.io; do
+    for _deg in docker-ce docker.io docker-ce-rootless-extras moby-engine moby-cli; do
       if tp_pkg_installed "$_deg"; then
         return 1
       fi
     done
   fi
+  if tp_has_tool systemctl; then
+    for _deg in docker.service docker.socket snap.docker.dockerd.service; do
+      if systemctl is-active --quiet "$_deg" 2>/dev/null; then
+        return 1
+      fi
+    done
+  fi
+  for _deg in ${TP_DOCKER_SOCKETS:-/var/run/docker.sock /run/docker.sock /run/user/*/docker.sock /var/snap/docker/common/run/docker.sock}; do
+    [ -S "$_deg" ] && return 1
+  done
   return 0
 }
 
 # Docker's own firewall rules reference its bridges (docker0, br-<12 hex>) or
 # jump to its DOCKER* chains. Rules with quoted words are never touched.
+# Docker adds bridge rules only to FORWARD, POSTROUTING and PREROUTING and
+# never to INPUT, so an administrator's own INPUT/OUTPUT rule is left alone;
+# only the jump into a DOCKER* chain is Docker's in those chains.
 tp_docker_net_rule() {
   case $1 in
     *\"*|*\'*) return 1 ;;
-    "-A DOCKER"*) return 1 ;;
-    *" -j DOCKER"*|*" docker0"*) return 0 ;;
+    "-A DOCKER"*|"-A INPUT "*) return 1 ;;
   esac
+  if printf '%s\n' "$1" | grep -Eq ' -j DOCKER(-[A-Z0-9-]+)?$'; then
+    return 0
+  fi
+  case $1 in
+    "-A FORWARD "*|"-A POSTROUTING "*|"-A PREROUTING "*) ;;
+    *) return 1 ;;
+  esac
+  case $1 in *" docker0"*) return 0 ;; esac
   printf '%s\n' "$1" | grep -Eq ' br-[0-9a-f]{12}( |$)'
 }
 
@@ -3107,15 +3137,6 @@ tp_purge_docker_net_table() {
   _dnt_bin=$1
   _dnt_table=$2
   "$_dnt_bin" -w 5 -t "$_dnt_table" -S > "$TP_TMP/dn.rules" 2>>"$TP_LOG_FILE" || return 0
-  while IFS= read -r _dnt_line; do
-    case $_dnt_line in "-A "*) ;; *) continue ;; esac
-    tp_docker_net_rule "$_dnt_line" || continue
-    _dnt_del="-D ${_dnt_line#-A }"
-    set -f
-    # shellcheck disable=SC2086
-    tp_run "delete $_dnt_bin $_dnt_table rule: ${_dnt_line}" "$_dnt_bin" -w 5 -t "$_dnt_table" $_dnt_del || true
-    set +f
-  done < "$TP_TMP/dn.rules"
   _dnt_chains=$(sed -n 's/^-N \(DOCKER[A-Z0-9-]*\)$/\1/p' "$TP_TMP/dn.rules")
   # The DOCKER-USER chain is the operator's hook. It is only emptied when it
   # holds nothing but Docker's default RETURN rule.
@@ -3129,6 +3150,20 @@ tp_purge_docker_net_table() {
       tp_record_skip "kept $_dnt_bin DOCKER-USER chain: it holds rules Docker did not add"
     fi
   done
+  while IFS= read -r _dnt_line; do
+    case $_dnt_line in "-A "*) ;; *) continue ;; esac
+    tp_docker_net_rule "$_dnt_line" || continue
+    # While the operator's DOCKER-USER chain is kept, the jump into it stays,
+    # or the operator's rules would silently stop applying.
+    if [ -n "$_dnt_keep" ]; then
+      case $_dnt_line in *" -j $_dnt_keep") continue ;; esac
+    fi
+    _dnt_del="-D ${_dnt_line#-A }"
+    set -f
+    # shellcheck disable=SC2086
+    tp_run "delete $_dnt_bin $_dnt_table rule: ${_dnt_line}" "$_dnt_bin" -w 5 -t "$_dnt_table" $_dnt_del || true
+    set +f
+  done < "$TP_TMP/dn.rules"
   for _dnt_chain in $_dnt_chains; do
     [ "$_dnt_chain" = "$_dnt_keep" ] && continue
     "$_dnt_bin" -w 5 -t "$_dnt_table" -F "$_dnt_chain" >>"$TP_LOG_FILE" 2>&1 || true
@@ -3618,7 +3653,7 @@ TP_LEGACY_SHELL_RC_NEEDLE='/opt/turbopanel/runtimes/deno/.install/env'
 # Every tree this script may delete: what TurboPanel creates, plus Docker's
 # default state it purges. tp_path_is_safe refuses anything else, including a
 # folder configured elsewhere in daemon.env; those are listed as kept.
-TP_OWNED_TREES="/opt/turbopanel /etc/turbopanel /etc/ssh/turbopanel /var/lib/turbopanel /var/log/turbopanel /run/turbopanel /var/run/turbopanel /backup /srv/users /tmp/turbopanel-ansible /tmp/turbopanel-orchestrate /root/.ansible /var/lib/docker /var/lib/containerd /etc/docker /var/lib/turbopanel-purge /var/lib/turbopanel-hosting-caddy /run/turbopanel-gate /var/cache/turbopanel-docker-gate /var/lib/turbopanel-build"
+TP_OWNED_TREES="/opt/turbopanel /etc/turbopanel /etc/ssh/turbopanel /var/lib/turbopanel /var/log/turbopanel /run/turbopanel /var/run/turbopanel /backup /srv/users /tmp/turbopanel-ansible /tmp/turbopanel-orchestrate /root/.ansible /var/lib/docker /var/lib/containerd /etc/docker /var/lib/turbopanel-purge /var/lib/turbopanel-hosting-caddy /run/turbopanel-gate /var/cache/turbopanel-docker-gate /var/lib/turbopanel-docker-gate /var/lib/turbopanel-build"
 TP_SYSTEMD_DIRS="/etc/systemd/system /usr/local/lib/systemd/system /lib/systemd/system /usr/lib/systemd/system"
 TP_DAEMON_ENV=/etc/turbopanel/daemon.env
 TP_RESUME_DIR=/var/lib/turbopanel-purge
