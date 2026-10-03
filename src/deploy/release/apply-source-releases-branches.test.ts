@@ -800,6 +800,138 @@ test("applySourceReleases removes the record again when the promote fails", asyn
   });
 });
 
+test("applySourceReleases leaves no pending marker once the promote finished", async () => {
+  await createTempLayout().then(async (fixture) => {
+    try {
+      const layout = layoutFromFixture(fixture);
+      await applySourceReleases(
+        layout,
+        basePayload({
+          sourceMaterial: [baseSource({ principal: PRINCIPAL })],
+        }),
+        nativeDeps(fakeLogSink().sink),
+      );
+      const dir = resolveDaemonReleasePaths(layout, {
+        serviceId: "web",
+        releaseId: "rel-1",
+      }).releaseDir;
+      await assertRejects(
+        () => Deno.stat(join(dir, ".pending")),
+        Deno.errors.NotFound,
+      );
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+});
+
+test("applySourceReleases records pending before the promote (a kill mid-promote is untrusted)", async () => {
+  await createTempLayout().then(async (fixture) => {
+    try {
+      const layout = layoutFromFixture(fixture);
+      const serviceId = "svc-kill";
+      const dir = resolveDaemonReleasePaths(layout, {
+        serviceId,
+        releaseId: "rel-1",
+      }).releaseDir;
+      const hostings = [{
+        hostingId: "host-kill",
+        composeServiceName: "web",
+        serviceId,
+        hostnames: ["kill.example.com"],
+      }];
+      const payload = () =>
+        basePayload({
+          hostings,
+          sourceMaterial: [baseSource({
+            commitSha: "site-commit",
+            principal: PRINCIPAL,
+          })],
+        });
+      // The promote sees the pending record while it runs.
+      const paths = resolveReleasePaths(layout, {
+        username: PRINCIPAL.username,
+        serviceId,
+        releaseId: "rel-1",
+      });
+      let pendingDuringPromote = false;
+      await assertRejects(() =>
+        applySourceReleases(layout, payload(), {
+          ...nativeDeps(fakeLogSink().sink),
+          promoteReleaseFn: async () => {
+            await mkdirReleaseTree(paths);
+            await Deno.stat(join(dir, ".pending"));
+            pendingDuringPromote = true;
+            throw new Error("killed");
+          },
+        })
+      );
+      assertEquals(pendingDuringPromote, true);
+
+      // Failure discards the record; restore what a kill would have left
+      // instead: a pending record and a partial tree.
+      await Deno.mkdir(dir, { recursive: true });
+      await writeReleaseManifest(dir, recordManifest(serviceId, "rel-1"));
+      await Deno.writeTextFile(join(dir, ".pending"), "");
+      await mkdirReleaseTree(paths);
+
+      // Re-send: the pending record is not trusted, so it rebuilds + promotes.
+      const calls: string[] = [];
+      await applySourceReleases(layout, payload(), {
+        ...nativeDeps(fakeLogSink().sink),
+        promoteReleaseFn: (params: { paths: { releaseDir: string } }) => {
+          calls.push("promote");
+          return Promise.resolve(params.paths.releaseDir);
+        },
+        promoteExistingReleaseFn: (
+          params: { paths: { releaseDir: string } },
+        ) => {
+          calls.push("existing");
+          return Promise.resolve(params.paths.releaseDir);
+        },
+      });
+      assertEquals(calls, ["promote"]);
+      await assertRejects(
+        () => Deno.stat(join(dir, ".pending")),
+        Deno.errors.NotFound,
+      );
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+});
+
+test("applySourceReleases refuses to roll back to a pending record", async () => {
+  await createTempLayout().then(async (fixture) => {
+    try {
+      const layout = layoutFromFixture(fixture);
+      const dir = resolveDaemonReleasePaths(layout, {
+        serviceId: "web",
+        releaseId: "rel-1",
+      }).releaseDir;
+      await seedRecord(layout, { serviceId: "web", releaseId: "rel-1" });
+      await Deno.writeTextFile(join(dir, ".pending"), "");
+      await assertRejects(
+        () =>
+          applySourceReleases(
+            layout,
+            basePayload({
+              sourceMaterial: [baseSource({
+                rollbackToReleaseId: "rel-1",
+                principal: PRINCIPAL,
+              })],
+            }),
+            nativeDeps(fakeLogSink().sink),
+          ),
+        Error,
+        "no release record",
+      );
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+});
+
 test("applySourceReleases prunes the records of the native releases it prunes", async () => {
   await createTempLayout().then(async (fixture) => {
     try {

@@ -45,7 +45,7 @@ import type {
 } from "../../contracts/commands-contracts.ts";
 import type { DecryptSecretsFn } from "../materialize-tls.ts";
 import type { RunFn } from "../ensure-principal.ts";
-import { dirname } from "@std/path";
+import { dirname, join } from "@std/path";
 import {
   assertCheckoutCredentialsRemoved,
   checkoutRelease,
@@ -502,7 +502,7 @@ async function resentPublishedRelease(
 ): Promise<RollbackTarget | null> {
   const paths = params.principalPaths;
   if (!paths || entry.build.kind === "railpack") return null;
-  const record = await readReleaseManifest(
+  const record = await readFinalizedRecord(
     resolveDaemonReleasePaths(layout, {
       serviceId,
       releaseId: entry.releaseId,
@@ -548,7 +548,7 @@ async function resolveRollbackTarget(
     serviceId: params.serviceId,
     releaseId: params.releaseId,
   });
-  const manifest = await readReleaseManifest(recordPaths.releaseDir);
+  const manifest = await readFinalizedRecord(recordPaths.releaseDir);
   const matches = manifest?.serviceId === params.serviceId &&
     manifest.releaseId === params.releaseId;
   if (!manifest || !matches) {
@@ -564,6 +564,26 @@ async function resolveRollbackTarget(
     : null;
 }
 
+/** Present in a record dir from before the promote until it has finished. */
+const PENDING_RECORD_MARKER = ".pending";
+
+/**
+ * The record at `recordDir`, unless it is still pending: a pending record was
+ * written ahead of a promote that never finished (the daemon died mid-way), so
+ * its tree may be partial and neither a re-send nor a rollback may trust it.
+ */
+async function readFinalizedRecord(
+  recordDir: string,
+): Promise<ReleaseManifestV1 | null> {
+  try {
+    await Deno.stat(join(recordDir, PENDING_RECORD_MARKER));
+    return null;
+  } catch (err) {
+    if (!(err instanceof Deno.errors.NotFound)) throw err;
+  }
+  return await readReleaseManifest(recordDir);
+}
+
 /**
  * Record a native release under the daemon-owned record root, so a later
  * rollback can restore it without reading the principal's tree.
@@ -571,8 +591,11 @@ async function resolveRollbackTarget(
  * Written **before** the promote, and a failure fails the deploy: once the
  * cutover has happened a missing record could only be logged, and the release
  * would be live but impossible to roll back to. Writing first means the
- * failure is seen at deploy time with `current` untouched. {@link
- * discardNativeRecord} removes it again when the promote then fails.
+ * failure is seen at deploy time with `current` untouched. It is written
+ * **pending** (marker first, then the manifest) and {@link
+ * finalizeNativeRecord} clears the marker once the promote has succeeded, so a
+ * kill between the two leaves a record nothing trusts. {@link
+ * discardNativeRecord} removes it when the promote fails.
  */
 async function recordNativeRelease(
   layout: LayoutPaths,
@@ -587,6 +610,10 @@ async function recordNativeRelease(
     await (deps.ensureDaemonReleaseRecordDirFn ?? ensureDaemonReleaseRecordDir)(
       recordPaths,
     );
+    await Deno.writeTextFile(
+      join(recordPaths.releaseDir, PENDING_RECORD_MARKER),
+      "",
+    );
     await writeReleaseManifest(recordPaths.releaseDir, manifest);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -594,6 +621,34 @@ async function recordNativeRelease(
       `release ${manifest.releaseId} was not published: its rollback record ` +
         `could not be written: ${message}`,
       { cause: err },
+    );
+  }
+}
+
+/**
+ * Mark a recorded release as published, once its promote has finished. The
+ * deploy is already cut over to it, so a failure here is only logged: the
+ * release stays live and the record stays pending (not rollback-able, and a
+ * re-send rebuilds it).
+ */
+async function finalizeNativeRecord(
+  layout: LayoutPaths,
+  serviceId: string,
+  releaseId: string,
+  deps: ApplySourceReleasesDeps,
+): Promise<void> {
+  const { releaseDir } = resolveDaemonReleasePaths(layout, {
+    serviceId,
+    releaseId,
+  });
+  try {
+    await Deno.remove(join(releaseDir, PENDING_RECORD_MARKER));
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) return;
+    const message = err instanceof Error ? err.message : String(err);
+    deps.logSink.onLine(
+      "stderr",
+      `could not finalize the rollback record for ${releaseId}: ${message}`,
     );
   }
 }
@@ -789,6 +844,7 @@ async function buildNativeRelease(
       await discardNativeRecord(layout, serviceId, entry.releaseId, deps);
       throw err;
     }
+    await finalizeNativeRecord(layout, serviceId, entry.releaseId, deps);
     logSink.onLine(
       "stdout",
       `promoted release ${entry.releaseId} (${checkout.commitSha}) for ${entry.composeServiceName}`,
