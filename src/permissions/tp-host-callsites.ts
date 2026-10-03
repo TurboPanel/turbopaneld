@@ -177,7 +177,7 @@ const PHP_FPM_SPEC: SitePhpRuntimeSpec = {
   mode: "fpm",
 };
 const PHP_WRITABLE = { writablePaths: ["-/srv/users/alice/sites/svc1/shared"] };
-const PHP_INI_TEXT = sitePhpIni([]);
+const PHP_INI_TEXT = underPrefix(sitePhpIni([], PHP_SPEC.home));
 const PHP_SERVICE_TEXT = underPrefix(
   sitePhpServiceUnit(PHP_SPEC, PHP_WRITABLE),
 );
@@ -275,6 +275,14 @@ const SITES: CallSite[] = [
       setup: { files: { [PHP_INI]: PHP_INI_TEXT } },
     },
   ),
+  tpHost(`${PHP_APPLY}sudo(io,["ls","-A","--",dir])`, {
+    argv: ["ls", "-A", "--", `${CONF}/apache/sites`],
+    setup: dir(`${CONF}/apache/sites`),
+  }),
+  tpHost(`${PHP_APPLY}sudo(io,["cat","--",join(dir,name)])`, {
+    argv: ["cat", "--", `${CONF}/nginx/sites/tp-env1-www.conf`],
+    setup: file(`${CONF}/nginx/sites/tp-env1-www.conf`),
+  }),
   tpHost(`${PHP_APPLY}sudo(io,["ls","-1","--",io.unitDir])`, {
     argv: ["ls", "-1", "--", UNITS],
   }),
