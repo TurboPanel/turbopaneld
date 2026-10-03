@@ -92,6 +92,19 @@ module and CI guard are the only places allowed to reference it.
 | Managed-engine backups (`backupDir`, one subdir per `managedId`)   | `/backup`                             |
 | Runtime (sockets, `daemon.lock`)                                  | `/run/turbopanel`                     |
 
+**Files at the root of the config and state trees (P1-1).** `/etc/turbopanel`
+and `/var/lib/turbopanel` end up root-owned: the daemon (`tp`) writes only its own
+folders below them (`DAEMON_CONFIG_LEAVES` / `DAEMON_STATE_LEAVES` in
+`src/paths/layout.ts`, created by the `daemon-layout` role). The few files that
+live at the root itself (`instance-ca.pem`, `firewall*.v4|v6`, `server.id`,
+the server key and key-id files, `update-guard-disarm.json`) go through
+`writeDaemonFile` / `removeDaemonFile` / `ensureDaemonDir`
+(`src/permissions/daemon-files.ts`): rename in directly when the folder is
+writable, otherwise `tp-host install -o tp` / `rm`. Never `Deno.rename` or
+`Deno.mkdir` a new entry straight into those two roots. Root Ansible never
+recurses or follows links inside a leaf (pinned by
+`src/orchestration/root-tasks-platform-parents.test.ts`).
+
 `backupDir` is deliberately **outside** the FHS state tree and carries the same
 `/backup` default in development and production: backups are the one artifact
 an operator is expected to point at other storage (a second disk, a NAS mount,
@@ -360,10 +373,6 @@ compile toolchain).
   production source (`src/**`, excluding `*.test.ts` and `src/paths/layout.ts`)
   references `/opt/turbopanel/platform` or the retired `share/ansible`. Wired
   into `publish-daemon-trunk.yml`.
-- `deno task check:metrics-legacy` (`scripts/check-metrics-legacy.ts`) — fails
-  on any ClickHouse/Tabix reference outside the managed-engine allowlist (the
-  metrics store is DuckDB + Parquet / Analytics Engine); scans this repo plus
-  the co-located `turbopanel`/`dev`/`ui` `src` trees when present.
 - `deno task test` / `test:coverage` / `lint` / `fmt:check` / `check` / `notices:check` — quality
   surface in `deno.json`. `notices:generate` writes `THIRD_PARTY_NOTICES.md` from
   `deno.lock` and orchestration pins
@@ -433,7 +442,7 @@ compile toolchain).
 
 Local commands: **`deno task verify:ci`** is the guest mirror of `verify.yml`
 minus the Sonar upload: `verify:static` (`fmt:check`, `lint`, `check`,
-`check:layout`, `check:vocabulary`, `check:metrics-legacy`) then
+`check:layout`, `check:vocabulary`, `check:contract-drift`) then
 `notices:check`, `check:orchestration` (needs `ansible-playbook` /
 `ansible-lint` on PATH — prepend `/opt/turbopanel/vendor/ansible/current/bin`
 in the guest), and **`test:coverage`** (the LCOV Sonar imports).
