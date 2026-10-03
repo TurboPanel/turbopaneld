@@ -1,5 +1,9 @@
 import { join } from "@std/path";
 import {
+  ensureDaemonDir,
+  writeDaemonFile,
+} from "../permissions/daemon-files.ts";
+import {
   buildEnrollmentPayload,
   computePublicKeyFingerprint,
   type DaemonKeyFile,
@@ -42,16 +46,7 @@ async function persistServerId(
   persistedServerId: string | undefined,
 ): Promise<void> {
   if (persistedServerId === serverId) return;
-  const target = join(stateDir, SERVER_ID_FILE);
-  const tmp = `${target}.${crypto.randomUUID()}.tmp`;
-  try {
-    await Deno.writeTextFile(tmp, `${serverId}\n`, { mode: 0o660 });
-    await Deno.chmod(tmp, 0o660);
-    await Deno.rename(tmp, target);
-  } catch (err) {
-    await Deno.remove(tmp).catch(() => undefined);
-    throw err;
-  }
+  await writeDaemonFile(join(stateDir, SERVER_ID_FILE), `${serverId}\n`, 0o660);
 }
 
 export async function enrollDaemon(params: {
@@ -88,7 +83,7 @@ export async function enrollDaemon(params: {
     signature,
   });
 
-  await Deno.mkdir(params.stateDir, { recursive: true });
+  await ensureDaemonDir(params.stateDir);
   await saveDaemonKeyFile(
     join(params.stateDir, SERVER_KEY_FILE),
     enrollmentKeyFile,
@@ -98,9 +93,10 @@ export async function enrollDaemon(params: {
     enrollment.serverId,
     persistedServerId,
   );
-  await Deno.writeTextFile(
+  await writeDaemonFile(
     join(params.stateDir, KEY_ID_FILE),
     `${enrollment.keyId}\n`,
+    0o640,
   );
 
   return {

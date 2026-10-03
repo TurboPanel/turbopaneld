@@ -1413,6 +1413,62 @@ const SITES: CallSite[] = [
     ],
   }),
 
+  // Files the daemon keeps directly in the root-owned config and state roots
+  // (P1-1): created as the daemon account's own, replaced atomically.
+  tpHost(
+    'src/permissions/daemon-files.ts|["-n",...args]',
+    {
+      argv: [
+        "install",
+        "-m",
+        "0640",
+        "-o",
+        "tp",
+        "-g",
+        "tp",
+        STAGED,
+        `${CONF}/instance-ca.pem`,
+      ],
+      setup: dir(CONF),
+    },
+    {
+      argv: [
+        "install",
+        "-m",
+        "0644",
+        "-o",
+        "tp",
+        "-g",
+        "tp",
+        STAGED,
+        `${CONF}/firewall.v4`,
+      ],
+      setup: dir(CONF),
+    },
+    {
+      argv: [
+        "install",
+        "-m",
+        "0600",
+        "-o",
+        "tp",
+        "-g",
+        "tp",
+        STAGED,
+        `${STATE}/server-key.json`,
+      ],
+      setup: dir(STATE),
+    },
+    {
+      argv: ["rm", "-f", "--", `${CONF}/firewall.v4`],
+      setup: file(`${CONF}/firewall.v4`),
+    },
+    {
+      argv: ["rm", "-f", "--", `${STATE}/server-key-id`],
+      setup: file(`${STATE}/server-key-id`),
+    },
+  ),
+
   // --- control-plane settings and the co-located daemon --------------------
   tpHost(
     'src/instance/public-urls-env.ts|["-n",...args]',
