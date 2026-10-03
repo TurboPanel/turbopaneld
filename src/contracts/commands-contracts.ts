@@ -4297,7 +4297,9 @@ function parseSite(
   const site: EnvironmentDeploySite = {
     composeServiceName: parseNonEmptyString(value, "composeServiceName"),
     engine: parseSiteEngine(value.engine),
-    root: parseNonEmptyString(value, "root"),
+    // The panel form can carry stray whitespace; the daemon serves the path
+    // it validated, so the trim happens once, here.
+    root: parseNonEmptyString(value, "root").trim(),
     listenPort: parseSiteListenPort(value.listenPort),
   };
   const sourceKind = parseSiteSourceKind(value.sourceKind);

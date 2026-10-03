@@ -333,6 +333,32 @@ than private/rprivate (`Binds` options and `BindOptions.Propagation`). Every oth
 `BENIGN_HOSTCONFIG_FIELDS` or `RULED_HOSTCONFIG_FIELDS` in `policy.ts`, else `hostconfig-unknown-field`: a field a newer
 engine adds is denied until reviewed. When a real flow trips it, add the field to the benign list with a corpus entry.
 
+## Volume drivers and mount options
+
+`HostConfig.VolumeDriver` and each volume mount's `VolumeOptions.DriverConfig.Name` must be empty or `local`
+(`volume-driver`), like `POST /volumes/create`'s `Driver`. A `local` volume's `type`/`o`/`device` options are deny by
+default: `o=bind` or `o=rbind` (or `type=none`) with an absolute device is judged as a bind path; a `/` device otherwise
+is `volume-device`; tmpfs passes; every other type (nfs, cifs, overlay, ...) or option set without a device is
+`volume-mount-type`. Previously `rbind` skipped the path check and overlay/nfs passed. A volume mount's `VolumeOptions.Subpath` must be relative
+with no `..` (`volume-subpath`); a tmpfs mount's `TmpfsOptions.Options` may only hold noexec/exec/nosuid/nodev/ro/rw
+(`tmpfs-options`). A host that deliberately uses
+NFS volumes will see findings until the profile grows an allowance.
+
+## Framing and form parity (Go differential)
+
+The engine parses with Go's `net/http`. `src/testing/docker-gate-diff/main.go` (standard library only) runs
+`http.ReadRequest` + `ParseForm` over `src/docker-gate/testdata/parser-cases.json`; its recorded output is
+`testdata/go-parser.json` and `src/docker-gate/parser-differential.test.ts` checks the gate against it: the gate may
+refuse what Go accepts, but must never pass a request Go reads differently (method, path, body length and framing,
+leftover bytes, form fields). `DOCKER_GATE_GO_DIFF=1 deno test` re-runs the harness (local `go`, else
+`docker run golang:1.23`) and checks the record is current. Regenerate with
+`docker run --rm -v "$PWD":/w -w /w/src/testing/docker-gate-diff golang:1.23 go run . ../../docker-gate/testdata/parser-cases.json > src/docker-gate/testdata/go-parser.json`.
+Gaps it found and the gate now closes: Transfer-Encoding on an HTTP/1.0 request is refused (Go ignores it and reads the
+chunks as the next request), and a form-encoded body is an `form-encoded-body` finding (Go merges it into the form
+ahead of the query, so `networkmode=host` could ride in the body of `POST /build`), and a request target holding
+`#` is refused (Go keeps `#` as data: `/build?q=1#&networkmode=host` sets `networkmode`; the gate used to drop it as a
+fragment).
+
 ## Route parity
 
 `policy.ts` `ROUTES` / `READ_ROUTES` mirror the engine's router (moby `api/server/router`); `ENGINE_ROUTES` in

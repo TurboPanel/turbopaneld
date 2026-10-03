@@ -420,7 +420,7 @@ test("volume create: drivers, bind devices and block devices", async () => {
       Name: "v",
       DriverOpts: { type: "nfs", o: "addr=10.0.0.5", device: ":/export" },
     }),
-    [],
+    [{ rule: "volume-mount-type", detail: "nfs" }],
   );
   assertEquals(ruleNames(await create("nope")), ["body-unparseable"]);
 });
@@ -777,6 +777,115 @@ test("optional fields left out are their defaults, not findings", async () => {
   );
   assertEquals(await createVerdict({ LogConfig: { Config: {} } }), []);
   assertEquals(await createVerdict({ LogConfig: { Type: null } }), []);
+});
+
+test("volume driver and mount options: deny by default, tmpfs and a checked bind pass", async () => {
+  const create = (body: unknown) => verdict({ path: "/volumes/create", body });
+  const rules = async (opts: unknown) =>
+    ruleNames(await create({ Name: "v", DriverOpts: opts }));
+  assertEquals(await rules({}), []);
+  assertEquals(
+    await rules({ type: "tmpfs", device: "tmpfs", o: "size=1m" }),
+    [],
+  );
+  // rbind is a bind too: it must not skip the path check.
+  assertEquals(
+    await rules({ type: "none", o: "rbind", device: "/" }),
+    ["volume-bind-host-root"],
+  );
+  assertEquals(
+    await rules({ type: "none", o: "rw,rbind", device: "/etc" }),
+    ["volume-bind-forbidden-path"],
+  );
+  // Layered or remote filesystems read host paths without a `/` device.
+  assertEquals(
+    await rules({ type: "overlay", device: "overlay", o: "lowerdir=/etc" }),
+    ["volume-mount-type"],
+  );
+  assertEquals(await rules({ o: "bind" }), ["volume-mount-type"]);
+  assertEquals(await rules({ type: "none", o: "bind" }), ["volume-mount-type"]);
+});
+
+test("a container's VolumeDriver and a volume mount's DriverConfig.Name must be local", async () => {
+  assertEquals(await createVerdict({ VolumeDriver: "local" }), []);
+  assertEquals(await createVerdict({ VolumeDriver: "" }), []);
+  assertEquals(await createVerdict({ VolumeDriver: "rexray" }), [
+    { rule: "volume-driver", detail: "rexray" },
+  ]);
+  const mount = (Name: unknown, Options?: unknown) => ({
+    Type: "volume",
+    Source: "v",
+    Target: "/m",
+    VolumeOptions: { DriverConfig: { Name, Options } },
+  });
+  assertEquals(await createVerdict({ Mounts: [mount("local")] }), []);
+  assertEquals(await createVerdict({ Mounts: [mount("")] }), []);
+  assertEquals(await createVerdict({ Mounts: [mount("sshfs")] }), [
+    { rule: "volume-driver", detail: "sshfs" },
+  ]);
+  assertEquals(
+    ruleNames(await createVerdict({ Mounts: [mount(7)] })),
+    ["volume-driver"],
+  );
+  // Options of a non-local driver are not local's: the driver is the finding.
+  assertEquals(
+    ruleNames(
+      await createVerdict({
+        Mounts: [mount("sshfs", { type: "none", o: "bind", device: "/" })],
+      }),
+    ),
+    ["volume-driver", "volume-bind-host-root"],
+  );
+});
+
+test("a volume mount's Subpath must stay inside the volume, and tmpfs mount options are allowlisted", async () => {
+  const volume = (Subpath: unknown) => ({
+    Type: "volume",
+    Source: "v",
+    Target: "/m",
+    VolumeOptions: { Subpath },
+  });
+  assertEquals(await createVerdict({ Mounts: [volume("data/app")] }), []);
+  assertEquals(await createVerdict({ Mounts: [volume("")] }), []);
+  for (const subpath of ["../other", "a/../../b", "/etc", 7]) {
+    assertEquals(
+      ruleNames(await createVerdict({ Mounts: [volume(subpath)] })),
+      ["volume-subpath"],
+      String(subpath),
+    );
+  }
+  const tmpfs = (Options: unknown) => ({
+    Type: "tmpfs",
+    Target: "/t",
+    TmpfsOptions: { SizeBytes: 1024, Mode: 448, Options },
+  });
+  assertEquals(
+    await createVerdict({ Mounts: [tmpfs([["noexec"], ["nosuid"]])] }),
+    [],
+  );
+  assertEquals(await createVerdict({ Mounts: [tmpfs(undefined)] }), []);
+  assertEquals(
+    ruleNames(await createVerdict({ Mounts: [tmpfs([["suid"], ["dev"]])] })),
+    ["tmpfs-options", "tmpfs-options"],
+  );
+  assertEquals(
+    ruleNames(await createVerdict({ Mounts: [tmpfs("exec")] })),
+    ["tmpfs-options"],
+  );
+});
+
+test("a form-encoded body is a finding: the engine merges it into the form ahead of the query", async () => {
+  const found = await evaluateRequest(
+    {
+      method: "POST",
+      path: "/build",
+      query: new URLSearchParams(),
+      formBody: true,
+    },
+    DEFAULT_POLICY_CONFIG,
+    (p) => Promise.resolve(p),
+  );
+  assertEquals(found.map((v) => v.rule), ["form-encoded-body"]);
 });
 
 /**
