@@ -72,6 +72,45 @@ engine would clean (`..`, `//`); an API version prefix other than one
 refuses (`body-unparseable` with `empty`, `invalid-utf8`, `invalid-json`,
 `too-deep`, `duplicate-key` or `non-ascii-key`).
 
+## Bind sources: allowed places, and the start-time re-check
+
+**Allowed places under the site owners' homes.** A bind source that resolves
+(symlinks followed root-side, dangling ones included, `..` refused) under
+`/srv/users` must be one of the places the principal home layout gives
+containers (`policy.ts` `principalViolation`, config `principalRoots`):
+`<user>/data` and `<user>/tmp`, `<user>/volumes/<id>` (path storage),
+`<user>/sites/<site>/shared`, `.../webroot` and the root-owned
+`.../releases`. Everything else under a home (`home/`, the home or `sites/`
+as a whole, a site's `.turbopanel-hosting`, `.tp-staging`) is a
+`bind-principal-path` finding. Outside `/srv/users` the older rules stand
+(root-owned bind roots such as `<state>/storage`, the deny list). The gate does
+not know which owner a container belongs to, so `alice/data` for bob's
+container is not caught here. An operator-chosen storage path under a home
+(`sourcePath`, "explicit operator paths still win") outside those places is
+refused too, backup and restore helpers included. `principalRoots` is the
+built-in `/srv/users` (it does not follow `TP_DOCKER_GATE_BIND_ROOTS`).
+
+**Start / restart re-check.** The engine resolves a bind source again at
+`start`, so a clean create can be stale (source swapped for a symlink, a
+container made before the gate enforced). `POST /containers/{id}/start|restart`
+does one `GET /containers/{id}/json` (the same one the ownership check
+needed), then applies the same bind policy to the live `HostConfig.Binds`,
+`HostConfig.Mounts` and the live bind `Mounts`. Findings are the create rules
+prefixed `start-` (`start-bind-principal-path`...). A container's own signed
+approval label still covers its approved features (signature and project only:
+expiry, body digest and single use were enforced at create; the digest no
+longer pins the exact paths, so an approved feature covers whatever binds the
+container has at restart). An inspect that
+fails is `owner-unknown`, as before.
+
+Both checks follow the gate's mode: observe logs `docker-gate.would-deny`,
+enforce answers 403 before the engine is reached. **Residual race:** a
+tenant-writable allowed source (`data/`, `tmp/`, `shared/`) can still be
+swapped for a symlink in the window between the gate's inspect and the engine's
+own resolution at start; the check narrows that window, it does not close it.
+Closing it fully needs the engine to mount by file descriptor or the sources to
+be root-owned.
+
 ## Paths and bodies as the engine reads them
 
 Rules only hold if the gate reads a request exactly as the engine does.
