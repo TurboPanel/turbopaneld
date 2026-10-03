@@ -644,10 +644,16 @@ async function sealReleaseInPlace(
   await swapCurrentSymlink(params.paths, runFn);
 }
 
-/** Best-effort removal of everything a failed promote may have left. */
+/**
+ * Best-effort removal of everything a failed promote may have left. A release
+ * directory that was already there before this promote (a re-sent deploy of a
+ * published release, which `publish` refuses) may be what `current` serves:
+ * it is never removed here.
+ */
 async function discardFailedPromote(
   paths: ReleasePaths,
   runFn: RunFn,
+  releaseExisted: boolean,
 ): Promise<void> {
   try {
     // The daemon's own leaf; a failed `publish` already removed its own.
@@ -655,6 +661,7 @@ async function discardFailedPromote(
   } catch {
     // Already taken over by root — tp-host removes it on the next open.
   }
+  if (releaseExisted) return;
   try {
     await Deno.remove(paths.releaseDir, { recursive: true });
   } catch {
@@ -677,6 +684,10 @@ export async function promoteRelease(
   params: PromoteReleaseParams,
 ): Promise<string> {
   const runFn = params.runFn ?? runPrivileged;
+  const releaseExisted = await releasePathExists(
+    params.paths.releaseDir,
+    runFn,
+  );
   try {
     const staged = await stageRelease({ ...params, runFn });
     if (staged.viaPublish) {
@@ -687,7 +698,7 @@ export async function promoteRelease(
     return params.paths.releaseDir;
   } catch (err) {
     // Never leave a half-staged release visible under `releases/`.
-    await discardFailedPromote(params.paths, runFn);
+    await discardFailedPromote(params.paths, runFn, releaseExisted);
     throw err;
   }
 }

@@ -302,7 +302,6 @@ test("promoteRelease failure before rename leaves current untouched and cleans s
       { principalHomeRoot: root, daemonStateDir: join(root, "state") },
       { username: "appuser", serviceId: "svc-1", releaseId: "rel-1" },
     );
-    await Deno.mkdir(first.releaseDir, { recursive: true });
     await Deno.mkdir(first.sharedDir, { recursive: true });
     const workingDir = join(root, "checkout");
     await Deno.mkdir(workingDir, { recursive: true });
@@ -326,7 +325,6 @@ test("promoteRelease failure before rename leaves current untouched and cleans s
       { principalHomeRoot: root, daemonStateDir: join(root, "state") },
       { username: "appuser", serviceId: "svc-1", releaseId: "rel-2" },
     );
-    await Deno.mkdir(second.releaseDir, { recursive: true });
     await Deno.writeTextFile(join(workingDir, "index.html"), "v2");
     const failingSeal: RunFn = (_command, args) => {
       if (args.includes("chown")) {
@@ -394,6 +392,37 @@ test("promoteRelease default probe requires the metadata directory", async () =>
       err instanceof Error ? err.message : String(err),
       RELEASE_METADATA_DIRNAME,
     );
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+test("promoteRelease never removes a release that was already on the host", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-promote-resent-" });
+  try {
+    const paths = resolveReleasePaths(
+      { principalHomeRoot: root, daemonStateDir: join(root, "state") },
+      { username: "appuser", serviceId: "svc-1", releaseId: "rel-1" },
+    );
+    // A re-sent deploy of a published release: what `current` may serve.
+    await Deno.mkdir(paths.releaseDir, { recursive: true });
+    await Deno.writeTextFile(join(paths.releaseDir, "index.html"), "live");
+    const workingDir = join(root, "checkout");
+    await Deno.mkdir(workingDir, { recursive: true });
+    await Deno.writeTextFile(join(workingDir, "index.html"), "v2");
+    await assertRejects(
+      () =>
+        promoteRelease({
+          paths,
+          workingDir,
+          username: "appuser",
+          healthProbe: () => Promise.reject(new Error("probe failed")),
+          runFn: runOk,
+        }),
+      Error,
+      "probe failed",
+    );
+    assertEquals((await Deno.stat(paths.releaseDir)).isDirectory, true);
   } finally {
     await Deno.remove(root, { recursive: true });
   }

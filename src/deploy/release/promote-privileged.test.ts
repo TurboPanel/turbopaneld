@@ -673,7 +673,6 @@ test("promoteRelease privileged cleanup runs when unprivileged remove fails", as
       { principalHomeRoot: root, daemonStateDir: join(root, "state") },
       { username: "appuser", serviceId: "svc-1", releaseId: "rel-fail" },
     );
-    await Deno.mkdir(paths.releaseDir, { recursive: true });
     await Deno.mkdir(paths.sharedDir, { recursive: true });
     const workingDir = join(root, "checkout");
     await Deno.mkdir(workingDir, { recursive: true });
@@ -761,7 +760,6 @@ test("promoteRelease swallows a failed privileged cleanup", async () => {
       { principalHomeRoot: root, daemonStateDir: join(root, "state") },
       { username: "appuser", serviceId: "svc-1", releaseId: "rel-fail" },
     );
-    await Deno.mkdir(paths.releaseDir, { recursive: true });
     await Deno.mkdir(paths.sharedDir, { recursive: true });
     const workingDir = join(root, "checkout");
     await Deno.mkdir(workingDir, { recursive: true });
