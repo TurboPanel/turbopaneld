@@ -106,3 +106,17 @@ test("invalidatePrefix with no matching keys is a no-op", () => {
   tracker.invalidatePrefix("never-seen:");
   assertEquals(tracker.delta("a", 150, 0), 50);
 });
+
+test("elapsedSeconds reports time since each key's own baseline", () => {
+  const tracker = new CounterBaselineTracker();
+  tracker.beginTick(1_000);
+  tracker.delta("a", 1, 0);
+  tracker.beginTick(61_000);
+  tracker.delta("a", 2, 0);
+  tracker.delta("b", 2, 0);
+  tracker.beginTick(181_000);
+  tracker.delta("a", 3, 0);
+  assertEquals(tracker.elapsedSeconds("a", 60), 120);
+  // No tick time known for a key that was never delta'd: fallback.
+  assertEquals(tracker.elapsedSeconds("zzz", 60), 60);
+});

@@ -25,6 +25,8 @@ import {
   buildMetricsSample,
   type DiagnosticsSample,
   type DockerUsageSample,
+  type GpuSample,
+  type HardwareSignalSample,
   type HostMetrics,
   METRICS_SCHEMA_VERSION,
   type MetricsSample,
@@ -80,6 +82,7 @@ import {
   parseFileMax,
   parseFileNr,
 } from "./parse-kernel-limits.ts";
+import { PresenceTracker } from "./presence.ts";
 import { parsePsiLine, type PsiKind, psiPercent } from "./parse-psi.ts";
 import {
   parseStat,
@@ -698,9 +701,42 @@ function monitoredNetworkDevices(
   return ordered;
 }
 
+function gpuHasValue(gpu: GpuSample): boolean {
+  return [
+    gpu.utilizationPercent,
+    gpu.memoryUsedBytes,
+    gpu.memoryActivityPercent,
+    gpu.pcieReceiveBytesPerSecond,
+    gpu.pcieTransmitBytesPerSecond,
+    gpu.throttlePercent,
+  ].some((value) => value !== null);
+}
+
+/**
+ * The topology snapshot slot allocation sees: GPUs and sensor signals that
+ * went quiet (see `presence.ts`) are removed first, so a slot is never spent
+ * on an entity that reports nothing.
+ */
+export function presentSnapshot(
+  snapshot: TopologySnapshot,
+  reported: { gpus: GpuSample[]; signals: HardwareSignalSample[] },
+): TopologySnapshot {
+  const gpuIds = new Set(reported.gpus.map((gpu) => gpu.gpuId));
+  const signalIds = new Set(reported.signals.map((signal) => signal.signalId));
+  return {
+    ...snapshot,
+    gpus: snapshot.gpus.filter((gpu) => gpuIds.has(gpu.gpuId)),
+    hardwareSignals: snapshot.hardwareSignals.filter((signal) =>
+      signalIds.has(signal.signalId)
+    ),
+  };
+}
+
 export class LinuxMetricsCollector implements MetricsCollector {
   #previous: PreviousCpuSnapshot | undefined;
   readonly #tracker = new CounterBaselineTracker();
+  readonly #gpuPresence = new PresenceTracker();
+  readonly #signalPresence = new PresenceTracker();
   readonly #deps: CollectorDeps;
   readonly #nominalIntervalSeconds: number;
   readonly #pageSizeBytes: number;
@@ -750,6 +786,7 @@ export class LinuxMetricsCollector implements MetricsCollector {
       nowMs,
       this.#nominalIntervalSeconds,
     );
+    this.#tracker.beginTick(nowMs);
     const bootGeneration = snapshot.bootGeneration;
     const bootChanged = bootGenerationChanged(previous, bootGeneration);
     const rates: TickRates = {
@@ -812,6 +849,18 @@ export class LinuxMetricsCollector implements MetricsCollector {
         blockDevices: snapshot.blockDevices,
       },
     );
+    const reported = {
+      gpus: this.#gpuPresence.filter(
+        gpus,
+        (gpu) => gpu.gpuId,
+        gpuHasValue,
+      ),
+      signals: this.#signalPresence.filter(
+        hardwareSignalResult.samples,
+        (signal) => signal.signalId,
+        (signal) => signal.value !== null,
+      ),
+    };
     const disks = readDiskTick(snapshot.blockDevices, raw.diskstatsText, rates);
     const mountEntries = whenPresentOr(raw.mountsText, parseProcMounts, []);
 
@@ -875,8 +924,8 @@ export class LinuxMetricsCollector implements MetricsCollector {
       networks,
       filesystems,
       blockDevices: disks.blockDevices,
-      gpus,
-      hardwareSignals: hardwareSignalResult.samples,
+      gpus: reported.gpus,
+      hardwareSignals: reported.signals,
       ingressSources,
       databaseProxies,
       events,
@@ -897,7 +946,7 @@ export class LinuxMetricsCollector implements MetricsCollector {
       ? truncateSampleToCapabilityPlan(
         sample,
         storedPlan.plan,
-        computeSlotMapping(snapshot, overrides),
+        computeSlotMapping(presentSnapshot(snapshot, reported), overrides),
       )
       : sample;
 

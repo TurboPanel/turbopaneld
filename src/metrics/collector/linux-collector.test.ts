@@ -2,7 +2,7 @@ import { assertEquals } from "@std/assert";
 import { fromFileUrl } from "@std/path";
 import { emptyDirectoryUsageSnapshot } from "./directory-usage.ts";
 import { EventCollectorSet } from "./events/index.ts";
-import { LinuxMetricsCollector } from "./linux-collector.ts";
+import { LinuxMetricsCollector, presentSnapshot } from "./linux-collector.ts";
 import { defaultSensorIo } from "./sensors/discovery.ts";
 import type { CollectorDeps } from "./types.ts";
 import { collectTopology } from "../topology/topology.ts";
@@ -1289,4 +1289,34 @@ test("LinuxMetricsCollector falls back to the nominal interval when the clock go
     throw new TypeError("expected supported samples");
   }
   assertEquals(second.sample.metadata.intervalSeconds, 60);
+});
+
+test("presentSnapshot removes quiet GPUs and signals before slot allocation", () => {
+  const snapshot = fullTopologySnapshot();
+  const gpu = snapshot.gpus[0];
+  const signal = snapshot.hardwareSignals[0];
+  const out = presentSnapshot(snapshot, { gpus: [], signals: [] });
+  assertEquals(out.gpus.length, 0);
+  assertEquals(out.hardwareSignals.length, 0);
+  const kept = presentSnapshot(snapshot, {
+    gpus: gpu
+      ? [{
+        gpuId: gpu.gpuId,
+        utilizationPercent: 1,
+        memoryUsedBytes: null,
+        memoryActivityPercent: null,
+        pcieReceiveBytesPerSecond: null,
+        pcieTransmitBytesPerSecond: null,
+        throttlePercent: null,
+      }]
+      : [],
+    signals: signal
+      ? [{ signalId: signal.signalId, kind: signal.kind, value: 1 }]
+      : [],
+  });
+  assertEquals(kept.gpus.length, snapshot.gpus.length ? 1 : 0);
+  assertEquals(
+    kept.hardwareSignals.length,
+    snapshot.hardwareSignals.length ? 1 : 0,
+  );
 });
