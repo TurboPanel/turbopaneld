@@ -2152,6 +2152,8 @@ test("per-site PHP config: root:<owner>-grp, 0750/0640, directives on an allowli
     const badIni = [
       "extension = /tmp/evil.so",
       "extension = redis",
+      "extension = ../curl.so",
+      "extension = mysqli.so.1",
       "zend_extension = /tmp/evil.so",
       "auto_prepend_file = /tmp/x.php",
       "sendmail_path = /bin/sh -c id",
@@ -2174,6 +2176,21 @@ test("per-site PHP config: root:<owner>-grp, 0750/0640, directives on an allowli
       "memory_limit = `id`",
       'memory_limit = "1G" ; x',
       "extension_dir = /tmp",
+      // The edges of the new extension allowlist: a path, a near-name, a
+      // module the vendored lsphp does not ship, a second zend extension,
+      // and extension directories that only look like the allowed ones.
+      "extension = /usr/lib/php/x/curl.so",
+      "extension = curl.so.so",
+      "extension = curlx",
+      "extension = pdo_pgsql",
+      "zend_extension = /usr/lib/php/20240924/opcache.so",
+      "zend_extension = xdebug.so",
+      "extension_dir = /usr/lib/php/20240924x",
+      "extension_dir = /usr/lib/php/20240924/../../../tmp",
+      `extension_dir = ${host.path("opt/turbopanel/vendor/lsphp-evil")}`,
+      `extension_dir = ${
+        host.path("opt/turbopanel/vendor/lsphp/8.4/../../../../tmp")
+      }`,
       "no equals sign",
     ];
     for (const bad of badIni) {
@@ -2184,6 +2201,24 @@ test("per-site PHP config: root:<owner>-grp, 0750/0640, directives on an allowli
         bad,
       );
     }
+    // A detached lsphp ini names the vendored modules itself (PHPRC replaces
+    // the php.ini next to the binary).
+    const lsphpExt = host.path(
+      "opt/turbopanel/vendor/lsphp/8.4/current/lib/php/ext",
+    );
+    const lsphpIni = [
+      `extension_dir = ${lsphpExt}`,
+      "zend_extension = opcache.so",
+      "extension = curl.so",
+      "extension = mysqli.so",
+      "extension = pdo_mysql",
+    ].join("\n");
+    const lsphp = await installPhpConf(
+      host,
+      "php.ini",
+      `${PHP_INI}${lsphpIni}\n`,
+    );
+    assertEquals(lsphp.code, 0, lsphp.stderr);
 
     const fpm = phpFpmConf(host);
     const badFpm: Mutation[] = [
@@ -2394,8 +2429,16 @@ test("per-site PHP: what the daemon renders for each mode and web server passes 
   await withPhpHost(async (host) => {
     const home = host.path("srv/users/alice");
     const site = `${home}/sites/shop`;
-    for (const mode of ["fastcgi", "fpm"] as const) {
-      for (const webAccount of ["tpnginx", "tpapache"] as const) {
+    const combos = [
+      ...(["fastcgi", "fpm"] as const).flatMap((mode) =>
+        (["tpnginx", "tpapache", "tpols"] as const).map((webAccount) =>
+          [mode, webAccount] as const
+        )
+      ),
+      ["lsphp-detached", "tpols"] as const,
+    ];
+    for (const [mode, webAccount] of combos) {
+      {
         const id = sitePhpRuntimeId(sitePhpKey("env1", "shop"), mode, "8.4");
         const spec: SitePhpRuntimeSpec = {
           id,
@@ -2406,6 +2449,7 @@ test("per-site PHP: what the daemon renders for each mode and web server passes 
           home,
           configDir: host.path("etc/turbopanel"),
           libDir: host.path("opt/turbopanel/lib"),
+          runtimesDir: host.path("opt/turbopanel/vendor"),
           webAccount,
         };
         const dir = sitePhpConfigDir(spec.configDir, id);
@@ -2423,12 +2467,16 @@ test("per-site PHP: what the daemon renders for each mode and web server passes 
         assertEquals(made.code, 0, made.stderr);
         const configs: Array<[string, string]> = [[
           "php.ini",
-          sitePhpIni([
-            { key: "memory_limit", value: "256M" },
-            { key: "open_basedir", value: `${site}/current/public:/tmp` },
-            { key: "realpath_cache_ttl", value: "0" },
-            { key: "session.save_path", value: "/var/lib/php/sessions" },
-          ], home),
+          sitePhpIni(
+            [
+              { key: "memory_limit", value: "256M" },
+              { key: "open_basedir", value: `${site}/current/public:/tmp` },
+              { key: "realpath_cache_ttl", value: "0" },
+              { key: "session.save_path", value: "/var/lib/php/sessions" },
+            ],
+            home,
+            spec,
+          ),
         ]];
         if (mode === "fpm") {
           configs.push([
@@ -2454,7 +2502,7 @@ test("per-site PHP: what the daemon renders for each mode and web server passes 
           ]);
           assertEquals(put.code, 0, `${mode} ${name}: ${put.stderr}`);
         }
-        if (mode === "fastcgi") {
+        if (mode !== "fpm") {
           const socket = await installUnit(
             host,
             sitePhpSocketName(id),

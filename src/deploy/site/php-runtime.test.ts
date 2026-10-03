@@ -14,12 +14,15 @@ import {
   sitePhpIni,
   sitePhpKey,
   sitePhpLockedValues,
+  sitePhpModeWarnings,
+  sitePhpRuntimeChildren,
   sitePhpRuntimeId,
   sitePhpRuntimeIdsIn,
   sitePhpRuntimeMode,
   type SitePhpRuntimeSpec,
   sitePhpServiceUnit,
   sitePhpSocketPath,
+  sitePhpSocketUnit,
   sitePhpUnitLimits,
 } from "./php-runtime.ts";
 import {
@@ -48,6 +51,7 @@ const SPEC: SitePhpRuntimeSpec = {
   home: "/srv/users/alice",
   configDir: "/etc/turbopanel",
   libDir: "/opt/turbopanel/lib",
+  runtimesDir: "/opt/turbopanel/vendor",
   webAccount: "tpnginx",
 };
 
@@ -61,7 +65,7 @@ test("site keys fit tp-host's alphabet whatever the environment and service look
     ]
   ) {
     const key = sitePhpKey(env, service);
-    for (const mode of ["fastcgi", "fpm"] as const) {
+    for (const mode of ["fastcgi", "fpm", "lsphp-detached"] as const) {
       const id = sitePhpRuntimeId(key, mode, "8.4");
       assertEquals(SITE_PHP_ID_RE.test(id), true, id);
       assertEquals(id.length <= 64, true, id);
@@ -96,7 +100,7 @@ test("each mode and series is its own runtime, so a switch runs side by side", (
   );
 });
 
-test("the per-site mode: nginx and Apache only, lsphp refused there, none keeps the shared master", () => {
+test("the per-site mode: lsphp on OpenLiteSpeed only, none keeps the shared master on nginx and Apache", () => {
   const site = (
     engine: "caddy" | "nginx" | "apache" | "openlitespeed",
     mode?: "fastcgi" | "fpm" | "lsphp-detached" | "lsphp-attached",
@@ -108,7 +112,25 @@ test("the per-site mode: nginx and Apache only, lsphp refused there, none keeps 
   assertEquals(sitePhpRuntimeMode(site("nginx", "fastcgi")), "fastcgi");
   assertEquals(sitePhpRuntimeMode(site("apache", "fpm")), "fpm");
   assertEquals(sitePhpRuntimeMode(site("nginx")), null);
-  assertEquals(sitePhpRuntimeMode(site("openlitespeed", "fastcgi")), null);
+  assertEquals(sitePhpRuntimeMode(site("openlitespeed", "fastcgi")), "fastcgi");
+  assertEquals(sitePhpRuntimeMode(site("openlitespeed", "fpm")), "fpm");
+  assertEquals(
+    sitePhpRuntimeMode(site("openlitespeed", "lsphp-detached")),
+    "lsphp-detached",
+  );
+  assertEquals(
+    sitePhpRuntimeMode({ composeServiceName: "s", engine: "openlitespeed" }),
+    null,
+  );
+  // OpenLiteSpeed has no shared master: a site an older control plane sent
+  // without a mode runs the control plane's default rather than failing the
+  // environment. Attached lsphp is not offered (its launcher was dropped):
+  // it runs detached instead of throwing, so one site never fails a deploy.
+  assertEquals(sitePhpRuntimeMode(site("openlitespeed")), "fastcgi");
+  assertEquals(
+    sitePhpRuntimeMode(site("openlitespeed", "lsphp-attached")),
+    "lsphp-detached",
+  );
   assertEquals(sitePhpRuntimeMode(site("caddy", "fpm")), null);
   assertEquals(
     sitePhpRuntimeMode({ composeServiceName: "s", engine: "nginx" }),
@@ -119,6 +141,50 @@ test("the per-site mode: nginx and Apache only, lsphp refused there, none keeps 
     Error,
     "needs OpenLiteSpeed, not apache",
   );
+});
+
+test("an OpenLiteSpeed mode fallback is logged once per site, however often the mode is asked", () => {
+  sitePhpModeWarnings(true);
+  const ask = (name: string, mode?: "lsphp-attached") =>
+    sitePhpRuntimeMode({
+      composeServiceName: name,
+      engine: "openlitespeed",
+      php: mode === undefined ? { version: "8.4" } : { version: "8.4", mode },
+    });
+  for (let i = 0; i < 5; i++) {
+    assertEquals(ask("a"), "fastcgi");
+    assertEquals(ask("b", "lsphp-attached"), "lsphp-detached");
+  }
+  assertEquals(sitePhpModeWarnings(), ["a:nomode", "b:attached"]);
+  sitePhpModeWarnings(true);
+});
+
+test("detached lsphp carries the same sandbox as the other modes: loopback filter, its guard, and the caps", () => {
+  const spec = {
+    ...SPEC,
+    id: "shop-0a1b2c3d4e5f-lsd84",
+    mode: "lsphp-detached" as const,
+    webAccount: "tpols" as const,
+  };
+  const unit = sitePhpServiceUnit(spec, {
+    writablePaths: [],
+    limits: sitePhpUnitLimits([], sitePhpRuntimeChildren(spec.mode, [])),
+  });
+  assertStringIncludes(
+    unit,
+    "\nIPAddressDeny=localhost link-local multicast 0.0.0.0/8 fc00::/7\n",
+  );
+  assertStringIncludes(unit, "\nIPAddressAllow=127.0.0.1 127.0.0.53\n");
+  const guard = "ExecStartPre=+/opt/turbopanel/lib/tp-php-loopback sync";
+  assertStringIncludes(unit, `\n${guard}\n`);
+  assertEquals(unit.split("ExecStartPre=").length, 2);
+  assert(unit.indexOf(guard) < unit.indexOf("ExecStart="));
+  // 10 children at the 128M default plus 256M headroom; 10 * 8 tasks < floor.
+  assertStringIncludes(
+    unit,
+    `\nMemoryMax=${128 * 1024 ** 2 * 10 + 256 * 1024 ** 2}\n`,
+  );
+  assertStringIncludes(unit, "\nTasksMax=128\n");
 });
 
 test("php.ini keeps the isolation pinned and refuses what tp-host would", () => {
@@ -169,6 +235,58 @@ test("php-fpm.conf: one pool named after the runtime, no user or group, an ACL f
   for (const refused of ["\nuser", "\ngroup", "listen.owner", "listen.group"]) {
     assertEquals(conf.includes(refused), false, refused);
   }
+});
+
+test("detached lsphp: the vendored binary on a socket, its own php.ini through PHPRC with the modules", () => {
+  const spec = {
+    ...SPEC,
+    id: "shop-0a1b2c3d4e5f-lsd84",
+    mode: "lsphp-detached" as const,
+    webAccount: "tpols" as const,
+  };
+  const unit = sitePhpServiceUnit(spec, { writablePaths: [] });
+  for (
+    const want of [
+      "Requires=turbopanel-php-shop-0a1b2c3d4e5f-lsd84.socket\n",
+      "Type=simple\n",
+      "ExecStart=/opt/turbopanel/vendor/lsphp/8.4/current/bin/lsphp\n",
+      "StandardInput=socket\n",
+      "Environment=PHPRC=/etc/turbopanel/php/sites/shop-0a1b2c3d4e5f-lsd84/php.ini\n",
+      "Environment=LSAPI_CHILDREN=10\n",
+      "User=alice\n",
+      "StandardOutput=journal\n",
+    ]
+  ) {
+    assertStringIncludes(unit, want);
+  }
+  assertEquals(unit.includes("[Install]"), false);
+  assertStringIncludes(sitePhpSocketUnit(spec), "SocketGroup=tpols\n");
+  const ini = sitePhpIni(
+    [{ key: "memory_limit", value: "256M" }],
+    spec.home,
+    spec,
+  );
+  assertStringIncludes(
+    ini,
+    "[PHP]\nextension_dir = /opt/turbopanel/vendor/lsphp/8.4/current/lib/php/ext\nzend_extension = opcache.so\nextension = curl.so\nextension = mysqli.so\nextension = pdo_mysql.so\n",
+  );
+  assertStringIncludes(ini, "memory_limit = 256M\n");
+  // php-cgi and php-fpm load modules from their packaged conf.d.
+  assertEquals(sitePhpIni([], SPEC.home).includes("extension"), false);
+});
+
+test("a runtime's children: the site's pm.max_children for php-fpm, fixed otherwise", () => {
+  assertEquals(sitePhpRuntimeChildren("fastcgi", []), 4);
+  assertEquals(sitePhpRuntimeChildren("lsphp-detached", []), 10);
+  assertEquals(sitePhpRuntimeChildren("fpm", []), 20);
+  assertEquals(
+    sitePhpRuntimeChildren("fpm", [{ key: "pm.max_children", value: "6" }]),
+    6,
+  );
+  assertEquals(
+    sitePhpRuntimeChildren("fpm", [{ key: "pm.max_children", value: "x" }]),
+    20,
+  );
 });
 
 test("only php-fpm starts at boot; FastCGI waits on its socket", () => {

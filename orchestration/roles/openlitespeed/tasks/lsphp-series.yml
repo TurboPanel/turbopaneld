@@ -117,6 +117,17 @@
       - _lsphp_ext_dirs.files | length == 1
     fail_msg: "Expected one lib/php/<api> directory under {{ _lsphp_dest }}."
 
+# A per-site lsphp runtime's php.ini (PHPRC) names its extension_dir through
+# this link, so the daemon never needs the series' API number.
+- name: Link a stable lsphp extension directory ({{ lsphp_series }})
+  ansible.builtin.file:
+    src: "{{ _lsphp_ext_dirs.files[0].path | basename }}"
+    dest: "{{ _lsphp_dest }}/lib/php/ext"
+    state: link
+    owner: root
+    group: "{{ _lsphp_group }}"
+    force: true
+
 - name: Seed the relocated php.ini from the production template ({{ lsphp_series }})
   ansible.builtin.copy:
     remote_src: true
@@ -153,11 +164,9 @@
     or 'Zend OPcache' not in _lsphp_info.stdout
     or 'mysqli' not in _lsphp_info.stdout
 
-# `root:tp 0750` was wrong, not merely tight: OpenLiteSpeed suEXEC drops to the
-# site principal and *then* `execve`s lsphp, and tenant principals are
-# deliberately never in `tp` — so a principal-pinned OLS PHP vhost could not
-# spawn its LSAPI processor at all. The series entitlement group is the identity
-# that actually needs exec here.
+# Detached lsphp runs as the site principal from its systemd unit, and tenant
+# principals are deliberately never in `tp`: the series entitlement group
+# (which the daemon grants a site's principal) is the identity that execs it.
 - name: Scope the lsphp tree to its PHP entitlement group ({{ lsphp_series }})
   ansible.builtin.file:
     path: "{{ _lsphp_dest }}"
