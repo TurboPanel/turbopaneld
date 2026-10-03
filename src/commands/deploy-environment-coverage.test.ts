@@ -1166,6 +1166,18 @@ test({
             code: 0,
           });
         }
+        if (args.includes("network") && args.includes("inspect")) {
+          return Promise.resolve({
+            success: true,
+            stdout: JSON.stringify([{
+              IPAM: {
+                Config: [{ Subnet: "172.30.0.0/16", Gateway: "172.30.0.1" }],
+              },
+            }]),
+            stderr: "",
+            code: 0,
+          });
+        }
         return Promise.resolve({
           success: true,
           stdout: args.includes("ps") ? "[]" : "",
