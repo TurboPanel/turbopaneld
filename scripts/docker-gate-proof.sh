@@ -211,7 +211,7 @@ if gate_docker run --rm --network none --cap-add SYS_ADMIN "$IMAGE" true >/dev/n
 gate_docker run -d --name tpgate-proof-human --network none "$IMAGE" sleep 120 >/dev/null 2>&1
 if gate_docker stop -t 1 tpgate-proof-human >/dev/null 2>&1; then pass "stop of an unlabeled container ran (observe)"; else fail "stop of an unlabeled container did not run"; fi
 gate_docker rm -f tpgate-proof-human >/dev/null 2>&1
-if gate_docker run --rm --privileged --network none --label com.turbopanel.approval=v1.bm90LWEtdG9rZW4.bm90LWEtc2lnbmF0dXJl "$IMAGE" true >/dev/null 2>&1; then pass "privileged with a bogus approval ran (observe)"; else fail "privileged with a bogus approval did not run"; fi
+if gate_docker run --rm --privileged --network none --label com.turbopanel.approval=v2.bm90LWEtdG9rZW4.bm90LWEtc2lnbmF0dXJl "$IMAGE" true >/dev/null 2>&1; then pass "privileged with a bogus approval ran (observe)"; else fail "privileged with a bogus approval did not run"; fi
 
 sleep 1
 _log=$(journalctl -u "$GATE_UNIT" --since "$SINCE" --no-pager -o cat 2>/dev/null)

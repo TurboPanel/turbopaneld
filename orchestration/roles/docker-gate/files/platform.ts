@@ -126,9 +126,13 @@ export function platformBindVerdict(
   return undefined;
 }
 
-/** Container a request acts on, for the routes whose target must be owned. */
+/**
+ * Container a request acts on, for the routes whose target must be owned.
+ * Frequent reads (stats, logs, top) are left out on purpose: each checked
+ * request costs an inspect round trip, and the daemon polls those.
+ */
 const OWNED_TARGET =
-  /^\/containers\/([^/]+)\/(?:start|stop|restart|kill|pause|unpause|rename|update|exec|attach|archive)$/;
+  /^\/containers\/([^/]+)\/(?:start|stop|restart|kill|pause|unpause|rename|update|exec|attach|archive|wait|resize|export|attach\/ws)$/;
 const OWNED_REMOVE = /^\/containers\/([^/]+)$/;
 
 /** Container id/name an owned-only route addresses, otherwise `undefined`. */
@@ -142,4 +146,29 @@ export function ownedTarget(
     return id === "json" ? undefined : id;
   }
   return undefined;
+}
+
+export type OwnedObject = { kind: "volume" | "network"; name: string };
+
+/** Network or volume a request removes or (for a network) connects a container to. */
+const OWNED_OBJECT_REMOVE = /^\/(volumes|networks)\/([^/]+)$/;
+const OWNED_NETWORK_ATTACH = /^\/networks\/([^/]+)\/(?:connect|disconnect)$/;
+const NOT_AN_OBJECT = new Set(["create", "prune"]);
+
+/** Volume or network a request removes or attaches to, otherwise `undefined`. */
+export function ownedObject(
+  method: string,
+  path: string,
+): OwnedObject | undefined {
+  if (method === "DELETE") {
+    const found = OWNED_OBJECT_REMOVE.exec(path);
+    if (found === null || NOT_AN_OBJECT.has(found[2])) return undefined;
+    return {
+      kind: found[1] === "volumes" ? "volume" : "network",
+      name: found[2],
+    };
+  }
+  if (method !== "POST") return undefined;
+  const name = OWNED_NETWORK_ATTACH.exec(path)?.[1];
+  return name === undefined ? undefined : { kind: "network", name };
 }
