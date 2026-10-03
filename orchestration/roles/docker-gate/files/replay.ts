@@ -30,7 +30,7 @@ type Log = (record: Record<string, unknown>) => void;
 const FILE_VERSION = 1;
 
 function describe(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
+  return err instanceof Error ? err.message : Deno.inspect(err);
 }
 
 /** Parse the state file text into live ids; throws on any malformed shape. */
@@ -53,7 +53,7 @@ export function parseUsedIds(
   const live = new Map<string, number>();
   for (const [id, exp] of Object.entries(ids)) {
     if (typeof exp !== "number" || !Number.isFinite(exp)) {
-      throw new Error("the used-token file holds a bad expiry");
+      throw new TypeError("the used-token file holds a bad expiry");
     }
     if (exp > nowSec) live.set(id, Math.min(exp, ceiling));
   }
