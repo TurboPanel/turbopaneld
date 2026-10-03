@@ -120,7 +120,7 @@ first `tpsftp` member, the first `tpshell` member, and the first principal in
 neither (`getent`, no root). `Match Group` resolves groups from the account
 database, so a made-up user would match nothing; a level with no account is
 skipped. Every one of AllowTcpForwarding, AllowStreamLocalForwarding,
-AllowAgentForwarding, X11Forwarding, PermitTunnel, GatewayPorts must be `no`
+AllowAgentForwarding, X11Forwarding, PermitTunnel, GatewayPorts must be `no` (our Match blocks set each one, so the assertion checks our own configuration)
 and PermitOpen / PermitListen `none` (a keyword sshd does not report fails
 too). Any other value restores the previous drop-in and does not reload.
 `tp-host sshd` accepts `-t`, `-T`, or exactly `-T -C user=<name>,host=localhost,addr=127.0.0.1`

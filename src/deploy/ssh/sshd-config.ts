@@ -68,6 +68,9 @@ function forwardingDirectives(): readonly string[] {
     "AllowAgentForwarding no",
     "X11Forwarding no",
     "PermitTunnel no",
+    // The assertion demands `gatewayports no`; set it so an administrator's global
+    // `GatewayPorts clientspecified` cannot wedge every reconcile.
+    "GatewayPorts no",
   ];
 }
 

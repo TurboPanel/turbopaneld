@@ -473,6 +473,7 @@ const NO_FORWARDING = [
   "AllowAgentForwarding no",
   "X11Forwarding no",
   "PermitTunnel no",
+  "GatewayPorts no",
 ];
 
 test("every principal is matched, after the levels and before `Match all`", () => {
