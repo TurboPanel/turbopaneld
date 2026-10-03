@@ -73,10 +73,12 @@ export function sitePhpKey(
     new TextEncoder().encode(`${environmentId}\n${composeServiceName}`),
   );
   const hash = encodeHex(new Uint8Array(digest)).slice(0, SITE_KEY_HASH_HEX);
-  const slug = composeServiceName.toLowerCase()
+  // Runs of anything else are one dash, so at most one dash sits at each end.
+  let slug = composeServiceName.toLowerCase()
     .replaceAll(/[^a-z0-9]+/g, "-")
-    .slice(0, SITE_KEY_SLUG_MAX)
-    .replaceAll(/^-+|-+$/g, "");
+    .slice(0, SITE_KEY_SLUG_MAX);
+  if (slug.startsWith("-")) slug = slug.slice(1);
+  if (slug.endsWith("-")) slug = slug.slice(0, -1);
   return slug.length > 0 ? `${slug}-${hash}` : hash;
 }
 
