@@ -2631,6 +2631,44 @@ test("docker role denies the network.host and security.insecure build entitlemen
   );
 });
 
+test("daemon-converge re-applies only the builder entitlement deny to already-provisioned Docker hosts", async () => {
+  const roleDir = join(CHECKOUT_ORCHESTRATION_DIR, "roles/docker");
+  const converge = await Deno.readTextFile(
+    join(CHECKOUT_ORCHESTRATION_DIR, "playbooks/daemon-converge.yml"),
+  );
+  const entry = await Deno.readTextFile(
+    join(roleDir, "tasks/converge-builder.yml"),
+  );
+  const daemonJson = await Deno.readTextFile(
+    join(roleDir, "tasks/daemon-json.yml"),
+  );
+  const defaults = await Deno.readTextFile(join(roleDir, "defaults/main.yml"));
+  // The converge runs the entry file, ahead of the gate, never the whole role.
+  assertEquals(
+    /- role: docker\n\s+tasks_from: converge-builder\n\s+- role: docker-gate/
+      .test(converge),
+    true,
+  );
+  assertEquals(entry.includes("turbopanel_docker_builder_only: true"), true);
+  assertEquals(entry.includes("/usr/bin/docker"), true);
+  // It reads the file back and refuses to pass if the deny is not on disk.
+  assertEquals(entry.includes("['network-host'] == false"), true);
+  assertEquals(entry.includes("['security-insecure'] == false"), true);
+  // Builder-only mode leaves pools, bip and live-restore as found.
+  assertEquals(
+    daemonJson.includes("when: turbopanel_docker_builder_only | bool"),
+    true,
+  );
+  assertEquals(
+    daemonJson.includes("when: not (turbopanel_docker_builder_only | bool)"),
+    true,
+  );
+  assertEquals(
+    defaults.includes("turbopanel_docker_builder_only: false"),
+    true,
+  );
+});
+
 test("a co-located instance host gets a pending dockerd restart, applied once live-restore is running", async () => {
   const roleDir = join(CHECKOUT_ORCHESTRATION_DIR, "roles/docker");
   const daemonJson = await Deno.readTextFile(

@@ -1,0 +1,42 @@
+---
+# Entry point for daemon-converge (`- role: docker, tasks_from: converge-builder`).
+#
+# The docker role otherwise runs only on install, on a socket-unreachable retry
+# or when the address-pool descriptor changes, so a host provisioned before the
+# builder entitlement deny landed would keep the engine default (and the Docker
+# gate cannot see `network.host` inside a raw /session or /grpc stream). This
+# re-applies just that deny on every converge. Nothing is installed, and the
+# address pools, bip and live-restore are left as found. A real diff restarts
+# dockerd like any daemon.json change (see daemon-json.yml for the co-located
+# instance host, which is never restarted automatically).
+
+- name: Check for the Docker binary
+  ansible.builtin.stat:
+    path: /usr/bin/docker
+  register: _docker_converge_bin
+
+- name: Re-apply the builder entitlement deny on an already-provisioned host
+  when:
+    - _docker_converge_bin.stat.exists
+    - turbopanel_docker_manage_daemon_json | bool
+    - turbopanel_docker_deny_builder_entitlements | bool
+  block:
+    - name: Merge the builder entitlement deny into daemon.json
+      ansible.builtin.include_tasks: daemon-json.yml
+      vars:
+        turbopanel_docker_builder_only: true
+
+    - name: Read daemon.json back
+      ansible.builtin.slurp:
+        src: /etc/docker/daemon.json
+      register: _docker_converge_daemon_json
+
+    - name: Verify the deny is on disk
+      ansible.builtin.assert:
+        that:
+          - (_docker_converge_daemon_json.content | b64decode | from_json).builder.entitlements['network-host'] == false
+          - (_docker_converge_daemon_json.content | b64decode | from_json).builder.entitlements['security-insecure'] == false
+        fail_msg: >-
+          /etc/docker/daemon.json does not deny the network.host and
+          security.insecure build entitlements after the merge.
+        quiet: true
