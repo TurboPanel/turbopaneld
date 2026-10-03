@@ -341,6 +341,15 @@ test("converge and web-service account ids are globally unique", async () => {
     throw new Error("build-user: tpbuild must be uid/gid 9994");
   }
 
+  // tpphplaunch (php-launch) is a group only: the setuid tp-php-launch's
+  // group, whose one member is tpols.
+  const phpLaunch = parse(
+    await readRole("roles/php-launch/defaults/main.yml"),
+  ) as { php_launch_gid: number };
+  if (phpLaunch.php_launch_gid !== 9981) {
+    throw new Error("php-launch: tpphplaunch must be gid 9981");
+  }
+
   const convergeIds = ACCOUNTS.map((entry) => entry.id);
   const webIds = Object.values(webServiceMap).map((entry) => entry.uid);
   const hostingCaddy = parse(
@@ -359,6 +368,7 @@ test("converge and web-service account ids are globally unique", async () => {
     ...convergeIds,
     ...webIds,
     buildDefaults.build_uid,
+    phpLaunch.php_launch_gid,
     ...entitlementIds,
     ...accessGroupIds,
     hostingCaddy.hosting_caddy_uid,

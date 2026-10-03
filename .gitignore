@@ -61,3 +61,7 @@ orchestration/.ansible/
 
 # Local Claude Code settings (background-session isolation)
 .claude/settings.json
+
+# tp-php-launch release builds (scripts/build-tp-php-launch.sh); the release
+# bundle stages them, a dev checkout builds them locally.
+/orchestration/roles/php-launch/files/tp-php-launch-*

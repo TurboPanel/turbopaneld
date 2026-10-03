@@ -1,0 +1,13 @@
+version=1
+site=shop-1
+mode=lsphp-attached
+user=tpols
+uid=15001
+group=alice-grp
+gid=15001
+home=/srv/users/alice/home
+tmp=/srv/users/alice/tmp
+php=8.4
+bin=/opt/turbopanel/vendor/lsphp/8.4/current/bin/lsphp
+ini=/etc/turbopanel/php/sites/shop-1/php.ini
+children=10

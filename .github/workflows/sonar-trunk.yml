@@ -104,6 +104,12 @@ jobs:
           run-id: ${{ github.event.workflow_run.id }}
           github-token: ${{ github.token }}
 
+      # SonarCloud analyses C only from a compilation database
+      # (sonar.cfamily.compile-commands): the tp-php-launch sources.
+      - name: Compilation database for the C sources
+        if: steps.lcov.outputs.found == 'true'
+        run: bash scripts/tp-php-launch/compile-commands.sh build/compile_commands.json
+
       # The main branch is named explicitly and the revision is the trunk
       # build's commit, not GITHUB_SHA (see the header). No quality-gate wait:
       # the gate blocks pull requests only, and the result shows on SonarCloud.

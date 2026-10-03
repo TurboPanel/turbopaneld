@@ -74,6 +74,9 @@ R_UNITS="$P/etc/systemd/system"
 R_SSHD_DROPINS="$P/etc/ssh/sshd_config.d"
 R_WG="$P/etc/wireguard"
 R_SYSCTL="$P/etc/sysctl.d"
+# The attached-lsphp launcher registry (tp-php-launch). Root-owned and outside
+# the tp-owned config tree, so tp cannot swap it by renaming a parent.
+R_PHP_SITES="$P/etc/turbopanel-php-sites"
 # A principal home root the operator moved is recorded root-side, next to this
 # script — never taken from the daemon's own environment.
 if [ -f "$_self_dir/tp-host.conf" ] && [ ! -L "$_self_dir/tp-host.conf" ]; then
@@ -161,7 +164,7 @@ tp_path_class() {
   # Per-site PHP config and the launcher registry sit inside the config tree
   # but are never `tree`: only their own verbs and checks write them.
   case "$_pc" in
-    "$R_CONFIG/php/sites"|"$R_CONFIG/php/sites"/*|"$R_CONFIG/php-sites"|"$R_CONFIG/php-sites"/*)
+    "$R_CONFIG/php/sites"|"$R_CONFIG/php/sites"/*|"$R_PHP_SITES"|"$R_PHP_SITES"/*)
       tp_php_path_class "$_pc"
       return
       ;;
@@ -228,7 +231,7 @@ tp_require_class() {
 # The managed roots themselves are never removed or re-owned.
 tp_is_root_path() {
   for _ir in "$R_CONFIG" "$R_STATE" "$R_LOG" "$R_RUN" "$R_PRINCIPALS" \
-    "$R_SSHKEYS" "$R_UNITS" "$R_SSHD_DROPINS" "$R_SYSCTL"; do
+    "$R_SSHKEYS" "$R_UNITS" "$R_SSHD_DROPINS" "$R_SYSCTL" "$R_PHP_SITES"; do
     [ "$1" = "$_ir" ] && return 0
   done
   return 1
@@ -866,8 +869,9 @@ tp_backup_unit_ok() {
 # read-only system with writes only inside the owner's home, and sockets at the
 # top of /run (never in the daemon's /run/turbopanel). The site's PHP config
 # lives in $R_CONFIG/php/sites/<siteId>/ (root:<owner>-grp, directive
-# allowlist), and $R_CONFIG/php-sites/<siteId> is the registry the attached
-# lsphp launcher reads (written only by `php-site-register`).
+# allowlist), and $R_PHP_SITES/<siteId> (root:root, outside the tp-owned
+# config tree) is the registry the attached lsphp launcher reads (written only
+# by `php-site-register`).
 
 # Web server accounts that talk to a site's PHP socket (Caddy serves no PHP).
 PHP_WEB_GROUPS="tpnginx tpapache tpols"
@@ -1374,14 +1378,14 @@ tp_php_conf_ok() {
   esac
 }
 
-# phproot: $R_CONFIG/php/sites or $R_CONFIG/php-sites; phpconfdir: one site's
+# phproot: $R_CONFIG/php/sites or $R_PHP_SITES; phpconfdir: one site's
 # config directory; phpconf: a config file in it (or its .tpprev); phpreg: one
 # site's launcher registry entry. Nothing deeper.
 tp_php_path_class() {
   case "$1" in
-    "$R_CONFIG/php/sites"|"$R_CONFIG/php-sites") echo phproot; return 0 ;;
-    "$R_CONFIG/php-sites"/*)
-      tp_php_site_id_ok "${1#"$R_CONFIG/php-sites/"}" || return 1
+    "$R_CONFIG/php/sites"|"$R_PHP_SITES") echo phproot; return 0 ;;
+    "$R_PHP_SITES"/*)
+      tp_php_site_id_ok "${1#"$R_PHP_SITES/"}" || return 1
       echo phpreg
       return 0
       ;;
@@ -1510,10 +1514,10 @@ tp_verb_php_site_register() {
   _pg_home="$(tp_getent passwd "$_pg_user" | cut -d: -f6)"
   tp_principal_home_ok "$_pg_home" "$_pg_user" ||
     tp_die "php-site-register: $_pg_user's home is not $R_PRINCIPALS/$_pg_user/home"
-  tp_mkdir_pinned "$R_CONFIG/php-sites" 0755
+  tp_mkdir_pinned "$R_PHP_SITES" 0755
   # shellcheck disable=SC3067 # dash (Debian's /bin/sh) implements -O
   [ -O . ] && [ "$(stat -c '%a' .)" = "755" ] ||
-    tp_die "php-site-register: $R_CONFIG/php-sites is not root-owned 0755"
+    tp_die "php-site-register: $R_PHP_SITES is not root-owned 0755"
   printf '%s\n' \
     "version=1" \
     "site=$_pg_site" \
@@ -1528,7 +1532,7 @@ tp_verb_php_site_register() {
     "bin=$INSTALL_ROOT/vendor/lsphp/$4/current/bin/lsphp" \
     "ini=$R_CONFIG/php/sites/$_pg_site/php.ini" \
     "children=$5" |
-    tp_put_file "$R_CONFIG/php-sites/$_pg_site" 0644 root root
+    tp_put_file "$R_PHP_SITES/$_pg_site" 0644 root root
 }
 
 # --- verbs -------------------------------------------------------------------

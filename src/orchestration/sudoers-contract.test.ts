@@ -594,7 +594,7 @@ test("daemon-install.yml leaves per-site PHP config and the lsphp registry to tp
   const argv = (contents?.["ansible.builtin.command"] as
     | { argv?: string[] }
     | undefined)?.argv ?? [];
-  for (const pruned of ["php/sites", "php-sites"]) {
+  for (const pruned of ["php/sites"]) {
     const at = argv.indexOf(`{{ turbopanel_config_dir }}/${pruned}`);
     assertEquals(argv[at - 1], "-path", pruned);
   }

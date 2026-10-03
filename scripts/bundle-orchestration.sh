@@ -23,6 +23,17 @@ ORCH_ARCHIVE="$DIST/$(tp_orchestration_release_filename "$VERSION")"
 rm -rf "$ARCHIVE_STAGING"
 tp_build_orchestration_archive_staging "$ARCHIVE_STAGING" "$PROD_HOME" "$ROOT/orchestration"
 tp_stage_release_notices "$ARCHIVE_STAGING" "$PROD_HOME" "$ROOT/THIRD_PARTY_NOTICES.md"
+# The setuid tp-php-launch release build, one per architecture. The build is
+# reproducible and fails unless each binary matches its SHA-256 pin in
+# roles/php-launch/defaults/main.yml, which the role checks again on install.
+_launch_dir="$ARCHIVE_STAGING/$PROD_HOME/share/orchestration/roles/php-launch/files"
+bash "$ROOT/scripts/build-tp-php-launch.sh" "$_launch_dir"
+for _arch in amd64 arm64; do
+	if [[ ! -f "$_launch_dir/tp-php-launch-$_arch" ]]; then
+		echo "bundle-orchestration.sh: missing tp-php-launch-$_arch" >&2
+		exit 1
+	fi
+done
 if ! tp_verify_release_root "$ARCHIVE_STAGING" "orchestration"; then
 	echo "bundle-orchestration.sh: orchestration release verification failed" >&2
 	exit 1

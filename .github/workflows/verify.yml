@@ -228,6 +228,11 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+      # SonarCloud analyses C only from a compilation database
+      # (sonar.cfamily.compile-commands): the tp-php-launch sources.
+      - name: Compilation database for the C sources
+        run: bash scripts/tp-php-launch/compile-commands.sh build/compile_commands.json
+
       # Coverage import needs CI-based analysis (Automatic Analysis must stay
       # off for turbopanel_turbopaneld). Quality gate failure fails this job.
       - name: SonarQube Scan
@@ -350,6 +355,36 @@ jobs:
           TURBOPANEL_REQUIRE_SIBLING: "1"
         run: deno task check:contract-drift
 
+  # tp-php-launch, the setuid launcher for attached lsphp: the reproducible
+  # release build must match the role's SHA-256 pins, the registry parser is
+  # fuzzed, and the hostile test corpus runs as root on this disposable runner
+  # against both a glibc build of the source and the static release build.
+  php-launch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Shellcheck the launcher scripts
+        run: shellcheck -x -s bash scripts/build-tp-php-launch.sh scripts/bundle-orchestration.sh scripts/tp-php-launch/*.sh
+
+      - name: Reproducible release build matches the pins
+        run: bash scripts/build-tp-php-launch.sh dist/php-launch
+
+      - name: Fuzz the registry parser
+        run: bash scripts/tp-php-launch/fuzz.sh 2000000
+
+      - name: Hostile tests (source, glibc)
+        run: sudo TP_PHP_LAUNCH_DISPOSABLE=1 bash scripts/tp-php-launch/hostile-test.sh
+
+      - name: Hostile tests (release build, static musl)
+        run: sudo TP_PHP_LAUNCH_DISPOSABLE=1 bash scripts/tp-php-launch/hostile-test.sh dist/php-launch/tp-php-launch-amd64
+
   # The one context the trunk ruleset will require: green only when every
   # PR-time job above succeeded. Every need runs unconditionally, so a
   # `skipped` result is a failure here too.
@@ -362,7 +397,7 @@ jobs:
   # A real failure of a need still runs it, and still fails it.
   ci-ok:
     name: ci-ok
-    needs: [verify, contract-drift]
+    needs: [verify, contract-drift, php-launch]
     if: ${{ (github.event_name == 'pull_request' && always()) || !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5

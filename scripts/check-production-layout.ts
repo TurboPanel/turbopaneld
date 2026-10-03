@@ -300,6 +300,9 @@ export const RUNTIME_ROOT_SCAN_ALLOWLIST = new Set([
   "scripts/purge.sh",
   "orchestration/roles/daemon-launch/templates/turbopaneld.service.j2",
   "orchestration/roles/daemon-launch/templates/tp-backup-run.j2",
+  // Root-only test of tp-php-launch's compiled-in paths (the C source pins
+  // them to this layout in src/orchestration/php-launch.test.ts).
+  "scripts/tp-php-launch/hostile-test.sh",
 ]);
 
 export function collectForbiddenReferenceFailures(

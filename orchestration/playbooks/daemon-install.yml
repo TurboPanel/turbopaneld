@@ -99,8 +99,7 @@
         group: "{{ turbopanel_group }}"
 
     # Everything below it too, except the per-site PHP config (php/sites/,
-    # root:<owner>-grp, read by the owner's PHP), the attached-lsphp registry
-    # (php-sites/, root:root) and the site-engine trees
+    # root:<owner>-grp, read by the owner's PHP) and the site-engine trees
     # (turbopanel_engine_config_dirs, root:<engine group>; roles
     # apache/nginx/openlitespeed/php-fpm, written through tp-host): a tp:tp
     # pass would leave every PHP site unable to read its php.ini and the
@@ -116,9 +115,6 @@
           - (
           - -path
           - "{{ turbopanel_config_dir }}/php/sites"
-          - -o
-          - -path
-          - "{{ turbopanel_config_dir }}/php-sites"
           - -o
           - -path
           - "{{ turbopanel_config_dir }}/apache"

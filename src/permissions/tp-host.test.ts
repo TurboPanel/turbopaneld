@@ -2016,7 +2016,7 @@ test("per-site PHP config: root:<owner>-grp, 0750/0640, directives on an allowli
         ["0750", "root", "alice-grp", phpConfDir(host, "Shop")],
         ["0750", "root", "alice-grp", `${dir}/deeper`],
         ["0755", "root", "root", host.path("etc/turbopanel/php/sites")],
-        ["0755", "root", "root", host.path("etc/turbopanel/php-sites")],
+        ["0755", "root", "root", host.path("etc/turbopanel-php-sites")],
       ]
     ) {
       assertEquals(
@@ -2228,9 +2228,9 @@ test("per-site PHP config: symlinks, other verbs and the rollout copy", async ()
           "-g",
           "root",
           staged,
-          host.path("etc/turbopanel/php-sites/shop-1"),
+          host.path("etc/turbopanel-php-sites/shop-1"),
         ],
-        ["tee", host.path("etc/turbopanel/php-sites/shop-1")],
+        ["tee", host.path("etc/turbopanel-php-sites/shop-1")],
       ]
     ) {
       await refused(host, args, args[0] === "tee" ? "x\n" : undefined);
@@ -2316,7 +2316,7 @@ test("php-test runs the installed unit's binary on its own config, as the owner"
 
 test("php-site-register writes the launcher registry from the account database only", async () => {
   await withPhpHost(async (host) => {
-    const entry = host.path(`etc/turbopanel/php-sites/${PHP_SITE}`);
+    const entry = host.path(`etc/turbopanel-php-sites/${PHP_SITE}`);
     const register = [
       "php-site-register",
       PHP_SITE,

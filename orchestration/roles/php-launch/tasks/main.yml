@@ -1,0 +1,113 @@
+---
+# Install tp-php-launch from the release build (staged into files/ by
+# scripts/bundle-orchestration.sh; a dev checkout runs
+# `bash scripts/build-tp-php-launch.sh orchestration/roles/php-launch/files`).
+# The binary's SHA-256 is checked against the pin before it is copied and again
+# where it lands. The daemon never installs or changes it.
+- name: Assert a supported CPU architecture for tp-php-launch
+  ansible.builtin.assert:
+    that:
+      - ansible_architecture in php_launch_arch_map
+    fail_msg: "tp-php-launch has no build for {{ ansible_architecture }}."
+
+- name: Resolve the tp-php-launch build for this architecture
+  ansible.builtin.set_fact:
+    _php_launch_arch: "{{ php_launch_arch_map[ansible_architecture] }}"
+
+- name: Check the tp-php-launch release build
+  ansible.builtin.stat:
+    path: "{{ role_path }}/files/tp-php-launch-{{ _php_launch_arch }}"
+    checksum_algorithm: sha256
+    follow: false
+  delegate_to: localhost
+  become: false
+  register: _php_launch_build
+
+- name: Assert the tp-php-launch build matches its pin
+  ansible.builtin.assert:
+    that:
+      - _php_launch_build.stat.exists
+      - _php_launch_build.stat.isreg
+      - _php_launch_build.stat.checksum == php_launch_sha256[_php_launch_arch]
+    fail_msg: >-
+      {{ role_path }}/files/tp-php-launch-{{ _php_launch_arch }} is missing or
+      does not match php_launch_sha256.{{ _php_launch_arch }}. A release ships
+      it; in a dev checkout run
+      `bash scripts/build-tp-php-launch.sh orchestration/roles/php-launch/files`.
+
+- name: Check that the launcher's caller account exists
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ php_launch_caller }}"
+
+- name: Ensure the launcher group
+  ansible.builtin.group:
+    name: "{{ php_launch_group }}"
+    gid: "{{ php_launch_gid }}"
+    system: true
+    state: present
+
+- name: Let the caller execute the launcher
+  ansible.builtin.user:
+    name: "{{ php_launch_caller }}"
+    groups: ["{{ php_launch_group }}"]
+    append: true
+
+- name: Read the launcher group
+  ansible.builtin.getent:
+    database: group
+    key: "{{ php_launch_group }}"
+
+# Fail closed rather than prune: anyone else in the group could run the
+# launcher, and who added them needs a look.
+- name: Refuse a launcher group with any member but the caller
+  ansible.builtin.assert:
+    that:
+      - (ansible_facts.getent_group[php_launch_group][2] | split(',') | select | list) == [php_launch_caller]
+    fail_msg: >-
+      {{ php_launch_group }} must hold only {{ php_launch_caller }}; it holds
+      {{ ansible_facts.getent_group[php_launch_group][2] }}.
+
+- name: Check the registry directory is not a symlink
+  ansible.builtin.stat:
+    path: "{{ php_launch_registry_dir }}"
+    follow: false
+  register: _php_launch_registry
+
+- name: Refuse a symlinked registry directory
+  ansible.builtin.assert:
+    that:
+      - not (_php_launch_registry.stat.islnk | default(false))
+    fail_msg: "{{ php_launch_registry_dir }} is a symlink."
+
+- name: Ensure the root-owned launcher registry directory
+  ansible.builtin.file:
+    path: "{{ php_launch_registry_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Install tp-php-launch
+  ansible.builtin.copy:
+    src: "tp-php-launch-{{ _php_launch_arch }}"
+    dest: "{{ php_launch_dest }}"
+    owner: root
+    group: "{{ php_launch_group }}"
+    mode: "4750"
+
+- name: Check the installed tp-php-launch
+  ansible.builtin.stat:
+    path: "{{ php_launch_dest }}"
+    checksum_algorithm: sha256
+    follow: false
+  register: _php_launch_installed
+
+- name: Assert the installed tp-php-launch is the pinned build, 4750 root:tpphplaunch
+  ansible.builtin.assert:
+    that:
+      - _php_launch_installed.stat.isreg
+      - _php_launch_installed.stat.checksum == php_launch_sha256[_php_launch_arch]
+      - _php_launch_installed.stat.mode == "4750"
+      - _php_launch_installed.stat.pw_name == "root"
+      - _php_launch_installed.stat.gr_name == php_launch_group
