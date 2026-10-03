@@ -2648,6 +2648,63 @@ test("sftp-chroot checks an account whose primary group is tpsftp", async () => 
   });
 });
 
+test("sshd accepts -t, -T and exactly -T -C user=<name>,host=localhost,addr=127.0.0.1", async () => {
+  await withHost(async (host) => {
+    for (const argv of [["-t"], ["-T"]]) {
+      const ok = await host.run(["sshd", ...argv]);
+      assertEquals(ok.code, 0, ok.stderr);
+    }
+    const spec = "user=alice,host=localhost,addr=127.0.0.1";
+    const ok = await host.run(["sshd", "-T", "-C", spec]);
+    assertEquals(ok.code, 0, ok.stderr);
+    assertStringIncludes(
+      ok.stdout,
+      `EXEC [/usr/sbin/sshd] [-T] [-C] [${spec}]`,
+    );
+  });
+});
+
+test("sshd -T -C refuses anything but the one fixed spec", async () => {
+  await withHost(async (host) => {
+    const tail = ",host=localhost,addr=127.0.0.1";
+    for (
+      const argv of [
+        ["-T", "-C", "user=alice,host=localhost,addr=127.0.0.1,laddr=1.2.3.4"],
+        ["-T", "-C", "user=alice,host=localhost"],
+        ["-T", "-C", "host=localhost,addr=127.0.0.1,user=alice"],
+        ["-T", "-C", "user=alice,addr=127.0.0.1,host=localhost"],
+        ["-T", "-C", "user=alice,host=example.com,addr=127.0.0.1"],
+        ["-T", "-C", "user=alice,host=localhost,addr=10.0.0.1"],
+        ["-T", "-C", "user=,host=localhost,addr=127.0.0.1"],
+        ["-T", "-C", `user=-oProxyCommand=x${tail}`],
+        ["-T", "-C", `user=-x${tail}`],
+        ["-T", "-C", `user=a b${tail}`],
+        ["-T", "-C", `user=a;id${tail}`],
+        ["-T", "-C", `user=a,user=b${tail}`],
+        ["-T", "-C", `user=${"a".repeat(33)}${tail}`],
+        ["-T", "-C", `user=a\nb${tail}`],
+        ["-T", "-C", "user=alice" + tail + "\n"],
+        ["-t", "-C", `user=alice${tail}`],
+        ["-C", `user=alice${tail}`, "-T"],
+        ["-T", "-C", `user=alice${tail}`, "-f", "/tmp/x"],
+        ["-T", "-f", "/tmp/x"],
+        ["-T", "-C"],
+        ["-f", "/tmp/x"],
+        ["-T", "-o", "AllowTcpForwarding=yes"],
+        [],
+      ]
+    ) {
+      const stderr = await refused(host, ["sshd", ...argv]);
+      // Refused either by the verb or earlier, by the newline guard.
+      assertEquals(
+        stderr.includes("refusing") || stderr.includes("sshd: only"),
+        true,
+        stderr,
+      );
+    }
+  });
+});
+
 test("php-loopback-sync runs the installed guard with sync and nothing else", async () => {
   await withHost(async (host) => {
     const ok = await host.run(["php-loopback-sync"]);
