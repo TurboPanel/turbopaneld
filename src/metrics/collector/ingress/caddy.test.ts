@@ -285,3 +285,40 @@ test("CaddyIngressAdapter.read succeeds on a valid scrape", async () => {
   assertEquals(result?.sourceKind, "caddy");
   assertEquals(result?.reading.requestsInFlight, 3);
 });
+
+test("CaddyIngressAdapter scrapes the hosting Caddy's metrics listener, not the site Caddy's", async () => {
+  const addrs: string[] = [];
+  const adapter = new CaddyIngressAdapter({
+    fetchText: (addr) => {
+      addrs.push(addr);
+      return Promise.resolve(fixture("proxy-caddy-metrics-base.txt"));
+    },
+  });
+  await adapter.read(ctx());
+  assertEquals(addrs, ["127.0.0.1:2049"]);
+});
+
+test("parseCaddyExposition does not count the metrics listener's own scrapes", () => {
+  const text = [
+    "# TYPE caddy_http_requests_total counter",
+    'caddy_http_requests_total{server="srv0",handler="subroute"} 40',
+    'caddy_http_requests_total{server="srv1",handler="metrics"} 7',
+    "# TYPE caddy_http_request_duration_seconds_count counter",
+    'caddy_http_request_duration_seconds_count{server="srv0",handler="subroute",code="200"} 40',
+    'caddy_http_request_duration_seconds_count{server="srv1",handler="metrics",code="200"} 7',
+    "",
+  ].join("\n");
+  const tracker = new CounterBaselineTracker();
+  parseCaddyExposition(
+    parsePrometheusExposition(
+      text.replaceAll("} 40", "} 0").replaceAll("} 7", "} 0"),
+    ),
+    ctx({ tracker }),
+  );
+  const reading = parseCaddyExposition(
+    parsePrometheusExposition(text),
+    ctx({ tracker }),
+  );
+  assertEquals(reading.requests, 40);
+  assertEquals(reading.responses2xx, 40);
+});

@@ -257,6 +257,12 @@ const SITES: CallSite[] = [
     { argv: ["ip", "-o", "-4", "addr", "show", "dev", "tp0"] },
     { argv: ["wg", "show", "tp0", "dump"] },
   ),
+  tpHost('src/metrics/collector/tls-expiry.ts|["-n","cert-dates"]', {
+    argv: ["cert-dates"],
+  }),
+  tpHost('src/metrics/collector/site-usage.ts|["-n","site-usage"]', {
+    argv: ["site-usage"],
+  }),
   tpHost('src/commands/reboot.ts|["-n","systemctl","reboot"]', {
     argv: ["systemctl", "reboot"],
   }),

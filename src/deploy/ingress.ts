@@ -133,7 +133,7 @@ const TRAEFIK_HTTPS_PORT = 7443;
 /**
  * Loopback-only Prometheus metrics entrypoint for the shared hosting-ingress
  * Traefik. Scraped by the daemon's `metrics/collector/router/traefik.ts` adapter
- * the same way `SITE_CADDY_ADMIN_ADDR`/`PROXYSQL_REST_ADDR` are — never
+ * the same way `CADDY_METRICS_ADDR`/`PROXYSQL_REST_ADDR` are — never
  * published beyond `TRAEFIK_LOOPBACK`. Per-service tenant Traefik
  * (`serviceTraefikCompose`) does not get one; ingress metrics are scoped to
  * the shared HTTP-only proxy only.
@@ -160,6 +160,17 @@ export const HOSTING_CADDY_ADMIN_SOCKET =
   `/run/${HOSTING_CADDY_RUNTIME_DIRECTORY}/admin.sock`;
 /** Caddy's spelling of {@link HOSTING_CADDY_ADMIN_SOCKET} as an address. */
 const HOSTING_CADDY_ADMIN_ADDR = `unix/${HOSTING_CADDY_ADMIN_SOCKET}`;
+/**
+ * Loopback port of the hosting Caddy's metrics-only listener: Prometheus text
+ * from the `metrics` handler and nothing else (the admin API stays a unix
+ * socket). Totals only: `metrics` is rendered without `per_host`, so no
+ * per-site label ever leaves Caddy. 2019, 2029 and 2039 are taken by the dev
+ * panel Caddy, the old hosting admin and the site Caddy's listener.
+ */
+export const HOSTING_CADDY_METRICS_PORT = 2049;
+/** Loopback address `metrics/collector/ingress/caddy.ts` scrapes. */
+export const HOSTING_CADDY_METRICS_ADDR =
+  `127.0.0.1:${HOSTING_CADDY_METRICS_PORT}`;
 const SAFE_FILE_ID_RE = /^[A-Za-z0-9_-]+$/;
 /** Compose Spec `name:` charset — lowercase alphanumerics, `-`, and `_`. */
 const COMPOSE_PROJECT_NAME_RE = /^[a-z0-9][a-z0-9_-]*$/;
@@ -701,9 +712,17 @@ export function caddyfile(configDir: string): string {
   auto_https disable_redirects
   skip_install_trust
   grace_period ${HOSTING_CADDY_GRACE_PERIOD}
+  metrics
   servers {
     protocols h1 h2 h3
+    metrics
   }
+}
+# Metrics only, with no per-host option: totals across every site, no site
+# name in a label. \`bind\` keeps the listener on loopback.
+http://${HOSTING_CADDY_METRICS_ADDR} {
+  bind 127.0.0.1
+  metrics
 }
 import ${join(configDir, "hosting", "sites", "*.caddy")}
 `;

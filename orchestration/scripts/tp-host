@@ -2762,6 +2762,69 @@ tp_verb_build_return() {
   tp_run chown -R -h -P -- "$CALLER_UID:$CALLER_GID" .
 }
 
+# Expiry dates of the certificates the hosting Caddy issued itself, nothing
+# else: no names, no key material, no internal-CA leaf (issuer directory
+# `local`). The certificate tree belongs to tpedge (0700), so each file is
+# opened as tpedge rather than as root, and only regular files directly in
+# the `<issuer>/<host>/` shape are looked at (a symlink is not `-type f`).
+# One `notAfter` per line, as openssl spells it with spaces squeezed
+# (`Jan 1 00:00:00 2027 GMT`).
+tp_verb_cert_dates() {
+  [ "$#" -eq 0 ] || tp_die "cert-dates: takes no arguments"
+  _cd_root="$P/var/lib/$HOSTING_CADDY_STATE/data/caddy/certificates"
+  tp_pin_dir "$_cd_root" || return 0
+  _cd_uid="$(tp_uid_of "$HOSTING_CADDY_USER")" || return 0
+  _cd_gid="$(tp_gid_of_group "$HOSTING_CADDY_USER")" || return 0
+  [ -n "$_cd_uid" ] && [ -n "$_cd_gid" ] || return 0
+  find . -mindepth 3 -maxdepth 3 -type f -name '*.crt' ! -path './local/*' |
+    sort | while IFS= read -r _cd_file; do
+    case "$_cd_file" in
+      *[!A-Za-z0-9._@:+,=/-]*) continue ;;
+    esac
+    _cd_end="$(tp_as "$_cd_uid" "$_cd_gid" openssl x509 -noout -enddate -in "$_cd_file" 2>/dev/null)" || continue
+    printf '%s\n' "$_cd_end" |
+      sed -n 's/^notAfter=\([A-Z][a-z][a-z]  *[0-9][0-9]*  *[0-9:]*  *[0-9][0-9][0-9][0-9]  *GMT\)$/\1/p' |
+      tr -s ' '
+  done
+}
+
+# Allocated sizes of every principal home and of every site directory
+# (`<home>/sites/<id>`), for the metrics collector: homes are root-owned
+# 0750 root:<principal>-grp, so the daemon account cannot walk them. Sizes and
+# directory names only, `home <bytes> <name>` / `site <bytes> <id>`; no file
+# name or content is printed. Nothing follows a symlink: each directory is
+# pinned with `cd -P`, and `du -P` never follows one.
+tp_site_usage_kib() {
+  nice -n 19 du -skxP -- "$1" 2>/dev/null | cut -f1
+}
+
+tp_site_usage_sites() {
+  _ss_name="$1"
+  tp_pin_dir "$R_PRINCIPALS/$_ss_name/sites" 2>/dev/null || return 0
+  for _ss_site in ./*; do
+    [ -d "$_ss_site" ] && [ ! -L "$_ss_site" ] || continue
+    _ss_id="${_ss_site#./}"
+    tp_name_shape_ok "$_ss_id" || continue
+    _ss_kib="$(tp_site_usage_kib "$_ss_site")"
+    case "$_ss_kib" in ''|*[!0-9]*) continue ;; esac
+    printf 'site %s %s\n' "$((_ss_kib * 1024))" "$_ss_id"
+  done
+}
+
+tp_verb_site_usage() {
+  [ "$#" -eq 0 ] || tp_die "site-usage: takes no arguments"
+  tp_pin_dir "$R_PRINCIPALS" 2>/dev/null || return 0
+  for _su_home in ./*; do
+    [ -d "$_su_home" ] && [ ! -L "$_su_home" ] || continue
+    _su_name="${_su_home#./}"
+    tp_name_shape_ok "$_su_name" || continue
+    _su_kib="$(tp_site_usage_kib "$_su_home")"
+    case "$_su_kib" in ''|*[!0-9]*) continue ;; esac
+    printf 'home %s %s\n' "$((_su_kib * 1024))" "$_su_name"
+    (tp_site_usage_sites "$_su_name") || true
+  done
+}
+
 # --- dispatch ----------------------------------------------------------------
 
 [ $# -ge 1 ] || tp_die "usage: tp-host <verb> [args…]"
@@ -2809,6 +2872,8 @@ case "$_verb" in
   build-run) tp_verb_build_run "$@" ;;
   build-return) tp_verb_build_return "$@" ;;
   php-test) tp_verb_php_test "$@" ;;
+  cert-dates) tp_verb_cert_dates "$@" ;;
+  site-usage) tp_verb_site_usage "$@" ;;
   php-site-register) tp_verb_php_site_register "$@" ;;
   *) tp_die "refusing verb $_verb" ;;
 esac
