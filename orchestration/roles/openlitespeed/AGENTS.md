@@ -29,12 +29,10 @@ The role also provisions FHS-compliant config/log/state directories (mirroring
 | `/run/turbopanel-ols/` | `tpols:tpols` | `0750` | LSAPI sockets; the unit's `RuntimeDirectory` (the role also creates it for an already-running server) |
 
 Everything above is ensured on **every** converge, not only on first install: a
-host upgraded over an older vendored tree skips the install block. Installs used to
-chown the whole `/etc/turbopanel` to `tp:tp`; `daemon-install.yml` now skips the
-engine trees (`turbopanel_engine_config_dirs`), and the role still puts the
-OpenLiteSpeed config tree back to `root:tpols` on hosts that were already
-flipped (owner and group only — the daemon sets each file's mode through
-tp-host).
+host upgraded over an older vendored tree skips the install block. Nothing re-owns
+`/etc/turbopanel` recursively any more (`daemon-install.yml` has no find/chown
+pass, P1-1): the role pins the three config folders and `tp-host` writes every
+file in them as `root:tpols`.
 
 Identity comes from `web-service-user` (`tpols`, uid/gid **9990** — see the
 table above); the **`site-openlitespeed-apply`** playbook

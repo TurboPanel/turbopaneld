@@ -222,6 +222,19 @@ export class DaemonApiClient {
   }
 
   /**
+   * Authenticated no-op round trip (`GET /api/daemon/v1/ping`). Rejects when
+   * the control plane cannot be reached or does not accept the daemon token.
+   */
+  async ping(): Promise<void> {
+    const response = await this.#request(
+      "/api/daemon/v1/ping",
+      { method: "GET" },
+      { auth: true },
+    );
+    await response.body?.cancel();
+  }
+
+  /**
    * POST a host-metrics sample to the instance (authenticated).
    * Fire-and-forget at the call site — the scheduler awaits and rate-limit-logs
    * on failure; this method does not swallow errors.

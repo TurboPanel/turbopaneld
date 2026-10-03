@@ -37,6 +37,8 @@ import {
 } from "../paths/layout.ts";
 import type { RunFn } from "../deploy/ensure-principal.ts";
 import { runPrivileged } from "../deploy/release/release-layout.ts";
+import { retirePrincipals } from "../deploy/retire-principals.ts";
+import type { SshApplyResult } from "../deploy/ssh/apply.ts";
 import {
   pruneFabricStateNetworks,
   removeFabricDockerNetworks,
@@ -64,6 +66,8 @@ export type EnvironmentStopHandlerDeps = {
   removeFabricNetworks?: (names: readonly string[]) => Promise<void>;
   /** Test seam — privileged `sudo -n …` runner for release-tree removal. */
   runPrivileged?: RunFn;
+  /** Test seam — the `sshd` drop-in re-render after principals are retired. */
+  applySshAccess?: () => Promise<SshApplyResult>;
 };
 
 /**
@@ -195,6 +199,24 @@ async function removeDeploymentDir(
       `deployment dir removal failed: ${result.stderr || "tp-host rm failed"}`,
     );
   }
+}
+
+function retirementSummary(
+  stopped: string,
+  retirement: { retired: string[]; failed: Array<{ username: string }> },
+): string {
+  const parts = [stopped];
+  if (retirement.retired.length > 0) {
+    parts.push(`retired principals: ${retirement.retired.join(", ")}`);
+  }
+  if (retirement.failed.length > 0) {
+    parts.push(
+      `principals kept: ${
+        retirement.failed.map((entry) => entry.username).join(", ")
+      }`,
+    );
+  }
+  return parts.join("; ");
 }
 
 function assertSafeStopIdentifiers(payload: EnvironmentStopPayload): void {
@@ -338,9 +360,20 @@ export async function handleEnvironmentStop(
     parsedPayload.environmentId,
   );
 
-  const summary = hasCompose
+  // Last, once every unit, site and release tree above is gone: tp-host
+  // refuses an account the host still references.
+  const retirement = await retirePrincipals(
+    (parsedPayload.retirePrincipals ?? []).map((entry) => entry.username),
+    {
+      runFn: deps?.runPrivileged ?? runPrivileged,
+      ...(deps?.applySshAccess ? { applySshAccess: deps.applySshAccess } : {}),
+    },
+  );
+
+  const stopped = hasCompose
     ? `Stopped environment ${parsedPayload.environmentId}`
     : `Environment ${parsedPayload.environmentId} already stopped`;
+  const summary = retirementSummary(stopped, retirement);
   logInfo(
     "commands",
     `environment.stop completed project=${parsedPayload.projectName} received=${daemonReceivedAt}`,

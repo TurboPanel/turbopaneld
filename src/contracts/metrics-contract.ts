@@ -22,7 +22,34 @@
  * gate that `hardware.physical` already applies.
  */
 
-export const METRICS_SCHEMA_VERSION = 6 as const;
+/**
+ * The schema version the control plane stores (`blob3` on every row, dataset
+ * `turbopanel_server_metrics_v7`). A sample on the wire may still be stamped
+ * with an older {@link METRICS_WIRE_VERSIONS} entry; the control plane writes
+ * v7 rows for all of them.
+ */
+export const METRICS_SCHEMA_VERSION = 7 as const;
+
+/**
+ * The wire version a daemon stamps until the control plane advertises the
+ * `metrics-v7` wire feature (`DAEMON_WIRE_FEATURES`). v6-shaped samples carry
+ * no {@link MetricsExtended} section and no `durable` flag.
+ */
+export const METRICS_LEGACY_WIRE_VERSION = 6 as const;
+
+/** Sample versions the control plane accepts from a daemon during the v6 -> v7 transition. */
+export const METRICS_WIRE_VERSIONS = [
+  METRICS_LEGACY_WIRE_VERSION,
+  METRICS_SCHEMA_VERSION,
+] as const;
+
+export type MetricsWireVersion = (typeof METRICS_WIRE_VERSIONS)[number];
+
+export function isMetricsWireVersion(
+  value: unknown,
+): value is MetricsWireVersion {
+  return (METRICS_WIRE_VERSIONS as readonly unknown[]).includes(value);
+}
 
 /** Maps every non-string field of `T` to `number | null` — the sanitized-output shape for a raw input `T`. */
 type RawNumeric<T> = {
@@ -450,6 +477,145 @@ export type DockerUsageSample = {
 };
 
 // ---------------------------------------------------------------------------
+// v7 extension — everything the v7 layout stores that the v6 groups above do
+// not carry. One optional, self-contained section so a v6 daemon's sample
+// stays valid byte for byte: every field is optional, `null` is "unknown",
+// and a missing section reads exactly like a section of nulls.
+// ---------------------------------------------------------------------------
+
+/** Host-wide readings added in v7 (kernel limits, OOM kills, root disk queue/IOPS, health counters). */
+export type ExtendedHostMetrics = {
+  /** Processes and threads as a share of the kernel PID limit. */
+  pidLimitUsedPercent?: number | null;
+  /** Processes the kernel OOM killer ended in the interval (`/proc/vmstat` `oom_kill` delta). */
+  oomKills?: number | null;
+  /** Requests queued at the disk that holds `/`. */
+  rootDiskQueueDepth?: number | null;
+  /** Read plus write operations per second on the disk that holds `/`. */
+  rootDiskOpsPerSecond?: number | null;
+  /** Failed systemd units. */
+  systemdUnitsFailed?: number | null;
+  /** Software RAID arrays running degraded. */
+  mdArraysDegraded?: number | null;
+  /** Software RAID arrays resyncing or rebuilding. */
+  mdArraysResyncing?: number | null;
+};
+
+/** Docker health and container totals added in v7 (alongside {@link DockerUsageSample}'s disk breakdown). */
+export type ExtendedDockerMetrics = {
+  containersRunning?: number | null;
+  containersUnhealthy?: number | null;
+  containersRestarting?: number | null;
+  /** Container OOM kills in the interval. */
+  containerOomEvents?: number | null;
+  /** Unexpected container exits in the interval (not deploys or daemon-issued stops). */
+  containerDieEvents?: number | null;
+  /** CPU used by all containers together, as a share of the whole host (0-100). */
+  containersCpuPercent?: number | null;
+  /** Memory used by all containers together (cgroup usage minus inactive file cache). */
+  containersMemoryBytes?: number | null;
+  /** Images, volumes and build cache Docker could reclaim, summed. */
+  reclaimableBytes?: number | null;
+};
+
+/** Hosting-Caddy fields added in v7. Totals only: never per-site counts. */
+export type ExtendedIngressMetrics = {
+  /** Days until the soonest hosting certificate expires. */
+  tlsCertSoonestExpiryDays?: number | null;
+};
+
+/**
+ * Host-wide text fields v7 stores in free blobs, in no particular order. Each
+ * is a short human-readable string (process short names and site ids only,
+ * never full command lines, domain names, serials or IPs).
+ */
+export const METRICS_TEXT_FIELD_NAMES = [
+  "loadavg",
+  "topCpu",
+  "cpuModel",
+  "topMem",
+  "lastOom",
+  "unhealthyContainers",
+  "dockerVersion",
+  "failedUnits",
+  "raidState",
+  "rebootRequired",
+  "kernel",
+  "os",
+  "bootId",
+  "virt",
+  "cloudProvider",
+  "agentVersion",
+  "timeSync",
+  "pendingUpdates",
+  "fsReadOnly",
+  "phpVersions",
+  "webEngines",
+  "fpmBusiest",
+  "topSites",
+  "caddyVersion",
+  "certSoonest",
+  "traefikVersion",
+  "unhealthyBackends",
+  "dbVersions",
+] as const;
+
+export type MetricsTextFieldName = (typeof METRICS_TEXT_FIELD_NAMES)[number];
+
+export type MetricsTextFields = { [K in MetricsTextFieldName]?: string };
+
+/** Longest text value kept (characters); longer values are truncated. */
+export const MAX_METRICS_TEXT_LENGTH = 256;
+
+/** Per-drive text (model and SMART verdict), keyed by the drive's `deviceId`. */
+export type ExtendedBlockDeviceText = {
+  deviceId: string;
+  model?: string;
+  smart?: string;
+};
+
+/** Per-GPU text (driver and model), keyed by the GPU's `gpuId`. */
+export type ExtendedGpuText = {
+  gpuId: string;
+  driver?: string;
+  model?: string;
+};
+
+export type MetricsExtended = {
+  host?: ExtendedHostMetrics;
+  docker?: ExtendedDockerMetrics;
+  ingress?: ExtendedIngressMetrics;
+  text?: MetricsTextFields;
+  blockDeviceText?: ExtendedBlockDeviceText[];
+  gpuText?: ExtendedGpuText[];
+};
+
+export const EXTENDED_HOST_FIELD_NAMES = [
+  "pidLimitUsedPercent",
+  "oomKills",
+  "rootDiskQueueDepth",
+  "rootDiskOpsPerSecond",
+  "systemdUnitsFailed",
+  "mdArraysDegraded",
+  "mdArraysResyncing",
+] as const;
+
+export const EXTENDED_DOCKER_FIELD_NAMES = [
+  "containersRunning",
+  "containersUnhealthy",
+  "containersRestarting",
+  "containerOomEvents",
+  "containerDieEvents",
+  "containersCpuPercent",
+  "containersMemoryBytes",
+  "reclaimableBytes",
+] as const;
+
+export const EXTENDED_INGRESS_FIELD_NAMES = [
+  "tlsCertSoonestExpiryDays",
+] as const;
+
+// ---------------------------------------------------------------------------
 // Events — a closed catalog of discrete state-change/fault signals distinct
 // from the continuous numeric metrics above.
 // ---------------------------------------------------------------------------
@@ -603,12 +769,19 @@ function assertValidEventKind(kind: string): asserts kind is MetricEventKind {
 // ---------------------------------------------------------------------------
 
 export type MetricsSampleMetadata = {
-  version: typeof METRICS_SCHEMA_VERSION;
+  version: MetricsWireVersion;
   sampledAt: string;
   intervalSeconds: number;
   sequence: number;
   topologyGeneration: number;
   bootGeneration: number;
+  /**
+   * v7 daemons only. `false` marks a 10 s live-lease sample that feeds the
+   * live overlay and is never stored; the parallel 60 s baseline sample is
+   * `true`. Absent means durable (every v6 sample, and v7 samples outside a
+   * lease), so a v6 daemon's lease samples keep being stored.
+   */
+  durable?: boolean;
 };
 
 export type MetricsSample = {
@@ -627,6 +800,8 @@ export type MetricsSample = {
   router?: RouterSample;
   storage?: StorageSample;
   dockerUsage?: DockerUsageSample;
+  /** v7 additions. Absent on a v6 daemon's sample. */
+  extended?: MetricsExtended;
 };
 
 /**
@@ -655,6 +830,7 @@ export type MetricsSampleInput = {
   router?: RawInput<RouterSample>;
   storage?: RawInput<StorageSample>;
   dockerUsage?: RawInput<DockerUsageSample>;
+  extended?: MetricsExtended;
 };
 
 type RawInput<T> = {
@@ -1026,6 +1202,85 @@ function sanitizeDockerUsage(
   };
 }
 
+function sanitizeOptionalNumbers<N extends string>(
+  names: readonly N[],
+  raw: { [K in N]?: number | null | undefined } | undefined,
+  percentFields: readonly N[] = [],
+): { [K in N]?: number | null } | undefined {
+  if (!raw) return undefined;
+  const out: { [K in N]?: number | null } = {};
+  for (const name of names) {
+    const value = raw[name];
+    if (value === undefined) continue;
+    const finite = sanitizeFinite(value);
+    out[name] = percentFields.includes(name) ? clampPercent(finite) : finite;
+  }
+  return out;
+}
+
+/** Trim, drop control characters, cap the length; an empty result is no value. */
+export function sanitizeMetricsText(
+  value: string | null | undefined,
+): string | undefined {
+  if (typeof value !== "string") return undefined;
+  let out = "";
+  for (const ch of value) {
+    const code = ch.codePointAt(0) ?? 0;
+    out += code < 0x20 || code === 0x7f ? " " : ch;
+  }
+  const trimmed = out.trim().slice(0, MAX_METRICS_TEXT_LENGTH);
+  return trimmed === "" ? undefined : trimmed;
+}
+
+function sanitizeTextRecord<K extends string>(
+  names: readonly K[],
+  raw: { [P in K]?: string | null | undefined },
+): { [P in K]?: string } {
+  const out: { [P in K]?: string } = {};
+  for (const name of names) {
+    const text = sanitizeMetricsText(raw[name]);
+    if (text !== undefined) out[name] = text;
+  }
+  return out;
+}
+
+function sanitizeExtended(raw: MetricsExtended): MetricsExtended {
+  const out: MetricsExtended = {};
+  const host = sanitizeOptionalNumbers(
+    EXTENDED_HOST_FIELD_NAMES,
+    raw.host,
+    ["pidLimitUsedPercent"],
+  );
+  if (host) out.host = host;
+  const docker = sanitizeOptionalNumbers(
+    EXTENDED_DOCKER_FIELD_NAMES,
+    raw.docker,
+    ["containersCpuPercent"],
+  );
+  if (docker) out.docker = docker;
+  const ingress = sanitizeOptionalNumbers(
+    EXTENDED_INGRESS_FIELD_NAMES,
+    raw.ingress,
+  );
+  if (ingress) out.ingress = ingress;
+  if (raw.text) {
+    out.text = sanitizeTextRecord(METRICS_TEXT_FIELD_NAMES, raw.text);
+  }
+  if (raw.blockDeviceText) {
+    out.blockDeviceText = raw.blockDeviceText.map((entry) => ({
+      deviceId: entry.deviceId,
+      ...sanitizeTextRecord(["model", "smart"] as const, entry),
+    }));
+  }
+  if (raw.gpuText) {
+    out.gpuText = raw.gpuText.map((entry) => ({
+      gpuId: entry.gpuId,
+      ...sanitizeTextRecord(["driver", "model"] as const, entry),
+    }));
+  }
+  return out;
+}
+
 function sanitizeEvent(event: MetricEvent): MetricEvent {
   assertValidEventKind(event.kind);
   if (
@@ -1043,9 +1298,11 @@ function sanitizeEvent(event: MetricEvent): MetricEvent {
 export function buildMetricsSample(
   input: MetricsSampleInput,
 ): MetricsSample {
-  if (input.metadata.version !== METRICS_SCHEMA_VERSION) {
+  if (!isMetricsWireVersion(input.metadata.version)) {
     throw new TypeError(
-      `metrics metadata.version must be ${METRICS_SCHEMA_VERSION}`,
+      `metrics metadata.version must be one of ${
+        METRICS_WIRE_VERSIONS.join(", ")
+      }`,
     );
   }
   // intervalSeconds is divisor-bearing downstream — zero is never valid.
@@ -1095,6 +1352,16 @@ export function buildMetricsSample(
     MAX_METRIC_ENTITY_ARRAY_LENGTH,
   );
   assertArrayWithinCap("events", input.events, MAX_METRIC_EVENTS_PER_SAMPLE);
+  assertArrayWithinCap(
+    "extended.blockDeviceText",
+    input.extended?.blockDeviceText ?? [],
+    MAX_METRIC_ENTITY_ARRAY_LENGTH,
+  );
+  assertArrayWithinCap(
+    "extended.gpuText",
+    input.extended?.gpuText ?? [],
+    MAX_METRIC_ENTITY_ARRAY_LENGTH,
+  );
 
   const sample: MetricsSample = {
     type: "metrics",
@@ -1126,6 +1393,9 @@ export function buildMetricsSample(
   }
   if (input.dockerUsage) {
     sample.dockerUsage = sanitizeDockerUsage(input.dockerUsage);
+  }
+  if (input.extended) {
+    sample.extended = sanitizeExtended(input.extended);
   }
   return sample;
 }
