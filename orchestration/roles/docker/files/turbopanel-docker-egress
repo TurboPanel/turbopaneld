@@ -1,0 +1,170 @@
+#!/bin/sh
+# Always-on egress block for Docker containers and builds (audit P1-4).
+#
+# Installed by the docker role and run as root by turbopanel-docker-egress.service
+# after every (re)start of docker.service, so it survives a dockerd restart and a
+# reboot. It is deliberately NOT part of the opt-in TP-FWD / TP-INPUT firewall:
+# that one is off by default and would not reach every host.
+#
+# One chain, TP-EGRESS, hung off two hooks for traffic that ENTERS on a
+# container-side interface (docker0, br-+ = every user-defined Docker bridge):
+#   - DOCKER-USER  forwarded traffic: a site owner's container or build reaching
+#                  a cloud metadata service or anything else on a link-local
+#                  address through the host.
+#   - INPUT        the same destinations when they are the host's own addresses.
+# Nothing else is matched, so ingress/Caddy, ProxySQL, the daemon, traffic
+# between containers on a project network, published ports and replies to all of
+# them pass exactly as before. What is dropped:
+#   IPv4  169.254.0.0/16 (link-local, 169.254.169.254 metadata on AWS, GCP, Azure,
+#         Oracle, DigitalOcean, Hetzner), 168.63.129.16 (Azure wireserver),
+#         100.100.100.200 (Alibaba metadata)
+#   IPv6  fe80::/10 (ICMPv6 stays allowed so neighbour discovery works),
+#         fd00:ec2::254 (AWS metadata)
+# Exception: DNS (tcp/udp 53) to the link-local resolvers clouds hand out
+# (169.254.169.253 AWS, 169.254.169.254 GCP, fd00:ec2::253 AWS v6), plus any
+# link-local nameserver in the host's resolv.conf files. Metadata is HTTP, not 53.
+#
+# Not covered, by design: fetches made by the BuildKit engine itself (`ADD
+# http://...`, remote/git build contexts) run in dockerd's own network namespace
+# and never traverse these hooks.
+#
+# Usage: turbopanel-docker-egress apply | remove | print4 | print6
+#   apply   idempotent: --noflush restore of the TP-EGRESS chain only, then the
+#           jumps (-C then -I, re-inserted if something pushed them down).
+#   remove  take the jumps out and delete the chain (uninstall / role switch off).
+#   print4 / print6  the iptables-restore document; touches nothing, needs no root.
+# Overrides for tests: TP_EGRESS_IPTABLES, TP_EGRESS_IP6TABLES,
+# TP_EGRESS_IPTABLES_RESTORE, TP_EGRESS_IP6TABLES_RESTORE, TP_EGRESS_RESOLV_FILES.
+set -eu
+
+CHAIN=TP-EGRESS
+IPT4="${TP_EGRESS_IPTABLES:-iptables}"
+IPT6="${TP_EGRESS_IP6TABLES:-ip6tables}"
+RESTORE4="${TP_EGRESS_IPTABLES_RESTORE:-iptables-restore}"
+RESTORE6="${TP_EGRESS_IP6TABLES_RESTORE:-ip6tables-restore}"
+RESOLV_FILES="${TP_EGRESS_RESOLV_FILES:-/etc/resolv.conf /run/systemd/resolve/resolv.conf}"
+# Container-side interfaces; same set the firewall module treats as container ingress.
+IFACES="docker0 br-+"
+HOOKS="INPUT DOCKER-USER"
+
+die() {
+  printf 'turbopanel-docker-egress: %s\n' "$1" >&2
+  exit 1
+}
+
+# Link-local nameservers: the fixed cloud resolvers plus the host's own.
+link_local_resolvers() {
+  {
+    printf '%s\n' 169.254.169.253 169.254.169.254
+    for _f in $RESOLV_FILES; do
+      [ -r "$_f" ] || continue
+      awk '$1 == "nameserver" && $2 ~ /^169\.254\.[0-9]+\.[0-9]+$/ { print $2 }' "$_f"
+    done
+  } | sort -u
+}
+
+print4() {
+  printf '*filter\n:%s - [0:0]\n' "$CHAIN"
+  for _ns in $(link_local_resolvers); do
+    for _p in udp tcp; do
+      printf -- '-A %s -p %s -m %s --dport 53 -d %s/32 -j RETURN\n' "$CHAIN" "$_p" "$_p" "$_ns"
+    done
+  done
+  printf -- '-A %s -d 169.254.0.0/16 -j DROP\n' "$CHAIN"
+  printf -- '-A %s -d 168.63.129.16/32 -j DROP\n' "$CHAIN"
+  printf -- '-A %s -d 100.100.100.200/32 -j DROP\n' "$CHAIN"
+  printf 'COMMIT\n'
+}
+
+print6() {
+  printf '*filter\n:%s - [0:0]\n' "$CHAIN"
+  printf -- '-A %s -p ipv6-icmp -j RETURN\n' "$CHAIN"
+  for _p in udp tcp; do
+    printf -- '-A %s -p %s -m %s --dport 53 -d fd00:ec2::253/128 -j RETURN\n' "$CHAIN" "$_p" "$_p"
+  done
+  printf -- '-A %s -d fe80::/10 -j DROP\n' "$CHAIN"
+  printf -- '-A %s -d fd00:ec2::254/128 -j DROP\n' "$CHAIN"
+  printf 'COMMIT\n'
+}
+
+have_chain() { "$1" -w 5 -S "$2" >/dev/null 2>&1; }
+
+# Our jumps are the first rules of the chain (rule 1 is the `-N` line in -S).
+jumps_first() {
+  _n=$("$1" -w 5 -S "$2" | sed -n '2,3p' | grep -c -- "-j $CHAIN" || true)
+  [ "$_n" = 2 ]
+}
+
+drop_jumps() {
+  for _i in $IFACES; do
+    while "$1" -w 5 -C "$2" -i "$_i" -j "$CHAIN" 2>/dev/null; do
+      "$1" -w 5 -D "$2" -i "$_i" -j "$CHAIN"
+    done
+  done
+}
+
+ensure_jumps() {
+  for _i in $IFACES; do
+    "$1" -w 5 -C "$2" -i "$_i" -j "$CHAIN" 2>/dev/null ||
+      "$1" -w 5 -I "$2" 1 -i "$_i" -j "$CHAIN"
+  done
+  if ! jumps_first "$1" "$2"; then
+    drop_jumps "$1" "$2"
+    for _i in $IFACES; do
+      "$1" -w 5 -I "$2" 1 -i "$_i" -j "$CHAIN"
+    done
+  fi
+}
+
+apply_family() {
+  _bin=$1 _restore=$2 _doc=$3
+  _tmp=$(mktemp)
+  trap 'rm -f "$_tmp"' EXIT
+  "$_doc" > "$_tmp"
+  "$_restore" -w 5 --noflush --test < "$_tmp"
+  "$_restore" -w 5 --noflush < "$_tmp"
+  for _h in $HOOKS; do
+    # DOCKER-USER is Docker's; it may not exist for this family (ip6tables off).
+    if [ "$_h" = DOCKER-USER ] && ! have_chain "$_bin" DOCKER-USER; then continue; fi
+    ensure_jumps "$_bin" "$_h"
+  done
+  rm -f "$_tmp"
+}
+
+remove_family() {
+  _bin=$1
+  for _h in $HOOKS; do
+    if have_chain "$_bin" "$_h"; then drop_jumps "$_bin" "$_h"; fi
+  done
+  if have_chain "$_bin" "$CHAIN"; then
+    "$_bin" -w 5 -F "$CHAIN"
+    "$_bin" -w 5 -X "$CHAIN"
+  fi
+}
+
+# TP_EGRESS_ALLOW_NONROOT exists for the stubbed tests only; a real iptables
+# refuses a non-root caller on its own.
+need_root() {
+  [ "$(id -u)" = 0 ] || [ -n "${TP_EGRESS_ALLOW_NONROOT:-}" ] || die "must run as root"
+}
+
+case "${1:-}" in
+  print4) print4 ;;
+  print6) print6 ;;
+  apply)
+    need_root
+    command -v "$IPT4" >/dev/null 2>&1 || die "iptables is not installed; the egress block cannot be applied"
+    apply_family "$IPT4" "$RESTORE4" print4
+    if command -v "$IPT6" >/dev/null 2>&1; then
+      apply_family "$IPT6" "$RESTORE6" print6
+    else
+      printf 'turbopanel-docker-egress: ip6tables not installed; IPv6 rules skipped\n' >&2
+    fi
+    ;;
+  remove)
+    need_root
+    if command -v "$IPT4" >/dev/null 2>&1; then remove_family "$IPT4"; fi
+    if command -v "$IPT6" >/dev/null 2>&1; then remove_family "$IPT6"; fi
+    ;;
+  *) die "usage: turbopanel-docker-egress apply|remove|print4|print6" ;;
+esac

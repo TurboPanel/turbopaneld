@@ -151,3 +151,7 @@
 - name: Install the Docker gate
   ansible.builtin.include_role:
     name: docker-gate
+
+# Always-on egress block (audit P1-4); needs the iptables/ip6tables tools only.
+- name: Install the always-on Docker egress block
+  ansible.builtin.include_tasks: egress-guard.yml

@@ -2370,6 +2370,12 @@ tp_remove_host_config() {
   if [ -e /usr/local/bin/php ]; then
     tp_run "remove /usr/local/bin/php" rm -f /usr/local/bin/php || true
   fi
+  # Docker egress block script (docker role). Its unit is removed with the other
+  # turbopanel* units and its TP-EGRESS chain and jumps with the TP-* chains.
+  if [ -e /usr/local/lib/turbopanel/turbopanel-docker-egress ]; then
+    tp_run "remove Docker egress block script" rm -f /usr/local/lib/turbopanel/turbopanel-docker-egress || true
+    rmdir /usr/local/lib/turbopanel 2>/dev/null || true
+  fi
   tp_remove_statoverrides
 }
 
