@@ -1135,10 +1135,22 @@ const SITES: CallSite[] = [
       setup: { files: { [`${STAGING}/index.html`]: "<h1>hi</h1>\n" } },
     },
   ),
+  tpHost(
+    'src/deploy/release/release-links.ts|["-n",...releaseLinkTextsFindArgs(releaseDir)]',
+    {
+      argv: ["find", RELEASE, "-type", "l", "-printf", String.raw`%P\0%l\0`],
+      setup: dir(RELEASE),
+    },
+  ),
   tpHost('src/deploy/site.ts|["-n","ls","-A","--",documentRoot]', {
     argv: ["ls", "-A", "--", `${SITE}/webroot`],
     setup: dir(`${SITE}/webroot`),
   }),
+  tpHost(
+    'src/deploy/release/live-release-scan.ts|["-n","ls","-A","--",dir]',
+    { argv: ["ls", "-A", "--", `${P}/srv/users`], setup: dir(HOME) },
+    { argv: ["ls", "-A", "--", `${HOME}/sites`], setup: dir(SITE) },
+  ),
   tpHost('src/deploy/site/app-detect.ts|["-n","ls","-A","--",path]', {
     argv: ["ls", "-A", "--", `${SITE}/webroot`],
     setup: dir(`${SITE}/webroot`),

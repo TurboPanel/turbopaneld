@@ -7,10 +7,17 @@ import {
 import { dirname, join, resolve } from "@std/path";
 import type { RunFn } from "../ensure-principal.ts";
 import { resolveReleasePaths } from "./release-layout.ts";
-import { promoteRelease } from "./promote.ts";
+import {
+  promoteExistingRelease,
+  promoteRelease,
+  RELEASE_SHARED_LINK_TARGET,
+} from "./promote.ts";
+import { RELEASE_PUBLISHED_MODE } from "./release-layout.ts";
 import {
   foreignLinkTargets,
+  linksLeavingReleaseLexically,
   linkTargetsLeavingRelease,
+  parseReleaseLinkTexts,
 } from "./release-links.ts";
 
 /**
@@ -282,3 +289,265 @@ for (const { name, build } of TWO_HOP_CASES) {
     });
   });
 }
+
+test("promoteRelease compares link targets with the physical release path", async () => {
+  await withHomes(async (real) => {
+    // The homes root reached through a symlink: `realpath` prints the
+    // physical path, so a logical release path would flag every link.
+    const root = join(real, "alias");
+    await Deno.mkdir(join(real, "homes"));
+    await Deno.symlink(join(real, "homes"), root);
+    const paths = resolveReleasePaths(
+      { principalHomeRoot: root, daemonStateDir: join(real, "state") },
+      { username: "alice", serviceId: "web", releaseId: "rel-1" },
+    );
+    await Deno.mkdir(paths.sharedDir, { recursive: true });
+    const workingDir = join(real, "checkout");
+    await Deno.mkdir(join(workingDir, "public"), { recursive: true });
+    await Deno.writeTextFile(join(workingDir, "public", "index.html"), "hi");
+    await Deno.symlink("index.html", join(workingDir, "public", "home.html"));
+
+    await promoteRelease({
+      paths,
+      workingDir,
+      username: "alice",
+      healthProbe: () => Promise.resolve(),
+      runFn: runSeam,
+    });
+    assert((await Deno.lstat(paths.currentLink)).isSymlink);
+  });
+});
+
+test("linksLeavingReleaseLexically follows link texts, never shared/", () => {
+  const links = [
+    { path: "shared", text: "../../shared" },
+    { path: "public/build", text: "../dist" },
+    { path: "public/home.html", text: "index.html" },
+    { path: "public/storage", text: "../shared/storage" },
+    { path: "public/up", text: "../shared" },
+    { path: "here", text: "." },
+    { path: "public/x", text: "../here/shared/evil" },
+    // `deep/..` is `nested`, not the release root: `deep` is a link.
+    { path: "deep", text: "nested/dir" },
+    { path: "public/ok", text: "../deep/../shared" },
+    { path: "public/abs", text: "/srv/users/alice/sites/web/shared/a" },
+    { path: "public/out", text: "../../../r0/public" },
+    { path: "loop/a", text: "b" },
+    { path: "loop/b", text: "a" },
+    { path: "public/vendor", text: "../vendor/./pkg/" },
+  ];
+  assertEquals(linksLeavingReleaseLexically(links), [
+    "public/storage -> ../shared/storage (reaches into shared/)",
+    "public/up -> ../shared (reaches into shared/)",
+    "public/x -> ../here/shared/evil (reaches into shared/)",
+    "public/abs -> /srv/users/alice/sites/web/shared/a (leaves the release)",
+    "public/out -> ../../../r0/public (leaves the release)",
+    "loop/a -> b (loops)",
+    "loop/b -> a (loops)",
+  ]);
+});
+
+test("linksLeavingReleaseLexically refuses a release over its step budget", () => {
+  // 50 links of 4 components each: 200 steps.
+  const links = Array.from({ length: 50 }, (_, i) => ({
+    path: `d/l${i}`,
+    text: "../a/b/c",
+  }));
+  assertEquals(linksLeavingReleaseLexically(links), []);
+  assertEquals(linksLeavingReleaseLexically(links, 100), [
+    "d/l25 -> ../a/b/c (too many link components to check: over 100)",
+  ]);
+});
+
+test("linksLeavingReleaseLexically walks a chain many links share once", () => {
+  // chain/c0 -> c1 -> … -> c30 -> ../real, and 500 links into c0. Walked per
+  // link that is over 16k steps; resolved once and reused it is about 1.1k.
+  const chain = Array.from({ length: 31 }, (_, i) => ({
+    path: `chain/c${i}`,
+    text: i === 30 ? "../real" : `c${i + 1}`,
+  }));
+  const users = Array.from({ length: 500 }, (_, i) => ({
+    path: `users/u${i}`,
+    text: "../chain/c0",
+  }));
+  assertEquals(linksLeavingReleaseLexically([...users, ...chain], 2_000), []);
+  // A chain ending in shared/ is reported for every link through it.
+  const leaking = [...chain.slice(0, 30), {
+    path: "chain/c30",
+    text: "../shared/x",
+  }];
+  const found = linksLeavingReleaseLexically([...users, ...leaking], 2_000);
+  assertEquals(found.length, 531);
+  assert(found.every((line) => line.endsWith("(reaches into shared/)")));
+});
+
+test("linksLeavingReleaseLexically counts reused links' hops toward the limit", () => {
+  // c0 follows 38 more links, a 39, b 40 (the limit); c would follow 41.
+  const chain = Array.from({ length: 39 }, (_, i) => ({
+    path: `chain/c${i}`,
+    text: i === 38 ? "../real" : `c${i + 1}`,
+  }));
+  const links = [
+    { path: "c", text: "b" },
+    ...chain,
+    { path: "a", text: "chain/c0" },
+    { path: "b", text: "a" },
+  ];
+  assertEquals(linksLeavingReleaseLexically(links), ["c -> b (loops)"]);
+  // A long cycle loops for every link on it, each resolved once.
+  const ring = Array.from({ length: 1_000 }, (_, i) => ({
+    path: `ring/l${i}`,
+    text: `l${(i + 1) % 1_000}`,
+  }));
+  const looped = linksLeavingReleaseLexically(ring, 2_000);
+  assertEquals(looped.length, 1_000);
+  assert(looped.every((line) => line.endsWith("(loops)")));
+});
+
+test("parseReleaseLinkTexts reads find's NUL-separated pairs", () => {
+  assertEquals(parseReleaseLinkTexts("public/x\0../shared/e\0a b\0c\n\0"), [
+    { path: "public/x", text: "../shared/e" },
+    { path: "a b", text: "c\n" },
+  ]);
+  assertEquals(parseReleaseLinkTexts(""), []);
+});
+
+/**
+ * A release as an earlier promote left it: sealed mode, the layout's
+ * `shared` link in place, and whatever links the build shipped — before the
+ * publish-time link checks existed to refuse them.
+ */
+async function sealedRelease(
+  root: string,
+  links: Readonly<Record<string, string>>,
+) {
+  const paths = resolveReleasePaths(
+    { principalHomeRoot: root, daemonStateDir: join(root, "state") },
+    { username: "alice", serviceId: "web", releaseId: "rel-1" },
+  );
+  await Deno.mkdir(join(paths.sharedDir), { recursive: true });
+  await Deno.writeTextFile(join(paths.sharedDir, "evil"), "tenant-controlled");
+  await Deno.mkdir(join(paths.releaseDir, "public"), { recursive: true });
+  await Deno.mkdir(join(paths.releaseDir, "dist"));
+  await Deno.writeTextFile(
+    join(paths.releaseDir, "public", "index.html"),
+    "hi",
+  );
+  await Deno.symlink(
+    RELEASE_SHARED_LINK_TARGET,
+    join(paths.releaseDir, "shared"),
+  );
+  await Promise.all(
+    Object.entries(links).map(([path, text]) =>
+      Deno.symlink(text, join(paths.releaseDir, path))
+    ),
+  );
+  await Deno.chmod(paths.releaseDir, RELEASE_PUBLISHED_MODE);
+  return paths;
+}
+
+async function withSealedRelease(
+  links: Readonly<Record<string, string>>,
+  fn: (paths: ReturnType<typeof resolveReleasePaths>) => Promise<void>,
+): Promise<void> {
+  await withHomes(async (root) => {
+    const paths = await sealedRelease(root, links);
+    try {
+      await fn(paths);
+    } finally {
+      await Deno.chmod(paths.releaseDir, 0o750);
+    }
+  });
+}
+
+const PRE_FIX_LINKS: Readonly<Record<string, Record<string, string>>> = {
+  "a link into shared/": { "public/x": "../shared/evil" },
+  "a link to shared/ itself": { "public/up": "../shared" },
+  "a chain that reaches shared/ through another link": {
+    "here": ".",
+    "public/x": "../here/shared/evil",
+  },
+  "a link out of the release": { "public/x": "../../rel-0/public" },
+};
+
+for (const [name, links] of Object.entries(PRE_FIX_LINKS)) {
+  test(`promoteExistingRelease refuses to roll back to ${name}`, async () => {
+    await withSealedRelease(links, async (paths) => {
+      const err = await assertRejects(() =>
+        promoteExistingRelease({
+          paths,
+          releaseId: "rel-1",
+          healthProbe: () => Promise.resolve(),
+          runFn: runSeam,
+        })
+      );
+      assertStringIncludes(String(err), "public/");
+      await assertRejects(() => Deno.lstat(paths.currentLink));
+    });
+  });
+}
+
+test("promoteExistingRelease rolls back to a release whose links stay inside", async () => {
+  await withSealedRelease({
+    "public/build": "../dist",
+    "public/home.html": "index.html",
+  }, async (paths) => {
+    await promoteExistingRelease({
+      paths,
+      releaseId: "rel-1",
+      healthProbe: () => Promise.resolve(),
+      runFn: runSeam,
+    });
+    assert((await Deno.lstat(paths.currentLink)).isSymlink);
+  });
+});
+
+test("promoteExistingRelease also refuses a link that resolves out of the release", async () => {
+  await withSealedRelease({ "public/build": "../dist" }, async (paths) => {
+    // The texts pass; resolved against the live tree, a link does not.
+    const outside = join(paths.sharedDir, "evil");
+    const runFn: RunFn = (_command, args) =>
+      Promise.resolve({
+        success: true,
+        stdout: args.includes("realpath") ? `${outside}\0` : "",
+        stderr: "",
+      });
+    const err = await assertRejects(() =>
+      promoteExistingRelease({
+        paths,
+        releaseId: "rel-1",
+        healthProbe: () => Promise.resolve(),
+        runFn,
+      })
+    );
+    assertStringIncludes(String(err), outside);
+    await assertRejects(() => Deno.lstat(paths.currentLink));
+  });
+});
+
+test("promoteExistingRelease lists links as root when the release is unreadable", async () => {
+  const calls: string[][] = [];
+  const runFn: RunFn = (_command, args) => {
+    calls.push([...args]);
+    return Promise.resolve({
+      success: true,
+      stdout: "shared\0../../shared\0public/x\0../shared/evil\0",
+      stderr: "",
+    });
+  };
+  await withSealedRelease({}, async (paths) => {
+    const readDir = Deno.readDir;
+    Deno.readDir = () => {
+      throw new Deno.errors.PermissionDenied("denied");
+    };
+    try {
+      const err = await assertRejects(() =>
+        promoteExistingRelease({ paths, releaseId: "rel-1", runFn })
+      );
+      assertStringIncludes(String(err), "public/x -> ../shared/evil");
+    } finally {
+      Deno.readDir = readDir;
+    }
+    assert(calls.some((args) => args.includes("-printf")));
+  });
+});
