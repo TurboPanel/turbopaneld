@@ -210,6 +210,8 @@ export type ManagedLastStreamingObservation = {
   ageMs: number;
   lagBytes?: number;
   lagSeconds?: number;
+  /** That read's received-vs-primary byte lag (`receiveLagBytes`). */
+  receiveLagBytes?: number;
 };
 
 export type ManagedReplicationObservedHealth = {
@@ -221,6 +223,11 @@ export type ManagedReplicationObservedHealth = {
   receivedLsn?: string;
   /** Standby only: `pg_last_wal_replay_lsn()` (absent when NULL). */
   replayLsn?: string;
+  /**
+   * Standby only, while streaming: bytes between the primary's last reported
+   * WAL end (`latest_end_lsn`) and what this standby has received.
+   */
+  receiveLagBytes?: number;
   /** Standby only, on `managed-health-result`. */
   lastStreaming?: ManagedLastStreamingObservation;
 };

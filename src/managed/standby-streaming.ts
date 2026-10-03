@@ -27,6 +27,7 @@ type StreamingRecord = {
   at: string;
   lagBytes?: number;
   lagSeconds?: number;
+  receiveLagBytes?: number;
 };
 
 export class StandbyStreamingTracker {
@@ -37,7 +38,7 @@ export class StandbyStreamingTracker {
     memberId: string,
     health: Pick<
       ManagedReplicationObservedHealth,
-      "state" | "lagBytes" | "lagSeconds" | "observedAt"
+      "state" | "lagBytes" | "lagSeconds" | "observedAt" | "receiveLagBytes"
     >,
     monoMs: number,
   ): void {
@@ -51,6 +52,9 @@ export class StandbyStreamingTracker {
       ...(health.lagSeconds === undefined
         ? {}
         : { lagSeconds: health.lagSeconds }),
+      ...(health.receiveLagBytes === undefined
+        ? {}
+        : { receiveLagBytes: health.receiveLagBytes }),
     });
   }
 
@@ -67,6 +71,9 @@ export class StandbyStreamingTracker {
       ...(record.lagSeconds === undefined
         ? {}
         : { lagSeconds: record.lagSeconds }),
+      ...(record.receiveLagBytes === undefined
+        ? {}
+        : { receiveLagBytes: record.receiveLagBytes }),
     };
   }
 

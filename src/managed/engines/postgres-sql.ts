@@ -234,7 +234,14 @@ export function standbyReplicationStatusSql(): string {
     // last position received and flushed, and the last position replayed.
     // NULL (empty) when streaming never started since the server started.
     `  pg_catalog.pg_last_wal_receive_lsn()::text AS received_lsn,`,
-    `  pg_catalog.pg_last_wal_replay_lsn()::text AS replay_lsn`,
+    `  pg_catalog.pg_last_wal_replay_lsn()::text AS replay_lsn,`,
+    // How far the received WAL trails the primary's last reported WAL end,
+    // from the standby's own receiver state (no primary query, no clock).
+    `  CASE`,
+    `    WHEN r.status = 'streaming' AND r.latest_end_lsn IS NOT NULL AND r.flushed_lsn IS NOT NULL`,
+    `    THEN GREATEST(pg_catalog.pg_wal_lsn_diff(r.latest_end_lsn, r.flushed_lsn), 0)`,
+    `    ELSE NULL`,
+    `  END AS receive_lag_bytes`,
     `FROM (SELECT 1) AS _dummy`,
     `LEFT JOIN pg_catalog.pg_stat_wal_receiver r ON true;`,
   ].join("\n");

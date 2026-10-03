@@ -15,7 +15,13 @@ test("tracker remembers the last streaming read and its monotonic age", () => {
   assertEquals(tracker.lastStreaming(MEMBER, 0), undefined);
   tracker.record(
     MEMBER,
-    { state: "streaming", observedAt: AT, lagBytes: 8, lagSeconds: 1 },
+    {
+      state: "streaming",
+      observedAt: AT,
+      lagBytes: 8,
+      lagSeconds: 1,
+      receiveLagBytes: 512,
+    },
     1_000,
   );
   assertEquals(tracker.lastStreaming(MEMBER, 4_000), {
@@ -23,6 +29,7 @@ test("tracker remembers the last streaming read and its monotonic age", () => {
     ageMs: 3_000,
     lagBytes: 8,
     lagSeconds: 1,
+    receiveLagBytes: 512,
   });
 });
 

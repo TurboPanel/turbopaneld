@@ -934,7 +934,10 @@ test("standbyHealthFromRow keeps the received and replayed LSNs of a stopped rec
     },
   );
   assertEquals(
-    standbyHealthFromRow(["streaming", "16", "0.5", "1A/FF", "1a/f0"], at),
+    standbyHealthFromRow(
+      ["streaming", "16", "0.5", "1A/FF", "1a/f0", "4096"],
+      at,
+    ),
     {
       state: "streaming",
       observedAt: at,
@@ -942,6 +945,7 @@ test("standbyHealthFromRow keeps the received and replayed LSNs of a stopped rec
       lagSeconds: 0.5,
       receivedLsn: "1A/FF",
       replayLsn: "1A/F0",
+      receiveLagBytes: 4096,
     },
   );
 });
