@@ -375,13 +375,51 @@ async function yarnIsBerry(workingDir: string): Promise<boolean> {
   return await regularFileExists(join(workingDir, ".yarnrc.yml"));
 }
 
+type NodeManagerName = "pnpm" | "yarn" | "npm";
+
+/** The manager and major version `package.json`'s `packageManager` pins. */
+async function readPackageManagerPin(
+  workingDir: string,
+): Promise<{ name: NodeManagerName; major: number } | undefined> {
+  try {
+    const raw = await Deno.readTextFile(join(workingDir, "package.json"));
+    const pin = JSON.parse(raw)?.packageManager;
+    const match = typeof pin === "string"
+      ? /^(pnpm|yarn|npm)@(\d+)/.exec(pin)
+      : null;
+    if (!match) return undefined;
+    return {
+      name: match[1] as NodeManagerName,
+      major: Number(match[2]),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The flag that keeps `devDependencies` in a pnpm install under the build's
+ * `NODE_ENV=production`, per pnpm major (checked against the real binaries):
+ *
+ * - pnpm 9 drops dev dependencies under `NODE_ENV=production` and takes
+ *   `--prod=false` to keep them.
+ * - pnpm 10, 11 and 12 install them anyway, and pnpm 12 rejects
+ *   `--prod=false` outright (`--prod` became a plain boolean flag), so no flag.
+ * - With no pin the version Corepack resolves is unknown, so use
+ *   `--config.production=false`, a setting override every pnpm 9-12 accepts.
+ */
+function pnpmDevDepsArgs(major: number | undefined): string[] {
+  if (major === undefined) return ["--config.production=false"];
+  return major < 10 ? ["--prod=false"] : [];
+}
+
 /**
  * Derive the install command for a native-app build from the operator's
  * package-manager choice, falling back to lockfile detection
  * (`pnpm-lock.yaml` > `yarn.lock` > `package-lock.json` > bare npm).
  *
- * The dev-deps flags (`--include=dev`, `--prod=false`, `--production=false`)
- * are load-bearing: the build environment sets `NODE_ENV=production`, under
+ * The dev-deps flags (`--include=dev`, `--production=false`, and for pnpm
+ * whatever `pnpmDevDepsArgs` picks for the pinned major) are load-bearing: the build environment sets `NODE_ENV=production`, under
  * which npm, pnpm, and classic yarn silently omit devDependencies — which is
  * where every build toolchain lives.
  *
@@ -399,15 +437,18 @@ export async function deriveNodeInstallCommand(params: {
 
   const hasPnpmLock = await has("pnpm-lock.yaml");
   const hasYarnLock = await has("yarn.lock");
-  let lockfileManager: "pnpm" | "yarn" | "npm" = "npm";
+  let lockfileManager: NodeManagerName = "npm";
   if (hasPnpmLock) lockfileManager = "pnpm";
   else if (hasYarnLock) lockfileManager = "yarn";
-  const manager = params.packageManager ?? lockfileManager;
+  const pin = await readPackageManagerPin(params.workingDir);
+  const manager = params.packageManager ?? pin?.name ?? lockfileManager;
 
   if (manager === "pnpm") {
-    return hasPnpmLock
-      ? "corepack pnpm install --frozen-lockfile --prod=false"
-      : "corepack pnpm install --prod=false";
+    return [
+      "corepack pnpm install",
+      ...(hasPnpmLock ? ["--frozen-lockfile"] : []),
+      ...pnpmDevDepsArgs(pin?.name === "pnpm" ? pin.major : undefined),
+    ].join(" ");
   }
   if (manager === "yarn") {
     // CI=1 already makes Berry installs immutable when a lockfile exists.

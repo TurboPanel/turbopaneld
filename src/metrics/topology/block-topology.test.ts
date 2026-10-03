@@ -32,16 +32,14 @@ test("collectBlockTopology: NVMe naming — whole disks, partitions linked via p
   assertEquals(wholeDisk.isServiceDevice, true);
   assertEquals(wholeDisk.model, "NVMe SSD Model A");
 
-  const partition1 = byName.get("nvme0n1p1")!;
-  assertEquals(partition1.deviceType, "partition");
-  assertEquals(partition1.parentDeviceId, wholeDisk.deviceId);
-  assertEquals(partition1.isServiceDevice, false);
+  // Partitions are never inventory; the whole disk backing them stays.
+  assertEquals(byName.has("nvme0n1p1"), false);
 
   const unrelatedDisk = byName.get("nvme1n1")!;
   assertEquals(unrelatedDisk.isServiceDevice, false);
 });
 
-test("collectBlockTopology: LVM/dm backing chain resolved via slaves/, dm/md represented as virtual devices (not excluded)", async () => {
+test("collectBlockTopology: LVM/dm backing chain resolved via slaves/, a mounted dm/md device stays as a virtual device, unmounted ones and partitions are dropped", async () => {
   const devices = await collectBlockTopology({
     readProcFile: (path) =>
       path === "/proc/diskstats"
@@ -55,16 +53,13 @@ test("collectBlockTopology: LVM/dm backing chain resolved via slaves/, dm/md rep
   const byName = new Map(devices.map((d) => [d.kernelName, d]));
   const sda = byName.get("sda")!;
   const dm0 = byName.get("dm-0")!;
-  const dm1 = byName.get("dm-1")!;
-  const sda1 = byName.get("sda1")!;
 
   assertEquals(sda.deviceType, "physical");
   assertEquals(dm0.deviceType, "virtual");
-  assertEquals(dm1.deviceType, "virtual");
+  assertEquals(byName.has("dm-1"), false);
+  assertEquals(byName.has("sda1"), false);
   assertEquals(dm0.parentDeviceId, sda.deviceId);
-  assertEquals(dm1.parentDeviceId, sda1.deviceId);
   assertEquals(dm0.isServiceDevice, true);
-  assertEquals(dm1.isServiceDevice, false);
   assertEquals(sda.isServiceDevice, false);
 });
 
@@ -80,4 +75,19 @@ test("collectBlockTopology: excludes loop/ram/pseudo devices entirely", async ()
     serviceDeviceNames: [],
   });
   assertEquals(devices.some((d) => d.kernelName === "loop0"), false);
+});
+
+test("collectBlockTopology: partitions of a kept whole disk are not inventory", async () => {
+  const text = [
+    "   8       0 sda 1 0 1 0 1 0 1 0 0 0 0 0 0 0 0 0 0",
+    "   8       1 sda1 1 0 1 0 1 0 1 0 0 0 0 0 0 0 0 0 0",
+    "   8       2 sda2 1 0 1 0 1 0 1 0 0 0 0 0 0 0 0 0 0",
+  ].join("\n");
+  const devices = await collectBlockTopology({
+    readProcFile: (path) => path === "/proc/diskstats" ? text : undefined,
+    io: defaultSensorIo(),
+    sysRoot: "/nonexistent",
+    serviceDeviceNames: ["sda1"],
+  });
+  assertEquals(devices.map((d) => d.kernelName), ["sda"]);
 });

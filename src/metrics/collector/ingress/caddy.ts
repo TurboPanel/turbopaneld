@@ -1,16 +1,15 @@
 /**
- * v5 site-Caddy ingress adapter (`orchestration/roles/site-caddy` — the
- * unprivileged per-site Caddy, not the hosting Caddy in
- * `src/deploy/ingress.ts` nor the control-plane Caddy). That role's
- * `Caddyfile.j2` sets the global `metrics` option, which is what actually
- * exposes Prometheus text at `/metrics` on the admin listener (`servers
- * { metrics }` alone only turns on per-server instrumentation and leaves
- * `/metrics` 404); there is no supported way to bind a *second* admin API
- * for just metrics, so this reads the same loopback admin address the role
- * already reserves (`site_caddy_admin_addr`, mirrored here as
- * `SITE_CADDY_ADMIN_ADDR`, the same way `HOSTING_CADDY_ADMIN_ADDR` mirrors
- * the hosting Caddy's in `src/deploy/ingress.ts`), and reuses the shared
- * Prometheus text parser (`../proxy/prom-exposition.ts`).
+ * Hosting-Caddy ingress adapter (`src/deploy/ingress.ts`, the native
+ * `turbopanel-hosting-caddy` service on every host: all site traffic, and the
+ * traffic Caddy forwards to Traefik, passes through it). The hosting Caddy's
+ * admin API is a unix socket only, so metrics come from a separate loopback
+ * listener it renders with just the `metrics` handler
+ * (`HOSTING_CADDY_METRICS_ADDR`), without `per_host`: totals only, no site
+ * label ever exists. This adapter used to scrape the per-site Caddy
+ * (`orchestration/roles/site-caddy`), which only counted sites whose web
+ * engine is Caddy. It reuses the shared Prometheus text parser
+ * (`../proxy/prom-exposition.ts`). The listener's own scrapes are requests on
+ * a server whose only handler is `metrics`; that group is never counted.
  *
  * **Canonical single-request aggregation scope.** Every handler Caddy places
  * in a request's handler chain — the site's top-level `subroute`, and any
@@ -42,6 +41,7 @@
  * alone, so it is not specially handled — the max-count handler is used as
  * the closest available approximation of "most inclusive scope".
  */
+import { HOSTING_CADDY_METRICS_ADDR } from "../../../deploy/ingress.ts";
 import { createRetryBoundedProbe } from "../proxy/endpoint-cache.ts";
 import {
   containsAnyMetricName,
@@ -56,8 +56,11 @@ import type {
   IngressReading,
 } from "./adapter.ts";
 
-/** Mirrors `orchestration/roles/site-caddy/defaults/main.yml` `site_caddy_admin_addr`. */
-export const SITE_CADDY_ADMIN_ADDR = "127.0.0.1:2039";
+/** The hosting Caddy's metrics-only loopback listener. */
+export const CADDY_METRICS_ADDR = HOSTING_CADDY_METRICS_ADDR;
+
+/** The handler name of the metrics-only listener's one route. */
+const METRICS_HANDLER = "metrics";
 
 /**
  * Every metric name `parseCaddyExposition` requires at least one of to
@@ -94,6 +97,7 @@ function resolveValidGroups(samples: readonly PromSample[]): Set<string> {
     const server = sample.labels.server;
     const handler = sample.labels.handler;
     if (server === undefined || handler === undefined) continue;
+    if (handler === METRICS_HANDLER) continue;
     const key = groupKey(server, handler);
     handlerTotals.set(key, (handlerTotals.get(key) ?? 0) + sample.value);
     const handlers = handlersByServer.get(server) ?? new Set();
@@ -340,7 +344,7 @@ export class CaddyIngressAdapter implements IngressAdapter {
     now?: () => number;
     fetchText?: (addr: string, path: string) => Promise<string | undefined>;
   }) {
-    const addr = deps?.addr ?? SITE_CADDY_ADMIN_ADDR;
+    const addr = deps?.addr ?? CADDY_METRICS_ADDR;
     const fetchText = deps?.fetchText ?? fetchLoopbackText;
     this.scrape = createRetryBoundedProbe(async () => {
       const text = await fetchText(addr, "/metrics");

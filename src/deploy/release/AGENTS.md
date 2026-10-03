@@ -302,7 +302,10 @@ Corepack install, never the daemon's home. `NODE_ENV` follows the app's
 A missing `installCommand` is then **derived** rather than skipped
 (`deriveNodeInstallCommand`): the operator's `build.packageManager` wins, else
 the lockfile decides (`pnpm-lock.yaml` > `yarn.lock` > `package-lock.json` >
-bare npm) — `corepack pnpm install --frozen-lockfile --prod=false`,
+bare npm; a `package.json` `packageManager` pin sits between the two) —
+`corepack pnpm install --frozen-lockfile` plus a per-major dev-deps flag
+(pnpm 9 `--prod=false`; pnpm 10-12 none, since pnpm 12 rejects `--prod=false`;
+unpinned `--config.production=false`, accepted by 9-12),
 `corepack yarn install --frozen-lockfile --production=false` for classic yarn,
 `npm ci --include=dev` / `npm install --include=dev`; the frozen flag is
 dropped when the chosen manager has no lockfile, and Yarn Berry (a

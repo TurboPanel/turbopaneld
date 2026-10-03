@@ -17,7 +17,7 @@
  * `DockerClient.ping()` treats an unreachable socket as "no Docker" rather
  * than "Docker with nothing running".
  */
-import type { DockerSystemDf } from "../../docker/client.ts";
+import type { DockerSystemDf, DockerTypeUsage } from "../../docker/client.ts";
 import type { DockerUsageSample } from "../../contracts/metrics-contract.ts";
 
 /**
@@ -26,6 +26,12 @@ import type { DockerUsageSample } from "../../contracts/metrics-contract.ts";
  * someone deploys, not continuously.
  */
 export const DOCKER_USAGE_REFRESH_INTERVAL_MS = 5 * 60_000;
+
+/** Per-call ceiling for `/system/df`; one hung call must not freeze the family. */
+export const DOCKER_USAGE_TIMEOUT_MS = 60_000;
+
+/** Failure back-off ceiling: the refresh delay doubles per failure up to this. */
+export const DOCKER_USAGE_MAX_BACKOFF_MS = 30 * 60_000;
 
 /** A completed reading: the ten breakdown fields plus the total `managed.storage` carries. */
 export type DockerUsageReading = {
@@ -36,6 +42,11 @@ export type DockerUsageReading = {
    * component is unknown, since a partial sum understates the total.
    */
   dockerUsedBytes: number | null;
+  /**
+   * `true` when the newest refresh failed (timeout, socket error) and this is
+   * the last good reading carried forward. Absent/`false` when current.
+   */
+  stale?: boolean;
 };
 
 /** Finite non-negative number, or `null` — an absent Engine field is never `0`. */
@@ -93,7 +104,54 @@ function totalUsedBytes(usage: DockerUsageSample): number | null {
  * (`RefCount === 0`), and build-cache entries not in use.
  */
 export function reduceDockerSystemDf(df: DockerSystemDf): DockerUsageReading {
-  const usage: DockerUsageSample = {
+  const usage = applyTypeUsages(df, reduceLegacyDf(df));
+  return { usage, dockerUsedBytes: totalUsedBytes(usage) };
+}
+
+/**
+ * Overlay the Docker 29 `*DiskUsage` summaries on a legacy reduction. Where
+ * the Engine supplies one, its own `TotalSize`/`Reclaimable`/`TotalCount` win:
+ * the deprecated per-object arrays overcount reclaimable image bytes.
+ */
+function applyTypeUsages(
+  df: DockerSystemDf,
+  legacy: DockerUsageSample,
+): DockerUsageSample {
+  const usage = { ...legacy };
+  const images: DockerTypeUsage | undefined = df.ImagesDiskUsage;
+  if (images) {
+    usage.layersBytes = numberOrNull(images.TotalSize) ?? usage.layersBytes;
+    usage.imagesCount = numberOrNull(images.TotalCount) ?? usage.imagesCount;
+    usage.imagesReclaimableBytes = numberOrNull(images.Reclaimable) ??
+      usage.imagesReclaimableBytes;
+  }
+  const containers = df.ContainersDiskUsage;
+  if (containers) {
+    usage.containersBytes = numberOrNull(containers.TotalSize) ??
+      usage.containersBytes;
+    usage.containersCount = numberOrNull(containers.TotalCount) ??
+      usage.containersCount;
+  }
+  const volumes = df.VolumesDiskUsage;
+  if (volumes) {
+    usage.volumesBytes = numberOrNull(volumes.TotalSize) ?? usage.volumesBytes;
+    usage.volumesCount = numberOrNull(volumes.TotalCount) ??
+      usage.volumesCount;
+    usage.volumesReclaimableBytes = numberOrNull(volumes.Reclaimable) ??
+      usage.volumesReclaimableBytes;
+  }
+  const cache = df.BuildCacheDiskUsage;
+  if (cache) {
+    usage.buildCacheBytes = numberOrNull(cache.TotalSize) ??
+      usage.buildCacheBytes;
+    usage.buildCacheReclaimableBytes = numberOrNull(cache.Reclaimable) ??
+      usage.buildCacheReclaimableBytes;
+  }
+  return usage;
+}
+
+function reduceLegacyDf(df: DockerSystemDf): DockerUsageSample {
+  return {
     layersBytes: numberOrNull(df.LayersSize),
     imagesCount: countOrNull(df.Images),
     imagesReclaimableBytes: df.Images
@@ -129,13 +187,15 @@ export function reduceDockerSystemDf(df: DockerSystemDf): DockerUsageReading {
       )
       : null,
   };
-  return { usage, dockerUsedBytes: totalUsedBytes(usage) };
 }
 
 export type DockerUsageDeps = {
   /** `DockerClient.systemDf`, or a stub. Throwing means "no Docker this round". */
-  systemDf: () => Promise<DockerSystemDf>;
+  systemDf: (signal: AbortSignal) => Promise<DockerSystemDf>;
   intervalMs?: number;
+  /** Per-call abort timeout; default {@link DOCKER_USAGE_TIMEOUT_MS}. */
+  timeoutMs?: number;
+  now?: () => number;
   setIntervalFn?: typeof setInterval;
   clearIntervalFn?: typeof clearInterval;
   onError?: (error: unknown) => void;
@@ -157,6 +217,8 @@ export class DockerUsageSampler {
   #timer: ReturnType<typeof setInterval> | undefined;
   #running = false;
   #reading: DockerUsageReading | null = null;
+  #failures = 0;
+  #nextAttemptAt = 0;
 
   constructor(deps: DockerUsageDeps) {
     this.#deps = deps;
@@ -167,7 +229,19 @@ export class DockerUsageSampler {
 
   /** Last successful reading, or `null` when Docker is absent / not yet read. */
   latest(): DockerUsageReading | null {
-    return this.#reading;
+    if (!this.#reading) return null;
+    return this.#failures > 0
+      ? { ...this.#reading, stale: true }
+      : this.#reading;
+  }
+
+  /** Delay after `failures` consecutive failures: interval doubled, capped. */
+  static backoffMs(intervalMs: number, failures: number): number {
+    if (failures <= 0) return intervalMs;
+    return Math.min(
+      intervalMs * 2 ** failures,
+      Math.max(DOCKER_USAGE_MAX_BACKOFF_MS, intervalMs),
+    );
   }
 
   start(): void {
@@ -186,14 +260,25 @@ export class DockerUsageSampler {
 
   async refresh(): Promise<void> {
     if (this.#running) return;
+    const now = (this.#deps.now ?? Date.now)();
+    if (now < this.#nextAttemptAt) return;
     this.#running = true;
     try {
-      this.#reading = reduceDockerSystemDf(await this.#deps.systemDf());
+      const signal = AbortSignal.timeout(
+        this.#deps.timeoutMs ?? DOCKER_USAGE_TIMEOUT_MS,
+      );
+      this.#reading = reduceDockerSystemDf(await this.#deps.systemDf(signal));
+      this.#failures = 0;
+      this.#nextAttemptAt = 0;
     } catch (error) {
-      // Socket gone, Engine restarting, permission revoked: keep whatever was
-      // last read rather than blanking a panel on one failed poll. A daemon
-      // that never once succeeded still reports `null`, so the family stays
-      // absent instead of emitting zeros.
+      // Socket gone, Engine restarting, timeout, permission revoked: keep the
+      // last good reading (flagged stale) rather than blanking a panel on one
+      // failed poll, and back off exponentially so a struggling Engine is not
+      // re-walked every interval. A daemon that never once succeeded still
+      // reports `null`, so the family stays absent instead of emitting zeros.
+      this.#failures += 1;
+      this.#nextAttemptAt = now +
+        DockerUsageSampler.backoffMs(this.#intervalMs, this.#failures);
       this.#deps.onError?.(error);
     } finally {
       this.#running = false;

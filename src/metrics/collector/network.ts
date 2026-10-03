@@ -23,6 +23,8 @@ const CONTAINER_BRIDGE_PREFIXES = [
   "virbr",
   "vnet",
   "tap",
+  "cni",
+  "flannel",
 ] as const;
 
 /**

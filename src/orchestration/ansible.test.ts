@@ -2421,6 +2421,27 @@ test("docker role merges daemon.json address pools and live-restore, skipping th
     true,
     "strip owned keys before merging the current values back on",
   );
+  // Dedicated cgroup parent for the container metrics reads: owned with the
+  // systemd driver, preserved on a cgroupfs-pinned host, rides the same
+  // restart / pending-marker rules as live-restore.
+  assertEquals(
+    daemonJson.includes(
+      "combine({'cgroup-parent': turbopanel_docker_cgroup_parent}",
+    ) ||
+      daemonJson.includes("{'cgroup-parent': turbopanel_docker_cgroup_parent}"),
+    true,
+  );
+  assertEquals(
+    daemonJson.includes("native.cgroupdriver=cgroupfs"),
+    true,
+    "a cgroupfs-driver host keeps its own cgroup-parent",
+  );
+  assertEquals(
+    defaults.includes(
+      "turbopanel_docker_cgroup_parent: turbopanel-containers.slice",
+    ),
+    true,
+  );
   assertEquals(
     daemonJson.includes("_docker_daemon_json_current is mapping"),
     true,

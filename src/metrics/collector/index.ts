@@ -27,16 +27,23 @@ import type { IngressAdapterSet } from "./ingress/adapter.ts";
 import { CaddyIngressAdapter } from "./ingress/caddy.ts";
 import type { RouterAdapterSet } from "./router/adapter.ts";
 import { TraefikRouterAdapter } from "./router/traefik.ts";
+import { readSiteUsage } from "./site-usage.ts";
+import { TlsExpirySampler } from "./tls-expiry.ts";
 import {
   createDirectoryUsageWalker,
   type DirectoryUsageWalker,
 } from "./directory-usage.ts";
 import { DockerUsageSampler } from "./docker-usage.ts";
+import {
+  ContainerHealthSampler,
+  defaultCgroupReader,
+} from "./docker-containers.ts";
 import { ManagedEngineSampler } from "./managed-engines.ts";
 import { resolveHostingPath } from "./hosting.ts";
 import { defaultSensorIo } from "./sensors/discovery.ts";
 import { LinuxMetricsCollector } from "./linux-collector.ts";
 import { resolvePageSizeBytes } from "./parse-vmstat.ts";
+import { defaultHostTextCollector } from "./host-text-io.ts";
 import { countProcessesInProc } from "./processes.ts";
 import { readProcFile } from "./proc-read.ts";
 import type {
@@ -130,8 +137,8 @@ export type {
 } from "./ingress/index.ts";
 export {
   buildIngressSources,
+  CADDY_METRICS_ADDR,
   CaddyIngressAdapter,
-  SITE_CADDY_ADMIN_ADDR,
 } from "./ingress/index.ts";
 export type {
   RouterAdapter,
@@ -323,10 +330,36 @@ function defaultDirectoryUsageWalker(): DirectoryUsageWalker {
       resolveHostingPath: () => resolveHostingPath(),
       resolveBackupPath: () => resolveLayout(Deno.env.toObject()).backupDir,
       resolveLogsPath: () => resolveLayout(Deno.env.toObject()).logDir,
+      readSiteUsage: () => readSiteUsage(),
     });
     cachedDirectoryUsageWalker.start();
   }
   return cachedDirectoryUsageWalker;
+}
+
+let cachedTlsExpirySampler: TlsExpirySampler | undefined;
+/** Hosting-Caddy certificate expiry, polled every few hours (`tls-expiry.ts`). */
+function defaultTlsExpirySampler(): TlsExpirySampler {
+  if (!cachedTlsExpirySampler) {
+    cachedTlsExpirySampler = new TlsExpirySampler();
+    cachedTlsExpirySampler.start();
+  }
+  return cachedTlsExpirySampler;
+}
+
+let cachedContainerSampler: ContainerHealthSampler | undefined;
+function defaultContainerSampler(): ContainerHealthSampler {
+  if (!cachedContainerSampler) {
+    const client = new DockerClient();
+    cachedContainerSampler = new ContainerHealthSampler({
+      listContainers: () => client.listContainers(true),
+      streamEvents: (signal) => client.streamEvents(signal),
+      readCgroupFile: defaultCgroupReader(),
+      cpuCount: () => navigator.hardwareConcurrency,
+    });
+    cachedContainerSampler.start();
+  }
+  return cachedContainerSampler;
 }
 
 let cachedDockerUsageSampler: DockerUsageSampler | undefined;
@@ -337,7 +370,7 @@ function defaultDockerUsageSampler(): DockerUsageSampler {
     // which omits the family rather than reporting zero bytes of Docker.
     const client = new DockerClient();
     cachedDockerUsageSampler = new DockerUsageSampler({
-      systemDf: () => client.systemDf(),
+      systemDf: (signal) => client.systemDf(signal),
     });
     cachedDockerUsageSampler.start();
   }
@@ -388,12 +421,17 @@ function defaultManagedEngineSampler(): ManagedEngineSampler {
  */
 export function stopHostStorageSamplers(): void {
   cachedDirectoryUsageWalker?.stop();
+  cachedTlsExpirySampler?.stop();
   cachedDockerUsageSampler?.stop();
+  cachedContainerSampler?.stop();
   cachedManagedEngineSampler?.stop();
 }
 
 function defaultDeps(): CollectorDeps {
+  const pageSizeBytes = resolvePageSizeBytes();
+  const hostText = defaultHostTextCollector(pageSizeBytes);
   return {
+    hostText: () => hostText.read(),
     readProcFile,
     statfs: defaultStatfs,
     now: () => Date.now(),
@@ -409,7 +447,7 @@ function defaultDeps(): CollectorDeps {
       Deno.env.get("TURBOPANEL_INSTANCE_RUNTIME")?.trim() === "deno",
     io: defaultSensorIo(),
     // Resolved once here (construction time), never per tick.
-    pageSizeBytes: resolvePageSizeBytes(),
+    pageSizeBytes,
     countProcesses: () => countProcessesInProc(),
     gpuAdapters: defaultGpuAdapters(),
     ingressAdapters: defaultIngressAdapters(),
@@ -417,7 +455,9 @@ function defaultDeps(): CollectorDeps {
     databaseProxyAdapters: defaultDatabaseProxyAdapters(),
     eventCollectors: defaultEventCollectors(),
     directoryUsage: () => defaultDirectoryUsageWalker().latest(),
+    tlsExpiry: () => defaultTlsExpirySampler().latest(),
     dockerUsage: () => defaultDockerUsageSampler().latest(),
+    containers: () => defaultContainerSampler().latest(),
     managedEngines: () => defaultManagedEngineSampler().latest(),
   };
 }
