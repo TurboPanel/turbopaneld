@@ -34,6 +34,7 @@ Environment=TP_DOCKER_GATE_PLATFORM_RW_ROOTS={{ docker_gate_platform_rw_roots | 
 {% if (docker_gate_approval_pubkeys | string | trim | length) > 0 %}
 Environment=TP_DOCKER_GATE_APPROVAL_PUBKEY={{ docker_gate_approval_pubkey_file }}
 {% endif %}
+Environment=TP_DOCKER_GATE_APPROVAL_STATE={{ docker_gate_approval_state_file }}
 Environment=TP_DOCKER_GATE_SUMMARY_SEC={{ docker_gate_summary_seconds }}
 # Stage 4: the build listener, the only socket BuildKit's /session and /grpc
 # may open on; root:<build group> 0660, the group holding only the daemon
@@ -80,6 +81,8 @@ SystemCallArchitectures=native
 UMask=0077
 CacheDirectory=turbopanel-docker-gate
 CacheDirectoryMode=0700
+StateDirectory=turbopanel-docker-gate
+StateDirectoryMode=0700
 ReadWritePaths=-{{ docker_gate_run_dir }}
 
 [Install]
