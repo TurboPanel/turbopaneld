@@ -32,7 +32,9 @@ const EXEMPT: Record<string, string> = {
   // Created and owned by root roles (site-caddy, php-fpm, openlitespeed,
   // nginx, apache, system stack); the daemon only reads them or goes through
   // tp-host.
-  "config/caddy": "root role (site-caddy, instance-launch)",
+  "config/caddy": "root role (instance-launch): the control plane Caddy",
+  "config/site-caddy":
+    "root role (site-caddy): the site Caddy, never the above",
   "config/nginx": "root role",
   "config/apache": "root role",
   "config/openlitespeed": "root role (openlitespeed)",

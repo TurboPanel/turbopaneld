@@ -18,7 +18,7 @@
 
 - name: Ensure FHS site-Caddy config directories
   ansible.builtin.file:
-    path: "{{ turbopanel_config_dir }}/caddy/{{ item }}"
+    path: "{{ site_caddy_config_dir }}/{{ item }}"
     state: directory
     owner: root
     group: "{{ site_caddy_service_group }}"
@@ -50,7 +50,7 @@
 - name: Install empty-glob placeholder site block
   ansible.builtin.template:
     src: 00-empty.conf.j2
-    dest: "{{ turbopanel_config_dir }}/caddy/sites/00-empty.conf"
+    dest: "{{ site_caddy_config_dir }}/sites/00-empty.conf"
     owner: root
     group: "{{ site_caddy_service_group }}"
     mode: "0640"
@@ -58,7 +58,7 @@
 - name: Install site-Caddy main Caddyfile
   ansible.builtin.template:
     src: Caddyfile.j2
-    dest: "{{ turbopanel_config_dir }}/caddy/Caddyfile"
+    dest: "{{ site_caddy_config_dir }}/Caddyfile"
     owner: root
     group: "{{ site_caddy_service_group }}"
     mode: "0640"

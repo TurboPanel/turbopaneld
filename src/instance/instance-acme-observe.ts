@@ -72,8 +72,8 @@ export async function readInstanceEdgeHostnames(
   layout: LayoutPaths,
   run?: PrivilegedReadRun,
 ): Promise<InstanceEdgeHostname[]> {
-  // `/etc/turbopanel/caddy` is `root:tpcaddysite` `0750` once the site Caddy
-  // role runs; behind that the sidecar is read through tp-host.
+  // `/etc/turbopanel/caddy` can be root-owned `0750`; behind that the sidecar
+  // is read through tp-host.
   const raw = await readTextFileOrNull(
     instanceHostnameSidecarPath(layout),
     run,

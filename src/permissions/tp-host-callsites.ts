@@ -1385,7 +1385,7 @@ const SITES: CallSite[] = [
         "--adapter",
         "caddyfile",
         "--config",
-        "/etc/turbopanel/caddy/Caddyfile",
+        "/etc/turbopanel/site-caddy/Caddyfile",
       ],
     },
   ),

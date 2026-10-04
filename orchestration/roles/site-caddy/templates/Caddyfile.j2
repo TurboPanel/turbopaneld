@@ -1,5 +1,5 @@
 # Managed by TurboPanel — do not edit by hand.
-# Per-site blocks live in {{ turbopanel_config_dir }}/caddy/sites/*.conf
+# Per-site blocks live in {{ site_caddy_config_dir }}/sites/*.conf
 # (written by the daemon site apply path).
 {
 	# Unix socket only (see site_caddy_admin_socket): never loopback TCP.
@@ -33,4 +33,4 @@ http://127.0.0.1:{{ site_caddy_metrics_port }} {
 # An import whose glob matches nothing is an ERROR, not an empty set, so
 # `caddy validate` would fail on a host with no sites yet. 00-empty.conf keeps
 # the glob non-empty; the daemon's `tp-<envId>-` prefix sweep leaves it alone.
-import {{ turbopanel_config_dir }}/caddy/sites/*.conf
+import {{ site_caddy_config_dir }}/sites/*.conf

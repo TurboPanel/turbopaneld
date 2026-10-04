@@ -10,6 +10,7 @@ import {
   phpFpmDriver,
   publishStagedConfig,
   rolloutSiteConfigs,
+  siteCaddyConfigDir,
   type SiteRunFn,
   type SiteRunResult,
   stageDaemonConfigFile,
@@ -451,4 +452,40 @@ test({
       "never swapped",
     );
   },
+});
+
+test("site Caddy config directory never overlaps the control plane Caddy directory", () => {
+  const layout = resolveLayout({ TURBOPANEL_ROOT: "/tmp/tp-site-caddy-dir" });
+  const siteDir = siteCaddyConfigDir(layout);
+  const controlPlaneDir = join(layout.configDir, "caddy");
+  assertEquals(siteDir, join(layout.configDir, "site-caddy"));
+  assertEquals(siteDir === controlPlaneDir, false);
+  assertEquals(siteDir.startsWith(`${controlPlaneDir}/`), false);
+});
+
+test("site Caddy role, unit and sudoers pins use the site-caddy directory only", async () => {
+  const root = new URL("../../../orchestration/", import.meta.url);
+  const files = [
+    "roles/site-caddy/tasks/main.yml",
+    "roles/site-caddy/templates/Caddyfile.j2",
+    "roles/site-caddy/templates/turbopanel-site-caddy.service.j2",
+  ];
+  for (const file of files) {
+    const text = await Deno.readTextFile(new URL(file, root));
+    assertEquals(
+      /turbopanel_config_dir\s*}}\/caddy\b/.test(text),
+      false,
+      `${file} must not use the control plane Caddy directory`,
+    );
+  }
+  const sudoers = await Deno.readTextFile(
+    new URL("roles/turbopanel-user/templates/sudoers.j2", root),
+  );
+  const pin = sudoers.split("\n").find((l) =>
+    l.startsWith("Cmnd_Alias TP_CADDY_VALIDATE")
+  );
+  assertEquals(
+    pin?.endsWith("--config /etc/turbopanel/site-caddy/Caddyfile"),
+    true,
+  );
 });
