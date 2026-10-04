@@ -21,6 +21,16 @@ import {
 } from "./apply.ts";
 import { renderFirewall } from "./render.ts";
 import {
+  FIREWALL_CONFIRM_WINDOW_SECONDS,
+  FIREWALL_GUARD_TIMER,
+  FIREWALL_PENDING_V4_FILENAME,
+  FIREWALL_PENDING_V6_FILENAME,
+  FirewallGuardUnavailableError,
+  pendingMarkerPath,
+  readPendingMarker,
+  rollbackRecordPath,
+} from "./pending.ts";
+import {
   type FirewallRunFn,
   type FirewallRunResult,
   runFirewallHost,
@@ -108,6 +118,7 @@ async function withTempLayout<T>(
       TURBOPANEL_CONFIG_DIR: join(root, "etc"),
       TURBOPANEL_STATE_DIR: join(root, "state"),
       TURBOPANEL_DAEMON_STATE_DIR: join(root, "state"),
+      TURBOPANEL_RUN_DIR: join(root, "run"),
     });
     return await fn(layout);
   } finally {
@@ -190,7 +201,7 @@ test("hasDockerUserChain and isControlPlaneColocated read the host's answer", as
   assertEquals(await isControlPlaneColocated(plain.run), false);
 });
 
-test("applyRenderedFirewall: --test then restore per family, jumps ensured only when missing, documents persisted", async () => {
+test("applyRenderedFirewall: guard armed first, --test then restore per family, jumps ensured only when missing, documents left pending", async () => {
   await withTempLayout(async (layout) => {
     const rendered = renderFirewall({
       payload: payload(),
@@ -206,19 +217,26 @@ test("applyRenderedFirewall: --test then restore per family, jumps ensured only 
       "ip6tables -C INPUT -j TP-INPUT": fail("Bad rule"),
       "ip6tables -C DOCKER-USER -j TP-FWD": fail("Bad rule"),
     });
+    const now = new Date("2026-10-01T12:00:00.000Z");
     const outcome = await applyRenderedFirewall(
       rendered,
       { 4: true, 6: true },
       NFT_PROBE,
-      { run: host.run, layout },
+      { run: host.run, layout, generation: 4, now: () => now },
     );
     assertEquals(outcome, {
       ipv6Applied: true,
+      ipv6Status: "applied",
       forwardApplied: true,
       warnings: [],
+      confirmation: {
+        deadlineAt: "2026-10-01T12:02:00.000Z",
+        windowSeconds: FIREWALL_CONFIRM_WINDOW_SECONDS,
+      },
     });
     const keys = host.calls.map((c) => `${c.cmd} ${c.args.join(" ")}`);
     assertEquals(keys, [
+      `systemctl restart ${FIREWALL_GUARD_TIMER}`,
       "iptables-restore --noflush --test",
       "iptables-restore --noflush",
       "iptables -C INPUT -j TP-INPUT",
@@ -232,16 +250,107 @@ test("applyRenderedFirewall: --test then restore per family, jumps ensured only 
       "ip6tables -I DOCKER-USER 1 -j TP-FWD",
     ]);
     // the restore documents went in over stdin, byte for byte
-    assertEquals(host.calls[0]!.stdin, rendered.v4);
     assertEquals(host.calls[1]!.stdin, rendered.v4);
-    assertEquals(host.calls[5]!.stdin, rendered.v6!);
+    assertEquals(host.calls[2]!.stdin, rendered.v4);
+    assertEquals(host.calls[6]!.stdin, rendered.v6!);
+    // Nothing durable yet: the documents wait, pending, for a confirm.
+    await assertRejects(
+      () => Deno.readTextFile(join(layout.configDir, FIREWALL_V4_FILENAME)),
+      Deno.errors.NotFound,
+    );
+    await assertRejects(
+      () => Deno.readTextFile(join(layout.configDir, FIREWALL_V6_FILENAME)),
+      Deno.errors.NotFound,
+    );
     assertEquals(
-      await Deno.readTextFile(join(layout.configDir, FIREWALL_V4_FILENAME)),
+      await Deno.readTextFile(
+        join(layout.configDir, FIREWALL_PENDING_V4_FILENAME),
+      ),
       rendered.v4,
     );
     assertEquals(
-      await Deno.readTextFile(join(layout.configDir, FIREWALL_V6_FILENAME)),
+      await Deno.readTextFile(
+        join(layout.configDir, FIREWALL_PENDING_V6_FILENAME),
+      ),
       rendered.v6!,
+    );
+    assertEquals(await readPendingMarker(layout), {
+      version: 1,
+      digest: rendered.digest,
+      generation: 4,
+      armedAt: "2026-10-01T12:00:00.000Z",
+      deadlineAt: "2026-10-01T12:02:00.000Z",
+      windowSeconds: FIREWALL_CONFIRM_WINDOW_SECONDS,
+      v6: "replace",
+    });
+  });
+});
+
+test("applyRenderedFirewall: when the guard cannot be armed, no rule is loaded and nothing stays staged", async () => {
+  await withTempLayout(async (layout) => {
+    const rendered = renderFirewall({
+      payload: payload(),
+      sshPorts: [22],
+      includeForward: { 4: false, 6: false },
+    });
+    const host = fakeHost({
+      [`systemctl restart ${FIREWALL_GUARD_TIMER}`]: fail(
+        `Unit ${FIREWALL_GUARD_TIMER} not found.`,
+        5,
+      ),
+    });
+    const err = await assertRejects(
+      () =>
+        applyRenderedFirewall(rendered, { 4: false, 6: false }, NFT_PROBE, {
+          run: host.run,
+          layout,
+        }),
+      FirewallGuardUnavailableError,
+    );
+    assertStringIncludes(err.message, "no rules were loaded");
+    assertStringIncludes(err.message, "not found");
+    assertEquals(host.calls.length, 1, "no iptables call after a failed arm");
+    assertEquals(await readPendingMarker(layout), null);
+    await assertRejects(
+      () =>
+        Deno.readTextFile(join(layout.configDir, FIREWALL_PENDING_V4_FILENAME)),
+      Deno.errors.NotFound,
+    );
+  });
+});
+
+test("applyRenderedFirewall: a second apply inside the window moves the deadline and forgets an earlier rollback", async () => {
+  await withTempLayout(async (layout) => {
+    const rendered = renderFirewall({
+      payload: payload(),
+      sshPorts: [22],
+      includeForward: { 4: false, 6: false },
+    });
+    await Deno.mkdir(layout.stateDir, { recursive: true });
+    await Deno.writeTextFile(rollbackRecordPath(layout), "{}");
+    const host = fakeHost();
+    const first = new Date("2026-10-01T12:00:00.000Z");
+    const later = new Date("2026-10-01T12:01:00.000Z");
+    for (const now of [first, later]) {
+      await applyRenderedFirewall(
+        rendered,
+        { 4: false, 6: false },
+        { ...NFT_PROBE, ipv6: false },
+        { run: host.run, layout, now: () => now },
+      );
+    }
+    assertEquals(
+      (await readPendingMarker(layout))?.deadlineAt,
+      "2026-10-01T12:03:00.000Z",
+    );
+    assertEquals(
+      host.calls.filter((c) => c.cmd === "systemctl").length,
+      2,
+      "the timer is restarted on every apply, so the deadline really moves",
+    );
+    await assertRejects(
+      () => Deno.readTextFile(rollbackRecordPath(layout)),
+      Deno.errors.NotFound,
     );
   });
 });
@@ -267,7 +376,16 @@ test("applyRenderedFirewall: a refused v4 --test throws before anything is appli
       Error,
       "--test refused the ruleset",
     );
-    assertEquals(host.calls.length, 1, "nothing ran after the refused test");
+    assertEquals(
+      host.calls.map((c) => `${c.cmd} ${c.args.join(" ")}`),
+      [
+        `systemctl restart ${FIREWALL_GUARD_TIMER}`,
+        "iptables-restore --noflush --test",
+        `systemctl stop ${FIREWALL_GUARD_TIMER}`,
+      ],
+      "armed, refused, then disarmed: nothing reached the kernel",
+    );
+    assertEquals(await readPendingMarker(layout), null);
     await assertRejects(
       () => Deno.readTextFile(join(layout.configDir, FIREWALL_V4_FILENAME)),
       Deno.errors.NotFound,
@@ -275,7 +393,7 @@ test("applyRenderedFirewall: a refused v4 --test throws before anything is appli
   });
 });
 
-test("applyRenderedFirewall: a v6 failure fails the reconcile, keeps v4 applied and durable, leaves the v6 document alone", async () => {
+test("applyRenderedFirewall: a v6 failure fails the reconcile, keeps v4 applied and pending under the guard, leaves the durable v6 document alone", async () => {
   await withTempLayout(async (layout) => {
     const rendered = renderFirewall({
       payload: payload(),
@@ -303,13 +421,22 @@ test("applyRenderedFirewall: a v6 failure fails the reconcile, keeps v4 applied 
         ),
       FirewallIpv6ApplyError,
     );
+    assertStringIncludes(err.message, "ipv6_unfiltered:");
     assertStringIncludes(err.message, "IPv4 is applied");
     assertStringIncludes(err.message, "line 4 failed");
-    // v4 went in and is durable for boot.
+    // v4 went in and is pending: the guard stays armed (it is the net under
+    // a half-applied state), and a confirm would leave durable v6 alone.
     assert(host.calls.some((c) => c.cmd === "iptables-restore"));
     assertEquals(
-      await Deno.readTextFile(join(layout.configDir, FIREWALL_V4_FILENAME)),
+      await Deno.readTextFile(
+        join(layout.configDir, FIREWALL_PENDING_V4_FILENAME),
+      ),
       rendered.v4,
+    );
+    assertEquals((await readPendingMarker(layout))?.v6, "keep");
+    assert(
+      !host.calls.some((c) => c.cmd === "systemctl" && c.args[0] === "stop"),
+      "the guard is not disarmed after v4 went in",
     );
     // v6 was never applied, and its durable document still matches the kernel.
     assert(
@@ -324,7 +451,7 @@ test("applyRenderedFirewall: a v6 failure fails the reconcile, keeps v4 applied 
   });
 });
 
-test("applyRenderedFirewall: no ip6tables → v6 left alone with a warning", async () => {
+test("applyRenderedFirewall: no ip6tables → v6 left alone, reported ipv6_unfiltered with a warning", async () => {
   await withTempLayout(async (layout) => {
     const rendered = renderFirewall({
       payload: payload(),
@@ -339,16 +466,27 @@ test("applyRenderedFirewall: no ip6tables → v6 left alone with a warning", asy
       { run: host.run, layout },
     );
     assertEquals(outcome.ipv6Applied, false);
+    assertEquals(outcome.ipv6Status, "ipv6_unfiltered");
+    assertStringIncludes(outcome.warnings[0]!, "ipv6_unfiltered:");
     assertStringIncludes(outcome.warnings[0]!, "ip6tables is not available");
     assert(!host.calls.some((c) => c.cmd.startsWith("ip6tables")));
+    assertEquals((await readPendingMarker(layout))?.v6, "forget");
   });
 });
 
-test("removeFirewall takes every jump, flushes and deletes both chains in both families, forgets the documents", async () => {
+test("removeFirewall takes every jump, flushes and deletes both chains in both families, forgets the documents, pending state and guard", async () => {
   await withTempLayout(async (layout) => {
     await Deno.mkdir(layout.configDir, { recursive: true });
+    await Deno.mkdir(layout.runDir, { recursive: true });
+    await Deno.mkdir(layout.stateDir, { recursive: true });
     await Deno.writeTextFile(join(layout.configDir, FIREWALL_V4_FILENAME), "x");
     await Deno.writeTextFile(join(layout.configDir, FIREWALL_V6_FILENAME), "y");
+    await Deno.writeTextFile(
+      join(layout.configDir, FIREWALL_PENDING_V4_FILENAME),
+      "p",
+    );
+    await Deno.writeTextFile(pendingMarkerPath(layout), "{}");
+    await Deno.writeTextFile(rollbackRecordPath(layout), "{}");
     // the INPUT jump was doubled by some older tool; the second -D succeeds, the third says gone
     let inputDeletes = 0;
     const host = fakeHost();
@@ -380,6 +518,22 @@ test("removeFirewall takes every jump, flushes and deletes both chains in both f
       () => Deno.readTextFile(join(layout.configDir, FIREWALL_V6_FILENAME)),
       Deno.errors.NotFound,
     );
+    for (
+      const path of [
+        join(layout.configDir, FIREWALL_PENDING_V4_FILENAME),
+        pendingMarkerPath(layout),
+        rollbackRecordPath(layout),
+      ]
+    ) {
+      await assertRejects(() => Deno.readTextFile(path), Deno.errors.NotFound);
+    }
+    assert(
+      host.calls.some((c) =>
+        c.cmd === "systemctl" && c.args.join(" ") ===
+          `stop ${FIREWALL_GUARD_TIMER}`
+      ),
+      "the guard timer is stopped",
+    );
   });
 });
 
@@ -410,7 +564,11 @@ test("removeFirewall runs the host commands strictly one at a time, in a fixed o
       `${bin} -F TP-FWD`,
       `${bin} -X TP-FWD`,
     ];
-    assertEquals(seen, [...perFamily("iptables"), ...perFamily("ip6tables")]);
+    assertEquals(seen, [
+      ...perFamily("iptables"),
+      ...perFamily("ip6tables"),
+      `systemctl stop ${FIREWALL_GUARD_TIMER}`,
+    ]);
   });
 });
 
@@ -485,6 +643,298 @@ test("reinstallFirewallForwardingIfEnabled: no document → nothing; document wi
     const noDocker = fakeHost({ "iptables -S DOCKER-USER": fail("No chain") });
     await reinstallFirewallForwardingIfEnabled({ run: noDocker.run, layout });
     assertEquals(noDocker.calls.length, 1);
+  });
+});
+
+test("reinstallFirewallForwardingIfEnabled: while a ruleset is pending it re-applies the PENDING document, never the older confirmed one", async () => {
+  await withTempLayout(async (layout) => {
+    const confirmed = renderFirewall({
+      payload: payload({
+        rules: [{
+          id: "old",
+          scope: "published",
+          action: "drop",
+          proto: "tcp",
+          ports: "1111",
+          sources: ["any"],
+          origin: "user",
+        }],
+      }),
+      sshPorts: [22],
+      includeForward: { 4: true, 6: false },
+    });
+    const pending = renderFirewall({
+      payload: payload({
+        rules: [{
+          id: "new",
+          scope: "published",
+          action: "drop",
+          proto: "tcp",
+          ports: "2222",
+          sources: ["any"],
+          origin: "user",
+        }],
+      }),
+      sshPorts: [22],
+      includeForward: { 4: true, 6: false },
+    });
+    await Deno.mkdir(layout.configDir, { recursive: true });
+    await Deno.mkdir(layout.runDir, { recursive: true });
+    await Deno.writeTextFile(
+      join(layout.configDir, FIREWALL_V4_FILENAME),
+      confirmed.v4,
+    );
+    await Deno.writeTextFile(
+      join(layout.configDir, FIREWALL_PENDING_V4_FILENAME),
+      pending.v4,
+    );
+    await Deno.writeTextFile(
+      pendingMarkerPath(layout),
+      JSON.stringify({
+        version: 1,
+        digest: pending.digest,
+        generation: 9,
+        armedAt: "2026-10-01T12:00:00.000Z",
+        deadlineAt: "2026-10-01T12:02:00.000Z",
+        windowSeconds: 120,
+        v6: "keep",
+      }),
+    );
+    const host = fakeHost({
+      "iptables -C DOCKER-USER -j TP-FWD": fail("Bad rule"),
+    });
+    await reinstallFirewallForwardingIfEnabled({ run: host.run, layout });
+    const restores = host.calls.filter((c) =>
+      c.cmd === "iptables-restore" && !c.args.includes("--test")
+    );
+    assertEquals(restores.length, 1);
+    assertEquals(restores[0]!.stdin, pending.v4);
+
+    // Once the marker is gone (confirmed or rolled back) the durable document
+    // is the truth again.
+    await Deno.remove(pendingMarkerPath(layout));
+    const after = fakeHost();
+    await reinstallFirewallForwardingIfEnabled({ run: after.run, layout });
+    const durable = after.calls.filter((c) =>
+      c.cmd === "iptables-restore" && !c.args.includes("--test")
+    );
+    assertEquals(durable[0]!.stdin, confirmed.v4);
+  });
+});
+
+test("reinstallFirewallForwardingIfEnabled: a pending marker with no pending document does nothing and never throws", async () => {
+  await withTempLayout(async (layout) => {
+    await Deno.mkdir(layout.runDir, { recursive: true });
+    await Deno.writeTextFile(
+      pendingMarkerPath(layout),
+      JSON.stringify({
+        version: 1,
+        digest: "d".repeat(64),
+        generation: 1,
+        armedAt: "2026-10-01T12:00:00.000Z",
+        deadlineAt: "2026-10-01T12:02:00.000Z",
+        windowSeconds: 120,
+        v6: "keep",
+      }),
+    );
+    const host = fakeHost();
+    await reinstallFirewallForwardingIfEnabled({ run: host.run, layout });
+    assertEquals(host.calls, []);
+  });
+});
+
+/** Both families rendered with `TP-FWD`, as on a Docker 28+ host. */
+function renderBothForward(port = "8080") {
+  return renderFirewall({
+    payload: payload({
+      rules: [{
+        id: `drop-${port}`,
+        scope: "published",
+        action: "drop",
+        proto: "tcp",
+        ports: port,
+        sources: ["any"],
+        origin: "user",
+      }],
+    }),
+    sshPorts: [22],
+    includeForward: { 4: true, 6: true },
+  });
+}
+
+async function writeConfigDocument(
+  layout: ReturnType<typeof resolveLayout>,
+  filename: string,
+  document: string,
+): Promise<void> {
+  await Deno.mkdir(layout.configDir, { recursive: true });
+  await Deno.writeTextFile(join(layout.configDir, filename), document);
+}
+
+async function writePendingMarker(
+  layout: ReturnType<typeof resolveLayout>,
+  v6: "replace" | "forget" | "keep",
+): Promise<void> {
+  await Deno.mkdir(layout.runDir, { recursive: true });
+  await Deno.writeTextFile(
+    pendingMarkerPath(layout),
+    JSON.stringify({
+      version: 1,
+      digest: "e".repeat(64),
+      generation: 3,
+      armedAt: "2026-10-01T12:00:00.000Z",
+      deadlineAt: "2026-10-01T12:02:00.000Z",
+      windowSeconds: 120,
+      v6,
+    }),
+  );
+}
+
+const callLines = (calls: Call[]) =>
+  calls.map((c) => `${c.cmd} ${c.args.join(" ")}`);
+
+test("reinstallFirewallForwardingIfEnabled: re-hangs IPv6 TP-FWD off DOCKER-USER exactly like IPv4, and a second run inserts nothing", async () => {
+  await withTempLayout(async (layout) => {
+    const rendered = renderBothForward();
+    await writeConfigDocument(layout, FIREWALL_V4_FILENAME, rendered.v4);
+    await writeConfigDocument(layout, FIREWALL_V6_FILENAME, rendered.v6!);
+
+    // dockerd restarted: both DOCKER-USER chains are back without our jump.
+    const restarted = fakeHost({
+      "iptables -C DOCKER-USER -j TP-FWD": fail("Bad rule"),
+      "ip6tables -C DOCKER-USER -j TP-FWD": fail("Bad rule"),
+    });
+    await reinstallFirewallForwardingIfEnabled({ run: restarted.run, layout });
+    assertEquals(callLines(restarted.calls), [
+      "iptables -S DOCKER-USER",
+      "iptables-restore --noflush --test",
+      "iptables-restore --noflush",
+      "iptables -C DOCKER-USER -j TP-FWD",
+      "iptables -I DOCKER-USER 1 -j TP-FWD",
+      "ip6tables -S DOCKER-USER",
+      "ip6tables-restore --noflush --test",
+      "ip6tables-restore --noflush",
+      "ip6tables -C DOCKER-USER -j TP-FWD",
+      "ip6tables -I DOCKER-USER 1 -j TP-FWD",
+    ]);
+    const v6Restore = restarted.calls.find((c) =>
+      c.cmd === "ip6tables-restore" && !c.args.includes("--test")
+    );
+    assertEquals(v6Restore?.stdin, rendered.v6);
+
+    // Idempotent: the jump is already there, so nothing is inserted twice.
+    const steady = fakeHost();
+    await reinstallFirewallForwardingIfEnabled({ run: steady.run, layout });
+    assert(!callLines(steady.calls).some((line) => line.includes(" -I ")));
+    assertEquals(
+      callLines(steady.calls).filter((line) => line.includes(" -C ")),
+      [
+        "iptables -C DOCKER-USER -j TP-FWD",
+        "ip6tables -C DOCKER-USER -j TP-FWD",
+      ],
+    );
+    // Never flushes, deletes or re-declares a Docker chain.
+    assert(
+      !callLines(steady.calls).some((line) =>
+        / -[FXN] /.test(` ${line} `) || line.includes("-D DOCKER-USER")
+      ),
+    );
+  });
+});
+
+test("reinstallFirewallForwardingIfEnabled: under a pending ruleset IPv6 follows only a recorded replace", async () => {
+  await withTempLayout(async (layout) => {
+    const confirmed = renderBothForward("1111");
+    const pending = renderBothForward("2222");
+    await writeConfigDocument(layout, FIREWALL_V4_FILENAME, confirmed.v4);
+    await writeConfigDocument(layout, FIREWALL_V6_FILENAME, confirmed.v6!);
+    await writeConfigDocument(layout, FIREWALL_PENDING_V4_FILENAME, pending.v4);
+    await writeConfigDocument(
+      layout,
+      FIREWALL_PENDING_V6_FILENAME,
+      pending.v6!,
+    );
+
+    await writePendingMarker(layout, "replace");
+    const replaced = fakeHost();
+    await reinstallFirewallForwardingIfEnabled({ run: replaced.run, layout });
+    const v6Restores = replaced.calls.filter((c) =>
+      c.cmd === "ip6tables-restore" && !c.args.includes("--test")
+    );
+    assertEquals(v6Restores.length, 1);
+    assertEquals(v6Restores[0]!.stdin, pending.v6);
+
+    // keep (apply in flight or failed) and forget: v6 is the guard's, not ours.
+    for (const intent of ["keep", "forget"] as const) {
+      await writePendingMarker(layout, intent);
+      const host = fakeHost();
+      await reinstallFirewallForwardingIfEnabled({ run: host.run, layout });
+      assertEquals(host.calls.filter((c) => c.cmd.startsWith("ip6")), []);
+      const v4Restore = host.calls.find((c) =>
+        c.cmd === "iptables-restore" && !c.args.includes("--test")
+      );
+      assertEquals(v4Restore?.stdin, pending.v4);
+    }
+  });
+});
+
+test("reinstallFirewallForwardingIfEnabled: each family stands alone — a missing IPv6 DOCKER-USER or a failing family never stops the other, and nothing throws", async () => {
+  await withTempLayout(async (layout) => {
+    const rendered = renderBothForward();
+    await writeConfigDocument(layout, FIREWALL_V4_FILENAME, rendered.v4);
+    await writeConfigDocument(layout, FIREWALL_V6_FILENAME, rendered.v6!);
+
+    // Docker with ip6tables off: probe v6, apply nothing there.
+    const noV6Chain = fakeHost({
+      "ip6tables -S DOCKER-USER": fail("No chain/target/match by that name."),
+    });
+    await reinstallFirewallForwardingIfEnabled({ run: noV6Chain.run, layout });
+    assertEquals(
+      callLines(noV6Chain.calls).filter((line) => line.startsWith("ip6")),
+      ["ip6tables -S DOCKER-USER"],
+    );
+    assert(callLines(noV6Chain.calls).includes("iptables-restore --noflush"));
+
+    // v6 restore refused: v4 already done, the hook still resolves.
+    const v6Refused = fakeHost({
+      "ip6tables-restore --noflush --test": fail("line 3 failed"),
+    });
+    await reinstallFirewallForwardingIfEnabled({ run: v6Refused.run, layout });
+    assert(
+      callLines(v6Refused.calls).includes("iptables -C DOCKER-USER -j TP-FWD"),
+    );
+    assert(!callLines(v6Refused.calls).includes("ip6tables-restore --noflush"));
+
+    // v4 jump fails: v6 is still re-hung.
+    const v4Broken = fakeHost({
+      "iptables -C DOCKER-USER -j TP-FWD": fail("Bad rule"),
+      "iptables -I DOCKER-USER 1 -j TP-FWD": fail("Resource busy"),
+    });
+    await reinstallFirewallForwardingIfEnabled({ run: v4Broken.run, layout });
+    assert(callLines(v4Broken.calls).includes("ip6tables-restore --noflush"));
+    assert(
+      callLines(v4Broken.calls).includes("ip6tables -C DOCKER-USER -j TP-FWD"),
+    );
+  });
+});
+
+test("reinstallFirewallForwardingIfEnabled: an unreadable document skips that family, an unreadable marker skips both", async () => {
+  await withTempLayout(async (layout) => {
+    const rendered = renderBothForward();
+    // A directory where the v4 document should be: unreadable, not missing.
+    await Deno.mkdir(join(layout.configDir, FIREWALL_V4_FILENAME), {
+      recursive: true,
+    });
+    await writeConfigDocument(layout, FIREWALL_V6_FILENAME, rendered.v6!);
+    const host = fakeHost();
+    await reinstallFirewallForwardingIfEnabled({ run: host.run, layout });
+    assert(host.calls.every((c) => c.cmd.startsWith("ip6")));
+    assert(callLines(host.calls).includes("ip6tables-restore --noflush"));
+
+    await Deno.mkdir(pendingMarkerPath(layout), { recursive: true });
+    const blocked = fakeHost();
+    await reinstallFirewallForwardingIfEnabled({ run: blocked.run, layout });
+    assertEquals(blocked.calls, []);
   });
 });
 

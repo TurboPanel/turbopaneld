@@ -23,6 +23,7 @@ import { hostSudoArgs } from "../../permissions/host-sudo.ts";
 import { logInfo, logWarn } from "../../util/logger.ts";
 import { forEachSequential } from "../../util/sequential.ts";
 import { accessGroup } from "../../runtime/registry.ts";
+import { playbooksNeedRootHelper } from "../../orchestration/privileged.ts";
 import type { RunFn, RunResult } from "../ensure-principal.ts";
 import {
   AUTHORIZED_KEYS_DIR,
@@ -33,9 +34,12 @@ import {
 import {
   SSHD_CONFIG_PATH,
   SSHD_DROPIN_PATH,
+  SSHD_SAMPLE_NAME,
   sshdAccessRestrictions,
   sshdConfigIncludesDropIns,
   sshdDropInContent,
+  sshdEffectiveSpec,
+  sshdForwardingViolations,
 } from "./sshd-config.ts";
 
 /** One account's desired key set. `keys: []` is a revocation, not a no-op. */
@@ -65,6 +69,13 @@ export type SshApplyPaths = {
    * about it is "do not delete anything".
    */
   prune?: boolean;
+  /**
+   * Whether root is reached through `tp-host`, which owns the SFTP chroot
+   * switch. Off (a development host, or a daemon already running as root)
+   * there is no switch and nothing is jailed. Defaults to
+   * {@link playbooksNeedRootHelper}.
+   */
+  tpHostManaged?: boolean;
 };
 
 export type SshApplyResult = {
@@ -74,6 +85,8 @@ export type SshApplyResult = {
   removedPrincipals: string[];
   /** True when the drop-in changed and `sshd` was reloaded. */
   sshdReloaded: boolean;
+  /** True when the drop-in jails `tpsftp` members (the host's switch is on). */
+  sftpChroot: boolean;
   /**
    * Host conditions that will stop a valid key from working and that TurboPanel
    * must not edit its way around. Surfaced, never silently repaired.
@@ -104,6 +117,27 @@ async function readPrivileged(
 ): Promise<string | null> {
   const result = await runFn("sudo", hostSudoArgs(["-n", "cat", "--", path]));
   return result.success ? result.stdout : null;
+}
+
+/**
+ * An `sshd` config file — the administrator's `sshd_config` or our drop-in —
+ * read directly when it is readable (both are `root:root 0644`) and through
+ * `sudo` only when it is not.
+ *
+ * Direct first because tp-host's `cat` serves only TurboPanel's own trees and
+ * refuses both paths: the privileged read alone failed every SSH reconcile on
+ * a managed host, and made every existing drop-in look absent, so a refused
+ * rewrite "rolled back" by deleting it.
+ */
+async function readSshdFile(
+  runFn: RunFn,
+  path: string,
+): Promise<string | null> {
+  try {
+    return await Deno.readTextFile(path);
+  } catch {
+    return await readPrivileged(runFn, path);
+  }
 }
 
 /**
@@ -294,6 +328,87 @@ async function reconcileKeyFiles(
   return { changed, removed };
 }
 
+/** An effective-config assertion run after `sshd -t`, before any reload. */
+type Verifier = {
+  run: () => Promise<RunResult>;
+  refusal: string;
+  fallback: string;
+};
+
+/** Members of `group`: supplementary (`getent group`) and primary (`getent passwd`). */
+function groupMembers(
+  group: string,
+  groupLine: string,
+  passwd: string,
+): string[] {
+  const parts = groupLine.trim().split(":");
+  if (parts[0] !== group) return [];
+  const members = (parts[3] ?? "").split(",");
+  for (const entry of passwd.split("\n")) {
+    const fields = entry.split(":");
+    if (fields[3] === parts[2]) members.push(fields[0]);
+  }
+  return members.filter((name) => SSHD_SAMPLE_NAME.test(name)).sort((a, b) =>
+    a.localeCompare(b)
+  );
+}
+
+/**
+ * One real account per access level to ask `sshd -T` about: the first sftp
+ * member, the first shell member, and the first principal in neither. `Match
+ * Group` resolves groups from the account database, so a made-up user name
+ * would match nothing and prove nothing; a level with no account has nothing
+ * to leak and is skipped. Read with plain `getent`, no root needed.
+ */
+async function sampleAccounts(runFn: RunFn): Promise<string[]> {
+  const sftp = accessGroup("sftp");
+  const shell = accessGroup("shell");
+  const principal = accessGroup("principal");
+  if (!sftp || !shell || !principal) return [];
+  const passwd = (await runFn("getent", ["passwd"])).stdout;
+  const members = async (group: string) => {
+    const line = await runFn("getent", ["group", group]);
+    return line.success ? groupMembers(group, line.stdout, passwd) : [];
+  };
+  const [sftpOnes, shellOnes, principalOnes] = await Promise.all([
+    members(sftp),
+    members(shell),
+    members(principal),
+  ]);
+  const leveled = new Set([...sftpOnes, ...shellOnes]);
+  const bare = principalOnes.find((name) => !leveled.has(name));
+  return [sftpOnes[0], shellOnes[0], bare].filter((name) => name !== undefined);
+}
+
+/**
+ * Refuse a drop-in (or an administrator's earlier one that outranks it) under
+ * which any sampled account would still be able to forward. Fails closed: an
+ * `sshd -T` that cannot answer is a refusal, not a pass.
+ */
+async function assertForwardingOff(runFn: RunFn): Promise<RunResult> {
+  const findings: string[] = [];
+  const samples = [...new Set(await sampleAccounts(runFn))];
+  const results = await Promise.all(samples.map(async (user) => ({
+    user,
+    result: await runFn(
+      "sudo",
+      hostSudoArgs(["-n", "sshd", "-T", "-C", sshdEffectiveSpec(user)]),
+    ),
+  })));
+  for (const { user, result } of results) {
+    if (!result.success) {
+      findings.push(`${user}: sshd -T failed`);
+      continue;
+    }
+    for (const finding of sshdForwardingViolations(result.stdout)) {
+      findings.push(`${user}: ${finding}`);
+    }
+  }
+  return findings.length === 0
+    ? { success: true, stdout: "", stderr: "" }
+    : { success: false, stdout: findings.join("; "), stderr: "" };
+}
+
 /**
  * Stage, test, publish, and reload the drop-in — rolling back to the previous
  * bytes if `sshd -t` refuses the result.
@@ -308,9 +423,10 @@ async function reconcileDropIn(
   runFn: RunFn,
   dropInPath: string,
   contents: string,
+  verifiers: readonly Verifier[] = [],
 ): Promise<boolean> {
   const backup = `${dropInPath}.tpprev`;
-  const existing = await readPrivileged(runFn, dropInPath);
+  const existing = await readSshdFile(runFn, dropInPath);
   if (existing !== null) {
     const snapshot = await runFn(
       "sudo",
@@ -350,29 +466,103 @@ async function reconcileDropIn(
     return false;
   }
 
-  const test = await sshdConfigTest(runFn);
-  if (!test.success) {
-    // Put the host back exactly as it was before failing. Leaving a rejected
-    // drop-in in place would break the next unrelated `systemctl reload ssh`,
-    // by anyone, for any reason.
-    if (existing === null) {
-      await runFn("sudo", hostSudoArgs(["-n", "rm", "-f", "--", dropInPath]));
-    } else {
-      await runFn(
+  // Put the host back exactly as it was before a refused swap. Leaving a
+  // rejected drop-in in place would break the next unrelated
+  // `systemctl reload ssh`, by anyone, for any reason.
+  const restore = () =>
+    existing === null
+      ? runFn("sudo", hostSudoArgs(["-n", "rm", "-f", "--", dropInPath]))
+      : runFn(
         "sudo",
         hostSudoArgs(["-n", "mv", "-f", "--", backup, dropInPath]),
       );
-    }
+
+  const test = await sshdConfigTest(runFn);
+  if (!test.success) {
+    await restore();
     throw new Error(
       `sshd rejected the TurboPanel configuration, and it has been rolled back: ${
         test.stderr || test.stdout || "sshd -t failed"
       }`,
     );
   }
+  try {
+    await forEachSequential(verifiers, async (verifier) => {
+      const effective = await verifier.run();
+      if (effective.success) return;
+      throw new Error(
+        `${verifier.refusal}, and the change has been rolled back: ${
+          effective.stdout || effective.stderr || verifier.fallback
+        }`,
+      );
+    });
+  } catch (error) {
+    await restore();
+    throw error;
+  }
 
   await reloadSshd(runFn);
   await runFn("sudo", hostSudoArgs(["-n", "rm", "-f", "--", backup]));
   return true;
+}
+
+type SftpChroot = { root: string | null; warnings: string[] };
+
+/** `on <absolute root>` or `off`; anything else is not an answer. */
+function parseSftpChrootStatus(stdout: string): string | null | undefined {
+  const status = stdout.trim();
+  if (status === "off") return null;
+  const match = /^on (\/[A-Za-z0-9._/-]+)$/.exec(status);
+  return match ? match[1] : undefined;
+}
+
+/**
+ * Is this host's SFTP chroot switch on, under which root, and does every
+ * `tpsftp` member still pass the layout check `tp-host sftp-chroot on` ran?
+ *
+ * Only `tp-host` turns the switch on, and only after that check passes, so the
+ * daemon never decides to jail anyone. The root comes from `tp-host` too — the
+ * root it validated — never from the daemon's own environment. An unreadable
+ * switch aborts the reconcile: rendering the unjailed block because `sudo`
+ * hiccuped would fail open. A later finding (a member whose home drifted off
+ * the layout) keeps the jail and becomes a warning: that member's logins fail
+ * closed until the home is fixed.
+ */
+async function readSftpChroot(
+  runFn: RunFn,
+  managed: boolean,
+): Promise<SftpChroot> {
+  if (!managed) return { root: null, warnings: [] };
+  const status = await runFn(
+    "sudo",
+    hostSudoArgs(["-n", "sftp-chroot", "status"]),
+  );
+  const root = status.success
+    ? parseSftpChrootStatus(status.stdout)
+    : undefined;
+  if (root === undefined) {
+    throw new Error(
+      `Could not read the SFTP chroot switch; SSH access was not changed: ${
+        status.stderr || status.stdout || "no answer"
+      }`,
+    );
+  }
+  if (root === null) return { root, warnings: [] };
+  const check = await runFn(
+    "sudo",
+    hostSudoArgs(["-n", "sftp-chroot", "check"]),
+  );
+  if (check.success) return { root, warnings: [] };
+  const findings = (check.stdout || check.stderr || "layout check failed")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  return {
+    root,
+    warnings: findings.map((finding) =>
+      `SFTP chroot is on, but ${finding}. That member cannot sign in until its home is back on the layout.`
+    ),
+  };
 }
 
 /**
@@ -403,7 +593,7 @@ export async function applySshAccess(
   );
 
   const warnings: string[] = [];
-  const sshdConfig = await readPrivileged(runFn, sshdConfigPath);
+  const sshdConfig = await readSshdFile(runFn, sshdConfigPath);
   if (sshdConfig === null) {
     throw new Error(
       `Could not read ${sshdConfigPath}; SSH access cannot be configured on this host`,
@@ -426,10 +616,17 @@ export async function applySshAccess(
     );
   }
 
+  const chroot = await readSftpChroot(
+    runFn,
+    paths.tpHostManaged ?? playbooksNeedRootHelper(),
+  );
+  warnings.push(...chroot.warnings);
+
   const sftpGroup = accessGroup("sftp");
   const shellGroup = accessGroup("shell");
   const passwordGroup = accessGroup("password");
-  if (!sftpGroup || !shellGroup || !passwordGroup) {
+  const principalGroup = accessGroup("principal");
+  if (!sftpGroup || !shellGroup || !passwordGroup || !principalGroup) {
     throw new Error("runtime registry is missing an SSH access group");
   }
 
@@ -440,8 +637,22 @@ export async function applySshAccess(
       sftpGroup,
       shellGroup,
       passwordGroup,
+      principalGroup,
       authorizedKeysDir: dir,
+      ...(chroot.root === null ? {} : { sftpChrootRoot: chroot.root }),
     }),
+    [
+      {
+        run: () => assertForwardingOff(runFn),
+        refusal: "sshd would still allow forwarding as configured",
+        fallback: "forwarding check failed",
+      },
+      ...(chroot.root === null ? [] : [{
+        run: () => runFn("sudo", hostSudoArgs(["-n", "sftp-chroot", "verify"])),
+        refusal: "sshd would not jail SFTP members as configured",
+        fallback: "sftp-chroot verify failed",
+      }]),
+    ],
   );
 
   for (const warning of warnings) logWarn("deploy", warning);
@@ -458,6 +669,7 @@ export async function applySshAccess(
     changedPrincipals: changed,
     removedPrincipals: removed,
     sshdReloaded,
+    sftpChroot: chroot.root !== null,
     warnings,
   };
 }

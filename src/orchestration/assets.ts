@@ -186,6 +186,34 @@ export const ORCHESTRATE_HELPER = join(
  */
 export const ANSIBLE_SHELL_EXECUTABLE = "/bin/bash";
 
+/**
+ * Daemon-writable scratch for the unprivileged `ansible-playbook --version`
+ * probe: `<daemonStateDir>/ansible` is a state leaf (`daemon-layout`), so it
+ * exists tp-owned on a fresh sealed install, unlike `$HOME/.ansible`.
+ */
+export const ANSIBLE_STATE_DIR = join(layout.daemonStateDir, "ansible");
+
+/**
+ * Env for running ansible binaries as the daemon (version probes). Bare
+ * `HOME=<state root>` makes ansible try `<state root>/.ansible/tmp`, which a
+ * sealed root:tp 0750 state root denies on a fresh install; point HOME and
+ * every Ansible temp/home variable at the {@link ANSIBLE_STATE_DIR} leaf.
+ */
+export function ansibleProbeEnv(): Record<string, string> {
+  // The leaf itself is the temp root: ansible creates its own subfolders, so
+  // nothing below the (tp-owned) leaf is ever created by a root-run probe.
+  // Built without ansibleEnv() so no throwaway ANSIBLE_HOME temp dir is made.
+  return {
+    ANSIBLE_CONFIG: ANSIBLE_CFG,
+    ANSIBLE_EXECUTABLE: ANSIBLE_SHELL_EXECUTABLE,
+    ANSIBLE_ROLES_PATH: `${GALAXY_ROLES_DIR}:${GALAXY_VENDOR_ROLES_DIR}`,
+    HOME: ANSIBLE_STATE_DIR,
+    ANSIBLE_HOME: ANSIBLE_STATE_DIR,
+    ANSIBLE_LOCAL_TEMP: ANSIBLE_STATE_DIR,
+    ANSIBLE_REMOTE_TEMP: ANSIBLE_STATE_DIR,
+  };
+}
+
 /** Ansible env vars for playbook and galaxy bootstrap invocations. */
 export function ansibleEnv(): Record<string, string> {
   return {

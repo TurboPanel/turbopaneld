@@ -1,0 +1,72 @@
+---
+# Always-on DOCKER-USER / INPUT egress block for container-side interfaces
+# (audit P1-4). Included from tasks/main.yml. Installs a root-owned script and
+# a oneshot unit that re-applies it after every docker.service (re)start, and
+# applies it now. It never restarts dockerd. Switching the var off removes the
+# unit, the script and the TP-EGRESS chain again.
+
+- name: Install the egress block script directory
+  ansible.builtin.file:
+    path: "{{ turbopanel_docker_egress_script | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+  when: turbopanel_docker_egress_guard | bool
+
+- name: Install the egress block script
+  ansible.builtin.copy:
+    src: turbopanel-docker-egress
+    dest: "{{ turbopanel_docker_egress_script }}"
+    owner: root
+    group: root
+    mode: "0750"
+  register: _docker_egress_script
+  when: turbopanel_docker_egress_guard | bool
+
+- name: Install the egress block unit
+  ansible.builtin.template:
+    src: turbopanel-docker-egress.service.j2
+    dest: /etc/systemd/system/turbopanel-docker-egress.service
+    owner: root
+    group: root
+    mode: "0640"
+  register: _docker_egress_unit
+  when: turbopanel_docker_egress_guard | bool
+
+- name: Enable the egress block and apply it now
+  ansible.builtin.systemd:
+    name: turbopanel-docker-egress.service
+    enabled: true
+    state: "{{ 'restarted' if (_docker_egress_script.changed or _docker_egress_unit.changed) else 'started' }}"
+    daemon_reload: true
+  when: turbopanel_docker_egress_guard | bool
+
+# A started oneshot with RemainAfterExit does not re-run on `started`; make
+# sure the rules are really in the kernel on every converge (idempotent).
+- name: Re-apply the egress block (idempotent)
+  ansible.builtin.command: "{{ turbopanel_docker_egress_script }} apply"
+  changed_when: false
+  when: turbopanel_docker_egress_guard | bool
+
+- name: Check for an installed egress block when it is switched off
+  ansible.builtin.stat:
+    path: "{{ turbopanel_docker_egress_script }}"
+  register: _docker_egress_installed
+  when: not turbopanel_docker_egress_guard | bool
+
+- name: Remove the egress block rules
+  ansible.builtin.command: "{{ turbopanel_docker_egress_script }} remove"
+  changed_when: false
+  when:
+    - not turbopanel_docker_egress_guard | bool
+    - _docker_egress_installed.stat.exists
+
+- name: Remove the egress block unit and script
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /etc/systemd/system/turbopanel-docker-egress.service
+    - "{{ turbopanel_docker_egress_script }}"
+  when: not turbopanel_docker_egress_guard | bool

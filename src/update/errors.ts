@@ -66,3 +66,15 @@ export class ManifestSignatureError extends Error {
     this.name = "ManifestSignatureError";
   }
 }
+
+/**
+ * A correctly signed manifest that names an older build than the one running.
+ * The signature proves authorship, not freshness, so replaying an old release
+ * manifest must not roll a host back (see `freshness.ts`).
+ */
+export class RollbackRefusedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RollbackRefusedError";
+  }
+}

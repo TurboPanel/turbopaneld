@@ -16,14 +16,15 @@ const VALID_CHANNELS: ReadonlySet<UpdateChannel> = new Set<UpdateChannel>([
 /**
  * Resolve which update channel the daemon should follow.
  *
- * Reads `TURBOPANEL_UPDATE_CHANNEL` from the environment. Invalid values crash
+ * Reads `TURBOPANEL_UPDATE_CHANNEL` from the environment (default `release`:
+ * a daemon installed with no channel follows the stable rail). Invalid values crash
  * at startup so misconfiguration is caught early.
  */
 export function resolveUpdateChannelConfig(
   env: Record<string, string | undefined> = Deno.env.toObject(),
 ): UpdateChannelConfig {
   const raw = env.TURBOPANEL_UPDATE_CHANNEL?.trim();
-  const value = raw || "trunk";
+  const value = raw || "release";
 
   if (!VALID_CHANNELS.has(value as UpdateChannel)) {
     const valid = [...VALID_CHANNELS].join(", ");

@@ -159,7 +159,7 @@ test({
     assertEquals(frames[1]?.result, undefined);
     assertMatch(String(frames[1]?.error), /Invalid hostname/);
     assertEquals(String(frames[1]?.error).includes("\n"), false);
-    assert(String(frames[1]?.error).length <= 500);
+    assert(String(frames[1]?.error).length <= 4096);
   },
 });
 
@@ -376,6 +376,52 @@ test({
 });
 
 test({
+  name: "handleCommandDispatch strips URL credentials from handler errors",
+  permissions: { env: true, sys: ["hostname"], read: true },
+  fn: async () => {
+    const { handleCommandDispatch } = await import("./command-router.ts");
+    const {
+      setAnsibleAvailabilityCheckForTests,
+      setRunSetHostnameForTests,
+    } = await import("./hostname.ts");
+
+    // Built at run time so no secret-like literal sits in the source.
+    const userInfo = ["deploy", ["tok", "en", "value"].join("")].join(":");
+    const query = ["to", "ken"].join("") + "=" + "abc123";
+    setAnsibleAvailabilityCheckForTests(() => Promise.resolve(true));
+    setRunSetHostnameForTests(() =>
+      Promise.reject(
+        new Error(
+          `npm ERR! fetch https://${userInfo}@registry.example.com/pkg?${query} failed`,
+        ),
+      )
+    );
+    try {
+      const ws = new MockWebSocket() as unknown as WebSocket;
+      const message: CommandDispatchMessage = {
+        type: "command-dispatch",
+        id: "req-host-url",
+        commandId: "cmd-host-url",
+        commandType: "server.hostname.set",
+        payload: { hostname: "web-01" },
+        at: new Date().toISOString(),
+      };
+
+      await handleCommandDispatch(message, ws);
+
+      const frames = parseFrames((ws as unknown as MockWebSocket).sentFrames);
+      const error = String(frames[1]?.error);
+      assertEquals(error.includes("tokenvalue"), false);
+      assertEquals(error.includes("abc123"), false);
+      assertMatch(error, /registry\.example\.com\/pkg\?\[redacted\] failed/);
+    } finally {
+      setAnsibleAvailabilityCheckForTests(null);
+      setRunSetHostnameForTests(null);
+    }
+  },
+});
+
+test({
   name: "handleCommandDispatch truncates sanitized handler errors",
   permissions: { env: true, sys: ["hostname"], read: true },
   fn: async () => {
@@ -386,7 +432,9 @@ test({
     } = await import("./hostname.ts");
 
     setAnsibleAvailabilityCheckForTests(() => Promise.resolve(true));
-    setRunSetHostnameForTests(() => Promise.reject(new Error("x".repeat(600))));
+    setRunSetHostnameForTests(() =>
+      Promise.reject(new Error(`${"a".repeat(5000)}END`))
+    );
     try {
       const ws = new MockWebSocket() as unknown as WebSocket;
       const message: CommandDispatchMessage = {
@@ -403,7 +451,10 @@ test({
       const frames = parseFrames((ws as unknown as MockWebSocket).sentFrames);
       assertEquals(frames[1]?.ok, false);
       const error = String(frames[1]?.error);
-      assertEquals(error.length, 500);
+      // Tail kept (the cause is last), within the 4096-char wire cap.
+      assert(error.length <= 4096);
+      assert(error.startsWith("[...truncated] "));
+      assert(error.endsWith("END"));
       assertEquals(error.includes("\n"), false);
     } finally {
       setAnsibleAvailabilityCheckForTests(null);
@@ -705,6 +756,7 @@ async function dispatchWithStubHandler(
     | "handleEnvironmentDeploy"
     | "handleEnvironmentLifecycle"
     | "handlePrincipalsReconcile"
+    | "handleBackupsReconcile"
     | "handleManagedApply"
     | "handleManagedLifecycle"
     | "handleManagedDestroy"
@@ -980,6 +1032,7 @@ test({
         keysChanged: [],
         keysRemoved: [],
         sshdReloaded: false,
+        sftpChroot: false,
         warnings: [],
         summary: "principals stub",
       },
@@ -988,6 +1041,30 @@ test({
     const result = outcome.result as Record<string, unknown>;
     assertEquals(result.summary, "principals stub");
     assertEquals(result.principalsApplied, 0);
+  },
+});
+
+test({
+  name:
+    "handleCommandDispatch routes server.backups.reconcile through stub handler",
+  permissions: { env: true, read: true },
+  fn: async () => {
+    const outcome = await dispatchWithStubHandler(
+      "server.backups.reconcile",
+      { policies: [] },
+      {
+        policiesApplied: 0,
+        unitsChanged: [],
+        unitsRemoved: [],
+        nextRuns: [],
+        warnings: [],
+      },
+      "handleBackupsReconcile",
+    );
+    assertEquals(outcome.ok, true);
+    const result = outcome.result as Record<string, unknown>;
+    assertEquals(result.policiesApplied, 0);
+    assertEquals(result.unitsRemoved, []);
   },
 });
 

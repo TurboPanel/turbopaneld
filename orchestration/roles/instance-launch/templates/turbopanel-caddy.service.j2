@@ -56,8 +56,11 @@ ExecReload={{ turbopanel_vendor_dir }}/caddy/current/caddy reload --config {{ tu
 ExecReload={{ turbopanel_vendor_dir }}/caddy/current/caddy reload --config {{ turbopanel_caddyfile }} --adapter caddyfile --address unix/{{ turbopanel_caddy_admin_socket }} --force
 {% endif %}
 # Rescue path when reload fails: cap stop so cert-apply cannot hang on Caddy's
-# eternal grace shutdown. Managed reload uses the admin Unix socket.
-TimeoutStopSec=20
+# grace shutdown. 60 s: a 1-core host needs longer than 20 s to drain, and a
+# kill at 20 s left the unit inactive after an update. The update flow also
+# starts Caddy again when it is not active. Managed reload uses the admin Unix
+# socket.
+TimeoutStopSec=60
 Restart=always
 RestartSec=2
 CPUQuota=100%

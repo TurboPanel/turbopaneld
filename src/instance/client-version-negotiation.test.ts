@@ -384,6 +384,26 @@ test({
 });
 
 test({
+  name: "a pong from the control plane is ignored without a warning",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    net: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  fn: async () => {
+    const log = await withClient(undefined, async (_client, socket) => {
+      await settleConnect();
+      socket.receive({ type: "pong" } as unknown as Record<string, unknown>);
+      await flushMicrotasks();
+      assertEquals(socket.readyState, OPEN);
+    });
+    assertEquals(log.includes("ignored unknown websocket message"), false);
+  },
+});
+
+test({
   name:
     "instanceSupports is closed until the attach frame advertises a feature",
   permissions: {

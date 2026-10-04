@@ -298,7 +298,11 @@ tp_verify_release_root() {
 		_fail=1
 	fi
 
-	_ts_files="$(find "$_root" -name '*.ts' -print 2>/dev/null || true)"
+	# The one TypeScript tree that ships: the Docker gate's source, run as-is by
+	# the vendored Deno (roles/docker-gate). Anything else .ts is a leak.
+	_ts_files="$(find "$_root" -name '*.ts' \
+		-not -path '*/share/orchestration/roles/docker-gate/files/*' \
+		-print 2>/dev/null || true)"
 	if [[ -n "$_ts_files" ]]; then
 		echo "tp_verify_release_root: unexpected TypeScript sources in release tree:" >&2
 		printf '%s\n' "$_ts_files" >&2
@@ -410,8 +414,8 @@ tp_download_verified_artifact() {
 	while [[ "$_attempt" -le "$_max_attempts" ]]; do
 		rm -f "$_dest"
 		# shellcheck disable=SC2086
-		if ! curl -fsSL $_curl_tls "$_fetch_url" -o "$_dest"; then
-			echo "tp_download_verified_artifact: failed to download $_fetch_url" >&2
+		if ! curl -fsSL --retry 2 --retry-delay 3 --retry-max-time 60 $_curl_tls "$_fetch_url" -o "$_dest"; then
+			echo "tp_download_verified_artifact: failed to download ${_fetch_url%%[?#]*} (query string omitted: it can carry a signed token)" >&2
 			return 1
 		fi
 		if printf '%s  %s\n' "$_sha256" "$_dest" | sha256sum -c - >/dev/null 2>&1; then

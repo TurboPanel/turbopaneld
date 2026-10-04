@@ -6,6 +6,7 @@
  * backup credential-free — never `-p` on argv and never `-e MYSQL_PWD`.
  */
 
+import { helperLabelArgs } from "../../deploy/labels.ts";
 import type {
   ManagedApplyCredential,
   ManagedApplyDatabaseOp,
@@ -447,6 +448,7 @@ const mysqlReplicationRuntime: ManagedEngineReplicationRuntime = {
       const probe = await ctx.runDocker([
         "run",
         "--rm",
+        ...helperLabelArgs("volume-copy"),
         "--user",
         ctx.containerUser,
         ...volumeArgs,
@@ -470,6 +472,7 @@ const mysqlReplicationRuntime: ManagedEngineReplicationRuntime = {
       const clean = await ctx.runDocker([
         "run",
         "--rm",
+        ...helperLabelArgs("volume-copy"),
         "--user",
         "0",
         ...volumeArgs,

@@ -60,6 +60,17 @@
     - role: principal-access
     - role: rapl-access
     - role: time-sync
+    # tpbuild, /var/lib/turbopanel-build and tpbuild.slice for tp-host
+    # build-run's sandboxed builds.
+    - role: build-user
+    # Existing Docker hosts get the observe-mode gate on their next converge;
+    # the role is a no-op where Docker is absent (docker-setup installs it
+    # there, via the docker role).
+    # Docker hosts provisioned before the builder entitlement deny (#204) never
+    # re-run the docker role; re-apply just that daemon.json deny here.
+    - role: docker
+      tasks_from: converge-builder
+    - role: docker-gate
 
   # Already-provisioned managed daemons only ever receive this lightweight
   # converge (see src/orchestration/setup.ts), never a full reinstall. Refresh

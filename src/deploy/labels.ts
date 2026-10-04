@@ -20,6 +20,14 @@ export const LABEL_SERVICE_ID = "com.turbopanel.service";
 /** Marks a container that publishes raw tcp/udp ports (per-service Traefik boundary). */
 export const LABEL_RAW_PORT = "com.turbopanel.raw-port";
 
+/**
+ * Marks a container the platform routes through the shared Traefik. Only the
+ * daemon stamps it (the `com.turbopanel.system.` namespace is reserved), and the
+ * shared Traefik's provider constraint requires it, so a `traefik.*` label a
+ * site owner wrote can never route traffic by itself.
+ */
+export const LABEL_ROUTED = "com.turbopanel.system.routed";
+
 /** Project UUID stamped on tenant app containers. */
 export const LABEL_PROJECT = "com.turbopanel.project";
 
@@ -58,3 +66,29 @@ export const LABEL_ROLE_SYSTEM = "turbopanel";
  */
 export const LABEL_COMPOSE_PROJECT = "com.docker.compose.project";
 export const LABEL_COMPOSE_SERVICE = "com.docker.compose.service";
+
+/**
+ * `com.turbopanel.system.component` values of the throwaway helper containers
+ * the daemon starts with a plain `docker run` (backup tar, restore swap, managed
+ * file ownership, engine volume bootstrap). The Docker gate allows them as
+ * platform containers by this label, so every such `docker run` must stamp it
+ * through {@link helperLabelArgs} (a test scans `src` for any that does not).
+ */
+export const HELPER_COMPONENTS = [
+  "backup-copy",
+  "backup-restore",
+  "managed-files",
+  "volume-copy",
+] as const;
+
+export type HelperComponent = (typeof HELPER_COMPONENTS)[number];
+
+/** `docker run` label flags that mark a daemon helper container as platform-owned. */
+export function helperLabelArgs(component: HelperComponent): string[] {
+  return [
+    "--label",
+    `${LABEL_ROLE}=${LABEL_ROLE_SYSTEM}`,
+    "--label",
+    `${LABEL_SYSTEM_COMPONENT}=${component}`,
+  ];
+}

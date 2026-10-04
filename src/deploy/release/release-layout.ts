@@ -2,10 +2,12 @@
  * On-host release tree layout and privileged directory creation.
  *
  * ```
+ * <principalHomeRoot>/.tp-staging/                 root:tp 0710
+ *   <username>.<serviceId>.<releaseId>/            tp 0700 while the daemon copies
  * <principalHomeRoot>/<username>/sites/            root:<username>-grp 0750
  *   <serviceId>/                                   root:<username>-grp 0750
  *     releases/                                    root:<username>-grp 0750
- *       <releaseId>/  staging 0750 → published 0550, root:<username>-grp
+ *       <releaseId>/  root:<username>-grp, 0550 top, nothing g/o-writable
  *     current -> releases/<releaseId>
  *     shared/         <username>:<username>-grp 0750  (the one writable path)
  * ```
@@ -17,9 +19,14 @@
  * principal-owned `releases/` would leave the app process able to rewrite the
  * code it runs (and to swap `current`), which turns any RCE into persistence and
  * defeats the point of immutable releases. `shared/` is the single
- * principal-owned, principal-writable directory, and a staging release is
- * root-writable only until {@link sealPublishedRelease} drops it to
- * {@link RELEASE_PUBLISHED_MODE}.
+ * principal-owned, principal-writable directory.
+ *
+ * On a managed host a release never exists unsealed under `releases/`: the
+ * daemon copies it into its own staging leaf ({@link ReleasePaths.stagingDir}),
+ * and tp-host `publish` seals that leaf recursively, refuses hard links,
+ * special files and symlinks that resolve outside it, and renames it into
+ * place (`./promote.ts`). tp-host refuses to create anything under
+ * `releases/<releaseId>` any other way.
  *
  * Path shapes come from `src/paths/layout.ts` (`siteRoot` / `siteReleasesDir` /
  * `siteCurrentSymlink` / `siteSharedDir`) so the next phase's site
@@ -35,6 +42,8 @@ import { forEachSequential } from "../../util/sequential.ts";
 import type { LayoutPaths } from "../../paths/layout.ts";
 import {
   principalHomePath,
+  RELEASE_STAGING_DIRNAME,
+  releaseStagingDir,
   siteCurrentSymlink,
   siteReleasesDir,
   siteRoot,
@@ -54,7 +63,13 @@ export const RELEASE_SCRATCH_DIRNAME = "release-build";
 export const RELEASE_METADATA_DIRNAME = ".turbopanel";
 
 /**
- * Daemon-owned release-history root, for releases that publish **no tree**.
+ * Daemon-owned release-history root: the authoritative record of every release
+ * this host published, and the home of releases that publish **no tree**.
+ *
+ * Every lane writes its manifest here, and rollback reads only this root. A
+ * native release also keeps a copy inside its tree, but that tree sits in the
+ * principal's home, which the principal owns — nothing privileged or
+ * trust-bearing is ever read back out of it.
  *
  * A Railpack release produces an OCI image; nothing is copied into a directory
  * and no runtime user ever reads one, so it needs no principal home — and
@@ -64,9 +79,9 @@ export const RELEASE_METADATA_DIRNAME = ".turbopanel";
  * which is the same shape {@link resolveReleasePaths} produces so retention and
  * the manifest readers stay lane-agnostic.
  *
- * A Railpack service that *does* have a principal keeps using the principal
- * home tree — one service should not move its history between two roots
- * depending on an unrelated assignment.
+ * A Railpack service keeps its history here whether or not it has a principal
+ * — one service should not move its history between two roots depending on an
+ * unrelated assignment.
  */
 export const RELEASE_RECORDS_DIRNAME = "release-records";
 
@@ -77,15 +92,11 @@ export const RELEASE_RECORDS_DIRNAME = "release-records";
  * writable by the runtime user: a compromised app process must not be able to
  * rewrite the code it is running. `shared/` is the one writable path.
  *
- * {@link RELEASE_STAGING_MODE} is the same `0750` while the deploy engine is
- * still copying the build output in — owner-writable, group read-only — and
- * {@link sealPublishedRelease} tightens it to {@link RELEASE_PUBLISHED_MODE}
- * once the health probe passes.
+ * A published release's top directory is {@link RELEASE_PUBLISHED_MODE}.
  */
 export const RELEASE_DIR_MODE = "0750";
 export const RELEASE_PUBLISHED_MODE = 0o550;
 export const RELEASE_SHARED_MODE = "0750";
-export const RELEASE_STAGING_MODE = "0750";
 
 /** Owner of every immutable path in the tree (`root:<username>-grp`). */
 function releaseRootOwner(username: string): string {
@@ -121,6 +132,13 @@ export type ReleasePaths = {
   sharedDir: string;
   /** Ephemeral checkout/build directory — removed after promote. */
   scratchDir: string;
+  /**
+   * The daemon's checked copy of the build output on a managed host: a leaf
+   * under `<principalHomeRoot>/.tp-staging` that tp-host `publish` seals and
+   * renames into {@link releaseDir}. Outside the scratch root on purpose — the
+   * build controls every name under its own tree.
+   */
+  stagingDir: string;
 };
 
 /**
@@ -151,6 +169,11 @@ export function resolveReleasePaths(
       serviceId,
       releaseId,
     ),
+    stagingDir: releaseStagingDir(layout, {
+      username: params.username,
+      serviceId,
+      releaseId,
+    }),
   };
 }
 
@@ -159,8 +182,8 @@ export function resolveReleasePaths(
  *
  * Same path shape, no principal home and no privileged ownership: every
  * directory here is created by the daemon user with {@link
- * ensureDaemonReleaseRecordDir}. Use this only for a lane that publishes no
- * tree — anything a runtime user reads belongs in the principal home, under the
+ * ensureDaemonReleaseRecordDir}. It holds release *records* (manifests) only —
+ * anything a runtime user reads belongs in the principal home, under the
  * root-owned ownership rules this module documents.
  */
 export function resolveDaemonReleasePaths(
@@ -184,6 +207,8 @@ export function resolveDaemonReleasePaths(
       serviceId,
       releaseId,
     ),
+    // Never staged: a release record has no tree to publish.
+    stagingDir: join(recordsHome, RELEASE_STAGING_DIRNAME, releaseId),
   };
 }
 
@@ -211,8 +236,8 @@ export async function ensureDaemonReleaseRecordDir(
 }
 
 /**
- * Create `sites/<serviceId>/{releases,shared}` and the staging release dir,
- * each with the ownership its role requires.
+ * Create `sites/<serviceId>/{releases,shared}`, each with the ownership its
+ * role requires.
  *
  * - `sites/`, `sites/<serviceId>/`, `releases/` — **root-owned**, group
  *   `<username>-grp`, {@link RELEASE_DIR_MODE}. The runtime user may traverse
@@ -220,12 +245,9 @@ export async function ensureDaemonReleaseRecordDir(
  *   plant a release nor repoint `current`.
  * - `shared/` — principal-owned and writable: the one path an app may write
  *   that survives a promote.
- * - `releases/<releaseId>/` — root-owned and **writable** at
- *   {@link RELEASE_STAGING_MODE} while the build output is copied in;
- *   {@link sealPublishedRelease} drops it to {@link RELEASE_PUBLISHED_MODE}
- *   after the health probe passes, so a failed build never leaves a read-only
- *   half-release behind and the principal is never able to write a release at
- *   all.
+ *
+ * `releases/<releaseId>/` is not created here: it appears only when a sealed
+ * release is renamed into place (`./promote.ts`).
  *
  * `install -d` repairs as well as creates, so a tree laid down by the earlier
  * principal-owned layout converges to this one on the next deploy.
@@ -246,12 +268,6 @@ export async function ensureReleaseTree(
     paths.sharedDir,
     username,
     group,
-    runFn,
-  );
-  await ensureDirectoryWithOwner(
-    paths.releaseDir,
-    RELEASE_STAGING_MODE,
-    owner,
     runFn,
   );
 }

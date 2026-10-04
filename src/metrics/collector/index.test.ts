@@ -45,6 +45,7 @@ function inertDeps(): Partial<CollectorDeps> {
     collectTopology: () => Promise.resolve(emptyTopologySnapshot()),
     io: { listDir: () => [], readFile: () => undefined },
     countProcesses: () => 0,
+    hostText: () => Promise.resolve({}),
   };
 }
 

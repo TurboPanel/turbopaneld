@@ -1,0 +1,270 @@
+import { assert, assertEquals } from "@std/assert";
+import { join } from "@std/path";
+import {
+  BufferedReader,
+  encodeText,
+} from "../../orchestration/roles/docker-gate/files/http.ts";
+import { HELPER_COMPONENTS } from "../deploy/labels.ts";
+import {
+  fetchContainerLabels,
+  MAX_INSPECT_BYTES,
+} from "../../orchestration/roles/docker-gate/files/inspect.ts";
+import { review } from "../../orchestration/roles/docker-gate/files/review.ts";
+import { platformAccessRule } from "../../orchestration/roles/docker-gate/files/platform.ts";
+import { DEFAULT_POLICY_CONFIG } from "../../orchestration/roles/docker-gate/files/policy.ts";
+import { GateStats } from "../../orchestration/roles/docker-gate/files/stats.ts";
+import type {
+  GateConn,
+  LogRecord,
+} from "../../orchestration/roles/docker-gate/files/proxy.ts";
+
+/**
+ * Jest/Mocha-shaped alias for {@link Deno.test}.
+ *
+ * Sonar typescript:S2187 only recognizes `test()` / `it()` / `describe()` and
+ * reports Deno suites as empty; keep this alias so analysis sees real tests.
+ */
+const test = Deno.test.bind(Deno);
+
+/** An engine that answers every connection with `reply` (or never, for null). */
+async function withEngine(
+  reply: string | null,
+  fn: (connect: () => Promise<GateConn>) => Promise<void>,
+): Promise<void> {
+  const dir = await Deno.makeTempDir({ prefix: "tp-gate-inspect-" });
+  const path = join(dir, "engine.sock");
+  const listener = Deno.listen({ transport: "unix", path });
+  const held: Deno.Conn[] = [];
+  const serving = (async () => {
+    for await (const conn of listener) {
+      held.push(conn);
+      await new BufferedReader(conn).readHead();
+      if (reply !== null) {
+        await conn.write(encodeText(reply)).catch(() => 0);
+        conn.close();
+      }
+    }
+  })();
+  try {
+    await fn(() => Deno.connect({ transport: "unix", path }));
+  } finally {
+    listener.close();
+    for (const conn of held) {
+      try {
+        conn.close();
+      } catch { /* already closed */ }
+    }
+    await serving.catch(() => {});
+    await Deno.remove(dir, { recursive: true });
+  }
+}
+
+const json = (doc: unknown) => {
+  const body = JSON.stringify(doc);
+  return `HTTP/1.1 200 OK\r\nContent-Length: ${body.length}\r\n\r\n${body}`;
+};
+
+const opts = { sanitizeOps: false, sanitizeResources: false };
+
+test({
+  name: "a well-formed inspect answer yields the labels",
+  ...opts,
+  fn: () =>
+    withEngine(json({ Config: { Labels: { a: "b" } } }), async (connect) => {
+      assertEquals(await fetchContainerLabels(connect, "c"), { a: "b" });
+    }),
+});
+
+test({
+  name: "a non-200, an oversize or a malformed answer cannot tell the owner",
+  ...opts,
+  fn: async () => {
+    const big = "x".repeat(MAX_INSPECT_BYTES + 1);
+    const replies = [
+      "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n",
+      "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n",
+      `HTTP/1.1 200 OK\r\nContent-Length: ${big.length}\r\n\r\n${big}`,
+      "HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\n{x}",
+    ];
+    const results = await Promise.all(
+      replies.map((reply) =>
+        withEngine(reply, async (connect) => {
+          assertEquals(await fetchContainerLabels(connect, "c"), undefined);
+        })
+      ),
+    );
+    assertEquals(results.length, replies.length);
+  },
+});
+
+test({
+  name: "an engine that never answers times out instead of holding the request",
+  ...opts,
+  fn: () =>
+    withEngine(null, async (connect) => {
+      const started = Date.now();
+      assertEquals(await fetchContainerLabels(connect, "c", 100), undefined);
+      assert(Date.now() - started < 2000, "the lookup was bounded");
+    }),
+});
+
+test({
+  name:
+    "an action whose target cannot be inspected is an owner-unknown finding",
+  ...opts,
+  fn: () =>
+    withEngine(
+      "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n",
+      async (connect) => {
+        const logs: LogRecord[] = [];
+        const findings = await review(
+          {
+            method: "POST",
+            path: "/containers/ghost/stop",
+            query: new URLSearchParams(),
+          },
+          "containers.action",
+          {
+            policy: DEFAULT_POLICY_CONFIG,
+            resolvePath: (path) => Promise.resolve(path),
+            log: (record) => logs.push(record),
+            stats: new GateStats(),
+            connectUpstream: connect,
+          },
+        );
+        assertEquals(findings, [{ rule: "owner-unknown", detail: "ghost" }]);
+        assertEquals(
+          logs.filter((l) => l.event === "docker-gate.would-deny").length,
+          1,
+        );
+      },
+    ),
+});
+
+const platformEngine = { "tp.managed.engine": "postgres" };
+const proxysql = {
+  "turbopanel.role": "ingress",
+  "com.turbopanel.system.component": "managed-ingress",
+};
+const traefik = {
+  "turbopanel.role": "ingress",
+  "com.turbopanel.system.component": "hosting-ingress",
+};
+const database = {
+  "turbopanel.role": "turbopanel",
+  "com.turbopanel.system.component": "database",
+};
+const tenant = { "com.docker.compose.project": "app" };
+
+test({
+  name: "platformAccessRule allows only the daemon's exec pairs",
+  ...opts,
+  fn: () => {
+    const exec = "/containers/c/exec";
+    const mysql = { Cmd: ["/usr/bin/mysql", "-h127.0.0.1"] };
+    const rule = platformAccessRule;
+    assertEquals(rule(exec, platformEngine, { Cmd: ["pg_ctl"] }), undefined);
+    assertEquals(rule(exec, proxysql, mysql), undefined);
+    assertEquals(rule(exec, proxysql, { Cmd: ["sh"] }), "platform-exec");
+    assertEquals(rule(exec, proxysql, undefined), "platform-exec");
+    assertEquals(rule(exec, traefik, mysql), "platform-exec");
+    assertEquals(rule(exec, database, mysql), "platform-exec");
+    for (const labels of [platformEngine, proxysql, traefik, database]) {
+      const attach = rule("/containers/c/attach", labels, undefined);
+      assertEquals(attach, "platform-attach");
+      const ws = rule("/containers/c/attach/ws", labels, undefined);
+      assertEquals(ws, "platform-attach");
+      const cp = rule("/containers/c/archive", labels, undefined);
+      assertEquals(cp, "platform-archive");
+    }
+  },
+});
+
+test({
+  name: "platformAccessRule allows attach only on the four docker run helpers",
+  ...opts,
+  fn: () => {
+    for (const component of HELPER_COMPONENTS) {
+      const labels = {
+        "turbopanel.role": "turbopanel",
+        "com.turbopanel.system.component": component,
+      };
+      for (const path of ["attach", "attach/ws"]) {
+        assertEquals(
+          platformAccessRule(`/containers/c/${path}`, labels, undefined),
+          undefined,
+          component,
+        );
+      }
+      assertEquals(
+        platformAccessRule("/containers/c/exec", labels, { Cmd: ["sh"] }),
+        "platform-exec",
+      );
+      assertEquals(
+        platformAccessRule("/containers/c/archive", labels, undefined),
+        "platform-archive",
+      );
+    }
+  },
+});
+
+test({
+  name: "platformAccessRule leaves tenant containers and other routes alone",
+  ...opts,
+  fn: () => {
+    for (const path of ["exec", "attach", "archive"]) {
+      const found = platformAccessRule(
+        `/containers/c/${path}`,
+        tenant,
+        { Cmd: ["sh"] },
+      );
+      assertEquals(found, undefined);
+    }
+    const stop = platformAccessRule("/containers/c/stop", proxysql, undefined);
+    assertEquals(stop, undefined);
+  },
+});
+
+async function reviewExec(
+  labels: Record<string, string>,
+  path: string,
+  body: unknown,
+) {
+  let found: unknown;
+  await withEngine(json({ Config: { Labels: labels } }), async (connect) => {
+    found = await review(
+      {
+        method: "POST",
+        path,
+        query: new URLSearchParams(),
+        body,
+      },
+      "containers.exec.create",
+      {
+        policy: DEFAULT_POLICY_CONFIG,
+        resolvePath: (p) => Promise.resolve(p),
+        log: () => {},
+        stats: new GateStats(),
+        connectUpstream: connect,
+      },
+    );
+  });
+  return found;
+}
+
+test({
+  name: "review flags exec into a platform container, not a tenant's",
+  ...opts,
+  fn: async () => {
+    const body = { Cmd: ["sh"] };
+    assertEquals(
+      await reviewExec(traefik, "/containers/ingress/exec", body),
+      [{ rule: "platform-exec", detail: "ingress" }],
+    );
+    assertEquals(await reviewExec(tenant, "/containers/app/exec", body), []);
+    assertEquals(
+      await reviewExec(platformEngine, "/containers/db/exec", body),
+      [],
+    );
+  },
+});

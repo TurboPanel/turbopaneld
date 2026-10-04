@@ -12,6 +12,21 @@ import {
 } from "../orchestration/assets.ts";
 import { resolveUpdateChannelConfig } from "../update/config.ts";
 import { DAEMON_VERSION } from "../version.ts";
+import {
+  runScheduledBackup,
+  type ScheduledBackupOutcome,
+} from "../backups/runner.ts";
+import { removeFirewall } from "../firewall/apply.ts";
+import { foldManagedPublicChain, type FoldOutcome } from "../firewall/fold.ts";
+import {
+  confirmPendingFirewall,
+  type FirewallConfirmOutcome,
+} from "../firewall/confirm.ts";
+import {
+  type PendingFirewallMarker,
+  readPendingMarker,
+} from "../firewall/pending.ts";
+import { resolveLayout } from "../paths/layout.ts";
 
 export type DaemonCliIo = {
   args?: string[];
@@ -22,6 +37,11 @@ export type DaemonCliIo = {
   resolveUpdateChannelConfig?: typeof resolveUpdateChannelConfig;
   runBootstrapOrchestration?: () => Promise<void>;
   runInstaller?: (opts: RunInstallerOptions) => Promise<void>;
+  runScheduledBackup?: (policyId: string) => Promise<ScheduledBackupOutcome>;
+  removeFirewall?: () => Promise<void>;
+  confirmFirewall?: (digest: string) => Promise<FirewallConfirmOutcome>;
+  foldFirewall?: () => Promise<FoldOutcome>;
+  readPendingFirewall?: () => Promise<PendingFirewallMarker | null>;
 };
 
 export type InstallerCliFlags = {
@@ -51,9 +71,10 @@ function resolveIo(io: DaemonCliIo = {}): Required<
 }
 
 /**
- * Handle one-shot CLI verbs (`version`, bootstrap, installer). Returns after
- * those paths `Deno.exit`. Fall-through means the caller should start the
- * long-running daemon.
+ * Handle one-shot CLI verbs (`version`, bootstrap, installer, `backup-run`,
+ * `firewall`).
+ * Returns after those paths `Deno.exit`. Fall-through means the caller should
+ * start the long-running daemon.
  */
 export async function maybeRunDaemonCli(io: DaemonCliIo = {}): Promise<void> {
   const { args, exit, log, error } = resolveIo(io);
@@ -86,10 +107,160 @@ export async function maybeRunDaemonCli(io: DaemonCliIo = {}): Promise<void> {
     return;
   }
 
+  if (args[0] === "backup-run") {
+    await runBackupRunCli(args.slice(1), io);
+    return;
+  }
+
+  if (args[0] === "firewall") {
+    await runFirewallCli(args.slice(1), io);
+    return;
+  }
+
   if (args[0] !== "run-installer") {
     return;
   }
   await runInstallerCli(args.slice(1), io);
+}
+
+/**
+ * Exit codes for `backup-run <policyId>`: 0 the backup succeeded, 1 it ran and
+ * failed (a result was spooled), 2 bad usage or policy id, 3 the host holds no
+ * enabled policy with that id (nothing ran, nothing spooled).
+ */
+export const BACKUP_RUN_EXIT = {
+  succeeded: 0,
+  failed: 1,
+  usage: 2,
+  noPolicy: 3,
+} as const;
+
+async function runBackupRunCli(
+  args: string[],
+  io: DaemonCliIo = {},
+): Promise<void> {
+  const { exit, log, error } = resolveIo(io);
+  if (args.length !== 1) {
+    error("[backup-run] usage: backup-run <policyId>");
+    exit(BACKUP_RUN_EXIT.usage);
+    return;
+  }
+  let outcome: ScheduledBackupOutcome;
+  try {
+    outcome = await (io.runScheduledBackup ?? runScheduledBackup)(args[0]);
+  } catch (err) {
+    error(`[backup-run] ${sanitizeForLog(err)}`);
+    exit(BACKUP_RUN_EXIT.failed);
+    return;
+  }
+  if (outcome.kind !== "ran") {
+    error(`[backup-run] ${outcome.message}`);
+    exit(
+      outcome.kind === "no-policy"
+        ? BACKUP_RUN_EXIT.noPolicy
+        : BACKUP_RUN_EXIT.usage,
+    );
+    return;
+  }
+  const { result, resultPath } = outcome;
+  if (result.status === "succeeded") {
+    log(
+      `[backup-run] policy ${result.policyId}: ${result.backupId} (${result.sizeBytes} bytes); result ${resultPath}`,
+    );
+    exit(BACKUP_RUN_EXIT.succeeded);
+    return;
+  }
+  error(
+    `[backup-run] policy ${result.policyId} failed: ${result.error}; result ${resultPath}`,
+  );
+  exit(BACKUP_RUN_EXIT.failed);
+}
+
+/**
+ * Exit codes for `firewall`: 0 done (or nothing to do), 1 the confirm was not
+ * honoured (expired, rolled back, digest mismatch) or the action failed, 2 bad
+ * usage.
+ */
+export const FIREWALL_CLI_EXIT = { ok: 0, failed: 1, usage: 2 } as const;
+
+const FIREWALL_USAGE =
+  "[firewall] usage: firewall off | firewall status | firewall fold | firewall confirm [<digest>]";
+
+/**
+ * `turbopaneld firewall …`, run as root over SSH when the panel cannot be
+ * reached: `off` is the break-glass (removes every TurboPanel chain, jump and
+ * stored document and stops the guard), `confirm` makes the pending ruleset
+ * durable once the operator has proven the host is reachable, and `status`
+ * says what is pending.
+ */
+async function runFirewallCli(
+  args: string[],
+  io: DaemonCliIo = {},
+): Promise<void> {
+  const { exit, log, error } = resolveIo(io);
+  const verb = args[0];
+  const readPending = io.readPendingFirewall ??
+    (() => readPendingMarker(resolveLayout(Deno.env.toObject())));
+  try {
+    if (verb === "off" && args.length === 1) {
+      await (io.removeFirewall ?? removeFirewall)();
+      log("[firewall] TurboPanel firewall chains removed");
+      exit(FIREWALL_CLI_EXIT.ok);
+      return;
+    }
+    if (verb === "status" && args.length === 1) {
+      const pending = await readPending();
+      log(
+        pending === null
+          ? "[firewall] nothing pending"
+          : `[firewall] pending ${pending.digest} until ${pending.deadlineAt}`,
+      );
+      exit(FIREWALL_CLI_EXIT.ok);
+      return;
+    }
+    if (verb === "fold" && args.length === 1) {
+      const outcome = await (io.foldFirewall ?? foldManagedPublicChain)();
+      const detail = outcome.reasons.length > 0
+        ? ` (${outcome.reasons.join("; ")})`
+        : "";
+      log(`[firewall] fold ${outcome.state}${detail}`);
+      exit(
+        outcome.state === "partial"
+          ? FIREWALL_CLI_EXIT.failed
+          : FIREWALL_CLI_EXIT.ok,
+      );
+      return;
+    }
+    if (verb === "confirm" && args.length <= 2) {
+      await runFirewallConfirmCli(args[1], io, readPending);
+      return;
+    }
+  } catch (err) {
+    error(`[firewall] ${sanitizeForLog(err)}`);
+    exit(FIREWALL_CLI_EXIT.failed);
+    return;
+  }
+  error(FIREWALL_USAGE);
+  exit(FIREWALL_CLI_EXIT.usage);
+}
+
+async function runFirewallConfirmCli(
+  digestArg: string | undefined,
+  io: DaemonCliIo,
+  readPending: () => Promise<PendingFirewallMarker | null>,
+): Promise<void> {
+  const { exit, log, error } = resolveIo(io);
+  const digest = digestArg ?? (await readPending())?.digest;
+  if (digest === undefined) {
+    log("[firewall] nothing pending");
+    exit(FIREWALL_CLI_EXIT.ok);
+    return;
+  }
+  const outcome = await (io.confirmFirewall ?? confirmPendingFirewall)(digest);
+  const honoured = outcome.state === "confirmed" ||
+    outcome.state === "nothing_pending";
+  (honoured ? log : error)(`[firewall] ${outcome.state}: ${outcome.summary}`);
+  exit(honoured ? FIREWALL_CLI_EXIT.ok : FIREWALL_CLI_EXIT.failed);
 }
 
 function isInstallerPlaybook(value: string): value is InstallerPlaybook {

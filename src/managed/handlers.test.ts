@@ -300,6 +300,41 @@ test("handleManagedLifecycle with memberId returns member health when replicatio
   });
 });
 
+test("handleManagedLifecycle reports the member's payload role and defaults to primary", async () => {
+  const managedId = "managed_lifecycle_member_role";
+  const memberId = "00000000-0000-4000-8000-0000000000a2";
+  const runDocker = (args: string[]) => {
+    if (args[0] === "compose" && args.includes("ps")) {
+      return Promise.resolve(dockerOk(RUNNING_PS));
+    }
+    if (args[0] === "exec") {
+      return Promise.resolve(dockerOk("streaming\t0\n"));
+    }
+    return Promise.resolve(dockerOk());
+  };
+  await withManagedStateDir(managedId, async () => {
+    const replica = await handleManagedLifecycle(
+      {
+        managedId,
+        action: "restart",
+        memberId,
+        engine: "postgres",
+        role: "replica",
+      },
+      new Date().toISOString(),
+      { runDocker },
+    );
+    assertEquals(replica.member?.role, "replica");
+
+    const legacy = await handleManagedLifecycle(
+      { managedId, action: "restart", memberId, engine: "postgres" },
+      new Date().toISOString(),
+      { runDocker },
+    );
+    assertEquals(legacy.member?.role, "primary");
+  });
+});
+
 function mockDestroyDocker(options?: {
   down?: DockerCliResult;
   psStdout?: string[];

@@ -4,7 +4,7 @@
  *
  * Mirrors `turbopanel/scripts/check-contract-drift.mjs`. Missing sibling
  * `../turbopanel` → skip (exit 0). Dual-checkout CI (turbopanel
- * `metrics-legacy` job) runs the Node twin; this task covers a co-located
+ * `contract-twin` job) runs the Node twin; this task covers a co-located
  * daemon workspace.
  *
  * The expand-only snapshot pins a normalized type signature per field. A

@@ -5,6 +5,7 @@
  * inline instance-only imports.
  */
 import type { SensorCapabilities } from "../metrics/collector/sensors/discovery.ts";
+import { ConfigValueError, safeUrlPath } from "./config-values.ts";
 
 export const COMMAND_TYPES = [
   "daemon.ping",
@@ -16,6 +17,8 @@ export const COMMAND_TYPES = [
   "server.tls.trust.reconcile",
   "server.principals.reconcile",
   "server.firewall.reconcile",
+  "server.firewall.confirm",
+  "server.backups.reconcile",
   "environment.deploy",
   "environment.lifecycle",
   "environment.stop",
@@ -28,6 +31,8 @@ export const COMMAND_TYPES = [
   "managed.ingress.reconcile",
   "managed.ha.reconcile",
   "managed.ha.failover",
+  "storage.backup",
+  "storage.restore",
   "system.reconcile",
 ] as const;
 
@@ -137,6 +142,11 @@ export type PrincipalsReconcileResult = {
   keysChanged: string[];
   keysRemoved: string[];
   sshdReloaded: boolean;
+  /**
+   * True when `tpsftp` members are jailed in their principal home (the host's
+   * SFTP chroot switch is on). Additive: older control planes ignore it.
+   */
+  sftpChroot: boolean;
   warnings: string[];
 };
 
@@ -267,6 +277,13 @@ export type FirewallReconcileResult = {
   digest: string;
   ruleCount: number;
   ipv6Applied: boolean;
+  /**
+   * Managed applies only: `applied`, `skipped` (policy ipv6: skip) or
+   * `ipv6_unfiltered` (v4 enforced, a rendered v6 ruleset could not be applied
+   * because ip6tables is missing; the panel should show a degraded state).
+   * Absent on observe, off and refused results.
+   */
+  ipv6Status?: "applied" | "skipped" | "ipv6_unfiltered";
   /** `DOCKER-USER` existed and `TP-FWD` is hung off it (v4). */
   forwardApplied: boolean;
   /**
@@ -278,7 +295,239 @@ export type FirewallReconcileResult = {
    */
   sshPorts: number[];
   warnings: string[];
+  /**
+   * Present when this apply loaded rules that are not yet durable: the root
+   * guard rolls them back at `deadlineAt` unless a `server.firewall.confirm`
+   * for `digest` arrives first. Absent for observe, off and refused applies.
+   */
+  confirmation?: FirewallPendingConfirmation;
+  /**
+   * Set when the host's guard rolled a ruleset back and nothing has been
+   * confirmed since (only while no ruleset is pending). Lets the control plane
+   * report "rolled back" without ever asking.
+   */
+  lastRollback?: FirewallLastRollback;
+  /**
+   * The kernel's verdict on the rendered ruleset when this result did not
+   * apply it: observe (a preview) or a refused apply. Absent when the rules
+   * were loaded (the load itself is the verdict).
+   */
+  validation?: FirewallValidation;
+  /** The rendered documents, on the same results as `validation`; omitted when over {@link FIREWALL_RENDERED_MAX_BYTES}. */
+  rendered?: FirewallRendered;
   summary: string;
+};
+
+/** The guard's record of an undone ruleset. */
+export type FirewallLastRollback = {
+  digest: string;
+  at: string;
+  restored: "durable" | "none" | "open";
+};
+
+/**
+ * A ruleset that was applied and is waiting to be confirmed (commit-confirm).
+ * Must stay in sync with the instance canonical shape.
+ */
+export type FirewallPendingConfirmation = {
+  /**
+   * `pending`: loaded, rolls back at `deadlineAt` unless confirmed.
+   * `confirmed`: the daemon confirmed its own change (see `autoConfirm`).
+   */
+  state: "pending" | "confirmed";
+  /** ISO time after which the host's root guard rolls the ruleset back. */
+  deadlineAt: string;
+  /** The confirm window the host armed, in seconds. */
+  windowSeconds: number;
+  /**
+   * The daemon's own confirm attempt: after the rules went live it made an
+   * authenticated round trip to the control plane and, if that worked,
+   * confirmed. `ok: false` means it did nothing and the host rolls back at
+   * `deadlineAt`. `reason` says why, in plain words.
+   */
+  autoConfirm?: { ok: boolean; reason: string };
+};
+
+/**
+ * What the kernel said about a rendered ruleset when the daemon only checked
+ * it (`iptables-restore --noflush --test`: parse and validate, load nothing).
+ * Present on results that did not apply (observe, or a refused apply). Must
+ * stay in sync with the instance canonical shape.
+ */
+export type FirewallValidation = {
+  /** Every family that was checked accepted the ruleset. */
+  ok: boolean;
+  /** One entry per refusing family, e.g. `iptables-restore --test refused the ruleset: ...`. */
+  errors: string[];
+};
+
+/** Longest rendered document a result carries (bytes of text); a longer one is left out with a warning. */
+export const FIREWALL_RENDERED_MAX_BYTES = 65_536;
+
+/**
+ * The exact `iptables-restore` / `ip6tables-restore` documents the daemon
+ * rendered, so the console can show what would be loaded. `v6` is absent under
+ * `ipv6: skip` or when ip6tables is unavailable. Must stay in sync with the
+ * instance canonical shape.
+ */
+export type FirewallRendered = {
+  v4: string;
+  v6?: string;
+};
+
+/**
+ * `server.firewall.confirm`: promote the pending ruleset named by `digest` (the
+ * reconcile result's digest, lower-case sha256 hex) to durable. Must stay in
+ * sync with the instance canonical shape.
+ */
+export type FirewallConfirmPayload = {
+  digest: string;
+};
+
+export type FirewallConfirmState =
+  | "confirmed"
+  | "nothing_pending"
+  | "digest_mismatch"
+  | "expired"
+  | "rolled_back";
+
+/**
+ * - `confirmed`: the pending ruleset is now durable (it survives a reboot).
+ * - `nothing_pending`: no unconfirmed ruleset (already confirmed, or none).
+ * - `digest_mismatch`: a different ruleset is pending; `pendingDigest` names it.
+ * - `expired`: the window ran out; the host is rolling back, not promoting.
+ * - `rolled_back`: the guard already restored the previous rules.
+ */
+export type FirewallConfirmResult = {
+  state: FirewallConfirmState;
+  digest: string;
+  pendingDigest?: string;
+  summary: string;
+};
+
+/**
+ * One scheduled backup as this host runs it. Must stay in sync with the
+ * instance canonical `server.backups.reconcile` entry (pinned in
+ * `scripts/contract-field-snapshot.json`).
+ *
+ * `onCalendar` arrives already translated from the authored schedule, so the
+ * daemon renders it and never parses cron. A `managed` entry carries what the
+ * host needs to dump the engine on its own (`engine`, `artifactExtension`),
+ * and a `copy` entry where the storage copy's bytes live
+ * ({@link CopyBackupSource}): a scheduled run never asks the control plane
+ * anything.
+ */
+export type BackupPolicyWireEntry = {
+  policyId: string;
+  targetKind: "managed" | "copy";
+  managedId?: string;
+  engine?: ManagedEngineCode;
+  artifactExtension?: ManagedBackupArtifactExtension;
+  copyId?: string;
+  copyProvider?: CopyBackupProvider;
+  volumeName?: string;
+  hostPath?: string;
+  organizationId?: string;
+  storageId?: string;
+  onCalendar: string;
+  retentionKeep: number;
+  enabled: boolean;
+};
+
+/** The storage-copy providers a backup can read: a named Docker volume, or a host directory. */
+export type CopyBackupProvider = "docker" | "path";
+
+/**
+ * Where one storage copy's bytes live on this host. Must stay in sync with the
+ * instance canonical `CopyBackupSource`.
+ *
+ * - `docker`: the named volume (`volumeName`) deploy mounts.
+ * - `path`: `hostPath`, or — when absent — the default
+ *   `<stateDir>/storage/<organizationId>/<storageId>/<copyId>/data` deploy
+ *   materializes. The host refuses any directory outside its own storage root
+ *   and `/srv/users/`.
+ */
+export type CopyBackupSource = {
+  copyId: string;
+  copyProvider: CopyBackupProvider;
+  volumeName?: string;
+  hostPath?: string;
+  organizationId?: string;
+  storageId?: string;
+};
+
+/**
+ * Must stay in sync with the instance canonical `storage.backup` shape.
+ * `create` archives the copy (live, no pause) into
+ * `<backupDir>/copies/<copyId>/<backupId>.tar.gz`; `delete` removes an
+ * artifact, and `policyId` locates one a scheduled run made
+ * (`<backupDir>/copies/<copyId>/policy-<policyId>/…`).
+ */
+export type StorageBackupPayload = CopyBackupSource & {
+  action: "create" | "delete";
+  backupId: string;
+  policyId?: string;
+};
+
+/** Must stay in sync with the instance canonical `storage.backup` result. */
+export type StorageBackupResult = {
+  backupId: string;
+  deleted?: boolean;
+  path?: string;
+  sizeBytes?: number;
+  checksum?: string;
+  completedAt?: string;
+  summary?: string;
+};
+
+/**
+ * Must stay in sync with the instance canonical `storage.restore` shape.
+ *
+ * Replaces one storage copy's contents with an archive this host made.
+ * `checksum` comes from the control plane's `archive` row: an artifact whose
+ * sha256 differs is refused before anything is stopped.
+ */
+export type StorageRestorePayload = CopyBackupSource & {
+  backupId: string;
+  checksum: string;
+  policyId?: string;
+};
+
+/** Must stay in sync with the instance canonical `storage.restore` result. Container ids only. */
+export type StorageRestoreResult = {
+  backupId: string;
+  restoredAt?: string;
+  stopped?: string[];
+  restarted?: string[];
+  notRestarted?: string[];
+  summary?: string;
+};
+
+/**
+ * Must stay in sync with the instance canonical `server.backups.reconcile`
+ * shape. `policies` is the **complete** set for this server, the same contract
+ * as `server.principals.reconcile`: a policy absent from it is one this host
+ * no longer runs, and its timer goes.
+ */
+export type BackupsReconcilePayload = {
+  policies: BackupPolicyWireEntry[];
+};
+
+/** When one policy's timer next fires; `nextRunAt` is absent while none is scheduled. */
+export type BackupPolicyNextRun = {
+  policyId: string;
+  nextRunAt?: string;
+};
+
+/** Must stay in sync with the instance canonical `server.backups.reconcile` shape. */
+export type BackupsReconcileResult = {
+  policiesApplied: number;
+  /** Policy ids whose units were written or rewritten. */
+  unitsChanged: string[];
+  /** Policy ids whose units were removed. */
+  unitsRemoved: string[];
+  nextRuns: BackupPolicyNextRun[];
+  warnings: string[];
 };
 
 /** Must stay in sync with the instance canonical `server.tls.trust.reconcile` shape. */
@@ -545,8 +794,35 @@ export type EnvironmentDeployServiceHook = {
   buildDisableCache?: boolean;
 };
 
+/**
+ * How a site's PHP runs, always as the site's principal (never root, never a
+ * web server account): `fastcgi` is php-cgi on a systemd socket, `fpm` one
+ * php-fpm master per site, and the two `lsphp-*` forms are OpenLiteSpeed's.
+ */
+export type EnvironmentDeployPhpMode =
+  | "fastcgi"
+  | "fpm"
+  | "lsphp-detached"
+  | "lsphp-attached";
+
+/** Every {@link EnvironmentDeployPhpMode}, in the control plane's order. */
+export const ENVIRONMENT_DEPLOY_PHP_MODES: readonly EnvironmentDeployPhpMode[] =
+  Object.freeze(["fastcgi", "fpm", "lsphp-detached", "lsphp-attached"]);
+
+export function isEnvironmentDeployPhpMode(
+  value: unknown,
+): value is EnvironmentDeployPhpMode {
+  return typeof value === "string" &&
+    (ENVIRONMENT_DEPLOY_PHP_MODES as readonly string[]).includes(value);
+}
+
 export type EnvironmentDeployHostingPhp = {
   version?: string;
+  /**
+   * Omitted keeps the shared php-fpm master (the layout before per-site PHP);
+   * the control plane sends a mode for every PHP site it resolves one for.
+   */
+  mode?: EnvironmentDeployPhpMode;
   /** Validated `php_admin_value` directives, rendered to strings upstream. */
   settings?: Record<string, string>;
   /** Validated php-fpm pool directives (`pm`, `pm.max_children`, …). */
@@ -617,9 +893,19 @@ export type EnvironmentDeployCronJob = {
 
 export type EnvironmentDeploySite = {
   composeServiceName: string;
-  engine: "caddy" | "apache" | "nginx" | "openlitespeed";
+  /**
+   * `nginx+apache` is nginx in front of Apache: nginx serves common static
+   * types on `listenPort` and proxies everything else to Apache on
+   * `backendPort`, where `.htaccess` and the site's PHP mode apply.
+   */
+  engine: "caddy" | "apache" | "nginx" | "openlitespeed" | "nginx+apache";
   root: string;
   listenPort: number;
+  /**
+   * Apache's loopback port behind nginx. Required for `nginx+apache` (only
+   * nginx connects to it), absent for every other engine.
+   */
+  backendPort?: number;
   /** Omitted means `release`, which is the behavior every existing site had. */
   sourceKind?: EnvironmentDeploySiteSourceKind;
   /**
@@ -944,6 +1230,12 @@ export type EnvironmentDeployDockerNetwork = {
  */
 export type EnvironmentDeployHostAccess = {
   hostLevelApproved?: boolean;
+  /**
+   * True only when the organization allows a build to fetch its source from a
+   * public remote (a URL or git `build.context`). Absent reads as `false`; the
+   * daemon then refuses such a context. Internal hosts are refused either way.
+   */
+  remoteBuildSourcesApproved?: boolean;
 };
 
 export type EnvironmentDeployPayload = EnvironmentDeployHostAccess & {
@@ -1030,6 +1322,22 @@ export type EnvironmentDeployPayload = EnvironmentDeployHostAccess & {
    * (cacheless redeploy from the control plane).
    */
   noCache?: boolean;
+  /**
+   * `sequential` stops the previous version, runs migrations, starts the new
+   * version, gates on health and rolls back (see `deploy/sequential-deploy.ts`).
+   * Absent or `inplace` is the original `compose up -d` deploy. An older
+   * control plane never sends it, so it keeps deploying in place.
+   */
+  deployStrategy?: EnvironmentDeployStrategy;
+  /** Environment's declared migration status; only `breaking` changes the engine. */
+  migrations?: EnvironmentDeployMigrations;
+  /** Seconds the health gate waits (default 120 when absent). */
+  healthTimeoutSeconds?: number;
+  /**
+   * Compose services left running while a sequential deploy stops the
+   * application (databases and other stateful services).
+   */
+  keepRunningServices?: string[];
   tlsMaterial?: EnvironmentDeployTlsMaterial[];
   variableMaterial?: EnvironmentDeployVariableMaterial[];
   envFile?: string;
@@ -1069,6 +1377,13 @@ export type EnvironmentDeployContainer = {
  * surface is the image tag plus the pinned tools that produced it; a native
  * release simply omits those three fields.
  */
+export type EnvironmentDeployStrategy = "inplace" | "sequential";
+export type EnvironmentDeployMigrations =
+  | "none"
+  | "compatible"
+  | "breaking"
+  | "unknown";
+
 export type EnvironmentDeployResultRelease = {
   composeServiceName: string;
   serviceId: string;
@@ -1079,6 +1394,26 @@ export type EnvironmentDeployResultRelease = {
   railpackPlanVersion?: string;
 };
 
+/**
+ * What the daemon recognised in a site's document root. Detected from file
+ * names (never from `wp-config.php` contents), so it carries no secret.
+ */
+export type EnvironmentDeployResultApp = {
+  kind: "wordpress";
+  /** WordPress release when `wp-includes/version.php` could be read. */
+  version?: string;
+};
+
+/**
+ * One site this deploy applied and what it found in the document root. `app`
+ * is omitted for a plain PHP or static site; the row is still sent so the
+ * control plane can clear a fact that no longer holds.
+ */
+export type EnvironmentDeployResultSite = {
+  composeServiceName: string;
+  app?: EnvironmentDeployResultApp;
+};
+
 export type EnvironmentDeployResult = {
   projectName: string;
   summary: string;
@@ -1086,6 +1421,8 @@ export type EnvironmentDeployResult = {
   containers?: EnvironmentDeployContainer[];
   /** Git-backed releases this deploy applied; omitted when there were none. */
   releases?: EnvironmentDeployResultRelease[];
+  /** Per-site facts for the sites this deploy applied; omitted when none. */
+  sites?: EnvironmentDeployResultSite[];
 };
 
 export type EnvironmentStopPayload = {
@@ -1109,6 +1446,14 @@ export type EnvironmentStopPayload = {
    * that named these, so the payload is the only remaining copy for this host.
    */
   siteReleases?: Array<{ serviceId: string; username: string }>;
+  /**
+   * Principals no project, site or app on this host uses once this delete
+   * commits: the daemon retires each through `tp-host principal-remove`
+   * (slice, processes, key file, group memberships, home tree, account and
+   * group) after everything above is reclaimed. Only ever set by a delete
+   * teardown; a plain stop never carries it.
+   */
+  retirePrincipals?: Array<{ username: string }>;
 };
 
 export type EnvironmentStopResult = {
@@ -1344,6 +1689,24 @@ export type ManagedReplicationHealth = {
   lagBytes?: number;
   lagSeconds?: number;
   observedAt: string;
+  /** Standby only: `pg_last_wal_receive_lsn()` text (absent when NULL). */
+  receivedLsn?: string;
+  /** Standby only: `pg_last_wal_replay_lsn()` text (absent when NULL). */
+  replayLsn?: string;
+  /** Standby only, while streaming: received-vs-primary byte lag. */
+  receiveLagBytes?: number;
+  /**
+   * Standby only, on `managed-health-result`: the daemon's last `streaming`
+   * read of this member. `ageMs` is measured on the daemon's monotonic clock
+   * when the result is built.
+   */
+  lastStreaming?: {
+    at: string;
+    ageMs: number;
+    lagBytes?: number;
+    lagSeconds?: number;
+    receiveLagBytes?: number;
+  };
 };
 
 /** Must stay in sync with the instance canonical `managed.apply` shape. */
@@ -1438,6 +1801,12 @@ export type ManagedLifecyclePayload = {
    * (defaults to postgres).
    */
   engine?: ManagedEngineCode;
+  /**
+   * Optional HA role of the member being acted on, so its health is reported
+   * under the right role. Absent on in-flight commands from older releases
+   * (defaults to primary).
+   */
+  role?: "primary" | "replica";
 };
 
 /** Must stay in sync with the instance canonical `managed.lifecycle` shape. */
@@ -2377,11 +2746,202 @@ export function parseFirewallReconcileResult(
     digest: value.digest,
     ruleCount: value.ruleCount,
     ipv6Applied: value.ipv6Applied as boolean,
+    ...(value.ipv6Status === undefined
+      ? {}
+      : { ipv6Status: parseIpv6Status(value.ipv6Status) }),
     forwardApplied: value.forwardApplied as boolean,
     sshPorts: parseFirewallPortList(value.sshPorts, "sshPorts"),
     warnings: [...value.warnings],
+    ...(value.confirmation === undefined
+      ? {}
+      : { confirmation: parseFirewallPendingConfirmation(value.confirmation) }),
+    ...(value.lastRollback === undefined
+      ? {}
+      : { lastRollback: parseFirewallLastRollback(value.lastRollback) }),
+    ...(value.validation === undefined
+      ? {}
+      : { validation: parseFirewallValidation(value.validation) }),
+    ...(value.rendered === undefined
+      ? {}
+      : { rendered: parseFirewallRendered(value.rendered) }),
     summary: value.summary,
   };
+}
+
+function parseIpv6Status(
+  value: unknown,
+): "applied" | "skipped" | "ipv6_unfiltered" {
+  if (
+    value !== "applied" && value !== "skipped" && value !== "ipv6_unfiltered"
+  ) {
+    throw new TypeError(
+      "ipv6Status must be applied, skipped or ipv6_unfiltered",
+    );
+  }
+  return value;
+}
+
+const FIREWALL_VALIDATION_MAX_ERRORS = 8;
+const FIREWALL_VALIDATION_MAX_ERROR_LENGTH = 500;
+
+function parseFirewallValidation(value: unknown): FirewallValidation {
+  if (!isRecord(value) || typeof value.ok !== "boolean") {
+    throw new TypeError("validation must carry a boolean ok");
+  }
+  if (
+    !Array.isArray(value.errors) ||
+    value.errors.length > FIREWALL_VALIDATION_MAX_ERRORS ||
+    !value.errors.every((entry) =>
+      typeof entry === "string" &&
+      entry.length <= FIREWALL_VALIDATION_MAX_ERROR_LENGTH
+    )
+  ) {
+    throw new TypeError(
+      "validation.errors must be a short list of short strings",
+    );
+  }
+  return { ok: value.ok, errors: [...value.errors] };
+}
+
+function parseFirewallRenderedDocument(value: unknown, field: string): string {
+  if (
+    typeof value !== "string" || value.length > FIREWALL_RENDERED_MAX_BYTES
+  ) {
+    throw new TypeError(
+      `rendered.${field} must be a string of at most ${FIREWALL_RENDERED_MAX_BYTES} characters`,
+    );
+  }
+  return value;
+}
+
+function parseFirewallRendered(value: unknown): FirewallRendered {
+  if (!isRecord(value)) throw new Error("rendered must be an object");
+  const rendered: FirewallRendered = {
+    v4: parseFirewallRenderedDocument(value.v4, "v4"),
+  };
+  if (value.v6 !== undefined) {
+    rendered.v6 = parseFirewallRenderedDocument(value.v6, "v6");
+  }
+  return rendered;
+}
+
+function parseFirewallLastRollback(value: unknown): FirewallLastRollback {
+  if (
+    !isRecord(value) || typeof value.digest !== "string" ||
+    !/^[a-f0-9]{64}$/.test(value.digest) || typeof value.at !== "string" ||
+    Number.isNaN(Date.parse(value.at)) ||
+    (value.restored !== "durable" && value.restored !== "none" &&
+      value.restored !== "open")
+  ) {
+    throw new Error("lastRollback must be a rollback record");
+  }
+  return { digest: value.digest, at: value.at, restored: value.restored };
+}
+
+function parseFirewallAutoConfirm(
+  value: unknown,
+): { ok: boolean; reason: string } {
+  if (
+    !isRecord(value) || typeof value.ok !== "boolean" ||
+    typeof value.reason !== "string"
+  ) {
+    throw new Error("confirmation.autoConfirm must be { ok, reason }");
+  }
+  return { ok: value.ok, reason: value.reason };
+}
+
+function parseFirewallPendingConfirmation(
+  value: unknown,
+): FirewallPendingConfirmation {
+  if (
+    !isRecord(value) ||
+    (value.state !== "pending" && value.state !== "confirmed")
+  ) {
+    throw new Error("confirmation must be a pending or confirmed confirmation");
+  }
+  if (
+    typeof value.deadlineAt !== "string" ||
+    Number.isNaN(Date.parse(value.deadlineAt))
+  ) {
+    throw new TypeError("confirmation.deadlineAt must be an ISO time");
+  }
+  if (
+    typeof value.windowSeconds !== "number" ||
+    !Number.isInteger(value.windowSeconds) || value.windowSeconds < 1 ||
+    value.windowSeconds > 3600
+  ) {
+    throw new Error(
+      "confirmation.windowSeconds must be an integer from 1 to 3600",
+    );
+  }
+  return {
+    state: value.state,
+    deadlineAt: value.deadlineAt,
+    windowSeconds: value.windowSeconds,
+    ...(value.autoConfirm === undefined
+      ? {}
+      : { autoConfirm: parseFirewallAutoConfirm(value.autoConfirm) }),
+  };
+}
+
+const FIREWALL_DIGEST_RE = /^[a-f0-9]{64}$/;
+const FIREWALL_CONFIRM_STATES = new Set<FirewallConfirmState>([
+  "confirmed",
+  "nothing_pending",
+  "digest_mismatch",
+  "expired",
+  "rolled_back",
+]);
+
+/** Parse `server.firewall.confirm`. Byte-for-byte the instance's rules. */
+export function parseFirewallConfirmPayload(
+  value: unknown,
+): FirewallConfirmPayload {
+  if (!isRecord(value)) {
+    throw new Error("Invalid firewall confirm payload");
+  }
+  if (
+    typeof value.digest !== "string" || !FIREWALL_DIGEST_RE.test(value.digest)
+  ) {
+    throw new Error("digest must be a lower-case sha256 hex string");
+  }
+  return { digest: value.digest };
+}
+
+export function parseFirewallConfirmResult(
+  value: unknown,
+): FirewallConfirmResult {
+  if (!isRecord(value)) {
+    throw new Error("Invalid firewall confirm result");
+  }
+  if (!FIREWALL_CONFIRM_STATES.has(value.state as FirewallConfirmState)) {
+    throw new Error(
+      "state must be confirmed, nothing_pending, digest_mismatch, expired or rolled_back",
+    );
+  }
+  if (
+    typeof value.digest !== "string" || !FIREWALL_DIGEST_RE.test(value.digest)
+  ) {
+    throw new Error("digest must be a lower-case sha256 hex string");
+  }
+  if (typeof value.summary !== "string") {
+    throw new TypeError("summary must be a string");
+  }
+  const result: FirewallConfirmResult = {
+    state: value.state as FirewallConfirmState,
+    digest: value.digest,
+    summary: value.summary,
+  };
+  if (value.pendingDigest !== undefined) {
+    if (
+      typeof value.pendingDigest !== "string" ||
+      !FIREWALL_DIGEST_RE.test(value.pendingDigest)
+    ) {
+      throw new Error("pendingDigest must be a lower-case sha256 hex string");
+    }
+    result.pendingDigest = value.pendingDigest;
+  }
+  return result;
 }
 
 function parseOptionalNtpServerList(
@@ -2939,7 +3499,17 @@ function parseHostingPathPrefix(value: unknown): string | undefined {
   if (typeof value !== "string" || !value.startsWith("/")) {
     throw new TypeError("hostings[].pathPrefix must start with /");
   }
-  return value;
+  return parseUrlPathField("hostings[].pathPrefix", value);
+}
+
+/** {@link safeUrlPath}, reported as the wire contract's TypeError. */
+function parseUrlPathField(field: string, value: string): string {
+  try {
+    return safeUrlPath(field, value);
+  } catch (err) {
+    if (err instanceof ConfigValueError) throw new TypeError(err.message);
+    throw err;
+  }
 }
 
 function parseHostingTargetPort(value: unknown): number | undefined {
@@ -3044,7 +3614,10 @@ function parseHostingProxy(
   if (typeof value.gzip === "boolean") proxy.gzip = value.gzip;
   if (typeof value.brotli === "boolean") proxy.brotli = value.brotli;
   if (typeof value.stripPrefix === "string") {
-    proxy.stripPrefix = value.stripPrefix;
+    proxy.stripPrefix = parseUrlPathField(
+      "hostings[].proxy.stripPrefix",
+      value.stripPrefix,
+    );
   }
   return Object.keys(proxy).length === 0 ? undefined : proxy;
 }
@@ -3066,6 +3639,7 @@ function parseHostingPhp(
   if (!isRecord(value)) return undefined;
   const php: EnvironmentDeployHostingPhp = {};
   if (typeof value.version === "string") php.version = value.version;
+  if (isEnvironmentDeployPhpMode(value.mode)) php.mode = value.mode;
   for (const field of ["settings", "pool"] as const) {
     const kept = parseStringRecord(value[field]);
     if (kept) php[field] = kept;
@@ -3539,6 +4113,7 @@ const SITE_ENGINES = new Set([
   "apache",
   "nginx",
   "openlitespeed",
+  "nginx+apache",
 ]);
 
 function parseSiteEngine(
@@ -3560,6 +4135,24 @@ function parseSiteListenPort(value: unknown): number {
     throw new TypeError("Invalid sites entry");
   }
   return value;
+}
+
+/**
+ * Apache's port behind nginx: required for `nginx+apache`, a distinct
+ * loopback port, and dropped for any other engine (nothing would listen on it).
+ */
+function parseSiteBackendPort(
+  site: EnvironmentDeploySite,
+  value: unknown,
+): number | undefined {
+  if (site.engine !== "nginx+apache") return undefined;
+  const port = parseSiteListenPort(value);
+  if (port === site.listenPort) {
+    throw new TypeError(
+      `sites.${site.composeServiceName}: backendPort must differ from listenPort`,
+    );
+  }
+  return port;
 }
 
 function parseSiteOptionalId(value: unknown): number | undefined {
@@ -3856,9 +4449,13 @@ function parseSite(
   const site: EnvironmentDeploySite = {
     composeServiceName: parseNonEmptyString(value, "composeServiceName"),
     engine: parseSiteEngine(value.engine),
-    root: parseNonEmptyString(value, "root"),
+    // The panel form can carry stray whitespace; the daemon serves the path
+    // it validated, so the trim happens once, here.
+    root: parseNonEmptyString(value, "root").trim(),
     listenPort: parseSiteListenPort(value.listenPort),
   };
+  const backendPort = parseSiteBackendPort(site, value.backendPort);
+  if (backendPort !== undefined) site.backendPort = backendPort;
   const sourceKind = parseSiteSourceKind(value.sourceKind);
   if (sourceKind) site.sourceKind = sourceKind;
   const cron = parseCronJobs(value.cron, `sites.${site.composeServiceName}`);
@@ -4254,6 +4851,51 @@ function parseOptionalBoolean(
     throw new TypeError(`${fieldName} must be a boolean`);
   }
   return value;
+}
+
+function parseDeployStrategy(
+  value: unknown,
+): EnvironmentDeployStrategy | undefined {
+  if (value === undefined) return undefined;
+  if (value !== "inplace" && value !== "sequential") {
+    throw new TypeError("deployStrategy must be inplace or sequential");
+  }
+  return value;
+}
+
+function parseDeployMigrations(
+  value: unknown,
+): EnvironmentDeployMigrations | undefined {
+  if (value === undefined) return undefined;
+  if (
+    value !== "none" && value !== "compatible" && value !== "breaking" &&
+    value !== "unknown"
+  ) {
+    throw new TypeError("migrations is not a known migration status");
+  }
+  return value;
+}
+
+function parseDeployHealthTimeout(value: unknown): number | undefined {
+  if (value === undefined) return undefined;
+  if (
+    typeof value !== "number" || !Number.isInteger(value) || value < 10 ||
+    value > 3600
+  ) {
+    throw new TypeError("healthTimeoutSeconds must be an integer 10 to 3600");
+  }
+  return value;
+}
+
+function parseDeployKeepRunning(value: unknown): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (
+    !Array.isArray(value) ||
+    value.some((name) => typeof name !== "string" || name.length === 0)
+  ) {
+    throw new TypeError("keepRunningServices must be an array of names");
+  }
+  return value as string[];
 }
 
 const DESIRED_HASH_RE = /^[0-9a-f]{64}$/;
@@ -4829,9 +5471,19 @@ export function parseEnvironmentDeployPayload(
         managedNetworkServices,
       ),
       noCache: parseOptionalBoolean(value.noCache, "noCache"),
+      deployStrategy: parseDeployStrategy(value.deployStrategy),
+      migrations: parseDeployMigrations(value.migrations),
+      healthTimeoutSeconds: parseDeployHealthTimeout(
+        value.healthTimeoutSeconds,
+      ),
+      keepRunningServices: parseDeployKeepRunning(value.keepRunningServices),
       hostLevelApproved: parseOptionalBoolean(
         value.hostLevelApproved,
         "hostLevelApproved",
+      ),
+      remoteBuildSourcesApproved: parseOptionalBoolean(
+        value.remoteBuildSourcesApproved,
+        "remoteBuildSourcesApproved",
       ),
       tlsMaterial: parseOptionalMaterialArray(
         value.tlsMaterial,
@@ -4900,6 +5552,16 @@ function parseStopSiteRelease(
   return { serviceId: value.serviceId, username: value.username };
 }
 
+function parseStopRetirePrincipal(value: unknown): { username: string } {
+  if (
+    !isRecord(value) || typeof value.username !== "string" ||
+    !STOP_SITE_RELEASE_USERNAME_RE.test(value.username)
+  ) {
+    throw new TypeError("Invalid environment.stop retirePrincipals entry");
+  }
+  return { username: value.username };
+}
+
 function parseStopFabricNetworks(value: unknown): string[] | undefined {
   if (value === undefined) return undefined;
   if (!Array.isArray(value)) {
@@ -4936,6 +5598,11 @@ export function parseEnvironmentStopPayload(
     "siteReleases",
     parseStopSiteRelease,
   );
+  const retirePrincipals = parseOptionalMaterialArray(
+    value.retirePrincipals,
+    "retirePrincipals",
+    parseStopRetirePrincipal,
+  );
   return {
     environmentId: parseNonEmptyString(value, "environmentId"),
     projectId: parseNonEmptyString(value, "projectId"),
@@ -4943,6 +5610,7 @@ export function parseEnvironmentStopPayload(
     ...(ingressServices === undefined ? {} : { ingressServices }),
     ...(fabricNetworks === undefined ? {} : { fabricNetworks }),
     ...(siteReleases === undefined ? {} : { siteReleases }),
+    ...(retirePrincipals === undefined ? {} : { retirePrincipals }),
   };
 }
 
@@ -6090,6 +6758,27 @@ export function parseManagedReplicationHealth(
   ) {
     health.lagSeconds = value.lagSeconds;
   }
+  return withStandbyPositions(health, value);
+}
+
+/** Standby WAL positions and receive lag, when present and well-formed. */
+function withStandbyPositions(
+  health: ManagedReplicationHealth,
+  value: Record<string, unknown>,
+): ManagedReplicationHealth {
+  if (typeof value.receivedLsn === "string" && value.receivedLsn.length <= 32) {
+    health.receivedLsn = value.receivedLsn;
+  }
+  if (typeof value.replayLsn === "string" && value.replayLsn.length <= 32) {
+    health.replayLsn = value.replayLsn;
+  }
+  if (
+    typeof value.receiveLagBytes === "number" &&
+    Number.isFinite(value.receiveLagBytes) &&
+    value.receiveLagBytes >= 0
+  ) {
+    health.receiveLagBytes = value.receiveLagBytes;
+  }
   return health;
 }
 
@@ -6273,6 +6962,12 @@ export function parseManagedLifecyclePayload(
       throw new TypeError("Invalid managed.lifecycle payload");
     }
     payload.engine = value.engine;
+  }
+  if (value.role !== undefined) {
+    if (value.role !== "primary" && value.role !== "replica") {
+      throw new TypeError("Invalid managed.lifecycle payload");
+    }
+    payload.role = value.role;
   }
   return payload;
 }
@@ -6566,6 +7261,12 @@ export type ManagedRestorePayload = {
   database?: string;
   checksum: string;
   sizeBytes?: number;
+  /**
+   * The `backuppolicy` that made the artifact, when a scheduled run did: each
+   * policy keeps its artifacts in their own directory, so this is how the
+   * file is found. Omitted for a manual backup.
+   */
+  policyId?: string;
 };
 
 /** Must stay in sync with the instance canonical `managed.restore` shape. */
@@ -6710,6 +7411,12 @@ export function parseManagedRestorePayload(
     }
     payload.sizeBytes = value.sizeBytes;
   }
+  if (value.policyId !== undefined) {
+    if (!isCanonicalBackupUuid(value.policyId)) {
+      throw new Error("Invalid managed.restore payload policyId");
+    }
+    payload.policyId = value.policyId;
+  }
   return payload;
 }
 
@@ -6728,6 +7435,370 @@ export function parseManagedRestoreResult(
   if (isString(value.database)) result.database = value.database;
   if (isString(value.summary)) result.summary = value.summary;
   return result;
+}
+
+/**
+ * A lower-case UUID. A backup policy id becomes a systemd unit name
+ * (`turbopanel-backup-<policyId>.timer`) that the host's unit check matches
+ * exactly, so a mixed-case spelling of the same id is refused. Same rule as
+ * the instance's `isCanonicalUuid`.
+ */
+const BACKUP_POLICY_UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+function isCanonicalBackupUuid(value: unknown): value is string {
+  return typeof value === "string" && BACKUP_POLICY_UUID_RE.test(value);
+}
+
+const BACKUP_TARGET_KIND_SET = new Set(["managed", "copy"]);
+/** Bound on one server's policy set; far above any real schedule list. */
+const MAX_BACKUP_POLICIES_PER_SERVER = 500;
+
+/** A storage-copy backup is a gzipped tar of the copy's contents. */
+export const COPY_BACKUP_ARTIFACT_EXTENSION = "tar.gz";
+
+const COPY_BACKUP_PROVIDER_SET: ReadonlySet<string> = new Set([
+  "docker",
+  "path",
+]);
+const MAX_COPY_HOST_PATH_LENGTH = 1024;
+/** One path segment: no `/`, no `,` (the path lands in a `docker --mount` value), no shell metacharacters. */
+const COPY_HOST_PATH_SEGMENT_RE = /^[\w.@+-]+$/;
+const COPY_SOURCE_FIELDS = [
+  "volumeName",
+  "hostPath",
+  "organizationId",
+  "storageId",
+] as const;
+
+/**
+ * An absolute, already-normalized host directory: `/`-separated segments of a
+ * conservative charset, none of them `.` or `..`, no empty segment. Same rule
+ * as the instance's `isSafeCopyHostPath`.
+ */
+export function isSafeCopyHostPath(value: unknown): value is string {
+  if (
+    typeof value !== "string" || value.length < 2 ||
+    value.length > MAX_COPY_HOST_PATH_LENGTH || !value.startsWith("/")
+  ) {
+    return false;
+  }
+  return value
+    .slice(1)
+    .split("/")
+    .every((segment) =>
+      segment !== "." && segment !== ".." &&
+      COPY_HOST_PATH_SEGMENT_RE.test(segment)
+    );
+}
+
+function parsePathCopySource(
+  raw: Record<string, unknown>,
+  source: CopyBackupSource,
+): void {
+  if (raw.volumeName !== undefined) {
+    throw new Error("A path copy source cannot name a volume");
+  }
+  if (raw.hostPath !== undefined) {
+    if (
+      !isSafeCopyHostPath(raw.hostPath) ||
+      raw.organizationId !== undefined ||
+      raw.storageId !== undefined
+    ) {
+      throw new Error("Invalid path copy source hostPath");
+    }
+    source.hostPath = raw.hostPath;
+    return;
+  }
+  if (
+    !isCanonicalBackupUuid(raw.organizationId) ||
+    !isCanonicalBackupUuid(raw.storageId)
+  ) {
+    throw new Error(
+      "A path copy source needs hostPath, or organizationId and storageId",
+    );
+  }
+  source.organizationId = raw.organizationId;
+  source.storageId = raw.storageId;
+}
+
+/** Must stay in sync with the instance canonical `parseCopyBackupSource`. */
+export function parseCopyBackupSource(
+  raw: Record<string, unknown>,
+): CopyBackupSource {
+  if (
+    !isCanonicalBackupUuid(raw.copyId) ||
+    typeof raw.copyProvider !== "string" ||
+    !COPY_BACKUP_PROVIDER_SET.has(raw.copyProvider)
+  ) {
+    throw new Error("Invalid copy backup source");
+  }
+  const source: CopyBackupSource = {
+    copyId: raw.copyId,
+    copyProvider: raw.copyProvider as CopyBackupProvider,
+  };
+  if (source.copyProvider === "path") {
+    parsePathCopySource(raw, source);
+    return source;
+  }
+  if (
+    typeof raw.volumeName !== "string" ||
+    !DOCKER_RESOURCE_NAME_RE.test(raw.volumeName)
+  ) {
+    throw new Error("A docker copy source needs a valid volumeName");
+  }
+  if (
+    raw.hostPath !== undefined || raw.organizationId !== undefined ||
+    raw.storageId !== undefined
+  ) {
+    throw new Error("A docker copy source cannot name a host path");
+  }
+  source.volumeName = raw.volumeName;
+  return source;
+}
+
+function hasCopySourceFields(raw: Record<string, unknown>): boolean {
+  return raw.copyProvider !== undefined ||
+    COPY_SOURCE_FIELDS.some((field) => raw[field] !== undefined);
+}
+
+function parseBackupPolicyTarget(
+  raw: Record<string, unknown>,
+  entry: BackupPolicyWireEntry,
+): void {
+  if (entry.targetKind === "managed") {
+    if (
+      !isCanonicalBackupUuid(raw.managedId) ||
+      typeof raw.engine !== "string" || !isManagedEngineCode(raw.engine) ||
+      typeof raw.artifactExtension !== "string" ||
+      !isManagedBackupArtifactExtension(raw.artifactExtension) ||
+      raw.copyId !== undefined ||
+      hasCopySourceFields(raw)
+    ) {
+      throw new Error("Invalid backup policy managed target");
+    }
+    entry.managedId = raw.managedId;
+    entry.engine = raw.engine;
+    entry.artifactExtension = raw.artifactExtension;
+    return;
+  }
+  if (
+    raw.managedId !== undefined ||
+    raw.engine !== undefined ||
+    raw.artifactExtension !== undefined
+  ) {
+    throw new Error("Invalid backup policy copy target");
+  }
+  Object.assign(entry, parseCopyBackupSource(raw));
+}
+
+function parseBackupPolicyWireEntry(raw: unknown): BackupPolicyWireEntry {
+  if (
+    !isRecord(raw) ||
+    !isCanonicalBackupUuid(raw.policyId) ||
+    typeof raw.targetKind !== "string" ||
+    !BACKUP_TARGET_KIND_SET.has(raw.targetKind) ||
+    typeof raw.onCalendar !== "string" ||
+    !ON_CALENDAR_RE.test(raw.onCalendar) ||
+    typeof raw.retentionKeep !== "number" ||
+    !Number.isInteger(raw.retentionKeep) ||
+    raw.retentionKeep < 1 ||
+    raw.retentionKeep > MAX_BACKUP_RETENTION_KEEP_BOUND ||
+    typeof raw.enabled !== "boolean"
+  ) {
+    throw new Error("Invalid backup policy entry");
+  }
+  const entry: BackupPolicyWireEntry = {
+    policyId: raw.policyId,
+    targetKind: raw.targetKind as BackupPolicyWireEntry["targetKind"],
+    onCalendar: raw.onCalendar,
+    retentionKeep: raw.retentionKeep,
+    enabled: raw.enabled,
+  };
+  parseBackupPolicyTarget(raw, entry);
+  return entry;
+}
+
+/** Must stay in sync with the instance canonical `server.backups.reconcile` validator. */
+export function parseBackupsReconcilePayload(
+  value: unknown,
+): BackupsReconcilePayload {
+  if (!isRecord(value)) {
+    throw new Error("Invalid backups reconcile payload");
+  }
+  if (
+    !Array.isArray(value.policies) ||
+    value.policies.length > MAX_BACKUP_POLICIES_PER_SERVER
+  ) {
+    throw new TypeError("policies must be an array of at most 500 entries");
+  }
+  const policies = value.policies.map(parseBackupPolicyWireEntry);
+  const seen = new Set<string>();
+  for (const policy of policies) {
+    // Two entries for one id would name the same unit twice, and "the
+    // complete set" would no longer say which schedule wins.
+    if (seen.has(policy.policyId)) {
+      throw new Error(`policies contains ${policy.policyId} more than once`);
+    }
+    seen.add(policy.policyId);
+  }
+  return { policies };
+}
+
+function parseBackupStringArray(value: unknown, field: string): string[] {
+  if (!Array.isArray(value) || !value.every(isString)) {
+    throw new Error(`${field} must be an array of strings`);
+  }
+  return [...value];
+}
+
+function parseBackupPolicyNextRuns(value: unknown): BackupPolicyNextRun[] {
+  if (!Array.isArray(value)) {
+    throw new TypeError("nextRuns must be an array");
+  }
+  return value.map((raw) => {
+    if (!isRecord(raw) || !isCanonicalBackupUuid(raw.policyId)) {
+      throw new Error("Invalid backups reconcile nextRuns entry");
+    }
+    const next: BackupPolicyNextRun = { policyId: raw.policyId };
+    if (raw.nextRunAt !== undefined) {
+      if (
+        typeof raw.nextRunAt !== "string" ||
+        Number.isNaN(Date.parse(raw.nextRunAt))
+      ) {
+        throw new TypeError("Invalid backups reconcile nextRunAt");
+      }
+      next.nextRunAt = raw.nextRunAt;
+    }
+    return next;
+  });
+}
+
+/** Must stay in sync with the instance canonical `storage.backup` validator. */
+export function parseStorageBackupPayload(
+  value: unknown,
+): StorageBackupPayload {
+  if (
+    !isRecord(value) ||
+    typeof value.action !== "string" ||
+    !MANAGED_BACKUP_ACTIONS.has(value.action) ||
+    typeof value.backupId !== "string" ||
+    !isSafeBackupId(value.backupId)
+  ) {
+    throw new Error("Invalid storage.backup payload");
+  }
+  const payload: StorageBackupPayload = {
+    ...parseCopyBackupSource(value),
+    action: value.action as StorageBackupPayload["action"],
+    backupId: value.backupId,
+  };
+  if (value.policyId !== undefined) {
+    if (payload.action !== "delete" || !isCanonicalBackupUuid(value.policyId)) {
+      throw new Error("Invalid storage.backup payload policyId");
+    }
+    payload.policyId = value.policyId;
+  }
+  return payload;
+}
+
+/** Lenient result parser, like `managed.backup`'s. Never carries archive contents. */
+export function parseStorageBackupResult(value: unknown): StorageBackupResult {
+  if (
+    !isRecord(value) || !isString(value.backupId) || value.backupId.length === 0
+  ) {
+    return { backupId: "" };
+  }
+  const result: StorageBackupResult = { backupId: value.backupId };
+  if (typeof value.deleted === "boolean") result.deleted = value.deleted;
+  if (isString(value.path)) result.path = value.path;
+  if (
+    typeof value.sizeBytes === "number" && Number.isFinite(value.sizeBytes) &&
+    value.sizeBytes >= 0
+  ) {
+    result.sizeBytes = value.sizeBytes;
+  }
+  if (isString(value.checksum) && CHECKSUM_SHA256_RE.test(value.checksum)) {
+    result.checksum = value.checksum;
+  }
+  if (isString(value.completedAt)) result.completedAt = value.completedAt;
+  if (isString(value.summary)) result.summary = value.summary;
+  return result;
+}
+
+/** Must stay in sync with the instance canonical `storage.restore` validator. */
+export function parseStorageRestorePayload(
+  value: unknown,
+): StorageRestorePayload {
+  if (
+    !isRecord(value) ||
+    typeof value.backupId !== "string" ||
+    !isSafeBackupId(value.backupId) ||
+    typeof value.checksum !== "string" ||
+    !CHECKSUM_SHA256_RE.test(value.checksum) ||
+    (value.policyId !== undefined && !isCanonicalBackupUuid(value.policyId))
+  ) {
+    throw new Error("Invalid storage.restore payload");
+  }
+  const payload: StorageRestorePayload = {
+    ...parseCopyBackupSource(value),
+    backupId: value.backupId,
+    checksum: value.checksum,
+  };
+  if (value.policyId !== undefined) payload.policyId = value.policyId;
+  return payload;
+}
+
+const CONTAINER_ID_RE = /^[a-f\d]{12,64}$/;
+
+function parseContainerIds(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  return value.filter((id): id is string =>
+    isString(id) && CONTAINER_ID_RE.test(id)
+  );
+}
+
+/** Lenient result parser: keeps only well-formed fields. */
+export function parseStorageRestoreResult(
+  value: unknown,
+): StorageRestoreResult {
+  if (
+    !isRecord(value) || !isString(value.backupId) || value.backupId.length === 0
+  ) {
+    return { backupId: "" };
+  }
+  const result: StorageRestoreResult = { backupId: value.backupId };
+  if (isString(value.restoredAt)) result.restoredAt = value.restoredAt;
+  const stopped = parseContainerIds(value.stopped);
+  if (stopped) result.stopped = stopped;
+  const restarted = parseContainerIds(value.restarted);
+  if (restarted) result.restarted = restarted;
+  const notRestarted = parseContainerIds(value.notRestarted);
+  if (notRestarted) result.notRestarted = notRestarted;
+  if (isString(value.summary)) result.summary = value.summary;
+  return result;
+}
+
+/** Must stay in sync with the instance canonical `server.backups.reconcile` result validator. */
+export function parseBackupsReconcileResult(
+  value: unknown,
+): BackupsReconcileResult {
+  if (!isRecord(value)) {
+    throw new Error("Invalid backups reconcile result");
+  }
+  if (
+    typeof value.policiesApplied !== "number" ||
+    !Number.isInteger(value.policiesApplied) ||
+    value.policiesApplied < 0
+  ) {
+    throw new TypeError("policiesApplied must be a non-negative integer");
+  }
+  return {
+    policiesApplied: value.policiesApplied,
+    unitsChanged: parseBackupStringArray(value.unitsChanged, "unitsChanged"),
+    unitsRemoved: parseBackupStringArray(value.unitsRemoved, "unitsRemoved"),
+    nextRuns: parseBackupPolicyNextRuns(value.nextRuns),
+    warnings: parseBackupStringArray(value.warnings, "warnings"),
+  };
 }
 
 function parseProxySqlBackendPayload(value: unknown): ProxySqlBackendPayload {

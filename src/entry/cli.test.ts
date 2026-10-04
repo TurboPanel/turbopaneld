@@ -2,10 +2,14 @@ import { assertEquals, assertThrows } from "@std/assert";
 import { DAEMON_VERSION } from "../version.ts";
 import { InstallerPresentedFailure } from "../orchestration/install-presenter-context.ts";
 import {
+  BACKUP_RUN_EXIT,
   type DaemonCliIo,
+  FIREWALL_CLI_EXIT,
   maybeRunDaemonCli,
   parseInstallerFlags,
 } from "./cli.ts";
+import type { FirewallConfirmOutcome } from "../firewall/confirm.ts";
+import type { PendingFirewallMarker } from "../firewall/pending.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -58,7 +62,7 @@ test("maybeRunDaemonCli prints version and exits 0", async () => {
   assertEquals(exits, [0]);
   assertEquals(
     logs[0],
-    `turbopaneld v${DAEMON_VERSION} abc1234 (trunk, build-1, 2026-01-01T00:00:00.000Z)`,
+    `turbopaneld v${DAEMON_VERSION} abc1234 (release, build-1, 2026-01-01T00:00:00.000Z)`,
   );
 
   const verb = captureIo({
@@ -324,4 +328,234 @@ test("run-installer success and failure paths", async () => {
   await maybeRunDaemonCli(presented.io);
   assertEquals(presented.exits, [1]);
   assertEquals(presented.errors, []);
+});
+
+const RAN_BASE = {
+  policyId: "0192f1de-7c3b-7e4a-9f10-3a5b6c7d8e9f",
+  runId: "run_1",
+  startedAt: "2026-09-30T03:00:00.000Z",
+  finishedAt: "2026-09-30T03:00:05.000Z",
+};
+
+test("backup-run without exactly one policy id is a usage error (exit 2) and runs nothing", async () => {
+  for (const args of [["backup-run"], ["backup-run", "a", "b"]]) {
+    let called = false;
+    const { io, exits, errors } = captureIo({
+      args,
+      runScheduledBackup: () => {
+        called = true;
+        return Promise.resolve({ kind: "no-policy", message: "x" });
+      },
+    });
+    await maybeRunDaemonCli(io);
+    assertEquals(exits, [BACKUP_RUN_EXIT.usage]);
+    assertEquals(called, false);
+    assertEquals(errors[0], "[backup-run] usage: backup-run <policyId>");
+  }
+});
+
+test("backup-run maps each runner outcome to its exit code", async () => {
+  const cases: Array<
+    [
+      Awaited<ReturnType<NonNullable<DaemonCliIo["runScheduledBackup"]>>>,
+      number,
+    ]
+  > = [
+    [{ kind: "invalid-policy-id", message: "bad id" }, BACKUP_RUN_EXIT.usage],
+    [{ kind: "no-policy", message: "not here" }, BACKUP_RUN_EXIT.noPolicy],
+    [
+      {
+        kind: "ran",
+        resultPath: "/r/run_1.json",
+        result: {
+          ...RAN_BASE,
+          status: "succeeded",
+          backupId: "bk_1",
+          sizeBytes: 3,
+        },
+      },
+      BACKUP_RUN_EXIT.succeeded,
+    ],
+    [
+      {
+        kind: "ran",
+        resultPath: "/r/run_1.json",
+        result: { ...RAN_BASE, status: "failed", error: "engine busy" },
+      },
+      BACKUP_RUN_EXIT.failed,
+    ],
+  ];
+  for (const [outcome, code] of cases) {
+    const seen: string[] = [];
+    const { io, exits } = captureIo({
+      args: ["backup-run", RAN_BASE.policyId],
+      runScheduledBackup: (policyId) => {
+        seen.push(policyId);
+        return Promise.resolve(outcome);
+      },
+    });
+    await maybeRunDaemonCli(io);
+    assertEquals(exits, [code], outcome.kind);
+    assertEquals(seen, [RAN_BASE.policyId]);
+  }
+});
+
+test("backup-run exits 1 when the runner itself throws", async () => {
+  const { io, exits, errors } = captureIo({
+    args: ["backup-run", RAN_BASE.policyId],
+    runScheduledBackup: () => Promise.reject(new Error("disk gone")),
+  });
+  await maybeRunDaemonCli(io);
+  assertEquals(exits, [BACKUP_RUN_EXIT.failed]);
+  assertEquals(errors[0], "[backup-run] disk gone");
+});
+
+const FW_DIGEST = "f".repeat(64);
+const FW_MARKER: PendingFirewallMarker = {
+  version: 1,
+  digest: FW_DIGEST,
+  generation: 2,
+  armedAt: "2026-10-01T12:00:00.000Z",
+  deadlineAt: "2026-10-01T12:02:00.000Z",
+  windowSeconds: 120,
+  v6: "keep",
+};
+
+test("firewall off is the break-glass: it removes the chains and exits 0", async () => {
+  let removed = 0;
+  const { io, exits, logs } = captureIo({
+    args: ["firewall", "off"],
+    removeFirewall: () => {
+      removed += 1;
+      return Promise.resolve();
+    },
+  });
+  await maybeRunDaemonCli(io);
+  assertEquals(removed, 1);
+  assertEquals(exits, [FIREWALL_CLI_EXIT.ok]);
+  assertEquals(logs, ["[firewall] TurboPanel firewall chains removed"]);
+});
+
+test("firewall off reports a failed removal as exit 1 without throwing", async () => {
+  const { io, exits, errors } = captureIo({
+    args: ["firewall", "off"],
+    removeFirewall: () => Promise.reject(new Error("host went away")),
+  });
+  await maybeRunDaemonCli(io);
+  assertEquals(exits, [FIREWALL_CLI_EXIT.failed]);
+  assertEquals(errors.length, 1);
+});
+
+test("firewall status says what is pending", async () => {
+  const pending = captureIo({
+    args: ["firewall", "status"],
+    readPendingFirewall: () => Promise.resolve(FW_MARKER),
+  });
+  await maybeRunDaemonCli(pending.io);
+  assertEquals(pending.logs, [
+    `[firewall] pending ${FW_DIGEST} until 2026-10-01T12:02:00.000Z`,
+  ]);
+  const none = captureIo({
+    args: ["firewall", "status"],
+    readPendingFirewall: () => Promise.resolve(null),
+  });
+  await maybeRunDaemonCli(none.io);
+  assertEquals(none.logs, ["[firewall] nothing pending"]);
+  assertEquals([...pending.exits, ...none.exits], [0, 0]);
+});
+
+test("firewall confirm names the pending digest itself when none is given, and an explicit one when it is", async () => {
+  const named: string[] = [];
+  const confirmFirewall = (digest: string): Promise<FirewallConfirmOutcome> => {
+    named.push(digest);
+    return Promise.resolve({
+      state: "confirmed",
+      digest,
+      summary: "durable now",
+    });
+  };
+  const implicit = captureIo({
+    args: ["firewall", "confirm"],
+    readPendingFirewall: () => Promise.resolve(FW_MARKER),
+    confirmFirewall,
+  });
+  await maybeRunDaemonCli(implicit.io);
+  const explicit = captureIo({
+    args: ["firewall", "confirm", "a".repeat(64)],
+    confirmFirewall,
+  });
+  await maybeRunDaemonCli(explicit.io);
+  assertEquals(named, [FW_DIGEST, "a".repeat(64)]);
+  assertEquals(implicit.logs, ["[firewall] confirmed: durable now"]);
+  assertEquals([...implicit.exits, ...explicit.exits], [0, 0]);
+});
+
+test("firewall confirm with nothing pending is a quiet success; a confirm that is not honoured is exit 1", async () => {
+  const quiet = captureIo({
+    args: ["firewall", "confirm"],
+    readPendingFirewall: () => Promise.resolve(null),
+    confirmFirewall: () => Promise.reject(new Error("never reached")),
+  });
+  await maybeRunDaemonCli(quiet.io);
+  assertEquals(quiet.exits, [FIREWALL_CLI_EXIT.ok]);
+  assertEquals(quiet.logs, ["[firewall] nothing pending"]);
+
+  for (const state of ["expired", "rolled_back", "digest_mismatch"] as const) {
+    const refused = captureIo({
+      args: ["firewall", "confirm", FW_DIGEST],
+      confirmFirewall: () =>
+        Promise.resolve({ state, digest: FW_DIGEST, summary: "no" }),
+    });
+    await maybeRunDaemonCli(refused.io);
+    assertEquals(refused.exits, [FIREWALL_CLI_EXIT.failed], state);
+    assertEquals(refused.errors, [`[firewall] ${state}: no`]);
+  }
+});
+
+test("firewall with an unknown or malformed verb is a usage error (exit 2) and does nothing", async () => {
+  for (
+    const args of [
+      ["firewall"],
+      ["firewall", "reboot"],
+      ["firewall", "off", "now"],
+      ["firewall", "status", "x"],
+      ["firewall", "confirm", "a", "b"],
+    ]
+  ) {
+    const touched: string[] = [];
+    const { io, exits, errors } = captureIo({
+      args,
+      removeFirewall: () => {
+        touched.push("off");
+        return Promise.resolve();
+      },
+      confirmFirewall: (digest) => {
+        touched.push(digest);
+        return Promise.reject(new Error("never reached"));
+      },
+    });
+    await maybeRunDaemonCli(io);
+    assertEquals(exits, [FIREWALL_CLI_EXIT.usage], args.join(" "));
+    assertEquals(touched, []);
+    assertEquals(errors.length, 1);
+  }
+});
+
+test("firewall fold reports the outcome and exits 0; a partial removal exits 1", async () => {
+  const folded = captureIo({
+    args: ["firewall", "fold"],
+    foldFirewall: () =>
+      Promise.resolve({ state: "folded", listeners: 1, reasons: [] }),
+  });
+  await maybeRunDaemonCli(folded.io);
+  assertEquals(folded.logs, ["[firewall] fold folded"]);
+  assertEquals(folded.exits, [0]);
+  const partial = captureIo({
+    args: ["firewall", "fold"],
+    foldFirewall: () =>
+      Promise.resolve({ state: "partial", listeners: 1, reasons: ["busy"] }),
+  });
+  await maybeRunDaemonCli(partial.io);
+  assertEquals(partial.logs, ["[firewall] fold partial (busy)"]);
+  assertEquals(partial.exits, [1]);
 });

@@ -26,6 +26,13 @@ import {
   isValidHostname,
   isValidNtpServer,
 } from "../contracts/commands-contracts.ts";
+import {
+  instanceAcmeCooldownError,
+  instanceAcmeRowFailure,
+  instanceAcmeWindowFailure,
+  noteInstanceAcmeFailure,
+} from "../deploy/instance-acme-failure.ts";
+import { instanceAcmeIssuerKey } from "../deploy/instance-acme-issuer.ts";
 import { upsertPublicUrlsInEnv } from "./public-urls-env.ts";
 
 /** Wire hostname, including the one-hop decrypted upload pair. */
@@ -359,12 +366,20 @@ async function openIssueWindow(
     closed = true;
     await close(layout);
   };
+  const issuerKey = instanceAcmeIssuerKey(instanceAcme);
+  const cooling = instanceAcmeCooldownError(hosts, issuerKey, Date.now());
+  if (cooling) throw cooling;
   try {
     attempted = true;
-    await open(layout, hosts);
+    await open(layout, hosts).catch((err) => {
+      throw instanceAcmeWindowFailure(err, hosts[0]);
+    });
     await preflight(hostnames, layout);
     await issue(layout, hosts, instanceAcme, certsDir, {
       closeWindow: () => closeOnce(),
+    }).catch((err) => {
+      noteInstanceAcmeFailure(err, hosts, issuerKey, Date.now());
+      throw instanceAcmeRowFailure(err, hosts[0]);
     });
   } catch (err) {
     if (attempted) await closeOnce().catch(() => undefined);

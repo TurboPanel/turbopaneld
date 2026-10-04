@@ -40,7 +40,7 @@ test("run.sh --daemon-only does not install the control plane", async () => {
   const missingText = new TextDecoder().decode(missingPin.stderr);
   assertStringIncludes(missingText, "does not install the control plane");
   assertEquals(
-    missingText.includes("this host (self-hosted instance install)"),
+    missingText.includes("this host (self-hosted install)"),
     false,
   );
 
@@ -138,6 +138,8 @@ async function runLabelScript(
     "tp_restore_instance_prev",
     "tp_instance_build_label_path",
     "tp_write_instance_build_label",
+    "tp_print_error",
+    "tp_rewrite_instance_runtime_env",
     "tp_sync_instance_build_label",
   ].map((name) => extractShellFunction(source, name)).join("\n");
   const root = await Deno.makeTempDir({ prefix: "tp-build-label-" });

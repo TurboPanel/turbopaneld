@@ -113,3 +113,49 @@ printf 'ok\n'
     await Deno.remove(work, { recursive: true });
   }
 });
+
+/** A minimal orchestration-only release tree with the given extra files. */
+async function verifyOrchestrationTree(
+  extraFiles: string[],
+): Promise<{ code: number; stderr: string }> {
+  const work = await Deno.makeTempDir({ prefix: "tp-release-verify-" });
+  try {
+    const script = String.raw`
+set -eu
+. '${RELEASE_LIB}'
+ROOT='${work}/root'
+PROD="$ROOT/$(tp_prod_home)"
+mkdir -p "$PROD/share/orchestration"
+printf '[defaults]\n' > "$PROD/share/orchestration/ansible.cfg"
+printf 'notice\n' > "$PROD/share/THIRD_PARTY_NOTICES.md"
+for f in ${extraFiles.map((f) => `'${f}'`).join(" ")}; do
+  mkdir -p "$(dirname "$PROD/share/orchestration/$f")"
+  printf 'x\n' > "$PROD/share/orchestration/$f"
+done
+tp_verify_release_root "$ROOT" orchestration
+`;
+    const result = await runBash(script);
+    return { code: result.code, stderr: result.stderr };
+  } finally {
+    await Deno.remove(work, { recursive: true });
+  }
+}
+
+test("tp_verify_release_root accepts the Docker gate's TypeScript and nothing else", async () => {
+  const gate = await verifyOrchestrationTree([
+    "roles/docker-gate/files/main.ts",
+    "roles/docker-gate/files/policy.ts",
+  ]);
+  assertEquals(gate.code, 0, gate.stderr);
+
+  const stray = await verifyOrchestrationTree([
+    "roles/docker-gate/files/main.ts",
+    "roles/other/files/leak.ts",
+  ]);
+  assertEquals(stray.code, 1);
+  assertEquals(stray.stderr.includes("roles/other/files/leak.ts"), true);
+  assertEquals(stray.stderr.includes("docker-gate/files/main.ts"), false);
+
+  const daemonSource = await verifyOrchestrationTree(["src/main.ts"]);
+  assertEquals(daemonSource.code, 1);
+});

@@ -42,6 +42,7 @@ const CONSTANTS = [
   "TP_LEGACY_SHELL_RC_NEEDLE",
   "TP_OWNED_TREES",
   "TP_DOCKER_PACKAGES",
+  "TP_OTHER_UNITS",
 ];
 
 function extractFunction(source: string, name: string): string | null {
@@ -225,6 +226,8 @@ const OWNED_PATHS = [
   "/etc/ssh/turbopanel",
   "/var/lib/turbopanel",
   "/var/lib/turbopanel/state",
+  "/var/lib/turbopanel-build",
+  "/var/lib/turbopanel-build/work/b1",
   "/var/log/turbopanel",
   "/run/turbopanel",
   "/backup",
@@ -553,4 +556,383 @@ test("the purge scope warns that no inbound firewall remains and that other pack
   );
   assertStringIncludes(result.stdout.toLowerCase(), "no inbound firewall");
   assertStringIncludes(result.stdout, "does not remove any other package");
+});
+
+async function stubSystemctl(active: string, enabled: string): Promise<string> {
+  const dir = await Deno.makeTempDir({ prefix: "tp-purge-stub-" });
+  await Deno.writeTextFile(
+    join(dir, "systemctl"),
+    [
+      "#!/bin/sh",
+      'case "$1" in',
+      "  show) echo loaded ;;",
+      `  is-active) echo ${active}; exit 3 ;;`,
+      `  is-enabled) echo ${enabled}; exit 1 ;;`,
+      "esac",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  return dir;
+}
+
+async function wgPresent(active: string, enabled: string): Promise<string> {
+  const stub = await stubSystemctl(active, enabled);
+  const empty = await Deno.makeTempDir({ prefix: "tp-purge-units-" });
+  const result = await runPurgeSh(
+    ["tp_unit_present", "tp_wg_tp0_present"],
+    `TP_SYSTEMD_DIRS=${empty}\n` +
+      "if tp_unit_present wg-quick@tp0.service; then echo present; else echo absent; fi",
+    { PATH: `${stub}:${Deno.env.get("PATH") ?? ""}` },
+  );
+  return result.stdout.trim();
+}
+
+test("the stock wg-quick template is not ours until tp0 was enabled or started", async () => {
+  assertEquals(await wgPresent("inactive", "disabled"), "absent");
+  assertEquals(await wgPresent("active", "disabled"), "present");
+  assertEquals(await wgPresent("inactive", "enabled"), "present");
+});
+
+test("the Docker gate stage-1 folders are owned trees and are removed with the other folders", async () => {
+  const source = await Deno.readTextFile(purgePath);
+  const trees = extractConstant(source, "TP_OWNED_TREES") ?? "";
+  const remove = extractFunction(source, "tp_remove_folders_and_shell") ?? "";
+  for (
+    const dir of [
+      "/run/turbopanel-gate",
+      "/var/cache/turbopanel-docker-gate",
+      "/var/lib/turbopanel-docker-gate",
+    ]
+  ) {
+    assertStringIncludes(trees, dir);
+    assertStringIncludes(remove, `tp_safe_rm_tree ${dir}`);
+  }
+});
+
+test("the build slice is stopped and its unit file removed although it is not turbopanel*", async () => {
+  const units = await Deno.makeTempDir({ prefix: "tp-purge-units-" });
+  await Deno.writeTextFile(join(units, "tpbuild.slice"), "[Slice]\n");
+  await Deno.writeTextFile(join(units, "tpother.slice"), "[Slice]\n");
+  const result = await runPurgeSh(
+    ["tp_unit_present", "tp_collect_unit_names", "tp_remove_unit_files"],
+    [
+      `TP_SYSTEMD_DIRS=${units}`,
+      // No systemctl: discovery falls back to the unit directories.
+      'tp_has_tool() { [ "$1" != systemctl ] && command -v "$1" >/dev/null 2>&1; }',
+      "tp_collect_unit_names",
+      'cat "$TP_TMP/work.unitnames"',
+      "tp_remove_unit_files",
+    ].join("\n"),
+  );
+  assertStringIncludes(result.stdout, "tpbuild.slice\n", result.stderr);
+  assertEquals(await exists(join(units, "tpbuild.slice")), false);
+  assertEquals(await exists(join(units, "tpother.slice")), true);
+});
+
+async function stubBin(name: string, script: string): Promise<string> {
+  const dir = await Deno.makeTempDir({ prefix: "tp-purge-stub-" });
+  await Deno.writeTextFile(join(dir, name), `#!/bin/sh\n${script}\n`, {
+    mode: 0o755,
+  });
+  return dir;
+}
+
+const BASE_PATH = Deno.env.get("PATH") ?? "/usr/bin:/bin";
+
+test("an inactive slice systemd keeps without a unit file is not reported as left over", async () => {
+  const stub = await stubBin(
+    "systemctl",
+    [
+      'case "$*" in',
+      "  *LoadState*) echo loaded ;;",
+      "  *FragmentPath*) echo ;;",
+      "  *ActiveState*) echo inactive ;;",
+      "esac",
+    ].join("\n"),
+  );
+  const empty = await Deno.makeTempDir({ prefix: "tp-purge-units-" });
+  const result = await runPurgeSh(
+    ["tp_unit_present"],
+    `TP_SYSTEMD_DIRS=${empty}\nif tp_unit_present tpbuild.slice; then echo present; else echo absent; fi`,
+    { PATH: `${stub}:${BASE_PATH}` },
+  );
+  assertEquals(result.stdout.trim(), "absent", result.stderr);
+  // A slice that is still running, or whose unit file exists, is still ours.
+  const live = await stubBin(
+    "systemctl",
+    'case "$*" in *LoadState*) echo loaded ;; *FragmentPath*) echo ;; *ActiveState*) echo active ;; esac',
+  );
+  const running = await runPurgeSh(
+    ["tp_unit_present"],
+    `TP_SYSTEMD_DIRS=${empty}\nif tp_unit_present tpbuild.slice; then echo present; else echo absent; fi`,
+    { PATH: `${live}:${BASE_PATH}` },
+  );
+  assertEquals(running.stdout.trim(), "present", running.stderr);
+});
+
+test("containers are not carried into the final check once Docker Engine was purged", async () => {
+  const stub = await stubBin("docker", "exit 1");
+  const run = (gone: string, left = "false") =>
+    runPurgeSh(
+      [
+        "tp_inventory_docker",
+        "tp_inv_skip",
+        "tp_inv_warn",
+        "tp_inv_keep_previous",
+        "tp_docker_ready",
+      ],
+      [
+        'echo "abc-in" > "$TP_TMP/before.containers"',
+        ': > "$TP_TMP/inv.containers"',
+        "TP_INV_QUIET=true",
+        `TP_DOCKER_ENGINE_GONE=${gone}`,
+        `TP_DOCKER_LEFT=${left}`,
+        "tp_inventory_docker",
+        'cat "$TP_TMP/inv.containers"',
+      ].join("\n"),
+      { PATH: `${stub}:${BASE_PATH}` },
+    );
+  assertEquals((await run("true")).stdout.trim(), "");
+  // Daemon dead after the removal step ran: nothing is left to report.
+  assertEquals((await run("false")).stdout.trim(), "");
+  // Docker still installed, not answering, and the removal step was skipped:
+  // the old list is kept.
+  assertEquals((await run("false", "true")).stdout.trim(), "abc-in");
+});
+
+test("a purge with Docker already removed reports no false container failure", async () => {
+  // Docker CLI gone: the removal step skips quietly and records no failure.
+  const result = await runPurgeSh(
+    ["tp_remove_docker", "tp_has_tool", "tp_record_skip"],
+    'tp_has_tool() { return 1; }\ntp_remove_docker\necho "fail=$TP_FAIL_COUNT left=${TP_DOCKER_LEFT:-no}"',
+  );
+  assertStringIncludes(result.stdout, "fail=0 left=no");
+  assertStringIncludes(result.stdout, "fail=0");
+});
+
+test("the hosting Caddy state folder is owned, inventoried and removed", async () => {
+  const source = await Deno.readTextFile(purgePath);
+  const dir = "/var/lib/turbopanel-hosting-caddy";
+  assertStringIncludes(extractConstant(source, "TP_OWNED_TREES") ?? "", dir);
+  assertStringIncludes(
+    extractFunction(source, "tp_remove_folders_and_shell") ?? "",
+    `tp_safe_rm_tree ${dir}`,
+  );
+  assertStringIncludes(
+    extractFunction(source, "tp_inventory_folders") ?? "",
+    dir,
+  );
+});
+
+test("the Docker gate build group is removed by exact name even though its gid is outside the service band", async () => {
+  const stub = await stubBin(
+    "getent",
+    [
+      'case "$1" in',
+      "  passwd) echo 'root:x:0:0::/root:/bin/sh' ;;",
+      "  group) echo 'tpgatebuild:x:988:'; echo 'tpother:x:989:'; echo 'tp:x:9901:' ;;",
+      "esac",
+    ].join("\n"),
+  );
+  const result = await runPurgeSh(
+    [
+      "tp_account_delete_names",
+      "tp_list_has_word",
+      "tp_name_is_tp",
+      "tp_id_in_band",
+      "tp_home_is_principal",
+    ],
+    [
+      "TP_OTHER_GROUPS=tpgatebuild",
+      "tp_account_delete_names",
+      'cat "$TP_TMP/work.groups"',
+    ].join("\n"),
+    { PATH: `${stub}:${BASE_PATH}` },
+  );
+  assertEquals(result.stdout.trim().split("\n").sort(), ["tp", "tpgatebuild"]);
+});
+
+test("only Docker's own firewall rules are matched for removal", async () => {
+  const check = async (rule: string) =>
+    (await runPurgeSh(
+      ["tp_docker_net_rule"],
+      `if tp_docker_net_rule "$RULE"; then echo ours; else echo foreign; fi`,
+      { RULE: rule, PATH: BASE_PATH },
+    )).stdout.trim();
+  assertEquals(await check("-A FORWARD -j DOCKER-USER"), "ours");
+  assertEquals(await check("-A FORWARD -o docker0 -j DOCKER"), "ours");
+  assertEquals(
+    await check(
+      "-A POSTROUTING -s 172.18.0.0/16 ! -o br-0123456789ab -j MASQUERADE",
+    ),
+    "ours",
+  );
+  assertEquals(await check("-A FORWARD -j DOCKER-ISOLATION-STAGE-1"), "ours");
+  assertEquals(await check("-A DOCKER -j RETURN"), "foreign");
+  assertEquals(await check("-A INPUT -p tcp --dport 22 -j ACCEPT"), "foreign");
+  assertEquals(await check("-A FORWARD -o br-lan -j ACCEPT"), "foreign");
+  assertEquals(await check("-A INPUT -i docker0 -j ACCEPT"), "foreign");
+  assertEquals(await check("-A INPUT -i br-0123456789ab -j ACCEPT"), "foreign");
+  assertEquals(await check("-A OUTPUT -o docker0 -j ACCEPT"), "foreign");
+  assertEquals(await check("-A OUTPUT -j DOCKER"), "ours");
+  assertEquals(
+    await check('-A FORWARD -o docker0 -m comment --comment "mine" -j ACCEPT'),
+    "foreign",
+  );
+});
+
+test("the Docker network cleanup removes Docker bridges and chains and nothing else", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "tp-purge-net-" });
+  const calls = join(dir, "calls");
+  await Deno.writeTextFile(
+    join(dir, "ip"),
+    [
+      "#!/bin/sh",
+      `echo "ip $*" >> ${calls}`,
+      'case "$*" in',
+      '  "-o link show type bridge") printf "3: docker0: <X>\\n4: br-0123456789ab: <X>\\n5: br-lan: <X>\\n6: virbr0: <X>\\n" ;;',
+      "esac",
+    ].join("\n") + "\n",
+    { mode: 0o755 },
+  );
+  await Deno.writeTextFile(
+    join(dir, "iptables"),
+    [
+      "#!/bin/sh",
+      `echo "iptables $*" >> ${calls}`,
+      'case "$*" in',
+      '  *"-t filter -S") printf -- "-N DOCKER\\n-N DOCKER-USER\\n-A DOCKER-USER -j RETURN\\n-A FORWARD -j DOCKER-USER\\n-A INPUT -p tcp -j ACCEPT\\n" ;;',
+      "esac",
+    ].join("\n") + "\n",
+    { mode: 0o755 },
+  );
+  const result = await runPurgeSh(
+    [
+      "tp_purge_docker_network_state",
+      "tp_purge_docker_net_table",
+      "tp_docker_net_rule",
+    ],
+    "tp_purge_docker_network_state",
+    { PATH: `${dir}:${BASE_PATH}` },
+  );
+  assertEquals(result.code, 0, result.stderr);
+  const log = await Deno.readTextFile(calls);
+  assertStringIncludes(log, "ip link del docker0");
+  assertStringIncludes(log, "ip link del br-0123456789ab");
+  assert(!log.includes("br-lan") || !log.includes("link del br-lan"), log);
+  assert(!log.includes("link del virbr0"), log);
+  assertStringIncludes(log, "-t filter -D FORWARD -j DOCKER-USER");
+  assertStringIncludes(log, "-t filter -X DOCKER");
+  assert(!log.includes("-D INPUT"), log);
+});
+
+async function netCleanup(
+  forward: string,
+  extra: string,
+): Promise<{ log: string; dir: string; stdout: string }> {
+  const dir = await Deno.makeTempDir({ prefix: "tp-purge-net2-" });
+  const calls = join(dir, "calls");
+  await Deno.writeTextFile(
+    join(dir, "iptables"),
+    [
+      "#!/bin/sh",
+      `echo "iptables $*" >> ${calls}`,
+      'case "$*" in',
+      `  *"-t filter -S") printf -- "${forward}" ;;`,
+      "esac",
+    ].join("\n") + "\n",
+    { mode: 0o755 },
+  );
+  const result = await runPurgeSh(
+    [
+      "tp_purge_docker_net_table",
+      "tp_docker_net_rule",
+    ],
+    `tp_purge_docker_net_table iptables filter\n${extra}`,
+    { PATH: `${dir}:${BASE_PATH}` },
+  );
+  assertEquals(result.code, 0, result.stderr);
+  let log = "";
+  try {
+    log = await Deno.readTextFile(calls);
+  } catch { /* no calls */ }
+  return { log, dir, stdout: result.stdout };
+}
+
+const NET_KEPT =
+  "-N DOCKER\\n-N DOCKER-USER\\n-A DOCKER-USER -s 10.0.0.1 -j DROP\\n-A DOCKER-USER -j RETURN\\n-A FORWARD -j DOCKER-USER\\n-A FORWARD -o docker0 -j DOCKER\\n-A INPUT -i docker0 -j ACCEPT\\n";
+
+test("a kept DOCKER-USER chain keeps its FORWARD jump; Docker's other rules and an admin INPUT docker0 rule are handled", async () => {
+  const { log } = await netCleanup(NET_KEPT, "");
+  assert(!log.includes("-D FORWARD -j DOCKER-USER"), log);
+  assert(!log.includes("-D INPUT"), log);
+  assertStringIncludes(log, "-t filter -D FORWARD -o docker0 -j DOCKER");
+  assert(!log.includes("-X DOCKER-USER"), log);
+  assert(!log.includes("-F DOCKER-USER"), log);
+  assertStringIncludes(log, "-t filter -X DOCKER");
+});
+
+test("an inert DOCKER-USER chain (only RETURN) loses its jump and the chain", async () => {
+  const { log } = await netCleanup(
+    "-N DOCKER-USER\\n-A DOCKER-USER -j RETURN\\n-A FORWARD -j DOCKER-USER\\n",
+    "",
+  );
+  assertStringIncludes(log, "-t filter -D FORWARD -j DOCKER-USER");
+  assertStringIncludes(log, "-t filter -X DOCKER-USER");
+});
+
+test("running the network cleanup on an already clean table does nothing", async () => {
+  const { log } = await netCleanup("-A INPUT -p tcp -j ACCEPT\\n", "");
+  assert(!log.includes(" -D "), log);
+  assert(!log.includes(" -X "), log);
+  assert(!log.includes(" -F "), log);
+});
+
+async function engineGone(
+  stubs: Record<string, string>,
+  env: Record<string, string> = {},
+): Promise<string> {
+  const dir = await Deno.makeTempDir({ prefix: "tp-purge-eng-" });
+  for (const [name, body] of Object.entries(stubs)) {
+    await Deno.writeTextFile(join(dir, name), `#!/bin/sh\n${body}\n`, {
+      mode: 0o755,
+    });
+  }
+  // Hermetic PATH: only the stubs plus sh, so a runner that really has
+  // dockerd, docker-ce, snap or docker.service installed cannot leak in.
+  await Deno.symlink("/bin/sh", join(dir, "sh"));
+  const result = await runPurgeSh(
+    ["tp_docker_engine_gone", "tp_has_tool", "tp_pkg_installed"],
+    "DRY_RUN=false; if tp_docker_engine_gone; then echo gone; else echo present; fi",
+    {
+      PATH: dir,
+      TP_DOCKER_SOCKETS: "/nonexistent/x.sock",
+      ...env,
+    },
+  );
+  return result.stdout.trim();
+}
+
+test("Docker Engine counts as gone only when no daemon, snap, service or socket remains", async () => {
+  assertEquals(await engineGone({}), "gone");
+  assertEquals(await engineGone({ dockerd: "exit 0" }), "present");
+  assertEquals(
+    await engineGone({ "dockerd-rootless.sh": "exit 0" }),
+    "present",
+  );
+  assertEquals(await engineGone({ snap: "exit 0" }), "present");
+  assertEquals(await engineGone({ systemctl: "exit 0" }), "present");
+  assertEquals(
+    await engineGone({ "dpkg-query": 'printf "install ok installed"' }),
+    "present",
+  );
+  const dir = await Deno.makeTempDir({ prefix: "tp-purge-sock-" });
+  const sock = join(dir, "docker.sock");
+  const listener = Deno.listen({ transport: "unix", path: sock });
+  try {
+    assertEquals(await engineGone({}, { TP_DOCKER_SOCKETS: sock }), "present");
+  } finally {
+    listener.close();
+  }
 });

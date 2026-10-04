@@ -14,10 +14,15 @@
  * viewer instead of a redirect the operator has to invent.
  */
 
-import { principalHomePath } from "../../paths/layout.ts";
+import { safeConfigToken } from "../../contracts/config-values.ts";
 import type { LayoutPaths } from "../../paths/layout.ts";
 import { principalUnixGroupName } from "../ensure-principal.ts";
-import { principalSliceName, SYSTEMD_UNIT_DIR } from "../native/unit.ts";
+import {
+  principalReadWritePaths,
+  principalSliceName,
+  principalUnitEnvironment,
+  SYSTEMD_UNIT_DIR,
+} from "../native/unit.ts";
 import type { EnvironmentDeployCronJob } from "../../contracts/commands-contracts.ts";
 
 /**
@@ -43,8 +48,17 @@ export type CronUnitIdentity = {
 };
 
 /** `turbopanel-cron-<environmentId>-<service>-<job>` — no extension. */
+/** The compose service name, refused unless it is one bare config token. */
+function cronServiceToken(identity: { composeServiceName: string }): string {
+  return safeConfigToken(
+    "cron composeServiceName",
+    identity.composeServiceName,
+  );
+}
+
 export function cronUnitName(identity: CronUnitIdentity): string {
-  return `${CRON_UNIT_PREFIX}${identity.environmentId}-${identity.composeServiceName}-${identity.jobName}`;
+  const service = cronServiceToken(identity);
+  return `${CRON_UNIT_PREFIX}${identity.environmentId}-${service}-${identity.jobName}`;
 }
 
 export function cronServicePath(
@@ -73,10 +87,16 @@ const SYSTEMD_QUOTE_ESCAPE = String.raw`\$&`;
  * about which characters are "safe" here.
  *
  * The wire contract already refuses NUL, CR, and LF in an argument, so what is
- * left cannot terminate the directive.
+ * left cannot terminate the directive. `$` and `%` are doubled so systemd
+ * passes them through literally instead of expanding a variable or a
+ * specifier (`%h`, `%u`, ...) before the job sees its own argument.
  */
 function quoteExecArg(arg: string): string {
-  return `"${arg.replaceAll(/["\\]/g, SYSTEMD_QUOTE_ESCAPE)}"`;
+  const escaped = arg
+    .replaceAll(/["\\]/g, SYSTEMD_QUOTE_ESCAPE)
+    .replaceAll("$", () => "$$")
+    .replaceAll("%", () => "%%");
+  return `"${escaped}"`;
 }
 
 export type CronUnitOpts = {
@@ -88,6 +108,11 @@ export type CronUnitOpts = {
   username: string;
   /** Directory the job runs in: a site's document root, an app's `current`. */
   workingDirectory: string;
+  /**
+   * The site's tenant-writable directories (`shared/`, and `webroot/` in the
+   * managed lane). Empty or absent for a tree outside the principal's home.
+   */
+  siteWritableDirs?: readonly string[];
 };
 
 /**
@@ -107,11 +132,10 @@ export type CronUnitOpts = {
 const DEFAULT_CRON_TIMEOUT_SECONDS = 900;
 
 export function cronServiceContent(opts: CronUnitOpts): string {
-  const home = principalHomePath(opts.layout, opts.username);
   return [
     "# Managed by TurboPanel — regenerated on deploy; edits are overwritten.",
     "[Unit]",
-    `Description=TurboPanel job ${opts.job.name} (${opts.composeServiceName})`,
+    `Description=TurboPanel job ${opts.job.name} (${cronServiceToken(opts)})`,
     `X-TurboPanel-Environment=${opts.environmentId}`,
     "",
     "[Service]",
@@ -122,7 +146,7 @@ export function cronServiceContent(opts: CronUnitOpts): string {
     `Group=${principalUnixGroupName(opts.username)}`,
     `Slice=${principalSliceName(opts.username)}`,
     `WorkingDirectory=${opts.workingDirectory}`,
-    `Environment=HOME=${home}`,
+    ...principalUnitEnvironment(opts.layout, opts.username),
     `ExecStart=${opts.job.command.map(quoteExecArg).join(" ")}`,
     // Output goes to the log viewer rather than a redirect the operator has to
     // invent — which is also why the command parser can refuse `>>`.
@@ -155,10 +179,15 @@ export function cronServiceContent(opts: CronUnitOpts): string {
     "LockPersonality=yes",
     "CapabilityBoundingSet=",
     "AmbientCapabilities=",
-    // The tree it runs in. `ProtectHome` is deliberately NOT set: the working
-    // directory is inside the principal's home, and a job that cannot read the
-    // application it was written for is not a job.
-    `ReadWritePaths=${home}`,
+    // `ProtectHome` is deliberately NOT set: the working directory is inside
+    // the principal's home, and a job that cannot read the application it was
+    // written for is not a job. It writes only the site's own writable dirs and
+    // the principal's home/, data/ and tmp/; the home root is root-owned.
+    principalReadWritePaths(
+      opts.layout,
+      opts.username,
+      opts.siteWritableDirs ?? [],
+    ),
     "",
   ].join("\n");
 }
@@ -179,7 +208,9 @@ export function cronTimerContent(opts: CronUnitOpts): string {
   return [
     "# Managed by TurboPanel — regenerated on deploy; edits are overwritten.",
     "[Unit]",
-    `Description=TurboPanel schedule for ${opts.job.name} (${opts.composeServiceName})`,
+    `Description=TurboPanel schedule for ${opts.job.name} (${
+      cronServiceToken(opts)
+    })`,
     `X-TurboPanel-Environment=${opts.environmentId}`,
     "",
     "[Timer]",

@@ -9,8 +9,9 @@
 #
 # Verbs:
 #   playbook -i localhost, -c local [-e key=value|-e '{json}']... <playbook.yml>
-#       Run one of the shipped playbooks (a basename resolved under this
-#       tree's playbooks/ — never a caller-supplied path). Each extra-var key
+#       Run one of the shipped playbooks on TP_PLAYBOOK_ALLOWLIST (a basename
+#       resolved under this tree's playbooks/ — never a caller-supplied path;
+#       `.`/`..` segments and symlinks are refused). Each extra-var key
 #       must be on the allowlist below with a value of the expected shape;
 #       JSON objects are limited to TP_JSON_EXTRA_VAR_KEYS; @file is refused.
 #       Everything else on the command line is refused.
@@ -166,9 +167,10 @@ tp_extra_var_value_ok() {
       ;;
     turbopanel_upgrade_id)
       case "$_xv" in
-        ''|*[!A-Za-z0-9_-]*) return 1 ;;
+        ''|[-_]*|*[!A-Za-z0-9_-]*) return 1 ;;
       esac
-      [ "${#_xv}" -le 128 ] && return 0
+      # Same shape the backup and rollback playbooks assert: one path segment.
+      [ "${#_xv}" -le 80 ] && return 0
       ;;
     turbopanel_instance_version)
       case "$_xv" in
@@ -357,6 +359,22 @@ if not isinstance(doc, dict) or not doc:
     sys.exit(1)
 if any(k not in allowed for k in doc):
     sys.exit(1)
+# The PHP series and extension names become apt package names
+# (php<series>-<extension>=<version>): a name here is a package, never an apt
+# option, a version pin or a second package.
+series = re.compile(r"[0-9]\.[0-9]{1,2}")
+ext = re.compile(r"[a-z0-9][a-z0-9.+-]{0,31}")
+versions = doc.get("php_fpm_versions", [])
+if not (isinstance(versions, list) and all(isinstance(x, str) and series.fullmatch(x) for x in versions)):
+    sys.exit(1)
+exts = doc.get("php_fpm_extensions", {})
+if not isinstance(exts, dict):
+    sys.exit(1)
+for k, names in exts.items():
+    if not series.fullmatch(k) or not isinstance(names, list):
+        sys.exit(1)
+    if not all(isinstance(x, str) and ext.fullmatch(x) for x in names):
+        sys.exit(1)
 sys.exit(0 if all(leaf_ok(v) for v in doc.values()) else 1)
 ' "$_jv"
 }
@@ -377,6 +395,53 @@ tp_valid_extra_var() {
     *[!a-z0-9_]*) return 1 ;;
   esac
   tp_extra_var_value_ok "$_key" "${1#*=}"
+}
+
+# The playbooks the daemon account may run as root, by basename: the ones
+# src/orchestration/assets.ts and src/instance/run-reconcile.ts hand to this
+# helper. The installer plays (daemon-install.yml, instance-install.yml,
+# daemon-colocated-refresh.yml) are not here: run.sh runs them as root itself.
+# A playbook shipped in the tree but missing from this list is refused, so a
+# new play the daemon runs through the helper must be added here
+# (src/orchestration/tp-orchestrate.test.ts checks the list against the daemon).
+TP_PLAYBOOK_ALLOWLIST="buildkit-setup.yml caddy-setup.yml daemon-converge.yml daemon-logs-setup.yml daemon-systemd-setup.yml docker-setup.yml instance-backup.yml instance-build-toggle.yml instance-certs-apply.yml instance-launch-only.yml instance-rollback.yml instance-units-refresh.yml localhost-test.yml node-app-runtime-apply.yml orchestrator-setup.yml postgres-setup.yml proxysql-setup.yml rabbitmq-setup.yml redis-setup.yml set-hostname.yml site-apache-apply.yml site-caddy-apply.yml site-nginx-apply.yml site-openlitespeed-apply.yml socket-dirs-setup.yml time-sync-apply.yml"
+
+# Resolve the caller's playbook argument into $_resolved, or die. It is a bare
+# basename, or the daemon's absolute constant (<orchestration>/playbooks/<name>),
+# whose directory must be this tree's own playbooks directory. A `.` or `..`
+# segment is refused outright, the name must be on TP_PLAYBOOK_ALLOWLIST before
+# anything is looked up on disk, and the shipped file must be a regular file,
+# not a symlink.
+tp_resolve_playbook() {
+  _rp="$1"
+  case "/$_rp/" in
+    */../*|*/./*) tp_die "refusing playbook path $_rp: no . or .. segments" ;;
+  esac
+  _name="${_rp##*/}"
+  case "$_name" in
+    *.yml) ;;
+    *) tp_die "playbook must be a .yml file name" ;;
+  esac
+  case "$_name" in
+    .*|*[[:space:][:cntrl:]]*) tp_die "refusing playbook name $_name" ;;
+  esac
+  case " $TP_PLAYBOOK_ALLOWLIST " in
+    *" $_name "*) ;;
+    *) tp_die "refusing playbook $_name: not on the tp-orchestrate allowlist" ;;
+  esac
+  if [ "$_rp" != "$_name" ]; then
+    _rp_dir="${_rp%/*}"
+    [ -n "$_rp_dir" ] || _rp_dir="/"
+    _rp_real="$(cd -P "$_rp_dir" 2>/dev/null && pwd -P)" || _rp_real=""
+    _pb_real="$(cd -P "$PLAYBOOKS_DIR" && pwd -P)"
+    [ "$_rp_real" = "$_pb_real" ] ||
+      tp_die "refusing playbook $_rp: not in the shipped playbooks directory"
+  fi
+  _resolved="$PLAYBOOKS_DIR/$_name"
+  if [ -L "$_resolved" ]; then
+    tp_die "refusing symlinked playbook $_name"
+  fi
+  [ -f "$_resolved" ] || tp_die "no such shipped playbook: $_name"
 }
 
 tp_verb_playbook() {
@@ -423,21 +488,7 @@ tp_verb_playbook() {
   [ "$_connection" = "local" ] || tp_die "missing -c local"
   [ -n "$_playbook" ] || tp_die "missing playbook"
 
-  # A basename only — callers pass the daemon's absolute constant and we keep
-  # nothing of it but the file name, resolved under the root-owned tree.
-  _name="${_playbook##*/}"
-  case "$_name" in
-    *.yml) ;;
-    *) tp_die "playbook must be a .yml file name" ;;
-  esac
-  case "$_name" in
-    .*|*/*) tp_die "refusing playbook name $_name" ;;
-  esac
-  _resolved="$PLAYBOOKS_DIR/$_name"
-  [ -f "$_resolved" ] || tp_die "no such shipped playbook: $_name"
-  if [ -L "$_resolved" ]; then
-    tp_die "refusing symlinked playbook $_name"
-  fi
+  tp_resolve_playbook "$_playbook"
   [ -x "$ANSIBLE_PLAYBOOK_BIN" ] || tp_die "ansible-playbook missing at $ANSIBLE_PLAYBOOK_BIN"
 
   tp_export_runtime_env
@@ -472,7 +523,7 @@ tp_verb_galaxy_docker_role() {
   _work="$ROOT_SCRATCH/galaxy-docker.$$"
   rm -rf "$_work"
   mkdir -m 0700 "$_work"
-  if ! curl -fsSL --max-time 120 -o "$_work/role.tar.gz" "$_url"; then
+  if ! curl -fsSL --max-time 120 --retry 2 --retry-delay 3 --retry-max-time 60 -o "$_work/role.tar.gz" "$_url"; then
     rm -rf "$_work"
     tp_die "failed to download $_url"
   fi
@@ -666,7 +717,7 @@ tp_fetch_pinned_run_script() {
   # (dev overlay) replaces it below. `_channel` is set by the calling verb from
   # a fixed vocabulary and only ever selects one of three constant hosts.
   _script_url="https://$(tp_installer_host_for_channel "${_channel:-}")"
-  set -- curl -fsSL --max-time 120
+  set -- curl -fsSL --max-time 120 --retry 2 --retry-delay 3 --retry-max-time 60
   case "$_pin_host" in
     http://*)
       tp_die "refusing plaintext update origin $_pin_host — the control plane is https://<host>:8443"
@@ -774,6 +825,12 @@ tp_verb_update() {
   [ -n "$_host" ] || _host="$_pin_host"
   [ -n "$_dl_base" ] || _dl_base="$_pin_dl_base"
   [ -n "$_ca" ] || _ca="$_pin_ca"
+  # An overlay host installs with --dev-allow-unsigned; a --manifest-url pin
+  # (an upgrade or a rollback to one exact release) must always verify against
+  # the release key, so the two never travel together (run.sh agrees).
+  if [ -n "$_manifest_url" ] && [ -n "$_dl_base" ]; then
+    tp_die "refusing --manifest-url on an overlay host: a pinned manifest must be signed by the release key"
+  fi
 
   # Where run.sh comes from, and how it is trusted — the same three answers
   # as the daemon's resolveAutomaticUpdateTrust, decided here from the pinned
@@ -784,7 +841,9 @@ tp_verb_update() {
 
   set -- --license "$_license"
   [ -n "$_host" ] && set -- "$@" --host "$_host"
-  [ -n "$_dl_base" ] && set -- "$@" --dl-base "$_dl_base"
+  # An overlay host was installed with --dev-allow-unsigned (the root-owned
+  # pin exists only for such an install), so the refresh carries it too.
+  [ -n "$_dl_base" ] && set -- "$@" --dl-base "$_dl_base" --dev-allow-unsigned
   [ -n "$_ca" ] && set -- "$@" --instance-ca "$_ca"
   [ -n "$_channel" ] && set -- "$@" --channel "$_channel"
   [ -n "$_manifest_url" ] && set -- "$@" --manifest-url "$_manifest_url"

@@ -45,9 +45,28 @@ import type {
 } from "../../contracts/commands-contracts.ts";
 import type { DecryptSecretsFn } from "../materialize-tls.ts";
 import type { RunFn } from "../ensure-principal.ts";
-import { dirname } from "@std/path";
-import { checkoutRelease, type ReleaseOutputHandler } from "./checkout.ts";
-import { prepareNativeAppBuildOutput, runReleaseBuild } from "./build.ts";
+import { dirname, join } from "@std/path";
+import {
+  assertCheckoutCredentialsRemoved,
+  checkoutRelease,
+  type CheckoutResult,
+  type ReleaseOutputHandler,
+} from "./checkout.ts";
+import {
+  type NativeAppBuildOutput,
+  prepareNativeAppBuildOutput,
+  runReleaseBuild,
+} from "./build.ts";
+import {
+  buildSandboxEnabled,
+  type BuildSandboxMarkers,
+  buildSpecCwd,
+  type BuildWork,
+  createBuildWorkDir,
+  removeBuildWork,
+  resolveBuildWork,
+  sweepStaleBuildWork,
+} from "./build-sandbox.ts";
 import {
   nativeAppNodeBinary,
   nativeAppRuntimeGroup,
@@ -55,7 +74,7 @@ import {
 } from "../native/unit.ts";
 import {
   ensureBuildkitRailpack,
-  railpackCacheDir,
+  railpackCacheKey,
   railpackImageTag,
   runRailpackBuild,
 } from "./railpack-build.ts";
@@ -64,6 +83,7 @@ import {
   promoteRelease,
   readCurrentReleaseId,
   recordRailpackRelease,
+  releasePathExists,
 } from "./promote.ts";
 import { pruneReleases } from "./retention.ts";
 import { definedFields } from "../../util/optional-fields.ts";
@@ -71,6 +91,7 @@ import { forEachSequential } from "../../util/sequential.ts";
 import {
   readReleaseManifest,
   type ReleaseManifestV1,
+  writeReleaseManifest,
 } from "./deployment-json.ts";
 import {
   ensureDaemonReleaseRecordDir,
@@ -80,6 +101,7 @@ import {
   resetReleaseScratchDir,
   resolveDaemonReleasePaths,
   resolveReleasePaths,
+  runPrivileged,
 } from "./release-layout.ts";
 
 export type AppliedRelease = {
@@ -227,6 +249,15 @@ export type ApplySourceReleasesDeps = {
   ensureReleaseTreeFn?: typeof ensureReleaseTree;
   /** Test seam — defaults to {@link ensureDaemonReleaseRecordDir}. */
   ensureDaemonReleaseRecordDirFn?: typeof ensureDaemonReleaseRecordDir;
+  /**
+   * Whether native builds run in the build sandbox. Defaults to
+   * {@link buildSandboxEnabled} (every managed host).
+   */
+  sandboxedBuilds?: boolean;
+  /** Test seam — the root-owned facts {@link buildSandboxEnabled} checks. */
+  buildSandboxMarkers?: BuildSandboxMarkers;
+  /** Test seam — the build-user role's tree (`/var/lib/turbopanel-build`). */
+  buildSandboxRoot?: string;
 };
 
 /**
@@ -241,14 +272,16 @@ export type ApplySourceReleasesDeps = {
  * `deployment.json`, and retention consume a rollback exactly as they consume a
  * fresh deploy.
  *
- * The commit and the build-output shape are read back from the target release's
- * own `.turbopanel/release.json` rather than from the payload: the payload's
- * `commitSha` is a wire-shape placeholder on a rollback, and what the result has
- * to report is which commit — and which runtime lane — is now live.
+ * The commit and the build-output shape come from the daemon-owned record of
+ * the target release ({@link resolveRollbackTarget}) rather than from the
+ * payload: the payload's `commitSha` is a wire-shape placeholder on a rollback,
+ * and what the result has to report is which commit — and which runtime lane —
+ * is now live. Nothing is read back out of the principal's tree, which its
+ * owner can rewrite.
  */
 async function rollbackOneRelease(
   entry: EnvironmentDeploySource,
-  paths: ReleasePaths,
+  target: RollbackTarget,
   params: {
     serviceId: string;
     releaseId: string;
@@ -257,18 +290,17 @@ async function rollbackOneRelease(
   },
 ): Promise<AppliedRelease> {
   const { logSink, deps } = params;
+  const { paths, manifest: recordedManifest } = target;
   logSink.setPhase(COMMAND_LOG_PHASES.RELEASE_PROMOTE);
   const previousReleaseId = await readCurrentReleaseId(paths, deps.runFn);
 
   // A Railpack release published no tree, so there is no sealed directory to
-  // validate and no `current` to swap: the manifest read straight off the
-  // record directory *is* the rollback. Deciding from the manifest rather than
-  // from `entry.build.kind` is deliberate — what matters is how the release
-  // being restored was built, not what the payload asks for now, so flipping a
-  // service's build mode never breaks rollback to a release from before the
-  // switch.
-  const recordedManifest = await readReleaseManifest(paths.releaseDir);
-  if (recordedManifest?.imageTag) {
+  // validate and no `current` to swap: the daemon record *is* the rollback.
+  // Deciding from the record rather than from `entry.build.kind` is deliberate
+  // — what matters is how the release being restored was built, not what the
+  // payload asks for now, so flipping a service's build mode never breaks
+  // rollback to a release from before the switch.
+  if (recordedManifest.imageTag) {
     logSink.onLine(
       "stdout",
       `rolled ${entry.composeServiceName} back to release ${params.releaseId} ` +
@@ -306,26 +338,25 @@ async function rollbackOneRelease(
     await (deps.promoteExistingReleaseFn ?? promoteExistingRelease)({
       paths,
       releaseId: params.releaseId,
+      ...(deps.runFn === undefined ? {} : { runFn: deps.runFn }),
     });
-  const manifest = await readReleaseManifest(releaseDir);
   logSink.onLine(
     "stdout",
-    `rolled ${entry.composeServiceName} back to release ${params.releaseId}` +
-      (manifest ? ` (${manifest.commitSha})` : ""),
+    `rolled ${entry.composeServiceName} back to release ${params.releaseId} ` +
+      `(${recordedManifest.commitSha})`,
   );
 
-  // The target release's own manifest is the authority on what is now live; the
-  // payload only carries a stored copy of it for the control plane's benefit,
-  // and carries nothing at all for a release published before this metadata
-  // existed.
-  const commitMessage = manifest?.commitMessage ?? entry.commitMessage;
-  const commitAuthor = manifest?.commitAuthor ?? entry.commitAuthor;
+  // The daemon's record of the target release is the authority on what is now
+  // live; the payload only carries a stored copy of it for the control plane's
+  // benefit, and carries nothing at all for metadata recorded before it existed.
+  const commitMessage = recordedManifest.commitMessage ?? entry.commitMessage;
+  const commitAuthor = recordedManifest.commitAuthor ?? entry.commitAuthor;
 
   return {
     composeServiceName: entry.composeServiceName,
     serviceId: params.serviceId,
     releaseId: params.releaseId,
-    commitSha: manifest?.commitSha ?? entry.commitSha,
+    commitSha: recordedManifest.commitSha,
     ...(commitMessage === undefined ? {} : { commitMessage }),
     ...(commitAuthor === undefined ? {} : { commitAuthor }),
     releaseDir,
@@ -335,8 +366,8 @@ async function rollbackOneRelease(
     // being re-derived (nothing was built here to derive them from). A
     // pre-manifest-field release reads back as `false`, which is the behavior
     // those releases already had.
-    standaloneOutput: manifest?.standaloneOutput ?? false,
-    staticExport: manifest?.staticExport ?? false,
+    standaloneOutput: recordedManifest.standaloneOutput ?? false,
+    staticExport: recordedManifest.staticExport ?? false,
   };
 }
 
@@ -378,10 +409,9 @@ async function applyRailpackRelease(
     build: entry.build,
     workingDir: params.buildWorkingDir,
     scratchDir: paths.scratchDir,
-    cacheDir: railpackCacheDir(layout, payload.projectId),
+    cacheKey: railpackCacheKey(payload.projectId),
     imageTag,
     tools,
-    layout,
     onOutput,
     redactSummary: (text) => logSink.redactSummary(text),
   });
@@ -455,31 +485,195 @@ async function applyRailpackRelease(
   };
 }
 
+/** What a rollback restores: the release paths and the daemon's record of it. */
+type RollbackTarget = { paths: ReleasePaths; manifest: ReleaseManifestV1 };
+
 /**
- * Which root holds the release a rollback is addressing.
- *
- * A Railpack release's history lives in the daemon-owned record root and a
- * native one's in the principal home, and the payload cannot say which: a
- * service that switched build modes since must still be able to roll back to a
- * release built the old way. So the record root is probed first and the
- * principal home is the fallback — the release that actually exists identifies
- * its own lane.
+ * A re-sent deploy of a native release this host already published — the same
+ * release id and the same commit in the daemon's own record, and the tree still
+ * there. tp-host `publish` never stages over an existing release, so it is cut
+ * over to again like a rollback instead of being rebuilt.
  */
-async function resolveRollbackPaths(
+async function resentPublishedRelease(
+  layout: LayoutPaths,
+  entry: EnvironmentDeploySource,
+  serviceId: string,
+  params: { principalPaths: ReleasePaths | null; runFn: RunFn | undefined },
+): Promise<RollbackTarget | null> {
+  const paths = params.principalPaths;
+  if (!paths || entry.build.kind === "railpack") return null;
+  const record = await readFinalizedRecord(
+    resolveDaemonReleasePaths(layout, {
+      serviceId,
+      releaseId: entry.releaseId,
+    }).releaseDir,
+  );
+  const same = record !== null && !record.imageTag &&
+    record.serviceId === serviceId && record.releaseId === entry.releaseId &&
+    record.commitSha === entry.commitSha;
+  if (!same) return null;
+  const present = await releasePathExists(
+    paths.releaseDir,
+    params.runFn ?? runPrivileged,
+  );
+  return present ? { paths, manifest: record } : null;
+}
+
+/**
+ * The release a rollback is addressing, as this host's daemon recorded it.
+ *
+ * Every published release — native or Railpack — leaves a manifest under the
+ * daemon-owned record root ({@link resolveDaemonReleasePaths}), and that record
+ * is the **only** thing a rollback trusts. The copy inside a native release
+ * tree lives in the principal's home, which the principal owns and can
+ * rearrange, so neither the lane (`imageTag`) nor the commit is ever taken from
+ * it. A release with no record — one published before records were kept, or on
+ * another host — fails here with the fix spelled out, rather than falling back
+ * to that tree.
+ *
+ * The record also identifies the lane: an `imageTag` means a Railpack release,
+ * restored from the record root itself; anything else is a native tree in the
+ * principal home (`null` when there is no principal to own one).
+ */
+async function resolveRollbackTarget(
   layout: LayoutPaths,
   params: {
+    composeServiceName: string;
     serviceId: string;
     releaseId: string;
     principalPaths: ReleasePaths | null;
   },
-): Promise<ReleasePaths | null> {
+): Promise<RollbackTarget | null> {
   const recordPaths = resolveDaemonReleasePaths(layout, {
     serviceId: params.serviceId,
     releaseId: params.releaseId,
   });
-  const recorded = await readReleaseManifest(recordPaths.releaseDir);
-  if (recorded?.imageTag) return recordPaths;
-  return params.principalPaths;
+  const manifest = await readFinalizedRecord(recordPaths.releaseDir);
+  const matches = manifest?.serviceId === params.serviceId &&
+    manifest.releaseId === params.releaseId;
+  if (!manifest || !matches) {
+    throw new Error(
+      `cannot roll ${params.composeServiceName} back to release ` +
+        `${params.releaseId}: this host has no release record for it — ` +
+        `redeploy that release instead`,
+    );
+  }
+  if (manifest.imageTag) return { paths: recordPaths, manifest };
+  return params.principalPaths
+    ? { paths: params.principalPaths, manifest }
+    : null;
+}
+
+/** Present in a record dir from before the promote until it has finished. */
+const PENDING_RECORD_MARKER = ".pending";
+
+/**
+ * The record at `recordDir`, unless it is still pending: a pending record was
+ * written ahead of a promote that never finished (the daemon died mid-way), so
+ * its tree may be partial and neither a re-send nor a rollback may trust it.
+ */
+async function readFinalizedRecord(
+  recordDir: string,
+): Promise<ReleaseManifestV1 | null> {
+  try {
+    await Deno.stat(join(recordDir, PENDING_RECORD_MARKER));
+    return null;
+  } catch (err) {
+    if (!(err instanceof Deno.errors.NotFound)) throw err;
+  }
+  return await readReleaseManifest(recordDir);
+}
+
+/**
+ * Record a native release under the daemon-owned record root, so a later
+ * rollback can restore it without reading the principal's tree.
+ *
+ * Written **before** the promote, and a failure fails the deploy: once the
+ * cutover has happened a missing record could only be logged, and the release
+ * would be live but impossible to roll back to. Writing first means the
+ * failure is seen at deploy time with `current` untouched. It is written
+ * **pending** (marker first, then the manifest) and {@link
+ * finalizeNativeRecord} clears the marker once the promote has succeeded, so a
+ * kill between the two leaves a record nothing trusts. {@link
+ * discardNativeRecord} removes it when the promote fails.
+ */
+async function recordNativeRelease(
+  layout: LayoutPaths,
+  manifest: ReleaseManifestV1,
+  deps: ApplySourceReleasesDeps,
+): Promise<void> {
+  const recordPaths = resolveDaemonReleasePaths(layout, {
+    serviceId: manifest.serviceId,
+    releaseId: manifest.releaseId,
+  });
+  try {
+    await (deps.ensureDaemonReleaseRecordDirFn ?? ensureDaemonReleaseRecordDir)(
+      recordPaths,
+    );
+    await Deno.writeTextFile(
+      join(recordPaths.releaseDir, PENDING_RECORD_MARKER),
+      "",
+    );
+    await writeReleaseManifest(recordPaths.releaseDir, manifest);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new Error(
+      `release ${manifest.releaseId} was not published: its rollback record ` +
+        `could not be written: ${message}`,
+      { cause: err },
+    );
+  }
+}
+
+/**
+ * Mark a recorded release as published, once its promote has finished. The
+ * deploy is already cut over to it, so a failure here is only logged: the
+ * release stays live and the record stays pending (not rollback-able, and a
+ * re-send rebuilds it).
+ */
+async function finalizeNativeRecord(
+  layout: LayoutPaths,
+  serviceId: string,
+  releaseId: string,
+  deps: ApplySourceReleasesDeps,
+): Promise<void> {
+  const { releaseDir } = resolveDaemonReleasePaths(layout, {
+    serviceId,
+    releaseId,
+  });
+  try {
+    await Deno.remove(join(releaseDir, PENDING_RECORD_MARKER));
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) return;
+    const message = err instanceof Error ? err.message : String(err);
+    deps.logSink.onLine(
+      "stderr",
+      `could not finalize the rollback record for ${releaseId}: ${message}`,
+    );
+  }
+}
+
+/** Remove a release's record; best-effort, a leftover is only a stale record. */
+async function discardNativeRecord(
+  layout: LayoutPaths,
+  serviceId: string,
+  releaseId: string,
+  deps: ApplySourceReleasesDeps,
+): Promise<void> {
+  const { releaseDir } = resolveDaemonReleasePaths(layout, {
+    serviceId,
+    releaseId,
+  });
+  try {
+    await Deno.remove(releaseDir, { recursive: true });
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) return;
+    const message = err instanceof Error ? err.message : String(err);
+    deps.logSink.onLine(
+      "stderr",
+      `could not remove the rollback record for ${releaseId}: ${message}`,
+    );
+  }
 }
 
 /** Clone one release's source into its scratch dir — identical on both lanes. */
@@ -488,6 +682,7 @@ async function checkoutForEntry(
   paths: ReleasePaths,
   deps: ApplySourceReleasesDeps,
   onOutput: ReleaseOutputHandler,
+  checkoutDir?: string,
 ) {
   const credential = await decryptCloneCredential(
     entry.credential,
@@ -498,6 +693,7 @@ async function checkoutForEntry(
     ref: entry.ref,
     commitSha: entry.commitSha,
     scratchDir: paths.scratchDir,
+    checkoutDir,
     onOutput,
     redactSummary: (text: string) => deps.logSink.redactSummary(text),
     credential,
@@ -582,7 +778,6 @@ async function buildNativeRelease(
 ): Promise<AppliedRelease> {
   const { deps, onOutput, serviceId, username } = params;
   const { logSink } = deps;
-  const nativeApp = nativeAppForService(payload, entry.composeServiceName);
 
   await (deps.ensureReleaseTreeFn ?? ensureReleaseTree)(
     paths,
@@ -590,48 +785,26 @@ async function buildNativeRelease(
     deps.runFn,
   );
   await resetReleaseScratchDir(paths);
+  let work: BuildWork | null = null;
   try {
+    work = await prepareBuildWork(payload, entry, serviceId, deps);
     logSink.setPhase(COMMAND_LOG_PHASES.FETCH);
-    const checkout = await checkoutForEntry(entry, paths, deps, onOutput);
+    const checkout = await checkoutForEntry(
+      entry,
+      paths,
+      deps,
+      onOutput,
+      work?.checkoutDir,
+    );
 
     logSink.setPhase(COMMAND_LOG_PHASES.BUILD);
-    const buildWorkingDir = buildWorkingDirFor(entry, checkout.workingDir);
-    await (deps.runReleaseBuildFn ?? runReleaseBuild)(definedFields({
-      build: entry.build,
-      workingDir: buildWorkingDir,
-      // A native app builds with its own runtime on PATH and its declared
-      // NODE_ENV, so the derived install command and the build both run on
-      // the series the app will execute on.
-      nativeRuntime: nativeApp
-        ? definedFields({
-          nodeBinDir: dirname(nativeAppNodeBinary(
-            layout,
-            resolveNativeAppNodeVersion(nativeApp),
-          )),
-          nodeEnv: nativeApp.appMode ?? "production",
-          runtimeGroup: nativeAppRuntimeGroup(
-            resolveNativeAppNodeVersion(nativeApp),
-          ),
-        })
-        : undefined,
+    if (work) await assertCheckoutCredentialsRemoved(paths.scratchDir);
+    const nativeOutput = await buildNativeTree(layout, payload, entry, {
+      checkout,
+      work,
+      deps,
       onOutput,
-      redactSummary: (text: string) => logSink.redactSummary(text),
-    }));
-
-    // An operator-declared `outputDirectory` always wins: they said where the
-    // payload is, and second-guessing that would make the field a suggestion.
-    const nativeOutput = nativeApp && entry.build.outputDirectory === undefined
-      ? await (deps.prepareNativeAppBuildOutputFn ??
-        prepareNativeAppBuildOutput)({
-          framework: nativeApp.framework,
-          workingDir: buildWorkingDir,
-          onOutput,
-        })
-      : {
-        standaloneOutput: false as boolean,
-        staticExport: false as boolean,
-        outputDirectory: undefined,
-      };
+    });
 
     logSink.setPhase(COMMAND_LOG_PHASES.RELEASE_PROMOTE);
     const previousReleaseId = await readCurrentReleaseId(paths, deps.runFn);
@@ -651,18 +824,27 @@ async function buildNativeRelease(
       standaloneOutput: nativeOutput.standaloneOutput,
       staticExport: nativeOutput.staticExport,
     });
-    const releaseDir = await (deps.promoteReleaseFn ?? promoteRelease)(
-      definedFields({
-        paths,
-        workingDir: checkout.workingDir,
-        username,
-        manifest,
-        subdirectory: entry.subdirectory,
-        outputDirectory: entry.build.outputDirectory ??
-          nativeOutput.outputDirectory,
-        runFn: deps.runFn,
-      }),
-    );
+    await recordNativeRelease(layout, manifest, deps);
+    let releaseDir: string;
+    try {
+      releaseDir = await (deps.promoteReleaseFn ?? promoteRelease)(
+        definedFields({
+          paths,
+          workingDir: checkout.workingDir,
+          username,
+          manifest,
+          subdirectory: entry.subdirectory,
+          outputDirectory: entry.build.outputDirectory ??
+            nativeOutput.outputDirectory,
+          containmentRoot: work?.workDir,
+          runFn: deps.runFn,
+        }),
+      );
+    } catch (err) {
+      await discardNativeRecord(layout, serviceId, entry.releaseId, deps);
+      throw err;
+    }
+    await finalizeNativeRecord(layout, serviceId, entry.releaseId, deps);
     logSink.onLine(
       "stdout",
       `promoted release ${entry.releaseId} (${checkout.commitSha}) for ${entry.composeServiceName}`,
@@ -676,6 +858,12 @@ async function buildNativeRelease(
     if (pruned.length > 0) {
       logSink.onLine("stdout", `pruned ${pruned.length} superseded release(s)`);
     }
+    // A record lives exactly as long as the tree it describes: a rollback to a
+    // pruned release has nothing to restore, so its record would only mislead.
+    await forEachSequential(
+      pruned,
+      (releaseId) => discardNativeRecord(layout, serviceId, releaseId, deps),
+    );
 
     return definedFields({
       composeServiceName: entry.composeServiceName,
@@ -690,8 +878,96 @@ async function buildNativeRelease(
       staticExport: nativeOutput.staticExport,
     });
   } finally {
+    if (work) await removeBuildWork(work, onOutput);
     await removeReleaseScratchDir(paths);
   }
+}
+
+/**
+ * The sandbox work tree for a native build, created empty for the clone, or
+ * `null` where builds run unsandboxed (a development install).
+ */
+async function prepareBuildWork(
+  payload: EnvironmentDeployPayload,
+  entry: EnvironmentDeploySource,
+  serviceId: string,
+  deps: ApplySourceReleasesDeps,
+): Promise<BuildWork | null> {
+  const sandboxed = deps.sandboxedBuilds ??
+    await buildSandboxEnabled(deps.buildSandboxMarkers);
+  if (!sandboxed) return null;
+  await sweepStaleBuildWork(deps.buildSandboxRoot, {
+    runFn: deps.runFn,
+    onOutput: (stream, line) => deps.logSink.onLine(stream, line),
+  });
+  const work = await resolveBuildWork(
+    { serviceId, releaseId: entry.releaseId, projectId: payload.projectId },
+    deps.buildSandboxRoot,
+  );
+  await createBuildWorkDir(work, deps.runFn);
+  return work;
+}
+
+/**
+ * Run the build (sandboxed when `work` is set), then decide what the release
+ * payload is. Only after the sandbox handed the tree back does anything here
+ * read it.
+ */
+async function buildNativeTree(
+  layout: LayoutPaths,
+  payload: EnvironmentDeployPayload,
+  entry: EnvironmentDeploySource,
+  params: {
+    checkout: CheckoutResult;
+    work: BuildWork | null;
+    deps: ApplySourceReleasesDeps;
+    onOutput: ReleaseOutputHandler;
+  },
+): Promise<NativeAppBuildOutput> {
+  const { checkout, work, deps, onOutput } = params;
+  const nativeApp = nativeAppForService(payload, entry.composeServiceName);
+  const buildWorkingDir = buildWorkingDirFor(entry, checkout.workingDir);
+  await (deps.runReleaseBuildFn ?? runReleaseBuild)(definedFields({
+    build: entry.build,
+    workingDir: buildWorkingDir,
+    // A native app builds with its own runtime on PATH and its declared
+    // NODE_ENV, so the derived install command and the build both run on
+    // the series the app will execute on.
+    nativeRuntime: nativeApp
+      ? definedFields({
+        nodeBinDir: dirname(nativeAppNodeBinary(
+          layout,
+          resolveNativeAppNodeVersion(nativeApp),
+        )),
+        nodeEnv: nativeApp.appMode ?? "production",
+        runtimeGroup: nativeAppRuntimeGroup(
+          resolveNativeAppNodeVersion(nativeApp),
+        ),
+      })
+      : undefined,
+    sandbox: work
+      ? definedFields({
+        work,
+        cwd: buildSpecCwd(entry.subdirectory),
+        runFn: deps.runFn,
+      })
+      : undefined,
+    onOutput,
+    redactSummary: (text: string) => deps.logSink.redactSummary(text),
+  }));
+
+  // An operator-declared `outputDirectory` always wins: they said where the
+  // payload is, and second-guessing that would make the field a suggestion.
+  if (!nativeApp || entry.build.outputDirectory !== undefined) {
+    return { standaloneOutput: false, staticExport: false };
+  }
+  return await (deps.prepareNativeAppBuildOutputFn ??
+    prepareNativeAppBuildOutput)(definedFields({
+      framework: nativeApp.framework,
+      workingDir: buildWorkingDir,
+      containmentRoot: work?.workDir,
+      onOutput,
+    }));
 }
 
 async function applyOneRelease(
@@ -747,19 +1023,20 @@ async function applyOneRelease(
     : principalPaths;
 
   if (entry.rollbackToReleaseId) {
-    const rollbackPaths = await resolveRollbackPaths(layout, {
+    const rollbackTarget = await resolveRollbackTarget(layout, {
+      composeServiceName: entry.composeServiceName,
       serviceId,
       releaseId: entry.rollbackToReleaseId,
       principalPaths,
     });
-    if (!rollbackPaths) {
+    if (!rollbackTarget) {
       logSink.onLine(
         "stderr",
         `rollback skipped for ${entry.composeServiceName}: no project principal assigned`,
       );
       return null;
     }
-    return await rollbackOneRelease(entry, rollbackPaths, {
+    return await rollbackOneRelease(entry, rollbackTarget, {
       serviceId,
       releaseId: entry.rollbackToReleaseId,
       logSink,
@@ -773,6 +1050,24 @@ async function applyOneRelease(
     throw new Error(
       `release for ${entry.composeServiceName} has no release paths`,
     );
+  }
+
+  const resent = await resentPublishedRelease(layout, entry, serviceId, {
+    principalPaths,
+    runFn: deps.runFn,
+  });
+  if (resent) {
+    logSink.onLine(
+      "stdout",
+      `release ${entry.releaseId} is already published on this host; ` +
+        `cutting ${entry.composeServiceName} over to it without a rebuild`,
+    );
+    return await rollbackOneRelease(entry, resent, {
+      serviceId,
+      releaseId: entry.releaseId,
+      logSink,
+      deps,
+    });
   }
 
   if (railpack) {

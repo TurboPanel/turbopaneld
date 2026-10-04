@@ -518,3 +518,86 @@ test("SysfsGpuAdapter RC6 fallback stays null across a non-positive interval", a
   const second = await adapter.read(gpu, ctx({ tracker, seconds: 0 }));
   assertEquals(second?.utilizationPercent, null);
 });
+
+test("SysfsGpuAdapter reports amdgpu mem_busy_percent as memoryActivityPercent and reads a power1_input-only chip", async () => {
+  const hwmon0 = `${SYS_ROOT}/class/hwmon/hwmon0`;
+  const files: Record<string, string | undefined> = {
+    [`${hwmon0}/name`]: "amdgpu",
+    [`${hwmon0}/temp1_input`]: "52000",
+    [`${hwmon0}/temp1_label`]: "edge",
+    // RDNA3+/APUs on 6.x kernels: instantaneous power only.
+    [`${hwmon0}/power1_input`]: "23000000",
+    [`${hwmon0}/power1_label`]: "PPT",
+    [`${hwmon0}/device/gpu_busy_percent`]: "12",
+    [`${hwmon0}/device/mem_busy_percent`]: "7\n",
+    [`${hwmon0}/device/uevent`]: "PCI_SLOT_NAME=0000:03:00.0\nDRIVER=amdgpu\n",
+    [`${hwmon0}/device/mem_info_vram_used`]: "1073741824",
+  };
+  const dirs: Record<string, string[]> = {
+    [`${SYS_ROOT}/class/hwmon`]: ["hwmon0"],
+    [hwmon0]: [
+      "name",
+      "temp1_input",
+      "temp1_label",
+      "power1_input",
+      "power1_label",
+    ],
+  };
+  const adapter = new SysfsGpuAdapter({
+    io: fakeIo(files, dirs),
+    sysRoot: SYS_ROOT,
+  });
+  const reading = await adapter.read({
+    gpuId: "pci:0000:03:00.0",
+    kind: "drm",
+    pciPath: "0000:03:00.0",
+    vendor: "amd",
+    chip: "amdgpu",
+  }, ctx());
+  assertEquals(reading?.utilizationPercent, 12);
+  assertEquals(reading?.memoryActivityPercent, 7);
+  assertEquals(reading?.memoryUsedBytes, 1073741824);
+  assertEquals(reading?.temperatureCelsius, 52);
+  assertEquals(reading?.powerWatts, 23);
+});
+
+test("SysfsGpuAdapter reduces Xe tile gtidle residency to a GT-awake percent", async () => {
+  // Xe (Lunar Lake / Battlemage): no gt/gtN/rc6_residency_ms; GT-C6
+  // residency is device/tileN/gtM/gtidle/idle_residency_ms.
+  const card0 = `${SYS_ROOT}/class/drm/card0`;
+  const idle = `${card0}/device/tile0/gt0/gtidle/idle_residency_ms`;
+  const files: Record<string, string | undefined> = {
+    [`${card0}/device/vendor`]: "0x8086",
+    [`${card0}/device/uevent`]: "PCI_SLOT_NAME=0000:00:02.0\nDRIVER=xe\n",
+    [idle]: "200000",
+  };
+  const dirs: Record<string, string[]> = {
+    [`${SYS_ROOT}/class/drm`]: ["card0"],
+    [`${card0}/device`]: ["tile0", "vendor", "uevent"],
+    [`${card0}/device/tile0`]: ["gt0", "gt1"],
+  };
+  const adapter = new SysfsGpuAdapter({
+    io: fakeIo(files, dirs),
+    sysRoot: SYS_ROOT,
+  });
+  const gpu: GpuTopology = {
+    gpuId: "pci:0000:00:02.0",
+    kind: "drm",
+    pciPath: "0000:00:02.0",
+    vendor: "intel",
+    chip: "xe",
+  };
+  const tracker = new CounterBaselineTracker();
+  assertEquals(
+    (await adapter.read(gpu, ctx({ tracker, seconds: 10 })))
+      ?.utilizationPercent,
+    null,
+  );
+  // 2500 ms idle over 10 s wall = 75% GT-awake.
+  files[idle] = "202500";
+  assertEquals(
+    (await adapter.read(gpu, ctx({ tracker, seconds: 10 })))
+      ?.utilizationPercent,
+    75,
+  );
+});

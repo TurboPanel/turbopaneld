@@ -12,7 +12,12 @@ import {
   reinstallFabricForwardingIfEnabled,
   restoreFabricFromPersistedState,
 } from "../commands/fabric.ts";
+import { reinstallFirewallForwardingIfEnabled } from "../firewall/apply.ts";
+import { reconcileSitePhpRuntimesAtBoot } from "../deploy/site/php-runtime-apply.ts";
 import { logInfo, logWarn } from "../util/logger.ts";
+import { resolveLayout } from "../paths/layout.ts";
+import { reportLiveReleaseLinks } from "../deploy/release/live-release-scan.ts";
+import { guardHostingCaddySites } from "../deploy/ingress.ts";
 import { createSentinel, type SentinelOptions } from "../monitor/index.ts";
 import {
   initOrchestration,
@@ -46,7 +51,14 @@ export type SentinelLike = {
 export type DaemonRunIo = {
   initOrchestration?: () => Promise<boolean>;
   restoreFabricFromPersistedState?: () => Promise<void>;
+  /** Boot-time live-release link scan; defaults to {@link scanLiveReleases}. */
+  scanLiveReleases?: () => Promise<void>;
+  /** Set aside hosting Caddy snippets it cannot load; defaults to {@link guardHostingSites}. */
+  guardHostingCaddySites?: () => Promise<void>;
   reinstallFabricForwardingIfEnabled?: () => Promise<void>;
+  reinstallFirewallForwardingIfEnabled?: () => Promise<void>;
+  /** Start any per-site PHP runtime that is installed but not running. */
+  reconcileSitePhpRuntimes?: () => Promise<void>;
   shouldEnableDockerIntegration?: () => boolean;
   shouldConnectToInstance?: () => boolean;
   createDockerClient?: () => DockerClientLike;
@@ -105,7 +117,7 @@ async function connectControlPlane(
 
 async function maybeAttachDocker(
   io: DaemonRunIo,
-  reinstallFabric: () => Promise<void>,
+  reinstallForwardingJumps: () => Promise<void>,
 ): Promise<{
   dockerClient?: DockerClientLike;
   dockerMonitor?: DockerMonitorLike;
@@ -139,9 +151,27 @@ async function maybeAttachDocker(
     ((client) => new DockerMonitor(client as DockerClient)))(dockerClient);
   dockerMonitor.subscribeReachability((reachable) => {
     if (!reachable) return;
-    void reinstallFabric();
+    void reinstallForwardingJumps();
   });
   return { dockerClient, dockerMonitor };
+}
+
+/**
+ * Check every live release for links that leave it or reach into `shared/`
+ * (`live-release-scan.ts`), logging each finding.
+ */
+async function scanLiveReleases(): Promise<void> {
+  await reportLiveReleaseLinks(resolveLayout(Deno.env.toObject()), {
+    warn: (message) => logWarn("release", message),
+  });
+}
+
+/**
+ * Set aside any hosting Caddy snippet already on disk that Caddy cannot load
+ * (`ingress.ts`), so a stale one does not keep ingress from starting.
+ */
+async function guardHostingSites(): Promise<void> {
+  await guardHostingCaddySites(resolveLayout(Deno.env.toObject()));
 }
 
 /**
@@ -157,8 +187,20 @@ export async function runDaemon(io: DaemonRunIo = {}): Promise<void> {
     ((signal: Deno.Signal, handler: () => void) => {
       Deno.addSignalListener(signal, handler);
     });
-  const reinstallFabric = io.reinstallFabricForwardingIfEnabled ??
+  const reinstallFabricJump = io.reinstallFabricForwardingIfEnabled ??
     reinstallFabricForwardingIfEnabled;
+  const reinstallFirewallJump = io.reinstallFirewallForwardingIfEnabled ??
+    reinstallFirewallForwardingIfEnabled;
+  // dockerd rebuilds DOCKER-USER whenever it restarts, so both chains hung off
+  // it (the fabric's TP-FORWARD and the firewall's TP-FWD) are put back
+  // together, at startup and on every Docker reachability change.
+  const reinstallForwardingJumps = async (): Promise<void> => {
+    try {
+      await reinstallFabricJump();
+    } finally {
+      await reinstallFirewallJump();
+    }
+  };
 
   info("daemon", "starting up");
 
@@ -168,7 +210,30 @@ export async function runDaemon(io: DaemonRunIo = {}): Promise<void> {
   if (orchestrationReady) {
     await (io.restoreFabricFromPersistedState ??
       restoreFabricFromPersistedState)();
-    await reinstallFabric();
+    await reinstallForwardingJumps();
+    await (io.reconcileSitePhpRuntimes ?? reconcileSitePhpRuntimesAtBoot)();
+  }
+  // In the background: a slow tree walk must not hold up the connection, and
+  // a failure is only ever reported.
+  if (orchestrationReady) {
+    (io.scanLiveReleases ?? scanLiveReleases)().catch((err) => {
+      (io.logWarn ?? logWarn)(
+        "release",
+        "live release link scan failed:",
+        err instanceof Error ? err.message : String(err),
+      );
+    });
+  }
+
+  // Also in the background, and only ever reported on.
+  if (orchestrationReady) {
+    (io.guardHostingCaddySites ?? guardHostingSites)().catch((err) => {
+      (io.logWarn ?? logWarn)(
+        "deploy",
+        "hosting Caddy snippet check failed:",
+        err instanceof Error ? err.message : String(err),
+      );
+    });
   }
 
   const abort = new AbortController();
@@ -177,7 +242,7 @@ export async function runDaemon(io: DaemonRunIo = {}): Promise<void> {
   const sentinelOptions: SentinelOptions = {};
 
   if (orchestrationReady) {
-    const attached = await maybeAttachDocker(io, reinstallFabric);
+    const attached = await maybeAttachDocker(io, reinstallForwardingJumps);
     dockerClient = attached.dockerClient;
     if (attached.dockerMonitor && !io.createSentinel) {
       sentinelOptions.dockerMonitor = attached.dockerMonitor as DockerMonitor;

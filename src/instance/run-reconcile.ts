@@ -2,6 +2,7 @@ import { encodeBase64Url } from "@std/encoding/base64url";
 import { hostSudoArgs } from "../permissions/host-sudo.ts";
 import { dirname } from "@std/path";
 import { forEachSequential } from "../util/sequential.ts";
+import { logWarn } from "../util/logger.ts";
 import { statfs } from "node:fs/promises";
 import { ORCHESTRATE_HELPER } from "../orchestration/assets.ts";
 import { playbooksNeedRootHelper } from "../orchestration/privileged.ts";
@@ -27,13 +28,16 @@ import {
 import { parseTurbopanelStageLine } from "./update-progress-reporter.ts";
 import {
   type ControlPlaneHealthSnapshot,
+  INSTANCE_UPDATE_HEALTH_MAX_INTERVAL_MS,
   InstanceHealthError,
   type InstanceHealthTarget,
   instanceUnitIsActive,
   readInstanceHealth,
+  resolveUpdateHealthTimeoutMs,
   waitForInstanceHealth,
 } from "./instance-health-check.ts";
 import { resolveInstanceSupport } from "./version-wire.ts";
+import { type RetryFetchOptions, retryTransient } from "../util/retry-fetch.ts";
 import {
   fetchWithPlatformCa,
   type InstanceConfig,
@@ -103,7 +107,8 @@ export const MIN_INSTANCE_UPDATE_FREE_BACKUP_BYTES = 1024 * 1024 * 1024;
 export const CONTROL_PLANE_DATABASE_CONTAINER = "turbopanel-database";
 const DOCKER_HEALTH_FORMAT =
   "{{.State.Running}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}";
-const UPGRADE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,80}$/;
+// Must match tp-orchestrate's turbopanel_upgrade_id shape (no dots, <=80).
+const UPGRADE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/;
 
 export class UpdatePreflightError extends Error {
   readonly code: string;
@@ -437,6 +442,16 @@ export function buildRunReconcileArgs(options: {
   return args;
 }
 
+/** Same policy as run.sh: two retries of transient failures, 3 s apart, 60 s cap. */
+const RUN_SCRIPT_CURL_RETRY_ARGS = [
+  "--retry",
+  "2",
+  "--retry-delay",
+  "3",
+  "--retry-max-time",
+  "60",
+];
+
 export async function downloadRunScript(
   runScriptUrl: string,
   options: boolean | RunScriptDownloadOptions = {},
@@ -450,7 +465,7 @@ export async function downloadRunScript(
   } else if (opts.caPath?.trim()) {
     curlArgs.push("--cacert", opts.caPath.trim());
   }
-  curlArgs.push(runScriptUrl);
+  curlArgs.push(...RUN_SCRIPT_CURL_RETRY_ARGS, runScriptUrl);
   const curl = await new Deno.Command("curl", {
     args: curlArgs,
     stdout: "piped",
@@ -837,6 +852,11 @@ export type InstanceUpdateHooks = {
   ) => Promise<InstanceUpdateCommandResult>;
   restartUnits?: () => Promise<boolean>;
   /**
+   * Make sure the web server (Caddy, `:8443`) is serving, starting it with a
+   * short backoff when it is not. `false` means it never came up.
+   */
+  ensureWebServer?: () => Promise<boolean>;
+  /**
    * Run the new instance binary's `migrate` verb. A non-zero exit keeps the
    * backup and rolls the previous generation back.
    */
@@ -960,7 +980,8 @@ async function defaultInstanceUpdateRun(
 /**
  * How an instance or UI manifest's signature is checked. The rule is the
  * daemon package's (`unsignedManifestBypass`): required everywhere except a
- * source checkout or an opted-in `--dl-base` overlay host.
+ * source checkout or an opted-in `--dl-base` overlay host, and always for a
+ * pinned manifest URL.
  */
 type ManifestSignaturePolicy = {
   required: boolean;
@@ -972,12 +993,14 @@ function manifestSignaturePolicy(options: {
   installMode?: InstallMode;
   env?: Record<string, string | undefined>;
   publicKeyHex?: string;
+  pinned?: boolean;
 }): ManifestSignaturePolicy {
   const env = options.env ?? Deno.env.toObject();
   const bypass = unsignedManifestBypass({
     installMode: options.installMode ?? detectInstallMode(env),
     overlay: resolveOverlayDlBase(env) !== null,
     env,
+    pinned: options.pinned,
   });
   return { required: !bypass, publicKeyHex: options.publicKeyHex };
 }
@@ -1023,10 +1046,14 @@ async function fetchVerifiedManifest(
   label: string,
   fetchText: NonNullable<InstanceUpdateHooks["fetchText"]>,
   policy: ManifestSignaturePolicy,
+  retry?: RetryFetchOptions,
 ): Promise<Record<string, unknown>> {
   let fetched: { ok: boolean; status: number; body: string };
   try {
-    fetched = await fetchText(url);
+    fetched = await retryTransient(() => fetchText(url), {
+      status: (res) => res.status,
+      retryAfter: () => null,
+    }, retry);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     throw new UpdatePreflightError(
@@ -1056,6 +1083,8 @@ export async function assertControlPlaneManifestPreflight(options: {
   targetVersion?: string;
   targetCommit?: string;
   fetchText?: InstanceUpdateHooks["fetchText"];
+  /** Retry policy for the manifest reads (tests inject a no-wait sleep). */
+  retry?: RetryFetchOptions;
   /** Defaults to {@link detectInstallMode}; the managed update path passes production. */
   installMode?: InstallMode;
   env?: Record<string, string | undefined>;
@@ -1063,8 +1092,8 @@ export async function assertControlPlaneManifestPreflight(options: {
   publicKeyHex?: string;
 }): Promise<VerifiedPackageManifest> {
   const fetchText = options.fetchText ?? defaultFetchManifestText;
-  const policy = manifestSignaturePolicy(options);
   const pinned = options.manifestUrl?.trim();
+  const policy = manifestSignaturePolicy({ ...options, pinned: !!pinned });
   if (pinned) assertReleaseManifestUrl("instance", pinned, "manifestUrl");
   const uiUrl = options.uiManifestUrl?.trim();
   if (uiUrl) assertReleaseManifestUrl("ui", uiUrl, "uiManifestUrl");
@@ -1080,6 +1109,7 @@ export async function assertControlPlaneManifestPreflight(options: {
     "instance",
     fetchText,
     policy,
+    options.retry,
   );
   const commit = typeof manifest.commit === "string" ? manifest.commit : "";
   if (!commit) {
@@ -1104,7 +1134,13 @@ export async function assertControlPlaneManifestPreflight(options: {
     );
   }
   if (uiUrl) {
-    await fetchVerifiedManifest(uiUrl, "ui", fetchText, policy);
+    await fetchVerifiedManifest(
+      uiUrl,
+      "ui",
+      fetchText,
+      manifestSignaturePolicy({ ...options, pinned: true }),
+      options.retry,
+    );
   }
   return { url, commit, version };
 }
@@ -1160,7 +1196,21 @@ function caddyNeedsRefresh(text: string | null): boolean {
   return !text.includes("handle_errors") || !text.includes("updating.html");
 }
 
+/** The plain fact first: what did not happen, and for how long we waited. */
+function controlPlaneRecoveryLead(reason: string | undefined): string {
+  if (reason === "health_timeout" || reason === "health_mismatch") {
+    const minutes = Math.max(
+      1,
+      Math.round(resolveUpdateHealthTimeoutMs() / 60_000),
+    );
+    const unit = minutes === 1 ? "minute" : "minutes";
+    return `The new control plane did not become healthy within ${minutes} ${unit} and the previous build could not be confirmed.`;
+  }
+  return "The new control plane could not be started and the previous build could not be confirmed.";
+}
+
 function controlPlaneRecoveryDetail(options: {
+  reason?: string;
   channel: ReleaseChannel;
   previous: ControlPlaneHealthSnapshot | null;
   upgradeId: string;
@@ -1179,7 +1229,9 @@ function controlPlaneRecoveryDetail(options: {
   const rollback =
     `sudo -n ${ORCHESTRATE_HELPER} playbook -i localhost, -c local -e turbopanel_upgrade_id=${options.upgradeId} instance-rollback.yml`;
   const backup = `${options.backupDir}/control-plane/${options.upgradeId}`;
-  return `rollback did not restore a healthy control plane. Backup: ${backup}. Retry rollback: ${rollback}. Reinstall the previous build: ${reinstall}`;
+  return `${
+    controlPlaneRecoveryLead(options.reason)
+  } The automatic rollback did not restore a healthy control plane. Check first whether the control plane is answering (for example, open the panel); if it is, do nothing. Only if it is not: backup ${backup}. Retry the rollback: ${rollback}. Or reinstall the previous build: ${reinstall}`;
 }
 
 async function rollbackControlPlane(options: {
@@ -1219,6 +1271,7 @@ async function rollbackControlPlane(options: {
   try {
     await waitForInstanceHealth({
       target,
+      maxIntervalMs: INSTANCE_UPDATE_HEALTH_MAX_INTERVAL_MS,
       readHealth: options.readHealth,
       unitActive: options.unitActive,
       sleep: options.sleep,
@@ -1258,12 +1311,65 @@ type ControlPlaneRollbackBase = {
   backupDir: string;
   previous: ControlPlaneHealthSnapshot | null;
   failedCommit: string;
+  failedVersion?: string;
   run: NonNullable<InstanceUpdateHooks["run"]>;
   readHealth: () => Promise<ControlPlaneHealthSnapshot | null>;
   unitActive: () => Promise<boolean>;
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
 };
+
+/** Last look at the new build after a rollback that could not be confirmed. */
+export const NEW_BUILD_RECHECK_MS = 60_000;
+
+/**
+ * The health wait for the new build failed, so roll back. If the rollback
+ * itself cannot be confirmed (`recovery_required`) but the NEW build is
+ * serving after all (a slow host answered late), that is a success with a
+ * warning, not a failure: the returned text. Any other outcome throws.
+ */
+async function rollbackAfterVerifyFailure(
+  options: ControlPlaneRollbackBase & { reason: string },
+): Promise<string> {
+  let failure: unknown;
+  try {
+    await rollbackControlPlane(options);
+  } catch (err) {
+    failure = err;
+  }
+  if (
+    failure instanceof ControlPlaneUpdateFailedError &&
+    failure.code === "recovery_required" &&
+    await newBuildServing(options)
+  ) {
+    return `${options.reason}: the new control plane was slow to answer; the automatic rollback was not confirmed, but the new build ${
+      options.failedVersion ?? options.failedCommit
+    } is serving`;
+  }
+  throw failure;
+}
+
+async function newBuildServing(
+  options: ControlPlaneRollbackBase,
+): Promise<boolean> {
+  try {
+    await waitForInstanceHealth({
+      target: {
+        commit: options.failedCommit,
+        ...(options.failedVersion ? { version: options.failedVersion } : {}),
+      },
+      timeoutMs: NEW_BUILD_RECHECK_MS,
+      maxIntervalMs: INSTANCE_UPDATE_HEALTH_MAX_INTERVAL_MS,
+      readHealth: options.readHealth,
+      unitActive: options.unitActive,
+      sleep: options.sleep,
+      now: options.now,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 async function installControlPlaneOrRollback(options: {
   run: NonNullable<InstanceUpdateHooks["run"]>;
@@ -1380,6 +1486,40 @@ async function refreshCaddyIfNeeded(
 }
 
 /**
+ * Re-render the control-plane units (instance, Caddy, Docker gate, ...) from
+ * the orchestration bundle the daemon already carries. The package swap above
+ * only replaces binaries, so a changed unit template (a sandbox, a new gate)
+ * never reached a host that updated in place. Runs before the one restart the
+ * caller performs next (the playbook itself restarts nothing), and never
+ * blocks the update: a failed render is a warning, the old unit keeps working.
+ */
+async function refreshControlPlaneUnits(
+  run: NonNullable<InstanceUpdateHooks["run"]>,
+  installRoot: string,
+): Promise<void> {
+  const refresh = rootHelperPlaybookInvocation("instance-units-refresh.yml", {
+    turbopanel_install_root: installRoot,
+  });
+  let problem = "";
+  try {
+    const refreshed = await run(refresh.bin, refresh.args);
+    if (refreshed.code !== 0) {
+      problem = refreshed.stderr.trim() || refreshed.stdout.trim() ||
+        "unknown error";
+    }
+  } catch (err) {
+    problem = err instanceof Error ? err.message : String(err);
+  }
+  if (problem) {
+    logWarn(
+      "update",
+      "unit refresh failed, keeping the installed units:",
+      problem,
+    );
+  }
+}
+
+/**
  * Reconcile an already-installed control plane on a managed host.
  *
  * Development hosts are refused: their control plane is source-run.
@@ -1401,7 +1541,7 @@ export async function executeInstanceUpdateReconcile(options: {
   upgradeId?: string;
   onStage?: (stage: UpdateProgressStage) => void;
   hooks?: InstanceUpdateHooks;
-}): Promise<void> {
+}): Promise<{ warning?: string }> {
   assertControlPlaneUpdateAllowed(options.targetVersion);
   const hooks = options.hooks ?? {};
   if (!hooks.forceManaged && !reconcileNeedsRootHelper()) {
@@ -1459,6 +1599,7 @@ export async function executeInstanceUpdateReconcile(options: {
     backupDir: layout.backupDir,
     previous,
     failedCommit: manifest.commit,
+    ...(manifest.version ? { failedVersion: manifest.version } : {}),
     run,
     readHealth,
     unitActive,
@@ -1477,12 +1618,15 @@ export async function executeInstanceUpdateReconcile(options: {
   const migrate = hooks.migrate ??
     (() => defaultInstanceMigrate(run, report));
   await migrateControlPlaneOrRollback(migrate, rollbackBase);
+  await refreshControlPlaneUnits(run, layout.home);
 
   const restart = hooks.restartUnits ??
     (() =>
       restartControlPlaneUnits({
         restartCaddy: hooks.caddyBinaryChanged === true,
       }));
+  const ensureWebServer = hooks.ensureWebServer ??
+    (() => ensureWebServerRunning({ sleep: hooks.sleep }));
   let restarted = false;
   try {
     restarted = await restart();
@@ -1494,6 +1638,9 @@ export async function executeInstanceUpdateReconcile(options: {
     await rollbackControlPlane({ ...rollbackBase, reason: "restart_failed" });
   }
 
+  // The instance is checked directly (its own socket) below; the proxy in
+  // front of it is a separate step so a dead proxy never reads as a bad build.
+  let webServerUp = await ensureWebServer();
   report("verifying");
   try {
     await waitForInstanceHealth({
@@ -1501,6 +1648,7 @@ export async function executeInstanceUpdateReconcile(options: {
         commit: manifest.commit,
         ...(manifest.version ? { version: manifest.version } : {}),
       },
+      maxIntervalMs: INSTANCE_UPDATE_HEALTH_MAX_INTERVAL_MS,
       readHealth,
       unitActive,
       sleep: hooks.sleep,
@@ -1510,9 +1658,23 @@ export async function executeInstanceUpdateReconcile(options: {
     const code = err instanceof InstanceHealthError
       ? err.code
       : "health_timeout";
-    await rollbackControlPlane({ ...rollbackBase, reason: code });
+    const warning = await rollbackAfterVerifyFailure({
+      ...rollbackBase,
+      reason: code,
+    });
+    report("done");
+    return { warning };
+  }
+  if (!webServerUp) webServerUp = await ensureWebServer();
+  if (!webServerUp) {
+    throw new ControlPlaneUpdateFailedError(
+      "failed",
+      "web_server_failed",
+      webServerFailureDetail(manifest.version ?? manifest.commit),
+    );
   }
   report("done");
+  return {};
 }
 
 export const CONTROL_PLANE_UNITS = [
@@ -1520,29 +1682,34 @@ export const CONTROL_PLANE_UNITS = [
   "turbopanel-caddy",
 ] as const;
 
+type SystemctlResult = { success: boolean; stderr: string };
+type RunSystemctl = (args: string[]) => Promise<SystemctlResult>;
+
+async function defaultRunSystemctl(args: string[]): Promise<SystemctlResult> {
+  const result = await new Deno.Command("sudo", {
+    args: hostSudoArgs(args),
+    stdin: "null",
+    stdout: "piped",
+    stderr: "piped",
+  }).output();
+  return {
+    success: result.success,
+    stderr: new TextDecoder().decode(result.stderr).trim(),
+  };
+}
+
 /**
  * Restart `turbopanel-instance` and reload `turbopanel-caddy` so `:8443`
  * keeps serving the updating page. Restart Caddy only when its binary changed.
- * The daemon itself is not restarted here.
+ * The daemon itself is not restarted here. The result is the instance's: a
+ * Caddy that is not running afterwards is handled by
+ * {@link ensureWebServerRunning}, not by rolling the instance back.
  */
 export async function restartControlPlaneUnits(options?: {
-  runSystemctl?: (
-    args: string[],
-  ) => Promise<{ success: boolean; stderr: string }>;
+  runSystemctl?: RunSystemctl;
   restartCaddy?: boolean;
 }): Promise<boolean> {
-  const run = options?.runSystemctl ?? (async (args: string[]) => {
-    const result = await new Deno.Command("sudo", {
-      args: hostSudoArgs(args),
-      stdin: "null",
-      stdout: "piped",
-      stderr: "piped",
-    }).output();
-    return {
-      success: result.success,
-      stderr: new TextDecoder().decode(result.stderr).trim(),
-    };
-  });
+  const run = options?.runSystemctl ?? defaultRunSystemctl;
   const instance = await run([
     "-n",
     "systemctl",
@@ -1551,13 +1718,51 @@ export async function restartControlPlaneUnits(options?: {
   ]);
   if (!instance.success) return false;
   const caddyVerb = options?.restartCaddy ? "restart" : "reload";
-  const caddy = await run([
-    "-n",
-    "systemctl",
-    caddyVerb,
-    "turbopanel-caddy",
-  ]);
-  return caddy.success;
+  // A failed reload (Caddy not running) is not an instance failure.
+  await run(["-n", "systemctl", caddyVerb, "turbopanel-caddy"]);
+  return true;
+}
+
+/** Waits between attempts to start the web server. */
+export const WEB_SERVER_START_BACKOFF_MS: readonly number[] = [
+  1_000,
+  3_000,
+  6_000,
+  10_000,
+];
+
+async function webServerUnitIsActive(): Promise<boolean> {
+  return await instanceUnitIsActive("turbopanel-caddy");
+}
+
+/**
+ * True once `turbopanel-caddy` is active. When it is not, start it with
+ * `systemctl restart` (a start for an inactive unit), retrying with backoff.
+ */
+export async function ensureWebServerRunning(options?: {
+  isActive?: () => Promise<boolean>;
+  runSystemctl?: RunSystemctl;
+  sleep?: (ms: number) => Promise<void>;
+  backoffMs?: readonly number[];
+}): Promise<boolean> {
+  const isActive = options?.isActive ?? webServerUnitIsActive;
+  const run = options?.runSystemctl ?? defaultRunSystemctl;
+  const sleep = options?.sleep ??
+    ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const backoff = options?.backoffMs ?? WEB_SERVER_START_BACKOFF_MS;
+  const attempt = async (index: number): Promise<boolean> => {
+    if (await isActive()) return true;
+    if (index >= backoff.length) return false;
+    logWarn("update", "web server is not running, starting it");
+    await run(["-n", "systemctl", "restart", "turbopanel-caddy"]);
+    await sleep(backoff[index] ?? 0);
+    return attempt(index + 1);
+  };
+  return await attempt(0);
+}
+
+function webServerFailureDetail(build: string): string {
+  return `web server did not start: the new control plane (${build}) is running and healthy, but the web server on port 8443 could not be started. Start it with: sudo systemctl restart turbopanel-caddy`;
 }
 
 async function defaultInstanceMigrate(

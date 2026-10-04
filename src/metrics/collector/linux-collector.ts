@@ -21,12 +21,14 @@
  * (`events/index.ts`'s `EventCollectorSet`) when wired. Absent (e.g. a test
  * collector), each of these stays `[]`.
  */
+import { toContainerHealthSample } from "./docker-containers.ts";
 import {
   buildMetricsSample,
   type DiagnosticsSample,
   type DockerUsageSample,
+  type GpuSample,
   type HostMetrics,
-  METRICS_SCHEMA_VERSION,
+  METRICS_LEGACY_WIRE_VERSION,
   type MetricsSample,
   type RouterSample,
   type StorageSample,
@@ -80,6 +82,7 @@ import {
   parseFileMax,
   parseFileNr,
 } from "./parse-kernel-limits.ts";
+import { PresenceTracker } from "./presence.ts";
 import { parsePsiLine, type PsiKind, psiPercent } from "./parse-psi.ts";
 import {
   parseStat,
@@ -99,6 +102,8 @@ import {
   type VmstatRates,
   vmstatRates,
 } from "./parse-vmstat.ts";
+import { buildCollectedExtended, mergeExtended } from "./extended-v7.ts";
+import { type HostTextSample, hostTextToExtended } from "./host-text.ts";
 import type {
   CollectorDeps,
   CpuCounters,
@@ -238,7 +243,7 @@ function emptySample(
 ): MetricsSample {
   return buildMetricsSample({
     metadata: {
-      version: METRICS_SCHEMA_VERSION,
+      version: METRICS_LEGACY_WIRE_VERSION,
       sampledAt: new Date(nowMs).toISOString(),
       intervalSeconds: seconds,
       sequence,
@@ -698,9 +703,22 @@ function monitoredNetworkDevices(
   return ordered;
 }
 
+function gpuHasValue(gpu: GpuSample): boolean {
+  return [
+    gpu.utilizationPercent,
+    gpu.memoryUsedBytes,
+    gpu.memoryActivityPercent,
+    gpu.pcieReceiveBytesPerSecond,
+    gpu.pcieTransmitBytesPerSecond,
+    gpu.throttlePercent,
+  ].some((value) => value !== null);
+}
+
 export class LinuxMetricsCollector implements MetricsCollector {
   #previous: PreviousCpuSnapshot | undefined;
   readonly #tracker = new CounterBaselineTracker();
+  readonly #gpuPresence = new PresenceTracker();
+  readonly #signalPresence = new PresenceTracker();
   readonly #deps: CollectorDeps;
   readonly #nominalIntervalSeconds: number;
   readonly #pageSizeBytes: number;
@@ -750,6 +768,7 @@ export class LinuxMetricsCollector implements MetricsCollector {
       nowMs,
       this.#nominalIntervalSeconds,
     );
+    this.#tracker.beginTick(nowMs);
     const bootGeneration = snapshot.bootGeneration;
     const bootChanged = bootGenerationChanged(previous, bootGeneration);
     const rates: TickRates = {
@@ -812,6 +831,18 @@ export class LinuxMetricsCollector implements MetricsCollector {
         blockDevices: snapshot.blockDevices,
       },
     );
+    const reported = {
+      gpus: this.#gpuPresence.filter(
+        gpus,
+        (gpu) => gpu.gpuId,
+        gpuHasValue,
+      ),
+      signals: this.#signalPresence.filter(
+        hardwareSignalResult.samples,
+        (signal) => signal.signalId,
+        (signal) => signal.value !== null,
+      ),
+    };
     const disks = readDiskTick(snapshot.blockDevices, raw.diskstatsText, rates);
     const mountEntries = whenPresentOr(raw.mountsText, parseProcMounts, []);
 
@@ -855,7 +886,7 @@ export class LinuxMetricsCollector implements MetricsCollector {
 
     const sample = buildMetricsSample({
       metadata: {
-        version: METRICS_SCHEMA_VERSION,
+        version: METRICS_LEGACY_WIRE_VERSION,
         sampledAt: new Date(nowMs).toISOString(),
         intervalSeconds: seconds,
         sequence,
@@ -875,8 +906,8 @@ export class LinuxMetricsCollector implements MetricsCollector {
       networks,
       filesystems,
       blockDevices: disks.blockDevices,
-      gpus,
-      hardwareSignals: hardwareSignalResult.samples,
+      gpus: reported.gpus,
+      hardwareSignals: reported.signals,
       ingressSources,
       databaseProxies,
       events,
@@ -891,6 +922,10 @@ export class LinuxMetricsCollector implements MetricsCollector {
     const storedPlan = this.#deps.resolveCapabilityPlan
       ? await this.#deps.resolveCapabilityPlan()
       : undefined;
+    // Truncation numbers slots over the FULL snapshot, exactly what the
+    // topology fingerprint (generation) and the topology sent upstream use, so
+    // a slot never changes meaning without a generation bump. Presence only
+    // decides what is reported, never which slot an entity occupies.
     // Self-hosted never caps outbound samples — ignore a leftover plan so
     // enroll/reconnect cannot start dropping GPUs, filesystems, or signals.
     const outgoing = storedPlan && !this.#deps.skipCapabilityPlanTruncation
@@ -907,6 +942,39 @@ export class LinuxMetricsCollector implements MetricsCollector {
       cpu: cpu.currentCpu,
       cores: cpu.currentCores,
     };
-    return { supported: true, sample: outgoing };
+    const hostText = await this.#readHostText();
+    const containerReading = this.#deps.containers?.() ?? null;
+    const containers = containerReading
+      ? toContainerHealthSample(containerReading, this.#tracker, bootGeneration)
+      : undefined;
+    // Everything v7 adds rides in the contract's `extended` block: host text,
+    // container health, Docker reclaimable bytes, TLS expiry and the largest
+    // sites. The scheduler strips `extended` (and stamps v6) unless metrics-v7
+    // is negotiated. Added after plan truncation, so no plan gates it.
+    const extended = mergeExtended(
+      outgoing.extended,
+      hostText ? hostTextToExtended(hostText) : undefined,
+      buildCollectedExtended({
+        containers,
+        dockerUsage: dockerUsageReading?.usage,
+        tlsExpiry: this.#deps.tlsExpiry?.(),
+        topSites: directoryUsage?.topSites,
+      }),
+    );
+    return {
+      supported: true,
+      sample: extended ? { ...outgoing, extended } : outgoing,
+      ...(containers ? { containers } : {}),
+    };
+  }
+
+  /** Free-text facts never break a sample: any failure just omits them. */
+  async #readHostText(): Promise<HostTextSample | undefined> {
+    if (!this.#deps.hostText) return undefined;
+    try {
+      return await this.#deps.hostText();
+    } catch {
+      return undefined;
+    }
   }
 }

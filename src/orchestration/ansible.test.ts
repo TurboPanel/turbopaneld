@@ -21,11 +21,14 @@ import {
   ANSIBLE_LOCAL_TMP,
   ANSIBLE_PLAYBOOK_CWD,
   ANSIBLE_SHELL_EXECUTABLE,
+  ANSIBLE_STATE_DIR,
   ansibleEnv,
+  ansibleProbeEnv,
   DAEMON_ROOT,
   GALAXY_COLLECTIONS_DIR,
   GALAXY_ROLES_DIR,
   GALAXY_VENDOR_ROLES_DIR,
+  ORCHESTRATION_LAYOUT,
   RABBITMQ_PLAYBOOK,
   REDIS_PLAYBOOK,
 } from "./assets.ts";
@@ -307,6 +310,23 @@ test("ansibleEnv uses a private per-process ANSIBLE_HOME without overriding coll
       `expected ANSIBLE_ROLES_PATH=${GALAXY_ROLES_DIR}:${GALAXY_VENDOR_ROLES_DIR}, got ${env.ANSIBLE_ROLES_PATH}`,
     );
   }
+});
+
+test("ansibleProbeEnv keeps HOME and every ansible temp dir in the state leaf, not ~/.ansible", () => {
+  const env = ansibleProbeEnv();
+  // A fresh sealed install has no <state root>/.ansible and cannot create it.
+  assertEquals(env.HOME, ANSIBLE_STATE_DIR);
+  assertEquals(env.ANSIBLE_HOME, ANSIBLE_STATE_DIR);
+  // The leaf itself, no subfolder: a root-run probe must not create a
+  // root-owned directory inside the tp-owned leaf.
+  assertEquals(env.ANSIBLE_LOCAL_TEMP, ANSIBLE_STATE_DIR);
+  assertEquals(env.ANSIBLE_REMOTE_TEMP, ANSIBLE_STATE_DIR);
+  assertEquals(env.ANSIBLE_CONFIG, ansibleEnv().ANSIBLE_CONFIG);
+  assert(!ANSIBLE_STATE_DIR.endsWith(".ansible"));
+  assertEquals(
+    ANSIBLE_STATE_DIR,
+    join(ORCHESTRATION_LAYOUT.daemonStateDir, "ansible"),
+  );
 });
 
 test("devOrchestrationAnsibleEnv selects overlay config without collections override", async () => {
@@ -861,9 +881,15 @@ test(
     const tasks = await Deno.readTextFile(
       join(CHECKOUT_ORCHESTRATION_DIR, "roles/instance-launch/tasks/main.yml"),
     );
+    const caddyfileTasks = await Deno.readTextFile(
+      join(
+        CHECKOUT_ORCHESTRATION_DIR,
+        "roles/instance-launch/tasks/caddyfile.yml",
+      ),
+    );
     assertMatch(
-      tasks,
-      /- name: Render the Caddy site config\n\s+when: turbopanel_dev_user \| default\(''\) \| length == 0\n\s+ansible\.builtin\.template:\n\s+src: Caddyfile\.j2\n\s+dest: "\{\{ turbopanel_caddyfile \}\}"[\s\S]*?notify:\n\s+- Reload turbopanel caddy/,
+      caddyfileTasks,
+      /- name: Render the Caddy site config\n\s+when:\n\s+- turbopanel_dev_user \| default\(''\) \| length == 0\n\s+- not \(_caddyfile_keep_installed \| bool\)\n\s+ansible\.builtin\.template:\n\s+src: Caddyfile\.j2\n\s+dest: "\{\{ turbopanel_caddyfile \}\}"[\s\S]*?notify:\n\s+- Reload turbopanel caddy/,
       "instance-launch renders Caddyfile.j2 to turbopanel_caddyfile on managed hosts and reloads Caddy on change",
     );
     assertMatch(
@@ -901,6 +927,30 @@ test(
         caddyfile.indexOf("handle_errors"),
       true,
       "handle_errors follows the site routes",
+    );
+    const uiHandle = caddyfile.slice(
+      caddyfile.lastIndexOf("handle {", caddyfile.indexOf("file_server")),
+      caddyfile.indexOf("file_server"),
+    );
+    for (
+      const line of [
+        `Content-Security-Policy "frame-ancestors 'none'"`,
+        `Referrer-Policy "strict-origin-when-cross-origin"`,
+        "Permissions-Policy ",
+        "Content-Security-Policy-Report-Only ",
+      ]
+    ) {
+      assertEquals(
+        uiHandle.includes(line),
+        true,
+        `UI handle sets ${line}`,
+      );
+    }
+    // Report-only: the script policy must never ride the enforced header.
+    assertEquals(
+      /^\s*Content-Security-Policy "[^"]*script-src/m.test(caddyfile),
+      false,
+      "script-src stays report-only",
     );
     assertEquals(caddyfile.includes("handle_errors"), true);
     assertEquals(caddyfile.includes("updating.html"), true);
@@ -1531,6 +1581,10 @@ test("site apply playbooks vendor engines (never apt nginx/apache2)", async () =
   assertEquals(apachePlaybook.includes("name: apache"), true);
   assertEquals(apachePlaybook.includes("name: php-fpm"), true);
   assertEquals(olsPlaybook.includes("name: openlitespeed"), true);
+  // An OpenLiteSpeed-only host must not gain the tpapache account: php-fpm
+  // runs as tpols there.
+  assertEquals(olsPlaybook.includes("web_service_key: apache"), false);
+  assertEquals(olsPlaybook.includes("php_fpm_service_user: tpols"), true);
 
   // Distro package installs must stay gone — engines come from vendor roles.
   for (
@@ -1719,12 +1773,39 @@ test("site apply playbooks vendor engines (never apt nginx/apache2)", async () =
     /site_caddy_service_user:\s*tpcaddysite/,
     "site caddy service user",
   );
-  // Three Caddy admin endpoints now exist (2019 dev control plane, 2029 edge,
-  // 2039 sites); a collision crash-loops the unit.
+  // Audit P0-1: the admin API is a unix socket in the unit's 0700
+  // RuntimeDirectory, never loopback TCP. 2039 now serves read-only metrics.
   assertMatch(
     siteCaddyDefaults,
-    /site_caddy_admin_addr:\s*"127\.0\.0\.1:2039"/,
-    "site caddy admin port",
+    /site_caddy_admin_socket:\s*"\/run\/\{\{ site_caddy_runtime_dir \}\}\/admin\.sock"/,
+    "site caddy admin socket",
+  );
+  assertMatch(
+    siteCaddyDefaults,
+    /^site_caddy_metrics_port:\s*2039$/m,
+    "site caddy metrics port",
+  );
+  // The metrics server stays on loopback: a site address alone binds every
+  // interface.
+  assertMatch(
+    await Deno.readTextFile(
+      join(
+        CHECKOUT_ORCHESTRATION_DIR,
+        "roles/site-caddy/templates/Caddyfile.j2",
+      ),
+    ),
+    /^http:\/\/127\.0\.0\.1:\{\{ site_caddy_metrics_port \}\} \{\n\tbind 127\.0\.0\.1\n\tmetrics\n\}$/m,
+    "site caddy metrics server is loopback-only and serves metrics alone",
+  );
+  assertMatch(
+    siteCaddyUnit,
+    /^RuntimeDirectory=\{\{ site_caddy_runtime_dir \}\}\nRuntimeDirectoryMode=0700$/m,
+    "site caddy admin socket directory",
+  );
+  assertMatch(
+    siteCaddyUnit,
+    / --adapter caddyfile --address unix\/\{\{ site_caddy_admin_socket \}\}$/m,
+    "site caddy reloads through the admin socket",
   );
 
   // A zero-match import glob is an error in Caddy, so the placeholder has to
@@ -1793,6 +1874,77 @@ test("site apply playbooks vendor engines (never apt nginx/apache2)", async () =
     phpFpmUnit.includes("PHP_INI_SCAN_DIR=:"),
     true,
   );
+});
+
+test("Apache runs as tpapache with its own top-level log and runtime dirs", async () => {
+  const role = (rel: string) =>
+    Deno.readTextFile(join(CHECKOUT_ORCHESTRATION_DIR, "roles/apache", rel));
+  const unit = await role("templates/turbopanel-apache.service.j2");
+  const conf = await role("templates/httpd.conf.j2");
+  const tasks = await role("tasks/main.yml");
+  const defaults = await role("defaults/main.yml");
+  const lines = unit.split("\n");
+  for (
+    const line of [
+      "User={{ apache_service_user }}",
+      "Group={{ apache_service_group }}",
+      "LogsDirectory={{ apache_logs_directory }}",
+      "RuntimeDirectory={{ apache_runtime_directory }}",
+      "PIDFile=/run/{{ apache_runtime_directory }}/httpd.pid",
+    ]
+  ) {
+    assertEquals(lines.includes(line), true, line);
+  }
+  assertMatch(defaults, /apache_service_user:\s*tpapache\n/, "service user");
+  // Top level: never inside the tp-owned /var/log/turbopanel or /run/turbopanel.
+  assertMatch(
+    defaults,
+    /apache_logs_directory:\s*turbopanel-apache\n/,
+    "logs directory",
+  );
+  assertMatch(
+    defaults,
+    /apache_runtime_directory:\s*turbopanel-apache\n/,
+    "runtime directory",
+  );
+  // No root master: httpd.conf names no account to switch to.
+  assertEquals(/^\s*(User|Group)\s/m.test(conf), false);
+  assertEquals(
+    conf.includes('PidFile "/run/{{ apache_runtime_directory }}/httpd.pid"'),
+    true,
+  );
+  assertEquals(
+    conf.includes('ErrorLog "/var/log/{{ apache_logs_directory }}/error.log"'),
+    true,
+  );
+  assertEquals(conf.includes("turbopanel_log_dir"), false);
+  assertEquals(conf.includes("turbopanel_run_dir"), false);
+  // A changed unit restarts a running master; a reload would keep root.
+  assertEquals(
+    tasks.includes("systemctl try-restart turbopanel-apache.service"),
+    true,
+  );
+});
+
+test("Apache loads mod_remoteip and logs the client address for nginx in front", async () => {
+  const conf = await Deno.readTextFile(
+    join(CHECKOUT_ORCHESTRATION_DIR, "roles/apache/templates/httpd.conf.j2"),
+  );
+  const lines = conf.split("\n");
+  assertEquals(
+    lines.includes("LoadModule remoteip_module modules/mod_remoteip.so"),
+    true,
+  );
+  // `combined` must be defined before use, with `%a`: the address mod_remoteip
+  // takes from nginx's X-Forwarded-For (WP5 proof: the undefined format logged
+  // the literal word).
+  const format = lines.findIndex((line) =>
+    line.startsWith('LogFormat "%a ') && line.endsWith('" combined')
+  );
+  const custom = lines.findIndex((line) =>
+    line.startsWith("CustomLog ") && line.endsWith(" combined")
+  );
+  assertEquals(format >= 0 && format < custom, true);
 });
 
 test("devOwnershipPlaybookExtraArgs emits user uid gid and root", () => {
@@ -2293,6 +2445,27 @@ test("docker role merges daemon.json address pools and live-restore, skipping th
     true,
     "strip owned keys before merging the current values back on",
   );
+  // Dedicated cgroup parent for the container metrics reads: owned with the
+  // systemd driver, preserved on a cgroupfs-pinned host, rides the same
+  // restart / pending-marker rules as live-restore.
+  assertEquals(
+    daemonJson.includes(
+      "combine({'cgroup-parent': turbopanel_docker_cgroup_parent}",
+    ) ||
+      daemonJson.includes("{'cgroup-parent': turbopanel_docker_cgroup_parent}"),
+    true,
+  );
+  assertEquals(
+    daemonJson.includes("native.cgroupdriver=cgroupfs"),
+    true,
+    "a cgroupfs-driver host keeps its own cgroup-parent",
+  );
+  assertEquals(
+    defaults.includes(
+      "turbopanel_docker_cgroup_parent: turbopanel-containers.slice",
+    ),
+    true,
+  );
   assertEquals(
     daemonJson.includes("_docker_daemon_json_current is mapping"),
     true,
@@ -2332,7 +2505,7 @@ test("docker role merges daemon.json address pools and live-restore, skipping th
   // outage risk, not just a database blip.
   assertEquals(
     handlers.includes(
-      "when: not (_docker_colocated_instance_host | default(false) | bool)",
+      "when: not (_docker_restart_deferred | default(true) | bool)",
     ),
     true,
   );
@@ -2491,3 +2664,214 @@ test(
     );
   },
 );
+
+test("docker role denies the network.host and security.insecure build entitlements in daemon.json, keeping other builder keys", async () => {
+  const roleDir = join(CHECKOUT_ORCHESTRATION_DIR, "roles/docker");
+  const daemonJson = await Deno.readTextFile(
+    join(roleDir, "tasks/daemon-json.yml"),
+  );
+  const defaults = await Deno.readTextFile(join(roleDir, "defaults/main.yml"));
+  assertEquals(
+    daemonJson.includes(
+      "combine({'network-host': false, 'security-insecure': false})",
+    ),
+    true,
+  );
+  // The existing builder section and entitlements are the base, never replaced.
+  assertEquals(
+    daemonJson.includes("_docker_daemon_json_current.builder.entitlements"),
+    true,
+  );
+  assertEquals(
+    daemonJson.includes("{'builder': _docker_builder_merged}"),
+    true,
+  );
+  // The only gate on it is the opt-out variable, default on.
+  assertEquals(
+    defaults.includes("turbopanel_docker_deny_builder_entitlements: true"),
+    true,
+  );
+  assertEquals(
+    daemonJson.includes("turbopanel_docker_deny_builder_entitlements | bool"),
+    true,
+  );
+});
+
+test("daemon-converge re-applies only the builder entitlement deny to already-provisioned Docker hosts", async () => {
+  const roleDir = join(CHECKOUT_ORCHESTRATION_DIR, "roles/docker");
+  const converge = await Deno.readTextFile(
+    join(CHECKOUT_ORCHESTRATION_DIR, "playbooks/daemon-converge.yml"),
+  );
+  const entry = await Deno.readTextFile(
+    join(roleDir, "tasks/converge-builder.yml"),
+  );
+  const daemonJson = await Deno.readTextFile(
+    join(roleDir, "tasks/daemon-json.yml"),
+  );
+  const defaults = await Deno.readTextFile(join(roleDir, "defaults/main.yml"));
+  // The converge runs the entry file, ahead of the gate, never the whole role.
+  assertEquals(
+    /- role: docker\n\s+tasks_from: converge-builder\n\s+- role: docker-gate/
+      .test(converge),
+    true,
+  );
+  assertEquals(entry.includes("turbopanel_docker_builder_only: true"), true);
+  assertEquals(entry.includes("/usr/bin/docker"), true);
+  // It reads the file back and refuses to pass if the deny is not on disk.
+  assertEquals(entry.includes("['network-host'] == false"), true);
+  assertEquals(entry.includes("['security-insecure'] == false"), true);
+  // Builder-only mode leaves pools, bip and live-restore as found.
+  assertEquals(
+    daemonJson.includes("when: turbopanel_docker_builder_only | bool"),
+    true,
+  );
+  assertEquals(
+    daemonJson.includes("when: not (turbopanel_docker_builder_only | bool)"),
+    true,
+  );
+  assertEquals(
+    defaults.includes("turbopanel_docker_builder_only: false"),
+    true,
+  );
+});
+
+test("a co-located instance host gets a pending dockerd restart, applied once live-restore is running", async () => {
+  const roleDir = join(CHECKOUT_ORCHESTRATION_DIR, "roles/docker");
+  const daemonJson = await Deno.readTextFile(
+    join(roleDir, "tasks/daemon-json.yml"),
+  );
+  const defaults = await Deno.readTextFile(join(roleDir, "defaults/main.yml"));
+  assertEquals(
+    defaults.includes(
+      "turbopanel_docker_restart_pending_file: /etc/docker/turbopanel-restart-pending",
+    ),
+    true,
+  );
+  for (
+    const name of [
+      "Mark a dockerd restart pending when the restart is deferred",
+      "Ask the running dockerd whether live-restore is in effect",
+      "Restart dockerd now that live-restore keeps containers running",
+      "Clear the pending dockerd restart",
+      "Warn that dockerd still needs a restart",
+    ]
+  ) {
+    assertEquals(daemonJson.includes(`- name: ${name}`), true, name);
+  }
+  assertEquals(
+    daemonJson.includes("register: _docker_daemon_json_write"),
+    true,
+  );
+  assertEquals(daemonJson.includes(".LiveRestoreEnabled"), true);
+});
+
+async function runDockerRestartGate(
+  vars: Record<string, unknown>,
+  dockerInfoOutput: string | null,
+): Promise<boolean> {
+  const dir = await Deno.makeTempDir();
+  try {
+    const bin = join(dir, "bin");
+    await Deno.mkdir(bin);
+    // Stand-in `docker info --format {{.LiveRestoreEnabled}}`; null = docker
+    // cannot answer (no daemon). Listed first on PATH so a real docker on the
+    // runner is never consulted.
+    await Deno.writeTextFile(
+      join(bin, "docker"),
+      dockerInfoOutput === null
+        ? "#!/bin/sh\nexit 1\n"
+        : `#!/bin/sh\necho ${dockerInfoOutput}\n`,
+      { mode: 0o755 },
+    );
+    const gate = join(
+      CHECKOUT_ORCHESTRATION_DIR,
+      "roles/docker/tasks/restart-gate.yml",
+    );
+    await Deno.writeTextFile(
+      join(dir, "play.yml"),
+      `- hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - ansible.builtin.include_tasks: ${gate}
+    - ansible.builtin.debug:
+        msg: "DEFERRED={{ _docker_restart_deferred | bool }}"
+`,
+    );
+    await Deno.writeTextFile(join(dir, "vars.json"), JSON.stringify(vars));
+    const out = await new Deno.Command("ansible-playbook", {
+      args: ["-e", `@${join(dir, "vars.json")}`, join(dir, "play.yml")],
+      env: { PATH: `${bin}:${Deno.env.get("PATH") ?? ""}` },
+      stdout: "piped",
+      stderr: "piped",
+    }).output();
+    const text = new TextDecoder().decode(out.stdout);
+    assert(out.success, text + new TextDecoder().decode(out.stderr));
+    return text.includes("DEFERRED=True");
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+}
+
+let ansibleAvailable = false;
+try {
+  ansibleAvailable =
+    (await new Deno.Command("ansible-playbook", { args: ["--version"] })
+      .output()).success;
+} catch { /* ansible not installed: the gating test is skipped */ }
+
+Deno.test({
+  name:
+    "daemon.json restart gate defers the dockerd restart unless it is live-restored",
+  ignore: !ansibleAvailable,
+  fn: async () => {
+    const full = { turbopanel_docker_builder_only: false };
+    const builder = { turbopanel_docker_builder_only: true };
+    const colo = (v: Record<string, unknown>) => ({
+      ...v,
+      _docker_colocated_instance_host: true,
+    });
+    const plain = (v: Record<string, unknown>) => ({
+      ...v,
+      _docker_colocated_instance_host: false,
+    });
+    // Full role run enforces live-restore itself: restart allowed.
+    assertEquals(await runDockerRestartGate(plain(full), null), false);
+    // Co-located instance host is always deferred.
+    assertEquals(await runDockerRestartGate(colo(full), null), true);
+    assertEquals(await runDockerRestartGate(colo(builder), "true"), true);
+    // Builder-only: restart only when the running dockerd is live-restored.
+    assertEquals(await runDockerRestartGate(plain(builder), "true"), false);
+    assertEquals(await runDockerRestartGate(plain(builder), "false"), true);
+    // No daemon.json / docker info failing or empty: deferred.
+    assertEquals(await runDockerRestartGate(plain(builder), null), true);
+  },
+});
+
+test("principal-access creates every SSH access group the registry defines", async () => {
+  // The daemon refuses to materialize a principal that cannot join
+  // tpprincipal, and sshd matches nothing for a group that does not exist — so
+  // a registry access group the role does not create is an outage or a hole.
+  const registry = JSON.parse(
+    await Deno.readTextFile(
+      join(CHECKOUT_ORCHESTRATION_DIR, "runtime-registry.json"),
+    ),
+  ) as { accessGroups: Record<string, unknown> };
+  const tasks = await Deno.readTextFile(
+    join(CHECKOUT_ORCHESTRATION_DIR, "roles/principal-access/tasks/main.yml"),
+  );
+  const ensure = tasks.slice(
+    tasks.indexOf("- name: Ensure the SSH access groups"),
+    tasks.indexOf("- name: Ensure the panel-managed authorized_keys directory"),
+  );
+  for (const key of Object.keys(registry.accessGroups)) {
+    assert(
+      ensure.includes(`runtime_registry.accessGroups.${key} }}`),
+      `principal-access does not create accessGroups.${key}`,
+    );
+    assert(
+      tasks.includes(`runtime_registry.accessGroups.${key} is defined`),
+      `principal-access does not assert accessGroups.${key}`,
+    );
+  }
+});

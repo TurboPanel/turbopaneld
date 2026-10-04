@@ -1,0 +1,14 @@
+[Unit]
+Description=TurboPanel host firewall rollback guard
+
+[Service]
+# Oneshot, run as root by turbopanel-firewall-guard.timer after the daemon loads
+# a ruleset that is not yet confirmed. Restores the last confirmed rules (or
+# removes TurboPanel's chains) when the pending marker outlived its deadline;
+# does nothing and stops the timer when there is none. Independent of the
+# daemon on purpose: the failure it exists for is a host nobody can reach.
+Type=oneshot
+ExecStart={{ turbopanel_firewall_guard_bin | default(turbopanel_install_root ~ '/lib/tp-firewall-guard') }}
+Environment=TURBOPANEL_RUN_DIR={{ runtime_socket_dir | default('/run/turbopanel') }}
+Environment=TURBOPANEL_STATE_DIR={{ turbopanel_daemon_state_dir | default('/var/lib/turbopanel') }}
+Environment=TURBOPANEL_CONFIG_DIR={{ turbopanel_config_dir | default('/etc/turbopanel') }}

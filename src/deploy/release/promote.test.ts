@@ -17,7 +17,6 @@ import {
   resolveReleasePaths,
 } from "./release-layout.ts";
 import {
-  copyTree,
   expectedPathsProbe,
   promoteExistingRelease,
   promoteRelease,
@@ -68,28 +67,73 @@ test("expectedPathsProbe accepts present paths and rejects missing ones", async 
   }
 });
 
-test("copyTree recreates symlinks and skips .git", async () => {
+test("stageRelease keeps in-tree links, drops escaping ones and skips .git", async () => {
   const root = await Deno.makeTempDir({ prefix: "tp-copy-" });
   try {
-    const from = join(root, "from");
-    const to = join(root, "to");
-    await Deno.mkdir(join(from, "bin"), { recursive: true });
-    await Deno.writeTextFile(join(from, "bin", "tool"), "#!/bin/sh");
-    await Deno.symlink("tool", join(from, "bin", "alias"));
-    await Deno.mkdir(join(from, ".git"), { recursive: true });
-    await Deno.writeTextFile(join(from, ".git", "HEAD"), "ref");
-    await Deno.writeTextFile(join(from, "app.js"), "export {}");
+    const paths = resolveReleasePaths(
+      { principalHomeRoot: root, daemonStateDir: join(root, "state") },
+      { username: "appuser", serviceId: "svc-1", releaseId: "rel-1" },
+    );
+    const workingDir = join(root, "checkout");
+    await Deno.mkdir(join(workingDir, "bin"), { recursive: true });
+    await Deno.writeTextFile(join(workingDir, "bin", "tool"), "#!/bin/sh");
+    await Deno.symlink("tool", join(workingDir, "bin", "alias"));
+    await Deno.symlink("/etc", join(workingDir, "etc"));
+    await Deno.mkdir(join(workingDir, ".git"), { recursive: true });
+    await Deno.writeTextFile(join(workingDir, ".git", "HEAD"), "ref");
+    await Deno.writeTextFile(join(workingDir, "app.js"), "export {}");
 
-    await copyTree(from, to);
+    await stageRelease({ paths, username: "appuser", workingDir });
 
+    const to = paths.releaseDir;
     assertEquals(await Deno.readTextFile(join(to, "app.js")), "export {}");
     assertEquals(await Deno.readLink(join(to, "bin", "alias")), "tool");
-    try {
-      await Deno.stat(join(to, ".git"));
-      throw new TypeError(".git must not be copied");
-    } catch (err) {
-      if (!(err instanceof Deno.errors.NotFound)) throw err;
+    for (const name of [".git", "etc"]) {
+      await assertRejects(
+        () => Deno.lstat(join(to, name)),
+        Deno.errors.NotFound,
+      );
     }
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+test("stageRelease refuses an output directory that is a link or climbs out", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-stage-escape-" });
+  try {
+    const paths = resolveReleasePaths(
+      { principalHomeRoot: root, daemonStateDir: join(root, "state") },
+      { username: "appuser", serviceId: "svc-1", releaseId: "rel-1" },
+    );
+    const workingDir = join(root, "checkout");
+    const outside = join(root, "daemon-state");
+    await Deno.mkdir(workingDir, { recursive: true });
+    await Deno.mkdir(outside, { recursive: true });
+    await Deno.writeTextFile(join(outside, "state.json"), "secret");
+    await Deno.symlink(outside, join(workingDir, "dist"));
+    await Deno.mkdir(join(workingDir, "apps"), { recursive: true });
+    await Deno.symlink(outside, join(workingDir, "apps", "web"));
+
+    for (
+      const params of [
+        { outputDirectory: "dist" },
+        { subdirectory: "apps/web" },
+        { outputDirectory: "../daemon-state" },
+        { subdirectory: "apps", outputDirectory: "../../daemon-state" },
+      ]
+    ) {
+      await assertRejects(
+        () =>
+          stageRelease({ paths, username: "appuser", workingDir, ...params }),
+        Error,
+        "refusing",
+      );
+    }
+    await assertRejects(
+      () => Deno.lstat(join(paths.releaseDir, "state.json")),
+      Deno.errors.NotFound,
+    );
   } finally {
     await Deno.remove(root, { recursive: true });
   }
@@ -122,7 +166,12 @@ test("stageRelease copies output and rejects a missing or non-dir source", async
     await Deno.mkdir(join(workingDir, "dist"), { recursive: true });
     await Deno.writeTextFile(join(workingDir, "dist", "index.html"), "built");
 
-    await stageRelease({ paths, workingDir, outputDirectory: "dist" });
+    await stageRelease({
+      paths,
+      username: "appuser",
+      workingDir,
+      outputDirectory: "dist",
+    });
     assertEquals(
       await Deno.readTextFile(join(paths.releaseDir, "index.html")),
       "built",
@@ -131,6 +180,7 @@ test("stageRelease copies output and rejects a missing or non-dir source", async
     await assertRejects(
       () =>
         stageRelease({
+          username: "appuser",
           paths,
           workingDir,
           outputDirectory: "nope",
@@ -143,6 +193,7 @@ test("stageRelease copies output and rejects a missing or non-dir source", async
     await assertRejects(
       () =>
         stageRelease({
+          username: "appuser",
           paths,
           workingDir,
           outputDirectory: "file-only",
@@ -213,6 +264,8 @@ test("promoteExistingRelease rejects missing and unsealed trees", async () => {
       paths,
       releaseId: "rel-1",
       healthProbe: () => Promise.resolve(),
+      // The resolved link listing: an empty release has none.
+      runFn: () => Promise.resolve({ success: true, stdout: "", stderr: "" }),
     });
     assertEquals(await readCurrentReleaseId(paths), "rel-1");
   } finally {
@@ -251,7 +304,6 @@ test("promoteRelease failure before rename leaves current untouched and cleans s
       { principalHomeRoot: root, daemonStateDir: join(root, "state") },
       { username: "appuser", serviceId: "svc-1", releaseId: "rel-1" },
     );
-    await Deno.mkdir(first.releaseDir, { recursive: true });
     await Deno.mkdir(first.sharedDir, { recursive: true });
     const workingDir = join(root, "checkout");
     await Deno.mkdir(workingDir, { recursive: true });
@@ -275,7 +327,6 @@ test("promoteRelease failure before rename leaves current untouched and cleans s
       { principalHomeRoot: root, daemonStateDir: join(root, "state") },
       { username: "appuser", serviceId: "svc-1", releaseId: "rel-2" },
     );
-    await Deno.mkdir(second.releaseDir, { recursive: true });
     await Deno.writeTextFile(join(workingDir, "index.html"), "v2");
     const failingSeal: RunFn = (_command, args) => {
       if (args.includes("chown")) {
@@ -343,6 +394,37 @@ test("promoteRelease default probe requires the metadata directory", async () =>
       err instanceof Error ? err.message : String(err),
       RELEASE_METADATA_DIRNAME,
     );
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+test("promoteRelease never removes a release that was already on the host", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-promote-resent-" });
+  try {
+    const paths = resolveReleasePaths(
+      { principalHomeRoot: root, daemonStateDir: join(root, "state") },
+      { username: "appuser", serviceId: "svc-1", releaseId: "rel-1" },
+    );
+    // A re-sent deploy of a published release: what `current` may serve.
+    await Deno.mkdir(paths.releaseDir, { recursive: true });
+    await Deno.writeTextFile(join(paths.releaseDir, "index.html"), "live");
+    const workingDir = join(root, "checkout");
+    await Deno.mkdir(workingDir, { recursive: true });
+    await Deno.writeTextFile(join(workingDir, "index.html"), "v2");
+    await assertRejects(
+      () =>
+        promoteRelease({
+          paths,
+          workingDir,
+          username: "appuser",
+          healthProbe: () => Promise.reject(new Error("probe failed")),
+          runFn: runOk,
+        }),
+      Error,
+      "probe failed",
+    );
+    assertEquals((await Deno.stat(paths.releaseDir)).isDirectory, true);
   } finally {
     await Deno.remove(root, { recursive: true });
   }

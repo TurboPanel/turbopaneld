@@ -44,7 +44,9 @@ export const SHARED_TRAEFIK_COMPOSE_SERVICE_NAME = "traefik";
  * Only this container sees `/var/run/docker.sock`. Every Traefik on the host
  * — the shared HTTP ingress and each per-service raw-TCP/UDP one — reaches
  * Docker through it over the ingress network instead, so an RCE in a Traefik
- * that proxies tenant traffic no longer hands over the Engine API.
+ * that proxies tenant traffic no longer hands over the Engine API. With the
+ * Docker gate's stage-3 switch on, the Traefiks use the gate's read-only
+ * socket and this service is dropped (`src/deploy/ingress.ts`).
  */
 export const SOCKET_PROXY_COMPOSE_SERVICE_NAME = "docker-socket-proxy";
 

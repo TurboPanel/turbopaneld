@@ -1,14 +1,54 @@
 import { resolveInstanceSocket } from "./sockets.ts";
 
-/** Long enough for the instance binary to apply migrations before it answers. */
-export const INSTANCE_UPDATE_HEALTH_TIMEOUT_MS = 5 * 60 * 1000;
-export const INSTANCE_UPDATE_HEALTH_INTERVAL_MS = 2_000;
+/**
+ * Default health-wait budget. A 1-core, 1 GB host can take several minutes to
+ * start the new instance binary and apply migrations before it answers, and a
+ * rollback is far worse than waiting, so the default is generous. Override
+ * with {@link UPDATE_HEALTH_TIMEOUT_ENV}.
+ */
+export const INSTANCE_UPDATE_HEALTH_TIMEOUT_MS = 10 * 60 * 1000;
+/** First poll gap; later polls back off up to the max below. */
+export const INSTANCE_UPDATE_HEALTH_INTERVAL_MS = 1_000;
+export const INSTANCE_UPDATE_HEALTH_MAX_INTERVAL_MS = 10_000;
+
+export const UPDATE_HEALTH_TIMEOUT_ENV =
+  "TURBOPANEL_UPDATE_HEALTH_TIMEOUT_SECONDS";
+const MIN_HEALTH_TIMEOUT_SECONDS = 30;
+const MAX_HEALTH_TIMEOUT_SECONDS = 3_600;
+
+/**
+ * The health-wait budget in milliseconds: `TURBOPANEL_UPDATE_HEALTH_TIMEOUT_SECONDS`
+ * when it is a whole number of seconds within 30..3600, else the default.
+ */
+export function resolveUpdateHealthTimeoutMs(
+  env?: Record<string, string | undefined>,
+): number {
+  let raw: string | undefined;
+  try {
+    raw = (env ?? Deno.env.toObject())[UPDATE_HEALTH_TIMEOUT_ENV];
+  } catch {
+    raw = undefined;
+  }
+  const text = raw?.trim() ?? "";
+  if (!/^\d+$/.test(text)) return INSTANCE_UPDATE_HEALTH_TIMEOUT_MS;
+  const seconds = Number(text);
+  if (
+    seconds < MIN_HEALTH_TIMEOUT_SECONDS ||
+    seconds > MAX_HEALTH_TIMEOUT_SECONDS
+  ) {
+    return INSTANCE_UPDATE_HEALTH_TIMEOUT_MS;
+  }
+  return seconds * 1_000;
+}
 
 export const CONTROL_PLANE_INSTANCE_UNIT = "turbopanel-instance";
 
 export type ControlPlaneHealthSnapshot = {
+  /** The binary's plain base version (`0.1.7`), whichever channel published it. */
   version: string;
   commit: string;
+  /** The release label of the installed bytes (`0.1.7-canary.56`), when known. */
+  build?: string;
 };
 
 export class InstanceHealthError extends Error {
@@ -41,13 +81,44 @@ function healthAccepted(
   return healthMatches(health, options.target);
 }
 
+/** `0.1.7-canary.56` → `0.1.7`: the part before any pre-release or build label. */
+function baseVersion(version: string): string {
+  return version.split(/[-+]/, 1)[0];
+}
+
+/**
+ * The commit is the build's identity. The version is a sanity check, and only
+ * its base counts: a binary reports its plain base version (`0.1.7`) while the
+ * manifest carries the channel label (`0.1.7-canary.56`), so a strict compare
+ * never matched a canary or rc build and every such update timed out and
+ * rolled back (canary, 2026-10-01).
+ */
 function healthMatches(
   health: ControlPlaneHealthSnapshot,
   target: InstanceHealthTarget,
 ): boolean {
   if (health.commit !== target.commit) return false;
-  if (target.version && health.version !== target.version) return false;
-  return true;
+  if (!target.version) return true;
+  if (health.build === target.version) return true;
+  return baseVersion(health.version) === baseVersion(target.version);
+}
+
+/**
+ * The build an `/api/health` body names, or `null` without a version and a
+ * known commit. `build` is the release label the instance reports.
+ */
+export function parseInstanceHealth(
+  body: unknown,
+): ControlPlaneHealthSnapshot | null {
+  if (!isRecord(body)) return null;
+  const version = typeof body.version === "string" ? body.version : "";
+  const revision = isRecord(body.revision) ? body.revision : null;
+  const commit = revision && typeof revision.commit === "string"
+    ? revision.commit
+    : "";
+  if (!version || !commit || commit === "unknown") return null;
+  const build = typeof body.build === "string" ? body.build.trim() : "";
+  return build ? { version, commit, build } : { version, commit };
 }
 
 /**
@@ -64,15 +135,7 @@ export async function readInstanceHealth(
     });
     const response = await fetch("http://localhost/api/health", { client });
     if (!response.ok) return null;
-    const body: unknown = await response.json();
-    if (!isRecord(body)) return null;
-    const version = typeof body.version === "string" ? body.version : "";
-    const revision = isRecord(body.revision) ? body.revision : null;
-    const commit = revision && typeof revision.commit === "string"
-      ? revision.commit
-      : "";
-    if (!version || !commit || commit === "unknown") return null;
-    return { version, commit };
+    return parseInstanceHealth(await response.json());
   } catch {
     return null;
   } finally {
@@ -105,6 +168,8 @@ export async function waitForInstanceHealth(options: {
   target: InstanceHealthTarget;
   timeoutMs?: number;
   intervalMs?: number;
+  /** When set, the poll gap doubles after each miss, up to this cap. */
+  maxIntervalMs?: number;
   readHealth?: () => Promise<ControlPlaneHealthSnapshot | null>;
   unitActive?: () => Promise<boolean>;
   now?: () => number;
@@ -112,8 +177,9 @@ export async function waitForInstanceHealth(options: {
   /** When set, replaces commit/version equality (rollback with no prior health). */
   accept?: (health: ControlPlaneHealthSnapshot) => boolean;
 }): Promise<void> {
-  const timeoutMs = options.timeoutMs ?? INSTANCE_UPDATE_HEALTH_TIMEOUT_MS;
-  const intervalMs = options.intervalMs ?? INSTANCE_UPDATE_HEALTH_INTERVAL_MS;
+  const timeoutMs = options.timeoutMs ?? resolveUpdateHealthTimeoutMs();
+  let intervalMs = options.intervalMs ?? INSTANCE_UPDATE_HEALTH_INTERVAL_MS;
+  const maxIntervalMs = options.maxIntervalMs ?? intervalMs;
   const readHealth = options.readHealth ?? (() => readInstanceHealth());
   const unitActive = options.unitActive ?? (() => instanceUnitIsActive());
   const now = options.now ?? (() => Date.now());
@@ -131,6 +197,7 @@ export async function waitForInstanceHealth(options: {
     if (now() >= deadline) return false;
     const remaining = deadline - now();
     await sleep(Math.min(intervalMs, Math.max(remaining, 0)));
+    intervalMs = Math.min(intervalMs * 2, maxIntervalMs);
     return poll();
   };
   if (await poll()) return;

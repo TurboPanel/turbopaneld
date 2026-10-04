@@ -3,12 +3,12 @@
 # (written by the daemon site apply path).
 
 ServerRoot "{{ turbopanel_vendor_dir }}/apache/current"
-PidFile "{{ turbopanel_run_dir }}/apache/httpd.pid"
+PidFile "/run/{{ apache_runtime_directory }}/httpd.pid"
 ServerName localhost
 ServerAdmin turbopanel@localhost
 
-User {{ apache_service_user }}
-Group {{ apache_service_group }}
+# No User/Group: the unit starts httpd as {{ apache_service_user }}, so there is
+# no root master to switch from.
 
 # MPM is built as a shared module (--enable-mpms-shared=event).
 # Remaining modules are shared (--enable-mods-shared=most).
@@ -27,6 +27,9 @@ LoadModule setenvif_module modules/mod_setenvif.so
 LoadModule log_config_module modules/mod_log_config.so
 LoadModule proxy_module modules/mod_proxy.so
 LoadModule proxy_fcgi_module modules/mod_proxy_fcgi.so
+# Client address from nginx in front of Apache (each such vhost trusts
+# X-Forwarded-For from 127.0.0.2 only, nginx's proxy_bind source address).
+LoadModule remoteip_module modules/mod_remoteip.so
 
 TypesConfig conf/mime.types
 AddType application/x-compress .Z
@@ -34,9 +37,13 @@ AddType application/x-gzip .gz .tgz
 
 DirectoryIndex index.html
 
-ErrorLog "{{ turbopanel_log_dir }}/apache/error.log"
+ErrorLog "/var/log/{{ apache_logs_directory }}/error.log"
 LogLevel notice
-CustomLog "{{ turbopanel_log_dir }}/apache/access.log" combined
+# `combined` is not built in: without this line every entry is the literal
+# word. `%a` is the client address, which mod_remoteip sets from nginx's
+# X-Forwarded-For on a vhost behind nginx.
+LogFormat "%a %l %u %t \"%r\" %>s %b \"%{Referer}i\" \"%{User-Agent}i\"" combined
+CustomLog "/var/log/{{ apache_logs_directory }}/access.log" combined
 
 # Dummy document root (unused — each site sets its own DocumentRoot).
 DocumentRoot "{{ turbopanel_state_dir }}/apache/empty"

@@ -1,8 +1,11 @@
 name: Verify
 
-# Tests + LCOV first, then Sonar quality gate. If Sonar fails, the workflow
-# stops (no further jobs). Automatic Analysis must stay off
-# (Administration → Analysis Method).
+# Tests + LCOV, then, on a pull request, the SonarCloud scan and its quality
+# gate: a failed gate fails the verify job, so ci-ok is red. On a trunk build
+# (this file called by publish-daemon-trunk.yml) the job uploads the LCOV and
+# stops there; sonar-trunk.yml analyses the commit after the trunk build
+# completes, so the scan never holds back publish or the canary. Automatic
+# Analysis must stay off (Administration → Analysis Method).
 
 on:
   workflow_call:
@@ -26,8 +29,8 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     concurrency:
-      group: daemon-verify-${{ github.event_name }}-${{ github.ref }}
-      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+      group: daemon-verify-${{ github.event_name }}-${{ (github.head_ref == 'trunk' || github.head_ref == 'staging') && github.run_id || github.ref }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' && github.head_ref != 'trunk' && github.head_ref != 'staging' }}
     env:
       # Job-level so Sonar `if:` / require-token steps can read the secret.
       # Empty only for fork PRs (secrets are not available to forks).
@@ -55,7 +58,33 @@ jobs:
             exit 1
           fi
 
+      # Three attempts, 15 s then 45 s apart: setup-deno has no retry input and
+      # a transient GitHub 5xx on the download must not turn the run red.
       - name: Install Deno
+        id: deno-try-1
+        continue-on-error: true
+        uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
+        with:
+          # Keep in step with DENO_VERSION / deno_version / TP_DENO_VERSION (2.9.7).
+          deno-version: "2.9.7"
+          cache: true
+      - name: Wait before retrying the Deno download
+        if: steps.deno-try-1.outcome == 'failure'
+        run: sleep 15
+      - name: Install Deno (retry 1 of 2)
+        id: deno-try-2
+        if: steps.deno-try-1.outcome == 'failure'
+        continue-on-error: true
+        uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
+        with:
+          # Keep in step with DENO_VERSION / deno_version / TP_DENO_VERSION (2.9.7).
+          deno-version: "2.9.7"
+          cache: true
+      - name: Wait before retrying the Deno download again
+        if: steps.deno-try-2.outcome == 'failure'
+        run: sleep 45
+      - name: Install Deno (retry 2 of 2)
+        if: steps.deno-try-2.outcome == 'failure'
         uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
         with:
           # Keep in step with DENO_VERSION / deno_version / TP_DENO_VERSION (2.9.7).
@@ -78,30 +107,34 @@ jobs:
         run: deno task check:vocabulary
 
       - name: Shellcheck the uninstall script and the root helpers
-        run: shellcheck -s sh --severity=warning scripts/purge.sh orchestration/scripts/tp-host orchestration/scripts/tp-update-guard
-
-      # ClickHouse/Tabix metrics infrastructure is retired (DuckDB + Parquet /
-      # Analytics Engine replaced it). Sibling repo trees are scanned too when
-      # the co-located workspace layout is present; a clean single-repo CI
-      # checkout still verifies this repo's own trees.
-      - name: Check metrics legacy (no ClickHouse/Tabix references)
-        run: deno task check:metrics-legacy
+        run: shellcheck -s sh --severity=warning scripts/purge.sh orchestration/scripts/tp-host orchestration/scripts/tp-php-loopback orchestration/scripts/tp-build-runner orchestration/scripts/tp-update-guard orchestration/scripts/tp-firewall-guard
 
       - name: Scan for secrets (every tracked file)
         run: sh scripts/scan-secrets.sh --all
 
+      # The commits a PR adds, not just its final tree: a secret committed and
+      # removed again inside the PR still sits in the history that gets merged.
+      # PRs into staging/live carry trunk commits that were already scanned on
+      # their own PRs, so only PRs into trunk are scanned by range.
+      - name: Scan pull request commits for secrets
+        if: github.event_name == 'pull_request' && github.base_ref == 'trunk'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: sh scripts/scan-secrets.sh --range "$BASE_SHA..$HEAD_SHA"
+
+      - name: Secret scanner self-test
+        run: sh scripts/scan-secrets.selftest.sh
+
       - name: Check third-party notices
         run: deno task notices:check
 
-      - name: Install osv-scanner
-        run: |
-          curl -sSfL --proto "=https" --proto-redir "=https" --retry 3 --retry-connrefused --retry-delay 2 -o /usr/local/bin/osv-scanner \
-            https://github.com/google/osv-scanner/releases/download/v2.6.0/osv-scanner_linux_amd64
-          echo "ca69b3d3cd08f889a49dc0a383122f71cc528b83803671df5fd874d97485b108  /usr/local/bin/osv-scanner" | sha256sum -c -
-          chmod +x /usr/local/bin/osv-scanner
-
-      - name: Dependency vulnerability scan (osv-scanner)
-        run: osv-scanner scan source --recursive .
+      # Dependency Advisory Gate (TurboPanel/dev): fails only on a HIGH or
+      # CRITICAL advisory that already has a fixed version; everything else is
+      # a warning annotation. Override for one verified not exploitable here:
+      # an [[IgnoredVulns]] entry with a reason in osv-scanner.toml.
+      - name: Dependency advisory gate (osv-scanner)
+        uses: TurboPanel/dev/.github/actions/osv-scan@8512d65091c662383a4aa6ff2848e16230ccc5e1 # dev#55
 
       # The Ansible layer (20+ playbooks, 30+ first-party roles) had no CI
       # gate at all -- its only feedback was a converge failure on a real host.
@@ -189,16 +222,23 @@ jobs:
           retention-days: 7
 
       # Coverage import needs CI-based analysis (Automatic Analysis must stay
-      # off for turbopanel_turbopaneld). Skipped only when SONAR_TOKEN is empty
-      # (fork or Dependabot PRs). Quality gate failure fails this job.
+      # off for turbopanel_turbopaneld). Quality gate failure fails this job.
       - name: SonarQube Scan
-        # Promotion PRs (trunk → staging, staging → live) carry no new code —
-        # every commit in them was analysed when it landed on trunk — and
-        # Sonar would count the whole diff since the last release as new code.
+        id: sonar
+        # Pull requests only; the quality gate blocks pull requests only. A
+        # trunk build is analysed by sonar-trunk.yml after it completes, from
+        # the daemon-coverage-lcov artifact uploaded above, so the scan does
+        # not hold back publish or the canary (decision 4, 2026-09-30).
+        #
+        # Also skipped when SONAR_TOKEN is empty (fork or Dependabot PR) and on
+        # the automatic promotion PRs into staging/live, which carry only
+        # commits already analysed on trunk (no new code to gate; Sonar would
+        # count the whole diff since the last release as new code).
         if: >-
           env.SONAR_TOKEN != ''
-          && !(github.event_name == 'pull_request'
-               && (github.base_ref == 'staging' || github.base_ref == 'live'))
+          && github.event_name == 'pull_request'
+          && github.base_ref != 'staging'
+          && github.base_ref != 'live'
         uses: SonarSource/sonarqube-scan-action@ba9859eae8dd6bd29e412f25ddbbef3d032000f4 # v8.2.2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -206,11 +246,18 @@ jobs:
           args: >
             -Dsonar.qualitygate.wait=true
 
+      # The Sonar way gate fails only on ratings, so one new code smell passes
+      # it; this fails the PR on any new issue (owner rule, 2026-09-30). Runs
+      # only where the PR scan above ran, so it skips the promotion PRs too.
+      - name: No new Sonar issues
+        if: github.event_name == 'pull_request' && steps.sonar.outcome == 'success'
+        uses: TurboPanel/dev/.github/actions/sonar-new-issues@2db1bbfa3cff89a52fac3ee4a53bd495dc1c79b1 # dev#47
+
   # The contract twins (commands, cell messages, version-wire, the field
   # snapshot) are compared against the turbopanel checkout of the same-named
   # branch (else trunk; never turbopanel's staging or live), so a daemon-only change that drifts fails here rather
   # than turning turbopanel red after it merges. Mirrors turbopanel's
-  # metrics-legacy job.
+  # contract-twin job.
   #
   # PRs into staging/live (the automatic promotion PRs) have `staging` or
   # `trunk` as their head, carrying commits that were checked against
@@ -221,8 +268,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     concurrency:
-      group: daemon-contract-drift-${{ github.event_name }}-${{ github.ref }}
-      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+      group: daemon-contract-drift-${{ github.event_name }}-${{ (github.head_ref == 'trunk' || github.head_ref == 'staging') && github.run_id || github.ref }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' && github.head_ref != 'trunk' && github.head_ref != 'staging' }}
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -263,7 +310,29 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
+      # Three attempts, 15 s then 45 s apart: setup-deno has no retry input and
+      # a transient GitHub 5xx on the download must not turn the run red.
       - name: Install Deno
+        id: deno-try-1
+        continue-on-error: true
+        uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
+        with:
+          deno-version: "2.9.7"
+      - name: Wait before retrying the Deno download
+        if: steps.deno-try-1.outcome == 'failure'
+        run: sleep 15
+      - name: Install Deno (retry 1 of 2)
+        id: deno-try-2
+        if: steps.deno-try-1.outcome == 'failure'
+        continue-on-error: true
+        uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
+        with:
+          deno-version: "2.9.7"
+      - name: Wait before retrying the Deno download again
+        if: steps.deno-try-2.outcome == 'failure'
+        run: sleep 45
+      - name: Install Deno (retry 2 of 2)
+        if: steps.deno-try-2.outcome == 'failure'
         uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
         with:
           deno-version: "2.9.7"

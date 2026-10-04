@@ -3,7 +3,7 @@
   ansible.builtin.file:
     path: "{{ daemon_log_dir }}"
     state: directory
-    owner: "{{ daemon_log_owner }}"
+    owner: "{{ daemon_log_dir_owner }}"
     group: "{{ daemon_log_group }}"
     mode: "{{ daemon_log_dir_mode }}"
 

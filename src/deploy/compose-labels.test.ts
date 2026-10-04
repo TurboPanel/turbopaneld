@@ -85,6 +85,8 @@ test("buildHostingLabelsFragment configures Traefik and ingress network", () => 
   );
   assertEquals(labels["com.turbopanel.project"], "project_123");
   assertEquals(labels["com.turbopanel.raw-port"], undefined);
+  // The shared Traefik's provider constraint reads this label.
+  assertEquals(labels["com.turbopanel.system.routed"], "true");
   assertEquals(fragment.services?.app?.networks, [HOSTING_INGRESS_NETWORK]);
   assertEquals(
     (fragment.networks as Record<string, { external: boolean }>)[
@@ -157,6 +159,8 @@ test("buildHostingLabelsFragment configures a tcp router+service per published p
   );
   assertEquals(labels["traefik.http.routers.hosting_db-5432.rule"], undefined);
   assertEquals(labels["com.turbopanel.raw-port"], "true");
+  // TCP/UDP is served by the per-service Traefik, never the shared one.
+  assertEquals(labels["com.turbopanel.system.routed"], undefined);
   assertEquals(fragment.services?.db?.networks, [HOSTING_INGRESS_NETWORK]);
 });
 
@@ -470,7 +474,7 @@ test("buildHostingLabelsFragment rejects unsafe router ids and pathPrefix", () =
         resolved: appResolved,
       }),
     Error,
-    "unsupported character",
+    "hostings[].pathPrefix must be",
   );
 });
 

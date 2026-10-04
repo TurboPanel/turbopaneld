@@ -7,3 +7,6 @@ daemon_log_dir: /var/log/turbopanel
 daemon_log_owner: "{{ turbopanel_user | default('tp') }}"
 daemon_log_group: "{{ turbopanel_group | default('tp') }}"
 daemon_log_dir_mode: "0750"
+# P1-1: the log directory is root-owned on managed hosts; the daemon never
+# writes there (systemd appends daemon.log as root).
+daemon_log_dir_owner: "{{ 'root' if (turbopanel_dev_user | default('') | length == 0) else daemon_log_owner }}"

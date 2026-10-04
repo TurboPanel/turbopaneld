@@ -22,9 +22,14 @@ on:
 permissions:
   contents: read
 
+# Never dropped: the default single-pending queue replaces a waiting run when
+# a third arrives, and the replaced run concludes cancelled (a red mark on
+# the trunk commit). The job is idempotent (it reads trunk's head), so a
+# queued run that finds nothing to do is harmless.
 concurrency:
   group: promote-prs
   cancel-in-progress: false
+  queue: max
 
 jobs:
   rc-pr:
@@ -38,14 +43,14 @@ jobs:
         id: app
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          app-id: ${{ secrets.RELEASE_APP_ID }}
+          client-id: ${{ secrets.RELEASE_APP_ID }}
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
 
       - name: Check out the changelog and version scripts (TurboPanel/dev)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: TurboPanel/dev
-          ref: 387788e9e64344fc5de32f6b93abd178e956d6a1 # dev#42
+          ref: d9127ee03a6a3b42e9435ebec3542db5fab09bc0 # dev#49
           path: .promote
           fetch-depth: 1
           persist-credentials: false
