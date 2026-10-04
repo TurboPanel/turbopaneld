@@ -22,6 +22,10 @@ import {
   type ServerReportedIp,
 } from "../host/server-addresses.ts";
 import type { HostResources } from "../host/host-inventory.ts";
+import {
+  readServiceRunStates,
+  type ServiceRunState,
+} from "../host/service-run-state.ts";
 
 export const IDLE_PRESENCE_MS = 60_000;
 
@@ -98,6 +102,12 @@ type PresenceSnapshot = {
    * about this host right now".
    */
   runtimes?: HostRuntimeMetadata;
+  /**
+   * Per-service run state (running / restart count / last error), present only
+   * while the sentinel watches Docker. An empty list is meaningful: it tells the
+   * control plane every service on this host is gone.
+   */
+  services?: ServiceRunState[];
 };
 
 type BuildInfoProvider = () => BuildInfo;
@@ -114,11 +124,13 @@ type DaemonBuildWire = BuildInfo & { channel: string; version: string };
 function defaultPresenceSnapshot(): PresenceSnapshot {
   const docker = readDocker();
   const runtimes = readHostRuntimes();
+  const services = readServiceRunStates();
   return {
     timeSync: readTimeSync(),
     ips: collectServerIps(readDefaultRouteInterfaces()),
     ...(docker ? { docker } : {}),
     ...(runtimes ? { runtimes } : {}),
+    ...(services ? { services } : {}),
   };
 }
 
@@ -344,6 +356,7 @@ export class IdlePresence {
         timeSync: presence.timeSync,
         ...(presence.docker ? { docker: presence.docker } : {}),
         ...(presence.runtimes ? { runtimes: presence.runtimes } : {}),
+        ...(presence.services ? { services: presence.services } : {}),
         features: [...DAEMON_WIRE_FEATURES],
       }));
       this.#lastActivityAt = Date.now();
@@ -406,6 +419,7 @@ export class IdlePresence {
       resources: presence && { ips: presence.ips },
       docker: presence?.docker,
       runtimes: presence?.runtimes,
+      services: presence?.services,
     });
   }
 
@@ -459,6 +473,7 @@ export class IdlePresence {
     resources?: HostResources;
     docker?: HostDockerMetadata;
     runtimes?: HostRuntimeMetadata;
+    services?: ServiceRunState[];
   }): void {
     const ws = this.#ws;
     if (ws?.readyState !== WebSocket.OPEN) return;
@@ -471,6 +486,7 @@ export class IdlePresence {
       resources?: HostResources;
       docker?: HostDockerMetadata;
       runtimes?: HostRuntimeMetadata;
+      services?: ServiceRunState[];
     } = {
       type: "heartbeat",
       at: new Date().toISOString(),
@@ -483,6 +499,7 @@ export class IdlePresence {
     if (fields.resources) payload.resources = fields.resources;
     if (fields.docker) payload.docker = fields.docker;
     if (fields.runtimes) payload.runtimes = fields.runtimes;
+    if (fields.services) payload.services = fields.services;
 
     try {
       ws.send(JSON.stringify(payload));

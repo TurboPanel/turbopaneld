@@ -95,6 +95,21 @@
       { "name": "upgradeId", "required": false, "type": "string" }
     ]
   },
+  "ServiceRunState": {
+    "instance": "src/contracts/service-run-state.ts",
+    "daemon": "src/contracts/service-run-state.ts",
+    "fields": [
+      { "name": "asOf", "required": true, "type": "string" },
+      { "name": "lastError", "required": false, "type": "string" },
+      { "name": "restartCount", "required": true, "type": "number" },
+      { "name": "serviceId", "required": true, "type": "string" },
+      {
+        "name": "state",
+        "required": true,
+        "type": "'crashing' | 'running' | 'starting' | 'stopped_after_crashes' | 'stopped' | 'unhealthy' | 'unknown'"
+      }
+    ]
+  },
   "InstanceAcmeWireSettings": {
     "instance": "src/contracts/cell-protocol.ts",
     "daemon": "src/contracts/cell-messages.ts",
