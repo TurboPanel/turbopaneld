@@ -23,6 +23,7 @@
  * recorded before they carried one — the very releases this looks for.
  */
 import { join } from "@std/path";
+import { writeDaemonFile } from "../../permissions/daemon-files.ts";
 import { hostSudoArgs } from "../../permissions/host-sudo.ts";
 import {
   type LayoutPaths,
@@ -184,18 +185,11 @@ export async function reportLiveReleaseLinks(
   );
   for (const finding of findings) deps.warn?.(describeFinding(finding));
   const path = join(layout.daemonStateDir, RELEASE_LINK_SCAN_FILENAME);
-  const temp = `${path}.tmp-${crypto.randomUUID()}`;
   const scannedAt = (deps.now ?? (() => new Date().toISOString()))();
-  try {
-    await Deno.writeTextFile(
-      temp,
-      `${JSON.stringify({ version: 1, scannedAt, findings }, null, 2)}\n`,
-      { mode: 0o600 },
-    );
-    await Deno.rename(temp, path);
-  } catch (err) {
-    await Deno.remove(temp).catch(() => undefined);
-    throw err;
-  }
+  await writeDaemonFile(
+    path,
+    `${JSON.stringify({ version: 1, scannedAt, findings }, null, 2)}\n`,
+    0o600,
+  );
   return findings;
 }

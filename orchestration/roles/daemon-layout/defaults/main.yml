@@ -24,3 +24,6 @@ turbopanel_daemon_state_leaves:
   - { name: cloudflared/tunnels, mode: "0750" }
   - { name: tls, mode: "0750" }
   - { name: orchestrator, mode: "0750" }
+  - { name: commands, mode: "0750" }
+  - { name: release-records, mode: "0750" }
+  - { name: release-build, mode: "0700" }
