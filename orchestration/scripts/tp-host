@@ -2970,10 +2970,6 @@ tp_build_write_resolv() {
 # unit whose client went away. Not exercised in test mode (no flock there).
 tp_build_lock() {
   [ -z "$TP_TEST" ] || return 0
-  # One queue slot per project: a project's own deploys wait on its own lock,
-  # so they cannot out-number every other project's waiters on the host lock.
-  exec 8>>"$BUILD_LOCK.$1"
-  flock -w "$BUILD_LOCK_WAIT_SEC" 8 || tp_die "build-run: this project already has a build running or waiting"
   exec 9>>"$BUILD_LOCK"
   flock -w "$BUILD_LOCK_WAIT_SEC" 9 || tp_die "build-run: timed out waiting for the running build"
   _bl_active="$(systemctl list-units --plain --no-legend --all \
@@ -2995,7 +2991,7 @@ tp_verb_build_run() {
   case "$_br_v" in ''|*[!0-9]*) tp_die "build-run: cannot read the systemd version" ;; esac
   [ "$_br_v" -ge "$BUILD_SYSTEMD_MIN" ] ||
     tp_die "build-run: systemd $_br_v cannot sandbox a build; the supported floor is Debian 13 / Ubuntu 24.04"
-  tp_build_lock "$2"
+  tp_build_lock
   tp_build_write_resolv
   _br_work="$R_BUILD/work/$1"
   _br_cache="$R_BUILD/cache/$2"
@@ -3014,6 +3010,7 @@ tp_verb_build_run() {
   cd /
   # The watcher stops the build when its work tree or cache outgrows the caps.
   tp_run systemd-run --unit="turbopanel-buildwatch-$_br_id" --collect --quiet --no-block \
+    --setenv=SUDO_UID="$CALLER_UID" --setenv=SUDO_GID="$CALLER_GID" \
     -p RuntimeMaxSec="$((BUILD_RUNTIME_MAX_SEC + 300))" \
     -- "$_self_dir/tp-host" build-watch "$_br_id" "$_br_project" ||
     tp_die "build-run: cannot start the build's disk watcher"

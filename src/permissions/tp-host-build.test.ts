@@ -93,6 +93,8 @@ function expectedWatcher(prefix: string): string {
     "--collect",
     "--quiet",
     "--no-block",
+    `--setenv=SUDO_UID=${Deno.uid()}`,
+    `--setenv=SUDO_GID=${Deno.gid()}`,
     "-p",
     "RuntimeMaxSec=2100",
     "--",
