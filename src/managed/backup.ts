@@ -525,6 +525,7 @@ export async function handleManagedBackup(
         payload.managedId,
         payload.backupId,
         payload.artifactExtension,
+        payload.policyId,
       ),
     );
     return {
