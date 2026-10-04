@@ -8,6 +8,10 @@ import {
 } from "../deploy/compose-files.ts";
 import { writeReleaseManifest } from "../deploy/release/deployment-json.ts";
 import { createTempLayout } from "../testing/temp-layout.ts";
+import {
+  setHostingCaddyAccountCheckForTest,
+  setIngressGuardCheckForTest,
+} from "../deploy/ensure-hosting-caddy.ts";
 import { resolveLayout } from "../paths/layout.ts";
 import {
   COMMAND_LOG_PHASES,
@@ -23,12 +27,15 @@ import {
   resolveHostNativeLanes,
   resolveRuntimeComposeYaml,
   shapeEnvironmentDeployResult,
+  siteCronWritableDirs,
 } from "./deploy-environment.ts";
 import type { AppliedRelease } from "../deploy/release/apply-source-releases.ts";
 import type {
   EnvironmentDeployPayload,
   EnvironmentDeployResultRelease,
+  EnvironmentDeployResultSite,
 } from "../contracts/commands-contracts.ts";
+import "../testing/stub-hosting-caddy-host.ts";
 
 /**
  * Shared hosting-ingress Docker network — the `hosting-ingress` system
@@ -154,6 +161,14 @@ async function withDeployEnv(
   for (const [key, value] of Object.entries(fixture.env)) {
     Deno.env.set(key, value);
   }
+  // A planted hosting Caddy counts as installed only with its account; report
+  // the account present so a deploy never runs caddy-setup on the test host.
+  const restoreAccountCheck = setHostingCaddyAccountCheckForTest(() =>
+    Promise.resolve(true)
+  );
+  const restoreGuardCheck = setIngressGuardCheckForTest(() =>
+    Promise.resolve(true)
+  );
   try {
     await fn({
       stateDir: fixture.dirs.stateDir,
@@ -162,6 +177,8 @@ async function withDeployEnv(
       runtimesDir: fixture.dirs.runtimesDir,
     });
   } finally {
+    restoreAccountCheck();
+    restoreGuardCheck();
     for (const [key, value] of previous) {
       if (value === undefined) Deno.env.delete(key);
       else Deno.env.set(key, value);
@@ -264,6 +281,32 @@ test("shapeEnvironmentDeployResult includes releases and omits empty services", 
   });
   assertEquals(result.releases, releases);
   assertEquals("services" in result, false);
+});
+
+test("shapeEnvironmentDeployResult carries per-site app facts and omits them when empty", () => {
+  const base = {
+    projectName: "demo",
+    environmentId: "env-apps",
+    labeledServices: [],
+    sites: [],
+    containers: [],
+  };
+  const siteApps: EnvironmentDeployResultSite[] = [
+    {
+      composeServiceName: "blog",
+      app: { kind: "wordpress", version: "6.5.2" },
+    },
+    { composeServiceName: "docs" },
+  ];
+  assertEquals(
+    shapeEnvironmentDeployResult({ ...base, siteApps }).sites,
+    siteApps,
+  );
+  assertEquals("sites" in shapeEnvironmentDeployResult(base), false);
+  assertEquals(
+    "sites" in shapeEnvironmentDeployResult({ ...base, siteApps: [] }),
+    false,
+  );
 });
 
 test("resolveHostNativeLanes preserves payload when nothing static-exported", () => {
@@ -1125,6 +1168,18 @@ test({
             code: 0,
           });
         }
+        if (args.includes("network") && args.includes("inspect")) {
+          return Promise.resolve({
+            success: true,
+            stdout: JSON.stringify([{
+              IPAM: {
+                Config: [{ Subnet: "172.30.0.0/16", Gateway: "172.30.0.1" }],
+              },
+            }]),
+            stderr: "",
+            code: 0,
+          });
+        }
         return Promise.resolve({
           success: true,
           stdout: args.includes("ps") ? "[]" : "",
@@ -1162,12 +1217,13 @@ test({
       ) as { serviceId: string };
       assertEquals(descriptor.serviceId, ingressServiceId);
       // The shared proxy is brought up by `-f <path>` alone — its compose file
-      // declares `name: <serviceId>` so no `-p` is passed.
+      // declares `name: <serviceId>` so no `-p` is passed. `up` runs on the
+      // pending file, which becomes docker-compose.yml only once it succeeds.
       assertEquals(
         calls.some((argv) =>
           argv.includes("up") &&
           argv.some((arg) =>
-            arg.endsWith("/ingress/traefik/docker-compose.yml")
+            arg.endsWith("/ingress/traefik/docker-compose.pending.yml")
           )
         ),
         true,
@@ -2148,4 +2204,17 @@ test({
       );
     });
   },
+});
+
+test("siteCronWritableDirs: shared/ for a release, webroot/ and shared/ for a managed tree, nothing otherwise", () => {
+  const layout = { principalHomeRoot: "/srv/users" };
+  const site = { serviceId: "svc1", username: "alice" };
+  assertEquals(siteCronWritableDirs(layout, site, undefined), [
+    "/srv/users/alice/sites/svc1/shared",
+  ]);
+  assertEquals(siteCronWritableDirs(layout, undefined, site), [
+    "/srv/users/alice/sites/svc1/webroot",
+    "/srv/users/alice/sites/svc1/shared",
+  ]);
+  assertEquals(siteCronWritableDirs(layout, undefined, undefined), []);
 });

@@ -8,9 +8,10 @@ import {
   MalformedManifestError,
   ManifestSignatureError,
   MissingChannelError,
+  RollbackRefusedError,
 } from "./errors.ts";
 import { resolveUpdate } from "./resolver.ts";
-import { DEV_UNSIGNED_MANIFEST_ENV } from "./signing.ts";
+import { DEV_UNSIGNED_MANIFEST_ENV, signManifest } from "./signing.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -171,8 +172,13 @@ test("resolveUpdate follows rc and release to GitHub Releases", async () => {
   }
 });
 
+const PINNED_MANIFEST_URL =
+  "https://github.com/TurboPanel/turbopaneld/releases/download/v0.1.0/manifest.json";
+
 test("resolveUpdate honours a pinned manifest over the channel, but not over an overlay", async () => {
   const fetched: string[] = [];
+  const signed = await signWithTestKey(channelManifest());
+  const keyed = { publicKeyHex: TEST_RELEASE_SIGNING_PUBLIC_KEY_HEX };
   const restore = installFetch((url) => {
     fetched.push(url);
     if (url.endsWith("/channels.json")) {
@@ -182,22 +188,21 @@ test("resolveUpdate honours a pinned manifest over the channel, but not over an 
         channels: { trunk: { manifestUrl: "./manifest.json" } },
       });
     }
-    return Response.json(channelManifest());
+    return Response.json(signed);
   });
-  const pin =
-    "https://github.com/TurboPanel/turbopaneld/releases/download/v0.1.0/manifest.json";
+  const pin = PINNED_MANIFEST_URL;
   try {
     // Pinned: the channel is ignored, the pin is fetched directly.
     await resolveUpdate({ app: "daemon", channel: "release" }, {
       TURBOPANEL_MANIFEST_URL: pin,
-    });
+    }, keyed);
     assertEquals(fetched, [pin]);
     // An overlay catalog still wins — a dev host is never pinned past it.
     fetched.length = 0;
     await resolveUpdate({ app: "daemon", channel: "trunk" }, {
       TURBOPANEL_MANIFEST_URL: pin,
       TURBOPANEL_DL_BASE: "https://dev.example/downloads/daemon",
-    });
+    }, keyed);
     assertEquals(
       fetched[0],
       "https://dev.example/downloads/daemon/channels.json",
@@ -206,7 +211,7 @@ test("resolveUpdate honours a pinned manifest over the channel, but not over an 
     fetched.length = 0;
     await resolveUpdate({ app: "daemon", channel: "trunk" }, {
       TURBOPANEL_MANIFEST_URL: "http://evil.example/manifest.json",
-    });
+    }, keyed);
     assertEquals(fetched, ["https://dl.trbp.nl/channels/trunk/manifest.json"]);
   } finally {
     restore();
@@ -685,6 +690,223 @@ test("resolveUpdate rejects a manifest body that is not JSON", async () => {
       MalformedManifestError,
       "not valid JSON",
     );
+  } finally {
+    restore();
+  }
+});
+
+// --- freshness: replay of an old signed manifest ----------------------------
+
+const NEWER_BUILD = {
+  commit: "fff9999",
+  version: "0.1.3",
+  builtAt: "2026-10-01T00:00:00.000Z",
+};
+
+test("resolveUpdate (production) refuses a replayed, validly signed older manifest", async () => {
+  // channelManifest() is the old build: abc1234 built 2026-01-01, no version.
+  const restore = serveManifest(await signWithTestKey(channelManifest()));
+  try {
+    await assertRejects(
+      () =>
+        resolveUpdate({ app: "daemon", channel: "trunk" }, {}, {
+          ...PRODUCTION,
+          installed: NEWER_BUILD,
+        }),
+      RollbackRefusedError,
+      "refusing to roll back",
+    );
+  } finally {
+    restore();
+  }
+});
+
+test("resolveUpdate (production) refuses an older versioned release even when its builtAt looks newer", async () => {
+  const restore = serveManifest(
+    await signWithTestKey({
+      ...channelManifest(),
+      version: "0.1.2",
+      builtAt: "2026-12-01T00:00:00.000Z",
+    }),
+  );
+  try {
+    await assertRejects(
+      () =>
+        resolveUpdate({ app: "daemon", channel: "release" }, {}, {
+          ...PRODUCTION,
+          installed: NEWER_BUILD,
+        }),
+      RollbackRefusedError,
+    );
+  } finally {
+    restore();
+  }
+});
+
+test("resolveUpdate (production) accepts a newer canary of the installed base, and the host break-glass accepts the old one", async () => {
+  const newer = await signWithTestKey({
+    ...channelManifest(),
+    commit: "eee7777",
+    version: "0.1.3-canary.9",
+    builtAt: "2026-10-02T00:00:00.000Z",
+  });
+  let restore = serveManifest(newer);
+  try {
+    const info = await resolveUpdate({ app: "daemon", channel: "canary" }, {}, {
+      ...PRODUCTION,
+      installed: NEWER_BUILD,
+    });
+    assertEquals(info.commit, "eee7777");
+    assertEquals(info.version, "0.1.3-canary.9");
+  } finally {
+    restore();
+  }
+
+  restore = serveManifest(await signWithTestKey(channelManifest()));
+  try {
+    const info = await resolveUpdate(
+      { app: "daemon", channel: "trunk" },
+      { TURBOPANEL_ALLOW_DOWNGRADE: "1" },
+      { ...PRODUCTION, installed: NEWER_BUILD },
+    );
+    assertEquals(info.commit, "abc1234");
+  } finally {
+    restore();
+  }
+});
+
+// --- pinned manifests (--manifest-url): upgrade and rollback ---------------
+
+/** A key generated for this run: it signs validly, but it is not ours. */
+async function foreignSigningKey(): Promise<CryptoKey> {
+  const pair = await crypto.subtle.generateKey(
+    { name: "Ed25519" },
+    true,
+    ["sign", "verify"],
+  ) as CryptoKeyPair;
+  return pair.privateKey;
+}
+
+/** Resolve the daemon pin against `body`, as a source checkout or a host. */
+async function resolvePinned(
+  body: unknown,
+  installMode: "development" | "production",
+  env: Record<string, string> = {},
+) {
+  const restore = serveManifest(body);
+  try {
+    return await resolveUpdate(
+      { app: "daemon", channel: "release" },
+      { TURBOPANEL_MANIFEST_URL: PINNED_MANIFEST_URL, ...env },
+      {
+        installMode,
+        publicKeyHex: TEST_RELEASE_SIGNING_PUBLIC_KEY_HEX,
+        installed: NEWER_BUILD,
+      },
+    );
+  } finally {
+    restore();
+  }
+}
+
+test("resolveUpdate refuses an unsigned or foreign-signed pinned manifest, even in a source checkout", async () => {
+  const foreign = await signManifest(
+    channelManifest(),
+    await foreignSigningKey(),
+  );
+  const optIn = { [DEV_UNSIGNED_MANIFEST_ENV]: "1" };
+  await assertRejects(
+    () => resolvePinned(channelManifest(), "development", optIn),
+    ManifestSignatureError,
+    "unsigned",
+  );
+  await assertRejects(
+    () => resolvePinned(channelManifest(), "production", optIn),
+    ManifestSignatureError,
+    "unsigned",
+  );
+  await assertRejects(
+    () => resolvePinned(foreign, "development", optIn),
+    ManifestSignatureError,
+    "invalid",
+  );
+  await assertRejects(
+    () => resolvePinned(foreign, "production"),
+    ManifestSignatureError,
+    "invalid",
+  );
+});
+
+test("resolveUpdate rolls back to an older release-signed pinned manifest", async () => {
+  // channelManifest() is older than NEWER_BUILD; the host break-glass is the
+  // existing downgrade switch, and the signature is still required.
+  const older = await signWithTestKey({
+    ...channelManifest(),
+    version: "0.1.0",
+  });
+  const info = await resolvePinned(older, "production", {
+    TURBOPANEL_ALLOW_DOWNGRADE: "1",
+  });
+  assertEquals(info.version, "0.1.0");
+  assertEquals(info.commit, "abc1234");
+});
+
+const noWaitRetry = { sleep: () => Promise.resolve() };
+
+test("resolveUpdate retries a 504 on the manifest and keeps the HTTP text when it persists", async () => {
+  let calls = 0;
+  const restore = installFetch(() => {
+    calls += 1;
+    return new Response("", { status: 504 });
+  });
+  try {
+    await assertRejects(
+      () =>
+        resolveUpdate({ app: "daemon", channel: "trunk" }, {}, {
+          retry: noWaitRetry,
+        }),
+      MalformedManifestError,
+      "Failed to fetch channel manifest: HTTP 504",
+    );
+    assertEquals(calls, 4);
+  } finally {
+    restore();
+  }
+});
+
+test("resolveUpdate does not retry a 404 on the manifest", async () => {
+  let calls = 0;
+  const restore = installFetch(() => {
+    calls += 1;
+    return new Response("", { status: 404 });
+  });
+  try {
+    await assertRejects(
+      () =>
+        resolveUpdate({ app: "daemon", channel: "trunk" }, {}, {
+          retry: noWaitRetry,
+        }),
+      MalformedManifestError,
+      "HTTP 404",
+    );
+    assertEquals(calls, 1);
+  } finally {
+    restore();
+  }
+});
+
+test("resolveUpdate redacts a signed URL quoted by a failed manifest fetch", async () => {
+  const restore = installFetch(() => {
+    throw new TypeError(
+      "error sending request for url (https://release-assets.githubusercontent.com/m.json?X-Amz-Signature=secret)",
+    );
+  });
+  try {
+    const err = await assertRejects(
+      () => resolveUpdate({ app: "daemon", channel: "trunk" }, {}),
+      MalformedManifestError,
+    );
+    assertEquals(err.message.includes("secret"), false);
   } finally {
     restore();
   }

@@ -143,16 +143,16 @@ test("upsertPublicUrlsInEnv removes temp files when rename fails", async () => {
     assertEquals(threw, true);
     assertEquals(await listEnvTmpFiles(checkoutDir), []);
 
-    const writeTmpDir = join(configDir, ".write-tmp");
-    let leftoverTmp = 0;
-    try {
-      for await (const entry of Deno.readDir(writeTmpDir)) {
-        if (entry.name.startsWith("write-")) leftoverTmp++;
-      }
-    } catch (err) {
-      if (!(err instanceof Deno.errors.NotFound)) throw err;
+    for await (const entry of Deno.readDir(configDir)) {
+      assertEquals(entry.name.startsWith("runtime.env.tmp-"), false);
     }
-    assertEquals(leftoverTmp, 0);
+    assertEquals(
+      await Deno.stat(join(configDir, ".write-tmp")).then(
+        () => true,
+        () => false,
+      ),
+      false,
+    );
   } finally {
     await Deno.remove(root, { recursive: true });
   }
@@ -453,8 +453,8 @@ test({
   permissions: { read: true, write: true, env: true },
   fn: async () => {
     const failures = [
-      "hosting Caddy reload failed",
-      "hosting Caddy is not listening on port 80",
+      "hosting Caddy lost its admin socket",
+      "something unrelated broke",
     ];
     for (const message of failures) {
       const root = await Deno.makeTempDir({ prefix: "tp-apply-open-" });
@@ -759,4 +759,25 @@ test({
       await Deno.remove(root, { recursive: true });
     }
   },
+});
+
+test("upsertPublicUrlsInEnv creates no folder beside runtime.env (sealed config root)", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-public-urls-flat-" });
+  const configDir = join(root, "config", "instance");
+  const runtimeEnvPath = join(configDir, "runtime.env");
+  try {
+    await Deno.mkdir(configDir, { recursive: true });
+    await upsertPublicUrlsInEnv(["https://panel.example.com"], {
+      runtimeEnvPath,
+    });
+    const names: string[] = [];
+    for await (const entry of Deno.readDir(configDir)) names.push(entry.name);
+    assertEquals(names, ["runtime.env"]);
+    const source = await Deno.readTextFile(
+      new URL("./public-urls-env.ts", import.meta.url),
+    );
+    assertEquals(source.includes(".write-tmp"), false);
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
 });

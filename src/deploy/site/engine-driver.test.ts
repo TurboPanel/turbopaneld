@@ -10,6 +10,7 @@ import {
   phpFpmDriver,
   publishStagedConfig,
   rolloutSiteConfigs,
+  siteCaddyConfigDir,
   type SiteRunFn,
   type SiteRunResult,
   stageDaemonConfigFile,
@@ -138,6 +139,34 @@ test({
 });
 
 test({
+  name: "stageOwnedConfigFile never writes beside the root-owned config",
+  permissions: { read: true, write: true },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      // A dir the daemon cannot enter behaves like one that does not exist.
+      const dir = join(fixture.dirs.configDir, "nginx", "sites");
+      const path = join(dir, "site.conf");
+      let source: string | undefined;
+      const run: SiteRunFn = async (_command, args) => {
+        if (args.includes("cmp")) return fail();
+        if (args.includes("install")) {
+          source = args.at(-2);
+          assertEquals(await Deno.readTextFile(source as string), "next\n");
+        }
+        return ok();
+      };
+      const staged = await stageOwnedConfigFile(run, path, "next\n", "tpnginx");
+      assertEquals(staged?.candidatePath, `${path}.tpnew`);
+      assertEquals(source?.startsWith(dir), false);
+      await assertRejects(
+        () => Deno.stat(source as string),
+        Deno.errors.NotFound,
+      );
+    });
+  },
+});
+
+test({
   name: "stageDaemonConfigFile returns null when the live file already matches",
   permissions: { read: true, write: true },
   fn: async () => {
@@ -213,6 +242,34 @@ test({
       Error,
       "php-fpm 8.4 --test failed",
     );
+  },
+});
+
+test({
+  name: "Apache's config test runs httpd -t as tpapache, never as root",
+  permissions: { read: true, env: true },
+  fn: async () => {
+    const layout = resolveLayout({}, {
+      skipDiscovery: true,
+      forceMode: "production",
+    });
+    const calls: string[][] = [];
+    const run: SiteRunFn = (command, args) => {
+      calls.push([command, ...args]);
+      return Promise.resolve(ok());
+    };
+    await APACHE_DRIVER.configTest(run, layout);
+    assertEquals(calls, [[
+      "sudo",
+      "-n",
+      "-u",
+      "tpapache",
+      "--",
+      join(layout.runtimesDir, "apache", "current", "bin", "httpd"),
+      "-t",
+      "-f",
+      join(layout.configDir, "apache", "httpd.conf"),
+    ]]);
   },
 });
 
@@ -395,4 +452,40 @@ test({
       "never swapped",
     );
   },
+});
+
+test("site Caddy config directory never overlaps the control plane Caddy directory", () => {
+  const layout = resolveLayout({ TURBOPANEL_ROOT: "/tmp/tp-site-caddy-dir" });
+  const siteDir = siteCaddyConfigDir(layout);
+  const controlPlaneDir = join(layout.configDir, "caddy");
+  assertEquals(siteDir, join(layout.configDir, "site-caddy"));
+  assertEquals(siteDir === controlPlaneDir, false);
+  assertEquals(siteDir.startsWith(`${controlPlaneDir}/`), false);
+});
+
+test("site Caddy role, unit and sudoers pins use the site-caddy directory only", async () => {
+  const root = new URL("../../../orchestration/", import.meta.url);
+  const files = [
+    "roles/site-caddy/tasks/main.yml",
+    "roles/site-caddy/templates/Caddyfile.j2",
+    "roles/site-caddy/templates/turbopanel-site-caddy.service.j2",
+  ];
+  for (const file of files) {
+    const text = await Deno.readTextFile(new URL(file, root));
+    assertEquals(
+      /turbopanel_config_dir\s*}}\/caddy\b/.test(text),
+      false,
+      `${file} must not use the control plane Caddy directory`,
+    );
+  }
+  const sudoers = await Deno.readTextFile(
+    new URL("roles/turbopanel-user/templates/sudoers.j2", root),
+  );
+  const pin = sudoers.split("\n").find((l) =>
+    l.startsWith("Cmnd_Alias TP_CADDY_VALIDATE")
+  );
+  assertEquals(
+    pin?.endsWith("--config /etc/turbopanel/site-caddy/Caddyfile"),
+    true,
+  );
 });

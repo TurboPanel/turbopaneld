@@ -1,5 +1,11 @@
-import { assert, assertEquals, assertRejects } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertRejects,
+  assertStringIncludes,
+} from "@std/assert";
 import type { LayoutPaths } from "../paths/layout.ts";
+import { accessGroup } from "../runtime/registry.ts";
 import {
   DEFAULT_PRINCIPAL_SHELL,
   ensureDirectoryOwnedByPrincipal,
@@ -13,6 +19,7 @@ import {
   parsePasswdHomeShell,
   type PrincipalEnsureSpec,
   principalUnixGroupName,
+  resolveManagedGroups,
   type RunFn,
   type RunResult,
   userSupplementaryGroups,
@@ -81,6 +88,8 @@ const baseSpec: PrincipalEnsureSpec = {
 };
 
 const defaultHome = "/srv/users/appuser";
+/** The passwd home: the tenant's `home/` inside the root-owned home. */
+const loginHome = `${defaultHome}/home`;
 
 test("ensureSystemPrincipals fresh create without ids uses group name and omits -u", async () => {
   const { run, calls } = captureRun({});
@@ -121,7 +130,7 @@ test("ensureSystemPrincipals fresh create without ids uses group name and omits 
     "-g",
     "appuser-grp",
     "-d",
-    defaultHome,
+    loginHome,
     "-M",
     "-s",
     "/bin/bash",
@@ -129,15 +138,28 @@ test("ensureSystemPrincipals fresh create without ids uses group name and omits 
   ]);
   assertEquals(useradd?.args.includes("-u"), false);
 
-  const installHome = calls.find((c) =>
-    c.command === "sudo" &&
-    c.args.includes("install") &&
-    c.args.includes(defaultHome) &&
-    c.args.includes("0750")
+  // The home is root's (the tenant could otherwise rename what root writes
+  // into); the principal owns only home/, data/ and tmp/. Parent before child.
+  const homeInstalls = calls
+    .filter((c) =>
+      c.command === "sudo" && c.args[1] === "install" &&
+      c.args[c.args.length - 1].startsWith(defaultHome)
+    )
+    .map((c) => c.args.slice(4).join(" "));
+  assertEquals(homeInstalls, [
+    `0750 -o root -g appuser-grp ${defaultHome}`,
+    `0700 -o appuser -g appuser-grp ${defaultHome}/home`,
+    `0700 -o appuser -g appuser-grp ${defaultHome}/data`,
+    `0700 -o appuser -g appuser-grp ${defaultHome}/tmp`,
+    `0750 -o root -g appuser-grp ${defaultHome}/sites`,
+    `0750 -o root -g appuser-grp ${defaultHome}/volumes`,
+  ]);
+  // The account is created before its tenant directories are chowned to it.
+  const useraddAt = calls.findIndex((c) => c.args.includes("useradd"));
+  const firstHomeAt = calls.findIndex((c) =>
+    c.args[1] === "install" && c.args.includes(`${defaultHome}/home`)
   );
-  assertEquals(installHome?.args.includes("-o"), true);
-  assertEquals(installHome?.args.includes("appuser"), true);
-  assertEquals(installHome?.args.includes("appuser-grp"), true);
+  assert(useraddAt < firstHomeAt);
 });
 
 test("ensureSystemPrincipals fresh create with explicit uid/gid passes -u and groupadd -g", async () => {
@@ -172,7 +194,7 @@ test("ensureSystemPrincipals fresh create with explicit uid/gid passes -u and gr
     "-g",
     "appuser-grp",
     "-d",
-    defaultHome,
+    loginHome,
     "-M",
     "-s",
     "/bin/bash",
@@ -243,7 +265,8 @@ test("ensureSystemPrincipals adopts matching home and reconciles shell only", as
     getentGroup: { success: true, stdout: "appuser-grp:x:15001:", stderr: "" },
     getentPasswd: {
       success: true,
-      stdout: "appuser:x:15001:15001::/srv/users/appuser:/usr/sbin/nologin",
+      stdout:
+        "appuser:x:15001:15001::/srv/users/appuser/home:/usr/sbin/nologin",
       stderr: "",
     },
   });
@@ -318,7 +341,8 @@ test("ensureSystemPrincipals rejects an adopted user below the current UID/GID f
     getentGroup: { success: true, stdout: "appuser-grp:x:15001:", stderr: "" },
     getentPasswd: {
       success: true,
-      stdout: "appuser:x:10001:15001::/srv/users/appuser:/usr/sbin/nologin",
+      stdout:
+        "appuser:x:10001:15001::/srv/users/appuser/home:/usr/sbin/nologin",
       stderr: "",
     },
   });
@@ -357,7 +381,7 @@ test("ensureSystemPrincipals refuses foreign home without usermod or install", a
         shell: "/bin/bash",
       }], run),
     Error,
-    "refusing to adopt existing account `appuser` — home `/var/www` does not match `/srv/users/appuser`",
+    "refusing to adopt existing account `appuser` — home `/var/www` does not match `/srv/users/appuser/home`",
   );
   assertEquals(
     calls.some((c) => c.command === "sudo" && c.args.includes("usermod")),
@@ -378,7 +402,7 @@ test("ensureSystemPrincipals rejects existing username with mismatched uid overr
     getentGroup: { success: true, stdout: "appuser-grp:x:15001:", stderr: "" },
     getentPasswd: {
       success: true,
-      stdout: "appuser:x:33:33::/srv/users/appuser:/usr/sbin/nologin",
+      stdout: "appuser:x:33:33::/srv/users/appuser/home:/usr/sbin/nologin",
       stderr: "",
     },
   });
@@ -435,7 +459,7 @@ test("ensureSystemPrincipals adopts existing group when gid override matches", a
     "-g",
     "appuser-grp",
     "-d",
-    defaultHome,
+    loginHome,
     "-M",
     "-s",
     "/bin/bash",
@@ -551,7 +575,8 @@ test("ensureSystemPrincipals rejects home with .. segment", async () => {
   );
 });
 
-test("ensureDirectoryOwnedByPrincipal chowns when mkdir succeeds", async () => {
+test("ensureDirectoryOwnedByPrincipal goes through install -d, never mkdir + chown", async () => {
+  // A writable parent: the daemon could mkdir here, and must not.
   const root = await Deno.makeTempDir({ prefix: "tp-principal-dir-" });
   const path = `${root}/owned`;
   const calls: Array<{ command: string; args: string[] }> = [];
@@ -565,44 +590,22 @@ test("ensureDirectoryOwnedByPrincipal chowns when mkdir succeeds", async () => {
         return Promise.resolve({ success: true, stdout: "", stderr: "" });
       },
     );
-    const st = await Deno.stat(path);
-    assertEquals(st.isDirectory, true);
-    assertEquals(
-      calls.some((c) =>
-        c.command === "sudo" && c.args.includes("chown") &&
-        c.args.includes("appuser:appuser-grp")
-      ),
-      true,
-    );
-  } finally {
-    await Deno.remove(root, { recursive: true });
-  }
-});
-
-test("ensureDirectoryOwnedByPrincipal throws when chown fails", async () => {
-  const root = await Deno.makeTempDir({ prefix: "tp-principal-chown-" });
-  const path = `${root}/owned`;
-  try {
-    await assertRejects(
-      () =>
-        ensureDirectoryOwnedByPrincipal(
-          path,
-          "appuser",
-          "appuser-grp",
-          (command, args) => {
-            if (command === "sudo" && args.includes("chown")) {
-              return Promise.resolve({
-                success: false,
-                stdout: "",
-                stderr: "chown denied",
-              });
-            }
-            return Promise.resolve({ success: true, stdout: "", stderr: "" });
-          },
-        ),
-      Error,
-      "chown denied",
-    );
+    assertEquals(calls, [{
+      command: "sudo",
+      args: [
+        "-n",
+        "install",
+        "-d",
+        "-m",
+        "0750",
+        "-o",
+        "appuser",
+        "-g",
+        "appuser-grp",
+        path,
+      ],
+    }]);
+    await assertRejects(() => Deno.stat(path), Deno.errors.NotFound);
   } finally {
     await Deno.remove(root, { recursive: true });
   }
@@ -705,7 +708,7 @@ test("ensureSystemPrincipals fails when existing passwd line is unparsable", asy
     },
     getentPasswd: {
       success: true,
-      stdout: "appuser:x:bad:bad::/srv/users/appuser:/bin/bash",
+      stdout: "appuser:x:bad:bad::/srv/users/appuser/home:/bin/bash",
       stderr: "",
     },
   });
@@ -732,7 +735,7 @@ test("ensureSystemPrincipals fails when usermod -s fails", async () => {
     if (command === "getent" && args[0] === "passwd") {
       return Promise.resolve({
         success: true,
-        stdout: `appuser:x:15001:15001::${defaultHome}:/bin/false`,
+        stdout: `appuser:x:15001:15001::${loginHome}:/bin/false`,
         stderr: "",
       });
     }
@@ -859,6 +862,19 @@ function groupMutations(
     .map((c) => c.args);
 }
 
+test("resolveManagedGroups grants the password group only alongside an SSH level", () => {
+  const base = { username: "appuser" } as PrincipalEnsureSpec;
+  const withGroups = (...accessGroups: string[]) =>
+    resolveManagedGroups({ ...base, accessGroups });
+  const password = accessGroup("password")!;
+  const sftp = accessGroup("sftp")!;
+  const shell = accessGroup("shell")!;
+  assert(!withGroups(password).has(password));
+  assert(withGroups(password, sftp).has(password));
+  assert(withGroups(password, shell).has(password));
+  assert(withGroups(sftp).has(sftp));
+});
+
 test("ensurePrincipalManagedGroups adds only the missing groups", async () => {
   const { run, calls } = runtimeGroupRun(["appuser-grp", "tpphp84"]);
   await ensurePrincipalManagedGroups(
@@ -876,9 +892,10 @@ test("ensurePrincipalManagedGroups revokes a group that is no longer granted", a
   // principal that once deployed a Node app could execute Node forever.
   const { run, calls } = runtimeGroupRun(["appuser-grp", "tpnode24"]);
   await ensurePrincipalManagedGroups("appuser", new Set(["tpphp84"]), run);
+  // Revoke first, then grant.
   assertEquals(groupMutations(calls), [
-    ["-n", "usermod", "-aG", "tpphp84", "appuser"],
     ["-n", "gpasswd", "-d", "appuser", "tpnode24"],
+    ["-n", "usermod", "-aG", "tpphp84", "appuser"],
   ]);
 });
 
@@ -950,7 +967,7 @@ test("ensureSystemPrincipals grants the runtimes its spec carries", async () => 
   const added = calls
     .filter((c) => c.args.includes("usermod") && c.args.includes("-aG"))
     .map((c) => c.args[3]);
-  assertEquals(added.sort(), ["tpnode24", "tpphp84"]);
+  assertEquals(added.sort(), ["tpnode24", "tpphp84", "tpprincipal"]);
 });
 
 test("ensureSystemPrincipals grants the access group its spec carries", async () => {
@@ -970,7 +987,7 @@ test("ensureSystemPrincipals grants the access group its spec carries", async ()
     .filter((c) => c.args.includes("usermod") && c.args.includes("-aG"))
     .map((c) => c.args[3]);
   // Entitlements and access are one reconcile pass, so both land together.
-  assertEquals(added.sort(), ["tpphp84", "tpshell"]);
+  assertEquals(added.sort(), ["tpphp84", "tpprincipal", "tpshell"]);
 });
 
 test("downgrading from shell to files-only revokes the shell group", async () => {
@@ -990,6 +1007,58 @@ test("downgrading from shell to files-only revokes the shell group", async () =>
     .filter((c) => c.args.includes("gpasswd") && c.args.includes("-d"))
     .map((c) => c.args.at(-1));
   assertEquals(removed, ["tpshell"]);
+});
+
+test("switching access level revokes the old group before granting the new one", async () => {
+  // Granting first would leave the account in tpsftp and tpshell at once,
+  // and sshd would match whichever block comes first.
+  const { run, calls } = captureRun({ groups: ["appuser-grp", "tpshell"] });
+  await ensureSystemPrincipals(
+    stubLayout(),
+    [{ principalId: "pr-1", username: "appuser", accessGroups: ["tpsftp"] }],
+    run,
+  );
+  const membership = calls
+    .filter((c) => c.args.includes("gpasswd") || c.args.includes("-aG"))
+    .map((c) => c.args.slice(-2).join(" "));
+  assertEquals(membership, [
+    "appuser tpshell",
+    "tpprincipal appuser",
+    "tpsftp appuser",
+  ]);
+});
+
+test("ensureSystemPrincipals refuses sftp and shell together before any host call", async () => {
+  // One access level per principal: sshd applies the first matching block,
+  // so an account in both would be jailed with no shell.
+  const { run, calls } = captureRun({});
+  await assertRejects(
+    () =>
+      ensureSystemPrincipals(stubLayout(), [
+        { ...baseSpec, accessGroups: ["tpsftp"] },
+        {
+          principalId: "pr-2",
+          username: "otheruser",
+          accessGroups: ["tpshell", "tpsftp"],
+        },
+      ], run),
+    TypeError,
+    "otheruser: SSH access groups tpsftp and tpshell are exclusive",
+  );
+  assertEquals(calls, []);
+});
+
+test("the password group still rides along with one access level", async () => {
+  const { run, calls } = captureRun({});
+  await ensureSystemPrincipals(
+    stubLayout(),
+    [{ ...baseSpec, accessGroups: ["tpshell", "tppasswd"] }],
+    run,
+  );
+  const added = calls
+    .filter((c) => c.args.includes("-aG"))
+    .map((c) => c.args.at(-2));
+  assertEquals(added, ["tppasswd", "tpprincipal", "tpshell"]);
 });
 
 test("a suspended account keeps its groups revoked and nothing else touched", async () => {
@@ -1018,8 +1087,52 @@ test("an access group the registry does not define is dropped, not created", asy
   );
   // Inventing the group would hand out an `sshd` Match block nobody wrote.
   assertEquals(
-    calls.filter((c) => c.args.includes("usermod") && c.args.includes("-aG")),
-    [],
+    calls
+      .filter((c) => c.args.includes("usermod") && c.args.includes("-aG"))
+      .map((c) => c.args[3]),
+    ["tpprincipal"],
+  );
+});
+
+test("every principal joins the every-principal group, even with no SSH level", async () => {
+  // A site owner with no access level matched no sshd block, so a key it put
+  // in its own ~/.ssh/authorized_keys authenticated and TCP forwarding reached
+  // the host's loopback. tpprincipal selects the drop-in's backstop block.
+  const { run, calls } = captureRun({});
+  await ensureSystemPrincipals(
+    stubLayout(),
+    [{ principalId: "pr-1", username: "appuser", accessGroups: [] }],
+    run,
+  );
+  assertEquals(
+    calls
+      .filter((c) => c.args.includes("usermod") && c.args.includes("-aG"))
+      .map((c) => c.args[3]),
+    ["tpprincipal"],
+  );
+});
+
+test("a principal that cannot join the every-principal group fails the reconcile", async () => {
+  // Best-effort is right for a runtime group, wrong here: a silent miss leaves
+  // the account on the host's sshd defaults.
+  const { run: base } = captureRun({});
+  const run: RunFn = (command, args, stdin) =>
+    args.includes("-aG") && args.includes("tpprincipal")
+      ? Promise.resolve({
+        success: false,
+        stdout: "",
+        stderr: "usermod: group 'tpprincipal' does not exist",
+      })
+      : base(command, args, stdin);
+  await assertRejects(
+    () =>
+      ensureSystemPrincipals(
+        stubLayout(),
+        [{ principalId: "pr-1", username: "appuser" }],
+        run,
+      ),
+    Error,
+    "tpprincipal",
   );
 });
 
@@ -1262,8 +1375,10 @@ test("ensureSystemPrincipals drops an unknown runtime instead of failing", async
     runtimes: [{ runtime: "python", series: "3.12" }],
   }], run);
   assertEquals(
-    calls.filter((c) => c.args.includes("usermod") && c.args.includes("-aG")),
-    [],
+    calls
+      .filter((c) => c.args.includes("usermod") && c.args.includes("-aG"))
+      .map((c) => c.args[3]),
+    ["tpprincipal"],
   );
 });
 
@@ -1272,7 +1387,7 @@ test("ensureSystemPrincipals rejects existing username with mismatched gid overr
     getentGroup: { success: true, stdout: "appuser-grp:x:15001:", stderr: "" },
     getentPasswd: {
       success: true,
-      stdout: `appuser:x:15001:33::${defaultHome}:/usr/sbin/nologin`,
+      stdout: `appuser:x:15001:33::${loginHome}:/usr/sbin/nologin`,
       stderr: "",
     },
   });
@@ -1294,7 +1409,7 @@ test("ensureSystemPrincipals skips usermod when the adopted shell already matche
     getentGroup: { success: true, stdout: "appuser-grp:x:15001:", stderr: "" },
     getentPasswd: {
       success: true,
-      stdout: `appuser:x:15001:15001::${defaultHome}:/bin/bash`,
+      stdout: `appuser:x:15001:15001::${loginHome}:/bin/bash`,
       stderr: "",
     },
   });
@@ -1381,7 +1496,7 @@ test("ensureSystemPrincipals uses generic errors when sudo stderr is empty", asy
     if (command === "getent" && args[0] === "passwd") {
       return Promise.resolve({
         success: true,
-        stdout: `appuser:x:15001:15001::${defaultHome}:/bin/false`,
+        stdout: `appuser:x:15001:15001::${loginHome}:/bin/false`,
         stderr: "",
       });
     }
@@ -1503,12 +1618,16 @@ test("ensurePrincipalManagedGroups adds in sorted order and keeps going after a 
         : { success: true, stdout: "", stderr: "" },
     );
   };
-  await ensurePrincipalManagedGroups(
+  const warnings = await ensurePrincipalManagedGroups(
     "appuser",
     new Set(["tpphp84", "tpnode24", "tpnode22"]),
     run,
   );
   assertEquals(calls.map((a) => a.at(-2)), ["tpnode22", "tpnode24", "tpphp84"]);
+  // The failed add is reported, not swallowed (a runtime not installed here).
+  assertEquals(warnings.length, 1);
+  assertStringIncludes(warnings[0], "could not add appuser to tpnode24");
+  assertStringIncludes(warnings[0], "no such group");
 });
 
 test("ensurePrincipalManagedGroups revokes in sorted order and stops at the first failed revoke", async () => {
@@ -1660,35 +1779,6 @@ test("ensurePrincipalPassword uses generic errors when sudo stderr is empty", as
   );
 });
 
-test("ensureDirectoryOwnedByPrincipal uses a generic chown error when stderr is empty", async () => {
-  const root = await Deno.makeTempDir({ prefix: "tp-principal-chown-empty-" });
-  const path = `${root}/owned`;
-  try {
-    await assertRejects(
-      () =>
-        ensureDirectoryOwnedByPrincipal(
-          path,
-          "appuser",
-          "appuser-grp",
-          (command, args) => {
-            if (command === "sudo" && args.includes("chown")) {
-              return Promise.resolve({
-                success: false,
-                stdout: "",
-                stderr: "",
-              });
-            }
-            return Promise.resolve({ success: true, stdout: "", stderr: "" });
-          },
-        ),
-      Error,
-      `Failed to chown ${path}`,
-    );
-  } finally {
-    await Deno.remove(root, { recursive: true });
-  }
-});
-
 test("ensureDirectoryWithOwner default runner pipes stdin and reports output", async () => {
   const original = Deno.Command;
   let wroteStdin = "";
@@ -1748,7 +1838,7 @@ const ADOPTED_USER_CASES: Array<{
   },
   {
     label: "gid override mismatch alone",
-    passwd: "appuser:x:15001:15009::/srv/users/appuser:/usr/sbin/nologin",
+    passwd: "appuser:x:15001:15009::/srv/users/appuser/home:/usr/sbin/nologin",
     spec: { gid: 15001 },
     group: "appuser-grp:x:15001:",
     error:
@@ -1756,7 +1846,7 @@ const ADOPTED_USER_CASES: Array<{
   },
   {
     label: "both overrides mismatched",
-    passwd: "appuser:x:15002:15003::/srv/users/appuser:/usr/sbin/nologin",
+    passwd: "appuser:x:15002:15003::/srv/users/appuser/home:/usr/sbin/nologin",
     spec: { uid: 15001, gid: 15001 },
     group: "appuser-grp:x:15001:",
     error:
@@ -1776,7 +1866,7 @@ const ADOPTED_USER_CASES: Array<{
     spec: {},
     group: "appuser-grp:x:15001:",
     error:
-      "refusing to adopt existing account `appuser` — home `/srv/users/other` does not match `/srv/users/appuser`",
+      "refusing to adopt existing account `appuser` — home `/srv/users/other` does not match `/srv/users/appuser/home`",
   },
 ];
 
@@ -1813,7 +1903,7 @@ test("ensureSystemPrincipals adopts an account below the floor when its uid is a
     getentGroup: { success: true, stdout: "appuser-grp:x:15001:", stderr: "" },
     getentPasswd: {
       success: true,
-      stdout: `appuser:x:15001:15001::${defaultHome}:/bin/bash`,
+      stdout: `appuser:x:15001:15001::${loginHome}:/bin/bash`,
       stderr: "",
     },
   });
@@ -1824,11 +1914,41 @@ test("ensureSystemPrincipals adopts an account below the floor when its uid is a
     home: defaultHome,
     shell: "/bin/bash",
   }], run);
+  // Supplementary-group joins (`usermod -aG`) are membership, not a change to
+  // the adopted account itself.
   assertEquals(
     calls.some((call) =>
       call.command === "sudo" &&
-      (call.args.includes("useradd") || call.args.includes("usermod"))
+      (call.args.includes("useradd") ||
+        (call.args.includes("usermod") && !call.args.includes("-aG")))
     ),
     false,
   );
+});
+
+test("ensureSystemPrincipals fails when useradd lands below the uid floor (Debian 13 behaviour)", async () => {
+  const base = captureRun({}).run;
+  let created = false;
+  const run: RunFn = (command, args, stdin) => {
+    if (command === "sudo" && args.includes("useradd")) created = true;
+    if (command === "getent" && args[0] === "passwd" && created) {
+      return Promise.resolve({
+        success: true,
+        stdout: "appuser:x:10000:15002::/srv/users/appuser/home:/bin/bash",
+        stderr: "",
+      });
+    }
+    return base(command, args, stdin);
+  };
+  const err = await assertRejects(
+    () =>
+      ensureSystemPrincipals(stubLayout(), [{
+        ...baseSpec,
+        home: defaultHome,
+        shell: "/bin/bash",
+      }], run),
+    Error,
+    "uid=10000",
+  );
+  assert(err.message.includes("usermod -u"));
 });

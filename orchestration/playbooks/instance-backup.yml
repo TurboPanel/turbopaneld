@@ -50,6 +50,19 @@
           chmod 0600 "$dest"
         executable: /bin/bash
 
+    - name: Keep the installed instance unit for a rollback
+      # The update re-renders the unit after this backup; a rollback puts the
+      # old bytes back so the old binary never runs under a newer sandbox.
+      # Never fatal: the unit is a convenience copy, not the database.
+      ansible.builtin.copy:
+        src: /etc/systemd/system/turbopanel-instance.service
+        dest: "{{ control_plane_backup_dir }}/turbopanel-instance.service"
+        remote_src: true
+        owner: root
+        group: "{{ turbopanel_group }}"
+        mode: "0640"
+      failed_when: false
+
     - name: Archive /etc/turbopanel
       ansible.builtin.shell:
         cmd: |

@@ -584,3 +584,35 @@ test("readTimeSync without io writes the process-wide last observation", () => {
     setLastObservedTimeSyncForTests(undefined);
   }
 });
+
+test("readTimeSync prefers the /etc/localtime link over a stale timedatectl show", () => {
+  const result = readTimeSync({
+    spawnText: (_cmd, args) =>
+      args[0] === "show"
+        ? "Timezone=America/Chicago\nNTP=yes\nNTPSynchronized=yes\n"
+        : undefined,
+    readTextFile: () => undefined,
+    readLink: () => "../usr/share/zoneinfo/Europe/Berlin",
+    synchronizedFileMtime: () => undefined,
+  });
+  assertEquals(result.timezone, "Europe/Berlin");
+});
+
+test("readTimeSync falls back to timedatectl when /etc/localtime is not a zoneinfo link", () => {
+  const io = {
+    spawnText: (_cmd: string, args: string[]) =>
+      args[0] === "show"
+        ? "Timezone=UTC\nNTP=yes\nNTPSynchronized=yes\n"
+        : undefined,
+    readTextFile: () => undefined,
+    synchronizedFileMtime: () => undefined,
+  };
+  assertEquals(
+    readTimeSync({ ...io, readLink: () => "/etc/other" }).timezone,
+    "UTC",
+  );
+  assertEquals(
+    readTimeSync({ ...io, readLink: () => undefined }).timezone,
+    "UTC",
+  );
+});

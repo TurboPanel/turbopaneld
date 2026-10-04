@@ -301,6 +301,31 @@ test("the daemon's staging directory is refused", () =>
     assert(msg.includes("staging directory"), msg);
   }));
 
+test("the retained previous deployment is refused, read-only included", () =>
+  withFixture(async (f) => {
+    await Deno.mkdir(join(f.dir, "previous"));
+    for (const readOnly of [false, true]) {
+      const msg = await refusal(f, [
+        binds({
+          type: "bind",
+          source: join(f.stage, "previous"),
+          target: "/x",
+          read_only: readOnly,
+        }),
+      ]);
+      assert(msg.includes("retained previous deployment"), msg);
+    }
+    // A sibling whose name merely starts with `previous` is fine.
+    await Deno.mkdir(join(f.dir, "previous-data"));
+    await allowed(f, [
+      binds({
+        type: "bind",
+        source: join(f.stage, "previous-data"),
+        target: "/x",
+      }),
+    ]);
+  }));
+
 test("an env_file symlinked to a daemon file is refused", () =>
   withFixture(async (f) => {
     await Deno.mkdir(join(f.dir, "data"));
@@ -417,6 +442,53 @@ test("build contexts, Dockerfiles, additional contexts and SSH keys are checked"
     assert(msg.includes("build context `root`"), msg);
     assert(msg.includes("build SSH key"), msg);
     assert(!msg.includes("`img`") && !msg.includes("`git`"), msg);
+  }));
+
+test("build paths outside the deployment dir are refused even with host-level approval", () =>
+  withFixture(async (f) => {
+    const resolved = collectResolvedHostPaths({
+      services: {
+        web: {
+          build: {
+            context: f.outside,
+            dockerfile: "/etc/Dockerfile",
+            additional_contexts: {
+              up: join(f.stage, "..", "..", "other"),
+              oci: `oci-layout://${f.outside}/oci`,
+            },
+          },
+        },
+      },
+    });
+    const authored = collectAuthoredHostPaths(
+      "services:\n  web:\n    build:\n      context: .\n      ssh: [key=/root/.ssh/id_rsa]\n",
+    );
+    const msg = await refusal(f, [resolved, authored], {
+      hostLevelApproved: true,
+    });
+    for (
+      const what of [
+        "service web build context `",
+        "service web Dockerfile",
+        "build context `up`",
+        "build context `oci`",
+        "build SSH key",
+      ]
+    ) {
+      assert(msg.includes(what), `${what} not refused: ${msg}`);
+    }
+    assert(msg.includes("build_context_outside_project"), msg);
+    assert(!msg.includes("organization owner's opt-in"), msg);
+  }));
+
+test("a build context inside the deployment dir is still allowed", () =>
+  withFixture(async (f) => {
+    await Deno.mkdir(join(f.dir, "app"));
+    await allowed(f, [
+      collectResolvedHostPaths({
+        services: { web: { build: { context: join(f.stage, "app") } } },
+      }),
+    ]);
   }));
 
 test("an npipe mount is refused", () =>

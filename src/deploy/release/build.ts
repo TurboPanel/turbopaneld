@@ -1,22 +1,21 @@
 /**
- * Run a release's install / build commands inside the ephemeral checkout.
+ * Run a release's install / build commands.
  *
- * **Sandboxed build, containerless runtime.** This is not container isolation
- * and does not claim to be. What it does guarantee:
+ * On a managed host they run in the **build sandbox** (`./build-sandbox.ts`):
+ * as the unprivileged build account, in a transient systemd unit tp-host
+ * fixes (no Docker, no daemon state or secrets, no private-range or metadata
+ * egress, memory / CPU / task / time caps), over the work tree the daemon
+ * cloned into and gets back only once the unit is gone. Anyone who can deploy
+ * may define these commands, so nothing about them is trusted.
  *
- * - the command runs in the scratch checkout, never in the live release tree
- *   or the principal home;
- * - `clearEnv` plus an explicit allow-list means no daemon credential material
- *   (no `GIT_ASKPASS`, no decrypted envelope, no daemon token) is inherited —
- *   only `EnvironmentDeploySourceBuild.env`, which is non-secret by contract;
- * - an rlimit wrapper caps CPU time, address space, and file size where the
- *   host provides `prlimit`, degrading to an unwrapped run (with a transcript
- *   note) where it does not;
- * - output is streamed line-by-line so it reaches the transcript under the
- *   `build` phase while the build is still running, not after it finishes.
+ * A development install runs them as the developer in the checkout, with `clearEnv` plus an explicit
+ * allow-list so no daemon credential material is inherited.
+ *
+ * Either way output is streamed line-by-line so it reaches the transcript
+ * under the `build` phase while the build is still running.
  */
 
-import { join } from "@std/path";
+import { isAbsolute, join, relative } from "@std/path";
 import { pumpLines } from "../../logs/line-stream.ts";
 import type { CommandSummaryRedactor } from "../../logs/contracts.ts";
 import { redactCommandSummary } from "../../logs/redactor.ts";
@@ -26,27 +25,24 @@ import type {
 } from "../../contracts/commands-contracts.ts";
 import type { ReleaseOutputHandler } from "./checkout.ts";
 import { normalizeNodePackageManagerCommand } from "../node-package-manager.ts";
-import { copyTree } from "./promote.ts";
+import {
+  type ContainedPath,
+  copyContainedTree,
+  inspectContainedDir,
+} from "./safe-copy.ts";
 import { forEachSequential } from "../../util/sequential.ts";
+import { definedFields } from "../../util/optional-fields.ts";
+import type { RunFn } from "../ensure-principal.ts";
+import {
+  type BuildWork,
+  isSpecEnvName,
+  renderBuildSpec,
+  runSandboxedBuild,
+} from "./build-sandbox.ts";
 
 /** Build ceiling. Long enough for a cold dependency install, not unbounded. */
 export const BUILD_TIMEOUT_MS = 1_800_000;
 
-/** `prlimit` caps applied when the host has the binary. */
-const BUILD_RLIMIT_CPU_SECONDS = 1_800;
-/**
- * Virtual address-space cap. Must be **well above** 4 GiB per V8 isolate:
- * pointer compression reserves a 4 GiB CodeRange, and Corepack/pnpm spawn
- * worker threads that each need their own. 4 GiB dies at isolate init
- * (`Failed to reserve virtual memory for CodeRange`); 16 GiB lets Node
- * start but pnpm's fetch workers fail with `GET … error (unknown)` /
- * `ERR_PNPM_META_FETCH_FAIL`. 32 GiB is enough for a one-package install;
- * 64 GiB leaves room for a Next.js install + `next build`. This is virtual
- * size, not RSS.
- */
-export const BUILD_RLIMIT_AS_BYTES = 64 * 1024 * 1024 * 1024;
-const BUILD_RLIMIT_FSIZE_BYTES = 4 * 1024 * 1024 * 1024;
-const PRLIMIT_BIN = "/usr/bin/prlimit";
 /**
  * Refresh supplementary groups (`tpnodeNN`) without a login shell. `sg` execs
  * the passwd shell and dies on `/usr/sbin/nologin` with "This account is
@@ -72,7 +68,31 @@ const RESERVED_BUILD_ENV_KEYS = new Set([
   "LD_LIBRARY_PATH",
   "PATH",
   "HOME",
+  // Shell start-up files and options: `sh -c` reads `ENV` / `BASH_ENV`, and
+  // `SHELLOPTS` / `BASHOPTS` / `PS4` / `PROMPT_COMMAND` run code or reshape it.
+  "ENV",
+  "BASH_ENV",
+  "SHELLOPTS",
+  "BASHOPTS",
+  "PS4",
+  "PROMPT_COMMAND",
+  "IFS",
+  // libc and git lookups that load code from a tenant-chosen path.
+  "GCONV_PATH",
+  "GLIBC_TUNABLES",
+  "LOCPATH",
+  "NLSPATH",
+  "HOSTALIASES",
+  "GIT_EXEC_PATH",
+  "GIT_CONFIG_GLOBAL",
+  "GIT_CONFIG_SYSTEM",
+  "GIT_CONFIG_COUNT",
 ]);
+
+/** `LD_*` is the dynamic loader's namespace (`LD_AUDIT`, `LD_DEBUG_OUTPUT`, …). */
+function isReservedBuildEnvKey(key: string): boolean {
+  return RESERVED_BUILD_ENV_KEYS.has(key) || key.startsWith("LD_");
+}
 
 const defaultSummaryRedactor: CommandSummaryRedactor = (text) =>
   redactCommandSummary(text);
@@ -112,24 +132,32 @@ export type ReleaseBuildParams = {
   onOutput?: ReleaseOutputHandler;
   redactSummary?: CommandSummaryRedactor;
   /**
-   * Test seam for prlimit detection. Defaults to checking {@link PRLIMIT_BIN}.
-   * Host-free suites force `false` so the no-caps path is covered without
-   * depending on whether `/usr/bin/prlimit` exists in the guest.
+   * Run in the build sandbox (a managed host). `workingDir` must then be the
+   * spec's `cwd` inside `sandbox.work.workDir`.
    */
-  hasPrlimit?: () => Promise<boolean>;
+  sandbox?: SandboxBuildTarget;
   /**
-   * Test seam for the build command runner. Defaults to spawning `sh` /
-   * `prlimit`. Injected runners receive the same `(command, cwd, env,
-   * withPrlimit, …)` shape so they can assert the fallback without forking.
+   * Test seam for the unsandboxed (development) command runner. Defaults to
+   * spawning `sh -c` (or the `sudo -n -u <self>` group refresh).
    */
   runCommand?: (
     command: string,
     cwd: string,
     env: Record<string, string>,
-    withPrlimit: boolean,
     onOutput?: ReleaseOutputHandler,
     redactSummary?: CommandSummaryRedactor,
   ) => Promise<void>;
+};
+
+/** Where and how a sandboxed build runs. */
+export type SandboxBuildTarget = {
+  work: BuildWork;
+  /** The build directory relative to `work.workDir` (`source[/subdir]`). */
+  cwd: string;
+  /** Privileged runner for `build-return` / `systemctl stop`. */
+  runFn?: RunFn;
+  /** Test seam — defaults to {@link runSandboxedBuild}. */
+  run?: typeof runSandboxedBuild;
 };
 
 /**
@@ -160,69 +188,89 @@ export function buildEnvironment(
     env.COREPACK_HOME = join(workingDir, ".corepack");
     env.COREPACK_ENABLE_DOWNLOAD_PROMPT = "0";
   }
-  for (const [key, value] of Object.entries(build.env ?? {})) {
-    if (RESERVED_BUILD_ENV_KEYS.has(key)) continue;
-    env[key] = value;
+  // A name no shell can carry also cannot ride an `env NAME=value` argv.
+  const tenant = Object.fromEntries(
+    Object.entries(tenantBuildEnv(build)).filter(([key]) => isSpecEnvName(key)),
+  );
+  return { ...env, ...tenant };
+}
+
+/** The tenant's own `build.env`, minus the keys that are the sandbox. */
+function tenantBuildEnv(
+  build: EnvironmentDeploySourceBuild,
+): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(build.env ?? {}).filter(([key]) =>
+      !isReservedBuildEnvKey(key)
+    ),
+  );
+}
+
+/**
+ * Environment for a sandboxed build, on top of the runner's own `HOME` (the
+ * work tree), `PATH=/usr/local/bin:/usr/bin:/bin` and private `TMPDIR`.
+ * Package-manager caches live in the project's bound cache directory, never in
+ * the checkout (which a release may ship as-is). A tenant variable whose name
+ * no shell can carry is dropped with a transcript line.
+ */
+export function sandboxBuildEnvironment(
+  build: EnvironmentDeploySourceBuild,
+  work: BuildWork,
+  nativeRuntime?: NativeBuildRuntime,
+  onOutput?: ReleaseOutputHandler,
+): Record<string, string> {
+  const env: Record<string, string> = {
+    CI: "1",
+    NODE_ENV: nativeRuntime?.nodeEnv ?? "production",
+    XDG_CACHE_HOME: join(work.cacheDir, "xdg"),
+    npm_config_cache: join(work.cacheDir, "npm"),
+  };
+  if (nativeRuntime) {
+    env.PATH = `${nativeRuntime.nodeBinDir}:${NATIVE_BUILD_PATH_TAIL}`;
+    env.COREPACK_HOME = join(work.cacheDir, "corepack");
+    env.COREPACK_ENABLE_DOWNLOAD_PROMPT = "0";
+  }
+  for (const [key, value] of Object.entries(tenantBuildEnv(build))) {
+    if (isSpecEnvName(key)) {
+      env[key] = value;
+    } else {
+      onOutput?.("stderr", `skipping build variable ${key}: not a shell name`);
+    }
   }
   return env;
 }
 
-async function prlimitAvailable(): Promise<boolean> {
-  try {
-    const stat = await Deno.stat(PRLIMIT_BIN);
-    return stat.isFile;
-  } catch {
-    return false;
-  }
-}
-
 /**
- * `prlimit --cpu=… --as=… --fsize=… -- sh -c <command>`, or a bare `sh -c`.
- * Native-app builds wrap with `sudo -n -u <self> -- env … sh -c` so
- * `initgroups()` picks up `tpnodeNN` without exec'ing the passwd shell.
- * Exported so host-free suites can assert the argv shape without spawning.
+ * A bare `sh -c` (development builds). Native-app builds wrap with
+ * `sudo -n -u <self> -- env … sh -c` so `initgroups()` picks up `tpnodeNN`
+ * without exec'ing the passwd shell. Exported so host-free suites can assert
+ * the argv shape without spawning.
  */
 export function buildInvocation(
   command: string,
-  withPrlimit: boolean,
   runtimeGroup?: string,
   identity?: BuildInvocationIdentity,
 ): { bin: string; args: string[] } {
-  let runner: { bin: string; args: string[] };
-  if (!runtimeGroup) {
-    runner = { bin: "sh", args: ["-c", command] };
-  } else if (!identity) {
+  if (!runtimeGroup) return { bin: "sh", args: ["-c", command] };
+  if (!identity) {
     throw new TypeError(
       "native build group refresh requires the daemon username",
     );
-  } else {
-    runner = {
-      bin: SUDO_BIN,
-      args: [
-        "-n",
-        "-u",
-        identity.username,
-        "--",
-        ENV_BIN,
-        ...Object.entries(identity.env).map(([key, value]) =>
-          `${key}=${value}`
-        ),
-        "sh",
-        "-c",
-        command,
-      ],
-    };
   }
-  if (!withPrlimit) return runner;
   return {
-    bin: PRLIMIT_BIN,
+    bin: SUDO_BIN,
     args: [
-      `--cpu=${BUILD_RLIMIT_CPU_SECONDS}`,
-      `--as=${BUILD_RLIMIT_AS_BYTES}`,
-      `--fsize=${BUILD_RLIMIT_FSIZE_BYTES}`,
+      "-n",
+      "-u",
+      identity.username,
       "--",
-      runner.bin,
-      ...runner.args,
+      ENV_BIN,
+      // Without `--`, a name that starts with `-` would be read as an option.
+      "--",
+      ...Object.entries(identity.env).map(([key, value]) => `${key}=${value}`),
+      "sh",
+      "-c",
+      command,
     ],
   };
 }
@@ -245,23 +293,18 @@ async function currentUsername(): Promise<string> {
 
 async function resolveBuildInvocation(
   command: string,
-  withPrlimit: boolean,
   env: Record<string, string>,
   runtimeGroup?: string,
 ): Promise<{ bin: string; args: string[] }> {
-  if (!runtimeGroup) return buildInvocation(command, withPrlimit);
+  if (!runtimeGroup) return buildInvocation(command);
   const username = await currentUsername();
-  return buildInvocation(command, withPrlimit, runtimeGroup, {
-    username,
-    env,
-  });
+  return buildInvocation(command, runtimeGroup, { username, env });
 }
 
 async function runBuildCommand(
   command: string,
   cwd: string,
   env: Record<string, string>,
-  withPrlimit: boolean,
   onOutput?: ReleaseOutputHandler,
   redactSummary: CommandSummaryRedactor = defaultSummaryRedactor,
   runtimeGroup?: string,
@@ -270,7 +313,6 @@ async function runBuildCommand(
   const timeout = setTimeout(() => controller.abort(), BUILD_TIMEOUT_MS);
   const { bin, args } = await resolveBuildInvocation(
     command,
-    withPrlimit,
     env,
     runtimeGroup,
   );
@@ -320,6 +362,9 @@ async function runBuildCommand(
  */
 async function yarnIsBerry(workingDir: string): Promise<boolean> {
   try {
+    if (!(await regularFileExists(join(workingDir, "package.json")))) {
+      return await regularFileExists(join(workingDir, ".yarnrc.yml"));
+    }
     const raw = await Deno.readTextFile(join(workingDir, "package.json"));
     const pin = JSON.parse(raw)?.packageManager;
     const match = typeof pin === "string" ? /^yarn@(\d+)/.exec(pin) : null;
@@ -327,7 +372,45 @@ async function yarnIsBerry(workingDir: string): Promise<boolean> {
   } catch {
     // Unreadable/unparseable package.json — fall through to the file probe.
   }
-  return await fileExists(join(workingDir, ".yarnrc.yml"));
+  return await regularFileExists(join(workingDir, ".yarnrc.yml"));
+}
+
+type NodeManagerName = "pnpm" | "yarn" | "npm";
+
+/** The manager and major version `package.json`'s `packageManager` pins. */
+async function readPackageManagerPin(
+  workingDir: string,
+): Promise<{ name: NodeManagerName; major: number } | undefined> {
+  try {
+    const raw = await Deno.readTextFile(join(workingDir, "package.json"));
+    const pin = JSON.parse(raw)?.packageManager;
+    const match = typeof pin === "string"
+      ? /^(pnpm|yarn|npm)@(\d+)/.exec(pin)
+      : null;
+    if (!match) return undefined;
+    return {
+      name: match[1] as NodeManagerName,
+      major: Number(match[2]),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The flag that keeps `devDependencies` in a pnpm install under the build's
+ * `NODE_ENV=production`, per pnpm major (checked against the real binaries):
+ *
+ * - pnpm 9 drops dev dependencies under `NODE_ENV=production` and takes
+ *   `--prod=false` to keep them.
+ * - pnpm 10, 11 and 12 install them anyway, and pnpm 12 rejects
+ *   `--prod=false` outright (`--prod` became a plain boolean flag), so no flag.
+ * - With no pin the version Corepack resolves is unknown, so use
+ *   `--config.production=false`, a setting override every pnpm 9-12 accepts.
+ */
+function pnpmDevDepsArgs(major: number | undefined): string[] {
+  if (major === undefined) return ["--config.production=false"];
+  return major < 10 ? ["--prod=false"] : [];
 }
 
 /**
@@ -335,8 +418,8 @@ async function yarnIsBerry(workingDir: string): Promise<boolean> {
  * package-manager choice, falling back to lockfile detection
  * (`pnpm-lock.yaml` > `yarn.lock` > `package-lock.json` > bare npm).
  *
- * The dev-deps flags (`--include=dev`, `--prod=false`, `--production=false`)
- * are load-bearing: the build environment sets `NODE_ENV=production`, under
+ * The dev-deps flags (`--include=dev`, `--production=false`, and for pnpm
+ * whatever `pnpmDevDepsArgs` picks for the pinned major) are load-bearing: the build environment sets `NODE_ENV=production`, under
  * which npm, pnpm, and classic yarn silently omit devDependencies — which is
  * where every build toolchain lives.
  *
@@ -346,20 +429,26 @@ export async function deriveNodeInstallCommand(params: {
   packageManager?: EnvironmentDeploySourceBuild["packageManager"];
   workingDir: string;
 }): Promise<string | undefined> {
-  const has = (name: string) => fileExists(join(params.workingDir, name));
+  // Regular files only: the checkout is tenant content, and a link named
+  // package.json must not make the daemon read whatever it points at.
+  const has = (name: string) =>
+    regularFileExists(join(params.workingDir, name));
   if (!(await has("package.json"))) return undefined;
 
   const hasPnpmLock = await has("pnpm-lock.yaml");
   const hasYarnLock = await has("yarn.lock");
-  let lockfileManager: "pnpm" | "yarn" | "npm" = "npm";
+  let lockfileManager: NodeManagerName = "npm";
   if (hasPnpmLock) lockfileManager = "pnpm";
   else if (hasYarnLock) lockfileManager = "yarn";
-  const manager = params.packageManager ?? lockfileManager;
+  const pin = await readPackageManagerPin(params.workingDir);
+  const manager = params.packageManager ?? pin?.name ?? lockfileManager;
 
   if (manager === "pnpm") {
-    return hasPnpmLock
-      ? "corepack pnpm install --frozen-lockfile --prod=false"
-      : "corepack pnpm install --prod=false";
+    return [
+      "corepack pnpm install",
+      ...(hasPnpmLock ? ["--frozen-lockfile"] : []),
+      ...pnpmDevDepsArgs(pin?.name === "pnpm" ? pin.major : undefined),
+    ].join(" ");
   }
   if (manager === "yarn") {
     // CI=1 already makes Berry installs immutable when a lockfile exists.
@@ -426,12 +515,9 @@ export async function runReleaseBuild(
     return;
   }
 
-  const withPrlimit = await (params.hasPrlimit ?? prlimitAvailable)();
-  if (!withPrlimit) {
-    params.onOutput?.(
-      "stderr",
-      "prlimit unavailable — running build without resource caps",
-    );
+  if (params.sandbox) {
+    await runSandboxedCommands(params, params.sandbox, commands);
+    return;
   }
   const env = buildEnvironment(
     params.build,
@@ -439,19 +525,11 @@ export async function runReleaseBuild(
     params.nativeRuntime,
   );
   const execute = params.runCommand ??
-    ((
-      command,
-      cwd,
-      commandEnv,
-      commandWithPrlimit,
-      commandOnOutput,
-      commandRedactSummary,
-    ) =>
+    ((command, cwd, commandEnv, commandOnOutput, commandRedactSummary) =>
       runBuildCommand(
         command,
         cwd,
         commandEnv,
-        commandWithPrlimit,
         commandOnOutput,
         commandRedactSummary,
         params.nativeRuntime?.runtimeGroup,
@@ -463,11 +541,39 @@ export async function runReleaseBuild(
       command,
       params.workingDir,
       env,
-      withPrlimit,
       params.onOutput,
       params.redactSummary,
     );
   });
+}
+
+/**
+ * One spec, one unit: the runner runs the commands in order and stops at the
+ * first failure, exactly like the unsandboxed loop.
+ */
+async function runSandboxedCommands(
+  params: ReleaseBuildParams,
+  sandbox: SandboxBuildTarget,
+  commands: string[],
+): Promise<void> {
+  const env = sandboxBuildEnvironment(
+    params.build,
+    sandbox.work,
+    params.nativeRuntime,
+    params.onOutput,
+  );
+  for (const command of commands) params.onOutput?.("stdout", `$ ${command}`);
+  params.onOutput?.(
+    "stdout",
+    `running ${commands.length} command(s) as the build account in turbopanel-build-${sandbox.work.buildId}.service`,
+  );
+  await (sandbox.run ?? runSandboxedBuild)(definedFields({
+    work: sandbox.work,
+    spec: renderBuildSpec({ cwd: sandbox.cwd, env, commands }),
+    onOutput: params.onOutput,
+    redactSummary: params.redactSummary,
+    runFn: sandbox.runFn,
+  }));
 }
 
 /**
@@ -493,19 +599,38 @@ const NEXT_PUBLIC_DIR = "public";
  */
 export const NEXT_EXPORT_DIR = "out";
 
-async function directoryExists(path: string): Promise<boolean> {
-  try {
-    const stat = await Deno.stat(path);
-    return stat.isDirectory;
-  } catch {
-    return false;
-  }
+/**
+ * Whether `relative` is a real directory of the build tree. A symlink on the
+ * way is refused outright (`./safe-copy.ts`): the build controls these names,
+ * and following one would let it pick what the daemon reads or writes.
+ */
+async function buildDirExists(
+  tree: BuildTree,
+  relative: string,
+): Promise<boolean> {
+  return await inspectContainedDir(tree.at(relative)) === "directory";
 }
 
-async function fileExists(path: string): Promise<boolean> {
+/**
+ * The build directory as seen from its containment root: `work/<id>` for a
+ * sandboxed build (everything under it, the checkout included, was the
+ * build's to rename), else the build directory itself.
+ */
+type BuildTree = { at: (relative: string) => ContainedPath };
+
+function buildTree(workingDir: string, containmentRoot?: string): BuildTree {
+  const root = containmentRoot ?? workingDir;
+  const prefix = relative(root, workingDir);
+  if (prefix.startsWith("..") || isAbsolute(prefix)) {
+    throw new Error(`build directory ${workingDir} is outside ${root}`);
+  }
+  return { at: (path) => ({ root, relative: join(prefix, path) }) };
+}
+
+/** A regular file, not a link to one. */
+async function regularFileExists(path: string): Promise<boolean> {
   try {
-    const stat = await Deno.stat(path);
-    return stat.isFile;
+    return (await Deno.lstat(path)).isFile;
   } catch {
     return false;
   }
@@ -520,10 +645,14 @@ async function fileExists(path: string): Promise<boolean> {
  * emitted `.next/standalone` is a server build and is never considered here —
  * the caller checks standalone first.
  */
-async function hasNextStaticExport(workingDir: string): Promise<boolean> {
-  const exportDir = join(workingDir, NEXT_EXPORT_DIR);
-  if (!(await directoryExists(exportDir))) return false;
-  return await fileExists(join(exportDir, "index.html"));
+async function hasNextStaticExport(
+  workingDir: string,
+  tree: BuildTree,
+): Promise<boolean> {
+  if (!(await buildDirExists(tree, NEXT_EXPORT_DIR))) return false;
+  return await regularFileExists(
+    join(workingDir, NEXT_EXPORT_DIR, "index.html"),
+  );
 }
 
 export type NativeAppBuildContext = {
@@ -531,6 +660,11 @@ export type NativeAppBuildContext = {
   framework: EnvironmentDeployNativeAppService["framework"];
   /** Working directory the build ran in (checkout root + `subdirectory`). */
   workingDir: string;
+  /**
+   * The sandboxed build's `work/<id>`: every path is checked from here down,
+   * so a build that swapped its checkout for a link is refused.
+   */
+  containmentRoot?: string;
   onOutput?: ReleaseOutputHandler;
 };
 
@@ -577,9 +711,9 @@ export async function prepareNativeAppBuildOutput(
     return { standaloneOutput: false, staticExport: false };
   }
 
-  const standaloneDir = join(context.workingDir, NEXT_STANDALONE_DIR);
-  if (!(await directoryExists(standaloneDir))) {
-    if (await hasNextStaticExport(context.workingDir)) {
+  const tree = buildTree(context.workingDir, context.containmentRoot);
+  if (!(await buildDirExists(tree, NEXT_STANDALONE_DIR))) {
+    if (await hasNextStaticExport(context.workingDir, tree)) {
       context.onOutput?.(
         "stdout",
         "detected a statically exported Next.js build — publishing out/ as the release and serving it on the site static lane (no app process is started)",
@@ -603,9 +737,10 @@ export async function prepareNativeAppBuildOutput(
     [NEXT_STATIC_DIR, join(NEXT_STANDALONE_DIR, NEXT_STATIC_DIR)],
     [NEXT_PUBLIC_DIR, join(NEXT_STANDALONE_DIR, NEXT_PUBLIC_DIR)],
   ], async ([from, to]) => {
-    const source = join(context.workingDir, from);
-    if (!(await directoryExists(source))) return;
-    await copyTree(source, join(context.workingDir, to));
+    if (!(await buildDirExists(tree, from))) return;
+    // Destination components are created or checked one at a time, so a
+    // planted `.next/standalone/.next -> elsewhere` is refused, not followed.
+    await copyContainedTree({ source: tree.at(from), dest: tree.at(to) });
   });
 
   context.onOutput?.(

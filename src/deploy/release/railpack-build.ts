@@ -9,38 +9,43 @@
  * downstream step (Traefik labels, hosting Caddy, storage mounts, `compose ps`
  * reporting) goes on treating the service as the plain container it is.
  *
- * Two vendored tools do the work, both installed **on demand** the same way
+ * Two vendored artifacts do the work, both installed **on demand** the same way
  * Docker and hosting Caddy are (`ensure-docker.ts`, `ensure-hosting-caddy.ts`):
  *
  * - `railpack` reads the checkout and emits a build **plan** (`railpack
  *   prepare`). Zero-config detection is the point of it — `installCommand` /
  *   `buildCommand` from the payload ride along as `RAILPACK_*_CMD` overrides,
  *   which Railpack may or may not honor depending on what it detected.
- * - `buildctl` hands that plan to the pinned Railpack BuildKit **gateway
- *   frontend** and builds it against a local `buildkitd`.
+ * - The pinned Railpack BuildKit **gateway frontend** turns that plan into an
+ *   image. It runs on the **Docker Engine's own BuildKit**, driven by `docker
+ *   buildx build` with `BUILDKIT_SYNTAX` — the invocation upstream documents for
+ *   platforms — through the same `docker` CLI path (and sudo ladder) every other
+ *   lane uses (`docker-cli.ts`).
  *
- * The frontend is a **third vendored artifact**, not a registry reference. It is
- * installed as a local OCI image layout under
- * `<runtimesDir>/railpack-frontend/<version>/image` (with a `current` symlink,
- * exactly like the two binaries) and addressed by the layout's own manifest
- * digest — `--oci-layout name=<dir> --opt source=oci-layout://name@sha256:…`.
- * Naming `ghcr.io/railwayapp/railpack-frontend:<tag>` at build time would put
- * live registry egress on the deploy path and leave build output at the mercy
- * of a mutable upstream tag, so two releases recorded with the same
- * `railpackFrontendVersion` could disagree about what actually built them.
+ * **Why not a private `buildkitd`.** The daemon runs as `tp`, and a non-root
+ * `buildkitd` insists on rootless mode (rootlesskit plus newuidmap/newgidmap and
+ * subuid/subgid ranges for `tp`), which managed hosts do not have and should not
+ * grow; it died with "rootless mode requires to be executed as the mapped root
+ * in a user namespace". A root `buildkitd` would be a second privileged build
+ * API beside Docker that the Docker gate cannot observe. The Engine's builder is
+ * already there for compose builds, its `/session` and `/grpc` upgrades already
+ * pass through the gate, and `--load` puts the result straight into the image
+ * store with no tarball handoff.
  *
- * **Output handoff.** The build writes a `type=docker` tarball to the scratch
- * dir and `docker load`s it into the local image store, rather than sharing a
- * containerd/moby store with the Docker daemon. The vendored BuildKit runs as
- * its own `buildkitd` on a private socket and is not wired into Docker's
- * storage, so a tarball is the one handoff that works on every host we install
- * on — at the cost of one extra copy of the image through the filesystem.
+ * The frontend is **pinned by digest**. `buildkit-setup` vendors it (a local OCI
+ * layout under `<runtimesDir>/railpack-frontend/<version>/image` plus its
+ * manifest digest) and pulls the same image into Docker's store; the build names
+ * `ghcr.io/railwayapp/railpack-frontend:<tag>@<digest>`, so a mutable upstream tag
+ * can never change what built a release, and two releases recorded with the same
+ * `railpackFrontendVersion` always used the same frontend bytes. If the image
+ * was pruned from the store, the Engine fetches exactly that digest again.
  *
- * **Cache isolation is per project, not per host.** `--import-cache` /
- * `--export-cache` point at `<daemonStateDir>/release-build/buildkit-cache/
- * <projectId>/`, so one tenant's build can never warm from another tenant's
- * layers. Sharing a single cache root would leak both timing and content across
- * projects on a shared host.
+ * **Tenant isolation is the `cache-key`.** The Engine's build cache is per host
+ * (as it is for compose builds, and as the old private `buildkitd` was), so the
+ * lever that matters is Railpack's mount caches (`node_modules`, package
+ * managers): those are writable and shared by id. `cache-key=<projectId>`
+ * prefixes every mount cache id, so one tenant's build can never read or poison
+ * another's.
  *
  * The build itself inherits **no** daemon environment: `clearEnv` plus an
  * explicit allow-list, exactly as `build.ts` documents, so no `GIT_ASKPASS`, no
@@ -49,6 +54,11 @@
 
 import { join } from "@std/path";
 import { pumpLines } from "../../logs/line-stream.ts";
+import {
+  type DockerCliResult,
+  runDockerStreamed,
+  type RunDockerStreamedFn,
+} from "../docker-cli.ts";
 import type { CommandSummaryRedactor } from "../../logs/contracts.ts";
 import { redactCommandSummary } from "../../logs/redactor.ts";
 import { logInfo, logWarn } from "../../util/logger.ts";
@@ -57,10 +67,7 @@ import { createSymlink } from "../../permissions/scoped-writes.ts";
 import type { LayoutPaths } from "../../paths/layout.ts";
 import type { EnvironmentDeploySourceBuild } from "../../contracts/commands-contracts.ts";
 import type { ReleaseOutputHandler } from "./checkout.ts";
-import { forEachSequential } from "../../util/sequential.ts";
 
-/** Keep in step with orchestration/roles/buildkit/defaults/main.yml. */
-export const BUILDKIT_VERSION = "0.27.0";
 /** Keep in step with orchestration/roles/buildkit/defaults/main.yml. */
 export const RAILPACK_VERSION = "0.9.0";
 /**
@@ -81,10 +88,11 @@ export const RAILPACK_FRONTEND_IMAGE = "ghcr.io/railwayapp/railpack-frontend";
  */
 export const RAILPACK_FRONTEND_VERSION = RAILPACK_VERSION;
 /**
- * `buildctl --oci-layout <name>=<dir>` mount name for the vendored frontend.
- * Purely local to one `buildctl` invocation; it never leaves the build.
+ * Registry tag of {@link RAILPACK_FRONTEND_VERSION}. Upstream publishes the
+ * frontend as `v<version>` only; the bare version is a 404 on ghcr.io. Keep in
+ * step with `railpack_frontend_tag` in orchestration/roles/buildkit.
  */
-export const RAILPACK_FRONTEND_LAYOUT_NAME = "railpack-frontend";
+export const RAILPACK_FRONTEND_TAG = `v${RAILPACK_FRONTEND_VERSION}`;
 
 /** A layout manifest digest — the only frontend reference a build accepts. */
 const FRONTEND_DIGEST_RE = /^sha256:[0-9a-f]{64}$/;
@@ -92,19 +100,15 @@ const FRONTEND_DIGEST_RE = /^sha256:[0-9a-f]{64}$/;
 /** Build ceiling. Matches the native lane's — a cold image build is not quick. */
 export const RAILPACK_BUILD_TIMEOUT_MS = 1_800_000;
 
-/** Local `buildkitd` socket, under the daemon's own state dir. */
-const BUILDKITD_SOCKET_NAME = "buildkitd.sock";
-/** How long to wait for a freshly spawned `buildkitd` to answer. */
-const BUILDKITD_READY_TIMEOUT_MS = 30_000;
-const BUILDKITD_POLL_INTERVAL_MS = 250;
+/** How many trailing lines of a failed build's output the error carries. */
+const FAILURE_TAIL_LINES = 20;
 
 /** Repository namespace every Railpack-built image is tagged under. */
 export const RAILPACK_IMAGE_NAMESPACE = "turbopanel-app";
 
 /** Scratch subdirectories the build owns (siblings of the checkout). */
 const RAILPACK_PLAN_FILENAME = "railpack-plan.json";
-const RAILPACK_IMAGE_TAR_FILENAME = "railpack-image.tar";
-const BUILDKIT_CACHE_DIRNAME = "buildkit-cache";
+const RAILPACK_FRONTEND_TAR_FILENAME = "railpack-frontend.tar";
 
 /** Environment keys a build may never set — they are the sandbox (see build.ts). */
 const RESERVED_BUILD_ENV_KEYS = new Set([
@@ -125,20 +129,12 @@ export function railpackBinaryPath(runtimesDir: string): string {
   return join(runtimesDir, "railpack", "current", "railpack");
 }
 
-export function buildctlBinaryPath(runtimesDir: string): string {
-  return join(runtimesDir, "buildkit", "current", "buildctl");
-}
-
-export function buildkitdBinaryPath(runtimesDir: string): string {
-  return join(runtimesDir, "buildkit", "current", "buildkitd");
-}
-
 /** Vendored gateway frontend root — `<vendor>/railpack-frontend/current`. */
 export function railpackFrontendDir(runtimesDir: string): string {
   return join(runtimesDir, "railpack-frontend", "current");
 }
 
-/** The OCI image layout `buildctl` mounts (`oci-layout`/`index.json`/`blobs`). */
+/** The vendored OCI image layout (`oci-layout`/`index.json`/`blobs`). */
 export function railpackFrontendLayoutDir(runtimesDir: string): string {
   return join(railpackFrontendDir(runtimesDir), "image");
 }
@@ -148,24 +144,29 @@ export function railpackFrontendDigestPath(runtimesDir: string): string {
   return join(railpackFrontendDir(runtimesDir), "digest");
 }
 
-/** Per-project BuildKit cache root — hard isolation between tenants. */
-export function railpackCacheDir(
-  layout: Pick<LayoutPaths, "daemonStateDir">,
-  projectId: string,
-): string {
-  return join(
-    layout.daemonStateDir,
-    "release-build",
-    BUILDKIT_CACHE_DIRNAME,
-    assertSafeCacheSegment(projectId),
-  );
+/**
+ * Railpack's `cache-key` for one project: the prefix of every mount cache id
+ * its builds use (package manager stores, `node_modules`), which is what keeps
+ * one tenant's build from reading or poisoning another's on the shared Engine
+ * builder.
+ */
+export function railpackCacheKey(projectId: string): string {
+  return assertSafeCacheSegment(projectId);
 }
 
 /**
- * Cache directories are addressed by project id, which arrives on the wire.
- * A traversal here would let one project read another's layers, so the segment
- * is asserted rather than sanitized — a malformed id is a bug, not something to
- * silently rewrite.
+ * The frontend image a build names: by digest only, so a repointed upstream tag
+ * can never change which frontend a build runs.
+ */
+export function railpackFrontendRef(digest: string): string {
+  return `${RAILPACK_FRONTEND_IMAGE}@${digest}`;
+}
+
+/**
+ * Cache keys are derived from the project id, which arrives on the wire. A key
+ * that could collide with or extend another project's would let one tenant
+ * reach another's mount caches, so the segment is asserted rather than
+ * sanitized — a malformed id is a bug, not something to silently rewrite.
  */
 function assertSafeCacheSegment(value: string): string {
   if (!/^[0-9A-Za-z][0-9A-Za-z_-]{0,63}$/.test(value)) {
@@ -249,8 +250,6 @@ export type EnsureBuildkitRailpackDeps = {
 
 export type BuildkitRailpackTools = {
   railpack: string;
-  buildctl: string;
-  buildkitd: string;
   /** Vendored gateway frontend layout — never a registry reference. */
   frontendLayoutDir: string;
   /** That layout's manifest digest; what `--opt source=` addresses. */
@@ -294,20 +293,11 @@ async function resolveTools(
   runtimesDir: string,
 ): Promise<BuildkitRailpackTools | undefined> {
   const railpack = railpackBinaryPath(runtimesDir);
-  const buildctl = buildctlBinaryPath(runtimesDir);
-  const buildkitd = buildkitdBinaryPath(runtimesDir);
-  if (
-    !(await fileExists(railpack)) || !(await fileExists(buildctl)) ||
-    !(await fileExists(buildkitd))
-  ) {
-    return undefined;
-  }
+  if (!(await fileExists(railpack))) return undefined;
   const frontendDigest = await readVendoredFrontendDigest(runtimesDir);
   if (frontendDigest === undefined) return undefined;
   return {
     railpack,
-    buildctl,
-    buildkitd,
     frontendLayoutDir: railpackFrontendLayoutDir(runtimesDir),
     frontendDigest,
   };
@@ -327,7 +317,6 @@ async function downloadBuildkitRailpack(
   const arch = deps.resolveArch();
   const tmp = await Deno.makeTempDir({ prefix: "tp-railpack-" });
   try {
-    await installBuildkit(runtimesDir, arch, tmp, deps);
     await installRailpack(runtimesDir, arch, tmp, deps);
     await installRailpackFrontend(runtimesDir, tmp, deps);
   } finally {
@@ -370,7 +359,7 @@ async function installRailpackFrontend(
   tmp: string,
   deps: Required<Pick<EnsureBuildkitRailpackDeps, "runCommand">>,
 ): Promise<void> {
-  const ref = `${RAILPACK_FRONTEND_IMAGE}:${RAILPACK_FRONTEND_VERSION}`;
+  const ref = `${RAILPACK_FRONTEND_IMAGE}:${RAILPACK_FRONTEND_TAG}`;
   logInfo("deploy", `vendoring Railpack frontend ${ref}`);
   const pull = await deps.runCommand("docker", ["pull", ref]);
   if (!pull.success) {
@@ -419,51 +408,15 @@ async function refreshCurrentSymlink(
   await createSymlink(versionDir, currentLink);
 }
 
-async function installBuildkit(
-  runtimesDir: string,
-  arch: "arm64" | "amd64",
-  tmp: string,
-  deps: Required<
-    Pick<EnsureBuildkitRailpackDeps, "runCommand" | "resolveArch">
-  >,
-): Promise<void> {
-  const asset = `buildkit-v${BUILDKIT_VERSION}.linux-${arch}.tar.gz`;
-  const url =
-    `https://github.com/moby/buildkit/releases/download/v${BUILDKIT_VERSION}/${asset}`;
-  const tarball = join(tmp, asset);
-  logInfo("deploy", `downloading BuildKit ${BUILDKIT_VERSION}`);
-  const curl = await deps.runCommand("/usr/bin/curl", [
-    "-fsSL",
-    "-o",
-    tarball,
-    url,
-  ]);
-  if (!curl.success) {
-    throw new Error(`curl failed: ${curl.stderr || "download error"}`);
-  }
-  const extractDir = join(tmp, "buildkit");
-  await Deno.mkdir(extractDir, { recursive: true });
-  const tar = await deps.runCommand("/usr/bin/tar", [
-    "-xzf",
-    tarball,
-    "-C",
-    extractDir,
-  ]);
-  if (!tar.success) {
-    throw new Error(`tar failed: ${tar.stderr || "extract error"}`);
-  }
-
-  const toolDir = join(runtimesDir, "buildkit");
-  const versionDir = join(toolDir, BUILDKIT_VERSION);
-  await Deno.mkdir(versionDir, { recursive: true, mode: 0o750 });
-  await forEachSequential(["buildctl", "buildkitd"], async (binary) => {
-    await Deno.copyFile(
-      join(extractDir, "bin", binary),
-      join(versionDir, binary),
-    );
-    await Deno.chmod(join(versionDir, binary), 0o750);
-  });
-  await refreshCurrentSymlink(toolDir, versionDir);
+/**
+ * Railpack's release asset for `arch`. Upstream names Linux builds by Rust
+ * target triple (`x86_64-unknown-linux-musl`), not Go-style `linux-amd64`
+ * like BuildKit; the old `-linux-<arch>` name 404'd. Keep in step with the
+ * `Install Railpack` task in orchestration/roles/buildkit/tasks/main.yml.
+ */
+export function railpackAssetName(arch: "arm64" | "amd64"): string {
+  const triple = arch === "amd64" ? "x86_64" : "arm64";
+  return `railpack-v${RAILPACK_VERSION}-${triple}-unknown-linux-musl.tar.gz`;
 }
 
 async function installRailpack(
@@ -474,7 +427,7 @@ async function installRailpack(
     Pick<EnsureBuildkitRailpackDeps, "runCommand" | "resolveArch">
   >,
 ): Promise<void> {
-  const asset = `railpack-v${RAILPACK_VERSION}-linux-${arch}.tar.gz`;
+  const asset = railpackAssetName(arch);
   const url =
     `https://github.com/railwayapp/railpack/releases/download/v${RAILPACK_VERSION}/${asset}`;
   const tarball = join(tmp, asset);
@@ -512,17 +465,17 @@ async function installRailpack(
 }
 
 /**
- * Ensure `railpack`, `buildctl`, `buildkitd`, **and the vendored gateway
- * frontend** exist under the vendor tree.
+ * Ensure `railpack` **and the vendored gateway frontend** exist under the
+ * vendor tree.
  *
  * Called from the deploy path **only when a `railpack` build is actually
  * requested** — never from `daemon-converge` or `instance-dev-install`. A host
  * that never runs a Railpack build never pays for BuildKit, which is the same
  * on-demand contract Docker and hosting Caddy already follow.
  *
- * The returned tools carry the frontend's layout directory and manifest digest
- * rather than an image name: after this call the build lane needs no registry,
- * and the frontend it uses is fixed to bytes already on disk.
+ * The returned tools carry the frontend's layout directory and manifest digest:
+ * the build names the frontend by that digest, so the bytes it runs are the
+ * bytes already on disk.
  */
 export async function ensureBuildkitRailpack(
   layout: LayoutPaths,
@@ -535,24 +488,36 @@ export async function ensureBuildkitRailpack(
   const present = await resolveTools(layout.runtimesDir);
   if (present) return present;
 
+  let setupError: string | undefined;
   try {
     await runSetup();
   } catch (err) {
+    setupError = err instanceof Error ? err.message : String(err);
     logWarn(
       "deploy",
-      `buildkit-setup playbook failed, trying direct download: ${
-        err instanceof Error ? err.message : String(err)
-      }`,
+      `buildkit-setup playbook failed, trying direct download: ${setupError}`,
     );
   }
 
   const installed = await resolveTools(layout.runtimesDir);
   if (installed) return installed;
 
-  await downloadBuildkitRailpack(layout.runtimesDir, {
-    runCommand,
-    resolveArch,
-  });
+  try {
+    await downloadBuildkitRailpack(layout.runtimesDir, {
+      runCommand,
+      resolveArch,
+    });
+  } catch (err) {
+    // On a managed host the vendor tree is root-owned and outside the daemon's
+    // write allowlist, so the fallback can only fail there; report the playbook
+    // failure that actually needs fixing rather than the fallback's.
+    if (setupError === undefined) throw err;
+    throw new Error(
+      `buildkit-setup playbook failed: ${setupError} (direct download fallback also failed: ${
+        err instanceof Error ? err.message : String(err)
+      })`,
+    );
+  }
 
   const downloaded = await resolveTools(layout.runtimesDir);
   if (downloaded) return downloaded;
@@ -560,9 +525,7 @@ export async function ensureBuildkitRailpack(
   throw new Error(
     `Railpack build runtime is missing: ${
       railpackBinaryPath(layout.runtimesDir)
-    } / ${buildctlBinaryPath(layout.runtimesDir)} / ${
-      railpackFrontendLayoutDir(layout.runtimesDir)
-    }`,
+    } / ${railpackFrontendLayoutDir(layout.runtimesDir)}`,
   );
 }
 
@@ -651,82 +614,17 @@ async function runToolStreamed(
   }
 }
 
-/**
- * Start `buildkitd` on a private socket if nothing is listening there yet.
- *
- * The daemon owns exactly one `buildkitd`, shared by every project on the host,
- * because BuildKit's own cache scoping is what keeps projects apart (see
- * {@link railpackCacheDir}) — running one daemon per project would multiply
- * resident memory for no isolation the cache root does not already give.
- */
-async function ensureBuildkitDaemon(
-  tools: BuildkitRailpackTools,
-  layout: Pick<LayoutPaths, "daemonStateDir">,
-  onOutput?: ReleaseOutputHandler,
-  timeouts?: { readyMs?: number; pollMs?: number },
-): Promise<string> {
-  const socketDir = join(layout.daemonStateDir, "release-build");
-  await Deno.mkdir(socketDir, { recursive: true, mode: 0o700 });
-  const socketPath = join(socketDir, BUILDKITD_SOCKET_NAME);
-  const addr = `unix://${socketPath}`;
-  const readyMs = timeouts?.readyMs ?? BUILDKITD_READY_TIMEOUT_MS;
-  const pollMs = timeouts?.pollMs ?? BUILDKITD_POLL_INTERVAL_MS;
-
-  if (await buildkitdResponds(tools.buildctl, addr)) return addr;
-
-  onOutput?.("stdout", `starting vendored buildkitd on ${socketPath}`);
-  // Detached: the daemon outlives this deploy so the next build reuses both the
-  // process and its in-memory cache metadata.
-  const child = new Deno.Command(tools.buildkitd, {
-    args: ["--addr", addr, "--root", join(socketDir, "buildkitd-state")],
-    stdin: "null",
-    stdout: "null",
-    stderr: "null",
-  }).spawn();
-  child.unref();
-
-  const deadline = Date.now() + readyMs;
-  const waitUntilReady = async (): Promise<boolean> => {
-    if (Date.now() >= deadline) return false;
-    if (await buildkitdResponds(tools.buildctl, addr)) return true;
-    await new Promise((resolve) => setTimeout(resolve, pollMs));
-    return await waitUntilReady();
-  };
-  if (await waitUntilReady()) return addr;
-  throw new Error(
-    `buildkitd did not become ready on ${socketPath} within ${readyMs}ms`,
-  );
-}
-
-async function buildkitdResponds(
-  buildctl: string,
-  addr: string,
-): Promise<boolean> {
-  try {
-    const result = await new Deno.Command(buildctl, {
-      args: ["--addr", addr, "debug", "workers"],
-      stdin: "null",
-      stdout: "null",
-      stderr: "null",
-    }).output();
-    return result.success;
-  } catch {
-    return false;
-  }
-}
-
 export type RailpackBuildParams = {
   build: EnvironmentDeploySourceBuild;
   /** Checked-out working tree (checkout root + `subdirectory`). */
   workingDir: string;
-  /** Scratch dir the plan file, image tarball, and logs may be written into. */
+  /** Scratch dir the plan file and logs may be written into (never the checkout). */
   scratchDir: string;
-  /** Per-project BuildKit cache root. */
-  cacheDir: string;
+  /** Railpack mount-cache prefix for the project ({@link railpackCacheKey}). */
+  cacheKey: string;
   /** Image tag to produce ({@link railpackImageTag}). */
   imageTag: string;
   tools: BuildkitRailpackTools;
-  layout: Pick<LayoutPaths, "daemonStateDir">;
   onOutput?: ReleaseOutputHandler;
   redactSummary?: CommandSummaryRedactor;
 };
@@ -745,18 +643,13 @@ export type RunRailpackBuildDeps = {
       timeoutMs?: number;
     },
   ) => Promise<void>;
-  ensureDaemon?: (
-    tools: BuildkitRailpackTools,
-    layout: Pick<LayoutPaths, "daemonStateDir">,
-    onOutput?: ReleaseOutputHandler,
-  ) => Promise<string>;
+  /** Every `docker` call; defaults to the shared CLI path ({@link runDockerStreamed}). */
+  runDocker?: RunDockerStreamedFn;
+  /** Non-docker helper commands (`tar`); defaults to a plain spawn. */
+  runCommand?: EnsureBuildkitRailpackDeps["runCommand"];
   inspectImage?: (imageTag: string) => Promise<string | undefined>;
-  /** Test-only override for streamed-tool wall clock. */
+  /** Test-only override for streamed-tool and build wall clock. */
   toolTimeoutMs?: number;
-  /** Test-only override for how long we wait for a freshly spawned buildkitd. */
-  buildkitdReadyTimeoutMs?: number;
-  /** Test-only override for the buildkitd readiness poll interval. */
-  buildkitdPollIntervalMs?: number;
 };
 
 export type RailpackBuildResult = {
@@ -788,32 +681,192 @@ async function readPlanVersion(planPath: string): Promise<string> {
   return RAILPACK_VERSION;
 }
 
-/** `docker image inspect` id for the loaded tag, or `undefined`. */
-async function resolveLoadedImageDigest(
-  imageTag: string,
-): Promise<string | undefined> {
-  try {
-    const result = await new Deno.Command("docker", {
-      args: ["image", "inspect", imageTag, "--format", "{{.Id}}"],
-      stdin: "null",
-      stdout: "piped",
-      stderr: "null",
-    }).output();
-    if (!result.success) return undefined;
-    const id = decoder.decode(result.stdout).trim();
-    return id.length > 0 ? id : undefined;
-  } catch {
-    return undefined;
-  }
+/** The last {@link FAILURE_TAIL_LINES} non-empty lines of `text`. */
+function tailLines(text: string): string {
+  return text.split("\n").filter((line) => line.trim().length > 0).slice(
+    -FAILURE_TAIL_LINES,
+  ).join("\n");
+}
+
+/** Redacted tail of a failed docker call, or its exit code when it said nothing. */
+function dockerFailureDetail(
+  result: DockerCliResult,
+  redact: CommandSummaryRedactor,
+): string {
+  return redact(tailLines(result.stderr)) || redact(tailLines(result.stdout)) ||
+    `exit code ${result.code}`;
 }
 
 /**
- * `railpack prepare` → `buildctl build` (Railpack gateway frontend) →
- * `docker load`.
+ * The Engine's BuildKit is driven through the buildx CLI plugin. Checked up
+ * front so a host without it fails with the package to install, not with
+ * "docker: 'buildx' is not a docker command" halfway through a deploy.
+ */
+async function assertBuildxAvailable(
+  runDocker: RunDockerStreamedFn,
+  redact: CommandSummaryRedactor,
+): Promise<void> {
+  const probe = await runDocker(["buildx", "version"]);
+  if (probe.success) return;
+  throw new Error(
+    `Railpack builds run on the Docker Engine's BuildKit and need the buildx CLI plugin (Debian/Ubuntu package docker-buildx-plugin); \`docker buildx version\` failed: ${
+      dockerFailureDetail(probe, redact)
+    }`,
+  );
+}
+
+/**
+ * Make the pinned frontend resolvable from Docker's own image store.
+ *
+ * `buildkit-setup` pulls it there when it vendors the layout, so this is
+ * normally one `image inspect`. When the image was pruned, the vendored layout
+ * is loaded back in, keeping the deploy path free of registry egress. A failed
+ * load is not fatal: the build names the frontend by digest, so the Engine can
+ * only ever fetch exactly the vendored bytes.
+ */
+async function ensureFrontendImage(
+  params: RailpackBuildParams,
+  runDocker: RunDockerStreamedFn,
+  runCommand: NonNullable<EnsureBuildkitRailpackDeps["runCommand"]>,
+): Promise<void> {
+  const ref = railpackFrontendRef(params.tools.frontendDigest);
+  const present = await runDocker([
+    "image",
+    "inspect",
+    "--format",
+    "{{.Id}}",
+    ref,
+  ]);
+  if (present.success) return;
+  params.onOutput?.("stdout", `loading vendored Railpack frontend ${ref}`);
+  const tarball = join(params.scratchDir, RAILPACK_FRONTEND_TAR_FILENAME);
+  try {
+    const tar = await runCommand("/usr/bin/tar", [
+      "-cf",
+      tarball,
+      "-C",
+      params.tools.frontendLayoutDir,
+      ".",
+    ]);
+    const load = tar.success
+      ? await runDocker(["load", "-i", tarball])
+      : { success: false, code: 1, stdout: "", stderr: tar.stderr };
+    if (!load.success) {
+      logWarn(
+        "deploy",
+        `could not load the vendored Railpack frontend; the Engine will fetch ${ref}: ${
+          load.stderr || "load error"
+        }`,
+      );
+    }
+  } finally {
+    await Deno.remove(tarball).catch(() => {});
+  }
+}
+
+/** `docker buildx build` argv for one Railpack build (Engine builder, `--load`). */
+export function railpackBuildxArgs(
+  params: Pick<
+    RailpackBuildParams,
+    "workingDir" | "cacheKey" | "imageTag" | "tools"
+  >,
+  planPath: string,
+): string[] {
+  return [
+    "buildx",
+    "build",
+    // The Engine's own builder (docker driver), never a docker-container
+    // builder a stray `docker buildx use` may have selected.
+    "--builder",
+    "default",
+    "--progress=plain",
+    // A single-platform image in the store, without attestation manifests.
+    "--provenance=false",
+    "--sbom=false",
+    "--build-arg",
+    `BUILDKIT_SYNTAX=${railpackFrontendRef(params.tools.frontendDigest)}`,
+    "--build-arg",
+    `cache-key=${params.cacheKey}`,
+    "--file",
+    planPath,
+    "--tag",
+    params.imageTag,
+    "--load",
+    params.workingDir,
+  ];
+}
+
+/**
+ * Run the build through the shared docker CLI path, bounded by the build
+ * timeout. Build output streams to the release log; a failure carries the
+ * redacted tail of BuildKit's own output rather than a generic message.
+ */
+async function runBuildx(
+  runDocker: RunDockerStreamedFn,
+  args: string[],
+  options: {
+    onOutput?: ReleaseOutputHandler;
+    redact: CommandSummaryRedactor;
+    timeoutMs: number;
+  },
+): Promise<void> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), options.timeoutMs);
+  const onOutput = options.onOutput;
+  try {
+    const result = await runDocker(args, {
+      signal: controller.signal,
+      ...(onOutput === undefined
+        ? {}
+        : { onLine: (event) => onOutput(event.stream, event.line) }),
+    });
+    if (controller.signal.aborted) {
+      throw new Error(
+        `docker buildx build timed out after ${options.timeoutMs}ms`,
+      );
+    }
+    if (!result.success) {
+      throw new Error(
+        `docker buildx build failed: ${
+          dockerFailureDetail(result, options.redact)
+        }`,
+      );
+    }
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+/** `docker image inspect` id for the built tag, or `undefined`. */
+async function resolveBuiltImageDigest(
+  runDocker: RunDockerStreamedFn,
+  imageTag: string,
+): Promise<string | undefined> {
+  const result = await runDocker([
+    "image",
+    "inspect",
+    imageTag,
+    "--format",
+    "{{.Id}}",
+  ]);
+  if (!result.success) return undefined;
+  const id = result.stdout.trim();
+  return id.length > 0 ? id : undefined;
+}
+
+/**
+ * `railpack prepare` → `docker buildx build` (Railpack gateway frontend on the
+ * Engine's BuildKit, `--load`ed into the image store).
  *
  * Returns the tag and the pinned tool versions that produced it. The caller
  * records all of it on the release manifest, which is what makes a rollback to
  * a Railpack release a pure "re-run this tag" operation with no rebuild.
+ *
+ * The docker CLI never sees {@link railpackToolEnvironment}: that environment
+ * carries tenant `build.env` keys and `HOME=<checkout>`, and the CLI resolves
+ * plugins and its config from `DOCKER_CONFIG` / `$HOME/.docker`, so a checkout
+ * shipping `.docker/cli-plugins/docker-buildx` would run as the daemon user.
+ * It inherits the daemon's own environment, exactly as compose builds do.
  */
 export async function runRailpackBuild(
   params: RailpackBuildParams,
@@ -821,8 +874,10 @@ export async function runRailpackBuild(
 ): Promise<RailpackBuildResult> {
   const env = railpackToolEnvironment(params.build, params.workingDir);
   const planPath = join(params.scratchDir, RAILPACK_PLAN_FILENAME);
-  const imageTarPath = join(params.scratchDir, RAILPACK_IMAGE_TAR_FILENAME);
   const runTool = deps?.runTool ?? runToolStreamed;
+  const runDocker = deps?.runDocker ?? runDockerStreamed;
+  const redact = params.redactSummary ?? defaultSummaryRedactor;
+  const timeoutMs = deps?.toolTimeoutMs ?? RAILPACK_BUILD_TIMEOUT_MS;
   const toolOptions = {
     cwd: params.workingDir,
     env,
@@ -835,6 +890,8 @@ export async function runRailpackBuild(
       : { timeoutMs: deps.toolTimeoutMs }),
   };
 
+  await assertBuildxAvailable(runDocker, redact);
+
   params.onOutput?.("stdout", "$ railpack prepare");
   await runTool(
     params.tools.railpack,
@@ -842,76 +899,28 @@ export async function runRailpackBuild(
     { ...toolOptions, label: "railpack prepare" },
   );
 
-  const addr = deps?.ensureDaemon
-    ? await deps.ensureDaemon(params.tools, params.layout, params.onOutput)
-    : await ensureBuildkitDaemon(
-      params.tools,
-      params.layout,
-      params.onOutput,
-      {
-        ...(deps?.buildkitdReadyTimeoutMs === undefined
-          ? {}
-          : { readyMs: deps.buildkitdReadyTimeoutMs }),
-        ...(deps?.buildkitdPollIntervalMs === undefined
-          ? {}
-          : { pollMs: deps.buildkitdPollIntervalMs }),
-      },
-    );
-  await Deno.mkdir(params.cacheDir, { recursive: true, mode: 0o700 });
+  await ensureFrontendImage(
+    params,
+    runDocker,
+    deps?.runCommand ?? runDefault,
+  );
 
-  // The frontend is mounted from the vendored layout and addressed by digest.
-  // Nothing here names a registry: an upstream tag repoint cannot reach a host
-  // that already vendored the frontend, so the same recorded
-  // `railpackFrontendVersion` always means the same build inputs.
-  const frontend =
-    `oci-layout://${RAILPACK_FRONTEND_LAYOUT_NAME}@${params.tools.frontendDigest}`;
-  const buildArgs = [
-    "--addr",
-    addr,
-    "build",
-    "--frontend=gateway.v0",
-    "--oci-layout",
-    `${RAILPACK_FRONTEND_LAYOUT_NAME}=${params.tools.frontendLayoutDir}`,
-    `--opt`,
-    `source=${frontend}`,
-    "--local",
-    `context=${params.workingDir}`,
-    "--local",
-    `dockerfile=${params.scratchDir}`,
-    "--opt",
-    `filename=${RAILPACK_PLAN_FILENAME}`,
-    "--output",
-    `type=docker,name=${params.imageTag},dest=${imageTarPath}`,
-    // Per-project cache. `mode=max` keeps intermediate layers, which is what
-    // makes the second deploy of a project fast; the isolation guarantee is the
-    // directory, not the mode.
-    "--import-cache",
-    `type=local,src=${params.cacheDir}`,
-    "--export-cache",
-    `type=local,mode=max,dest=${params.cacheDir}`,
-  ];
-  for (const [key, value] of Object.entries(params.build.env ?? {})) {
-    if (RESERVED_BUILD_ENV_KEYS.has(key)) continue;
-    buildArgs.push("--opt", `env:${key}=${value}`);
-  }
-
-  params.onOutput?.("stdout", `$ buildctl build (${frontend})`);
-  await runTool(params.tools.buildctl, buildArgs, {
-    ...toolOptions,
-    label: "buildctl build",
+  const args = railpackBuildxArgs(params, planPath);
+  params.onOutput?.(
+    "stdout",
+    `$ docker buildx build (${
+      railpackFrontendRef(params.tools.frontendDigest)
+    })`,
+  );
+  await runBuildx(runDocker, args, {
+    ...(params.onOutput === undefined ? {} : { onOutput: params.onOutput }),
+    redact,
+    timeoutMs,
   });
 
-  params.onOutput?.("stdout", `$ docker load ${params.imageTag}`);
-  await runTool("docker", ["load", "-i", imageTarPath], {
-    ...toolOptions,
-    label: "docker load",
-  });
-  // The tarball is a second full copy of the image; drop it as soon as the
-  // store has it rather than waiting for the scratch sweep.
-  await Deno.remove(imageTarPath).catch(() => {});
-
-  const inspectImage = deps?.inspectImage ?? resolveLoadedImageDigest;
-  const imageDigest = await inspectImage(params.imageTag);
+  const imageDigest = deps?.inspectImage
+    ? await deps.inspectImage(params.imageTag)
+    : await resolveBuiltImageDigest(runDocker, params.imageTag);
   return {
     imageTag: params.imageTag,
     ...(imageDigest === undefined ? {} : { imageDigest }),

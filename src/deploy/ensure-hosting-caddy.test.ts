@@ -1,15 +1,24 @@
-import { assertEquals, assertRejects } from "@std/assert";
+import { assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import { resolveLayout } from "../paths/layout.ts";
 import { withTempLayout } from "../testing/temp-layout.ts";
 import {
   ensureHostingCaddy,
   type EnsureHostingCaddyDeps,
+  grantHostingCaddyRead,
   HOSTING_CADDY_VERSION,
+  INGRESS_GUARD_UNIT,
+  INGRESS_GUARD_VERSION,
   verifyHostingCaddyTarballSha256,
 } from "./ensure-hosting-caddy.ts";
 
 const skipTarballDigestVerify = () => Promise.resolve();
+const accountPresent = () => Promise.resolve(true);
+/** The ingress guard ruleset is current and its unit active. */
+const guardReady = {
+  ingressGuardCurrent: () => Promise.resolve(true),
+  ingressGuardActive: () => Promise.resolve(true),
+} satisfies EnsureHostingCaddyDeps;
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -112,6 +121,8 @@ test({
 
       let setupCalls = 0;
       const resolved = await ensureHostingCaddy(layout, {
+        accountExists: accountPresent,
+        ...guardReady,
         runCaddySetup: () => {
           setupCalls += 1;
           return Promise.resolve();
@@ -138,6 +149,8 @@ test({
       });
       let setupCalls = 0;
       const resolved = await ensureHostingCaddy(layout, {
+        accountExists: accountPresent,
+        ...guardReady,
         runCaddySetup: async () => {
           setupCalls += 1;
           await plantVendorCaddy(layout.runtimesDir, "#!/bin/from-setup\n");
@@ -163,6 +176,8 @@ test({
       });
       const commands: string[] = [];
       const resolved = await ensureHostingCaddy(layout, {
+        accountExists: accountPresent,
+        ...guardReady,
         runCaddySetup: () => Promise.reject(new Error("playbook missing")),
         resolveArch: () => "amd64",
         runCommand: (command, args, opts) => {
@@ -202,6 +217,8 @@ test({
       await Deno.remove(join(staleDir, "caddy"));
 
       const resolved = await ensureHostingCaddy(layout, {
+        accountExists: accountPresent,
+        ...guardReady,
         runCaddySetup: () => Promise.resolve(),
         resolveArch: () => "arm64",
         runCommand: mockDownloadCommands({
@@ -246,6 +263,8 @@ test({
       await assertRejects(
         () =>
           ensureHostingCaddy(layout, {
+            accountExists: accountPresent,
+            ...guardReady,
             runCaddySetup: () => Promise.resolve(),
             resolveArch: () => "amd64",
             runCommand: mockDownloadCommands({}),
@@ -271,6 +290,8 @@ test({
       await assertRejects(
         () =>
           ensureHostingCaddy(layout, {
+            accountExists: accountPresent,
+            ...guardReady,
             runCaddySetup: () => Promise.resolve(),
             resolveArch: () => "amd64",
             runCommand: mockDownloadCommands({
@@ -298,6 +319,8 @@ test({
       await assertRejects(
         () =>
           ensureHostingCaddy(layout, {
+            accountExists: accountPresent,
+            ...guardReady,
             runCaddySetup: () => Promise.resolve(),
             resolveArch: () => "amd64",
             runCommand: mockDownloadCommands({ curlOk: false, curlStderr: "" }),
@@ -322,6 +345,8 @@ test({
       await assertRejects(
         () =>
           ensureHostingCaddy(layout, {
+            accountExists: accountPresent,
+            ...guardReady,
             runCaddySetup: () => Promise.resolve(),
             resolveArch: () => "amd64",
             runCommand: mockDownloadCommands({
@@ -349,6 +374,8 @@ test({
       await assertRejects(
         () =>
           ensureHostingCaddy(layout, {
+            accountExists: accountPresent,
+            ...guardReady,
             runCaddySetup: () => Promise.resolve(),
             resolveArch: () => "amd64",
             runCommand: mockDownloadCommands({ tarOk: false, tarStderr: "" }),
@@ -374,6 +401,8 @@ test({
       await assertRejects(
         () =>
           ensureHostingCaddy(layout, {
+            accountExists: accountPresent,
+            ...guardReady,
             runCaddySetup: () => Promise.resolve(),
             resolveArch: () => "amd64",
             runCommand: async (command, args, opts) => {
@@ -473,6 +502,8 @@ test({
       try {
         // No resolveArch / runCommand inject — exercises defaults.
         const resolved = await ensureHostingCaddy(layout, {
+          accountExists: accountPresent,
+          ...guardReady,
           runCaddySetup: () => Promise.resolve(),
           verifyTarballSha256: skipTarballDigestVerify,
         });
@@ -495,6 +526,8 @@ test({
         forceMode: "production",
       });
       const resolved = await ensureHostingCaddy(layout, {
+        accountExists: accountPresent,
+        ...guardReady,
         runCaddySetup: () => Promise.reject("setup blew up"),
         resolveArch: () => "amd64",
         runCommand: mockDownloadCommands({
@@ -520,6 +553,8 @@ test({
       await assertRejects(
         () =>
           ensureHostingCaddy(layout, {
+            accountExists: accountPresent,
+            ...guardReady,
             runCaddySetup: () => Promise.resolve(),
             resolveArch: () => {
               throw new Error(
@@ -558,6 +593,8 @@ test({
         await assertRejects(
           () =>
             ensureHostingCaddy(layout, {
+              accountExists: accountPresent,
+              ...guardReady,
               runCaddySetup: () => Promise.resolve(),
             }),
           Deno.errors.PermissionDenied,
@@ -595,6 +632,8 @@ test({
         await assertRejects(
           () =>
             ensureHostingCaddy(layout, {
+              accountExists: accountPresent,
+              ...guardReady,
               runCaddySetup: () => Promise.resolve(),
               resolveArch: () => "amd64",
               runCommand: mockDownloadCommands({}),
@@ -607,5 +646,355 @@ test({
         Deno.remove = originalRemove;
       }
     });
+  },
+});
+
+test({
+  name:
+    "ensureHostingCaddy runs caddy-setup when the binary exists but the account does not",
+  permissions: { read: true, write: true, run: ["ln"] },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      const layout = resolveLayout(fixture.env, {
+        skipDiscovery: true,
+        forceMode: "production",
+      });
+      const bin = await plantVendorCaddy(layout.runtimesDir);
+      let account = false;
+      let setupCalls = 0;
+      const resolved = await ensureHostingCaddy(layout, {
+        accountExists: () => Promise.resolve(account),
+        ...guardReady,
+        runCaddySetup: () => {
+          setupCalls += 1;
+          account = true;
+          return Promise.resolve();
+        },
+      });
+      assertEquals(resolved, bin);
+      assertEquals(setupCalls, 1);
+    });
+  },
+});
+
+test({
+  name: "ensureHostingCaddy refuses when caddy-setup leaves no account",
+  permissions: { read: true, write: true, run: ["ln"] },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      const layout = resolveLayout(fixture.env, {
+        skipDiscovery: true,
+        forceMode: "production",
+      });
+      await plantVendorCaddy(layout.runtimesDir);
+      await assertRejects(
+        () =>
+          ensureHostingCaddy(layout, {
+            accountExists: () => Promise.resolve(false),
+            runCaddySetup: () => Promise.resolve(),
+          }),
+        Error,
+        "Hosting Caddy account tpedge is missing",
+      );
+    });
+  },
+});
+
+test({
+  name:
+    "ensureHostingCaddy re-runs caddy-setup when the guard unit is inactive",
+  permissions: { read: true, write: true, run: ["ln"] },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      const layout = resolveLayout(fixture.env, {
+        skipDiscovery: true,
+        forceMode: "production",
+      });
+      const bin = await plantVendorCaddy(layout.runtimesDir);
+      let active = false;
+      let setupCalls = 0;
+      const resolved = await ensureHostingCaddy(layout, {
+        accountExists: accountPresent,
+        ingressGuardCurrent: () => Promise.resolve(true),
+        ingressGuardActive: () => Promise.resolve(active),
+        runCaddySetup: () => {
+          setupCalls += 1;
+          active = true;
+          return Promise.resolve();
+        },
+      });
+      assertEquals(resolved, bin);
+      assertEquals(setupCalls, 1);
+    });
+  },
+});
+
+test({
+  name:
+    "ensureHostingCaddy refuses when caddy-setup leaves no current ingress guard",
+  permissions: { read: true, write: true, run: ["ln"] },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      const layout = resolveLayout(fixture.env, {
+        skipDiscovery: true,
+        forceMode: "production",
+      });
+      await plantVendorCaddy(layout.runtimesDir);
+      await assertRejects(
+        () =>
+          ensureHostingCaddy(layout, {
+            accountExists: accountPresent,
+            ingressGuardCurrent: () => Promise.resolve(false),
+            ingressGuardActive: () => Promise.resolve(true),
+            runCaddySetup: () => Promise.resolve(),
+          }),
+        Error,
+        `Ingress guard ${INGRESS_GUARD_VERSION} is not installed`,
+      );
+    });
+  },
+});
+
+test({
+  name: "ensureHostingCaddy refuses when the ingress guard unit stays inactive",
+  permissions: { read: true, write: true, run: ["ln"] },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      const layout = resolveLayout(fixture.env, {
+        skipDiscovery: true,
+        forceMode: "production",
+      });
+      await plantVendorCaddy(layout.runtimesDir);
+      await assertRejects(
+        () =>
+          ensureHostingCaddy(layout, {
+            accountExists: accountPresent,
+            ingressGuardCurrent: () => Promise.resolve(true),
+            ingressGuardActive: () => Promise.resolve(false),
+            runCaddySetup: () => Promise.resolve(),
+          }),
+        Error,
+        `Ingress guard ${INGRESS_GUARD_UNIT} is not active`,
+      );
+    });
+  },
+});
+
+type Reply = { success: boolean; stderr: string; stdout?: string };
+type Call = { command: string; args: string[] };
+
+async function plantHostingTree(): Promise<string> {
+  const dir = await Deno.makeTempDir({ prefix: "tp-hosting-acl-" });
+  await Deno.mkdir(join(dir, "sites"), { mode: 0o750 });
+  await Deno.writeTextFile(join(dir, "Caddyfile"), "x", { mode: 0o640 });
+  await Deno.writeTextFile(join(dir, "sites", "a.caddy"), "x", { mode: 0o640 });
+  await Deno.symlink("/etc/passwd", join(dir, "sites", "link.caddy"));
+  return dir;
+}
+
+function fakeHost(opts: {
+  account?: boolean;
+  setfaclOk?: boolean;
+  acl?: (path: string) => string;
+}): { calls: Call[]; run: NonNullable<EnsureHostingCaddyDeps["runCommand"]> } {
+  const calls: Call[] = [];
+  const run = (command: string, args: string[]): Promise<Reply> => {
+    calls.push({ command, args });
+    if (command === "getent") {
+      return Promise.resolve({
+        success: opts.account !== false,
+        stderr: "",
+      });
+    }
+    if (command === "setfacl") {
+      return Promise.resolve({
+        success: opts.setfaclOk !== false,
+        stderr: opts.setfaclOk === false ? "Operation not permitted" : "",
+      });
+    }
+    const paths = args.slice(args.indexOf("--") + 1);
+    return Promise.resolve({
+      success: true,
+      stderr: "",
+      stdout: paths.map((p) =>
+        `# file: ${p}\nuser::rw-\n${opts.acl?.(p) ?? ""}\n`
+      ).join("\n"),
+    });
+  };
+  return { calls, run };
+}
+
+const OK_ACL = (p: string) =>
+  p.endsWith("sites") || !p.includes(".")
+    ? "user:tpedge:r-x\t#effective:r-x"
+    : "user:tpedge:r--\t#effective:r--";
+
+test("grantHostingCaddyRead sets rX on files, rX plus a default on folders, skips symlinks, then reads back", async () => {
+  const dir = await plantHostingTree();
+  try {
+    const host = fakeHost({ acl: OK_ACL });
+    await grantHostingCaddyRead(dir, host.run);
+    const [getent, files, dirs, getfacl] = host.calls;
+    assertEquals(getent?.command, "getent");
+    assertEquals(files?.command, "setfacl");
+    assertEquals(files?.args.slice(0, 3), ["-m", "u:tpedge:rX", "--"]);
+    assertEquals(
+      files?.args.slice(3).sort(),
+      [join(dir, "Caddyfile"), join(dir, "sites", "a.caddy")].sort(),
+    );
+    assertEquals(dirs?.args.slice(0, 5), [
+      "-m",
+      "u:tpedge:rX",
+      "-m",
+      "d:u:tpedge:rX",
+      "--",
+    ]);
+    assertEquals(getfacl?.command, "getfacl");
+    assertEquals(
+      host.calls.some((c) => c.args.some((a) => a.endsWith("link.caddy"))),
+      false,
+    );
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+test("grantHostingCaddyRead leaves a host without the account alone", async () => {
+  const dir = await plantHostingTree();
+  try {
+    const host = fakeHost({ account: false });
+    await grantHostingCaddyRead(dir, host.run);
+    assertEquals(host.calls.map((c) => c.command), ["getent"]);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+test("grantHostingCaddyRead fails loudly when tpedge still cannot read (setfacl refused or missing)", async () => {
+  const dir = await plantHostingTree();
+  try {
+    await assertRejects(
+      () => grantHostingCaddyRead(dir, fakeHost({ setfaclOk: false }).run),
+      Error,
+      "cannot read its config",
+    );
+    const missing: NonNullable<EnsureHostingCaddyDeps["runCommand"]> = (
+      command,
+    ) =>
+      command === "getent"
+        ? Promise.resolve({ success: true, stderr: "" })
+        : Promise.reject(new Deno.errors.NotFound(command));
+    await assertRejects(
+      () => grantHostingCaddyRead(dir, missing),
+      Error,
+      "cannot read its config",
+    );
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+test("grantHostingCaddyRead: a root-owned file passes only when it already carries the entry", async () => {
+  const dir = await plantHostingTree();
+  try {
+    // setfacl is refused for it (not ours), but the default entry gave it one.
+    await grantHostingCaddyRead(
+      dir,
+      fakeHost({ setfaclOk: false, acl: OK_ACL }).run,
+    );
+    const lacking = fakeHost({
+      setfaclOk: false,
+      acl: (p) => p.endsWith("a.caddy") ? "" : OK_ACL(p),
+    });
+    const err = await assertRejects(
+      () => grantHostingCaddyRead(dir, lacking.run),
+      Error,
+      "cannot read its config",
+    );
+    assertStringIncludes(err.message, "a.caddy");
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+test("grantHostingCaddyRead reports a mask that hides the entry (file chmod 0600)", async () => {
+  const dir = await plantHostingTree();
+  try {
+    await assertRejects(
+      () =>
+        grantHostingCaddyRead(
+          dir,
+          fakeHost({
+            acl: (p) =>
+              p.endsWith("Caddyfile")
+                ? "user:tpedge:r--\t#effective:---"
+                : OK_ACL(p),
+          }).run,
+        ),
+      Error,
+      "Caddyfile",
+    );
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+async function toolOk(command: string): Promise<boolean> {
+  try {
+    return (await new Deno.Command(command, {
+      args: ["--version"],
+      stdout: "null",
+      stderr: "null",
+    }).output()).success;
+  } catch {
+    return false;
+  }
+}
+
+async function acl(path: string): Promise<string> {
+  const out = await new Deno.Command("getfacl", {
+    args: ["-c", path],
+    stdout: "piped",
+    stderr: "null",
+  }).output();
+  return new TextDecoder().decode(out.stdout);
+}
+
+// Linux only: files and a folder made BEFORE any default entry existed (the
+// fresh install and the update the canary proof hit) get the entry, a file made
+// afterwards inherits it, and a chmod 0600 is reported. The current user
+// stands in for tpedge. CI (ubuntu has acl) must not skip this.
+test({
+  name:
+    "grantHostingCaddyRead backfills and inherits with real setfacl (linux)",
+  ignore: Deno.build.os !== "linux",
+  fn: async () => {
+    if (!(await toolOk("setfacl")) || !(await toolOk("getfacl"))) {
+      if (Deno.env.get("CI")) throw new Error("setfacl/getfacl missing on CI");
+      return;
+    }
+    const user = new TextDecoder().decode(
+      (await new Deno.Command("id", { args: ["-un"], stdout: "piped" })
+        .output()).stdout,
+    ).trim();
+    const dir = await plantHostingTree();
+    try {
+      await grantHostingCaddyRead(dir, undefined, user);
+      const want = `user:${user}:r`;
+      for (const f of ["Caddyfile", "sites/a.caddy", "sites"]) {
+        assertStringIncludes(await acl(join(dir, f)), want);
+      }
+      assertStringIncludes(await acl(join(dir, "sites")), `default:${want}`);
+      await Deno.writeTextFile(join(dir, "sites", "b.caddy"), "x", {
+        mode: 0o640,
+      });
+      assertStringIncludes(await acl(join(dir, "sites", "b.caddy")), want);
+      await Deno.chmod(join(dir, "Caddyfile"), 0o600);
+      // A later chmod 0600 masks the entry away; the next grant restores it.
+      await grantHostingCaddyRead(dir, undefined, user);
+      assertStringIncludes(await acl(join(dir, "Caddyfile")), want);
+    } finally {
+      await Deno.remove(dir, { recursive: true });
+    }
   },
 });

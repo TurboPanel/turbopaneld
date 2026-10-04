@@ -1,10 +1,12 @@
 import type { EnvironmentDeployPayload } from "../contracts/commands-contracts.ts";
+import { safeUrlPath } from "../contracts/config-values.ts";
 import type { ComposeOverlayFragment } from "./compose-overlay.ts";
 import type { ResolvedComposeModel } from "./compose-services.ts";
 import {
   LABEL_ENVIRONMENT,
   LABEL_PROJECT,
   LABEL_RAW_PORT,
+  LABEL_ROUTED,
   LABEL_SERVICE_ID,
 } from "./labels.ts";
 
@@ -137,10 +139,8 @@ function buildRouterRule(hostnames: string[], pathPrefix?: string): string {
     " || ",
   );
   if (!pathPrefix) return hostRule;
-  if (pathPrefix.includes("`") || /[\r\n]/.test(pathPrefix)) {
-    throw new Error("hostings[].pathPrefix contains an unsupported character");
-  }
-  return `(${hostRule}) && PathPrefix(\`${pathPrefix}\`)`;
+  const prefix = safeUrlPath("hostings[].pathPrefix", pathPrefix);
+  return `(${hostRule}) && PathPrefix(\`${prefix}\`)`;
 }
 
 function applyProxyMiddlewareLabels(
@@ -157,7 +157,7 @@ function applyProxyMiddlewareLabels(
     addLabel(
       labels,
       `traefik.http.middlewares.${middlewareId}.stripprefix.prefixes`,
-      proxy.stripPrefix,
+      safeUrlPath("hostings[].proxy.stripPrefix", proxy.stripPrefix),
     );
     middlewares.push(middlewareId);
   }
@@ -328,6 +328,8 @@ export function buildHostingLabelsFragment(input: {
       addLabel(labels, LABEL_RAW_PORT, "true");
     } else {
       applyHttpHostingLabels(labels, hosting);
+      // The shared Traefik only routes containers that carry this label.
+      addLabel(labels, LABEL_ROUTED, "true");
     }
     addLabel(labels, LABEL_PROJECT, payload.projectId);
     addLabel(labels, LABEL_ENVIRONMENT, payload.environmentId);

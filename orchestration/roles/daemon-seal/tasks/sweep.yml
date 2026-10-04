@@ -1,0 +1,31 @@
+---
+# Remove links the daemon planted at the top of a root. Only links NOT owned by
+# root: a link tp planted is tp's, an administrator's (for example
+# `backup -> /mnt/x`) is root's and stays. find -delete never follows a link.
+- name: Check the config and state roots are not links (before the sweep)
+  ansible.builtin.include_tasks: roots-not-links.yml
+
+- name: Remove links the daemon planted at the top of the roots
+  ansible.builtin.command:
+    argv:
+      - find
+      - "{{ item.path }}"
+      - -mindepth
+      - "1"
+      - -maxdepth
+      - "1"
+      - -type
+      - l
+      - "!"
+      - -user
+      - root
+      - -print
+      - -delete
+  when: item.seal | bool
+  loop:
+    - { path: "{{ turbopanel_config_dir }}", seal: "{{ turbopanel_seal_config_root }}" }
+    - { path: "{{ turbopanel_daemon_state_dir }}", seal: "{{ turbopanel_seal_state_root }}" }
+  loop_control:
+    label: "{{ item.path }}"
+  register: _planted_root_links
+  changed_when: _planted_root_links.stdout | default('') | length > 0

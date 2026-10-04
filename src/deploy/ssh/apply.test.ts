@@ -48,6 +48,17 @@ function fail(stderr: string): RunResult {
   return { success: false, stdout: "", stderr };
 }
 
+const SAFE_EFFECTIVE = [
+  "allowtcpforwarding no",
+  "allowstreamlocalforwarding no",
+  "allowagentforwarding no",
+  "x11forwarding no",
+  "permittunnel no",
+  "gatewayports no",
+  "permitopen none",
+  "permitlisten none",
+].join("\n");
+
 type Host = {
   root: string;
   keysDir: string;
@@ -60,6 +71,14 @@ type Host = {
   /** Set to fail `sshd -t`, as a real host would on a bad config. */
   sshdTestError: string | null;
   reloads: string[];
+  /** What `tp-host sftp-chroot status|check|verify` answer. */
+  sftpStatus: RunResult;
+  sftpCheck: RunResult;
+  sftpVerify: RunResult;
+  /** `getent group` lines the fake answers with, by group name. */
+  groups: Map<string, string>;
+  /** `sshd -T -C user=<u>` output by user; absent means a clean answer. */
+  effective: Map<string, string>;
   cleanup: () => Promise<void>;
 };
 
@@ -103,16 +122,37 @@ async function makeHost(
     modes: new Map(),
     sshdTestError: null,
     reloads: [],
+    sftpStatus: ok("off"),
+    sftpCheck: ok(),
+    sftpVerify: ok(),
+    groups: new Map(),
+    effective: new Map(),
     run: () => Promise.resolve(ok()),
     cleanup: () => Deno.remove(root, { recursive: true }),
   };
 
   host.run = async (command, args) => {
     host.calls.push({ command, args: [...args] });
+    if (command === "getent" && args[0] === "group") {
+      const line = host.groups.get(args[1]);
+      return line === undefined ? fail("not found") : ok(line);
+    }
     if (command !== "sudo") return ok();
     const rest = args[0] === "-n" ? args.slice(1) : args;
     const [tool, ...tail] = rest;
 
+    if (tool === "sftp-chroot") {
+      const answers: Record<string, RunResult> = {
+        status: host.sftpStatus,
+        check: host.sftpCheck,
+        verify: host.sftpVerify,
+      };
+      return answers[tail[0]] ?? fail("tp-host: refusing");
+    }
+    if (tool === "sshd" && tail[0] === "-T") {
+      const user = tail[2].slice("user=".length).split(",")[0];
+      return ok(host.effective.get(user) ?? SAFE_EFFECTIVE);
+    }
     if (tool === "sshd") {
       return host.sshdTestError === null ? ok() : fail(host.sshdTestError);
     }
@@ -360,6 +400,7 @@ test("the drop-in sets no global directive before its first Match", () => {
     sftpGroup: "tpsftp",
     shellGroup: "tpshell",
     passwordGroup: "tppasswd",
+    principalGroup: "tpprincipal",
   });
   const directives = contents.split("\n").map((line) => line.trim()).filter(
     (line) => line.length > 0 && !line.startsWith("#"),
@@ -375,6 +416,7 @@ test("the password block precedes the level blocks and sets only one keyword", (
     sftpGroup: "tpsftp",
     shellGroup: "tpshell",
     passwordGroup: "tppasswd",
+    principalGroup: "tpprincipal",
   });
   const directives = contents.split("\n").map((line) => line.trim()).filter(
     (line) => line.length > 0 && !line.startsWith("#"),
@@ -399,6 +441,104 @@ test("the password block precedes the level blocks and sets only one keyword", (
   );
   assert(sftpBlock.includes("PasswordAuthentication no"));
   assert(shellBlock.includes("PasswordAuthentication no"));
+});
+
+function renderedDirectives(): string[] {
+  return sshdDropInContent({
+    sftpGroup: "tpsftp",
+    shellGroup: "tpshell",
+    passwordGroup: "tppasswd",
+    principalGroup: "tpprincipal",
+  }).split("\n").map((line) => line.trim()).filter(
+    (line) => line.length > 0 && !line.startsWith("#"),
+  );
+}
+
+/** Directives of the block that `Match <header>` opens, up to the next Match. */
+function blockOf(directives: string[], header: string): string[] {
+  const start = directives.indexOf(header);
+  if (start < 0) throw new TypeError(`no block ${header}`);
+  const rest = directives.slice(start + 1);
+  const end = rest.findIndex((line) => line.startsWith("Match "));
+  return end < 0 ? rest : rest.slice(0, end);
+}
+
+const keyword = (line: string) => line.split(/\s+/)[0];
+
+const NO_FORWARDING = [
+  "AllowTcpForwarding no",
+  "AllowStreamLocalForwarding no",
+  "PermitOpen none",
+  "PermitListen none",
+  "AllowAgentForwarding no",
+  "X11Forwarding no",
+  "PermitTunnel no",
+  "GatewayPorts no",
+];
+
+test("every principal is matched, after the levels and before `Match all`", () => {
+  const directives = renderedDirectives();
+  // A principal with no SSH level used to match nothing, so the host defaults
+  // applied: its own ~/.ssh/authorized_keys and TCP forwarding into the host.
+  const backstop = directives.indexOf("Match Group tpprincipal");
+  assert(backstop > directives.indexOf("Match Group tpsftp"));
+  assert(backstop > directives.indexOf("Match Group tpshell"));
+  assertEquals(directives.at(-1), "Match all");
+  assert(backstop < directives.indexOf("Match all"));
+});
+
+test("the backstop refuses every sign-in method and every forward", () => {
+  const block = blockOf(renderedDirectives(), "Match Group tpprincipal");
+  for (
+    const line of [
+      "PubkeyAuthentication no",
+      "PasswordAuthentication no",
+      "KbdInteractiveAuthentication no",
+      // Never the home: a key the tenant writes there must not be consulted.
+      "AuthorizedKeysFile none",
+      "AuthorizedKeysCommand none",
+      ...NO_FORWARDING,
+    ]
+  ) {
+    assert(block.includes(line), `backstop is missing \`${line}\``);
+  }
+});
+
+test("the backstop sets no keyword a level block leaves unset", () => {
+  // sshd keeps the first value per keyword across matching blocks, so a level
+  // member is unaffected by the backstop ONLY if each level block already set
+  // every keyword the backstop sets. A `ForceCommand` or `ChrootDirectory`
+  // added to the backstop would leak onto tpshell members.
+  const directives = renderedDirectives();
+  const backstop = blockOf(directives, "Match Group tpprincipal").map(keyword);
+  for (const level of ["Match Group tpsftp", "Match Group tpshell"]) {
+    const levelKeywords = new Set(blockOf(directives, level).map(keyword));
+    for (const word of backstop) {
+      assert(levelKeywords.has(word), `${level} does not set ${word}`);
+    }
+  }
+});
+
+test("both levels forbid every kind of forwarding", () => {
+  const directives = renderedDirectives();
+  for (const level of ["Match Group tpsftp", "Match Group tpshell"]) {
+    const block = blockOf(directives, level);
+    for (const line of NO_FORWARDING) {
+      assert(block.includes(line), `${level} is missing \`${line}\``);
+    }
+  }
+});
+
+test("the applied drop-in carries the registry's every-principal group", async () => {
+  const host = await makeHost();
+  try {
+    // No keys at all: the drop-in is still what makes in-home keys inert.
+    await apply(host, []);
+    const contents = await Deno.readTextFile(host.dropInPath);
+    assertStringIncludes(contents, "Match Group tpprincipal\n");
+  } finally {
+    await host.cleanup();
+  }
 });
 
 test("sshd reloads only when the drop-in changed, and never restarts", async () => {
@@ -708,6 +848,7 @@ test("a missing sshd_config fails without writing a drop-in", async () => {
     return await inner(command, args);
   };
   try {
+    await Deno.remove(host.sshdConfigPath);
     const error = await assertRejects(() =>
       apply(host, [{ username: "appuser", keys: [ED25519] }])
     );
@@ -888,6 +1029,356 @@ test("a failed key-directory listing leaves existing files in place", async () =
     const result = await apply(host, []);
     assertEquals(result.removedPrincipals, []);
     await Deno.stat(authorizedKeysPath("appuser", host.keysDir));
+  } finally {
+    await host.cleanup();
+  }
+});
+
+// --- SFTP chroot ------------------------------------------------------------
+
+function switchOn(host: Host, root = "/srv/users"): void {
+  host.sftpStatus = ok(`on ${root}`);
+}
+
+function applyJailed(host: Host, tpHostManaged = true) {
+  return applySshAccess(
+    [{ username: "appuser", keys: [ED25519] }],
+    {
+      authorizedKeysDir: host.keysDir,
+      sshdConfigPath: host.sshdConfigPath,
+      sshdDropInPath: host.dropInPath,
+      tpHostManaged,
+    },
+    host.run,
+  );
+}
+
+async function appliedDirectives(host: Host): Promise<string[]> {
+  return (await Deno.readTextFile(host.dropInPath)).split("\n").map((line) =>
+    line.trim()
+  ).filter((line) => line.length > 0 && !line.startsWith("#"));
+}
+
+const sftpCalls = (host: Host) =>
+  host.calls.filter((call) => call.args.includes("sftp-chroot")).map((call) =>
+    call.args.at(-1)
+  );
+
+test("with the switch off nothing is jailed and no layout check runs", async () => {
+  const host = await makeHost();
+  try {
+    const result = await applyJailed(host);
+    assertEquals(result.sftpChroot, false);
+    const directives = await appliedDirectives(host);
+    assert(!directives.some((line) => line.startsWith("ChrootDirectory")));
+    assert(
+      blockOf(directives, "Match Group tpsftp").includes(
+        "ForceCommand internal-sftp",
+      ),
+    );
+    assertEquals(sftpCalls(host), ["status"]);
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("a host without tp-host has no switch and is never asked", async () => {
+  const host = await makeHost();
+  try {
+    switchOn(host);
+    assertEquals((await applyJailed(host, false)).sftpChroot, false);
+    assertEquals(sftpCalls(host), []);
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("with the switch on, tpsftp members are jailed in their home root and start in home/", async () => {
+  const host = await makeHost();
+  try {
+    switchOn(host);
+    const result = await applyJailed(host);
+    assertEquals(result.sftpChroot, true);
+    assertEquals(result.warnings, []);
+    const directives = await appliedDirectives(host);
+    const sftp = blockOf(directives, "Match Group tpsftp");
+    // %u, not %h: the passwd home is <root>/<user>/home, below the jail.
+    assert(sftp.includes("ChrootDirectory /srv/users/%u"));
+    assert(sftp.includes("ForceCommand internal-sftp -d /home"));
+    // A shell needs a userland inside a jail, and the backstop would carry
+    // the chroot onto shell members too.
+    for (const other of ["Match Group tpshell", "Match Group tpprincipal"]) {
+      assert(
+        !blockOf(directives, other).some((line) =>
+          line.startsWith("ChrootDirectory")
+        ),
+        `${other} must never be jailed`,
+      );
+    }
+    // The effective config is verified before sshd is reloaded.
+    assertEquals(sftpCalls(host), ["status", "check", "verify"]);
+    assertEquals(host.reloads, ["ssh.service"]);
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("the chroot root is the one tp-host validated, not the daemon's environment", async () => {
+  const host = await makeHost();
+  try {
+    switchOn(host, "/data/homes");
+    await applyJailed(host);
+    assert(
+      blockOf(await appliedDirectives(host), "Match Group tpsftp").includes(
+        "ChrootDirectory /data/homes/%u",
+      ),
+    );
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("an unreadable switch aborts the reconcile instead of unjailing", async () => {
+  for (
+    const status of [
+      fail("sudo: a password is required"),
+      ok("on"),
+      ok("on relative/path"),
+      ok("on /srv/users\nextra"),
+      ok("maybe"),
+    ]
+  ) {
+    const host = await makeHost();
+    try {
+      host.sftpStatus = status;
+      const error = await assertRejects(() => applyJailed(host));
+      assertStringIncludes(String(error), "SFTP chroot switch");
+      await assertRejects(() => Deno.stat(host.dropInPath));
+      assertEquals(host.reloads, []);
+    } finally {
+      await host.cleanup();
+    }
+  }
+});
+
+test("a member that drifts off the layout keeps the jail and is reported", async () => {
+  const host = await makeHost();
+  try {
+    switchOn(host);
+    host.sftpCheck = fail("");
+    host.sftpCheck.stdout = "bob: passwd home is not /srv/users/bob/home\n";
+    const result = await applyJailed(host);
+    // Failing closed for bob, not open for everyone.
+    assertEquals(result.sftpChroot, true);
+    assert(
+      blockOf(await appliedDirectives(host), "Match Group tpsftp").includes(
+        "ChrootDirectory /srv/users/%u",
+      ),
+    );
+    assertEquals(result.warnings.length, 1);
+    assertStringIncludes(result.warnings[0], "bob: passwd home is not");
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("a jailed drop-in sshd refuses is rolled back to the unjailed one", async () => {
+  const host = await makeHost();
+  try {
+    await applyJailed(host);
+    const unjailed = await Deno.readTextFile(host.dropInPath);
+    host.reloads.length = 0;
+
+    switchOn(host);
+    host.sshdTestError = "ChrootDirectory: bad ownership or modes";
+    const error = await assertRejects(() => applyJailed(host));
+    assertStringIncludes(String(error), "rolled back");
+    assertEquals(await Deno.readTextFile(host.dropInPath), unjailed);
+    assertEquals(host.reloads, []);
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("a jail the effective sshd config does not apply is rolled back", async () => {
+  const host = await makeHost();
+  try {
+    await applyJailed(host);
+    const unjailed = await Deno.readTextFile(host.dropInPath);
+    host.reloads.length = 0;
+
+    switchOn(host);
+    host.sftpVerify = fail("");
+    host.sftpVerify.stdout =
+      "alice: effective ChrootDirectory is not /srv/users/%u\n";
+    const error = await assertRejects(() => applyJailed(host));
+    assertStringIncludes(String(error), "rolled back");
+    assertStringIncludes(String(error), "effective ChrootDirectory");
+    assertEquals(await Deno.readTextFile(host.dropInPath), unjailed);
+    assertEquals(host.reloads, []);
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("a world-readable sshd_config is read without asking tp-host", async () => {
+  const host = await makeHost();
+  try {
+    // tp-host's `cat` serves only TurboPanel's trees and refuses sshd_config.
+    const fake = host.run;
+    host.run = (command, args) =>
+      args.includes(host.sshdConfigPath) && args.includes("cat")
+        ? Promise.resolve(fail(`tp-host: refusing path ${host.sshdConfigPath}`))
+        : fake(command, args);
+    const result = await apply(host, [{
+      username: "appuser",
+      keys: [ED25519],
+    }]);
+    assertEquals(result.sshdReloaded, true);
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("a refused rewrite restores the previous drop-in tp-host would not cat", async () => {
+  const host = await makeHost();
+  try {
+    await apply(host, [{ username: "appuser", keys: [ED25519] }]);
+    const good = await Deno.readTextFile(host.dropInPath);
+    // tp-host's `cat` serves only TurboPanel's trees and refuses the drop-in.
+    const fake = host.run;
+    host.run = (command, args) =>
+      args.includes(host.dropInPath) && args.includes("cat")
+        ? Promise.resolve(fail(`tp-host: refusing path ${host.dropInPath}`))
+        : fake(command, args);
+    host.sshdTestError = "line 3: Bad configuration option";
+    await assertRejects(() =>
+      applySshAccess(
+        [{ username: "appuser", keys: [ED25519] }],
+        {
+          authorizedKeysDir: join(host.root, "etc/ssh/turbopanel/moved"),
+          sshdConfigPath: host.sshdConfigPath,
+          sshdDropInPath: host.dropInPath,
+        },
+        host.run,
+      )
+    );
+    assertEquals(await Deno.readTextFile(host.dropInPath), good);
+  } finally {
+    await host.cleanup();
+  }
+});
+
+function withLevels(host: Host) {
+  host.groups.set("tpsftp", "tpsftp:x:9986:zed,alice");
+  host.groups.set("tpshell", "tpshell:x:9987:bob");
+  host.groups.set("tpprincipal", "tpprincipal:x:9985:alice,bob,carol,zed");
+}
+
+const effectiveCalls = (host: Host) =>
+  host.calls.filter((call) => call.args.includes("-T")).map((call) =>
+    call.args.at(-1)
+  );
+
+test("forwarding is asserted for one sample per level before sshd reloads", async () => {
+  const host = await makeHost();
+  try {
+    withLevels(host);
+    await apply(host, [{ username: "alice", keys: [ED25519] }]);
+    assertEquals(effectiveCalls(host), [
+      "user=alice,host=localhost,addr=127.0.0.1",
+      "user=bob,host=localhost,addr=127.0.0.1",
+      "user=carol,host=localhost,addr=127.0.0.1",
+    ]);
+    assertEquals(host.reloads, ["ssh.service"]);
+  } finally {
+    await host.cleanup();
+  }
+});
+
+for (
+  const [level, user, setting] of [
+    ["sftp-only", "alice", "allowtcpforwarding yes"],
+    ["shell", "bob", "allowagentforwarding yes"],
+    ["principal-only", "carol", "x11forwarding yes"],
+    ["shell", "bob", "permitopen any"],
+    ["sftp-only", "alice", "gatewayports clientspecified"],
+    ["principal-only", "carol", "permittunnel point-to-point"],
+  ] as const
+) {
+  test(`${level} account with ${setting} refuses the apply and rolls back`, async () => {
+    const host = await makeHost();
+    try {
+      withLevels(host);
+      await apply(host, [{ username: "alice", keys: [ED25519] }]);
+      const before = await Deno.readTextFile(host.dropInPath);
+      host.reloads.length = 0;
+      host.effective.set(
+        user,
+        SAFE_EFFECTIVE.split("\n").filter((line) =>
+          !line.startsWith(setting.split(" ")[0] + " ")
+        ).concat(setting).join("\n"),
+      );
+      // A change that would be written, so the check runs.
+      host.groups.set("tpprincipal", "tpprincipal:x:9985:alice,bob,carol,zed");
+      await Deno.writeTextFile(host.dropInPath, before + "# drift\n");
+      const error = await assertRejects(
+        () => apply(host, [{ username: "alice", keys: [ED25519] }]),
+        Error,
+      );
+      assertStringIncludes(error.message, "rolled back");
+      assertStringIncludes(error.message, `${user}: ${setting.split(" ")[0]}`);
+      assertEquals(host.reloads, []);
+      assertEquals(
+        await Deno.readTextFile(host.dropInPath),
+        before + "# drift\n",
+      );
+    } finally {
+      await host.cleanup();
+    }
+  });
+}
+
+test("a missing forwarding keyword in sshd -T output fails closed", async () => {
+  const host = await makeHost();
+  try {
+    withLevels(host);
+    host.effective.set("alice", "allowtcpforwarding no");
+    const error = await assertRejects(
+      () => apply(host, [{ username: "alice", keys: [ED25519] }]),
+      Error,
+    );
+    assertStringIncludes(error.message, "alice: permitopen not reported");
+    assertEquals(host.reloads, []);
+    await Deno.stat(host.dropInPath).then(
+      () => {
+        throw new Error("drop-in left behind");
+      },
+      () => {},
+    );
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("hostile group members are never passed to sshd -T", async () => {
+  const host = await makeHost();
+  try {
+    host.groups.set("tpsftp", "tpsftp:x:9986:-oProxyCommand=x,a b,ok");
+    await apply(host, [{ username: "ok", keys: [ED25519] }]);
+    assertEquals(effectiveCalls(host), [
+      "user=ok,host=localhost,addr=127.0.0.1",
+    ]);
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("levels with no account are skipped", async () => {
+  const host = await makeHost();
+  try {
+    await apply(host, [{ username: "alice", keys: [ED25519] }]);
+    assertEquals(effectiveCalls(host), []);
   } finally {
     await host.cleanup();
   }

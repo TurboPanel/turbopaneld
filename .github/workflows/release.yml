@@ -78,6 +78,9 @@ jobs:
           fi
 
   build:
+    # Signing key = environment secret TURBOPANEL_RELEASE_SIGNING_KEY, one environment per
+    # channel: `canary` (trunk), `rc` (staging), `release` (live, owner approval).
+    environment: ${{ inputs.channel == 'canary' && 'canary' || (inputs.channel == 'rc' && 'rc' || 'release') }}
     needs: prepare
     runs-on: ubuntu-latest
     env:
@@ -154,6 +157,20 @@ jobs:
       - name: Compile linux-arm64 binary
         run: deno task compile:linux-arm64
 
+      - name: Generate the SBOM
+        # Built from deno.lock, which the --frozen compile above proved is
+        # exactly what ships. Kept as a workflow artifact beside the release
+        # assets (not inside them: the signed manifest lists the assets).
+        run: deno task sbom
+
+      - name: Upload the SBOM
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: turbopaneld-sbom
+          path: dist/sbom.cdx.json
+          if-no-files-found: error
+          retention-days: 90
+
       - name: Bundle JS fallback
         run: deno task bundle:js
 
@@ -210,7 +227,7 @@ jobs:
           ARTIFACT_BASE_URL: https://github.com/${{ github.repository }}/releases/download/v${{ needs.prepare.outputs.version }}
           # PKCS#8 PEM of the offline release signing key; the generator refuses
           # to write an unsigned manifest (src/update/signing.ts).
-          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+          RELEASE_SIGNING_KEY: ${{ secrets.TURBOPANEL_RELEASE_SIGNING_KEY }}
         run: |
           deno run --allow-env --allow-read --allow-write scripts/generate-channel-manifest.ts \
             release-assets \

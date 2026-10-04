@@ -9,6 +9,7 @@
  */
 
 import { resolveLayout } from "../paths/layout.ts";
+import { writeDaemonFile } from "../permissions/daemon-files.ts";
 import {
   fingerprintPemCertificate,
   invalidatePlatformCaHttpClient,
@@ -36,13 +37,11 @@ async function defaultReadTextFile(path: string): Promise<string> {
 }
 
 async function atomicWritePem(path: string, contents: string): Promise<void> {
-  const tmp = `${path}.tmp.${Deno.pid}`;
-  await Deno.writeTextFile(
-    tmp,
+  await writeDaemonFile(
+    path,
     contents.endsWith("\n") ? contents : `${contents}\n`,
+    CA_FILE_MODE,
   );
-  await Deno.chmod(tmp, CA_FILE_MODE);
-  await Deno.rename(tmp, path);
 }
 
 async function fingerprintsInPem(pem: string): Promise<string[]> {

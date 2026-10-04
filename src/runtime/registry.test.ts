@@ -17,6 +17,7 @@ import {
   runtimeGid,
   runtimeGroup,
   supportedSeries,
+  unsupportedSeriesMessage,
 } from "./registry.ts";
 
 /**
@@ -42,9 +43,10 @@ test("accessGroup and allAccessGroups cover SSH levels", () => {
   assertEquals(accessGroup("sftp"), "tpsftp");
   assertEquals(accessGroup("shell"), "tpshell");
   assertEquals(accessGroup("password"), "tppasswd");
+  assertEquals(accessGroup("principal"), "tpprincipal");
   assertEquals(
     [...allAccessGroups()].sort((a, b) => a.localeCompare(b)),
-    ["tppasswd", "tpsftp", "tpshell"],
+    ["tppasswd", "tpprincipal", "tpsftp", "tpshell"],
   );
 });
 
@@ -62,7 +64,7 @@ test("entitlementSeries uses major.minor for php and major for node", () => {
 
 test("supportedSeries and defaultSeries come from the registry", () => {
   assertEquals(supportedSeries("php"), ["8.3", "8.4"]);
-  assertEquals(supportedSeries("node"), ["22", "24"]);
+  assertEquals(supportedSeries("node"), ["22", "24", "26"]);
   assertEquals(defaultSeries("php"), "8.4");
   assertEquals(defaultSeries("node"), "24");
 });
@@ -76,20 +78,30 @@ test("runtimeGroup and runtimeGid resolve known series and unknown as undefined"
   assertEquals(runtimeGid("node", "24.17.0"), 9923);
   assertEquals(runtimeGroup("node", "22"), "tpnode22");
   assertEquals(runtimeGid("node", "22"), 9921);
+  assertEquals(runtimeGroup("node", "26.10.0"), "tpnode26");
+  assertEquals(runtimeGid("node", "26"), 9925);
   assertEquals(runtimeGroup("php", "7.4"), undefined);
   assertEquals(runtimeGid("node", "18"), undefined);
 });
 
 test("allRuntimeGroups and allManagedGroups are the containment sets", () => {
   const runtime = [...allRuntimeGroups()].sort((a, b) => a.localeCompare(b));
-  assertEquals(runtime, ["tpnode22", "tpnode24", "tpphp83", "tpphp84"]);
+  assertEquals(runtime, [
+    "tpnode22",
+    "tpnode24",
+    "tpnode26",
+    "tpphp83",
+    "tpphp84",
+  ]);
   const managed = [...allManagedGroups()].sort((a, b) => a.localeCompare(b));
   assertEquals(managed, [
     "tpnode22",
     "tpnode24",
+    "tpnode26",
     "tppasswd",
     "tpphp83",
     "tpphp84",
+    "tpprincipal",
     "tpsftp",
     "tpshell",
   ]);
@@ -112,4 +124,12 @@ test("phpBinaryPaths and phpFpmUnit are series-scoped", () => {
     cli: "/usr/bin/php8.4",
   });
   assertEquals(phpFpmUnit("8.3"), "turbopanel-php-fpm@8.3");
+});
+
+test("unsupportedSeriesMessage names the supported series, and is silent for known ones", () => {
+  assertEquals(unsupportedSeriesMessage("node", "26.10.0"), undefined);
+  assertEquals(
+    unsupportedSeriesMessage("node", "27"),
+    "node 27 is not a supported node version on this server. Supported series: 22, 24, 26.",
+  );
 });

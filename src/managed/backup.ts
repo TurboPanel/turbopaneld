@@ -15,8 +15,10 @@ import { crypto } from "@std/crypto";
 import { encodeHex } from "@std/encoding/hex";
 import type {
   EnvironmentDeployContainer,
+  ManagedBackupArtifactExtension,
   ManagedBackupPayload,
   ManagedBackupResult,
+  ManagedEngineCode,
   ManagedRestorePayload,
   ManagedRestoreResult,
 } from "../contracts/commands-contracts.ts";
@@ -24,20 +26,25 @@ import { ensureDocker as defaultEnsureDocker } from "../deploy/ensure-docker.ts"
 import { spawnDockerStreaming } from "../deploy/docker-cli.ts";
 import { sanitizeForLog } from "../util/logger.ts";
 import { forEachSequential } from "../util/sequential.ts";
-import { resolveLayout } from "../paths/layout.ts";
+import { type LayoutPaths, resolveLayout } from "../paths/layout.ts";
 import {
   collectManagedContainers,
   resolveSoleEngineContainer,
 } from "./containers.ts";
 import { getManagedEngineRuntime } from "./engines/index.ts";
 import { ManagedBackupNotSupportedError } from "./engines/types.ts";
-import type { ManagedEngineContext } from "./engines/types.ts";
+import type {
+  ManagedEngineBackupRuntime,
+  ManagedEngineContext,
+  ManagedEngineRuntime,
+} from "./engines/types.ts";
 import {
+  managedBackupArtifactDir,
   managedBackupArtifactPath,
-  managedBackupsDir,
   managedComposeProject,
   SAFE_MANAGED_ID_RE,
 } from "./engine-paths.ts";
+import { withManagedTargetLock } from "./target-lock.ts";
 
 type StreamExecOutcome = { success: boolean; stderr: string };
 
@@ -52,13 +59,16 @@ function formatPipeError(err: unknown): string {
   }
 }
 
-/** Overridable for tests so they can exercise path/mode/prune/checksum logic without Docker. */
-export type ManagedBackupHandlerDeps = {
-  now?: () => Date;
+/** How the engine container is reached; overridable for tests without Docker. */
+export type EngineAccessDeps = {
   ensureDocker?: () => Promise<void>;
   resolveContainer?: (
     project: string,
   ) => Promise<EnvironmentDeployContainer>;
+};
+
+/** Overridable for tests so they can exercise path/mode/prune/checksum logic without Docker. */
+export type ManagedBackupArtifactDeps = EngineAccessDeps & {
   /** Pipes dump stdout into `destination`; never buffers the payload. */
   runDump?: (
     argv: string[],
@@ -66,17 +76,20 @@ export type ManagedBackupHandlerDeps = {
   ) => Promise<StreamExecOutcome>;
 };
 
-export type ManagedRestoreHandlerDeps = {
+export type ManagedBackupHandlerDeps = ManagedBackupArtifactDeps & {
   now?: () => Date;
-  ensureDocker?: () => Promise<void>;
-  resolveContainer?: (
-    project: string,
-  ) => Promise<EnvironmentDeployContainer>;
+};
+
+export type ManagedRestoreArtifactDeps = EngineAccessDeps & {
   /** Pipes `source` into restore stdin; never buffers the payload. */
   runRestore?: (
     argv: string[],
     source: ReadableStream<Uint8Array>,
   ) => Promise<StreamExecOutcome>;
+};
+
+export type ManagedRestoreHandlerDeps = ManagedRestoreArtifactDeps & {
+  now?: () => Date;
 };
 
 async function readStreamText(
@@ -213,15 +226,22 @@ async function pathExists(path: string): Promise<boolean> {
   }
 }
 
-async function digestFileSha256(path: string): Promise<string> {
+export async function digestFileSha256(path: string): Promise<string> {
   const file = await Deno.open(path, { read: true });
   const digest = await crypto.subtle.digest("SHA-256", file.readable);
   return encodeHex(new Uint8Array(digest));
 }
 
-type BackupArtifactEntry = { id: string; path: string; mtimeMs: number };
+/** One artifact file in a backup directory. */
+export type BackupArtifactEntry = {
+  id: string;
+  path: string;
+  mtimeMs: number;
+  sizeBytes: number;
+};
 
-async function listBackupArtifacts(
+/** Artifacts (`<id>.<ext>`, safe ids only) directly in `dir`; a missing dir is empty. */
+export async function listBackupArtifacts(
   dir: string,
   ext: string,
 ): Promise<BackupArtifactEntry[]> {
@@ -235,7 +255,12 @@ async function listBackupArtifacts(
       if (id.length === 0 || !SAFE_MANAGED_ID_RE.test(id)) continue;
       const path = `${dir}/${entry.name}`;
       const stat = await Deno.stat(path);
-      entries.push({ id, path, mtimeMs: stat.mtime?.getTime() ?? 0 });
+      entries.push({
+        id,
+        path,
+        mtimeMs: stat.mtime?.getTime() ?? 0,
+        sizeBytes: stat.size,
+      });
     }
   } catch (err) {
     if (!(err instanceof Deno.errors.NotFound)) throw err;
@@ -244,7 +269,7 @@ async function listBackupArtifacts(
 }
 
 /** Keep the newest `retentionKeep` artifacts by mtime; unlink the rest. Returns pruned ids. */
-async function pruneBackupArtifacts(
+export async function pruneBackupArtifacts(
   dir: string,
   ext: string,
   retentionKeep: number | undefined,
@@ -297,7 +322,7 @@ export function buildEngineContext(
   };
 }
 
-async function removeIfExists(path: string): Promise<void> {
+export async function removeIfExists(path: string): Promise<void> {
   try {
     await Deno.remove(path);
   } catch (err) {
@@ -305,62 +330,90 @@ async function removeIfExists(path: string): Promise<void> {
   }
 }
 
-export async function handleManagedBackup(
-  payload: ManagedBackupPayload,
-  daemonReceivedAt: string,
-  deps?: ManagedBackupHandlerDeps,
-): Promise<ManagedBackupResult> {
-  if (!SAFE_MANAGED_ID_RE.test(payload.managedId)) {
+/** A managed engine runtime known to support backup/restore. */
+export type BackupCapableEngine = ManagedEngineRuntime & {
+  backup: ManagedEngineBackupRuntime;
+};
+
+function assertSafeManagedId(managedId: string): void {
+  if (!SAFE_MANAGED_ID_RE.test(managedId)) {
     throw new Error("managedId contains unsupported characters");
   }
+}
 
-  const layout = resolveLayout(Deno.env.toObject());
-  const engine = getManagedEngineRuntime(payload.engine);
-  if (!engine.backup) {
-    throw new ManagedBackupNotSupportedError(payload.engine);
+/**
+ * Resolve `engine` and check it can back up to `artifactExtension`. `verb`
+ * names the operation in the mismatch error (`managed.backup` /
+ * `managed.restore`).
+ */
+export function resolveBackupEngine(
+  engine: ManagedEngineCode,
+  artifactExtension: ManagedBackupArtifactExtension,
+  verb: string,
+): BackupCapableEngine {
+  const runtime = getManagedEngineRuntime(engine);
+  const backup = runtime.backup;
+  if (!backup) {
+    throw new ManagedBackupNotSupportedError(engine);
   }
-  if (engine.backup.artifactExtension !== payload.artifactExtension) {
+  if (backup.artifactExtension !== artifactExtension) {
     throw new Error(
-      `managed.backup artifactExtension mismatch: expected ${engine.backup.artifactExtension}`,
+      `${verb} artifactExtension mismatch: expected ${backup.artifactExtension}`,
     );
   }
+  return { ...runtime, backup };
+}
 
-  const now = deps?.now ?? (() => new Date());
-  const artifactPath = managedBackupArtifactPath(
-    layout,
-    payload.managedId,
-    payload.backupId,
-    payload.artifactExtension,
-  );
+/** One backup to write. `policyId` marks a scheduled backup (see {@link managedBackupArtifactDir}). */
+export type ManagedBackupArtifactRequest = {
+  managedId: string;
+  backupId: string;
+  artifactExtension: ManagedBackupArtifactExtension;
+  database?: string;
+  retentionKeep?: number;
+  policyId?: string;
+};
 
-  if (payload.action === "delete") {
-    await removeIfExists(artifactPath);
-    return {
-      backupId: payload.backupId,
-      deleted: true,
-      completedAt: now().toISOString(),
-    };
-  }
+/** What was written — never the bytes themselves. */
+export type ManagedBackupArtifact = {
+  path: string;
+  sizeBytes: number;
+  checksum: string;
+  database: string;
+  /** Artifact ids removed by the retention prune (same directory only). */
+  pruned: string[];
+};
 
-  const ensureDocker = deps?.ensureDocker ?? defaultEnsureDocker;
+type EngineExecTarget = {
+  containerId: string;
+  ctx: ManagedEngineContext;
+};
+
+async function resolveEngineExecTarget(
+  managedId: string,
+  engine: BackupCapableEngine,
+  deps: EngineAccessDeps,
+): Promise<EngineExecTarget> {
+  const ensureDocker = deps.ensureDocker ?? defaultEnsureDocker;
   await ensureDocker();
+  const resolveContainer = deps.resolveContainer ?? defaultResolveContainer;
+  const container = await resolveContainer(managedComposeProject(managedId));
+  return {
+    containerId: container.containerId,
+    ctx: buildEngineContext(
+      container,
+      engine.rootUsername,
+      engine.defaultDatabase,
+    ),
+  };
+}
 
-  const dir = managedBackupsDir(layout, payload.managedId);
-  await Deno.mkdir(dir, { recursive: true, mode: 0o750 });
-
-  const project = managedComposeProject(payload.managedId);
-  const resolveContainer = deps?.resolveContainer ?? defaultResolveContainer;
-  const container = await resolveContainer(project);
-  const ctx = buildEngineContext(
-    container,
-    engine.rootUsername,
-    engine.defaultDatabase,
-  );
-  const database = payload.database ?? engine.defaultDatabase;
-  const dumpArgv = engine.backup.dumpArgv(ctx, { database });
-
-  const partPath = `${artifactPath}.part`;
-  const runDump = deps?.runDump ?? defaultRunDump;
+/** Stream the dump into `partPath` (0600); on any failure the `.part` file is removed. */
+async function dumpToPartFile(
+  partPath: string,
+  argv: string[],
+  runDump: NonNullable<ManagedBackupArtifactDeps["runDump"]>,
+): Promise<void> {
   const file = await Deno.open(partPath, {
     write: true,
     create: true,
@@ -370,10 +423,7 @@ export async function handleManagedBackup(
 
   let outcome: StreamExecOutcome;
   try {
-    outcome = await runDump(
-      ["exec", "-u", engine.containerUser, container.containerId, ...dumpArgv],
-      file.writable,
-    );
+    outcome = await runDump(argv, file.writable);
   } catch (err) {
     await removeIfExists(partPath);
     throw new Error(
@@ -391,6 +441,47 @@ export async function handleManagedBackup(
       }`,
     );
   }
+}
+
+/**
+ * Write one backup artifact: dump into `<artifact>.part` (0600), checksum it,
+ * rename it into place, then prune the artifact's own directory down to
+ * `retentionKeep`. Shared by the `managed.backup` command and scheduled runs.
+ *
+ * Ids are re-checked here too (the path is built from them), so a second
+ * entry point cannot write outside the engine's backup directory.
+ */
+export async function createManagedBackupArtifact(
+  layout: LayoutPaths,
+  engine: BackupCapableEngine,
+  request: ManagedBackupArtifactRequest,
+  deps: ManagedBackupArtifactDeps = {},
+): Promise<ManagedBackupArtifact> {
+  assertSafeManagedId(request.managedId);
+  const artifactPath = managedBackupArtifactPath(
+    layout,
+    request.managedId,
+    request.backupId,
+    request.artifactExtension,
+    request.policyId,
+  );
+  const target = await resolveEngineExecTarget(request.managedId, engine, deps);
+
+  const dir = managedBackupArtifactDir(
+    layout,
+    request.managedId,
+    request.policyId,
+  );
+  await Deno.mkdir(dir, { recursive: true, mode: 0o750 });
+
+  const database = request.database ?? engine.defaultDatabase;
+  const dumpArgv = engine.backup.dumpArgv(target.ctx, { database });
+  const partPath = `${artifactPath}.part`;
+  await dumpToPartFile(
+    partPath,
+    ["exec", "-u", engine.containerUser, target.containerId, ...dumpArgv],
+    deps.runDump ?? defaultRunDump,
+  );
 
   const checksum = await digestFileSha256(partPath);
   const stat = await Deno.stat(partPath);
@@ -399,90 +490,145 @@ export async function handleManagedBackup(
 
   const pruned = await pruneBackupArtifacts(
     dir,
+    request.artifactExtension,
+    request.retentionKeep,
+    request.backupId,
+  );
+  return {
+    path: artifactPath,
+    sizeBytes: stat.size,
+    checksum,
+    database,
+    pruned,
+  };
+}
+
+export async function handleManagedBackup(
+  payload: ManagedBackupPayload,
+  daemonReceivedAt: string,
+  deps?: ManagedBackupHandlerDeps,
+): Promise<ManagedBackupResult> {
+  assertSafeManagedId(payload.managedId);
+
+  const layout = resolveLayout(Deno.env.toObject());
+  const engine = resolveBackupEngine(
+    payload.engine,
     payload.artifactExtension,
-    payload.retentionKeep,
-    payload.backupId,
+    "managed.backup",
+  );
+  const now = deps?.now ?? (() => new Date());
+
+  if (payload.action === "delete") {
+    await removeIfExists(
+      managedBackupArtifactPath(
+        layout,
+        payload.managedId,
+        payload.backupId,
+        payload.artifactExtension,
+      ),
+    );
+    return {
+      backupId: payload.backupId,
+      deleted: true,
+      completedAt: now().toISOString(),
+    };
+  }
+
+  const artifact = await withManagedTargetLock(
+    layout,
+    payload.managedId,
+    () =>
+      createManagedBackupArtifact(
+        layout,
+        engine,
+        {
+          managedId: payload.managedId,
+          backupId: payload.backupId,
+          artifactExtension: payload.artifactExtension,
+          database: payload.database,
+          retentionKeep: payload.retentionKeep,
+        },
+        deps,
+      ),
   );
 
   const result: ManagedBackupResult = {
     backupId: payload.backupId,
-    path: artifactPath,
-    sizeBytes: stat.size,
-    checksum,
+    path: artifact.path,
+    sizeBytes: artifact.sizeBytes,
+    checksum: artifact.checksum,
     completedAt: now().toISOString(),
-    database,
+    database: artifact.database,
     summary:
       `managed.backup completed for ${payload.managedId} (received ${daemonReceivedAt})`,
   };
-  if (pruned.length > 0) result.pruned = pruned;
+  if (artifact.pruned.length > 0) result.pruned = artifact.pruned;
   return result;
 }
 
-export async function handleManagedRestore(
-  payload: ManagedRestorePayload,
-  daemonReceivedAt: string,
-  deps?: ManagedRestoreHandlerDeps,
-): Promise<ManagedRestoreResult> {
-  if (!SAFE_MANAGED_ID_RE.test(payload.managedId)) {
-    throw new Error("managedId contains unsupported characters");
-  }
+/** One artifact to restore. `policyId` locates a scheduled backup's artifact. */
+export type ManagedRestoreArtifactRequest = {
+  managedId: string;
+  backupId: string;
+  artifactExtension: ManagedBackupArtifactExtension;
+  checksum: string;
+  sizeBytes?: number;
+  database?: string;
+  policyId?: string;
+};
 
-  const layout = resolveLayout(Deno.env.toObject());
-  const engine = getManagedEngineRuntime(payload.engine);
-  if (!engine.backup) {
-    throw new ManagedBackupNotSupportedError(payload.engine);
-  }
-  if (engine.backup.artifactExtension !== payload.artifactExtension) {
-    throw new Error(
-      `managed.restore artifactExtension mismatch: expected ${engine.backup.artifactExtension}`,
-    );
-  }
-
-  const now = deps?.now ?? (() => new Date());
-  const artifactPath = managedBackupArtifactPath(
-    layout,
-    payload.managedId,
-    payload.backupId,
-    payload.artifactExtension,
-  );
-
+/** Size and SHA-256 are checked against the request before the engine is touched. */
+async function assertArtifactMatches(
+  artifactPath: string,
+  request: ManagedRestoreArtifactRequest,
+): Promise<void> {
   if (!(await pathExists(artifactPath))) {
     throw new Error(
-      `managed.restore backup artifact not found: ${payload.backupId}`,
+      `managed.restore backup artifact not found: ${request.backupId}`,
     );
   }
 
   const stat = await Deno.stat(artifactPath);
-  if (payload.sizeBytes !== undefined && stat.size !== payload.sizeBytes) {
+  if (request.sizeBytes !== undefined && stat.size !== request.sizeBytes) {
     throw new Error(
-      `managed.restore backup artifact size mismatch: expected ${payload.sizeBytes}, found ${stat.size}`,
+      `managed.restore backup artifact size mismatch: expected ${request.sizeBytes}, found ${stat.size}`,
     );
   }
 
   const checksum = await digestFileSha256(artifactPath);
-  if (checksum !== payload.checksum) {
+  if (checksum !== request.checksum) {
     throw new Error("managed.restore checksum mismatch — refusing to restore");
   }
+}
 
-  const ensureDocker = deps?.ensureDocker ?? defaultEnsureDocker;
-  await ensureDocker();
-
-  const project = managedComposeProject(payload.managedId);
-  const resolveContainer = deps?.resolveContainer ?? defaultResolveContainer;
-  const container = await resolveContainer(project);
-  const ctx = buildEngineContext(
-    container,
-    engine.rootUsername,
-    engine.defaultDatabase,
+/**
+ * Verify an artifact (size, SHA-256) and stream it into the running engine.
+ * Returns the database it was restored into.
+ */
+export async function restoreManagedBackupArtifact(
+  layout: LayoutPaths,
+  engine: BackupCapableEngine,
+  request: ManagedRestoreArtifactRequest,
+  deps: ManagedRestoreArtifactDeps = {},
+): Promise<string> {
+  assertSafeManagedId(request.managedId);
+  const artifactPath = managedBackupArtifactPath(
+    layout,
+    request.managedId,
+    request.backupId,
+    request.artifactExtension,
+    request.policyId,
   );
-  const database = payload.database ?? engine.defaultDatabase;
-  const restoreArgv = engine.backup.restoreArgv(ctx, { database });
+  await assertArtifactMatches(artifactPath, request);
 
-  const runRestore = deps?.runRestore ?? defaultRunRestore;
+  const target = await resolveEngineExecTarget(request.managedId, engine, deps);
+  const database = request.database ?? engine.defaultDatabase;
+  const restoreArgv = engine.backup.restoreArgv(target.ctx, { database });
+
+  const runRestore = deps.runRestore ?? defaultRunRestore;
   const source = await Deno.open(artifactPath, { read: true });
-
   const outcome = await runRestore(
-    ["exec", "-i", container.containerId, ...restoreArgv],
+    ["exec", "-i", target.containerId, ...restoreArgv],
     source.readable,
   );
 
@@ -493,6 +639,43 @@ export async function handleManagedRestore(
       }`,
     );
   }
+  return database;
+}
+
+export async function handleManagedRestore(
+  payload: ManagedRestorePayload,
+  daemonReceivedAt: string,
+  deps?: ManagedRestoreHandlerDeps,
+): Promise<ManagedRestoreResult> {
+  assertSafeManagedId(payload.managedId);
+
+  const layout = resolveLayout(Deno.env.toObject());
+  const engine = resolveBackupEngine(
+    payload.engine,
+    payload.artifactExtension,
+    "managed.restore",
+  );
+  const now = deps?.now ?? (() => new Date());
+
+  const database = await withManagedTargetLock(
+    layout,
+    payload.managedId,
+    () =>
+      restoreManagedBackupArtifact(
+        layout,
+        engine,
+        {
+          managedId: payload.managedId,
+          backupId: payload.backupId,
+          artifactExtension: payload.artifactExtension,
+          checksum: payload.checksum,
+          sizeBytes: payload.sizeBytes,
+          database: payload.database,
+          policyId: payload.policyId,
+        },
+        deps,
+      ),
+  );
 
   return {
     backupId: payload.backupId,

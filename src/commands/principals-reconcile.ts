@@ -42,7 +42,7 @@ export type PrincipalsReconcileDeps = {
   ensureSystemPrincipals?: (
     layout: LayoutPaths,
     principals: PrincipalEnsureSpec[],
-  ) => Promise<void>;
+  ) => Promise<string[] | void>;
   applySshAccess?: (
     principals: readonly PrincipalSshSpec[],
     paths?: SshApplyPaths,
@@ -60,26 +60,27 @@ export async function handlePrincipalsReconcile(
   // keyed by username, so the account has to exist before its key file does —
   // and the access groups have to exist before `sshd` is asked to match on
   // them.
-  await (deps.ensureSystemPrincipals ?? ensureSystemPrincipals)(
-    layout,
-    payload.principals.map((principal) => ({
-      principalId: principal.principalId,
-      username: principal.username,
-      ...(principal.uid === undefined ? {} : { uid: principal.uid }),
-      ...(principal.gid === undefined ? {} : { gid: principal.gid }),
-      ...(principal.home === undefined ? {} : { home: principal.home }),
-      ...(principal.shell === undefined ? {} : { shell: principal.shell }),
-      ...(principal.runtimes === undefined
-        ? {}
-        : { runtimes: principal.runtimes }),
-      ...(principal.accessGroups === undefined
-        ? {}
-        : { accessGroups: principal.accessGroups }),
-      ...(principal.passwordHash === undefined
-        ? {}
-        : { passwordHash: principal.passwordHash }),
-    })),
-  );
+  const groupWarnings = await (deps.ensureSystemPrincipals ??
+    ensureSystemPrincipals)(
+      layout,
+      payload.principals.map((principal) => ({
+        principalId: principal.principalId,
+        username: principal.username,
+        ...(principal.uid === undefined ? {} : { uid: principal.uid }),
+        ...(principal.gid === undefined ? {} : { gid: principal.gid }),
+        ...(principal.home === undefined ? {} : { home: principal.home }),
+        ...(principal.shell === undefined ? {} : { shell: principal.shell }),
+        ...(principal.runtimes === undefined
+          ? {}
+          : { runtimes: principal.runtimes }),
+        ...(principal.accessGroups === undefined
+          ? {}
+          : { accessGroups: principal.accessGroups }),
+        ...(principal.passwordHash === undefined
+          ? {}
+          : { passwordHash: principal.passwordHash }),
+      })),
+    );
 
   const ssh = await (deps.applySshAccess ?? applySshAccess)(
     payload.principals.map((principal) => ({
@@ -106,6 +107,7 @@ export async function handlePrincipalsReconcile(
     keysChanged: ssh.changedPrincipals,
     keysRemoved: ssh.removedPrincipals,
     sshdReloaded: ssh.sshdReloaded,
-    warnings: ssh.warnings,
+    sftpChroot: ssh.sftpChroot,
+    warnings: [...(groupWarnings ?? []), ...ssh.warnings],
   };
 }

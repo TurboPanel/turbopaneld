@@ -69,6 +69,14 @@ export interface DockerInfo {
   DockerRootDir?: string;
 }
 
+/** Docker 29 `*DiskUsage` summary for one object type. */
+export interface DockerTypeUsage {
+  ActiveCount?: number;
+  TotalCount?: number;
+  Reclaimable?: number;
+  TotalSize?: number;
+}
+
 /**
  * Docker Engine `GET /system/df` subset — only the fields the disk-usage
  * rollup consumes (`metrics/collector/docker-usage.ts`).
@@ -83,6 +91,15 @@ export interface DockerInfo {
  * the sum of `Images[].Size`, which double-counts shared layers.
  */
 export interface DockerSystemDf {
+  /**
+   * Docker 29 (API 1.52) per-type summaries. When present they replace the
+   * deprecated per-object arrays below, whose image `Containers` counts and
+   * sizes overcount what a prune reclaims.
+   */
+  ImagesDiskUsage?: DockerTypeUsage;
+  ContainersDiskUsage?: DockerTypeUsage;
+  VolumesDiskUsage?: DockerTypeUsage;
+  BuildCacheDiskUsage?: DockerTypeUsage;
   LayersSize?: number;
   Images?: Array<{
     Size?: number;
@@ -191,9 +208,10 @@ export class DockerClient {
    * never once per metrics tick. Same error-handling shape as {@link info}:
    * a non-2xx response throws rather than returning a partial reading.
    */
-  async systemDf(): Promise<DockerSystemDf> {
+  async systemDf(signal?: AbortSignal): Promise<DockerSystemDf> {
     const response = await this.#fetch(
       "/system/df?type=image&type=container&type=volume&type=build-cache",
+      signal ? { signal } : {},
     );
     if (!response.ok) {
       throw new Error(`docker system df failed: HTTP ${response.status}`);

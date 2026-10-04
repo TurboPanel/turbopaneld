@@ -54,6 +54,32 @@
     mode: "0750"
     remote_src: true
 
+- name: Ensure firewall guard helper is executable
+  ansible.builtin.file:
+    path: "{{ turbopanel_firewall_guard_script }}"
+    owner: root
+    group: "{{ turbopanel_group }}"
+    mode: "0750"
+
+- name: Install firewall rollback guard outside the replaceable orchestration tree
+  ansible.builtin.copy:
+    src: "{{ turbopanel_firewall_guard_script }}"
+    dest: "{{ turbopanel_firewall_guard_bin }}"
+    owner: root
+    group: "{{ turbopanel_group }}"
+    mode: "0750"
+    remote_src: true
+
+# Root-owned, group-executable: the daemon account runs it from a backup
+# timer's service but can never rewrite it.
+- name: Install the scheduled-backup runner wrapper
+  ansible.builtin.template:
+    src: tp-backup-run.j2
+    dest: "{{ turbopanel_backup_run_bin }}"
+    owner: root
+    group: "{{ turbopanel_group }}"
+    mode: "0750"
+
 - name: Install daemon update-guard systemd units
   ansible.builtin.template:
     src: "{{ item.src }}"
@@ -66,6 +92,32 @@
     - { src: turbopaneld-update-guard.timer.j2, dest: turbopaneld-update-guard.timer }
   notify:
     - Reload systemd
+
+# The guard timer is not enabled: the daemon arms it (systemctl restart) only
+# while a ruleset is pending, and a reboot forgets it. No [Install] section on
+# purpose. turbopanel-firewall.service is the boot restore (enabled below).
+- name: Install firewall systemd units
+  ansible.builtin.template:
+    src: "{{ item.src }}"
+    dest: "/etc/systemd/system/{{ item.dest }}"
+    owner: root
+    group: root
+    mode: "0640"
+  loop:
+    - { src: turbopanel-firewall-guard.service.j2, dest: turbopanel-firewall-guard.service }
+    - { src: turbopanel-firewall-guard.timer.j2, dest: turbopanel-firewall-guard.timer }
+    - { src: turbopanel-firewall.service.j2, dest: turbopanel-firewall.service }
+  notify:
+    - Reload systemd
+
+# Boot restore of the confirmed rules. Enabled, not started: starting would only
+# re-load what the kernel already holds, and the condition keeps it a no-op until
+# a ruleset has been confirmed once.
+- name: Enable the firewall boot restore unit
+  ansible.builtin.systemd:
+    name: turbopanel-firewall.service
+    enabled: true
+    daemon_reload: true
 
 - name: Install daemon systemd unit
   ansible.builtin.template:

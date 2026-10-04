@@ -192,3 +192,83 @@ test("DockerUsageSampler.start is idempotent and stop is safe before start", asy
   assertEquals(intervalArmed, 1);
   assertEquals(intervalCleared, 1);
 });
+
+const inertTimers = {
+  setIntervalFn: (() => 0) as unknown as typeof setInterval,
+  clearIntervalFn: (() => {}) as unknown as typeof clearInterval,
+};
+
+test("a hung /system/df is aborted by the timeout and does not freeze the sampler", async () => {
+  let polls = 0;
+  let clock = 0;
+  const sampler = new DockerUsageSampler({
+    timeoutMs: 10,
+    now: () => clock,
+    systemDf: (signal) => {
+      polls += 1;
+      if (polls > 1) return Promise.resolve(df());
+      return new Promise((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(signal.reason));
+      });
+    },
+    ...inertTimers,
+  });
+  await sampler.refresh(); // hangs, aborted after 10 ms
+  assertEquals(sampler.latest(), null);
+  clock += 10 * DOCKER_USAGE_REFRESH_INTERVAL_MS;
+  await sampler.refresh(); // not blocked by the earlier hang
+  assertEquals(sampler.latest()?.usage.layersBytes, 6000);
+});
+
+test("failures back off exponentially to 30 minutes and flag the carried reading stale", async () => {
+  let clock = 0;
+  let polls = 0;
+  let failing = false;
+  const sampler = new DockerUsageSampler({
+    now: () => clock,
+    systemDf: () => {
+      polls += 1;
+      return failing
+        ? Promise.reject(new Error("boom"))
+        : Promise.resolve(df());
+    },
+    ...inertTimers,
+  });
+  await sampler.refresh();
+  assertEquals(sampler.latest()?.stale, undefined);
+  failing = true;
+  await sampler.refresh();
+  assertEquals(sampler.latest()?.stale, true);
+  assertEquals(sampler.latest()?.usage.layersBytes, 6000);
+  const after = polls;
+  // Inside the back-off window (2 x interval): no new poll.
+  clock += DOCKER_USAGE_REFRESH_INTERVAL_MS;
+  await sampler.refresh();
+  assertEquals(polls, after);
+  clock += DOCKER_USAGE_REFRESH_INTERVAL_MS;
+  await sampler.refresh();
+  assertEquals(polls, after + 1);
+  assertEquals(DockerUsageSampler.backoffMs(300_000, 1), 600_000);
+  assertEquals(DockerUsageSampler.backoffMs(300_000, 10), 30 * 60_000);
+  failing = false;
+  clock += 30 * 60_000;
+  await sampler.refresh();
+  assertEquals(sampler.latest()?.stale, undefined);
+});
+
+test("Docker 29 *DiskUsage summaries win over the deprecated per-object arrays", () => {
+  const { usage, dockerUsedBytes } = reduceDockerSystemDf(
+    df({
+      ImagesDiskUsage: { TotalSize: 900, TotalCount: 4, Reclaimable: 100 },
+      ContainersDiskUsage: { TotalSize: 50, TotalCount: 3 },
+      VolumesDiskUsage: { TotalSize: 70, TotalCount: 2, Reclaimable: 20 },
+      BuildCacheDiskUsage: { TotalSize: 30, Reclaimable: 30 },
+    }),
+  );
+  assertEquals(usage.layersBytes, 900);
+  assertEquals(usage.imagesReclaimableBytes, 100);
+  assertEquals(usage.containersBytes, 50);
+  assertEquals(usage.volumesReclaimableBytes, 20);
+  assertEquals(usage.buildCacheReclaimableBytes, 30);
+  assertEquals(dockerUsedBytes, 900 + 50 + 70 + 30);
+});

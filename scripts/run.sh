@@ -21,7 +21,7 @@
 #
 # Typical install (production):
 #   curl -fsSL turbopanel.sh | TURBOPANEL_LICENSE=<b64> sh
-# Optional: TURBOPANEL_HOST, TURBOPANEL_INSECURE_TLS=1, TURBOPANEL_UPDATE_CHANNEL,
+# Optional: TURBOPANEL_HOST, TURBOPANEL_INSECURE_TLS=1, TURBOPANEL_UPDATE_CHANNEL (default release),
 # TURBOPANEL_DL_BASE (dev overlay catalog; never falls back to the public CDN).
 # Flags (--license, --host, …) remain supported for scripts and sudo re-exec.
 #
@@ -46,8 +46,37 @@
 # Manifest and release helpers below must stay in sync with scripts/lib/release-artifacts.sh.
 
 # Shared curl prefixes for HTTPS downloads (and the insecure-TLS install path).
-TP_CURL_FETCH='curl -fsSL'
-TP_CURL_FETCH_INSECURE='curl -fsSLk'
+#
+# Transient failures (HTTP 408/429/500/502/503/504, timeouts) are retried twice
+# (3 attempts), 3 s apart, within 60 s overall; curl honours Retry-After inside
+# that cap. GitHub answers 504 now and then and the next try works. Plain
+# --retry is used (not --retry-all-errors, curl >= 7.71) so old distro curls
+# keep working. 4xx other than 408/429 are never retried; the SHA-256 check
+# after the download is outside curl and is not retried here.
+#
+# curl's --retry never covers a failed name lookup (exit 6) or a refused
+# connection (exit 7), so a one-off DNS blip (EAI_AGAIN) failed the whole run.
+# tp_curl_net_retry wraps curl and retries only those two exits, 4 attempts
+# with 2 s / 4 s / 8 s waits (TP_CURL_NET_RETRY_UNIT, default 2, is for tests).
+# It works on any curl; a 4xx or a signature/checksum failure is never retried.
+tp_curl_net_retry() {
+  _tp_net_try=1
+  while :; do
+    _tp_net_rc=0
+    curl "$@" || _tp_net_rc=$? # not a bare call: run.sh runs under set -e
+    case "$_tp_net_rc" in
+      0) return 0 ;;
+      6 | 7) ;;
+      *) return "$_tp_net_rc" ;;
+    esac
+    [ "$_tp_net_try" -ge 4 ] && return "$_tp_net_rc"
+    sleep $((${TP_CURL_NET_RETRY_UNIT:-2} * (1 << (_tp_net_try - 1))))
+    _tp_net_try=$((_tp_net_try + 1))
+  done
+}
+TP_CURL_RETRY='--retry 2 --retry-delay 3 --retry-max-time 60'
+TP_CURL_FETCH="tp_curl_net_retry -fsSL $TP_CURL_RETRY"
+TP_CURL_FETCH_INSECURE="tp_curl_net_retry -fsSLk $TP_CURL_RETRY"
 
 # Release artifact downloads (channel manifest, verified binary/orchestration/JS
 # artifacts, and the Deno runtime zip) always verify TLS against public trust.
@@ -141,6 +170,28 @@ tp_trust_has_distinct_issuer() {
   return "$_distinct"
 }
 
+# Copy every certificate of TRUST except the presented leaf (by fingerprint)
+# to OUT, so -partial_chain can never anchor the leaf on itself.
+tp_trust_issuers_only() {
+  _trust="$1"
+  _leaf_fp="$2"
+  _out="$3"
+  _dir="$(mktemp -d)"
+  awk -v dir="$_dir" '
+    /-----BEGIN CERTIFICATE-----/ { n++; file = dir "/c" n ".pem" }
+    n > 0 { print >> file }
+    /-----END CERTIFICATE-----/ { if (file != "") close(file) }
+  ' "$_trust"
+  : >"$_out"
+  for _cert in "$_dir"/c*.pem; do
+    [ -f "$_cert" ] || continue
+    if [ "$(tp_ca_fingerprint "$_cert")" != "$_leaf_fp" ]; then
+      cat "$_cert" >>"$_out"
+    fi
+  done
+  rm -rf "$_dir"
+}
+
 tp_uploaded_trust_verifies() {
   _trust="$1"
   _leaf="$2"
@@ -158,7 +209,14 @@ tp_uploaded_trust_verifies() {
   if ! tp_trust_has_distinct_issuer "$_trust" "$_leaf_fp"; then
     return 1
   fi
-  openssl verify -verify_hostname "$_host" -partial_chain -CAfile "$_trust" "$_leaf" >/dev/null 2>&1
+  _issuers="$(mktemp)"
+  tp_trust_issuers_only "$_trust" "$_leaf_fp" "$_issuers"
+  _verified=1
+  if openssl verify -verify_hostname "$_host" -partial_chain -CAfile "$_issuers" "$_leaf" >/dev/null 2>&1; then
+    _verified=0
+  fi
+  rm -f "$_issuers"
+  return "$_verified"
 }
 
 tp_url_host() {
@@ -264,16 +322,13 @@ tp_fetch_uploaded_trust() {
       rm -f "$UPLOADED_TRUST_PATH"
       ;;
     000)
+      # The stored issuer could not verify the control plane. It is never
+      # replaced from an unverified (-k) fetch: an on-path attacker would
+      # pick the replacement. Keep it and stop.
       if [ -f "$UPLOADED_TRUST_PATH" ]; then
-        _retry="$(mktemp)"
-        _retry_code=$(tp_curl_http_code curl -sSLk -o "$_retry" "${HOST_URL%/}/api/daemon/v1/instance/uploaded-trust")
-        if [ "$_retry_code" = "200" ] && tp_install_verified_uploaded_trust "$_retry"; then
-          rm -f "$_retry"
-        else
-          rm -f "$_trust_tmp" "$_retry"
-          tp_print_error "private uploaded issuer changed and could not be verified"
-          return 1
-        fi
+        rm -f "$_trust_tmp"
+        tp_print_error "Could not reach or verify ${HOST_URL} with the stored private uploaded issuer ($(tp_ca_fingerprint "$UPLOADED_TRUST_PATH")) — keeping it. If the control plane's issuer really changed, confirm the new issuer's fingerprint out of band, then re-run with --insecure-tls to re-bootstrap trust."
+        return 1
       fi
       ;;
     *)
@@ -293,9 +348,9 @@ tp_install_instance_ca() {
   install -m 0640 "$_new_ca" "$CA_PATH"
   _new_fp="$(tp_ca_fingerprint "$CA_PATH")"
   if [ -n "$_old_fp" ]; then
-    tp_print_ok "Instance CA downloaded (was ${_old_fp}; now ${_new_fp})"
+    tp_print_ok "Platform CA downloaded (was ${_old_fp}; now ${_new_fp})"
   else
-    tp_print_ok "Instance CA downloaded (${_new_fp})"
+    tp_print_ok "Platform CA downloaded (${_new_fp})"
   fi
 }
 
@@ -325,11 +380,11 @@ tp_fetch_instance_ca() {
       if [ -f "$CA_PATH" ]; then
         tp_refetch_instance_ca_unpinned
       else
-        tp_print_step "~" "Could not download instance CA (HTTP ${_ca_http_code}) — keeping existing CA if present"
+        tp_print_step "~" "Could not download the Platform CA (HTTP ${_ca_http_code}) — keeping existing CA if present"
       fi
       ;;
     *)
-      tp_print_step "~" "Could not download instance CA (HTTP ${_ca_http_code}) — keeping existing CA if present"
+      tp_print_step "~" "Could not download the Platform CA (HTTP ${_ca_http_code}) — keeping existing CA if present"
       ;;
   esac
   rm -f "$_ca_tmp"
@@ -339,8 +394,10 @@ tp_fetch_instance_ca() {
 # The pinned fetch could not verify the control plane. Most often it moved to
 # a publicly trusted certificate (Let's Encrypt, a public upload, Cloudflare)
 # and no longer presents a Platform CA leaf, so ask again with the system
-# roots first; only then fall back to one unpinned fetch of the CA document.
-# Whatever happens, the existing CA stays unless a replacement verifies.
+# roots. Nothing else is tried: the pin is never replaced from an unverified
+# (-k) fetch, since an on-path attacker would choose the replacement and its
+# leaf. The existing CA stays unless public trust authenticates a new one; a
+# real rotation is applied by the operator with --instance-ca.
 tp_refetch_instance_ca_unpinned() {
   _old_fp="$(tp_ca_fingerprint "$CA_PATH")"
   _ca_retry="$(mktemp)"
@@ -358,22 +415,13 @@ tp_refetch_instance_ca_unpinned() {
         return 0
       fi
       ;;
-    000)
-      # Unpinned fetch of the CA document only; acceptance is gated below.
-      _ca_retry_code=$(tp_curl_http_code curl -sSLk -o "$_ca_retry" "${HOST_URL%/}/api/daemon/v1/instance/ca")
-      if [ "$_ca_retry_code" = "200" ] && tp_ca_parses "$_ca_retry" && tp_ca_validates_leaf "$_ca_retry"; then
-        tp_install_instance_ca "$_ca_retry"
-        rm -f "$_ca_retry"
-        return 0
-      fi
-      ;;
     *) ;;
   esac
   _new_fp=""
   if [ -f "$_ca_retry" ] && tp_ca_parses "$_ca_retry"; then
     _new_fp="$(tp_ca_fingerprint "$_ca_retry")"
   fi
-  tp_print_step "~" "Could not verify the control plane's Platform CA (existing ${_old_fp:-unknown}; fetched ${_new_fp:-unknown}) — keeping the existing CA; the daemon trusts it alongside the system roots"
+  tp_print_step "~" "Could not verify the control plane's Platform CA (existing ${_old_fp:-unknown}; fetched ${_new_fp:-unknown}) — keeping the existing CA; the daemon trusts it alongside the system roots. If the control plane's CA was rotated, confirm the new CA's fingerprint out of band and re-run with --instance-ca <pem>."
   rm -f "$_ca_retry"
   return 0
 }
@@ -403,7 +451,7 @@ tp_artifact_curl() {
     _cacert="/etc/turbopanel/instance-ca.pem"
   fi
   if [ -n "$_cacert" ]; then
-    printf 'curl -fsSL --cacert %s' "$_cacert"
+    printf 'tp_curl_net_retry -fsSL %s --cacert %s' "$TP_CURL_RETRY" "$_cacert"
     return 0
   fi
   printf '%s' "$TP_CURL_FETCH"
@@ -513,10 +561,21 @@ TP_RELEASE_SIGNING_PUBLIC_KEY="e854267676c6700a79ff19b89211b76d609af142f4c2c1cb0
 
 # The canonicaliser, printed so it can be run here and byte-compared in tests
 # (src/update/signing.test.ts). stdin: manifest JSON; stdout: canonical bytes.
+# Both python programs parse strictly: a key repeated in any object is refused,
+# so there is exactly one reading of a manifest and it is the signed one.
 tp_manifest_canonical_python() {
   cat <<'PY'
 import json, sys
-manifest = json.load(sys.stdin)
+
+def unique_keys(pairs):
+    obj = {}
+    for key, value in pairs:
+        if key in obj:
+            raise SystemExit("manifest has a duplicate key %r" % key)
+        obj[key] = value
+    return obj
+
+manifest = json.load(sys.stdin, object_pairs_hook=unique_keys)
 if not isinstance(manifest, dict):
     raise SystemExit("manifest root must be an object")
 manifest.pop("signature", None)
@@ -535,8 +594,16 @@ tp_manifest_signature_material_python() {
 import base64, binascii, json, sys
 from pathlib import Path
 
+def unique_keys(pairs):
+    obj = {}
+    for key, value in pairs:
+        if key in obj:
+            raise SystemExit("manifest has a duplicate key %r" % key)
+        obj[key] = value
+    return obj
+
 pub_hex, out = sys.argv[1], Path(sys.argv[2])
-manifest = json.load(sys.stdin)
+manifest = json.load(sys.stdin, object_pairs_hook=unique_keys)
 if not isinstance(manifest, dict):
     raise SystemExit("manifest root must be an object")
 signature = manifest.pop("signature", None)
@@ -570,8 +637,11 @@ PY
 }
 
 # Verify $1 (manifest JSON) against the pinned release key. Returns 0 only for
-# a well-formed signature by that key over exactly these bytes.
+# a well-formed signature by that key over exactly these bytes, and leaves the
+# verified canonical bytes in $_tp_verified_manifest: every field is read from
+# those, never from the downloaded text.
 tp_verify_manifest_signature() {
+  _tp_verified_manifest=""
   _sig_json="$1"
   _sig_key="${2:-$TP_RELEASE_SIGNING_PUBLIC_KEY}"
   if ! command -v openssl >/dev/null 2>&1; then
@@ -590,17 +660,35 @@ tp_verify_manifest_signature() {
     rm -rf "$_sig_dir"
     return 1
   fi
+  _tp_verified_manifest="$(cat "$_sig_dir/canonical")"
   rm -rf "$_sig_dir"
-  return 0
+  [ -n "$_tp_verified_manifest" ]
+}
+
+# The development overlay's unsigned manifest still goes through the same
+# strict parse, and fields are read from its canonical form.
+tp_manifest_strict_canonical() {
+  _tp_verified_manifest=""
+  if ! _tp_verified_manifest="$(printf '%s' "$1" | python3 -c "$(tp_manifest_canonical_python)")"; then
+    echo "run.sh: release manifest rejected (not strict JSON)" >&2
+    return 1
+  fi
+  [ -n "$_tp_verified_manifest" ]
 }
 
 # The development-only bypass: a TURBOPANEL_DL_BASE overlay is a contributor's
 # own build served from their dev host, and the dev catalog writer signs
-# nothing. Host-side and explicit (the --dl-base flag), never something a
-# manifest can switch on; the built-in rail and --manifest-url pins always
-# verify. Printed loudly so nobody mistakes an overlay install for a release.
+# nothing. Two explicit, host-side switches are required together: the overlay
+# (--dl-base / TURBOPANEL_DL_BASE) AND the second opt-in
+# (--dev-allow-unsigned / TURBOPANEL_DEV_ALLOW_UNSIGNED_MANIFEST=1, the same
+# name the daemon honours). A stray TURBOPANEL_DL_BASE in an environment, a
+# pasted one-liner or a shell profile therefore still verifies the signature
+# and fails closed on an unsigned manifest. Never something a manifest can
+# switch on; the built-in rail and --manifest-url pins always verify. Printed
+# loudly so nobody mistakes an overlay install for a release.
 tp_manifest_signature_bypass() {
-  [ -n "${TURBOPANEL_DL_BASE:-}" ]
+  [ -n "${TURBOPANEL_DL_BASE:-}" ] \
+    && [ "${TURBOPANEL_DEV_ALLOW_UNSIGNED_MANIFEST:-}" = "1" ]
 }
 
 tp_resolve_channel_manifest() {
@@ -635,7 +723,7 @@ tp_extract_tar_zst_archive() {
     return 1
   fi
   mkdir -p "$_dest_root"
-  if ! zstd -d -q -c "$_archive" | tar -x -C "$_dest_root"; then
+  if ! zstd -d -q -c "$_archive" | tar -x --no-same-owner --no-overwrite-dir -C "$_dest_root"; then
     echo "run.sh: failed to extract $_archive" >&2
     return 1
   fi
@@ -651,7 +739,7 @@ tp_extract_orchestration_release() {
     return 1
   fi
   mkdir -p "$_dest_root"
-  if ! zstd -d -q -c "$_archive" | tar -x -C "$_dest_root"; then
+  if ! zstd -d -q -c "$_archive" | tar -x --no-same-owner --no-overwrite-dir -C "$_dest_root"; then
     echo "run.sh: failed to extract $_archive" >&2
     return 1
   fi
@@ -689,7 +777,7 @@ tp_download_verified_artifact() {
     rm -f "$_dest"
     # shellcheck disable=SC2086
     if ! $_curl "$_fetch_url" -o "$_dest"; then
-      echo "run.sh: failed to download $_fetch_url" >&2
+      echo "run.sh: failed to download ${_fetch_url%%[?#]*} (query string omitted: it can carry a signed token)" >&2
       return 1
     fi
     if printf '%s  %s\n' "$_sha256" "$_dest" | sha256sum -c - >/dev/null 2>&1; then
@@ -915,14 +1003,72 @@ tp_daemon_file_group() {
   printf '%s' "tp"
 }
 
-# Root-owned, daemon-group readable (production: root:tp 0640).
-tp_install_daemon_readable_file() {
-  _path="$1"
-  chmod 0640 "$_path" || return 1
-  _g="$(tp_daemon_file_group)"
-  if ! chown "root:${_g}" "$_path" 2>/dev/null; then
-    chgrp "$_g" "$_path" 2>/dev/null || true
+# Write stdin to a new file in a root-only staging dir, then set its mode and
+# (when given) group. Only ever called on a path inside tp_root_safe_write's
+# fresh 0700 directory, so nothing here can be redirected by tp.
+tp_root_safe_stage() {
+  _rss_path="$1"
+  _rss_mode="$2"
+  _rss_group="$3"
+  (umask 077 && cat > "$_rss_path") || return 1
+  chmod "$_rss_mode" "$_rss_path" || return 1
+  if [ -n "$_rss_group" ] && ! chown "root:${_rss_group}" "$_rss_path" 2>/dev/null; then
+    chgrp "$_rss_group" "$_rss_path" 2>/dev/null || true
   fi
+}
+
+# Root writes into a directory tp can write (/run/turbopanel, /var/lib/turbopanel)
+# go through here: stdin becomes <dest> with <mode> and optional <group>. The
+# content is staged in a fresh 0700 directory beside that directory (its parent
+# is root-owned and on the same filesystem) and renamed into place. rename(2)
+# replaces a link or file tp planted at <dest> and never writes through it; no
+# path inside the tp-writable directory is opened, chmod-ed or chown-ed by root.
+tp_root_safe_write() {
+  _rsw_dest="$1"
+  _rsw_mode="$2"
+  _rsw_group="${3:-}"
+  _rsw_dir="$(dirname "$_rsw_dest")"
+  if [ -L "$_rsw_dir" ] || [ ! -d "$_rsw_dir" ]; then
+    tp_print_error "Refusing to write $_rsw_dest: $_rsw_dir is not a plain directory"
+    return 1
+  fi
+  _rsw_stage="$(mktemp -d "$(dirname "$_rsw_dir")/.tp-stage.XXXXXX")" || return 1
+  _rsw_rc=0
+  if ! tp_root_safe_stage "$_rsw_stage/new" "$_rsw_mode" "$_rsw_group"; then
+    _rsw_rc=1
+  elif ! mv -fT "$_rsw_stage/new" "$_rsw_dest"; then
+    tp_print_error "Refusing to write $_rsw_dest: it is not a plain file"
+    _rsw_rc=1
+  fi
+  rm -rf "$_rsw_stage"
+  return "$_rsw_rc"
+}
+
+# Print a license file from tp's state dir with whitespace removed, or nothing.
+# Root reads it, so a link (to /etc/shadow, say) or a fifo is refused: dd opens
+# with O_NOFOLLOW and O_NONBLOCK. Relies on fs.protected_hardlinks=1 (Debian's
+# default) so tp cannot hard-link a root file into place.
+tp_read_state_license_file() {
+  _rsl_path="$1"
+  if [ -L "$_rsl_path" ] || [ ! -f "$_rsl_path" ]; then
+    return 0
+  fi
+  dd if="$_rsl_path" iflag=nofollow,nonblock bs=4096 count=4 status=none 2>/dev/null | tr -d '[:space:]' || true
+}
+
+# Stage the enrolment license for the daemon-config role. The staging dir sits
+# directly under root-owned /var/lib (LICENSE_STAGING_DIR), not in tp's state
+# dir, so tp cannot plant links in it for these writes or for the role's root
+# copy out of it. Whatever is at that path is removed and made fresh at 0700.
+tp_stage_daemon_license() {
+  _sdl_dir="$LICENSE_STAGING_DIR"
+  rm -rf "$_sdl_dir"
+  if ! mkdir -m 0700 "$_sdl_dir"; then
+    tp_print_error "Failed to create license staging dir $_sdl_dir"
+    return 1
+  fi
+  (umask 077 && printf '%s' "$LICENSE_ID" > "$_sdl_dir/license.id" \
+    && printf '%s' "$LICENSE_TOKEN" > "$_sdl_dir/license.token")
 }
 
 tp_arm_update_guard() {
@@ -949,9 +1095,11 @@ tp_arm_update_guard() {
     _previous_commit="$(tp_parse_daemon_commit_from_version "$("$_js_prev" --version 2>/dev/null || true)")"
   fi
   mkdir -p "$RUN_DIR"
-  printf '{"targetCommit":"%s","deadlineAt":"%s","armedAt":"%s","previousCommit":"%s"}\n' \
-    "$_manifest_commit" "$_deadline" "$_armed_at" "$_previous_commit" > "$_guard_path"
-  if ! tp_install_daemon_readable_file "$_guard_path"; then
+  # Root-owned, daemon-group readable (production: root:tp 0640). /run/turbopanel
+  # is tp-writable, so the file is staged elsewhere and renamed in.
+  if ! printf '{"targetCommit":"%s","deadlineAt":"%s","armedAt":"%s","previousCommit":"%s"}\n' \
+    "$_manifest_commit" "$_deadline" "$_armed_at" "$_previous_commit" \
+    | tp_root_safe_write "$_guard_path" 0640 "$(tp_daemon_file_group)"; then
     tp_print_error "Failed to write update guard $_guard_path"
     return 1
   fi
@@ -1039,7 +1187,7 @@ TP_DENO_VERSION="2.9.7"
 # run-installer), which run as root before the unit exists. Rendered by
 # src/permissions/daemon-permissions.ts renderInstallerPermissionFlags() and pinned by
 # src/permissions/daemon-permissions.test.ts — never --allow-all.
-TP_INSTALLER_DENO_PERMISSIONS="--allow-read=/opt/turbopanel,/etc/turbopanel,/var/lib/turbopanel,/var/log/turbopanel,/run/turbopanel,/tmp,/root/.ansible,/etc/os-release,/etc/hostname,/etc/machine-id,/etc/passwd,/etc/group,/etc/ssl,/etc/systemd,/proc,/sys,/dev,/usr,/bin,/sbin,/lib,/lib64 --allow-write=/opt/turbopanel,/etc/turbopanel,/var/lib/turbopanel,/var/log/turbopanel,/run/turbopanel,/tmp,/root/.ansible --allow-run=sh,/bin/sh,bash,cat,ls,cp,chmod,ln,id,/usr/bin/id,getent,systemctl,tar,/usr/bin/tar,curl,/usr/bin/curl,git,openssl,/usr/bin/openssl,/opt/turbopanel/vendor/deno/bin/deno,/opt/turbopanel/vendor/deno/current/deno,/opt/turbopanel/vendor/uv/0.11.21/uv,/opt/turbopanel/vendor/uv/0.11.21/uvx,/opt/turbopanel/vendor/ansible/2.20/bin/ansible-playbook,/opt/turbopanel/vendor/ansible/2.20/bin/ansible-galaxy,/opt/turbopanel/vendor/ansible/2.20/bin/ansible-lint --allow-env --allow-net --deny-net=169.254.169.254,metadata.google.internal,[fd00:ec2::254] --allow-sys=networkInterfaces,hostname,statfs,uid"
+TP_INSTALLER_DENO_PERMISSIONS="--allow-read=/opt/turbopanel,/etc/turbopanel,/var/lib/turbopanel,/var/log/turbopanel,/run/turbopanel,/tmp,/root/.ansible,/etc/os-release,/etc/hostname,/etc/machine-id,/etc/passwd,/etc/group,/etc/ssl,/etc/systemd,/proc,/sys,/dev,/usr,/bin,/sbin,/lib,/lib64 --allow-write=/opt/turbopanel,/etc/turbopanel,/var/lib/turbopanel,/var/log/turbopanel,/run/turbopanel,/tmp,/root/.ansible --allow-run=sh,/bin/sh,bash,cat,ls,cp,chmod,ln,id,/usr/bin/id,getent,systemctl,tar,/usr/bin/tar,curl,/usr/bin/curl,git,openssl,/usr/bin/openssl,/opt/turbopanel/vendor/deno/bin/deno,/opt/turbopanel/vendor/deno/current/deno,/opt/turbopanel/vendor/uv/0.11.21/uv,/opt/turbopanel/vendor/uv/0.11.21/uvx,/opt/turbopanel/vendor/ansible/2.20/bin/ansible-playbook,/opt/turbopanel/vendor/ansible/2.20/bin/ansible-galaxy,/opt/turbopanel/vendor/ansible/2.20/bin/ansible-lint --allow-env=TURBOPANEL_*,HOME,PATH,USER,LOGNAME --ignore-env --allow-net --deny-net=169.254.169.254,metadata.google.internal,[fd00:ec2::254] --allow-sys=networkInterfaces,hostname,statfs,uid"
 # Upstream SHA-256 of the release zip per architecture (dl.deno.land publishes
 # `<asset>.sha256sum` beside each asset). The download below is verified
 # against these before extraction — this path runs as root before any Ansible
@@ -1141,6 +1289,19 @@ PY
   # Stable path for the JS-fallback systemd ExecStart (next phase).
   mkdir -p "$RUNTIMES_DIR/deno/bin"
   ln -sfn "../current/deno" "$RUNTIMES_DIR/deno/bin/deno"
+}
+
+# The channel an install follows when the caller named none: the stable
+# release rail. Every component (daemon, instance, UI, co-located daemon)
+# follows the channel it was installed from, so there is exactly one fallback.
+# The one exception is a development overlay (TURBOPANEL_DL_BASE): its catalog
+# only ever carries trunk builds.
+tp_default_update_channel() {
+  if [ -n "${TURBOPANEL_DL_BASE:-}" ]; then
+    printf '%s' trunk
+  else
+    printf '%s' release
+  fi
 }
 
 # Built-in manifest location per advertised channel and artifact kind, used
@@ -1294,7 +1455,7 @@ tp_builtin_repo_manifest_url() {
 }
 
 tp_fetch_channel_manifest() {
-  _channel="${TURBOPANEL_UPDATE_CHANNEL:-trunk}"
+  _channel="${TURBOPANEL_UPDATE_CHANNEL:-$(tp_default_update_channel)}"
   _dl_base="${TURBOPANEL_DL_BASE:-}"
   if [ -n "$_dl_base" ]; then
     _catalog_url="${_dl_base}/channels.json"
@@ -1334,11 +1495,12 @@ tp_fetch_channel_manifest() {
   # Signature first — nothing in the manifest is read before it is trusted.
   if tp_manifest_signature_bypass; then
     tp_print_styled_line "1;33" "*** DEVELOPMENT OVERLAY: release manifest signature not verified (TURBOPANEL_DL_BASE=${_dl_base}) ***" >&2
+    tp_manifest_strict_canonical "$_manifest_json" || return 1
   elif ! tp_verify_manifest_signature "$_manifest_json"; then
     return 1
   fi
 
-  if ! tp_resolve_channel_manifest "$_manifest_json"; then
+  if ! tp_resolve_channel_manifest "$_tp_verified_manifest"; then
     return 1
   fi
 
@@ -1385,9 +1547,12 @@ tp_fetch_repo_manifest() {
   fi
   # Same rule as the daemon package: the manifest must carry a valid
   # signature by the pinned release key before any field of it is read. Only
-  # a development overlay (tp_manifest_signature_bypass) skips it.
-  if tp_manifest_signature_bypass; then
+  # a development overlay (tp_manifest_signature_bypass) skips it, and never
+  # for a pin: --instance-manifest-url / --ui-manifest-url (an upgrade or a
+  # rollback to one exact release) always verifies.
+  if [ -z "$_pin" ] && tp_manifest_signature_bypass; then
     tp_print_styled_line "1;33" "*** DEVELOPMENT OVERLAY: ${_repo} manifest signature not verified (TURBOPANEL_DL_BASE=${TURBOPANEL_DL_BASE}) ***" >&2
+    tp_manifest_strict_canonical "$_manifest_json" || return 1
   else
     case "$_manifest_json" in
       *'"signature"'*) ;;
@@ -1401,7 +1566,7 @@ tp_fetch_repo_manifest() {
       return 1
     fi
   fi
-  _repo_manifest_compact="$(tp_manifest_compact "$_manifest_json")"
+  _repo_manifest_compact="$(tp_manifest_compact "$_tp_verified_manifest")"
   [ -n "$_repo_manifest_compact" ]
 }
 
@@ -1506,12 +1671,14 @@ tp_write_instance_build_label() {
 
 # Copy the label into the instance's runtime.env — the file the unit already
 # loads — so an update, which does not re-render that template, still restarts
-# the instance with the right TURBOPANEL_BUILD_LABEL. Owner and mode are kept
-# (cp -p, then truncate-and-write). No runtime.env yet (a first install, before
-# instance-launch renders it) is left alone: the template reads the same file.
+# the instance with the right TURBOPANEL_BUILD_LABEL. Owner and mode are kept.
+# No runtime.env yet (a first install, before instance-launch renders it) is
+# left alone: the template reads the same file. A refused rewrite (see
+# tp_rewrite_instance_runtime_env) is reported and skipped; the label is only
+# cosmetic, so it does not fail the update.
 tp_sync_instance_build_label() {
-  _env="${CONFIG_DIR}/instance/runtime.env"
-  [ -f "$_env" ] || return 0
+  _env_dir="${CONFIG_DIR}/instance"
+  [ -f "$_env_dir/runtime.env" ] || return 0
   _label_path="$(tp_instance_build_label_path)"
   _label=""
   if [ -f "$_label_path" ]; then
@@ -1521,15 +1688,44 @@ tp_sync_instance_build_label() {
     *[!0-9A-Za-z.+-]*) _label="" ;;
     *) ;;
   esac
-  _tmp="${_env}.tmp.$$"
-  cp -p "$_env" "$_tmp"
-  {
-    grep -v '^TURBOPANEL_BUILD_LABEL=' "$_env" || true
-    if [ -n "$_label" ]; then
-      printf 'TURBOPANEL_BUILD_LABEL=%s\n' "$_label"
+  if ! (tp_rewrite_instance_runtime_env "$_env_dir" "$_label"); then
+    tp_print_error "Skipped the build label in $_env_dir/runtime.env"
+  fi
+  return 0
+}
+
+# Runs in a subshell: it pins the instance config dir as the working directory
+# so every later step uses that directory, not a path tp can re-point. tp owns
+# /etc/turbopanel, so it can rename instance/ and put its own directory or a
+# link in its place. Refused: a dir that is not where it should be (a link), is
+# not owned by this user (root), or is group/other writable, and a runtime.env
+# that is a link or not a plain file. The new file is a mktemp in the pinned
+# dir, given runtime.env's owner and mode, then renamed over it.
+tp_rewrite_instance_runtime_env() {
+  _rre_dir="$1"
+  _rre_label="$2"
+  cd -P -- "$_rre_dir" || return 1
+  if [ "$(pwd -P)" != "$_rre_dir" ] || [ "$(stat -c '%u' .)" != "$(id -u)" ] \
+    || [ -n "$(find . -maxdepth 0 -perm /022)" ]; then
+    tp_print_error "Refusing to rewrite $_rre_dir/runtime.env: the directory is not root-owned and private"
+    return 1
+  fi
+  if [ -L runtime.env ] || [ ! -f runtime.env ]; then
+    tp_print_error "Refusing to rewrite $_rre_dir/runtime.env: it is not a plain file"
+    return 1
+  fi
+  _rre_tmp="$(mktemp runtime.env.XXXXXX)" || return 1
+  if {
+    grep -v '^TURBOPANEL_BUILD_LABEL=' runtime.env || true
+    if [ -n "$_rre_label" ]; then
+      printf 'TURBOPANEL_BUILD_LABEL=%s\n' "$_rre_label"
     fi
-  } > "$_tmp"
-  mv -f "$_tmp" "$_env"
+  } > "$_rre_tmp" && chown --reference=runtime.env "$_rre_tmp" \
+    && chmod --reference=runtime.env "$_rre_tmp" && mv -fT "$_rre_tmp" runtime.env; then
+    return 0
+  fi
+  rm -f "$_rre_tmp"
+  return 1
 }
 
 # Written when an update starts moving the live instance and UI aside.
@@ -1542,7 +1738,8 @@ tp_instance_swap_marker() {
 tp_mark_instance_swap() {
   _marker="$(tp_instance_swap_marker)"
   mkdir -p "$(dirname "$_marker")"
-  printf '%s\n' '{"swapped":true}' > "$_marker"
+  # The state dir is tp-writable: stage and rename, never write through a link.
+  printf '%s\n' '{"swapped":true}' | tp_root_safe_write "$_marker" 0644 ""
 }
 
 tp_clear_instance_swap_marker() {
@@ -1558,14 +1755,14 @@ tp_run_instance_install() {
     tp_emit_update_stage downloading
   fi
 
-  tp_print_step "▸" "Fetching instance release manifest (TurboPanel/turbopanel, channel ${TURBOPANEL_UPDATE_CHANNEL:-release})…"
+  tp_print_step "▸" "Fetching control plane release manifest (TurboPanel/turbopanel, channel ${TURBOPANEL_UPDATE_CHANNEL:-release})…"
   tp_fetch_repo_manifest turbopanel || { rm -rf "$_work"; return 1; }
   _instance_version="$(tp_manifest_field "$_repo_manifest_compact" "version")"
   _instance_commit="$(tp_manifest_field "$_repo_manifest_compact" "commit")"
   tp_print_step "  " "Instance: v${_instance_version:-?} (${_instance_commit:-unknown})"
-  tp_print_step "▸" "Downloading instance package (${_linux_arch})…"
+  tp_print_step "▸" "Downloading control plane package (${_linux_arch})…"
   tp_download_repo_artifact "instance-${_linux_arch}" "$_work/instance.tar.zst" || { rm -rf "$_work"; return 1; }
-  tp_print_ok "Instance package verified (SHA-256 ok)"
+  tp_print_ok "Control plane package verified (SHA-256 ok)"
 
   tp_print_step "▸" "Fetching UI release manifest (TurboPanel/ui)…"
   tp_fetch_repo_manifest ui || { rm -rf "$_work"; return 1; }
@@ -1610,7 +1807,7 @@ tp_run_instance_install() {
   if [ "$_skip_daemon" = true ]; then
     rm -rf "$_ui_dir.new"
     mkdir -p "$_ui_dir.new"
-    if ! tar -xzf "$_work/ui.tar.gz" -C "$_ui_dir.new"; then
+    if ! tar -xzf "$_work/ui.tar.gz" --no-same-owner --no-overwrite-dir -C "$_ui_dir.new"; then
       tp_restore_instance_prev
       tp_clear_instance_swap_marker
       rm -rf "$_work"
@@ -1626,7 +1823,7 @@ tp_run_instance_install() {
   else
     rm -rf "$_ui_dir"
     mkdir -p "$_ui_dir"
-    tar -xzf "$_work/ui.tar.gz" -C "$_ui_dir"
+    tar -xzf "$_work/ui.tar.gz" --no-same-owner --no-overwrite-dir -C "$_ui_dir"
   fi
   rm -rf "$_work"
   for _required in \
@@ -1634,7 +1831,7 @@ tp_run_instance_install() {
     "$INSTALL_ROOT/lib/libduckdb.so" \
     "$_ui_dir/index.html"; do
     if [ ! -e "$_required" ]; then
-      tp_print_error "Instance package missing $_required"
+      tp_print_error "Control plane package missing $_required"
       if [ "$_skip_daemon" = true ]; then
         tp_restore_instance_prev
         tp_clear_instance_swap_marker
@@ -1682,7 +1879,7 @@ tp_run_instance_install() {
     printf 'turbopanel_daemon_state_dir: %s\n' "$STATE_DIR"
     printf 'turbopanel_daemon_env_file: %s\n' "$ENV_FILE"
   } > "$_vars"
-  tp_print_step "▸" "Provisioning the self-hosted instance (Postgres, Redis, RabbitMQ, Docker, certs, units, Caddy, co-located daemon)…"
+  tp_print_step "▸" "Provisioning the self-hosted control plane (Postgres, Redis, RabbitMQ, Docker, certs, units, Caddy, co-located daemon)…"
   _rc=0
   if [ "$DAEMON_EXEC_MODE" = "$TP_EXEC_MODE_NATIVE" ]; then
     "$(tp_daemon_binary_path)" run-installer --playbook instance-install.yml --vars-file "$_vars" || _rc=$?
@@ -1692,57 +1889,156 @@ tp_run_instance_install() {
   rm -f "$_vars"
   rm -rf /tmp/turbopanel-ansible /root/.ansible
   if [ "$_rc" -ne 0 ]; then
-    tp_print_error "Instance provisioning failed"
+    tp_print_error "Control plane provisioning failed"
     return "$_rc"
   fi
-  tp_print_ok "Self-hosted instance installed — open the wizard URL printed above (https://<this host>:8443/install); this host's daemon enrols itself once the wizard has issued the first license"
+  # The co-located refresh reads its channel from this root-only file, not
+  # from daemon.env. The install wrote no control-plane pins into daemon.env,
+  # so none are recorded here either.
+  if ! tp_write_control_plane_refresh "${TURBOPANEL_UPDATE_CHANNEL:-release}" "" ""; then
+    tp_print_error "Could not write $(tp_control_plane_refresh_file)"
+    return 1
+  fi
+  tp_print_ok "Self-hosted control plane installed — open the wizard URL printed above (https://<this host>:8443/install); this host's daemon enrols itself once the wizard has issued the first license"
   return 0
 }
 
-# An existing self-hosted control plane dials the instance Unix socket: the
-# instance binary is installed and daemon.env does not name a remote URL.
-# Works before INSTALL_ROOT / ENV_FILE are assigned (the --daemon-only
+# An existing self-hosted control plane dials the instance Unix socket. Decided
+# from root-owned files only, never from daemon.env: the control-plane binary
+# is installed and the update-origin pin says colocated=1. A control-plane
+# host installed before run.sh wrote a pin has none and still counts (as in
+# tp-orchestrate). Works before INSTALL_ROOT is assigned (the --daemon-only
 # argument checks run earlier than the layout constants).
 tp_colocated_control_plane_host() {
   _ccp_root="${INSTALL_ROOT:-/opt/turbopanel}"
-  _ccp_env="${ENV_FILE:-/etc/turbopanel/daemon.env}"
-  [ -e "$_ccp_root/bin/turbopanel" ] || return 1
-  [ -f "$_ccp_env" ] || return 1
-  if grep -q '^TURBOPANEL_INSTANCE_URL=' "$_ccp_env"; then
-    return 1
+  _ccp_pin="$_ccp_root/lib/update-origin"
+  [ -f "$_ccp_root/bin/turbopanel" ] && [ ! -L "$_ccp_root/bin/turbopanel" ] || return 1
+  if [ ! -e "$_ccp_pin" ] && [ ! -L "$_ccp_pin" ]; then
+    return 0
   fi
+  [ -f "$_ccp_pin" ] && [ ! -L "$_ccp_pin" ] || return 1
+  [ "$(sed -n 's/^colocated=//p' "$_ccp_pin" | head -1)" = 1 ]
+}
+
+# The co-located refresh's own settings: lib/control-plane-refresh, root:root
+# 0600 beside lib/update-origin in the root-owned lib/ directory. The refresh
+# runs as root and keeps only the channel and the two control-plane manifest
+# pins there; daemon.env is the daemon's file (tp:tp 0600) and the refresh
+# never reads it — except once, below, to migrate a host that predates this
+# file.
+tp_control_plane_refresh_file() {
+  printf '%s/lib/control-plane-refresh' "${INSTALL_ROOT:-/opt/turbopanel}"
+}
+
+tp_refresh_channel_ok() {
+  _rco_channel="$1"
+  case "$_rco_channel" in
+    trunk|edge|canary|rc|release) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Prints a validated value or nothing. $1: channel | instance | ui.
+tp_refresh_value_ok() {
+  _rvo_kind="$1"
+  _rvo_value="$2"
+  if [ "$_rvo_kind" = channel ]; then
+    tp_refresh_channel_ok "$_rvo_value"
+  else
+    tp_release_manifest_url_ok "$_rvo_kind" "$_rvo_value"
+  fi
+}
+
+# Fill _cpr_channel, _cpr_instance_manifest_url and _cpr_ui_manifest_url,
+# each validated (an invalid value reads as empty). The root file is the only
+# source once it exists. Without it — a host installed before this file — the
+# values are read from daemon.env one last time, validated the same way, and
+# tp_write_control_plane_refresh then records them so no later run reads
+# daemon.env again.
+tp_load_control_plane_refresh() {
+  _cpr_file="$(tp_control_plane_refresh_file)"
+  _cpr_channel=""
+  _cpr_instance_manifest_url=""
+  _cpr_ui_manifest_url=""
+  if [ -L "$_cpr_file" ]; then
+    return 0
+  fi
+  if [ -f "$_cpr_file" ]; then
+    _cpr_raw_channel="$(sed -n 's/^channel=//p' "$_cpr_file" | head -1)"
+    _cpr_raw_instance="$(sed -n 's/^instance_manifest_url=//p' "$_cpr_file" | head -1)"
+    _cpr_raw_ui="$(sed -n 's/^ui_manifest_url=//p' "$_cpr_file" | head -1)"
+  else
+    _cpr_env="${ENV_FILE:-/etc/turbopanel/daemon.env}"
+    [ -f "$_cpr_env" ] && [ ! -L "$_cpr_env" ] || return 0
+    _cpr_raw_channel="$(sed -n 's/^TURBOPANEL_UPDATE_CHANNEL=//p' "$_cpr_env" | head -1)"
+    _cpr_raw_instance="$(sed -n 's/^TURBOPANEL_INSTANCE_MANIFEST_URL=//p' "$_cpr_env" | head -1)"
+    _cpr_raw_ui="$(sed -n 's/^TURBOPANEL_UI_MANIFEST_URL=//p' "$_cpr_env" | head -1)"
+  fi
+  tp_refresh_value_ok channel "$_cpr_raw_channel" && _cpr_channel="$_cpr_raw_channel"
+  tp_refresh_value_ok instance "$_cpr_raw_instance" && _cpr_instance_manifest_url="$_cpr_raw_instance"
+  tp_refresh_value_ok ui "$_cpr_raw_ui" && _cpr_ui_manifest_url="$_cpr_raw_ui"
   return 0
+}
+
+# Install a scratch file as a root-only file (root:root 0600).
+tp_install_root_only() {
+  _iro_src="$1"
+  _iro_dest="$2"
+  install -m 0600 -o root -g root "$_iro_src" "$_iro_dest"
+}
+
+tp_write_control_plane_refresh() {
+  _cpw_channel="$1"
+  _cpw_instance="$2"
+  _cpw_ui="$3"
+  _cpw_file="$(tp_control_plane_refresh_file)"
+  mkdir -p "${_cpw_file%/*}"
+  _cpw_tmp="$(mktemp)"
+  printf 'channel=%s\ninstance_manifest_url=%s\nui_manifest_url=%s\n' \
+    "$_cpw_channel" "$_cpw_instance" "$_cpw_ui" > "$_cpw_tmp"
+  _cpw_rc=0
+  tp_install_root_only "$_cpw_tmp" "$_cpw_file" || _cpw_rc=$?
+  rm -f "$_cpw_tmp"
+  return "$_cpw_rc"
 }
 
 # --daemon-only on a self-hosted control-plane host refreshes the co-located
 # daemon (daemon-colocated-refresh.yml). It needs no license (the play does
-# not enrol) and no manifest pin: the channel comes from daemon.env when the
-# caller names none, and the manifest from that channel's built-in rail —
-# signature-verified by tp_fetch_channel_manifest like every other install.
+# not enrol) and no manifest pin: the channel comes from
+# lib/control-plane-refresh when the caller names none, and the manifest from
+# that channel's built-in rail — signature-verified by
+# tp_fetch_channel_manifest like every other install.
 tp_prepare_colocated_daemon_only() {
   tp_colocated_control_plane_host || return 1
   if [ -z "${TURBOPANEL_UPDATE_CHANNEL:-}" ]; then
-    _cdo_channel="$(sed -n 's/^TURBOPANEL_UPDATE_CHANNEL=//p' "${ENV_FILE:-/etc/turbopanel/daemon.env}" | head -1)"
-    TURBOPANEL_UPDATE_CHANNEL="${_cdo_channel:-release}"
+    tp_load_control_plane_refresh
+    TURBOPANEL_UPDATE_CHANNEL="${_cpr_channel:-release}"
     export TURBOPANEL_UPDATE_CHANNEL
   fi
   return 0
 }
 
-tp_daemon_env_value() {
-  _key="$1"
-  sed -n "s/^${_key}=//p" "$ENV_FILE" | head -1
-}
-
 # Refresh the co-located daemon without daemon-install.yml. That play would
 # write a remote instance URL and recursively chown state and config.
+#
+# Its settings come from lib/control-plane-refresh (root-owned), never from
+# daemon.env: the daemon can write daemon.env, and root must not take paths
+# or origins from it. The instance CA and DL_BASE are not carried at all — a
+# control-plane host has neither (run.sh --instance refuses both). A caller's
+# --instance-manifest-url / --ui-manifest-url (already validated) replaces the
+# recorded pin; the file is rewritten on every refresh.
 tp_run_colocated_daemon_refresh() {
-  _vars="$(mktemp)"
+  tp_load_control_plane_refresh
   _channel="${TURBOPANEL_UPDATE_CHANNEL:-}"
-  if [ -z "$_channel" ]; then
-    _channel="$(tp_daemon_env_value TURBOPANEL_UPDATE_CHANNEL)"
-  fi
+  [ -n "$_channel" ] || _channel="$_cpr_channel"
   [ -n "$_channel" ] || _channel=release
+  _instance_pin="${INSTANCE_MANIFEST_URL:-$_cpr_instance_manifest_url}"
+  _ui_pin="${UI_MANIFEST_URL:-$_cpr_ui_manifest_url}"
+  if ! tp_write_control_plane_refresh "$_channel" "$_instance_pin" "$_ui_pin"; then
+    tp_print_error "Could not write $(tp_control_plane_refresh_file)"
+    return 1
+  fi
+  _vars="$(mktemp)"
   {
     printf 'turbopanel_instance_url: ""\n'
     printf 'turbopanel_after_instance_service: true\n'
@@ -1766,24 +2062,14 @@ tp_run_colocated_daemon_refresh() {
     if [ -n "$MANIFEST_URL" ]; then
       printf 'turbopanel_manifest_url: "%s"\n' "$MANIFEST_URL"
     fi
-    _kept="$(tp_daemon_env_value TURBOPANEL_INSTANCE_CA)"
-    if [ -n "$_kept" ]; then
-      printf 'turbopanel_instance_ca: "%s"\n' "$_kept"
+    if [ -n "$_instance_pin" ]; then
+      printf 'turbopanel_instance_manifest_url: "%s"\n' "$_instance_pin"
     fi
-    _kept="$(tp_daemon_env_value TURBOPANEL_DL_BASE)"
-    if [ -n "$_kept" ]; then
-      printf 'turbopanel_dl_base: "%s"\n' "$_kept"
-    fi
-    _kept="$(tp_daemon_env_value TURBOPANEL_INSTANCE_MANIFEST_URL)"
-    if [ -n "$_kept" ]; then
-      printf 'turbopanel_instance_manifest_url: "%s"\n' "$_kept"
-    fi
-    _kept="$(tp_daemon_env_value TURBOPANEL_UI_MANIFEST_URL)"
-    if [ -n "$_kept" ]; then
-      printf 'turbopanel_ui_manifest_url: "%s"\n' "$_kept"
+    if [ -n "$_ui_pin" ]; then
+      printf 'turbopanel_ui_manifest_url: "%s"\n' "$_ui_pin"
     fi
   } > "$_vars"
-  tp_print_step "▸" "Refreshing the co-located daemon (socket mode; instance, UI, and database unchanged)…"
+  tp_print_step "▸" "Refreshing the co-located daemon (socket mode; control plane, web app, and database unchanged)…"
   _rc=0
   if [ "$DAEMON_EXEC_MODE" = "$TP_EXEC_MODE_NATIVE" ]; then
     "$(tp_daemon_binary_path)" run-installer --playbook daemon-colocated-refresh.yml --vars-file "$_vars" || _rc=$?
@@ -1869,9 +2155,9 @@ tp_print_instance_welcome() {
   _channel="${TURBOPANEL_UPDATE_CHANNEL:-release}"
 
   printf '\n'
-  tp_print_styled_line "1" '  ╭──────────────────────────────────────────────────────────────╮'
-  tp_print_styled_line "1" '  │  ⚡ TurboPanel  ·  Self-Hosted Instance Installer / Updater  │'
-  tp_print_styled_line "1" '  ╰──────────────────────────────────────────────────────────────╯'
+  tp_print_styled_line "1" '  ╭──────────────────────────────────────────────────────────────────╮'
+  tp_print_styled_line "1" '  │  ⚡ TurboPanel  ·  Self-Hosted Control Plane Installer / Updater  │'
+  tp_print_styled_line "1" '  ╰──────────────────────────────────────────────────────────────────╯'
   _version=""
   _version="$(tp_peek_instance_version 2>/dev/null)" || _version=""
   if [ -n "$_version" ]; then
@@ -1887,7 +2173,7 @@ tp_print_instance_welcome() {
   printf '  This installs the full TurboPanel control plane on this host.\n'
   printf '\n'
   printf '  Connecting a server to an existing control plane? Sign in to that\n'
-  printf '  panel and copy the install command from Servers. It includes the\n'
+  printf '  control plane and copy the install command from Servers. It includes the\n'
   printf '  license this host needs.\n'
   printf '\n'
   if [ -t 1 ] && tp_is_interactive; then
@@ -1957,6 +2243,8 @@ while [ $# -gt 0 ]; do
     --tunnel-token)
       [ $# -ge 2 ] || { tp_print_error "--tunnel-token requires an argument"; exit 1; }
       TUNNEL_TOKEN="$2"; shift 2 ;;
+    --dev-allow-unsigned)
+      export TURBOPANEL_DEV_ALLOW_UNSIGNED_MANIFEST=1; shift ;;
     --insecure-tls)
       INSECURE_TLS=true; shift ;;
     --no-start)
@@ -1988,8 +2276,11 @@ done
 
 # Piped install form prefers env vars so the copy-paste command stays clean:
 #   curl -fsSL turbopanel.sh | TURBOPANEL_LICENSE=… sh
-# Explicit flags win when both are set (sudo re-exec always uses flags).
+# Explicit flags win when both are set. The sudo re-exec hands the license and
+# tunnel token over in these variables, never as flags: argv is world-readable
+# (ps, /proc) and sudo logs it.
 [ -n "$LICENSE" ] || LICENSE="${TURBOPANEL_LICENSE:-}"
+[ -n "$TUNNEL_TOKEN" ] || TUNNEL_TOKEN="${TURBOPANEL_TUNNEL_TOKEN:-}"
 [ -n "$HOST_URL" ] || HOST_URL="${TURBOPANEL_HOST:-}"
 [ -n "$DL_BASE" ] || DL_BASE="${TURBOPANEL_DL_BASE:-}"
 DL_BASE="$(tp_strip_trailing_slashes "$DL_BASE")"
@@ -2086,8 +2377,8 @@ if [ "$DAEMON_ONLY" = true ] && ! tp_prepare_colocated_daemon_only; then
   if [ -z "$LICENSE" ]; then
     _state="${TURBOPANEL_STATE_DIR:-/var/lib/turbopanel}"
     if [ -f "$_state/license.id" ] && [ -f "$_state/license.token" ]; then
-      _id="$(tr -d '[:space:]' < "$_state/license.id")"
-      _tok="$(tr -d '[:space:]' < "$_state/license.token")"
+      _id="$(tp_read_state_license_file "$_state/license.id")"
+      _tok="$(tp_read_state_license_file "$_state/license.token")"
       if [ -n "$_id" ] && [ -n "$_tok" ]; then
         LICENSE="$(printf '%s:%s' "$_id" "$_tok" | base64 | tr -d '\n' | tr '+/' '-_')"
       fi
@@ -2116,7 +2407,7 @@ if [ "$INSTANCE_INSTALL" = true ]; then
     exit 1
   fi
   if ! tp_builtin_repo_manifest_url turbopanel "$TURBOPANEL_UPDATE_CHANNEL" >/dev/null; then
-    tp_print_error "--instance needs --channel canary, rc or release (the instance and UI packages publish only through GitHub Releases; got ${TURBOPANEL_UPDATE_CHANNEL})"
+    tp_print_error "--instance needs --channel canary, rc or release (the control plane and web app packages publish only through GitHub Releases; got ${TURBOPANEL_UPDATE_CHANNEL})"
     exit 1
   fi
   if [ "$SKIP_DAEMON_PACKAGE" = true ] && [ "$NO_START" != true ]; then
@@ -2169,7 +2460,16 @@ if ! tp_is_root; then
     _REEXEC_SCRIPT_URL="https://$(tp_installer_host_for_channel "${TURBOPANEL_UPDATE_CHANNEL:-release}")"
   fi
   set --
-  [ -n "$LICENSE" ] && set -- "$@" --license "$LICENSE"
+  # Secrets travel in the environment (sudo --preserve-env), not in argv.
+  _sudo_keep=""
+  if [ -n "$LICENSE" ]; then
+    export TURBOPANEL_LICENSE="$LICENSE"
+    _sudo_keep="TURBOPANEL_LICENSE"
+  fi
+  if [ -n "$TUNNEL_TOKEN" ]; then
+    export TURBOPANEL_TUNNEL_TOKEN="$TUNNEL_TOKEN"
+    _sudo_keep="${_sudo_keep:+${_sudo_keep},}TURBOPANEL_TUNNEL_TOKEN"
+  fi
   [ "$INSTANCE_INSTALL" = true ] && set -- "$@" --instance
   [ "$DAEMON_ONLY" = true ] && set -- "$@" --daemon-only
   [ -n "$MANIFEST_URL" ] && set -- "$@" --manifest-url "$MANIFEST_URL"
@@ -2177,8 +2477,8 @@ if ! tp_is_root; then
   [ -n "$UI_MANIFEST_URL" ] && set -- "$@" --ui-manifest-url "$UI_MANIFEST_URL"
   [ -n "$HOST_URL" ] && set -- "$@" --host "$HOST_URL"
   [ -n "$DL_BASE" ] && set -- "$@" --dl-base "$DL_BASE"
+  [ -n "$DL_BASE" ] && [ "${TURBOPANEL_DEV_ALLOW_UNSIGNED_MANIFEST:-}" = "1" ] && set -- "$@" --dev-allow-unsigned
   [ -n "$INSTANCE_CA" ] && set -- "$@" --instance-ca "$INSTANCE_CA"
-  [ -n "$TUNNEL_TOKEN" ] && set -- "$@" --tunnel-token "$TUNNEL_TOKEN"
   [ "$INSECURE_TLS" = true ] && set -- "$@" --insecure-tls
   [ "$NO_START" = true ] && set -- "$@" --no-start
   [ "$SKIP_DAEMON_PACKAGE" = true ] && set -- "$@" --skip-daemon-package
@@ -2191,8 +2491,13 @@ if ! tp_is_root; then
   # curl subshell, not this shell — leaving the original non-root shell to
   # fall through and fail on the privileged mkdir calls below. Run the
   # pipeline, then exit with its status so the parent shell never continues.
-  # shellcheck disable=SC2086
-  $_curl "$_REEXEC_SCRIPT_URL" | sudo sh -s -- "$@"
+  if [ -n "$_sudo_keep" ]; then
+    # shellcheck disable=SC2086
+    $_curl "$_REEXEC_SCRIPT_URL" | sudo --preserve-env="$_sudo_keep" sh -s -- "$@"
+  else
+    # shellcheck disable=SC2086
+    $_curl "$_REEXEC_SCRIPT_URL" | sudo sh -s -- "$@"
+  fi
   exit $?
 fi
 
@@ -2208,7 +2513,9 @@ RUN_DIR="/run/turbopanel"
 ENV_FILE="$CONFIG_DIR/daemon.env"
 CA_PATH="$CONFIG_DIR/instance-ca.pem"
 UPLOADED_TRUST_PATH="$CONFIG_DIR/instance-uploaded-trust.pem"
-LICENSE_STAGING_DIR="$STATE_DIR/daemon-license-staging"
+# Root-owned parent on purpose (not $STATE_DIR, which tp owns): see
+# tp_stage_daemon_license. Passed to the daemon-config role in the vars file.
+LICENSE_STAGING_DIR="/var/lib/turbopanel-license-staging"
 
 # NOTE: `--insecure-tls` (INSECURE_TLS) deliberately does NOT export any
 # release-insecure flag. It only relaxes trust for the self-hosted instance
@@ -2221,11 +2528,7 @@ LICENSE_STAGING_DIR="$STATE_DIR/daemon-license-staging"
 
 mkdir -p "$STATE_DIR" "$CONFIG_DIR" "$BIN_DIR" "$INSTALL_ROOT/share" "$RUN_DIR"
 if [ "$INSTANCE_INSTALL" != true ] && [ "$COLOCATED_DAEMON_ONLY" != true ]; then
-  STAGING_DIR="$LICENSE_STAGING_DIR"
-  mkdir -p "$STAGING_DIR"
-  printf '%s' "$LICENSE_ID" > "$STAGING_DIR/license.id"
-  printf '%s' "$LICENSE_TOKEN" > "$STAGING_DIR/license.token"
-  chmod 0640 "$STAGING_DIR/license.id" "$STAGING_DIR/license.token"
+  tp_stage_daemon_license
 fi
 
 export DEBIAN_FRONTEND=noninteractive
@@ -2319,13 +2622,13 @@ fi
 if [ -n "$MANIFEST_URL" ]; then
   tp_print_ok "Release manifest resolved (pinned to $MANIFEST_URL, arch ${_linux_arch:-unknown})"
 else
-  tp_print_ok "Release manifest resolved (channel ${TURBOPANEL_UPDATE_CHANNEL:-trunk}, arch ${_linux_arch:-unknown})"
+  tp_print_ok "Release manifest resolved (channel ${TURBOPANEL_UPDATE_CHANNEL:-$(tp_default_update_channel)}, arch ${_linux_arch:-unknown})"
 fi
 tp_print_step "  " "Binary (${_linux_arch:-unknown}): $_binary_artifact_url"
 tp_print_step "  " "JS bundle (if needed): $_js_fallback_artifact_url"
 tp_print_step "  " "Commit: ${_manifest_commit:-unknown}"
 if [ "$INSTANCE_INSTALL" = true ]; then
-  tp_print_step "  " "Control plane: this host (self-hosted instance install)"
+  tp_print_step "  " "Control plane: this host (self-hosted install)"
 elif [ "$_colocated_daemon_refresh" = true ]; then
   tp_print_step "  " "Control plane: this host (co-located socket)"
 else
@@ -2350,7 +2653,7 @@ elif [ -n "$INSTANCE_CA" ]; then
     install -m 0640 "$INSTANCE_CA" "$CA_PATH"
   fi
 else
-  tp_print_step "▸" "Fetching instance CA…"
+  tp_print_step "▸" "Fetching the Platform CA…"
   tp_fetch_instance_ca
 fi
 if [ "$INSTANCE_INSTALL" != true ] && [ -n "$HOST_URL" ]; then
@@ -2501,7 +2804,7 @@ if [ "$INSTANCE_INSTALL" = true ]; then
   # starts turbopaneld itself (socket mode), so nothing daemon-specific
   # happens in this script for a control-plane install.
   if ! command -v zstd >/dev/null 2>&1; then
-    tp_print_error "zstd is required to unpack the instance package (apt install zstd)"
+    tp_print_error "zstd is required to unpack the control plane package (apt install zstd)"
     exit 1
   fi
   tp_run_instance_install
@@ -2512,6 +2815,7 @@ VARS_FILE="$(mktemp)"
 trap 'rm -f "$VARS_FILE"' EXIT
 {
   printf 'turbopanel_instance_url: %s\n' "$HOST_URL"
+  printf 'turbopanel_daemon_license_staging_dir: %s\n' "$LICENSE_STAGING_DIR"
   printf 'turbopanel_start: %s\n' "$([ "$NO_START" = true ] && echo false || echo true)"
   printf 'turbopanel_manage_service_state: %s\n' "$([ "$NO_START" = true ] && echo false || echo true)"
   printf 'turbopanel_restart_daemon: %s\n' "$([ "$NO_START" = true ] && echo false || echo true)"
@@ -2535,9 +2839,16 @@ trap 'rm -f "$VARS_FILE"' EXIT
       printf 'turbopanel_instance_ca_fingerprint: %s\n' "$_ca_fp"
     fi
   fi
-  printf 'turbopanel_update_channel: %s\n' "${TURBOPANEL_UPDATE_CHANNEL:-trunk}"
+  printf 'turbopanel_update_channel: %s\n' "${TURBOPANEL_UPDATE_CHANNEL:-$(tp_default_update_channel)}"
   if [ -n "$DL_BASE" ]; then
     printf 'turbopanel_dl_base: %s\n' "$DL_BASE"
+    # The daemon's own unsigned-manifest bypass is written only when this
+    # install opted in (--dev-allow-unsigned); a signed overlay keeps verifying.
+    if tp_manifest_signature_bypass; then
+      printf 'turbopanel_dev_allow_unsigned: true\n'
+    else
+      printf 'turbopanel_dev_allow_unsigned: false\n'
+    fi
   fi
   if [ -n "$MANIFEST_URL" ]; then
     printf 'turbopanel_manifest_url: %s\n' "$MANIFEST_URL"

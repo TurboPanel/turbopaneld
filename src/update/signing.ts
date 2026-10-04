@@ -23,7 +23,7 @@ import { ManifestSignatureError } from "./errors.ts";
  * Raw 32-byte Ed25519 public key of the TurboPanel release signing key, hex.
  * Mirrored by hand as `TP_RELEASE_SIGNING_PUBLIC_KEY` in scripts/run.sh —
  * signing.test.ts pins the two against each other. Rotating the key is a
- * coordinated change to both plus the CI `RELEASE_SIGNING_KEY` secret.
+ * coordinated change to both plus the CI `TURBOPANEL_RELEASE_SIGNING_KEY` environment secret.
  */
 export const RELEASE_SIGNING_PUBLIC_KEY_HEX =
   "e854267676c6700a79ff19b89211b76d609af142f4c2c1cb011339346d1cea0a";
@@ -261,14 +261,19 @@ export async function verifyManifestSignature(
  *   `TURBOPANEL_DEV_ALLOW_UNSIGNED_MANIFEST=1`, which run.sh / daemon-config
  *   only write for `--dl-base` installs.
  *
- * Built-in rail and pinned (`TURBOPANEL_MANIFEST_URL`) manifests are never
- * exempt: a production manifest cannot enable this.
+ * A production manifest cannot enable this, and a pinned manifest
+ * (`--manifest-url`, `TURBOPANEL_MANIFEST_URL` and the instance/UI pins — an
+ * upgrade or a rollback to one exact release) is never exempt, not even in a
+ * source checkout.
  */
 export function unsignedManifestBypass(options: {
   installMode: "development" | "production";
   overlay: boolean;
   env: Record<string, string | undefined>;
+  /** The manifest was named by a pin rather than a channel. */
+  pinned?: boolean;
 }): boolean {
+  if (options.pinned) return false;
   if (options.installMode === "development") return true;
   return options.overlay &&
     options.env[DEV_UNSIGNED_MANIFEST_ENV]?.trim() === "1";

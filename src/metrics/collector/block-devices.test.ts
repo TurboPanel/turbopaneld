@@ -8,6 +8,7 @@ import {
 } from "./block-devices.ts";
 import { parseDiskstatsRows } from "./parse-diskstats.ts";
 import type { BlockDeviceTopology } from "../../contracts/topology-types.ts";
+import type { DiskDeviceCounters } from "./types.ts";
 
 function fixture(name: string): string {
   return Deno.readTextFileSync(
@@ -316,4 +317,37 @@ it("hostDiskAggregates nulls the interval right after a missing-row gap, then re
   );
   assertEquals(secondResumedTick.diskReadBytesPerSecond, 0);
   assertEquals(secondResumedTick.diskWriteBytesPerSecond, 0);
+});
+
+it("buildBlockDeviceSamples divides by each counter's real elapsed time", () => {
+  const tracker = new CounterBaselineTracker();
+  const topology = [serviceDevice({ kernelName: "vda", deviceId: "blk:vda" })];
+  const counters = (n: number): Record<string, DiskDeviceCounters> => ({
+    vda: {
+      iosInProgress: 0,
+      readsCompleted: n,
+      sectorsRead: n * 2,
+      readTicksMs: 0,
+      writesCompleted: 0,
+      sectorsWritten: 0,
+      writeTicksMs: 0,
+      ioTicksMs: 0,
+      weightedIoTicksMs: 0,
+    },
+  });
+  tracker.beginTick(0);
+  buildBlockDeviceSamples(topology, counters(0), tracker, 0, 60);
+  hostDiskAggregates(topology, counters(0), tracker, 0, 60);
+  // One tick missed: 120 s elapsed against a nominal 60 s.
+  tracker.beginTick(120_000);
+  const [sample] = buildBlockDeviceSamples(
+    topology,
+    counters(1200),
+    tracker,
+    0,
+    60,
+  );
+  assertEquals(sample!.readOpsPerSecond, 10);
+  const host = hostDiskAggregates(topology, counters(1200), tracker, 0, 60);
+  assertEquals(host.diskReadBytesPerSecond, 10 * 2 * 512 * 1);
 });

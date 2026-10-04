@@ -11,9 +11,16 @@
  */
 
 import { join } from "@std/path";
+import {
+  safeConfigLine,
+  safeConfigToken,
+} from "../../contracts/config-values.ts";
 import type { LayoutPaths } from "../../paths/layout.ts";
 import {
+  principalDataDir,
   principalHomePath,
+  principalTmpDir,
+  principalUserHome,
   siteCurrentSymlink,
   siteSharedDir,
 } from "../../paths/layout.ts";
@@ -144,6 +151,46 @@ export function nativeAppUnitPath(
   return join(unitDir, nativeAppUnitName(serviceId));
 }
 
+/**
+ * `HOME` and `TMPDIR` for a unit that runs as a principal: its own `home/` and
+ * `tmp/`, never the home itself, which is root-owned and read-only to it.
+ */
+export function principalUnitEnvironment(
+  layout: Pick<LayoutPaths, "principalHomeRoot">,
+  username: string,
+): string[] {
+  return [
+    `Environment=HOME=${principalUserHome(layout, username)}`,
+    `Environment=TMPDIR=${principalTmpDir(layout, username)}`,
+  ];
+}
+
+/**
+ * The one `ReadWritePaths=` line for a unit that runs as a principal: the
+ * site directories it may write, then the principal's `home/`, `data/` and
+ * `tmp/`. Never the home root: under `ProtectSystem=strict` everything else
+ * stays read-only, whatever the file modes say.
+ *
+ * Every path must exist before the unit starts (systemd fails it with
+ * `226/NAMESPACE` otherwise). Principal ensure creates the three tenant dirs,
+ * and the site lanes create `shared/` and `webroot/`, before any unit is
+ * installed.
+ */
+export function principalReadWritePaths(
+  layout: Pick<LayoutPaths, "principalHomeRoot">,
+  username: string,
+  siteDirs: readonly string[],
+): string {
+  return `ReadWritePaths=${
+    [
+      ...siteDirs,
+      principalUserHome(layout, username),
+      principalDataDir(layout, username),
+      principalTmpDir(layout, username),
+    ].join(" ")
+  }`;
+}
+
 /** `turbopanel-<username>.slice` — one parent slice per tenant account. */
 export function principalSliceName(username: string): string {
   return `turbopanel-${username}.slice`;
@@ -219,7 +266,7 @@ export function resolveExecStart(params: {
 }): string {
   if (params.startCommand && params.startCommand.trim().length > 0) {
     const command = resolveNativeAppRuntimeStartCommand(
-      params.startCommand.trim(),
+      safeConfigLine("startCommand", params.startCommand.trim()),
       params.nodeBinary,
     );
     return `/bin/sh -c ${quoteSystemdArgument(command)}`;
@@ -408,7 +455,12 @@ export function nativeAppUnitContent(opts: NativeAppUnitOpts): string {
   const lines = [
     "# Managed by TurboPanel — regenerated on deploy; edits are overwritten.",
     "[Unit]",
-    `Description=TurboPanel app ${app.composeServiceName} (${app.serviceId})`,
+    `Description=TurboPanel app ${
+      safeConfigToken(
+        "nativeAppServices[].composeServiceName",
+        app.composeServiceName,
+      )
+    } (${app.serviceId})`,
     `X-TurboPanel-Environment=${opts.environmentId}`,
     ...(labelsLine === null ? [] : [labelsLine]),
     "After=network-online.target",
@@ -428,7 +480,7 @@ export function nativeAppUnitContent(opts: NativeAppUnitOpts): string {
     `Environment=NODE_ENV=${app.appMode ?? "production"}`,
     `Environment=PORT=${app.listenPort}`,
     `Environment=HOST=127.0.0.1`,
-    `Environment=HOME=${home}`,
+    ...principalUnitEnvironment(opts.layout, username),
     // Writable under ReadWritePaths=shared — Corepack falls back here when a
     // custom start command still invokes pnpm/yarn at runtime.
     `Environment=XDG_CACHE_HOME=${sharedDir}/.cache`,
@@ -450,7 +502,8 @@ export function nativeAppUnitContent(opts: NativeAppUnitOpts): string {
     "LockPersonality=yes",
     "CapabilityBoundingSet=",
     "AmbientCapabilities=",
-    `ReadWritePaths=${sharedDir}`,
+    // Its own site's shared/ plus home/, data/ and tmp/: nothing else.
+    principalReadWritePaths(opts.layout, username, [sharedDir]),
   ];
 
   if (app.resources?.cpus !== undefined) {

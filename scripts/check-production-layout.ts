@@ -294,11 +294,12 @@ export const RUNTIME_ROOT_SCAN_ALLOWLIST = new Set([
   "orchestration/playbooks/daemon-install.yml", // comment only
   "orchestration/roles/deno-runtime/meta/main.yml", // role description
   // Scoped Deno grants rendered from src/permissions/daemon-permissions.ts (which builds
-  // them from the layout module); src/permissions/daemon-permissions.test.ts pins both
-  // copies to that renderer, so the literals cannot drift.
+  // them from the layout module); src/permissions/daemon-permissions.test.ts pins every
+  // copy to that renderer, so the literals cannot drift.
   "scripts/run.sh",
   "scripts/purge.sh",
   "orchestration/roles/daemon-launch/templates/turbopaneld.service.j2",
+  "orchestration/roles/daemon-launch/templates/tp-backup-run.j2",
 ]);
 
 export function collectForbiddenReferenceFailures(

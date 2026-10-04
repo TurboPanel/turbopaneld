@@ -11,6 +11,7 @@ import {
   principalUnixGroupName,
 } from "./ensure-principal.ts";
 import { runDocker } from "./docker-cli.ts";
+import { directoryExists } from "../permissions/privileged-read.ts";
 
 const STORAGE_ROOT = "storage";
 
@@ -44,18 +45,93 @@ async function maybeChown(
   );
 }
 
-async function ensureParentDirectory(hostPath: string): Promise<void> {
-  const parent = dirname(hostPath);
-  if (parent.length === 0 || parent === hostPath) return;
-  await Deno.mkdir(parent, { recursive: true, mode: 0o750 });
+/**
+ * The segments of a storage file name, relative to its location. Refuses
+ * anything that could leave the location (`..`, an absolute path) or that is
+ * ambiguous (`.`, empty segments, a trailing slash).
+ */
+function storageFileSegments(name: string): string[] {
+  const segments = name.split("/");
+  const bad = name.startsWith("/") ||
+    segments.some((s) => s === "" || s === "." || s === "..");
+  if (bad) {
+    throw new TypeError(`Invalid storage file name: ${name}`);
+  }
+  return segments;
 }
 
-async function materializeDirectory(
-  hostPath: string,
-  ownership: EnvironmentDeployPrincipalMaterial | undefined,
+/** `lstat`, with "absent" as `null` rather than an exception. */
+async function lstatOrNull(path: string): Promise<Deno.FileInfo | null> {
+  try {
+    return await Deno.lstat(path);
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) return null;
+    throw err;
+  }
+}
+
+/**
+ * Create `dir` if absent and refuse it unless it is a real directory. `lstat`
+ * never follows a link, so a link planted in its place is refused rather than
+ * walked through.
+ */
+async function ensureRealDirectory(dir: string): Promise<void> {
+  if (await lstatOrNull(dir) === null) {
+    await Deno.mkdir(dir, { mode: 0o750 });
+  }
+  const info = await Deno.lstat(dir);
+  if (!info.isDirectory || info.isSymlink) {
+    throw new Error(`${dir} is not a directory`);
+  }
+}
+
+/**
+ * A path storage directory with no principal to own it. The daemon creates it
+ * where it may (its own storage root); anywhere it may not — a principal home,
+ * an operator mount — it must already exist, because root has nobody to hand
+ * a new directory to. An existing one the daemon cannot traverse is confirmed
+ * through tp-host rather than failing the deploy. Either way a link planted in
+ * its place is refused, never walked through.
+ */
+async function materializeUnownedDirectory(hostPath: string): Promise<void> {
+  try {
+    await Deno.mkdir(dirname(hostPath), { recursive: true, mode: 0o750 });
+    await ensureRealDirectory(hostPath);
+    return;
+  } catch (err) {
+    if (!(err instanceof Deno.errors.PermissionDenied)) throw err;
+  }
+  if (await directoryExists(hostPath)) return;
+  throw new Error(
+    `storage directory ${hostPath} does not exist and has no principal to own it; assign the storage to a principal or create the directory on the host`,
+  );
+}
+
+/**
+ * Write `content` to `path` without following a link at `path`: a new file is
+ * opened with `createNew` (`O_EXCL`, which never follows) next to it and then
+ * renamed over it. `rename(2)` replaces a link rather than writing through it,
+ * and the file is never seen half-written.
+ */
+async function replaceFileNoFollow(
+  path: string,
+  content: string,
 ): Promise<void> {
-  await Deno.mkdir(hostPath, { recursive: true, mode: 0o750 });
-  await maybeChown(hostPath, ownership);
+  const existing = await lstatOrNull(path);
+  if (existing?.isDirectory) {
+    throw new Error(`${path} is a directory`);
+  }
+  const temp = join(
+    dirname(path),
+    `.tp-storage-${crypto.randomUUID()}.tmp`,
+  );
+  await Deno.writeTextFile(temp, content, { createNew: true, mode: 0o640 });
+  try {
+    await Deno.rename(temp, path);
+  } catch (err) {
+    await Deno.remove(temp).catch(() => undefined);
+    throw err;
+  }
 }
 
 async function materializeFile(
@@ -64,9 +140,14 @@ async function materializeFile(
   ownership: EnvironmentDeployPrincipalMaterial | undefined,
   content: string,
 ): Promise<string> {
-  const hostPath = join(baseDir, entry.name);
-  await ensureParentDirectory(hostPath);
-  await Deno.writeTextFile(hostPath, content, { mode: 0o640 });
+  const segments = storageFileSegments(entry.name);
+  const parents = segments.slice(0, -1).map((_, i) =>
+    join(baseDir, ...segments.slice(0, i + 1))
+  );
+  // Parent before child, each one checked before anything is created in it.
+  await forEachSequential([baseDir, ...parents], ensureRealDirectory);
+  const hostPath = join(baseDir, ...segments);
+  await replaceFileNoFollow(hostPath, content);
   await maybeChown(hostPath, ownership);
   return hostPath;
 }
@@ -105,7 +186,7 @@ async function materializeHostPathEntry(
         principalUnixGroupName(ownership.username),
       );
     } else {
-      await materializeDirectory(hostPath, ownership);
+      await materializeUnownedDirectory(hostPath);
     }
   } else if (entry.kind === "file") {
     hostPath = await materializeFile(baseDir, entry, ownership, fileContent);

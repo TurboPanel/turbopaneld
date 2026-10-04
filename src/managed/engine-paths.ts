@@ -168,7 +168,33 @@ export function managedBackupsDir(
 }
 
 /**
- * Join a backup artifact path under `managedBackupsDir`, re-validating
+ * The directory one backup's artifact lives in, and the only directory its
+ * retention prune looks at.
+ *
+ * - Manual backups (no `policyId`): `managedBackupsDir` itself, as always.
+ * - Scheduled backups: `<backupDir>/<managedId>/policy-<policyId>`, one
+ *   directory per policy, so an hourly keep-24 policy never prunes a daily
+ *   policy's or a manual backup's artifacts. A manual prune only lists files,
+ *   so it never descends into a `policy-*` directory either.
+ *
+ * `policyId` is re-validated (same charset as `managedId`) so it cannot
+ * escape the engine's backup directory.
+ */
+export function managedBackupArtifactDir(
+  layout: LayoutPaths,
+  managedId: string,
+  policyId?: string,
+): string {
+  const engineDir = managedBackupsDir(layout, managedId);
+  if (policyId === undefined) return engineDir;
+  if (!SAFE_MANAGED_ID_RE.test(policyId)) {
+    throw new Error("policyId contains unsupported characters");
+  }
+  return join(engineDir, `policy-${policyId}`);
+}
+
+/**
+ * Join a backup artifact path under `managedBackupArtifactDir`, re-validating
  * `backupId` (same charset as `managedId` — it becomes a filename) and `ext`
  * against the extension allowlist before joining. Callers must not build
  * this path any other way.
@@ -178,6 +204,7 @@ export function managedBackupArtifactPath(
   managedId: string,
   backupId: string,
   ext: string,
+  policyId?: string,
 ): string {
   if (!SAFE_MANAGED_ID_RE.test(backupId)) {
     throw new Error("backupId contains unsupported characters");
@@ -185,7 +212,10 @@ export function managedBackupArtifactPath(
   if (!isManagedBackupArtifactExtension(ext)) {
     throw new Error(`unsupported backup artifact extension: ${ext}`);
   }
-  return join(managedBackupsDir(layout, managedId), `${backupId}.${ext}`);
+  return join(
+    managedBackupArtifactDir(layout, managedId, policyId),
+    `${backupId}.${ext}`,
+  );
 }
 
 /**

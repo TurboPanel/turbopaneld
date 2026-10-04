@@ -10,9 +10,10 @@
 #   DL_S3_BUCKET            — Bunny Storage Zone name (bucket name)
 #   DL_S3_ACCESS_KEY_ID     — Bunny Storage Zone Access Key ID
 #   DL_S3_SECRET_ACCESS_KEY — Bunny Storage Zone Password (Secret Access Key)
-#   SONAR_TOKEN             — SonarCloud token for CI-based scan + LCOV import in
-#                             verify.yml (required for same-repo / trunk; fork
-#                             PRs omit it). Keep Automatic Analysis off.
+#   SONAR_TOKEN             — SonarCloud token for CI-based scan + LCOV import:
+#                             verify.yml on pull requests, sonar-trunk.yml on
+#                             trunk (required for same-repo / trunk; fork PRs
+#                             omit it). Keep Automatic Analysis off.
 #
 # The workflow will fail with a clear error if any DL_S3_* variable or secret is
 # missing. Missing SONAR_TOKEN fails verify on trunk (publish `needs: verify`).
@@ -63,8 +64,9 @@ permissions:
 # show a red X. `queue: max` keeps up to 100 pending runs in push order
 # instead (it cannot be combined with cancel-in-progress: true). Serialising
 # the whole run — verify, publish and canary — also keeps the job-level
-# groups inside verify.yml and gh-canary.yml free of competing pending jobs,
-# and SonarCloud's trunk analyses in commit order.
+# groups inside verify.yml and gh-canary.yml free of competing pending jobs.
+# SonarCloud's trunk analysis runs after this workflow, in sonar-trunk.yml
+# (its own queue keeps those in commit order).
 concurrency:
   group: publish-daemon-trunk-run
   cancel-in-progress: false
@@ -81,6 +83,9 @@ jobs:
     secrets: inherit
 
   publish:
+    # Signs the canary manifest on every trunk merge: environment secret
+    # TURBOPANEL_RELEASE_SIGNING_KEY from the `canary` environment.
+    environment: canary
     needs: verify
     runs-on: ubuntu-latest
     steps:
@@ -122,7 +127,31 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Three attempts, 15 s then 45 s apart: setup-deno has no retry input and
+      # a transient GitHub 5xx on the download must not turn the run red.
       - name: Install Deno
+        id: deno-try-1
+        continue-on-error: true
+        uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
+        with:
+          # Keep in step with DENO_VERSION / deno_version / TP_DENO_VERSION (2.9.7).
+          deno-version: "2.9.7"
+      - name: Wait before retrying the Deno download
+        if: steps.deno-try-1.outcome == 'failure'
+        run: sleep 15
+      - name: Install Deno (retry 1 of 2)
+        id: deno-try-2
+        if: steps.deno-try-1.outcome == 'failure'
+        continue-on-error: true
+        uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
+        with:
+          # Keep in step with DENO_VERSION / deno_version / TP_DENO_VERSION (2.9.7).
+          deno-version: "2.9.7"
+      - name: Wait before retrying the Deno download again
+        if: steps.deno-try-2.outcome == 'failure'
+        run: sleep 45
+      - name: Install Deno (retry 2 of 2)
+        if: steps.deno-try-2.outcome == 'failure'
         uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
         with:
           # Keep in step with DENO_VERSION / deno_version / TP_DENO_VERSION (2.9.7).
@@ -133,7 +162,7 @@ jobs:
 
       - name: Work out this build's version from the tags
         id: version
-        uses: TurboPanel/dev/.github/actions/version@387788e9e64344fc5de32f6b93abd178e956d6a1 # dev#42
+        uses: TurboPanel/dev/.github/actions/version@d9127ee03a6a3b42e9435ebec3542db5fab09bc0 # dev#49
         with:
           mode: canary
 
@@ -265,7 +294,7 @@ jobs:
         env:
           # PKCS#8 PEM of the offline release signing key; the generator refuses
           # to write an unsigned manifest (src/update/signing.ts).
-          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+          RELEASE_SIGNING_KEY: ${{ secrets.TURBOPANEL_RELEASE_SIGNING_KEY }}
         run: |
           deno run --allow-env --allow-read --allow-write scripts/generate-channel-manifest.ts \
             publish/channels/trunk/daemon \
@@ -451,7 +480,7 @@ jobs:
           # The rolling release's download path: assets are added under
           # build-unique names, so this never 404s a manifest that names them.
           ARTIFACT_BASE_URL: https://github.com/${{ github.repository }}/releases/download/canary
-          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+          RELEASE_SIGNING_KEY: ${{ secrets.TURBOPANEL_RELEASE_SIGNING_KEY }}
         run: |
           deno run --allow-env --allow-read --allow-write scripts/generate-channel-manifest.ts \
             canary-assets \
@@ -474,7 +503,7 @@ jobs:
     # gh-canary.yml creates/updates the rolling `canary` release and its assets.
     permissions:
       contents: write
-    uses: TurboPanel/dev/.github/workflows/gh-canary.yml@387788e9e64344fc5de32f6b93abd178e956d6a1 # dev#42
+    uses: TurboPanel/dev/.github/workflows/gh-canary.yml@d9127ee03a6a3b42e9435ebec3542db5fab09bc0 # dev#49
     with:
       version: ${{ needs.publish.outputs.canary-version }}
       commit: ${{ github.sha }}

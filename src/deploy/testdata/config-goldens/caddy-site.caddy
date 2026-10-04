@@ -1,0 +1,18 @@
+:18081 {
+  bind 127.0.0.1 ::1
+  root * /srv/x/public
+  encode zstd gzip
+  php_fastcgi unix//run/x.sock {
+    env APP_ENV "production"
+    env EMPTY ""
+    env URL "https://x.example/a?b=c&d=%20"
+  }
+  @dotfile {
+    path_regexp dotfile (^|/)\.
+    not path_regexp wellknown ^/\.well-known(/|$)
+  }
+  respond @dotfile 403
+  @dotInWellKnown path_regexp dotinwk ^/\.well-known/(.*/)?\.
+  respond @dotInWellKnown 403
+  file_server
+}

@@ -241,7 +241,14 @@ for (const variant of VARIANTS) {
       const expectedOrder = variant.afterInstance
         ? "network-online.target turbopanel-instance.service"
         : "network-online.target";
-      assertEquals(only(unit, "Unit", "After"), expectedOrder);
+      // docker.service is ordering only: stop before Docker at shutdown.
+      assertEquals(
+        only(unit, "Unit", "After"),
+        expectedOrder.replace(
+          "network-online.target",
+          "network-online.target docker.service",
+        ),
+      );
       assertEquals(only(unit, "Unit", "Wants"), expectedOrder);
       assertEquals(
         only(unit, "Unit", "OnFailure"),

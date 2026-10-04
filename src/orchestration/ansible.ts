@@ -53,6 +53,7 @@ import {
   ANSIBLE_PLAYBOOK_CWD,
   ansibleEnv,
   ansibleHome,
+  ansibleProbeEnv,
   BUILD_TOGGLE_PLAYBOOK,
   BUILDKIT_PLAYBOOK,
   CADDY_PLAYBOOK,
@@ -95,8 +96,12 @@ async function fileExists(path: string): Promise<boolean> {
 
 export async function ansiblePlaybookWorks(): Promise<boolean> {
   if (!(await fileExists(ANSIBLE_PLAYBOOK_BIN))) return false;
+  // The daemon's bare env points HOME at the sealed state root; ansible then
+  // fails creating ~/.ansible/tmp on a fresh install. Use the state leaf
+  // (made tp-owned by daemon-layout); never mkdir here, this also runs as root.
   const result = await run(ANSIBLE_PLAYBOOK_BIN, ["--version"], {
     stream: false,
+    env: ansibleProbeEnv(),
   });
   return result.success;
 }
@@ -105,6 +110,7 @@ export async function ansibleLintWorks(): Promise<boolean> {
   if (!(await fileExists(ANSIBLE_LINT_BIN))) return false;
   const result = await run(ANSIBLE_LINT_BIN, ["--version"], {
     stream: false,
+    env: ansibleProbeEnv(),
   });
   return result.success;
 }
@@ -1015,14 +1021,13 @@ export async function runCaddySetup(
 }
 
 /**
- * Vendor BuildKit + Railpack for the Railpack build lane.
+ * Vendor Railpack and its BuildKit frontend for the Railpack build lane.
  *
  * Called on demand from `ensureBuildkitRailpack` when a deploy asks for
  * `build.kind: railpack`, never from `daemon-converge` or
- * `instance-dev-install` — a host that never builds an image from source should
- * not carry a build daemon. `ensureGalaxyDockerRole()` runs first because the
- * built image is loaded into the local Docker image store, so the container
- * runtime has to be there before this is worth installing.
+ * `instance-dev-install`. `ensureGalaxyDockerRole()` runs first because the
+ * build runs on the Docker Engine's own BuildKit and lands in its image store,
+ * so the container runtime has to be there before this is worth installing.
  */
 export async function runBuildkitSetup(
   onEvent?: AnsibleEventHandler,

@@ -856,6 +856,7 @@ tp_discover_paths() {
   # a partial install can disagree with itself, so every distinct path is kept.
   tp_discover_add config /etc/turbopanel default
   tp_discover_add state /var/lib/turbopanel default
+  tp_discover_add state /var/lib/turbopanel-build default
   tp_discover_add log /var/log/turbopanel default
   tp_discover_add runtimes /opt/turbopanel/vendor default
   tp_discover_add run /run/turbopanel default
@@ -965,12 +966,51 @@ tp_print_group() {
   done < "$_pg_file"
 }
 
+# wg-quick@.service is a stock template: systemd reports any instance of it as
+# loaded, so tp0 only counts as ours once it was enabled, started or linked.
+tp_wg_tp0_present() {
+  for _wp_dir in $TP_SYSTEMD_DIRS; do
+    if [ -e "$_wp_dir/wg-quick@tp0.service" ] || [ -L "$_wp_dir/multi-user.target.wants/wg-quick@tp0.service" ]; then
+      return 0
+    fi
+  done
+  tp_has_tool systemctl || return 1
+  _wp_active=$(systemctl is-active wg-quick@tp0.service 2>/dev/null || true)
+  case $_wp_active in
+    inactive|unknown|"") ;;
+    *) return 0 ;;
+  esac
+  _wp_enabled=$(systemctl is-enabled wg-quick@tp0.service 2>/dev/null || true)
+  case $_wp_enabled in
+    enabled|enabled-runtime|alias|indirect) return 0 ;;
+  esac
+  return 1
+}
+
 tp_unit_present() {
   _up_unit=$1
+  case $_up_unit in
+    wg-quick@tp0|wg-quick@tp0.service) tp_wg_tp0_present; return ;;
+  esac
   if tp_has_tool systemctl; then
     _up_load=$(systemctl show -p LoadState --value "$_up_unit" 2>/dev/null || true)
     if [ -n "$_up_load" ] && [ "$_up_load" != not-found ]; then
-      return 0
+      # systemd keeps a synthetic, inactive "loaded" slice with no unit file
+      # after the file is deleted. That is nothing on disk, so it is gone.
+      case $_up_unit in
+        *.slice)
+          _up_frag=$(systemctl show -p FragmentPath --value "$_up_unit" 2>/dev/null || true)
+          _up_act=$(systemctl show -p ActiveState --value "$_up_unit" 2>/dev/null || true)
+          if [ -n "$_up_frag" ]; then
+            return 0
+          fi
+          case $_up_act in
+            inactive|"") ;;
+            *) return 0 ;;
+          esac
+          ;;
+        *) return 0 ;;
+      esac
     fi
   fi
   for _up_dir in $TP_SYSTEMD_DIRS; do
@@ -1030,7 +1070,7 @@ tp_inventory_units() {
     tp_note_unit "$_iu_path"
   done < "$_iu_files"
   # shellcheck disable=SC2086
-  for _iu_legacy in $TP_LEGACY_UNITS; do
+  for _iu_legacy in $TP_LEGACY_UNITS $TP_OTHER_UNITS; do
     if tp_unit_present "$_iu_legacy"; then
       tp_note_unit "$_iu_legacy"
     fi
@@ -1333,7 +1373,18 @@ tp_inventory_docker() {
     tp_inv_skip "docker not installed"
     return 0
   fi
+  # Docker Engine was purged by this run. Its containers, networks and volumes
+  # cannot exist any more, so do not carry the pre-purge lists forward.
+  if [ "${TP_INV_QUIET:-false}" = true ] && [ "${TP_DOCKER_ENGINE_GONE:-false}" = true ]; then
+    return 0
+  fi
   if ! tp_docker_ready; then
+    # The removal step already ran against a working daemon (or had nothing to
+    # remove), so a daemon that is gone now holds none of the old objects.
+    # Carry the old lists forward only when the removal step itself was skipped.
+    if [ "${TP_INV_QUIET:-false}" = true ] && [ "${TP_DOCKER_LEFT:-false}" != true ]; then
+      return 0
+    fi
     tp_inv_warn "Docker is installed but the daemon is not responding; containers could not be listed yet"
     tp_inv_keep_previous containers
     tp_inv_keep_previous networks
@@ -1402,6 +1453,8 @@ tp_inventory_host_files() {
   done
   for _ih_file in \
     /etc/tmpfiles.d/turbopanel.conf \
+    /etc/tmpfiles.d/turbopanel-docker-gate.conf \
+    /etc/tmpfiles.d/turbopanel-hosting-caddy.conf \
     /etc/sudoers.d/tp \
     /etc/ssh/sshd_config.d/60-turbopanel.conf \
     /usr/local/bin/php
@@ -1503,6 +1556,8 @@ tp_inventory_accounts() {
     fi
     if tp_name_is_tp "$_ia_gname" && tp_id_in_band "$_ia_ggid"; then
       tp_file_add "$TP_TMP/inv.groups" "$_ia_glabel gid ${_ia_ggid}"
+    elif tp_list_has_word "$_ia_gname" $TP_OTHER_GROUPS; then
+      tp_file_add "$TP_TMP/inv.groups" "$_ia_glabel gid ${_ia_ggid}"
     elif tp_name_is_tp "$_ia_gname"; then
       tp_file_add "$TP_TMP/inv.leftalone" "group $_ia_glabel gid ${_ia_ggid} (left alone, check by hand)"
     fi
@@ -1541,6 +1596,13 @@ tp_inventory_folders() {
   done
   tp_add_existing "$TP_TMP/inv.folders_remove" /tmp/turbopanel-ansible ""
   tp_add_existing "$TP_TMP/inv.folders_remove" /tmp/turbopanel-orchestrate ""
+  # The Docker gate's socket directory and Deno transpile cache.
+  tp_add_existing "$TP_TMP/inv.folders_remove" /run/turbopanel-gate ""
+  tp_add_existing "$TP_TMP/inv.folders_remove" /var/cache/turbopanel-docker-gate ""
+  tp_add_existing "$TP_TMP/inv.folders_remove" /var/lib/turbopanel-docker-gate ""
+  # The hosting Caddy's StateDirectory. It sits beside /var/lib/turbopanel, not
+  # under it, and is owned by the hosting Caddy account.
+  tp_add_existing "$TP_TMP/inv.folders_remove" /var/lib/turbopanel-hosting-caddy ""
   for _ifo_path in $TP_CONFIG_DIRS $TP_STATE_DIRS $TP_LOG_DIRS; do
     tp_add_existing "$TP_TMP/inv.folders_keep" "$_ifo_path" ""
   done
@@ -1923,7 +1985,7 @@ tp_collect_unit_names() {
     done < "$_cun_list"
   fi
   # shellcheck disable=SC2086
-  for _cun_legacy in $TP_LEGACY_UNITS wg-quick@tp0.service wg-quick@tp0; do
+  for _cun_legacy in $TP_LEGACY_UNITS $TP_OTHER_UNITS wg-quick@tp0.service wg-quick@tp0; do
     if tp_unit_present "$_cun_legacy"; then
       case $_cun_legacy in
         wg-quick@tp0) tp_file_add "$TP_TMP/work.unitnames" "wg-quick@tp0.service" ;;
@@ -1997,6 +2059,11 @@ tp_remove_unit_files() {
   for _ruf_dir in $TP_SYSTEMD_DIRS; do
     [ -d "$_ruf_dir" ] || continue
     find "$_ruf_dir" -maxdepth 3 \( -name 'turbopanel*' -o -name 'turbopaneld*' \) >> "$_ruf_list" 2>/dev/null || true
+    for _ruf_other in $TP_OTHER_UNITS; do
+      if [ -e "$_ruf_dir/$_ruf_other" ]; then
+        printf '%s\n' "$_ruf_dir/$_ruf_other" >> "$_ruf_list"
+      fi
+    done
   done
   while IFS= read -r _ruf_path; do
     [ -n "$_ruf_path" ] || continue
@@ -2081,12 +2148,14 @@ tp_remove_docker() {
       tp_run "start docker" systemctl start docker.service || true
     fi
     if ! tp_docker_ready; then
+      TP_DOCKER_LEFT=true
       tp_record_skip "docker daemon not responding; containers remain"
       tp_print_warn "Docker containers remain because the daemon did not respond"
       return 0
     fi
   fi
   tp_docker_collect || {
+    TP_DOCKER_LEFT=true
     tp_record_fail "list docker containers"
     return 0
   }
@@ -2326,7 +2395,7 @@ tp_remove_host_config() {
       tp_record_skip "udevadm not installed"
     fi
   fi
-  for _rhc in /etc/tmpfiles.d/turbopanel.conf /etc/sudoers.d/tp; do
+  for _rhc in /etc/tmpfiles.d/turbopanel.conf /etc/tmpfiles.d/turbopanel-docker-gate.conf /etc/tmpfiles.d/turbopanel-hosting-caddy.conf /etc/sudoers.d/tp; do
     if [ -e "$_rhc" ]; then
       tp_run "remove $_rhc" rm -f "$_rhc" || true
     fi
@@ -2335,6 +2404,12 @@ tp_remove_host_config() {
   tp_remove_sshd_dropin
   if [ -e /usr/local/bin/php ]; then
     tp_run "remove /usr/local/bin/php" rm -f /usr/local/bin/php || true
+  fi
+  # Docker egress block script (docker role). Its unit is removed with the other
+  # turbopanel* units and its TP-EGRESS chain and jumps with the TP-* chains.
+  if [ -e /usr/local/lib/turbopanel/turbopanel-docker-egress ]; then
+    tp_run "remove Docker egress block script" rm -f /usr/local/lib/turbopanel/turbopanel-docker-egress || true
+    rmdir /usr/local/lib/turbopanel 2>/dev/null || true
   fi
   tp_remove_statoverrides
 }
@@ -2429,6 +2504,10 @@ tp_remove_folders_and_shell() {
   done
   tp_safe_rm_tree /tmp/turbopanel-ansible
   tp_safe_rm_tree /tmp/turbopanel-orchestrate
+  tp_safe_rm_tree /run/turbopanel-gate
+  tp_safe_rm_tree /var/cache/turbopanel-docker-gate
+  tp_safe_rm_tree /var/lib/turbopanel-docker-gate
+  tp_safe_rm_tree /var/lib/turbopanel-hosting-caddy
   tp_safe_rm_tree /root/.ansible
   tp_strip_shell_rcs
 }
@@ -2552,6 +2631,8 @@ tp_account_delete_names() {
   while IFS=: read -r _adn_gname _adn_gpw _adn_ggid _adn_members; do
     [ -n "$_adn_gname" ] || continue
     if tp_name_is_tp "$_adn_gname" && tp_id_in_band "$_adn_ggid"; then
+      tp_file_add "$TP_TMP/work.groups" "$_adn_gname"
+    elif tp_list_has_word "$_adn_gname" $TP_OTHER_GROUPS; then
       tp_file_add "$TP_TMP/work.groups" "$_adn_gname"
     fi
   done < "$TP_TMP/groups"
@@ -3004,13 +3085,139 @@ tp_purge_docker_engine() {
       tp_record_skip "groupdel not installed"
     fi
   fi
+  if tp_docker_engine_gone; then
+    TP_DOCKER_ENGINE_GONE=true
+    tp_purge_docker_network_state
+  else
+    tp_print_warn "Docker Engine is still installed; its bridges and firewall rules were left"
+  fi
+}
+
+# Docker Engine is gone only when nothing of it remains: no daemon binary
+# (also the snap and rootless ones), no engine package, no active or installed
+# service, and no live socket. Anything uncertain counts as still present.
+# Dry runs change nothing, so they never count as gone.
+tp_docker_engine_gone() {
+  [ "$DRY_RUN" = true ] && return 1
+  tp_has_tool dockerd && return 1
+  tp_has_tool dockerd-rootless.sh && return 1
+  [ -x /snap/bin/docker.dockerd ] && return 1
+  [ -d /snap/docker ] && return 1
+  if tp_has_tool snap && snap list docker >/dev/null 2>&1; then
+    return 1
+  fi
+  if tp_has_tool dpkg-query; then
+    for _deg in docker-ce docker.io docker-ce-rootless-extras moby-engine moby-cli; do
+      if tp_pkg_installed "$_deg"; then
+        return 1
+      fi
+    done
+  fi
+  if tp_has_tool systemctl; then
+    for _deg in docker.service docker.socket snap.docker.dockerd.service; do
+      if systemctl is-active --quiet "$_deg" 2>/dev/null; then
+        return 1
+      fi
+    done
+  fi
+  for _deg in ${TP_DOCKER_SOCKETS:-/var/run/docker.sock /run/docker.sock /run/user/*/docker.sock /var/snap/docker/common/run/docker.sock}; do
+    [ -S "$_deg" ] && return 1
+  done
+  return 0
+}
+
+# Docker's own firewall rules reference its bridges (docker0, br-<12 hex>) or
+# jump to its DOCKER* chains. Rules with quoted words are never touched.
+# Docker adds bridge rules only to FORWARD, POSTROUTING and PREROUTING and
+# never to INPUT, so an administrator's own INPUT/OUTPUT rule is left alone;
+# only the jump into a DOCKER* chain is Docker's in those chains.
+tp_docker_net_rule() {
+  case $1 in
+    *\"*|*\'*) return 1 ;;
+    "-A DOCKER"*|"-A INPUT "*) return 1 ;;
+  esac
+  if printf '%s\n' "$1" | grep -Eq ' -j DOCKER(-[A-Z0-9-]+)?$'; then
+    return 0
+  fi
+  case $1 in
+    "-A FORWARD "*|"-A POSTROUTING "*|"-A PREROUTING "*) ;;
+    *) return 1 ;;
+  esac
+  case $1 in *" docker0"*) return 0 ;; esac
+  printf '%s\n' "$1" | grep -Eq ' br-[0-9a-f]{12}( |$)'
+}
+
+tp_purge_docker_net_table() {
+  _dnt_bin=$1
+  _dnt_table=$2
+  "$_dnt_bin" -w 5 -t "$_dnt_table" -S > "$TP_TMP/dn.rules" 2>>"$TP_LOG_FILE" || return 0
+  _dnt_chains=$(sed -n 's/^-N \(DOCKER[A-Z0-9-]*\)$/\1/p' "$TP_TMP/dn.rules")
+  # The DOCKER-USER chain is the operator's hook. It is only emptied when it
+  # holds nothing but Docker's default RETURN rule.
+  _dnt_keep=
+  for _dnt_chain in $_dnt_chains; do
+    [ "$_dnt_chain" = DOCKER-USER ] || continue
+    _dnt_all=$(grep -c "^-A DOCKER-USER " "$TP_TMP/dn.rules" || true)
+    _dnt_ret=$(grep -c "^-A DOCKER-USER -j RETURN$" "$TP_TMP/dn.rules" || true)
+    if [ "${_dnt_all:-0}" != "${_dnt_ret:-0}" ]; then
+      _dnt_keep=DOCKER-USER
+      tp_record_skip "kept $_dnt_bin DOCKER-USER chain: it holds rules Docker did not add"
+    fi
+  done
+  while IFS= read -r _dnt_line; do
+    case $_dnt_line in "-A "*) ;; *) continue ;; esac
+    tp_docker_net_rule "$_dnt_line" || continue
+    # While the operator's DOCKER-USER chain is kept, the jump into it stays,
+    # or the operator's rules would silently stop applying.
+    if [ -n "$_dnt_keep" ]; then
+      case $_dnt_line in *" -j $_dnt_keep") continue ;; esac
+    fi
+    _dnt_del="-D ${_dnt_line#-A }"
+    set -f
+    # shellcheck disable=SC2086
+    tp_run "delete $_dnt_bin $_dnt_table rule: ${_dnt_line}" "$_dnt_bin" -w 5 -t "$_dnt_table" $_dnt_del || true
+    set +f
+  done < "$TP_TMP/dn.rules"
+  for _dnt_chain in $_dnt_chains; do
+    [ "$_dnt_chain" = "$_dnt_keep" ] && continue
+    "$_dnt_bin" -w 5 -t "$_dnt_table" -F "$_dnt_chain" >>"$TP_LOG_FILE" 2>&1 || true
+  done
+  for _dnt_chain in $_dnt_chains; do
+    [ "$_dnt_chain" = "$_dnt_keep" ] && continue
+    if "$_dnt_bin" -w 5 -t "$_dnt_table" -X "$_dnt_chain" >>"$TP_LOG_FILE" 2>&1; then
+      printf '%s\n' "delete $_dnt_bin $_dnt_table $_dnt_chain" >> "$TP_TMP/removed"
+    else
+      TP_NET_LEFT=true
+    fi
+  done
+}
+
+# After Docker Engine is purged its bridges and firewall rules are orphans.
+# Remove only what Docker names: docker0, br-<12 hex> bridges, DOCKER* chains,
+# and the rules that point at them. The iptables-nft tables themselves belong
+# to the host and stay.
+tp_purge_docker_network_state() {
   if tp_has_tool ip; then
-    if ip link show docker0 >/dev/null 2>&1; then
-      tp_run "delete docker0 bridge" ip link del docker0 || true
+    for _pdn_br in $(ip -o link show type bridge 2>/dev/null | sed -n 's/^[0-9]*: \([^:@ ]*\).*/\1/p'); do
+      case $_pdn_br in
+        docker0) ;;
+        br-????????????) printf '%s\n' "${_pdn_br#br-}" | grep -Eq '^[0-9a-f]{12}$' || continue ;;
+        *) continue ;;
+      esac
+      tp_run "delete bridge $_pdn_br" ip link del "$_pdn_br" || true
+    done
+    if ip -o link show type bridge 2>/dev/null | grep -Eq '^[0-9]+: (docker0|br-[0-9a-f]{12})[:@ ]'; then
+      TP_NET_LEFT=true
     fi
   else
     tp_record_skip "ip not installed"
   fi
+  for _pdn_bin in iptables ip6tables; do
+    tp_has_tool "$_pdn_bin" || continue
+    for _pdn_table in filter nat raw; do
+      tp_purge_docker_net_table "$_pdn_bin" "$_pdn_table"
+    done
+  done
 }
 
 tp_purge_path_file() {
@@ -3244,7 +3451,9 @@ tp_print_purge_notes() {
   tp_print_group "Packages kept" "$TP_TMP/kept-packages"
   tp_say "Other packages stay installed by design (curl, git, acl, gnupg, iptables, openssl, wireguard-tools, build tools, ...); this purge never runs autoremove."
   tp_say "/etc/systemd/timesyncd.conf is left as TurboPanel wrote it."
-  tp_say "Reboot this host to clear leftover kernel state (bridges and NAT rules)."
+  if [ "$TP_NET_LEFT" = true ]; then
+    tp_say "Some Docker bridges or firewall chains could not be removed; reboot this host to clear them."
+  fi
 }
 
 tp_print_summary() {
@@ -3407,6 +3616,9 @@ export PATH
 
 TP_FAIL_COUNT=0
 TP_BENIGN_FAIL_COUNT=0
+TP_DOCKER_ENGINE_GONE=false
+TP_DOCKER_LEFT=false
+TP_NET_LEFT=false
 TP_STARTED_REMOVAL=false
 TP_INV_QUIET=false
 TP_LOG_FILE=
@@ -3445,13 +3657,18 @@ TP_OTHER_DIRS=
 TP_LEGACY_ACCOUNTS="turbopanel turbopaneli turbopanelc"
 TP_LEGACY_ACCOUNT_IDS="9999 9998 9997"
 TP_LEGACY_UNITS="turbopanel-mailer.service turbopanel-php-fpm.service"
+# Current units whose names the turbopanel* scans miss.
+TP_OTHER_UNITS="tpbuild.slice"
+# Groups the platform creates outside the 9900-9999 band (the Docker gate's
+# build group, a system gid). Matched by exact name only.
+TP_OTHER_GROUPS="tpgatebuild"
 TP_LEGACY_CONTAINER_NAMES="turbopanel-database turbopanel-queue"
 TP_LEGACY_OPT_PATHS="runtimes platform share/ansible lib/instance vendor/duckdb share/caddy bin/turbopanel-instance bin/turbopanel-mailer"
 TP_LEGACY_SHELL_RC_NEEDLE='/opt/turbopanel/runtimes/deno/.install/env'
 # Every tree this script may delete: what TurboPanel creates, plus Docker's
 # default state it purges. tp_path_is_safe refuses anything else, including a
 # folder configured elsewhere in daemon.env; those are listed as kept.
-TP_OWNED_TREES="/opt/turbopanel /etc/turbopanel /etc/ssh/turbopanel /var/lib/turbopanel /var/log/turbopanel /run/turbopanel /var/run/turbopanel /backup /srv/users /tmp/turbopanel-ansible /tmp/turbopanel-orchestrate /root/.ansible /var/lib/docker /var/lib/containerd /etc/docker /var/lib/turbopanel-purge"
+TP_OWNED_TREES="/opt/turbopanel /etc/turbopanel /etc/ssh/turbopanel /var/lib/turbopanel /var/log/turbopanel /run/turbopanel /var/run/turbopanel /backup /srv/users /tmp/turbopanel-ansible /tmp/turbopanel-orchestrate /root/.ansible /var/lib/docker /var/lib/containerd /etc/docker /var/lib/turbopanel-purge /var/lib/turbopanel-hosting-caddy /run/turbopanel-gate /var/cache/turbopanel-docker-gate /var/lib/turbopanel-docker-gate /var/lib/turbopanel-build"
 TP_SYSTEMD_DIRS="/etc/systemd/system /usr/local/lib/systemd/system /lib/systemd/system /usr/lib/systemd/system"
 TP_DAEMON_ENV=/etc/turbopanel/daemon.env
 TP_RESUME_DIR=/var/lib/turbopanel-purge

@@ -16,6 +16,7 @@
  */
 
 import {
+  dockerBinaryInstalled,
   type DockerCliResult,
   runDocker as defaultRunDocker,
   type RunDockerOptions,
@@ -72,6 +73,8 @@ type RunDockerFn = (
 export type SystemReconcileHandlerDeps = {
   /** Test seam — defaults to {@link defaultRunDocker}. */
   runDocker?: RunDockerFn;
+  /** Test seam — defaults to a `/usr/bin/docker` probe when no Docker seam is injected. */
+  dockerInstalled?: () => Promise<boolean>;
   /** Test seam — defaults to {@link defaultEnsureDocker}. */
   ensureDocker?: () => Promise<void>;
   /** Test seam — defaults to {@link defaultEnsureHostingIngress}. */
@@ -205,7 +208,26 @@ export async function handleSystemReconcile(
   const containers: EnvironmentDeployContainer[] = [];
   let inspectFailed = false;
 
+  // Stopping on a host that never had Docker (site-only) has nothing to stop;
+  // installing Docker just to stop it would fail and queue pointless work.
+  const noDockerStop = parsedPayload.action === "stop" &&
+    !(deps?.dockerInstalled
+      ? await deps.dockerInstalled()
+      : deps?.runDocker !== undefined || deps?.ensureDocker !== undefined ||
+        await dockerBinaryInstalled());
+
   for (const component of parsedPayload.components) {
+    if (noDockerStop) {
+      logInfo(
+        "commands",
+        `system.reconcile stop: Docker not installed; nothing to stop for ${component.component}`,
+      );
+      await writeSystemComponentDescriptor(
+        layout,
+        descriptorFromComponent(component),
+      );
+      continue;
+    }
     await reconcileOneComponent({
       component,
       action: parsedPayload.action,

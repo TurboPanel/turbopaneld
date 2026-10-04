@@ -96,6 +96,23 @@ test("collectContainerLogs rejects when serviceIds does not name the compose ser
   );
 });
 
+test("collectContainerLogs accepts a compose deploy whose manifest has no serviceIds", async () => {
+  const manifests = ownedManifests();
+  delete manifests[0]!.manifest.serviceIds;
+  const logs = await collectContainerLogs(
+    OWNED_ID,
+    { stateDir: "/var/lib/turbopanel" },
+    {
+      runDocker: (args) =>
+        Promise.resolve(
+          args[0] === "inspect" ? ok(inspectStdout()) : ok("line one\n"),
+        ),
+      listManifests: () => Promise.resolve(manifests),
+    },
+  );
+  assertEquals(logs.includes("line one"), true);
+});
+
 test("collectContainerLogs clamps tail and redacts owned container output", async () => {
   const calls: string[][] = [];
   const redactor = createMutableTranscriptRedactor(["s3cret"]);
@@ -394,4 +411,113 @@ test("collectContainerLogs redacts via the process-wide deny-set when no redacto
   } finally {
     resetSharedSecretRedactorForTests();
   }
+});
+
+test("collectContainerLogs accepts a container of a second (green) generation project", async () => {
+  const [owned] = ownedManifests();
+  const manifests: LocalDeploymentManifest[] = [{
+    dir: owned!.dir,
+    manifest: {
+      ...owned!.manifest,
+      version: 3,
+      generations: [
+        {
+          color: "blue",
+          generation: 1,
+          projectName: PROJECT,
+          state: "draining",
+        },
+        {
+          color: "green",
+          generation: 2,
+          projectName: `${PROJECT}-green`,
+          state: "live",
+        },
+      ],
+    },
+  }];
+  const text = await collectContainerLogs(
+    OWNED_ID,
+    { stateDir: "/var/lib/turbopanel" },
+    {
+      listManifests: () => Promise.resolve(manifests),
+      runDocker: (args) => {
+        if (args[0] === "inspect") {
+          return Promise.resolve(ok(inspectStdout(`${PROJECT}-green`)));
+        }
+        return Promise.resolve(ok("line\n"));
+      },
+    },
+  );
+  assertEquals(text.includes("line"), true);
+});
+
+const MANAGED_PROJECT = "01a0fca4-71fb-756a-842f-969404ef4385";
+
+test("collectContainerLogs allows a managed engine container with a managed compose file", async () => {
+  const checked: string[] = [];
+  const logs = await collectContainerLogs(
+    OWNED_ID,
+    { stateDir: "/var/lib/turbopanel" },
+    {
+      runDocker: (args) => {
+        if (args[0] === "inspect") {
+          return Promise.resolve(
+            ok(inspectStdout(MANAGED_PROJECT, "postgres")),
+          );
+        }
+        return Promise.resolve(ok("engine ready\n"));
+      },
+      listManifests: () => Promise.resolve([]),
+      managedComposeExists: (path) => {
+        checked.push(path);
+        return Promise.resolve(true);
+      },
+    },
+  );
+  assertEquals(logs.includes("engine ready"), true);
+  assertEquals(checked, [
+    `/var/lib/turbopanel/managed/${MANAGED_PROJECT}/docker-compose.yml`,
+  ]);
+});
+
+test("collectContainerLogs rejects a project with no managed compose file", async () => {
+  await assertRejects(
+    () =>
+      collectContainerLogs(FOREIGN_ID, { stateDir: "/var/lib/turbopanel" }, {
+        runDocker: (args) =>
+          Promise.resolve(
+            args[0] === "inspect"
+              ? ok(inspectStdout("other-managed", "postgres"))
+              : ok("should-not-run\n"),
+          ),
+        listManifests: () => Promise.resolve([]),
+        managedComposeExists: () => Promise.resolve(false),
+      }),
+    Error,
+    "not owned by this host",
+  );
+});
+
+test("collectContainerLogs never probes the managed dir for a traversal project label", async () => {
+  let probed = false;
+  await assertRejects(
+    () =>
+      collectContainerLogs(FOREIGN_ID, { stateDir: "/var/lib/turbopanel" }, {
+        runDocker: (args) =>
+          Promise.resolve(
+            args[0] === "inspect"
+              ? ok(inspectStdout("../deployments/x", "postgres"))
+              : ok("should-not-run\n"),
+          ),
+        listManifests: () => Promise.resolve([]),
+        managedComposeExists: () => {
+          probed = true;
+          return Promise.resolve(true);
+        },
+      }),
+    Error,
+    "not owned by this host",
+  );
+  assertEquals(probed, false);
 });

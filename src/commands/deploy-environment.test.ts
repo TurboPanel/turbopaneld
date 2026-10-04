@@ -14,6 +14,7 @@ import { createTempLayout } from "../testing/temp-layout.ts";
 import { resolveLayout } from "../paths/layout.ts";
 import { readSystemComponentDescriptor } from "../deploy/system-component.ts";
 import {
+  applyDeploySshAccess,
   buildDeployServiceNames,
   buildDeploySummary,
   containerHostingsNeedSharedHttpIngress,
@@ -31,6 +32,7 @@ import type {
   EnvironmentDeployNativeAppService,
   EnvironmentDeployPayload,
 } from "../contracts/commands-contracts.ts";
+import "../testing/stub-hosting-caddy-host.ts";
 
 /**
  * Shared hosting-ingress Docker network — the `hosting-ingress` system
@@ -577,8 +579,12 @@ test({
         projectName: string;
         composeSha256: string;
         services: Record<string, { replicas: number }>;
+        generations: unknown;
       };
-      assertEquals(manifest.version, 2);
+      assertEquals(manifest.version, 3);
+      assertEquals(manifest.generations, [
+        { color: "blue", generation: 3, projectName, state: "live" },
+      ]);
       assertEquals(manifest.projectId, projectId);
       assertEquals(manifest.environmentId, environmentId);
       assertEquals(manifest.serverId, "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee");
@@ -738,7 +744,7 @@ test({
           join(deploymentDir, DEPLOYMENT_MANIFEST_FILENAME),
         ),
       ) as { version: number; services: Record<string, { replicas: number }> };
-      assertEquals(manifest.version, 2);
+      assertEquals(manifest.version, 3);
       assertEquals(manifest.services, { web: { replicas: 1 } });
 
       const buildCall = calls.find((argv) =>
@@ -2006,4 +2012,42 @@ test({
       await fixture.cleanup();
     }
   },
+});
+
+test("a deploy ensures the sshd drop-in even when no principal declared keys", async () => {
+  // The drop-in's backstop is what makes a key planted in a principal's own
+  // home inert. Gating it on declared keys left it off every host whose tenants
+  // never asked for SSH, so those principals fell through to the host defaults.
+  const seen: string[][] = [];
+  await applyDeploySshAccess(
+    [{ principalId: "pr-1", username: "siteowner" }],
+    (principals) => {
+      seen.push(principals.map((principal) => principal.username));
+      return Promise.resolve();
+    },
+  );
+  // Called, with no key file to write for the keyless principal.
+  assertEquals(seen, [[]]);
+});
+
+test("a deploy passes only principals that declared keys, and none for no principals", async () => {
+  const seen: string[][] = [];
+  const record = (principals: readonly { username: string }[]) => {
+    seen.push(principals.map((principal) => principal.username));
+    return Promise.resolve();
+  };
+  await applyDeploySshAccess([], record);
+  assertEquals(seen, []);
+  await applyDeploySshAccess([
+    { principalId: "pr-1", username: "withkeys", sshKeys: [] },
+    { principalId: "pr-2", username: "silent" },
+  ], record);
+  assertEquals(seen, [["withkeys"]]);
+});
+
+test("a deploy warns rather than fails when ssh access cannot be applied", async () => {
+  await applyDeploySshAccess(
+    [{ principalId: "pr-1", username: "siteowner" }],
+    () => Promise.reject(new Error("no Include line")),
+  );
 });

@@ -28,6 +28,10 @@
     # native | js — set by run.sh after the native-binary executability probe.
     turbopanel_daemon_exec_mode: native
     turbopanel_user: tp
+    # P1-1: root-owned config and state roots (the daemon-seal role, last
+    # before the daemon starts); the daemon writes only its own leaves.
+    turbopanel_seal_config_root: true
+    turbopanel_seal_state_root: true
     turbopanel_group: tp
     turbopanel_uid: 9999
     turbopanel_gid: 9999
@@ -61,25 +65,25 @@
     - role: daemon-logs
     - role: principal-access
     - role: rapl-access
+    # tpbuild, /var/lib/turbopanel-build and tpbuild.slice for tp-host
+    # build-run's sandboxed builds.
+    - role: build-user
     - role: daemon-config
     - role: daemon-launch
 
   post_tasks:
-    # Mutable state and config belong to the daemon. The vendor tree and the
+    # The state and config roots are made root-owned by the daemon-seal role
+    # (last, just before the daemon starts); the daemon owns only its own
+    # folders below them (roles/daemon-layout). The vendor tree and the
     # orchestration tree deliberately do **not** appear here: they are release
     # content root executes (tp-orchestrate runs playbooks from it), and the
     # daemon must not be able to rewrite them — see roles/turbopanel-user and
     # roles/daemon-layout.
-    - name: Ensure tp owns state and config trees
-      ansible.builtin.file:
-        path: "{{ item }}"
-        state: directory
-        owner: "{{ turbopanel_user }}"
-        group: "{{ turbopanel_group }}"
-        recurse: true
-      loop:
-        - "{{ turbopanel_daemon_state_dir }}"
-        - "{{ turbopanel_config_dir }}"
+    #
+    # Nothing under the state or config trees is re-owned recursively. The
+    # state tree holds trees the daemon deliberately hands to other owners
+    # (managed engine bind mounts, tenant-owned deployment trees), and a root
+    # pass over tp's folders would follow whatever tp swapped in (P1-1).
 
     # Galaxy install uses ANSIBLE_HOME=/tmp/turbopanel-ansible (see paths.ts).
     # Roles/collections are already in FHS paths; drop the disposable cache and

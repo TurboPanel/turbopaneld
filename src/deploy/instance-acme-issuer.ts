@@ -15,6 +15,10 @@ import { X509Certificate } from "node:crypto";
 import type { InstanceAcmeWireSettings } from "../contracts/cell-messages.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 import { join } from "@std/path";
+import {
+  type PrivilegedReadRun,
+  readTextFileOrNull,
+} from "../permissions/privileged-read.ts";
 
 export const INSTANCE_ACME_SERVICE = "turbopanel-instance-acme.service";
 export const HOSTING_CADDY_SERVICE = "turbopanel-hosting-caddy.service";
@@ -169,13 +173,109 @@ function lineHasMessage(line: string, message: string): boolean {
   return line.includes(`"msg":"${message}"`);
 }
 
-/** A terminal issuer error, if the log contains one. */
+function trimHyphens(text: string): string {
+  let start = 0;
+  let end = text.length;
+  while (start < end && text[start] === "-") start++;
+  while (end > start && text[end - 1] === "-") end--;
+  return text.slice(start, end);
+}
+
+/**
+ * Caddy's storage folder name for the configured CA, built the way certmagic
+ * builds it (acmeissuer.go `issuerKey`, then storage.go `KeyBuilder.Safe`):
+ * the directory URL's host (with any port) and its path with `/` and `\`
+ * turned into `-` and the ends trimmed, joined by `-`; then lower-cased, `:`
+ * to `-`, `..` removed and everything outside `[\w@.-]` dropped. Examples:
+ * `acme-v02.api.letsencrypt.org-directory`, `localhost-14000-dir`. Staging and
+ * production live in sibling folders, so every lookup must name one.
+ */
+export function instanceAcmeIssuerKey(
+  settings: InstanceAcmeWireSettings,
+): string {
+  const raw = instanceAcmeIssuerDirectory(settings);
+  const url = new URL(raw);
+  // The authority as written (certmagic keeps an explicit port, even :443).
+  const afterScheme = raw.trim().split("://")[1] ?? "";
+  const written = afterScheme.split(/[/?#]/, 1)[0] ?? "";
+  const authority = written.slice(written.lastIndexOf("@") + 1) || url.host;
+  const path = trimHyphens(url.pathname.replaceAll(/[/\\]/g, "-"));
+  const key = path ? `${authority}-${path}` : authority;
+  return key.toLowerCase().trim()
+    .replaceAll(" ", "_")
+    .replaceAll("+", "_plus_")
+    .replaceAll("*", "wildcard_")
+    .replaceAll(":", "-")
+    .replaceAll("..", "")
+    .replace(/[^\w@.-]/g, "");
+}
+
+export type InstanceAcmeProblem =
+  | "rate-limited"
+  | "caa"
+  | "rejected-identifier"
+  | "invalid-contact"
+  | "dns"
+  | "unauthorized"
+  | "network"
+  | "timeout";
+
+/** Most specific first: a later pattern must not hide an earlier one. */
+const PROBLEM_PATTERNS: ReadonlyArray<[InstanceAcmeProblem, RegExp]> = [
+  [
+    "rate-limited",
+    /ratelimited|rate limit|too many (failed|certificates|new)/i,
+  ],
+  ["caa", /caa record|acme:error:caa/i],
+  ["rejected-identifier", /rejectedidentifier/i],
+  ["invalid-contact", /invalidcontact|unsupportedcontact|invalid contact/i],
+  ["dns", /nxdomain|no valid a records|dns problem|no such host/i],
+  [
+    "unauthorized",
+    /unauthorized|challenge failed|validation failed|connection refused|timeout during connect/i,
+  ],
+  [
+    "network",
+    /connection reset|no route to host|context deadline exceeded|i\/o timeout/i,
+  ],
+  ["timeout", /instance acme issuer timed out/i],
+];
+
+function problemRank(text: string): number {
+  const at = PROBLEM_PATTERNS.findIndex(([, re]) => re.test(text));
+  return at < 0 ? PROBLEM_PATTERNS.length : at;
+}
+
+/** The most specific known problem named in an issuer or window error. */
+export function instanceAcmeProblem(text: string): InstanceAcmeProblem | null {
+  const rank = problemRank(text);
+  return PROBLEM_PATTERNS[rank]?.[0] ?? null;
+}
+
+const FAILURE_LINE_MAX = 500;
+
+/**
+ * A terminal issuer error, if the log contains one. Every failure line is
+ * scanned: the most specific known problem wins (a rate limit is not hidden by
+ * an earlier "unauthorized"), and a long line keeps its tail, where Caddy puts
+ * the `error` field.
+ */
 export function instanceAcmeIssuerFailureLine(log: string): string | null {
+  let best: string | null = null;
+  let bestRank = Infinity;
   for (const line of log.split("\n")) {
     if (!isIssuerFailureLine(line)) continue;
-    return line.length > 500 ? `${line.slice(0, 500)}…` : line;
+    const rank = problemRank(line);
+    if (rank < bestRank) {
+      best = line;
+      bestRank = rank;
+    }
   }
-  return null;
+  if (best === null) return null;
+  if (best.length <= FAILURE_LINE_MAX) return best;
+  const hit = PROBLEM_PATTERNS[bestRank]?.[1].exec(best)?.[0];
+  const tail = `…${best.slice(-FAILURE_LINE_MAX)}`;
+  return hit && !tail.includes(hit) ? `${tail} [${hit}]` : tail;
 }
 
 function isIssuerFailureLine(line: string): boolean {
@@ -292,17 +392,17 @@ export function parseInstanceAcmeSettings(
   };
 }
 
+/**
+ * The saved instance ACME settings, or `null` when none were saved. The file
+ * sits in `/etc/turbopanel/caddy`, which can be root-owned `0750`; behind
+ * that it is read through tp-host.
+ */
 export async function readInstanceAcmeSettings(
   layout: LayoutPaths,
+  run?: PrivilegedReadRun,
 ): Promise<InstanceAcmeWireSettings | null> {
-  let raw: string;
-  try {
-    raw = await Deno.readTextFile(instanceAcmeSettingsPath(layout));
-  } catch (err) {
-    if (err instanceof Deno.errors.NotFound) return null;
-    throw err;
-  }
-  return parseInstanceAcmeSettings(raw);
+  const raw = await readTextFileOrNull(instanceAcmeSettingsPath(layout), run);
+  return raw === null ? null : parseInstanceAcmeSettings(raw);
 }
 
 function isInstanceAcmeSettings(

@@ -1,0 +1,35 @@
+http://app.example.com {
+  redir https://{host}{uri} permanent
+}
+
+app.example.com {
+  tls /etc/turbopanel/tls/tls-1/fullchain.pem /etc/turbopanel/tls/tls-1/privkey.pem
+  handle /v1/docs/* {
+    uri strip_prefix /v1/docs/
+    reverse_proxy 127.0.0.1:7443 {
+  transport http {
+    proxy_protocol v2
+    keepalive off
+    versions 2
+    tls
+    tls_insecure_skip_verify
+  }
+}
+  }
+  handle /api/* {
+    uri strip_prefix /api
+    reverse_proxy 127.0.0.1:18080
+  }
+  handle {
+    reverse_proxy 127.0.0.1:7443 {
+  transport http {
+    proxy_protocol v2
+    keepalive off
+    versions 2
+    tls
+    tls_insecure_skip_verify
+  }
+}
+  }
+
+}

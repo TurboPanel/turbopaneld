@@ -64,7 +64,10 @@ is not a command: no command row, no outbox. Health was otherwise only
 observed when a `managed.apply` / `managed.lifecycle` result came back, so the
 promote gate's staleness window expired on an idle, healthy cluster. A control
 plane that predates the feature never sends the request; the message is
-additive and no floor moved.
+additive and no floor moved. A replica's `member.replication` also carries
+`receivedLsn` / `replayLsn` and, once `PgStandbySampler` has seen it streaming,
+`lastStreaming` (`at`, monotonic `ageMs`, lag); all optional, so an older
+control plane ignores them.
 
 ### Instance Let's Encrypt renewal (`src/instance/instance-acme-renew.ts`)
 
@@ -95,7 +98,7 @@ is already valid and outside the renewal window is reported once as well
 before it answers, so a leaf it just installed is reported on the same
 request. A failure
 waits at least one hour before that hostname is tried again, then doubles up
-to 24 hours. The wait is stored in `<stateDir>/instance-acme/renewal-state.json`
+to 24 hours. The wait is stored in `<stateDir>/instance/acme-renewal-state.json` (not under `instance-acme`, which is the issuer's Caddy storage, `tpcaddy:tp` 2750; an older `instance-acme/renewal-state.json` is still read)
 so a restart cannot spend Let's Encrypt's five failed authorizations per
 identifier per hour (one refill every 12 minutes). The tenant
 `AcmeIssuanceObserver` is unchanged and still probes organization names.
@@ -344,20 +347,40 @@ still pipes the downloaded script through `sudo sh -s`. Flags (`--license`,
 separate update binary installed under `/opt/turbopanel/bin/`.
 
 `run.sh --daemon-only` on a host that already has the control-plane binary
-and a socket-mode `daemon.env` (no `TURBOPANEL_INSTANCE_URL`) runs
-`daemon-colocated-refresh.yml`. That play refreshes the daemon unit, keeps
+and a `colocated=1` update-origin pin (or no pin: a host installed before
+pins) runs `daemon-colocated-refresh.yml`. Detection reads root-owned files
+only (`tp_colocated_control_plane_host`), never `daemon.env`. That play refreshes the daemon unit, keeps
 `After=turbopanel-instance.service`, and does not recurse-chown state or
 config. It does not run `daemon-install.yml`. It does re-install the root
 helpers from the new orchestration tree first (`turbopanel-user`
 `tasks_from: root-helpers` — `lib/tp-host`, `lib/tp-host.conf` and
 `/etc/sudoers.d/tp`, `visudo -cf`-validated), so a tp-host fix reaches a
 self-hosted panel host; every play that replaces the daemon binary ships the
-matching tp-host (`sudoers-contract.test.ts` pins this). A remote node, or a `daemon.env`
-that already dials a URL, still uses the remote installer.
+matching tp-host (`sudoers-contract.test.ts` pins this). A remote node still
+uses the remote installer, and the play refuses a `daemon.env` that already
+dials a URL.
+
+**The refresh never takes settings from `daemon.env`.** It runs as root and
+the daemon can rewrite `daemon.env`, so its settings live in
+`/opt/turbopanel/lib/control-plane-refresh` (`root:root 0600`, beside
+`lib/update-origin`): `channel=` (allowlisted), `instance_manifest_url=` and
+`ui_manifest_url=` (each `tp_release_manifest_url_ok`-validated on read; an
+invalid value reads as empty). The instance CA and `DL_BASE` are not carried —
+a control-plane host has neither. `run.sh --instance` writes the file at
+install; every refresh rewrites it (a caller's channel and
+`--instance-manifest-url`/`--ui-manifest-url` replace the recorded values).
+**Migration:** a host installed before this file has none, so its first
+refresh reads those three keys from `daemon.env` once, validates them the same
+way, records them, and never reads `daemon.env` again
+(`tp_load_control_plane_refresh`). `daemon.env` itself is daemon-only:
+`daemon-config` writes it `0600` (was `0640`), so the control-plane accounts in
+group `tp` cannot read it; the next refresh or converge tightens existing
+hosts.
 
 On such a host `--daemon-only` needs **no license and no manifest pin**
 (`tp_prepare_colocated_daemon_only`): the play does not enrol, the channel
-comes from `daemon.env` when the caller names none (default `release`), and
+comes from `lib/control-plane-refresh` when the caller names none (default
+`release`), and
 the manifest from that channel's built-in rail — signature-verified by
 `tp_fetch_channel_manifest` like every install. A remote daemon still needs
 `TURBOPANEL_LICENSE` (or `license.id`/`license.token`) and a pinned manifest.
@@ -441,18 +464,32 @@ writes `<backupDir>/control-plane/<upgradeId>/` (`pg_dump -Fc` inside the
 database container, an `/etc/turbopanel` tarball, and `meta.json` with the
 migration-history fingerprint) and keeps the newest three. When the rendered
 Caddyfile does not yet serve `updating.html`, `instance-launch-only.yml`
-re-templates it first. After restart, `waitForInstanceHealth` polls
-`GET /api/health` on the instance socket until `version` and
-`revision.commit` match the manifest, within
-`INSTANCE_UPDATE_HEALTH_TIMEOUT_MS`. A timeout or mismatch runs
+re-templates it first; that render keeps the `TURBOPANEL_UPDATE_CHANNEL` already
+in runtime.env (only the installer sets the channel). After restart, `waitForInstanceHealth` polls
+`GET /api/health` on the instance socket until `revision.commit` matches the
+manifest and the version agrees (the reported `build` label equals the
+manifest version, or the base versions match: the binary reports `0.1.7`
+while a canary manifest says `0.1.7-canary.56`), within
+`INSTANCE_UPDATE_HEALTH_TIMEOUT_MS` (10 min by default; set
+`TURBOPANEL_UPDATE_HEALTH_TIMEOUT_SECONDS` to 30..3600 for a slow host; the poll
+backs off from 1 s to 10 s and succeeds the moment the new build answers). A timeout or mismatch runs
 `instance-rollback.yml` (restore `.prev`, and `pg_restore` only when the
 migration fingerprint changed) and checks health again. Success of that
 check reports `rolled-back` with the original `errorCode` (`health_timeout`,
 `health_mismatch`, or `restart_failed`) on `update-progress` (when
-`update-progress-v1` is advertised) and on `instance-update-result`. A failed
+`update-progress-v1` is advertised) and on `instance-update-result`. If the rollback cannot be confirmed but a final
+60 s recheck finds the NEW build serving, the update is a success with a
+warning (logged, and carried as the `done` progress detail), not
+`recovery_required`. A failed
 rollback reports `failed` / `recovery_required` and includes the backup path,
 `sudo -n tp-orchestrate playbook … instance-rollback.yml -e
 turbopanel_upgrade_id=…`, and a pinned `update-instance` reinstall command.
+The web server (`turbopanel-caddy`, :8443) is separate from the build: the
+restart only reloads or restarts it best-effort, then `ensureWebServerRunning`
+starts it again (backoff) when it is not active. The instance is checked
+directly on its socket, so a dead proxy never rolls back a healthy build; if
+Caddy never starts the update fails with `web_server_failed` ("web server did
+not start"), no rollback.
 Stages are `preparing → downloading → installing → restarting → verifying →
 done`. The managed Caddyfile `handle_errors` block answers socket
 502/503/504 with JSON `control_plane_updating` on `/api` and `/ws`, a bare

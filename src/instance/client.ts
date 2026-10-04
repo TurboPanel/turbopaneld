@@ -1,5 +1,8 @@
+import { SeenCommandIds } from "./dispatch-dedupe.ts";
+import { closeAndAbandon } from "./socket-close.ts";
 import { restartDaemonService } from "./restart-daemon-service.ts";
 import { describeUnknown } from "../util/describe-unknown.ts";
+import { redactUrlSecrets } from "../util/redact-url-secrets.ts";
 import { forEachSequential, repeatSequential } from "../util/sequential.ts";
 import {
   createInstanceHttpClient,
@@ -64,6 +67,7 @@ import { runDocker as defaultRunDocker } from "../deploy/docker-cli.ts";
 import { syncHostDockerNetworking } from "../deploy/docker-networking-sync.ts";
 import { runDockerSetup } from "../orchestration/ansible.ts";
 import { resolveLayout } from "../paths/layout.ts";
+import { removeDaemonFile } from "../permissions/daemon-files.ts";
 import { sweepOrphanCommandLogs } from "../logs/orphan-sweep.ts";
 import { classifyConnectFailure } from "./connect-failure.ts";
 import { DaemonJwksClient } from "./jwks-client.ts";
@@ -94,6 +98,7 @@ import {
   MalformedManifestError,
   ManifestSignatureError,
   MissingChannelError,
+  RollbackRefusedError,
   UnsupportedSchemaVersionError,
 } from "../update/errors.ts";
 import { resolveUpdate } from "../update/resolver.ts";
@@ -130,10 +135,16 @@ import {
 } from "../update/urls.ts";
 import { installOriginNeedsInsecureTls } from "./install-tls.ts";
 import { ManagedHaObserver } from "./ha-observe.ts";
+import { PgDeadPrimaryObserver } from "./pg-dead-primary-observe.ts";
+import { PgStandbySampler } from "./pg-standby-sampler.ts";
+import { BackupResultReporter } from "../backups/result-reporter.ts";
 import { AcmeIssuanceObserver } from "./acme-observe.ts";
 import { InstanceAcmeRenewalScheduler } from "./instance-acme-renew.ts";
 import { DAEMON_VERSION } from "../version.ts";
-import { resolveDaemonCapabilities } from "./version-wire.ts";
+import {
+  MANAGED_HA_PROBE_FEATURE,
+  resolveDaemonCapabilities,
+} from "./version-wire.ts";
 import { TopologyReporter } from "./topology-reporter.ts";
 import type { TopologySnapshot } from "../contracts/topology-types.ts";
 import type {
@@ -148,6 +159,7 @@ import type {
  * module never imports handlers.
  */
 export type CommandDispatchDeps = {
+  verifyControlPlane?: () => Promise<void>;
   decryptSecrets?: (ciphertexts: string[]) => Promise<(string | null)[]>;
   sendCommandLogChunk?: SendCommandLogChunkFn;
   rehydrateDeploymentSecrets?: (
@@ -188,6 +200,8 @@ export type CommandPorts = {
   handleCommandDispatch?: CommandDispatchHandler;
   handleFabricPathProbe?: FabricPathProbeHandler;
   handleDrivetempEnable?: DrivetempEnableHandler;
+  /** Runs when a session attaches: delivers held command outcomes. */
+  handleSessionAttach?: (ws: WebSocket) => Promise<void>;
 };
 
 let commandPorts: CommandPorts = {};
@@ -361,7 +375,7 @@ function parseMessage(raw: string): DaemonMessage | null {
 export async function clearDaemonKeyState(stateDir: string): Promise<void> {
   await forEachSequential([SERVER_KEY_FILE, KEY_ID_FILE], async (file) => {
     try {
-      await Deno.remove(`${stateDir}/${file}`);
+      await removeDaemonFile(`${stateDir}/${file}`);
     } catch {
       // Missing files are fine.
     }
@@ -419,7 +433,12 @@ export class InstanceClient {
   #loggedUnsupportedInstanceVersion: string | undefined;
   #licenseStamp: string | undefined;
   #idlePresence: IdlePresence | undefined;
+  /** Command ids already dispatched, so a repeated frame never runs twice. */
+  readonly #seenDispatchIds = new SeenCommandIds();
   #haObserver: ManagedHaObserver | undefined;
+  #pgProbeObserver: PgDeadPrimaryObserver | undefined;
+  #pgStandbySampler: PgStandbySampler | undefined;
+  #backupReporter: BackupResultReporter | undefined;
   #acmeObserver: AcmeIssuanceObserver | undefined;
   /** Panel certificate renewal. Independent of `#acmeObserver`. */
   #instanceAcmeRenewal: InstanceAcmeRenewalScheduler | undefined;
@@ -553,6 +572,10 @@ export class InstanceClient {
   }
 
   async #afterAttachVersion(ws: WebSocket): Promise<void> {
+    const sessionAttach = commandPorts.handleSessionAttach;
+    if (sessionAttach) {
+      this.#runSocketHandler("session-attach", sessionAttach(ws));
+    }
     const pending = this.#pendingInstanceUpdateResult;
     if (pending && ws.readyState === WebSocket.OPEN) {
       this.#pendingInstanceUpdateResult = null;
@@ -840,7 +863,11 @@ export class InstanceClient {
     this.#idlePresence?.detach();
     this.#idlePresence = undefined;
     this.#haObserver?.detach();
+    this.#pgProbeObserver?.detach();
+    this.#pgStandbySampler?.detach();
     this.#haObserver = undefined;
+    this.#backupReporter?.detach();
+    this.#backupReporter = undefined;
     this.#acmeObserver?.detach();
     this.#acmeObserver = undefined;
     this.#instanceAcmeRenewal?.stop();
@@ -920,6 +947,9 @@ export class InstanceClient {
     this.#closeActiveSocket();
     this.#idlePresence?.detach();
     this.#haObserver?.detach();
+    this.#pgProbeObserver?.detach();
+    this.#pgStandbySampler?.detach();
+    this.#backupReporter?.detach();
     this.#acmeObserver?.detach();
     this.#metricsScheduler?.detach();
     const classified = classifyConnectFailure(err);
@@ -1072,11 +1102,7 @@ export class InstanceClient {
     ) {
       return;
     }
-    try {
-      ws.close();
-    } catch {
-      // Socket may already be gone.
-    }
+    closeAndAbandon(ws);
     if (this.#ws === ws) this.#ws = undefined;
   }
 
@@ -1339,6 +1365,11 @@ export class InstanceClient {
     this.#idlePresence?.attach(ws);
     this.#ensureHaObserver();
     this.#haObserver?.attach();
+    this.#ensurePgProbeObserver();
+    this.#pgProbeObserver?.attach();
+    this.#pgStandbySampler ??= new PgStandbySampler();
+    this.#pgStandbySampler.attach();
+    this.#ensureBackupReporter().attach();
     this.#ensureAcmeObserver();
     this.#acmeObserver?.attach();
     this.#instanceAcmeRenewal?.flush();
@@ -1355,6 +1386,9 @@ export class InstanceClient {
     this.#syncDockerNetworkingAfterConnect();
 
     ws.onmessage = (event) => {
+      // An abandoned or replaced socket may still wake up with buffered
+      // frames; only the current socket may drive the daemon.
+      if (this.#ws !== ws) return;
       this.#idlePresence?.noteInboundActivity();
       const raw = typeof event.data === "string"
         ? event.data
@@ -1370,7 +1404,14 @@ export class InstanceClient {
       this.#handleMessage(message, ws);
     };
 
+    let closeHandled = false;
     ws.onclose = (event) => {
+      // closeAndAbandon dispatches a synthetic close, and the real socket can
+      // still fire its own later. By then a new connection owns the shared
+      // state below, so each socket cleans up at most once, and only while it
+      // is still the current one.
+      if (closeHandled) return;
+      closeHandled = true;
       if (event.code === 4401) {
         logWarn("instance", "authentication rejected");
       }
@@ -1379,10 +1420,14 @@ export class InstanceClient {
       } else {
         logDebug("instance", "websocket closed before registration");
       }
-      if (this.#ws === ws) this.#ws = undefined;
+      if (this.#ws !== undefined && this.#ws !== ws) return;
+      this.#ws = undefined;
       this.#peerFeatures = [];
       this.#idlePresence?.detach();
       this.#haObserver?.detach();
+      this.#pgProbeObserver?.detach();
+      this.#pgStandbySampler?.detach();
+      this.#backupReporter?.detach();
       this.#acmeObserver?.detach();
       this.#metricsScheduler?.detach();
       this.#topologyReporter?.detach();
@@ -1429,6 +1474,29 @@ export class InstanceClient {
         this.#ws.send(JSON.stringify(message));
       },
     });
+  }
+
+  #ensurePgProbeObserver(): void {
+    if (this.#pgProbeObserver) return;
+    this.#pgProbeObserver = new PgDeadPrimaryObserver({
+      send: (message) => {
+        if (!this.#ws || this.#ws.readyState !== WebSocket.OPEN) return false;
+        this.#ws.send(JSON.stringify(message));
+        return true;
+      },
+      peerSupportsProbe: () => this.instanceSupports(MANAGED_HA_PROBE_FEATURE),
+    });
+  }
+
+  #ensureBackupReporter(): BackupResultReporter {
+    this.#backupReporter ??= new BackupResultReporter({
+      send: (message) => {
+        if (!this.#ws || this.#ws.readyState !== WebSocket.OPEN) return false;
+        this.#ws.send(JSON.stringify(message));
+        return true;
+      },
+    });
+    return this.#backupReporter;
   }
 
   #ensureAcmeObserver(): void {
@@ -1485,7 +1553,9 @@ export class InstanceClient {
       existingServerId: this.#metricsSchedulerServerId,
       serverId,
       collectorFactory: this.#metricsCollectorFactory,
-      schedulerOptions: {},
+      schedulerOptions: {
+        durabilityFlag: () => this.instanceSupports("metrics-v7"),
+      },
     });
     this.#metricsScheduler = rebound.scheduler;
     this.#metricsSchedulerServerId = rebound.serverId;
@@ -1570,6 +1640,9 @@ export class InstanceClient {
   // Identity is established locally (enrollment + server.id) and confirmed via
   // verified JWT `sub` in DaemonTokenManager — no socket message adopts serverId.
   #handleMessage(message: DaemonMessage, ws: WebSocket): void {
+    // The control plane answers the daemon's wire ping with `{type:"pong"}`
+    // (a Workers auto-response); it carries nothing to act on.
+    if ((message as { type?: unknown }).type === "pong") return;
     switch (message.type) {
       case "version":
         // `commit` / `branch` stay informational — the daemon never
@@ -1588,6 +1661,24 @@ export class InstanceClient {
         const dispatch = this.#resolveCommandDispatch();
         if (!dispatch) {
           logWarn("instance", "command-dispatch handler not registered");
+          break;
+        }
+        if (this.#seenDispatchIds.seenBefore(message.id)) {
+          logWarn(
+            "instance",
+            "ignored repeated command-dispatch",
+            sanitizeForLog(message.id),
+          );
+          // Re-ack so the control plane stops waiting on an ack it missed.
+          if (ws.readyState === WebSocket.OPEN) {
+            const at = new Date().toISOString();
+            ws.send(JSON.stringify({
+              type: "command-ack",
+              id: message.id,
+              at,
+              daemonReceivedAt: at,
+            }));
+          }
           break;
         }
         this.#runSocketHandler(
@@ -1650,6 +1741,12 @@ export class InstanceClient {
           this.#applyTunnelToken(message, ws),
         );
         break;
+      case "backup-run-report-result":
+        this.#runSocketHandler(
+          "backup-run-report-result",
+          this.#ensureBackupReporter().handleResult(message),
+        );
+        break;
       case "public-urls-update":
         this.#runSocketHandler(
           "public-urls-update",
@@ -1689,6 +1786,7 @@ export class InstanceClient {
     if (!apiClient) return undefined;
     return {
       decryptSecrets: (ciphertexts) => apiClient.decryptSecrets(ciphertexts),
+      verifyControlPlane: () => apiClient.ping(),
       rehydrateDeploymentSecrets: (deployments) =>
         apiClient.rehydrateDeploymentSecrets(deployments),
       sendCommandLogChunk: (params) => apiClient.sendCommandLogChunk(params),
@@ -2094,6 +2192,7 @@ export class InstanceClient {
       err instanceof MalformedManifestError ||
       err instanceof MissingChannelError ||
       err instanceof ManifestSignatureError ||
+      err instanceof RollbackRefusedError ||
       err instanceof UnsupportedSchemaVersionError ||
       err instanceof InsecureOverlayBaseError
     ) {
@@ -2116,7 +2215,7 @@ export class InstanceClient {
       type: "update-result",
       id,
       ok,
-      error,
+      error: error === undefined ? undefined : redactUrlSecrets(error),
       at: new Date().toISOString(),
       ...(extra.errorCode ? { errorCode: extra.errorCode } : {}),
       ...(extra.upgradeId ? { upgradeId: extra.upgradeId } : {}),
@@ -2279,7 +2378,7 @@ export class InstanceClient {
       type: "instance-update-result",
       id,
       ok,
-      error,
+      error: error === undefined ? undefined : redactUrlSecrets(error),
       at: new Date().toISOString(),
       ...(extra.errorCode ? { errorCode: extra.errorCode } : {}),
       ...(extra.upgradeId ? { upgradeId: extra.upgradeId } : {}),
@@ -2364,7 +2463,7 @@ export class InstanceClient {
         upgradeId,
         targetCommit: message.targetCommit?.trim() || undefined,
       });
-      await clientTestHooks.executeInstanceUpdateReconcile({
+      const outcome = await clientTestHooks.executeInstanceUpdateReconcile({
         channel,
         ...(instancePin ? { manifestUrl: instancePin } : {}),
         ...(uiPin ? { uiManifestUrl: uiPin } : {}),
@@ -2377,6 +2476,18 @@ export class InstanceClient {
           this.#reportUpdateStage(stage, { unit: "instance", upgradeId });
         },
       });
+      if (outcome?.warning) {
+        logWarn(
+          "update",
+          "control-plane update succeeded with a warning:",
+          sanitizeForLog(outcome.warning),
+        );
+        this.#reportUpdateStage("done", {
+          unit: "instance",
+          upgradeId,
+          detail: outcome.warning,
+        });
+      }
       ok = true;
     } catch (err) {
       const classified = this.#classifyControlPlaneUpdateFailure(err);
@@ -2415,6 +2526,7 @@ export class InstanceClient {
       err instanceof MalformedManifestError ||
       err instanceof MissingChannelError ||
       err instanceof ManifestSignatureError ||
+      err instanceof RollbackRefusedError ||
       err instanceof UnsupportedSchemaVersionError ||
       err instanceof InsecureOverlayBaseError
     ) {
@@ -3063,7 +3175,9 @@ type ClientTestHooks = {
   downloadRunScript: typeof downloadRunScript;
   executeRunReconcile: typeof executeRunReconcile;
   assertUpdateDiskPreflight: typeof assertUpdateDiskPreflight;
-  executeInstanceUpdateReconcile: typeof executeInstanceUpdateReconcile;
+  executeInstanceUpdateReconcile: (
+    options: Parameters<typeof executeInstanceUpdateReconcile>[0],
+  ) => Promise<{ warning?: string } | void>;
   restartControlPlaneUnits: typeof restartControlPlaneUnits;
   collectServerIps: typeof collectServerIps;
   collectMetricsCapabilities: typeof collectMetricsCapabilities;

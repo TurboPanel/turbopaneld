@@ -61,9 +61,11 @@
   ansible.builtin.shell: |
     set -euo pipefail
     RP_VER="{{ railpack_version }}"
-    RP_ARCH="{{ buildkit_arch }}"
+    # Railpack names Linux assets by Rust target triple, not linux-<arch>
+    # (keep in step with railpackAssetName in src/deploy/release/railpack-build.ts).
+    RP_ARCH="{{ 'x86_64' if buildkit_arch == 'amd64' else 'arm64' }}"
     TMP="$(mktemp -d)"
-    ASSET="railpack-v${RP_VER}-linux-${RP_ARCH}.tar.gz"
+    ASSET="railpack-v${RP_VER}-${RP_ARCH}-unknown-linux-musl.tar.gz"
     curl -fsSL -o "$TMP/$ASSET" \
       "https://github.com/railwayapp/railpack/releases/download/v${RP_VER}/${ASSET}"
     tar -xzf "$TMP/$ASSET" -C "$TMP"
@@ -100,9 +102,11 @@
 #   mutable tag. Two releases recorded with the same `railpackFrontendVersion`
 #   must have been produced by the same frontend bytes, which is only true when
 #   the bytes are the thing kept. The layout's own manifest digest is written to
-#   `digest` and is what `buildctl` addresses
-#   (`--oci-layout … --opt source=oci-layout://…@sha256:…`), so a repointed
-#   upstream tag cannot change build output on a host that already vendored it.
+#   `digest`, and the daemon's `docker buildx build` names the frontend by it
+#   (`BUILDKIT_SYNTAX=<image>@sha256:…`), so a repointed upstream tag cannot
+#   change build output on a host that already vendored it. The `docker pull`
+#   below also leaves that image in Docker's store, where the Engine's BuildKit
+#   resolves it; the daemon reloads the layout if the store lost it.
 - name: Check vendored Railpack frontend image layout
   ansible.builtin.stat:
     path: "{{ turbopanel_vendor_dir }}/railpack-frontend/{{ railpack_frontend_version }}/digest"
@@ -120,7 +124,7 @@
       if [ -n "$SRC_DIGEST" ]; then
         REF="{{ railpack_frontend_image }}@${SRC_DIGEST}"
       else
-        REF="{{ railpack_frontend_image }}:{{ railpack_frontend_version }}"
+        REF="{{ railpack_frontend_image }}:{{ railpack_frontend_tag }}"
       fi
       TMP="$(mktemp -d)"
       trap 'rm -rf "$TMP"' EXIT

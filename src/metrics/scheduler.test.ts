@@ -8,7 +8,7 @@ import {
 import type { CollectorDeps } from "./collector/types.ts";
 import {
   buildMetricsSample,
-  METRICS_SCHEMA_VERSION,
+  METRICS_LEGACY_WIRE_VERSION,
 } from "../contracts/metrics-contract.ts";
 import type { TopologySnapshot } from "../contracts/topology-types.ts";
 import {
@@ -233,6 +233,7 @@ function createFixtureCollectorFactory(): () => MetricsCollector {
       // back to `ls`). FakeClock only drains microtasks, so a busy CI
       // runner never finishes the first collect before the assertion.
       countProcesses: () => 42,
+      hostText: () => Promise.resolve({}),
       // Unlike GPU adapters (only invoked per topology-enumerated GPU, and
       // this fixture's topology has none), the ingress/router/database-proxy
       // adapters are scrape-derived with no topology gate — `defaultDeps()`'s
@@ -279,7 +280,7 @@ function supportedSample(sequence: number): MetricsCollectResult {
     supported: true,
     sample: buildMetricsSample({
       metadata: {
-        version: METRICS_SCHEMA_VERSION,
+        version: METRICS_LEGACY_WIRE_VERSION,
         sampledAt: new Date(0).toISOString(),
         intervalSeconds: 60,
         sequence,
@@ -342,6 +343,7 @@ function makeScheduler(options: {
   jitterMaxMs?: number;
   primeMs?: number;
   logRateLimitMs?: number;
+  durabilityFlag?: () => boolean;
   onLog?: (level: "info" | "warn", message: string) => void;
 }): MetricsScheduler {
   return new MetricsScheduler({
@@ -359,6 +361,7 @@ function makeScheduler(options: {
     clearIntervalFn: options.clock
       .clearIntervalFn as unknown as typeof clearInterval,
     logRateLimitMs: options.logRateLimitMs,
+    durabilityFlag: options.durabilityFlag,
     onLog: options.onLog,
   });
 }
@@ -380,7 +383,7 @@ it("MetricsScheduler emits first metrics frame immediately on attach", async () 
   const frames = parseMetricsFrames(sent);
   assertEquals(frames.length, 1);
   assertEquals(frames[0].type, "metrics");
-  assertEquals(frames[0].metadata.version, METRICS_SCHEMA_VERSION);
+  assertEquals(frames[0].metadata.version, METRICS_LEGACY_WIRE_VERSION);
   assertEquals(typeof frames[0].metadata.sequence, "number");
 });
 
@@ -1134,4 +1137,123 @@ it({
     assertEquals(typeof primed[1].host.cpu.busyPercent, "number");
     assertEquals(primed[1].host.cpu.busyPercent !== null, true);
   },
+});
+
+it("v7 live stream runs beside the baseline on its own collector; only the baseline is durable", async () => {
+  const clock = new FakeClock();
+  const sent: unknown[] = [];
+  let collectors = 0;
+  const scheduler = makeScheduler({
+    clock,
+    intervalMs: 60_000,
+    durabilityFlag: () => true,
+    collectorFactory: () => {
+      collectors += 1;
+      return createFakeCollector((sequence) => supportedSample(sequence));
+    },
+  });
+  scheduler.attach(capturingSink(sent));
+  await clock.advance(0);
+  scheduler.setStreamIntervalMs(10_000);
+  await clock.advance(60_000);
+  const flags = sent.map((s) =>
+    (s as { metadata: { durable?: boolean } }).metadata.durable
+  );
+  assertEquals(collectors, 2);
+  assertEquals(flags.filter((d) => d === true).length, 2);
+  assertEquals(flags.filter((d) => d === false).length, 7);
+  scheduler.setStreamIntervalMs(null);
+  sent.length = 0;
+  await clock.advance(60_000);
+  assertEquals(sent.length, 1);
+});
+
+it("closed durability flag leaves samples unflagged and no stream collector", async () => {
+  const clock = new FakeClock();
+  const sent: unknown[] = [];
+  const scheduler = makeScheduler({
+    clock,
+    collectorFactory: () =>
+      createFakeCollector((sequence) => supportedSample(sequence)),
+  });
+  scheduler.attach(capturingSink(sent));
+  await clock.advance(0);
+  assertEquals(scheduler.splitsLiveStream(), false);
+  assertEquals(
+    (sent[0] as { metadata: { durable?: boolean } }).metadata.durable,
+    undefined,
+  );
+});
+
+it("extended text is stripped on the v6 wire and kept under metrics-v7", async () => {
+  for (const v7 of [false, true]) {
+    const clock = new FakeClock();
+    const sent: unknown[] = [];
+    const scheduler = makeScheduler({
+      clock,
+      durabilityFlag: () => v7,
+      collectorFactory: () =>
+        createFakeCollector((sequence) => {
+          const r = supportedSample(sequence);
+          if (r.supported) {
+            r.sample.extended = { text: { kernel: "6.1" } };
+          }
+          return r;
+        }),
+    });
+    scheduler.attach(capturingSink(sent));
+    await clock.advance(0);
+    assertEquals(
+      (sent[0] as { extended?: unknown }).extended !== undefined,
+      v7,
+    );
+  }
+});
+
+it("metrics-v7 stamps sample version 7; the v6 wire keeps 6 and no extended", async () => {
+  for (const v7 of [false, true]) {
+    const clock = new FakeClock();
+    const sent: unknown[] = [];
+    const scheduler = makeScheduler({
+      clock,
+      durabilityFlag: () => v7,
+      collectorFactory: () =>
+        createFakeCollector((sequence) => {
+          const r = supportedSample(sequence);
+          if (r.supported) {
+            r.sample.extended = { docker: { containersRunning: 2 } };
+          }
+          return r;
+        }),
+    });
+    scheduler.attach(capturingSink(sent));
+    await clock.advance(0);
+    const frame = sent[0] as {
+      metadata: { version: number };
+      extended?: unknown;
+    };
+    assertEquals(frame.metadata.version, v7 ? 7 : METRICS_LEGACY_WIRE_VERSION);
+    assertEquals(frame.extended !== undefined, v7);
+  }
+});
+
+it("a control plane that negotiates metrics-v7 later flips the same scheduler from v6 to v7", async () => {
+  const clock = new FakeClock();
+  const sent: unknown[] = [];
+  let v7 = false;
+  const scheduler = makeScheduler({
+    clock,
+    intervalMs: 1_000,
+    durabilityFlag: () => v7,
+    collectorFactory: () =>
+      createFakeCollector((sequence) => supportedSample(sequence)),
+  });
+  scheduler.attach(capturingSink(sent));
+  await clock.advance(0);
+  v7 = true;
+  await clock.advance(1_000);
+  const versions = sent.map((s) =>
+    (s as { metadata: { version: number } }).metadata.version
+  );
+  assertEquals(versions, [6, 7]);
 });

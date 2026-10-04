@@ -101,27 +101,6 @@
     - ""
     - sites
 
-- name: Ensure Apache log directory
-  ansible.builtin.file:
-    path: "{{ turbopanel_log_dir }}/apache"
-    state: directory
-    owner: "{{ apache_service_user }}"
-    group: "{{ apache_service_group }}"
-    mode: "0750"
-
-- name: Ensure Apache log files exist with service ownership
-  ansible.builtin.file:
-    path: "{{ turbopanel_log_dir }}/apache/{{ item }}"
-    state: touch
-    owner: "{{ apache_service_user }}"
-    group: "{{ apache_service_group }}"
-    mode: "0640"
-    modification_time: preserve
-    access_time: preserve
-  loop:
-    - error.log
-    - access.log
-
 - name: Ensure Apache state directories
   ansible.builtin.file:
     path: "{{ turbopanel_state_dir }}/apache/{{ item }}"
@@ -133,9 +112,13 @@
     - ""
     - empty
 
-- name: Ensure Apache runtime directory (pidfile)
+# systemd only creates LogsDirectory= when the unit starts, but the config test
+# (`httpd -t`, run before the first start) already opens ErrorLog/CustomLog under
+# it. Create it here with the same owner and mode the unit uses, so the first
+# test on a fresh host finds it.
+- name: Ensure the Apache log directory
   ansible.builtin.file:
-    path: "{{ turbopanel_run_dir }}/apache"
+    path: "/var/log/{{ apache_logs_directory }}"
     state: directory
     owner: "{{ apache_service_user }}"
     group: "{{ apache_service_group }}"
@@ -162,6 +145,26 @@
   ansible.builtin.systemd:
     daemon_reload: true
   when: _apache_unit.changed # noqa: no-handler
+
+# A reload keeps the running master, and with it the account it runs as. A
+# changed unit (for example the move from a root master to User=tpapache)
+# only takes effect on a restart. try-restart leaves a stopped unit stopped:
+# the daemon starts Apache when the first site needs it.
+- name: Restart a running Apache after its unit changed
+  ansible.builtin.command:
+    cmd: systemctl try-restart turbopanel-apache.service
+  when: _apache_unit.changed # noqa: no-handler
+  changed_when: true
+
+# Logs and the pidfile now live in the unit's own LogsDirectory= and
+# RuntimeDirectory=. The old paths inside the tp-owned trees go.
+- name: Remove the old Apache log and pidfile directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ turbopanel_log_dir }}/apache"
+    - "{{ turbopanel_run_dir }}/apache"
 
 - name: Stop and disable leftover distro apache2 unit when present
   ansible.builtin.systemd:

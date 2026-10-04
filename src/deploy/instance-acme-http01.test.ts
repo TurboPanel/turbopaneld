@@ -7,19 +7,24 @@ import {
   INSTANCE_ACME_RENEWAL_WINDOW_RATIO,
   instanceAcmeHostSettled,
   instanceAcmeIssuerFailureLine,
+  instanceAcmeIssuerKey,
   LETS_ENCRYPT_STAGING_DIRECTORY_URL,
   parseInstanceAcmeSettings,
   renderInstanceAcmeIssuerConfig,
 } from "./instance-acme-issuer.ts";
 import { writeFixtureLeafPair } from "../testing/openssl-fixture-leaf.ts";
+import { HOSTING_CADDY_USER } from "./ensure-hosting-caddy.ts";
 import {
   classifyPort80,
   closeInstanceAcmeWindow,
   type CommandResult,
+  controlPlaneCaddyUser,
+  findIssuedPair,
   findIssuedPairViaSudo,
   groupIdFromGroupFile,
   INSTANCE_ACME_HTTP01_PREFLIGHT_PREFIX,
   INSTANCE_ACME_HTTP01_SITE,
+  INSTANCE_ACME_SOCKET_ACL,
   type InstanceAcmeCommand,
   issuedCertificateFindArgs,
   issuedPairFromFindOutput,
@@ -31,6 +36,7 @@ import {
   preflightHttpResponse,
   preflightInstanceLetsEncryptHttp01,
   renderInstanceAcmeHttp01Site,
+  sanitizePort80Holders,
 } from "./instance-acme-http01.ts";
 
 /**
@@ -64,6 +70,8 @@ async function readUnixChallenge(
   }
 }
 
+const STAGING_KEY = "acme-staging-v02.api.letsencrypt.org-directory";
+const PROD_KEY = "acme-v02.api.letsencrypt.org-directory";
 const HOST = "panel.example.com";
 const FIXED_NOW_MS = Date.parse("2026-09-23T12:00:00.000Z");
 
@@ -289,6 +297,63 @@ test("openInstanceAcmeWindow reloads when hosting Caddy is already on port 80", 
     assertEquals(
       calls.some((line) => line.includes("systemctl reload")),
       true,
+    );
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+test("openInstanceAcmeWindow reloads a running hosting Caddy that is not on port 80 yet and keeps it running on failure", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-acme-active-no80-" });
+  const layout = layoutUnder(root);
+  const calls: string[] = [];
+  let ensured = false;
+  let inspections = 0;
+  const run: InstanceAcmeCommand = (_program, args) => {
+    calls.push(args.join(" "));
+    if (args.includes("ActiveState")) {
+      return Promise.resolve(ok("activating\n"));
+    }
+    return Promise.resolve(ok());
+  };
+  const ensureHostingCaddyRuntime = () => {
+    ensured = true;
+    return Promise.resolve();
+  };
+  try {
+    await openInstanceAcmeWindow(layout, [HOST], {
+      run,
+      inspect: () => {
+        inspections += 1;
+        if (inspections === 1) return Promise.resolve({ kind: "free" });
+        return Promise.resolve({ kind: "hosting-caddy" });
+      },
+      ensureHostingCaddyRuntime,
+    });
+    assertEquals(ensured, false);
+    assertEquals(
+      calls.some((line) => line.includes("systemctl reload")),
+      true,
+    );
+    calls.length = 0;
+    await assertRejects(
+      () =>
+        openInstanceAcmeWindow(layout, [HOST], {
+          run,
+          inspect: () => Promise.resolve({ kind: "free" }),
+          sleep: () => Promise.resolve(),
+          ensureHostingCaddyRuntime,
+        }),
+      Error,
+      "not listening on port 80",
+    );
+    assertEquals(
+      calls.some((line) => line.includes("disable")),
+      false,
+    );
+    assertEquals(
+      calls.filter((line) => line.includes("systemctl reload")).length,
+      2,
     );
   } finally {
     await Deno.remove(root, { recursive: true });
@@ -521,12 +586,20 @@ test("preflight serves the nonce on the socket and rejects a public miss", async
       },
     );
     assertEquals(preflightHttpResponse("/", "abc").status, 404);
+    const socket = join(layout.runDir, "instance-acme.sock");
+    const order: string[] = [];
+    const run: InstanceAcmeCommand = (program, args) => {
+      order.push(`${program} ${args.join(" ")}`);
+      return Promise.resolve(ok());
+    };
     await preflightInstanceLetsEncryptHttp01(
       [{ host: `https://${HOST}/`, source: "lets-encrypt" }],
       layout,
       {
+        run,
         nonce: () => "abc",
         fetchImpl: async (input) => {
+          order.push("fetch");
           const url = new URL(String(input));
           assertStringIncludes(
             url.href,
@@ -541,12 +614,35 @@ test("preflight serves the nonce on the socket and rejects a public miss", async
         },
       },
     );
+    // tpedge is granted the socket before hosting Caddy is asked to reach it.
+    assertEquals(order, [
+      `sudo -n setfacl -P -m ${INSTANCE_ACME_SOCKET_ACL} ${socket}`,
+      "fetch",
+    ]);
+    assertEquals(INSTANCE_ACME_SOCKET_ACL, `u:${HOSTING_CADDY_USER}:rw`);
     await assertRejects(
       () =>
         preflightInstanceLetsEncryptHttp01(
           [{ host: HOST, source: "lets-encrypt" }],
           layout,
           {
+            run: () => Promise.resolve({ ...ok(), ok: false }),
+            nonce: () => "abc",
+            fetchImpl: () => {
+              throw new Error("fetched without the socket grant");
+            },
+          },
+        ),
+      Error,
+      `could not let ${HOSTING_CADDY_USER} reach`,
+    );
+    await assertRejects(
+      () =>
+        preflightInstanceLetsEncryptHttp01(
+          [{ host: HOST, source: "lets-encrypt" }],
+          layout,
+          {
+            run,
             nonce: () => "abc",
             fetchImpl: () =>
               Promise.resolve(new Response("nope", { status: 404 })),
@@ -561,6 +657,7 @@ test("preflight serves the nonce on the socket and rejects a public miss", async
         [{ host: HOST, source: "lets-encrypt" }],
         layout,
         {
+          run,
           nonce: () => "abc",
           fetchImpl: () => Promise.resolve(new Response("", { status: 404 })),
         },
@@ -675,7 +772,7 @@ test("issue copies the leaf and stops the issuer in finally", async () => {
     "instance-acme",
     "caddy",
     "certificates",
-    "staging",
+    STAGING_KEY,
     HOST,
   );
   await writeFixtureLeafPair(
@@ -722,10 +819,17 @@ test("issue copies the leaf and stops the issuer in finally", async () => {
         0o777,
       0o600,
     );
-    assertEquals(
-      calls.some((line) => line.includes("systemctl start")),
-      true,
+    const startAt = calls.findIndex((line) => line.includes("systemctl start"));
+    const grantAt = calls.findIndex((line) =>
+      line.endsWith(
+        `setfacl -P -m ${INSTANCE_ACME_SOCKET_ACL} ${
+          join(layout.runDir, "instance-acme.sock")
+        }`,
+      )
     );
+    assertEquals(startAt >= 0, true);
+    // The issuer binds its socket on start; tpedge is granted it right after.
+    assertEquals(grantAt, startAt + 1, JSON.stringify(calls));
     assertEquals(calls.some((line) => line.includes("systemctl stop")), true);
     assertEquals(calls.includes("close"), true);
     const config = await Deno.readTextFile(
@@ -792,7 +896,7 @@ test("issue waits for a replacement when the stored certificate is inside the re
     "instance-acme",
     "caddy",
     "certificates",
-    "staging",
+    STAGING_KEY,
     HOST,
   );
   await writeFixtureLeafPair(
@@ -853,7 +957,7 @@ test("issue does not copy an expired certificate that the issuer log calls succe
     "instance-acme",
     "caddy",
     "certificates",
-    "staging",
+    STAGING_KEY,
     HOST,
   );
   await writeFixtureLeafPair(
@@ -915,7 +1019,7 @@ test("managed identity installs a leaf and repeats against an unreadable key", a
     "instance-acme",
     "caddy",
     "certificates",
-    "staging",
+    STAGING_KEY,
     HOST,
   );
   await writeFixtureLeafPair(
@@ -982,7 +1086,7 @@ test("managed identity installs a leaf and repeats against an unreadable key", a
       true,
     );
     assertEquals(
-      calls.some((line) => line.includes("install -m 0600 -o root -g tp")),
+      calls.some((line) => line.includes("install -m 0600 -o tpcaddy -g tp")),
       true,
     );
     calls.length = 0;
@@ -993,7 +1097,7 @@ test("managed identity installs a leaf and repeats against an unreadable key", a
     calls.length = 0;
     await issue();
     assertEquals(
-      calls.some((line) => line.includes("install -m 0600 -o root -g tp")),
+      calls.some((line) => line.includes("install -m 0600 -o tpcaddy -g tp")),
       true,
     );
   } finally {
@@ -1053,18 +1157,19 @@ test("issuedPairFromFindOutput picks the first issuer's cert and its key", () =>
     `  ${le}/a.example.com.crt  `,
     `${root}/acme-v02/b.example.com/b.example.com.crt`,
   ].join("\n");
-  assertEquals(issuedPairFromFindOutput(listing, "a.example.com"), {
+  assertEquals(issuedPairFromFindOutput(listing, "a.example.com", PROD_KEY), {
     crt: `${le}/a.example.com.crt`,
     key: `${le}/a.example.com.key`,
   });
 });
 
 test("issuedPairFromFindOutput is null when the host has no certificate", () => {
-  assertEquals(issuedPairFromFindOutput("", "a.example.com"), null);
+  assertEquals(issuedPairFromFindOutput("", "a.example.com", PROD_KEY), null);
   assertEquals(
     issuedPairFromFindOutput(
       "/r/i/b.example.com/b.example.com.crt\n",
       "a.example.com",
+      PROD_KEY,
     ),
     null,
   );
@@ -1072,6 +1177,7 @@ test("issuedPairFromFindOutput is null when the host has no certificate", () => 
     issuedPairFromFindOutput(
       "/r/i/xa.example.com/xa.example.com.crt\n",
       "a.example.com",
+      PROD_KEY,
     ),
     null,
   );
@@ -1090,6 +1196,7 @@ test("findIssuedPairViaSudo refuses a glob-shaped host without spawning a comman
     const found = await findIssuedPairViaSudo(
       "/var/lib/acme/certificates",
       "*.example.com",
+      PROD_KEY,
     );
     assertEquals(found, null);
     assertEquals(spawned, false);
@@ -1114,6 +1221,7 @@ test("findIssuedPairViaSudo is null when the sudo find fails", async () => {
     const found = await findIssuedPairViaSudo(
       "/var/lib/acme/certificates",
       "a.example.com",
+      PROD_KEY,
     );
     assertEquals(found, null);
   } finally {
@@ -1136,7 +1244,7 @@ test("findIssuedPairViaSudo parses tp-host's listing into the issued pair", asyn
     }
   };
   try {
-    const found = await findIssuedPairViaSudo(root, "a.example.com");
+    const found = await findIssuedPairViaSudo(root, "a.example.com", PROD_KEY);
     assertEquals(found, {
       crt: `${le}/a.example.com.crt`,
       key: `${le}/a.example.com.key`,
@@ -1144,4 +1252,221 @@ test("findIssuedPairViaSudo parses tp-host's listing into the issued pair", asyn
   } finally {
     Deno.Command = original;
   }
+});
+
+test("issuer key is the configured CA's host and path with slashes as dashes", () => {
+  const base = { ...ACME_SETTINGS };
+  assertEquals(
+    instanceAcmeIssuerKey({ ...base, useStaging: false }),
+    PROD_KEY,
+  );
+  assertEquals(
+    instanceAcmeIssuerKey({ ...base, useStaging: true }),
+    STAGING_KEY,
+  );
+});
+
+test("issued pair follows the configured CA when staging and production both exist", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-acme-two-" });
+  try {
+    for (const key of [STAGING_KEY, PROD_KEY]) {
+      const dir = join(root, key, HOST);
+      await Deno.mkdir(dir, { recursive: true });
+      await Deno.writeTextFile(join(dir, `${HOST}.crt`), key);
+      await Deno.writeTextFile(join(dir, `${HOST}.key`), key);
+    }
+    const prod = await findIssuedPair(root, HOST, PROD_KEY);
+    assertEquals(prod?.crt, join(root, PROD_KEY, HOST, `${HOST}.crt`));
+    const staging = await findIssuedPair(root, HOST, STAGING_KEY);
+    assertEquals(staging?.crt, join(root, STAGING_KEY, HOST, `${HOST}.crt`));
+    assertEquals(await findIssuedPair(root, HOST, "other-ca"), null);
+    const listing = [STAGING_KEY, PROD_KEY].map((key) =>
+      join(root, key, HOST, `${HOST}.crt`)
+    ).join("\n");
+    assertEquals(
+      issuedPairFromFindOutput(listing, HOST, PROD_KEY)?.crt,
+      join(root, PROD_KEY, HOST, `${HOST}.crt`),
+    );
+    assertEquals(
+      issuedPairFromFindOutput(listing, HOST, STAGING_KEY)?.crt,
+      join(root, STAGING_KEY, HOST, `${HOST}.crt`),
+    );
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+const ACME_LOG =
+  `{"level":"info","msg":"certificate obtained successfully","identifier":"${HOST}"}`;
+
+async function leafHarness(
+  prefix: string,
+  installFails: (dest: string) => boolean,
+) {
+  const root = await Deno.makeTempDir({ prefix });
+  const issuer = join(
+    root,
+    "state",
+    "instance-acme",
+    "caddy",
+    "certificates",
+    STAGING_KEY,
+    HOST,
+  );
+  await writeFixtureLeafPair(
+    issuer,
+    HOST,
+    "20260901000000Z",
+    "20270901000000Z",
+  );
+  const certsDir = join(root, "certs");
+  await Deno.mkdir(certsDir, { recursive: true });
+  const calls: string[] = [];
+  const run: InstanceAcmeCommand = async (_program, args) => {
+    calls.push(args.join(" "));
+    const dest = args.at(-1) ?? "";
+    if (args[1] === "install") {
+      if (installFails(dest)) {
+        return { ok: false, stdout: "", stderr: "denied" };
+      }
+      const staged = args.at(-2) ?? "";
+      await Deno.chmod(certsDir, 0o755);
+      await Deno.copyFile(staged, dest);
+      await Deno.chmod(certsDir, 0o555);
+      return ok();
+    }
+    if (args[1] === "cat") {
+      await Deno.chmod(certsDir, 0o755);
+      const text = await Deno.readTextFile(dest);
+      await Deno.chmod(certsDir, 0o000);
+      return ok(text);
+    }
+    return ok();
+  };
+  const issue = () =>
+    issueInstanceLetsEncryptCertificates(
+      layoutUnder(root),
+      [HOST],
+      ACME_SETTINGS,
+      certsDir,
+      {
+        run,
+        now: () => FIXED_NOW_MS,
+        readLog: () => Promise.resolve(ACME_LOG),
+        closeWindow: () => Promise.resolve(),
+      },
+    );
+  const cleanup = async () => {
+    await Deno.chmod(certsDir, 0o755).catch(() => undefined);
+    await Deno.remove(root, { recursive: true });
+  };
+  return { root, issuer, certsDir, calls, issue, cleanup };
+}
+
+test("a failed key install leaves the old certificate and key untouched", async () => {
+  const h = await leafHarness("tp-acme-keyfail-", (d) => d.endsWith(".key"));
+  try {
+    await Deno.writeTextFile(
+      join(h.certsDir, `letsencrypt-${HOST}.crt`),
+      "old-crt",
+    );
+    await Deno.writeTextFile(
+      join(h.certsDir, `letsencrypt-${HOST}.key`),
+      "old-key",
+    );
+    await Deno.chmod(h.certsDir, 0o555);
+    await assertRejects(() => h.issue());
+    assertEquals(
+      h.calls.some((c) => c.includes(".crt") && c.includes("install")),
+      false,
+    );
+    await Deno.chmod(h.certsDir, 0o755);
+    assertEquals(
+      await Deno.readTextFile(join(h.certsDir, `letsencrypt-${HOST}.crt`)),
+      "old-crt",
+    );
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("a failed certificate install puts the previous key back", async () => {
+  const h = await leafHarness("tp-acme-crtfail-", (d) => d.endsWith(".crt"));
+  try {
+    await Deno.writeTextFile(
+      join(h.certsDir, `letsencrypt-${HOST}.crt`),
+      "old-crt",
+    );
+    await Deno.writeTextFile(
+      join(h.certsDir, `letsencrypt-${HOST}.key`),
+      "old-key",
+    );
+    await Deno.chmod(h.certsDir, 0o555);
+    await assertRejects(() => h.issue());
+    await Deno.chmod(h.certsDir, 0o755);
+    assertEquals(
+      await Deno.readTextFile(join(h.certsDir, `letsencrypt-${HOST}.key`)),
+      "old-key",
+    );
+    const keyInstalls = h.calls.filter((c) =>
+      c.includes("install") && c.includes("-o tpcaddy")
+    );
+    assertEquals(keyInstalls.length, 2);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("unchanged bytes still re-own the key for Caddy and the certificate for group tp", async () => {
+  const h = await leafHarness("tp-acme-same-", () => false);
+  try {
+    for (const ext of ["crt", "key"]) {
+      await Deno.copyFile(
+        join(h.issuer, `${HOST}.${ext}`),
+        join(h.certsDir, `letsencrypt-${HOST}.${ext}`),
+      );
+    }
+    await Deno.chmod(h.certsDir, 0o000);
+    await h.issue();
+    assertEquals(
+      h.calls.some((c) =>
+        c.includes(`chown tpcaddy:tp ${h.certsDir}/letsencrypt-${HOST}.key`)
+      ),
+      true,
+    );
+    assertEquals(
+      h.calls.some((c) =>
+        c.includes(`chown :tp ${h.certsDir}/letsencrypt-${HOST}.crt`)
+      ),
+      true,
+    );
+    assertEquals(h.calls.some((c) => c.includes("install")), false);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("the Caddy account is the dev user on a dev host and tpcaddy otherwise", () => {
+  assertEquals(controlPlaneCaddyUser({}), "tpcaddy");
+  assertEquals(
+    controlPlaneCaddyUser({ TURBOPANEL_DEV_USER: "vagrant" }),
+    "vagrant",
+  );
+  assertEquals(
+    controlPlaneCaddyUser({ TURBOPANEL_DEV_USER: "bad name;" }),
+    "tpcaddy",
+  );
+});
+
+test("port 80 holder names keep spaces and lists but lose markup", () => {
+  assertEquals(
+    port80HeldMessage("Web Content"),
+    "port 80 is held by Web Content",
+  );
+  assertEquals(
+    port80HeldMessage("apache2, nginx"),
+    "port 80 is held by apache2, nginx",
+  );
+  assertEquals(sanitizePort80Holders("<b>x</b>").includes("<"), false);
+  assertEquals(sanitizePort80Holders("a".repeat(200)).length <= 120, true);
 });

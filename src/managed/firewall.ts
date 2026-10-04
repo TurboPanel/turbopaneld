@@ -26,6 +26,7 @@ import {
 import { hostSudoArgs } from "../permissions/host-sudo.ts";
 import { logWarn, sanitizeForLog } from "../util/logger.ts";
 import { forEachSequential } from "../util/sequential.ts";
+import { isManagedListenerCovered } from "../firewall/fold.ts";
 
 /** Parent chain hung off `DOCKER-USER`; holds one jump per managed cluster. */
 export const MANAGED_PUBLIC_CHAIN = "TP-MANAGED-PUB";
@@ -178,6 +179,20 @@ export async function reconcileManagedPublicFirewall(
 
   const sources = resolveManagedPublicAllowedSources(payload);
   if (sources.length === 0) return;
+
+  // Stage 6 fold: once the confirmed managed rule set (TP-FWD) already narrows
+  // this listener to the same peers, the legacy chain is redundant. Drop this
+  // cluster's old chain (the new rules are verified first) and stop rebuilding it.
+  const covered = await isManagedListenerCovered({
+    dest: listener.address,
+    port: String(listener.port),
+    hasDrop: true,
+    sources,
+  }, { run: (_cmd, args) => runIptables(args) });
+  if (covered) {
+    await removeManagedPublicFirewall(payload.managedId);
+    return;
+  }
 
   const chain = managedFirewallChain(payload.managedId);
   const match = originMatch(listener.address, listener.port);

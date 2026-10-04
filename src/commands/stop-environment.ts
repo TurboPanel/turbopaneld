@@ -1,12 +1,16 @@
+import { dirname } from "node:path";
 import {
   composeFileArgs,
+  readDeploymentManifest,
   resolveDeployedComposePaths,
   resolveEnvironmentDeploymentDir,
 } from "../deploy/compose-files.ts";
+import { projectsForCommand } from "../deploy/deployment-generations.ts";
 import { hostSudoArgs } from "../permissions/host-sudo.ts";
 import { removeSecretTree } from "../deploy/secret-runtime.ts";
 import {
   createStreamedRunner,
+  dockerBinaryInstalled,
   type DockerCliResult,
   runDocker as defaultRunDocker,
   type RunDockerOptions,
@@ -35,6 +39,12 @@ import {
 import type { RunFn } from "../deploy/ensure-principal.ts";
 import { runPrivileged } from "../deploy/release/release-layout.ts";
 import {
+  actOnEarlierContainers,
+  earlierRecordedProjects,
+} from "../deploy/retire-previous-projects.ts";
+import { retirePrincipals } from "../deploy/retire-principals.ts";
+import type { SshApplyResult } from "../deploy/ssh/apply.ts";
+import {
   pruneFabricStateNetworks,
   removeFabricDockerNetworks,
 } from "./fabric.ts";
@@ -61,6 +71,10 @@ export type EnvironmentStopHandlerDeps = {
   removeFabricNetworks?: (names: readonly string[]) => Promise<void>;
   /** Test seam — privileged `sudo -n …` runner for release-tree removal. */
   runPrivileged?: RunFn;
+  /** Test seam — defaults to a `/usr/bin/docker` probe when `runDocker` is not injected. */
+  dockerInstalled?: () => Promise<boolean>;
+  /** Test seam — the `sshd` drop-in re-render after principals are retired. */
+  applySshAccess?: () => Promise<SshApplyResult>;
 };
 
 /**
@@ -136,6 +150,82 @@ async function removeEnvironmentNativeApps(
   }
 }
 
+/**
+ * `deployments/<projectId>/<environmentId>` is gone by now; drop the
+ * `<projectId>` parent too once no other environment lives in it. A plain
+ * (non-recursive) remove, so a sibling environment's tree is never touched.
+ */
+async function removeEmptyProjectDeploymentDir(
+  deploymentDir: string,
+): Promise<void> {
+  try {
+    await Deno.remove(dirname(deploymentDir));
+  } catch (err) {
+    // Not empty (sibling environment) or already gone: both are fine.
+    logInfo(
+      "commands",
+      `environment.stop project deployment dir kept: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+}
+
+/**
+ * Remove `deployments/<projectId>/<environmentId>`.
+ *
+ * Containers write bind mounts (`./data`) as root, so the unprivileged daemon
+ * can hit EACCES on nested entries. Only then is the removal routed through
+ * `tp-host rm -rf`, which accepts the path only beneath the managed state root,
+ * pins the parent with `cd -P` and unlinks without following symlinks. A
+ * deployment dir that is itself a symlink is never handed to the privileged
+ * runner.
+ */
+async function removeDeploymentDir(
+  deploymentDir: string,
+  runFn: RunFn,
+): Promise<void> {
+  try {
+    await Deno.remove(deploymentDir, { recursive: true });
+    return;
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) return;
+    if (!(err instanceof Deno.errors.PermissionDenied)) throw err;
+  }
+  const info = await Deno.lstat(deploymentDir).catch(() => null);
+  if (info === null) return;
+  if (!info.isDirectory) {
+    throw new Error(`deployment path is not a directory: ${deploymentDir}`);
+  }
+  const result = await runFn(
+    "sudo",
+    hostSudoArgs(["-n", "rm", "-rf", "--", deploymentDir]),
+  );
+  if (!result.success) {
+    throw new Error(
+      `deployment dir removal failed: ${result.stderr || "tp-host rm failed"}`,
+    );
+  }
+}
+
+function retirementSummary(
+  stopped: string,
+  retirement: { retired: string[]; failed: Array<{ username: string }> },
+): string {
+  const parts = [stopped];
+  if (retirement.retired.length > 0) {
+    parts.push(`retired principals: ${retirement.retired.join(", ")}`);
+  }
+  if (retirement.failed.length > 0) {
+    parts.push(
+      `principals kept: ${
+        retirement.failed.map((entry) => entry.username).join(", ")
+      }`,
+    );
+  }
+  return parts.join("; ");
+}
+
 function assertSafeStopIdentifiers(payload: EnvironmentStopPayload): void {
   if (!SAFE_PATH_ID_RE.test(payload.environmentId)) {
     throw new Error("environmentId contains unsupported characters");
@@ -159,12 +249,58 @@ async function composeDown(
     "down",
     "--remove-orphans",
     "--volumes",
+    // Only images built for this stack (no `image:` tag of their own); pulled
+    // or explicitly tagged images (base/shared) are never touched.
+    "--rmi",
+    "local",
   ], {
     onLine: (event) => logSink.onLine(event.stream, event.line),
   });
   if (!result.success) {
     throw new Error(
       logSink.redactSummary(result.stderr) || "Docker Compose stop failed",
+    );
+  }
+}
+
+/**
+ * A host without Docker (site-only) has no containers or networks to stop, so
+ * Docker steps are skipped. An injected `runDocker` means "Docker is there".
+ */
+async function dockerAvailableForStop(
+  deps?: EnvironmentStopHandlerDeps,
+): Promise<boolean> {
+  if (deps?.dockerInstalled) return await deps.dockerInstalled();
+  return deps?.runDocker !== undefined || await dockerBinaryInstalled();
+}
+
+const noDocker: RunDockerFn = () =>
+  Promise.resolve({ success: true, stdout: "", stderr: "", code: 0 });
+
+/**
+ * A stack still running under an earlier, project-wide name: Compose acts on a
+ * whole project, and sibling environments shared that name, so only this
+ * environment's own containers are removed (volumes are kept).
+ */
+async function removeEarlierNamedContainers(
+  payload: EnvironmentStopPayload,
+  deploymentDir: string,
+  run: RunDockerFn,
+): Promise<void> {
+  const earlier = await earlierRecordedProjects(
+    deploymentDir,
+    payload.projectName,
+  );
+  const removed = await actOnEarlierContainers(earlier, run, {
+    environmentId: payload.environmentId,
+    deploymentDir,
+  }, "remove");
+  if (removed.length > 0) {
+    logInfo(
+      "commands",
+      `environment.stop removed containers started under earlier compose project ${
+        removed.join(",")
+      } env=${payload.environmentId}`,
     );
   }
 }
@@ -181,7 +317,8 @@ export async function handleEnvironmentStop(
 ): Promise<EnvironmentStopResult> {
   const parsedPayload = parseEnvironmentStopPayload(payload);
   assertSafeStopIdentifiers(parsedPayload);
-  const run = deps?.runDocker ?? defaultRunDocker;
+  const dockerPresent = await dockerAvailableForStop(deps);
+  const run = dockerPresent ? (deps?.runDocker ?? defaultRunDocker) : noDocker;
   const runStreamed = createStreamedRunner(deps?.runDocker);
   const logSink = deps?.logSink ?? createNoopCommandOutputSink();
   logSink.setPhase(COMMAND_LOG_PHASES.STOP);
@@ -195,23 +332,37 @@ export async function handleEnvironmentStop(
   const composePaths = await resolveDeployedComposePaths(deploymentDir);
   const hasCompose = composePaths !== null;
 
-  if (hasCompose) {
-    await composeDown(
+  if (hasCompose && !dockerPresent) {
+    logInfo(
+      "commands",
+      `environment.stop Docker not installed; skipping compose down project=${parsedPayload.projectName} env=${parsedPayload.environmentId}`,
+    );
+  } else if (hasCompose) {
+    // Every generation the deployment owns comes down, not just the named one.
+    const projects = projectsForCommand(
+      await readDeploymentManifest(deploymentDir),
       parsedPayload.projectName,
-      composePaths,
-      runStreamed,
-      logSink,
+      "all",
+    );
+    await forEachSequential(
+      projects,
+      (projectName) =>
+        composeDown(projectName, composePaths, runStreamed, logSink),
     );
   } else {
     // Already torn down — still clear hosting site and report empty containers.
     logInfo(
       "commands",
-      `environment.stop compose missing project=${parsedPayload.projectName} env=${parsedPayload.environmentId}; treating as already stopped`,
+      `environment.stop compose missing project=${parsedPayload.projectName} env=${parsedPayload.environmentId}; no compose files to take down`,
     );
   }
 
+  if (dockerPresent) {
+    await removeEarlierNamedContainers(parsedPayload, deploymentDir, run);
+  }
+
   const fabricNetworks = parsedPayload.fabricNetworks ?? [];
-  if (fabricNetworks.length > 0) {
+  if (fabricNetworks.length > 0 && dockerPresent) {
     try {
       const removeNetworks = deps?.removeFabricNetworks ??
         removeFabricDockerNetworks;
@@ -255,13 +406,12 @@ export async function handleEnvironmentStop(
     { runDocker: run },
   );
 
-  try {
-    await Deno.remove(deploymentDir, { recursive: true });
-  } catch (err) {
-    if (!(err instanceof Deno.errors.NotFound)) {
-      throw err;
-    }
-  }
+  await removeDeploymentDir(
+    deploymentDir,
+    deps?.runPrivileged ?? runPrivileged,
+  );
+
+  await removeEmptyProjectDeploymentDir(deploymentDir);
 
   await removeSecretTree(
     layout,
@@ -269,9 +419,20 @@ export async function handleEnvironmentStop(
     parsedPayload.environmentId,
   );
 
-  const summary = hasCompose
+  // Last, once every unit, site and release tree above is gone: tp-host
+  // refuses an account the host still references.
+  const retirement = await retirePrincipals(
+    (parsedPayload.retirePrincipals ?? []).map((entry) => entry.username),
+    {
+      runFn: deps?.runPrivileged ?? runPrivileged,
+      ...(deps?.applySshAccess ? { applySshAccess: deps.applySshAccess } : {}),
+    },
+  );
+
+  const stopped = hasCompose
     ? `Stopped environment ${parsedPayload.environmentId}`
     : `Environment ${parsedPayload.environmentId} already stopped`;
+  const summary = retirementSummary(stopped, retirement);
   logInfo(
     "commands",
     `environment.stop completed project=${parsedPayload.projectName} received=${daemonReceivedAt}`,

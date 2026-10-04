@@ -81,8 +81,14 @@ export async function collectNetworkTopology(
     ? classification.resolveUplinkFor(routeInterface)
     : undefined;
 
+  // Loopback and container plumbing (veth, br-*, docker0, cni, tun/tap
+  // outside the fabric) never enter the inventory or topology identity.
+  const kept = names.filter((name) => {
+    const kind = classification.kinds.get(name);
+    return kind !== "loopback" && kind !== "container-bridge";
+  });
   return await Promise.all(
-    names.map(async (name): Promise<NetworkDeviceTopology> => {
+    kept.map(async (name): Promise<NetworkDeviceTopology> => {
       const [{ deviceId, identity }, speedMbps, mtu] = await Promise.all([
         deriveNetworkDeviceIdentity(name, deps.io, root, {
           macIdentity: isBareEthernet(factsByName.get(name)!),

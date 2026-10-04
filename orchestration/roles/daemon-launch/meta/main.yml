@@ -11,3 +11,4 @@ galaxy_info:
 
 dependencies:
   - role: daemon-logs
+  - role: daemon-seal

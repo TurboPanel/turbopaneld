@@ -1,0 +1,89 @@
+[Unit]
+Description=TurboPanel Docker gate (observe mode: forwards everything, logs what the strict profile would refuse)
+Documentation=https://github.com/TurboPanel/turbopaneld/blob/trunk/orchestration/roles/docker-gate/AGENTS.md
+# Ordered after Docker, but independent of it: the gate connects to the engine
+# per request, so a Docker restart needs no gate restart, and a stopped Docker
+# is a 502 from the gate, not a dead gate.
+After=docker.service docker.socket
+# Never give up restarting: once traffic is routed through the gate (later
+# stages) a unit stuck in `failed` is a Docker outage.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=root
+Group=root
+# Observe (the default): the gate never refuses a policy finding; findings go
+# to the journal. docker_gate_mode switches on the refusing stage-4 mode.
+Environment=TP_DOCKER_GATE_MODE={{ docker_gate_mode }}
+Environment=TP_DOCKER_GATE_SOCKET={{ docker_gate_socket }}
+# Stage 3: the read-only listener Traefik may mount (readonly.ts). It refuses
+# everything but container list / inspect, events, version and ping.
+Environment=TP_DOCKER_GATE_RO_SOCKET={{ docker_gate_ro_socket }}
+# While this file exists (Traefik is on the read-only socket), a read-only
+# listener that cannot open fails the start instead of being skipped.
+Environment=TP_DOCKER_GATE_INGRESS_SWITCH={{ docker_gate_ingress_switch_file }}
+Environment=TP_DOCKER_GATE_UPSTREAM={{ docker_gate_upstream_socket }}
+{% if (docker_gate_gid | string | length) > 0 %}
+Environment=TP_DOCKER_GATE_SOCKET_GID={{ docker_gate_gid }}
+{% endif %}
+Environment=TP_DOCKER_GATE_BIND_ROOTS={{ docker_gate_bind_roots | join(':') }}
+Environment=TP_DOCKER_GATE_DENY_PREFIXES={{ docker_gate_deny_prefixes_extra | join(':') }}
+Environment=TP_DOCKER_GATE_PLATFORM_RO_ROOTS={{ docker_gate_platform_ro_roots | join(':') }}
+Environment=TP_DOCKER_GATE_PLATFORM_RW_ROOTS={{ docker_gate_platform_rw_roots | join(':') }}
+{% if (docker_gate_approval_pubkeys | string | trim | length) > 0 %}
+Environment=TP_DOCKER_GATE_APPROVAL_PUBKEY={{ docker_gate_approval_pubkey_file }}
+Environment=TP_DOCKER_GATE_APPROVAL_STATE={{ docker_gate_approval_state_file }}
+{% endif %}
+Environment=TP_DOCKER_GATE_SUMMARY_SEC={{ docker_gate_summary_seconds }}
+# Stage 4: the build listener, the only socket BuildKit's /session and /grpc
+# may open on; root:<build group> 0660, the group holding only the daemon
+# account (build.ts).
+Environment=TP_DOCKER_GATE_BUILD_SOCKET={{ docker_gate_build_socket }}
+Environment=TP_DOCKER_GATE_BUILD_GID={{ docker_gate_build_gid }}
+Environment=DENO_DIR={{ docker_gate_cache_dir }}
+Environment=DENO_NO_UPDATE_CHECK=1
+Environment=NO_COLOR=1
+# The gate's own permissions: read anywhere (it resolves symlinks of bind
+# sources), write only its socket directory and the engine socket, no network
+# beyond its own Unix sockets, no subprocesses, only its own variables.
+# `--allow-net=unix:` is what Deno gates `listen()` on; `connect()` is gated on
+# read and write of the socket path.
+ExecStartPre=+/usr/bin/install -d -m 0750 -o root -g {{ docker_gate_group }} {{ docker_gate_run_dir }}
+ExecStartPre=+/usr/bin/install -d -m 0750 -o root -g root {{ docker_gate_ro_run_dir }}
+ExecStartPre=+/usr/bin/install -d -m 0750 -o root -g {{ docker_gate_build_group }} {{ docker_gate_build_run_dir }}
+ExecStart={{ docker_gate_deno_bin }} run --no-prompt --no-remote --no-config --no-lock --allow-read --allow-write={{ docker_gate_run_dir }},{{ docker_gate_upstream_socket }},{{ docker_gate_approval_state_dir }} --allow-net=unix:{{ docker_gate_socket }},unix:{{ docker_gate_ro_socket }},unix:{{ docker_gate_build_socket }},unix:{{ docker_gate_upstream_socket }} --allow-env=TP_DOCKER_GATE_* {{ docker_gate_dir }}/main.ts
+SyslogIdentifier={{ docker_gate_service_name }}
+Restart=always
+RestartSec=2
+TimeoutStopSec=10
+KillSignal=SIGTERM
+WorkingDirectory=/
+
+# Sandbox. No MemoryDenyWriteExecute (V8 needs a JIT) and no syscall filter.
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_READ_SEARCH
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+UMask=0077
+CacheDirectory=turbopanel-docker-gate
+CacheDirectoryMode=0700
+StateDirectory=turbopanel-docker-gate
+StateDirectoryMode=0700
+ReadWritePaths=-{{ docker_gate_run_dir }}
+
+[Install]
+WantedBy=multi-user.target

@@ -11,6 +11,7 @@
  * correlated to their DRM card via the same `device` symlink resolution.
  */
 import { GPU_HWMON_CHIPS } from "../collector/sensors/discovery.ts";
+import { isNoTelemetryDisplay } from "../../host/display-devices.ts";
 import {
   fnv1aHex,
   type IdentityIo,
@@ -20,6 +21,12 @@ import {
 import type { GpuTopology } from "../../contracts/topology-types.ts";
 
 const DRM_CARD_DIR_RE = /^card\d+$/;
+/**
+ * Pre-GCN Radeon (`radeon` driver) has no `gpu_busy_percent`/VRAM sysfs; its
+ * only telemetry is an optional hwmon chip, which RS780/RS880-class IGPs
+ * never register. Without one the card is inventory-only, not a metrics GPU.
+ */
+const LEGACY_RADEON_DRIVER = "radeon";
 
 const VENDOR_NAMES: ReadonlyMap<string, string> = new Map([
   ["0x8086", "intel"],
@@ -49,20 +56,25 @@ async function collectDrmCards(
     DRM_CARD_DIR_RE.test(entry)
   );
   // Independent sysfs reads, in parallel; GPUs are built in listing order.
-  const reads = await Promise.all(cards.map((entry) => {
+  const reads = await Promise.all(cards.map(async (entry) => {
     const cardPath = `${drmRoot}/${entry}`;
-    return Promise.all([
+    const [vendorRaw, uevent] = await Promise.all([
       io.readFile(`${cardPath}/device/vendor`),
       io.readFile(`${cardPath}/device/uevent`),
     ]);
+    const driver = uevent ? parseDriverName(uevent) : undefined;
+    const monitorable = !isNoTelemetryDisplay(vendorRaw, driver) &&
+      (driver !== LEGACY_RADEON_DRIVER ||
+        (await io.listDir(`${cardPath}/device/hwmon`)).length > 0);
+    return { vendorRaw, uevent, driver, monitorable };
   }));
   const gpus: GpuTopology[] = [];
   for (const [index, entry] of cards.entries()) {
-    const [vendorRaw, uevent] = reads[index];
+    const { vendorRaw, uevent, driver, monitorable } = reads[index];
     const vendorId = vendorRaw?.trim();
-    if (!vendorId) continue;
+    if (!vendorId || !monitorable) continue;
     const pciPath = uevent ? parsePciSlotName(uevent) : undefined;
-    const chip = (uevent ? parseDriverName(uevent) : undefined) ?? "unknown";
+    const chip = driver ?? "unknown";
     const identityKey = `${entry}:${chip}`;
     const gpuId = pciPath ? `pci:${pciPath}` : `drm:${fnv1aHex(identityKey)}`;
     gpus.push({
