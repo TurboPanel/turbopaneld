@@ -1,5 +1,8 @@
 import { assertEquals, assertRejects } from "@std/assert";
-import type { ManagedLifecyclePayload } from "../contracts/commands-contracts.ts";
+import {
+  type ManagedLifecyclePayload,
+  parseManagedLifecycleResult,
+} from "../contracts/commands-contracts.ts";
 import type { DockerCliResult } from "../deploy/docker-cli.ts";
 import { withTempLayout } from "../testing/temp-layout.ts";
 import { handleManagedLifecycle } from "./lifecycle.ts";
@@ -126,6 +129,14 @@ for (const action of ["start", "restart"] as const) {
     assertEquals(result.member?.status, "needs_resync");
     assertEquals(result.member?.role, "replica");
     assertEquals(result.member?.replication?.state, "needs_resync");
+    // The control plane reads the result through the shared parser.
+    const parsed = parseManagedLifecycleResult(
+      JSON.parse(JSON.stringify(result)),
+    );
+    assertEquals(parsed.status, "needs_resync");
+    assertEquals(parsed.member?.status, "needs_resync");
+    assertEquals(parsed.member?.role, "replica");
+    assertEquals(parsed.member?.replication?.state, "needs_resync");
   });
 }
 
