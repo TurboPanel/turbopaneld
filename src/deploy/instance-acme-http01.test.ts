@@ -18,6 +18,7 @@ import {
   classifyPort80,
   closeInstanceAcmeWindow,
   type CommandResult,
+  controlPlaneCaddyUser,
   findIssuedPair,
   findIssuedPairViaSudo,
   groupIdFromGroupFile,
@@ -35,6 +36,7 @@ import {
   preflightHttpResponse,
   preflightInstanceLetsEncryptHttp01,
   renderInstanceAcmeHttp01Site,
+  sanitizePort80Holders,
 } from "./instance-acme-http01.ts";
 
 /**
@@ -1235,4 +1237,179 @@ test("issued pair follows the configured CA when staging and production both exi
   } finally {
     await Deno.remove(root, { recursive: true });
   }
+});
+
+const ACME_LOG =
+  `{"level":"info","msg":"certificate obtained successfully","identifier":"${HOST}"}`;
+
+async function leafHarness(
+  prefix: string,
+  installFails: (dest: string) => boolean,
+) {
+  const root = await Deno.makeTempDir({ prefix });
+  const issuer = join(
+    root,
+    "state",
+    "instance-acme",
+    "caddy",
+    "certificates",
+    STAGING_KEY,
+    HOST,
+  );
+  await writeFixtureLeafPair(
+    issuer,
+    HOST,
+    "20260901000000Z",
+    "20270901000000Z",
+  );
+  const certsDir = join(root, "certs");
+  await Deno.mkdir(certsDir, { recursive: true });
+  const calls: string[] = [];
+  const run: InstanceAcmeCommand = async (_program, args) => {
+    calls.push(args.join(" "));
+    const dest = args.at(-1) ?? "";
+    if (args[1] === "install") {
+      if (installFails(dest)) {
+        return { ok: false, stdout: "", stderr: "denied" };
+      }
+      const staged = args.at(-2) ?? "";
+      await Deno.chmod(certsDir, 0o755);
+      await Deno.copyFile(staged, dest);
+      await Deno.chmod(certsDir, 0o555);
+      return ok();
+    }
+    if (args[1] === "cat") {
+      await Deno.chmod(certsDir, 0o755);
+      const text = await Deno.readTextFile(dest);
+      await Deno.chmod(certsDir, 0o000);
+      return ok(text);
+    }
+    return ok();
+  };
+  const issue = () =>
+    issueInstanceLetsEncryptCertificates(
+      layoutUnder(root),
+      [HOST],
+      ACME_SETTINGS,
+      certsDir,
+      {
+        run,
+        now: () => FIXED_NOW_MS,
+        readLog: () => Promise.resolve(ACME_LOG),
+        closeWindow: () => Promise.resolve(),
+      },
+    );
+  const cleanup = async () => {
+    await Deno.chmod(certsDir, 0o755).catch(() => undefined);
+    await Deno.remove(root, { recursive: true });
+  };
+  return { root, issuer, certsDir, calls, issue, cleanup };
+}
+
+test("a failed key install leaves the old certificate and key untouched", async () => {
+  const h = await leafHarness("tp-acme-keyfail-", (d) => d.endsWith(".key"));
+  try {
+    await Deno.writeTextFile(
+      join(h.certsDir, `letsencrypt-${HOST}.crt`),
+      "old-crt",
+    );
+    await Deno.writeTextFile(
+      join(h.certsDir, `letsencrypt-${HOST}.key`),
+      "old-key",
+    );
+    await Deno.chmod(h.certsDir, 0o555);
+    await assertRejects(() => h.issue());
+    assertEquals(
+      h.calls.some((c) => c.includes(".crt") && c.includes("install")),
+      false,
+    );
+    await Deno.chmod(h.certsDir, 0o755);
+    assertEquals(
+      await Deno.readTextFile(join(h.certsDir, `letsencrypt-${HOST}.crt`)),
+      "old-crt",
+    );
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("a failed certificate install puts the previous key back", async () => {
+  const h = await leafHarness("tp-acme-crtfail-", (d) => d.endsWith(".crt"));
+  try {
+    await Deno.writeTextFile(
+      join(h.certsDir, `letsencrypt-${HOST}.crt`),
+      "old-crt",
+    );
+    await Deno.writeTextFile(
+      join(h.certsDir, `letsencrypt-${HOST}.key`),
+      "old-key",
+    );
+    await Deno.chmod(h.certsDir, 0o555);
+    await assertRejects(() => h.issue());
+    await Deno.chmod(h.certsDir, 0o755);
+    assertEquals(
+      await Deno.readTextFile(join(h.certsDir, `letsencrypt-${HOST}.key`)),
+      "old-key",
+    );
+    const keyInstalls = h.calls.filter((c) =>
+      c.includes("install") && c.includes("-o tpcaddy")
+    );
+    assertEquals(keyInstalls.length, 2);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("unchanged bytes still re-own the key for Caddy and the certificate for group tp", async () => {
+  const h = await leafHarness("tp-acme-same-", () => false);
+  try {
+    for (const ext of ["crt", "key"]) {
+      await Deno.copyFile(
+        join(h.issuer, `${HOST}.${ext}`),
+        join(h.certsDir, `letsencrypt-${HOST}.${ext}`),
+      );
+    }
+    await Deno.chmod(h.certsDir, 0o000);
+    await h.issue();
+    assertEquals(
+      h.calls.some((c) =>
+        c.includes(`chown tpcaddy:tp ${h.certsDir}/letsencrypt-${HOST}.key`)
+      ),
+      true,
+    );
+    assertEquals(
+      h.calls.some((c) =>
+        c.includes(`chown :tp ${h.certsDir}/letsencrypt-${HOST}.crt`)
+      ),
+      true,
+    );
+    assertEquals(h.calls.some((c) => c.includes("install")), false);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("the Caddy account is the dev user on a dev host and tpcaddy otherwise", () => {
+  assertEquals(controlPlaneCaddyUser({}), "tpcaddy");
+  assertEquals(
+    controlPlaneCaddyUser({ TURBOPANEL_DEV_USER: "vagrant" }),
+    "vagrant",
+  );
+  assertEquals(
+    controlPlaneCaddyUser({ TURBOPANEL_DEV_USER: "bad name;" }),
+    "tpcaddy",
+  );
+});
+
+test("port 80 holder names keep spaces and lists but lose markup", () => {
+  assertEquals(
+    port80HeldMessage("Web Content"),
+    "port 80 is held by Web Content",
+  );
+  assertEquals(
+    port80HeldMessage("apache2, nginx"),
+    "port 80 is held by apache2, nginx",
+  );
+  assertEquals(sanitizePort80Holders("<b>x</b>").includes("<"), false);
+  assertEquals(sanitizePort80Holders("a".repeat(200)).length <= 120, true);
 });

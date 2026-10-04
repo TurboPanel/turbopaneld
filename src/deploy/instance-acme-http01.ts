@@ -71,8 +71,18 @@ export async function withInstanceAcmeWindowLock<T>(
   }
 }
 
-/** The account the panel's Caddy runs as; it must be able to read its key. */
-export const CONTROL_PLANE_CADDY_USER = "tpcaddy";
+/**
+ * The account the panel's Caddy runs as; it must be able to read its key. The
+ * apply playbook's `caddy_user` is the dev user on a co-located dev host
+ * (`TURBOPANEL_DEV_USER`, the same variable the daemon passes to the playbook)
+ * and `tpcaddy` everywhere else.
+ */
+export function controlPlaneCaddyUser(
+  env: Record<string, string | undefined> = Deno.env.toObject(),
+): string {
+  const dev = env.TURBOPANEL_DEV_USER?.trim();
+  return dev && /^[a-z_][a-z0-9_-]{0,31}$/.test(dev) ? dev : "tpcaddy";
+}
 
 export async function reloadControlPlaneCaddy(
   deps: { run?: InstanceAcmeCommand } = {},
@@ -118,8 +128,25 @@ export function isDaemonReservedHostingSite(name: string): boolean {
   return DAEMON_RESERVED_HOSTING_SITES.has(name);
 }
 
+const HOLDER_NAME_MAX = 32;
+const HOLDER_LIST_MAX = 120;
+
+/**
+ * Process names come from the kernel (up to 15 arbitrary bytes), and this text
+ * is stored on the hostname row and shown in the UI: keep each name to word
+ * characters, `.@:+-` and spaces, and cap the length.
+ */
+export function sanitizePort80Holders(processNames: string): string {
+  const names = processNames.split(",").map((name) =>
+    name.replace(/[^\w.@:+ -]/g, "_").trim().slice(0, HOLDER_NAME_MAX)
+  ).filter((name) => name.length > 0);
+  return names.join(", ").slice(0, HOLDER_LIST_MAX);
+}
+
 export function port80HeldMessage(processName: string): string {
-  return `port 80 is held by ${processName}`;
+  return `port 80 is held by ${
+    sanitizePort80Holders(processName) || "another process"
+  }`;
 }
 
 export type Port80Listener = { process: string; pid: number };
@@ -1038,6 +1065,23 @@ function needsRoot(err: unknown): boolean {
     err instanceof Deno.errors.NotCapable;
 }
 
+type LeafStep = {
+  /** Installs the new bytes (or only fixes owner and mode when unchanged). */
+  apply: () => Promise<void>;
+  /** Puts the previous bytes back; null when nothing was replaced. */
+  restore: (() => Promise<void>) | null;
+};
+
+/**
+ * The key goes first and the certificate second, so a failed key install
+ * leaves the old pair untouched, and a failed certificate install puts the old
+ * key back: Caddy never reads a new certificate beside an old key (or the
+ * reverse) after a failure we can see. Both files are the ones the apply
+ * playbook writes (`<state>/tls/certs/letsencrypt-<host>.{crt,key}`); the
+ * playbook leaves the key `<caddy user>:tp 0600` and renewal must agree. A
+ * crash between the two installs can still leave a mismatched pair until the
+ * next run, because tp-host installs one file per call.
+ */
 async function installLeaf(
   sourceCrt: string,
   sourceKey: string,
@@ -1045,27 +1089,48 @@ async function installLeaf(
   destKey: string,
   run: InstanceAcmeCommand,
 ): Promise<void> {
-  await copyIfChanged(sourceCrt, destCrt, 0o640, "root", run);
-  // The panel Caddy (tpcaddy, group tp) loads this key, exactly as the apply
-  // playbook's "Harden Let's Encrypt keys" step leaves it (tpcaddy:tp 0600).
-  // A root-owned 0600 key would break the next Caddy reload or restart.
-  await copyIfChanged(sourceKey, destKey, 0o600, CONTROL_PLANE_CADDY_USER, run);
+  const key = await planLeaf(
+    sourceKey,
+    destKey,
+    0o600,
+    controlPlaneCaddyUser(),
+    run,
+  );
+  const crt = await planLeaf(sourceCrt, destCrt, 0o640, "root", run);
+  await key.apply();
+  try {
+    await crt.apply();
+  } catch (err) {
+    if (key.restore) {
+      await key.restore().catch((restoreErr) =>
+        logWarn("deploy", "instance ACME key rollback failed:", restoreErr)
+      );
+    }
+    throw err;
+  }
 }
 
-async function copyIfChanged(
+async function planLeaf(
   source: string,
   dest: string,
   mode: number,
   owner: string,
   run: InstanceAcmeCommand,
-): Promise<void> {
+): Promise<LeafStep> {
   const next = await readFilePrivileged(source, run);
   const current = await readDestBytes(dest, run);
   if (current && bytesEqual(current, next)) {
-    await ensureInstalledMode(dest, mode, owner, run);
-    return;
+    return {
+      apply: () => ensureInstalledMode(dest, mode, owner, run),
+      restore: null,
+    };
   }
-  await stageAndInstall(dest, next, mode, owner, run);
+  return {
+    apply: () => stageAndInstall(dest, next, mode, owner, run),
+    restore: current
+      ? () => stageAndInstall(dest, current, mode, owner, run)
+      : null,
+  };
 }
 
 async function stageAndInstall(

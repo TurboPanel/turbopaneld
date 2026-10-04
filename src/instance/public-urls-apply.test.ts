@@ -453,8 +453,8 @@ test({
   permissions: { read: true, write: true, env: true },
   fn: async () => {
     const failures = [
-      "hosting Caddy reload failed",
-      "hosting Caddy is not listening on port 80",
+      "hosting Caddy lost its admin socket",
+      "something unrelated broke",
     ];
     for (const message of failures) {
       const root = await Deno.makeTempDir({ prefix: "tp-apply-open-" });
