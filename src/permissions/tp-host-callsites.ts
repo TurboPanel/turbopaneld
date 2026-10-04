@@ -687,6 +687,9 @@ const SITES: CallSite[] = [
   tpHost('src/deploy/ingress.ts|["-n","systemctl","reload",CADDY_SERVICE]', {
     argv: ["systemctl", "reload", "turbopanel-hosting-caddy.service"],
   }),
+  tpHost('src/deploy/ingress.ts|["-n","systemctl","start",CADDY_SERVICE]', {
+    argv: ["systemctl", "start", "turbopanel-hosting-caddy.service"],
+  }),
   tpHost(
     'src/deploy/ingress.ts|["-n","systemctl","is-active","--quiet",CADDY_SERVICE]',
     {
@@ -699,7 +702,7 @@ const SITES: CallSite[] = [
     },
   ),
   sudo(
-    'src/deploy/ingress.ts|["-n","-u",HOSTING_CADDY_USER,"--",join(layout.runtimesDir,"caddy","current","caddy"),"validate","--adapter","caddyfile","--config",candidateFile]',
+    'src/deploy/ingress.ts|["-n","-u",HOSTING_CADDY_USER,"--",join(layout.runtimesDir,"caddy","current","caddy"),"validate","--adapter","caddyfile","--config",candidate.caddyfile]',
     {
       runas: "tpedge",
       argv: [

@@ -192,6 +192,18 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    the validated file for its next start. The acme-hostnames manifest is
    written only after the snippet is live. Changes run one at a time (the
    candidate is staged at fixed paths), `removeHostingCaddySite` included.
+   A set that is refused only because of a snippet already on disk (the other
+   environments' files fail without the new one) does not fail the deploy: the
+   stale files are found by adding them to an empty set one at a time (the
+   daemon's reserved sites first, then by name) and the ones Caddy will not load
+   are set aside as `<name>.caddy.quarantined`, which no glob matches (the later
+   file of two serving one hostname). The same check runs at daemon start
+   (`guardHostingCaddySites`, then a reload), so a stale file does not keep the
+   unit from starting; until the daemon is up, a unit that restarts on its own
+   (boot) can still fail to load such a file. The validating account keeps its
+   throwaway CA in the unit's state folder, which systemd creates when the unit
+   starts: a never-started unit is started once first, and a folder that stays
+   missing is an error.
 11a. Alongside each environment's `.caddy` site file, `rewriteHostingCaddySites`
    also writes a companion `<environmentId>.acme-hostnames.json` naming just
    that environment's `tlsMode: 'acme'` hostnames (removed in lockstep by

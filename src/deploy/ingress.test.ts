@@ -24,6 +24,7 @@ import {
   ensureHostingIngress,
   ensureServiceIngress,
   formatCaddyPathMatcher,
+  guardHostingCaddySites,
   HOSTING_CADDY_ADMIN_SOCKET,
   HOSTING_CADDY_METRICS_ADDR,
   HOSTING_CADDY_RUNTIME_DIRECTORY,
@@ -85,6 +86,9 @@ async function makeTestLayout(): Promise<
     },
     { skipDiscovery: true, forceMode: "production" },
   );
+  // The hosting unit's state folder (`/var/lib/turbopanel-hosting-caddy`),
+  // which systemd creates when the unit starts.
+  await Deno.mkdir(`${root}/turbopanel-hosting-caddy`);
   return { layout, cleanup: () => Deno.remove(root, { recursive: true }) };
 }
 
@@ -1472,6 +1476,10 @@ test("ensureServiceIngress rejects identity serviceId mismatch", async () => {
   }
 });
 
+function hostingDirOf(layout: LayoutPaths): string {
+  return join(layout.configDir, "hosting");
+}
+
 function hostingPayload(environmentId: string, hostname: string) {
   return {
     environmentId,
@@ -1496,6 +1504,46 @@ function hostingPayload(environmentId: string, hostname: string) {
 }
 
 const noGrant = () => Promise.resolve();
+
+/**
+ * What `caddy validate` says about the staged set, as far as these tests care:
+ * a snippet marked BAD does not load, and neither does a hostname served twice
+ * ("ambiguous site definition"). `null` when the set loads.
+ */
+function fakeCaddyRefusal(layout: LayoutPaths): string | null {
+  const sites = join(layout.configDir, "hosting", "sites.next");
+  const seen = new Set<string>();
+  for (const entry of Deno.readDirSync(sites)) {
+    const text = Deno.readTextFileSync(join(sites, entry.name));
+    if (text.includes("BAD")) return `unrecognized directive in ${entry.name}`;
+    const own = new Set(
+      [...text.matchAll(/^(?:http:\/\/)?([a-z0-9.-]+) \{$/gm)].map((m) =>
+        m[1]!
+      ),
+    );
+    for (const host of own) {
+      if (seen.has(host)) return `ambiguous site definition: ${host}`;
+      seen.add(host);
+    }
+  }
+  return null;
+}
+
+/** A `run` that validates with {@link fakeCaddyRefusal} and accepts the rest. */
+function fakeHostRun(layout: LayoutPaths, calls?: string[][]) {
+  return (_command: string, args: string[]) => {
+    calls?.push([...args]);
+    if (args.includes("validate")) {
+      const refusal = fakeCaddyRefusal(layout);
+      return Promise.resolve(
+        refusal === null
+          ? { success: true, stderr: "" }
+          : { success: false, stderr: refusal },
+      );
+    }
+    return Promise.resolve({ success: true, stderr: "" });
+  };
+}
 
 test("rewriteHostingCaddySites validates the staged set, then activates and reloads", async () => {
   const { layout, cleanup } = await makeTestLayout();
@@ -1554,27 +1602,8 @@ test("rewriteHostingCaddySites validates the staged set, then activates and relo
 
 test("rewriteHostingCaddySites refuses a set the hosting Caddy cannot load and leaves the live files alone", async () => {
   const { layout, cleanup } = await makeTestLayout();
-  let candidate = "";
-  let refuse = false;
   const calls: string[][] = [];
-  const restore = setIngressHostCommandForTest((_command, args) => {
-    calls.push([...args]);
-    if (args.includes("validate") && refuse) {
-      // What `caddy validate` is asked to load: the staged set only.
-      const sites = join(
-        layout.configDir,
-        "hosting",
-        "sites.next",
-      );
-      candidate = [...Deno.readDirSync(sites)].map((e) => e.name).sort()
-        .join(",");
-      return Promise.resolve({
-        success: false,
-        stderr: "ambiguous site definition: app.example.com",
-      });
-    }
-    return Promise.resolve({ success: true, stderr: "" });
-  });
+  const restore = setIngressHostCommandForTest(fakeHostRun(layout, calls));
   try {
     await rewriteHostingCaddySites(
       layout,
@@ -1585,7 +1614,6 @@ test("rewriteHostingCaddySites refuses a set the hosting Caddy cannot load and l
     const sitesDir = join(layout.configDir, "hosting", "sites");
     const before = await Deno.readTextFile(join(sitesDir, "env-a.caddy"));
 
-    refuse = true;
     calls.length = 0;
     await assertRejects(
       () =>
@@ -1598,9 +1626,8 @@ test("rewriteHostingCaddySites refuses a set the hosting Caddy cannot load and l
       Error,
       "ambiguous site definition",
     );
-    // The candidate held the other environment's file plus the new one.
-    assertEquals(candidate, "env-a.caddy,env-b.caddy");
-    // Nothing reached the live glob, no reload ran, nothing was left behind.
+    // Nothing reached the live glob, no reload ran, nothing was left behind,
+    // and the other environment's file was not touched.
     assertEquals(calls.some((a) => a.includes("reload")), false);
     assertEquals(
       [...Deno.readDirSync(sitesDir)].map((e) => e.name).sort(),
@@ -1610,6 +1637,149 @@ test("rewriteHostingCaddySites refuses a set the hosting Caddy cannot load and l
       await Deno.readTextFile(join(sitesDir, "env-a.caddy")),
       before,
     );
+  } finally {
+    restore();
+    await cleanup();
+  }
+});
+
+test("a stale snippet already on disk is set aside, not allowed to fail every other deploy", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const restore = setIngressHostCommandForTest(fakeHostRun(layout));
+  try {
+    const sitesDir = join(layout.configDir, "hosting", "sites");
+    await Deno.mkdir(sitesDir, { recursive: true });
+    await Deno.writeTextFile(
+      join(sitesDir, "env-good.caddy"),
+      "good.example.com {\n}\n",
+    );
+    await Deno.writeTextFile(
+      join(sitesDir, "env-old.caddy"),
+      "BAD.example.com {\n}\n",
+    );
+
+    await rewriteHostingCaddySites(
+      layout,
+      hostingPayload("env-new", "new.example.com"),
+      undefined,
+      noGrant,
+    );
+    assertEquals(
+      [...Deno.readDirSync(sitesDir)].map((e) => e.name).sort(),
+      [
+        "env-good.caddy",
+        "env-new.acme-hostnames.json",
+        "env-new.caddy",
+        "env-old.caddy.quarantined",
+      ],
+    );
+    // The set-aside file is kept, and goes with its environment.
+    await removeHostingCaddySite(layout, "env-old");
+    await assertRejects(
+      () => Deno.stat(join(sitesDir, "env-old.caddy.quarantined")),
+      Deno.errors.NotFound,
+    );
+  } finally {
+    restore();
+    await cleanup();
+  }
+});
+
+test("when two environments serve one hostname the later file is set aside, the earlier keeps serving", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const restore = setIngressHostCommandForTest(fakeHostRun(layout));
+  try {
+    const sitesDir = join(layout.configDir, "hosting", "sites");
+    await Deno.mkdir(sitesDir, { recursive: true });
+    await Deno.writeTextFile(
+      join(sitesDir, "env-a.caddy"),
+      "dup.example.com {\n}\n",
+    );
+    await Deno.writeTextFile(
+      join(sitesDir, "env-b.caddy"),
+      "dup.example.com {\n}\n",
+    );
+    const quarantined = await guardHostingCaddySites(layout, noGrant);
+    assertEquals(quarantined, ["env-b.caddy"]);
+    assertEquals(
+      [...Deno.readDirSync(sitesDir)].map((e) => e.name).sort(),
+      ["env-a.caddy", "env-b.caddy.quarantined"],
+    );
+  } finally {
+    restore();
+    await cleanup();
+  }
+});
+
+test("guardHostingCaddySites leaves a loadable set alone and reloads only after setting one aside", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const calls: string[][] = [];
+  const restore = setIngressHostCommandForTest(fakeHostRun(layout, calls));
+  try {
+    // No sites folder, then an empty one.
+    assertEquals(await guardHostingCaddySites(layout, noGrant), []);
+    const sitesDir = join(layout.configDir, "hosting", "sites");
+    await Deno.mkdir(sitesDir, { recursive: true });
+    assertEquals(await guardHostingCaddySites(layout, noGrant), []);
+
+    await Deno.writeTextFile(
+      join(sitesDir, "env-a.caddy"),
+      "a.example.com {\n}\n",
+    );
+    assertEquals(await guardHostingCaddySites(layout, noGrant), []);
+    assertEquals(calls.some((a) => a.includes("reload")), false);
+
+    await Deno.writeTextFile(join(sitesDir, "env-b.caddy"), "BAD {\n}\n");
+    assertEquals(await guardHostingCaddySites(layout, noGrant), [
+      "env-b.caddy",
+    ]);
+    assertEquals(calls.some((a) => a.includes("reload")), true);
+    assertEquals(
+      [...Deno.readDirSync(hostingDirOf(layout))].some((e) =>
+        e.name.endsWith(".next")
+      ),
+      false,
+    );
+  } finally {
+    restore();
+    await cleanup();
+  }
+});
+
+test("validation needs the hosting unit's state folder: a never-started unit is started once, and a folder that stays missing is an error", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const state = join(dirname(layout.stateDir), "turbopanel-hosting-caddy");
+  await Deno.remove(state);
+  const calls: string[][] = [];
+  let createOnStart = false;
+  const restore = setIngressHostCommandForTest((_command, args) => {
+    calls.push([...args]);
+    if (args.includes("start") && createOnStart) Deno.mkdirSync(state);
+    return Promise.resolve({ success: true, stderr: "" });
+  });
+  try {
+    await assertRejects(
+      () =>
+        rewriteHostingCaddySites(
+          layout,
+          hostingPayload("env-s", "s.example.com"),
+          undefined,
+          noGrant,
+        ),
+      Error,
+      "state folder",
+    );
+    assertEquals(calls.some((a) => a.includes("start")), true);
+    assertEquals(calls.some((a) => a.includes("validate")), false);
+
+    createOnStart = true;
+    await rewriteHostingCaddySites(
+      layout,
+      hostingPayload("env-s", "s.example.com"),
+      undefined,
+      noGrant,
+    );
+    assertEquals(calls.some((a) => a.includes("validate")), true);
   } finally {
     restore();
     await cleanup();
@@ -1687,7 +1857,9 @@ test("rewriteHostingCaddySites runs one change at a time, so a candidate set is 
       if (validating > 1) overlap = true;
       const sites = join(layout.configDir, "hosting", "sites.next");
       seen.push(
-        [...Deno.readDirSync(sites)].map((e) => e.name).sort().join(","),
+        [...Deno.readDirSync(sites)].map((e) => e.name).filter((n) =>
+          n !== "00-candidate.caddy"
+        ).sort().join(","),
       );
       // Yield so a second, unserialized deploy would run in the gap.
       await new Promise((resolve) => setTimeout(resolve, 20));

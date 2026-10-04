@@ -1,4 +1,4 @@
-import { join } from "@std/path";
+import { dirname, join } from "@std/path";
 import { hostSudoArgs } from "../permissions/host-sudo.ts";
 import { errorText, logInfo, logWarn } from "../util/logger.ts";
 import { forEachSequential } from "../util/sequential.ts";
@@ -1875,6 +1875,162 @@ function withHostingSitesLock<T>(work: () => Promise<T>): Promise<T> {
 const HOSTING_CANDIDATE_SITES_DIR = "sites.next";
 const HOSTING_CANDIDATE_CADDYFILE = "Caddyfile.next";
 
+/** `/var/lib/turbopanel-hosting-caddy`: the unit's `StateDirectory=`. */
+function hostingCaddyStateRoot(layout: LayoutPaths): string {
+  return join(dirname(layout.stateDir), HOSTING_CADDY_STATE_DIRECTORY);
+}
+
+/**
+ * The validating account keeps its throwaway certificate authority under the
+ * unit's state folder, which systemd creates on the unit's first start. A host
+ * whose unit has never started gets it started once (the deploy path normally
+ * did that already), and a folder that still is not there is an error.
+ */
+async function ensureValidationStorage(layout: LayoutPaths): Promise<string> {
+  const state = hostingCaddyStateRoot(layout);
+  const exists = () =>
+    Deno.stat(state).then(() => true, (err) => {
+      if (err instanceof Deno.errors.NotFound) return false;
+      throw err;
+    });
+  if (!await exists()) {
+    await run(
+      "sudo",
+      hostSudoArgs(["-n", "systemctl", "start", CADDY_SERVICE]),
+    );
+    if (!await exists()) {
+      throw new Error(
+        `hosting Caddy state folder ${state} is missing: the unit has not started`,
+      );
+    }
+  }
+  return join(state, "validate");
+}
+
+/** The staged copy of the site set, outside the live include glob. */
+type HostingCandidate = Readonly<{
+  sitesDir: string;
+  caddyfile: string;
+  validateStorage: string;
+}>;
+
+async function openHostingCandidate(
+  layout: LayoutPaths,
+  hostingDir: string,
+): Promise<HostingCandidate> {
+  const candidate = {
+    sitesDir: join(hostingDir, HOSTING_CANDIDATE_SITES_DIR),
+    caddyfile: join(hostingDir, HOSTING_CANDIDATE_CADDYFILE),
+    validateStorage: await ensureValidationStorage(layout),
+  };
+  await Deno.remove(candidate.sitesDir, { recursive: true }).catch(() => {});
+  await Deno.mkdir(candidate.sitesDir, { mode: 0o750 });
+  // A glob that matches nothing is an error in Caddy; the staged set may be empty.
+  await Deno.writeTextFile(
+    join(candidate.sitesDir, "00-candidate.caddy"),
+    "# staged candidate\n",
+    { mode: 0o640 },
+  );
+  await Deno.writeTextFile(
+    candidate.caddyfile,
+    caddyfile(layout.configDir, {
+      sitesDir: candidate.sitesDir,
+      storageDir: candidate.validateStorage,
+    }),
+    { mode: 0o640 },
+  );
+  return candidate;
+}
+
+async function closeHostingCandidate(
+  candidate: HostingCandidate,
+): Promise<void> {
+  await Deno.remove(candidate.sitesDir, { recursive: true }).catch(() => {});
+  await Deno.remove(candidate.caddyfile).catch(() => {});
+}
+
+/** Caddy's complaint about the staged set, or `null` when it loads. */
+async function hostingCandidateRefusal(
+  layout: LayoutPaths,
+  candidate: HostingCandidate,
+): Promise<string | null> {
+  const test = await run(
+    "sudo",
+    hostSudoArgs([
+      "-n",
+      "-u",
+      HOSTING_CADDY_USER,
+      "--",
+      join(layout.runtimesDir, "caddy", "current", "caddy"),
+      "validate",
+      "--adapter",
+      "caddyfile",
+      "--config",
+      candidate.caddyfile,
+    ]),
+  );
+  return test.success ? null : test.stderr || "caddy validate failed";
+}
+
+async function liveSnippetNames(sitesDir: string): Promise<string[]> {
+  const names: string[] = [];
+  for await (const entry of Deno.readDir(sitesDir)) {
+    if (entry.isFile && entry.name.endsWith(".caddy")) names.push(entry.name);
+  }
+  // The daemon's own reserved sites first: they are kept in preference.
+  return names.sort((a, b) =>
+    Number(isDaemonReservedHostingSite(b)) -
+      Number(isDaemonReservedHostingSite(a)) || a.localeCompare(b)
+  );
+}
+
+/**
+ * The snippets already on disk that Caddy will not load, found by adding them
+ * to an empty set one at a time (the reserved sites first, then by name). One
+ * that refuses to join a set the earlier ones load fine is the one to set
+ * aside; a hostname served by two environments leaves the later file out.
+ */
+async function findUnloadableSnippets(
+  layout: LayoutPaths,
+  candidate: HostingCandidate,
+  sitesDir: string,
+  names: readonly string[],
+): Promise<Array<{ name: string; reason: string }>> {
+  const bad: Array<{ name: string; reason: string }> = [];
+  await forEachSequential(names, async (name) => {
+    const staged = join(candidate.sitesDir, name);
+    await Deno.copyFile(join(sitesDir, name), staged);
+    const refusal = await hostingCandidateRefusal(layout, candidate);
+    if (refusal !== null) {
+      await Deno.remove(staged);
+      bad.push({ name, reason: refusal });
+    }
+  });
+  return bad;
+}
+
+/**
+ * Move snippets the hosting Caddy cannot load out of the live glob, so one
+ * environment's stale file never fails every other environment's deploy or
+ * crash-loops the unit at its next start. The file is kept beside its old
+ * name as `<name>.quarantined`, which no `*.caddy` glob matches.
+ */
+async function quarantineHostingSnippets(
+  sitesDir: string,
+  bad: ReadonlyArray<{ name: string; reason: string }>,
+): Promise<void> {
+  await forEachSequential(bad, async ({ name, reason }) => {
+    await Deno.rename(
+      join(sitesDir, name),
+      join(sitesDir, `${name}.quarantined`),
+    );
+    logWarn(
+      "deploy",
+      `hosting Caddy cannot load ${name}; set aside as ${name}.quarantined: ${reason}`,
+    );
+  });
+}
+
 /**
  * Stage the whole site set with this environment's new snippet in place of its
  * old one, outside the live include glob, and let the web server's own account
@@ -1883,6 +2039,10 @@ const HOSTING_CANDIDATE_CADDYFILE = "Caddyfile.next";
  * environment already serves, a malformed line, a certificate it cannot read)
  * is refused here, before it can sit in the glob where the next restart or boot
  * would crash-loop ingress for every site on the host.
+ *
+ * When the set is refused only because of a stale snippet already on disk (the
+ * other environments' files fail on their own, without the new one), that file
+ * is set aside and the new snippet is judged again.
  */
 async function validateHostingCaddyCandidate(
   layout: LayoutPaths,
@@ -1892,63 +2052,120 @@ async function validateHostingCaddyCandidate(
   contents: string,
   grantRead: (hostingDir: string) => Promise<void>,
 ): Promise<void> {
-  const candidateSites = join(hostingDir, HOSTING_CANDIDATE_SITES_DIR);
-  const candidateFile = join(hostingDir, HOSTING_CANDIDATE_CADDYFILE);
+  const candidate = await openHostingCandidate(layout, hostingDir);
   try {
-    await Deno.remove(candidateSites, { recursive: true }).catch(() => {});
-    await Deno.mkdir(candidateSites, { mode: 0o750 });
-    const others: string[] = [];
-    for await (const entry of Deno.readDir(sitesDir)) {
-      if (
-        entry.isFile && entry.name.endsWith(".caddy") && entry.name !== siteFile
-      ) {
-        others.push(entry.name);
-      }
-    }
+    const others = (await liveSnippetNames(sitesDir)).filter((name) =>
+      name !== siteFile
+    );
     await Promise.all(
       others.map((name) =>
-        Deno.copyFile(join(sitesDir, name), join(candidateSites, name))
+        Deno.copyFile(join(sitesDir, name), join(candidate.sitesDir, name))
       ),
     );
-    await Deno.writeTextFile(join(candidateSites, siteFile), contents, {
+    await Deno.writeTextFile(join(candidate.sitesDir, siteFile), contents, {
       mode: 0o640,
     });
-    await Deno.writeTextFile(
-      candidateFile,
-      caddyfile(layout.configDir, {
-        sitesDir: candidateSites,
-        storageDir: `/var/lib/${HOSTING_CADDY_STATE_DIRECTORY}/validate`,
-      }),
-      { mode: 0o640 },
-    );
     // After staging, so the account can read everything staged (the grant also
     // sets the folder defaults the live snippets inherit).
     await grantRead(hostingDir);
-    const test = await run(
-      "sudo",
-      hostSudoArgs([
-        "-n",
-        "-u",
-        HOSTING_CADDY_USER,
-        "--",
-        join(layout.runtimesDir, "caddy", "current", "caddy"),
-        "validate",
-        "--adapter",
-        "caddyfile",
-        "--config",
-        candidateFile,
-      ]),
-    );
-    if (!test.success) {
+    let refusal = await hostingCandidateRefusal(layout, candidate);
+    if (refusal === null) return;
+
+    // Is it the new snippet, or one already on disk?
+    await Deno.remove(join(candidate.sitesDir, siteFile));
+    if (await hostingCandidateRefusal(layout, candidate) === null) {
       throw new Error(
-        `hosting Caddy refused the site config for ${siteFile}: ${
-          test.stderr || "caddy validate failed"
-        }`,
+        `hosting Caddy refused the site config for ${siteFile}: ${refusal}`,
+      );
+    }
+    await Promise.all(
+      others.map((name) =>
+        Deno.remove(join(candidate.sitesDir, name)).catch(() => {})
+      ),
+    );
+    const bad = await findUnloadableSnippets(
+      layout,
+      candidate,
+      sitesDir,
+      others,
+    );
+    await quarantineHostingSnippets(sitesDir, bad);
+    await Deno.writeTextFile(join(candidate.sitesDir, siteFile), contents, {
+      mode: 0o640,
+    });
+    refusal = await hostingCandidateRefusal(layout, candidate);
+    if (refusal !== null) {
+      throw new Error(
+        `hosting Caddy refused the site config for ${siteFile}: ${refusal}`,
       );
     }
   } finally {
-    await Deno.remove(candidateSites, { recursive: true }).catch(() => {});
-    await Deno.remove(candidateFile).catch(() => {});
+    await closeHostingCandidate(candidate);
+  }
+}
+
+/**
+ * At daemon start: set aside any snippet already on disk that the hosting
+ * Caddy cannot load, so a stale one does not keep the unit from starting. A
+ * unit already running keeps its loaded config; it picks up the change on the
+ * reload sent here.
+ */
+export function guardHostingCaddySites(
+  layout: LayoutPaths,
+  grantRead: (hostingDir: string) => Promise<void> = grantHostingCaddyRead,
+): Promise<string[]> {
+  return withHostingSitesLock(() =>
+    guardHostingCaddySitesLocked(layout, grantRead)
+  );
+}
+
+async function guardHostingCaddySitesLocked(
+  layout: LayoutPaths,
+  grantRead: (hostingDir: string) => Promise<void>,
+): Promise<string[]> {
+  const hostingDir = join(layout.configDir, "hosting");
+  const sitesDir = join(hostingDir, "sites");
+  let names: string[];
+  try {
+    names = await liveSnippetNames(sitesDir);
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) return [];
+    throw err;
+  }
+  if (names.length === 0) return [];
+  const candidate = await openHostingCandidate(layout, hostingDir);
+  try {
+    await Promise.all(
+      names.map((name) =>
+        Deno.copyFile(join(sitesDir, name), join(candidate.sitesDir, name))
+      ),
+    );
+    await grantRead(hostingDir);
+    if (await hostingCandidateRefusal(layout, candidate) === null) return [];
+    await Promise.all(
+      names.map((name) =>
+        Deno.remove(join(candidate.sitesDir, name)).catch(() => {})
+      ),
+    );
+    const bad = await findUnloadableSnippets(
+      layout,
+      candidate,
+      sitesDir,
+      names,
+    );
+    await quarantineHostingSnippets(sitesDir, bad);
+    if (bad.length > 0) {
+      const reload = await run(
+        "sudo",
+        hostSudoArgs(["-n", "systemctl", "reload", CADDY_SERVICE]),
+      );
+      if (!reload.success) {
+        logWarn("deploy", `hosting Caddy reload skipped: ${reload.stderr}`);
+      }
+    }
+    return bad.map((b) => b.name);
+  } finally {
+    await closeHostingCandidate(candidate);
   }
 }
 
@@ -1986,6 +2203,8 @@ async function activateHostingSite(
     },
   );
   await Deno.rename(next, live);
+  // A new snippet supersedes one set aside earlier for this environment.
+  await Deno.remove(`${live}.quarantined`).catch(() => {});
 
   const reloadArgs = hostSudoArgs(["-n", "systemctl", "reload", CADDY_SERVICE]);
   const reload = await run("sudo", reloadArgs);
@@ -2143,6 +2362,8 @@ async function removeHostingCaddySiteLocked(
       throw err;
     }
   }
+
+  await Deno.remove(`${sitePath}.quarantined`).catch(() => {});
 
   try {
     await Deno.remove(acmeHostnamesManifestPath(layout, environmentId));
