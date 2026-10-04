@@ -2399,6 +2399,37 @@ test("the deploy fails when the site Caddy still holds no mount for a tree it se
   }
 });
 
+test("an older host helper that does not know site-caddy-mounts gives a plain error, not a mystery failure", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const mock = createSiteRunMock();
+  const run: SiteRunFn = (command, args) =>
+    args.includes("site-caddy-mounts")
+      ? Promise.resolve(fail("tp-host: refusing verb site-caddy-mounts"))
+      : mock.run(command, args);
+  const { runPlaybook } = capturePlaybooks();
+  try {
+    await assertRejects(
+      () =>
+        applySites(
+          layout,
+          "envoldhelper",
+          [managedCaddySite],
+          {
+            run: withGroupMembership(run, {
+              tpcaddysite: ["tpcaddysite", RELEASE_GROUP],
+            }),
+            runPlaybook,
+            managedDirectoryBindings: managedBindingsFor("static"),
+          },
+        ),
+      Error,
+      "finish the update on this host",
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
 test("a plain Caddy site only reloads", async () => {
   const { layout, cleanup } = await makeTestLayout();
   const mock = createSiteRunMock();

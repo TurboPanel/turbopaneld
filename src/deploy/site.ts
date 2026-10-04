@@ -3287,9 +3287,14 @@ function siteCaddyMountDirs(
 async function siteCaddyUnmounted(dirs: readonly string[]): Promise<string[]> {
   if (dirs.length === 0) return [];
   const result = await run("sudo", hostSudoArgs(["-n", "site-caddy-mounts"]));
-  const mounted = new Set(
-    result.success ? result.stdout.split("\n").filter((l) => l !== "") : [],
-  );
+  if (!result.success) {
+    throw new Error(
+      `cannot read which web roots the site Caddy has mounted (${
+        result.stderr || "tp-host site-caddy-mounts failed"
+      }). The host helper is older than this daemon: finish the update on this host (the update installs the matching helper), then deploy again.`,
+    );
+  }
+  const mounted = new Set(result.stdout.split("\n").filter((l) => l !== ""));
   return dirs.filter((dir) => !mounted.has(dir));
 }
 
