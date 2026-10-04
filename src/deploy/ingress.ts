@@ -37,6 +37,7 @@ import {
   LABEL_RAW_PORT,
   LABEL_ROLE,
   LABEL_ROLE_INGRESS,
+  LABEL_ROUTED,
   LABEL_SERVICE_ID,
   LABEL_SYSTEM_COMPONENT,
 } from "./labels.ts";
@@ -549,6 +550,7 @@ export function traefikCompose(
   proxyTrustedIps: readonly string[],
   identity?: SystemComponentDescriptor,
   docker: SharedTraefikDocker = VIA_SOCKET_PROXY,
+  requireRoutedLabel = true,
 ): string {
   assertSafeComposeProjectName(ingressNetwork);
   const trusted = proxyProtocolTrustedIps(proxyTrustedIps);
@@ -592,6 +594,18 @@ export function traefikCompose(
     `      - --providers.docker.endpoint=${dockerEndpoint(docker.source)}`,
     "      - --providers.docker.exposedbydefault=false",
     `      - --providers.docker.network=${ingressNetwork}`,
+    // Only containers the daemon stamped as routed (a reserved label) are read.
+    // Left off while a running HTTP container still predates the label (see
+    // `legacyHttpContainersPresent`), so no site goes dark mid-transition.
+    ...(requireRoutedLabel
+      ? [
+        `      - ${
+          quoteYamlScalar(
+            `--providers.docker.constraints=Label(\`${LABEL_ROUTED}\`,\`true\`)`,
+          )
+        }`,
+      ]
+      : []),
     `      - --entrypoints.web.address=:${TRAEFIK_HTTP_PORT}`,
     `      - --entrypoints.web.proxyProtocol.trustedIPs=${trusted}`,
     `      - --entrypoints.websecure.address=:${TRAEFIK_HTTPS_PORT}`,
@@ -1082,6 +1096,56 @@ async function loadHostingIngressDescriptor(
   }
 }
 
+/**
+ * True when a running container still routes HTTP through the shared Traefik
+ * without the daemon's routed label (it was deployed before the label existed).
+ * Such a container only gets the label when its environment is redeployed, so
+ * the shared Traefik keeps reading every labelled container (no provider
+ * constraint) until none is left; the next render after that turns the
+ * constraint on. Authored `traefik.*` labels are refused at deploy either way.
+ * A Docker error counts as "present": availability wins over the constraint.
+ */
+export async function legacyHttpContainersPresent(
+  run: RunDockerFn,
+): Promise<boolean> {
+  // `-a`: a stopped container comes back unrouted when its site is started.
+  const ps = await run([
+    "ps",
+    "-a",
+    "-q",
+    "--filter",
+    "label=traefik.enable=true",
+  ]);
+  if (!ps.success) return true;
+  const ids = ps.stdout.split("\n").map((l) => l.trim()).filter(Boolean);
+  if (ids.length === 0) return false;
+  const inspect = await run([
+    "inspect",
+    "--format",
+    "{{json .Config.Labels}}",
+    ...ids,
+  ]);
+  if (!inspect.success) return true;
+  return inspect.stdout.split("\n").some((line) => {
+    const labels = parseLabelsLine(line);
+    if (labels === undefined || labels[LABEL_ROUTED] === "true") return false;
+    return Object.keys(labels).some((k) => k.startsWith("traefik.http."));
+  });
+}
+
+function parseLabelsLine(line: string): Record<string, string> | undefined {
+  const text = line.trim();
+  if (text === "" || text === "null") return undefined;
+  try {
+    const parsed: unknown = JSON.parse(text);
+    return typeof parsed === "object" && parsed !== null
+      ? parsed as Record<string, string>
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** `compose up` the shared project from `yaml` (applied only on success). */
 function upSharedTraefik(
   layout: LayoutPaths,
@@ -1140,6 +1204,7 @@ async function ensureSharedSocketProxy(
       await ingressNetworkGateways(ingressNetwork, run),
       descriptor,
       docker,
+      !(await legacyHttpContainersPresent(run)),
     ),
     run,
   );
@@ -1217,7 +1282,13 @@ export async function ensureHostingIngress(
   );
   await upSharedTraefik(
     layout,
-    traefikCompose(ingressNetwork, gateways, descriptor, docker),
+    traefikCompose(
+      ingressNetwork,
+      gateways,
+      descriptor,
+      docker,
+      !(await legacyHttpContainersPresent(run)),
+    ),
     run,
   );
 

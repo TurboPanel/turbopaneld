@@ -20,6 +20,14 @@ export const LABEL_SERVICE_ID = "com.turbopanel.service";
 /** Marks a container that publishes raw tcp/udp ports (per-service Traefik boundary). */
 export const LABEL_RAW_PORT = "com.turbopanel.raw-port";
 
+/**
+ * Marks a container the platform routes through the shared Traefik. Only the
+ * daemon stamps it (the `com.turbopanel.system.` namespace is reserved), and the
+ * shared Traefik's provider constraint requires it, so a `traefik.*` label a
+ * site owner wrote can never route traffic by itself.
+ */
+export const LABEL_ROUTED = "com.turbopanel.system.routed";
+
 /** Project UUID stamped on tenant app containers. */
 export const LABEL_PROJECT = "com.turbopanel.project";
 
