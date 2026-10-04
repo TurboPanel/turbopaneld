@@ -105,8 +105,9 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    (the storage UUID). Optional `chown` when a
    principal is linked. The instance owns Docker volume naming. Path-provider
    directory/file entries arrive with `sourcePath` — principal-owned defaults
-   are `/srv/users/<username>/volumes/<storageId>` (explicit operator paths
-   still win). Never write under `/var/lib/docker/volumes`.
+   are `/srv/users/<username>/volumes/<storageId>`; a `sourcePath` outside the
+   assigned site owner's `volumes/` directory (or with no site owner) is refused
+   before anything is created, re-owned or mounted (`assertSourcePathConfined`). Never write under `/var/lib/docker/volumes`.
 6. Decrypt `variableMaterial[]` via `POST /api/daemon/v1/secrets/decrypt` and
    write Compose standalone secret files under
    `<runDir>/deployments/<projectId>/<environmentId>/secrets/` (`secret-runtime.ts`,
