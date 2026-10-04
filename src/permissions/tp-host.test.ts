@@ -25,6 +25,9 @@ import {
   principalSliceContent,
 } from "../deploy/native/unit.ts";
 import { caddyUnit } from "../deploy/ingress.ts";
+import { phpFpmPoolConfig } from "../deploy/site.ts";
+import { allAccessGroups } from "../runtime/registry.ts";
+import { sshdDropInContent } from "../deploy/ssh/sshd-config.ts";
 import { backupServiceContent, backupTimerContent } from "../backups/units.ts";
 import { issuedCertificateFindArgs } from "../deploy/instance-acme-http01.ts";
 import { setgidDirectoriesFindArgs } from "../deploy/site.ts";
@@ -298,6 +301,50 @@ test("the daemon's own unit files pass; privileged or foreign units do not", asy
         service.replace(/^NoNewPrivileges=.*$/m, "NoNewPrivileges="),
       ],
       ["privileged exec prefix", service.replace("ExecStart=", "ExecStart=+")],
+      // systemd takes the prefix characters `@ - : + ! |` stacked in any order,
+      // after any leading whitespace.
+      ...[
+        "-+",
+        "@+",
+        "+-",
+        "!!",
+        "-!",
+        ":+",
+        "@-+",
+        "|",
+        " +",
+        "\t!",
+        "  -@+",
+      ].map((prefix): [string, string] => [
+        `stacked exec prefix ${JSON.stringify(prefix)}`,
+        service.replace("ExecStart=", `ExecStart=${prefix}`),
+      ]),
+      // systemd unquotes and unescapes the first word before it reads the
+      // prefix, so these run as root too.
+      ...[
+        `"+/bin/sh" "-c" "id"`,
+        `-"+/bin/sh" "-c" "id"`,
+        `'+/bin/sh' -c id`,
+        `\\x2b/bin/sh -c id`,
+        `"\\x2b/bin/sh" -c id`,
+        `"!/bin/sh" -c id`,
+        `sh -c id`,
+        `"sh" "-c" "id"`,
+        ``,
+      ].flatMap((exec): Array<[string, string]> => [
+        [
+          `quoted or escaped exec ${JSON.stringify(exec)}`,
+          service.replace(/^ExecStart=.*$/m, `ExecStart=${exec}`),
+        ],
+        [
+          `ExecReload ${JSON.stringify(exec)}`,
+          service.replace("[Service]", `[Service]\nExecReload=${exec}`),
+        ],
+        [
+          `ExecStartPre ${JSON.stringify(exec)}`,
+          service.replace("[Service]", `[Service]\nExecStartPre=${exec}`),
+        ],
+      ]),
       [
         "root pre-start",
         service.replace("[Service]", "[Service]\nExecStartPre=!/bin/sh -c id"),
@@ -3267,3 +3314,475 @@ async function stageContent(host: Host, content: string): Promise<string> {
   await Deno.writeTextFile(staged, content);
   return staged;
 }
+
+const WG_KEY = `${"B".repeat(43)}=`;
+const WG_CONF = [
+  "[Interface]",
+  `PrivateKey = ${WG_KEY}`,
+  "Address = 10.77.0.1/24",
+  "ListenPort = 51820",
+  "",
+  "[Peer]",
+  `PublicKey = ${WG_KEY}`,
+  "AllowedIPs = 10.77.0.2/32, fd00::2/128",
+  "Endpoint = node-2.example.net:51820",
+  `PresharedKey = ${WG_KEY}`,
+  "PersistentKeepalive = 25",
+  "",
+].join("\n");
+
+async function stage(host: Host, content: string): Promise<string> {
+  const staged = host.path("tmp/content");
+  await Deno.writeTextFile(staged, content);
+  return staged;
+}
+
+test("the WireGuard config: only the keys the daemon renders, never a hook", async () => {
+  await withHost(async (host) => {
+    await Deno.mkdir(host.path("etc/wireguard"), { recursive: true });
+    const dest = host.path("etc/wireguard/tp0.conf");
+    const install = (staged: string) =>
+      host.run([
+        "install",
+        "-m",
+        "0600",
+        "-o",
+        "root",
+        "-g",
+        "root",
+        staged,
+        dest,
+      ]);
+    const ok = await install(await stage(host, WG_CONF));
+    assertEquals(ok.code, 0, ok.stderr);
+    const cp = await host.run(["cp", await stage(host, WG_CONF), dest]);
+    assertEquals(cp.code, 0, cp.stderr);
+
+    const hostile = [
+      "PostUp = /var/lib/turbopanel/spool/x",
+      "PreUp = /x",
+      "PostDown = /x",
+      "PreDown = /x",
+      "SaveConfig = true",
+      "postup = /x",
+      "PostUp=/x",
+      "Table = off",
+      "DNS = 1.1.1.1",
+      "MTU = 1380",
+      "FwMark = 1",
+      "PostUp\t= /x",
+      "PostUp  = /x",
+      " PostUp = /x",
+      `PrivateKey = ${WG_KEY};`,
+      "Address = 10.0.0.1/24; id",
+      "Address = 10.0.0.1/24,",
+      "ListenPort = 51820 ",
+      "ListenPort = 5182000",
+    ];
+    for (const line of hostile) {
+      const conf = WG_CONF.replace("ListenPort = 51820", line);
+      await refused(host, [
+        "install",
+        "-m",
+        "0600",
+        "-o",
+        "root",
+        "-g",
+        "root",
+        await stage(host, conf),
+        dest,
+      ]);
+      await refused(host, ["cp", await stage(host, conf), dest]);
+      // The same line under [Peer] is no better.
+      await refused(host, [
+        "install",
+        "-m",
+        "0600",
+        "-o",
+        "root",
+        "-g",
+        "root",
+        await stage(host, `${WG_CONF}${line}\n`),
+        dest,
+      ]);
+    }
+    for (
+      const conf of [
+        "PostUp = /x\n[Interface]\n",
+        `${WG_CONF}[Peer]\nEndpoint = a:1\nPostUp = /x\n`,
+        WG_CONF.replace("[Peer]", "[Peer]\r"),
+        WG_CONF.replace("PostUp", "x") + "\0PostUp = /x\n",
+        WG_CONF.replace("[Interface]", "[Interface]\nPost\0Up = /x"),
+        WG_CONF.replace(
+          "Endpoint = node-2.example.net:51820",
+          "Endpoint = $(id):1",
+        ),
+        WG_CONF.replace("[Peer]", "[Script]"),
+        WG_CONF.replace(
+          "AllowedIPs = 10.77.0.2/32, fd00::2/128",
+          "AllowedIPs = ",
+        ),
+        `${WG_CONF}# x\rPostUp = /x\n`,
+        `${WG_CONF}# x\0PostUp = /x\n`,
+      ]
+    ) {
+      await refused(host, [
+        "install",
+        "-m",
+        "0600",
+        "-o",
+        "root",
+        "-g",
+        "root",
+        await stage(host, conf),
+        dest,
+      ]);
+    }
+  });
+});
+
+test("the sysctl drop-in: only the forwarding switch, through install and tee", async () => {
+  await withHost(async (host) => {
+    const dest = host.path("etc/sysctl.d/99-turbopanel-fabric.conf");
+    for (
+      const content of [
+        "net.ipv4.ip_forward=1\n",
+        "# x\nnet.ipv4.ip_forward = 1\n",
+      ]
+    ) {
+      const t = await host.run(["tee", dest], content);
+      assertEquals(t.code, 0, t.stderr);
+      const i = await host.run([
+        "install",
+        "-m",
+        "0644",
+        await stage(host, content),
+        dest,
+      ]);
+      assertEquals(i.code, 0, i.stderr);
+    }
+    for (
+      const content of [
+        "kernel.core_pattern=|/var/lib/turbopanel/spool/x\n",
+        "kernel.core_pattern = |/x\n",
+        "kernel.modprobe=/x\n",
+        "kernel.uevent_helper=/x\n",
+        "net.ipv4.ip_forward=1\nkernel.core_pattern=|/x\n",
+        "net.ipv4.ip_forward=0\n",
+        "net.ipv4.ip_forward=1 \n",
+        "-kernel.modprobe=/x\n",
+        "; x\nkernel.modprobe=/x\n",
+        "net.ipv4.ip_forward=1\0\nkernel.modprobe=/x\n",
+        // systemd-sysctl ends a line at a carriage return too.
+        "# x\rkernel.core_pattern=|/var/lib/turbopanel/spool/x\n",
+        "net.ipv4.ip_forward=1\rkernel.modprobe=/x\n",
+        "; x\0kernel.core_pattern=|/x\n",
+      ]
+    ) {
+      await refused(host, ["tee", dest], content);
+      await refused(host, [
+        "install",
+        "-m",
+        "0644",
+        await stage(host, content),
+        dest,
+      ]);
+    }
+  });
+});
+
+test("the sshd drop-in: only the renderer's Match blocks, never a global or root-capable directive", async () => {
+  await withHost(async (host) => {
+    const dest = host.path("etc/ssh/sshd_config.d/60-turbopanel.conf");
+    const groups = {
+      sftpGroup: "tpsftp",
+      shellGroup: "tpshell",
+      passwordGroup: "tppasswd",
+      principalGroup: "tpprincipal",
+      authorizedKeysDir: host.path("etc/ssh/turbopanel/authorized_keys"),
+    };
+    for (
+      const content of [
+        sshdDropInContent(groups),
+        sshdDropInContent({
+          ...groups,
+          sftpChrootRoot: host.path("srv/users"),
+        }),
+      ]
+    ) {
+      const ok = await host.run([
+        "install",
+        "-m",
+        "0644",
+        "-o",
+        "root",
+        "-g",
+        "root",
+        await stage(host, content),
+        dest,
+      ]);
+      assertEquals(ok.code, 0, ok.stderr);
+    }
+    // A drop-in installed as the rollback copy gets the same check.
+    await refused(host, [
+      "install",
+      "-m",
+      "0644",
+      await stage(host, "PermitRootLogin yes\n"),
+      `${dest}.tpprev`,
+    ]);
+    const good = sshdDropInContent(groups);
+    const keys = host.path("etc/ssh/turbopanel/authorized_keys");
+    const hostile = [
+      "PermitRootLogin yes\n",
+      `PermitRootLogin yes\nAuthorizedKeysFile ${keys}/%u\n`,
+      `AuthorizedKeysFile ${keys}/%u\n`,
+      `Match all\nPermitRootLogin yes\n`,
+      `Match User root\n  PermitRootLogin yes\n`,
+      `Match Group root\n  PubkeyAuthentication yes\n  AuthorizedKeysFile ${keys}/%u\n`,
+      `Match Group tpsftp\n  PermitRootLogin yes\n`,
+      `Match Group tpsftp\n  AuthorizedKeysCommand /usr/local/bin/x\n`,
+      `Match Group tpsftp\n  AuthorizedKeysFile /etc/ssh/other/%u\n`,
+      `Match Group tpsftp\n  ForceCommand /bin/sh\n`,
+      `Match Group tpsftp\n  ChrootDirectory /\n`,
+      `Match Group tpsftp\n  AllowTcpForwarding yes\n`,
+      `Match Group tpsftp,root\n  PubkeyAuthentication yes\n`,
+      `Match Group tpsftp\n  PubkeyAuthentication yes # x\n`,
+      `Match Group tpsftp\n  PubkeyAuthentication yes\r\n`,
+      `Match Group tpsftp\n  Include /tmp/x\n`,
+      `Match Group tpsftp\n\tPubkeyAuthentication yes\n`,
+      `Match Group tpsftp\n  PubkeyAuthentication yes\0\n  PermitRootLogin yes\n`,
+      `${good}PermitRootLogin yes\n`,
+      `${good}Include /tmp/x\n`,
+      // A comment hides what follows a carriage return from this check only.
+      `${good}# x\rPermitRootLogin yes\n`,
+      `${good}# x\0PermitRootLogin yes\n`,
+      // A block left open would swallow the host config included after it.
+      "Match Group tpsftp\n  PubkeyAuthentication yes\n",
+      good.replace(/Match all\n$/, ""),
+      `${good}Match Group tpsftp\n  PubkeyAuthentication yes\n`,
+    ];
+    for (const content of hostile) {
+      await refused(host, [
+        "install",
+        "-m",
+        "0644",
+        "-o",
+        "root",
+        "-g",
+        "root",
+        await stage(host, content),
+        dest,
+      ]);
+    }
+  });
+});
+
+test("the sshd drop-in's allowed groups equal the registry's access groups", async () => {
+  const script = await Deno.readTextFile(SCRIPT);
+  const found = /^SSHD_MATCH_GROUPS="([^"]*)"$/m.exec(script)?.[1] ?? "";
+  assertEquals(
+    found.split(" ").sort(),
+    [...allAccessGroups()].sort(),
+  );
+});
+
+test("units: a carriage return or NUL never hides a directive from the check", async () => {
+  await withHost(async (host) => {
+    const layout = resolveLayout({
+      TURBOPANEL_HOME: host.path("opt/turbopanel"),
+      TURBOPANEL_RUNTIMES_DIR: host.path("opt/turbopanel/vendor"),
+      TURBOPANEL_CONFIG_DIR: host.path("etc/turbopanel"),
+      TURBOPANEL_STATE_DIR: host.path("var/lib/turbopanel"),
+      TURBOPANEL_PRINCIPAL_HOME_ROOT: host.path("srv/users"),
+    }, { forceMode: "production" });
+    const service = cronServiceContent({
+      layout,
+      environmentId: "env1",
+      composeServiceName: "web",
+      job: {
+        name: "nightly",
+        schedule: "*-*-* 03:00:00",
+        command: ["/usr/bin/php8.4", "artisan", "schedule:run"],
+      } as unknown as EnvironmentDeployCronJob,
+      username: "alice",
+      workingDirectory: host.path("srv/users/alice/sites/web/current"),
+    });
+    const name = "turbopanel-cron-env1-web-nightly.service";
+    const dest = host.path(`etc/systemd/system/${name}`);
+    const ok = await host.run([
+      "install",
+      "-m",
+      "0644",
+      "-o",
+      "root",
+      "-g",
+      "root",
+      await stage(host, service),
+      dest,
+    ]);
+    assertEquals(ok.code, 0, ok.stderr);
+    for (
+      const hostile of [
+        service.replace("[Service]", "[Service]\n# x\rUser=root"),
+        service.replace("[Service]", "[Service]\n; x\rExecStartPre=+/bin/sh"),
+        service.replace(
+          "Description=",
+          "Description=x\rExecStart=+/bin/sh\rUser=root\rignored=",
+        ),
+        service.replace("[Service]", "[Service]\n# x\0User=root"),
+        service.replace("[Service]", "[Service]\r\nUser=root"),
+      ]
+    ) {
+      assertEquals(hostile === service, false);
+      await refused(host, [
+        "install",
+        "-m",
+        "0644",
+        "-o",
+        "root",
+        "-g",
+        "root",
+        await stage(host, hostile),
+        dest,
+      ]);
+    }
+    // The slice, timer and hosting classes go through the same gate.
+    await refused(host, [
+      "install",
+      "-m",
+      "0644",
+      "-o",
+      "root",
+      "-g",
+      "root",
+      await stage(host, "[Slice]\n# x\rCPUQuota=1\n"),
+      host.path("etc/systemd/system/turbopanel-alice.slice"),
+    ]);
+  });
+});
+
+test("shared php-fpm master pools: only what the daemon renders, never a root worker or the master's own section", async () => {
+  await withHost(async (host) => {
+    await Deno.mkdir(host.path("etc/turbopanel/php/8.4/pools"), {
+      recursive: true,
+    });
+    const dest = host.path("etc/turbopanel/php/8.4/pools/tp-env1-phpapp.conf");
+    const base = {
+      composeServiceName: "phpapp",
+      engine: "nginx" as const,
+      root: "public",
+      listenPort: 18081,
+    };
+    const rendered = [
+      phpFpmPoolConfig(
+        "env1",
+        { ...base, php: { version: "8.4" } },
+        "/srv/root",
+        "/run/turbopanel/php/8.4/tp-env1-phpapp.sock",
+      ),
+      phpFpmPoolConfig(
+        "env1",
+        {
+          ...base,
+          php: {
+            version: "8.4",
+            pool: { pm: "static", "pm.max_children": "8" },
+            settings: { memory_limit: "256M" },
+          },
+          principal: {
+            principalId: "00000000-0000-4000-8000-000000000099",
+            username: "site_user",
+          },
+        },
+        "/var/lib/turbopanel/sites/env1/phpapp/public",
+        "/run/turbopanel/php/tp-env1-phpapp.sock",
+        {
+          openBasedir: ["/var/lib/turbopanel/sites/env1/phpapp/public", "/tmp"],
+          releaseSymlinkSwap: true,
+        },
+      ),
+    ];
+    for (const content of rendered) {
+      for (const target of [dest, `${dest}.candidate`]) {
+        const ok = await host.run([
+          "install",
+          "-m",
+          "0640",
+          "-o",
+          "root",
+          "-g",
+          "tpnginx",
+          await stage(host, content),
+          target,
+        ]);
+        assertEquals(ok.code, 0, ok.stderr);
+      }
+      const t = await host.run(["tee", dest], content);
+      assertEquals(t.code, 0, t.stderr);
+    }
+    const good = rendered[0];
+    const hostile = [
+      good.replace("user = tpnginx", "user = root"),
+      good.replace("group = tpnginx", "group = root"),
+      good.replace("[tp-env1-phpapp]", "[global]"),
+      good.replace("[tp-env1-phpapp]", "[GLOBAL]"),
+      `${good}[global]\nerror_log = /etc/cron.d/x\n`,
+      `${good}include = /var/lib/turbopanel/spool/x.conf\n`,
+      `${good}prefix = /\n`,
+      `${good}chroot = /\n`,
+      `${good}php_admin_value[extension] = /var/lib/turbopanel/spool/x.so\n`,
+      `${good}php_admin_value[zend_extension] = /x.so\n`,
+      `${good}php_admin_value[EXTENSION_DIR] = /x\n`,
+      `${good}security.limit_extensions =\n`,
+      `${good}; x\ruser = root\n`,
+      `${good}; x\0user = root\n`,
+      "user = root\n",
+      good.replace("listen.mode = 0660", "listen.mode = 0666 ; x"),
+      good.replace("pm = ondemand", "pm = ondemand\npm.status_path = /x"),
+    ];
+    for (const content of hostile) {
+      assertEquals(content === good, false);
+      await refused(host, [
+        "install",
+        "-m",
+        "0640",
+        "-o",
+        "root",
+        "-g",
+        "tpnginx",
+        await stage(host, content),
+        dest,
+      ]);
+      await refused(host, ["tee", dest], content);
+    }
+  });
+});
+
+test("a directory renamed over a php-fpm series or pools directory is refused", async () => {
+  await withHost(async (host) => {
+    const php = host.path("etc/turbopanel/php");
+    await Deno.mkdir(`${php}/8.4/pools`, { recursive: true });
+    await Deno.mkdir(`${php}/8.4/evil`, { recursive: true });
+    await Deno.mkdir(`${php}/evil`, { recursive: true });
+    await refused(host, [
+      "mv",
+      "-T",
+      "-f",
+      `${php}/8.4/evil`,
+      `${php}/8.4/pools`,
+    ]);
+    await refused(host, ["mv", "-T", "-f", `${php}/evil`, `${php}/8.4`]);
+    await refused(host, ["mv", "-f", `${php}/evil`, `${php}/8.4`]);
+    // The daemon's own candidate-to-live rename inside pools/ still works.
+    await Deno.writeTextFile(`${php}/8.4/pools/a.conf.candidate`, "x\n");
+    const ok = await host.run([
+      "mv",
+      "-f",
+      "--",
+      `${php}/8.4/pools/a.conf.candidate`,
+      `${php}/8.4/pools/a.conf`,
+    ]);
+    assertEquals(ok.code, 0, ok.stderr);
+  });
+});
