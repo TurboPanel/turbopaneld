@@ -2166,17 +2166,17 @@ async function guardHostingCaddySitesLocked(
   }
 }
 
-/** Put the previous snippet back (or drop a new one) after a failed reload. */
-async function restoreHostingSite(
+/** Put the previous snippet back after a failed reload. */
+async function restorePreviousHostingSite(
   live: string,
   previous: string,
-  hadPrevious: boolean,
 ): Promise<void> {
-  if (hadPrevious) {
-    await Deno.rename(previous, live);
-  } else {
-    await Deno.remove(live).catch(() => {});
-  }
+  await Deno.rename(previous, live);
+}
+
+/** Drop a brand-new snippet after a failed reload. */
+async function dropNewHostingSite(live: string): Promise<void> {
+  await Deno.remove(live).catch(() => {});
 }
 
 /**
@@ -2218,7 +2218,9 @@ async function activateHostingSite(
     await Deno.remove(previous).catch(() => {});
     return;
   }
-  await restoreHostingSite(live, previous, hadPrevious);
+  await (hadPrevious
+    ? restorePreviousHostingSite(live, previous)
+    : dropNewHostingSite(live));
   const again = await run("sudo", reloadArgs);
   if (!again.success) {
     logWarn(
