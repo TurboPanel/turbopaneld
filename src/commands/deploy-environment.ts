@@ -88,6 +88,7 @@ import {
 } from "../deploy/run-deploy-hooks.ts";
 import {
   applySites,
+  ensureSitePhpRuntimes,
   resolveSiteDocumentRoot,
   resolveSitePhpSeries,
   type SiteManagedDirectory,
@@ -345,6 +346,8 @@ export type EnvironmentDeployDeps = {
    * or a real `ansible-playbook` run.
    */
   nativeAppIo?: Omit<ApplyNativeAppsOpts, "bindings">;
+  /** Test seam — the Ansible runner for the pre-principal PHP runtime step. */
+  siteIo?: Parameters<typeof ensureSitePhpRuntimes>[1];
 };
 
 /**
@@ -2013,6 +2016,8 @@ export async function handleEnvironmentDeploy(
     parsedPayload.nativeAppServices ?? [],
     deps?.nativeAppIo,
   );
+  // Same for PHP: the site engine playbooks create the `tpphp<series>` groups.
+  await ensureSitePhpRuntimes(parsedPayload.sites ?? [], deps?.siteIo);
 
   const principalMaterial = parsedPayload.principalMaterial ?? [];
   await ensureDeployPrincipals(
