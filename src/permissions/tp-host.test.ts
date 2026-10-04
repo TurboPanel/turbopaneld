@@ -438,6 +438,114 @@ async function refusedUnit(host: Host, name: string, content: string) {
   ]);
 }
 
+test("a native app unit may load its own variables file and no other", async () => {
+  await withHost(async (host) => {
+    const layout = resolveLayout({
+      TURBOPANEL_HOME: host.path("opt/turbopanel"),
+      TURBOPANEL_RUNTIMES_DIR: host.path("opt/turbopanel/vendor"),
+      TURBOPANEL_CONFIG_DIR: host.path("etc/turbopanel"),
+      TURBOPANEL_STATE_DIR: host.path("var/lib/turbopanel"),
+      TURBOPANEL_PRINCIPAL_HOME_ROOT: host.path("srv/users"),
+    }, { forceMode: "production" });
+    const unitFor = (serviceId: string) =>
+      nativeAppUnitContent({
+        layout,
+        username: "alice",
+        environmentId: "env1",
+        environmentFile: true,
+        app: {
+          serviceId,
+          composeServiceName: "web",
+          listenPort: 3000,
+        } as unknown as EnvironmentDeployNativeAppService,
+      });
+    const name = "turbopanel-app-svc1.service";
+    const unit = unitFor("svc1");
+    const own = `EnvironmentFile=${
+      host.path("etc/turbopanel/node-apps/envs/svc1.env")
+    }`;
+    assertStringIncludes(unit, own);
+    const result = await installUnit(host, name, unit);
+    assertEquals(result.code, 0, result.stderr);
+
+    const hostile: Array<[string, string]> = [
+      // Another service's file: one tenant's unit would load another's secrets.
+      ["another service's file", unitFor("svc2")],
+      [
+        "a path outside the node-apps tree",
+        unit.replace(own, "EnvironmentFile=/etc/turbopanel/daemon.env"),
+      ],
+      [
+        "the daemon's own environment file",
+        unit.replace(
+          own,
+          `EnvironmentFile=${host.path("etc/turbopanel/daemon.env")}`,
+        ),
+      ],
+      ["the optional (-) spelling", unit.replace(own, own.replace("=", "=-"))],
+      [
+        "a path that climbs out of the directory",
+        unit.replace(
+          own,
+          own.replace("envs/svc1.env", "envs/../../daemon.env"),
+        ),
+      ],
+      [
+        "a trailing-space spelling",
+        unit.replace(own, `${own} `),
+      ],
+      [
+        "a second EnvironmentFile",
+        unit.replace(own, `${own}\n${own}`),
+      ],
+      [
+        "an indented directive",
+        unit.replace(own, ` ${own}`),
+      ],
+    ];
+    for (const [label, content] of hostile) {
+      await Deno.writeTextFile(host.path("tmp/bad"), content);
+      try {
+        await refused(host, [
+          "install",
+          "-m",
+          "0644",
+          "-o",
+          "root",
+          "-g",
+          "root",
+          host.path("tmp/bad"),
+          host.path(`etc/systemd/system/${name}`),
+        ]);
+      } catch (err) {
+        throw new Error(
+          `${label}: ${err instanceof Error ? err.message : err}`,
+        );
+      }
+    }
+
+    // Only app units: a cron unit (or any other tenant unit) gains nothing.
+    const cronName = "turbopanel-cron-env1-web-nightly.service";
+    const cron = cronServiceContent({
+      layout,
+      environmentId: "env1",
+      composeServiceName: "web",
+      job: {
+        name: "nightly",
+        schedule: "*-*-* 03:00:00",
+        command: ["/usr/bin/true"],
+      } as unknown as EnvironmentDeployCronJob,
+      username: "alice",
+      workingDirectory: host.path("srv/users/alice/sites/web/current"),
+    });
+    await refusedUnit(
+      host,
+      cronName,
+      cron.replace("[Service]", `[Service]\n${own}`),
+    );
+  });
+});
+
 test("the hosting Caddy unit passes only as tpedge with CAP_NET_BIND_SERVICE alone", async () => {
   await withHost(async (host) => {
     const layout = resolveLayout({

@@ -218,6 +218,30 @@ export function nativeAppConfigDir(
   return join(layout.configDir, NATIVE_APP_CONFIG_DIRNAME);
 }
 
+/**
+ * Directory for the apps' private environment files. It sits inside the
+ * daemon-owned `node-apps` leaf (so the daemon, which is not root, can write
+ * it) and is `0700`: systemd reads these files as root, and nothing else —
+ * least of all a tenant's own account — has any business in there.
+ */
+export function nativeAppEnvDir(
+  layout: Pick<LayoutPaths, "configDir">,
+): string {
+  return join(nativeAppConfigDir(layout), "envs");
+}
+
+/**
+ * The environment file one app's unit loads. Keyed on the service id alone —
+ * the same id that names the unit — which is also the only shape the
+ * `tp-host` unit check accepts for `EnvironmentFile=`.
+ */
+export function nativeAppEnvPath(
+  layout: Pick<LayoutPaths, "configDir">,
+  serviceId: string,
+): string {
+  return join(nativeAppEnvDir(layout), `${serviceId}.env`);
+}
+
 export function nativeAppStagedFilePrefix(environmentId: string): string {
   return `tp-${environmentId}-`;
 }
@@ -402,13 +426,46 @@ export function serviceLabelsLine(
   return `X-TurboPanel-Labels=${JSON.stringify(ordered)}`;
 }
 
+/**
+ * Variable names the unit sets itself.
+ *
+ * systemd applies an `EnvironmentFile=` **over** every `Environment=` line, no
+ * matter which comes first, so a tenant variable of one of these names would
+ * silently replace what the platform decided (the port the proxy dials, the
+ * Node on `PATH`, the writable `HOME`). They are therefore never written to the
+ * app's environment file. Kept next to {@link nativeAppUnitContent} so a new
+ * `Environment=` line and its entry here are changed together; a unit test
+ * fails when they disagree.
+ */
+export const NATIVE_APP_PLATFORM_ENV_NAMES: ReadonlySet<string> = new Set([
+  "PATH",
+  "NODE_ENV",
+  "PORT",
+  "HOST",
+  "HOME",
+  "TMPDIR",
+  "XDG_CACHE_HOME",
+  "COREPACK_HOME",
+  "COREPACK_ENABLE_DOWNLOAD_PROMPT",
+]);
+
 export type NativeAppUnitOpts = {
-  layout: Pick<LayoutPaths, "runtimesDir" | "principalHomeRoot">;
+  layout: Pick<
+    LayoutPaths,
+    "runtimesDir" | "principalHomeRoot" | "configDir"
+  >;
   app: EnvironmentDeployNativeAppService;
   username: string;
   environmentId: string;
   /** Resolved from `sourceMaterial[].build.startCommand`, when the author set one. */
   startCommand?: string;
+  /**
+   * The app has variables, so the unit loads {@link nativeAppEnvPath}. Left
+   * false, no `EnvironmentFile=` line is written and the unit text is
+   * byte-identical to one rendered before variables existed — so adding this
+   * feature restarts no app that has none.
+   */
+  environmentFile?: boolean;
 };
 
 /**
@@ -486,6 +543,13 @@ export function nativeAppUnitContent(opts: NativeAppUnitOpts): string {
     `Environment=XDG_CACHE_HOME=${sharedDir}/.cache`,
     `Environment=COREPACK_HOME=${sharedDir}/.corepack`,
     `Environment=COREPACK_ENABLE_DOWNLOAD_PROMPT=0`,
+    // The author's variables. Read by systemd (as root) from a `0600` file, so
+    // a secret is never in this world-readable unit or in `systemctl show`.
+    // The file already omits every name set above — see
+    // {@link NATIVE_APP_PLATFORM_ENV_NAMES}.
+    ...(opts.environmentFile === true
+      ? [`EnvironmentFile=${nativeAppEnvPath(opts.layout, app.serviceId)}`]
+      : []),
     `ExecStart=${execStart}`,
     ...restartLines(app.restartPolicy),
     // Hardening. Containerless is not container isolation; this is the set that

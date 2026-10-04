@@ -1043,6 +1043,28 @@ export type EnvironmentDeployNativeAppService = {
    * application it belongs to.
    */
   cron?: EnvironmentDeployCronJob[];
+  /**
+   * Environment variables for the app's process, as the control plane resolved
+   * them (project, environment, service, hosting and server scopes already
+   * merged). A `node` service is removed from the compose document, so this is
+   * the only lane that carries them to the host — see
+   * {@link EnvironmentDeployNativeAppVariable}. Omitted or empty means the
+   * process gets only the platform's own variables.
+   */
+  variables?: EnvironmentDeployNativeAppVariable[];
+};
+
+/**
+ * One environment variable for a native app. Exactly one of `value` (a plain,
+ * non-secret value) or `secretKey` (the `key` of the sealed
+ * `variableMaterial[]` entry for the same compose service) is set, so a secret
+ * never rides this lane in the clear.
+ */
+export type EnvironmentDeployNativeAppVariable = {
+  /** Name the process sees (`[A-Za-z_][A-Za-z0-9_]*`). */
+  name: string;
+  value?: string;
+  secretKey?: string;
 };
 
 /**
@@ -4403,6 +4425,78 @@ function parseNativeAppStartupFile(value: unknown): string | undefined {
   return value;
 }
 
+const NATIVE_APP_VARIABLE_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
+const NATIVE_APP_MAX_VARIABLES = 256;
+const NATIVE_APP_MAX_VARIABLE_VALUE = 65_536;
+
+function parseNativeAppVariable(
+  value: unknown,
+): EnvironmentDeployNativeAppVariable {
+  if (!isRecord(value)) {
+    throw new TypeError("Invalid nativeAppServices variables entry");
+  }
+  if (
+    typeof value.name !== "string" ||
+    !NATIVE_APP_VARIABLE_NAME_RE.test(value.name)
+  ) {
+    throw new TypeError("Invalid nativeAppServices variables name");
+  }
+  const hasValue = value.value !== undefined;
+  const hasSecret = value.secretKey !== undefined;
+  if (hasValue === hasSecret) {
+    throw new TypeError(
+      `nativeAppServices variable ${value.name} needs exactly one of value or secretKey`,
+    );
+  }
+  if (hasValue) {
+    if (
+      typeof value.value !== "string" ||
+      value.value.length > NATIVE_APP_MAX_VARIABLE_VALUE ||
+      value.value.includes("\0")
+    ) {
+      throw new TypeError(
+        `Invalid nativeAppServices variable value for ${value.name}`,
+      );
+    }
+    return { name: value.name, value: value.value };
+  }
+  if (
+    typeof value.secretKey !== "string" || value.secretKey.length === 0 ||
+    value.secretKey.length > 256
+  ) {
+    throw new TypeError(
+      `Invalid nativeAppServices variable secretKey for ${value.name}`,
+    );
+  }
+  return { name: value.name, secretKey: value.secretKey };
+}
+
+/**
+ * Parse `variables`. Names are unique (a repeat would make which value wins a
+ * matter of file order) and the list is bounded, because every entry becomes a
+ * line of a file systemd reads as root.
+ */
+function parseNativeAppVariables(
+  value: unknown,
+): EnvironmentDeployNativeAppVariable[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > NATIVE_APP_MAX_VARIABLES) {
+    throw new TypeError("Invalid nativeAppServices variables");
+  }
+  const seen = new Set<string>();
+  const variables = value.map((entry) => {
+    const variable = parseNativeAppVariable(entry);
+    if (seen.has(variable.name)) {
+      throw new TypeError(
+        `Duplicate nativeAppServices variable ${variable.name}`,
+      );
+    }
+    seen.add(variable.name);
+    return variable;
+  });
+  return variables.length > 0 ? variables : undefined;
+}
+
 function parseNativeAppService(
   value: unknown,
 ): EnvironmentDeployNativeAppService {
@@ -4443,6 +4537,8 @@ function parseNativeAppService(
   if (serviceLabels) app.serviceLabels = serviceLabels;
   const cron = parseCronJobs(value.cron, "nativeAppServices");
   if (cron?.length) app.cron = cron;
+  const variables = parseNativeAppVariables(value.variables);
+  if (variables) app.variables = variables;
   return app;
 }
 

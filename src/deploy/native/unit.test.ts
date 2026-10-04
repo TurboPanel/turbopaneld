@@ -6,7 +6,10 @@ import {
   DEFAULT_START_SCRIPT,
   formatCpuQuota,
   formatMemoryBytes,
+  NATIVE_APP_PLATFORM_ENV_NAMES,
   nativeAppConfigDir,
+  nativeAppEnvDir,
+  nativeAppEnvPath,
   nativeAppNodeBinary,
   nativeAppRuntimeRoot,
   nativeAppStagedFilePrefix,
@@ -406,4 +409,46 @@ test("a native app's HOME and TMPDIR are its tenant dirs, never the sealed home 
     ],
   );
   assertEquals(lines.includes("Environment=HOME=/srv/users/appuser"), false);
+});
+
+test("a unit loads an environment file only when the app has variables", () => {
+  const user = { layout, app, username: "alice", environmentId: "env-1" };
+  const without = nativeAppUnitContent(user);
+  assertEquals(without.includes("EnvironmentFile"), false);
+  // Asking explicitly for no file is the same text as not asking, so shipping
+  // this feature rewrites (and restarts) no app that has no variables.
+  assertEquals(
+    nativeAppUnitContent({ ...user, environmentFile: false }),
+    without,
+  );
+
+  const withFile = nativeAppUnitContent({ ...user, environmentFile: true });
+  assertStringIncludes(
+    withFile,
+    "EnvironmentFile=/etc/turbopanel/node-apps/envs/svc-native-1.env\n",
+  );
+  assertEquals(
+    nativeAppEnvPath(layout, "svc-native-1"),
+    "/etc/turbopanel/node-apps/envs/svc-native-1.env",
+  );
+  assertEquals(nativeAppEnvDir(layout), "/etc/turbopanel/node-apps/envs");
+  // Never an optional (`-`) path: a missing file must fail the unit loudly
+  // rather than start an app without the credentials it was promised.
+  assertEquals(withFile.includes("EnvironmentFile=-"), false);
+});
+
+test("the platform-owned names are exactly the Environment= keys a unit sets", () => {
+  const unit = nativeAppUnitContent({
+    layout,
+    app,
+    username: "alice",
+    environmentId: "env-1",
+    environmentFile: true,
+  });
+  const set = unit.split("\n")
+    .filter((line) => line.startsWith("Environment="))
+    .map((line) => line.slice("Environment=".length).split("=")[0]);
+  // systemd lets EnvironmentFile override Environment=, so every name the unit
+  // sets must be on the list that keeps tenant values out of the file.
+  assertEquals([...set].sort(), [...NATIVE_APP_PLATFORM_ENV_NAMES].sort());
 });

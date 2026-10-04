@@ -875,7 +875,14 @@ tp_unit_ok() {
   # the backup check below, or it is refused.
   _uk_backup=""
   _uk_hosting=""
+  _uk_app=""
   [ "$_uk_name" = "turbopanel-hosting-caddy.service" ] && _uk_hosting=1
+  case "$_uk_name" in
+    turbopanel-app-*.service)
+      _uk_app="${_uk_name#turbopanel-app-}"
+      _uk_app="${_uk_app%.service}"
+      ;;
+  esac
   case "$_uk_name" in
     turbopanel-build-*.service) return 1 ;;
     turbopanel-php-*)
@@ -887,7 +894,7 @@ tp_unit_ok() {
       ;;
     *) ;;
   esac
-  _uk_meta="$(awk -v name="$_uk_name" -v min="$PRINCIPAL_ID_MIN" -v backup="${_uk_backup:+1}" -v hosting="$_uk_hosting" -v hostcap="$HOSTING_CADDY_CAP" '
+  _uk_meta="$(awk -v name="$_uk_name" -v min="$PRINCIPAL_ID_MIN" -v backup="${_uk_backup:+1}" -v hosting="$_uk_hosting" -v app="${_uk_app:+1}" -v hostcap="$HOSTING_CADDY_CAP" '
     function fail(msg) { print "tp-host: unit " name ": " msg > "/dev/stderr"; bad = 1; exit 1 }
     BEGIN {
       split("Description After Before Wants Requires PartOf StartLimitBurst StartLimitIntervalSec", a, " ");
@@ -906,6 +913,9 @@ tp_unit_ok() {
         ok["Service", "Nice"] = 1
         ok["Service", "IOSchedulingClass"] = 1
       }
+      # Only a native app unit may load an environment file (its own
+      # variables); tp_app_envfile_ok pins the one path.
+      if (app == "1") ok["Service", "EnvironmentFile"] = 1
       # Only the hosting Caddy keeps state in a systemd StateDirectory= and
       # its admin socket in a RuntimeDirectory=; tp_hosting_caddy_unit_ok pins
       # each value.
@@ -995,7 +1005,35 @@ tp_unit_ok() {
   [ "$_uk_group" = "${_uk_user}-grp" ] || return 1
   [ "$_uk_slice" = "turbopanel-${_uk_user}.slice" ] || return 1
   [ "$_uk_nnp" = "yes" ] || return 1
+  [ -z "$_uk_app" ] || tp_app_envfile_ok "$_uk_file" "$_uk_app" || return 1
   return 0
+}
+
+# A native app unit's one allowed EnvironmentFile=: its own variables file,
+# <config>/node-apps/envs/<service id>.env, and nothing else. systemd reads the
+# file as root and hands every line to the tenant's process, so a free-form path
+# would let one app's unit load another's variables, or the daemon's own
+# environment file. The path must equal the one derived from the unit's name;
+# no `-` (optional) prefix, no second line, no other spelling. Read from the
+# file the awk pass above already shape-checked (keys start in column one, no
+# continuations), so a matching line is a directive and nothing else.
+tp_app_envfile_ok() {
+  _ae_file="$1"
+  _ae_id="$2"
+  case "$_ae_id" in
+    ''|*[!A-Za-z0-9_-]*) return 1 ;;
+  esac
+  _ae_want="EnvironmentFile=$R_CONFIG/node-apps/envs/$_ae_id.env"
+  _ae_seen=0
+  while IFS= read -r _ae_line || [ -n "$_ae_line" ]; do
+    case "$_ae_line" in
+      EnvironmentFile=*)
+        [ "$_ae_line" = "$_ae_want" ] || return 1
+        _ae_seen=$((_ae_seen + 1))
+        ;;
+    esac
+  done < "$_ae_file"
+  [ "$_ae_seen" -le 1 ]
 }
 
 # The hosting Caddy unit, beyond the account checks in tp_unit_ok: the vendored

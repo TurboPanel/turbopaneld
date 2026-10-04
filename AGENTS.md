@@ -731,6 +731,11 @@ it regresses:
     capability sets, no `+`/`!`/`:` exec prefixes, no line ending in a
     backslash (systemd would join it onto the next line, hiding e.g. `User=`
     from this line-by-line check), a timer may only start its own service;
+    a `turbopanel-app-<id>.service` may carry exactly one `EnvironmentFile=`,
+    equal to `<config>/node-apps/envs/<id>.env` (its own variables file —
+    systemd reads it as root, so no other path, no `-` prefix, no second
+    line; `tp_app_envfile_ok`) and no other unit may carry one except the
+    backup unit below;
     the hosting-Caddy unit must run as `tpedge:tpedge` with
     `NoNewPrivileges=yes`, exactly `CAP_NET_BIND_SERVICE` in both capability
     sets, `StateDirectory=turbopanel-hosting-caddy` and only the

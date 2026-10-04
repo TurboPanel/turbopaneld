@@ -50,7 +50,9 @@ import {
 import type {
   EnvironmentDeployNativeAppService,
   EnvironmentDeployPayload,
+  EnvironmentDeployVariableMaterial,
 } from "../../contracts/commands-contracts.ts";
+import type { DecryptSecretsFn } from "../materialize-tls.ts";
 import { resolveReleasePaths } from "../release/release-layout.ts";
 import type { ReleaseOutputHandler } from "../release/checkout.ts";
 import { swapCurrentSymlink } from "../release/promote.ts";
@@ -68,6 +70,10 @@ import {
   resolveNativeAppNodeVersion,
   SYSTEMD_UNIT_DIR,
 } from "./unit.ts";
+import {
+  materializeNativeAppVariables,
+  removeNativeAppEnvFile,
+} from "./variables-runtime.ts";
 
 const SAFE_ID_RE = /^[A-Za-z0-9_-]+$/;
 
@@ -123,6 +129,12 @@ export type ApplyNativeAppsOpts = {
   sleep?: NativeAppSleepFn;
   /** Test seam: systemd unit directory (defaults to `/etc/systemd/system`). */
   systemdUnitDir?: string;
+  /**
+   * Sealed secrets for `nativeAppServices[].variables[].secretKey`, and the
+   * decrypt call that opens them — the same pair the compose secret files use.
+   */
+  variableMaterial?: readonly EnvironmentDeployVariableMaterial[];
+  decryptSecrets?: DecryptSecretsFn;
   /**
    * Deploy transcript. Native start / health / unit journal ride this the
    * same way fetch and build do — without it, a failed probe is only an
@@ -476,6 +488,7 @@ async function installNativeAppUnit(
     app: EnvironmentDeployNativeAppService;
     binding: NativeAppRelease;
     systemdUnitDir: string;
+    environmentFile: boolean;
   },
 ): Promise<boolean> {
   const { app, binding } = params;
@@ -491,11 +504,47 @@ async function installNativeAppUnit(
       app,
       username: binding.username,
       environmentId: params.environmentId,
+      environmentFile: params.environmentFile,
       ...(binding.startCommand === undefined
         ? {}
         : { startCommand: binding.startCommand }),
     }),
   });
+}
+
+/**
+ * Write (or clear) the app's variables file before its unit is installed, and
+ * tell the transcript what arrived — names and counts only, never values.
+ */
+async function applyNativeAppVariables(
+  io: NativeAppIo,
+  layout: LayoutPaths,
+  app: EnvironmentDeployNativeAppService,
+  opts: Pick<ApplyNativeAppsOpts, "variableMaterial" | "decryptSecrets">,
+): Promise<boolean> {
+  const result = await materializeNativeAppVariables(
+    layout,
+    app,
+    opts.variableMaterial ?? [],
+    opts.decryptSecrets,
+  );
+  if (result.count > 0) {
+    io.onOutput?.(
+      "stdout",
+      `${app.composeServiceName}: ${result.count} environment variable${
+        result.count === 1 ? "" : "s"
+      } written to the app's private environment file`,
+    );
+  }
+  if (result.platformManaged.length > 0) {
+    io.onOutput?.(
+      "stderr",
+      `${app.composeServiceName}: ignored ${
+        result.platformManaged.join(", ")
+      } (set by the platform for every app, so it cannot be overridden)`,
+    );
+  }
+  return result.environmentFile;
 }
 
 /**
@@ -731,11 +780,18 @@ export async function applyNativeAppServices(
       );
       return;
     }
+    const environmentFile = await applyNativeAppVariables(
+      io,
+      layout,
+      app,
+      opts,
+    );
     const unitChanged = await installNativeAppUnit(io, layout, {
       environmentId,
       app,
       binding,
       systemdUnitDir,
+      environmentFile,
     });
     if (unitChanged) filesChanged = true;
     prepared.push({
@@ -886,6 +942,9 @@ export async function removeNativeAppServices(
         `${nativeAppStagedFilePrefix(environmentId)}${serviceId}.service`,
       ),
     );
+    // The variables file goes with the unit: leaving secrets on disk for an
+    // app that no longer exists would keep them past their purpose.
+    await removeNativeAppEnvFile(layout, serviceId);
     removed += 1;
   });
 

@@ -1268,6 +1268,7 @@ async function applyDeployNativeApps(
   apps: readonly EnvironmentDeployNativeAppService[],
   applied: readonly AppliedRelease[],
   logSink: CommandOutputSink,
+  decryptSecrets: DecryptSecretsFn | undefined,
   io?: Omit<ApplyNativeAppsOpts, "bindings">,
 ): Promise<void> {
   if (apps.length === 0) return;
@@ -1275,6 +1276,8 @@ async function applyDeployNativeApps(
     applied.map((entry) => [entry.composeServiceName, entry.previousReleaseId]),
   );
   await applyNativeAppServices(layout, parsedPayload.environmentId, apps, {
+    variableMaterial: parsedPayload.variableMaterial ?? [],
+    decryptSecrets,
     ...io,
     onOutput: io?.onOutput ??
       ((stream, line) => logSink.onLine(stream, line)),
@@ -2154,6 +2157,7 @@ export async function handleEnvironmentDeploy(
     nativeAppServices,
     appliedReleases,
     runtime.logSink,
+    runtime.decryptSecrets,
     deps?.nativeAppIo,
   );
   runtime.logSink.setPhase(COMMAND_LOG_PHASES.PREPARE);

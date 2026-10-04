@@ -153,6 +153,42 @@ directive name is not, and `JSON.stringify` escapes every control character, so
 a label value containing a newline cannot break out into a directive of its
 own. Keys are sorted so the rendered text is a function of the label set alone.
 
+**Variables.** `nativeAppServices[].variables[]` carries the app's environment
+variables, resolved by the control plane (all scopes merged, secrets already
+filtered to the ones the author referenced): `{ name, value }` for a plain
+value, `{ name, secretKey }` for a secret, where `secretKey` points at the
+daemon-sealed `variableMaterial[]` entry for the same compose service. The
+`node` service is not in the compose document the host runs, so this is the only
+lane that reaches the process. `variables-runtime.ts` decrypts the referenced
+secrets (the same `decryptSecrets` the compose secret files use, so transcript
+redaction applies), then writes **one** `0600` file per app,
+`<configDir>/node-apps/envs/<serviceId>.env` (directory `0700`, inside the
+daemon-owned `node-apps` leaf, so no root is needed), via temp file + rename.
+The unit loads it with `EnvironmentFile=<that path>` — and only when the app
+has variables, so a unit without them is byte-identical to before. Rules that
+are not obvious:
+
+- **A file, never `Environment=` lines.** Unit text is `0644`, shows in
+  `systemctl show`, and has `%` expanded; the file is root-read and private.
+- **`EnvironmentFile=` overrides `Environment=` whatever the line order**, so
+  the platform's own names (`NATIVE_APP_PLATFORM_ENV_NAMES` in `unit.ts`:
+  `PATH`, `NODE_ENV`, `PORT`, `HOST`, `HOME`, `TMPDIR`, `XDG_CACHE_HOME`,
+  `COREPACK_*`) are dropped from the file, and the transcript says which. A
+  unit test keeps that set equal to the `Environment=` keys the unit renders.
+- **Quoting.** Values are single-quoted (literal: no `$`, no backslash
+  handling); a value containing `'` is double-quoted with `\ " ` $` escaped.
+- **Lifecycle.** Written on every deploy before the unit is installed
+  (the restart that follows is what delivers a changed value); removed on a
+  redeploy with no variables left and by `removeNativeAppServices`. A secret
+  that has no sealed material or will not decrypt fails the deploy, naming the
+  variable and never the value.
+- **`tp-host`** accepts `EnvironmentFile=` in a tenant unit only for
+  `turbopanel-app-<id>.service`, only equal to the path above for the same
+  `<id>` (see the `tp-host` bullet in `../../../AGENTS.md`).
+- Unlike the compose secret files (tmpfs `/run`, rehydrated after a reboot),
+  this file lives on disk under `/etc` so the unit can start at boot before the
+  daemon is up.
+
 **Health probe.** Any completed HTTP response counts as started — a 404 or a 500
 is a running app, and this gate answers "did the release come up", not "is the
 application logically correct". `Type=simple` reports active the moment the

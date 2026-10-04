@@ -19,6 +19,7 @@ import {
 import {
   DEFAULT_NATIVE_APP_NODE_VERSION,
   nativeAppConfigDir,
+  nativeAppEnvPath,
   nativeAppNodeBinary,
   nativeAppRuntimeGroup,
   nativeAppUnitName,
@@ -1697,6 +1698,199 @@ test("waitForNativeApp uses sleepDefault between probes when sleep is omitted", 
     );
     assertEquals(result.applied, ["web"]);
     assertEquals(probes, 2);
+  } finally {
+    await host.cleanup();
+  }
+});
+
+const VARIABLE_MATERIAL = [{
+  key: "DB_PASSWORD",
+  composeServiceName: "web",
+  forBuild: false,
+  forRuntime: true,
+  isLiteral: false,
+  valueEnvelope: "tpdaemon.hunter2",
+}];
+
+const decryptForTest = (envelopes: string[]) =>
+  Promise.resolve(envelopes.map((e) => e.slice("tpdaemon.".length)));
+
+const VARIABLES_APP = {
+  variables: [
+    { name: "API_URL", value: "https://example.test" },
+    { name: "DB_PASSWORD", secretKey: "DB_PASSWORD" },
+    { name: "PORT", value: "1" },
+  ],
+};
+
+test("an app's variables are on disk, privately, before its unit is installed and started", async () => {
+  const host = await makeTestHost();
+  const mock = createRunMock();
+  const lines: string[] = [];
+  const envPath = nativeAppEnvPath(host.layout, "svc-web");
+  // The unit install is the first moment the host could start the app, so the
+  // file has to exist by then — and not as a world-readable file.
+  const run: RunFn = async (command, args) => {
+    if (args.includes("install") && args.at(-1)?.endsWith(".service")) {
+      assertStringIncludes(
+        await Deno.readTextFile(envPath),
+        "DB_PASSWORD='hunter2'",
+      );
+    }
+    return await mock.run(command, args);
+  };
+  try {
+    await applyNativeAppServices(
+      host.layout,
+      ENVIRONMENT_ID,
+      [makeApp(VARIABLES_APP)],
+      {
+        ...applyOpts(host, mock),
+        run,
+        variableMaterial: VARIABLE_MATERIAL,
+        decryptSecrets: decryptForTest,
+        onOutput: (_stream, line) => lines.push(line),
+      },
+    );
+
+    const text = await Deno.readTextFile(envPath);
+    assertStringIncludes(text, "API_URL='https://example.test'\n");
+    assertStringIncludes(text, "DB_PASSWORD='hunter2'\n");
+    // A platform-set name never reaches the file, where it would override.
+    assertEquals(text.includes("PORT="), false);
+    assertEquals((await Deno.stat(envPath)).mode! & 0o777, 0o600);
+
+    const unit = await Deno.readTextFile(
+      nativeAppUnitPath("svc-web", host.unitDir),
+    );
+    assertStringIncludes(unit, `EnvironmentFile=${envPath}\n`);
+    assertEquals(unit.includes("hunter2"), false);
+    assertEquals(unit.includes("example.test"), false);
+
+    // Names and counts reach the transcript; values never do.
+    const transcript = lines.join("\n");
+    assertStringIncludes(transcript, "web: 2 environment variables written");
+    assertStringIncludes(transcript, "ignored PORT");
+    assertEquals(transcript.includes("hunter2"), false);
+    assertEquals(
+      mock.calls.some((call) =>
+        call.args.some((arg) => arg.includes("hunter2"))
+      ),
+      false,
+    );
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("dropping every variable removes the file and the unit stops loading it", async () => {
+  const host = await makeTestHost();
+  try {
+    await applyNativeAppServices(host.layout, ENVIRONMENT_ID, [
+      makeApp(VARIABLES_APP),
+    ], {
+      ...applyOpts(host, createRunMock()),
+      variableMaterial: VARIABLE_MATERIAL,
+      decryptSecrets: decryptForTest,
+    });
+    const envPath = nativeAppEnvPath(host.layout, "svc-web");
+    assertEquals((await Deno.stat(envPath)).isFile, true);
+
+    const mock = createRunMock();
+    mock.activeUnits.add(nativeAppUnitName("svc-web"));
+    await applyNativeAppServices(
+      host.layout,
+      ENVIRONMENT_ID,
+      [makeApp()],
+      applyOpts(host, mock),
+    );
+    await assertRejects(() => Deno.stat(envPath), Deno.errors.NotFound);
+    const unit = await Deno.readTextFile(
+      nativeAppUnitPath("svc-web", host.unitDir),
+    );
+    assertEquals(unit.includes("EnvironmentFile"), false);
+    // The unit changed, so systemd must be told before the restart.
+    assertEquals(mock.systemctl("daemon-reload").length, 1);
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("a variable change with an identical unit still restarts the app, with no reload", async () => {
+  const host = await makeTestHost();
+  try {
+    const opts = (decrypt: (e: string[]) => Promise<(string | null)[]>) => ({
+      variableMaterial: VARIABLE_MATERIAL,
+      decryptSecrets: decrypt,
+    });
+    await applyNativeAppServices(host.layout, ENVIRONMENT_ID, [
+      makeApp(VARIABLES_APP),
+    ], { ...applyOpts(host, createRunMock()), ...opts(decryptForTest) });
+
+    const mock = createRunMock();
+    mock.activeUnits.add(nativeAppUnitName("svc-web"));
+    await applyNativeAppServices(host.layout, ENVIRONMENT_ID, [
+      makeApp(VARIABLES_APP),
+    ], {
+      ...applyOpts(host, mock),
+      ...opts((envelopes) => Promise.resolve(envelopes.map(() => "rotated"))),
+    });
+    assertStringIncludes(
+      await Deno.readTextFile(nativeAppEnvPath(host.layout, "svc-web")),
+      "DB_PASSWORD='rotated'",
+    );
+    assertEquals(mock.systemctl("daemon-reload").length, 0);
+    assertEquals(mock.systemctl("restart"), [nativeAppUnitName("svc-web")]);
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("a referenced secret with no sealed value fails before any unit is installed", async () => {
+  const host = await makeTestHost();
+  const mock = createRunMock();
+  try {
+    await assertRejects(
+      () =>
+        applyNativeAppServices(
+          host.layout,
+          ENVIRONMENT_ID,
+          [makeApp(VARIABLES_APP)],
+          { ...applyOpts(host, mock), variableMaterial: [] },
+        ),
+      Error,
+      "no sealed value for secret variable DB_PASSWORD",
+    );
+    assertEquals(
+      mock.calls.some((c) =>
+        c.args.includes("install") && c.args.at(-1)?.endsWith(".service")
+      ),
+      false,
+    );
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("removing an environment's apps also removes their variables files", async () => {
+  const host = await makeTestHost();
+  const mock = createRunMock();
+  try {
+    await applyNativeAppServices(host.layout, ENVIRONMENT_ID, [
+      makeApp(VARIABLES_APP),
+    ], {
+      ...applyOpts(host, mock),
+      variableMaterial: VARIABLE_MATERIAL,
+      decryptSecrets: decryptForTest,
+    });
+    const envPath = nativeAppEnvPath(host.layout, "svc-web");
+    assertEquals((await Deno.stat(envPath)).isFile, true);
+
+    await removeNativeAppServices(host.layout, ENVIRONMENT_ID, {
+      run: mock.run,
+      systemdUnitDir: host.unitDir,
+    });
+    await assertRejects(() => Deno.stat(envPath), Deno.errors.NotFound);
   } finally {
     await host.cleanup();
   }
