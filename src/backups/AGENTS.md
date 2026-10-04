@@ -130,7 +130,7 @@ Keep this order (`copy-restore.ts`, pinned by `copy-restore.test.ts`):
    old contents put back; 5 = putting them back failed too; 6 = an earlier
    restore left `.tp-restore-old` without its `.tp-restore-done` marker, so
    nothing is touched. The script never deletes such an `old`).
-   Before step 2 an intent file (`<stateDir>/restore-intents/<copyId>.json`:
+   Before step 2 an intent file (`<backupDir>/restore-intents/<copyId>.json`:
    container ids, helper name) is written; it is removed once the containers
    run again, and `recoverInterruptedRestores` (daemon boot) starts them if the
    daemon died in between.

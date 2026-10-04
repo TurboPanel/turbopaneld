@@ -24,7 +24,7 @@
  *    again. Ones that will not start are reported.
  *
  * Crash safety: before stopping anything an intent file (container ids, helper
- * name) is written under `<stateDir>/restore-intents/`, and removed once the
+ * name) is written under `<backupDir>/restore-intents/`, and removed once the
  * containers are running again. A daemon that starts with an intent left over
  * ({@link recoverInterruptedRestores}) starts those containers again, unless
  * the helper is still running. The swap script never deletes `.tp-restore-old`
@@ -141,8 +141,8 @@ export function restoreArgv(
   return [
     "run",
     "--rm",
-    ...(helperName ? ["--name", helperName] : []),
     ...helperLabelArgs("backup-restore"),
+    ...(helperName ? ["--name", helperName] : []),
     "--network",
     "none",
     "--pull",
@@ -317,9 +317,9 @@ function guardDeps(deps: RestoreDeps): CopyGuardDeps {
 type RestoreIntent = { copyId: string; helper: string; containers: string[] };
 
 export function restoreIntentDir(
-  layout: Pick<LayoutPaths, "stateDir">,
+  layout: Pick<LayoutPaths, "backupDir">,
 ): string {
-  return join(layout.stateDir, "restore-intents");
+  return join(layout.backupDir, "restore-intents");
 }
 
 function restoreHelperName(copyId: string): string {
