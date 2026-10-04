@@ -1889,8 +1889,14 @@ function hostingCaddyStateRoot(layout: LayoutPaths): string {
 async function ensureValidationStorage(layout: LayoutPaths): Promise<string> {
   const state = hostingCaddyStateRoot(layout);
   const exists = await Deno.stat(state).then(() => true, (err) => {
-    if (err instanceof Deno.errors.NotFound) return false;
-    throw err;
+    if (!(err instanceof Deno.errors.NotFound)) {
+      logWarn(
+        "deploy",
+        `hosting Caddy state folder not checked: ${errorText(err)}`,
+      );
+      return true;
+    }
+    return false;
   });
   if (!exists) {
     const start = await run(
@@ -1982,15 +1988,20 @@ async function hostingCandidateRefusal(
 }
 
 async function liveSnippetNames(sitesDir: string): Promise<string[]> {
-  const names: string[] = [];
+  const entries: Array<{ name: string; modified: number }> = [];
   for await (const entry of Deno.readDir(sitesDir)) {
-    if (entry.isFile && entry.name.endsWith(".caddy")) names.push(entry.name);
+    if (entry.isFile && entry.name.endsWith(".caddy")) {
+      const info = await Deno.stat(join(sitesDir, entry.name));
+      entries.push({ name: entry.name, modified: info.mtime?.getTime() ?? 0 });
+    }
   }
-  // The daemon's own reserved sites first: they are kept in preference.
-  return names.sort((a, b) =>
-    Number(isDaemonReservedHostingSite(b)) -
-      Number(isDaemonReservedHostingSite(a)) || a.localeCompare(b)
-  );
+  // The daemon's own reserved sites first (they are kept in preference), then
+  // oldest first: of two files serving one hostname the newer is set aside.
+  return entries.sort((a, b) =>
+    Number(isDaemonReservedHostingSite(b.name)) -
+      Number(isDaemonReservedHostingSite(a.name)) ||
+    a.modified - b.modified || a.name.localeCompare(b.name)
+  ).map((entry) => entry.name);
 }
 
 /**
@@ -2005,6 +2016,15 @@ async function findUnloadableSnippets(
   sitesDir: string,
   names: readonly string[],
 ): Promise<Array<{ name: string; reason: string }>> {
+  // An empty set must load. When it does not, the validator itself is not
+  // working (no sudoers entry, no binary, an unreadable candidate) and nothing
+  // says anything about the snippets: set none aside.
+  const empty = await hostingCandidateRefusal(layout, candidate);
+  if (empty !== null) {
+    throw new Error(
+      `the hosting Caddy validation is not working on this host, so no snippet was judged or set aside: ${empty}`,
+    );
+  }
   const bad: Array<{ name: string; reason: string }> = [];
   await forEachSequential(names, async (name) => {
     const staged = join(candidate.sitesDir, name);

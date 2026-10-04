@@ -1782,6 +1782,93 @@ test("validation needs the hosting unit's state folder: a never-started unit is 
   }
 });
 
+test("a validator that cannot run at all sets nothing aside, whatever the failure looks like", async () => {
+  for (
+    const stderr of [
+      "sudo: /opt/turbopanel/vendor/caddy/current/caddy: command not found",
+      "Error: loading config: open /etc/turbopanel/hosting/Caddyfile.next: permission denied",
+    ]
+  ) {
+    const { layout, cleanup } = await makeTestLayout();
+    const restore = setIngressHostCommandForTest((_command, args) =>
+      Promise.resolve(
+        args.includes("validate")
+          ? { success: false, stderr }
+          : { success: true, stderr: "" },
+      )
+    );
+    try {
+      const sitesDir = join(layout.configDir, "hosting", "sites");
+      await Deno.mkdir(sitesDir, { recursive: true });
+      await Deno.writeTextFile(
+        join(sitesDir, "env-a.caddy"),
+        "a.example.com {\n}\n",
+      );
+      await Deno.writeTextFile(
+        join(sitesDir, "env-b.caddy"),
+        "b.example.com {\n}\n",
+      );
+      await assertRejects(
+        () =>
+          rewriteHostingCaddySites(
+            layout,
+            hostingPayload("env-n", "n.example.com"),
+            undefined,
+            noGrant,
+          ),
+        Error,
+        "validation is not working",
+      );
+      await assertRejects(
+        () => guardHostingCaddySites(layout, noGrant),
+        Error,
+        "validation is not working",
+      );
+      assertEquals(
+        [...Deno.readDirSync(sitesDir)].map((e) => e.name).sort(),
+        ["env-a.caddy", "env-b.caddy"],
+      );
+    } finally {
+      restore();
+      await cleanup();
+    }
+  }
+});
+
+test("of two environments serving one hostname the newer file is set aside", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const restore = setIngressHostCommandForTest(fakeHostRun(layout));
+  try {
+    const sitesDir = join(layout.configDir, "hosting", "sites");
+    await Deno.mkdir(sitesDir, { recursive: true });
+    // `env-a` sorts first by name but is the newer file.
+    await Deno.writeTextFile(
+      join(sitesDir, "env-a.caddy"),
+      "dup.example.com {\n}\n",
+    );
+    await Deno.writeTextFile(
+      join(sitesDir, "env-b.caddy"),
+      "dup.example.com {\n}\n",
+    );
+    await Deno.utime(
+      join(sitesDir, "env-a.caddy"),
+      new Date(2_000_000),
+      new Date(2_000_000),
+    );
+    await Deno.utime(
+      join(sitesDir, "env-b.caddy"),
+      new Date(1_000_000),
+      new Date(1_000_000),
+    );
+    assertEquals(await guardHostingCaddySites(layout, noGrant), [
+      "env-a.caddy",
+    ]);
+  } finally {
+    restore();
+    await cleanup();
+  }
+});
+
 test("a host without the sudoers entry gets a plain error and no snippet is set aside", async () => {
   const { layout, cleanup } = await makeTestLayout();
   const restore = setIngressHostCommandForTest((_command, args) =>
