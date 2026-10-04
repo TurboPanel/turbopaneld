@@ -1,3 +1,4 @@
+import { forEachSequential } from "../../util/sequential.ts";
 import { assertEquals } from "@std/assert";
 
 import type { ContainerSummary, DockerEvent } from "../../docker/client.ts";
@@ -163,11 +164,11 @@ test("a reading expires after the stale window and Docker going away blanks it",
   await sampler.refresh();
   assertEquals(sampler.latest()?.running, 1);
   down = true;
-  for (const t of [30_000, 60_000, 90_000]) {
+  await forEachSequential([30_000, 60_000, 90_000], async (t) => {
     clock = t;
     await sampler.refresh();
     assertEquals(sampler.latest()?.running, 1);
-  }
+  });
   clock = 120_000;
   await sampler.refresh();
   assertEquals(sampler.latest(), null);

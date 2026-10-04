@@ -230,7 +230,9 @@ export async function fetchLoopbackText(
       return undefined;
     }
     if (
-      !EXPOSITION_CONTENT_TYPE.test(response.headers.get("content-type") ?? "")
+      !EXPOSITION_CONTENT_TYPE.test(
+        response.headers.get("content-type") ?? "text/plain",
+      )
     ) {
       await response.body?.cancel();
       return undefined;
