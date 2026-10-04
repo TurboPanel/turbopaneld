@@ -22,6 +22,72 @@ export interface PumpLimits {
   onLimit?: () => void;
 }
 
+/** Splits decoded chunks into lines in time linear in the input. */
+class LineSplitter {
+  private pending = "";
+
+  constructor(
+    private readonly onLine: LineHandler,
+    private readonly maxLineChars?: number,
+  ) {}
+
+  private emit(raw: string): void {
+    const line = stripCarriageReturn(raw);
+    if (line.length > 0) this.onLine(line);
+  }
+
+  push(value: string): void {
+    let start = 0;
+    let newlineAt = value.indexOf("\n", start);
+    while (newlineAt !== -1) {
+      this.emit(this.pending + value.slice(start, newlineAt));
+      this.pending = "";
+      start = newlineAt + 1;
+      newlineAt = value.indexOf("\n", start);
+    }
+    this.pending += value.slice(start);
+    this.splitLongPending();
+  }
+
+  private splitLongPending(): void {
+    const max = this.maxLineChars;
+    if (max === undefined || this.pending.length <= max) return;
+    let at = 0;
+    while (this.pending.length - at > max) {
+      this.emit(this.pending.slice(at, at + max));
+      at += max;
+    }
+    this.pending = this.pending.slice(at);
+  }
+
+  finish(): void {
+    if (this.pending.trim().length > 0) this.emit(this.pending);
+  }
+}
+
+/** Keeps decoded text, or only its tail when a limit is given. */
+class TextKeeper {
+  private parts: string[] = [];
+  private chars = 0;
+
+  constructor(private readonly tailChars?: number) {}
+
+  push(value: string): void {
+    this.parts.push(value);
+    this.chars += value.length;
+    if (this.tailChars !== undefined && this.chars > this.tailChars * 2) {
+      const joined = this.parts.join("").slice(-this.tailChars);
+      this.parts = [joined];
+      this.chars = joined.length;
+    }
+  }
+
+  text(): string {
+    const text = this.parts.join("");
+    return this.tailChars === undefined ? text : text.slice(-this.tailChars);
+  }
+}
+
 /**
  * Read `readable` to completion, calling `onLine` per complete line, and
  * resolve with the decoded text (all of it, or only its tail when
@@ -33,61 +99,31 @@ export async function pumpLines(
   limits: PumpLimits = {},
 ): Promise<string> {
   const reader = readable.pipeThrough(new TextDecoderStream()).getReader();
-  const { tailChars, maxLineChars, maxTotalChars } = limits;
-  let kept: string[] = [];
-  let keptChars = 0;
+  const keeper = new TextKeeper(limits.tailChars);
+  const splitter = onLine
+    ? new LineSplitter(onLine, limits.maxLineChars)
+    : undefined;
   let total = 0;
   let limitHit = false;
-  let pending = "";
-  const emit = (raw: string) => {
-    const line = stripCarriageReturn(raw);
-    if (line.length > 0) onLine?.(line);
-  };
-  const feed = (value: string) => {
-    let start = 0;
-    let newlineAt = value.indexOf("\n", start);
-    while (newlineAt !== -1) {
-      emit(pending + value.slice(start, newlineAt));
-      pending = "";
-      start = newlineAt + 1;
-      newlineAt = value.indexOf("\n", start);
-    }
-    pending += value.slice(start);
-    if (maxLineChars !== undefined && pending.length > maxLineChars) {
-      let at = 0;
-      while (pending.length - at > maxLineChars) {
-        emit(pending.slice(at, at + maxLineChars));
-        at += maxLineChars;
-      }
-      pending = pending.slice(at);
-    }
-  };
   try {
     while (true) {
       const { value, done } = await reader.read();
       if (done) break;
       if (!value || limitHit) continue;
       total += value.length;
-      if (maxTotalChars !== undefined && total > maxTotalChars) {
+      if (limits.maxTotalChars !== undefined && total > limits.maxTotalChars) {
         limitHit = true;
         limits.onLimit?.();
         continue;
       }
-      kept.push(value);
-      keptChars += value.length;
-      if (tailChars !== undefined && keptChars > tailChars * 2) {
-        const joined = kept.join("").slice(-tailChars);
-        kept = [joined];
-        keptChars = joined.length;
-      }
-      if (onLine) feed(value);
+      keeper.push(value);
+      splitter?.push(value);
     }
-    if (onLine && pending.trim().length > 0) emit(pending);
+    splitter?.finish();
   } finally {
     reader.releaseLock();
   }
-  const text = kept.join("");
-  return tailChars === undefined ? text : text.slice(-tailChars);
+  return keeper.text();
 }
 
 /** Replay already-buffered text through `onLine`, one non-empty line at a time. */

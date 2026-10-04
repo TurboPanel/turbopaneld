@@ -16,7 +16,11 @@
  */
 
 import { isAbsolute, join, relative } from "@std/path";
-import { BUILD_OUTPUT_LIMITS, pumpLines } from "../../logs/line-stream.ts";
+import {
+  BUILD_OUTPUT_LIMITS,
+  type PumpLimits,
+  pumpLines,
+} from "../../logs/line-stream.ts";
 import type { CommandSummaryRedactor } from "../../logs/contracts.ts";
 import { redactCommandSummary } from "../../logs/redactor.ts";
 import type {
@@ -301,6 +305,24 @@ async function resolveBuildInvocation(
   return buildInvocation(command, runtimeGroup, { username, env });
 }
 
+const OUTPUT_LIMIT_MESSAGE =
+  "build output exceeded the size limit; the build was stopped";
+
+/** Wait for the build, tailing its output through `onOutput` under the output cap. */
+function collectBuildOutput(
+  child: Deno.ChildProcess,
+  onOutput: ReleaseOutputHandler | undefined,
+  limits: PumpLimits,
+): Promise<[Deno.CommandStatus, string, string]> {
+  const forward = (stream: "stdout" | "stderr") =>
+    onOutput ? (line: string) => onOutput(stream, line) : undefined;
+  return Promise.all([
+    child.status,
+    pumpLines(child.stdout, forward("stdout"), limits),
+    pumpLines(child.stderr, forward("stderr"), limits),
+  ]);
+}
+
 async function runBuildCommand(
   command: string,
   cwd: string,
@@ -324,6 +346,10 @@ async function runBuildCommand(
       controller.abort();
     },
   };
+  const abortMessage = () =>
+    outputExceeded
+      ? OUTPUT_LIMIT_MESSAGE
+      : `build command timed out after ${BUILD_TIMEOUT_MS}ms`;
   try {
     const child = new Deno.Command(bin, {
       args,
@@ -335,24 +361,12 @@ async function runBuildCommand(
       stderr: "piped",
       signal: controller.signal,
     }).spawn();
-    const [status, stdout, stderr] = await Promise.all([
-      child.status,
-      pumpLines(
-        child.stdout,
-        onOutput ? (line) => onOutput("stdout", line) : undefined,
-        limits,
-      ),
-      pumpLines(
-        child.stderr,
-        onOutput ? (line) => onOutput("stderr", line) : undefined,
-        limits,
-      ),
-    ]);
-    if (outputExceeded) {
-      throw new Error(
-        "build output exceeded the size limit; the build was stopped",
-      );
-    }
+    const [status, stdout, stderr] = await collectBuildOutput(
+      child,
+      onOutput,
+      limits,
+    );
+    if (outputExceeded) throw new Error(OUTPUT_LIMIT_MESSAGE);
     if (!status.success) {
       throw new Error(
         redactSummary(stderr.trim()) || redactSummary(stdout.trim()) ||
@@ -360,13 +374,8 @@ async function runBuildCommand(
       );
     }
   } catch (err) {
-    if (outputExceeded) {
-      throw new Error(
-        "build output exceeded the size limit; the build was stopped",
-      );
-    }
     if (err instanceof DOMException && err.name === "AbortError") {
-      throw new Error(`build command timed out after ${BUILD_TIMEOUT_MS}ms`);
+      throw new Error(abortMessage());
     }
     throw err;
   } finally {
