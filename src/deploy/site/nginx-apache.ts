@@ -99,7 +99,7 @@ export const NGINX_APACHE_TRUSTED_PROXY = "127.0.0.2";
  * Dotfile paths refused by both engines; `/.well-known/` (security.txt, app
  * links) is not one.
  */
-const DOTFILE_PATH_RE = String.raw`/\.(?!well-known(?:/|$))`;
+export const DOTFILE_PATH_RE = String.raw`/\.(?!well-known(?:/|$))`;
 
 type SiteEngineRef = Readonly<{ engine: string }>;
 
@@ -169,9 +169,7 @@ export function nginxApacheLocations(backendPort: number): string {
     "  proxy_set_header X-Forwarded-For $remote_addr;",
     "",
     "  # Dotfiles (.htaccess, .env, .git) are refused here and never reach Apache.",
-    `  location ~ ${DOTFILE_PATH_RE} {`,
-    "    return 403;",
-    "  }",
+    ...nginxDotfileDenyLines(),
     "",
     "  # Common static types only; everything else goes to Apache, where .htaccess applies.",
     String.raw`  location ~* \.(?:${extensions})$ {`,
@@ -199,8 +197,28 @@ export function apacheBehindNginxLines(): string[] {
   return [
     "  RemoteIPHeader X-Forwarded-For",
     `  RemoteIPInternalProxy ${NGINX_APACHE_TRUSTED_PROXY}`,
+    ...apacheDotfileDenyLines(),
+  ];
+}
+
+/**
+ * Refuse dotfiles (`.htaccess`, `.env`, `.git/…`) on an Apache vhost. A
+ * `<LocationMatch>` merges after `<Directory>` and `.htaccess`, so neither can
+ * grant them back.
+ */
+export function apacheDotfileDenyLines(): string[] {
+  return [
     `  <LocationMatch "${DOTFILE_PATH_RE}">`,
     "    Require all denied",
     "  </LocationMatch>",
+  ];
+}
+
+/** nginx `location` refusing dotfiles; first among the regex locations. */
+export function nginxDotfileDenyLines(): string[] {
+  return [
+    `  location ~ ${DOTFILE_PATH_RE} {`,
+    "    return 403;",
+    "  }",
   ];
 }

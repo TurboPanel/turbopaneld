@@ -287,6 +287,13 @@ root-owned `0550` by design:
 - **Hosting metadata moves out of the release.** `hosting.env` / `php.json` land
   in `<siteRoot>/.turbopanel-hosting/` (root-owned, group-readable), installed
   through the same `sudo -n install` seam as every other managed config file.
+- **Every engine refuses dotfiles.** A path with a segment starting with a dot
+  (`.env`, `.git/…`, `.htaccess`, `.htpasswd`) answers 403 on Caddy, nginx,
+  Apache and OpenLiteSpeed, except under `/.well-known/`. nginx and Apache use
+  one lookahead rule (`DOTFILE_PATH_RE`); OpenLiteSpeed a rewrite rule with the
+  same pattern; Caddy (Go regexp, no lookahead) two matchers, because it matches
+  the raw request path and `file_server` cleans it afterwards, so a dot segment
+  *inside* `/.well-known/` (`/.well-known/../.env`) has its own refusal.
 - **PHP is confined.** A release-backed nginx/Apache PHP pool gets
   `php_admin_value[open_basedir] = <documentRoot>:<siteRoot>/shared:/tmp`, so
   scripts read the release and write through `shared/` — reachable as
