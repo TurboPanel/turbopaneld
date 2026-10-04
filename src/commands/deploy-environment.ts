@@ -26,6 +26,10 @@ import {
 } from "../deploy/compose-files.ts";
 import { singleGeneration } from "../deploy/deployment-generations.ts";
 import {
+  readPreviousProjects,
+  retirePreviousProjects,
+} from "../deploy/retire-previous-projects.ts";
+import {
   applyRailpackImagesToComposeYaml,
   mergeComposeOverlayFragments,
   mergeOverlayIntoComposeYaml,
@@ -1590,6 +1594,9 @@ async function deployContainerServices(
   const onLine = (event: { stream: "stdout" | "stderr"; line: string }) =>
     logSink.onLine(event.stream, event.line);
   const stageDir = await resetComposeStageDir(deploymentDir);
+  // Read before publish replaces the live files.
+  const previousProjects = await readPreviousProjects(deploymentDir);
+  let retiredEarlier: string[] = [];
   try {
     const stagedPath = join(stageDir, RUNTIME_COMPOSE_FILENAME);
     let yaml = applySecretFilePaths(
@@ -1685,6 +1692,18 @@ async function deployContainerServices(
     );
 
     if (resolved.serviceNames.length === 0) {
+      // Nothing comes up, so containers an earlier deploy started would keep
+      // running untracked: take the project (and any earlier-named one) down.
+      await retirePreviousProjects(
+        previousProjects,
+        parsedPayload.projectName,
+        run,
+        {
+          environmentId: parsedPayload.environmentId,
+          deploymentDir,
+          includeCurrent: true,
+        },
+      );
       const livePaths = await publishStagedRuntimeCompose(
         deploymentDir,
         stageDir,
@@ -1706,6 +1725,24 @@ async function deployContainerServices(
       manifest,
     );
     await persistComposeEnvFile(deploymentDir, parsedPayload.envFile);
+
+    // A stack started under an earlier project name is replaced, not kept
+    // (before either strategy brings the new name up). Images are pulled first
+    // (best effort) so the gap between removing the old containers and
+    // starting the new ones is short.
+    if (previousProjects?.names.some((n) => n !== parsedPayload.projectName)) {
+      await runStreamed([
+        ...composeFileArgs(parsedPayload.projectName, chain),
+        "pull",
+        "--ignore-buildable",
+      ], { onLine });
+    }
+    retiredEarlier = await retirePreviousProjects(
+      previousProjects,
+      parsedPayload.projectName,
+      run,
+      { environmentId: parsedPayload.environmentId, deploymentDir },
+    );
 
     const serviceHooks = parsedPayload.serviceHooks ?? [];
     if (parsedPayload.deployStrategy === "sequential") {
@@ -1766,6 +1803,12 @@ async function deployContainerServices(
       serviceNames: labeledServices,
       composePaths: chain,
     };
+  } catch (err) {
+    if (retiredEarlier.length > 0 && err instanceof Error) {
+      err.message +=
+        " The containers this environment had under its earlier compose project name were already removed; deploy again to bring it back.";
+    }
+    throw err;
   } finally {
     await removeComposeStageDir(deploymentDir);
   }
