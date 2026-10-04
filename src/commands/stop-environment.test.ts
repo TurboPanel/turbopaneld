@@ -775,3 +775,120 @@ test({
       );
     }),
 });
+
+test({
+  name:
+    "handleEnvironmentStop skips Docker steps on a host without Docker and still tears the site down",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: async () => {
+    const root = await Deno.makeTempDir({ prefix: "tp-stop-nodocker-" });
+    const previous = {
+      TURBOPANEL_STATE_DIR: Deno.env.get("TURBOPANEL_STATE_DIR"),
+      TURBOPANEL_CONFIG_DIR: Deno.env.get("TURBOPANEL_CONFIG_DIR"),
+    };
+    const stateDir = join(root, "state");
+    Deno.env.set("TURBOPANEL_STATE_DIR", stateDir);
+    Deno.env.set("TURBOPANEL_CONFIG_DIR", join(root, "config"));
+    try {
+      const layout = resolveLayout(Deno.env.toObject());
+      const deploymentDir = join(
+        layout.stateDir,
+        "deployments",
+        "proj-1",
+        "envnodock1",
+      );
+      await Deno.mkdir(deploymentDir, { recursive: true });
+      await writeComposeFileSecure(
+        join(deploymentDir, RUNTIME_COMPOSE_FILENAME),
+        "services:\n  web:\n    image: nginx\n",
+      );
+      const dockerCalls: string[][] = [];
+      const result = await handleEnvironmentStop(
+        {
+          environmentId: "envnodock1",
+          projectId: "proj-1",
+          projectName: "tp-demo-envnodoc",
+          fabricNetworks: ["tpn_gone"],
+        },
+        new Date().toISOString(),
+        {
+          dockerInstalled: () => Promise.resolve(false),
+          runDocker: (args) => {
+            dockerCalls.push(args);
+            return Promise.reject(new Error("Failed to spawn /usr/bin/docker"));
+          },
+          removeFabricNetworks: () =>
+            Promise.reject(new Error("Failed to spawn /usr/bin/docker")),
+        },
+      );
+      assertEquals(dockerCalls, []);
+      assertEquals(result.summary.includes("Stopped environment"), true);
+    } finally {
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) Deno.env.delete(key);
+        else Deno.env.set(key, value);
+      }
+      await Deno.remove(root, { recursive: true });
+    }
+  },
+});
+
+test({
+  name:
+    "handleEnvironmentStop still reports a compose failure on a host that has Docker",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: async () => {
+    const root = await Deno.makeTempDir({ prefix: "tp-stop-withdocker-" });
+    const previous = {
+      TURBOPANEL_STATE_DIR: Deno.env.get("TURBOPANEL_STATE_DIR"),
+      TURBOPANEL_CONFIG_DIR: Deno.env.get("TURBOPANEL_CONFIG_DIR"),
+    };
+    Deno.env.set("TURBOPANEL_STATE_DIR", join(root, "state"));
+    Deno.env.set("TURBOPANEL_CONFIG_DIR", join(root, "config"));
+    try {
+      const layout = resolveLayout(Deno.env.toObject());
+      const deploymentDir = join(
+        layout.stateDir,
+        "deployments",
+        "proj-1",
+        "envwithdock",
+      );
+      await Deno.mkdir(deploymentDir, { recursive: true });
+      await writeComposeFileSecure(
+        join(deploymentDir, RUNTIME_COMPOSE_FILENAME),
+        "services:\n  web:\n    image: nginx\n",
+      );
+      await assertRejects(
+        () =>
+          handleEnvironmentStop(
+            {
+              environmentId: "envwithdock",
+              projectId: "proj-1",
+              projectName: "tp-demo-envwith",
+            },
+            new Date().toISOString(),
+            {
+              dockerInstalled: () => Promise.resolve(true),
+              runDocker: () =>
+                Promise.resolve(
+                  {
+                    success: false,
+                    code: 1,
+                    stdout: "",
+                    stderr: "compose exploded",
+                  } satisfies DockerCliResult,
+                ),
+            },
+          ),
+        Error,
+        "compose exploded",
+      );
+    } finally {
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) Deno.env.delete(key);
+        else Deno.env.set(key, value);
+      }
+      await Deno.remove(root, { recursive: true });
+    }
+  },
+});

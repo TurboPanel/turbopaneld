@@ -79,6 +79,20 @@ function resolvedDockerBin(): string {
   return ioOverride?.dockerBin ?? DOCKER_BIN;
 }
 
+/**
+ * True when the Docker CLI binary exists on this host. A site-only host never
+ * installs Docker, so stop/teardown steps use this to skip Docker work
+ * instead of failing with `Failed to spawn /usr/bin/docker`.
+ */
+export async function dockerBinaryInstalled(): Promise<boolean> {
+  try {
+    return (await Deno.stat(resolvedDockerBin())).isFile;
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) return false;
+    throw err;
+  }
+}
+
 function clearDockerInvocationCache(): void {
   cachedInvocation = undefined;
   cachedInvocationPromise = undefined;

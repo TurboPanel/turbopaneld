@@ -10,6 +10,7 @@ import { hostSudoArgs } from "../permissions/host-sudo.ts";
 import { removeSecretTree } from "../deploy/secret-runtime.ts";
 import {
   createStreamedRunner,
+  dockerBinaryInstalled,
   type DockerCliResult,
   runDocker as defaultRunDocker,
   type RunDockerOptions,
@@ -66,6 +67,8 @@ export type EnvironmentStopHandlerDeps = {
   removeFabricNetworks?: (names: readonly string[]) => Promise<void>;
   /** Test seam — privileged `sudo -n …` runner for release-tree removal. */
   runPrivileged?: RunFn;
+  /** Test seam — defaults to a `/usr/bin/docker` probe when `runDocker` is not injected. */
+  dockerInstalled?: () => Promise<boolean>;
   /** Test seam — the `sshd` drop-in re-render after principals are retired. */
   applySshAccess?: () => Promise<SshApplyResult>;
 };
@@ -257,6 +260,20 @@ async function composeDown(
 }
 
 /**
+ * A host without Docker (site-only) has no containers or networks to stop, so
+ * Docker steps are skipped. An injected `runDocker` means "Docker is there".
+ */
+async function dockerAvailableForStop(
+  deps?: EnvironmentStopHandlerDeps,
+): Promise<boolean> {
+  if (deps?.dockerInstalled) return await deps.dockerInstalled();
+  return deps?.runDocker !== undefined || await dockerBinaryInstalled();
+}
+
+const noDocker: RunDockerFn = () =>
+  Promise.resolve({ success: true, stdout: "", stderr: "", code: 0 });
+
+/**
  * Tear down a deployed environment stack (compose down + volumes + hosting site
  * + per-service release trees). Idempotent when the compose file is already
  * gone.
@@ -268,7 +285,8 @@ export async function handleEnvironmentStop(
 ): Promise<EnvironmentStopResult> {
   const parsedPayload = parseEnvironmentStopPayload(payload);
   assertSafeStopIdentifiers(parsedPayload);
-  const run = deps?.runDocker ?? defaultRunDocker;
+  const dockerPresent = await dockerAvailableForStop(deps);
+  const run = dockerPresent ? (deps?.runDocker ?? defaultRunDocker) : noDocker;
   const runStreamed = createStreamedRunner(deps?.runDocker);
   const logSink = deps?.logSink ?? createNoopCommandOutputSink();
   logSink.setPhase(COMMAND_LOG_PHASES.STOP);
@@ -282,7 +300,12 @@ export async function handleEnvironmentStop(
   const composePaths = await resolveDeployedComposePaths(deploymentDir);
   const hasCompose = composePaths !== null;
 
-  if (hasCompose) {
+  if (hasCompose && !dockerPresent) {
+    logInfo(
+      "commands",
+      `environment.stop Docker not installed; skipping compose down project=${parsedPayload.projectName} env=${parsedPayload.environmentId}`,
+    );
+  } else if (hasCompose) {
     // Every generation the deployment owns comes down, not just the named one.
     const projects = projectsForCommand(
       await readDeploymentManifest(deploymentDir),
@@ -303,7 +326,7 @@ export async function handleEnvironmentStop(
   }
 
   const fabricNetworks = parsedPayload.fabricNetworks ?? [];
-  if (fabricNetworks.length > 0) {
+  if (fabricNetworks.length > 0 && dockerPresent) {
     try {
       const removeNetworks = deps?.removeFabricNetworks ??
         removeFabricDockerNetworks;

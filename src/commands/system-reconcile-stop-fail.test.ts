@@ -1,4 +1,4 @@
-import { assertRejects } from "@std/assert";
+import { assertEquals, assertRejects } from "@std/assert";
 import type { DockerCliResult } from "../deploy/docker-cli.ts";
 import { orchestratorComposePath } from "../managed/engine-paths.ts";
 import { resolveLayout } from "../paths/layout.ts";
@@ -205,6 +205,43 @@ test({
           Error,
           "stop denied",
         );
+      });
+    });
+  },
+});
+
+test({
+  name:
+    "handleSystemReconcile action=stop skips Docker entirely on a host without Docker",
+  permissions: { env: true, read: true, write: true },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      await withLayoutEnv(fixture, async () => {
+        let ensured = false;
+        const result = await handleSystemReconcile(
+          {
+            environmentId: ENVIRONMENT_ID,
+            action: "stop",
+            components: [{
+              component: "hosting-ingress",
+              serviceId: SERVICE_ID,
+              composeServiceName: "traefik",
+              containerName: `${SERVICE_ID}-in`,
+              role: "ingress",
+              desired: "absent",
+            }],
+          },
+          new Date().toISOString(),
+          {
+            dockerInstalled: () => Promise.resolve(false),
+            ensureDocker: () => {
+              ensured = true;
+              return Promise.resolve();
+            },
+          },
+        );
+        assertEquals(ensured, false);
+        assertEquals(result.containers, []);
       });
     });
   },
