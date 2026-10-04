@@ -173,6 +173,14 @@ function lineHasMessage(line: string, message: string): boolean {
   return line.includes(`"msg":"${message}"`);
 }
 
+function trimHyphens(text: string): string {
+  let start = 0;
+  let end = text.length;
+  while (start < end && text[start] === "-") start++;
+  while (end > start && text[end - 1] === "-") end--;
+  return text.slice(start, end);
+}
+
 /**
  * Caddy's storage folder name for the configured CA, built the way certmagic
  * builds it (acmeissuer.go `issuerKey`, then storage.go `KeyBuilder.Safe`):
@@ -191,7 +199,7 @@ export function instanceAcmeIssuerKey(
   const afterScheme = raw.trim().split("://")[1] ?? "";
   const written = afterScheme.split(/[/?#]/, 1)[0] ?? "";
   const authority = written.slice(written.lastIndexOf("@") + 1) || url.host;
-  const path = url.pathname.replaceAll(/[/\\]/g, "-").replace(/^-+|-+$/g, "");
+  const path = trimHyphens(url.pathname.replaceAll(/[/\\]/g, "-"));
   const key = path ? `${authority}-${path}` : authority;
   return key.toLowerCase().trim()
     .replaceAll(" ", "_")
