@@ -2202,7 +2202,7 @@ test("applySites fails when release hosting metadata mkdir or install fails", as
     const installBase = createSiteRunMock();
     const installRun = withGroupMembership(async (command, args) => {
       if (
-        args.includes("install") && args.includes("0640") &&
+        args.includes("install") && args.includes("0600") &&
         String(args.at(-1)).includes(".turbopanel-hosting")
       ) {
         return fail("install hosting meta denied");
@@ -2218,6 +2218,89 @@ test("applySites fails when release hosting metadata mkdir or install fails", as
         }),
       Error,
       "install hosting meta denied",
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test("hosting metadata is root-only: no web engine can read it through the owner's group", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const mock = createSiteRunMock();
+  const run = withGroupMembership(mock.run, { tpnginx: ["tpnginx"] });
+  const { runPlaybook } = capturePlaybooks();
+  try {
+    await seedRelease(layout, "rel-1", "public", "<h1>one</h1>");
+    await applySites(layout, "envmetaperm", [
+      { ...nginxSite, webEnv: { FOO: "bar" } },
+    ], {
+      run,
+      runPlaybook,
+      releaseBindings: releaseBindingsFor("www"),
+    });
+    const metaDir = join(siteTreeRoot(layout), ".turbopanel-hosting");
+    const installs = mock.calls.filter((c) =>
+      c.args.includes("install") &&
+      String(c.args.at(-1)).startsWith(metaDir)
+    );
+    assertEquals(installs.length, 2);
+    for (const call of installs) {
+      const isDir = call.args.includes("-d");
+      assertEquals(
+        call.args[call.args.indexOf("-m") + 1],
+        isDir ? "0700" : "0600",
+      );
+      assertEquals(call.args[call.args.indexOf("-o") + 1], "root");
+      assertEquals(call.args[call.args.indexOf("-g") + 1], "root");
+    }
+  } finally {
+    await cleanup();
+  }
+});
+
+test("a managed-directory Caddy site restarts the site Caddy so its web root is mounted nosymfollow", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const mock = createSiteRunMock();
+  // Already in the owner's group: only the mount rule can ask for a restart.
+  const run = withGroupMembership(mock.run, {
+    tpcaddysite: ["tpcaddysite", RELEASE_GROUP],
+  });
+  const { runPlaybook } = capturePlaybooks();
+  try {
+    await applySites(layout, "envmdcaddy", [{
+      ...caddySite,
+      sourceKind: "managed-directory",
+      principal: { principalId: "pr-1", username: RELEASE_USERNAME },
+    }], {
+      run,
+      runPlaybook,
+      managedDirectoryBindings: managedBindingsFor("static"),
+    });
+    assertEquals(
+      systemctlActions(mock.calls, "turbopanel-site-caddy").includes(
+        "restart",
+      ),
+      true,
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test("a plain Caddy site only reloads", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const mock = createSiteRunMock();
+  const { runPlaybook } = capturePlaybooks();
+  try {
+    await applySites(layout, "envplaincaddy", [caddySite], {
+      run: mock.run,
+      runPlaybook,
+    });
+    assertEquals(
+      systemctlActions(mock.calls, "turbopanel-site-caddy").includes(
+        "restart",
+      ),
+      false,
     );
   } finally {
     await cleanup();
@@ -2316,7 +2399,7 @@ test("applySites skips a managed placeholder when index install fails", async ()
   const base = createSiteRunMock();
   const run = withGroupMembership(async (command, args) => {
     if (
-      args.includes("install") && args.includes("0640") &&
+      args.includes("install") && args.includes("0600") &&
       String(args.at(-1)).endsWith("index.html")
     ) {
       return fail("index skipped");

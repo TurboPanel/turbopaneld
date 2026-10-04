@@ -15,7 +15,12 @@ Environment=XDG_CONFIG_HOME={{ turbopanel_state_dir }}/site-caddy
 # The admin socket's directory: the service account only.
 RuntimeDirectory={{ site_caddy_runtime_dir }}
 RuntimeDirectoryMode=0700
-ExecStart={{ turbopanel_vendor_dir }}/caddy/current/caddy run --config {{ turbopanel_config_dir }}/caddy/Caddyfile --adapter caddyfile
+# `+` runs this one command as root: it only sets up the private mount
+# namespace (managed web roots mounted `nosymfollow`, so no link in an owner's
+# writable web root is followed) and then drops to {{ site_caddy_service_user }} with no
+# capabilities before it execs Caddy. It fails closed: when a mount cannot be
+# made, Caddy does not start. See orchestration/scripts/tp-site-caddy-run.
+ExecStart=+{{ turbopanel_install_root | default('/opt/turbopanel') }}/lib/tp-site-caddy-run run {{ turbopanel_config_dir }}/caddy/sites {{ site_caddy_service_user }} {{ turbopanel_vendor_dir }}/caddy/current/caddy {{ turbopanel_config_dir }}/caddy/Caddyfile
 ExecReload={{ turbopanel_vendor_dir }}/caddy/current/caddy reload --config {{ turbopanel_config_dir }}/caddy/Caddyfile --adapter caddyfile --address unix/{{ site_caddy_admin_socket }}
 # Longer than the Caddyfile's grace_period (5s) plus a margin.
 TimeoutStopSec=30

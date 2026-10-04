@@ -285,8 +285,23 @@ root-owned `0550` by design:
   back to an ordinary reload. php-fpm is never restarted for this — its workers
   run as the principal, which owns the group already.
 - **Hosting metadata moves out of the release.** `hosting.env` / `php.json` land
-  in `<siteRoot>/.turbopanel-hosting/` (root-owned, group-readable), installed
-  through the same `sudo -n install` seam as every other managed config file.
+  in `<siteRoot>/.turbopanel-hosting/` (`root:root`, dir `0700`, files `0600`),
+  installed through the same `sudo -n install` seam as every other managed
+  config file. Not group-readable: every web engine is a member of the site
+  owner's group and nothing but root reads these files. The daemon-owned lane
+  keeps `<base>/.turbopanel/` at `0700`/`0600` for the same reason.
+- **Caddy follows no link in a site owner's writable web root.** Caddy's
+  `file_server` always follows symlinks, and `tpcaddysite` sits in every owner's
+  group, so the unit starts through `orchestration/scripts/tp-site-caddy-run`
+  (`ExecStart=+`): in a private mount namespace it bind-mounts every managed
+  `…/sites/<id>/webroot` named by a fragment's `root *` line read-only with
+  `nosymfollow` (Linux 5.10+), then drops to `tpcaddysite` with no capabilities.
+  The mounts exist only for Caddy; the owner's PHP, apps and shell still follow
+  their own links. It fails closed (no mount, no Caddy). A new or changed
+  managed-lane fragment therefore restarts the unit instead of reloading it.
+  Release-backed Caddy sites are not mounted (`current` is the platform's own
+  link and release links are confined at publish); at a release top the layout's
+  `shared` link is refused (`/shared`, `/shared/*` answer 404).
 - **PHP is confined.** A release-backed nginx/Apache PHP pool gets
   `php_admin_value[open_basedir] = <documentRoot>:<siteRoot>/shared:/tmp`, so
   scripts read the release and write through `shared/` — reachable as

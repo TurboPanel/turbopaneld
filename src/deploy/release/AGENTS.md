@@ -54,7 +54,7 @@ serving change in the next phase addresses the same tree without restating it):
       <releaseId>/shared -> ../../shared              relative convenience link
     current -> releases/<releaseId>
     shared/               <username>:<username>-grp 0750
-    .turbopanel-hosting/  root:<username>-grp 0750  (hosting.env / php.json)
+    .turbopanel-hosting/  root:root 0700  (hosting.env / php.json, files 0600)
 ```
 
 Every published release carries a relative **`shared` symlink** at its root

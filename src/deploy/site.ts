@@ -448,7 +448,18 @@ function buildNginxPhpLocation(
 export type CaddySiteConfigOpts = Readonly<{
   /** Absolute unix socket path for `php_fastcgi` when the site needs PHP. */
   phpFpmSocket?: string | null;
+  /**
+   * The document root is a sealed release (`…/current/<root>`). When the root
+   * is the release top, the layout's `shared` link sits directly under it and
+   * leads into the site owner's writable state, so it is never served.
+   */
+  releaseBacked?: boolean;
 }>;
+
+/** True for a `root` that names the directory itself (`.`, `./`, `./.`). */
+function isReleaseTopRoot(root: string): boolean {
+  return root.split("/").every((segment) => segment === "" || segment === ".");
+}
 
 /**
  * Reject a `webEnv` value Caddy would reinterpret rather than escaping it.
@@ -491,6 +502,12 @@ export function caddySiteConfig(
     `  root * ${documentRoot}`,
     "  encode zstd gzip",
   ];
+  if (opts?.releaseBacked && isReleaseTopRoot(site.root)) {
+    lines.push(
+      "  @sharedState path /shared /shared/*",
+      "  respond @sharedState 404",
+    );
+  }
   if (needsPhp && phpFpmSocket) {
     // `unix/` + an absolute path is a literal double slash. `php_fastcgi` also
     // brings its own file-existence matcher, which closes the
@@ -1466,21 +1483,26 @@ async function writeHostingWebMetadata(
   if (files.length === 0) return;
 
   const metaDir = join(siteBase, ".turbopanel");
-  await Deno.mkdir(metaDir, { recursive: true, mode: 0o750 });
+  // Private to the daemon account: the web engines share its group, and a
+  // document root of `.` would otherwise serve these files.
+  await Deno.mkdir(metaDir, { recursive: true, mode: 0o700 });
+  await Deno.chmod(metaDir, 0o700);
   // Distinct files in a fresh directory: no ordering between the writes.
   await Promise.all(
-    files.map((file) =>
-      Deno.writeTextFile(join(metaDir, file.name), file.contents, {
-        mode: 0o640,
-      })
-    ),
+    files.map(async (file) => {
+      const path = join(metaDir, file.name);
+      await Deno.writeTextFile(path, file.contents, { mode: 0o600 });
+      // `mode` only applies when the file is created.
+      await Deno.chmod(path, 0o600);
+    }),
   );
 }
 
 /**
  * Release-backed site: metadata lives in `<siteRoot>/.turbopanel-hosting/`,
- * root-owned and group-readable by the principal — never inside the release,
- * which is read-only by the time this runs.
+ * root-only (`0700`, files `0600`) — never inside the release, which is
+ * read-only by the time this runs. Not group-readable: every web engine is a
+ * member of the site owner's group, and nothing but root reads these files.
  *
  * Files are staged in the daemon-owned site dir and installed through
  * the same `sudo -n install` seam every other managed config file uses, so the
@@ -1495,7 +1517,6 @@ async function writeReleaseHostingWebMetadata(
   const files = hostingWebMetadataFiles(site);
   if (files.length === 0) return;
 
-  const group = principalUnixGroupName(release.username);
   const metaDir = siteMetadataDir(
     principalHomePath(layout, release.username),
     release.serviceId,
@@ -1507,11 +1528,11 @@ async function writeReleaseHostingWebMetadata(
       "install",
       "-d",
       "-m",
-      "0750",
+      "0700",
       "-o",
       "root",
       "-g",
-      group,
+      "root",
       metaDir,
     ]),
   );
@@ -1544,11 +1565,11 @@ async function writeReleaseHostingWebMetadata(
         "-n",
         "install",
         "-m",
-        "0640",
+        "0600",
         "-o",
         "root",
         "-g",
-        group,
+        "root",
         staged,
         target,
       ]),
@@ -2891,6 +2912,7 @@ async function applyCaddySite(
   const configPath = join(paths.sitesDir, paths.configName);
   const contents = caddySiteConfig(site, paths.documentRoot, dockerBind, {
     phpFpmSocket: php.socket,
+    releaseBacked: paths.release !== undefined,
   });
   const staged = await SITE_ENGINE_DRIVERS.caddy
     .stageSiteConfig(run, configPath, contents);
@@ -3279,6 +3301,15 @@ async function applyOneSite(
       { ...pathBase, sitesDir: sitesDirs.caddy },
       dockerBind,
     );
+    // A managed web root is mounted `nosymfollow` when the unit starts
+    // (`tp-site-caddy-run`, from the fragments on disk), so a new or changed
+    // fragment for one needs a restart, not a reload.
+    if (managed !== undefined && applied.staged.length > 0) {
+      return {
+        ...applied,
+        restartEngines: [...new Set([...restartEngines, "caddy" as const])],
+      };
+    }
     return { ...applied, ...restart };
   }
   if (site.engine === "nginx") {

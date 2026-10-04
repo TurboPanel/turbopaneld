@@ -1,0 +1,102 @@
+#!/bin/sh
+# tp-site-caddy-run — starts the site Caddy with no symlink followed inside a
+# site owner's writable web root (POSIX sh, root:root, installed in lib/).
+#
+# Caddy's file_server always follows symlinks, and the site Caddy's account
+# (tpcaddysite) is a member of every site owner's group. Without this, one
+# owner could link from their own web root to a file that another owner keeps
+# in a group-readable place and have Caddy serve it. Here the Caddy process
+# runs in a private mount namespace where every managed web root
+# (`.../sites/<id>/webroot`) is bind-mounted read-only with `nosymfollow`
+# (Linux 5.10+), so a link inside one is never followed. Nothing else on the
+# host sees these mounts: the site owner's own PHP, apps and shell still follow
+# their own links. Release-backed sites are not mounted: their `current` link is
+# the platform's own, and every link inside a sealed release is confined to the
+# release at publish time.
+#
+# Verbs:
+#   roots SITES_DIR
+#       print each managed web root named by a `root * <path>` line in
+#       SITES_DIR/*.conf (the daemon's generated fragments), one per line.
+#   run SITES_DIR USER CADDY CADDYFILE
+#       the unit's ExecStart (as root, `+`): mount, then drop to USER and exec
+#       `caddy run`. FAILS CLOSED: when a root cannot be mounted, or the kernel
+#       or util-linux does not know `nosymfollow`, nothing starts.
+#
+# The roots come from the fragments on disk, so a new site needs a restart (the
+# daemon restarts the unit when a managed-directory fragment changes), and a
+# reboot or crash restart rebuilds the same set.
+set -eu
+umask 077
+
+tp_die() {
+  printf 'tp-site-caddy-run: %s\n' "$*" >&2
+  exit 1
+}
+
+# `/<...>/sites/<serviceId>/webroot` and the characters tp-host allows in paths.
+tp_roots() {
+  [ -d "$1" ] || tp_die "no such directory $1"
+  for _f in "$1"/*.conf; do
+    [ -f "$_f" ] && [ ! -L "$_f" ] || continue
+    sed -n 's/^[[:space:]]*root[[:space:]][[:space:]]*\*[[:space:]][[:space:]]*\(\/[A-Za-z0-9._\/-]*\)[[:space:]]*$/\1/p' "$_f"
+  done | while IFS= read -r _p; do
+    case "$_p" in
+      */../* | */.. | *//*) continue ;;
+    esac
+    # Keep everything up to and including the `webroot` segment.
+    _w="$(printf '%s\n' "$_p" | sed -n 's/^\(\/.*\/sites\/[A-Za-z0-9_-][A-Za-z0-9_-]*\/webroot\)\(\/.*\)\{0,1\}$/\1/p')"
+    [ -n "$_w" ] && printf '%s\n' "$_w"
+  done | sort -u
+}
+
+tp_inner() {
+  _sites="$1"
+  _user="$2"
+  _caddy="$3"
+  _config="$4"
+  for _bin in setpriv findmnt mount; do
+    command -v "$_bin" >/dev/null 2>&1 || tp_die "$_bin is required"
+  done
+  _list="$(tp_roots "$_sites")"
+  _old_ifs="$IFS"
+  IFS='
+'
+  for _w in $_list; do
+    # A web root that is not there yet serves nothing; one that is a link or
+    # moved is refused outright.
+    [ -e "$_w" ] || [ -L "$_w" ] || continue
+    [ -d "$_w" ] && [ ! -L "$_w" ] || tp_die "$_w is not a plain directory"
+    [ "$(cd -P -- "$_w" && pwd -P)" = "$_w" ] || tp_die "$_w has a link in its path"
+    mount --bind -- "$_w" "$_w" || tp_die "cannot bind-mount $_w"
+    mount -o remount,bind,ro,nosymfollow,nosuid,nodev -- "$_w" ||
+      tp_die "cannot mount $_w with nosymfollow (needs Linux 5.10+)"
+    findmnt -no OPTIONS --target "$_w" | grep -q 'nosymfollow' ||
+      tp_die "$_w is not mounted nosymfollow"
+  done
+  IFS="$_old_ifs"
+  exec setpriv --reuid="$_user" --regid="$_user" --init-groups \
+    --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs -- \
+    "$_caddy" run --config "$_config" --adapter caddyfile
+}
+
+case "${1:-}" in
+  roots)
+    [ "$#" -eq 2 ] || tp_die "usage: roots SITES_DIR"
+    tp_roots "$2"
+    ;;
+  run)
+    [ "$#" -eq 5 ] || tp_die "usage: run SITES_DIR USER CADDY CADDYFILE"
+    command -v unshare >/dev/null 2>&1 || tp_die "unshare is required"
+    exec unshare --mount --propagation private -- "$0" inner "$2" "$3" "$4" "$5"
+    ;;
+  inner)
+    [ "$#" -eq 5 ] || tp_die "inner is internal to run"
+    # The unit's exec chain starts here: this is the only path to `inner`.
+    shift
+    tp_inner "$@"
+    ;;
+  *)
+    tp_die "usage: roots|run"
+    ;;
+esac
