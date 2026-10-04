@@ -68,6 +68,27 @@ type PathProbe = Pick<
   "lstat" | "realPath" | "privilegedDirectoryExists"
 >;
 
+/** Check one component: throws a refusal for a link or a missing entry; `"host"` when the daemon may not look. */
+async function checkComponent(
+  component: string,
+  path: string,
+  lstat: NonNullable<CopyGuardDeps["lstat"]>,
+): Promise<"ok" | "host"> {
+  try {
+    if ((await lstat(component)).isSymlink) {
+      throw new CopySourceRefusedError(
+        `refusing ${path}: ${component} is a symbolic link`,
+      );
+    }
+    return "ok";
+  } catch (err) {
+    if (err instanceof CopySourceRefusedError) throw err;
+    if (err instanceof Deno.errors.NotFound) throw missing(path);
+    if (needsRoot(err)) return "host";
+    throw err;
+  }
+}
+
 /** Walk the components below `base`; true when tp-host had to answer instead. */
 async function walkComponents(
   base: string,
@@ -75,26 +96,16 @@ async function walkComponents(
   deps: PathProbe,
 ): Promise<boolean> {
   const lstat = deps.lstat ?? ((p: string) => Deno.lstat(p));
-  const viaHost = deps.privilegedDirectoryExists ??
-    ((p: string) => directoryExists(p));
   for (const component of componentsBelow(base, path)) {
-    try {
-      if ((await lstat(component)).isSymlink) {
-        throw new CopySourceRefusedError(
-          `refusing ${path}: ${component} is a symbolic link`,
-        );
-      }
-    } catch (err) {
-      if (err instanceof CopySourceRefusedError) throw err;
-      if (err instanceof Deno.errors.NotFound) throw missing(path);
-      if (!needsRoot(err)) throw err;
-      // Not traversable by the daemon: tp-host answers, and refuses a path
-      // with a link component, so a "yes" means none is there.
-      if (await viaHost(path)) return true;
-      throw new CopySourceRefusedError(
-        `refusing ${path}: it could not be confirmed to be free of symbolic links`,
-      );
-    }
+    if ((await checkComponent(component, path, lstat)) === "ok") continue;
+    // Not traversable by the daemon: tp-host answers, and refuses a path
+    // with a link component, so a "yes" means none is there.
+    const viaHost = deps.privilegedDirectoryExists ??
+      ((p: string) => directoryExists(p));
+    if (await viaHost(path)) return true;
+    throw new CopySourceRefusedError(
+      `refusing ${path}: it could not be confirmed to be free of symbolic links`,
+    );
   }
   return false;
 }
