@@ -118,9 +118,10 @@ const JUMPS = [
   "-A INPUT -i br-+ -j TP-EGRESS",
   "-A INPUT -i docker0 -j TP-EGRESS",
 ];
+// Forwarded traffic is matched on every interface, so a network with a custom
+// bridge name (not docker0 or br-*) cannot step around the block.
 const FWD_JUMPS = [
-  "-A DOCKER-USER -i br-+ -j TP-EGRESS",
-  "-A DOCKER-USER -i docker0 -j TP-EGRESS",
+  "-A DOCKER-USER -j TP-EGRESS",
 ];
 
 Deno.test("print4 drops link-local and cloud metadata with DNS exceptions first", async () => {
@@ -208,9 +209,10 @@ Deno.test("platform traffic is never matched: only DNS RETURNs and the four meta
     assert(!four.includes(forbidden), forbidden);
     assert(!six.includes(forbidden), forbidden);
   }
-  // Only traffic entering from a container-side interface is ever diverted.
+  // Host-bound traffic is diverted from container-side interfaces only; forwarded traffic from any interface.
   const script = await Deno.readTextFile(SCRIPT);
   assertStringIncludes(script, 'IFACES="docker0 br-+"');
+  assertStringIncludes(script, 'FORWARD_IFACES="any"');
   assertStringIncludes(script, 'HOOKS="INPUT DOCKER-USER"');
 });
 
@@ -264,8 +266,11 @@ Deno.test("apply moves the jumps back to the front when another rule was inserte
   );
   await h.run("apply");
   const rules = h.chain(4, "DOCKER-USER")!;
-  assertEquals(rules.slice(0, 2).sort(), [...FWD_JUMPS].sort());
-  assertEquals(rules.filter((r) => r.includes("TP-EGRESS")).length, 2);
+  assertEquals(rules.slice(0, FWD_JUMPS.length), FWD_JUMPS);
+  assertEquals(
+    rules.filter((r) => r.includes("TP-EGRESS")).length,
+    FWD_JUMPS.length,
+  );
   assert(rules.includes("-A DOCKER-USER -j TP-FWD"));
 });
 
@@ -346,4 +351,13 @@ Deno.test("apply and remove skip IPv6 when ip6tables has no filter table", async
   const r = await h.run("remove");
   assertEquals(r.code, 0, r.err);
   assertEquals(h.chain(4, "TP-EGRESS"), null);
+});
+
+Deno.test("forwarded traffic is diverted whatever the ingress interface is called", async () => {
+  const h = await makeHost();
+  await h.run("apply");
+  const rules = h.chain(4, "DOCKER-USER")!;
+  // No `-i` on the forwarded jump: a bridge named `tpx0` is covered like br-*.
+  assert(rules.some((r) => r === "-A DOCKER-USER -j TP-EGRESS"));
+  assert(!rules.some((r) => r.includes("TP-EGRESS") && r.includes(" -i ")));
 });

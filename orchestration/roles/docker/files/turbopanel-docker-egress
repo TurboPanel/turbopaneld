@@ -46,6 +46,10 @@ RESTORE6="${TP_EGRESS_IP6TABLES_RESTORE:-ip6tables-restore}"
 RESOLV_FILES="${TP_EGRESS_RESOLV_FILES:-/etc/resolv.conf /run/systemd/resolve/resolv.conf}"
 # Container-side interfaces; same set the firewall module treats as container ingress.
 IFACES="docker0 br-+"
+# Forwarded traffic is matched on every ingress interface: a network created
+# with a custom bridge name (`com.docker.network.bridge.name`) is not docker0 or
+# br-*, and nothing legitimate forwards to the addresses the chain drops.
+FORWARD_IFACES="any"
 HOOKS="INPUT DOCKER-USER"
 
 die() {
@@ -92,27 +96,48 @@ have_chain() { "$1" -w 5 -S "$2" >/dev/null 2>&1; }
 
 # Our jumps are the first rules of the chain (rule 1 is the `-N` line in -S).
 jumps_first() {
-  _n=$("$1" -w 5 -S "$2" | sed -n '2,3p' | grep -c -- "-j $CHAIN" || true)
-  [ "$_n" = 2 ]
+  _want=$(ifaces_for "$2" | wc -w | tr -d ' ')
+  _n=$("$1" -w 5 -S "$2" | sed -n "2,$((_want + 1))p" | grep -c -- "-j $CHAIN" || true)
+  [ "$_n" = "$_want" ]
+}
+
+# Interfaces a hook is matched on: forwarded traffic on all, host-bound on the bridges.
+ifaces_for() {
+  if [ "$1" = DOCKER-USER ]; then printf '%s' "$FORWARD_IFACES"; else printf '%s' "$IFACES"; fi
+}
+
+# `-i <iface>` for a named interface, nothing for "any".
+iface_args() {
+  if [ "$1" = any ]; then return 0; fi
+  printf '%s\n%s\n' -i "$1"
+}
+
+jump() {
+  _op=$1 _bin=$2 _hook=$3 _if=$4
+  # shellcheck disable=SC2046
+  if [ "$_op" = -I ]; then
+    "$_bin" -w 5 -I "$_hook" 1 $(iface_args "$_if") -j "$CHAIN"
+  else
+    "$_bin" -w 5 "$_op" "$_hook" $(iface_args "$_if") -j "$CHAIN"
+  fi
 }
 
 drop_jumps() {
-  for _i in $IFACES; do
-    while "$1" -w 5 -C "$2" -i "$_i" -j "$CHAIN" 2>/dev/null; do
-      "$1" -w 5 -D "$2" -i "$_i" -j "$CHAIN"
+  for _i in $(ifaces_for "$2"); do
+    while jump -C "$1" "$2" "$_i" 2>/dev/null; do
+      jump -D "$1" "$2" "$_i"
     done
   done
 }
 
 ensure_jumps() {
-  for _i in $IFACES; do
-    "$1" -w 5 -C "$2" -i "$_i" -j "$CHAIN" 2>/dev/null ||
-      "$1" -w 5 -I "$2" 1 -i "$_i" -j "$CHAIN"
+  for _i in $(ifaces_for "$2"); do
+    jump -C "$1" "$2" "$_i" 2>/dev/null || jump -I "$1" "$2" "$_i"
   done
   if ! jumps_first "$1" "$2"; then
     drop_jumps "$1" "$2"
-    for _i in $IFACES; do
-      "$1" -w 5 -I "$2" 1 -i "$_i" -j "$CHAIN"
+    for _i in $(ifaces_for "$2"); do
+      jump -I "$1" "$2" "$_i"
     done
   fi
 }
