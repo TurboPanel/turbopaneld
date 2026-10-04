@@ -19,7 +19,6 @@
     owner: "{{ item.owner | default(turbopanel_user) }}"
     group: "{{ item.group | default(turbopanel_group) }}"
     mode: "{{ item.mode }}"
-    follow: false
   loop:
     - {
         path: "{{ turbopanel_install_root }}/bin",
