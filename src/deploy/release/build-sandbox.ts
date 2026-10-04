@@ -200,16 +200,19 @@ async function makeTreeRemovable(path: string): Promise<void> {
  * access, and as a last resort the tree is renamed aside so the same
  * release can be built again. Resolves true when the tree is gone.
  */
-export async function removeBuildTree(path: string): Promise<boolean> {
+export async function removeBuildTree(
+  path: string,
+  remove: typeof Deno.remove = Deno.remove,
+): Promise<boolean> {
   try {
-    await Deno.remove(path, { recursive: true });
+    await remove(path, { recursive: true });
     return true;
   } catch (err) {
     if (err instanceof Deno.errors.NotFound) return true;
   }
   try {
     await makeTreeRemovable(path);
-    await Deno.remove(path, { recursive: true });
+    await remove(path, { recursive: true });
     return true;
   } catch (err) {
     if (err instanceof Deno.errors.NotFound) return true;

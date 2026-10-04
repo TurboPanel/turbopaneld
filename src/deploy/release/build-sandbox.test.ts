@@ -502,3 +502,67 @@ test("removeBuildWork reports nothing for a locked tree and clears it", async ()
     await Deno.remove(dir, { recursive: true });
   }
 });
+
+const stuck: typeof Deno.remove = () =>
+  Promise.reject(new Deno.errors.PermissionDenied("stuck"));
+
+test("a tree that cannot be removed is renamed aside so the release can build again", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "tp-sandbox-aside-" });
+  try {
+    const tree = join(dir, "abc123");
+    await Deno.mkdir(join(tree, "d"), { recursive: true });
+    assertEquals(await removeBuildTree(tree, stuck), false);
+    assertEquals(await Deno.stat(tree).catch(() => null), null);
+    const names = (await Array.fromAsync(Deno.readDir(dir))).map((e) => e.name);
+    assertEquals(names.length, 1);
+    assert(names[0].startsWith("q-") && names[0].endsWith("-abc123"));
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+test("removeBuildWork says when it had to move a tree aside", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "tp-sandbox-aside-" });
+  try {
+    const target = { ...(await work(dir)), workDir: join(dir, "w1") };
+    await Deno.mkdir(target.workDir);
+    const original = Deno.remove;
+    Deno.remove = stuck;
+    const messages: string[] = [];
+    try {
+      await removeBuildWork(target, (_s, line) => messages.push(line));
+    } finally {
+      Deno.remove = original;
+    }
+    assertEquals(messages.length, 1);
+    assertStringIncludes(messages[0], "moved aside");
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+test("the stale sweep retries a tree that was moved aside, without a unit stop", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "tp-sandbox-sweep-" });
+  try {
+    await Deno.mkdir(join(dir, "work", "q-k1-abc123", "d"), {
+      recursive: true,
+    });
+    await Deno.chmod(join(dir, "work", "q-k1-abc123", "d"), 0o000);
+    const { runFn, calls } = recordingRunFn();
+    const out: string[] = [];
+    await sweepStaleBuildWork(dir, {
+      runFn,
+      maxAgeMs: -1000,
+      onOutput: (_s, line) => out.push(line),
+    });
+    assertEquals(calls, []);
+    assertEquals(out.length, 1);
+    assertStringIncludes(out[0], "reclaimed");
+    assertEquals(
+      await Deno.stat(join(dir, "work", "q-k1-abc123")).catch(() => null),
+      null,
+    );
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
