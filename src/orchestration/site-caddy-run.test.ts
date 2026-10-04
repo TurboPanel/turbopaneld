@@ -57,11 +57,24 @@ test("roots lists the managed web root of each fragment once", async () => {
   ]);
 });
 
-test("roots skips release-backed and daemon-owned roots", async () => {
+test("roots names the releases tree of a release-backed site, not its current link", async () => {
   const out = await roots({
     "tp-a.conf": block("/srv/users/u1/sites/web/current/public"),
-    "tp-b.conf": block("/var/lib/turbopanel/sites/env/web/public"),
-    "tp-c.conf": block("/srv/users/u1/sites/web/webroots/public"),
+    "tp-b.conf": block("/srv/users/u1/sites/top/current"),
+    "tp-c.conf": block("/srv/users/u2/sites/app/current/dist/x"),
+  });
+  assertEquals(out.lines, [
+    "/srv/users/u1/sites/top/releases",
+    "/srv/users/u1/sites/web/releases",
+    "/srv/users/u2/sites/app/releases",
+  ]);
+});
+
+test("roots skips daemon-owned roots and look-alike names", async () => {
+  const out = await roots({
+    "tp-a.conf": block("/var/lib/turbopanel/sites/env/web/public"),
+    "tp-b.conf": block("/srv/users/u1/sites/web/webroots/public"),
+    "tp-c.conf": block("/srv/users/u1/sites/web/currently/public"),
   });
   assertEquals(out.lines, []);
 });
@@ -69,6 +82,7 @@ test("roots skips release-backed and daemon-owned roots", async () => {
 test("roots refuses a path that climbs out or doubles a slash", async () => {
   const out = await roots({
     "tp-a.conf": block("/srv/users/u1/sites/web/webroot/../../x/webroot"),
+    "tp-c.conf": block("/srv/users/u1/sites/web/current/../../x/current"),
     "tp-b.conf": block("/srv/users/u1//sites/web/webroot"),
   });
   assertEquals(out.lines, []);
@@ -110,6 +124,16 @@ test("the site Caddy unit starts through the launcher and never as plain Caddy",
     join(ORCHESTRATION, "roles/site-caddy/tasks/main.yml"),
   );
   assertStringIncludes(tasks, "tp-site-caddy-run");
+});
+
+test("a link two hops deep through shared/ is not followed in a release tree", async () => {
+  // Real mounts need root, so this pins the mapping the guarantee rests on: the
+  // tree a release-backed Caddy site is served from is mounted, so the second
+  // hop (public/x -> ../shared/uploads -> another owner's file) is never taken.
+  const out = await roots({
+    "tp-a.conf": block("/srv/users/u1/sites/web/current/public"),
+  });
+  assertEquals(out.lines, ["/srv/users/u1/sites/web/releases"]);
 });
 
 test("the launcher mounts nosymfollow and drops every privilege before Caddy", async () => {

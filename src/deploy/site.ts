@@ -1500,9 +1500,12 @@ async function writeHostingWebMetadata(
 
 /**
  * Release-backed site: metadata lives in `<siteRoot>/.turbopanel-hosting/`,
- * root-only (`0700`, files `0600`) — never inside the release, which is
- * read-only by the time this runs. Not group-readable: every web engine is a
- * member of the site owner's group, and nothing but root reads these files.
+ * never inside the release, which is read-only by the time this runs. The
+ * directory is root's and only traversable (`0711`); each file is owned by the
+ * site owner's Linux user and readable by that user alone (`0400`). Not
+ * group-readable: every web engine is a member of the site owner's group, so a
+ * group bit would let one owner's link reach another owner's values. The owner's
+ * own scripts and apps can still read their file.
  *
  * Files are staged in the daemon-owned site dir and installed through
  * the same `sudo -n install` seam every other managed config file uses, so the
@@ -1528,7 +1531,7 @@ async function writeReleaseHostingWebMetadata(
       "install",
       "-d",
       "-m",
-      "0700",
+      "0711",
       "-o",
       "root",
       "-g",
@@ -1565,9 +1568,9 @@ async function writeReleaseHostingWebMetadata(
         "-n",
         "install",
         "-m",
-        "0600",
+        "0400",
         "-o",
-        "root",
+        release.username,
         "-g",
         "root",
         staged,
@@ -3221,6 +3224,48 @@ type ApplyOneSiteResult = ApplySiteResult & {
   restartEngines?: SiteEngineId[];
 };
 
+/**
+ * The directories the site Caddy must hold mounted `nosymfollow` for these
+ * Caddy sites: a managed site's `webroot/` and a release-backed site's
+ * `releases/` (the unit mounts them once, at start; `current`, the platform's
+ * own link, stays outside).
+ */
+function siteCaddyMountDirs(
+  layout: LayoutPaths,
+  sites: readonly SiteApplySpec[],
+  releaseBindings: ReadonlyMap<string, SiteRelease> | undefined,
+  managedBindings: ReadonlyMap<string, SiteManagedDirectory> | undefined,
+): string[] {
+  const dirs = new Set<string>();
+  for (const site of sites) {
+    if (site.engine !== "caddy") continue;
+    const release = releaseBindings?.get(site.composeServiceName);
+    const managed = managedBindings?.get(site.composeServiceName);
+    if (release) {
+      dirs.add(siteReleasesDir(
+        principalHomePath(layout, release.username),
+        release.serviceId,
+      ));
+    } else if (managed) {
+      dirs.add(siteWebrootDir(
+        principalHomePath(layout, managed.username),
+        managed.serviceId,
+      ));
+    }
+  }
+  return [...dirs];
+}
+
+/** The directories among `dirs` the running site Caddy does not hold mounted. */
+async function siteCaddyUnmounted(dirs: readonly string[]): Promise<string[]> {
+  if (dirs.length === 0) return [];
+  const result = await run("sudo", hostSudoArgs(["-n", "site-caddy-mounts"]));
+  const mounted = new Set(
+    result.success ? result.stdout.split("\n").filter((l) => l !== "") : [],
+  );
+  return dirs.filter((dir) => !mounted.has(dir));
+}
+
 async function applyOneSite(
   layout: LayoutPaths,
   environmentId: string,
@@ -3301,15 +3346,6 @@ async function applyOneSite(
       { ...pathBase, sitesDir: sitesDirs.caddy },
       dockerBind,
     );
-    // A managed web root is mounted `nosymfollow` when the unit starts
-    // (`tp-site-caddy-run`, from the fragments on disk), so a new or changed
-    // fragment for one needs a restart, not a reload.
-    if (managed !== undefined && applied.staged.length > 0) {
-      return {
-        ...applied,
-        restartEngines: [...new Set([...restartEngines, "caddy" as const])],
-      };
-    }
     return { ...applied, ...restart };
   }
   if (site.engine === "nginx") {
@@ -3695,7 +3731,29 @@ export async function applySites(
         sitesDirs,
         hostVhosts,
       );
+      // `nosymfollow` is set up when the unit starts, so a directory it does
+      // not hold yet (a new site, or one recreated since) needs a restart.
+      const mountDirs = siteCaddyMountDirs(
+        layout,
+        sites,
+        releaseBindings,
+        managedDirectoryBindings,
+      );
+      if ((await siteCaddyUnmounted(mountDirs)).length > 0) {
+        plan.restartEngines.add("caddy");
+      }
       reloaded = [...retired, ...await reloadSiteEngines(layout, plan)];
+      // Fail loudly rather than serve a tree whose links would be followed.
+      const stillUnmounted = plan.restartEngines.has("caddy")
+        ? await siteCaddyUnmounted(mountDirs)
+        : [];
+      if (stillUnmounted.length > 0) {
+        throw new Error(
+          `the site Caddy did not mount ${
+            stillUnmounted.join(", ")
+          } nosymfollow`,
+        );
+      }
     } catch (err) {
       await rollbackUnsettledPhpRuntimes(plan);
       throw err;

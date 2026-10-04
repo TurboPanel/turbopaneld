@@ -2811,6 +2811,43 @@ test("cert-dates prints nothing when the hosting Caddy has issued no certificate
   });
 });
 
+test("site-caddy-mounts lists only the nosymfollow mounts under the home root, and nothing when the unit is down", async () => {
+  await withHost(async (host) => {
+    // No unit, no answer.
+    const down = await host.run(["site-caddy-mounts"]);
+    assertEquals(down.code, 0, down.stderr);
+    assertEquals(down.stdout, "");
+
+    const homes = host.path("srv/users");
+    const procs = host.path(
+      "sys/fs/cgroup/system.slice/turbopanel-site-caddy.service",
+    );
+    await Deno.mkdir(procs, { recursive: true });
+    await Deno.writeTextFile(join(procs, "cgroup.procs"), "4242\n4243\n");
+    await Deno.mkdir(host.path("proc/4242"), { recursive: true });
+    const line = (mp: string, opts: string) =>
+      `36 35 8:1 /x ${mp} ${opts} shared:1 - ext4 /dev/sda1 rw`;
+    await Deno.writeTextFile(
+      host.path("proc/4242/mountinfo"),
+      [
+        line(`${homes}/alice/sites/web/webroot`, "ro,nosuid,nodev,nosymfollow"),
+        line(`${homes}/alice/sites/web/releases`, "ro,nosymfollow"),
+        // Not nosymfollow, or not under the home root: never reported.
+        line(`${homes}/alice/sites/other/webroot`, "ro,nosuid"),
+        line("/srv/elsewhere/webroot", "ro,nosymfollow"),
+        line(`${homes}x/alice/webroot`, "ro,nosymfollow"),
+      ].join("\n") + "\n",
+    );
+    const up = await host.run(["site-caddy-mounts"]);
+    assertEquals(up.code, 0, up.stderr);
+    assertEquals(up.stdout.trim().split("\n"), [
+      `${homes}/alice/sites/web/webroot`,
+      `${homes}/alice/sites/web/releases`,
+    ]);
+    await refused(host, ["site-caddy-mounts", "/etc"]);
+  });
+});
+
 test("site-usage prints home and site sizes only, never follows a symlink and takes no arguments", async () => {
   await withHost(async (host) => {
     const sites = host.path("srv/users/alice/sites");

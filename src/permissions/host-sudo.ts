@@ -57,6 +57,7 @@ export const TP_HOST_VERBS: ReadonlySet<string> = new Set([
   "php-test",
   "cert-dates",
   "site-usage",
+  "site-caddy-mounts",
   "publish-open",
   "publish",
   "php-loopback-sync",

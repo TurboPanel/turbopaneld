@@ -7,25 +7,26 @@
 # owner could link from their own web root to a file that another owner keeps
 # in a group-readable place and have Caddy serve it. Here the Caddy process
 # runs in a private mount namespace where every managed web root
-# (`.../sites/<id>/webroot`) is bind-mounted read-only with `nosymfollow`
-# (Linux 5.10+), so a link inside one is never followed. Nothing else on the
-# host sees these mounts: the site owner's own PHP, apps and shell still follow
-# their own links. Release-backed sites are not mounted: their `current` link is
-# the platform's own, and every link inside a sealed release is confined to the
-# release at publish time.
+# (`.../sites/<id>/webroot`) and every release tree (`.../sites/<id>/releases`)
+# is bind-mounted read-only with `nosymfollow` (Linux 5.10+), so a link inside
+# one is never followed. Nothing else on the host sees these mounts: the site
+# owner's own PHP, apps and shell still follow their own links. The platform's
+# own `current` link sits outside the mount and is still followed.
 #
 # Verbs:
 #   roots SITES_DIR
-#       print each managed web root named by a `root * <path>` line in
-#       SITES_DIR/*.conf (the daemon's generated fragments), one per line.
+#       print each web root or release tree to mount, for the `root * <path>`
+#       lines in SITES_DIR/*.conf (the daemon's generated fragments), one per
+#       line.
 #   run SITES_DIR USER CADDY CADDYFILE
 #       the unit's ExecStart (as root, `+`): mount, then drop to USER and exec
 #       `caddy run`. FAILS CLOSED: when a root cannot be mounted, or the kernel
 #       or util-linux does not know `nosymfollow`, nothing starts.
 #
-# The roots come from the fragments on disk, so a new site needs a restart (the
-# daemon restarts the unit when a managed-directory fragment changes), and a
-# reboot or crash restart rebuilds the same set.
+# The roots come from the fragments on disk. A new site needs a restart: the
+# daemon reads the unit's mounts (`tp-host site-caddy-mounts`) and restarts it
+# when a directory its sites need is not mounted. A reboot or crash restart
+# rebuilds the same set.
 set -eu
 umask 077
 
@@ -34,7 +35,12 @@ tp_die() {
   exit 1
 }
 
-# `/<...>/sites/<serviceId>/webroot` and the characters tp-host allows in paths.
+# What gets mounted for each `root * <path>` line, paths limited to the
+# characters tp-host allows:
+#   .../sites/<serviceId>/webroot[/...]  -> .../sites/<serviceId>/webroot
+#   .../sites/<serviceId>/current[/...]  -> .../sites/<serviceId>/releases
+# `current` itself is the platform's own link and stays outside the mount; the
+# release it names is under `releases/`, so no link inside a release is followed.
 tp_roots() {
   [ -d "$1" ] || tp_die "no such directory $1"
   for _f in "$1"/*.conf; do
@@ -44,8 +50,8 @@ tp_roots() {
     case "$_p" in
       */../* | */.. | *//*) continue ;;
     esac
-    # Keep everything up to and including the `webroot` segment.
-    _w="$(printf '%s\n' "$_p" | sed -n 's/^\(\/.*\/sites\/[A-Za-z0-9_-][A-Za-z0-9_-]*\/webroot\)\(\/.*\)\{0,1\}$/\1/p')"
+    # Two plain expressions rather than one alternation, which BSD sed lacks.
+    _w="$(printf '%s\n' "$_p" | sed -n 's/^\(\/.*\/sites\/[A-Za-z0-9_-][A-Za-z0-9_-]*\)\/webroot\(\/.*\)\{0,1\}$/\1\/webroot/p;s/^\(\/.*\/sites\/[A-Za-z0-9_-][A-Za-z0-9_-]*\)\/current\(\/.*\)\{0,1\}$/\1\/releases/p')"
     [ -n "$_w" ] && printf '%s\n' "$_w"
   done | sort -u
 }
