@@ -64,3 +64,52 @@ test("each leaf is created on its own: the daemon account owns it, no recursion,
     assert(!("recurse" in args), "a leaf is never created recursively");
   }
 });
+
+test("metrics is a daemon-owned folder on daemon-only hosts and left to instance-launch co-located", async () => {
+  const tasks = await readYaml<Task[]>(join(ROLE, "tasks/main.yml"));
+  const task = tasks.find((t) => t.name?.includes("metrics folder"));
+  assert(task, "expected a metrics task in daemon-layout");
+  assertEquals(
+    task.when,
+    "not (turbopanel_after_instance_service | default(false) | bool)",
+  );
+  const args = task["ansible.builtin.file"] as Record<string, unknown>;
+  assertEquals(args.path, "{{ turbopanel_daemon_state_dir }}/metrics");
+  assertEquals(args.owner, "{{ turbopanel_user }}");
+  assertEquals(args.follow, false);
+  assert(args.recurse === undefined);
+  // The flag is true exactly where instance-launch runs on the same host.
+  for (
+    const [file, expected] of [
+      ["playbooks/instance-install.yml", true],
+      ["playbooks/daemon-colocated-refresh.yml", true],
+      ["playbooks/daemon-install.yml", false],
+    ] as const
+  ) {
+    const text = await Deno.readTextFile(
+      join(DAEMON_ROOT, "orchestration", file),
+    );
+    assertEquals(
+      /turbopanel_after_instance_service: true/.test(text),
+      expected,
+      file,
+    );
+  }
+  const launch = await Deno.readTextFile(
+    join(
+      DAEMON_ROOT,
+      "orchestration/roles/instance-launch/tasks/platform-runtime-dirs.yml",
+    ),
+  );
+  assert(
+    launch.includes('mode: "2770"') &&
+      launch.includes("turbopanel_metrics_dir"),
+  );
+});
+
+test("the command journal and release folders are leaves with their modes", () => {
+  const modes = new Map(DAEMON_STATE_LEAVES.map((l) => [l.name, l.mode]));
+  assertEquals(modes.get("commands"), "0750");
+  assertEquals(modes.get("release-records"), "0750");
+  assertEquals(modes.get("release-build"), "0700");
+});
