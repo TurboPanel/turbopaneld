@@ -187,8 +187,10 @@ export function instanceAcmeIssuerKey(
 ): string {
   const raw = instanceAcmeIssuerDirectory(settings);
   const url = new URL(raw);
-  const authority =
-    /^[^:/]+:\/\/(?:[^/?#@]*@)?([^/?#]*)/.exec(raw.trim())?.[1] ?? url.host;
+  // The authority as written (certmagic keeps an explicit port, even :443).
+  const afterScheme = raw.trim().split("://")[1] ?? "";
+  const written = afterScheme.split(/[/?#]/, 1)[0] ?? "";
+  const authority = written.slice(written.lastIndexOf("@") + 1) || url.host;
   const path = url.pathname.replaceAll(/[/\\]/g, "-").replace(/^-+|-+$/g, "");
   const key = path ? `${authority}-${path}` : authority;
   return key.toLowerCase().trim()

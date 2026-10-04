@@ -822,9 +822,7 @@ function waitForCertificates(
         hosts,
         had,
         issuerKey,
-        log,
-        elapsed,
-        now(),
+        { log, elapsed, nowMs: now() },
         run,
       )
     ) {
@@ -842,9 +840,7 @@ async function everyHostSettled(
   hosts: readonly string[],
   had: ReadonlyMap<string, InstanceAcmeCertificateBaseline>,
   issuerKey: string,
-  log: string,
-  elapsed: number,
-  nowMs: number,
+  { log, elapsed, nowMs }: { log: string; elapsed: number; nowMs: number },
   run: InstanceAcmeCommand,
 ): Promise<boolean> {
   for (const host of hosts) {

@@ -21,6 +21,11 @@ const PLAIN: Record<InstanceAcmeProblem, string> = {
   "timeout":
     "the certificate request did not finish in time on this server; check that this server can reach the internet and that port 80 is open, then try again",
 };
+function errorText(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  return typeof err === "string" ? err : "unknown error";
+}
+
 const GENERIC =
   "Let's Encrypt could not issue a certificate; see the control plane log for details";
 
@@ -73,7 +78,7 @@ export function instanceAcmeRowFailure(
   err: unknown,
   host: string | undefined,
 ): Error {
-  const raw = err instanceof Error ? err.message : String(err);
+  const raw = errorText(err);
   if (raw.startsWith(INSTANCE_ACME_HTTP01_PREFLIGHT_PREFIX) || !host) {
     return err instanceof Error ? err : new Error(raw);
   }
@@ -86,7 +91,7 @@ export function instanceAcmeWindowFailure(
   err: unknown,
   host: string | undefined,
 ): Error {
-  const raw = err instanceof Error ? err.message : String(err);
+  const raw = errorText(err);
   const known = raw.startsWith("port 80 is held by") ||
     WINDOW_MESSAGES.some(([pattern]) => pattern.test(raw));
   if (!known) return err instanceof Error ? err : new Error(raw);
@@ -107,7 +112,7 @@ export function noteInstanceAcmeFailure(
   issuerKey: string,
   nowMs: number,
 ): void {
-  const raw = err instanceof Error ? err.message : String(err);
+  const raw = errorText(err);
   if (instanceAcmeProblem(raw) !== "rate-limited") return;
   for (const host of hosts) {
     cooldowns.set(cooldownKey(host, issuerKey), nowMs + RATE_LIMIT_COOLDOWN_MS);
