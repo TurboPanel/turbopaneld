@@ -1033,32 +1033,32 @@ const SITES: CallSite[] = [
 
   // --- sites ----------------------------------------------------------------
   tpHost(
-    'src/deploy/site.ts|["-n","install","-d","-m","0750","-o","root","-g",group,metaDir]',
+    'src/deploy/site.ts|["-n","install","-d","-m","0700","-o","root","-g","root",metaDir]',
     {
       argv: [
         "install",
         "-d",
         "-m",
-        "0750",
+        "0700",
         "-o",
         "root",
         "-g",
-        "alice-grp",
+        "root",
         `${SITE}/meta`,
       ],
     },
   ),
   tpHost(
-    'src/deploy/site.ts|["-n","install","-m","0640","-o","root","-g",group,staged,target]',
+    'src/deploy/site.ts|["-n","install","-m","0600","-o","root","-g","root",staged,target]',
     {
       argv: [
         "install",
         "-m",
-        "0640",
+        "0600",
         "-o",
         "root",
         "-g",
-        "alice-grp",
+        "root",
         STAGED,
         `${SITE}/meta/robots.txt`,
       ],
