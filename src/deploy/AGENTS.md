@@ -199,6 +199,10 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    collection succeeds; a `ps`/parse failure never fails an otherwise-successful
    deploy.
 
+## Compose project per environment (upgrade note)
+
+The control plane names one Compose project per **environment** (it used to be one per project, so two environments of a project on one server replaced each other's containers). On an environment's first deploy under the new name, `retire-previous-projects.ts` removes **that environment's** containers still running under a name recorded in its `deployment.json` (`docker rm -f`, volumes kept). It never uses a whole-project `compose down`: the old name was shared with sibling environments, so containers are matched by the `com.turbopanel.environment` label or, for older containers, by `com.docker.compose.project.working_dir` equal to this environment's deployment directory. A deploy with zero container services clears the environment's containers the same way. Stop and start/restart use the names recorded in the manifest when the named project is not one of them. Named volumes the control plane registers are pinned by `name:` (storage id), so they no longer depend on the project name; data in a stack's old `<project>_<id>` volumes is kept on the host but not reused by the first deploy after this change.
+
 ## Git-backed releases
 
 Moved to [`release/AGENTS.md`](./release/AGENTS.md) — clone/fetch flow, release

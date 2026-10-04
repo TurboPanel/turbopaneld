@@ -4,74 +4,101 @@
  * The control plane names one Docker Compose project per environment. A stack
  * deployed under an earlier name (the old project-wide name) is still running
  * and still recorded in the environment's `deployment.json`. Before the new
- * name comes up, those containers are taken down (volumes are kept) so they do
- * not keep serving next to the new ones or hold the same ports. Zero services
- * means nothing new will come up, so the current project is taken down too:
- * containers of services that were removed from the compose must not linger.
+ * name comes up, this environment's containers under those names are removed
+ * (volumes are kept) so they do not keep serving next to the new ones or hold
+ * the same names and ports.
+ *
+ * The old name was shared by every environment of the project on this server,
+ * so a whole-project `compose down` would also remove a sibling environment's
+ * containers. Removal is therefore scoped to this environment: a container
+ * counts when it carries this environment's id label, or (older containers
+ * without the label) when Compose started it from this environment's
+ * deployment directory.
+ *
+ * Zero services means nothing new will come up, so the current project's
+ * containers go too: services removed from the compose must not linger.
  */
-import type { DockerCliResult, RunDockerStreamedFn } from "./docker-cli.ts";
+import type { RunDockerFn } from "./docker-cli.ts";
 import { forEachSequential } from "../util/sequential.ts";
 import { allProjects } from "./deployment-generations.ts";
-import {
-  composeFileArgs,
-  readDeploymentManifest,
-  resolveDeployedComposePaths,
-} from "./compose-files.ts";
+import { readDeploymentManifest } from "./compose-files.ts";
+import { LABEL_ENVIRONMENT } from "./labels.ts";
+
+const LABEL_COMPOSE_WORKING_DIR = "com.docker.compose.project.working_dir";
 
 export interface PreviousProjects {
   /** Project names the live deployment recorded, in manifest order. */
   readonly names: readonly string[];
-  /** Live compose chain those projects were started from. */
-  readonly composePaths: readonly string[];
 }
 
-/** Read before the new files are published, while the live ones are intact. */
+export interface RetireScope {
+  readonly environmentId: string;
+  /** `<stateDir>/deployments/<projectId>/<environmentId>`. */
+  readonly deploymentDir: string;
+  readonly includeCurrent?: boolean;
+}
+
+/** Read before the new files are published. */
 export async function readPreviousProjects(
   deploymentDir: string,
 ): Promise<PreviousProjects | null> {
   const manifest = await readDeploymentManifest(deploymentDir);
-  const composePaths = await resolveDeployedComposePaths(deploymentDir);
-  if (manifest === null || composePaths === null) return null;
-  return { names: allProjects(manifest), composePaths };
+  if (manifest === null) return null;
+  return { names: allProjects(manifest) };
 }
 
-async function composeDownKeepVolumes(
-  projectName: string,
-  composePaths: readonly string[],
-  runStreamed: RunDockerStreamedFn,
-): Promise<DockerCliResult> {
-  return await runStreamed([
-    ...composeFileArgs(projectName, composePaths),
-    "down",
-    "--remove-orphans",
+/** Container ids of `project` that belong to this environment. */
+async function ownContainerIds(
+  project: string,
+  scope: RetireScope,
+  run: RunDockerFn,
+): Promise<string[]> {
+  const listed = await run([
+    "ps",
+    "-a",
+    "--filter",
+    `label=com.docker.compose.project=${project}`,
+    "--format",
+    `{{.ID}}\t{{.Label "${LABEL_ENVIRONMENT}"}}\t{{.Label "${LABEL_COMPOSE_WORKING_DIR}"}}`,
   ]);
+  if (!listed.success) {
+    throw new Error(
+      `could not list the containers of the earlier compose project ${project}; ` +
+        "the earlier containers were left running",
+    );
+  }
+  return listed.stdout.split("\n").flatMap((line) => {
+    const [id, environment, workingDir] = line.split("\t");
+    if (!id) return [];
+    const mine = environment === scope.environmentId ||
+      workingDir === scope.deploymentDir;
+    return mine ? [id] : [];
+  });
 }
 
 /**
- * Take down every previously recorded project whose name is not
- * `currentProject`. With `includeCurrent` the current one goes too.
+ * Remove this environment's containers under every previously recorded project
+ * whose name is not `currentProject` (and the current one with
+ * `includeCurrent`). Containers of other environments are never touched.
  */
 export async function retirePreviousProjects(
   previous: PreviousProjects | null,
   currentProject: string,
-  runStreamed: RunDockerStreamedFn,
-  options: { includeCurrent?: boolean } = {},
+  run: RunDockerFn,
+  scope: RetireScope,
 ): Promise<string[]> {
   if (previous === null) return [];
   const names = new Set(previous.names.filter((n) => n !== currentProject));
-  if (options.includeCurrent === true) names.add(currentProject);
+  if (scope.includeCurrent === true) names.add(currentProject);
   const retired: string[] = [];
   await forEachSequential(names, async (name) => {
-    const result = await composeDownKeepVolumes(
-      name,
-      previous.composePaths,
-      runStreamed,
-    );
-    if (!result.success) {
+    const ids = await ownContainerIds(name, scope, run);
+    if (ids.length === 0) return;
+    const removed = await run(["rm", "-f", ...ids]);
+    if (!removed.success) {
       throw new Error(
-        `could not take down previous compose project ${name}: ${
-          result.stderr.trim().split("\n").pop() ?? "docker compose failed"
-        }`,
+        `could not remove the containers of the earlier compose project ${name}; ` +
+          "stop them by hand, then deploy again",
       );
     }
     retired.push(name);

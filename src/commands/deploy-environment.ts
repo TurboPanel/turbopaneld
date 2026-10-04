@@ -1685,8 +1685,12 @@ async function deployContainerServices(
       await retirePreviousProjects(
         previousProjects,
         parsedPayload.projectName,
-        runStreamed,
-        { includeCurrent: true },
+        run,
+        {
+          environmentId: parsedPayload.environmentId,
+          deploymentDir,
+          includeCurrent: true,
+        },
       );
       const livePaths = await publishStagedRuntimeCompose(
         deploymentDir,
@@ -1715,7 +1719,8 @@ async function deployContainerServices(
     await retirePreviousProjects(
       previousProjects,
       parsedPayload.projectName,
-      runStreamed,
+      run,
+      { environmentId: parsedPayload.environmentId, deploymentDir },
     );
 
     const serviceHooks = parsedPayload.serviceHooks ?? [];

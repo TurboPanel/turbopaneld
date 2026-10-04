@@ -255,30 +255,47 @@ test({
 
 test({
   name:
-    "a project renamed between deploys takes the old-named stack down (volumes kept) before the new one comes up",
+    "a project renamed between deploys removes only this environment's old containers, never a sibling's",
   permissions: { env: true, read: true, write: true, run: true },
   fn: () =>
-    withState(async () => {
+    withState(async (dir) => {
       const docker = fakeDocker([HEALTHY]);
+      const sharedRows = [
+        `c-own\t${ENVIRONMENT_ID}\t${dir}`,
+        `c-own-old\t\t${dir}`, // started before the environment label existed
+        "c-sibling\tother-env\t/state/deployments/proj-seq/other-env",
+      ].join("\n");
+      const run = (args: string[]) => {
+        if (
+          args[0] === "ps" && args.includes(
+            `label=com.docker.compose.project=${PROJECT_NAME}`,
+          )
+        ) {
+          docker.calls.push([...args]);
+          return ok(sharedRows);
+        }
+        return docker.run(args);
+      };
       for (const strategy of [undefined, "sequential"] as const) {
         const extra = strategy ? { deployStrategy: strategy } : {};
-        await deploy(payload("nginx:1", extra), docker.run);
+        await deploy(payload("nginx:1", extra), run);
         docker.calls.length = 0;
         await deploy(
           payload("nginx:2", { ...extra, projectName: "env-new-name" }),
-          docker.run,
+          run,
         );
-        const downIdx = docker.calls.findIndex((c) =>
-          c.includes("down") && c[2] === PROJECT_NAME
-        );
+        const rmIdx = docker.calls.findIndex((c) => c[0] === "rm");
         const upIdx = docker.calls.findIndex((c) =>
           c.includes("up") && c[2] === "env-new-name"
         );
-        assert(downIdx >= 0, `old project taken down (${strategy})`);
-        assert(upIdx > downIdx, `down precedes up (${strategy})`);
-        assertEquals(docker.calls[downIdx].includes("--volumes"), false);
-        // Back to the original name for the next round.
-        await deploy(payload("nginx:3", extra), docker.run);
+        assert(rmIdx >= 0, `old containers removed (${strategy})`);
+        assert(upIdx > rmIdx, `removal precedes up (${strategy})`);
+        assertEquals(docker.calls[rmIdx], ["rm", "-f", "c-own", "c-own-old"]);
+        assertEquals(
+          docker.calls.some((c) => c.includes("down")),
+          false,
+        );
+        await deploy(payload("nginx:3", extra), run);
         docker.calls.length = 0;
       }
     }),

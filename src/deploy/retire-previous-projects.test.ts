@@ -13,65 +13,94 @@ import {
 
 const test = Deno.test.bind(Deno);
 
-const ok: DockerCliResult = { success: true, code: 0, stdout: "", stderr: "" };
-const previous = { names: ["proj-1"], composePaths: ["/d/compose.yaml"] };
+const ok = (stdout = ""): DockerCliResult => ({
+  success: true,
+  code: 0,
+  stdout,
+  stderr: "",
+});
+const previous = { names: ["proj-1"] };
+const scope = { environmentId: "env-1", deploymentDir: "/d/proj-1/env-1" };
 
-function recorder(result: DockerCliResult = ok) {
+/** Two environments share project `proj-1` on the host. */
+const rows = [
+  "a1\tenv-1\t/d/proj-1/env-1",
+  "a2\t\t/d/proj-1/env-1",
+  "b1\tenv-2\t/d/proj-1/env-2",
+  "b2\t\t/d/proj-1/env-2",
+].join("\n");
+
+function recorder(psResult: DockerCliResult = ok(rows), rmOk = true) {
   const calls: string[][] = [];
   return {
     calls,
     run: (args: string[]) => {
       calls.push(args);
-      return Promise.resolve(result);
+      if (args[0] === "ps") return Promise.resolve(psResult);
+      return Promise.resolve(
+        rmOk ? ok() : { success: false, code: 1, stdout: "", stderr: "x" },
+      );
     },
   };
 }
 
-test("retirePreviousProjects takes down an earlier-named project, keeps volumes", async () => {
+test("retirePreviousProjects removes only this environment's containers; a sibling's survive", async () => {
   const r = recorder();
-  const retired = await retirePreviousProjects(previous, "env-1", r.run);
+  const retired = await retirePreviousProjects(
+    previous,
+    "env-1",
+    r.run,
+    scope,
+  );
   assertEquals(retired, ["proj-1"]);
-  assertEquals(r.calls, [[
-    "compose",
-    "-p",
-    "proj-1",
-    "-f",
-    "/d/compose.yaml",
-    "down",
-    "--remove-orphans",
-  ]]);
+  assertEquals(r.calls[1], ["rm", "-f", "a1", "a2"]);
+  assertEquals(r.calls.flat().some((a) => a === "b1" || a === "b2"), false);
 });
 
 test("retirePreviousProjects leaves the current project alone by default", async () => {
   const r = recorder();
-  assertEquals(await retirePreviousProjects(previous, "proj-1", r.run), []);
+  assertEquals(
+    await retirePreviousProjects(previous, "proj-1", r.run, scope),
+    [],
+  );
   assertEquals(r.calls.length, 0);
 });
 
 test("retirePreviousProjects includeCurrent clears the current project (zero services)", async () => {
   const r = recorder();
   const retired = await retirePreviousProjects(previous, "proj-1", r.run, {
+    ...scope,
     includeCurrent: true,
   });
   assertEquals(retired, ["proj-1"]);
 });
 
-test("retirePreviousProjects does nothing without a previous deployment", async () => {
-  const r = recorder();
-  assertEquals(await retirePreviousProjects(null, "env-1", r.run), []);
-  assertEquals(r.calls.length, 0);
+test("retirePreviousProjects does nothing without a previous deployment or without own containers", async () => {
+  const r = recorder(ok("b1\tenv-2\t/d/proj-1/env-2"));
+  assertEquals(await retirePreviousProjects(null, "env-1", r.run, scope), []);
+  assertEquals(
+    await retirePreviousProjects(previous, "env-1", r.run, scope),
+    [],
+  );
+  assertEquals(r.calls.filter((c) => c[0] === "rm").length, 0);
 });
 
-test("retirePreviousProjects surfaces a failed down", async () => {
-  const r = recorder({ success: false, code: 1, stdout: "", stderr: "boom\n" });
+test("retirePreviousProjects explains a failed listing or removal in plain words", async () => {
+  const bad = recorder({ success: false, code: 1, stdout: "", stderr: "x" });
   await assertRejects(
-    () => retirePreviousProjects(previous, "env-1", r.run),
+    () => retirePreviousProjects(previous, "env-1", bad.run, scope),
     Error,
-    "proj-1",
+    "left running",
+  );
+  const noRm = recorder(ok(rows), false);
+  await assertRejects(
+    () => retirePreviousProjects(previous, "env-1", noRm.run, scope),
+    Error,
+    "stop them by hand",
   );
 });
 
-test("readPreviousProjects reads the live manifest and compose chain", async () => {
+test("readPreviousProjects reads the recorded project names, with no compose file needed", async () => {
   const dir = await Deno.makeTempDir();
   try {
     assertEquals(await readPreviousProjects(dir), null);
@@ -79,6 +108,7 @@ test("readPreviousProjects reads the live manifest and compose chain", async () 
       join(dir, RUNTIME_COMPOSE_FILENAME),
       "services: {}\n",
     );
+    await Deno.remove(join(dir, RUNTIME_COMPOSE_FILENAME));
     await writeDeploymentManifest(dir, {
       version: 2,
       projectId: "p",
@@ -89,9 +119,7 @@ test("readPreviousProjects reads the live manifest and compose chain", async () 
       composeSha256: "a".repeat(64),
       services: { web: { replicas: 1 } },
     });
-    const prev = await readPreviousProjects(dir);
-    assertEquals(prev?.names, ["p"]);
-    assertEquals(prev?.composePaths, [join(dir, RUNTIME_COMPOSE_FILENAME)]);
+    assertEquals((await readPreviousProjects(dir))?.names, ["p"]);
   } finally {
     await Deno.remove(dir, { recursive: true });
   }
