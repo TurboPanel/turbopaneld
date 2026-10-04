@@ -25,6 +25,10 @@ import {
 } from "../deploy/compose-files.ts";
 import { singleGeneration } from "../deploy/deployment-generations.ts";
 import {
+  readPreviousProjects,
+  retirePreviousProjects,
+} from "../deploy/retire-previous-projects.ts";
+import {
   applyRailpackImagesToComposeYaml,
   mergeComposeOverlayFragments,
   mergeOverlayIntoComposeYaml,
@@ -1589,6 +1593,8 @@ async function deployContainerServices(
   const onLine = (event: { stream: "stdout" | "stderr"; line: string }) =>
     logSink.onLine(event.stream, event.line);
   const stageDir = await resetComposeStageDir(deploymentDir);
+  // Read before publish replaces the live files.
+  const previousProjects = await readPreviousProjects(deploymentDir);
   try {
     const stagedPath = join(stageDir, RUNTIME_COMPOSE_FILENAME);
     let yaml = applySecretFilePaths(
@@ -1674,6 +1680,14 @@ async function deployContainerServices(
     );
 
     if (resolved.serviceNames.length === 0) {
+      // Nothing comes up, so containers an earlier deploy started would keep
+      // running untracked: take the project (and any earlier-named one) down.
+      await retirePreviousProjects(
+        previousProjects,
+        parsedPayload.projectName,
+        runStreamed,
+        { includeCurrent: true },
+      );
       const livePaths = await publishStagedRuntimeCompose(
         deploymentDir,
         stageDir,
@@ -1722,6 +1736,13 @@ async function deployContainerServices(
     }
 
     await ensureDeployNetworks(input);
+
+    // A stack started under an earlier project name is replaced, not kept.
+    await retirePreviousProjects(
+      previousProjects,
+      parsedPayload.projectName,
+      runStreamed,
+    );
 
     if (parsedPayload.noCache === true) {
       await runComposeBuild(input, chain, onLine);
