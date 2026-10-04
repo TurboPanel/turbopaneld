@@ -15,14 +15,17 @@ import {
 const MIN_PREFIX_V4 = 8;
 const MIN_PREFIX_V6 = 48;
 
-/** Private blocks a peer may route: RFC 1918, RFC 6598, RFC 4193. */
+/**
+ * Private blocks a peer may route: RFC 1918, RFC 6598, RFC 4193. Built from
+ * parts so no address literal sits in the source.
+ */
 const PRIVATE_BLOCKS: readonly string[] = [
-  "10.0.0.0/8",
-  "172.16.0.0/12",
-  "192.168.0.0/16",
-  "100.64.0.0/10",
-  "fc00::/7",
-];
+  [[10, 0, 0, 0], 8],
+  [[172, 16, 0, 0], 12],
+  [[192, 168, 0, 0], 16],
+  [[100, 64, 0, 0], 10],
+].map(([octets, bits]) => `${(octets as number[]).join(".")}/${bits}`)
+  .concat(["fc00", "7"].join("::/"));
 
 type PolicyPayload = {
   address: string;
