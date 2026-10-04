@@ -427,6 +427,8 @@ export type BackupPolicyWireEntry = {
   copyProvider?: CopyBackupProvider;
   volumeName?: string;
   hostPath?: string;
+  ownerUsername?: string;
+  composeProject?: string;
   organizationId?: string;
   storageId?: string;
   onCalendar: string;
@@ -452,6 +454,10 @@ export type CopyBackupSource = {
   copyProvider: CopyBackupProvider;
   volumeName?: string;
   hostPath?: string;
+  /** The site owner's Linux user; required with `hostPath`. */
+  ownerUsername?: string;
+  /** A docker copy: the project label an externally named volume must carry. */
+  composeProject?: string;
   organizationId?: string;
   storageId?: string;
 };
@@ -7467,9 +7473,13 @@ const COPY_HOST_PATH_SEGMENT_RE = /^[\w.@+-]+$/;
 const COPY_SOURCE_FIELDS = [
   "volumeName",
   "hostPath",
+  "ownerUsername",
+  "composeProject",
   "organizationId",
   "storageId",
 ] as const;
+const COPY_OWNER_USERNAME_RE = /^[A-Za-z_][A-Za-z0-9_-]{0,63}$/;
+const COPY_COMPOSE_PROJECT_RE = /^[a-z0-9][a-z0-9_-]*$/;
 
 /**
  * An absolute, already-normalized host directory: `/`-separated segments of a
@@ -7503,12 +7513,19 @@ function parsePathCopySource(
     if (
       !isSafeCopyHostPath(raw.hostPath) ||
       raw.organizationId !== undefined ||
-      raw.storageId !== undefined
+      raw.storageId !== undefined ||
+      raw.composeProject !== undefined ||
+      typeof raw.ownerUsername !== "string" ||
+      !COPY_OWNER_USERNAME_RE.test(raw.ownerUsername)
     ) {
       throw new Error("Invalid path copy source hostPath");
     }
     source.hostPath = raw.hostPath;
+    source.ownerUsername = raw.ownerUsername;
     return;
+  }
+  if (raw.ownerUsername !== undefined || raw.composeProject !== undefined) {
+    throw new Error("Invalid path copy source");
   }
   if (
     !isCanonicalBackupUuid(raw.organizationId) ||
@@ -7549,11 +7566,25 @@ export function parseCopyBackupSource(
   }
   if (
     raw.hostPath !== undefined || raw.organizationId !== undefined ||
-    raw.storageId !== undefined
+    raw.ownerUsername !== undefined
   ) {
     throw new Error("A docker copy source cannot name a host path");
   }
+  if (!isCanonicalBackupUuid(raw.storageId)) {
+    throw new Error("A docker copy source needs a storageId");
+  }
+  if (
+    raw.composeProject !== undefined &&
+    (typeof raw.composeProject !== "string" ||
+      !COPY_COMPOSE_PROJECT_RE.test(raw.composeProject))
+  ) {
+    throw new Error("Invalid docker copy source composeProject");
+  }
   source.volumeName = raw.volumeName;
+  source.storageId = raw.storageId;
+  if (raw.composeProject !== undefined) {
+    source.composeProject = raw.composeProject;
+  }
   return source;
 }
 
