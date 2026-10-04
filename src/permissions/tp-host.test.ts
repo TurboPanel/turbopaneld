@@ -319,6 +319,32 @@ test("the daemon's own unit files pass; privileged or foreign units do not", asy
         `stacked exec prefix ${JSON.stringify(prefix)}`,
         service.replace("ExecStart=", `ExecStart=${prefix}`),
       ]),
+      // systemd unquotes and unescapes the first word before it reads the
+      // prefix, so these run as root too.
+      ...[
+        `"+/bin/sh" "-c" "id"`,
+        `-"+/bin/sh" "-c" "id"`,
+        `'+/bin/sh' -c id`,
+        `\\x2b/bin/sh -c id`,
+        `"\\x2b/bin/sh" -c id`,
+        `"!/bin/sh" -c id`,
+        `sh -c id`,
+        `"sh" "-c" "id"`,
+        ``,
+      ].flatMap((exec): Array<[string, string]> => [
+        [
+          `quoted or escaped exec ${JSON.stringify(exec)}`,
+          service.replace(/^ExecStart=.*$/m, `ExecStart=${exec}`),
+        ],
+        [
+          `ExecReload ${JSON.stringify(exec)}`,
+          service.replace("[Service]", `[Service]\nExecReload=${exec}`),
+        ],
+        [
+          `ExecStartPre ${JSON.stringify(exec)}`,
+          service.replace("[Service]", `[Service]\nExecStartPre=${exec}`),
+        ],
+      ]),
       [
         "root pre-start",
         service.replace("[Service]", "[Service]\nExecStartPre=!/bin/sh -c id"),
@@ -3355,6 +3381,10 @@ test("the WireGuard config: only the keys the daemon renders, never a hook", asy
           "Endpoint = $(id):1",
         ),
         WG_CONF.replace("[Peer]", "[Script]"),
+        WG_CONF.replace(
+          "AllowedIPs = 10.77.0.2/32, fd00::2/128",
+          "AllowedIPs = ",
+        ),
         `${WG_CONF}# x\rPostUp = /x\n`,
         `${WG_CONF}# x\0PostUp = /x\n`,
       ]
@@ -3666,6 +3696,7 @@ test("shared php-fpm master pools: only what the daemon renders, never a root wo
       `${good}chroot = /\n`,
       `${good}php_admin_value[extension] = /var/lib/turbopanel/spool/x.so\n`,
       `${good}php_admin_value[zend_extension] = /x.so\n`,
+      `${good}php_admin_value[EXTENSION_DIR] = /x\n`,
       `${good}security.limit_extensions =\n`,
       `${good}; x\ruser = root\n`,
       `${good}; x\0user = root\n`,
@@ -3688,5 +3719,33 @@ test("shared php-fpm master pools: only what the daemon renders, never a root wo
       ]);
       await refused(host, ["tee", dest], content);
     }
+  });
+});
+
+test("a directory renamed over a php-fpm series or pools directory is refused", async () => {
+  await withHost(async (host) => {
+    const php = host.path("etc/turbopanel/php");
+    await Deno.mkdir(`${php}/8.4/pools`, { recursive: true });
+    await Deno.mkdir(`${php}/8.4/evil`, { recursive: true });
+    await Deno.mkdir(`${php}/evil`, { recursive: true });
+    await refused(host, [
+      "mv",
+      "-T",
+      "-f",
+      `${php}/8.4/evil`,
+      `${php}/8.4/pools`,
+    ]);
+    await refused(host, ["mv", "-T", "-f", `${php}/evil`, `${php}/8.4`]);
+    await refused(host, ["mv", "-f", `${php}/evil`, `${php}/8.4`]);
+    // The daemon's own candidate-to-live rename inside pools/ still works.
+    await Deno.writeTextFile(`${php}/8.4/pools/a.conf.candidate`, "x\n");
+    const ok = await host.run([
+      "mv",
+      "-f",
+      "--",
+      `${php}/8.4/pools/a.conf.candidate`,
+      `${php}/8.4/pools/a.conf`,
+    ]);
+    assertEquals(ok.code, 0, ok.stderr);
   });
 });

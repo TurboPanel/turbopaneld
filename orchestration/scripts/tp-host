@@ -182,7 +182,7 @@ tp_path_class() {
   esac
   # The shared php-fpm master runs as root and reads its main config and every
   # conf.d/*.ini at start (`extension=` loads code into it). Only Ansible writes
-  # those; the daemon keeps just pool.d/*.conf here.
+  # those; the daemon keeps just pools/*.conf here.
   case "$_pc" in
     "$R_CONFIG"/php/conf.d|"$R_CONFIG"/php/conf.d/*|"$R_CONFIG"/php/*/conf.d|"$R_CONFIG"/php/*/conf.d/*|"$R_CONFIG"/php/*/php-fpm.conf) return 1 ;;
   esac
@@ -825,7 +825,7 @@ tp_phppool_ok() {
       if (k ~ /^pm\.(max_children|start_servers|min_spare_servers|max_spare_servers|max_requests|process_idle_timeout)$/ || k == "request_terminate_timeout") return word(v)
       if (k == "chdir") return v ~ /^\/[A-Za-z0-9._\/@+:-]*$/
       if (k == "catch_workers_output" || k == "decorate_workers_output" || k == "clear_env") return v == "yes" || v == "no"
-      if (k ~ /^php_admin_value\[[A-Za-z0-9._]+\]$/) return k !~ /extension/ && v !~ /^[ \t]/
+      if (k ~ /^php_admin_value\[[A-Za-z0-9._]+\]$/) return tolower(k) !~ /extension/ && v !~ /^[ \t]/
       return -1
     }
     /^[ \t]*$/ || /^;/ { next }
@@ -935,13 +935,11 @@ tp_unit_ok() {
       if (section == "") fail("directive outside a section: " key)
       if (key ~ /^X-TurboPanel-[A-Za-z]+$/ && section == "Unit") next
       if (!((section, key) in ok)) fail("directive " section "." key)
-      # systemd skips leading whitespace, then any run of the prefix characters
-      # `@ - : + ! |` in any order; `+`, `!`, `:` and `|` lift or alter the
-      # privilege limits, so a run holding one is refused whatever else is in it.
-      if (key ~ /^Exec/) {
-        pre = val; sub(/^[[:space:]]+/, "", pre); match(pre, /^[-@+!:|]*/)
-        if (substr(pre, 1, RLENGTH) ~ /[+!:|]/) fail(key " with a privileged prefix")
-      }
+      # systemd unquotes and unescapes the first word before it reads the
+      # prefix characters, so a quoted or escaped `+` would still lift the
+      # privilege limits. Only an absolute path may follow (after optional
+      # whitespace, one optional opening quote and the harmless `-`/`@`).
+      if (key ~ /^Exec/ && val !~ /^[ \t]*"?[-@]*\//) fail(key " must start with an absolute path")
       if (key == "User") user = val
       if (key == "Group") group = val
       if (key == "Slice") slice = val
@@ -1956,6 +1954,10 @@ tp_verb_mv() {
   # Renaming a directory over the one holding php/sites would swap in config
   # no check has seen.
   [ "$2" != "$R_CONFIG/php" ] || tp_die "refusing path $2"
+  # Nor over a series directory or its pools directory: the files inside would
+  # reach the root php-fpm master without the pool check they get on install.
+  [ "${2%/*}" != "$R_CONFIG/php" ] || tp_die "refusing path $2"
+  case "$2" in "$R_CONFIG"/php/*/pools) tp_die "refusing path $2" ;; esac
   tp_path_class "$1" >/dev/null || tp_die "refusing path $1"
   tp_refuse_root_entry "$1"
   tp_refuse_root_entry "$2"

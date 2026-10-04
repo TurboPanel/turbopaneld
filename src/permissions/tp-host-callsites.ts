@@ -1118,7 +1118,7 @@ const SITES: CallSite[] = [
     setup: file(`${CONF}/openlitespeed/sites/tp-env1-www.conf`),
   }),
   tpHost('src/deploy/site.ts|["-n","rm","-f",path]', {
-    argv: ["rm", "-f", `${CONF}/php/8.4/pool.d/svc1.conf`],
+    argv: ["rm", "-f", `${CONF}/php/8.4/pools/svc1.conf`],
   }),
   tpHost('src/deploy/site.ts|["-n","chown","-R",`${user}:${group}`,base]', {
     argv: ["chown", "-R", "alice:alice-grp", `${SITE}/webroot`],
