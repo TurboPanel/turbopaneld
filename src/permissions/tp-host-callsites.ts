@@ -687,6 +687,31 @@ const SITES: CallSite[] = [
   tpHost('src/deploy/ingress.ts|["-n","systemctl","reload",CADDY_SERVICE]', {
     argv: ["systemctl", "reload", "turbopanel-hosting-caddy.service"],
   }),
+  tpHost(
+    'src/deploy/ingress.ts|["-n","systemctl","is-active","--quiet",CADDY_SERVICE]',
+    {
+      argv: [
+        "systemctl",
+        "is-active",
+        "--quiet",
+        "turbopanel-hosting-caddy.service",
+      ],
+    },
+  ),
+  sudo(
+    'src/deploy/ingress.ts|["-n","-u",HOSTING_CADDY_USER,"--",join(layout.runtimesDir,"caddy","current","caddy"),"validate","--adapter","caddyfile","--config",candidateFile]',
+    {
+      runas: "tpedge",
+      argv: [
+        `${VENDOR}/caddy/current/caddy`,
+        "validate",
+        "--adapter",
+        "caddyfile",
+        "--config",
+        "/etc/turbopanel/hosting/Caddyfile.next",
+      ],
+    },
+  ),
 
   // --- control-plane Let's Encrypt ------------------------------------------
   tpHost(

@@ -1472,44 +1472,232 @@ test("ensureServiceIngress rejects identity serviceId mismatch", async () => {
   }
 });
 
-test("rewriteHostingCaddySites writes site snippet and best-effort reloads", async () => {
+function hostingPayload(environmentId: string, hostname: string) {
+  return {
+    environmentId,
+    projectId: "proj-1",
+    organizationId: "org-1",
+    projectName: "demo",
+    composeFiles: [{
+      filename: "compose.yaml",
+      role: "runtime" as const,
+      content: "services: {}",
+    }],
+    hostings: [
+      {
+        hostingId: "h1",
+        serviceId: "s1",
+        composeServiceName: "web",
+        hostnames: [hostname],
+        bindAddress: "203.0.113.10",
+      },
+    ],
+  };
+}
+
+const noGrant = () => Promise.resolve();
+
+test("rewriteHostingCaddySites validates the staged set, then activates and reloads", async () => {
   const { layout, cleanup } = await makeTestLayout();
-  const reloads: string[][] = [];
+  const calls: string[][] = [];
   const restore = setIngressHostCommandForTest((_command, args) => {
-    reloads.push([...args]);
-    return Promise.resolve({ success: false, stderr: "unit not installed" });
+    calls.push([...args]);
+    return Promise.resolve({ success: true, stderr: "" });
   });
   try {
-    await rewriteHostingCaddySites(layout, {
-      environmentId: "env-caddy-1",
-      projectId: "proj-1",
-      organizationId: "org-1",
-      projectName: "demo",
-      composeFiles: [{
-        filename: "compose.yaml",
-        role: "runtime",
-        content: "services: {}",
-      }],
-      hostings: [
-        {
-          hostingId: "h1",
-          serviceId: "s1",
-          composeServiceName: "web",
-          hostnames: ["app.example.com"],
-          bindAddress: "203.0.113.10",
-        },
-      ],
-    });
-    const sitePath = join(
-      layout.configDir,
-      "hosting",
-      "sites",
-      "env-caddy-1.caddy",
+    await rewriteHostingCaddySites(
+      layout,
+      hostingPayload("env-caddy-1", "app.example.com"),
+      undefined,
+      noGrant,
     );
-    const content = await Deno.readTextFile(sitePath);
+    const hostingDir = join(layout.configDir, "hosting");
+    const sitesDir = join(hostingDir, "sites");
+    const content = await Deno.readTextFile(
+      join(sitesDir, "env-caddy-1.caddy"),
+    );
     assertStringIncludes(content, "app.example.com");
     assertStringIncludes(content, "203.0.113.10");
-    assertEquals(reloads.some((a) => a.includes("reload")), true);
+
+    // The account that runs Caddy validates the pinned argv, on the staged
+    // Caddyfile, before the reload.
+    const validateAt = calls.findIndex((a) => a.includes("validate"));
+    const reloadAt = calls.findIndex((a) => a.includes("reload"));
+    assertEquals(validateAt >= 0 && reloadAt > validateAt, true);
+    const validate = calls[validateAt]!;
+    assertEquals(validate.slice(validate.indexOf("-u")), [
+      "-u",
+      "tpedge",
+      "--",
+      join(layout.runtimesDir, "caddy", "current", "caddy"),
+      "validate",
+      "--adapter",
+      "caddyfile",
+      "--config",
+      join(hostingDir, "Caddyfile.next"),
+    ]);
+
+    // Nothing is left beside the live glob.
+    assertEquals(
+      [...Deno.readDirSync(sitesDir)].map((e) => e.name).sort(),
+      ["env-caddy-1.acme-hostnames.json", "env-caddy-1.caddy"],
+    );
+    assertEquals(
+      [...Deno.readDirSync(hostingDir)].some((e) => e.name.endsWith(".next")),
+      false,
+    );
+  } finally {
+    restore();
+    await cleanup();
+  }
+});
+
+test("rewriteHostingCaddySites refuses a set the hosting Caddy cannot load and leaves the live files alone", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  let candidate = "";
+  let refuse = false;
+  const calls: string[][] = [];
+  const restore = setIngressHostCommandForTest((_command, args) => {
+    calls.push([...args]);
+    if (args.includes("validate") && refuse) {
+      // What `caddy validate` is asked to load: the staged set only.
+      const sites = join(
+        layout.configDir,
+        "hosting",
+        "sites.next",
+      );
+      candidate = [...Deno.readDirSync(sites)].map((e) => e.name).sort()
+        .join(",");
+      return Promise.resolve({
+        success: false,
+        stderr: "ambiguous site definition: app.example.com",
+      });
+    }
+    return Promise.resolve({ success: true, stderr: "" });
+  });
+  try {
+    await rewriteHostingCaddySites(
+      layout,
+      hostingPayload("env-a", "app.example.com"),
+      undefined,
+      noGrant,
+    );
+    const sitesDir = join(layout.configDir, "hosting", "sites");
+    const before = await Deno.readTextFile(join(sitesDir, "env-a.caddy"));
+
+    refuse = true;
+    calls.length = 0;
+    await assertRejects(
+      () =>
+        rewriteHostingCaddySites(
+          layout,
+          hostingPayload("env-b", "app.example.com"),
+          undefined,
+          noGrant,
+        ),
+      Error,
+      "ambiguous site definition",
+    );
+    // The candidate held the other environment's file plus the new one.
+    assertEquals(candidate, "env-a.caddy,env-b.caddy");
+    // Nothing reached the live glob, no reload ran, nothing was left behind.
+    assertEquals(calls.some((a) => a.includes("reload")), false);
+    assertEquals(
+      [...Deno.readDirSync(sitesDir)].map((e) => e.name).sort(),
+      ["env-a.acme-hostnames.json", "env-a.caddy"],
+    );
+    assertEquals(
+      await Deno.readTextFile(join(sitesDir, "env-a.caddy")),
+      before,
+    );
+  } finally {
+    restore();
+    await cleanup();
+  }
+});
+
+test("rewriteHostingCaddySites restores the previous snippet and fails when a running Caddy refuses the reload", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  let reloadOk = true;
+  const restore = setIngressHostCommandForTest((_command, args) =>
+    Promise.resolve({
+      success: !(args.includes("reload") && !reloadOk),
+      stderr: "reload refused",
+    })
+  );
+  try {
+    await rewriteHostingCaddySites(
+      layout,
+      hostingPayload("env-r", "one.example.com"),
+      undefined,
+      noGrant,
+    );
+    const sitesDir = join(layout.configDir, "hosting", "sites");
+    const live = join(sitesDir, "env-r.caddy");
+    const before = await Deno.readTextFile(live);
+
+    reloadOk = false;
+    await assertRejects(
+      () =>
+        rewriteHostingCaddySites(
+          layout,
+          hostingPayload("env-r", "two.example.com"),
+          undefined,
+          noGrant,
+        ),
+      Error,
+      "did not reload",
+    );
+    assertEquals(await Deno.readTextFile(live), before);
+    assertEquals(
+      [...Deno.readDirSync(sitesDir)].map((e) => e.name).sort(),
+      ["env-r.acme-hostnames.json", "env-r.caddy"],
+    );
+
+    // A brand-new snippet that is refused is removed, not left behind.
+    await assertRejects(
+      () =>
+        rewriteHostingCaddySites(
+          layout,
+          hostingPayload("env-new", "three.example.com"),
+          undefined,
+          noGrant,
+        ),
+      Error,
+      "did not reload",
+    );
+    await assertRejects(
+      () => Deno.stat(join(sitesDir, "env-new.caddy")),
+      Deno.errors.NotFound,
+    );
+  } finally {
+    restore();
+    await cleanup();
+  }
+});
+
+test("rewriteHostingCaddySites keeps a validated snippet when the hosting Caddy is not running", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const restore = setIngressHostCommandForTest((_command, args) =>
+    Promise.resolve({
+      // reload and is-active both fail: the unit is not installed or stopped.
+      success: !(args.includes("reload") || args.includes("is-active")),
+      stderr: "unit not installed",
+    })
+  );
+  try {
+    await rewriteHostingCaddySites(
+      layout,
+      hostingPayload("env-off", "app.example.com"),
+      undefined,
+      noGrant,
+    );
+    assertStringIncludes(
+      await Deno.readTextFile(
+        join(layout.configDir, "hosting", "sites", "env-off.caddy"),
+      ),
+      "app.example.com",
+    );
   } finally {
     restore();
     await cleanup();

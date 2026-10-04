@@ -778,7 +778,21 @@ export const HOSTING_CADDY_STATE_DIRECTORY = "turbopanel-hosting-caddy";
  */
 export const HOSTING_CADDY_GRACE_PERIOD = "5s";
 
-export function caddyfile(configDir: string): string {
+/**
+ * The Caddyfile the deploy path validates a candidate site set with: the real
+ * one, except it imports the staged copy of the sites and keeps its throwaway
+ * certificate authority in its own folder (`caddy validate` provisions the
+ * internal CA, and the validating account has no home to put it in).
+ */
+type HostingCaddyfileCandidate = Readonly<{
+  sitesDir: string;
+  storageDir: string;
+}>;
+
+export function caddyfile(
+  configDir: string,
+  candidate?: HostingCaddyfileCandidate,
+): string {
   // `disable_redirects`, not `off`: every site snippet writes its own
   // `http://<host>` redirect block, but `off` also disables certificate
   // management — `tls internal` sites then fail the handshake with no leaf
@@ -790,8 +804,12 @@ export function caddyfile(configDir: string): string {
   // `skip_install_trust`: Caddy runs as an unprivileged account, so it must
   // never try to add its internal CA to the host's trust store (it would
   // shell out to sudo, and as root it used to succeed).
+  const storage = candidate
+    ? `\n  storage file_system ${candidate.storageDir}`
+    : "";
+  const sitesGlob = candidate?.sitesDir ?? join(configDir, "hosting", "sites");
   return `{
-  admin ${HOSTING_CADDY_ADMIN_ADDR}|0600
+  admin ${HOSTING_CADDY_ADMIN_ADDR}|0600${storage}
   auto_https disable_redirects
   skip_install_trust
   grace_period ${HOSTING_CADDY_GRACE_PERIOD}
@@ -807,7 +825,7 @@ http://${HOSTING_CADDY_METRICS_ADDR} {
   bind 127.0.0.1
   metrics
 }
-import ${join(configDir, "hosting", "sites", "*.caddy")}
+import ${join(sitesGlob, "*.caddy")}
 `;
 }
 
@@ -1841,6 +1859,157 @@ async function readAcmeHostnamesManifest(
   }
 }
 
+const HOSTING_CANDIDATE_SITES_DIR = "sites.next";
+const HOSTING_CANDIDATE_CADDYFILE = "Caddyfile.next";
+
+/**
+ * Stage the whole site set with this environment's new snippet in place of its
+ * old one, outside the live include glob, and let the web server's own account
+ * validate it with the pinned `caddy validate` (sudoers allows exactly this
+ * argv). A snippet the hosting Caddy cannot load (a hostname another
+ * environment already serves, a malformed line, a certificate it cannot read)
+ * is refused here, before it can sit in the glob where the next restart or boot
+ * would crash-loop ingress for every site on the host.
+ */
+async function validateHostingCaddyCandidate(
+  layout: LayoutPaths,
+  hostingDir: string,
+  sitesDir: string,
+  siteFile: string,
+  contents: string,
+  grantRead: (hostingDir: string) => Promise<void>,
+): Promise<void> {
+  const candidateSites = join(hostingDir, HOSTING_CANDIDATE_SITES_DIR);
+  const candidateFile = join(hostingDir, HOSTING_CANDIDATE_CADDYFILE);
+  try {
+    await Deno.remove(candidateSites, { recursive: true }).catch(() => {});
+    await Deno.mkdir(candidateSites, { mode: 0o750 });
+    const others: string[] = [];
+    for await (const entry of Deno.readDir(sitesDir)) {
+      if (
+        entry.isFile && entry.name.endsWith(".caddy") && entry.name !== siteFile
+      ) {
+        others.push(entry.name);
+      }
+    }
+    await Promise.all(
+      others.map((name) =>
+        Deno.copyFile(join(sitesDir, name), join(candidateSites, name))
+      ),
+    );
+    await Deno.writeTextFile(join(candidateSites, siteFile), contents, {
+      mode: 0o640,
+    });
+    await Deno.writeTextFile(
+      candidateFile,
+      caddyfile(layout.configDir, {
+        sitesDir: candidateSites,
+        storageDir: `/var/lib/${HOSTING_CADDY_STATE_DIRECTORY}/validate`,
+      }),
+      { mode: 0o640 },
+    );
+    // After staging, so the account can read everything staged (the grant also
+    // sets the folder defaults the live snippets inherit).
+    await grantRead(hostingDir);
+    const test = await run(
+      "sudo",
+      hostSudoArgs([
+        "-n",
+        "-u",
+        HOSTING_CADDY_USER,
+        "--",
+        join(layout.runtimesDir, "caddy", "current", "caddy"),
+        "validate",
+        "--adapter",
+        "caddyfile",
+        "--config",
+        candidateFile,
+      ]),
+    );
+    if (!test.success) {
+      throw new Error(
+        `hosting Caddy refused the site config for ${siteFile}: ${
+          test.stderr || "caddy validate failed"
+        }`,
+      );
+    }
+  } finally {
+    await Deno.remove(candidateSites, { recursive: true }).catch(() => {});
+    await Deno.remove(candidateFile).catch(() => {});
+  }
+}
+
+/** Put the previous snippet back (or drop a new one) after a failed reload. */
+async function restoreHostingSite(
+  live: string,
+  previous: string,
+  hadPrevious: boolean,
+): Promise<void> {
+  if (hadPrevious) {
+    await Deno.rename(previous, live);
+  } else {
+    await Deno.remove(live).catch(() => {});
+  }
+}
+
+/**
+ * Swap the validated snippet in (`.tpnew` is outside the `*.caddy` glob, and
+ * the rename is atomic), reload, and put the old one back when a running Caddy
+ * refuses the reload. A unit that is not running keeps the validated file: it
+ * loads it on its next start.
+ */
+async function activateHostingSite(
+  live: string,
+  contents: string,
+): Promise<void> {
+  const next = `${live}.tpnew`;
+  const previous = `${live}.tpprev`;
+  await Deno.writeTextFile(next, contents, { mode: 0o640 });
+  const hadPrevious = await Deno.copyFile(live, previous).then(
+    () => true,
+    (err) => {
+      if (err instanceof Deno.errors.NotFound) return false;
+      throw err;
+    },
+  );
+  await Deno.rename(next, live);
+
+  const reloadArgs = hostSudoArgs(["-n", "systemctl", "reload", CADDY_SERVICE]);
+  const reload = await run("sudo", reloadArgs);
+  if (reload.success) {
+    await Deno.remove(previous).catch(() => {});
+    return;
+  }
+  const active = await run(
+    "sudo",
+    hostSudoArgs(["-n", "systemctl", "is-active", "--quiet", CADDY_SERVICE]),
+  );
+  if (!active.success) {
+    logWarn("deploy", `hosting Caddy reload skipped: ${reload.stderr}`);
+    await Deno.remove(previous).catch(() => {});
+    return;
+  }
+  await restoreHostingSite(live, previous, hadPrevious);
+  const again = await run("sudo", reloadArgs);
+  if (!again.success) {
+    logWarn(
+      "deploy",
+      `hosting Caddy reload after restoring ${live} failed: ${again.stderr}`,
+    );
+  }
+  throw new Error(
+    `hosting Caddy did not reload the new site config: ${
+      reload.stderr || "reload failed"
+    }`,
+  );
+}
+
+/**
+ * Write one environment's hosting snippet. The new snippet is validated as part
+ * of the whole set before it touches the live include glob; when a running
+ * Caddy then refuses the reload the previous snippet is restored and the deploy
+ * fails, so the host never keeps a config its next start cannot load.
+ */
 export async function rewriteHostingCaddySites(
   layout: LayoutPaths,
   payload: EnvironmentDeployPayload,
@@ -1851,11 +2020,9 @@ export async function rewriteHostingCaddySites(
     throw new Error("environmentId contains unsupported characters");
   }
 
-  const sitesDir = join(layout.configDir, "hosting", "sites");
+  const hostingDir = join(layout.configDir, "hosting");
+  const sitesDir = join(hostingDir, "sites");
   await Deno.mkdir(sitesDir, { recursive: true, mode: 0o750 });
-  // A sites/ folder that predates the hosting Caddy's account has no default
-  // entry, so the snippets written below would not inherit one.
-  await grantRead(join(layout.configDir, "hosting"));
 
   const hostnameSites = buildCaddyHostnameRoutes(payload);
 
@@ -1876,22 +2043,14 @@ export async function rewriteHostingCaddySites(
       });
     })
     .join("\n");
-  await Deno.writeTextFile(
-    join(sitesDir, `${payload.environmentId}.caddy`),
+  const siteFile = `${payload.environmentId}.caddy`;
+  await validateHostingCaddyCandidate(
+    layout,
+    hostingDir,
+    sitesDir,
+    siteFile,
     siteContent,
-    { mode: 0o640 },
-  );
-
-  // Rewritten unconditionally, same lifecycle as the .caddy file above, so an
-  // environment that moves off acme-mode entirely never leaves a stale entry
-  // for readAcmeModeHostnames() to keep polling.
-  const acmeHostnames = hostnames.filter((hostname) =>
-    hostnameSites.get(hostname)!.tlsMode === "acme"
-  );
-  await Deno.writeTextFile(
-    acmeHostnamesManifestPath(layout, payload.environmentId),
-    JSON.stringify(acmeHostnames),
-    { mode: 0o640 },
+    grantRead,
   );
 
   if (hostnames.length > 0) {
@@ -1908,18 +2067,20 @@ export async function rewriteHostingCaddySites(
     }
   }
 
-  const reload = await run(
-    "sudo",
-    hostSudoArgs([
-      "-n",
-      "systemctl",
-      "reload",
-      CADDY_SERVICE,
-    ]),
+  await activateHostingSite(join(sitesDir, siteFile), siteContent);
+
+  // Rewritten unconditionally, same lifecycle as the .caddy file above, so an
+  // environment that moves off acme-mode entirely never leaves a stale entry
+  // for readAcmeModeHostnames() to keep polling. Only after the snippet is
+  // live: a refused deploy must not change what the observer polls.
+  const acmeHostnames = hostnames.filter((hostname) =>
+    hostnameSites.get(hostname)!.tlsMode === "acme"
   );
-  if (!reload.success) {
-    logWarn("deploy", `hosting Caddy reload skipped: ${reload.stderr}`);
-  }
+  await Deno.writeTextFile(
+    acmeHostnamesManifestPath(layout, payload.environmentId),
+    JSON.stringify(acmeHostnames),
+    { mode: 0o640 },
+  );
 }
 
 /** Remove the per-environment hosting site snippet and best-effort reload Caddy. */
