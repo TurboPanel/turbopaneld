@@ -792,11 +792,6 @@ async function plantHostingTree(): Promise<string> {
   return dir;
 }
 
-/** getfacl text where each path carries `acl` for the user. */
-function getfaclFor(paths: string[], line: string): string {
-  return paths.map((p) => `# file: ${p}\nuser::rw-\n${line}\n`).join("\n");
-}
-
 function fakeHost(opts: {
   account?: boolean;
   setfaclOk?: boolean;
