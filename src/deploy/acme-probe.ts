@@ -20,6 +20,7 @@
  * does, so this module deliberately never touches the lower-level API.
  */
 
+import { clipKeepingEnd } from "../util/error-line.ts";
 import { errorText } from "../util/logger.ts";
 
 export type AcmeProbeResult =
@@ -35,9 +36,8 @@ function summarizeError(err: unknown): string {
     ? err.cause.message
     : undefined;
   const combined = cause && cause !== top ? `${top}: ${cause}` : top;
-  return combined.length > MAX_ERROR_MESSAGE_CHARS
-    ? `${combined.slice(0, MAX_ERROR_MESSAGE_CHARS)}…`
-    : combined;
+  // The cause (`fetch failed: <why>`) comes last, so a long message loses its start.
+  return clipKeepingEnd(combined, MAX_ERROR_MESSAGE_CHARS);
 }
 
 /**
