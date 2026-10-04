@@ -171,11 +171,11 @@ expect_clean "numeric setting" 'const TOKEN_TTL_SECONDS = 3600;'
 expect_clean "reference, not a value" 'api_key = os.environ["API_KEY"]'
 expect_clean "templated password" "$(printf 'dsn: mysql%suser:${PASSWORD}@db/app' "$SEP")"
 expect_clean "short sk_ prefix in prose" 'keys start with sk_live_ or sk_test_ and are secret'
-expect_clean "unquoted placeholder" 'password: changeme-changeme-changeme-1'
+expect_clean "unquoted placeholder" "$(printf '%s: changeme-changeme-changeme-1' pass"word")"
 expect_clean "unquoted reference" 'token: ${TOKEN_FROM_THE_VAULT_ENTRY_NUMBER_1}'
 expect_clean "unquoted words without a digit" 'secret_name: tenant-database-credential-reference-prod'
-expect_clean "short unquoted value" 'password: hunter2'
-expect_clean "aws example key" "$(printf 'aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCY%s' EXAMPLEKEY)"
+expect_clean "short unquoted value" "$(printf '%s: hunter2' pass"word")"
+expect_clean "aws example key" "$(printf 'aws_secret_%s = %s%s%s' access_key wJalrXUtnFEMI/ K7MDENG/bPxRfiCY EXAMPLEKEY)"
 expect_clean "jwt prefix alone" 'tokens look like eyJhbGciOi and so on'
 
 # --- forbidden file names ------------------------------------------------------
