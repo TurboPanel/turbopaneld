@@ -25,6 +25,8 @@ import {
   principalSliceContent,
 } from "../deploy/native/unit.ts";
 import { caddyUnit } from "../deploy/ingress.ts";
+import { sshdDropInContent } from "../deploy/ssh/sshd-config.ts";
+import { allAccessGroups } from "../runtime/registry.ts";
 import { backupServiceContent, backupTimerContent } from "../backups/units.ts";
 import { issuedCertificateFindArgs } from "../deploy/instance-acme-http01.ts";
 import { setgidDirectoriesFindArgs } from "../deploy/site.ts";
@@ -298,6 +300,24 @@ test("the daemon's own unit files pass; privileged or foreign units do not", asy
         service.replace(/^NoNewPrivileges=.*$/m, "NoNewPrivileges="),
       ],
       ["privileged exec prefix", service.replace("ExecStart=", "ExecStart=+")],
+      // systemd takes the prefix characters `@ - : + ! |` stacked in any order,
+      // after any leading whitespace.
+      ...[
+        "-+",
+        "@+",
+        "+-",
+        "!!",
+        "-!",
+        ":+",
+        "@-+",
+        "|",
+        " +",
+        "\t!",
+        "  -@+",
+      ].map((prefix): [string, string] => [
+        `stacked exec prefix ${JSON.stringify(prefix)}`,
+        service.replace("ExecStart=", `ExecStart=${prefix}`),
+      ]),
       [
         "root pre-start",
         service.replace("[Service]", "[Service]\nExecStartPre=!/bin/sh -c id"),
@@ -3025,5 +3045,260 @@ test("tp-host's leaf lists equal the layout tables", async () => {
   assertEquals(
     names(leaves, "R_STATE"),
     DAEMON_STATE_LEAVES.filter(top).map((leaf) => leaf.name).sort(),
+  );
+});
+
+const WG_KEY = `${"B".repeat(43)}=`;
+const WG_CONF = [
+  "[Interface]",
+  `PrivateKey = ${WG_KEY}`,
+  "Address = 10.77.0.1/24",
+  "ListenPort = 51820",
+  "",
+  "[Peer]",
+  `PublicKey = ${WG_KEY}`,
+  "AllowedIPs = 10.77.0.2/32, fd00::2/128",
+  "Endpoint = node-2.example.net:51820",
+  `PresharedKey = ${WG_KEY}`,
+  "PersistentKeepalive = 25",
+  "",
+].join("\n");
+
+async function stage(host: Host, content: string): Promise<string> {
+  const staged = host.path("tmp/content");
+  await Deno.writeTextFile(staged, content);
+  return staged;
+}
+
+test("the WireGuard config: only the keys the daemon renders, never a hook", async () => {
+  await withHost(async (host) => {
+    await Deno.mkdir(host.path("etc/wireguard"), { recursive: true });
+    const dest = host.path("etc/wireguard/tp0.conf");
+    const install = (staged: string) =>
+      host.run([
+        "install",
+        "-m",
+        "0600",
+        "-o",
+        "root",
+        "-g",
+        "root",
+        staged,
+        dest,
+      ]);
+    const ok = await install(await stage(host, WG_CONF));
+    assertEquals(ok.code, 0, ok.stderr);
+    const cp = await host.run(["cp", await stage(host, WG_CONF), dest]);
+    assertEquals(cp.code, 0, cp.stderr);
+
+    const hostile = [
+      "PostUp = /var/lib/turbopanel/spool/x",
+      "PreUp = /x",
+      "PostDown = /x",
+      "PreDown = /x",
+      "SaveConfig = true",
+      "postup = /x",
+      "PostUp=/x",
+      "Table = off",
+      "DNS = 1.1.1.1",
+      "MTU = 1380",
+      "FwMark = 1",
+      "PostUp\t= /x",
+      "PostUp  = /x",
+      " PostUp = /x",
+      `PrivateKey = ${WG_KEY};`,
+      "Address = 10.0.0.1/24; id",
+      "Address = 10.0.0.1/24,",
+      "ListenPort = 51820 ",
+      "ListenPort = 5182000",
+    ];
+    for (const line of hostile) {
+      const conf = WG_CONF.replace("ListenPort = 51820", line);
+      await refused(host, [
+        "install",
+        "-m",
+        "0600",
+        "-o",
+        "root",
+        "-g",
+        "root",
+        await stage(host, conf),
+        dest,
+      ]);
+      await refused(host, ["cp", await stage(host, conf), dest]);
+      // The same line under [Peer] is no better.
+      await refused(host, [
+        "install",
+        "-m",
+        "0600",
+        "-o",
+        "root",
+        "-g",
+        "root",
+        await stage(host, `${WG_CONF}${line}\n`),
+        dest,
+      ]);
+    }
+    for (
+      const conf of [
+        "PostUp = /x\n[Interface]\n",
+        `${WG_CONF}[Peer]\nEndpoint = a:1\nPostUp = /x\n`,
+        WG_CONF.replace("[Peer]", "[Peer]\r"),
+        WG_CONF.replace("PostUp", "x") + "\0PostUp = /x\n",
+        WG_CONF.replace("[Interface]", "[Interface]\nPost\0Up = /x"),
+        WG_CONF.replace(
+          "Endpoint = node-2.example.net:51820",
+          "Endpoint = $(id):1",
+        ),
+        WG_CONF.replace("[Peer]", "[Script]"),
+      ]
+    ) {
+      await refused(host, [
+        "install",
+        "-m",
+        "0600",
+        "-o",
+        "root",
+        "-g",
+        "root",
+        await stage(host, conf),
+        dest,
+      ]);
+    }
+  });
+});
+
+test("the sysctl drop-in: only the forwarding switch, through install and tee", async () => {
+  await withHost(async (host) => {
+    const dest = host.path("etc/sysctl.d/99-turbopanel-fabric.conf");
+    for (
+      const content of [
+        "net.ipv4.ip_forward=1\n",
+        "# x\nnet.ipv4.ip_forward = 1\n",
+      ]
+    ) {
+      const t = await host.run(["tee", dest], content);
+      assertEquals(t.code, 0, t.stderr);
+      const i = await host.run([
+        "install",
+        "-m",
+        "0644",
+        await stage(host, content),
+        dest,
+      ]);
+      assertEquals(i.code, 0, i.stderr);
+    }
+    for (
+      const content of [
+        "kernel.core_pattern=|/var/lib/turbopanel/spool/x\n",
+        "kernel.core_pattern = |/x\n",
+        "kernel.modprobe=/x\n",
+        "kernel.uevent_helper=/x\n",
+        "net.ipv4.ip_forward=1\nkernel.core_pattern=|/x\n",
+        "net.ipv4.ip_forward=0\n",
+        "net.ipv4.ip_forward=1 \n",
+        "-kernel.modprobe=/x\n",
+        "; x\nkernel.modprobe=/x\n",
+        "net.ipv4.ip_forward=1\0\nkernel.modprobe=/x\n",
+      ]
+    ) {
+      await refused(host, ["tee", dest], content);
+      await refused(host, [
+        "install",
+        "-m",
+        "0644",
+        await stage(host, content),
+        dest,
+      ]);
+    }
+  });
+});
+
+test("the sshd drop-in: only the renderer's Match blocks, never a global or root-capable directive", async () => {
+  await withHost(async (host) => {
+    const dest = host.path("etc/ssh/sshd_config.d/60-turbopanel.conf");
+    const groups = {
+      sftpGroup: "tpsftp",
+      shellGroup: "tpshell",
+      passwordGroup: "tppasswd",
+      principalGroup: "tpprincipal",
+      authorizedKeysDir: host.path("etc/ssh/turbopanel/authorized_keys"),
+    };
+    for (
+      const content of [
+        sshdDropInContent(groups),
+        sshdDropInContent({
+          ...groups,
+          sftpChrootRoot: host.path("srv/users"),
+        }),
+      ]
+    ) {
+      const ok = await host.run([
+        "install",
+        "-m",
+        "0644",
+        "-o",
+        "root",
+        "-g",
+        "root",
+        await stage(host, content),
+        dest,
+      ]);
+      assertEquals(ok.code, 0, ok.stderr);
+    }
+    // A drop-in installed as the rollback copy gets the same check.
+    await refused(host, [
+      "install",
+      "-m",
+      "0644",
+      await stage(host, "PermitRootLogin yes\n"),
+      `${dest}.tpprev`,
+    ]);
+    const good = sshdDropInContent(groups);
+    const keys = host.path("etc/ssh/turbopanel/authorized_keys");
+    const hostile = [
+      "PermitRootLogin yes\n",
+      `PermitRootLogin yes\nAuthorizedKeysFile ${keys}/%u\n`,
+      `AuthorizedKeysFile ${keys}/%u\n`,
+      `Match all\nPermitRootLogin yes\n`,
+      `Match User root\n  PermitRootLogin yes\n`,
+      `Match Group root\n  PubkeyAuthentication yes\n  AuthorizedKeysFile ${keys}/%u\n`,
+      `Match Group tpsftp\n  PermitRootLogin yes\n`,
+      `Match Group tpsftp\n  AuthorizedKeysCommand /usr/local/bin/x\n`,
+      `Match Group tpsftp\n  AuthorizedKeysFile /etc/ssh/other/%u\n`,
+      `Match Group tpsftp\n  ForceCommand /bin/sh\n`,
+      `Match Group tpsftp\n  ChrootDirectory /\n`,
+      `Match Group tpsftp\n  AllowTcpForwarding yes\n`,
+      `Match Group tpsftp,root\n  PubkeyAuthentication yes\n`,
+      `Match Group tpsftp\n  PubkeyAuthentication yes # x\n`,
+      `Match Group tpsftp\n  PubkeyAuthentication yes\r\n`,
+      `Match Group tpsftp\n  Include /tmp/x\n`,
+      `Match Group tpsftp\n\tPubkeyAuthentication yes\n`,
+      `Match Group tpsftp\n  PubkeyAuthentication yes\0\n  PermitRootLogin yes\n`,
+      `${good}PermitRootLogin yes\n`,
+      `${good}Include /tmp/x\n`,
+    ];
+    for (const content of hostile) {
+      await refused(host, [
+        "install",
+        "-m",
+        "0644",
+        "-o",
+        "root",
+        "-g",
+        "root",
+        await stage(host, content),
+        dest,
+      ]);
+    }
+  });
+});
+
+test("the sshd drop-in's allowed groups equal the registry's access groups", async () => {
+  const script = await Deno.readTextFile(SCRIPT);
+  const found = /^SSHD_MATCH_GROUPS="([^"]*)"$/m.exec(script)?.[1] ?? "";
+  assertEquals(
+    found.split(" ").sort(),
+    [...allAccessGroups()].sort(),
   );
 });
