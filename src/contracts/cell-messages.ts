@@ -386,6 +386,30 @@ export type DaemonMessage =
   }
   | {
     /**
+     * Control plane asks the daemon to stop one running `environment.deploy`
+     * (`commandId`). Sent only to a daemon advertising `deploy-cancel-v1`.
+     */
+    type: "deploy-cancel";
+    id: string;
+    commandId: string;
+    at: string;
+  }
+  | {
+    /**
+     * `cancelling`: the deploy was signalled and will end with a
+     * `cancelled: ` command outcome. `too_late`: it already switched over and
+     * will finish normally. `not_running`: no such deploy is running here (the
+     * cancel is remembered briefly, so a dispatch that arrives later is refused).
+     */
+    type: "deploy-cancel-result";
+    id: string;
+    ok: boolean;
+    outcome?: "cancelling" | "too_late" | "not_running";
+    error?: string;
+    at: string;
+  }
+  | {
+    /**
      * Daemon-initiated, fire-and-forget (no correlated request/result) —
      * `../metrics/topology/`'s stable device/filesystem/GPU/signal identity
      * and generation, reported over the socket by `TopologyReporter`

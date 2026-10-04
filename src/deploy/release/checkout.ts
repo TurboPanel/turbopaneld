@@ -28,6 +28,7 @@
 
 import { join } from "@std/path";
 import { pumpLines } from "../../logs/line-stream.ts";
+import { throwIfAborted } from "../deploy-cancel.ts";
 import type { CommandSummaryRedactor } from "../../logs/contracts.ts";
 import { redactCommandSummary } from "../../logs/redactor.ts";
 
@@ -56,6 +57,8 @@ export type GitRunner = (
   cwd: string,
   env: Record<string, string>,
   onOutput?: ReleaseOutputHandler,
+  /** Kills git when aborted (a cancelled deploy). */
+  signal?: AbortSignal,
 ) => Promise<GitRunResult>;
 
 export type CheckoutParams = {
@@ -93,6 +96,11 @@ export type CheckoutParams = {
   redactSummary?: CommandSummaryRedactor;
   /** Test seam — defaults to spawning real `git`. */
   runGit?: GitRunner;
+  /**
+   * Cancel signal of the deploy. Aborting it kills the running git process and
+   * makes the checkout throw `DeployCancelledError`.
+   */
+  signal?: AbortSignal;
 };
 
 export type CheckoutResult = {
@@ -331,9 +339,13 @@ async function runGit(
   cwd: string,
   env: Record<string, string>,
   onOutput?: ReleaseOutputHandler,
+  cancelSignal?: AbortSignal,
 ): Promise<GitRunResult> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), CHECKOUT_TIMEOUT_MS);
+  const signal = cancelSignal
+    ? AbortSignal.any([controller.signal, cancelSignal])
+    : controller.signal;
   try {
     const child = new Deno.Command(GIT_BIN, {
       args,
@@ -343,7 +355,7 @@ async function runGit(
       stdin: "null",
       stdout: "piped",
       stderr: "piped",
-      signal: controller.signal,
+      signal,
     }).spawn();
     const [status, stdout, stderr] = await Promise.all([
       child.status,
@@ -441,7 +453,16 @@ export async function checkoutRelease(
   params: CheckoutParams,
 ): Promise<CheckoutResult> {
   const redactSummary = params.redactSummary ?? defaultSummaryRedactor;
-  const git = params.runGit ?? runGit;
+  const runner = params.runGit ?? runGit;
+  // Every git call is followed by a cancel check: a cancelled deploy kills the
+  // running git (via the signal) and stops here instead of reading its failure
+  // as a clone error.
+  const git: GitRunner = async (args, cwd, env, onOutput) => {
+    throwIfAborted(params.signal, "before the source was fetched");
+    const result = await runner(args, cwd, env, onOutput, params.signal);
+    throwIfAborted(params.signal, "while the source was being fetched");
+    return result;
+  };
   const workingDir = params.checkoutDir ?? join(params.scratchDir, "source");
   const credentialFiles = await writeCheckoutCredentialFiles(params);
   const env = gitEnvironment(credentialFiles, params.scratchDir);

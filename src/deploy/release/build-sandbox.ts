@@ -28,6 +28,7 @@ import type { RunFn } from "../ensure-principal.ts";
 import type { ReleaseOutputHandler } from "./checkout.ts";
 import { runPrivileged } from "./release-layout.ts";
 import { forEachSequential } from "../../util/sequential.ts";
+import { throwIfAborted } from "../deploy-cancel.ts";
 
 /** The build-user role's tree; tp-host pins the same path. */
 export const BUILD_SANDBOX_ROOT = "/var/lib/turbopanel-build";
@@ -362,6 +363,12 @@ export type SandboxedBuildParams = {
   timeoutMs?: number;
   /** Stop the build once it has printed this many characters. */
   maxOutputChars?: number;
+  /**
+   * Cancel signal of the deploy: aborting it stops the build unit the same way
+   * the timeout does (client killed first, then `systemctl stop`), takes the
+   * work tree back, and throws `DeployCancelledError`.
+   */
+  signal?: AbortSignal;
 };
 
 // One build at a time per host: tp-host holds a root-only lock as well, but
@@ -445,6 +452,9 @@ async function runBuildUnit(
     aborted = abortBuildUnit(child, work, runFn);
   };
   const timer = setTimeout(() => abort(abortReason), timeoutMs);
+  const onCancel = () => abort("the deploy was cancelled");
+  params.signal?.addEventListener("abort", onCancel, { once: true });
+  if (params.signal?.aborted) onCancel();
   const limits = {
     ...BUILD_OUTPUT_LIMITS,
     maxTotalChars: params.maxOutputChars ?? BUILD_OUTPUT_LIMITS.maxTotalChars,
@@ -465,10 +475,12 @@ async function runBuildUnit(
     throw err;
   } finally {
     clearTimeout(timer);
+    params.signal?.removeEventListener("abort", onCancel);
   }
   const [status, stdout, stderr] = outcome;
   if (aborted !== null) {
     await aborted;
+    throwIfAborted(params.signal, "while the build was running");
     throw new Error(`${abortReason}; the build unit was stopped`);
   }
   if (!status.success) {
@@ -502,6 +514,8 @@ export async function runSandboxedBuild(
   await withBuildSlot(params.onOutput, async () => {
     let failure: unknown = null;
     try {
+      // A deploy cancelled while it waited for the build slot never starts one.
+      throwIfAborted(params.signal, "before the build started");
       await runBuildUnit(params, runFn);
     } catch (err) {
       failure = err;
@@ -513,6 +527,9 @@ export async function runSandboxedBuild(
       const message = err instanceof Error ? err.message : String(err);
       params.onOutput?.("stderr", message);
     }
-    if (failure !== null) throw failure;
+    if (failure !== null) {
+      throwIfAborted(params.signal, "while the build was running");
+      throw failure;
+    }
   });
 }

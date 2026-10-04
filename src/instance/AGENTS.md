@@ -54,6 +54,15 @@ the request (nothing is applied, the tunnel is not torn down). The legacy
 plaintext `keyPem` / `token` from an older control plane is still accepted
 until both floors pass the release that ships this; then those fields go.
 
+**Deploy cancel (`deploy-cancel-v1`).** The daemon advertises the feature in
+`hello.features`. A control plane that sees it may send `deploy-cancel`
+(`commandId`) and gets `deploy-cancel-result` (`ok`, `outcome`: `cancelling`,
+`too_late` or `not_running`) on the same id. `InstanceClient.#handleDeployCancel`
+hands it to `deployCancels` (`src/deploy/deploy-cancel.ts`) and always answers.
+It is not a queued command: a running deploy holds the queue slot. The deploy
+itself ends with a `command-outcome` whose error starts with `cancelled: `. The
+cutover rule and its limits are in `../deploy/AGENTS.md`.
+
 **On-demand managed health (`managed-health-v1`).** The daemon advertises
 the feature in `hello.features`. A control plane that sees it may send
 `managed-health-request` (`managedId`, `memberId`, `role`, `engine`) and gets
