@@ -190,7 +190,8 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    `.caddy.tpprev`. If the running unit then refuses the reload, the old snippet
    (or none) is put back and the deploy fails; a stopped or missing unit keeps
    the validated file for its next start. The acme-hostnames manifest is
-   written only after the snippet is live.
+   written only after the snippet is live. Changes run one at a time (the
+   candidate is staged at fixed paths), `removeHostingCaddySite` included.
 11a. Alongside each environment's `.caddy` site file, `rewriteHostingCaddySites`
    also writes a companion `<environmentId>.acme-hostnames.json` naming just
    that environment's `tlsMode: 'acme'` hostnames (removed in lockstep by

@@ -1859,6 +1859,19 @@ async function readAcmeHostnamesManifest(
   }
 }
 
+/**
+ * One hosting-site change at a time. The candidate set is staged at fixed paths
+ * (sudoers pins one argv), and commands run concurrently, so two environments
+ * deploying together would validate each other's half-built set.
+ */
+let hostingSitesTail: Promise<unknown> = Promise.resolve();
+
+function withHostingSitesLock<T>(work: () => Promise<T>): Promise<T> {
+  const result = hostingSitesTail.then(work, work);
+  hostingSitesTail = result.catch(() => {});
+  return result;
+}
+
 const HOSTING_CANDIDATE_SITES_DIR = "sites.next";
 const HOSTING_CANDIDATE_CADDYFILE = "Caddyfile.next";
 
@@ -2010,16 +2023,28 @@ async function activateHostingSite(
  * Caddy then refuses the reload the previous snippet is restored and the deploy
  * fails, so the host never keeps a config its next start cannot load.
  */
-export async function rewriteHostingCaddySites(
+export function rewriteHostingCaddySites(
   layout: LayoutPaths,
   payload: EnvironmentDeployPayload,
   hostnameTls?: Map<string, string>,
   grantRead: (hostingDir: string) => Promise<void> = grantHostingCaddyRead,
 ): Promise<void> {
   if (!SAFE_FILE_ID_RE.test(payload.environmentId)) {
-    throw new Error("environmentId contains unsupported characters");
+    return Promise.reject(
+      new Error("environmentId contains unsupported characters"),
+    );
   }
+  return withHostingSitesLock(() =>
+    rewriteHostingCaddySitesLocked(layout, payload, hostnameTls, grantRead)
+  );
+}
 
+async function rewriteHostingCaddySitesLocked(
+  layout: LayoutPaths,
+  payload: EnvironmentDeployPayload,
+  hostnameTls: Map<string, string> | undefined,
+  grantRead: (hostingDir: string) => Promise<void>,
+): Promise<void> {
   const hostingDir = join(layout.configDir, "hosting");
   const sitesDir = join(hostingDir, "sites");
   await Deno.mkdir(sitesDir, { recursive: true, mode: 0o750 });
@@ -2084,13 +2109,24 @@ export async function rewriteHostingCaddySites(
 }
 
 /** Remove the per-environment hosting site snippet and best-effort reload Caddy. */
-export async function removeHostingCaddySite(
+export function removeHostingCaddySite(
   layout: LayoutPaths,
   environmentId: string,
 ): Promise<void> {
   if (!SAFE_FILE_ID_RE.test(environmentId)) {
-    throw new Error("environmentId contains unsupported characters");
+    return Promise.reject(
+      new Error("environmentId contains unsupported characters"),
+    );
   }
+  return withHostingSitesLock(() =>
+    removeHostingCaddySiteLocked(layout, environmentId)
+  );
+}
+
+async function removeHostingCaddySiteLocked(
+  layout: LayoutPaths,
+  environmentId: string,
+): Promise<void> {
   const siteName = `${environmentId}.caddy`;
   if (isDaemonReservedHostingSite(siteName)) return;
 

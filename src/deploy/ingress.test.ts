@@ -1676,6 +1676,49 @@ test("rewriteHostingCaddySites restores the previous snippet and fails when a ru
   }
 });
 
+test("rewriteHostingCaddySites runs one change at a time, so a candidate set is never shared", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const seen: string[] = [];
+  let validating = 0;
+  let overlap = false;
+  const restore = setIngressHostCommandForTest(async (_command, args) => {
+    if (args.includes("validate")) {
+      validating++;
+      if (validating > 1) overlap = true;
+      const sites = join(layout.configDir, "hosting", "sites.next");
+      seen.push(
+        [...Deno.readDirSync(sites)].map((e) => e.name).sort().join(","),
+      );
+      // Yield so a second, unserialized deploy would run in the gap.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      validating--;
+    }
+    return { success: true, stderr: "" };
+  });
+  try {
+    await Promise.all([
+      rewriteHostingCaddySites(
+        layout,
+        hostingPayload("env-x", "x.example.com"),
+        undefined,
+        noGrant,
+      ),
+      rewriteHostingCaddySites(
+        layout,
+        hostingPayload("env-y", "y.example.com"),
+        undefined,
+        noGrant,
+      ),
+    ]);
+    assertEquals(overlap, false);
+    // The second deploy validated a set that already holds the first's file.
+    assertEquals(seen, ["env-x.caddy", "env-x.caddy,env-y.caddy"]);
+  } finally {
+    restore();
+    await cleanup();
+  }
+});
+
 test("rewriteHostingCaddySites keeps a validated snippet when the hosting Caddy is not running", async () => {
   const { layout, cleanup } = await makeTestLayout();
   const restore = setIngressHostCommandForTest((_command, args) =>
