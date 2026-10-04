@@ -70,7 +70,11 @@ tp_inner() {
 '
   for _w in $_list; do
     # A web root that is not there yet serves nothing; one that is a link or
-    # moved is refused outright.
+    # moved is refused outright. That cannot be caused by a site owner:
+    # `sites/<id>/` is root:<owner group> 0750 (tp-host refuses to re-own it
+    # and `src/deploy/site-apply.test.ts` pins root as its owner), so the owner
+    # can neither rename nor replace `webroot`, and `releases/` is root's too.
+    # Only root could produce this state, and then stopping is the safe answer.
     [ -e "$_w" ] || [ -L "$_w" ] || continue
     [ -d "$_w" ] && [ ! -L "$_w" ] || tp_die "$_w is not a plain directory"
     [ "$(cd -P -- "$_w" && pwd -P)" = "$_w" ] || tp_die "$_w has a link in its path"
