@@ -76,32 +76,62 @@ async function ownContainerIds(
   });
 }
 
+export type EarlierContainerAction = "remove" | "stop" | "start" | "restart";
+
+/**
+ * Apply `action` to this environment's containers under each of `names`
+ * (never another environment's). Returns the project names that had any.
+ */
+export async function actOnEarlierContainers(
+  names: Iterable<string>,
+  run: RunDockerFn,
+  scope: RetireScope,
+  action: EarlierContainerAction,
+): Promise<string[]> {
+  const acted: string[] = [];
+  await forEachSequential(new Set(names), async (name) => {
+    const ids = await ownContainerIds(name, scope, run);
+    if (ids.length === 0) return;
+    const args = action === "remove" ? ["rm", "-f", ...ids] : [action, ...ids];
+    const result = await run(args);
+    if (!result.success) {
+      throw new Error(
+        `could not ${action} the containers of the earlier compose project ${name}; ` +
+          "stop them by hand, then try again",
+      );
+    }
+    acted.push(name);
+  });
+  return acted;
+}
+
+/**
+ * Project names the environment's `deployment.json` records when the command's
+ * own name is not one of them (a stack started under an earlier, project-wide
+ * name). Empty when the recorded names already include the command's name.
+ */
+export async function earlierRecordedProjects(
+  deploymentDir: string,
+  commandProject: string,
+): Promise<string[]> {
+  const previous = await readPreviousProjects(deploymentDir);
+  if (previous === null || previous.names.includes(commandProject)) return [];
+  return [...previous.names];
+}
+
 /**
  * Remove this environment's containers under every previously recorded project
  * whose name is not `currentProject` (and the current one with
  * `includeCurrent`). Containers of other environments are never touched.
  */
-export async function retirePreviousProjects(
+export function retirePreviousProjects(
   previous: PreviousProjects | null,
   currentProject: string,
   run: RunDockerFn,
   scope: RetireScope,
 ): Promise<string[]> {
-  if (previous === null) return [];
+  if (previous === null) return Promise.resolve([]);
   const names = new Set(previous.names.filter((n) => n !== currentProject));
   if (scope.includeCurrent === true) names.add(currentProject);
-  const retired: string[] = [];
-  await forEachSequential(names, async (name) => {
-    const ids = await ownContainerIds(name, scope, run);
-    if (ids.length === 0) return;
-    const removed = await run(["rm", "-f", ...ids]);
-    if (!removed.success) {
-      throw new Error(
-        `could not remove the containers of the earlier compose project ${name}; ` +
-          "stop them by hand, then deploy again",
-      );
-    }
-    retired.push(name);
-  });
-  return retired;
+  return actOnEarlierContainers(names, run, scope, "remove");
 }

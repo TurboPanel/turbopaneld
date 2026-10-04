@@ -1595,6 +1595,7 @@ async function deployContainerServices(
   const stageDir = await resetComposeStageDir(deploymentDir);
   // Read before publish replaces the live files.
   const previousProjects = await readPreviousProjects(deploymentDir);
+  let retiredEarlier: string[] = [];
   try {
     const stagedPath = join(stageDir, RUNTIME_COMPOSE_FILENAME);
     let yaml = applySecretFilePaths(
@@ -1715,8 +1716,17 @@ async function deployContainerServices(
     await persistComposeEnvFile(deploymentDir, parsedPayload.envFile);
 
     // A stack started under an earlier project name is replaced, not kept
-    // (before either strategy brings the new name up).
-    await retirePreviousProjects(
+    // (before either strategy brings the new name up). Images are pulled first
+    // (best effort) so the gap between removing the old containers and
+    // starting the new ones is short.
+    if (previousProjects?.names.some((n) => n !== parsedPayload.projectName)) {
+      await runStreamed([
+        ...composeFileArgs(parsedPayload.projectName, chain),
+        "pull",
+        "--ignore-buildable",
+      ], { onLine });
+    }
+    retiredEarlier = await retirePreviousProjects(
       previousProjects,
       parsedPayload.projectName,
       run,
@@ -1782,6 +1792,12 @@ async function deployContainerServices(
       serviceNames: labeledServices,
       composePaths: chain,
     };
+  } catch (err) {
+    if (retiredEarlier.length > 0 && err instanceof Error) {
+      err.message +=
+        " The containers this environment had under its earlier compose project name were already removed; deploy again to bring it back.";
+    }
+    throw err;
   } finally {
     await removeComposeStageDir(deploymentDir);
   }

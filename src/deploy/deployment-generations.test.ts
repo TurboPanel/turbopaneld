@@ -102,15 +102,9 @@ test("projectsForCommand: live for start, all for stop, payload name as fallback
   };
   assertEquals(projectsForCommand(m, "app", "live"), ["app-green"]);
   assertEquals(projectsForCommand(m, "app", "all"), ["app", "app-green"]);
-  // No manifest: act on the named project.
+  // No manifest, or a manifest of some other project: act on the named one.
   assertEquals(projectsForCommand(null, "app", "live"), ["app"]);
-  // An earlier-named stack of the same environment is still found.
-  assertEquals(projectsForCommand(m, "other", "all"), [
-    "other",
-    "app",
-    "app-green",
-  ]);
-  assertEquals(projectsForCommand(m, "other", "live"), ["app-green"]);
+  assertEquals(projectsForCommand(m, "other", "all"), ["other"]);
   // A single-generation manifest is the named project either way.
   const single = { projectName: "app", generation: 1 };
   assertEquals(projectsForCommand(single, "app", "live"), ["app"]);

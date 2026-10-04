@@ -300,3 +300,33 @@ test({
       }
     }),
 });
+
+test({
+  name:
+    "a failed up after the earlier-named containers were removed says so in plain words",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: () =>
+    withState(async (dir) => {
+      const docker = fakeDocker([HEALTHY]);
+      await deploy(payload("nginx:1"), docker.run);
+      const run = (args: string[]) => {
+        if (args[0] === "ps" && args.includes("--format")) {
+          return ok(`c-own\t${ENVIRONMENT_ID}\t${dir}`);
+        }
+        if (args.includes("up")) {
+          return Promise.resolve({
+            success: false,
+            stdout: "",
+            stderr: "boom",
+            code: 1,
+          });
+        }
+        return docker.run(args);
+      };
+      await assertRejects(
+        () => deploy(payload("nginx:2", { projectName: "env-new-name" }), run),
+        Error,
+        "deploy again to bring it back",
+      );
+    }),
+});

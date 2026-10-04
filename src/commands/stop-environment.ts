@@ -38,6 +38,10 @@ import {
 } from "../paths/layout.ts";
 import type { RunFn } from "../deploy/ensure-principal.ts";
 import { runPrivileged } from "../deploy/release/release-layout.ts";
+import {
+  actOnEarlierContainers,
+  earlierRecordedProjects,
+} from "../deploy/retire-previous-projects.ts";
 import { retirePrincipals } from "../deploy/retire-principals.ts";
 import type { SshApplyResult } from "../deploy/ssh/apply.ts";
 import {
@@ -321,8 +325,30 @@ export async function handleEnvironmentStop(
     // Already torn down — still clear hosting site and report empty containers.
     logInfo(
       "commands",
-      `environment.stop compose missing project=${parsedPayload.projectName} env=${parsedPayload.environmentId}; treating as already stopped`,
+      `environment.stop compose missing project=${parsedPayload.projectName} env=${parsedPayload.environmentId}; no compose files to take down`,
     );
+  }
+
+  if (dockerPresent) {
+    // A stack still running under an earlier, project-wide name: Compose acts
+    // on a whole project, and sibling environments shared that name, so only
+    // this environment's own containers are removed (volumes are kept).
+    const earlier = await earlierRecordedProjects(
+      deploymentDir,
+      parsedPayload.projectName,
+    );
+    const removed = await actOnEarlierContainers(earlier, run, {
+      environmentId: parsedPayload.environmentId,
+      deploymentDir,
+    }, "remove");
+    if (removed.length > 0) {
+      logInfo(
+        "commands",
+        `environment.stop removed containers started under earlier compose project ${
+          removed.join(",")
+        } env=${parsedPayload.environmentId}`,
+      );
+    }
   }
 
   const fabricNetworks = parsedPayload.fabricNetworks ?? [];
