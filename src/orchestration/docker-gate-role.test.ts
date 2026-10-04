@@ -82,10 +82,13 @@ const JINJA_PYTHON = await findJinjaPython();
 const RENDER_REQUIRED = Deno.env.get("CI") === "true";
 
 type UnitVars = {
+  docker_gate_mode: string;
   docker_gate_platform_ro_roots: string[];
   docker_gate_platform_rw_roots: string[];
   docker_gate_approval_pubkeys: string;
   docker_gate_approval_pubkey_file: string;
+  docker_gate_approval_state_dir: string;
+  docker_gate_approval_state_file: string;
   docker_gate_gid: string;
   docker_gate_dir: string;
   docker_gate_deno_bin: string;
@@ -108,6 +111,7 @@ type UnitVars = {
 };
 
 const DEFAULT_VARS: UnitVars = {
+  docker_gate_mode: "observe",
   docker_gate_gid: "9999",
   docker_gate_dir: "/opt/turbopanel/lib/docker-gate",
   docker_gate_deno_bin: "/opt/turbopanel/vendor/deno/current/deno",
@@ -134,6 +138,9 @@ const DEFAULT_VARS: UnitVars = {
     "/var/lib/turbopanel/managed",
   ],
   docker_gate_approval_pubkeys: "",
+  docker_gate_approval_state_dir: "/var/lib/turbopanel-docker-gate",
+  docker_gate_approval_state_file:
+    "/var/lib/turbopanel-docker-gate/approval-used.json",
   docker_gate_approval_pubkey_file:
     "/opt/turbopanel/lib/docker-gate/approval.pub",
   docker_gate_build_run_dir: "/run/turbopanel-gate/build",
@@ -183,6 +190,15 @@ const jinjaTest = (name: string, fn: () => Promise<void>) =>
     ignore: JINJA_PYTHON === undefined && !RENDER_REQUIRED,
     fn,
   });
+
+jinjaTest("the unit's mode comes from docker_gate_mode", async () => {
+  const unit = await renderUnit({ docker_gate_mode: "enforce" });
+  assert(
+    directives(unit, "Service").includes(
+      "Environment=TP_DOCKER_GATE_MODE=enforce",
+    ),
+  );
+});
 
 jinjaTest(
   "the unit is observe-only, root-owned and pinned to the gate's own socket",
@@ -263,6 +279,11 @@ jinjaTest(
     assertEquals(
       line,
       "Environment=TP_DOCKER_GATE_APPROVAL_PUBKEY=/opt/turbopanel/lib/docker-gate/approval.pub",
+    );
+    assert(
+      on.includes(
+        "Environment=TP_DOCKER_GATE_APPROVAL_STATE=/var/lib/turbopanel-docker-gate/approval-used.json",
+      ),
     );
     const defaults = await read("defaults/main.yml");
     assertStringIncludes(
@@ -383,7 +404,7 @@ jinjaTest(
     assert(argv.includes("--allow-read"), "symlink resolution reads anywhere");
     assert(
       argv.includes(
-        "--allow-write=/run/turbopanel-gate,/var/run/docker.sock",
+        "--allow-write=/run/turbopanel-gate,/var/run/docker.sock,/var/lib/turbopanel-docker-gate",
       ),
     );
     assert(
@@ -392,6 +413,17 @@ jinjaTest(
       ),
     );
     assert(argv.includes("--allow-env=TP_DOCKER_GATE_*"));
+    // The approval-token state file is written under Deno's permission model:
+    // the directory must be writable, and the file must live inside it.
+    const write = argv.find((a) => a.startsWith("--allow-write="))!;
+    const writable = write.slice("--allow-write=".length).split(",");
+    assert(
+      writable.some((p) =>
+        DEFAULT_VARS.docker_gate_approval_state_file.startsWith(p + "/")
+      ),
+      "ExecStart must grant write on the approval state directory",
+    );
+    assert(unit.includes("StateDirectory=turbopanel-docker-gate"));
     assertEquals(argv.at(-1), "/opt/turbopanel/lib/docker-gate/main.ts");
     for (const arg of argv) {
       assert(
@@ -704,6 +736,14 @@ test("F3: flipping the switch restarts the gate, and a converge with it on prove
   const rescue = main.slice(main.indexOf("rescue:"));
   assertStringIncludes(rescue, "{{ docker_gate_ingress_switch_file }}");
   assertStringIncludes(rescue, "ansible.builtin.fail");
+  // Enforce mode never rescues a failed install into a warning, and the mode
+  // is checked outside the rescued block.
+  assertStringIncludes(rescue, "docker_gate_mode");
+  assertStringIncludes(rescue, "== 'enforce'");
+  assertStringIncludes(
+    main.slice(0, main.indexOf("block:")),
+    "docker_gate_mode must be observe or enforce",
+  );
   const probe = task(
     "Prove the read-only socket answers while Traefik's switch is on",
   );

@@ -1614,13 +1614,16 @@ async function deployContainerServices(
     assertNoReservedOwnerLabels(resolved.document ?? {});
     // Build options no deploy may carry (host network, privileges, SSH agent,
     // internal extra_hosts or remote contexts, secret files outside); no
-    // approval reaches these. Build paths are confined just below.
+    // approval reaches these, bar a public remote context the organization
+    // allowed (`remoteBuildSourcesApproved`). Build paths are confined just below.
     const daemonSecretNames = new Set(
       (parsedPayload.secretPlan ?? []).map((e) => e.source),
     );
     assertComposeBuildPolicy(resolved.document ?? {}, {
       stageDir,
       exemptSecretNames: daemonSecretNames,
+      remoteBuildSourcesApproved:
+        parsedPayload.remoteBuildSourcesApproved === true,
     });
     // The control plane's host-level gate is lexical; only the host can see
     // where a bind source really resolves. `hostLevelApproved` (absent reads
@@ -2000,19 +2003,21 @@ export async function handleEnvironmentDeploy(
   );
   await Deno.mkdir(deploymentDir, { recursive: true, mode: 0o750 });
 
+  // Before the principals: the playbook creates the `tpnode<NN>` runtime
+  // groups, and the principal reconcile joins the site owner's Linux user to
+  // them. Joining a group that does not exist yet is skipped with a warning, so
+  // on the first deploy of a series the user missed the group and the unit died
+  // 203/EXEC. Tenant Node must also exist before the Git build: native installs
+  // run `corepack` from `vendor/node-app/<series>/current/bin`.
+  await ensureNativeAppRuntime(
+    parsedPayload.nativeAppServices ?? [],
+    deps?.nativeAppIo,
+  );
+
   const principalMaterial = parsedPayload.principalMaterial ?? [];
   await ensureDeployPrincipals(
     layout,
     deployPrincipalSpecs(parsedPayload, principalMaterial),
-  );
-
-  // Tenant Node must exist before the Git build: native installs run
-  // `corepack` from `vendor/node-app/<series>/current/bin`, which this
-  // playbook vendors. Waiting until `applyNativeAppServices` (after promote)
-  // left the first build with no binary.
-  await ensureNativeAppRuntime(
-    parsedPayload.nativeAppServices ?? [],
-    deps?.nativeAppIo,
   );
 
   // Git-backed releases run before the compose / site apply steps,

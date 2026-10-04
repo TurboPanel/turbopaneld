@@ -80,6 +80,7 @@ import {
 } from "./ensure-principal.ts";
 import {
   DEFAULT_PHP_FPM_SERIES,
+  openSiteRollout,
   ownedConfigFileMatches as ownedConfigFileMatchesVia,
   phpFpmDriver,
   removeStagedFile,
@@ -90,23 +91,43 @@ import {
   writeOwnedConfigFile as writeOwnedConfigFileVia,
 } from "./site/engine-driver.ts";
 import type {
+  PendingSiteRollout,
+  SiteEngineId,
   SiteRunFn,
   SiteRunResult,
   SiteValidationTarget,
   StagedConfigWrite,
 } from "./site/engine-driver.ts";
 import {
+  defaultProbeHostPort,
+  type ProbeHostPortFn,
+} from "../managed/proxysql.ts";
+import {
+  apacheBehindNginxLines,
+  isNginxApacheSite,
+  nginxApacheBackendProbe,
+  nginxApacheLocations,
+  siteFrontEngine,
+  siteServingEngines,
+} from "./site/nginx-apache.ts";
+import {
   isSitePhpRuntimeOf,
   sitePhpFpmConf,
   sitePhpIni,
   sitePhpKey,
+  sitePhpLockedValues,
+  sitePhpLsphpBinary,
+  sitePhpRuntimeChildren,
   sitePhpRuntimeId,
   type SitePhpRuntimeMode,
   sitePhpRuntimeMode,
   type SitePhpRuntimeSpec,
   sitePhpServiceUnit,
+  sitePhpSocketActivated,
   sitePhpSocketPath,
   sitePhpSocketUnit,
+  sitePhpUnitLimits,
+  type SitePhpWebAccount,
 } from "./site/php-runtime.ts";
 import {
   holdSitePhpRuntime,
@@ -203,13 +224,16 @@ async function withSiteIo<T>(
   }
 }
 
-/** Engine service account for the FHS vendor tree (web-service-user role). */
+/**
+ * Engine service account for the FHS vendor tree (web-service-user role).
+ * For nginx in front of Apache it is Apache's: the engine that talks to PHP.
+ */
 export function siteEngineUnixUser(
   engine: SiteApplySpec["engine"],
 ): string {
   if (engine === "caddy") return "tpcaddysite";
   if (engine === "nginx") return "tpnginx";
-  if (engine === "apache") return "tpapache";
+  if (engine === "apache" || engine === "nginx+apache") return "tpapache";
   return "tpols";
 }
 
@@ -229,7 +253,12 @@ export function resolveSiteOwnership(
       `site principal username is unsafe: ${principal.username}`,
     );
   }
-  return { user: principal.username, group: engineUser };
+  // Two engines read a paired site, so its tree carries the principal's group,
+  // which both join, rather than either engine's own.
+  const group = isNginxApacheSite(site)
+    ? principalUnixGroupName(principal.username)
+    : engineUser;
+  return { user: principal.username, group };
 }
 
 function assertSafeId(value: string, field: string): void {
@@ -497,6 +526,11 @@ export type NginxSiteConfigOpts = Readonly<{
    * a rollback brings back) from serving a second hop through `shared/`.
    */
   releaseBacked?: boolean;
+  /**
+   * nginx in front of Apache: serve common static types, refuse dotfiles, and
+   * proxy everything else to Apache on this loopback port. No PHP location.
+   */
+  apacheBackendPort?: number | null;
 }>;
 
 /**
@@ -521,6 +555,18 @@ export function nginxSiteConfig(
   const dockerListen = dockerBindAddress
     ? `\n  listen ${dockerBindAddress}:${site.listenPort};`
     : "";
+  const backendPort = opts?.apacheBackendPort ?? null;
+  if (backendPort !== null) {
+    return `server {
+  listen 127.0.0.1:${site.listenPort};
+  listen [::1]:${site.listenPort};${dockerListen}
+  server_name _;
+  root ${documentRoot};
+  ${nginxDisableSymlinks(opts?.releaseBacked ?? false)}
+${nginxApacheLocations(backendPort)}
+}
+`;
+  }
   const phpFpmSocket = opts?.phpFpmSocket ?? null;
   const needsPhp = siteNeedsPhp(site);
   if (needsPhp && !phpFpmSocket) {
@@ -982,6 +1028,12 @@ export type ApacheSiteConfigOpts = Readonly<{
   dockerBindAddress?: string | null;
   /** Absolute unix socket path for proxy_fcgi when the site needs PHP. */
   phpFpmSocket?: string | null;
+  /**
+   * Apache behind nginx: listen on this loopback port only (never `::1` or the
+   * docker bridge, which nginx owns) and take the client address from
+   * nginx's `X-Forwarded-For`.
+   */
+  behindNginxPort?: number | null;
 }>;
 
 /**
@@ -1008,6 +1060,35 @@ function apacheSetEnvLine(
     .replaceAll("\\", String.raw`\\`)
     .replaceAll('"', String.raw`\"`);
   return `  SetEnv ${name} "${escaped}"`;
+}
+
+/**
+ * Comment, `Listen` lines, `<VirtualHost>` and `ServerName` of a site vhost.
+ * Behind nginx: the backend port on loopback only, plus mod_remoteip.
+ */
+function apacheVhostHead(
+  site: SiteApplySpec,
+  dockerBindAddress: string | null,
+  behindNginxPort: number | null,
+): string {
+  const name = site.composeServiceName;
+  if (behindNginxPort !== null) {
+    return [
+      `# TurboPanel site ${name} (behind nginx)`,
+      `Listen 127.0.0.1:${behindNginxPort}`,
+      `<VirtualHost 127.0.0.1:${behindNginxPort}>`,
+      "  ServerName localhost",
+      ...apacheBehindNginxLines(),
+    ].join("\n");
+  }
+  const addrs = [`127.0.0.1:${site.listenPort}`];
+  if (dockerBindAddress) addrs.push(`${dockerBindAddress}:${site.listenPort}`);
+  return [
+    `# TurboPanel site ${name}`,
+    ...addrs.map((addr) => `Listen ${addr}`),
+    `<VirtualHost ${addrs.join(" ")}>`,
+    "  ServerName localhost",
+  ].join("\n");
 }
 
 export function apacheSiteConfig(
@@ -1037,18 +1118,13 @@ export function apacheSiteConfig(
     sitePhpRuntimeMode(site) === "fastcgi",
   );
   const setenvBlock = envLines.length > 0 ? `\n${envLines.join("\n")}` : "";
-  const dockerListen = dockerBindAddress
-    ? `\nListen ${dockerBindAddress}:${site.listenPort}`
-    : "";
-  const vhostAddrs = [`127.0.0.1:${site.listenPort}`];
-  if (dockerBindAddress) {
-    vhostAddrs.push(`${dockerBindAddress}:${site.listenPort}`);
-  }
+  const head = apacheVhostHead(
+    site,
+    dockerBindAddress,
+    opts?.behindNginxPort ?? null,
+  );
 
-  return `# TurboPanel site ${site.composeServiceName}
-Listen 127.0.0.1:${site.listenPort}${dockerListen}
-<VirtualHost ${vhostAddrs.join(" ")}>
-  ServerName localhost
+  return `${head}
   DocumentRoot "${documentRoot}"
   <Directory "${documentRoot}">
     Options Indexes SymLinksIfOwnerMatch
@@ -1081,100 +1157,81 @@ export function openlitespeedLsphpBinaryPath(
   layout: LayoutPaths,
   series: string = DEFAULT_PHP_SERIES,
 ): string {
-  return join(layout.runtimesDir, "lsphp", series, "current", "bin", "lsphp");
+  return sitePhpLsphpBinary(layout.runtimesDir, series);
 }
 
 /**
- * LSAPI socket directory: the `turbopanel-openlitespeed.service`
- * `RuntimeDirectory` (roles/openlitespeed), owned by `tpols`. A relative
- * `uds://tmp/…` resolves against `/`, i.e. the shared host `/tmp`.
+ * Worker processes OpenLiteSpeed runs (`httpdWorkers`). Pinned rather than
+ * left to the CPU count, because `maxConns` counts per worker: the pairing in
+ * {@link openlitespeedPhpMaxConns} holds only if this is known (WP0 gotcha 5).
  */
-export const OPENLITESPEED_LSAPI_SOCKET_DIR = "/run/turbopanel-ols";
+export const OPENLITESPEED_HTTPD_WORKERS = 2;
 
-/** `extprocessor` name for one site — also what its `scripthandler` maps to. */
-export function openlitespeedLsapiProcessorName(olsSiteName: string): string {
-  return `lsphp_${olsSiteName}`;
+/**
+ * `maxConns` for one site's PHP processor: workers × maxConns never exceeds
+ * the runtime's children, or requests queue on a busy child for seconds
+ * ("Reached max children process limit").
+ */
+export function openlitespeedPhpMaxConns(children: number): number {
+  return Math.max(1, Math.floor(children / OPENLITESPEED_HTTPD_WORKERS));
 }
 
-/** suEXEC identity + binary one vhost's LSAPI processor runs as. */
-export type OpenLiteSpeedLsapiOpts = Readonly<{
+/** `extprocessor` name for one site — also what its `scripthandler` maps to. */
+export function openlitespeedPhpProcessorName(olsSiteName: string): string {
+  return `php_${olsSiteName}`;
+}
+
+/** OpenLiteSpeed's processor type for each per-site PHP mode. */
+const OPENLITESPEED_PHP_TYPE: Readonly<
+  Record<SitePhpRuntimeMode, "fcgi" | "lsapi">
+> = {
+  fastcgi: "fcgi",
+  fpm: "fcgi",
+  "lsphp-detached": "lsapi",
+};
+
+/** The site's own PHP runtime, as one vhost's processor reaches it. */
+export type OpenLiteSpeedVhostPhpOpts = Readonly<{
   processorName: string;
-  /** Vendored `lsphp` binary this processor execs. */
-  lsphpPath: string;
-  /** suEXEC user: the site principal when pinned, else `tpols`. */
-  user: string;
-  group: string;
+  mode: SitePhpRuntimeMode;
+  /** The runtime's socket (`/run/turbopanel-php-<id>/php.sock`). */
+  socket: string;
+  /** The runtime's children, which bound `maxConns`. */
+  children: number;
+  /** The limits site code must not raise ({@link sitePhpLockedValues}). */
+  lockedValues: readonly PhpAdminValue[];
 }>;
 
 /**
- * Per-vhost LSAPI `extprocessor`.
+ * Per-vhost `extprocessor` for the site's own runtime.
  *
- * OpenLiteSpeed's PHP model is deliberately not a shared pool: each vhost execs
- * its **own** `lsphp` under `extUser`/`extGroup` (suEXEC), so the process
- * identity *is* the isolation boundary — the OLS-native equivalent of a php-fpm
- * pool's `user`/`group`, resolved from the same site principal. `runOnStartUp 0`
- * with `autoStart 2` keeps that process on-demand, matching the `pm = ondemand`
- * the FPM pools use, so an idle site costs nothing.
+ * OpenLiteSpeed never starts PHP here (`autoStart 0`): systemd runs it as the
+ * site owner, on a socket (FastCGI, detached lsphp) or as a php-fpm master, so
+ * it outlives an OpenLiteSpeed restart. OpenLiteSpeed runs as `tpols` and
+ * cannot switch users, which is why the old per-vhost `extUser`/`extGroup`
+ * never took effect (WP0).
  */
-export function openlitespeedLsapiExtProcessorFragment(
-  opts: OpenLiteSpeedLsapiOpts,
+export function openlitespeedPhpExtProcessorFragment(
+  opts: OpenLiteSpeedVhostPhpOpts,
 ): string {
   return `extprocessor ${opts.processorName}{
-  type                      lsapi
-  address                   uds://${OPENLITESPEED_LSAPI_SOCKET_DIR}/${opts.processorName}.sock
-  maxConns                  10
-  env                       PHP_LSAPI_CHILDREN=10
-  env                       PATH=/usr/local/bin:/usr/bin:/bin
+  type                      ${OPENLITESPEED_PHP_TYPE[opts.mode]}
+  address                   uds://${opts.socket}
+  maxConns                  ${openlitespeedPhpMaxConns(opts.children)}
   initTimeout               60
   retryTimeout              0
   persistConn               1
   respBuffer                0
-  autoStart                 2
-  runOnStartUp              0
-  path                      ${opts.lsphpPath}
-  backlog                   100
-  instances                 1
-  extUser                   ${opts.user}
-  extGroup                  ${opts.group}
-  priority                  0
-  memSoftLimit              2047M
-  memHardLimit              2047M
-  procSoftLimit             1400
-  procHardLimit             1500
+  autoStart                 0
 }
 `;
 }
 
-/** Per-vhost suEXEC principal identity, as OpenLiteSpeed spells it. */
-export type OpenLiteSpeedVhostIdentity = Readonly<{
-  /** suEXEC user: the site principal when pinned, else `tpols`. */
-  user: string;
-  group: string;
-}>;
-
 /** Per-site OpenLiteSpeed rendering options (PHP is off unless supplied). */
 export type OpenLiteSpeedSiteFragmentOpts = Readonly<{
-  /** Enables script execution for the vhost — its `vhconf.conf` runs LSAPI PHP. */
+  /** Enables script execution for the vhost — its `vhconf.conf` hands PHP on. */
   php?: boolean;
-  /**
-   * Principal-scoped identity for the vhost itself. Set for PHP-enabled sites:
-   * the `extprocessor`'s `extUser`/`extGroup` is only half the shared-hosting
-   * model — the vhost has to declare the same principal so everything OLS runs
-   * for that site (LSAPI processor, CGI, suEXEC-launched helpers) lands on one
-   * uid/gid instead of falling back to the server-wide `tpols`.
-   */
-  identity?: OpenLiteSpeedVhostIdentity;
 }>;
-
-/** vhost-level `user`/`group` lines, or nothing for a static site. */
-function openlitespeedVhostIdentityLines(
-  identity?: OpenLiteSpeedVhostIdentity,
-): string {
-  if (!identity) return "";
-  return `\n  user                      ${identity.user}` +
-    `\n  group                     ${identity.group}` +
-    `\n  setUIDMode                0`;
-}
 
 /**
  * Per-site `virtualHost` + `listener` block(s) appended into the single
@@ -1182,14 +1239,8 @@ function openlitespeedVhostIdentityLines(
  * directory convention — the whole main config is regenerated from every
  * currently-active site's fragment on each apply).
  *
- * `enableScript` is the server-level gate: the vhost's own LSAPI processor and
+ * `enableScript` is the server-level gate: the vhost's PHP processor and
  * `.php` handler live in its `vhconf.conf`, but neither runs while this is `0`.
- *
- * A PHP site also carries `opts.identity` — the vhost's own `user`/`group`,
- * resolved from the site principal exactly the way a php-fpm pool's are. With
- * `setUIDMode 0` OpenLiteSpeed runs the vhost under that declared identity
- * rather than the server-wide account or the document root's owner, which is
- * what makes the per-vhost suEXEC boundary hold for shared hosting.
  */
 export function openlitespeedSiteFragment(
   environmentId: string,
@@ -1207,7 +1258,7 @@ export function openlitespeedSiteFragment(
   vhRoot                    ${documentRoot}/
   allowSymbolLink           2
   enableScript              ${opts?.php ? 1 : 0}
-  restrained                0${openlitespeedVhostIdentityLines(opts?.identity)}
+  restrained                0
   configFile                ${vhConfigPath}
 }
 
@@ -1219,20 +1270,29 @@ listener ${name}_lo{
 `;
 }
 
-/** Everything one vhost needs to serve PHP through its own LSAPI processor. */
-export type OpenLiteSpeedVhostPhpOpts = Readonly<
-  OpenLiteSpeedLsapiOpts & {
-    /** Hosting `web.php` hints, already validated by {@link phpAdminValues}. */
-    adminValues: readonly PhpAdminValue[];
-  }
->;
-
 /**
- * OpenLiteSpeed spells a `php_admin_value[k] = v` pool line `php_admin_value k v`
- * inside a vhost `phpIniOverride{}` — same setting, different syntax.
+ * Answer 403 for server-side script files the vhost does not run. OpenLiteSpeed
+ * serves any file it has no handler for as plain text, so a `.php3` (the
+ * handler only runs `.php`), a `.phtml`, or an editor backup such as
+ * `.php.bak` or `.php~` would hand its source to anyone who asks.
+ *
+ * `.php` itself (and `/a.php/extra` path-info) is left alone when the vhost has
+ * the LSAPI handler. `.sh`/`.py`/`.pl` are not listed: no scripthandler or CGI
+ * context in our config executes them, so they are ordinary static downloads
+ * and carry no hidden source. `.cgi` stays denied as a server-side type.
  */
-function formatOpenLiteSpeedAdminValue(value: PhpAdminValue): string {
-  return `php_admin_value ${value.key} ${value.value}`;
+function openlitespeedScriptDenyRewrite(phpHandled: boolean): string {
+  const family = "php[0-9]+|phtml|phar|phps|pht|phpt|inc|cgi";
+  const denied = phpHandled ? family : `php|${family}`;
+  const backups = String.raw`~|\.(bak|old|orig|save|swp|swo|tmp|dist|txt)`;
+  return String.raw`rewrite {
+  enable                    1
+  rules                     <<<END_rules
+RewriteRule \.(${denied})(/.*)?$ - [F,L,NC]
+RewriteRule \.(php|${family})(${backups})$ - [F,L,NC]
+END_rules
+}
+`;
 }
 
 /**
@@ -1242,9 +1302,9 @@ function formatOpenLiteSpeedAdminValue(value: PhpAdminValue): string {
  * directory listing (that is `autoIndex`): `0` answers 403 for everything.
  *
  * Static document root only (no directory listing) unless `php` is supplied, in
- * which case the vhost also carries its own suEXEC LSAPI processor, a `.php`
- * script handler bound to it, and a `phpIniOverride{}` holding the same hosting
- * hints an FPM pool takes as `php_admin_value[…]`.
+ * which case the vhost also carries the processor for the site's own runtime
+ * and a `.php` script handler bound to it. The hosting PHP settings live in
+ * that runtime's `php.ini`, not here.
  */
 export function openlitespeedVhostConfig(
   php?: OpenLiteSpeedVhostPhpOpts,
@@ -1255,13 +1315,18 @@ index {
   indexFiles index.html
   autoIndex 0
 }
+${openlitespeedScriptDenyRewrite(false)}
 context / {
   allowBrowse 1
   location $DOC_ROOT/
 }
 `;
   }
-  const overrides = php.adminValues.map(formatOpenLiteSpeedAdminValue);
+  // OpenLiteSpeed's spelling of a pool's `php_admin_value[k] = v`: honoured
+  // for lsapi, and the same limits the runtime's php.ini locks per path.
+  const overrides = php.lockedValues.map((v) =>
+    `php_admin_value ${v.key} ${v.value}`
+  );
   const overrideBlock = overrides.length > 0
     ? `\nphpIniOverride {\n${
       overrides.map((line) => `  ${line}`).join("\n")
@@ -1273,11 +1338,14 @@ index {
   autoIndex 0
 }
 
-${openlitespeedLsapiExtProcessorFragment(php)}
+${openlitespeedPhpExtProcessorFragment(php)}
 scripthandler {
-  add                       lsapi:${php.processorName} php
+  add                       ${
+    OPENLITESPEED_PHP_TYPE[php.mode]
+  }:${php.processorName} php
 }
 ${overrideBlock}
+${openlitespeedScriptDenyRewrite(true)}
 context / {
   allowBrowse 1
   location $DOC_ROOT/
@@ -1313,6 +1381,7 @@ mime                              ${join(configDir, "mime.properties")}
 showVersionNumber                 0
 indexFiles                        index.html
 disableWebAdmin                   1
+httpdWorkers                      ${OPENLITESPEED_HTTPD_WORKERS}
 
 # OLS refuses a static file without the world-read bit unless told otherwise;
 # site files are principal-owned and shared with tpols by group, never world.
@@ -1501,6 +1570,7 @@ const SITE_ENGINE_LABELS: Record<
   nginx: "nginx",
   apache: "Apache",
   openlitespeed: "OpenLiteSpeed",
+  "nginx+apache": "nginx + Apache",
 };
 
 export function defaultIndexHtml(
@@ -1860,9 +1930,10 @@ async function runSitePlaybook(
 function assertSite(site: SiteApplySpec): void {
   assertSafeId(site.composeServiceName, "composeServiceName");
   assertSafeRoot(site.root);
-  if (!(site.engine in SITE_ENGINE_DRIVERS)) {
+  if (!(site.engine in SITE_ENGINE_DRIVERS) && !isNginxApacheSite(site)) {
     throw new Error(`site engine "${site.engine}" is not supported`);
   }
+  if (isNginxApacheSite(site)) assertNginxApacheSite(site);
   if (
     !Number.isInteger(site.listenPort) ||
     site.listenPort < 1024 ||
@@ -1875,6 +1946,27 @@ function assertSite(site: SiteApplySpec): void {
   if (site.principal) {
     // Validates username shape used by chown / php-fpm pool user lines.
     resolveSiteOwnership(site);
+  }
+}
+
+/**
+ * nginx in front of Apache needs Apache's own loopback port, and an owner: both
+ * engines read the tree through the principal's group.
+ */
+function assertNginxApacheSite(site: SiteApplySpec): void {
+  const port = site.backendPort;
+  if (
+    port === undefined || !Number.isInteger(port) || port < 1024 ||
+    port > 65_535 || port === site.listenPort
+  ) {
+    throw new Error(
+      `site ${site.composeServiceName}: nginx+apache needs a backendPort other than listenPort`,
+    );
+  }
+  if (!site.principal) {
+    throw new Error(
+      `site ${site.composeServiceName}: nginx+apache needs a principal to own its tree`,
+    );
   }
 }
 
@@ -1975,6 +2067,8 @@ export type ApplySiteOpts = {
   systemdUnitDir?: string;
   /** Test seam: the pause before a started PHP runtime is checked. */
   sleep?: (ms: number) => Promise<void>;
+  /** Test seam: whether a loopback port could be bound right now. */
+  probeHostPort?: ProbeHostPortFn;
 };
 
 /** Optional test seams for {@link removeSites}. */
@@ -2025,14 +2119,15 @@ type SiteConfigDirs = {
  * actually changed" and for "this engine's service account joined a principal
  * group", which are the only two reasons to reload or restart anything.
  */
-type SiteEngineSet = Set<SiteApplySpec["engine"]>;
+type SiteEngineSet = Set<SiteEngineId>;
 
 /**
- * Engines that reach PHP through a php-fpm pool (not LSAPI). Caddy's
- * `php_fastcgi` talks to the same socket nginx's `fastcgi_pass` does, so it
- * joins this lane rather than needing anything of its own.
+ * Engines whose sites run the packaged PHP (`php-fpm` / `php-cgi`, from the
+ * php-fpm role). Caddy's `php_fastcgi` talks to the same socket nginx's
+ * `fastcgi_pass` does, so it joins this lane rather than needing anything of
+ * its own; an OpenLiteSpeed site joins it in the fastcgi and fpm modes.
  */
-type PhpFpmEngine = "caddy" | "nginx" | "apache";
+type PhpFpmEngine = SiteApplySpec["engine"];
 
 export type SiteEngineNeeds = {
   caddy: boolean;
@@ -2047,7 +2142,7 @@ export type SiteEngineNeeds = {
    * playbook — the Apache one never runs there.
    */
   phpFpmEngines: ReadonlySet<PhpFpmEngine>;
-  /** Any OpenLiteSpeed site needs a vendored `lsphp` LSAPI processor. */
+  /** An OpenLiteSpeed site in detached lsphp mode needs the vendored `lsphp`. */
   openlitespeedLsphp: boolean;
 };
 
@@ -2055,25 +2150,26 @@ export function resolveSiteEngineNeeds(
   sites: readonly SiteApplySpec[],
 ): SiteEngineNeeds {
   const phpFpmEngines = new Set<PhpFpmEngine>();
+  let openlitespeedLsphp = false;
   for (const site of sites) {
     if (!siteNeedsPhp(site)) continue;
-    if (
-      site.engine === "caddy" || site.engine === "nginx" ||
-      site.engine === "apache"
-    ) {
-      phpFpmEngines.add(site.engine);
+    // nginx in front of Apache reaches PHP through Apache only.
+    if (sitePhpRuntimeMode(site) === "lsphp-detached") {
+      openlitespeedLsphp = true;
+    } else {
+      phpFpmEngines.add(isNginxApacheSite(site) ? "apache" : site.engine);
     }
   }
+  const serves = (engine: SiteEngineId) =>
+    sites.some((site) => siteServingEngines(site).includes(engine));
   return {
-    caddy: sites.some((site) => site.engine === "caddy"),
-    nginx: sites.some((site) => site.engine === "nginx"),
-    apache: sites.some((site) => site.engine === "apache"),
-    openlitespeed: sites.some((site) => site.engine === "openlitespeed"),
+    caddy: serves("caddy"),
+    nginx: serves("nginx"),
+    apache: serves("apache"),
+    openlitespeed: serves("openlitespeed"),
     phpFpm: phpFpmEngines.size > 0,
     phpFpmEngines,
-    openlitespeedLsphp: sites.some((site) =>
-      site.engine === "openlitespeed" && siteNeedsPhp(site)
-    ),
+    openlitespeedLsphp,
   };
 }
 
@@ -2088,23 +2184,22 @@ export function siteEngineApplyExtraArgs(
   phpSeries: readonly string[],
   phpExtensions: Record<string, string[]>,
 ): string[] {
+  const phpFpm = {
+    turbopanel_php_fpm_install: needs.phpFpmEngines.has(engine),
+    php_fpm_versions: phpSeries,
+    php_fpm_extensions: phpExtensions,
+  };
   if (engine === "openlitespeed") {
     return [
       "-e",
       JSON.stringify({
         turbopanel_lsphp_install: needs.openlitespeedLsphp,
         openlitespeed_lsphp_versions: phpSeries,
+        ...phpFpm,
       }),
     ];
   }
-  return [
-    "-e",
-    JSON.stringify({
-      turbopanel_php_fpm_install: needs.phpFpmEngines.has(engine),
-      php_fpm_versions: phpSeries,
-      php_fpm_extensions: phpExtensions,
-    }),
-  ];
+  return ["-e", JSON.stringify(phpFpm)];
 }
 
 /**
@@ -2141,7 +2236,7 @@ async function installSiteEngines(
       needs.openlitespeed,
       "openlitespeed",
       SITE_OPENLITESPEED_APPLY_PLAYBOOK,
-      "site-openlitespeed-apply (vendor + lsphp + identity)",
+      "site-openlitespeed-apply (vendor + lsphp/php-fpm + identity)",
     ],
   ] as const;
   // Host provisioning playbooks run one engine at a time, in this order.
@@ -2205,25 +2300,19 @@ function emptyStagedConfigs(): SiteStagedConfigs {
 }
 
 /** Loopback endpoints each engine has to answer on once it is back. */
-type SiteValidationTargets = Record<
-  SiteApplySpec["engine"],
-  SiteValidationTarget[]
->;
+type SiteValidationTargets = Record<SiteEngineId, SiteValidationTarget[]>;
 
 function emptyValidationTargets(): SiteValidationTargets {
   return { caddy: [], nginx: [], apache: [], openlitespeed: [] };
 }
 
-function emptyPhpRuntimes(): Record<
-  SiteApplySpec["engine"],
-  PreparedSitePhpRuntime[]
-> {
+function emptyPhpRuntimes(): Record<SiteEngineId, PreparedSitePhpRuntime[]> {
   return { caddy: [], nginx: [], apache: [], openlitespeed: [] };
 }
 
-/** nginx and Apache run per-site PHP runtimes (OpenLiteSpeed: WP6). */
+/** nginx, Apache and OpenLiteSpeed run per-site PHP runtimes. */
 function sitePhpRuntimeEngine(site: SiteApplySpec): boolean {
-  return site.engine === "nginx" || site.engine === "apache";
+  return site.engine !== "caddy";
 }
 
 /**
@@ -2275,7 +2364,7 @@ function holdSiteRuntime(
   site: SiteApplySpec,
 ): (() => void) | null {
   if (!sitePhpRuntimeEngine(site)) return null;
-  const mode = sitePhpRuntimeMode(site);
+  const mode = sitePhpRuntimeMode(site, environmentId);
   const series = resolveSitePhpSeries(site);
   if (mode === null || !series) return null;
   const key = sitePhpKey(environmentId, site.composeServiceName);
@@ -2356,16 +2445,16 @@ type SiteReloadPlan = Readonly<{
   /** Candidates waiting to be swapped in, per unit. */
   staged: SiteStagedConfigs;
   /** Engines that newly joined a principal group (restart, not reload). */
-  restartEngines: Set<SiteApplySpec["engine"]>;
+  restartEngines: SiteEngineSet;
   /** Post-reload HTTP probes, per engine. */
   validationTargets: SiteValidationTargets;
   openlitespeedSitesDir: string;
   /** Per-site PHP runtimes this apply started, by the engine serving them. */
-  phpRuntimes: Readonly<
-    Record<SiteApplySpec["engine"], PreparedSitePhpRuntime[]>
-  >;
+  phpRuntimes: Readonly<Record<SiteEngineId, PreparedSitePhpRuntime[]>>;
   /** Runtimes whose engine rolled out: kept, never rolled back. */
   settled: Set<PreparedSitePhpRuntime>;
+  /** Some site is nginx in front of Apache: Apache commits after nginx. */
+  paired: boolean;
 }>;
 
 /**
@@ -2373,7 +2462,7 @@ type SiteReloadPlan = Readonly<{
  * its config changed or its group membership newly requires a restart.
  */
 function engineNeedsReload(
-  engine: SiteApplySpec["engine"],
+  engine: SiteEngineId,
   plan: SiteReloadPlan,
 ): boolean {
   if (!plan.needs[engine]) return false;
@@ -2415,29 +2504,66 @@ async function reloadSiteEngines(
       touched.push(`php-fpm ${series}`);
     },
   );
-  await forEachSequential(SITE_ENGINE_ORDER, async (engine) => {
-    const reload = engineNeedsReload(engine, plan);
-    if (reload) await rolloutEngine(layout, plan, engine);
-    if (reload) touched.push(engine);
-    // The engine serves the new sockets now (or never changed vhosts): keep
-    // its sites' runtimes, probing those no rollout probed.
-    const runtimes = plan.phpRuntimes[engine];
-    await settleSitePhpRuntimes(sitePhpIo(), runtimes, {
-      engineProbed: reload,
-      label: SITE_ENGINE_DRIVERS[engine].label,
+  // nginx in front of Apache: Apache rolls out first but stays revertible, and
+  // its runtimes unsettled, until nginx has answered through it as well.
+  const held: EngineRolloutStep[] = [];
+  try {
+    await forEachSequential(SITE_ENGINE_ORDER, async (engine) => {
+      const reload = engineNeedsReload(engine, plan);
+      const rollout = reload
+        ? await openEngineRollout(layout, plan, engine)
+        : null;
+      if (reload) touched.push(engine);
+      const step = { engine, reload, rollout };
+      if (engine === "apache" && plan.paired) {
+        held.push(step);
+        return;
+      }
+      await settleEngineRollout(plan, step);
+      await forEachSequential(
+        held.splice(0),
+        (heldStep) => settleEngineRollout(plan, heldStep),
+      );
     });
-    for (const runtime of runtimes) plan.settled.add(runtime);
-  });
+  } catch (err) {
+    await forEachSequential(held, (step) => step.rollout?.rollback());
+    throw err;
+  }
   return touched;
 }
 
+/** One engine's rollout, awaiting its commit and its runtimes' settling. */
+type EngineRolloutStep = Readonly<{
+  engine: SiteEngineId;
+  reload: boolean;
+  rollout: PendingSiteRollout | null;
+}>;
+
+/**
+ * Keep an engine's rollout and its sites' runtimes: the engine serves the new
+ * sockets now (or never changed vhosts), and runtimes no rollout probed are
+ * probed here.
+ */
+async function settleEngineRollout(
+  plan: SiteReloadPlan,
+  step: EngineRolloutStep,
+): Promise<void> {
+  await step.rollout?.commit();
+  const runtimes = plan.phpRuntimes[step.engine];
+  await settleSitePhpRuntimes(sitePhpIo(), runtimes, {
+    engineProbed: step.reload,
+    label: SITE_ENGINE_DRIVERS[step.engine].label,
+  });
+  for (const runtime of runtimes) plan.settled.add(runtime);
+}
+
 /** One engine's swap → test → reload → probe, rolled back on failure. */
-async function rolloutEngine(
+async function openEngineRollout(
   layout: LayoutPaths,
   plan: SiteReloadPlan,
-  engine: SiteApplySpec["engine"],
-): Promise<void> {
-  await rolloutSiteConfigs({
+  engine: SiteEngineId,
+): Promise<PendingSiteRollout> {
+  return await openSiteRollout({
     run,
     layout,
     target: SITE_ENGINE_DRIVERS[engine],
@@ -2474,6 +2600,8 @@ type SitePaths = {
 type ApplySiteResult = {
   /** Candidate engine configs for this site, in dependency order. */
   staged: StagedConfigWrite[];
+  /** nginx in front of Apache: Apache's own vhost, rolled out before nginx. */
+  backendStaged?: StagedConfigWrite[];
   /** Candidate php-fpm pool — the only reason to reload FPM. */
   phpFpmStaged: StagedConfigWrite[];
   /** Series that owns `phpFpmStaged`, when the site runs PHP. */
@@ -2586,7 +2714,7 @@ async function applySitePhpBackend(
 ): Promise<SitePhpBackend> {
   const series = resolveSitePhpSeries(site);
   if (!series) return { socket: null, result: { phpFpmStaged: [] } };
-  const mode = sitePhpRuntimeMode(site);
+  const mode = sitePhpRuntimeMode(site, environmentId);
   if (mode !== null) {
     const phpRuntime = await installSitePhpRuntime(
       sitePhpIo(),
@@ -2649,6 +2777,19 @@ function sitePhpWritablePaths(
   return [];
 }
 
+/** The web server account that reaches a site's PHP socket. */
+const SITE_PHP_WEB_ACCOUNT: Readonly<
+  Record<SiteApplySpec["engine"], SitePhpWebAccount>
+> = {
+  // Caddy runs no per-site PHP (sitePhpRuntimeMode); nginx's account is inert.
+  caddy: "tpnginx",
+  nginx: "tpnginx",
+  apache: "tpapache",
+  // PHP runs behind Apache in the nginx+apache pair.
+  "nginx+apache": "tpapache",
+  openlitespeed: "tpols",
+};
+
 /** Render one site's per-site PHP runtime (units and config). */
 function sitePhpRuntimeFiles(
   layout: LayoutPaths,
@@ -2679,7 +2820,8 @@ function sitePhpRuntimeFiles(
     home,
     configDir: layout.configDir,
     libDir: layout.libDir,
-    webAccount: site.engine === "apache" ? "tpapache" : "tpnginx",
+    runtimesDir: layout.runtimesDir,
+    webAccount: SITE_PHP_WEB_ACCOUNT[site.engine],
   };
   const values = site.php
     ? phpAdminValues(site.php, sitePhpAdminOpts(layout, paths))
@@ -2691,17 +2833,21 @@ function sitePhpRuntimeFiles(
       `site ${site.composeServiceName}: PHP mode ${mode} serves only from the owner's home (a release or a managed directory)`,
     );
   }
+  const pool = phpFpmPoolOverrides(site.php);
+  const workers = sitePhpRuntimeChildren(mode, pool);
   return {
     spec,
     service: sitePhpServiceUnit(spec, {
       writablePaths: sitePhpWritablePaths(layout, paths),
+      limits: sitePhpUnitLimits(values, workers),
     }),
-    socket: mode === "fastcgi" ? sitePhpSocketUnit(spec) : null,
-    ini: sitePhpIni(values, home),
+    socket: sitePhpSocketActivated(mode) ? sitePhpSocketUnit(spec) : null,
+    ini: sitePhpIni(values, home, spec),
     fpmConf: mode === "fpm"
       ? sitePhpFpmConf(spec, {
-        pool: phpFpmPoolOverrides(site.php),
+        pool,
         chdir: paths.documentRoot,
+        admin: sitePhpLockedValues(values),
       })
       : null,
   };
@@ -2771,37 +2917,74 @@ async function applyApacheSite(
 }
 
 /**
- * The vhost's own LSAPI processor, or `undefined` for a static site.
- *
- * suEXEC identity is resolved exactly the way {@link phpFpmPoolConfig} resolves
- * a pool's `user`/`group` — the assigned principal when pinned, the engine
- * account otherwise — so "who runs this script" has one answer per site
- * regardless of which engine serves it.
+ * nginx in front of Apache: Apache's vhost on the backend port runs PHP the way
+ * a plain Apache site does; nginx's vhost on `listenPort` serves static types
+ * and proxies the rest. Both are staged here and rolled out Apache first.
  */
-function resolveOpenLiteSpeedVhostPhp(
+async function applyNginxApacheSite(
   layout: LayoutPaths,
+  environmentId: string,
   site: SiteApplySpec,
   paths: SitePaths,
-  olsSiteName: string,
-): OpenLiteSpeedVhostPhpOpts | undefined {
-  if (!site.php || !siteNeedsPhp(site)) return undefined;
-  const engineUser = siteEngineUnixUser(site.engine);
+  dockerBind: string | null,
+  sitesDirs: SiteConfigDirs,
+): Promise<ApplySiteResult> {
+  const backendPort = site.backendPort as number;
+  const php = await applySitePhpBackend(layout, environmentId, site, paths);
+  const backend = await SITE_ENGINE_DRIVERS.apache.stageSiteConfig(
+    run,
+    join(sitesDirs.apache, paths.configName),
+    apacheSiteConfig(site, paths.documentRoot, {
+      phpFpmSocket: php.socket,
+      behindNginxPort: backendPort,
+    }),
+  );
+  const front = await SITE_ENGINE_DRIVERS.nginx.stageSiteConfig(
+    run,
+    join(sitesDirs.nginx, paths.configName),
+    nginxSiteConfig(site, paths.documentRoot, dockerBind, {
+      releaseBacked: paths.release !== undefined,
+      apacheBackendPort: backendPort,
+    }),
+  );
+  await applySiteTreeOwnership(site, paths);
   return {
-    processorName: openlitespeedLsapiProcessorName(olsSiteName),
-    // Per vhost, so two OLS sites on one host can run different series.
-    lsphpPath: openlitespeedLsphpBinaryPath(
-      layout,
-      resolveSitePhpSeries(site) ?? DEFAULT_PHP_SERIES,
-    ),
-    user: site.principal?.username ?? engineUser,
-    group: site.principal
-      ? principalUnixGroupName(site.principal.username)
-      : engineUser,
-    adminValues: phpAdminValues(site.php, sitePhpAdminOpts(layout, paths)),
+    staged: stagedList(front),
+    backendStaged: stagedList(backend),
+    ...php.result,
   };
 }
 
-/** Stages the vhost config and the aggregated fragment for one OLS site. */
+/**
+ * The vhost's processor for the site's own runtime, or `undefined` for a
+ * static site.
+ */
+function openlitespeedVhostPhp(
+  site: SiteApplySpec,
+  olsSiteName: string,
+  runtime: PreparedSitePhpRuntime | undefined,
+  adminOpts: PhpFpmPoolAdminOpts | undefined,
+): OpenLiteSpeedVhostPhpOpts | undefined {
+  if (!runtime) return undefined;
+  const { spec } = runtime.files;
+  return {
+    processorName: openlitespeedPhpProcessorName(olsSiteName),
+    mode: spec.mode,
+    socket: sitePhpSocketPath(spec.id),
+    children: sitePhpRuntimeChildren(
+      spec.mode,
+      phpFpmPoolOverrides(site.php),
+    ),
+    lockedValues: sitePhpLockedValues(
+      site.php ? phpAdminValues(site.php, adminOpts) : [],
+    ),
+  };
+}
+
+/**
+ * Starts the site's PHP runtime, then stages the vhost config and the
+ * aggregated fragment for one OLS site.
+ */
 async function applyOpenLiteSpeedSite(
   layout: LayoutPaths,
   environmentId: string,
@@ -2813,7 +2996,13 @@ async function applyOpenLiteSpeedSite(
   const vhostDir = join(openlitespeedVhostsDir(layout), olsName);
   const vhConfigPath = join(vhostDir, "vhconf.conf");
   await ensureEngineConfigDir(vhostDir, "tpols");
-  const php = resolveOpenLiteSpeedVhostPhp(layout, site, paths, olsName);
+  const backend = await applySitePhpBackend(layout, environmentId, site, paths);
+  const php = openlitespeedVhostPhp(
+    site,
+    olsName,
+    backend.result.phpRuntime,
+    sitePhpAdminOpts(layout, paths),
+  );
   const vhostStaged = await stageOwnedConfigFile(
     vhConfigPath,
     openlitespeedVhostConfig(php),
@@ -2825,22 +3014,16 @@ async function applyOpenLiteSpeedSite(
     vhConfigPath,
     paths.documentRoot,
     dockerBind,
-    php === undefined
-      ? { php: false }
-      // The vhost declares the same principal the LSAPI processor execs as, so
-      // suEXEC covers the whole vhost rather than the extprocessor alone.
-      : { php: true, identity: { user: php.user, group: php.group } },
+    { php: php !== undefined },
   );
   const fragmentPath = join(paths.sitesDir, paths.configName);
   const fragmentStaged = await SITE_ENGINE_DRIVERS.openlitespeed
     .stageSiteConfig(run, fragmentPath, fragment);
   await applySiteTreeOwnership(site, paths);
-  // lsphp runs out of the vendored tree, not a shared FPM pool, so an OLS PHP
-  // site never stages a pool — its reload is the engine's own. The vhost config
-  // is swapped in before the fragment that names it.
+  // The vhost config is swapped in before the fragment that names it.
   return {
     staged: stagedList(vhostStaged, fragmentStaged),
-    phpFpmStaged: [],
+    ...backend.result,
   };
 }
 
@@ -2886,7 +3069,7 @@ async function ensureManagedDirectory(
   documentRoot: string,
 ): Promise<void> {
   const principalHome = principalHomePath(layout, managed.username);
-  const owner = `${managed.username}:${siteEngineUnixUser(site.engine)}`;
+  const owner = `${managed.username}:${resolveSiteOwnership(site).group}`;
   await ensureDirectoryWithOwner(
     siteRoot(principalHome, managed.serviceId),
     "0750",
@@ -2948,21 +3131,47 @@ async function seedManagedIndexHtml(
   }
 }
 
-async function ensureEngineCanReadPrincipalTree(
+/**
+ * Join every engine serving this site to the principal's group; returns those
+ * whose membership is new (a restart, not a reload, picks it up).
+ */
+async function ensureEnginesCanReadPrincipalTree(
   site: SiteApplySpec,
   username: string,
-): Promise<boolean> {
-  const engineUser = siteEngineUnixUser(site.engine);
+): Promise<SiteEngineId[]> {
   const group = principalUnixGroupName(username);
-  const existing = await userSupplementaryGroups(engineUser);
-  if (existing.has(group)) return false;
-  await ensureEngineGroupMembership(engineUser, group, run);
-  return true;
+  const joined: SiteEngineId[] = [];
+  await forEachSequential(siteServingEngines(site), async (engine) => {
+    const engineUser = siteEngineUnixUser(engine);
+    const existing = await userSupplementaryGroups(engineUser);
+    if (existing.has(group)) return;
+    await ensureEngineGroupMembership(engineUser, group, run);
+    joined.push(engine);
+  });
+  return joined;
+}
+
+/**
+ * The daemon-owned tree of a site with no source. A paired site's tree carries
+ * the principal's group, so both its engines join it; returns those that did.
+ */
+async function prepareDaemonOwnedTree(
+  site: SiteApplySpec,
+  base: string,
+  documentRoot: string,
+): Promise<SiteEngineId[]> {
+  await ensureDocumentRoot(documentRoot, site.composeServiceName, site.engine);
+  await writeHostingWebMetadata(base, site);
+  if (!isNginxApacheSite(site) || !site.principal) return [];
+  return await ensureEnginesCanReadPrincipalTree(
+    site,
+    site.principal.username,
+  );
 }
 
 type ApplyOneSiteResult = ApplySiteResult & {
-  /** Engine whose group membership changed — needs a restart, not a reload. */
-  restartEngine?: SiteApplySpec["engine"];
+  /** Engines whose group membership changed — a restart, not a reload. */
+  restartEngines?: SiteEngineId[];
 };
 
 async function applyOneSite(
@@ -2987,14 +3196,15 @@ async function applyOneSite(
     managed,
   );
 
-  let restartEngine: SiteApplySpec["engine"] | undefined;
+  let restartEngines: SiteEngineId[] = [];
   if (release) {
     // The release engine owns the tree; assert it, never create or seed it.
     await assertReleaseDocumentRoot(layout, documentRoot, site, release);
     await writeReleaseHostingWebMetadata(layout, environmentId, site, release);
-    if (await ensureEngineCanReadPrincipalTree(site, release.username)) {
-      restartEngine = site.engine;
-    }
+    restartEngines = await ensureEnginesCanReadPrincipalTree(
+      site,
+      release.username,
+    );
   } else if (managed) {
     // Nobody else creates this tree — there is no release engine on this lane,
     // so the directory the tenant uploads into has to exist before the vhost
@@ -3004,16 +3214,12 @@ async function applyOneSite(
       serviceId: managed.serviceId,
       username: managed.username,
     });
-    if (await ensureEngineCanReadPrincipalTree(site, managed.username)) {
-      restartEngine = site.engine;
-    }
-  } else {
-    await ensureDocumentRoot(
-      documentRoot,
-      site.composeServiceName,
-      site.engine,
+    restartEngines = await ensureEnginesCanReadPrincipalTree(
+      site,
+      managed.username,
     );
-    await writeHostingWebMetadata(base, site);
+  } else {
+    restartEngines = await prepareDaemonOwnedTree(site, base, documentRoot);
   }
 
   const configName = `tp-${environmentId}-${site.composeServiceName}.conf`;
@@ -3027,8 +3233,19 @@ async function applyOneSite(
     ...(release === undefined ? {} : { release }),
     ...(managed === undefined ? {} : { managed }),
   };
-  const restart = restartEngine === undefined ? {} : { restartEngine };
+  const restart = restartEngines.length === 0 ? {} : { restartEngines };
 
+  if (isNginxApacheSite(site)) {
+    const applied = await applyNginxApacheSite(
+      layout,
+      environmentId,
+      site,
+      { ...pathBase, sitesDir: sitesDirs.nginx },
+      dockerBind,
+      sitesDirs,
+    );
+    return { ...applied, ...restart };
+  }
   if (site.engine === "caddy") {
     const applied = await applyCaddySite(
       layout,
@@ -3080,12 +3297,235 @@ function recordSiteResult(
     forSeries.push(...result.phpFpmStaged);
     plan.staged.phpFpm.set(result.phpSeries, forSeries);
   }
-  plan.staged[site.engine].push(...result.staged);
-  if (result.restartEngine) plan.restartEngines.add(result.restartEngine);
-  if (result.phpRuntime) plan.phpRuntimes[site.engine].push(result.phpRuntime);
+  const front = siteFrontEngine(site);
+  plan.staged[front].push(...result.staged);
+  for (const engine of result.restartEngines ?? []) {
+    plan.restartEngines.add(engine);
+  }
+  // Under the front engine: a paired site's runtime is kept only once nginx,
+  // rolled out last, answers through Apache.
+  if (result.phpRuntime) plan.phpRuntimes[front].push(result.phpRuntime);
   // Probed after the reload: the site has to still answer on its own
   // loopback listener, changed config or not.
-  plan.validationTargets[site.engine].push(siteProbeTarget(site));
+  plan.validationTargets[front].push(siteProbeTarget(site));
+  if (isNginxApacheSite(site) && site.backendPort !== undefined) {
+    plan.staged.apache.push(...(result.backendStaged ?? []));
+    plan.validationTargets.apache.push(
+      nginxApacheBackendProbe(site.composeServiceName, site.backendPort),
+    );
+  }
+}
+
+/** Engines whose site vhost is one `<configName>` file in its sites dir. */
+const FILE_VHOST_ENGINES: readonly SiteEngineId[] = Object.freeze(
+  ["caddy", "nginx", "apache"] as const,
+);
+
+/** Every site vhost on this host (all environments), read once per apply. */
+type HostSiteVhosts = Readonly<{
+  /** `*.conf` names per engine sites dir. */
+  names: Readonly<Record<SiteEngineId, readonly string[]>>;
+  /** Loopback port -> `<engine>/<name>` of every vhost that binds or proxies it. */
+  ports: ReadonlyMap<number, readonly string[]>;
+}>;
+
+/**
+ * Ports a rendered vhost listens on or proxies to, from its directive lines
+ * only (`listen`/`Listen`/`address`, Caddy's `:<port> {`, nginx's
+ * `proxy_pass`). Values such as `SetEnv` never start a line with these, so a
+ * tenant's environment cannot claim another tenant's port.
+ */
+export function siteVhostPorts(contents: string): number[] {
+  const ports = new Set<number>();
+  for (const line of contents.split("\n")) {
+    const port = vhostLinePort(line);
+    if (port !== undefined) ports.add(port);
+  }
+  return [...ports];
+}
+
+/** The digits after the last `:` of `authority` (a trailing `;` ignored). */
+function trailingPort(authority: string): number | undefined {
+  const bare = authority.endsWith(";") ? authority.slice(0, -1) : authority;
+  const digits = bare.slice(bare.lastIndexOf(":") + 1);
+  return bare.includes(":") && /^\d+$/.test(digits)
+    ? Number(digits)
+    : undefined;
+}
+
+/** The port one vhost line listens on or proxies to, if it is a directive. */
+function vhostLinePort(line: string): number | undefined {
+  const caddy = line.trimEnd();
+  if (caddy.startsWith(":") && caddy.endsWith("{")) {
+    const digits = caddy.slice(1, -1).trimEnd();
+    return /^\d+$/.test(digits) ? Number(digits) : undefined;
+  }
+  const [directive, value] = line.trim().split(/\s+/, 2);
+  if (value === undefined) return undefined;
+  if (
+    directive === "listen" || directive === "Listen" || directive === "address"
+  ) {
+    return trailingPort(value);
+  }
+  if (directive === "proxy_pass") {
+    const scheme = ["https://", "http://"].find((p) => value.startsWith(p));
+    if (scheme === undefined) return undefined;
+    const rest = value.slice(scheme.length);
+    const slash = rest.indexOf("/");
+    return trailingPort(slash < 0 ? rest : rest.slice(0, slash));
+  }
+  return undefined;
+}
+
+async function scanHostSiteVhosts(
+  sitesDirs: SiteConfigDirs,
+): Promise<HostSiteVhosts> {
+  const names = {
+    caddy: [],
+    nginx: [],
+    apache: [],
+    openlitespeed: [],
+  } as Record<
+    SiteEngineId,
+    string[]
+  >;
+  const ports = new Map<number, string[]>();
+  await forEachSequential(SITE_ENGINE_ORDER, async (engine) => {
+    const confs = (await listEngineConfigDir(sitesDirs[engine]) ?? [])
+      .filter((name) => name.endsWith(".conf"));
+    names[engine] = confs;
+    await forEachSequential(confs, async (name) => {
+      const contents = await readEngineConfigFile(
+        join(sitesDirs[engine], name),
+      );
+      for (const port of siteVhostPorts(contents)) {
+        const owners = ports.get(port) ?? [];
+        owners.push(`${engine}/${name}`);
+        ports.set(port, owners);
+      }
+    });
+  });
+  return { names, ports };
+}
+
+/** The loopback ports a site claims: `listenPort`, plus Apache's behind nginx. */
+function siteClaimedPorts(site: SiteApplySpec): number[] {
+  return isNginxApacheSite(site) && site.backendPort !== undefined
+    ? [site.listenPort, site.backendPort]
+    : [site.listenPort];
+}
+
+/**
+ * Refuse a site whose port is taken: by another site of this apply, by any
+ * vhost of another environment on this host (the control plane's port ledger
+ * is per environment), or, for a port no vhost of this environment holds yet,
+ * by anything else listening on loopback. Runs before anything is written, so
+ * a refused apply changes nothing and Caddy never routes one site's domain to
+ * another tenant's listener.
+ */
+async function assertSitePortsFree(
+  environmentId: string,
+  sites: readonly SiteApplySpec[],
+  host: HostSiteVhosts,
+  probe: ProbeHostPortFn,
+): Promise<void> {
+  const prefix = `tp-${environmentId}-`;
+  const claimed = new Map<number, string>();
+  await forEachSequential(sites, async (site) => {
+    const name = site.composeServiceName;
+    await forEachSequential(siteClaimedPorts(site), async (port) => {
+      const other = claimed.get(port);
+      if (other !== undefined) {
+        throw new Error(
+          `site ${name}: port ${port} is also claimed by site ${other} in this deploy`,
+        );
+      }
+      claimed.set(port, name);
+      const owners = host.ports.get(port) ?? [];
+      const foreign = owners.find((owner) =>
+        !owner.slice(owner.indexOf("/") + 1).startsWith(prefix)
+      );
+      if (foreign !== undefined) {
+        throw new Error(
+          `site ${name}: port ${port} is already used by ${foreign} (another environment on this host); refusing to apply`,
+        );
+      }
+      if (owners.length > 0) return;
+      if (!(await probe("127.0.0.1", port))) {
+        throw new Error(
+          `site ${name}: port ${port} is already in use on this host; refusing to apply`,
+        );
+      }
+    });
+  });
+}
+
+/**
+ * Remove this environment's vhosts of a site from every engine it no longer
+ * uses (nginx+apache -> apache leaves nginx on `listenPort`; -> nginx leaves
+ * Apache on the old backend port), and reload those engines so they let go of
+ * the ports before the site's own engine binds them. A failed removal or
+ * reload stops the apply: rolling out onto a port still held would fail the
+ * new engine's restart host-wide.
+ *
+ * Outside the rollout transaction: a later rollout failure does not bring the
+ * old engine's vhost back (the switch is the operator's change; redeploy).
+ * OpenLiteSpeed keeps fragment, vhost dir and aggregate in step on removal
+ * and is not swept here.
+ */
+async function retireStaleSiteVhosts(
+  layout: LayoutPaths,
+  environmentId: string,
+  sites: readonly SiteApplySpec[],
+  sitesDirs: SiteConfigDirs,
+  host: HostSiteVhosts,
+): Promise<string[]> {
+  const retired = new Set<SiteEngineId>();
+  await forEachSequential(sites, async (site) => {
+    const name = `tp-${environmentId}-${site.composeServiceName}.conf`;
+    const serving = siteServingEngines(site);
+    await forEachSequential(FILE_VHOST_ENGINES, async (engine) => {
+      if (serving.includes(engine) || !host.names[engine].includes(name)) {
+        return;
+      }
+      const path = join(sitesDirs[engine], name);
+      const rm = await run("sudo", hostSudoArgs(["-n", "rm", "-f", path]));
+      if (!rm.success) {
+        throw new Error(rm.stderr || `Failed to remove stale vhost ${path}`);
+      }
+      logInfo(
+        "deploy",
+        `site ${site.composeServiceName} left ${engine}: removed ${path}`,
+      );
+      retired.add(engine);
+    });
+  });
+  const touched: string[] = [];
+  await forEachSequential(
+    SITE_ENGINE_ORDER.filter((engine) => retired.has(engine)),
+    async (engine) => {
+      const driver = SITE_ENGINE_DRIVERS[engine];
+      await driver.configTest(run, layout);
+      // An engine that is not running holds no port: nothing to reload.
+      const active = await run(
+        "sudo",
+        hostSudoArgs(["-n", "systemctl", "is-active", "--quiet", driver.unit]),
+      );
+      if (!active.success) return;
+      const reload = await run(
+        "sudo",
+        hostSudoArgs(["-n", "systemctl", "reload", driver.unit]),
+      );
+      if (!reload.success) {
+        throw new Error(
+          reload.stderr ||
+            `Failed to reload ${driver.label} after removing a stale vhost`,
+        );
+      }
+      touched.push(engine);
+    },
+  );
+  return touched;
 }
 
 /**
@@ -3116,14 +3556,8 @@ export async function applySites(
     // bad version fails the deploy rather than half-applying.
     for (const site of sites) {
       resolveSitePhpSeries(site);
-      sitePhpRuntimeMode(site);
+      sitePhpRuntimeMode(site, environmentId);
     }
-
-    await installSiteEngines(
-      needs,
-      phpSeriesForDeploy(sites),
-      phpExtensionsForDeploy(sites),
-    );
 
     const sitesDirs: SiteConfigDirs = {
       caddy: join(layout.configDir, "caddy", "sites"),
@@ -3131,6 +3565,22 @@ export async function applySites(
       apache: join(layout.configDir, "apache", "sites"),
       openlitespeed: join(layout.configDir, "openlitespeed", "sites"),
     };
+    // Before anything is installed or written: a port another environment's
+    // vhost (or anything else) holds is refused, never shared.
+    const hostVhosts = await scanHostSiteVhosts(sitesDirs);
+    await assertSitePortsFree(
+      environmentId,
+      sites,
+      hostVhosts,
+      opts?.probeHostPort ?? defaultProbeHostPort,
+    );
+
+    await installSiteEngines(
+      needs,
+      phpSeriesForDeploy(sites),
+      phpExtensionsForDeploy(sites),
+    );
+
     await ensureSiteConfigDirs(
       layout,
       needs,
@@ -3155,6 +3605,7 @@ export async function applySites(
       openlitespeedSitesDir: sitesDirs.openlitespeed,
       phpRuntimes: emptyPhpRuntimes(),
       settled: new Set(),
+      paired: sites.some(isNginxApacheSite),
     };
     let reloaded: string[];
     try {
@@ -3179,7 +3630,16 @@ export async function applySites(
         }
         applied.push(site.composeServiceName);
       });
-      reloaded = await reloadSiteEngines(layout, plan);
+      // Every candidate is staged: the engines a site left let go of its
+      // ports before the engine it moved to binds them.
+      const retired = await retireStaleSiteVhosts(
+        layout,
+        environmentId,
+        sites,
+        sitesDirs,
+        hostVhosts,
+      );
+      reloaded = [...retired, ...await reloadSiteEngines(layout, plan)];
     } catch (err) {
       await rollbackUnsettledPhpRuntimes(plan);
       throw err;

@@ -25,6 +25,9 @@ export type ManagedHaEventMessage = {
   type: "managed-ha-event";
   managedId: string;
   sourceMemberId?: string;
+  /** Orchestrator's key for the dead instance; both or neither. */
+  instanceHost?: string;
+  instancePort?: number;
   at: string;
 };
 
@@ -96,12 +99,22 @@ export class ManagedHaObserver {
         }`;
         if (this.#emitted.has(key)) continue;
         this.#emitted.add(key);
+        const { hostname, port } = problem.key ?? {};
+        const instance = hostname && port !== undefined
+          ? { instanceHost: hostname, instancePort: port }
+          : {};
         this.#send({
           type: "managed-ha-event",
           managedId: alias,
+          ...instance,
           at: this.#now(),
         });
-        logInfo("managed", `managed-ha-event emitted managedId=${alias}`);
+        logInfo(
+          "managed",
+          `managed-ha-event emitted managedId=${alias} instance=${
+            hostname ?? "?"
+          }:${port ?? "?"}`,
+        );
       }
     } catch (err) {
       logWarn("managed", "managed-ha observe failed:", sanitizeForLog(err));

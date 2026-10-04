@@ -52,16 +52,20 @@ function inspectPath(kind: InspectKind, target: string): string {
   return kind === "volume" ? `/volumes/${name}` : `/networks/${name}`;
 }
 
-function labelsFromInspect(
-  bytes: Uint8Array,
-  kind: InspectKind,
-): Labels | undefined {
+/** The parsed inspect answer, or `undefined` when it is not a JSON object. */
+function parseInspect(bytes: Uint8Array): unknown {
   try {
     const doc = JSON.parse(new TextDecoder().decode(bytes));
-    return labelsOf(kind === "container" ? doc?.Config?.Labels : doc?.Labels);
+    return typeof doc === "object" && doc !== null ? doc : undefined;
   } catch {
     return undefined;
   }
+}
+
+function labelsFromDoc(doc: unknown, kind: InspectKind): Labels | undefined {
+  if (typeof doc !== "object" || doc === null) return undefined;
+  const record = doc as { Config?: { Labels?: unknown }; Labels?: unknown };
+  return labelsOf(kind === "container" ? record.Config?.Labels : record.Labels);
 }
 
 async function readInspect(
@@ -87,11 +91,11 @@ async function readInspect(
     // The engine answers inspect chunked: take the decoded payload.
     const capture = { chunks: [] as Uint8Array[], maxBytes: MAX_INSPECT_BYTES };
     await relayChunked(reader, null, capture);
-    return labelsFromInspect(concatBytes(capture.chunks), kind);
+    return parseInspect(concatBytes(capture.chunks));
   }
   const sink = new LimitedSink();
   await relayBody(reader, framing, sink);
-  return labelsFromInspect(concatBytes(sink.parts), kind);
+  return parseInspect(concatBytes(sink.parts));
 }
 
 function closeQuietly(conn: GateConn | undefined): void {
@@ -120,6 +124,63 @@ export async function fetchLabels(
   target: string,
   timeoutMs = INSPECT_TIMEOUT_MS,
 ): Promise<Labels | undefined> {
+  return labelsFromDoc(
+    await fetchInspect(connect, kind, target, timeoutMs),
+    kind,
+  );
+}
+
+/** The labels and live mounts of a container (see {@link fetchContainerDoc}). */
+export type ContainerDoc = {
+  labels: Labels;
+  hostConfig: Record<string, unknown>;
+  /** The bind mounts the engine lists now, as `HostConfig.Mounts` specs. */
+  mounts: unknown[];
+};
+
+/**
+ * The parts of a container's inspect answer the start check reads, or
+ * `undefined` when they cannot be told (same failure cases as `fetchLabels`).
+ */
+export async function fetchContainerDoc(
+  connect: () => Promise<GateConn>,
+  target: string,
+  timeoutMs = INSPECT_TIMEOUT_MS,
+): Promise<ContainerDoc | undefined> {
+  const doc = await fetchInspect(connect, "container", target, timeoutMs);
+  const labels = labelsFromDoc(doc, "container");
+  if (labels === undefined) return undefined;
+  const record = doc as { HostConfig?: unknown; Mounts?: unknown };
+  const live = Array.isArray(record.Mounts) ? record.Mounts : [];
+  const hostConfig = typeof record.HostConfig === "object" &&
+      record.HostConfig !== null && !Array.isArray(record.HostConfig)
+    ? record.HostConfig as Record<string, unknown>
+    : {};
+  return {
+    labels,
+    hostConfig,
+    mounts: live.filter(isBindMount).map((mount) => ({
+      Type: "bind",
+      Source: mount.Source,
+      ReadOnly: mount.RW === false,
+    })),
+  };
+}
+
+function isBindMount(
+  mount: unknown,
+): mount is { Source?: unknown; RW?: unknown } {
+  return typeof mount === "object" && mount !== null &&
+    (mount as { Type?: unknown }).Type === "bind";
+}
+
+/** The parsed inspect answer of an object, or `undefined` (see `fetchLabels`). */
+async function fetchInspect(
+  connect: () => Promise<GateConn>,
+  kind: InspectKind,
+  target: string,
+  timeoutMs: number,
+): Promise<unknown> {
   let conn: GateConn | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const expired = new Promise<undefined>((resolve) => {

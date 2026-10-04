@@ -35,11 +35,13 @@ import { nativeAppUnitContent } from "../deploy/native/unit.ts";
 import {
   sitePhpFpmConf,
   sitePhpIni,
+  sitePhpLockedValues,
   type SitePhpRuntimeSpec,
   sitePhpServiceUnit,
   sitePhpSocketUnit,
+  sitePhpUnitLimits,
 } from "../deploy/site/php-runtime.ts";
-import { resolveLayout } from "../paths/layout.ts";
+import { PROD_RUNTIME_DIR_DEFAULT, resolveLayout } from "../paths/layout.ts";
 
 /** A path tp-host's test harness must create before the sample runs. */
 export type CallSiteSetup = {
@@ -185,6 +187,7 @@ const PHP_SPEC: SitePhpRuntimeSpec = {
   home: "/srv/users/alice",
   configDir: "/etc/turbopanel",
   libDir: "/opt/turbopanel/lib",
+  runtimesDir: PROD_RUNTIME_DIR_DEFAULT,
   webAccount: "tpnginx",
 };
 const PHP_FPM_SPEC: SitePhpRuntimeSpec = {
@@ -192,7 +195,10 @@ const PHP_FPM_SPEC: SitePhpRuntimeSpec = {
   id: PHP_FPM_ID,
   mode: "fpm",
 };
-const PHP_WRITABLE = { writablePaths: ["-/srv/users/alice/sites/svc1/shared"] };
+const PHP_WRITABLE = {
+  writablePaths: ["-/srv/users/alice/sites/svc1/shared"],
+  limits: sitePhpUnitLimits([], 4),
+};
 const PHP_INI_TEXT = underPrefix(sitePhpIni([], PHP_SPEC.home));
 const PHP_SERVICE_TEXT = underPrefix(
   sitePhpServiceUnit(PHP_SPEC, PHP_WRITABLE),
@@ -201,7 +207,10 @@ const PHP_FPM_SERVICE_TEXT = underPrefix(
   sitePhpServiceUnit(PHP_FPM_SPEC, PHP_WRITABLE),
 );
 const PHP_SOCKET_TEXT = sitePhpSocketUnit(PHP_SPEC);
-const PHP_FPM_CONF_TEXT = sitePhpFpmConf(PHP_FPM_SPEC, { pool: [] });
+const PHP_FPM_CONF_TEXT = sitePhpFpmConf(PHP_FPM_SPEC, {
+  pool: [],
+  admin: sitePhpLockedValues([]),
+});
 /** What `php-test` needs on disk: the installed unit and its php.ini. */
 const PHP_TEST_SETUP: CallSiteSetup = {
   files: {
@@ -260,6 +269,12 @@ const SITES: CallSite[] = [
     { argv: ["ip", "-o", "-4", "addr", "show", "dev", "tp0"] },
     { argv: ["wg", "show", "tp0", "dump"] },
   ),
+  tpHost('src/metrics/collector/tls-expiry.ts|["-n","cert-dates"]', {
+    argv: ["cert-dates"],
+  }),
+  tpHost('src/metrics/collector/site-usage.ts|["-n","site-usage"]', {
+    argv: ["site-usage"],
+  }),
   tpHost('src/commands/reboot.ts|["-n","systemctl","reboot"]', {
     argv: ["systemctl", "reboot"],
   }),
@@ -379,6 +394,14 @@ const SITES: CallSite[] = [
   tpHost(
     `${PHP_APPLY}sudoOrThrow(io,["systemctl","enable","--now",socket],\`PHPruntime\${spec.id}:socket\`)`,
     { argv: ["systemctl", "enable", "--now", `${PHP_UNIT}.socket`] },
+  ),
+  tpHost(
+    `${PHP_APPLY}sudoOrThrow(io,["systemctl","restart",socket],\`PHPruntime\${spec.id}:socketrestart\`)`,
+    { argv: ["systemctl", "restart", `${PHP_UNIT}.socket`] },
+  ),
+  tpHost(
+    `${PHP_APPLY}sudoQuietly(io,["systemctl","restart",socket],\`couldnotrestart\${socket}onitspreviousconfig\`)`,
+    { argv: ["systemctl", "restart", `${PHP_UNIT}.socket`] },
   ),
   tpHost(
     `${PHP_APPLY}sudoOrThrow(io,["systemctl","enable",service],\`PHPruntime\${spec.id}:enable\`)`,
@@ -1055,6 +1078,16 @@ const SITES: CallSite[] = [
       setup: dir(`${CONF}/nginx`),
     },
   ),
+  tpHost(
+    'src/deploy/site.ts|["-n","systemctl","is-active","--quiet",driver.unit]',
+    { argv: ["systemctl", "is-active", "--quiet", "turbopanel-nginx"] },
+    { argv: ["systemctl", "is-active", "--quiet", "turbopanel-apache"] },
+  ),
+  tpHost(
+    'src/deploy/site.ts|["-n","systemctl","reload",driver.unit]',
+    { argv: ["systemctl", "reload", "turbopanel-nginx"] },
+    { argv: ["systemctl", "reload", "turbopanel-apache"] },
+  ),
   tpHost('src/deploy/site.ts|["-n","ls","-A","--",dir]', {
     argv: ["ls", "-A", "--", `${CONF}/nginx/sites`],
     setup: dir(`${CONF}/nginx/sites`),
@@ -1127,10 +1160,22 @@ const SITES: CallSite[] = [
       setup: { files: { [`${STAGING}/index.html`]: "<h1>hi</h1>\n" } },
     },
   ),
+  tpHost(
+    'src/deploy/release/release-links.ts|["-n",...releaseLinkTextsFindArgs(releaseDir)]',
+    {
+      argv: ["find", RELEASE, "-type", "l", "-printf", String.raw`%P\0%l\0`],
+      setup: dir(RELEASE),
+    },
+  ),
   tpHost('src/deploy/site.ts|["-n","ls","-A","--",documentRoot]', {
     argv: ["ls", "-A", "--", `${SITE}/webroot`],
     setup: dir(`${SITE}/webroot`),
   }),
+  tpHost(
+    'src/deploy/release/live-release-scan.ts|["-n","ls","-A","--",dir]',
+    { argv: ["ls", "-A", "--", `${P}/srv/users`], setup: dir(HOME) },
+    { argv: ["ls", "-A", "--", `${HOME}/sites`], setup: dir(SITE) },
+  ),
   tpHost('src/deploy/site/app-detect.ts|["-n","ls","-A","--",path]', {
     argv: ["ls", "-A", "--", `${SITE}/webroot`],
     setup: dir(`${SITE}/webroot`),
@@ -1373,6 +1418,12 @@ const SITES: CallSite[] = [
   tpHost('src/deploy/ssh/apply.ts|["-n","sshd","-t"]', {
     argv: ["sshd", "-t"],
   }),
+  tpHost(
+    'src/deploy/ssh/apply.ts|["-n","sshd","-T","-C",sshdEffectiveSpec(user)]',
+    {
+      argv: ["sshd", "-T", "-C", "user=alice,host=localhost,addr=127.0.0.1"],
+    },
+  ),
   tpHost('src/deploy/ssh/apply.ts|["-n","systemctl","reload",unit]', {
     argv: ["systemctl", "reload", "ssh.service"],
   }),

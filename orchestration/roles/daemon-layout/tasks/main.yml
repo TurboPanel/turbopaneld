@@ -15,6 +15,7 @@
   ansible.builtin.file:
     path: "{{ item.path }}"
     state: directory
+    follow: false
     owner: "{{ item.owner | default(turbopanel_user) }}"
     group: "{{ item.group | default(turbopanel_group) }}"
     mode: "{{ item.mode }}"

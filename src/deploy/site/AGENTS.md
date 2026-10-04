@@ -31,15 +31,26 @@ Docker Compose. The daemon:
    ownership to negotiate. Metadata still lands in `.turbopanel/php.json`.
 3. Runs `playbooks/site-openlitespeed-apply.yml` (vendor
    `openlitespeed` + `tpols`) when any site uses `engine: openlitespeed`, plus
-   vendored **lsphp** on `turbopanel_lsphp_install=true` when an OLS site wants
-   PHP. OpenLiteSpeed does not use php-fpm: `openlitespeedVhostConfig` gives the
-   vhost its own LSAPI `extprocessor` (`path` → `<runtimesDir>/lsphp/<series>/current/bin/lsphp`,
-   `address uds:///run/turbopanel-ols/<name>.sock` — `OPENLITESPEED_LSAPI_SOCKET_DIR`,
-   the unit's `RuntimeDirectory`; a relative `uds://tmp/…` is the host `/tmp` —
-   on-demand via `runOnStartUp 0` + `autoStart 2`) under **suEXEC** — `extUser`/`extGroup` resolved from the site
-   principal exactly the way a pool's `user`/`group` are, falling back to
-   `tpols`. Hosting hints render into the vhost's `phpIniOverride{}` as
-   `php_admin_value <key> <value>`, and the site fragment flips
+   vendored **lsphp** on `turbopanel_lsphp_install=true` for a site in
+   `lsphp-detached` mode, and the packaged php-cgi/php-fpm
+   (`turbopanel_php_fpm_install`) for one in `fastcgi` or `fpm`. OpenLiteSpeed
+   runs as `tpols` and cannot switch users, so it never starts PHP (php-fpm's own
+   account is `tpols` there too, so the host gains no `tpapache`): each PHP
+   site gets its per-site runtime (step 3 above, as the owner) and
+   `openlitespeedVhostConfig` gives the vhost one `extprocessor` to its socket
+   — `type fcgi` for FastCGI and php-fpm, `type lsapi` for detached lsphp (the
+   vendored lsphp on a systemd socket, `PHPRC` = its own php.ini with the
+   module lines, since PHPRC replaces the relocated `bin/php.ini`), always
+   `autoStart 0`, `address uds:///run/turbopanel-php-<id>/php.sock`. Detached
+   lsphp therefore survives an OpenLiteSpeed restart. `httpdWorkers` is pinned
+   (`OPENLITESPEED_HTTPD_WORKERS`) because `maxConns` counts per worker:
+   `openlitespeedPhpMaxConns` keeps workers × maxConns within the runtime's
+   children, or requests stall on "Reached max children process limit"
+   (WP0). A PHP site with no mode (an older control plane) runs FastCGI, the
+   control plane's default, with a warning (logged once); `lsphp-attached`
+   (dropped with its launcher, still on the wire) runs as `lsphp-detached`,
+   warned once, so one such site never fails the deploy. Hosting hints land in
+   the runtime's php.ini, and the site fragment flips
    `enableScript 1`. Every `context /` renders `allowBrowse 1`: in OLS that is
    the context's "Accessible" flag (`0` is a 403 for everything); listing is
    `autoIndex 0`. `httpd_config.conf` sets `fileAccessControl`
@@ -95,7 +106,7 @@ Docker Compose. The daemon:
    php.ini, so it carries the production baseline itself, with a 128 MB
    opcache per runtime and `validate_permission`/`validate_root` on. Apache
    adds `ProxyFCGIBackendType GENERIC` for php-cgi. `<id>` is
-   `<slug>-<sha256(env, service)[0..12]>-<fcgi|fpm><series>`: a mode or
+   `<slug>-<sha256(env, service)[0..12]>-<fcgi|fpm|lsd><series>`: a mode or
    series switch is a **second** runtime beside the first. The new one is
    written, `php-test`ed (as the owner), started and checked before the vhost
    is staged; the vhost then moves to its socket through the safe rollout
@@ -141,10 +152,8 @@ Docker Compose. The daemon:
    through `ct state established,related accept` first. The `nft` and `flock`
    programs are installed by `turbopanel-user/root-helpers.yml`; if still
    missing the helper exits non-zero naming the program (units do not start,
-   boot reconcile logs the error). Known gap: an owner whose OLS PHP runs only
-   as attached lsphp (turbopaneld#250, spawned by OpenLiteSpeed, no unit) is
-   never in the rule set and stays unrestricted on loopback; handle when #250
-   merges. Not closed: an
+   boot reconcile logs the error). OpenLiteSpeed's detached lsphp (`lsd`) runs
+   the same unit, so it carries the same filter, limits and guard. Not closed: an
    `nft flush ruleset` while PHP runs leaves loopback open until the next
    start, deploy or daemon boot. The ProxySQL MySQL port is fixed at 13306
    in the script; a changed `listenerPorts` needs the script's `DB_PORT`
@@ -155,8 +164,11 @@ Docker Compose. The daemon:
    `0750 root:tpphp<series>`) is resolved control-plane side as a `deploy`
    entitlement; the daemon also adds it on deploy only to
    cover an older control plane.
-   No mode keeps the shared master; a mode without a principal, or lsphp on
-   nginx/Apache, is refused. OpenLiteSpeed and Caddy ignore `php.mode` here.
+   No mode keeps the shared master on nginx and Apache; a mode without a
+   principal, or lsphp on nginx/Apache, is refused. OpenLiteSpeed runs the same
+   runtimes (plus `-lsd<series>`, detached lsphp) behind `tpols`; Caddy ignores
+   `php.mode`. Attached lsphp is not offered: a site asking for it runs
+   detached (warned once), never failing the deploy.
 
 4. Materializes document roots under
    `<stateDir>/sites/<environmentId>/<composeServiceName>/<root>/` (default
@@ -171,10 +183,9 @@ Docker Compose. The daemon:
    nginx/Apache php-fpm pools run workers as the principal when pinned (`user` /
    `group = ${username}-grp` from `ensureSystemPrincipals`); the listen socket is
    owned by the serving engine (`tpnginx` / `tpapache`). An OpenLiteSpeed vhost
-   carries the same identity twice: as LSAPI `extUser`/`extGroup` on the vhost's
-   `extprocessor`, **and** as the vhost's own `user`/`group` (`setUIDMode 0`) in
-   the aggregated `httpd_config.conf`, so suEXEC covers everything the vhost
-   runs rather than the external processor alone. Multiple principals on one
+   declares no identity: its PHP runs as the owner through the per-site
+   runtime, and the old `extUser`/`extGroup`/`setUIDMode` lines never took
+   effect with OpenLiteSpeed as `tpols` (WP0). Multiple principals on one
    site service are rejected at deploy-prepare
    (`site_principal_ambiguous`).
 5. Installs loopback-only vhosts under FHS config — nginx
@@ -281,6 +292,15 @@ root-owned `0550` by design:
   scripts read the release and write through `shared/` — reachable as
   `current/shared` — and nothing else on the filesystem. Daemon-owned sites
   (no release binding) stay unrestricted.
+- **nginx follows no link below a release-backed document root.** It serves
+  one with `disable_symlinks on from=$document_root`, so **every** symlink under
+  the root answers 403 — including links that stay inside the release, such as
+  `public/build -> ../dist` or Laravel's `public/storage` (`artisan
+  storage:link`). Builds that need those paths must copy the files rather than
+  link them, or serve them through the app. Apache and OpenLiteSpeed keep
+  owner-match link following (`.htaccess` `RewriteRule` needs it); the
+  publish-time link checks in `../release/release-links.ts` are what keeps
+  those engines safe.
 - **PHP is told the symlink moved.** PHP is the one runtime that would keep
   serving the old release after a promote even though the document-root *string*
   never changed, because two caches hide the swap: the realpath cache still
@@ -359,6 +379,57 @@ swarm-style replicas, ACME issuance on the daemon. TurboFabric **is** the
 single org mesh (`server.fabric.reconcile` — see `src/commands/fabric.ts`
 and `../../orchestration/AGENTS.md`). `{ enabled: false }` is a teardown; the
 daemon owns apply (no Ansible apply playbook).
+
+## nginx in front of Apache (`engine: "nginx+apache"`, `nginx-apache.ts`)
+
+One site, two engines. nginx's vhost listens on `listenPort` (plus the docker
+bridge), refuses dotfiles itself, serves only `NGINX_APACHE_STATIC_EXTENSIONS`
+(images, CSS, JS, fonts, media) from disk, and proxies everything else, and
+any static path missing on disk, to `127.0.0.1:<backendPort>`. Apache's vhost
+listens there only, honours `.htaccess`, runs PHP in the site's mode exactly
+as a plain Apache site (socket group `tpapache`), and takes the client address
+from `X-Forwarded-For` through mod_remoteip trusting `127.0.0.2` alone:
+nginx connects from that address (`proxy_bind`), while Apache still listens
+on `127.0.0.1` (Linux routes all of 127/8 to `lo`). That is not a security
+boundary: a local user can bind `127.0.0.2` too and claim any client address on
+loopback, so `.htaccess` IP rules must not be relied on for security. nginx sends exactly one address, `$remote_addr` after
+realip from loopback (the hosting Caddy, which replaces an inbound
+`X-Forwarded-For` because it trusts no proxies); a local process calling nginx
+directly can still claim any address. Apache's backend vhost also refuses
+dotfiles (`<LocationMatch>`, except `/.well-known/`) for a caller that skips
+nginx. The role's `LogFormat combined` logs `%a`, so the access log shows the
+visitor.
+Files nginx serves skip `.htaccess`; that is the documented caveat, and why
+the static list stays short.
+
+- The control plane allocates `backendPort` from the same loopback ledger as
+  `listenPort`; the parser requires it (and a distinct value) for this engine.
+- A paired site needs a principal: its tree carries `<user>-grp`, which both
+  `tpnginx` and `tpapache` join (`resolveSiteOwnership`,
+  `ensureEnginesCanReadPrincipalTree`).
+- Rollout is Apache first (`SITE_ENGINE_ORDER`), probed on `backendPort`,
+  then nginx, probed on `listenPort` through Apache. Apache's rollout stays
+  open (`openSiteRollout`) until nginx passes: an nginx failure restores both
+  vhosts, and the site's PHP runtime, filed under nginx, settles only then.
+- Removal needs nothing new: both sites dirs are swept by prefix.
+- Engine switch: before any engine rolls out, `retireStaleSiteVhosts` removes
+  the site's `tp-<env>-<service>.conf` from every file-vhost engine (Caddy,
+  nginx, Apache) that no longer serves it, then config-tests and reloads that
+  engine (if active), so it lets go of the port first. A failure stops the
+  apply. This is outside the rollout transaction: a later failure does not
+  bring the old vhost back. OpenLiteSpeed is not swept.
+
+## Host-wide ports (`assertSitePortsFree`)
+
+The control plane's port ledger is per environment. Before installing or
+writing anything, `applySites` reads every `*.conf` in the four engine sites
+dirs (all environments, through tp-host) and takes the ports from directive
+lines only (`siteVhostPorts`). A site is refused when its `listenPort` or
+`backendPort` is named by another environment's vhost, by another site of the
+same deploy, or, when no vhost of this environment names it yet, when a bind
+probe on `127.0.0.1` fails. The post-apply probe is still status-only: this
+check, not the probe, is what keeps one tenant's domain off another's
+listener.
 
 ## Managed-directory sites
 

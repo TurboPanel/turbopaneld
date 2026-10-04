@@ -58,9 +58,13 @@ import type { LayoutPaths } from "../../paths/layout.ts";
 /** Engines that can serve a site. */
 export type SiteEngineId = "caddy" | "nginx" | "apache" | "openlitespeed";
 
-/** Reload order: php-fpm first (see `reloadSiteEngines`), then these. */
+/**
+ * Reload order: php-fpm first (see `reloadSiteEngines`), then these. Apache
+ * comes before nginx because nginx in front of Apache proxies to it: nginx's
+ * probe only passes once Apache serves the new vhost.
+ */
 export const SITE_ENGINE_ORDER: readonly SiteEngineId[] = Object.freeze(
-  ["caddy", "nginx", "apache", "openlitespeed"] as const,
+  ["caddy", "apache", "nginx", "openlitespeed"] as const,
 );
 
 /** Injectable command runner for host-free apply/remove tests. */
@@ -880,6 +884,15 @@ async function rollbackSiteConfigs(
 }
 
 /**
+ * A rollout that has passed its probes but still holds its last-known-good
+ * snapshots: `commit` drops them, `rollback` puts them back and reloads.
+ */
+export type PendingSiteRollout = {
+  commit(): Promise<void>;
+  rollback(): Promise<void>;
+};
+
+/**
  * Swap → config-test → reload → HTTP-validate, rolling the whole set back to
  * the last-known-good config if any of those steps fails.
  *
@@ -890,6 +903,17 @@ async function rollbackSiteConfigs(
 export async function rolloutSiteConfigs(
   opts: SiteRolloutOpts,
 ): Promise<void> {
+  await (await openSiteRollout(opts)).commit();
+}
+
+/**
+ * {@link rolloutSiteConfigs} without the commit, for an engine that another
+ * one depends on: Apache behind nginx stays revertible until nginx, rolled out
+ * after it, has answered through it too.
+ */
+export async function openSiteRollout(
+  opts: SiteRolloutOpts,
+): Promise<PendingSiteRollout> {
   const published: StagedConfigWrite[] = [];
   try {
     await forEachSequential(opts.staged, async (staged) => {
@@ -917,8 +941,12 @@ export async function rolloutSiteConfigs(
     await rollbackSiteConfigs(opts, published);
     throw err;
   }
-  await forEachSequential(
-    published,
-    (staged) => commitStagedConfig(opts.run, staged),
-  );
+  return {
+    commit: () =>
+      forEachSequential(
+        published,
+        (staged) => commitStagedConfig(opts.run, staged),
+      ),
+    rollback: () => rollbackSiteConfigs(opts, published),
+  };
 }

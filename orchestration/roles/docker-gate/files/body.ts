@@ -48,6 +48,7 @@ export const CANONICAL_FIELDS: readonly string[] = [
   "Cgroup",
   "CgroupParent",
   "CgroupnsMode",
+  "Cmd",
   "CpuRealtimePeriod",
   "CpuRealtimeRuntime",
   "DeviceCgroupRules",

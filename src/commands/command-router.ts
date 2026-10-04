@@ -1,8 +1,12 @@
+import {
+  deliverCommandOutcome,
+  markCommandInFlight,
+} from "./command-outbox.ts";
 import { errorText, sanitizeForLog } from "../util/logger.ts";
+import { redactUrlSecrets } from "../util/redact-url-secrets.ts";
 import type {
   CommandAckMessage,
   CommandDispatchMessage,
-  CommandOutcomeMessage,
   PingResult,
   RebootPayload,
 } from "../contracts/commands-contracts.ts";
@@ -88,6 +92,8 @@ export interface CommandRouterDeps {
    * with the no-op sink and no transcript is captured.
    */
   sendCommandLogChunk?: SendCommandLogChunkFn;
+  /** One authenticated round trip to the control plane (`GET /api/daemon/v1/ping`); the firewall auto-confirm check. */
+  verifyControlPlane?: () => Promise<void>;
   /** Fetch last-applied secret plans + envelopes for boot/lifecycle rehydrate. */
   rehydrateDeploymentSecrets?: (
     deployments: ReadonlyArray<{
@@ -168,9 +174,26 @@ function createDispatchLogSink(
   });
 }
 
-function sanitizeError(value: unknown, maxLen = 500): string {
+/**
+ * Longest `command-outcome.error` the daemon sends. The control plane rejects
+ * anything over 4096 characters (`MAX_DAEMON_WS_ERROR_CHARS`), so this leaves
+ * room for the truncation marker.
+ */
+const MAX_OUTCOME_ERROR_CHARS = 4000;
+const TRUNCATED_MARKER = "[...truncated] ";
+
+/**
+ * Keep the **tail**: a failed build prints the cause last, and the head is
+ * usually progress output. The full transcript stays on the command log
+ * endpoint.
+ */
+function sanitizeError(
+  value: unknown,
+  maxLen = MAX_OUTCOME_ERROR_CHARS,
+): string {
   const text = sanitizeForLog(value);
-  return text.length > maxLen ? text.slice(0, maxLen) : text;
+  if (text.length <= maxLen) return text;
+  return `${TRUNCATED_MARKER}${text.slice(text.length - maxLen)}`;
 }
 
 /**
@@ -179,22 +202,17 @@ function sanitizeError(value: unknown, maxLen = 500): string {
  * A handler error message is very often raw process stderr, and the outcome is
  * persisted in command history where the transcript's redaction does not
  * reach. Redact against the sink's deny-set *before* sanitizing, so multiline
- * plaintext still matches the raw text it was captured from.
+ * plaintext still matches the raw text it was captured from. URLs are then
+ * stripped of user info and query strings (registry or release-asset links
+ * quoted in build output carry tokens the deny-set cannot know about).
  */
 function sanitizeOutcomeError(
   value: unknown,
   logSink: CommandOutputSink,
 ): string {
-  return sanitizeError(logSink.redactSummary(errorText(value)));
-}
-
-function sendOutcome(
-  ws: WebSocket,
-  outcome: CommandOutcomeMessage,
-): void {
-  if (ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify(outcome));
-  }
+  return sanitizeError(
+    redactUrlSecrets(logSink.redactSummary(errorText(value))),
+  );
 }
 
 export async function handleCommandDispatch(
@@ -214,6 +232,7 @@ export async function handleCommandDispatch(
     ws.send(JSON.stringify(ack));
   }
 
+  await markCommandInFlight(message.id);
   const logSink = createDispatchLogSink(message, deps);
   // Before any handler runs: the dead-primary probe must see the platform's
   // own stop/restart/re-apply/promote/restore/destroy as intent, not a crash.
@@ -288,7 +307,9 @@ export async function handleCommandDispatch(
         result = await pickCommandRouterHandler(
           "handleFirewallReconcile",
           handleFirewallReconcile,
-        )(payload, daemonReceivedAt);
+        )(payload, daemonReceivedAt, {
+          verifyControlPlane: deps?.verifyControlPlane,
+        });
         ok = true;
         daemonRespondedAt = new Date().toISOString();
         break;
@@ -522,7 +543,7 @@ export async function handleCommandDispatch(
     }
 
     commandSucceeded = ok;
-    sendOutcome(ws, {
+    await deliverCommandOutcome(ws, {
       type: "command-outcome",
       id: message.id,
       ok,
@@ -534,7 +555,7 @@ export async function handleCommandDispatch(
     });
   } catch (err) {
     const daemonRespondedAt = new Date().toISOString();
-    sendOutcome(ws, {
+    await deliverCommandOutcome(ws, {
       type: "command-outcome",
       id: message.id,
       ok: false,

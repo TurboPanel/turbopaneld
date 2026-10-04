@@ -26,6 +26,7 @@ import {
 import { DEFAULT_POLICY_CONFIG, type PolicyConfig } from "./policy.ts";
 import { DEFAULT_PLATFORM_ROOTS } from "./platform.ts";
 import { importApprovalKeys, ReplayCache } from "./approval.ts";
+import { PersistentReplayCache } from "./replay.ts";
 import { resolveBindPath } from "./resolve.ts";
 import { GateStats } from "./stats.ts";
 import { describeError } from "./util.ts";
@@ -59,6 +60,11 @@ export type GateConfig = {
   summarySeconds: number;
   /** File of trusted approval public keys; unset = signed approvals are off. */
   approvalKeyFile?: string;
+  /**
+   * File of used approval token ids, kept across restarts (replay.ts);
+   * unset = ids are remembered in memory only.
+   */
+  approvalStateFile?: string;
   /** Test hook: the clock approvals are judged against (seconds). */
   nowSec?: () => number;
   /** The build listener (build.ts); unset = no build session passes. */
@@ -135,12 +141,14 @@ export function loadConfig(env: Env): GateConfig {
     upstream: env.TP_DOCKER_GATE_UPSTREAM || DEFAULT_UPSTREAM_SOCKET,
     socketGid: Number.isInteger(gid) && gid > 0 ? gid : undefined,
     approvalKeyFile: pathList(env.TP_DOCKER_GATE_APPROVAL_PUBKEY)[0],
+    approvalStateFile: pathList(env.TP_DOCKER_GATE_APPROVAL_STATE)[0],
     summarySeconds: positiveInt(
       env.TP_DOCKER_GATE_SUMMARY_SEC,
       DEFAULT_SUMMARY_SECONDS,
     ),
     policy: {
       bindRoots: roots.length > 0 ? roots : DEFAULT_POLICY_CONFIG.bindRoots,
+      principalRoots: DEFAULT_POLICY_CONFIG.principalRoots,
       denyPrefixes: [...DEFAULT_POLICY_CONFIG.denyPrefixes, ...denyExtra],
       dockerSockets: DEFAULT_POLICY_CONFIG.dockerSockets,
       capAllowlist: caps,
@@ -333,7 +341,14 @@ export async function startGate(
     stats,
     maxBodyBytes: DEFAULT_MAX_BODY_BYTES,
     approvalKeys,
-    approvalReplay: new ReplayCache(),
+    approvalReplay: config.approvalStateFile === undefined
+      ? new ReplayCache()
+      : new PersistentReplayCache(
+        config.approvalStateFile,
+        config.mode === "enforce",
+        log,
+        (config.nowSec ?? (() => Math.floor(Date.now() / 1000)))(),
+      ),
     nowSec: config.nowSec,
   };
   const listener = await openListener(config.socket, config.socketGid);
@@ -415,6 +430,7 @@ export const GATE_ENV_KEYS = [
   "TP_DOCKER_GATE_PLATFORM_RO_ROOTS",
   "TP_DOCKER_GATE_PLATFORM_RW_ROOTS",
   "TP_DOCKER_GATE_APPROVAL_PUBKEY",
+  "TP_DOCKER_GATE_APPROVAL_STATE",
   "TP_DOCKER_GATE_SUMMARY_SEC",
   "TP_DOCKER_GATE_LOAD_CHECK",
   "TP_DOCKER_GATE_BUILD_SOCKET",

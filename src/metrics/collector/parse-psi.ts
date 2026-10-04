@@ -69,8 +69,11 @@ export function psiPercent(
   if (currTotalUs === null) return null;
   const deltaUs = tracker.delta(key, currTotalUs, bootGeneration);
   if (deltaUs === null) return null;
-  if (seconds <= 0) return null;
+  // Divide by this counter's own elapsed time: after a missed read the
+  // baseline is older than one nominal interval.
+  const elapsed = tracker.elapsedSeconds(key, seconds);
+  if (elapsed <= 0) return null;
   const deltaMs = deltaUs / 1000;
-  const intervalMs = seconds * 1000;
+  const intervalMs = elapsed * 1000;
   return clampPercent((deltaMs / intervalMs) * 100);
 }

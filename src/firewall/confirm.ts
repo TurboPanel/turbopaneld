@@ -25,6 +25,7 @@ import {
   readPendingMarker,
   readRollbackRecord,
   removeIfPresent,
+  rollbackRecordPath,
   writeFileAtomic,
 } from "./pending.ts";
 import { foldManagedPublicChainBestEffort } from "./fold.ts";
@@ -139,6 +140,8 @@ export async function confirmPendingFirewall(
   await promoteDurable(layout, marker.v6, v4Document);
   await clearPendingFirewall(layout);
   await disarmGuardTimer(run);
+  // An earlier rollback is history once a ruleset is confirmed.
+  await removeIfPresent(rollbackRecordPath(layout));
   // Stage 6: the ruleset is confirmed, so the legacy managed public chain can
   // go if (and only if) it now covers every listener that chain restricted.
   await foldManagedPublicChainBestEffort({ run, layout });

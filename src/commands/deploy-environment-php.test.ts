@@ -35,9 +35,15 @@ test("a per-site PHP runtime implies its PHP series for the site's principal", (
       phpSite("a", ALICE, { version: "8.3", mode: "fastcgi" }),
       phpSite("b", ALICE, { mode: "fpm" }),
       phpSite("c", ALICE, { version: "8.4", mode: "fpm" }, "apache"),
-      // Shared master or another engine: the daemon runs nothing as bob.
+      // The shared master runs nothing as bob; OpenLiteSpeed's runtime does.
       phpSite("d", BOB, { version: "8.4" }),
-      phpSite("e", BOB, { version: "8.4", mode: "fastcgi" }, "openlitespeed"),
+      phpSite(
+        "e",
+        BOB,
+        { version: "8.3", mode: "lsphp-detached" },
+        "openlitespeed",
+      ),
+      phpSite("f", BOB, { version: "8.4", mode: "fastcgi" }, "caddy"),
     ],
   }, [
     { ...ALICE, runtimes: [{ runtime: "node", series: "24" }] },
@@ -52,7 +58,7 @@ test("a per-site PHP runtime implies its PHP series for the site's principal", (
         { runtime: "php", series: "8.4" },
       ],
     },
-    BOB,
+    { ...BOB, runtimes: [{ runtime: "php", series: "8.3" }] },
   ]);
 });
 

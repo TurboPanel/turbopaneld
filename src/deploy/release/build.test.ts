@@ -391,7 +391,7 @@ test("deriveNodeInstallCommand detects the manager from the lockfile", async () 
     await Deno.writeTextFile(join(workingDir, "pnpm-lock.yaml"), "");
     assertEquals(
       await deriveNodeInstallCommand({ workingDir }),
-      "corepack pnpm install --frozen-lockfile --prod=false",
+      "corepack pnpm install --frozen-lockfile --config.production=false",
     );
   });
 });
@@ -412,9 +412,59 @@ test("deriveNodeInstallCommand lets an explicit packageManager override the lock
     await Deno.remove(join(workingDir, "pnpm-lock.yaml"));
     assertEquals(
       await deriveNodeInstallCommand({ packageManager: "pnpm", workingDir }),
-      "corepack pnpm install --prod=false",
+      "corepack pnpm install --config.production=false",
     );
   });
+});
+
+test("deriveNodeInstallCommand picks pnpm dev-deps flags by pinned major", async () => {
+  const cases: Array<[string, string]> = [
+    ["pnpm@9.15.9", "corepack pnpm install --frozen-lockfile --prod=false"],
+    ["pnpm@10.20.0", "corepack pnpm install --frozen-lockfile"],
+    ["pnpm@11.28.4", "corepack pnpm install --frozen-lockfile"],
+    // pnpm 12 rejects `--prod=false`.
+    ["pnpm@12.3.4+sha512.961aa41f", "corepack pnpm install --frozen-lockfile"],
+  ];
+  for (const [pin, expected] of cases) {
+    await withWorkingDir(async (workingDir) => {
+      await Deno.writeTextFile(
+        join(workingDir, "package.json"),
+        JSON.stringify({ packageManager: pin }),
+      );
+      await Deno.writeTextFile(join(workingDir, "pnpm-lock.yaml"), "");
+      assertEquals(await deriveNodeInstallCommand({ workingDir }), expected);
+    });
+  }
+  // yarn 1 / berry / npm pins are unaffected by the pnpm logic.
+  const others: Array<[string, string]> = [
+    ["yarn@1.22.22", "corepack yarn install --production=false"],
+    ["yarn@4.5.0", "corepack yarn install"],
+    ["npm@10.8.0", "npm install --include=dev"],
+  ];
+  for (const [pin, expected] of others) {
+    await withWorkingDir(async (workingDir) => {
+      await Deno.writeTextFile(
+        join(workingDir, "package.json"),
+        JSON.stringify({ packageManager: pin }),
+      );
+      assertEquals(await deriveNodeInstallCommand({ workingDir }), expected);
+    });
+  }
+});
+
+test("deriveNodeInstallCommand ignores a pin for a different manager than packageManager=pnpm", async () => {
+  for (const pin of ["yarn@4.5.0", "npm@10.8.0"]) {
+    await withWorkingDir(async (workingDir) => {
+      await Deno.writeTextFile(
+        join(workingDir, "package.json"),
+        JSON.stringify({ packageManager: pin }),
+      );
+      assertEquals(
+        await deriveNodeInstallCommand({ packageManager: "pnpm", workingDir }),
+        "corepack pnpm install --config.production=false",
+      );
+    });
+  }
 });
 
 test("deriveNodeInstallCommand treats Yarn Berry as immutable-by-CI", async () => {
@@ -495,7 +545,7 @@ test("runReleaseBuild derives the install command for a native-app build", async
     });
     // The derived install runs before the build command.
     assertEquals(ran, [
-      "corepack pnpm install --frozen-lockfile --prod=false",
+      "corepack pnpm install --frozen-lockfile --config.production=false",
       "npm run build",
     ]);
     assertEquals(
@@ -525,7 +575,7 @@ test("runReleaseBuild normalizes bare pnpm build commands for native-app builds"
       onOutput: (_stream, line) => lines.push(line),
     });
     assertEquals(ran, [
-      "corepack pnpm install --frozen-lockfile --prod=false",
+      "corepack pnpm install --frozen-lockfile --config.production=false",
       "corepack pnpm run build",
     ]);
     assertEquals(

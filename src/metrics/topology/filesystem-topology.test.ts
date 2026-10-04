@@ -100,3 +100,24 @@ test("collectFilesystemTopology: distinct devices for hosting and Docker stay as
   assertEquals(new Set(root!.roles), new Set(["root", "backup", "logs"]));
   assertEquals(filesystems.length, 3);
 });
+
+test("collectFilesystemTopology: a docker role resolving to a tmpfs or overlay mount is dropped, the root stays", async () => {
+  const mounts = [
+    "/dev/sda1 / ext4 rw 0 0",
+    "overlay /var/lib/docker/overlay2/x/merged overlay rw 0 0",
+    "tmpfs /srv/cache tmpfs rw 0 0",
+  ].join("\n");
+  const filesystems = await collectFilesystemTopology({
+    readProcFile: (path) => path === "/proc/mounts" ? mounts : undefined,
+    statfs: () => fakeStatfs(),
+    resolveHostingPath: () => "/srv/cache",
+    resolveDockerDataRoot: () =>
+      Promise.resolve("/var/lib/docker/overlay2/x/merged"),
+    resolveBackupPath: () => "/backup",
+    resolveLogsPath: () => "/var/log/turbopanel",
+    io: defaultSensorIo(),
+    sysRoot: fixtureRoot("net-topology"),
+  });
+  assertEquals(filesystems.map((fs) => fs.fsType), ["ext4"]);
+  assertEquals(filesystems[0]!.roles.includes("root"), true);
+});
