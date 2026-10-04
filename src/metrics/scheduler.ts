@@ -17,7 +17,18 @@
  */
 import { METRICS_SCHEMA_VERSION } from "../contracts/metrics-contract.ts";
 import { logInfo, logWarn, sanitizeForLog } from "../util/logger.ts";
-import type { MetricsCollector } from "./collector/index.ts";
+import type {
+  MetricsCollector,
+  MetricsCollectResult,
+} from "./collector/index.ts";
+
+/**
+ * Longest one collect may run before the scheduler abandons it, releases its
+ * in-flight guard and logs why. Well under the steady interval's multiple, and
+ * above the collector's own per-source deadlines (which normally fire first
+ * and still yield a sample with null for the stuck source).
+ */
+export const METRICS_COLLECT_DEADLINE_MS = 45_000;
 
 /** Steady metrics cadence (independent of IdlePresence / cell ping). */
 export const METRICS_INTERVAL_MS = 60_000;
@@ -82,6 +93,8 @@ export type MetricsSchedulerOptions = {
    * the single-cadence behaviour.
    */
   durabilityFlag?: () => boolean;
+  /** Override {@link METRICS_COLLECT_DEADLINE_MS} (tests). */
+  collectDeadlineMs?: number;
   onLog?: (level: MetricsLogLevel, message: string) => void;
 };
 
@@ -164,6 +177,7 @@ export class MetricsScheduler {
    */
   #activeEmitGeneration: number | undefined;
   readonly #lastLoggedAt = new Map<string, number>();
+  readonly #collectDeadlineMs: number;
 
   constructor(options: MetricsSchedulerOptions) {
     this.#serverId = options.serverId;
@@ -179,6 +193,8 @@ export class MetricsScheduler {
     this.#logRateLimitMs = options.logRateLimitMs ?? METRICS_LOG_RATE_LIMIT_MS;
     this.#onLog = options.onLog ?? defaultOnLog;
     this.#durabilityFlag = options.durabilityFlag ?? (() => false);
+    this.#collectDeadlineMs = options.collectDeadlineMs ??
+      METRICS_COLLECT_DEADLINE_MS;
   }
 
   /** `true` when live leases run beside the baseline instead of replacing it. */
@@ -232,7 +248,10 @@ export class MetricsScheduler {
     this.#streamEmitting = true;
     try {
       this.#sequence += 1;
-      const result = await collector.collect({ sequence: this.#sequence });
+      const result = await this.#collectWithDeadline(collector, {
+        sequence: this.#sequence,
+        live: true,
+      });
       if (generation !== this.#attachGeneration || !result.supported) return;
       if (this.#send !== send) return;
       await send(this.#stampDurable(result.sample, false));
@@ -246,6 +265,41 @@ export class MetricsScheduler {
     } finally {
       this.#streamEmitting = false;
     }
+  }
+
+  /**
+   * `collector.collect` bounded by the collect deadline. A hung source (dead
+   * mount, wedged GPU driver, stuck Docker call) would otherwise leave the
+   * in-flight guard set forever and silence every host metric. On expiry the
+   * stuck collect is abandoned (its late result is ignored), the caller's
+   * guard is released by its `finally`, and the reason is thrown for the
+   * caller to log in plain words.
+   */
+  #collectWithDeadline(
+    collector: MetricsCollector,
+    options: { sequence: number; live?: boolean },
+  ): Promise<MetricsCollectResult> {
+    return new Promise<MetricsCollectResult>((resolve, reject) => {
+      const timer = this.#setTimeoutFn(() => {
+        reject(
+          new Error(
+            `a host read did not finish within ${
+              Math.round(this.#collectDeadlineMs / 1000)
+            } s (a stuck mount, GPU driver or Docker call?); skipped this sample`,
+          ),
+        );
+      }, this.#collectDeadlineMs);
+      collector.collect(options).then(
+        (result) => {
+          this.#clearTimeoutFn(timer);
+          resolve(result);
+        },
+        (err) => {
+          this.#clearTimeoutFn(timer);
+          reject(err);
+        },
+      );
+    });
   }
 
   #stampDurable<T>(sample: T, durable: boolean): T {
@@ -395,7 +449,7 @@ export class MetricsScheduler {
     try {
       let result;
       try {
-        result = await collector.collect({ sequence });
+        result = await this.#collectWithDeadline(collector, { sequence });
       } catch (err) {
         if (generation !== this.#attachGeneration) return;
         this.#logRateLimited(

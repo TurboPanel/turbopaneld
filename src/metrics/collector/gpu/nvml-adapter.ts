@@ -86,31 +86,46 @@ const NVML_SYMBOLS = {
 } as const;
 
 /**
+ * Every NVML call runs on Deno's blocking thread pool (`nonblocking`), so a
+ * call stuck on a wedged GPU parks its own promise instead of freezing the
+ * daemon's event loop (WebSocket liveness included). The collector's source
+ * deadline then abandons it.
+ */
+const NVML_NONBLOCKING_SYMBOLS = Object.fromEntries(
+  Object.entries(NVML_SYMBOLS).map((
+    [name, def],
+  ) => [name, { ...def, nonblocking: true }]),
+) as unknown as Deno.ForeignLibraryInterface;
+
+/** A value now, or a promise of it (real NVML is non-blocking; test doubles stay synchronous). */
+type Maybe<T> = T | Promise<T>;
+
+/**
  * Vendor-neutral surface over the raw FFI symbol table — the injectable
  * seam tests use to exercise adapter logic without `Deno.dlopen` or a real
  * NVIDIA driver. {@link openDefaultNvmlBinding} is the only implementation
  * that touches `Deno.dlopen` directly.
  */
 export type NvmlBinding = {
-  init(): boolean;
-  shutdown(): void;
-  getHandleByPciBusId(pciBusId: string): bigint | null;
+  init(): Maybe<boolean>;
+  shutdown(): Maybe<void>;
+  getHandleByPciBusId(pciBusId: string): Maybe<bigint | null>;
   getUtilizationRates(
     handle: bigint,
-  ): { gpuPercent: number; memoryPercent: number } | null;
-  getMemoryUsedBytes(handle: bigint): number | null;
-  getTemperatureCelsius(handle: bigint): number | null;
-  getPowerWatts(handle: bigint): number | null;
+  ): Maybe<{ gpuPercent: number; memoryPercent: number } | null>;
+  getMemoryUsedBytes(handle: bigint): Maybe<number | null>;
+  getTemperatureCelsius(handle: bigint): Maybe<number | null>;
+  getPowerWatts(handle: bigint): Maybe<number | null>;
   getPcieThroughputBytesPerSecond(
     handle: bigint,
-  ): { rx: number; tx: number } | null;
-  getThermalViolationNanoseconds(handle: bigint): number | null;
-  getEccDoubleBitAggregateTotal(handle: bigint): number | null;
+  ): Maybe<{ rx: number; tx: number } | null>;
+  getThermalViolationNanoseconds(handle: bigint): Maybe<number | null>;
+  getEccDoubleBitAggregateTotal(handle: bigint): Maybe<number | null>;
   /** Last Xid critical-error code observed for this device, `null` when none has been recorded. */
-  getLastXidErrorCode(handle: bigint): number | null;
-  getRemappedRows(handle: bigint): NvmlRemappedRows | null;
+  getLastXidErrorCode(handle: bigint): Maybe<number | null>;
+  getRemappedRows(handle: bigint): Maybe<NvmlRemappedRows | null>;
   /** Whether a row-retirement (page-retirement) event is pending a reboot to take effect. */
-  getRetiredPagesPending(handle: bigint): boolean | null;
+  getRetiredPagesPending(handle: bigint): Maybe<boolean | null>;
 };
 
 /** `nvmlDeviceGetRemappedRows` — row-remapping ECC-repair state (Ampere+). */
@@ -144,61 +159,61 @@ function pciBusIdBuffer(pciBusId: string): Uint8Array {
  */
 export type NvmlLibrary = {
   symbols: {
-    nvmlInit_v2: () => number;
-    nvmlShutdown: () => number;
+    nvmlInit_v2: () => Maybe<number>;
+    nvmlShutdown: () => Maybe<number>;
     nvmlDeviceGetHandleByPciBusId_v2: (
       busId: Uint8Array,
       out: Uint8Array,
-    ) => number;
+    ) => Maybe<number>;
     nvmlDeviceGetUtilizationRates: (
       handle: bigint,
       out: Uint8Array,
-    ) => number;
+    ) => Maybe<number>;
     nvmlDeviceGetMemoryInfo_v2: (
       handle: bigint,
       out: Uint8Array,
-    ) => number;
+    ) => Maybe<number>;
     nvmlDeviceGetTemperature: (
       handle: bigint,
       sensor: number,
       out: Uint8Array,
-    ) => number;
+    ) => Maybe<number>;
     nvmlDeviceGetPowerUsage: (
       handle: bigint,
       out: Uint8Array,
-    ) => number;
+    ) => Maybe<number>;
     nvmlDeviceGetPcieThroughput: (
       handle: bigint,
       counter: number,
       out: Uint8Array,
-    ) => number;
+    ) => Maybe<number>;
     nvmlDeviceGetViolationStatus: (
       handle: bigint,
       policy: number,
       out: Uint8Array,
-    ) => number;
+    ) => Maybe<number>;
     nvmlDeviceGetTotalEccErrors: (
       handle: bigint,
       bitType: number,
       counterType: number,
       out: Uint8Array,
-    ) => number;
+    ) => Maybe<number>;
     nvmlDeviceGetFieldValues: (
       handle: bigint,
       count: number,
       out: Uint8Array,
-    ) => number;
+    ) => Maybe<number>;
     nvmlDeviceGetRemappedRows: (
       handle: bigint,
       corr: Uint8Array,
       unc: Uint8Array,
       pending: Uint8Array,
       failure: Uint8Array,
-    ) => number;
+    ) => Maybe<number>;
     nvmlDeviceGetRetiredPagesPendingStatus: (
       handle: bigint,
       out: Uint8Array,
-    ) => number;
+    ) => Maybe<number>;
   };
   close: () => void;
 };
@@ -208,33 +223,33 @@ export function createNvmlBindingFromLibrary(lib: NvmlLibrary): NvmlBinding {
   const sym = lib.symbols;
 
   return {
-    init(): boolean {
+    async init(): Promise<boolean> {
       try {
-        return sym.nvmlInit_v2() === NVML_SUCCESS;
+        return (await sym.nvmlInit_v2()) === NVML_SUCCESS;
       } catch {
         return false;
       }
     },
-    shutdown(): void {
+    async shutdown(): Promise<void> {
       try {
-        sym.nvmlShutdown();
+        await sym.nvmlShutdown();
         lib.close();
       } catch {
         // Best-effort — the process is likely exiting anyway.
       }
     },
-    getHandleByPciBusId(pciBusId: string): bigint | null {
+    async getHandleByPciBusId(pciBusId: string): Promise<bigint | null> {
       const out = new Uint8Array(8);
-      const rc = sym.nvmlDeviceGetHandleByPciBusId_v2(
+      const rc = await sym.nvmlDeviceGetHandleByPciBusId_v2(
         pciBusIdBuffer(pciBusId),
         out,
       );
       if (rc !== NVML_SUCCESS) return null;
       return readHandle(out);
     },
-    getUtilizationRates(handle) {
+    async getUtilizationRates(handle) {
       const out = new Uint8Array(8);
-      const rc = sym.nvmlDeviceGetUtilizationRates(handle, out);
+      const rc = await sym.nvmlDeviceGetUtilizationRates(handle, out);
       if (rc !== NVML_SUCCESS) return null;
       const view = new DataView(out.buffer);
       return {
@@ -242,21 +257,21 @@ export function createNvmlBindingFromLibrary(lib: NvmlLibrary): NvmlBinding {
         memoryPercent: view.getUint32(4, true),
       };
     },
-    getMemoryUsedBytes(handle) {
+    async getMemoryUsedBytes(handle) {
       // nvmlMemory_v2_t: { u32 version; u64 total; u64 reserved; u64 free; u64 used; } (40 bytes, 8-byte aligned).
       const STRUCT_SIZE = 40;
       const out = new Uint8Array(STRUCT_SIZE);
       const view = new DataView(out.buffer);
       // NVML_STRUCT_VERSION(Memory, 2) = sizeof(nvmlMemory_v2_t) | (2 << 24)
       view.setUint32(0, STRUCT_SIZE | (2 << 24), true);
-      const rc = sym.nvmlDeviceGetMemoryInfo_v2(handle, out);
+      const rc = await sym.nvmlDeviceGetMemoryInfo_v2(handle, out);
       if (rc !== NVML_SUCCESS) return null;
       // `used` sits after `free` (offset 24) — reading 24 reports free memory.
       return Number(view.getBigUint64(32, true));
     },
-    getTemperatureCelsius(handle) {
+    async getTemperatureCelsius(handle) {
       const out = new Uint8Array(4);
-      const rc = sym.nvmlDeviceGetTemperature(
+      const rc = await sym.nvmlDeviceGetTemperature(
         handle,
         NVML_TEMPERATURE_GPU,
         out,
@@ -264,21 +279,21 @@ export function createNvmlBindingFromLibrary(lib: NvmlLibrary): NvmlBinding {
       if (rc !== NVML_SUCCESS) return null;
       return new DataView(out.buffer).getUint32(0, true);
     },
-    getPowerWatts(handle) {
+    async getPowerWatts(handle) {
       const out = new Uint8Array(4);
-      const rc = sym.nvmlDeviceGetPowerUsage(handle, out);
+      const rc = await sym.nvmlDeviceGetPowerUsage(handle, out);
       if (rc !== NVML_SUCCESS) return null;
       return new DataView(out.buffer).getUint32(0, true) / 1000;
     },
-    getPcieThroughputBytesPerSecond(handle) {
+    async getPcieThroughputBytesPerSecond(handle) {
       const rxOut = new Uint8Array(4);
       const txOut = new Uint8Array(4);
-      const rxRc = sym.nvmlDeviceGetPcieThroughput(
+      const rxRc = await sym.nvmlDeviceGetPcieThroughput(
         handle,
         NVML_PCIE_UTIL_RX_BYTES,
         rxOut,
       );
-      const txRc = sym.nvmlDeviceGetPcieThroughput(
+      const txRc = await sym.nvmlDeviceGetPcieThroughput(
         handle,
         NVML_PCIE_UTIL_TX_BYTES,
         txOut,
@@ -289,10 +304,10 @@ export function createNvmlBindingFromLibrary(lib: NvmlLibrary): NvmlBinding {
         tx: new DataView(txOut.buffer).getUint32(0, true) * 1024,
       };
     },
-    getThermalViolationNanoseconds(handle) {
+    async getThermalViolationNanoseconds(handle) {
       // nvmlViolationTime_t: { u64 referenceTime; u64 violationTime; }
       const out = new Uint8Array(16);
-      const rc = sym.nvmlDeviceGetViolationStatus(
+      const rc = await sym.nvmlDeviceGetViolationStatus(
         handle,
         NVML_PERF_POLICY_THERMAL,
         out,
@@ -300,9 +315,9 @@ export function createNvmlBindingFromLibrary(lib: NvmlLibrary): NvmlBinding {
       if (rc !== NVML_SUCCESS) return null;
       return Number(new DataView(out.buffer).getBigUint64(8, true));
     },
-    getEccDoubleBitAggregateTotal(handle) {
+    async getEccDoubleBitAggregateTotal(handle) {
       const out = new Uint8Array(8);
-      const rc = sym.nvmlDeviceGetTotalEccErrors(
+      const rc = await sym.nvmlDeviceGetTotalEccErrors(
         handle,
         NVML_DOUBLE_BIT_ECC,
         NVML_AGGREGATE_ECC,
@@ -311,7 +326,7 @@ export function createNvmlBindingFromLibrary(lib: NvmlLibrary): NvmlBinding {
       if (rc !== NVML_SUCCESS) return null;
       return Number(new DataView(out.buffer).getBigUint64(0, true));
     },
-    getLastXidErrorCode(handle) {
+    async getLastXidErrorCode(handle) {
       // nvmlFieldValue_t: { u32 fieldId; u32 scopeId; i64 timestamp;
       // i64 latencyUsec; u32 valueType; i32 nvmlReturn; u64 value; }
       // (40 bytes, 8-byte aligned). `nvmlReturn` at offset 28 is this one
@@ -320,17 +335,17 @@ export function createNvmlBindingFromLibrary(lib: NvmlLibrary): NvmlBinding {
       const out = new Uint8Array(STRUCT_SIZE);
       const view = new DataView(out.buffer);
       view.setUint32(0, NVML_FIELD_ID_XID_ERRORS, true);
-      const rc = sym.nvmlDeviceGetFieldValues(handle, 1, out);
+      const rc = await sym.nvmlDeviceGetFieldValues(handle, 1, out);
       if (rc !== NVML_SUCCESS) return null;
       if (view.getInt32(28, true) !== NVML_SUCCESS) return null;
       return view.getUint32(32, true);
     },
-    getRemappedRows(handle) {
+    async getRemappedRows(handle) {
       const corrOut = new Uint8Array(4);
       const uncOut = new Uint8Array(4);
       const pendingOut = new Uint8Array(4);
       const failureOut = new Uint8Array(4);
-      const rc = sym.nvmlDeviceGetRemappedRows(
+      const rc = await sym.nvmlDeviceGetRemappedRows(
         handle,
         corrOut,
         uncOut,
@@ -346,9 +361,9 @@ export function createNvmlBindingFromLibrary(lib: NvmlLibrary): NvmlBinding {
           0,
       };
     },
-    getRetiredPagesPending(handle) {
+    async getRetiredPagesPending(handle) {
       const out = new Uint8Array(4);
-      const rc = sym.nvmlDeviceGetRetiredPagesPendingStatus(handle, out);
+      const rc = await sym.nvmlDeviceGetRetiredPagesPendingStatus(handle, out);
       if (rc !== NVML_SUCCESS) return null;
       return new DataView(out.buffer).getUint32(0, true) !== 0;
     },
@@ -375,7 +390,10 @@ export function openDefaultNvmlBinding(): NvmlBinding | null {
   for (const candidate of NVML_LIBRARY_CANDIDATES) {
     try {
       return createNvmlBindingFromLibrary(
-        Deno.dlopen(candidate, NVML_SYMBOLS) as unknown as NvmlLibrary,
+        Deno.dlopen(
+          candidate,
+          NVML_NONBLOCKING_SYMBOLS,
+        ) as unknown as NvmlLibrary,
       );
     } catch {
       // Missing at this path, or outside the FFI grant — try the next one.
@@ -384,9 +402,9 @@ export function openDefaultNvmlBinding(): NvmlBinding | null {
   return null;
 }
 
-function safeCall<T>(fn: () => T | null): T | null {
+async function safeCall<T>(fn: () => Maybe<T | null>): Promise<T | null> {
   try {
-    return fn();
+    return await fn();
   } catch {
     return null;
   }
@@ -396,6 +414,7 @@ export class NvmlGpuAdapter implements GpuAdapter {
   readonly id = "nvml" as const;
   readonly #openBinding: () => NvmlBinding | null;
   #binding: NvmlBinding | null | undefined = undefined;
+  #probing: Promise<void> | undefined;
   readonly #handles = new Map<string, bigint | null>();
 
   constructor(deps?: { openBinding?: () => NvmlBinding | null }) {
@@ -404,13 +423,17 @@ export class NvmlGpuAdapter implements GpuAdapter {
 
   /** Open and initialise NVML once. `safeCall` swallows every throw, so this resolves. */
   probe(): Promise<void> {
-    if (this.#binding !== undefined) return Promise.resolve();
-    this.#binding = safeCall(() => {
+    // One init even when two readers (GPU metrics, health events) probe at once.
+    this.#probing ??= this.#open();
+    return this.#probing;
+  }
+
+  async #open(): Promise<void> {
+    this.#binding = await safeCall(async () => {
       const binding = this.#openBinding();
       if (!binding) return null;
-      return binding.init() ? binding : null;
+      return (await binding.init()) ? binding : null;
     });
-    return Promise.resolve();
   }
 
   async read(
@@ -423,22 +446,26 @@ export class NvmlGpuAdapter implements GpuAdapter {
 
     let handle = this.#handles.get(gpu.gpuId);
     if (handle === undefined) {
-      handle = safeCall(() => binding.getHandleByPciBusId(gpu.pciPath)) ??
+      handle = await safeCall(() => binding.getHandleByPciBusId(gpu.pciPath)) ??
         null;
       this.#handles.set(gpu.gpuId, handle);
     }
     if (!handle) return null;
 
-    const utilization = safeCall(() => binding.getUtilizationRates(handle));
-    const memoryUsedBytes = safeCall(() => binding.getMemoryUsedBytes(handle));
-    const temperatureCelsius = safeCall(() =>
+    const utilization = await safeCall(() =>
+      binding.getUtilizationRates(handle)
+    );
+    const memoryUsedBytes = await safeCall(() =>
+      binding.getMemoryUsedBytes(handle)
+    );
+    const temperatureCelsius = await safeCall(() =>
       binding.getTemperatureCelsius(handle)
     );
-    const powerWatts = safeCall(() => binding.getPowerWatts(handle));
-    const pcie = safeCall(() =>
+    const powerWatts = await safeCall(() => binding.getPowerWatts(handle));
+    const pcie = await safeCall(() =>
       binding.getPcieThroughputBytesPerSecond(handle)
     );
-    const violationNs = safeCall(() =>
+    const violationNs = await safeCall(() =>
       binding.getThermalViolationNanoseconds(handle)
     );
 
@@ -495,19 +522,21 @@ export class NvmlGpuAdapter implements GpuAdapter {
 
     let handle = this.#handles.get(gpu.gpuId);
     if (handle === undefined) {
-      handle = safeCall(() => binding.getHandleByPciBusId(gpu.pciPath)) ??
+      handle = await safeCall(() => binding.getHandleByPciBusId(gpu.pciPath)) ??
         null;
       this.#handles.set(gpu.gpuId, handle);
     }
     if (!handle) return empty;
 
     return {
-      eccDoubleBitAggregateTotal: safeCall(() =>
+      eccDoubleBitAggregateTotal: await safeCall(() =>
         binding.getEccDoubleBitAggregateTotal(handle)
       ),
-      lastXidErrorCode: safeCall(() => binding.getLastXidErrorCode(handle)),
-      remappedRows: safeCall(() => binding.getRemappedRows(handle)),
-      retiredPagesPending: safeCall(() =>
+      lastXidErrorCode: await safeCall(() =>
+        binding.getLastXidErrorCode(handle)
+      ),
+      remappedRows: await safeCall(() => binding.getRemappedRows(handle)),
+      retiredPagesPending: await safeCall(() =>
         binding.getRetiredPagesPending(handle)
       ),
     };

@@ -354,29 +354,6 @@ test("LinuxMetricsCollector smoke test: a normal 1-NIC VM produces a logically c
   assertEquals(result.sample.databaseProxies, []);
 });
 
-test("LinuxMetricsCollector never throws out of collect() — falls back to a minimal valid sample", async () => {
-  const collector = new LinuxMetricsCollector({
-    readProcFile: () => undefined,
-    statfs: () => null,
-    now: () => 1_000,
-    collectTopology: () => Promise.reject(new Error("topology boom")),
-    io: { listDir: () => [], readFile: () => undefined },
-    pageSizeBytes: 4096,
-  });
-
-  const result = await collector.collect({ sequence: 1 });
-  if (!result.supported) {
-    throw new TypeError("expected a supported (fallback) sample");
-  }
-  assertEquals(result.sample.type, "metrics");
-  assertEquals(result.sample.metadata.topologyGeneration, 0);
-  assertEquals(result.sample.metadata.bootGeneration, 0);
-  assertEquals(result.sample.host.cpu.busyPercent, null);
-  assertEquals(result.sample.networks, []);
-  assertEquals(result.sample.filesystems, []);
-  assertEquals(result.sample.blockDevices, []);
-});
-
 test("LinuxMetricsCollector re-baselines (nulls once) on a boot generation change", async () => {
   let generation = 2;
   let tick = 0;
@@ -1386,4 +1363,59 @@ test("LinuxMetricsCollector sends no extended section when nothing v7 was collec
   ).collect({ sequence: 1, nowMs: 1_000_000 });
   if (!result.supported) throw new TypeError("expected a supported sample");
   assertEquals(result.sample.extended, undefined);
+});
+
+test("LinuxMetricsCollector: a live-stream collect never runs event detection (the stream sample is non-durable)", async () => {
+  let detects = 0;
+  const nowMs = 1_000_000;
+  const collector = new LinuxMetricsCollector({
+    ...makeDeps(() => TICK_1, fullTopologySnapshot(), () => nowMs),
+    eventCollectors: {
+      detect: () => {
+        detects += 1;
+        return Promise.resolve([]);
+      },
+    },
+  });
+  await collector.collect({ sequence: 1, nowMs, live: true });
+  assertEquals(detects, 0);
+  await collector.collect({ sequence: 2, nowMs: nowMs + 60_000 });
+  assertEquals(detects, 1);
+});
+
+test("LinuxMetricsCollector: a hung statfs / GPU / ingress / event source degrades to nulls instead of hanging the collect", async () => {
+  const never = new Promise<never>(() => {});
+  const nowMs = 1_000_000;
+  const collector = new LinuxMetricsCollector({
+    ...makeDeps(() => TICK_1, fullTopologySnapshot(), () => nowMs),
+    sourceDeadlineMs: 20,
+    statfs: () => never,
+    gpuAdapters: {
+      nvml: { id: "nvml", probe: () => never, read: () => never },
+      dcgm: { id: "dcgm", probe: () => never, read: () => never },
+      sysfs: { id: "sysfs", probe: () => never, read: () => never },
+      nvidiaSmi: { id: "nvidia-smi", probe: () => never, read: () => never },
+    } as unknown as GpuAdapterSet,
+    eventCollectors: { detect: () => never },
+    hostText: () => never,
+  });
+  const result = await collector.collect({ sequence: 1, nowMs });
+  if (!result.supported) throw new TypeError("expected a supported sample");
+  assertEquals(result.sample.events, []);
+  assertEquals(result.sample.host.storage.rootFilesystemAvailableBytes, null);
+});
+
+test("LinuxMetricsCollector: an internal failure is thrown (so the scheduler logs it and sends nothing), not turned into an all-null row", async () => {
+  const nowMs = 1_000_000;
+  const collector = new LinuxMetricsCollector({
+    ...makeDeps(() => TICK_1, fullTopologySnapshot(), () => nowMs),
+    collectTopology: () => Promise.reject(new Error("topology exploded")),
+  });
+  let message = "";
+  try {
+    await collector.collect({ sequence: 1, nowMs });
+  } catch (err) {
+    message = String(err);
+  }
+  assertEquals(message.includes("topology exploded"), true);
 });
