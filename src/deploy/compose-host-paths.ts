@@ -218,12 +218,32 @@ function collectBuild(
 
 /** tmpfs mount options a volume may carry: sizing and ownership only. */
 const SAFE_TMPFS_OPTION = /^(size|mode|uid|gid|nr_inodes|nr_blocks)=[\w.]+$/;
-const SAFE_TMPFS_FLAGS = new Set(["noexec", "nosuid", "nodev", "ro", "rw"]);
+const SAFE_TMPFS_FLAGS = new Set([
+  "noexec",
+  "nosuid",
+  "nodev",
+  "noatime",
+  "ro",
+  "rw",
+]);
 
 function mountOptions(opts: Record<string, unknown>): string[] {
   return typeof opts.o === "string"
     ? opts.o.split(",").map((s) => s.trim().toLowerCase())
     : [];
+}
+
+/**
+ * A volume mount the engine treats as a bind of a host path (`o: bind`,
+ * `type: none`), judged by the path checks rather than by type.
+ */
+export function isBindStyleVolume(opts: Record<string, unknown>): boolean {
+  const type = typeof opts.type === "string"
+    ? opts.type.trim().toLowerCase()
+    : undefined;
+  const o = mountOptions(opts);
+  return o.includes("bind") || o.includes("rbind") || type === "none" ||
+    type === "bind";
 }
 
 /**
@@ -233,7 +253,7 @@ function mountOptions(opts: Record<string, unknown>): string[] {
  * sizing and ownership options passes; a bind-style mount is judged by the
  * path checks instead.
  */
-function isSafeTmpfsVolume(opts: Record<string, unknown>): boolean {
+export function isSafeTmpfsVolume(opts: Record<string, unknown>): boolean {
   const keys = Object.keys(opts);
   if (keys.some((k) => k !== "type" && k !== "device" && k !== "o")) {
     return false;
@@ -255,19 +275,9 @@ function collectTopLevelVolumes(
     const opts = spec.driver_opts;
     if (Object.keys(opts).length === 0) continue;
     const o = mountOptions(opts);
-    const type = typeof opts.type === "string"
-      ? opts.type.trim().toLowerCase()
-      : undefined;
-    const isBind = o.includes("bind") || o.includes("rbind") ||
-      type === "none" || type === "bind";
-    if (!isBind) {
-      if (!isSafeTmpfsVolume(opts)) {
-        out.findings.push(
-          `volume ${name} sets driver_opts the platform does not allow (only a tmpfs with size, mode, uid or gid, or a host-approved bind, is supported)`,
-        );
-      }
-      continue;
-    }
+    // Other mount types are judged by `assertComposePolicy`, which knows
+    // whether the deploy carries host-level approval.
+    if (!isBindStyleVolume(opts)) continue;
     if (typeof opts.device !== "string" || !isAbsolute(opts.device)) {
       out.findings.push(
         `volume ${name} binds a device that is not an absolute host path`,

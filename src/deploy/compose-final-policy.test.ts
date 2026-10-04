@@ -93,8 +93,11 @@ test("local volume driver_opts other than a plain tmpfs are refused", () => {
     { o: "uid=1000" },
   ];
   for (const driver_opts of refused) {
-    const scan = collectResolvedHostPaths({ volumes: { v: { driver_opts } } });
-    assertEquals(scan.findings.length, 1, JSON.stringify(driver_opts));
+    const findings = collectComposePolicyFindings(
+      { volumes: { v: { driver_opts } } },
+      {},
+    );
+    assertEquals(findings.length, 1, JSON.stringify(driver_opts));
   }
 });
 
@@ -180,4 +183,25 @@ test("the shared Traefik only reads containers the daemon marked as routed", () 
   if (!compose.includes("com.turbopanel.system.routed")) {
     throw new TypeError("shared Traefik has no provider constraint");
   }
+});
+
+test("volume options other than bind or a sized tmpfs pass only with host-level approval", () => {
+  const overlay = {
+    volumes: {
+      v: {
+        driver_opts: { type: "overlay", o: "lowerdir=/etc", device: "overlay" },
+      },
+      n: { driver_opts: { type: "nfs", o: "addr=10.0.0.2", device: ":/x" } },
+    },
+  };
+  assertThrows(() => assertComposePolicy(overlay, {}), Error, "volume v");
+  assertComposePolicy(overlay, { hostLevelApproved: true });
+  assertComposePolicy({
+    volumes: {
+      t: {
+        driver_opts: { type: "tmpfs", device: "tmpfs", o: "size=1g,noatime" },
+      },
+      b: { driver_opts: { type: "none", o: "bind", device: "/srv/x" } },
+    },
+  }, {});
 });

@@ -10,6 +10,8 @@
  * bridge interface, and images that shadow the platform's own, are refused.
  */
 
+import { isBindStyleVolume, isSafeTmpfsVolume } from "./compose-host-paths.ts";
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -113,6 +115,22 @@ function imageShadowFindings(
     );
 }
 
+function volumeFindings(volumes: unknown): string[] {
+  if (!isRecord(volumes)) return [];
+  const found: string[] = [];
+  for (const [name, spec] of Object.entries(volumes)) {
+    if (!isRecord(spec) || !isRecord(spec.driver_opts)) continue;
+    const opts = spec.driver_opts;
+    if (Object.keys(opts).length === 0) continue;
+    // A bind-style mount is a host path: the path checks confine it.
+    if (isBindStyleVolume(opts) || isSafeTmpfsVolume(opts)) continue;
+    found.push(
+      `volume ${name} mounts something other than plain Docker storage (overlay, network and other filesystem types can reach host paths; only a sized tmpfs is allowed without host-level approval)`,
+    );
+  }
+  return found;
+}
+
 function networkFindings(networks: unknown): string[] {
   if (!isRecord(networks)) return [];
   const found: string[] = [];
@@ -143,6 +161,7 @@ export function collectComposePolicyFindings(
     findings.push(...imageShadowFindings(name, service));
   }
   if (opts.hostLevelApproved !== true) {
+    findings.push(...volumeFindings(document.volumes));
     findings.push(...networkFindings(document.networks));
   }
   return findings;

@@ -1,4 +1,5 @@
 import { assertEquals, assertThrows } from "@std/assert";
+import { parse } from "yaml";
 import {
   assertNoReservedOwnerLabels,
   ComposeReservedLabelError,
@@ -112,4 +113,28 @@ test("a tenant compose may not author traefik routing labels or the routed marke
       "reserved",
     );
   }
+});
+
+test("a padded, merged or list-form traefik label is still refused", () => {
+  const merged = parse(
+    "x-l: &l\n  traefik.http.routers.x.rule: Host(`v.example.com`)\nservices:\n  web:\n    image: alpine\n    labels:\n      <<: *l\n",
+    { merge: true },
+  ) as Record<string, unknown>;
+  assertThrows(() => assertNoReservedOwnerLabels(merged), Error, "reserved");
+  assertThrows(
+    () =>
+      assertNoReservedOwnerLabels({
+        services: { web: { labels: { " traefik.enable": "true" } } },
+      }),
+    Error,
+    "reserved",
+  );
+  assertThrows(
+    () =>
+      assertNoReservedOwnerLabels({
+        services: { web: { labels: [" Traefik.enable=true"] } },
+      }),
+    Error,
+    "reserved",
+  );
 });
