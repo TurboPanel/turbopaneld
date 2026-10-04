@@ -747,28 +747,32 @@ const SITES: CallSite[] = [
     { argv: ["systemctl", "stop", "turbopanel-instance-acme.service"] },
   ),
   tpHost(
-    'src/deploy/instance-acme-http01.ts|["-n","install","-m",modeText(mode),"-o","root","-g",INSTANCE_ACME_CERT_GROUP,"--",staged,dest]',
+    'src/deploy/instance-acme-http01.ts|["-n","install","-m",modeText(mode),"-o",owner,"-g",INSTANCE_ACME_CERT_GROUP,"--",staged,dest]',
     {
       argv: [
         "install",
         "-m",
-        "0640",
+        "0600",
         "-o",
-        "root",
+        "tpcaddy",
         "-g",
         "tp",
         "--",
         STAGED,
-        `${CONF}/tls/instance-acme/panel.example.com.crt`,
+        `${CONF}/tls/instance-acme/panel.example.com.key`,
       ],
       // The daemon creates the directory first (as itself).
       setup: dir(`${CONF}/tls/instance-acme`),
     },
   ),
   tpHost(
-    'src/deploy/instance-acme-http01.ts|["-n","chown",`:${INSTANCE_ACME_CERT_GROUP}`,dest]',
+    'src/deploy/instance-acme-http01.ts|["-n","chown",`${owner==="root"?"":owner}:${INSTANCE_ACME_CERT_GROUP}`,dest]',
     {
-      argv: ["chown", ":tp", `${CONF}/tls/instance-acme/panel.example.com.key`],
+      argv: [
+        "chown",
+        "tpcaddy:tp",
+        `${CONF}/tls/instance-acme/panel.example.com.key`,
+      ],
       setup: file(`${CONF}/tls/instance-acme/panel.example.com.key`),
     },
   ),

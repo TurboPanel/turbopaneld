@@ -29,6 +29,7 @@ import {
   instanceAcmeConfigPath,
   instanceAcmeHostSettled,
   instanceAcmeIssuerFailureLine,
+  instanceAcmeIssuerKey,
   instanceAcmeLogPath,
   instanceAcmeSettingsPath,
   instanceAcmeSocketPath,
@@ -68,6 +69,19 @@ export async function withInstanceAcmeWindowLock<T>(
   } finally {
     release();
   }
+}
+
+/**
+ * The account the panel's Caddy runs as; it must be able to read its key. The
+ * apply playbook's `caddy_user` is the dev user on a co-located dev host
+ * (`TURBOPANEL_DEV_USER`, the same variable the daemon passes to the playbook)
+ * and `tpcaddy` everywhere else.
+ */
+export function controlPlaneCaddyUser(
+  env: Record<string, string | undefined> = Deno.env.toObject(),
+): string {
+  const dev = env.TURBOPANEL_DEV_USER?.trim();
+  return dev && /^[a-z_][a-z0-9_-]{0,31}$/.test(dev) ? dev : "tpcaddy";
 }
 
 export async function reloadControlPlaneCaddy(
@@ -114,8 +128,25 @@ export function isDaemonReservedHostingSite(name: string): boolean {
   return DAEMON_RESERVED_HOSTING_SITES.has(name);
 }
 
+const HOLDER_NAME_MAX = 32;
+const HOLDER_LIST_MAX = 120;
+
+/**
+ * Process names come from the kernel (up to 15 arbitrary bytes), and this text
+ * is stored on the hostname row and shown in the UI: keep each name to word
+ * characters, `.@:+-` and spaces, and cap the length.
+ */
+export function sanitizePort80Holders(processNames: string): string {
+  const names = processNames.split(",").map((name) =>
+    name.replace(/[^\w.@:+ -]/g, "_").trim().slice(0, HOLDER_NAME_MAX)
+  ).filter((name) => name.length > 0);
+  return names.join(", ").slice(0, HOLDER_LIST_MAX);
+}
+
 export function port80HeldMessage(processName: string): string {
-  return `port 80 is held by ${processName}`;
+  return `port 80 is held by ${
+    sanitizePort80Holders(processName) || "another process"
+  }`;
 }
 
 export type Port80Listener = { process: string; pid: number };
@@ -712,16 +743,18 @@ export async function issueInstanceLetsEncryptCertificates(
     run,
   );
   const now = deps.now ?? Date.now;
-  const had = await snapshotIssued(layout, hosts, now(), run);
+  const issuerKey = instanceAcmeIssuerKey(instanceAcme);
+  const had = await snapshotIssued(layout, hosts, now(), issuerKey, run);
   await startIssuer(run);
   let failed = true;
   let stopError: Error | null = null;
   try {
     await grantInstanceAcmeSocket(instanceAcmeSocketPath(layout), run);
-    await waitForCertificates(layout, hosts, had, deps, run);
+    await waitForCertificates(layout, hosts, had, issuerKey, deps, run);
     await forEachSequential(
       hosts,
-      (host) => publishIssuedCertificate(layout, host, certsDir, run),
+      (host) =>
+        publishIssuedCertificate(layout, host, certsDir, issuerKey, run),
     );
     failed = false;
   } finally {
@@ -735,11 +768,12 @@ async function snapshotIssued(
   layout: LayoutPaths,
   hosts: readonly string[],
   nowMs: number,
+  issuerKey: string,
   run: InstanceAcmeCommand,
 ): Promise<Map<string, InstanceAcmeCertificateBaseline>> {
   const had = new Map<string, InstanceAcmeCertificateBaseline>();
   await forEachSequential(hosts, async (host) => {
-    had.set(host, await baselineForHost(layout, host, nowMs, run));
+    had.set(host, await baselineForHost(layout, host, nowMs, issuerKey, run));
   });
   return had;
 }
@@ -748,9 +782,16 @@ async function baselineForHost(
   layout: LayoutPaths,
   host: string,
   nowMs: number,
+  issuerKey: string,
   run: InstanceAcmeCommand,
 ): Promise<InstanceAcmeCertificateBaseline> {
-  const current = await readIssuerInspection(layout, host, nowMs, run);
+  const current = await readIssuerInspection(
+    layout,
+    host,
+    nowMs,
+    issuerKey,
+    run,
+  );
   if (!current) return { identity: null, due: true };
   return {
     identity: current.identity,
@@ -762,6 +803,7 @@ function waitForCertificates(
   layout: LayoutPaths,
   hosts: readonly string[],
   had: ReadonlyMap<string, InstanceAcmeCertificateBaseline>,
+  issuerKey: string,
   deps: InstanceAcmeIssueDeps,
   run: InstanceAcmeCommand,
 ): Promise<void> {
@@ -774,7 +816,16 @@ function waitForCertificates(
     const log = await (deps.readLog ?? (() => readIssuerLog(layout)))();
     const failure = instanceAcmeIssuerFailureLine(log);
     if (failure) throw new Error(`instance ACME issuer failed: ${failure}`);
-    if (await everyHostSettled(layout, hosts, had, log, elapsed, now(), run)) {
+    if (
+      await everyHostSettled(
+        layout,
+        hosts,
+        had,
+        issuerKey,
+        { log, elapsed, nowMs: now() },
+        run,
+      )
+    ) {
       return;
     }
     if (elapsed >= timeoutMs) throw new Error("instance ACME issuer timed out");
@@ -788,13 +839,18 @@ async function everyHostSettled(
   layout: LayoutPaths,
   hosts: readonly string[],
   had: ReadonlyMap<string, InstanceAcmeCertificateBaseline>,
-  log: string,
-  elapsed: number,
-  nowMs: number,
+  issuerKey: string,
+  { log, elapsed, nowMs }: { log: string; elapsed: number; nowMs: number },
   run: InstanceAcmeCommand,
 ): Promise<boolean> {
   for (const host of hosts) {
-    const current = await readIssuerInspection(layout, host, nowMs, run);
+    const current = await readIssuerInspection(
+      layout,
+      host,
+      nowMs,
+      issuerKey,
+      run,
+    );
     const baseline = had.get(host) ?? { identity: null, due: true };
     const settled = instanceAcmeHostSettled(log, host, baseline, elapsed, {
       identity: current?.identity ?? null,
@@ -867,12 +923,17 @@ async function publishIssuedCertificate(
   layout: LayoutPaths,
   host: string,
   certsDir: string,
+  issuerKey: string,
   run: InstanceAcmeCommand,
 ): Promise<void> {
   if (!/^[A-Za-z0-9.-]+$/.test(host)) {
     throw new Error(`refusing certificate name ${host}`);
   }
-  const found = await findIssuedPair(instanceAcmeCertificateRoot(layout), host);
+  const found = await findIssuedPair(
+    instanceAcmeCertificateRoot(layout),
+    host,
+    issuerKey,
+  );
   if (!found) throw new Error(`issuer storage has no certificate for ${host}`);
   await installLeaf(
     found.crt,
@@ -909,9 +970,10 @@ async function chgrp(path: string): Promise<void> {
   }
 }
 
-async function findIssuedPair(
+export async function findIssuedPair(
   root: string,
   host: string,
+  issuerKey: string,
 ): Promise<{ crt: string; key: string } | null> {
   const issuers: string[] = [];
   try {
@@ -920,11 +982,13 @@ async function findIssuedPair(
     }
   } catch (err) {
     if (err instanceof Deno.errors.NotFound) return null;
-    if (needsRoot(err)) return await findIssuedPairViaSudo(root, host);
+    if (needsRoot(err)) {
+      return await findIssuedPairViaSudo(root, host, issuerKey);
+    }
     throw err;
   }
-  issuers.sort((a, b) => a.localeCompare(b));
   for (const issuer of issuers) {
+    if (issuer !== issuerKey) continue;
     const crt = join(root, issuer, host, `${host}.crt`);
     const key = join(root, issuer, host, `${host}.key`);
     if (await isFile(crt) && await isFile(key)) return { crt, key };
@@ -958,6 +1022,7 @@ export function issuedCertificateFindArgs(
 export async function findIssuedPairViaSudo(
   root: string,
   host: string,
+  issuerKey: string,
 ): Promise<{ crt: string; key: string } | null> {
   if (/[*?[\]]/.test(host)) return null;
   const stdout = await sudoBytes([
@@ -965,20 +1030,26 @@ export async function findIssuedPairViaSudo(
     ...issuedCertificateFindArgs(root, host),
   ]);
   if (!stdout) return null;
-  return issuedPairFromFindOutput(new TextDecoder().decode(stdout), host);
+  return issuedPairFromFindOutput(
+    new TextDecoder().decode(stdout),
+    host,
+    issuerKey,
+  );
 }
 
 /**
- * The first `<host>.crt` (sorted, so the issuer choice is stable) in the
- * tp-host find listing, and its sibling `.key`; null when none is listed.
+ * The `<host>.crt` under the configured CA's folder in the tp-host find
+ * listing, and its sibling `.key`; null when that CA has none. Another CA's
+ * pair (a staging certificate under production settings) is never returned.
  */
 export function issuedPairFromFindOutput(
   listing: string,
   host: string,
+  issuerKey: string,
 ): { crt: string; key: string } | null {
   const paths = listing.split("\n").map((line) => line.trim()).filter((
     line,
-  ) => line.endsWith(`/${host}.crt`));
+  ) => line.endsWith(`/${issuerKey}/${host}/${host}.crt`));
   paths.sort((a, b) => a.localeCompare(b));
   const crt = paths[0];
   if (!crt) return null;
@@ -990,6 +1061,23 @@ function needsRoot(err: unknown): boolean {
     err instanceof Deno.errors.NotCapable;
 }
 
+type LeafStep = {
+  /** Installs the new bytes (or only fixes owner and mode when unchanged). */
+  apply: () => Promise<void>;
+  /** Puts the previous bytes back; null when nothing was replaced. */
+  restore: (() => Promise<void>) | null;
+};
+
+/**
+ * The key goes first and the certificate second, so a failed key install
+ * leaves the old pair untouched, and a failed certificate install puts the old
+ * key back: Caddy never reads a new certificate beside an old key (or the
+ * reverse) after a failure we can see. Both files are the ones the apply
+ * playbook writes (`<state>/tls/certs/letsencrypt-<host>.{crt,key}`); the
+ * playbook leaves the key `<caddy user>:tp 0600` and renewal must agree. A
+ * crash between the two installs can still leave a mismatched pair until the
+ * next run, because tp-host installs one file per call.
+ */
 async function installLeaf(
   sourceCrt: string,
   sourceKey: string,
@@ -997,29 +1085,55 @@ async function installLeaf(
   destKey: string,
   run: InstanceAcmeCommand,
 ): Promise<void> {
-  await copyIfChanged(sourceCrt, destCrt, 0o640, run);
-  await copyIfChanged(sourceKey, destKey, 0o600, run);
+  const key = await planLeaf(
+    sourceKey,
+    destKey,
+    0o600,
+    controlPlaneCaddyUser(),
+    run,
+  );
+  const crt = await planLeaf(sourceCrt, destCrt, 0o640, "root", run);
+  await key.apply();
+  try {
+    await crt.apply();
+  } catch (err) {
+    if (key.restore) {
+      await key.restore().catch((restoreErr) =>
+        logWarn("deploy", "instance ACME key rollback failed:", restoreErr)
+      );
+    }
+    throw err;
+  }
 }
 
-async function copyIfChanged(
+async function planLeaf(
   source: string,
   dest: string,
   mode: number,
+  owner: string,
   run: InstanceAcmeCommand,
-): Promise<void> {
+): Promise<LeafStep> {
   const next = await readFilePrivileged(source, run);
   const current = await readDestBytes(dest, run);
   if (current && bytesEqual(current, next)) {
-    await ensureInstalledMode(dest, mode, run);
-    return;
+    return {
+      apply: () => ensureInstalledMode(dest, mode, owner, run),
+      restore: null,
+    };
   }
-  await stageAndInstall(dest, next, mode, run);
+  return {
+    apply: () => stageAndInstall(dest, next, mode, owner, run),
+    restore: current
+      ? () => stageAndInstall(dest, current, mode, owner, run)
+      : null,
+  };
 }
 
 async function stageAndInstall(
   dest: string,
   bytes: Uint8Array,
   mode: number,
+  owner: string,
   run: InstanceAcmeCommand,
 ): Promise<void> {
   try {
@@ -1045,7 +1159,7 @@ async function stageAndInstall(
         "-m",
         modeText(mode),
         "-o",
-        "root",
+        owner,
         "-g",
         INSTANCE_ACME_CERT_GROUP,
         "--",
@@ -1064,6 +1178,7 @@ async function stageAndInstall(
 async function ensureInstalledMode(
   dest: string,
   mode: number,
+  owner: string,
   run: InstanceAcmeCommand,
 ): Promise<void> {
   try {
@@ -1078,7 +1193,7 @@ async function ensureInstalledMode(
     hostSudoArgs([
       "-n",
       "chown",
-      `:${INSTANCE_ACME_CERT_GROUP}`,
+      `${owner === "root" ? "" : owner}:${INSTANCE_ACME_CERT_GROUP}`,
       dest,
     ]),
   );
@@ -1144,9 +1259,14 @@ async function readIssuerInspection(
   layout: LayoutPaths,
   host: string,
   nowMs: number,
+  issuerKey: string,
   run: InstanceAcmeCommand,
 ) {
-  const found = await findIssuedPair(instanceAcmeCertificateRoot(layout), host);
+  const found = await findIssuedPair(
+    instanceAcmeCertificateRoot(layout),
+    host,
+    issuerKey,
+  );
   if (!found) return null;
   const pem = new TextDecoder().decode(
     await readFilePrivileged(found.crt, run),
