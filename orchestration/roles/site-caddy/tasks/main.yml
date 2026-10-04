@@ -64,6 +64,15 @@
     mode: "0640"
   register: _site_caddy_config
 
+- name: Fail on a kernel that cannot mount web roots nosymfollow
+  ansible.builtin.assert:
+    that:
+      - (ansible_facts.kernel | regex_replace('[^0-9.].*$', '')) is version('5.10', '>=')
+    fail_msg: >-
+      The site Caddy mounts each site owner's web root with `nosymfollow` so no
+      link in it is followed; that needs Linux 5.10 or newer (Debian 12 and
+      later ship 6.1). This host runs {{ ansible_facts.kernel }}.
+
 # Starts Caddy in a private mount namespace with every managed web root mounted
 # `nosymfollow` (Linux 5.10+), so a link in a site owner's writable tree is
 # never served. Needs util-linux (unshare, setpriv, mount, findmnt).
