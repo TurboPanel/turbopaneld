@@ -29,6 +29,7 @@ import {
   resetFabricTestOverrides,
   restoreFabricFromPersistedState,
   setFabricEnableIpForwardingForTests,
+  setFabricLocalAddressesForTests,
   setFabricNetworkDirForTests,
   setFabricRunForTests,
   setFabricSkipRealSyscallsForTests,
@@ -291,6 +292,30 @@ test("disabled fabric payload tears down even when nothing exists", async () => 
       return null;
     },
   );
+});
+
+test("reconcile result names the local NIC that carries each peer endpoint", async () => {
+  await withFabricDir("tp-fabric-nic-", async () => {
+    const parsed = parseFabricReconcilePayload(enabledPayload());
+    if (!parsed.enabled) {
+      throw new TypeError("expected enabled fabric payload");
+    }
+    const when = new Date().toISOString();
+    const without = await handleFabricReconcile(parsed, when);
+    assertEquals(without.peers?.[0]?.interface, undefined);
+
+    setFabricLocalAddressesForTests(() => [
+      {
+        address: "203.0.113.9",
+        version: 4,
+        scope: "public",
+        cidr: "203.0.113.9/24",
+        interface: "eno2",
+      },
+    ]);
+    const withNic = await handleFabricReconcile(parsed, when);
+    assertEquals(withNic.peers?.[0]?.interface, "eno2");
+  });
 });
 
 test("enabled fabric reconcile writes key/state and applies mtu/keepalive/wg-quick", async () => {
