@@ -2,6 +2,15 @@
 # Managed-node FHS layout. run.sh installs bin/turbopaneld, share/orchestration/,
 # and optionally bin/turbopaneld.js (JS-fallback path only) before this playbook runs.
 
+# The config and state roots are sealed (root-owned) later, by the daemon-seal
+# role just before the daemon starts; until then a running daemon can still
+# write into them. A link the daemon planted at the top of a root is removed
+# first, so the tasks below (which never follow links) do not trip over it.
+- name: Remove links planted at the top of the config and state roots
+  ansible.builtin.include_role:
+    name: daemon-seal
+    tasks_from: sweep
+
 - name: Ensure production FHS directories exist
   ansible.builtin.file:
     path: "{{ item.path }}"
@@ -35,8 +44,6 @@
         owner: "root",
         group: "{{ turbopanel_group }}",
       }
-    - { path: "{{ turbopanel_config_dir }}", mode: "0750" }
-    - { path: "{{ turbopanel_daemon_state_dir }}", mode: "0750" }
     # Only the tunnels folder below it is the daemon's (a leaf); this one is
     # root's, so the daemon cannot swap it.
     - {
@@ -51,7 +58,7 @@
       }
 
 # The folders the daemon writes directly (P1-1: the config and state roots
-# become root-owned, so these leaves are what stays tp-owned). Created here,
+# are root-owned, so these leaves are what stays tp-owned). Created here,
 # the leaf itself only: nothing below a leaf is ever touched by root.
 - name: Ensure the daemon-writable config folders
   ansible.builtin.file:

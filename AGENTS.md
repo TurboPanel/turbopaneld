@@ -93,7 +93,9 @@ module and CI guard are the only places allowed to reference it.
 | Runtime (sockets, `daemon.lock`)                                  | `/run/turbopanel`                     |
 
 **Files at the root of the config and state trees (P1-1).** `/etc/turbopanel`
-and `/var/lib/turbopanel` end up root-owned: the daemon (`tp`) writes only its own
+and `/var/lib/turbopanel` end up root-owned (the `daemon-seal` role, last before
+the daemon restarts, with a sweep of links the daemon planted; an administrator's
+root-owned links stay): the daemon (`tp`) writes only its own
 folders below them (`DAEMON_CONFIG_LEAVES` / `DAEMON_STATE_LEAVES` in
 `src/paths/layout.ts`, created by the `daemon-layout` role). The few files that
 live at the root itself (`instance-ca.pem`, `firewall*.v4|v6`, `server.id`,
@@ -101,7 +103,10 @@ the server key and key-id files, `update-guard-disarm.json`) go through
 `writeDaemonFile` / `removeDaemonFile` / `ensureDaemonDir`
 (`src/permissions/daemon-files.ts`): rename in directly when the folder is
 writable, otherwise `tp-host install -o tp` / `rm`. Never `Deno.rename` or
-`Deno.mkdir` a new entry straight into those two roots. Root Ansible never
+`Deno.mkdir` a new entry straight into those two roots. `/var/log/turbopanel`
+is root-owned too (the daemon writes nothing there). On a host that also runs
+the control plane the state root stays shared with the instance for now
+(`turbopanel_seal_state_root: false` in the co-located playbooks). Root Ansible never
 recurses or follows links inside a leaf (pinned by
 `src/orchestration/root-tasks-platform-parents.test.ts`).
 

@@ -1,7 +1,7 @@
 ---
 galaxy_info:
   author: turbopanel
-  description: Install and enable the turbopaneld systemd unit.
+  description: Make the config and state roots root-owned, last before the daemon restarts.
   license: AGPL-3.0
   min_ansible_version: "2.14"
   platforms:
@@ -9,6 +9,4 @@ galaxy_info:
       versions:
         - all
 
-dependencies:
-  - role: daemon-logs
-  - role: daemon-seal
+dependencies: []

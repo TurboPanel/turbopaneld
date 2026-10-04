@@ -1,0 +1,27 @@
+---
+# A root that is itself a link is refused: the root tasks never follow links,
+# so they cannot seal what it points at, and silently following it is what the
+# sealing exists to prevent.
+- name: Look at the sealed roots without following links
+  ansible.builtin.stat:
+    path: "{{ item.path }}"
+    follow: false
+  when: item.seal | bool
+  loop:
+    - { path: "{{ turbopanel_config_dir }}", seal: "{{ turbopanel_seal_config_root }}" }
+    - { path: "{{ turbopanel_daemon_state_dir }}", seal: "{{ turbopanel_seal_state_root }}" }
+  loop_control:
+    label: "{{ item.path }}"
+  register: _root_stat
+
+- name: Refuse a config or state root that is a symbolic link
+  ansible.builtin.assert:
+    that:
+      - item.skipped | default(false) or not (item.stat.islnk | default(false))
+    fail_msg: >-
+      {{ item.item.path }} is a symbolic link. TurboPanel will not follow it:
+      make it a real directory (move its contents there, or bind-mount the
+      target) and run the update again.
+  loop: "{{ _root_stat.results }}"
+  loop_control:
+    label: "{{ item.item.path }}"
