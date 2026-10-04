@@ -1782,6 +1782,51 @@ test("validation needs the hosting unit's state folder: a never-started unit is 
   }
 });
 
+test("a host without the sudoers entry gets a plain error and no snippet is set aside", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const restore = setIngressHostCommandForTest((_command, args) =>
+    Promise.resolve(
+      args.includes("validate")
+        ? {
+          success: false,
+          stderr: "sudo: a password is required",
+        }
+        : { success: true, stderr: "" },
+    )
+  );
+  try {
+    const sitesDir = join(layout.configDir, "hosting", "sites");
+    await Deno.mkdir(sitesDir, { recursive: true });
+    await Deno.writeTextFile(
+      join(sitesDir, "env-a.caddy"),
+      "a.example.com {\n}\n",
+    );
+    await assertRejects(
+      () =>
+        rewriteHostingCaddySites(
+          layout,
+          hostingPayload("env-n", "n.example.com"),
+          undefined,
+          noGrant,
+        ),
+      Error,
+      "Finish the update on this host",
+    );
+    await assertRejects(
+      () => guardHostingCaddySites(layout, noGrant),
+      Error,
+      "sudoers entry",
+    );
+    assertEquals(
+      [...Deno.readDirSync(sitesDir)].map((e) => e.name),
+      ["env-a.caddy"],
+    );
+  } finally {
+    restore();
+    await cleanup();
+  }
+});
+
 test("rewriteHostingCaddySites keeps a validated snippet when the hosting Caddy is not running", async () => {
   const { layout, cleanup } = await makeTestLayout();
   const restore = setIngressHostCommandForTest((_command, args) =>

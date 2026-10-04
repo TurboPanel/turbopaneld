@@ -1966,7 +1966,19 @@ async function hostingCandidateRefusal(
       candidate.caddyfile,
     ]),
   );
-  return test.success ? null : test.stderr || "caddy validate failed";
+  if (test.success) return null;
+  // sudo itself refusing is a host that was not finished updating, not a bad
+  // snippet: say so, and never let it read as "every snippet is bad".
+  if (
+    /password is required|not allowed to execute|may not run sudo/i.test(
+      test.stderr,
+    )
+  ) {
+    throw new Error(
+      "the hosting Caddy check is not allowed on this host: the sudoers entry that lets the daemon run it is missing, so the host update did not finish. Finish the update on this host, then deploy again.",
+    );
+  }
+  return test.stderr || "caddy validate failed";
 }
 
 async function liveSnippetNames(sitesDir: string): Promise<string[]> {
