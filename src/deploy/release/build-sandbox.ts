@@ -20,7 +20,7 @@ import { encodeBase64 } from "@std/encoding/base64";
 import { encodeHex } from "@std/encoding/hex";
 import { join } from "@std/path";
 import type { CommandSummaryRedactor } from "../../logs/contracts.ts";
-import { pumpLines } from "../../logs/line-stream.ts";
+import { BUILD_OUTPUT_LIMITS, pumpLines } from "../../logs/line-stream.ts";
 import { redactCommandSummary } from "../../logs/redactor.ts";
 import { PROD_LIB_DIR_DEFAULT } from "../../paths/layout.ts";
 import { hostSudoArgs } from "../../permissions/host-sudo.ts";
@@ -360,6 +360,8 @@ export type SandboxedBuildParams = {
   runFn?: RunFn;
   spawn?: SandboxSpawn;
   timeoutMs?: number;
+  /** Stop the build once it has printed this many characters. */
+  maxOutputChars?: number;
 };
 
 // One build at a time per host: tp-host holds a root-only lock as well, but
@@ -434,17 +436,27 @@ async function runBuildUnit(
     hostSudoArgs(["-n", "build-run", work.buildId, work.projectKey], MANAGED),
   );
   let aborted: Promise<void> | null = null;
-  const timer = setTimeout(() => {
-    // Kill the client first, so a tp-host still waiting on the host lock
-    // cannot start the unit after the stop.
+  let abortReason = `build timed out after ${timeoutMs}ms`;
+  // Kill the client first, so a tp-host still waiting on the host lock
+  // cannot start the unit after the stop.
+  const abort = (reason: string) => {
+    if (aborted !== null) return;
+    abortReason = reason;
     aborted = abortBuildUnit(child, work, runFn);
-  }, timeoutMs);
+  };
+  const timer = setTimeout(() => abort(abortReason), timeoutMs);
+  const limits = {
+    ...BUILD_OUTPUT_LIMITS,
+    maxTotalChars: params.maxOutputChars ?? BUILD_OUTPUT_LIMITS.maxTotalChars,
+    onLimit: () =>
+      abort("build output exceeded the size limit; the build was stopped"),
+  };
   let outcome: [Deno.CommandStatus, string, string, void];
   try {
     outcome = await Promise.all([
       child.status,
-      pumpLines(child.stdout, (line) => onOutput?.("stdout", line)),
-      pumpLines(child.stderr, (line) => onOutput?.("stderr", line)),
+      pumpLines(child.stdout, (line) => onOutput?.("stdout", line), limits),
+      pumpLines(child.stderr, (line) => onOutput?.("stderr", line), limits),
       writeSpec(child.stdin, params.spec),
     ]);
   } catch (err) {
@@ -457,9 +469,7 @@ async function runBuildUnit(
   const [status, stdout, stderr] = outcome;
   if (aborted !== null) {
     await aborted;
-    throw new Error(
-      `build timed out after ${timeoutMs}ms; the build unit was stopped`,
-    );
+    throw new Error(`${abortReason}; the build unit was stopped`);
   }
   if (!status.success) {
     throw new Error(failureMessage(status.code, stdout, stderr, redact));
