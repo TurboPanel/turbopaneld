@@ -47,7 +47,6 @@ import {
 } from "../deploy/docker-cli.ts";
 import { digestFileSha256 } from "../managed/backup.ts";
 import { join } from "@std/path";
-import { logInfo, logWarn } from "../util/logger.ts";
 import { withCopyTargetLock } from "../managed/target-lock.ts";
 import { type LayoutPaths, resolveLayout } from "../paths/layout.ts";
 import { directoryExists } from "../permissions/privileged-read.ts";
@@ -55,7 +54,7 @@ import {
   assertCopyMountSafe,
   type CopyGuardDeps,
 } from "./copy-source-guard.ts";
-import { sanitizeForLog } from "../util/logger.ts";
+import { logInfo, logWarn, sanitizeForLog } from "../util/logger.ts";
 import { mapSequential } from "../util/sequential.ts";
 import {
   COPY_BACKUP_HELPER_IMAGE,
@@ -446,7 +445,7 @@ export async function recoverInterruptedRestores(
   }
   await mapSequential(ids, async (copyId) => {
     const intent = await readIntent(layout, copyId);
-    if (!intent || intent.copyId !== copyId) {
+    if (intent?.copyId !== copyId) {
       logWarn("backup", `restore recovery: unreadable intent for ${copyId}`);
       return;
     }

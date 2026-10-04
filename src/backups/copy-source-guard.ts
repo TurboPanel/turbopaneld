@@ -55,6 +55,76 @@ function componentsBelow(base: string, path: string): string[] {
   return out;
 }
 
+/** A copy source the host refuses to mount. */
+export class CopySourceRefusedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "CopySourceRefusedError";
+  }
+}
+
+type PathProbe = Pick<
+  CopyGuardDeps,
+  "lstat" | "realPath" | "privilegedDirectoryExists"
+>;
+
+/** Walk the components below `base`; true when tp-host had to answer instead. */
+async function walkComponents(
+  base: string,
+  path: string,
+  deps: PathProbe,
+): Promise<boolean> {
+  const lstat = deps.lstat ?? ((p: string) => Deno.lstat(p));
+  const viaHost = deps.privilegedDirectoryExists ??
+    ((p: string) => directoryExists(p));
+  for (const component of componentsBelow(base, path)) {
+    try {
+      if ((await lstat(component)).isSymlink) {
+        throw new CopySourceRefusedError(
+          `refusing ${path}: ${component} is a symbolic link`,
+        );
+      }
+    } catch (err) {
+      if (err instanceof CopySourceRefusedError) throw err;
+      if (err instanceof Deno.errors.NotFound) throw missing(path);
+      if (!needsRoot(err)) throw err;
+      // Not traversable by the daemon: tp-host answers, and refuses a path
+      // with a link component, so a "yes" means none is there.
+      if (await viaHost(path)) return true;
+      throw new CopySourceRefusedError(
+        `refusing ${path}: it could not be confirmed to be free of symbolic links`,
+      );
+    }
+  }
+  return false;
+}
+
+function missing(path: string): Error {
+  return new CopySourceRefusedError(`directory ${path} not found on this host`);
+}
+
+async function assertResolvesToItself(
+  base: string,
+  path: string,
+  deps: PathProbe,
+): Promise<void> {
+  const realPath = deps.realPath ?? ((p: string) => Deno.realPath(p));
+  try {
+    // Compare below the base: the base itself may sit behind a harmless link.
+    const expected = `${await realPath(base)}${path.slice(base.length)}`;
+    const resolved = await realPath(path);
+    if (resolved !== expected) {
+      throw new CopySourceRefusedError(
+        `refusing ${path}: it resolves to ${resolved}`,
+      );
+    }
+  } catch (err) {
+    if (err instanceof CopySourceRefusedError) throw err;
+    if (err instanceof Deno.errors.NotFound) throw missing(path);
+    if (!needsRoot(err)) throw err;
+  }
+}
+
 /**
  * Refuse `path` unless every component below `base` is a real directory (or
  * file) and the resolved path equals the lexical one.
@@ -62,52 +132,13 @@ function componentsBelow(base: string, path: string): string[] {
 export async function assertNoSymlinkBelow(
   base: string,
   path: string,
-  deps: Pick<
-    CopyGuardDeps,
-    "lstat" | "realPath" | "privilegedDirectoryExists"
-  > = {},
+  deps: PathProbe = {},
 ): Promise<void> {
   if (path !== base && !path.startsWith(`${base}/`)) {
-    throw new Error(`${path} is outside ${base}`);
+    throw new CopySourceRefusedError(`${path} is outside ${base}`);
   }
-  const lstat = deps.lstat ?? ((p: string) => Deno.lstat(p));
-  const realPath = deps.realPath ?? ((p: string) => Deno.realPath(p));
-  const viaHost = deps.privilegedDirectoryExists ??
-    ((p: string) => directoryExists(p));
-  for (const component of componentsBelow(base, path)) {
-    try {
-      const info = await lstat(component);
-      if (info.isSymlink) {
-        throw new Error(`refusing ${path}: ${component} is a symbolic link`);
-      }
-    } catch (err) {
-      if (err instanceof Deno.errors.NotFound) {
-        throw new Error(`directory ${path} not found on this host`);
-      }
-      if (!needsRoot(err)) throw err;
-      // Not traversable by the daemon: tp-host answers, and refuses a path
-      // with a link component, so a "yes" means none is there.
-      if (!(await viaHost(path))) {
-        throw new Error(
-          `refusing ${path}: it could not be confirmed to be free of symbolic links`,
-        );
-      }
-      return;
-    }
-  }
-  try {
-    // Compare below the base: the base itself may sit behind a harmless link.
-    const expected = `${await realPath(base)}${path.slice(base.length)}`;
-    const resolved = await realPath(path);
-    if (resolved !== expected) {
-      throw new Error(`refusing ${path}: it resolves to ${resolved}`);
-    }
-  } catch (err) {
-    if (err instanceof Deno.errors.NotFound) {
-      throw new Error(`directory ${path} not found on this host`);
-    }
-    if (!needsRoot(err)) throw err;
-  }
+  if (await walkComponents(base, path, deps)) return;
+  await assertResolvesToItself(base, path, deps);
 }
 
 type VolumeInspect = {
