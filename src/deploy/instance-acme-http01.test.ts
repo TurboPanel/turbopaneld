@@ -311,7 +311,9 @@ test("openInstanceAcmeWindow reloads a running hosting Caddy that is not on port
   let inspections = 0;
   const run: InstanceAcmeCommand = (_program, args) => {
     calls.push(args.join(" "));
-    if (args.includes("ActiveState")) return Promise.resolve(ok("active\n"));
+    if (args.includes("ActiveState")) {
+      return Promise.resolve(ok("activating\n"));
+    }
     return Promise.resolve(ok());
   };
   const ensureHostingCaddyRuntime = () => {
@@ -348,6 +350,10 @@ test("openInstanceAcmeWindow reloads a running hosting Caddy that is not on port
     assertEquals(
       calls.some((line) => line.includes("disable")),
       false,
+    );
+    assertEquals(
+      calls.filter((line) => line.includes("systemctl reload")).length,
+      2,
     );
   } finally {
     await Deno.remove(root, { recursive: true });

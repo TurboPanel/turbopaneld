@@ -121,6 +121,8 @@ const POLL_MS = 500;
  * forked. `:80` (and the admin socket) bind a few milliseconds later. Bounded
  * by attempts so an injected `sleep` keeps tests instant.
  */
+// A unit that is starting or reloading must never be disabled by a rollback.
+const ACTIVE_UNIT_STATES = new Set(["active", "activating", "reloading"]);
 const HOSTING_CADDY_READY_ATTEMPTS = 20;
 const HOSTING_CADDY_READY_INTERVAL_MS = 50;
 
@@ -376,7 +378,7 @@ async function hostingCaddyIsActive(
     "--value",
     HOSTING_CADDY_SERVICE,
   ]);
-  return state.ok && state.stdout.trim() === "active";
+  return state.ok && ACTIVE_UNIT_STATES.has(state.stdout.trim());
 }
 
 async function waitForHostingCaddyOn80(
@@ -405,11 +407,23 @@ async function rollbackOpenedWindow(
       logWarn("deploy", "instance ACME site rollback failed:", err);
     }
   }
-  if (!startedRuntime) return;
+  if (!startedRuntime) {
+    // The unit kept running: unload the challenge site it may have read.
+    if (wroteSite) await reloadAfterRollback(run);
+    return;
+  }
   try {
     await disableHostingCaddy(run);
   } catch (err) {
     logWarn("deploy", "instance ACME runtime rollback failed:", err);
+  }
+}
+
+async function reloadAfterRollback(run: InstanceAcmeCommand): Promise<void> {
+  try {
+    await reloadHostingCaddy(run);
+  } catch (err) {
+    logWarn("deploy", "instance ACME reload after rollback failed:", err);
   }
 }
 
