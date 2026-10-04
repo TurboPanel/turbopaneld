@@ -88,6 +88,7 @@ import {
 } from "../deploy/run-deploy-hooks.ts";
 import {
   applySites,
+  ensureSitePhpRuntimes,
   resolveSiteDocumentRoot,
   resolveSitePhpSeries,
   type SiteManagedDirectory,
@@ -2013,6 +2014,8 @@ export async function handleEnvironmentDeploy(
     parsedPayload.nativeAppServices ?? [],
     deps?.nativeAppIo,
   );
+  // Same for PHP: the site engine playbooks create the `tpphp<series>` groups.
+  await ensureSitePhpRuntimes(parsedPayload.sites ?? []);
 
   const principalMaterial = parsedPayload.principalMaterial ?? [];
   await ensureDeployPrincipals(

@@ -112,6 +112,18 @@
     - ""
     - empty
 
+# systemd only creates LogsDirectory= when the unit starts, but the config test
+# (`httpd -t`, run before the first start) already opens ErrorLog/CustomLog under
+# it. Create it here with the same owner and mode the unit uses, so the first
+# test on a fresh host finds it.
+- name: Ensure the Apache log directory
+  ansible.builtin.file:
+    path: "/var/log/{{ apache_logs_directory }}"
+    state: directory
+    owner: "{{ apache_service_user }}"
+    group: "{{ apache_service_group }}"
+    mode: "0750"
+
 - name: Install TurboPanel Apache main config
   ansible.builtin.template:
     src: httpd.conf.j2

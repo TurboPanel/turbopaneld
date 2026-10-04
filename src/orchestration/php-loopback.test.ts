@@ -246,3 +246,33 @@ test("a missing nft or flock fails the sync with a message that names it", async
     script.indexOf("nft is not installed") < script.indexOf("nft -f -"),
   );
 });
+
+test("the shared php-fpm@ template unit (no User=) is not a site owner's unit", async () => {
+  await withTree({
+    "turbopanel-php-a-fcgi84.service": "bob",
+  }, async (run, dir) => {
+    await Deno.writeTextFile(
+      join(dir, "etc/systemd/system/turbopanel-php-fpm@.service"),
+      "[Service]\nType=forking\n",
+    );
+    await Deno.writeTextFile(
+      join(dir, "etc/systemd/system/turbopanel-php-fpm@8.4.service"),
+      "[Service]\nType=forking\n",
+    );
+    const out = await run("sync");
+    assertEquals(out.code, 0, out.stderr);
+    assertStringIncludes(out.stdout, "elements = { 15002 }");
+  });
+});
+
+test("a site unit with no User= is still refused", async () => {
+  await withTree({}, async (run, dir) => {
+    await Deno.writeTextFile(
+      join(dir, "etc/systemd/system/turbopanel-php-x-fcgi84.service"),
+      "[Service]\n",
+    );
+    const out = await run("sync");
+    assertEquals(out.code, 1);
+    assertStringIncludes(out.stderr, "bad User=");
+  });
+});

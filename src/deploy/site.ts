@@ -2253,6 +2253,31 @@ async function installSiteEngines(
   );
 }
 
+/**
+ * Vendor the PHP runtimes (and so create their `tpphp<series>` entitlement
+ * groups) for a deploy's PHP sites, ahead of the principal reconcile.
+ *
+ * The reconcile joins the site owner's Linux user to those groups, and a join
+ * to a group that does not exist yet is skipped: on the first PHP deploy of a
+ * series the user missed the group and `php-cgi` was permission denied. Same
+ * ordering fix as `ensureNativeAppRuntime` for Node. {@link applySites} runs the
+ * same idempotent playbooks again afterwards.
+ */
+export async function ensureSitePhpRuntimes(
+  sites: readonly SiteApplySpec[],
+  opts?: Pick<ApplySiteOpts, "runPlaybook">,
+): Promise<void> {
+  const phpSites = sites.filter(siteNeedsPhp);
+  if (phpSites.length === 0) return;
+  await withSiteIo(resolveSiteIo(opts), async () => {
+    await installSiteEngines(
+      resolveSiteEngineNeeds(phpSites),
+      phpSeriesForDeploy(phpSites),
+      phpExtensionsForDeploy(phpSites),
+    );
+  });
+}
+
 async function ensureSiteConfigDirs(
   layout: LayoutPaths,
   needs: SiteEngineNeeds,
