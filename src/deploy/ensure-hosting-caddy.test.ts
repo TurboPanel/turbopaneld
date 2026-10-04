@@ -1,4 +1,4 @@
-import { assertEquals, assertRejects } from "@std/assert";
+import { assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import { resolveLayout } from "../paths/layout.ts";
 import { withTempLayout } from "../testing/temp-layout.ts";
@@ -780,62 +780,169 @@ test({
   },
 });
 
-test("grantHostingCaddyRead adds an access entry, then a folder-only default entry, for tpedge only", async () => {
-  const calls: Array<{ command: string; args: string[] }> = [];
-  await grantHostingCaddyRead("/etc/turbopanel/hosting", (command, args) => {
-    calls.push({ command, args });
-    return Promise.resolve({ success: true, stderr: "" });
-  });
-  assertEquals(calls, [
-    {
-      command: "setfacl",
-      args: [
-        "-R",
-        "-P",
-        "-m",
-        "u:tpedge:rX",
-        "--",
-        "/etc/turbopanel/hosting",
-      ],
-    },
-    {
-      command: "find",
-      args: [
-        "/etc/turbopanel/hosting",
-        "-type",
-        "d",
-        "-exec",
-        "setfacl",
-        "-d",
-        "-m",
-        "u:tpedge:rX",
-        "--",
-        "{}",
-        "+",
-      ],
-    },
-  ]);
-});
+type Reply = { success: boolean; stderr: string; stdout?: string };
+type Call = { command: string; args: string[] };
 
-test("grantHostingCaddyRead never throws when setfacl fails or is missing", async () => {
-  await grantHostingCaddyRead(
-    "/x",
-    () => Promise.resolve({ success: false, stderr: "no such user" }),
-  );
-  await grantHostingCaddyRead(
-    "/x",
-    () => Promise.reject(new Deno.errors.NotFound("setfacl")),
-  );
-});
-
-async function aclText(path: string, flags: string[]): Promise<string> {
-  const out = await new Deno.Command("getfacl", {
-    args: ["-c", ...flags, path],
-    stdout: "piped",
-    stderr: "null",
-  }).output();
-  return new TextDecoder().decode(out.stdout);
+async function plantHostingTree(): Promise<string> {
+  const dir = await Deno.makeTempDir({ prefix: "tp-hosting-acl-" });
+  await Deno.mkdir(join(dir, "sites"), { mode: 0o750 });
+  await Deno.writeTextFile(join(dir, "Caddyfile"), "x", { mode: 0o640 });
+  await Deno.writeTextFile(join(dir, "sites", "a.caddy"), "x", { mode: 0o640 });
+  await Deno.symlink("/etc/passwd", join(dir, "sites", "link.caddy"));
+  return dir;
 }
+
+/** getfacl text where each path carries `acl` for the user. */
+function getfaclFor(paths: string[], line: string): string {
+  return paths.map((p) => `# file: ${p}\nuser::rw-\n${line}\n`).join("\n");
+}
+
+function fakeHost(opts: {
+  account?: boolean;
+  setfaclOk?: boolean;
+  acl?: (path: string) => string;
+}): { calls: Call[]; run: NonNullable<EnsureHostingCaddyDeps["runCommand"]> } {
+  const calls: Call[] = [];
+  const run = (command: string, args: string[]): Promise<Reply> => {
+    calls.push({ command, args });
+    if (command === "getent") {
+      return Promise.resolve({
+        success: opts.account !== false,
+        stderr: "",
+      });
+    }
+    if (command === "setfacl") {
+      return Promise.resolve({
+        success: opts.setfaclOk !== false,
+        stderr: opts.setfaclOk === false ? "Operation not permitted" : "",
+      });
+    }
+    const paths = args.slice(args.indexOf("--") + 1);
+    return Promise.resolve({
+      success: true,
+      stderr: "",
+      stdout: paths.map((p) =>
+        `# file: ${p}\nuser::rw-\n${opts.acl?.(p) ?? ""}\n`
+      ).join("\n"),
+    });
+  };
+  return { calls, run };
+}
+
+const OK_ACL = (p: string) =>
+  p.endsWith("sites") || !p.includes(".")
+    ? "user:tpedge:r-x\t#effective:r-x"
+    : "user:tpedge:r--\t#effective:r--";
+
+test("grantHostingCaddyRead sets rX on files, rX plus a default on folders, skips symlinks, then reads back", async () => {
+  const dir = await plantHostingTree();
+  try {
+    const host = fakeHost({ acl: OK_ACL });
+    await grantHostingCaddyRead(dir, host.run);
+    const [getent, files, dirs, getfacl] = host.calls;
+    assertEquals(getent?.command, "getent");
+    assertEquals(files?.command, "setfacl");
+    assertEquals(files?.args.slice(0, 3), ["-m", "u:tpedge:rX", "--"]);
+    assertEquals(
+      files?.args.slice(3).sort(),
+      [join(dir, "Caddyfile"), join(dir, "sites", "a.caddy")].sort(),
+    );
+    assertEquals(dirs?.args.slice(0, 5), [
+      "-m",
+      "u:tpedge:rX",
+      "-m",
+      "d:u:tpedge:rX",
+      "--",
+    ]);
+    assertEquals(getfacl?.command, "getfacl");
+    assertEquals(
+      host.calls.some((c) => c.args.some((a) => a.endsWith("link.caddy"))),
+      false,
+    );
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+test("grantHostingCaddyRead leaves a host without the account alone", async () => {
+  const dir = await plantHostingTree();
+  try {
+    const host = fakeHost({ account: false });
+    await grantHostingCaddyRead(dir, host.run);
+    assertEquals(host.calls.map((c) => c.command), ["getent"]);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+test("grantHostingCaddyRead fails loudly when tpedge still cannot read (setfacl refused or missing)", async () => {
+  const dir = await plantHostingTree();
+  try {
+    await assertRejects(
+      () => grantHostingCaddyRead(dir, fakeHost({ setfaclOk: false }).run),
+      Error,
+      "cannot read its config",
+    );
+    const missing: NonNullable<EnsureHostingCaddyDeps["runCommand"]> = (
+      command,
+    ) =>
+      command === "getent"
+        ? Promise.resolve({ success: true, stderr: "" })
+        : Promise.reject(new Deno.errors.NotFound(command));
+    await assertRejects(
+      () => grantHostingCaddyRead(dir, missing),
+      Error,
+      "cannot read its config",
+    );
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+test("grantHostingCaddyRead: a root-owned file passes only when it already carries the entry", async () => {
+  const dir = await plantHostingTree();
+  try {
+    // setfacl is refused for it (not ours), but the default entry gave it one.
+    await grantHostingCaddyRead(
+      dir,
+      fakeHost({ setfaclOk: false, acl: OK_ACL }).run,
+    );
+    const lacking = fakeHost({
+      setfaclOk: false,
+      acl: (p) => p.endsWith("a.caddy") ? "" : OK_ACL(p),
+    });
+    const err = await assertRejects(
+      () => grantHostingCaddyRead(dir, lacking.run),
+      Error,
+      "cannot read its config",
+    );
+    assertStringIncludes(err.message, "a.caddy");
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+test("grantHostingCaddyRead reports a mask that hides the entry (file chmod 0600)", async () => {
+  const dir = await plantHostingTree();
+  try {
+    await assertRejects(
+      () =>
+        grantHostingCaddyRead(
+          dir,
+          fakeHost({
+            acl: (p) =>
+              p.endsWith("Caddyfile")
+                ? "user:tpedge:r--\t#effective:---"
+                : OK_ACL(p),
+          }).run,
+        ),
+      Error,
+      "Caddyfile",
+    );
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
 
 async function toolOk(command: string): Promise<boolean> {
   try {
@@ -849,55 +956,48 @@ async function toolOk(command: string): Promise<boolean> {
   }
 }
 
-// Linux only: a folder and files made BEFORE any default entry existed (the
-// fresh install and the update the canary proof hit) get the entry, and a file
-// made afterwards inherits it. The current user stands in for tpedge.
+async function acl(path: string): Promise<string> {
+  const out = await new Deno.Command("getfacl", {
+    args: ["-c", path],
+    stdout: "piped",
+    stderr: "null",
+  }).output();
+  return new TextDecoder().decode(out.stdout);
+}
+
+// Linux only: files and a folder made BEFORE any default entry existed (the
+// fresh install and the update the canary proof hit) get the entry, a file made
+// afterwards inherits it, and a chmod 0600 is reported. The current user
+// stands in for tpedge. CI (ubuntu has acl) must not skip this.
 test({
   name:
-    "grantHostingCaddyRead backfills existing files and makes new ones inherit (linux, real setfacl)",
+    "grantHostingCaddyRead backfills and inherits with real setfacl (linux)",
   ignore: Deno.build.os !== "linux",
   fn: async () => {
-    if (!(await toolOk("setfacl")) || !(await toolOk("getfacl"))) return;
-    const me = (await new Deno.Command("id", { args: ["-un"], stdout: "piped" })
-      .output()).stdout;
-    const user = new TextDecoder().decode(me).trim();
-    const dir = await Deno.makeTempDir({ prefix: "tp-hosting-acl-" });
+    if (!(await toolOk("setfacl")) || !(await toolOk("getfacl"))) {
+      if (Deno.env.get("CI")) throw new Error("setfacl/getfacl missing on CI");
+      return;
+    }
+    const user = new TextDecoder().decode(
+      (await new Deno.Command("id", { args: ["-un"], stdout: "piped" })
+        .output()).stdout,
+    ).trim();
+    const dir = await plantHostingTree();
     try {
-      await Deno.mkdir(join(dir, "sites"), { mode: 0o750 });
-      await Deno.writeTextFile(join(dir, "Caddyfile"), "x", { mode: 0o640 });
-      await Deno.writeTextFile(join(dir, "sites", "a.caddy"), "x", {
-        mode: 0o640,
-      });
-      await grantHostingCaddyRead(dir, async (command, args) => {
-        const out = await new Deno.Command(command, {
-          args,
-          stdout: "null",
-          stderr: "piped",
-        }).output();
-        return {
-          success: out.success,
-          stderr: new TextDecoder().decode(out.stderr),
-        };
-      }, user);
+      await grantHostingCaddyRead(dir, undefined, user);
       const want = `user:${user}:r`;
       for (const f of ["Caddyfile", "sites/a.caddy", "sites"]) {
-        assertEquals(
-          (await aclText(join(dir, f), [])).includes(want),
-          true,
-          `${f} lacks ${want}`,
-        );
+        assertStringIncludes(await acl(join(dir, f)), want);
       }
-      assertEquals(
-        (await aclText(join(dir, "sites"), [])).includes(`default:${want}`),
-        true,
-      );
+      assertStringIncludes(await acl(join(dir, "sites")), `default:${want}`);
       await Deno.writeTextFile(join(dir, "sites", "b.caddy"), "x", {
         mode: 0o640,
       });
-      assertEquals(
-        (await aclText(join(dir, "sites", "b.caddy"), [])).includes(want),
-        true,
-      );
+      assertStringIncludes(await acl(join(dir, "sites", "b.caddy")), want);
+      await Deno.chmod(join(dir, "Caddyfile"), 0o600);
+      // A later chmod 0600 masks the entry away; the next grant restores it.
+      await grantHostingCaddyRead(dir, undefined, user);
+      assertStringIncludes(await acl(join(dir, "Caddyfile")), want);
     } finally {
       await Deno.remove(dir, { recursive: true });
     }

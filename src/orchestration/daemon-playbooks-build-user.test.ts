@@ -1,5 +1,6 @@
 import { assert } from "@std/assert";
 import { join } from "@std/path";
+import { parse } from "yaml";
 import { DAEMON_ROOT } from "./assets.ts";
 
 /**
@@ -59,4 +60,21 @@ test("every playbook that installs the daemon runs build-user before daemon-laun
   ) {
     assert(installers.includes(expected), `${expected} no longer found`);
   }
+});
+
+test("instance-install.yml includes build-user between principal-access and daemon-launch in its role loop", async () => {
+  const plays = parse(
+    await Deno.readTextFile(join(PLAYBOOKS, "instance-install.yml")),
+  ) as Array<{ post_tasks?: Array<Record<string, unknown>> }>;
+  const loops = (plays[0]?.post_tasks ?? []).flatMap((task) =>
+    Array.isArray(task.loop) && "ansible.builtin.include_role" in task
+      ? [task.loop as string[]]
+      : []
+  );
+  const loop = loops.find((l) => l.includes("daemon-launch"));
+  assert(loop, "no include_role loop launches the daemon");
+  const at = (role: string) => loop.indexOf(role);
+  assert(at("build-user") >= 0, "build-user is not in the daemon role loop");
+  assert(at("principal-access") < at("build-user"));
+  assert(at("build-user") < at("daemon-launch"));
 });

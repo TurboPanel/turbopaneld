@@ -1845,6 +1845,7 @@ export async function rewriteHostingCaddySites(
   layout: LayoutPaths,
   payload: EnvironmentDeployPayload,
   hostnameTls?: Map<string, string>,
+  grantRead: (hostingDir: string) => Promise<void> = grantHostingCaddyRead,
 ): Promise<void> {
   if (!SAFE_FILE_ID_RE.test(payload.environmentId)) {
     throw new Error("environmentId contains unsupported characters");
@@ -1854,7 +1855,7 @@ export async function rewriteHostingCaddySites(
   await Deno.mkdir(sitesDir, { recursive: true, mode: 0o750 });
   // A sites/ folder that predates the hosting Caddy's account has no default
   // entry, so the snippets written below would not inherit one.
-  await grantHostingCaddyRead(join(layout.configDir, "hosting"));
+  await grantRead(join(layout.configDir, "hosting"));
 
   const hostnameSites = buildCaddyHostnameRoutes(payload);
 
