@@ -1045,6 +1045,38 @@ test("setgidDirectoriesFindArgs builds the exact find tp-host accepts", () => {
   ]);
 });
 
+test("caddySiteConfig never serves the layout's shared link at a release top", () => {
+  const caddySite = {
+    composeServiceName: "site",
+    engine: "caddy" as const,
+    root: "public",
+    listenPort: 18080,
+  };
+  const site = { ...caddySite, root: "." };
+  const release = caddySiteConfig(site, "/h/u/sites/s/current/.", null, {
+    releaseBacked: true,
+  });
+  assertStringIncludes(release, "@sharedState path /shared /shared/*");
+  assertStringIncludes(release, "respond @sharedState 404");
+  // The guard sits before the file server.
+  assertEquals(
+    release.indexOf("respond @sharedState") < release.indexOf("file_server"),
+    true,
+  );
+  // A `public/shared` directory of a release, or a daemon-owned tree, is
+  // ordinary content.
+  assertEquals(
+    caddySiteConfig({ ...caddySite, root: "public" }, "/r/public", null, {
+      releaseBacked: true,
+    }).includes("sharedState"),
+    false,
+  );
+  assertEquals(
+    caddySiteConfig(site, "/s/x/.", null).includes("sharedState"),
+    false,
+  );
+});
+
 const dotfileSite = {
   composeServiceName: "dots",
   engine: "caddy" as const,

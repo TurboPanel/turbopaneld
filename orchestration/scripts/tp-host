@@ -3292,6 +3292,26 @@ tp_site_usage_rows() {
     done
 }
 
+# site-caddy-mounts: the mount points the running site Caddy holds `nosymfollow`
+# under the principal home root, one per line (nothing when the unit is not
+# running). The daemon compares them with the web roots and release trees its
+# sites need and restarts the unit when one is missing: tp-site-caddy-run
+# mounts them once, at start, in the unit's private mount namespace. Reads only
+# the unit's process list and its mount table.
+tp_verb_site_caddy_mounts() {
+  [ "$#" -eq 0 ] || tp_die "site-caddy-mounts: takes no arguments"
+  _cm_procs="$P/sys/fs/cgroup/system.slice/turbopanel-site-caddy.service/cgroup.procs"
+  [ -f "$_cm_procs" ] || return 0
+  _cm_pid="$(sed -n '1p' "$_cm_procs")"
+  case "$_cm_pid" in ''|*[!0-9]*) return 0 ;; esac
+  [ -r "$P/proc/$_cm_pid/mountinfo" ] || return 0
+  while read -r _cm_id _cm_parent _cm_dev _cm_root _cm_mp _cm_opts _cm_rest; do
+    case "$_cm_opts" in *nosymfollow*) ;; *) continue ;; esac
+    case "$_cm_mp" in "$R_PRINCIPALS"/*) ;; *) continue ;; esac
+    printf '%s\n' "$_cm_mp"
+  done < "$P/proc/$_cm_pid/mountinfo"
+}
+
 tp_verb_site_usage() {
   [ "$#" -eq 0 ] || tp_die "site-usage: takes no arguments"
   tp_pin_dir "$R_PRINCIPALS" 2>/dev/null || return 0
@@ -3575,6 +3595,7 @@ case "$_verb" in
   php-test) tp_verb_php_test "$@" ;;
   cert-dates) tp_verb_cert_dates "$@" ;;
   site-usage) tp_verb_site_usage "$@" ;;
+  site-caddy-mounts) tp_verb_site_caddy_mounts "$@" ;;
   php-loopback-sync) tp_verb_php_loopback_sync "$@" ;;
   *) tp_die "refusing verb $_verb" ;;
 esac

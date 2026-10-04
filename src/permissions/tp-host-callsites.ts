@@ -289,6 +289,9 @@ const SITES: CallSite[] = [
   tpHost('src/metrics/collector/tls-expiry.ts|["-n","cert-dates"]', {
     argv: ["cert-dates"],
   }),
+  tpHost('src/deploy/site.ts|["-n","site-caddy-mounts"]', {
+    argv: ["site-caddy-mounts"],
+  }),
   tpHost('src/metrics/collector/site-usage.ts|["-n","site-usage"]', {
     argv: ["site-usage"],
   }),
@@ -1078,32 +1081,32 @@ const SITES: CallSite[] = [
 
   // --- sites ----------------------------------------------------------------
   tpHost(
-    'src/deploy/site.ts|["-n","install","-d","-m","0750","-o","root","-g",group,metaDir]',
+    'src/deploy/site.ts|["-n","install","-d","-m","0711","-o","root","-g","root",metaDir]',
     {
       argv: [
         "install",
         "-d",
         "-m",
-        "0750",
+        "0711",
         "-o",
         "root",
         "-g",
-        "alice-grp",
+        "root",
         `${SITE}/meta`,
       ],
     },
   ),
   tpHost(
-    'src/deploy/site.ts|["-n","install","-m","0640","-o","root","-g",group,staged,target]',
+    'src/deploy/site.ts|["-n","install","-m","0400","-o",release.username,"-g","root",staged,target]',
     {
       argv: [
         "install",
         "-m",
-        "0640",
+        "0400",
         "-o",
-        "root",
+        "alice",
         "-g",
-        "alice-grp",
+        "root",
         STAGED,
         `${SITE}/meta/robots.txt`,
       ],

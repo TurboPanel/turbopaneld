@@ -1,0 +1,112 @@
+#!/bin/sh
+# tp-site-caddy-run — starts the site Caddy with no symlink followed inside a
+# site owner's writable web root (POSIX sh, root:root, installed in lib/).
+#
+# Caddy's file_server always follows symlinks, and the site Caddy's account
+# (tpcaddysite) is a member of every site owner's group. Without this, one
+# owner could link from their own web root to a file that another owner keeps
+# in a group-readable place and have Caddy serve it. Here the Caddy process
+# runs in a private mount namespace where every managed web root
+# (`.../sites/<id>/webroot`) and every release tree (`.../sites/<id>/releases`)
+# is bind-mounted read-only with `nosymfollow` (Linux 5.10+), so a link inside
+# one is never followed. Nothing else on the host sees these mounts: the site
+# owner's own PHP, apps and shell still follow their own links. The platform's
+# own `current` link sits outside the mount and is still followed.
+#
+# Verbs:
+#   roots SITES_DIR
+#       print each web root or release tree to mount, for the `root * <path>`
+#       lines in SITES_DIR/*.conf (the daemon's generated fragments), one per
+#       line.
+#   run SITES_DIR USER CADDY CADDYFILE
+#       the unit's ExecStart (as root, `+`): mount, then drop to USER and exec
+#       `caddy run`. FAILS CLOSED: when a root cannot be mounted, or the kernel
+#       or util-linux does not know `nosymfollow`, nothing starts.
+#
+# The roots come from the fragments on disk. A new site needs a restart: the
+# daemon reads the unit's mounts (`tp-host site-caddy-mounts`) and restarts it
+# when a directory its sites need is not mounted. A reboot or crash restart
+# rebuilds the same set.
+set -eu
+umask 077
+
+tp_die() {
+  printf 'tp-site-caddy-run: %s\n' "$*" >&2
+  exit 1
+}
+
+# What gets mounted for each `root * <path>` line, paths limited to the
+# characters tp-host allows:
+#   .../sites/<serviceId>/webroot[/...]  -> .../sites/<serviceId>/webroot
+#   .../sites/<serviceId>/current[/...]  -> .../sites/<serviceId>/releases
+# `current` itself is the platform's own link and stays outside the mount; the
+# release it names is under `releases/`, so no link inside a release is followed.
+tp_roots() {
+  [ -d "$1" ] || tp_die "no such directory $1"
+  for _f in "$1"/*.conf; do
+    [ -f "$_f" ] && [ ! -L "$_f" ] || continue
+    sed -n 's/^[[:space:]]*root[[:space:]][[:space:]]*\*[[:space:]][[:space:]]*\(\/[A-Za-z0-9._\/-]*\)[[:space:]]*$/\1/p' "$_f"
+  done | while IFS= read -r _p; do
+    case "$_p" in
+      */../* | */.. | *//*) continue ;;
+    esac
+    # Two plain expressions rather than one alternation, which BSD sed lacks.
+    _w="$(printf '%s\n' "$_p" | sed -n 's/^\(\/.*\/sites\/[A-Za-z0-9_-][A-Za-z0-9_-]*\)\/webroot\(\/.*\)\{0,1\}$/\1\/webroot/p;s/^\(\/.*\/sites\/[A-Za-z0-9_-][A-Za-z0-9_-]*\)\/current\(\/.*\)\{0,1\}$/\1\/releases/p')"
+    [ -n "$_w" ] && printf '%s\n' "$_w"
+  done | sort -u
+}
+
+tp_inner() {
+  _sites="$1"
+  _user="$2"
+  _caddy="$3"
+  _config="$4"
+  for _bin in setpriv findmnt mount; do
+    command -v "$_bin" >/dev/null 2>&1 || tp_die "$_bin is required"
+  done
+  _list="$(tp_roots "$_sites")"
+  _old_ifs="$IFS"
+  IFS='
+'
+  for _w in $_list; do
+    # A web root that is not there yet serves nothing; one that is a link or
+    # moved is refused outright. That cannot be caused by a site owner:
+    # `sites/<id>/` is root:<owner group> 0750 (tp-host refuses to re-own it
+    # and `src/deploy/site-apply.test.ts` pins root as its owner), so the owner
+    # can neither rename nor replace `webroot`, and `releases/` is root's too.
+    # Only root could produce this state, and then stopping is the safe answer.
+    [ -e "$_w" ] || [ -L "$_w" ] || continue
+    [ -d "$_w" ] && [ ! -L "$_w" ] || tp_die "$_w is not a plain directory"
+    [ "$(cd -P -- "$_w" && pwd -P)" = "$_w" ] || tp_die "$_w has a link in its path"
+    mount --bind -- "$_w" "$_w" || tp_die "cannot bind-mount $_w"
+    mount -o remount,bind,ro,nosymfollow,nosuid,nodev -- "$_w" ||
+      tp_die "cannot mount $_w with nosymfollow (needs Linux 5.10+)"
+    findmnt -no OPTIONS --target "$_w" | grep -q 'nosymfollow' ||
+      tp_die "$_w is not mounted nosymfollow"
+  done
+  IFS="$_old_ifs"
+  exec setpriv --reuid="$_user" --regid="$_user" --init-groups \
+    --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs -- \
+    "$_caddy" run --config "$_config" --adapter caddyfile
+}
+
+case "${1:-}" in
+  roots)
+    [ "$#" -eq 2 ] || tp_die "usage: roots SITES_DIR"
+    tp_roots "$2"
+    ;;
+  run)
+    [ "$#" -eq 5 ] || tp_die "usage: run SITES_DIR USER CADDY CADDYFILE"
+    command -v unshare >/dev/null 2>&1 || tp_die "unshare is required"
+    exec unshare --mount --propagation private -- "$0" inner "$2" "$3" "$4" "$5"
+    ;;
+  inner)
+    [ "$#" -eq 5 ] || tp_die "inner is internal to run"
+    # The unit's exec chain starts here: this is the only path to `inner`.
+    shift
+    tp_inner "$@"
+    ;;
+  *)
+    tp_die "usage: roots|run"
+    ;;
+esac

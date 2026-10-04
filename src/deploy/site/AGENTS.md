@@ -285,6 +285,33 @@ root-owned `0550` by design:
   back to an ordinary reload. php-fpm is never restarted for this — its workers
   run as the principal, which owns the group already.
 - **Hosting metadata moves out of the release.** `hosting.env` / `php.json` land
+  in `<siteRoot>/.turbopanel-hosting/` (directory `root:root` `0711`, each file owned by the site owner's Linux user
+  and `root` group, `0400`), installed through the same `sudo -n install` seam
+  as every other managed config file. Not group-readable: every web engine is a
+  member of the site owner's group, so a group bit would let one owner's link
+  reach another owner's values; the owner's own scripts and apps still read
+  their file. The daemon-owned lane keeps `<base>/.turbopanel/` at
+  `0700`/`0600` (only the daemon account owns that tree).
+- **Caddy follows no link inside a site owner's tree.** Caddy's `file_server`
+  always follows symlinks, and `tpcaddysite` sits in every owner's group, so the
+  unit starts through `orchestration/scripts/tp-site-caddy-run`
+  (`ExecStart=+`): in a private mount namespace it bind-mounts, read-only with
+  `nosymfollow` (Linux 5.10+), each managed `…/sites/<id>/webroot` and each
+  release-backed `…/sites/<id>/releases` named by a fragment's `root *` line,
+  then drops to `tpcaddysite` with no capabilities. The platform's own `current`
+  link sits outside the mount and is still followed; every link *inside* a
+  release (including a second hop through `shared/`) is not. The mounts exist
+  only for Caddy; the owner's PHP, apps and shell still follow their own links.
+  Like nginx's `disable_symlinks on`, this means a link under a Caddy site's
+  document root (`public/storage`, `public/build -> ../dist`) answers 404.
+  The unit fails closed (no mount, no Caddy), and the Ansible role probes the
+  mount sequence on the host first. The mounts are made once, at start, so
+  `applySites` reads the unit's mount table (`tp-host site-caddy-mounts`) and
+  restarts the unit when a directory its Caddy sites need is missing (a new
+  site, or one recreated since), then fails the deploy if it is still missing.
+  Release top: the layout's `shared` link is refused (`/shared`, `/shared/*`
+  answer 404).
+
   in `<siteRoot>/.turbopanel-hosting/` (root-owned, group-readable), installed
   through the same `sudo -n install` seam as every other managed config file.
 - **Every engine refuses dotfiles.** A path with a segment starting with a dot
