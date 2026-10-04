@@ -270,7 +270,7 @@ const ENGINE_VALIDATE: Record<string, string> = {
   tpols:
     `${VENDOR}/openlitespeed/current/bin/openlitespeed -t -c /etc/turbopanel/openlitespeed/httpd_config.conf`,
   tpcaddysite:
-    `${VENDOR}/caddy/current/caddy validate --adapter caddyfile --config /etc/turbopanel/caddy/Caddyfile`,
+    `${VENDOR}/caddy/current/caddy validate --adapter caddyfile --config /etc/turbopanel/site-caddy/Caddyfile`,
   tpedge:
     `${VENDOR}/caddy/current/caddy validate --adapter caddyfile --config /etc/turbopanel/hosting/Caddyfile.next`,
 };
@@ -300,7 +300,9 @@ test("engine accounts refuse env, other engines' binaries and free arguments (P2
     ],
     tpcaddysite: [
       "/usr/bin/env id",
-      `/usr/bin/env XDG_DATA_HOME=/tmp ${VENDOR}/caddy/current/caddy validate --adapter caddyfile --config /etc/turbopanel/caddy/Caddyfile`,
+      `/usr/bin/env XDG_DATA_HOME=/tmp ${VENDOR}/caddy/current/caddy validate --adapter caddyfile --config /etc/turbopanel/site-caddy/Caddyfile`,
+      // The control plane Caddy's file is not the site Caddy's to validate.
+      `${VENDOR}/caddy/current/caddy validate --adapter caddyfile --config /etc/turbopanel/caddy/Caddyfile`,
       `${VENDOR}/caddy/current/caddy run --config /tmp/x`,
       `${VENDOR}/caddy/current/caddy validate --adapter caddyfile --config /tmp/x`,
       `${VENDOR}/caddy/2.11.4/caddy validate --config /tmp/x`,

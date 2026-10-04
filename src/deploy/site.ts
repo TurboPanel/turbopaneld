@@ -87,6 +87,7 @@ import {
   rolloutSiteConfigs,
   SITE_ENGINE_DRIVERS,
   SITE_ENGINE_ORDER,
+  siteCaddyConfigDir,
   stageOwnedConfigFile as stageOwnedConfigFileVia,
   writeOwnedConfigFile as writeOwnedConfigFileVia,
 } from "./site/engine-driver.ts";
@@ -2936,7 +2937,7 @@ async function applyCaddySite(
   paths: SitePaths,
   dockerBind: string | null,
 ): Promise<ApplySiteResult> {
-  // Live include dir is FHS `/etc/turbopanel/caddy/sites/` (the site Caddy's
+  // Live include dir is FHS `/etc/turbopanel/site-caddy/sites/` (the site Caddy's
   // main Caddyfile imports this glob).
   const php = await applySitePhpBackend(layout, environmentId, site, paths);
   const configPath = join(paths.sitesDir, paths.configName);
@@ -3684,7 +3685,7 @@ export async function applySites(
     }
 
     const sitesDirs: SiteConfigDirs = {
-      caddy: join(layout.configDir, "caddy", "sites"),
+      caddy: join(siteCaddyConfigDir(layout), "sites"),
       nginx: join(layout.configDir, "nginx", "sites"),
       apache: join(layout.configDir, "apache", "sites"),
       openlitespeed: join(layout.configDir, "openlitespeed", "sites"),
@@ -3845,7 +3846,9 @@ async function removePhpFpmEngineSites(
   engine: PhpFpmEngine,
 ): Promise<RemovedSites> {
   const prefix = `tp-${environmentId}-`;
-  const sitesDir = join(layout.configDir, engine, "sites");
+  const sitesDir = engine === "caddy"
+    ? join(siteCaddyConfigDir(layout), "sites")
+    : join(layout.configDir, engine, "sites");
   const removedNames = await removePrefixedConfFiles(sitesDir, prefix, engine);
   const services = removedNames.map((name) =>
     stripConfSuffix(name.slice(prefix.length))

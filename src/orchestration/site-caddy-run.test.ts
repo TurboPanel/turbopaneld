@@ -117,7 +117,7 @@ test("the site Caddy unit starts through the launcher and never as plain Caddy",
   );
   assertMatch(
     unit,
-    /^ExecStart=\+\{\{[^\n]*\}\}\/lib\/tp-site-caddy-run run \{\{ turbopanel_config_dir \}\}\/caddy\/sites \{\{ site_caddy_service_user \}\} /m,
+    /^ExecStart=\+\{\{[^\n]*\}\}\/lib\/tp-site-caddy-run run \{\{ site_caddy_config_dir \}\}\/sites \{\{ site_caddy_service_user \}\} /m,
   );
   assertEquals(/^ExecStart=[^+]/m.test(unit), false);
   const tasks = await Deno.readTextFile(

@@ -1330,7 +1330,7 @@ test("applySites caddy writes a site block and reloads the site Caddy", async ()
     });
 
     const conf = await Deno.readTextFile(
-      join(layout.configDir, "caddy", "sites", "tp-envcaddy-static.conf"),
+      join(layout.configDir, "site-caddy", "sites", "tp-envcaddy-static.conf"),
     );
     assertStringIncludes(conf, ":18085 {");
     assertStringIncludes(conf, "file_server");
@@ -1379,7 +1379,7 @@ test("applySites caddy+php installs php-fpm and reloads it before Caddy", async 
     assertStringIncludes(pool, "listen.owner = tpcaddysite");
 
     const conf = await Deno.readTextFile(
-      join(layout.configDir, "caddy", "sites", "tp-envcaddyphp-wp.conf"),
+      join(layout.configDir, "site-caddy", "sites", "tp-envcaddyphp-wp.conf"),
     );
     assertStringIncludes(
       conf,
@@ -2368,7 +2368,12 @@ test("a release-backed Caddy site needs its releases tree mounted, not its curre
     assertEquals(siteCaddyRestarts(mock.calls), 1);
     // The new fragment is live before the restart reads it.
     const conf = await Deno.readTextFile(
-      join(layout.configDir, "caddy", "sites", "tp-envrelcaddy-static.conf"),
+      join(
+        layout.configDir,
+        "site-caddy",
+        "sites",
+        "tp-envrelcaddy-static.conf",
+      ),
     );
     assertStringIncludes(conf, `root * ${siteTreeRoot(layout)}/current/public`);
   } finally {
@@ -3126,6 +3131,31 @@ test("removeSites reloads site Caddy after tearing down a Caddy vhost", async ()
   }
 });
 
+test("a Caddy site deploy and removal leave the control plane Caddy directory alone", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const { run } = createSiteRunMock();
+  const { runPlaybook } = capturePlaybooks();
+  const environmentId = "envcaddycp";
+  const controlPlaneDir = join(layout.configDir, "caddy");
+  const controlPlaneFile = join(controlPlaneDir, "Caddyfile");
+  try {
+    await Deno.mkdir(controlPlaneDir, { recursive: true });
+    await Deno.writeTextFile(controlPlaneFile, "control plane caddyfile\n");
+    await applySites(layout, environmentId, [caddySite], { run, runPlaybook });
+    await removeSites(layout, environmentId, { run });
+    assertEquals(
+      await Deno.readTextFile(controlPlaneFile),
+      "control plane caddyfile\n",
+    );
+    assertEquals(
+      [...Deno.readDirSync(controlPlaneDir)].map((e) => e.name),
+      ["Caddyfile"],
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
 test("OpenLiteSpeed apply and removal work when the daemon cannot enter its config dir", async () => {
   const { layout, cleanup } = await makeTestLayout();
   const { run } = createSiteRunMock();
@@ -3183,7 +3213,12 @@ test("applySites creates root-owned engine config dirs through tp-host", async (
     );
     const conf = layout.configDir;
     assertEquals(dirGroups.get(join(conf, "nginx", "sites")), "tpnginx");
-    assertEquals(dirGroups.get(join(conf, "caddy", "sites")), "tpcaddysite");
+    assertEquals(
+      dirGroups.get(join(conf, "site-caddy", "sites")),
+      "tpcaddysite",
+    );
+    // The control plane Caddy's directory is never a site engine directory.
+    assertEquals(dirGroups.has(join(conf, "caddy", "sites")), false);
     assertEquals(dirGroups.get(join(conf, "apache", "sites")), "tpapache");
     // php-fpm role's php_fpm_service_group, whichever engine asked.
     assertEquals(
