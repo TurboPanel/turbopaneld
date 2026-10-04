@@ -279,14 +279,15 @@ archive_case() {
   scan --all
   [ "$code" = "$want" ] || bad "archive case '$label': expected exit $want, got $code: $(cat "$W/err")"
 }
-make_gz() { printf 'line\n%s\n' "$TOK" | gzip -c > "$R/src/f.gz"; }
+archive_body() { printf 'line\n%s\n' "$TOK"; }
+make_gz() { archive_body | gzip -c > "$R/src/f.gz"; }
 make_tar() {
-  printf 'line\n%s\n' "$TOK" > "$R/src/inner.txt"
+  archive_body > "$R/src/inner.txt"
   tar -C "$R/src" -cf "$R/src/f.tar" inner.txt
   rm "$R/src/inner.txt"
 }
 make_tgz() {
-  printf 'line\n%s\n' "$TOK" > "$R/src/inner.txt"
+  archive_body > "$R/src/inner.txt"
   tar -C "$R/src" -czf "$R/src/f.tgz" inner.txt
   rm "$R/src/inner.txt"
 }
@@ -299,7 +300,7 @@ archive_case "clean .gz" 0 make_clean_gz
 archive_case "corrupt .gz fails closed" 1 make_bad_gz
 if command -v zip > /dev/null 2>&1 && command -v unzip > /dev/null 2>&1; then
   make_zip() {
-    printf 'line\n%s\n' "$TOK" > "$W/inner.txt"
+    archive_body > "$W/inner.txt"
     (cd "$W" && zip -q "$R/src/f.zip" inner.txt)
   }
   archive_case "token inside a .zip" 1 make_zip

@@ -46,6 +46,8 @@
 # as stale on stderr (a warning only).
 set -eu
 
+# Prefix of an allowlist entry that allows a forbidden file name.
+ATAG="@path "
 MODE=staged
 RANGE=
 case "${1:-}" in
@@ -166,7 +168,7 @@ while IFS= read -r entry || [ -n "$entry" ]; do
     continue
   fi
   case "$entry" in
-    "@path "*) apath=${entry#"@path "} ;;
+    "$ATAG"*) apath=${entry#"$ATAG"} ;;
     *) apath=${entry%%:*} ;;
   esac
   case "$apath" in
@@ -233,8 +235,8 @@ check_paths() {
   while IFS= read -r file || [ -n "$file" ]; do
     [ -n "$file" ] || continue
     pid="$(forbidden_path "$file")" || continue
-    printf '@path %s\n' "$file" >> "$FLAGGED"
-    if entry_allowed "@path $file"; then
+    printf '%s%s\n' "$ATAG" "$file" >> "$FLAGGED"
+    if entry_allowed "$ATAG$file"; then
       continue
     fi
     echo "scan-secrets: secret-bearing path must not be committed ($pid): $file" >&2
@@ -351,8 +353,8 @@ check_allowlist() {
   while IFS= read -r entry || [ -n "$entry" ]; do
     [ -n "$entry" ] || continue
     case "$entry" in
-      "@path "*)
-        ca_path=${entry#"@path "}
+      "$ATAG"*)
+        ca_path=${entry#"$ATAG"}
         if [ ! -f "$ca_path" ]; then
           echo "scan-secrets: allowlist names a file that does not exist: $ca_path" >&2
           fail=1
