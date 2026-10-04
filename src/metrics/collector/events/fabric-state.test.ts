@@ -1,12 +1,13 @@
 import { assertEquals } from "@std/assert";
 import { CounterBaselineTracker } from "../baseline.ts";
+import { FABRIC_HANDSHAKE_HEALTHY_MS } from "../../../commands/fabric.ts";
 import { FabricStateEventCollector } from "./fabric-state.ts";
 import type { EventDetectContext } from "./types.ts";
 import type { FabricReconcileObservedPeer } from "../../../contracts/commands-contracts.ts";
 
 const test = Deno.test.bind(Deno);
 
-const HANDSHAKE_HEALTHY_MS = 75_000;
+const HANDSHAKE_HEALTHY_MS = FABRIC_HANDSHAKE_HEALTHY_MS;
 
 function peer(
   lastHandshakeAt: string | undefined,
