@@ -501,6 +501,7 @@ test("build-return gives the tree back only once the build unit is gone", async 
       const self = `${Deno.uid()}:${Deno.gid()}`;
       assertEquals(execLines(result.stdout), [
         execLine(["chown", "-R", "-h", "-P", "--", self, "."]),
+        execLine(["chmod", "-R", "u+rwX", "--", "."]),
       ]);
     }
     await Deno.symlink(

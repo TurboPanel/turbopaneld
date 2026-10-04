@@ -13,6 +13,7 @@ import {
   buildSpecCwd,
   type BuildWork,
   createBuildWorkDir,
+  removeBuildTree,
   removeBuildWork,
   renderBuildSpec,
   resolveBuildWork,
@@ -466,5 +467,38 @@ test("trees left by a dead daemon are stopped, taken back and removed; live ones
     assertEquals((await Deno.lstat(fresh)).isDirectory, true);
   } finally {
     await Deno.remove(root, { recursive: true });
+  }
+});
+
+test("a tree a build locked with mode 000 is still removed", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "tp-sandbox-locked-" });
+  try {
+    const tree = join(dir, "work1");
+    await Deno.mkdir(join(tree, "d", "e"), { recursive: true });
+    await Deno.writeTextFile(join(tree, "d", "e", "f"), "x");
+    await Deno.symlink("/nonexistent", join(tree, "d", "link"));
+    await Deno.chmod(join(tree, "d", "e"), 0o000);
+    await Deno.chmod(join(tree, "d"), 0o000);
+    assertEquals(await removeBuildTree(tree), true);
+    assertEquals(await Deno.stat(tree).catch(() => null), null);
+    // Removing what is already gone is not an error.
+    assertEquals(await removeBuildTree(tree), true);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+test("removeBuildWork reports nothing for a locked tree and clears it", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "tp-sandbox-locked-" });
+  try {
+    const target = { ...(await work(dir)), workDir: join(dir, "w") };
+    await Deno.mkdir(join(target.workDir, "d"), { recursive: true });
+    await Deno.chmod(join(target.workDir, "d"), 0o000);
+    const messages: string[] = [];
+    await removeBuildWork(target, (_s, line) => messages.push(line));
+    assertEquals(messages, []);
+    assertEquals(await Deno.stat(target.workDir).catch(() => null), null);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
   }
 });

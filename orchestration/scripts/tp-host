@@ -3040,6 +3040,10 @@ tp_verb_build_return() {
   tp_pin_dir "$R_BUILD/work" || tp_die "no build directory $R_BUILD/work"
   tp_build_work_pin "$1"
   tp_run chown -R -h -P -- "$CALLER_UID:$CALLER_GID" .
+  # A build can leave a directory it made mode 000 or read-only: give the
+  # caller owner access back so it can read and remove the tree. chmod -R
+  # never follows a symlink (the unit is gone, nothing races this).
+  tp_run chmod -R u+rwX -- .
 }
 
 # Expiry dates of the certificates the hosting Caddy issued itself, nothing
