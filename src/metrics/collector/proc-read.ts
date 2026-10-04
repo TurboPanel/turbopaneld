@@ -1,3 +1,14 @@
+function isReadBlocked(err: unknown): boolean {
+  return err instanceof Deno.errors.PermissionDenied ||
+    err instanceof Deno.errors.NotCapable;
+}
+
+/** `cat` only ever gets an absolute path with no traversal segments. */
+function isFallbackPath(path: string): boolean {
+  return path.startsWith("/") && !path.includes("\0") &&
+    !path.split("/").includes("..");
+}
+
 /**
  * Read a `/proc` (or sysfs) file. Tries Deno direct read first, then `cat`
  * fallback — Deno 2 blocks direct `/proc` reads under `--allow-read`.
@@ -19,7 +30,10 @@ export async function readProcFile(
   const readText = io?.readTextFile ?? ((p) => Deno.readTextFile(p));
   try {
     return await readText(path);
-  } catch {
+  } catch (err) {
+    // A missing file (absent PSI, conntrack, md, an exited pid) is final and
+    // common; forking `cat` for it every tick is pure overhead.
+    if (!isReadBlocked(err) || !isFallbackPath(path)) return undefined;
     // Deno 2 blocks direct /proc reads under --allow-read; fall back to cat.
   }
 
