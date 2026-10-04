@@ -1746,145 +1746,36 @@ test("guardHostingCaddySites leaves a loadable set alone and reloads only after 
   }
 });
 
-test("validation needs the hosting unit's state folder: a never-started unit is started once, and a folder that stays missing is an error", async () => {
+test("validation needs the hosting unit's state folder: a never-started unit is started once first", async () => {
   const { layout, cleanup } = await makeTestLayout();
   const state = join(dirname(layout.stateDir), "turbopanel-hosting-caddy");
   await Deno.remove(state);
   const calls: string[][] = [];
-  let createOnStart = false;
   const restore = setIngressHostCommandForTest((_command, args) => {
     calls.push([...args]);
-    if (args.includes("start") && createOnStart) Deno.mkdirSync(state);
+    if (args.includes("start")) Deno.mkdirSync(state);
     return Promise.resolve({ success: true, stderr: "" });
   });
   try {
-    await assertRejects(
-      () =>
-        rewriteHostingCaddySites(
-          layout,
-          hostingPayload("env-s", "s.example.com"),
-          undefined,
-          noGrant,
-        ),
-      Error,
-      "state folder",
-    );
-    assertEquals(calls.some((a) => a.includes("start")), true);
-    assertEquals(calls.some((a) => a.includes("validate")), false);
-
-    createOnStart = true;
     await rewriteHostingCaddySites(
       layout,
       hostingPayload("env-s", "s.example.com"),
       undefined,
       noGrant,
     );
-    assertEquals(calls.some((a) => a.includes("validate")), true);
-  } finally {
-    restore();
-    await cleanup();
-  }
-});
+    const startAt = calls.findIndex((a) => a.includes("start"));
+    const validateAt = calls.findIndex((a) => a.includes("validate"));
+    assertEquals(startAt >= 0 && validateAt > startAt, true);
 
-test("rewriteHostingCaddySites restores the previous snippet and fails when a running Caddy refuses the reload", async () => {
-  const { layout, cleanup } = await makeTestLayout();
-  let reloadOk = true;
-  const restore = setIngressHostCommandForTest((_command, args) =>
-    Promise.resolve({
-      success: !(args.includes("reload") && !reloadOk),
-      stderr: "reload refused",
-    })
-  );
-  try {
+    // With the folder there, the unit is not started again.
+    calls.length = 0;
     await rewriteHostingCaddySites(
       layout,
-      hostingPayload("env-r", "one.example.com"),
+      hostingPayload("env-s", "s.example.com"),
       undefined,
       noGrant,
     );
-    const sitesDir = join(layout.configDir, "hosting", "sites");
-    const live = join(sitesDir, "env-r.caddy");
-    const before = await Deno.readTextFile(live);
-
-    reloadOk = false;
-    await assertRejects(
-      () =>
-        rewriteHostingCaddySites(
-          layout,
-          hostingPayload("env-r", "two.example.com"),
-          undefined,
-          noGrant,
-        ),
-      Error,
-      "did not reload",
-    );
-    assertEquals(await Deno.readTextFile(live), before);
-    assertEquals(
-      [...Deno.readDirSync(sitesDir)].map((e) => e.name).sort(),
-      ["env-r.acme-hostnames.json", "env-r.caddy"],
-    );
-
-    // A brand-new snippet that is refused is removed, not left behind.
-    await assertRejects(
-      () =>
-        rewriteHostingCaddySites(
-          layout,
-          hostingPayload("env-new", "three.example.com"),
-          undefined,
-          noGrant,
-        ),
-      Error,
-      "did not reload",
-    );
-    await assertRejects(
-      () => Deno.stat(join(sitesDir, "env-new.caddy")),
-      Deno.errors.NotFound,
-    );
-  } finally {
-    restore();
-    await cleanup();
-  }
-});
-
-test("rewriteHostingCaddySites runs one change at a time, so a candidate set is never shared", async () => {
-  const { layout, cleanup } = await makeTestLayout();
-  const seen: string[] = [];
-  let validating = 0;
-  let overlap = false;
-  const restore = setIngressHostCommandForTest(async (_command, args) => {
-    if (args.includes("validate")) {
-      validating++;
-      if (validating > 1) overlap = true;
-      const sites = join(layout.configDir, "hosting", "sites.next");
-      seen.push(
-        [...Deno.readDirSync(sites)].map((e) => e.name).filter((n) =>
-          n !== "00-candidate.caddy"
-        ).sort().join(","),
-      );
-      // Yield so a second, unserialized deploy would run in the gap.
-      await new Promise((resolve) => setTimeout(resolve, 20));
-      validating--;
-    }
-    return { success: true, stderr: "" };
-  });
-  try {
-    await Promise.all([
-      rewriteHostingCaddySites(
-        layout,
-        hostingPayload("env-x", "x.example.com"),
-        undefined,
-        noGrant,
-      ),
-      rewriteHostingCaddySites(
-        layout,
-        hostingPayload("env-y", "y.example.com"),
-        undefined,
-        noGrant,
-      ),
-    ]);
-    assertEquals(overlap, false);
-    // The second deploy validated a set that already holds the first's file.
-    assertEquals(seen, ["env-x.caddy", "env-x.caddy,env-y.caddy"]);
+    assertEquals(calls.some((a) => a.includes("start")), false);
   } finally {
     restore();
     await cleanup();

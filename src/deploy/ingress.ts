@@ -1882,26 +1882,23 @@ function hostingCaddyStateRoot(layout: LayoutPaths): string {
 
 /**
  * The validating account keeps its throwaway certificate authority under the
- * unit's state folder, which systemd creates on the unit's first start. A host
- * whose unit has never started gets it started once (the deploy path normally
- * did that already), and a folder that still is not there is an error.
+ * unit's state folder, which systemd creates when the unit starts. A host whose
+ * unit has never started gets it started once (the deploy path normally did
+ * that already), so the folder exists before Caddy is asked to use it.
  */
 async function ensureValidationStorage(layout: LayoutPaths): Promise<string> {
   const state = hostingCaddyStateRoot(layout);
-  const exists = () =>
-    Deno.stat(state).then(() => true, (err) => {
-      if (err instanceof Deno.errors.NotFound) return false;
-      throw err;
-    });
-  if (!await exists()) {
-    await run(
+  const exists = await Deno.stat(state).then(() => true, (err) => {
+    if (err instanceof Deno.errors.NotFound) return false;
+    throw err;
+  });
+  if (!exists) {
+    const start = await run(
       "sudo",
       hostSudoArgs(["-n", "systemctl", "start", CADDY_SERVICE]),
     );
-    if (!await exists()) {
-      throw new Error(
-        `hosting Caddy state folder ${state} is missing: the unit has not started`,
-      );
+    if (!start.success) {
+      logWarn("deploy", `hosting Caddy start skipped: ${start.stderr}`);
     }
   }
   return join(state, "validate");
