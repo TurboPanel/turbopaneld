@@ -16,7 +16,7 @@
  */
 
 import { isAbsolute, join, relative } from "@std/path";
-import { pumpLines } from "../../logs/line-stream.ts";
+import { BUILD_OUTPUT_LIMITS, pumpLines } from "../../logs/line-stream.ts";
 import type { CommandSummaryRedactor } from "../../logs/contracts.ts";
 import { redactCommandSummary } from "../../logs/redactor.ts";
 import type {
@@ -316,6 +316,14 @@ async function runBuildCommand(
     env,
     runtimeGroup,
   );
+  let outputExceeded = false;
+  const limits = {
+    ...BUILD_OUTPUT_LIMITS,
+    onLimit: () => {
+      outputExceeded = true;
+      controller.abort();
+    },
+  };
   try {
     const child = new Deno.Command(bin, {
       args,
@@ -332,12 +340,19 @@ async function runBuildCommand(
       pumpLines(
         child.stdout,
         onOutput ? (line) => onOutput("stdout", line) : undefined,
+        limits,
       ),
       pumpLines(
         child.stderr,
         onOutput ? (line) => onOutput("stderr", line) : undefined,
+        limits,
       ),
     ]);
+    if (outputExceeded) {
+      throw new Error(
+        "build output exceeded the size limit; the build was stopped",
+      );
+    }
     if (!status.success) {
       throw new Error(
         redactSummary(stderr.trim()) || redactSummary(stdout.trim()) ||
@@ -345,6 +360,11 @@ async function runBuildCommand(
       );
     }
   } catch (err) {
+    if (outputExceeded) {
+      throw new Error(
+        "build output exceeded the size limit; the build was stopped",
+      );
+    }
     if (err instanceof DOMException && err.name === "AbortError") {
       throw new Error(`build command timed out after ${BUILD_TIMEOUT_MS}ms`);
     }
