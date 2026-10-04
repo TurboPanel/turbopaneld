@@ -369,7 +369,7 @@ test("an interpolated path is refused", () =>
     assert(msg.includes("is interpolated"), msg);
   }));
 
-test("a bind-type driver_opts device is checked; an NFS volume is not", () =>
+test("a bind-type driver_opts device is checked; an NFS volume is refused", () =>
   withFixture(async (f) => {
     const disguised = collectResolvedHostPaths({
       volumes: {
@@ -377,19 +377,21 @@ test("a bind-type driver_opts device is checked; an NFS volume is not", () =>
       },
     });
     assert((await refusal(f, [disguised])).includes("volume d device"));
-    await allowed(f, [
-      collectResolvedHostPaths({
-        volumes: {
-          n: {
-            driver_opts: {
-              type: "nfs",
-              o: "addr=10.0.0.2",
-              device: ":/export",
+    assert(
+      (await refusal(f, [
+        collectResolvedHostPaths({
+          volumes: {
+            n: {
+              driver_opts: {
+                type: "nfs",
+                o: "addr=10.0.0.2",
+                device: ":/export",
+              },
             },
           },
-        },
-      }),
-    ]);
+        }),
+      ])).includes("volume n sets driver_opts"),
+    );
     const relative = collectResolvedHostPaths({
       volumes: { r: { driver_opts: { o: "bind", device: "rel" } } },
     });
@@ -796,6 +798,7 @@ test("collectResolvedHostPaths top-level volume rules", () => {
     ["volume oNotString device", "/srv/d", "mount", false],
   ]);
   assertEquals(scan.findings, [
+    "volume nfs sets driver_opts the platform does not allow (only a tmpfs with size, mode, uid or gid, or a host-approved bind, is supported)",
     "volume relDevice binds a device that is not an absolute host path",
     "volume noDevice binds a device that is not an absolute host path",
     "volume numDevice binds a device that is not an absolute host path",

@@ -216,6 +216,35 @@ function collectBuild(
   }
 }
 
+/** tmpfs mount options a volume may carry: sizing and ownership only. */
+const SAFE_TMPFS_OPTION = /^(size|mode|uid|gid|nr_inodes|nr_blocks)=[\w.]+$/;
+const SAFE_TMPFS_FLAGS = new Set(["noexec", "nosuid", "nodev", "ro", "rw"]);
+
+function mountOptions(opts: Record<string, unknown>): string[] {
+  return typeof opts.o === "string"
+    ? opts.o.split(",").map((s) => s.trim().toLowerCase())
+    : [];
+}
+
+/**
+ * The local volume driver hands `type`, `o` and `device` to mount(2), so any
+ * type other than a plain tmpfs (overlay, nfs, cifs, 9p, fuse ...) can reach
+ * host directories or dial an address the author picks. Only a tmpfs with
+ * sizing and ownership options passes; a bind-style mount is judged by the
+ * path checks instead.
+ */
+function isSafeTmpfsVolume(opts: Record<string, unknown>): boolean {
+  const keys = Object.keys(opts);
+  if (keys.some((k) => k !== "type" && k !== "device" && k !== "o")) {
+    return false;
+  }
+  if (opts.type !== "tmpfs") return false;
+  if (opts.device !== undefined && opts.device !== "tmpfs") return false;
+  return mountOptions(opts).every((flag) =>
+    flag === "" || SAFE_TMPFS_FLAGS.has(flag) || SAFE_TMPFS_OPTION.test(flag)
+  );
+}
+
 function collectTopLevelVolumes(
   volumes: unknown,
   out: ComposeHostPathScan,
@@ -224,11 +253,21 @@ function collectTopLevelVolumes(
   for (const [name, spec] of Object.entries(volumes)) {
     if (!isRecord(spec) || !isRecord(spec.driver_opts)) continue;
     const opts = spec.driver_opts;
-    const o = typeof opts.o === "string"
-      ? opts.o.split(",").map((s) => s.trim())
-      : [];
-    const isBind = o.includes("bind") || opts.type === "none";
-    if (!isBind) continue;
+    if (Object.keys(opts).length === 0) continue;
+    const o = mountOptions(opts);
+    const type = typeof opts.type === "string"
+      ? opts.type.trim().toLowerCase()
+      : undefined;
+    const isBind = o.includes("bind") || o.includes("rbind") ||
+      type === "none" || type === "bind";
+    if (!isBind) {
+      if (!isSafeTmpfsVolume(opts)) {
+        out.findings.push(
+          `volume ${name} sets driver_opts the platform does not allow (only a tmpfs with size, mode, uid or gid, or a host-approved bind, is supported)`,
+        );
+      }
+      continue;
+    }
     if (typeof opts.device !== "string" || !isAbsolute(opts.device)) {
       out.findings.push(
         `volume ${name} binds a device that is not an absolute host path`,
@@ -373,7 +412,9 @@ export function collectAuthoredHostPaths(yaml: string): ComposeHostPathScan {
   const out: ComposeHostPathScan = { entries: [], findings: [] };
   let doc: unknown;
   try {
-    doc = parse(yaml);
+    // Merge keys expanded, as Docker Compose reads them, so `env_file`,
+    // `extends` and the like cannot hide under `<<`.
+    doc = parse(yaml, { merge: true });
   } catch {
     out.findings.push("the compose document could not be parsed");
     return out;

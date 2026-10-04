@@ -36,6 +36,7 @@ import {
   LABEL_RAW_PORT,
   LABEL_ROLE,
   LABEL_ROLE_INGRESS,
+  LABEL_ROUTED,
   LABEL_SERVICE_ID,
   LABEL_SYSTEM_COMPONENT,
 } from "./labels.ts";
@@ -591,6 +592,12 @@ export function traefikCompose(
     `      - --providers.docker.endpoint=${dockerEndpoint(docker.source)}`,
     "      - --providers.docker.exposedbydefault=false",
     `      - --providers.docker.network=${ingressNetwork}`,
+    // Only containers the daemon stamped as routed (a reserved label) are read.
+    `      - ${
+      quoteYamlScalar(
+        `--providers.docker.constraints=Label(\`${LABEL_ROUTED}\`,\`true\`)`,
+      )
+    }`,
     `      - --entrypoints.web.address=:${TRAEFIK_HTTP_PORT}`,
     `      - --entrypoints.web.proxyProtocol.trustedIPs=${trusted}`,
     `      - --entrypoints.websecure.address=:${TRAEFIK_HTTPS_PORT}`,

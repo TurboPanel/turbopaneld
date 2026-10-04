@@ -48,7 +48,6 @@ test("the control plane's identity labels and anything else stay allowed", () =>
         labels: {
           "com.turbopanel.service": "web",
           "com.turbopanel.environment": "e1",
-          "traefik.enable": "true",
           "com.example": "keep",
         },
       },
@@ -95,4 +94,22 @@ test("only the turbopanel. prefix and the existing reserved names are refused", 
       },
     },
   });
+});
+
+test("a tenant compose may not author traefik routing labels or the routed marker", () => {
+  for (
+    const labels of [
+      { "traefik.http.routers.steal.rule": "Host(`victim.example.com`)" },
+      ["traefik.enable=true"],
+      { "Traefik.http.routers.x.priority": "9" },
+      { "com.turbopanel.raw-port": "true" },
+      { "com.turbopanel.system.routed": "true" },
+    ]
+  ) {
+    assertThrows(
+      () => assertNoReservedOwnerLabels({ services: { web: { labels } } }),
+      Error,
+      "reserved",
+    );
+  }
 });
