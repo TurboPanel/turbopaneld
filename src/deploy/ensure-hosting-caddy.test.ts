@@ -5,6 +5,7 @@ import { withTempLayout } from "../testing/temp-layout.ts";
 import {
   ensureHostingCaddy,
   type EnsureHostingCaddyDeps,
+  grantHostingCaddyRead,
   HOSTING_CADDY_VERSION,
   INGRESS_GUARD_UNIT,
   INGRESS_GUARD_VERSION,
@@ -776,5 +777,129 @@ test({
         `Ingress guard ${INGRESS_GUARD_UNIT} is not active`,
       );
     });
+  },
+});
+
+test("grantHostingCaddyRead adds an access entry, then a folder-only default entry, for tpedge only", async () => {
+  const calls: Array<{ command: string; args: string[] }> = [];
+  await grantHostingCaddyRead("/etc/turbopanel/hosting", (command, args) => {
+    calls.push({ command, args });
+    return Promise.resolve({ success: true, stderr: "" });
+  });
+  assertEquals(calls, [
+    {
+      command: "setfacl",
+      args: [
+        "-R",
+        "-P",
+        "-m",
+        "u:tpedge:rX",
+        "--",
+        "/etc/turbopanel/hosting",
+      ],
+    },
+    {
+      command: "find",
+      args: [
+        "/etc/turbopanel/hosting",
+        "-type",
+        "d",
+        "-exec",
+        "setfacl",
+        "-d",
+        "-m",
+        "u:tpedge:rX",
+        "--",
+        "{}",
+        "+",
+      ],
+    },
+  ]);
+});
+
+test("grantHostingCaddyRead never throws when setfacl fails or is missing", async () => {
+  await grantHostingCaddyRead(
+    "/x",
+    () => Promise.resolve({ success: false, stderr: "no such user" }),
+  );
+  await grantHostingCaddyRead(
+    "/x",
+    () => Promise.reject(new Deno.errors.NotFound("setfacl")),
+  );
+});
+
+async function aclText(path: string, flags: string[]): Promise<string> {
+  const out = await new Deno.Command("getfacl", {
+    args: ["-c", ...flags, path],
+    stdout: "piped",
+    stderr: "null",
+  }).output();
+  return new TextDecoder().decode(out.stdout);
+}
+
+async function toolOk(command: string): Promise<boolean> {
+  try {
+    return (await new Deno.Command(command, {
+      args: ["--version"],
+      stdout: "null",
+      stderr: "null",
+    }).output()).success;
+  } catch {
+    return false;
+  }
+}
+
+// Linux only: a folder and files made BEFORE any default entry existed (the
+// fresh install and the update the canary proof hit) get the entry, and a file
+// made afterwards inherits it. The current user stands in for tpedge.
+test({
+  name:
+    "grantHostingCaddyRead backfills existing files and makes new ones inherit (linux, real setfacl)",
+  ignore: Deno.build.os !== "linux",
+  fn: async () => {
+    if (!(await toolOk("setfacl")) || !(await toolOk("getfacl"))) return;
+    const me = (await new Deno.Command("id", { args: ["-un"], stdout: "piped" })
+      .output()).stdout;
+    const user = new TextDecoder().decode(me).trim();
+    const dir = await Deno.makeTempDir({ prefix: "tp-hosting-acl-" });
+    try {
+      await Deno.mkdir(join(dir, "sites"), { mode: 0o750 });
+      await Deno.writeTextFile(join(dir, "Caddyfile"), "x", { mode: 0o640 });
+      await Deno.writeTextFile(join(dir, "sites", "a.caddy"), "x", {
+        mode: 0o640,
+      });
+      await grantHostingCaddyRead(dir, async (command, args) => {
+        const out = await new Deno.Command(command, {
+          args,
+          stdout: "null",
+          stderr: "piped",
+        }).output();
+        return {
+          success: out.success,
+          stderr: new TextDecoder().decode(out.stderr),
+        };
+      }, user);
+      const want = `user:${user}:r`;
+      for (const f of ["Caddyfile", "sites/a.caddy", "sites"]) {
+        assertEquals(
+          (await aclText(join(dir, f), [])).includes(want),
+          true,
+          `${f} lacks ${want}`,
+        );
+      }
+      assertEquals(
+        (await aclText(join(dir, "sites"), [])).includes(`default:${want}`),
+        true,
+      );
+      await Deno.writeTextFile(join(dir, "sites", "b.caddy"), "x", {
+        mode: 0o640,
+      });
+      assertEquals(
+        (await aclText(join(dir, "sites", "b.caddy"), [])).includes(want),
+        true,
+      );
+    } finally {
+      await Deno.remove(dir, { recursive: true });
+    }
   },
 });

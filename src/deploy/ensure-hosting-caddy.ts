@@ -137,7 +137,62 @@ export type EnsureHostingCaddyDeps = {
     arch: "arm64" | "amd64",
     tarballPath: string,
   ) => Promise<void>;
+  /** Replaces {@link grantHostingCaddyRead} in {@link ensureHostingCaddyRuntime}. */
+  grantHostingRead?: (hostingDir: string) => Promise<void>;
 };
+
+/**
+ * Give the hosting Caddy read access to everything under the hosting config
+ * directory, as the daemon (which owns it), with no privilege. The role's
+ * default ACL on the leaf only reaches what is created after the role ran, so
+ * anything written earlier (the Caddyfile on an updated host, `sites/` and its
+ * snippets on a fresh one) has no entry for {@link HOSTING_CADDY_USER} until
+ * this adds it. It adds an access entry on every file and folder and a default
+ * entry on every folder, so files created later inherit it. `-P` never follows
+ * a symlink, and only the daemon's own files are touched (a file root wrote
+ * keeps its owner and is left to the default entry). Nothing widens beyond
+ * {@link HOSTING_CADDY_USER}: no group or other bits change.
+ */
+export async function grantHostingCaddyRead(
+  hostingDir: string,
+  runCommand: NonNullable<EnsureHostingCaddyDeps["runCommand"]> = runDefault,
+  user: string = HOSTING_CADDY_USER,
+): Promise<void> {
+  const entry = `u:${user}:rX`;
+  const attempt = async (command: string, args: string[]) => {
+    try {
+      const result = await runCommand(command, args);
+      if (!result.success) {
+        logWarn(
+          "deploy",
+          `hosting Caddy read access not fully applied (${command}): ${result.stderr}`,
+        );
+      }
+    } catch (err) {
+      logWarn(
+        "deploy",
+        `hosting Caddy read access not applied (${command}): ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  };
+  await attempt("setfacl", ["-R", "-P", "-m", entry, "--", hostingDir]);
+  // Default entries apply to folders only; find keeps files out of it.
+  await attempt("find", [
+    hostingDir,
+    "-type",
+    "d",
+    "-exec",
+    "setfacl",
+    "-d",
+    "-m",
+    entry,
+    "--",
+    "{}",
+    "+",
+  ]);
+}
 
 /**
  * Direct download into the vendor tree (no Ansible). Used when the caddy-setup
