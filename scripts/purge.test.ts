@@ -673,7 +673,7 @@ test("an inactive slice systemd keeps without a unit file is not reported as lef
 
 test("containers are not carried into the final check once Docker Engine was purged", async () => {
   const stub = await stubBin("docker", "exit 1");
-  const run = (gone: string) =>
+  const run = (gone: string, left = "false") =>
     runPurgeSh(
       [
         "tp_inventory_docker",
@@ -687,14 +687,28 @@ test("containers are not carried into the final check once Docker Engine was pur
         ': > "$TP_TMP/inv.containers"',
         "TP_INV_QUIET=true",
         `TP_DOCKER_ENGINE_GONE=${gone}`,
+        `TP_DOCKER_LEFT=${left}`,
         "tp_inventory_docker",
         'cat "$TP_TMP/inv.containers"',
       ].join("\n"),
       { PATH: `${stub}:${BASE_PATH}` },
     );
   assertEquals((await run("true")).stdout.trim(), "");
-  // Docker still installed but not answering: the old list is kept.
-  assertEquals((await run("false")).stdout.trim(), "abc-in");
+  // Daemon dead after the removal step ran: nothing is left to report.
+  assertEquals((await run("false")).stdout.trim(), "");
+  // Docker still installed, not answering, and the removal step was skipped:
+  // the old list is kept.
+  assertEquals((await run("false", "true")).stdout.trim(), "abc-in");
+});
+
+test("a purge with Docker already removed reports no false container failure", async () => {
+  // Docker CLI gone: the removal step skips quietly and records no failure.
+  const result = await runPurgeSh(
+    ["tp_remove_docker", "tp_has_tool", "tp_record_skip"],
+    'tp_has_tool() { return 1; }\ntp_remove_docker\necho "fail=$TP_FAIL_COUNT left=${TP_DOCKER_LEFT:-no}"',
+  );
+  assertStringIncludes(result.stdout, "fail=0 left=no");
+  assertStringIncludes(result.stdout, "fail=0");
 });
 
 test("the hosting Caddy state folder is owned, inventoried and removed", async () => {
