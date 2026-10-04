@@ -188,9 +188,10 @@ async function makeTreeRemovable(path: string): Promise<void> {
   if (!info?.isDirectory) return;
   await Deno.chmod(path, 0o700);
   const entries = await Array.fromAsync(Deno.readDir(path));
-  for (const entry of entries) {
-    if (entry.isDirectory) await makeTreeRemovable(join(path, entry.name));
-  }
+  await forEachSequential(
+    entries.filter((entry) => entry.isDirectory),
+    (entry) => makeTreeRemovable(join(path, entry.name)),
+  );
 }
 
 /**
