@@ -3470,21 +3470,29 @@ function parseFabricObservedPeer(value: unknown): FabricReconcileObservedPeer {
     peer.endpoint = record.endpoint;
   }
   if (record.health !== undefined) {
-    if (
-      typeof record.health !== "string" ||
-      !FABRIC_PEER_HEALTH.has(record.health as FabricPeerHealth)
-    ) {
-      throw new TypeError("Invalid fabric reconcile result peer health");
-    }
-    peer.health = record.health as FabricPeerHealth;
+    peer.health = parseObservedPeerHealth(record.health);
   }
   if (record.interface !== undefined) {
-    if (!isValidInterfaceName(record.interface)) {
-      throw new TypeError("Invalid fabric reconcile result peer interface");
-    }
-    peer.interface = record.interface;
+    peer.interface = parseObservedPeerInterface(record.interface);
   }
   return peer;
+}
+
+function parseObservedPeerHealth(value: unknown): FabricPeerHealth {
+  if (
+    typeof value !== "string" ||
+    !FABRIC_PEER_HEALTH.has(value as FabricPeerHealth)
+  ) {
+    throw new TypeError("Invalid fabric reconcile result peer health");
+  }
+  return value as FabricPeerHealth;
+}
+
+function parseObservedPeerInterface(value: unknown): string {
+  if (!isValidInterfaceName(value)) {
+    throw new TypeError("Invalid fabric reconcile result peer interface");
+  }
+  return value;
 }
 
 function parseNonEmptyString(
