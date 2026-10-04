@@ -1561,6 +1561,10 @@ test("site apply playbooks vendor engines (never apt nginx/apache2)", async () =
   assertEquals(apachePlaybook.includes("name: apache"), true);
   assertEquals(apachePlaybook.includes("name: php-fpm"), true);
   assertEquals(olsPlaybook.includes("name: openlitespeed"), true);
+  // An OpenLiteSpeed-only host must not gain the tpapache account: php-fpm
+  // runs as tpols there.
+  assertEquals(olsPlaybook.includes("web_service_key: apache"), false);
+  assertEquals(olsPlaybook.includes("php_fpm_service_user: tpols"), true);
 
   // Distro package installs must stay gone — engines come from vendor roles.
   for (
@@ -1900,6 +1904,27 @@ test("Apache runs as tpapache with its own top-level log and runtime dirs", asyn
     tasks.includes("systemctl try-restart turbopanel-apache.service"),
     true,
   );
+});
+
+test("Apache loads mod_remoteip and logs the client address for nginx in front", async () => {
+  const conf = await Deno.readTextFile(
+    join(CHECKOUT_ORCHESTRATION_DIR, "roles/apache/templates/httpd.conf.j2"),
+  );
+  const lines = conf.split("\n");
+  assertEquals(
+    lines.includes("LoadModule remoteip_module modules/mod_remoteip.so"),
+    true,
+  );
+  // `combined` must be defined before use, with `%a`: the address mod_remoteip
+  // takes from nginx's X-Forwarded-For (WP5 proof: the undefined format logged
+  // the literal word).
+  const format = lines.findIndex((line) =>
+    line.startsWith('LogFormat "%a ') && line.endsWith('" combined')
+  );
+  const custom = lines.findIndex((line) =>
+    line.startsWith("CustomLog ") && line.endsWith(" combined")
+  );
+  assertEquals(format >= 0 && format < custom, true);
 });
 
 test("devOwnershipPlaybookExtraArgs emits user uid gid and root", () => {
@@ -2400,6 +2425,27 @@ test("docker role merges daemon.json address pools and live-restore, skipping th
     true,
     "strip owned keys before merging the current values back on",
   );
+  // Dedicated cgroup parent for the container metrics reads: owned with the
+  // systemd driver, preserved on a cgroupfs-pinned host, rides the same
+  // restart / pending-marker rules as live-restore.
+  assertEquals(
+    daemonJson.includes(
+      "combine({'cgroup-parent': turbopanel_docker_cgroup_parent}",
+    ) ||
+      daemonJson.includes("{'cgroup-parent': turbopanel_docker_cgroup_parent}"),
+    true,
+  );
+  assertEquals(
+    daemonJson.includes("native.cgroupdriver=cgroupfs"),
+    true,
+    "a cgroupfs-driver host keeps its own cgroup-parent",
+  );
+  assertEquals(
+    defaults.includes(
+      "turbopanel_docker_cgroup_parent: turbopanel-containers.slice",
+    ),
+    true,
+  );
   assertEquals(
     daemonJson.includes("_docker_daemon_json_current is mapping"),
     true,
@@ -2439,7 +2485,7 @@ test("docker role merges daemon.json address pools and live-restore, skipping th
   // outage risk, not just a database blip.
   assertEquals(
     handlers.includes(
-      "when: not (_docker_colocated_instance_host | default(false) | bool)",
+      "when: not (_docker_restart_deferred | default(true) | bool)",
     ),
     true,
   );
@@ -2631,6 +2677,44 @@ test("docker role denies the network.host and security.insecure build entitlemen
   );
 });
 
+test("daemon-converge re-applies only the builder entitlement deny to already-provisioned Docker hosts", async () => {
+  const roleDir = join(CHECKOUT_ORCHESTRATION_DIR, "roles/docker");
+  const converge = await Deno.readTextFile(
+    join(CHECKOUT_ORCHESTRATION_DIR, "playbooks/daemon-converge.yml"),
+  );
+  const entry = await Deno.readTextFile(
+    join(roleDir, "tasks/converge-builder.yml"),
+  );
+  const daemonJson = await Deno.readTextFile(
+    join(roleDir, "tasks/daemon-json.yml"),
+  );
+  const defaults = await Deno.readTextFile(join(roleDir, "defaults/main.yml"));
+  // The converge runs the entry file, ahead of the gate, never the whole role.
+  assertEquals(
+    /- role: docker\n\s+tasks_from: converge-builder\n\s+- role: docker-gate/
+      .test(converge),
+    true,
+  );
+  assertEquals(entry.includes("turbopanel_docker_builder_only: true"), true);
+  assertEquals(entry.includes("/usr/bin/docker"), true);
+  // It reads the file back and refuses to pass if the deny is not on disk.
+  assertEquals(entry.includes("['network-host'] == false"), true);
+  assertEquals(entry.includes("['security-insecure'] == false"), true);
+  // Builder-only mode leaves pools, bip and live-restore as found.
+  assertEquals(
+    daemonJson.includes("when: turbopanel_docker_builder_only | bool"),
+    true,
+  );
+  assertEquals(
+    daemonJson.includes("when: not (turbopanel_docker_builder_only | bool)"),
+    true,
+  );
+  assertEquals(
+    defaults.includes("turbopanel_docker_builder_only: false"),
+    true,
+  );
+});
+
 test("a co-located instance host gets a pending dockerd restart, applied once live-restore is running", async () => {
   const roleDir = join(CHECKOUT_ORCHESTRATION_DIR, "roles/docker");
   const daemonJson = await Deno.readTextFile(
@@ -2645,7 +2729,7 @@ test("a co-located instance host gets a pending dockerd restart, applied once li
   );
   for (
     const name of [
-      "Mark a dockerd restart pending on a co-located instance host",
+      "Mark a dockerd restart pending when the restart is deferred",
       "Ask the running dockerd whether live-restore is in effect",
       "Restart dockerd now that live-restore keeps containers running",
       "Clear the pending dockerd restart",
@@ -2659,6 +2743,89 @@ test("a co-located instance host gets a pending dockerd restart, applied once li
     true,
   );
   assertEquals(daemonJson.includes(".LiveRestoreEnabled"), true);
+});
+
+async function runDockerRestartGate(
+  vars: Record<string, unknown>,
+  dockerInfoOutput: string | null,
+): Promise<boolean> {
+  const dir = await Deno.makeTempDir();
+  try {
+    const bin = join(dir, "bin");
+    await Deno.mkdir(bin);
+    // Stand-in `docker info --format {{.LiveRestoreEnabled}}`; null = docker
+    // cannot answer (no daemon). Listed first on PATH so a real docker on the
+    // runner is never consulted.
+    await Deno.writeTextFile(
+      join(bin, "docker"),
+      dockerInfoOutput === null
+        ? "#!/bin/sh\nexit 1\n"
+        : `#!/bin/sh\necho ${dockerInfoOutput}\n`,
+      { mode: 0o755 },
+    );
+    const gate = join(
+      CHECKOUT_ORCHESTRATION_DIR,
+      "roles/docker/tasks/restart-gate.yml",
+    );
+    await Deno.writeTextFile(
+      join(dir, "play.yml"),
+      `- hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - ansible.builtin.include_tasks: ${gate}
+    - ansible.builtin.debug:
+        msg: "DEFERRED={{ _docker_restart_deferred | bool }}"
+`,
+    );
+    await Deno.writeTextFile(join(dir, "vars.json"), JSON.stringify(vars));
+    const out = await new Deno.Command("ansible-playbook", {
+      args: ["-e", `@${join(dir, "vars.json")}`, join(dir, "play.yml")],
+      env: { PATH: `${bin}:${Deno.env.get("PATH") ?? ""}` },
+      stdout: "piped",
+      stderr: "piped",
+    }).output();
+    const text = new TextDecoder().decode(out.stdout);
+    assert(out.success, text + new TextDecoder().decode(out.stderr));
+    return text.includes("DEFERRED=True");
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+}
+
+let ansibleAvailable = false;
+try {
+  ansibleAvailable =
+    (await new Deno.Command("ansible-playbook", { args: ["--version"] })
+      .output()).success;
+} catch { /* ansible not installed: the gating test is skipped */ }
+
+Deno.test({
+  name:
+    "daemon.json restart gate defers the dockerd restart unless it is live-restored",
+  ignore: !ansibleAvailable,
+  fn: async () => {
+    const full = { turbopanel_docker_builder_only: false };
+    const builder = { turbopanel_docker_builder_only: true };
+    const colo = (v: Record<string, unknown>) => ({
+      ...v,
+      _docker_colocated_instance_host: true,
+    });
+    const plain = (v: Record<string, unknown>) => ({
+      ...v,
+      _docker_colocated_instance_host: false,
+    });
+    // Full role run enforces live-restore itself: restart allowed.
+    assertEquals(await runDockerRestartGate(plain(full), null), false);
+    // Co-located instance host is always deferred.
+    assertEquals(await runDockerRestartGate(colo(full), null), true);
+    assertEquals(await runDockerRestartGate(colo(builder), "true"), true);
+    // Builder-only: restart only when the running dockerd is live-restored.
+    assertEquals(await runDockerRestartGate(plain(builder), "true"), false);
+    assertEquals(await runDockerRestartGate(plain(builder), "false"), true);
+    // No daemon.json / docker info failing or empty: deferred.
+    assertEquals(await runDockerRestartGate(plain(builder), null), true);
+  },
 });
 
 test("principal-access creates every SSH access group the registry defines", async () => {

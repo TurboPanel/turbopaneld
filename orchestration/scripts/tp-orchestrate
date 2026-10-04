@@ -167,9 +167,10 @@ tp_extra_var_value_ok() {
       ;;
     turbopanel_upgrade_id)
       case "$_xv" in
-        ''|*[!A-Za-z0-9_-]*) return 1 ;;
+        ''|[-_]*|*[!A-Za-z0-9_-]*) return 1 ;;
       esac
-      [ "${#_xv}" -le 128 ] && return 0
+      # Same shape the backup and rollback playbooks assert: one path segment.
+      [ "${#_xv}" -le 80 ] && return 0
       ;;
     turbopanel_instance_version)
       case "$_xv" in

@@ -214,7 +214,10 @@ support in `features[]` (`DAEMON_WIRE_FEATURES`, kept equal in both
 `version-wire.ts` files) and the daemon checks `InstanceClient.instanceSupports()`
 before treating the peer as able to speak it. `update-progress`
 (`update-progress-v1`) is the worked example — fire-and-forget progress,
-ignored by a peer that does not list the feature. `managed-health-v1` is the
+ignored by a peer that does not list the feature. `php-site-modes-v1` is advertised by a daemon that runs each PHP site in its
+`php.mode` (FastCGI or php-fpm on nginx and Apache); the control plane refuses to
+deploy any mode but php-fpm to a daemon without it. OpenLiteSpeed and Caddy sites
+still ignore `php.mode` (the lsphp work is turbopaneld#250). `managed-health-v1` is the
 worked example of a control-plane-initiated correlated request
 (`managed-health-request` / `managed-health-result`): this daemon advertises it
 in `DAEMON_WIRE_FEATURES`, and the control plane sends the request only to a
@@ -381,10 +384,6 @@ compile toolchain).
   production source (`src/**`, excluding `*.test.ts` and `src/paths/layout.ts`)
   references `/opt/turbopanel/platform` or the retired `share/ansible`. Wired
   into `publish-daemon-trunk.yml`.
-- `deno task check:metrics-legacy` (`scripts/check-metrics-legacy.ts`) — fails
-  on any ClickHouse/Tabix reference outside the managed-engine allowlist (the
-  metrics store is DuckDB + Parquet / Analytics Engine); scans this repo plus
-  the co-located `turbopanel`/`dev`/`ui` `src` trees when present.
 - `deno task test` / `test:coverage` / `lint` / `fmt:check` / `check` / `notices:check` — quality
   surface in `deno.json`. `notices:generate` writes `THIRD_PARTY_NOTICES.md` from
   `deno.lock` and orchestration pins
@@ -454,7 +453,7 @@ compile toolchain).
 
 Local commands: **`deno task verify:ci`** is the guest mirror of `verify.yml`
 minus the Sonar upload: `verify:static` (`fmt:check`, `lint`, `check`,
-`check:layout`, `check:vocabulary`, `check:metrics-legacy`) then
+`check:layout`, `check:vocabulary`, `check:contract-drift`) then
 `notices:check`, `check:orchestration` (needs `ansible-playbook` /
 `ansible-lint` on PATH — prepend `/opt/turbopanel/vendor/ansible/current/bin`
 in the guest), and **`test:coverage`** (the LCOV Sonar imports).
@@ -762,9 +761,7 @@ it regresses:
     section is `[PATH=<owner home>]`, the locked limits; php-fpm pools take
     `listen.acl_users`, never `user`/`group`/`listen.group`);
     `php-test <siteId>` runs the installed unit's binary on that config as
-    the owner, and `php-site-register` writes the attached-lsphp launcher's
-    registry (`/etc/turbopanel/php-sites/<siteId>`, root:root, this verb
-    only). daemon-install's tp:tp pass over the config tree skips both;
+    the owner. daemon-install's tp:tp pass over the config tree skips it;
   - changes only principal accounts (uid ≥ 15001, `<name>-grp`, home under
     the principal root, a listed shell), adds principals only to groups
     `runtime-registry.json` defines and engine accounts only to principal
@@ -781,8 +778,11 @@ it regresses:
     fixed property set (`NoNewPrivileges`, no capabilities,
     `ProtectSystem=strict`, private tmp/devices/IPC/PIDs, the daemon's trees,
     principal homes, Docker/containerd/gate sockets and `/etc/ssh` made
-    inaccessible, loopback/private/link-local/CGNAT egress denied except the
-    host's literal nameservers, 4G memory, 200% CPU, 1800 s, `tpbuild.slice`)
+    inaccessible, private/link-local/CGNAT egress denied except the host's
+    literal nameservers, loopback open but port-filtered per `tpbuild` uid by
+    `lib/tp-build-loopback` (nftables table `inet turbopanel_build`, loaded by
+    `build-run` and again as the unit's `ExecStartPre=+`; no `nft` or a load
+    failure means the build does not start), 4G memory, 200% CPU, 1800 s, `tpbuild.slice`)
     whose only command is `/bin/sh` on `lib/tp-build-runner`, loaded as a
     systemd credential (PID 1 reads it; the build account gets a private
     copy); the spec rides
@@ -795,6 +795,25 @@ it regresses:
     every native/static release build through it
     (`src/deploy/release/build-sandbox.ts`), so no tenant build command runs
     as `tp`;
+    **Build loopback (plain words):** Turbopack's helper processes talk over
+    127.0.0.1 on ports the build picks, so the build may use loopback. The
+    build is refused every known platform port (list in one place,
+    `DENY_PORTS` in `lib/tp-build-loopback`, pinned to the code constants by
+    `src/orchestration/build-loopback.test.ts`): ssh 22, web 80/443, web
+    server admin 2019/2029/2039, database proxy 6032/6070/6132/13306/15432,
+    router 7080/7081/7443, panel 8443, GPU metrics 9400, 19080/19820, database
+    HA 33001/33002, platform Postgres 5432 (when `postgres_expose_port` is
+    true), legacy ProxySQL 3306, site and app listen bands 18080-18999 and
+    19100-19799 (includes 18110). Nothing inside the kernel ephemeral range
+    (32768-60999) is listed, because a build's own workers may be handed any
+    port there; managed private ports (45000-45999) bind a non-loopback
+    address, so they are not listed either. The resolver stub (53) is not
+    listed, so it stays reachable. **Residual risk, accepted by
+    the owner:** anything else listening on 127.0.0.1 on a port not in that
+    list (for example a Docker port a site owner published on loopback with
+    an ephemeral port) can be reached by a build, because nftables cannot
+    tell the build's own listeners from another service's. Adding a new
+    fixed loopback port to the platform means adding it to `DENY_PORTS`;
   - brings a release into `<home>/sites/<svc>/releases/<id>` only through
     `publish-open <user> <svc> <id>` (a fresh daemon-owned leaf under
     `<principal root>/.tp-staging`, `root:tp 0710`, a class no generic verb
@@ -1025,6 +1044,21 @@ and the mount kept). There is one copy of that function. A Docker apt
 `Signed-By` keyring is only removed when it is a file directly in
 `/etc/apt/keyrings`, `/usr/share/keyrings`, or `/etc/apt/trusted.gpg.d`.
 
+**Post-check rules (what "left over" means).** The final inventory must
+match what can exist after the purge. A `.slice` unit that systemd still
+reports as loaded but with no unit file and inactive (`tpbuild.slice`) is gone
+(`tp_unit_present`). Once Docker Engine was purged (`TP_DOCKER_ENGINE_GONE`)
+the final inventory skips Docker, so the `<id>-in` containers removed with it
+are not reported. Anything else still on disk stays a failure. The purge also
+removes `/var/lib/turbopanel-hosting-caddy` (the hosting Caddy's
+`StateDirectory`, beside `/var/lib/turbopanel`, in `TP_OWNED_TREES`),
+`/etc/tmpfiles.d/turbopanel-hosting-caddy.conf`, and the `tpgatebuild` group
+(`TP_OTHER_GROUPS`, matched by exact name because its gid is outside the
+9900 band). The resume marker clears whenever the remaining failures are
+benign, so a clean run leaves `/var/lib/turbopanel-purge` gone. A role that
+adds a group or state folder outside the `tp*`/`/var/lib/turbopanel` naming
+must be added to these lists.
+
 **Shell startup files** (`.bashrc` and friends) are scanned in root's home
 and in every UID ≥ 1000 home except principal homes (those are purged whole
 by the purge). A symlinked file is left alone. The
@@ -1080,8 +1114,16 @@ Purge order:
    data root, and `/etc/docker` even when the packages are already gone.
    Remove any file in `/etc/apt/sources.list.d` that references
    `download.docker.com`, and the keyring named in that file's `Signed-By`
-   (usually `/etc/apt/keyrings/docker.asc`). `groupdel docker`, and delete
-   the `docker0` bridge when it is present.
+   (usually `/etc/apt/keyrings/docker.asc`). `groupdel docker`. Once
+   Docker Engine is gone (no `dockerd`, no `docker-ce`/`docker.io`;
+   `tp_docker_engine_gone`), `tp_purge_docker_network_state` deletes the
+   `docker0` and `br-<12 hex>` bridges, the rules in the filter, nat and raw
+   tables that name those bridges or jump to a `DOCKER*` chain (rules with
+   quoted words are never touched), and the `DOCKER*` chains. `DOCKER-USER`
+   is kept when it holds anything but Docker's default `RETURN`. The
+   iptables-nft tables themselves belong to the host and stay. Whatever
+   cannot be removed sets `TP_NET_LEFT`, which is the only time the summary
+   asks for a reboot.
 3. **Data folders.** Every discovered config, state, log, run, and backup
    path, plus `/etc/ssh/turbopanel`.
 4. **PHP packages TurboPanel added**, last, and only when TurboPanel's own
@@ -1111,8 +1153,8 @@ remove" list from the second scan: hosted data that is still present
 mountpoints kept on purpose are left off that list. It also lists packages
 kept and why (a Docker or PHP package whose purge would have dragged others
 along); a note that other packages stay installed by design; that
-`/etc/systemd/timesyncd.conf` is left as written; a reboot so leftover kernel
-state (bridges, NAT rules) is cleared; and the commands to install a daemon or
+`/etc/systemd/timesyncd.conf` is left as written; a reboot only when Docker
+bridges or chains could not be removed; and the commands to install a daemon or
 a self-hosted control plane again.
 
 ## Installer script hosting

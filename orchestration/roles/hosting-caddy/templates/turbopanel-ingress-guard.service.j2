@@ -1,0 +1,25 @@
+[Unit]
+Description=TurboPanel ingress guard (only the hosting Caddy reaches the shared Traefik entrypoints)
+Documentation=https://github.com/TurboPanel/turbopaneld/blob/trunk/src/deploy/AGENTS.md
+DefaultDependencies=no
+# After nftables.service, and PartOf it: a host that re-enables it loads
+# /etc/nftables.conf's `flush ruleset`, and a `systemctl restart nftables`
+# restarts this unit right after, putting the table back. Before Docker, so the
+# guard is in place before the shared Traefik's loopback publish comes back;
+# docker.service refuses to start without the table (docker-ingress-guard.conf
+# drop-in). Not RequiredBy=docker.service: Requires= would restart Docker, and
+# every container, whenever this unit restarts.
+After=local-fs.target systemd-modules-load.service nftables.service
+PartOf=nftables.service
+Wants=network-pre.target
+Before=network-pre.target docker.service shutdown.target
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f {{ hosting_ingress_guard_rules }}
+ExecReload=/usr/sbin/nft -f {{ hosting_ingress_guard_rules }}
+
+[Install]
+WantedBy=multi-user.target docker.service

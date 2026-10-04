@@ -51,6 +51,14 @@ fast-path when the binary is present and the service active. The role
   (`src/deploy/docker-networking-state.ts`, synced once per daemon session by
   `syncHostDockerNetworking`), so an on-demand install lands with the right
   pools too.
+- **Always-on egress block** (`tasks/egress-guard.yml`, `files/turbopanel-docker-egress`, unit
+  `turbopanel-docker-egress.service`, var `turbopanel_docker_egress_guard`, default true; audit P1-4): chain `TP-EGRESS`
+  hung off `DOCKER-USER` and `INPUT` for traffic entering on `docker0` / `br-+` only. Drops 169.254.0.0/16,
+  168.63.129.16, 100.100.100.200 (IPv4) and fe80::/10 (ICMPv6 allowed), fd00:ec2::254 (IPv6), with a DNS (53)
+  exception for link-local resolvers. Independent of the opt-in host firewall (`TP-FWD`/`TP-INPUT`). Re-applied after
+  every docker.service restart (`PartOf`/`After`), never removed on stop; purge removes unit, script, chain and jumps.
+  It does not cover fetches the BuildKit engine makes itself (`ADD http://`, remote contexts), which run in dockerd's
+  own namespace. Tests: `src/firewall/egress-guard.test.ts` (stub iptables).
 - **Builder backstop**: the merge also forces `builder.entitlements` `network-host` and `security-insecure` to `false`
   (`turbopanel_docker_deny_builder_entitlements`, default true), so the engine's own builder refuses a build that asks
   for either ("granting entitlement network.host is not allowed by build daemon configuration"), whatever the Docker
@@ -58,6 +66,9 @@ fast-path when the binary is present and the service active. The role
   On a co-located instance host (never auto-restarted by the handler) a change leaves
   `/etc/docker/turbopanel-restart-pending`; this and every later converge restart dockerd once the running dockerd
   reports live-restore, then clear the marker, and otherwise warn that a restart is pending.
+  `daemon-converge` re-applies just this deny (`tasks/converge-builder.yml`, `turbopanel_docker_builder_only`) on
+  hosts the role provisioned earlier: address pools, `bip` and `live-restore` are left as found, and it reads
+  `daemon.json` back and fails if the deny is not on disk.
 - **Strict no-op when both are empty and nothing is being cleared** (and
   when `turbopanel_docker_manage_daemon_json: false`): `daemon-json.yml` is
   not even included, so an unrelated converge never reads, writes or

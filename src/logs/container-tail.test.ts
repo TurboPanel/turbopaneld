@@ -96,6 +96,23 @@ test("collectContainerLogs rejects when serviceIds does not name the compose ser
   );
 });
 
+test("collectContainerLogs accepts a compose deploy whose manifest has no serviceIds", async () => {
+  const manifests = ownedManifests();
+  delete manifests[0]!.manifest.serviceIds;
+  const logs = await collectContainerLogs(
+    OWNED_ID,
+    { stateDir: "/var/lib/turbopanel" },
+    {
+      runDocker: (args) =>
+        Promise.resolve(
+          args[0] === "inspect" ? ok(inspectStdout()) : ok("line one\n"),
+        ),
+      listManifests: () => Promise.resolve(manifests),
+    },
+  );
+  assertEquals(logs.includes("line one"), true);
+});
+
 test("collectContainerLogs clamps tail and redacts owned container output", async () => {
   const calls: string[][] = [];
   const redactor = createMutableTranscriptRedactor(["s3cret"]);

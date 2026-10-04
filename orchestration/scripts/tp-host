@@ -169,10 +169,10 @@ tp_path_class() {
   # publish reach it, and no generic verb accepts the class.
   if tp_under "$_pc" "$R_STAGING"; then echo staging; return 0; fi
   if tp_under "$_pc" "$R_PRINCIPALS"; then echo principal; return 0; fi
-  # Per-site PHP config and the launcher registry sit inside the config tree
-  # but are never `tree`: only their own verbs and checks write them.
+  # Per-site PHP config sits inside the config tree but is never `tree`: only
+  # its own verbs and checks write it.
   case "$_pc" in
-    "$R_CONFIG/php/sites"|"$R_CONFIG/php/sites"/*|"$R_CONFIG/php-sites"|"$R_CONFIG/php-sites"/*)
+    "$R_CONFIG/php/sites"|"$R_CONFIG/php/sites"/*)
       tp_php_path_class "$_pc"
       return
       ;;
@@ -949,8 +949,7 @@ tp_backup_unit_ok() {
 # read-only system with writes only inside the owner's home, and sockets at the
 # top of /run (never in the daemon's /run/turbopanel). The site's PHP config
 # lives in $R_CONFIG/php/sites/<siteId>/ (root:<owner>-grp, directive
-# allowlist), and $R_CONFIG/php-sites/<siteId> is the registry the attached
-# lsphp launcher reads (written only by `php-site-register`).
+# allowlist).
 
 # Web server accounts that talk to a site's PHP socket (Caddy serves no PHP).
 PHP_WEB_GROUPS="tpnginx tpapache tpols"
@@ -1227,6 +1226,29 @@ tp_php_service_line_ok() {
   tp_php_service_mode_ok "$1"
 }
 
+# One owner per site: the owner named in a site's config directory group, its
+# service User= and its socket SocketUser= must agree, so a unit cannot pair
+# one site id with a second owner's account. Whatever of the three already
+# exists is the reference; the first piece written fixes the owner.
+# Argv: SITE-ID OWNER. Returns 1 on a clash.
+tp_php_site_owner_ok() {
+  _po_site="$1"
+  _po_owner="$2"
+  # The test host cannot chown, so the directory's group is only read for real.
+  if [ -z "$TP_TEST" ] && [ -d "$R_CONFIG/php/sites/$_po_site" ] &&
+    [ ! -L "$R_CONFIG/php/sites/$_po_site" ]; then
+    [ "$(stat -c '%g' "$R_CONFIG/php/sites/$_po_site")" = "$(tp_gid_of_group "$_po_owner-grp")" ] ||
+      return 1
+  fi
+  for _po_src in "$R_UNITS/turbopanel-php-$_po_site.service:User" \
+    "$R_UNITS/turbopanel-php-$_po_site.socket:SocketUser"; do
+    [ -f "${_po_src%:*}" ] || continue
+    _po_have="$(sed -n "s/^${_po_src#*:}=//p" "${_po_src%:*}" | head -1)"
+    [ -z "$_po_have" ] || [ "$_po_have" = "$_po_owner" ] || return 1
+  done
+  return 0
+}
+
 # A per-site PHP service: who it runs as and what it runs come from its
 # User= and ExecStart= (each exactly once), then every line is checked against
 # that owner, mode and series, and the lines that make the shape are required.
@@ -1240,6 +1262,10 @@ tp_php_service_ok() {
   _ps_user="$(printf '%s\n' "$_ps_lines" | sed -n 's/^Service\.User=//p' | head -1)"
   tp_is_principal "$_ps_user" || return 1
   tp_is_principal_group "$_ps_user-grp" || return 1
+  tp_php_site_owner_ok "$_ps_site" "$_ps_user" || {
+    printf 'tp-host: php unit: %s is already bound to another owner than %s\n' "$_ps_site" "$_ps_user" >&2
+    return 1
+  }
   _ps_exec="$(printf '%s\n' "$_ps_lines" | sed -n 's/^Service\.ExecStart=//p')"
   _ps_mode="$(tp_php_exec_mode "$_ps_exec" "$_ps_site")" || return 1
   _ps_mode="${_ps_mode%% *}"
@@ -1313,6 +1339,11 @@ LINES
       *) printf 'tp-host: php socket: missing %s=\n' "$_pk_key" >&2; return 1 ;;
     esac
   done
+  _pk_owner="$(printf '%s\n' "$_pk_lines" | sed -n 's/^Socket\.SocketUser=//p' | head -1)"
+  tp_php_site_owner_ok "$_pk_site" "$_pk_owner" || {
+    printf 'tp-host: php socket: %s is already bound to another owner than %s\n' "$_pk_site" "$_pk_owner" >&2
+    return 1
+  }
 }
 
 tp_php_unit_ok() {
@@ -1351,7 +1382,7 @@ tp_php_ini_awk='
     return p == "/tmp" || index(p, "/tmp/") == 1
   }
   function ini_init(   a, i) {
-    split("memory_limit upload_max_filesize post_max_size max_execution_time max_input_time max_input_vars max_file_uploads default_socket_timeout session.gc_maxlifetime session.gc_probability session.gc_divisor display_errors display_startup_errors log_errors allow_url_fopen file_uploads expose_php short_open_tag session.cookie_secure session.cookie_httponly session.use_strict_mode session.cookie_samesite session.cookie_lifetime session.name opcache.enable opcache.enable_cli opcache.memory_consumption opcache.interned_strings_buffer opcache.max_accelerated_files opcache.revalidate_freq opcache.revalidate_path opcache.validate_timestamps opcache.validate_permission opcache.validate_root error_reporting date.timezone disable_functions realpath_cache_size realpath_cache_ttl output_buffering default_charset variables_order request_order zend.exception_ignore_args mail.add_x_header open_basedir error_log session.save_path upload_tmp_dir sys_temp_dir extension_dir zend_extension", a, " ")
+    split("memory_limit upload_max_filesize post_max_size max_execution_time max_input_time max_input_vars max_file_uploads default_socket_timeout session.gc_maxlifetime session.gc_probability session.gc_divisor display_errors display_startup_errors log_errors allow_url_fopen file_uploads expose_php short_open_tag session.cookie_secure session.cookie_httponly session.use_strict_mode session.cookie_samesite session.cookie_lifetime session.name opcache.enable opcache.enable_cli opcache.memory_consumption opcache.interned_strings_buffer opcache.max_accelerated_files opcache.revalidate_freq opcache.revalidate_path opcache.validate_timestamps opcache.validate_permission opcache.validate_root error_reporting date.timezone disable_functions realpath_cache_size realpath_cache_ttl output_buffering default_charset variables_order request_order zend.exception_ignore_args mail.add_x_header open_basedir error_log session.save_path upload_tmp_dir sys_temp_dir extension_dir zend_extension extension", a, " ")
     for (i in a) inikey[a[i]] = 1
     split("error_log session.save_path upload_tmp_dir sys_temp_dir", a, " ")
     for (i in a) pathkey[a[i]] = 1
@@ -1368,6 +1399,9 @@ tp_php_ini_awk='
     if (key == "extension_dir" && index(val, lsphp) != 1 && val !~ /^\/usr\/lib\/php\/[0-9]+$/) fail("extension_dir=" val)
     if (key == "extension_dir" && val ~ /\.\./) fail("extension_dir=" val)
     if (key == "zend_extension" && val != "opcache.so" && val != "opcache") fail("zend_extension=" val)
+    # Only the modules the vendored lsphp ships as shared objects: PHPRC
+    # replaces its own php.ini, so the ini of a detached lsphp site loads them.
+    if (key == "extension" && val !~ /^(curl|mysqli|pdo_mysql)(\.so)?$/) fail("extension=" val)
     if ((key == "opcache.validate_permission" || key == "opcache.validate_root") && val !~ /^(1|[Oo]n|true|yes)$/) fail(key " must stay on")
   }
 '
@@ -1432,7 +1466,7 @@ tp_php_fpm_conf_ok() {
       if (key == "slowlog" || key == "access.log") { if (!log_ok(val)) fail(key "=" val); return }
       if (key == "chdir") { if (!path_ok(val) || index(val, home "/") != 1) fail("chdir=" val); return }
       if (key == "security.limit_extensions") { if (val !~ /^(\.[a-z0-9]+ ?)+$/) fail(key "=" val); return }
-      if (key ~ /^(pm|pm\.[a-z_]+|listen\.backlog|request_slowlog_timeout|request_terminate_timeout|pm\.status_path|ping\.path|ping\.response|catch_workers_output|decorate_workers_output|clear_env)$/) {
+      if (key ~ /^(pm|pm\.(max_children|start_servers|min_spare_servers|max_spare_servers|max_requests|process_idle_timeout|status_path)|listen\.backlog|request_slowlog_timeout|request_terminate_timeout|ping\.path|ping\.response|catch_workers_output|decorate_workers_output|clear_env)$/) {
         if (val !~ /^[A-Za-z0-9._\/-]+$/) fail(key "=" val)
         return
       }
@@ -1475,17 +1509,11 @@ tp_php_conf_ok() {
   esac
 }
 
-# phproot: $R_CONFIG/php/sites or $R_CONFIG/php-sites; phpconfdir: one site's
-# config directory; phpconf: a config file in it (or its .tpprev); phpreg: one
-# site's launcher registry entry. Nothing deeper.
+# phproot: $R_CONFIG/php/sites; phpconfdir: one site's config directory;
+# phpconf: a config file in it (or its .tpprev). Nothing deeper.
 tp_php_path_class() {
   case "$1" in
-    "$R_CONFIG/php/sites"|"$R_CONFIG/php-sites") echo phproot; return 0 ;;
-    "$R_CONFIG/php-sites"/*)
-      tp_php_site_id_ok "${1#"$R_CONFIG/php-sites/"}" || return 1
-      echo phpreg
-      return 0
-      ;;
+    "$R_CONFIG/php/sites") echo phproot; return 0 ;;
   esac
   _pp_rest="${1#"$R_CONFIG/php/sites/"}"
   case "$_pp_rest" in
@@ -1521,6 +1549,10 @@ tp_php_install() {
   if [ -n "$_pi_dir" ]; then
     [ "$_pi_class" = "phpconfdir" ] && [ $# -eq 1 ] || tp_die "refusing path $_pi_dest ($_pi_class)"
     case "$_pi_mode" in 0750|750) ;; *) tp_die "refusing mode $_pi_mode for $_pi_dest" ;; esac
+    _pi_site="${_pi_dest##*/}"
+    _pi_who="$(tp_php_conf_owner "$_pi_group")"
+    tp_php_site_owner_ok "$_pi_site" "$_pi_who" ||
+      tp_die "refusing group $_pi_group for $_pi_dest: the site is bound to another owner"
     tp_mkdir_pinned "$_pi_dest" 0755
     chmod 0750 .
     tp_run chown -h -- "root:$_pi_group" .
@@ -1597,50 +1629,6 @@ tp_php_test_run() {
     *"PHP:  "*|*"PHP Warning"*|*"PHP Fatal"*|*"PHP Parse"*|*"PHP Startup"*|*"Cannot load"*) exit 1 ;;
   esac
   exit 0
-}
-
-# php-site-register <siteId> <user> lsphp-attached <series> <children>: the
-# registry entry the attached-lsphp launcher reads. Identity comes from the
-# account database, never from the caller; the file is root:root 0644 and only
-# this verb writes it.
-tp_verb_php_site_register() {
-  [ $# -eq 5 ] ||
-    tp_die "php-site-register: only <siteId> <user> lsphp-attached <series> <children>"
-  _pg_site="$1"
-  _pg_user="$2"
-  tp_php_site_id_ok "$_pg_site" || tp_die "php-site-register: refusing site id $_pg_site"
-  tp_is_principal "$_pg_user" || tp_die "php-site-register: $_pg_user is not a principal"
-  tp_is_principal_group "$_pg_user-grp" || tp_die "php-site-register: no group $_pg_user-grp"
-  [ "$3" = "lsphp-attached" ] || tp_die "php-site-register: only mode lsphp-attached"
-  tp_php_series_ok "$4" || tp_die "php-site-register: refusing PHP series $4"
-  case "$5" in
-    [1-9]|[1-5][0-9]|6[0-4]) ;;
-    *) tp_die "php-site-register: children must be 1-64" ;;
-  esac
-  # The passwd home is home/ inside the root-owned principal home; tmp/ sits
-  # beside it (tp_principal_home_ok, the shape useradd accepts).
-  _pg_home="$(tp_getent passwd "$_pg_user" | cut -d: -f6)"
-  tp_principal_home_ok "$_pg_home" "$_pg_user" ||
-    tp_die "php-site-register: $_pg_user's home is not $R_PRINCIPALS/$_pg_user/home"
-  tp_mkdir_pinned "$R_CONFIG/php-sites" 0755
-  # shellcheck disable=SC3067 # dash (Debian's /bin/sh) implements -O
-  [ -O . ] && [ "$(stat -c '%a' .)" = "755" ] ||
-    tp_die "php-site-register: $R_CONFIG/php-sites is not root-owned 0755"
-  printf '%s\n' \
-    "version=1" \
-    "site=$_pg_site" \
-    "mode=lsphp-attached" \
-    "user=$_pg_user" \
-    "uid=$(tp_uid_of "$_pg_user")" \
-    "group=$_pg_user-grp" \
-    "gid=$(tp_gid_of_group "$_pg_user-grp")" \
-    "home=$_pg_home" \
-    "tmp=$R_PRINCIPALS/$_pg_user/tmp" \
-    "php=$4" \
-    "bin=$INSTALL_ROOT/vendor/lsphp/$4/current/bin/lsphp" \
-    "ini=$R_CONFIG/php/sites/$_pg_site/php.ini" \
-    "children=$5" |
-    tp_put_file "$R_CONFIG/php-sites/$_pg_site" 0644 root root
 }
 
 # --- verbs -------------------------------------------------------------------
@@ -1817,7 +1805,7 @@ tp_verb_rm() {
   [ $# -eq 1 ] || tp_die "rm takes one path"
   _rm_class="$(tp_path_class "$1")" || tp_die "refusing path $1"
   case "$_rm_class" in
-    tree|principal|unit|sshd|sysctl|phpconf|phpconfdir|phpreg) ;;
+    tree|principal|unit|sshd|sysctl|phpconf|phpconfdir) ;;
     # TurboFabric teardown removes the tp0 config, never the directory.
     wireguard) [ "$1" = "$R_WG/tp0.conf" ] || tp_die "refusing path $1" ;;
     *) tp_die "refusing path $1" ;;
@@ -1887,7 +1875,7 @@ tp_verb_cmp() {
   _cm_staged="$3"
   _cm_path="$4"
   _cm_class="$(tp_path_class "$_cm_path")" || tp_die "refusing path $_cm_path"
-  case "$_cm_class" in tree|unit|sshd|phpconf|phpreg) ;; *) tp_die "refusing path $_cm_path" ;; esac
+  case "$_cm_class" in tree|unit|sshd|phpconf) ;; *) tp_die "refusing path $_cm_path" ;; esac
   tp_stage_dir
   _cm_tmp="$TP_STAGE/staged"
   tp_read_as_caller "$_cm_staged" > "$_cm_tmp"
@@ -1947,6 +1935,17 @@ tp_verb_find() {
         ;;
       *) tp_die "refusing path $_fd_base ($_fd_class)" ;;
     esac
+    return
+  fi
+  # Every symlink under a sealed release with its unresolved text
+  # (release-links.ts releaseLinkTextsFindArgs): rollback follows the texts
+  # lexically and never through the tenant's shared/. Only names and link
+  # texts come back, NUL-separated; nothing a link points at is opened.
+  if [ "$#" -eq 4 ] && [ "$1" = "-type" ] && [ "$2" = "l" ] && [ "$3" = "-printf" ] &&
+    [ "$4" = '%P\0%l\0' ]; then
+    tp_require_class "$_fd_base" principal
+    tp_pin_dir "$_fd_base" || tp_die "no such directory $_fd_base"
+    find -P . -type l -printf '%P\0%l\0'
     return
   fi
   if [ "$#" -eq 7 ] && [ "$1" = "-type" ] && [ "$2" = "d" ] && [ "$3" = "-exec" ] &&
@@ -2138,10 +2137,24 @@ tp_verb_journalctl() {
   tp_exec journalctl "$@"
 }
 
+# `-t`, `-T`, or exactly `-T -C user=<name>,host=localhost,addr=127.0.0.1`
+# (the daemon's forwarding assertion): <name> a plain account name, no other
+# -C key, no other arguments.
 tp_verb_sshd() {
-  [ "$#" -eq 1 ] || tp_die "sshd: only -t or -T"
-  case "$1" in -t|-T) tp_exec /usr/sbin/sshd "$1" ;; esac
-  tp_die "sshd: only -t or -T"
+  case "$#" in
+    1) case "$1" in -t|-T) tp_exec /usr/sbin/sshd "$1" ;; esac ;;
+    3)
+      if [ "$1" = "-T" ] && [ "$2" = "-C" ]; then
+        _ss_user="${3#user=}"
+        _ss_user="${_ss_user%,host=localhost,addr=127.0.0.1}"
+        if [ "$3" = "user=$_ss_user,host=localhost,addr=127.0.0.1" ] &&
+          tp_name_shape_ok "$_ss_user"; then
+          tp_exec /usr/sbin/sshd -T -C "$3"
+        fi
+      fi
+      ;;
+  esac
+  tp_die "sshd: only -t, -T or -T -C user=<name>,host=localhost,addr=127.0.0.1"
 }
 
 # --- the SFTP chroot ---------------------------------------------------------
@@ -2749,15 +2762,18 @@ BUILD_RUNTIME_MAX_SEC=1800
 # the build account, still confined); below the minimum: no build.
 BUILD_SYSTEMD_FLOOR=255
 BUILD_SYSTEMD_MIN=247
-# Loopback, private (10/8 covers the tp0 fabric), CGNAT, link-local (cloud
-# metadata), benchmark, multicast and reserved ranges, on every port. Nothing
-# is allowed back in (an IPAddressAllow= wins over the deny for every port):
-# the build resolves through its own resolv.conf naming only public
-# nameservers, which public egress already reaches.
-BUILD_DENY_V4="0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 169.254.0.0/16 172.16.0.0/12 192.0.0.0/24 192.168.0.0/16 198.18.0.0/15 224.0.0.0/3"
+# Private (10/8 covers the tp0 fabric), CGNAT, link-local (cloud metadata),
+# benchmark, multicast and reserved ranges, on every port. Nothing is allowed
+# back in (an IPAddressAllow= wins over the deny for every port): the build
+# resolves through its own resolv.conf naming only public nameservers, which
+# public egress already reaches. Loopback (127.0.0.0/8, ::1) is NOT denied here:
+# Turbopack's helper processes talk to each other over it. lib/tp-build-loopback
+# (nftables, per tpbuild uid) refuses the platform's loopback ports instead.
+BUILD_LOOPBACK="$INSTALL_ROOT/lib/tp-build-loopback"
+BUILD_DENY_V4="0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 169.254.0.0/16 172.16.0.0/12 192.0.0.0/24 192.168.0.0/16 198.18.0.0/15 224.0.0.0/3"
 # NAT64 (64:ff9b::/96) and 6to4 (2002::/16) embed IPv4 addresses, private
 # ones included, so both are denied whole.
-BUILD_DENY_V6="::/128 ::1/128 64:ff9b::/96 2002::/16 fc00::/7 fe80::/10 ff00::/8"
+BUILD_DENY_V6="::/128 64:ff9b::/96 2002::/16 fc00::/7 fe80::/10 ff00::/8"
 # Used when the host names no public nameserver (a loopback stub with
 # private upstreams, a LAN router): never a loopback, private or link-local
 # resolver, which would open that address to the build.
@@ -2882,6 +2898,33 @@ tp_build_public_resolvers() {
     done
 }
 
+# The host's own public addresses, one per line as /32 or /128 entries for
+# IPAddressDeny=. A build must not reach a service bound to the host's public
+# address (the private ranges are already denied whole). A public nameserver
+# in the build's resolv.conf is left out: it has to stay reachable.
+tp_build_host_deny() {
+  if [ -n "$TP_TEST" ]; then
+    _hd_addrs="$(cat -- "$P/run/host-addrs" 2>/dev/null || true)"
+  else
+    _hd_addrs="$(ip -o addr show scope global 2>/dev/null | awk '{ print $4 }')"
+  fi
+  [ -n "$_hd_addrs" ] || return 0
+  _hd_resolvers="$(tp_build_public_resolvers "$BUILD_RESOLV_DIR/resolv.conf")"
+  printf '%s\n' "$_hd_addrs" | while IFS= read -r _hd; do
+    _hd="${_hd%%/*}"
+    _hd="${_hd%%%*}"
+    case "$_hd" in
+      ''|*[!0-9A-Fa-f:.]*) continue ;;
+    esac
+    tp_build_ip_public "$_hd" || continue
+    printf '%s\n' "$_hd_resolvers" | grep -qxF -- "$_hd" && continue
+    case "$_hd" in
+      *:*) printf '%s/128\n' "$_hd" ;;
+      *) printf '%s/32\n' "$_hd" ;;
+    esac
+  done
+}
+
 # Write the build's resolv.conf (root-owned 0644 under /run/tpbuild): the
 # host's public nameservers, else systemd-resolved's public upstreams (behind
 # the 127.0.0.53 stub), else BUILD_FALLBACK_RESOLVERS.
@@ -2938,6 +2981,10 @@ tp_verb_build_run() {
   tp_run chown -h -- "$BUILD_UID:$BUILD_GID" .
   tp_build_work_pin "$1"
   tp_run chown -R -h -P -- "$BUILD_UID:$BUILD_GID" .
+  # Fail closed: without the port filter the build would reach host services
+  # on loopback, so it does not start (the unit re-runs this as ExecStartPre).
+  tp_run "$BUILD_LOOPBACK" sync ||
+    tp_die "build-run: the build's network rules could not be loaded (is nftables installed?); builds are stopped until they can"
   cd /
   set -- --unit="turbopanel-build-$1" --service-type=exec --wait --pipe --quiet --collect \
     -p User="$BUILD_ACCOUNT" -p Group="$BUILD_ACCOUNT" -p WorkingDirectory="$_br_work" \
@@ -2967,8 +3014,10 @@ tp_verb_build_run() {
       "$_br_v" "$BUILD_ACCOUNT" >&2
   fi
   [ "$_br_v" -lt 257 ] || set -- "$@" -p PrivatePIDs=yes
+  _br_host_deny="$(tp_build_host_deny | tr '\n' ' ')"
   set -- "$@" -p RestrictAddressFamilies="AF_INET AF_INET6 AF_UNIX" \
-    -p IPAddressDeny="$BUILD_DENY_V4 $BUILD_DENY_V6"
+    -p IPAddressDeny="$BUILD_DENY_V4 $BUILD_DENY_V6${_br_host_deny:+ ${_br_host_deny% }}" \
+    -p ExecStartPre="+$BUILD_LOOPBACK sync"
   set -- "$@" -p Slice="$BUILD_SLICE" -p MemoryMax="$BUILD_MEMORY_MAX" -p MemorySwapMax=0 \
     -p CPUQuota="$BUILD_CPU_QUOTA" -p TasksMax=1024 -p IOWeight=50 -p LimitFSIZE=4G \
     -p LimitNOFILE=65536 -p LimitCORE=0 -p RuntimeMaxSec="$BUILD_RUNTIME_MAX_SEC" \
@@ -2991,6 +3040,90 @@ tp_verb_build_return() {
   tp_pin_dir "$R_BUILD/work" || tp_die "no build directory $R_BUILD/work"
   tp_build_work_pin "$1"
   tp_run chown -R -h -P -- "$CALLER_UID:$CALLER_GID" .
+}
+
+# Expiry dates of the certificates the hosting Caddy issued itself, nothing
+# else: no names, no key material, no internal-CA leaf (issuer directory
+# `local`). The certificate tree belongs to tpedge (0700), so each file is
+# opened as tpedge rather than as root, and only regular files directly in
+# the `<issuer>/<host>/` shape are looked at (a symlink is not `-type f`).
+# One `notAfter` per line, as openssl spells it with spaces squeezed
+# (`Jan 1 00:00:00 2027 GMT`).
+tp_verb_cert_dates() {
+  [ "$#" -eq 0 ] || tp_die "cert-dates: takes no arguments"
+  _cd_root="$P/var/lib/$HOSTING_CADDY_STATE/data/caddy/certificates"
+  tp_pin_dir "$_cd_root" || return 0
+  _cd_uid="$(tp_uid_of "$HOSTING_CADDY_USER")" || return 0
+  _cd_gid="$(tp_gid_of_group "$HOSTING_CADDY_USER")" || return 0
+  [ -n "$_cd_uid" ] && [ -n "$_cd_gid" ] || return 0
+  find . -mindepth 3 -maxdepth 3 -type f -name '*.crt' ! -path './local/*' |
+    sort | while IFS= read -r _cd_file; do
+    case "$_cd_file" in
+      *[!A-Za-z0-9._@:+,=/-]*) continue ;;
+    esac
+    _cd_end="$(tp_as "$_cd_uid" "$_cd_gid" openssl x509 -noout -enddate -in "$_cd_file" 2>/dev/null)" || continue
+    printf '%s\n' "$_cd_end" |
+      sed -n 's/^notAfter=\([A-Z][a-z][a-z]  *[0-9][0-9]*  *[0-9:]*  *[0-9][0-9][0-9][0-9]  *GMT\)$/\1/p' |
+      tr -s ' '
+  done
+}
+
+# Allocated sizes of every principal home and of every site directory
+# (`<home>/sites/<id>`), for the metrics collector: homes are root-owned
+# 0750 root:<principal>-grp, so the daemon account cannot walk them. Sizes and
+# directory names only, `home <bytes> <name>` / `site <bytes> <id>`; no file
+# name or content is printed. Nothing follows a symlink: each directory is
+# pinned with `cd -P`, and `du -P` never follows one.
+# One bounded walk per home: `du -d 2` reports the home itself (depth 0) and
+# every directory two levels down, which includes `sites/<id>`, so no file is
+# visited twice. Idle I/O class and lowest CPU priority where the tools exist,
+# a hard per-home limit, and a time budget for the whole verb so a home with
+# millions of files cannot hold root busy: a home that times out is skipped.
+TP_SITE_USAGE_HOME_SECONDS=120
+TP_SITE_USAGE_TOTAL_SECONDS=600
+
+tp_site_usage_walk() {
+  if command -v ionice >/dev/null 2>&1; then
+    set -- ionice -c3 nice -n 19 du -kxP -d 2 -- .
+  else
+    set -- nice -n 19 du -kxP -d 2 -- .
+  fi
+  if command -v timeout >/dev/null 2>&1; then
+    timeout -k 5 "$TP_SITE_USAGE_HOME_SECONDS" "$@" 2>/dev/null
+  else
+    "$@" 2>/dev/null
+  fi
+}
+
+# Reads `du` rows from stdin, prints the home row first, then each site row.
+tp_site_usage_rows() {
+  _sr_name="$1"
+  _sr_rows="$(cat)"
+  _sr_home="$(printf '%s\n' "$_sr_rows" | awk -F'\t' '$2 == "." { print $1; exit }')"
+  case "$_sr_home" in ''|*[!0-9]*) return 1 ;; esac
+  printf 'home %s %s\n' "$((_sr_home * 1024))" "$_sr_name"
+  printf '%s\n' "$_sr_rows" | awk -F'\t' '$2 ~ /^\.\/sites\/[^\/]+$/ { print $1 "\t" substr($2, 9) }' |
+    while IFS="$(printf '\t')" read -r _sr_kib _sr_id; do
+      case "$_sr_kib" in ''|*[!0-9]*) continue ;; esac
+      tp_name_shape_ok "$_sr_id" || continue
+      printf 'site %s %s\n' "$((_sr_kib * 1024))" "$_sr_id"
+    done
+}
+
+tp_verb_site_usage() {
+  [ "$#" -eq 0 ] || tp_die "site-usage: takes no arguments"
+  tp_pin_dir "$R_PRINCIPALS" 2>/dev/null || return 0
+  _su_started="$(date +%s)"
+  for _su_home in ./*; do
+    [ -d "$_su_home" ] && [ ! -L "$_su_home" ] || continue
+    _su_name="${_su_home#./}"
+    tp_name_shape_ok "$_su_name" || continue
+    [ "$(($(date +%s) - _su_started))" -lt "$TP_SITE_USAGE_TOTAL_SECONDS" ] || break
+    (
+      tp_pin_dir "$R_PRINCIPALS/$_su_name" 2>/dev/null || exit 0
+      tp_site_usage_walk | tp_site_usage_rows "$_su_name"
+    ) || true
+  done
 }
 
 # --- release publish -----------------------------------------------------------
@@ -3258,7 +3391,8 @@ case "$_verb" in
   publish-open) tp_verb_publish_open "$@" ;;
   publish) tp_verb_publish "$@" ;;
   php-test) tp_verb_php_test "$@" ;;
+  cert-dates) tp_verb_cert_dates "$@" ;;
+  site-usage) tp_verb_site_usage "$@" ;;
   php-loopback-sync) tp_verb_php_loopback_sync "$@" ;;
-  php-site-register) tp_verb_php_site_register "$@" ;;
   *) tp_die "refusing verb $_verb" ;;
 esac

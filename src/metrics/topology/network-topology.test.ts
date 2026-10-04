@@ -27,10 +27,10 @@ test("collectNetworkTopology classifies uplink/fabric/container-bridge/loopback 
   });
 
   const byName = new Map(devices.map((d) => [d.name, d]));
-  assertEquals(byName.get("lo")?.kind, "loopback");
   assertEquals(byName.get("tp0")?.kind, "fabric");
-  assertEquals(byName.get("docker0")?.kind, "container-bridge");
-  assertEquals(byName.get("veth123")?.kind, "container-bridge");
+  assertEquals(byName.has("lo"), false);
+  assertEquals(byName.has("docker0"), false);
+  assertEquals(byName.has("veth123"), false);
   assertEquals(byName.get("eth0")?.kind, "uplink");
 });
 
@@ -108,7 +108,7 @@ function bondFixtureDeps(routeInterface: string) {
 test("collectNetworkTopology: bonds and bridges over physical ports are the uplink, their ports are members, VLAN children and tunnels are virtual, veth-only bridges are container bridges", async () => {
   const devices = await collectNetworkTopology(bondFixtureDeps("bond0"));
   const kinds = new Map(devices.map((d) => [d.name, d.kind]));
-  assertEquals(kinds.get("lo"), "loopback");
+  assertEquals(kinds.has("lo"), false);
   assertEquals(kinds.get("bond0"), "uplink");
   assertEquals(kinds.get("eth0"), "member");
   assertEquals(kinds.get("eth1"), "member");
@@ -117,9 +117,9 @@ test("collectNetworkTopology: bonds and bridges over physical ports are the upli
   assertEquals(kinds.get("eth3"), "uplink");
   assertEquals(kinds.get("eth3.100"), "virtual");
   assertEquals(kinds.get("wg0"), "virtual");
-  assertEquals(kinds.get("docker0"), "container-bridge");
-  assertEquals(kinds.get("veth1"), "container-bridge");
-  assertEquals(kinds.get("lxdbr0"), "container-bridge");
+  assertEquals(kinds.has("docker0"), false);
+  assertEquals(kinds.has("veth1"), false);
+  assertEquals(kinds.has("lxdbr0"), false);
 });
 
 test("collectNetworkTopology: the default-route flag lands on exactly the uplink carrying the route", async () => {
@@ -246,7 +246,7 @@ function containerFixtureDeps(routeInterface: string) {
 test("collectNetworkTopology: a container's renamed veth peer (no bus device, no DEVTYPE, Ethernet) is the uplink and carries the default route; tun/sit/WireGuard stay virtual", async () => {
   const devices = await collectNetworkTopology(containerFixtureDeps("eth0"));
   const kinds = new Map(devices.map((d) => [d.name, d.kind]));
-  assertEquals(kinds.get("lo"), "loopback");
+  assertEquals(kinds.has("lo"), false);
   assertEquals(kinds.get("eth0"), "uplink");
   assertEquals(kinds.get("wg0"), "virtual");
   assertEquals(kinds.get("tailscale0"), "virtual");
@@ -318,7 +318,7 @@ test("collectNetworkTopology: defaults sysRoot to /sys when omitted", async () =
   const readPaths: string[] = [];
   const devices = await collectNetworkTopology({
     readProcFile: (path) =>
-      path === "/proc/net/dev" ? netDevFor(["lo"]) : undefined,
+      path === "/proc/net/dev" ? netDevFor(["eth9"]) : undefined,
     resolveFabricInterfaces: () => Promise.resolve([]),
     io: {
       listDir: () => [],
@@ -329,9 +329,9 @@ test("collectNetworkTopology: defaults sysRoot to /sys when omitted", async () =
     },
   });
   assertEquals(devices.length, 1);
-  assertEquals(devices[0].kind, "loopback");
+  assertEquals(devices[0].kind, "virtual");
   assertEquals(
-    readPaths.some((path) => path.startsWith("/sys/class/net/lo/")),
+    readPaths.some((path) => path.startsWith("/sys/class/net/eth9/")),
     true,
   );
 });
@@ -352,4 +352,17 @@ test("collectNetworkTopology: an uplink-named device with no sysfs entry at all 
   assertEquals(byName.get("eth9")?.defaultRoute, undefined);
   assertEquals(byName.get("eth0")?.kind, "uplink");
   assertEquals(byName.get("eth0")?.defaultRoute, undefined);
+});
+
+test("collectNetworkTopology: loopback, veth, br-*, docker0 and tun never enter the inventory (fabric stays)", async () => {
+  const devices = await collectNetworkTopology({
+    readProcFile: (path) =>
+      path === "/proc/net/dev"
+        ? netDevFor(["lo", "eth0", "docker0", "veth1", "br-ab", "cni0", "tp0"])
+        : undefined,
+    resolveFabricInterfaces: () => Promise.resolve(["tp0"]),
+    io: defaultSensorIo(),
+    sysRoot: fixtureRoot("net-topology"),
+  });
+  assertEquals(devices.map((d) => d.name).sort(), ["eth0", "tp0"]);
 });

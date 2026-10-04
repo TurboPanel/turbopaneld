@@ -12,6 +12,7 @@
 - name: Ensure Orchestrator config directory exists
   ansible.builtin.file:
     path: "{{ orchestrator_config_dir }}"
+    follow: false
     state: directory
     owner: root
     group: "{{ turbopanel_group }}"
@@ -20,6 +21,7 @@
 - name: Ensure Orchestrator TLS directory exists
   ansible.builtin.file:
     path: "{{ orchestrator_tls_dir }}"
+    follow: false
     state: directory
     owner: root
     group: "{{ turbopanel_group }}"
@@ -28,6 +30,7 @@
 - name: Ensure Orchestrator data directory exists
   ansible.builtin.file:
     path: "{{ orchestrator_data_dir }}"
+    follow: false
     state: directory
     owner: root
     group: "{{ turbopanel_group }}"
@@ -41,6 +44,7 @@
 - name: Remove Docker bind-mount scar directory for api.cnf
   ansible.builtin.file:
     path: "{{ orchestrator_config_dir }}/api.cnf"
+    follow: false
     state: absent
   when:
     - _orchestrator_api_stat.stat.exists | default(false)
@@ -51,15 +55,23 @@
     cmd: |
       set -euo pipefail
       f='{{ orchestrator_config_dir }}/api.cnf'
+      # The directory is writable by the daemon user, so never trust what is at
+      # the name: drop a planted link (unlink does not follow it), then install
+      # a fresh file (install replaces the name and sets mode/owner on the new
+      # file, never on a link target).
+      if [ -L "$f" ]; then
+        rm -f "$f"
+      fi
       if [ -d "$f" ]; then
         rm -rf "$f"
       fi
       if [ ! -f "$f" ] || [ ! -s "$f" ]; then
         pass="$(openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c 32)"
         umask 077
-        printf '%s\n' '[client]' "user={{ orchestrator_api_user }}" "password=${pass}" > "$f"
-        chmod 0600 "$f"
-        chown {{ turbopanel_user }}:{{ turbopanel_group }} "$f"
+        tmp="$(mktemp)"
+        trap 'rm -f "$tmp"' EXIT
+        printf '%s\n' '[client]' "user={{ orchestrator_api_user }}" "password=${pass}" > "$tmp"
+        install -m 0600 -o {{ turbopanel_user }} -g {{ turbopanel_group }} "$tmp" "$f"
         echo created
       fi
     executable: /bin/bash
@@ -70,6 +82,7 @@
 - name: Ensure Orchestrator api.cnf is owner-private for the daemon
   ansible.builtin.file:
     path: "{{ orchestrator_config_dir }}/api.cnf"
+    follow: false
     owner: "{{ turbopanel_user }}"
     group: "{{ turbopanel_group }}"
     mode: "0600"
@@ -83,6 +96,7 @@
 - name: Remove Docker bind-mount scar directory for raft.cnf
   ansible.builtin.file:
     path: "{{ orchestrator_config_dir }}/raft.cnf"
+    follow: false
     state: absent
   when:
     - _orchestrator_raft_stat.stat.exists | default(false)
@@ -93,15 +107,23 @@
     cmd: |
       set -euo pipefail
       f='{{ orchestrator_config_dir }}/raft.cnf'
+      # The directory is writable by the daemon user, so never trust what is at
+      # the name: drop a planted link (unlink does not follow it), then install
+      # a fresh file (install replaces the name and sets mode/owner on the new
+      # file, never on a link target).
+      if [ -L "$f" ]; then
+        rm -f "$f"
+      fi
       if [ -d "$f" ]; then
         rm -rf "$f"
       fi
       if [ ! -f "$f" ] || [ ! -s "$f" ]; then
         pass="$(openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c 32)"
         umask 077
-        printf '%s\n' '[client]' "user=raft" "password=${pass}" > "$f"
-        chmod 0600 "$f"
-        chown {{ turbopanel_user }}:{{ turbopanel_group }} "$f"
+        tmp="$(mktemp)"
+        trap 'rm -f "$tmp"' EXIT
+        printf '%s\n' '[client]' "user=raft" "password=${pass}" > "$tmp"
+        install -m 0600 -o {{ turbopanel_user }} -g {{ turbopanel_group }} "$tmp" "$f"
         echo created
       fi
     executable: /bin/bash
@@ -112,15 +134,31 @@
 - name: Ensure Orchestrator raft.cnf is owner-private for the daemon
   ansible.builtin.file:
     path: "{{ orchestrator_config_dir }}/raft.cnf"
+    follow: false
     owner: "{{ turbopanel_user }}"
     group: "{{ turbopanel_group }}"
     mode: "0600"
   no_log: true
 
+- name: Ensure the root-only libexec directory exists
+  ansible.builtin.file:
+    path: "{{ orchestrator_libexec_dir }}"
+    state: directory
+    follow: false
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: Remove the old readiness script from the daemon-writable config directory
+  ansible.builtin.file:
+    path: "{{ orchestrator_config_dir }}/wait-ready.sh"
+    state: absent
+    follow: false
+
 - name: Install Orchestrator readiness wait script
   ansible.builtin.template:
     src: wait-ready.sh.j2
-    dest: "{{ orchestrator_config_dir }}/wait-ready.sh"
+    dest: "{{ orchestrator_wait_ready_script }}"
     owner: root
     group: root
     mode: "0750"

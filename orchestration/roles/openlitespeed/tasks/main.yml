@@ -217,16 +217,6 @@
     - ""
     - swap
 
-# The unit's RuntimeDirectory creates this at start; a server that is already
-# running when the unit first gains it is only reloaded, so create it now too.
-- name: Ensure OpenLiteSpeed LSAPI socket directory
-  ansible.builtin.file:
-    path: /run/turbopanel-ols
-    state: directory
-    owner: "{{ openlitespeed_service_user }}"
-    group: "{{ openlitespeed_service_group }}"
-    mode: "0750"
-
 - name: Install turbopanel-openlitespeed systemd unit
   ansible.builtin.template:
     src: turbopanel-openlitespeed.service.j2

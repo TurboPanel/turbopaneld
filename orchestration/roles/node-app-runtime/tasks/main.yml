@@ -23,9 +23,14 @@
 
 # setfacl, for the traverse-only grants below. Present on most Debian images
 # but only Priority: optional, so a minimal host can be missing it.
-- name: Ensure ACL tooling is present
+# libatomic1: the official Node 26 binary links libatomic.so.1, which a minimal
+# Debian/Ubuntu image does not ship (the vendored node then fails to start).
+# This role is Debian-family only (apt), so no other package manager applies.
+- name: Ensure ACL tooling and Node's libatomic are present
   ansible.builtin.apt:
-    name: acl
+    name:
+      - acl
+      - libatomic1
     state: present
     update_cache: true
     cache_valid_time: 3600

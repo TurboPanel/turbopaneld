@@ -28,7 +28,11 @@ import { caddyUnit } from "../deploy/ingress.ts";
 import { backupServiceContent, backupTimerContent } from "../backups/units.ts";
 import { issuedCertificateFindArgs } from "../deploy/instance-acme-http01.ts";
 import { setgidDirectoriesFindArgs } from "../deploy/site.ts";
-import { releaseLinkTargetsFindArgs } from "../deploy/release/release-links.ts";
+import {
+  parseReleaseLinkTexts,
+  releaseLinkTargetsFindArgs,
+  releaseLinkTextsFindArgs,
+} from "../deploy/release/release-links.ts";
 import type {
   EnvironmentDeployCronJob,
   EnvironmentDeployNativeAppService,
@@ -1103,11 +1107,27 @@ test("find: every daemon-built find argv is accepted; anything else is refused",
       host.path("srv/users/bob"),
     ]);
     const linkArgs = releaseLinkTargetsFindArgs(release);
+    // Rollback: the same links with their unresolved texts, relative paths.
+    const texts = await host.run(releaseLinkTextsFindArgs(release));
+    assertEquals(texts.code, 0, texts.stderr);
+    assertEquals(
+      parseReleaseLinkTexts(texts.stdout).sort((a, b) =>
+        a.path.localeCompare(b.path)
+      ),
+      [
+        { path: "public/up", text: "../shared" },
+        { path: "public/x", text: host.path("outside/hop") },
+      ],
+    );
+    const textArgs = releaseLinkTextsFindArgs(release);
 
     const lookup = issuedCertificateFindArgs(root, "canary.example.com");
     for (
       const args of [
         releaseLinkTargetsFindArgs(host.path("outside")),
+        releaseLinkTextsFindArgs(host.path("outside")),
+        [...textArgs.slice(0, -1), "%p\\0%l\\0"],
+        [...textArgs, "-quit"],
         [...linkArgs.slice(0, -1), ";"],
         linkArgs.map((arg) => arg === "realpath" ? "cat" : arg),
         [...lookup, "-print"],
@@ -2086,7 +2106,6 @@ test("per-site PHP config: root:<owner>-grp, 0750/0640, directives on an allowli
         ["0750", "root", "alice-grp", phpConfDir(host, "Shop")],
         ["0750", "root", "alice-grp", `${dir}/deeper`],
         ["0755", "root", "root", host.path("etc/turbopanel/php/sites")],
-        ["0755", "root", "root", host.path("etc/turbopanel/php-sites")],
       ]
     ) {
       assertEquals(
@@ -2138,6 +2157,8 @@ test("per-site PHP config: root:<owner>-grp, 0750/0640, directives on an allowli
     const badIni = [
       "extension = /tmp/evil.so",
       "extension = redis",
+      "extension = ../curl.so",
+      "extension = mysqli.so.1",
       "zend_extension = /tmp/evil.so",
       "auto_prepend_file = /tmp/x.php",
       "sendmail_path = /bin/sh -c id",
@@ -2160,6 +2181,21 @@ test("per-site PHP config: root:<owner>-grp, 0750/0640, directives on an allowli
       "memory_limit = `id`",
       'memory_limit = "1G" ; x',
       "extension_dir = /tmp",
+      // The edges of the new extension allowlist: a path, a near-name, a
+      // module the vendored lsphp does not ship, a second zend extension,
+      // and extension directories that only look like the allowed ones.
+      "extension = /usr/lib/php/x/curl.so",
+      "extension = curl.so.so",
+      "extension = curlx",
+      "extension = pdo_pgsql",
+      "zend_extension = /usr/lib/php/20240924/opcache.so",
+      "zend_extension = xdebug.so",
+      "extension_dir = /usr/lib/php/20240924x",
+      "extension_dir = /usr/lib/php/20240924/../../../tmp",
+      `extension_dir = ${host.path("opt/turbopanel/vendor/lsphp-evil")}`,
+      `extension_dir = ${
+        host.path("opt/turbopanel/vendor/lsphp/8.4/../../../../tmp")
+      }`,
       "no equals sign",
     ];
     for (const bad of badIni) {
@@ -2170,6 +2206,24 @@ test("per-site PHP config: root:<owner>-grp, 0750/0640, directives on an allowli
         bad,
       );
     }
+    // A detached lsphp ini names the vendored modules itself (PHPRC replaces
+    // the php.ini next to the binary).
+    const lsphpExt = host.path(
+      "opt/turbopanel/vendor/lsphp/8.4/current/lib/php/ext",
+    );
+    const lsphpIni = [
+      `extension_dir = ${lsphpExt}`,
+      "zend_extension = opcache.so",
+      "extension = curl.so",
+      "extension = mysqli.so",
+      "extension = pdo_mysql",
+    ].join("\n");
+    const lsphp = await installPhpConf(
+      host,
+      "php.ini",
+      `${PHP_INI}${lsphpIni}\n`,
+    );
+    assertEquals(lsphp.code, 0, lsphp.stderr);
 
     const fpm = phpFpmConf(host);
     const badFpm: Mutation[] = [
@@ -2224,6 +2278,8 @@ test("per-site PHP config: root:<owner>-grp, 0750/0640, directives on an allowli
       ["rlimit_core", add(PHP_SITE, "rlimit_core = unlimited")],
       ["process.dumpable", add(PHP_SITE, "process.dumpable = yes")],
       ["a variable", line("pm.max_children", "pm.max_children = ${pool}")],
+      ["a status listener", add(PHP_SITE, "pm.status_listen = 0.0.0.0:9000")],
+      ["an unlisted pm key", add(PHP_SITE, "pm.unknown = 1")],
       ["chdir outside the home", line("chdir", "chdir = /etc")],
     ];
     for (const [label, mutate] of badFpm) {
@@ -2293,18 +2349,6 @@ test("per-site PHP config: symlinks, other verbs and the rollout copy", async ()
           staged,
           `${dir}/x.conf`,
         ],
-        [
-          "install",
-          "-m",
-          "0640",
-          "-o",
-          "root",
-          "-g",
-          "root",
-          staged,
-          host.path("etc/turbopanel/php-sites/shop-1"),
-        ],
-        ["tee", host.path("etc/turbopanel/php-sites/shop-1")],
       ]
     ) {
       await refused(host, args, args[0] === "tee" ? "x\n" : undefined);
@@ -2392,8 +2436,16 @@ test("per-site PHP: what the daemon renders for each mode and web server passes 
   await withPhpHost(async (host) => {
     const home = host.path("srv/users/alice");
     const site = `${home}/sites/shop`;
-    for (const mode of ["fastcgi", "fpm"] as const) {
-      for (const webAccount of ["tpnginx", "tpapache"] as const) {
+    const combos = [
+      ...(["fastcgi", "fpm"] as const).flatMap((mode) =>
+        (["tpnginx", "tpapache", "tpols"] as const).map((webAccount) =>
+          [mode, webAccount] as const
+        )
+      ),
+      ["lsphp-detached", "tpols"] as const,
+    ];
+    for (const [mode, webAccount] of combos) {
+      {
         const id = sitePhpRuntimeId(sitePhpKey("env1", "shop"), mode, "8.4");
         const spec: SitePhpRuntimeSpec = {
           id,
@@ -2404,6 +2456,7 @@ test("per-site PHP: what the daemon renders for each mode and web server passes 
           home,
           configDir: host.path("etc/turbopanel"),
           libDir: host.path("opt/turbopanel/lib"),
+          runtimesDir: host.path("opt/turbopanel/vendor"),
           webAccount,
         };
         const dir = sitePhpConfigDir(spec.configDir, id);
@@ -2421,12 +2474,16 @@ test("per-site PHP: what the daemon renders for each mode and web server passes 
         assertEquals(made.code, 0, made.stderr);
         const configs: Array<[string, string]> = [[
           "php.ini",
-          sitePhpIni([
-            { key: "memory_limit", value: "256M" },
-            { key: "open_basedir", value: `${site}/current/public:/tmp` },
-            { key: "realpath_cache_ttl", value: "0" },
-            { key: "session.save_path", value: "/var/lib/php/sessions" },
-          ], home),
+          sitePhpIni(
+            [
+              { key: "memory_limit", value: "256M" },
+              { key: "open_basedir", value: `${site}/current/public:/tmp` },
+              { key: "realpath_cache_ttl", value: "0" },
+              { key: "session.save_path", value: "/var/lib/php/sessions" },
+            ],
+            home,
+            spec,
+          ),
         ]];
         if (mode === "fpm") {
           configs.push([
@@ -2452,7 +2509,7 @@ test("per-site PHP: what the daemon renders for each mode and web server passes 
           ]);
           assertEquals(put.code, 0, `${mode} ${name}: ${put.stderr}`);
         }
-        if (mode === "fastcgi") {
+        if (mode !== "fpm") {
           const socket = await installUnit(
             host,
             sitePhpSocketName(id),
@@ -2479,83 +2536,32 @@ test("per-site PHP: what the daemon renders for each mode and web server passes 
   });
 });
 
-test("php-site-register writes the launcher registry from the account database only", async () => {
+test("one site is bound to one owner across its service, socket and config", async () => {
   await withPhpHost(async (host) => {
-    const entry = host.path(`etc/turbopanel/php-sites/${PHP_SITE}`);
-    const register = [
-      "php-site-register",
-      PHP_SITE,
-      "alice",
-      "lsphp-attached",
-      "8.3",
-      "10",
-    ];
-    // An account whose passwd home is the principal home itself (the layout
-    // before home/) is refused: the home comes from the account database.
-    const root = host.path("srv/users/alice");
-    assertStringIncludes(await refused(host, register), "home is not");
-    const passwd = host.path("etc/passwd");
-    await Deno.writeTextFile(
-      passwd,
-      (await Deno.readTextFile(passwd)).replace(
-        `::${root}:`,
-        `::${root}/home:`,
-      ),
-    );
-    const ok = await host.run(register);
-    assertEquals(ok.code, 0, ok.stderr);
-    assertStringIncludes(ok.stdout, "EXEC [chown] [-h] [--] [root:root] [./f]");
-    const home = `${root}/home`;
     assertEquals(
-      await Deno.readTextFile(entry),
-      [
-        "version=1",
-        `site=${PHP_SITE}`,
-        "mode=lsphp-attached",
-        "user=alice",
-        "uid=15001",
-        "group=alice-grp",
-        "gid=15001",
-        `home=${home}`,
-        `tmp=${root}/tmp`,
-        "php=8.3",
-        `bin=${phpExec(host, "lsphp")}`,
-        `ini=${phpConfDir(host)}/php.ini`,
-        "children=10",
-        "",
-      ].join("\n"),
+      (await installUnit(host, phpServiceName, phpService(host, "fastcgi")))
+        .code,
+      0,
     );
-    for (
-      const args of [
-        [PHP_SITE, "root", "lsphp-attached", "8.3", "10"],
-        [PHP_SITE, "tpnginx", "lsphp-attached", "8.3", "10"],
-        [PHP_SITE, "carol", "lsphp-attached", "8.3", "10"],
-        [PHP_SITE, "alice", "php-fpm", "8.3", "10"],
-        [PHP_SITE, "alice", "lsphp-attached", "9.1", "10"],
-        [PHP_SITE, "alice", "lsphp-attached", "8.3.1", "10"],
-        [PHP_SITE, "alice", "lsphp-attached", "8.3", "0"],
-        [PHP_SITE, "alice", "lsphp-attached", "8.3", "65"],
-        [PHP_SITE, "alice", "lsphp-attached", "8.3", "010"],
-        ["Shop", "alice", "lsphp-attached", "8.3", "10"],
-        ["../x", "alice", "lsphp-attached", "8.3", "10"],
-        [PHP_SITE, "alice", "lsphp-attached", "8.3"],
-        [PHP_SITE, "alice", "lsphp-attached", "8.3", "10", "uid=0"],
-      ]
-    ) {
-      await refused(host, ["php-site-register", ...args]);
-    }
-    for (
-      const args of [["chown", "tp", entry], ["chmod", "0666", entry], [
-        "cp",
-        "-p",
-        "--",
-        entry,
-        `${entry}.x`,
-      ]]
-    ) {
-      await refused(host, args);
-    }
-    assertEquals((await host.run(["rm", "-f", "--", entry])).code, 0);
+    // The service names alice; a socket for the same site owned by bob and a
+    // config group of bob's are all refused.
+    const other = phpSocket().replace("SocketUser=alice", "SocketUser=bob");
+    assertEquals(
+      (await installUnit(host, phpSocketName, other)).code === 0,
+      false,
+    );
+    assertEquals((await installUnit(host, phpSocketName, phpSocket())).code, 0);
+    await refused(host, [
+      "install",
+      "-d",
+      "-m",
+      "0750",
+      "-o",
+      "root",
+      "-g",
+      "bob-grp",
+      phpConfDir(host),
+    ]);
   });
 });
 
@@ -2723,6 +2729,191 @@ test("sftp-chroot checks an account whose primary group is tpsftp", async () => 
     assertEquals(check.code === 0, false);
     assertStringIncludes(check.stdout, "dave: passwd home is not");
     assertEquals(check.stdout.includes("alice:"), false, check.stdout);
+  });
+});
+
+async function selfSignedCert(
+  dir: string,
+  host: string,
+  days: number,
+): Promise<void> {
+  await Deno.mkdir(dir, { recursive: true });
+  const made = await new Deno.Command("openssl", {
+    args: [
+      "req",
+      "-x509",
+      "-newkey",
+      "rsa:2048",
+      "-nodes",
+      "-subj",
+      `/CN=${host}`,
+      "-days",
+      String(days),
+      "-keyout",
+      join(dir, `${host}.key`),
+      "-out",
+      join(dir, `${host}.crt`),
+    ],
+    stdout: "null",
+    stderr: "null",
+  }).output();
+  assertEquals(made.success, true);
+}
+
+test("cert-dates prints only notAfter dates, skips internal certs, symlinks and takes no arguments", async () => {
+  await withHost(async (host) => {
+    const passwd = await Deno.readTextFile(host.path("etc/passwd"));
+    await Deno.writeTextFile(
+      host.path("etc/passwd"),
+      passwd + `tpedge:x:${Deno.uid}:${Deno.gid}::/nonexistent:/bin/false\n`,
+    );
+    const group = await Deno.readTextFile(host.path("etc/group"));
+    await Deno.writeTextFile(
+      host.path("etc/group"),
+      group + `tpedge:x:${Deno.gid}:\n`,
+    );
+    const certs = host.path(
+      "var/lib/turbopanel-hosting-caddy/data/caddy/certificates",
+    );
+    await selfSignedCert(
+      join(certs, "acme-v02.api.letsencrypt.org-directory", "shop.example.com"),
+      "shop.example.com",
+      30,
+    );
+    await selfSignedCert(
+      join(certs, "local", "intranet.test"),
+      "intranet.test",
+      10,
+    );
+    await Deno.symlink(
+      host.path("outside"),
+      join(certs, "acme-v02.api.letsencrypt.org-directory", "linked"),
+    );
+    const result = await host.run(["cert-dates"]);
+    assertEquals(result.code, 0, result.stderr);
+    const lines = result.stdout.trim().split("\n");
+    assertEquals(lines.length, 1, result.stdout);
+    assertEquals(
+      /^[A-Z][a-z]{2} \d{1,2} \d{2}:\d{2}:\d{2} \d{4} GMT$/.test(lines[0]!),
+      true,
+      lines[0],
+    );
+    assertEquals(result.stdout.includes("example.com"), false);
+    await refused(host, ["cert-dates", "x"]);
+  });
+});
+
+test("cert-dates prints nothing when the hosting Caddy has issued no certificates", async () => {
+  await withHost(async (host) => {
+    const result = await host.run(["cert-dates"]);
+    assertEquals(result.code, 0, result.stderr);
+    assertEquals(result.stdout, "");
+  });
+});
+
+test("site-usage prints home and site sizes only, never follows a symlink and takes no arguments", async () => {
+  await withHost(async (host) => {
+    const sites = host.path("srv/users/alice/sites");
+    await Deno.mkdir(join(sites, "web"), { recursive: true });
+    await Deno.writeFile(join(sites, "web", "blob"), new Uint8Array(200_000));
+    await Deno.mkdir(join(sites, "tiny"), { recursive: true });
+    await Deno.writeTextFile(join(sites, "tiny", "a"), "x");
+    await Deno.mkdir(host.path("outside/big"), { recursive: true });
+    await Deno.writeFile(
+      host.path("outside/big/huge"),
+      new Uint8Array(5_000_000),
+    );
+    await Deno.symlink(host.path("outside/big"), join(sites, "escape"));
+    await Deno.symlink(host.path("outside"), host.path("srv/users/mallory"));
+    const result = await host.run(["site-usage"]);
+    assertEquals(result.code, 0, result.stderr);
+    const rows = result.stdout.trim().split("\n").map((l) => l.split(" "));
+    const bytes = (kind: string, name: string) =>
+      Number(rows.find((r) => r[0] === kind && r[2] === name)?.[1]);
+    assertEquals(bytes("site", "web") >= 200_000, true, result.stdout);
+    assertEquals(bytes("site", "web") < 400_000, true, result.stdout);
+    assertEquals(bytes("home", "alice") >= bytes("site", "web"), true);
+    assertEquals(rows.some((r) => r[2] === "escape"), false, result.stdout);
+    assertEquals(rows.some((r) => r[2] === "mallory"), false, result.stdout);
+    assertEquals(
+      rows.every((r) => r.length === 3 && /^\d+$/.test(r[1]!)),
+      true,
+    );
+    // One walk per home: each home and each site appears exactly once.
+    assertEquals(
+      rows.filter((r) => r[0] === "home" && r[2] === "alice").length,
+      1,
+    );
+    assertEquals(
+      rows.filter((r) => r[0] === "site" && r[2] === "web").length,
+      1,
+    );
+    const script = await Deno.readTextFile(
+      new URL("../../orchestration/scripts/tp-host", import.meta.url),
+    );
+    assertEquals(/ionice -c3 nice -n 19 du /.test(script), true);
+    assertEquals(
+      /timeout -k 5 "\$TP_SITE_USAGE_HOME_SECONDS"/.test(script),
+      true,
+    );
+    await refused(host, ["site-usage", "/etc"]);
+  });
+});
+
+test("sshd accepts -t, -T and exactly -T -C user=<name>,host=localhost,addr=127.0.0.1", async () => {
+  await withHost(async (host) => {
+    for (const argv of [["-t"], ["-T"]]) {
+      const ok = await host.run(["sshd", ...argv]);
+      assertEquals(ok.code, 0, ok.stderr);
+    }
+    const spec = "user=alice,host=localhost,addr=127.0.0.1";
+    const ok = await host.run(["sshd", "-T", "-C", spec]);
+    assertEquals(ok.code, 0, ok.stderr);
+    assertStringIncludes(
+      ok.stdout,
+      `EXEC [/usr/sbin/sshd] [-T] [-C] [${spec}]`,
+    );
+  });
+});
+
+test("sshd -T -C refuses anything but the one fixed spec", async () => {
+  await withHost(async (host) => {
+    const tail = ",host=localhost,addr=127.0.0.1";
+    for (
+      const argv of [
+        ["-T", "-C", "user=alice,host=localhost,addr=127.0.0.1,laddr=1.2.3.4"],
+        ["-T", "-C", "user=alice,host=localhost"],
+        ["-T", "-C", "host=localhost,addr=127.0.0.1,user=alice"],
+        ["-T", "-C", "user=alice,addr=127.0.0.1,host=localhost"],
+        ["-T", "-C", "user=alice,host=example.com,addr=127.0.0.1"],
+        ["-T", "-C", "user=alice,host=localhost,addr=10.0.0.1"],
+        ["-T", "-C", "user=,host=localhost,addr=127.0.0.1"],
+        ["-T", "-C", `user=-oProxyCommand=x${tail}`],
+        ["-T", "-C", `user=-x${tail}`],
+        ["-T", "-C", `user=a b${tail}`],
+        ["-T", "-C", `user=a;id${tail}`],
+        ["-T", "-C", `user=a,user=b${tail}`],
+        ["-T", "-C", `user=${"a".repeat(33)}${tail}`],
+        ["-T", "-C", `user=a\nb${tail}`],
+        ["-T", "-C", "user=alice" + tail + "\n"],
+        ["-t", "-C", `user=alice${tail}`],
+        ["-C", `user=alice${tail}`, "-T"],
+        ["-T", "-C", `user=alice${tail}`, "-f", "/tmp/x"],
+        ["-T", "-f", "/tmp/x"],
+        ["-T", "-C"],
+        ["-f", "/tmp/x"],
+        ["-T", "-o", "AllowTcpForwarding=yes"],
+        [],
+      ]
+    ) {
+      const stderr = await refused(host, ["sshd", ...argv]);
+      // Refused either by the verb or earlier, by the newline guard.
+      assertEquals(
+        stderr.includes("refusing") || stderr.includes("sshd: only"),
+        true,
+        stderr,
+      );
+    }
   });
 });
 

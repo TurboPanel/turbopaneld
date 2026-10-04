@@ -8,9 +8,12 @@
 # Postgres and RabbitMQ containers there, and an automatic restart would be
 # a control-plane outage rather than a database blip. That host's operator
 # restarts dockerd by hand (see the "Announce the daemon.json write" debug
-# message for confirmation the file actually changed first).
+# message for confirmation the file actually changed first). Also skipped in
+# daemon-converge's builder-only mode unless the running dockerd reports
+# live-restore (tasks/restart-gate.yml): a later converge applies the pending
+# marker once it does.
 - name: Restart docker
   ansible.builtin.systemd:
     name: docker
     state: restarted
-  when: not (_docker_colocated_instance_host | default(false) | bool)
+  when: not (_docker_restart_deferred | default(true) | bool)

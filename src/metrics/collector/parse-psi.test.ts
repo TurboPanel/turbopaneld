@@ -74,3 +74,12 @@ test("psiPercent clamps to 0–100 and nulls a non-positive interval after a bas
   assertEquals(psiPercent(1_000, 60, zeroWindow, "psi:zero", 0), null);
   assertEquals(psiPercent(2_000, 0, zeroWindow, "psi:zero", 0), null);
 });
+
+test("psiPercent divides by the real elapsed time after a missed read", () => {
+  const tracker = new CounterBaselineTracker();
+  tracker.beginTick(0);
+  psiPercent(0, 60, tracker, "psi:cpu:some", 0);
+  // The next read lands 120 s later (one tick missed); 6 s stalled is 5%.
+  tracker.beginTick(120_000);
+  assertEquals(psiPercent(6_000_000, 60, tracker, "psi:cpu:some", 0), 5);
+});

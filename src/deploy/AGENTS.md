@@ -36,8 +36,22 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    `hosting-ingress` component's `serviceId`, carried on the wire as
    `hostingIngressNetwork` — **only when the
    deploy has at least one container HTTP hosting with hostnames** (shared
-   loopback entrypoints `127.0.0.1:7080` / `127.0.0.1:7443`, PROXY protocol,
-   …). Bare container deploys (no hostnames / no HTTP hosting rows) never start
+   loopback entrypoints `127.0.0.1:7080` / `127.0.0.1:7443`, PROXY protocol
+   trusted **only from the ingress network's bridge gateway** — read from
+   `docker network inspect` on every render, never `insecure` — …). The
+   loopback publish relays every host connection from that gateway, so the
+   `hosting-caddy` role's ingress guard (`turbopanel-ingress-guard.service`,
+   its own `inet turbopanel_ingress_guard` nftables table, root-owned rules at
+   `<install>/lib/ingress-guard.nft`) lets only root and `tpedge` open a
+   connection to those ports, over loopback or straight to a bridge address.
+   It matches the connection's original tuple (`ct original`), because with
+   `userland-proxy: false` nat-output DNATs the loopback publish to the
+   container before the filter hook. The unit is `PartOf=nftables.service`
+   (an nftables restart re-applies it) and a docker.service drop-in refuses to
+   start Docker without the table (no `Requires=`, which would restart Docker
+   with the guard). `ensureHostingCaddy` re-runs caddy-setup when the
+   installed guard lacks `INGRESS_GUARD_VERSION` or its unit is inactive, and
+   refuses the deploy when either is still true afterwards. Bare container deploys (no hostnames / no HTTP hosting rows) never start
    the platform `-in` Traefik or declare the external ingress network on
    compose. When
    `<stateDir>/system/hosting-ingress.json` is present,
