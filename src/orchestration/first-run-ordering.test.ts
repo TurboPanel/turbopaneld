@@ -19,8 +19,8 @@ test("deploy vendors PHP runtimes (creating tpphp groups) before joining princip
   const src = await Deno.readTextFile(
     join(DAEMON_ROOT, "src/commands/deploy-environment.ts"),
   );
-  const php = src.indexOf("await ensureSitePhpRuntimes(");
-  const principals = src.indexOf("await ensureDeployPrincipals(\n    layout,");
+  const php = src.search(/await\s+ensureSitePhpRuntimes\(/);
+  const principals = src.search(/await\s+ensureDeployPrincipals\(\s*layout,/);
   assert(php > 0 && principals > 0);
   assertEquals(php < principals, true);
 });

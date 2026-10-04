@@ -276,3 +276,42 @@ test("a site unit with no User= is still refused", async () => {
     assertStringIncludes(out.stderr, "bad User=");
   });
 });
+
+test("an '@' in the base path does not hide site units", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "tp-php-loopback@" });
+  try {
+    await Deno.mkdir(join(dir, "etc/systemd/system"), { recursive: true });
+    await Deno.writeTextFile(
+      join(dir, "etc/passwd"),
+      "bob:x:15002:15002::/h:/bin/sh\n",
+    );
+    await Deno.writeTextFile(
+      join(dir, "etc/systemd/system/turbopanel-php-a-fcgi84.service"),
+      "[Service]\nUser=bob\n",
+    );
+    const out = await new Deno.Command("sh", {
+      args: [SCRIPT, "sync"],
+      clearEnv: true,
+      env: { PATH: "/usr/bin:/bin", TP_HOST_TEST_PREFIX: dir },
+      stdout: "piped",
+      stderr: "piped",
+    }).output();
+    assertEquals(out.code, 0, new TextDecoder().decode(out.stderr));
+    assertStringIncludes(
+      new TextDecoder().decode(out.stdout),
+      "elements = { 15002 }",
+    );
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+test("another '@' unit with a User= is still validated", async () => {
+  await withTree({
+    "turbopanel-php-x@.service": "daemon",
+  }, async (run) => {
+    const out = await run("sync");
+    assertEquals(out.code, 1);
+    assertStringIncludes(out.stderr, "not a site owner's account");
+  });
+});

@@ -75,10 +75,12 @@ owner_uids() {
   _acc=""
   for _u in "$UNITS"/turbopanel-php-*.service; do
     [ -f "$_u" ] && [ ! -L "$_u" ] || continue
-    # `turbopanel-php-fpm@.service` is the shared php-fpm template: its master
-    # runs as root (no User=) and it is no site owner's unit. A site unit's
-    # name never holds `@`.
-    case "$_u" in *@*) continue ;; esac
+    # `turbopanel-php-fpm@.service` (and its instances) is the shared php-fpm
+    # template: its master runs as root (no User=) and it is no site owner's
+    # unit. Matched on the basename and only this template, so an '@' elsewhere
+    # in the path, or in any other unit name, is still validated.
+    _b="${_u##*/}"
+    case "$_b" in turbopanel-php-fpm@*.service) continue ;; esac
     _name="$(sed -n 's/^User=//p' "$_u" | head -1)"
     case "$_name" in ''|-*|*[!A-Za-z0-9_.-]*) tp_die "$_u: bad User=" ;; esac
     _uid="$(uid_of "$_name")"
