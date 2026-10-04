@@ -1997,7 +1997,7 @@ async function liveSnippetNames(sitesDir: string): Promise<string[]> {
   }
   // The daemon's own reserved sites first (they are kept in preference), then
   // oldest first: of two files serving one hostname the newer is set aside.
-  const ordered = entries.sort((a, b) =>
+  const ordered = entries.toSorted((a, b) =>
     Number(isDaemonReservedHostingSite(b.name)) -
       Number(isDaemonReservedHostingSite(a.name)) ||
     a.modified - b.modified || a.name.localeCompare(b.name)
