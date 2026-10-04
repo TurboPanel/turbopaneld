@@ -303,6 +303,57 @@ test("openInstanceAcmeWindow reloads when hosting Caddy is already on port 80", 
   }
 });
 
+test("openInstanceAcmeWindow reloads a running hosting Caddy that is not on port 80 yet and keeps it running on failure", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-acme-active-no80-" });
+  const layout = layoutUnder(root);
+  const calls: string[] = [];
+  let ensured = false;
+  let inspections = 0;
+  const run: InstanceAcmeCommand = (_program, args) => {
+    calls.push(args.join(" "));
+    if (args.includes("ActiveState")) return Promise.resolve(ok("active\n"));
+    return Promise.resolve(ok());
+  };
+  const ensureHostingCaddyRuntime = () => {
+    ensured = true;
+    return Promise.resolve();
+  };
+  try {
+    await openInstanceAcmeWindow(layout, [HOST], {
+      run,
+      inspect: () => {
+        inspections += 1;
+        if (inspections === 1) return Promise.resolve({ kind: "free" });
+        return Promise.resolve({ kind: "hosting-caddy" });
+      },
+      ensureHostingCaddyRuntime,
+    });
+    assertEquals(ensured, false);
+    assertEquals(
+      calls.some((line) => line.includes("systemctl reload")),
+      true,
+    );
+    calls.length = 0;
+    await assertRejects(
+      () =>
+        openInstanceAcmeWindow(layout, [HOST], {
+          run,
+          inspect: () => Promise.resolve({ kind: "free" }),
+          sleep: () => Promise.resolve(),
+          ensureHostingCaddyRuntime,
+        }),
+      Error,
+      "not listening on port 80",
+    );
+    assertEquals(
+      calls.some((line) => line.includes("disable")),
+      false,
+    );
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
 test("openInstanceAcmeWindow waits for port 80 after a first start", async () => {
   const root = await Deno.makeTempDir({ prefix: "tp-acme-wait-80-" });
   const layout = layoutUnder(root);

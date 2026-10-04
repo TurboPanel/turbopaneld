@@ -355,12 +355,28 @@ async function activateHostingCaddyForWindow(
   ensure: (layout: LayoutPaths) => Promise<void>,
   run: InstanceAcmeCommand,
 ): Promise<boolean> {
-  if (holder.kind === "hosting-caddy") {
+  // A unit that is already active but not on :80 (no port-80 site yet) never
+  // reads the snippet again on `enable --now`: reload it, and leave it running
+  // if the window fails.
+  if (holder.kind === "hosting-caddy" || await hostingCaddyIsActive(run)) {
     await reloadHostingCaddy(run);
     return false;
   }
   await ensure(layout);
   return true;
+}
+
+async function hostingCaddyIsActive(
+  run: InstanceAcmeCommand,
+): Promise<boolean> {
+  const state = await run("systemctl", [
+    "show",
+    "-p",
+    "ActiveState",
+    "--value",
+    HOSTING_CADDY_SERVICE,
+  ]);
+  return state.ok && state.stdout.trim() === "active";
 }
 
 async function waitForHostingCaddyOn80(
