@@ -161,7 +161,8 @@ test("dumpArgv rejects system schemas and validates identifiers", () => {
   const argv = backup.dumpArgv(ctx, { database: "appdb" });
   assertEquals(argv[0], "mysqldump");
   assertEquals(argv.includes("appdb"), true);
-  assertEquals(argv.includes("--set-gtid-purged=ON"), true);
+  assertEquals(argv.includes("--set-gtid-purged=OFF"), true);
+  assertEquals(argv.includes("--set-gtid-purged=ON"), false);
   assertThrows(() => backup.dumpArgv(ctx, { database: "mysql" }), Error);
   assertThrows(
     () => backup.dumpArgv(ctx, { database: "information_schema" }),
