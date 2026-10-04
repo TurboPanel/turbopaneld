@@ -458,11 +458,11 @@ function buildNginxPhpLocation(
 function caddyDotfileDenyLines(): string[] {
   return [
     "  @dotfile {",
-    "    path_regexp dotfile (^|/)\\.",
-    "    not path_regexp wellknown ^/\\.well-known(/|$)",
+    String.raw`    path_regexp dotfile (^|/)\.`,
+    String.raw`    not path_regexp wellknown ^/\.well-known(/|$)`,
     "  }",
     "  respond @dotfile 403",
-    "  @dotInWellKnown path_regexp dotinwk ^/\\.well-known/(.*/)?\\.",
+    String.raw`  @dotInWellKnown path_regexp dotinwk ^/\.well-known/(.*/)?\.`,
     "  respond @dotInWellKnown 403",
   ];
 }
@@ -531,9 +531,8 @@ export function caddySiteConfig(
       lines.push(`  php_fastcgi unix/${phpFpmSocket}`);
     }
   }
-  lines.push(...caddyDotfileDenyLines());
   // No `browse`: a directory listing is not a default worth shipping.
-  lines.push("  file_server", "}", "");
+  lines.push(...caddyDotfileDenyLines(), "  file_server", "}", "");
   return lines.join("\n");
 }
 
