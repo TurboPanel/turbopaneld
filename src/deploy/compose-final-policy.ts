@@ -151,20 +151,22 @@ export function collectComposePolicyFindings(
   document: Record<string, unknown>,
   opts: { hostLevelApproved?: boolean },
 ): string[] {
-  const findings: string[] = [];
+  const approved = opts.hostLevelApproved === true;
   const services = isRecord(document.services) ? document.services : {};
-  for (const [name, service] of Object.entries(services)) {
-    if (!isRecord(service)) continue;
-    if (opts.hostLevelApproved !== true) {
-      findings.push(...hostLevelServiceFindings(name, service));
-    }
-    findings.push(...imageShadowFindings(name, service));
-  }
-  if (opts.hostLevelApproved !== true) {
-    findings.push(...volumeFindings(document.volumes));
-    findings.push(...networkFindings(document.networks));
-  }
-  return findings;
+  const perService = Object.entries(services).flatMap(([name, service]) => {
+    if (!isRecord(service)) return [];
+    return [
+      ...(approved ? [] : hostLevelServiceFindings(name, service)),
+      ...imageShadowFindings(name, service),
+    ];
+  });
+  return [
+    ...perService,
+    ...(approved ? [] : [
+      ...volumeFindings(document.volumes),
+      ...networkFindings(document.networks),
+    ]),
+  ];
 }
 
 /** Refuse (throws {@link ComposePolicyError}) a resolved model the platform will not run. */
