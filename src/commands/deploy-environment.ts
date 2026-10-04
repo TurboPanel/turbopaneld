@@ -1710,6 +1710,14 @@ async function deployContainerServices(
     );
     await persistComposeEnvFile(deploymentDir, parsedPayload.envFile);
 
+    // A stack started under an earlier project name is replaced, not kept
+    // (before either strategy brings the new name up).
+    await retirePreviousProjects(
+      previousProjects,
+      parsedPayload.projectName,
+      runStreamed,
+    );
+
     const serviceHooks = parsedPayload.serviceHooks ?? [];
     if (parsedPayload.deployStrategy === "sequential") {
       return await deploySequentially(input, {
@@ -1736,13 +1744,6 @@ async function deployContainerServices(
     }
 
     await ensureDeployNetworks(input);
-
-    // A stack started under an earlier project name is replaced, not kept.
-    await retirePreviousProjects(
-      previousProjects,
-      parsedPayload.projectName,
-      runStreamed,
-    );
 
     if (parsedPayload.noCache === true) {
       await runComposeBuild(input, chain, onLine);

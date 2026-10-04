@@ -252,3 +252,34 @@ test({
       assertEquals(docker.calls.map(verbOf).includes("stop"), false);
     }),
 });
+
+test({
+  name:
+    "a project renamed between deploys takes the old-named stack down (volumes kept) before the new one comes up",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: () =>
+    withState(async () => {
+      const docker = fakeDocker([HEALTHY]);
+      for (const strategy of [undefined, "sequential"] as const) {
+        const extra = strategy ? { deployStrategy: strategy } : {};
+        await deploy(payload("nginx:1", extra), docker.run);
+        docker.calls.length = 0;
+        await deploy(
+          payload("nginx:2", { ...extra, projectName: "env-new-name" }),
+          docker.run,
+        );
+        const downIdx = docker.calls.findIndex((c) =>
+          c.includes("down") && c[2] === PROJECT_NAME
+        );
+        const upIdx = docker.calls.findIndex((c) =>
+          c.includes("up") && c[2] === "env-new-name"
+        );
+        assert(downIdx >= 0, `old project taken down (${strategy})`);
+        assert(upIdx > downIdx, `down precedes up (${strategy})`);
+        assertEquals(docker.calls[downIdx].includes("--volumes"), false);
+        // Back to the original name for the next round.
+        await deploy(payload("nginx:3", extra), docker.run);
+        docker.calls.length = 0;
+      }
+    }),
+});
