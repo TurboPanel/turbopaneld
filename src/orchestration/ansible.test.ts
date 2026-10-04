@@ -317,8 +317,10 @@ test("ansibleProbeEnv keeps HOME and every ansible temp dir in the state leaf, n
   // A fresh sealed install has no <state root>/.ansible and cannot create it.
   assertEquals(env.HOME, ANSIBLE_STATE_DIR);
   assertEquals(env.ANSIBLE_HOME, ANSIBLE_STATE_DIR);
-  assertEquals(env.ANSIBLE_LOCAL_TEMP, join(ANSIBLE_STATE_DIR, "tmp"));
-  assertEquals(env.ANSIBLE_REMOTE_TEMP, join(ANSIBLE_STATE_DIR, "tmp"));
+  // The leaf itself, no subfolder: a root-run probe must not create a
+  // root-owned directory inside the tp-owned leaf.
+  assertEquals(env.ANSIBLE_LOCAL_TEMP, ANSIBLE_STATE_DIR);
+  assertEquals(env.ANSIBLE_REMOTE_TEMP, ANSIBLE_STATE_DIR);
   assertEquals(env.ANSIBLE_CONFIG, ansibleEnv().ANSIBLE_CONFIG);
   assert(!ANSIBLE_STATE_DIR.endsWith(".ansible"));
   assertEquals(

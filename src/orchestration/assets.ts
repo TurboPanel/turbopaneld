@@ -200,12 +200,17 @@ export const ANSIBLE_STATE_DIR = join(layout.daemonStateDir, "ansible");
  * every Ansible temp/home variable at the {@link ANSIBLE_STATE_DIR} leaf.
  */
 export function ansibleProbeEnv(): Record<string, string> {
+  // The leaf itself is the temp root: ansible creates its own subfolders, so
+  // nothing below the (tp-owned) leaf is ever created by a root-run probe.
+  // Built without ansibleEnv() so no throwaway ANSIBLE_HOME temp dir is made.
   return {
-    ...ansibleEnv(),
+    ANSIBLE_CONFIG: ANSIBLE_CFG,
+    ANSIBLE_EXECUTABLE: ANSIBLE_SHELL_EXECUTABLE,
+    ANSIBLE_ROLES_PATH: `${GALAXY_ROLES_DIR}:${GALAXY_VENDOR_ROLES_DIR}`,
     HOME: ANSIBLE_STATE_DIR,
     ANSIBLE_HOME: ANSIBLE_STATE_DIR,
-    ANSIBLE_LOCAL_TEMP: join(ANSIBLE_STATE_DIR, "tmp"),
-    ANSIBLE_REMOTE_TEMP: join(ANSIBLE_STATE_DIR, "tmp"),
+    ANSIBLE_LOCAL_TEMP: ANSIBLE_STATE_DIR,
+    ANSIBLE_REMOTE_TEMP: ANSIBLE_STATE_DIR,
   };
 }
 
