@@ -1,4 +1,5 @@
 import { assertEquals } from "@std/assert";
+import { wwwSiblingHostname } from "./commands-contracts.ts";
 import { describe, it } from "@std/testing/bdd";
 import type {
   EnvironmentDeployHosting,
@@ -14,6 +15,7 @@ import {
   validateDeployStorageMaterial,
   validateDeployStorageMaterialList,
   validateDeployTargetPort,
+  validateDeployWwwRedirects,
 } from "./deploy-validation.ts";
 
 function hosting(
@@ -265,6 +267,63 @@ describe("daemon deploy-validation parity", () => {
     assertEquals(
       validateDeployStorageMaterialList([storage({ volumeName: "" })]),
       "storage stor-1 missing volumeName",
+    );
+  });
+});
+
+describe("wwwRedirect validation", () => {
+  it("flips the www spelling and refuses unusable results", () => {
+    assertEquals(wwwSiblingHostname("example.com"), "www.example.com");
+    assertEquals(wwwSiblingHostname("www.example.com"), "example.com");
+    assertEquals(wwwSiblingHostname("www."), null);
+    assertEquals(wwwSiblingHostname(`${"a.".repeat(124)}com`), null);
+  });
+
+  it("accepts a lone www redirect", () => {
+    assertEquals(
+      validateDeployHostings([
+        hosting({ hostnames: ["example.com"], wwwRedirect: true }),
+      ]),
+      null,
+    );
+  });
+
+  it("refuses wwwRedirect on a tcp hosting", () => {
+    assertEquals(
+      validateDeployWwwRedirects([
+        hosting({
+          hostnames: [],
+          protocol: "tcp",
+          ports: [{ published: 5432, target: 5432 }],
+          wwwRedirect: true,
+        }),
+      ]),
+      "wwwRedirect requires the http protocol",
+    );
+  });
+
+  it("refuses a sibling that is already a hostname, in this or another hosting", () => {
+    const own = validateDeployWwwRedirects([
+      hosting({
+        hostnames: ["example.com", "www.example.com"],
+        wwwRedirect: true,
+      }),
+    ]);
+    assertEquals(own?.includes("www.example.com"), true);
+    const other = validateDeployHostings([
+      hosting({ hostnames: ["example.com"], wwwRedirect: true }),
+      hosting({ hostingId: "h2", hostnames: ["www.example.com"] }),
+    ]);
+    assertEquals(other?.includes("already a hostname"), true);
+  });
+
+  it("ignores hostings without the flag", () => {
+    assertEquals(
+      validateDeployHostings([
+        hosting({ hostnames: ["example.com"] }),
+        hosting({ hostingId: "h2", hostnames: ["www.example.com"] }),
+      ]),
+      null,
     );
   });
 });

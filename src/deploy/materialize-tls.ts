@@ -1,7 +1,8 @@
 import { join } from "@std/path";
-import type {
-  EnvironmentDeployPayload,
-  EnvironmentDeployTlsMaterial,
+import {
+  type EnvironmentDeployPayload,
+  type EnvironmentDeployTlsMaterial,
+  wwwSiblingHostname,
 } from "../contracts/commands-contracts.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 import { forEachSequential } from "../util/sequential.ts";
@@ -79,6 +80,11 @@ export function hostnameTlsMap(
     if (!hosting.tlsId || hosting.tlsMode === "acme") continue;
     for (const hostname of hosting.hostnames) {
       map.set(hostname, hosting.tlsId);
+      // The redirect name is served under the same pinned pair.
+      const sibling = hosting.wwwRedirect ? wwwSiblingHostname(hostname) : null;
+      if (sibling !== null && !map.has(sibling)) {
+        map.set(sibling, hosting.tlsId);
+      }
     }
   }
   return map;

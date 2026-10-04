@@ -9,6 +9,7 @@ import {
   type EnvironmentDeployPayload,
   isValidIpv4Literal,
   isValidIpv6Literal,
+  wwwSiblingHostname,
 } from "../contracts/commands-contracts.ts";
 import { type LayoutPaths, PROD_HOME_DEFAULT } from "../paths/layout.ts";
 import { safeConfigToken, safeUrlPath } from "../contracts/config-values.ts";
@@ -1545,6 +1546,8 @@ type HostnameSite = {
   bindAddress?: string;
   routes: CaddySiteRoute[];
   tlsMode?: EnvironmentDeployHosting["tlsMode"];
+  /** Set on a `wwwRedirect` name: send every request to `https://<redirectTo>`. */
+  redirectTo?: string;
 };
 
 function hostingTlsDirective(
@@ -1677,9 +1680,32 @@ export type SiteSnippetOptions = Readonly<{
   upstream?: CaddyUpstream;
   routes?: readonly CaddySiteRoute[];
   tlsMode?: EnvironmentDeployHosting["tlsMode"];
+  /**
+   * Serve this name as a permanent redirect to `https://<redirectTo>` (path and
+   * query kept) instead of proxying. Always HTTPS, so the name holds a
+   * certificate and a browser typing it gets there without a warning.
+   */
+  redirectTo?: string;
 }>;
 
+/** A name that only redirects: plain HTTP and HTTPS both send the visitor on. */
+function redirectSiteSnippet(options: SiteSnippetOptions): string {
+  const { hostname, tlsDir, tlsId, bindAddress, tlsMode } = options;
+  const target = safeConfigToken("hostings[].wwwRedirect", options.redirectTo!);
+  const tlsDirective = hostingTlsDirective(tlsMode, tlsId, tlsDir);
+  const tlsLine = tlsDirective ? `${tlsDirective}\n` : "";
+  const bindLine = bindAddress ? formatBindDirective(bindAddress) : "";
+  const redirect = `  redir https://${target}{uri} permanent\n`;
+  return `http://${hostname} {
+${bindLine}${redirect}}
+
+${hostname} {
+${bindLine}${tlsLine}${redirect}}
+`;
+}
+
 export function siteSnippet(options: SiteSnippetOptions): string {
+  if (options.redirectTo !== undefined) return redirectSiteSnippet(options);
   const {
     hostname,
     tlsDir,
@@ -1854,7 +1880,36 @@ export function buildCaddyHostnameRoutes(
     }
   }
 
+  addWwwRedirectSites(byHostname, payload.hostings);
   return byHostname;
+}
+
+/**
+ * The `wwwRedirect` names: one redirect site per hostname, under the same TLS
+ * mode and bind address as the hostname it points at. A name some hosting
+ * already serves is left alone (the control plane refuses that deploy; this
+ * keeps a stray payload from replacing a real site).
+ */
+function addWwwRedirectSites(
+  byHostname: Map<string, HostnameSite>,
+  hostings: readonly EnvironmentDeployHosting[],
+): void {
+  for (const hosting of hostings) {
+    if (!hosting.wwwRedirect || (hosting.protocol ?? "http") !== "http") {
+      continue;
+    }
+    for (const hostname of hosting.hostnames) {
+      const sibling = wwwSiblingHostname(hostname);
+      if (sibling === null || byHostname.has(sibling)) continue;
+      byHostname.set(sibling, {
+        forceHttps: true,
+        routes: [],
+        redirectTo: hostname,
+        ...(hosting.tlsMode === "acme" ? { tlsMode: "acme" as const } : {}),
+        ...(hosting.bindAddress ? { bindAddress: hosting.bindAddress } : {}),
+      });
+    }
+  }
 }
 
 /** Companion manifest naming which of an environment's hostnames run tlsMode: 'acme'. */
@@ -2387,6 +2442,7 @@ async function rewriteHostingCaddySitesLocked(
         bindAddress: site.bindAddress,
         routes: site.routes,
         tlsMode: site.tlsMode,
+        redirectTo: site.redirectTo,
       });
     })
     .join("\n");

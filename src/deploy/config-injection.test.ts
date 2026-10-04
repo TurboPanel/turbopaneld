@@ -444,3 +444,40 @@ test("renderers route tenant fields through their named validators", () => {
     );
   }
 });
+
+test("www redirect sites render byte-identical configs (acme, pinned with bind)", () => {
+  assertEquals(
+    siteSnippet({
+      hostname: "www.example.com",
+      tlsDir: TLS_DIR,
+      tlsMode: "acme",
+      redirectTo: "example.com",
+    }),
+    golden("hosting-caddy-www-redirect-acme.caddy"),
+  );
+  assertEquals(
+    siteSnippet({
+      hostname: "example.com",
+      tlsDir: TLS_DIR,
+      tlsId: "tls-1",
+      bindAddress: "203.0.113.10",
+      redirectTo: "www.example.com",
+    }),
+    golden("hosting-caddy-www-redirect-pinned.caddy"),
+  );
+});
+
+test("www redirect target refuses a hostile name", () => {
+  for (const fragment of HOSTILE_CONFIG_FRAGMENTS) {
+    assertThrows(
+      () =>
+        siteSnippet({
+          hostname: "www.example.com",
+          tlsDir: TLS_DIR,
+          redirectTo: `example.com${fragment}x`,
+        }),
+      Error,
+      "hostings[].wwwRedirect must be",
+    );
+  }
+});
