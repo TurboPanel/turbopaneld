@@ -1090,8 +1090,10 @@ async function loadHostingIngressDescriptor(
 export async function legacyHttpContainersPresent(
   run: RunDockerFn,
 ): Promise<boolean> {
+  // `-a`: a stopped container comes back unrouted when its site is started.
   const ps = await run([
     "ps",
+    "-a",
     "-q",
     "--filter",
     "label=traefik.enable=true",

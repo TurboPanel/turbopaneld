@@ -205,3 +205,63 @@ test("volume options other than bind or a sized tmpfs pass only with host-level 
     },
   }, {});
 });
+
+test("published ports on platform bands are host-level", () => {
+  for (
+    const published of ["80", "443", 7080, "18080", "19150", "18000-18100"]
+  ) {
+    const doc = { services: { web: { ports: [{ target: 80, published }] } } };
+    assertThrows(() => assertComposePolicy(doc, {}), Error, "platform uses");
+    assertComposePolicy(doc, { hostLevelApproved: true });
+  }
+  assertComposePolicy({
+    services: {
+      web: { ports: [{ target: 80, published: "8080" }, { target: 5 }] },
+    },
+  }, {});
+});
+
+test("gpus, group_add and device reservations are host-level", () => {
+  for (
+    const service of [
+      { gpus: "all" },
+      { group_add: ["999"] },
+      {
+        deploy: {
+          resources: { reservations: { devices: [{ capabilities: ["gpu"] }] } },
+        },
+      },
+    ]
+  ) {
+    const doc = { services: { web: service } };
+    assertThrows(() => assertComposePolicy(doc, {}));
+    assertComposePolicy(doc, { hostLevelApproved: true });
+  }
+});
+
+test("the platform's own networks cannot be joined by hand, approved or not", () => {
+  const doc = {
+    networks: { shared: { external: true, name: "ingress-net-1" } },
+  };
+  assertThrows(() =>
+    assertComposePolicy(doc, {
+      hostLevelApproved: true,
+      platformNetworks: ["ingress-net-1"],
+    })
+  );
+  assertComposePolicy(doc, { platformNetworks: ["other"] });
+});
+
+test("tmpfs volume options are compared case-insensitively, as in the control plane", () => {
+  const ok = { type: " TmpFS ", device: "Tmpfs", o: "SIZE=1g,NoAtime" };
+  assertEquals(
+    collectComposePolicyFindings({ volumes: { v: { driver_opts: ok } } }, {}),
+    [],
+  );
+  assertEquals(
+    collectComposePolicyFindings({
+      volumes: { v: { driver_opts: { type: "OVERLAY" } } },
+    }, {}).length,
+    1,
+  );
+});

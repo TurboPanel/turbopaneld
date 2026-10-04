@@ -75,3 +75,16 @@ test("the shared Traefik renders the constraint only when asked", () => {
   assertStringIncludes(on, "providers.docker.constraints=");
   assertEquals(off.includes("providers.docker.constraints"), false);
 });
+
+test("the legacy check lists stopped containers too", async () => {
+  let psArgs: string[] = [];
+  const run = (args: string[]): Promise<DockerCliResult> => {
+    if (args[0] === "ps") {
+      psArgs = args;
+      return Promise.resolve(ok("c1"));
+    }
+    return Promise.resolve(ok(JSON.stringify(HTTP)));
+  };
+  assertEquals(await legacyHttpContainersPresent(run), true);
+  assertEquals(psArgs.includes("-a"), true);
+});

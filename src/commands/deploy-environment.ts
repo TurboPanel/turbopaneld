@@ -1621,6 +1621,10 @@ async function deployContainerServices(
     // plane's approval, and built images may not take platform image names.
     assertComposePolicy(resolved.document ?? {}, {
       hostLevelApproved: parsedPayload.hostLevelApproved === true,
+      platformNetworks: [
+        parsedPayload.hostingIngressNetwork,
+        parsedPayload.managedNetwork,
+      ].filter((n): n is string => typeof n === "string"),
     });
     // Build options no deploy may carry (host network, privileges, SSH agent,
     // internal extra_hosts or remote contexts, secret files outside); no

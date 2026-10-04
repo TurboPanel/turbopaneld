@@ -258,8 +258,10 @@ export function isSafeTmpfsVolume(opts: Record<string, unknown>): boolean {
   if (keys.some((k) => k !== "type" && k !== "device" && k !== "o")) {
     return false;
   }
-  if (opts.type !== "tmpfs") return false;
-  if (opts.device !== undefined && opts.device !== "tmpfs") return false;
+  const norm = (v: unknown) =>
+    typeof v === "string" ? v.trim().toLowerCase() : v;
+  if (norm(opts.type) !== "tmpfs") return false;
+  if (opts.device !== undefined && norm(opts.device) !== "tmpfs") return false;
   return mountOptions(opts).every((flag) =>
     flag === "" || SAFE_TMPFS_FLAGS.has(flag) || SAFE_TMPFS_OPTION.test(flag)
   );

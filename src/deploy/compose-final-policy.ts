@@ -49,6 +49,44 @@ export const PLATFORM_IMAGE_REPOSITORIES: readonly string[] = [
   "ghcr.io/railwayapp/railpack-frontend",
 ];
 
+/**
+ * Service keys that hand the container host devices or extra groups. The
+ * control plane gates the same keys behind the host-level opt-in
+ * (`gpus`, `group_add` in its field policy; `deploy.resources.reservations`
+ * is unsupported there outright), so the daemon mirrors `hostLevelApproved`.
+ */
+const HOST_LEVEL_DEVICE_KEYS = ["gpus", "group_add"] as const;
+
+/**
+ * Host ports the platform itself listens on (hosting Caddy, shared Traefik,
+ * metrics, the site engines' loopback bands, ProxySQL REST) plus 80 and 443.
+ * An authored published port inside one is host-level: with the platform
+ * service stopped (recreate, boot order) a site's container would own the
+ * port the platform connects to.
+ */
+export const RESERVED_HOST_PORT_RANGES: ReadonlyArray<
+  readonly [number, number]
+> = [
+  [80, 80],
+  [443, 443],
+  [2019, 2019],
+  [2029, 2029],
+  [2039, 2039],
+  [6070, 6070],
+  [7080, 7081],
+  [7443, 7443],
+  [18080, 18999],
+  [19100, 19799],
+];
+
+/**
+ * Not checkable here, by design: a volume's `name:` / `external:` pointing at
+ * another project's volume. The control plane rewrites its own storage volumes
+ * to external named volumes before the daemon sees them, so the daemon cannot
+ * tell an authored reference from a platform one; the control plane's
+ * host-access gate owns that rule.
+ */
+
 export const COMPOSE_POLICY_REFUSED_CODE = "compose_policy_refused";
 
 export class ComposePolicyError extends Error {
@@ -131,6 +169,69 @@ function volumeFindings(volumes: unknown): string[] {
   return found;
 }
 
+function publishedRange(port: unknown): [number, number] | undefined {
+  const text = typeof port === "number" ? String(port) : port;
+  if (typeof text !== "string") return undefined;
+  const [from, to = from] = text.trim().split("-");
+  const lo = Number(from);
+  const hi = Number(to);
+  return Number.isInteger(lo) && Number.isInteger(hi) ? [lo, hi] : undefined;
+}
+
+function reservedPortFindings(
+  name: string,
+  service: Record<string, unknown>,
+): string[] {
+  if (!Array.isArray(service.ports)) return [];
+  return service.ports.flatMap((entry): string[] => {
+    const range = isRecord(entry) ? publishedRange(entry.published) : undefined;
+    if (range === undefined) return [];
+    const hit = RESERVED_HOST_PORT_RANGES.some(([lo, hi]) =>
+      range[0] <= hi && range[1] >= lo
+    );
+    return hit
+      ? [
+        `service ${name} publishes host port ${
+          range[0]
+        }, which the platform uses`,
+      ]
+      : [];
+  });
+}
+
+function deviceFindings(
+  name: string,
+  service: Record<string, unknown>,
+): string[] {
+  const keys: string[] = HOST_LEVEL_DEVICE_KEYS.filter((k) =>
+    isPresent(service[k])
+  );
+  const deploy = isRecord(service.deploy) ? service.deploy : {};
+  const resources = isRecord(deploy.resources) ? deploy.resources : {};
+  const reservations = isRecord(resources.reservations)
+    ? resources.reservations
+    : {};
+  if (isPresent(reservations.devices)) {
+    keys.push("deploy.resources.reservations.devices");
+  }
+  return keys.map((key) => `service ${name} sets \`${key}\``);
+}
+
+function platformNetworkFindings(
+  networks: unknown,
+  platformNetworks: readonly string[],
+): string[] {
+  if (!isRecord(networks)) return [];
+  return Object.entries(networks).flatMap(([key, spec]) => {
+    const name = isRecord(spec) && typeof spec.name === "string"
+      ? spec.name
+      : key;
+    return platformNetworks.includes(name)
+      ? [`network ${key} is the platform's own network ${name}`]
+      : [];
+  });
+}
+
 function networkFindings(networks: unknown): string[] {
   if (!isRecord(networks)) return [];
   const found: string[] = [];
@@ -149,19 +250,26 @@ function networkFindings(networks: unknown): string[] {
 /** Findings for a resolved model; host-level service keys pass when approved. */
 export function collectComposePolicyFindings(
   document: Record<string, unknown>,
-  opts: { hostLevelApproved?: boolean },
+  opts: { hostLevelApproved?: boolean; platformNetworks?: readonly string[] },
 ): string[] {
   const approved = opts.hostLevelApproved === true;
   const services = isRecord(document.services) ? document.services : {};
   const perService = Object.entries(services).flatMap(([name, service]) => {
     if (!isRecord(service)) return [];
     return [
-      ...(approved ? [] : hostLevelServiceFindings(name, service)),
+      ...(approved ? [] : [
+        ...hostLevelServiceFindings(name, service),
+        ...deviceFindings(name, service),
+        ...reservedPortFindings(name, service),
+      ]),
       ...imageShadowFindings(name, service),
     ];
   });
   return [
     ...perService,
+    // Joining the hosting-ingress or managed network by hand is never
+    // approved: the daemon attaches those itself.
+    ...platformNetworkFindings(document.networks, opts.platformNetworks ?? []),
     ...(approved ? [] : [
       ...volumeFindings(document.volumes),
       ...networkFindings(document.networks),
@@ -172,7 +280,7 @@ export function collectComposePolicyFindings(
 /** Refuse (throws {@link ComposePolicyError}) a resolved model the platform will not run. */
 export function assertComposePolicy(
   document: Record<string, unknown>,
-  opts: { hostLevelApproved?: boolean },
+  opts: { hostLevelApproved?: boolean; platformNetworks?: readonly string[] },
 ): void {
   const findings = collectComposePolicyFindings(document, opts);
   if (findings.length > 0) throw new ComposePolicyError(findings);
