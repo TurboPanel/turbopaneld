@@ -28,7 +28,9 @@ import {
   type DockerUsageSample,
   type GpuSample,
   type HostMetrics,
+  type MetricEvent,
   METRICS_LEGACY_WIRE_VERSION,
+  type MetricsExtended,
   type RouterSample,
   type StorageSample,
 } from "../../contracts/metrics-contract.ts";
@@ -652,6 +654,8 @@ function gpuHasValue(gpu: GpuSample): boolean {
   ].some((value) => value !== null);
 }
 
+type BuiltExtendedInput = Parameters<typeof buildCollectedExtended>[0];
+
 export class LinuxMetricsCollector implements MetricsCollector {
   #previous: PreviousCpuSnapshot | undefined;
   readonly #tracker = new CounterBaselineTracker();
@@ -660,6 +664,8 @@ export class LinuxMetricsCollector implements MetricsCollector {
   readonly #deps: CollectorDeps;
   readonly #nominalIntervalSeconds: number;
   readonly #pageSizeBytes: number;
+  #detecting: Promise<void> | undefined;
+  readonly #carriedEvents: MetricEvent[] = [];
 
   constructor(
     deps: CollectorDeps,
@@ -820,27 +826,23 @@ export class LinuxMetricsCollector implements MetricsCollector {
     );
     // The live stream's sample is never stored, so a transition the detectors
     // consumed there would be lost: only the durable baseline detects events.
-    const events = live ? [] : await withDeadline(
-      collectEvents(this.#deps, {
-        nowMs,
-        snapshot,
-        tracker: this.#tracker,
-        bootGeneration,
-        seconds,
-        gpus,
-        gpuThermals: gpuResult.thermals,
-        hardwareSignals: hardwareSignalResult.samples,
-        hardwareSignalCandidates: hardwareSignalResult.candidates,
-        oomKillTotal: memory.vmstat.oomKill,
-        conntrackUsedPercent: kernel.conntrackPercent,
-        mountEntries,
-        mdstatText: raw.mdstatText,
-        io: this.#deps.io,
-        sysRoot: this.#deps.sysRoot,
-      }),
-      deadlineMs,
-      [],
-    );
+    const events = live ? [] : await this.#detectEvents({
+      nowMs,
+      snapshot,
+      tracker: this.#tracker,
+      bootGeneration,
+      seconds,
+      gpus,
+      gpuThermals: gpuResult.thermals,
+      hardwareSignals: hardwareSignalResult.samples,
+      hardwareSignalCandidates: hardwareSignalResult.candidates,
+      oomKillTotal: memory.vmstat.oomKill,
+      conntrackUsedPercent: kernel.conntrackPercent,
+      mountEntries,
+      mdstatText: raw.mdstatText,
+      io: this.#deps.io,
+      sysRoot: this.#deps.sysRoot,
+    }, deadlineMs);
 
     const sample = buildMetricsSample({
       metadata: {
@@ -901,29 +903,83 @@ export class LinuxMetricsCollector implements MetricsCollector {
       cores: cpu.currentCores,
     };
     const hostText = await this.#readHostText(deadlineMs);
-    const containerReading = this.#deps.containers?.() ?? null;
-    const containers = containerReading
-      ? toContainerHealthSample(containerReading, this.#tracker, bootGeneration)
-      : undefined;
-    // Everything v7 adds rides in the contract's `extended` block: host text,
-    // container health, Docker reclaimable bytes, TLS expiry and the largest
-    // sites. The scheduler strips `extended` (and stamps v6) unless metrics-v7
-    // is negotiated. Added after plan truncation, so no plan gates it.
-    const extended = mergeExtended(
-      outgoing.extended,
-      hostText ? hostTextToExtended(hostText) : undefined,
-      buildCollectedExtended({
-        containers,
-        dockerUsage: dockerUsageReading?.usage,
-        tlsExpiry: this.#deps.tlsExpiry?.(),
-        topSites: directoryUsage?.topSites,
-      }),
-    );
+    const { extended, containers } = this.#buildExtended({
+      outgoing,
+      hostText,
+      bootGeneration,
+      dockerUsage: dockerUsageReading?.usage,
+      topSites: directoryUsage?.topSites,
+    });
     return {
       supported: true,
       sample: extended ? { ...outgoing, extended } : outgoing,
       ...(containers ? { containers } : {}),
     };
+  }
+
+  /**
+   * Everything v7 adds rides in the contract's `extended` block: host text,
+   * container health, Docker reclaimable bytes, TLS expiry and the largest
+   * sites. The scheduler strips `extended` (and stamps v6) unless metrics-v7
+   * is negotiated. Added after plan truncation, so no plan gates it. A failure
+   * here drops only the v7 block, never the good v6 sample around it.
+   */
+  #buildExtended(input: {
+    outgoing: { extended?: MetricsExtended };
+    hostText: HostTextSample | undefined;
+    bootGeneration: number;
+    dockerUsage: DockerUsageSample | undefined;
+    topSites: BuiltExtendedInput["topSites"];
+  }): {
+    extended?: MetricsExtended;
+    containers?: ReturnType<typeof toContainerHealthSample>;
+  } {
+    try {
+      const containerReading = this.#deps.containers?.() ?? null;
+      const containers = containerReading
+        ? toContainerHealthSample(
+          containerReading,
+          this.#tracker,
+          input.bootGeneration,
+        )
+        : undefined;
+      const extended = mergeExtended(
+        input.outgoing.extended,
+        input.hostText ? hostTextToExtended(input.hostText) : undefined,
+        buildCollectedExtended({
+          containers,
+          dockerUsage: input.dockerUsage,
+          tlsExpiry: this.#deps.tlsExpiry?.(),
+          topSites: input.topSites,
+        }),
+      );
+      return { extended, containers };
+    } catch {
+      return {};
+    }
+  }
+
+  /**
+   * Event detectors are edge-triggered: whatever a run detects has already been
+   * consumed from their state. A run that overruns the deadline is therefore
+   * never abandoned or repeated; it finishes in the background, its events are
+   * carried onto the next durable sample, and no second run starts while it is
+   * still going (detectors are not re-entrant).
+   */
+  async #detectEvents(
+    ctx: Parameters<typeof collectEvents>[1],
+    deadlineMs: number,
+  ): Promise<MetricEvent[]> {
+    this.#detecting ??= collectEvents(this.#deps, ctx).then(
+      (events) => {
+        this.#carriedEvents.push(...events);
+      },
+      () => {},
+    ).finally(() => {
+      this.#detecting = undefined;
+    });
+    await withDeadline(this.#detecting, deadlineMs, undefined);
+    return this.#carriedEvents.splice(0);
   }
 
   /** Free-text facts never break a sample: any failure just omits them. */

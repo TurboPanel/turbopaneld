@@ -72,6 +72,9 @@ export type MetricsLogLevel = "info" | "warn";
 /** Async (or sync) sink that delivers a collected host-metrics sample. */
 export type MetricsSink = (sample: unknown) => Promise<void> | void;
 
+/** The collect outlived its deadline and was abandoned. */
+class CollectDeadlineError extends Error {}
+
 export type MetricsSchedulerOptions = {
   serverId: string;
   collectorFactory: () => MetricsCollector;
@@ -227,9 +230,9 @@ export class MetricsScheduler {
     }
     this.#streamCollector = collector;
     const generation = this.#attachGeneration;
-    void this.#emitStream(generation, send, collector);
+    void this.#emitStream(generation, send);
     this.#streamTimer = this.#setIntervalFn(() => {
-      void this.#emitStream(generation, send, collector);
+      void this.#emitStream(generation, send);
     }, ms);
   }
 
@@ -242,9 +245,12 @@ export class MetricsScheduler {
   async #emitStream(
     generation: number,
     send: MetricsSink,
-    collector: MetricsCollector,
   ): Promise<void> {
-    if (generation !== this.#attachGeneration || this.#streamEmitting) return;
+    const collector = this.#streamCollector;
+    if (
+      !collector || generation !== this.#attachGeneration ||
+      this.#streamEmitting
+    ) return;
     this.#streamEmitting = true;
     try {
       this.#sequence += 1;
@@ -256,6 +262,14 @@ export class MetricsScheduler {
       if (this.#send !== send) return;
       await send(this.#stampDurable(result.sample, false));
     } catch (err) {
+      if (
+        err instanceof CollectDeadlineError &&
+        this.#streamCollector === collector
+      ) {
+        // The abandoned collect may still be running on that collector; never
+        // reuse it (collectors are stateful and not re-entrant).
+        this.#streamCollector = this.#freshCollector(generation, collector);
+      }
       this.#logRateLimited(
         "collect",
         "warn",
@@ -282,7 +296,7 @@ export class MetricsScheduler {
     return new Promise<MetricsCollectResult>((resolve, reject) => {
       const timer = this.#setTimeoutFn(() => {
         reject(
-          new Error(
+          new CollectDeadlineError(
             `a host read did not finish within ${
               Math.round(this.#collectDeadlineMs / 1000)
             } s (a stuck mount, GPU driver or Docker call?); skipped this sample`,
@@ -300,6 +314,19 @@ export class MetricsScheduler {
         },
       );
     });
+  }
+
+  /** A new collector to replace an abandoned one; the old one stays if the factory fails. */
+  #freshCollector(
+    generation: number,
+    current: MetricsCollector,
+  ): MetricsCollector {
+    if (generation !== this.#attachGeneration) return current;
+    try {
+      return this.#collectorFactory();
+    } catch {
+      return current;
+    }
   }
 
   #stampDurable<T>(sample: T, durable: boolean): T {
@@ -452,6 +479,11 @@ export class MetricsScheduler {
         result = await this.#collectWithDeadline(collector, { sequence });
       } catch (err) {
         if (generation !== this.#attachGeneration) return;
+        if (
+          err instanceof CollectDeadlineError && this.#collector === collector
+        ) {
+          this.#collector = this.#freshCollector(generation, collector);
+        }
         this.#logRateLimited(
           "collect",
           "warn",

@@ -1419,3 +1419,46 @@ test("LinuxMetricsCollector: an internal failure is thrown (so the scheduler log
   }
   assertEquals(message.includes("topology exploded"), true);
 });
+
+test("LinuxMetricsCollector: events from a detect that overruns the deadline are carried to the next sample, never lost or run concurrently", async () => {
+  const nowMs = 1_000_000;
+  let release: (events: never[] | unknown[]) => void = () => {};
+  let running = 0;
+  let peak = 0;
+  let calls = 0;
+  const event = {
+    eventId: "e1",
+    at: new Date(0).toISOString(),
+    kind: "oom_kill",
+    severity: "warning",
+  } as const;
+  const collector = new LinuxMetricsCollector({
+    ...makeDeps(() => TICK_1, fullTopologySnapshot(), () => nowMs),
+    sourceDeadlineMs: 20,
+    eventCollectors: {
+      detect: () => {
+        calls += 1;
+        running += 1;
+        peak = Math.max(peak, running);
+        return new Promise((resolve) => {
+          release = (events) => {
+            running -= 1;
+            resolve(events as never);
+          };
+        });
+      },
+    },
+  });
+  const first = await collector.collect({ sequence: 1, nowMs });
+  if (!first.supported) throw new TypeError("expected a sample");
+  assertEquals(first.sample.events, []);
+  release([event]);
+  const second = await collector.collect({
+    sequence: 2,
+    nowMs: nowMs + 60_000,
+  });
+  if (!second.supported) throw new TypeError("expected a sample");
+  assertEquals(second.sample.events, [event]);
+  assertEquals(peak, 1);
+  assertEquals(calls >= 1, true);
+});

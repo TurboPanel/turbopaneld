@@ -1307,3 +1307,26 @@ it("a collect that never settles is abandoned at the deadline: the guard clears,
   assertEquals(sent.length > 0, true);
   assertEquals(logs.some((l) => l.includes("did not finish")), true);
 });
+
+it("after a collect is abandoned at the deadline the scheduler builds a fresh collector, so the stuck one is never re-entered", async () => {
+  const clock = new FakeClock();
+  let built = 0;
+  const scheduler = makeScheduler({
+    clock,
+    intervalMs: 1_000,
+    collectDeadlineMs: 2_500,
+    collectorFactory: () => {
+      built += 1;
+      const mine = built;
+      return {
+        collect: ({ sequence }) =>
+          mine === 1
+            ? new Promise<MetricsCollectResult>(() => {})
+            : Promise.resolve(supportedSample(sequence)),
+      };
+    },
+  });
+  scheduler.attach(capturingSink([]));
+  await clock.advance(4_000);
+  assertEquals(built, 2);
+});
