@@ -232,9 +232,6 @@ export const DAEMON_RUN_PROGRAMS: readonly string[] = [
   "mkdir",
   "cp",
   "ln",
-  // the hosting Caddy read access on the daemon's own files (no privilege)
-  "setfacl",
-  "getfacl",
   // services, sources, archives, TLS
   "systemctl",
   "sshd",

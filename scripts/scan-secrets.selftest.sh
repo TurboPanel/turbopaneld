@@ -147,6 +147,18 @@ expect_flag generic-secret-assignment "$(printf 'API_KEY = "%s"' "$BODY40")"
 expect_flag generic-secret-assignment "$(printf "password: '%s'" "$BODY24")"
 expect_flag generic-secret-assignment "$(printf 'const clientSecret = "%s";' "$BODY24")"
 expect_flag generic-secret-env "$(printf 'DB_PASSWORD=%s' "$BODY40")"
+expect_flag generic-secret-unquoted "$(printf 'password: %s' "$BODY24")"
+expect_flag generic-secret-unquoted "$(printf 'api_key=%s # from the vault' "$BODY40")"
+expect_flag generic-secret-unquoted "$(printf '  clientSecret: %s' "$BODY40")"
+# A trailing comment word with no digit must not hide the value.
+expect_flag generic-secret-assignment "$(printf 'token = "%s" # see_loaded_from_vault_secret_name' "$BODY24")"
+expect_flag generic-secret-unquoted "$(printf 'token: %s # see_loaded_from_vault_secret_name' "$BODY24")"
+expect_flag google-api-key "$(printf '%s%s' AIza "$BODY40" | cut -c1-39)"
+expect_flag npm-token "$(printf '%s%s' npm_ "$BODY40" | cut -c1-40)"
+expect_flag anthropic-openai-key "$(printf '%s%s' sk-ant- "$BODY24")"
+expect_flag anthropic-openai-key "$(printf '%s%s' sk-proj- "$BODY24")"
+expect_flag generic-aws-secret-key "$(printf 'aws_secret_access_key = %s' "$BODY40")"
+expect_flag generic-aws-secret-key "$(printf 'AWS_SECRET_KEY: "%s"' "$BODY40")"
 
 # --- ordinary code and prose stay clean ---------------------------------------
 expect_clean "plain code" 'export function add(a: number, b: number) { return a + b; }'
@@ -159,6 +171,11 @@ expect_clean "numeric setting" 'const TOKEN_TTL_SECONDS = 3600;'
 expect_clean "reference, not a value" 'api_key = os.environ["API_KEY"]'
 expect_clean "templated password" "$(printf 'dsn: mysql%suser:${PASSWORD}@db/app' "$SEP")"
 expect_clean "short sk_ prefix in prose" 'keys start with sk_live_ or sk_test_ and are secret'
+expect_clean "unquoted placeholder" "$(printf '%s: changeme-changeme-changeme-1' pass"word")"
+expect_clean "unquoted reference" 'token: ${TOKEN_FROM_THE_VAULT_ENTRY_NUMBER_1}'
+expect_clean "unquoted words without a digit" 'secret_name: tenant-database-credential-reference-prod'
+expect_clean "short unquoted value" "$(printf '%s: hunter2' pass"word")"
+expect_clean "aws example key" "$(printf 'aws_secret_%s = %s%s%s' access_key wJalrXUtnFEMI/ K7MDENG/bPxRfiCY EXAMPLEKEY)"
 expect_clean "jwt prefix alone" 'tokens look like eyJhbGciOi and so on'
 
 # --- forbidden file names ------------------------------------------------------
@@ -232,8 +249,8 @@ src/f.txt:2:$LINE" 0
 
 checks=$((checks + 1))
 new_repo
-printf 'ok\n' > "$R/src/f.txt"
-printf '# reason: gone\nsrc/f.txt:cat state/removed-line-text\n' > "$R/.secretscan-allowlist"
+printf 'ok\ncat state/still-here-text\n' > "$R/src/f.txt"
+printf '# reason: gone\nsrc/f.txt:cat state/still-here-text\n' > "$R/.secretscan-allowlist"
 scan --all
 [ "$code" = 0 ] || bad "stale entry must not fail the scan"
 grep -q 'stale allowlist entry' "$W/err" || bad "stale entry was not reported"
@@ -248,6 +265,77 @@ scan --all
 printf '# reason: public CA bundle, no key\n@path certs/*.pem\n' > "$R/.secretscan-allowlist"
 scan --all
 [ "$code" = 1 ] || bad "a wildcard @path entry must be rejected"
+
+# --- archives are opened ----------------------------------------------------------
+TOK="$(printf '%s%s' ghp_ "$BODY40")"
+archive_case() {
+  label=$1
+  want=$2
+  checks=$((checks + 1))
+  new_repo
+  printf 'ok\n' > "$R/src/a.txt"
+  shift 2
+  "$@"
+  scan --all
+  [ "$code" = "$want" ] || bad "archive case '$label': expected exit $want, got $code: $(cat "$W/err")"
+}
+make_gz() { printf 'line\n%s\n' "$TOK" | gzip -c > "$R/src/f.gz"; }
+make_tar() {
+  printf 'line\n%s\n' "$TOK" > "$R/src/inner.txt"
+  tar -C "$R/src" -cf "$R/src/f.tar" inner.txt
+  rm "$R/src/inner.txt"
+}
+make_tgz() {
+  printf 'line\n%s\n' "$TOK" > "$R/src/inner.txt"
+  tar -C "$R/src" -czf "$R/src/f.tgz" inner.txt
+  rm "$R/src/inner.txt"
+}
+make_clean_gz() { printf 'nothing here\n' | gzip -c > "$R/src/f.gz"; }
+make_bad_gz() { printf 'not gzip data\n' > "$R/src/f.gz"; }
+archive_case "token inside a .gz" 1 make_gz
+archive_case "token inside a .tar" 1 make_tar
+archive_case "token inside a .tgz" 1 make_tgz
+archive_case "clean .gz" 0 make_clean_gz
+archive_case "corrupt .gz fails closed" 1 make_bad_gz
+if command -v zip > /dev/null 2>&1 && command -v unzip > /dev/null 2>&1; then
+  make_zip() {
+    printf 'line\n%s\n' "$TOK" > "$W/inner.txt"
+    (cd "$W" && zip -q "$R/src/f.zip" inner.txt)
+  }
+  archive_case "token inside a .zip" 1 make_zip
+fi
+checks=$((checks + 1))
+new_repo
+make_gz
+scan --all
+grep -q 'src/f.gz (inside the archive, line 2) (github-token)' "$W/err" || bad "archive report lacks file, line and rule"
+if grep -qF -- "$BODY40" "$W/err"; then bad "archive report echoed fixture text"; fi
+printf '# reason: archived sample\nsrc/f.gz:%s\n' "$TOK" > "$R/.secretscan-allowlist"
+scan --all
+[ "$code" = 0 ] || bad "an exact allowlist entry must allow a line inside an archive: $(cat "$W/err")"
+
+# --- the allowlist itself is checked ---------------------------------------------
+checks=$((checks + 1))
+new_repo
+printf 'ok\n' > "$R/src/f.txt"
+printf '# reason: pasted\nsrc/f.txt:%s\n' "$TOK" > "$R/.secretscan-allowlist"
+scan --all
+[ "$code" = 1 ] || bad "an entry for a line the file does not hold must fail"
+grep -q 'matches no line in src/f.txt' "$W/err" || bad "missing-line entry not reported"
+if grep -qF -- "$BODY40" "$W/err"; then bad "allowlist report echoed fixture text"; fi
+printf '# reason: gone\nsrc/missing.txt:%s\n' "$TOK" > "$R/.secretscan-allowlist"
+scan --all
+[ "$code" = 1 ] || bad "an entry for a missing file must fail"
+printf '# reason: gone\n@path certs/missing.pem\n' > "$R/.secretscan-allowlist"
+scan --all
+[ "$code" = 1 ] || bad "an @path entry for a missing file must fail"
+printf '# reason: %s\n' "$TOK" > "$R/.secretscan-allowlist"
+scan --all
+[ "$code" = 1 ] || bad "a secret in an allowlist comment must fail"
+grep -q 'comment of .secretscan-allowlist (github-token)' "$W/err" || bad "comment secret not reported"
+printf '# reason: refresh the token every so often\n' > "$R/.secretscan-allowlist"
+scan --all
+[ "$code" = 0 ] || bad "an ordinary allowlist comment must pass: $(cat "$W/err")"
 
 # --- staged files (the pre-commit run) -------------------------------------------
 checks=$((checks + 1))

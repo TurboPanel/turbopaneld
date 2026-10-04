@@ -104,7 +104,7 @@ async function runDefault(
   command: string,
   args: string[],
   opts: { cwd?: string } = {},
-): Promise<{ success: boolean; stderr: string; stdout: string }> {
+): Promise<{ success: boolean; stderr: string }> {
   const result = await new Deno.Command(command, {
     args,
     cwd: opts.cwd,
@@ -115,7 +115,6 @@ async function runDefault(
   return {
     success: result.success,
     stderr: decoder.decode(result.stderr).trim(),
-    stdout: decoder.decode(result.stdout),
   };
 }
 
@@ -126,7 +125,7 @@ export type EnsureHostingCaddyDeps = {
     command: string,
     args: string[],
     opts?: { cwd?: string },
-  ) => Promise<{ success: boolean; stderr: string; stdout?: string }>;
+  ) => Promise<{ success: boolean; stderr: string }>;
   resolveArch?: () => "arm64" | "amd64";
   /** Whether the hosting Caddy account exists (`getent passwd`). */
   accountExists?: () => Promise<boolean>;
@@ -138,122 +137,7 @@ export type EnsureHostingCaddyDeps = {
     arch: "arm64" | "amd64",
     tarballPath: string,
   ) => Promise<void>;
-  /** Replaces {@link grantHostingCaddyRead} in {@link ensureHostingCaddyRuntime}. */
-  grantHostingRead?: (hostingDir: string) => Promise<void>;
 };
-
-/** A path under the hosting config directory and whether it is a folder. */
-type HostingEntry = { path: string; dir: boolean };
-
-async function listHostingEntries(root: string): Promise<HostingEntry[]> {
-  const out: HostingEntry[] = [{ path: root, dir: true }];
-  const children = await Array.fromAsync(Deno.readDir(root));
-  const nested = await Promise.all(children.map(async (child) => {
-    const path = join(root, child.name);
-    // Symlinks are never followed or labelled: a link there is not the
-    // daemon's to point the web server at anything else.
-    if (child.isSymlink) return [];
-    if (child.isDirectory) return await listHostingEntries(path);
-    return child.isFile ? [{ path, dir: false }] : [];
-  }));
-  return out.concat(...nested);
-}
-
-/** `getfacl` blocks as `path -> [permissions, effective]` for `user`. */
-function parseUserEntries(
-  text: string,
-  user: string,
-): Map<string, [string, string]> {
-  const found = new Map<string, [string, string]>();
-  for (const block of text.split(/\n\s*\n/)) {
-    const file = /^# file: (.+)$/m.exec(block)?.[1];
-    if (!file) continue;
-    const line = new RegExp(
-      String.raw`^user:${user}:(\S+?)(?:\s+#effective:(\S+))?$`,
-      "m",
-    )
-      .exec(block);
-    if (line) found.set(file, [line[1]!, line[2] ?? line[1]!]);
-  }
-  return found;
-}
-
-/**
- * Give the hosting Caddy read access to everything under the hosting config
- * directory, as the daemon (which owns it), with no privilege. The role's
- * default ACL on the leaf only reaches what is created after the role ran, so
- * anything written earlier (the Caddyfile on an updated host, `sites/` and its
- * snippets on a fresh one) has no entry for {@link HOSTING_CADDY_USER} until
- * this adds it: an access entry on every file and folder and a default entry
- * on every folder, so files created later inherit it. Only
- * {@link HOSTING_CADDY_USER} gains anything. It walks with the daemon's own
- * reads (never following a symlink) and spawns only `setfacl` and `getfacl`
- * (both on the run allowlist). It then checks, per path, that the entry is
- * there and not masked away, and throws when the web server user still cannot
- * read its config. A path root owns that the daemon cannot change passes only
- * if it already carries the entry. A host without the account (dev, tests) is
- * left alone. The files the daemon writes must keep a group-or-mask read bit
- * (0640): a later chmod 0600 would mask the entry away, which the check
- * reports.
- */
-export async function grantHostingCaddyRead(
-  hostingDir: string,
-  runCommand: NonNullable<EnsureHostingCaddyDeps["runCommand"]> = runDefault,
-  user: string = HOSTING_CADDY_USER,
-): Promise<void> {
-  const account = await runCommand("getent", ["passwd", user]).catch(() => ({
-    success: false,
-    stderr: "",
-  }));
-  if (!account.success) return;
-
-  const entries = await listHostingEntries(hostingDir);
-  const access = `u:${user}:rX`;
-  const failures: string[] = [];
-  // One call per kind of path, not one spawn per file; the trees are small.
-  const apply = async (paths: string[], entry: string[]) => {
-    if (paths.length === 0) return;
-    const result = await runCommand(
-      "setfacl",
-      [...entry.flatMap((e) => ["-m", e]), "--", ...paths],
-    ).catch((err) => ({ success: false, stderr: String(err) }));
-    if (!result.success) failures.push(result.stderr);
-  };
-  await apply(entries.filter((e) => !e.dir).map((e) => e.path), [access]);
-  await apply(entries.filter((e) => e.dir).map((e) => e.path), [
-    access,
-    `d:${access}`,
-  ]);
-
-  // The read-back decides, not setfacl's exit code.
-  const shown = await runCommand("getfacl", [
-    "-p",
-    "--",
-    ...entries.map((e) => e.path),
-  ]).catch(() => ({ success: false, stderr: "", stdout: "" }));
-  const have = parseUserEntries(shown.stdout ?? "", user);
-  const unreadable = entries.filter((entry) => {
-    const got = have.get(entry.path);
-    const needs = entry.dir ? "r-x" : "r--";
-    return got === undefined ||
-      ![...needs].every((c, k) => c === "-" || got[1][k] === c);
-  }).map((e) => e.path);
-  if (unreadable.length > 0) {
-    logWarn(
-      "deploy",
-      `hosting Caddy read access: setfacl said ${failures.join("; ")}`,
-    );
-    const more = unreadable.length > 5
-      ? ` and ${unreadable.length - 5} more`
-      : "";
-    throw new Error(
-      `the web server user (${user}) cannot read its config: ${
-        unreadable.slice(0, 5).join(", ")
-      }${more}. Files owned by root that the daemon cannot change need ` +
-        `\`setfacl -m u:${user}:r\` run as root; the rest is retried by the next apply.`,
-    );
-  }
-}
 
 /**
  * Direct download into the vendor tree (no Ansible). Used when the caddy-setup

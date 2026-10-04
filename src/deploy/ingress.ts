@@ -26,7 +26,6 @@ import {
 import {
   ensureHostingCaddy,
   type EnsureHostingCaddyDeps,
-  grantHostingCaddyRead,
   HOSTING_CADDY_USER,
 } from "./ensure-hosting-caddy.ts";
 import {
@@ -933,11 +932,6 @@ export async function ensureHostingCaddyRuntime(
   const hostingDir = join(layout.configDir, "hosting");
   const sitesDir = join(hostingDir, "sites");
   await Deno.mkdir(sitesDir, { recursive: true, mode: 0o750 });
-  const grantRead = deps?.grantHostingRead ?? grantHostingCaddyRead;
-  // Before the writes, so a folder made before the role ran hands its default
-  // entry to the files below; after them (further down), so whatever was
-  // already there (an updated host's Caddyfile) gets its entry too.
-  await grantRead(hostingDir);
   await Deno.writeTextFile(
     join(sitesDir, "00-empty.caddy"),
     "# Hosting routes are written per environment.\n",
@@ -955,7 +949,6 @@ export async function ensureHostingCaddyRuntime(
   // The staged copy is the last unit that was installed and started.
   const unitChanged = (await readTextIfPresent(unitSource)) !== unit;
   await Deno.writeTextFile(unitSource, unit, { mode: 0o640 });
-  await grantRead(hostingDir);
 
   const started = await installAndStartCaddy(unitSource, unitChanged);
   if (!started) {
@@ -1845,7 +1838,6 @@ export async function rewriteHostingCaddySites(
   layout: LayoutPaths,
   payload: EnvironmentDeployPayload,
   hostnameTls?: Map<string, string>,
-  grantRead: (hostingDir: string) => Promise<void> = grantHostingCaddyRead,
 ): Promise<void> {
   if (!SAFE_FILE_ID_RE.test(payload.environmentId)) {
     throw new Error("environmentId contains unsupported characters");
@@ -1853,9 +1845,6 @@ export async function rewriteHostingCaddySites(
 
   const sitesDir = join(layout.configDir, "hosting", "sites");
   await Deno.mkdir(sitesDir, { recursive: true, mode: 0o750 });
-  // A sites/ folder that predates the hosting Caddy's account has no default
-  // entry, so the snippets written below would not inherit one.
-  await grantRead(join(layout.configDir, "hosting"));
 
   const hostnameSites = buildCaddyHostnameRoutes(payload);
 
