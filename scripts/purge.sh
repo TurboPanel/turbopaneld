@@ -1379,6 +1379,12 @@ tp_inventory_docker() {
     return 0
   fi
   if ! tp_docker_ready; then
+    # The removal step already ran against a working daemon (or had nothing to
+    # remove), so a daemon that is gone now holds none of the old objects.
+    # Carry the old lists forward only when the removal step itself was skipped.
+    if [ "${TP_INV_QUIET:-false}" = true ] && [ "${TP_DOCKER_LEFT:-false}" != true ]; then
+      return 0
+    fi
     tp_inv_warn "Docker is installed but the daemon is not responding; containers could not be listed yet"
     tp_inv_keep_previous containers
     tp_inv_keep_previous networks
@@ -2142,12 +2148,14 @@ tp_remove_docker() {
       tp_run "start docker" systemctl start docker.service || true
     fi
     if ! tp_docker_ready; then
+      TP_DOCKER_LEFT=true
       tp_record_skip "docker daemon not responding; containers remain"
       tp_print_warn "Docker containers remain because the daemon did not respond"
       return 0
     fi
   fi
   tp_docker_collect || {
+    TP_DOCKER_LEFT=true
     tp_record_fail "list docker containers"
     return 0
   }
@@ -3609,6 +3617,7 @@ export PATH
 TP_FAIL_COUNT=0
 TP_BENIGN_FAIL_COUNT=0
 TP_DOCKER_ENGINE_GONE=false
+TP_DOCKER_LEFT=false
 TP_NET_LEFT=false
 TP_STARTED_REMOVAL=false
 TP_INV_QUIET=false
