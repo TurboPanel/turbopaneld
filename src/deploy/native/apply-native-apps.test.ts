@@ -15,6 +15,7 @@ import {
   nativeAppBindingsFromPayload,
   nativeAppNodeVersions,
   removeNativeAppServices,
+  summarizeNativeAppFailure,
 } from "./apply-native-apps.ts";
 import {
   DEFAULT_NATIVE_APP_NODE_VERSION,
@@ -403,6 +404,82 @@ test("a failed health probe with no previous release says so instead of rolling 
   } finally {
     await host.cleanup();
   }
+});
+
+test("a failed first deploy stops the unit and says what the app last wrote", async () => {
+  const host = await makeTestHost();
+  const mock = createRunMock();
+  const run = mock.run;
+  mock.run = async (command, args) => {
+    if (args.includes("journalctl")) {
+      mock.calls.push({ command, args: [...args] });
+      return {
+        success: true,
+        stdout: [
+          "2026-10-04T15:01:48+00:00 alpha systemd[1]: x.service: Scheduled restart job, restart counter is at 2023.",
+          "2026-10-04T15:01:48+00:00 alpha sh[88959]: /bin/sh: 1: next: not found",
+          "2026-10-04T15:01:48+00:00 alpha systemd[1]: x.service: Failed with result 'exit-code'.",
+        ].join("\n"),
+        stderr: "",
+      };
+    }
+    return await run(command, args);
+  };
+  try {
+    const error = await assertRejects(
+      () =>
+        applyNativeAppServices(host.layout, ENVIRONMENT_ID, [makeApp()], {
+          ...applyOpts(host, mock, false),
+          run: mock.run,
+        }),
+      Error,
+    );
+    assertStringIncludes(error.message, "next: not found");
+    assertStringIncludes(error.message, "restarted it 2023 times");
+    assertStringIncludes(error.message, "leave the start command empty");
+    assertStringIncludes(error.message, "the app was stopped");
+    assertEquals(mock.systemctl("disable"), [nativeAppUnitName("svc-web")]);
+    assertEquals(mock.systemctl("reset-failed").length > 0, true);
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("a failed redeploy that rolls back leaves the unit enabled on the old release", async () => {
+  const host = await makeTestHost();
+  const mock = createRunMock();
+  const siteDir = join(
+    host.layout.principalHomeRoot,
+    USERNAME,
+    "sites",
+    "svc-web",
+  );
+  await Deno.mkdir(join(siteDir, "releases", "rel-old"), { recursive: true });
+  await Deno.mkdir(join(siteDir, "releases", "rel-new"), { recursive: true });
+  await Deno.symlink(join("releases", "rel-new"), join(siteDir, "current"));
+  try {
+    await assertRejects(
+      () =>
+        applyNativeAppServices(host.layout, ENVIRONMENT_ID, [makeApp()], {
+          ...applyOpts(host, mock, false),
+          bindings: bindings({ previousReleaseId: "rel-old" }),
+        }),
+      Error,
+    );
+    assertEquals(mock.systemctl("disable"), []);
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("summarizeNativeAppFailure reports the app's last line and the restart count", () => {
+  assertEquals(summarizeNativeAppFailure(""), "");
+  assertEquals(
+    summarizeNativeAppFailure(
+      "t alpha systemd[1]: u: Scheduled restart job, restart counter is at 7.\nt alpha node[9]: boom",
+    ),
+    ' (last message from the app: "t alpha node[9]: boom"; systemd restarted it 7 times)',
+  );
 });
 
 test("a failed health probe streams the unit journal into the transcript", async () => {

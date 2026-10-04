@@ -139,6 +139,16 @@ export function nativeAppNodeBinDir(
 
 const NATIVE_RUNTIME_PATH_TAIL = "/usr/bin:/bin";
 
+/**
+ * Crash-loop budget applied when the author declared no `restart_policy`:
+ * ten starts inside two minutes. systemd's own default (five in ten seconds)
+ * never trips with `RestartSec=2`, because the sixth start lands after the
+ * first has aged out of the window, so a unit that fails instantly restarted
+ * for ever.
+ */
+export const DEFAULT_NATIVE_APP_START_LIMIT_BURST = 10;
+export const DEFAULT_NATIVE_APP_START_LIMIT_INTERVAL_SEC = 120;
+
 /** `/etc/systemd/system/turbopanel-app-<serviceId>.service`. */
 export function nativeAppUnitName(serviceId: string): string {
   return `${NATIVE_APP_UNIT_PREFIX}${serviceId}.service`;
@@ -360,16 +370,12 @@ function restartLines(
 function startLimitLines(
   policy: EnvironmentDeployNativeAppRestartPolicy | undefined,
 ): string[] {
-  const lines: string[] = [];
-  if (policy?.maxAttempts !== undefined) {
-    lines.push(
-      `StartLimitBurst=${Math.max(1, Math.round(policy.maxAttempts))}`,
-    );
-  }
-  if (policy?.window !== undefined) {
-    lines.push(`StartLimitIntervalSec=${policy.window}`);
-  }
-  return lines;
+  const burst = policy?.maxAttempts === undefined
+    ? DEFAULT_NATIVE_APP_START_LIMIT_BURST
+    : Math.max(1, Math.round(policy.maxAttempts));
+  const interval = policy?.window ??
+    DEFAULT_NATIVE_APP_START_LIMIT_INTERVAL_SEC;
+  return [`StartLimitBurst=${burst}`, `StartLimitIntervalSec=${interval}`];
 }
 
 /**
@@ -476,7 +482,9 @@ export function nativeAppUnitContent(opts: NativeAppUnitOpts): string {
     `Group=${group}`,
     `Slice=${principalSliceName(username)}`,
     `WorkingDirectory=${workingDir}`,
-    `Environment=PATH=${nodeBinDir}:${NATIVE_RUNTIME_PATH_TAIL}`,
+    // The release's own `node_modules/.bin` leads, so a start command that
+    // names a local binary (`next start`, `vite preview`) resolves it.
+    `Environment=PATH=${workingDir}/node_modules/.bin:${nodeBinDir}:${NATIVE_RUNTIME_PATH_TAIL}`,
     `Environment=NODE_ENV=${app.appMode ?? "production"}`,
     `Environment=PORT=${app.listenPort}`,
     `Environment=HOST=127.0.0.1`,

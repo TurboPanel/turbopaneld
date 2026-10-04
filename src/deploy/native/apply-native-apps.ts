@@ -383,10 +383,9 @@ function emitOutputLines(
 async function emitNativeAppJournal(
   io: NativeAppIo,
   unit: string,
-): Promise<void> {
+): Promise<string> {
   const onOutput = io.onOutput;
-  if (!onOutput) return;
-  onOutput(
+  onOutput?.(
     "stderr",
     `--- ${unit} journal (last ${NATIVE_APP_JOURNAL_TAIL} lines) ---`,
   );
@@ -408,8 +407,32 @@ async function emitNativeAppJournal(
     lineCount = emitOutputLines(onOutput, "stderr", text);
   }
   if (lineCount === 0) {
-    onOutput("stderr", "(no journal output for this unit)");
+    onOutput?.("stderr", "(no journal output for this unit)");
   }
+  return text;
+}
+
+const RESTART_COUNTER_RE = /restart counter is at (\d+)/g;
+const SYSTEMD_LINE_RE = /\bsystemd\[\d+\]:/;
+
+/**
+ * Plain-words facts from the journal tail of a unit that never answered: the
+ * last line the app itself wrote and how many times systemd restarted it.
+ */
+export function summarizeNativeAppFailure(journal: string): string {
+  const lines = journal.split("\n").map((l) => l.trim()).filter(Boolean);
+  const appLine = lines.findLast((l) => !SYSTEMD_LINE_RE.test(l));
+  const counters = [...journal.matchAll(RESTART_COUNTER_RE)];
+  const restarts = counters.at(-1)?.[1];
+  const parts: string[] = [];
+  if (appLine) parts.push(`last message from the app: "${appLine}"`);
+  if (restarts) parts.push(`systemd restarted it ${restarts} times`);
+  if (appLine && /\bnot found\b/.test(appLine)) {
+    parts.push(
+      "the start command calls a program that is not in the release; leave the start command empty to use the default server.js",
+    );
+  }
+  return parts.length === 0 ? "" : ` (${parts.join("; ")})`;
 }
 
 /**
@@ -542,6 +565,9 @@ async function startNativeApp(
   // `enable --now` on first deploy, `restart` afterwards: an already-enabled
   // unit re-enabled is a no-op, but an already-running one needs a restart to
   // pick up the release `current` now points at.
+  // A unit systemd gave up on refuses every start until its failure is
+  // cleared, which would make a fixed redeploy fail the same way.
+  await systemctl(io, ["reset-failed", unit]);
   const active = await unitIsActive(io, unit);
   const action = active ? "restart" : "enable --now";
   io.onOutput?.(
@@ -572,9 +598,11 @@ async function startNativeApp(
       NATIVE_APP_HEALTH_TIMEOUT_MS / 1000
     }s`,
   );
-  await emitNativeAppJournal(io, unit);
+  const journal = await emitNativeAppJournal(io, unit);
+  const facts = summarizeNativeAppFailure(journal);
 
   const previous = binding.previousReleaseId;
+  await systemctl(io, ["reset-failed", unit]);
   const rolledBack = previous
     ? await rollbackNativeApp(io, layout, {
       app,
@@ -582,13 +610,18 @@ async function startNativeApp(
       previousReleaseId: previous,
     })
     : false;
+  if (!rolledBack) {
+    // Nothing healthy to fall back to: stop the failing unit rather than
+    // leave it restarting behind a deploy that already reported failure.
+    await systemctl(io, ["disable", "--now", unit]);
+  }
   throw new Error(
     `native app ${app.composeServiceName} did not answer on 127.0.0.1:${app.listenPort} within ${
       NATIVE_APP_HEALTH_TIMEOUT_MS / 1000
-    }s${
+    }s${facts}${
       rolledBack
         ? ` — rolled back to release ${previous}`
-        : " — no previous release to roll back to"
+        : " — no previous release to roll back to; the app was stopped"
     }`,
   );
 }

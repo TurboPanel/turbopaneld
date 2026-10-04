@@ -222,7 +222,7 @@ test("nativeAppUnitContent prefixes PATH with the vendored tenant Node bin", () 
   });
   assertStringIncludes(
     content,
-    "Environment=PATH=/opt/turbopanel/vendor/node-app/22/current/bin:/usr/bin:/bin",
+    "Environment=PATH=/srv/users/appuser/sites/svc-native-1/current/node_modules/.bin:/opt/turbopanel/vendor/node-app/22/current/bin:/usr/bin:/bin",
   );
   assertStringIncludes(
     content,
@@ -297,6 +297,18 @@ test("principalSliceContent emits account limits when provided", () => {
   assertStringIncludes(slice, "TasksMax=128");
 });
 
+test("an app with no restart_policy still gets a bounded crash-loop budget", () => {
+  const content = nativeAppUnitContent({
+    layout,
+    app,
+    username: "appuser",
+    environmentId: "env-1",
+  });
+  const unitSection = content.slice(0, content.indexOf("[Service]"));
+  assertStringIncludes(unitSection, "StartLimitBurst=10\n");
+  assertStringIncludes(unitSection, "StartLimitIntervalSec=120\n");
+});
+
 test("an app with no restart_policy keeps the historical supervision lines", () => {
   // The regression that matters most: adding the field must not rewrite units
   // that existed before it. A payload without a policy has to render exactly
@@ -310,7 +322,6 @@ test("an app with no restart_policy keeps the historical supervision lines", () 
   });
   assertStringIncludes(content, "\nRestart=on-failure\n");
   assertStringIncludes(content, "\nRestartSec=2\n");
-  assertEquals(content.includes("StartLimit"), false);
   assertEquals(content.includes("X-TurboPanel-Labels"), false);
 });
 

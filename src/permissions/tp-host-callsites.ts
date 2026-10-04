@@ -1968,6 +1968,12 @@ const SITES: CallSite[] = [
     },
   ),
   tpHost(
+    'src/deploy/native/apply-native-apps.ts|systemctl(io,["reset-failed",unit])',
+    {
+      argv: ["systemctl", "reset-failed", APP_UNIT],
+    },
+  ),
+  tpHost(
     'src/deploy/native/apply-native-apps.ts|systemctl(io,["is-active","--quiet",unit])',
     {
       argv: ["systemctl", "is-active", "--quiet", APP_UNIT],
