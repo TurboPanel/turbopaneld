@@ -244,6 +244,13 @@ export interface InstanceClientOptions {
 
 export const DEFAULT_INITIAL_BACKOFF_MS = 2_000;
 export const DEFAULT_MAX_BACKOFF_MS = 30_000;
+/** Smallest reconnect delay; a tiny floor keeps the draw truly spread (full jitter). */
+export const RECONNECT_FLOOR_MS = 250;
+/**
+ * Widest first-attempt window after a clean drop. A control-plane deploy drops
+ * every daemon at once; spreading them over this window avoids a handshake wave.
+ */
+export const RECONNECT_FIRST_WINDOW_MS = 8_000;
 export const PARKED_BACKOFF_MIN_MS = 5 * 60_000;
 export const PARKED_BACKOFF_MAX_MS = 60 * 60_000;
 /**
@@ -402,6 +409,7 @@ export class InstanceClient {
   #stopped = false;
   #connectLoopStarted = false;
   #backoffMs: number;
+  #wideNextReconnect = false;
   #hadStableSession = false;
   readonly #devSync = new Map<string, DevSyncState>();
   /** Transfer ids already refused at dev-sync-begin (managed / non-checkout). */
@@ -808,9 +816,16 @@ export class InstanceClient {
     this.#backoffMs = nextBackoffMs(this.#backoffMs, this.#maxBackoffMs);
   }
 
-  /** Full-jitter sleep: random delay in [floor, ceiling] inclusive. */
+  /** Full-jitter sleep: random delay in [RECONNECT_FLOOR_MS, backoff ceiling] inclusive. */
   #nextReconnectDelayMs(): number {
-    return fullJitterMs(this.#initialBackoffMs, this.#backoffMs);
+    const wide = this.#wideNextReconnect;
+    this.#wideNextReconnect = false;
+    return fullJitterMs(
+      RECONNECT_FLOOR_MS,
+      wide
+        ? Math.max(this.#backoffMs, RECONNECT_FIRST_WINDOW_MS)
+        : this.#backoffMs,
+    );
   }
 
   async fetchVersion(): Promise<{ commit: string; branch: string }> {
@@ -1461,6 +1476,9 @@ export class InstanceClient {
       now() - connectedAt >= STABLE_SESSION_MS;
     if (wasStableSession) {
       this.#resetBackoff();
+      // A drop after a healthy session is how a control-plane deploy looks to
+      // the whole fleet at once: spread that first reconnect over a wide window.
+      this.#wideNextReconnect = true;
     } else {
       this.#increaseBackoff();
     }
