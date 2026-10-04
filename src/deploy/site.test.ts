@@ -6,9 +6,11 @@ import {
   defaultIndexHtml,
   formatHostingEnvFile,
   nginxSiteConfig,
-  openlitespeedLsapiProcessorName,
+  OPENLITESPEED_HTTPD_WORKERS,
   openlitespeedLsphpBinaryPath,
   openlitespeedMainConfig,
+  openlitespeedPhpMaxConns,
+  openlitespeedPhpProcessorName,
   openlitespeedSiteFragment,
   openlitespeedSiteName,
   openlitespeedVhostConfig,
@@ -28,6 +30,7 @@ import {
   siteEngineUnixUser,
 } from "./site.ts";
 import { caddyHttpUpstream, siteSnippet } from "./ingress.ts";
+import { sitePhpRuntimeChildren } from "./site/php-runtime.ts";
 import { resolveLayout } from "../paths/layout.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 
@@ -176,6 +179,49 @@ test("nginxSiteConfig listens on loopback only", () => {
   assertStringIncludes(conf, "root /var/lib/turbopanel/sites/env/site/public;");
 });
 
+test("site engines follow a symlink only when its owner matches the target's", () => {
+  const site = {
+    composeServiceName: "site",
+    root: "public",
+    listenPort: 18080,
+  } as const;
+  const docroot = "/srv/users/alice/sites/web/current/public";
+  const nginx = nginxSiteConfig({ ...site, engine: "nginx" }, docroot);
+  assertStringIncludes(
+    nginx,
+    "disable_symlinks if_not_owner from=$document_root;",
+  );
+  // A sealed release follows no link below its root: owner-match cannot see a
+  // second hop through the tenant's `shared/` (`public/x -> ../shared/evil`,
+  // `shared/evil -> another tenant's root-owned file`).
+  const release = nginxSiteConfig(
+    { ...site, engine: "nginx" },
+    docroot,
+    null,
+    { releaseBacked: true },
+  );
+  assertStringIncludes(release, "disable_symlinks on from=$document_root;");
+  assertEquals(release.includes("if_not_owner"), false);
+
+  const apache = apacheSiteConfig({ ...site, engine: "apache" }, docroot);
+  assertStringIncludes(apache, "Options Indexes SymLinksIfOwnerMatch\n");
+  assertEquals(apache.includes("FollowSymLinks"), false);
+  // `.htaccess` may not turn FollowSymLinks back on.
+  assertEquals(apache.includes("AllowOverride All"), false);
+  assertStringIncludes(
+    apache,
+    "Options=Indexes,MultiViews,SymLinksIfOwnerMatch\n",
+  );
+
+  const ols = openlitespeedSiteFragment(
+    "env",
+    { ...site, engine: "openlitespeed" },
+    "/etc/turbopanel/openlitespeed/vhosts/tp_env_site/vhconf.conf",
+    docroot,
+  );
+  assertStringIncludes(ols, "allowSymbolLink           2\n");
+});
+
 test("apacheSiteConfig refuses a PHP site with no fpm socket", () => {
   assertThrows(
     () =>
@@ -224,14 +270,16 @@ test("apacheSiteConfig listens on loopback and proxies PHP to php-fpm", () => {
 });
 
 test("phpFpmPoolAdminDirectives drops what it cannot vouch for", () => {
-  // The security property, asserted directly: a value the daemon has not
-  // validated is DROPPED, never escaped. Both render targets are line-oriented
-  // and unquoted, so a dropped value has no escaping bug to have.
-  assertEquals(
-    phpFpmPoolAdminDirectives({
-      settings: { memory_limit: "256M\nevil = 1" },
-    }),
-    [],
+  // The security property, asserted directly: a value outside the allowlist is
+  // REFUSED, never escaped. Both render targets are line-oriented and
+  // unquoted, so a refused value has no escaping bug to have.
+  assertThrows(
+    () =>
+      phpFpmPoolAdminDirectives({
+        settings: { memory_limit: "256M\nevil = 1" },
+      }),
+    Error,
+    "php.settings.memory_limit must use only",
   );
   // An unknown directive never renders, however well-formed it looks.
   assertEquals(
@@ -281,17 +329,21 @@ test("phpFpmPoolOverrides gates pool tuning and drops the rest", () => {
   );
 });
 
-test("phpAdminValues drops empty, over-long, and newline settings", () => {
+test("phpAdminValues drops empty and over-long settings, refuses a newline", () => {
   assertEquals(
     phpAdminValues({
       settings: {
         memory_limit: "   ",
         max_execution_time: "x".repeat(513),
-        display_errors: "Off\nOn",
         upload_max_filesize: "32M",
       },
     }),
     [{ key: "upload_max_filesize", value: "32M" }],
+  );
+  assertThrows(
+    () => phpAdminValues({ settings: { display_errors: "Off\nOn" } }),
+    Error,
+    "php.settings.display_errors must use only",
   );
 });
 
@@ -556,7 +608,75 @@ test("openlitespeedVhostConfig serves a static document root with no directory l
   const conf = openlitespeedVhostConfig();
   assertStringIncludes(conf, "docRoot $VH_ROOT/");
   assertStringIncludes(conf, "autoIndex 0");
-  assertStringIncludes(conf, "allowBrowse 0");
+  // `allowBrowse` is OpenLiteSpeed's "Accessible" flag: 0 answers 403 for `/`.
+  assertStringIncludes(conf, "allowBrowse 1");
+  assertEquals(conf.includes("allowBrowse 0"), false);
+});
+
+/** The deny rules as JS regexes, read back from the rendered vhost config. */
+function olsDenyRules(conf: string): RegExp[] {
+  return [...conf.matchAll(/^RewriteRule (\S+) - \[F,L,NC\]$/gm)].map(
+    (m) => new RegExp(m[1], "i"),
+  );
+}
+
+function olsDenied(conf: string, path: string): boolean {
+  return olsDenyRules(conf).some((re) => re.test(path));
+}
+
+test("openlitespeedVhostConfig never serves script source as plain text", () => {
+  const staticConf = openlitespeedVhostConfig();
+  const phpConf = openlitespeedVhostConfig({
+    processorName: "php_x",
+    mode: "lsphp-detached",
+    socket: "/run/turbopanel-php-x/php.sock",
+    children: 10,
+    lockedValues: [],
+  });
+  assertEquals(olsDenyRules(staticConf).length, 2);
+  const everywhere = [
+    "a.php3",
+    "a.php8",
+    "dir/a.PHP5",
+    "a.phtml",
+    "a.PhAr",
+    "a.phps",
+    "a.pht",
+    "a.inc",
+    "a.cgi",
+    "a.php.bak",
+    "a.php~",
+    "a.PHP.old",
+    "a.php3.bak",
+    "a.php3/x",
+  ];
+  for (const path of everywhere) {
+    assertEquals(olsDenied(staticConf, path), true, `static ${path}`);
+    assertEquals(olsDenied(phpConf, path), true, `php ${path}`);
+  }
+  // Static sites run no PHP, so `.php` (any case, with path-info) is denied.
+  for (const path of ["a.php", "a.PHP", "dir/a.php/x", "a.Php/x/y"]) {
+    assertEquals(olsDenied(staticConf, path), true, `static ${path}`);
+  }
+  // On a PHP site the handler runs `.php`, with or without path-info.
+  for (const path of ["a.php", "index.php/route", "dir/a.php/x"]) {
+    assertEquals(olsDenied(phpConf, path), false, `php ${path}`);
+  }
+  // Ordinary static files, including shell/python/perl downloads, are served.
+  for (
+    const path of [
+      "style.css",
+      "install.sh",
+      "tool.py",
+      "report.pl",
+      "phpinfo.txt",
+      "a.phpx",
+      "img/php.png",
+    ]
+  ) {
+    assertEquals(olsDenied(staticConf, path), false, `static ${path}`);
+    assertEquals(olsDenied(phpConf, path), false, `php ${path}`);
+  }
 });
 
 test("openlitespeedMainConfig assembles a single httpd_config.conf from fragments", async () => {
@@ -576,6 +696,14 @@ test("openlitespeedMainConfig assembles a single httpd_config.conf from fragment
     const conf = openlitespeedMainConfig(layout, [fragment]);
     assertStringIncludes(conf, "user                              tpols");
     assertStringIncludes(conf, "disableWebAdmin                   1");
+    // maxConns counts per worker, so the worker count is pinned.
+    assertStringIncludes(
+      conf,
+      `httpdWorkers                      ${OPENLITESPEED_HTTPD_WORKERS}`,
+    );
+    // Site files are shared with tpols by group (0640); without this OLS
+    // demands the world-read bit and answers 403.
+    assertStringIncludes(conf, "requiredPermissionMask    000");
     assertStringIncludes(
       conf,
       `swappingDir                       ${layout.stateDir}/openlitespeed/swap`,
@@ -768,41 +896,80 @@ test("phpSeriesForDeploy collects every distinct series, sorted", () => {
   assertEquals(phpSeriesForDeploy([]), []);
 });
 
-test("openlitespeedVhostConfig runs PHP through a suEXEC LSAPI processor", () => {
-  const processorName = openlitespeedLsapiProcessorName("tp_env1_phpapp");
-  const conf = openlitespeedVhostConfig({
-    processorName,
-    lsphpPath: "/opt/turbopanel/vendor/lsphp/8.4/current/bin/lsphp",
-    user: "site_user",
-    group: "site_user-grp",
-    adminValues: [
-      { key: "memory_limit", value: "256M" },
-      { key: "max_execution_time", value: "30" },
-    ],
-  });
-  assertEquals(processorName, "lsphp_tp_env1_phpapp");
-  assertStringIncludes(conf, "extprocessor lsphp_tp_env1_phpapp{");
-  assertStringIncludes(conf, "type                      lsapi");
-  assertStringIncludes(
-    conf,
-    "path                      /opt/turbopanel/vendor/lsphp/8.4/current/bin/lsphp",
-  );
-  assertStringIncludes(conf, "extUser                   site_user");
-  assertStringIncludes(conf, "extGroup                  site_user-grp");
-  assertStringIncludes(
-    conf,
-    "add                       lsapi:lsphp_tp_env1_phpapp php",
-  );
-  assertStringIncludes(conf, "phpIniOverride {");
-  assertStringIncludes(conf, "php_admin_value memory_limit 256M");
-  assertStringIncludes(conf, "php_admin_value max_execution_time 30");
-  assertStringIncludes(conf, "indexFiles index.php, index.html");
-  // No shared pool: OLS never touches php-fpm.
-  if (conf.includes("php_admin_value[")) {
-    throw new Error(
-      "OpenLiteSpeed uses phpIniOverride, not php-fpm pool syntax",
+test("openlitespeedVhostConfig hands PHP to the site's own runtime, never starting it", () => {
+  const processorName = openlitespeedPhpProcessorName("tp_env1_phpapp");
+  assertEquals(processorName, "php_tp_env1_phpapp");
+  const socket = "/run/turbopanel-php-phpapp-0a1b2c3d4e5f-lsd84/php.sock";
+  const want = { "lsphp-detached": "lsapi", fastcgi: "fcgi", fpm: "fcgi" };
+  for (const [mode, type] of Object.entries(want)) {
+    const conf = openlitespeedVhostConfig({
+      processorName,
+      mode: mode as keyof typeof want,
+      socket,
+      children: 10,
+      lockedValues: [{ key: "memory_limit", value: "256M" }],
+    });
+    assertStringIncludes(
+      conf,
+      "phpIniOverride {\n  php_admin_value memory_limit 256M\n}",
+    );
+    assertStringIncludes(conf, "extprocessor php_tp_env1_phpapp{");
+    assertStringIncludes(conf, `type                      ${type}`);
+    assertStringIncludes(conf, `address                   uds://${socket}`);
+    // systemd runs PHP as the owner; OpenLiteSpeed only connects.
+    assertStringIncludes(conf, "autoStart                 0");
+    assertStringIncludes(
+      conf,
+      `add                       ${type}:php_tp_env1_phpapp php`,
+    );
+    assertStringIncludes(conf, "indexFiles index.php, index.html");
+    // OpenLiteSpeed runs as tpols and cannot switch users: no suEXEC lines,
+    // no binary to start, and the settings live in the runtime's php.ini.
+    for (
+      const dead of [
+        "extUser",
+        "extGroup",
+        "path ",
+        "runOnStartUp",
+        "/run/turbopanel-ols",
+        "uds://tmp/",
+        "allowBrowse 0",
+      ]
+    ) {
+      assertEquals(conf.includes(dead), false, `${mode}: ${dead}`);
+    }
+  }
+});
+
+test("OpenLiteSpeed workers × maxConns never exceeds the runtime's children", () => {
+  const cases = [
+    ["fastcgi", []],
+    ["fpm", []],
+    ["fpm", [{ key: "pm.max_children", value: "3" }]],
+    ["fpm", [{ key: "pm.max_children", value: "1" }]],
+    ["lsphp-detached", []],
+  ] as const;
+  for (const [mode, pool] of cases) {
+    const children = sitePhpRuntimeChildren(mode, pool);
+    const maxConns = openlitespeedPhpMaxConns(children);
+    // Fewer children than workers still needs one connection per worker.
+    assertEquals(
+      OPENLITESPEED_HTTPD_WORKERS * maxConns <= children || maxConns === 1,
+      true,
+      `${mode} ${
+        JSON.stringify(pool)
+      }: ${maxConns} × ${OPENLITESPEED_HTTPD_WORKERS} > ${children}`,
     );
   }
+  assertEquals(
+    openlitespeedPhpMaxConns(sitePhpRuntimeChildren("fastcgi", [])),
+    2,
+  );
+  assertEquals(
+    openlitespeedPhpMaxConns(sitePhpRuntimeChildren("lsphp-detached", [])),
+    5,
+  );
+  assertEquals(openlitespeedPhpMaxConns(sitePhpRuntimeChildren("fpm", [])), 10);
 });
 
 test("openlitespeedLsphpBinaryPath addresses the vendored series", async () => {
@@ -821,37 +988,27 @@ test("openlitespeedLsphpBinaryPath addresses the vendored series", async () => {
   }
 });
 
-test("openlitespeedSiteFragment scopes a PHP vhost to the principal identity", () => {
+test("openlitespeedSiteFragment declares no identity OpenLiteSpeed cannot take", () => {
   const site: SiteApplySpec = {
     composeServiceName: "phpapp",
     engine: "openlitespeed",
     root: "public",
     listenPort: 18080,
-    php: { version: "8.4" },
+    php: { version: "8.4", mode: "lsphp-detached" },
     principal: { principalId: "p-1", username: "siteowner" },
   };
   const vhConf =
     "/etc/turbopanel/openlitespeed/vhosts/tp_env1_phpapp/vhconf.conf";
   const root = "/var/lib/turbopanel/sites/env1/phpapp/public";
-
   const fragment = openlitespeedSiteFragment("env1", site, vhConf, root, null, {
     php: true,
-    identity: { user: "siteowner", group: "siteowner-grp" },
   });
-  // Shared hosting suEXEC is a vhost property, not only an extprocessor one.
-  assertStringIncludes(fragment, "user                      siteowner");
-  assertStringIncludes(fragment, "group                     siteowner-grp");
-  assertStringIncludes(fragment, "setUIDMode                0");
-
-  // A static vhost has no script to run, so it inherits the server identity.
-  const staticFragment = openlitespeedSiteFragment(
-    "env1",
-    { ...site, php: undefined, principal: undefined },
-    vhConf,
-    root,
-  );
-  assertEquals(staticFragment.includes("setUIDMode"), false);
-  assertEquals(staticFragment.includes("\n  user "), false);
+  // OpenLiteSpeed runs as tpols: a per-vhost user switch never took effect
+  // (WP0). PHP runs as the owner through its systemd runtime instead.
+  assertEquals(fragment.includes("setUIDMode"), false);
+  assertEquals(fragment.includes("\n  user "), false);
+  assertEquals(fragment.includes("\n  group "), false);
+  assertStringIncludes(fragment, "enableScript              1");
 });
 
 test("openlitespeedSiteFragment enables scripts only for a PHP site", () => {

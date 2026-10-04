@@ -60,13 +60,70 @@ entitlements — one containment set (`allManagedGroups`), or a principal
 downgraded from shell to files-only would keep `tpshell` because the entitlement
 pass did not recognize it.
 
+**Every principal is matched, including one with no level.** `tpprincipal`
+(registry `accessGroups.principal`) is joined by every principal in
+`resolveManagedGroups`, whatever the wire says, and a failed join fails the
+reconcile instead of being logged. Its `Match` block comes after the level
+blocks and refuses every sign-in method (`PubkeyAuthentication no`,
+`AuthorizedKeysFile none`, …) and every forward. Because `sshd` keeps the
+first value of each keyword, a level member is untouched; the block only
+decides for a principal with no level, which before matched nothing and fell
+through to the host defaults — its own `~/.ssh/authorized_keys` and
+`AllowTcpForwarding yes`, so a planted key was a tunnel into the host's
+loopback and LAN (found live 2026-10-02). Rule: the backstop may only set
+keywords **every** level block already sets (`apply.test.ts` pins it); a
+`ForceCommand` or `ChrootDirectory` there would leak onto `tpshell` members.
+The SFTP chroot lives in `sftpLevelDirectives` for that reason.
+For the same reason the drop-in is ensured on **every** deploy that
+materializes a principal (`applyDeploySshAccess`), not only when keys are
+declared; a keyless principal gets no key file. Every level block also sets
+`AllowStreamLocalForwarding no`, `PermitOpen none` and `PermitListen none`.
+
 **Password sign-in is a third group plus a shadow hash.** `tppasswd` is
 additive — its `Match` block sets only `PasswordAuthentication yes` and sits
 **first** in the drop-in, because when several `Match` blocks apply `sshd`
 takes the first instance of each keyword; everything else still comes from the
 member's level block, and non-members keep the level blocks' explicit `no`.
+Because that block cannot be conditioned on a level, `resolveManagedGroups`
+never grants `tppasswd` without `tpsftp` or `tpshell` (and revokes it): a
+password group alone would sign in a no-level account with a full shell.
 The hash itself is sha512-crypt, computed control-plane side (the plaintext
 never rides the wire), applied by `ensurePrincipalPassword` in
 `ensure-principal.ts` via `chpasswd -e` over **stdin** — never argv, which
 `ps` can read. A material with no `passwordHash` locks the account password
 (`usermod -p !`), the state `useradd` created it in.
+
+**The SFTP chroot is a per-host switch, on last.** With the switch on, the
+`tpsftp` block gets `ChrootDirectory <root>/%u` and
+`ForceCommand internal-sftp -d /home`: the jail is the root-owned principal
+home, the session starts in `home/`, and `sites/` is visible read-only. `%u`,
+not `%h`, because the passwd home is `home/` one level down. The switch is
+`/etc/ssh/turbopanel-sftp-chroot`, outside every tp-host tree, so no generic
+verb can write or remove it: only `tp-host sftp-chroot on` (which refuses
+while any member — supplementary or primary `tpsftp` — fails
+`sftp-chroot check`: a chroot path component not root-owned or group/world
+writable, no principal-owned `home/`, a passwd home other than
+`<root>/<p>/home`, or `tpshell` held as well) and `off`, the ungated
+rollback. The daemon asks `sftp-chroot status` (`on <root>` | `off`) and
+renders the root tp-host validated, never its own environment's; an
+unreadable or malformed answer aborts the reconcile rather than unjailing.
+When on, each reconcile re-runs `check` (findings become warnings and the jail
+stays — fail closed for that member), and after `sshd -t` runs
+`sftp-chroot verify`, which asks `sshd -T -C user=<member>` whether the jail
+is really effective; a refusal rolls the drop-in back like a failed `-t`.
+
+**Forwarding is asserted, not assumed** (an administrator's earlier drop-in
+with `Match all` + `AllowTcpForwarding yes` outranks ours). After `sshd -t`,
+and before any reload, the daemon runs `tp-host sshd -T -C
+user=<u>,host=localhost,addr=127.0.0.1` for one real account per level: the
+first `tpsftp` member, the first `tpshell` member, and the first principal in
+neither (`getent`, no root). `Match Group` resolves groups from the account
+database, so a made-up user would match nothing; a level with no account is
+skipped. Every one of AllowTcpForwarding, AllowStreamLocalForwarding,
+AllowAgentForwarding, X11Forwarding, PermitTunnel, GatewayPorts must be `no` (our Match blocks set each one, so the assertion checks our own configuration)
+and PermitOpen / PermitListen `none` (a keyword sshd does not report fails
+too). Any other value restores the previous drop-in and does not reload.
+`tp-host sshd` accepts `-t`, `-T`, or exactly `-T -C user=<name>,host=localhost,addr=127.0.0.1`
+(plain account name, no other `-C` key, no other arguments). The check runs only
+when the drop-in changes.
+`server.principals.reconcile` reports `sftpChroot`.

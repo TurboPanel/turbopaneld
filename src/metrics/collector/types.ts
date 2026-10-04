@@ -1,3 +1,4 @@
+import type { HostTextSample } from "./host-text.ts";
 import type { MetricsCapabilityPlan } from "../capability-plan.ts";
 import type { MetricsSample } from "../../contracts/metrics-contract.ts";
 import type {
@@ -7,16 +8,30 @@ import type {
 import type { DatabaseProxyAdapterSet } from "./database-proxy/adapter.ts";
 import type { DirectoryUsageSnapshot } from "./directory-usage.ts";
 import type { DockerUsageReading } from "./docker-usage.ts";
+import type {
+  ContainerHealthReading,
+  ContainerHealthSample,
+} from "./docker-containers.ts";
 import type { ManagedEngineCensusReading } from "./managed-engines.ts";
 import type { TopLevelEventCollector } from "./events/index.ts";
 import type { GpuAdapterSet } from "./gpu/adapter.ts";
 import type { IngressAdapterSet } from "./ingress/adapter.ts";
 import type { RouterAdapterSet } from "./router/adapter.ts";
 import type { SensorIo } from "./sensors/discovery.ts";
+import type { TlsExpiryReading } from "./tls-expiry.ts";
 
 /** Outcome of a single collect() invocation: an entity-grouped `MetricsSample`. */
 export type MetricsCollectResult =
-  | { supported: true; sample: MetricsSample }
+  | {
+    supported: true;
+    sample: MetricsSample;
+    /**
+     * The container health reading behind `sample.extended.docker` (and its
+     * unhealthy-name text), kept for callers that want the raw sample. Absent
+     * when Docker is not readable.
+     */
+    containers?: ContainerHealthSample;
+  }
   | { supported: false; reason: string };
 
 /**
@@ -308,6 +323,8 @@ export type CollectorDeps = {
    * stub this so FakeClock microtask draining never waits on real directory
    * I/O (hundreds of PID entries, plus a possible `ls` fallback).
    */
+  /** v7 free-text host facts (`host-text.ts`); the scheduler strips them unless `metrics-v7` is negotiated. */
+  hostText?: () => Promise<HostTextSample>;
   countProcesses?: () => number | null | Promise<number | null>;
   /**
    * GPU telemetry adapters (sysfs/NVML/DCGM), constructed once at daemon
@@ -363,6 +380,13 @@ export type CollectorDeps = {
    */
   directoryUsage?: () => DirectoryUsageSnapshot;
   /**
+   * Cached hosting-Caddy certificate expiry (`tls-expiry.ts`), polled every
+   * few hours through `tp-host cert-dates`. Same getter discipline as
+   * {@link CollectorDeps.directoryUsage}; `null` until the first poll lands
+   * or when no Caddy-issued certificate exists.
+   */
+  tlsExpiry?: () => TlsExpiryReading | null;
+  /**
    * Cached Docker `GET /system/df` rollup — the `managed.docker` family, plus
    * the `dockerUsedBytes` total `managed.storage` carries. Same getter
    * discipline and the same reason as {@link CollectorDeps.directoryUsage}.
@@ -372,6 +396,11 @@ export type CollectorDeps = {
    * `storage.dockerUsedBytes` stays `null`.
    */
   dockerUsage?: () => DockerUsageReading | null;
+  /**
+   * Cached container health/resource reading (`docker-containers.ts`); same
+   * getter discipline. `null` when Docker is absent or not yet read.
+   */
+  containers?: () => ContainerHealthReading | null;
   /**
    * Cached managed-engine census — the twelve per-engine fields of
    * `managed.storage` (`managed-engines.ts`'s `ManagedEngineSampler`). Same

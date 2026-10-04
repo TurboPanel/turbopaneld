@@ -195,10 +195,37 @@ export function pathExists(path: string): boolean {
   }
 }
 
+/** Asks whether this process may read `path` (a seam: tests pass a fake). */
+export type ReadPermissionQuery = (path: string) => Deno.PermissionState;
+
+function queryReadPermission(path: string): Deno.PermissionState {
+  try {
+    return Deno.permissions.querySync({ name: "read", path }).state;
+  } catch {
+    return "denied";
+  }
+}
+
+/**
+ * Existence probe that never raises a permission prompt: a read this process
+ * has not been granted counts as "not there". Probing for a checkout runs
+ * before anything else (even `turbopaneld --version`), so it must not ask an
+ * operator for read access to paths they did not mean to touch.
+ */
+export function probeExists(
+  path: string,
+  query: ReadPermissionQuery = queryReadPermission,
+): boolean {
+  return query(path) === "granted" && pathExists(path);
+}
+
 /** True when `root` looks like a daemon source or dev checkout tree. */
-export function hasDaemonCheckout(root: string): boolean {
-  return pathExists(join(root, "orchestration", "ansible.cfg")) ||
-    pathExists(join(root, "main.ts"));
+export function hasDaemonCheckout(
+  root: string,
+  query: ReadPermissionQuery = queryReadPermission,
+): boolean {
+  return probeExists(join(root, "orchestration", "ansible.cfg"), query) ||
+    probeExists(join(root, "main.ts"), query);
 }
 
 /**
@@ -456,6 +483,48 @@ export function resolveLayout(
 }
 
 /**
+ * The folders the daemon account (`tp`) writes directly under the config and
+ * state roots (P1-1 layout). `/etc/turbopanel` and `/var/lib/turbopanel` end up
+ * root-owned; these leaves are the only entries below them that `tp` owns, so
+ * it can create and rename inside them but cannot swap any root-owned sibling.
+ * `orchestration/roles/daemon-layout/defaults/main.yml` creates exactly this
+ * list (pinned by `src/orchestration/daemon-layout-leaves.test.ts`). Root
+ * tasks may touch a leaf itself, never anything inside it.
+ */
+export interface DaemonLeaf {
+  /** Path relative to the config or state root. */
+  name: string;
+  /** Octal mode string, as Ansible takes it. */
+  mode: string;
+}
+
+export const DAEMON_CONFIG_LEAVES: readonly DaemonLeaf[] = [
+  { name: "docker", mode: "0750" },
+  { name: "proxysql", mode: "0750" },
+  { name: "orchestrator", mode: "0750" },
+  { name: "node-apps", mode: "0750" },
+  // The hosting Caddy's config; the hosting-caddy role adds its default ACL.
+  { name: "hosting", mode: "0750" },
+];
+
+export const DAEMON_STATE_LEAVES: readonly DaemonLeaf[] = [
+  { name: "update", mode: "0750" },
+  { name: "system", mode: "0750" },
+  { name: "deployments", mode: "0750" },
+  { name: "ingress", mode: "0750" },
+  { name: "sites", mode: "0750" },
+  { name: "storage", mode: "0750" },
+  { name: "managed", mode: "0750" },
+  { name: "managed-intent", mode: "0700" },
+  { name: "backup", mode: "0750" },
+  { name: "spool", mode: "0700" },
+  { name: "network", mode: "0700" },
+  { name: "cloudflared/tunnels", mode: "0750" },
+  { name: "tls", mode: "0750" },
+  { name: "orchestrator", mode: "0750" },
+];
+
+/**
  * TurboFabric generated-state root (`<daemonStateDir>/network/`).
  * Private key lives at `wireguard/private.key` (mode 0600); reconcilable
  * facts at `state.json`. Never under `runDir`.
@@ -545,12 +614,76 @@ export function siteSharedDir(
   return join(siteRoot(principalHome, serviceId), "shared");
 }
 
-/** Principal home for `username` under the layout's principal home root. */
+/**
+ * Principal home for `username` under the layout's principal home root.
+ *
+ * `root:<username>-grp 0750`, like `sites/` and `volumes/` inside it: a
+ * directory's owner can rename its entries, so every directory holding a
+ * root-owned path is root's. The principal writes only into the leaves —
+ * {@link principalUserHome}, {@link principalDataDir}, {@link principalTmpDir}
+ * and each site's `shared/` / `webroot/`. tp-host enforces the owners and
+ * modes.
+ */
 export function principalHomePath(
   layout: Pick<LayoutPaths, "principalHomeRoot">,
   username: string,
 ): string {
   return join(layout.principalHomeRoot, username);
+}
+
+/** Release staging root, beside the principal homes (tp-host `publish-open`). */
+export const RELEASE_STAGING_DIRNAME = ".tp-staging";
+
+/**
+ * `<principalHomeRoot>/.tp-staging/<username>.<serviceId>.<releaseId>` — the
+ * daemon's own copy of a release, which tp-host `publish` seals in place and
+ * renames into `releases/<releaseId>`. It sits on the homes' filesystem so
+ * that step is a rename, and the leading dot keeps it apart from every
+ * principal name.
+ */
+export function releaseStagingDir(
+  layout: Pick<LayoutPaths, "principalHomeRoot">,
+  release: { username: string; serviceId: string; releaseId: string },
+): string {
+  return join(
+    layout.principalHomeRoot,
+    RELEASE_STAGING_DIRNAME,
+    `${release.username}.${release.serviceId}.${release.releaseId}`,
+  );
+}
+
+/**
+ * `<home>/home` — the account's passwd home (`$HOME`): dotfiles, shell
+ * history, tool caches. `<username>:<username>-grp 0700`.
+ */
+export function principalUserHome(
+  layout: Pick<LayoutPaths, "principalHomeRoot">,
+  username: string,
+): string {
+  return join(principalHomePath(layout, username), "home");
+}
+
+/**
+ * `<home>/data` — private persistent data not tied to one site (SQLite
+ * files, state shared by the principal's services). Never served.
+ * `<username>:<username>-grp 0700`.
+ */
+export function principalDataDir(
+  layout: Pick<LayoutPaths, "principalHomeRoot">,
+  username: string,
+): string {
+  return join(principalHomePath(layout, username), "data");
+}
+
+/**
+ * `<home>/tmp` — the principal's own `TMPDIR`, off the shared `/tmp`.
+ * `<username>:<username>-grp 0700`.
+ */
+export function principalTmpDir(
+  layout: Pick<LayoutPaths, "principalHomeRoot">,
+  username: string,
+): string {
+  return join(principalHomePath(layout, username), "tmp");
 }
 
 /** Host WireGuard private key for interface `tp0`. */

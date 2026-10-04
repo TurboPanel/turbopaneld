@@ -234,6 +234,13 @@ export async function collectBlockTopology(
     allNames,
     (name) => collectOneDevice(name, wholeDiskNames, identities, deps, root),
   );
-  const results = devices.filter((device) => device !== undefined);
+  // Allowlist: partitions of a kept disk are never drives, and dm/md devices
+  // only count when they back a mount.
+  const results = devices.filter((device) => device !== undefined).filter((
+    device,
+  ) =>
+    device.deviceType !== "partition" &&
+    (device.deviceType !== "virtual" || device.isServiceDevice)
+  );
   return results.sort((a, b) => a.deviceId.localeCompare(b.deviceId));
 }

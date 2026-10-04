@@ -199,6 +199,11 @@ test("a leaf outside the renewal window is left alone", async () => {
       closeWindow: () => Promise.resolve(),
       reload: () => Promise.resolve(),
     });
+    // The issuer's Caddy storage is tpcaddy:tp 2750 on a real host: the
+    // instance user cannot write there, so its wait state must live elsewhere.
+    const issuerDir = join(layout.stateDir, "instance-acme");
+    await Deno.mkdir(issuerDir, { recursive: true, mode: 0o750 });
+    await Deno.chmod(issuerDir, 0o550);
     await scheduler.check();
     assertEquals(issued, 0);
     assertEquals(sent, [{
@@ -212,8 +217,12 @@ test("a leaf outside the renewal window is left alone", async () => {
     assertEquals(sent.length, 1);
     const statePath = join(
       layout.stateDir,
-      "instance-acme",
-      "renewal-state.json",
+      "instance",
+      "acme-renewal-state.json",
+    );
+    assertEquals(
+      Array.from(Deno.readDirSync(issuerDir)).map((entry) => entry.name),
+      [],
     );
     const saved = JSON.parse(await Deno.readTextFile(statePath));
     saved.reported["not a host"] = "x";

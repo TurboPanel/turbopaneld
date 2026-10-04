@@ -24,6 +24,8 @@ function stubIo(overrides: Partial<DaemonRunIo> = {}): {
   exits: number[];
   fabricRestores: number;
   fabricReinstalls: number;
+  firewallReinstalls: number;
+  phpReconciles: number;
   instanceStops: number;
   sentinelStops: number;
   dockerCloses: number;
@@ -34,6 +36,8 @@ function stubIo(overrides: Partial<DaemonRunIo> = {}): {
   const exits: number[] = [];
   let fabricRestores = 0;
   let fabricReinstalls = 0;
+  let firewallReinstalls = 0;
+  let phpReconciles = 0;
   let instanceStops = 0;
   let sentinelStops = 0;
   let dockerCloses = 0;
@@ -73,12 +77,21 @@ function stubIo(overrides: Partial<DaemonRunIo> = {}): {
       if (signal === "SIGTERM") queueMicrotask(handler);
     },
     initOrchestration: () => Promise.resolve(false),
+    scanLiveReleases: () => Promise.resolve(),
     restoreFabricFromPersistedState: () => {
       fabricRestores += 1;
       return Promise.resolve();
     },
     reinstallFabricForwardingIfEnabled: () => {
       fabricReinstalls += 1;
+      return Promise.resolve();
+    },
+    reinstallFirewallForwardingIfEnabled: () => {
+      firewallReinstalls += 1;
+      return Promise.resolve();
+    },
+    reconcileSitePhpRuntimes: () => {
+      phpReconciles += 1;
       return Promise.resolve();
     },
     shouldEnableDockerIntegration: () => false,
@@ -114,6 +127,12 @@ function stubIo(overrides: Partial<DaemonRunIo> = {}): {
     get fabricReinstalls() {
       return fabricReinstalls;
     },
+    get firewallReinstalls() {
+      return firewallReinstalls;
+    },
+    get phpReconciles() {
+      return phpReconciles;
+    },
     get instanceStops() {
       return instanceStops;
     },
@@ -131,6 +150,7 @@ test("runDaemon skips fabric, docker, and instance when orchestration is not rea
   const stub = stubIo();
   await runDaemon(stub.io);
   assertEquals(stub.fabricRestores, 0);
+  assertEquals(stub.phpReconciles, 0);
   assertEquals(stub.fabricReinstalls, 0);
   assertEquals(stub.dockerCloses, 0);
   assertEquals(stub.instanceStops, 0);
@@ -154,10 +174,44 @@ test("runDaemon restores fabric and attaches Docker when the socket is up", asyn
   });
   await runDaemon(stub.io);
   assertEquals(stub.fabricRestores, 1);
+  assertEquals(stub.phpReconciles, 1);
   assertEquals(stub.fabricReinstalls >= 1, true);
   assertEquals(stub.dockerCloses, 1);
   assertEquals(stub.instanceStops, 1);
   assertEquals(stub.exits, [0]);
+});
+
+test("runDaemon scans live releases in the background and only warns on failure", async () => {
+  let scans = 0;
+  const stub = stubIo({
+    initOrchestration: () => Promise.resolve(true),
+    scanLiveReleases: () => {
+      scans += 1;
+      return Promise.reject(new Error("sudo: a password is required"));
+    },
+  });
+  await runDaemon(stub.io);
+  assertEquals(scans, 1);
+  assertEquals(stub.exits, [0]);
+  assertEquals(
+    stub.warns.some((line) =>
+      line.includes("live release link scan failed") &&
+      line.includes("password is required")
+    ),
+    true,
+  );
+});
+
+test("runDaemon skips the live release scan without orchestration", async () => {
+  let scans = 0;
+  const stub = stubIo({
+    scanLiveReleases: () => {
+      scans += 1;
+      return Promise.resolve();
+    },
+  });
+  await runDaemon(stub.io);
+  assertEquals(scans, 0);
 });
 
 test("runDaemon warns when Docker is present but the socket is down", async () => {
@@ -235,6 +289,59 @@ test("runDaemon reinstalls fabric when Docker becomes reachable", async () => {
   });
   await runDaemon(stub.io);
   assertEquals(stub.fabricReinstalls >= 2, true);
+});
+
+test("runDaemon re-hangs the firewall chain at startup and every time Docker becomes reachable, beside the fabric one", async () => {
+  const reachability: Array<(reachable: boolean) => void> = [];
+  const stub = stubIo({
+    initOrchestration: () => Promise.resolve(true),
+    shouldEnableDockerIntegration: () => true,
+    dockerBinaryPresent: () => Promise.resolve(true),
+    createDockerMonitor: () => ({
+      subscribeReachability: (cb) => {
+        reachability.push(cb);
+      },
+    }),
+    startTunnels: () => {
+      for (const cb of reachability) {
+        cb(false);
+        cb(true);
+        cb(true);
+      }
+      return Promise.resolve();
+    },
+  });
+  await runDaemon(stub.io);
+  // one at startup, two for the two reachable callbacks (the unreachable one is ignored)
+  assertEquals(stub.firewallReinstalls, 3);
+  assertEquals(stub.firewallReinstalls, stub.fabricReinstalls);
+});
+
+test("runDaemon does not touch the firewall when orchestration is not ready", async () => {
+  const stub = stubIo();
+  await runDaemon(stub.io);
+  assertEquals(stub.firewallReinstalls, 0);
+});
+
+test("a failing fabric reinstall does not skip the firewall one", async () => {
+  let firewall = 0;
+  const stub = stubIo({
+    initOrchestration: () => Promise.resolve(true),
+    reinstallFabricForwardingIfEnabled: () =>
+      Promise.reject(new Error("fabric went away")),
+    reinstallFirewallForwardingIfEnabled: () => {
+      firewall += 1;
+      return Promise.resolve();
+    },
+  });
+  let failure: unknown = null;
+  try {
+    await runDaemon(stub.io);
+  } catch (err) {
+    failure = err;
+  }
+  assertEquals(firewall, 1, "the firewall hook still ran");
+  assertEquals((failure as Error | null)?.message, "fabric went away");
 });
 
 test("runDaemon passes the Docker monitor into the default sentinel", async () => {

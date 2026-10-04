@@ -120,6 +120,47 @@ const TLS_FULLCHAIN_PATH = "/var/lib/proxysql/certs/fullchain.pem";
 const TLS_PRIVKEY_PATH = "/var/lib/proxysql/certs/privkey.pem";
 const TLS_CA_PATH = "/var/lib/proxysql/certs/ca.pem";
 
+/**
+ * ProxySQL's client-facing (frontend) TLS material is not configurable: it is
+ * always `<datadir>/proxysql-{cert,key,ca}.pem`, and when none of the three
+ * exist at boot ProxySQL silently generates its own self-signed CA and leaf
+ * (`ProxySQL_Auto_Generated_Server_Certificate`). `ssl_p2s_*` above only
+ * covers the proxy-to-server leg. Without these links every client that
+ * verifies (`sslmode=verify-full`, `ssl-mode=VERIFY_IDENTITY`) against the
+ * Organization CA is refused.
+ *
+ * The links are relative (`certs/…`) into the read-only `./tls` directory
+ * mount, so a rewritten PEM (unlink + create, see `managed/tls.ts`) is what
+ * the next `PROXYSQL RELOAD TLS` reads — a per-file bind mount would pin the
+ * old inode. `ln -sf` replaces auto-generated files already sitting in the
+ * persistent data volume.
+ */
+const PROXYSQL_DATADIR = "/var/lib/proxysql";
+const FRONTEND_TLS_LINKS = [
+  ["certs/fullchain.pem", "proxysql-cert.pem"],
+  ["certs/privkey.pem", "proxysql-key.pem"],
+  ["certs/ca.pem", "proxysql-ca.pem"],
+] as const;
+
+/** Image default CMD, run after the frontend TLS links are in place. */
+const PROXYSQL_START_COMMAND =
+  `exec proxysql -f --idle-threads -D ${PROXYSQL_DATADIR}`;
+
+/**
+ * Admin statement that reloads frontend TLS from the datadir links. It fails
+ * (instead of falling back to a generated cert) unless all three files are
+ * readable, so a reconcile with missing material errors out.
+ */
+export const PROXYSQL_RELOAD_TLS_STATEMENT = "PROXYSQL RELOAD TLS";
+
+/** Shell entry for the ProxySQL container: link frontend TLS, then start. */
+export function renderProxySqlStartScript(): string {
+  const links = FRONTEND_TLS_LINKS.map(([target, name]) =>
+    `ln -sf ${target} ${PROXYSQL_DATADIR}/${name}`
+  );
+  return [...links, PROXYSQL_START_COMMAND].join(" && ");
+}
+
 const DYNAMIC_SECTION_MARKERS = [
   "mysql_servers",
   "pgsql_servers",
@@ -434,7 +475,10 @@ export type ProbeHostPortFn = (
   port: number,
 ) => Promise<boolean>;
 
-const defaultProbeHostPort: ProbeHostPortFn = async (bindAddress, port) => {
+export const defaultProbeHostPort: ProbeHostPortFn = async (
+  bindAddress,
+  port,
+) => {
   // Deno.listen is synchronous but the seam is async so callers can inject a
   // probe; await keeps both shapes identical.
   await Promise.resolve();
@@ -797,6 +841,10 @@ export function proxysqlComposeWithAttachments(
     `    image: ${PROXYSQL_IMAGE}`,
     ...identityLines,
     "    restart: unless-stopped",
+    "    command:",
+    "      - /bin/sh",
+    "      - -c",
+    `      - ${JSON.stringify(renderProxySqlStartScript())}`,
     "    ports:",
     ...publishedPortLines,
     "    volumes:",
@@ -1356,6 +1404,9 @@ export function buildProxySqlAdminStatements(
       "SAVE PGSQL VARIABLES TO DISK",
     );
   }
+  // Last, so a rotated Organization CA leaf reaches the client listeners
+  // without a container restart.
+  statements.push(PROXYSQL_RELOAD_TLS_STATEMENT);
   return statements;
 }
 

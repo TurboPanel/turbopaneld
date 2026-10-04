@@ -1,0 +1,114 @@
+---
+# Master switch. false = leave an existing gate alone and install nothing.
+docker_gate_enabled: true
+
+turbopanel_install_root: /opt/turbopanel
+turbopanel_config_dir: /etc/turbopanel
+turbopanel_daemon_state_dir: /var/lib/turbopanel
+# Co-located dev runs everything as the human user, with no `tp` group and no
+# docker-group boundary to guard: the gate is a managed-host component only.
+turbopanel_dev_user: ""  # noqa: var-naming[no-role-prefix]
+
+docker_gate_service_name: turbopanel-docker-gate
+# Group allowed to open the gate socket (the daemon account's group).
+docker_gate_group: tp
+# Gate source, copied here root-owned (outside the replaceable orchestration
+# tree, so a rollback to an older package cannot delete the only copy the unit
+# can exec). tp can read it, never change it.
+docker_gate_dir: "{{ turbopanel_install_root }}/lib/docker-gate"
+docker_gate_deno_bin: "{{ turbopanel_install_root }}/vendor/deno/current/deno"
+# Root-owned directory (NOT under /run/turbopanel, which tp owns and could
+# swap): the only thing in it is the gate's listening socket.
+docker_gate_run_dir: /run/turbopanel-gate
+docker_gate_socket: "{{ docker_gate_run_dir }}/docker.sock"
+# Stage 3: the READ-ONLY listener for Traefik (container list / inspect,
+# events, version, ping; everything else is a 403). A directory of its own,
+# root:root 0750, so a Traefik can mount it without the main socket.
+docker_gate_ro_run_dir: "{{ docker_gate_run_dir }}/ro"
+docker_gate_ro_socket: "{{ docker_gate_ro_run_dir }}/docker.sock"
+# Whether the daemon points both Traefiks at the read-only socket instead of
+# the Tecnativa socket-proxy container. Sticky: true writes the root-owned
+# switch file, false removes it, empty (the default) leaves it as it is, so an
+# update converge that does not pass the variable never flips it. Off until
+# someone turns it on.
+docker_gate_ingress_socket: ""
+# The gate's mode: observe (log findings, refuse nothing) or enforce (stage 4:
+# refuse a request with findings). Once it is enforce, a gate that cannot be
+# installed or swapped in fails the converge: an older, laxer gate must never
+# stay behind with only a warning.
+docker_gate_mode: observe
+docker_gate_ingress_switch_file: "{{ docker_gate_dir }}/ingress-socket.on"
+docker_gate_upstream_socket: /var/run/docker.sock
+docker_gate_cache_dir: /var/cache/turbopanel-docker-gate
+docker_gate_summary_seconds: 300
+# Host trees a tenant bind mount may resolve under; everything else is what the
+# strict profile would refuse. Tenant principal homes + operator storage.
+docker_gate_bind_roots:
+  - /srv/users
+  - "{{ turbopanel_daemon_state_dir }}/storage"
+# Added to the gate's built-in deny list (/etc, /run, /proc, /sys, /dev, /root,
+# /boot, /opt/turbopanel, /backup ...).
+docker_gate_deny_prefixes_extra:
+  - "{{ turbopanel_install_root }}"
+# Trees the platform's own containers (ProxySQL, orchestrator, managed engines)
+# may bind: config trees read-only, state trees any mode. A false-positive
+# remover for observe mode, not a boundary (see AGENTS.md).
+docker_gate_platform_ro_roots:
+  - "{{ turbopanel_config_dir }}/proxysql"
+  - "{{ turbopanel_config_dir }}/orchestrator"
+  # Backup artifacts: the restore helper binds one archive read-only.
+  - "{{ turbopanel_backup_dir | default('/backup') }}"
+docker_gate_platform_rw_roots:
+  - "{{ turbopanel_daemon_state_dir }}/proxysql"
+  - "{{ turbopanel_daemon_state_dir }}/orchestrator"
+  - "{{ turbopanel_daemon_state_dir }}/managed"
+# Control-plane approval PUBLIC key(s) for host-level Compose features: one raw
+# 32-byte Ed25519 key per line, base64url. Empty (the default) = signed
+# approvals are off and every host-level finding stands. Never a private key.
+docker_gate_approval_pubkeys: ""
+# Root-owned, inside the gate's own directory: NOT under /etc/turbopanel or
+# /run/turbopanel, which the daemon account can write (it could swap the key).
+docker_gate_approval_pubkey_file: "{{ docker_gate_dir }}/approval.pub"
+# Used approval token ids, kept across gate restarts (root-owned 0700 state
+# directory the unit creates; the file is 0600, pruned at token expiry).
+# The unit's StateDirectory=turbopanel-docker-gate, and the one place besides
+# the run dir the gate may write (Deno --allow-write): the temp file and the
+# rename both live there.
+docker_gate_approval_state_dir: /var/lib/turbopanel-docker-gate
+docker_gate_approval_state_file: "{{ docker_gate_approval_state_dir }}/approval-used.json"
+# Stage 4: BuildKit's /session and /grpc open only on the BUILD listener
+# (build.ts): socket root:<build group> 0660 in a root:<build group> 0750
+# directory of its own. The build group holds only the build user (the daemon
+# account); root owns both, so the daemon cannot widen them. The kernel lets
+# only group members (and root) connect.
+docker_gate_build_user: tp
+docker_gate_build_group: tpgatebuild
+docker_gate_build_run_dir: "{{ docker_gate_run_dir }}/build"
+docker_gate_build_socket: "{{ docker_gate_build_run_dir }}/docker.sock"
+# The gate's own source files, in the order they are copied.
+docker_gate_files:
+  - http.ts
+  - body.ts
+  - approval.ts
+  - inspect.ts
+  - platform.ts
+  - policy.ts
+  - build.ts
+  - proxy.ts
+  - readonly.ts
+  - replay.ts
+  - resolve.ts
+  - review.ts
+  - stats.ts
+  - util.ts
+  - main.ts
+# Atomic deploy: new source is staged here and load-checked before anything is
+# replaced; the previous files (and unit, key, switch state) are kept in .prev
+# so a failed swap is rolled back. Both are root-only directories.
+docker_gate_stage_dir: "{{ docker_gate_dir }}/.next"
+docker_gate_prev_dir: "{{ docker_gate_dir }}/.prev"
+docker_gate_unit_file: "/etc/systemd/system/{{ docker_gate_service_name }}.service"
+# Everything a swap can change, restored (or removed if it did not exist) on rollback.
+docker_gate_managed_paths: >-
+  {{ (docker_gate_files | map('regex_replace', '^', docker_gate_dir ~ '/') | list)
+  + [docker_gate_approval_pubkey_file, docker_gate_ingress_switch_file, docker_gate_unit_file] }}

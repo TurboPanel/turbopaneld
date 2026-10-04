@@ -134,7 +134,11 @@ export async function collectTopologyInputs(
     merged.resolveDockerDataRoot().catch(() => null),
     merged.resolveBootGeneration(),
     merged.readProcFile("/proc/meminfo"),
-    isPhysicalMachine({ readFile: merged.io.readFile, sysRoot: root }),
+    isPhysicalMachine({
+      readFile: merged.io.readFile,
+      listDir: merged.io.listDir,
+      sysRoot: root,
+    }),
   ]);
 
   const mountEntries = mountsText ? parseProcMounts(mountsText) : [];

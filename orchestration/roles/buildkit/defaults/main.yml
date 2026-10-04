@@ -1,9 +1,11 @@
 ---
 # Runtimes always live under the FHS vendor tree (dev shares it with prod).
 turbopanel_vendor_dir: "{{ turbopanel_install_root | default('/opt/turbopanel') }}/vendor"  # noqa: var-naming[no-role-prefix]
-# Pinned to match BUILDKIT_VERSION / RAILPACK_VERSION in
-# src/deploy/release/railpack-build.ts. Bumping either here without bumping it
-# there leaves the daemon looking for a version directory that was not vendored.
+# railpack_version is pinned to match RAILPACK_VERSION in
+# src/deploy/release/railpack-build.ts. Bumping it here without bumping it there
+# leaves the daemon looking for a version directory that was not vendored.
+# buildkit_version: the daemon no longer runs buildctl/buildkitd (Railpack builds
+# run on the Docker Engine's BuildKit); the binaries are still vendored.
 buildkit_version: "0.27.0"
 railpack_version: "0.9.0"
 # The Railpack BuildKit gateway frontend is vendored as a local OCI image layout
@@ -11,6 +13,9 @@ railpack_version: "0.9.0"
 # RAILPACK_FRONTEND_VERSION in src/deploy/release/railpack-build.ts.
 railpack_frontend_version: "0.9.0"
 railpack_frontend_image: "ghcr.io/railwayapp/railpack-frontend"
+# Upstream tags the frontend `v<version>`; the bare version does not exist on
+# ghcr.io. Keep in step with RAILPACK_FRONTEND_TAG in railpack-build.ts.
+railpack_frontend_tag: "v{{ railpack_frontend_version }}"
 # Optional upstream pin. Empty means "resolve the tag once, at install time, and
 # then never look at the registry again" — the vendored bytes are the pin from
 # that point on. Set it to a `sha256:…` manifest digest to make the *fetch*

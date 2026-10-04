@@ -1,0 +1,30 @@
+# Managed by TurboPanel — regenerated on deploy; edits are overwritten.
+[Unit]
+Description=TurboPanel job wp-cron (blog)
+X-TurboPanel-Environment=env-cron
+
+[Service]
+Type=oneshot
+User=appuser
+Group=appuser-grp
+Slice=turbopanel-appuser.slice
+WorkingDirectory=/srv/users/appuser/x
+Environment=HOME=/srv/users/appuser/home
+Environment=TMPDIR=/srv/users/appuser/tmp
+ExecStart="/usr/local/bin/php" "wp-cron.php" "a \"q\" b\\c"
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=turbopanel-cron-env-cron-blog-wp-cron
+TimeoutStartSec=900
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ReadWritePaths=/srv/users/appuser/home /srv/users/appuser/data /srv/users/appuser/tmp

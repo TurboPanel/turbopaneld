@@ -1,8 +1,13 @@
 import { fetchWithPlatformCa } from "../instance/sockets.ts";
 import { errorText } from "../util/logger.ts";
+import { redactUrlSecrets } from "../util/redact-url-secrets.ts";
+import { fetchWithRetry, type RetryFetchOptions } from "../util/retry-fetch.ts";
+import { getBuildInfo } from "../build-info.ts";
 import { detectInstallMode, type InstallMode } from "../paths/layout.ts";
+import { DAEMON_VERSION } from "../version.ts";
 import type { UpdateChannelConfig } from "./config.ts";
 import { MalformedManifestError, MissingChannelError } from "./errors.ts";
+import { assertNotRollback, type InstalledBuild } from "./freshness.ts";
 import { unsignedManifestBypass, verifyManifestSignature } from "./signing.ts";
 import type { LinuxArch, UpdateInfo } from "./types.ts";
 import {
@@ -34,18 +39,23 @@ function describeFetchError(
     const detail = err.message === "fetch failed" && cause
       ? `${err.message} (${cause})`
       : err.message;
-    return new MalformedManifestError(`${context}: ${detail}`);
+    return new MalformedManifestError(
+      redactUrlSecrets(`${context}: ${detail}`),
+    );
   }
-  return new MalformedManifestError(`${context}: ${errorText(err)}`);
+  return new MalformedManifestError(
+    redactUrlSecrets(`${context}: ${errorText(err)}`),
+  );
 }
 
 async function trustedFetch(
   url: string,
   env: Record<string, string | undefined>,
   context: string,
+  retry?: RetryFetchOptions,
 ): Promise<Response> {
   try {
-    return await fetchWithPlatformCa(url, env);
+    return await fetchWithRetry(() => fetchWithPlatformCa(url, env), retry);
   } catch (err) {
     throw describeFetchError(context, err);
   }
@@ -76,12 +86,13 @@ function resolveLinuxArch(): LinuxArch {
 async function resolveManifestLocation(
   config: UpdateChannelConfig,
   env: Record<string, string | undefined>,
-): Promise<{ manifestUrl: string; overlay: boolean }> {
+  retry?: RetryFetchOptions,
+): Promise<{ manifestUrl: string; overlay: boolean; pinned?: boolean }> {
   const overlayBase = resolveOverlayDlBase(env);
   if (overlayBase === null) {
     const pinned = resolvePinnedManifestUrl(env);
     if (pinned !== null) {
-      return { manifestUrl: pinned, overlay: false };
+      return { manifestUrl: pinned, overlay: false, pinned: true };
     }
     const manifestUrl = builtinChannelManifestUrl(config.channel);
     if (manifestUrl === null) {
@@ -97,6 +108,7 @@ async function resolveManifestLocation(
     catalogUrl,
     env,
     "Failed to fetch channels.json",
+    retry,
   );
   if (!catalogResponse.ok) {
     throw new MalformedManifestError(
@@ -130,7 +142,23 @@ export type ResolveUpdateOptions = {
   installMode?: InstallMode;
   /** Test seam — pin a different verification key. */
   publicKeyHex?: string;
+  /**
+   * Test seam — the build the freshness check compares against. Defaults to
+   * the running daemon (`DAEMON_VERSION` + the stamped build identity).
+   */
+  installed?: InstalledBuild;
+  /** Retry policy for the manifest reads (tests inject a no-wait sleep). */
+  retry?: RetryFetchOptions;
 };
+
+function runningBuild(): InstalledBuild {
+  const info = getBuildInfo();
+  return {
+    commit: info.commit,
+    version: DAEMON_VERSION,
+    builtAt: info.builtAt,
+  };
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -149,6 +177,7 @@ async function parseSignedManifestBody(
     env: Record<string, string | undefined>;
     installMode: InstallMode;
     overlay: boolean;
+    pinned?: boolean;
     publicKeyHex?: string;
   },
 ): Promise<Record<string, unknown>> {
@@ -165,6 +194,7 @@ async function parseSignedManifestBody(
     installMode: options.installMode,
     overlay: options.overlay,
     env: options.env,
+    pinned: options.pinned,
   });
   if (!bypass) {
     await verifyManifestSignature(raw, options.publicKeyHex);
@@ -177,14 +207,16 @@ export async function resolveUpdate(
   env: Record<string, string | undefined> = Deno.env.toObject(),
   options: ResolveUpdateOptions = {},
 ): Promise<UpdateInfo> {
-  const { manifestUrl, overlay } = await resolveManifestLocation(
+  const { manifestUrl, overlay, pinned } = await resolveManifestLocation(
     config,
     env,
+    options.retry,
   );
   const manifestResponse = await trustedFetch(
     manifestUrl,
     env,
     "Failed to fetch channel manifest",
+    options.retry,
   );
   if (!manifestResponse.ok) {
     throw new MalformedManifestError(
@@ -195,10 +227,18 @@ export async function resolveUpdate(
   const installMode = options.installMode ?? detectInstallMode(env);
   const verified = await parseSignedManifestBody(
     await manifestResponse.text(),
-    { env, installMode, overlay, publicKeyHex: options.publicKeyHex },
+    { env, installMode, overlay, pinned, publicKeyHex: options.publicKeyHex },
   );
   const manifest = parseChannelManifest(
     absolutizeChannelManifestJson(verified, manifestUrl),
+  );
+
+  // A signature proves who made the manifest, not that it is current: refuse
+  // a replayed older build before anything is downloaded.
+  assertNotRollback(
+    options.installed ?? runningBuild(),
+    manifest,
+    env,
   );
 
   const arch = resolveLinuxArch();
@@ -209,6 +249,7 @@ export async function resolveUpdate(
     buildId: manifest.buildId,
     commit: manifest.commit,
     builtAt: manifest.builtAt,
+    ...(manifest.version === undefined ? {} : { version: manifest.version }),
     binaryArtifact,
     jsFallbackArtifact: manifest.jsFallbackArtifact,
     orchestrationArtifact: manifest.orchestrationArtifact,

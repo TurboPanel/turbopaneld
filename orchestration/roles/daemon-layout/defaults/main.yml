@@ -1,0 +1,26 @@
+---
+# The only folders the daemon account writes directly under the config and
+# state roots. Keep in step with DAEMON_CONFIG_LEAVES / DAEMON_STATE_LEAVES in
+# src/paths/layout.ts (pinned by src/orchestration/daemon-layout-leaves.test.ts).
+# Root tasks may act on a leaf itself, never on anything inside it.
+turbopanel_daemon_config_leaves:
+  - { name: docker, mode: "0750" }
+  - { name: proxysql, mode: "0750" }
+  - { name: orchestrator, mode: "0750" }
+  - { name: node-apps, mode: "0750" }
+  - { name: hosting, mode: "0750" }
+turbopanel_daemon_state_leaves:
+  - { name: update, mode: "0750" }
+  - { name: system, mode: "0750" }
+  - { name: deployments, mode: "0750" }
+  - { name: ingress, mode: "0750" }
+  - { name: sites, mode: "0750" }
+  - { name: storage, mode: "0750" }
+  - { name: managed, mode: "0750" }
+  - { name: managed-intent, mode: "0700" }
+  - { name: backup, mode: "0750" }
+  - { name: spool, mode: "0700" }
+  - { name: network, mode: "0700" }
+  - { name: cloudflared/tunnels, mode: "0750" }
+  - { name: tls, mode: "0750" }
+  - { name: orchestrator, mode: "0750" }

@@ -11,35 +11,85 @@
       {{ openlitespeed_lsphp_series_map.keys() | list | join(', ') }}.
 
 - name: Resolve lsphp package data for this series
+  vars:
+    _suite: "{{ openlitespeed_lsphp_suite }}"
+    _map: "{{ openlitespeed_lsphp_series_map[lsphp_series] }}"
+    _arch: "{{ 'arm64' if ansible_architecture == 'aarch64' else 'amd64' }}"
+    _stem: "{{ _map.version }}-{{ openlitespeed_lsphp_deb_revision }}+{{ _suite }}"
   ansible.builtin.set_fact:
-    _lsphp: "{{ openlitespeed_lsphp_series_map[lsphp_series] }}"
-    _lsphp_deb_arch: "{{ 'arm64' if ansible_architecture == 'aarch64' else 'amd64' }}"
+    _lsphp: "{{ _map }}"
+    _lsphp_suite: "{{ _suite }}"
     _lsphp_group: "tpphp{{ lsphp_series | replace('.', '') }}"
+    _lsphp_dest: "{{ turbopanel_vendor_dir }}/lsphp/{{ lsphp_series }}/{{ _map.version }}"
+    # `<pkg>_<version>-<rev>+<suite>_<arch>.deb`; `-common` is `_all`.
+    _lsphp_debs: >-
+      {{
+        (_map.packages | difference(_map.arch_all)
+          | map('regex_replace', '$', '_' ~ _stem ~ '_' ~ _arch ~ '.deb') | list)
+        + (_map.arch_all | map('regex_replace', '$', '_' ~ _stem ~ '_all.deb') | list)
+      }}
+
+- name: Assert every pinned lsphp package has a digest ({{ lsphp_series }})
+  ansible.builtin.assert:
+    that:
+      - _lsphp_suite in openlitespeed_lsphp_runtime_packages
+      - _lsphp_debs | difference(openlitespeed_lsphp_sha256.keys() | list) | length == 0
+    fail_msg: >-
+      No pinned lsphp {{ _lsphp.version }} for Debian '{{ _lsphp_suite }}'
+      ({{ _lsphp_debs | difference(openlitespeed_lsphp_sha256.keys() | list) | join(', ') }}).
+      Add the sha256 of each .deb from the suite's Packages index to
+      openlitespeed_lsphp_sha256 before bumping the pin.
+
+# Outside the extract guard: a tree vendored before these were listed still
+# needs them, and lsphp fails to start (not merely an extension) without them.
+- name: Ensure lsphp runtime libraries ({{ lsphp_series }})
+  ansible.builtin.apt:
+    name: "{{ openlitespeed_lsphp_runtime_packages[_lsphp_suite] }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
 
 - name: Check vendored lsphp binary ({{ lsphp_series }})
   ansible.builtin.stat:
-    path: "{{ turbopanel_vendor_dir }}/lsphp/{{ lsphp_series }}/{{ _lsphp.version }}/bin/lsphp"
+    path: "{{ _lsphp_dest }}/bin/lsphp"
   register: _lsphp_pinned
 
 - name: Extract lsphp packages into runtimes directory ({{ lsphp_series }})
   when: not _lsphp_pinned.stat.exists
-  ansible.builtin.shell: |
-    set -euo pipefail
-    DEST="{{ turbopanel_vendor_dir }}/lsphp/{{ lsphp_series }}/{{ _lsphp.version }}"
-    TMP="$(mktemp -d)"
-    trap 'rm -rf "$TMP"' EXIT
+  block:
+    - name: Create temp dir for lsphp packages ({{ lsphp_series }})
+      ansible.builtin.tempfile:
+        state: directory
+        suffix: lsphp
+      register: _lsphp_tmp
 
-    for PKG in {{ _lsphp.packages | join(' ') }}; do
-      URL="{{ openlitespeed_lsphp_repo_base }}/{{ _lsphp.pkg }}/${PKG}_{{ _lsphp.deb_version }}_{{ _lsphp_deb_arch }}.deb"
-      curl -fsSL -o "$TMP/${PKG}.deb" "$URL"
-      # All packages unpack into one tree; later ones only add extensions.
-      dpkg-deb -x "$TMP/${PKG}.deb" "$TMP/extract"
-    done
+    - name: Download pinned lsphp packages ({{ lsphp_series }})
+      ansible.builtin.get_url:
+        url: "{{ openlitespeed_lsphp_repo_base }}/{{ _lsphp_suite }}/{{ item }}"
+        dest: "{{ _lsphp_tmp.path }}/{{ item }}"
+        checksum: "sha256:{{ openlitespeed_lsphp_sha256[item] }}"
+        mode: "0640"
+        timeout: 120
+      loop: "{{ _lsphp_debs }}"
 
-    install -d "$DEST"
-    cp -a "$TMP/extract/usr/local/lsws/{{ _lsphp.pkg }}/." "$DEST/"
-  args:
-    creates: "{{ turbopanel_vendor_dir }}/lsphp/{{ lsphp_series }}/{{ _lsphp.version }}/bin/lsphp"
+    - name: Unpack lsphp packages ({{ lsphp_series }})
+      ansible.builtin.shell: |
+        set -euo pipefail
+        for DEB in "{{ _lsphp_tmp.path }}"/*.deb; do
+          # All packages unpack into one tree; later ones only add extensions.
+          dpkg-deb -x "$DEB" "{{ _lsphp_tmp.path }}/extract"
+        done
+        install -d "{{ _lsphp_dest }}"
+        cp -a "{{ _lsphp_tmp.path }}/extract/usr/local/lsws/{{ _lsphp.pkg }}/." "{{ _lsphp_dest }}/"
+      args:
+        creates: "{{ _lsphp_dest }}/bin/lsphp"
+
+  always:
+    - name: Remove lsphp temp dir ({{ lsphp_series }})
+      ansible.builtin.file:
+        path: "{{ _lsphp_tmp.path }}"
+        state: absent
+      when: _lsphp_tmp.path is defined
 
 # Entitlement group for this PHP series, shared with php-fpm: one grant means
 # "may execute PHP <series> here", whichever engine serves the site.
@@ -50,14 +100,76 @@
     runtime_entitlement_runtime: php
     runtime_entitlement_series: ["{{ lsphp_series }}"]
 
-# `root:tp 0750` was wrong, not merely tight: OpenLiteSpeed suEXEC drops to the
-# site principal and *then* `execve`s lsphp, and tenant principals are
-# deliberately never in `tp` — so a principal-pinned OLS PHP vhost could not
-# spawn its LSAPI processor at all. The series entitlement group is the identity
-# that actually needs exec here.
+# The binary was built for /usr/local/lsws/<pkg>/, so its compiled php.ini and
+# extension paths do not exist here. PHP also looks for php.ini next to the
+# executable, so the relocated config lives in bin/ and needs no env or flag in
+# the generated vhosts.
+- name: Find the lsphp extension directory ({{ lsphp_series }})
+  ansible.builtin.find:
+    paths: "{{ _lsphp_dest }}/lib/php"
+    patterns: "20*"
+    file_type: directory
+  register: _lsphp_ext_dirs
+
+- name: Assert exactly one lsphp extension directory ({{ lsphp_series }})
+  ansible.builtin.assert:
+    that:
+      - _lsphp_ext_dirs.files | length == 1
+    fail_msg: "Expected one lib/php/<api> directory under {{ _lsphp_dest }}."
+
+# A per-site lsphp runtime's php.ini (PHPRC) names its extension_dir through
+# this link, so the daemon never needs the series' API number.
+- name: Link a stable lsphp extension directory ({{ lsphp_series }})
+  ansible.builtin.file:
+    src: "{{ _lsphp_ext_dirs.files[0].path | basename }}"
+    dest: "{{ _lsphp_dest }}/lib/php/ext"
+    state: link
+    owner: root
+    group: "{{ _lsphp_group }}"
+    force: true
+
+- name: Seed the relocated php.ini from the production template ({{ lsphp_series }})
+  ansible.builtin.copy:
+    remote_src: true
+    src: "{{ _lsphp_dest }}/lib/php/{{ lsphp_series }}/php.ini-production"
+    dest: "{{ _lsphp_dest }}/bin/php.ini"
+    owner: root
+    group: "{{ _lsphp_group }}"
+    mode: "0640"
+    force: false
+
+- name: Point the relocated php.ini at the vendored extensions ({{ lsphp_series }})
+  ansible.builtin.blockinfile:
+    path: "{{ _lsphp_dest }}/bin/php.ini"
+    marker: "; {mark} TurboPanel relocated lsphp"
+    # One line per list item: `extension_dir` first, then the extensions.
+    block: >-
+      {{
+        (['extension_dir = "' ~ _lsphp_ext_dirs.files[0].path ~ '"']
+          + openlitespeed_lsphp_ini_extensions) | join(_lsphp_newline)
+      }}
+  vars:
+    _lsphp_newline: "\n"
+
+- name: Check lsphp loads its libraries and extensions ({{ lsphp_series }})
+  ansible.builtin.command:
+    argv:
+      - "{{ _lsphp_dest }}/bin/lsphp"
+      - "-i"
+  register: _lsphp_info
+  changed_when: false
+  failed_when: >-
+    _lsphp_info.rc != 0
+    or ('Loaded Configuration File => ' ~ _lsphp_dest ~ '/bin/php.ini') not in _lsphp_info.stdout
+    or 'Zend OPcache' not in _lsphp_info.stdout
+    or 'mysqli' not in _lsphp_info.stdout
+
+# Detached lsphp runs as the site principal from its systemd unit, and tenant
+# principals are deliberately never in `tp`: the series entitlement group
+# (which the daemon grants a site's principal) is the identity that execs it.
 - name: Scope the lsphp tree to its PHP entitlement group ({{ lsphp_series }})
   ansible.builtin.file:
-    path: "{{ turbopanel_vendor_dir }}/lsphp/{{ lsphp_series }}/{{ _lsphp.version }}"
+    path: "{{ _lsphp_dest }}"
     owner: root
     group: "{{ _lsphp_group }}"
     mode: "0750"
@@ -65,7 +177,7 @@
 
 - name: Keep the lsphp binary executable by the entitlement group only ({{ lsphp_series }})
   ansible.builtin.file:
-    path: "{{ turbopanel_vendor_dir }}/lsphp/{{ lsphp_series }}/{{ _lsphp.version }}/bin/lsphp"
+    path: "{{ _lsphp_dest }}/bin/lsphp"
     owner: root
     group: "{{ _lsphp_group }}"
     mode: "0750"
@@ -81,7 +193,7 @@
 
 - name: Point lsphp current symlink at the pinned version ({{ lsphp_series }})
   ansible.builtin.file:
-    src: "{{ turbopanel_vendor_dir }}/lsphp/{{ lsphp_series }}/{{ _lsphp.version }}"
+    src: "{{ _lsphp_dest }}"
     dest: "{{ turbopanel_vendor_dir }}/lsphp/{{ lsphp_series }}/current"
     state: link
     force: true

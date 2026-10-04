@@ -16,7 +16,11 @@ import {
   hasDaemonCheckout,
   isCompiledStubRoot,
   pathExists,
+  principalDataDir,
   principalHomePath,
+  principalTmpDir,
+  principalUserHome,
+  probeExists,
   PROD_BACKUP_DIR_DEFAULT,
   PROD_BIN_DIR_DEFAULT,
   PROD_CONFIG_DIR_DEFAULT,
@@ -81,6 +85,32 @@ test("hasDaemonCheckout requires main.ts or orchestration/ansible.cfg", async ()
       "[defaults]\n",
     );
     assertEquals(hasDaemonCheckout(root), true);
+  });
+});
+
+test("probeExists never reads a path the process has not been granted", async () => {
+  await withTempLayout(async (fixture) => {
+    const file = join(fixture.dirs.stateDir, "probe-target");
+    await Deno.writeTextFile(file, "x\n");
+    const asked: string[] = [];
+    const answer = (state: Deno.PermissionState) => (path: string) => {
+      asked.push(path);
+      return state;
+    };
+    assertEquals(probeExists(file, answer("granted")), true);
+    assertEquals(probeExists(file, answer("prompt")), false);
+    assertEquals(probeExists(file, answer("denied")), false);
+    assertEquals(asked, [file, file, file]);
+  });
+});
+
+test("hasDaemonCheckout counts an ungranted read as no checkout", async () => {
+  await withTempLayout(async (fixture) => {
+    const root = join(fixture.dirs.stateDir, "checkout-ungranted");
+    await Deno.mkdir(root);
+    await Deno.writeTextFile(join(root, "main.ts"), "// checkout\n");
+    assertEquals(hasDaemonCheckout(root), true);
+    assertEquals(hasDaemonCheckout(root, () => "prompt"), false);
   });
 });
 
@@ -555,6 +585,9 @@ test("site and spool helpers join under principal home and daemon state", () => 
     "/custom/state/spool/execution-logs",
   );
   assertEquals(principalHomePath(layout, "alice"), "/srv/tenants/alice");
+  assertEquals(principalUserHome(layout, "alice"), "/srv/tenants/alice/home");
+  assertEquals(principalDataDir(layout, "alice"), "/srv/tenants/alice/data");
+  assertEquals(principalTmpDir(layout, "alice"), "/srv/tenants/alice/tmp");
   assertEquals(
     siteRoot("/srv/tenants/alice", "svc-1"),
     "/srv/tenants/alice/sites/svc-1",

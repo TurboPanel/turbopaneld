@@ -220,16 +220,17 @@ test("an unreachable control plane keeps the existing CA and continues (every fe
     assertEquals(out.status, 0, out.stderr);
     assertStringIncludes(out.stdout, "keeping the existing CA");
     assertStringIncludes(out.stdout, `existing ${before}`);
+    assertStringIncludes(out.stdout, "--instance-ca");
     assertStringIncludes(out.stdout, "RC=0");
     assertEquals(out.stderr.includes("ERR"), false);
     assertEquals(await fingerprint(caPath), before);
-    assertEquals(out.calls, ["pinned", "system", "insecure"]);
+    assertEquals(out.calls, ["pinned", "system"]);
   } finally {
     await Deno.remove(dir, { recursive: true });
   }
 });
 
-test("a replacement CA that does not validate the live leaf is never installed", async () => {
+test("a replacement CA public trust serves that does not validate the live leaf is never installed", async () => {
   const source = await Deno.readTextFile(runShPath);
   const dir = await Deno.makeTempDir({ prefix: "tp-run-sh-ca-" });
   try {
@@ -240,8 +241,7 @@ test("a replacement CA that does not validate the live leaf is never installed",
     const before = await fingerprint(caPath);
     const out = await fetchCa(source, {
       TP_TEST_PINNED: "000",
-      TP_TEST_SYSTEM: "000",
-      TP_TEST_INSECURE: "200",
+      TP_TEST_SYSTEM: "200",
       TP_TEST_LEAF_OK: "0",
       TP_TEST_SERVED_CA: rogue,
     }, caPath);
@@ -254,7 +254,33 @@ test("a replacement CA that does not validate the live leaf is never installed",
   }
 });
 
-test("a rotated CA that validates the live leaf is installed over the pinned one", async () => {
+test("a CA only reachable over unverified TLS never replaces the pin, even when it validates the live leaf", async () => {
+  const source = await Deno.readTextFile(runShPath);
+  const dir = await Deno.makeTempDir({ prefix: "tp-run-sh-ca-" });
+  try {
+    const old = await selfSignedCa(dir, "OldPlatformCA");
+    const other = await selfSignedCa(dir, "OtherCA");
+    const caPath = `${dir}/instance-ca.pem`;
+    await Deno.copyFile(old, caPath);
+    const before = await fingerprint(caPath);
+    const out = await fetchCa(source, {
+      TP_TEST_PINNED: "000",
+      TP_TEST_SYSTEM: "000",
+      TP_TEST_INSECURE: "200",
+      TP_TEST_LEAF_OK: "1",
+      TP_TEST_SERVED_CA: other,
+    }, caPath);
+    assertEquals(out.status, 0, out.stderr);
+    assertStringIncludes(out.stdout, "keeping the existing CA");
+    assertStringIncludes(out.stdout, "--instance-ca");
+    assertEquals(await fingerprint(caPath), before);
+    assertEquals(out.calls.includes("insecure"), false);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+test("a rotated CA served over publicly trusted TLS that validates the live leaf replaces the pin", async () => {
   const source = await Deno.readTextFile(runShPath);
   const dir = await Deno.makeTempDir({ prefix: "tp-run-sh-ca-" });
   try {
@@ -264,16 +290,26 @@ test("a rotated CA that validates the live leaf is installed over the pinned one
     await Deno.copyFile(old, caPath);
     const out = await fetchCa(source, {
       TP_TEST_PINNED: "000",
-      TP_TEST_SYSTEM: "000",
-      TP_TEST_INSECURE: "200",
+      TP_TEST_SYSTEM: "200",
       TP_TEST_LEAF_OK: "1",
       TP_TEST_SERVED_CA: next,
     }, caPath);
     assertEquals(out.status, 0, out.stderr);
-    assertStringIncludes(out.stdout, "Instance CA downloaded (was");
+    assertStringIncludes(out.stdout, "Platform CA downloaded (was");
     assertEquals(await fingerprint(caPath), await fingerprint(next));
+    assertEquals(out.calls, ["pinned", "system"]);
   } finally {
     await Deno.remove(dir, { recursive: true });
+  }
+});
+
+test("run.sh never fetches trust material over unverified TLS unless --insecure-tls asked for it", async () => {
+  const source = await Deno.readTextFile(runShPath);
+  for (
+    const name of ["tp_refetch_instance_ca_unpinned", "tp_fetch_uploaded_trust"]
+  ) {
+    const body = extractShellFunction(source, name);
+    assertEquals(/curl\s+-\w*k/.test(body), false, name);
   }
 });
 

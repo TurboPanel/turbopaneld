@@ -44,10 +44,12 @@ allow-list.
 serving change in the next phase addresses the same tree without restating it):
 
 ```
+<principalHomeRoot>/.tp-staging/                 root:tp 0710 (publish-open)
+  <username>.<serviceId>.<releaseId>/            tp 0700 until tp-host publish
 <principalHomeRoot>/<username>/sites/            root:<username>-grp 0750
   <serviceId>/                                   root:<username>-grp 0750
     releases/                                    root:<username>-grp 0750
-      <releaseId>/        staging 0750 → published 0550, root:<username>-grp
+      <releaseId>/        root:<username>-grp, top 0550, nothing g/o-writable
       <releaseId>/.turbopanel/release.json        per-release manifest
       <releaseId>/shared -> ../../shared              relative convenience link
     current -> releases/<releaseId>
@@ -56,12 +58,65 @@ serving change in the next phase addresses the same tree without restating it):
 ```
 
 Every published release carries a relative **`shared` symlink** at its root
-(`promoteRelease` → `linkReleaseSharedDir`), so `current/shared` is a stable
+(tp-host `publish`, or `linkReleaseSharedDir` where the daemon owns the
+tree), so `current/shared` is a stable
 writable path for *any* release-backed service. That is generic on purpose: the
 site serving path pins PHP `open_basedir` to it, and the
 native runtime relies on the same convention rather than inventing a
 second one. A build that ships its own `shared` entry is replaced — the link is
 part of the layout contract, not payload.
+
+**No release link may leave the release or reach into `shared`**
+(`release-links.ts`). `shared/` is tenant-writable, so a shipped
+`public/x -> ../shared/evil` is a second hop the tenant can repoint at another
+principal's sealed, root-owned file after publish; the engines' owner-match
+rules compare only the first link (root, from the seal) with the final target
+(root) and would serve it. `promoteRelease` therefore removes the build's own
+`shared` entry, lists every link with `realpath -m` **before** the layout link
+exists (so a `shared/…` tail resolves under `<releaseDir>/shared`, never through
+the tenant's real directory), and refuses the release if any target is outside
+the release or under `shared`. Apps reach `shared/` by path (`current/shared`,
+PHP `open_basedir`), not through a link the build ships. nginx additionally
+serves a release-backed document root with `disable_symlinks on`; Apache keeps
+`SymLinksIfOwnerMatch`, because `.htaccess` `RewriteRule` needs it.
+
+What this refuses at publish, so builds that used to work need changing:
+WordPress `wp-content/uploads -> ../shared/uploads` (or any other link into
+`shared/`) fails the promote with "reach into shared/" (serve shared files
+through the app, not a link), and on nginx every link under the document root,
+even one that stays in the release (`public/build -> ../dist`, Laravel
+`public/storage`), answers 403 (`../site/AGENTS.md`).
+
+**A rollback re-checks the target's links, lexically and resolved**
+(`assertSealedLinksStayInRelease`). A release sealed before the publish-time
+check can still hold `x -> ../shared/evil`, and `promoteExistingRelease`
+publishes nothing, so it lists every link's unresolved text (tp-host
+`find <release> -type l -printf '%P\0%l\0'`) and follows each chain through
+the other links' texts only — never the filesystem, never into the top-level
+`shared` (whose layout link exists by then, so `realpath` would ask the tenant
+where it goes). A chain that lands in `shared` or leaves the release, an
+absolute link, or one past 40 hops refuses the rollback. The walk is O(total
+components): each link is resolved once and reused, and a release needing
+more than `LINK_WALK_STEP_BUDGET` steps is refused rather than walked.
+Then every link is also resolved with `realpath -m` against the live tree, `shared` link included,
+and any target outside the release or under its `shared` refuses it too (only
+the layout link's own resolution is excused, once). The publish-time checks
+compare `realpath` output with the release and home paths realpath'd first, so a
+homes root reached through a symlink neither flags every link nor misses a
+foreign one.
+
+**Live releases are scanned at daemon start** (`live-release-scan.ts`, from
+`runDaemon` once orchestration is ready, in the background). Every
+`<homes>/<user>/sites/<service>/current` is followed and its release checked the
+same lexical way — walked from the homes root, not the deployment manifests,
+which do not name the principal for older releases. It **reports only**: each
+hit is a `release` warning in the daemon log and an entry in
+`<daemonStateDir>/release-link-scan.json` (`{version, scannedAt, findings}`,
+replaced each start). A sealed release cannot be re-sealed without the link and
+the host has no per-site safe state short of taking the site down, which would
+break working sites whose only hit is a pre-check `uploads`/`storage` link;
+redeploying publishes a vetted release. Surfacing the findings in the control
+plane's server status needs a cell-protocol message and is a follow-up.
 
 A published release is **read-only to the runtime user** on purpose: an app
 process that can rewrite its own code turns any RCE into persistence. That is an
@@ -69,19 +124,18 @@ process that can rewrite its own code turns any RCE into persistence. That is an
 root-owned too, so the principal cannot create, rename, or unlink inside them —
 it could otherwise plant a release directory or repoint `current` regardless of
 how tight each published release is. `shared/` is the one principal-owned,
-principal-writable path, and a staging release is root-writable only until the
-seal. Directory creation reuses the single `sudo -n install -d` seam in
-`ensure-principal.ts` (`ensureDirectoryWithOwner` for the root-owned side,
-`ensureDirectoryOwnedByPrincipal` for `shared/`); sealing (`chown -R root:<grp>`
-+ `chmod 0550`) and retention removal go through the same `sudo -n` runner seam,
-never a second mkdir helper. The daemon is **not** in `<username>-grp`, so it
-cannot traverse the root-owned `0750` site tree: unprivileged `readlink` of
-`current`, staging copy, the `shared` link, the per-release manifest, the health
-probe, and the atomic `current` swap all fall back to that same `sudo -n` runner
-when Deno returns EACCES. Tests that own a temp tree keep the Deno path.
-`install -d` repairs an existing directory's owner
-and mode, so a tree from the earlier principal-owned layout converges on the
-next deploy.
+principal-writable path. A release directory is never created unsealed under
+`releases/`: tp-host refuses `install -d` / `mkdir -p` there, and only
+`publish` (below) renames a sealed tree in. Directory creation for the rest
+reuses the single `sudo -n install -d` seam in `ensure-principal.ts`
+(`ensureDirectoryWithOwner` for the root-owned side,
+`ensureDirectoryOwnedByPrincipal` for `shared/`); retention removal goes
+through the same `sudo -n` runner seam, never a second mkdir helper. The daemon
+is **not** in `<username>-grp`, so it cannot traverse the root-owned `0750`
+site tree: unprivileged `readlink` of `current`, the rollback swap and the
+probes fall back to that same `sudo -n` runner when Deno returns EACCES. Tests
+that own a temp tree keep the Deno path (copy, link, manifest, probe, seal,
+link check and swap in place).
 
 **Order per entry** (`apply-source-releases.ts`): ensure tree → `resetReleaseScratchDir`
 → **checkout** (`fetch` phase) → **build** (`build` phase) → **stage / manifest /
@@ -100,45 +154,130 @@ the ordinary `environment.deploy` payload, so compose apply, ingress, TLS,
 retention, `deployment.json`, and the native / site promote hooks all
 keep working unchanged, and the generation-supersede rule still applies. That
 branch skips `ensureReleaseTree`, the scratch dir, checkout, and build entirely
-— `ensureReleaseTree` in particular would `install -d` the sealed release back
-to staging mode and hand the runtime user a writable copy of the code it runs —
-and calls `promoteExistingRelease` (verify the tree exists and is sealed at
-`0550` → optional health probe → `swapCurrentSymlink`) instead of
-`promoteRelease`. Only the `release-promote` phase is emitted; there is no
-`fetch` or `build` line, because neither happened. A missing target directory
-**fails** rather than skipping: "the release you asked for was pruned on this
-host" is exactly what the operator needs told. `commitSha`, `standaloneOutput`,
-and `staticExport` in the returned `AppliedRelease` are read back from the
-target release's `.turbopanel/release.json` — the payload's `commitSha` is a
-placeholder on a rollback, and `staticExport` decides whether the service is
-supervised as a unit or served as files, so guessing it would put the service on
-the wrong lane.
+and calls `promoteExistingRelease` (verify the tree exists — and, where the
+daemon account can stat it, that it is sealed at `0550` → optional health probe
+→ `swapCurrentSymlink`) instead of `promoteRelease`. Only the `release-promote`
+phase is emitted; there is no `fetch` or `build` line, because neither happened.
+A missing target directory **fails** rather than skipping: "the release you
+asked for was pruned on this host" is exactly what the operator needs told.
+
+**A rollback trusts only the daemon's own release record.** Every successful
+promote — native or Railpack — leaves a copy of its manifest under the
+daemon-owned `<daemonStateDir>/release-records/` root
+(`resolveDaemonReleasePaths`); for the native lane it is written after the seal
+and swap succeed, so its existence is this host's statement that the release was
+published. `resolveRollbackTarget` reads that record and nothing else: the copy
+inside a native release tree sits in the principal's home, which the principal
+owns, so neither the lane (`imageTag`), the commit, nor the runtime shape is
+ever taken from it, and no privileged read of that tree exists. A release with
+no record (published before records were kept) **fails** with "redeploy that
+release" rather than falling back to the tree. `commitSha`, `standaloneOutput`,
+and `staticExport` in the returned `AppliedRelease` come from that record — the
+payload's `commitSha` is a placeholder on a rollback, and `staticExport` decides
+whether the service is supervised as a unit or served as files, so guessing it
+would put the service on the wrong lane.
 
 **Staged build, atomic promote** — the same staged-write / validated-cutover
 contract `compose-files.ts` uses for `compose.yaml`. The clone lands in an
 ephemeral scratch dir under `<daemonStateDir>/release-build/`, never inside the
-release tree. Only after the build succeeds is the output copied into
-`releases/<releaseId>/`, the manifest written, and the health probe run (this
-phase: "the expected paths exist"; later phases swap in a real runtime probe).
-Then the tree is sealed and `current` is swapped by creating
-`current.tmp.<releaseId>` as a symlink and `rename()`-ing it over `current` —
-atomic on the same filesystem, so a reader sees the old release or the new one,
-never a missing link. **Any failure before the rename leaves `current`
-untouched** and removes the staged directory; there is no partial publish.
+release tree. Only after the build succeeds is the output staged, the manifest
+written, and the health probe run against the staged tree (this phase: "the
+expected paths exist"; later phases swap in a real runtime probe). Then the
+tree is sealed and `current` is swapped by creating `current.tmp.<releaseId>`
+as a symlink and `rename()`-ing it over `current` — atomic on the same
+filesystem, so a reader sees the old release or the new one, never a missing
+link. **Any failure before the rename leaves `current` untouched** and removes
+the staged tree; there is no partial publish.
 
-**Sandboxed build, containerless runtime.** `build.ts` is explicitly not
-container isolation and does not claim to be. It guarantees: the command runs in
-the scratch checkout (never the live tree or the principal home); no daemon
-credential material is inherited (`clearEnv` + allow-list; build `env` is
-non-secret by contract — build secrets keep riding `variableMaterial[]` /
-`secretPlan[]`); and CPU / address-space / file-size caps via `prlimit` where the
-host has it, degrading to an unwrapped run with a transcript note where it does
-not. The address-space cap is **64 GiB virtual**, not 4 GiB: V8 pointer
-compression reserves a 4 GiB CodeRange per isolate, and Corepack/pnpm workers
-each need their own — `RLIMIT_AS=4G` dies with `Failed to reserve virtual
-memory for CodeRange`; `16G` lets Node start but pnpm's registry GETs fail
-with `error (unknown)` / `ERR_PNPM_META_FETCH_FAIL`. That cap is virtual
-size, not RSS.
+**Sealed publish** (managed hosts). `tp-host publish-open <user> <svc> <id>`
+makes a fresh leaf `<principalHomeRoot>/.tp-staging/<user>.<svc>.<id>`, owned by
+the daemon (0700) under a `root:tp 0710` parent that no tenant or build can
+reach, on the homes' filesystem. The daemon copies the build output into it
+(the hand-off below), drops any `shared` entry, writes the manifest and runs
+the probe. `tp-host publish <user> <svc> <id>` then, as root and with every
+path built from the ids: takes the leaf (`root:root 0700`), refuses hard-linked
+files (before any `chown -R`, so no outside inode is re-owned), FIFOs,
+sockets, devices and a shipped `shared`, seals it
+(`chown -R -h -P root:<user>-grp`, `chmod -R u-s,g-s,go-w,g+rX,o-rwx`) and
+re-checks that nothing is left foreign-owned, set-id or group/other-writable,
+resolves every symlink physically (`realpath -m`) and refuses one that lands
+outside the leaf (so the two-link `s1/s2/up → ../..` + `s1/s2/s3/x → ../up/..`
+chain is caught), requires the home, `sites/`, `sites/<svc>/` and `releases/`
+to be root-owned and not group/other-writable, the leaf and `releases/` to
+share `st_dev`, and `releases/<id>` not to exist, then `mv -T`s the leaf into
+place, links `shared → ../../shared`, drops the top to `0550` and swaps
+`current`. A directory planted at `current` or `current.tmp.<id>` is refused
+(and the generic `ln` uses `-T`, so the rollback swap never links into one).
+Any refusal before the rename removes the leaf. tp-host also refuses absolute
+link targets (a link to the staging path would dangle or reach another leaf
+once renamed) and links resolving to or under the leaf's `shared`, clears the
+sticky bit in the seal, holds a per-release `flock` (`/run/tp-publish/`) over
+`publish-open` and `publish`, requires the home root itself to be sealed,
+sweeps leaves older than an hour, and checks that `releases/<id>` is the
+sealed leaf (`dev:ino`) before it links, opens to `0550` or swaps `current`.
+When a home's `releases/` is on another filesystem than the staging area, the
+sealed, root-owned leaf is copied by root to a root-only name beside the
+release and renamed in. The daemon runs `release-links.ts`'s
+`assertStagedLinksStayInRelease` on the leaf before `publish` (the in-place
+path runs it plus `assertReleaseLinksStayHome` after the seal). A re-sent
+deploy of a release this host already published (same id and commit in the
+daemon's record, tree present) is cut over to like a rollback instead of
+being rebuilt.
+
+**Symlink-safe hand-off** (`safe-copy.ts`). The build controls every name in
+its tree, so every copy out of it — the stage into `releases/<releaseId>/` and
+the Next fold — goes through `copyContainedTree`, never a plain recursive copy:
+the source directory is reached from the checkout one `lstat`ed component at a
+time (a symlinked, absolute or `..` `subdirectory` / `outputDirectory` /
+`.next/standalone` / `.next/static` / `public` / `out` is refused, and the real
+path must stay under the root's); entries are never followed; a regular file is
+checked on its opened handle (same inode and device as the `lstat`, so a swap
+is refused, not read); a symlink is kept only when it is relative and its `..`
+run, all leading, stays within its own depth (`linkStaysInside`), otherwise
+dropped; FIFOs, sockets and devices are dropped; set-id, sticky and
+group/other-write bits are stripped; nothing is chowned; an entry owned by
+anyone but the source root's owner (a hard link to a root file) is refused;
+destinations are created one component at a time and files with `O_EXCL`, so a
+link planted at a destination is refused; entries (500 000), bytes (16 GiB) and
+depth (128) are capped. On a managed host the checked copy lands in the
+daemon's staging leaf (`ReleasePaths.stagingDir`, recreated fresh by
+`publish-open`, outside the build's tree) and root only ever operates on that
+leaf once it has taken it from the daemon: root never walks a tree a build
+wrote, and never reads a name another account can still change. (The earlier
+`<daemonStateDir>/release-handoff/` copy and the root `cp -a` into the release
+are gone.) Deno has no `openat2`, so a directory
+swapped and swapped back between two calls is out of reach of these checks; the
+unprivileged-builds design closes that by handing the tree back only once the
+build unit's processes are gone and the tree belongs to the daemon again.
+
+**Builds run in the build sandbox** (`build-sandbox.ts`, WP4 of the
+unprivileged-builds design). Install and build commands and `build.env` are
+tenant input — anyone who can deploy a project may set them — so on a managed
+host they never run as the daemon account. Per native/static release:
+`work/<buildId>` is created (0700, as the daemon) under
+`/var/lib/turbopanel-build/work` (the build-user role's tree; the id is a
+digest of service and release, so a crashed run's tree is taken back and
+removed on the rerun); git clones into `work/<id>/source` while git's HOME
+and the credential files stay in the daemon-only scratch dir, and the build
+refuses to start if a credential file is still there; the commands, the
+filtered env (`PATH`/`HOME`/`LD_*`/`GIT_*` reserved, Node `bin/` leading
+`PATH` for a native app, Corepack/npm/XDG caches in `cache/<projectId>`) and
+the cwd go to `sudo tp-host build-run <id> <projectId>` as a spec on stdin
+(`orchestration/scripts/tp-build-runner` documents the format). tp-host runs
+them as `tpbuild` in a transient `turbopanel-build-<id>.service` with a fixed
+sandbox: no docker or tp group, daemon trees and sockets inaccessible,
+private-range / metadata egress denied, 4G memory, 2 CPUs, 1024 tasks, 30
+minutes, one build per host (the daemon also queues its own builds and says
+so in the transcript). Output streams back line by line. On any abort (the
+daemon-side ceiling, a lost client) the daemon runs `tp-host systemctl stop
+turbopanel-build-<id>.service`; then, success or not, `tp-host build-return
+<id>` gives the tree back only once the unit is gone, and only after that do
+the Next fold and the stage read it, contained in `work/<id>` (so a build
+that swapped `source` itself for a link is refused). Systemd 247–254 hosts
+get tp-host's reduced sandbox and a warning; below 247 builds refuse. Docker
+and Railpack builds stay on the Docker lane. There is no opt-out on a managed
+host. A development install runs the commands as the developer with `clearEnv` and an explicit
+allow-list, and no resource caps.
 
 **Native-app builds run on the tenant runtime.** `ensureNativeAppRuntime`
 vendors `vendor/node-app/<series>/current` **before** `applySourceReleases`,
@@ -148,19 +287,25 @@ not after promote. When an entry belongs to a `nativeAppServices[]` row,
 series' `bin/` leads a **curated** `PATH` (`<bin>:/usr/bin:/bin`, never the
 daemon's PATH — Deno's `node_compat_bin` would shadow `node`, and an
 unreadable `/usr/local/sbin` makes dash report `corepack: Permission denied`
-for a missing binary). The child is `sudo -n -u <self> -- env … sh -c` so
+for a missing binary). In the sandbox `tpbuild` reaches the series through
+its own `tpnode<series>` membership (node-app-runtime role). Unsandboxed, the
+child is `sudo -n -u <self> -- env … sh -c` so
 `initgroups()` picks up `tpnode<series>` without a daemon re-login and
 without exec'ing the passwd shell (`sg` dies on `/usr/sbin/nologin` with
 "This account is currently not available" — the managed daemon user `tp`
-and tenant principals are both nologin). Corepack still caches under
-`<checkout>/.corepack` with its download prompt off — never a host-wide
+and tenant principals are both nologin). Corepack caches under the
+project's sandbox cache (unsandboxed: `<checkout>/.corepack`) with its download
+prompt off — never a host-wide
 Corepack install, never the daemon's home. `NODE_ENV` follows the app's
 `appMode` (default `production`) in the build exactly as in the generated unit.
 
 A missing `installCommand` is then **derived** rather than skipped
 (`deriveNodeInstallCommand`): the operator's `build.packageManager` wins, else
 the lockfile decides (`pnpm-lock.yaml` > `yarn.lock` > `package-lock.json` >
-bare npm) — `corepack pnpm install --frozen-lockfile --prod=false`,
+bare npm; a `package.json` `packageManager` pin sits between the two) —
+`corepack pnpm install --frozen-lockfile` plus a per-major dev-deps flag
+(pnpm 9 `--prod=false`; pnpm 10-12 none, since pnpm 12 rejects `--prod=false`;
+unpinned `--config.production=false`, accepted by 9-12),
 `corepack yarn install --frozen-lockfile --production=false` for classic yarn,
 `npm ci --include=dev` / `npm install --include=dev`; the frozen flag is
 dropped when the chosen manager has no lockfile, and Yarn Berry (a
@@ -247,27 +392,44 @@ Concretely (`release/railpack-build.ts`, branch in `apply-source-releases.ts`):
 
 - Checkout is identical — `checkout.ts` unchanged, same scratch dir, same
   credential handling.
-- `railpack prepare` writes a build plan; `buildctl` hands that plan to the
-  pinned Railpack **BuildKit gateway frontend** against a vendored `buildkitd`
-  on a private socket under `<daemonStateDir>/release-build/`.
-- The frontend is **vendored, not pulled**. `buildkit-setup` installs it as a
-  local OCI image layout at
-  `<runtimesDir>/railpack-frontend/<version>/image` (with a `current` symlink,
-  like the binaries) and records the layout's manifest digest beside it; the
-  build passes `--oci-layout <name>=<dir> --opt source=oci-layout://<name>@<digest>`.
-  Naming `ghcr.io/railwayapp/railpack-frontend:<tag>` at build time would put
-  live registry egress on the deploy path and let a repointed upstream tag
-  change what two releases recorded with the same `railpackFrontendVersion`
-  were actually built by.
-- Output handoff is a **`type=docker` tarball plus `docker load`**, not a shared
-  containerd/moby store. The vendored BuildKit is its own daemon and is not
-  wired into Docker's storage, so the tarball is the one handoff that works on
-  every host we install on; the cost is one extra copy through the filesystem,
-  which is deleted as soon as the load succeeds.
-- Build cache is **per project**:
-  `<daemonStateDir>/release-build/buildkit-cache/<projectId>/`, passed as
-  `--import-cache` / `--export-cache local`. One tenant's build can never warm
-  from another's layers.
+- `railpack prepare` writes a build plan; `docker buildx build` hands that
+  plan to the pinned Railpack **BuildKit gateway frontend** on the **Docker
+  Engine's own BuildKit** (`--builder default`, `BUILDKIT_SYNTAX=<frontend>`,
+  `-f <plan>`, `--load`), through the same `docker` CLI path and sudo ladder as
+  compose builds (`runDockerStreamed`). A `docker buildx version` preflight
+  names `docker-buildx-plugin` when the plugin is missing; a failed build
+  reports the redacted tail of BuildKit's own output.
+- **No private `buildkitd`.** The daemon runs as `tp`, and a non-root
+  `buildkitd` demands rootless mode (rootlesskit, newuidmap/newgidmap,
+  subuid/subgid for `tp`): on adrastea it exited with "rootless mode requires to
+  be executed as the mapped root in a user namespace" and the lane only ever saw
+  a readiness timeout. A root `buildkitd` socket would be a second privileged
+  build API the Docker gate cannot observe. The Engine's builder already exists
+  for compose builds, and its `/session` / `/grpc` upgrades already pass through
+  the gate. `buildctl` / `buildkitd` are no longer on the daemon's `--allow-run`.
+- The docker CLI **never** gets the build environment: tenant `build.env` and
+  `HOME=<checkout>` go to `railpack prepare` only. The CLI resolves plugins from
+  `$DOCKER_CONFIG` / `$HOME/.docker/cli-plugins`, so a checkout shipping
+  `.docker/cli-plugins/docker-buildx` would otherwise run as the daemon user.
+- The frontend is **pinned by digest**. `buildkit-setup` vendors it as a local
+  OCI layout at `<runtimesDir>/railpack-frontend/<version>/image` (with a
+  `current` symlink) plus its manifest digest, and its `docker pull` leaves the
+  same image in Docker's store. The build names
+  `ghcr.io/railwayapp/railpack-frontend@<digest>`, so a repointed upstream tag
+  cannot change what two releases recorded with the same
+  `railpackFrontendVersion` were built by. If the store lost the image, the
+  vendored layout is `docker load`ed back first; if even that fails the Engine
+  can only fetch exactly that digest.
+- Output goes straight into the image store (`--load`): no tarball handoff.
+- **Tenant isolation is `cache-key=<projectId>`**, which Railpack prefixes to
+  every mount cache id (package-manager stores, `node_modules`). Mount caches
+  are writable and shared by id, so without it one tenant could read or poison
+  another's. The Engine's layer cache is per host, as it is for compose builds
+  (and as it was for the old private `buildkitd`).
+- Build env is **not** passed to the frontend: it reads only `cache-key`,
+  `secrets-hash` and `github-token` build args, so the old `--opt env:K=V` never
+  reached a build. Build secrets need `railpack prepare --env` plus `--secret`
+  (follow-up), never values on argv.
 - Everything the native lane does *after* the build is skipped. Nothing is
   staged, sealed, or linked, and `current` never moves. There is no promoted
   tree, so a Railpack release needs **no project principal** — the guard that
@@ -293,10 +455,9 @@ is **not** host-native and never appears in `hostNativeComposeServiceNames()` /
 `sites[]` / `nativeAppServices[]`.
 
 **Rollback** rides the existing `rollbackToReleaseId` field with no new command
-type. Which root holds the target release identifies its lane: the record root
-is probed first, and a manifest carrying `imageTag` short-circuits the whole
-promote — no checkout, no build, no symlink swap, just that tag written back
-into compose. Probing the manifest rather than the payload's `build.kind` is
+type. The daemon record identifies the lane: a record carrying `imageTag`
+short-circuits the whole promote — no checkout, no build, no symlink swap, just that tag written back
+into compose. Reading the record rather than the payload's `build.kind` is
 what lets a service that switched build modes still roll back to a release built
 the old way.
 
@@ -309,10 +470,11 @@ be rolled back to, which is the same guarantee the native lane gives.
 
 **Provisioning is on demand.** `ensureBuildkitRailpack` follows the
 `ensureDocker` / `ensureHostingCaddy` pattern exactly: check the vendor tree →
-`buildkit-setup.yml` (`runBuildkitSetup`) → direct binary download → re-check →
-throw. It is called only when a `railpack` build is actually requested, never
-from `daemon-converge` or `instance-dev-install`. `BUILDKIT_VERSION` /
-`RAILPACK_VERSION` in `railpack-build.ts` are pinned in step with
+`buildkit-setup.yml` (`runBuildkitSetup`) → direct download of railpack and the
+frontend → re-check → throw. It is called only when a `railpack` build is
+actually requested, never from `daemon-converge` or `instance-dev-install`.
+`RAILPACK_VERSION` in `railpack-build.ts` is pinned in step with
 `orchestration/roles/buildkit/defaults/main.yml`; bumping one without the other
-leaves the daemon looking for a version directory that was never vendored.
+leaves the daemon looking for a version directory that was never vendored. The
+role still vendors `buildctl` / `buildkitd`; the daemon no longer runs them.
 

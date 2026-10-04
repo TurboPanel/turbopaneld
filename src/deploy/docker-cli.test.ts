@@ -219,6 +219,60 @@ test("runDocker prefers original stderr when sudo refresh also fails", async () 
   }
 });
 
+const DENIED_RUN =
+  'spawn failed: Requires run access to "/usr/bin/sudo", run again with the --allow-run flag';
+const SOCKET_DENIED =
+  "permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock";
+
+test("runDocker reports the real socket error when this process may not run sudo", async () => {
+  const calls: string[] = [];
+  const restore = setDockerCliIoForTest({
+    runRaw: (command) => {
+      calls.push(command);
+      return Promise.resolve(
+        command === "/usr/bin/docker" ? fail(SOCKET_DENIED) : fail(DENIED_RUN),
+      );
+    },
+  });
+  const previousUser = Deno.env.get("USER");
+  Deno.env.set("USER", "tp");
+  try {
+    const result = await runDocker(["info"]);
+    assertEquals(result.success, false);
+    assertEquals(result.stderr, SOCKET_DENIED);
+    assertEquals(calls, [
+      "/usr/bin/docker",
+      "/usr/bin/sudo",
+      "/usr/bin/sudo",
+    ]);
+  } finally {
+    if (previousUser === undefined) Deno.env.delete("USER");
+    else Deno.env.set("USER", previousUser);
+    restore();
+  }
+});
+
+test("resolveDockerInvocation keeps the direct docker call when this process may not run sudo", async () => {
+  const restore = setDockerCliIoForTest({
+    runRaw: (command) =>
+      Promise.resolve(
+        command === "/usr/bin/docker" ? fail(SOCKET_DENIED) : fail(DENIED_RUN),
+      ),
+  });
+  const previousUser = Deno.env.get("USER");
+  Deno.env.set("USER", "tp");
+  try {
+    assertEquals(await resolveDockerInvocation(), {
+      bin: "/usr/bin/docker",
+      prefixArgs: [],
+    });
+  } finally {
+    if (previousUser === undefined) Deno.env.delete("USER");
+    else Deno.env.set("USER", previousUser);
+    restore();
+  }
+});
+
 test("runDocker returns the sudo-run command's real failure instead of the socket error", async () => {
   const calls: Array<{ command: string; args: string[] }> = [];
   const restore = setDockerCliIoForTest({

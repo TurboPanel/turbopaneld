@@ -402,3 +402,215 @@ test("materializeStorageEntries chowns directory and file copies for a linked pr
     Deno.Command = original;
   }
 });
+
+function fileEntry(name: string, content = "fresh") {
+  return {
+    storageId: "stor-file",
+    locationId: "loc-file",
+    kind: "file" as const,
+    name,
+    provider: "path" as const,
+    serverId: "srv",
+    contentEnvelope: content,
+    mounts: [],
+  };
+}
+
+/** Deny the daemon's `mkdir` under `prefix`, as a root-owned parent does. */
+async function withDeniedMkdir(
+  prefix: string,
+  fn: () => Promise<void>,
+): Promise<void> {
+  const mkdir = Deno.mkdir;
+  Deno.mkdir =
+    ((path: string | URL, options?: Deno.MkdirOptions) =>
+      String(path).startsWith(prefix)
+        ? Promise.reject(new Deno.errors.PermissionDenied(String(path)))
+        : mkdir(path, options)) as typeof Deno.mkdir;
+  try {
+    await fn();
+  } finally {
+    Deno.mkdir = mkdir;
+  }
+}
+
+function unownedDirectory(sourcePath: string) {
+  return {
+    storageId: "stor-op",
+    locationId: "loc-op",
+    kind: "directory" as const,
+    name: "data",
+    provider: "path" as const,
+    serverId: "srv",
+    sourcePath,
+    mounts: [],
+  };
+}
+
+test("a file copy replaces a planted link instead of writing through it", async () => {
+  await withTempLayout(async (layout) => {
+    const victim = join(layout.stateDir, "victim.txt");
+    await Deno.writeTextFile(victim, "untouched");
+    const baseDir = storageHostPath(layout, "org-1", "stor-file", "loc-file");
+    await Deno.mkdir(baseDir, { recursive: true });
+    await Deno.symlink(victim, join(baseDir, "notes.txt"));
+
+    const paths = await materializeStorageEntries(layout, "org-1", [
+      fileEntry("notes.txt"),
+    ]);
+
+    const filePath = join(baseDir, "notes.txt");
+    assertEquals(paths.get("loc-file"), filePath);
+    assertEquals(await Deno.readTextFile(victim), "untouched");
+    const stat = await Deno.lstat(filePath);
+    assertEquals(stat.isFile, true);
+    assertEquals(await Deno.readTextFile(filePath), "fresh");
+  });
+});
+
+test("a file copy is rewritten in place on the next deploy", async () => {
+  await withTempLayout(async (layout) => {
+    await materializeStorageEntries(layout, "org-1", [
+      fileEntry("a/b.txt", "one"),
+    ]);
+    const paths = await materializeStorageEntries(layout, "org-1", [
+      fileEntry("a/b.txt", "two"),
+    ]);
+    const filePath = paths.get("loc-file") ?? "";
+    assertEquals(await Deno.readTextFile(filePath), "two");
+    const baseDir = storageHostPath(layout, "org-1", "stor-file", "loc-file");
+    // No temporary file is left behind next to it.
+    const names = await Array.fromAsync(Deno.readDir(join(baseDir, "a")));
+    assertEquals(names.map((e) => e.name), ["b.txt"]);
+  });
+});
+
+test("a file copy refuses a directory in its place and leaves no temporary file", async () => {
+  await withTempLayout(async (layout) => {
+    const baseDir = storageHostPath(layout, "org-1", "stor-file", "loc-file");
+    await Deno.mkdir(join(baseDir, "notes.txt"), { recursive: true });
+
+    await assertRejects(
+      () =>
+        materializeStorageEntries(layout, "org-1", [fileEntry("notes.txt")]),
+      Error,
+      "is a directory",
+    );
+    const names = await Array.fromAsync(Deno.readDir(baseDir));
+    assertEquals(names.map((e) => e.name), ["notes.txt"]);
+  });
+});
+
+test("a file copy never walks through a planted directory link", async () => {
+  await withTempLayout(async (layout) => {
+    const outside = join(layout.stateDir, "outside");
+    await Deno.mkdir(outside);
+    const baseDir = storageHostPath(layout, "org-1", "stor-file", "loc-file");
+    await Deno.mkdir(baseDir, { recursive: true });
+    await Deno.symlink(outside, join(baseDir, "conf"));
+
+    await assertRejects(
+      () =>
+        materializeStorageEntries(layout, "org-1", [
+          fileEntry("conf/app.ini"),
+        ]),
+      Error,
+      "is not a directory",
+    );
+    assertEquals(await Array.fromAsync(Deno.readDir(outside)), []);
+  });
+});
+
+test("a file copy name cannot leave its location", async () => {
+  await withTempLayout(async (layout) => {
+    for (const name of ["../escape.txt", "/etc/x", "a/./b", "a//b", "a/"]) {
+      await assertRejects(
+        () => materializeStorageEntries(layout, "org-1", [fileEntry(name)]),
+        TypeError,
+        "storage file name",
+      );
+    }
+    await assertRejects(
+      () =>
+        Deno.lstat(
+          join(
+            layout.stateDir,
+            "storage",
+            "org-1",
+            "stor-file",
+            "loc-file",
+            "escape.txt",
+          ),
+        ),
+      Deno.errors.NotFound,
+    );
+  });
+});
+
+test("a directory copy refuses a source path that is a link", async () => {
+  await withTempLayout(async (layout) => {
+    const outside = join(layout.stateDir, "outside");
+    await Deno.mkdir(outside);
+    const linked = join(layout.stateDir, "linked");
+    await Deno.symlink(outside, linked);
+
+    await assertRejects(
+      () =>
+        materializeLocation(
+          layout,
+          "org-1",
+          {
+            storageId: "stor-1",
+            locationId: "loc-1",
+            kind: "directory",
+            name: "data",
+            provider: "path",
+            serverId: "srv",
+            sourcePath: linked,
+            mounts: [],
+          },
+          undefined,
+          "",
+        ),
+      Error,
+      "is not a directory",
+    );
+  });
+});
+
+test("materializeLocation accepts an existing operator directory the daemon cannot create in", async () => {
+  await withTempLayout(async (layout) => {
+    const operatorDir = join(layout.stateDir, "operator", "data");
+    await Deno.mkdir(operatorDir, { recursive: true });
+    await withDeniedMkdir(join(layout.stateDir, "operator"), async () => {
+      const hostPath = await materializeLocation(
+        layout,
+        "org-1",
+        unownedDirectory(operatorDir),
+        undefined,
+        "",
+      );
+      assertEquals(hostPath, operatorDir);
+    });
+  });
+});
+
+test("materializeLocation names a missing unowned directory it may not create", async () => {
+  await withTempLayout(async (layout) => {
+    const operatorDir = join(layout.stateDir, "operator", "data");
+    await withDeniedMkdir(join(layout.stateDir, "operator"), async () => {
+      await assertRejects(
+        () =>
+          materializeLocation(
+            layout,
+            "org-1",
+            unownedDirectory(operatorDir),
+            undefined,
+            "",
+          ),
+        Error,
+        "has no principal to own it",
+      );
+    });
+  });
+});

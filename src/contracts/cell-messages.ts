@@ -148,6 +148,49 @@ export type TunnelTokenMessage = {
   at: string;
 };
 
+/**
+ * Daemon → control plane: one finished scheduled backup run, read from this
+ * host's result spool. Correlated by `id`: the spooled result is deleted only
+ * when a {@link BackupRunReportResultMessage} with the same `id` arrives, so a
+ * report lost in a disconnect is simply sent again, and `runId` (unique per
+ * policy) makes the second copy a no-op. The artifact fields are present when
+ * `status` is `succeeded`. Twin of `turbopanel/src/contracts/cell-protocol.ts`;
+ * not sent yet (Road row `r2-backup-status-report` wires it).
+ */
+export type BackupRunReportMessage = {
+  type: "backup-run-report";
+  id: string;
+  policyId: string;
+  runId: string;
+  startedAt: string;
+  finishedAt: string;
+  status: "succeeded" | "failed";
+  error?: string;
+  backupId?: string;
+  sizeBytes?: number;
+  checksum?: string;
+  path?: string;
+  /** `bk_` ids this run's retention removed from the policy's directory. */
+  pruned?: string[];
+  /** When the policy's timer next fires, read from systemd after the run. */
+  nextRunAt?: string;
+  at: string;
+};
+
+/**
+ * Control plane → daemon: the report with this `id` is stored (`ok: true`) or
+ * refused for good (`ok: false`) — either way the spooled result is dropped.
+ * No reply means a transient failure, and the report is sent again. Twin of
+ * `turbopanel/src/contracts/cell-protocol.ts`.
+ */
+export type BackupRunReportResultMessage = {
+  type: "backup-run-report-result";
+  id: string;
+  ok: boolean;
+  error?: string;
+  at: string;
+};
+
 /** Instance-wide ACME knobs for hostnames whose source is `lets-encrypt`. */
 export type InstanceAcmeWireSettings = {
   contactEmail: string;
@@ -367,6 +410,21 @@ export type DaemonMessage =
     type: "managed-ha-event";
     managedId: string;
     sourceMemberId?: string;
+    /**
+     * Who decided the primary is dead. Absent = the Orchestrator poller
+     * (`ha-observe.ts`); `postgres-probe` = `pg-dead-primary-observe.ts`,
+     * sent only to a control plane advertising `managed-ha-probe-v1`.
+     */
+    detector?: "orchestrator" | "postgres-probe";
+    /**
+     * Orchestrator's key for the dead instance (`ha-observe.ts` only; feature
+     * `managed-ha-instance-v1`). Both or neither. The control plane fences
+     * only when they match the cluster's current primary.
+     */
+    instanceHost?: string;
+    instancePort?: number;
+    /** Bounded detector evidence (failure count, last error, container state). */
+    evidence?: Record<string, unknown>;
     at: string;
   }
   | {
@@ -449,6 +507,8 @@ export type DaemonMessage =
     error?: string;
     at: string;
   }
+  | BackupRunReportMessage
+  | BackupRunReportResultMessage
   | {
     type: "public-urls-update";
     id: string;

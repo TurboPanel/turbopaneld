@@ -1,0 +1,86 @@
+---
+# Re-render the self-hosted control plane's systemd units from this bundle.
+#
+# The control-plane update (run.sh --instance --skip-daemon-package) swaps the
+# binaries only, so a changed unit template never reached a host that updated
+# in place: the instance unit kept its old sandbox and the Docker gate never
+# appeared. The daemon runs this play from the update flow, after the package
+# swap and the migration and BEFORE its single restart of the instance.
+#
+#   tp-orchestrate playbook -i localhost, -c local \
+#     -e turbopanel_install_root=/opt/turbopanel instance-units-refresh.yml
+#
+# Contract:
+# - It never touches the Caddyfile or any TLS state: only unit templates are
+#   rendered (instance-launch tasks/units.yml). The hostname list, ACME
+#   settings and uploaded certificates arrive as extra-vars from the control
+#   plane's apply, which this play does not have; the leaf generator reads the
+#   persisted instance-hostnames.json instead (resolve-hostnames.yml).
+# - It restarts nothing (instance_start is false, so the instance-launch
+#   handlers that restart the instance and Caddy are skipped). The caller
+#   restarts the instance once, under the update health check and rollback.
+#   Run by hand, restart turbopanel-instance afterwards to apply the units.
+# - It never fails the update: any error is reported as a warning and the
+#   play still ends with a daemon-reload so systemd matches the files on disk.
+# - The Docker gate installs only where /usr/bin/docker exists (its own role
+#   skips elsewhere), and the gate is observe-only.
+- name: TurboPanel control-plane unit refresh
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: true
+
+  vars:
+    turbopanel_install_root: /opt/turbopanel
+    # Never restart from here; the update flow owns the one restart.
+    instance_start: false
+
+  tasks:
+    - name: Require an installed control plane
+      ansible.builtin.stat:
+        path: "{{ turbopanel_install_root }}/bin/turbopanel"
+      register: _units_instance_binary
+
+    - name: Refresh the units
+      when: _units_instance_binary.stat.exists
+      block:
+        - name: Provision tpctrl/tpcaddy before the units that name them
+          ansible.builtin.include_role:
+            name: instance-user
+
+        - name: Platform CA and server leaf the Caddy unit reads
+          ansible.builtin.include_role:
+            name: instance-certs
+
+        - name: Vendored runtimes the units ExecStart through
+          ansible.builtin.include_role:
+            name: "{{ item }}"
+          loop:
+            - deno-runtime
+            - node-runtime
+
+        # Unit templates ONLY (tasks/units.yml). The rest of instance-launch
+        # renders the Caddyfile from TLS extra-vars this play does not carry,
+        # rotates secrets and runs migrations: never include it from here.
+        - name: Instance, Caddy and ACME issuer units
+          ansible.builtin.include_role:
+            name: instance-launch
+            tasks_from: units.yml
+
+        - name: Docker gate (no-op without Docker, observe mode)
+          ansible.builtin.include_role:
+            name: docker-gate
+
+        - name: Apply the rendered units to systemd
+          ansible.builtin.meta: flush_handlers
+      rescue:
+        - name: Report that the units could not be refreshed
+          ansible.builtin.debug:
+            msg: >-
+              WARNING: control-plane units not refreshed, the installed units
+              keep running: {{ ansible_failed_result.msg | default('unknown error') }}
+      always:
+        - name: Make systemd match the files on disk
+          ansible.builtin.systemd:
+            daemon_reload: true
+          failed_when: false

@@ -19,6 +19,7 @@ import {
 } from "../collector/mounts.ts";
 import { probeStorage } from "../collector/filesystem.ts";
 import type { StatfsResult } from "../collector/types.ts";
+import { isAllowedFilesystem } from "./allowlist.ts";
 import { deriveFilesystemId, type IdentityIo } from "./identity.ts";
 import type {
   FilesystemRole,
@@ -75,6 +76,13 @@ async function groupByFilesystemId(
     if (!path) return undefined;
     const entry = mountForPath(mountEntries, path);
     if (!entry) return undefined;
+    // The system root is always kept: it carries host.storage's root capacity
+    // whatever its type (an overlay root in a container, a ZFS root, …).
+    if (
+      role !== "root" && !isAllowedFilesystem(entry.fsType, entry.mountPoint)
+    ) {
+      return undefined;
+    }
     const deviceName = kernelDeviceName(entry.source) ?? null;
     const filesystemId = await deriveFilesystemId(
       { sourceDevice: entry.source, deviceName, mountpoint: entry.mountPoint },

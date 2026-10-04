@@ -837,6 +837,63 @@ test("instance-launch-only refreshes the runtimes its units ExecStart through", 
   }
 });
 
+test("instance-units-refresh re-renders the instance units and the Docker gate without restarting or failing the update", () => {
+  const playbook = readPlaybook("instance-units-refresh.yml");
+  for (const role of ["instance-launch", "docker-gate"]) {
+    if (!playbook.includes(`name: ${role}`)) {
+      throw new TypeError(`instance-units-refresh.yml must include ${role}`);
+    }
+  }
+  // Runtimes and users come before the units that name them.
+  for (const role of ["instance-user", "deno-runtime", "node-runtime"]) {
+    if (playbook.indexOf(role) > playbook.indexOf("name: instance-launch")) {
+      throw new TypeError(`${role} must precede instance-launch`);
+    }
+  }
+  // The caller owns the one restart; nothing here may restart the instance.
+  if (!/^ {4}instance_start: false$/m.test(playbook)) {
+    throw new TypeError("instance_start must be false");
+  }
+  if (/state:\s*restarted/.test(playbook)) {
+    throw new TypeError("the unit refresh must not restart anything");
+  }
+  // A render failure warns; it never fails the play.
+  for (const marker of ["rescue:", "always:", "daemon_reload: true"]) {
+    if (!playbook.includes(marker)) {
+      throw new TypeError(`instance-units-refresh.yml needs ${marker}`);
+    }
+  }
+});
+
+test("a co-located daemon refresh also installs the Docker gate", () => {
+  const roles = readPlaybook("daemon-colocated-refresh.yml");
+  if (!roles.includes("- role: docker-gate")) {
+    throw new TypeError("daemon-colocated-refresh.yml must run docker-gate");
+  }
+});
+
+test("a rollback rebuilds the instance unit from the release, never from the backup", () => {
+  const backup = readPlaybook("instance-backup.yml");
+  const rollback = readPlaybook("instance-rollback.yml");
+  if (
+    !backup.includes(
+      "{{ control_plane_backup_dir }}/turbopanel-instance.service",
+    )
+  ) {
+    throw new TypeError("instance-backup.yml must keep the instance unit");
+  }
+  if (
+    rollback.includes("dest: /etc/systemd/system/turbopanel-instance.service")
+  ) {
+    throw new TypeError(
+      "instance-rollback.yml must not copy the instance unit from the backup",
+    );
+  }
+  if (!rollback.includes("Rebuild the instance unit from the release tree")) {
+    throw new TypeError("instance-rollback.yml must rebuild the instance unit");
+  }
+});
+
 test("daemon playbooks run deno-runtime unconditionally", () => {
   assertRoleIsUnconditional("daemon-converge.yml", "deno-runtime");
   assertRoleIsUnconditional("daemon-install.yml", "deno-runtime");
@@ -1122,6 +1179,75 @@ test("node-runtime pins corepack by version and verified tarball digest", () => 
     ),
     true,
   );
+});
+
+function readNodeAppRuntimeFile(...parts: string[]): string {
+  return Deno.readTextFileSync(
+    join(fromMeta, "orchestration", "roles", "node-app-runtime", ...parts),
+  );
+}
+
+test("node-app-runtime pnpm plan: verified corepack, then pnpm/yarn shims in the series bin", () => {
+  const version = requireCapture(
+    readRoleDefaults("node-app-runtime"),
+    /^corepack_version:\s*"([\d.]+)"\s*$/m,
+    "corepack_version",
+  );
+  const table = readDigestTable(
+    readRoleDefaults("node-app-runtime"),
+    "corepack_sha256",
+  );
+  assertEquals(SHA256_HEX.test(table[version]?.[""] ?? ""), true);
+  // Same pin as the panel's own node-runtime role: one corepack everywhere.
+  assertEquals(
+    table[version]?.[""],
+    readDigestTable(readRoleDefaults("node-runtime"), "corepack_sha256")[
+      version
+    ]?.[""],
+  );
+  const tasks = readNodeAppRuntimeFile("tasks", "vendor-series.yml");
+  assertEquals(
+    tasks.includes(
+      'checksum: "sha256:{{ corepack_sha256[corepack_version] }}"',
+    ),
+    true,
+  );
+  const script = readNodeAppRuntimeFile("files", "install-series.sh");
+  // Only installs corepack when the tarball lacks one (Node 25+), from the
+  // verified local file, never a floating package spec.
+  assertEquals(script.includes('if [[ ! -e "${DEST}/bin/corepack" ]]'), true);
+  assertEquals(script.includes('"$COREPACK_TGZ"'), true);
+  assertEquals(/npm install[^\n]*corepack\s*$/m.test(script), false);
+  assertEquals(
+    script.includes(
+      'corepack" enable --install-directory "${DEST}/bin" pnpm yarn',
+    ),
+    true,
+  );
+  // Shims land before ownership is repaired so the build user can exec them,
+  // and the Node tarball is checked against the release's SHA-256 list.
+  assertEquals(
+    script.indexOf("enable --install-directory") < script.indexOf("chown -R"),
+    true,
+  );
+  assertEquals(script.includes("sha256sum -c"), true);
+});
+
+test("node-app-runtime scripts parse as bash", () => {
+  const result = new Deno.Command("bash", {
+    args: [
+      "-n",
+      join(
+        fromMeta,
+        "orchestration",
+        "roles",
+        "node-app-runtime",
+        "files",
+        "install-series.sh",
+      ),
+    ],
+  }).outputSync();
+  assertEquals(result.success, true);
 });
 
 test("caddy role pins an upstream SHA-256 for caddy_version on both architectures", () => {

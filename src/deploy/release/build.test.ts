@@ -1,7 +1,6 @@
 import { assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { join } from "@std/path";
 import {
-  BUILD_RLIMIT_AS_BYTES,
   BUILD_TIMEOUT_MS,
   buildEnvironment,
   buildInvocation,
@@ -153,6 +152,54 @@ test("framework next without standalone or export ships the tree with a warning"
   });
 });
 
+test("the Next fold refuses links the build planted at either end", async () => {
+  const cases: Array<(workingDir: string, outside: string) => Promise<void>> = [
+    // A link at the fold's destination directory.
+    async (workingDir, outside) => {
+      await seedStandalone(workingDir);
+      await Deno.symlink(
+        outside,
+        join(workingDir, NEXT_STANDALONE_DIR, ".next"),
+      );
+    },
+    // A link as the fold's source.
+    async (workingDir, outside) => {
+      await seedStandalone(workingDir);
+      await Deno.remove(join(workingDir, ".next", "static"), {
+        recursive: true,
+      });
+      await Deno.symlink(outside, join(workingDir, ".next", "static"));
+    },
+    // The standalone tree or the export itself is a link.
+    async (workingDir, outside) => {
+      await Deno.mkdir(join(workingDir, ".next"));
+      await Deno.symlink(outside, join(workingDir, NEXT_STANDALONE_DIR));
+    },
+    async (workingDir, outside) => {
+      await Deno.symlink(outside, join(workingDir, NEXT_EXPORT_DIR));
+    },
+  ];
+  for (const plant of cases) {
+    await withWorkingDir(async (root) => {
+      const workingDir = join(root, "build");
+      const outside = join(root, "daemon-state");
+      await Deno.mkdir(workingDir);
+      await Deno.mkdir(outside);
+      await Deno.writeTextFile(join(outside, "index.html"), "secret");
+      await plant(workingDir, outside);
+      await assertRejects(
+        () => prepareNativeAppBuildOutput({ framework: "next", workingDir }),
+        Error,
+        "symlink",
+      );
+      assertEquals(
+        [...Deno.readDirSync(outside)].map((entry) => entry.name),
+        ["index.html"],
+      );
+    });
+  }
+});
+
 test("standalone fold also copies public/ when present", async () => {
   await withWorkingDir(async (workingDir) => {
     await seedStandalone(workingDir);
@@ -178,6 +225,12 @@ test("buildEnvironment drops reserved sandbox keys from payload env", () => {
         GIT_SSH_COMMAND: "ssh -i /evil",
         LD_PRELOAD: "/evil.so",
         LD_LIBRARY_PATH: "/evil",
+        LD_AUDIT: "/evil.so",
+        BASH_ENV: "/evil.sh",
+        ENV: "/evil.sh",
+        GIT_EXEC_PATH: "/evil",
+        "-S": "x",
+        "BAD NAME": "x",
         PATH: "/evil/bin",
         HOME: "/evil/home",
         APP_SECRET_NAME: "ok-name",
@@ -190,6 +243,12 @@ test("buildEnvironment drops reserved sandbox keys from payload env", () => {
   assertEquals(env.GIT_SSH_COMMAND, undefined);
   assertEquals(env.LD_PRELOAD, undefined);
   assertEquals(env.LD_LIBRARY_PATH, undefined);
+  assertEquals(env.LD_AUDIT, undefined);
+  assertEquals(env.BASH_ENV, undefined);
+  assertEquals(env.ENV, undefined);
+  assertEquals(env.GIT_EXEC_PATH, undefined);
+  assertEquals(env["-S"], undefined);
+  assertEquals(env["BAD NAME"], undefined);
   assertEquals(env.PATH?.includes("/evil"), false);
   assertEquals(env.HOME, "/work");
   assertEquals(env.CI, "1");
@@ -198,23 +257,11 @@ test("buildEnvironment drops reserved sandbox keys from payload env", () => {
   assertEquals(env.NODE_OPTIONS, "--max-old-space-size=512");
 });
 
-test("buildInvocation wraps with prlimit or falls back to bare sh -c", () => {
-  assertEquals(buildInvocation("npm run build", false), {
+test("buildInvocation is a bare sh -c without a runtime group", () => {
+  assertEquals(buildInvocation("npm run build"), {
     bin: "sh",
     args: ["-c", "npm run build"],
   });
-  const wrapped = buildInvocation("npm run build", true);
-  assertEquals(wrapped.bin, "/usr/bin/prlimit");
-  assertEquals(wrapped.args.includes("--"), true);
-  assertEquals(wrapped.args.includes("sh"), true);
-  assertEquals(wrapped.args.at(-1), "npm run build");
-  // 4 GiB AS cannot hold V8's pointer cage; keep the cap strictly above that.
-  assertEquals(
-    wrapped.args.includes(`--as=${BUILD_RLIMIT_AS_BYTES}`),
-    true,
-  );
-  // 16 GiB still fails pnpm registry fetches; keep room for worker isolates.
-  assertEquals(BUILD_RLIMIT_AS_BYTES >= 32 * 1024 * 1024 * 1024, true);
 });
 
 test("buildInvocation enters the tenant Node entitlement group via sudo -u self", () => {
@@ -227,7 +274,6 @@ test("buildInvocation enters the tenant Node entitlement group via sudo -u self"
   };
   const invoked = buildInvocation(
     "corepack pnpm install",
-    false,
     "tpnode24",
     identity,
   );
@@ -235,6 +281,8 @@ test("buildInvocation enters the tenant Node entitlement group via sudo -u self"
   assertEquals(invoked.args.slice(0, 4), ["-n", "-u", "tp", "--"]);
   assertEquals(invoked.args.includes("/usr/bin/sg"), false);
   assertEquals(invoked.args.includes("/usr/bin/env"), true);
+  // `env` gets `--` so no variable name can be read as one of its options.
+  assertEquals(invoked.args[invoked.args.indexOf("/usr/bin/env") + 1], "--");
   assertEquals(
     invoked.args.includes(
       "PATH=/opt/turbopanel/vendor/node-app/24/current/bin:/usr/bin:/bin",
@@ -242,35 +290,23 @@ test("buildInvocation enters the tenant Node entitlement group via sudo -u self"
     true,
   );
   assertEquals(invoked.args.slice(-3), ["sh", "-c", "corepack pnpm install"]);
-  const wrapped = buildInvocation(
-    "corepack pnpm install",
-    true,
-    "tpnode24",
-    identity,
-  );
-  assertEquals(wrapped.bin, "/usr/bin/prlimit");
-  assertEquals(wrapped.args.includes("/usr/bin/sudo"), true);
-  assertEquals(wrapped.args.includes("/usr/bin/sg"), false);
-  assertEquals(wrapped.args.includes("tp"), true);
-  assertEquals(wrapped.args.at(-1), "corepack pnpm install");
 });
 
 test("buildInvocation refuses a native group wrap without the daemon username", () => {
   assertThrows(
-    () => buildInvocation("corepack pnpm install", false, "tpnode24"),
+    () => buildInvocation("corepack pnpm install", "tpnode24"),
     TypeError,
     "daemon username",
   );
 });
 
-test("runReleaseBuild notes when prlimit is unavailable and skips empty commands", async () => {
+test("runReleaseBuild skips empty commands and runs the rest in order", async () => {
   await withWorkingDir(async (workingDir) => {
     const lines: string[] = [];
     const ran: string[] = [];
     await runReleaseBuild({
       build: { kind: "native" },
       workingDir,
-      hasPrlimit: () => Promise.resolve(false),
       runCommand: (command) => {
         ran.push(command);
         return Promise.resolve();
@@ -289,34 +325,13 @@ test("runReleaseBuild notes when prlimit is unavailable and skips empty commands
         buildCommand: "npm run build",
       },
       workingDir,
-      hasPrlimit: () => Promise.resolve(false),
-      runCommand: (command, _cwd, _env, withPrlimit) => {
-        ran.push(`${withPrlimit ? "cap" : "bare"}:${command}`);
+      runCommand: (command) => {
+        ran.push(command);
         return Promise.resolve();
       },
       onOutput: (_stream, line) => lines.push(line),
     });
-    assertEquals(
-      lines.some((line) => line.includes("prlimit unavailable")),
-      true,
-    );
-    assertEquals(ran, ["bare:npm ci", "bare:npm run build"]);
-  });
-});
-
-test("runReleaseBuild uses prlimit when the host reports it available", async () => {
-  await withWorkingDir(async (workingDir) => {
-    const ran: Array<{ command: string; withPrlimit: boolean }> = [];
-    await runReleaseBuild({
-      build: { kind: "native", buildCommand: "make" },
-      workingDir,
-      hasPrlimit: () => Promise.resolve(true),
-      runCommand: (command, _cwd, _env, withPrlimit) => {
-        ran.push({ command, withPrlimit });
-        return Promise.resolve();
-      },
-    });
-    assertEquals(ran, [{ command: "make", withPrlimit: true }]);
+    assertEquals(ran, ["npm ci", "npm run build"]);
   });
 });
 
@@ -376,7 +391,7 @@ test("deriveNodeInstallCommand detects the manager from the lockfile", async () 
     await Deno.writeTextFile(join(workingDir, "pnpm-lock.yaml"), "");
     assertEquals(
       await deriveNodeInstallCommand({ workingDir }),
-      "corepack pnpm install --frozen-lockfile --prod=false",
+      "corepack pnpm install --frozen-lockfile --config.production=false",
     );
   });
 });
@@ -397,9 +412,59 @@ test("deriveNodeInstallCommand lets an explicit packageManager override the lock
     await Deno.remove(join(workingDir, "pnpm-lock.yaml"));
     assertEquals(
       await deriveNodeInstallCommand({ packageManager: "pnpm", workingDir }),
-      "corepack pnpm install --prod=false",
+      "corepack pnpm install --config.production=false",
     );
   });
+});
+
+test("deriveNodeInstallCommand picks pnpm dev-deps flags by pinned major", async () => {
+  const cases: Array<[string, string]> = [
+    ["pnpm@9.15.9", "corepack pnpm install --frozen-lockfile --prod=false"],
+    ["pnpm@10.20.0", "corepack pnpm install --frozen-lockfile"],
+    ["pnpm@11.28.4", "corepack pnpm install --frozen-lockfile"],
+    // pnpm 12 rejects `--prod=false`.
+    ["pnpm@12.3.4+sha512.961aa41f", "corepack pnpm install --frozen-lockfile"],
+  ];
+  for (const [pin, expected] of cases) {
+    await withWorkingDir(async (workingDir) => {
+      await Deno.writeTextFile(
+        join(workingDir, "package.json"),
+        JSON.stringify({ packageManager: pin }),
+      );
+      await Deno.writeTextFile(join(workingDir, "pnpm-lock.yaml"), "");
+      assertEquals(await deriveNodeInstallCommand({ workingDir }), expected);
+    });
+  }
+  // yarn 1 / berry / npm pins are unaffected by the pnpm logic.
+  const others: Array<[string, string]> = [
+    ["yarn@1.22.22", "corepack yarn install --production=false"],
+    ["yarn@4.5.0", "corepack yarn install"],
+    ["npm@10.8.0", "npm install --include=dev"],
+  ];
+  for (const [pin, expected] of others) {
+    await withWorkingDir(async (workingDir) => {
+      await Deno.writeTextFile(
+        join(workingDir, "package.json"),
+        JSON.stringify({ packageManager: pin }),
+      );
+      assertEquals(await deriveNodeInstallCommand({ workingDir }), expected);
+    });
+  }
+});
+
+test("deriveNodeInstallCommand ignores a pin for a different manager than packageManager=pnpm", async () => {
+  for (const pin of ["yarn@4.5.0", "npm@10.8.0"]) {
+    await withWorkingDir(async (workingDir) => {
+      await Deno.writeTextFile(
+        join(workingDir, "package.json"),
+        JSON.stringify({ packageManager: pin }),
+      );
+      assertEquals(
+        await deriveNodeInstallCommand({ packageManager: "pnpm", workingDir }),
+        "corepack pnpm install --config.production=false",
+      );
+    });
+  }
 });
 
 test("deriveNodeInstallCommand treats Yarn Berry as immutable-by-CI", async () => {
@@ -472,7 +537,6 @@ test("runReleaseBuild derives the install command for a native-app build", async
         nodeBinDir: "/opt/turbopanel/vendor/node-app/24/current/bin",
         nodeEnv: "production",
       },
-      hasPrlimit: () => Promise.resolve(false),
       runCommand: (command) => {
         ran.push(command);
         return Promise.resolve();
@@ -481,7 +545,7 @@ test("runReleaseBuild derives the install command for a native-app build", async
     });
     // The derived install runs before the build command.
     assertEquals(ran, [
-      "corepack pnpm install --frozen-lockfile --prod=false",
+      "corepack pnpm install --frozen-lockfile --config.production=false",
       "npm run build",
     ]);
     assertEquals(
@@ -504,7 +568,6 @@ test("runReleaseBuild normalizes bare pnpm build commands for native-app builds"
         nodeBinDir: "/opt/turbopanel/vendor/node-app/24/current/bin",
         nodeEnv: "production",
       },
-      hasPrlimit: () => Promise.resolve(false),
       runCommand: (command) => {
         ran.push(command);
         return Promise.resolve();
@@ -512,7 +575,7 @@ test("runReleaseBuild normalizes bare pnpm build commands for native-app builds"
       onOutput: (_stream, line) => lines.push(line),
     });
     assertEquals(ran, [
-      "corepack pnpm install --frozen-lockfile --prod=false",
+      "corepack pnpm install --frozen-lockfile --config.production=false",
       "corepack pnpm run build",
     ]);
     assertEquals(
@@ -537,7 +600,6 @@ test("runReleaseBuild prefers an explicit installCommand over the derived one", 
         nodeBinDir: "/opt/turbopanel/vendor/node-app/24/current/bin",
         nodeEnv: "production",
       },
-      hasPrlimit: () => Promise.resolve(false),
       runCommand: (command) => {
         ran.push(command);
         return Promise.resolve();
@@ -561,7 +623,6 @@ test("runReleaseBuild does not derive an install without a native runtime", asyn
     await runReleaseBuild({
       build: { kind: "native", buildCommand: "npm run build" },
       workingDir,
-      hasPrlimit: () => Promise.resolve(false),
       runCommand: (command) => {
         ran.push(command);
         return Promise.resolve();
@@ -585,7 +646,6 @@ test({
       await runReleaseBuild({
         build: { kind: "native", buildCommand: "printf 'built-ok\\n'" },
         workingDir,
-        hasPrlimit: () => Promise.resolve(false),
         onOutput: (_stream, line) => lines.push(line),
       });
       assertEquals(lines.some((line) => line.includes("built-ok")), true);
@@ -598,7 +658,6 @@ test({
               buildCommand: "printf 'boom\\n' >&2; exit 7",
             },
             workingDir,
-            hasPrlimit: () => Promise.resolve(false),
           }),
         Error,
         "boom",
@@ -618,24 +677,10 @@ test({
           runReleaseBuild({
             build: { kind: "native", buildCommand: "exit 3" },
             workingDir,
-            hasPrlimit: () => Promise.resolve(false),
           }),
         Error,
         "build command failed: exit 3",
       );
-    });
-  },
-});
-
-test({
-  name: "runReleaseBuild probes prlimit availability on the host",
-  permissions: { read: true, write: true, run: true, env: true },
-  fn: async () => {
-    await withWorkingDir(async (workingDir) => {
-      await runReleaseBuild({
-        build: { kind: "native", buildCommand: "true" },
-        workingDir,
-      });
     });
   },
 });
@@ -676,7 +721,6 @@ test({
             runReleaseBuild({
               build: { kind: "native", buildCommand: "true" },
               workingDir,
-              hasPrlimit: () => Promise.resolve(false),
             }),
           Error,
           `build command timed out after ${BUILD_TIMEOUT_MS}ms`,
@@ -712,7 +756,6 @@ test({
             runReleaseBuild({
               build: { kind: "native", buildCommand: "true" },
               workingDir,
-              hasPrlimit: () => Promise.resolve(false),
             }),
           Error,
           `build command timed out after ${BUILD_TIMEOUT_MS}ms`,
@@ -738,7 +781,6 @@ test({
             runReleaseBuild({
               build: { kind: "native", buildCommand: "true" },
               workingDir,
-              hasPrlimit: () => Promise.resolve(false),
             }),
           Error,
           "sh missing",
@@ -751,79 +793,18 @@ test({
 });
 
 test({
-  name: "runReleaseBuild default runner rethrows a prlimit spawn failure",
-  permissions: { read: true, write: true, run: true, env: true },
-  fn: async () => {
-    const restore = stubDenoCommand((cmd) => {
-      if (cmd === "/usr/bin/prlimit") {
-        throw new Error("prlimit denied");
-      }
-      throw new Error(`unexpected bin ${cmd}`);
-    });
-    try {
-      await withWorkingDir(async (workingDir) => {
-        await assertRejects(
-          () =>
-            runReleaseBuild({
-              build: { kind: "native", buildCommand: "true" },
-              workingDir,
-              hasPrlimit: () => Promise.resolve(true),
-            }),
-          Error,
-          "prlimit denied",
-        );
-      });
-    } finally {
-      restore();
-    }
-  },
-});
-
-test({
-  name:
-    "runReleaseBuild default runner succeeds under prlimit with a cleared env",
+  name: "runReleaseBuild default runner succeeds with a cleared env",
   permissions: { read: true, write: true, run: true, env: true },
   fn: async () => {
     await withWorkingDir(async (workingDir) => {
       const lines: string[] = [];
       await runReleaseBuild({
-        build: { kind: "native", buildCommand: "printf 'prlimit-ok\\n'" },
+        build: { kind: "native", buildCommand: "printf 'build-ok\\n'" },
         workingDir,
-        hasPrlimit: () => Promise.resolve(true),
         onOutput: (_stream, line) => lines.push(line),
       });
-      assertEquals(lines.some((line) => line.includes("prlimit-ok")), true);
+      assertEquals(lines.some((line) => line.includes("build-ok")), true);
     });
-  },
-});
-
-test({
-  name: "runReleaseBuild treats a missing prlimit binary as unavailable",
-  permissions: { read: true, write: true, run: true, env: true },
-  fn: async () => {
-    const originalStat = Deno.stat;
-    Deno.stat = (path) => {
-      if (String(path) === "/usr/bin/prlimit") {
-        return Promise.reject(new Deno.errors.NotFound("missing"));
-      }
-      return originalStat(path);
-    };
-    try {
-      await withWorkingDir(async (workingDir) => {
-        const lines: string[] = [];
-        await runReleaseBuild({
-          build: { kind: "native", buildCommand: "true" },
-          workingDir,
-          onOutput: (_stream, line) => lines.push(line),
-        });
-        assertEquals(
-          lines.some((line) => line.includes("prlimit unavailable")),
-          true,
-        );
-      });
-    } finally {
-      Deno.stat = originalStat;
-    }
   },
 });
 

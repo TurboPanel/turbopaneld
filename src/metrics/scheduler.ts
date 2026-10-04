@@ -15,6 +15,7 @@
  * sequences stay monotonic. Attach-scoped generation tokens ignore stale
  * in-flight emits across detach/reconnect.
  */
+import { METRICS_SCHEMA_VERSION } from "../contracts/metrics-contract.ts";
 import { logInfo, logWarn, sanitizeForLog } from "../util/logger.ts";
 import type { MetricsCollector } from "./collector/index.ts";
 
@@ -73,6 +74,14 @@ export type MetricsSchedulerOptions = {
   setTimeoutFn?: typeof setTimeout;
   clearTimeoutFn?: typeof clearTimeout;
   logRateLimitMs?: number;
+  /**
+   * `true` once the control plane negotiated the `metrics-v7` wire feature.
+   * Then live leases keep the baseline sampler running and the 10 s stream
+   * runs beside it on its own collector; each sample carries
+   * `metadata.durable` (baseline `true`, stream `false`). Closed (v6) keeps
+   * the single-cadence behaviour.
+   */
+  durabilityFlag?: () => boolean;
   onLog?: (level: MetricsLogLevel, message: string) => void;
 };
 
@@ -134,7 +143,12 @@ export class MetricsScheduler {
   readonly #clearTimeoutFn: typeof clearTimeout;
   readonly #logRateLimitMs: number;
   readonly #onLog: (level: MetricsLogLevel, message: string) => void;
+  readonly #durabilityFlag: () => boolean;
 
+  #streamCollector: MetricsCollector | undefined;
+  #streamTimer: ReturnType<typeof setInterval> | undefined;
+  #streamIntervalMs: number | null = null;
+  #streamEmitting = false;
   #send: MetricsSink | undefined;
   #collector: MetricsCollector | undefined;
   #firstTimer: ReturnType<typeof setTimeout> | undefined;
@@ -164,6 +178,90 @@ export class MetricsScheduler {
     this.#clearTimeoutFn = options.clearTimeoutFn ?? clearTimeout;
     this.#logRateLimitMs = options.logRateLimitMs ?? METRICS_LOG_RATE_LIMIT_MS;
     this.#onLog = options.onLog ?? defaultOnLog;
+    this.#durabilityFlag = options.durabilityFlag ?? (() => false);
+  }
+
+  /** `true` when live leases run beside the baseline instead of replacing it. */
+  splitsLiveStream(): boolean {
+    return this.#durabilityFlag();
+  }
+
+  /**
+   * Run (`ms`) or stop (`null`) the stream-only sampler beside the baseline
+   * timer. It owns a separate collector so its 10 s counter deltas never
+   * disturb the baseline's 60 s deltas.
+   */
+  setStreamIntervalMs(ms: number | null): void {
+    if (ms === this.#streamIntervalMs) return;
+    this.#streamIntervalMs = ms;
+    this.#stopStreamTimer();
+    const send = this.#send;
+    if (ms === null || !send) return;
+    let collector: MetricsCollector;
+    try {
+      collector = this.#streamCollector ?? this.#collectorFactory();
+    } catch (err) {
+      this.#logRateLimited(
+        "factory",
+        "warn",
+        "stream collector factory failed:",
+        sanitizeForLog(err),
+      );
+      return;
+    }
+    this.#streamCollector = collector;
+    const generation = this.#attachGeneration;
+    void this.#emitStream(generation, send, collector);
+    this.#streamTimer = this.#setIntervalFn(() => {
+      void this.#emitStream(generation, send, collector);
+    }, ms);
+  }
+
+  #stopStreamTimer(): void {
+    if (this.#streamTimer === undefined) return;
+    this.#clearIntervalFn(this.#streamTimer);
+    this.#streamTimer = undefined;
+  }
+
+  async #emitStream(
+    generation: number,
+    send: MetricsSink,
+    collector: MetricsCollector,
+  ): Promise<void> {
+    if (generation !== this.#attachGeneration || this.#streamEmitting) return;
+    this.#streamEmitting = true;
+    try {
+      this.#sequence += 1;
+      const result = await collector.collect({ sequence: this.#sequence });
+      if (generation !== this.#attachGeneration || !result.supported) return;
+      if (this.#send !== send) return;
+      await send(this.#stampDurable(result.sample, false));
+    } catch (err) {
+      this.#logRateLimited(
+        "collect",
+        "warn",
+        "stream sample failed:",
+        sanitizeForLog(err),
+      );
+    } finally {
+      this.#streamEmitting = false;
+    }
+  }
+
+  #stampDurable<T>(sample: T, durable: boolean): T {
+    if (!this.#durabilityFlag()) {
+      // v6 wire: the v7-only `extended` block (free text included) is never sent.
+      delete (sample as { extended?: unknown }).extended;
+      return sample;
+    }
+    const metadata = (sample as { metadata?: Record<string, unknown> })
+      .metadata;
+    if (metadata) {
+      // metrics-v7 negotiated: this is a v7 sample (durable flag, extended).
+      metadata.version = METRICS_SCHEMA_VERSION;
+      metadata.durable = durable;
+    }
+    return sample;
   }
 
   /** Jitter applied for the current serverId (test/introspection helper). */
@@ -274,6 +372,9 @@ export class MetricsScheduler {
       this.#clearIntervalFn(this.#intervalTimer);
       this.#intervalTimer = undefined;
     }
+    this.#stopStreamTimer();
+    this.#streamIntervalMs = null;
+    this.#streamCollector = undefined;
     this.#send = undefined;
     this.#collector = undefined;
   }
@@ -323,7 +424,7 @@ export class MetricsScheduler {
       if (this.#send !== send) return;
 
       try {
-        await send(result.sample);
+        await send(this.#stampDurable(result.sample, true));
       } catch (err) {
         this.#logRateLimited(
           "send",

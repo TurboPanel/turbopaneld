@@ -1,7 +1,11 @@
 import { assertEquals, assertRejects } from "@std/assert";
 import { join } from "@std/path";
 import type { DockerCliResult } from "../deploy/docker-cli.ts";
-import { RUNTIME_COMPOSE_FILENAME } from "../deploy/compose-files.ts";
+import {
+  RUNTIME_COMPOSE_FILENAME,
+  writeComposeFileSecure,
+  writeDeploymentManifest,
+} from "../deploy/compose-files.ts";
 import {
   cleanupStaleTcpUdpServiceIngress,
   listPersistedTcpUdpServiceIds,
@@ -206,8 +210,16 @@ test({
       assertEquals(downCall !== undefined, true);
       assertEquals(downCall!.includes("--remove-orphans"), true);
       assertEquals(downCall!.includes("--volumes"), true);
+      // Only locally built images go; never pulled/tagged base images.
+      const rmi = downCall!.indexOf("--rmi");
+      assertEquals(downCall![rmi + 1], "local");
       assertEquals(pathsInOrder(downCall!, [composePath]), true);
       await assertRejects(() => Deno.stat(deploymentDir), Deno.errors.NotFound);
+      // The now-empty project dir goes too.
+      await assertRejects(
+        () => Deno.stat(join(stateDir, "deployments", "proj-1")),
+        Deno.errors.NotFound,
+      );
     } finally {
       if (previous.TURBOPANEL_STATE_DIR === undefined) {
         Deno.env.delete("TURBOPANEL_STATE_DIR");
@@ -218,6 +230,49 @@ test({
         Deno.env.delete("TURBOPANEL_CONFIG_DIR");
       } else {
         Deno.env.set("TURBOPANEL_CONFIG_DIR", previous.TURBOPANEL_CONFIG_DIR);
+      }
+      await Deno.remove(root, { recursive: true }).catch(() => undefined);
+    }
+  },
+});
+
+test({
+  name:
+    "handleEnvironmentStop keeps the project dir while a sibling environment still lives in it",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: async () => {
+    const root = await Deno.makeTempDir({ prefix: "tp-stop-sibling-" });
+    const previous = {
+      TURBOPANEL_STATE_DIR: Deno.env.get("TURBOPANEL_STATE_DIR"),
+      TURBOPANEL_CONFIG_DIR: Deno.env.get("TURBOPANEL_CONFIG_DIR"),
+    };
+    const stateDir = join(root, "state");
+    Deno.env.set("TURBOPANEL_STATE_DIR", stateDir);
+    Deno.env.set("TURBOPANEL_CONFIG_DIR", join(root, "config"));
+    const projectDir = join(stateDir, "deployments", "proj-1");
+    const deploymentDir = join(projectDir, "envstop01");
+    const sibling = join(projectDir, "envother1");
+    await Deno.mkdir(deploymentDir, { recursive: true, mode: 0o750 });
+    await Deno.mkdir(sibling, { recursive: true, mode: 0o750 });
+    try {
+      await handleEnvironmentStop(
+        {
+          environmentId: "envstop01",
+          projectId: "proj-1",
+          projectName: "tp-demo-envstop1",
+        },
+        new Date().toISOString(),
+        {
+          runDocker: (): Promise<DockerCliResult> =>
+            Promise.resolve({ success: true, stdout: "", stderr: "", code: 0 }),
+        },
+      );
+      await assertRejects(() => Deno.stat(deploymentDir), Deno.errors.NotFound);
+      assertEquals((await Deno.stat(sibling)).isDirectory, true);
+    } finally {
+      for (const [k, v] of Object.entries(previous)) {
+        if (v === undefined) Deno.env.delete(k);
+        else Deno.env.set(k, v);
       }
       await Deno.remove(root, { recursive: true }).catch(() => undefined);
     }
@@ -418,6 +473,77 @@ test({
 });
 
 test({
+  name:
+    "handleEnvironmentStop retires the principals a delete names, after their trees",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: async () => {
+    const root = await Deno.makeTempDir({ prefix: "tp-stop-retire-" });
+    const previous = {
+      TURBOPANEL_STATE_DIR: Deno.env.get("TURBOPANEL_STATE_DIR"),
+      TURBOPANEL_CONFIG_DIR: Deno.env.get("TURBOPANEL_CONFIG_DIR"),
+      TURBOPANEL_PRINCIPAL_HOME_ROOT: Deno.env.get(
+        "TURBOPANEL_PRINCIPAL_HOME_ROOT",
+      ),
+    };
+    Deno.env.set("TURBOPANEL_STATE_DIR", join(root, "state"));
+    Deno.env.set("TURBOPANEL_CONFIG_DIR", join(root, "config"));
+    Deno.env.set("TURBOPANEL_PRINCIPAL_HOME_ROOT", join(root, "srv", "users"));
+
+    const privileged: string[] = [];
+    let rerenders = 0;
+    try {
+      const result = await handleEnvironmentStop(
+        {
+          environmentId: "envret0001",
+          projectId: "proj-1",
+          projectName: "tp-demo-envret000",
+          siteReleases: [{ serviceId: "svc-1", username: "appuser" }],
+          retirePrincipals: [{ username: "appuser" }, { username: "held" }],
+        },
+        new Date().toISOString(),
+        {
+          runPrivileged: (_command, args) => {
+            privileged.push(args.slice(-2).join(" "));
+            const refused = args.at(-1) === "held";
+            return Promise.resolve({
+              success: !refused,
+              stdout: "",
+              stderr: refused ? "tp-host: held is still referenced" : "",
+            });
+          },
+          applySshAccess: () => {
+            rerenders++;
+            return Promise.resolve({
+              changedPrincipals: [],
+              removedPrincipals: [],
+              sshdReloaded: false,
+              sftpChroot: false,
+              warnings: [],
+            });
+          },
+        },
+      );
+      assertEquals(privileged, [
+        `-- ${join(root, "srv", "users", "appuser", "sites", "svc-1")}`,
+        "principal-remove appuser",
+        "principal-remove held",
+      ]);
+      assertEquals(rerenders, 1);
+      assertEquals(
+        result.summary,
+        "Environment envret0001 already stopped; retired principals: appuser; principals kept: held",
+      );
+    } finally {
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) Deno.env.delete(key);
+        else Deno.env.set(key, value);
+      }
+      await Deno.remove(root, { recursive: true });
+    }
+  },
+});
+
+test({
   name: "handleEnvironmentStop keeps stopping when privileged reclaim throws",
   permissions: { env: true, read: true, write: true, run: true },
   fn: async () => {
@@ -458,4 +584,194 @@ test({
       await Deno.remove(root, { recursive: true });
     }
   },
+});
+
+const TWO_GENERATIONS = [
+  {
+    color: "blue",
+    generation: 1,
+    projectName: "tp-demo-gen",
+    state: "draining",
+  },
+  {
+    color: "green",
+    generation: 2,
+    projectName: "tp-demo-gen-green",
+    state: "live",
+  },
+] as const;
+
+/** A deployment dir with a two-generation v3 manifest; returns the env + dir. */
+async function withTwoGenerationDeployment(
+  fn: (deploymentDir: string) => Promise<void>,
+): Promise<void> {
+  const root = await Deno.makeTempDir({ prefix: "tp-gen-cmd-" });
+  const previous = {
+    TURBOPANEL_STATE_DIR: Deno.env.get("TURBOPANEL_STATE_DIR"),
+    TURBOPANEL_CONFIG_DIR: Deno.env.get("TURBOPANEL_CONFIG_DIR"),
+  };
+  const stateDir = join(root, "state");
+  Deno.env.set("TURBOPANEL_STATE_DIR", stateDir);
+  Deno.env.set("TURBOPANEL_CONFIG_DIR", join(root, "config"));
+  const dir = join(stateDir, "deployments", "proj-1", "envgen001");
+  try {
+    await Deno.mkdir(dir, { recursive: true, mode: 0o750 });
+    await writeComposeFileSecure(
+      join(dir, RUNTIME_COMPOSE_FILENAME),
+      "services: {}\n",
+    );
+    await writeDeploymentManifest(dir, {
+      version: 3,
+      projectId: "proj-1",
+      environmentId: "envgen001",
+      serverId: "srv-1",
+      generation: 2,
+      projectName: "tp-demo-gen",
+      composeSha256: "a".repeat(64),
+      services: {},
+      generations: [...TWO_GENERATIONS],
+    });
+    await fn(dir);
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) Deno.env.delete(key);
+      else Deno.env.set(key, value);
+    }
+    await Deno.remove(root, { recursive: true });
+  }
+}
+
+function recordingRun(calls: string[][]) {
+  return (args: string[]): Promise<DockerCliResult> => {
+    calls.push([...args]);
+    return Promise.resolve({
+      success: true,
+      stdout: "[]",
+      stderr: "",
+      code: 0,
+    });
+  };
+}
+
+function projectOf(argv: string[]): string {
+  return argv[argv.indexOf("-p") + 1]!;
+}
+
+test({
+  name:
+    "handleEnvironmentStop removes unreadable root-owned data via the privileged runner only",
+  permissions: { read: true, write: true, env: true, run: true },
+  async fn() {
+    const root = await Deno.makeTempDir({ prefix: "tp-stop-rootdata-" });
+    const previous = Deno.env.get("TURBOPANEL_STATE_DIR");
+    Deno.env.set("TURBOPANEL_STATE_DIR", join(root, "state"));
+    const outside = join(root, "outside");
+    await Deno.mkdir(outside);
+    await Deno.writeTextFile(join(outside, "keep"), "keep");
+    const deploymentDir = join(
+      root,
+      "state",
+      "deployments",
+      "proj-1",
+      "envrd0001",
+    );
+    const locked = join(deploymentDir, "data", "locked");
+    await Deno.mkdir(locked, { recursive: true });
+    await Deno.writeTextFile(join(locked, "f"), "x");
+    await Deno.symlink(outside, join(deploymentDir, "data", "escape"));
+    await Deno.chmod(locked, 0o500);
+    const removed: string[] = [];
+    try {
+      await handleEnvironmentStop(
+        {
+          environmentId: "envrd0001",
+          projectId: "proj-1",
+          projectName: "tp-demo-rd",
+        },
+        new Date().toISOString(),
+        {
+          runPrivileged: async (command, args) => {
+            assertEquals(command, "sudo");
+            assertEquals(args.slice(-4, -1), ["rm", "-rf", "--"]);
+            const path = args.at(-1)!;
+            removed.push(path);
+            await Deno.chmod(locked, 0o700);
+            await Deno.remove(path, { recursive: true });
+            return { success: true, stdout: "", stderr: "" };
+          },
+        },
+      );
+      assertEquals(removed, [deploymentDir]);
+      await assertRejects(() => Deno.stat(deploymentDir), Deno.errors.NotFound);
+      assertEquals(await Deno.readTextFile(join(outside, "keep")), "keep");
+    } finally {
+      await Deno.chmod(locked, 0o700).catch(() => undefined);
+      if (previous === undefined) Deno.env.delete("TURBOPANEL_STATE_DIR");
+      else Deno.env.set("TURBOPANEL_STATE_DIR", previous);
+      await Deno.remove(root, { recursive: true });
+    }
+  },
+});
+
+test({
+  name:
+    "handleEnvironmentStop never hands a symlinked deployment dir to the privileged runner",
+  permissions: { read: true, write: true, env: true, run: true },
+  async fn() {
+    const root = await Deno.makeTempDir({ prefix: "tp-stop-symlink-" });
+    const previous = Deno.env.get("TURBOPANEL_STATE_DIR");
+    Deno.env.set("TURBOPANEL_STATE_DIR", join(root, "state"));
+    const target = join(root, "etc");
+    await Deno.mkdir(target);
+    await Deno.mkdir(join(root, "state", "deployments", "proj-1"), {
+      recursive: true,
+    });
+    const link = join(root, "state", "deployments", "proj-1", "envsl0001");
+    await Deno.symlink(target, link);
+    let called = false;
+    try {
+      await handleEnvironmentStop(
+        {
+          environmentId: "envsl0001",
+          projectId: "proj-1",
+          projectName: "tp-demo-sl",
+        },
+        new Date().toISOString(),
+        {
+          runPrivileged: () => {
+            called = true;
+            return Promise.resolve({ success: true, stdout: "", stderr: "" });
+          },
+        },
+      );
+      assertEquals(called, false);
+      await Deno.stat(target);
+    } finally {
+      if (previous === undefined) Deno.env.delete("TURBOPANEL_STATE_DIR");
+      else Deno.env.set("TURBOPANEL_STATE_DIR", previous);
+      await Deno.remove(root, { recursive: true });
+    }
+  },
+});
+
+test({
+  name: "environment.stop brings down every generation of the deployment",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: () =>
+    withTwoGenerationDeployment(async () => {
+      const calls: string[][] = [];
+      await handleEnvironmentStop(
+        {
+          environmentId: "envgen001",
+          projectId: "proj-1",
+          projectName: "tp-demo-gen",
+        },
+        new Date().toISOString(),
+        { runDocker: recordingRun(calls) },
+      );
+      assertEquals(
+        calls.filter((argv) => argv.includes("down")).map(projectOf),
+        ["tp-demo-gen", "tp-demo-gen-green"],
+      );
+    }),
 });

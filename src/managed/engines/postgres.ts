@@ -4,6 +4,7 @@
  * SQL is built by `postgres-sql.ts` and fed to `psql` via stdin (never `-c`).
  */
 
+import { helperLabelArgs } from "../../deploy/labels.ts";
 import type {
   ManagedApplyCredential,
   ManagedApplyDatabaseOp,
@@ -256,6 +257,7 @@ const postgresReplicationRuntime: ManagedEngineReplicationRuntime = {
       const probe = await ctx.runDocker([
         "run",
         "--rm",
+        ...helperLabelArgs("volume-copy"),
         "--user",
         ctx.containerUser,
         ...volumeArgs,
@@ -289,6 +291,7 @@ const postgresReplicationRuntime: ManagedEngineReplicationRuntime = {
     const clean = await ctx.runDocker([
       "run",
       "--rm",
+      ...helperLabelArgs("volume-copy"),
       "--user",
       ctx.containerUser,
       ...volumeArgs,
@@ -320,6 +323,7 @@ const postgresReplicationRuntime: ManagedEngineReplicationRuntime = {
         [
           "run",
           "--rm",
+          ...helperLabelArgs("volume-copy"),
           "--user",
           ctx.containerUser,
           "--network",
@@ -368,6 +372,7 @@ const postgresReplicationRuntime: ManagedEngineReplicationRuntime = {
     const publish = await ctx.runDocker([
       "run",
       "--rm",
+      ...helperLabelArgs("volume-copy"),
       "--user",
       ctx.containerUser,
       ...volumeArgs,
@@ -420,27 +425,58 @@ const postgresReplicationRuntime: ManagedEngineReplicationRuntime = {
     if (rows.length === 0) {
       return { state: "unknown", observedAt };
     }
-    const [state, lagBytesRaw, lagSecondsRaw] = rows[0]!;
-    const health: ManagedReplicationObservedHealth = {
-      state: state || "unknown",
-      observedAt,
-    };
-    if (
-      lagBytesRaw !== undefined && lagBytesRaw !== "" && lagBytesRaw !== null
-    ) {
-      const lagBytes = Number(lagBytesRaw);
-      if (Number.isFinite(lagBytes)) health.lagBytes = lagBytes;
-    }
-    if (
-      lagSecondsRaw !== undefined && lagSecondsRaw !== "" &&
-      lagSecondsRaw !== null
-    ) {
-      const lagSeconds = Number(lagSecondsRaw);
-      if (Number.isFinite(lagSeconds)) health.lagSeconds = lagSeconds;
-    }
-    return health;
+    return standbyHealthFromRow(rows[0]!, observedAt);
   },
 };
+
+function optionalNumber(raw: string | undefined): number | undefined {
+  if (raw === undefined || raw === "") return undefined;
+  const value = Number(raw);
+  return Number.isFinite(value) ? value : undefined;
+}
+
+/** `X/Y` hex LSN text, as `pg_lsn::text` prints it. */
+const LSN_TEXT_RE = /^[0-9A-F]{1,8}\/[0-9A-F]{1,8}$/i;
+
+function optionalLsn(raw: string | undefined): string | undefined {
+  const value = raw?.trim();
+  return value && LSN_TEXT_RE.test(value) ? value.toUpperCase() : undefined;
+}
+
+/** One `standbyReplicationStatusSql` row → observed health. */
+export function standbyHealthFromRow(
+  row: readonly string[],
+  observedAt: string,
+): ManagedReplicationObservedHealth {
+  const [
+    state,
+    lagBytesRaw,
+    lagSecondsRaw,
+    receivedRaw,
+    replayRaw,
+    receiveLagRaw,
+    receiptAgeRaw,
+  ] = row;
+  const health: ManagedReplicationObservedHealth = {
+    state: state || "unknown",
+    observedAt,
+  };
+  const lagBytes = optionalNumber(lagBytesRaw);
+  if (lagBytes !== undefined) health.lagBytes = lagBytes;
+  const lagSeconds = optionalNumber(lagSecondsRaw);
+  if (lagSeconds !== undefined) health.lagSeconds = lagSeconds;
+  const receivedLsn = optionalLsn(receivedRaw);
+  if (receivedLsn) health.receivedLsn = receivedLsn;
+  const replayLsn = optionalLsn(replayRaw);
+  if (replayLsn) health.replayLsn = replayLsn;
+  const receiveLagBytes = optionalNumber(receiveLagRaw);
+  if (receiveLagBytes !== undefined) health.receiveLagBytes = receiveLagBytes;
+  const receiptAgeSeconds = optionalNumber(receiptAgeRaw);
+  if (receiptAgeSeconds !== undefined) {
+    health.receiptAgeSeconds = receiptAgeSeconds;
+  }
+  return health;
+}
 
 export const postgresManagedEngineRuntime: ManagedEngineRuntime = {
   engine: "postgres",

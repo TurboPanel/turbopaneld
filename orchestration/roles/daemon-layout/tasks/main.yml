@@ -2,10 +2,20 @@
 # Managed-node FHS layout. run.sh installs bin/turbopaneld, share/orchestration/,
 # and optionally bin/turbopaneld.js (JS-fallback path only) before this playbook runs.
 
+# The config and state roots are sealed (root-owned) later, by the daemon-seal
+# role just before the daemon starts; until then a running daemon can still
+# write into them. A link the daemon planted at the top of a root is removed
+# first, so the tasks below (which never follow links) do not trip over it.
+- name: Remove links planted at the top of the config and state roots
+  ansible.builtin.include_role:
+    name: daemon-seal
+    tasks_from: sweep
+
 - name: Ensure production FHS directories exist
   ansible.builtin.file:
     path: "{{ item.path }}"
     state: directory
+    follow: false
     owner: "{{ item.owner | default(turbopanel_user) }}"
     group: "{{ item.group | default(turbopanel_group) }}"
     mode: "{{ item.mode }}"
@@ -34,16 +44,45 @@
         owner: "root",
         group: "{{ turbopanel_group }}",
       }
-    - { path: "{{ turbopanel_config_dir }}", mode: "0750" }
-    - { path: "{{ turbopanel_daemon_state_dir }}", mode: "0750" }
+    # Only the tunnels folder below it is the daemon's (a leaf); this one is
+    # root's, so the daemon cannot swap it.
     - {
-        path: "{{ turbopanel_daemon_state_dir }}/cloudflared/tunnels",
+        path: "{{ turbopanel_daemon_state_dir }}/cloudflared",
         mode: "0750",
+        owner: "root",
+        group: "{{ turbopanel_group }}",
       }
     - {
         path: "{{ turbopanel_run_dir | default('/run/turbopanel') }}",
         mode: "2770",
       }
+
+# The folders the daemon writes directly (P1-1: the config and state roots
+# are root-owned, so these leaves are what stays tp-owned). Created here,
+# the leaf itself only: nothing below a leaf is ever touched by root.
+- name: Ensure the daemon-writable config folders
+  ansible.builtin.file:
+    path: "{{ turbopanel_config_dir }}/{{ item.name }}"
+    state: directory
+    owner: "{{ turbopanel_user }}"
+    group: "{{ turbopanel_group }}"
+    mode: "{{ item.mode }}"
+    follow: false
+  loop: "{{ turbopanel_daemon_config_leaves }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Ensure the daemon-writable state folders
+  ansible.builtin.file:
+    path: "{{ turbopanel_daemon_state_dir }}/{{ item.name }}"
+    state: directory
+    owner: "{{ turbopanel_user }}"
+    group: "{{ turbopanel_group }}"
+    mode: "{{ item.mode }}"
+    follow: false
+  loop: "{{ turbopanel_daemon_state_leaves }}"
+  loop_control:
+    label: "{{ item.name }}"
 
 - name: Require native daemon binary
   ansible.builtin.stat:

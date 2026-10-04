@@ -34,7 +34,11 @@
     "check: sshd matches on groups, not on shells, so ForceCommand",
     "internal-sftp has to hang off a group of its own. 'password' is not a",
     "level — it is an additive credential group whose Match block turns",
-    "PasswordAuthentication on for members; it rides alongside tpsftp/tpshell."
+    "PasswordAuthentication on for members; it rides alongside tpsftp/tpshell.",
+    "'principal' is not a level either: EVERY principal holds it, whatever its",
+    "level, so sshd has one Match block that covers a tenant account with no",
+    "SSH access at all. Without it such an account falls through to the host's",
+    "global defaults: its own ~/.ssh/authorized_keys and TCP forwarding."
   ],
   "accessGroups": {
     "sftp": {
@@ -48,6 +52,10 @@
     "password": {
       "group": "tppasswd",
       "gid": 9984
+    },
+    "principal": {
+      "group": "tpprincipal",
+      "gid": 9983
     }
   },
   "runtimes": {
@@ -120,6 +128,10 @@
         "24": {
           "group": "tpnode24",
           "gid": 9923
+        },
+        "26": {
+          "group": "tpnode26",
+          "gid": 9925
         }
       }
     }

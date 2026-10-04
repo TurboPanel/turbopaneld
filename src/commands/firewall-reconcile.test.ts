@@ -10,6 +10,11 @@ import { resolveLayout } from "../paths/layout.ts";
 import type { FirewallRunFn, FirewallRunResult } from "../firewall/run.ts";
 import { FIREWALL_V4_FILENAME } from "../firewall/apply.ts";
 import {
+  FIREWALL_CONFIRM_WINDOW_SECONDS,
+  FIREWALL_PENDING_V4_FILENAME,
+  readPendingMarker,
+} from "../firewall/pending.ts";
+import {
   type CommandDispatchMessage,
   type FirewallReconcilePayload,
   parseFirewallReconcileResult,
@@ -100,6 +105,7 @@ async function withLayout<T>(
       TURBOPANEL_CONFIG_DIR: join(root, "etc"),
       TURBOPANEL_STATE_DIR: join(root, "state"),
       TURBOPANEL_DAEMON_STATE_DIR: join(root, "state"),
+      TURBOPANEL_RUN_DIR: join(root, "run"),
     }));
   } finally {
     await Deno.remove(root, { recursive: true });
@@ -124,7 +130,17 @@ test("managed + inputDefault accept: renders, applies v4 and v6, reports the ssh
     assertEquals(result.sshPorts, [22]);
     assertEquals(result.digest.length, 64);
     assertEquals(result.warnings, []);
-    assertStringIncludes(result.summary, "applied: 1 rules");
+    assertStringIncludes(result.summary, "pending confirmation until");
+    assertStringIncludes(result.summary, "1 rules");
+    // Applied means pending: the result names the deadline, and the digest the
+    // confirm must echo back is the one the marker holds.
+    assertEquals(result.confirmation?.state, "pending");
+    assertEquals(
+      result.confirmation?.windowSeconds,
+      FIREWALL_CONFIRM_WINDOW_SECONDS,
+    );
+    assertEquals((await readPendingMarker(layout))?.digest, result.digest);
+    assertEquals((await readPendingMarker(layout))?.generation, 11);
     const keys = host.calls.map((c) => `${c.cmd} ${c.args.join(" ")}`);
     // probes first, sshd, DOCKER-USER per family, then the apply
     assertEquals(keys.slice(0, 5), [
@@ -141,10 +157,14 @@ test("managed + inputDefault accept: renders, applies v4 and v6, reports the ssh
       !keys.includes("systemctl is-active turbopanel-instance.service"),
       "co-location is only consulted for a default-drop apply",
     );
-    const durable = await Deno.readTextFile(
-      join(layout.configDir, FIREWALL_V4_FILENAME),
+    const pending = await Deno.readTextFile(
+      join(layout.configDir, FIREWALL_PENDING_V4_FILENAME),
     );
-    assertStringIncludes(durable, "--ctorigdstport 443");
+    assertStringIncludes(pending, "--ctorigdstport 443");
+    await assertRejects(
+      () => Deno.readTextFile(join(layout.configDir, FIREWALL_V4_FILENAME)),
+      Deno.errors.NotFound,
+    );
   });
 });
 
@@ -188,14 +208,25 @@ test("observe renders and reports without touching the host", async () => {
       { run: host.run, resolveLayout: () => layout },
     );
     assertEquals(result.applied, false);
+    assertEquals(result.confirmation, undefined);
+    assertEquals(await readPendingMarker(layout), null);
     assertEquals(result.mode, "observe");
     assertEquals(result.ruleCount, 1);
     assertEquals(result.digest.length, 64);
     assertStringIncludes(result.summary, "observed");
     assert(
-      !host.calls.some((c) => c.cmd.endsWith("-restore") || c.args[0] === "-I"),
-      "observe never restores or inserts",
+      !host.calls.some((c) =>
+        (c.cmd.endsWith("-restore") && !c.args.includes("--test")) ||
+        c.args[0] === "-I"
+      ),
+      "observe only ever asks the kernel to --test; it never loads or inserts",
     );
+    assertEquals(result.validation, { ok: true, errors: [] });
+    assert(
+      result.rendered !== undefined,
+      "a preview carries the rendered text",
+    );
+    assertStringIncludes(result.rendered!.v4, "TP-INPUT");
     await assertRejects(
       () => Deno.readTextFile(join(layout.configDir, FIREWALL_V4_FILENAME)),
       Deno.errors.NotFound,
@@ -203,7 +234,7 @@ test("observe renders and reports without touching the host", async () => {
   });
 });
 
-test("inputDefault drop is rendered, then refused with the held-until-commit-confirm sentence", async () => {
+test("inputDefault drop is rendered, then refused with the default-drop-held sentence", async () => {
   await withLayout(async (layout) => {
     const host = fakeHost(HEALTHY);
     const result = await handleFirewallReconcile(
@@ -214,7 +245,81 @@ test("inputDefault drop is rendered, then refused with the held-until-commit-con
     assertEquals(result.applied, false);
     assertEquals(result.warnings, [DEFAULT_DROP_HELD_WARNING]);
     assertStringIncludes(result.summary, "refused: 1 condition(s)");
-    assert(!host.calls.some((c) => c.cmd.endsWith("-restore")));
+    assert(
+      !host.calls.some((c) =>
+        c.cmd.endsWith("-restore") && !c.args.includes("--test")
+      ),
+      "a refused apply is still only checked, never loaded",
+    );
+    assertEquals(result.validation?.ok, true);
+  });
+});
+
+test("managed, ip6tables missing: v4 applies, result is ipv6_unfiltered with a warning, never plain success", async () => {
+  await withLayout(async (layout) => {
+    const host = fakeHost({
+      ...HEALTHY,
+      "ip6tables -V": fail("ip6tables: command not found", 127),
+    });
+    const result = await handleFirewallReconcile(payload(), "now", {
+      run: host.run,
+      resolveLayout: () => layout,
+    });
+    assertEquals(parseFirewallReconcileResult(result), result);
+    assertEquals(result.applied, true);
+    assertEquals(result.ipv6Applied, false);
+    assertEquals(result.ipv6Status, "ipv6_unfiltered");
+    assert(result.warnings.some((w) => w.startsWith("ipv6_unfiltered:")));
+  });
+});
+
+test("managed, v6 apply error with v4 success: the command fails with ipv6_unfiltered", async () => {
+  await withLayout(async (layout) => {
+    const host = fakeHost({
+      ...HEALTHY,
+      "ip6tables-restore --noflush": fail("ip6tables-restore: boom"),
+    });
+    const err = await assertRejects(() =>
+      handleFirewallReconcile(payload(), "now", {
+        run: host.run,
+        resolveLayout: () => layout,
+      })
+    );
+    assertStringIncludes((err as Error).message, "ipv6_unfiltered:");
+    assert(host.calls.some((c) => c.cmd === "iptables-restore"));
+  });
+});
+
+test("managed, both families apply: ipv6Status is applied", async () => {
+  await withLayout(async (layout) => {
+    const host = fakeHost(HEALTHY);
+    const result = await handleFirewallReconcile(payload(), "now", {
+      run: host.run,
+      resolveLayout: () => layout,
+    });
+    assertEquals(result.ipv6Status, "applied");
+    assertEquals(result.warnings, []);
+  });
+});
+
+test("observe with ip6tables missing is untouched: nothing applied, no ipv6Status", async () => {
+  await withLayout(async (layout) => {
+    const host = fakeHost({
+      ...HEALTHY,
+      "ip6tables -V": fail("ip6tables: command not found", 127),
+    });
+    const result = await handleFirewallReconcile(
+      payload({ mode: "observe" }),
+      "now",
+      { run: host.run, resolveLayout: () => layout },
+    );
+    assertEquals(result.applied, false);
+    assertEquals(result.ipv6Status, undefined);
+    assert(
+      !host.calls.some((c) =>
+        c.cmd.endsWith("-restore") && !c.args.includes("--test")
+      ),
+    );
   });
 });
 
@@ -388,4 +493,190 @@ test({
       setCommandRouterHandlersForTests(null);
     }
   },
+});
+
+test({
+  name:
+    "handleCommandDispatch routes server.firewall.confirm through the handler override and refuses a malformed digest",
+  permissions: { env: true, sys: ["hostname"], read: true },
+  fn: async () => {
+    const { handleCommandDispatch, setCommandRouterHandlersForTests } =
+      await import("./command-router.ts");
+    const seen: string[] = [];
+    setCommandRouterHandlersForTests({
+      handleFirewallConfirm: (p) => {
+        seen.push(p.digest);
+        return Promise.resolve({
+          state: "confirmed" as const,
+          digest: p.digest,
+          summary: "stubbed",
+        });
+      },
+    });
+    const confirmMessage = (payloadValue: unknown): CommandDispatchMessage => ({
+      ...dispatchMessage(payloadValue),
+      id: "cmd-fw-2",
+      commandId: "cmd-fw-2",
+      commandType: "server.firewall.confirm",
+    });
+    try {
+      const ws = new MockWebSocket() as unknown as WebSocket;
+      await handleCommandDispatch(
+        confirmMessage({ digest: "c".repeat(64) }),
+        ws,
+      );
+      const frames = (ws as unknown as MockWebSocket).sentFrames.map((f) =>
+        JSON.parse(f) as Record<string, unknown>
+      );
+      assertEquals(frames[1]?.ok, true);
+      assertEquals(
+        (frames[1]?.result as Record<string, unknown>).state,
+        "confirmed",
+      );
+      assertEquals(seen, ["c".repeat(64)]);
+
+      const bad = new MockWebSocket() as unknown as WebSocket;
+      await handleCommandDispatch(confirmMessage({ digest: "NOPE" }), bad);
+      const badFrames = (bad as unknown as MockWebSocket).sentFrames.map((f) =>
+        JSON.parse(f) as Record<string, unknown>
+      );
+      assertEquals(badFrames[1]?.ok, false);
+      assertEquals(seen.length, 1, "a malformed digest never reaches the host");
+    } finally {
+      setCommandRouterHandlersForTests(null);
+    }
+  },
+});
+
+test("observe asks the kernel to --test both families and loads nothing", async () => {
+  await withLayout(async (layout) => {
+    const host = fakeHost({
+      ...HEALTHY,
+      "ip6tables -S DOCKER-USER": ok("-N DOCKER-USER"),
+    });
+    const result = await handleFirewallReconcile(
+      payload({ mode: "observe" }),
+      "now",
+      { run: host.run, resolveLayout: () => layout },
+    );
+    const restores = host.calls.filter((c) => c.cmd.endsWith("-restore"));
+    assertEquals(restores.map((c) => c.cmd), [
+      "iptables-restore",
+      "ip6tables-restore",
+    ]);
+    for (const call of restores) {
+      assertEquals(call.args, ["--noflush", "--test"]);
+    }
+    assertEquals(result.validation, { ok: true, errors: [] });
+    assert(
+      result.rendered?.v6 !== undefined,
+      "v6 text is included under mirror",
+    );
+    assertEquals(await readPendingMarker(layout), null);
+    parseFirewallReconcileResult(JSON.parse(JSON.stringify(result)));
+  });
+});
+
+test("observe reports a kernel refusal as validation, not as a failed command", async () => {
+  await withLayout(async (layout) => {
+    const host = fakeHost({
+      ...HEALTHY,
+      "iptables-restore --noflush --test": fail(
+        "iptables-restore: line 7 failed",
+      ),
+    });
+    const result = await handleFirewallReconcile(
+      payload({ mode: "observe" }),
+      "now",
+      { run: host.run, resolveLayout: () => layout },
+    );
+    assertEquals(result.applied, false);
+    assertEquals(result.validation?.ok, false);
+    assertEquals(result.validation?.errors.length, 1);
+    assertStringIncludes(
+      result.validation!.errors[0]!,
+      "iptables-restore --test refused the ruleset",
+    );
+    assert(
+      result.warnings.some((w) => w.includes("the kernel would refuse")),
+      "the refusal is a warning the console shows",
+    );
+    assertEquals(
+      result.digest.length,
+      64,
+      "the ruleset is still rendered and digested",
+    );
+  });
+});
+
+test("observe leaves the rendered text out, with a warning, when it is too large", async () => {
+  await withLayout(async (layout) => {
+    const sources = Array.from({ length: 256 }, (_, i) => `10.${i}.0.0/16`);
+    const rules = Array.from({ length: 12 }, (_, i) => ({
+      id: `big-${i}`,
+      scope: "host" as const,
+      action: "accept" as const,
+      proto: "tcp" as const,
+      ports: String(8000 + i),
+      sources,
+      origin: "derived" as const,
+    }));
+    const host = fakeHost(HEALTHY);
+    const result = await handleFirewallReconcile(
+      payload({ mode: "observe", rules }),
+      "now",
+      { run: host.run, resolveLayout: () => layout },
+    );
+    assertEquals(result.rendered, undefined);
+    assertEquals(result.digest.length, 64);
+    assert(result.ruleCount > 0);
+    assert(
+      result.warnings.some((w) => w.includes("is not included")),
+      "the omission is explained",
+    );
+    assertEquals(result.validation?.ok, true, "it was still checked");
+  });
+});
+
+test("a result with validation and rendered round-trips the contract parser", () => {
+  const base = {
+    generation: 1,
+    mode: "observe",
+    applied: false,
+    digest: "a".repeat(64),
+    ruleCount: 1,
+    ipv6Applied: false,
+    forwardApplied: false,
+    sshPorts: [22],
+    warnings: [],
+    summary: "observed",
+  };
+  const parsed = parseFirewallReconcileResult({
+    ...base,
+    validation: {
+      ok: false,
+      errors: ["iptables-restore --test refused the ruleset: x"],
+    },
+    rendered: { v4: "*filter\nCOMMIT\n", v6: "*filter\nCOMMIT\n" },
+  });
+  assertEquals(parsed.validation?.ok, false);
+  assertEquals(parsed.rendered?.v4, "*filter\nCOMMIT\n");
+  assertEquals(parseFirewallReconcileResult(base).validation, undefined);
+  for (
+    const bad of [
+      { validation: { ok: "yes", errors: [] } },
+      { validation: { ok: true, errors: "none" } },
+      { validation: { ok: true, errors: Array(9).fill("x") } },
+      { rendered: { v4: 5 } },
+      { rendered: { v4: "x".repeat(65_537) } },
+    ]
+  ) {
+    let threw = false;
+    try {
+      parseFirewallReconcileResult({ ...base, ...bad });
+    } catch {
+      threw = true;
+    }
+    assert(threw, `must reject ${JSON.stringify(bad).slice(0, 40)}`);
+  }
 });

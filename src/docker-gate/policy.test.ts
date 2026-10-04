@@ -1,0 +1,1024 @@
+import { assert, assertEquals, assertFalse } from "@std/assert";
+import {
+  classifyRoute,
+  DEFAULT_POLICY_CONFIG,
+  evaluateDetailed,
+  evaluateRequest,
+  pathIsCanonical,
+  type PolicyConfig,
+  type RequestFacts,
+  type ResolvePath,
+  routePath,
+  versionPrefixIsCanonical,
+  type Violation,
+} from "../../orchestration/roles/docker-gate/files/policy.ts";
+
+/**
+ * Jest/Mocha-shaped alias for {@link Deno.test}.
+ *
+ * Sonar typescript:S2187 only recognizes `test()` / `it()` / `describe()` and
+ * reports Deno suites as empty; keep this alias so analysis sees real tests.
+ */
+const test = Deno.test.bind(Deno);
+
+type Corpus = Array<{
+  name: string;
+  flow: string;
+  method: string;
+  path: string;
+  body: unknown;
+  expect: string[];
+}>;
+
+/**
+ * Request bodies the Docker CLI and Compose really sent (captured from a
+ * local Engine 29 / CLI 29 / Compose 5.5 run of the deploy, backup, managed
+ * volume, fabric network and Compose shapes the daemon uses, with host paths
+ * rewritten under /srv/users). The expectations are the strict profile's
+ * verdict for each.
+ */
+const CORPUS: Corpus = JSON.parse(
+  await Deno.readTextFile(
+    new URL("./testdata/corpus.json", import.meta.url),
+  ),
+);
+
+const identity: ResolvePath = (path) => Promise.resolve(path);
+
+function ruleNames(violations: Violation[]): string[] {
+  return violations.map((violation) => violation.rule);
+}
+
+async function verdict(
+  facts: Partial<RequestFacts> & { body?: unknown },
+  config: PolicyConfig = DEFAULT_POLICY_CONFIG,
+  resolve: ResolvePath = identity,
+): Promise<Violation[]> {
+  return await evaluateRequest(
+    {
+      method: facts.method ?? "POST",
+      path: facts.path ?? "/containers/create",
+      query: facts.query ?? new URLSearchParams(),
+      body: facts.body,
+    },
+    config,
+    resolve,
+  );
+}
+
+function clone<T>(value: T): T {
+  return structuredClone(value);
+}
+
+const baseCreate = () =>
+  clone(CORPUS.find((entry) => entry.name === "app-container")!.body) as {
+    HostConfig: Record<string, unknown>;
+  };
+
+async function createVerdict(
+  patch: Record<string, unknown>,
+  resolve: ResolvePath = identity,
+): Promise<Violation[]> {
+  const body = baseCreate();
+  Object.assign(body.HostConfig, patch);
+  return await verdict({ body }, DEFAULT_POLICY_CONFIG, resolve);
+}
+
+for (const entry of CORPUS) {
+  test(
+    `corpus ${entry.flow}/${entry.name}: ${
+      entry.expect.length === 0 ? "clean" : entry.expect.join(", ")
+    }`,
+    async () => {
+      const found = await verdict({
+        method: entry.method,
+        path: `/v1.55${entry.path}`,
+        body: entry.body,
+      });
+      assertEquals(ruleNames(found), entry.expect);
+    },
+  );
+}
+
+test("the corpus covers every platform flow and the attack shapes", () => {
+  const flows = new Set(CORPUS.map((entry) => entry.flow));
+  for (
+    const flow of ["backup", "deploy", "managed", "fabric", "compose", "attack"]
+  ) {
+    assert(flows.has(flow), `corpus has a ${flow} entry`);
+  }
+});
+
+test("tenant-facing flows are clean; the platform's own containers are clean except the ingress socket proxy", async () => {
+  const clean = ["backup", "deploy", "managed", "fabric", "compose"];
+  for (const entry of CORPUS.filter((e) => clean.includes(e.flow))) {
+    assertEquals(entry.expect, [], entry.name);
+  }
+  // Real ProxySQL / orchestrator / managed-engine creates and the daemon's
+  // helper containers (labelled by `helperLabelArgs`) pass through the
+  // platform allowance. One finding remains on purpose: the ingress socket
+  // proxy mounts the Docker socket until stage 3 deletes it.
+  const platform = CORPUS.filter((e) => e.flow === "platform");
+  assertEquals(platform.map((e) => [e.name, e.expect]), [
+    ["ingress-socket-proxy", ["bind-docker-socket"]],
+    ["proxysql-compose", []],
+    ["orchestrator-compose", []],
+    ["managed-engine-compose", []],
+    ["managed-root-helper", []],
+    ["backup-restore-helper", []],
+    ["engine-volume-helper", []],
+  ]);
+  // The same binds without a platform label (or with a forged component, or a
+  // writable archive) are still flagged.
+  const attacks = new Map(
+    CORPUS.filter((e) => e.flow === "attack").map((e) => [e.name, e.expect]),
+  );
+  assertEquals(attacks.get("managed-root-helper-unlabeled"), [
+    "bind-outside-roots",
+  ]);
+  assertEquals(attacks.get("managed-root-helper-forged-component"), [
+    "bind-outside-roots",
+  ]);
+  assertEquals(attacks.get("backup-restore-helper-unlabeled"), [
+    "bind-forbidden-path",
+  ]);
+  assertEquals(attacks.get("backup-restore-helper-writable-archive"), [
+    "platform-config-writable",
+  ]);
+  for (
+    const entry of platform.filter((e) =>
+      e.name.endsWith("-compose") || e.name.endsWith("-helper")
+    )
+  ) {
+    const found = await evaluateDetailed(
+      {
+        method: entry.method,
+        path: entry.path,
+        query: new URLSearchParams(),
+        body: entry.body,
+      },
+      DEFAULT_POLICY_CONFIG,
+      identity,
+    );
+    assert(found.allowances.length > 0, `${entry.name} used an allowance`);
+  }
+});
+
+test("privileged, host network, capabilities", async () => {
+  assertEquals(ruleNames(await createVerdict({ Privileged: true })), [
+    "privileged",
+  ]);
+  assertEquals(
+    ruleNames(await createVerdict({ NetworkMode: "host" })),
+    ["network-mode-host"],
+  );
+  assertEquals(
+    ruleNames(await createVerdict({ NetworkMode: "container:abc" })),
+    ["network-mode-container"],
+  );
+  assertEquals(
+    ruleNames(await createVerdict({ CgroupnsMode: "host" })),
+    ["cgroupns-mode-host"],
+  );
+  const caps = await createVerdict({ CapAdd: ["SYS_ADMIN", "CAP_NET_RAW"] });
+  assertEquals(caps, [
+    { rule: "cap-add", detail: "SYS_ADMIN" },
+    { rule: "cap-add", detail: "NET_RAW" },
+  ]);
+});
+
+test("a capability on the allowlist passes", async () => {
+  const config = {
+    ...DEFAULT_POLICY_CONFIG,
+    capAllowlist: ["NET_BIND_SERVICE"],
+  };
+  const body = baseCreate();
+  Object.assign(body.HostConfig, { CapAdd: ["CAP_NET_BIND_SERVICE"] });
+  assertEquals(await verdict({ body }, config), []);
+});
+
+test("device requests, runtimes and other bans", async () => {
+  assertEquals(
+    ruleNames(await createVerdict({ DeviceRequests: [{ Driver: "nvidia" }] })),
+    ["device-requests"],
+  );
+  assertEquals(
+    ruleNames(await createVerdict({ DeviceCgroupRules: ["c 1:3 rwm"] })),
+    ["device-cgroup-rules"],
+  );
+  assertEquals(await createVerdict({ Runtime: "runc" }), []);
+  assertEquals(await createVerdict({ Runtime: "" }), []);
+  assertEquals(await createVerdict({ Runtime: "nvidia" }), [
+    { rule: "runtime", detail: "nvidia" },
+  ]);
+});
+
+test("security options: only no-new-privileges is allowed, profiles are never echoed", async () => {
+  assertEquals(
+    await createVerdict({ SecurityOpt: ["no-new-privileges:true"] }),
+    [],
+  );
+  assertEquals(
+    await createVerdict({ SecurityOpt: ["no-new-privileges=true"] }),
+    [],
+  );
+  const found = await createVerdict({
+    SecurityOpt: [
+      "no-new-privileges=false",
+      "label=disable",
+      "seccomp=" + JSON.stringify({ defaultAction: "SCMP_ACT_ALLOW" }),
+      "unknown-option=1",
+    ],
+  });
+  assertEquals(found, [
+    { rule: "security-opt-weakened", detail: "no-new-privileges=false" },
+    { rule: "security-opt-weakened", detail: "label=disable" },
+    { rule: "security-opt-weakened", detail: "seccomp=<value>" },
+    { rule: "security-opt-unknown", detail: "unknown-option=<value>" },
+  ]);
+  assertFalse(JSON.stringify(found).includes("SCMP_ACT_ALLOW"));
+});
+
+test("a bind of the host root is refused, with or without options", async () => {
+  assertEquals(
+    ruleNames(await createVerdict({ Binds: ["/:/host"] })),
+    ["bind-host-root"],
+  );
+  assertEquals(
+    ruleNames(await createVerdict({ Binds: ["/:/host:ro"] })),
+    ["bind-host-root"],
+  );
+  assertEquals(
+    ruleNames(
+      await createVerdict({
+        Mounts: [{ Type: "bind", Source: "/", Target: "/host" }],
+      }),
+    ),
+    ["bind-host-root"],
+  );
+});
+
+test("the Docker socket is refused in every spelling, even through a symlink", async () => {
+  for (const source of ["/var/run/docker.sock", "/run/docker.sock"]) {
+    assertEquals(
+      ruleNames(await createVerdict({ Binds: [`${source}:/docker.sock`] })),
+      ["bind-docker-socket"],
+    );
+  }
+  const resolve: ResolvePath = (path) =>
+    Promise.resolve(
+      path === "/srv/users/alice/data/app/sock" ? "/run/docker.sock" : path,
+    );
+  assertEquals(
+    ruleNames(
+      await createVerdict(
+        { Binds: ["/srv/users/alice/data/app/sock:/s"] },
+        resolve,
+      ),
+    ),
+    ["bind-docker-socket"],
+  );
+});
+
+test("forbidden host trees, and everything outside the allowed roots", async () => {
+  const cases: Array<[string, string]> = [
+    ["/etc/turbopanel", "bind-forbidden-path"],
+    ["/etc", "bind-forbidden-path"],
+    ["/proc/1/root", "bind-forbidden-path"],
+    ["/sys/fs/cgroup", "bind-forbidden-path"],
+    ["/dev", "bind-forbidden-path"],
+    ["/root/.ssh", "bind-forbidden-path"],
+    ["/run/turbopanel", "bind-forbidden-path"],
+    ["/opt/turbopanel/vendor", "bind-forbidden-path"],
+    ["/backup/engine", "bind-forbidden-path"],
+    ["/var/lib/turbopanel", "bind-outside-roots"],
+    ["/var/lib/turbopanel/secrets", "bind-outside-roots"],
+    ["/srv/usersx", "bind-outside-roots"],
+    ["/srv", "bind-outside-roots"],
+    ["/home/someone", "bind-outside-roots"],
+  ];
+  for (const [source, rule] of cases) {
+    assertEquals(
+      ruleNames(await createVerdict({ Binds: [`${source}:/x`] })),
+      [rule],
+      source,
+    );
+  }
+});
+
+test("the allowed roots, and named volumes, pass", async () => {
+  for (
+    const source of [
+      "/srv/users/alice/data/app/data",
+      "/srv/users/alice/tmp",
+      "/var/lib/turbopanel/storage",
+      "/var/lib/turbopanel/storage/vol-1",
+      "named-volume",
+    ]
+  ) {
+    assertEquals(
+      await createVerdict({ Binds: [`${source}:/x:rw`] }),
+      [],
+      source,
+    );
+  }
+});
+
+test("a symlink under an allowed root that leaves it is judged by its target", async () => {
+  const resolve: ResolvePath = (path) =>
+    Promise.resolve(path.startsWith("/srv/users/mallory/escape") ? "/" : path);
+  assertEquals(
+    ruleNames(
+      await createVerdict({ Binds: ["/srv/users/mallory/escape:/x"] }, resolve),
+    ),
+    ["bind-host-root"],
+  );
+  const toEtc: ResolvePath = () => Promise.resolve("/etc/turbopanel/secrets");
+  assertEquals(
+    ruleNames(
+      await createVerdict({ Binds: ["/srv/users/mallory/l:/x"] }, toEtc),
+    ),
+    ["bind-forbidden-path"],
+  );
+});
+
+test("a resolver that throws falls back to the path as written", async () => {
+  const broken: ResolvePath = () => Promise.reject(new Error("EACCES"));
+  assertEquals(
+    ruleNames(await createVerdict({ Binds: ["/etc/x:/x"] }, broken)),
+    ["bind-forbidden-path"],
+  );
+  assertEquals(
+    await createVerdict({ Binds: ["/srv/users/a/data:/x"] }, broken),
+    [],
+  );
+});
+
+test("non-canonical bind sources are refused with the cleaned path", async () => {
+  const found = await createVerdict({
+    Binds: ["/srv/users/../../etc:/x"],
+  });
+  assertEquals(found, [{ rule: "bind-noncanonical-path", detail: "/etc" }]);
+  assertEquals(
+    ruleNames(await createVerdict({ Binds: ["/srv//users/alice:/x"] })),
+    ["bind-noncanonical-path"],
+  );
+});
+
+test("a bind mount with no source or a tmpfs mount names no host path", async () => {
+  assertEquals(
+    ruleNames(
+      await createVerdict({ Mounts: [{ Type: "bind", Target: "/x" }] }),
+    ),
+    [],
+  );
+  assertEquals(
+    await createVerdict({ Mounts: [{ Type: "tmpfs", Target: "/x" }] }),
+    [],
+  );
+});
+
+test("a named volume that is a bind to a host path is judged like a bind", async () => {
+  const bindOpts = (device: string) => ({
+    Type: "volume",
+    Source: "v",
+    Target: "/m",
+    VolumeOptions: {
+      DriverConfig: {
+        Name: "local",
+        Options: { type: "none", o: "bind", device },
+      },
+    },
+  });
+  assertEquals(
+    ruleNames(await createVerdict({ Mounts: [bindOpts("/etc/turbopanel")] })),
+    ["volume-bind-forbidden-path"],
+  );
+  assertEquals(
+    await createVerdict({ Mounts: [bindOpts("/srv/users/a/data/d")] }),
+    [],
+  );
+});
+
+test("volume create: drivers, bind devices and block devices", async () => {
+  const create = (body: unknown) => verdict({ path: "/volumes/create", body });
+  assertEquals(await create({ Name: "v" }), []);
+  assertEquals(await create({ Name: "v", Driver: "local" }), []);
+  assertEquals(await create({ Name: "v", Driver: "rexray" }), [
+    { rule: "volume-driver", detail: "rexray" },
+  ]);
+  assertEquals(
+    await create({
+      Name: "v",
+      DriverOpts: { type: "none", o: "bind", device: "/" },
+    }),
+    [{ rule: "volume-bind-host-root", detail: "/" }],
+  );
+  assertEquals(
+    await create({
+      Name: "v",
+      DriverOpts: { type: "ext4", device: "/dev/sda1" },
+    }),
+    [{ rule: "volume-device", detail: "/dev/sda1" }],
+  );
+  assertEquals(
+    await create({
+      Name: "v",
+      DriverOpts: { type: "nfs", o: "addr=10.0.0.5", device: ":/export" },
+    }),
+    [{ rule: "volume-mount-type", detail: "nfs" }],
+  );
+  assertEquals(ruleNames(await create("nope")), ["body-unparseable"]);
+});
+
+test("network create: only the bridge driver", async () => {
+  const create = (body: unknown) => verdict({ path: "/networks/create", body });
+  assertEquals(await create({ Name: "n" }), []);
+  assertEquals(await create({ Name: "n", Driver: "bridge" }), []);
+  assertEquals(await create({ Name: "n", Driver: "host" }), [
+    { rule: "network-driver", detail: "host" },
+  ]);
+  assertEquals(await create({ Name: "n", Driver: "macvlan" }), [
+    { rule: "network-driver", detail: "macvlan" },
+  ]);
+  assertEquals(ruleNames(await create(undefined)), ["body-unparseable"]);
+});
+
+test("exec create: privileged only; an unparseable body is flagged", async () => {
+  const exec = (body: unknown) =>
+    verdict({ path: "/containers/abc/exec", body });
+  assertEquals(await exec({ Cmd: ["id"], User: "0" }), []);
+  assertEquals(ruleNames(await exec({ Privileged: true })), [
+    "exec-privileged",
+  ]);
+  assertEquals(ruleNames(await exec(undefined)), ["body-unparseable"]);
+});
+
+test("build, archive writes and restricted API groups", async () => {
+  const build = (query: string) =>
+    verdict({ path: "/build", query: new URLSearchParams(query) });
+  assertEquals(await build("t=x&dockerfile=Dockerfile"), []);
+  assertEquals(ruleNames(await build("networkmode=host")), [
+    "build-host-network",
+  ]);
+  assertEquals(ruleNames(await build("cgroupparent=x.slice")), [
+    "build-cgroup-parent",
+  ]);
+  assertEquals(
+    ruleNames(
+      await verdict({ method: "PUT", path: "/containers/abc/archive" }),
+    ),
+    ["archive-put"],
+  );
+  assertEquals(
+    ruleNames(
+      await verdict({ method: "GET", path: "/containers/abc/archive" }),
+    ),
+    [],
+  );
+  for (
+    const path of [
+      "/plugins/pull",
+      "/swarm/init",
+      "/services/create",
+      "/secrets/create",
+    ]
+  ) {
+    const found = await verdict({ path });
+    assertEquals(found.length, 1, path);
+    assertEquals(found[0].rule, "restricted-api-group");
+  }
+});
+
+test("a body that is not an object is flagged on a create call", async () => {
+  assertEquals(ruleNames(await verdict({ body: undefined })), [
+    "body-unparseable",
+  ]);
+  assertEquals(ruleNames(await verdict({ body: [1, 2] })), [
+    "body-unparseable",
+  ]);
+});
+
+test("a path the engine would clean is flagged", async () => {
+  assertEquals(pathIsCanonical("/containers/create"), true);
+  for (
+    const path of ["/a/../b", "/a/./b", "//a", "/a//b", "/a\\b", "/a\u0000b"]
+  ) {
+    assertFalse(pathIsCanonical(path), path);
+  }
+  assertEquals(
+    ruleNames(
+      await verdict({ path: "/containers/../containers/create", body: {} }),
+    ),
+    // The engine would clean it to a real route; the gate cannot classify the raw path.
+    ["path-noncanonical", "unclassified-route"],
+  );
+});
+
+test("violations never carry environment, commands, labels or auth", async () => {
+  const marker = ["marker", crypto.randomUUID()].join("-");
+  const body = baseCreate() as Record<string, unknown> & {
+    HostConfig: Record<string, unknown>;
+  };
+  Object.assign(body, {
+    Env: [`TOKEN_VALUE=${marker}`],
+    Cmd: ["sh", "-c", marker],
+    Entrypoint: [marker],
+    Labels: { k: marker },
+  });
+  Object.assign(body.HostConfig, {
+    Privileged: true,
+    SecurityOpt: [`seccomp=${marker}`],
+    Binds: [`/etc/${marker}:/x`],
+  });
+  const found = await verdict({ body });
+  assert(found.length >= 3);
+  const serialised = JSON.stringify(found);
+  assertFalse(
+    serialised.replace(`/etc/${marker}`, "").includes(marker),
+    "only the bind source path may appear, never env, cmd, labels or profiles",
+  );
+});
+
+test("routePath strips only a leading API version", () => {
+  assertEquals(routePath("/v1.43/containers/json"), "/containers/json");
+  assertEquals(routePath("/v1/containers/json"), "/containers/json");
+  // The engine's router strips `/v[0-9.]+`, so these route too.
+  assertEquals(routePath("/v1.47.0/containers/json"), "/containers/json");
+  assertEquals(routePath("/v1.47./containers/json"), "/containers/json");
+  assertEquals(routePath("/containers/json"), "/containers/json");
+  assertEquals(routePath("/images/v1.2/json"), "/images/v1.2/json");
+});
+
+/** Routes the platform really hits, with the class the corpus counters use. */
+const ROUTE_TABLE: Array<[string, string, string]> = [
+  ["GET", "/_ping", "read"],
+  ["HEAD", "/_ping", "read"],
+  ["GET", "/v1.55/version", "read"],
+  ["GET", "/info", "read"],
+  ["GET", "/system/df", "read"],
+  ["GET", "/events", "read"],
+  ["GET", "/containers/json", "read"],
+  ["GET", "/containers/abc123/json", "read"],
+  ["GET", "/containers/abc123/logs", "read"],
+  ["GET", "/containers/abc123/stats", "read"],
+  ["GET", "/exec/e1/json", "read"],
+  ["GET", "/images/json", "read"],
+  ["GET", "/images/docker.io/library/alpine/json", "read"],
+  ["GET", "/networks", "read"],
+  ["GET", "/networks/n1", "read"],
+  ["GET", "/volumes", "read"],
+  ["GET", "/volumes/v1", "read"],
+  ["POST", "/containers/create", "containers.create"],
+  ["POST", "/containers/abc/exec", "containers.exec.create"],
+  ["POST", "/containers/abc/start", "containers.action"],
+  ["POST", "/containers/abc/stop", "containers.action"],
+  ["POST", "/containers/abc/kill", "containers.action"],
+  ["POST", "/containers/abc/attach", "containers.attach"],
+  ["POST", "/exec/e1/start", "exec.start"],
+  ["DELETE", "/containers/abc", "containers.remove"],
+  ["DELETE", "/networks/n1", "object.remove"],
+  ["DELETE", "/images/docker.io/library/alpine", "object.remove"],
+  ["POST", "/images/create", "images.pull"],
+  ["POST", "/images/docker.io/library/alpine/tag", "images.write"],
+  ["POST", "/networks/create", "networks.create"],
+  ["POST", "/networks/n1/connect", "networks.attach"],
+  ["POST", "/volumes/create", "volumes.create"],
+  ["POST", "/volumes/prune", "prune"],
+  ["POST", "/build", "build"],
+  ["POST", "/session", "session"],
+  ["POST", "/grpc", "grpc"],
+  ["POST", "/auth", "auth"],
+  ["PUT", "/containers/abc/archive", "containers.archive.put"],
+  ["GET", "/containers/abc/archive", "containers.archive.get"],
+  ["POST", "/plugins/pull", "restricted-group"],
+  ["POST", "/swarm/init", "restricted-group"],
+  ["GET", "/something/new", "unclassified"],
+];
+
+for (const [method, path, expected] of ROUTE_TABLE) {
+  test(`route ${method} ${path} is ${expected}`, () => {
+    assertEquals(classifyRoute(method, path).route, expected);
+  });
+}
+
+test("only create calls need their body held for the policy", () => {
+  const needing = ROUTE_TABLE.filter(([method, path]) =>
+    classifyRoute(method, path).needsBody
+  ).map(([, , route]) => route);
+  assertEquals(
+    new Set(needing),
+    new Set([
+      "containers.create",
+      "containers.exec.create",
+      "networks.create",
+      "volumes.create",
+    ]),
+  );
+});
+
+/** Every spelling of a version prefix the engine's router strips (`/v[0-9.]+`). */
+const ENGINE_PREFIXES = [
+  "/v1.47",
+  "/v1.47.0",
+  "/v1.47.",
+  "/v1",
+  "/v1..47",
+  "/v.",
+];
+
+test("a version-prefixed path classifies exactly like the unprefixed one, allowed and denied routes alike", () => {
+  for (const [method, path] of ROUTE_TABLE) {
+    const bare = routePath(path);
+    for (const prefix of ENGINE_PREFIXES) {
+      assertEquals(
+        classifyRoute(method, `${prefix}${bare}`),
+        classifyRoute(method, bare),
+        `${method} ${prefix}${bare}`,
+      );
+    }
+  }
+});
+
+test("only one /v<major>.<minor> prefix is canonical; every other prefix the engine strips is flagged", async () => {
+  for (
+    const path of [
+      "/containers/create",
+      "/v1.47/containers/create",
+      "/version",
+      "/volumes/v1.2",
+      "/images/v1.2/json",
+    ]
+  ) {
+    assert(versionPrefixIsCanonical(path), path);
+  }
+  for (
+    const path of [
+      "/v1.47.0/containers/create",
+      "/v1.47./containers/create",
+      "/v1/containers/create",
+      "/v./containers/create",
+      "/v1.47/v1.47/containers/create",
+    ]
+  ) {
+    assertFalse(versionPrefixIsCanonical(path), path);
+  }
+  const body = baseCreate();
+  body.HostConfig.Privileged = true;
+  assertEquals(
+    ruleNames(await verdict({ path: "/v1.47.0/containers/create", body })),
+    ["path-version-prefix", "privileged"],
+  );
+  assertEquals(
+    ruleNames(await verdict({ path: "/v1.47/containers/create", body })),
+    ["privileged"],
+  );
+  assertEquals(
+    ruleNames(
+      await verdict({
+        path: "/v1.47./containers/abc/exec",
+        body: { Privileged: true },
+      }),
+    ),
+    ["path-version-prefix", "exec-privileged"],
+  );
+});
+
+test("container create breadth: fields that reach the host are findings, deny by default", async () => {
+  const cases: Array<[Record<string, unknown>, string[]]> = [
+    [{ Cgroup: "container:abc" }, ["cgroup-join"]],
+    [{ Links: ["db:db"] }, ["links"]],
+    [{ GroupAdd: ["docker"] }, ["group-add"]],
+    [{ Annotations: { "run.oci.handler": "wasm" } }, ["annotations"]],
+    [{ CpuRealtimeRuntime: 950000 }, ["cpu-realtime"]],
+    [{ OomScoreAdj: -1000 }, ["oom-score-adj"]],
+    [{ Capabilities: ["CAP_SYS_ADMIN"] }, ["cap-add"]],
+    [{ LogConfig: { Type: "syslog", Config: { "syslog-address": "x" } } }, [
+      "log-driver",
+    ]],
+    [{ Binds: ["/srv/users/a/data/d:/d:rshared"] }, ["bind-propagation"]],
+    [{ Mounts: [{ Type: "npipe", Source: "a", Target: "b" }] }, ["mount-type"]],
+    [{ Mounts: [{ Type: "image", Source: "a", Target: "b" }] }, ["mount-type"]],
+    [{
+      Mounts: [{
+        Type: "bind",
+        Source: "/srv/users/a/data/d",
+        Target: "/d",
+        BindOptions: { Propagation: "rshared" },
+      }],
+    }, ["bind-propagation"]],
+    [{ SomeFutureField: 1 }, ["hostconfig-unknown-field"]],
+    [{ privileged: true }, ["hostconfig-unknown-field"]],
+  ];
+  for (const [patch, expected] of cases) {
+    assertEquals(
+      ruleNames(await createVerdict(patch)),
+      expected,
+      JSON.stringify(patch),
+    );
+  }
+});
+
+test("the orchestrator's numeric group_add is fine for a platform container only", async () => {
+  const labels = {
+    "turbopanel.role": "turbopanel",
+    "com.turbopanel.system.component": "managed-ha",
+  };
+  const create = async (groups: string[], withLabels: boolean) => {
+    const body = baseCreate() as Record<string, unknown>;
+    body.Labels = withLabels ? labels : { "com.docker.compose.project": "p" };
+    Object.assign(body.HostConfig as Record<string, unknown>, {
+      GroupAdd: groups,
+    });
+    return ruleNames(await verdict({ body }, DEFAULT_POLICY_CONFIG, identity));
+  };
+  assertEquals(await create(["993"], true), []);
+  assertEquals(await create(["993"], false), ["group-add"]);
+  assertEquals(await create(["docker"], true), ["group-add"]);
+  assertEquals(await create(["0"], true), ["group-add"]);
+});
+
+test("the zero values a real client sends are clean", async () => {
+  assertEquals(
+    await createVerdict({
+      Cgroup: "",
+      Links: null,
+      GroupAdd: null,
+      Annotations: {},
+      CpuRealtimePeriod: 0,
+      CpuRealtimeRuntime: 0,
+      OomScoreAdj: 0,
+      Capabilities: null,
+      LogConfig: { Type: "json-file", Config: { "max-size": "10m" } },
+      Binds: ["/srv/users/a/data/d:/d:ro,rprivate"],
+      Init: true,
+      PidsLimit: -1,
+    }),
+    [],
+  );
+});
+
+test("an unknown HostConfig key is reported by a harmless name only", async () => {
+  const found = await createVerdict({
+    "Odd\\u0001Name": 1,
+    SomeFutureField: 1,
+  });
+  assertEquals(
+    found.map((v) => v.detail).toSorted(),
+    ["<odd>", "SomeFutureField"],
+  );
+});
+
+test("optional fields left out are their defaults, not findings", async () => {
+  assertEquals(
+    await createVerdict({
+      Mounts: [{
+        Type: "bind",
+        Source: "/srv/users/a/data/d",
+        Target: "/d",
+        BindOptions: { NonRecursive: true },
+      }],
+    }),
+    [],
+  );
+  assertEquals(await createVerdict({ LogConfig: { Config: {} } }), []);
+  assertEquals(await createVerdict({ LogConfig: { Type: null } }), []);
+});
+
+test("volume driver and mount options: deny by default, tmpfs and a checked bind pass", async () => {
+  const create = (body: unknown) => verdict({ path: "/volumes/create", body });
+  const rules = async (opts: unknown) =>
+    ruleNames(await create({ Name: "v", DriverOpts: opts }));
+  assertEquals(await rules({}), []);
+  assertEquals(
+    await rules({ type: "tmpfs", device: "tmpfs", o: "size=1m" }),
+    [],
+  );
+  // rbind is a bind too: it must not skip the path check.
+  assertEquals(
+    await rules({ type: "none", o: "rbind", device: "/" }),
+    ["volume-bind-host-root"],
+  );
+  assertEquals(
+    await rules({ type: "none", o: "rw,rbind", device: "/etc" }),
+    ["volume-bind-forbidden-path"],
+  );
+  // Layered or remote filesystems read host paths without a `/` device.
+  assertEquals(
+    await rules({ type: "overlay", device: "overlay", o: "lowerdir=/etc" }),
+    ["volume-mount-type"],
+  );
+  assertEquals(await rules({ o: "bind" }), ["volume-mount-type"]);
+  assertEquals(await rules({ type: "none", o: "bind" }), ["volume-mount-type"]);
+});
+
+test("a container's VolumeDriver and a volume mount's DriverConfig.Name must be local", async () => {
+  assertEquals(await createVerdict({ VolumeDriver: "local" }), []);
+  assertEquals(await createVerdict({ VolumeDriver: "" }), []);
+  assertEquals(await createVerdict({ VolumeDriver: "rexray" }), [
+    { rule: "volume-driver", detail: "rexray" },
+  ]);
+  const mount = (Name: unknown, Options?: unknown) => ({
+    Type: "volume",
+    Source: "v",
+    Target: "/m",
+    VolumeOptions: { DriverConfig: { Name, Options } },
+  });
+  assertEquals(await createVerdict({ Mounts: [mount("local")] }), []);
+  assertEquals(await createVerdict({ Mounts: [mount("")] }), []);
+  assertEquals(await createVerdict({ Mounts: [mount("sshfs")] }), [
+    { rule: "volume-driver", detail: "sshfs" },
+  ]);
+  assertEquals(
+    ruleNames(await createVerdict({ Mounts: [mount(7)] })),
+    ["volume-driver"],
+  );
+  // Options of a non-local driver are not local's: the driver is the finding.
+  assertEquals(
+    ruleNames(
+      await createVerdict({
+        Mounts: [mount("sshfs", { type: "none", o: "bind", device: "/" })],
+      }),
+    ),
+    ["volume-driver", "volume-bind-host-root"],
+  );
+});
+
+test("a volume mount's Subpath must stay inside the volume, and tmpfs mount options are allowlisted", async () => {
+  const volume = (Subpath: unknown) => ({
+    Type: "volume",
+    Source: "v",
+    Target: "/m",
+    VolumeOptions: { Subpath },
+  });
+  assertEquals(await createVerdict({ Mounts: [volume("data/app")] }), []);
+  assertEquals(await createVerdict({ Mounts: [volume("")] }), []);
+  for (const subpath of ["../other", "a/../../b", "/etc", 7]) {
+    assertEquals(
+      ruleNames(await createVerdict({ Mounts: [volume(subpath)] })),
+      ["volume-subpath"],
+      String(subpath),
+    );
+  }
+  const tmpfs = (Options: unknown) => ({
+    Type: "tmpfs",
+    Target: "/t",
+    TmpfsOptions: { SizeBytes: 1024, Mode: 448, Options },
+  });
+  assertEquals(
+    await createVerdict({ Mounts: [tmpfs([["noexec"], ["nosuid"]])] }),
+    [],
+  );
+  assertEquals(await createVerdict({ Mounts: [tmpfs(undefined)] }), []);
+  assertEquals(
+    ruleNames(await createVerdict({ Mounts: [tmpfs([["suid"], ["dev"]])] })),
+    ["tmpfs-options", "tmpfs-options"],
+  );
+  assertEquals(
+    ruleNames(await createVerdict({ Mounts: [tmpfs("exec")] })),
+    ["tmpfs-options"],
+  );
+});
+
+test("a form-encoded body is a finding: the engine merges it into the form ahead of the query", async () => {
+  const found = await evaluateRequest(
+    {
+      method: "POST",
+      path: "/build",
+      query: new URLSearchParams(),
+      formBody: true,
+    },
+    DEFAULT_POLICY_CONFIG,
+    (p) => Promise.resolve(p),
+  );
+  assertEquals(found.map((v) => v.rule), ["form-encoded-body"]);
+});
+
+/**
+ * The engine's router table (moby api/server/router, API 1.4x): every method
+ * and path template it serves, as [method, example path, the gate's route].
+ * `route: undefined` is a read the gate classes `read`. A route the engine
+ * serves and the gate calls `unclassified` must be listed with that name and
+ * is then a finding of its own.
+ */
+const ENGINE_ROUTES: ReadonlyArray<[string, string, string]> = [
+  ["HEAD", "/_ping", "read"],
+  ["GET", "/_ping", "read"],
+  ["GET", "/events", "read"],
+  ["GET", "/info", "read"],
+  ["GET", "/version", "read"],
+  ["GET", "/system/df", "read"],
+  ["POST", "/auth", "auth"],
+  ["GET", "/distribution/alpine/json", "read"],
+  ["GET", "/containers/json", "read"],
+  ["HEAD", "/containers/c1/archive", "containers.archive.get"],
+  ["GET", "/containers/c1/archive", "containers.archive.get"],
+  ["PUT", "/containers/c1/archive", "containers.archive.put"],
+  ["GET", "/containers/c1/export", "read"],
+  ["GET", "/containers/c1/changes", "read"],
+  ["GET", "/containers/c1/json", "read"],
+  ["GET", "/containers/c1/top", "read"],
+  ["GET", "/containers/c1/logs", "read"],
+  ["GET", "/containers/c1/stats", "read"],
+  ["GET", "/containers/c1/attach/ws", "read"],
+  ["GET", "/exec/e1/json", "read"],
+  ["POST", "/containers/create", "containers.create"],
+  ["POST", "/containers/c1/kill", "containers.action"],
+  ["POST", "/containers/c1/pause", "containers.action"],
+  ["POST", "/containers/c1/unpause", "containers.action"],
+  ["POST", "/containers/c1/restart", "containers.action"],
+  ["POST", "/containers/c1/start", "containers.action"],
+  ["POST", "/containers/c1/stop", "containers.action"],
+  ["POST", "/containers/c1/wait", "containers.action"],
+  ["POST", "/containers/c1/resize", "containers.action"],
+  ["POST", "/containers/c1/rename", "containers.action"],
+  ["POST", "/containers/c1/update", "containers.action"],
+  ["POST", "/containers/c1/attach", "containers.attach"],
+  ["POST", "/containers/c1/exec", "containers.exec.create"],
+  ["POST", "/exec/e1/start", "exec.start"],
+  ["POST", "/exec/e1/resize", "exec.start"],
+  ["POST", "/containers/prune", "prune"],
+  ["DELETE", "/containers/c1", "containers.remove"],
+  ["GET", "/containers/c1/checkpoints", "restricted-group"],
+  ["POST", "/containers/c1/checkpoints", "restricted-group"],
+  ["DELETE", "/containers/c1/checkpoints/cp", "restricted-group"],
+  ["GET", "/images/json", "read"],
+  ["GET", "/images/search", "read"],
+  ["GET", "/images/get", "read"],
+  ["GET", "/images/alpine/get", "read"],
+  ["GET", "/images/alpine/history", "read"],
+  ["GET", "/images/alpine/json", "read"],
+  ["POST", "/commit", "commit"],
+  ["POST", "/images/load", "images.load"],
+  ["POST", "/images/create", "images.pull"],
+  ["POST", "/images/alpine/push", "images.write"],
+  ["POST", "/images/alpine/tag", "images.write"],
+  ["POST", "/images/prune", "prune"],
+  ["DELETE", "/images/alpine", "object.remove"],
+  ["POST", "/build", "build"],
+  ["POST", "/build/prune", "prune"],
+  ["GET", "/networks", "read"],
+  ["GET", "/networks/n1", "read"],
+  ["POST", "/networks/create", "networks.create"],
+  ["POST", "/networks/n1/connect", "networks.attach"],
+  ["POST", "/networks/n1/disconnect", "networks.attach"],
+  ["POST", "/networks/prune", "prune"],
+  ["DELETE", "/networks/n1", "object.remove"],
+  ["GET", "/volumes", "read"],
+  ["GET", "/volumes/v1", "read"],
+  ["POST", "/volumes/create", "volumes.create"],
+  ["PUT", "/volumes/v1", "restricted-group"],
+  ["POST", "/volumes/prune", "prune"],
+  ["DELETE", "/volumes/v1", "object.remove"],
+  ["GET", "/plugins", "read"],
+  ["GET", "/plugins/privileges", "restricted-group"],
+  ["POST", "/plugins/pull", "restricted-group"],
+  ["DELETE", "/plugins/p1", "restricted-group"],
+  ["POST", "/swarm/init", "restricted-group"],
+  ["POST", "/services/create", "restricted-group"],
+  ["POST", "/secrets/create", "restricted-group"],
+  ["POST", "/configs/create", "restricted-group"],
+  ["GET", "/nodes", "restricted-group"],
+  ["GET", "/tasks", "restricted-group"],
+  ["GET", "/debug/vars", "restricted-group"],
+  ["GET", "/debug/pprof/heap", "restricted-group"],
+  ["POST", "/session", "session"],
+  ["POST", "/grpc", "grpc"],
+  // `{name:.*}` in the engine: a slash inside the name is still routed.
+  ["POST", "/containers/a/b/start", "containers.action"],
+  ["POST", "/containers/a/b/exec", "containers.exec.create"],
+  ["DELETE", "/containers/a/b", "containers.remove"],
+  ["GET", "/networks/a/b", "read"],
+  ["GET", "/volumes/a/b", "read"],
+];
+
+test("every route the engine serves is classified as intended, bare and under any version prefix", () => {
+  for (const [method, path, expected] of ENGINE_ROUTES) {
+    for (const prefix of ["", ...ENGINE_PREFIXES]) {
+      assertEquals(
+        classifyRoute(method, `${prefix}${path}`).route,
+        expected,
+        `${method} ${prefix}${path}`,
+      );
+    }
+  }
+});
+
+test("an unknown path, or a known path under the wrong method, is a finding (deny by default)", async () => {
+  for (
+    const [method, path] of [
+      ["GET", "/something/new"],
+      ["POST", "/containers/json"],
+      ["PATCH", "/containers/c1/json"],
+      ["GET", "/containers/c1/start"],
+      ["DELETE", "/_ping"],
+    ]
+  ) {
+    const found = await evaluateRequest(
+      { method, path, query: new URLSearchParams() },
+      DEFAULT_POLICY_CONFIG,
+      (p) => Promise.resolve(p),
+    );
+    assertEquals(found.map((v) => v.rule), ["unclassified-route"], path);
+  }
+});

@@ -13,8 +13,10 @@
 # privilege boundary) until each is replaced:
 # - Docker: there is no sudo grant for it, but `tp` is in the `docker` group
 #   and Docker access is root-equivalent.
-# - TP_ENGINE_VALIDATE: the engines' own config tests run as root against the
-#   configs under /etc/turbopanel, pinned to those exact files here.
+# - TP_ENGINE_VALIDATE: php-fpm's own config test runs as root against the
+#   configs under /etc/turbopanel, pinned to those exact files here. The other
+#   engines' tests run as their own service accounts, pinned the same way
+#   (the tpapache line and TP_*_VALIDATE below).
 #
 # src/orchestration/sudoers-contract.test.ts pins this file.
 Defaults:{{ turbopanel_user }} !requiretty
@@ -23,13 +25,28 @@ Defaults:{{ turbopanel_user }} env_reset
 Cmnd_Alias TP_HOST = {{ turbopanel_install_root }}/lib/tp-host
 Cmnd_Alias TP_ORCHESTRATE = {{ turbopanel_orchestration_dir }}/scripts/tp-orchestrate
 # tp-update-guard runs only as root via systemd OnFailure=/timer — no sudo entry.
-Cmnd_Alias TP_ENGINE_VALIDATE = {{ turbopanel_vendor_dir }}/apache/current/bin/httpd -t -f /etc/turbopanel/apache/httpd.conf, /usr/sbin/php-fpm[0-9].[0-9] --fpm-config /etc/turbopanel/php/[0-9].[0-9]/php-fpm.conf --test
+# tp-firewall-guard runs only as root via its systemd timer (armed through tp-host's
+# systemctl verb on turbopanel-* units) — no sudo entry.
+Cmnd_Alias TP_ENGINE_VALIDATE = /usr/sbin/php-fpm[0-9].[0-9] --fpm-config /etc/turbopanel/php/[0-9].[0-9]/php-fpm.conf --test
 
 {{ turbopanel_user }} ALL=(root) NOPASSWD: TP_HOST, TP_ORCHESTRATE, TP_ENGINE_VALIDATE
 # Re-exec as itself: `sudo -n -u tp -- docker …` picks up a fresh group set
 # after Docker install, and native builds wrap in `sudo -n -u tp -- env … sh -c`.
 {{ turbopanel_user }} ALL=({{ turbopanel_user }}) NOPASSWD: ALL
-# Config validation as the unprivileged engine service accounts
-# (`sudo -n -u tpnginx -- nginx -t`, `… tpols -- openlitespeed -t`,
-# `… tpcaddysite -- env XDG_DATA_HOME=… caddy validate`).
-{{ turbopanel_user }} ALL=(tpnginx, tpols, tpcaddysite) NOPASSWD: {{ turbopanel_vendor_dir }}/nginx/*/sbin/nginx, {{ turbopanel_vendor_dir }}/openlitespeed/*/bin/openlitespeed, {{ turbopanel_vendor_dir }}/caddy/*/caddy, /usr/bin/env
+# Apache's config test runs as tpapache, the account its master runs as, with
+# every argument pinned: no `env`, no other config file.
+{{ turbopanel_user }} ALL=(tpapache) NOPASSWD: {{ turbopanel_vendor_dir }}/apache/current/bin/httpd -t -f /etc/turbopanel/apache/httpd.conf
+# Config validation as the unprivileged engine service accounts: each account
+# gets exactly one command, its engine's config test with the binary, every
+# argument and the config path pinned. No env, no wildcard, no other engine's
+# binary: a free argument list (`nginx -c /tmp/x.conf` with `load_module`,
+# `caddy run --config …`) or `/usr/bin/env` would run anything as an account
+# that sits in every served tenant's group (audit P2-8).
+# The Caddy check needs no XDG_DATA_HOME: the site Caddyfile sets
+# `auto_https off`, so `caddy validate` never opens certificate storage.
+Cmnd_Alias TP_NGINX_VALIDATE = {{ turbopanel_vendor_dir }}/nginx/current/sbin/nginx -t -c /etc/turbopanel/nginx/nginx.conf
+Cmnd_Alias TP_OLS_VALIDATE = {{ turbopanel_vendor_dir }}/openlitespeed/current/bin/openlitespeed -t -c /etc/turbopanel/openlitespeed/httpd_config.conf
+Cmnd_Alias TP_CADDY_VALIDATE = {{ turbopanel_vendor_dir }}/caddy/current/caddy validate --adapter caddyfile --config /etc/turbopanel/caddy/Caddyfile
+{{ turbopanel_user }} ALL=(tpnginx) NOPASSWD: TP_NGINX_VALIDATE
+{{ turbopanel_user }} ALL=(tpols) NOPASSWD: TP_OLS_VALIDATE
+{{ turbopanel_user }} ALL=(tpcaddysite) NOPASSWD: TP_CADDY_VALIDATE

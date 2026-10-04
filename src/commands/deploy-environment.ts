@@ -1,24 +1,29 @@
 import { buildStorageVolumesFragment } from "../deploy/apply-storage-volumes.ts";
 import { buildHostingLabelsFragment } from "../deploy/compose-labels.ts";
+import { assertNoReservedOwnerLabels } from "../deploy/compose-reserved-labels.ts";
+import { assertComposeBuildPolicy } from "../deploy/compose-build-policy.ts";
 import { encodeHex } from "@std/encoding/hex";
 import { join } from "@std/path";
 import {
   composeFileArgs,
+  type DeploymentManifest,
   type DeploymentManifestRelease,
   type DeploymentManifestSecret,
-  type DeploymentManifestV2,
   environmentDeploymentDir,
+  previousComposePaths,
   pruneStaleComposeLayerFiles,
   publishStagedRuntimeCompose,
   readDeploymentManifest,
   removeComposeEnvFile,
   removeComposeStageDir,
   resetComposeStageDir,
+  restorePreviousDeployment,
   RUNTIME_COMPOSE_FILENAME,
   writeComposeEnvFile,
   writeComposeFileSecure,
   writeDeploymentManifest,
 } from "../deploy/compose-files.ts";
+import { singleGeneration } from "../deploy/deployment-generations.ts";
 import {
   applyRailpackImagesToComposeYaml,
   mergeComposeOverlayFragments,
@@ -48,7 +53,7 @@ import {
 } from "../logs/contracts.ts";
 import { ensureDocker as defaultEnsureDocker } from "../deploy/ensure-docker.ts";
 import { ensureSystemPrincipals } from "../deploy/ensure-principal.ts";
-import { applySshAccess } from "../deploy/ssh/apply.ts";
+import { applySshAccess, type PrincipalSshSpec } from "../deploy/ssh/apply.ts";
 import {
   buildTcpUdpIngressEntries,
   cleanupStaleTcpUdpServiceIngress,
@@ -67,6 +72,16 @@ import {
   materializeTlsCertificates,
 } from "../deploy/materialize-tls.ts";
 import {
+  runSequentialDeploy,
+  type SequentialDeploySteps,
+} from "../deploy/sequential-deploy.ts";
+import {
+  composePsForGate,
+  HEALTH_GATE_DEFAULT_POLL_MS,
+  HEALTH_GATE_DEFAULT_STABLE_MS,
+  waitForHealthGate,
+} from "../deploy/health-gate.ts";
+import {
   assertHooksConfined,
   runDeployServiceHooks,
   runPostDeployHooks,
@@ -74,9 +89,12 @@ import {
 import {
   applySites,
   resolveSiteDocumentRoot,
+  resolveSitePhpSeries,
   type SiteManagedDirectory,
   type SiteRelease,
 } from "../deploy/site.ts";
+import { detectSiteApps } from "../deploy/site-apps.ts";
+import { sitePhpRuntimeMode } from "../deploy/site/php-runtime.ts";
 import { applyCronJobs, type CronApplySpec } from "../deploy/cron/apply.ts";
 import {
   type AppliedRelease,
@@ -136,6 +154,8 @@ import {
   type EnvironmentDeployPrincipalMaterial,
   type EnvironmentDeployResult,
   type EnvironmentDeployResultRelease,
+  type EnvironmentDeployResultSite,
+  type EnvironmentDeployServiceHook,
   type EnvironmentDeploySite,
   type EnvironmentDeploySource,
   parseEnvironmentDeployPayload,
@@ -145,6 +165,8 @@ import {
   principalHomePath,
   resolveLayout,
   siteCurrentSymlink,
+  siteSharedDir,
+  siteWebrootDir,
 } from "../paths/layout.ts";
 
 const SAFE_PATH_ID_RE = /^[A-Za-z0-9_-]+$/;
@@ -498,8 +520,8 @@ async function ensureDeployIngress(
  * has to be created before the release engine runs — even when nothing else in
  * the payload references that principal.
  */
-function deployPrincipalSpecs(
-  parsedPayload: EnvironmentDeployPayload,
+export function deployPrincipalSpecs(
+  parsedPayload: Pick<EnvironmentDeployPayload, "sourceMaterial" | "sites">,
   principalMaterial: EnvironmentDeployPrincipalMaterial[],
 ): EnvironmentDeployPrincipalMaterial[] {
   const byId = new Map<string, EnvironmentDeployPrincipalMaterial>();
@@ -516,7 +538,48 @@ function deployPrincipalSpecs(
       ...(principal.gid === undefined ? {} : { gid: principal.gid }),
     });
   }
-  return [...byId.values()];
+  return withSitePhpRuntimes([...byId.values()], parsedPayload.sites ?? []);
+}
+
+/**
+ * A per-site PHP runtime runs `php-cgi<series>` / `php-fpm<series>` as the
+ * site's principal, and those binaries are `0750 root:tpphp<series>`: the
+ * principal must hold that series' entitlement or its unit dies `203/EXEC`.
+ *
+ * The grant belongs in the control plane's effective runtime set (see
+ * `PrincipalEnsureSpec.runtimes`: the daemon reconciles, it does not derive),
+ * which persists it as a `deploy` entitlement the way a native app's Node
+ * series is, so `server.principals.reconcile` and every other environment's
+ * deploy (both full-replace) carry it too. Adding it here as well only covers
+ * a control plane older than that, since the daemon ships first: a deploy
+ * from one still starts its runtime, though a later reconcile from it can
+ * still take the grant away.
+ */
+function withSitePhpRuntimes(
+  principals: EnvironmentDeployPrincipalMaterial[],
+  sites: readonly EnvironmentDeploySite[],
+): EnvironmentDeployPrincipalMaterial[] {
+  const implied = new Map<string, Set<string>>();
+  for (const site of sites) {
+    if (!site.principal || sitePhpRuntimeMode(site) === null) continue;
+    const series = resolveSitePhpSeries(site);
+    if (!series) continue;
+    const set = implied.get(site.principal.principalId) ?? new Set<string>();
+    set.add(series);
+    implied.set(site.principal.principalId, set);
+  }
+  return principals.map((principal) => {
+    const series = implied.get(principal.principalId);
+    if (!series) return principal;
+    const runtimes = [...(principal.runtimes ?? [])];
+    for (const entry of series) {
+      const held = runtimes.some((r) =>
+        r.runtime === "php" && r.series === entry
+      );
+      if (!held) runtimes.push({ runtime: "php", series: entry });
+    }
+    return { ...principal, runtimes };
+  });
 }
 
 async function ensureDeployPrincipals(
@@ -545,38 +608,54 @@ async function ensureDeployPrincipals(
     })),
   );
 
-  // Key files, but **never** the removal sweep: this payload describes one
-  // environment and the host serves many, so pruning here would revoke every
-  // other environment's access. `server.principals.reconcile` is the caller
-  // that holds the whole server and is allowed to delete.
-  //
-  // Skipped entirely when no principal declared keys, so a deploy from a
-  // control plane that predates the key subsystem does not touch `sshd`.
+  await applyDeploySshAccess(principalMaterial);
+}
+
+/**
+ * Key files and the `sshd` drop-in for the principals a deploy materialized.
+ *
+ * Runs on **every** deploy that materializes a principal, keys or not. The
+ * drop-in's backstop block is what stops a principal with no SSH level from
+ * signing in with a key it planted in its own home and tunnelling into the
+ * host; gating this on declared keys left that drop-in off every host whose
+ * tenants never asked for SSH — the default case.
+ *
+ * Key files, but **never** the removal sweep: this payload describes one
+ * environment and the host serves many, so pruning here would revoke every
+ * other environment's access. `server.principals.reconcile` is the caller that
+ * holds the whole server and is allowed to delete. A principal whose material
+ * says nothing about keys (`sshKeys` absent) gets no key file written.
+ */
+export async function applyDeploySshAccess(
+  principalMaterial: readonly EnvironmentDeployPrincipalMaterial[],
+  apply: (
+    principals: readonly PrincipalSshSpec[],
+  ) => Promise<unknown> = applySshAccess,
+): Promise<void> {
+  if (principalMaterial.length === 0) return;
   const withKeys = principalMaterial.filter(
     (principal) => principal.sshKeys !== undefined,
   );
-  if (withKeys.length > 0) {
-    try {
-      await applySshAccess(
-        withKeys.map((principal) => ({
-          username: principal.username,
-          keys: principal.sshKeys ?? [],
-        })),
-      );
-    } catch (err) {
-      // Warn, do not fail. A host whose `sshd_config` has no `Include` line
-      // cannot take the drop-in, and that is a real problem — but it is not a
-      // reason to refuse to deploy an application. The key files themselves are
-      // written before that check, so the account is left correct-but-not-yet
-      // -consulted, and `server.principals.reconcile` is where the operator
-      // sees the failure as a failure.
-      logWarn(
-        "deploy",
-        `ssh access could not be applied: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      );
-    }
+  try {
+    await apply(
+      withKeys.map((principal) => ({
+        username: principal.username,
+        keys: principal.sshKeys ?? [],
+      })),
+    );
+  } catch (err) {
+    // Warn, do not fail. A host whose `sshd_config` has no `Include` line
+    // cannot take the drop-in, and that is a real problem — but it is not a
+    // reason to refuse to deploy an application. The key files themselves are
+    // written before that check, so the account is left correct-but-not-yet
+    // -consulted, and `server.principals.reconcile` is where the operator
+    // sees the failure as a failure.
+    logWarn(
+      "deploy",
+      `ssh access could not be applied: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
   }
 }
 
@@ -988,12 +1067,12 @@ async function buildDeploymentManifest(
   composeYaml: string,
   serviceNames: readonly string[],
   appliedReleases: readonly AppliedRelease[] = [],
-): Promise<DeploymentManifestV2> {
+): Promise<DeploymentManifest> {
   const secrets = secretPlanToManifest(payload.secretPlan ?? []);
   const serviceIds = serviceIdsForManifest(payload);
   const releases = releasesForManifest(payload, appliedReleases);
   return {
-    version: 2,
+    version: 3,
     projectId: payload.projectId,
     environmentId: payload.environmentId,
     serverId: payload.serverId ?? "",
@@ -1001,6 +1080,9 @@ async function buildDeploymentManifest(
     projectName: payload.projectName,
     composeSha256: await sha256HexUtf8(composeYaml),
     services: replicaCountsForManifest(payload, serviceNames),
+    generations: [
+      singleGeneration(payload.projectName, payload.generation ?? 0),
+    ],
     ...(secrets.length > 0 ? { secrets } : {}),
     ...(Object.keys(serviceIds).length > 0 ? { serviceIds } : {}),
     ...(releases.length > 0 ? { releases } : {}),
@@ -1047,6 +1129,34 @@ async function persistComposeEnvFile(
  * `applyCronJobs` call would treat the first lane's timers as stale and remove
  * the ones it had just installed.
  */
+/**
+ * What a site's cron job may write besides the principal's `home/`, `data/`
+ * and `tmp/`: `shared/` in the release lane, `webroot/` and `shared/` in the
+ * managed lane, nothing for a tree outside the principal's home.
+ */
+export function siteCronWritableDirs(
+  layout: Pick<LayoutPaths, "principalHomeRoot">,
+  release: SiteRelease | undefined,
+  managed: SiteManagedDirectory | undefined,
+): string[] {
+  if (release) {
+    return [
+      siteSharedDir(
+        principalHomePath(layout, release.username),
+        release.serviceId,
+      ),
+    ];
+  }
+  if (managed) {
+    const home = principalHomePath(layout, managed.username);
+    return [
+      siteWebrootDir(home, managed.serviceId),
+      siteSharedDir(home, managed.serviceId),
+    ];
+  }
+  return [];
+}
+
 async function applyDeployCronJobs(
   layout: LayoutPaths,
   parsedPayload: EnvironmentDeployPayload,
@@ -1072,6 +1182,11 @@ async function applyDeployCronJobs(
         releaseBindings.get(site.composeServiceName),
         managedBindings.get(site.composeServiceName),
       ),
+      siteWritableDirs: siteCronWritableDirs(
+        layout,
+        releaseBindings.get(site.composeServiceName),
+        managedBindings.get(site.composeServiceName),
+      ),
       jobs: site.cron,
     });
   }
@@ -1091,6 +1206,12 @@ async function applyDeployCronJobs(
         principalHomePath(layout, binding.username),
         app.serviceId,
       ),
+      siteWritableDirs: [
+        siteSharedDir(
+          principalHomePath(layout, binding.username),
+          app.serviceId,
+        ),
+      ],
       username: binding.username,
       jobs: app.cron,
     });
@@ -1263,6 +1384,181 @@ function applySecretFilePaths(
   );
 }
 
+/** External, fabric and managed networks a deploy needs before compose runs. */
+async function ensureDeployNetworks(
+  input: DeployContainerServicesInput,
+): Promise<void> {
+  const { parsedPayload, run } = input;
+  const externalNetworks = zipExternalDockerNetworkSpecs(
+    parsedPayload.dockerExternalNetworks,
+    parsedPayload.dockerNetworkAddressing,
+  );
+  if (externalNetworks.length > 0) {
+    await input.ensureExternalNetworks(externalNetworks);
+  }
+
+  const fabricNetworks = parsedPayload.fabricNetworks ?? [];
+  if (fabricNetworks.length > 0) {
+    // Belt-and-braces for the race between reconcile and deploy: a deploy
+    // must never depend on `server.fabric.reconcile` having landed first.
+    await input.ensureFabricDockerNetworks(fabricNetworks, FABRIC_DEFAULT_MTU);
+  }
+
+  const managedNetworkServices = parsedPayload.managedNetworkServices ?? [];
+  if (managedNetworkServices.length > 0) {
+    // The contract requires `managedNetwork` exactly when at least one
+    // compose service joins it, so this is a non-null read.
+    await ensureManagedIngressNetwork(parsedPayload.managedNetwork!, run);
+  }
+}
+
+type LineHandler = (
+  event: { stream: "stdout" | "stderr"; line: string },
+) => void;
+
+/** `docker compose build --no-cache --pull` for the whole project. */
+async function runComposeBuild(
+  input: DeployContainerServicesInput,
+  chain: string[],
+  onLine: LineHandler,
+): Promise<void> {
+  const { parsedPayload, runStreamed, logSink } = input;
+  logInfo(
+    "commands",
+    `cacheless rebuild for compose project ${parsedPayload.projectName}`,
+  );
+  logSink.setPhase(COMMAND_LOG_PHASES.BUILD);
+  const build = await runStreamed([
+    ...composeFileArgs(parsedPayload.projectName, chain),
+    "build",
+    "--no-cache",
+    "--pull",
+  ], { onLine });
+  if (!build.success) {
+    // Docker echoes build args and failing command output verbatim —
+    // redact against the sink's deny-set before it becomes a summary.
+    throw new Error(
+      logSink.redactSummary(build.stderr) ||
+        "Docker Compose cacheless build failed",
+    );
+  }
+}
+
+type SequentialDeployContext = {
+  chain: string[];
+  serviceHooks: EnvironmentDeployServiceHook[];
+  labeledServices: string[];
+  deploymentDir: string;
+  onLine: LineHandler;
+};
+
+const DEFAULT_HEALTH_TIMEOUT_SECONDS = 120;
+
+/**
+ * The `sequential` strategy: stop the old version, migrate, start the new one,
+ * gate on health, roll back when safe. See `deploy/sequential-deploy.ts`.
+ */
+async function deploySequentially(
+  input: DeployContainerServicesInput,
+  ctx: SequentialDeployContext,
+): Promise<{ serviceNames: string[]; composePaths: string[] }> {
+  const { parsedPayload, run, runStreamed, logSink } = input;
+  const { chain, serviceHooks, labeledServices, deploymentDir, onLine } = ctx;
+  if (serviceHooks.length > 0) {
+    assertHooksConfined(serviceHooks, labeledServices);
+  }
+  const timeoutMs = (parsedPayload.healthTimeoutSeconds ??
+    DEFAULT_HEALTH_TIMEOUT_SECONDS) * 1000;
+  const projectName = parsedPayload.projectName;
+  const steps: SequentialDeploySteps = {
+    prepare: () => prepareSequentialDeploy(input, chain, onLine),
+    run: (args) => run(args),
+    runStreamed: (args) => runStreamed(args, { onLine }),
+    runPreDeployHooks: () =>
+      runDeployServiceHooks(serviceHooks, {
+        projectName,
+        composePaths: chain,
+        deploymentDir,
+        runDocker: run,
+        onOutput: (stream, line) => logSink.onLine(stream, line),
+        redactSummary: (text) => logSink.redactSummary(text),
+      }),
+    gate: (paths) =>
+      waitForHealthGate({
+        ps: composePsForGate(run, projectName, paths),
+        timeoutMs,
+        stableMs: Math.min(HEALTH_GATE_DEFAULT_STABLE_MS, timeoutMs),
+        pollMs: HEALTH_GATE_DEFAULT_POLL_MS,
+        onProgress: (message) => logSink.onLine("stdout", message),
+      }),
+    restorePrevious: () => restorePreviousDeployment(deploymentDir),
+    composeArgs: (paths) => composeFileArgs(projectName, paths),
+    redact: (text) => logSink.redactSummary(text),
+    log: (line) => logSink.onLine("stdout", line),
+    setPhase: (phase) => logSink.setPhase(SEQUENTIAL_PHASES[phase]),
+  };
+  await runSequentialDeploy({
+    composePaths: chain,
+    previousComposePaths: await previousComposePaths(deploymentDir),
+    keepRunning: parsedPayload.keepRunningServices ?? [],
+    hasHooks: serviceHooks.length > 0,
+    hooksMigrate: serviceHooks.some((hook) => Boolean(hook.preDeployCommand)),
+    breakingMigration: parsedPayload.migrations === "breaking",
+    steps,
+  });
+  if (serviceHooks.length > 0) {
+    logSink.setPhase(COMMAND_LOG_PHASES.POST_DEPLOY);
+    await runPostDeployHooks(serviceHooks, {
+      projectName,
+      composePaths: chain,
+      runDocker: run,
+      onOutput: (stream, line) => logSink.onLine(stream, line),
+      redactSummary: (text) => logSink.redactSummary(text),
+    });
+  }
+  return { serviceNames: labeledServices, composePaths: chain };
+}
+
+const SEQUENTIAL_PHASES = {
+  build: COMMAND_LOG_PHASES.BUILD,
+  "pre-deploy": COMMAND_LOG_PHASES.PRE_DEPLOY,
+  "compose-up": COMMAND_LOG_PHASES.COMPOSE_UP,
+  health: COMMAND_LOG_PHASES.HEALTH,
+} as const;
+
+/**
+ * Everything a sequential deploy does before it stops anything: networks,
+ * image build and a best-effort pull, so the downtime window is only stop to
+ * healthy and a build failure leaves the old version serving.
+ */
+async function prepareSequentialDeploy(
+  input: DeployContainerServicesInput,
+  chain: string[],
+  onLine: LineHandler,
+): Promise<void> {
+  const { parsedPayload, runStreamed, logSink } = input;
+  await ensureDeployNetworks(input);
+  if (parsedPayload.noCache === true) {
+    await runComposeBuild(input, chain, onLine);
+  } else {
+    const build = await runStreamed([
+      ...composeFileArgs(parsedPayload.projectName, chain),
+      "build",
+    ], { onLine });
+    if (!build.success) {
+      throw new Error(
+        logSink.redactSummary(build.stderr) || "Docker Compose build failed",
+      );
+    }
+  }
+  // Best effort: `up` pulls anything still missing.
+  await runStreamed([
+    ...composeFileArgs(parsedPayload.projectName, chain),
+    "pull",
+    "--ignore-buildable",
+  ], { onLine });
+}
+
 /**
  * Writes one compiled `compose.yaml` (daemon overlay merged in), validates
  * Docker config, publishes `compose.yaml` + `deployment.json` + `.env`, then
@@ -1286,8 +1582,6 @@ async function deployContainerServices(
     runStreamed,
     logSink,
     decryptSecrets,
-    ensureExternalNetworks,
-    ensureFabricDockerNetworks,
   } = input;
   const onLine = (event: { stream: "stdout" | "stderr"; line: string }) =>
     logSink.onLine(event.stream, event.line);
@@ -1315,16 +1609,29 @@ async function deployContainerServices(
       [stagedPath],
       run,
     );
+    // A tenant compose never carries the labels that mark the platform's own
+    // containers (the Docker gate trusts them); refuse before anything runs.
+    assertNoReservedOwnerLabels(resolved.document ?? {});
+    // Build options no deploy may carry (host network, privileges, SSH agent,
+    // internal extra_hosts or remote contexts, secret files outside); no
+    // approval reaches these, bar a public remote context the organization
+    // allowed (`remoteBuildSourcesApproved`). Build paths are confined just below.
+    const daemonSecretNames = new Set(
+      (parsedPayload.secretPlan ?? []).map((e) => e.source),
+    );
+    assertComposeBuildPolicy(resolved.document ?? {}, {
+      stageDir,
+      exemptSecretNames: daemonSecretNames,
+      remoteBuildSourcesApproved:
+        parsedPayload.remoteBuildSourcesApproved === true,
+    });
     // The control plane's host-level gate is lexical; only the host can see
     // where a bind source really resolves. `hostLevelApproved` (absent reads
     // false) lets absolute and Docker-socket sources through; it never
     // excuses a symlink escape, a nested writable bind, or the staging dir.
     await assertComposeHostPathsConfined(
       [
-        collectResolvedHostPaths(
-          resolved.document ?? {},
-          new Set((parsedPayload.secretPlan ?? []).map((e) => e.source)),
-        ),
+        collectResolvedHostPaths(resolved.document ?? {}, daemonSecretNames),
         collectAuthoredHostPaths(yaml),
       ],
       {
@@ -1387,6 +1694,15 @@ async function deployContainerServices(
     await persistComposeEnvFile(deploymentDir, parsedPayload.envFile);
 
     const serviceHooks = parsedPayload.serviceHooks ?? [];
+    if (parsedPayload.deployStrategy === "sequential") {
+      return await deploySequentially(input, {
+        chain,
+        serviceHooks,
+        labeledServices,
+        deploymentDir,
+        onLine,
+      });
+    }
     if (serviceHooks.length > 0) {
       // Every hook must be confined to a compose service this deploy runs;
       // the runner then executes it inside that service's container.
@@ -1402,48 +1718,10 @@ async function deployContainerServices(
       });
     }
 
-    const externalNetworks = zipExternalDockerNetworkSpecs(
-      parsedPayload.dockerExternalNetworks,
-      parsedPayload.dockerNetworkAddressing,
-    );
-    if (externalNetworks.length > 0) {
-      await ensureExternalNetworks(externalNetworks);
-    }
-
-    const fabricNetworks = parsedPayload.fabricNetworks ?? [];
-    if (fabricNetworks.length > 0) {
-      // Belt-and-braces for the race between reconcile and deploy: a deploy
-      // must never depend on `server.fabric.reconcile` having landed first.
-      await ensureFabricDockerNetworks(fabricNetworks, FABRIC_DEFAULT_MTU);
-    }
-
-    const managedNetworkServices = parsedPayload.managedNetworkServices ?? [];
-    if (managedNetworkServices.length > 0) {
-      // The contract requires `managedNetwork` exactly when at least one
-      // compose service joins it, so this is a non-null read.
-      await ensureManagedIngressNetwork(parsedPayload.managedNetwork!, run);
-    }
+    await ensureDeployNetworks(input);
 
     if (parsedPayload.noCache === true) {
-      logInfo(
-        "commands",
-        `cacheless rebuild for compose project ${parsedPayload.projectName}`,
-      );
-      logSink.setPhase(COMMAND_LOG_PHASES.BUILD);
-      const build = await runStreamed([
-        ...composeFileArgs(parsedPayload.projectName, chain),
-        "build",
-        "--no-cache",
-        "--pull",
-      ], { onLine });
-      if (!build.success) {
-        // Docker echoes build args and failing command output verbatim —
-        // redact against the sink's deny-set before it becomes a summary.
-        throw new Error(
-          logSink.redactSummary(build.stderr) ||
-            "Docker Compose cacheless build failed",
-        );
-      }
+      await runComposeBuild(input, chain, onLine);
     }
 
     logSink.setPhase(COMMAND_LOG_PHASES.COMPOSE_UP);
@@ -1559,6 +1837,8 @@ export function shapeEnvironmentDeployResult(input: {
   containers: EnvironmentDeployContainer[] | null;
   /** Git-backed releases this deploy applied, in payload order. */
   releases?: readonly EnvironmentDeployResultRelease[];
+  /** Per-site application facts for the sites this deploy applied. */
+  siteApps?: readonly EnvironmentDeployResultSite[];
 }): EnvironmentDeployResult {
   const summary = buildDeploySummary(
     input.environmentId,
@@ -1580,6 +1860,9 @@ export function shapeEnvironmentDeployResult(input: {
     // environment with no sources should not grow a release array.
     ...(input.releases && input.releases.length > 0
       ? { releases: [...input.releases] }
+      : {}),
+    ...(input.siteApps && input.siteApps.length > 0
+      ? { sites: [...input.siteApps] }
       : {}),
   };
 }
@@ -1720,19 +2003,21 @@ export async function handleEnvironmentDeploy(
   );
   await Deno.mkdir(deploymentDir, { recursive: true, mode: 0o750 });
 
+  // Before the principals: the playbook creates the `tpnode<NN>` runtime
+  // groups, and the principal reconcile joins the site owner's Linux user to
+  // them. Joining a group that does not exist yet is skipped with a warning, so
+  // on the first deploy of a series the user missed the group and the unit died
+  // 203/EXEC. Tenant Node must also exist before the Git build: native installs
+  // run `corepack` from `vendor/node-app/<series>/current/bin`.
+  await ensureNativeAppRuntime(
+    parsedPayload.nativeAppServices ?? [],
+    deps?.nativeAppIo,
+  );
+
   const principalMaterial = parsedPayload.principalMaterial ?? [];
   await ensureDeployPrincipals(
     layout,
     deployPrincipalSpecs(parsedPayload, principalMaterial),
-  );
-
-  // Tenant Node must exist before the Git build: native installs run
-  // `corepack` from `vendor/node-app/<series>/current/bin`, which this
-  // playbook vendors. Waiting until `applyNativeAppServices` (after promote)
-  // left the first build with no binary.
-  await ensureNativeAppRuntime(
-    parsedPayload.nativeAppServices ?? [],
-    deps?.nativeAppIo,
   );
 
   // Git-backed releases run before the compose / site apply steps,
@@ -1783,6 +2068,19 @@ export async function handleEnvironmentDeploy(
     ),
     siteReleaseBindings,
     siteManagedBindings,
+  );
+
+  // Read-only: what each site's document root runs (WordPress today), reported
+  // so the control plane can warn about an unusable database pairing.
+  const siteApps = await detectSiteApps(
+    layout,
+    parsedPayload.environmentId,
+    sites,
+    {
+      releaseBindings: siteReleaseBindings,
+      managedDirectoryBindings: siteManagedBindings,
+      run: runtime.runPrivileged,
+    },
   );
 
   // Native apps come last of the host-native lanes: the release is promoted and
@@ -1869,5 +2167,6 @@ export async function handleEnvironmentDeploy(
     sites,
     containers,
     releases: deployResultReleases(appliedReleases),
+    siteApps,
   });
 }

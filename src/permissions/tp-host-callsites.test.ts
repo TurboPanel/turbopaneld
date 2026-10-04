@@ -15,6 +15,7 @@
 import { assert, assertEquals } from "@std/assert";
 import { dirname, fromFileUrl, join, relative } from "@std/path";
 import { hostSudoArgs } from "./host-sudo.ts";
+import { removeHostPrefix } from "../testing/tp-host-fixture.ts";
 import {
   CALL_SITES,
   type CallSiteSetup,
@@ -263,7 +264,9 @@ async function makeHost(): Promise<Host> {
       "tpapache:x:9991:9991::/nonexistent:/usr/sbin/nologin",
       "tpols:x:9992:9992::/nonexistent:/usr/sbin/nologin",
       "tpcaddysite:x:9993:9993::/nonexistent:/usr/sbin/nologin",
-      `alice:x:15001:15001::${prefix}/srv/users/alice:/bin/bash`,
+      "tpbuild:x:9994:9994::/nonexistent:/usr/sbin/nologin",
+      // The passwd home is home/ inside the root-owned principal home.
+      `alice:x:15001:15001::${prefix}/srv/users/alice/home:/bin/bash`,
       "",
     ].join("\n"),
   );
@@ -278,6 +281,7 @@ async function makeHost(): Promise<Host> {
       "tpapache:x:9991:",
       "tpols:x:9992:",
       "tpcaddysite:x:9993:",
+      "tpbuild:x:9994:",
       "tpphp84:x:9902:",
       "tpsftp:x:9986:alice",
       "alice-grp:x:15001:",
@@ -309,13 +313,16 @@ async function makeHost(): Promise<Host> {
         stderr: new TextDecoder().decode(out.stderr),
       };
     },
-    cleanup: () => Deno.remove(prefix, { recursive: true }),
+    cleanup: () => removeHostPrefix(prefix),
   };
 }
 
 const at = (prefix: string, value: string) => value.replaceAll("{P}", prefix);
 
-async function prepare(prefix: string, setup: CallSiteSetup | undefined) {
+async function prepare(
+  prefix: string,
+  setup: CallSiteSetup | undefined,
+): Promise<Deno.Listener[]> {
   for (const d of setup?.dirs ?? []) {
     await Deno.mkdir(at(prefix, d), { recursive: true });
   }
@@ -333,6 +340,11 @@ async function prepare(prefix: string, setup: CallSiteSetup | undefined) {
     await Deno.mkdir(dirname(at(prefix, link)), { recursive: true });
     await Deno.symlink(target, at(prefix, link));
   }
+  // Deno unlinks a Unix socket when its listener closes, so the caller keeps
+  // these open until the sample has run.
+  return (setup?.sockets ?? []).map((socket) =>
+    Deno.listen({ transport: "unix", path: at(prefix, socket) })
+  );
 }
 
 /** The argv a managed host really sends: `{P}` is the host's `/`. */
@@ -342,8 +354,9 @@ function onHost(argv: readonly string[]): string[] {
 
 async function runSample(sample: TpHostSample): Promise<string | undefined> {
   const host = await makeHost();
+  let sockets: Deno.Listener[] = [];
   try {
-    await prepare(host.prefix, sample.setup);
+    sockets = await prepare(host.prefix, sample.setup);
     const argv = sample.argv.map((a) => at(host.prefix, a));
     const stdin = sample.stdin === undefined
       ? undefined
@@ -357,6 +370,7 @@ async function runSample(sample: TpHostSample): Promise<string | undefined> {
     }
     return undefined;
   } finally {
+    for (const socket of sockets) socket.close();
     await host.cleanup();
   }
 }

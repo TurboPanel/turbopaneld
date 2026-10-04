@@ -52,10 +52,24 @@ const VM_PRODUCT_MARKERS: readonly string[] = [
   "hyper-v",
 ];
 
+/** Fixed `chassis_asset_tag` every Hyper-V guest reports. */
+const HYPERV_CHASSIS_ASSET_TAG = "7783-7084-3265-9085-8269-3286-77";
+
 export type PhysicalClassifierDeps = {
   readFile: IdentityIo["readFile"];
+  /** Optional: lets a Hyper-V guest be recognised by its VMBus devices. */
+  listDir?: IdentityIo["listDir"];
   sysRoot?: string;
 };
+
+async function hasVmbusDevices(deps: PhysicalClassifierDeps, root: string) {
+  if (!deps.listDir) return false;
+  try {
+    return (await deps.listDir(`${root}/bus/vmbus/devices`)).length > 0;
+  } catch {
+    return false;
+  }
+}
 
 /**
  * `true` when this host looks like bare metal: no `/sys/hypervisor/type`
@@ -71,12 +85,18 @@ export async function isPhysicalMachine(
   deps: PhysicalClassifierDeps,
 ): Promise<boolean> {
   const root = deps.sysRoot ?? "/sys";
-  const [hypervisorType, sysVendorRaw, productNameRaw] = await Promise.all([
-    deps.readFile(`${root}/hypervisor/type`),
-    deps.readFile(`${root}/class/dmi/id/sys_vendor`),
-    deps.readFile(`${root}/class/dmi/id/product_name`),
-  ]);
+  const [hypervisorType, sysVendorRaw, productNameRaw, assetTag, vmbus] =
+    await Promise.all([
+      deps.readFile(`${root}/hypervisor/type`),
+      deps.readFile(`${root}/class/dmi/id/sys_vendor`),
+      deps.readFile(`${root}/class/dmi/id/product_name`),
+      deps.readFile(`${root}/class/dmi/id/chassis_asset_tag`),
+      hasVmbusDevices(deps, root),
+    ]);
   if (hypervisorType !== undefined) return false;
+  // Hyper-V guests (systemd-detect-virt=microsoft) are caught by the fixed
+  // chassis asset tag or live VMBus devices even when DMI vendor text is odd.
+  if (assetTag?.trim() === HYPERV_CHASSIS_ASSET_TAG || vmbus) return false;
 
   const sysVendor = sysVendorRaw?.trim().toLowerCase();
   if (!sysVendor) return true;

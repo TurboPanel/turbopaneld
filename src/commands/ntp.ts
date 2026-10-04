@@ -97,6 +97,9 @@ export async function handleNtp(
   const { summary } = await applyTimeSync(applyOpts);
   const observed = await observeTimeSync();
 
+  const fallbackNtpServers = applyOpts.ntpFallbackServers ??
+    observed.fallbackNtpServers;
+
   logInfo(
     "commands",
     `NTP applied; enabled=${observed.ntpEnabled} synced=${observed.ntpSynced}`,
@@ -109,10 +112,10 @@ export async function handleNtp(
     ...(observed.ntpSynced !== undefined
       ? { ntpSynced: observed.ntpSynced }
       : {}),
-    ntpServers: observed.ntpServers,
-    ...(observed.fallbackNtpServers
-      ? { fallbackNtpServers: observed.fallbackNtpServers }
-      : {}),
+    // The apply just wrote these to timesyncd.conf; the read-back can lag
+    // (timesyncd restarts async) or be unreadable by the daemon user.
+    ntpServers: applyOpts.ntpServers ?? observed.ntpServers,
+    ...(fallbackNtpServers ? { fallbackNtpServers } : {}),
     ...(summary.length > 0 ? { summary } : {}),
   };
 }

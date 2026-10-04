@@ -1008,3 +1008,62 @@ test({
     }
   },
 });
+
+test({
+  name: "rehydrate starts only the live generation of a version-3 manifest",
+  permissions: { read: true, write: true },
+  fn: async () => {
+    const root = await Deno.makeTempDir({ prefix: "tp-rehydrate-gen-" });
+    const stateDir = join(root, "state");
+    const layout = {
+      stateDir,
+      runDir: join(root, "run"),
+    } as Parameters<typeof rehydrateLocalDeployments>[0]["layout"];
+    const dir = join(stateDir, "deployments", "proj-1", "env-1");
+    await Deno.mkdir(dir, { recursive: true });
+    await writeComposeFileSecure(
+      join(dir, RUNTIME_COMPOSE_FILENAME),
+      "services:\n  web:\n    image: nginx\n",
+    );
+    await writeDeploymentManifest(dir, {
+      version: 3,
+      projectId: "proj-1",
+      environmentId: "env-1",
+      serverId: "srv-1",
+      generation: 2,
+      projectName: "demo",
+      composeSha256: "a".repeat(64),
+      services: { web: { replicas: 1 } },
+      generations: [
+        { color: "blue", generation: 1, projectName: "demo", state: "retired" },
+        {
+          color: "green",
+          generation: 2,
+          projectName: "demo-green",
+          state: "live",
+        },
+      ],
+    });
+    const projects: string[] = [];
+    try {
+      await rehydrateLocalDeployments({
+        layout,
+        decryptSecrets: () => Promise.resolve([]),
+        rehydrate: () => Promise.resolve([]),
+        runDocker: (args) => {
+          if (args.includes("up")) projects.push(args[args.indexOf("-p") + 1]!);
+          return Promise.resolve({
+            success: true,
+            stdout: "",
+            stderr: "",
+            code: 0,
+          });
+        },
+        composeUp: "always",
+      });
+      assertEquals(projects, ["demo-green"]);
+    } finally {
+      await Deno.remove(root, { recursive: true });
+    }
+  },
+});

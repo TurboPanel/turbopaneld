@@ -1,0 +1,40 @@
+#!/usr/sbin/nft -f
+# turbopanel-ingress-guard {{ hosting_ingress_guard_version }}
+# Managed by TurboPanel daemon orchestration (hosting-caddy role); loaded by
+# turbopanel-ingress-guard.service. Do not edit: the next converge rewrites it.
+#
+# The shared hosting-ingress Traefik trusts a PROXY protocol header only from
+# its ingress network's bridge gateway, which is where Docker's loopback
+# publish relays 127.0.0.1:{{ hosting_ingress_guard_ports | join('/') }} from.
+# Any host process that reaches those entrypoints therefore speaks with the
+# gateway's voice and could claim any client address in every tenant's app.
+# So only root (dockerd's proxy) and the hosting Caddy ({{ hosting_caddy_user }})
+# may open a connection to them: over loopback, or straight to a container
+# address on a Docker bridge (the source would be the gateway there too).
+#
+# Every match is on the connection's ORIGINAL tuple (`ct original`), which
+# conntrack records before nat-output runs. With Docker's `userland-proxy:
+# false`, nat-output DNATs 127.0.0.1:<port> straight to the Traefik container
+# before this priority-filter hook sees the packet, so plain `ip daddr` /
+# `tcp dport` would see the container address and miss the loopback publish.
+#
+# Its own table: the TurboPanel firewall (iptables TP-INPUT / TP-FWD chains,
+# tp-firewall-guard) and Docker never flush or replace it. The first two lines
+# make a reload an atomic replace.
+table inet turbopanel_ingress_guard
+delete table inet turbopanel_ingress_guard
+
+table inet turbopanel_ingress_guard {
+	chain output {
+		type filter hook output priority filter; policy accept;
+		ct state new meta l4proto tcp ct original proto-dst { {{ hosting_ingress_guard_ports | join(', ') }} } jump traefik_entrypoints
+	}
+
+	chain traefik_entrypoints {
+		meta skuid { 0, {{ hosting_caddy_uid }} } return
+		ct original ip daddr 127.0.0.0/8 counter reject with tcp reset
+		ct original ip6 daddr ::1 counter reject with tcp reset
+		oifname "docker0" counter reject with tcp reset
+		oifname "br-*" counter reject with tcp reset
+	}
+}

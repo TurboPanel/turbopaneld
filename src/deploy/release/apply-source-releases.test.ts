@@ -487,7 +487,12 @@ test("applySourceReleases rolls back native releases without fetch or build", as
       });
       await mkdirReleaseTree(paths);
       await Deno.writeTextFile(join(paths.releaseDir, "index.html"), "old");
-      await writeReleaseManifest(paths.releaseDir, {
+      const recordDir = resolveDaemonReleasePaths(layout, {
+        serviceId,
+        releaseId: "rel-old",
+      }).releaseDir;
+      await Deno.mkdir(recordDir, { recursive: true });
+      await writeReleaseManifest(recordDir, {
         version: 1,
         serviceId,
         composeServiceName: "web",
@@ -579,6 +584,21 @@ test("applySourceReleases fails rollback when the target release is missing", as
     try {
       const layout = layoutFromFixture(fixture);
       const log = fakeLogSink();
+      const recordDir = resolveDaemonReleasePaths(layout, {
+        serviceId: "web",
+        releaseId: "rel-missing",
+      }).releaseDir;
+      await Deno.mkdir(recordDir, { recursive: true });
+      await writeReleaseManifest(recordDir, {
+        version: 1,
+        serviceId: "web",
+        composeServiceName: "web",
+        releaseId: "rel-missing",
+        sourceId: "src-1",
+        commitSha: "pruned-commit",
+        ref: "main",
+        promotedAt: "2025-12-01T00:00:00.000Z",
+      });
       await assertRejects(
         () =>
           applySourceReleases(

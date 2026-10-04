@@ -1015,14 +1015,13 @@ export async function runCaddySetup(
 }
 
 /**
- * Vendor BuildKit + Railpack for the Railpack build lane.
+ * Vendor Railpack and its BuildKit frontend for the Railpack build lane.
  *
  * Called on demand from `ensureBuildkitRailpack` when a deploy asks for
  * `build.kind: railpack`, never from `daemon-converge` or
- * `instance-dev-install` — a host that never builds an image from source should
- * not carry a build daemon. `ensureGalaxyDockerRole()` runs first because the
- * built image is loaded into the local Docker image store, so the container
- * runtime has to be there before this is worth installing.
+ * `instance-dev-install`. `ensureGalaxyDockerRole()` runs first because the
+ * build runs on the Docker Engine's own BuildKit and lands in its image store,
+ * so the container runtime has to be there before this is worth installing.
  */
 export async function runBuildkitSetup(
   onEvent?: AnsibleEventHandler,

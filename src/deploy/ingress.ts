@@ -2,6 +2,7 @@ import { join } from "@std/path";
 import { hostSudoArgs } from "../permissions/host-sudo.ts";
 import { errorText, logInfo, logWarn } from "../util/logger.ts";
 import { forEachSequential } from "../util/sequential.ts";
+import { removeStaleNetworkContainers } from "./ingress-stale-network.ts";
 import {
   type EnvironmentDeployContainer,
   type EnvironmentDeployHosting,
@@ -9,7 +10,8 @@ import {
   isValidIpv4Literal,
   isValidIpv6Literal,
 } from "../contracts/commands-contracts.ts";
-import type { LayoutPaths } from "../paths/layout.ts";
+import { type LayoutPaths, PROD_HOME_DEFAULT } from "../paths/layout.ts";
+import { safeConfigToken, safeUrlPath } from "../contracts/config-values.ts";
 import { isDaemonReservedHostingSite } from "./instance-acme-http01.ts";
 import {
   parseComposePsEntries,
@@ -21,7 +23,11 @@ import {
   runDocker as defaultRunDocker,
   type RunDockerOptions,
 } from "./docker-cli.ts";
-import { ensureHostingCaddy } from "./ensure-hosting-caddy.ts";
+import {
+  ensureHostingCaddy,
+  type EnsureHostingCaddyDeps,
+  HOSTING_CADDY_USER,
+} from "./ensure-hosting-caddy.ts";
 import {
   assertSafeIngressIdentity,
   type IngressIdentity,
@@ -55,13 +61,80 @@ const TRAEFIK_IMAGE = "traefik:v3.6.6";
  */
 const SOCKET_PROXY_IMAGE = "tecnativa/docker-socket-proxy:0.3.0";
 const SOCKET_PROXY_PORT = 2375;
+const SOCKET_PROXY_ENDPOINT =
+  `tcp://${SOCKET_PROXY_COMPOSE_SERVICE_NAME}:${SOCKET_PROXY_PORT}`;
+
+/**
+ * Docker gate stage 3 (opt-in): the directory holding the root-owned gate's
+ * READ-ONLY listener (`orchestration/roles/docker-gate/files/readonly.ts`),
+ * which answers only container list / inspect, events, version and ping. A
+ * directory of its own, so mounting it never exposes the gate's main socket;
+ * the directory (not the socket file) is mounted so a gate restart, which
+ * recreates the socket, does not strand Traefik on a dead inode.
+ */
+export const INGRESS_GATE_SOCKET_DIR = "/run/turbopanel-gate/ro";
+const INGRESS_GATE_MOUNT = "/var/run/turbopanel-gate";
+const INGRESS_GATE_ENDPOINT = `unix://${INGRESS_GATE_MOUNT}/docker.sock`;
+/**
+ * The switch (off by default): a root-owned marker in the gate's own source
+ * directory (`root:tp 0750`, so the daemon can read it and never create it),
+ * written by the docker-gate role when `docker_gate_ingress_socket` is true.
+ * It sticks across converges until the role is run with `false`. Without it,
+ * both Traefiks keep the socket proxy exactly as before.
+ */
+export const INGRESS_GATE_SWITCH_FILE =
+  `${PROD_HOME_DEFAULT}/lib/docker-gate/ingress-socket.on`;
+
+/** Where a Traefik reaches Docker: the socket proxy, or the gate's read-only socket. */
+export type TraefikDockerSource = "socket-proxy" | "gate";
+
+/**
+ * The shared Traefik's Docker access. In gate mode the socket proxy stays in
+ * the project only while a service Traefik rendered before the switch still
+ * points at it (`keepSocketProxy`); the next render drops it and
+ * `--remove-orphans` deletes the container.
+ */
+export type SharedTraefikDocker =
+  | { source: "socket-proxy" }
+  | { source: "gate"; keepSocketProxy: boolean };
+
+const VIA_SOCKET_PROXY: SharedTraefikDocker = { source: "socket-proxy" };
+
+/**
+ * True when Traefik should use the gate's read-only socket: the switch file
+ * is there AND so is the gate's read-only directory (created by tmpfiles and
+ * the gate unit, so it survives gate restarts; a host where the gate failed
+ * to install keeps the socket proxy).
+ */
+export async function ingressDockerGateEnabled(
+  stat: (path: string) => Promise<Deno.FileInfo> = Deno.stat,
+): Promise<boolean> {
+  const probe = (path: string) => stat(path).catch(() => undefined);
+  const [flag, dir] = await Promise.all([
+    probe(INGRESS_GATE_SWITCH_FILE),
+    probe(INGRESS_GATE_SOCKET_DIR),
+  ]);
+  return flag?.isFile === true && dir?.isDirectory === true;
+}
+
+function dockerEndpoint(source: TraefikDockerSource): string {
+  return source === "gate" ? INGRESS_GATE_ENDPOINT : SOCKET_PROXY_ENDPOINT;
+}
+
+function gateVolumeLines(source: TraefikDockerSource): string[] {
+  if (source !== "gate") return [];
+  return [
+    "    volumes:",
+    `      - ${INGRESS_GATE_SOCKET_DIR}:${INGRESS_GATE_MOUNT}:ro`,
+  ];
+}
 const TRAEFIK_LOOPBACK = "127.0.0.1";
 const TRAEFIK_HTTP_PORT = 7080;
 const TRAEFIK_HTTPS_PORT = 7443;
 /**
  * Loopback-only Prometheus metrics entrypoint for the shared hosting-ingress
  * Traefik. Scraped by the daemon's `metrics/collector/router/traefik.ts` adapter
- * the same way `SITE_CADDY_ADMIN_ADDR`/`PROXYSQL_REST_ADDR` are — never
+ * the same way `CADDY_METRICS_ADDR`/`PROXYSQL_REST_ADDR` are — never
  * published beyond `TRAEFIK_LOOPBACK`. Per-service tenant Traefik
  * (`serviceTraefikCompose`) does not get one; ingress metrics are scoped to
  * the shared HTTP-only proxy only.
@@ -71,14 +144,36 @@ const TRAEFIK_METRICS_PORT = 7081;
 export const TRAEFIK_METRICS_ADDR =
   `${TRAEFIK_LOOPBACK}:${TRAEFIK_METRICS_PORT}`;
 /**
- * Dedicated admin endpoint for the hosting Caddy.
- *
- * Caddy defaults to `127.0.0.1:2019`, which the co-located dev panel Caddy
- * (`orchestration/Caddyfile`) already binds. Without an explicit override the
- * hosting unit crash-loops on "address already in use" on every dev box.
- * `ExecReload` must dial the same address (see {@link caddyUnit}).
+ * systemd `RuntimeDirectory=` of the hosting Caddy unit: `/run/<this>`, created
+ * `tpedge:tpedge 0700` on every start and removed on stop.
  */
-const HOSTING_CADDY_ADMIN_ADDR = "127.0.0.1:2029";
+export const HOSTING_CADDY_RUNTIME_DIRECTORY = "turbopanel-hosting-caddy";
+/**
+ * The hosting Caddy's admin API, a unix socket only `tpedge` (and root) can
+ * reach. Never a TCP listener: any local process (tenant PHP, native app, cron,
+ * SSH shell) can dial loopback TCP, and the admin API loads arbitrary config
+ * as `tpedge`, which reads every uploaded TLS key (audit P0-1). Nothing in the
+ * daemon dials it; reloads go through `systemctl reload`, whose `ExecReload`
+ * runs as `tpedge` (see {@link caddyUnit}). Caddy's default `127.0.0.1:2019`
+ * would also collide with the dev panel Caddy.
+ */
+export const HOSTING_CADDY_ADMIN_SOCKET =
+  `/run/${HOSTING_CADDY_RUNTIME_DIRECTORY}/admin.sock`;
+/** Caddy's spelling of {@link HOSTING_CADDY_ADMIN_SOCKET} as an address. */
+const HOSTING_CADDY_ADMIN_ADDR = `unix/${HOSTING_CADDY_ADMIN_SOCKET}`;
+/**
+ * Loopback port of the hosting Caddy's metrics-only listener: Prometheus text
+ * from the `metrics` handler and nothing else (the admin API stays a unix
+ * socket). Totals only: `metrics` is rendered without `per_host`, so no
+ * per-site label ever leaves Caddy. Not 2049 (NFS: a host running an NFS server
+ * would stop the whole hosting Caddy from binding), and not the 2019/2029/2039
+ * Caddy admin ports; 18110 sits beside the other platform loopback ports
+ * (18080, 18081, 18099, 18100, 18300).
+ */
+export const HOSTING_CADDY_METRICS_PORT = 18110;
+/** Loopback address `metrics/collector/ingress/caddy.ts` scrapes. */
+export const HOSTING_CADDY_METRICS_ADDR =
+  `127.0.0.1:${HOSTING_CADDY_METRICS_PORT}`;
 const SAFE_FILE_ID_RE = /^[A-Za-z0-9_-]+$/;
 /** Compose Spec `name:` charset — lowercase alphanumerics, `-`, and `_`. */
 const COMPOSE_PROJECT_NAME_RE = /^[a-z0-9][a-z0-9_-]*$/;
@@ -296,6 +391,21 @@ async function ensureIngressNetwork(
   }
 }
 
+/**
+ * Bridge gateway(s) of the ingress network: the PROXY protocol peers the
+ * shared Traefik trusts (see {@link traefikCompose}).
+ */
+async function ingressNetworkGateways(
+  network: string,
+  run: RunDockerFn,
+): Promise<string[]> {
+  const inspect = await run(["network", "inspect", network]);
+  if (!inspect.success) {
+    throw commandError("Inspecting ingress Docker network", inspect);
+  }
+  return parseIngressNetworkGateways(network, inspect.stdout);
+}
+
 /** Traefik entrypoint name for one raw TCP/UDP published port (must be a valid Traefik entrypoint name). */
 function tcpUdpEntrypointName(
   protocol: "tcp" | "udp",
@@ -351,6 +461,59 @@ function tcpUdpPortLines(entries: readonly TcpUdpIngressEntry[]): string[] {
   });
 }
 
+/**
+ * The `trustedIPs` value for the shared entrypoints: bare IPv4 / IPv6 literals
+ * only (no CIDR — one gateway, not the subnet its tenant containers live in),
+ * deduplicated, comma-joined. Empty is refused: without a trusted peer Caddy's
+ * PROXY header would be ignored and every site would see the gateway as its
+ * client, and `insecure` is never the fallback.
+ */
+export function proxyProtocolTrustedIps(ips: readonly string[]): string {
+  const unique = [...new Set(ips)];
+  if (unique.length === 0) {
+    throw new Error(
+      "Shared Traefik needs at least one trusted PROXY protocol peer (the ingress network gateway)",
+    );
+  }
+  for (const ip of unique) {
+    if (!isValidIpv4Literal(ip) && !isValidIpv6Literal(ip)) {
+      throw new Error(`Invalid PROXY protocol trusted address: ${ip}`);
+    }
+  }
+  return unique.join(",");
+}
+
+/**
+ * Bridge gateway address(es) from `docker network inspect <network>` output
+ * (a JSON array with one network object). Throws when there is none: the
+ * shared Traefik cannot be rendered safely without it.
+ */
+export function parseIngressNetworkGateways(
+  network: string,
+  inspectStdout: string,
+): string[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(inspectStdout);
+  } catch {
+    parsed = undefined;
+  }
+  const first = Array.isArray(parsed) ? parsed[0] : parsed;
+  const config = (first as { IPAM?: { Config?: unknown } } | undefined)?.IPAM
+    ?.Config;
+  const gateways = Array.isArray(config)
+    ? config
+      .map((entry) => (entry as { Gateway?: unknown } | null)?.Gateway)
+      .filter((gw): gw is string => typeof gw === "string" && gw !== "")
+    : [];
+  if (gateways.length === 0) {
+    throw new Error(
+      `Ingress Docker network ${network} reports no IPAM gateway; cannot pin the PROXY protocol trusted peer`,
+    );
+  }
+  return gateways;
+}
+
 /** Shared HTTP-only Traefik (loopback web/websecure). No tcp/udp entrypoints. */
 /**
  * Shared HTTP-only Traefik compose document.
@@ -370,12 +533,24 @@ function tcpUdpPortLines(entries: readonly TcpUdpIngressEntry[]): string[] {
  * never `traefik.enable`, HTTP router labels, or `com.turbopanel.raw-port`
  * (omitting raw-port keeps the shared container invisible to every tenant
  * Traefik provider constraint).
+ *
+ * `proxyTrustedIps` are the only peers whose PROXY protocol header Traefik
+ * believes: the ingress network's bridge gateway(s), which is where the
+ * hosting Caddy's connections arrive from (Docker's loopback publish relays
+ * them from the host side of the bridge). Every other peer — a tenant
+ * container on the ingress network above all — has its header read and
+ * ignored, so it cannot claim another client's address. Who on the host may
+ * reach the loopback publish at all is the ingress guard's job
+ * (`orchestration/roles/hosting-caddy`, `turbopanel-ingress-guard.service`).
  */
 export function traefikCompose(
   ingressNetwork: string,
+  proxyTrustedIps: readonly string[],
   identity?: SystemComponentDescriptor,
+  docker: SharedTraefikDocker = VIA_SOCKET_PROXY,
 ): string {
   assertSafeComposeProjectName(ingressNetwork);
+  const trusted = proxyProtocolTrustedIps(proxyTrustedIps);
   if (identity !== undefined) {
     assertSafeSystemIngressIdentity(identity);
   }
@@ -396,6 +571,12 @@ export function traefikCompose(
     }`,
     `      ${LABEL_SERVICE_ID}: ${quoteYamlScalar(identity.serviceId)}`,
   ];
+  const viaProxy = docker.source === "socket-proxy";
+  const dependsLines = viaProxy
+    ? ["    depends_on:", `      - ${SOCKET_PROXY_COMPOSE_SERVICE_NAME}`]
+    : [];
+  const keepProxy = viaProxy || docker.keepSocketProxy;
+  const proxyLines = keepProxy ? socketProxyServiceLines(ingressNetwork) : [];
 
   const lines = [
     `name: ${ingressNetwork}`,
@@ -407,13 +588,13 @@ export function traefikCompose(
     "    restart: unless-stopped",
     "    command:",
     "      - --providers.docker=true",
-    `      - --providers.docker.endpoint=${socketProxyEndpoint()}`,
+    `      - --providers.docker.endpoint=${dockerEndpoint(docker.source)}`,
     "      - --providers.docker.exposedbydefault=false",
     `      - --providers.docker.network=${ingressNetwork}`,
     `      - --entrypoints.web.address=:${TRAEFIK_HTTP_PORT}`,
-    "      - --entrypoints.web.proxyProtocol.insecure=true",
+    `      - --entrypoints.web.proxyProtocol.trustedIPs=${trusted}`,
     `      - --entrypoints.websecure.address=:${TRAEFIK_HTTPS_PORT}`,
-    "      - --entrypoints.websecure.proxyProtocol.insecure=true",
+    `      - --entrypoints.websecure.proxyProtocol.trustedIPs=${trusted}`,
     "      - --entrypoints.websecure.http.tls=true",
     `      - --entrypoints.metrics.address=:${TRAEFIK_METRICS_PORT}`,
     "      - --metrics.prometheus=true",
@@ -434,11 +615,11 @@ export function traefikCompose(
     `      - ${TRAEFIK_LOOPBACK}:${TRAEFIK_HTTPS_PORT}:${TRAEFIK_HTTPS_PORT}`,
     `      - ${TRAEFIK_LOOPBACK}:${TRAEFIK_METRICS_PORT}:${TRAEFIK_METRICS_PORT}`,
     ...labelLines,
+    ...gateVolumeLines(docker.source),
     "    networks:",
     `      - ${ingressNetwork}`,
-    "    depends_on:",
-    `      - ${SOCKET_PROXY_COMPOSE_SERVICE_NAME}`,
-    ...socketProxyServiceLines(ingressNetwork),
+    ...dependsLines,
+    ...proxyLines,
     "",
     "networks:",
     `  ${ingressNetwork}:`,
@@ -446,11 +627,6 @@ export function traefikCompose(
     "",
   ];
   return lines.join("\n");
-}
-
-/** Where every Traefik on this host reaches Docker. */
-function socketProxyEndpoint(): string {
-  return `tcp://${SOCKET_PROXY_COMPOSE_SERVICE_NAME}:${SOCKET_PROXY_PORT}`;
 }
 
 /**
@@ -535,6 +711,7 @@ export function serviceTraefikCompose(
   entries: readonly TcpUdpIngressEntry[],
   identity: ServiceIngressIdentity,
   ingressNetwork: string,
+  docker: TraefikDockerSource = "socket-proxy",
 ): string {
   assertSafeServiceIngressIdentity(identity);
   assertSafeComposeProjectName(ingressNetwork);
@@ -560,8 +737,9 @@ export function serviceTraefikCompose(
     "      - --providers.docker=true",
     // The host's socket proxy lives in the shared ingress project and is
     // reachable over the ingress network this container already joins — one
-    // proxy per host, not one per service.
-    `      - --providers.docker.endpoint=${socketProxyEndpoint()}`,
+    // proxy per host, not one per service. In gate mode: the gate's
+    // read-only socket, mounted below.
+    `      - --providers.docker.endpoint=${dockerEndpoint(docker)}`,
     "      - --providers.docker.exposedbydefault=false",
     `      - --providers.docker.network=${ingressNetwork}`,
     `      - ${
@@ -572,6 +750,7 @@ export function serviceTraefikCompose(
     "    labels:",
     `      ${LABEL_ROLE}: ${LABEL_ROLE_INGRESS}`,
     `      ${LABEL_SERVICE_ID}: ${quoteYamlScalar(identity.serviceId)}`,
+    ...gateVolumeLines(docker),
     "    networks:",
     `      - ${ingressNetwork}`,
     "",
@@ -583,10 +762,20 @@ export function serviceTraefikCompose(
   return lines.join("\n");
 }
 
-/** Caddy storage root (internal CA + leaf certs) for the hosting unit. */
-export function hostingCaddyDataDir(layout: LayoutPaths): string {
-  return join(layout.stateDir, "hosting-caddy");
-}
+/**
+ * The hosting unit's systemd `StateDirectory=`: `/var/lib/<name>`, created
+ * and owned by {@link HOSTING_CADDY_USER}. It holds the ACME account, the
+ * internal CA and every leaf certificate. Top level on purpose: never inside
+ * the `tp`-owned state tree, so `tp` cannot swap it out from under Caddy.
+ */
+export const HOSTING_CADDY_STATE_DIRECTORY = "turbopanel-hosting-caddy";
+
+/**
+ * Bounded shutdown for the hosting Caddy. Without it Caddy waits forever for
+ * open connections after SIGTERM and systemd has to kill it. The unit's
+ * `TimeoutStopSec` must stay above this.
+ */
+export const HOSTING_CADDY_GRACE_PERIOD = "5s";
 
 export function caddyfile(configDir: string): string {
   // `disable_redirects`, not `off`: every site snippet writes its own
@@ -597,12 +786,25 @@ export function caddyfile(configDir: string): string {
   // ACME client can issue on :80/:443.
   // Future: optional `email {acmeEmail}` in this global block when the
   // deploy payload carries an ACME contact address.
+  // `skip_install_trust`: Caddy runs as an unprivileged account, so it must
+  // never try to add its internal CA to the host's trust store (it would
+  // shell out to sudo, and as root it used to succeed).
   return `{
-  admin ${HOSTING_CADDY_ADMIN_ADDR}
+  admin ${HOSTING_CADDY_ADMIN_ADDR}|0600
   auto_https disable_redirects
+  skip_install_trust
+  grace_period ${HOSTING_CADDY_GRACE_PERIOD}
+  metrics
   servers {
     protocols h1 h2 h3
+    metrics
   }
+}
+# Metrics only, with no per-host option: totals across every site, no site
+# name in a label. \`bind\` keeps the listener on loopback.
+http://${HOSTING_CADDY_METRICS_ADDR} {
+  bind 127.0.0.1
+  metrics
 }
 import ${join(configDir, "hosting", "sites", "*.caddy")}
 `;
@@ -611,14 +813,14 @@ import ${join(configDir, "hosting", "sites", "*.caddy")}
 export function caddyUnit(layout: LayoutPaths): string {
   const caddy = join(layout.runtimesDir, "caddy", "current", "caddy");
   const configDir = join(layout.configDir, "hosting");
-  // systemd gives the unit no $HOME, so Caddy would fall back to `./caddy`
-  // under WorkingDirectory — i.e. internal-CA roots and leaf certs written
-  // into the config tree. Pin storage to the state dir instead.
-  // XDG_DATA_HOME is this process's ACME account and certificate storage.
-  // It must stay distinct from control-plane Caddy
+  // Without HOME and the XDG paths Caddy falls back to `./caddy` under
+  // WorkingDirectory, i.e. certificates and autosave written into the config
+  // tree. `%S` is systemd's state root (/var/lib), so all of it lands in the
+  // unit's own StateDirectory. XDG_DATA_HOME is this process's ACME account
+  // and certificate storage. It must stay distinct from control-plane Caddy
   // (`<state>/caddy/.local/share`) and from site Caddy (`<state>/site-caddy`).
   // The processes must never share an account, contact, or on-disk storage.
-  const dataDir = hostingCaddyDataDir(layout);
+  const state = `%S/${HOSTING_CADDY_STATE_DIRECTORY}`;
   return `[Unit]
 Description=TurboPanel hosting Caddy ingress
 After=network-online.target docker.service
@@ -626,11 +828,24 @@ Wants=network-online.target
 
 [Service]
 # Type=simple is active as soon as ExecStart is forked. ExecReload POSTs to
-# admin ${HOSTING_CADDY_ADMIN_ADDR}, which is not listening yet. Instance
-# ACME writes the HTTP-01 site before the first start and does not reload
-# that window; an already-running unit still reloads.
+# the admin socket, which does not exist yet. Instance ACME writes the
+# HTTP-01 site before the first start and does not reload that window; an
+# already-running unit still reloads.
 Type=simple
-Environment=XDG_DATA_HOME=${dataDir}
+# Not root: ${HOSTING_CADDY_USER} (not in group tp) with one capability, binding
+# :80/:443. tp-host refuses this unit in any other shape.
+User=${HOSTING_CADDY_USER}
+Group=${HOSTING_CADDY_USER}
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=yes
+StateDirectory=${HOSTING_CADDY_STATE_DIRECTORY}
+# The admin socket's directory: ${HOSTING_CADDY_USER} only. tp-host pins both.
+RuntimeDirectory=${HOSTING_CADDY_RUNTIME_DIRECTORY}
+RuntimeDirectoryMode=0700
+Environment=HOME=${state}
+Environment=XDG_DATA_HOME=${state}/data
+Environment=XDG_CONFIG_HOME=${state}/config
 WorkingDirectory=${configDir}
 ExecStart=${caddy} run --config ${
     join(configDir, "Caddyfile")
@@ -638,6 +853,7 @@ ExecStart=${caddy} run --config ${
 ExecReload=${caddy} reload --config ${
     join(configDir, "Caddyfile")
   } --adapter caddyfile --address ${HOSTING_CADDY_ADMIN_ADDR}
+TimeoutStopSec=30
 Restart=always
 RestartSec=2
 
@@ -648,6 +864,7 @@ WantedBy=multi-user.target
 
 async function installAndStartCaddy(
   unitSource: string,
+  unitChanged: boolean,
 ): Promise<boolean> {
   const install = await run(
     "sudo",
@@ -676,6 +893,19 @@ async function installAndStartCaddy(
     );
     return false;
   }
+  // `enable --now` leaves a running Caddy alone, so a changed unit (a new
+  // account, capability or store) would only apply on the next reboot.
+  // Restart it now; on a host where it is stopped this starts it.
+  if (unitChanged) {
+    const restart = await run(
+      "sudo",
+      hostSudoArgs(["-n", "systemctl", "restart", CADDY_SERVICE]),
+    );
+    if (!restart.success) {
+      logWarn("deploy", `hosting Caddy restart failed: ${restart.stderr}`);
+      return false;
+    }
+  }
   const enable = await run(
     "sudo",
     hostSudoArgs([
@@ -696,12 +926,9 @@ async function installAndStartCaddy(
 /** Ensure hosting Caddy binary, Caddyfile, sites dir, and systemd unit. */
 export async function ensureHostingCaddyRuntime(
   layout: LayoutPaths,
+  deps?: EnsureHostingCaddyDeps,
 ): Promise<void> {
-  await ensureHostingCaddy(layout);
-  await Deno.mkdir(hostingCaddyDataDir(layout), {
-    recursive: true,
-    mode: 0o750,
-  });
+  await ensureHostingCaddy(layout, deps);
   const hostingDir = join(layout.configDir, "hosting");
   const sitesDir = join(hostingDir, "sites");
   await Deno.mkdir(sitesDir, { recursive: true, mode: 0o750 });
@@ -718,12 +945,16 @@ export async function ensureHostingCaddyRuntime(
     },
   );
   const unitSource = join(hostingDir, CADDY_SERVICE);
-  await Deno.writeTextFile(unitSource, caddyUnit(layout), { mode: 0o640 });
+  const unit = caddyUnit(layout);
+  // The staged copy is the last unit that was installed and started.
+  const unitChanged = (await readTextIfPresent(unitSource)) !== unit;
+  await Deno.writeTextFile(unitSource, unit, { mode: 0o640 });
 
-  // A non-root daemon cannot install a system unit. Keep the generated config
-  // so test and dev environments can grant sudo later without redeploying.
-  const started = await installAndStartCaddy(unitSource);
+  const started = await installAndStartCaddy(unitSource, unitChanged);
   if (!started) {
+    // Drop the staged copy so the next attempt still sees a changed unit and
+    // restarts Caddy once it installs.
+    await Deno.remove(unitSource).catch(() => {});
     throw new Error("hosting Caddy could not be installed or started");
   }
 }
@@ -733,7 +964,204 @@ export type EnsureHostingIngressDeps = {
   runDocker?: RunDockerFn;
   /** When set, skips binary/unit install (host-free tests). */
   ensureHostingCaddyRuntime?: (layout: LayoutPaths) => Promise<void>;
+  /** Docker gate stage 3 switch; defaults to {@link ingressDockerGateEnabled}. */
+  ingressDockerGate?: () => Promise<boolean>;
 };
+
+/**
+ * Where a compose document waits while `compose up` runs on it. It replaces
+ * the applied `docker-compose.yml` only after `up` succeeds, so the applied
+ * file always describes what last came up (never mere intent). A failed `up`
+ * leaves it behind: it may describe containers that did get (re)created.
+ */
+function pendingComposePath(composePath: string): string {
+  return composePath.replace(/\.yml$/, ".pending.yml");
+}
+
+/** Write `yaml` pending, run `up` on it, then make it the applied file. */
+async function applyCompose(
+  composePath: string,
+  yaml: string,
+  up: (file: string) => Promise<DockerCliResult>,
+  what: string,
+): Promise<void> {
+  const pending = pendingComposePath(composePath);
+  await Deno.writeTextFile(pending, yaml, { mode: 0o640 });
+  const result = await up(pending);
+  if (!result.success) throw commandError(what, result);
+  await Deno.rename(pending, composePath);
+}
+
+async function readTextIfPresent(path: string): Promise<string | undefined> {
+  try {
+    return await Deno.readTextFile(path);
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) return undefined;
+    throw err;
+  }
+}
+
+/**
+ * True while a service Traefik may still reach Docker through the shared
+ * socket proxy: its applied compose file names the proxy, or a pending one
+ * does (an `up` that failed part-way may have left a container on it). The
+ * shared project keeps the proxy until none does.
+ */
+export async function serviceIngressUsesSocketProxy(
+  layout: LayoutPaths,
+): Promise<boolean> {
+  const root = join(layout.stateDir, "ingress", "services");
+  let entries: Deno.DirEntry[];
+  try {
+    entries = await Array.fromAsync(Deno.readDir(root));
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) return false;
+    throw err;
+  }
+  const files = entries.filter((entry) => entry.isDirectory).flatMap(
+    (entry) => {
+      const applied = join(root, entry.name, "docker-compose.yml");
+      return [applied, pendingComposePath(applied)];
+    },
+  );
+  const uses = await Promise.all(files.map(composeNamesSocketProxy));
+  return uses.includes(true);
+}
+
+async function composeNamesSocketProxy(path: string): Promise<boolean> {
+  const yaml = await readTextIfPresent(path);
+  return yaml?.includes(SOCKET_PROXY_ENDPOINT) === true;
+}
+
+/** True when a shared compose document runs the socket-proxy service. */
+function declaresSocketProxy(yaml: string): boolean {
+  return yaml.includes(`\n  ${SOCKET_PROXY_COMPOSE_SERVICE_NAME}:\n`);
+}
+
+async function loadHostingIngressDescriptor(
+  layout: LayoutPaths,
+): Promise<SystemComponentDescriptor | undefined> {
+  try {
+    const loaded = await readSystemComponentDescriptor(
+      layout,
+      SYSTEM_HOSTING_INGRESS_COMPONENT,
+    );
+    return loaded ?? undefined;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    logWarn(
+      "deploy",
+      `hosting ingress descriptor unreadable; using anonymous Traefik: ${message}`,
+    );
+    return undefined;
+  }
+}
+
+/** `compose up` the shared project from `yaml` (applied only on success). */
+function upSharedTraefik(
+  layout: LayoutPaths,
+  yaml: string,
+  run: RunDockerFn,
+): Promise<void> {
+  // No `-p`: the compose file declares its own project through `name:`.
+  return applyCompose(
+    hostingIngressComposePath(layout),
+    yaml,
+    (file) => run(["compose", "-f", file, "up", "-d", "--remove-orphans"]),
+    "Starting Traefik ingress",
+  );
+}
+
+/**
+ * A service Traefik about to use the socket proxy needs it running. After the
+ * switch is turned off, a TCP/UDP-only deploy re-renders its Traefik onto the
+ * proxy without rendering the shared project, which may still be in gate mode
+ * (no proxy). Add the proxy back to it: same gate-mode Traefik plus the proxy
+ * service, so compose only starts the proxy and the shared Traefik (every
+ * HTTP route) is not recreated. No shared project: nothing to add it to (a
+ * TCP/UDP-only host has never had a proxy; unchanged).
+ */
+async function ensureSharedSocketProxy(
+  layout: LayoutPaths,
+  ingressNetwork: string,
+  run: RunDockerFn,
+): Promise<void> {
+  const composePath = hostingIngressComposePath(layout);
+  const applied = await readTextIfPresent(composePath);
+  if (applied === undefined) return;
+  if (declaresSocketProxy(applied)) {
+    // Declared is not running: a leftover pending file (a failed `up` may have
+    // removed the proxy as an orphan) or a missing container means the proxy
+    // is gone. Re-up the applied file as it is; compose only starts the proxy.
+    const trusted = !(await exists(pendingComposePath(composePath))) &&
+      await socketProxyRunning(ingressNetwork, run);
+    if (!trusted) await upSharedTraefik(layout, applied, run);
+    return;
+  }
+  // A legacy shared file (Traefik on docker.sock directly, no proxy service)
+  // is not ours to recreate from a TCP/UDP deploy: only a file that already
+  // uses the gate endpoint may be re-rendered in gate mode.
+  if (!applied.includes(INGRESS_GATE_ENDPOINT)) return;
+  const descriptor = await loadHostingIngressDescriptor(layout);
+  // No descriptor: the anonymous shape, which is always on the proxy (it has
+  // no ingress label for the gate's allowance), as ensureHostingIngress does.
+  const docker: SharedTraefikDocker = descriptor === undefined
+    ? VIA_SOCKET_PROXY
+    : { source: "gate", keepSocketProxy: true };
+  await upSharedTraefik(
+    layout,
+    traefikCompose(
+      ingressNetwork,
+      await ingressNetworkGateways(ingressNetwork, run),
+      descriptor,
+      docker,
+    ),
+    run,
+  );
+}
+
+async function exists(path: string): Promise<boolean> {
+  try {
+    await Deno.stat(path);
+    return true;
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) return false;
+    throw err;
+  }
+}
+
+/** True when the shared project's socket-proxy container is running. */
+async function socketProxyRunning(
+  ingressNetwork: string,
+  run: RunDockerFn,
+): Promise<boolean> {
+  const result = await run([
+    "ps",
+    "-q",
+    "--filter",
+    `label=com.docker.compose.project=${ingressNetwork}`,
+    "--filter",
+    `label=com.docker.compose.service=${SOCKET_PROXY_COMPOSE_SERVICE_NAME}`,
+  ]);
+  return result.success && result.stdout.trim() !== "";
+}
+
+/**
+ * The anonymous (pre-`system.reconcile`) shared Traefik carries no
+ * `turbopanel.role=ingress` label, so the gate would not grant it the
+ * read-only socket bind: it keeps the socket proxy until it has an identity.
+ */
+async function sharedTraefikDocker(
+  layout: LayoutPaths,
+  hasIdentity: boolean,
+  gateEnabled: () => Promise<boolean>,
+): Promise<SharedTraefikDocker> {
+  if (!hasIdentity || !(await gateEnabled())) return VIA_SOCKET_PROXY;
+  return {
+    source: "gate",
+    keepSocketProxy: await serviceIngressUsesSocketProxy(layout),
+  };
+}
 
 /**
  * Ensure the shared HTTP-only Traefik + hosting Caddy runtime.
@@ -750,43 +1178,23 @@ export async function ensureHostingIngress(
 ): Promise<void> {
   const run = deps?.runDocker ?? defaultRunDocker;
   await ensureIngressNetwork(ingressNetwork, run);
+  await removeStaleNetworkContainers(ingressNetwork, ingressNetwork, run);
+  const gateways = await ingressNetworkGateways(ingressNetwork, run);
 
   const ingressDir = hostingIngressDir(layout);
   await Deno.mkdir(ingressDir, { recursive: true, mode: 0o750 });
-  const composePath = hostingIngressComposePath(layout);
 
-  let descriptor: SystemComponentDescriptor | undefined;
-  try {
-    const loaded = await readSystemComponentDescriptor(
-      layout,
-      SYSTEM_HOSTING_INGRESS_COMPONENT,
-    );
-    if (loaded !== null) descriptor = loaded;
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    logWarn(
-      "deploy",
-      `hosting ingress descriptor unreadable; using anonymous Traefik: ${message}`,
-    );
-  }
-
-  await Deno.writeTextFile(
-    composePath,
-    traefikCompose(ingressNetwork, descriptor),
-    { mode: 0o640 },
+  const descriptor = await loadHostingIngressDescriptor(layout);
+  const docker = await sharedTraefikDocker(
+    layout,
+    descriptor !== undefined,
+    deps?.ingressDockerGate ?? (() => ingressDockerGateEnabled()),
   );
-  // No `-p`: the compose file declares its own project through `name:`.
-  const composeUp = await run([
-    "compose",
-    "-f",
-    composePath,
-    "up",
-    "-d",
-    "--remove-orphans",
-  ]);
-  if (!composeUp.success) {
-    throw commandError("Starting Traefik ingress", composeUp);
-  }
+  await upSharedTraefik(
+    layout,
+    traefikCompose(ingressNetwork, gateways, descriptor, docker),
+    run,
+  );
 
   const ensureCaddy = deps?.ensureHostingCaddyRuntime ??
     ensureHostingCaddyRuntime;
@@ -900,6 +1308,8 @@ export async function inspectHostingIngressContainer(
 /** Optional test seams for {@link ensureServiceIngress}. */
 export type EnsureServiceIngressDeps = {
   runDocker?: RunDockerFn;
+  /** Docker gate stage 3 switch; defaults to {@link ingressDockerGateEnabled}. */
+  ingressDockerGate?: () => Promise<boolean>;
 };
 
 /**
@@ -919,29 +1329,40 @@ export async function ensureServiceIngress(
   }
   const run = deps?.runDocker ?? defaultRunDocker;
   await ensureIngressNetwork(ingressNetwork, run);
+  await removeStaleNetworkContainers(
+    serviceIngressProject(serviceId),
+    ingressNetwork,
+    run,
+  );
 
   const ingressDir = serviceIngressDir(layout, serviceId);
   await Deno.mkdir(ingressDir, { recursive: true, mode: 0o750 });
   const composePath = serviceIngressComposePath(layout, serviceId);
-  await Deno.writeTextFile(
-    composePath,
-    serviceTraefikCompose(entries, identity, ingressNetwork),
-    { mode: 0o640 },
-  );
-  const project = serviceIngressProject(serviceId);
-  const composeUp = await run([
-    "compose",
-    "-p",
-    project,
-    "-f",
-    composePath,
-    "up",
-    "-d",
-    "--remove-orphans",
-  ]);
-  if (!composeUp.success) {
-    throw commandError("Starting service Traefik ingress", composeUp);
+  const gateEnabled = deps?.ingressDockerGate ??
+    (() => ingressDockerGateEnabled());
+  const docker: TraefikDockerSource = (await gateEnabled())
+    ? "gate"
+    : "socket-proxy";
+  if (docker === "socket-proxy") {
+    await ensureSharedSocketProxy(layout, ingressNetwork, run);
   }
+  const project = serviceIngressProject(serviceId);
+  await applyCompose(
+    composePath,
+    serviceTraefikCompose(entries, identity, ingressNetwork, docker),
+    (file) =>
+      run([
+        "compose",
+        "-p",
+        project,
+        "-f",
+        file,
+        "up",
+        "-d",
+        "--remove-orphans",
+      ]),
+    "Starting service Traefik ingress",
+  );
 }
 
 /** Optional test seams for {@link removeServiceIngress}. */
@@ -1037,8 +1458,9 @@ function hostingTlsDirective(
 ): string {
   if (tlsMode === "acme") return "";
   if (tlsId) {
-    return `  tls ${join(tlsDir, tlsId, "fullchain.pem")} ${
-      join(tlsDir, tlsId, "privkey.pem")
+    const id = safeConfigToken("hostings[].tlsId", tlsId);
+    return `  tls ${join(tlsDir, id, "fullchain.pem")} ${
+      join(tlsDir, id, "privkey.pem")
     }`;
   }
   return "  tls internal";
@@ -1057,9 +1479,7 @@ function emitHttpsSite(
 }
 
 export function assertSafeHostingPathPrefix(pathPrefix: string): void {
-  if (pathPrefix.includes("`") || /[\r\n]/.test(pathPrefix)) {
-    throw new Error("hostings[].pathPrefix contains an unsupported character");
-  }
+  safeUrlPath("hostings[].pathPrefix", pathPrefix);
 }
 
 export function formatCaddyPathMatcher(pathPrefix: string): string {
@@ -1096,8 +1516,9 @@ function formatRouteHandleBlock(
     return `  handle {\n    ${upstreamLine}\n  }\n`;
   }
   const match = formatCaddyPathMatcher(route.pathPrefix);
-  const strip = route.stripPrefix?.trim();
-  if (strip && strip.length > 0) {
+  const raw = route.stripPrefix?.trim();
+  if (raw && raw.length > 0) {
+    const strip = safeUrlPath("hostings[].proxy.stripPrefix", raw);
     return `  handle ${match} {\n    uri strip_prefix ${strip}\n    ${upstreamLine}\n  }\n`;
   }
   return `  handle ${match} {\n    ${upstreamLine}\n  }\n`;

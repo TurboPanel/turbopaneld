@@ -39,8 +39,28 @@ import {
 } from "../paths/layout.ts";
 
 const VENDOR = PROD_RUNTIME_DIR_DEFAULT;
+/**
+ * The build-user role's tree (`BUILD_SANDBOX_ROOT` in
+ * `src/deploy/release/build-sandbox.ts`, pinned in tp-host): the daemon
+ * creates `work/<id>`, clones into it, and reads and removes it once
+ * `tp-host build-return` has handed it back.
+ */
+const BUILD_SANDBOX_ROOT = "/var/lib/turbopanel-build";
 const PRINCIPAL_HOME_ROOT = "/srv/users";
-const DOCKER_SOCKETS = ["/run/docker.sock", "/var/run/docker.sock"];
+/**
+ * The Docker gate's socket directory (`orchestration/roles/docker-gate`):
+ * `root:tp 0750`, holding only the gate's listening socket. Deno gates a Unix
+ * `connect()` on read and write access to the socket path, so the daemon needs
+ * both here for the in-process Docker client to reach the gate once
+ * `TURBOPANEL_DOCKER_SOCKET` points at it. The directory is root-owned: the
+ * grant cannot be used to create or replace anything in it.
+ */
+export const DOCKER_GATE_SOCKET_DIR = "/run/turbopanel-gate";
+const DOCKER_SOCKETS = [
+  "/run/docker.sock",
+  "/var/run/docker.sock",
+  DOCKER_GATE_SOCKET_DIR,
+];
 
 /**
  * Vendor subtrees the daemon process itself writes at runtime: uv's download
@@ -50,8 +70,8 @@ const DOCKER_SOCKETS = ["/run/docker.sock", "/var/run/docker.sock"];
  * (`orchestration/roles/turbopanel-user`, mirrored as
  * `turbopanel_daemon_vendor_cache_dirs`), so a compromised daemon cannot
  * replace its binary, the orchestration tree root executes, a Galaxy role,
- * or a runtime it is launched from. buildkit/railpack are installed by the
- * `buildkit` role (root); the Galaxy Docker role by `tp-orchestrate`.
+ * or a runtime it is launched from. railpack and its frontend are installed
+ * by the `buildkit` role (root); the Galaxy Docker role by `tp-orchestrate`.
  */
 export const DAEMON_WRITABLE_VENDOR_DIRS: readonly string[] = [
   `${VENDOR}/uv/cache`,
@@ -113,6 +133,7 @@ export const DAEMON_READ_PATHS: readonly string[] = [
   PROD_HOME_DEFAULT,
   PROD_CONFIG_DIR_DEFAULT,
   PROD_STATE_DIR_DEFAULT,
+  BUILD_SANDBOX_ROOT,
   PROD_LOG_DIR_DEFAULT,
   PROD_RUN_DIR_DEFAULT,
   PROD_BACKUP_DIR_DEFAULT,
@@ -157,6 +178,7 @@ export const DAEMON_READ_PATHS: readonly string[] = [
 export const DAEMON_WRITE_PATHS: readonly string[] = [
   PROD_CONFIG_DIR_DEFAULT,
   PROD_STATE_DIR_DEFAULT,
+  BUILD_SANDBOX_ROOT,
   PROD_LOG_DIR_DEFAULT,
   PROD_RUN_DIR_DEFAULT,
   PROD_BACKUP_DIR_DEFAULT,
@@ -221,12 +243,9 @@ export const DAEMON_RUN_PROGRAMS: readonly string[] = [
   "openssl",
   "/usr/bin/openssl",
   "/usr/bin/env",
-  "/usr/bin/prlimit",
   // containers and image builds
   "docker",
   "/usr/bin/docker",
-  `${VENDOR}/buildkit/current/buildctl`,
-  `${VENDOR}/buildkit/current/buildkitd`,
   `${VENDOR}/railpack/current/railpack`,
   // the daemon itself (dev-sync cache warm, restart) and its runtime
   `${PROD_BIN_DIR_DEFAULT}/turbopaneld`,
@@ -283,13 +302,42 @@ export const DAEMON_DENY_NET: readonly string[] = [
  *   listens on a configured bind — Deno has no wildcard or CIDR host grant,
  *   so a static list cannot express it. `--deny-net` closes the metadata
  *   endpoints instead.
- * - `env`: `Deno.env.toObject()` (the daemon's env plumbing) requires the
- *   unscoped grant — Deno rejects it under any `--allow-env=<list>`.
+ *
+ * `env` is scoped: see {@link DAEMON_ENV_NAMES}.
  */
-export const DAEMON_UNSCOPED_GRANTS: Readonly<Record<"net" | "env", string>> = {
+export const DAEMON_UNSCOPED_GRANTS: Readonly<Record<"net", string>> = {
   net: "operator-configured origins; no wildcard host grant exists",
-  env: "Deno.env.toObject() requires the unscoped env grant",
 };
+
+/**
+ * Environment variables the daemon (and the installer and backup runner that
+ * share its bundle) may read. Every name the source reads is project-owned
+ * `TURBOPANEL_*` except the account basics `HOME` (dev layout root, git/ansible
+ * homes), `PATH` (the minimal env handed to clearEnv build/git children), and
+ * `USER` / `LOGNAME` (dev-mode account detection).
+ * `src/permissions/env-allowlist.test.ts` scans the source and fails on a
+ * read this list does not cover.
+ *
+ * Paired with a bare `--ignore-env`: a read of any other name returns
+ * `undefined` (as if unset) instead of throwing, and `Deno.env.toObject()` —
+ * which Deno refuses outright under a scoped grant — returns just the allowed
+ * names. Children still inherit the full process environment (Deno does not
+ * filter it), so this narrows what the daemon's own JavaScript can see, not
+ * what its spawned tools get. The `*` is Deno's prefix wildcard; shells leave
+ * it literal because no file is named like the whole flag.
+ */
+export const DAEMON_ENV_NAMES: readonly string[] = [
+  "TURBOPANEL_*",
+  "HOME",
+  "PATH",
+  "USER",
+  "LOGNAME",
+];
+
+/** `--allow-env=<names>` plus the `--ignore-env` that makes it workable. */
+export function renderEnvFlags(): string[] {
+  return [`--allow-env=${DAEMON_ENV_NAMES.join(",")}`, "--ignore-env"];
+}
 
 /** Render the flags in canonical order for `deno run` / `deno compile`. */
 export function renderDaemonPermissionFlags(): string[] {
@@ -297,11 +345,75 @@ export function renderDaemonPermissionFlags(): string[] {
     `--allow-read=${DAEMON_READ_PATHS.join(",")}`,
     `--allow-write=${DAEMON_WRITE_PATHS.join(",")}`,
     `--allow-run=${DAEMON_RUN_PROGRAMS.join(",")}`,
-    "--allow-env",
+    ...renderEnvFlags(),
     "--allow-net",
     `--deny-net=${DAEMON_DENY_NET.join(",")}`,
     `--allow-sys=${DAEMON_SYS_APIS.join(",")}`,
     `--allow-ffi=${DAEMON_FFI_PATHS.join(",")}`,
+  ];
+}
+
+/**
+ * The scheduled-backup runner's Deno permission contract (JS mode).
+ *
+ * `turbopaneld backup-run <policyId>` is started by a policy's systemd timer
+ * through `lib/tp-backup-run` (`orchestration/roles/daemon-launch/templates/
+ * tp-backup-run.j2`). It never talks to the control plane or a socket and
+ * only ever drives the Docker CLI, so it gets a fraction of the daemon's set
+ * instead of a copy of it:
+ *
+ * - read/write: the policies file and result spool under
+ *   `<state>/backup`, the two per-target lock directories under the run dir,
+ *   and the backup tree itself. Nothing else under the state dir (licence,
+ *   server id, TLS, tunnels), no tenant home (`/srv/users`: the volume is
+ *   read by a helper container, never by this process), and not the Docker
+ *   socket (the CLI child opens that, not Deno).
+ * - read of the docker binary: `ensureDocker` stats it.
+ * - run: the Docker CLI only. Not `sudo`: a timer-started process has fresh
+ *   credentials, and `docker-cli.ts` reports the real socket error when it
+ *   may not run the sudo fallback.
+ * - env: the daemon's scoped set ({@link renderEnvFlags}) — layout
+ *   resolution reads `TURBOPANEL_*` overrides.
+ * - sys: `statfs` for the free-space check.
+ * - no net, no ffi.
+ *
+ * Native hosts execute the compiled binary instead, whose baked grants are
+ * the daemon's ({@link renderDaemonPermissionFlags}) and cannot be narrowed
+ * at runtime.
+ */
+export const BACKUP_RUNNER_STATE_SUBDIR = "backup";
+export const BACKUP_RUNNER_LOCK_SUBDIRS: readonly string[] = [
+  "managed-locks",
+  "copy-locks",
+];
+export const BACKUP_RUNNER_DOCKER_BIN = "/usr/bin/docker";
+
+/** Folders the runner reads and writes. */
+export const BACKUP_RUNNER_DATA_PATHS: readonly string[] = [
+  `${PROD_STATE_DIR_DEFAULT}/${BACKUP_RUNNER_STATE_SUBDIR}`,
+  ...BACKUP_RUNNER_LOCK_SUBDIRS.map((dir) => `${PROD_RUN_DIR_DEFAULT}/${dir}`),
+  PROD_BACKUP_DIR_DEFAULT,
+];
+export const BACKUP_RUNNER_READ_PATHS: readonly string[] = [
+  ...BACKUP_RUNNER_DATA_PATHS,
+  BACKUP_RUNNER_DOCKER_BIN,
+];
+export const BACKUP_RUNNER_WRITE_PATHS: readonly string[] = [
+  ...BACKUP_RUNNER_DATA_PATHS,
+];
+export const BACKUP_RUNNER_RUN_PROGRAMS: readonly string[] = [
+  BACKUP_RUNNER_DOCKER_BIN,
+];
+export const BACKUP_RUNNER_SYS_APIS: readonly string[] = ["statfs"];
+
+/** Render the backup runner's flags in canonical order for `deno run`. */
+export function renderBackupRunnerPermissionFlags(): string[] {
+  return [
+    `--allow-read=${BACKUP_RUNNER_READ_PATHS.join(",")}`,
+    `--allow-write=${BACKUP_RUNNER_WRITE_PATHS.join(",")}`,
+    `--allow-run=${BACKUP_RUNNER_RUN_PROGRAMS.join(",")}`,
+    ...renderEnvFlags(),
+    `--allow-sys=${BACKUP_RUNNER_SYS_APIS.join(",")}`,
   ];
 }
 
@@ -380,7 +492,7 @@ export function renderInstallerPermissionFlags(): string[] {
     `--allow-read=${read.join(",")}`,
     `--allow-write=${write.join(",")}`,
     `--allow-run=${run.join(",")}`,
-    "--allow-env",
+    ...renderEnvFlags(),
     "--allow-net",
     `--deny-net=${DAEMON_DENY_NET.join(",")}`,
     `--allow-sys=${DAEMON_SYS_APIS.join(",")}`,

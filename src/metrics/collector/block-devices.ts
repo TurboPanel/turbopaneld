@@ -129,25 +129,29 @@ export function buildBlockDeviceSamples(
         bootGeneration,
       );
 
-      const utilizationPercent = ioTicksDelta === null || seconds <= 0
+      const secs = (field: string) =>
+        tracker.elapsedSeconds(key(field), seconds);
+      const ioSeconds = secs("ioTicks");
+      const utilizationPercent = ioTicksDelta === null || ioSeconds <= 0
         ? null
-        : clampPercent((ioTicksDelta / (seconds * 1000)) * 100);
-      const queueDepth = weightedIoTicksDelta === null || seconds <= 0
+        : clampPercent((ioTicksDelta / (ioSeconds * 1000)) * 100);
+      const weightedSeconds = secs("weightedIoTicks");
+      const queueDepth = weightedIoTicksDelta === null || weightedSeconds <= 0
         ? null
-        : weightedIoTicksDelta / (seconds * 1000);
+        : weightedIoTicksDelta / (weightedSeconds * 1000);
 
       return {
         deviceId: device.deviceId,
         readBytesPerSecond: toRate(
           readSectorsDelta === null ? null : readSectorsDelta * SECTOR_BYTES,
-          seconds,
+          secs("readSectors"),
         ),
         writeBytesPerSecond: toRate(
           writeSectorsDelta === null ? null : writeSectorsDelta * SECTOR_BYTES,
-          seconds,
+          secs("writeSectors"),
         ),
-        readOpsPerSecond: toRate(readOpsDelta, seconds),
-        writeOpsPerSecond: toRate(writeOpsDelta, seconds),
+        readOpsPerSecond: toRate(readOpsDelta, secs("readOps")),
+        writeOpsPerSecond: toRate(writeOpsDelta, secs("writeOps")),
         readLatencyMs: latencyMs(readTicksDelta, readOpsDelta),
         writeLatencyMs: latencyMs(writeTicksDelta, writeOpsDelta),
         utilizationPercent,
@@ -238,6 +242,8 @@ type DirectionSums = {
   ops: number;
   sectors: number;
   ticks: number;
+  /** Σ of each device's own bytes/s (sectors over that counter's elapsed). */
+  bytesPerSecond: number;
 };
 
 function addCompleteDirection(
@@ -245,6 +251,7 @@ function addCompleteDirection(
   ops: number | null,
   sectors: number | null,
   ticks: number | null,
+  sectorSeconds: number,
 ): boolean {
   if (ops === null || sectors === null || ticks === null) {
     return false;
@@ -252,6 +259,9 @@ function addCompleteDirection(
   sums.ops += ops;
   sums.sectors += sectors;
   sums.ticks += ticks;
+  if (sectorSeconds > 0) {
+    sums.bytesPerSecond += (sectors * SECTOR_BYTES) / sectorSeconds;
+  }
   return true;
 }
 
@@ -272,8 +282,18 @@ export function hostDiskAggregates(
   seconds: number,
 ): HostDiskAggregates {
   const serviceDevices = topology.filter((device) => device.isServiceDevice);
-  const read: DirectionSums = { ops: 0, sectors: 0, ticks: 0 };
-  const write: DirectionSums = { ops: 0, sectors: 0, ticks: 0 };
+  const read: DirectionSums = {
+    ops: 0,
+    sectors: 0,
+    ticks: 0,
+    bytesPerSecond: 0,
+  };
+  const write: DirectionSums = {
+    ops: 0,
+    sectors: 0,
+    ticks: 0,
+    bytesPerSecond: 0,
+  };
   let sawReadDelta = false;
   let sawWriteDelta = false;
 
@@ -291,6 +311,7 @@ export function hostDiskAggregates(
         tracker.delta(key("readOps"), counters.readsCompleted, bootGeneration),
         tracker.delta(key("readSectors"), counters.sectorsRead, bootGeneration),
         tracker.delta(key("readTicks"), counters.readTicksMs, bootGeneration),
+        tracker.elapsedSeconds(key("readSectors"), seconds),
       )
     ) {
       sawReadDelta = true;
@@ -309,6 +330,7 @@ export function hostDiskAggregates(
           bootGeneration,
         ),
         tracker.delta(key("writeTicks"), counters.writeTicksMs, bootGeneration),
+        tracker.elapsedSeconds(key("writeSectors"), seconds),
       )
     ) {
       sawWriteDelta = true;
@@ -316,12 +338,8 @@ export function hostDiskAggregates(
   }
 
   return {
-    diskReadBytesPerSecond: sawReadDelta
-      ? toRate(read.sectors * SECTOR_BYTES, seconds)
-      : null,
-    diskWriteBytesPerSecond: sawWriteDelta
-      ? toRate(write.sectors * SECTOR_BYTES, seconds)
-      : null,
+    diskReadBytesPerSecond: sawReadDelta ? read.bytesPerSecond : null,
+    diskWriteBytesPerSecond: sawWriteDelta ? write.bytesPerSecond : null,
     diskLatencyMs: sawReadDelta || sawWriteDelta
       ? latencyMs(read.ticks + write.ticks, read.ops + write.ops)
       : null,

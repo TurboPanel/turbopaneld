@@ -12,6 +12,7 @@ import {
   renderInstanceAcmeIssuerConfig,
 } from "./instance-acme-issuer.ts";
 import { writeFixtureLeafPair } from "../testing/openssl-fixture-leaf.ts";
+import { HOSTING_CADDY_USER } from "./ensure-hosting-caddy.ts";
 import {
   classifyPort80,
   closeInstanceAcmeWindow,
@@ -20,6 +21,7 @@ import {
   groupIdFromGroupFile,
   INSTANCE_ACME_HTTP01_PREFLIGHT_PREFIX,
   INSTANCE_ACME_HTTP01_SITE,
+  INSTANCE_ACME_SOCKET_ACL,
   type InstanceAcmeCommand,
   issuedCertificateFindArgs,
   issuedPairFromFindOutput,
@@ -521,12 +523,20 @@ test("preflight serves the nonce on the socket and rejects a public miss", async
       },
     );
     assertEquals(preflightHttpResponse("/", "abc").status, 404);
+    const socket = join(layout.runDir, "instance-acme.sock");
+    const order: string[] = [];
+    const run: InstanceAcmeCommand = (program, args) => {
+      order.push(`${program} ${args.join(" ")}`);
+      return Promise.resolve(ok());
+    };
     await preflightInstanceLetsEncryptHttp01(
       [{ host: `https://${HOST}/`, source: "lets-encrypt" }],
       layout,
       {
+        run,
         nonce: () => "abc",
         fetchImpl: async (input) => {
+          order.push("fetch");
           const url = new URL(String(input));
           assertStringIncludes(
             url.href,
@@ -541,12 +551,35 @@ test("preflight serves the nonce on the socket and rejects a public miss", async
         },
       },
     );
+    // tpedge is granted the socket before hosting Caddy is asked to reach it.
+    assertEquals(order, [
+      `sudo -n setfacl -P -m ${INSTANCE_ACME_SOCKET_ACL} ${socket}`,
+      "fetch",
+    ]);
+    assertEquals(INSTANCE_ACME_SOCKET_ACL, `u:${HOSTING_CADDY_USER}:rw`);
     await assertRejects(
       () =>
         preflightInstanceLetsEncryptHttp01(
           [{ host: HOST, source: "lets-encrypt" }],
           layout,
           {
+            run: () => Promise.resolve({ ...ok(), ok: false }),
+            nonce: () => "abc",
+            fetchImpl: () => {
+              throw new Error("fetched without the socket grant");
+            },
+          },
+        ),
+      Error,
+      `could not let ${HOSTING_CADDY_USER} reach`,
+    );
+    await assertRejects(
+      () =>
+        preflightInstanceLetsEncryptHttp01(
+          [{ host: HOST, source: "lets-encrypt" }],
+          layout,
+          {
+            run,
             nonce: () => "abc",
             fetchImpl: () =>
               Promise.resolve(new Response("nope", { status: 404 })),
@@ -561,6 +594,7 @@ test("preflight serves the nonce on the socket and rejects a public miss", async
         [{ host: HOST, source: "lets-encrypt" }],
         layout,
         {
+          run,
           nonce: () => "abc",
           fetchImpl: () => Promise.resolve(new Response("", { status: 404 })),
         },
@@ -722,10 +756,17 @@ test("issue copies the leaf and stops the issuer in finally", async () => {
         0o777,
       0o600,
     );
-    assertEquals(
-      calls.some((line) => line.includes("systemctl start")),
-      true,
+    const startAt = calls.findIndex((line) => line.includes("systemctl start"));
+    const grantAt = calls.findIndex((line) =>
+      line.endsWith(
+        `setfacl -P -m ${INSTANCE_ACME_SOCKET_ACL} ${
+          join(layout.runDir, "instance-acme.sock")
+        }`,
+      )
     );
+    assertEquals(startAt >= 0, true);
+    // The issuer binds its socket on start; tpedge is granted it right after.
+    assertEquals(grantAt, startAt + 1, JSON.stringify(calls));
     assertEquals(calls.some((line) => line.includes("systemctl stop")), true);
     assertEquals(calls.includes("close"), true);
     const config = await Deno.readTextFile(

@@ -1,22 +1,31 @@
 import { assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { encodeHex } from "@std/encoding/hex";
-import { join } from "@std/path";
+import { dirname, join } from "@std/path";
 import { setDockerCliIoForTest } from "../deploy/docker-cli.ts";
 import type { EnvironmentDeployContainer } from "../contracts/commands-contracts.ts";
 import {
   buildEngineContext,
+  createManagedBackupArtifact,
   handleManagedBackup,
   handleManagedRestore,
   pipeDumpOutput,
   pipeRestoreInput,
+  resolveBackupEngine,
+  restoreManagedBackupArtifact,
 } from "./backup.ts";
 import { getManagedEngineRuntime } from "./engines/index.ts";
 import { ManagedBackupNotSupportedError } from "./engines/types.ts";
 import { postgresManagedEngineRuntime } from "./engines/postgres.ts";
 import {
+  managedBackupArtifactDir,
   managedBackupArtifactPath,
   managedBackupsDir,
 } from "./engine-paths.ts";
+import { resolveLayout } from "../paths/layout.ts";
+import {
+  ManagedTargetBusyError,
+  managedTargetLockPath,
+} from "./target-lock.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -36,14 +45,19 @@ const FAKE_CONTAINER: EnvironmentDeployContainer = {
 
 const noopEnsureDocker = () => Promise.resolve();
 
+function restoreEnv(name: string, prior: string | undefined): void {
+  if (prior === undefined) Deno.env.delete(name);
+  else Deno.env.set(name, prior);
+}
+
 /**
- * Points both the state root and the *backup* root at one temp dir.
+ * Points the state, *backup* and run roots at one temp dir.
  *
  * v6 moved backup artifacts out from under `<stateDir>/managed/<id>/backups`
  * to `<backupDir>/<id>` (`TURBOPANEL_BACKUP_DIR`, `/backup` by default), so
  * overriding `TURBOPANEL_STATE_DIR` alone would leave these tests writing to
- * the real `/backup`. The `tmp` handed to each test is the value both
- * overrides carry, which is why a `{ backupDir: tmp }` layout stub and a
+ * the real `/backup`. The `tmp` handed to each test is the value every
+ * override carries, which is why a `{ backupDir: tmp }` layout stub and a
  * `{ stateDir: tmp }` one resolve to the same tree.
  */
 async function withTempStateDir<T>(
@@ -51,16 +65,18 @@ async function withTempStateDir<T>(
 ): Promise<T> {
   const priorState = Deno.env.get("TURBOPANEL_STATE_DIR");
   const priorBackup = Deno.env.get("TURBOPANEL_BACKUP_DIR");
+  const priorRun = Deno.env.get("TURBOPANEL_RUN_DIR");
   const tmp = await Deno.makeTempDir({ prefix: "tp-managed-backup-" });
   Deno.env.set("TURBOPANEL_STATE_DIR", tmp);
   Deno.env.set("TURBOPANEL_BACKUP_DIR", tmp);
+  // The per-engine lock lives under runDir; keep it off the real /run.
+  Deno.env.set("TURBOPANEL_RUN_DIR", tmp);
   try {
     return await fn(tmp);
   } finally {
-    if (priorState === undefined) Deno.env.delete("TURBOPANEL_STATE_DIR");
-    else Deno.env.set("TURBOPANEL_STATE_DIR", priorState);
-    if (priorBackup === undefined) Deno.env.delete("TURBOPANEL_BACKUP_DIR");
-    else Deno.env.set("TURBOPANEL_BACKUP_DIR", priorBackup);
+    restoreEnv("TURBOPANEL_STATE_DIR", priorState);
+    restoreEnv("TURBOPANEL_BACKUP_DIR", priorBackup);
+    restoreEnv("TURBOPANEL_RUN_DIR", priorRun);
     await Deno.remove(tmp, { recursive: true });
   }
 }
@@ -1440,4 +1456,395 @@ test("buildEngineContext exec stub rejects when invoked", () => {
     Error,
     "does not support exec()",
   );
+});
+
+async function createPostgresBackup(
+  managedId: string,
+  backupId: string,
+  retentionKeep?: number,
+) {
+  const bytes = new TextEncoder().encode(`dump-${backupId}`);
+  return await handleManagedBackup(
+    {
+      managedId,
+      engine: "postgres",
+      action: "create",
+      backupId,
+      artifactExtension: "dump",
+      scope: "database",
+      retentionKeep,
+    },
+    new Date().toISOString(),
+    {
+      ensureDocker: noopEnsureDocker,
+      resolveContainer: () => Promise.resolve(FAKE_CONTAINER),
+      runDump: async (_argv, destination) => {
+        await writeAllToStream(destination, bytes);
+        return { success: true, stderr: "" };
+      },
+    },
+  );
+}
+
+async function writeAgedArtifact(
+  dir: string,
+  name: string,
+  ageMs: number,
+): Promise<void> {
+  await Deno.mkdir(dir, { recursive: true, mode: 0o750 });
+  const path = join(dir, name);
+  await Deno.writeFile(path, new TextEncoder().encode("old"), { mode: 0o600 });
+  const mtime = new Date(Date.now() - ageMs);
+  await Deno.utime(path, mtime, mtime);
+}
+
+async function listFileNames(dir: string): Promise<Set<string>> {
+  const names = new Set<string>();
+  for await (const entry of Deno.readDir(dir)) {
+    if (entry.isFile) names.add(entry.name);
+  }
+  return names;
+}
+
+test("handleManagedBackup without retentionKeep prunes nothing and reports no pruned list", async () => {
+  await withTempStateDir(async (tmp) => {
+    const managedId = `bk-${crypto.randomUUID()}`;
+    const dir = managedBackupsDir(
+      { backupDir: tmp } as Parameters<typeof managedBackupsDir>[0],
+      managedId,
+    );
+    await writeAgedArtifact(dir, "old_1.dump", 120_000);
+    await writeAgedArtifact(dir, "old_2.dump", 60_000);
+
+    const result = await createPostgresBackup(managedId, "fresh");
+
+    assertEquals(result.pruned, undefined);
+    assertEquals(
+      await listFileNames(dir),
+      new Set(["old_1.dump", "old_2.dump", "fresh.dump"]),
+    );
+  });
+});
+
+test("handleManagedBackup manual prune never touches artifacts inside policy-* subdirectories", async () => {
+  await withTempStateDir(async (tmp) => {
+    const managedId = `bk-${crypto.randomUUID()}`;
+    const dir = managedBackupsDir(
+      { backupDir: tmp } as Parameters<typeof managedBackupsDir>[0],
+      managedId,
+    );
+    const policyDir = join(dir, `policy-${crypto.randomUUID()}`);
+    await writeAgedArtifact(policyDir, "sched_1.dump", 300_000);
+    await writeAgedArtifact(policyDir, "sched_2.dump", 240_000);
+    await writeAgedArtifact(dir, "manual_old.dump", 60_000);
+
+    const result = await createPostgresBackup(managedId, "manual_new", 1);
+
+    assertEquals(result.pruned, ["manual_old"]);
+    assertEquals(await listFileNames(dir), new Set(["manual_new.dump"]));
+    assertEquals(
+      await listFileNames(policyDir),
+      new Set(["sched_1.dump", "sched_2.dump"]),
+    );
+  });
+});
+
+const POSTGRES_BACKUP = () =>
+  resolveBackupEngine("postgres", "dump", "managed.backup");
+
+function fakeDumpDeps(payload: string) {
+  return {
+    ensureDocker: noopEnsureDocker,
+    resolveContainer: () => Promise.resolve(FAKE_CONTAINER),
+    runDump: async (
+      _argv: string[],
+      destination: WritableStream<Uint8Array>,
+    ) => {
+      await writeAllToStream(destination, new TextEncoder().encode(payload));
+      return { success: true, stderr: "" };
+    },
+  };
+}
+
+test("createManagedBackupArtifact with a policyId writes under policy-<id> and prunes only that policy", async () => {
+  await withTempStateDir(async () => {
+    const layout = resolveLayout(Deno.env.toObject());
+    const managedId = `bk-${crypto.randomUUID()}`;
+    const policyA = crypto.randomUUID();
+    const policyB = crypto.randomUUID();
+    const dirA = managedBackupArtifactDir(layout, managedId, policyA);
+    const dirB = managedBackupArtifactDir(layout, managedId, policyB);
+    const manualDir = managedBackupsDir(layout, managedId);
+    await writeAgedArtifact(dirA, "a_old_1.dump", 300_000);
+    await writeAgedArtifact(dirA, "a_old_2.dump", 200_000);
+    await writeAgedArtifact(dirB, "b_old.dump", 400_000);
+    await writeAgedArtifact(manualDir, "manual.dump", 500_000);
+
+    const artifact = await createManagedBackupArtifact(
+      layout,
+      POSTGRES_BACKUP(),
+      {
+        managedId,
+        backupId: "a_new",
+        artifactExtension: "dump",
+        retentionKeep: 2,
+        policyId: policyA,
+      },
+      fakeDumpDeps("scheduled"),
+    );
+
+    assertEquals(artifact.path, join(dirA, "a_new.dump"));
+    assertEquals(artifact.pruned, ["a_old_1"]);
+    assertEquals(artifact.database, "postgres");
+    const stat = await Deno.stat(artifact.path);
+    assertEquals(stat.mode !== null && (stat.mode & 0o777), 0o600);
+    assertEquals(
+      artifact.checksum,
+      await sha256Hex(new TextEncoder().encode("scheduled")),
+    );
+    assertEquals(
+      await listFileNames(dirA),
+      new Set(["a_old_2.dump", "a_new.dump"]),
+    );
+    assertEquals(await listFileNames(dirB), new Set(["b_old.dump"]));
+    assertEquals(await listFileNames(manualDir), new Set(["manual.dump"]));
+  });
+});
+
+test("createManagedBackupArtifact rejects an unsafe policyId before touching Docker", async () => {
+  await withTempStateDir(async () => {
+    let dockerTouched = false;
+    await assertRejects(
+      () =>
+        createManagedBackupArtifact(
+          resolveLayout(Deno.env.toObject()),
+          POSTGRES_BACKUP(),
+          {
+            managedId: `bk-${crypto.randomUUID()}`,
+            backupId: "b1",
+            artifactExtension: "dump",
+            policyId: "../escape",
+          },
+          {
+            ensureDocker: () => {
+              dockerTouched = true;
+              return Promise.resolve();
+            },
+          },
+        ),
+      Error,
+      "policyId",
+    );
+    assertEquals(dockerTouched, false);
+  });
+});
+
+test("restoreManagedBackupArtifact locates a scheduled artifact by policyId", async () => {
+  await withTempStateDir(async () => {
+    const layout = resolveLayout(Deno.env.toObject());
+    const managedId = `bk-${crypto.randomUUID()}`;
+    const policyId = crypto.randomUUID();
+    const artifact = await createManagedBackupArtifact(
+      layout,
+      POSTGRES_BACKUP(),
+      { managedId, backupId: "sched", artifactExtension: "dump", policyId },
+      fakeDumpDeps("scheduled-bytes"),
+    );
+
+    const request = {
+      managedId,
+      backupId: "sched",
+      artifactExtension: "dump" as const,
+      checksum: artifact.checksum,
+      sizeBytes: artifact.sizeBytes,
+    };
+    let restored: Uint8Array = new Uint8Array();
+    const deps = {
+      ensureDocker: noopEnsureDocker,
+      resolveContainer: () => Promise.resolve(FAKE_CONTAINER),
+      runRestore: async (
+        _argv: string[],
+        source: ReadableStream<Uint8Array>,
+      ) => {
+        restored = await drainStream(source);
+        return { success: true, stderr: "" };
+      },
+    };
+
+    // Without the policyId the artifact is looked for in the manual directory.
+    await assertRejects(
+      () =>
+        restoreManagedBackupArtifact(layout, POSTGRES_BACKUP(), request, deps),
+      Error,
+      "artifact not found",
+    );
+
+    const database = await restoreManagedBackupArtifact(
+      layout,
+      POSTGRES_BACKUP(),
+      { ...request, policyId },
+      deps,
+    );
+    assertEquals(database, "postgres");
+    assertEquals(new TextDecoder().decode(restored), "scheduled-bytes");
+  });
+});
+
+/** Hold the engine's lock through a second descriptor, as another process would. */
+async function holdEngineLock(
+  runDir: string,
+  managedId: string,
+): Promise<Deno.FsFile> {
+  const path = managedTargetLockPath({ runDir }, managedId);
+  await Deno.mkdir(dirname(path), { recursive: true });
+  const holder = await Deno.open(path, { create: true, write: true });
+  assertEquals(await holder.tryLock(true), true);
+  return holder;
+}
+
+test("handleManagedBackup refuses while another run holds the engine lock, and never touches the engine", async () => {
+  await withTempStateDir(async (tmp) => {
+    const managedId = `bk-${crypto.randomUUID()}`;
+    const holder = await holdEngineLock(tmp, managedId);
+    let dumped = false;
+    try {
+      await assertRejects(
+        () =>
+          handleManagedBackup(
+            {
+              managedId,
+              engine: "postgres",
+              action: "create",
+              backupId: "busy_1",
+              artifactExtension: "dump",
+              scope: "database",
+            },
+            new Date().toISOString(),
+            {
+              ensureDocker: noopEnsureDocker,
+              resolveContainer: () => Promise.resolve(FAKE_CONTAINER),
+              runDump: () => {
+                dumped = true;
+                return Promise.resolve({ success: true, stderr: "" });
+              },
+            },
+          ),
+        ManagedTargetBusyError,
+      );
+    } finally {
+      holder.close();
+    }
+    assertEquals(dumped, false);
+  });
+});
+
+test("handleManagedBackup releases the engine lock, so the next backup runs", async () => {
+  await withTempStateDir(async () => {
+    const managedId = `bk-${crypto.randomUUID()}`;
+    const deps = {
+      ensureDocker: noopEnsureDocker,
+      resolveContainer: () => Promise.resolve(FAKE_CONTAINER),
+      runDump: async (
+        _argv: string[],
+        destination: WritableStream<Uint8Array>,
+      ) => {
+        await writeAllToStream(destination, new TextEncoder().encode("x"));
+        return { success: true, stderr: "" };
+      },
+    };
+    const payload = {
+      managedId,
+      engine: "postgres" as const,
+      action: "create" as const,
+      artifactExtension: "dump" as const,
+      scope: "database" as const,
+    };
+    await handleManagedBackup(
+      { ...payload, backupId: "first" },
+      new Date().toISOString(),
+      deps,
+    );
+    const second = await handleManagedBackup(
+      { ...payload, backupId: "second" },
+      new Date().toISOString(),
+      deps,
+    );
+    assertEquals(second.backupId, "second");
+  });
+});
+
+test("handleManagedRestore refuses while another run holds the engine lock", async () => {
+  await withTempStateDir(async (tmp) => {
+    const managedId = `bk-${crypto.randomUUID()}`;
+    const holder = await holdEngineLock(tmp, managedId);
+    let restored = false;
+    try {
+      await assertRejects(
+        () =>
+          handleManagedRestore(
+            {
+              managedId,
+              engine: "postgres",
+              backupId: "anything",
+              artifactExtension: "dump",
+              checksum: "0".repeat(64),
+            },
+            new Date().toISOString(),
+            {
+              ensureDocker: noopEnsureDocker,
+              resolveContainer: () => Promise.resolve(FAKE_CONTAINER),
+              runRestore: () => {
+                restored = true;
+                return Promise.resolve({ success: true, stderr: "" });
+              },
+            },
+          ),
+        ManagedTargetBusyError,
+      );
+    } finally {
+      holder.close();
+    }
+    assertEquals(restored, false);
+  });
+});
+
+test("handleManagedRestore finds a scheduled artifact through the payload policyId", async () => {
+  await withTempStateDir(async (tmp) => {
+    const managedId = `bk-${crypto.randomUUID()}`;
+    const policyId = crypto.randomUUID();
+    const layout = { backupDir: tmp } as Parameters<
+      typeof managedBackupArtifactPath
+    >[0];
+    await Deno.mkdir(managedBackupArtifactDir(layout, managedId, policyId), {
+      recursive: true,
+    });
+    const bytes = new TextEncoder().encode("policy-dump");
+    await Deno.writeFile(
+      managedBackupArtifactPath(layout, managedId, "sched_1", "dump", policyId),
+      bytes,
+      { mode: 0o600 },
+    );
+    let streamed: Uint8Array | undefined;
+    const result = await handleManagedRestore(
+      {
+        managedId,
+        engine: "postgres",
+        backupId: "sched_1",
+        artifactExtension: "dump",
+        checksum: await sha256Hex(bytes),
+        policyId,
+      },
+      new Date().toISOString(),
+      {
+        ensureDocker: noopEnsureDocker,
+        resolveContainer: () => Promise.resolve(FAKE_CONTAINER),
+        runRestore: async (_argv, source) => {
+          streamed = await drainStream(source);
+          return { success: true, stderr: "" };
+        },
+      },
+    );
+    assertEquals(result.status, "restored");
+    assertEquals(streamed, bytes);
+  });
 });

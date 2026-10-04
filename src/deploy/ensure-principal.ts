@@ -4,6 +4,7 @@ import { logWarn } from "../util/logger.ts";
 import { forEachSequential } from "../util/sequential.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 import {
+  accessGroup,
   allAccessGroups,
   allManagedGroups,
   isRuntimeName,
@@ -104,6 +105,11 @@ export const ALLOWED_PRINCIPAL_SHELLS: readonly string[] = [
   "/bin/sh",
   "/bin/bash",
 ];
+
+/** The principal's own directories in its home, `0700` and tenant-owned. */
+const PRINCIPAL_TENANT_DIRS = ["home", "data", "tmp"] as const;
+/** Root-owned directories of the home skeleton the engines traverse. */
+const PRINCIPAL_STRUCTURAL_DIRS = ["sites", "volumes"] as const;
 
 const PRINCIPAL_USERNAME_RE = /^[A-Za-z_][A-Za-z0-9_-]*$/;
 
@@ -395,6 +401,29 @@ async function createPrincipalUser(
   if (!userAdd.success) {
     throw new Error(userAdd.stderr || "Failed to create principal user");
   }
+  if (principal.uid === undefined) {
+    await assertCreatedUidAboveFloor(principal.username, runFn);
+  }
+}
+
+/**
+ * Never trust the allocator alone: re-read the account `useradd` just made and
+ * refuse one that landed below the floor (login.defs fallthrough, or a wrapper
+ * that dropped the `-K` range). The daemon holds no `userdel` grant, so the
+ * account is left for the operator, with the repair spelled out.
+ */
+async function assertCreatedUidAboveFloor(
+  username: string,
+  runFn: RunFn,
+): Promise<void> {
+  const created = await runFn("getent", ["passwd", username]);
+  if (!created.success) return;
+  const entry = parsePasswdHomeShell(created.stdout);
+  if (entry && entry.uid < PRINCIPAL_ID_MIN) {
+    throw new Error(
+      `Principal user ${username} was created with uid=${entry.uid}, below PRINCIPAL_ID_MIN=${PRINCIPAL_ID_MIN} — the host ignored the requested uid range (check tp-host useradd passes -K through). Repair: usermod -u <free uid in [${PRINCIPAL_ID_MIN}, ${PRINCIPAL_ID_MAX}]> ${username}; chown -R the principal's home tree and group to match (find / -xdev -uid ${entry.uid} -exec chown -h <new uid> {} +), then retry`,
+    );
+  }
 }
 
 /** Explicit uid/gid overrides must still match the existing account. */
@@ -577,16 +606,40 @@ export async function ensurePrincipalPassword(
   }
 }
 
+/**
+ * The principal home: root-owned, so the tenant can never rename what root
+ * later writes into (a directory's owner can rename its entries even when it
+ * does not own them). The principal writes only into its own leaves.
+ *
+ *   <home>                   root:<grp> 0750
+ *   <home>/home|data|tmp     <user>:<grp> 0700  (home/ is the passwd home)
+ *   <home>/sites, volumes    root:<grp> 0750
+ *
+ * The group bit lets the engines (members of `<grp>`) reach `sites/`; other
+ * principals get nothing. Parent before child: tp-host refuses a tenant or
+ * structural directory whose parent is not root-owned and sealed.
+ */
 async function ensurePrincipalHomeTree(
   home: string,
   username: string,
   groupName: string,
   runFn: RunFn,
 ): Promise<void> {
-  const owner = `${username}:${groupName}`;
-  await ensureDir(home, "0750", owner, runFn);
-  await ensureDir(join(home, ".ssh"), "0700", owner, runFn);
-  await ensureDir(join(home, "volumes"), "0750", owner, runFn);
+  const structural = `root:${groupName}`;
+  const tenant = `${username}:${groupName}`;
+  await forEachSequential<[string, string, string]>([
+    [home, "0750", structural],
+    ...PRINCIPAL_TENANT_DIRS.map((name): [string, string, string] => [
+      join(home, name),
+      "0700",
+      tenant,
+    ]),
+    ...PRINCIPAL_STRUCTURAL_DIRS.map((name): [string, string, string] => [
+      join(home, name),
+      "0750",
+      structural,
+    ]),
+  ], ([path, mode, owner]) => ensureDir(path, mode, owner, runFn));
 }
 
 /**
@@ -611,25 +664,45 @@ function assertPrincipalIdOverrides(principal: PrincipalEnsureSpec): void {
   }
 }
 
+/**
+ * A principal holds at most one SSH access level. `sshd` applies the first
+ * `Match Group` block that fits, so an account in both `tpsftp` and `tpshell`
+ * would get whichever block happens to come first (jailed with no shell, once
+ * SFTP is chrooted). The password group is a credential, not a level, and
+ * combines with either.
+ */
+function assertSingleAccessLevel(principal: PrincipalEnsureSpec): void {
+  const requested = new Set(principal.accessGroups ?? []);
+  const sftp = accessGroup("sftp");
+  const shell = accessGroup("shell");
+  if (sftp && shell && requested.has(sftp) && requested.has(shell)) {
+    throw new TypeError(
+      `${principal.username}: SSH access groups ${sftp} and ${shell} are exclusive`,
+    );
+  }
+}
+
 export async function ensureSystemPrincipals(
   layout: LayoutPaths,
   principals: PrincipalEnsureSpec[],
   runFn: RunFn = runDefault,
-): Promise<void> {
+): Promise<string[]> {
   for (const principal of principals) {
     assertPrincipalIdOverrides(principal);
+    assertSingleAccessLevel(principal);
   }
-  await forEachSequential(
-    principals,
-    (principal) => ensureOnePrincipal(layout, principal, runFn),
-  );
+  const warnings: string[] = [];
+  await forEachSequential(principals, async (principal) => {
+    warnings.push(...await ensureOnePrincipal(layout, principal, runFn));
+  });
+  return warnings;
 }
 
 async function ensureOnePrincipal(
   layout: LayoutPaths,
   principal: PrincipalEnsureSpec,
   runFn: RunFn,
-): Promise<void> {
+): Promise<string[]> {
   assertSafePrincipalUsername(principal.username);
   const groupName = principalUnixGroupName(principal.username);
   const home = assertSafeAbsolutePath(
@@ -652,12 +725,19 @@ async function ensureOnePrincipal(
   await ensureDir(layout.principalHomeRoot, "0750", "root:root", runFn);
   await ensurePrincipalHomeRootTraverse(layout.principalHomeRoot, runFn);
   await ensurePrincipalGroup(principal, groupName, runFn);
-  await ensurePrincipalUser(principal, home, shell, groupName, runFn);
+  // The passwd home is the tenant's `home/`, never the root-owned home itself.
+  await ensurePrincipalUser(
+    principal,
+    join(home, "home"),
+    shell,
+    groupName,
+    runFn,
+  );
   await ensurePrincipalHomeTree(home, principal.username, groupName, runFn);
   // Runs here, before any unit is installed or pool staged: systemd resolves
   // supplementary groups at `execve`, so a unit started before its principal
   // joined the runtime group dies `203/EXEC`.
-  await ensurePrincipalManagedGroups(
+  const warnings = await ensurePrincipalManagedGroups(
     principal.username,
     resolveManagedGroups(principal),
     runFn,
@@ -667,6 +747,7 @@ async function ensureOnePrincipal(
     principal.passwordHash,
     runFn,
   );
+  return warnings;
 }
 
 /**
@@ -683,7 +764,9 @@ async function ensureOnePrincipal(
  * of them, so a third name is a control-plane bug, and inventing the group
  * would hand out an `sshd` Match block nobody wrote.
  */
-function resolveManagedGroups(principal: PrincipalEnsureSpec): Set<string> {
+export function resolveManagedGroups(
+  principal: PrincipalEnsureSpec,
+): Set<string> {
   const groups = new Set<string>();
   for (const entry of principal.runtimes ?? []) {
     if (!isRuntimeName(entry.runtime)) continue;
@@ -694,7 +777,31 @@ function resolveManagedGroups(principal: PrincipalEnsureSpec): Set<string> {
   for (const group of principal.accessGroups ?? []) {
     if (known.has(group)) groups.add(group);
   }
+  // The password group is additive: its sshd block sets only
+  // `PasswordAuthentication yes` and comes first, so on its own it would
+  // sign in an account with no level and a full shell. Without a level the
+  // group is never granted, and the reconcile revokes one already held.
+  const password = accessGroup("password");
+  const levels = [accessGroup("sftp"), accessGroup("shell")];
+  if (password && !levels.some((level) => level && groups.has(level))) {
+    groups.delete(password);
+  }
+  // Every principal, whatever the wire says about its level. This group is
+  // what the drop-in's backstop `Match` selects on; an account outside it with
+  // no level group falls through to the host's global sshd defaults — its own
+  // `~/.ssh/authorized_keys`, and TCP forwarding into the host.
+  const everyPrincipal = accessGroup("principal");
+  if (everyPrincipal) groups.add(everyPrincipal);
   return groups;
+}
+
+/**
+ * Whether a failure to join `group` must fail the reconcile rather than be
+ * logged. Only the every-principal group: missing it silently re-opens the
+ * in-home-key and port-forwarding path the backstop block exists to close.
+ */
+function isRequiredManagedGroup(group: string): boolean {
+  return group === accessGroup("principal");
 }
 
 /**
@@ -780,15 +887,22 @@ async function removeSupplementaryGroupMembership(
  *
  * Adds are best-effort and logged (a host provisioned some other way may
  * legitimately not have the group yet, and the unit's own health probe is what
- * catches a genuinely unreachable runtime). A failed **revoke** is loud: an
+ * catches a genuinely unreachable runtime) — except the every-principal group
+ * (`accessGroup("principal")`), whose add is loud like a revoke: without it the
+ * sshd backstop block does not apply. A failed **revoke** is loud: an
  * entitlement or a login that silently outlives its grant is a security
  * problem, not an inconvenience.
+ *
+ * Returns one warning per add that failed, so a caller that has somewhere to
+ * report (the principals reconcile command result) can say so rather than
+ * leave the grant looking applied.
  */
 export async function ensurePrincipalManagedGroups(
   username: string,
   desiredGroups: ReadonlySet<string>,
   runFn: RunFn = runDefault,
-): Promise<void> {
+): Promise<string[]> {
+  const warnings: string[] = [];
   const registryGroups = allManagedGroups();
   for (const group of desiredGroups) {
     if (!registryGroups.has(group)) {
@@ -799,25 +913,28 @@ export async function ensurePrincipalManagedGroups(
   const sorted = (values: Iterable<string>) =>
     [...values].sort((a, b) => a.localeCompare(b));
 
-  await forEachSequential(sorted(desiredGroups), async (group) => {
-    if (current.has(group)) return;
-    try {
-      await ensureSupplementaryGroupMembership(username, group, runFn);
-    } catch (err) {
-      logWarn(
-        "deploy",
-        `could not add ${username} to ${group}: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      );
-    }
-  });
-
+  // Revoke before granting, so a switch between access levels never leaves
+  // the account in both groups at once.
   await forEachSequential(sorted(current), async (group) => {
     // Never touch a group outside the registry, even if it looks like ours.
     if (!registryGroups.has(group) || desiredGroups.has(group)) return;
     await removeSupplementaryGroupMembership(username, group, runFn);
   });
+
+  await forEachSequential(sorted(desiredGroups), async (group) => {
+    if (current.has(group)) return;
+    try {
+      await ensureSupplementaryGroupMembership(username, group, runFn);
+    } catch (err) {
+      if (isRequiredManagedGroup(group)) throw err;
+      const warning = `could not add ${username} to ${group}: ${
+        err instanceof Error ? err.message : String(err)
+      } (is that runtime installed on this host?)`;
+      logWarn("deploy", warning);
+      warnings.push(warning);
+    }
+  });
+  return warnings;
 }
 
 /**
@@ -837,22 +954,17 @@ export function ensureEngineGroupMembership(
   return ensureSupplementaryGroupMembership(user, groupName, runFn);
 }
 
+/**
+ * A principal-owned leaf (a site's `shared/`, a storage directory), always
+ * through tp-host's `install -d`. Never a `mkdir` as the daemon followed by a
+ * `chown`: the daemon cannot write inside the root-owned home anyway, and a
+ * chown by name could be raced onto whatever the tenant swapped in between.
+ */
 export async function ensureDirectoryOwnedByPrincipal(
   path: string,
   username: string,
   groupName: string,
   runFn: RunFn = runDefault,
 ): Promise<void> {
-  const owner = `${username}:${groupName}`;
-  // Fast path when the parent is already daemon-writable.
-  try {
-    await Deno.mkdir(path, { recursive: true, mode: 0o750 });
-  } catch {
-    await ensureDir(path, "0750", owner, runFn);
-    return;
-  }
-  const chown = await runFn("sudo", hostSudoArgs(["-n", "chown", owner, path]));
-  if (!chown.success) {
-    throw new Error(chown.stderr || `Failed to chown ${path}`);
-  }
+  await ensureDir(path, "0750", `${username}:${groupName}`, runFn);
 }

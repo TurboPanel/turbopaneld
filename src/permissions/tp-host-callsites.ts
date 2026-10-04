@@ -23,10 +23,25 @@
  * paths under `/etc/turbopanel`, `/var/lib/turbopanel`, `/srv/users`, … .
  */
 
+import {
+  backupServiceContent,
+  backupServicePath,
+  backupTimerContent,
+  backupTimerPath,
+} from "../backups/units.ts";
 import { cronTimerContent, cronTimerPath } from "../deploy/cron/unit.ts";
 import { caddyUnit } from "../deploy/ingress.ts";
 import { nativeAppUnitContent } from "../deploy/native/unit.ts";
-import { resolveLayout } from "../paths/layout.ts";
+import {
+  sitePhpFpmConf,
+  sitePhpIni,
+  sitePhpLockedValues,
+  type SitePhpRuntimeSpec,
+  sitePhpServiceUnit,
+  sitePhpSocketUnit,
+  sitePhpUnitLimits,
+} from "../deploy/site/php-runtime.ts";
+import { PROD_RUNTIME_DIR_DEFAULT, resolveLayout } from "../paths/layout.ts";
 
 /** A path tp-host's test harness must create before the sample runs. */
 export type CallSiteSetup = {
@@ -38,6 +53,8 @@ export type CallSiteSetup = {
   links?: Array<[string, string]>;
   /** `/etc/group` lines to add. */
   groups?: string[];
+  /** Unix sockets to bind (left in place, unlistened). */
+  sockets?: string[];
 };
 
 export type TpHostSample = {
@@ -68,8 +85,22 @@ const STATE = `${P}/var/lib/turbopanel`;
 const HOME = `${P}/srv/users/alice`;
 const SITE = `${HOME}/sites/svc1`;
 const RELEASE = `${SITE}/releases/20260927-120000`;
+const STAGING = `${P}/srv/users/.tp-staging/alice.svc1.20260927-120000`;
 const STAGED = `${P}/tmp/staged`;
 const SSH_KEYS = `${P}/etc/ssh/turbopanel/authorized_keys`;
+/** A sandboxed build: `work/<id>` holding the clone, the runner installed. */
+const BUILD_ID = "0123456789abcdef0123456789abcdef";
+const PROJECT_ID = "01a0e39d-0418-7852-bc47-bc2f8422d404";
+const BUILD_TREE: CallSiteSetup = {
+  dirs: [
+    `${P}/var/lib/turbopanel-build/work/${BUILD_ID}/source`,
+    `${P}/var/lib/turbopanel-build/cache`,
+  ],
+  files: {
+    [`${P}/opt/turbopanel/lib/tp-build-runner`]: "#!/bin/sh\n",
+    [`${P}/etc/resolv.conf`]: "nameserver 9.9.9.9\n",
+  },
+};
 const DROP_IN = `${P}/etc/ssh/sshd_config.d/60-turbopanel.conf`;
 const ACME_CERTS = `${STATE}/instance-acme/caddy/certificates`;
 const ACME_CERT =
@@ -122,15 +153,79 @@ const CRON = {
   composeServiceName: "web",
   username: "alice",
   workingDirectory: "/srv/users/alice/sites/svc1/current",
+  siteWritableDirs: ["/srv/users/alice/sites/svc1/shared"],
   job: { name: "backup", schedule: "*-*-* 03:00:00", command: ["/bin/true"] },
 };
 const CRON_TIMER = cronTimerPath(
   { ...CRON, jobName: CRON.job.name },
   UNITS,
 );
+/** A scheduled-backup policy's units (turbopanel-backup-<policyId>.*). */
+const BACKUP_POLICY = "0192a3b4-c5d6-7e8f-9a0b-1c2d3e4f5a6b";
+const BACKUP_SERVICE = backupServicePath(BACKUP_POLICY, UNITS);
+const BACKUP_TIMER = backupTimerPath(BACKUP_POLICY, UNITS);
+const BACKUP_TIMER_UNIT = `turbopanel-backup-${BACKUP_POLICY}.timer`;
 const unitSetup = (text: string): CallSiteSetup => ({
   files: { [STAGED]: underPrefix(text) },
 });
+
+// One per-site PHP runtime of alice's, as `php-runtime.ts` renders it.
+const PHP_APPLY = "src/deploy/site/php-runtime-apply.ts|";
+const PHP_ID = "shop-0a1b2c3d4e5f-fcgi84";
+const PHP_FPM_ID = "shop-0a1b2c3d4e5f-fpm84";
+const PHP_UNIT = `turbopanel-php-${PHP_ID}`;
+const PHP_FPM_UNIT = `turbopanel-php-${PHP_FPM_ID}`;
+const PHP_CONF_DIR = `${CONF}/php/sites/${PHP_ID}`;
+const PHP_FPM_CONF_DIR = `${CONF}/php/sites/${PHP_FPM_ID}`;
+const PHP_INI = `${PHP_CONF_DIR}/php.ini`;
+const PHP_SPEC: SitePhpRuntimeSpec = {
+  id: PHP_ID,
+  mode: "fastcgi",
+  series: "8.4",
+  user: "alice",
+  group: "alice-grp",
+  home: "/srv/users/alice",
+  configDir: "/etc/turbopanel",
+  libDir: "/opt/turbopanel/lib",
+  runtimesDir: PROD_RUNTIME_DIR_DEFAULT,
+  webAccount: "tpnginx",
+};
+const PHP_FPM_SPEC: SitePhpRuntimeSpec = {
+  ...PHP_SPEC,
+  id: PHP_FPM_ID,
+  mode: "fpm",
+};
+const PHP_WRITABLE = {
+  writablePaths: ["-/srv/users/alice/sites/svc1/shared"],
+  limits: sitePhpUnitLimits([], 4),
+};
+const PHP_INI_TEXT = underPrefix(sitePhpIni([], PHP_SPEC.home));
+const PHP_SERVICE_TEXT = underPrefix(
+  sitePhpServiceUnit(PHP_SPEC, PHP_WRITABLE),
+);
+const PHP_FPM_SERVICE_TEXT = underPrefix(
+  sitePhpServiceUnit(PHP_FPM_SPEC, PHP_WRITABLE),
+);
+const PHP_SOCKET_TEXT = sitePhpSocketUnit(PHP_SPEC);
+const PHP_FPM_CONF_TEXT = sitePhpFpmConf(PHP_FPM_SPEC, {
+  pool: [],
+  admin: sitePhpLockedValues([]),
+});
+/** What `php-test` needs on disk: the installed unit and its php.ini. */
+const PHP_TEST_SETUP: CallSiteSetup = {
+  files: {
+    [`${UNITS}/${PHP_UNIT}.service`]: PHP_SERVICE_TEXT,
+    [PHP_INI]: PHP_INI_TEXT,
+  },
+};
+
+/** `install -m 0644 -o root -g root STAGED <unit>` with the unit's text staged. */
+function phpUnitSample(path: string, text: string): TpHostSample {
+  return {
+    argv: ["install", "-m", "0644", "-o", "root", "-g", "root", STAGED, path],
+    setup: { files: { [STAGED]: text } },
+  };
+}
 
 /** tp-host's `-n <verb> …` samples for one call-site key. */
 function tpHost(key: string, ...samples: TpHostSample[]): CallSite {
@@ -152,6 +247,20 @@ const file = (path: string, contents = "x\n"): CallSiteSetup => ({
 });
 const dir = (...paths: string[]): CallSiteSetup => ({ dirs: paths });
 
+/** `install -d -m MODE -o USER -g GROUP PATH`, under an existing `parent`. */
+function installDir(
+  mode: string,
+  owner: string,
+  path: string,
+  parent?: string,
+): TpHostSample {
+  const [user, group] = owner.split(":");
+  return {
+    argv: ["install", "-d", "-m", mode, "-o", user, "-g", group, path],
+    ...(parent === undefined ? {} : { setup: dir(parent) }),
+  };
+}
+
 const SITES: CallSite[] = [
   // --- commands -------------------------------------------------------------
   tpHost(
@@ -160,6 +269,12 @@ const SITES: CallSite[] = [
     { argv: ["ip", "-o", "-4", "addr", "show", "dev", "tp0"] },
     { argv: ["wg", "show", "tp0", "dump"] },
   ),
+  tpHost('src/metrics/collector/tls-expiry.ts|["-n","cert-dates"]', {
+    argv: ["cert-dates"],
+  }),
+  tpHost('src/metrics/collector/site-usage.ts|["-n","site-usage"]', {
+    argv: ["site-usage"],
+  }),
   tpHost('src/commands/reboot.ts|["-n","systemctl","reboot"]', {
     argv: ["systemctl", "reboot"],
   }),
@@ -167,10 +282,198 @@ const SITES: CallSite[] = [
     argv: ["rm", "-rf", "--", SITE],
     setup: dir(SITE),
   }),
-
-  // --- cron -----------------------------------------------------------------
   tpHost(
-    'src/deploy/cron/apply.ts|["-n","systemctl",...args]',
+    'src/commands/stop-environment.ts|["-n","rm","-rf","--",deploymentDir]',
+    {
+      argv: ["rm", "-rf", "--", `${STATE}/deployments/proj1/env1`],
+      setup: dir(`${STATE}/deployments/proj1/env1/data`),
+    },
+  ),
+
+  // --- per-site PHP runtimes (site/php-runtime-apply.ts) -------------------
+  tpHost(
+    `${PHP_APPLY}["-n",...args]`,
+    { argv: ["php-test", PHP_ID], setup: PHP_TEST_SETUP },
+    { argv: ["systemctl", "start", `${PHP_UNIT}.socket`] },
+  ),
+  tpHost(`${PHP_APPLY}sudo(io,args)`, {
+    argv: ["systemctl", "restart", `${PHP_UNIT}.service`],
+  }),
+  tpHost(
+    `${PHP_APPLY}sudo(io,["cp","-p","--",path,\`\${path}\${CONFIG_PREVIOUS_SUFFIX}\`])`,
+    {
+      argv: ["cp", "-p", "--", PHP_INI, `${PHP_INI}.tpprev`],
+      setup: { files: { [PHP_INI]: PHP_INI_TEXT } },
+    },
+  ),
+  tpHost(`${PHP_APPLY}sudo(io,["ls","-A","--",dir])`, {
+    argv: ["ls", "-A", "--", `${CONF}/apache/sites`],
+    setup: dir(`${CONF}/apache/sites`),
+  }),
+  tpHost(`${PHP_APPLY}sudo(io,["cat","--",join(dir,name)])`, {
+    argv: ["cat", "--", `${CONF}/nginx/sites/tp-env1-www.conf`],
+    setup: file(`${CONF}/nginx/sites/tp-env1-www.conf`),
+  }),
+  tpHost(`${PHP_APPLY}sudo(io,["ls","-1","--",io.unitDir])`, {
+    argv: ["ls", "-1", "--", UNITS],
+  }),
+  tpHost(
+    `${PHP_APPLY}sudoOrThrow(io,["php-loopback-sync"],"PHPloopbackrules")`,
+    {
+      argv: ["php-loopback-sync"],
+    },
+  ),
+  tpHost(
+    `${PHP_APPLY}sudoQuietly(io,["php-loopback-sync"],"PHPloopbackrules")`,
+    {
+      argv: ["php-loopback-sync"],
+    },
+  ),
+  tpHost(`${PHP_APPLY}sudo(io,["php-test",files.spec.id])`, {
+    argv: ["php-test", PHP_ID],
+    setup: PHP_TEST_SETUP,
+  }),
+  tpHost(
+    `${PHP_APPLY}sudo(io,["systemctl","is-active","--quiet",service])`,
+    { argv: ["systemctl", "is-active", "--quiet", `${PHP_UNIT}.service`] },
+  ),
+  tpHost(`${PHP_APPLY}sudo(io,["systemctl","is-active","--quiet",unit])`, {
+    argv: ["systemctl", "is-active", "--quiet", `${PHP_UNIT}.socket`],
+  }),
+  tpHost(`${PHP_APPLY}sudo(io,["systemctl","start",unit])`, {
+    argv: ["systemctl", "start", `${PHP_UNIT}.socket`],
+  }),
+  tpHost(
+    `${PHP_APPLY}sudoOrThrow(io,["install","-d","-m","0750","-o","root","-g",spec.group,sitePhpConfigDir(spec.configDir,spec.id)],\`PHPruntime\${spec.id}:configdirectory\`)`,
+    installDir("0750", "root:alice-grp", PHP_CONF_DIR),
+  ),
+  tpHost(
+    `${PHP_APPLY}sudoOrThrow(io,["install","-m","0640","-o","root","-g",spec.group,tmp,path],\`PHPruntime\${spec.id}:tp-hostrefused\${name}\`)`,
+    {
+      argv: [
+        "install",
+        "-m",
+        "0640",
+        "-o",
+        "root",
+        "-g",
+        "alice-grp",
+        STAGED,
+        PHP_INI,
+      ],
+      setup: { dirs: [PHP_CONF_DIR], files: { [STAGED]: PHP_INI_TEXT } },
+    },
+    {
+      argv: [
+        "install",
+        "-m",
+        "0640",
+        "-o",
+        "root",
+        "-g",
+        "alice-grp",
+        STAGED,
+        `${PHP_FPM_CONF_DIR}/php-fpm.conf`,
+      ],
+      setup: {
+        dirs: [PHP_FPM_CONF_DIR],
+        files: { [STAGED]: PHP_FPM_CONF_TEXT },
+      },
+    },
+  ),
+  tpHost(
+    `${PHP_APPLY}sudoOrThrow(io,["install","-m","0644","-o","root","-g","root",tmp,path],\`tp-hostrefused\${name}\`)`,
+    phpUnitSample(`${UNITS}/${PHP_UNIT}.socket`, PHP_SOCKET_TEXT),
+    phpUnitSample(`${UNITS}/${PHP_UNIT}.service`, PHP_SERVICE_TEXT),
+    phpUnitSample(`${UNITS}/${PHP_FPM_UNIT}.service`, PHP_FPM_SERVICE_TEXT),
+  ),
+  tpHost(
+    `${PHP_APPLY}sudoOrThrow(io,["systemctl","daemon-reload"],"daemon-reload")`,
+    { argv: ["systemctl", "daemon-reload"] },
+  ),
+  tpHost(
+    `${PHP_APPLY}sudoOrThrow(io,["systemctl","enable","--now",socket],\`PHPruntime\${spec.id}:socket\`)`,
+    { argv: ["systemctl", "enable", "--now", `${PHP_UNIT}.socket`] },
+  ),
+  tpHost(
+    `${PHP_APPLY}sudoOrThrow(io,["systemctl","restart",socket],\`PHPruntime\${spec.id}:socketrestart\`)`,
+    { argv: ["systemctl", "restart", `${PHP_UNIT}.socket`] },
+  ),
+  tpHost(
+    `${PHP_APPLY}sudoQuietly(io,["systemctl","restart",socket],\`couldnotrestart\${socket}onitspreviousconfig\`)`,
+    { argv: ["systemctl", "restart", `${PHP_UNIT}.socket`] },
+  ),
+  tpHost(
+    `${PHP_APPLY}sudoOrThrow(io,["systemctl","enable",service],\`PHPruntime\${spec.id}:enable\`)`,
+    { argv: ["systemctl", "enable", `${PHP_FPM_UNIT}.service`] },
+  ),
+  tpHost(
+    `${PHP_APPLY}sudoOrThrow(io,["systemctl","restart",service],\`PHPruntime\${spec.id}:start\`)`,
+    { argv: ["systemctl", "restart", `${PHP_UNIT}.service`] },
+  ),
+  tpHost(
+    `${PHP_APPLY}sudoOrThrow(io,["systemctl",action,service],\`PHPruntime\${spec.id}:\${action}\`)`,
+    { argv: ["systemctl", "restart", `${PHP_FPM_UNIT}.service`] },
+    { argv: ["systemctl", "reload", `${PHP_FPM_UNIT}.service`] },
+  ),
+  tpHost(
+    `${PHP_APPLY}sudoQuietly(io,["install","-m","0644","-o","root","-g","root",tmp,unit.path],\`couldnotrestore\${unit.path}\`)`,
+    phpUnitSample(`${UNITS}/${PHP_UNIT}.service`, PHP_SERVICE_TEXT),
+  ),
+  tpHost(
+    `${PHP_APPLY}sudoQuietly(io,["rm","-f","--",\`\${config.path}\${CONFIG_PREVIOUS_SUFFIX}\`],\`couldnotdrop\${config.path}\${CONFIG_PREVIOUS_SUFFIX}\`)`,
+    { argv: ["rm", "-f", "--", `${PHP_INI}.tpprev`], setup: dir(PHP_CONF_DIR) },
+  ),
+  tpHost(
+    `${PHP_APPLY}sudoQuietly(io,["rm","-f","--",join(io.unitDir,name)],\`couldnotremove\${name}\`)`,
+    { argv: ["rm", "-f", "--", `${UNITS}/${PHP_UNIT}.socket`] },
+    { argv: ["rm", "-f", "--", `${UNITS}/${PHP_UNIT}.service`] },
+  ),
+  tpHost(
+    `${PHP_APPLY}sudoQuietly(io,["rm","-rf","--",sitePhpConfigDir(configDir,id)],\`couldnotremovethePHPconfigof\${id}\`)`,
+    { argv: ["rm", "-rf", "--", PHP_CONF_DIR], setup: dir(PHP_CONF_DIR) },
+  ),
+  tpHost(
+    `${PHP_APPLY}sudoQuietly(io,["systemctl","daemon-reload"],"daemon-reload")`,
+    { argv: ["systemctl", "daemon-reload"] },
+  ),
+  tpHost(
+    `${PHP_APPLY}sudoQuietly(io,["systemctl","disable",...names],\`disable\${id}\`)`,
+    {
+      argv: [
+        "systemctl",
+        "disable",
+        `${PHP_UNIT}.socket`,
+        `${PHP_UNIT}.service`,
+      ],
+    },
+  ),
+  tpHost(
+    `${PHP_APPLY}sudoQuietly(io,["systemctl","reset-failed",unit],\`reset\${unit}\`)`,
+    { argv: ["systemctl", "reset-failed", `${PHP_FPM_UNIT}.service`] },
+  ),
+  tpHost(
+    `${PHP_APPLY}sudoQuietly(io,["systemctl","restart",sitePhpServiceName(spec.id)],\`couldnotrestart\${sitePhpServiceName(spec.id)}onitspreviousconfig\`)`,
+    { argv: ["systemctl", "restart", `${PHP_FPM_UNIT}.service`] },
+  ),
+  tpHost(
+    `${PHP_APPLY}sudoQuietly(io,["systemctl","stop",...names],\`stop\${id}\`)`,
+    {
+      argv: ["systemctl", "stop", `${PHP_UNIT}.socket`, `${PHP_UNIT}.service`],
+    },
+  ),
+  tpHost(
+    `${PHP_APPLY}sudoQuietly(io,args,\`couldnotrestore\${config.path}\`)`,
+    {
+      argv: ["mv", "-f", "--", `${PHP_INI}.tpprev`, PHP_INI],
+      setup: { files: { [`${PHP_INI}.tpprev`]: PHP_INI_TEXT } },
+    },
+    { argv: ["rm", "-f", "--", PHP_INI], setup: dir(PHP_CONF_DIR) },
+  ),
+
+  // --- systemd unit sets (tenant cron, scheduled backups) ------------------
+  tpHost(
+    'src/deploy/systemd-unit-set.ts|["-n","systemctl",...args]',
     { argv: ["systemctl", "daemon-reload"] },
     {
       argv: [
@@ -188,8 +491,10 @@ const SITES: CallSite[] = [
         "turbopanel-cron-svc1-backup.timer",
       ],
     },
+    { argv: ["systemctl", "enable", "--now", BACKUP_TIMER_UNIT] },
+    { argv: ["systemctl", "disable", "--now", BACKUP_TIMER_UNIT] },
   ),
-  tpHost('src/deploy/cron/apply.ts|["-n","cmp","-s","--",staged,path]', {
+  tpHost('src/deploy/systemd-unit-set.ts|["-n","cmp","-s","--",staged,path]', {
     argv: [
       "cmp",
       "-s",
@@ -200,7 +505,7 @@ const SITES: CallSite[] = [
     setup: file(`${UNITS}/turbopanel-cron-svc1-backup.service`, STAGED_CONTENT),
   }),
   tpHost(
-    'src/deploy/cron/apply.ts|["-n","install","-m","0644","-o","root","-g","root",staged,path]',
+    'src/deploy/systemd-unit-set.ts|["-n","install","-m","0644","-o","root","-g","root",staged,path]',
     {
       argv: [
         "install",
@@ -215,13 +520,43 @@ const SITES: CallSite[] = [
       ],
       setup: unitSetup(cronTimerContent(CRON)),
     },
+    {
+      argv: [
+        "install",
+        "-m",
+        "0644",
+        "-o",
+        "root",
+        "-g",
+        "root",
+        STAGED,
+        BACKUP_SERVICE,
+      ],
+      setup: unitSetup(backupServiceContent(LAYOUT, BACKUP_POLICY)),
+    },
+    {
+      argv: [
+        "install",
+        "-m",
+        "0644",
+        "-o",
+        "root",
+        "-g",
+        "root",
+        STAGED,
+        BACKUP_TIMER,
+      ],
+      setup: unitSetup(backupTimerContent(BACKUP_POLICY, "*-*-* 03:00:00")),
+    },
   ),
-  tpHost('src/deploy/cron/apply.ts|["-n","ls","-1","--",unitDir]', {
+  tpHost('src/deploy/systemd-unit-set.ts|["-n","ls","-1","--",unitDir]', {
     argv: ["ls", "-1", "--", UNITS],
   }),
   tpHost(
-    'src/deploy/cron/apply.ts|["-n","rm","-f","--",join(unitDir,`${unit}${suffix}`)]',
+    'src/deploy/systemd-unit-set.ts|["-n","rm","-f","--",join(unitDir,`${unit}${suffix}`)]',
     { argv: ["rm", "-f", "--", `${UNITS}/turbopanel-cron-svc1-backup.timer`] },
+    { argv: ["rm", "-f", "--", BACKUP_TIMER] },
+    { argv: ["rm", "-f", "--", BACKUP_SERVICE] },
   ),
 
   // --- hosting Caddy --------------------------------------------------------
@@ -236,19 +571,19 @@ const SITES: CallSite[] = [
   }),
   tpHost(
     'src/deploy/ensure-principal.ts|["-n","install","-d","-m",mode,"-o",user,"-g",group,path]',
-    {
-      argv: [
-        "install",
-        "-d",
-        "-m",
-        "0750",
-        "-o",
-        "alice",
-        "-g",
-        "alice-grp",
-        `${HOME}/sites`,
-      ],
-    },
+    // The home root, then the principal home skeleton, parent before child.
+    installDir("0750", "root:root", `${P}/srv/users`),
+    installDir("0750", "root:alice-grp", HOME, `${P}/srv/users`),
+    installDir("0700", "alice:alice-grp", `${HOME}/home`, HOME),
+    installDir("0700", "alice:alice-grp", `${HOME}/data`, HOME),
+    installDir("0700", "alice:alice-grp", `${HOME}/tmp`, HOME),
+    installDir("0750", "root:alice-grp", `${HOME}/sites`, HOME),
+    installDir("0750", "root:alice-grp", `${HOME}/volumes`, HOME),
+    // Managed lane (site.ts) and release lane (release-layout.ts).
+    installDir("0750", "root:alice-grp", SITE, `${HOME}/sites`),
+    installDir("0750", "alice:tpnginx", `${SITE}/webroot`, SITE),
+    installDir("0750", "alice:alice-grp", `${SITE}/shared`, SITE),
+    installDir("0750", "root:alice-grp", `${SITE}/releases`, SITE),
   ),
   tpHost(
     "src/deploy/ensure-principal.ts|args",
@@ -273,7 +608,7 @@ const SITES: CallSite[] = [
         "-g",
         "bob-grp",
         "-d",
-        `${P}/srv/users/bob`,
+        `${P}/srv/users/bob/home`,
         "-M",
         "-s",
         "/bin/bash",
@@ -308,15 +643,15 @@ const SITES: CallSite[] = [
     },
   ),
   tpHost(
+    'src/deploy/retire-principals.ts|["-n","principal-remove",username]',
+    { argv: ["principal-remove", "alice"] },
+  ),
+  tpHost(
     'src/deploy/ensure-principal.ts|["-n","gpasswd","-d",user,groupName]',
     {
       argv: ["gpasswd", "-d", "alice", "tpsftp"],
     },
   ),
-  tpHost('src/deploy/ensure-principal.ts|["-n","chown",owner,path]', {
-    argv: ["chown", "alice:alice-grp", `${HOME}/sites`],
-    setup: dir(`${HOME}/sites`),
-  }),
 
   // --- hosting ingress ------------------------------------------------------
   tpHost(
@@ -346,6 +681,9 @@ const SITES: CallSite[] = [
       ],
     },
   ),
+  tpHost('src/deploy/ingress.ts|["-n","systemctl","restart",CADDY_SERVICE]', {
+    argv: ["systemctl", "restart", "turbopanel-hosting-caddy.service"],
+  }),
   tpHost('src/deploy/ingress.ts|["-n","systemctl","reload",CADDY_SERVICE]', {
     argv: ["systemctl", "reload", "turbopanel-hosting-caddy.service"],
   }),
@@ -390,6 +728,19 @@ const SITES: CallSite[] = [
   tpHost(
     'src/deploy/instance-acme-http01.ts|["-n","systemctl","start",INSTANCE_ACME_SERVICE]',
     { argv: ["systemctl", "start", "turbopanel-instance-acme.service"] },
+  ),
+  tpHost(
+    'src/deploy/instance-acme-http01.ts|["-n","setfacl","-P","-m",INSTANCE_ACME_SOCKET_ACL,socketPath]',
+    {
+      argv: [
+        "setfacl",
+        "-P",
+        "-m",
+        "u:tpedge:rw",
+        `${P}/run/turbopanel/instance-acme.sock`,
+      ],
+      setup: { sockets: [`${P}/run/turbopanel/instance-acme.sock`] },
+    },
   ),
   tpHost(
     'src/deploy/instance-acme-http01.ts|["-n","systemctl","stop",INSTANCE_ACME_SERVICE]',
@@ -560,42 +911,32 @@ const SITES: CallSite[] = [
   ),
 
   // --- release promotion ----------------------------------------------------
-  tpHost('src/deploy/release/promote.ts|["-n","mkdir","-p","--",to]', {
-    argv: ["mkdir", "-p", "--", RELEASE],
-  }),
-  tpHost('src/deploy/release/promote.ts|["-n","cp","-a","--",`${from}/.`,to]', {
-    argv: ["cp", "-a", "--", `${STATE}/builds/svc1/.`, RELEASE],
-    setup: {
-      files: { [`${STATE}/builds/svc1/index.html`]: "<h1>hi</h1>\n" },
-      dirs: [RELEASE],
-    },
-  }),
+  // tp-host builds every path from the ids; the staging leaf is the daemon's.
   tpHost(
-    'src/deploy/release/promote.ts|["-n","rm","-rf","--",join(to,".git")]',
+    'src/deploy/release/build-sandbox.ts|["-n","build-run",work.buildId,work.projectKey],MANAGED',
     {
-      argv: ["rm", "-rf", "--", `${RELEASE}/.git`],
-      setup: dir(`${RELEASE}/.git`),
+      argv: ["build-run", BUILD_ID, PROJECT_ID],
+      stdin: "tp-build-spec 1\ncwd source\nrun dHJ1ZQ==\nend\n",
+      setup: BUILD_TREE,
     },
   ),
-  tpHost('src/deploy/release/promote.ts|["-n","mkdir","-p","--",destDir]', {
-    argv: ["mkdir", "-p", "--", `${RELEASE}/config`],
-  }),
   tpHost(
-    'src/deploy/release/promote.ts|["-n","install","-m","0640","-o","root","-g","root","--",staged,dest]',
+    'src/deploy/release/build-sandbox.ts|["-n","build-return",work.buildId],MANAGED',
+    { argv: ["build-return", BUILD_ID], setup: BUILD_TREE },
+  ),
+  tpHost(
+    'src/deploy/release/build-sandbox.ts|["-n","systemctl","stop",`turbopanel-build-${work.buildId}.service`],MANAGED',
+    { argv: ["systemctl", "stop", `turbopanel-build-${BUILD_ID}.service`] },
+  ),
+  tpHost(
+    'src/deploy/release/promote.ts|["-n",verb,username,serviceId,releaseId]',
+    { argv: ["publish-open", "alice", "svc1", "20260927-120000"] },
     {
-      argv: [
-        "install",
-        "-m",
-        "0640",
-        "-o",
-        "root",
-        "-g",
-        "root",
-        "--",
-        STAGED,
-        `${RELEASE}/config/app.env`,
-      ],
-      setup: dir(`${RELEASE}/config`),
+      argv: ["publish", "alice", "svc1", "20260927-120000"],
+      setup: {
+        files: { [`${STAGING}/index.html`]: "<h1>hi</h1>\n" },
+        dirs: [`${SITE}/releases`, `${SITE}/shared`],
+      },
     },
   ),
   tpHost('src/deploy/release/promote.ts|["-n","test","-e",currentLink]', {
@@ -641,6 +982,10 @@ const SITES: CallSite[] = [
     argv: ["test", "-e", `${SITE}/shared`],
     setup: dir(`${SITE}/shared`),
   }),
+  tpHost('src/deploy/release/promote.ts|["-n","test","-d",target]', {
+    argv: ["test", "-d", `${RELEASE}/public`],
+    setup: dir(`${RELEASE}/public`),
+  }),
   tpHost('src/deploy/release/promote.ts|["-n","rm","-rf","--",linkPath]', {
     argv: ["rm", "-rf", "--", `${RELEASE}/storage`],
     setup: dir(`${RELEASE}/storage`),
@@ -655,7 +1000,7 @@ const SITES: CallSite[] = [
   tpHost(
     'src/deploy/release/release-layout.ts|["-n","chown","-R",owner,releaseDir]',
     {
-      argv: ["chown", "-R", "alice:alice-grp", RELEASE],
+      argv: ["chown", "-R", "root:alice-grp", RELEASE],
       setup: dir(RELEASE),
     },
   ),
@@ -717,7 +1062,7 @@ const SITES: CallSite[] = [
     },
   ),
   tpHost(
-    'src/deploy/site.ts|["-n","install","-d","-m","0750","-o","root","-g","tpols",path]',
+    'src/deploy/site.ts|["-n","install","-d","-m","0750","-o","root","-g",group,path]',
     {
       argv: [
         "install",
@@ -727,11 +1072,30 @@ const SITES: CallSite[] = [
         "-o",
         "root",
         "-g",
-        "tpols",
-        `${CONF}/openlitespeed/vhosts/svc1`,
+        "tpnginx",
+        `${CONF}/nginx/sites`,
       ],
+      setup: dir(`${CONF}/nginx`),
     },
   ),
+  tpHost(
+    'src/deploy/site.ts|["-n","systemctl","is-active","--quiet",driver.unit]',
+    { argv: ["systemctl", "is-active", "--quiet", "turbopanel-nginx"] },
+    { argv: ["systemctl", "is-active", "--quiet", "turbopanel-apache"] },
+  ),
+  tpHost(
+    'src/deploy/site.ts|["-n","systemctl","reload",driver.unit]',
+    { argv: ["systemctl", "reload", "turbopanel-nginx"] },
+    { argv: ["systemctl", "reload", "turbopanel-apache"] },
+  ),
+  tpHost('src/deploy/site.ts|["-n","ls","-A","--",dir]', {
+    argv: ["ls", "-A", "--", `${CONF}/nginx/sites`],
+    setup: dir(`${CONF}/nginx/sites`),
+  }),
+  tpHost('src/deploy/site.ts|["-n","cat","--",path]', {
+    argv: ["cat", "--", `${CONF}/openlitespeed/sites/tp-env1-www.conf`],
+    setup: file(`${CONF}/openlitespeed/sites/tp-env1-www.conf`),
+  }),
   tpHost('src/deploy/site.ts|["-n","rm","-f",path]', {
     argv: ["rm", "-f", `${CONF}/php/8.4/pool.d/svc1.conf`],
   }),
@@ -760,7 +1124,59 @@ const SITES: CallSite[] = [
       setup: dir(`${SITE}/webroot`),
     },
   ),
+  tpHost(
+    'src/deploy/release/release-links.ts|["-n",...releaseLinkTargetsFindArgs(releaseDir)]',
+    {
+      argv: [
+        "find",
+        RELEASE,
+        "-type",
+        "l",
+        "-exec",
+        "realpath",
+        "-m",
+        "-z",
+        "--",
+        "{}",
+        "+",
+      ],
+      setup: dir(RELEASE),
+    },
+    // promote.ts: the daemon's own staging leaf, walked as the daemon.
+    {
+      argv: [
+        "find",
+        STAGING,
+        "-type",
+        "l",
+        "-exec",
+        "realpath",
+        "-m",
+        "-z",
+        "--",
+        "{}",
+        "+",
+      ],
+      setup: { files: { [`${STAGING}/index.html`]: "<h1>hi</h1>\n" } },
+    },
+  ),
+  tpHost(
+    'src/deploy/release/release-links.ts|["-n",...releaseLinkTextsFindArgs(releaseDir)]',
+    {
+      argv: ["find", RELEASE, "-type", "l", "-printf", String.raw`%P\0%l\0`],
+      setup: dir(RELEASE),
+    },
+  ),
   tpHost('src/deploy/site.ts|["-n","ls","-A","--",documentRoot]', {
+    argv: ["ls", "-A", "--", `${SITE}/webroot`],
+    setup: dir(`${SITE}/webroot`),
+  }),
+  tpHost(
+    'src/deploy/release/live-release-scan.ts|["-n","ls","-A","--",dir]',
+    { argv: ["ls", "-A", "--", `${P}/srv/users`], setup: dir(HOME) },
+    { argv: ["ls", "-A", "--", `${HOME}/sites`], setup: dir(SITE) },
+  ),
+  tpHost('src/deploy/site/app-detect.ts|["-n","ls","-A","--",path]', {
     argv: ["ls", "-A", "--", `${SITE}/webroot`],
     setup: dir(`${SITE}/webroot`),
   }),
@@ -876,7 +1292,7 @@ const SITES: CallSite[] = [
     {
       runas: "tpnginx",
       argv: [
-        `${VENDOR}/nginx/1.28.0/sbin/nginx`,
+        `${VENDOR}/nginx/current/sbin/nginx`,
         "-t",
         "-c",
         "/etc/turbopanel/nginx/nginx.conf",
@@ -884,8 +1300,9 @@ const SITES: CallSite[] = [
     },
   ),
   sudo(
-    'src/deploy/site/engine-driver.ts|["-n",apacheBinaryPath(layout),"-t","-f",apacheMainConfigPath(layout)]',
+    'src/deploy/site/engine-driver.ts|["-n","-u","tpapache","--",apacheBinaryPath(layout),"-t","-f",apacheMainConfigPath(layout)]',
     {
+      runas: "tpapache",
       argv: [
         `${VENDOR}/apache/current/bin/httpd`,
         "-t",
@@ -899,7 +1316,7 @@ const SITES: CallSite[] = [
     {
       runas: "tpols",
       argv: [
-        `${VENDOR}/openlitespeed/1.8.3/bin/openlitespeed`,
+        `${VENDOR}/openlitespeed/current/bin/openlitespeed`,
         "-t",
         "-c",
         "/etc/turbopanel/openlitespeed/httpd_config.conf",
@@ -907,18 +1324,16 @@ const SITES: CallSite[] = [
     },
   ),
   sudo(
-    'src/deploy/site/engine-driver.ts|["-n","-u","tpcaddysite","--","env",`XDG_DATA_HOME=${siteCaddyDataDir(layout)}`,siteCaddyBinaryPath(layout),"validate","--adapter","caddyfile","--config",siteCaddyMainConfigPath(layout)]',
+    'src/deploy/site/engine-driver.ts|["-n","-u","tpcaddysite","--",siteCaddyBinaryPath(layout),"validate","--adapter","caddyfile","--config",siteCaddyMainConfigPath(layout)]',
     {
       runas: "tpcaddysite",
       argv: [
-        "/usr/bin/env",
-        "XDG_DATA_HOME=/var/lib/turbopanel/site-caddy",
-        `${VENDOR}/caddy/2.11.4/caddy`,
+        `${VENDOR}/caddy/current/caddy`,
         "validate",
         "--adapter",
         "caddyfile",
         "--config",
-        "/etc/turbopanel/site-caddy/Caddyfile",
+        "/etc/turbopanel/caddy/Caddyfile",
       ],
     },
   ),
@@ -933,6 +1348,16 @@ const SITES: CallSite[] = [
       ],
     },
   ),
+
+  // --- Reads behind closed trees ---------------------------------------------
+  tpHost('src/permissions/privileged-read.ts|["-n","cat","--",path]', {
+    argv: ["cat", "--", `${CONF}/caddy/instance-acme-settings.json`],
+    setup: file(`${CONF}/caddy/instance-acme-settings.json`),
+  }),
+  tpHost('src/permissions/privileged-read.ts|["-n","test","-e",path]', {
+    argv: ["test", "-e", `${HOME}/volumes/stor-1`],
+    setup: dir(`${HOME}/volumes/stor-1`),
+  }),
 
   // --- SSH ------------------------------------------------------------------
   tpHost('src/deploy/ssh/apply.ts|["-n","cat","--",path]', {
@@ -978,9 +1403,27 @@ const SITES: CallSite[] = [
   tpHost('src/deploy/ssh/apply.ts|["-n","rm","-f","--",`${dir}/${name}`]', {
     argv: ["rm", "-f", "--", `${SSH_KEYS}/bob`],
   }),
+  tpHost('src/deploy/ssh/apply.ts|["-n","sftp-chroot","status"]', {
+    argv: ["sftp-chroot", "status"],
+  }),
+  tpHost('src/deploy/ssh/apply.ts|["-n","sftp-chroot","verify"]', {
+    argv: ["sftp-chroot", "verify"],
+    setup: file(`${P}/etc/ssh/turbopanel-sftp-chroot`, "on\n"),
+  }),
+  tpHost('src/deploy/ssh/apply.ts|["-n","sftp-chroot","check"]', {
+    argv: ["sftp-chroot", "check"],
+    // alice is in tpsftp; on the new layout the check is clean.
+    setup: dir(`${P}/srv/users/alice/home`),
+  }),
   tpHost('src/deploy/ssh/apply.ts|["-n","sshd","-t"]', {
     argv: ["sshd", "-t"],
   }),
+  tpHost(
+    'src/deploy/ssh/apply.ts|["-n","sshd","-T","-C",sshdEffectiveSpec(user)]',
+    {
+      argv: ["sshd", "-T", "-C", "user=alice,host=localhost,addr=127.0.0.1"],
+    },
+  ),
   tpHost('src/deploy/ssh/apply.ts|["-n","systemctl","reload",unit]', {
     argv: ["systemctl", "reload", "ssh.service"],
   }),
@@ -1045,6 +1488,62 @@ const SITES: CallSite[] = [
       "ACCEPT",
     ],
   }),
+
+  // Files the daemon keeps directly in the root-owned config and state roots
+  // (P1-1): created as the daemon account's own, replaced atomically.
+  tpHost(
+    'src/permissions/daemon-files.ts|["-n",...args]',
+    {
+      argv: [
+        "install",
+        "-m",
+        "0640",
+        "-o",
+        "tp",
+        "-g",
+        "tp",
+        STAGED,
+        `${CONF}/instance-ca.pem`,
+      ],
+      setup: dir(CONF),
+    },
+    {
+      argv: [
+        "install",
+        "-m",
+        "0644",
+        "-o",
+        "tp",
+        "-g",
+        "tp",
+        STAGED,
+        `${CONF}/firewall.v4`,
+      ],
+      setup: dir(CONF),
+    },
+    {
+      argv: [
+        "install",
+        "-m",
+        "0600",
+        "-o",
+        "tp",
+        "-g",
+        "tp",
+        STAGED,
+        `${STATE}/${"server-key"}.json`,
+      ],
+      setup: dir(STATE),
+    },
+    {
+      argv: ["rm", "-f", "--", `${CONF}/firewall.v4`],
+      setup: file(`${CONF}/firewall.v4`),
+    },
+    {
+      argv: ["rm", "-f", "--", `${STATE}/server-key-id`],
+      setup: file(`${STATE}/server-key-id`),
+    },
+  ),
 
   // --- control-plane settings and the co-located daemon --------------------
   tpHost(
@@ -1360,12 +1859,12 @@ const SITES: CallSite[] = [
     argv: ["iptables", "-X", MGD_CHAIN],
   }),
 
-  // Cron and native-app units.
-  tpHost('src/deploy/cron/apply.ts|systemctl(runFn,["daemon-reload"])', {
+  // Cron, scheduled-backup and native-app units.
+  tpHost('src/deploy/systemd-unit-set.ts|systemctl(runFn,["daemon-reload"])', {
     argv: ["systemctl", "daemon-reload"],
   }),
   tpHost(
-    'src/deploy/cron/apply.ts|systemctl(runFn,["disable","--now",`${unit}.timer`])',
+    'src/deploy/systemd-unit-set.ts|systemctl(runFn,["disable","--now",`${unit}.timer`])',
     {
       argv: [
         "systemctl",
@@ -1376,7 +1875,7 @@ const SITES: CallSite[] = [
     },
   ),
   tpHost(
-    'src/deploy/cron/apply.ts|systemctl(runFn,["enable","--now",`${unit}.timer`])',
+    'src/deploy/systemd-unit-set.ts|systemctl(runFn,["enable","--now",`${unit}.timer`])',
     {
       argv: [
         "systemctl",

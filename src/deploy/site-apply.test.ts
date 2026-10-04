@@ -11,13 +11,21 @@ import {
   applySites,
   RELEASE_SYMLINK_SWAP_PHP_DIRECTIVES,
   removeSites,
+  resolveSiteEngineNeeds,
   type SiteApplySpec,
+  siteEngineApplyExtraArgs,
   type SiteManagedDirectory,
   type SitePlaybookFn,
   type SiteRelease,
   type SiteRunFn,
   type SiteRunResult,
+  siteVhostPorts,
 } from "./site.ts";
+import {
+  sitePhpKey,
+  sitePhpRuntimeId,
+  type SitePhpRuntimeMode,
+} from "./site/php-runtime.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -49,6 +57,23 @@ async function makeTestLayout(): Promise<
   };
 }
 
+/**
+ * The filesystem as root sees it. The sudo seam below acts through these, so a
+ * test can deny the daemon's own `Deno.*` calls without denying tp-host's.
+ */
+const rootFs = {
+  copyFile: Deno.copyFile.bind(Deno),
+  lstat: Deno.lstat.bind(Deno),
+  mkdir: Deno.mkdir.bind(Deno),
+  readDir: Deno.readDir.bind(Deno),
+  readFile: Deno.readFile.bind(Deno),
+  readLink: Deno.readLink.bind(Deno),
+  readTextFile: Deno.readTextFile.bind(Deno),
+  remove: Deno.remove.bind(Deno),
+  rename: Deno.rename.bind(Deno),
+  stat: Deno.stat.bind(Deno),
+};
+
 function ok(): SiteRunResult {
   return { success: true, stdout: "", stderr: "" };
 }
@@ -61,13 +86,64 @@ function fail(stderr: string): SiteRunResult {
 async function filesMatch(a: string, b: string): Promise<boolean> {
   try {
     const [left, right] = await Promise.all([
-      Deno.readFile(a),
-      Deno.readFile(b),
+      rootFs.readFile(a),
+      rootFs.readFile(b),
     ]);
     if (left.length !== right.length) return false;
     return left.every((byte, index) => byte === right[index]);
   } catch {
     return false;
+  }
+}
+
+/**
+ * tp-host's read-only verbs. `test` pins the parent directory and refuses a
+ * symlink anywhere in it, so a path *through* `current` answers "absent" here
+ * exactly as it does on a host.
+ */
+async function privilegedReadVerb(
+  args: readonly string[],
+): Promise<SiteRunResult | null> {
+  const path = args.at(-1);
+  if (typeof path !== "string") return null;
+  if (args.includes("cat")) {
+    try {
+      return {
+        success: true,
+        stdout: await rootFs.readTextFile(path),
+        stderr: "",
+      };
+    } catch {
+      return fail(`no such file ${path}`);
+    }
+  }
+  if (args.includes("readlink")) {
+    try {
+      return {
+        success: true,
+        stdout: `${await rootFs.readLink(path)}\n`,
+        stderr: "",
+      };
+    } catch {
+      return fail(`readlink: ${path}`);
+    }
+  }
+  if (!args.includes("test")) return null;
+  if (dirname(path).split("/").includes("current")) {
+    return fail(`refusing ${path}: a component is a symlink`);
+  }
+  try {
+    if (args.includes("-L")) {
+      return (await rootFs.lstat(path)).isSymlink ? ok() : fail("not a link");
+    }
+    if (args.includes("-d")) {
+      // tp-host's `-d` never follows a symlink as the last component.
+      return (await rootFs.lstat(path)).isDirectory ? ok() : fail("not a dir");
+    }
+    await rootFs.stat(path);
+    return ok();
+  } catch {
+    return fail("");
   }
 }
 
@@ -97,12 +173,15 @@ function createSiteRunMock(): {
       return (await filesMatch(left, right)) ? ok() : fail("files differ");
     }
 
+    const privilegedRead = await privilegedReadVerb(args);
+    if (privilegedRead !== null) return privilegedRead;
+
     if (args.includes("install") && args.includes("-d")) {
       const path = args.at(-1);
       if (typeof path !== "string") {
         throw new TypeError("expected install -d path");
       }
-      await Deno.mkdir(path, { recursive: true, mode: 0o750 });
+      await rootFs.mkdir(path, { recursive: true, mode: 0o750 });
       return ok();
     }
 
@@ -112,8 +191,8 @@ function createSiteRunMock(): {
       if (typeof src !== "string" || typeof dest !== "string") {
         throw new TypeError("expected install src dest");
       }
-      await Deno.mkdir(dirname(dest), { recursive: true });
-      await Deno.copyFile(src, dest);
+      await rootFs.mkdir(dirname(dest), { recursive: true });
+      await rootFs.copyFile(src, dest);
       return ok();
     }
 
@@ -127,7 +206,7 @@ function createSiteRunMock(): {
       }
       try {
         const names: string[] = [];
-        for await (const entry of Deno.readDir(path)) names.push(entry.name);
+        for await (const entry of rootFs.readDir(path)) names.push(entry.name);
         return { success: true, stdout: names.join("\n"), stderr: "" };
       } catch {
         return fail("No such file or directory");
@@ -140,7 +219,7 @@ function createSiteRunMock(): {
         throw new TypeError("expected rm path");
       }
       try {
-        await Deno.remove(path, { recursive: true });
+        await rootFs.remove(path, { recursive: true });
       } catch (err) {
         if (!(err instanceof Deno.errors.NotFound)) throw err;
       }
@@ -156,7 +235,7 @@ function createSiteRunMock(): {
         throw new TypeError("expected cp src dest");
       }
       try {
-        await Deno.copyFile(src, dest);
+        await rootFs.copyFile(src, dest);
       } catch {
         return fail(`cp: cannot stat '${src}'`);
       }
@@ -170,7 +249,7 @@ function createSiteRunMock(): {
         throw new TypeError("expected mv src dest");
       }
       try {
-        await Deno.rename(src, dest);
+        await rootFs.rename(src, dest);
       } catch {
         return fail(`mv: cannot move '${src}'`);
       }
@@ -375,6 +454,70 @@ test("applySites applies nginx+apache+ols together", async () => {
   }
 });
 
+test("removeSites stops the OpenLiteSpeed unit when its last site goes, and keeps it for another environment", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const { run, calls } = createSiteRunMock();
+  const { runPlaybook } = capturePlaybooks();
+  const unitCalls = () =>
+    calls.filter((call) => call.args.includes("turbopanel-openlitespeed"))
+      .map((call) => call.args.filter((arg) => arg !== "-n").join(" "))
+      .filter((line) => line.includes("systemctl"));
+  try {
+    await applySites(layout, "envolsa", [olsSite], { run, runPlaybook });
+    await applySites(
+      layout,
+      "envolsb",
+      [{ ...olsSite, listenPort: olsSite.listenPort + 1 }],
+      { run, runPlaybook },
+    );
+
+    calls.length = 0;
+    await removeSites(layout, "envolsa", { run });
+    const kept = unitCalls();
+    assertEquals(kept.some((line) => line.includes("disable --now")), false);
+    assertEquals(kept.some((line) => line.includes("reload")), true);
+
+    calls.length = 0;
+    await removeSites(layout, "envolsb", { run });
+    const idle = unitCalls();
+    assertEquals(idle.some((line) => line.includes("disable --now")), true);
+    assertEquals(idle.some((line) => line.includes("reload")), false);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("applySites restarts the OpenLiteSpeed unit after it was stopped for idleness", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const { run, calls } = createSiteRunMock();
+  const { runPlaybook } = capturePlaybooks();
+  const isUnit = (args: string[], verb: string) =>
+    args.includes("turbopanel-openlitespeed") && args.includes(verb);
+  // A stopped unit refuses `reload`, as systemd does.
+  const stoppedRun: SiteRunFn = (command, args) =>
+    command === "sudo" && isUnit(args, "reload")
+      ? Promise.resolve(
+        fail("Unit turbopanel-openlitespeed.service is not active"),
+      )
+      : run(command, args);
+  try {
+    await applySites(layout, "envolsx", [olsSite], { run, runPlaybook });
+    await removeSites(layout, "envolsx", { run });
+
+    calls.length = 0;
+    await applySites(layout, "envolsy", [olsSite], {
+      run: stoppedRun,
+      runPlaybook,
+    });
+    const enabled = calls.some((call) =>
+      isUnit(call.args, "enable") && call.args.includes("--now")
+    );
+    assertEquals(enabled, true);
+  } finally {
+    await cleanup();
+  }
+});
+
 test("removeSites removes nginx/apache/ols configs via mocked sudo", async () => {
   const { layout, cleanup } = await makeTestLayout();
   const { run } = createSiteRunMock();
@@ -541,6 +684,24 @@ test("applySites fails when apache reload and start both fail", async () => {
         }),
       Error,
       "reload failed",
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test("applySites rejects a document root that is only safe once trimmed", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const { run } = createSiteRunMock();
+  try {
+    await assertRejects(
+      () =>
+        applySites(layout, "envtrim", [{ ...nginxSite, root: " public" }], {
+          run,
+          runPlaybook: () => Promise.resolve(),
+        }),
+      Error,
+      "site root is unsafe",
     );
   } finally {
     await cleanup();
@@ -1381,52 +1542,44 @@ test("applySites nginx+php vendors php-fpm and writes its pool", async () => {
   }
 });
 
-test("applySites openlitespeed+php vendors lsphp and wires LSAPI", async () => {
-  const { layout, cleanup } = await makeTestLayout();
-  const { run, calls } = createSiteRunMock();
-  const { runPlaybook, extraVars } = capturePlaybooks();
+test("OpenLiteSpeed vendors lsphp only for detached lsphp, and packaged PHP for fastcgi and fpm", () => {
+  const vars = (mode: SitePhpRuntimeMode) => {
+    const site = { ...olsPhpSite, php: { version: "8.4", mode } };
+    const [, json] = siteEngineApplyExtraArgs(
+      "openlitespeed",
+      resolveSiteEngineNeeds([site]),
+      ["8.4"],
+      {},
+    );
+    return JSON.parse(json ?? "{}");
+  };
+  assertEquals(vars("lsphp-detached"), {
+    turbopanel_lsphp_install: true,
+    openlitespeed_lsphp_versions: ["8.4"],
+    turbopanel_php_fpm_install: false,
+    php_fpm_versions: ["8.4"],
+    php_fpm_extensions: {},
+  });
+  for (const mode of ["fastcgi", "fpm"] as const) {
+    assertEquals(vars(mode).turbopanel_lsphp_install, false, mode);
+    assertEquals(vars(mode).turbopanel_php_fpm_install, true, mode);
+  }
+});
+
+test("per-site PHP on OpenLiteSpeed: a site without a mode runs FastCGI instead of failing the environment", async () => {
+  const h = await perSitePhpHarness();
   try {
-    await applySites(layout, "envols", [olsPhpSite], {
-      run,
-      runPlaybook,
-    });
-
-    assertEquals(playbookVars(extraVars, "openlitespeed"), {
-      turbopanel_lsphp_install: true,
-      openlitespeed_lsphp_versions: ["8.4"],
-    });
-
-    const vhost = await Deno.readTextFile(
-      join(
-        layout.configDir,
-        "openlitespeed",
-        "vhosts",
-        "tp_envols_olsphp",
-        "vhconf.conf",
-      ),
-    );
-    assertStringIncludes(vhost, "extprocessor lsphp_tp_envols_olsphp{");
+    const site = perSitePhpSite("openlitespeed", "fastcgi");
+    const { mode: _mode, ...php } = site.php ?? {};
+    await h.apply({ ...site, php });
+    const id = phpRuntimeId("fastcgi");
+    await Deno.stat(join(h.unitDir, `turbopanel-php-${id}.socket`));
     assertStringIncludes(
-      vhost,
-      `path                      ${layout.runtimesDir}/lsphp/8.4/current/bin/lsphp`,
+      await olsVhconf(h),
+      `uds:///run/turbopanel-php-${id}/php.sock`,
     );
-    assertStringIncludes(vhost, "extUser                   tpols");
-    assertStringIncludes(vhost, "php_admin_value memory_limit 192M");
-
-    const fragment = await Deno.readTextFile(
-      join(
-        layout.configDir,
-        "openlitespeed",
-        "sites",
-        "tp-envols-olsphp.conf",
-      ),
-    );
-    assertStringIncludes(fragment, "enableScript              1");
-
-    // No php-fpm anywhere: OLS runs its own lsphp.
-    assertEquals(systemctlActions(calls, "turbopanel-php-fpm@8.4"), []);
   } finally {
-    await cleanup();
+    await h.cleanup();
   }
 });
 
@@ -1636,57 +1789,6 @@ test("applySites fails when openlitespeed -t rejects the config", async () => {
   }
 });
 
-const olsPrincipalPhpSite: SiteApplySpec = {
-  composeServiceName: "olsowned",
-  engine: "openlitespeed",
-  root: "public",
-  listenPort: 18085,
-  php: { version: "8.4", settings: { memory_limit: "128M" } },
-  principal: { principalId: "prin-1", username: "siteowner" },
-};
-
-test("applySites scopes an OpenLiteSpeed PHP vhost to its principal", async () => {
-  const { layout, cleanup } = await makeTestLayout();
-  const { run } = createSiteRunMock();
-  const { runPlaybook } = capturePlaybooks();
-  try {
-    await applySites(layout, "envolsown", [olsPrincipalPhpSite], {
-      run,
-      runPlaybook,
-    });
-
-    const fragment = await Deno.readTextFile(
-      join(
-        layout.configDir,
-        "openlitespeed",
-        "sites",
-        "tp-envolsown-olsowned.conf",
-      ),
-    );
-    // suEXEC is declared on the vhost itself, not only on its extprocessor —
-    // that is what makes the shared-hosting boundary hold for everything the
-    // vhost runs.
-    assertStringIncludes(fragment, "user                      siteowner");
-    assertStringIncludes(fragment, "group                     siteowner-grp");
-    assertStringIncludes(fragment, "setUIDMode                0");
-    assertStringIncludes(fragment, "enableScript              1");
-
-    const vhost = await Deno.readTextFile(
-      join(
-        layout.configDir,
-        "openlitespeed",
-        "vhosts",
-        "tp_envolsown_olsowned",
-        "vhconf.conf",
-      ),
-    );
-    assertStringIncludes(vhost, "extUser                   siteowner");
-    assertStringIncludes(vhost, "extGroup                  siteowner-grp");
-  } finally {
-    await cleanup();
-  }
-});
-
 // ---------------------------------------------------------------------------
 // Managed-directory sites: a principal-owned webroot the tenant fills itself.
 // ---------------------------------------------------------------------------
@@ -1745,6 +1847,23 @@ test("a managed-directory site serves from a principal-owned webroot", async () 
     assertEquals(mkdir.args[mkdir.args.indexOf("-o") + 1], RELEASE_USERNAME);
     assertEquals(mkdir.args[mkdir.args.indexOf("-g") + 1], "tpnginx");
     assertEquals(mkdir.args[mkdir.args.indexOf("-m") + 1], "0750");
+
+    // `sites/<serviceId>/` itself is root's: the tenant must not be able to
+    // rename the leaves the engine serves (tp-host refuses anything else).
+    const siteRootMkdir = mock.calls.find((c) =>
+      c.args.includes("install") && c.args.includes("-d") &&
+      c.args.at(-1) === siteTreeRoot(layout)
+    );
+    assert(siteRootMkdir);
+    assertEquals(siteRootMkdir.args.slice(-7), [
+      "-m",
+      "0750",
+      "-o",
+      "root",
+      "-g",
+      RELEASE_GROUP,
+      siteTreeRoot(layout),
+    ]);
 
     // The engine joins the principal's group and therefore restarts.
     assertEquals(
@@ -2037,7 +2156,11 @@ test("applySites warns and continues when legacy chown/chmod/setgid fail", async
       return await modeBase.run(command, args);
     };
     assertEquals(
-      (await applySites(layout, "envchmod", [nginxSite], {
+      // Another environment: its own port (the host refuses a shared one).
+      (await applySites(layout, "envchmod", [{
+        ...nginxSite,
+        listenPort: nginxSite.listenPort + 100,
+      }], {
         run: modeRun,
         runPlaybook,
       })).applied,
@@ -2120,6 +2243,69 @@ test("applySites fails when a release document root is not a directory", async (
       Error,
       "is not a directory",
     );
+  } finally {
+    await cleanup();
+  }
+});
+
+/** Replace the release's `public` with a link to a directory outside it. */
+async function linkReleaseDocumentRootOut(
+  layout: LayoutPaths,
+  releaseDir: string,
+): Promise<void> {
+  const foreign = join(layout.principalHomeRoot, "bob", "public");
+  await Deno.mkdir(foreign, { recursive: true });
+  await Deno.writeTextFile(join(foreign, "index.html"), "bob");
+  await Deno.remove(join(releaseDir, "public"), { recursive: true });
+  await Deno.symlink(foreign, join(releaseDir, "public"));
+}
+
+test("applySites refuses a release document root that is a symlink", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const mock = createSiteRunMock();
+  const run = withGroupMembership(mock.run, { tpnginx: ["tpnginx"] });
+  const { runPlaybook } = capturePlaybooks();
+  try {
+    const releaseDir = await seedRelease(layout, "rel-1", "public", "one");
+    await linkReleaseDocumentRootOut(layout, releaseDir);
+    await assertRejects(
+      () =>
+        applySites(layout, "envlinkroot", [nginxSite], {
+          run,
+          runPlaybook,
+          releaseBindings: releaseBindingsFor("www"),
+        }),
+      Error,
+      "is not a directory",
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test("applySites refuses a symlinked release document root it cannot enter", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const mock = createSiteRunMock();
+  const run = withGroupMembership(mock.run, { tpnginx: ["tpnginx"] });
+  const { runPlaybook } = capturePlaybooks();
+  try {
+    const releaseDir = await seedRelease(layout, "rel-1", "public", "one");
+    await linkReleaseDocumentRootOut(layout, releaseDir);
+    const restore = denyDaemonFs(siteTreeRoot(layout));
+    try {
+      await assertRejects(
+        () =>
+          applySites(layout, "envlinkroot2", [nginxSite], {
+            run,
+            runPlaybook,
+            releaseBindings: releaseBindingsFor("www"),
+          }),
+        Error,
+        "release document root missing for www",
+      );
+    } finally {
+      restore();
+    }
   } finally {
     await cleanup();
   }
@@ -2217,27 +2403,28 @@ test("removeSites skips idle disable when another pool remains and swallows a st
   }
 });
 
-test("removeSites rethrows a non-NotFound config-dir read", async () => {
+test("removeSites rethrows a refused config-dir listing", async () => {
   const { layout, cleanup } = await makeTestLayout();
-  const { run } = createSiteRunMock();
-  const originalReadDir = Deno.readDir.bind(Deno);
-  Deno.readDir = ((path: string | URL) => {
-    if (String(path).includes(`${layout.configDir}/nginx/sites`)) {
-      // deno-lint-ignore require-yield
-      return (async function* () {
-        throw new Deno.errors.PermissionDenied("sites dir");
-      })();
+  const base = createSiteRunMock();
+  const run: SiteRunFn = async (command, args) => {
+    if (
+      args.includes("ls") &&
+      String(args.at(-1)).includes(`${layout.configDir}/nginx/sites`)
+    ) {
+      return fail("tp-host: refusing path sites dir");
     }
-    return originalReadDir(path);
-  }) as typeof Deno.readDir;
+    return await base.run(command, args);
+  };
   try {
+    await Deno.mkdir(join(layout.configDir, "nginx", "sites"), {
+      recursive: true,
+    });
     await assertRejects(
       () => removeSites(layout, "envrd", { run }),
-      Deno.errors.PermissionDenied,
-      "sites dir",
+      Error,
+      "refusing path sites dir",
     );
   } finally {
-    Deno.readDir = originalReadDir;
     await cleanup();
   }
 });
@@ -2317,32 +2504,108 @@ test("applySites rethrows a non-NotFound document-root index stat", async () => 
   }
 });
 
-test("applySites rethrows a non-NotFound release document-root stat", async () => {
+/**
+ * Deny the daemon's own `Deno.*` calls under `prefix`, the way a `0750` dir it
+ * cannot enter does on a host. The sudo seam keeps acting through `rootFs`.
+ */
+function denyDaemonFs(prefix: string): () => void {
+  const names = [
+    "copyFile",
+    "lstat",
+    "mkdir",
+    "readDir",
+    "readLink",
+    "readTextFile",
+    "remove",
+    "rename",
+    "stat",
+    "writeTextFile",
+  ] as const;
+  const denied = (path: unknown) => String(path).startsWith(prefix);
+  const saved = names.map((name) => [name, Deno[name]] as const);
+  for (const name of names) {
+    const original = Deno[name] as (...args: unknown[]) => unknown;
+    (Deno as unknown as Record<string, unknown>)[name] = (
+      ...args: unknown[]
+    ) => {
+      if (args.slice(0, 2).some(denied)) {
+        if (name === "readDir") {
+          // deno-lint-ignore require-yield
+          return (async function* () {
+            throw new Deno.errors.PermissionDenied(String(args[0]));
+          })();
+        }
+        return Promise.reject(
+          new Deno.errors.PermissionDenied(String(args[0])),
+        );
+      }
+      return original.apply(Deno, args);
+    };
+  }
+  return () => {
+    for (const [name, original] of saved) {
+      (Deno as unknown as Record<string, unknown>)[name] = original;
+    }
+  };
+}
+
+test("applySites checks a release document root it cannot enter through tp-host", async () => {
   const { layout, cleanup } = await makeTestLayout();
   const mock = createSiteRunMock();
   const run = withGroupMembership(mock.run, { tpnginx: ["tpnginx"] });
   const { runPlaybook } = capturePlaybooks();
-  const originalStat = Deno.stat.bind(Deno);
-  Deno.stat = ((path: string | URL) => {
-    if (String(path).endsWith("/current/public")) {
-      return Promise.reject(new Deno.errors.PermissionDenied("docroot"));
-    }
-    return originalStat(path);
-  }) as typeof Deno.stat;
   try {
     await seedRelease(layout, "rel-1", "public", "<h1>one</h1>");
-    await assertRejects(
-      () =>
-        applySites(layout, "envstat", [nginxSite], {
-          run,
-          runPlaybook,
-          releaseBindings: releaseBindingsFor("www"),
-        }),
-      Deno.errors.PermissionDenied,
-      "docroot",
+    const restore = denyDaemonFs(layout.principalHomeRoot);
+    try {
+      const result = await applySites(layout, "envstat", [nginxSite], {
+        run,
+        runPlaybook,
+        releaseBindings: releaseBindingsFor("www"),
+      });
+      assertEquals(result.applied, ["www"]);
+    } finally {
+      restore();
+    }
+    const tests = mock.calls.filter((c) => c.args.includes("test"));
+    // `current` is resolved with readlink, never traversed by a root check.
+    assertEquals(
+      tests.some((c) => dirname(c.args.at(-1) ?? "").includes("/current")),
+      false,
+    );
+    assert(
+      tests.some((c) =>
+        c.args.at(-1) === join(siteTreeRoot(layout), "releases/rel-1/public")
+      ),
     );
   } finally {
-    Deno.stat = originalStat;
+    await cleanup();
+  }
+});
+
+test("applySites reports a missing release document root it cannot enter", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const mock = createSiteRunMock();
+  const run = withGroupMembership(mock.run, { tpnginx: ["tpnginx"] });
+  const { runPlaybook } = capturePlaybooks();
+  try {
+    await seedRelease(layout, "rel-1", "dist", "<h1>one</h1>");
+    const restore = denyDaemonFs(layout.principalHomeRoot);
+    try {
+      await assertRejects(
+        () =>
+          applySites(layout, "envstat2", [nginxSite], {
+            run,
+            runPlaybook,
+            releaseBindings: releaseBindingsFor("www"),
+          }),
+        Error,
+        "release document root missing for www",
+      );
+    } finally {
+      restore();
+    }
+  } finally {
     await cleanup();
   }
 });
@@ -2366,70 +2629,112 @@ test("removeSites swallows an engine reload failure after a successful site dele
   }
 });
 
-test("removeSites swallows a missing OLS fragment and rethrows a denied one", async () => {
+test("removeSites removes php-fpm pools when the daemon cannot enter the php config dir", async () => {
   const { layout, cleanup } = await makeTestLayout();
   const { run } = createSiteRunMock();
   const { runPlaybook } = capturePlaybooks();
-  const environmentId = "envolsrm";
+  const phpDir = join(layout.configDir, "php");
+  const pool = join(phpDir, "8.4", "pools", "tp-envphpdeny-phpsite.conf");
   try {
-    await applySites(layout, environmentId, [olsSite], { run, runPlaybook });
-    const fragment = join(
-      layout.configDir,
-      "openlitespeed",
-      "sites",
-      `tp-${environmentId}-static.conf`,
-    );
-    const originalRemove = Deno.remove.bind(Deno);
-    Deno.remove = ((path: string | URL, options?: Deno.RemoveOptions) => {
-      if (String(path) === fragment) {
-        return Promise.reject(new Deno.errors.NotFound("already gone"));
-      }
-      return originalRemove(path, options);
-    }) as typeof Deno.remove;
+    await applySites(layout, "envphpdeny", [nginxPhpSite], {
+      run,
+      runPlaybook,
+    });
+    await rootFs.stat(pool);
+    const restore = denyDaemonFs(phpDir);
     try {
-      await removeSites(layout, environmentId, { run });
+      await removeSites(layout, "envphpdeny", { run });
     } finally {
-      Deno.remove = originalRemove;
+      restore();
     }
-
-    await applySites(layout, environmentId, [olsSite], { run, runPlaybook });
-    Deno.remove = ((path: string | URL, options?: Deno.RemoveOptions) => {
-      if (String(path) === fragment) {
-        return Promise.reject(new Deno.errors.PermissionDenied("fragment"));
-      }
-      return originalRemove(path, options);
-    }) as typeof Deno.remove;
-    try {
-      await assertRejects(
-        () => removeSites(layout, environmentId, { run }),
-        Deno.errors.PermissionDenied,
-        "fragment",
-      );
-    } finally {
-      Deno.remove = originalRemove;
-    }
+    await assertRejects(() => rootFs.stat(pool), Deno.errors.NotFound);
   } finally {
     await cleanup();
   }
 });
 
-test("removeSites best-effort-cleans a leftover staging directory", async () => {
+test("removeSites warns and keeps the aggregate when an OLS fragment cannot be removed", async () => {
   const { layout, cleanup } = await makeTestLayout();
   const { run } = createSiteRunMock();
   const { runPlaybook } = capturePlaybooks();
+  const environmentId = "envolsrm";
+  const olsDir = join(layout.configDir, "openlitespeed");
+  try {
+    await applySites(layout, environmentId, [olsSite], { run, runPlaybook });
+    const fragment = join(olsDir, "sites", `tp-${environmentId}-static.conf`);
+    const before = await rootFs.readTextFile(join(olsDir, "httpd_config.conf"));
+    const remove: SiteRunFn = (command, args) =>
+      args.includes("rm") && args.at(-1) === fragment
+        ? Promise.resolve(fail("rm: denied"))
+        : run(command, args);
+    await removeSites(layout, environmentId, { run: remove });
+    assertEquals(
+      await rootFs.readTextFile(join(olsDir, "httpd_config.conf")),
+      before,
+    );
+    // The aggregate still names this vhost, so its vhconf must survive too.
+    await rootFs.stat(
+      join(olsDir, "vhosts", `tp_${environmentId}_static`, "vhconf.conf"),
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test("removeSites drops an OLS vhost dir only after the aggregate stops naming it", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const { run, calls } = createSiteRunMock();
+  const { runPlaybook } = capturePlaybooks();
+  const environmentId = "envolsorder";
+  const olsDir = join(layout.configDir, "openlitespeed");
+  try {
+    await applySites(layout, environmentId, [olsSite], { run, runPlaybook });
+    const start = calls.length;
+    await removeSites(layout, environmentId, { run });
+    const teardown = calls.slice(start).map((c) => c.args.at(-1) ?? "");
+    const fragmentRm = teardown.indexOf(
+      join(olsDir, "sites", `tp-${environmentId}-static.conf`),
+    );
+    const aggregate = teardown.indexOf(join(olsDir, "httpd_config.conf"));
+    const vhostRm = teardown.indexOf(
+      join(olsDir, "vhosts", `tp_${environmentId}_static`),
+    );
+    assert(fragmentRm >= 0 && aggregate > fragmentRm, teardown.join("\n"));
+    assert(vhostRm > aggregate, teardown.join("\n"));
+  } finally {
+    await cleanup();
+  }
+});
+
+test("removeSites lists and removes root-owned engine configs through sudo", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const { run, calls } = createSiteRunMock();
+  const { runPlaybook } = capturePlaybooks();
   const environmentId = "envstage";
+  const sitesDir = join(layout.configDir, "nginx", "sites");
   try {
     await applySites(layout, environmentId, [nginxSite], { run, runPlaybook });
-    const leftover = join(
-      layout.configDir,
-      "nginx",
-      "sites",
-      `tp-${environmentId}-stale.tmp`,
-    );
-    await Deno.mkdir(leftover);
-    await Deno.writeTextFile(join(leftover, "keep"), "x");
+    const leftover = join(sitesDir, `tp-${environmentId}-www.conf.tpprev`);
+    await Deno.writeTextFile(leftover, "stale\n");
+    calls.length = 0;
     await removeSites(layout, environmentId, { run });
-    await Deno.stat(leftover);
+    // The daemon cannot enter `root:tpnginx 0750`: list and unlink via tp-host.
+    assertEquals(
+      calls.some((c) =>
+        c.command === "sudo" && c.args.includes("ls") &&
+        c.args.at(-1) === sitesDir
+      ),
+      true,
+    );
+    const removed = calls
+      .filter((c) => c.command === "sudo" && c.args.includes("rm"))
+      .map((c) => c.args.at(-1));
+    assertEquals(removed.includes(leftover), true);
+    assertEquals(
+      removed.includes(join(sitesDir, `tp-${environmentId}-www.conf`)),
+      true,
+    );
+    assertEquals(await listConfigDirEntries(sitesDir), []);
   } finally {
     await cleanup();
   }
@@ -2481,38 +2786,30 @@ test("removeSites reloads both PHP series an environment owned", async () => {
 
 test("removeSites skips idle disable when the pools directory vanishes", async () => {
   const { layout, cleanup } = await makeTestLayout();
-  const { run } = createSiteRunMock();
+  const base = createSiteRunMock();
   const { runPlaybook } = capturePlaybooks();
   const environmentId = "envnopools";
   const poolsDir = join(layout.configDir, "php", "8.4", "pools");
-  const originalReadDir = Deno.readDir.bind(Deno);
+  let poolListings = 0;
+  const run: SiteRunFn = async (command, args) => {
+    if (args.includes("ls") && args.at(-1) === poolsDir) {
+      poolListings += 1;
+      // The removal sweep sees the pools; the idle check finds them gone.
+      if (poolListings >= 2) return fail("No such file or directory");
+    }
+    if (args.includes("disable") && args.includes("--now")) {
+      throw new TypeError("disable must not run when the pools dir is gone");
+    }
+    return await base.run(command, args);
+  };
   try {
     await applySites(layout, environmentId, [nginxPhpSite], {
       run,
       runPlaybook,
     });
-    Deno.readDir = ((path: string | URL) => {
-      if (String(path) !== poolsDir) return originalReadDir(path);
-      const inner = originalReadDir(path);
-      return (async function* () {
-        let count = 0;
-        for await (const entry of inner) {
-          count += 1;
-          yield entry;
-        }
-        if (count === 0) {
-          Deno.readDir = ((later: string | URL) => {
-            if (String(later) === poolsDir) {
-              throw new Deno.errors.NotFound("pools gone");
-            }
-            return originalReadDir(later);
-          }) as typeof Deno.readDir;
-        }
-      })();
-    }) as typeof Deno.readDir;
     await removeSites(layout, environmentId, { run });
+    assertEquals(poolListings >= 2, true);
   } finally {
-    Deno.readDir = originalReadDir;
     await cleanup();
   }
 });
@@ -2543,30 +2840,25 @@ test("removeSites skips leftover OLS files that are not this environment's fragm
 
 test("removeSites swallows a leftover staging file that cannot be unlinked", async () => {
   const { layout, cleanup } = await makeTestLayout();
-  const { run } = createSiteRunMock();
+  const base = createSiteRunMock();
   const { runPlaybook } = capturePlaybooks();
   const environmentId = "envstagefile";
+  const leftover = join(
+    layout.configDir,
+    "nginx",
+    "sites",
+    `tp-${environmentId}-www.conf.tpnew`,
+  );
+  const run: SiteRunFn = async (command, args) => {
+    if (args.includes("rm") && args.at(-1) === leftover) {
+      return fail("rm denied");
+    }
+    return await base.run(command, args);
+  };
   try {
     await applySites(layout, environmentId, [nginxSite], { run, runPlaybook });
-    const leftover = join(
-      layout.configDir,
-      "nginx",
-      "sites",
-      `tp-${environmentId}-www.conf.tpnew`,
-    );
     await Deno.writeTextFile(leftover, "stale\n");
-    const originalRemove = Deno.remove.bind(Deno);
-    Deno.remove = ((path: string | URL, options?: Deno.RemoveOptions) => {
-      if (String(path) === leftover) {
-        return Promise.reject(new Deno.errors.PermissionDenied("staged"));
-      }
-      return originalRemove(path, options);
-    }) as typeof Deno.remove;
-    try {
-      await removeSites(layout, environmentId, { run });
-    } finally {
-      Deno.remove = originalRemove;
-    }
+    await removeSites(layout, environmentId, { run });
   } finally {
     await cleanup();
   }
@@ -2608,63 +2900,1409 @@ test("removeSites reloads site Caddy after tearing down a Caddy vhost", async ()
   }
 });
 
-test("applySites rethrows a non-NotFound OpenLiteSpeed sites listing", async () => {
+test("OpenLiteSpeed apply and removal work when the daemon cannot enter its config dir", async () => {
   const { layout, cleanup } = await makeTestLayout();
   const { run } = createSiteRunMock();
   const { runPlaybook } = capturePlaybooks();
-  const originalReadDir = Deno.readDir.bind(Deno);
-  Deno.readDir = ((path: string | URL) => {
-    if (String(path).includes("/openlitespeed/sites")) {
-      // deno-lint-ignore require-yield
-      return (async function* () {
-        throw new Deno.errors.PermissionDenied("ols sites");
-      })();
-    }
-    return originalReadDir(path);
-  }) as typeof Deno.readDir;
+  const olsDir = join(layout.configDir, "openlitespeed");
+  const mainConfig = join(olsDir, "httpd_config.conf");
   try {
-    await assertRejects(
-      () => applySites(layout, "envolsrd", [olsSite], { run, runPlaybook }),
-      Deno.errors.PermissionDenied,
-      "ols sites",
-    );
+    const restore = denyDaemonFs(olsDir);
+    try {
+      await applySites(layout, "envolsa", [olsSite], { run, runPlaybook });
+      await applySites(layout, "envolsb", [{
+        ...olsSite,
+        listenPort: olsSite.listenPort + 100,
+      }], { run, runPlaybook });
+      // A teardown of an environment with no OLS site must not trip on it.
+      await removeSites(layout, "envnone", { run });
+      await removeSites(layout, "envolsa", { run });
+    } finally {
+      restore();
+    }
+    const aggregate = await rootFs.readTextFile(mainConfig);
+    assertStringIncludes(aggregate, "tp_envolsb_static");
+    assertEquals(aggregate.includes("tp_envolsa_static"), false);
+    assertEquals(await listConfigDirEntries(join(olsDir, "sites")), [
+      "tp-envolsb-static.conf",
+    ]);
   } finally {
-    Deno.readDir = originalReadDir;
     await cleanup();
   }
 });
 
-test("removeSites rethrows a non-NotFound leftover staging listing", async () => {
+test("applySites creates root-owned engine config dirs through tp-host", async () => {
   const { layout, cleanup } = await makeTestLayout();
-  const { run } = createSiteRunMock();
+  const { run, calls } = createSiteRunMock();
   const { runPlaybook } = capturePlaybooks();
-  const environmentId = "envstagerd";
-  const originalReadDir = Deno.readDir.bind(Deno);
-  let nginxSitesReads = 0;
   try {
-    await applySites(layout, environmentId, [nginxSite], {
+    await applySites(layout, "envdirs", [nginxPhpSite, caddySite], {
       run,
       runPlaybook,
     });
-    Deno.readDir = ((path: string | URL) => {
-      if (String(path).includes("/nginx/sites")) {
-        nginxSitesReads += 1;
-        if (nginxSitesReads >= 2) {
-          // deno-lint-ignore require-yield
-          return (async function* () {
-            throw new Deno.errors.PermissionDenied("staging list");
-          })();
-        }
-      }
-      return originalReadDir(path);
-    }) as typeof Deno.readDir;
-    await assertRejects(
-      () => removeSites(layout, environmentId, { run }),
-      Deno.errors.PermissionDenied,
-      "staging list",
+    await applySites(layout, "envdirs2", [apachePhpSite], {
+      run,
+      runPlaybook,
+    });
+    const dirGroups = new Map(
+      calls
+        .filter((c) =>
+          c.command === "sudo" && c.args.includes("install") &&
+          c.args.includes("-d")
+        )
+        .map((c) => [
+          String(c.args.at(-1)),
+          c.args[c.args.indexOf("-g") + 1],
+        ]),
+    );
+    const conf = layout.configDir;
+    assertEquals(dirGroups.get(join(conf, "nginx", "sites")), "tpnginx");
+    assertEquals(dirGroups.get(join(conf, "caddy", "sites")), "tpcaddysite");
+    assertEquals(dirGroups.get(join(conf, "apache", "sites")), "tpapache");
+    // php-fpm role's php_fpm_service_group, whichever engine asked.
+    assertEquals(
+      dirGroups.get(join(conf, "php", "8.4", "pools")),
+      "tpapache",
     );
   } finally {
-    Deno.readDir = originalReadDir;
     await cleanup();
+  }
+});
+
+test("applySites never stages a root-owned config inside its config dir", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const { run, calls } = createSiteRunMock();
+  const { runPlaybook } = capturePlaybooks();
+  try {
+    await applySites(layout, "envsrc", [nginxPhpSite], { run, runPlaybook });
+    const sources = calls
+      .filter((c) =>
+        c.command === "sudo" && c.args.includes("install") &&
+        !c.args.includes("-d") && String(c.args.at(-1)).endsWith(".tpnew")
+      )
+      .map((c) => String(c.args.at(-2)));
+    assertEquals(sources.length >= 2, true);
+    for (const source of sources) {
+      assertEquals(source.startsWith(layout.configDir), false, source);
+    }
+  } finally {
+    await cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Per-site PHP runtimes: FastCGI and php-fpm as the site's principal.
+// ---------------------------------------------------------------------------
+
+const PHP_PRINCIPAL = { principalId: "pr-1", username: RELEASE_USERNAME };
+
+function perSitePhpSite(
+  engine: "nginx" | "apache" | "nginx+apache" | "openlitespeed",
+  mode: SitePhpRuntimeMode,
+  settings: Record<string, string> = { memory_limit: "256M" },
+): SiteApplySpec {
+  return {
+    composeServiceName: "shop",
+    engine,
+    root: "public",
+    listenPort: 18090,
+    ...(engine === "nginx+apache" ? { backendPort: 18091 } : {}),
+    principal: PHP_PRINCIPAL,
+    php: { version: "8.4", mode, settings },
+  };
+}
+
+function phpRuntimeId(
+  mode: SitePhpRuntimeMode,
+  env = "envphp",
+  service = "shop",
+): string {
+  return sitePhpRuntimeId(sitePhpKey(env, service), mode, "8.4");
+}
+
+type PerSitePhpHarness = {
+  layout: LayoutPaths;
+  unitDir: string;
+  calls: Array<{ command: string; args: string[] }>;
+  apply: (
+    site: SiteApplySpec | SiteApplySpec[],
+    env?: string,
+  ) => Promise<unknown>;
+  failProbe: (on: boolean) => void;
+  failPhpTest: (on: boolean) => void;
+  /** Fail the config test of the engine whose binary path ends with this. */
+  failEngineTest: (binary: string | null) => void;
+  /** Loopback ports the bind probe reports as taken by something else. */
+  busyPorts: Set<number>;
+  /** Ports the bind probe was asked about, in order. */
+  probedPorts: number[];
+  cleanup: () => Promise<void>;
+};
+
+async function perSitePhpHarness(): Promise<PerSitePhpHarness> {
+  const { layout, root, cleanup } = await makeTestLayout();
+  const unitDir = join(root, "units");
+  await Deno.mkdir(unitDir, { recursive: true });
+  const base = createSiteRunMock();
+  let probeFails = false;
+  let phpTestFails = false;
+  let failingEngine: string | null = null;
+  const run = withGroupMembership(async (command, args) => {
+    if (probeFails && command === "curl") {
+      return { success: true, stdout: "502", stderr: "" };
+    }
+    if (
+      failingEngine !== null && args.includes("-t") &&
+      args.some((arg) => arg.endsWith(failingEngine as string))
+    ) {
+      base.calls.push({ command, args: [...args] });
+      return fail(`${failingEngine}: config test failed`);
+    }
+    if (phpTestFails && args.includes("php-test")) {
+      base.calls.push({ command, args: [...args] });
+      return fail("PHP Startup: Unable to load dynamic library");
+    }
+    return await base.run(command, args);
+  }, {
+    tpnginx: ["tpnginx", RELEASE_GROUP],
+    tpapache: ["tpapache", RELEASE_GROUP],
+    tpols: ["tpols", RELEASE_GROUP],
+  });
+  await seedRelease(layout, "rel-1", "public", "<?php echo 1;");
+  const busyPorts = new Set<number>();
+  const probedPorts: number[] = [];
+  return {
+    layout,
+    unitDir,
+    calls: base.calls,
+    apply: (site, env = "envphp") => {
+      const sites = Array.isArray(site) ? site : [site];
+      return applySites(layout, env, sites, {
+        run,
+        runPlaybook: () => Promise.resolve(),
+        releaseBindings: releaseBindingsFor(
+          ...sites.map((s) => s.composeServiceName),
+        ),
+        systemdUnitDir: unitDir,
+        sleep: () => Promise.resolve(),
+        probeHostPort: (_address, port) => {
+          probedPorts.push(port);
+          return Promise.resolve(!busyPorts.has(port));
+        },
+      });
+    },
+    busyPorts,
+    probedPorts,
+    failProbe: (on) => {
+      probeFails = on;
+    },
+    failPhpTest: (on) => {
+      phpTestFails = on;
+    },
+    failEngineTest: (binary) => {
+      failingEngine = binary;
+    },
+    cleanup,
+  };
+}
+
+async function exists(path: string): Promise<boolean> {
+  try {
+    await Deno.lstat(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function callIndex(
+  calls: ReadonlyArray<{ args: string[] }>,
+  match: (args: string[]) => boolean,
+): number {
+  return calls.findIndex((call) => match(call.args));
+}
+
+test("per-site FastCGI: the runtime is tested and started before the nginx vhost names its socket", async () => {
+  const h = await perSitePhpHarness();
+  try {
+    await h.apply(perSitePhpSite("nginx", "fastcgi"));
+    const id = phpRuntimeId("fastcgi");
+    const service = await Deno.readTextFile(
+      join(h.unitDir, `turbopanel-php-${id}.service`),
+    );
+    assertStringIncludes(
+      service,
+      `ExecStart=/usr/bin/php-cgi8.4 -c ${h.layout.configDir}/php/sites/${id}/php.ini`,
+    );
+    assertStringIncludes(service, `User=${RELEASE_USERNAME}`);
+    assertStringIncludes(service, "StandardInput=socket");
+    assertStringIncludes(
+      service,
+      `ReadWritePaths=${
+        join(h.layout.principalHomeRoot, RELEASE_USERNAME, "tmp")
+      } -${join(siteTreeRoot(h.layout), "shared")}`,
+    );
+    const socket = await Deno.readTextFile(
+      join(h.unitDir, `turbopanel-php-${id}.socket`),
+    );
+    assertStringIncludes(socket, "SocketGroup=tpnginx");
+    const ini = await Deno.readTextFile(
+      join(h.layout.configDir, "php", "sites", id, "php.ini"),
+    );
+    assertStringIncludes(ini, "memory_limit = 256M");
+    assertStringIncludes(ini, "opcache.memory_consumption = 128");
+    assertStringIncludes(ini, "opcache.validate_root = 1");
+    assertStringIncludes(ini, "session.save_path = /tmp");
+    assertStringIncludes(
+      ini,
+      `open_basedir = ${join(siteTreeRoot(h.layout), "current", "public")}:${
+        join(siteTreeRoot(h.layout), "shared")
+      }:/tmp`,
+    );
+
+    const vhost = await Deno.readTextFile(
+      join(h.layout.configDir, "nginx", "sites", "tp-envphp-shop.conf"),
+    );
+    assertStringIncludes(
+      vhost,
+      `fastcgi_pass unix:/run/turbopanel-php-${id}/php.sock;`,
+    );
+    // No pool on the shared master for this site.
+    assertEquals(
+      await exists(
+        join(h.layout.configDir, "php", "8.4", "pools", "tp-envphp-shop.conf"),
+      ),
+      false,
+    );
+
+    const phpTest = callIndex(h.calls, (a) => a.includes("php-test"));
+    const started = callIndex(
+      h.calls,
+      (a) =>
+        a.includes("restart") && a.includes(`turbopanel-php-${id}.service`),
+    );
+    const nginxTest = callIndex(h.calls, (a) => a.includes("-t"));
+    assert(phpTest >= 0 && phpTest < started, "php-test before start");
+    assert(started < nginxTest, "runtime up before the vhost is tested");
+    assertEquals(
+      systemctlCalls(h.calls).filter((c) => c.includes(`php-${id}`)),
+      [
+        `enable --now turbopanel-php-${id}.socket`,
+        `restart turbopanel-php-${id}.service`,
+        `is-active --quiet turbopanel-php-${id}.service`,
+      ],
+    );
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("per-site PHP: a redeploy with nothing changed touches no runtime", async () => {
+  const h = await perSitePhpHarness();
+  try {
+    await h.apply(perSitePhpSite("nginx", "fastcgi"));
+    h.calls.length = 0;
+    await h.apply(perSitePhpSite("nginx", "fastcgi"));
+    assertEquals(h.calls.some((c) => c.args.includes("php-test")), false);
+    assertEquals(
+      systemctlCalls(h.calls).filter((c) => c.includes("turbopanel-php-")),
+      [],
+    );
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("per-site php-fpm on Apache: a pool for the owner, reachable by tpapache through an ACL", async () => {
+  const h = await perSitePhpHarness();
+  try {
+    await h.apply(perSitePhpSite("apache", "fpm"));
+    const id = phpRuntimeId("fpm");
+    const fpm = await Deno.readTextFile(
+      join(h.layout.configDir, "php", "sites", id, "php-fpm.conf"),
+    );
+    assertStringIncludes(fpm, `[${id}]`);
+    assertStringIncludes(fpm, "listen.acl_users = tpapache");
+    assertEquals(fpm.includes("\nuser ="), false);
+    assertEquals(
+      await exists(join(h.unitDir, `turbopanel-php-${id}.socket`)),
+      false,
+    );
+    const vhost = await Deno.readTextFile(
+      join(h.layout.configDir, "apache", "sites", "tp-envphp-shop.conf"),
+    );
+    assertStringIncludes(
+      vhost,
+      `SetHandler "proxy:unix:/run/turbopanel-php-${id}/php.sock|fcgi://localhost/"`,
+    );
+    assertEquals(vhost.includes("ProxyFCGIBackendType"), false);
+    assertEquals(
+      systemctlCalls(h.calls).filter((c) => c.includes(`php-${id}`)),
+      [
+        `enable turbopanel-php-${id}.service`,
+        `is-active --quiet turbopanel-php-${id}.service`,
+        `restart turbopanel-php-${id}.service`,
+        `is-active --quiet turbopanel-php-${id}.service`,
+      ],
+    );
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("per-site FastCGI on Apache tells proxy_fcgi it talks to a generic backend", async () => {
+  const h = await perSitePhpHarness();
+  try {
+    await h.apply(perSitePhpSite("apache", "fastcgi"));
+    const vhost = await Deno.readTextFile(
+      join(h.layout.configDir, "apache", "sites", "tp-envphp-shop.conf"),
+    );
+    assertStringIncludes(vhost, "  ProxyFCGIBackendType GENERIC\n");
+    const socket = await Deno.readTextFile(
+      join(h.unitDir, `turbopanel-php-${phpRuntimeId("fastcgi")}.socket`),
+    );
+    assertStringIncludes(socket, "SocketGroup=tpapache");
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("per-site PHP: switching mode starts the new runtime first and removes the old only after the probe", async () => {
+  const h = await perSitePhpHarness();
+  try {
+    await h.apply(perSitePhpSite("nginx", "fastcgi"));
+    const oldId = phpRuntimeId("fastcgi");
+    const newId = phpRuntimeId("fpm");
+    h.calls.length = 0;
+    await h.apply(perSitePhpSite("nginx", "fpm"));
+
+    const newStarted = callIndex(
+      h.calls,
+      (a) =>
+        a.includes("restart") && a.includes(`turbopanel-php-${newId}.service`),
+    );
+    const probe = h.calls.findIndex((c) => c.command === "curl");
+    const oldStopped = callIndex(
+      h.calls,
+      (a) =>
+        a.includes("stop") && a.includes(`turbopanel-php-${oldId}.service`),
+    );
+    assert(newStarted >= 0 && newStarted < probe, "new runtime before probe");
+    assert(probe < oldStopped, "old runtime only after the probe");
+    assertEquals(
+      await exists(join(h.unitDir, `turbopanel-php-${oldId}.service`)),
+      false,
+    );
+    assertEquals(
+      await exists(join(h.unitDir, `turbopanel-php-${oldId}.socket`)),
+      false,
+    );
+    assertEquals(
+      await exists(join(h.layout.configDir, "php", "sites", oldId)),
+      false,
+    );
+    assertEquals(
+      await exists(join(h.unitDir, `turbopanel-php-${newId}.service`)),
+      true,
+    );
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("per-site PHP: a failed probe keeps the old runtime and removes the one the apply created", async () => {
+  const h = await perSitePhpHarness();
+  try {
+    await h.apply(perSitePhpSite("nginx", "fastcgi"));
+    const oldId = phpRuntimeId("fastcgi");
+    const newId = phpRuntimeId("fpm");
+    const vhostPath = join(
+      h.layout.configDir,
+      "nginx",
+      "sites",
+      "tp-envphp-shop.conf",
+    );
+    const lastGood = await Deno.readTextFile(vhostPath);
+    h.failProbe(true);
+    await assertRejects(
+      () => h.apply(perSitePhpSite("nginx", "fpm")),
+      Error,
+      "did not serve shop",
+    );
+    assertEquals(await Deno.readTextFile(vhostPath), lastGood);
+    assertEquals(
+      await exists(join(h.unitDir, `turbopanel-php-${newId}.service`)),
+      false,
+    );
+    assertEquals(
+      await exists(join(h.layout.configDir, "php", "sites", newId)),
+      false,
+    );
+    assertEquals(
+      await exists(join(h.unitDir, `turbopanel-php-${oldId}.service`)),
+      true,
+    );
+    // An fpm runtime has no socket unit to stop.
+    assertEquals(
+      systemctlCalls(h.calls).filter((c) => c.startsWith("stop")),
+      [`stop turbopanel-php-${newId}.service`],
+    );
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("per-site PHP: a failed config test stages no vhost and leaves no runtime", async () => {
+  const h = await perSitePhpHarness();
+  try {
+    h.failPhpTest(true);
+    await assertRejects(
+      () => h.apply(perSitePhpSite("nginx", "fastcgi")),
+      Error,
+      "failed its config test: PHP Startup",
+    );
+    const id = phpRuntimeId("fastcgi");
+    assertEquals(
+      await exists(join(h.unitDir, `turbopanel-php-${id}.service`)),
+      false,
+    );
+    assertEquals(
+      await listConfigDirEntries(join(h.layout.configDir, "nginx", "sites")),
+      [],
+    );
+    assertEquals(h.calls.some((c) => c.args.includes("-t")), false);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("per-site PHP: a settings change restores the previous config when the site stops answering", async () => {
+  const h = await perSitePhpHarness();
+  try {
+    await h.apply(perSitePhpSite("nginx", "fpm"));
+    const id = phpRuntimeId("fpm");
+    const iniPath = join(h.layout.configDir, "php", "sites", id, "php.ini");
+    const lastGood = await Deno.readTextFile(iniPath);
+    h.calls.length = 0;
+    h.failProbe(true);
+    await assertRejects(
+      () => h.apply(perSitePhpSite("nginx", "fpm", { memory_limit: "64M" })),
+      Error,
+      "did not serve shop",
+    );
+    // The vhost did not change, so nginx was never reloaded; the runtime was
+    // restarted (a new memory_limit moves the unit's MemoryMax, which a
+    // reload cannot apply), probed, and put back.
+    assertEquals(h.calls.some((c) => c.args.includes("-t")), false);
+    assertEquals(await Deno.readTextFile(iniPath), lastGood);
+    assertEquals(await exists(`${iniPath}.tpprev`), false);
+    assertEquals(
+      systemctlCalls(h.calls).filter((c) => c.includes(`php-${id}`)),
+      [
+        `enable turbopanel-php-${id}.service`,
+        `is-active --quiet turbopanel-php-${id}.service`,
+        `restart turbopanel-php-${id}.service`,
+        `is-active --quiet turbopanel-php-${id}.service`,
+        `restart turbopanel-php-${id}.service`,
+      ],
+    );
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("per-site PHP is refused without a principal, and lsphp is refused on nginx", async () => {
+  const h = await perSitePhpHarness();
+  try {
+    const { principal: _none, ...ownerless } = perSitePhpSite(
+      "nginx",
+      "fastcgi",
+    );
+    await assertRejects(
+      () => h.apply(ownerless),
+      Error,
+      "runs as the site's principal, and the site has none",
+    );
+    await assertRejects(
+      () =>
+        h.apply({
+          ...perSitePhpSite("nginx", "fastcgi"),
+          php: { version: "8.4", mode: "lsphp-detached" },
+        }),
+      Error,
+      "PHP mode lsphp-detached needs OpenLiteSpeed, not nginx",
+    );
+  } finally {
+    await h.cleanup();
+  }
+});
+
+async function olsVhconf(h: PerSitePhpHarness, service = "shop") {
+  return await Deno.readTextFile(
+    join(
+      h.layout.configDir,
+      "openlitespeed",
+      "vhosts",
+      `tp_envphp_${service}`,
+      "vhconf.conf",
+    ),
+  );
+}
+
+const OLS_DEAD_LINES = [
+  "extUser",
+  "extGroup",
+  "setUIDMode",
+  "runOnStartUp",
+  "\n  user ",
+];
+
+test("per-site PHP on OpenLiteSpeed: fastcgi and fpm reach the owner's runtime through an fcgi processor", async () => {
+  for (const [mode, maxConns] of [["fastcgi", 2], ["fpm", 10]] as const) {
+    const h = await perSitePhpHarness();
+    try {
+      await h.apply(perSitePhpSite("openlitespeed", mode));
+      const id = phpRuntimeId(mode);
+      const service = await Deno.readTextFile(
+        join(h.unitDir, `turbopanel-php-${id}.service`),
+      );
+      assertStringIncludes(service, `User=${RELEASE_USERNAME}`);
+      if (mode === "fastcgi") {
+        const socket = await Deno.readTextFile(
+          join(h.unitDir, `turbopanel-php-${id}.socket`),
+        );
+        assertStringIncludes(socket, "SocketGroup=tpols");
+      } else {
+        const fpm = await Deno.readTextFile(
+          join(h.layout.configDir, "php", "sites", id, "php-fpm.conf"),
+        );
+        assertStringIncludes(fpm, "listen.acl_users = tpols");
+      }
+      const ini = await Deno.readTextFile(
+        join(h.layout.configDir, "php", "sites", id, "php.ini"),
+      );
+      assertStringIncludes(ini, "memory_limit = 256M");
+      const vhost = await olsVhconf(h);
+      assertStringIncludes(vhost, "type                      fcgi");
+      assertStringIncludes(
+        vhost,
+        `address                   uds:///run/turbopanel-php-${id}/php.sock`,
+      );
+      assertStringIncludes(vhost, `maxConns                  ${maxConns}`);
+      assertStringIncludes(vhost, "autoStart                 0");
+      assertStringIncludes(
+        vhost,
+        "add                       fcgi:php_tp_envphp_shop php",
+      );
+      const fragment = await Deno.readTextFile(
+        join(
+          h.layout.configDir,
+          "openlitespeed",
+          "sites",
+          "tp-envphp-shop.conf",
+        ),
+      );
+      for (const dead of OLS_DEAD_LINES) {
+        assertEquals(vhost.includes(dead), false, `${mode} vhost: ${dead}`);
+        assertEquals(
+          fragment.includes(dead),
+          false,
+          `${mode} fragment: ${dead}`,
+        );
+      }
+      // The runtime answers before OpenLiteSpeed is tested against its socket.
+      const started = callIndex(
+        h.calls,
+        (a) =>
+          a.includes("restart") && a.includes(`turbopanel-php-${id}.service`),
+      );
+      const olsTest = callIndex(h.calls, (a) => a.includes("-t"));
+      assert(started >= 0 && started < olsTest, `${mode}: runtime up first`);
+    } finally {
+      await h.cleanup();
+    }
+  }
+});
+
+test("detached lsphp on OpenLiteSpeed: systemd runs the vendored lsphp as the owner, OpenLiteSpeed only connects", async () => {
+  const h = await perSitePhpHarness();
+  try {
+    await h.apply(perSitePhpSite("openlitespeed", "lsphp-detached"));
+    const id = phpRuntimeId("lsphp-detached");
+    assertEquals(id.endsWith("-lsd84"), true, id);
+    const service = await Deno.readTextFile(
+      join(h.unitDir, `turbopanel-php-${id}.service`),
+    );
+    for (
+      const want of [
+        `ExecStart=${h.layout.runtimesDir}/lsphp/8.4/current/bin/lsphp\n`,
+        "StandardInput=socket\n",
+        `Environment=PHPRC=${h.layout.configDir}/php/sites/${id}/php.ini\n`,
+        "Environment=LSAPI_CHILDREN=10\n",
+        `User=${RELEASE_USERNAME}\n`,
+        "\nIPAddressDeny=localhost ",
+        "\nIPAddressAllow=127.0.0.1 127.0.0.53\n",
+        "tp-php-loopback sync\n",
+        "\nMemoryMax=",
+        "\nTasksMax=",
+      ]
+    ) {
+      assertStringIncludes(service, want);
+    }
+    const socket = await Deno.readTextFile(
+      join(h.unitDir, `turbopanel-php-${id}.socket`),
+    );
+    assertStringIncludes(
+      socket,
+      `ListenStream=/run/turbopanel-php-${id}/php.sock`,
+    );
+    assertStringIncludes(socket, "SocketGroup=tpols");
+    const ini = await Deno.readTextFile(
+      join(h.layout.configDir, "php", "sites", id, "php.ini"),
+    );
+    assertStringIncludes(
+      ini,
+      `extension_dir = ${h.layout.runtimesDir}/lsphp/8.4/current/lib/php/ext\n`,
+    );
+    assertStringIncludes(ini, "extension = mysqli.so\n");
+    assertStringIncludes(ini, "memory_limit = 256M\n");
+    const vhost = await olsVhconf(h);
+    assertStringIncludes(vhost, "type                      lsapi");
+    assertStringIncludes(
+      vhost,
+      `address                   uds:///run/turbopanel-php-${id}/php.sock`,
+    );
+    assertStringIncludes(vhost, "maxConns                  5");
+    assertStringIncludes(vhost, "autoStart                 0");
+    assertStringIncludes(
+      vhost,
+      "add                       lsapi:php_tp_envphp_shop php",
+    );
+    // #283's script-source deny rules sit beside the handler, and the locked
+    // limits go to lsphp as admin values.
+    assertStringIncludes(vhost, "rewrite {\n  enable                    1");
+    assertStringIncludes(vhost, "phpIniOverride {\n  php_admin_value ");
+    for (const dead of [...OLS_DEAD_LINES, "path "]) {
+      assertEquals(vhost.includes(dead), false, dead);
+    }
+    assertEquals(
+      systemctlCalls(h.calls).filter((c) => c.includes(`php-${id}`)),
+      [
+        `enable --now turbopanel-php-${id}.socket`,
+        `restart turbopanel-php-${id}.service`,
+        `is-active --quiet turbopanel-php-${id}.service`,
+      ],
+    );
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("per-site PHP on OpenLiteSpeed: a site asking for attached lsphp runs detached and does not fail the apply", async () => {
+  const h = await perSitePhpHarness();
+  try {
+    await h.apply([
+      perSitePhpSite("openlitespeed", "lsphp-detached"),
+      {
+        ...perSitePhpSite("openlitespeed", "fpm"),
+        composeServiceName: "attached",
+        listenPort: 18092,
+        php: { version: "8.4", mode: "lsphp-attached" },
+      },
+    ]);
+    const attached = phpRuntimeId("lsphp-detached", "envphp", "attached");
+    const service = await Deno.readTextFile(
+      join(h.unitDir, `turbopanel-php-${attached}.service`),
+    );
+    assertStringIncludes(service, "StandardInput=socket\n");
+    // Same sandbox as every per-site PHP unit: loopback filter, its root
+    // guard, and the memory and task caps.
+    assertStringIncludes(service, "\nIPAddressDeny=localhost ");
+    assertStringIncludes(service, "\nIPAddressAllow=127.0.0.1 127.0.0.53\n");
+    assertStringIncludes(service, "\nExecStartPre=+");
+    assertStringIncludes(service, "tp-php-loopback sync\n");
+    assertStringIncludes(service, "\nMemoryMax=");
+    assertStringIncludes(service, "\nTasksMax=");
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("two OpenLiteSpeed PHP sites in one apply restart OpenLiteSpeed once", async () => {
+  const h = await perSitePhpHarness();
+  try {
+    await h.apply([
+      perSitePhpSite("openlitespeed", "lsphp-detached"),
+      {
+        ...perSitePhpSite("openlitespeed", "fastcgi"),
+        composeServiceName: "blog",
+        listenPort: 18091,
+      },
+    ]);
+    assertEquals(
+      systemctlCalls(h.calls).filter((c) =>
+        c.includes("turbopanel-openlitespeed") && !c.startsWith("is-active")
+      ),
+      ["reload turbopanel-openlitespeed"],
+    );
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("per-site PHP: a site that names no mode keeps the shared php-fpm pool", async () => {
+  const h = await perSitePhpHarness();
+  try {
+    const site = perSitePhpSite("nginx", "fastcgi");
+    await h.apply({ ...site, php: { version: "8.4" } });
+    assertEquals(
+      await exists(
+        join(h.layout.configDir, "php", "8.4", "pools", "tp-envphp-shop.conf"),
+      ),
+      true,
+    );
+    assertEquals(h.calls.some((c) => c.args.includes("php-test")), false);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("removeSites removes the environment's per-site PHP runtimes after the vhosts", async () => {
+  const h = await perSitePhpHarness();
+  try {
+    await h.apply(perSitePhpSite("nginx", "fastcgi"));
+    await h.apply(
+      { ...perSitePhpSite("nginx", "fpm"), listenPort: 18190 },
+      "envother",
+    );
+    const id = phpRuntimeId("fastcgi");
+    const other = phpRuntimeId("fpm", "envother");
+    const mock = createSiteRunMock();
+    await removeSites(h.layout, "envphp", {
+      run: mock.run,
+      systemdUnitDir: h.unitDir,
+    });
+    assertEquals(
+      await exists(join(h.unitDir, `turbopanel-php-${id}.service`)),
+      false,
+    );
+    assertEquals(
+      await exists(join(h.layout.configDir, "php", "sites", id)),
+      false,
+    );
+    assertEquals(
+      await exists(join(h.unitDir, `turbopanel-php-${other}.service`)),
+      true,
+    );
+    const nginxReload = callIndex(
+      mock.calls,
+      (a) => a.includes("-t") || a.includes("reload"),
+    );
+    const stopped = callIndex(
+      mock.calls,
+      (a) => a.includes("stop") && a.includes(`turbopanel-php-${id}.service`),
+    );
+    assert(nginxReload < stopped, "vhost gone before its runtime");
+  } finally {
+    await h.cleanup();
+  }
+});
+
+function sharedPoolPath(layout: LayoutPaths, env = "envphp"): string {
+  return join(layout.configDir, "php", "8.4", "pools", `tp-${env}-shop.conf`);
+}
+
+test("per-site PHP: moving off the shared master removes the site's pool and stops the idle master", async () => {
+  const h = await perSitePhpHarness();
+  try {
+    const site = perSitePhpSite("nginx", "fastcgi");
+    await h.apply({ ...site, php: { version: "8.4" } });
+    assertEquals(await exists(sharedPoolPath(h.layout)), true);
+    h.calls.length = 0;
+    await h.apply(site);
+
+    assertEquals(await exists(sharedPoolPath(h.layout)), false);
+    const fpm = systemctlCalls(h.calls).filter((c) =>
+      c.includes("turbopanel-php-fpm@8.4")
+    );
+    assert(fpm.some((c) => c.startsWith("reload")), fpm.join("; "));
+    // Its only pool is gone: the master goes with it.
+    assertEquals(fpm.at(-1), "disable --now turbopanel-php-fpm@8.4");
+    const probe = h.calls.findIndex((c) => c.command === "curl");
+    const poolGone = callIndex(
+      h.calls,
+      (a) => a.includes("rm") && a.at(-1) === sharedPoolPath(h.layout),
+    );
+    assert(probe >= 0 && probe < poolGone, "pool only after the probe");
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("per-site PHP: the shared master keeps running while another site's pool is on it", async () => {
+  const h = await perSitePhpHarness();
+  try {
+    const site = perSitePhpSite("nginx", "fpm");
+    await h.apply(
+      { ...site, listenPort: 18190, php: { version: "8.4" } },
+      "envkeep",
+    );
+    await h.apply({ ...site, php: { version: "8.4" } });
+    h.calls.length = 0;
+    await h.apply(site);
+    assertEquals(await exists(sharedPoolPath(h.layout)), false);
+    assertEquals(await exists(sharedPoolPath(h.layout, "envkeep")), true);
+    assertEquals(
+      systemctlCalls(h.calls).filter((c) => c.startsWith("disable --now")),
+      [],
+    );
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("per-site PHP: moving back to the shared master installs the pool before the vhost and removes the runtime after", async () => {
+  const h = await perSitePhpHarness();
+  try {
+    const site = perSitePhpSite("nginx", "fastcgi");
+    await h.apply(site);
+    const id = phpRuntimeId("fastcgi");
+    h.calls.length = 0;
+    await h.apply({ ...site, php: { version: "8.4" } });
+
+    assertEquals(await exists(sharedPoolPath(h.layout)), true);
+    assertEquals(
+      await exists(join(h.unitDir, `turbopanel-php-${id}.service`)),
+      false,
+    );
+    assertEquals(
+      await exists(join(h.layout.configDir, "php", "sites", id)),
+      false,
+    );
+    const fpmUp = callIndex(
+      h.calls,
+      (a) => a.includes("systemctl") && a.includes("turbopanel-php-fpm@8.4"),
+    );
+    const nginxTest = callIndex(h.calls, (a) => a.includes("-t"));
+    const runtimeStopped = callIndex(
+      h.calls,
+      (a) => a.includes("stop") && a.includes(`turbopanel-php-${id}.service`),
+    );
+    assert(fpmUp >= 0 && fpmUp < nginxTest, "pool live before nginx -t");
+    assert(nginxTest < runtimeStopped, "runtime only after the vhost moved");
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("per-site PHP: a site whose key extends another's keeps its runtime when the other goes", async () => {
+  const h = await perSitePhpHarness();
+  try {
+    // Slugs to `<shop's key>-x`, so its runtime ids start with `<key>-`.
+    const lookalike = `${sitePhpKey("envphp", "shop")}-x`;
+    const longer = sitePhpRuntimeId(
+      sitePhpKey("envother", lookalike),
+      "fpm",
+      "8.4",
+    );
+    assert(longer.startsWith(`${sitePhpKey("envphp", "shop")}-`));
+    await h.apply({
+      ...perSitePhpSite("nginx", "fpm"),
+      composeServiceName: lookalike,
+      listenPort: 18190,
+    }, "envother");
+    await h.apply(perSitePhpSite("nginx", "fastcgi"));
+    // Switching shop's mode must not take the lookalike's runtime either.
+    await h.apply(perSitePhpSite("nginx", "fpm"));
+    assertEquals(
+      await exists(join(h.unitDir, `turbopanel-php-${longer}.service`)),
+      true,
+    );
+    await removeSites(h.layout, "envphp", {
+      run: createSiteRunMock().run,
+      systemdUnitDir: h.unitDir,
+    });
+    assertEquals(
+      await exists(
+        join(h.unitDir, `turbopanel-php-${phpRuntimeId("fpm")}.service`),
+      ),
+      false,
+    );
+    assertEquals(
+      await exists(join(h.unitDir, `turbopanel-php-${longer}.service`)),
+      true,
+    );
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("removeSites also removes a runtime no vhost names any more", async () => {
+  const h = await perSitePhpHarness();
+  try {
+    await h.apply(perSitePhpSite("nginx", "fpm"), "envkeep");
+    const kept = phpRuntimeId("fpm", "envkeep");
+    // Left by a site removed while its runtime stayed: no vhost names it.
+    const orphan = phpRuntimeId("fastcgi", "envgone");
+    await Deno.writeTextFile(
+      join(h.unitDir, `turbopanel-php-${orphan}.service`),
+      "",
+    );
+    await Deno.writeTextFile(
+      join(h.unitDir, `turbopanel-php-${orphan}.socket`),
+      "",
+    );
+    await removeSites(h.layout, "envphp", {
+      run: createSiteRunMock().run,
+      systemdUnitDir: h.unitDir,
+    });
+    assertEquals(
+      await exists(join(h.unitDir, `turbopanel-php-${orphan}.service`)),
+      false,
+    );
+    assertEquals(
+      await exists(join(h.unitDir, `turbopanel-php-${orphan}.socket`)),
+      false,
+    );
+    assertEquals(
+      await exists(join(h.unitDir, `turbopanel-php-${kept}.service`)),
+      true,
+    );
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("per-site PHP is refused for a document root outside the owner's home", async () => {
+  const h = await perSitePhpHarness();
+  try {
+    await assertRejects(
+      () =>
+        applySites(h.layout, "envphp", [perSitePhpSite("nginx", "fastcgi")], {
+          run: createSiteRunMock().run,
+          runPlaybook: () => Promise.resolve(),
+          systemdUnitDir: h.unitDir,
+          sleep: () => Promise.resolve(),
+        }),
+      Error,
+      "serves only from the owner's home",
+    );
+  } finally {
+    await h.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// nginx in front of Apache: two engines, Apache rolled out first.
+// ---------------------------------------------------------------------------
+
+function pairedConfPaths(layout: LayoutPaths): {
+  apache: string;
+  nginx: string;
+} {
+  return {
+    apache: join(layout.configDir, "apache", "sites", "tp-envphp-shop.conf"),
+    nginx: join(layout.configDir, "nginx", "sites", "tp-envphp-shop.conf"),
+  };
+}
+
+/** The probed URLs, in order. */
+function probedUrls(
+  calls: ReadonlyArray<{ command: string; args: string[] }>,
+): string[] {
+  return calls.filter((c) => c.command === "curl").map((c) =>
+    String(c.args.at(-1))
+  );
+}
+
+test("nginx+apache: Apache runs PHP behind nginx and is rolled out and probed first", async () => {
+  const h = await perSitePhpHarness();
+  try {
+    await h.apply(perSitePhpSite("nginx+apache", "fastcgi"));
+    const id = phpRuntimeId("fastcgi");
+    const paths = pairedConfPaths(h.layout);
+    const backend = await Deno.readTextFile(paths.apache);
+    assertStringIncludes(backend, "<VirtualHost 127.0.0.1:18091>");
+    assertStringIncludes(backend, "RemoteIPInternalProxy 127.0.0.2\n");
+    assertStringIncludes(
+      backend,
+      `SetHandler "proxy:unix:/run/turbopanel-php-${id}/php.sock|fcgi://localhost/"`,
+    );
+    const front = await Deno.readTextFile(paths.nginx);
+    assertStringIncludes(front, "proxy_bind 127.0.0.2;");
+    assertStringIncludes(front, "listen 127.0.0.1:18090;");
+    assertStringIncludes(front, "proxy_pass http://127.0.0.1:18091;");
+    assertEquals(front.includes("fastcgi_pass"), false);
+    // The socket is Apache's to connect to, not nginx's.
+    const socket = await Deno.readTextFile(
+      join(h.unitDir, `turbopanel-php-${id}.socket`),
+    );
+    assertStringIncludes(socket, "SocketGroup=tpapache");
+
+    const apacheTest = callIndex(
+      h.calls,
+      (a) => a.some((x) => x.endsWith("/httpd")),
+    );
+    const nginxTest = callIndex(
+      h.calls,
+      (a) => a.some((x) => x.endsWith("/nginx")),
+    );
+    assert(apacheTest >= 0 && apacheTest < nginxTest, "Apache before nginx");
+    const urls = probedUrls(h.calls);
+    const backendProbe = urls.indexOf("http://127.0.0.1:18091/");
+    const frontProbe = urls.lastIndexOf("http://127.0.0.1:18090/");
+    assert(backendProbe >= 0 && backendProbe < frontProbe, urls.join(" "));
+    assertEquals(
+      await listConfigDirEntries(dirname(paths.apache)),
+      ["tp-envphp-shop.conf"],
+    );
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("nginx+apache: nginx failing after Apache rolled out puts both back", async () => {
+  const h = await perSitePhpHarness();
+  try {
+    await h.apply(perSitePhpSite("nginx+apache", "fastcgi"));
+    const paths = pairedConfPaths(h.layout);
+    const lastGood = {
+      apache: await Deno.readTextFile(paths.apache),
+      nginx: await Deno.readTextFile(paths.nginx),
+    };
+    const oldId = phpRuntimeId("fastcgi");
+    const newId = phpRuntimeId("fpm");
+
+    h.failEngineTest("/nginx");
+    const before = h.calls.length;
+    await assertRejects(
+      // A new backend port: both vhosts change, so both engines roll out.
+      () =>
+        h.apply({
+          ...perSitePhpSite("nginx+apache", "fpm"),
+          backendPort: 18092,
+        }),
+      Error,
+      "config test failed",
+    );
+    // Apache did roll out (and reload) on the new socket before nginx failed…
+    const calls = h.calls.slice(before);
+    assert(
+      callIndex(calls, (a) => a.some((x) => x.endsWith("/httpd"))) >= 0,
+      "Apache rolled out first",
+    );
+    // …and is back on the previous vhost, as is nginx: nothing left staged.
+    assertEquals(await Deno.readTextFile(paths.apache), lastGood.apache);
+    assertEquals(await Deno.readTextFile(paths.nginx), lastGood.nginx);
+    assertEquals(
+      await listConfigDirEntries(dirname(paths.apache)),
+      ["tp-envphp-shop.conf"],
+    );
+    assertEquals(
+      await listConfigDirEntries(dirname(paths.nginx)),
+      ["tp-envphp-shop.conf"],
+    );
+    // The old runtime still serves; the one this apply created is gone.
+    assertEquals(
+      await exists(join(h.unitDir, `turbopanel-php-${oldId}.service`)),
+      true,
+    );
+    assertEquals(
+      await exists(join(h.unitDir, `turbopanel-php-${newId}.service`)),
+      false,
+    );
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("nginx+apache: a failed Apache rollout never touches nginx", async () => {
+  const h = await perSitePhpHarness();
+  try {
+    h.failEngineTest("/httpd");
+    await assertRejects(
+      () => h.apply(perSitePhpSite("nginx+apache", "fastcgi")),
+      Error,
+      "config test failed",
+    );
+    assertEquals(
+      callIndex(h.calls, (a) => a.some((x) => x.endsWith("/nginx"))),
+      -1,
+    );
+    const paths = pairedConfPaths(h.layout);
+    assertEquals(await exists(paths.apache), false);
+    assertEquals(await exists(paths.nginx), false);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("nginx+apache: both engines join the owner's group and restart", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const mock = createSiteRunMock();
+  try {
+    await seedRelease(layout, "rel-1", "public", "<?php echo 1;");
+    await applySites(layout, "envpair", [{
+      composeServiceName: "shop",
+      engine: "nginx+apache",
+      root: "public",
+      listenPort: 18090,
+      backendPort: 18091,
+      principal: PHP_PRINCIPAL,
+    }], {
+      run: mock.run,
+      runPlaybook: () => Promise.resolve(),
+      releaseBindings: releaseBindingsFor("shop"),
+    });
+    const joined = usermodCalls(mock.calls).map((c) => c.args.at(-1));
+    assertEquals(joined.sort(), ["tpapache", "tpnginx"]);
+    assertEquals(
+      systemctlActions(mock.calls, "turbopanel-apache")[0],
+      "restart",
+    );
+    assertEquals(
+      systemctlActions(mock.calls, "turbopanel-nginx")[0],
+      "restart",
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test("nginx+apache: refused without a backend port or an owner", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const mock = createSiteRunMock();
+  const site: SiteApplySpec = {
+    composeServiceName: "shop",
+    engine: "nginx+apache",
+    root: "public",
+    listenPort: 18090,
+    backendPort: 18091,
+    principal: PHP_PRINCIPAL,
+  };
+  try {
+    for (
+      const [bad, message] of [
+        [{ ...site, backendPort: undefined }, "needs a backendPort"],
+        [{ ...site, backendPort: 18090 }, "needs a backendPort"],
+        [{ ...site, principal: undefined }, "needs a principal"],
+      ] as const
+    ) {
+      await assertRejects(
+        () => applySites(layout, "envpair", [bad], { run: mock.run }),
+        Error,
+        message,
+      );
+    }
+    assertEquals(mock.calls.length, 0);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("removeSites drops both vhosts of a paired site and its runtime", async () => {
+  const h = await perSitePhpHarness();
+  try {
+    await h.apply(perSitePhpSite("nginx+apache", "fastcgi"));
+    const id = phpRuntimeId("fastcgi");
+    const mock = createSiteRunMock();
+    await removeSites(h.layout, "envphp", {
+      run: mock.run,
+      systemdUnitDir: h.unitDir,
+    });
+    const paths = pairedConfPaths(h.layout);
+    assertEquals(await exists(paths.apache), false);
+    assertEquals(await exists(paths.nginx), false);
+    assertEquals(
+      await exists(join(h.unitDir, `turbopanel-php-${id}.service`)),
+      false,
+    );
+  } finally {
+    await h.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Host-wide ports and engine switches.
+// ---------------------------------------------------------------------------
+
+test("a port another environment's vhost holds is refused before anything is written", async () => {
+  const h = await perSitePhpHarness();
+  try {
+    await h.apply(perSitePhpSite("nginx+apache", "fastcgi"));
+    const paths = pairedConfPaths(h.layout);
+    const lastGood = await Deno.readTextFile(paths.apache);
+    const otherConf = (engine: string) =>
+      join(h.layout.configDir, engine, "sites", "tp-envb-shop.conf");
+    for (
+      const [clash, port] of [
+        [{ listenPort: 18090, backendPort: 18191 }, 18090],
+        // Apache's backend port is a port too: nginx proxies to it.
+        [{ listenPort: 18190, backendPort: 18091 }, 18091],
+        // A plain site on another environment's backend port.
+        [{ engine: "apache" as const, listenPort: 18091 }, 18091],
+      ] as const
+    ) {
+      const before = h.calls.length;
+      await assertRejects(
+        () =>
+          h.apply(
+            { ...perSitePhpSite("nginx+apache", "fpm"), ...clash },
+            "envb",
+          ),
+        Error,
+        `port ${port} is already used by`,
+      );
+      // Refused before the engines were installed, staged or reloaded.
+      const calls = h.calls.slice(before);
+      assertEquals(
+        calls.some((c) =>
+          c.args.includes("install") || c.args.includes("reload") ||
+          c.args.includes("useradd")
+        ),
+        false,
+      );
+    }
+    assertEquals(await exists(otherConf("nginx")), false);
+    assertEquals(await exists(otherConf("apache")), false);
+    assertEquals(await Deno.readTextFile(paths.apache), lastGood);
+    // The environment that owns the ports redeploys on them.
+    await h.apply(perSitePhpSite("nginx+apache", "fpm"));
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("a newly claimed port held by anything else is refused; the site's own ports are not probed", async () => {
+  const h = await perSitePhpHarness();
+  try {
+    h.busyPorts.add(18091);
+    await assertRejects(
+      () => h.apply(perSitePhpSite("nginx+apache", "fastcgi")),
+      Error,
+      "port 18091 is already in use on this host",
+    );
+    assertEquals(await exists(pairedConfPaths(h.layout).nginx), false);
+
+    h.busyPorts.clear();
+    await h.apply(perSitePhpSite("nginx+apache", "fastcgi"));
+    // Held by the site's own engines now: a redeploy must not trip on them.
+    h.busyPorts.add(18090);
+    h.busyPorts.add(18091);
+    h.probedPorts.length = 0;
+    await h.apply(perSitePhpSite("nginx+apache", "fpm"));
+    assertEquals(h.probedPorts, []);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("two sites of one deploy cannot claim the same port", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const mock = createSiteRunMock();
+  try {
+    await assertRejects(
+      () =>
+        applySites(layout, "envdup", [
+          { ...nginxSite, composeServiceName: "a" },
+          { ...nginxSite, composeServiceName: "b" },
+        ], { run: mock.run, runPlaybook: () => Promise.resolve() }),
+      Error,
+      "also claimed by site a",
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test("siteVhostPorts reads directive lines only", () => {
+  assertEquals(
+    siteVhostPorts(
+      [
+        ":18080 {",
+        "  bind 127.0.0.1 ::1",
+        "  env FOO 127.0.0.1:18500",
+        "}",
+        "listen 127.0.0.1:18081;",
+        "  listen [::1]:18081;",
+        "  proxy_pass http://127.0.0.1:18082;",
+        "Listen 172.17.0.1:18083",
+        '  SetEnv TARGET "127.0.0.1:18501"',
+        "  fastcgi_param X 127.0.0.1:18502;",
+        "  address                   127.0.0.1:18084",
+      ].join("\n"),
+    ).sort(),
+    [18080, 18081, 18082, 18083, 18084],
+  );
+});
+
+test("nginx+apache -> apache: nginx drops the site's vhost and reloads before Apache binds listenPort", async () => {
+  const h = await perSitePhpHarness();
+  try {
+    await h.apply(perSitePhpSite("nginx+apache", "fastcgi"));
+    const paths = pairedConfPaths(h.layout);
+    const before = h.calls.length;
+    await h.apply(perSitePhpSite("apache", "fastcgi"));
+    const calls = h.calls.slice(before);
+
+    assertEquals(await exists(paths.nginx), false);
+    const apache = await Deno.readTextFile(paths.apache);
+    assertStringIncludes(apache, "Listen 127.0.0.1:18090\n");
+    assertEquals(apache.includes("18091"), false);
+
+    const nginxReload = callIndex(
+      calls,
+      (a) => a.includes("reload") && a.includes("turbopanel-nginx"),
+    );
+    const apacheTest = callIndex(
+      calls,
+      (a) => a.some((x) => x.endsWith("/httpd")),
+    );
+    assert(nginxReload >= 0, "nginx reloaded without the vhost");
+    assert(nginxReload < apacheTest, "nginx let go before Apache rolled out");
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("nginx+apache -> nginx: Apache drops the backend vhost, and PHP's socket moves to nginx", async () => {
+  const h = await perSitePhpHarness();
+  try {
+    await h.apply(perSitePhpSite("nginx+apache", "fastcgi"));
+    const paths = pairedConfPaths(h.layout);
+    const before = h.calls.length;
+    await h.apply(perSitePhpSite("nginx", "fastcgi"));
+    const calls = h.calls.slice(before);
+
+    assertEquals(await exists(paths.apache), false);
+    const nginx = await Deno.readTextFile(paths.nginx);
+    assertEquals(nginx.includes("proxy_pass"), false);
+    assertStringIncludes(nginx, "fastcgi_pass");
+    const apacheReload = callIndex(
+      calls,
+      (a) => a.includes("reload") && a.includes("turbopanel-apache"),
+    );
+    const nginxTest = callIndex(
+      calls,
+      (a) => a.some((x) => x.endsWith("/nginx")),
+    );
+    assert(
+      apacheReload >= 0 && apacheReload < nginxTest,
+      "Apache let go first",
+    );
+    const id = phpRuntimeId("fastcgi");
+    const socket = await Deno.readTextFile(
+      join(h.unitDir, `turbopanel-php-${id}.socket`),
+    );
+    assertStringIncludes(socket, "SocketGroup=tpnginx");
+    // Same runtime id, new group: the live socket is restarted, or it keeps
+    // tpapache and nginx cannot connect.
+    const socketRestart = callIndex(
+      calls,
+      (a) => a.includes("restart") && a.includes(`turbopanel-php-${id}.socket`),
+    );
+    assert(socketRestart >= 0 && socketRestart < nginxTest, "socket restarted");
+  } finally {
+    await h.cleanup();
   }
 });

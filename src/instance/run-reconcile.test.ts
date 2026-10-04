@@ -14,6 +14,7 @@ import {
   ControlPlaneUpdateFailedError,
   downloadRunScript,
   encodeLicenseArg,
+  ensureWebServerRunning,
   executeInstanceUpdateReconcile,
   executeRunReconcile,
   type InstanceUpdateHooks,
@@ -191,6 +192,15 @@ test("buildRunReconcileArgs includes TLS flags for an https instance URL", () =>
   );
 });
 
+const RETRY_ARGS = [
+  "--retry",
+  "2",
+  "--retry-delay",
+  "3",
+  "--retry-max-time",
+  "60",
+];
+
 test("downloadRunScript applies insecure TLS flags", async () => {
   const originalCommand = Deno.Command;
   let capturedArgs: string[] | undefined;
@@ -216,6 +226,7 @@ test("downloadRunScript applies insecure TLS flags", async () => {
     assertEquals(capturedArgs, [
       "-fsSL",
       "-k",
+      ...RETRY_ARGS,
       "https://huey.lan:8443/run.sh",
     ]);
     if (!script.trim()) {
@@ -477,7 +488,12 @@ test("downloadRunScript uses -k for insecure HTTPS", async () => {
     await downloadRunScript("https://huey.lan:8443/run.sh", {
       insecureTls: true,
     });
-    assertEquals(capturedArgs, ["-fsSL", "-k", "https://huey.lan:8443/run.sh"]);
+    assertEquals(capturedArgs, [
+      "-fsSL",
+      "-k",
+      ...RETRY_ARGS,
+      "https://huey.lan:8443/run.sh",
+    ]);
   } finally {
     Deno.Command = originalCommand;
   }
@@ -507,6 +523,7 @@ test("downloadRunScript uses --cacert when platform CA is provided", async () =>
       "-fsSL",
       "--cacert",
       "/etc/turbopanel/instance-ca.pem",
+      ...RETRY_ARGS,
       "https://huey.lan:8443/run.sh",
     ]);
   } finally {
@@ -532,7 +549,12 @@ test("downloadRunScript accepts legacy boolean insecureTls option", async () => 
       }
     } as typeof Deno.Command;
     await downloadRunScript("https://huey.lan:8443/run.sh", true);
-    assertEquals(capturedArgs, ["-fsSL", "-k", "https://huey.lan:8443/run.sh"]);
+    assertEquals(capturedArgs, [
+      "-fsSL",
+      "-k",
+      ...RETRY_ARGS,
+      "https://huey.lan:8443/run.sh",
+    ]);
   } finally {
     Deno.Command = originalCommand;
   }
@@ -1165,6 +1187,7 @@ function managedUpdateHooks(
       Promise.resolve({ ok: true, status: 200, body: instanceManifestBody() }),
     readCaddyfile: () => Promise.resolve("handle_errors\nupdating.html\n"),
     restartUnits: () => Promise.resolve(true),
+    ensureWebServer: () => Promise.resolve(true),
     migrate: () =>
       Promise.resolve({
         code: 0,
@@ -1299,6 +1322,91 @@ test("assertControlPlaneManifestPreflight refuses a tampered manifest", async ()
   );
 });
 
+/** A fetchText that answers `statuses` in turn (the last one repeats) and counts calls. */
+function flakyManifests(statuses: number[], okBody: string) {
+  const calls = { n: 0 };
+  const fetchText = (_url: string) => {
+    const status = statuses[Math.min(calls.n, statuses.length - 1)];
+    calls.n += 1;
+    return Promise.resolve({
+      ok: status === 200,
+      status,
+      body: status === 200 ? okBody : "",
+    });
+  };
+  return { calls, fetchText };
+}
+
+const noWait = { sleep: () => Promise.resolve() };
+
+test("assertControlPlaneManifestPreflight retries a 503 and then verifies", async () => {
+  const flaky = flakyManifests([503, 200], SIGNED_INSTANCE_MANIFEST_BODY);
+  const verified = await assertControlPlaneManifestPreflight({
+    channel: "release",
+    installMode: "production",
+    publicKeyHex: TEST_RELEASE_SIGNING_PUBLIC_KEY_HEX,
+    fetchText: flaky.fetchText,
+    retry: noWait,
+  });
+  assertEquals(verified.commit, "newcommit");
+  assertEquals(flaky.calls.n, 2);
+});
+
+test("assertControlPlaneManifestPreflight gives up after four 504s with the original text", async () => {
+  const flaky = flakyManifests([504], "");
+  await assertRejects(
+    () =>
+      assertControlPlaneManifestPreflight({
+        channel: "release",
+        installMode: "production",
+        publicKeyHex: TEST_RELEASE_SIGNING_PUBLIC_KEY_HEX,
+        fetchText: flaky.fetchText,
+        retry: noWait,
+      }),
+    UpdatePreflightError,
+    "failed to fetch instance manifest: HTTP 504",
+  );
+  assertEquals(flaky.calls.n, 4);
+});
+
+test("assertControlPlaneManifestPreflight does not retry a 404", async () => {
+  const flaky = flakyManifests([404, 200], SIGNED_INSTANCE_MANIFEST_BODY);
+  await assertRejects(
+    () =>
+      assertControlPlaneManifestPreflight({
+        channel: "release",
+        installMode: "production",
+        publicKeyHex: TEST_RELEASE_SIGNING_PUBLIC_KEY_HEX,
+        fetchText: flaky.fetchText,
+        retry: noWait,
+      }),
+    UpdatePreflightError,
+    "HTTP 404",
+  );
+  assertEquals(flaky.calls.n, 1);
+});
+
+test("assertControlPlaneManifestPreflight does not retry a bad signature", async () => {
+  const tampered = JSON.stringify({
+    ...JSON.parse(SIGNED_INSTANCE_MANIFEST_BODY),
+    commit: "evilcommit",
+  });
+  const flaky = flakyManifests([200], tampered);
+  await assertRejects(
+    () =>
+      assertControlPlaneManifestPreflight({
+        channel: "release",
+        installMode: "production",
+        publicKeyHex: TEST_RELEASE_SIGNING_PUBLIC_KEY_HEX,
+        fetchText: flaky.fetchText,
+        retry: noWait,
+      }),
+    UpdatePreflightError,
+    "invalid",
+  );
+  assertEquals(flaky.calls.n, 1);
+});
+
 test("assertControlPlaneManifestPreflight accepts signed instance and UI manifests", async () => {
   const verified = await assertControlPlaneManifestPreflight({
     channel: "release",
@@ -1311,6 +1419,64 @@ test("assertControlPlaneManifestPreflight accepts signed instance and UI manifes
     ),
   });
   assertEquals(verified.commit, "newcommit");
+});
+
+test("assertControlPlaneManifestPreflight never skips the signature for a pinned instance or UI manifest", async () => {
+  const unsigned = serveManifests(JSON.stringify(INSTANCE_MANIFEST));
+  const instancePin =
+    "https://github.com/TurboPanel/turbopanel/releases/download/v0.1.1/manifest.json";
+  const overlayEnv = {
+    TURBOPANEL_DL_BASE: "https://dev.example.lan:8443",
+    TURBOPANEL_DEV_ALLOW_UNSIGNED_MANIFEST: "1",
+  };
+  await assertRejects(
+    () =>
+      assertControlPlaneManifestPreflight({
+        channel: "release",
+        manifestUrl: instancePin,
+        installMode: "development",
+        fetchText: unsigned,
+      }),
+    UpdatePreflightError,
+    "unsigned",
+  );
+  await assertRejects(
+    () =>
+      assertControlPlaneManifestPreflight({
+        channel: "release",
+        manifestUrl: instancePin,
+        installMode: "production",
+        env: overlayEnv,
+        fetchText: unsigned,
+      }),
+    UpdatePreflightError,
+    "unsigned",
+  );
+  // The channel's instance manifest may take the bypass; the UI pin may not.
+  await assertRejects(
+    () =>
+      assertControlPlaneManifestPreflight({
+        channel: "release",
+        uiManifestUrl: UI_PIN,
+        installMode: "production",
+        env: overlayEnv,
+        fetchText: serveManifests(
+          JSON.stringify(INSTANCE_MANIFEST),
+          JSON.stringify(UI_MANIFEST),
+        ),
+      }),
+    UpdatePreflightError,
+    "ui manifest is unsigned",
+  );
+  // A release-signed pin still verifies on such a host.
+  const pinned = await assertControlPlaneManifestPreflight({
+    channel: "release",
+    manifestUrl: instancePin,
+    installMode: "development",
+    publicKeyHex: TEST_RELEASE_SIGNING_PUBLIC_KEY_HEX,
+    fetchText: serveManifests(SIGNED_INSTANCE_MANIFEST_BODY),
+  });
+  assertEquals(pinned.commit, "newcommit");
 });
 
 test("assertControlPlaneManifestPreflight skips signatures only under the development bypass", async () => {
@@ -1420,6 +1586,105 @@ test("executeInstanceUpdateReconcile refreshes Caddy when the updating page is a
   );
   assertEquals(backupAt >= 0 && refreshAt > backupAt, true);
   assertEquals(installAt > refreshAt, true);
+});
+
+test("executeInstanceUpdateReconcile re-renders the units once, after the swap and before the restart", async () => {
+  const calls: Array<{ bin: string; args: string[] }> = [];
+  const order: string[] = [];
+  await executeInstanceUpdateReconcile({
+    channel: "release",
+    hooks: managedUpdateHooks(calls, {
+      restartUnits: () => {
+        order.push("restart");
+        return Promise.resolve(true);
+      },
+      run: (bin, args) => {
+        calls.push({ bin, args });
+        order.push(
+          args.includes("update-instance")
+            ? "update-instance"
+            : args.at(-1) ?? "",
+        );
+        if (args[0] === "inspect") {
+          return Promise.resolve({
+            code: 0,
+            stdout: "true healthy\n",
+            stderr: "",
+          });
+        }
+        return Promise.resolve({ code: 0, stdout: "", stderr: "" });
+      },
+    }),
+  });
+  const refreshes = order.filter((name) =>
+    name === "instance-units-refresh.yml"
+  );
+  assertEquals(refreshes.length, 1);
+  const refreshAt = order.indexOf("instance-units-refresh.yml");
+  assertEquals(refreshAt > order.indexOf("update-instance"), true);
+  assertEquals(order.indexOf("update-instance") >= 0, true);
+  assertEquals(order.indexOf("restart") > refreshAt, true);
+  assertEquals(order.filter((name) => name === "restart").length, 1);
+});
+
+test("executeInstanceUpdateReconcile warns and carries on when the unit refresh fails", async () => {
+  const calls: Array<{ bin: string; args: string[] }> = [];
+  const base = managedUpdateHooks(calls);
+  const stages: string[] = [];
+  await executeInstanceUpdateReconcile({
+    channel: "release",
+    onStage: (stage) => stages.push(stage),
+    hooks: {
+      ...base,
+      run: (bin, args, onStage) => {
+        if (args.at(-1) === "instance-units-refresh.yml") {
+          calls.push({ bin, args });
+          return Promise.resolve({ code: 2, stdout: "", stderr: "boom" });
+        }
+        return base.run!(bin, args, onStage);
+      },
+    },
+  });
+  assertEquals(stages.at(-1), "done");
+  assertEquals(
+    calls.some((call) => call.args.includes("instance-rollback.yml")),
+    false,
+  );
+});
+
+test("executeInstanceUpdateReconcile finishes a canary update: the manifest names the label, the binary its base version", async () => {
+  // canary update #2 (2026-10-01): the new build served the target commit as
+  // `0.1.7` (build `0.1.7-canary.56`), the manifest said `0.1.7-canary.56`,
+  // and the strict version compare waited out the health budget and rolled back.
+  const canaryManifest = JSON.stringify(
+    await signWithTestKey({
+      commit: "newcommit",
+      version: "0.1.7-canary.56",
+      channel: "canary",
+    }),
+  );
+  const calls: Array<{ bin: string; args: string[] }> = [];
+  const stages: string[] = [];
+  await executeInstanceUpdateReconcile({
+    channel: "canary",
+    upgradeId: "up-canary",
+    onStage: (stage) => stages.push(stage),
+    hooks: managedUpdateHooks(calls, {
+      fetchText: () =>
+        Promise.resolve({ ok: true, status: 200, body: canaryManifest }),
+      readHealth: () =>
+        Promise.resolve({
+          version: "0.1.7",
+          commit: "newcommit",
+          build: "0.1.7-canary.56",
+        }),
+    }),
+  });
+  assertEquals(stages.at(-1), "done");
+  assertEquals(
+    calls.some((call) => call.args.includes("instance-rollback.yml")),
+    false,
+  );
 });
 
 test("executeInstanceUpdateReconcile names the running build in the backup playbook", async () => {
@@ -1540,7 +1805,7 @@ test("executeInstanceUpdateReconcile rolls back when health never matches", asyn
         hooks: managedUpdateHooks(calls, {
           readHealth: () => {
             reads += 1;
-            if (reads === 1 || reads >= 4) {
+            if (reads === 1 || reads >= 6) {
               return Promise.resolve({ version: "0.1.0", commit: "oldcommit" });
             }
             return Promise.resolve(null);
@@ -1600,7 +1865,220 @@ test("executeInstanceUpdateReconcile reports recovery_required when rollback fai
     assertEquals(error.code, "recovery_required");
     assertStringIncludes(error.message, "instance-rollback.yml");
     assertStringIncludes(error.message, "up-recover");
+    // The plain fact leads; the commands come second, behind a health check.
+    assertStringIncludes(
+      error.message,
+      "recovery_required: The new control plane",
+    );
+    assertStringIncludes(error.message, "could not be confirmed");
+    assertEquals(
+      error.message.indexOf("Check first") <
+        error.message.indexOf("instance-rollback.yml"),
+      true,
+    );
   }
+});
+
+test("ensureWebServerRunning starts an inactive Caddy and then succeeds", async () => {
+  let active = false;
+  const calls: string[][] = [];
+  const ok = await ensureWebServerRunning({
+    isActive: () => Promise.resolve(active),
+    runSystemctl: (args) => {
+      calls.push(args);
+      active = true;
+      return Promise.resolve({ success: true, stderr: "" });
+    },
+    sleep: () => Promise.resolve(),
+  });
+  assertEquals(ok, true);
+  assertEquals(calls.length, 1);
+  assertEquals(calls[0], ["-n", "systemctl", "restart", "turbopanel-caddy"]);
+});
+
+test("ensureWebServerRunning leaves a running Caddy alone", async () => {
+  let started = 0;
+  const ok = await ensureWebServerRunning({
+    isActive: () => Promise.resolve(true),
+    runSystemctl: () => {
+      started++;
+      return Promise.resolve({ success: true, stderr: "" });
+    },
+  });
+  assertEquals(ok, true);
+  assertEquals(started, 0);
+});
+
+test("ensureWebServerRunning retries with backoff, then gives up", async () => {
+  const waits: number[] = [];
+  let starts = 0;
+  const ok = await ensureWebServerRunning({
+    isActive: () => Promise.resolve(false),
+    runSystemctl: () => {
+      starts++;
+      return Promise.resolve({ success: false, stderr: "boom" });
+    },
+    sleep: (ms) => {
+      waits.push(ms);
+      return Promise.resolve();
+    },
+    backoffMs: [1, 2, 3],
+  });
+  assertEquals(ok, false);
+  assertEquals(starts, 3);
+  assertEquals(waits, [1, 2, 3]);
+});
+
+test("a failed Caddy reload does not fail the instance restart", async () => {
+  const run = (args: string[]) =>
+    Promise.resolve({
+      success: !args.includes("reload"),
+      stderr: "Unit cannot be reloaded because it is inactive",
+    });
+  assertEquals(await restartControlPlaneUnits({ runSystemctl: run }), true);
+});
+
+test("Caddy down after the restart is started and the update succeeds", async () => {
+  const calls: Array<{ bin: string; args: string[] }> = [];
+  let caddyUp = false;
+  const result = await executeInstanceUpdateReconcile({
+    channel: "release",
+    hooks: managedUpdateHooks(calls, {
+      ensureWebServer: () => {
+        const ok = ensureWebServerRunning({
+          isActive: () => Promise.resolve(caddyUp),
+          runSystemctl: () => {
+            caddyUp = true;
+            return Promise.resolve({ success: true, stderr: "" });
+          },
+          sleep: () => Promise.resolve(),
+        });
+        return ok;
+      },
+    }),
+  });
+  assertEquals(caddyUp, true);
+  assertEquals(result.warning, undefined);
+  assertEquals(
+    calls.some((call) => call.args.includes("instance-rollback.yml")),
+    false,
+  );
+});
+
+test("a web server that never starts is its own error, with no rollback", async () => {
+  const calls: Array<{ bin: string; args: string[] }> = [];
+  const error = await assertRejects(
+    () =>
+      executeInstanceUpdateReconcile({
+        channel: "release",
+        hooks: managedUpdateHooks(calls, {
+          ensureWebServer: () => Promise.resolve(false),
+        }),
+      }),
+    ControlPlaneUpdateFailedError,
+    "web server did not start",
+  );
+  if (error instanceof ControlPlaneUpdateFailedError) {
+    assertEquals(error.code, "web_server_failed");
+    assertEquals(error.stage, "failed");
+  }
+  assertEquals(
+    calls.some((call) => call.args.includes("instance-rollback.yml")),
+    false,
+  );
+});
+
+test("a bad new build still rolls back even when the web server is down", async () => {
+  const calls: Array<{ bin: string; args: string[] }> = [];
+  await assertRejects(
+    () =>
+      executeInstanceUpdateReconcile({
+        channel: "release",
+        hooks: managedUpdateHooks(calls, {
+          ensureWebServer: () => Promise.resolve(false),
+          readHealth: () => Promise.resolve(null),
+        }),
+      }),
+    ControlPlaneUpdateFailedError,
+  );
+  assertEquals(
+    calls.some((call) => call.args.includes("instance-rollback.yml")),
+    true,
+  );
+});
+
+test("a slow host that answers after more than five minutes is not rolled back", async () => {
+  const calls: Array<{ bin: string; args: string[] }> = [];
+  let clock = 0;
+  let reads = 0;
+  await executeInstanceUpdateReconcile({
+    channel: "release",
+    upgradeId: "up-slow",
+    hooks: managedUpdateHooks(calls, {
+      now: () => clock,
+      sleep: (ms) => {
+        clock += ms;
+        return Promise.resolve();
+      },
+      readHealth: () => {
+        reads += 1;
+        if (reads === 1) {
+          return Promise.resolve({ version: "0.1.0", commit: "oldcommit" });
+        }
+        // Silent for 7 minutes of fake time, then the new build answers.
+        return Promise.resolve(
+          clock < 7 * 60 * 1000
+            ? null
+            : { version: "0.1.1", commit: "newcommit" },
+        );
+      },
+    }),
+  });
+  assertEquals(clock >= 7 * 60 * 1000, true);
+  assertEquals(
+    calls.some((call) => call.args.includes("instance-rollback.yml")),
+    false,
+  );
+});
+
+test("a new build that is serving after a failed rollback is a success with a warning", async () => {
+  const calls: Array<{ bin: string; args: string[] }> = [];
+  let clock = 0;
+  let reads = 0;
+  let rollbackRan = false;
+  const base = managedUpdateHooks(calls);
+  const outcome = await executeInstanceUpdateReconcile({
+    channel: "release",
+    upgradeId: "up-late",
+    hooks: {
+      ...base,
+      now: () => clock,
+      sleep: (ms) => {
+        clock += ms;
+        return Promise.resolve();
+      },
+      readHealth: () => {
+        reads += 1;
+        if (reads === 1) {
+          return Promise.resolve({ version: "0.1.0", commit: "oldcommit" });
+        }
+        return Promise.resolve(
+          rollbackRan ? { version: "0.1.1", commit: "newcommit" } : null,
+        );
+      },
+      run: (bin, args, onStage) => {
+        if (args.includes("instance-rollback.yml")) {
+          calls.push({ bin, args });
+          rollbackRan = true;
+          return Promise.resolve({ code: 1, stdout: "", stderr: "slow" });
+        }
+        return base.run!(bin, args, onStage);
+      },
+    },
+  });
+  assertEquals(rollbackRan, true);
+  assertStringIncludes(outcome.warning ?? "", "health_timeout");
+  assertStringIncludes(outcome.warning ?? "", "0.1.1 is serving");
 });
 
 test("a failed migration keeps the previous database and rolls back", async () => {

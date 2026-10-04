@@ -84,3 +84,30 @@ test("isPhysicalMachine: an ambiguous vendor reads false once product_name confi
   });
   assertEquals(physical, false);
 });
+
+test("isPhysicalMachine: a Hyper-V guest with an unfamiliar vendor reads false via the chassis asset tag", async () => {
+  const files: Record<string, string> = {
+    "/s/class/dmi/id/sys_vendor": "Acme\n",
+    "/s/class/dmi/id/chassis_asset_tag": "7783-7084-3265-9085-8269-3286-77\n",
+  };
+  assertEquals(
+    await isPhysicalMachine({ readFile: (p) => files[p], sysRoot: "/s" }),
+    false,
+  );
+});
+
+test("isPhysicalMachine: VMBus devices read false; empty VMBus dir does not", async () => {
+  const readFile = () => undefined;
+  assertEquals(
+    await isPhysicalMachine({
+      readFile,
+      listDir: () => ["vmbus_0"],
+      sysRoot: "/s",
+    }),
+    false,
+  );
+  assertEquals(
+    await isPhysicalMachine({ readFile, listDir: () => [], sysRoot: "/s" }),
+    true,
+  );
+});

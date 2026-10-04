@@ -81,58 +81,75 @@
       loop_control:
         label: "{{ item }}"
 
+    # The pruned copy above omits fcgi-bin, and `copy` to a file dest does not
+    # create a missing parent directory (fails: destination directory does not exist).
+    - name: Create fcgi-bin directory in the versioned tree
+      ansible.builtin.file:
+        path: "{{ turbopanel_vendor_dir }}/openlitespeed/{{ openlitespeed_version }}/fcgi-bin"
+        state: directory
+        owner: root
+        group: "{{ turbopanel_group }}"
+        mode: "0750"
+
     - name: Install lsperld.fpl only (drop node/ruby fcgi helpers — unused, unvendored runtimes)
       ansible.builtin.copy:
         remote_src: true
         src: "{{ _openlitespeed_tmp.path }}/openlitespeed/fcgi-bin/lsperld.fpl"
         dest: "{{ turbopanel_vendor_dir }}/openlitespeed/{{ openlitespeed_version }}/fcgi-bin/lsperld.fpl"
-        mode: "0750"
-
-    - name: Seed FHS mime.properties from the release tree (first install only)
-      ansible.builtin.copy:
-        remote_src: true
-        src: "{{ _openlitespeed_tmp.path }}/openlitespeed/conf/mime.properties"
-        dest: "{{ turbopanel_config_dir }}/openlitespeed/mime.properties"
         owner: root
-        group: "{{ openlitespeed_service_group }}"
-        mode: "0640"
-        force: false
+        group: "{{ turbopanel_group }}"
+        mode: "0750"
 
     - name: Remove temp download dir
       ansible.builtin.file:
         path: "{{ _openlitespeed_tmp.path }}"
         state: absent
 
-    - name: Create litespeed exec name expected by lswsctrl
-      ansible.builtin.file:
-        src: "./openlitespeed"
-        dest: "{{ turbopanel_vendor_dir }}/openlitespeed/{{ openlitespeed_version }}/bin/litespeed"
-        state: link
-        force: true
-
-    - name: Create writable server-root-relative runtime dirs (OLS writes these unconditionally; not config-relocatable)
-      ansible.builtin.file:
-        path: "{{ turbopanel_vendor_dir }}/openlitespeed/{{ openlitespeed_version }}/{{ item }}"
-        state: directory
-        owner: "{{ openlitespeed_service_user }}"
-        group: "{{ openlitespeed_service_group }}"
-        mode: "0750"
-      loop:
-        - cachedata
-        - autoupdate
-        - tmp
-        - tmp/ocspcache
-
-# Separate from the first-install block above: an existing vendored tree needs
-# this the moment a site first asks for PHP. `uds://tmp/lshttpd/<name>.sock` in
-# each vhost's extprocessor resolves relative to the server root.
-- name: Ensure LSAPI socket directory
+# Outside the first-install block on purpose: a host upgraded over an older
+# vendored tree skips the install above. OpenLiteSpeed writes these relative to
+# its server root (they are not config-relocatable) and fails to serve without
+# them. LSAPI sockets do not live here: `uds://tmp/…` resolves to the host /tmp,
+# so the vhosts name an absolute path under the unit's RuntimeDirectory.
+- name: Ensure writable server-root-relative runtime dirs
   ansible.builtin.file:
-    path: "{{ turbopanel_vendor_dir }}/openlitespeed/{{ openlitespeed_version }}/tmp/lshttpd"
+    path: "{{ turbopanel_vendor_dir }}/openlitespeed/{{ openlitespeed_version }}/{{ item }}"
     state: directory
     owner: "{{ openlitespeed_service_user }}"
     group: "{{ openlitespeed_service_group }}"
     mode: "0750"
+  loop:
+    - cachedata
+    - autoupdate
+    - tmp
+    - tmp/ocspcache
+
+# Outside the first-install block on purpose: a host upgraded over an older
+# vendored 1.9.1 tree skips the install above and would never get the link,
+# leaving lswsctrl ("Cannot find .../bin/litespeed") crash-looping the service.
+- name: Re-check vendored OpenLiteSpeed binary
+  ansible.builtin.stat:
+    path: "{{ turbopanel_vendor_dir }}/openlitespeed/{{ openlitespeed_version }}/bin/openlitespeed"
+    follow: false
+  register: _openlitespeed_bin
+
+- name: Assert vendored OpenLiteSpeed binary is a regular file
+  ansible.builtin.assert:
+    that:
+      - _openlitespeed_bin.stat.exists
+      - _openlitespeed_bin.stat.isreg
+    fail_msg: >-
+      {{ turbopanel_vendor_dir }}/openlitespeed/{{ openlitespeed_version }}/bin/openlitespeed
+      is missing or not a regular file; refusing to link litespeed to it.
+
+- name: Create litespeed exec name expected by lswsctrl
+  ansible.builtin.file:
+    src: "openlitespeed"
+    dest: "{{ turbopanel_vendor_dir }}/openlitespeed/{{ openlitespeed_version }}/bin/litespeed"
+    state: link
+    follow: false
+    force: true
+    owner: root
+    group: "{{ turbopanel_group }}"
 
 - name: Harden OpenLiteSpeed binary permissions
   ansible.builtin.file:
@@ -159,7 +176,7 @@
   loop_control:
     loop_var: lsphp_series
 
-- name: Ensure FHS config dir for OpenLiteSpeed (vhosts sub-dir)
+- name: Ensure FHS config dirs for OpenLiteSpeed (sites + vhosts)
   ansible.builtin.file:
     path: "{{ turbopanel_config_dir }}/openlitespeed/{{ item }}"
     state: directory
@@ -168,7 +185,18 @@
     mode: "0750"
   loop:
     - ""
+    - sites
     - vhosts
+
+# Shipped with the role (the v1.9.1 release's conf/mime.properties), so a host
+# whose vendored tree predates this task still gets it without a re-download.
+- name: Install OpenLiteSpeed mime.properties
+  ansible.builtin.copy:
+    src: mime.properties
+    dest: "{{ turbopanel_config_dir }}/openlitespeed/mime.properties"
+    owner: root
+    group: "{{ openlitespeed_service_group }}"
+    mode: "0640"
 
 - name: Ensure OpenLiteSpeed log directory
   ansible.builtin.file:

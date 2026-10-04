@@ -16,6 +16,7 @@ import type { LayoutPaths } from "../paths/layout.ts";
 import { logWarn } from "../util/logger.ts";
 import { forEachSequential } from "../util/sequential.ts";
 import { instanceSiteHostname } from "../instance/instance-acme-observe.ts";
+import { HOSTING_CADDY_USER } from "./ensure-hosting-caddy.ts";
 import {
   HOSTING_CADDY_SERVICE,
   inspectIssuerCertificatePem,
@@ -103,7 +104,7 @@ const PREFLIGHT_TIMEOUT_MS = 8_000;
 const POLL_MS = 500;
 /**
  * `Type=simple` reports hosting Caddy active as soon as `caddy run` is
- * forked. `:80` (and admin `:2029`) bind a few milliseconds later. Bounded
+ * forked. `:80` (and the admin socket) bind a few milliseconds later. Bounded
  * by attempts so an injected `sleep` keeps tests instant.
  */
 const HOSTING_CADDY_READY_ATTEMPTS = 20;
@@ -290,7 +291,7 @@ export async function openInstanceAcmeWindow(
       throw new Error(port80HeldMessage(holder.process));
     }
     // Write before start: the unit is Type=simple, so enable --now returns
-    // before admin :2029 exists. ExecReload then fails with connection
+    // before the admin socket exists. ExecReload then fails with connection
     // refused. A first start must load this snippet as the initial config.
     wroteSite = true;
     await writeTextPrivileged(
@@ -543,9 +544,47 @@ export async function verifyInstanceAcmeHttp01Reachability(
   );
 }
 
+/**
+ * The one ACL entry that lets hosting Caddy ({@link HOSTING_CADDY_USER}, not
+ * in group tp) connect to the issuer socket. Connecting needs write on the
+ * socket inode; the hosting-caddy role grants traverse (`x`) on the run
+ * directory, and nothing else in it.
+ */
+export const INSTANCE_ACME_SOCKET_ACL = `u:${HOSTING_CADDY_USER}:rw`;
+
+/**
+ * Let hosting Caddy reach the issuer socket. Whoever binds it (the daemon's
+ * preflight listener, or the issuer Caddy as tpcaddy) is not root and cannot
+ * name another user in an ACL, so tp-host adds exactly this entry, waiting
+ * briefly for the issuer to bind. `-P`: a swapped-in symlink is never followed.
+ */
+export async function grantInstanceAcmeSocket(
+  socketPath: string,
+  run: InstanceAcmeCommand,
+): Promise<void> {
+  const result = await run(
+    "sudo",
+    hostSudoArgs([
+      "-n",
+      "setfacl",
+      "-P",
+      "-m",
+      INSTANCE_ACME_SOCKET_ACL,
+      socketPath,
+    ]),
+  );
+  if (!result.ok) {
+    throw new Error(
+      result.stderr.trim() ||
+        `could not let ${HOSTING_CADDY_USER} reach ${socketPath}`,
+    );
+  }
+}
+
 async function withPreflightServer(
   socketPath: string,
   nonce: string,
+  run: InstanceAcmeCommand,
   body: () => Promise<void>,
 ): Promise<void> {
   await removeSite(socketPath);
@@ -553,6 +592,7 @@ async function withPreflightServer(
   await Deno.chmod(socketPath, 0o660).catch(() => undefined);
   const serving = acceptPreflight(listener, nonce);
   try {
+    await grantInstanceAcmeSocket(socketPath, run);
     await body();
   } finally {
     listener.close();
@@ -605,6 +645,7 @@ async function readRequestPath(conn: Deno.Conn): Promise<string> {
 }
 
 export type InstanceAcmeHttp01PreflightDeps = {
+  run?: InstanceAcmeCommand;
   fetchImpl?: typeof fetch;
   nonce?: () => string;
   timeoutMs?: number;
@@ -622,11 +663,12 @@ export async function preflightInstanceLetsEncryptHttp01(
 ): Promise<void> {
   const hosts = letsEncryptHostnames(hostnames);
   const socketPath = instanceAcmeSocketPath(layout);
+  const run = deps.run ?? defaultCommand;
   // One shared issuer socket: hosts are probed one at a time, stopping at the
   // first failure.
   await forEachSequential(hosts, async (host) => {
     const nonce = deps.nonce?.() ?? instanceAcmePreflightNonce();
-    await withPreflightServer(socketPath, nonce, async () => {
+    await withPreflightServer(socketPath, nonce, run, async () => {
       await verifyInstanceAcmeHttp01Reachability(host, nonce, {
         fetchImpl: deps.fetchImpl,
         timeoutMs: deps.timeoutMs,
@@ -675,6 +717,7 @@ export async function issueInstanceLetsEncryptCertificates(
   let failed = true;
   let stopError: Error | null = null;
   try {
+    await grantInstanceAcmeSocket(instanceAcmeSocketPath(layout), run);
     await waitForCertificates(layout, hosts, had, deps, run);
     await forEachSequential(
       hosts,

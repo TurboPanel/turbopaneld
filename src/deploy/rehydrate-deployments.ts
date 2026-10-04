@@ -7,6 +7,7 @@
 
 import { logInfo, logWarn, sanitizeForLog } from "../util/logger.ts";
 import { forEachSequential } from "../util/sequential.ts";
+import { liveProjects } from "./deployment-generations.ts";
 import {
   composeFileArgs,
   type DeploymentManifestSecret,
@@ -133,8 +134,22 @@ async function composeUpDeployment(
 ): Promise<void> {
   const paths = await resolveDeployedComposePaths(local.dir);
   if (paths === null) return;
+  // Only the live generation is started after a reboot; a draining or retired
+  // one stays down. With one project per deployment this is that project.
+  await Promise.all(
+    liveProjects(local.manifest).map((projectName) =>
+      composeUpProject(projectName, paths, run)
+    ),
+  );
+}
+
+async function composeUpProject(
+  projectName: string,
+  paths: readonly string[],
+  run: RunDockerFn,
+): Promise<void> {
   const result = await run([
-    ...composeFileArgs(local.manifest.projectName, paths),
+    ...composeFileArgs(projectName, paths),
     "up",
     "-d",
     "--remove-orphans",
@@ -142,7 +157,7 @@ async function composeUpDeployment(
   if (!result.success) {
     logWarn(
       "deploy",
-      `rehydrate compose up failed project=${local.manifest.projectName}: ${
+      `rehydrate compose up failed project=${projectName}: ${
         sanitizeForLog(result.stderr || "compose up failed")
       }`,
     );

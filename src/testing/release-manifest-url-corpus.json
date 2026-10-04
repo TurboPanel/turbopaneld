@@ -660,6 +660,168 @@
       "url": "https://github.com/TurboPanel/turbopaneld/releases/download/v0.1.3/manifest.json",
       "allow": true,
       "why": "release tag manifest"
+    },
+    {
+      "kind": "daemon",
+      "url": "https://[::1]/TurboPanel/turbopaneld/releases/download/v1/manifest.json",
+      "allow": false,
+      "why": "IPv6 loopback literal host"
+    },
+    {
+      "kind": "daemon",
+      "url": "https://[2606:50c0:8000::154]/TurboPanel/turbopaneld/releases/download/v1/manifest.json",
+      "allow": false,
+      "why": "IPv6 literal host, even GitHub's own address"
+    },
+    {
+      "kind": "daemon",
+      "url": "https://[::ffff:140.82.112.3]/TurboPanel/turbopaneld/releases/download/v1/manifest.json",
+      "allow": false,
+      "why": "IPv4-mapped IPv6 literal host"
+    },
+    {
+      "kind": "daemon",
+      "url": "https://140.82.112.3/TurboPanel/turbopaneld/releases/download/v1/manifest.json",
+      "allow": false,
+      "why": "bare IPv4 literal host"
+    },
+    {
+      "kind": "daemon",
+      "url": "https://github\u3002com/TurboPanel/turbopaneld/releases/download/v1/manifest.json",
+      "allow": false,
+      "why": "ideographic full stop in the host"
+    },
+    {
+      "kind": "daemon",
+      "url": "https://github\uff0ecom/TurboPanel/turbopaneld/releases/download/v1/manifest.json",
+      "allow": false,
+      "why": "fullwidth full stop in the host"
+    },
+    {
+      "kind": "daemon",
+      "url": "https://g\u0456thub.com/TurboPanel/turbopaneld/releases/download/v1/manifest.json",
+      "allow": false,
+      "why": "Cyrillic lookalike letter in the host"
+    },
+    {
+      "kind": "daemon",
+      "url": "https://github.com/TurboPanel/turbopaneld/releases/download/v1/\u202emanifest.json",
+      "allow": false,
+      "why": "right-to-left override in the file name"
+    },
+    {
+      "kind": "daemon",
+      "url": "https://github.com/TurboPanel/turbopaneld/releases/download/v1/manifest.json%00",
+      "allow": false,
+      "why": "percent-encoded NUL after the file name"
+    },
+    {
+      "kind": "daemon",
+      "url": "https://github.com/TurboPanel/turbopaneld/releases/download/v1/manifest.json\r",
+      "allow": false,
+      "why": "trailing carriage return"
+    },
+    {
+      "kind": "daemon",
+      "url": "https://github.com/TurboPanel/turbopaneld/releases/download/v1/manifest.json\t",
+      "allow": false,
+      "why": "trailing tab"
+    },
+    {
+      "kind": "daemon",
+      "url": "https://github.com%2eevil.example/TurboPanel/turbopaneld/releases/download/v1/manifest.json",
+      "allow": false,
+      "why": "percent escape inside the host"
+    },
+    {
+      "kind": "daemon",
+      "url": "https://github.com:/TurboPanel/turbopaneld/releases/download/v1/manifest.json",
+      "allow": false,
+      "why": "empty port"
+    },
+    {
+      "kind": "daemon",
+      "url": "https://dl.trbp.nl:443/channels/trunk/manifest.json",
+      "allow": false,
+      "why": "CDN host with an explicit default port"
+    },
+    {
+      "kind": "daemon",
+      "url": "https://dl.trbp.nl./channels/trunk/manifest.json",
+      "allow": false,
+      "why": "CDN host with a trailing dot"
+    },
+    {
+      "kind": "daemon",
+      "url": "https://dl.trbp.nl@attacker.example/channels/trunk/manifest.json",
+      "allow": false,
+      "why": "CDN userinfo trick"
+    },
+    {
+      "kind": "daemon",
+      "url": "https://dl.trbp.nl/channels/trunk/manifest.json%2f..%2f..%2fx",
+      "allow": false,
+      "why": "CDN encoded traversal after the file name"
+    },
+    {
+      "kind": "daemon",
+      "url": "https://dl.trbp.nl/channels/trunk/extra/manifest.json",
+      "allow": false,
+      "why": "CDN extra path segment"
+    },
+    {
+      "kind": "daemon",
+      "url": "https://dl.trbp.nl/channels/%2e%2e/evil/manifest.json",
+      "allow": false,
+      "why": "CDN encoded dot segments"
+    },
+    {
+      "kind": "daemon",
+      "url": "",
+      "allow": false,
+      "why": "empty string"
+    },
+    {
+      "kind": "daemon",
+      "url": "https://",
+      "allow": false,
+      "why": "scheme only"
+    },
+    {
+      "kind": "daemon",
+      "url": "file:///etc/passwd",
+      "allow": false,
+      "why": "file scheme"
+    },
+    {
+      "kind": "daemon",
+      "url": "javascript:alert(1)//github.com/TurboPanel/turbopaneld/releases/download/v1/manifest.json",
+      "allow": false,
+      "why": "javascript scheme"
+    },
+    {
+      "kind": "instance",
+      "url": "https://[::1]/TurboPanel/turbopanel/releases/download/v1/manifest.json",
+      "allow": false,
+      "why": "IPv6 loopback literal host"
+    },
+    {
+      "kind": "instance",
+      "url": "https://github.com/TurboPanel/turbopanel/releases/download/v1/\u202emanifest.json",
+      "allow": false,
+      "why": "right-to-left override in the file name"
+    },
+    {
+      "kind": "ui",
+      "url": "https://[::1]/TurboPanel/ui/releases/download/v1/manifest.json",
+      "allow": false,
+      "why": "IPv6 loopback literal host"
+    },
+    {
+      "kind": "ui",
+      "url": "https://github\uff0ecom/TurboPanel/ui/releases/download/v1/manifest.json",
+      "allow": false,
+      "why": "fullwidth full stop in the host"
     }
   ]
 }

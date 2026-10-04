@@ -1,0 +1,202 @@
+---
+- name: Look up the daemon group id
+  ansible.builtin.getent:
+    database: group
+    key: "{{ docker_gate_group }}"
+    fail_key: false
+
+- name: Record the daemon group id
+  ansible.builtin.set_fact:
+    docker_gate_gid: "{{ (getent_group[docker_gate_group] | default(['', ''], true))[1] | default('') }}"
+
+# Stage 4: the build socket's group. A missing build user is an error, never
+# a build socket nobody can open.
+- name: Look up the daemon account that may open the build socket
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ docker_gate_build_user }}"
+    fail_key: true
+
+- name: Ensure the build socket group exists
+  ansible.builtin.group:
+    name: "{{ docker_gate_build_group }}"
+    system: true
+
+- name: Add the daemon account to the build socket group
+  ansible.builtin.user:
+    name: "{{ docker_gate_build_user }}"
+    groups: "{{ docker_gate_build_group }}"
+    append: true
+
+- name: Look up the build socket group id
+  ansible.builtin.getent:
+    database: group
+    key: "{{ docker_gate_build_group }}"
+    fail_key: true
+
+- name: Record the build socket group id
+  ansible.builtin.set_fact:
+    docker_gate_build_gid: "{{ getent_group[docker_gate_build_group][1] }}"
+
+- name: Refuse a build socket group that is not exactly the build user
+  ansible.builtin.assert:
+    that:
+      - (docker_gate_build_gid | string | length) > 0
+      - (getent_group[docker_gate_build_group][2] | default('', true)).split(',') | reject('equalto', '') | list == [docker_gate_build_user]
+    fail_msg: >-
+      {{ docker_gate_build_group }} must hold only {{ docker_gate_build_user }}
+      (it holds: {{ getent_group[docker_gate_build_group][2] | default('', true) }})
+
+# deploy.yml has already staged the files in .next and load-checked them: this
+# only moves checked files into place.
+- name: Install the gate source (root-owned, never writable by the daemon)
+  ansible.builtin.copy:
+    remote_src: true
+    src: "{{ docker_gate_stage_dir }}/{{ item }}"
+    dest: "{{ docker_gate_dir }}/{{ item }}"
+    owner: root
+    group: "{{ docker_gate_group }}"
+    mode: "0640"
+  loop: "{{ docker_gate_files }}"
+  notify: Restart Docker gate
+
+- name: Install the approval public key (root-owned; empty variable = approvals off)
+  ansible.builtin.copy:
+    content: "{{ docker_gate_approval_pubkeys | trim }}\n"
+    dest: "{{ docker_gate_approval_pubkey_file }}"
+    owner: root
+    group: "{{ docker_gate_group }}"
+    mode: "0640"
+  when: (docker_gate_approval_pubkeys | string | trim | length) > 0
+  notify: Restart Docker gate
+
+- name: Remove a stale approval public key when approvals are switched off
+  ansible.builtin.file:
+    path: "{{ docker_gate_approval_pubkey_file }}"
+    state: absent
+  when: (docker_gate_approval_pubkeys | string | trim | length) == 0
+  notify: Restart Docker gate
+
+# The socket directory is created at boot by tmpfiles.d (and by ExecStartPre
+# on every start), owned by root with the daemon group allowed in.
+- name: Install tmpfiles.d entry for the gate socket directory
+  ansible.builtin.copy:
+    dest: /etc/tmpfiles.d/turbopanel-docker-gate.conf
+    owner: root
+    group: root
+    mode: "0640"
+    content: |
+      # Managed by TurboPanel daemon orchestration (docker-gate role).
+      d {{ docker_gate_run_dir }} 0750 root {{ docker_gate_group }} -
+      d {{ docker_gate_ro_run_dir }} 0750 root root -
+      d {{ docker_gate_build_run_dir }} 0750 root {{ docker_gate_build_group }} -
+
+- name: Ensure the gate socket directory exists
+  ansible.builtin.file:
+    path: "{{ docker_gate_run_dir }}"
+    state: directory
+    owner: root
+    group: "{{ docker_gate_group }}"
+    mode: "0750"
+
+# Stage 3: the read-only listener's own directory (what a Traefik mounts).
+- name: Ensure the read-only socket directory exists
+  ansible.builtin.file:
+    path: "{{ docker_gate_ro_run_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+
+# Stage 4: the build listener's own directory (build.ts); the socket in it is
+# root:<build group> 0660.
+- name: Ensure the build socket directory exists
+  ansible.builtin.file:
+    path: "{{ docker_gate_build_run_dir }}"
+    state: directory
+    owner: root
+    group: "{{ docker_gate_build_group }}"
+    mode: "0750"
+
+# The daemon's switch to the read-only socket for Traefik. Root-owned in the
+# gate's own directory, so the daemon can read it and never write it. Sticky:
+# an empty variable leaves it as it is (its value is checked in main.yml).
+# The gate reads the switch at start (a read-only listener that cannot open is
+# fatal while it is on), so flipping it restarts the gate.
+- name: Turn on Traefik's read-only gate socket
+  ansible.builtin.copy:
+    content: "on\n"
+    dest: "{{ docker_gate_ingress_switch_file }}"
+    owner: root
+    group: "{{ docker_gate_group }}"
+    mode: "0640"
+  when:
+    - (docker_gate_ingress_socket | string | length) > 0
+    - docker_gate_ingress_socket | bool
+  notify: Restart Docker gate
+
+- name: Turn off Traefik's read-only gate socket
+  ansible.builtin.file:
+    path: "{{ docker_gate_ingress_switch_file }}"
+    state: absent
+  when:
+    - (docker_gate_ingress_socket | string | length) > 0
+    - not (docker_gate_ingress_socket | bool)
+  notify: Restart Docker gate
+
+- name: Install the gate systemd unit
+  ansible.builtin.template:
+    src: turbopanel-docker-gate.service.j2
+    dest: "{{ docker_gate_unit_file }}"
+    owner: root
+    group: root
+    mode: "0640"
+  notify:
+    - Reload systemd for the Docker gate
+    - Restart Docker gate
+
+- name: Flush handlers so the unit is loaded before it is started
+  ansible.builtin.meta: flush_handlers
+
+- name: Enable and start the Docker gate
+  ansible.builtin.systemd:
+    name: "{{ docker_gate_service_name }}"
+    enabled: true
+    state: started
+    daemon_reload: true
+
+# The main socket must answer whatever the switch says: it is what the daemon's
+# own tooling reads once routed through the gate, and a Type=simple unit that
+# crash-loops still passes `state: started`.
+- name: Prove the main gate socket answers
+  ansible.builtin.uri:
+    url: http://localhost/_ping
+    unix_socket: "{{ docker_gate_socket }}"
+    return_content: true
+  register: _docker_gate_main_ping
+  until: _docker_gate_main_ping.status == 200
+  retries: 15
+  delay: 2
+
+# With the switch on, Traefik is rendered against the read-only socket: a
+# converge must not report success while it is not answering. `state: started`
+# alone passes even while a Type=simple unit crash-loops, and a crash can leave
+# a stale socket file, so ask the socket itself.
+- name: Make sure the gate restart (if any) has happened before probing
+  ansible.builtin.meta: flush_handlers
+
+- name: Look for Traefik's switch file
+  ansible.builtin.stat:
+    path: "{{ docker_gate_ingress_switch_file }}"
+  register: _docker_gate_switch
+
+- name: Prove the read-only socket answers while Traefik's switch is on
+  ansible.builtin.uri:
+    url: http://localhost/_ping
+    unix_socket: "{{ docker_gate_ro_socket }}"
+    return_content: true
+  register: _docker_gate_ro_ping
+  until: _docker_gate_ro_ping.status == 200
+  retries: 15
+  delay: 2
+  when: _docker_gate_switch.stat.exists

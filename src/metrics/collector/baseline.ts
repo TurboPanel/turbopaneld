@@ -21,10 +21,34 @@
 type BaselineEntry = {
   value: number;
   bootGeneration: number;
+  /** Tick time (ms) the value was read at; `null` when no tick time was set. */
+  atMs: number | null;
 };
 
 export class CounterBaselineTracker {
   readonly #entries = new Map<string, BaselineEntry>();
+  readonly #elapsedMs = new Map<string, number>();
+  #tickMs: number | null = null;
+
+  /**
+   * Set the wall-clock time (ms) of the tick about to read counters. Each
+   * baseline remembers the tick time it was stored at, so a rate can divide
+   * by that counter's real elapsed time ({@link elapsedSeconds}) even when
+   * ticks or reads were missed in between.
+   */
+  beginTick(nowMs: number): void {
+    this.#tickMs = nowMs;
+  }
+
+  /**
+   * Seconds between `key`'s previous baseline and its latest computed
+   * {@link delta}; `fallbackSeconds` when no tick time was set or no delta
+   * was computed yet.
+   */
+  elapsedSeconds(key: string, fallbackSeconds: number): number {
+    const ms = this.#elapsedMs.get(key);
+    return ms === undefined || ms <= 0 ? fallbackSeconds : ms / 1000;
+  }
 
   /**
    * Per-interval delta for `key` given `currentValue`/`currentBootGeneration`.
@@ -41,11 +65,16 @@ export class CounterBaselineTracker {
     this.#entries.set(key, {
       value: currentValue,
       bootGeneration: currentBootGeneration,
+      atMs: this.#tickMs,
     });
+    this.#elapsedMs.delete(key);
 
     if (!prior) return null;
     if (prior.bootGeneration !== currentBootGeneration) return null;
     if (currentValue < prior.value) return null;
+    if (prior.atMs !== null && this.#tickMs !== null) {
+      this.#elapsedMs.set(key, this.#tickMs - prior.atMs);
+    }
     return currentValue - prior.value;
   }
 
@@ -72,6 +101,7 @@ export class CounterBaselineTracker {
    */
   invalidate(key: string): void {
     this.#entries.delete(key);
+    this.#elapsedMs.delete(key);
   }
 
   /**
@@ -84,7 +114,7 @@ export class CounterBaselineTracker {
    */
   invalidatePrefix(prefix: string): void {
     for (const key of this.#entries.keys()) {
-      if (key.startsWith(prefix)) this.#entries.delete(key);
+      if (key.startsWith(prefix)) this.invalidate(key);
     }
   }
 }

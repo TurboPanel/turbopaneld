@@ -1,0 +1,16 @@
+[Unit]
+Description=TurboPanel always-on egress block for Docker containers and builds
+Documentation=https://github.com/TurboPanel/turbopaneld/blob/trunk/orchestration/roles/docker/files/turbopanel-docker-egress
+After=docker.service network-online.target
+# Re-runs whenever docker.service is restarted (dockerd can rebuild DOCKER-USER).
+# Not Requires=: a host without Docker running still boots, and the rules stay
+# loaded when Docker stops (no stop command: stopping must never open the block).
+PartOf=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart={{ turbopanel_docker_egress_script }} apply
+
+[Install]
+WantedBy=multi-user.target docker.service

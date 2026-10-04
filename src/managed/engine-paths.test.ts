@@ -1,6 +1,7 @@
 import { assertEquals, assertThrows } from "@std/assert";
 import {
   assertSafeManagedIdentifiers,
+  managedBackupArtifactDir,
   managedBackupArtifactPath,
   managedBackupsDir,
   managedComposePath,
@@ -333,4 +334,28 @@ test("managedBackupsDir and managedBackupArtifactPath", () => {
     Error,
     "extension",
   );
+});
+
+test("managedBackupArtifactDir: manual backups stay in the engine dir, scheduled ones get policy-<id>", () => {
+  assertEquals(managedBackupArtifactDir(LAYOUT, "abc"), "/backup/abc");
+  assertEquals(
+    managedBackupArtifactDir(LAYOUT, "abc", "p1"),
+    "/backup/abc/policy-p1",
+  );
+  assertEquals(
+    managedBackupArtifactPath(LAYOUT, "abc", "bk_1", "dump", "p1"),
+    "/backup/abc/policy-p1/bk_1.dump",
+  );
+  for (const bad of ["../escape", "a/b", "p.1", ""]) {
+    assertThrows(
+      () => managedBackupArtifactDir(LAYOUT, "abc", bad),
+      Error,
+      "policyId",
+    );
+    assertThrows(
+      () => managedBackupArtifactPath(LAYOUT, "abc", "bk_1", "dump", bad),
+      Error,
+      "policyId",
+    );
+  }
 });

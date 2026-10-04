@@ -1,0 +1,28 @@
+[Unit]
+Description=TurboPanel host firewall (restore the confirmed rules)
+Documentation=https://github.com/TurboPanel/turbopaneld/blob/trunk/src/firewall/AGENTS.md
+DefaultDependencies=no
+After=local-fs.target systemd-modules-load.service
+Wants=network-pre.target
+# Before Docker, so TP-INPUT is in place before the first container publishes a
+# port. TP-FWD hangs off DOCKER-USER, which only exists once dockerd is up: the
+# daemon's Docker monitor re-hangs it (reinstallFirewallForwardingIfEnabled).
+Before=network-pre.target docker.service shutdown.target
+Conflicts=shutdown.target
+# Nothing to restore until a ruleset has been confirmed once.
+ConditionPathExistsGlob={{ turbopanel_config_dir | default('/etc/turbopanel') }}/firewall.v[46]
+
+[Service]
+# Loads only the CONFIRMED documents (firewall.v4|.v6), never a pending
+# ruleset. FAILS OPEN: the leading "-" ignores a non-zero exit, and the script
+# itself leaves the host with no TurboPanel rules rather than half a ruleset
+# when a document is invalid or the kernel refuses it.
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=-{{ turbopanel_firewall_guard_bin | default(turbopanel_install_root ~ '/lib/tp-firewall-guard') }} restore
+Environment=TURBOPANEL_RUN_DIR={{ runtime_socket_dir | default('/run/turbopanel') }}
+Environment=TURBOPANEL_STATE_DIR={{ turbopanel_daemon_state_dir | default('/var/lib/turbopanel') }}
+Environment=TURBOPANEL_CONFIG_DIR={{ turbopanel_config_dir | default('/etc/turbopanel') }}
+
+[Install]
+WantedBy=multi-user.target

@@ -1,6 +1,10 @@
 import { assertEquals, assertStringIncludes } from "@std/assert";
 import { dirname, fromFileUrl, join } from "@std/path";
-import { tpOrchestrateValidatorSource } from "../testing/tp-orchestrate-validator.ts";
+import {
+  tpOrchestratePlaybookAllowlist,
+  tpOrchestrateValidatorSource,
+} from "../testing/tp-orchestrate-validator.ts";
+import * as assets from "./assets.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -24,6 +28,9 @@ function extractShellFunction(source: string, name: string): string {
 
 /**
  * Stand up a fake install root (`<root>/share/orchestration/{playbooks,…}`,
+ * with an allowlisted `daemon-converge.yml`, a shipped but unlisted
+ * `daemon-install.yml` and an allowlisted name that is a symlink out of the
+ * tree; `@ORCH@` in `args` becomes the fake orchestration dir),
  * `<root>/vendor/ansible/current/bin/ansible-playbook`) whose
  * ansible-playbook records its argv and environment, then drive the helper's
  * `playbook` verb with the root and scratch checks stubbed out (they need
@@ -43,10 +50,14 @@ async function runPlaybookVerb(
       join(orch, "playbooks", "daemon-converge.yml"),
       "---\n",
     );
+    await Deno.writeTextFile(
+      join(orch, "playbooks", "daemon-install.yml"),
+      "---\n",
+    );
     await Deno.writeTextFile(join(root, "outside.yml"), "---\n");
     await Deno.symlink(
       join(root, "outside.yml"),
-      join(orch, "playbooks", "linked.yml"),
+      join(orch, "playbooks", "socket-dirs-setup.yml"),
     );
     const bin = join(root, "vendor", "ansible", "current", "bin");
     await Deno.mkdir(bin, { recursive: true });
@@ -73,11 +84,13 @@ async function runPlaybookVerb(
       'tp_require_root_scratch() { mkdir -p "$ROOT_SCRATCH"; }',
       extractShellFunction(source, "tp_export_runtime_env"),
       await tpOrchestrateValidatorSource(),
+      extractShellFunction(source, "tp_resolve_playbook"),
       extractShellFunction(source, "tp_verb_playbook"),
       'tp_verb_playbook "$@"',
     ].join("\n");
+    const argv = args.map((a) => a.replace("@ORCH@", orch));
     const out = await new Deno.Command("sh", {
-      args: ["-c", script, "sh", ...args],
+      args: ["-c", script, "sh", ...argv],
       stdout: "piped",
       stderr: "piped",
     }).output();
@@ -91,7 +104,7 @@ async function runPlaybookVerb(
   }
 }
 
-test("tp-orchestrate runs a shipped playbook by basename with fixed inventory, env and cwd", async () => {
+test("tp-orchestrate runs an allowlisted playbook by basename with fixed inventory, env and cwd", async () => {
   const result = await runPlaybookVerb([
     "-i",
     "localhost,",
@@ -102,7 +115,7 @@ test("tp-orchestrate runs a shipped playbook by basename with fixed inventory, e
     "-e",
     "postgres_expose_port=true",
     // The daemon passes its absolute constant; only the basename survives.
-    "/opt/turbopanel/share/orchestration/playbooks/daemon-converge.yml",
+    "@ORCH@/playbooks/daemon-converge.yml",
   ]);
   assertEquals(result.status, 0, result.stderr);
   const argv = result.stdout.split("\n").find((l) => l.startsWith("ARGV")) ??
@@ -114,32 +127,87 @@ test("tp-orchestrate runs a shipped playbook by basename with fixed inventory, e
     argv,
     "share/orchestration/playbooks/daemon-converge.yml]",
   );
-  assertEquals(argv.includes("/opt/turbopanel/"), false);
+  const bare = await runPlaybookVerb([
+    "-i",
+    "localhost,",
+    "-c",
+    "local",
+    "daemon-converge.yml",
+  ]);
+  assertEquals(bare.status, 0, bare.stderr);
   const env = result.stdout.split("\n").find((l) => l.startsWith("ENV")) ?? "";
   assertStringIncludes(env, "share/orchestration/ansible.cfg");
   assertStringIncludes(env, "ANSIBLE_HOME=");
   assertStringIncludes(env, "/scratch/home");
 });
 
-test("tp-orchestrate refuses playbooks outside the shipped tree, symlinks and traversal", async () => {
-  for (
-    const [name, needle] of [
-      ["/etc/evil.yml", "no such shipped playbook"],
-      ["../outside.yml", "no such shipped playbook"],
-      ["linked.yml", "symlinked"],
-      ["daemon-converge.yaml", ".yml file name"],
-    ] as const
-  ) {
-    const result = await runPlaybookVerb([
-      "-i",
-      "localhost,",
-      "-c",
-      "local",
-      name,
-    ]);
+test("tp-orchestrate refuses playbooks off the allowlist, outside the shipped tree, symlinks and traversal", async () => {
+  const cases: Array<[string, string]> = [
+    ["/etc/evil.yml", "not on the tp-orchestrate allowlist"],
+    ["evil.yml", "not on the tp-orchestrate allowlist"],
+    // Shipped in the tree, but an installer play run.sh runs itself.
+    ["daemon-install.yml", "not on the tp-orchestrate allowlist"],
+    [
+      "@ORCH@/playbooks/daemon-install.yml",
+      "not on the tp-orchestrate allowlist",
+    ],
+    ["/etc/daemon-converge.yml", "not in the shipped playbooks directory"],
+    ["@ORCH@/daemon-converge.yml", "not in the shipped playbooks directory"],
+    ["../outside.yml", "no . or .. segments"],
+    ["../daemon-converge.yml", "no . or .. segments"],
+    ["./daemon-converge.yml", "no . or .. segments"],
+    [
+      "@ORCH@/playbooks/../playbooks/daemon-converge.yml",
+      "no . or .. segments",
+    ],
+    ["@ORCH@/playbooks/../../outside.yml", "no . or .. segments"],
+    ["socket-dirs-setup.yml", "symlinked"],
+    ["redis-setup.yml", "no such shipped playbook"],
+    ["daemon-converge.yaml", ".yml file name"],
+    ["Daemon-Converge.yml", "not on the tp-orchestrate allowlist"],
+    ["caddy-setup.yml daemon-converge.yml", "refusing playbook name"],
+    [".hidden.yml", "refusing playbook name"],
+  ];
+  const results = await Promise.all(
+    cases.map(([name]) =>
+      runPlaybookVerb(["-i", "localhost,", "-c", "local", name])
+    ),
+  );
+  results.forEach((result, i) => {
+    const [name, needle] = cases[i];
     assertEquals(result.status, 1, name);
-    assertStringIncludes(result.stderr, needle);
+    assertStringIncludes(result.stderr, needle, name);
+    assertEquals(result.stdout.includes("ARGV"), false, name);
+  });
+});
+
+test("the tp-orchestrate playbook allowlist is exactly what the daemon runs through it", async () => {
+  const installer = new Set(Object.keys(assets.INSTALLER_PLAYBOOKS));
+  const fromAssets = Object.entries(assets)
+    .filter(([key, value]) =>
+      key.endsWith("_PLAYBOOK") && typeof value === "string"
+    )
+    .map(([, value]) => (value as string).split("/").pop() ?? "")
+    .filter((name) => !installer.has(name));
+  const reconcile = await Deno.readTextFile(
+    join(here, "../instance/run-reconcile.ts"),
+  );
+  const fromReconcile = [
+    ...reconcile.matchAll(/"(instance-[a-z-]+\.yml)"/g),
+  ].map((m) => m[1]);
+  const expected = [...new Set([...fromAssets, ...fromReconcile])].sort();
+  const allowlist = await tpOrchestratePlaybookAllowlist();
+  assertEquals([...allowlist].sort(), expected);
+  for (const name of installer) {
+    assertEquals(allowlist.includes(name), false, name);
   }
+  const playbooks = join(here, "../../orchestration/playbooks");
+  const infos = await Promise.all(
+    allowlist.map((name) => Deno.lstat(join(playbooks, name))),
+  );
+  infos.forEach((info, i) => {
+    assertEquals(info.isFile && !info.isSymlink, true, allowlist[i]);
+  });
 });
 
 test("tp-orchestrate refuses anything but key=value extra-vars and the fixed local inventory", async () => {
@@ -414,6 +482,25 @@ test("tp-orchestrate update refuses origins that differ from the pin", async () 
   }
 });
 
+test("tp-orchestrate update pins a signed release only off an overlay, which would skip the signature", async () => {
+  const pin =
+    "https://github.com/TurboPanel/turbopaneld/releases/download/v0.1.0/manifest.json";
+  const args = ["--license", "abc", "--manifest-url", pin, "--no-start"];
+  const [overlay, release] = await Promise.all([
+    runUpdateVerb(args, OVERLAY_PIN),
+    runUpdateVerb(args, PUBLIC_PIN),
+  ]);
+  assertEquals(overlay.status, 1, overlay.stderr);
+  assertStringIncludes(
+    overlay.stderr,
+    "a pinned manifest must be signed by the release key",
+  );
+  assertEquals(overlay.stdout.includes("RUNSH"), false);
+  assertEquals(release.status, 0, release.stderr);
+  assertStringIncludes(release.stdout, `[--manifest-url] [${pin}]`);
+  assertEquals(release.stdout.includes("--dev-allow-unsigned"), false);
+});
+
 test("tp-orchestrate update uses the pinned overlay host with the pinned Platform CA, never -k", async () => {
   const result = await runUpdateVerb(
     [
@@ -677,6 +764,15 @@ test("control-plane backup and rollback playbooks are shipped basenames", async 
   }
   const helper = await Deno.readTextFile(helperPath);
   assertEquals(helper.includes("*.yml) ;;"), true);
+});
+
+test("rollback never installs the instance unit from the backup directory", async () => {
+  const play = await Deno.readTextFile(
+    join(here, "../../orchestration/playbooks/instance-rollback.yml"),
+  );
+  assertEquals(play.includes("remote_src"), false);
+  assertEquals(play.includes("turbopanel-instance.service"), false);
+  assertEquals(play.includes("tasks_from: units.yml"), true);
 });
 
 test("migrate reads the instance unit URL, not runtime.env or a caller URL", async () => {

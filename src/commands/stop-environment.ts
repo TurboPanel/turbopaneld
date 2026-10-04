@@ -1,8 +1,11 @@
+import { dirname } from "node:path";
 import {
   composeFileArgs,
+  readDeploymentManifest,
   resolveDeployedComposePaths,
   resolveEnvironmentDeploymentDir,
 } from "../deploy/compose-files.ts";
+import { projectsForCommand } from "../deploy/deployment-generations.ts";
 import { hostSudoArgs } from "../permissions/host-sudo.ts";
 import { removeSecretTree } from "../deploy/secret-runtime.ts";
 import {
@@ -34,6 +37,8 @@ import {
 } from "../paths/layout.ts";
 import type { RunFn } from "../deploy/ensure-principal.ts";
 import { runPrivileged } from "../deploy/release/release-layout.ts";
+import { retirePrincipals } from "../deploy/retire-principals.ts";
+import type { SshApplyResult } from "../deploy/ssh/apply.ts";
 import {
   pruneFabricStateNetworks,
   removeFabricDockerNetworks,
@@ -61,6 +66,8 @@ export type EnvironmentStopHandlerDeps = {
   removeFabricNetworks?: (names: readonly string[]) => Promise<void>;
   /** Test seam — privileged `sudo -n …` runner for release-tree removal. */
   runPrivileged?: RunFn;
+  /** Test seam — the `sshd` drop-in re-render after principals are retired. */
+  applySshAccess?: () => Promise<SshApplyResult>;
 };
 
 /**
@@ -136,6 +143,82 @@ async function removeEnvironmentNativeApps(
   }
 }
 
+/**
+ * `deployments/<projectId>/<environmentId>` is gone by now; drop the
+ * `<projectId>` parent too once no other environment lives in it. A plain
+ * (non-recursive) remove, so a sibling environment's tree is never touched.
+ */
+async function removeEmptyProjectDeploymentDir(
+  deploymentDir: string,
+): Promise<void> {
+  try {
+    await Deno.remove(dirname(deploymentDir));
+  } catch (err) {
+    // Not empty (sibling environment) or already gone: both are fine.
+    logInfo(
+      "commands",
+      `environment.stop project deployment dir kept: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+}
+
+/**
+ * Remove `deployments/<projectId>/<environmentId>`.
+ *
+ * Containers write bind mounts (`./data`) as root, so the unprivileged daemon
+ * can hit EACCES on nested entries. Only then is the removal routed through
+ * `tp-host rm -rf`, which accepts the path only beneath the managed state root,
+ * pins the parent with `cd -P` and unlinks without following symlinks. A
+ * deployment dir that is itself a symlink is never handed to the privileged
+ * runner.
+ */
+async function removeDeploymentDir(
+  deploymentDir: string,
+  runFn: RunFn,
+): Promise<void> {
+  try {
+    await Deno.remove(deploymentDir, { recursive: true });
+    return;
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) return;
+    if (!(err instanceof Deno.errors.PermissionDenied)) throw err;
+  }
+  const info = await Deno.lstat(deploymentDir).catch(() => null);
+  if (info === null) return;
+  if (!info.isDirectory) {
+    throw new Error(`deployment path is not a directory: ${deploymentDir}`);
+  }
+  const result = await runFn(
+    "sudo",
+    hostSudoArgs(["-n", "rm", "-rf", "--", deploymentDir]),
+  );
+  if (!result.success) {
+    throw new Error(
+      `deployment dir removal failed: ${result.stderr || "tp-host rm failed"}`,
+    );
+  }
+}
+
+function retirementSummary(
+  stopped: string,
+  retirement: { retired: string[]; failed: Array<{ username: string }> },
+): string {
+  const parts = [stopped];
+  if (retirement.retired.length > 0) {
+    parts.push(`retired principals: ${retirement.retired.join(", ")}`);
+  }
+  if (retirement.failed.length > 0) {
+    parts.push(
+      `principals kept: ${
+        retirement.failed.map((entry) => entry.username).join(", ")
+      }`,
+    );
+  }
+  return parts.join("; ");
+}
+
 function assertSafeStopIdentifiers(payload: EnvironmentStopPayload): void {
   if (!SAFE_PATH_ID_RE.test(payload.environmentId)) {
     throw new Error("environmentId contains unsupported characters");
@@ -159,6 +242,10 @@ async function composeDown(
     "down",
     "--remove-orphans",
     "--volumes",
+    // Only images built for this stack (no `image:` tag of their own); pulled
+    // or explicitly tagged images (base/shared) are never touched.
+    "--rmi",
+    "local",
   ], {
     onLine: (event) => logSink.onLine(event.stream, event.line),
   });
@@ -196,11 +283,16 @@ export async function handleEnvironmentStop(
   const hasCompose = composePaths !== null;
 
   if (hasCompose) {
-    await composeDown(
+    // Every generation the deployment owns comes down, not just the named one.
+    const projects = projectsForCommand(
+      await readDeploymentManifest(deploymentDir),
       parsedPayload.projectName,
-      composePaths,
-      runStreamed,
-      logSink,
+      "all",
+    );
+    await forEachSequential(
+      projects,
+      (projectName) =>
+        composeDown(projectName, composePaths, runStreamed, logSink),
     );
   } else {
     // Already torn down — still clear hosting site and report empty containers.
@@ -255,13 +347,12 @@ export async function handleEnvironmentStop(
     { runDocker: run },
   );
 
-  try {
-    await Deno.remove(deploymentDir, { recursive: true });
-  } catch (err) {
-    if (!(err instanceof Deno.errors.NotFound)) {
-      throw err;
-    }
-  }
+  await removeDeploymentDir(
+    deploymentDir,
+    deps?.runPrivileged ?? runPrivileged,
+  );
+
+  await removeEmptyProjectDeploymentDir(deploymentDir);
 
   await removeSecretTree(
     layout,
@@ -269,9 +360,20 @@ export async function handleEnvironmentStop(
     parsedPayload.environmentId,
   );
 
-  const summary = hasCompose
+  // Last, once every unit, site and release tree above is gone: tp-host
+  // refuses an account the host still references.
+  const retirement = await retirePrincipals(
+    (parsedPayload.retirePrincipals ?? []).map((entry) => entry.username),
+    {
+      runFn: deps?.runPrivileged ?? runPrivileged,
+      ...(deps?.applySshAccess ? { applySshAccess: deps.applySshAccess } : {}),
+    },
+  );
+
+  const stopped = hasCompose
     ? `Stopped environment ${parsedPayload.environmentId}`
     : `Environment ${parsedPayload.environmentId} already stopped`;
+  const summary = retirementSummary(stopped, retirement);
   logInfo(
     "commands",
     `environment.stop completed project=${parsedPayload.projectName} received=${daemonReceivedAt}`,

@@ -24,24 +24,39 @@
  * the kernel holds. No `ip6tables` at all is still a warning: there is
  * nothing to apply against.
  *
- * **`DOCKER-USER` may not exist** (Docker not installed yet; `ip6tables` unless
- * Docker's own ip6tables is on). The renderer is told per family and leaves
+ * **`DOCKER-USER` may not exist** (Docker not installed yet; `ip6tables` on a
+ * Docker older than 28 or one with `"ip6tables": false`). The renderer is told per family and leaves
  * `TP-FWD` out; {@link reinstallFirewallForwardingIfEnabled} is the hook for
  * the Docker monitor to call when dockerd (re)appears — dockerd rebuilds
  * `DOCKER-USER` on restart, so the jump has to be put back the way the fabric
  * jump already is.
  *
- * **Durable copy.** The applied documents are written to
- * `<configDir>/firewall.v4` and `firewall.v6` (world-readable — they hold no
- * secret and an operator should be able to read what the host enforces). The
- * boot unit that restores them lands with `fw-boot-persistence`; this module
- * only writes them.
+ * **Not durable until confirmed.** Applying arms the root rollback guard and
+ * loads the rules, but writes only *pending* documents; the durable
+ * `<configDir>/firewall.v4` / `firewall.v6` (world-readable — they hold no
+ * secret and an operator should be able to read what the host enforces) change
+ * only when `./confirm.ts` promotes the pending ones. See `./pending.ts` for
+ * why and for the files involved. The boot unit loads the durable documents
+ * only.
  */
 
 import { join } from "@std/path";
 import { type LayoutPaths, resolveLayout } from "../paths/layout.ts";
 import { errorText, logInfo, logWarn, sanitizeForLog } from "../util/logger.ts";
 import { forEachSequential } from "../util/sequential.ts";
+import {
+  type ArmedPendingFirewall,
+  armPendingFirewall,
+  clearPendingFirewall,
+  disarmGuardTimer,
+  FIREWALL_PENDING_V4_FILENAME,
+  FIREWALL_PENDING_V6_FILENAME,
+  type PendingFirewallMarker,
+  readPendingMarker,
+  recordPendingV6,
+  removeIfPresent,
+  rollbackRecordPath,
+} from "./pending.ts";
 import {
   FIREWALL_FORWARD_CHAIN,
   FIREWALL_INPUT_CHAIN,
@@ -68,6 +83,9 @@ const DOCKER_USER_CHAIN = "DOCKER-USER";
 export type FirewallApplyOptions = {
   run?: FirewallRunFn;
   layout?: LayoutPaths;
+  /** The payload's generation, recorded in the pending marker. */
+  generation?: number;
+  now?: () => Date;
 };
 
 function binaryFor(family: FirewallFamily, tool: "" | "-restore" | "-save") {
@@ -187,13 +205,57 @@ async function restoreDocument(
   const bin = binaryFor(family, "-restore");
   const tested = await run(bin, ["--noflush", "--test"], { stdin: document });
   if (!tested.success) {
-    throw new Error(
+    throw new FirewallRulesetRefusedError(
       `${bin} --test refused the ruleset: ${failureText(tested)}`,
     );
   }
   const applied = await run(bin, ["--noflush"], { stdin: document });
   if (!applied.success) {
     throw new Error(`${bin} failed: ${failureText(applied)}`);
+  }
+}
+
+/**
+ * Ask the kernel whether it would accept a rendered ruleset, loading nothing.
+ *
+ * Runs the same `--noflush --test` pass an apply makes first (`-t`/`--test`
+ * parses and constructs the ruleset but does not commit it), once per family
+ * that was rendered. No marker, no guard, no file, no chain or jump changes:
+ * a preview must be able to call this on any host without moving it. A family
+ * that refuses becomes an entry in `errors`; this never throws for a refusal.
+ */
+export async function validateRenderedFirewall(
+  rendered: RenderedFirewall,
+  probe: XtablesProbe,
+  run: FirewallRunFn,
+): Promise<{ ok: boolean; errors: string[] }> {
+  const documents: Array<{ family: FirewallFamily; document: string }> = [
+    { family: 4, document: rendered.v4 },
+  ];
+  if (rendered.v6 !== null && probe.ipv6) {
+    documents.push({ family: 6, document: rendered.v6 });
+  }
+  const errors: string[] = [];
+  await forEachSequential(documents, async ({ family, document }) => {
+    const bin = binaryFor(family, "-restore");
+    const tested = await run(bin, ["--noflush", "--test"], { stdin: document });
+    if (!tested.success) {
+      errors.push(
+        sanitizeForLog(
+          `${bin} --test refused the ruleset: ${failureText(tested)}`,
+        )
+          .slice(0, 500),
+      );
+    }
+  });
+  return { ok: errors.length === 0, errors };
+}
+
+/** `--test` refused the document: nothing was loaded. */
+export class FirewallRulesetRefusedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "FirewallRulesetRefusedError";
   }
 }
 
@@ -205,7 +267,7 @@ async function restoreDocument(
 export class FirewallIpv6ApplyError extends Error {
   constructor(cause: unknown) {
     super(
-      `IPv6 ruleset was not applied (IPv4 is applied; IPv6 left unchanged): ${
+      `ipv6_unfiltered: IPv6 ruleset was not applied (IPv4 is applied; IPv6 left unchanged): ${
         errorText(cause)
       }`,
     );
@@ -213,15 +275,34 @@ export class FirewallIpv6ApplyError extends Error {
   }
 }
 
+/**
+ * What happened to IPv6 on a managed apply. `ipv6_unfiltered` is the degraded
+ * state: v4 is enforced but a rendered v6 ruleset could not be applied (no
+ * `ip6tables`), so IPv6 traffic is not filtered by this generation. It is
+ * never reported as success; a v6 *apply error* fails the command instead.
+ */
+export type FirewallIpv6Status = "applied" | "skipped" | "ipv6_unfiltered";
+
+export const IPV6_UNFILTERED_WARNING =
+  "ipv6_unfiltered: ip6tables is not available; IPv4 is enforced but IPv6 is NOT filtered (left unchanged)";
+
 export type FirewallApplyOutcome = {
   ipv6Applied: boolean;
+  ipv6Status: FirewallIpv6Status;
   forwardApplied: boolean;
   warnings: string[];
+  /** The ruleset is loaded but not durable: confirm it before this deadline. */
+  confirmation: ArmedPendingFirewall;
 };
 
 /**
  * Apply both documents. `includeForward` must be the same value the renderer
  * was given — it says which jumps to ensure.
+ *
+ * Stages the ruleset and arms the rollback guard *first*; when the guard cannot
+ * be armed nothing is loaded. The rules are then loaded but only pending: they
+ * become durable when `confirmPendingFirewall` promotes them, and the guard
+ * restores the last confirmed rules when the window runs out first.
  */
 export async function applyRenderedFirewall(
   rendered: RenderedFirewall,
@@ -231,9 +312,51 @@ export async function applyRenderedFirewall(
 ): Promise<FirewallApplyOutcome> {
   const run = options.run ?? runFirewallHost;
   const layout = options.layout ?? resolveLayout(Deno.env.toObject());
+  const armed = await armPendingFirewall(
+    {
+      digest: rendered.digest,
+      generation: options.generation ?? 0,
+      v4: rendered.v4,
+    },
+    { run, layout, now: options.now },
+  );
+  const progress = { v4Loaded: false };
+  try {
+    return await loadStagedRuleset(
+      rendered,
+      includeForward,
+      probe,
+      { run, layout, armed, progress },
+    );
+  } catch (err) {
+    // Nothing reached the kernel: forget the stage. Anything loaded stays
+    // under the guard, which restores the confirmed rules at the deadline.
+    if (!progress.v4Loaded) {
+      await clearPendingFirewall(layout);
+      await disarmGuardTimer(run);
+    }
+    throw err;
+  }
+}
+
+type StagedLoad = {
+  run: FirewallRunFn;
+  layout: LayoutPaths;
+  armed: ArmedPendingFirewall;
+  progress: { v4Loaded: boolean };
+};
+
+async function loadStagedRuleset(
+  rendered: RenderedFirewall,
+  includeForward: Record<FirewallFamily, boolean>,
+  probe: XtablesProbe,
+  staged: StagedLoad,
+): Promise<FirewallApplyOutcome> {
+  const { run, layout, armed, progress } = staged;
   const warnings: string[] = [];
 
   await restoreDocument(4, rendered.v4, run);
+  progress.v4Loaded = true;
   await ensureJump(4, INPUT_BUILTIN, FIREWALL_INPUT_CHAIN, run);
   if (includeForward[4]) {
     await ensureJump(4, DOCKER_USER_CHAIN, FIREWALL_FORWARD_CHAIN, run);
@@ -254,18 +377,32 @@ export async function applyRenderedFirewall(
         ipv6Failure = err;
       }
     } else {
-      warnings.push("ip6tables is not available; IPv6 was left unchanged");
+      warnings.push(IPV6_UNFILTERED_WARNING);
     }
   }
 
-  // v6 durable document: a failed apply leaves the file alone, a successful
-  // one records the rendered document, and no apply forgets it.
-  let durableV6: DurableV6Document = KEEP_V6_DOCUMENT;
-  if (ipv6Failure === null) durableV6 = ipv6Applied ? rendered.v6 : null;
-  await writeDurableDocuments(layout, rendered.v4, durableV6);
-
-  if (ipv6Failure !== null) throw new FirewallIpv6ApplyError(ipv6Failure);
-  return { ipv6Applied, forwardApplied: includeForward[4], warnings };
+  // What a confirm does to the durable v6 document: a failed apply leaves it
+  // alone, a successful one records the rendered document, and no apply
+  // forgets it.
+  if (ipv6Failure !== null) {
+    await recordPendingV6(layout, "keep", null);
+    throw new FirewallIpv6ApplyError(ipv6Failure);
+  }
+  await recordPendingV6(
+    layout,
+    ipv6Applied ? "replace" : "forget",
+    ipv6Applied ? rendered.v6 : null,
+  );
+  let ipv6Status: FirewallIpv6Status = "skipped";
+  if (ipv6Applied) ipv6Status = "applied";
+  else if (rendered.v6 !== null) ipv6Status = "ipv6_unfiltered";
+  return {
+    ipv6Applied,
+    ipv6Status,
+    forwardApplied: includeForward[4],
+    warnings,
+    confirmation: armed,
+  };
 }
 
 async function applyIpv6(
@@ -281,42 +418,10 @@ async function applyIpv6(
 }
 
 /**
- * What to do with the durable v6 document: the document text to keep, `null`
- * to forget it, or the {@link KEEP_V6_DOCUMENT} sentinel to leave the existing
- * file alone (the v6 kernel state did not change).
- */
-type DurableV6Document = string | null | typeof KEEP_V6_DOCUMENT;
-const KEEP_V6_DOCUMENT: unique symbol = Symbol("keep-v6-document");
-
-async function writeDurableDocuments(
-  layout: LayoutPaths,
-  v4: string,
-  v6: DurableV6Document,
-): Promise<void> {
-  await Deno.mkdir(layout.configDir, { recursive: true });
-  const v4Path = join(layout.configDir, FIREWALL_V4_FILENAME);
-  const v6Path = join(layout.configDir, FIREWALL_V6_FILENAME);
-  await Deno.writeTextFile(v4Path, v4, { mode: 0o644 });
-  if (v6 === KEEP_V6_DOCUMENT) return;
-  if (v6 === null) {
-    await removeIfPresent(v6Path);
-  } else {
-    await Deno.writeTextFile(v6Path, v6, { mode: 0o644 });
-  }
-}
-
-async function removeIfPresent(path: string): Promise<void> {
-  try {
-    await Deno.remove(path);
-  } catch (err) {
-    if (!(err instanceof Deno.errors.NotFound)) throw err;
-  }
-}
-
-/**
  * `mode: off` — take the jumps out, flush and delete both chains in both
- * families, forget the durable documents. Best-effort throughout: a chain that
- * is already gone is the desired state, not an error.
+ * families, forget the durable and pending documents and stop the guard.
+ * Best-effort throughout: a chain that is already gone is the desired state,
+ * not an error. Also the `turbopaneld firewall off` break-glass.
  */
 export async function removeFirewall(
   options: FirewallApplyOptions = {},
@@ -329,6 +434,9 @@ export async function removeFirewall(
   );
   await removeIfPresent(join(layout.configDir, FIREWALL_V4_FILENAME));
   await removeIfPresent(join(layout.configDir, FIREWALL_V6_FILENAME));
+  await clearPendingFirewall(layout);
+  await removeIfPresent(rollbackRecordPath(layout));
+  await disarmGuardTimer(run);
   logInfo("firewall", "TurboPanel firewall chains removed (mode off)");
 }
 
@@ -381,40 +489,96 @@ export async function snapshotFirewallChains(
 }
 
 /**
- * Re-hang `TP-FWD` off `DOCKER-USER` (and re-apply the durable v4 document)
+ * Re-hang `TP-FWD` off `DOCKER-USER` (and re-apply that family's document)
  * when dockerd becomes reachable — the Docker monitor's hook, mirroring
- * `reinstallFabricForwardingIfEnabled`. No durable document means the
- * firewall is not managed here, and nothing happens. Never throws.
+ * `reinstallFabricForwardingIfEnabled`. dockerd rebuilds `DOCKER-USER` on
+ * restart, so the jump has to be put back. Both families, v4 then v6, each on
+ * its own: one failing never stops the other. Docker 28+ builds the IPv6
+ * `DOCKER-USER` by default (verified on Docker 29.8.1, 2026-10-01), so IPv6
+ * needs the same re-hang as IPv4.
+ *
+ * **Which document.** While a ruleset is pending (loaded, not yet confirmed)
+ * the kernel holds the *pending* document, so that is the one re-applied: the
+ * durable document is the last *confirmed* rules and loading it here would
+ * silently undo a ruleset that is still inside its confirm window. With
+ * nothing pending it is the durable document. For IPv6 under a pending
+ * ruleset only a recorded `replace` names a document; `keep` (apply still in
+ * flight, or it failed) and `forget` re-hang nothing, since loading the
+ * durable v6 there could overwrite a v6 apply that just landed — the guard
+ * restores v6 at the deadline anyway. No document at all means the firewall
+ * is not managed here, and nothing happens. Never throws.
  */
 export async function reinstallFirewallForwardingIfEnabled(
   options: FirewallApplyOptions = {},
 ): Promise<void> {
   const run = options.run ?? runFirewallHost;
   const layout = options.layout ?? resolveLayout(Deno.env.toObject());
-  let v4: string;
+  let pending: PendingFirewallMarker | null;
   try {
-    v4 = await Deno.readTextFile(join(layout.configDir, FIREWALL_V4_FILENAME));
+    pending = await readPendingMarker(layout);
+  } catch (err) {
+    logWarn(
+      "firewall",
+      `firewall pending marker unreadable: ${sanitizeForLog(err)}`,
+    );
+    return;
+  }
+  await forEachSequential(
+    [4, 6] as const,
+    (family) =>
+      rehangForwardChain(
+        family,
+        forwardDocumentFilename(family, pending),
+        run,
+        layout,
+      ),
+  );
+}
+
+/** The document the kernel holds for this family, or null when none applies. */
+function forwardDocumentFilename(
+  family: FirewallFamily,
+  pending: PendingFirewallMarker | null,
+): string | null {
+  if (pending === null) {
+    return family === 4 ? FIREWALL_V4_FILENAME : FIREWALL_V6_FILENAME;
+  }
+  if (family === 4) return FIREWALL_PENDING_V4_FILENAME;
+  return pending.v6 === "replace" ? FIREWALL_PENDING_V6_FILENAME : null;
+}
+
+/** One family's half of {@link reinstallFirewallForwardingIfEnabled}. */
+async function rehangForwardChain(
+  family: FirewallFamily,
+  filename: string | null,
+  run: FirewallRunFn,
+  layout: LayoutPaths,
+): Promise<void> {
+  if (filename === null) return;
+  let document: string;
+  try {
+    document = await Deno.readTextFile(join(layout.configDir, filename));
   } catch (err) {
     if (err instanceof Deno.errors.NotFound) return;
     logWarn(
       "firewall",
-      `firewall.v4 unreadable: ${sanitizeForLog(err)}`,
+      `firewall document unreadable: ${sanitizeForLog(err)}`,
     );
     return;
   }
-  if (!v4.includes(`:${FIREWALL_FORWARD_CHAIN} `)) return;
+  if (!document.includes(`:${FIREWALL_FORWARD_CHAIN} `)) return;
   try {
-    if (!(await hasDockerUserChain(4, run))) return;
-    await restoreDocument(4, v4, run);
-    await ensureJump(4, DOCKER_USER_CHAIN, FIREWALL_FORWARD_CHAIN, run);
+    if (!(await hasDockerUserChain(family, run))) return;
+    await restoreDocument(family, document, run);
+    await ensureJump(family, DOCKER_USER_CHAIN, FIREWALL_FORWARD_CHAIN, run);
     logInfo(
       "firewall",
-      "TP-FWD re-hung off DOCKER-USER after dockerd came back",
+      `TP-FWD re-hung off DOCKER-USER (IPv${family}) after dockerd came back`,
     );
   } catch (err) {
     logWarn(
       "firewall",
-      `TP-FWD reinstall failed: ${sanitizeForLog(err)}`,
+      `TP-FWD reinstall failed (IPv${family}): ${sanitizeForLog(err)}`,
     );
   }
 }

@@ -1,3 +1,4 @@
+import { isNoTelemetryDisplay } from "./display-devices.ts";
 import type { ServerReportedIp } from "./server-addresses.ts";
 
 /**
@@ -108,6 +109,11 @@ export type HostInventoryIo = {
    * `Deno.readTextFileSync` fails (host-free coverage of that path).
    */
   runCat?: (path: string) => { code: number; stdout: Uint8Array };
+  /**
+   * Override the `ls -1` fallback used by the default directory lister after
+   * `Deno.readDirSync` fails (host-free coverage of that path).
+   */
+  runLs?: (path: string) => { code: number; stdout: Uint8Array };
   architecture?: string;
 };
 
@@ -157,6 +163,39 @@ function defaultReadTextFile(
   }
 }
 
+/**
+ * List a directory, falling back to `ls -1` when `Deno.readDirSync` throws:
+ * Deno 2 `NotCapable`s directory listing under `/sys` and `/proc` even inside
+ * a scoped `--allow-read=/sys` grant (the compiled daemon's), so
+ * `/sys/class/drm` is only enumerable through the subprocess.
+ */
+function defaultReadDirSync(
+  path: string,
+  runLs?: (path: string) => { code: number; stdout: Uint8Array },
+): Iterable<{ name: string }> {
+  try {
+    return [...Deno.readDirSync(path)];
+  } catch {
+    // Deno 2 NotCapable on /sys (and /proc) under scoped --allow-read.
+  }
+
+  try {
+    const { code, stdout } = runLs ? runLs(path) : new Deno.Command("ls", {
+      args: ["-1", path],
+      stdout: "piped",
+      stderr: "null",
+      // Scoped --allow-run=ls cannot inherit LD_* / DYLD_* (Deno 2.9).
+      clearEnv: true,
+    }).outputSync();
+    if (code !== 0) return [];
+    return new TextDecoder().decode(stdout).split("\n")
+      .filter((name) => name.length > 0)
+      .map((name) => ({ name }));
+  } catch {
+    return [];
+  }
+}
+
 function resolveInventoryLayout(io?: HostInventoryIo): InventoryLayout {
   const procRoot = io?.procRoot ?? DEFAULT_PROC_ROOT;
   const sysRoot = io?.sysRoot ?? DEFAULT_SYS_ROOT;
@@ -175,7 +214,8 @@ function resolveInventoryLayout(io?: HostInventoryIo): InventoryLayout {
       `${procRoot}/driver/nvidia/gpus/${slot}/information`,
     readTextFile: io?.readTextFile ??
       ((path) => defaultReadTextFile(path, io?.runCat)),
-    readDirSync: io?.readDirSync ?? ((path) => Deno.readDirSync(path)),
+    readDirSync: io?.readDirSync ??
+      ((path) => defaultReadDirSync(path, io?.runLs)),
     nvidiaSmiCsv: io?.nvidiaSmiCsv,
     architecture: io?.architecture ?? Deno.build.arch,
   };
@@ -973,7 +1013,8 @@ function nvidiaModelForSlot(
  * (exported for fixture tests).
  */
 export function normalizePciSlot(slot: string): string {
-  const trimmed = slot.trim();
+  // nvidia-smi prints upper-case hex (`00000000:0A:00.0`); sysfs is lower.
+  const trimmed = slot.trim().toLowerCase();
   const colon = trimmed.indexOf(":");
   if (colon <= 0) return trimmed;
   const domain = trimmed.slice(0, colon);
@@ -1071,6 +1112,7 @@ function readGpuFromCard(
   const uevent = parseUeventMap(layout.readTextFile(`${deviceDir}/uevent`));
   const slot = uevent.get("PCI_SLOT_NAME");
   const driver = uevent.get("DRIVER");
+  if (isNoTelemetryDisplay(vendorRaw, driver)) return undefined;
   const gpu: HostGpu = {};
   if (vendorRaw) gpu.vendorId = vendorRaw;
   if (driver) gpu.driver = driver;

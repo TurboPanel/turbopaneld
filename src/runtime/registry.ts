@@ -42,9 +42,15 @@ const RUNTIMES = registryJson.runtimes as unknown as Readonly<
  * Access groups the registry defines. `sftp` / `shell` are levels (`none`
  * holds no group); `password` is an additive credential group — its Match
  * block turns `PasswordAuthentication` on for members and rides alongside a
- * level group, never instead of one.
+ * level group, never instead of one. `principal` is held by every principal
+ * whatever its level, so the drop-in's backstop block also covers an account
+ * with no SSH access at all.
  */
-export type PrincipalAccessGroupLevel = "sftp" | "shell" | "password";
+export type PrincipalAccessGroupLevel =
+  | "sftp"
+  | "shell"
+  | "password"
+  | "principal";
 
 const ACCESS_GROUPS = registryJson.accessGroups as unknown as Readonly<
   Record<PrincipalAccessGroupLevel, RuntimeSeriesEntry>
@@ -119,6 +125,22 @@ export function runtimeGroup(
   version: string,
 ): string | undefined {
   return RUNTIMES[runtime].series[entitlementSeries(runtime, version)]?.group;
+}
+
+/**
+ * Clear error for a requested series this host does not offer, or `undefined`
+ * when it is supported. Checked before any playbook runs: an unknown series
+ * has no entitlement group, so the playbook would otherwise die with only
+ * "ansible-playbook failed".
+ */
+export function unsupportedSeriesMessage(
+  runtime: RuntimeName,
+  version: string,
+): string | undefined {
+  if (runtimeGroup(runtime, version)) return undefined;
+  return `${runtime} ${version} is not a supported ${runtime} version on this server. Supported series: ${
+    supportedSeries(runtime).join(", ")
+  }.`;
 }
 
 export function runtimeGid(

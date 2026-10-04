@@ -145,3 +145,13 @@
   ansible.builtin.include_tasks: daemon-json.yml
   when:
     - turbopanel_docker_manage_daemon_json | bool
+
+# Managed hosts only (the role skips co-located dev). Observe mode, never fatal:
+# see roles/docker-gate/tasks/main.yml.
+- name: Install the Docker gate
+  ansible.builtin.include_role:
+    name: docker-gate
+
+# Always-on egress block (audit P1-4); needs the iptables/ip6tables tools only.
+- name: Install the always-on Docker egress block
+  ansible.builtin.include_tasks: egress-guard.yml
