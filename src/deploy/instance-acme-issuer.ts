@@ -173,6 +173,20 @@ function lineHasMessage(line: string, message: string): boolean {
   return line.includes(`"msg":"${message}"`);
 }
 
+/**
+ * Caddy's storage folder name for the configured CA: the directory URL's host
+ * and path with `/` replaced by `-` (for example
+ * `acme-v02.api.letsencrypt.org-directory`). Staging and production live in
+ * sibling folders, so every lookup must name one.
+ */
+export function instanceAcmeIssuerKey(
+  settings: InstanceAcmeWireSettings,
+): string {
+  const url = new URL(instanceAcmeIssuerDirectory(settings));
+  return `${url.host}${url.pathname}`.replaceAll("/", "-")
+    .replace(/[:*?"<>|\\]/g, "").replace(/^-+|-+$/g, "");
+}
+
 /** A terminal issuer error, if the log contains one. */
 export function instanceAcmeIssuerFailureLine(log: string): string | null {
   for (const line of log.split("\n")) {

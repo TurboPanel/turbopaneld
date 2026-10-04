@@ -7,6 +7,7 @@ import {
   INSTANCE_ACME_RENEWAL_WINDOW_RATIO,
   instanceAcmeHostSettled,
   instanceAcmeIssuerFailureLine,
+  instanceAcmeIssuerKey,
   LETS_ENCRYPT_STAGING_DIRECTORY_URL,
   parseInstanceAcmeSettings,
   renderInstanceAcmeIssuerConfig,
@@ -17,6 +18,7 @@ import {
   classifyPort80,
   closeInstanceAcmeWindow,
   type CommandResult,
+  findIssuedPair,
   findIssuedPairViaSudo,
   groupIdFromGroupFile,
   INSTANCE_ACME_HTTP01_PREFLIGHT_PREFIX,
@@ -66,6 +68,8 @@ async function readUnixChallenge(
   }
 }
 
+const STAGING_KEY = "acme-staging-v02.api.letsencrypt.org-directory";
+const PROD_KEY = "acme-v02.api.letsencrypt.org-directory";
 const HOST = "panel.example.com";
 const FIXED_NOW_MS = Date.parse("2026-09-23T12:00:00.000Z");
 
@@ -709,7 +713,7 @@ test("issue copies the leaf and stops the issuer in finally", async () => {
     "instance-acme",
     "caddy",
     "certificates",
-    "staging",
+    STAGING_KEY,
     HOST,
   );
   await writeFixtureLeafPair(
@@ -833,7 +837,7 @@ test("issue waits for a replacement when the stored certificate is inside the re
     "instance-acme",
     "caddy",
     "certificates",
-    "staging",
+    STAGING_KEY,
     HOST,
   );
   await writeFixtureLeafPair(
@@ -894,7 +898,7 @@ test("issue does not copy an expired certificate that the issuer log calls succe
     "instance-acme",
     "caddy",
     "certificates",
-    "staging",
+    STAGING_KEY,
     HOST,
   );
   await writeFixtureLeafPair(
@@ -956,7 +960,7 @@ test("managed identity installs a leaf and repeats against an unreadable key", a
     "instance-acme",
     "caddy",
     "certificates",
-    "staging",
+    STAGING_KEY,
     HOST,
   );
   await writeFixtureLeafPair(
@@ -1023,7 +1027,7 @@ test("managed identity installs a leaf and repeats against an unreadable key", a
       true,
     );
     assertEquals(
-      calls.some((line) => line.includes("install -m 0600 -o root -g tp")),
+      calls.some((line) => line.includes("install -m 0600 -o tpcaddy -g tp")),
       true,
     );
     calls.length = 0;
@@ -1034,7 +1038,7 @@ test("managed identity installs a leaf and repeats against an unreadable key", a
     calls.length = 0;
     await issue();
     assertEquals(
-      calls.some((line) => line.includes("install -m 0600 -o root -g tp")),
+      calls.some((line) => line.includes("install -m 0600 -o tpcaddy -g tp")),
       true,
     );
   } finally {
@@ -1094,18 +1098,19 @@ test("issuedPairFromFindOutput picks the first issuer's cert and its key", () =>
     `  ${le}/a.example.com.crt  `,
     `${root}/acme-v02/b.example.com/b.example.com.crt`,
   ].join("\n");
-  assertEquals(issuedPairFromFindOutput(listing, "a.example.com"), {
+  assertEquals(issuedPairFromFindOutput(listing, "a.example.com", PROD_KEY), {
     crt: `${le}/a.example.com.crt`,
     key: `${le}/a.example.com.key`,
   });
 });
 
 test("issuedPairFromFindOutput is null when the host has no certificate", () => {
-  assertEquals(issuedPairFromFindOutput("", "a.example.com"), null);
+  assertEquals(issuedPairFromFindOutput("", "a.example.com", PROD_KEY), null);
   assertEquals(
     issuedPairFromFindOutput(
       "/r/i/b.example.com/b.example.com.crt\n",
       "a.example.com",
+      PROD_KEY,
     ),
     null,
   );
@@ -1113,6 +1118,7 @@ test("issuedPairFromFindOutput is null when the host has no certificate", () => 
     issuedPairFromFindOutput(
       "/r/i/xa.example.com/xa.example.com.crt\n",
       "a.example.com",
+      PROD_KEY,
     ),
     null,
   );
@@ -1131,6 +1137,7 @@ test("findIssuedPairViaSudo refuses a glob-shaped host without spawning a comman
     const found = await findIssuedPairViaSudo(
       "/var/lib/acme/certificates",
       "*.example.com",
+      PROD_KEY,
     );
     assertEquals(found, null);
     assertEquals(spawned, false);
@@ -1155,6 +1162,7 @@ test("findIssuedPairViaSudo is null when the sudo find fails", async () => {
     const found = await findIssuedPairViaSudo(
       "/var/lib/acme/certificates",
       "a.example.com",
+      PROD_KEY,
     );
     assertEquals(found, null);
   } finally {
@@ -1177,12 +1185,54 @@ test("findIssuedPairViaSudo parses tp-host's listing into the issued pair", asyn
     }
   };
   try {
-    const found = await findIssuedPairViaSudo(root, "a.example.com");
+    const found = await findIssuedPairViaSudo(root, "a.example.com", PROD_KEY);
     assertEquals(found, {
       crt: `${le}/a.example.com.crt`,
       key: `${le}/a.example.com.key`,
     });
   } finally {
     Deno.Command = original;
+  }
+});
+
+test("issuer key is the configured CA's host and path with slashes as dashes", () => {
+  const base = { ...ACME_SETTINGS };
+  assertEquals(
+    instanceAcmeIssuerKey({ ...base, useStaging: false }),
+    PROD_KEY,
+  );
+  assertEquals(
+    instanceAcmeIssuerKey({ ...base, useStaging: true }),
+    STAGING_KEY,
+  );
+});
+
+test("issued pair follows the configured CA when staging and production both exist", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-acme-two-" });
+  try {
+    for (const key of [STAGING_KEY, PROD_KEY]) {
+      const dir = join(root, key, HOST);
+      await Deno.mkdir(dir, { recursive: true });
+      await Deno.writeTextFile(join(dir, `${HOST}.crt`), key);
+      await Deno.writeTextFile(join(dir, `${HOST}.key`), key);
+    }
+    const prod = await findIssuedPair(root, HOST, PROD_KEY);
+    assertEquals(prod?.crt, join(root, PROD_KEY, HOST, `${HOST}.crt`));
+    const staging = await findIssuedPair(root, HOST, STAGING_KEY);
+    assertEquals(staging?.crt, join(root, STAGING_KEY, HOST, `${HOST}.crt`));
+    assertEquals(await findIssuedPair(root, HOST, "other-ca"), null);
+    const listing = [STAGING_KEY, PROD_KEY].map((key) =>
+      join(root, key, HOST, `${HOST}.crt`)
+    ).join("\n");
+    assertEquals(
+      issuedPairFromFindOutput(listing, HOST, PROD_KEY)?.crt,
+      join(root, PROD_KEY, HOST, `${HOST}.crt`),
+    );
+    assertEquals(
+      issuedPairFromFindOutput(listing, HOST, STAGING_KEY)?.crt,
+      join(root, STAGING_KEY, HOST, `${HOST}.crt`),
+    );
+  } finally {
+    await Deno.remove(root, { recursive: true });
   }
 });
