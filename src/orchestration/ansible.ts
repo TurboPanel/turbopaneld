@@ -1,5 +1,6 @@
 import { run, runLogged, runOrThrow, symlinkPointsAt } from "./exec.ts";
 import { createSymlink } from "../permissions/scoped-writes.ts";
+import { ensureDaemonDir } from "../permissions/daemon-files.ts";
 import {
   galaxyDockerRoleHelperInvocation,
   playbooksNeedRootHelper,
@@ -51,8 +52,10 @@ import {
   ANSIBLE_LINT_BIN,
   ANSIBLE_PLAYBOOK_BIN,
   ANSIBLE_PLAYBOOK_CWD,
+  ANSIBLE_STATE_DIR,
   ansibleEnv,
   ansibleHome,
+  ansibleProbeEnv,
   BUILD_TOGGLE_PLAYBOOK,
   BUILDKIT_PLAYBOOK,
   CADDY_PLAYBOOK,
@@ -95,16 +98,22 @@ async function fileExists(path: string): Promise<boolean> {
 
 export async function ansiblePlaybookWorks(): Promise<boolean> {
   if (!(await fileExists(ANSIBLE_PLAYBOOK_BIN))) return false;
+  // The daemon's bare env points HOME at the sealed state root; ansible then
+  // fails creating ~/.ansible/tmp on a fresh install. Use the state leaf.
+  await ensureDaemonDir(join(ANSIBLE_STATE_DIR, "tmp"), 0o750);
   const result = await run(ANSIBLE_PLAYBOOK_BIN, ["--version"], {
     stream: false,
+    env: ansibleProbeEnv(),
   });
   return result.success;
 }
 
 export async function ansibleLintWorks(): Promise<boolean> {
   if (!(await fileExists(ANSIBLE_LINT_BIN))) return false;
+  await ensureDaemonDir(join(ANSIBLE_STATE_DIR, "tmp"), 0o750);
   const result = await run(ANSIBLE_LINT_BIN, ["--version"], {
     stream: false,
+    env: ansibleProbeEnv(),
   });
   return result.success;
 }

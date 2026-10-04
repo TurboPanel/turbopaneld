@@ -21,11 +21,14 @@ import {
   ANSIBLE_LOCAL_TMP,
   ANSIBLE_PLAYBOOK_CWD,
   ANSIBLE_SHELL_EXECUTABLE,
+  ANSIBLE_STATE_DIR,
   ansibleEnv,
+  ansibleProbeEnv,
   DAEMON_ROOT,
   GALAXY_COLLECTIONS_DIR,
   GALAXY_ROLES_DIR,
   GALAXY_VENDOR_ROLES_DIR,
+  ORCHESTRATION_LAYOUT,
   RABBITMQ_PLAYBOOK,
   REDIS_PLAYBOOK,
 } from "./assets.ts";
@@ -307,6 +310,21 @@ test("ansibleEnv uses a private per-process ANSIBLE_HOME without overriding coll
       `expected ANSIBLE_ROLES_PATH=${GALAXY_ROLES_DIR}:${GALAXY_VENDOR_ROLES_DIR}, got ${env.ANSIBLE_ROLES_PATH}`,
     );
   }
+});
+
+test("ansibleProbeEnv keeps HOME and every ansible temp dir in the state leaf, not ~/.ansible", () => {
+  const env = ansibleProbeEnv();
+  // A fresh sealed install has no <state root>/.ansible and cannot create it.
+  assertEquals(env.HOME, ANSIBLE_STATE_DIR);
+  assertEquals(env.ANSIBLE_HOME, ANSIBLE_STATE_DIR);
+  assertEquals(env.ANSIBLE_LOCAL_TEMP, join(ANSIBLE_STATE_DIR, "tmp"));
+  assertEquals(env.ANSIBLE_REMOTE_TEMP, join(ANSIBLE_STATE_DIR, "tmp"));
+  assertEquals(env.ANSIBLE_CONFIG, ansibleEnv().ANSIBLE_CONFIG);
+  assert(!ANSIBLE_STATE_DIR.endsWith(".ansible"));
+  assertEquals(
+    ANSIBLE_STATE_DIR,
+    join(ORCHESTRATION_LAYOUT.daemonStateDir, "ansible"),
+  );
 });
 
 test("devOrchestrationAnsibleEnv selects overlay config without collections override", async () => {

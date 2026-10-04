@@ -113,3 +113,8 @@ test("the command journal and release folders are leaves with their modes", () =
   assertEquals(modes.get("release-records"), "0750");
   assertEquals(modes.get("release-build"), "0700");
 });
+
+test("the ansible probe scratch folder is a state leaf", () => {
+  const modes = new Map(DAEMON_STATE_LEAVES.map((l) => [l.name, l.mode]));
+  assertEquals(modes.get("ansible"), "0750");
+});
