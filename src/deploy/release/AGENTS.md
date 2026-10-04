@@ -115,8 +115,11 @@ hit is a `release` warning in the daemon log and an entry in
 replaced each start). A sealed release cannot be re-sealed without the link and
 the host has no per-site safe state short of taking the site down, which would
 break working sites whose only hit is a pre-check `uploads`/`storage` link;
-redeploying publishes a vetted release. Surfacing the findings in the control
-plane's server status needs a cell-protocol message and is a follow-up.
+redeploying publishes a vetted release. The daemon also sends a bounded summary
+of the file with its presence frames (`readReleaseLinkScanReport`: scan time,
+total count, the first 20 sites with a link count, never link text), so the
+control plane shows it in server status (`releaseLinkScan` on the servers
+list).
 
 A published release is **read-only to the runtime user** on purpose: an app
 process that can rewrite its own code turns any RCE into persistence. That is an

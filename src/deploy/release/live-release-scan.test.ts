@@ -2,9 +2,12 @@ import { assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import type { RunFn } from "../ensure-principal.ts";
 import {
+  MAX_REPORTED_LINK_FINDINGS,
+  readReleaseLinkScanReport,
   RELEASE_LINK_SCAN_FILENAME,
   reportLiveReleaseLinks,
   scanLiveReleaseLinks,
+  summarizeReleaseLinkScan,
 } from "./live-release-scan.ts";
 
 /**
@@ -157,4 +160,104 @@ test("reportLiveReleaseLinks warns per finding and records the scan", async () =
     assertEquals(record.findings.length, 1);
     assertEquals((await Deno.stat(path)).mode! & 0o777, 0o600);
   });
+});
+
+test("summarizeReleaseLinkScan counts links and leaves their text out", () => {
+  const report = summarizeReleaseLinkScan({
+    version: 1,
+    scannedAt: "2026-10-04T00:00:00.000Z",
+    findings: [
+      {
+        username: "appuser",
+        serviceId: "svc-a",
+        releaseId: "r1",
+        links: [
+          "public/x -> ../shared/evil (reaches into shared/)",
+          "b -> /etc",
+        ],
+      },
+      {
+        username: "appuser",
+        serviceId: "svc-b",
+        releaseId: null,
+        links: [],
+        error: "e".repeat(500),
+      },
+      "not a finding",
+    ],
+  });
+  assertEquals(report?.findingCount, 2);
+  assertEquals(report?.findings[0], {
+    username: "appuser",
+    serviceId: "svc-a",
+    releaseId: "r1",
+    linkCount: 2,
+  });
+  assertEquals(report?.findings[1]?.error?.length, 120);
+  assertEquals(JSON.stringify(report).includes("evil"), false);
+});
+
+test("summarizeReleaseLinkScan keeps the full count but only the first findings", () => {
+  const findings = Array.from(
+    { length: MAX_REPORTED_LINK_FINDINGS + 5 },
+    (_, i) => ({
+      username: "u",
+      serviceId: `svc-${i}`,
+      releaseId: "r1",
+      links: ["x"],
+    }),
+  );
+  const report = summarizeReleaseLinkScan({
+    version: 1,
+    scannedAt: "2026-10-04T00:00:00.000Z",
+    findings,
+  });
+  assertEquals(report?.findingCount, MAX_REPORTED_LINK_FINDINGS + 5);
+  assertEquals(report?.findings.length, MAX_REPORTED_LINK_FINDINGS);
+});
+
+test("summarizeReleaseLinkScan refuses anything that is not a version 1 scan", () => {
+  assertEquals(summarizeReleaseLinkScan(null), undefined);
+  assertEquals(
+    summarizeReleaseLinkScan({ version: 2, findings: [] }),
+    undefined,
+  );
+  assertEquals(
+    summarizeReleaseLinkScan({ version: 1, scannedAt: "t", findings: "x" }),
+    undefined,
+  );
+  assertEquals(
+    summarizeReleaseLinkScan({ version: 1, findings: [] }),
+    undefined,
+  );
+});
+
+test("readReleaseLinkScanReport reads the recorded scan and tolerates its absence", async () => {
+  const state = await Deno.makeTempDir({ prefix: "tp-link-scan-report-" });
+  try {
+    assertEquals(
+      readReleaseLinkScanReport({ daemonStateDir: state }),
+      undefined,
+    );
+    await Deno.writeTextFile(join(state, RELEASE_LINK_SCAN_FILENAME), "{ nope");
+    assertEquals(
+      readReleaseLinkScanReport({ daemonStateDir: state }),
+      undefined,
+    );
+    await Deno.writeTextFile(
+      join(state, RELEASE_LINK_SCAN_FILENAME),
+      JSON.stringify({
+        version: 1,
+        scannedAt: "2026-10-04T00:00:00.000Z",
+        findings: [],
+      }),
+    );
+    assertEquals(readReleaseLinkScanReport({ daemonStateDir: state }), {
+      scannedAt: "2026-10-04T00:00:00.000Z",
+      findingCount: 0,
+      findings: [],
+    });
+  } finally {
+    await Deno.remove(state, { recursive: true });
+  }
 });
