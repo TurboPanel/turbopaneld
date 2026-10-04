@@ -104,9 +104,11 @@ import {
 } from "../managed/proxysql.ts";
 import {
   apacheBehindNginxLines,
+  apacheDotfileDenyLines,
   isNginxApacheSite,
   nginxApacheBackendProbe,
   nginxApacheLocations,
+  nginxDotfileDenyLines,
   siteFrontEngine,
   siteServingEngines,
 } from "./site/nginx-apache.ts";
@@ -445,6 +447,26 @@ function buildNginxPhpLocation(
   return lines.join("\n");
 }
 
+/**
+ * Refuse dotfiles (`.env`, `.git/…`, `.htaccess`) on a site Caddy block, except
+ * under `/.well-known/`. Go's regexp has no lookahead, so the exception is its
+ * own matcher; a second one refuses a dot segment *inside* `/.well-known/`,
+ * because Caddy matches the raw request path and `file_server` later cleans it
+ * (`/.well-known/../.env`). `respond` runs before `php_fastcgi` and
+ * `file_server` whatever the order written.
+ */
+function caddyDotfileDenyLines(): string[] {
+  return [
+    "  @dotfile {",
+    "    path_regexp dotfile (^|/)\\.",
+    "    not path_regexp wellknown ^/\\.well-known(/|$)",
+    "  }",
+    "  respond @dotfile 403",
+    "  @dotInWellKnown path_regexp dotinwk ^/\\.well-known/(.*/)?\\.",
+    "  respond @dotInWellKnown 403",
+  ];
+}
+
 export type CaddySiteConfigOpts = Readonly<{
   /** Absolute unix socket path for `php_fastcgi` when the site needs PHP. */
   phpFpmSocket?: string | null;
@@ -509,6 +531,7 @@ export function caddySiteConfig(
       lines.push(`  php_fastcgi unix/${phpFpmSocket}`);
     }
   }
+  lines.push(...caddyDotfileDenyLines());
   // No `browse`: a directory listing is not a default worth shipping.
   lines.push("  file_server", "}", "");
   return lines.join("\n");
@@ -587,6 +610,7 @@ ${nginxApacheLocations(backendPort)}
   root ${documentRoot};
   ${nginxDisableSymlinks(opts?.releaseBacked ?? false)}
   index ${indexFiles};
+${nginxDotfileDenyLines().join("\n")}
 
   location / {
     try_files $uri $uri/ =404;
@@ -1088,6 +1112,7 @@ function apacheVhostHead(
     ...addrs.map((addr) => `Listen ${addr}`),
     `<VirtualHost ${addrs.join(" ")}>`,
     "  ServerName localhost",
+    ...apacheDotfileDenyLines(),
   ].join("\n");
 }
 
@@ -1271,8 +1296,10 @@ listener ${name}_lo{
 }
 
 /**
- * Answer 403 for server-side script files the vhost does not run. OpenLiteSpeed
- * serves any file it has no handler for as plain text, so a `.php3` (the
+ * Answer 403 for dotfiles (`.env`, `.git/…`, `.htaccess`; `/.well-known/` is
+ * not one) and for server-side script files the vhost does not run.
+ *
+ * OpenLiteSpeed serves any file it has no handler for as plain text, so a `.php3` (the
  * handler only runs `.php`), a `.phtml`, or an editor backup such as
  * `.php.bak` or `.php~` would hand its source to anyone who asks.
  *
@@ -1288,6 +1315,7 @@ function openlitespeedScriptDenyRewrite(phpHandled: boolean): string {
   return String.raw`rewrite {
   enable                    1
   rules                     <<<END_rules
+RewriteRule (^|/)\.(?!well-known(/|$)) - [F,L]
 RewriteRule \.(${denied})(/.*)?$ - [F,L,NC]
 RewriteRule \.(php|${family})(${backups})$ - [F,L,NC]
 END_rules
