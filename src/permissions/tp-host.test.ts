@@ -3064,3 +3064,206 @@ test("tp-host's leaf lists equal the layout tables", async () => {
     DAEMON_STATE_LEAVES.filter(top).map((leaf) => leaf.name).sort(),
   );
 });
+
+test("iptables and ip6tables: only the options the daemon sends, in no spelling of --modprobe", async () => {
+  await withHost(async (host) => {
+    for (const bin of ["iptables", "ip6tables"]) {
+      for (
+        const args of [
+          ["-w", "5", "-S", "INPUT"],
+          [
+            "-w",
+            "5",
+            "-C",
+            "INPUT",
+            "-p",
+            "tcp",
+            "--dport",
+            "5432",
+            "-j",
+            "ACCEPT",
+          ],
+          [
+            "-A",
+            "TP-MGD-1",
+            "-s",
+            "203.0.113.7",
+            "-p",
+            "tcp",
+            "-m",
+            "conntrack",
+            "--ctorigdst",
+            "198.51.100.2",
+            "--ctorigdstport",
+            "5432",
+            "-j",
+            "ACCEPT",
+          ],
+          ["-I", "DOCKER-USER", "1", "-j", "TP-FORWARD"],
+          ["-A", "TP-FORWARD", "-i", "tp0", "-o", "tp0", "-j", "DROP"],
+          [
+            "-A",
+            "TP-FORWARD",
+            "-m",
+            "conntrack",
+            "--ctstate",
+            "RELATED,ESTABLISHED",
+            "-j",
+            "ACCEPT",
+          ],
+          ["-N", "TP-FORWARD"],
+          ["-F", "TP-FORWARD"],
+          ["-X", "TP-FORWARD"],
+          ["-D", "DOCKER-USER", "-j", "TP-FORWARD"],
+          ["--version"],
+          ["-V"],
+        ]
+      ) {
+        const ok = await host.run([bin, ...args]);
+        assertEquals(ok.code, 0, `${bin} ${args.join(" ")}: ${ok.stderr}`);
+      }
+      for (
+        const args of [
+          ["-M/var/lib/turbopanel/spool/x", "-L"],
+          ["-t", "security", "-M/x", "-L"],
+          ["-nM/x", "-L"],
+          ["-vM/x", "-L"],
+          ["-M", "/x", "-L"],
+          ["--mod=/x", "-L"],
+          ["--modp", "/x", "-L"],
+          ["--modprobe=/x", "-L"],
+          ["--modprobe", "/x", "-L"],
+          ["-s", "-M/x"],
+          ["-L"],
+          ["-nL"],
+          ["-t", "nat", "-S"],
+          ["-w5", "-S"],
+          ["--table=nat", "-S"],
+          ["-S", "--list"],
+          ["-A", "X", "-j", "ACCEPT", "--wait=5"],
+          ["-A", "X", "-m", "comment", "--comment", "x", "-j", "ACCEPT"],
+        ]
+      ) {
+        await refused(host, [bin, ...args]);
+      }
+    }
+  });
+});
+
+test("tenant units: output goes to the journal, never a file target", async () => {
+  await withHost(async (host) => {
+    const layout = resolveLayout({
+      TURBOPANEL_HOME: host.path("opt/turbopanel"),
+      TURBOPANEL_RUNTIMES_DIR: host.path("opt/turbopanel/vendor"),
+      TURBOPANEL_CONFIG_DIR: host.path("etc/turbopanel"),
+      TURBOPANEL_STATE_DIR: host.path("var/lib/turbopanel"),
+      TURBOPANEL_PRINCIPAL_HOME_ROOT: host.path("srv/users"),
+    }, { forceMode: "production" });
+    const service = cronServiceContent({
+      layout,
+      environmentId: "env1",
+      composeServiceName: "web",
+      job: {
+        name: "nightly",
+        schedule: "*-*-* 03:00:00",
+        command: ["/usr/bin/php8.4", "artisan", "schedule:run"],
+      } as unknown as EnvironmentDeployCronJob,
+      username: "alice",
+      workingDirectory: host.path("srv/users/alice/sites/web/current"),
+    });
+    const name = "turbopanel-cron-env1-web-nightly.service";
+    const install = (content: string) =>
+      stageContent(host, content).then((staged) =>
+        host.run([
+          "install",
+          "-m",
+          "0644",
+          "-o",
+          "root",
+          "-g",
+          "root",
+          staged,
+          host.path(`etc/systemd/system/${name}`),
+        ])
+      );
+    for (const value of ["journal", "null", "inherit"]) {
+      const ok = await install(
+        service.replace("StandardOutput=journal", `StandardOutput=${value}`),
+      );
+      assertEquals(ok.code, 0, ok.stderr);
+    }
+    for (
+      const value of [
+        "append:/etc/sudoers.d/x",
+        "file:/etc/sudoers.d/x",
+        "truncate:/etc/x",
+        "journal+console",
+        "kmsg",
+        "socket",
+        "tty",
+        "",
+        " journal",
+      ]
+    ) {
+      for (const key of ["StandardOutput", "StandardError"]) {
+        const hostile = service.replace(`${key}=journal`, `${key}=${value}`);
+        assertEquals(hostile === service, false);
+        assertEquals(
+          (await install(hostile)).code === 0,
+          false,
+          `${key}=${value}`,
+        );
+      }
+    }
+  });
+});
+
+test("the root php-fpm master's own config and conf.d are not the daemon's to write", async () => {
+  await withHost(async (host) => {
+    for (
+      const dir of [
+        "etc/turbopanel/php/8.4/conf.d",
+        "etc/turbopanel/php/8.4/pool.d",
+        "etc/turbopanel/php/conf.d",
+      ]
+    ) {
+      await Deno.mkdir(host.path(dir), { recursive: true });
+    }
+    const staged = await stageContent(
+      host,
+      "extension=/var/lib/turbopanel/spool/x.so\n",
+    );
+    // pool.d is still the daemon's.
+    const pool = await host.run([
+      "install",
+      "-m",
+      "0644",
+      staged,
+      host.path("etc/turbopanel/php/8.4/pool.d/svc1.conf"),
+    ]);
+    assertEquals(pool.code, 0, pool.stderr);
+    for (
+      const dest of [
+        "etc/turbopanel/php/8.4/conf.d/zz.ini",
+        "etc/turbopanel/php/conf.d/zz.ini",
+        "etc/turbopanel/php/8.4/php-fpm.conf",
+      ]
+    ) {
+      await refused(host, ["install", "-m", "0644", staged, host.path(dest)]);
+      await refused(host, ["tee", host.path(dest)], "x\n");
+    }
+    await refused(host, [
+      "install",
+      "-d",
+      "-m",
+      "0755",
+      host.path("etc/turbopanel/php/8.4/conf.d/sub"),
+    ]);
+  });
+});
+
+async function stageContent(host: Host, content: string): Promise<string> {
+  const staged = host.path("tmp/content");
+  await Deno.writeTextFile(staged, content);
+  return staged;
+}

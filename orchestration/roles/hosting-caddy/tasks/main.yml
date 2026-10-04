@@ -87,7 +87,11 @@
 # The daemon creates hosting/sites and writes the Caddyfile and site snippets
 # 0640 inside it; a default ACL entry on the leaf makes every new file and
 # folder readable by the hosting Caddy and nobody else new. Nothing below the
-# leaf is touched by root (no per-file ACLs, no existing-file backfill).
+# leaf is touched by root (no per-file ACLs, no existing-file backfill: root
+# never walks the daemon's folders). What was written before this ran (an
+# updated host's Caddyfile, a fresh host's sites/) is backfilled by the daemon
+# itself, as the owner, in grantHostingCaddyRead (src/deploy/
+# ensure-hosting-caddy.ts) on every hosting Caddy ensure and sites write.
 - name: Ensure the hosting config directory belongs to the daemon
   ansible.builtin.file:
     path: "{{ turbopanel_config_dir }}/hosting"

@@ -1516,6 +1516,56 @@ test("rewriteHostingCaddySites writes site snippet and best-effort reloads", asy
   }
 });
 
+test("rewriteHostingCaddySites grants the hosting Caddy read access, and fails when it cannot", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const restore = setIngressHostCommandForTest(() =>
+    Promise.resolve({ success: true, stderr: "" })
+  );
+  const payload = {
+    environmentId: "env-grant-1",
+    projectId: "proj-1",
+    organizationId: "org-1",
+    projectName: "demo",
+    composeFiles: [{
+      filename: "compose.yaml",
+      role: "runtime" as const,
+      content: "services: {}",
+    }],
+    hostings: [{
+      hostingId: "h1",
+      serviceId: "s1",
+      composeServiceName: "web",
+      hostnames: ["app.example.com"],
+      bindAddress: "203.0.113.10",
+    }],
+  };
+  try {
+    const granted: string[] = [];
+    await rewriteHostingCaddySites(layout, payload, undefined, (dir) => {
+      granted.push(dir);
+      return Promise.resolve();
+    });
+    assertEquals(granted, [join(layout.configDir, "hosting")]);
+    await assertRejects(
+      () =>
+        rewriteHostingCaddySites(
+          layout,
+          payload,
+          undefined,
+          () =>
+            Promise.reject(
+              new Error("the web server user cannot read its config"),
+            ),
+        ),
+      Error,
+      "cannot read its config",
+    );
+  } finally {
+    restore();
+    await cleanup();
+  }
+});
+
 test("rewriteHostingCaddySites enables hosting Caddy before reloading when it wrote a tenant site", async () => {
   const { layout, cleanup } = await makeTestLayout();
   const calls: string[] = [];
@@ -1801,6 +1851,7 @@ test("ensureHostingCaddyRuntime writes unit and attempts install via host comman
   await Deno.mkdir(caddyDir, { recursive: true });
   await Deno.writeTextFile(join(caddyDir, "caddy"), "#!/bin/true\n");
   const hostCalls: Array<{ command: string; args: string[] }> = [];
+  const grants: string[] = [];
   const restore = setIngressHostCommandForTest((command, args) => {
     hostCalls.push({ command, args: [...args] });
     if (args.includes("install") && args.includes("0640")) {
@@ -1816,7 +1867,14 @@ test("ensureHostingCaddyRuntime writes unit and attempts install via host comman
   });
   try {
     await assertRejects(
-      () => ensureHostingCaddyRuntime(layout, CADDY_READY),
+      () =>
+        ensureHostingCaddyRuntime(layout, {
+          ...CADDY_READY,
+          grantHostingRead: (dir) => {
+            grants.push(dir);
+            return Promise.resolve();
+          },
+        }),
       Error,
       "hosting Caddy could not be installed or started",
     );
@@ -1827,6 +1885,8 @@ test("ensureHostingCaddyRuntime writes unit and attempts install via host comman
     );
     assertEquals(hostCalls.some((c) => c.args.includes("install")), true);
     assertEquals(hostCalls.some((c) => c.args.includes("enable")), true);
+    // Before the config writes and again before Caddy starts.
+    assertEquals(grants, Array(2).fill(join(layout.configDir, "hosting")));
   } finally {
     restore();
     await Deno.remove(root, { recursive: true });

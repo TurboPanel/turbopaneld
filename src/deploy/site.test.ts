@@ -1076,3 +1076,94 @@ test("caddySiteConfig never serves the layout's shared link at a release top", (
     false,
   );
 });
+
+const dotfileSite = {
+  composeServiceName: "dots",
+  engine: "caddy" as const,
+  root: "public",
+  listenPort: 18090,
+};
+
+test("every site engine refuses dotfiles outside /.well-known/", () => {
+  const caddy = caddySiteConfig(dotfileSite, "/srv/x/public");
+  assertStringIncludes(caddy, "respond @dotfile 403");
+  assertStringIncludes(caddy, "respond @dotInWellKnown 403");
+  // `respond` is ordered before the file server and PHP handler by Caddy
+  // itself; the matchers must at least be in the same block.
+  assertEquals(caddy.indexOf("@dotfile") < caddy.indexOf("file_server"), true);
+
+  const nginx = nginxSiteConfig(
+    { ...dotfileSite, engine: "nginx" },
+    "/srv/x/public",
+  );
+  assertStringIncludes(nginx, "location ~ /\\.(?!well-known(?:/|$)) {");
+  // Before the catch-all and the PHP location (first regex location wins).
+  assertEquals(
+    nginx.indexOf("well-known") < nginx.indexOf("location / {"),
+    true,
+  );
+
+  const phpNginx = nginxSiteConfig(
+    { ...dotfileSite, engine: "nginx", php: { version: "8.4" } },
+    "/srv/x/public",
+    null,
+    { phpFpmSocket: "/run/x.sock" },
+  );
+  assertEquals(
+    phpNginx.indexOf("well-known") < phpNginx.indexOf("location ~ \\.php$"),
+    true,
+  );
+
+  const apache = apacheSiteConfig(
+    { ...dotfileSite, engine: "apache" },
+    "/srv/x/public",
+  );
+  assertStringIncludes(apache, '<LocationMatch "/\\.(?!well-known(?:/|$))">');
+  assertStringIncludes(apache, "Require all denied");
+
+  assertStringIncludes(
+    openlitespeedVhostConfig(),
+    "RewriteRule (^|/)\\.(?!well-known(/|$)) - [F,L]",
+  );
+});
+
+/** The Caddy matchers' regexes (RE2 and JS agree on this subset). */
+function caddyRefusesDotPath(path: string): boolean {
+  const lines = caddySiteConfig(dotfileSite, "/srv/x/public").split("\n");
+  const pattern = (name: string): RegExp => {
+    const line = lines.find((l) => l.includes(`path_regexp ${name} `));
+    return new RegExp((line as string).split(`${name} `)[1] as string);
+  };
+  const dot = pattern("dotfile").test(path) &&
+    !pattern("wellknown").test(path);
+  return dot || pattern("dotinwk").test(path);
+}
+
+test("the Caddy dotfile rule refuses .env and nested dotfiles, not /.well-known/", () => {
+  for (
+    const path of [
+      "/.env",
+      "/.htaccess",
+      "/a/.git/config",
+      "/a/b/.hidden.php",
+      "/.well-known/../.env",
+      "/.well-known/.hidden",
+      "/.well-known/a/.hidden",
+      "/.wellknown/x",
+    ]
+  ) {
+    assertEquals(caddyRefusesDotPath(path), true, path);
+  }
+  for (
+    const path of [
+      "/",
+      "/index.html",
+      "/a/b.css",
+      "/.well-known/acme-challenge/token",
+      "/.well-known/security.txt",
+      "/a.b/c.d",
+    ]
+  ) {
+    assertEquals(caddyRefusesDotPath(path), false, path);
+  }
+});
