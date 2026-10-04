@@ -253,7 +253,7 @@ tp_is_root_path() {
 tp_daemon_leaf_name() {
   case "$1" in
     "$R_CONFIG"/docker|"$R_CONFIG"/proxysql|"$R_CONFIG"/orchestrator|"$R_CONFIG"/node-apps|"$R_CONFIG"/hosting) return 0 ;;
-    "$R_STATE"/update|"$R_STATE"/system|"$R_STATE"/deployments|"$R_STATE"/ingress|"$R_STATE"/sites|"$R_STATE"/storage|"$R_STATE"/managed|"$R_STATE"/managed-intent|"$R_STATE"/backup|"$R_STATE"/spool|"$R_STATE"/network|"$R_STATE"/tls|"$R_STATE"/orchestrator) return 0 ;;
+    "$R_STATE"/update|"$R_STATE"/system|"$R_STATE"/deployments|"$R_STATE"/ingress|"$R_STATE"/sites|"$R_STATE"/storage|"$R_STATE"/managed|"$R_STATE"/managed-intent|"$R_STATE"/backup|"$R_STATE"/spool|"$R_STATE"/network|"$R_STATE"/tls|"$R_STATE"/orchestrator|"$R_STATE"/commands|"$R_STATE"/release-records|"$R_STATE"/release-build) return 0 ;;
   esac
   return 1
 }
@@ -261,7 +261,7 @@ tp_daemon_leaf_name() {
 tp_daemon_loose_file_name() {
   case "$1" in
     "$R_CONFIG"/instance-ca.pem|"$R_CONFIG"/firewall.v4|"$R_CONFIG"/firewall.v6|"$R_CONFIG"/firewall.pending.v4|"$R_CONFIG"/firewall.pending.v6) return 0 ;;
-    "$R_STATE"/server.id|"$R_STATE"/server-key.json|"$R_STATE"/server-key-id|"$R_STATE"/update-guard-disarm.json) return 0 ;;
+    "$R_STATE"/server.id|"$R_STATE"/server-key.json|"$R_STATE"/server-key-id|"$R_STATE"/update-guard-disarm.json|"$R_STATE"/release-link-scan.json) return 0 ;;
   esac
   return 1
 }

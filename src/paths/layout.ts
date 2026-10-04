@@ -522,6 +522,11 @@ export const DAEMON_STATE_LEAVES: readonly DaemonLeaf[] = [
   { name: "cloudflared/tunnels", mode: "0750" },
   { name: "tls", mode: "0750" },
   { name: "orchestrator", mode: "0750" },
+  // In-flight and outcome command journal (command-outbox.ts).
+  { name: "commands", mode: "0750" },
+  // Release records and release build scratch (release-layout.ts).
+  { name: "release-records", mode: "0750" },
+  { name: "release-build", mode: "0700" },
 ];
 
 /**
