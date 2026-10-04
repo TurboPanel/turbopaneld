@@ -14,7 +14,11 @@ import {
   TP_HOST_SCRIPT as SCRIPT,
   withHost,
 } from "../testing/tp-host-fixture.ts";
-import { resolveLayout } from "../paths/layout.ts";
+import {
+  DAEMON_CONFIG_LEAVES,
+  DAEMON_STATE_LEAVES,
+  resolveLayout,
+} from "../paths/layout.ts";
 import { cronServiceContent, cronTimerContent } from "../deploy/cron/unit.ts";
 import {
   nativeAppUnitContent,
@@ -67,7 +71,8 @@ test("tp-host refuses to run as a normal user outside its test mode", async () =
 
 test("install writes a file only inside the managed trees, never through a symlink", async () => {
   await withHost(async (host) => {
-    const dest = host.path("etc/turbopanel/nginx.conf");
+    await Deno.mkdir(host.path("etc/turbopanel/nginx"), { recursive: true });
+    const dest = host.path("etc/turbopanel/nginx/nginx.conf");
     const ok = await host.run([
       "install",
       "-m",
@@ -88,7 +93,7 @@ test("install writes a file only inside the managed trees, never through a symli
     );
 
     // A symlink planted as the destination is replaced, not written through.
-    const planted = host.path("etc/turbopanel/app.conf");
+    const planted = host.path("etc/turbopanel/nginx/app.conf");
     await Deno.symlink(host.path("outside/secret"), planted);
     const replaced = await host.run([
       "install",
@@ -107,14 +112,14 @@ test("install writes a file only inside the managed trees, never through a symli
     // A symlinked directory anywhere in the path is refused.
     await Deno.symlink(
       host.path("outside"),
-      host.path("etc/turbopanel/linked"),
+      host.path("etc/turbopanel/nginx/linked"),
     );
     await refused(host, [
       "install",
       "-m",
       "0640",
       host.path("tmp/staged"),
-      host.path("etc/turbopanel/linked/evil"),
+      host.path("etc/turbopanel/nginx/linked/evil"),
     ]);
     for (
       const target of [
@@ -772,7 +777,7 @@ test("numeric owner and group ids resolve to the same accounts the name checks a
 
 test("rm, chown and chmod stay inside the trees and never follow a symlink", async () => {
   await withHost(async (host) => {
-    const tree = host.path("var/lib/turbopanel/scratch");
+    const tree = host.path("var/lib/turbopanel/deployments/scratch");
     await Deno.mkdir(tree, { recursive: true });
     await Deno.symlink(host.path("outside"), join(tree, "escape"));
     const rm = await host.run(["rm", "-rf", "--", tree]);
@@ -2923,4 +2928,102 @@ test("php-loopback-sync runs the installed guard with sync and nothing else", as
     const extra = await host.run(["php-loopback-sync", "alice"]);
     assertEquals(extra.code, 1);
   });
+});
+
+test("the top of the config and state roots is root's: no verb removes, renames, re-owns or writes a root-owned entry there", async () => {
+  await withHost(async (host) => {
+    const staged = host.path("tmp/staged");
+    const config = host.path("etc/turbopanel");
+    const state = host.path("var/lib/turbopanel");
+    await Deno.mkdir(join(config, "instance"), { recursive: true });
+    await Deno.mkdir(join(state, "nginx"), { recursive: true });
+    await Deno.writeTextFile(join(config, "daemon.env"), "A=1\n");
+
+    // A root-owned regular file at the top of either root is refused,
+    // whatever its name and whether or not the owner is spelled out.
+    for (const dest of [join(config, "nginx.conf"), join(state, "x.json")]) {
+      for (const owner of [["-o", "root", "-g", "tp"], ["-g", "tp"], []]) {
+        await refused(host, ["install", "-m", "0640", ...owner, staged, dest]);
+      }
+    }
+    await refused(host, ["tee", join(config, "daemon.env")]);
+
+    // The daemon's own loose files are fine, owned by it.
+    const loose = join(config, "firewall.v4");
+    const ok = await host.run([
+      "install",
+      "-m",
+      "0644",
+      "-o",
+      "tp",
+      "-g",
+      "tp",
+      staged,
+      loose,
+    ]);
+    assertEquals(ok.code, 0, ok.stderr);
+    assertEquals((await host.run(["rm", "-f", "--", loose])).code, 0);
+
+    // Root's entries cannot be removed, renamed (either side) or re-owned.
+    for (const entry of [join(config, "instance"), join(state, "nginx")]) {
+      await refused(host, ["rm", "-rf", "--", entry]);
+      await refused(host, ["rm", "-f", "--", entry]);
+      await refused(host, ["chown", "tp:tp", entry]);
+      await refused(host, ["install", "-d", "-m", "0750", "-o", "tp", entry]);
+      await refused(host, ["mv", "-T", "-f", "--", entry, `${entry}-x`]);
+    }
+    await refused(host, [
+      "mv",
+      "-T",
+      "-f",
+      "--",
+      join(config, "daemon.env"),
+      join(config, "instance"),
+    ]);
+    await refused(host, [
+      "mv",
+      "-T",
+      "-f",
+      "--",
+      join(config, "daemon.env"),
+      join(config, "hosting"),
+    ]);
+
+    // The daemon's leaves stay its own to rearrange, and root's own folders
+    // are still created (root-owned) by callers that need them.
+    await Deno.mkdir(join(config, "hosting"), { recursive: true });
+    assertEquals(
+      (await host.run(["rm", "-rf", "--", join(config, "hosting")])).code,
+      0,
+    );
+    const made = await host.run([
+      "install",
+      "-d",
+      "-m",
+      "0750",
+      join(config, "instance-acme"),
+    ]);
+    assertEquals(made.code, 0, made.stderr);
+  });
+});
+
+test("tp-host's leaf lists equal the layout tables", async () => {
+  const script = await Deno.readTextFile(SCRIPT);
+  const fn = (name: string) => {
+    const start = script.indexOf(`${name}() {`);
+    return script.slice(start, script.indexOf("\n}\n", start));
+  };
+  const names = (body: string, root: string) =>
+    [...body.matchAll(new RegExp(`"\\$${root}"/([A-Za-z0-9.-]+)`, "g"))]
+      .map((match) => match[1]).sort();
+  const leaves = fn("tp_daemon_leaf_name");
+  const top = (leaf: { name: string }) => !leaf.name.includes("/");
+  assertEquals(
+    names(leaves, "R_CONFIG"),
+    DAEMON_CONFIG_LEAVES.filter(top).map((leaf) => leaf.name).sort(),
+  );
+  assertEquals(
+    names(leaves, "R_STATE"),
+    DAEMON_STATE_LEAVES.filter(top).map((leaf) => leaf.name).sort(),
+  );
 });
