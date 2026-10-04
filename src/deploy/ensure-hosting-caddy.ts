@@ -169,7 +169,7 @@ function parseUserEntries(
     const file = /^# file: (.+)$/m.exec(block)?.[1];
     if (!file) continue;
     const line = new RegExp(
-      `^user:${user}:(\\S+?)(?:\\s+#effective:(\\S+))?$`,
+      String.raw`^user:${user}:(\S+?)(?:\s+#effective:(\S+))?$`,
       "m",
     )
       .exec(block);
@@ -243,13 +243,14 @@ export async function grantHostingCaddyRead(
       "deploy",
       `hosting Caddy read access: setfacl said ${failures.join("; ")}`,
     );
+    const more = unreadable.length > 5
+      ? ` and ${unreadable.length - 5} more`
+      : "";
     throw new Error(
       `the web server user (${user}) cannot read its config: ${
         unreadable.slice(0, 5).join(", ")
-      }${unreadable.length > 5 ? ` and ${unreadable.length - 5} more` : ""}. ` +
-        "Files owned by root that the daemon cannot change need `setfacl -m " +
-        `u:${user}:r` +
-        "` run as root; the rest should be retried by the next apply.",
+      }${more}. Files owned by root that the daemon cannot change need ` +
+        `\`setfacl -m u:${user}:r\` run as root; the rest is retried by the next apply.`,
     );
   }
 }
