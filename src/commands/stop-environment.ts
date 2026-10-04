@@ -260,6 +260,20 @@ async function composeDown(
 }
 
 /**
+ * A host without Docker (site-only) has no containers or networks to stop, so
+ * Docker steps are skipped. An injected `runDocker` means "Docker is there".
+ */
+async function dockerAvailableForStop(
+  deps?: EnvironmentStopHandlerDeps,
+): Promise<boolean> {
+  if (deps?.dockerInstalled) return await deps.dockerInstalled();
+  return deps?.runDocker !== undefined || await dockerBinaryInstalled();
+}
+
+const noDocker: RunDockerFn = () =>
+  Promise.resolve({ success: true, stdout: "", stderr: "", code: 0 });
+
+/**
  * Tear down a deployed environment stack (compose down + volumes + hosting site
  * + per-service release trees). Idempotent when the compose file is already
  * gone.
@@ -271,14 +285,8 @@ export async function handleEnvironmentStop(
 ): Promise<EnvironmentStopResult> {
   const parsedPayload = parseEnvironmentStopPayload(payload);
   assertSafeStopIdentifiers(parsedPayload);
-  // A host without Docker (site-only) has no containers or networks to stop:
-  // skip Docker steps. An injected runDocker means "Docker is there".
-  const dockerPresent = deps?.dockerInstalled
-    ? await deps.dockerInstalled()
-    : deps?.runDocker !== undefined || await dockerBinaryInstalled();
-  const run: RunDockerFn = dockerPresent
-    ? (deps?.runDocker ?? defaultRunDocker)
-    : () => Promise.resolve({ success: true, stdout: "", stderr: "", code: 0 });
+  const dockerPresent = await dockerAvailableForStop(deps);
+  const run = dockerPresent ? (deps?.runDocker ?? defaultRunDocker) : noDocker;
   const runStreamed = createStreamedRunner(deps?.runDocker);
   const logSink = deps?.logSink ?? createNoopCommandOutputSink();
   logSink.setPhase(COMMAND_LOG_PHASES.STOP);
