@@ -174,7 +174,8 @@ test("plain Apache keeps its own listener and no mod_remoteip lines", () => {
   );
   assertStringIncludes(conf, "Listen 127.0.0.1:18080\nListen 172.17.0.1:18080");
   assertEquals(conf.includes("RemoteIP"), false);
-  assertEquals(conf.includes("LocationMatch"), false);
+  // Dotfiles are refused on plain Apache too, but no client-address trust.
+  assertStringIncludes(conf, "<LocationMatch");
 });
 
 test("a paired site is served by Apache then nginx, with nginx in front", () => {

@@ -6,6 +6,7 @@ import {
   LABEL_ENVIRONMENT,
   LABEL_PROJECT,
   LABEL_RAW_PORT,
+  LABEL_ROUTED,
   LABEL_SERVICE_ID,
 } from "./labels.ts";
 
@@ -327,6 +328,8 @@ export function buildHostingLabelsFragment(input: {
       addLabel(labels, LABEL_RAW_PORT, "true");
     } else {
       applyHttpHostingLabels(labels, hosting);
+      // The shared Traefik only routes containers that carry this label.
+      addLabel(labels, LABEL_ROUTED, "true");
     }
     addLabel(labels, LABEL_PROJECT, payload.projectId);
     addLabel(labels, LABEL_ENVIRONMENT, payload.environmentId);

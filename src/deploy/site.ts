@@ -104,9 +104,11 @@ import {
 } from "../managed/proxysql.ts";
 import {
   apacheBehindNginxLines,
+  apacheDotfileDenyLines,
   isNginxApacheSite,
   nginxApacheBackendProbe,
   nginxApacheLocations,
+  nginxDotfileDenyLines,
   siteFrontEngine,
   siteServingEngines,
 } from "./site/nginx-apache.ts";
@@ -445,10 +447,41 @@ function buildNginxPhpLocation(
   return lines.join("\n");
 }
 
+/**
+ * Refuse dotfiles (`.env`, `.git/…`, `.htaccess`) on a site Caddy block, except
+ * under `/.well-known/`. Go's regexp has no lookahead, so the exception is its
+ * own matcher; a second one refuses a dot segment *inside* `/.well-known/`,
+ * because Caddy matches the raw request path and `file_server` later cleans it
+ * (`/.well-known/../.env`). `respond` runs before `php_fastcgi` and
+ * `file_server` whatever the order written.
+ */
+function caddyDotfileDenyLines(): string[] {
+  return [
+    "  @dotfile {",
+    String.raw`    path_regexp dotfile (^|/)\.`,
+    String.raw`    not path_regexp wellknown ^/\.well-known(/|$)`,
+    "  }",
+    "  respond @dotfile 403",
+    String.raw`  @dotInWellKnown path_regexp dotinwk ^/\.well-known/(.*/)?\.`,
+    "  respond @dotInWellKnown 403",
+  ];
+}
+
 export type CaddySiteConfigOpts = Readonly<{
   /** Absolute unix socket path for `php_fastcgi` when the site needs PHP. */
   phpFpmSocket?: string | null;
+  /**
+   * The document root is a sealed release (`…/current/<root>`). When the root
+   * is the release top, the layout's `shared` link sits directly under it and
+   * leads into the site owner's writable state, so it is never served.
+   */
+  releaseBacked?: boolean;
 }>;
+
+/** True for a `root` that names the directory itself (`.`, `./`, `./.`). */
+function isReleaseTopRoot(root: string): boolean {
+  return root.split("/").every((segment) => segment === "" || segment === ".");
+}
 
 /**
  * Reject a `webEnv` value Caddy would reinterpret rather than escaping it.
@@ -491,6 +524,12 @@ export function caddySiteConfig(
     `  root * ${documentRoot}`,
     "  encode zstd gzip",
   ];
+  if (opts?.releaseBacked && isReleaseTopRoot(site.root)) {
+    lines.push(
+      "  @sharedState path /shared /shared/*",
+      "  respond @sharedState 404",
+    );
+  }
   if (needsPhp && phpFpmSocket) {
     // `unix/` + an absolute path is a literal double slash. `php_fastcgi` also
     // brings its own file-existence matcher, which closes the
@@ -510,7 +549,7 @@ export function caddySiteConfig(
     }
   }
   // No `browse`: a directory listing is not a default worth shipping.
-  lines.push("  file_server", "}", "");
+  lines.push(...caddyDotfileDenyLines(), "  file_server", "}", "");
   return lines.join("\n");
 }
 
@@ -587,6 +626,7 @@ ${nginxApacheLocations(backendPort)}
   root ${documentRoot};
   ${nginxDisableSymlinks(opts?.releaseBacked ?? false)}
   index ${indexFiles};
+${nginxDotfileDenyLines().join("\n")}
 
   location / {
     try_files $uri $uri/ =404;
@@ -1088,6 +1128,7 @@ function apacheVhostHead(
     ...addrs.map((addr) => `Listen ${addr}`),
     `<VirtualHost ${addrs.join(" ")}>`,
     "  ServerName localhost",
+    ...apacheDotfileDenyLines(),
   ].join("\n");
 }
 
@@ -1271,8 +1312,10 @@ listener ${name}_lo{
 }
 
 /**
- * Answer 403 for server-side script files the vhost does not run. OpenLiteSpeed
- * serves any file it has no handler for as plain text, so a `.php3` (the
+ * Answer 403 for dotfiles (`.env`, `.git/…`, `.htaccess`; `/.well-known/` is
+ * not one) and for server-side script files the vhost does not run.
+ *
+ * OpenLiteSpeed serves any file it has no handler for as plain text, so a `.php3` (the
  * handler only runs `.php`), a `.phtml`, or an editor backup such as
  * `.php.bak` or `.php~` would hand its source to anyone who asks.
  *
@@ -1288,6 +1331,7 @@ function openlitespeedScriptDenyRewrite(phpHandled: boolean): string {
   return String.raw`rewrite {
   enable                    1
   rules                     <<<END_rules
+RewriteRule (^|/)\.(?!well-known(/|$)) - [F,L]
 RewriteRule \.(${denied})(/.*)?$ - [F,L,NC]
 RewriteRule \.(php|${family})(${backups})$ - [F,L,NC]
 END_rules
@@ -1466,21 +1510,29 @@ async function writeHostingWebMetadata(
   if (files.length === 0) return;
 
   const metaDir = join(siteBase, ".turbopanel");
-  await Deno.mkdir(metaDir, { recursive: true, mode: 0o750 });
+  // Private to the daemon account: the web engines share its group, and a
+  // document root of `.` would otherwise serve these files.
+  await Deno.mkdir(metaDir, { recursive: true, mode: 0o700 });
+  await Deno.chmod(metaDir, 0o700);
   // Distinct files in a fresh directory: no ordering between the writes.
   await Promise.all(
-    files.map((file) =>
-      Deno.writeTextFile(join(metaDir, file.name), file.contents, {
-        mode: 0o640,
-      })
-    ),
+    files.map(async (file) => {
+      const path = join(metaDir, file.name);
+      await Deno.writeTextFile(path, file.contents, { mode: 0o600 });
+      // `mode` only applies when the file is created.
+      await Deno.chmod(path, 0o600);
+    }),
   );
 }
 
 /**
  * Release-backed site: metadata lives in `<siteRoot>/.turbopanel-hosting/`,
- * root-owned and group-readable by the principal — never inside the release,
- * which is read-only by the time this runs.
+ * never inside the release, which is read-only by the time this runs. The
+ * directory is root's and only traversable (`0711`); each file is owned by the
+ * site owner's Linux user and readable by that user alone (`0400`). Not
+ * group-readable: every web engine is a member of the site owner's group, so a
+ * group bit would let one owner's link reach another owner's values. The owner's
+ * own scripts and apps can still read their file.
  *
  * Files are staged in the daemon-owned site dir and installed through
  * the same `sudo -n install` seam every other managed config file uses, so the
@@ -1495,7 +1547,6 @@ async function writeReleaseHostingWebMetadata(
   const files = hostingWebMetadataFiles(site);
   if (files.length === 0) return;
 
-  const group = principalUnixGroupName(release.username);
   const metaDir = siteMetadataDir(
     principalHomePath(layout, release.username),
     release.serviceId,
@@ -1507,11 +1558,11 @@ async function writeReleaseHostingWebMetadata(
       "install",
       "-d",
       "-m",
-      "0750",
+      "0711",
       "-o",
       "root",
       "-g",
-      group,
+      "root",
       metaDir,
     ]),
   );
@@ -1544,11 +1595,11 @@ async function writeReleaseHostingWebMetadata(
         "-n",
         "install",
         "-m",
-        "0640",
+        "0400",
         "-o",
-        "root",
+        release.username,
         "-g",
-        group,
+        "root",
         staged,
         target,
       ]),
@@ -2891,6 +2942,7 @@ async function applyCaddySite(
   const configPath = join(paths.sitesDir, paths.configName);
   const contents = caddySiteConfig(site, paths.documentRoot, dockerBind, {
     phpFpmSocket: php.socket,
+    releaseBacked: paths.release !== undefined,
   });
   const staged = await SITE_ENGINE_DRIVERS.caddy
     .stageSiteConfig(run, configPath, contents);
@@ -3198,6 +3250,53 @@ type ApplyOneSiteResult = ApplySiteResult & {
   /** Engines whose group membership changed — a restart, not a reload. */
   restartEngines?: SiteEngineId[];
 };
+
+/**
+ * The directories the site Caddy must hold mounted `nosymfollow` for these
+ * Caddy sites: a managed site's `webroot/` and a release-backed site's
+ * `releases/` (the unit mounts them once, at start; `current`, the platform's
+ * own link, stays outside).
+ */
+function siteCaddyMountDirs(
+  layout: LayoutPaths,
+  sites: readonly SiteApplySpec[],
+  releaseBindings: ReadonlyMap<string, SiteRelease> | undefined,
+  managedBindings: ReadonlyMap<string, SiteManagedDirectory> | undefined,
+): string[] {
+  const dirs = new Set<string>();
+  for (const site of sites) {
+    if (site.engine !== "caddy") continue;
+    const release = releaseBindings?.get(site.composeServiceName);
+    const managed = managedBindings?.get(site.composeServiceName);
+    if (release) {
+      dirs.add(siteReleasesDir(
+        principalHomePath(layout, release.username),
+        release.serviceId,
+      ));
+    } else if (managed) {
+      dirs.add(siteWebrootDir(
+        principalHomePath(layout, managed.username),
+        managed.serviceId,
+      ));
+    }
+  }
+  return [...dirs];
+}
+
+/** The directories among `dirs` the running site Caddy does not hold mounted. */
+async function siteCaddyUnmounted(dirs: readonly string[]): Promise<string[]> {
+  if (dirs.length === 0) return [];
+  const result = await run("sudo", hostSudoArgs(["-n", "site-caddy-mounts"]));
+  if (!result.success) {
+    throw new Error(
+      `cannot read which web roots the site Caddy has mounted (${
+        result.stderr || "tp-host site-caddy-mounts failed"
+      }). The host helper is older than this daemon: finish the update on this host (the update installs the matching helper), then deploy again.`,
+    );
+  }
+  const mounted = new Set(result.stdout.split("\n").filter((l) => l !== ""));
+  return dirs.filter((dir) => !mounted.has(dir));
+}
 
 async function applyOneSite(
   layout: LayoutPaths,
@@ -3664,7 +3763,29 @@ export async function applySites(
         sitesDirs,
         hostVhosts,
       );
+      // `nosymfollow` is set up when the unit starts, so a directory it does
+      // not hold yet (a new site, or one recreated since) needs a restart.
+      const mountDirs = siteCaddyMountDirs(
+        layout,
+        sites,
+        releaseBindings,
+        managedDirectoryBindings,
+      );
+      if ((await siteCaddyUnmounted(mountDirs)).length > 0) {
+        plan.restartEngines.add("caddy");
+      }
       reloaded = [...retired, ...await reloadSiteEngines(layout, plan)];
+      // Fail loudly rather than serve a tree whose links would be followed.
+      const stillUnmounted = plan.restartEngines.has("caddy")
+        ? await siteCaddyUnmounted(mountDirs)
+        : [];
+      if (stillUnmounted.length > 0) {
+        throw new Error(
+          `the site Caddy did not mount ${
+            stillUnmounted.join(", ")
+          } nosymfollow`,
+        );
+      }
     } catch (err) {
       await rollbackUnsettledPhpRuntimes(plan);
       throw err;

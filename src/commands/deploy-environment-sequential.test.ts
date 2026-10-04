@@ -5,6 +5,7 @@ import { RUNTIME_COMPOSE_FILENAME } from "../deploy/compose-files.ts";
 import { handleEnvironmentDeploy } from "./deploy-environment.ts";
 import { SequentialDeployError } from "../deploy/sequential-deploy.ts";
 import type { EnvironmentDeployPayload } from "../contracts/commands-contracts.ts";
+import "../testing/stub-hosting-caddy-host.ts";
 
 /** Jest/Mocha-shaped alias so Sonar sees real tests (see deploy-environment.test.ts). */
 const test = Deno.test.bind(Deno);

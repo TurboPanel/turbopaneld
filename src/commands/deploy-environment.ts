@@ -1,5 +1,6 @@
 import { buildStorageVolumesFragment } from "../deploy/apply-storage-volumes.ts";
 import { buildHostingLabelsFragment } from "../deploy/compose-labels.ts";
+import { assertComposePolicy } from "../deploy/compose-final-policy.ts";
 import { assertNoReservedOwnerLabels } from "../deploy/compose-reserved-labels.ts";
 import { assertComposeBuildPolicy } from "../deploy/compose-build-policy.ts";
 import { encodeHex } from "@std/encoding/hex";
@@ -1622,6 +1623,16 @@ async function deployContainerServices(
     // A tenant compose never carries the labels that mark the platform's own
     // containers (the Docker gate trusts them); refuse before anything runs.
     assertNoReservedOwnerLabels(resolved.document ?? {});
+    // The resolved model is what Compose will run (merge keys, anchors and
+    // `extends` already expanded): host-level service fields need the control
+    // plane's approval, and built images may not take platform image names.
+    assertComposePolicy(resolved.document ?? {}, {
+      hostLevelApproved: parsedPayload.hostLevelApproved === true,
+      platformNetworks: [
+        parsedPayload.hostingIngressNetwork,
+        parsedPayload.managedNetwork,
+      ].filter((n): n is string => typeof n === "string"),
+    });
     // Build options no deploy may carry (host network, privileges, SSH agent,
     // internal extra_hosts or remote contexts, secret files outside); no
     // approval reaches these, bar a public remote context the organization

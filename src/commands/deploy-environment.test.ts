@@ -32,6 +32,7 @@ import type {
   EnvironmentDeployNativeAppService,
   EnvironmentDeployPayload,
 } from "../contracts/commands-contracts.ts";
+import "../testing/stub-hosting-caddy-host.ts";
 
 /**
  * Shared hosting-ingress Docker network — the `hosting-ingress` system
