@@ -65,12 +65,6 @@ async function chownFileOwner(
   await runSudo(["chown", `${uid}:${gid}`, path]);
 }
 
-async function ensureWriteTmpDir(configDir: string): Promise<string> {
-  const tmpDir = join(configDir, ".write-tmp");
-  await Deno.mkdir(tmpDir, { recursive: true, mode: 0o700 });
-  return tmpDir;
-}
-
 async function removeTempFile(path: string | null): Promise<void> {
   if (!path) return;
   try {
@@ -87,7 +81,7 @@ function modeOctal(mode: number): string {
 /**
  * Instance config (`/etc/turbopanel/instance`) is intentionally root:group
  * mode 0750 so secret files stay non-group-writable. The daemon therefore
- * cannot create `.write-tmp` there — stage in /tmp and `sudo install`.
+ * cannot stage a temp file there — stage in /tmp and `sudo install`.
  */
 async function writeEnvFilePrivileged(
   envPath: string,
@@ -128,8 +122,10 @@ async function writeEnvFileUnprivileged(
 ): Promise<void> {
   const configDir = dirname(envPath);
   await Deno.mkdir(configDir, { recursive: true, mode: 0o750 });
-  const tmpDir = await ensureWriteTmpDir(configDir);
-  const tmpPath = join(tmpDir, `write-${crypto.randomUUID()}`);
+  // Staged beside the file, never in a folder of its own: the instance config
+  // folder is root-owned on a sealed host, so any create here fails with
+  // PermissionDenied and falls through to the privileged install.
+  const tmpPath = `${envPath}.tmp-${crypto.randomUUID().slice(0, 8)}`;
   const mode = meta?.mode ?? DEFAULT_ENV_MODE;
   let tmpCreated: string | null = tmpPath;
   try {

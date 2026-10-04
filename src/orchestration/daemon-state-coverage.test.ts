@@ -40,19 +40,17 @@ const EXEMPT: Record<string, string> = {
   "config/system": "root role (system stack)",
   "config/instance": "control plane (state root not sealed co-located)",
   "state/instance": "control plane (state root not sealed co-located)",
-  "config/.write-tmp":
-    "instance (public-urls-env.ts); open item if sealed co-located",
   "config/Caddyfile": "below config/hosting (a local variable, not the root)",
   "config/mime.properties": "below config/openlitespeed (a local variable)",
   "state/update-rollback.json": "written by the root update guard",
   "state/instance-acme": "control plane (state root not sealed co-located)",
   "state/openlitespeed": "root role (openlitespeed)",
   "state/proxysql": "root-written by the managed-engine playbooks",
-  // The instance and the daemon share this folder on a co-located host, where
-  // instance-launch creates it for the instance user (2770); making it a
-  // daemon leaf would flip that owner. Open item: a daemon-only host has no
-  // role that creates it.
-  "state/metrics": "instance-launch owns it (co-located); open item",
+  // A leaf on a daemon-only host (daemon-layout makes it when no control
+  // plane is installed); co-located, instance-launch owns it for the instance
+  // user (2770) and daemon-layout leaves it alone.
+  "state/metrics":
+    "conditional leaf (daemon-only) / instance-launch (co-located)",
   // Written by the root guard script, only read or removed by the daemon.
   "state/firewall-rollback.json": "written by the root guard",
 };

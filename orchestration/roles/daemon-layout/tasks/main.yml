@@ -84,6 +84,21 @@
   loop_control:
     label: "{{ item.name }}"
 
+# The daemon keeps its hardware profile in <state>/metrics. On a daemon-only
+# host nothing else creates that folder, so it is a leaf here. On a co-located
+# host (turbopanel_after_instance_service) the instance-launch role owns it
+# for the instance user (2770, shared with the daemon through the group), so
+# this role leaves it alone rather than flip that owner.
+- name: Ensure the daemon-writable metrics folder (daemon-only hosts)
+  when: not (turbopanel_after_instance_service | default(false) | bool)
+  ansible.builtin.file:
+    path: "{{ turbopanel_daemon_state_dir }}/metrics"
+    state: directory
+    owner: "{{ turbopanel_user }}"
+    group: "{{ turbopanel_group }}"
+    mode: "0750"
+    follow: false
+
 - name: Require native daemon binary
   ansible.builtin.stat:
     path: "{{ turbopanel_daemon_bin }}"

@@ -180,7 +180,7 @@ test({
       options?: Deno.WriteFileOptions,
     ) => {
       const p = String(path);
-      if (p.includes(".write-tmp") || p.includes("/write-")) {
+      if (p.includes("runtime.env.tmp-")) {
         return Promise.reject(
           new Deno.errors.PermissionDenied("mocked unprivileged write"),
         );
@@ -237,7 +237,7 @@ test({
       options?: Deno.WriteFileOptions,
     ) => {
       if (
-        String(path).includes(".write-tmp") || String(path).includes("/write-")
+        String(path).includes("runtime.env.tmp-")
       ) {
         return Promise.reject(
           new Deno.errors.PermissionDenied("mocked"),
@@ -434,7 +434,7 @@ test({
       options?: Deno.WriteFileOptions,
     ) => {
       const p = String(path);
-      if (p.includes(".write-tmp") || p.includes("/write-")) {
+      if (p.includes("runtime.env.tmp-")) {
         return Promise.reject(
           new Deno.errors.PermissionDenied("mocked unprivileged write"),
         );
@@ -483,7 +483,7 @@ test({
       options?: Deno.WriteFileOptions,
     ) => {
       if (
-        String(path).includes(".write-tmp") || String(path).includes("/write-")
+        String(path).includes("runtime.env.tmp-")
       ) {
         return Promise.reject(new Error("disk full"));
       }
@@ -647,7 +647,7 @@ test({
       options?: Deno.WriteFileOptions,
     ) => {
       const p = String(path);
-      if (p.includes(".write-tmp") || p.includes("/write-")) {
+      if (p.includes("runtime.env.tmp-")) {
         return Promise.reject(
           new Deno.errors.PermissionDenied("mocked unprivileged write"),
         );
@@ -731,7 +731,7 @@ test({
       options?: Deno.WriteFileOptions,
     ) => {
       const p = String(path);
-      if (p.includes(".write-tmp") || p.includes("/write-")) {
+      if (p.includes("runtime.env.tmp-")) {
         return Promise.reject(
           new Deno.errors.PermissionDenied("mocked unprivileged write"),
         );
