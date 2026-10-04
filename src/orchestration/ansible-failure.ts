@@ -98,7 +98,7 @@ export function ansibleFailureLine(
 /** Remembers the last real cause seen while a playbook runs. */
 export class AnsibleFailureTracker {
   #taskFailure: string | null = null;
-  #stderr: string[] = [];
+  readonly #stderr: string[] = [];
 
   handleEvent(event: AnsibleEvent): void {
     if (
