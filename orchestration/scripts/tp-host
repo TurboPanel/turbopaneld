@@ -177,6 +177,12 @@ tp_path_class() {
       return
       ;;
   esac
+  # The shared php-fpm master runs as root and reads its main config and every
+  # conf.d/*.ini at start (`extension=` loads code into it). Only Ansible writes
+  # those; the daemon keeps just pool.d/*.conf here.
+  case "$_pc" in
+    "$R_CONFIG"/php/conf.d|"$R_CONFIG"/php/conf.d/*|"$R_CONFIG"/php/*/conf.d|"$R_CONFIG"/php/*/conf.d/*|"$R_CONFIG"/php/*/php-fpm.conf) return 1 ;;
+  esac
   for _pc_root in "$R_CONFIG" "$R_STATE" "$R_LOG" "$R_RUN" "$R_SSHKEYS"; do
     if tp_under "$_pc" "$_pc_root"; then echo tree; return 0; fi
   done
@@ -783,6 +789,9 @@ tp_unit_ok() {
       # binding :80/:443.
       if (key ~ /^(CapabilityBoundingSet|AmbientCapabilities)$/ && val != "" && !(hosting == "1" && val == hostcap)) fail(key "=" val)
       if (key == "NoNewPrivileges") nnp = val
+      # Tenant output goes to the journal (or nowhere): systemd opens `file:`,
+      # `append:` and `truncate:` targets itself, before it drops to User=.
+      if (key ~ /^Standard(Output|Error)$/ && val !~ /^(journal|null|inherit)$/) fail(key "=" val)
       if (key == "Unit" && section == "Timer") timerunit = val
     }
     END {
@@ -2334,16 +2343,25 @@ tp_verb_sysctl() {
   tp_die "sysctl: unsupported form"
 }
 
-# xtables: any rule, but never --modprobe (it names a program root runs) and
-# no rule files (restore reads stdin only).
+# xtables: the rule options the daemon sends, never anything else. An option
+# that names a program root would run (`--modprobe`, spelled `-M/path`,
+# `-nM/path`, `--mod=/path` or any other getopt abbreviation) can then never
+# slip through, because every argument that starts with `-` must be on the
+# list. Rule files are refused too (restore reads stdin only).
 tp_verb_xtables() {
   _xt_bin="$1"
   shift
-  for _xt_a in "$@"; do
-    case "$_xt_a" in
-      --modprobe*|-M) tp_die "$_xt_bin: refusing $_xt_a" ;;
-    esac
-  done
+  case "$_xt_bin" in
+    iptables|ip6tables)
+      for _xt_a in "$@"; do
+        case "$_xt_a" in
+          -w|--wait|-V|--version|-A|-C|-D|-I|-N|-F|-X|-S|-p|-s|-d|-i|-o|-j|-m|--dport|--ctstate|--ctorigdst|--ctorigdstport) ;;
+          -*) tp_die "$_xt_bin: refusing option $_xt_a" ;;
+          *) ;;
+        esac
+      done
+      ;;
+  esac
   case "$_xt_bin" in
     iptables-restore|ip6tables-restore)
       for _xt_a in "$@"; do
