@@ -25,6 +25,7 @@ import {
   principalSliceContent,
 } from "../deploy/native/unit.ts";
 import { caddyUnit } from "../deploy/ingress.ts";
+import { phpFpmPoolConfig } from "../deploy/site.ts";
 import { sshdDropInContent } from "../deploy/ssh/sshd-config.ts";
 import { allAccessGroups } from "../runtime/registry.ts";
 import { backupServiceContent, backupTimerContent } from "../backups/units.ts";
@@ -3151,6 +3152,8 @@ test("the WireGuard config: only the keys the daemon renders, never a hook", asy
           "Endpoint = $(id):1",
         ),
         WG_CONF.replace("[Peer]", "[Script]"),
+        `${WG_CONF}# x\rPostUp = /x\n`,
+        `${WG_CONF}# x\0PostUp = /x\n`,
       ]
     ) {
       await refused(host, [
@@ -3200,6 +3203,10 @@ test("the sysctl drop-in: only the forwarding switch, through install and tee", 
         "-kernel.modprobe=/x\n",
         "; x\nkernel.modprobe=/x\n",
         "net.ipv4.ip_forward=1\0\nkernel.modprobe=/x\n",
+        // systemd-sysctl ends a line at a carriage return too.
+        "# x\rkernel.core_pattern=|/var/lib/turbopanel/spool/x\n",
+        "net.ipv4.ip_forward=1\rkernel.modprobe=/x\n",
+        "; x\0kernel.core_pattern=|/x\n",
       ]
     ) {
       await refused(host, ["tee", dest], content);
@@ -3277,6 +3284,13 @@ test("the sshd drop-in: only the renderer's Match blocks, never a global or root
       `Match Group tpsftp\n  PubkeyAuthentication yes\0\n  PermitRootLogin yes\n`,
       `${good}PermitRootLogin yes\n`,
       `${good}Include /tmp/x\n`,
+      // A comment hides what follows a carriage return from this check only.
+      `${good}# x\rPermitRootLogin yes\n`,
+      `${good}# x\0PermitRootLogin yes\n`,
+      // A block left open would swallow the host config included after it.
+      "Match Group tpsftp\n  PubkeyAuthentication yes\n",
+      good.replace(/Match all\n$/, ""),
+      `${good}Match Group tpsftp\n  PubkeyAuthentication yes\n`,
     ];
     for (const content of hostile) {
       await refused(host, [
@@ -3301,4 +3315,175 @@ test("the sshd drop-in's allowed groups equal the registry's access groups", asy
     found.split(" ").sort(),
     [...allAccessGroups()].sort(),
   );
+});
+
+test("units: a carriage return or NUL never hides a directive from the check", async () => {
+  await withHost(async (host) => {
+    const layout = resolveLayout({
+      TURBOPANEL_HOME: host.path("opt/turbopanel"),
+      TURBOPANEL_RUNTIMES_DIR: host.path("opt/turbopanel/vendor"),
+      TURBOPANEL_CONFIG_DIR: host.path("etc/turbopanel"),
+      TURBOPANEL_STATE_DIR: host.path("var/lib/turbopanel"),
+      TURBOPANEL_PRINCIPAL_HOME_ROOT: host.path("srv/users"),
+    }, { forceMode: "production" });
+    const service = cronServiceContent({
+      layout,
+      environmentId: "env1",
+      composeServiceName: "web",
+      job: {
+        name: "nightly",
+        schedule: "*-*-* 03:00:00",
+        command: ["/usr/bin/php8.4", "artisan", "schedule:run"],
+      } as unknown as EnvironmentDeployCronJob,
+      username: "alice",
+      workingDirectory: host.path("srv/users/alice/sites/web/current"),
+    });
+    const name = "turbopanel-cron-env1-web-nightly.service";
+    const dest = host.path(`etc/systemd/system/${name}`);
+    const ok = await host.run([
+      "install",
+      "-m",
+      "0644",
+      "-o",
+      "root",
+      "-g",
+      "root",
+      await stage(host, service),
+      dest,
+    ]);
+    assertEquals(ok.code, 0, ok.stderr);
+    for (
+      const hostile of [
+        service.replace("[Service]", "[Service]\n# x\rUser=root"),
+        service.replace("[Service]", "[Service]\n; x\rExecStartPre=+/bin/sh"),
+        service.replace(
+          "Description=",
+          "Description=x\rExecStart=+/bin/sh\rUser=root\rignored=",
+        ),
+        service.replace("[Service]", "[Service]\n# x\0User=root"),
+        service.replace("[Service]", "[Service]\r\nUser=root"),
+      ]
+    ) {
+      assertEquals(hostile === service, false);
+      await refused(host, [
+        "install",
+        "-m",
+        "0644",
+        "-o",
+        "root",
+        "-g",
+        "root",
+        await stage(host, hostile),
+        dest,
+      ]);
+    }
+    // The slice, timer and hosting classes go through the same gate.
+    await refused(host, [
+      "install",
+      "-m",
+      "0644",
+      "-o",
+      "root",
+      "-g",
+      "root",
+      await stage(host, "[Slice]\n# x\rCPUQuota=1\n"),
+      host.path("etc/systemd/system/turbopanel-alice.slice"),
+    ]);
+  });
+});
+
+test("shared php-fpm master pools: only what the daemon renders, never a root worker or the master's own section", async () => {
+  await withHost(async (host) => {
+    await Deno.mkdir(host.path("etc/turbopanel/php/8.4/pools"), {
+      recursive: true,
+    });
+    const dest = host.path("etc/turbopanel/php/8.4/pools/tp-env1-phpapp.conf");
+    const base = {
+      composeServiceName: "phpapp",
+      engine: "nginx" as const,
+      root: "public",
+      listenPort: 18081,
+    };
+    const rendered = [
+      phpFpmPoolConfig(
+        "env1",
+        { ...base, php: { version: "8.4" } },
+        "/srv/root",
+        "/run/turbopanel/php/8.4/tp-env1-phpapp.sock",
+      ),
+      phpFpmPoolConfig(
+        "env1",
+        {
+          ...base,
+          php: {
+            version: "8.4",
+            pool: { pm: "static", "pm.max_children": "8" },
+            settings: { memory_limit: "256M" },
+          },
+          principal: {
+            principalId: "00000000-0000-4000-8000-000000000099",
+            username: "site_user",
+          },
+        },
+        "/var/lib/turbopanel/sites/env1/phpapp/public",
+        "/run/turbopanel/php/tp-env1-phpapp.sock",
+        {
+          openBasedir: ["/var/lib/turbopanel/sites/env1/phpapp/public", "/tmp"],
+          releaseSymlinkSwap: true,
+        },
+      ),
+    ];
+    for (const content of rendered) {
+      for (const target of [dest, `${dest}.candidate`]) {
+        const ok = await host.run([
+          "install",
+          "-m",
+          "0640",
+          "-o",
+          "root",
+          "-g",
+          "tpnginx",
+          await stage(host, content),
+          target,
+        ]);
+        assertEquals(ok.code, 0, ok.stderr);
+      }
+      const t = await host.run(["tee", dest], content);
+      assertEquals(t.code, 0, t.stderr);
+    }
+    const good = rendered[0];
+    const hostile = [
+      good.replace("user = tpnginx", "user = root"),
+      good.replace("group = tpnginx", "group = root"),
+      good.replace("[tp-env1-phpapp]", "[global]"),
+      good.replace("[tp-env1-phpapp]", "[GLOBAL]"),
+      `${good}[global]\nerror_log = /etc/cron.d/x\n`,
+      `${good}include = /var/lib/turbopanel/spool/x.conf\n`,
+      `${good}prefix = /\n`,
+      `${good}chroot = /\n`,
+      `${good}php_admin_value[extension] = /var/lib/turbopanel/spool/x.so\n`,
+      `${good}php_admin_value[zend_extension] = /x.so\n`,
+      `${good}security.limit_extensions =\n`,
+      `${good}; x\ruser = root\n`,
+      `${good}; x\0user = root\n`,
+      "user = root\n",
+      good.replace("listen.mode = 0660", "listen.mode = 0666 ; x"),
+      good.replace("pm = ondemand", "pm = ondemand\npm.status_path = /x"),
+    ];
+    for (const content of hostile) {
+      assertEquals(content === good, false);
+      await refused(host, [
+        "install",
+        "-m",
+        "0640",
+        "-o",
+        "root",
+        "-g",
+        "tpnginx",
+        await stage(host, content),
+        dest,
+      ]);
+      await refused(host, ["tee", dest], content);
+    }
+  });
 });

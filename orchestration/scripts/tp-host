@@ -713,14 +713,15 @@ META
 # daemon renders are accepted: known keys with strict values, nothing else.
 # Each takes the staged file path and returns non-zero on any other content.
 
-# A NUL would split a line differently for awk and for the program that
-# finally reads the file.
-tp_content_nul_free() {
-  LC_ALL=C tr -d '\000' < "$1" | cmp -s - "$1"
+# A NUL or a carriage return ends a line for systemd's and PHP's readers (and a
+# NUL for bash's `read`) but not for awk, so text after one would be read as a
+# directive the checks below never saw. No file the daemon renders holds either.
+tp_content_plain() {
+  LC_ALL=C tr -d '\000\r' < "$1" | cmp -s - "$1"
 }
 
 tp_wireguard_ok() {
-  tp_content_nul_free "$1" || return 1
+  tp_content_plain "$1" || return 1
   LC_ALL=C awk '
     function fail(msg) { print "tp-host: wireguard config: " msg > "/dev/stderr"; exit 1 }
     function b64key(v) { return length(v) == 44 && v ~ /^[A-Za-z0-9+\/]+=$/ }
@@ -760,9 +761,9 @@ tp_wireguard_ok() {
 }
 
 tp_sshd_dropin_ok() {
-  tp_content_nul_free "$1" || return 1
+  tp_content_plain "$1" || return 1
   LC_ALL=C awk -v keys="$R_SSHKEYS/authorized_keys/%u" -v chroot="$R_PRINCIPALS/%u" -v groups="$SSHD_MATCH_GROUPS" '
-    function fail(msg) { print "tp-host: sshd drop-in: " msg > "/dev/stderr"; exit 1 }
+    function fail(msg) { print "tp-host: sshd drop-in: " msg > "/dev/stderr"; bad = 1; exit 1 }
     BEGIN {
       n = split(groups, g, " ")
       for (i = 1; i <= n; i++) okgroup[g[i]] = 1
@@ -772,6 +773,7 @@ tp_sshd_dropin_ok() {
       okline["  ChrootDirectory " chroot] = 1
     }
     /^[ \t]*$/ || /^#/ { next }
+    { last = $0 }
     /^Match all$/ { inmatch = 0; next }
     /^Match Group [A-Za-z0-9_-]+$/ {
       if (!(substr($0, 13) in okgroup)) fail("Match group " substr($0, 13))
@@ -782,23 +784,74 @@ tp_sshd_dropin_ok() {
       if (!inmatch) fail("directive outside a Match block: " $0)
       if (!($0 in okline)) fail("directive " $0)
     }
+    # The drop-in is included near the top of sshd_config: a Match block left
+    # open would swallow every directive of the host config that follows it.
+    END {
+      if (bad) exit 1
+      if (last != "" && last != "Match all") { print "tp-host: sshd drop-in: does not end with Match all" > "/dev/stderr"; exit 1 }
+    }
   ' "$1"
 }
 
 tp_sysctl_dropin_ok() {
-  tp_content_nul_free "$1" || return 1
+  tp_content_plain "$1" || return 1
   LC_ALL=C awk '
     /^$/ || /^#/ || $0 == "net.ipv4.ip_forward=1" || $0 == "net.ipv4.ip_forward = 1" { next }
     { print "tp-host: sysctl drop-in: refusing line " $0 > "/dev/stderr"; exit 1 }
   ' "$1"
 }
 
-# Run the check that belongs to a class whose content root loads unseen.
+# A pool file of the shared php-fpm master (root; it reads every pool at start).
+# Only the directives the daemon renders, a pool never named `global` (that
+# section sets the master's own log, includes and prefix), no worker account
+# of root.
+tp_phppool_ok() {
+  tp_content_plain "$1" || return 1
+  LC_ALL=C awk '
+    function fail(msg) { print "tp-host: php-fpm pool: " msg > "/dev/stderr"; exit 1 }
+    function acct(v) { return v != "root" && length(v) <= 32 && v ~ /^[a-z_][a-z0-9_-]*$/ }
+    function word(v) { return v ~ /^[A-Za-z0-9._-]+$/ }
+    function valueok(k, v) {
+      if (k == "user" || k == "group" || k == "listen.owner" || k == "listen.group") return acct(v)
+      if (k == "listen") return v ~ /^\/[A-Za-z0-9._\/-]+$/
+      if (k == "listen.mode") return v ~ /^0[0-7][0-7][0-7]$/
+      if (k == "pm") return v == "static" || v == "dynamic" || v == "ondemand"
+      if (k ~ /^pm\.(max_children|start_servers|min_spare_servers|max_spare_servers|max_requests|process_idle_timeout)$/ || k == "request_terminate_timeout") return word(v)
+      if (k == "chdir") return v ~ /^\/[A-Za-z0-9._\/@+:-]*$/
+      if (k == "catch_workers_output" || k == "decorate_workers_output" || k == "clear_env") return v == "yes" || v == "no"
+      if (k ~ /^php_admin_value\[[A-Za-z0-9._]+\]$/) return k !~ /extension/ && v !~ /^[ \t]/
+      return -1
+    }
+    /^[ \t]*$/ || /^;/ { next }
+    /^\[[A-Za-z0-9._-]+\]$/ {
+      if (tolower($0) == "[global]") fail("a [global] section")
+      inpool = 1
+      next
+    }
+    {
+      if (!inpool) fail("directive outside a pool")
+      if (!match($0, /^[A-Za-z0-9._]+(\[[A-Za-z0-9._]+\])? = /)) fail("line without a key: " $0)
+      k = $0; sub(/ = .*$/, "", k)
+      r = valueok(k, substr($0, RLENGTH + 1))
+      if (r < 0) fail("directive " k)
+      if (!r) fail("value of " k)
+    }
+  ' "$1"
+}
+
+# Run the check that belongs to what root loads unseen: CLASS, the staged file,
+# and the destination path (the pool files are plain tree paths).
 tp_content_ok() {
   case "$1" in
     wireguard) tp_wireguard_ok "$2" ;;
     sshd) tp_sshd_dropin_ok "$2" ;;
     sysctl) tp_sysctl_dropin_ok "$2" ;;
+    tree)
+      case "$3" in
+        "$R_CONFIG"/php/*/pools/*) tp_phppool_ok "$2" ;;
+        *) return 0 ;;
+      esac
+      ;;
     *) return 0 ;;
   esac
 }
@@ -810,6 +863,7 @@ tp_content_ok() {
 tp_unit_ok() {
   _uk_file="$1"
   _uk_name="$2"
+  tp_content_plain "$_uk_file" || return 1
   # `turbopanel-backup-` is reserved for scheduled backups: a name under it is
   # either exactly turbopanel-backup-<lower-case uuid>.service|.timer and gets
   # the backup check below, or it is refused.
@@ -1669,7 +1723,8 @@ tp_php_install() {
   case "$_pi_mode" in 0640|640) ;; *) tp_die "refusing mode $_pi_mode for $_pi_dest" ;; esac
   tp_stage_dir
   tp_read_as_caller "$1" > "$TP_STAGE/src"
-  tp_php_conf_ok "$TP_STAGE/src" "$_pi_dest" "$_pi_group" ||
+  tp_content_plain "$TP_STAGE/src" &&
+    tp_php_conf_ok "$TP_STAGE/src" "$_pi_dest" "$_pi_group" ||
     tp_die "refusing ${_pi_dest##*/}: content outside the allowed directives"
   tp_put_file "$_pi_dest" 0640 root "$_pi_group" < "$TP_STAGE/src"
 }
@@ -1820,7 +1875,7 @@ tp_verb_install() {
     tp_unit_ok "$_in_stage" "${_in_dest##*/}" ||
       tp_die "refusing unit ${_in_dest##*/}: content outside the allowed shape"
   fi
-  tp_content_ok "$_in_class" "$_in_stage" ||
+  tp_content_ok "$_in_class" "$_in_stage" "$_in_dest" ||
     tp_die "refusing ${_in_dest##*/}: content outside the allowed shape"
   tp_put_file "$_in_dest" "$_in_mode" "$_in_owner" "$_in_group" < "$_in_stage"
 }
@@ -1864,7 +1919,7 @@ tp_verb_cp() {
       [ "$_cp_dest" = "$R_WG/tp0.conf" ] || tp_die "refusing cp destination $_cp_dest"
       tp_stage_dir
       tp_read_as_caller "$_cp_src" > "$TP_STAGE/src"
-      tp_content_ok wireguard "$TP_STAGE/src" ||
+      tp_content_ok wireguard "$TP_STAGE/src" "$_cp_dest" ||
         tp_die "refusing ${_cp_dest##*/}: content outside the allowed shape"
       tp_put_file "$_cp_dest" 600 < "$TP_STAGE/src"
       ;;
@@ -2187,7 +2242,7 @@ tp_verb_tee() {
   tp_stage_dir
   _te_tmp="$TP_STAGE/stdin"
   cat > "$_te_tmp"
-  tp_content_ok "$_te_class" "$_te_tmp" ||
+  tp_content_ok "$_te_class" "$_te_tmp" "$1" ||
     tp_die "refusing ${1##*/}: content outside the allowed shape"
   # 0600 until the caller sets the final mode (it always follows with chmod).
   tp_put_file "$1" 600 < "$_te_tmp"
