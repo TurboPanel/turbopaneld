@@ -132,6 +132,13 @@ Deploy-time `fabricNetworks[]` is the belt-and-braces bridge path alongside
 command-driven reconcile and boot restore. **Not** wired into
 `daemon-converge.yml` (command-driven, plus boot restore).
 
+Observed peers in the reconcile result carry `interface`: the local NIC whose
+connected subnet holds the peer's live endpoint (`src/commands/fabric-peer-interface.ts`,
+matched against the addresses `collectServerIps` already reports, so it starts
+no process and changes no route). Absent means the endpoint is reached by the
+default route. The control plane's traffic map compares it with the datacenter
+it planned the endpoint from.
+
 ### ProxySQL (`proxysql`)
 
 Moved to `roles/proxysql/AGENTS.md`.

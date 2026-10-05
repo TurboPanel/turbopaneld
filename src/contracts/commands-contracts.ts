@@ -618,6 +618,12 @@ export type FabricReconcileObservedPeer = {
   transferTx?: number;
   endpoint?: string;
   health?: FabricPeerHealth;
+  /**
+   * Local NIC whose connected subnet holds the peer's live endpoint (the
+   * network the tunnel really runs on). Absent when the endpoint is not on a
+   * connected subnet (reached by the default route).
+   */
+  interface?: string;
 };
 
 /**
@@ -3165,6 +3171,12 @@ export function addressInCidrLiteral(address: string, cidr: string): boolean {
   return value >= range.base && value <= range.last;
 }
 
+/** Linux interface name: at most 15 bytes, no slash or whitespace. */
+export function isValidInterfaceName(value: unknown): value is string {
+  return typeof value === "string" &&
+    /^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,14}$/.test(value);
+}
+
 export function isValidWireguardEndpoint(value: unknown): boolean {
   if (typeof value !== "string") return false;
   if (value.length === 0 || value.length > 255) return false;
@@ -3498,15 +3510,29 @@ function parseFabricObservedPeer(value: unknown): FabricReconcileObservedPeer {
     peer.endpoint = record.endpoint;
   }
   if (record.health !== undefined) {
-    if (
-      typeof record.health !== "string" ||
-      !FABRIC_PEER_HEALTH.has(record.health as FabricPeerHealth)
-    ) {
-      throw new TypeError("Invalid fabric reconcile result peer health");
-    }
-    peer.health = record.health as FabricPeerHealth;
+    peer.health = parseObservedPeerHealth(record.health);
+  }
+  if (record.interface !== undefined) {
+    peer.interface = parseObservedPeerInterface(record.interface);
   }
   return peer;
+}
+
+function parseObservedPeerHealth(value: unknown): FabricPeerHealth {
+  if (
+    typeof value !== "string" ||
+    !FABRIC_PEER_HEALTH.has(value as FabricPeerHealth)
+  ) {
+    throw new TypeError("Invalid fabric reconcile result peer health");
+  }
+  return value as FabricPeerHealth;
+}
+
+function parseObservedPeerInterface(value: unknown): string {
+  if (!isValidInterfaceName(value)) {
+    throw new TypeError("Invalid fabric reconcile result peer interface");
+  }
+  return value;
 }
 
 function parseNonEmptyString(

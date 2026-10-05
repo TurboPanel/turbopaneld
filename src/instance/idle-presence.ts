@@ -14,6 +14,11 @@ import {
   type HostHelloIdentity,
 } from "../host/os-release.ts";
 import { type HostTimeSync, readTimeSync } from "../host/time-sync.ts";
+import {
+  readReleaseLinkScanReport,
+  type ReleaseLinkScanReport,
+} from "../deploy/release/live-release-scan.ts";
+import { resolveLayout } from "../paths/layout.ts";
 import { logInfo, logWarn, sanitizeForLog } from "../util/logger.ts";
 import { DAEMON_WIRE_FEATURES } from "./version-wire.ts";
 import {
@@ -120,6 +125,13 @@ type PresenceSnapshot = {
    * control plane every service on this host is gone.
    */
   services?: ServiceRunState[];
+  /**
+   * Summary of the boot-time check of live releases for links that leave the
+   * release (`release-link-scan.json`). The scan runs in the background after
+   * the daemon is up, so it usually lands after the first hello and arrives on
+   * a later heartbeat through the same change detection.
+   */
+  releaseLinkScan?: ReleaseLinkScanReport;
 };
 
 type BuildInfoProvider = () => BuildInfo;
@@ -133,16 +145,27 @@ type PresenceSnapshotProvider = () => PresenceSnapshot;
  * its supported range. */
 type DaemonBuildWire = BuildInfo & { channel: string; version: string };
 
+/** Presence never fails on this: no env or file access just means no report. */
+function readLinkScanForPresence(): ReleaseLinkScanReport | undefined {
+  try {
+    return readReleaseLinkScanReport(resolveLayout(Deno.env.toObject()));
+  } catch {
+    return undefined;
+  }
+}
+
 function defaultPresenceSnapshot(): PresenceSnapshot {
   const docker = readDocker();
   const runtimes = readHostRuntimes();
   const services = readServiceRunStates();
+  const releaseLinkScan = readLinkScanForPresence();
   return {
     timeSync: readTimeSync(),
     ips: collectServerIps(readDefaultRouteInterfaces()),
     ...(docker ? { docker } : {}),
     ...(runtimes ? { runtimes } : {}),
     ...(services ? { services } : {}),
+    ...(releaseLinkScan ? { releaseLinkScan } : {}),
   };
 }
 
@@ -377,6 +400,9 @@ export class IdlePresence {
         ...(presence.docker ? { docker: presence.docker } : {}),
         ...(presence.runtimes ? { runtimes: presence.runtimes } : {}),
         ...(presence.services ? { services: presence.services } : {}),
+        ...(presence.releaseLinkScan
+          ? { releaseLinkScan: presence.releaseLinkScan }
+          : {}),
         features: [...DAEMON_WIRE_FEATURES],
       }));
       this.#lastActivityAt = Date.now();
@@ -397,7 +423,7 @@ export class IdlePresence {
    *    the runtime level without waking the DO.
    * 2. The app-level heartbeat — sent when the daemon build commit changed
    *    since the last hello/heartbeat, **or** when `timeSync` / `resources.ips` /
-   *    `docker` changed since the last presence snapshot (change-detected,
+   *    `docker` / `releaseLinkScan` changed since the last presence snapshot (change-detected,
    *    cadence-bound), **or** when no presence frame has gone out for
    *    {@link PRESENCE_REFRESH_MS}. That last case is the cheap floor that
    *    still refreshes presence facts on a connection where nothing else
@@ -440,6 +466,7 @@ export class IdlePresence {
       docker: presence?.docker,
       runtimes: presence?.runtimes,
       services: presence?.services,
+      releaseLinkScan: presence?.releaseLinkScan,
     });
   }
 
@@ -494,6 +521,7 @@ export class IdlePresence {
     docker?: HostDockerMetadata;
     runtimes?: HostRuntimeMetadata;
     services?: ServiceRunState[];
+    releaseLinkScan?: ReleaseLinkScanReport;
   }): void {
     const ws = this.#ws;
     if (ws?.readyState !== WebSocket.OPEN) return;
@@ -507,6 +535,7 @@ export class IdlePresence {
       docker?: HostDockerMetadata;
       runtimes?: HostRuntimeMetadata;
       services?: ServiceRunState[];
+      releaseLinkScan?: ReleaseLinkScanReport;
     } = {
       type: "heartbeat",
       at: new Date().toISOString(),
@@ -520,6 +549,9 @@ export class IdlePresence {
     if (fields.docker) payload.docker = fields.docker;
     if (fields.runtimes) payload.runtimes = fields.runtimes;
     if (fields.services) payload.services = fields.services;
+    if (fields.releaseLinkScan) {
+      payload.releaseLinkScan = fields.releaseLinkScan;
+    }
 
     try {
       ws.send(JSON.stringify(payload));

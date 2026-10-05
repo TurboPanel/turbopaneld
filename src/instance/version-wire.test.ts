@@ -4,6 +4,7 @@ import {
   compareSemver,
   DAEMON_FEATURE_MIN_VERSIONS,
   DAEMON_WIRE_FEATURES,
+  DEPLOY_CANCEL_FEATURE,
   instanceUnsupportedReason,
   MANAGED_HA_INSTANCE_FEATURE,
   MANAGED_HEALTH_FEATURE,
@@ -142,6 +143,17 @@ test("php-site-modes-v1 is advertised on the wire and raised no floor", () => {
   assertEquals(
     (DAEMON_WIRE_FEATURES as readonly string[]).includes(
       PHP_SITE_MODES_FEATURE,
+    ),
+    true,
+  );
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+});
+
+test("deploy-cancel-v1 is advertised on the wire and raised no floor", () => {
+  assertEquals(DEPLOY_CANCEL_FEATURE, "deploy-cancel-v1");
+  assertEquals(
+    (DAEMON_WIRE_FEATURES as readonly string[]).includes(
+      DEPLOY_CANCEL_FEATURE,
     ),
     true,
   );

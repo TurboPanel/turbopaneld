@@ -35,6 +35,7 @@ import {
   inspectContainedDir,
 } from "./safe-copy.ts";
 import { forEachSequential } from "../../util/sequential.ts";
+import { throwIfAborted, withCancelSignal } from "../deploy-cancel.ts";
 import { definedFields } from "../../util/optional-fields.ts";
 import type { RunFn } from "../ensure-principal.ts";
 import {
@@ -140,6 +141,11 @@ export type ReleaseBuildParams = {
    * spec's `cwd` inside `sandbox.work.workDir`.
    */
   sandbox?: SandboxBuildTarget;
+  /**
+   * Cancel signal of the deploy. Aborting it stops the running build (the
+   * sandbox unit on a managed host) and throws `DeployCancelledError`.
+   */
+  signal?: AbortSignal;
   /**
    * Test seam for the unsandboxed (development) command runner. Defaults to
    * spawning `sh -c` (or the `sudo -n -u <self>` group refresh).
@@ -330,9 +336,11 @@ async function runBuildCommand(
   onOutput?: ReleaseOutputHandler,
   redactSummary: CommandSummaryRedactor = defaultSummaryRedactor,
   runtimeGroup?: string,
+  cancelSignal?: AbortSignal,
 ): Promise<void> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), BUILD_TIMEOUT_MS);
+  const signal = withCancelSignal(controller.signal, cancelSignal);
   const { bin, args } = await resolveBuildInvocation(
     command,
     env,
@@ -359,7 +367,7 @@ async function runBuildCommand(
       stdin: "null",
       stdout: "piped",
       stderr: "piped",
-      signal: controller.signal,
+      signal,
     }).spawn();
     const [status, stdout, stderr] = await collectBuildOutput(
       child,
@@ -374,6 +382,7 @@ async function runBuildCommand(
       );
     }
   } catch (err) {
+    throwIfAborted(cancelSignal, "while the build was running");
     if (err instanceof DOMException && err.name === "AbortError") {
       throw new Error(abortMessage());
     }
@@ -381,6 +390,7 @@ async function runBuildCommand(
   } finally {
     clearTimeout(timeout);
   }
+  throwIfAborted(cancelSignal, "while the build was running");
 }
 
 /**
@@ -562,9 +572,11 @@ export async function runReleaseBuild(
         commandOnOutput,
         commandRedactSummary,
         params.nativeRuntime?.runtimeGroup,
+        params.signal,
       ));
   // Build commands run in order and stop at the first failure.
   await forEachSequential(commands, async (command) => {
+    throwIfAborted(params.signal, "before the build ran");
     params.onOutput?.("stdout", `$ ${command}`);
     await execute(
       command,
@@ -602,6 +614,7 @@ async function runSandboxedCommands(
     onOutput: params.onOutput,
     redactSummary: params.redactSummary,
     runFn: sandbox.runFn,
+    signal: params.signal,
   }));
 }
 

@@ -67,6 +67,7 @@ import { createSymlink } from "../../permissions/scoped-writes.ts";
 import type { LayoutPaths } from "../../paths/layout.ts";
 import type { EnvironmentDeploySourceBuild } from "../../contracts/commands-contracts.ts";
 import type { ReleaseOutputHandler } from "./checkout.ts";
+import { throwIfAborted, withCancelSignal } from "../deploy-cancel.ts";
 
 /** Keep in step with orchestration/roles/buildkit/defaults/main.yml. */
 export const RAILPACK_VERSION = "0.9.0";
@@ -564,12 +565,15 @@ async function runToolStreamed(
     redactSummary?: CommandSummaryRedactor;
     /** Test-only override; production keeps {@link RAILPACK_BUILD_TIMEOUT_MS}. */
     timeoutMs?: number;
+    /** Cancel signal of the deploy; aborting it kills the tool. */
+    signal?: AbortSignal;
   },
 ): Promise<void> {
   const redactSummary = options.redactSummary ?? defaultSummaryRedactor;
   const timeoutMs = options.timeoutMs ?? RAILPACK_BUILD_TIMEOUT_MS;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const signal = withCancelSignal(controller.signal, options.signal);
   try {
     const child = new Deno.Command(bin, {
       args,
@@ -579,7 +583,7 @@ async function runToolStreamed(
       stdin: "null",
       stdout: "piped",
       stderr: "piped",
-      signal: controller.signal,
+      signal,
     }).spawn();
     const [status, stdout, stderr] = await Promise.all([
       child.status,
@@ -603,6 +607,7 @@ async function runToolStreamed(
       );
     }
   } catch (err) {
+    throwIfAborted(options.signal, `while ${options.label} was running`);
     if (err instanceof DOMException && err.name === "AbortError") {
       throw new Error(
         `${options.label} timed out after ${timeoutMs}ms`,
@@ -612,6 +617,7 @@ async function runToolStreamed(
   } finally {
     clearTimeout(timeout);
   }
+  throwIfAborted(options.signal, `while ${options.label} was running`);
 }
 
 export type RailpackBuildParams = {
@@ -627,6 +633,8 @@ export type RailpackBuildParams = {
   tools: BuildkitRailpackTools;
   onOutput?: ReleaseOutputHandler;
   redactSummary?: CommandSummaryRedactor;
+  /** Cancel signal of the deploy; aborting it stops the build. */
+  signal?: AbortSignal;
 };
 
 /** Optional test seams for {@link runRailpackBuild}. */
@@ -641,6 +649,7 @@ export type RunRailpackBuildDeps = {
       onOutput?: ReleaseOutputHandler;
       redactSummary?: CommandSummaryRedactor;
       timeoutMs?: number;
+      signal?: AbortSignal;
     },
   ) => Promise<void>;
   /** Every `docker` call; defaults to the shared CLI path ({@link runDockerStreamed}). */
@@ -808,18 +817,21 @@ async function runBuildx(
     onOutput?: ReleaseOutputHandler;
     redact: CommandSummaryRedactor;
     timeoutMs: number;
+    cancelSignal?: AbortSignal;
   },
 ): Promise<void> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), options.timeoutMs);
   const onOutput = options.onOutput;
+  const signal = withCancelSignal(controller.signal, options.cancelSignal);
   try {
     const result = await runDocker(args, {
-      signal: controller.signal,
+      signal,
       ...(onOutput === undefined
         ? {}
         : { onLine: (event) => onOutput(event.stream, event.line) }),
     });
+    throwIfAborted(options.cancelSignal, "while the image was building");
     if (controller.signal.aborted) {
       throw new Error(
         `docker buildx build timed out after ${options.timeoutMs}ms`,
@@ -888,8 +900,10 @@ export async function runRailpackBuild(
     ...(deps?.toolTimeoutMs === undefined
       ? {}
       : { timeoutMs: deps.toolTimeoutMs }),
+    ...(params.signal === undefined ? {} : { signal: params.signal }),
   };
 
+  throwIfAborted(params.signal, "before the image build started");
   await assertBuildxAvailable(runDocker, redact);
 
   params.onOutput?.("stdout", "$ railpack prepare");
@@ -916,6 +930,7 @@ export async function runRailpackBuild(
     ...(params.onOutput === undefined ? {} : { onOutput: params.onOutput }),
     redact,
     timeoutMs,
+    ...(params.signal === undefined ? {} : { cancelSignal: params.signal }),
   });
 
   const imageDigest = deps?.inspectImage

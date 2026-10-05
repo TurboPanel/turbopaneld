@@ -10,6 +10,8 @@
  * Order (owner decisions 2026-10-01):
  * 1. `prepare` (networks, image build and pull). A failure here throws a plain
  *    error: nothing has been stopped yet, so the old version is still serving.
+ *    A cancel lands here too (`commit` throws `DeployCancelledError`); after
+ *    `commit` it answers "too late".
  * 2. Stop the application services of the previous deploy. Services named in
  *    `keepRunning` (databases and other stateful services) stay up so
  *    migrations have something to talk to.
@@ -59,6 +61,12 @@ export type SequentialDeploySteps = {
   gate: (composePaths: readonly string[]) => Promise<HealthGateResult>;
   /** Restore `previous/` as the live deployment; `null` when it is missing. */
   restorePrevious: () => Promise<string[] | null>;
+  /**
+   * Called once `prepare` is done and before anything is stopped: the point of
+   * no return for a cancel. Throws when a cancel already landed, in which case
+   * nothing has been stopped and the old version is still serving.
+   */
+  commit?: () => void;
   /** Compose argv prefix (`compose -p <project> -f …`) for a chain. */
   composeArgs: (composePaths: readonly string[]) => string[];
   /** Redact secrets from text before it reaches a summary or log. */
@@ -225,6 +233,7 @@ export async function runSequentialDeploy(
   const { steps } = input;
   steps.setPhase("build");
   await steps.prepare();
+  steps.commit?.();
 
   try {
     await stopPrevious(input);

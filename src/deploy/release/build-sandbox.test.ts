@@ -13,12 +13,14 @@ import {
   buildSpecCwd,
   type BuildWork,
   createBuildWorkDir,
+  removeBuildTree,
   removeBuildWork,
   renderBuildSpec,
   resolveBuildWork,
   runSandboxedBuild,
   type SandboxSpawn,
   sweepStaleBuildWork,
+  withBuildSlot,
 } from "./build-sandbox.ts";
 
 /**
@@ -467,6 +469,126 @@ test("trees left by a dead daemon are stopped, taken back and removed; live ones
   } finally {
     await Deno.remove(root, { recursive: true });
   }
+});
+
+test("a tree a build locked with mode 000 is still removed", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "tp-sandbox-locked-" });
+  try {
+    const tree = join(dir, "work1");
+    await Deno.mkdir(join(tree, "d", "e"), { recursive: true });
+    await Deno.writeTextFile(join(tree, "d", "e", "f"), "x");
+    await Deno.symlink("/nonexistent", join(tree, "d", "link"));
+    await Deno.chmod(join(tree, "d", "e"), 0o000);
+    await Deno.chmod(join(tree, "d"), 0o000);
+    assertEquals(await removeBuildTree(tree), true);
+    assertEquals(await Deno.stat(tree).catch(() => null), null);
+    // Removing what is already gone is not an error.
+    assertEquals(await removeBuildTree(tree), true);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+test("removeBuildWork reports nothing for a locked tree and clears it", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "tp-sandbox-locked-" });
+  try {
+    const target = { ...(await work(dir)), workDir: join(dir, "w") };
+    await Deno.mkdir(join(target.workDir, "d"), { recursive: true });
+    await Deno.chmod(join(target.workDir, "d"), 0o000);
+    const messages: string[] = [];
+    await removeBuildWork(target, (_s, line) => messages.push(line));
+    assertEquals(messages, []);
+    assertEquals(await Deno.stat(target.workDir).catch(() => null), null);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+const stuck: typeof Deno.remove = () =>
+  Promise.reject(new Deno.errors.PermissionDenied("stuck"));
+
+test("a tree that cannot be removed is renamed aside so the release can build again", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "tp-sandbox-aside-" });
+  try {
+    const tree = join(dir, "abc123");
+    await Deno.mkdir(join(tree, "d"), { recursive: true });
+    assertEquals(await removeBuildTree(tree, stuck), false);
+    assertEquals(await Deno.stat(tree).catch(() => null), null);
+    const names = (await Array.fromAsync(Deno.readDir(dir))).map((e) => e.name);
+    assertEquals(names.length, 1);
+    assert(names[0].startsWith("q-") && names[0].endsWith("-abc123"));
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+test("removeBuildWork says when it had to move a tree aside", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "tp-sandbox-aside-" });
+  try {
+    const target = { ...(await work(dir)), workDir: join(dir, "w1") };
+    await Deno.mkdir(target.workDir);
+    const original = Deno.remove;
+    Deno.remove = stuck;
+    const messages: string[] = [];
+    try {
+      await removeBuildWork(target, (_s, line) => messages.push(line));
+    } finally {
+      Deno.remove = original;
+    }
+    assertEquals(messages.length, 1);
+    assertStringIncludes(messages[0], "moved aside");
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+test("the stale sweep retries a tree that was moved aside, without a unit stop", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "tp-sandbox-sweep-" });
+  try {
+    await Deno.mkdir(join(dir, "work", "q-k1-abc123", "d"), {
+      recursive: true,
+    });
+    await Deno.chmod(join(dir, "work", "q-k1-abc123", "d"), 0o000);
+    const { runFn, calls } = recordingRunFn();
+    const out: string[] = [];
+    await sweepStaleBuildWork(dir, {
+      runFn,
+      maxAgeMs: -1000,
+      onOutput: (_s, line) => out.push(line),
+    });
+    assertEquals(calls, []);
+    assertEquals(out.length, 1);
+    assertStringIncludes(out[0], "reclaimed");
+    assertEquals(
+      await Deno.stat(join(dir, "work", "q-k1-abc123")).catch(() => null),
+      null,
+    );
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+test("waiting builds are served round-robin by project", async () => {
+  const order: string[] = [];
+  let open = () => {};
+  const gate = new Promise<void>((resolve) => {
+    open = resolve;
+  });
+  const job = (name: string, project: string, wait?: Promise<void>) =>
+    withBuildSlot(undefined, async () => {
+      await wait;
+      order.push(name);
+    }, project);
+  const all = [
+    job("a1", "A", gate),
+    job("a2", "A"),
+    job("a3", "A"),
+    job("b1", "B"),
+    job("c1", "C"),
+  ];
+  open();
+  await Promise.all(all);
+  assertEquals(order, ["a1", "b1", "a2", "c1", "a3"]);
 });
 
 test("a build that floods its output is stopped and does not buffer it", async () => {

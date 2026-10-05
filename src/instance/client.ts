@@ -146,6 +146,7 @@ import {
   resolveDaemonCapabilities,
 } from "./version-wire.ts";
 import { TopologyReporter } from "./topology-reporter.ts";
+import { deployCancels } from "../deploy/deploy-cancel.ts";
 import type { TopologySnapshot } from "../contracts/topology-types.ts";
 import type {
   DaemonMessage,
@@ -1732,6 +1733,9 @@ export class InstanceClient {
       case "capability-plan-clear":
         this.#applyCapabilityPlanClear(message, ws);
         break;
+      case "deploy-cancel":
+        this.#handleDeployCancel(message, ws);
+        break;
       case "container-logs-request":
         this.#collectContainerLogs(message, ws);
         break;
@@ -2884,6 +2888,33 @@ export class InstanceClient {
       ...(error === undefined ? {} : { error }),
       at: new Date().toISOString(),
     };
+    if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(result));
+  }
+
+  /** Stop one running deploy; always answers, never throws. */
+  #handleDeployCancel(
+    message: Extract<DaemonMessage, { type: "deploy-cancel" }>,
+    ws: WebSocket,
+  ): void {
+    let result: DaemonMessage;
+    try {
+      result = {
+        type: "deploy-cancel-result",
+        id: message.id,
+        ok: true,
+        outcome: deployCancels.cancel(message.commandId),
+        at: new Date().toISOString(),
+      };
+    } catch (err) {
+      logWarn("instance", "deploy cancel failed:", sanitizeForLog(err));
+      result = {
+        type: "deploy-cancel-result",
+        id: message.id,
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+        at: new Date().toISOString(),
+      };
+    }
     if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(result));
   }
 
