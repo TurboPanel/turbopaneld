@@ -567,3 +567,9 @@ test("vendored tool grants carry the pinned versions, not `current`", () => {
     }
   }
 });
+
+test("the daemon may spawn the programs the hosting Caddy ACL grant uses", () => {
+  for (const program of ["setfacl", "getfacl"]) {
+    assertEquals(DAEMON_RUN_PROGRAMS.includes(program), true, program);
+  }
+});
