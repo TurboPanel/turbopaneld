@@ -2,7 +2,7 @@ import { assertEquals } from "@std/assert";
 import { fromFileUrl } from "@std/path";
 import { emptyDirectoryUsageSnapshot } from "./directory-usage.ts";
 import { EventCollectorSet } from "./events/index.ts";
-import { LinuxMetricsCollector } from "./linux-collector.ts";
+import { EVENT_MAX_AGE_MS, LinuxMetricsCollector } from "./linux-collector.ts";
 import { PRESENCE_WINDOW_SAMPLES } from "./presence.ts";
 import { computeTopologyFingerprint } from "../topology/generation.ts";
 import { defaultSensorIo } from "./sensors/discovery.ts";
@@ -1461,4 +1461,27 @@ test("LinuxMetricsCollector: events from a detect that overruns the deadline are
   assertEquals(second.sample.events, [event]);
   assertEquals(peak, 1);
   assertEquals(calls >= 1, true);
+});
+
+test("LinuxMetricsCollector: a carried event older than the control plane's 7-day window is dropped, never sent", async () => {
+  const nowMs = 20 * 24 * 3_600_000;
+  const stale = {
+    eventId: "stale",
+    at: new Date(nowMs - EVENT_MAX_AGE_MS - 1_000).toISOString(),
+    kind: "oom_kill",
+    severity: "warning",
+  } as const;
+  const fresh = {
+    eventId: "fresh",
+    at: new Date(nowMs - EVENT_MAX_AGE_MS + 60_000).toISOString(),
+    kind: "oom_kill",
+    severity: "warning",
+  } as const;
+  const collector = new LinuxMetricsCollector({
+    ...makeDeps(() => TICK_1, fullTopologySnapshot(), () => nowMs),
+    eventCollectors: { detect: () => Promise.resolve([stale, fresh] as never) },
+  });
+  const result = await collector.collect({ sequence: 1, nowMs });
+  if (!result.supported) throw new TypeError("expected a sample");
+  assertEquals(result.sample.events.map((e) => e.eventId), ["fresh"]);
 });

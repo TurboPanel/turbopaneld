@@ -654,6 +654,9 @@ function gpuHasValue(gpu: GpuSample): boolean {
   ].some((value) => value !== null);
 }
 
+/** The control plane's ingest window for an event's `at` (turbopanel `MAX_EVENT_AGE_MS`). */
+export const EVENT_MAX_AGE_MS = 7 * 24 * 3_600_000;
+
 type BuiltExtendedInput = Parameters<typeof buildCollectedExtended>[0];
 
 export class LinuxMetricsCollector implements MetricsCollector {
@@ -979,7 +982,12 @@ export class LinuxMetricsCollector implements MetricsCollector {
       this.#detecting = undefined;
     });
     await withDeadline(this.#detecting, deadlineMs, undefined);
-    return this.#carriedEvents.splice(0);
+    // The control plane rejects a whole sample holding an event older than 7
+    // days, so a carried event that old (a detect stuck for days) is dropped.
+    const oldest = ctx.nowMs - EVENT_MAX_AGE_MS;
+    return this.#carriedEvents.splice(0).filter((event) =>
+      Date.parse(event.at) >= oldest
+    );
   }
 
   /** Free-text facts never break a sample: any failure just omits them. */
