@@ -123,6 +123,9 @@ type RawFixtureMap = Partial<{
   "/proc/sys/net/netfilter/nf_conntrack_max": string;
   "/proc/mounts": string;
   "/proc/mdstat": string;
+  "/proc/loadavg": string;
+  "/proc/sys/kernel/pid_max": string;
+  "/proc/sys/kernel/threads-max": string;
 }>;
 
 /**
@@ -1357,12 +1360,108 @@ test("LinuxMetricsCollector puts container, TLS, site and host text data in exte
   assertEquals(extended?.text?.topSites, "site-a=700");
 });
 
-test("LinuxMetricsCollector sends no extended section when nothing v7 was collected", async () => {
+test("LinuxMetricsCollector sends only the always-known RAID zeros when nothing else v7 was collected", async () => {
   const result = await new LinuxMetricsCollector(
     makeDeps(() => TICK_1, fullTopologySnapshot(), () => 1_000_000),
   ).collect({ sequence: 1, nowMs: 1_000_000 });
   if (!result.supported) throw new TypeError("expected a supported sample");
-  assertEquals(result.sample.extended, undefined);
+  assertEquals(result.sample.extended, {
+    host: { mdArraysDegraded: 0, mdArraysResyncing: 0 },
+  });
+});
+
+const HOST_EXTENDED_RAW: RawFixtureMap = {
+  "/proc/loadavg": "0.48 0.37 0.35 1/352 151909\n",
+  "/proc/sys/kernel/pid_max": "4194304\n",
+  "/proc/sys/kernel/threads-max": "7040\n",
+  "/proc/mounts": "/dev/sda1 / ext4 rw,relatime 0 0\n",
+};
+
+test("LinuxMetricsCollector fills extended.host: PID limit, OOM kills, root disk queue and IOPS", async () => {
+  let tick = 0;
+  let nowMs = 1_000_000;
+  const collector = new LinuxMetricsCollector(
+    makeDeps(
+      () => ({
+        ...(tick === 0 ? TICK_1 : TICK_2),
+        ...HOST_EXTENDED_RAW,
+        "/proc/vmstat": fixture(`proc-vmstat-${tick + 1}.txt`),
+      }),
+      fullTopologySnapshot(),
+      () => nowMs,
+    ),
+  );
+  const first = await collector.collect({ sequence: 1, nowMs });
+  if (!first.supported) throw new TypeError("expected a supported sample");
+  // The first tick has no counter baseline: rates and the OOM delta stay unknown.
+  assertEquals(first.sample.extended?.host, {
+    pidLimitUsedPercent: (352 / 7040) * 100,
+    mdArraysDegraded: 0,
+    mdArraysResyncing: 0,
+  });
+  tick = 1;
+  nowMs += 60_000;
+  const second = await collector.collect({ sequence: 2, nowMs });
+  if (!second.supported) throw new TypeError("expected a supported sample");
+  assertEquals(second.sample.extended?.host, {
+    pidLimitUsedPercent: (352 / 7040) * 100,
+    oomKills: 1,
+    rootDiskQueueDepth: 0.03,
+    rootDiskOpsPerSecond: 200 / 60,
+    mdArraysDegraded: 0,
+    mdArraysResyncing: 0,
+  });
+});
+
+test("LinuxMetricsCollector reads the root disk through an LVM mapper source and leaves it out when the root is not a service disk", async () => {
+  const lvm = fullTopologySnapshot({
+    blockDevices: [{
+      deviceId: "blk:dm-0",
+      kernelName: "dm-0",
+      deviceType: "virtual",
+      isServiceDevice: true,
+    }],
+  });
+  let tick = 0;
+  let nowMs = 1_000_000;
+  const raw = () => ({
+    ...(tick === 0 ? TICK_1 : TICK_2),
+    "/proc/mounts": "/dev/mapper/vg0-root / ext4 rw 0 0\n",
+    "/proc/diskstats":
+      (tick === 0
+        ? fixture("proc-diskstats-virtio-1.txt")
+        : fixture("proc-diskstats-virtio-2.txt")).replace("vda", "dm-0"),
+  });
+  const deps: CollectorDeps = {
+    ...makeDeps(raw, lvm, () => nowMs),
+    io: {
+      listDir: (path) => path === "/sys/block" ? ["dm-0"] : [],
+      readFile: (path) =>
+        path === "/sys/block/dm-0/dm/name" ? "vg0-root\n" : undefined,
+    },
+  };
+  const collector = new LinuxMetricsCollector(deps);
+  await collector.collect({ sequence: 1, nowMs });
+  tick = 1;
+  nowMs += 60_000;
+  const second = await collector.collect({ sequence: 2, nowMs });
+  if (!second.supported) throw new TypeError("expected a supported sample");
+  assertEquals(second.sample.extended?.host?.rootDiskOpsPerSecond, 200 / 60);
+
+  // Root on a disk the topology does not list as a service disk: unknown, not 0.
+  const other = new LinuxMetricsCollector(
+    makeDeps(
+      () => ({ ...TICK_2, "/proc/mounts": "/dev/sdz1 / ext4 rw 0 0\n" }),
+      fullTopologySnapshot(),
+      () => nowMs,
+    ),
+  );
+  await other.collect({ sequence: 1, nowMs });
+  nowMs += 60_000;
+  const third = await other.collect({ sequence: 2, nowMs });
+  if (!third.supported) throw new TypeError("expected a supported sample");
+  assertEquals(third.sample.extended?.host?.rootDiskQueueDepth, undefined);
+  assertEquals(third.sample.extended?.host?.rootDiskOpsPerSecond, undefined);
 });
 
 test("LinuxMetricsCollector: a live-stream collect never runs event detection (the stream sample is non-durable)", async () => {

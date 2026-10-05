@@ -1,6 +1,7 @@
 import { assertEquals } from "@std/assert";
 import { METRICS_TEXT_FIELD_NAMES } from "../../contracts/metrics-contract.ts";
 import {
+  countFailedUnits,
   HOST_TEXT_TTL_MS,
   HostTextCollector,
   type HostTextIo,
@@ -142,6 +143,7 @@ test("HostTextCollector gathers short-name facts and never reads command lines",
   assertEquals(first.os, "debian 13");
   assertEquals(first.rebootRequired, true);
   assertEquals(first.unhealthyUnits, ["foo.service"]);
+  assertEquals(first.failedUnitCount, 1);
   assertEquals(first.phpVersions, ["8.3"]);
   assertEquals(first.topMemProcess, "heavy");
   assertEquals(first.topCpuProcess, undefined);
@@ -284,6 +286,46 @@ Deno.test("hostTextToExtended uses exactly the contract's text keys", () => {
     );
   }
   assertEquals(hostTextToExtended({}), {});
+});
+
+Deno.test("hostTextToExtended reports the full failed-unit count, zero included", () => {
+  assertEquals(
+    hostTextToExtended({
+      unhealthyUnits: ["a.service"],
+      failedUnitCount: 9,
+    }).host,
+    { systemdUnitsFailed: 9 },
+  );
+  assertEquals(
+    hostTextToExtended({ unhealthyUnits: [], failedUnitCount: 0 }).host,
+    { systemdUnitsFailed: 0 },
+  );
+  assertEquals(hostTextToExtended({}).host, undefined);
+});
+
+Deno.test("HostTextCollector reports zero failed units when systemctl prints nothing, unknown when it fails", async () => {
+  const run = (
+    result: { code: number; stdout: string } | null,
+  ): HostTextIo => ({
+    ...fakeIo().io,
+    run: () => Promise.resolve(result),
+  });
+  const none = await new HostTextCollector(run({ code: 0, stdout: "" })).read();
+  assertEquals(none.failedUnitCount, 0);
+  assertEquals(hostTextToExtended(none).host, { systemdUnitsFailed: 0 });
+  const unknown = await new HostTextCollector(run(null)).read();
+  assertEquals(unknown.failedUnitCount, undefined);
+});
+
+Deno.test("countFailedUnits counts past the name cap and treats empty output as zero", () => {
+  const many = Array.from(
+    { length: 8 },
+    (_, i) => `u${i}.service loaded failed`,
+  )
+    .join("\n");
+  assertEquals(countFailedUnits(many), 8);
+  assertEquals(parseFailedUnits(many).length, 5);
+  assertEquals(countFailedUnits(""), 0);
 });
 
 Deno.test("shared php-fpm masters attribute workers to the pool in the process title", () => {
