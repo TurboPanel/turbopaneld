@@ -1730,6 +1730,14 @@ const SITES: CallSite[] = [
     'src/commands/fabric.ts|runHost("docker",["network","inspect","-f",`{{index.Options"${DOCKER_MTU_OPT_KEY}"}}`,network.name])',
     DOCKER_DIRECT,
   ),
+  notRoot(
+    'src/commands/fabric.ts|runHost("docker",["network","ls","--filter",`name=${FABRIC_BRIDGE_PREFIX}`,"--format","{{.Name}}"])',
+    DOCKER_DIRECT,
+  ),
+  notRoot(
+    'src/commands/fabric.ts|runHost("docker",["network","rm",name])',
+    DOCKER_DIRECT,
+  ),
   tpHost(
     'src/commands/fabric.ts|runHost("ip",["-o","-4","addr","show","dev",FABRIC_INTERFACE_NAME])',
     { argv: ["ip", "-o", "-4", "addr", "show", "dev", "tp0"] },
@@ -1861,10 +1869,6 @@ const SITES: CallSite[] = [
       argv: ["wg", "syncconf", "tp0", `${FABRIC_DIR}/wireguard/tp0.sync.conf`],
       setup: file(`${FABRIC_DIR}/wireguard/tp0.sync.conf`),
     },
-  ),
-  notRoot(
-    'src/commands/fabric.ts|runTeardownBestEffort("docker",["network","rm",name],(result)=>isMissingDeviceText(result)||isActiveEndpointsText(result))',
-    DOCKER_DIRECT,
   ),
   tpHost(
     'src/commands/fabric.ts|runTeardownBestEffort("ip",["link","delete",FABRIC_INTERFACE_NAME],isMissingDeviceText)',
