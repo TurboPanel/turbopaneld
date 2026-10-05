@@ -32,6 +32,8 @@ import {
 import { cronTimerContent, cronTimerPath } from "../deploy/cron/unit.ts";
 import { caddyUnit } from "../deploy/ingress.ts";
 import { nativeAppUnitContent } from "../deploy/native/unit.ts";
+import { sshdDropInContent } from "../deploy/ssh/sshd-config.ts";
+import { accessGroup } from "../runtime/registry.ts";
 import {
   sitePhpFpmConf,
   sitePhpIni,
@@ -119,6 +121,21 @@ const WG_CONF = `${P}/etc/wireguard/tp0.conf`;
 const FABRIC_SYSCTL = `${P}/etc/sysctl.d/99-turbopanel-fabric.conf`;
 /** A WireGuard key's shape (32 bytes, base64), built so no key sits in source. */
 const WG_KEY = `${"A".repeat(43)}=`;
+// A mesh config as `renderWgConf` writes it (keys built at run time).
+const WG_CONF_CONTENT = [
+  "[Interface]",
+  `PrivateKey = ${WG_KEY}`,
+  "Address = 10.77.0.1/24",
+  "ListenPort = 51820",
+  "",
+  "[Peer]",
+  `PublicKey = ${WG_KEY}`,
+  "AllowedIPs = 10.77.0.2/32, 10.78.0.0/24",
+  "Endpoint = 203.0.113.7:51820",
+  `PresharedKey = ${WG_KEY}`,
+  "PersistentKeepalive = 25",
+  "",
+].join("\n");
 const MGD_CHAIN = "TP-MGD-0a1b2c3d";
 const MGD_MATCH = [
   "-p",
@@ -271,6 +288,9 @@ const SITES: CallSite[] = [
   ),
   tpHost('src/metrics/collector/tls-expiry.ts|["-n","cert-dates"]', {
     argv: ["cert-dates"],
+  }),
+  tpHost('src/deploy/site.ts|["-n","site-caddy-mounts"]', {
+    argv: ["site-caddy-mounts"],
   }),
   tpHost('src/metrics/collector/site-usage.ts|["-n","site-usage"]', {
     argv: ["site-usage"],
@@ -687,6 +707,34 @@ const SITES: CallSite[] = [
   tpHost('src/deploy/ingress.ts|["-n","systemctl","reload",CADDY_SERVICE]', {
     argv: ["systemctl", "reload", "turbopanel-hosting-caddy.service"],
   }),
+  tpHost('src/deploy/ingress.ts|["-n","systemctl","start",CADDY_SERVICE]', {
+    argv: ["systemctl", "start", "turbopanel-hosting-caddy.service"],
+  }),
+  tpHost(
+    'src/deploy/ingress.ts|["-n","systemctl","is-active","--quiet",CADDY_SERVICE]',
+    {
+      argv: [
+        "systemctl",
+        "is-active",
+        "--quiet",
+        "turbopanel-hosting-caddy.service",
+      ],
+    },
+  ),
+  sudo(
+    'src/deploy/ingress.ts|["-n","-u",HOSTING_CADDY_USER,"--",join(layout.runtimesDir,"caddy","current","caddy"),"validate","--adapter","caddyfile","--config",candidate.caddyfile]',
+    {
+      runas: "tpedge",
+      argv: [
+        `${VENDOR}/caddy/current/caddy`,
+        "validate",
+        "--adapter",
+        "caddyfile",
+        "--config",
+        "/etc/turbopanel/hosting/Caddyfile.next",
+      ],
+    },
+  ),
 
   // --- control-plane Let's Encrypt ------------------------------------------
   tpHost(
@@ -1033,32 +1081,32 @@ const SITES: CallSite[] = [
 
   // --- sites ----------------------------------------------------------------
   tpHost(
-    'src/deploy/site.ts|["-n","install","-d","-m","0750","-o","root","-g",group,metaDir]',
+    'src/deploy/site.ts|["-n","install","-d","-m","0711","-o","root","-g","root",metaDir]',
     {
       argv: [
         "install",
         "-d",
         "-m",
-        "0750",
+        "0711",
         "-o",
         "root",
         "-g",
-        "alice-grp",
+        "root",
         `${SITE}/meta`,
       ],
     },
   ),
   tpHost(
-    'src/deploy/site.ts|["-n","install","-m","0640","-o","root","-g",group,staged,target]',
+    'src/deploy/site.ts|["-n","install","-m","0400","-o",release.username,"-g","root",staged,target]',
     {
       argv: [
         "install",
         "-m",
-        "0640",
+        "0400",
         "-o",
-        "root",
+        "alice",
         "-g",
-        "alice-grp",
+        "root",
         STAGED,
         `${SITE}/meta/robots.txt`,
       ],
@@ -1101,7 +1149,7 @@ const SITES: CallSite[] = [
     setup: file(`${CONF}/openlitespeed/sites/tp-env1-www.conf`),
   }),
   tpHost('src/deploy/site.ts|["-n","rm","-f",path]', {
-    argv: ["rm", "-f", `${CONF}/php/8.4/pool.d/svc1.conf`],
+    argv: ["rm", "-f", `${CONF}/php/8.4/pools/svc1.conf`],
   }),
   tpHost('src/deploy/site.ts|["-n","chown","-R",`${user}:${group}`,base]', {
     argv: ["chown", "-R", "alice:alice-grp", `${SITE}/webroot`],
@@ -1337,7 +1385,7 @@ const SITES: CallSite[] = [
         "--adapter",
         "caddyfile",
         "--config",
-        "/etc/turbopanel/caddy/Caddyfile",
+        "/etc/turbopanel/site-caddy/Caddyfile",
       ],
     },
   ),
@@ -1399,6 +1447,18 @@ const SITES: CallSite[] = [
         STAGED,
         DROP_IN,
       ],
+      // The drop-in is content-checked: stage what the renderer produces.
+      setup: file(
+        STAGED,
+        sshdDropInContent({
+          sftpGroup: accessGroup("sftp")!,
+          shellGroup: accessGroup("shell")!,
+          passwordGroup: accessGroup("password")!,
+          principalGroup: accessGroup("principal")!,
+          authorizedKeysDir: SSH_KEYS,
+          sftpChrootRoot: `${P}/srv/users`,
+        }),
+      ),
     },
   ),
   tpHost('src/deploy/ssh/apply.ts|["-n","ls","-1","--",dir]', {
@@ -1642,7 +1702,7 @@ const SITES: CallSite[] = [
   }),
   tpHost('src/commands/fabric.ts|runHost("cp",[confPath,WG_QUICK_CONF_PATH])', {
     argv: ["cp", `${FABRIC_DIR}/wireguard/tp0.conf`, WG_CONF],
-    setup: file(`${FABRIC_DIR}/wireguard/tp0.conf`),
+    setup: file(`${FABRIC_DIR}/wireguard/tp0.conf`, WG_CONF_CONTENT),
   }),
   notRoot(
     'src/commands/fabric.ts|runHost("docker",["network","create","--driver","bridge","--subnet",network.subnet,"--opt",DOCKER_ROUTED_BRIDGE_OPT,"--opt",`${DOCKER_MTU_OPT_KEY}=${mtu}`,network.name])',

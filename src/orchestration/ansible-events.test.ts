@@ -381,3 +381,84 @@ exit 0
     await Deno.remove(root, { recursive: true });
   }
 });
+
+const FAILED_EVENT_JSON = JSON.stringify({
+  _event: "v2_runner_on_failed",
+  _timestamp: "2026-01-01T00:00:00Z",
+  task: { name: "Install Caddy", id: "1", path: "", duration: { start: "" } },
+  hosts: { localhost: { msg: "apt lock held" } },
+});
+
+async function failingPlaybook(
+  script: string,
+): Promise<{ bin: string; cleanup: () => Promise<void> }> {
+  const root = await Deno.makeTempDir({ prefix: "tp-ansible-cause-" });
+  const bin = join(root, "ansible-playbook");
+  await Deno.writeTextFile(bin, script);
+  await Deno.chmod(bin, 0o755);
+  return { bin, cleanup: () => Deno.remove(root, { recursive: true }) };
+}
+
+async function messageOfRejection(run: () => Promise<void>): Promise<string> {
+  try {
+    await run();
+  } catch (err) {
+    return err instanceof Error ? err.message : String(err);
+  }
+  throw new Error("expected the run to fail");
+}
+
+test("a failed playbook names the failed task, not just the exit code", async () => {
+  const { bin, cleanup } = await failingPlaybook(
+    `#!/bin/sh\nprintf '%s\\n' '${FAILED_EVENT_JSON}'\nexit 2\n`,
+  );
+  try {
+    const message = await messageOfRejection(() =>
+      runPlaybookStreaming(bin, ["play.yml"], { quiet: false })
+    );
+    assertEquals(
+      message,
+      "ansible-playbook failed (exit 2): Install Caddy: apt lock held",
+    );
+    const quiet = await messageOfRejection(() =>
+      runPlaybookStreaming(bin, ["play.yml"], { quiet: true })
+    );
+    assertEquals(
+      quiet,
+      "orchestration failed (exit 2): Install Caddy: apt lock held",
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test("a playbook that dies before any task reports its last stderr line", async () => {
+  const { bin, cleanup } = await failingPlaybook(
+    "#!/bin/sh\necho 'ERROR! the playbook could not be found' >&2\nexit 5\n",
+  );
+  try {
+    const message = await messageOfRejection(() =>
+      runPlaybookStreaming(bin, ["play.yml"], { quiet: false })
+    );
+    assertEquals(
+      message,
+      "ansible-playbook failed (exit 5): ERROR! the playbook could not be found",
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test("the failure message never repeats the argument list", async () => {
+  const { bin, cleanup } = await failingPlaybook("#!/bin/sh\nexit 4\n");
+  try {
+    const message = await messageOfRejection(() =>
+      runPlaybookStreaming(bin, ["-e", "vault_password=hunter2", "play.yml"], {
+        quiet: false,
+      })
+    );
+    assertEquals(message, "ansible-playbook failed (exit 4)");
+  } finally {
+    await cleanup();
+  }
+});

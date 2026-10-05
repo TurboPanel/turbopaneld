@@ -158,6 +158,14 @@ export type ManagedEngineReplicationRuntime = {
     },
   ): Promise<"seeded" | "already_standby" | "needs_resync">;
   /**
+   * Read-only classification of the data volume (never seeds or wipes):
+   * `not_standby` means data is present without the standby marker, so the
+   * member must not be started as-is.
+   */
+  probeStandbyData(
+    ctx: ManagedEngineProbeContext,
+  ): Promise<"uninitialized" | "standby" | "not_standby">;
+  /**
    * Engines whose standby is configured by SQL rather than by config file
    * (MySQL / MariaDB GTID). Called **after** compose up + waitReady and
    * before the standby early-return that skips credential/database mutation.
@@ -197,6 +205,12 @@ export type ManagedEngineBootstrapContext = {
     options?: { input?: string; envFile?: string },
   ) => Promise<{ success: boolean; stdout: string; stderr: string }>;
 };
+
+/** What a read-only data-volume probe needs (subset of the bootstrap context). */
+export type ManagedEngineProbeContext = Pick<
+  ManagedEngineBootstrapContext,
+  "image" | "volumes" | "containerUser" | "runDocker"
+>;
 
 /**
  * The last time this daemon saw a standby's WAL receiver `streaming`, from

@@ -1044,3 +1044,209 @@ test("setgidDirectoriesFindArgs builds the exact find tp-host accepts", () => {
     "+",
   ]);
 });
+
+test("caddySiteConfig never serves the layout's shared link at a release top", () => {
+  const caddySite = {
+    composeServiceName: "site",
+    engine: "caddy" as const,
+    root: "public",
+    listenPort: 18080,
+  };
+  const site = { ...caddySite, root: "." };
+  const release = caddySiteConfig(site, "/h/u/sites/s/current/.", null, {
+    releaseBacked: true,
+  });
+  assertStringIncludes(release, "@sharedState path /shared /shared/*");
+  assertStringIncludes(release, "respond @sharedState 404");
+  // The guard sits before the file server.
+  assertEquals(
+    release.indexOf("respond @sharedState") < release.indexOf("file_server"),
+    true,
+  );
+  // A `public/shared` directory of a release, or a daemon-owned tree, is
+  // ordinary content.
+  assertEquals(
+    caddySiteConfig({ ...caddySite, root: "public" }, "/r/public", null, {
+      releaseBacked: true,
+    }).includes("sharedState"),
+    false,
+  );
+  assertEquals(
+    caddySiteConfig(site, "/s/x/.", null).includes("sharedState"),
+    false,
+  );
+});
+
+const dotfileSite = {
+  composeServiceName: "dots",
+  engine: "caddy" as const,
+  root: "public",
+  listenPort: 18090,
+};
+
+test("every site engine refuses dotfiles outside /.well-known/", () => {
+  const caddy = caddySiteConfig(dotfileSite, "/srv/x/public");
+  assertStringIncludes(caddy, "respond @dotfile 403");
+  assertStringIncludes(caddy, "respond @dotInWellKnown 403");
+  // `respond` is ordered before the file server and PHP handler by Caddy
+  // itself; the matchers must at least be in the same block.
+  assertEquals(caddy.indexOf("@dotfile") < caddy.indexOf("file_server"), true);
+
+  const nginx = nginxSiteConfig(
+    { ...dotfileSite, engine: "nginx" },
+    "/srv/x/public",
+  );
+  assertStringIncludes(nginx, "location ~ /\\.(?!well-known(?:/|$)) {");
+  // Before the catch-all and the PHP location (first regex location wins).
+  assertEquals(
+    nginx.indexOf("well-known") < nginx.indexOf("location / {"),
+    true,
+  );
+
+  const phpNginx = nginxSiteConfig(
+    { ...dotfileSite, engine: "nginx", php: { version: "8.4" } },
+    "/srv/x/public",
+    null,
+    { phpFpmSocket: "/run/x.sock" },
+  );
+  assertEquals(
+    phpNginx.indexOf("well-known") < phpNginx.indexOf("location ~ \\.php$"),
+    true,
+  );
+
+  const apache = apacheSiteConfig(
+    { ...dotfileSite, engine: "apache" },
+    "/srv/x/public",
+  );
+  assertStringIncludes(apache, '<LocationMatch "/\\.(?!well-known(?:/|$))">');
+  assertStringIncludes(apache, "Require all denied");
+
+  assertStringIncludes(
+    openlitespeedVhostConfig(),
+    "RewriteRule (^|/)\\.(?!well-known(/|$)) - [F,L]",
+  );
+});
+
+/** The Caddy matchers' regexes (RE2 and JS agree on this subset). */
+function caddyRefusesDotPath(path: string): boolean {
+  const lines = caddySiteConfig(dotfileSite, "/srv/x/public").split("\n");
+  const pattern = (name: string): RegExp => {
+    const line = lines.find((l) => l.includes(`path_regexp ${name} `));
+    return new RegExp((line as string).split(`${name} `)[1] as string);
+  };
+  const dot = pattern("dotfile").test(path) &&
+    !pattern("wellknown").test(path);
+  return dot || pattern("dotinwk").test(path);
+}
+
+test("the Caddy dotfile rule refuses .env and nested dotfiles, not /.well-known/", () => {
+  for (
+    const path of [
+      "/.env",
+      "/.htaccess",
+      "/a/.git/config",
+      "/a/b/.hidden.php",
+      "/.well-known/../.env",
+      "/.well-known/.hidden",
+      "/.well-known/a/.hidden",
+      "/.wellknown/x",
+    ]
+  ) {
+    assertEquals(caddyRefusesDotPath(path), true, path);
+  }
+  for (
+    const path of [
+      "/",
+      "/index.html",
+      "/a/b.css",
+      "/.well-known/acme-challenge/token",
+      "/.well-known/security.txt",
+      "/a.b/c.d",
+    ]
+  ) {
+    assertEquals(caddyRefusesDotPath(path), false, path);
+  }
+});
+
+const NGINX_PHP_SITE: SiteApplySpec = {
+  composeServiceName: "app",
+  engine: "nginx",
+  root: "public",
+  listenPort: 18080,
+  php: { version: "8.4" },
+};
+
+/** The nginx vhost of a PHP site carrying `webEnv`. */
+function nginxPhpWith(webEnv?: Record<string, string>): string {
+  return nginxSiteConfig(
+    { ...NGINX_PHP_SITE, ...(webEnv ? { webEnv } : {}) },
+    "/srv/users/alice/sites/app/current/public",
+    null,
+    { phpFpmSocket: "/run/turbopanel/php/8.4/tp-env-app.sock" },
+  );
+}
+
+test("nginxSiteConfig passes site variables to PHP as fastcgi_param, name order, before the pinned parameters", () => {
+  const conf = nginxPhpWith({ ZED: "z", APP_ENV: "production" });
+  assertStringIncludes(conf, '    fastcgi_param APP_ENV "production";\n');
+  assertStringIncludes(conf, '    fastcgi_param ZED "z";\n');
+  assertEquals(conf.indexOf("APP_ENV") < conf.indexOf("ZED"), true);
+  // Platform-pinned parameters come last, so a site cannot move the script.
+  assertEquals(
+    conf.indexOf("ZED") < conf.indexOf("fastcgi_param SCRIPT_FILENAME"),
+    true,
+  );
+});
+
+test("nginxSiteConfig escapes quotes and backslashes in a site variable", () => {
+  const conf = nginxPhpWith({ QUOTED: String.raw`a"b\c` });
+  assertStringIncludes(conf, String.raw`fastcgi_param QUOTED "a\"b\\c";`);
+});
+
+test("nginxSiteConfig drops a site variable it cannot carry and keeps the rest, never printing the value", () => {
+  const conf = nginxPhpWith({
+    KEEP: "ok",
+    // nginx expands `$name` inside quotes and has no escape.
+    DOLLAR: "alpha$host",
+    NEWLINE: "a\nfastcgi_param X y",
+    // Parameters the platform sets itself.
+    SCRIPT_FILENAME: "/etc/passwd",
+    REMOTE_ADDR: "127.0.0.1",
+    HTTP_HOST: "evil",
+    http_authorization: "x",
+    HTTPS: "on",
+  });
+  assertStringIncludes(conf, 'fastcgi_param KEEP "ok";');
+  const gone = ["DOLLAR", "alpha", "NEWLINE", "/etc/passwd", "evil", "HTTPS"];
+  for (const text of [...gone, '127.0.0.1"', "http_authorization"]) {
+    assertEquals(conf.includes(text), false, text);
+  }
+  // Only the platform's own SCRIPT_FILENAME is left.
+  assertEquals(conf.match(/fastcgi_param SCRIPT_FILENAME /g)?.length, 1);
+});
+
+test("nginxSiteConfig still refuses a name that is not an environment variable name", () => {
+  assertThrows(() => nginxPhpWith({ "BAD-NAME": "x" }));
+});
+
+test("nginxSiteConfig carries no site variables outside the PHP location", () => {
+  assertEquals(
+    nginxPhpWith({ APP_ENV: "production" }).replace(
+      '    fastcgi_param APP_ENV "production";\n',
+      "",
+    ),
+    nginxPhpWith(),
+  );
+  // A static site has no PHP location, so nothing to pass the variables to.
+  const staticSite = nginxSiteConfig(
+    {
+      composeServiceName: "app",
+      engine: "nginx",
+      root: "public",
+      listenPort: 18080,
+      webEnv: { APP_ENV: "production" },
+    },
+    "/srv/users/alice/sites/app/current/public",
+  );
+  assertEquals(staticSite.includes("APP_ENV"), false);
+});

@@ -2,7 +2,7 @@
 # Vendor Caddy (never a distro apt package) + php-fpm from the sury repo when a
 # Caddy site needs PHP + tpcaddysite identity for site deploy.
 # Per-site blocks and per-site php-fpm pools are written by the daemon
-# TypeScript apply path after this playbook, under /etc/turbopanel/caddy/sites/
+# TypeScript apply path after this playbook, under /etc/turbopanel/site-caddy/sites/
 # and /etc/turbopanel/php/pools/.
 - name: TurboPanel site prerequisites (Caddy)
   hosts: localhost

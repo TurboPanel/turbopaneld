@@ -1,5 +1,6 @@
 import { buildStorageVolumesFragment } from "../deploy/apply-storage-volumes.ts";
 import { buildHostingLabelsFragment } from "../deploy/compose-labels.ts";
+import { assertComposePolicy } from "../deploy/compose-final-policy.ts";
 import { assertNoReservedOwnerLabels } from "../deploy/compose-reserved-labels.ts";
 import { assertComposeBuildPolicy } from "../deploy/compose-build-policy.ts";
 import { encodeHex } from "@std/encoding/hex";
@@ -25,6 +26,10 @@ import {
 } from "../deploy/compose-files.ts";
 import { singleGeneration } from "../deploy/deployment-generations.ts";
 import {
+  readPreviousProjects,
+  retirePreviousProjects,
+} from "../deploy/retire-previous-projects.ts";
+import {
   applyRailpackImagesToComposeYaml,
   mergeComposeOverlayFragments,
   mergeOverlayIntoComposeYaml,
@@ -46,6 +51,7 @@ import {
   type RunDockerStreamedFn,
 } from "../deploy/docker-cli.ts";
 import { captureDecryptedSecrets } from "../logs/capture.ts";
+import { resolveSiteSecretEnv } from "../deploy/site/site-secret-env.ts";
 import {
   COMMAND_LOG_PHASES,
   type CommandOutputSink,
@@ -1589,6 +1595,9 @@ async function deployContainerServices(
   const onLine = (event: { stream: "stdout" | "stderr"; line: string }) =>
     logSink.onLine(event.stream, event.line);
   const stageDir = await resetComposeStageDir(deploymentDir);
+  // Read before publish replaces the live files.
+  const previousProjects = await readPreviousProjects(deploymentDir);
+  let retiredEarlier: string[] = [];
   try {
     const stagedPath = join(stageDir, RUNTIME_COMPOSE_FILENAME);
     let yaml = applySecretFilePaths(
@@ -1615,6 +1624,16 @@ async function deployContainerServices(
     // A tenant compose never carries the labels that mark the platform's own
     // containers (the Docker gate trusts them); refuse before anything runs.
     assertNoReservedOwnerLabels(resolved.document ?? {});
+    // The resolved model is what Compose will run (merge keys, anchors and
+    // `extends` already expanded): host-level service fields need the control
+    // plane's approval, and built images may not take platform image names.
+    assertComposePolicy(resolved.document ?? {}, {
+      hostLevelApproved: parsedPayload.hostLevelApproved === true,
+      platformNetworks: [
+        parsedPayload.hostingIngressNetwork,
+        parsedPayload.managedNetwork,
+      ].filter((n): n is string => typeof n === "string"),
+    });
     // Build options no deploy may carry (host network, privileges, SSH agent,
     // internal extra_hosts or remote contexts, secret files outside); no
     // approval reaches these, bar a public remote context the organization
@@ -1674,6 +1693,18 @@ async function deployContainerServices(
     );
 
     if (resolved.serviceNames.length === 0) {
+      // Nothing comes up, so containers an earlier deploy started would keep
+      // running untracked: take the project (and any earlier-named one) down.
+      await retirePreviousProjects(
+        previousProjects,
+        parsedPayload.projectName,
+        run,
+        {
+          environmentId: parsedPayload.environmentId,
+          deploymentDir,
+          includeCurrent: true,
+        },
+      );
       const livePaths = await publishStagedRuntimeCompose(
         deploymentDir,
         stageDir,
@@ -1695,6 +1726,24 @@ async function deployContainerServices(
       manifest,
     );
     await persistComposeEnvFile(deploymentDir, parsedPayload.envFile);
+
+    // A stack started under an earlier project name is replaced, not kept
+    // (before either strategy brings the new name up). Images are pulled first
+    // (best effort) so the gap between removing the old containers and
+    // starting the new ones is short.
+    if (previousProjects?.names.some((n) => n !== parsedPayload.projectName)) {
+      await runStreamed([
+        ...composeFileArgs(parsedPayload.projectName, chain),
+        "pull",
+        "--ignore-buildable",
+      ], { onLine });
+    }
+    retiredEarlier = await retirePreviousProjects(
+      previousProjects,
+      parsedPayload.projectName,
+      run,
+      { environmentId: parsedPayload.environmentId, deploymentDir },
+    );
 
     const serviceHooks = parsedPayload.serviceHooks ?? [];
     if (parsedPayload.deployStrategy === "sequential") {
@@ -1755,6 +1804,12 @@ async function deployContainerServices(
       serviceNames: labeledServices,
       composePaths: chain,
     };
+  } catch (err) {
+    if (retiredEarlier.length > 0 && err instanceof Error) {
+      err.message +=
+        " The containers this environment had under its earlier compose project name were already removed; deploy again to bring it back.";
+    }
+    throw err;
   } finally {
     await removeComposeStageDir(deploymentDir);
   }
@@ -2046,10 +2101,11 @@ export async function handleEnvironmentDeploy(
   // Which host-native lane each service ends up on can only be decided once the
   // releases are built: a `serviceKind: node` service that turned out to be a
   // static export is served as files, not supervised as a process.
-  const { sites, nativeAppServices } = resolveHostNativeLanes(
-    parsedPayload,
-    appliedReleases,
-  );
+  const lanes = resolveHostNativeLanes(parsedPayload, appliedReleases);
+  const { nativeAppServices } = lanes;
+  // Secret runtime variables arrive sealed; the engine configs and
+  // `hosting.env` take them from `webEnv` once decrypted.
+  const sites = await resolveSiteSecretEnv(lanes.sites, runtime.decryptSecrets);
 
   const mountPaths = await resolveDeployMountPaths(
     layout,

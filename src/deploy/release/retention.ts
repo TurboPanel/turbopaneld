@@ -30,6 +30,7 @@ import { hostSudoArgs } from "../../permissions/host-sudo.ts";
 import { forEachSequential } from "../../util/sequential.ts";
 import type { RunFn } from "../ensure-principal.ts";
 import {
+  RELEASE_RECORDS_DIRNAME,
   type ReleasePaths,
   removePublishedRelease,
   runPrivileged,
@@ -197,7 +198,7 @@ export function releaseTreesToReclaim(
 }
 
 export type ReclaimRemovedReleaseTreesParams = {
-  layout: Pick<LayoutPaths, "principalHomeRoot">;
+  layout: Pick<LayoutPaths, "principalHomeRoot" | "daemonStateDir">;
   /** Release rows the previous deploy recorded in `deployment.json`. */
   previous: readonly ReleaseTreeRef[];
   /** `serviceId`s this deploy still carries a `sourceMaterial[]` entry for. */
@@ -210,9 +211,12 @@ export type ReclaimRemovedReleaseTreesParams = {
  * Remove the whole release tree for every service that lost its source.
  *
  * The tree is root-owned by design, so removal goes through the same privileged
- * runner sealing and per-release pruning use. Best-effort per entry, for the
- * same reason retention is: a leftover directory must never fail a deploy that
- * has already promoted. Returns the paths actually removed.
+ * runner sealing and per-release pruning use. Once a tree is gone, the
+ * daemon's rollback records for that service go with it
+ * ({@link removeServiceReleaseRecords}): a record outlives its tree nowhere.
+ * Best-effort per entry, for the same reason retention is: a leftover directory
+ * must never fail a deploy that has already promoted. Returns the tree paths
+ * actually removed.
  */
 export async function reclaimRemovedReleaseTrees(
   params: ReclaimRemovedReleaseTreesParams,
@@ -246,6 +250,11 @@ export async function reclaimRemovedReleaseTrees(
         return;
       }
       removed.push(path);
+      await removeServiceReleaseRecords(
+        params.layout,
+        ref.serviceId,
+        params.onOutput,
+      );
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       params.onOutput?.(
@@ -255,4 +264,32 @@ export async function reclaimRemovedReleaseTrees(
     }
   });
   return removed;
+}
+
+/**
+ * Remove `<daemonStateDir>/release-records/sites/<serviceId>`, the daemon-owned
+ * rollback records of a service whose release tree was reclaimed. The folder
+ * belongs to the daemon user, so no privilege is involved. `serviceId` has been
+ * through {@link releaseTreesToReclaim}'s segment check. Best-effort: a
+ * leftover record only fails a later rollback cleanly.
+ */
+async function removeServiceReleaseRecords(
+  layout: Pick<LayoutPaths, "daemonStateDir">,
+  serviceId: string,
+  onOutput: ReclaimRemovedReleaseTreesParams["onOutput"],
+): Promise<void> {
+  const dir = siteRoot(
+    join(layout.daemonStateDir, RELEASE_RECORDS_DIRNAME),
+    serviceId,
+  );
+  try {
+    await Deno.remove(dir, { recursive: true });
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) return;
+    const message = err instanceof Error ? err.message : String(err);
+    onOutput?.(
+      "stderr",
+      `release record reclaim could not remove ${dir}: ${message}`,
+    );
+  }
 }

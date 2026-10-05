@@ -13,10 +13,12 @@ import {
   restoreFabricFromPersistedState,
 } from "../commands/fabric.ts";
 import { reinstallFirewallForwardingIfEnabled } from "../firewall/apply.ts";
+import { recoverInterruptedRestores } from "../backups/copy-restore.ts";
 import { reconcileSitePhpRuntimesAtBoot } from "../deploy/site/php-runtime-apply.ts";
 import { logInfo, logWarn } from "../util/logger.ts";
 import { resolveLayout } from "../paths/layout.ts";
 import { reportLiveReleaseLinks } from "../deploy/release/live-release-scan.ts";
+import { guardHostingCaddySites } from "../deploy/ingress.ts";
 import { createSentinel, type SentinelOptions } from "../monitor/index.ts";
 import {
   initOrchestration,
@@ -52,10 +54,14 @@ export type DaemonRunIo = {
   restoreFabricFromPersistedState?: () => Promise<void>;
   /** Boot-time live-release link scan; defaults to {@link scanLiveReleases}. */
   scanLiveReleases?: () => Promise<void>;
+  /** Set aside hosting Caddy snippets it cannot load; defaults to {@link guardHostingSites}. */
+  guardHostingCaddySites?: () => Promise<void>;
   reinstallFabricForwardingIfEnabled?: () => Promise<void>;
   reinstallFirewallForwardingIfEnabled?: () => Promise<void>;
   /** Start any per-site PHP runtime that is installed but not running. */
   reconcileSitePhpRuntimes?: () => Promise<void>;
+  /** Start containers a restore stopped before the daemon died. */
+  recoverInterruptedRestores?: () => Promise<unknown>;
   shouldEnableDockerIntegration?: () => boolean;
   shouldConnectToInstance?: () => boolean;
   createDockerClient?: () => DockerClientLike;
@@ -164,6 +170,14 @@ async function scanLiveReleases(): Promise<void> {
 }
 
 /**
+ * Set aside any hosting Caddy snippet already on disk that Caddy cannot load
+ * (`ingress.ts`), so a stale one does not keep ingress from starting.
+ */
+async function guardHostingSites(): Promise<void> {
+  await guardHostingCaddySites(resolveLayout(Deno.env.toObject()));
+}
+
+/**
  * Long-running daemon loop. `main.ts` / `prod-main.ts` call this after CLI
  * verbs. Tests inject {@link DaemonRunIo} so startup branches stay isolated.
  */
@@ -202,6 +216,16 @@ export async function runDaemon(io: DaemonRunIo = {}): Promise<void> {
     await reinstallForwardingJumps();
     await (io.reconcileSitePhpRuntimes ?? reconcileSitePhpRuntimesAtBoot)();
   }
+  if (orchestrationReady) {
+    (io.recoverInterruptedRestores ?? (() => recoverInterruptedRestores()))()
+      .catch((err) => {
+        (io.logWarn ?? logWarn)(
+          "backup",
+          "restore recovery failed:",
+          err instanceof Error ? err.message : String(err),
+        );
+      });
+  }
   // In the background: a slow tree walk must not hold up the connection, and
   // a failure is only ever reported.
   if (orchestrationReady) {
@@ -209,6 +233,17 @@ export async function runDaemon(io: DaemonRunIo = {}): Promise<void> {
       (io.logWarn ?? logWarn)(
         "release",
         "live release link scan failed:",
+        err instanceof Error ? err.message : String(err),
+      );
+    });
+  }
+
+  // Also in the background, and only ever reported on.
+  if (orchestrationReady) {
+    (io.guardHostingCaddySites ?? guardHostingSites)().catch((err) => {
+      (io.logWarn ?? logWarn)(
+        "deploy",
+        "hosting Caddy snippet check failed:",
         err instanceof Error ? err.message : String(err),
       );
     });

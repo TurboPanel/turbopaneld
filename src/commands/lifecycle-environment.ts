@@ -12,6 +12,10 @@
  */
 
 import {
+  actOnEarlierContainers,
+  earlierRecordedProjects,
+} from "../deploy/retire-previous-projects.ts";
+import {
   composeFileArgs,
   readDeploymentManifest,
   resolveDeployedComposePaths,
@@ -239,31 +243,46 @@ export async function handleEnvironmentLifecycle(
     }
   }
 
-  // start / restart act on the live generation; stop on every generation.
-  const projects = projectsForCommand(
-    manifest,
+  // A stack still running under an earlier, project-wide name (the recorded
+  // names do not include this command's). Compose acts on a whole project and
+  // sibling environments shared that name, so only this environment's own
+  // containers are touched, and no compose command runs on the old name.
+  const earlier = manifest === null ? [] : await earlierRecordedProjects(
+    deploymentDir,
     parsedPayload.projectName,
-    parsedPayload.action === "stop" ? "all" : "live",
   );
-  await forEachSequential(projects, async (projectName) => {
-    const result = await runStreamed([
-      ...composeFileArgs(projectName, composePaths),
-      parsedPayload.action,
-    ], {
-      onLine: (event) => logSink.onLine(event.stream, event.line),
+  if (earlier.length > 0) {
+    await actOnEarlierContainers(earlier, run, {
+      environmentId: parsedPayload.environmentId,
+      deploymentDir,
+    }, parsedPayload.action);
+  } else {
+    // start / restart act on the live generation; stop on every generation.
+    const projects = projectsForCommand(
+      manifest,
+      parsedPayload.projectName,
+      parsedPayload.action === "stop" ? "all" : "live",
+    );
+    await forEachSequential(projects, async (projectName) => {
+      const result = await runStreamed([
+        ...composeFileArgs(projectName, composePaths),
+        parsedPayload.action,
+      ], {
+        onLine: (event) => logSink.onLine(event.stream, event.line),
+      });
+      if (!result.success) {
+        // Redact before sanitizing: the deny-set matches raw plaintext, and
+        // sanitizeForLog would otherwise rewrite the newlines a multiline
+        // secret (a PEM body) is matched on.
+        throw new Error(
+          sanitizeForLog(
+            logSink.redactSummary(result.stderr) ||
+              `compose ${parsedPayload.action} failed`,
+          ),
+        );
+      }
     });
-    if (!result.success) {
-      // Redact before sanitizing: the deny-set matches raw plaintext, and
-      // sanitizeForLog would otherwise rewrite the newlines a multiline secret
-      // (a PEM body) is matched on.
-      throw new Error(
-        sanitizeForLog(
-          logSink.redactSummary(result.stderr) ||
-            `compose ${parsedPayload.action} failed`,
-        ),
-      );
-    }
-  });
+  }
 
   // Best-effort parity with managed.lifecycle: keep per-service Traefik in
   // step so stopped stacks do not leave published ports listening with no
@@ -292,11 +311,15 @@ export async function handleEnvironmentLifecycle(
     );
   }
 
-  const containers = await collectAllLifecycleContainers(
-    projectsForCommand(manifest, parsedPayload.projectName, "live"),
-    composePaths,
-    run,
-  );
+  // No container listing for an earlier-named stack: Compose would list the
+  // whole shared project, siblings included.
+  const containers = earlier.length > 0
+    ? undefined
+    : await collectAllLifecycleContainers(
+      projectsForCommand(manifest, parsedPayload.projectName, "live"),
+      composePaths,
+      run,
+    );
 
   const summary =
     `Lifecycle ${parsedPayload.action} for environment ${parsedPayload.environmentId}`;

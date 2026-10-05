@@ -18,7 +18,7 @@
 
 - name: Ensure FHS site-Caddy config directories
   ansible.builtin.file:
-    path: "{{ turbopanel_config_dir }}/caddy/{{ item }}"
+    path: "{{ site_caddy_config_dir }}/{{ item }}"
     state: directory
     owner: root
     group: "{{ site_caddy_service_group }}"
@@ -50,7 +50,7 @@
 - name: Install empty-glob placeholder site block
   ansible.builtin.template:
     src: 00-empty.conf.j2
-    dest: "{{ turbopanel_config_dir }}/caddy/sites/00-empty.conf"
+    dest: "{{ site_caddy_config_dir }}/sites/00-empty.conf"
     owner: root
     group: "{{ site_caddy_service_group }}"
     mode: "0640"
@@ -58,11 +58,59 @@
 - name: Install site-Caddy main Caddyfile
   ansible.builtin.template:
     src: Caddyfile.j2
-    dest: "{{ turbopanel_config_dir }}/caddy/Caddyfile"
+    dest: "{{ site_caddy_config_dir }}/Caddyfile"
     owner: root
     group: "{{ site_caddy_service_group }}"
     mode: "0640"
   register: _site_caddy_config
+
+# The probe is the launcher's own mount sequence on a throwaway directory, so it
+# fails here, with a plain message, instead of at the next start of the unit.
+- name: Probe that this host can mount a directory nosymfollow
+  ansible.builtin.shell: |
+    set -u
+    for tool in unshare setpriv findmnt mount; do
+      command -v "$tool" >/dev/null 2>&1 || { echo "missing $tool"; exit 1; }
+    done
+    d="$(mktemp -d)"
+    unshare --mount --propagation private sh -c '
+      mount --bind -- "$1" "$1" &&
+        mount -o remount,bind,ro,nosymfollow,nosuid,nodev -- "$1" &&
+        findmnt -no OPTIONS --target "$1" | grep -q nosymfollow
+    ' sh "$d"
+    rc=$?
+    rmdir "$d"
+    exit "$rc"
+  args:
+    executable: /bin/sh
+  register: _site_caddy_nosymfollow
+  changed_when: false
+  failed_when: false
+
+- name: Fail on a host that cannot mount web roots nosymfollow
+  ansible.builtin.assert:
+    that:
+      - _site_caddy_nosymfollow.rc == 0
+    fail_msg: >-
+      The site Caddy mounts each site owner's web root and release tree with
+      `nosymfollow` so no link in them is followed. That needs Linux 5.10 or
+      newer and util-linux with unshare, setpriv, findmnt and mount (Debian 12
+      and later have both). This host could not do it:
+      {{ _site_caddy_nosymfollow.stdout | default('') }}
+      {{ _site_caddy_nosymfollow.stderr | default('') }}
+
+# Starts Caddy in a private mount namespace with every managed web root mounted
+# `nosymfollow` (Linux 5.10+), so a link in a site owner's writable tree is
+# never served. Needs util-linux (unshare, setpriv, mount, findmnt).
+- name: Install tp-site-caddy-run
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../scripts/tp-site-caddy-run"
+    dest: "{{ turbopanel_install_root | default('/opt/turbopanel') }}/lib/tp-site-caddy-run"
+    owner: root
+    group: root
+    mode: "0750"
+    remote_src: true
+  register: _site_caddy_launcher
 
 - name: Install turbopanel-site-caddy systemd unit
   ansible.builtin.template:
@@ -89,4 +137,4 @@
   ansible.builtin.systemd:
     name: turbopanel-site-caddy
     state: restarted
-  when: _site_caddy_config.changed or _site_caddy_unit.changed
+  when: _site_caddy_config.changed or _site_caddy_unit.changed or _site_caddy_launcher.changed

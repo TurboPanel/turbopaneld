@@ -20,6 +20,7 @@ import {
   runSandboxedBuild,
   type SandboxSpawn,
   sweepStaleBuildWork,
+  withBuildSlot,
 } from "./build-sandbox.ts";
 
 /**
@@ -565,4 +566,74 @@ test("the stale sweep retries a tree that was moved aside, without a unit stop",
   } finally {
     await Deno.remove(dir, { recursive: true });
   }
+});
+
+test("waiting builds are served round-robin by project", async () => {
+  const order: string[] = [];
+  let open = () => {};
+  const gate = new Promise<void>((resolve) => {
+    open = resolve;
+  });
+  const job = (name: string, project: string, wait?: Promise<void>) =>
+    withBuildSlot(undefined, async () => {
+      await wait;
+      order.push(name);
+    }, project);
+  const all = [
+    job("a1", "A", gate),
+    job("a2", "A"),
+    job("a3", "A"),
+    job("b1", "B"),
+    job("c1", "C"),
+  ];
+  open();
+  await Promise.all(all);
+  assertEquals(order, ["a1", "b1", "a2", "c1", "a3"]);
+});
+
+test("a build that floods its output is stopped and does not buffer it", async () => {
+  const target = await work();
+  const killed: string[] = [];
+  let finish = () => {};
+  const gate = new Promise<void>((resolve) => {
+    finish = resolve;
+  });
+  const flood = (chunks: number) => {
+    let sent = 0;
+    return new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        if (sent >= chunks) {
+          await gate;
+          return controller.close();
+        }
+        sent += 1;
+        controller.enqueue(new TextEncoder().encode("x".repeat(65536)));
+      },
+    });
+  };
+  const spawn: SandboxSpawn = () =>
+    ({
+      stdin: new WritableStream<Uint8Array>(),
+      stdout: flood(64),
+      stderr: flood(0),
+      status: gate.then(() => ({ success: false, code: 143, signal: null })),
+      kill: (signal: string) => {
+        killed.push(signal);
+        finish();
+      },
+    }) as unknown as Deno.ChildProcess;
+  const { runFn } = recordingRunFn();
+  await assertRejects(
+    () =>
+      runSandboxedBuild({
+        work: target,
+        spec: "",
+        spawn,
+        runFn,
+        maxOutputChars: 1_000_000,
+      }),
+    Error,
+    "build output exceeded the size limit",
+  );
+  assertEquals(killed, ["SIGTERM"]);
 });

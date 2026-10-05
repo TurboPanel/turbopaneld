@@ -394,8 +394,8 @@ export function parseInstanceAcmeSettings(
 
 /**
  * The saved instance ACME settings, or `null` when none were saved. The file
- * sits in `/etc/turbopanel/caddy`, which the site Caddy role makes
- * `root:tpcaddysite` `0750`; behind that it is read through tp-host.
+ * sits in `/etc/turbopanel/caddy`, which can be root-owned `0750`; behind
+ * that it is read through tp-host.
  */
 export async function readInstanceAcmeSettings(
   layout: LayoutPaths,

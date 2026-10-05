@@ -46,6 +46,18 @@ export const PRESENCE_REFRESH_MS = 5 * 60_000;
  */
 export const MAX_CONNECTION_AGE_MS = 2 * 60 * 60 * 1_000;
 
+/** Default forced-recycle age is spread by +-10% so a fleet that connected together does not recycle together. */
+export const MAX_CONNECTION_AGE_JITTER = 0.1;
+
+/** Per-connection recycle age: `baseMs` spread uniformly by +-`MAX_CONNECTION_AGE_JITTER`. */
+export function jitteredMaxConnectionAgeMs(
+  baseMs: number,
+  random: () => number = Math.random,
+): number {
+  const spread = (random() * 2 - 1) * MAX_CONNECTION_AGE_JITTER;
+  return Math.round(baseMs * (1 + spread));
+}
+
 // Must match DAEMON_CELL_PING in instance/src/daemon/cell/protocol.ts exactly.
 const CELL_PING_MESSAGE = '{"type":"ping"}';
 
@@ -205,7 +217,9 @@ export class IdlePresence {
   readonly #presenceRefreshIntervalMs: number;
   readonly #staleConnectionMs: number;
   readonly #onStaleConnection: (() => void) | undefined;
-  readonly #maxConnectionAgeMs: number;
+  readonly #baseMaxConnectionAgeMs: number;
+  readonly #jitterMaxAge: boolean;
+  #maxConnectionAgeMs: number;
   readonly #onMaxAge: (() => void) | undefined;
 
   #ws: WebSocket | undefined;
@@ -231,8 +245,11 @@ export class IdlePresence {
     this.#staleConnectionMs = options.staleConnectionMs ??
       this.#idleThresholdMs * 3;
     this.#onStaleConnection = options.onStaleConnection;
-    this.#maxConnectionAgeMs = options.maxConnectionAgeMs ??
+    this.#baseMaxConnectionAgeMs = options.maxConnectionAgeMs ??
       MAX_CONNECTION_AGE_MS;
+    // Only the production default is jittered; explicit overrides stay exact.
+    this.#jitterMaxAge = options.maxConnectionAgeMs === undefined;
+    this.#maxConnectionAgeMs = this.#baseMaxConnectionAgeMs;
     this.#onMaxAge = options.onMaxAge;
   }
 
@@ -259,6 +276,9 @@ export class IdlePresence {
     this.#lastInboundAt = Date.now();
     this.#staleReported = false;
     this.#connectedAtMs = Date.now();
+    this.#maxConnectionAgeMs = this.#jitterMaxAge
+      ? jitteredMaxConnectionAgeMs(this.#baseMaxConnectionAgeMs)
+      : this.#baseMaxConnectionAgeMs;
     this.#maxAgeReported = false;
     this.#lastPresenceFrameAt = 0;
     this.#sendHello();

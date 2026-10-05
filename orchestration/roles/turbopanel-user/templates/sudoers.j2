@@ -46,7 +46,12 @@ Cmnd_Alias TP_ENGINE_VALIDATE = /usr/sbin/php-fpm[0-9].[0-9] --fpm-config /etc/t
 # `auto_https off`, so `caddy validate` never opens certificate storage.
 Cmnd_Alias TP_NGINX_VALIDATE = {{ turbopanel_vendor_dir }}/nginx/current/sbin/nginx -t -c /etc/turbopanel/nginx/nginx.conf
 Cmnd_Alias TP_OLS_VALIDATE = {{ turbopanel_vendor_dir }}/openlitespeed/current/bin/openlitespeed -t -c /etc/turbopanel/openlitespeed/httpd_config.conf
-Cmnd_Alias TP_CADDY_VALIDATE = {{ turbopanel_vendor_dir }}/caddy/current/caddy validate --adapter caddyfile --config /etc/turbopanel/caddy/Caddyfile
+Cmnd_Alias TP_CADDY_VALIDATE = {{ turbopanel_vendor_dir }}/caddy/current/caddy validate --adapter caddyfile --config /etc/turbopanel/site-caddy/Caddyfile
+# The hosting (edge) Caddy: the deploy path validates the candidate site set
+# with this one argv before any snippet reaches the live include glob. The
+# candidate Caddyfile is written by the daemon beside the live one.
+Cmnd_Alias TP_HOSTING_CADDY_VALIDATE = {{ turbopanel_vendor_dir }}/caddy/current/caddy validate --adapter caddyfile --config /etc/turbopanel/hosting/Caddyfile.next
+{{ turbopanel_user }} ALL=(tpedge) NOPASSWD: TP_HOSTING_CADDY_VALIDATE
 {{ turbopanel_user }} ALL=(tpnginx) NOPASSWD: TP_NGINX_VALIDATE
 {{ turbopanel_user }} ALL=(tpols) NOPASSWD: TP_OLS_VALIDATE
 {{ turbopanel_user }} ALL=(tpcaddysite) NOPASSWD: TP_CADDY_VALIDATE

@@ -105,8 +105,9 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    (the storage UUID). Optional `chown` when a
    principal is linked. The instance owns Docker volume naming. Path-provider
    directory/file entries arrive with `sourcePath` — principal-owned defaults
-   are `/srv/users/<username>/volumes/<storageId>` (explicit operator paths
-   still win). Never write under `/var/lib/docker/volumes`.
+   are `/srv/users/<username>/volumes/<storageId>`; a `sourcePath` outside the
+   assigned site owner's `volumes/` directory (or with no site owner) is refused
+   before anything is created, re-owned or mounted (`assertSourcePathConfined`). Never write under `/var/lib/docker/volumes`.
 6. Decrypt `variableMaterial[]` via `POST /api/daemon/v1/secrets/decrypt` and
    write Compose standalone secret files under
    `<runDir>/deployments/<projectId>/<environmentId>/secrets/` (`secret-runtime.ts`,
@@ -176,6 +177,34 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    Caddy can take `:80`/`:443` without a control-plane release step.
    **Distinct**
    from control-plane Caddy (`:8443`).
+11-validate. A hosting snippet is never written straight into the live
+   `sites/*.caddy` glob. `rewriteHostingCaddySites` stages the whole site set
+   (every other environment's file plus the new one) in `hosting/sites.next/`
+   with a `Caddyfile.next` that imports it, and `tpedge` runs the pinned
+   `caddy validate --adapter caddyfile --config …/Caddyfile.next` (sudoers
+   `TP_HOSTING_CADDY_VALIDATE`; the candidate keeps its throwaway CA under
+   `/var/lib/turbopanel-hosting-caddy/validate` because the account has no
+   home). A set Caddy refuses (the same hostname in two environments, a bad
+   line, a certificate file that is missing or unreadable) fails the deploy
+   with Caddy's message and changes nothing. A validated snippet goes in through
+   `<env>.caddy.tpnew` and an atomic rename, with the old one kept as
+   `.caddy.tpprev`. If the running unit then refuses the reload, the old snippet
+   (or none) is put back and the deploy fails; a stopped or missing unit keeps
+   the validated file for its next start. The acme-hostnames manifest is
+   written only after the snippet is live. Changes run one at a time (the
+   candidate is staged at fixed paths), `removeHostingCaddySite` included.
+   A set that is refused only because of a snippet already on disk (the other
+   environments' files fail without the new one) does not fail the deploy: the
+   stale files are found by adding them to an empty set one at a time (the
+   daemon's reserved sites first, then by name) and the ones Caddy will not load
+   are set aside as `<name>.caddy.quarantined`, which no glob matches (the later
+   file of two serving one hostname). The same check runs at daemon start
+   (`guardHostingCaddySites`, then a reload), so a stale file does not keep the
+   unit from starting; until the daemon is up, a unit that restarts on its own
+   (boot) can still fail to load such a file. The validating account keeps its
+   throwaway CA in the unit's state folder, which systemd creates when the unit
+   starts: a never-started unit is started once first, and a folder that stays
+   missing is an error.
 11a. Alongside each environment's `.caddy` site file, `rewriteHostingCaddySites`
    also writes a companion `<environmentId>.acme-hostnames.json` naming just
    that environment's `tlsMode: 'acme'` hostnames (removed in lockstep by
@@ -186,18 +215,24 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    `HEAD` + `redirect: manual`) and sending a daemon-initiated
    `acme-issuance-event` only on a state change — a debounced failure (two
    consecutive bad polls, so the few seconds Caddy needs right after a fresh
-   deploy never false-alarms) or an immediate recovery. Caddy's admin API has
+   deploy never false-alarms), an immediate recovery, the first good
+   sighting of a hostname, or a renewal (the probe's `notAfter` changed).
+   Good events carry that `notAfter` when the probe could read it. Caddy's admin API has
    no issuance-status endpoint to poll instead — verified empirically against
    a real container before choosing the live-handshake probe (see
    `src/deploy/acme-probe.ts`'s header comment). The control plane
    merge-patches the matching `managed` `lets_encrypt` row's
-   `tls.metadata.acme.lastError` and deliberately never touches `tls.status`
+   `tls.metadata.acme` (`lastError`, `lastIssuedAt`, `notAfter`) and deliberately never touches `tls.status`
    — see `turbopanel/src/client/tls/acme-issuance-event.ts`.
 12. Best-effort `docker compose ps --format json` — per-container identity/status
    (`containerId`, `containerName`, `composeServiceName`, `status`, optional
    `serviceId` from `payload.hostings`) is included in the command result when
    collection succeeds; a `ps`/parse failure never fails an otherwise-successful
    deploy.
+
+## Compose project per environment (upgrade note)
+
+The control plane names one Compose project per **environment** (it used to be one per project, so two environments of a project on one server replaced each other's containers). On an environment's first deploy under the new name, `retire-previous-projects.ts` removes **that environment's** containers still running under a name recorded in its `deployment.json` (`docker rm -f`, volumes kept). It never uses a whole-project `compose down`: the old name was shared with sibling environments, so containers are matched by the `com.turbopanel.environment` label or, for older containers, by `com.docker.compose.project.working_dir` equal to this environment's deployment directory. A deploy with zero container services clears the environment's containers the same way. Stop/teardown and start/restart/stop (lifecycle) of an environment whose recorded names do not include the command's name act the same way on this environment's own containers only (`docker rm -f` / `stop` / `start` / `restart` on their ids), never as a whole-project Compose command on the old name; a stop with the compose files gone still removes them. Images are pulled (best effort) before the old containers are removed, and a deploy that then fails says the earlier containers were already removed and to deploy again. Named volumes the control plane registers are pinned by `name:` (storage id), so they no longer depend on the project name; data in a stack's old `<project>_<id>` volumes is kept on the host but not reused by the first deploy after this change.
 
 ## Git-backed releases
 
@@ -782,6 +817,7 @@ new sink still needs a `SINKS` row and a refusal test.
 | `hostings[].hostnames` | hosting Caddyfile site addresses, Traefik `Host` | `isValidHostname` (contract parse) |
 | `hostings[].bindAddress` | hosting Caddyfile `bind` | IP literal (contract parse, `assertValidBindAddress`) |
 | `sites[].webEnv` key / value | Apache `SetEnv` | `safeEnvName` / `safeEnvValue`, and no `${` (Apache expands it on every line, with no escape) |
+| `sites[].webEnv` key / value | nginx `fastcgi_param` | `safeEnvName` (refused) / `safeEnvValue` and no `$` (nginx expands it inside quotes, no escape) and no name nginx or PHP sets itself (`SCRIPT_FILENAME`, `REMOTE_ADDR`, `HTTP_*`, ...) (all dropped and named, not refused: variables are inherited into every hosting) |
 | `sites[].webEnv` key / value | site Caddy `php_fastcgi env` | `safeEnvName` (refused) / `isSafeCaddyEnvValue` (dropped: a multi-line PEM is legitimate and other engines carry it) |
 | `sites[].php.settings` | php-fpm `php_admin_value[...]`, OpenLiteSpeed `phpIniOverride{}` | key allowlist (unknown keys dropped), `safePhpIniValue` |
 | `sites[].php.pool` | php-fpm pool tuning | key allowlist, `^[A-Za-z0-9._-]+$` |
@@ -796,3 +832,10 @@ Not tenant-editable, so not in the scan: ProxySQL backend addresses and
 credentials (control-plane managed, rendered in a container), platform paths,
 ports and ids (`SAFE_ID_RE`, `SAFE_PATH_ID_RE`). `hosting.env` escapes for its
 own reader and is not loaded by any engine.
+
+## Compose policy on the resolved model, and routing labels
+
+- `compose-final-policy.ts` (`assertComposePolicy`) judges `docker compose config` output, after merge keys, anchors and `extends` are expanded: host-level service fields, volume mount options other than a sized tmpfs or a bind (host paths are confined separately) and bridge options on networks need `hostLevelApproved`; a built service may not take a platform image name (`PLATFORM_IMAGE_REPOSITORIES`, kept in step with the image constants by a test).
+- `traefik.*` labels and `com.turbopanel.raw-port` are reserved owner labels: routing is generated by the daemon only. HTTP-hosted containers get `com.turbopanel.system.routed=true`; the shared Traefik carries `--providers.docker.constraints` on it.
+- Transition: while a running container still routes HTTP (`traefik.http.*` labels) without the routed label, the shared Traefik is rendered without the constraint (`legacyHttpContainersPresent`), so no site goes dark; the render after the last such container is redeployed turns the constraint on. Both the legacy docker.sock file and the socket-proxy shape go through the same `traefikCompose`.
+- The resolved-model policy also refuses, without host-level approval, published host ports inside the platform's bands (`RESERVED_HOST_PORT_RANGES`) and `gpus` / `group_add` / device reservations (the control plane gates `gpus` and `group_add` the same way); it always refuses an authored network that is the hosting-ingress or managed network. Not checkable in the daemon: a volume's `name:` / `external:` pointing at another project's volume — the control plane rewrites its own storage volumes to external named volumes, so only its host-access gate can tell. The legacy-container check lists stopped containers too (`docker ps -a`).

@@ -2,8 +2,8 @@
  * Reads of host paths the daemon account may not be able to open itself.
  *
  * Several trees the daemon used to read directly are now root-owned with an
- * engine or principal group: `/etc/turbopanel/caddy` is `root:tpcaddysite`
- * `0750` once the site Caddy role runs, and principal homes under
+ * engine or principal group: `/etc/turbopanel/caddy` can be root-owned
+ * `0750`, and principal homes under
  * `/srv/users` are `0750` to their own group. A direct `Deno.*` call there
  * fails with PermissionDenied, which used to read as "absent". These helpers
  * try the direct call first and only then ask tp-host, which refuses any path

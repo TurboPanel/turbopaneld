@@ -16,6 +16,7 @@
  * local-bridge ↔ remote peer prefix (non-/32) forwarding.
  */
 import { encodeHex } from "@std/encoding/hex";
+import { fabricAllowedIpsPolicyError } from "./fabric-allowed-ips.ts";
 import { hostSudoArgs } from "../permissions/host-sudo.ts";
 import { join } from "@std/path";
 import { logInfo, logWarn } from "../util/logger.ts";
@@ -53,8 +54,13 @@ const FABRIC_SYSCTL_CONTENTS = "net.ipv4.ip_forward=1\n";
 const WG_QUICK_UNIT = `wg-quick@${FABRIC_INTERFACE_NAME}`;
 const WG_QUICK_CONF_PATH = `/etc/wireguard/${FABRIC_INTERFACE_NAME}.conf`;
 const PREFLIGHT_TIMEOUT_MS = 5_000;
-/** ~3× `PersistentKeepalive = 25` — handshake inside this window is healthy. */
-export const FABRIC_HANDSHAKE_HEALTHY_MS = 75_000;
+/**
+ * WireGuard renews a handshake after 120 s of traffic (REKEY_AFTER_TIME) and
+ * declares a session dead after 180 s (REJECT_AFTER_TIME); keepalive packets
+ * are not handshakes. A handshake up to 180 s old (plus a margin for the
+ * poll interval) therefore still means a working tunnel.
+ */
+export const FABRIC_HANDSHAKE_HEALTHY_MS = 195_000;
 const FABRIC_PROBE_KEEPALIVE = 25;
 const WG_DUMP_ENDPOINT_NONE = "(none)";
 
@@ -1481,6 +1487,8 @@ async function handleFabricEnable(
   payload: FabricReconcileEnabledPayload,
   deps?: FabricHandlerDeps,
 ): Promise<FabricReconcileResult> {
+  const policyError = fabricAllowedIpsPolicyError(payload);
+  if (policyError) throw new Error(policyError);
   const networkDir = resolveNetworkDir();
   const publicKey = await ensureFabricKeypair(networkDir);
   const currentStamp = await computeFabricApplyStamp(payload, publicKey);
@@ -1577,6 +1585,8 @@ export async function restoreFabricFromPersistedState(): Promise<void> {
   if (!state) return;
   try {
     const payload = enabledPayloadFromState(state);
+    const policyError = fabricAllowedIpsPolicyError(payload);
+    if (policyError) throw new Error(policyError);
     const mtu = resolvePayloadMtu(payload);
     await ensureTp0Interface(payload.address);
     await applyMtu(mtu);

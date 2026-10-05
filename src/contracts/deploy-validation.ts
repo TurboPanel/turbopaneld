@@ -2,7 +2,7 @@
  * Deploy payload validators — keep in sync with instance `src/contracts/commands/deploy-validation.ts`.
  */
 
-import { isValidHostname } from "./commands-contracts.ts";
+import { isValidHostname, wwwSiblingHostname } from "./commands-contracts.ts";
 import type {
   EnvironmentDeployHosting,
   EnvironmentDeployStorageMaterial,
@@ -163,6 +163,46 @@ export function validateDeployHostnameRouting(
   return findDuplicateCatchAllHostname(byHostname);
 }
 
+function isHttpHosting(hosting: EnvironmentDeployHosting): boolean {
+  return (hosting.protocol ?? "http") === "http";
+}
+
+function validateWwwRedirectHostnames(
+  hosting: EnvironmentDeployHosting,
+  served: ReadonlySet<string>,
+): string | null {
+  for (const hostname of hosting.hostnames) {
+    const sibling = wwwSiblingHostname(hostname);
+    if (sibling === null) {
+      return `wwwRedirect: no valid www/non-www name for hostname ${hostname}`;
+    }
+    if (served.has(sibling)) {
+      return `wwwRedirect: ${sibling} is already a hostname in this environment (it would be redirected from ${hostname})`;
+    }
+  }
+  return null;
+}
+
+/**
+ * `wwwRedirect` serves a second name per hostname, so it only makes sense on
+ * `http`, every such name must be a valid hostname, and none may already be a
+ * hostname in the same deploy (that would be two sites for one name).
+ */
+export function validateDeployWwwRedirects(
+  hostings: EnvironmentDeployHosting[],
+): string | null {
+  const served = new Set(
+    hostings.filter(isHttpHosting).flatMap((hosting) => hosting.hostnames),
+  );
+  for (const hosting of hostings.filter((h) => h.wwwRedirect)) {
+    const error = isHttpHosting(hosting)
+      ? validateWwwRedirectHostnames(hosting, served)
+      : "wwwRedirect requires the http protocol";
+    if (error) return error;
+  }
+  return null;
+}
+
 export function validateDeployTargetPort(
   targetPort: number | undefined,
 ): boolean {
@@ -215,7 +255,10 @@ export function validateDeployHostings(
     const error = validateDeployHostingEntry(hosting);
     if (error) return error;
   }
-  return validateDeployHostnameRouting(hostings);
+  return (
+    validateDeployHostnameRouting(hostings) ??
+      validateDeployWwwRedirects(hostings)
+  );
 }
 
 function validateStorageKindAndProvider(

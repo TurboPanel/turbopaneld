@@ -285,8 +285,42 @@ root-owned `0550` by design:
   back to an ordinary reload. php-fpm is never restarted for this — its workers
   run as the principal, which owns the group already.
 - **Hosting metadata moves out of the release.** `hosting.env` / `php.json` land
+  in `<siteRoot>/.turbopanel-hosting/` (directory `root:root` `0711`, each file owned by the site owner's Linux user
+  and `root` group, `0400`), installed through the same `sudo -n install` seam
+  as every other managed config file. Not group-readable: every web engine is a
+  member of the site owner's group, so a group bit would let one owner's link
+  reach another owner's values; the owner's own scripts and apps still read
+  their file. The daemon-owned lane keeps `<base>/.turbopanel/` at
+  `0700`/`0600` (only the daemon account owns that tree).
+- **Caddy follows no link inside a site owner's tree.** Caddy's `file_server`
+  always follows symlinks, and `tpcaddysite` sits in every owner's group, so the
+  unit starts through `orchestration/scripts/tp-site-caddy-run`
+  (`ExecStart=+`): in a private mount namespace it bind-mounts, read-only with
+  `nosymfollow` (Linux 5.10+), each managed `…/sites/<id>/webroot` and each
+  release-backed `…/sites/<id>/releases` named by a fragment's `root *` line,
+  then drops to `tpcaddysite` with no capabilities. The platform's own `current`
+  link sits outside the mount and is still followed; every link *inside* a
+  release (including a second hop through `shared/`) is not. The mounts exist
+  only for Caddy; the owner's PHP, apps and shell still follow their own links.
+  Like nginx's `disable_symlinks on`, this means a link under a Caddy site's
+  document root (`public/storage`, `public/build -> ../dist`) answers 404.
+  The unit fails closed (no mount, no Caddy), and the Ansible role probes the
+  mount sequence on the host first. The mounts are made once, at start, so
+  `applySites` reads the unit's mount table (`tp-host site-caddy-mounts`) and
+  restarts the unit when a directory its Caddy sites need is missing (a new
+  site, or one recreated since), then fails the deploy if it is still missing.
+  Release top: the layout's `shared` link is refused (`/shared`, `/shared/*`
+  answer 404).
+
   in `<siteRoot>/.turbopanel-hosting/` (root-owned, group-readable), installed
   through the same `sudo -n install` seam as every other managed config file.
+- **Every engine refuses dotfiles.** A path with a segment starting with a dot
+  (`.env`, `.git/…`, `.htaccess`, `.htpasswd`) answers 403 on Caddy, nginx,
+  Apache and OpenLiteSpeed, except under `/.well-known/`. nginx and Apache use
+  one lookahead rule (`DOTFILE_PATH_RE`); OpenLiteSpeed a rewrite rule with the
+  same pattern; Caddy (Go regexp, no lookahead) two matchers, because it matches
+  the raw request path and `file_server` cleans it afterwards, so a dot segment
+  *inside* `/.well-known/` (`/.well-known/../.env`) has its own refusal.
 - **PHP is confined.** A release-backed nginx/Apache PHP pool gets
   `php_admin_value[open_basedir] = <documentRoot>:<siteRoot>/shared:/tmp`, so
   scripts read the release and write through `shared/` — reachable as
@@ -371,10 +405,30 @@ under `<configDir>/openlitespeed/sites/` on each apply/remove (no
 `sites-enabled` convention). PHP context lives inside the per-site
 `vhosts/<name>/vhconf.conf` and fragment that removal already deletes, so
 `removeOpenLiteSpeedSites` needs no PHP-specific step. `web.env`
-hints remain unapplied for OLS (Apache-only `SetEnv`) — PHP parity did not
-change that.
+hints remain unapplied for OLS (see **Site variables** below).
 
-Future seams (not MVP): multi-version PHP side-by-side, OLS/nginx `web.env`,
+**Site variables (`sites[].webEnv`, `sites[].webSecretEnv`).** Runtime variables
+set on a PHP site's hostings reach PHP as FastCGI parameters, so `getenv()` and
+`$_SERVER` see them: site Caddy `php_fastcgi { env }`, Apache `SetEnv`
+(mod_proxy_fcgi forwards it), nginx `fastcgi_param` after the shared parameter
+set and before the pinned `SCRIPT_FILENAME` / `PATH_INFO`. Not yet delivered:
+OpenLiteSpeed, and `$_ENV` in every mode (FastCGI parameters never fill it;
+`variables_order` is `GPCS`). Secret variables travel sealed: the control plane
+sends each as a `tpdaemon` envelope in `sites[].webSecretEnv`, and
+`resolveSiteSecretEnv` (`site/site-secret-env.ts`, called from
+`handleEnvironmentDeploy` before the site apply, the only caller of
+`applySites`) decrypts them through the `secrets/decrypt` seam (so they join the
+transcript redaction deny-set) and folds them into `webEnv`. The plaintext then
+lives only in the engine's own config (`root:<engine group>` `0640`) and the
+owner-only `hosting.env`. Variables are inherited from the organization, project
+and environment into every hosting, so nginx **drops and names** (never prints
+the value) a variable it cannot carry rather than failing the deploy: a value
+holding `$` (nginx expands `$name` inside quotes, with no escape), a value that
+is not one line, and a name nginx or PHP sets itself (`SCRIPT_FILENAME`,
+`REMOTE_ADDR`, `HTTP_*`, ...). A name that is not an environment variable name
+is still refused.
+
+Future seams (not MVP): multi-version PHP side-by-side, OLS `web.env`,
 swarm-style replicas, ACME issuance on the daemon. TurboFabric **is** the
 single org mesh (`server.fabric.reconcile` — see `src/commands/fabric.ts`
 and `../../orchestration/AGENTS.md`). `{ enabled: false }` is a teardown; the

@@ -51,6 +51,11 @@ import type {
   ManagedEngineRuntime,
   ManagedReplicationObservedHealth,
 } from "./types.ts";
+import {
+  mysqlFamilyDataRoot,
+  probeMysqlFamilyStandbyData,
+  volumeMountArgs,
+} from "./standby-probe.ts";
 
 /** Marker written into the data volume once configureStandby finishes. */
 const STANDBY_MARKER = ".turbopanel-standby";
@@ -84,7 +89,11 @@ const mysqlBackupRuntime: ManagedEngineBackupRuntime = {
       "--single-transaction",
       "--routines",
       "--triggers",
-      "--set-gtid-purged=ON",
+      // Backups are restored into a live instance whose GTID_EXECUTED already
+      // covers the dumped GTIDs: ON would emit SET @@GLOBAL.GTID_PURGED
+      // (error 3546) and SQL_LOG_BIN=0 (restore never reaches replicas).
+      // Replica seeding uses its own dump and keeps GTID_PURGED.
+      "--set-gtid-purged=OFF",
       "--protocol=socket",
       db,
     ];
@@ -433,39 +442,11 @@ const mysqlReplicationRuntime: ManagedEngineReplicationRuntime = {
     );
   },
 
+  probeStandbyData: (ctx) => probeMysqlFamilyStandbyData(ctx, STANDBY_MARKER),
+
   async bootstrapStandby(ctx: ManagedEngineBootstrapContext, spec) {
-    const volumeArgs: string[] = [];
-    for (const volume of ctx.volumes) {
-      volumeArgs.push("-v", `${volume.name}:${volume.target}`);
-    }
-    const dataRoot = ctx.volumes[0]?.target ?? "/var/lib/mysql";
-    // Initialised when the datadir has been written (mysql system schema).
-    // `test` exit codes alone cannot distinguish "path absent" from "docker
-    // never ran" (e.g. socket permission error) — echo an explicit marker and
-    // require the probe container itself to succeed, so a docker failure
-    // aborts instead of being misread as an uninitialized volume.
-    const probePath = async (flag: string, path: string): Promise<boolean> => {
-      const probe = await ctx.runDocker([
-        "run",
-        "--rm",
-        ...helperLabelArgs("volume-copy"),
-        "--user",
-        ctx.containerUser,
-        ...volumeArgs,
-        ctx.image,
-        "sh",
-        "-c",
-        `test ${flag} ${path} && echo present || echo absent`,
-      ]);
-      if (!probe.success) {
-        throw new Error(
-          `standby data probe failed: ${
-            sanitizeForLog(probe.stderr || probe.stdout || "unknown")
-          }`,
-        );
-      }
-      return probe.stdout.trim().endsWith("present");
-    };
+    const volumeArgs = volumeMountArgs(ctx.volumes);
+    const dataRoot = mysqlFamilyDataRoot(ctx.volumes);
     if (spec.forceResync) {
       // Operator-forced re-seed: wipe the datadir so the entrypoint re-runs
       // initdb and `configureStandby` reseeds (the standby marker is gone).
@@ -491,12 +472,9 @@ const mysqlReplicationRuntime: ManagedEngineReplicationRuntime = {
       return "seeded";
     }
 
-    if (await probePath("-d", `${dataRoot}/mysql`)) {
-      if (await probePath("-f", `${dataRoot}/${STANDBY_MARKER}`)) {
-        return "already_standby";
-      }
-      return "needs_resync";
-    }
+    const state = await probeMysqlFamilyStandbyData(ctx, STANDBY_MARKER);
+    if (state === "standby") return "already_standby";
+    if (state === "not_standby") return "needs_resync";
     // Uninitialised — actual seeding is deferred to configureStandby after
     // compose up runs initdb (socket-admin bootstrap).
     return "seeded";

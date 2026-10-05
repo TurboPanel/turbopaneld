@@ -27,6 +27,38 @@ function read(name: string): string {
   return Deno.readTextFileSync(join(WORKFLOWS, name));
 }
 
+/**
+ * The text of every `run:` step in a workflow file (single-line and block
+ * scalars), found by indentation so no YAML parser is needed.
+ */
+function runBodies(source: string): string[] {
+  const lines = source.split("\n");
+  const bodies: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const match = /^(\s*)(?:- )?run:\s*(.*)$/.exec(lines[i]);
+    if (!match) continue;
+    const indent = match[1].length;
+    if (!/^[|>][+-]?$/.test(match[2].trim())) {
+      bodies.push(match[2]);
+      continue;
+    }
+    const body: string[] = [];
+    for (let j = i + 1; j < lines.length; j++) {
+      const line = lines[j];
+      if (
+        line.trim() !== "" && line.length - line.trimStart().length <= indent
+      ) break;
+      body.push(line);
+    }
+    bodies.push(body.join("\n"));
+  }
+  return bodies;
+}
+
+/** Values an outsider can shape (a tag name, a dispatch input, a job output built from one). */
+const SHELL_UNSAFE =
+  /\$\{\{\s*(inputs\.|github\.ref_name|github\.head_ref|needs\.[\w-]+\.outputs\.)/;
+
 function workflowFiles(): string[] {
   return [...Deno.readDirSync(WORKFLOWS)]
     .filter((entry) => entry.isFile && entry.name.endsWith(".yml"))
@@ -158,4 +190,16 @@ test("the release workflows pin one TurboPanel/dev commit", () => {
     }
   }
   assertEquals(pins.size, 1, `pins: ${[...pins].join(", ")}`);
+});
+
+test("no run: step splices an input, the ref name or a job output into the shell", () => {
+  for (const file of workflowFiles()) {
+    for (const body of runBodies(read(file))) {
+      assertEquals(
+        SHELL_UNSAFE.test(body),
+        false,
+        `${file}: pass it through env: instead`,
+      );
+    }
+  }
 });

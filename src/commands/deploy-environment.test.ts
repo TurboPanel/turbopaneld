@@ -32,6 +32,7 @@ import type {
   EnvironmentDeployNativeAppService,
   EnvironmentDeployPayload,
 } from "../contracts/commands-contracts.ts";
+import "../testing/stub-hosting-caddy-host.ts";
 
 /**
  * Shared hosting-ingress Docker network — the `hosting-ingress` system
@@ -328,6 +329,33 @@ test("handleEnvironmentDeploy rejects secret plan when decrypt is unavailable", 
     await Deno.remove(root, { recursive: true });
   }
 });
+
+test("handleEnvironmentDeploy rejects sealed site variables when decrypt is unavailable", () =>
+  withReclaimEnv(async () => {
+    const payload = {
+      ...mixedLanePayload(),
+      hostings: [],
+      hostingIngressNetwork: undefined,
+      nativeAppServices: [],
+      sites: [{
+        composeServiceName: "app",
+        engine: "caddy",
+        root: "public",
+        listenPort: 18080,
+        webSecretEnv: { SITE_VAR: "tpdaemon.sealed" },
+      }],
+    } as unknown as EnvironmentDeployPayload;
+    await assertRejects(
+      () =>
+        handleEnvironmentDeploy(
+          payload,
+          new Date().toISOString(),
+          hermeticDeployDeps,
+        ),
+      Error,
+      "Site app has secret variables but secrets decrypt is unavailable",
+    );
+  }));
 
 test({
   name:
