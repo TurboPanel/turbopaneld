@@ -14,7 +14,12 @@ change-detected heartbeats.
   `readDefaultRouteInterfaces()` (parsed from `/proc/net/route` and
   `/proc/net/ipv6_route`) and the addresses on the default-route NIC are marked
   `preferred`, so a multi-homed host advertises the address a peer would
-  actually reach it on. **These are load-bearing, not decorative:** whenever the
+  actually reach it on. `readHostInterfaceLinkStates()` (two sysfs reads per
+  NIC: `operstate`, then `carrier`) stamps each address with `link: 'up' | 'down'`,
+  because `Deno.networkInterfaces()` keeps listing a static address after its
+  cable is pulled; the control plane uses it to move traffic off a dead network
+  (absent means "unknown", read as up). A link flip rides the existing
+  change-detected heartbeat. **These are load-bearing, not decorative:** whenever the
   daemon reaches the control plane through a reverse proxy, a Cloudflare Tunnel,
   or a forwarded port, the peer address the control plane sees is the proxy's,
   and this list is what it shows instead (`../turbopanel/AGENTS.md` → Caddy →

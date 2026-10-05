@@ -24,6 +24,7 @@ import { DAEMON_WIRE_FEATURES } from "./version-wire.ts";
 import {
   collectServerIps,
   readDefaultRouteInterfaces,
+  readHostInterfaceLinkStates,
   type ServerReportedIp,
 } from "../host/server-addresses.ts";
 import type { HostResources } from "../host/host-inventory.ts";
@@ -161,7 +162,10 @@ function defaultPresenceSnapshot(): PresenceSnapshot {
   const releaseLinkScan = readLinkScanForPresence();
   return {
     timeSync: readTimeSync(),
-    ips: collectServerIps(readDefaultRouteInterfaces()),
+    ips: collectServerIps(
+      readDefaultRouteInterfaces(),
+      readHostInterfaceLinkStates(),
+    ),
     ...(docker ? { docker } : {}),
     ...(runtimes ? { runtimes } : {}),
     ...(services ? { services } : {}),

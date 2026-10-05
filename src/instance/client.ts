@@ -20,6 +20,7 @@ import {
 import {
   collectServerIps,
   readDefaultRouteInterfaces,
+  readHostInterfaceLinkStates,
   type ServerReportedIp,
 } from "../host/server-addresses.ts";
 import {
@@ -2568,7 +2569,10 @@ export class InstanceClient {
   ): void {
     let ips: ServerReportedIp[];
     try {
-      ips = clientTestHooks.collectServerIps(readDefaultRouteInterfaces());
+      ips = clientTestHooks.collectServerIps(
+        readDefaultRouteInterfaces(),
+        readHostInterfaceLinkStates(),
+      );
     } catch (err) {
       logWarn(
         "instance",
