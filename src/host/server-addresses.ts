@@ -252,12 +252,16 @@ export function parseIpv6DefaultRouteInterface(
   return best?.iface;
 }
 
-function readRouteTable(path: string): string | undefined {
+/**
+ * A kernel text file (`/proc/net/route`, `/sys/class/net/<nic>/operstate`), or
+ * `undefined` on a non-Linux host, with /proc or /sys not mounted, or when the
+ * kernel refuses the read (`carrier` on an administratively down NIC): the
+ * addresses still report, just without a preferred marker or a link state.
+ */
+function readOptionalText(path: string): string | undefined {
   try {
     return Deno.readTextFileSync(path);
   } catch {
-    // Non-Linux host, or /proc not mounted — addresses still report, just
-    // without a preferred marker.
     return undefined;
   }
 }
@@ -268,12 +272,12 @@ function readRouteTable(path: string): string | undefined {
  */
 export function readDefaultRouteInterfaces(): DefaultRouteInterfaces {
   const out: DefaultRouteInterfaces = {};
-  const v4 = readRouteTable("/proc/net/route");
+  const v4 = readOptionalText("/proc/net/route");
   if (v4) {
     const iface = parseIpv4DefaultRouteInterface(v4);
     if (iface) out.v4 = iface;
   }
-  const v6 = readRouteTable("/proc/net/ipv6_route");
+  const v6 = readOptionalText("/proc/net/ipv6_route");
   if (v6) {
     const iface = parseIpv6DefaultRouteInterface(v6);
     if (iface) out.v6 = iface;
@@ -306,16 +310,6 @@ export function parseLinkState(
   return undefined;
 }
 
-function readSysfsText(path: string): string | undefined {
-  try {
-    return Deno.readTextFileSync(path);
-  } catch {
-    // Non-Linux host, sysfs not mounted, or `carrier` refused on an
-    // administratively down NIC (EINVAL): the caller treats it as unknown.
-    return undefined;
-  }
-}
-
 /**
  * Link state of every named interface. Read-only: two small sysfs reads per
  * NIC, no process and no route change. An interface the kernel does not
@@ -323,7 +317,7 @@ function readSysfsText(path: string): string | undefined {
  */
 export function readInterfaceLinkStates(
   names: Iterable<string>,
-  readText: (path: string) => string | undefined = readSysfsText,
+  readText: (path: string) => string | undefined = readOptionalText,
 ): Map<string, ServerReportedIpLink> {
   const out = new Map<string, ServerReportedIpLink>();
   for (const name of names) {
