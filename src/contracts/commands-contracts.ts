@@ -654,6 +654,12 @@ export type EnvironmentDeployHostingPort = {
 
 export type EnvironmentDeployHostingWeb = {
   env?: Record<string, string>;
+  /**
+   * Secret runtime variables, name to `tpdaemon` envelope. Never plaintext: the
+   * daemon decrypts them through `POST /api/daemon/v1/secrets/decrypt` and folds
+   * them into the site's `webEnv`. Disjoint from `env`.
+   */
+  secretEnv?: Record<string, string>;
   php?: EnvironmentDeployHostingPhp;
 };
 
@@ -927,6 +933,12 @@ export type EnvironmentDeploySite = {
    */
   cron?: EnvironmentDeployCronJob[];
   webEnv?: Record<string, string>;
+  /**
+   * Secret runtime variables, name to `tpdaemon` envelope (the sealed twin of
+   * `webEnv`, disjoint from it). The daemon decrypts them before the site is
+   * applied; the plaintext only ever reaches the engine's own config files.
+   */
+  webSecretEnv?: Record<string, string>;
   php?: EnvironmentDeployHostingPhp;
   /**
    * When set (from a project principal ↔ service tenancy), the site tree
@@ -3696,6 +3708,8 @@ function parseHostingWeb(
   const web: EnvironmentDeployHostingWeb = {};
   const env = parseStringRecord(value.env);
   if (env) web.env = env;
+  const secretEnv = parseStringRecord(value.secretEnv);
+  if (secretEnv) web.secretEnv = secretEnv;
   const php = parseHostingPhp(value.php);
   if (php) web.php = php;
   return Object.keys(web).length > 0 ? web : undefined;
@@ -4500,6 +4514,8 @@ function parseSite(
   if (cron) site.cron = cron;
   const webEnv = parseStringRecord(value.webEnv);
   if (webEnv) site.webEnv = webEnv;
+  const webSecretEnv = parseStringRecord(value.webSecretEnv);
+  if (webSecretEnv) site.webSecretEnv = webSecretEnv;
   const php = parseHostingPhp(value.php);
   if (php) site.php = php;
   const principal = parseSitePrincipal(value.principal);

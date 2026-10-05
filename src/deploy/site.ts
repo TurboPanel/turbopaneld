@@ -420,6 +420,81 @@ export function nginxFastcgiParamsPath(layout: LayoutPaths): string {
 }
 
 /**
+ * FastCGI parameter names the platform sets itself: every name in the shared
+ * parameter set, the two the PHP location pins after it, and the ones PHP
+ * derives its own state from. A site variable with one of these names would
+ * override request data (or `SCRIPT_FILENAME`), so it is refused, not sent.
+ */
+const NGINX_RESERVED_FASTCGI_PARAMS: ReadonlySet<string> = new Set([
+  ...NGINX_INLINE_FASTCGI_PARAMS.map((line) => line.split(" ")[1] as string),
+  "SCRIPT_FILENAME",
+  "PATH_INFO",
+  "PATH_TRANSLATED",
+  "REDIRECT_STATUS",
+  "HTTPS",
+]);
+
+/**
+ * Why nginx cannot carry a site variable, or `null` when it can.
+ *
+ * nginx expands `$name` inside a quoted string and has no escape for it, so a
+ * value holding `$` cannot be written safely; a name nginx or PHP sets itself
+ * would override request data. The value must also stay on its line
+ * (`safeEnvValue`).
+ */
+function nginxEnvRefusal(
+  field: string,
+  name: string,
+  raw: string,
+): string | null {
+  if (
+    NGINX_RESERVED_FASTCGI_PARAMS.has(name) ||
+    name.toUpperCase().startsWith("HTTP_")
+  ) {
+    return "is a FastCGI parameter nginx sets itself";
+  }
+  try {
+    safeEnvValue(field, raw);
+  } catch (error) {
+    if (error instanceof ConfigValueError) return error.message;
+    throw error;
+  }
+  return raw.includes("$") ? "holds a $, which nginx expands in quotes" : null;
+}
+
+/**
+ * The site's variables as `fastcgi_param` lines, in name order.
+ *
+ * A variable nginx cannot carry is **dropped and named** (never its value: it
+ * may be a decrypted secret), not a failed deploy: variables are inherited from
+ * the organization, project and environment into every hosting, so one value
+ * that suits another engine must not stop an unrelated nginx site. A name that
+ * is not an environment variable name is still refused (`safeEnvName`).
+ */
+function nginxFastcgiEnvLines(site: SiteApplySpec): string[] {
+  const env = site.webEnv ?? {};
+  const lines: string[] = [];
+  for (const key of Object.keys(env).sort((a, b) => a.localeCompare(b))) {
+    const field = `sites.${site.composeServiceName}.webEnv`;
+    const name = safeEnvName(field, key);
+    const raw = env[key] ?? "";
+    const refusal = nginxEnvRefusal(`${field}.${name}`, name, raw);
+    if (refusal !== null) {
+      logWarn(
+        "site",
+        `nginx site ${site.composeServiceName}: variable ${name} not passed to PHP (${refusal})`,
+      );
+      continue;
+    }
+    const escaped = raw
+      .replaceAll("\\", String.raw`\\`)
+      .replaceAll('"', String.raw`\"`);
+    lines.push(`fastcgi_param ${name} "${escaped}";`);
+  }
+  return lines;
+}
+
+/**
  * `location ~ \.php$` handing scripts to this site's own php-fpm pool.
  *
  * `SCRIPT_FILENAME` is emitted **after** the shared parameter set so it wins
@@ -430,6 +505,7 @@ export function nginxFastcgiParamsPath(layout: LayoutPaths): string {
 function buildNginxPhpLocation(
   phpFpmSocket: string,
   fastcgiParamsPath: string | null,
+  envLines: readonly string[],
 ): string {
   const params = fastcgiParamsPath
     ? [`include ${fastcgiParamsPath};`]
@@ -441,6 +517,7 @@ function buildNginxPhpLocation(
     `    fastcgi_pass unix:${phpFpmSocket};`,
     "    fastcgi_index index.php;",
     ...params.map((line) => `    ${line}`),
+    ...envLines.map((line) => `    ${line}`),
     "    fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;",
     "    fastcgi_param PATH_INFO $fastcgi_path_info;",
     "  }",
@@ -617,7 +694,11 @@ ${nginxApacheLocations(backendPort)}
   const indexFiles = needsPhp ? "index.php index.html" : "index.html";
   const phpBlock = needsPhp && phpFpmSocket
     ? `\n\n${
-      buildNginxPhpLocation(phpFpmSocket, opts?.fastcgiParamsPath ?? null)
+      buildNginxPhpLocation(
+        phpFpmSocket,
+        opts?.fastcgiParamsPath ?? null,
+        nginxFastcgiEnvLines(site),
+      )
     }`
     : "";
   return `server {
