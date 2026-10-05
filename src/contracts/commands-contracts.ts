@@ -4425,7 +4425,7 @@ function parseNativeAppStartupFile(value: unknown): string | undefined {
   return value;
 }
 
-const NATIVE_APP_VARIABLE_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
+const NATIVE_APP_VARIABLE_NAME_RE = /^[A-Za-z_]\w{0,127}$/;
 const NATIVE_APP_MAX_VARIABLES = 256;
 const NATIVE_APP_MAX_VARIABLE_VALUE = 65_536;
 

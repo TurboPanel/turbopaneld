@@ -26,6 +26,7 @@ import type {
   EnvironmentDeployVariableMaterial,
 } from "../../contracts/commands-contracts.ts";
 import type { LayoutPaths } from "../../paths/layout.ts";
+import { forEachSequential } from "../../util/sequential.ts";
 import type { DecryptSecretsFn } from "../materialize-tls.ts";
 import {
   NATIVE_APP_PLATFORM_ENV_NAMES,
@@ -77,15 +78,19 @@ async function decryptInBatches(
   decryptSecrets: DecryptSecretsFn,
   envelopes: readonly string[],
 ): Promise<(string | null)[]> {
-  const out: (string | null)[] = [];
+  const chunks: string[][] = [];
   for (let i = 0; i < envelopes.length; i += DECRYPT_BATCH_SIZE) {
-    const chunk = envelopes.slice(i, i + DECRYPT_BATCH_SIZE);
+    chunks.push(envelopes.slice(i, i + DECRYPT_BATCH_SIZE));
+  }
+  const out: (string | null)[] = [];
+  // One batch at a time: that is what the batch size is for.
+  await forEachSequential(chunks, async (chunk) => {
     const plaintexts = await decryptSecrets(chunk);
     if (plaintexts.length !== chunk.length) {
       throw new Error("secrets/decrypt returned unexpected length");
     }
     out.push(...plaintexts);
-  }
+  });
   return out;
 }
 

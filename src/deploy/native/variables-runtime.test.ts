@@ -251,3 +251,32 @@ test("an app whose only variables are platform-set gets no file at all", async (
     );
   });
 });
+
+test("secrets are decrypted in batches, one at a time", async () => {
+  const names = Array.from({ length: 101 }, (_, i) => `S${i}`);
+  const batches: number[] = [];
+  let running = 0;
+  let overlapped = false;
+  const resolved = await resolveNativeAppVariables(
+    {
+      ...app,
+      variables: names.map((name) => ({ name, secretKey: name })),
+    },
+    names.map((name) => sealed(name, `tpdaemon.${name}-value`)),
+    async (envelopes) => {
+      running += 1;
+      overlapped ||= running > 1;
+      batches.push(envelopes.length);
+      await Promise.resolve();
+      running -= 1;
+      return decryptSecrets(envelopes);
+    },
+  );
+  assertEquals(batches, [100, 1]);
+  assertEquals(overlapped, false);
+  assertEquals(resolved.entries.length, 101);
+  assertEquals(
+    resolved.entries.find((entry) => entry.name === "S100")?.value,
+    "S100-value",
+  );
+});
