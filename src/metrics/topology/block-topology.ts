@@ -81,7 +81,7 @@ function findWholeDiskParent(
 }
 
 /** Whether `deviceName` (a whole disk or virtual/dm-md device) backs one of `serviceDeviceNames`. */
-function backsServiceDevice(
+export function backsServiceDevice(
   deviceName: string,
   serviceDeviceNames: string[],
 ): boolean {

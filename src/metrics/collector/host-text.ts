@@ -35,6 +35,8 @@ export type HostTextSample = {
   virt?: string;
   cloudProvider?: string;
   unhealthyUnits?: string[];
+  /** Every failed systemd unit (`unhealthyUnits` keeps only the first few names). */
+  failedUnitCount?: number;
   raidState?: "none" | "ok" | "resyncing" | "degraded";
   rebootRequired?: boolean;
   clockSynced?: boolean;
@@ -137,14 +139,23 @@ export function parseCloudProvider(
   return known.find(([needle]) => text.includes(needle))?.[1];
 }
 
-export function parseFailedUnits(stdout: string): string[] {
+function allFailedUnits(stdout: string): string[] {
   const names: string[] = [];
   for (const line of stdout.split("\n")) {
     const first = line.replace(/^[^\w]+/, "").split(/\s+/)[0];
     const name = shortName(first);
     if (name?.includes(".")) names.push(name);
   }
-  return names.slice(0, MAX_LIST);
+  return names;
+}
+
+export function parseFailedUnits(stdout: string): string[] {
+  return allFailedUnits(stdout).slice(0, MAX_LIST);
+}
+
+/** How many units failed: `systemctl --failed` prints nothing when none did. */
+export function countFailedUnits(stdout: string): number {
+  return allFailedUnits(stdout).length;
 }
 
 export function raidStateFromMdstat(
@@ -321,7 +332,10 @@ export class HostTextCollector {
     ]);
     return dropEmpty({
       ...files,
-      unhealthyUnits: units ? parseFailedUnits(units) : undefined,
+      unhealthyUnits: units === undefined ? undefined : parseFailedUnits(units),
+      failedUnitCount: units === undefined
+        ? undefined
+        : countFailedUnits(units),
       clockSynced: io.clockSynced(),
       phpVersions: io.phpVersions().slice(0, MAX_LIST),
       lastOomVictim: await this.#oomVictim(),
@@ -504,7 +518,7 @@ function maxBy<T>(rows: T[], score: (row: T) => number): T | undefined {
 /** The contract's text blocks (`extended.text`, `extended.blockDeviceText`). */
 export type HostTextExtended = Pick<
   MetricsExtended,
-  "text" | "blockDeviceText"
+  "text" | "blockDeviceText" | "host"
 >;
 
 const joinList = (list: string[] | undefined) =>
@@ -548,6 +562,9 @@ export function hostTextToExtended(sample: HostTextSample): HostTextExtended {
     [deviceId, smart],
   ) => ({ deviceId, smart }));
   if (drives.length > 0) out.blockDeviceText = drives;
+  if (sample.failedUnitCount !== undefined) {
+    out.host = { systemdUnitsFailed: sample.failedUnitCount };
+  }
   return out;
 }
 

@@ -23,6 +23,7 @@
  */
 import { toContainerHealthSample } from "./docker-containers.ts";
 import {
+  type BlockDeviceSample,
   buildMetricsSample,
   type DiagnosticsSample,
   type DockerUsageSample,
@@ -35,6 +36,7 @@ import {
   type StorageSample,
 } from "../../contracts/metrics-contract.ts";
 import { truncateSampleToCapabilityPlan } from "../capability-plan-truncate.ts";
+import { backsServiceDevice } from "../topology/block-topology.ts";
 import { computeSlotMapping } from "../../contracts/topology-slot-mapping.ts";
 import {
   EMPTY_TOPOLOGY_OVERRIDES,
@@ -72,7 +74,7 @@ import {
   emptyManagedEngineCensus,
   type ManagedEngineCensusReading,
 } from "./managed-engines.ts";
-import { parseProcMounts } from "./mounts.ts";
+import { backingDeviceNames, parseProcMounts } from "./mounts.ts";
 import { buildNetworkDeviceSamples } from "./network.ts";
 import { parseDiskstatsRows } from "./parse-diskstats.ts";
 import {
@@ -103,6 +105,7 @@ import {
   type VmstatRates,
   vmstatRates,
 } from "./parse-vmstat.ts";
+import { buildHostExtended } from "./extended-host.ts";
 import { buildCollectedExtended, mergeExtended } from "./extended-v7.ts";
 import { SOURCE_DEADLINE_MS, withDeadline } from "./deadline.ts";
 import { type HostTextSample, hostTextToExtended } from "./host-text.ts";
@@ -130,6 +133,9 @@ const PROC_CONNTRACK_COUNT = "/proc/sys/net/netfilter/nf_conntrack_count";
 const PROC_CONNTRACK_MAX = "/proc/sys/net/netfilter/nf_conntrack_max";
 const PROC_MOUNTS = "/proc/mounts";
 const PROC_MDSTAT = "/proc/mdstat";
+const PROC_LOADAVG = "/proc/loadavg";
+const PROC_PID_MAX = "/proc/sys/kernel/pid_max";
+const PROC_THREADS_MAX = "/proc/sys/kernel/threads-max";
 
 type PreviousCpuSnapshot = {
   atMs: number;
@@ -168,6 +174,9 @@ type RawTexts = {
   conntrackMaxText: string | undefined;
   mountsText: string | undefined;
   mdstatText: string | undefined;
+  loadavgText: string | undefined;
+  pidMaxText: string | undefined;
+  threadsMaxText: string | undefined;
 };
 
 async function readRawTexts(deps: CollectorDeps): Promise<RawTexts> {
@@ -189,6 +198,9 @@ async function readRawTexts(deps: CollectorDeps): Promise<RawTexts> {
     conntrackMaxText,
     mountsText,
     mdstatText,
+    loadavgText,
+    pidMaxText,
+    threadsMaxText,
   ] = await Promise.all([
     deps.readProcFile(PROC_STAT),
     deps.readProcFile(PROC_MEMINFO),
@@ -207,6 +219,9 @@ async function readRawTexts(deps: CollectorDeps): Promise<RawTexts> {
     deps.readProcFile(PROC_CONNTRACK_MAX),
     deps.readProcFile(PROC_MOUNTS),
     deps.readProcFile(PROC_MDSTAT),
+    deps.readProcFile(PROC_LOADAVG),
+    deps.readProcFile(PROC_PID_MAX),
+    deps.readProcFile(PROC_THREADS_MAX),
   ]);
   return {
     statText,
@@ -226,7 +241,60 @@ async function readRawTexts(deps: CollectorDeps): Promise<RawTexts> {
     conntrackMaxText,
     mountsText,
     mdstatText,
+    loadavgText,
+    pidMaxText,
+    threadsMaxText,
   };
+}
+
+const OOM_KILLS_BASELINE_KEY = "ext:host:oom_kills";
+
+/**
+ * Kernel OOM kills since the previous tick. A key of its own: the OOM event
+ * detector diffs the same counter under another key, and a tracker key must
+ * only be advanced by one reader. `null` on the first tick, after a reboot or
+ * when the counter is unreadable.
+ */
+function oomKillsThisTick(
+  tracker: CounterBaselineTracker,
+  total: number | null,
+  bootGeneration: number,
+): number | null {
+  if (total === null) {
+    tracker.invalidate(OOM_KILLS_BASELINE_KEY);
+    return null;
+  }
+  return tracker.delta(OOM_KILLS_BASELINE_KEY, total, bootGeneration);
+}
+
+/**
+ * The block-device sample of the disk that holds `/`: the mount's backing
+ * device (a `/dev/mapper` source resolves to its `dm-N`) matched to the
+ * topology's service device that is, or is the whole disk of, that device.
+ * Never throws; `undefined` when the root device cannot be matched.
+ */
+async function rootDiskSample(
+  deps: CollectorDeps,
+  topology: TopologySnapshot["blockDevices"],
+  mountEntries: Parameters<typeof backingDeviceNames>[0],
+  samples: ReturnType<typeof buildBlockDeviceSamples>,
+): Promise<BlockDeviceSample | undefined> {
+  try {
+    const [rootName] = await backingDeviceNames(
+      mountEntries,
+      ["/"],
+      deps.io,
+      deps.sysRoot,
+    );
+    if (rootName === undefined) return undefined;
+    const device = topology.find((candidate) =>
+      candidate.isServiceDevice &&
+      backsServiceDevice(candidate.kernelName, [rootName])
+    );
+    return samples.find((sample) => sample.deviceId === device?.deviceId);
+  } catch {
+    return undefined;
+  }
 }
 
 function swapUsedBytes(
@@ -906,9 +974,27 @@ export class LinuxMetricsCollector implements MetricsCollector {
       cores: cpu.currentCores,
     };
     const hostText = await this.#readHostText(deadlineMs);
+    const hostExtended = buildHostExtended({
+      loadavgText: raw.loadavgText,
+      pidMaxText: raw.pidMaxText,
+      threadsMaxText: raw.threadsMaxText,
+      mdstatText: raw.mdstatText,
+      oomKills: oomKillsThisTick(
+        this.#tracker,
+        memory.vmstat.oomKill,
+        bootGeneration,
+      ),
+      rootDisk: await rootDiskSample(
+        this.#deps,
+        snapshot.blockDevices,
+        mountEntries,
+        disks.blockDevices,
+      ),
+    });
     const { extended, containers } = this.#buildExtended({
       outgoing,
       hostText,
+      hostExtended,
       bootGeneration,
       // A stale reading's reclaimable bytes are not reported as current.
       dockerUsage: dockerUsageReading?.stale
@@ -933,6 +1019,7 @@ export class LinuxMetricsCollector implements MetricsCollector {
   #buildExtended(input: {
     outgoing: { extended?: MetricsExtended };
     hostText: HostTextSample | undefined;
+    hostExtended: MetricsExtended["host"];
     bootGeneration: number;
     dockerUsage: DockerUsageSample | undefined;
     topSites: BuiltExtendedInput["topSites"];
@@ -952,6 +1039,7 @@ export class LinuxMetricsCollector implements MetricsCollector {
       const extended = mergeExtended(
         input.outgoing.extended,
         input.hostText ? hostTextToExtended(input.hostText) : undefined,
+        input.hostExtended ? { host: input.hostExtended } : undefined,
         buildCollectedExtended({
           containers,
           dockerUsage: input.dockerUsage,
