@@ -611,6 +611,30 @@ async function writeHelperStdin(
 }
 
 /**
+ * Start the root helper and hand it `stdinText` (when there is any) — exported
+ * for tests. With no text, stdin stays closed.
+ */
+export async function spawnRootHelper(
+  helper: { bin: string; args: string[] },
+  cwd: string,
+  stdinText: string | undefined,
+): Promise<Deno.ChildProcess> {
+  const child = new Deno.Command(helper.bin, {
+    args: helper.args,
+    cwd,
+    stdin: stdinText === undefined ? "null" : "piped",
+    stdout: "piped",
+    stderr: "piped",
+  }).spawn();
+  if (stdinText !== undefined) {
+    // If the helper exits before reading (refused flag, sudo failure), the
+    // write fails with a broken pipe; its own message on stderr says why.
+    await writeHelperStdin(child.stdin, stdinText).catch(() => {});
+  }
+  return child;
+}
+
+/**
  * Which root-helper verb a daemon self-update runs — exported for tests:
  * `update-colocated` on a self-hosted control-plane host, `update` elsewhere.
  */
@@ -769,19 +793,11 @@ export async function executeRunReconcile(options: {
       channel,
       manifestUrl: manifestForHelper,
     });
-    const helperStdin = rootHelperReconcileStdin(options);
-    const child = new Deno.Command(helper.bin, {
-      args: helper.args,
-      cwd: reconcileCwd,
-      stdin: helperStdin === undefined ? "null" : "piped",
-      stdout: "piped",
-      stderr: "piped",
-    }).spawn();
-    if (helperStdin !== undefined) {
-      // If the helper exits before reading (refused flag, sudo failure), the
-      // write fails with a broken pipe; its own message on stderr says why.
-      await writeHelperStdin(child.stdin, helperStdin).catch(() => {});
-    }
+    const child = await spawnRootHelper(
+      helper,
+      reconcileCwd,
+      rootHelperReconcileStdin(options),
+    );
     const stdout = child.stdout;
     const stderrChunks: string[] = [];
     const stderrReader = child.stderr.getReader();

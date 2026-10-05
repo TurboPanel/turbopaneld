@@ -33,6 +33,7 @@ import {
   rootHelperReconcileInvocation,
   rootHelperReconcileStdin,
   scriptWithLicense,
+  spawnRootHelper,
   UpdatePreflightError,
   UpdateTrustRepairError,
 } from "./run-reconcile.ts";
@@ -2443,6 +2444,86 @@ test("executeRunReconcile refuses a co-located daemon update on a development ho
       "not supported on a development host",
     );
     assertEquals(spawned, false);
+  } finally {
+    Deno.Command = originalCommand;
+  }
+});
+
+test("spawnRootHelper pipes the license to the helper's stdin and keeps it out of argv", async () => {
+  const originalCommand = Deno.Command;
+  let opts: Deno.CommandOptions | undefined;
+  let written = "";
+  let closed = false;
+  try {
+    Deno.Command = class {
+      constructor(_cmd: string, o: Deno.CommandOptions) {
+        opts = o;
+      }
+      spawn() {
+        return {
+          stdin: {
+            getWriter() {
+              return {
+                write(chunk: Uint8Array) {
+                  written += new TextDecoder().decode(chunk);
+                  return Promise.resolve();
+                },
+                close() {
+                  closed = true;
+                  return Promise.resolve();
+                },
+              };
+            },
+          },
+        };
+      }
+    } as unknown as typeof Deno.Command;
+    await spawnRootHelper(
+      { bin: "sudo", args: ["tp-orchestrate", "update", "--license-stdin"] },
+      "/",
+      "bGljZW5zZS1pZDp0b2tlbg\n",
+    );
+    assertEquals(opts?.stdin, "piped");
+    assertEquals(written, "bGljZW5zZS1pZDp0b2tlbg\n");
+    assertEquals(closed, true);
+    assertEquals(
+      (opts?.args ?? []).some((a) => a.includes("bGljZW5z")),
+      false,
+    );
+  } finally {
+    Deno.Command = originalCommand;
+  }
+});
+
+test("spawnRootHelper leaves stdin closed without text and survives a helper that exits before reading", async () => {
+  const originalCommand = Deno.Command;
+  const stdins: Array<Deno.CommandOptions["stdin"]> = [];
+  try {
+    Deno.Command = class {
+      constructor(_cmd: string, o: Deno.CommandOptions) {
+        stdins.push(o.stdin);
+      }
+      spawn() {
+        return {
+          stdin: {
+            getWriter() {
+              return {
+                write() {
+                  return Promise.reject(new Error("broken pipe"));
+                },
+                close() {
+                  return Promise.resolve();
+                },
+              };
+            },
+          },
+        };
+      }
+    } as unknown as typeof Deno.Command;
+    const helper = { bin: "sudo", args: ["tp-orchestrate"] };
+    await spawnRootHelper(helper, "/", undefined);
+    await spawnRootHelper(helper, "/", "abc\n");
+    assertEquals(stdins, ["null", "piped"]);
   } finally {
     Deno.Command = originalCommand;
   }
