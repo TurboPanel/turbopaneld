@@ -121,6 +121,8 @@ const POLL_MS = 500;
  * forked. `:80` (and the admin socket) bind a few milliseconds later. Bounded
  * by attempts so an injected `sleep` keeps tests instant.
  */
+// A unit that is starting or reloading must never be disabled by a rollback.
+const ACTIVE_UNIT_STATES = new Set(["active", "activating", "reloading"]);
 const HOSTING_CADDY_READY_ATTEMPTS = 20;
 const HOSTING_CADDY_READY_INTERVAL_MS = 50;
 
@@ -355,12 +357,28 @@ async function activateHostingCaddyForWindow(
   ensure: (layout: LayoutPaths) => Promise<void>,
   run: InstanceAcmeCommand,
 ): Promise<boolean> {
-  if (holder.kind === "hosting-caddy") {
+  // A unit that is already active but not on :80 (no port-80 site yet) never
+  // reads the snippet again on `enable --now`: reload it, and leave it running
+  // if the window fails.
+  if (holder.kind === "hosting-caddy" || await hostingCaddyIsActive(run)) {
     await reloadHostingCaddy(run);
     return false;
   }
   await ensure(layout);
   return true;
+}
+
+async function hostingCaddyIsActive(
+  run: InstanceAcmeCommand,
+): Promise<boolean> {
+  const state = await run("systemctl", [
+    "show",
+    "-p",
+    "ActiveState",
+    "--value",
+    HOSTING_CADDY_SERVICE,
+  ]);
+  return state.ok && ACTIVE_UNIT_STATES.has(state.stdout.trim());
 }
 
 async function waitForHostingCaddyOn80(
@@ -389,11 +407,23 @@ async function rollbackOpenedWindow(
       logWarn("deploy", "instance ACME site rollback failed:", err);
     }
   }
-  if (!startedRuntime) return;
+  if (!startedRuntime) {
+    // The unit kept running: unload the challenge site it may have read.
+    if (wroteSite) await reloadAfterRollback(run);
+    return;
+  }
   try {
     await disableHostingCaddy(run);
   } catch (err) {
     logWarn("deploy", "instance ACME runtime rollback failed:", err);
+  }
+}
+
+async function reloadAfterRollback(run: InstanceAcmeCommand): Promise<void> {
+  try {
+    await reloadHostingCaddy(run);
+  } catch (err) {
+    logWarn("deploy", "instance ACME reload after rollback failed:", err);
   }
 }
 

@@ -21,6 +21,8 @@ import {
   normalizeReconnectDelayMs,
   PARKED_BACKOFF_MIN_MS,
   readKeyId,
+  RECONNECT_FIRST_WINDOW_MS,
+  RECONNECT_FLOOR_MS,
   STABLE_SESSION_MS,
   writeKeyId,
 } from "./client.ts";
@@ -1089,6 +1091,26 @@ it({
 });
 
 it({
+  name: "reconnect delay after a reset backoff is spread over the first window",
+  fn: () => {
+    const delays = new Set<number>();
+    let min = Infinity;
+    let max = 0;
+    for (let i = 0; i < 1_000; i += 1) {
+      const d = fullJitterMs(
+        RECONNECT_FLOOR_MS,
+        Math.max(DEFAULT_INITIAL_BACKOFF_MS, RECONNECT_FIRST_WINDOW_MS),
+      );
+      delays.add(d);
+      min = Math.min(min, d);
+      max = Math.max(max, d);
+    }
+    assert(delays.size > 100, "delays must not collapse to a single value");
+    assert(max - min >= 5_000, `spread ${max - min} ms too narrow`);
+  },
+});
+
+it({
   name: "InstanceClient reconnect delay is jittered within backoff bounds",
   permissions: {
     env: true,
@@ -1123,7 +1145,7 @@ it({
       timeout?: number,
       ...args: unknown[]
     ) => {
-      if (typeof timeout === "number" && timeout >= initialBackoffMs) {
+      if (typeof timeout === "number" && timeout >= RECONNECT_FLOOR_MS) {
         reconnectDelays.push(timeout);
       }
       return originalSetTimeout(handler, 0, ...args);
@@ -1220,8 +1242,8 @@ it({
       const delayMs = reconnectDelays.at(-1);
       assertExists(delayMs);
       assert(
-        delayMs >= initialBackoffMs,
-        `delay ${delayMs} below floor ${initialBackoffMs}`,
+        delayMs >= RECONNECT_FLOOR_MS,
+        `delay ${delayMs} below floor ${RECONNECT_FLOOR_MS}`,
       );
       assert(
         delayMs <= DEFAULT_MAX_BACKOFF_MS,
@@ -1451,13 +1473,15 @@ it({
     const originalStateDir = Deno.env.get("TURBOPANEL_DAEMON_STATE_DIR");
     const originalForceEnroll = Deno.env.get("TURBOPANEL_FORCE_ENROLL");
     const sockets: MockWebSocket[] = [];
+    const originalRandom = Math.random;
+    Math.random = () => 0.99;
     const reconnectDelays: number[] = [];
     const clock = createFakeClock({ now: 1_000_000 });
     const restoreClock = clock.install();
     // Track reconnect delays through the injected client delay (not wall setTimeout).
     const restoreDelayTrack = installClientTimeSource({
       delay: (ms) => {
-        if (ms >= DEFAULT_INITIAL_BACKOFF_MS) reconnectDelays.push(ms);
+        if (ms >= RECONNECT_FLOOR_MS) reconnectDelays.push(ms);
         return clock.delay(ms);
       },
     });
@@ -1598,9 +1622,12 @@ it({
         () => reconnectDelays.length >= 2 ? reconnectDelays.at(-1) : undefined,
       );
       assertExists(afterStableDelay);
-      assertEquals(afterStableDelay, clampedInitialBackoffMs);
+      // Reset backoff + clean drop => wide first window, still full jitter.
+      assert(afterStableDelay >= RECONNECT_FLOOR_MS);
+      assert(afterStableDelay <= RECONNECT_FIRST_WINDOW_MS);
     } finally {
       client.stop();
+      Math.random = originalRandom;
       restoreDelayTrack();
       restoreClock();
       Object.defineProperty(globalThis, "fetch", {

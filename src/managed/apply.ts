@@ -58,6 +58,12 @@ import {
   loadProxySqlMonitorCredentials,
   proxySqlHostPrepPresent,
 } from "./proxysql-admin.ts";
+import {
+  buildNeedsResyncMember,
+  stopManagedProjectForResync,
+} from "./needs-resync.ts";
+
+export { buildNeedsResyncMember };
 
 type DecryptSecretsFn = (ciphertexts: string[]) => Promise<(string | null)[]>;
 type RunDockerFn = (
@@ -523,21 +529,6 @@ async function ensureProxySqlMonitorRoles(
   }
 }
 
-/** Pure member DTO for needs_resync early-return path. Exported for tests. */
-export function buildNeedsResyncMember(
-  memberId: string,
-): NonNullable<ManagedApplyResult["member"]> {
-  return {
-    memberId,
-    role: "replica",
-    status: "needs_resync",
-    replication: {
-      state: "needs_resync",
-      observedAt: new Date().toISOString(),
-    },
-  };
-}
-
 function buildManagedApplyResult(
   payload: ManagedApplyPayload,
   state: {
@@ -579,16 +570,7 @@ async function returnStandbyNeedsResync(
   redact: (text: string) => string,
   run: RunDockerFn,
 ): Promise<ManagedApplyResult> {
-  const project = managedComposeProject(payload.managedId);
-  const stop = await run(["compose", "-p", project, "stop"]);
-  if (!stop.success) {
-    logInfo(
-      "managed",
-      `needs_resync compose stop soft-failed project=${project}: ${
-        redact(stop.stderr || stop.stdout || "compose stop failed")
-      }`,
-    );
-  }
+  await stopManagedProjectForResync(payload.managedId, redact, run);
 
   const observedAt = new Date().toISOString();
   const member = payload.memberId

@@ -7243,6 +7243,12 @@ export type ManagedBackupPayload = {
   scope: "database" | "instance";
   database?: string;
   retentionKeep?: number;
+  /**
+   * The `backuppolicy` that made the artifact, set on `delete` of a scheduled
+   * backup: each policy keeps its artifacts in its own directory, so this is
+   * how the file is found. Omitted for a manual backup.
+   */
+  policyId?: string;
 };
 
 /** Must stay in sync with the instance canonical `managed.backup` shape. */
@@ -7338,6 +7344,12 @@ export function parseManagedBackupPayload(
       throw new Error("Invalid managed.backup payload retentionKeep");
     }
     payload.retentionKeep = value.retentionKeep;
+  }
+  if (value.policyId !== undefined) {
+    if (!isCanonicalBackupUuid(value.policyId)) {
+      throw new Error("Invalid managed.backup payload policyId");
+    }
+    payload.policyId = value.policyId;
   }
   return payload;
 }

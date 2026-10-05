@@ -1,4 +1,5 @@
 import { assertEquals } from "@std/assert";
+import { waitFor } from "../testing/wait-for.ts";
 import { createFakeClock, flushMicrotasks } from "../testing/fake-clock.ts";
 import {
   type AcmeIssuanceEventMessage,
@@ -31,11 +32,13 @@ test("AcmeIssuanceObserver.attach schedules poll and detach clears the timer", a
   });
 
   observer.attach();
-  await new Promise((resolve) => setTimeout(resolve, 65));
-  await flushMicrotasks();
+  await waitFor("the first scheduled poll to send", () => sent.length >= 1);
   observer.detach();
+  // A poll already in flight may still land; let it settle, then count.
+  await flushMicrotasks();
   const afterDetach = sent.length;
-  await new Promise((resolve) => setTimeout(resolve, 65));
+  // Three more intervals: a timer that survived detach would fire in them.
+  await new Promise((resolve) => setTimeout(resolve, 60));
   await flushMicrotasks();
 
   assertEquals(afterDetach >= 1, true);

@@ -42,10 +42,12 @@ import type {
   ManagedEngineBackupRuntime,
   ManagedEngineBootstrapContext,
   ManagedEngineContext,
+  ManagedEngineProbeContext,
   ManagedEngineReplicationRuntime,
   ManagedEngineRuntime,
   ManagedReplicationObservedHealth,
 } from "./types.ts";
+import { probeStandbyState, volumeMountArgs } from "./standby-probe.ts";
 
 /**
  * Validate `database` with the same identifier guard used by SQL callers
@@ -218,6 +220,28 @@ async function parsePsqlRows(
     .map((line) => line.split("\t"));
 }
 
+/**
+ * The engine's PGDATA is pinned to `<volume>/data` by the compose spec
+ * (postgres:18 images changed their default to <volume>/<major>/docker) —
+ * probe and seed that directory, never the volume root.
+ */
+function postgresDataDir(
+  volumes: ManagedEngineProbeContext["volumes"],
+): string {
+  return `${volumes[0]?.target ?? "/var/lib/postgresql"}/data`;
+}
+
+/** PG_VERSION marks an initialized cluster; standby.signal marks a standby. */
+function probePostgresStandbyData(
+  ctx: ManagedEngineProbeContext,
+): Promise<"uninitialized" | "standby" | "not_standby"> {
+  const dataDir = postgresDataDir(ctx.volumes);
+  return probeStandbyState(ctx, {
+    data: { flag: "-f", path: `${dataDir}/PG_VERSION` },
+    marker: `${dataDir}/standby.signal`,
+  });
+}
+
 const postgresReplicationRuntime: ManagedEngineReplicationRuntime = {
   async ensurePrimary(ctx, spec) {
     await runPsql(
@@ -238,50 +262,17 @@ const postgresReplicationRuntime: ManagedEngineReplicationRuntime = {
     });
   },
 
+  probeStandbyData: probePostgresStandbyData,
+
   async bootstrapStandby(ctx: ManagedEngineBootstrapContext, spec) {
-    // Idempotent: data volume already has PG_VERSION.
-    const volumeArgs: string[] = [];
-    for (const volume of ctx.volumes) {
-      volumeArgs.push("-v", `${volume.name}:${volume.target}`);
-    }
-    const dataRoot = ctx.volumes[0]?.target ?? "/var/lib/postgresql";
-    // The engine's PGDATA is pinned to `<volume>/data` by the compose spec
-    // (postgres:18 images changed their default to <volume>/<major>/docker) —
-    // probe and seed that directory, never the volume root.
-    const dataDir = `${dataRoot}/data`;
-    // `test -f` alone cannot distinguish "file absent" from "docker never ran"
-    // (e.g. socket permission error) — echo an explicit marker and require the
-    // probe container itself to succeed, so a docker failure aborts instead of
-    // being misread as an uninitialized volume.
-    const probeFile = async (path: string): Promise<boolean> => {
-      const probe = await ctx.runDocker([
-        "run",
-        "--rm",
-        ...helperLabelArgs("volume-copy"),
-        "--user",
-        ctx.containerUser,
-        ...volumeArgs,
-        ctx.image,
-        "sh",
-        "-c",
-        `test -f ${path} && echo present || echo absent`,
-      ]);
-      if (!probe.success) {
-        throw new Error(
-          `standby data probe failed: ${
-            sanitizeForLog(probe.stderr || probe.stdout || "unknown")
-          }`,
-        );
-      }
-      return probe.stdout.trim().endsWith("present");
-    };
-    if (!spec.forceResync && await probeFile(`${dataDir}/PG_VERSION`)) {
-      // Initialized — need standby.signal to confirm standby role.
-      if (await probeFile(`${dataDir}/standby.signal`)) {
-        return "already_standby";
-      }
+    const volumeArgs = volumeMountArgs(ctx.volumes);
+    const dataDir = postgresDataDir(ctx.volumes);
+    if (!spec.forceResync) {
+      // Idempotent: data volume already has PG_VERSION.
+      const state = await probePostgresStandbyData(ctx);
+      if (state === "standby") return "already_standby";
       // Initialized but not a standby (orphaned primary data) — never auto-rewind.
-      return "needs_resync";
+      if (state === "not_standby") return "needs_resync";
     }
 
     // No PG_VERSION (or an operator-forced resync) ⇒ discard what lives
