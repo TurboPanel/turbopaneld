@@ -19,6 +19,7 @@ import type { IngressAdapterSet } from "./ingress/adapter.ts";
 import type { RouterAdapterSet } from "./router/adapter.ts";
 import type { SensorIo } from "./sensors/discovery.ts";
 import type { TlsExpiryReading } from "./tls-expiry.ts";
+import type { VersionFacts } from "./version-facts.ts";
 
 /** Outcome of a single collect() invocation: an entity-grouped `MetricsSample`. */
 export type MetricsCollectResult =
@@ -398,6 +399,8 @@ export type CollectorDeps = {
    * or when no Caddy-issued certificate exists.
    */
   tlsExpiry?: () => TlsExpiryReading | null;
+  /** Cached Docker, Caddy, Traefik and database-engine versions (`version-facts.ts`); `null` until the first poll lands. */
+  versionFacts?: () => VersionFacts | null;
   /** The daemon's own version, sent as the `agentVersion` text fact. */
   agentVersion?: string;
   /**

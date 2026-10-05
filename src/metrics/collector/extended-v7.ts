@@ -16,6 +16,8 @@ import type {
 import type { ContainerHealthSample } from "./docker-containers.ts";
 import type { SiteSize } from "./site-usage.ts";
 import type { TlsExpiryReading } from "./tls-expiry.ts";
+import { cleanFact } from "./host-facts.ts";
+import type { VersionFacts } from "./version-facts.ts";
 
 /** Everything the glue reads; each part may be missing. */
 export type CollectedExtendedInput = {
@@ -23,6 +25,7 @@ export type CollectedExtendedInput = {
   dockerUsage?: DockerUsageSample | null;
   tlsExpiry?: TlsExpiryReading | null;
   topSites?: readonly SiteSize[] | null;
+  versions?: VersionFacts | null;
 };
 
 function finite(value: number | null | undefined): number | undefined {
@@ -94,6 +97,13 @@ export function formatTopSites(
     : known.map((site) => `${site.id}=${site.bytes}`).join(",");
 }
 
+const VERSION_TEXT_KEYS = [
+  "dockerVersion",
+  "caddyVersion",
+  "traefikVersion",
+  "dbVersions",
+] as const;
+
 export function collectedText(
   input: CollectedExtendedInput,
 ): MetricsTextFields | undefined {
@@ -104,6 +114,10 @@ export function collectedText(
   if (backends.length > 0) out.unhealthyBackends = backends.join(",");
   const topSites = formatTopSites(input.topSites);
   if (topSites) out.topSites = topSites;
+  for (const key of VERSION_TEXT_KEYS) {
+    const version = cleanFact(input.versions?.[key]);
+    if (version) out[key] = version;
+  }
   return Object.keys(out).length > 0 ? out : undefined;
 }
 

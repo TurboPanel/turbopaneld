@@ -4,6 +4,7 @@ import type { DockerUsageSample } from "../../contracts/metrics-contract.ts";
 import type { ContainerHealthSample } from "./docker-containers.ts";
 import {
   buildCollectedExtended,
+  collectedText,
   formatTopSites,
   mergeExtended,
   reclaimableBytes,
@@ -128,4 +129,25 @@ it("merges text and sections key by key so no part wipes another", () => {
     },
   );
   assertEquals(mergeExtended(undefined, undefined), undefined);
+});
+
+it("maps the version facts onto their text keys and ignores junk", () => {
+  assertEquals(
+    collectedText({
+      versions: {
+        dockerVersion: "29.8.2",
+        caddyVersion: "2.11.4",
+        traefikVersion: "3.6.6",
+        dbVersions: "postgres 18",
+      },
+    }),
+    {
+      dockerVersion: "29.8.2",
+      caddyVersion: "2.11.4",
+      traefikVersion: "3.6.6",
+      dbVersions: "postgres 18",
+    },
+  );
+  assertEquals(collectedText({ versions: { dockerVersion: "  " } }), undefined);
+  assertEquals(collectedText({ versions: null }), undefined);
 });

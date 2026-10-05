@@ -1398,6 +1398,25 @@ test("LinuxMetricsCollector sends the load average, CPU model, boot id and agent
   });
 });
 
+test("LinuxMetricsCollector sends the cached engine versions as text facts", async () => {
+  const result = await new LinuxMetricsCollector({
+    ...makeDeps(() => TICK_1, fullTopologySnapshot(), () => 1_000_000),
+    versionFacts: () => ({
+      dockerVersion: "29.8.2",
+      caddyVersion: "2.11.4",
+      traefikVersion: "3.6.6",
+      dbVersions: "postgres 18",
+    }),
+  }).collect({ sequence: 1, nowMs: 1_000_000 });
+  if (!result.supported) throw new TypeError("expected a supported sample");
+  assertEquals(result.sample.extended?.text, {
+    dockerVersion: "29.8.2",
+    caddyVersion: "2.11.4",
+    traefikVersion: "3.6.6",
+    dbVersions: "postgres 18",
+  });
+});
+
 const HOST_EXTENDED_RAW: RawFixtureMap = {
   "/proc/loadavg": "0.48 0.37 0.35 1/352 151909\n",
   "/proc/sys/kernel/pid_max": "4194304\n",

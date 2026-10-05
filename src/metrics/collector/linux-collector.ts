@@ -1060,6 +1060,7 @@ export class LinuxMetricsCollector implements MetricsCollector {
           dockerUsage: input.dockerUsage,
           tlsExpiry: this.#deps.tlsExpiry?.(),
           topSites: input.topSites,
+          versions: this.#deps.versionFacts?.(),
         }),
       );
       return { extended, containers };

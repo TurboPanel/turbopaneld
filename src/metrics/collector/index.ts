@@ -11,6 +11,7 @@ import { runDocker } from "../../deploy/docker-cli.ts";
 import { DockerClient } from "../../docker/client.ts";
 import { getManagedEngineRuntime } from "../../managed/engines/index.ts";
 import { resolveDockerDataRoot } from "../../host/docker.ts";
+import { join } from "@std/path";
 import { resolveLayout } from "../../paths/layout.ts";
 import { DAEMON_VERSION } from "../../version.ts";
 import { collectTopology } from "../topology/topology.ts";
@@ -30,6 +31,7 @@ import type { RouterAdapterSet } from "./router/adapter.ts";
 import { TraefikRouterAdapter } from "./router/traefik.ts";
 import { readSiteUsage } from "./site-usage.ts";
 import { TlsExpirySampler } from "./tls-expiry.ts";
+import { VersionFactsSampler } from "./version-facts.ts";
 import {
   createDirectoryUsageWalker,
   type DirectoryUsageWalker,
@@ -348,6 +350,23 @@ function defaultTlsExpirySampler(): TlsExpirySampler {
   return cachedTlsExpirySampler;
 }
 
+let cachedVersionFactsSampler: VersionFactsSampler | undefined;
+/** Docker, Caddy, Traefik and database-engine versions, polled every half hour (`version-facts.ts`). */
+function defaultVersionFactsSampler(): VersionFactsSampler {
+  if (!cachedVersionFactsSampler) {
+    const client = new DockerClient();
+    const caddyCurrent = () =>
+      join(resolveLayout(Deno.env.toObject()).runtimesDir, "caddy", "current");
+    cachedVersionFactsSampler = new VersionFactsSampler({
+      dockerVersion: () => client.version(),
+      listContainers: () => client.listContainers(true),
+      caddyDirectory: () => Deno.realPath(caddyCurrent()),
+    });
+    cachedVersionFactsSampler.start();
+  }
+  return cachedVersionFactsSampler;
+}
+
 let cachedContainerSampler: ContainerHealthSampler | undefined;
 function defaultContainerSampler(): ContainerHealthSampler {
   if (!cachedContainerSampler) {
@@ -423,6 +442,7 @@ function defaultManagedEngineSampler(): ManagedEngineSampler {
 export function stopHostStorageSamplers(): void {
   cachedDirectoryUsageWalker?.stop();
   cachedTlsExpirySampler?.stop();
+  cachedVersionFactsSampler?.stop();
   cachedDockerUsageSampler?.stop();
   cachedContainerSampler?.stop();
   cachedManagedEngineSampler?.stop();
@@ -468,6 +488,7 @@ function defaultDeps(): CollectorDeps {
     eventCollectors: defaultEventCollectors(),
     directoryUsage: () => defaultDirectoryUsageWalker().latest(),
     tlsExpiry: () => defaultTlsExpirySampler().latest(),
+    versionFacts: () => defaultVersionFactsSampler().latest(),
     agentVersion: DAEMON_VERSION,
     dockerUsage: () => defaultDockerUsageSampler().latest(),
     containers: () => defaultContainerSampler().latest(),

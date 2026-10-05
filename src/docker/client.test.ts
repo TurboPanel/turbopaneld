@@ -115,6 +115,33 @@ test("DockerClient info reads /info and throws on HTTP error", async () => {
   failing.close();
 });
 
+test("DockerClient version reads the engine version from /version and throws on HTTP error", async () => {
+  const seen: string[] = [];
+  const client = new DockerClient(undefined, {
+    fetchImpl: (url) => {
+      seen.push(url);
+      return Promise.resolve(
+        jsonResponse({ Version: "29.8.2", ApiVersion: "1.54" }),
+      );
+    },
+  });
+  assertEquals(await client.version(), "29.8.2");
+  assertEquals(seen[0], `${DOCKER_HTTP_ORIGIN}/version`);
+  client.close();
+
+  const odd = new DockerClient(undefined, {
+    fetchImpl: () => Promise.resolve(jsonResponse({ Version: 29 })),
+  });
+  assertEquals(await odd.version(), undefined);
+  odd.close();
+
+  const failing = new DockerClient(undefined, {
+    fetchImpl: () => Promise.resolve(new Response("no", { status: 500 })),
+  });
+  await assertRejects(() => failing.version(), Error, "docker version failed");
+  failing.close();
+});
+
 test("DockerClient systemDf asks for every object type explicitly and throws on HTTP error", async () => {
   const seen: string[] = [];
   const client = new DockerClient(undefined, {

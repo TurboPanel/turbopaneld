@@ -69,6 +69,11 @@ export interface DockerInfo {
   DockerRootDir?: string;
 }
 
+/** Docker Engine `/version` subset: the engine's own version string. */
+export interface DockerVersion {
+  Version?: string;
+}
+
 /** Docker 29 `*DiskUsage` summary for one object type. */
 export interface DockerTypeUsage {
   ActiveCount?: number;
@@ -196,6 +201,16 @@ export class DockerClient {
       throw new Error(`docker info failed: HTTP ${response.status}`);
     }
     return await response.json() as DockerInfo;
+  }
+
+  /** The Engine's version (`GET /version`), e.g. `29.8.2`; throws when the Engine is unreachable. */
+  async version(): Promise<string | undefined> {
+    const response = await this.#fetch("/version");
+    if (!response.ok) {
+      throw new Error(`docker version failed: HTTP ${response.status}`);
+    }
+    const body = await response.json() as DockerVersion;
+    return typeof body.Version === "string" ? body.Version : undefined;
   }
 
   /**
