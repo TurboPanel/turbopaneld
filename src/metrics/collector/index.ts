@@ -12,6 +12,7 @@ import { DockerClient } from "../../docker/client.ts";
 import { getManagedEngineRuntime } from "../../managed/engines/index.ts";
 import { resolveDockerDataRoot } from "../../host/docker.ts";
 import { resolveLayout } from "../../paths/layout.ts";
+import { DAEMON_VERSION } from "../../version.ts";
 import { collectTopology } from "../topology/topology.ts";
 import { resolveTopologyOverrides } from "../topology/overrides.ts";
 import { readCapabilityPlan } from "./capability-plan-store.ts";
@@ -467,6 +468,7 @@ function defaultDeps(): CollectorDeps {
     eventCollectors: defaultEventCollectors(),
     directoryUsage: () => defaultDirectoryUsageWalker().latest(),
     tlsExpiry: () => defaultTlsExpirySampler().latest(),
+    agentVersion: DAEMON_VERSION,
     dockerUsage: () => defaultDockerUsageSampler().latest(),
     containers: () => defaultContainerSampler().latest(),
     managedEngines: () => defaultManagedEngineSampler().latest(),

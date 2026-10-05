@@ -106,6 +106,7 @@ import {
   vmstatRates,
 } from "./parse-vmstat.ts";
 import { buildHostExtended } from "./extended-host.ts";
+import { buildHostFacts } from "./host-facts.ts";
 import { buildCollectedExtended, mergeExtended } from "./extended-v7.ts";
 import { SOURCE_DEADLINE_MS, withDeadline } from "./deadline.ts";
 import { type HostTextSample, hostTextToExtended } from "./host-text.ts";
@@ -134,6 +135,7 @@ const PROC_CONNTRACK_MAX = "/proc/sys/net/netfilter/nf_conntrack_max";
 const PROC_MOUNTS = "/proc/mounts";
 const PROC_MDSTAT = "/proc/mdstat";
 const PROC_LOADAVG = "/proc/loadavg";
+const PROC_BOOT_ID = "/proc/sys/kernel/random/boot_id";
 const PROC_PID_MAX = "/proc/sys/kernel/pid_max";
 const PROC_THREADS_MAX = "/proc/sys/kernel/threads-max";
 
@@ -177,6 +179,7 @@ type RawTexts = {
   loadavgText: string | undefined;
   pidMaxText: string | undefined;
   threadsMaxText: string | undefined;
+  bootIdText: string | undefined;
 };
 
 async function readRawTexts(deps: CollectorDeps): Promise<RawTexts> {
@@ -201,6 +204,7 @@ async function readRawTexts(deps: CollectorDeps): Promise<RawTexts> {
     loadavgText,
     pidMaxText,
     threadsMaxText,
+    bootIdText,
   ] = await Promise.all([
     deps.readProcFile(PROC_STAT),
     deps.readProcFile(PROC_MEMINFO),
@@ -222,6 +226,7 @@ async function readRawTexts(deps: CollectorDeps): Promise<RawTexts> {
     deps.readProcFile(PROC_LOADAVG),
     deps.readProcFile(PROC_PID_MAX),
     deps.readProcFile(PROC_THREADS_MAX),
+    deps.readProcFile(PROC_BOOT_ID),
   ]);
   return {
     statText,
@@ -244,6 +249,7 @@ async function readRawTexts(deps: CollectorDeps): Promise<RawTexts> {
     loadavgText,
     pidMaxText,
     threadsMaxText,
+    bootIdText,
   };
 }
 
@@ -991,10 +997,17 @@ export class LinuxMetricsCollector implements MetricsCollector {
         disks.blockDevices,
       ),
     });
+    const hostFacts = buildHostFacts({
+      loadavgText: raw.loadavgText,
+      cpuModel: snapshot.cpu.model,
+      bootIdText: raw.bootIdText,
+      agentVersion: this.#deps.agentVersion,
+    });
     const { extended, containers } = this.#buildExtended({
       outgoing,
       hostText,
       hostExtended,
+      hostFacts,
       bootGeneration,
       // A stale reading's reclaimable bytes are not reported as current.
       dockerUsage: dockerUsageReading?.stale
@@ -1020,6 +1033,7 @@ export class LinuxMetricsCollector implements MetricsCollector {
     outgoing: { extended?: MetricsExtended };
     hostText: HostTextSample | undefined;
     hostExtended: MetricsExtended["host"];
+    hostFacts: MetricsExtended["text"];
     bootGeneration: number;
     dockerUsage: DockerUsageSample | undefined;
     topSites: BuiltExtendedInput["topSites"];
@@ -1040,6 +1054,7 @@ export class LinuxMetricsCollector implements MetricsCollector {
         input.outgoing.extended,
         input.hostText ? hostTextToExtended(input.hostText) : undefined,
         input.hostExtended ? { host: input.hostExtended } : undefined,
+        input.hostFacts ? { text: input.hostFacts } : undefined,
         buildCollectedExtended({
           containers,
           dockerUsage: input.dockerUsage,

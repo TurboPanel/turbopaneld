@@ -126,6 +126,7 @@ type RawFixtureMap = Partial<{
   "/proc/loadavg": string;
   "/proc/sys/kernel/pid_max": string;
   "/proc/sys/kernel/threads-max": string;
+  "/proc/sys/kernel/random/boot_id": string;
 }>;
 
 /**
@@ -1367,6 +1368,33 @@ test("LinuxMetricsCollector sends only the always-known RAID zeros when nothing 
   if (!result.supported) throw new TypeError("expected a supported sample");
   assertEquals(result.sample.extended, {
     host: { mdArraysDegraded: 0, mdArraysResyncing: 0 },
+  });
+});
+
+test("LinuxMetricsCollector sends the load average, CPU model, boot id and agent version as text facts", async () => {
+  const snapshot = fullTopologySnapshot();
+  snapshot.cpu.model = "Intel Core Processor (Broadwell, no TSX, IBRS)";
+  const result = await new LinuxMetricsCollector({
+    ...makeDeps(
+      () => ({
+        ...TICK_1,
+        "/proc/loadavg": "0.48 0.37 0.35 1/306 151909\n",
+        "/proc/sys/kernel/random/boot_id":
+          "6797e9f8-e46d-4460-937e-e89ffdc42054\n",
+      }),
+      snapshot,
+      () => 1_000_000,
+    ),
+    agentVersion: "0.2.0",
+    hostText: () => Promise.resolve({ kernel: "6.12" }),
+  }).collect({ sequence: 1, nowMs: 1_000_000 });
+  if (!result.supported) throw new TypeError("expected a supported sample");
+  assertEquals(result.sample.extended?.text, {
+    kernel: "6.12",
+    loadavg: "0.48 0.37 0.35",
+    cpuModel: "Intel Core Processor (Broadwell, no TSX, IBRS)",
+    bootId: "6797e9f8-e46d-4460-937e-e89ffdc42054",
+    agentVersion: "0.2.0",
   });
 });
 

@@ -398,6 +398,8 @@ export type CollectorDeps = {
    * or when no Caddy-issued certificate exists.
    */
   tlsExpiry?: () => TlsExpiryReading | null;
+  /** The daemon's own version, sent as the `agentVersion` text fact. */
+  agentVersion?: string;
   /**
    * Cached Docker `GET /system/df` rollup — the `managed.docker` family, plus
    * the `dockerUsedBytes` total `managed.storage` carries. Same getter
