@@ -497,3 +497,46 @@ export function normalizeManagedCompose(
     composeServiceName,
   };
 }
+
+/** Image plus named data volumes of a persisted managed compose file. */
+export type ManagedComposeDataTarget = {
+  image: string;
+  volumes: Array<{ name: string; target: string }>;
+};
+
+function namedVolumeMount(
+  entry: unknown,
+  topLevel: Record<string, unknown>,
+): { name: string; target: string } | undefined {
+  if (typeof entry !== "string") return undefined;
+  const [source, target] = entry.split(":");
+  if (!source || !target || !Object.hasOwn(topLevel, source)) {
+    return undefined;
+  }
+  const declared = topLevel[source];
+  const name = isRecord(declared) && typeof declared.name === "string"
+    ? declared.name
+    : source;
+  return { name, target };
+}
+
+/**
+ * Read the image and named volumes (in mount order, bind mounts skipped) from
+ * the compose file `managed.apply` persisted, so read-only data-volume probes
+ * mount exactly what `compose start` will.
+ */
+export function readManagedComposeDataTarget(
+  composeYaml: string,
+): ManagedComposeDataTarget {
+  const document = parseCompose(composeYaml);
+  const { service } = resolveSoleManagedService(document);
+  if (typeof service.image !== "string" || service.image.length === 0) {
+    throw new Error("managed compose service has no image");
+  }
+  const topLevel = isRecord(document.volumes) ? document.volumes : {};
+  const mounts = Array.isArray(service.volumes) ? service.volumes : [];
+  const volumes = mounts
+    .map((entry) => namedVolumeMount(entry, topLevel))
+    .filter((mount) => mount !== undefined);
+  return { image: service.image, volumes };
+}

@@ -37,5 +37,11 @@ site_caddy_admin_socket: "/run/{{ site_caddy_runtime_dir }}/admin.sock"
 site_caddy_metrics_port: 2039
 
 turbopanel_config_dir: "/etc/turbopanel"  # noqa: var-naming[no-role-prefix]
+
+# The site Caddy keeps its Caddyfile and sites/ here, never in the control
+# plane Caddy's `{{ turbopanel_config_dir }}/caddy` (co-located hosts run both).
+# Must match siteCaddyConfigDir in src/deploy/site/engine-driver.ts and the
+# pinned paths in the sudoers template.
+site_caddy_config_dir: "{{ turbopanel_config_dir }}/site-caddy"
 turbopanel_log_dir: "/var/log/turbopanel"  # noqa: var-naming[no-role-prefix]
 turbopanel_state_dir: "/var/lib/turbopanel"  # noqa: var-naming[no-role-prefix]

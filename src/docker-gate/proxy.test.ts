@@ -623,12 +623,23 @@ e2e(
 );
 
 e2e("a dropped client mid-stream is routine, not an error", async (h) => {
+  // Settles when the fake engine's stream ends or breaks, i.e. once the gate
+  // has either closed the upstream connection or the stream ran out. Waiting
+  // on it replaces a fixed sleep that passed whenever an error log was late.
+  let engineSettled!: () => void;
+  const engineGone = new Promise<void>((resolve) => engineSettled = resolve);
   h.engine(async (conn) => {
-    await readRequest(conn);
-    await conn.write(encodeText("HTTP/1.1 200 OK\r\n\r\n"));
-    for (let i = 0; i < 50; i++) {
-      await conn.write(encodeText("x".repeat(1000)));
-      await new Promise((resolve) => setTimeout(resolve, 5));
+    try {
+      await readRequest(conn);
+      await conn.write(encodeText("HTTP/1.1 200 OK\r\n\r\n"));
+      for (let i = 0; i < 50; i++) {
+        await conn.write(encodeText("x".repeat(1000)));
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+    } catch {
+      // the gate dropped the upstream side: expected
+    } finally {
+      engineSettled();
     }
   });
   const client = await h.connect();
@@ -636,7 +647,9 @@ e2e("a dropped client mid-stream is routine, not an error", async (h) => {
   const buf = new Uint8Array(10);
   await client.read(buf);
   client.close();
-  await new Promise((resolve) => setTimeout(resolve, 400));
+  await engineGone;
+  // One more turn so the gate's own close handlers have logged.
+  await new Promise((resolve) => setTimeout(resolve, 20));
   assertEquals(h.logs.filter((l) => l.level === "error"), []);
 });
 

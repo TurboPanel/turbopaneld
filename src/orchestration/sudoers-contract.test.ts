@@ -270,7 +270,9 @@ const ENGINE_VALIDATE: Record<string, string> = {
   tpols:
     `${VENDOR}/openlitespeed/current/bin/openlitespeed -t -c /etc/turbopanel/openlitespeed/httpd_config.conf`,
   tpcaddysite:
-    `${VENDOR}/caddy/current/caddy validate --adapter caddyfile --config /etc/turbopanel/caddy/Caddyfile`,
+    `${VENDOR}/caddy/current/caddy validate --adapter caddyfile --config /etc/turbopanel/site-caddy/Caddyfile`,
+  tpedge:
+    `${VENDOR}/caddy/current/caddy validate --adapter caddyfile --config /etc/turbopanel/hosting/Caddyfile.next`,
 };
 
 test("each engine account grants exactly its own pinned config test (P2-8)", async () => {
@@ -298,10 +300,18 @@ test("engine accounts refuse env, other engines' binaries and free arguments (P2
     ],
     tpcaddysite: [
       "/usr/bin/env id",
-      `/usr/bin/env XDG_DATA_HOME=/tmp ${VENDOR}/caddy/current/caddy validate --adapter caddyfile --config /etc/turbopanel/caddy/Caddyfile`,
+      `/usr/bin/env XDG_DATA_HOME=/tmp ${VENDOR}/caddy/current/caddy validate --adapter caddyfile --config /etc/turbopanel/site-caddy/Caddyfile`,
+      // The control plane Caddy's file is not the site Caddy's to validate.
+      `${VENDOR}/caddy/current/caddy validate --adapter caddyfile --config /etc/turbopanel/caddy/Caddyfile`,
       `${VENDOR}/caddy/current/caddy run --config /tmp/x`,
       `${VENDOR}/caddy/current/caddy validate --adapter caddyfile --config /tmp/x`,
       `${VENDOR}/caddy/2.11.4/caddy validate --config /tmp/x`,
+    ],
+    tpedge: [
+      "/usr/bin/env id",
+      `${VENDOR}/caddy/current/caddy run --config /tmp/x`,
+      `${VENDOR}/caddy/current/caddy validate --adapter caddyfile --config /tmp/x`,
+      `${VENDOR}/caddy/current/caddy validate --adapter caddyfile --config /etc/turbopanel/hosting/Caddyfile`,
     ],
     tpapache: ["/usr/bin/env id", "/bin/sh -c id"],
   };

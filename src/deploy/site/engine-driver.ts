@@ -599,8 +599,18 @@ function siteCaddyBinaryPath(layout: LayoutPaths): string {
   return join(layout.runtimesDir, "caddy", "current", "caddy");
 }
 
+/**
+ * The site Caddy's own config directory. It is never the control plane
+ * Caddy's `<config>/caddy`: a co-located host runs both, and sharing one
+ * directory let a site deploy overwrite the control plane's Caddyfile and
+ * change the directory's group.
+ */
+export function siteCaddyConfigDir(layout: LayoutPaths): string {
+  return join(layout.configDir, "site-caddy");
+}
+
 function siteCaddyMainConfigPath(layout: LayoutPaths): string {
-  return join(layout.configDir, "caddy", "Caddyfile");
+  return join(siteCaddyConfigDir(layout), "Caddyfile");
 }
 
 export const NGINX_DRIVER: SiteEngineDriver = {
