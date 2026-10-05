@@ -897,7 +897,7 @@ tp_unit_ok() {
       ;;
   esac
   case "$_uk_name" in
-    turbopanel-build-*.service) return 1 ;;
+    turbopanel-build-*.service|turbopanel-buildwatch-*.service) return 1 ;;
     turbopanel-php-*)
       tp_php_unit_ok "$_uk_file" "$_uk_name"
       return
@@ -2992,6 +2992,25 @@ BUILD_LOCK_WAIT_SEC=2100
 BUILD_MEMORY_MAX=4G
 BUILD_CPU_QUOTA=200%
 BUILD_RUNTIME_MAX_SEC=1800
+# Disk: a build's private /tmp and /var/tmp are size-capped tmpfs (counted in
+# MemoryMax); the work tree and the project cache are watched while the build
+# runs (build-watch) and the build is stopped past the caps. A cache past its
+# cap, or unused for BUILD_CACHE_MAX_AGE_DAYS, is emptied before the next build.
+BUILD_TMP_SIZE=1G
+BUILD_TMP_INODES=262144
+BUILD_VARTMP_SIZE=512M
+BUILD_VARTMP_INODES=131072
+BUILD_WORK_MAX_KB=8388608
+BUILD_CACHE_MAX_KB=6291456
+BUILD_TREE_MAX_INODES=2000000
+BUILD_CACHE_MAX_AGE_DAYS=30
+BUILD_WATCH_SEC=10
+if [ -n "$TP_TEST" ]; then
+  BUILD_WORK_MAX_KB="${TP_TEST_WORK_MAX_KB:-$BUILD_WORK_MAX_KB}"
+  BUILD_TREE_MAX_INODES="${TP_TEST_TREE_MAX_INODES:-$BUILD_TREE_MAX_INODES}"
+  BUILD_CACHE_MAX_KB="${TP_TEST_CACHE_MAX_KB:-$BUILD_CACHE_MAX_KB}"
+  BUILD_WATCH_SEC="${TP_TEST_WATCH_SEC:-$BUILD_WATCH_SEC}"
+fi
 # Debian 13 / Ubuntu 24.04. Below it: a warning and a reduced sandbox (still
 # the build account, still confined); below the minimum: no build.
 BUILD_SYSTEMD_FLOOR=255
@@ -3199,6 +3218,8 @@ tp_verb_build_run() {
   tp_build_id_ok "$1" || tp_die "build-run: refusing build id $1"
   tp_build_id_ok "$2" || tp_die "build-run: refusing project id $2"
   tp_build_account_ok || tp_die "build-run: no confined $BUILD_ACCOUNT account (run the build-user role)"
+  _br_id="$1"
+  _br_project="$2"
   tp_build_tree_ok
   _br_v="$(tp_systemd_major)"
   case "$_br_v" in ''|*[!0-9]*) tp_die "build-run: cannot read the systemd version" ;; esac
@@ -3210,6 +3231,7 @@ tp_verb_build_run() {
   _br_cache="$R_BUILD/cache/$2"
   tp_build_work_pin "$1"
   tp_pin_dir "$R_BUILD/cache"
+  tp_build_prune_cache "$2"
   mkdir -m 0700 -- "./$2" 2>/dev/null || [ -d "./$2" ] || tp_die "cannot create $_br_cache"
   tp_pin_dir "$_br_cache" || tp_die "refusing $_br_cache"
   tp_run chown -h -- "$BUILD_UID:$BUILD_GID" .
@@ -3220,11 +3242,24 @@ tp_verb_build_run() {
   tp_run "$BUILD_LOOPBACK" sync ||
     tp_die "build-run: the build's network rules could not be loaded (is nftables installed?); builds are stopped until they can"
   cd /
+  # The watcher of an earlier run of this build id can still be waiting (a
+  # short build ends before its first look, and a release is rebuilt under the
+  # same id): its unit name would make this run's watcher fail to start. The
+  # host build lock is held, so no build of this id is running.
+  tp_run systemctl stop -- "turbopanel-buildwatch-$_br_id.service" 2>/dev/null || :
+  # The watcher stops the build when its work tree or cache outgrows the caps.
+  tp_run systemd-run --unit="turbopanel-buildwatch-$_br_id" --collect --quiet --no-block \
+    --setenv=SUDO_UID="$CALLER_UID" --setenv=SUDO_GID="$CALLER_GID" \
+    -p RuntimeMaxSec="$((BUILD_RUNTIME_MAX_SEC + 300))" \
+    -- "$_self_dir/tp-host" build-watch "$_br_id" "$_br_project" ||
+    tp_die "build-run: cannot start the build's disk watcher"
   set -- --unit="turbopanel-build-$1" --service-type=exec --wait --pipe --quiet --collect \
     -p User="$BUILD_ACCOUNT" -p Group="$BUILD_ACCOUNT" -p WorkingDirectory="$_br_work" \
     -p NoNewPrivileges=yes -p CapabilityBoundingSet= -p AmbientCapabilities= \
     -p RestrictSUIDSGID=yes -p ProtectSystem=strict -p ProtectHome=yes \
-    -p PrivateTmp=yes -p PrivateDevices=yes -p TemporaryFileSystem="$R_BUILD:ro" \
+    -p PrivateDevices=yes \
+    -p TemporaryFileSystem="/tmp:mode=1777,nosuid,nodev,size=$BUILD_TMP_SIZE,nr_inodes=$BUILD_TMP_INODES" \
+    -p TemporaryFileSystem="/var/tmp:mode=1777,nosuid,nodev,size=$BUILD_VARTMP_SIZE,nr_inodes=$BUILD_VARTMP_INODES" -p TemporaryFileSystem="$R_BUILD:ro" \
     -p LoadCredential="tp-build-runner:$BUILD_RUNNER" \
     -p BindPaths="$_br_work" -p BindPaths="$_br_cache" \
     -p BindReadOnlyPaths="$BUILD_RESOLV_DIR/resolv.conf:$P/etc/resolv.conf"
@@ -3248,6 +3283,12 @@ tp_verb_build_run() {
       "$_br_v" "$BUILD_ACCOUNT" >&2
   fi
   [ "$_br_v" -lt 257 ] || set -- "$@" -p PrivatePIDs=yes
+  # The site and app listen bands belong to the platform: a build must not
+  # squat a port a stopped or restarting app owns (systemd 249+).
+  if [ "$_br_v" -ge 249 ]; then
+    set -- "$@" -p SocketBindDeny=tcp:18080-18999 -p SocketBindDeny=udp:18080-18999 \
+      -p SocketBindDeny=tcp:19100-19799 -p SocketBindDeny=udp:19100-19799
+  fi
   _br_host_deny="$(tp_build_host_deny | tr '\n' ' ')"
   set -- "$@" -p RestrictAddressFamilies="AF_INET AF_INET6 AF_UNIX" \
     -p IPAddressDeny="$BUILD_DENY_V4 $BUILD_DENY_V6${_br_host_deny:+ ${_br_host_deny% }}" \
@@ -3258,6 +3299,73 @@ tp_verb_build_run() {
     -p KillMode=control-group -p OOMPolicy=continue -p UMask=0022 \
     -- /bin/sh '${CREDENTIALS_DIRECTORY}/tp-build-runner' "$_br_work"
   tp_exec systemd-run "$@"
+}
+
+# Empty caches of projects not built for BUILD_CACHE_MAX_AGE_DAYS, and this
+# project's own cache when it is over its cap. Runs with cwd = cache/ (pinned)
+# and the host build lock held, so no build unit is running. A cache is only a
+# cache: emptying one costs a slower next build. find -delete never follows a
+# symlink; a project directory is only touched when its name is well formed.
+tp_build_prune_cache() {
+  find . -mindepth 1 -maxdepth 1 -type d -mtime "+$BUILD_CACHE_MAX_AGE_DAYS" ! -name "$1" |
+    while IFS= read -r _pc_dir; do
+      _pc_name="${_pc_dir#./}"
+      tp_build_id_ok "$_pc_name" || continue
+      tp_run find "./$_pc_name" -mindepth 1 -delete
+      tp_run rmdir -- "./$_pc_name"
+    done
+  [ -d "./$1" ] && [ ! -L "./$1" ] || return 0
+  _pc_kb="$(du -sk -x -- "./$1" 2>/dev/null | cut -f1)"
+  case "$_pc_kb" in ''|*[!0-9]*) return 0 ;; esac
+  if [ "$_pc_kb" -gt "$BUILD_CACHE_MAX_KB" ]; then
+    tp_run find "./$1" -mindepth 1 -delete
+  fi
+  tp_run touch -- "./$1"
+}
+
+# Run by the transient unit build-run starts (never by hand): stop build $1
+# when its work tree or its project's cache holds more than the caps. Ends when
+# the build unit is gone.
+tp_verb_build_watch() {
+  [ $# -eq 2 ] || tp_die "build-watch: only build-watch BUILD-ID PROJECT-ID"
+  tp_build_id_ok "$1" || tp_die "build-watch: refusing build id $1"
+  tp_build_id_ok "$2" || tp_die "build-watch: refusing project id $2"
+  [ -n "$TP_TEST" ] || [ -n "${INVOCATION_ID:-}" ] ||
+    tp_die "build-watch: started by build-run only"
+  _bw_unit="turbopanel-build-$1.service"
+  _bw_seen=0
+  _bw_wait=0
+  while :; do
+    _bw_state="$(tp_build_unit_state "$_bw_unit")"
+    case "$_bw_state" in
+      active|activating|deactivating|reloading) _bw_seen=1 ;;
+      *)
+        [ "$_bw_seen" = 0 ] || exit 0
+        _bw_wait=$((_bw_wait + 1))
+        [ "$_bw_wait" -le 12 ] || exit 0
+        ;;
+    esac
+    if [ "$_bw_seen" = 1 ] && tp_build_over_caps "$1" "$2"; then
+      printf 'tp-host: build %s stopped: its work tree or cache is over the disk limit\n' "$1" >&2
+      tp_run systemctl stop -- "$_bw_unit"
+      exit 0
+    fi
+    sleep "$BUILD_WATCH_SEC"
+  done
+}
+
+# True when work/$1 or cache/$2 is over its size or inode cap.
+tp_build_over_caps() {
+  for _oc_pair in "work/$1:$BUILD_WORK_MAX_KB" "cache/$2:$BUILD_CACHE_MAX_KB"; do
+    _oc_path="$R_BUILD/${_oc_pair%:*}"
+    _oc_kb="$(du -sk -x -- "$_oc_path" 2>/dev/null | cut -f1)"
+    _oc_n="$(du -s --inodes -x -- "$_oc_path" 2>/dev/null | cut -f1)"
+    case "$_oc_kb" in ''|*[!0-9]*) _oc_kb=0 ;; esac
+    case "$_oc_n" in ''|*[!0-9]*) _oc_n=0 ;; esac
+    [ "$_oc_kb" -le "${_oc_pair#*:}" ] || return 0
+    [ "$_oc_n" -le "$BUILD_TREE_MAX_INODES" ] || return 0
+  done
+  return 1
 }
 
 # Hand a finished work tree back to the caller, only once its unit is gone
@@ -3274,6 +3382,10 @@ tp_verb_build_return() {
   tp_pin_dir "$R_BUILD/work" || tp_die "no build directory $R_BUILD/work"
   tp_build_work_pin "$1"
   tp_run chown -R -h -P -- "$CALLER_UID:$CALLER_GID" .
+  # A build can leave a directory it made mode 000 or read-only: give the
+  # caller owner access back so it can read and remove the tree. chmod -R
+  # never follows a symlink (the unit is gone, nothing races this).
+  tp_run chmod -R u+rwX -- .
 }
 
 # Expiry dates of the certificates the hosting Caddy issued itself, nothing
@@ -3785,6 +3897,7 @@ case "$_verb" in
   modprobe) tp_verb_modprobe "$@" ;;
   build-run) tp_verb_build_run "$@" ;;
   build-return) tp_verb_build_return "$@" ;;
+  build-watch) tp_verb_build_watch "$@" ;;
   publish-open) tp_verb_publish_open "$@" ;;
   publish) tp_verb_publish "$@" ;;
   php-test) tp_verb_php_test "$@" ;;

@@ -386,6 +386,30 @@ export type DaemonMessage =
   }
   | {
     /**
+     * Control plane asks the daemon to stop one running `environment.deploy`
+     * (`commandId`). Sent only to a daemon advertising `deploy-cancel-v1`.
+     */
+    type: "deploy-cancel";
+    id: string;
+    commandId: string;
+    at: string;
+  }
+  | {
+    /**
+     * `cancelling`: the deploy was signalled and will end with a
+     * `cancelled: ` command outcome. `too_late`: it already switched over and
+     * will finish normally. `not_running`: no such deploy is running here (the
+     * cancel is remembered briefly, so a dispatch that arrives later is refused).
+     */
+    type: "deploy-cancel-result";
+    id: string;
+    ok: boolean;
+    outcome?: "cancelling" | "too_late" | "not_running";
+    error?: string;
+    at: string;
+  }
+  | {
+    /**
      * Daemon-initiated, fire-and-forget (no correlated request/result) —
      * `../metrics/topology/`'s stable device/filesystem/GPU/signal identity
      * and generation, reported over the socket by `TopologyReporter`
@@ -432,12 +456,18 @@ export type DaemonMessage =
      * Daemon-initiated, fire-and-forget (no correlated request/result, same
      * shape as `managed-ha-event`) — `AcmeIssuanceObserver`'s live TLS-probe
      * verdict for one `tlsMode: 'acme'` hostname, sent only on a state
-     * change (first failure after a short debounce, or a recovery).
+     * change (first failure after a short debounce, a recovery, the first
+     * good sighting, or a renewal that moves `notAfter`).
      */
     type: "acme-issuance-event";
     hostname: string;
     ok: boolean;
     errorMessage?: string;
+    /**
+     * Leaf expiry (ISO 8601) the probe read, sent with `ok: true` on the
+     * first good sighting, on recovery and when a renewal changes it.
+     */
+    notAfter?: string;
     at: string;
   }
   | {

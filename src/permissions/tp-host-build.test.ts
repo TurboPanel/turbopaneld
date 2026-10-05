@@ -85,10 +85,35 @@ function execLine(argv: string[]): string {
   return `EXEC ${argv.map((arg) => `[${arg}]`).join(" ")}`;
 }
 
+/** The disk watcher build-run starts before the build unit. */
+function expectedWatcher(prefix: string): string {
+  return execLine([
+    "systemd-run",
+    "--unit=turbopanel-buildwatch-b1",
+    "--collect",
+    "--quiet",
+    "--no-block",
+    `--setenv=SUDO_UID=${Deno.uid()}`,
+    `--setenv=SUDO_GID=${Deno.gid()}`,
+    "-p",
+    "RuntimeMaxSec=2100",
+    "--",
+    `${prefix}/opt/turbopanel/lib/tp-host`,
+    "build-watch",
+    "b1",
+    "p1",
+  ]);
+}
+
 /** The full systemd-run argv for build `b1` of project `p1`, systemd 257. */
 function expectedSystemdRun(
   prefix: string,
-  tier: { floor?: boolean; privatePids?: boolean; hostDeny?: string } = {},
+  tier: {
+    floor?: boolean;
+    privatePids?: boolean;
+    bindDeny?: boolean;
+    hostDeny?: string;
+  } = {},
 ): string[] {
   const build = `${prefix}/var/lib/turbopanel-build`;
   const work = `${build}/work/b1`;
@@ -129,8 +154,9 @@ function expectedSystemdRun(
       "RestrictSUIDSGID=yes",
       "ProtectSystem=strict",
       "ProtectHome=yes",
-      "PrivateTmp=yes",
       "PrivateDevices=yes",
+      "TemporaryFileSystem=/tmp:mode=1777,nosuid,nodev,size=1G,nr_inodes=262144",
+      "TemporaryFileSystem=/var/tmp:mode=1777,nosuid,nodev,size=512M,nr_inodes=131072",
       `TemporaryFileSystem=${build}:ro`,
       `LoadCredential=tp-build-runner:${prefix}/opt/turbopanel/lib/tp-build-runner`,
       `BindPaths=${work}`,
@@ -155,6 +181,14 @@ function expectedSystemdRun(
         ? ["ProtectClock=yes", "ProtectProc=invisible", "PrivateIPC=yes"]
         : []),
       ...((tier.privatePids ?? true) ? ["PrivatePIDs=yes"] : []),
+      ...((tier.bindDeny ?? true)
+        ? [
+          "SocketBindDeny=tcp:18080-18999",
+          "SocketBindDeny=udp:18080-18999",
+          "SocketBindDeny=tcp:19100-19799",
+          "SocketBindDeny=udp:19100-19799",
+        ]
+        : []),
       "RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX",
       // No loopback here: lib/tp-build-loopback filters it by port instead.
       "IPAddressDeny=0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 " +
@@ -201,6 +235,15 @@ test("build-run hands the work tree to tpbuild and starts the runner in the fixe
         ".",
       ]),
       execLine([`${host.prefix}/opt/turbopanel/lib/tp-build-loopback`, "sync"]),
+      // A watcher an earlier run of this build id left waiting is stopped, or
+      // its unit name would make the new one fail to start.
+      execLine([
+        "systemctl",
+        "stop",
+        "--",
+        "turbopanel-buildwatch-b1.service",
+      ]),
+      expectedWatcher(host.prefix),
       execLine(expectedSystemdRun(host.prefix)),
     ]);
     const cache = await Deno.stat(
@@ -240,7 +283,7 @@ test("build-run never opens a resolver through the private-range deny, on any po
     const result = await host.run(["build-run", "b1", "p1"]);
     assertEquals(result.code, 0, result.stderr);
     assertEquals(result.stderr, "");
-    const run = execLines(result.stdout)[3] ?? "";
+    const run = execLines(result.stdout).at(-1) ?? "";
     assertEquals(run, execLine(expectedSystemdRun(host.prefix)));
     // Allow wins over deny for every port, so nothing is ever allowed back.
     assertEquals(run.includes("IPAddressAllow"), false);
@@ -289,7 +332,7 @@ test("build-run denies the host's own public addresses but never a resolver or a
     const result = await host.run(["build-run", "b1", "p1"]);
     assertEquals(result.code, 0, result.stderr);
     assertEquals(
-      execLines(result.stdout)[3],
+      execLines(result.stdout).at(-1),
       execLine(
         expectedSystemdRun(host.prefix, {
           hostDeny: " 203.0.113.7/32 2001:db8::5/128",
@@ -323,7 +366,7 @@ test("a host with only local or private resolvers builds through the vetted publ
     assertEquals(result.code, 0, result.stderr);
     assertStringIncludes(result.stderr, "no public nameserver");
     assertEquals(
-      execLines(result.stdout)[3],
+      execLines(result.stdout).at(-1),
       execLine(expectedSystemdRun(host.prefix)),
     );
     assertEquals(
@@ -347,7 +390,7 @@ test("build-run keeps the build unprivileged below the OS floor, with a warning"
     assertEquals(ubuntu.code, 0, ubuntu.stderr);
     assertEquals(ubuntu.stderr, "");
     assertEquals(
-      execLines(ubuntu.stdout)[3],
+      execLines(ubuntu.stdout).at(-1),
       execLine(expectedSystemdRun(host.prefix, { privatePids: false })),
     );
 
@@ -357,7 +400,7 @@ test("build-run keeps the build unprivileged below the OS floor, with a warning"
     assertStringIncludes(old.stderr, "below the supported floor");
     assertStringIncludes(old.stderr, "Debian 13 / Ubuntu 24.04");
     assertEquals(
-      execLines(old.stdout)[3],
+      execLines(old.stdout).at(-1),
       execLine(
         expectedSystemdRun(host.prefix, { floor: false, privatePids: false }),
       ),
@@ -501,6 +544,7 @@ test("build-return gives the tree back only once the build unit is gone", async 
       const self = `${Deno.uid()}:${Deno.gid()}`;
       assertEquals(execLines(result.stdout), [
         execLine(["chown", "-R", "-h", "-P", "--", self, "."]),
+        execLine(["chmod", "-R", "u+rwX", "--", "."]),
       ]);
     }
     await Deno.symlink(
@@ -525,7 +569,13 @@ test("tp cannot install a unit under the build sandbox's transient unit names", 
         "",
       ].join("\n"),
     );
-    for (const name of ["turbopanel-build-b1.service", "tpbuild.slice"]) {
+    for (
+      const name of [
+        "turbopanel-build-b1.service",
+        "turbopanel-buildwatch-b1.service",
+        "tpbuild.slice",
+      ]
+    ) {
       await refused(host, [
         "install",
         "-m",
@@ -534,5 +584,62 @@ test("tp cannot install a unit under the build sandbox's transient unit names", 
         host.path(`etc/systemd/system/${name}`),
       ]);
     }
+  });
+});
+
+test("build-run empties caches nobody has built with for a month, and one over its cap", async () => {
+  await withHost(async (host) => {
+    await setUpBuildHost(host);
+    const cache = host.path("var/lib/turbopanel-build/cache");
+    for (const name of ["old-one", "fresh-one", "p1"]) {
+      await Deno.mkdir(join(cache, name, "deep"), { recursive: true });
+      await Deno.writeTextFile(
+        join(cache, name, "deep", "f"),
+        "x".repeat(4096),
+      );
+    }
+    const old = new Date(Date.now() - 40 * 86_400_000);
+    await Deno.utime(join(cache, "old-one"), old, old);
+    // Over the cap (1 KiB here): the project's own cache is emptied.
+    const result = await host.run(["build-run", "b1", "p1"], "spec\n", {
+      TP_TEST_CACHE_MAX_KB: "1",
+    });
+    assertEquals(result.code, 0, result.stderr);
+    const lines = execLines(result.stdout);
+    assertEquals(
+      lines.filter((line) => line.startsWith("EXEC [find]")),
+      [
+        execLine(["find", "./old-one", "-mindepth", "1", "-delete"]),
+        execLine(["find", "./p1", "-mindepth", "1", "-delete"]),
+      ],
+    );
+    assertEquals(lines.includes(execLine(["rmdir", "--", "./old-one"])), true);
+    assertEquals(lines.some((line) => line.includes("fresh-one")), false);
+  });
+});
+
+test("build-watch stops a build whose work tree is over the cap, and not a finished one", async () => {
+  await withHost(async (host) => {
+    await setUpBuildHost(host);
+    await Deno.mkdir(host.path("run/unit-state"));
+    const unit = host.path("run/unit-state/turbopanel-build-b1.service");
+    await Deno.writeTextFile(
+      host.path("var/lib/turbopanel-build/work/b1/app/big"),
+      "x".repeat(64 * 1024),
+    );
+    const env = { TP_TEST_WATCH_SEC: "0", TP_TEST_WORK_MAX_KB: "8" };
+    // The unit never ran (or is already gone): nothing to stop.
+    const idle = await host.run(["build-watch", "b1", "p1"], undefined, env);
+    assertEquals(idle.code, 0, idle.stderr);
+    assertEquals(execLines(idle.stdout), []);
+    await Deno.writeTextFile(unit, "active\n");
+    const over = await host.run(["build-watch", "b1", "p1"], undefined, env);
+    assertEquals(over.code, 0, over.stderr);
+    assertEquals(execLines(over.stdout), [
+      execLine(["systemctl", "stop", "--", "turbopanel-build-b1.service"]),
+    ]);
+    assertStringIncludes(over.stderr, "over the disk limit");
+    await refused(host, ["build-watch", "b1"]);
+    await refused(host, ["build-watch", "../b1", "p1"]);
   });
 });

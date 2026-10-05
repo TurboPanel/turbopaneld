@@ -68,6 +68,7 @@ export const DAEMON_WIRE_FEATURES = [
   "metrics-v7",
   "php-site-modes-v1",
   "site-engine-nginx-apache-v1",
+  "deploy-cancel-v1",
 ] as const;
 
 export type DaemonWireFeature = (typeof DAEMON_WIRE_FEATURES)[number];
@@ -131,6 +132,14 @@ export const SITE_ENGINE_NGINX_APACHE_FEATURE: DaemonWireFeature =
  * and Caddy sites still ignore `php.mode`.
  */
 export const PHP_SITE_MODES_FEATURE: DaemonWireFeature = "php-site-modes-v1";
+
+/**
+ * This daemon understands `deploy-cancel` (stop one running `environment.deploy`
+ * before it switches over) and answers `deploy-cancel-result`. The control plane
+ * sends the message only to a daemon that lists this feature; an older daemon
+ * would drop it and the deploy would run on.
+ */
+export const DEPLOY_CANCEL_FEATURE: DaemonWireFeature = "deploy-cancel-v1";
 
 /** Features that need an instance at or above a semver. Empty until one lands. */
 export const INSTANCE_FEATURE_MIN_VERSIONS: Readonly<Record<string, string>> =

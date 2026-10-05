@@ -54,6 +54,15 @@ the request (nothing is applied, the tunnel is not torn down). The legacy
 plaintext `keyPem` / `token` from an older control plane is still accepted
 until both floors pass the release that ships this; then those fields go.
 
+**Deploy cancel (`deploy-cancel-v1`).** The daemon advertises the feature in
+`hello.features`. A control plane that sees it may send `deploy-cancel`
+(`commandId`) and gets `deploy-cancel-result` (`ok`, `outcome`: `cancelling`,
+`too_late` or `not_running`) on the same id. `InstanceClient.#handleDeployCancel`
+hands it to `deployCancels` (`src/deploy/deploy-cancel.ts`) and always answers.
+It is not a queued command: a running deploy holds the queue slot. The deploy
+itself ends with a `command-outcome` whose error starts with `cancelled: `. The
+cutover rule and its limits are in `../deploy/AGENTS.md`.
+
 **On-demand managed health (`managed-health-v1`).** The daemon advertises
 the feature in `hello.features`. A control plane that sees it may send
 `managed-health-request` (`managedId`, `memberId`, `role`, `engine`) and gets
@@ -145,10 +154,16 @@ identifier per hour (one refill every 12 minutes). The tenant
   check interval (default), `IdlePresence` allows ~5s of `setInterval` skew so
   early ticks still send — otherwise early fires were skipped and Redis coalesce
   could false-demote a live socket.
-- Sends app-level `{ type: "heartbeat", at, daemonBuild?, timeSync?, resources?, docker? }`
+- Sends app-level `{ type: "heartbeat", at, daemonBuild?, timeSync?, resources?, docker?, runtimes?, releaseLinkScan? }`
   when the daemon build commit changed **or** when `timeSync` / `resources.ips` /
-  `docker` differ from the snapshot seeded on hello (change-detected, still
-  cadence-bound to the ~60s idle tick). Do **not** put OS or cpus/gpus/mem/swap on heartbeat. Offline
+  `docker` / `releaseLinkScan` differ from the snapshot seeded on hello
+  (change-detected, still cadence-bound to the ~60s idle tick).
+  `releaseLinkScan` is a bounded summary of `release-link-scan.json`
+  (`{ scannedAt, findingCount, findings[{ username, serviceId, releaseId?,
+  linkCount, error? }] }`, first 20 sites, no link text); the boot scan runs
+  after the first hello, so it normally arrives on a heartbeat. The control
+  plane stores it at `server.metadata.releaseLinkScan` and returns it on
+  `GET /api/client/v1/servers`. Do **not** put OS or cpus/gpus/mem/swap on heartbeat. Offline
   self-heal
   (Postgres `connected: false` while the socket is still live) is handled by the
   instance **offline-sweep cron** re-projecting online via `onDaemonConnected`

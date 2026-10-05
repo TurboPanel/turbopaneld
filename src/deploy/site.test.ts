@@ -1167,3 +1167,86 @@ test("the Caddy dotfile rule refuses .env and nested dotfiles, not /.well-known/
     assertEquals(caddyRefusesDotPath(path), false, path);
   }
 });
+
+const NGINX_PHP_SITE: SiteApplySpec = {
+  composeServiceName: "app",
+  engine: "nginx",
+  root: "public",
+  listenPort: 18080,
+  php: { version: "8.4" },
+};
+
+/** The nginx vhost of a PHP site carrying `webEnv`. */
+function nginxPhpWith(webEnv?: Record<string, string>): string {
+  return nginxSiteConfig(
+    { ...NGINX_PHP_SITE, ...(webEnv ? { webEnv } : {}) },
+    "/srv/users/alice/sites/app/current/public",
+    null,
+    { phpFpmSocket: "/run/turbopanel/php/8.4/tp-env-app.sock" },
+  );
+}
+
+test("nginxSiteConfig passes site variables to PHP as fastcgi_param, name order, before the pinned parameters", () => {
+  const conf = nginxPhpWith({ ZED: "z", APP_ENV: "production" });
+  assertStringIncludes(conf, '    fastcgi_param APP_ENV "production";\n');
+  assertStringIncludes(conf, '    fastcgi_param ZED "z";\n');
+  assertEquals(conf.indexOf("APP_ENV") < conf.indexOf("ZED"), true);
+  // Platform-pinned parameters come last, so a site cannot move the script.
+  assertEquals(
+    conf.indexOf("ZED") < conf.indexOf("fastcgi_param SCRIPT_FILENAME"),
+    true,
+  );
+});
+
+test("nginxSiteConfig escapes quotes and backslashes in a site variable", () => {
+  const conf = nginxPhpWith({ QUOTED: String.raw`a"b\c` });
+  assertStringIncludes(conf, String.raw`fastcgi_param QUOTED "a\"b\\c";`);
+});
+
+test("nginxSiteConfig drops a site variable it cannot carry and keeps the rest, never printing the value", () => {
+  const conf = nginxPhpWith({
+    KEEP: "ok",
+    // nginx expands `$name` inside quotes and has no escape.
+    DOLLAR: "alpha$host",
+    NEWLINE: "a\nfastcgi_param X y",
+    // Parameters the platform sets itself.
+    SCRIPT_FILENAME: "/etc/passwd",
+    REMOTE_ADDR: "127.0.0.1",
+    HTTP_HOST: "evil",
+    http_authorization: "x",
+    HTTPS: "on",
+  });
+  assertStringIncludes(conf, 'fastcgi_param KEEP "ok";');
+  const gone = ["DOLLAR", "alpha", "NEWLINE", "/etc/passwd", "evil", "HTTPS"];
+  for (const text of [...gone, '127.0.0.1"', "http_authorization"]) {
+    assertEquals(conf.includes(text), false, text);
+  }
+  // Only the platform's own SCRIPT_FILENAME is left.
+  assertEquals(conf.match(/fastcgi_param SCRIPT_FILENAME /g)?.length, 1);
+});
+
+test("nginxSiteConfig still refuses a name that is not an environment variable name", () => {
+  assertThrows(() => nginxPhpWith({ "BAD-NAME": "x" }));
+});
+
+test("nginxSiteConfig carries no site variables outside the PHP location", () => {
+  assertEquals(
+    nginxPhpWith({ APP_ENV: "production" }).replace(
+      '    fastcgi_param APP_ENV "production";\n',
+      "",
+    ),
+    nginxPhpWith(),
+  );
+  // A static site has no PHP location, so nothing to pass the variables to.
+  const staticSite = nginxSiteConfig(
+    {
+      composeServiceName: "app",
+      engine: "nginx",
+      root: "public",
+      listenPort: 18080,
+      webEnv: { APP_ENV: "production" },
+    },
+    "/srv/users/alice/sites/app/current/public",
+  );
+  assertEquals(staticSite.includes("APP_ENV"), false);
+});

@@ -415,6 +415,56 @@ test({
 });
 
 test({
+  name:
+    "IdlePresence emits heartbeat when the release link scan lands after hello",
+  fn: async () => {
+    let releaseLinkScan:
+      | { scannedAt: string; findingCount: number; findings: [] }
+      | undefined;
+    const restore = installIdlePresenceProviders({
+      getBuildInfo: () => makeDaemonBuild("abc1234"),
+      resolveUpdateChannelConfig: () => ({
+        app: "daemon" as const,
+        channel: "trunk" as const,
+      }),
+      getHostHelloIdentity: () => FULL_HOST,
+      collectPresenceSnapshot: () => ({
+        timeSync: makeTimeSync("UTC"),
+        ips: makeIps("203.0.113.10"),
+        ...(releaseLinkScan ? { releaseLinkScan } : {}),
+      }),
+    });
+    const idleCheckIntervalMs = 15;
+    const socket = openMockSocket();
+    const presence = new IdlePresence({
+      serverId: "srv-hb-scan",
+      idleCheckIntervalMs,
+      idleThresholdMs: idleCheckIntervalMs,
+      staleConnectionMs: 60_000,
+    });
+    try {
+      presence.attach(socket as unknown as WebSocket);
+      const hello = framesOfType(socket, "hello")[0] as Record<string, unknown>;
+      assertEquals("releaseLinkScan" in hello, false);
+      releaseLinkScan = {
+        scannedAt: "2026-10-04T00:00:00.000Z",
+        findingCount: 0,
+        findings: [],
+      };
+      await sleep(idleCheckIntervalMs + 25);
+      const heartbeats = framesOfType(socket, "heartbeat");
+      assertEquals(heartbeats.length, 1);
+      const heartbeat = heartbeats[0] as Record<string, unknown>;
+      assertEquals(heartbeat.releaseLinkScan, releaseLinkScan);
+      assertEquals("daemonBuild" in heartbeat, false);
+    } finally {
+      presence.detach();
+      restore();
+    }
+  },
+});
+
+test({
   name: "IdlePresence onMaxAge fires once and skips ping on recycle tick",
   fn: async () => {
     const restore = installIdlePresenceProviders({
