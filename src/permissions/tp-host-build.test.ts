@@ -235,6 +235,14 @@ test("build-run hands the work tree to tpbuild and starts the runner in the fixe
         ".",
       ]),
       execLine([`${host.prefix}/opt/turbopanel/lib/tp-build-loopback`, "sync"]),
+      // A watcher an earlier run of this build id left waiting is stopped, or
+      // its unit name would make the new one fail to start.
+      execLine([
+        "systemctl",
+        "stop",
+        "--",
+        "turbopanel-buildwatch-b1.service",
+      ]),
       expectedWatcher(host.prefix),
       execLine(expectedSystemdRun(host.prefix)),
     ]);
@@ -275,7 +283,7 @@ test("build-run never opens a resolver through the private-range deny, on any po
     const result = await host.run(["build-run", "b1", "p1"]);
     assertEquals(result.code, 0, result.stderr);
     assertEquals(result.stderr, "");
-    const run = execLines(result.stdout)[4] ?? "";
+    const run = execLines(result.stdout).at(-1) ?? "";
     assertEquals(run, execLine(expectedSystemdRun(host.prefix)));
     // Allow wins over deny for every port, so nothing is ever allowed back.
     assertEquals(run.includes("IPAddressAllow"), false);
@@ -324,7 +332,7 @@ test("build-run denies the host's own public addresses but never a resolver or a
     const result = await host.run(["build-run", "b1", "p1"]);
     assertEquals(result.code, 0, result.stderr);
     assertEquals(
-      execLines(result.stdout)[4],
+      execLines(result.stdout).at(-1),
       execLine(
         expectedSystemdRun(host.prefix, {
           hostDeny: " 203.0.113.7/32 2001:db8::5/128",
@@ -358,7 +366,7 @@ test("a host with only local or private resolvers builds through the vetted publ
     assertEquals(result.code, 0, result.stderr);
     assertStringIncludes(result.stderr, "no public nameserver");
     assertEquals(
-      execLines(result.stdout)[4],
+      execLines(result.stdout).at(-1),
       execLine(expectedSystemdRun(host.prefix)),
     );
     assertEquals(
@@ -382,7 +390,7 @@ test("build-run keeps the build unprivileged below the OS floor, with a warning"
     assertEquals(ubuntu.code, 0, ubuntu.stderr);
     assertEquals(ubuntu.stderr, "");
     assertEquals(
-      execLines(ubuntu.stdout)[4],
+      execLines(ubuntu.stdout).at(-1),
       execLine(expectedSystemdRun(host.prefix, { privatePids: false })),
     );
 
@@ -560,7 +568,13 @@ test("tp cannot install a unit under the build sandbox's transient unit names", 
         "",
       ].join("\n"),
     );
-    for (const name of ["turbopanel-build-b1.service", "tpbuild.slice"]) {
+    for (
+      const name of [
+        "turbopanel-build-b1.service",
+        "turbopanel-buildwatch-b1.service",
+        "tpbuild.slice",
+      ]
+    ) {
       await refused(host, [
         "install",
         "-m",

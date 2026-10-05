@@ -717,7 +717,7 @@ tp_unit_ok() {
   _uk_hosting=""
   [ "$_uk_name" = "turbopanel-hosting-caddy.service" ] && _uk_hosting=1
   case "$_uk_name" in
-    turbopanel-build-*.service) return 1 ;;
+    turbopanel-build-*.service|turbopanel-buildwatch-*.service) return 1 ;;
     turbopanel-php-*)
       tp_php_unit_ok "$_uk_file" "$_uk_name"
       return
@@ -3008,6 +3008,11 @@ tp_verb_build_run() {
   tp_run "$BUILD_LOOPBACK" sync ||
     tp_die "build-run: the build's network rules could not be loaded (is nftables installed?); builds are stopped until they can"
   cd /
+  # The watcher of an earlier run of this build id can still be waiting (a
+  # short build ends before its first look, and a release is rebuilt under the
+  # same id): its unit name would make this run's watcher fail to start. The
+  # host build lock is held, so no build of this id is running.
+  tp_run systemctl stop -- "turbopanel-buildwatch-$_br_id.service" 2>/dev/null || :
   # The watcher stops the build when its work tree or cache outgrows the caps.
   tp_run systemd-run --unit="turbopanel-buildwatch-$_br_id" --collect --quiet --no-block \
     --setenv=SUDO_UID="$CALLER_UID" --setenv=SUDO_GID="$CALLER_GID" \
