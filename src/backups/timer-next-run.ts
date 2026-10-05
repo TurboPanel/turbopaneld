@@ -32,7 +32,7 @@ export function parseTimerNextRun(
     if (typeof row !== "object" || row === null) continue;
     const entry = row as { unit?: unknown; next?: unknown };
     if (entry.unit !== timer) continue;
-    if (typeof entry.next !== "number" || !(entry.next > 0)) return undefined;
+    if (typeof entry.next !== "number" || entry.next <= 0) return undefined;
     const at = new Date(Math.floor(entry.next / 1000));
     return Number.isNaN(at.getTime()) ? undefined : at.toISOString();
   }
