@@ -22,6 +22,9 @@ import { join } from "@std/path";
 import { logInfo, logWarn } from "../util/logger.ts";
 import { forEachSequential } from "../util/sequential.ts";
 import { runDocker } from "../deploy/docker-cli.ts";
+import { collectServerIps } from "../host/server-addresses.ts";
+import type { ServerReportedIp } from "../contracts/server-reported-ip.ts";
+import { stampObservedPeerInterfaces } from "./fabric-peer-interface.ts";
 import { fabricNetworkDir, resolveLayout } from "../paths/layout.ts";
 import {
   type FabricPeerHealth,
@@ -105,6 +108,7 @@ let networkDirOverride: string | null = null;
 let runOverride: FabricRunFn | null = null;
 let enableIpForwardingOverride: (() => Promise<void>) | null = null;
 let skipRealSyscalls = false;
+let localAddressesOverride: (() => ServerReportedIp[]) | null = null;
 
 /** Test-only: treat this directory as `<daemonStateDir>/network/`. */
 export function setFabricNetworkDirForTests(dir: string | null): void {
@@ -131,7 +135,15 @@ export function setFabricSkipRealSyscallsForTests(skip: boolean): void {
   skipRealSyscalls = skip;
 }
 
+/** Test-only local address list for the endpoint-to-NIC match. */
+export function setFabricLocalAddressesForTests(
+  fn: (() => ServerReportedIp[]) | null,
+): void {
+  localAddressesOverride = fn;
+}
+
 export function resetFabricTestOverrides(): void {
+  localAddressesOverride = null;
   networkDirOverride = null;
   runOverride = null;
   enableIpForwardingOverride = null;
@@ -1281,12 +1293,30 @@ export function getLastObservedFabricPeers(): FabricReconcileObservedPeer[] {
   return lastObservedFabricPeers;
 }
 
+/**
+ * Local addresses for the endpoint-to-NIC match; none when the host cannot
+ * list them, or when a test runner is installed (the real NICs of the machine
+ * running the tests must not leak into observed peers).
+ */
+function observedPeerAddresses(): ServerReportedIp[] {
+  if (localAddressesOverride) return localAddressesOverride();
+  if (runOverride !== null || skipRealSyscalls) return [];
+  try {
+    return collectServerIps();
+  } catch {
+    return [];
+  }
+}
+
 async function collectFabricPeerState(): Promise<
   FabricReconcileObservedPeer[]
 > {
   const dump = await runHost("wg", ["show", FABRIC_INTERFACE_NAME, "dump"]);
   if (!dump.success) return [];
-  const peers = stampObservedPeerHealth(parseWgDumpPeers(dump.stdout));
+  const peers = stampObservedPeerInterfaces(
+    stampObservedPeerHealth(parseWgDumpPeers(dump.stdout)),
+    observedPeerAddresses(),
+  );
   lastObservedFabricPeers = peers;
   return peers;
 }
