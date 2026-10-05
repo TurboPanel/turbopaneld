@@ -20,6 +20,9 @@ import { resolveLayout } from "../paths/layout.ts";
 import { reportLiveReleaseLinks } from "../deploy/release/live-release-scan.ts";
 import { guardHostingCaddySites } from "../deploy/ingress.ts";
 import { createSentinel, type SentinelOptions } from "../monitor/index.ts";
+import type { ServiceRunState } from "../contracts/service-run-state.ts";
+import { setServiceRunStateSource } from "../host/service-run-state.ts";
+import { fetchContainerLastLogLine } from "../monitor/service-run-state.ts";
 import {
   initOrchestration,
   shouldConnectToInstance,
@@ -47,6 +50,8 @@ export type DockerMonitorLike = {
 export type SentinelLike = {
   start(signal: AbortSignal): void;
   stop(): void;
+  /** Per-service run state for the presence channel; absent on test doubles. */
+  serviceRunStates?(): ServiceRunState[] | undefined;
 };
 
 export type DaemonRunIo = {
@@ -259,6 +264,7 @@ export async function runDaemon(io: DaemonRunIo = {}): Promise<void> {
     dockerClient = attached.dockerClient;
     if (attached.dockerMonitor && !io.createSentinel) {
       sentinelOptions.dockerMonitor = attached.dockerMonitor as DockerMonitor;
+      sentinelOptions.fetchLastLogLine = fetchContainerLastLogLine;
     }
   }
 
@@ -266,6 +272,8 @@ export async function runDaemon(io: DaemonRunIo = {}): Promise<void> {
   // Future: daemon-side SQLite monitoring store will subscribe to
   // sentinel.onTransition() and sentinel.buildHeartbeat() here.
   sentinel.start(abort.signal);
+  // Per-service run state rides hello / heartbeat presence (host/service-run-state.ts).
+  setServiceRunStateSource(() => sentinel.serviceRunStates?.());
 
   await (io.startTunnels ?? startTunnels)(abort.signal);
 
@@ -288,6 +296,7 @@ export async function runDaemon(io: DaemonRunIo = {}): Promise<void> {
       info("daemon", "shutting down");
       instance.stop();
       sentinel.stop();
+      setServiceRunStateSource(undefined);
       (io.stopHostStorageSamplers ?? stopHostStorageSamplers)();
       closeDockerClient(dockerClient);
       dockerClient = undefined;

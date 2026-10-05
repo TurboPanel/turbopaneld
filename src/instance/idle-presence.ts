@@ -27,6 +27,10 @@ import {
   type ServerReportedIp,
 } from "../host/server-addresses.ts";
 import type { HostResources } from "../host/host-inventory.ts";
+import {
+  readServiceRunStates,
+  type ServiceRunState,
+} from "../host/service-run-state.ts";
 
 export const IDLE_PRESENCE_MS = 60_000;
 
@@ -116,6 +120,12 @@ type PresenceSnapshot = {
    */
   runtimes?: HostRuntimeMetadata;
   /**
+   * Per-service run state (running / restart count / last error), present only
+   * while the sentinel watches Docker. An empty list is meaningful: it tells the
+   * control plane every service on this host is gone.
+   */
+  services?: ServiceRunState[];
+  /**
    * Summary of the boot-time check of live releases for links that leave the
    * release (`release-link-scan.json`). The scan runs in the background after
    * the daemon is up, so it usually lands after the first hello and arrives on
@@ -147,12 +157,14 @@ function readLinkScanForPresence(): ReleaseLinkScanReport | undefined {
 function defaultPresenceSnapshot(): PresenceSnapshot {
   const docker = readDocker();
   const runtimes = readHostRuntimes();
+  const services = readServiceRunStates();
   const releaseLinkScan = readLinkScanForPresence();
   return {
     timeSync: readTimeSync(),
     ips: collectServerIps(readDefaultRouteInterfaces()),
     ...(docker ? { docker } : {}),
     ...(runtimes ? { runtimes } : {}),
+    ...(services ? { services } : {}),
     ...(releaseLinkScan ? { releaseLinkScan } : {}),
   };
 }
@@ -387,6 +399,7 @@ export class IdlePresence {
         timeSync: presence.timeSync,
         ...(presence.docker ? { docker: presence.docker } : {}),
         ...(presence.runtimes ? { runtimes: presence.runtimes } : {}),
+        ...(presence.services ? { services: presence.services } : {}),
         ...(presence.releaseLinkScan
           ? { releaseLinkScan: presence.releaseLinkScan }
           : {}),
@@ -452,6 +465,7 @@ export class IdlePresence {
       resources: presence && { ips: presence.ips },
       docker: presence?.docker,
       runtimes: presence?.runtimes,
+      services: presence?.services,
       releaseLinkScan: presence?.releaseLinkScan,
     });
   }
@@ -506,6 +520,7 @@ export class IdlePresence {
     resources?: HostResources;
     docker?: HostDockerMetadata;
     runtimes?: HostRuntimeMetadata;
+    services?: ServiceRunState[];
     releaseLinkScan?: ReleaseLinkScanReport;
   }): void {
     const ws = this.#ws;
@@ -519,6 +534,7 @@ export class IdlePresence {
       resources?: HostResources;
       docker?: HostDockerMetadata;
       runtimes?: HostRuntimeMetadata;
+      services?: ServiceRunState[];
       releaseLinkScan?: ReleaseLinkScanReport;
     } = {
       type: "heartbeat",
@@ -532,6 +548,7 @@ export class IdlePresence {
     if (fields.resources) payload.resources = fields.resources;
     if (fields.docker) payload.docker = fields.docker;
     if (fields.runtimes) payload.runtimes = fields.runtimes;
+    if (fields.services) payload.services = fields.services;
     if (fields.releaseLinkScan) {
       payload.releaseLinkScan = fields.releaseLinkScan;
     }

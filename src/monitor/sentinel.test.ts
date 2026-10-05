@@ -593,3 +593,129 @@ async function waitFor<T>(
   }
   throw new Error(`timed out waiting for ${label}`);
 }
+
+function serviceInspect(
+  status: string,
+  options: { startedAt?: string; restartCount?: number; exitCode?: number } =
+    {},
+): ContainerInspect {
+  const base = makeInspect(CONTAINER_ID, status);
+  return {
+    ...base,
+    RestartCount: options.restartCount ?? 0,
+    Config: { Labels: { "com.turbopanel.service": "svc-1" } },
+    State: {
+      ...base.State,
+      Restarting: status === "restarting",
+      ExitCode: options.exitCode ?? 0,
+      ...(options.startedAt ? { StartedAt: options.startedAt } : {}),
+    },
+  };
+}
+
+test("sentinel reports no service state until Docker has been listed or when Docker is off", async () => {
+  assertEquals(createSentinel({}).serviceRunStates(), undefined);
+
+  const dockerMonitor = new FakeDockerMonitor();
+  const sentinel = createSentinel({
+    dockerMonitor: dockerMonitor as unknown as DockerMonitor,
+  });
+  assertEquals(sentinel.serviceRunStates(), undefined);
+
+  const controller = new AbortController();
+  dockerMonitor.seed(makeSummary(), serviceInspect("running"));
+  sentinel.start(controller.signal);
+  await dockerMonitor.waitUntilReady();
+  assertEquals(sentinel.serviceRunStates()?.length, 1);
+  controller.abort();
+  sentinel.stop();
+});
+
+test("sentinel service state follows the 60 second settle rule", async () => {
+  const dockerMonitor = new FakeDockerMonitor();
+  const sentinel = createSentinel({
+    dockerMonitor: dockerMonitor as unknown as DockerMonitor,
+  });
+  const controller = new AbortController();
+  const startedAt = "2026-10-04T12:00:00.000Z";
+  dockerMonitor.seed(makeSummary(), serviceInspect("running", { startedAt }));
+  sentinel.start(controller.signal);
+  await dockerMonitor.waitUntilReady();
+
+  const at30 = new Date("2026-10-04T12:00:30.000Z");
+  const at61 = new Date("2026-10-04T12:01:01.000Z");
+  assertEquals(sentinel.serviceRunStates(at30)?.[0]?.state, "starting");
+  const settled = sentinel.serviceRunStates(at61)?.[0];
+  assertEquals(settled?.state, "running");
+  assertEquals(settled?.serviceId, "svc-1");
+  assertEquals(settled?.asOf, at61.toISOString());
+  controller.abort();
+  sentinel.stop();
+});
+
+test("sentinel fetches a crashing container's last log line once per restart count", async () => {
+  const dockerMonitor = new FakeDockerMonitor();
+  const fetched: string[] = [];
+  const sentinel = createSentinel({
+    dockerMonitor: dockerMonitor as unknown as DockerMonitor,
+    fetchLastLogLine: (id) => {
+      fetched.push(id);
+      return Promise.resolve("/bin/sh: 1: next: not found");
+    },
+  });
+  const controller = new AbortController();
+  dockerMonitor.seed(
+    makeSummary(),
+    serviceInspect("restarting", { restartCount: 4 }),
+  );
+  sentinel.start(controller.signal);
+  await dockerMonitor.waitUntilReady();
+
+  const first = sentinel.serviceRunStates();
+  assertEquals(first?.[0]?.state, "crashing");
+  assertEquals(first?.[0]?.lastError, undefined);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  const second = sentinel.serviceRunStates();
+  assertEquals(second?.[0]?.lastError, "/bin/sh: 1: next: not found");
+  assertEquals(second?.[0]?.restartCount, 4);
+  sentinel.serviceRunStates();
+  assertEquals(fetched.length, 1);
+  controller.abort();
+  sentinel.stop();
+});
+
+test("sentinel ignores ingress containers and survives a failing log fetch", async () => {
+  const dockerMonitor = new FakeDockerMonitor();
+  const sentinel = createSentinel({
+    dockerMonitor: dockerMonitor as unknown as DockerMonitor,
+    fetchLastLogLine: () => Promise.reject(new Error("docker unavailable")),
+  });
+  const controller = new AbortController();
+  const ingress = serviceInspect("exited", { exitCode: 1 });
+  ingress.Config = {
+    Labels: {
+      "com.turbopanel.service": "svc-ingress",
+      "turbopanel.role": "ingress",
+    },
+  };
+  dockerMonitor.seed(makeSummary(), ingress);
+  sentinel.start(controller.signal);
+  await dockerMonitor.waitUntilReady();
+  assertEquals(sentinel.serviceRunStates(), []);
+
+  dockerMonitor.clearContainers();
+  dockerMonitor.emitChange({
+    containerId: CONTAINER_ID,
+    summary: makeSummary(),
+    inspect: serviceInspect("exited", { exitCode: 1 }),
+    removed: false,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assertEquals(
+    sentinel.serviceRunStates()?.[0]?.lastError,
+    "Exited with code 1",
+  );
+  controller.abort();
+  sentinel.stop();
+});
