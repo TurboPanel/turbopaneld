@@ -90,6 +90,8 @@ test("the build account is refused every platform loopback port the code owns", 
     "app band end": 19799,
     "platform Postgres (postgres_expose_port)": 5432,
     "legacy ProxySQL": 3306,
+    "RabbitMQ AMQP": 5672,
+    "RabbitMQ management": 15672,
   };
   for (const port of PROXYSQL_RESERVED_PUBLISHED_PORTS) {
     owned[`database ingress ${port}`] = port;

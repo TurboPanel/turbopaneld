@@ -366,28 +366,46 @@ export type SandboxedBuildParams = {
 
 // One build at a time per host: tp-host holds a root-only lock as well, but
 // queueing here keeps a waiting deploy visible in its transcript.
-let buildQueue: Promise<void> = Promise.resolve();
-let buildsQueued = 0;
+type BuildWaiter = { projectKey: string; go: () => void };
+const buildWaiters: BuildWaiter[] = [];
+let buildBusy = false;
+let lastBuildProject = "";
 
-async function withBuildSlot<T>(
+/** Hand the slot to the longest waiter, preferring a project that did not just build. */
+function nextBuildWaiter(): void {
+  const index = buildWaiters.findIndex((w) =>
+    w.projectKey !== lastBuildProject
+  );
+  const [waiter] = buildWaiters.splice(Math.max(index, 0), 1);
+  if (!waiter) {
+    buildBusy = false;
+    return;
+  }
+  lastBuildProject = waiter.projectKey;
+  waiter.go();
+}
+
+/**
+ * One build at a time on the host. Waiting builds are served round-robin by
+ * project (oldest first within a project's turn), so one project that deploys
+ * over and over cannot keep every other project's build waiting.
+ */
+export async function withBuildSlot<T>(
   onOutput: ReleaseOutputHandler | undefined,
   run: () => Promise<T>,
+  projectKey = "",
 ): Promise<T> {
-  if (buildsQueued > 0) {
+  if (buildBusy) {
     onOutput?.("stdout", "waiting for another build on this host to finish");
+    await new Promise<void>((go) => buildWaiters.push({ projectKey, go }));
+  } else {
+    buildBusy = true;
+    lastBuildProject = projectKey;
   }
-  buildsQueued += 1;
-  const previous = buildQueue;
-  let release = () => {};
-  buildQueue = new Promise((resolve) => {
-    release = resolve;
-  });
   try {
-    await previous;
     return await run();
   } finally {
-    buildsQueued -= 1;
-    release();
+    nextBuildWaiter();
   }
 }
 
@@ -514,5 +532,5 @@ export async function runSandboxedBuild(
       params.onOutput?.("stderr", message);
     }
     if (failure !== null) throw failure;
-  });
+  }, params.work.projectKey);
 }

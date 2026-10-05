@@ -19,6 +19,7 @@ import {
   runSandboxedBuild,
   type SandboxSpawn,
   sweepStaleBuildWork,
+  withBuildSlot,
 } from "./build-sandbox.ts";
 
 /**
@@ -467,6 +468,29 @@ test("trees left by a dead daemon are stopped, taken back and removed; live ones
   } finally {
     await Deno.remove(root, { recursive: true });
   }
+});
+
+test("waiting builds are served round-robin by project", async () => {
+  const order: string[] = [];
+  let open = () => {};
+  const gate = new Promise<void>((resolve) => {
+    open = resolve;
+  });
+  const job = (name: string, project: string, wait?: Promise<void>) =>
+    withBuildSlot(undefined, async () => {
+      await wait;
+      order.push(name);
+    }, project);
+  const all = [
+    job("a1", "A", gate),
+    job("a2", "A"),
+    job("a3", "A"),
+    job("b1", "B"),
+    job("c1", "C"),
+  ];
+  open();
+  await Promise.all(all);
+  assertEquals(order, ["a1", "b1", "a2", "c1", "a3"]);
 });
 
 test("a build that floods its output is stopped and does not buffer it", async () => {
