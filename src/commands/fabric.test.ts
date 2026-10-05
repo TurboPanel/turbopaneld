@@ -595,6 +595,127 @@ test("teardown with persisted state is idempotent on a second call", async () =>
   );
 });
 
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await Deno.stat(path);
+    return true;
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) return false;
+    throw err;
+  }
+}
+
+test("teardown records a bridge that still has containers and retries it on the next teardown", async () => {
+  let busy = true;
+  await withFabricDir(
+    "tp-fabric-teardown-busy-",
+    async (networkDir) => {
+      const parsed = parseFabricReconcilePayload(enabledPayload());
+      if (!parsed.enabled) {
+        throw new TypeError("expected enabled fabric payload");
+      }
+      await handleFabricReconcile(parsed, new Date().toISOString());
+      const first = await handleFabricReconcile(
+        { enabled: false },
+        new Date().toISOString(),
+      );
+      assertEquals(
+        first.summary,
+        `TurboFabric torn down; still attached, removed later: ${NETWORK_NAME}`,
+      );
+      // state.json is gone (fabric is off), the leftover is kept apart.
+      assertEquals(await pathExists(join(networkDir, "state.json")), false);
+      const pending = JSON.parse(
+        await Deno.readTextFile(join(networkDir, "teardown-pending.json")),
+      );
+      assertEquals(pending, { networks: [NETWORK_NAME] });
+
+      busy = false;
+      const second = await handleFabricReconcile(
+        { enabled: false },
+        new Date().toISOString(),
+      );
+      assertEquals(second.summary, "TurboFabric torn down");
+      assertEquals(
+        await pathExists(join(networkDir, "teardown-pending.json")),
+        false,
+      );
+    },
+    (cmd, args) => {
+      if (cmd === "docker" && args[0] === "network" && args[1] === "rm") {
+        return busy
+          ? fail(
+            `Error response from daemon: error while removing network: network ${NETWORK_NAME} has active endpoints`,
+          )
+          : ok("");
+      }
+      return null;
+    },
+  );
+});
+
+test("teardown removes TurboFabric bridges that state.json does not name", async () => {
+  await withFabricDir(
+    "tp-fabric-teardown-orphan-",
+    async (_networkDir, invocations) => {
+      const result = await handleFabricReconcile(
+        { enabled: false },
+        new Date().toISOString(),
+      );
+      assertEquals(result.summary, "TurboFabric torn down");
+      assertEquals(
+        invocations.some((line) =>
+          line.includes("docker network rm tpn_orphan")
+        ),
+        true,
+      );
+      // Only routed fabric bridges, never another network the listing matched.
+      assertEquals(
+        invocations.some((line) =>
+          line.includes("docker network rm my-tpn_app")
+        ),
+        false,
+      );
+    },
+    (cmd, args) => {
+      if (cmd === "docker" && args[0] === "network" && args[1] === "ls") {
+        return ok("tpn_orphan\nmy-tpn_app\n");
+      }
+      if (cmd === "docker" && args[0] === "network" && args[1] === "rm") {
+        return ok("");
+      }
+      return null;
+    },
+  );
+});
+
+test("daemon start with fabric off retries bridges an earlier teardown left", async () => {
+  await withFabricDir(
+    "tp-fabric-boot-pending-",
+    async (networkDir, invocations) => {
+      await Deno.writeTextFile(
+        join(networkDir, "teardown-pending.json"),
+        `${JSON.stringify({ networks: [NETWORK_NAME, "not-a-fabric-net"] })}\n`,
+      );
+      await restoreFabricFromPersistedState();
+      assertEquals(
+        invocations.filter((line) => line.startsWith("docker network rm")),
+        [`docker network rm ${NETWORK_NAME}`],
+      );
+      assertEquals(
+        await pathExists(join(networkDir, "teardown-pending.json")),
+        false,
+      );
+    },
+    (cmd, args) => {
+      if (cmd === "docker" && args[0] === "network" && args[1] === "rm") {
+        return ok("");
+      }
+      return null;
+    },
+  );
+});
+
 test("teardown fails when wg-quick unit cannot be disabled", async () => {
   await withFabricDir(
     "tp-fabric-teardown-disable-",

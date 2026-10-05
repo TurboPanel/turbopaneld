@@ -35,7 +35,11 @@ change-detected heartbeats.
   https://turbopanel.io/docs/architecture/turbofabric-path-model — no daemon
   behavior change in this slice. `{ enabled: false }`
   tears down `tp0`, routed bridges, `TP-FORWARD`, keys, and local state — not a
-  no-op. The daemon owns apply (no Ansible round-trip): it persists the private
+  no-op. It removes every `tpn_*` bridge (the ones `state.json` names and any
+  other on the host, e.g. from a half-finished first enable); a bridge that
+  still has containers attached is recorded in `network/teardown-pending.json`
+  (never `state.json`, whose presence means enabled) and retried on the next
+  teardown and at daemon start. The daemon owns apply (no Ansible round-trip): it persists the private
   key at `<daemonStateDir>/network/wireguard/private.key` (mode `0600`, via
   `fabricNetworkDir`), writes mode-0600 `tp0.conf` (PSK plaintext inlined, temp
   `psk/` files deleted after apply), `wg syncconf`, enables `wg-quick@tp0` for
