@@ -23,6 +23,7 @@ import { nativeAppUnitContent } from "./native/unit.ts";
 import {
   apacheSiteConfig,
   caddySiteConfig,
+  nginxSiteConfig,
   openlitespeedVhostConfig,
   phpAdminValues,
   phpFpmPoolAdminDirectives,
@@ -303,6 +304,41 @@ test("Apache SetEnv refuses a line break in a value or a key, and ${ in a value"
     () => apacheWithEnv({ BIG: "x".repeat(4097) }),
     Error,
     "sites.phpapp.webEnv.BIG must be at most",
+  );
+});
+
+function nginxWithEnv(webEnv: Record<string, string>): string {
+  return nginxSiteConfig(
+    { ...apacheSite, engine: "nginx", webEnv },
+    "/srv/x/public",
+    null,
+    { phpFpmSocket: FPM_SOCKET },
+  );
+}
+
+test("nginx fastcgi_param drops a hostile value, refuses a bad name, and escapes the quote", () => {
+  for (
+    const ch of ["\n", "\r", "\0", "\u0085", "\u2028", "\u2029", "$", "${host}"]
+  ) {
+    const conf = nginxWithEnv({
+      VAR_X: `x${ch}fastcgi_param SCRIPT_FILENAME /etc/passwd;`,
+      BIG: "x".repeat(4097),
+    });
+    assertEquals(conf.includes("VAR_X"), false);
+    assertEquals(conf.includes("BIG"), false);
+    assertEquals(conf.includes("/etc/passwd"), false);
+  }
+  for (const key of ["A\nB", "A B", "A;", "1A", ""]) {
+    assertThrows(
+      () => nginxWithEnv({ [key]: "x" }),
+      Error,
+      "sites.phpapp.webEnv must be a letter",
+    );
+  }
+  // `;`, braces and `#` are inert inside a quoted value.
+  assertEquals(
+    nginxWithEnv({ V: 'a";}#{' }).includes('fastcgi_param V "a\\";}#{";'),
+    true,
   );
 });
 

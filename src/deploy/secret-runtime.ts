@@ -159,7 +159,7 @@ function plaintextKey(
   return `${entry.composeServiceName ?? ""}::${entry.key}`;
 }
 
-async function decryptEnvelopes(
+export async function decryptEnvelopes(
   decryptSecrets: DecryptSecretsFn,
   envelopes: readonly string[],
 ): Promise<(string | null)[]> {

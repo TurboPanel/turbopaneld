@@ -456,12 +456,18 @@ export type DaemonMessage =
      * Daemon-initiated, fire-and-forget (no correlated request/result, same
      * shape as `managed-ha-event`) — `AcmeIssuanceObserver`'s live TLS-probe
      * verdict for one `tlsMode: 'acme'` hostname, sent only on a state
-     * change (first failure after a short debounce, or a recovery).
+     * change (first failure after a short debounce, a recovery, the first
+     * good sighting, or a renewal that moves `notAfter`).
      */
     type: "acme-issuance-event";
     hostname: string;
     ok: boolean;
     errorMessage?: string;
+    /**
+     * Leaf expiry (ISO 8601) the probe read, sent with `ok: true` on the
+     * first good sighting, on recovery and when a renewal changes it.
+     */
+    notAfter?: string;
     at: string;
   }
   | {

@@ -255,6 +255,38 @@ test("parseEnvironmentDeployPayload round-trips managed-directory site with cron
   assertEquals(site?.principal?.username, "site_user");
 });
 
+test("parseEnvironmentDeployPayload keeps sealed site variables apart from webEnv", () => {
+  const payload = parseEnvironmentDeployPayload({
+    ...DEPLOY_BASE,
+    hostingIngressNetwork: HOSTING_INGRESS_NETWORK,
+    hostings: [{
+      hostingId: "h1",
+      serviceId: "s1",
+      composeServiceName: "site",
+      hostnames: ["site.example.test"],
+      web: {
+        env: { APP_ENV: "production" },
+        secretEnv: { SITE_VAR: "tpdaemon.abc", BAD: 7 },
+      },
+    }],
+    sites: [{
+      composeServiceName: "site",
+      engine: "nginx",
+      root: "public",
+      listenPort: 18080,
+      webEnv: { APP_ENV: "production" },
+      webSecretEnv: { SITE_VAR: "tpdaemon.abc", BAD: 7 },
+    }],
+  });
+  const site = payload.sites?.[0];
+  assertEquals(site?.webEnv, { APP_ENV: "production" });
+  // Only string envelopes survive the parse.
+  assertEquals(site?.webSecretEnv, { SITE_VAR: "tpdaemon.abc" });
+  assertEquals(payload.hostings[0]?.web?.secretEnv, {
+    SITE_VAR: "tpdaemon.abc",
+  });
+});
+
 test("parseEnvironmentDeployPayload rejects cron and managed-directory without principal", () => {
   assertThrows(
     () =>
@@ -545,10 +577,10 @@ test("parseEnvironmentDeployPayload rejects invalid secretPlan and oversized env
       parseEnvironmentDeployPayload({
         ...DEPLOY_BASE,
         secretPlan: [{
-          key: "DB_PASS",
+          key: "SITE_VAR",
           composeServiceName: "web",
           source: "../escape",
-          target: "DB_PASS",
+          target: "SITE_VAR",
           relativePath: "db_pass",
         }],
       }),

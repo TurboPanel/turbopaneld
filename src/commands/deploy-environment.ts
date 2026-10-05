@@ -56,6 +56,7 @@ import {
   type RunDockerStreamedFn,
 } from "../deploy/docker-cli.ts";
 import { captureDecryptedSecrets } from "../logs/capture.ts";
+import { resolveSiteSecretEnv } from "../deploy/site/site-secret-env.ts";
 import {
   COMMAND_LOG_PHASES,
   type CommandOutputSink,
@@ -2196,17 +2197,15 @@ export async function handleEnvironmentDeploy(
   // Which host-native lane each service ends up on can only be decided once the
   // releases are built: a `serviceKind: node` service that turned out to be a
   // static export is served as files, not supervised as a process.
-  const { sites, nativeAppServices } = resolveHostNativeLanes(
-    parsedPayload,
-    appliedReleases,
-  );
+  const lanes = resolveHostNativeLanes(parsedPayload, appliedReleases);
+  const { nativeAppServices } = lanes;
   // Everything from here on (release trees reclaimed, sites and native apps
   // applied, cron timers swept) changes what is serving. A deploy with none of
   // that to do stays cancellable until its containers are touched.
   if (
     cancel &&
     await hostNativeCutoverPending({
-      sites,
+      sites: lanes.sites,
       nativeAppServices,
       deploymentDir,
       environmentId: parsedPayload.environmentId,
@@ -2225,6 +2224,10 @@ export async function handleEnvironmentDeploy(
     runtime.runPrivileged,
   );
   runtime.logSink.setPhase(COMMAND_LOG_PHASES.PREPARE);
+
+  // Secret runtime variables arrive sealed; the engine configs and
+  // `hosting.env` take them from `webEnv` once decrypted.
+  const sites = await resolveSiteSecretEnv(lanes.sites, runtime.decryptSecrets);
 
   const mountPaths = await resolveDeployMountPaths(
     layout,
