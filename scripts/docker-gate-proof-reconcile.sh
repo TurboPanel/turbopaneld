@@ -122,7 +122,8 @@ traefik_id() {
 }
 
 mounts_of() {
-  docker inspect --format '{{range .Mounts}}{{.Source}} {{end}}' "$1" 2>/dev/null
+  _mo_id=$1
+  docker inspect --format '{{range .Mounts}}{{.Source}} {{end}}' "$_mo_id" 2>/dev/null
   return 0
 }
 
