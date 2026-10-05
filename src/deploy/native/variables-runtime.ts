@@ -6,36 +6,53 @@
  * resolved list on `nativeAppServices[].variables`: plain values inline, and
  * secrets as a pointer (`secretKey`) into the daemon-sealed
  * `variableMaterial[]` the deploy already carries. This module turns that into
- * one private file per app, `<configDir>/node-apps/envs/<serviceId>.env`,
- * which the unit loads with `EnvironmentFile=`.
+ * one private file per app that the unit loads with `EnvironmentFile=`.
  *
  * Why a file and not `Environment=` lines: a unit is `0644` and its text is
  * readable by anyone through `systemctl show`, and systemd expands `%` inside
- * it. The file is `0600` in a `0700` directory and is read by systemd as root
- * before it drops to the app's user.
+ * it. The file is `0600` and is read by systemd as root before it drops to the
+ * app's user.
  *
- * The file is written on **every** deploy (and removed when the app has no
- * variables left), before the unit is installed and started, so a variable
- * change reaches the process with the same restart that picks up a release.
- * Values are never logged; only names are.
+ * Why two copies: systemd reads the file as root, so the unit must not name a
+ * path the daemon account can write (it could swap in a link to any root-only
+ * file after `tp-host` checked the unit). The daemon therefore only *stages*
+ * the file, `<configDir>/node-apps/envs/<serviceId>.env`, and asks
+ * `tp-host app-env-install <serviceId>` to copy it, after checking it, into a
+ * folder only root can write (`<configDir>/node-app-env/`). The unit names that
+ * copy; the staged file is deleted as soon as the copy is made.
+ *
+ * The copy is made on **every** deploy, before the unit is installed and
+ * started, so a variable change reaches the process with the same restart that
+ * picks up a release. An app left with no variables loses its copy only after
+ * its unit (now without `EnvironmentFile=`) is in place and running. Values are
+ * never logged; only names are.
  */
 
 import { join } from "@std/path";
+import { hostSudoArgs } from "../../permissions/host-sudo.ts";
 import type {
   EnvironmentDeployNativeAppService,
   EnvironmentDeployVariableMaterial,
 } from "../../contracts/commands-contracts.ts";
 import type { LayoutPaths } from "../../paths/layout.ts";
 import { forEachSequential } from "../../util/sequential.ts";
+import type { RunFn } from "../ensure-principal.ts";
 import type { DecryptSecretsFn } from "../materialize-tls.ts";
 import {
   NATIVE_APP_PLATFORM_ENV_NAMES,
-  nativeAppEnvDir,
-  nativeAppEnvPath,
+  nativeAppEnvStageDir,
+  nativeAppEnvStagePath,
 } from "./unit.ts";
 
 export const NATIVE_APP_ENV_FILE_MODE = 0o600;
 export const NATIVE_APP_ENV_DIR_MODE = 0o700;
+/**
+ * Largest variables file `tp-host app-env-install` copies (TP_APPENV_MAX in
+ * orchestration/scripts/tp-host; a test keeps the two equal). The contract's
+ * worst case, 256 variables of 64 KiB, would not fit an environment block
+ * anyway; refusing here names the app instead of failing in root's helper.
+ */
+export const NATIVE_APP_ENV_MAX_BYTES = 1_048_576;
 const DECRYPT_BATCH_SIZE = 100;
 
 export type NativeAppEnvEntry = { name: string; value: string };
@@ -180,24 +197,31 @@ export function renderNativeAppEnvFile(
 }
 
 /**
- * Write the app's environment file (temp file + rename, `0600`).
+ * Stage the app's environment file (temp file + rename, `0600`).
  *
- * The rename keeps systemd from ever reading a half-written file when a
- * restart races a deploy, and the file is created `0600` rather than chmodded
- * afterwards so a secret is never on disk with a wider mode, even briefly.
+ * The rename keeps `tp-host` from ever reading a half-written file, and the
+ * file is created `0600` rather than chmodded afterwards so a secret is never
+ * on disk with a wider mode, even briefly.
  */
-export async function writeNativeAppEnvFile(
+export async function stageNativeAppEnvFile(
   layout: Pick<LayoutPaths, "configDir">,
   serviceId: string,
   entries: readonly NativeAppEnvEntry[],
 ): Promise<void> {
-  const dir = nativeAppEnvDir(layout);
+  const text = renderNativeAppEnvFile(entries);
+  const size = new TextEncoder().encode(text).length;
+  if (size > NATIVE_APP_ENV_MAX_BYTES) {
+    throw new Error(
+      `native app ${serviceId}: its environment variables come to ${size} bytes, over the ${NATIVE_APP_ENV_MAX_BYTES} byte limit`,
+    );
+  }
+  const dir = nativeAppEnvStageDir(layout);
   await Deno.mkdir(dir, { recursive: true, mode: NATIVE_APP_ENV_DIR_MODE });
   await Deno.chmod(dir, NATIVE_APP_ENV_DIR_MODE);
-  const path = nativeAppEnvPath(layout, serviceId);
+  const path = nativeAppEnvStagePath(layout, serviceId);
   const tmp = join(dir, `.${serviceId}.env.${crypto.randomUUID()}.tmp`);
   try {
-    await Deno.writeTextFile(tmp, renderNativeAppEnvFile(entries), {
+    await Deno.writeTextFile(tmp, text, {
       mode: NATIVE_APP_ENV_FILE_MODE,
       createNew: true,
     });
@@ -208,15 +232,57 @@ export async function writeNativeAppEnvFile(
   }
 }
 
-/** Remove the app's environment file. Absent is fine: nothing to clean. */
-export async function removeNativeAppEnvFile(
+/** Remove the staged file. Absent is fine: nothing to clean. */
+export async function removeStagedNativeAppEnvFile(
   layout: Pick<LayoutPaths, "configDir">,
   serviceId: string,
 ): Promise<void> {
   try {
-    await Deno.remove(nativeAppEnvPath(layout, serviceId));
+    await Deno.remove(nativeAppEnvStagePath(layout, serviceId));
   } catch (err) {
     if (!(err instanceof Deno.errors.NotFound)) throw err;
+  }
+}
+
+/** Ask `tp-host` to check the staged file and copy it where only root writes. */
+export async function installNativeAppEnvCopy(
+  run: RunFn,
+  serviceId: string,
+): Promise<void> {
+  const result = await run(
+    "sudo",
+    hostSudoArgs(["-n", "app-env-install", serviceId]),
+  );
+  if (!result.success) {
+    throw new Error(
+      `native app ${serviceId}: installing its environment file failed: ${
+        result.stderr.trim() || "tp-host refused it"
+      }`,
+    );
+  }
+}
+
+/**
+ * Remove the root-owned copy and any staged file. Absent is fine. A refusal is
+ * an error: a secret left on disk for an app that no longer wants it is the
+ * thing this is for.
+ */
+export async function removeNativeAppEnvFile(
+  run: RunFn,
+  layout: Pick<LayoutPaths, "configDir">,
+  serviceId: string,
+): Promise<void> {
+  await removeStagedNativeAppEnvFile(layout, serviceId);
+  const result = await run(
+    "sudo",
+    hostSudoArgs(["-n", "app-env-remove", serviceId]),
+  );
+  if (!result.success) {
+    throw new Error(
+      `native app ${serviceId}: removing its environment file failed: ${
+        result.stderr.trim() || "tp-host refused it"
+      }`,
+    );
   }
 }
 
@@ -224,12 +290,18 @@ export async function removeNativeAppEnvFile(
  * Bring the app's environment file in line with this deploy. Returns whether
  * the unit should load one, and the platform-managed names that were left out
  * (so the transcript can say why a variable did not arrive).
+ *
+ * With variables: stage, have `tp-host` copy it, delete the staged file (also
+ * when the copy fails). Without: nothing is touched on the root side here (see
+ * {@link removeNativeAppEnvFile}, which the caller runs once the unit that no
+ * longer loads the file is in place); a stale staged file is dropped.
  */
 export async function materializeNativeAppVariables(
   layout: Pick<LayoutPaths, "configDir">,
   app: EnvironmentDeployNativeAppService,
   material: readonly EnvironmentDeployVariableMaterial[],
   decryptSecrets: DecryptSecretsFn | undefined,
+  run: RunFn,
 ): Promise<
   { environmentFile: boolean; count: number; platformManaged: string[] }
 > {
@@ -239,9 +311,14 @@ export async function materializeNativeAppVariables(
     decryptSecrets,
   );
   if (entries.length === 0) {
-    await removeNativeAppEnvFile(layout, app.serviceId);
+    await removeStagedNativeAppEnvFile(layout, app.serviceId);
     return { environmentFile: false, count: 0, platformManaged };
   }
-  await writeNativeAppEnvFile(layout, app.serviceId, entries);
+  try {
+    await stageNativeAppEnvFile(layout, app.serviceId, entries);
+    await installNativeAppEnvCopy(run, app.serviceId);
+  } finally {
+    await removeStagedNativeAppEnvFile(layout, app.serviceId);
+  }
   return { environmentFile: true, count: entries.length, platformManaged };
 }

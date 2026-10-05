@@ -219,27 +219,44 @@ export function nativeAppConfigDir(
 }
 
 /**
- * Directory for the apps' private environment files. It sits inside the
- * daemon-owned `node-apps` leaf (so the daemon, which is not root, can write
- * it) and is `0700`: systemd reads these files as root, and nothing else —
- * least of all a tenant's own account — has any business in there.
+ * Where the daemon stages an app's variables file (`0700` folder inside the
+ * daemon-owned `node-apps` leaf, so no root is needed to write it). Nothing
+ * reads this path but `tp-host app-env-install`: it copies the file to
+ * {@link nativeAppEnvPath}, and the daemon deletes the staged one afterwards.
  */
-export function nativeAppEnvDir(
+export function nativeAppEnvStageDir(
   layout: Pick<LayoutPaths, "configDir">,
 ): string {
   return join(nativeAppConfigDir(layout), "envs");
 }
 
+export function nativeAppEnvStagePath(
+  layout: Pick<LayoutPaths, "configDir">,
+  serviceId: string,
+): string {
+  return join(nativeAppEnvStageDir(layout), `${serviceId}.env`);
+}
+
+/** The folder only root can write (`tp-host` makes it; see `NATIVE_APP_ENV_ROOT_DIRNAME`). */
+export const NATIVE_APP_ENV_ROOT_DIRNAME = "node-app-env";
+
 /**
- * The environment file one app's unit loads. Keyed on the service id alone —
- * the same id that names the unit — which is also the only shape the
- * `tp-host` unit check accepts for `EnvironmentFile=`.
+ * The environment file one app's unit loads: a root-owned copy `tp-host`
+ * made, never the daemon-writable staged file. systemd reads the unit's
+ * `EnvironmentFile=` as root, so it must name a path the daemon cannot swap for
+ * a link to some other root-only file. Keyed on the service id alone — the same
+ * id that names the unit — which is also the only shape the `tp-host` unit
+ * check accepts.
  */
 export function nativeAppEnvPath(
   layout: Pick<LayoutPaths, "configDir">,
   serviceId: string,
 ): string {
-  return join(nativeAppEnvDir(layout), `${serviceId}.env`);
+  return join(
+    layout.configDir,
+    NATIVE_APP_ENV_ROOT_DIRNAME,
+    `${serviceId}.env`,
+  );
 }
 
 export function nativeAppStagedFilePrefix(environmentId: string): string {

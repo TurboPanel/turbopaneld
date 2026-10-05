@@ -527,6 +527,7 @@ async function applyNativeAppVariables(
     app,
     opts.variableMaterial ?? [],
     opts.decryptSecrets,
+    io.run,
   );
   if (result.count > 0) {
     io.onOutput?.(
@@ -732,6 +733,28 @@ export async function ensureNativeAppRuntime(
 }
 
 /**
+ * Remove the root-owned variables copy of apps that have none now. Best-effort:
+ * the app is already running without it, so a refusal is a warning (the next
+ * deploy tries again), not a failed deploy.
+ */
+async function dropStaleEnvironmentFiles(
+  io: NativeAppIo,
+  layout: Pick<LayoutPaths, "configDir">,
+  serviceIds: readonly string[],
+): Promise<void> {
+  await forEachSequential(serviceIds, async (serviceId) => {
+    try {
+      await removeNativeAppEnvFile(io.run, layout, serviceId);
+    } catch (err) {
+      logWarn(
+        "deploy",
+        `native app ${serviceId}: ${err instanceof Error ? err.message : err}`,
+      );
+    }
+  });
+}
+
+/**
  * Apply every native app in one deploy.
  *
  * Apps with no binding are skipped loudly rather than failed, matching the
@@ -771,6 +794,9 @@ export async function applyNativeAppServices(
   );
 
   const prepared: PreparedNativeApp[] = [];
+  // Apps with no variables: their root-owned copy (left by an earlier deploy)
+  // goes only once the unit that no longer loads it is running.
+  const withoutVariables: string[] = [];
   await forEachSequential(apps, async (app) => {
     const binding = opts.bindings.get(app.composeServiceName);
     if (!binding) {
@@ -794,6 +820,7 @@ export async function applyNativeAppServices(
       environmentFile,
     });
     if (unitChanged) filesChanged = true;
+    if (!environmentFile) withoutVariables.push(app.serviceId);
     prepared.push({
       app,
       binding,
@@ -821,6 +848,8 @@ export async function applyNativeAppServices(
     }
     applied.push(entry.app.composeServiceName);
   });
+
+  await dropStaleEnvironmentFiles(io, layout, withoutVariables);
 
   logInfo(
     "deploy",
@@ -944,7 +973,7 @@ export async function removeNativeAppServices(
     );
     // The variables file goes with the unit: leaving secrets on disk for an
     // app that no longer exists would keep them past their purpose.
-    await removeNativeAppEnvFile(layout, serviceId);
+    await dropStaleEnvironmentFiles(io, layout, [serviceId]);
     removed += 1;
   });
 

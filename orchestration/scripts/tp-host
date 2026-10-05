@@ -70,6 +70,14 @@ R_LOG="$P/var/log/turbopanel"
 R_RUN="$P/run/turbopanel"
 R_PRINCIPALS="$P/srv/users"
 R_SSHKEYS="$P/etc/ssh/turbopanel"
+# A native app's variables as systemd reads them (EnvironmentFile=): copies
+# tp-host itself makes, root:root, in a folder only root can write. Never under
+# a daemon-owned folder, and no generic verb accepts a path in it
+# (tp_path_class) — see tp_verb_app_env_install.
+R_APPENV="$R_CONFIG/node-app-env"
+# Largest variables file tp-host will copy (NATIVE_APP_ENV_MAX_BYTES in
+# src/deploy/native/variables-runtime.ts; a test keeps the two equal).
+TP_APPENV_MAX=1048576
 R_UNITS="$P/etc/systemd/system"
 R_SSHD_DROPINS="$P/etc/ssh/sshd_config.d"
 R_WG="$P/etc/wireguard"
@@ -179,6 +187,11 @@ tp_path_class() {
       tp_php_path_class "$_pc"
       return
       ;;
+  esac
+  # The variables copies systemd reads as root: only app-env-install writes
+  # them, so no generic verb may name this folder or anything in it.
+  case "$_pc" in
+    "$R_APPENV"|"$R_APPENV"/*) return 1 ;;
   esac
   # The shared php-fpm master runs as root and reads its main config and every
   # conf.d/*.ini at start (`extension=` loads code into it). Only Ansible writes
@@ -1009,21 +1022,22 @@ tp_unit_ok() {
   return 0
 }
 
-# A native app unit's one allowed EnvironmentFile=: its own variables file,
-# <config>/node-apps/envs/<service id>.env, and nothing else. systemd reads the
+# A native app unit's one allowed EnvironmentFile=: its own variables copy,
+# <config>/node-app-env/<service id>.env, and nothing else. systemd reads the
 # file as root and hands every line to the tenant's process, so a free-form path
-# would let one app's unit load another's variables, or the daemon's own
-# environment file. The path must equal the one derived from the unit's name;
-# no `-` (optional) prefix, no second line, no other spelling. Read from the
-# file the awk pass above already shape-checked (keys start in column one, no
-# continuations), so a matching line is a directive and nothing else.
+# would let one app's unit load another's variables, the daemon's own
+# environment file, or a file in a folder the daemon can write (it could swap
+# in a symlink to any root-only file after this check). The path must equal the
+# one derived from the unit's name, and it names a folder only root can write
+# whose files only app-env-install creates; no `-` (optional) prefix, no second
+# line, no other spelling. Read from the file the awk pass above already
+# shape-checked (keys start in column one, no continuations), so a matching
+# line is a directive and nothing else.
 tp_app_envfile_ok() {
   _ae_file="$1"
   _ae_id="$2"
-  case "$_ae_id" in
-    ''|*[!A-Za-z0-9_-]*) return 1 ;;
-  esac
-  _ae_want="EnvironmentFile=$R_CONFIG/node-apps/envs/$_ae_id.env"
+  tp_appenv_id_ok "$_ae_id" || return 1
+  _ae_want="EnvironmentFile=$R_APPENV/$_ae_id.env"
   _ae_seen=0
   while IFS= read -r _ae_line || [ -n "$_ae_line" ]; do
     case "$_ae_line" in
@@ -3581,6 +3595,149 @@ tp_verb_publish() {
   tp_publish_swap
 }
 
+# --- native app variables (EnvironmentFile=) ----------------------------------
+# A Node app's variables reach its process through an EnvironmentFile= that
+# systemd (root, PID 1) reads. If that file sat anywhere the daemon account can
+# write, the daemon could point it at any root-only file (a symlink, or a
+# swapped folder, after the unit was checked) and have its lines handed to a
+# tenant's process. So the unit names a copy made here instead:
+#
+#   staged (daemon's, 0600)  <config>/node-apps/envs/<id>.env
+#   copy   (root's,  0600)   <config>/node-app-env/<id>.env  (folder root:root 0700)
+#
+# app-env-install takes a service id only and derives both paths. The staged
+# file is opened as the daemon account on a descriptor (never by following a
+# link: /proc/self/fd must name the file itself), must be a regular file the
+# daemon owns, and is read at most TP_APPENV_MAX bytes into root's private
+# scratch directory; every check runs on that copy, never on the daemon's path,
+# so nothing can change between the check and the use. The copy is then placed
+# like any other root file (scratch directory + mv -T). The folder is created
+# here, is refused to every generic verb (tp_path_class), and its owner and
+# mode are checked on each run.
+
+tp_appenv_id_ok() {
+  case "$1" in
+    ''|-*|*[!A-Za-z0-9_-]*) return 1 ;;
+  esac
+  [ "${#1}" -le 128 ]
+}
+
+# Enter the root-owned variables folder, creating it (root:root 0700) when
+# absent, and refuse unless it and its parent are what the checks assume.
+tp_appenv_enter() {
+  tp_mkdir_pinned "$R_APPENV" 0700
+  [ "$(stat -c '%u %a' .)" = "$ROOT_UID 700" ] ||
+    tp_die "refusing $R_APPENV: not a root-owned 0700 directory"
+  tp_dir_sealed_at .. ||
+    tp_die "refusing $R_APPENV: its parent is not sealed (root-owned, not group- or world-writable)"
+}
+
+# Copy the daemon's staged variables file for service ID to $TP_STAGE/envsrc.
+# The inner script runs as the daemon account (the same trust the other
+# daemon-staged sources get) under a timeout, so a FIFO swapped in at the path
+# can stall neither root nor the verb.
+tp_appenv_read_staged() {
+  _ar_id="$1"
+  tp_pin_dir "$R_CONFIG/node-apps/envs" ||
+    tp_die "app-env-install: no staging directory $R_CONFIG/node-apps/envs"
+  [ "$(stat -c '%u' .)" = "$CALLER_UID" ] ||
+    tp_die "refusing $R_CONFIG/node-apps/envs: not owned by the calling account"
+  _ar_real="$(pwd -P)"
+  tp_as "$CALLER_UID" "$CALLER_GID" timeout 10 sh -c '
+    exec 3< "./$1.env" || { echo "tp-host: cannot open the staged file" >&2; exit 1; }
+    real="$(readlink /proc/self/fd/3)"
+    if [ "$real" != "$2/$1.env" ]; then
+      echo "tp-host: refusing the staged file: it resolves to $real" >&2
+      exit 1
+    fi
+    meta="$(stat -L -c "%u:%h:%F" /proc/self/fd/3)" || exit 1
+    case "$meta" in
+      "$3:1:regular file"|"$3:1:regular empty file") ;;
+      *) echo "tp-host: refusing the staged file: owner, links or type ($meta)" >&2; exit 1 ;;
+    esac
+    head -c "$4" <&3
+  ' sh "$_ar_id" "$_ar_real" "$CALLER_UID" "$((TP_APPENV_MAX + 1))" > "$TP_STAGE/envsrc" ||
+    tp_die "refusing the staged variables file for $_ar_id"
+  [ "$(wc -c < "$TP_STAGE/envsrc")" -le "$TP_APPENV_MAX" ] ||
+    tp_die "refusing the variables file for $_ar_id: over $TP_APPENV_MAX bytes"
+}
+
+# The file holds exactly what the daemon renders: blank lines, `#`/`;` comment
+# lines, and NAME='value' or NAME="value" entries. A value may span lines (a
+# PEM block), but only inside its quotes. Single quotes are literal; double
+# quotes allow a backslash only before \ " ` or $, and take no bare ` or $.
+# Nothing may follow the closing quote, an entry never repeats a name, and no
+# NUL or carriage return (tp_content_plain) so nothing reads differently here
+# and in systemd.
+tp_appenv_content_ok() {
+  tp_content_plain "$1" || return 1
+  LC_ALL=C awk '
+    function fail(msg) {
+      print "tp-host: variables file line " NR ": " msg > "/dev/stderr"
+      bad = 1; exit 1
+    }
+    BEGIN { q = "" }
+    {
+      line = $0; n = length(line); i = 1
+      if (q == "") {
+        if (line == "" || line ~ /^[#;]/) next
+        if (!match(line, /^[A-Za-z_][A-Za-z0-9_]*=/)) fail("not NAME=value")
+        name = substr(line, 1, RLENGTH - 1)
+        if (length(name) > 255) fail("name too long")
+        if (name in seen) fail("name repeated: " name)
+        seen[name] = 1
+        i = RLENGTH + 1
+        q = substr(line, i, 1)
+        if (q != "\047" && q != "\"") fail("value is not quoted: " name)
+        i++
+      }
+      while (q != "" && i <= n) {
+        c = substr(line, i, 1)
+        if (q == "\047") {
+          if (c == "\047") q = ""
+        } else if (c == "\"") {
+          q = ""
+        } else if (c == "\\") {
+          d = substr(line, i + 1, 1)
+          if (d != "\\" && d != "\"" && d != "`" && d != "$") fail("bad escape")
+          i++
+        } else if (c == "`" || c == "$") {
+          fail("unescaped " c " in a double-quoted value")
+        }
+        i++
+      }
+      if (q == "" && i <= n) fail("text after the closing quote")
+    }
+    END {
+      if (!bad && q != "") {
+        print "tp-host: variables file: unterminated quote" > "/dev/stderr"
+        exit 1
+      }
+    }
+  ' "$1"
+}
+
+tp_verb_app_env_install() {
+  [ $# -eq 1 ] || tp_die "app-env-install: takes one service id"
+  tp_appenv_id_ok "$1" || tp_die "app-env-install: refusing service id $1"
+  tp_stage_dir
+  tp_appenv_read_staged "$1"
+  tp_appenv_content_ok "$TP_STAGE/envsrc" ||
+    tp_die "refusing the variables file for $1: content outside the allowed shape"
+  tp_appenv_enter
+  tp_put_file "$R_APPENV/$1.env" 600 < "$TP_STAGE/envsrc"
+}
+
+tp_verb_app_env_remove() {
+  [ $# -eq 1 ] || tp_die "app-env-remove: takes one service id"
+  tp_appenv_id_ok "$1" || tp_die "app-env-remove: refusing service id $1"
+  # No folder yet: no app has had variables, nothing to remove.
+  tp_pin_dir "$R_APPENV" || return 0
+  [ "$(stat -c '%u %a' .)" = "$ROOT_UID 700" ] ||
+    tp_die "refusing $R_APPENV: not a root-owned 0700 directory"
+  rm -f -- "./$1.env"
+}
+
 # --- dispatch ----------------------------------------------------------------
 
 [ $# -ge 1 ] || tp_die "usage: tp-host <verb> [args…]"
@@ -3635,5 +3792,7 @@ case "$_verb" in
   site-usage) tp_verb_site_usage "$@" ;;
   site-caddy-mounts) tp_verb_site_caddy_mounts "$@" ;;
   php-loopback-sync) tp_verb_php_loopback_sync "$@" ;;
+  app-env-install) tp_verb_app_env_install "$@" ;;
+  app-env-remove) tp_verb_app_env_remove "$@" ;;
   *) tp_die "refusing verb $_verb" ;;
 esac

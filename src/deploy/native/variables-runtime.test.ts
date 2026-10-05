@@ -1,5 +1,4 @@
 import { assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
 import type {
   EnvironmentDeployNativeAppService,
   EnvironmentDeployVariableMaterial,
@@ -8,12 +7,14 @@ import {
   materializeNativeAppVariables,
   NATIVE_APP_ENV_DIR_MODE,
   NATIVE_APP_ENV_FILE_MODE,
+  NATIVE_APP_ENV_MAX_BYTES,
   removeNativeAppEnvFile,
   renderNativeAppEnvFile,
   renderNativeAppEnvLine,
   resolveNativeAppVariables,
 } from "./variables-runtime.ts";
-import { nativeAppEnvPath } from "./unit.ts";
+import type { RunFn } from "../ensure-principal.ts";
+import { nativeAppEnvStageDir, nativeAppEnvStagePath } from "./unit.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -178,78 +179,217 @@ test("env lines keep every value literal: single quotes, or escaped double quote
   assertEquals(file.endsWith("A='1'\n"), true);
 });
 
-test("materializeNativeAppVariables writes a 0600 file in a 0700 directory", async () => {
+/**
+ * Stands in for `sudo tp-host`: `app-env-install <id>` copies the staged file
+ * into `copies` (as root would, into its own folder) and `app-env-remove <id>`
+ * drops the copy. `seen` records what the staged file looked like at the moment
+ * of each install, so a test can say what tp-host would have read.
+ */
+function fakeTpHost(layout: { configDir: string }, refuse?: string) {
+  const copies = new Map<string, string>();
+  const seen: Array<{ id: string; text: string; mode: number }> = [];
+  const calls: string[][] = [];
+  const run: RunFn = async (_command, args) => {
+    calls.push([...args]);
+    const [verb, id] = args.slice(1);
+    if (refuse !== undefined && verb === "app-env-install") {
+      return { success: false, stdout: "", stderr: refuse };
+    }
+    if (verb === "app-env-install") {
+      const path = nativeAppEnvStagePath(layout, id);
+      const text = await Deno.readTextFile(path);
+      seen.push({ id, text, mode: (await Deno.stat(path)).mode! & 0o777 });
+      copies.set(id, text);
+    } else if (verb === "app-env-remove") {
+      copies.delete(id);
+    }
+    return { success: true, stdout: "", stderr: "" };
+  };
+  return { run, copies, seen, calls };
+}
+
+const stagedNames = (layout: { configDir: string }) => {
+  try {
+    return [...Deno.readDirSync(nativeAppEnvStageDir(layout))].map((entry) =>
+      entry.name
+    );
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) return [];
+    throw err;
+  }
+};
+
+test("materializeNativeAppVariables stages a 0600 file, has tp-host copy it, and deletes the staged one", async () => {
   await withConfig(async (layout) => {
+    const host = fakeTpHost(layout);
     const result = await materializeNativeAppVariables(
       layout,
       app,
       [sealed("DB_PASSWORD", "tpdaemon.hunter2")],
       decryptSecrets,
+      host.run,
     );
     assertEquals(result.environmentFile, true);
     assertEquals(result.count, 3);
-    const path = nativeAppEnvPath(layout, "svc-1");
-    const text = await Deno.readTextFile(path);
+    // tp-host got the service id and nothing else: no path, no value.
+    assertEquals(host.calls, [["-n", "app-env-install", "svc-1"]]);
+    const text = host.copies.get("svc-1")!;
     assertStringIncludes(text, "DB_PASSWORD='hunter2'\n");
     assertStringIncludes(text, "API_URL='https://example.test'\n");
     if (Deno.build.os !== "windows") {
+      assertEquals(host.seen[0].mode, NATIVE_APP_ENV_FILE_MODE);
       assertEquals(
-        (await Deno.stat(path)).mode! & 0o777,
-        NATIVE_APP_ENV_FILE_MODE,
-      );
-      assertEquals(
-        (await Deno.stat(join(layout.configDir, "node-apps", "envs"))).mode! &
-          0o777,
+        (await Deno.stat(nativeAppEnvStageDir(layout))).mode! & 0o777,
         NATIVE_APP_ENV_DIR_MODE,
       );
     }
-    // No temp file is left behind next to it.
-    const names = [
-      ...Deno.readDirSync(join(layout.configDir, "node-apps", "envs")),
-    ].map((entry) => entry.name);
-    assertEquals(names, ["svc-1.env"]);
+    // The secret is not left on disk in the daemon's own folder.
+    assertEquals(stagedNames(layout), []);
   });
 });
 
-test("redeploying without variables removes the file, and removal is idempotent", async () => {
+test("a refused copy still deletes the staged file and names the app, never a value", async () => {
   await withConfig(async (layout) => {
-    await materializeNativeAppVariables(layout, app, [
-      sealed("DB_PASSWORD", "tpdaemon.x"),
-    ], decryptSecrets);
-    const path = nativeAppEnvPath(layout, "svc-1");
-    assertEquals((await Deno.stat(path)).isFile, true);
+    const host = fakeTpHost(layout, "tp-host: refusing the staged file");
+    const error = await assertRejects(
+      () =>
+        materializeNativeAppVariables(
+          layout,
+          app,
+          [sealed("DB_PASSWORD", "tpdaemon.hunter2")],
+          decryptSecrets,
+          host.run,
+        ),
+      Error,
+      "native app svc-1: installing its environment file failed",
+    );
+    assertEquals(error.message.includes("hunter2"), false);
+    assertEquals(stagedNames(layout), []);
+  });
+});
+
+test("an app with no variables makes no root call here, and drops a stale staged file", async () => {
+  await withConfig(async (layout) => {
+    const host = fakeTpHost(layout);
+    await materializeNativeAppVariables(
+      layout,
+      app,
+      [
+        sealed("DB_PASSWORD", "tpdaemon.x"),
+      ],
+      decryptSecrets,
+      host.run,
+    );
+    host.calls.length = 0;
+    await Deno.mkdir(nativeAppEnvStageDir(layout), { recursive: true });
+    await Deno.writeTextFile(nativeAppEnvStagePath(layout, "svc-1"), "stale");
 
     const none = await materializeNativeAppVariables(
       layout,
       { ...app, variables: undefined },
       [],
       decryptSecrets,
+      host.run,
     );
     assertEquals(none, {
       environmentFile: false,
       count: 0,
       platformManaged: [],
     });
-    await assertRejects(() => Deno.stat(path), Deno.errors.NotFound);
-    await removeNativeAppEnvFile(layout, "svc-1");
+    // The root copy goes later, once the unit that no longer loads it is in
+    // place (applyNativeAppServices), never before.
+    assertEquals(host.calls, []);
+    assertEquals(host.copies.has("svc-1"), true);
+    assertEquals(stagedNames(layout), []);
+  });
+});
+
+test("removeNativeAppEnvFile removes the copy and the staged file, and is idempotent", async () => {
+  await withConfig(async (layout) => {
+    const host = fakeTpHost(layout);
+    await materializeNativeAppVariables(
+      layout,
+      app,
+      [
+        sealed("DB_PASSWORD", "tpdaemon.x"),
+      ],
+      decryptSecrets,
+      host.run,
+    );
+    await Deno.writeTextFile(nativeAppEnvStagePath(layout, "svc-1"), "x");
+    await removeNativeAppEnvFile(host.run, layout, "svc-1");
+    await removeNativeAppEnvFile(host.run, layout, "svc-1");
+    assertEquals(host.copies.has("svc-1"), false);
+    assertEquals(stagedNames(layout), []);
+    assertEquals(host.calls.at(-1), ["-n", "app-env-remove", "svc-1"]);
+  });
+});
+
+test("a refused removal is an error, not silence", async () => {
+  await withConfig(async (layout) => {
+    await assertRejects(
+      () =>
+        removeNativeAppEnvFile(
+          () => Promise.resolve({ success: false, stdout: "", stderr: "no" }),
+          layout,
+          "svc-1",
+        ),
+      Error,
+      "removing its environment file failed",
+    );
   });
 });
 
 test("an app whose only variables are platform-set gets no file at all", async () => {
   await withConfig(async (layout) => {
+    const host = fakeTpHost(layout);
     const result = await materializeNativeAppVariables(
       layout,
       { ...app, variables: [{ name: "PORT", value: "9" }] },
       [],
       undefined,
+      host.run,
     );
     assertEquals(result.environmentFile, false);
     assertEquals(result.platformManaged, ["PORT"]);
-    await assertRejects(
-      () => Deno.stat(nativeAppEnvPath(layout, "svc-1")),
-      Deno.errors.NotFound,
-    );
+    assertEquals(host.calls, []);
+    assertEquals(stagedNames(layout), []);
   });
+});
+
+test("a variables file over the limit fails naming the app, before anything is staged", async () => {
+  await withConfig(async (layout) => {
+    const host = fakeTpHost(layout);
+    const big = Array.from({ length: 17 }, (_, i) => ({
+      name: `BIG_${i}`,
+      value: "x".repeat(65_536),
+    }));
+    const error = await assertRejects(
+      () =>
+        materializeNativeAppVariables(
+          layout,
+          { ...app, variables: big },
+          [],
+          undefined,
+          host.run,
+        ),
+      Error,
+      "native app svc-1: its environment variables come to",
+    );
+    assertEquals(error.message.includes("xxxx"), false);
+    assertEquals(host.calls, []);
+    assertEquals(stagedNames(layout), []);
+  });
+});
+
+test("the size limit equals the one tp-host enforces", async () => {
+  const script = await Deno.readTextFile(
+    new URL("../../../orchestration/scripts/tp-host", import.meta.url),
+  );
+  assertStringIncludes(
+    script,
+    `TP_APPENV_MAX=${NATIVE_APP_ENV_MAX_BYTES}\n`,
+  );
 });
 
 test("secrets are decrypted in batches, one at a time", async () => {

@@ -732,10 +732,20 @@ it regresses:
     backslash (systemd would join it onto the next line, hiding e.g. `User=`
     from this line-by-line check), a timer may only start its own service;
     a `turbopanel-app-<id>.service` may carry exactly one `EnvironmentFile=`,
-    equal to `<config>/node-apps/envs/<id>.env` (its own variables file —
-    systemd reads it as root, so no other path, no `-` prefix, no second
-    line; `tp_app_envfile_ok`) and no other unit may carry one except the
-    backup unit below;
+    equal to `<config>/node-app-env/<id>.env` (its own variables copy; systemd
+    reads it as root, so no other path, no `-` prefix, no second line;
+    `tp_app_envfile_ok`) and no other unit may carry one except the backup unit
+    below. That folder is root's alone: only `app-env-install <id>` fills it
+    (it reads the daemon's staged `<config>/node-apps/envs/<id>.env` as the
+    daemon account on an open descriptor, refuses a symlink, a non-regular
+    file, another owner, a second hard link or more than 1 MiB, checks the
+    copy it made in root's scratch directory line by line against what the
+    daemon renders, then places it `0600 root:root` with `mv -T`; the folder
+    is `root:root 0700` under a sealed config root, checked on every run) and
+    `app-env-remove <id>` empties it; `tp_path_class` refuses the folder to
+    every generic verb. Checking the text of a daemon-writable path is not
+    enough: the daemon could swap it for a link to any root-only file after
+    the check;
     the hosting-Caddy unit must run as `tpedge:tpedge` with
     `NoNewPrivileges=yes`, exactly `CAP_NET_BIND_SERVICE` in both capability
     sets, `StateDirectory=turbopanel-hosting-caddy` and only the

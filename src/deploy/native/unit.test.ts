@@ -8,8 +8,9 @@ import {
   formatMemoryBytes,
   NATIVE_APP_PLATFORM_ENV_NAMES,
   nativeAppConfigDir,
-  nativeAppEnvDir,
   nativeAppEnvPath,
+  nativeAppEnvStageDir,
+  nativeAppEnvStagePath,
   nativeAppNodeBinary,
   nativeAppRuntimeRoot,
   nativeAppStagedFilePrefix,
@@ -425,13 +426,20 @@ test("a unit loads an environment file only when the app has variables", () => {
   const withFile = nativeAppUnitContent({ ...user, environmentFile: true });
   assertStringIncludes(
     withFile,
-    "EnvironmentFile=/etc/turbopanel/node-apps/envs/svc-native-1.env\n",
+    "EnvironmentFile=/etc/turbopanel/node-app-env/svc-native-1.env\n",
   );
+  // The unit names the root-owned copy tp-host makes, never the daemon's
+  // staged file (a daemon-writable path systemd, as root, must not read).
   assertEquals(
     nativeAppEnvPath(layout, "svc-native-1"),
+    "/etc/turbopanel/node-app-env/svc-native-1.env",
+  );
+  assertEquals(nativeAppEnvStageDir(layout), "/etc/turbopanel/node-apps/envs");
+  assertEquals(
+    nativeAppEnvStagePath(layout, "svc-native-1"),
     "/etc/turbopanel/node-apps/envs/svc-native-1.env",
   );
-  assertEquals(nativeAppEnvDir(layout), "/etc/turbopanel/node-apps/envs");
+  assertEquals(withFile.includes("node-apps"), false);
   // Never an optional (`-`) path: a missing file must fail the unit loudly
   // rather than start an app without the credentials it was promised.
   assertEquals(withFile.includes("EnvironmentFile=-"), false);

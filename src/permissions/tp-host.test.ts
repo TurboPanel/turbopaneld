@@ -6,7 +6,7 @@
  * as `EXEC [argv]…` instead of run. Unit files come from the daemon's own
  * renderers, so the allowlist is proven against what the daemon writes.
  */
-import { assertEquals, assertStringIncludes } from "@std/assert";
+import { assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import {
   type Host,
@@ -24,6 +24,7 @@ import {
   nativeAppUnitContent,
   principalSliceContent,
 } from "../deploy/native/unit.ts";
+import { renderNativeAppEnvFile } from "../deploy/native/variables-runtime.ts";
 import { caddyUnit } from "../deploy/ingress.ts";
 import { phpFpmPoolConfig } from "../deploy/site.ts";
 import { allAccessGroups } from "../runtime/registry.ts";
@@ -462,7 +463,7 @@ test("a native app unit may load its own variables file and no other", async () 
     const name = "turbopanel-app-svc1.service";
     const unit = unitFor("svc1");
     const own = `EnvironmentFile=${
-      host.path("etc/turbopanel/node-apps/envs/svc1.env")
+      host.path("etc/turbopanel/node-app-env/svc1.env")
     }`;
     assertStringIncludes(unit, own);
     const result = await installUnit(host, name, unit);
@@ -472,7 +473,18 @@ test("a native app unit may load its own variables file and no other", async () 
       // Another service's file: one tenant's unit would load another's secrets.
       ["another service's file", unitFor("svc2")],
       [
-        "a path outside the node-apps tree",
+        // The folder the daemon stages into and can write: a unit naming it
+        // would have systemd (root) read whatever the daemon put there.
+        "the daemon-writable staging path",
+        unit.replace(
+          own,
+          `EnvironmentFile=${
+            host.path("etc/turbopanel/node-apps/envs/svc1.env")
+          }`,
+        ),
+      ],
+      [
+        "a path outside the node-app-env tree",
         unit.replace(own, "EnvironmentFile=/etc/turbopanel/daemon.env"),
       ],
       [
@@ -487,7 +499,7 @@ test("a native app unit may load its own variables file and no other", async () 
         "a path that climbs out of the directory",
         unit.replace(
           own,
-          own.replace("envs/svc1.env", "envs/../../daemon.env"),
+          own.replace("node-app-env/svc1.env", "node-app-env/../daemon.env"),
         ),
       ],
       [
@@ -543,6 +555,371 @@ test("a native app unit may load its own variables file and no other", async () 
       cronName,
       cron.replace("[Service]", `[Service]\n${own}`),
     );
+  });
+});
+
+// --- app-env-install / app-env-remove ---------------------------------------
+// A Node app's variables: tp-host copies the daemon's staged file into a folder
+// only root can write, and the unit loads that copy. Run unprivileged in test
+// mode, where "root" is the account running the tests; the one refusal that
+// needs a second real account (a staged file owned by someone else) is proved
+// in the root container run instead (see the PR).
+
+const ENV_STAGED = "etc/turbopanel/node-apps/envs/svc1.env";
+const ENV_COPY = "etc/turbopanel/node-app-env/svc1.env";
+
+const ENV_PEM = [
+  "-----BEGIN PRIVATE KEY-----",
+  "MIIEvQIBADANBgkqhkiG9w0BAQEFAASC",
+  "LD_PRELOAD=/not/a/line",
+  "-----END PRIVATE KEY-----",
+].join("\n");
+
+const ENV_ENTRIES = [
+  { name: "PLAIN", value: "value" },
+  { name: "DOLLAR", value: "pa$$word $HOME ${X}" },
+  { name: "BACKSLASH", value: String.raw`C:\temp\new` },
+  { name: "SPECIFIER", value: "%h %n" },
+  { name: "BOTH_QUOTES", value: `it's "quoted" \`tick\`` },
+  { name: "MULTILINE", value: "one\ntwo\n\nfour" },
+  { name: "PEM", value: ENV_PEM },
+  { name: "EMPTY", value: "" },
+  { name: "TRAILING_BACKSLASH", value: "ends\\" },
+];
+
+async function stageEnv(host: Host, text: string, rel = ENV_STAGED) {
+  await Deno.mkdir(host.path(rel.slice(0, rel.lastIndexOf("/"))), {
+    recursive: true,
+  });
+  await Deno.writeTextFile(host.path(rel), text);
+}
+
+async function modeOf(path: string): Promise<number> {
+  return (await Deno.stat(path)).mode! & 0o777;
+}
+
+async function refusedEnvInstall(host: Host, label: string, id = "svc1") {
+  try {
+    const stderr = await refused(host, ["app-env-install", id]);
+    assertEquals(stderr.includes("root-only secret"), false, label);
+  } catch (err) {
+    throw new Error(`${label}: ${err instanceof Error ? err.message : err}`);
+  }
+  const copied = await Deno.lstat(host.path(ENV_COPY)).then(
+    () => true,
+    () => false,
+  );
+  assertEquals(copied, false, label);
+}
+
+test("app-env-install copies a checked file into a root-only folder, every value intact", async () => {
+  await withHost(async (host) => {
+    const text = renderNativeAppEnvFile(ENV_ENTRIES);
+    await stageEnv(host, text);
+    const result = await host.run(["app-env-install", "svc1"]);
+    assertEquals(result.code, 0, result.stderr);
+    assertEquals(await Deno.readTextFile(host.path(ENV_COPY)), text);
+    assertEquals(await modeOf(host.path(ENV_COPY)), 0o600);
+    assertEquals(await modeOf(host.path("etc/turbopanel/node-app-env")), 0o700);
+    // Nothing is left beside it: no scratch directory.
+    assertEquals(
+      [...Deno.readDirSync(host.path("etc/turbopanel/node-app-env"))].map((
+        entry,
+      ) => entry.name),
+      ["svc1.env"],
+    );
+    // The daemon's staged file is its own to delete; tp-host leaves it alone.
+    assertEquals(await Deno.readTextFile(host.path(ENV_STAGED)), text);
+  });
+});
+
+test("app-env-install is idempotent and a later run replaces the copy", async () => {
+  await withHost(async (host) => {
+    const first = renderNativeAppEnvFile([{ name: "A", value: "1" }]);
+    await stageEnv(host, first);
+    for (const _ of [1, 2]) {
+      const result = await host.run(["app-env-install", "svc1"]);
+      assertEquals(result.code, 0, result.stderr);
+      assertEquals(await Deno.readTextFile(host.path(ENV_COPY)), first);
+    }
+    const second = renderNativeAppEnvFile([{ name: "A", value: "2" }]);
+    await stageEnv(host, second);
+    assertEquals((await host.run(["app-env-install", "svc1"])).code, 0);
+    assertEquals(await Deno.readTextFile(host.path(ENV_COPY)), second);
+    assertEquals(await modeOf(host.path(ENV_COPY)), 0o600);
+    // An empty file (an app whose names were all platform-managed never gets
+    // here, but an empty one is a valid, empty set).
+    await stageEnv(host, "");
+    assertEquals((await host.run(["app-env-install", "svc1"])).code, 0);
+  });
+});
+
+test("app-env-install refuses what is not a plain regular file the daemon owns", async () => {
+  await withHost(async (host) => {
+    const good = renderNativeAppEnvFile([{ name: "A", value: "1" }]);
+    const envs = host.path("etc/turbopanel/node-apps/envs");
+    const reset = async () => {
+      await Deno.remove(host.path("etc/turbopanel/node-apps"), {
+        recursive: true,
+      }).catch(() => undefined);
+      await stageEnv(host, good);
+    };
+
+    // A symlink at the staged path to a file only root can read: the daemon
+    // would otherwise have root copy it where the unit reads it.
+    await reset();
+    await Deno.remove(host.path(ENV_STAGED));
+    await Deno.symlink(host.path("outside/secret"), host.path(ENV_STAGED));
+    await refusedEnvInstall(host, "symlink at the staged path");
+
+    // A symlink to a file that is a valid env file: still a link.
+    await reset();
+    await Deno.writeTextFile(host.path("tmp/valid.env"), good);
+    await Deno.remove(host.path(ENV_STAGED));
+    await Deno.symlink(host.path("tmp/valid.env"), host.path(ENV_STAGED));
+    await refusedEnvInstall(host, "symlink to an acceptable file");
+
+    // The staging folder swapped for a link to another folder.
+    await reset();
+    await Deno.mkdir(host.path("outside/envs"), { recursive: true });
+    await Deno.writeTextFile(host.path("outside/envs/svc1.env"), good);
+    await Deno.rename(envs, host.path("tmp/envs-moved"));
+    await Deno.symlink(host.path("outside/envs"), envs);
+    await refusedEnvInstall(host, "staging folder swapped for a link");
+
+    // The folder above it (node-apps) swapped for a link.
+    await reset();
+    await Deno.rename(
+      host.path("etc/turbopanel/node-apps"),
+      host.path("tmp/node-apps-moved"),
+    );
+    await Deno.symlink(
+      host.path("tmp/node-apps-moved"),
+      host.path("etc/turbopanel/node-apps"),
+    );
+    await refusedEnvInstall(host, "node-apps swapped for a link");
+
+    // No staged file, a directory in its place, a named pipe in its place (a
+    // plain open would block root), a second hard link.
+    await reset();
+    await Deno.remove(host.path(ENV_STAGED));
+    await refusedEnvInstall(host, "no staged file");
+    await Deno.mkdir(host.path(ENV_STAGED));
+    await refusedEnvInstall(host, "a directory");
+    await Deno.remove(host.path(ENV_STAGED));
+    const fifo = await new Deno.Command("mkfifo", {
+      args: [host.path(ENV_STAGED)],
+    }).output();
+    assertEquals(fifo.code, 0);
+    await refusedEnvInstall(host, "a named pipe");
+    await Deno.remove(host.path(ENV_STAGED));
+    await Deno.writeTextFile(host.path(ENV_STAGED), good);
+    await Deno.link(host.path(ENV_STAGED), host.path("tmp/second-link"));
+    await refusedEnvInstall(host, "a second hard link");
+  });
+});
+
+test("app-env-install refuses a file over the size limit", async () => {
+  await withHost(async (host) => {
+    const line = `A='${"x".repeat(60_000)}'\n`;
+    await stageEnv(host, line.repeat(18));
+    const stderr = await refused(host, ["app-env-install", "svc1"]);
+    assertStringIncludes(stderr, "over 1048576 bytes");
+    await assertRejects(
+      () => Deno.lstat(host.path(ENV_COPY)),
+      Deno.errors.NotFound,
+    );
+  });
+});
+
+test("app-env-install refuses every line shape the daemon never writes", async () => {
+  await withHost(async (host) => {
+    const bad: Array<[string, string]> = [
+      ["a line that is not NAME=value", "just words\n"],
+      ["an unquoted value", "A=1\n"],
+      ["an empty unquoted value", "A=\n"],
+      ["a name starting with a digit", "1A='x'\n"],
+      ["a name with a dash", "A-B='x'\n"],
+      ["a name with a space", "A B='x'\n"],
+      ["an indented entry", " A='x'\n"],
+      ["export", "export A='x'\n"],
+      ["text after the closing quote", "A='x' B='y'\n"],
+      ["a second entry glued on after a quote", "A='x'\nB='y'C\n"],
+      ["an unterminated quote", "A='x\nB='y'\n"],
+      ["an unterminated double quote", 'A="x\n'],
+      ["an unescaped dollar in double quotes", `A="it's $HOME"\n`],
+      ["an unescaped backtick in double quotes", 'A="it\'s `id`"\n'],
+      ["an unknown escape", 'A="it\\\'s \\n"\n'],
+      ["a trailing backslash in double quotes", 'A="x\\\n'],
+      ["a repeated name", "A='1'\nA='2'\n"],
+      ["a carriage return", "A='1'\r\nB='2'\n"],
+      ["a NUL byte", "A='1'\u0000B='2'\n"],
+      ["an EnvironmentFile-looking line", "EnvironmentFile=/etc/shadow\n"],
+      ["a name over 255 characters", `${"N".repeat(256)}='x'\n`],
+    ];
+    for (const [label, text] of bad) {
+      await stageEnv(host, text);
+      await refusedEnvInstall(host, label);
+    }
+    // Quoted newlines are values, not lines: a "line" inside a PEM that looks
+    // like an entry or a directive is fine, and the same text outside quotes
+    // is not.
+    await stageEnv(
+      host,
+      renderNativeAppEnvFile([{ name: "K", value: "a\nB=c\n#d" }]),
+    );
+    assertEquals((await host.run(["app-env-install", "svc1"])).code, 0);
+    const before = await Deno.readTextFile(host.path(ENV_COPY));
+    await stageEnv(host, "K='a'\nB=c\n");
+    await refused(host, ["app-env-install", "svc1"]);
+    // A refused file leaves the copy already in place as it was.
+    assertEquals(await Deno.readTextFile(host.path(ENV_COPY)), before);
+  });
+});
+
+test("app-env-install and app-env-remove take one service id and nothing that is a path", async () => {
+  await withHost(async (host) => {
+    await stageEnv(host, renderNativeAppEnvFile([{ name: "A", value: "1" }]));
+    await stageEnv(host, "A='1'\n", "etc/turbopanel/node-apps/envs/-x.env");
+    await Deno.writeTextFile(host.path("etc/turbopanel/daemon.env"), "A='1'\n");
+    for (const verb of ["app-env-install", "app-env-remove"]) {
+      for (
+        const args of [
+          [],
+          ["svc1", "svc2"],
+          [""],
+          ["-x"],
+          ["--"],
+          [".."],
+          ["../daemon"],
+          ["svc1/../svc1"],
+          ["/etc/turbopanel/daemon"],
+          ["svc1.env"],
+          ["svc 1"],
+          ["svc1\\x"],
+          ["a".repeat(129)],
+          [host.path(ENV_STAGED)],
+        ]
+      ) {
+        await refused(host, [verb, ...args]);
+      }
+    }
+    await assertRejects(
+      () => Deno.lstat(host.path("etc/turbopanel/node-app-env")),
+      Deno.errors.NotFound,
+    );
+  });
+});
+
+test("app-env-install refuses a variables folder or parent that is not root's", async () => {
+  await withHost(async (host) => {
+    await stageEnv(host, renderNativeAppEnvFile([{ name: "A", value: "1" }]));
+    // A folder someone made with a wider mode (or owner) is not trusted.
+    await Deno.mkdir(host.path("etc/turbopanel/node-app-env"), { mode: 0o755 });
+    await Deno.chmod(host.path("etc/turbopanel/node-app-env"), 0o755);
+    await refusedEnvInstall(host, "a 0755 folder");
+    await refused(host, ["app-env-remove", "svc1"]);
+    await Deno.chmod(host.path("etc/turbopanel/node-app-env"), 0o700);
+    assertEquals((await host.run(["app-env-install", "svc1"])).code, 0);
+    // A config root the daemon could write would let it rename the folder.
+    await Deno.chmod(host.path("etc/turbopanel"), 0o777);
+    await Deno.remove(host.path(ENV_COPY));
+    await refusedEnvInstall(host, "a world-writable config root");
+    await Deno.chmod(host.path("etc/turbopanel"), 0o755);
+    // A link where the folder should be.
+    await Deno.remove(host.path("etc/turbopanel/node-app-env"));
+    await Deno.mkdir(host.path("outside/app-env"));
+    await Deno.symlink(
+      host.path("outside/app-env"),
+      host.path("etc/turbopanel/node-app-env"),
+    );
+    await refused(host, ["app-env-install", "svc1"]);
+    await refused(host, ["app-env-remove", "svc1"]);
+    assertEquals([...Deno.readDirSync(host.path("outside/app-env"))], []);
+  });
+});
+
+test("app-env-remove deletes the copy, and an absent file or folder is fine", async () => {
+  await withHost(async (host) => {
+    assertEquals((await host.run(["app-env-remove", "svc1"])).code, 0);
+    await stageEnv(host, renderNativeAppEnvFile([{ name: "A", value: "1" }]));
+    assertEquals((await host.run(["app-env-install", "svc1"])).code, 0);
+    await Deno.writeTextFile(
+      host.path("etc/turbopanel/node-app-env/svc2.env"),
+      "B='2'\n",
+    );
+    for (const _ of [1, 2]) {
+      assertEquals((await host.run(["app-env-remove", "svc1"])).code, 0);
+    }
+    await assertRejects(
+      () => Deno.lstat(host.path(ENV_COPY)),
+      Deno.errors.NotFound,
+    );
+    // One id, one file: another app's copy stays.
+    assertEquals(
+      (await Deno.lstat(host.path("etc/turbopanel/node-app-env/svc2.env")))
+        .isFile,
+      true,
+    );
+  });
+});
+
+test("no generic verb reaches the variables folder, so only app-env-install can fill it", async () => {
+  await withHost(async (host) => {
+    const dirPath = host.path("etc/turbopanel/node-app-env");
+    const file = `${dirPath}/svc1.env`;
+    assertEquals(
+      (await host.run(["app-env-install", "svc1"])).code === 0,
+      false,
+    );
+    await stageEnv(host, renderNativeAppEnvFile([{ name: "A", value: "1" }]));
+    assertEquals((await host.run(["app-env-install", "svc1"])).code, 0);
+    await Deno.writeTextFile(host.path("tmp/plain"), "A='planted'\n");
+    const attempts: string[][] = [
+      ["install", "-m", "0600", host.path("tmp/plain"), file],
+      [
+        "install",
+        "-m",
+        "0600",
+        "-o",
+        "root",
+        "-g",
+        "root",
+        host.path("tmp/plain"),
+        `${dirPath}/svc9.env`,
+      ],
+      ["install", "-d", "-m", "0700", `${dirPath}/sub`],
+      ["install", "-d", "-m", "0700", dirPath],
+      ["mkdir", "-p", `${dirPath}/sub`],
+      ["cp", "-p", "--", host.path("tmp/plain"), file],
+      ["cp", "-p", "--", file, `${dirPath}/copy.env`],
+      ["mv", "-T", host.path("tmp/plain"), file],
+      ["mv", "-T", file, host.path("tmp/stolen")],
+      ["mv", "-T", dirPath, host.path("tmp/dir-moved")],
+      ["rm", "-f", file],
+      ["rm", "-rf", dirPath],
+      ["ln", "-s", "--", host.path("outside/secret"), `${dirPath}/link.env`],
+      ["ln", "-s", "--", host.path("outside"), dirPath],
+      ["chown", "tp", file],
+      ["chmod", "0644", file],
+      ["cat", file],
+      ["cmp", file, host.path("tmp/plain")],
+      ["ls", dirPath],
+      ["tee", file],
+      ["test", "-e", file],
+      ["readlink", file],
+      ["find", dirPath, "-maxdepth", "1"],
+    ];
+    for (const args of attempts) {
+      await refused(host, args, "A='planted'\n");
+    }
+    assertEquals(
+      await Deno.readTextFile(file),
+      renderNativeAppEnvFile([{ name: "A", value: "1" }]),
+    );
+    assertEquals([...Deno.readDirSync(dirPath)].map((e) => e.name), [
+      "svc1.env",
+    ]);
   });
 });
 
