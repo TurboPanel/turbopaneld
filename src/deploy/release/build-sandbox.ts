@@ -18,7 +18,7 @@
 
 import { encodeBase64 } from "@std/encoding/base64";
 import { encodeHex } from "@std/encoding/hex";
-import { join } from "@std/path";
+import { basename, join } from "@std/path";
 import type { CommandSummaryRedactor } from "../../logs/contracts.ts";
 import { BUILD_OUTPUT_LIMITS, pumpLines } from "../../logs/line-stream.ts";
 import { redactCommandSummary } from "../../logs/redactor.ts";
@@ -176,6 +176,59 @@ export function isSpecEnvName(name: string): boolean {
   return SPEC_ENV_NAME_RE.test(name);
 }
 
+/** Prefix of a work tree moved aside because it could not be removed. */
+const QUARANTINE_PREFIX = "q-";
+
+/**
+ * Give the daemon back access to a tree it owns but a build locked
+ * (mode 000, no-write directories). Top-down, never follows a symlink.
+ */
+async function makeTreeRemovable(path: string): Promise<void> {
+  const info = await lstatOrNull(path);
+  if (!info?.isDirectory) return;
+  await Deno.chmod(path, 0o700);
+  const entries = await Array.fromAsync(Deno.readDir(path));
+  await forEachSequential(
+    entries.filter((entry) => entry.isDirectory),
+    (entry) => makeTreeRemovable(join(path, entry.name)),
+  );
+}
+
+/**
+ * Remove a returned work tree. A build can leave directories the daemon
+ * cannot enter, so a failed removal is retried after restoring owner
+ * access, and as a last resort the tree is renamed aside so the same
+ * release can be built again. Resolves true when the tree is gone.
+ */
+export async function removeBuildTree(
+  path: string,
+  remove: typeof Deno.remove = Deno.remove,
+): Promise<boolean> {
+  try {
+    await remove(path, { recursive: true });
+    return true;
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) return true;
+  }
+  try {
+    await makeTreeRemovable(path);
+    await remove(path, { recursive: true });
+    return true;
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) return true;
+    const parent = join(path, "..");
+    const aside = join(
+      parent,
+      `${QUARANTINE_PREFIX}${Date.now().toString(36)}-${basename(path)}`.slice(
+        0,
+        64,
+      ),
+    );
+    await Deno.rename(path, aside);
+    return false;
+  }
+}
+
 /**
  * Create `work/<buildId>` for a fresh clone. A tree left by a crashed run is
  * handed back and removed first; a missing `work/` names the role to run.
@@ -189,7 +242,7 @@ export async function createBuildWorkDir(
     // can be handed back (build-return refuses an active unit).
     await stopBuildUnit(work, runFn);
     await returnBuildWork(work, runFn);
-    await Deno.remove(work.workDir, { recursive: true });
+    await removeBuildTree(work.workDir);
   }
   try {
     await Deno.mkdir(work.workDir, { mode: 0o700 });
@@ -260,10 +313,17 @@ async function reclaimStaleWork(
   onOutput?: ReleaseOutputHandler,
 ): Promise<void> {
   try {
-    await stopBuildUnit(work, runFn);
-    await returnBuildWork(work, runFn);
-    await Deno.remove(work.workDir, { recursive: true });
-    onOutput?.("stdout", `reclaimed a stale build tree ${work.workDir}`);
+    if (!basename(work.workDir).startsWith(QUARANTINE_PREFIX)) {
+      await stopBuildUnit(work, runFn);
+      await returnBuildWork(work, runFn);
+    }
+    const gone = await removeBuildTree(work.workDir);
+    onOutput?.(
+      "stdout",
+      gone
+        ? `reclaimed a stale build tree ${work.workDir}`
+        : `moved a build tree that would not delete aside from ${work.workDir}`,
+    );
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     onOutput?.(
@@ -279,9 +339,13 @@ export async function removeBuildWork(
   onOutput?: ReleaseOutputHandler,
 ): Promise<void> {
   try {
-    await Deno.remove(work.workDir, { recursive: true });
+    if (!(await removeBuildTree(work.workDir))) {
+      onOutput?.(
+        "stderr",
+        `the build tree ${work.workDir} would not delete; it was moved aside`,
+      );
+    }
   } catch (err) {
-    if (err instanceof Deno.errors.NotFound) return;
     const message = err instanceof Error ? err.message : String(err);
     onOutput?.(
       "stderr",
