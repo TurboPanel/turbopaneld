@@ -2,6 +2,11 @@ import { logDebug, logError, logInfo } from "../util/logger.ts";
 import { logComponent, presentStatusLine } from "./presentation.ts";
 import { runStreamingLines } from "./exec.ts";
 import { privilegedPlaybookInvocation } from "./privileged.ts";
+import {
+  ansibleFailureLine,
+  AnsibleFailureTracker,
+  playbookFailureMessage,
+} from "./ansible-failure.ts";
 
 export interface AnsibleDuration {
   start: string;
@@ -163,13 +168,9 @@ export class AnsibleRunSummaryCollector {
       case "v2_runner_on_failed":
       case "v2_runner_on_unreachable": {
         if (this.#firstFailure) break;
-        const failedEvent = event as AnsibleTaskResultEvent;
-        const firstHost = Object.values(failedEvent.hosts)[0];
-        const msg = typeof firstHost?.msg === "string"
-          ? firstHost.msg
-          : "unknown error";
-        const taskName = failedEvent.task.name ?? "task";
-        this.#firstFailure = `${taskName}: ${msg}`;
+        this.#firstFailure = ansibleFailureLine(
+          event as AnsibleTaskResultEvent,
+        );
         break;
       }
     }
@@ -310,12 +311,14 @@ export async function runPlaybookStreaming(
   const quiet = options.quiet === true;
   // Managed hosts: root through the validated helper (sudoers has no shell).
   const invocation = privilegedPlaybookInvocation(ansiblePlaybookBin, args);
+  const failure = new AnsibleFailureTracker();
   const result = await runStreamingLines(invocation.bin, invocation.args, {
     cwd: options.cwd,
     env: options.env,
     onStdoutLine: (line) => {
       const event = parseAnsibleJsonlLine(line);
       if (event) {
+        failure.handleEvent(event);
         if (!quiet) logAnsibleEvent(event);
         if (options.onEvent) options.onEvent(event);
         return;
@@ -329,6 +332,7 @@ export async function runPlaybookStreaming(
     },
     onStderrLine: (line) => {
       if (line.trim().length === 0) return;
+      failure.handleStderrLine(line);
       if (quiet) {
         options.onRawLine?.("stderr", line);
         return;
@@ -338,13 +342,13 @@ export async function runPlaybookStreaming(
   });
 
   if (!result.success) {
-    if (quiet) {
-      throw new Error(`orchestration failed (exit ${result.code})`);
-    }
+    // Never the argument list: it can carry `-e` variables.
     throw new Error(
-      `ansible-playbook failed (exit ${result.code}): ${ansiblePlaybookBin} ${
-        args.join(" ")
-      }`,
+      playbookFailureMessage(
+        quiet ? "orchestration" : "ansible-playbook",
+        result.code,
+        failure,
+      ),
     );
   }
 }
