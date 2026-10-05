@@ -164,9 +164,14 @@ asked for was pruned on this host" is exactly what the operator needs told.
 **A rollback trusts only the daemon's own release record.** Every successful
 promote — native or Railpack — leaves a copy of its manifest under the
 daemon-owned `<daemonStateDir>/release-records/` root
-(`resolveDaemonReleasePaths`); for the native lane it is written after the seal
-and swap succeed, so its existence is this host's statement that the release was
-published. `resolveRollbackTarget` reads that record and nothing else: the copy
+(`resolveDaemonReleasePaths`); for the native lane it is written **before** the
+promote, under a `.pending` marker, so a write failure fails the deploy with
+`current` untouched, and the marker is cleared only once the seal and swap have
+succeeded (a failed promote removes the record). Only a record without the
+marker counts as this host's statement that the release was published. The
+manifest goes through temp file, fsync and rename, and a record is removed with
+its tree: by retention for one release, and with the whole site when a service
+loses its source. `resolveRollbackTarget` reads that record and nothing else: the copy
 inside a native release tree sits in the principal's home, which the principal
 owns, so neither the lane (`imageTag`), the commit, nor the runtime shape is
 ever taken from it, and no privileged read of that tree exists. A release with
@@ -340,7 +345,10 @@ candidate) and **before** the new manifest is written. Path segments are
 re-validated on the way out — the manifest is read back from disk, so it is not
 trusted to name a safe path. A service that is still sourced keeps its tree even
 if its principal changed: reclaiming it would delete live `shared/` state.
-Best-effort per entry, like the rest of retention.
+Once a tree is gone, the daemon's records for that service
+(`<daemonStateDir>/release-records/sites/<serviceId>`) are removed too, without
+privilege (the daemon owns them); a tree that could not be removed keeps its
+records. Best-effort per entry, like the rest of retention.
 
 **Sites now serve out of `current`.** `deploy-environment.ts`
 builds a `composeServiceName → { serviceId, username }` map from
