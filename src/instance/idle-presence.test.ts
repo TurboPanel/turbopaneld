@@ -792,6 +792,81 @@ test("IdlePresence hello and heartbeat carry runtimes when present", async () =>
   }
 });
 
+test("IdlePresence hello and heartbeat carry per-service run state, empty list included", async () => {
+  const running = [{
+    serviceId: "svc-1",
+    state: "running" as const,
+    restartCount: 0,
+    asOf: "2026-10-04T10:00:00.000Z",
+  }];
+  let snapshotServices: typeof running | undefined = running;
+  const restore = installIdlePresenceProviders({
+    getBuildInfo: () => makeDaemonBuild("abc1234"),
+    resolveUpdateChannelConfig: () => ({
+      app: "daemon" as const,
+      channel: "trunk" as const,
+    }),
+    getHostHelloIdentity: () => EMPTY_HOST,
+    collectPresenceSnapshot: () => ({
+      timeSync: makeTimeSync("UTC"),
+      ips: makeIps("203.0.113.10"),
+      ...(snapshotServices ? { services: snapshotServices } : {}),
+    }),
+  });
+  const idleCheckIntervalMs = 15;
+  const socket = openMockSocket();
+  const presence = new IdlePresence({
+    serverId: "srv-services",
+    idleCheckIntervalMs,
+    idleThresholdMs: idleCheckIntervalMs,
+    staleConnectionMs: 60_000,
+  });
+  try {
+    presence.attach(socket as unknown as WebSocket);
+    const hello = framesOfType(socket, "hello")[0] as Record<string, unknown>;
+    assertEquals(hello.services, running);
+
+    // The service goes away: an empty list must still be sent so the control
+    // plane clears it.
+    snapshotServices = [];
+    await sleep(idleCheckIntervalMs + 25);
+    const heartbeats = framesOfType(socket, "heartbeat");
+    assertEquals(heartbeats.length, 1);
+    assertEquals((heartbeats[0] as Record<string, unknown>).services, []);
+  } finally {
+    presence.detach();
+    restore();
+  }
+});
+
+test("IdlePresence omits services when the daemon is not watching Docker", () => {
+  const restore = installIdlePresenceProviders({
+    getBuildInfo: () => makeDaemonBuild("abc1234"),
+    resolveUpdateChannelConfig: () => ({
+      app: "daemon" as const,
+      channel: "trunk" as const,
+    }),
+    getHostHelloIdentity: () => EMPTY_HOST,
+    collectPresenceSnapshot: () => ({
+      timeSync: makeTimeSync("UTC"),
+      ips: makeIps("203.0.113.10"),
+    }),
+  });
+  const socket = openMockSocket();
+  const presence = new IdlePresence({
+    serverId: "srv-no-services",
+    staleConnectionMs: 60_000,
+  });
+  try {
+    presence.attach(socket as unknown as WebSocket);
+    const hello = framesOfType(socket, "hello")[0] as Record<string, unknown>;
+    assertEquals("services" in hello, false);
+  } finally {
+    presence.detach();
+    restore();
+  }
+});
+
 test({
   name: "IdlePresence onStaleConnection fires once until inbound traffic",
   fn: async () => {

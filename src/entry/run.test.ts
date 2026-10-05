@@ -1,4 +1,5 @@
 import { assertEquals } from "@std/assert";
+import { readServiceRunStates } from "../host/service-run-state.ts";
 import {
   type DaemonRunIo,
   type DockerClientLike,
@@ -466,4 +467,29 @@ test("runDaemon ignores a second shutdown signal and close errors", async () => 
   await runDaemon(stub.io);
   assertEquals(closes, 1);
   assertEquals(stub.exits, [0]);
+});
+
+test("runDaemon feeds the sentinel's service run state to presence and clears it on shutdown", async () => {
+  const services = [{
+    serviceId: "svc-1",
+    state: "running" as const,
+    restartCount: 0,
+    asOf: "2026-10-04T12:00:00.000Z",
+  }];
+  let seenWhileRunning: unknown;
+  const stub = stubIo({
+    createSentinel: () => ({
+      start() {},
+      stop() {},
+      serviceRunStates: () => services,
+    }),
+    shouldConnectToInstance: () => true,
+    connectInstance: () => {
+      seenWhileRunning = readServiceRunStates();
+      return Promise.resolve({ stop() {} });
+    },
+  });
+  await runDaemon(stub.io);
+  assertEquals(seenWhileRunning, services);
+  assertEquals(readServiceRunStates(), undefined);
 });

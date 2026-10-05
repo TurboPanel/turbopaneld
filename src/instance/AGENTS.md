@@ -169,6 +169,20 @@ identifier per hour (one refill every 12 minutes). The tenant
   instance **offline-sweep cron** re-projecting online via `onDaemonConnected`
   — not by a periodic daemon heartbeat.
 
+- Presence also carries **`services`** (per-service run state: running /
+  restart count / last error), change-detected like `docker` and sent on hello.
+  The sentinel (`src/monitor/sentinel.ts`, derivation in
+  `src/monitor/service-run-state.ts`) registers a source through
+  `src/host/service-run-state.ts`; `undefined` (Docker not watched, or the first
+  container listing not in yet) omits the field, `[]` is sent so the control
+  plane clears. A container is `running` only after 60 s up (`SERVICE_SETTLE_MS`),
+  `crashing` while Docker restarts it, `stopped_after_crashes` when down at 10
+  restarts (`SERVICE_CRASH_LIMIT`; reporting only, the restart policy itself is
+  set by the deploy). `asOf` is when the state last changed, so an idle service
+  never re-triggers a heartbeat. Wire twin: `src/contracts/service-run-state.ts`
+  (checked by `check:contract-drift`). The last log line comes from
+  `docker logs --tail 5`, fetched in the background once per restart count.
+
 Command handlers (`server.timezone.set`, `server.ntp.set`,
 `server.firewall.reconcile`, deploy/managed/fabric, …) live in
 `src/commands/` and are injected at the `src/entry/run.ts` composition root
