@@ -3,12 +3,12 @@
 # with a real version (TURBOPANEL_RELEASE_VERSION, already supported
 # end-to-end by scripts/package-daemon-release.sh and
 # scripts/bundle-orchestration.sh — this workflow is the first caller to
-# actually set it), and publishes to GitHub Releases instead of Bunny/CDN.
+# actually set it), and publishes to GitHub Releases.
 #
-# The existing trunk → Bunny/dl.trbp.nl path in publish-daemon-trunk.yml is
-# UNCHANGED and stays on its own push-to-trunk trigger — `retire-cdn` on the
-# Road page already decided dl.trbp.nl is kept, not replaced, so this adds a
-# second, independent publish path rather than touching the first.
+# The per-merge trunk → Bunny/dl.trbp.nl CDN drop that used to sit beside this
+# path is retired (owner decision 2026-10-05: "i dont think we need the trunk
+# channel anymore"; the DL_S3_* secrets are deleted). publish-daemon-trunk.yml
+# keeps its push-to-trunk trigger only to publish the rolling GitHub canary.
 #
 # The manifest.json this generates records the tag-pinned GitHub Release
 # download URL for every asset (ARTIFACT_BASE_URL below — see

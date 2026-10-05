@@ -333,13 +333,13 @@ dev-user parameters — not shipped in release; resolved via
 `TURBOPANEL_DEV_ORCHESTRATION_DIR` / `resolveDevOrchestrationDir`, layered with
 daemon production roles through `ANSIBLE_ROLES_PATH`). Production installs
 extract **`orchestration.tar.zst`** from the channel manifest into
-`/opt/turbopanel/share/orchestration/`. Release CDN artifacts are four split
-tarballs per build under versioned paths (`channels/trunk/daemon/<buildId>/…`):
+`/opt/turbopanel/share/orchestration/`. Release artifacts are four split
+tarballs per build on GitHub Releases:
 host-arch `turbopaneld-{amd64,arm64}.tar.zst`, shared `turbopaneld.js.tar.zst`
 (Deno JS runtime for hosts that cannot execute the native binary), and shared
-`orchestration.tar.zst`. Manifest artifact URLs are canonical — Bunny CDN
-ignores `?build=` query cache-bust, so each publish uploads to a new
-`<buildId>/` prefix with `Cache-Control: immutable`.
+`orchestration.tar.zst`. Manifest artifact URLs are canonical: assets are added
+under build-unique names, so a manifest never names a file a later publish
+replaces.
 
 **Two managed ExecStart modes (native vs Deno JS):** `run.sh` always downloads
 the host-arch native binary and orchestration tree, then probes
