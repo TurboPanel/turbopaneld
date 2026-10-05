@@ -98,6 +98,9 @@ DAEMON_ACCOUNT="tp"
 # only privilege is CAP_NET_BIND_SERVICE. Kept in step with
 # roles/hosting-caddy/defaults/main.yml and HOSTING_CADDY_USER in ingress.ts.
 HOSTING_CADDY_USER="tpedge"
+# The access groups the sshd drop-in may name in a Match block (the registry's
+# accessGroups: sftp, shell, password, principal); a test keeps them in step.
+SSHD_MATCH_GROUPS="tpsftp tpshell tppasswd tpprincipal"
 HOSTING_CADDY_CAP="CAP_NET_BIND_SERVICE"
 HOSTING_CADDY_STATE="turbopanel-hosting-caddy"
 # Its admin API is a unix socket in /run/<this> (0700, tpedge), never loopback
@@ -176,6 +179,12 @@ tp_path_class() {
       tp_php_path_class "$_pc"
       return
       ;;
+  esac
+  # The shared php-fpm master runs as root and reads its main config and every
+  # conf.d/*.ini at start (`extension=` loads code into it). Only Ansible writes
+  # those; the daemon keeps just pools/*.conf here.
+  case "$_pc" in
+    "$R_CONFIG"/php/conf.d|"$R_CONFIG"/php/conf.d/*|"$R_CONFIG"/php/*/conf.d|"$R_CONFIG"/php/*/conf.d/*|"$R_CONFIG"/php/*/php-fpm.conf) return 1 ;;
   esac
   for _pc_root in "$R_CONFIG" "$R_STATE" "$R_LOG" "$R_RUN" "$R_SSHKEYS"; do
     if tp_under "$_pc" "$_pc_root"; then echo tree; return 0; fi
@@ -703,6 +712,156 @@ META
   [ "$_um_count" -eq 4 ]
 }
 
+# Content checks for the three root-read config files the daemon may write
+# (the WireGuard config, the sshd drop-in, the sysctl drop-in). Root loads each
+# one without looking at it again (wg-quick runs hooks, sshd honours a root
+# login, systemd-sysctl sets kernel helpers), so only the exact shapes the
+# daemon renders are accepted: known keys with strict values, nothing else.
+# Each takes the staged file path and returns non-zero on any other content.
+
+# A NUL or a carriage return ends a line for systemd's and PHP's readers (and a
+# NUL for bash's `read`) but not for awk, so text after one would be read as a
+# directive the checks below never saw. No file the daemon renders holds either.
+tp_content_plain() {
+  LC_ALL=C tr -d '\000\r' < "$1" | cmp -s - "$1"
+}
+
+tp_wireguard_ok() {
+  tp_content_plain "$1" || return 1
+  LC_ALL=C awk '
+    function fail(msg) { print "tp-host: wireguard config: " msg > "/dev/stderr"; exit 1 }
+    function b64key(v) { return length(v) == 44 && v ~ /^[A-Za-z0-9+\/]+=$/ }
+    function port(v) { return length(v) <= 5 && v ~ /^[0-9]+$/ }
+    function iplist(v,   n, a, i) {
+      n = split(v, a, /, ?/)
+      for (i = 1; i <= n; i++) if (a[i] !~ /^[0-9A-Fa-f:.]+(\/[0-9]+)?$/ || length(a[i]) > 50) return 0
+      return n > 0
+    }
+    function endpoint(v) { return v ~ /^[][A-Za-z0-9._:-]+:[0-9]+$/ && length(v) <= 270 }
+    function valueok(sec, k, v) {
+      if (sec == "Interface") {
+        if (k == "PrivateKey") return b64key(v)
+        if (k == "Address") return iplist(v)
+        if (k == "ListenPort") return port(v)
+      }
+      if (sec == "Peer") {
+        if (k == "PublicKey" || k == "PresharedKey") return b64key(v)
+        if (k == "AllowedIPs") return iplist(v)
+        if (k == "Endpoint") return endpoint(v)
+        if (k == "PersistentKeepalive") return port(v)
+      }
+      return -1
+    }
+    /^[ \t]*$/ || /^#/ { next }
+    $0 == "[Interface]" { section = "Interface"; next }
+    $0 == "[Peer]" { section = "Peer"; next }
+    {
+      if (section == "") fail("directive outside a section")
+      if (!match($0, /^[A-Za-z]+ ?= ?/)) fail("line without a key")
+      k = $0; sub(/ ?=.*$/, "", k)
+      r = valueok(section, k, substr($0, RLENGTH + 1))
+      if (r < 0) fail("directive " section "." k)
+      if (!r) fail("value of " k)
+    }
+  ' "$1"
+}
+
+tp_sshd_dropin_ok() {
+  tp_content_plain "$1" || return 1
+  LC_ALL=C awk -v keys="$R_SSHKEYS/authorized_keys/%u" -v chroot="$R_PRINCIPALS/%u" -v groups="$SSHD_MATCH_GROUPS" '
+    function fail(msg) { print "tp-host: sshd drop-in: " msg > "/dev/stderr"; bad = 1; exit 1 }
+    BEGIN {
+      n = split(groups, g, " ")
+      for (i = 1; i <= n; i++) okgroup[g[i]] = 1
+      split("PubkeyAuthentication yes|PubkeyAuthentication no|PasswordAuthentication yes|PasswordAuthentication no|KbdInteractiveAuthentication no|AuthorizedKeysFile none|AuthorizedKeysCommand none|AllowTcpForwarding no|AllowStreamLocalForwarding no|PermitOpen none|PermitListen none|AllowAgentForwarding no|X11Forwarding no|PermitTunnel no|GatewayPorts no|PermitUserRC no|ForceCommand internal-sftp|ForceCommand internal-sftp -d /home", d, "|")
+      for (i in d) okline["  " d[i]] = 1
+      okline["  AuthorizedKeysFile " keys] = 1
+      okline["  ChrootDirectory " chroot] = 1
+    }
+    /^[ \t]*$/ || /^#/ { next }
+    { last = $0 }
+    /^Match all$/ { inmatch = 0; next }
+    /^Match Group [A-Za-z0-9_-]+$/ {
+      if (!(substr($0, 13) in okgroup)) fail("Match group " substr($0, 13))
+      inmatch = 1
+      next
+    }
+    {
+      if (!inmatch) fail("directive outside a Match block: " $0)
+      if (!($0 in okline)) fail("directive " $0)
+    }
+    # The drop-in is included near the top of sshd_config: a Match block left
+    # open would swallow every directive of the host config that follows it.
+    END {
+      if (bad) exit 1
+      if (last != "" && last != "Match all") { print "tp-host: sshd drop-in: does not end with Match all" > "/dev/stderr"; exit 1 }
+    }
+  ' "$1"
+}
+
+tp_sysctl_dropin_ok() {
+  tp_content_plain "$1" || return 1
+  LC_ALL=C awk '
+    /^$/ || /^#/ || $0 == "net.ipv4.ip_forward=1" || $0 == "net.ipv4.ip_forward = 1" { next }
+    { print "tp-host: sysctl drop-in: refusing line " $0 > "/dev/stderr"; exit 1 }
+  ' "$1"
+}
+
+# A pool file of the shared php-fpm master (root; it reads every pool at start).
+# Only the directives the daemon renders, a pool never named `global` (that
+# section sets the master's own log, includes and prefix), no worker account
+# of root.
+tp_phppool_ok() {
+  tp_content_plain "$1" || return 1
+  LC_ALL=C awk '
+    function fail(msg) { print "tp-host: php-fpm pool: " msg > "/dev/stderr"; exit 1 }
+    function acct(v) { return v != "root" && length(v) <= 32 && v ~ /^[a-z_][a-z0-9_-]*$/ }
+    function word(v) { return v ~ /^[A-Za-z0-9._-]+$/ }
+    function valueok(k, v) {
+      if (k == "user" || k == "group" || k == "listen.owner" || k == "listen.group") return acct(v)
+      if (k == "listen") return v ~ /^\/[A-Za-z0-9._\/-]+$/
+      if (k == "listen.mode") return v ~ /^0[0-7][0-7][0-7]$/
+      if (k == "pm") return v == "static" || v == "dynamic" || v == "ondemand"
+      if (k ~ /^pm\.(max_children|start_servers|min_spare_servers|max_spare_servers|max_requests|process_idle_timeout)$/ || k == "request_terminate_timeout") return word(v)
+      if (k == "chdir") return v ~ /^\/[A-Za-z0-9._\/@+:-]*$/
+      if (k == "catch_workers_output" || k == "decorate_workers_output" || k == "clear_env") return v == "yes" || v == "no"
+      if (k ~ /^php_admin_value\[[A-Za-z0-9._]+\]$/) return tolower(k) !~ /extension/ && v !~ /^[ \t]/
+      return -1
+    }
+    /^[ \t]*$/ || /^;/ { next }
+    /^\[[A-Za-z0-9._-]+\]$/ {
+      if (tolower($0) == "[global]") fail("a [global] section")
+      inpool = 1
+      next
+    }
+    {
+      if (!inpool) fail("directive outside a pool")
+      if (!match($0, /^[A-Za-z0-9._]+(\[[A-Za-z0-9._]+\])? = /)) fail("line without a key: " $0)
+      k = $0; sub(/ = .*$/, "", k)
+      r = valueok(k, substr($0, RLENGTH + 1))
+      if (r < 0) fail("directive " k)
+      if (!r) fail("value of " k)
+    }
+  ' "$1"
+}
+
+# Run the check that belongs to what root loads unseen: CLASS, the staged file,
+# and the destination path (the pool files are plain tree paths).
+tp_content_ok() {
+  case "$1" in
+    wireguard) tp_wireguard_ok "$2" ;;
+    sshd) tp_sshd_dropin_ok "$2" ;;
+    sysctl) tp_sysctl_dropin_ok "$2" ;;
+    tree)
+      case "$3" in
+        "$R_CONFIG"/php/*/pools/*) tp_phppool_ok "$2" ;;
+        *) return 0 ;;
+      esac
+      ;;
+    *) return 0 ;;
+  esac
+}
+
 # The daemon renders tenant units (native apps, cron jobs, slices) and the
 # hosting Caddy unit. Installing a unit is starting a process, so its content
 # is checked: known directives only, tenant services pinned to the principal
@@ -710,6 +869,7 @@ META
 tp_unit_ok() {
   _uk_file="$1"
   _uk_name="$2"
+  tp_content_plain "$_uk_file" || return 1
   # `turbopanel-backup-` is reserved for scheduled backups: a name under it is
   # either exactly turbopanel-backup-<lower-case uuid>.service|.timer and gets
   # the backup check below, or it is refused.
@@ -775,7 +935,11 @@ tp_unit_ok() {
       if (section == "") fail("directive outside a section: " key)
       if (key ~ /^X-TurboPanel-[A-Za-z]+$/ && section == "Unit") next
       if (!((section, key) in ok)) fail("directive " section "." key)
-      if (key ~ /^Exec/ && val ~ /^[+!:]/) fail(key " with a privileged prefix")
+      # systemd unquotes and unescapes the first word before it reads the
+      # prefix characters, so a quoted or escaped `+` would still lift the
+      # privilege limits. Only an absolute path may follow (after optional
+      # whitespace, one optional opening quote and the harmless `-`/`@`).
+      if (key ~ /^Exec/ && val !~ /^[ \t]*"?[-@]*\//) fail(key " must start with an absolute path")
       if (key == "User") user = val
       if (key == "Group") group = val
       if (key == "Slice") slice = val
@@ -783,6 +947,9 @@ tp_unit_ok() {
       # binding :80/:443.
       if (key ~ /^(CapabilityBoundingSet|AmbientCapabilities)$/ && val != "" && !(hosting == "1" && val == hostcap)) fail(key "=" val)
       if (key == "NoNewPrivileges") nnp = val
+      # Tenant output goes to the journal (or nowhere): systemd opens `file:`,
+      # `append:` and `truncate:` targets itself, before it drops to User=.
+      if (key ~ /^Standard(Output|Error)$/ && val !~ /^(journal|null|inherit)$/) fail(key "=" val)
       if (key == "Unit" && section == "Timer") timerunit = val
     }
     END {
@@ -1563,7 +1730,8 @@ tp_php_install() {
   case "$_pi_mode" in 0640|640) ;; *) tp_die "refusing mode $_pi_mode for $_pi_dest" ;; esac
   tp_stage_dir
   tp_read_as_caller "$1" > "$TP_STAGE/src"
-  tp_php_conf_ok "$TP_STAGE/src" "$_pi_dest" "$_pi_group" ||
+  tp_content_plain "$TP_STAGE/src" &&
+    tp_php_conf_ok "$TP_STAGE/src" "$_pi_dest" "$_pi_group" ||
     tp_die "refusing ${_pi_dest##*/}: content outside the allowed directives"
   tp_put_file "$_pi_dest" 0640 root "$_pi_group" < "$TP_STAGE/src"
 }
@@ -1714,6 +1882,8 @@ tp_verb_install() {
     tp_unit_ok "$_in_stage" "${_in_dest##*/}" ||
       tp_die "refusing unit ${_in_dest##*/}: content outside the allowed shape"
   fi
+  tp_content_ok "$_in_class" "$_in_stage" "$_in_dest" ||
+    tp_die "refusing ${_in_dest##*/}: content outside the allowed shape"
   tp_put_file "$_in_dest" "$_in_mode" "$_in_owner" "$_in_group" < "$_in_stage"
 }
 
@@ -1756,6 +1926,8 @@ tp_verb_cp() {
       [ "$_cp_dest" = "$R_WG/tp0.conf" ] || tp_die "refusing cp destination $_cp_dest"
       tp_stage_dir
       tp_read_as_caller "$_cp_src" > "$TP_STAGE/src"
+      tp_content_ok wireguard "$TP_STAGE/src" "$_cp_dest" ||
+        tp_die "refusing ${_cp_dest##*/}: content outside the allowed shape"
       tp_put_file "$_cp_dest" 600 < "$TP_STAGE/src"
       ;;
   esac
@@ -1782,6 +1954,10 @@ tp_verb_mv() {
   # Renaming a directory over the one holding php/sites would swap in config
   # no check has seen.
   [ "$2" != "$R_CONFIG/php" ] || tp_die "refusing path $2"
+  # Nor over a series directory or its pools directory: the files inside would
+  # reach the root php-fpm master without the pool check they get on install.
+  [ "${2%/*}" != "$R_CONFIG/php" ] || tp_die "refusing path $2"
+  case "$2" in "$R_CONFIG"/php/*/pools) tp_die "refusing path $2" ;; esac
   tp_path_class "$1" >/dev/null || tp_die "refusing path $1"
   tp_refuse_root_entry "$1"
   tp_refuse_root_entry "$2"
@@ -2077,6 +2253,8 @@ tp_verb_tee() {
   tp_stage_dir
   _te_tmp="$TP_STAGE/stdin"
   cat > "$_te_tmp"
+  tp_content_ok "$_te_class" "$_te_tmp" "$1" ||
+    tp_die "refusing ${1##*/}: content outside the allowed shape"
   # 0600 until the caller sets the final mode (it always follows with chmod).
   tp_put_file "$1" 600 < "$_te_tmp"
   cat -- "$_te_tmp"
@@ -2323,27 +2501,31 @@ tp_verb_sysctl() {
     tp_require_class "$2" sysctl
     tp_open_verified "$2" || tp_die "no such file $2"
     # Only the keys the fabric drop-in carries.
-    while IFS= read -r _sy_line || [ -n "$_sy_line" ]; do
-      case "$_sy_line" in
-        ''|'#'*|'net.ipv4.ip_forward=1'|'net.ipv4.ip_forward = 1') ;;
-        *) tp_die "sysctl: refusing drop-in line $_sy_line" ;;
-      esac
-    done <&3
+    tp_sysctl_dropin_ok "/proc/self/fd/3" || tp_die "sysctl: refusing drop-in content"
     tp_exec sysctl -w net.ipv4.ip_forward=1
   fi
   tp_die "sysctl: unsupported form"
 }
 
-# xtables: any rule, but never --modprobe (it names a program root runs) and
-# no rule files (restore reads stdin only).
+# xtables: the rule options the daemon sends, never anything else. An option
+# that names a program root would run (`--modprobe`, spelled `-M/path`,
+# `-nM/path`, `--mod=/path` or any other getopt abbreviation) can then never
+# slip through, because every argument that starts with `-` must be on the
+# list. Rule files are refused too (restore reads stdin only).
 tp_verb_xtables() {
   _xt_bin="$1"
   shift
-  for _xt_a in "$@"; do
-    case "$_xt_a" in
-      --modprobe*|-M) tp_die "$_xt_bin: refusing $_xt_a" ;;
-    esac
-  done
+  case "$_xt_bin" in
+    iptables|ip6tables)
+      for _xt_a in "$@"; do
+        case "$_xt_a" in
+          -w|--wait|-V|--version|-A|-C|-D|-I|-N|-F|-X|-S|-p|-s|-d|-i|-o|-j|-m|--dport|--ctstate|--ctorigdst|--ctorigdstport) ;;
+          -*) tp_die "$_xt_bin: refusing option $_xt_a" ;;
+          *) ;;
+        esac
+      done
+      ;;
+  esac
   case "$_xt_bin" in
     iptables-restore|ip6tables-restore)
       for _xt_a in "$@"; do
@@ -3110,6 +3292,26 @@ tp_site_usage_rows() {
     done
 }
 
+# site-caddy-mounts: the mount points the running site Caddy holds `nosymfollow`
+# under the principal home root, one per line (nothing when the unit is not
+# running). The daemon compares them with the web roots and release trees its
+# sites need and restarts the unit when one is missing: tp-site-caddy-run
+# mounts them once, at start, in the unit's private mount namespace. Reads only
+# the unit's process list and its mount table.
+tp_verb_site_caddy_mounts() {
+  [ "$#" -eq 0 ] || tp_die "site-caddy-mounts: takes no arguments"
+  _cm_procs="$P/sys/fs/cgroup/system.slice/turbopanel-site-caddy.service/cgroup.procs"
+  [ -f "$_cm_procs" ] || return 0
+  _cm_pid="$(sed -n '1p' "$_cm_procs")"
+  case "$_cm_pid" in ''|*[!0-9]*) return 0 ;; esac
+  [ -r "$P/proc/$_cm_pid/mountinfo" ] || return 0
+  while read -r _cm_id _cm_parent _cm_dev _cm_root _cm_mp _cm_opts _cm_rest; do
+    case "$_cm_opts" in *nosymfollow*) ;; *) continue ;; esac
+    case "$_cm_mp" in "$R_PRINCIPALS"/*) ;; *) continue ;; esac
+    printf '%s\n' "$_cm_mp"
+  done < "$P/proc/$_cm_pid/mountinfo"
+}
+
 tp_verb_site_usage() {
   [ "$#" -eq 0 ] || tp_die "site-usage: takes no arguments"
   tp_pin_dir "$R_PRINCIPALS" 2>/dev/null || return 0
@@ -3393,6 +3595,7 @@ case "$_verb" in
   php-test) tp_verb_php_test "$@" ;;
   cert-dates) tp_verb_cert_dates "$@" ;;
   site-usage) tp_verb_site_usage "$@" ;;
+  site-caddy-mounts) tp_verb_site_caddy_mounts "$@" ;;
   php-loopback-sync) tp_verb_php_loopback_sync "$@" ;;
   *) tp_die "refusing verb $_verb" ;;
 esac

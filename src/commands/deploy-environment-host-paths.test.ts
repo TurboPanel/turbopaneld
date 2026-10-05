@@ -6,6 +6,7 @@ import {
   RUNTIME_COMPOSE_FILENAME,
 } from "../deploy/compose-files.ts";
 import { handleEnvironmentDeploy } from "./deploy-environment.ts";
+import "../testing/stub-hosting-caddy-host.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.

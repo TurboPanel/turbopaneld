@@ -5,6 +5,7 @@ import { RUNTIME_COMPOSE_FILENAME } from "../deploy/compose-files.ts";
 import { handleEnvironmentDeploy } from "./deploy-environment.ts";
 import { SequentialDeployError } from "../deploy/sequential-deploy.ts";
 import type { EnvironmentDeployPayload } from "../contracts/commands-contracts.ts";
+import "../testing/stub-hosting-caddy-host.ts";
 
 /** Jest/Mocha-shaped alias so Sonar sees real tests (see deploy-environment.test.ts). */
 const test = Deno.test.bind(Deno);
@@ -250,5 +251,83 @@ test({
       );
       assertEquals(err instanceof SequentialDeployError, false);
       assertEquals(docker.calls.map(verbOf).includes("stop"), false);
+    }),
+});
+
+test({
+  name:
+    "a project renamed between deploys removes only this environment's old containers, never a sibling's",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: () =>
+    withState(async (dir) => {
+      const docker = fakeDocker([HEALTHY]);
+      const sharedRows = [
+        `c-own\t${ENVIRONMENT_ID}\t${dir}`,
+        `c-own-old\t\t${dir}`, // started before the environment label existed
+        "c-sibling\tother-env\t/state/deployments/proj-seq/other-env",
+      ].join("\n");
+      const run = (args: string[]) => {
+        if (
+          args[0] === "ps" && args.includes(
+            `label=com.docker.compose.project=${PROJECT_NAME}`,
+          )
+        ) {
+          docker.calls.push([...args]);
+          return ok(sharedRows);
+        }
+        return docker.run(args);
+      };
+      for (const strategy of [undefined, "sequential"] as const) {
+        const extra = strategy ? { deployStrategy: strategy } : {};
+        await deploy(payload("nginx:1", extra), run);
+        docker.calls.length = 0;
+        await deploy(
+          payload("nginx:2", { ...extra, projectName: "env-new-name" }),
+          run,
+        );
+        const rmIdx = docker.calls.findIndex((c) => c[0] === "rm");
+        const upIdx = docker.calls.findIndex((c) =>
+          c.includes("up") && c[2] === "env-new-name"
+        );
+        assert(rmIdx >= 0, `old containers removed (${strategy})`);
+        assert(upIdx > rmIdx, `removal precedes up (${strategy})`);
+        assertEquals(docker.calls[rmIdx], ["rm", "-f", "c-own", "c-own-old"]);
+        assertEquals(
+          docker.calls.some((c) => c.includes("down")),
+          false,
+        );
+        await deploy(payload("nginx:3", extra), run);
+        docker.calls.length = 0;
+      }
+    }),
+});
+
+test({
+  name:
+    "a failed up after the earlier-named containers were removed says so in plain words",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: () =>
+    withState(async (dir) => {
+      const docker = fakeDocker([HEALTHY]);
+      await deploy(payload("nginx:1"), docker.run);
+      const run = (args: string[]) => {
+        if (args[0] === "ps" && args.includes("--format")) {
+          return ok(`c-own\t${ENVIRONMENT_ID}\t${dir}`);
+        }
+        if (args.includes("up")) {
+          return Promise.resolve({
+            success: false,
+            stdout: "",
+            stderr: "boom",
+            code: 1,
+          });
+        }
+        return docker.run(args);
+      };
+      await assertRejects(
+        () => deploy(payload("nginx:2", { projectName: "env-new-name" }), run),
+        Error,
+        "deploy again to bring it back",
+      );
     }),
 });
