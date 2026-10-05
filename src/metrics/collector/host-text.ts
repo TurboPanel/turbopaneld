@@ -466,14 +466,17 @@ export class HostTextCollector {
     }
     const disks = await this.#io.blockDisks();
     const entries = await Promise.all(disks.map(async (name) => {
-      const out = await this.#run("smartctl", [
+      // smartctl's exit status is a bit mask: a failing drive (bit 3) exits
+      // non-zero while still printing a valid verdict, so parse the output
+      // whatever the exit code (a standby skip prints nothing and parses to null).
+      const result = await this.#io.run("smartctl", [
         "-H",
         "-j",
         "-n",
         "standby",
         `/dev/${name}`,
       ]);
-      const parsed = out ? parseSmartctlJson(out) : null;
+      const parsed = result?.stdout ? parseSmartctlJson(result.stdout) : null;
       if (!parsed) return undefined;
       const failing = parsed.critical || parsed.nvmeCritical;
       return [name, failing ? "failing" : "ok"] as const;

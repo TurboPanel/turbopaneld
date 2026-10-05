@@ -126,9 +126,14 @@ class FakeClock {
     await this.#flushMicrotasks();
   }
 
-  /** Settle chained `await`s from async collector / emit paths. */
+  /**
+   * Settle chained `await`s from async collector / emit paths. The budget is
+   * generous on purpose: every deadline wrapper and `Promise.all` in the
+   * collect path adds promise hops, and a budget that is only just enough
+   * turns the next added hop into a silent "no sample yet" failure.
+   */
   async #flushMicrotasks(): Promise<void> {
-    for (let i = 0; i < 32; i++) {
+    for (let i = 0; i < 256; i++) {
       await Promise.resolve();
     }
   }
@@ -344,6 +349,7 @@ function makeScheduler(options: {
   primeMs?: number;
   logRateLimitMs?: number;
   durabilityFlag?: () => boolean;
+  collectDeadlineMs?: number;
   onLog?: (level: "info" | "warn", message: string) => void;
 }): MetricsScheduler {
   return new MetricsScheduler({
@@ -362,6 +368,7 @@ function makeScheduler(options: {
       .clearIntervalFn as unknown as typeof clearInterval,
     logRateLimitMs: options.logRateLimitMs,
     durabilityFlag: options.durabilityFlag,
+    collectDeadlineMs: options.collectDeadlineMs,
     onLog: options.onLog,
   });
 }
@@ -752,7 +759,7 @@ it(
     assertEquals(maxInFlight, 1);
 
     releaseSlowCollect();
-    for (let i = 0; i < 32; i++) {
+    for (let i = 0; i < 256; i++) {
       await Promise.resolve();
     }
 
@@ -1256,4 +1263,75 @@ it("a control plane that negotiates metrics-v7 later flips the same scheduler fr
     (s as { metadata: { version: number } }).metadata.version
   );
   assertEquals(versions, [6, 7]);
+});
+
+it("the live-stream collector is told it is live (so it skips event detection); the baseline is not", async () => {
+  const clock = new FakeClock();
+  const seen: Array<boolean | undefined> = [];
+  const scheduler = makeScheduler({
+    clock,
+    intervalMs: 60_000,
+    durabilityFlag: () => true,
+    collectorFactory: () => ({
+      collect: ({ sequence, live }) => {
+        seen.push(live);
+        return Promise.resolve(supportedSample(sequence));
+      },
+    }),
+  });
+  scheduler.attach(capturingSink([]));
+  await clock.advance(0);
+  scheduler.setStreamIntervalMs(10_000);
+  await clock.advance(0);
+  assertEquals(seen, [undefined, true]);
+});
+
+it("a collect that never settles is abandoned at the deadline: the guard clears, the reason is logged, the next tick emits", async () => {
+  const clock = new FakeClock();
+  const sent: unknown[] = [];
+  const logs: string[] = [];
+  let calls = 0;
+  const scheduler = makeScheduler({
+    clock,
+    intervalMs: 1_000,
+    collectDeadlineMs: 2_500,
+    onLog: (_level, message) => logs.push(message),
+    collectorFactory: () => ({
+      collect: ({ sequence }) => {
+        calls += 1;
+        return calls === 1
+          ? new Promise<MetricsCollectResult>(() => {})
+          : Promise.resolve(supportedSample(sequence));
+      },
+    }),
+  });
+  scheduler.attach(capturingSink(sent));
+  await clock.advance(2_400);
+  assertEquals(sent.length, 0);
+  await clock.advance(2_000);
+  assertEquals(sent.length > 0, true);
+  assertEquals(logs.some((l) => l.includes("did not finish")), true);
+});
+
+it("after a collect is abandoned at the deadline the scheduler builds a fresh collector, so the stuck one is never re-entered", async () => {
+  const clock = new FakeClock();
+  let built = 0;
+  const scheduler = makeScheduler({
+    clock,
+    intervalMs: 1_000,
+    collectDeadlineMs: 2_500,
+    collectorFactory: () => {
+      built += 1;
+      const mine = built;
+      return {
+        collect: ({ sequence }) =>
+          mine === 1
+            ? new Promise<MetricsCollectResult>(() => {})
+            : Promise.resolve(supportedSample(sequence)),
+      };
+    },
+  });
+  scheduler.attach(capturingSink([]));
+  await clock.advance(4_000);
+  assertEquals(built, 2);
 });
