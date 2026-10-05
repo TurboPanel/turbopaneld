@@ -126,9 +126,14 @@ class FakeClock {
     await this.#flushMicrotasks();
   }
 
-  /** Settle chained `await`s from async collector / emit paths. */
+  /**
+   * Settle chained `await`s from async collector / emit paths. The budget is
+   * generous on purpose: every deadline wrapper and `Promise.all` in the
+   * collect path adds promise hops, and a budget that is only just enough
+   * turns the next added hop into a silent "no sample yet" failure.
+   */
   async #flushMicrotasks(): Promise<void> {
-    for (let i = 0; i < 32; i++) {
+    for (let i = 0; i < 256; i++) {
       await Promise.resolve();
     }
   }
@@ -754,7 +759,7 @@ it(
     assertEquals(maxInFlight, 1);
 
     releaseSlowCollect();
-    for (let i = 0; i < 32; i++) {
+    for (let i = 0; i < 256; i++) {
       await Promise.resolve();
     }
 
