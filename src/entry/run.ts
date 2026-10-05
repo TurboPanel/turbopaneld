@@ -22,6 +22,7 @@ import { guardHostingCaddySites } from "../deploy/ingress.ts";
 import { createSentinel, type SentinelOptions } from "../monitor/index.ts";
 import type { ServiceRunState } from "../contracts/service-run-state.ts";
 import { setServiceRunStateSource } from "../host/service-run-state.ts";
+import { stopCrashLoopingContainer } from "../monitor/crash-loop-guard.ts";
 import { fetchContainerLastLogLine } from "../monitor/service-run-state.ts";
 import {
   initOrchestration,
@@ -265,6 +266,7 @@ export async function runDaemon(io: DaemonRunIo = {}): Promise<void> {
     if (attached.dockerMonitor && !io.createSentinel) {
       sentinelOptions.dockerMonitor = attached.dockerMonitor as DockerMonitor;
       sentinelOptions.fetchLastLogLine = fetchContainerLastLogLine;
+      sentinelOptions.stopContainer = stopCrashLoopingContainer;
     }
   }
 

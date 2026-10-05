@@ -719,3 +719,68 @@ test("sentinel ignores ingress containers and survives a failing log fetch", asy
   controller.abort();
   sentinel.stop();
 });
+
+test("sentinel stops a service container at 10 restarts and reports stopped after crashes", async () => {
+  const dockerMonitor = new FakeDockerMonitor();
+  const stopped: string[] = [];
+  const sentinel = createSentinel({
+    dockerMonitor: dockerMonitor as unknown as DockerMonitor,
+    fetchLastLogLine: () => Promise.resolve("Error: listen EADDRINUSE :::3000"),
+    stopContainer: (id) => {
+      stopped.push(id);
+      return Promise.resolve();
+    },
+  });
+  const controller = new AbortController();
+  dockerMonitor.seed(
+    makeSummary(),
+    serviceInspect("restarting", { restartCount: 9, exitCode: 1 }),
+  );
+  sentinel.start(controller.signal);
+  await dockerMonitor.waitUntilReady();
+  assertEquals(sentinel.serviceRunStates()?.[0]?.state, "crashing");
+  assertEquals(stopped, []);
+
+  // Docker reports the restart that crosses the limit.
+  dockerMonitor.emitChange({
+    containerId: CONTAINER_ID,
+    summary: makeSummary(),
+    inspect: serviceInspect("restarting", { restartCount: 10, exitCode: 1 }),
+    removed: false,
+  });
+  assertEquals(stopped, [CONTAINER_ID]);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  dockerMonitor.clearContainers();
+  dockerMonitor.emitChange({
+    containerId: CONTAINER_ID,
+    summary: makeSummary(),
+    inspect: serviceInspect("exited", { restartCount: 10, exitCode: 1 }),
+    removed: false,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const [state] = sentinel.serviceRunStates() ?? [];
+  assertEquals(state?.state, "stopped_after_crashes");
+  assertEquals(state?.restartCount, 10);
+  assertEquals(state?.lastError, "Error: listen EADDRINUSE :::3000");
+  assertEquals(stopped.length, 1);
+  controller.abort();
+  sentinel.stop();
+});
+
+test("sentinel without a stop hook leaves a crash loop to Docker", async () => {
+  const dockerMonitor = new FakeDockerMonitor();
+  const sentinel = createSentinel({
+    dockerMonitor: dockerMonitor as unknown as DockerMonitor,
+  });
+  const controller = new AbortController();
+  dockerMonitor.seed(
+    makeSummary(),
+    serviceInspect("restarting", { restartCount: 30, exitCode: 1 }),
+  );
+  sentinel.start(controller.signal);
+  await dockerMonitor.waitUntilReady();
+  assertEquals(sentinel.serviceRunStates()?.[0]?.state, "crashing");
+  controller.abort();
+  sentinel.stop();
+});

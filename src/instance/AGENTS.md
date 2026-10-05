@@ -176,9 +176,14 @@ identifier per hour (one refill every 12 minutes). The tenant
   `src/host/service-run-state.ts`; `undefined` (Docker not watched, or the first
   container listing not in yet) omits the field, `[]` is sent so the control
   plane clears. A container is `running` only after 60 s up (`SERVICE_SETTLE_MS`),
-  `crashing` while Docker restarts it, `stopped_after_crashes` when down at 10
-  restarts (`SERVICE_CRASH_LIMIT`; reporting only, the restart policy itself is
-  set by the deploy). `asOf` is when the state last changed, so an idle service
+  `crashing` while Docker restarts it, `stopped_after_crashes` once it is down
+  after 10 restarts in a row (`SERVICE_CRASH_LIMIT`). The crash-loop guard
+  (`src/monitor/crash-loop-guard.ts`, wired through `SentinelOptions.stopContainer`)
+  does the stopping: it counts restarts since the container last stayed up for
+  60 s, runs `docker stop` once at the limit and leaves the authored restart
+  policy alone. A manual start zeroes Docker's `RestartCount`, which clears the
+  mark. Only service containers are guarded (not ingress/platform), and native
+  (systemd) apps are not watched. `asOf` is when the state last changed, so an idle service
   never re-triggers a heartbeat. Wire twin: `src/contracts/service-run-state.ts`
   (checked by `check:contract-drift`). The last log line comes from
   `docker logs --tail 5`, fetched in the background once per restart count.
