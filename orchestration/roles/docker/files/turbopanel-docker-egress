@@ -50,6 +50,9 @@ IFACES="docker0 br-+"
 # with a custom bridge name (`com.docker.network.bridge.name`) is not docker0 or
 # br-*, and nothing legitimate forwards to the addresses the chain drops.
 FORWARD_IFACES="any"
+# Earlier versions hung the forwarded jump off these interfaces one by one; an
+# upgraded host still carries those rules, and they would block `remove`.
+LEGACY_FORWARD_IFACES="$IFACES"
 HOOKS="INPUT DOCKER-USER"
 
 die() {
@@ -123,7 +126,19 @@ jump() {
 }
 
 drop_jumps() {
-  for _i in $(ifaces_for "$2"); do
+  _all=$(ifaces_for "$2")
+  if [ "$2" = DOCKER-USER ]; then _all="$_all $LEGACY_FORWARD_IFACES"; fi
+  for _i in $_all; do
+    while jump -C "$1" "$2" "$_i" 2>/dev/null; do
+      jump -D "$1" "$2" "$_i"
+    done
+  done
+}
+
+# Remove the per-interface forwarded jumps of earlier versions (they sit behind ours).
+drop_legacy_jumps() {
+  if [ "$2" != DOCKER-USER ]; then return 0; fi
+  for _i in $LEGACY_FORWARD_IFACES; do
     while jump -C "$1" "$2" "$_i" 2>/dev/null; do
       jump -D "$1" "$2" "$_i"
     done
@@ -140,6 +155,7 @@ ensure_jumps() {
       jump -I "$1" "$2" "$_i"
     done
   fi
+  drop_legacy_jumps "$1" "$2"
 }
 
 apply_family() {

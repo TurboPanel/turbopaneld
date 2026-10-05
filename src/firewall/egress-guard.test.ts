@@ -361,3 +361,28 @@ Deno.test("forwarded traffic is diverted whatever the ingress interface is calle
   assert(rules.some((r) => r === "-A DOCKER-USER -j TP-EGRESS"));
   assert(!rules.some((r) => r.includes("TP-EGRESS") && r.includes(" -i ")));
 });
+
+Deno.test("apply and remove clear the per-interface forwarded jumps of an older version", async () => {
+  const h = await makeHost();
+  const legacy = [
+    "-A DOCKER-USER -i br-+ -j TP-EGRESS",
+    "-A DOCKER-USER -i docker0 -j TP-EGRESS",
+  ];
+  await Deno.writeTextFile(
+    join(h.root, "v4", "c.DOCKER-USER"),
+    `${legacy.join("\n")}\n-A DOCKER-USER -j RETURN\n`,
+  );
+  await h.run("apply");
+  assertEquals(h.chain(4, "DOCKER-USER"), [
+    ...FWD_JUMPS,
+    "-A DOCKER-USER -j RETURN",
+  ]);
+  await Deno.writeTextFile(
+    join(h.root, "v4", "c.DOCKER-USER"),
+    `${FWD_JUMPS.join("\n")}\n${legacy.join("\n")}\n-A DOCKER-USER -j RETURN\n`,
+  );
+  const r = await h.run("remove");
+  assertEquals(r.code, 0, r.err);
+  assertEquals(h.chain(4, "DOCKER-USER"), ["-A DOCKER-USER -j RETURN"]);
+  assertEquals(h.chain(4, "TP-EGRESS"), null);
+});
