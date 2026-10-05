@@ -51,6 +51,7 @@ import {
   type RunDockerStreamedFn,
 } from "../deploy/docker-cli.ts";
 import { captureDecryptedSecrets } from "../logs/capture.ts";
+import { resolveSiteSecretEnv } from "../deploy/site/site-secret-env.ts";
 import {
   COMMAND_LOG_PHASES,
   type CommandOutputSink,
@@ -2100,10 +2101,11 @@ export async function handleEnvironmentDeploy(
   // Which host-native lane each service ends up on can only be decided once the
   // releases are built: a `serviceKind: node` service that turned out to be a
   // static export is served as files, not supervised as a process.
-  const { sites, nativeAppServices } = resolveHostNativeLanes(
-    parsedPayload,
-    appliedReleases,
-  );
+  const lanes = resolveHostNativeLanes(parsedPayload, appliedReleases);
+  const { nativeAppServices } = lanes;
+  // Secret runtime variables arrive sealed; the engine configs and
+  // `hosting.env` take them from `webEnv` once decrypted.
+  const sites = await resolveSiteSecretEnv(lanes.sites, runtime.decryptSecrets);
 
   const mountPaths = await resolveDeployMountPaths(
     layout,

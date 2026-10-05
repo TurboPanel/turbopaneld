@@ -405,10 +405,30 @@ under `<configDir>/openlitespeed/sites/` on each apply/remove (no
 `sites-enabled` convention). PHP context lives inside the per-site
 `vhosts/<name>/vhconf.conf` and fragment that removal already deletes, so
 `removeOpenLiteSpeedSites` needs no PHP-specific step. `web.env`
-hints remain unapplied for OLS (Apache-only `SetEnv`) — PHP parity did not
-change that.
+hints remain unapplied for OLS (see **Site variables** below).
 
-Future seams (not MVP): multi-version PHP side-by-side, OLS/nginx `web.env`,
+**Site variables (`sites[].webEnv`, `sites[].webSecretEnv`).** Runtime variables
+set on a PHP site's hostings reach PHP as FastCGI parameters, so `getenv()` and
+`$_SERVER` see them: site Caddy `php_fastcgi { env }`, Apache `SetEnv`
+(mod_proxy_fcgi forwards it), nginx `fastcgi_param` after the shared parameter
+set and before the pinned `SCRIPT_FILENAME` / `PATH_INFO`. Not yet delivered:
+OpenLiteSpeed, and `$_ENV` in every mode (FastCGI parameters never fill it;
+`variables_order` is `GPCS`). Secret variables travel sealed: the control plane
+sends each as a `tpdaemon` envelope in `sites[].webSecretEnv`, and
+`resolveSiteSecretEnv` (`site/site-secret-env.ts`, called from
+`handleEnvironmentDeploy` before the site apply, the only caller of
+`applySites`) decrypts them through the `secrets/decrypt` seam (so they join the
+transcript redaction deny-set) and folds them into `webEnv`. The plaintext then
+lives only in the engine's own config (`root:<engine group>` `0640`) and the
+owner-only `hosting.env`. Variables are inherited from the organization, project
+and environment into every hosting, so nginx **drops and names** (never prints
+the value) a variable it cannot carry rather than failing the deploy: a value
+holding `$` (nginx expands `$name` inside quotes, with no escape), a value that
+is not one line, and a name nginx or PHP sets itself (`SCRIPT_FILENAME`,
+`REMOTE_ADDR`, `HTTP_*`, ...). A name that is not an environment variable name
+is still refused.
+
+Future seams (not MVP): multi-version PHP side-by-side, OLS `web.env`,
 swarm-style replicas, ACME issuance on the daemon. TurboFabric **is** the
 single org mesh (`server.fabric.reconcile` — see `src/commands/fabric.ts`
 and `../../orchestration/AGENTS.md`). `{ enabled: false }` is a teardown; the
