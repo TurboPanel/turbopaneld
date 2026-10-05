@@ -256,25 +256,41 @@ export function standbyReplicationStatusSql(): string {
 }
 
 /**
+ * `pg_file_settings` rows that mean "restart required", not "broken file".
+ * PostgreSQL words it two ways:
+ * - `setting could not be applied`: a restart-required parameter is SET in the
+ *   file to a value the running server does not have yet.
+ * - `... cannot be changed without restarting the server`: a restart-required
+ *   parameter was REMOVED from the file (or lowered back to its default) and
+ *   would revert on restart. That row has no file or line (`sourcefile` is
+ *   NULL) and, left counted as an error, failed every later apply until the
+ *   engine was restarted.
+ * Real syntax or unknown-parameter errors (`unrecognized configuration
+ * parameter ...`) match neither and stay errors.
+ */
+const RESTART_PENDING_PREDICATE = "(error = 'setting could not be applied' " +
+  "OR error LIKE '%cannot be changed without restarting the server%')";
+
+/**
  * Post-reload verification: both views re-read the config files from disk at
  * query time, so an unreadable or syntactically broken file surfaces here
  * even though `pg_reload_conf()` itself returned true (the postmaster only
  * logs reload failures — it never reports them to the caller).
  *
- * `'setting could not be applied'` rows are excluded from the error count —
- * that is Postgres's marker for **restart-required** parameters (e.g.
- * `max_replication_slots` growing with the member count), which is expected
- * on reload, not a broken file. Their count is returned separately so the
- * caller can log the pending restart.
+ * Restart-required rows (see {@link RESTART_PENDING_PREDICATE}, e.g.
+ * `max_replication_slots` growing with the member count, or an operator
+ * removing `max_connections`) are excluded from the error count: that is
+ * expected on reload, not a broken file. Their count is returned separately
+ * so the caller can log the pending restart.
  */
 export function reloadVerifySql(): string {
   return [
     "SELECT",
     "  (SELECT count(*) FROM pg_catalog.pg_file_settings",
-    "   WHERE error IS NOT NULL AND error <> 'setting could not be applied') AS config_errors,",
+    `   WHERE error IS NOT NULL AND NOT ${RESTART_PENDING_PREDICATE}) AS config_errors,`,
     "  (SELECT count(*) FROM pg_catalog.pg_hba_file_rules WHERE error IS NOT NULL) AS hba_errors,",
     "  (SELECT count(*) FROM pg_catalog.pg_file_settings",
-    "   WHERE error = 'setting could not be applied') AS restart_pending;",
+    `   WHERE ${RESTART_PENDING_PREDICATE}) AS restart_pending;`,
   ].join("\n");
 }
 

@@ -657,6 +657,59 @@ test("postgres reloadConfig tolerates restart-pending settings but rejects file 
   assertEquals(threw, true);
 });
 
+test("postgres reloadConfig: a removed restart-required setting is pending, an unknown parameter still fails", async () => {
+  const reload = postgresManagedEngineRuntime.reloadConfig;
+  if (!reload) throw new TypeError("expected postgres reloadConfig");
+
+  // Fake pg_file_settings: evaluate the daemon's own exclusion rules against
+  // fixture rows by honouring the two texts the real SQL matches on.
+  const restartOnRemove =
+    'parameter "max_connections" cannot be changed without restarting the server';
+  const unknownParameter =
+    'unrecognized configuration parameter "bogus_setting"';
+  const verifyingExec =
+    (errors: string[]): ManagedEngineExec => (_argv, input) => {
+      if (!input?.includes("pg_file_settings")) {
+        return Promise.resolve({ success: true, stdout: "", stderr: "" });
+      }
+      const isPending = (e: string) =>
+        e === "setting could not be applied" ||
+        e.includes("cannot be changed without restarting the server");
+      const pending = errors.filter(isPending).length;
+      const broken = errors.length - pending;
+      return Promise.resolve({
+        success: true,
+        stdout: `${broken}\t0\t${pending}\n`,
+        stderr: "",
+      });
+    };
+
+  const logged: string[] = [];
+  const originalWrite = Deno.stdout.writeSync;
+  Deno.stdout.writeSync = (data: Uint8Array) => {
+    logged.push(new TextDecoder().decode(data));
+    return data.byteLength;
+  };
+  try {
+    await reload(buildContext(verifyingExec([restartOnRemove])));
+  } finally {
+    Deno.stdout.writeSync = originalWrite;
+  }
+  assertEquals(
+    logged.some((line) => line.includes("1 setting(s) pending engine restart")),
+    true,
+  );
+
+  const error = await assertRejects(() =>
+    reload(buildContext(verifyingExec([unknownParameter])))
+  );
+  assertEquals(
+    (error as Error).message,
+    "postgres config reload failed: 1 postgresql.conf error(s), " +
+      "0 pg_hba.conf error(s) — see engine logs",
+  );
+});
+
 test("postgres readVersion returns undefined when the query fails or is empty", async () => {
   const failed = await postgresManagedEngineRuntime.readVersion(
     buildContext(() =>
