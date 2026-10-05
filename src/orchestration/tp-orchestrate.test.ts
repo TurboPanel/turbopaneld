@@ -325,7 +325,7 @@ async function runUpdateVerb(
     | "tp_verb_update"
     | "tp_verb_update_instance"
     | "tp_verb_update_colocated" = "tp_verb_update",
-  options: { controlPlaneHost?: boolean } = {},
+  options: { controlPlaneHost?: boolean; stdin?: string } = {},
 ): Promise<{ status: number; stdout: string; stderr: string }> {
   const source = await Deno.readTextFile(helperPath);
   const root = await Deno.makeTempDir({ prefix: "tp-orchestrate-update-" });
@@ -346,6 +346,7 @@ async function runUpdateVerb(
       "  cat > \"$_out\" <<'FAKE'",
       "#!/bin/sh",
       "printf 'RUNSH'; for a in \"$@\"; do printf ' [%s]' \"$a\"; done; printf '\\n'",
+      "printf 'RUNSH-LICENSE [%s]\\n' \"${TURBOPANEL_LICENSE:-}\"",
       "FAKE",
       "}",
     ].join("\n");
@@ -375,11 +376,17 @@ async function runUpdateVerb(
       extractShellFunction(source, "tp_verb_update_colocated"),
       `${verb} "$@"`,
     ].join("\n");
-    const out = await new Deno.Command("sh", {
+    // The daemon writes the license line to the helper's stdin.
+    const child = new Deno.Command("sh", {
       args: ["-c", script, "sh", ...args],
+      stdin: "piped",
       stdout: "piped",
       stderr: "piped",
-    }).output();
+    }).spawn();
+    const writer = child.stdin.getWriter();
+    await writer.write(new TextEncoder().encode(options.stdin ?? "abc\n"));
+    await writer.close();
+    const out = await child.output();
     return {
       status: out.code,
       stdout: new TextDecoder().decode(out.stdout),
@@ -404,7 +411,7 @@ for (
 ) {
   test(`tp-orchestrate update on channel ${channel} fetches run.sh from ${host}`, async () => {
     const result = await runUpdateVerb(
-      ["--license", "abc", "--channel", channel, "--no-start"],
+      ["--license-stdin", "--channel", channel, "--no-start"],
       PUBLIC_PIN,
     );
     assertEquals(result.status, 0, result.stderr);
@@ -414,7 +421,7 @@ for (
 
 test("tp-orchestrate update with no channel keeps the release installer host", async () => {
   const result = await runUpdateVerb(
-    ["--license", "abc", "--no-start"],
+    ["--license-stdin", "--no-start"],
     PUBLIC_PIN,
   );
   assertEquals(result.status, 0, result.stderr);
@@ -423,21 +430,62 @@ test("tp-orchestrate update with no channel keeps the release installer host", a
 
 test("tp-orchestrate update fetches run.sh from the CDN for a public control plane and passes the pinned host", async () => {
   const result = await runUpdateVerb(
-    ["--license", "abc", "--channel", "release", "--no-start"],
+    ["--license-stdin", "--channel", "release", "--no-start"],
     PUBLIC_PIN,
   );
   assertEquals(result.status, 0, result.stderr);
   assertStringIncludes(result.stdout, "[https://turbopanel.sh]");
   assertStringIncludes(
     result.stdout,
-    "RUNSH [--license] [abc] [--host] [https://panel.example.com] [--channel] [release] [--no-start]",
+    "RUNSH [--host] [https://panel.example.com] [--channel] [release] [--no-start]",
   );
   assertEquals(result.stdout.includes("[-k]"), false);
 });
 
+test("tp-orchestrate update hands the license from stdin to run.sh in its environment, never argv", async () => {
+  const result = await runUpdateVerb(
+    ["--license-stdin", "--no-start"],
+    PUBLIC_PIN,
+    "tp_verb_update",
+    { stdin: "bGljZW5zZS1pZDp0b2tlbg\n" },
+  );
+  assertEquals(result.status, 0, result.stderr);
+  assertStringIncludes(result.stdout, "RUNSH-LICENSE [bGljZW5zZS1pZDp0b2tlbg]");
+  assertEquals(result.stdout.includes("RUNSH [--license]"), false);
+  assertEquals(
+    /RUNSH \[[^\n]*bGljZW5zZS1pZDp0b2tlbg/.test(result.stdout),
+    false,
+  );
+});
+
+test("tp-orchestrate update refuses a license on the command line, a missing one and a malformed one", async () => {
+  const flag = await runUpdateVerb(
+    ["--license", "abc", "--no-start"],
+    PUBLIC_PIN,
+  );
+  assertEquals(flag.status, 1);
+  assertStringIncludes(flag.stderr, "the license is read from stdin");
+  assertEquals(flag.stdout.includes("RUNSH"), false);
+
+  const noFlag = await runUpdateVerb(["--no-start"], PUBLIC_PIN);
+  assertEquals(noFlag.status, 1);
+  assertStringIncludes(noFlag.stderr, "update requires --license-stdin");
+
+  for (const stdin of ["", "\n", "abc def\n", "abc'x\n", "a;b\n"]) {
+    const bad = await runUpdateVerb(
+      ["--license-stdin", "--no-start"],
+      PUBLIC_PIN,
+      "tp_verb_update",
+      { stdin },
+    );
+    assertEquals(bad.status, 1, JSON.stringify(stdin));
+    assertEquals(bad.stdout.includes("RUNSH"), false);
+  }
+});
+
 test("tp-orchestrate update forwards --progress-markers to run.sh", async () => {
   const result = await runUpdateVerb(
-    ["--license", "abc", "--no-start", "--progress-markers"],
+    ["--license-stdin", "--no-start", "--progress-markers"],
     PUBLIC_PIN,
   );
   assertEquals(result.status, 0, result.stderr);
@@ -445,7 +493,7 @@ test("tp-orchestrate update forwards --progress-markers to run.sh", async () => 
 });
 
 test("tp-orchestrate update refuses without a root-pinned origin", async () => {
-  const result = await runUpdateVerb(["--license", "abc", "--no-start"], null);
+  const result = await runUpdateVerb(["--license-stdin", "--no-start"], null);
   assertEquals(result.status, 1);
   assertStringIncludes(result.stderr, "update origin pin missing");
 });
@@ -474,7 +522,7 @@ test("tp-orchestrate update refuses origins that differ from the pin", async () 
   ];
   for (const [extra, needle] of cases) {
     const result = await runUpdateVerb(
-      ["--license", "abc", ...extra, "--no-start"],
+      ["--license-stdin", ...extra, "--no-start"],
       PUBLIC_PIN,
     );
     assertEquals(result.status, 1, extra.join(" "));
@@ -485,7 +533,7 @@ test("tp-orchestrate update refuses origins that differ from the pin", async () 
 test("tp-orchestrate update pins a signed release only off an overlay, which would skip the signature", async () => {
   const pin =
     "https://github.com/TurboPanel/turbopaneld/releases/download/v0.1.0/manifest.json";
-  const args = ["--license", "abc", "--manifest-url", pin, "--no-start"];
+  const args = ["--license-stdin", "--manifest-url", pin, "--no-start"];
   const [overlay, release] = await Promise.all([
     runUpdateVerb(args, OVERLAY_PIN),
     runUpdateVerb(args, PUBLIC_PIN),
@@ -504,8 +552,7 @@ test("tp-orchestrate update pins a signed release only off an overlay, which wou
 test("tp-orchestrate update uses the pinned overlay host with the pinned Platform CA, never -k", async () => {
   const result = await runUpdateVerb(
     [
-      "--license",
-      "abc",
+      "--license-stdin",
       "--host",
       "https://huey.lan:8443",
       "--dl-base",
@@ -523,8 +570,7 @@ test("tp-orchestrate update uses the pinned overlay host with the pinned Platfor
 test("tp-orchestrate update trusts a pinned private uploaded issuer without --instance-ca", async () => {
   const missing = await runUpdateVerb(
     [
-      "--license",
-      "abc",
+      "--license-stdin",
       "--host",
       "https://private.example.com:8443",
       "--dl-base",
@@ -539,7 +585,7 @@ test("tp-orchestrate update trusts a pinned private uploaded issuer without --in
   assertEquals(missing.stdout.includes("[--instance-ca]"), false);
 
   const wrong = await runUpdateVerb(
-    ["--license", "abc", "--no-start"],
+    ["--license-stdin", "--no-start"],
     "host=https://panel.example.com\ndl_base=https://panel.example.com/downloads\ninstance_ca=\nuploaded_trust=/tmp/evil.pem\n",
   );
   assertEquals(wrong.status, 1);
@@ -555,7 +601,7 @@ test("tp-orchestrate update accepts the daemon release rails as manifest pins", 
     ]
   ) {
     const result = await runUpdateVerb(
-      ["--license", "abc", "--manifest-url", url, "--no-start"],
+      ["--license-stdin", "--manifest-url", url, "--no-start"],
       PUBLIC_PIN,
     );
     assertEquals(result.status, 0, result.stderr);
@@ -573,7 +619,7 @@ test("tp-orchestrate update refuses traversal and other packages' rails as the d
     ]
   ) {
     const result = await runUpdateVerb(
-      ["--license", "abc", "--manifest-url", url, "--no-start"],
+      ["--license-stdin", "--manifest-url", url, "--no-start"],
       PUBLIC_PIN,
     );
     assertEquals(result.status, 1, url);
@@ -1052,7 +1098,7 @@ test("a control-plane host without a pin (installed before run.sh wrote one) upd
 
 test("tp-orchestrate update (remote enrolment) refuses a control-plane pin", async () => {
   const result = await runUpdateVerb(
-    ["--license", "abc", "--no-start"],
+    ["--license-stdin", "--no-start"],
     COLOCATED_PIN,
     "tp_verb_update",
     { controlPlaneHost: true },

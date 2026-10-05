@@ -31,6 +31,8 @@ import {
   rootHelperColocatedRefreshInvocation,
   rootHelperInstanceUpdateInvocation,
   rootHelperReconcileInvocation,
+  rootHelperReconcileStdin,
+  scriptWithLicense,
   UpdatePreflightError,
   UpdateTrustRepairError,
 } from "./run-reconcile.ts";
@@ -135,13 +137,10 @@ test("resolveRunScriptUrl uses instance /run.sh when overlay dlBase is set", () 
 test("buildRunReconcileArgs passes --dl-base for overlay catalogs", () => {
   assertEquals(
     buildRunReconcileArgs({
-      licenseArg: "abc",
       instanceUrl: "https://turbopanel.dev",
       dlBase: "https://turbopanel.dev/downloads/daemon",
     }),
     [
-      "--license",
-      "abc",
       "--host",
       "https://turbopanel.dev",
       "--dl-base",
@@ -154,10 +153,9 @@ test("buildRunReconcileArgs passes --dl-base for overlay catalogs", () => {
 test("buildRunReconcileArgs omits --host for production", () => {
   assertEquals(
     buildRunReconcileArgs({
-      licenseArg: "abc",
       instanceUrl: PRODUCTION_CONTROL_PLANE,
     }),
-    ["--license", "abc", "--no-start"],
+    ["--no-start"],
   );
 });
 
@@ -174,14 +172,11 @@ test("resolveBootstrapInsecureTls follows releaseTlsInsecure for an https origin
 test("buildRunReconcileArgs includes TLS flags for an https instance URL", () => {
   assertEquals(
     buildRunReconcileArgs({
-      licenseArg: "abc",
       instanceUrl: "https://huey.lan:8443",
       instanceCaPath: "/etc/turbopanel/instance-ca.pem",
       insecureTls: true,
     }),
     [
-      "--license",
-      "abc",
       "--host",
       "https://huey.lan:8443",
       "--instance-ca",
@@ -268,14 +263,11 @@ test("resolveBootstrapInsecureTls prefers platform CA for self-hosted", () => {
 test("buildRunReconcileArgs includes self-hosted flags", () => {
   assertEquals(
     buildRunReconcileArgs({
-      licenseArg: "abc",
       instanceUrl: "https://huey.lan:8443",
       instanceCaPath: "/etc/turbopanel/instance-ca.pem",
       insecureTls: true,
     }),
     [
-      "--license",
-      "abc",
       "--host",
       "https://huey.lan:8443",
       "--instance-ca",
@@ -289,14 +281,11 @@ test("buildRunReconcileArgs includes self-hosted flags", () => {
 test("buildRunReconcileArgs passes non-canonical instance CA path", () => {
   assertEquals(
     buildRunReconcileArgs({
-      licenseArg: "abc",
       instanceUrl: "https://huey.lan:8443",
       instanceCaPath: "/tmp/platform-ca.pem",
       insecureTls: true,
     }),
     [
-      "--license",
-      "abc",
       "--host",
       "https://huey.lan:8443",
       "--instance-ca",
@@ -309,7 +298,6 @@ test("buildRunReconcileArgs passes non-canonical instance CA path", () => {
 
 test("buildRunReconcileArgs never emits a release-insecure token during insecure instance bootstrap", () => {
   const args = buildRunReconcileArgs({
-    licenseArg: "abc",
     instanceUrl: "https://huey.lan:8443",
     insecureTls: true,
   });
@@ -340,7 +328,6 @@ test("executeRunReconcile keeps release downloads TLS-verified when instance boo
     } as unknown as typeof Deno.Command;
 
     const args = buildRunReconcileArgs({
-      licenseArg: "abc",
       // Self-hosted, self-signed, no CA on disk → insecure instance bootstrap.
       instanceUrl: "https://huey.lan:8443",
       insecureTls: true,
@@ -874,8 +861,6 @@ test("the automatic update path never consults TURBOPANEL_RELEASE_TLS_INSECURE o
 
 test("rootHelperReconcileInvocation hands validated flags to sudo -n tp-orchestrate update", () => {
   const args = [
-    "--license",
-    "abc",
     "--host",
     "https://p.example",
     "--no-start",
@@ -890,6 +875,7 @@ test("rootHelperReconcileInvocation hands validated flags to sudo -n tp-orchestr
   assertEquals(invocation.args[2]?.endsWith("/scripts/tp-orchestrate"), true);
   assertEquals(invocation.args[3], "update");
   assertEquals(invocation.args.slice(4), [
+    "--license-stdin",
     ...args,
     "--channel",
     "release",
@@ -2340,18 +2326,103 @@ test("rootHelperColocatedRefreshInvocation refuses a missing channel and a non-d
 test("reconcileHelperInvocation picks update-colocated for a panel host and update elsewhere", () => {
   const colocated = reconcileHelperInvocation({
     colocated: true,
-    args: ["--license", "ignored", "--no-start"],
+    args: ["--no-start"],
     channel: "canary",
   });
   assertEquals(colocated.args[3], "update-colocated");
-  assertEquals(colocated.args.includes("--license"), false);
+  assertEquals(colocated.args.includes("--license-stdin"), false);
 
   const remote = reconcileHelperInvocation({
-    args: ["--license", "abc", "--no-start"],
+    args: ["--no-start"],
     channel: "canary",
   });
   assertEquals(remote.args[3], "update");
-  assertEquals(remote.args.includes("--license"), true);
+  assertEquals(remote.args.includes("--license-stdin"), true);
+});
+
+test("the host license never reaches the root helper's argv, only its stdin", () => {
+  const license = encodeLicenseArg("license-id", "secret-token");
+  const args = buildRunReconcileArgs({
+    instanceUrl: "https://huey.lan:8443",
+    instanceCaPath: "/etc/turbopanel/instance-ca.pem",
+  });
+  const invocation = reconcileHelperInvocation({ args, channel: "canary" });
+  assertEquals(invocation.args.some((a) => a.includes(license)), false);
+  assertEquals(invocation.args.includes("--license"), false);
+  assertEquals(rootHelperReconcileStdin({ license }), `${license}\n`);
+  // A co-located refresh does not enrol: nothing on stdin, even if given.
+  assertEquals(
+    rootHelperReconcileStdin({ colocated: true, license }),
+    undefined,
+  );
+});
+
+test("rootHelperReconcileStdin refuses a missing or malformed license", () => {
+  assertThrows(
+    () => rootHelperReconcileStdin({}),
+    Error,
+    "needs the host license",
+  );
+  for (const bad of ["", "abc def", "abc'x", "abc\nx", "a;b"]) {
+    assertThrows(
+      () => rootHelperReconcileStdin({ license: bad }),
+      Error,
+      "malformed host license",
+    );
+  }
+});
+
+test("executeRunReconcile on a development host sets the license in the piped script, not argv", async () => {
+  const originalCommand = Deno.Command;
+  let capturedArgs: string[] | undefined;
+  let written = "";
+  try {
+    Deno.Command = class {
+      constructor(_cmd: string, opts: Deno.CommandOptions) {
+        capturedArgs = opts.args as string[];
+      }
+      spawn() {
+        const child = fakeReconcileChild();
+        return {
+          ...child,
+          stdin: {
+            getWriter() {
+              return {
+                write(chunk: Uint8Array) {
+                  written += new TextDecoder().decode(chunk);
+                  return Promise.resolve();
+                },
+                close() {
+                  return Promise.resolve();
+                },
+              };
+            },
+          },
+        };
+      }
+    } as unknown as typeof Deno.Command;
+    await executeRunReconcile({
+      script: "#!/bin/sh\nexit 0\n",
+      args: ["--no-start"],
+      license: "bGljZW5zZS1pZDp0b2tlbg",
+    });
+    assertEquals(capturedArgs, ["sh", "-s", "--", "--no-start"]);
+    assertEquals(
+      written,
+      "TURBOPANEL_LICENSE='bGljZW5zZS1pZDp0b2tlbg'\nexport TURBOPANEL_LICENSE\n#!/bin/sh\nexit 0\n",
+    );
+  } finally {
+    Deno.Command = originalCommand;
+  }
+});
+
+test("scriptWithLicense leaves the script alone without a license and refuses a malformed one", () => {
+  assertEquals(scriptWithLicense("echo hi\n"), "echo hi\n");
+  assertThrows(
+    () => scriptWithLicense("echo hi\n", "x' ; id ; '"),
+    Error,
+    "malformed host license",
+  );
 });
 
 test("executeRunReconcile refuses a co-located daemon update on a development host", async () => {

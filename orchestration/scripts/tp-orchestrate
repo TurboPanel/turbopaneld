@@ -18,14 +18,17 @@
 #   galaxy-docker-role
 #       Fetch the geerlingguy.docker role pinned in requirements-docker.yml
 #       into the root-owned vendor roles dir (codeload tag tarball).
-#   update --license <b64url> [--host URL] [--dl-base URL]
+#   update --license-stdin [--host URL] [--dl-base URL]
 #          [--instance-ca /etc/turbopanel/instance-ca.pem] [--channel NAME]
 #          [--manifest-url https://…] --no-start
 #       Fetch run.sh (the CDN, or the control plane for an HTTPS overlay
 #       host) and run it as root with exactly those flags. The
 #       script body is never accepted from the caller, --insecure-tls is not
 #       a recognised flag here, and the only CA the fetch trusts beyond the
-#       system store is the daemon's canonical Platform CA file.
+#       system store is the daemon's canonical Platform CA file. The host
+#       license (base64url id:token) is read as one line from stdin and
+#       handed to run.sh in TURBOPANEL_LICENSE, never on a command line
+#       (sudo logs argv and any local user can read it from /proc).
 #
 # Every input that could steer root is taken from this root-owned tree, not
 # from the caller: the orchestration dir is derived from $0, ansible.cfg and
@@ -750,6 +753,7 @@ tp_verb_update() {
   tp_require_root_scratch
   tp_read_update_origin_pin
   _license=""
+  _license_stdin=false
   _host=""
   _dl_base=""
   _ca=""
@@ -759,13 +763,13 @@ tp_verb_update() {
   _no_start=false
   while [ $# -gt 0 ]; do
     case "$1" in
+      --license-stdin)
+        _license_stdin=true
+        shift
+        ;;
       --license)
-        [ $# -ge 2 ] || tp_die "--license requires a value"
-        case "$2" in
-          *[!A-Za-z0-9_=-]*|"") tp_die "refusing malformed --license" ;;
-        esac
-        _license="$2"
-        shift 2
+        # The license would be in sudo's log and in /proc/<pid>/cmdline.
+        tp_die "refusing --license: the license is read from stdin (--license-stdin)"
         ;;
       --host)
         [ $# -ge 2 ] || tp_die "--host requires a value"
@@ -818,7 +822,11 @@ tp_verb_update() {
         ;;
     esac
   done
-  [ -n "$_license" ] || tp_die "update requires --license"
+  [ "$_license_stdin" = true ] || tp_die "update requires --license-stdin"
+  IFS= read -r _license || [ -n "$_license" ] || tp_die "update: no license on stdin"
+  case "$_license" in
+    *[!A-Za-z0-9_=-]*|"") tp_die "refusing a malformed license on stdin" ;;
+  esac
   [ "$_no_start" = true ] || tp_die "update requires --no-start (the daemon restarts itself)"
   # Absent flags take the pinned values, so the installer always records the
   # control plane, overlay and CA this host was enrolled with.
@@ -839,7 +847,7 @@ tp_verb_update() {
   # the host / overlay / CA the installer records are the pinned ones.
   tp_fetch_pinned_run_script
 
-  set -- --license "$_license"
+  set --
   [ -n "$_host" ] && set -- "$@" --host "$_host"
   # An overlay host was installed with --dev-allow-unsigned (the root-owned
   # pin exists only for such an install), so the refresh carries it too.
@@ -851,7 +859,9 @@ tp_verb_update() {
   set -- "$@" --no-start
   cd "$INSTALL_ROOT"
   _rc=0
-  sh "$_script" "$@" || _rc=$?
+  # run.sh reads TURBOPANEL_LICENSE when no --license flag is given; a root
+  # process's environment is readable only by root.
+  TURBOPANEL_LICENSE="$_license" sh "$_script" "$@" </dev/null || _rc=$?
   rm -f "$_script"
   exit "$_rc"
 }
