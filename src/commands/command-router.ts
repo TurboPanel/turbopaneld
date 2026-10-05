@@ -39,6 +39,7 @@ import {
   parseTlsTrustReconcilePayload,
 } from "../contracts/commands-contracts.ts";
 import { handleEnvironmentDeploy } from "./deploy-environment.ts";
+import { deployCancels } from "../deploy/deploy-cancel.ts";
 import { handleManagedApply } from "../managed/apply.ts";
 import {
   beginManagedCommandIntent,
@@ -346,13 +347,21 @@ export async function handleCommandDispatch(
       }
       case "environment.deploy": {
         const payload = parseEnvironmentDeployPayload(message.payload);
-        result = await pickCommandRouterHandler(
-          "handleEnvironmentDeploy",
-          handleEnvironmentDeploy,
-        )(payload, daemonReceivedAt, {
-          decryptSecrets: deps?.decryptSecrets,
-          logSink,
-        });
+        // Throws `cancelled: …` when a cancel arrived before this dispatch; the
+        // catch below reports it as the command's outcome like any failure.
+        const cancel = deployCancels.begin(message.commandId);
+        try {
+          result = await pickCommandRouterHandler(
+            "handleEnvironmentDeploy",
+            handleEnvironmentDeploy,
+          )(payload, daemonReceivedAt, {
+            decryptSecrets: deps?.decryptSecrets,
+            logSink,
+            cancel,
+          });
+        } finally {
+          deployCancels.end(message.commandId);
+        }
         ok = true;
         daemonRespondedAt = new Date().toISOString();
         break;

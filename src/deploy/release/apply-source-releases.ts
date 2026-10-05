@@ -45,6 +45,7 @@ import type {
 } from "../../contracts/commands-contracts.ts";
 import type { DecryptSecretsFn } from "../materialize-tls.ts";
 import type { RunFn } from "../ensure-principal.ts";
+import type { DeployCancelToken } from "../deploy-cancel.ts";
 import { dirname, join } from "@std/path";
 import {
   assertCheckoutCredentialsRemoved,
@@ -222,6 +223,12 @@ function nativeAppForService(
 
 export type ApplySourceReleasesDeps = {
   logSink: CommandOutputSink;
+  /**
+   * Cancel token of the running deploy. Checked between phases; its signal
+   * stops the clone and the build; `commit` runs right before the first step
+   * that switches a release live (see `../deploy-cancel.ts`).
+   */
+  cancel?: DeployCancelToken;
   decryptSecrets: DecryptSecretsFn | undefined;
   /** Privileged runner seam (`sudo -n …`); tests inject a fake. */
   runFn?: RunFn;
@@ -334,6 +341,8 @@ async function rollbackOneRelease(
     };
   }
 
+  // Cutting `current` over is the switch itself: past this line a cancel is too late.
+  deps.cancel?.commit("before the release was switched over");
   const releaseDir =
     await (deps.promoteExistingReleaseFn ?? promoteExistingRelease)({
       paths,
@@ -414,8 +423,12 @@ async function applyRailpackRelease(
     tools,
     onOutput,
     redactSummary: (text) => logSink.redactSummary(text),
+    ...(deps.cancel === undefined ? {} : { signal: deps.cancel.signal }),
   });
 
+  // Recording the image is not a switch (compose `up` is), so this is a
+  // checkpoint, not the commit.
+  deps.cancel?.throwIfCancelled("after the image was built");
   logSink.setPhase(COMMAND_LOG_PHASES.RELEASE_PROMOTE);
   const manifest: ReleaseManifestV1 = {
     version: 1,
@@ -696,6 +709,7 @@ async function checkoutForEntry(
     checkoutDir,
     onOutput,
     redactSummary: (text: string) => deps.logSink.redactSummary(text),
+    signal: deps.cancel?.signal,
     credential,
     // An SSH deploy key and an HTTPS token are handed to git in completely
     // different ways; the control plane tags which one this is.
@@ -806,6 +820,10 @@ async function buildNativeRelease(
       onOutput,
     });
 
+    // The release is built and nothing live has changed yet: this is the last
+    // moment a cancel can land. It also precedes the daemon's record of the
+    // release, so a cancelled deploy leaves no record behind.
+    deps.cancel?.commit("before the release was switched over");
     logSink.setPhase(COMMAND_LOG_PHASES.RELEASE_PROMOTE);
     const previousReleaseId = await readCurrentReleaseId(paths, deps.runFn);
     const manifest: ReleaseManifestV1 = definedFields({
@@ -952,6 +970,7 @@ async function buildNativeTree(
         runFn: deps.runFn,
       })
       : undefined,
+    signal: deps.cancel?.signal,
     onOutput,
     redactSummary: (text: string) => deps.logSink.redactSummary(text),
   }));
@@ -979,6 +998,9 @@ async function applyOneRelease(
   const { logSink } = deps;
   const onOutput: ReleaseOutputHandler = (stream, line) =>
     logSink.onLine(stream, line);
+  deps.cancel?.throwIfCancelled(
+    `before ${entry.composeServiceName} was built`,
+  );
 
   const railpack = entry.build.kind === "railpack";
   const principal = entry.principal;

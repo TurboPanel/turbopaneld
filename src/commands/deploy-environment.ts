@@ -3,10 +3,15 @@ import { buildHostingLabelsFragment } from "../deploy/compose-labels.ts";
 import { assertComposePolicy } from "../deploy/compose-final-policy.ts";
 import { assertNoReservedOwnerLabels } from "../deploy/compose-reserved-labels.ts";
 import { assertComposeBuildPolicy } from "../deploy/compose-build-policy.ts";
+import {
+  DeployCancelledError,
+  type DeployCancelToken,
+} from "../deploy/deploy-cancel.ts";
 import { encodeHex } from "@std/encoding/hex";
 import { join } from "@std/path";
 import {
   composeFileArgs,
+  DEPLOYMENT_MANIFEST_FILENAME,
   type DeploymentManifest,
   type DeploymentManifestRelease,
   type DeploymentManifestSecret,
@@ -102,7 +107,11 @@ import {
 } from "../deploy/site.ts";
 import { detectSiteApps } from "../deploy/site-apps.ts";
 import { sitePhpRuntimeMode } from "../deploy/site/php-runtime.ts";
-import { applyCronJobs, type CronApplySpec } from "../deploy/cron/apply.ts";
+import {
+  applyCronJobs,
+  type CronApplySpec,
+  hasInstalledCronUnits,
+} from "../deploy/cron/apply.ts";
 import {
   type AppliedRelease,
   applySourceReleases,
@@ -354,6 +363,14 @@ export type EnvironmentDeployDeps = {
   nativeAppIo?: Omit<ApplyNativeAppsOpts, "bindings">;
   /** Test seam — the Ansible runner for the pre-principal PHP runtime step. */
   siteIo?: Parameters<typeof ensureSitePhpRuntimes>[1];
+  /**
+   * Cancel token of this deploy (`../deploy/deploy-cancel.ts`). Checked between
+   * phases and handed to the processes the deploy spawns; the first step that
+   * changes what is serving commits it, after which a cancel is "too late".
+   */
+  cancel?: DeployCancelToken;
+  /** Test seam — whether cron timers from an earlier deploy are installed. */
+  hasCronUnits?: (environmentId: string) => Promise<boolean>;
 };
 
 /**
@@ -1339,6 +1356,7 @@ type DeployContainerServicesInput = {
     networks: readonly EnvironmentDeployFabricNetwork[],
     defaultMtu: number,
   ) => Promise<void>;
+  cancel?: DeployCancelToken;
 };
 
 /**
@@ -1443,6 +1461,7 @@ async function runComposeBuild(
     "--no-cache",
     "--pull",
   ], { onLine });
+  input.cancel?.throwIfCancelled("while the images were building");
   if (!build.success) {
     // Docker echoes build args and failing command output verbatim —
     // redact against the sink's deny-set before it becomes a summary.
@@ -1501,6 +1520,7 @@ async function deploySequentially(
         onProgress: (message) => logSink.onLine("stdout", message),
       }),
     restorePrevious: () => restorePreviousDeployment(deploymentDir),
+    commit: () => input.cancel?.commit("before the old version was stopped"),
     composeArgs: (paths) => composeFileArgs(projectName, paths),
     redact: (text) => logSink.redactSummary(text),
     log: (line) => logSink.onLine("stdout", line),
@@ -1554,6 +1574,7 @@ async function prepareSequentialDeploy(
       ...composeFileArgs(parsedPayload.projectName, chain),
       "build",
     ], { onLine });
+    input.cancel?.throwIfCancelled("while the images were building");
     if (!build.success) {
       throw new Error(
         logSink.redactSummary(build.stderr) || "Docker Compose build failed",
@@ -1566,6 +1587,39 @@ async function prepareSequentialDeploy(
     "pull",
     "--ignore-buildable",
   ], { onLine });
+  input.cancel?.throwIfCancelled("while the images were being pulled");
+}
+
+/**
+ * Undo {@link publishStagedRuntimeCompose} for a deploy cancelled before it
+ * started anything: put the previous version's files back as the live ones, or
+ * (a first deploy has none) remove what was published. Never throws: the
+ * cancel is what the operator is told about.
+ */
+async function revertPublishedCompose(
+  deploymentDir: string,
+  hadPrevious: boolean,
+): Promise<void> {
+  try {
+    if (hadPrevious) {
+      await restorePreviousDeployment(deploymentDir);
+      return;
+    }
+    await Deno.remove(join(deploymentDir, RUNTIME_COMPOSE_FILENAME)).catch(
+      () => undefined,
+    );
+    await Deno.remove(join(deploymentDir, DEPLOYMENT_MANIFEST_FILENAME)).catch(
+      () => undefined,
+    );
+    await removeComposeEnvFile(deploymentDir);
+  } catch (err) {
+    logWarn(
+      "deploy",
+      `could not put the previous compose files back after a cancel: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
 }
 
 /**
@@ -1594,6 +1648,9 @@ async function deployContainerServices(
   } = input;
   const onLine = (event: { stream: "stdout" | "stderr"; line: string }) =>
     logSink.onLine(event.stream, event.line);
+  const cancel = input.cancel;
+  let published = false;
+  let hadPrevious = false;
   const stageDir = await resetComposeStageDir(deploymentDir);
   // Read before publish replaces the live files.
   const previousProjects = await readPreviousProjects(deploymentDir);
@@ -1695,6 +1752,7 @@ async function deployContainerServices(
     if (resolved.serviceNames.length === 0) {
       // Nothing comes up, so containers an earlier deploy started would keep
       // running untracked: take the project (and any earlier-named one) down.
+      cancel?.commit("before the old containers were removed");
       await retirePreviousProjects(
         previousProjects,
         parsedPayload.projectName,
@@ -1720,11 +1778,16 @@ async function deployContainerServices(
 
     await validateComposeConfig(parsedPayload.projectName, [stagedPath], run);
 
+    cancel?.throwIfCancelled("before the new version was published");
     const chain = await publishStagedRuntimeCompose(
       deploymentDir,
       stageDir,
       manifest,
     );
+    // From here until the cutover a cancel has to put the live compose files
+    // back, or they would describe a version that never started.
+    published = true;
+    hadPrevious = (await previousComposePaths(deploymentDir)) !== null;
     await persistComposeEnvFile(deploymentDir, parsedPayload.envFile);
 
     // A stack started under an earlier project name is replaced, not kept
@@ -1737,6 +1800,7 @@ async function deployContainerServices(
         "pull",
         "--ignore-buildable",
       ], { onLine });
+      cancel?.commit("before the earlier containers were removed");
     }
     retiredEarlier = await retirePreviousProjects(
       previousProjects,
@@ -1759,6 +1823,8 @@ async function deployContainerServices(
       // Every hook must be confined to a compose service this deploy runs;
       // the runner then executes it inside that service's container.
       assertHooksConfined(serviceHooks, labeledServices);
+      // Pre-deploy hooks run inside the live containers and may migrate data.
+      cancel?.commit("before the pre-deploy hooks ran");
       logSink.setPhase(COMMAND_LOG_PHASES.PRE_DEPLOY);
       await runDeployServiceHooks(serviceHooks, {
         projectName: parsedPayload.projectName,
@@ -1776,6 +1842,7 @@ async function deployContainerServices(
       await runComposeBuild(input, chain, onLine);
     }
 
+    cancel?.commit("before the new version was started");
     logSink.setPhase(COMMAND_LOG_PHASES.COMPOSE_UP);
     const up = await runStreamed([
       ...composeFileArgs(parsedPayload.projectName, chain),
@@ -1805,6 +1872,9 @@ async function deployContainerServices(
       composePaths: chain,
     };
   } catch (err) {
+    if (published && err instanceof DeployCancelledError) {
+      await revertPublishedCompose(deploymentDir, hadPrevious);
+    }
     if (retiredEarlier.length > 0 && err instanceof Error) {
       err.message +=
         " The containers this environment had under its earlier compose project name were already removed; deploy again to bring it back.";
@@ -1941,9 +2011,15 @@ function resolveEnvironmentDeployRuntime(deps?: EnvironmentDeployDeps): {
 } {
   const run = deps?.runDocker ?? defaultRunDocker;
   const logSink = deps?.logSink ?? createNoopCommandOutputSink();
+  const streamed = createStreamedRunner(deps?.runDocker);
+  const cancel = deps?.cancel;
   return {
     run,
-    runStreamed: createStreamedRunner(deps?.runDocker),
+    // Every streamed docker call (build, pull, up) dies with a cancel; once the
+    // deploy has committed, the signal can no longer fire.
+    runStreamed: cancel
+      ? (args, options) => streamed(args, { ...options, signal: cancel.signal })
+      : streamed,
     logSink,
     // Every plaintext this deploy decrypts (variable material, principal
     // passwords, TLS private keys) joins the transcript redaction deny-set.
@@ -2016,6 +2092,32 @@ async function collectEnvironmentDeployContainers(input: {
   return containers;
 }
 
+/**
+ * Would the host-native steps of this deploy change what is serving? Sites and
+ * native apps obviously do; so does the removal sweep when an earlier deploy
+ * left release trees or cron timers behind. A container-only deploy with none of
+ * those stays cancellable until its own cutover. Any doubt answers `true`.
+ */
+async function hostNativeCutoverPending(input: {
+  sites: readonly EnvironmentDeploySite[];
+  nativeAppServices: readonly EnvironmentDeployNativeAppService[];
+  deploymentDir: string;
+  environmentId: string;
+  hasCronUnits?: (environmentId: string) => Promise<boolean>;
+}): Promise<boolean> {
+  if (input.sites.length > 0 || input.nativeAppServices.length > 0) return true;
+  try {
+    if ((await previousReleaseTrees(input.deploymentDir)).length > 0) {
+      return true;
+    }
+    return await (input.hasCronUnits ?? hasInstalledCronUnits)(
+      input.environmentId,
+    );
+  } catch {
+    return true;
+  }
+}
+
 export async function handleEnvironmentDeploy(
   payload: EnvironmentDeployPayload,
   daemonReceivedAt: string,
@@ -2038,6 +2140,8 @@ export async function handleEnvironmentDeploy(
     (hosting) => !hostNativeNames.has(hosting.composeServiceName),
   );
 
+  const cancel = deps?.cancel;
+  cancel?.throwIfCancelled("before the deploy started");
   const ingressServices = parsedPayload.ingressServices ?? [];
   runtime.logSink.setPhase(COMMAND_LOG_PHASES.PREPARE);
   await ensureDeployIngress({
@@ -2054,6 +2158,7 @@ export async function handleEnvironmentDeploy(
     listenerPorts: parsedPayload.listenerPorts,
   });
 
+  cancel?.throwIfCancelled("while the host was being prepared");
   const deploymentDir = environmentDeploymentDir(
     layout,
     parsedPayload.projectId,
@@ -2083,10 +2188,32 @@ export async function handleEnvironmentDeploy(
   // Git-backed releases run before the compose / site apply steps,
   // so `<principalHome>/sites/<serviceId>/current` already resolves by the time
   // the site apply below points a document root at it.
+  cancel?.throwIfCancelled("while the host was being prepared");
   const appliedReleases = await applySourceReleases(layout, parsedPayload, {
     logSink: runtime.logSink,
     decryptSecrets: runtime.decryptSecrets,
+    ...(cancel === undefined ? {} : { cancel }),
   });
+  // Which host-native lane each service ends up on can only be decided once the
+  // releases are built: a `serviceKind: node` service that turned out to be a
+  // static export is served as files, not supervised as a process.
+  const lanes = resolveHostNativeLanes(parsedPayload, appliedReleases);
+  const { nativeAppServices } = lanes;
+  // Everything from here on (release trees reclaimed, sites and native apps
+  // applied, cron timers swept) changes what is serving. A deploy with none of
+  // that to do stays cancellable until its containers are touched.
+  if (
+    cancel &&
+    await hostNativeCutoverPending({
+      sites: lanes.sites,
+      nativeAppServices,
+      deploymentDir,
+      environmentId: parsedPayload.environmentId,
+      hasCronUnits: deps?.hasCronUnits,
+    })
+  ) {
+    cancel.commit("before the sites and apps were switched over");
+  }
   // Whole-tree cleanup for services that lost their source since last deploy —
   // per-release retention only ever walks services still being published.
   await reclaimRemovedServiceReleaseTrees(
@@ -2098,11 +2225,6 @@ export async function handleEnvironmentDeploy(
   );
   runtime.logSink.setPhase(COMMAND_LOG_PHASES.PREPARE);
 
-  // Which host-native lane each service ends up on can only be decided once the
-  // releases are built: a `serviceKind: node` service that turned out to be a
-  // static export is served as files, not supervised as a process.
-  const lanes = resolveHostNativeLanes(parsedPayload, appliedReleases);
-  const { nativeAppServices } = lanes;
   // Secret runtime variables arrive sealed; the engine configs and
   // `hosting.env` take them from `webEnv` once decrypted.
   const sites = await resolveSiteSecretEnv(lanes.sites, runtime.decryptSecrets);
@@ -2195,6 +2317,7 @@ export async function handleEnvironmentDeploy(
     decryptSecrets: runtime.decryptSecrets,
     ensureExternalNetworks: runtime.ensureExternalNetworks,
     ensureFabricDockerNetworks: runtime.ensureFabricDockerNetworks,
+    ...(cancel === undefined ? {} : { cancel }),
   });
 
   const hostnameTls = await materializeDeployTls(
