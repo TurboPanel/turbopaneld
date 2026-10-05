@@ -73,12 +73,15 @@ if ! [[ "$WAIT_SECS" =~ ^[0-9]+$ ]]; then
   exit 2
 fi
 
+# A labelled app with the daemon's HTTP router shape, including the routed label
+# the shared Traefik's provider constraint requires.
 start_app() {
   _app_name=$1
   _app_host=$2
   _app_net=$3
   docker run -d --name "$_app_name" --network "$_app_net" \
     --label traefik.enable=true \
+    --label com.turbopanel.system.routed=true \
     --label "traefik.docker.network=$_app_net" \
     --label "traefik.http.routers.$_app_name.rule=Host(\`$_app_host\`)" \
     --label "traefik.http.routers.$_app_name.entrypoints=web,websecure" \

@@ -22,6 +22,10 @@
 # busybox `nc -u -l` writing what it receives to a file; the probe is bash's
 # /dev/udp, so the host needs no nc. Nothing here changes the gate, the
 # switch, the daemon or any real route.
+#
+# It restarts the gate unit once: for a few seconds the daemon's Docker calls and
+# the read-only socket are unavailable. Run it on a canary or testing host with
+# no deploy in flight.
 set -u
 
 GATE_UNIT=turbopanel-docker-gate.service
