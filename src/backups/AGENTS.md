@@ -32,8 +32,10 @@ policies file first (only when the set changed, so an unchanged set leaves its
 each enabled policy only when the bytes differ, one `daemon-reload`, `enable
 --now` only the timers that moved, and remove every `turbopanel-backup-*` timer
 the set no longer names (disabled policies included). Next runs come from
-`systemctl show <timer> --property=NextElapseUSecRealtime --value
---timestamp=unix`, unprivileged; a failed read is a warning, not an error.
+`systemctl list-timers --all --output=json <timer>` (`timer-next-run.ts`; its
+`next` is microseconds since the epoch), unprivileged; a failed read is a
+warning, not an error. Do not use `systemctl show --timestamp=unix`: `show`
+ignores `--timestamp` and prints the local "Tue 2026-10-06 03:25:35 CDT" form.
 
 The units: the service is a oneshot as `tp:tp` whose only `ExecStart` is the
 wrapper with its own policy id, reading `daemon.env`, at `Nice=10` /
@@ -169,9 +171,8 @@ deploy.
   `ok` true (recorded) or false (refused for good). No answer leaves it for
   the next tick; the control plane records a run once however often it is
   sent. A closed socket ends the tick.
-- `nextRunAt` comes from `systemctl show turbopanel-backup-<policyId>.timer
-  --property=NextElapseUSecRealtime --value --timestamp=unix` (read-only, no
-  sudo); it is omitted while the unit does not exist or is not scheduled.
+- `nextRunAt` comes from `systemctl list-timers --all --output=json
+  turbopanel-backup-<policyId>.timer` (read-only, no sudo; `timer-next-run.ts`); it is omitted while the unit does not exist or is not scheduled.
 - A spooled file that would not pass the control plane's frame check is
   renamed to `.<runId>.json.invalid` and never sent: an out-of-shape frame
   closes the socket, which would otherwise repeat every tick.
