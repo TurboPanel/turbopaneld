@@ -11,6 +11,7 @@ import {
   createHostSummaryCollector,
   type HostSummaryCollector,
 } from "./host-summary.ts";
+import { CrashLoopGuard, type StopContainer } from "./crash-loop-guard.ts";
 import { normalizeContainer } from "./normalize.ts";
 import type { MonitorResourceState } from "./protocol.ts";
 import type { ServiceRunState } from "../contracts/service-run-state.ts";
@@ -30,6 +31,12 @@ export type SentinelOptions = {
    * Without it service run states carry no log line, only the exit code.
    */
   fetchLastLogLine?: (containerId: string) => Promise<string>;
+  /**
+   * Stops a service container that kept restarting past the limit (10
+   * restarts without staying up for 60 s). Without it nothing is stopped and
+   * Docker's own restart policy decides.
+   */
+  stopContainer?: StopContainer;
 };
 
 /** A fetched log line, valid for the restart count it was read at. */
@@ -66,6 +73,7 @@ export class Sentinel {
   readonly #transitionCallbacks = new Set<SentinelTransitionCallback>();
   readonly #fetchLastLogLine: SentinelOptions["fetchLastLogLine"];
   readonly #stamper = new ServiceRunStateStamper();
+  readonly #crashGuard: CrashLoopGuard | undefined;
   readonly #logLines = new Map<string, CachedLogLine>();
   readonly #logFetchesInFlight = new Set<string>();
   /** True once the Docker monitor's first listing is in; before that the list is empty, not true. */
@@ -88,6 +96,9 @@ export class Sentinel {
     this.#hostSummaryCollector = options.hostSummaryCollector ??
       createHostSummaryCollector();
     this.#fetchLastLogLine = options.fetchLastLogLine;
+    if (options.stopContainer) {
+      this.#crashGuard = new CrashLoopGuard(options.stopContainer);
+    }
   }
 
   onTransition(callback: SentinelTransitionCallback): () => void {
@@ -134,8 +145,7 @@ export class Sentinel {
    */
   serviceRunStates(now: Date = new Date()): ServiceRunState[] | undefined {
     if (!this.#dockerEnabled || !this.#containersKnown) return undefined;
-    const observations = this.#collectServiceObservations();
-    this.#scheduleLogFetches(observations);
+    const observations = this.#observeServices(now);
     return this.#stamper.stamp(
       deriveServiceRunStates(observations, now.getTime()),
       now,
@@ -180,6 +190,16 @@ export class Sentinel {
     }
 
     return resources;
+  }
+
+  /** Collect the service containers, apply the crash-loop limit and queue log fetches. */
+  #observeServices(now: Date = new Date()): ServiceContainerObservation[] {
+    const collected = this.#collectServiceObservations();
+    const observations = this.#crashGuard
+      ? this.#crashGuard.review(collected, now.getTime())
+      : collected;
+    this.#scheduleLogFetches(observations);
+    return observations;
   }
 
   #collectServiceObservations(): ServiceContainerObservation[] {
@@ -274,8 +294,9 @@ export class Sentinel {
 
     try {
       const resourcesAfter = this.#collectNormalizedResources();
-      // Warm the log-line cache so the next presence tick already has it.
-      this.#scheduleLogFetches(this.#collectServiceObservations());
+      // Warm the log-line cache so the next presence tick already has it, and
+      // stop a crash loop as soon as Docker reports the restart that crosses it.
+      this.#observeServices();
 
       if (change.removed) {
         const resourceKey = this.#resourceKeyForChange(change);
