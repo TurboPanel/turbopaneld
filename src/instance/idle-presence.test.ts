@@ -4,7 +4,13 @@ import type { HostHelloIdentity } from "../host/os-release.ts";
 import type { HostTimeSync } from "../host/time-sync.ts";
 import type { ServerReportedIp } from "../host/server-addresses.ts";
 import { framesOfType, MockWebSocket } from "../testing/fake-websocket.ts";
-import { IdlePresence, installIdlePresenceProviders } from "./idle-presence.ts";
+import {
+  IdlePresence,
+  installIdlePresenceProviders,
+  jitteredMaxConnectionAgeMs,
+  MAX_CONNECTION_AGE_JITTER,
+  MAX_CONNECTION_AGE_MS,
+} from "./idle-presence.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -934,5 +940,20 @@ test({
       presence.detach();
       restore();
     }
+  },
+});
+
+test({
+  name: "jitteredMaxConnectionAgeMs spreads the 2 h recycle age by +-10%",
+  fn: () => {
+    const ages = new Set<number>();
+    for (let i = 0; i < 1_000; i += 1) {
+      const age = jitteredMaxConnectionAgeMs(MAX_CONNECTION_AGE_MS);
+      assert(age >= MAX_CONNECTION_AGE_MS * (1 - MAX_CONNECTION_AGE_JITTER));
+      assert(age <= MAX_CONNECTION_AGE_MS * (1 + MAX_CONNECTION_AGE_JITTER));
+      ages.add(age);
+    }
+    assert(ages.size > 100, "recycle ages must differ per connection");
+    assertEquals(jitteredMaxConnectionAgeMs(1_000, () => 0.5), 1_000);
   },
 });

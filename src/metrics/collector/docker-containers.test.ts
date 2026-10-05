@@ -1,3 +1,4 @@
+import { forEachSequential } from "../../util/sequential.ts";
 import { assertEquals } from "@std/assert";
 
 import type { ContainerSummary, DockerEvent } from "../../docker/client.ts";
@@ -144,4 +145,49 @@ test("OOM kills and exits become per-sample deltas", () => {
     1,
   );
   assertEquals([second.oomKills, second.unexpectedExits], [1, 2]);
+});
+
+test("a reading expires after the stale window and Docker going away blanks it", async () => {
+  let clock = 0;
+  let down = false;
+  const sampler = new ContainerHealthSampler({
+    listContainers: () =>
+      down
+        ? Promise.reject(new Error("docker stopped"))
+        : Promise.resolve([c("web", "running", "Up (healthy)")]),
+    streamEvents: async function* () {},
+    readCgroupFile: () => Promise.resolve(undefined),
+    cpuCount: () => 2,
+    now: () => clock,
+    staleAfterMs: 90_000,
+  });
+  await sampler.refresh();
+  assertEquals(sampler.latest()?.running, 1);
+  down = true;
+  await forEachSequential([30_000, 60_000, 90_000], async (t) => {
+    clock = t;
+    await sampler.refresh();
+    assertEquals(sampler.latest()?.running, 1);
+  });
+  clock = 120_000;
+  await sampler.refresh();
+  assertEquals(sampler.latest(), null);
+});
+
+test("a hung Docker list call is abandoned so later refreshes still run", async () => {
+  let calls = 0;
+  const sampler = new ContainerHealthSampler({
+    listContainers: () =>
+      ++calls === 1
+        ? new Promise(() => {})
+        : Promise.resolve([c("web", "running", "Up (healthy)")]),
+    streamEvents: async function* () {},
+    readCgroupFile: () => Promise.resolve(undefined),
+    cpuCount: () => 2,
+    refreshTimeoutMs: 10,
+  });
+  await sampler.refresh();
+  assertEquals(sampler.latest(), null);
+  await sampler.refresh();
+  assertEquals(sampler.latest()?.running, 1);
 });

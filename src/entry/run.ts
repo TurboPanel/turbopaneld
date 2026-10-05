@@ -13,6 +13,7 @@ import {
   restoreFabricFromPersistedState,
 } from "../commands/fabric.ts";
 import { reinstallFirewallForwardingIfEnabled } from "../firewall/apply.ts";
+import { recoverInterruptedRestores } from "../backups/copy-restore.ts";
 import { reconcileSitePhpRuntimesAtBoot } from "../deploy/site/php-runtime-apply.ts";
 import { logInfo, logWarn } from "../util/logger.ts";
 import { resolveLayout } from "../paths/layout.ts";
@@ -64,6 +65,8 @@ export type DaemonRunIo = {
   reinstallFirewallForwardingIfEnabled?: () => Promise<void>;
   /** Start any per-site PHP runtime that is installed but not running. */
   reconcileSitePhpRuntimes?: () => Promise<void>;
+  /** Start containers a restore stopped before the daemon died. */
+  recoverInterruptedRestores?: () => Promise<unknown>;
   shouldEnableDockerIntegration?: () => boolean;
   shouldConnectToInstance?: () => boolean;
   createDockerClient?: () => DockerClientLike;
@@ -217,6 +220,16 @@ export async function runDaemon(io: DaemonRunIo = {}): Promise<void> {
       restoreFabricFromPersistedState)();
     await reinstallForwardingJumps();
     await (io.reconcileSitePhpRuntimes ?? reconcileSitePhpRuntimesAtBoot)();
+  }
+  if (orchestrationReady) {
+    (io.recoverInterruptedRestores ?? (() => recoverInterruptedRestores()))()
+      .catch((err) => {
+        (io.logWarn ?? logWarn)(
+          "backup",
+          "restore recovery failed:",
+          err instanceof Error ? err.message : String(err),
+        );
+      });
   }
   // In the background: a slow tree walk must not hold up the connection, and
   // a failure is only ever reported.

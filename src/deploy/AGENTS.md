@@ -105,8 +105,9 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    (the storage UUID). Optional `chown` when a
    principal is linked. The instance owns Docker volume naming. Path-provider
    directory/file entries arrive with `sourcePath` — principal-owned defaults
-   are `/srv/users/<username>/volumes/<storageId>` (explicit operator paths
-   still win). Never write under `/var/lib/docker/volumes`.
+   are `/srv/users/<username>/volumes/<storageId>`; a `sourcePath` outside the
+   assigned site owner's `volumes/` directory (or with no site owner) is refused
+   before anything is created, re-owned or mounted (`assertSourcePathConfined`). Never write under `/var/lib/docker/volumes`.
 6. Decrypt `variableMaterial[]` via `POST /api/daemon/v1/secrets/decrypt` and
    write Compose standalone secret files under
    `<runDir>/deployments/<projectId>/<environmentId>/secrets/` (`secret-runtime.ts`,
@@ -214,12 +215,14 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    `HEAD` + `redirect: manual`) and sending a daemon-initiated
    `acme-issuance-event` only on a state change — a debounced failure (two
    consecutive bad polls, so the few seconds Caddy needs right after a fresh
-   deploy never false-alarms) or an immediate recovery. Caddy's admin API has
+   deploy never false-alarms), an immediate recovery, the first good
+   sighting of a hostname, or a renewal (the probe's `notAfter` changed).
+   Good events carry that `notAfter` when the probe could read it. Caddy's admin API has
    no issuance-status endpoint to poll instead — verified empirically against
    a real container before choosing the live-handshake probe (see
    `src/deploy/acme-probe.ts`'s header comment). The control plane
    merge-patches the matching `managed` `lets_encrypt` row's
-   `tls.metadata.acme.lastError` and deliberately never touches `tls.status`
+   `tls.metadata.acme` (`lastError`, `lastIssuedAt`, `notAfter`) and deliberately never touches `tls.status`
    — see `turbopanel/src/client/tls/acme-issuance-event.ts`.
 12. Best-effort `docker compose ps --format json` — per-container identity/status
    (`containerId`, `containerName`, `composeServiceName`, `status`, optional
@@ -814,6 +817,7 @@ new sink still needs a `SINKS` row and a refusal test.
 | `hostings[].hostnames` | hosting Caddyfile site addresses, Traefik `Host` | `isValidHostname` (contract parse) |
 | `hostings[].bindAddress` | hosting Caddyfile `bind` | IP literal (contract parse, `assertValidBindAddress`) |
 | `sites[].webEnv` key / value | Apache `SetEnv` | `safeEnvName` / `safeEnvValue`, and no `${` (Apache expands it on every line, with no escape) |
+| `sites[].webEnv` key / value | nginx `fastcgi_param` | `safeEnvName` (refused) / `safeEnvValue` and no `$` (nginx expands it inside quotes, no escape) and no name nginx or PHP sets itself (`SCRIPT_FILENAME`, `REMOTE_ADDR`, `HTTP_*`, ...) (all dropped and named, not refused: variables are inherited into every hosting) |
 | `sites[].webEnv` key / value | site Caddy `php_fastcgi env` | `safeEnvName` (refused) / `isSafeCaddyEnvValue` (dropped: a multi-line PEM is legitimate and other engines carry it) |
 | `sites[].php.settings` | php-fpm `php_admin_value[...]`, OpenLiteSpeed `phpIniOverride{}` | key allowlist (unknown keys dropped), `safePhpIniValue` |
 | `sites[].php.pool` | php-fpm pool tuning | key allowlist, `^[A-Za-z0-9._-]+$` |

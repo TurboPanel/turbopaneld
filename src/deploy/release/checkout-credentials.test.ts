@@ -1,5 +1,6 @@
 import { assertEquals, assertStringIncludes } from "@std/assert";
 import {
+  askpassHostForCloneUrl,
   DEFAULT_HTTPS_CREDENTIAL_USERNAME,
   gitEnvironment,
   isSshCloneUrl,
@@ -199,3 +200,94 @@ async function pathExists(path: string): Promise<boolean> {
     return false;
   }
 }
+
+async function askpassAnswer(
+  cloneUrl: string,
+  prompt: string,
+): Promise<{ code: number; out: string }> {
+  const scratchDir = await Deno.makeTempDir({ prefix: "tp-checkout-host-" });
+  try {
+    const files = await writeCheckoutCredentialFiles({
+      cloneUrl,
+      ref: "main",
+      commitSha: "0".repeat(40),
+      scratchDir,
+      credential: "ghs_token",
+      credentialUsername: "oauth2",
+    });
+    const result = await new Deno.Command("sh", {
+      args: [files.askpassPath ?? "", prompt],
+      stdout: "piped",
+      stderr: "piped",
+    }).output();
+    return {
+      code: result.code,
+      out: new TextDecoder().decode(result.stdout),
+    };
+  } finally {
+    await Deno.remove(scratchDir, { recursive: true });
+  }
+}
+
+test("the askpass helper answers prompts for the clone host only", async () => {
+  const url = "https://github.com/owner/repo.git";
+  assertEquals(
+    await askpassAnswer(url, "Username for 'https://github.com': "),
+    {
+      code: 0,
+      out: "oauth2",
+    },
+  );
+  assertEquals(
+    await askpassAnswer(url, "Password for 'https://oauth2@github.com': "),
+    { code: 0, out: "ghs_token" },
+  );
+  for (
+    const prompt of [
+      "Username for 'https://attacker.example': ",
+      "Password for 'https://oauth2@attacker.example': ",
+      "Password for 'https://github.com.attacker.example': ",
+      "Password for 'https://github.com@attacker.example': ",
+      "Password for 'https://oauth2@github.com:8443': ",
+      "Username for 'https://evilgithub.com': ",
+    ]
+  ) {
+    assertEquals(
+      await askpassAnswer(url, prompt),
+      { code: 1, out: "" },
+      prompt,
+    );
+  }
+});
+
+test("the askpass helper keeps a non-default port in the host it pins", async () => {
+  const url = "https://git.corp.test:8443/g/app.git";
+  assertEquals(
+    await askpassAnswer(
+      url,
+      "Password for 'https://oauth2@git.corp.test:8443': ",
+    ),
+    { code: 0, out: "ghs_token" },
+  );
+  assertEquals(
+    await askpassAnswer(url, "Password for 'https://oauth2@git.corp.test': "),
+    { code: 1, out: "" },
+  );
+});
+
+test("a clone url with no usable host never gets a credential file", () => {
+  assertEquals(
+    askpassHostForCloneUrl("https://GitHub.com/o/r.git"),
+    "github.com",
+  );
+  // Nothing can prompt on a local path, so no helper is written at all.
+  assertEquals(askpassHostForCloneUrl("/srv/repos/r.git"), null);
+  assertEquals(askpassHostForCloneUrl("file:///srv/repos/r.git"), null);
+  let refused = false;
+  try {
+    askpassHostForCloneUrl("https://a'b.test/o/r");
+  } catch {
+    refused = true;
+  }
+  assertEquals(refused, true);
+});

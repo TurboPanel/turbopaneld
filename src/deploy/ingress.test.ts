@@ -4023,3 +4023,132 @@ Deno.test("the hosting Caddyfile exposes totals-only metrics on loopback, with n
   assertStringIncludes(text, "  metrics\n  servers {");
   assertEquals(text.includes("per_host"), false);
 });
+
+const WWW_BASE_PAYLOAD = {
+  environmentId: "env-www-1",
+  projectId: "proj-1",
+  organizationId: "org-1",
+  projectName: "demo",
+  composeFiles: [{
+    filename: "compose.yaml",
+    role: "runtime" as const,
+    content: "services: {}",
+  }],
+};
+
+test("buildCaddyHostnameRoutes adds a redirect site for each wwwRedirect hostname", () => {
+  const routes = buildCaddyHostnameRoutes({
+    ...WWW_BASE_PAYLOAD,
+    hostings: [
+      {
+        hostingId: "h1",
+        serviceId: "s1",
+        composeServiceName: "web",
+        hostnames: ["example.com", "www.shop.example.com"],
+        tlsMode: "acme",
+        bindAddress: "203.0.113.10",
+        wwwRedirect: true,
+      },
+    ],
+  });
+  assertEquals(
+    [...routes.keys()].sort(),
+    [
+      "example.com",
+      "shop.example.com",
+      "www.example.com",
+      "www.shop.example.com",
+    ],
+  );
+  const redirect = routes.get("www.example.com")!;
+  assertEquals(redirect.redirectTo, "example.com");
+  assertEquals(redirect.routes, []);
+  assertEquals(redirect.tlsMode, "acme");
+  assertEquals(redirect.bindAddress, "203.0.113.10");
+  assertEquals(
+    routes.get("shop.example.com")!.redirectTo,
+    "www.shop.example.com",
+  );
+  assertEquals(routes.get("example.com")!.redirectTo, undefined);
+});
+
+test("buildCaddyHostnameRoutes ignores wwwRedirect off, on tcp, and on a name already served", () => {
+  const routes = buildCaddyHostnameRoutes({
+    ...WWW_BASE_PAYLOAD,
+    hostings: [
+      {
+        hostingId: "h1",
+        serviceId: "s1",
+        composeServiceName: "web",
+        hostnames: ["example.com"],
+        wwwRedirect: true,
+      },
+      {
+        hostingId: "h2",
+        serviceId: "s2",
+        composeServiceName: "blog",
+        hostnames: ["www.example.com"],
+      },
+      {
+        hostingId: "h3",
+        serviceId: "s3",
+        composeServiceName: "db",
+        hostnames: [],
+        protocol: "tcp",
+        ports: [{ published: 5432, target: 5432 }],
+        wwwRedirect: true,
+      },
+      {
+        hostingId: "h4",
+        serviceId: "s4",
+        composeServiceName: "plain",
+        hostnames: ["plain.example.com"],
+      },
+    ],
+  });
+  assertEquals(routes.get("www.example.com")!.redirectTo, undefined);
+  assertEquals(routes.has("www.plain.example.com"), false);
+});
+
+test("rewriteHostingCaddySites serves the www name and lists it in the acme manifest", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const restore = setIngressHostCommandForTest(() =>
+    Promise.resolve({ success: true, stderr: "" })
+  );
+  try {
+    await rewriteHostingCaddySites(layout, {
+      ...WWW_BASE_PAYLOAD,
+      hostings: [
+        {
+          hostingId: "h1",
+          serviceId: "s1",
+          composeServiceName: "web",
+          hostnames: ["example.com"],
+          tlsMode: "acme",
+          wwwRedirect: true,
+        },
+      ],
+    });
+    const sitesDir = join(layout.configDir, "hosting", "sites");
+    const site = await Deno.readTextFile(join(sitesDir, "env-www-1.caddy"));
+    assertStringIncludes(
+      site,
+      `www.example.com {\n  redir https://example.com{uri} permanent\n}`,
+    );
+    assertEquals(
+      JSON.parse(
+        await Deno.readTextFile(
+          join(sitesDir, "env-www-1.acme-hostnames.json"),
+        ),
+      ),
+      ["example.com", "www.example.com"],
+    );
+    assertEquals(await readAcmeModeHostnames(layout), [
+      "example.com",
+      "www.example.com",
+    ]);
+  } finally {
+    restore();
+    await cleanup();
+  }
+});

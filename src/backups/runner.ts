@@ -184,6 +184,8 @@ function copySourceOf(entry: BackupPolicyWireEntry): CopyBackupSource {
   };
   if (entry.volumeName) source.volumeName = entry.volumeName;
   if (entry.hostPath) source.hostPath = entry.hostPath;
+  if (entry.ownerUsername) source.ownerUsername = entry.ownerUsername;
+  if (entry.composeProject) source.composeProject = entry.composeProject;
   if (entry.organizationId) source.organizationId = entry.organizationId;
   if (entry.storageId) source.storageId = entry.storageId;
   return source;

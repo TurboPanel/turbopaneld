@@ -96,10 +96,18 @@ narrowed at runtime; narrowing them would take a second compiled binary.
 - The image is pulled by `server.backups.reconcile` when an enabled copy
   policy exists (a failed pull is a warning) and by a manual `storage.backup`;
   a scheduled run never pulls.
-- Sources: a Docker volume by name (`docker volume inspect` first, so a
-  missing volume is refused rather than created empty), or a host directory
-  under `/srv/users/` or `<stateDir>/storage/` only. Never
-  `/var/lib/docker/volumes`.
+- Sources: a Docker volume by name, or a host directory. `copy-source-guard.ts`
+  checks both before every mount (backup, restore, and again under the restore
+  lock). A volume must be the storage's own (name = `storageId`) or carry the
+  project's `com.docker.compose.project` label, and must be a plain local
+  volume (no `device`/bind options, no other driver); `docker volume inspect`
+  also refuses a missing volume. A host path must be inside
+  `/srv/users/<ownerUsername>/volumes/` (the wire names the owner) or the
+  default `<stateDir>/storage/` root, with no symlink component below the
+  owner's home / storage root. Never `/var/lib/docker/volumes`.
+- Retention (`pruneBackupArtifacts` with `COPY_ARCHIVE_MIN_GOOD_BYTES`): an
+  archive under 1 KiB holds no files; it is kept, never counts toward
+  `retentionKeep`, and a run that produced one prunes nothing.
 - `<runDir>/copy-locks/<copyId>.lock` is the per-copy flock: a scheduled run,
   a manual backup and a restore of one copy never run at once.
 
@@ -119,7 +127,13 @@ Keep this order (`copy-restore.ts`, pinned by `copy-restore.test.ts`):
    extracts into `/dst/.tp-restore-stage`, moves the current entries to
    `/dst/.tp-restore-old`, moves the staged ones up, deletes the old ones
    (`RESTORE_SCRIPT`: exit 3 = unextractable, copy unchanged; 4 = swap failed,
-   old contents put back; 5 = putting them back failed too).
+   old contents put back; 5 = putting them back failed too; 6 = an earlier
+   restore left `.tp-restore-old` without its `.tp-restore-done` marker, so
+   nothing is touched. The script never deletes such an `old`).
+   Before step 2 an intent file (`<backupDir>/restore-intents/<copyId>.json`:
+   container ids, helper name) is written; it is removed once the containers
+   run again, and `recoverInterruptedRestores` (daemon boot) starts them if the
+   daemon died in between.
 4. Always: start every container stopped in step 2; report the ones that
    would not start.
 

@@ -312,7 +312,15 @@ test("handleManagedLifecycle reports the member's payload role and defaults to p
     }
     return Promise.resolve(dockerOk());
   };
-  await withManagedStateDir(managedId, async () => {
+  await withManagedStateDir(managedId, async (root) => {
+    // A replica start probes its data volume via the persisted compose file;
+    // the fake docker reports an empty volume, so the restart proceeds.
+    await Deno.writeTextFile(
+      `${root}/docker-compose.yml`,
+      "services:\n  postgres:\n    image: postgres:18\n    volumes:\n" +
+        "      - pgdata:/var/lib/postgresql\nvolumes:\n  pgdata:\n" +
+        "    name: pgdata\n",
+    );
     const replica = await handleManagedLifecycle(
       {
         managedId,

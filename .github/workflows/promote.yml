@@ -61,7 +61,7 @@ jobs:
     # release and upload assets.
     permissions:
       contents: write
-    uses: TurboPanel/dev/.github/workflows/gh-release.yml@5464e72c40aec3528fb10e6fc660583ad963b3cb # dev#35
+    uses: TurboPanel/dev/.github/workflows/gh-release.yml@d9127ee03a6a3b42e9435ebec3542db5fab09bc0 # dev#49
     with:
       version: ${{ needs.prepare.outputs.version }}
       channel: ${{ inputs.to }}
@@ -77,7 +77,7 @@ jobs:
     # release and upload assets.
     permissions:
       contents: write
-    uses: TurboPanel/dev/.github/workflows/gh-promote-finalize.yml@5464e72c40aec3528fb10e6fc660583ad963b3cb # dev#35
+    uses: TurboPanel/dev/.github/workflows/gh-promote-finalize.yml@d9127ee03a6a3b42e9435ebec3542db5fab09bc0 # dev#49
     with:
       to: ${{ inputs.to }}
       version: ${{ needs.prepare.outputs.version }}

@@ -468,3 +468,50 @@ test("trees left by a dead daemon are stopped, taken back and removed; live ones
     await Deno.remove(root, { recursive: true });
   }
 });
+
+test("a build that floods its output is stopped and does not buffer it", async () => {
+  const target = await work();
+  const killed: string[] = [];
+  let finish = () => {};
+  const gate = new Promise<void>((resolve) => {
+    finish = resolve;
+  });
+  const flood = (chunks: number) => {
+    let sent = 0;
+    return new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        if (sent >= chunks) {
+          await gate;
+          return controller.close();
+        }
+        sent += 1;
+        controller.enqueue(new TextEncoder().encode("x".repeat(65536)));
+      },
+    });
+  };
+  const spawn: SandboxSpawn = () =>
+    ({
+      stdin: new WritableStream<Uint8Array>(),
+      stdout: flood(64),
+      stderr: flood(0),
+      status: gate.then(() => ({ success: false, code: 143, signal: null })),
+      kill: (signal: string) => {
+        killed.push(signal);
+        finish();
+      },
+    }) as unknown as Deno.ChildProcess;
+  const { runFn } = recordingRunFn();
+  await assertRejects(
+    () =>
+      runSandboxedBuild({
+        work: target,
+        spec: "",
+        spawn,
+        runFn,
+        maxOutputChars: 1_000_000,
+      }),
+    Error,
+    "build output exceeded the size limit",
+  );
+  assertEquals(killed, ["SIGTERM"]);
+});

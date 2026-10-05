@@ -616,6 +616,31 @@ test("preflight failure names the missing tool", async () => {
   );
 });
 
+test("a default route in a peer's allowedIPs is refused before anything is applied", async () => {
+  await withFabricDir("tp-fabric-policy-", async (networkDir, invocations) => {
+    const payload = parseFabricReconcilePayload({
+      ...enabledPayload(),
+      peers: [{
+        publicKey: WG_PUBKEY_B,
+        endpoint: "203.0.113.1:51820",
+        allowedIPs: ["10.250.0.12/32", "0.0.0.0/0"],
+      }],
+    });
+    await assertRejects(
+      () => handleFabricReconcile(payload, new Date().toISOString()),
+      Error,
+      "TurboFabric refused a peer route",
+    );
+    assertEquals(
+      invocations.some((line) =>
+        line.includes("link add") || line.includes("syncconf")
+      ),
+      false,
+    );
+    await assertRejects(() => Deno.stat(join(networkDir, "state.json")));
+  });
+});
+
 test("boot-time restore reconstructs tp0 from state.json", async () => {
   await withFabricDir("tp-fabric-restore-", async (networkDir, invocations) => {
     await Deno.mkdir(join(networkDir, "wireguard"), {
@@ -1190,6 +1215,19 @@ test("classifyPeerHandshakeHealth maps missing, fresh, and aged handshakes", () 
     ),
     "stale",
   );
+});
+
+test("classifyPeerHandshakeHealth follows WireGuard timers: re-handshake ~120 s, dead at 180 s", () => {
+  const now = Date.parse("2026-08-18T18:00:00.000Z");
+  const aged = (seconds: number) =>
+    classifyPeerHandshakeHealth(
+      new Date(now - seconds * 1000).toISOString(),
+      now,
+    );
+  for (const seconds of [0, 75, 100, 125, 170, 180]) {
+    assertEquals(aged(seconds), "healthy", `${seconds} s`);
+  }
+  assertEquals(aged(300), "stale");
 });
 
 test("handleFabricPathProbe collect-only returns dump health", async () => {

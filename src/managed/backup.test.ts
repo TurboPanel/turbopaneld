@@ -768,6 +768,48 @@ test("handleManagedBackup delete removes the artifact when present", async () =>
   });
 });
 
+test("handleManagedBackup delete removes a scheduled backup from its policy directory", async () => {
+  await withTempStateDir(async (tmp) => {
+    const managedId = `bk-${crypto.randomUUID()}`;
+    const backupId = "scheduled_one";
+    const policyId = "11111111-1111-4111-8111-111111111111";
+    const layout = { backupDir: tmp } as Parameters<
+      typeof managedBackupArtifactPath
+    >[0];
+    const artifactPath = managedBackupArtifactPath(
+      layout,
+      managedId,
+      backupId,
+      "dump",
+      policyId,
+    );
+    await Deno.mkdir(dirname(artifactPath), { recursive: true, mode: 0o750 });
+    await Deno.writeFile(artifactPath, new TextEncoder().encode("keep"), {
+      mode: 0o600,
+    });
+
+    await handleManagedBackup(
+      {
+        managedId,
+        engine: "postgres",
+        action: "delete",
+        backupId,
+        artifactExtension: "dump",
+        scope: "database",
+        policyId,
+      },
+      new Date().toISOString(),
+    );
+
+    try {
+      await Deno.stat(artifactPath);
+      throw new TypeError("scheduled artifact should be deleted");
+    } catch (err) {
+      if (!(err instanceof Deno.errors.NotFound)) throw err;
+    }
+  });
+});
+
 test("handleManagedBackup delete is idempotent when the artifact is already gone", async () => {
   await withTempStateDir(async () => {
     const result = await handleManagedBackup(

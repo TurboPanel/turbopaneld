@@ -1,4 +1,4 @@
-import { dirname, join } from "@std/path";
+import { dirname, join, normalize } from "@std/path";
 import type { LayoutPaths } from "../paths/layout.ts";
 import { forEachSequential } from "../util/sequential.ts";
 import type {
@@ -170,12 +170,44 @@ async function materializeDockerVolume(
   return volumeName;
 }
 
+/**
+ * A path copy the instance names with `sourcePath` is only ever a directory
+ * inside the volumes directory of the site owner's Linux user it is assigned
+ * to (`<home root>/<username>/volumes/<name>`). The path must already be
+ * normalized: no `.` or `..` segments, doubled or trailing slashes. Anything
+ * else (another site owner's home, a system directory, no site owner at all)
+ * is refused before the daemon creates, re-owns or bind-mounts it.
+ */
+function assertSourcePathConfined(
+  layout: LayoutPaths,
+  entry: EnvironmentDeployStorageMaterial,
+  ownership: EnvironmentDeployPrincipalMaterial | undefined,
+): void {
+  const sourcePath = entry.sourcePath;
+  if (sourcePath === undefined) return;
+  const volumesRoot = ownership
+    ? join(layout.principalHomeRoot, ownership.username, "volumes")
+    : undefined;
+  if (
+    !volumesRoot ||
+    normalize(sourcePath) !== sourcePath ||
+    sourcePath.endsWith("/") ||
+    !sourcePath.startsWith(`${volumesRoot}/`)
+  ) {
+    throw new Error(
+      `storage ${entry.storageId}: source path ${sourcePath} is outside its site owner's volumes directory`,
+    );
+  }
+}
+
 async function materializeHostPathEntry(
+  layout: LayoutPaths,
   baseDir: string,
   entry: EnvironmentDeployStorageMaterial,
   ownership: EnvironmentDeployPrincipalMaterial | undefined,
   fileContent: string,
 ): Promise<string> {
+  assertSourcePathConfined(layout, entry, ownership);
   let hostPath = entry.sourcePath ?? baseDir;
 
   if (entry.kind === "directory") {
@@ -259,6 +291,7 @@ export async function materializeLocation(
   }
 
   return await materializeHostPathEntry(
+    layout,
     baseDir,
     entry,
     ownership,

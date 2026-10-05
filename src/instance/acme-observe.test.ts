@@ -1,4 +1,5 @@
 import { assertEquals } from "@std/assert";
+import { waitFor } from "../testing/wait-for.ts";
 import { createFakeClock, flushMicrotasks } from "../testing/fake-clock.ts";
 import {
   type AcmeIssuanceEventMessage,
@@ -31,11 +32,13 @@ test("AcmeIssuanceObserver.attach schedules poll and detach clears the timer", a
   });
 
   observer.attach();
-  await new Promise((resolve) => setTimeout(resolve, 65));
-  await flushMicrotasks();
+  await waitFor("the first scheduled poll to send", () => sent.length >= 1);
   observer.detach();
+  // A poll already in flight may still land; let it settle, then count.
+  await flushMicrotasks();
   const afterDetach = sent.length;
-  await new Promise((resolve) => setTimeout(resolve, 65));
+  // Three more intervals: a timer that survived detach would fire in them.
+  await new Promise((resolve) => setTimeout(resolve, 60));
   await flushMicrotasks();
 
   assertEquals(afterDetach >= 1, true);
@@ -121,11 +124,10 @@ test("resets the failure streak after an intermittent success", async () => {
   });
 
   await observer.poll(); // fail (1st)
-  await observer.poll(); // ok — resets streak, no report (never reported failed yet)
+  await observer.poll(); // ok — resets streak, first good sighting is reported
   await observer.poll(); // fail (1st again)
   await observer.poll(); // fail (2nd) — now reports
-  assertEquals(sent.length, 1);
-  assertEquals(sent[0]?.ok, false);
+  assertEquals(sent.map((m) => m.ok), [true, false]);
 });
 
 test("stops tracking a hostname once it leaves the acme-mode set (no phantom failures)", async () => {
@@ -180,7 +182,83 @@ test("tracks multiple hostnames independently", async () => {
 
   await observer.poll();
   await observer.poll();
+  const failed = sent.filter((m) => !m.ok);
+  assertEquals(failed.length, 1);
+  assertEquals(failed[0]?.hostname, "a.example.com");
+  const good = sent.filter((m) => m.ok);
+  assertEquals(good.length, 1, "b is reported good once, on first sighting");
+  assertEquals(good[0]?.hostname, "b.example.com");
+});
+
+test("reports the first good sighting with its notAfter, then stays quiet", async () => {
+  const sent: AcmeIssuanceEventMessage[] = [];
+  const observer = new AcmeIssuanceObserver({
+    now: () => "2026-09-16T00:00:00.000Z",
+    send: (message) => sent.push(message),
+    listHostnames: () => Promise.resolve(["a.example.com"]),
+    probe: (hostname): Promise<AcmeProbeResult> =>
+      Promise.resolve({
+        hostname,
+        ok: true,
+        notAfter: "2026-12-01T00:00:00.000Z",
+      }),
+  });
+
+  await observer.poll();
+  await observer.poll();
   assertEquals(sent.length, 1);
-  assertEquals(sent[0]?.hostname, "a.example.com");
-  assertEquals(sent[0]?.ok, false);
+  assertEquals(sent[0]?.ok, true);
+  assertEquals(sent[0]?.notAfter, "2026-12-01T00:00:00.000Z");
+});
+
+test("re-reports a good hostname when a renewal changes notAfter", async () => {
+  const sent: AcmeIssuanceEventMessage[] = [];
+  let notAfter: string | undefined = "2026-12-01T00:00:00.000Z";
+  const observer = new AcmeIssuanceObserver({
+    now: () => "2026-09-16T00:00:00.000Z",
+    send: (message) => sent.push(message),
+    listHostnames: () => Promise.resolve(["a.example.com"]),
+    probe: (hostname): Promise<AcmeProbeResult> =>
+      Promise.resolve({
+        hostname,
+        ok: true,
+        ...(notAfter ? { notAfter } : {}),
+      }),
+  });
+
+  await observer.poll();
+  notAfter = undefined; // an unreadable expiry is not a renewal
+  await observer.poll();
+  notAfter = "2027-03-01T00:00:00.000Z";
+  await observer.poll();
+  await observer.poll();
+  assertEquals(sent.map((m) => m.notAfter), [
+    "2026-12-01T00:00:00.000Z",
+    "2027-03-01T00:00:00.000Z",
+  ]);
+});
+
+test("a recovery carries notAfter, a failure never does", async () => {
+  const sent: AcmeIssuanceEventMessage[] = [];
+  let ok = false;
+  const observer = new AcmeIssuanceObserver({
+    now: () => "2026-09-16T00:00:00.000Z",
+    send: (message) => sent.push(message),
+    listHostnames: () => Promise.resolve(["a.example.com"]),
+    probe: (hostname): Promise<AcmeProbeResult> =>
+      Promise.resolve(
+        ok
+          ? { hostname, ok: true, notAfter: "2026-12-01T00:00:00.000Z" }
+          : { hostname, ok: false, errorMessage: "boom" },
+      ),
+  });
+
+  await observer.poll();
+  await observer.poll();
+  ok = true;
+  await observer.poll();
+  assertEquals(sent.map((m) => [m.ok, m.notAfter]), [
+    [false, undefined],
+    [true, "2026-12-01T00:00:00.000Z"],
+  ]);
 });

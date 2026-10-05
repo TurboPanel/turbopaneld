@@ -83,7 +83,11 @@ export function parseNvidiaSmiQuery(text: string): Map<string, NvidiaSmiRow> {
  */
 export type NvidiaSmiRunner = () => Promise<string | null | undefined>;
 
+/** nvidia-smi can hang for minutes when a GPU falls off the bus; kill it instead. */
+export const NVIDIA_SMI_TIMEOUT_MS = 8_000;
+
 async function runNvidiaSmi(): Promise<string | null | undefined> {
+  const signal = AbortSignal.timeout(NVIDIA_SMI_TIMEOUT_MS);
   try {
     const { code, stdout } = await new Deno.Command("nvidia-smi", {
       args: [
@@ -92,10 +96,13 @@ async function runNvidiaSmi(): Promise<string | null | undefined> {
       ],
       stdout: "piped",
       stderr: "null",
+      signal,
     }).output();
     if (code !== 0) return undefined;
     return new TextDecoder().decode(stdout);
   } catch {
+    // Killed at the deadline: this run failed, the binary is still there.
+    if (signal.aborted) return undefined;
     // Not installed / not on the allow-run list on this host.
     return null;
   }

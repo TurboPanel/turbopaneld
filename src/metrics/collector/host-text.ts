@@ -12,6 +12,7 @@
  * Everything is cached for {@link HOST_TEXT_TTL_MS}; SMART (a subprocess per
  * drive) has its own slower TTL. Every source degrades to "absent".
  */
+import { mapLimit } from "../../util/sequential.ts";
 import { parseVmstat } from "./parse-vmstat.ts";
 import type {
   MetricsExtended,
@@ -63,6 +64,9 @@ export type HostTextIo = {
   now: () => number;
   pageSizeBytes: number;
 };
+
+/** At most this many `/proc/<pid>` reads in flight: thousands at once exhaust file descriptors. */
+export const PROC_SCAN_CONCURRENCY = 32;
 
 export function shortName(raw: string | undefined): string | undefined {
   const cleaned = raw?.trim().replaceAll(/[^\w.+-]/g, "").slice(0, MAX_NAME);
@@ -280,6 +284,7 @@ export class HostTextCollector {
   #lastScanMs: number | undefined;
   #engines: { at: number; value: string[] } | undefined;
   #oom: { count: number | null; victim: string | undefined } | undefined;
+  #inflight: Promise<HostTextSample> | undefined;
 
   constructor(io: HostTextIo) {
     this.#io = io;
@@ -290,9 +295,14 @@ export class HostTextCollector {
     if (this.#cache && now - this.#cache.at < HOST_TEXT_TTL_MS) {
       return this.#cache.value;
     }
-    const value = await this.#collect(now);
-    this.#cache = { at: now, value };
-    return value;
+    // Two collectors sharing this instance share one scan in flight.
+    this.#inflight ??= this.#collect(now).then((value) => {
+      this.#cache = { at: now, value };
+      return value;
+    }).finally(() => {
+      this.#inflight = undefined;
+    });
+    return await this.#inflight;
   }
 
   async #collect(now: number): Promise<HostTextSample> {
@@ -419,8 +429,9 @@ export class HostTextCollector {
     Pick<HostTextSample, "topCpuProcess" | "topMemProcess" | "fpmBusiest">
   > {
     const pids = (await this.#io.listPids()).filter((p) => /^\d+$/.test(p));
-    const rows = (await Promise.all(pids.map((p) => this.#readProc(p))))
-      .filter((r): r is ProcRow => r !== undefined);
+    const rows =
+      (await mapLimit(pids, PROC_SCAN_CONCURRENCY, (p) => this.#readProc(p)))
+        .filter((r): r is ProcRow => r !== undefined);
     const firstScan = this.#lastScanMs === undefined;
     const priorTicks = new Map(this.#ticksByPid);
     this.#ticksByPid.clear();
@@ -455,14 +466,17 @@ export class HostTextCollector {
     }
     const disks = await this.#io.blockDisks();
     const entries = await Promise.all(disks.map(async (name) => {
-      const out = await this.#run("smartctl", [
+      // smartctl's exit status is a bit mask: a failing drive (bit 3) exits
+      // non-zero while still printing a valid verdict, so parse the output
+      // whatever the exit code (a standby skip prints nothing and parses to null).
+      const result = await this.#io.run("smartctl", [
         "-H",
         "-j",
         "-n",
         "standby",
         `/dev/${name}`,
       ]);
-      const parsed = out ? parseSmartctlJson(out) : null;
+      const parsed = result?.stdout ? parseSmartctlJson(result.stdout) : null;
       if (!parsed) return undefined;
       const failing = parsed.critical || parsed.nvmeCritical;
       return [name, failing ? "failing" : "ok"] as const;

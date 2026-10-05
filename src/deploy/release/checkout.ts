@@ -130,17 +130,52 @@ export const DEFAULT_HTTPS_CREDENTIAL_USERNAME = "x-access-token";
 function askpassScript(
   credentialValue: string,
   username: string,
+  host: string,
 ): string {
   const escaped = credentialValue.replaceAll("'", `'"'"'`);
   const escapedUsername = username.replaceAll("'", `'"'"'`);
   return [
     "#!/bin/sh",
+    // Answer only a prompt that names the host this checkout was minted for
+    // (`Username for 'https://host'` / `Password for 'https://user@host'`).
+    // A redirect to another host makes git ask again under that host's name;
+    // that prompt gets no credential.
+    'case "$1" in',
+    `  *"//${host}'"*|*"@${host}'"*) ;;`,
+    "  *) exit 1 ;;",
+    "esac",
     'case "$1" in',
     `  Username*) printf '%s' '${escapedUsername}' ;;`,
     `  *) printf '%s' '${escaped}' ;;`,
     "esac",
     "",
   ].join("\n");
+}
+
+const ASKPASS_HOST_RE = /^[a-z0-9.-]+(:\d{1,5})?$|^\[[0-9a-f:.]+\](:\d{1,5})?$/;
+
+/**
+ * The `host[:port]` git names in its credential prompts for `cloneUrl`, or
+ * `null` when the URL is not http(s) at all (a local path, `file://`): git
+ * never prompts there, so there is nothing a credential could be offered to.
+ *
+ * Throws for an http(s) URL with no usable host: a credential is never written
+ * for a clone whose destination cannot be pinned. The charset check also keeps
+ * the value safe to place inside the generated shell script.
+ */
+export function askpassHostForCloneUrl(cloneUrl: string): string | null {
+  let parsed: URL;
+  try {
+    parsed = new URL(cloneUrl);
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return null;
+  const host = parsed.host.toLowerCase();
+  if (!ASKPASS_HOST_RE.test(host)) {
+    throw new Error("clone credential refused: clone url has no valid host");
+  }
+  return host;
 }
 
 /** Payload-supplied user, else the HTTPS default. */
@@ -235,10 +270,16 @@ export async function writeCheckoutCredentialFiles(
     await Deno.writeTextFile(knownHostsPath, "", { mode: 0o600 });
     return { askpassPath: null, sshKeyPath, knownHostsPath };
   }
+  const askpassHost = askpassHostForCloneUrl(params.cloneUrl);
+  if (askpassHost === null) return NO_CREDENTIAL_FILES;
   const askpassPath = join(params.scratchDir, ".git-askpass");
   await Deno.writeTextFile(
     askpassPath,
-    askpassScript(params.credential, resolveCredentialUsername(params)),
+    askpassScript(
+      params.credential,
+      resolveCredentialUsername(params),
+      askpassHost,
+    ),
     { mode: 0o600 },
   );
   await Deno.chmod(askpassPath, 0o700);

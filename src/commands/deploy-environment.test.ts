@@ -330,6 +330,33 @@ test("handleEnvironmentDeploy rejects secret plan when decrypt is unavailable", 
   }
 });
 
+test("handleEnvironmentDeploy rejects sealed site variables when decrypt is unavailable", () =>
+  withReclaimEnv(async () => {
+    const payload = {
+      ...mixedLanePayload(),
+      hostings: [],
+      hostingIngressNetwork: undefined,
+      nativeAppServices: [],
+      sites: [{
+        composeServiceName: "app",
+        engine: "caddy",
+        root: "public",
+        listenPort: 18080,
+        webSecretEnv: { SITE_VAR: "tpdaemon.sealed" },
+      }],
+    } as unknown as EnvironmentDeployPayload;
+    await assertRejects(
+      () =>
+        handleEnvironmentDeploy(
+          payload,
+          new Date().toISOString(),
+          hermeticDeployDeps,
+        ),
+      Error,
+      "Site app has secret variables but secrets decrypt is unavailable",
+    );
+  }));
+
 test({
   name:
     "handleEnvironmentDeploy omits containers from result when compose ps fails",

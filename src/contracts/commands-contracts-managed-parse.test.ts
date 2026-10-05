@@ -555,6 +555,28 @@ test("parseManagedPromotePayload rejects invalid ids and engines", () => {
   );
 });
 
+test("parseManagedBackupPayload carries a canonical policyId and rejects a malformed one", () => {
+  const base = {
+    managedId: MANAGED_ID,
+    engine: "postgres",
+    action: "delete",
+    backupId: "bk_1",
+    artifactExtension: "dump",
+    scope: "instance",
+  };
+  const policyId = "11111111-1111-4111-8111-111111111111";
+  assertEquals(
+    parseManagedBackupPayload({ ...base, policyId }).policyId,
+    policyId,
+  );
+  assertEquals("policyId" in parseManagedBackupPayload(base), false);
+  assertThrows(
+    () => parseManagedBackupPayload({ ...base, policyId: "../policy" }),
+    Error,
+    "Invalid managed.backup payload policyId",
+  );
+});
+
 test("parseManagedBackupPayload rejects non-objects and result parsers stay lenient", () => {
   assertThrows(
     () => parseManagedBackupPayload(null),

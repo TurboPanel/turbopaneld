@@ -268,21 +268,38 @@ export async function listBackupArtifacts(
   return entries;
 }
 
-/** Keep the newest `retentionKeep` artifacts by mtime; unlink the rest. Returns pruned ids. */
+/**
+ * Keep the newest `retentionKeep` artifacts by mtime; unlink the rest. Returns pruned ids.
+ *
+ * With `minGoodBytes`, an artifact smaller than that is not a good copy (an
+ * archive of an empty directory is a few dozen bytes): it never counts toward
+ * `retentionKeep`, a run whose own artifact is not good prunes nothing, and
+ * the newest `retentionKeep` good artifacts are always kept.
+ */
 export async function pruneBackupArtifacts(
   dir: string,
   ext: string,
   retentionKeep: number | undefined,
   keepId: string,
+  minGoodBytes?: number,
 ): Promise<string[]> {
   if (retentionKeep === undefined) return [];
 
   const entries = await listBackupArtifacts(dir, ext);
   const sorted = entries.slice().sort((a, b) => b.mtimeMs - a.mtimeMs);
-  const keep = new Set(sorted.slice(0, retentionKeep).map((e) => e.id));
+  const isGood = (e: BackupArtifactEntry) =>
+    minGoodBytes === undefined || e.sizeBytes >= minGoodBytes;
+  const good = sorted.filter(isGood);
+  if (minGoodBytes !== undefined) {
+    const own = sorted.find((e) => e.id === keepId);
+    if (own && !isGood(own)) return [];
+  }
+  const keep = new Set(good.slice(0, retentionKeep).map((e) => e.id));
   // The artifact just written must never be pruned even if clock skew put it
   // out of the newest-N window.
   keep.add(keepId);
+  // Empty artifacts are only pruned once a good one is kept.
+  if (minGoodBytes !== undefined && good.length === 0) return [];
 
   const pruned: string[] = [];
   await forEachSequential(sorted, async (entry) => {
@@ -525,6 +542,7 @@ export async function handleManagedBackup(
         payload.managedId,
         payload.backupId,
         payload.artifactExtension,
+        payload.policyId,
       ),
     );
     return {

@@ -39,7 +39,10 @@ function captureRun(
   return { run, calls };
 }
 
-const LAYOUT = { principalHomeRoot: "/srv/users" };
+const LAYOUT = {
+  principalHomeRoot: "/srv/users",
+  daemonStateDir: "/nonexistent/tp-state",
+};
 const KEPT: ReleaseTreeRef = { serviceId: "svc-kept", username: "appuser" };
 const REMOVED: ReleaseTreeRef = { serviceId: "svc-gone", username: "appuser" };
 
@@ -104,6 +107,56 @@ test("reclaimRemovedReleaseTrees removes the whole tree through the privileged r
     "--",
     removedPath(REMOVED),
   ]);
+});
+
+test("reclaimRemovedReleaseTrees removes the service's daemon records, and only that service's", async () => {
+  const stateDir = await Deno.makeTempDir({ prefix: "tp-reclaim-records-" });
+  try {
+    const sites = join(stateDir, "release-records", "sites");
+    for (const id of [REMOVED.serviceId, KEPT.serviceId]) {
+      await Deno.mkdir(join(sites, id, "releases", "rel-1"), {
+        recursive: true,
+      });
+    }
+    const { run } = captureRun();
+    await reclaimRemovedReleaseTrees({
+      layout: { ...LAYOUT, daemonStateDir: stateDir },
+      previous: [KEPT, REMOVED],
+      currentServiceIds: new Set([KEPT.serviceId]),
+      runFn: run,
+    });
+    const left = (await Array.fromAsync(Deno.readDir(sites))).map((e) =>
+      e.name
+    );
+    assertEquals(left, [KEPT.serviceId]);
+  } finally {
+    await Deno.remove(stateDir, { recursive: true });
+  }
+});
+
+test("reclaimRemovedReleaseTrees keeps the records of a tree it could not remove", async () => {
+  const stateDir = await Deno.makeTempDir({ prefix: "tp-reclaim-records-" });
+  try {
+    const dir = join(
+      stateDir,
+      "release-records",
+      "sites",
+      REMOVED.serviceId,
+      "releases",
+      "rel-1",
+    );
+    await Deno.mkdir(dir, { recursive: true });
+    const { run } = captureRun(false);
+    await reclaimRemovedReleaseTrees({
+      layout: { ...LAYOUT, daemonStateDir: stateDir },
+      previous: [REMOVED],
+      currentServiceIds: new Set<string>(),
+      runFn: run,
+    });
+    assertEquals((await Deno.stat(dir)).isDirectory, true);
+  } finally {
+    await Deno.remove(stateDir, { recursive: true });
+  }
 });
 
 test("reclaimRemovedReleaseTrees is a no-op when every service is still sourced", async () => {
