@@ -427,6 +427,8 @@ export type BackupPolicyWireEntry = {
   copyProvider?: CopyBackupProvider;
   volumeName?: string;
   hostPath?: string;
+  ownerUsername?: string;
+  composeProject?: string;
   organizationId?: string;
   storageId?: string;
   onCalendar: string;
@@ -452,6 +454,10 @@ export type CopyBackupSource = {
   copyProvider: CopyBackupProvider;
   volumeName?: string;
   hostPath?: string;
+  /** The site owner's Linux user; required with `hostPath`. */
+  ownerUsername?: string;
+  /** A docker copy: the project label an externally named volume must carry. */
+  composeProject?: string;
   organizationId?: string;
   storageId?: string;
 };
@@ -681,6 +687,13 @@ export type EnvironmentDeployHosting = {
   /** Required (non-empty) when `protocol` is `tcp` or `udp`; ignored for `http`. */
   ports?: EnvironmentDeployHostingPort[];
   web?: EnvironmentDeployHostingWeb;
+  /**
+   * Also serve the other spelling of each hostname (`www.` added, or removed
+   * when the name starts with `www.`) as a permanent redirect to the hostname
+   * as written. `http` only; omitted when off. In `acme` mode the extra name
+   * gets its own certificate. Older daemons ignore the field.
+   */
+  wwwRedirect?: boolean;
 };
 
 export type EnvironmentDeployVariableMaterial = {
@@ -2131,6 +2144,21 @@ export function isValidHostname(value: unknown): boolean {
   return HOSTNAME_RE.test(value);
 }
 
+const WWW_PREFIX = "www.";
+
+/**
+ * The other spelling of a site name for the "send www to the main name" option:
+ * `www.example.com` for `example.com`, and `example.com` for `www.example.com`.
+ * `null` when no valid name results. Must stay in sync with the instance
+ * canonical version in src/contracts/commands/hostname.ts
+ */
+export function wwwSiblingHostname(hostname: string): string | null {
+  const sibling = hostname.startsWith(WWW_PREFIX)
+    ? hostname.slice(WWW_PREFIX.length)
+    : WWW_PREFIX + hostname;
+  return isValidHostname(sibling) ? sibling : null;
+}
+
 /** Must stay in sync with the instance canonical version in src/contracts/commands/hostname.ts */
 export function assertValidHostname(value: unknown): asserts value is string {
   if (!isValidHostname(value)) {
@@ -3569,6 +3597,14 @@ function parseHostingTlsMode(
   return value as EnvironmentDeployHosting["tlsMode"];
 }
 
+function parseHostingWwwRedirect(value: unknown): true | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "boolean") {
+    throw new TypeError("hostings[].wwwRedirect must be a boolean");
+  }
+  return value ? true : undefined;
+}
+
 function isValidPortNumber(value: unknown): value is number {
   return (
     typeof value === "number" &&
@@ -3679,6 +3715,7 @@ function parseHosting(value: unknown): EnvironmentDeployHosting {
   const protocol = parseHostingProtocol(value.protocol);
   const ports = parseHostingPorts(value.ports);
   const web = parseHostingWeb(value.web);
+  const wwwRedirect = parseHostingWwwRedirect(value.wwwRedirect);
 
   return {
     hostingId: parseNonEmptyString(value, "hostingId"),
@@ -3694,6 +3731,7 @@ function parseHosting(value: unknown): EnvironmentDeployHosting {
     ...(protocol === undefined ? {} : { protocol }),
     ...(ports === undefined ? {} : { ports }),
     ...(web === undefined ? {} : { web }),
+    ...(wwwRedirect === undefined ? {} : { wwwRedirect }),
   };
 }
 
@@ -7479,9 +7517,13 @@ const COPY_HOST_PATH_SEGMENT_RE = /^[\w.@+-]+$/;
 const COPY_SOURCE_FIELDS = [
   "volumeName",
   "hostPath",
+  "ownerUsername",
+  "composeProject",
   "organizationId",
   "storageId",
 ] as const;
+const COPY_OWNER_USERNAME_RE = /^[A-Za-z_][A-Za-z0-9_-]{0,63}$/;
+const COPY_COMPOSE_PROJECT_RE = /^[a-z0-9][a-z0-9_-]*$/;
 
 /**
  * An absolute, already-normalized host directory: `/`-separated segments of a
@@ -7515,12 +7557,19 @@ function parsePathCopySource(
     if (
       !isSafeCopyHostPath(raw.hostPath) ||
       raw.organizationId !== undefined ||
-      raw.storageId !== undefined
+      raw.storageId !== undefined ||
+      raw.composeProject !== undefined ||
+      typeof raw.ownerUsername !== "string" ||
+      !COPY_OWNER_USERNAME_RE.test(raw.ownerUsername)
     ) {
       throw new Error("Invalid path copy source hostPath");
     }
     source.hostPath = raw.hostPath;
+    source.ownerUsername = raw.ownerUsername;
     return;
+  }
+  if (raw.ownerUsername !== undefined || raw.composeProject !== undefined) {
+    throw new Error("Invalid path copy source");
   }
   if (
     !isCanonicalBackupUuid(raw.organizationId) ||
@@ -7561,11 +7610,25 @@ export function parseCopyBackupSource(
   }
   if (
     raw.hostPath !== undefined || raw.organizationId !== undefined ||
-    raw.storageId !== undefined
+    raw.ownerUsername !== undefined
   ) {
     throw new Error("A docker copy source cannot name a host path");
   }
+  if (!isCanonicalBackupUuid(raw.storageId)) {
+    throw new Error("A docker copy source needs a storageId");
+  }
+  if (
+    raw.composeProject !== undefined &&
+    (typeof raw.composeProject !== "string" ||
+      !COPY_COMPOSE_PROJECT_RE.test(raw.composeProject))
+  ) {
+    throw new Error("Invalid docker copy source composeProject");
+  }
   source.volumeName = raw.volumeName;
+  source.storageId = raw.storageId;
+  if (raw.composeProject !== undefined) {
+    source.composeProject = raw.composeProject;
+  }
   return source;
 }
 

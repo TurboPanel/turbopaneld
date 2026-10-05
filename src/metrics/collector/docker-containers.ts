@@ -24,6 +24,9 @@ import {
 } from "./container-cgroup.ts";
 
 export const CONTAINER_HEALTH_REFRESH_INTERVAL_MS = 30_000;
+/** Three missed refreshes. */
+export const CONTAINER_HEALTH_STALE_AFTER_MS = 3 * 30_000;
+export const CONTAINER_HEALTH_REFRESH_TIMEOUT_MS = 20_000;
 const MAX_NAMES = 8;
 const MAX_NAME_LENGTH = 48;
 /** A `die` this soon after a `kill` is a requested stop (deploy, `docker stop`). */
@@ -142,6 +145,14 @@ export type ContainerHealthDeps = {
   cpuCount: () => number;
   now?: () => number;
   intervalMs?: number;
+  /**
+   * A reading older than this is no longer reported (`latest()` returns
+   * `null`): after Docker stops, "12 running, 0 unhealthy" must not stay live
+   * forever. Defaults to {@link CONTAINER_HEALTH_STALE_AFTER_MS}.
+   */
+  staleAfterMs?: number;
+  /** Longest one refresh may wait on Docker before it is abandoned. */
+  refreshTimeoutMs?: number;
   onError?: (error: unknown) => void;
 };
 
@@ -165,6 +176,7 @@ export class ContainerHealthSampler {
   #abort: AbortController | undefined;
   #running = false;
   #reading: ContainerHealthReading | null = null;
+  #readingAtMs = 0;
   #cpuPrev: { usageUsec: number; atMs: number } | undefined;
 
   constructor(deps: ContainerHealthDeps) {
@@ -173,6 +185,10 @@ export class ContainerHealthSampler {
 
   latest(): ContainerHealthReading | null {
     if (!this.#reading) return null;
+    const ageMs = (this.#deps.now ?? Date.now)() - this.#readingAtMs;
+    if (ageMs > (this.#deps.staleAfterMs ?? CONTAINER_HEALTH_STALE_AFTER_MS)) {
+      return null;
+    }
     return {
       ...this.#reading,
       unexpectedExitsTotal: this.#exits.total(),
@@ -220,8 +236,9 @@ export class ContainerHealthSampler {
     if (this.#running) return;
     this.#running = true;
     try {
-      const summaries = await this.#deps.listContainers();
+      const summaries = await this.#withTimeout(this.#deps.listContainers());
       const resources = await this.#readResources();
+      this.#readingAtMs = (this.#deps.now ?? Date.now)();
       this.#reading = {
         ...summarizeContainers(summaries),
         unexpectedExitsTotal: this.#exits.total(),
@@ -232,6 +249,19 @@ export class ContainerHealthSampler {
     } finally {
       this.#running = false;
     }
+  }
+
+  /** A hung Docker call must not leave `#running` set forever. */
+  #withTimeout<T>(work: Promise<T>): Promise<T> {
+    const ms = this.#deps.refreshTimeoutMs ??
+      CONTAINER_HEALTH_REFRESH_TIMEOUT_MS;
+    return new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error(`Docker did not answer within ${ms} ms`)),
+        ms,
+      );
+      work.then(resolve, reject).finally(() => clearTimeout(timer));
+    });
   }
 
   async #readResources(): Promise<

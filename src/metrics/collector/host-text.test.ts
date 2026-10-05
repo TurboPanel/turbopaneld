@@ -14,6 +14,7 @@ import {
   parseSharedFpmPool,
   parseVirt,
   parseWebEngines,
+  PROC_SCAN_CONCURRENCY,
   raidStateFromMdstat,
   readOnlyMounts,
   shortName,
@@ -321,4 +322,60 @@ Deno.test("fpmBusiest includes workers of a shared php-fpm master", async () => 
     pageSizeBytes: 4096,
   };
   assertEquals((await new HostTextCollector(io).read()).fpmBusiest, "shared-a");
+});
+
+test("smart verdict: a failing drive (non-zero exit bitmask) is reported failing", async () => {
+  const { io } = fakeIo();
+  const outputs: Record<string, { code: number; stdout: string } | null> = {
+    sda: { code: 8, stdout: '{"smart_status":{"passed":false}}' },
+    sdb: { code: 0, stdout: '{"smart_status":{"passed":true}}' },
+    sdc: { code: 2, stdout: "" },
+    sdd: { code: 4, stdout: "not json" },
+  };
+  const collector = new HostTextCollector({
+    ...io,
+    blockDisks: () => Promise.resolve(["sda", "sdb", "sdc", "sdd"]),
+    run: (cmd, args) =>
+      Promise.resolve(
+        cmd === "smartctl" ? outputs[args.at(-1)!.replace("/dev/", "")] : null,
+      ),
+  });
+  const { smart } = await collector.read();
+  assertEquals(smart, { sda: "failing", sdb: "ok" });
+});
+
+test("process scan keeps /proc reads bounded on a box with thousands of processes", async () => {
+  const { io } = fakeIo();
+  let inFlight = 0;
+  let peak = 0;
+  const pids = Array.from({ length: 5000 }, (_, i) => String(1000 + i));
+  const collector = new HostTextCollector({
+    ...io,
+    listPids: () => Promise.resolve(pids),
+    readFile: async (p) => {
+      if (!p.startsWith("/proc/1") || !p.endsWith("/stat")) return undefined;
+      inFlight += 1;
+      peak = Math.max(peak, inFlight);
+      await Promise.resolve();
+      await Promise.resolve();
+      inFlight -= 1;
+      return `1 (p) S 1 1 1 0 -1 0 0 0 0 0 5 0 0 0`;
+    },
+  });
+  await collector.read();
+  assertEquals(peak > 0 && peak <= PROC_SCAN_CONCURRENCY, true);
+});
+
+test("two concurrent reads share one scan", async () => {
+  const { io } = fakeIo();
+  let listings = 0;
+  const collector = new HostTextCollector({
+    ...io,
+    listPids: () => {
+      listings += 1;
+      return Promise.resolve([]);
+    },
+  });
+  await Promise.all([collector.read(), collector.read()]);
+  assertEquals(listings, 1);
 });

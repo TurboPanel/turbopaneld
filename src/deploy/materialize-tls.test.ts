@@ -237,3 +237,21 @@ test("hostnameTlsMap skips acme-mode hostings even when tlsId is set", () => {
   const map = hostnameTlsMap(payload);
   assertEquals(map.has("acme.example.test"), false);
 });
+
+test("hostnameTlsMap pins the www redirect name to the same certificate", () => {
+  const payload = {
+    hostings: [
+      {
+        hostingId: "h1",
+        serviceId: "s1",
+        composeServiceName: "web",
+        hostnames: ["example.com"],
+        tlsId: TLS_ID,
+        wwwRedirect: true,
+      },
+    ],
+  } as EnvironmentDeployPayload;
+  const map = hostnameTlsMap(payload);
+  assertEquals(map.get("example.com"), TLS_ID);
+  assertEquals(map.get("www.example.com"), TLS_ID);
+});

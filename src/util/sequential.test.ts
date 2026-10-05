@@ -2,6 +2,7 @@ import { assertEquals, assertRejects } from "@std/assert";
 import {
   firstSequential,
   forEachSequential,
+  mapLimit,
   mapSequential,
   repeatSequential,
 } from "./sequential.ts";
@@ -154,4 +155,25 @@ test("repeatSequential rejects, rather than hanging, when a later turn throws sy
     "late sync boom",
   );
   assertEquals(turns, 3);
+});
+
+test("mapLimit keeps order and never exceeds the in-flight limit", async () => {
+  let inFlight = 0;
+  let peak = 0;
+  const out = await mapLimit(
+    Array.from({ length: 100 }, (_, i) => i),
+    8,
+    async (n) => {
+      inFlight += 1;
+      peak = Math.max(peak, inFlight);
+      await Promise.resolve();
+      await Promise.resolve();
+      inFlight -= 1;
+      return n * 2;
+    },
+  );
+  assertEquals(out, Array.from({ length: 100 }, (_, i) => i * 2));
+  assertEquals(peak <= 8, true);
+  assertEquals(peak > 1, true);
+  assertEquals(await mapLimit([], 8, (n) => n), []);
 });
