@@ -1388,3 +1388,32 @@ test("parseFirewallReconcileResult round-trips the daemon report", () => {
     "mode must be",
   );
 });
+
+test("parseEnvironmentDeployPayload keeps wwwRedirect only when true and rejects non-booleans", () => {
+  const withHosting = (extra: Record<string, unknown>) =>
+    parseEnvironmentDeployPayload({
+      ...DEPLOY_BASE,
+      hostings: [{
+        hostingId: "h1",
+        serviceId: "s1",
+        composeServiceName: "web",
+        hostnames: ["example.com"],
+        ...extra,
+      }],
+      hostingIngressNetwork: HOSTING_INGRESS_NETWORK,
+    });
+  assertEquals(
+    withHosting({ wwwRedirect: true }).hostings[0]?.wwwRedirect,
+    true,
+  );
+  assertEquals(
+    withHosting({ wwwRedirect: false }).hostings[0]?.wwwRedirect,
+    undefined,
+  );
+  assertEquals(withHosting({}).hostings[0]?.wwwRedirect, undefined);
+  assertThrows(
+    () => withHosting({ wwwRedirect: "yes" }),
+    TypeError,
+    "hostings[].wwwRedirect must be a boolean",
+  );
+});

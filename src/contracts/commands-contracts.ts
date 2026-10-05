@@ -687,6 +687,13 @@ export type EnvironmentDeployHosting = {
   /** Required (non-empty) when `protocol` is `tcp` or `udp`; ignored for `http`. */
   ports?: EnvironmentDeployHostingPort[];
   web?: EnvironmentDeployHostingWeb;
+  /**
+   * Also serve the other spelling of each hostname (`www.` added, or removed
+   * when the name starts with `www.`) as a permanent redirect to the hostname
+   * as written. `http` only; omitted when off. In `acme` mode the extra name
+   * gets its own certificate. Older daemons ignore the field.
+   */
+  wwwRedirect?: boolean;
 };
 
 export type EnvironmentDeployVariableMaterial = {
@@ -2137,6 +2144,21 @@ export function isValidHostname(value: unknown): boolean {
   return HOSTNAME_RE.test(value);
 }
 
+const WWW_PREFIX = "www.";
+
+/**
+ * The other spelling of a site name for the "send www to the main name" option:
+ * `www.example.com` for `example.com`, and `example.com` for `www.example.com`.
+ * `null` when no valid name results. Must stay in sync with the instance
+ * canonical version in src/contracts/commands/hostname.ts
+ */
+export function wwwSiblingHostname(hostname: string): string | null {
+  const sibling = hostname.startsWith(WWW_PREFIX)
+    ? hostname.slice(WWW_PREFIX.length)
+    : WWW_PREFIX + hostname;
+  return isValidHostname(sibling) ? sibling : null;
+}
+
 /** Must stay in sync with the instance canonical version in src/contracts/commands/hostname.ts */
 export function assertValidHostname(value: unknown): asserts value is string {
   if (!isValidHostname(value)) {
@@ -3575,6 +3597,14 @@ function parseHostingTlsMode(
   return value as EnvironmentDeployHosting["tlsMode"];
 }
 
+function parseHostingWwwRedirect(value: unknown): true | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "boolean") {
+    throw new TypeError("hostings[].wwwRedirect must be a boolean");
+  }
+  return value ? true : undefined;
+}
+
 function isValidPortNumber(value: unknown): value is number {
   return (
     typeof value === "number" &&
@@ -3685,6 +3715,7 @@ function parseHosting(value: unknown): EnvironmentDeployHosting {
   const protocol = parseHostingProtocol(value.protocol);
   const ports = parseHostingPorts(value.ports);
   const web = parseHostingWeb(value.web);
+  const wwwRedirect = parseHostingWwwRedirect(value.wwwRedirect);
 
   return {
     hostingId: parseNonEmptyString(value, "hostingId"),
@@ -3700,6 +3731,7 @@ function parseHosting(value: unknown): EnvironmentDeployHosting {
     ...(protocol === undefined ? {} : { protocol }),
     ...(ports === undefined ? {} : { ports }),
     ...(web === undefined ? {} : { web }),
+    ...(wwwRedirect === undefined ? {} : { wwwRedirect }),
   };
 }
 
