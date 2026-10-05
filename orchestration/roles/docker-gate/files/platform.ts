@@ -190,7 +190,7 @@ export const PLATFORM_ATTACH_ALLOWLIST: readonly string[] = [
 ];
 
 const PLATFORM_ACCESS =
-  /^\/containers\/[^/]+\/(exec|attach|attach\/ws|archive)$/;
+  /^\/containers\/[^/]+\/(exec|attach|attach\/ws|archive|export)$/;
 
 function execCommand(body: unknown): string | undefined {
   if (typeof body !== "object" || body === null) return undefined;
@@ -213,7 +213,7 @@ function allowanceMatches(
 }
 
 /**
- * Rule name when a request execs into, attaches to, or copies to or from a
+ * Rule name when a request execs into, attaches to, copies to or from, or exports a
  * platform container outside the allowlist, otherwise `undefined`. `path` is
  * the engine's route; only an exec create can be allowed.
  */
@@ -225,6 +225,9 @@ export function platformAccessRule(
   const kind = PLATFORM_ACCESS.exec(path)?.[1];
   if (kind === undefined || !isPlatformContainer(labels)) return undefined;
   if (kind === "archive") return "platform-archive";
+  // The whole filesystem of a platform container (`docker export`): nothing
+  // the daemon does needs it.
+  if (kind === "export") return "platform-export";
   if (kind !== "exec") {
     return PLATFORM_ATTACH_ALLOWLIST.includes(
         labels[LABEL_SYSTEM_COMPONENT] ?? "",
