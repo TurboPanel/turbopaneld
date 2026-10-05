@@ -111,7 +111,7 @@ test("resolveUpdate fetches catalog + manifest and picks host arch artifact", as
 
   try {
     const info = await resolveUpdate(
-      { app: "daemon", channel: "trunk" },
+      { app: "daemon", channel: "canary" },
       {},
     );
     assertEquals(info.channel, "trunk");
@@ -138,17 +138,19 @@ const OVERLAY_ENV = { TURBOPANEL_DL_BASE: "https://dl.trbp.nl" };
 
 test("resolveUpdate reads the built-in rail directly — no channels.json hop without an overlay", async () => {
   const fetched: string[] = [];
+  const canaryUrl =
+    "https://github.com/TurboPanel/turbopaneld/releases/download/canary/manifest.json";
   const restore = installFetch((url) => {
     fetched.push(url);
-    if (url === "https://dl.trbp.nl/channels/trunk/manifest.json") {
+    if (url === canaryUrl) {
       return Response.json(channelManifest());
     }
     return new Response("missing", { status: 404 });
   });
   try {
-    const info = await resolveUpdate({ app: "daemon", channel: "trunk" }, {});
+    const info = await resolveUpdate({ app: "daemon", channel: "canary" }, {});
     assertEquals(info.commit, "abc1234");
-    assertEquals(fetched, ["https://dl.trbp.nl/channels/trunk/manifest.json"]);
+    assertEquals(fetched, [canaryUrl]);
   } finally {
     restore();
   }
@@ -184,8 +186,8 @@ test("resolveUpdate honours a pinned manifest over the channel, but not over an 
     if (url.endsWith("/channels.json")) {
       return Response.json({
         schema: 1,
-        defaultChannel: "trunk",
-        channels: { trunk: { manifestUrl: "./manifest.json" } },
+        defaultChannel: "canary",
+        channels: { canary: { manifestUrl: "./manifest.json" } },
       });
     }
     return Response.json(signed);
@@ -199,7 +201,7 @@ test("resolveUpdate honours a pinned manifest over the channel, but not over an 
     assertEquals(fetched, [pin]);
     // An overlay catalog still wins — a dev host is never pinned past it.
     fetched.length = 0;
-    await resolveUpdate({ app: "daemon", channel: "trunk" }, {
+    await resolveUpdate({ app: "daemon", channel: "canary" }, {
       TURBOPANEL_MANIFEST_URL: pin,
       TURBOPANEL_DL_BASE: "https://dev.example/downloads/daemon",
     }, keyed);
@@ -209,10 +211,12 @@ test("resolveUpdate honours a pinned manifest over the channel, but not over an 
     );
     // A non-https pin is ignored, not followed.
     fetched.length = 0;
-    await resolveUpdate({ app: "daemon", channel: "trunk" }, {
+    await resolveUpdate({ app: "daemon", channel: "canary" }, {
       TURBOPANEL_MANIFEST_URL: "http://evil.example/manifest.json",
     }, keyed);
-    assertEquals(fetched, ["https://dl.trbp.nl/channels/trunk/manifest.json"]);
+    assertEquals(fetched, [
+      "https://github.com/TurboPanel/turbopaneld/releases/download/canary/manifest.json",
+    ]);
   } finally {
     restore();
   }
@@ -229,6 +233,21 @@ test("resolveUpdate throws MissingChannelError for the reserved channel without 
       () => resolveUpdate({ app: "daemon", channel: "edge" }, {}),
       MissingChannelError,
       "no built-in manifest location",
+    );
+  } finally {
+    restore();
+  }
+});
+
+test("resolveUpdate refuses the retired trunk channel without an overlay and says what to do", async () => {
+  const restore = installFetch(() => {
+    throw new Error("must not fetch");
+  });
+  try {
+    await assertRejects(
+      () => resolveUpdate({ app: "daemon", channel: "trunk" }, {}),
+      MissingChannelError,
+      "trunk update channel was retired",
     );
   } finally {
     restore();
@@ -291,7 +310,7 @@ test("resolveUpdate throws when channel manifest HTTP status is not ok", async (
   });
   try {
     await assertRejects(
-      () => resolveUpdate({ app: "daemon", channel: "trunk" }, {}),
+      () => resolveUpdate({ app: "daemon", channel: "canary" }, {}),
       MalformedManifestError,
       "Failed to fetch channel manifest",
     );
@@ -309,7 +328,7 @@ test("resolveUpdate refuses a configured http overlay without fetching the publi
   try {
     await assertRejects(
       () =>
-        resolveUpdate({ app: "daemon", channel: "trunk" }, {
+        resolveUpdate({ app: "daemon", channel: "canary" }, {
           TURBOPANEL_DL_BASE: "http://203.0.113.10/downloads/daemon",
         }),
       InsecureOverlayBaseError,
@@ -372,7 +391,7 @@ test("resolveUpdate surfaces a string fetch cause", async () => {
   });
   try {
     await assertRejects(
-      () => resolveUpdate({ app: "daemon", channel: "trunk" }, {}),
+      () => resolveUpdate({ app: "daemon", channel: "canary" }, {}),
       MalformedManifestError,
       "Failed to fetch channel manifest: fetch failed (tls handshake)",
     );
@@ -387,7 +406,7 @@ test("resolveUpdate wraps a fetch failed error without a usable cause", async ()
   });
   try {
     await assertRejects(
-      () => resolveUpdate({ app: "daemon", channel: "trunk" }, {}),
+      () => resolveUpdate({ app: "daemon", channel: "canary" }, {}),
       MalformedManifestError,
       "Failed to fetch channel manifest: fetch failed",
     );
@@ -402,7 +421,7 @@ test("resolveUpdate wraps a non-Error throw", async () => {
   });
   try {
     await assertRejects(
-      () => resolveUpdate({ app: "daemon", channel: "trunk" }, {}),
+      () => resolveUpdate({ app: "daemon", channel: "canary" }, {}),
       MalformedManifestError,
       "Failed to fetch channel manifest: offline",
     );
@@ -420,7 +439,7 @@ test("resolveUpdate surfaces fetch cause in MalformedManifestError", async () =>
 
   try {
     await assertRejects(
-      () => resolveUpdate({ app: "daemon", channel: "trunk" }, {}),
+      () => resolveUpdate({ app: "daemon", channel: "canary" }, {}),
       MalformedManifestError,
       "Failed to fetch channel manifest: fetch failed (certificate verify failed)",
     );
@@ -454,7 +473,7 @@ test("resolveUpdate rejects unsupported CPU architectures", async () => {
   });
   try {
     await assertRejects(
-      () => resolveUpdate({ app: "daemon", channel: "trunk" }, {}),
+      () => resolveUpdate({ app: "daemon", channel: "canary" }, {}),
       MalformedManifestError,
       "Unsupported CPU architecture",
     );
@@ -496,7 +515,7 @@ test("resolveUpdate (production) refuses an unsigned built-in rail manifest", as
   const restore = serveManifest(channelManifest());
   try {
     await assertRejects(
-      () => resolveUpdate({ app: "daemon", channel: "trunk" }, {}, PRODUCTION),
+      () => resolveUpdate({ app: "daemon", channel: "canary" }, {}, PRODUCTION),
       ManifestSignatureError,
       "unsigned",
     );
@@ -509,7 +528,7 @@ test("resolveUpdate (production) accepts a manifest signed by the pinned key", a
   const restore = serveManifest(await signWithTestKey(channelManifest()));
   try {
     const info = await resolveUpdate(
-      { app: "daemon", channel: "trunk" },
+      { app: "daemon", channel: "canary" },
       {},
       PRODUCTION,
     );
@@ -524,7 +543,7 @@ test("resolveUpdate (production) refuses a manifest signed by another key", asyn
   try {
     await assertRejects(
       () =>
-        resolveUpdate({ app: "daemon", channel: "trunk" }, {}, {
+        resolveUpdate({ app: "daemon", channel: "canary" }, {}, {
           installMode: "production",
         }),
       ManifestSignatureError,
@@ -548,7 +567,7 @@ test("resolveUpdate (production) refuses a manifest altered after signing", asyn
   const restore = serveManifest(tampered);
   try {
     await assertRejects(
-      () => resolveUpdate({ app: "daemon", channel: "trunk" }, {}, PRODUCTION),
+      () => resolveUpdate({ app: "daemon", channel: "canary" }, {}, PRODUCTION),
       ManifestSignatureError,
       "invalid",
     );
@@ -565,7 +584,7 @@ test("resolveUpdate (production) refuses a malformed signature object", async ()
   });
   try {
     await assertRejects(
-      () => resolveUpdate({ app: "daemon", channel: "trunk" }, {}, PRODUCTION),
+      () => resolveUpdate({ app: "daemon", channel: "canary" }, {}, PRODUCTION),
       ManifestSignatureError,
       "64 bytes",
     );
@@ -653,7 +672,7 @@ test("resolveUpdate (production) bypasses signatures only for an overlay with th
     await assertRejects(
       () =>
         resolveUpdate(
-          { app: "daemon", channel: "trunk" },
+          { app: "daemon", channel: "canary" },
           { [DEV_UNSIGNED_MANIFEST_ENV]: "1" },
           PRODUCTION,
         ),
@@ -686,7 +705,7 @@ test("resolveUpdate rejects a manifest body that is not JSON", async () => {
   });
   try {
     await assertRejects(
-      () => resolveUpdate({ app: "daemon", channel: "trunk" }, {}, PRODUCTION),
+      () => resolveUpdate({ app: "daemon", channel: "canary" }, {}, PRODUCTION),
       MalformedManifestError,
       "not valid JSON",
     );
@@ -709,7 +728,7 @@ test("resolveUpdate (production) refuses a replayed, validly signed older manife
   try {
     await assertRejects(
       () =>
-        resolveUpdate({ app: "daemon", channel: "trunk" }, {}, {
+        resolveUpdate({ app: "daemon", channel: "canary" }, {}, {
           ...PRODUCTION,
           installed: NEWER_BUILD,
         }),
@@ -765,7 +784,7 @@ test("resolveUpdate (production) accepts a newer canary of the installed base, a
   restore = serveManifest(await signWithTestKey(channelManifest()));
   try {
     const info = await resolveUpdate(
-      { app: "daemon", channel: "trunk" },
+      { app: "daemon", channel: "canary" },
       { TURBOPANEL_ALLOW_DOWNGRADE: "1" },
       { ...PRODUCTION, installed: NEWER_BUILD },
     );
@@ -862,7 +881,7 @@ test("resolveUpdate retries a 504 on the manifest and keeps the HTTP text when i
   try {
     await assertRejects(
       () =>
-        resolveUpdate({ app: "daemon", channel: "trunk" }, {}, {
+        resolveUpdate({ app: "daemon", channel: "canary" }, {}, {
           retry: noWaitRetry,
         }),
       MalformedManifestError,
@@ -883,7 +902,7 @@ test("resolveUpdate does not retry a 404 on the manifest", async () => {
   try {
     await assertRejects(
       () =>
-        resolveUpdate({ app: "daemon", channel: "trunk" }, {}, {
+        resolveUpdate({ app: "daemon", channel: "canary" }, {}, {
           retry: noWaitRetry,
         }),
       MalformedManifestError,
@@ -903,7 +922,7 @@ test("resolveUpdate redacts a signed URL quoted by a failed manifest fetch", asy
   });
   try {
     const err = await assertRejects(
-      () => resolveUpdate({ app: "daemon", channel: "trunk" }, {}),
+      () => resolveUpdate({ app: "daemon", channel: "canary" }, {}),
       MalformedManifestError,
     );
     assertEquals(err.message.includes("secret"), false);
