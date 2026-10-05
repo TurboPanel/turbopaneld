@@ -12,12 +12,14 @@ import {
   ensureProxySqlMonitorRoleSql,
   grantDatabaseSql,
   isInRecoverySql,
+  listDatabasesForRoleReleaseSql,
   listManagedSlotsSql,
   MANAGED_SLOT_PREFIX,
   primaryReplicationStatusSql,
   promoteSql,
   quoteIdentifier,
   quoteLiteral,
+  releaseRoleObjectsSql,
   reloadVerifySql,
   standbyReplicationStatusSql,
 } from "./postgres-sql.ts";
@@ -161,4 +163,26 @@ test("standbyReplicationStatusSql does not report streaming solely from recovery
     false,
   );
   assertEquals(sql.includes("r.status = 'streaming' THEN 'streaming'"), true);
+});
+
+test("releaseRoleObjectsSql reassigns before dropping owned objects", () => {
+  const sql = releaseRoleObjectsSql("app_user", "postgres");
+  assertEquals(sql.split("\n"), [
+    'REASSIGN OWNED BY "app_user" TO "postgres";',
+    'DROP OWNED BY "app_user";',
+  ]);
+  assertThrows(() => releaseRoleObjectsSql("app user", "postgres"));
+  assertThrows(() => releaseRoleObjectsSql("app_user", "post;gres"));
+});
+
+test("listDatabasesForRoleReleaseSql covers connectable non-template databases only when the role exists", () => {
+  const sql = listDatabasesForRoleReleaseSql("app_user");
+  assertEquals(sql.includes("d.datallowconn AND NOT d.datistemplate"), true);
+  assertEquals(
+    sql.includes(
+      "FROM pg_catalog.pg_roles WHERE rolname = 'app_user'",
+    ),
+    true,
+  );
+  assertThrows(() => listDatabasesForRoleReleaseSql("bad\nname"));
 });

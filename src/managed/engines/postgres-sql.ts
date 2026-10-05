@@ -79,6 +79,41 @@ export function dropRoleSql(username: string): string {
 }
 
 /**
+ * Databases a role must be released in before it can be dropped: every
+ * database that accepts connections and is not a template. Returns no rows
+ * when the role is already gone, so a retried delete skips the release step
+ * (`REASSIGN OWNED` errors on a missing role).
+ */
+export function listDatabasesForRoleReleaseSql(username: string): string {
+  return [
+    `SELECT d.datname`,
+    `FROM pg_catalog.pg_database d`,
+    `WHERE d.datallowconn AND NOT d.datistemplate`,
+    `AND EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = ${
+      quoteLiteral(username)
+    })`,
+    `ORDER BY d.datname;`,
+  ].join("\n");
+}
+
+/**
+ * Run inside each database before `DROP ROLE`. `REASSIGN OWNED` first, so a
+ * deleted owner's tables and databases pass to the platform admin (data is
+ * kept, never dropped); `DROP OWNED` then only removes the privileges and
+ * default privileges the role still holds (including on the database itself).
+ */
+export function releaseRoleObjectsSql(
+  username: string,
+  newOwner: string,
+): string {
+  const ident = quoteIdentifier(username);
+  return [
+    `REASSIGN OWNED BY ${ident} TO ${quoteIdentifier(newOwner)};`,
+    `DROP OWNED BY ${ident};`,
+  ].join("\n");
+}
+
+/**
  * CREATE DATABASE must not run inside a DO/function block (Postgres error
  * "CREATE DATABASE cannot be executed from a function"). Callers check
  * existence first via {@link databaseExistsSql}, then run this top-level.

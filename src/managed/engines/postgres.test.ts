@@ -127,6 +127,140 @@ test("dropUsers never drops the stable platform admin, even when it matches a st
   assertEquals(calls.some((c) => c.input?.includes('"orphaned_user"')), true);
 });
 
+/** Scripted exec: answers the release-databases query, records every call. */
+function releaseExec(
+  databases: Record<string, string[]>,
+  options?: { failDropRole?: boolean },
+): { exec: ManagedEngineExec; calls: RecordedExec[] } {
+  const calls: RecordedExec[] = [];
+  const exec: ManagedEngineExec = (argv, input) => {
+    calls.push({ argv: [...argv], input });
+    if (input?.includes("FROM pg_catalog.pg_database d")) {
+      const role = /rolname = '([^']+)'/.exec(input)?.[1] ?? "";
+      return Promise.resolve({
+        success: true,
+        stdout: (databases[role] ?? []).join("\n"),
+        stderr: "",
+      });
+    }
+    if (options?.failDropRole && input?.includes("DROP ROLE")) {
+      return Promise.resolve({
+        success: false,
+        stdout: "",
+        stderr: "role cannot be dropped because some objects depend on it",
+      });
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  return { exec, calls };
+}
+
+const databaseOf = (call: RecordedExec): string | undefined =>
+  call.argv[call.argv.indexOf("-d") + 1];
+
+test("dropUsers releases the role in every connectable database before DROP ROLE", async () => {
+  const { exec, calls } = releaseExec({
+    app_user: ["p_db", "postgres", "other_db"],
+  });
+  const ctx = buildContext(exec);
+
+  const dropped = await postgresManagedEngineRuntime.dropUsers!(ctx, [
+    "app_user",
+  ]);
+
+  assertEquals(dropped, ["app_user"]);
+  const release = calls.filter((c) =>
+    c.input?.startsWith('REASSIGN OWNED BY "app_user" TO "postgres";')
+  );
+  // One run per listed database, each connected to that database as the admin.
+  assertEquals(release.map(databaseOf), ["p_db", "postgres", "other_db"]);
+  for (const call of release) {
+    assertEquals(call.argv[call.argv.indexOf("-U") + 1], "postgres");
+    assertEquals(
+      call.input,
+      'REASSIGN OWNED BY "app_user" TO "postgres";\nDROP OWNED BY "app_user";',
+    );
+  }
+  // Order: list databases, release each one, only then DROP ROLE (last).
+  const steps = calls.map((c) => {
+    if (c.input?.includes("pg_database d")) return "list";
+    if (c.input?.includes("REASSIGN OWNED")) return `release:${databaseOf(c)}`;
+    return "drop";
+  });
+  assertEquals(steps, [
+    "list",
+    "release:p_db",
+    "release:postgres",
+    "release:other_db",
+    "drop",
+  ]);
+  const last = calls.at(-1);
+  assertEquals(last?.input, 'DROP ROLE IF EXISTS "app_user";');
+  assertEquals(databaseOf(last!), "postgres");
+});
+
+test("dropUsers skips the release step for a role that no longer exists", async () => {
+  // The listing query returns no rows when the role is gone.
+  const { exec, calls } = releaseExec({});
+  const ctx = buildContext(exec);
+
+  const dropped = await postgresManagedEngineRuntime.dropUsers!(ctx, [
+    "already_gone",
+  ]);
+
+  assertEquals(dropped, ["already_gone"]);
+  assertEquals(calls.some((c) => c.input?.includes("REASSIGN OWNED")), false);
+  assertEquals(calls.some((c) => c.input?.includes("DROP OWNED")), false);
+  assertEquals(calls.at(-1)?.input, 'DROP ROLE IF EXISTS "already_gone";');
+});
+
+test("dropUsers never releases or drops the platform admin and handles each role in turn", async () => {
+  const { exec, calls } = releaseExec({
+    user_a: ["db_one"],
+    user_b: ["db_one", "db_two"],
+  });
+  const ctx = buildContext(exec);
+
+  const dropped = await postgresManagedEngineRuntime.dropUsers!(ctx, [
+    "user_a",
+    "postgres",
+    "user_b",
+  ]);
+
+  assertEquals(dropped, ["user_a", "user_b"]);
+  assertEquals(
+    calls.some((c) => c.input?.includes('"postgres" TO "postgres"')),
+    false,
+  );
+  assertEquals(calls.some((c) => c.input?.includes("'postgres'")), false);
+  const order = calls
+    .filter((c) => !c.input?.includes("pg_database d"))
+    .map((c) => `${databaseOf(c)}:${c.input?.split("\n")[0]}`);
+  assertEquals(order, [
+    'db_one:REASSIGN OWNED BY "user_a" TO "postgres";',
+    'postgres:DROP ROLE IF EXISTS "user_a";',
+    'db_one:REASSIGN OWNED BY "user_b" TO "postgres";',
+    'db_two:REASSIGN OWNED BY "user_b" TO "postgres";',
+    'postgres:DROP ROLE IF EXISTS "user_b";',
+  ]);
+});
+
+test("dropUsers skips database names the identifier guard rejects and surfaces a DROP ROLE failure", async () => {
+  const { exec, calls } = releaseExec(
+    { app_user: ["good_db", "bad-db"] },
+    { failDropRole: true },
+  );
+  const ctx = buildContext(exec);
+
+  await assertRejects(
+    () => postgresManagedEngineRuntime.dropUsers!(ctx, ["app_user"]),
+    Error,
+    "psql failed",
+  );
+  const release = calls.filter((c) => c.input?.includes("REASSIGN OWNED"));
+  assertEquals(release.map(databaseOf), ["good_db"]);
+});
+
 test("waitReady and readVersion always target the stable platform admin", async () => {
   const engine = getManagedEngineRuntime("postgres");
   const { exec, calls } = recordingExec();

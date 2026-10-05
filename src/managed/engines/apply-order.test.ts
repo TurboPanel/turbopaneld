@@ -53,7 +53,13 @@ const engines: Array<[string, ManagedEngineRuntime]> = [
   ["postgres", postgresManagedEngineRuntime],
 ];
 
-for (const [name, engine] of engines) {
+// Postgres releases each role's objects before DROP ROLE (extra statements per
+// user); its ordering is covered in postgres.test.ts.
+for (
+  const [name, engine] of engines.filter(([engineName]) =>
+    engineName !== "postgres"
+  )
+) {
   test(`${name} dropUsers runs in order and stops at the first failure`, async () => {
     const { ctx, inputs, maxInFlight } = failingContext("user_b");
     await assertRejects(() =>
@@ -64,7 +70,27 @@ for (const [name, engine] of engines) {
     assertEquals(inputs[1]!.includes("user_b"), true);
     assertEquals(maxInFlight(), 1);
   });
+}
 
+test("postgres dropUsers handles users in order and stops at the first failure", async () => {
+  // Per user: list databases (empty here, role "absent"), then DROP ROLE.
+  const { ctx, inputs, maxInFlight } = failingContext("user_b");
+  await assertRejects(() =>
+    postgresManagedEngineRuntime.dropUsers!(ctx, [
+      "user_a",
+      "user_b",
+      "user_c",
+    ])
+  );
+  assertEquals(inputs.length, 3);
+  assertEquals(inputs[0]!.includes("user_a"), true);
+  assertEquals(inputs[1]!.includes("DROP ROLE"), true);
+  assertEquals(inputs[2]!.includes("user_b"), true);
+  assertEquals(inputs.some((input) => input.includes("user_c")), false);
+  assertEquals(maxInFlight(), 1);
+});
+
+for (const [name, engine] of engines) {
   test(`${name} applyDatabases runs in order and stops at the first failure`, async () => {
     const { ctx, inputs, maxInFlight } = failingContext("db_b");
     await assertRejects(() =>
