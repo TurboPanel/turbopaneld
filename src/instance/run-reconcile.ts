@@ -601,6 +601,15 @@ export function rootHelperReconcileStdin(options: {
   return `${options.license}\n`;
 }
 
+async function writeHelperStdin(
+  stdin: WritableStream<Uint8Array>,
+  text: string,
+): Promise<void> {
+  const writer = stdin.getWriter();
+  await writer.write(new TextEncoder().encode(text));
+  await writer.close();
+}
+
 /**
  * Which root-helper verb a daemon self-update runs — exported for tests:
  * `update-colocated` on a self-hosted control-plane host, `update` elsewhere.
@@ -769,9 +778,9 @@ export async function executeRunReconcile(options: {
       stderr: "piped",
     }).spawn();
     if (helperStdin !== undefined) {
-      const writer = child.stdin.getWriter();
-      await writer.write(new TextEncoder().encode(helperStdin));
-      await writer.close();
+      // If the helper exits before reading (refused flag, sudo failure), the
+      // write fails with a broken pipe; its own message on stderr says why.
+      await writeHelperStdin(child.stdin, helperStdin).catch(() => {});
     }
     const stdout = child.stdout;
     const stderrChunks: string[] = [];
