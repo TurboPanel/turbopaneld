@@ -11,6 +11,7 @@
 import {
   addressInCidrLiteral,
   type FabricReconcileObservedPeer,
+  isValidInterfaceName,
 } from "../contracts/commands-contracts.ts";
 import type { ServerReportedIp } from "../contracts/server-reported-ip.ts";
 
@@ -40,7 +41,9 @@ export function localInterfaceForEndpoint(
   if (host === undefined) return undefined;
   let best: { name: string; prefix: number } | undefined;
   for (const ip of ips) {
-    if (ip.interface === undefined || ip.cidr === undefined) continue;
+    // The result contract refuses odd names (over 15 bytes, spaces, slashes);
+    // leave those unmatched rather than lose the whole reconcile result.
+    if (!isValidInterfaceName(ip.interface) || ip.cidr === undefined) continue;
     if (!ip.cidr.includes("/") || !addressInCidrLiteral(host, ip.cidr)) {
       continue;
     }

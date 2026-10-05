@@ -80,6 +80,18 @@ test("addresses without a CIDR or interface name are ignored", () => {
   );
 });
 
+test("a NIC name the result contract would refuse is left unmatched", () => {
+  const long: ServerReportedIp = {
+    ...BACKHAUL,
+    interface: "a-very-long-nic-name",
+  };
+  const spaced: ServerReportedIp = { ...BACKHAUL, interface: "bad nic" };
+  assertEquals(
+    localInterfaceForEndpoint("10.9.0.20:51820", [long, spaced]),
+    undefined,
+  );
+});
+
 test("stampObservedPeerInterfaces sets interface only where it matches", () => {
   const peers = [
     { publicKey: "a", endpoint: "10.9.0.20:51820" },
