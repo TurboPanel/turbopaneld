@@ -143,7 +143,10 @@ test("withCancelSignal aborts with either the timeout or the cancel", () => {
   token.cancel();
   assertEquals(combined.aborted, true);
   const other = new AbortController();
-  const second = withCancelSignal(other.signal, createDeployCancelToken().signal);
+  const second = withCancelSignal(
+    other.signal,
+    createDeployCancelToken().signal,
+  );
   other.abort();
   assertEquals(second.aborted, true);
 });
