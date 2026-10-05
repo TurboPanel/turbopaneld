@@ -24,11 +24,13 @@ import {
   ensureProxySqlMonitorRoleSql,
   grantDatabaseSql,
   isInRecoverySql,
+  listDatabasesForRoleReleaseSql,
   listManagedSlotsSql,
   type ManagedDatabasePrivilege,
   primaryReplicationStatusSql,
   promoteSql,
   quoteIdentifier,
+  releaseRoleObjectsSql,
   reloadVerifySql,
   standbyReplicationStatusSql,
 } from "./postgres-sql.ts";
@@ -111,6 +113,7 @@ function sleep(ms: number): Promise<void> {
 async function runPsql(
   ctx: ManagedEngineContext,
   sql: string,
+  database: string = ctx.defaultDatabase,
 ): Promise<void> {
   const result = await ctx.exec(
     [
@@ -120,7 +123,7 @@ async function runPsql(
       "-U",
       ctx.rootUsername,
       "-d",
-      ctx.defaultDatabase,
+      database,
     ],
     sql,
   );
@@ -239,6 +242,40 @@ function probePostgresStandbyData(
   return probeStandbyState(ctx, {
     data: { flag: "-f", path: `${dataDir}/PG_VERSION` },
     marker: `${dataDir}/standby.signal`,
+  });
+}
+
+/**
+ * Hand a role's objects to the platform admin and strip its privileges in
+ * every connectable database, so `DROP ROLE` no longer fails with "some
+ * objects depend on it". Ownership moves first (data survives); a role that
+ * is already gone lists no databases and is a no-op.
+ */
+async function releaseRoleObjects(
+  ctx: ManagedEngineContext,
+  username: string,
+): Promise<void> {
+  const rows = await parsePsqlRows(
+    ctx,
+    listDatabasesForRoleReleaseSql(username),
+  );
+  const sql = releaseRoleObjectsSql(username, ctx.rootUsername);
+  await forEachSequential(rows, async ([database]) => {
+    if (!database) return;
+    // Names come from the catalog and reach argv (`psql -d`), never a shell;
+    // still refuse anything the platform's own identifier guard rejects.
+    try {
+      assertSafeDatabaseIdentifier(database);
+    } catch {
+      logInfo(
+        "managed",
+        `postgres drop user skipped unsafe database name ${
+          sanitizeForLog(database)
+        }`,
+      );
+      return;
+    }
+    await runPsql(ctx, sql, database);
   });
 }
 
@@ -626,6 +663,7 @@ export const postgresManagedEngineRuntime: ManagedEngineRuntime = {
     const dropped: string[] = [];
     await forEachSequential(usernames, async (username) => {
       if (username === ctx.rootUsername) return;
+      await releaseRoleObjects(ctx, username);
       await runPsql(ctx, dropRoleSql(username));
       dropped.push(username);
     });
