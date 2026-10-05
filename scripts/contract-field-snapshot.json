@@ -137,6 +137,7 @@
     "instance": "src/contracts/commands/schemas.ts",
     "daemon": "src/contracts/commands-contracts.ts",
     "fields": [
+      { "name": "composeProject", "required": false, "type": "string" },
       { "name": "copyId", "required": false, "type": "string" },
       {
         "name": "copyProvider",
@@ -148,6 +149,7 @@
       { "name": "managedId", "required": false, "type": "string" },
       { "name": "onCalendar", "required": true, "type": "string" },
       { "name": "organizationId", "required": false, "type": "string" },
+      { "name": "ownerUsername", "required": false, "type": "string" },
       { "name": "policyId", "required": true, "type": "string" },
       { "name": "retentionKeep", "required": true, "type": "number" },
       { "name": "storageId", "required": false, "type": "string" },

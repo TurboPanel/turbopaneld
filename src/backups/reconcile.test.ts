@@ -353,6 +353,7 @@ test("a copy policy makes sure the helper image is present; a pull failure is a 
       copyId: C,
       copyProvider: "docker",
       volumeName: "shop_uploads",
+      storageId: "0192f1de-7c3b-7e4a-9f10-0000000000b1",
     });
     let pulls = 0;
     const run = (answer: string | undefined) =>
@@ -394,6 +395,7 @@ test("a set with no enabled copy policy never touches the helper image", async (
             copyId: C,
             copyProvider: "docker",
             volumeName: "shop_uploads",
+            storageId: "0192f1de-7c3b-7e4a-9f10-0000000000b1",
             enabled: false,
           }),
         ],
@@ -425,6 +427,7 @@ function volumePolicy(
     copyId: C,
     copyProvider: "docker",
     volumeName: "shop_uploads",
+    storageId: "0192f1de-7c3b-7e4a-9f10-0000000000b1",
     ...overrides,
   });
 }
