@@ -14,6 +14,7 @@ import {
   parseSharedFpmPool,
   parseVirt,
   parseWebEngines,
+  PROC_SCAN_CONCURRENCY,
   raidStateFromMdstat,
   readOnlyMounts,
   shortName,
@@ -341,4 +342,40 @@ test("smart verdict: a failing drive (non-zero exit bitmask) is reported failing
   });
   const { smart } = await collector.read();
   assertEquals(smart, { sda: "failing", sdb: "ok" });
+});
+
+test("process scan keeps /proc reads bounded on a box with thousands of processes", async () => {
+  const { io } = fakeIo();
+  let inFlight = 0;
+  let peak = 0;
+  const pids = Array.from({ length: 5000 }, (_, i) => String(1000 + i));
+  const collector = new HostTextCollector({
+    ...io,
+    listPids: () => Promise.resolve(pids),
+    readFile: async (p) => {
+      if (!p.startsWith("/proc/1") || !p.endsWith("/stat")) return undefined;
+      inFlight += 1;
+      peak = Math.max(peak, inFlight);
+      await Promise.resolve();
+      await Promise.resolve();
+      inFlight -= 1;
+      return `1 (p) S 1 1 1 0 -1 0 0 0 0 0 5 0 0 0`;
+    },
+  });
+  await collector.read();
+  assertEquals(peak > 0 && peak <= PROC_SCAN_CONCURRENCY, true);
+});
+
+test("two concurrent reads share one scan", async () => {
+  const { io } = fakeIo();
+  let listings = 0;
+  const collector = new HostTextCollector({
+    ...io,
+    listPids: () => {
+      listings += 1;
+      return Promise.resolve([]);
+    },
+  });
+  await Promise.all([collector.read(), collector.read()]);
+  assertEquals(listings, 1);
 });

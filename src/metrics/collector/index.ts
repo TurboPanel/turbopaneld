@@ -427,9 +427,20 @@ export function stopHostStorageSamplers(): void {
   cachedManagedEngineSampler?.stop();
 }
 
+/**
+ * One host-text collector for the whole daemon: the baseline and the live
+ * stream collectors both read it, so its 5-minute process scan, smartctl and
+ * dmesg run once per interval, not once per collector.
+ */
+let cachedHostText: ReturnType<typeof defaultHostTextCollector> | undefined;
+function sharedHostTextCollector(pageSizeBytes: number) {
+  cachedHostText ??= defaultHostTextCollector(pageSizeBytes);
+  return cachedHostText;
+}
+
 function defaultDeps(): CollectorDeps {
   const pageSizeBytes = resolvePageSizeBytes();
-  const hostText = defaultHostTextCollector(pageSizeBytes);
+  const hostText = sharedHostTextCollector(pageSizeBytes);
   return {
     hostText: () => hostText.read(),
     readProcFile,

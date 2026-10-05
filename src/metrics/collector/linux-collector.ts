@@ -910,7 +910,10 @@ export class LinuxMetricsCollector implements MetricsCollector {
       outgoing,
       hostText,
       bootGeneration,
-      dockerUsage: dockerUsageReading?.usage,
+      // A stale reading's reclaimable bytes are not reported as current.
+      dockerUsage: dockerUsageReading?.stale
+        ? undefined
+        : dockerUsageReading?.usage,
       topSites: directoryUsage?.topSites,
     });
     return {
