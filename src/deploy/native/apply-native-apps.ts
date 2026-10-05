@@ -50,7 +50,9 @@ import {
 import type {
   EnvironmentDeployNativeAppService,
   EnvironmentDeployPayload,
+  EnvironmentDeployVariableMaterial,
 } from "../../contracts/commands-contracts.ts";
+import type { DecryptSecretsFn } from "../materialize-tls.ts";
 import { resolveReleasePaths } from "../release/release-layout.ts";
 import type { ReleaseOutputHandler } from "../release/checkout.ts";
 import { swapCurrentSymlink } from "../release/promote.ts";
@@ -68,6 +70,10 @@ import {
   resolveNativeAppNodeVersion,
   SYSTEMD_UNIT_DIR,
 } from "./unit.ts";
+import {
+  materializeNativeAppVariables,
+  removeNativeAppEnvFile,
+} from "./variables-runtime.ts";
 
 const SAFE_ID_RE = /^[A-Za-z0-9_-]+$/;
 
@@ -123,6 +129,12 @@ export type ApplyNativeAppsOpts = {
   sleep?: NativeAppSleepFn;
   /** Test seam: systemd unit directory (defaults to `/etc/systemd/system`). */
   systemdUnitDir?: string;
+  /**
+   * Sealed secrets for `nativeAppServices[].variables[].secretKey`, and the
+   * decrypt call that opens them — the same pair the compose secret files use.
+   */
+  variableMaterial?: readonly EnvironmentDeployVariableMaterial[];
+  decryptSecrets?: DecryptSecretsFn;
   /**
    * Deploy transcript. Native start / health / unit journal ride this the
    * same way fetch and build do — without it, a failed probe is only an
@@ -476,6 +488,7 @@ async function installNativeAppUnit(
     app: EnvironmentDeployNativeAppService;
     binding: NativeAppRelease;
     systemdUnitDir: string;
+    environmentFile: boolean;
   },
 ): Promise<boolean> {
   const { app, binding } = params;
@@ -491,11 +504,48 @@ async function installNativeAppUnit(
       app,
       username: binding.username,
       environmentId: params.environmentId,
+      environmentFile: params.environmentFile,
       ...(binding.startCommand === undefined
         ? {}
         : { startCommand: binding.startCommand }),
     }),
   });
+}
+
+/**
+ * Write (or clear) the app's variables file before its unit is installed, and
+ * tell the transcript what arrived — names and counts only, never values.
+ */
+async function applyNativeAppVariables(
+  io: NativeAppIo,
+  layout: LayoutPaths,
+  app: EnvironmentDeployNativeAppService,
+  opts: Pick<ApplyNativeAppsOpts, "variableMaterial" | "decryptSecrets">,
+): Promise<boolean> {
+  const result = await materializeNativeAppVariables(
+    layout,
+    app,
+    opts.variableMaterial ?? [],
+    opts.decryptSecrets,
+    io.run,
+  );
+  if (result.count > 0) {
+    io.onOutput?.(
+      "stdout",
+      `${app.composeServiceName}: ${result.count} environment variable${
+        result.count === 1 ? "" : "s"
+      } written to the app's private environment file`,
+    );
+  }
+  if (result.platformManaged.length > 0) {
+    io.onOutput?.(
+      "stderr",
+      `${app.composeServiceName}: ignored ${
+        result.platformManaged.join(", ")
+      } (set by the platform for every app, so it cannot be overridden)`,
+    );
+  }
+  return result.environmentFile;
 }
 
 /**
@@ -683,6 +733,28 @@ export async function ensureNativeAppRuntime(
 }
 
 /**
+ * Remove the root-owned variables copy of apps that have none now. Best-effort:
+ * the app is already running without it, so a refusal is a warning (the next
+ * deploy tries again), not a failed deploy.
+ */
+async function dropStaleEnvironmentFiles(
+  io: NativeAppIo,
+  layout: Pick<LayoutPaths, "configDir">,
+  serviceIds: readonly string[],
+): Promise<void> {
+  await forEachSequential(serviceIds, async (serviceId) => {
+    try {
+      await removeNativeAppEnvFile(io.run, layout, serviceId);
+    } catch (err) {
+      logWarn(
+        "deploy",
+        `native app ${serviceId}: ${err instanceof Error ? err.message : err}`,
+      );
+    }
+  });
+}
+
+/**
  * Apply every native app in one deploy.
  *
  * Apps with no binding are skipped loudly rather than failed, matching the
@@ -722,6 +794,9 @@ export async function applyNativeAppServices(
   );
 
   const prepared: PreparedNativeApp[] = [];
+  // Apps with no variables: their root-owned copy (left by an earlier deploy)
+  // goes only once the unit that no longer loads it is running.
+  const withoutVariables: string[] = [];
   await forEachSequential(apps, async (app) => {
     const binding = opts.bindings.get(app.composeServiceName);
     if (!binding) {
@@ -731,13 +806,21 @@ export async function applyNativeAppServices(
       );
       return;
     }
+    const environmentFile = await applyNativeAppVariables(
+      io,
+      layout,
+      app,
+      opts,
+    );
     const unitChanged = await installNativeAppUnit(io, layout, {
       environmentId,
       app,
       binding,
       systemdUnitDir,
+      environmentFile,
     });
     if (unitChanged) filesChanged = true;
+    if (!environmentFile) withoutVariables.push(app.serviceId);
     prepared.push({
       app,
       binding,
@@ -765,6 +848,8 @@ export async function applyNativeAppServices(
     }
     applied.push(entry.app.composeServiceName);
   });
+
+  await dropStaleEnvironmentFiles(io, layout, withoutVariables);
 
   logInfo(
     "deploy",
@@ -886,6 +971,9 @@ export async function removeNativeAppServices(
         `${nativeAppStagedFilePrefix(environmentId)}${serviceId}.service`,
       ),
     );
+    // The variables file goes with the unit: leaving secrets on disk for an
+    // app that no longer exists would keep them past their purpose.
+    await dropStaleEnvironmentFiles(io, layout, [serviceId]);
     removed += 1;
   });
 

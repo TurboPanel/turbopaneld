@@ -19,6 +19,8 @@ import {
 import {
   DEFAULT_NATIVE_APP_NODE_VERSION,
   nativeAppConfigDir,
+  nativeAppEnvPath,
+  nativeAppEnvStagePath,
   nativeAppNodeBinary,
   nativeAppRuntimeGroup,
   nativeAppUnitName,
@@ -88,6 +90,8 @@ type RunMock = {
   /** Units `is-active` should report as already running. */
   activeUnits: Set<string>;
   systemctl: (verb: string) => Array<string>;
+  /** What `tp-host app-env-install` holds as root's copies, by service id. */
+  envCopies: Map<string, string>;
 };
 
 /**
@@ -95,12 +99,28 @@ type RunMock = {
  * discipline is exactly what these tests are checking, so a mock that always
  * reported "differs" would make every assertion vacuous.
  */
-function createRunMock(): RunMock {
+function createRunMock(layout?: LayoutPaths): RunMock {
   const calls: Array<{ command: string; args: string[] }> = [];
   const activeUnits = new Set<string>();
+  const envCopies = new Map<string, string>();
   const run: RunFn = async (command, args) => {
     calls.push({ command, args: [...args] });
     if (command !== "sudo") return ok();
+
+    // tp-host's two variables verbs: a service id, nothing else.
+    if (args.includes("app-env-install")) {
+      const id = args.at(-1) ?? "";
+      if (layout === undefined) throw new TypeError("mock needs a layout");
+      envCopies.set(
+        id,
+        await Deno.readTextFile(nativeAppEnvStagePath(layout, id)),
+      );
+      return ok();
+    }
+    if (args.includes("app-env-remove")) {
+      envCopies.delete(args.at(-1) ?? "");
+      return ok();
+    }
 
     if (args.includes("cmp")) {
       const right = args.at(-1);
@@ -151,6 +171,7 @@ function createRunMock(): RunMock {
     run,
     calls,
     activeUnits,
+    envCopies,
     systemctl: (verb) =>
       calls
         .filter((call) =>
@@ -1697,6 +1718,285 @@ test("waitForNativeApp uses sleepDefault between probes when sleep is omitted", 
     );
     assertEquals(result.applied, ["web"]);
     assertEquals(probes, 2);
+  } finally {
+    await host.cleanup();
+  }
+});
+
+const VARIABLE_MATERIAL = [{
+  key: "DB_PASSWORD",
+  composeServiceName: "web",
+  forBuild: false,
+  forRuntime: true,
+  isLiteral: false,
+  valueEnvelope: "tpdaemon.hunter2",
+}];
+
+const decryptForTest = (envelopes: string[]) =>
+  Promise.resolve(envelopes.map((e) => e.slice("tpdaemon.".length)));
+
+const VARIABLES_APP = {
+  variables: [
+    { name: "API_URL", value: "https://example.test" },
+    { name: "DB_PASSWORD", secretKey: "DB_PASSWORD" },
+    { name: "PORT", value: "1" },
+  ],
+};
+
+test("an app's variables are copied by tp-host before its unit is installed and started", async () => {
+  const host = await makeTestHost();
+  const mock = createRunMock(host.layout);
+  const lines: string[] = [];
+  const envPath = nativeAppEnvPath(host.layout, "svc-web");
+  try {
+    await applyNativeAppServices(
+      host.layout,
+      ENVIRONMENT_ID,
+      [makeApp(VARIABLES_APP)],
+      {
+        ...applyOpts(host, mock),
+        variableMaterial: VARIABLE_MATERIAL,
+        decryptSecrets: decryptForTest,
+        onOutput: (_stream, line) => lines.push(line),
+      },
+    );
+
+    // The copy exists by the time the unit is installed (the first moment the
+    // host could start the app), and it is tp-host's: the daemon only named
+    // the service id.
+    const [copyAt] = callIndexes(
+      mock,
+      (args) => args.includes("app-env-install"),
+    );
+    const [unitAt] = callIndexes(
+      mock,
+      (args) =>
+        args.includes("install") && args.at(-1)?.endsWith(".service") === true,
+    );
+    assertEquals(copyAt < unitAt, true);
+    assertEquals(mock.calls[copyAt].args, ["-n", "app-env-install", "svc-web"]);
+
+    const text = mock.envCopies.get("svc-web")!;
+    assertStringIncludes(text, "API_URL='https://example.test'\n");
+    assertStringIncludes(text, "DB_PASSWORD='hunter2'\n");
+    // A platform-set name never reaches the file, where it would override.
+    assertEquals(text.includes("PORT="), false);
+    // The daemon's own staged file is gone: the secret is not on disk twice.
+    await assertRejects(
+      () => Deno.stat(nativeAppEnvStagePath(host.layout, "svc-web")),
+      Deno.errors.NotFound,
+    );
+
+    // The unit names the root-owned copy, never the daemon-writable staging
+    // path, and holds no value.
+    const unit = await Deno.readTextFile(
+      nativeAppUnitPath("svc-web", host.unitDir),
+    );
+    assertStringIncludes(unit, `EnvironmentFile=${envPath}\n`);
+    assertEquals(
+      unit.includes(nativeAppEnvStagePath(host.layout, "svc-web")),
+      false,
+    );
+    assertEquals(unit.includes("hunter2"), false);
+    assertEquals(unit.includes("example.test"), false);
+
+    // Names and counts reach the transcript; values never do.
+    const transcript = lines.join("\n");
+    assertStringIncludes(transcript, "web: 2 environment variables written");
+    assertStringIncludes(transcript, "ignored PORT");
+    assertEquals(transcript.includes("hunter2"), false);
+    assertEquals(
+      mock.calls.some((call) =>
+        call.args.some((arg) => arg.includes("hunter2"))
+      ),
+      false,
+    );
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("dropping every variable: the unit stops loading the file first, then the copy goes", async () => {
+  const host = await makeTestHost();
+  try {
+    await applyNativeAppServices(host.layout, ENVIRONMENT_ID, [
+      makeApp(VARIABLES_APP),
+    ], {
+      ...applyOpts(host, createRunMock(host.layout)),
+      variableMaterial: VARIABLE_MATERIAL,
+      decryptSecrets: decryptForTest,
+    });
+
+    const mock = createRunMock(host.layout);
+    mock.envCopies.set("svc-web", "left by the earlier deploy");
+    mock.activeUnits.add(nativeAppUnitName("svc-web"));
+    await applyNativeAppServices(
+      host.layout,
+      ENVIRONMENT_ID,
+      [makeApp()],
+      applyOpts(host, mock),
+    );
+    assertEquals(mock.envCopies.has("svc-web"), false);
+    const unit = await Deno.readTextFile(
+      nativeAppUnitPath("svc-web", host.unitDir),
+    );
+    assertEquals(unit.includes("EnvironmentFile"), false);
+    // The unit changed, so systemd must be told before the restart.
+    assertEquals(mock.systemctl("daemon-reload").length, 1);
+
+    // A crash-restart of the old unit between these steps would fail if the
+    // copy went first: it goes after the new unit is installed, reloaded and
+    // restarted.
+    const [unitAt] = callIndexes(
+      mock,
+      (args) =>
+        args.includes("install") && args.at(-1)?.endsWith(".service") === true,
+    );
+    const [reloadAt] = callIndexes(
+      mock,
+      (args) => args.includes("daemon-reload"),
+    );
+    const [restartAt] = callIndexes(mock, (args) => args.includes("restart"));
+    const [removeAt] = callIndexes(
+      mock,
+      (args) => args.includes("app-env-remove"),
+    );
+    assertEquals(unitAt < reloadAt && reloadAt < restartAt, true);
+    assertEquals(restartAt < removeAt, true);
+    assertEquals(mock.calls[removeAt].args, [
+      "-n",
+      "app-env-remove",
+      "svc-web",
+    ]);
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("an app that never had variables asks tp-host for nothing but the removal, and its unit is untouched", async () => {
+  const host = await makeTestHost();
+  try {
+    await applyNativeAppServices(
+      host.layout,
+      ENVIRONMENT_ID,
+      [makeApp()],
+      applyOpts(host, createRunMock()),
+    );
+    const mock = createRunMock();
+    mock.activeUnits.add(nativeAppUnitName("svc-web"));
+    await applyNativeAppServices(
+      host.layout,
+      ENVIRONMENT_ID,
+      [makeApp()],
+      applyOpts(host, mock),
+    );
+    assertEquals(
+      callIndexes(mock, (args) => args.includes("app-env-install")).length,
+      0,
+    );
+    assertEquals(mock.systemctl("daemon-reload").length, 0);
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("a refused removal of a stale copy warns and does not fail the deploy", async () => {
+  const host = await makeTestHost();
+  const mock = createRunMock();
+  const refuse: RunFn = (command, args) =>
+    args.includes("app-env-remove")
+      ? Promise.resolve(fail("tp-host: refusing verb"))
+      : mock.run(command, args);
+  try {
+    const result = await applyNativeAppServices(
+      host.layout,
+      ENVIRONMENT_ID,
+      [makeApp()],
+      { ...applyOpts(host, mock), run: refuse },
+    );
+    assertEquals(result.applied, ["web"]);
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("a variable change with an identical unit still restarts the app, with no reload", async () => {
+  const host = await makeTestHost();
+  try {
+    const opts = (decrypt: (e: string[]) => Promise<(string | null)[]>) => ({
+      variableMaterial: VARIABLE_MATERIAL,
+      decryptSecrets: decrypt,
+    });
+    await applyNativeAppServices(host.layout, ENVIRONMENT_ID, [
+      makeApp(VARIABLES_APP),
+    ], {
+      ...applyOpts(host, createRunMock(host.layout)),
+      ...opts(decryptForTest),
+    });
+
+    const mock = createRunMock(host.layout);
+    mock.activeUnits.add(nativeAppUnitName("svc-web"));
+    await applyNativeAppServices(host.layout, ENVIRONMENT_ID, [
+      makeApp(VARIABLES_APP),
+    ], {
+      ...applyOpts(host, mock),
+      ...opts((envelopes) => Promise.resolve(envelopes.map(() => "rotated"))),
+    });
+    assertStringIncludes(
+      mock.envCopies.get("svc-web")!,
+      "DB_PASSWORD='rotated'",
+    );
+    assertEquals(mock.systemctl("daemon-reload").length, 0);
+    assertEquals(mock.systemctl("restart"), [nativeAppUnitName("svc-web")]);
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("a referenced secret with no sealed value fails before any unit is installed", async () => {
+  const host = await makeTestHost();
+  const mock = createRunMock(host.layout);
+  try {
+    await assertRejects(
+      () =>
+        applyNativeAppServices(
+          host.layout,
+          ENVIRONMENT_ID,
+          [makeApp(VARIABLES_APP)],
+          { ...applyOpts(host, mock), variableMaterial: [] },
+        ),
+      Error,
+      "no sealed value for secret variable DB_PASSWORD",
+    );
+    assertEquals(
+      mock.calls.some((c) =>
+        c.args.includes("install") && c.args.at(-1)?.endsWith(".service")
+      ),
+      false,
+    );
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("removing an environment's apps also removes their variables copies", async () => {
+  const host = await makeTestHost();
+  const mock = createRunMock(host.layout);
+  try {
+    await applyNativeAppServices(host.layout, ENVIRONMENT_ID, [
+      makeApp(VARIABLES_APP),
+    ], {
+      ...applyOpts(host, mock),
+      variableMaterial: VARIABLE_MATERIAL,
+      decryptSecrets: decryptForTest,
+    });
+    assertEquals(mock.envCopies.has("svc-web"), true);
+
+    await removeNativeAppServices(host.layout, ENVIRONMENT_ID, {
+      run: mock.run,
+      systemdUnitDir: host.unitDir,
+    });
+    assertEquals(mock.envCopies.has("svc-web"), false);
   } finally {
     await host.cleanup();
   }

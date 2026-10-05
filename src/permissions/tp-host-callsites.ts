@@ -31,6 +31,7 @@ import {
 } from "../backups/units.ts";
 import { cronTimerContent, cronTimerPath } from "../deploy/cron/unit.ts";
 import { caddyUnit } from "../deploy/ingress.ts";
+import { renderNativeAppEnvFile } from "../deploy/native/variables-runtime.ts";
 import { nativeAppUnitContent } from "../deploy/native/unit.ts";
 import { sshdDropInContent } from "../deploy/ssh/sshd-config.ts";
 import { accessGroup } from "../runtime/registry.ts";
@@ -931,6 +932,23 @@ const SITES: CallSite[] = [
         }),
       ),
     },
+  ),
+  tpHost(
+    'src/deploy/native/variables-runtime.ts|["-n","app-env-install",serviceId]',
+    {
+      argv: ["app-env-install", "svc1"],
+      setup: file(
+        `${CONF}/node-apps/envs/svc1.env`,
+        renderNativeAppEnvFile([
+          { name: "API_URL", value: "https://example.test" },
+          { name: "QUOTED", value: "it's $HOME" },
+        ]),
+      ),
+    },
+  ),
+  tpHost(
+    'src/deploy/native/variables-runtime.ts|["-n","app-env-remove",serviceId]',
+    { argv: ["app-env-remove", "svc1"] },
   ),
   tpHost(
     'src/deploy/native/apply-native-apps.ts|["-n","systemctl",...args]',
