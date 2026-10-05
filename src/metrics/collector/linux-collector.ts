@@ -956,7 +956,10 @@ export class LinuxMetricsCollector implements MetricsCollector {
       hostText ? hostTextToExtended(hostText) : undefined,
       buildCollectedExtended({
         containers,
-        dockerUsage: dockerUsageReading?.usage,
+        // A stale reading's reclaimable bytes are not reported as current.
+        dockerUsage: dockerUsageReading?.stale
+          ? undefined
+          : dockerUsageReading?.usage,
         tlsExpiry: this.#deps.tlsExpiry?.(),
         topSites: directoryUsage?.topSites,
       }),

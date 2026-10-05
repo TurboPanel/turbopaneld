@@ -1,5 +1,8 @@
 import { assertEquals } from "@std/assert";
-import { parsePrometheusExposition } from "./prom-exposition.ts";
+import {
+  fetchLoopbackText,
+  parsePrometheusExposition,
+} from "./prom-exposition.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -73,8 +76,80 @@ test("malformed label blobs keep the pairs that parse", () => {
 test("label parsing stays linear on adversarial input", () => {
   const blob = `${"a".repeat(200_000)}="`;
   const started = performance.now();
-  assertEquals(labelsOf(blob), {});
+  // Past the line-length cap the line is skipped outright; below it, the
+  // scanner still handles the pathological shape in linear time.
+  assertEquals(labelsOf(blob), undefined);
+  assertEquals(labelsOf(`${"a".repeat(7_000)}="`), {});
   const elapsed = performance.now() - started;
   // The regex-based parser took seconds here; the scanner takes milliseconds.
   assertEquals(elapsed < 1_000, true, `took ${elapsed}ms`);
+});
+
+function textResponse(
+  body: BodyInit | null,
+  headers: Record<string, string> = { "content-type": "text/plain" },
+): Response {
+  return new Response(body, { headers });
+}
+
+test("fetchLoopbackText returns a normal exposition body", async () => {
+  const text = await fetchLoopbackText("127.0.0.1:1", "/metrics", {
+    fetch: () => Promise.resolve(textResponse("caddy_http_requests_total 5\n")),
+  });
+  assertEquals(text, "caddy_http_requests_total 5\n");
+});
+
+test("fetchLoopbackText gives up on an endless body at the byte cap", async () => {
+  let cancelled = false;
+  const endless = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      controller.enqueue(new Uint8Array(64 * 1024));
+    },
+    cancel() {
+      cancelled = true;
+    },
+  });
+  const text = await fetchLoopbackText("127.0.0.1:1", "/metrics", {
+    fetch: () => Promise.resolve(textResponse(endless)),
+    maxBytes: 256 * 1024,
+  });
+  assertEquals(text, undefined);
+  assertEquals(cancelled, true);
+});
+
+test("fetchLoopbackText rejects a declared oversize body and non-text content", async () => {
+  assertEquals(
+    await fetchLoopbackText("127.0.0.1:1", "/metrics", {
+      fetch: () =>
+        Promise.resolve(
+          textResponse("x", {
+            "content-type": "text/plain",
+            "content-length": "99999999",
+          }),
+        ),
+    }),
+    undefined,
+  );
+  assertEquals(
+    await fetchLoopbackText("127.0.0.1:1", "/metrics", {
+      fetch: () =>
+        Promise.resolve(
+          textResponse("caddy_http_requests_total 5\n", {
+            "content-type": "application/json",
+          }),
+        ),
+    }),
+    undefined,
+  );
+});
+
+test("parsePrometheusExposition ignores implausible values and oversized lines", () => {
+  const samples = parsePrometheusExposition(
+    [
+      "caddy_http_requests_total 5",
+      "caddy_http_requests_total 9e30",
+      `caddy_http_x{a="${"y".repeat(9000)}"} 1`,
+    ].join("\n"),
+  );
+  assertEquals(samples.map((s) => s.value), [5]);
 });
