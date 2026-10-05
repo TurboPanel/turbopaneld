@@ -28,7 +28,7 @@
 
 import { join } from "@std/path";
 import { pumpLines } from "../../logs/line-stream.ts";
-import { throwIfAborted } from "../deploy-cancel.ts";
+import { throwIfAborted, withCancelSignal } from "../deploy-cancel.ts";
 import type { CommandSummaryRedactor } from "../../logs/contracts.ts";
 import { redactCommandSummary } from "../../logs/redactor.ts";
 
@@ -343,9 +343,7 @@ async function runGit(
 ): Promise<GitRunResult> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), CHECKOUT_TIMEOUT_MS);
-  const signal = cancelSignal
-    ? AbortSignal.any([controller.signal, cancelSignal])
-    : controller.signal;
+  const signal = withCancelSignal(controller.signal, cancelSignal);
   try {
     const child = new Deno.Command(GIT_BIN, {
       args,

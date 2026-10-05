@@ -35,7 +35,7 @@ import {
   inspectContainedDir,
 } from "./safe-copy.ts";
 import { forEachSequential } from "../../util/sequential.ts";
-import { throwIfAborted } from "../deploy-cancel.ts";
+import { throwIfAborted, withCancelSignal } from "../deploy-cancel.ts";
 import { definedFields } from "../../util/optional-fields.ts";
 import type { RunFn } from "../ensure-principal.ts";
 import {
@@ -340,9 +340,7 @@ async function runBuildCommand(
 ): Promise<void> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), BUILD_TIMEOUT_MS);
-  const signal = cancelSignal
-    ? AbortSignal.any([controller.signal, cancelSignal])
-    : controller.signal;
+  const signal = withCancelSignal(controller.signal, cancelSignal);
   const { bin, args } = await resolveBuildInvocation(
     command,
     env,

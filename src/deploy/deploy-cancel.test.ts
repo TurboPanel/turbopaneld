@@ -5,6 +5,7 @@ import {
   DeployCancelledError,
   DeployCancelRegistry,
   throwIfAborted,
+  withCancelSignal,
 } from "./deploy-cancel.ts";
 import { runDockerStreamed, setDockerCliIoForTest } from "./docker-cli.ts";
 
@@ -127,4 +128,22 @@ test("aborting the signal kills a streamed docker child", async () => {
   } finally {
     restore();
   }
+});
+
+test("withCancelSignal passes the local signal through without a cancel", () => {
+  const local = new AbortController();
+  assert(withCancelSignal(local.signal, undefined) === local.signal);
+});
+
+test("withCancelSignal aborts with either the timeout or the cancel", () => {
+  const timeout = new AbortController();
+  const token = createDeployCancelToken();
+  const combined = withCancelSignal(timeout.signal, token.signal);
+  assertEquals(combined.aborted, false);
+  token.cancel();
+  assertEquals(combined.aborted, true);
+  const other = new AbortController();
+  const second = withCancelSignal(other.signal, createDeployCancelToken().signal);
+  other.abort();
+  assertEquals(second.aborted, true);
 });

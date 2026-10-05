@@ -67,7 +67,7 @@ import { createSymlink } from "../../permissions/scoped-writes.ts";
 import type { LayoutPaths } from "../../paths/layout.ts";
 import type { EnvironmentDeploySourceBuild } from "../../contracts/commands-contracts.ts";
 import type { ReleaseOutputHandler } from "./checkout.ts";
-import { throwIfAborted } from "../deploy-cancel.ts";
+import { throwIfAborted, withCancelSignal } from "../deploy-cancel.ts";
 
 /** Keep in step with orchestration/roles/buildkit/defaults/main.yml. */
 export const RAILPACK_VERSION = "0.9.0";
@@ -573,9 +573,7 @@ async function runToolStreamed(
   const timeoutMs = options.timeoutMs ?? RAILPACK_BUILD_TIMEOUT_MS;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
-  const signal = options.signal
-    ? AbortSignal.any([controller.signal, options.signal])
-    : controller.signal;
+  const signal = withCancelSignal(controller.signal, options.signal);
   try {
     const child = new Deno.Command(bin, {
       args,
@@ -825,9 +823,7 @@ async function runBuildx(
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), options.timeoutMs);
   const onOutput = options.onOutput;
-  const signal = options.cancelSignal
-    ? AbortSignal.any([controller.signal, options.cancelSignal])
-    : controller.signal;
+  const signal = withCancelSignal(controller.signal, options.cancelSignal);
   try {
     const result = await runDocker(args, {
       signal,

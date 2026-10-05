@@ -67,6 +67,17 @@ export function throwIfAborted(
   if (signal?.aborted) throw new DeployCancelledError(cancelledMessage(where));
 }
 
+/**
+ * `local` (a timeout) combined with the deploy's cancel `signal`, when there is
+ * one. Aborting either aborts the result.
+ */
+export function withCancelSignal(
+  local: AbortSignal,
+  cancel: AbortSignal | undefined,
+): AbortSignal {
+  return cancel ? AbortSignal.any([local, cancel]) : local;
+}
+
 export function createDeployCancelToken(): DeployCancelToken {
   const controller = new AbortController();
   let committed = false;
