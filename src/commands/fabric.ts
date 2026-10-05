@@ -336,7 +336,8 @@ function stateFilePath(networkDir: string): string {
 }
 
 /**
- * Bridges a teardown could not remove yet (containers still attached). Kept
+ * Bridges a teardown could not remove yet (containers still attached, or a
+ * Docker failure). Kept
  * apart from `state.json`, whose presence means "fabric enabled" to the boot
  * restore.
  */
@@ -359,7 +360,7 @@ async function readTeardownPending(networkDir: string): Promise<string[]> {
       : undefined;
     return Array.isArray(names)
       ? names.filter((name): name is string =>
-        typeof name === "string" && name.startsWith(FABRIC_BRIDGE_PREFIX)
+        typeof name === "string" && isFabricBridgeName(name)
       )
       : [];
   } catch {
@@ -861,6 +862,18 @@ export async function removeFabricDockerNetworks(
 const FABRIC_BRIDGE_PREFIX = "tpn_";
 
 /**
+ * A routed fabric bridge's exact name: `tpn_<network uuid>` (the control
+ * plane's composeNetworkHostName). An operator may register a Docker network
+ * that merely starts with `tpn_`; teardown never touches one.
+ */
+const FABRIC_BRIDGE_NAME_RE =
+  /^tpn_[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i;
+
+export function isFabricBridgeName(name: string): boolean {
+  return FABRIC_BRIDGE_NAME_RE.test(name);
+}
+
+/**
  * The `tpn_*` Docker networks on this host, whatever `state.json` says: a
  * first enable that failed half way creates bridges before `state.json` is
  * written. Best effort: an unreadable list is empty.
@@ -875,8 +888,8 @@ async function listFabricDockerNetworks(): Promise<string[]> {
     "{{.Name}}",
   ]);
   if (!listed.success) return [];
-  return listed.stdout.split("\n").map((line) => line.trim()).filter((name) =>
-    name.startsWith(FABRIC_BRIDGE_PREFIX)
+  return listed.stdout.split("\n").map((line) => line.trim()).filter(
+    isFabricBridgeName,
   );
 }
 
@@ -1584,12 +1597,27 @@ async function handleFabricTeardown(
 
   if (left.length > 0) {
     return {
-      summary: `TurboFabric torn down; still attached, removed later: ${
+      summary: `TurboFabric torn down; not removed yet, retried later: ${
         left.join(", ")
       }`,
     };
   }
   return { summary: "TurboFabric torn down" };
+}
+
+/**
+ * An enable that wants a bridge again takes it off the teardown list, so a
+ * later retry never removes a bridge the running fabric uses.
+ */
+async function forgetPendingTeardown(
+  networkDir: string,
+  desired: ReadonlySet<string>,
+): Promise<void> {
+  const pending = await readTeardownPending(networkDir);
+  const kept = pending.filter((name) => !desired.has(name));
+  if (kept.length !== pending.length) {
+    await writeTeardownPending(networkDir, kept);
+  }
 }
 
 /**
@@ -1633,6 +1661,7 @@ async function applyEnabledFabric(
     .map((network) => network.name)
     .filter((name) => !desired.has(name));
   await removeFabricDockerNetworks(stale);
+  await forgetPendingTeardown(networkDir, desired);
   await reconcileFabricForwarding(
     payload.networks ?? [],
     payload.peers,
