@@ -1,10 +1,11 @@
 /**
- * Managed engine apply: materialize → compose up → credentials.
+ * Managed engine apply: materialize → compose up → databases/credentials.
  */
 
 import type {
   EnvironmentDeployContainer,
   ManagedApplyCredential,
+  ManagedApplyDatabaseOp,
   ManagedApplyPayload,
   ManagedApplyResult,
 } from "../contracts/commands-contracts.ts";
@@ -411,8 +412,17 @@ async function dropManagedUsers(
   appliedUsers.push(...dropped);
 }
 
+async function applyDatabaseOps(
+  ctx: ManagedEngineContext,
+  engine: ReturnType<typeof getManagedEngineRuntime>,
+  ops: ManagedApplyDatabaseOp[],
+): Promise<string[]> {
+  return ops.length === 0 ? [] : await engine.applyDatabases(ctx, ops);
+}
+
 /**
- * Primary path: credentials + databases + version.
+ * Primary path: databases created, credentials, user drops, monitor roles,
+ * databases dropped, version.
  * Standby is read-only for **user-data** mutation — never run credential /
  * database SQL here. Engines whose standby is configured by SQL (MySQL /
  * MariaDB) still run {@link ManagedEngineReplicationRuntime.configureStandby}
@@ -450,12 +460,27 @@ export async function applyManagedEngineState(
     return { appliedUsers: [], appliedDatabases: [], engineVersion };
   }
 
+  // Databases that must exist come first: credential grants reference them,
+  // and an apply that failed early (say, on a user delete) must not leave a
+  // database uncreated, or every retry would fail at its grant. Drops come
+  // last, after the users are dropped, so a deleted owner is handled by the
+  // engine's drop-user path before its database goes.
+  const databaseOps = payload.databases ?? [];
+  const appliedDatabases = await applyDatabaseOps(
+    ctx,
+    engine,
+    databaseOps.filter((op) => op.action === "create"),
+  );
   const appliedUsers = await engine.applyCredentials(ctx, credentials);
   await dropManagedUsers(ctx, engine, payload, appliedUsers);
   await ensureProxySqlMonitorRoles(ctx, engine, deps);
-  const appliedDatabases = payload.databases
-    ? await engine.applyDatabases(ctx, payload.databases)
-    : [];
+  appliedDatabases.push(
+    ...await applyDatabaseOps(
+      ctx,
+      engine,
+      databaseOps.filter((op) => op.action === "drop"),
+    ),
+  );
   const engineVersion = await engine.readVersion(ctx);
   return { appliedUsers, appliedDatabases, engineVersion };
 }

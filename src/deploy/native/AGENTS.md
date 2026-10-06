@@ -92,9 +92,11 @@ from what is actually installed.
 `ProtectKernelTunables=yes`, `ProtectKernelModules=yes`,
 `ProtectControlGroups=yes`, `RestrictSUIDSGID=yes`, `RestrictRealtime=yes`,
 `LockPersonality=yes`, and an **empty** `CapabilityBoundingSet=` /
-`AmbientCapabilities=`. The writable paths are the site's own `shared/` plus
-the principal's `home/`, `data/` and `tmp/` (`ReadWritePaths=`, built by
-`principalReadWritePaths`), with `HOME=<home>/home` and `TMPDIR=<home>/tmp`.
+`AmbientCapabilities=`. The only writable path is the site's own `shared/`
+(`ReadWritePaths=<shared>`): a Node app writes only its own site folder, never
+the principal's `home/`, `data/` or `tmp/` (an owner decision; cron jobs, by
+contrast, get those three through `principalReadWritePaths`). `HOME=<home>/home`
+stays read-only to the app, and `TMPDIR=/tmp` is the unit's private `/tmp`.
 The home root, `sites/` and the release tree stay read-only to the runtime
 user, so a compromised app cannot rewrite the code it is running. No supplementary-group dance is needed
 here (unlike the web engines): the app *is* the principal that already has group
@@ -182,6 +184,11 @@ points to). Rules that are not obvious:
   unit test keeps that set equal to the `Environment=` keys the unit renders.
 - **Quoting.** Values are single-quoted (literal: no `$`, no backslash
   handling); a value containing `'` is double-quoted with `\ " ` $` escaped.
+- **Line endings.** `tp-host` refuses any carriage return (systemd and its
+  checker could read one differently), so `normalizeNativeAppEnvValue` turns
+  every CR LF in a value, plain or decrypted, into LF (a PEM pasted from a
+  Windows editor). A CR that is not half of a CR LF, or a NUL, fails the deploy
+  naming the app and the variable, never the value.
 - **Lifecycle.** Staged and copied on every deploy before the unit is installed
   (the restart that follows is what delivers a changed value). An app left with
   no variables loses its root copy (`app-env-remove`) only after its new unit

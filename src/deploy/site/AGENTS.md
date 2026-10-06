@@ -426,7 +426,10 @@ the value) a variable it cannot carry rather than failing the deploy: a value
 holding `$` (nginx expands `$name` inside quotes, with no escape), a value that
 is not one line, and a name nginx or PHP sets itself (`SCRIPT_FILENAME`,
 `REMOTE_ADDR`, `HTTP_*`, ...). A name that is not an environment variable name
-is still refused.
+is still refused. `PHP_VALUE` and `PHP_ADMIN_VALUE` (any case) are reserved on
+every engine: PHP-FPM reads them from the FastCGI request as ini overrides, so
+`resolveSiteSecretEnv` drops them (plain or sealed, before decrypting) and names
+them in the log; the control plane drops them first.
 
 Future seams (not MVP): multi-version PHP side-by-side, OLS `web.env`,
 swarm-style replicas, ACME issuance on the daemon. TurboFabric **is** the

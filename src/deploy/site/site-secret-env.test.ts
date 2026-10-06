@@ -132,3 +132,39 @@ test("resolveSiteSecretEnv decrypts more than one batch of secrets", async () =>
   assertEquals(Object.keys(out?.webEnv ?? {}).length, 130);
   assertEquals(out?.webEnv?.K129, "v-K129");
 });
+
+test("resolveSiteSecretEnv drops the PHP ini override names, plain and sealed, in any case", async () => {
+  const calls: string[][] = [];
+  const out = await resolveSiteSecretEnv(
+    [site({
+      webEnv: { PHP_VALUE: "memory_limit=-1", Php_Admin_Value: "x", KEEP: "1" },
+      webSecretEnv: {
+        PHP_ADMIN_VALUE: "tpdaemon.open_basedir=",
+        php_value: "tpdaemon.y",
+        SECRET: "tpdaemon.s",
+      },
+    })],
+    fakeDecrypt(calls),
+  );
+  assertEquals(out[0]?.webEnv, { KEEP: "1", SECRET: "s" });
+  // A reserved sealed value is never sent to be decrypted.
+  assertEquals(calls, [["tpdaemon.s"]]);
+});
+
+test("resolveSiteSecretEnv leaves no empty maps behind when only reserved names were set", async () => {
+  const [out] = await resolveSiteSecretEnv(
+    [site({
+      webEnv: { PHP_VALUE: "a" },
+      webSecretEnv: { PHP_ADMIN_VALUE: "tpdaemon.b" },
+    })],
+    undefined,
+  );
+  assertEquals("webEnv" in (out as object), false);
+  assertEquals("webSecretEnv" in (out as object), false);
+});
+
+test("resolveSiteSecretEnv returns a site without reserved names as the same object", async () => {
+  const plain = site({ webEnv: { APP_ENV: "production" } });
+  const [out] = await resolveSiteSecretEnv([plain], undefined);
+  assertEquals(out, plain);
+});
