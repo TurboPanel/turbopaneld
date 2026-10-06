@@ -230,7 +230,13 @@ async function proveLogins(
   const trigger =
     `CREATE FUNCTION rw.rw_fn() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END';
     CREATE TRIGGER rw_trg BEFORE INSERT ON public.orders FOR EACH ROW EXECUTE FUNCTION rw.rw_fn();`;
-  await expectRefused(session, "rw", "appdb", trigger, "permission denied for table public.orders");
+  await expectRefused(
+    session,
+    "rw",
+    "appdb",
+    trigger,
+    "permission denied for table public.orders",
+  );
   await expectRefused(
     session,
     "rw",

@@ -257,7 +257,9 @@ export function ensureReadWriteLoginSchemaSql(username: string): string {
     `DO $turbopanel$`,
     `BEGIN`,
     `  IF NOT EXISTS (`,
-    `    SELECT 1 FROM pg_catalog.pg_namespace WHERE nspname = ${quoteLiteral(username)}`,
+    `    SELECT 1 FROM pg_catalog.pg_namespace WHERE nspname = ${
+      quoteLiteral(username)
+    }`,
     `  ) THEN`,
     `    CREATE SCHEMA ${ident} AUTHORIZATION ${ident};`,
     `  END IF;`,
