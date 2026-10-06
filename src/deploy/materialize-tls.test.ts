@@ -269,3 +269,28 @@ test("hostnameTlsMap pins every www name to the same certificate", () => {
   }
   assertEquals(map.has("www.plain.example.com"), false);
 });
+
+test("hostnameTlsMap puts each www name under its own hosting's pair", () => {
+  const hosting = { serviceId: "s1", composeServiceName: "web" };
+  const map = hostnameTlsMap({
+    hostings: [
+      {
+        ...hosting,
+        hostingId: "h1",
+        hostnames: ["a.example.com"],
+        tlsId: "tls-a",
+        www: "www-to-root",
+      },
+      {
+        ...hosting,
+        hostingId: "h2",
+        hostnames: ["b.example.com"],
+        tlsId: "tls-b",
+        www: "root-to-www",
+      },
+    ],
+  } as EnvironmentDeployPayload);
+  assertEquals(map.get("www.a.example.com"), "tls-a");
+  assertEquals(map.get("b.example.com"), "tls-b");
+  assertEquals(map.get("www.b.example.com"), "tls-b");
+});

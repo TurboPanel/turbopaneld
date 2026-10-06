@@ -1684,8 +1684,8 @@ export type SiteSnippetOptions = Readonly<{
   /**
    * Serve this name as a permanent redirect to `<redirectTo>` (path and query
    * kept) instead of proxying. With `forceHttps` (the default) both plain HTTP
-   * and HTTPS land on `https://<redirectTo>` in one hop; without it each scheme
-   * keeps its own.
+   * and HTTPS land on `https://<redirectTo>` in one hop; without it both land
+   * on `http://<redirectTo>`, the only site the target then has.
    */
   redirectTo?: string;
 }>;
@@ -1697,15 +1697,18 @@ function redirectSiteSnippet(options: SiteSnippetOptions): string {
   const tlsDirective = hostingTlsDirective(tlsMode, tlsId, tlsDir);
   const tlsLine = tlsDirective ? `${tlsDirective}\n` : "";
   const bindLine = bindAddress ? formatBindDirective(bindAddress) : "";
-  const httpsRedirect = `  redir https://${target}{uri} permanent\n`;
-  const httpRedirect = emitHttpsSite(options.forceHttps ?? true, tlsMode)
-    ? httpsRedirect
-    : `  redir http://${target}{uri} permanent\n`;
+  // Both schemes land on the scheme the target actually serves: HTTPS in one
+  // hop normally, plain HTTP when the target has forced HTTPS off (it then has
+  // no HTTPS site to land on).
+  const scheme = emitHttpsSite(options.forceHttps ?? true, tlsMode)
+    ? "https"
+    : "http";
+  const redirect = `  redir ${scheme}://${target}{uri} permanent\n`;
   return `http://${hostname} {
-${bindLine}${httpRedirect}}
+${bindLine}${redirect}}
 
 ${hostname} {
-${bindLine}${tlsLine}${httpsRedirect}}
+${bindLine}${tlsLine}${redirect}}
 `;
 }
 
@@ -1904,8 +1907,12 @@ function addWwwRedirectSites(
     const acme = hosting.tlsMode === "acme";
     for (const { from, to } of hostingWwwRedirects(hosting)) {
       if (byHostname.has(from)) continue;
+      // Follow what the target site actually serves (every path of it).
+      const target = byHostname.get(to);
       byHostname.set(from, {
-        forceHttps: acme || (hosting.proxy?.forceHttps ?? true),
+        forceHttps: target
+          ? emitHttpsSite(target.forceHttps, target.tlsMode)
+          : acme || (hosting.proxy?.forceHttps ?? true),
         routes: [],
         redirectTo: to,
         ...(acme ? { tlsMode: "acme" as const } : {}),
@@ -2114,6 +2121,69 @@ async function hostingCandidateRefusal(
     );
   }
   return test.stderr || "caddy validate failed";
+}
+
+/**
+ * The site addresses one snippet answers on: every top-level `name {` /
+ * `http://name {` line the daemon itself wrote (`siteSnippet`).
+ */
+export function snippetSiteAddresses(contents: string): string[] {
+  const names: string[] = [];
+  for (const line of contents.split("\n")) {
+    if (line.length === 0 || line.startsWith(" ") || !line.endsWith(" {")) {
+      continue;
+    }
+    const address = line.slice(0, -2).trim();
+    names.push(
+      address.startsWith("http://") ? address.slice("http://".length) : address,
+    );
+  }
+  return names;
+}
+
+/**
+ * Before any container starts: refuse a deploy that would answer on a name
+ * another environment's live site already answers on on this server. A www
+ * choice adds names the panel's uniqueness check may not have seen, and the
+ * shared Traefik would otherwise route that name to this environment's
+ * containers even though Caddy later refuses the duplicate site.
+ */
+export async function assertHostingNamesFree(
+  layout: LayoutPaths,
+  payload: EnvironmentDeployPayload,
+): Promise<void> {
+  const wanted = new Set(
+    payload.hostings
+      .filter((hosting) => (hosting.protocol ?? "http") === "http")
+      .flatMap((hosting) => [
+        ...hostingServedNames(hosting),
+        ...hostingWwwRedirects(hosting).map((redirect) => redirect.from),
+      ]),
+  );
+  if (wanted.size === 0) return;
+  const sitesDir = join(layout.configDir, "hosting", "sites");
+  let names: string[];
+  try {
+    names = await liveSnippetNames(sitesDir);
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) return;
+    throw err;
+  }
+  const own = `${payload.environmentId}.caddy`;
+  const others = names.filter((name) =>
+    name !== own && !isDaemonReservedHostingSite(name)
+  );
+  const contents = await Promise.all(
+    others.map((name) => Deno.readTextFile(join(sitesDir, name))),
+  );
+  const taken = contents.flatMap(snippetSiteAddresses).find((name) =>
+    wanted.has(name)
+  );
+  if (taken !== undefined) {
+    throw new Error(
+      `${taken} is already served by another environment on this server; remove it there (or change this hosting's www choice) before deploying`,
+    );
+  }
 }
 
 async function liveSnippetNames(sitesDir: string): Promise<string[]> {

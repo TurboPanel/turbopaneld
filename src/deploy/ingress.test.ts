@@ -9,6 +9,7 @@ import { dirname, join } from "@std/path";
 import type { EnvironmentDeployHosting } from "../contracts/commands-contracts.ts";
 import { INSTANCE_ACME_HTTP01_SITE } from "./instance-acme-http01.ts";
 import {
+  assertHostingNamesFree,
   assertSafeComposeProjectName,
   assertSafeHostingPathPrefix,
   assertValidBindAddress,
@@ -51,6 +52,7 @@ import {
   serviceTraefikCompose,
   setIngressHostCommandForTest,
   siteSnippet,
+  snippetSiteAddresses,
   sortCaddySiteRoutes,
   syncTcpUdpIngressEntries,
   TcpUdpPortConflictError,
@@ -4097,6 +4099,31 @@ test("buildCaddyHostnameRoutes root-to-www serves www and redirects the bare nam
   assertEquals(routes.get("www.example.com")!.routes.length, 1);
 });
 
+test("buildCaddyHostnameRoutes redirect names follow the target's HTTPS setting", () => {
+  const plain = buildCaddyHostnameRoutes({
+    ...WWW_BASE_PAYLOAD,
+    hostings: [
+      wwwHosting(["example.com"], "www-to-root", {
+        proxy: { forceHttps: false },
+      }),
+    ],
+  });
+  assertEquals(plain.get("example.com")!.forceHttps, false);
+  assertEquals(plain.get("www.example.com")!.forceHttps, false);
+  // Let's Encrypt always keeps HTTPS, on the site and on its redirect name.
+  const acme = buildCaddyHostnameRoutes({
+    ...WWW_BASE_PAYLOAD,
+    hostings: [
+      wwwHosting(["example.com"], "root-to-www", {
+        tlsMode: "acme",
+        proxy: { forceHttps: false },
+      }),
+    ],
+  });
+  assertEquals(acme.get("example.com")!.forceHttps, true);
+  assertEquals(acme.get("example.com")!.tlsMode, "acme");
+});
+
 test("buildCaddyHostnameRoutes both serves the site on both names", () => {
   const routes = buildCaddyHostnameRoutes({
     ...WWW_BASE_PAYLOAD,
@@ -4144,7 +4171,7 @@ test("siteSnippet www redirect sends plain HTTP straight to the HTTPS target, pa
   assertEquals(snippet.includes("reverse_proxy"), false);
 });
 
-test("siteSnippet www redirect without forced HTTPS keeps each scheme", () => {
+test("siteSnippet www redirect without forced HTTPS lands on the target's plain HTTP site", () => {
   const snippet = siteSnippet({
     hostname: "example.com",
     tlsDir: "/etc/turbopanel/tls",
@@ -4157,7 +4184,7 @@ test("siteSnippet www redirect without forced HTTPS keeps each scheme", () => {
   );
   assertStringIncludes(
     snippet,
-    "example.com {\n  tls internal\n  redir https://www.example.com{uri} permanent\n}",
+    "example.com {\n  tls internal\n  redir http://www.example.com{uri} permanent\n}",
   );
 });
 
@@ -4238,6 +4265,52 @@ test("rewriteHostingCaddySites serves the www name and lists it in the acme mani
     ]);
   } finally {
     restore();
+    await cleanup();
+  }
+});
+
+test("snippetSiteAddresses reads back the names a snippet answers on", () => {
+  const snippet = siteSnippet({
+    hostname: "www.example.com",
+    tlsDir: "/etc/turbopanel/tls",
+    redirectTo: "example.com",
+  }) + siteSnippet({ hostname: "example.com", tlsDir: "/etc/turbopanel/tls" });
+  assertEquals(
+    [...new Set(snippetSiteAddresses(snippet))].sort(),
+    ["example.com", "www.example.com"],
+  );
+});
+
+test("assertHostingNamesFree refuses a www name another environment serves, before any container starts", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  try {
+    const payload = {
+      ...WWW_BASE_PAYLOAD,
+      hostings: [wwwHosting(["example.com"], "both")],
+    };
+    // Nothing deployed yet on this server: free.
+    await assertHostingNamesFree(layout, payload);
+    const sitesDir = join(layout.configDir, "hosting", "sites");
+    await Deno.mkdir(sitesDir, { recursive: true });
+    await Deno.writeTextFile(
+      join(sitesDir, "env-other.caddy"),
+      siteSnippet({ hostname: "www.example.com", tlsDir: layout.tlsDir }),
+    );
+    // This environment's own earlier file never counts against it.
+    await Deno.writeTextFile(
+      join(sitesDir, "env-www-1.caddy"),
+      siteSnippet({ hostname: "example.com", tlsDir: layout.tlsDir }),
+    );
+    await assertRejects(
+      () => assertHostingNamesFree(layout, payload),
+      Error,
+      "www.example.com is already served by another environment on this server",
+    );
+    await assertHostingNamesFree(layout, {
+      ...payload,
+      hostings: [wwwHosting(["example.com"])],
+    });
+  } finally {
     await cleanup();
   }
 });

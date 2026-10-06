@@ -339,7 +339,7 @@ describe("www mode validation", () => {
     assertEquals(other?.includes("already a hostname"), true);
   });
 
-  it("refuses a name one hosting redirects while another path of it is served", () => {
+  it("refuses paths of one name that make different www choices", () => {
     const error = validateDeployHostings([
       hosting({ hostnames: ["example.com"], www: "root-to-www" }),
       hosting({
@@ -350,7 +350,33 @@ describe("www mode validation", () => {
     ]);
     assertEquals(
       error,
-      "www: example.com is sent to www.example.com by one hosting but served by another",
+      "www: every path of example.com must use the same www choice (found root-to-www and off)",
+    );
+    // `both` on one path and nothing on another is just as mixed.
+    assertEquals(
+      validateDeployHostings([
+        hosting({ hostnames: ["example.com"], www: "both" }),
+        hosting({
+          hostingId: "h2",
+          hostnames: ["example.com"],
+          pathPrefix: "/api",
+        }),
+      ])?.startsWith("www: every path of example.com"),
+      true,
+    );
+  });
+
+  it("refuses www on IP addresses and one-word names", () => {
+    assertEquals(wwwSiblingHostname("203.0.113.5"), null);
+    assertEquals(wwwSiblingHostname("www.203.0.113.5"), null);
+    assertEquals(wwwSiblingHostname("localhost"), null);
+    assertEquals(wwwSiblingHostname("www.com"), null);
+    assertEquals(wwwSiblingHostname("www.localhost"), null);
+    assertEquals(
+      validateDeployWwwModes([
+        hosting({ hostnames: ["203.0.113.5"], www: "both" }),
+      ]),
+      "www: 203.0.113.5 has no www or bare spelling to use",
     );
   });
 

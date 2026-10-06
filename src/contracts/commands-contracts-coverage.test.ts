@@ -1446,4 +1446,24 @@ test("parseEnvironmentDeployPayload keeps a www mode, drops off, and rejects unk
       "hostings[].www must be off, both, www-to-root, or root-to-www",
     );
   }
+  // An older control plane's on/off flag is honoured, never dropped silently.
+  assertEquals(
+    withHosting({ wwwRedirect: true }).hostings[0]?.www,
+    "www-to-root",
+  );
+  assertEquals(
+    withHosting({ wwwRedirect: true, hostnames: ["www.example.com"] })
+      .hostings[0]?.www,
+    "root-to-www",
+  );
+  assertEquals(
+    withHosting({ wwwRedirect: true, www: "both" }).hostings[0]?.www,
+    "both",
+  );
+  assertEquals(withHosting({ wwwRedirect: false }).hostings[0]?.www, undefined);
+  assertThrows(
+    () => withHosting({ wwwRedirect: "yes" }),
+    TypeError,
+    "hostings[].wwwRedirect must be a boolean",
+  );
 });

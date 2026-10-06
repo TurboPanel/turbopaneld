@@ -2187,16 +2187,31 @@ export function isValidHostname(value: unknown): boolean {
 
 const WWW_PREFIX = "www.";
 
+/** True when every character of a non-empty label is a digit (an IPv4 octet). */
+function isAllDigits(label: string): boolean {
+  if (label.length === 0) return false;
+  for (const ch of label) {
+    if (ch < "0" || ch > "9") return false;
+  }
+  return true;
+}
+
 /**
- * The other spelling of a site name for the "send www to the main name" option:
- * `www.example.com` for `example.com`, and `example.com` for `www.example.com`.
- * `null` when no valid name results. Must stay in sync with the instance
- * canonical version in src/contracts/commands/hostname.ts
+ * The other spelling of a site name for the www choice: `www.example.com` for
+ * `example.com`, and `example.com` for `www.example.com`. `null` when no valid
+ * name results, and for names that have no www spelling at all: an IP address
+ * (the last label is all digits) or a one-word name (`localhost`, `com` from
+ * `www.com`). Must stay in sync with the instance canonical version in
+ * src/contracts/commands/hostname.ts
  */
 export function wwwSiblingHostname(hostname: string): string | null {
-  const sibling = hostname.startsWith(WWW_PREFIX)
+  const typedIsWww = hostname.startsWith(WWW_PREFIX);
+  const sibling = typedIsWww
     ? hostname.slice(WWW_PREFIX.length)
     : WWW_PREFIX + hostname;
+  const bare = typedIsWww ? sibling : hostname;
+  const lastDot = bare.lastIndexOf(".");
+  if (lastDot === -1 || isAllDigits(bare.slice(lastDot + 1))) return null;
   return isValidHostname(sibling) ? sibling : null;
 }
 
@@ -3728,6 +3743,25 @@ function parseHostingTlsMode(
   return value as EnvironmentDeployHosting["tlsMode"];
 }
 
+/**
+ * An older control plane sends `wwwRedirect: true` ("send the other spelling
+ * to the name as written"). Honour it as the mode that keeps the first typed
+ * name the site rather than dropping the redirect without a word.
+ */
+function parseLegacyHostingWwwRedirect(
+  value: unknown,
+  hostnames: unknown,
+): EnvironmentDeployHosting["www"] {
+  if (value === undefined || value === false) return undefined;
+  if (value !== true) {
+    throw new TypeError("hostings[].wwwRedirect must be a boolean");
+  }
+  const first = Array.isArray(hostnames) ? hostnames[0] : undefined;
+  return typeof first === "string" && first.startsWith(WWW_PREFIX)
+    ? "root-to-www"
+    : "www-to-root";
+}
+
 function parseHostingWww(
   value: unknown,
 ): EnvironmentDeployHosting["www"] {
@@ -3855,7 +3889,9 @@ function parseHosting(value: unknown): EnvironmentDeployHosting {
   const protocol = parseHostingProtocol(value.protocol);
   const ports = parseHostingPorts(value.ports);
   const web = parseHostingWeb(value.web);
-  const www = parseHostingWww(value.www);
+  const www = value.www === undefined
+    ? parseLegacyHostingWwwRedirect(value.wwwRedirect, value.hostnames)
+    : parseHostingWww(value.www);
 
   return {
     hostingId: parseNonEmptyString(value, "hostingId"),

@@ -2,15 +2,10 @@
  * Deploy payload validators — keep in sync with instance `src/contracts/commands/deploy-validation.ts`.
  */
 
-import {
-  hostingWwwNames,
-  isValidHostname,
-  wwwSiblingHostname,
-} from "./commands-contracts.ts";
+import { isValidHostname, wwwSiblingHostname } from "./commands-contracts.ts";
 import type {
   EnvironmentDeployHosting,
   EnvironmentDeployStorageMaterial,
-  HostingWwwNames,
 } from "./commands-contracts.ts";
 
 const STORAGE_KINDS = new Set(["volume", "directory", "file"]);
@@ -188,36 +183,30 @@ function validateWwwHostnames(
   return null;
 }
 
-function expandWwwNames(
-  hostings: readonly EnvironmentDeployHosting[],
-): HostingWwwNames[] {
-  return hostings.flatMap((hosting) =>
-    hosting.hostnames.flatMap((hostname) =>
-      hostingWwwNames(hostname, hosting.www) ?? []
-    )
-  );
-}
-
-/** A name one hosting redirects away must not be a name another one serves. */
-function findRedirectServedClash(
+/** Hostings on different paths of one name must make the same www choice. */
+function findMixedWwwModes(
   hostings: readonly EnvironmentDeployHosting[],
 ): string | null {
-  const expanded = expandWwwNames(hostings);
-  const served = new Set(expanded.flatMap((names) => names.serve));
-  const clash = expanded.find((names) =>
-    names.redirect !== null && served.has(names.redirect.from)
-  )?.redirect;
-  return clash
-    ? `www: ${clash.from} is sent to ${clash.to} by one hosting but served by another`
-    : null;
+  const modeByName = new Map<string, string>();
+  for (const hosting of hostings) {
+    const mode = hosting.www ?? "off";
+    for (const hostname of hosting.hostnames) {
+      const seen = modeByName.get(hostname);
+      if (seen !== undefined && seen !== mode) {
+        return `www: every path of ${hostname} must use the same www choice (found ${seen} and ${mode})`;
+      }
+      modeByName.set(hostname, mode);
+    }
+  }
+  return null;
 }
 
 /**
  * `www` answers on a second name per hostname, so it only makes sense on
  * `http`, every such name must be a valid hostname, none may already be a
- * hostname in the same deploy (that would be two sites for one name), and a
- * name redirected by one hosting may not be served by another (two hostings on
- * different paths of one name must agree on which spelling is the site).
+ * hostname in the same deploy (that would be two sites for one name), every
+ * path of one name must make the same choice (so one spelling is never a
+ * redirect for one path and the site for another).
  */
 export function validateDeployWwwModes(
   hostings: EnvironmentDeployHosting[],
@@ -230,7 +219,7 @@ export function validateDeployWwwModes(
       : "www requires the http protocol";
     if (error) return error;
   }
-  return findRedirectServedClash(http);
+  return findMixedWwwModes(http);
 }
 
 export function validateDeployTargetPort(
