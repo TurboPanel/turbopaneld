@@ -503,12 +503,12 @@ export function slotRetentionFromRows(
 ): ManagedSlotRetention | undefined {
   const slots = rows.filter((row) => row[0]).map(slotFromRow);
   if (slots.length === 0) return undefined;
-  const worst = slots.reduce((a, b) =>
-    SLOT_SEVERITY[b.state] > SLOT_SEVERITY[a.state] ||
-      (b.state === a.state && (b.retainedBytes ?? 0) > (a.retainedBytes ?? 0))
-      ? b
-      : a
+  // Worst first: higher severity, then more WAL held.
+  const [worst] = slots.sort((a, b) =>
+    SLOT_SEVERITY[b.state] - SLOT_SEVERITY[a.state] ||
+    (b.retainedBytes ?? 0) - (a.retainedBytes ?? 0)
   );
+  if (worst === undefined) return undefined;
   return worst.state === "ok" ? { state: "ok" } : worst;
 }
 
