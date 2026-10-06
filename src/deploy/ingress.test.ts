@@ -489,6 +489,12 @@ test("caddyTraefikUpstream http hop uses h2c and PROXY v2", () => {
   assertStringIncludes(upstream, "keepalive off");
 });
 
+test("caddyTraefikUpstream https hop preserves the original Host header", () => {
+  // Without this Caddy sends Host: 127.0.0.1:7443 and Traefik answers 404.
+  assertStringIncludes(caddyTraefikUpstream("https"), "header_up Host {host}");
+  assertEquals(caddyTraefikUpstream("http").includes("header_up"), false);
+});
+
 test("caddyTraefikUpstream https hop uses TLS skip-verify and PROXY v2", () => {
   const upstream = caddyTraefikUpstream("https");
   assertStringIncludes(upstream, "127.0.0.1:7443");
