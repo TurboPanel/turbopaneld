@@ -216,7 +216,9 @@ export function dropPhysicalSlotSql(slotName: string): string {
   return [
     `SELECT pg_catalog.pg_drop_replication_slot(slot_name)`,
     `FROM pg_catalog.pg_replication_slots`,
-    `WHERE slot_name = ${quoteLiteral(slotName)};`,
+    // A slot a replica is still attached to cannot be dropped (Postgres
+    // refuses); leave it for the next apply instead of failing this one.
+    `WHERE slot_name = ${quoteLiteral(slotName)} AND NOT active;`,
   ].join("\n");
 }
 
@@ -227,6 +229,43 @@ export function listManagedSlotsSql(): string {
     `SELECT slot_name FROM pg_catalog.pg_replication_slots`,
     `WHERE slot_name LIKE ${quoteLiteral(managedSlotPattern)}`,
     `  AND slot_type = 'physical';`,
+  ].join("\n");
+}
+
+/**
+ * Drop managed slots the primary has already given up on (`wal_status =
+ * 'lost'`: their WAL is gone, a replica can no longer stream from them). A
+ * lost slot cannot be reused, not even by a fresh `pg_basebackup -S`, so the
+ * apply drops it and the normal create step makes a fresh one. In-use slots
+ * are left alone.
+ */
+export function dropLostPhysicalSlotsSql(): string {
+  const managedSlotPattern = `${MANAGED_SLOT_PREFIX}%`;
+  return [
+    `SELECT pg_catalog.pg_drop_replication_slot(slot_name)`,
+    `FROM pg_catalog.pg_replication_slots`,
+    `WHERE slot_name LIKE ${quoteLiteral(managedSlotPattern)}`,
+    `  AND slot_type = 'physical' AND wal_status = 'lost' AND NOT active;`,
+  ].join("\n");
+}
+
+/**
+ * How much WAL each managed slot is holding back, one row per slot:
+ * name, whether a replica is attached, `wal_status`, bytes between the
+ * primary's WAL position and what the slot still needs, and the bytes left
+ * before the `max_slot_wal_keep_size` cap invalidates it (-1 with no cap).
+ * Primary only (`pg_current_wal_lsn()` does not run on a standby).
+ */
+export function managedSlotRetentionSql(): string {
+  const managedSlotPattern = `${MANAGED_SLOT_PREFIX}%`;
+  return [
+    `SELECT slot_name, active::text, COALESCE(wal_status, ''),`,
+    `  COALESCE(pg_catalog.pg_wal_lsn_diff(pg_catalog.pg_current_wal_lsn(), restart_lsn), 0)::bigint,`,
+    `  COALESCE(safe_wal_size, -1)::bigint`,
+    `FROM pg_catalog.pg_replication_slots`,
+    `WHERE slot_name LIKE ${quoteLiteral(managedSlotPattern)}`,
+    `  AND slot_type = 'physical'`,
+    `ORDER BY slot_name;`,
   ].join("\n");
 }
 

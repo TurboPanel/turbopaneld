@@ -19,6 +19,7 @@ import {
   createReplicationRoleSql,
   databaseExistsSql,
   dropDatabaseSql,
+  dropLostPhysicalSlotsSql,
   dropPhysicalSlotSql,
   dropRoleSql,
   ensureProxySqlMonitorRoleSql,
@@ -27,6 +28,7 @@ import {
   listDatabasesForRoleReleaseSql,
   listManagedSlotsSql,
   type ManagedDatabasePrivilege,
+  managedSlotRetentionSql,
   primaryReplicationStatusSql,
   promoteSql,
   quoteIdentifier,
@@ -48,6 +50,7 @@ import type {
   ManagedEngineReplicationRuntime,
   ManagedEngineRuntime,
   ManagedReplicationObservedHealth,
+  ManagedSlotRetention,
 } from "./types.ts";
 import { probeStandbyState, volumeMountArgs } from "./standby-probe.ts";
 
@@ -279,6 +282,18 @@ async function releaseRoleObjects(
   });
 }
 
+/** Drop managed slots that are not wanted (a removed member's leftovers). */
+async function pruneOrphanSlots(
+  ctx: ManagedEngineContext,
+  desired: ReadonlySet<string>,
+): Promise<void> {
+  const rows = await parsePsqlRows(ctx, listManagedSlotsSql());
+  await forEachSequential(rows, async ([slotName]) => {
+    if (!slotName || desired.has(slotName)) return;
+    await runPsql(ctx, dropPhysicalSlotSql(slotName));
+  });
+}
+
 const postgresReplicationRuntime: ManagedEngineReplicationRuntime = {
   async ensurePrimary(ctx, spec) {
     await runPsql(
@@ -287,17 +302,19 @@ const postgresReplicationRuntime: ManagedEngineReplicationRuntime = {
     );
 
     const desired = new Set(spec.desiredSlots);
+    // A slot the primary already gave up on (its WAL is gone) cannot serve a
+    // replica again, not even a freshly re-seeded one: drop it so the create
+    // step below makes a usable slot.
+    await runPsql(ctx, dropLostPhysicalSlotsSql());
     await forEachSequential(
       desired,
       (slot) => runPsql(ctx, createPhysicalSlotSql(slot)),
     );
 
-    const rows = await parsePsqlRows(ctx, listManagedSlotsSql());
-    await forEachSequential(rows, async ([slotName]) => {
-      if (!slotName || desired.has(slotName)) return;
-      await runPsql(ctx, dropPhysicalSlotSql(slotName));
-    });
+    await pruneOrphanSlots(ctx, desired);
   },
+
+  pruneOrphanSlots: (ctx, desired) => pruneOrphanSlots(ctx, new Set(desired)),
 
   probeStandbyData: probePostgresStandbyData,
 
@@ -438,8 +455,10 @@ const postgresReplicationRuntime: ManagedEngineReplicationRuntime = {
     const observedAt = new Date().toISOString();
     if (role === "primary") {
       const rows = await parsePsqlRows(ctx, primaryReplicationStatusSql());
+      const slotRetention = await readSlotRetention(ctx);
+      const withSlots = slotRetention === undefined ? {} : { slotRetention };
       if (rows.length === 0) {
-        return { state: "unknown", observedAt };
+        return { state: "unknown", observedAt, ...withSlots };
       }
       const [state, lagBytesRaw] = rows[0]!;
       const lagBytes = Number(lagBytesRaw);
@@ -447,6 +466,7 @@ const postgresReplicationRuntime: ManagedEngineReplicationRuntime = {
         state: state || "unknown",
         ...(Number.isFinite(lagBytes) ? { lagBytes } : {}),
         observedAt,
+        ...withSlots,
       };
     }
     const rows = await parsePsqlRows(ctx, standbyReplicationStatusSql());
@@ -456,6 +476,67 @@ const postgresReplicationRuntime: ManagedEngineReplicationRuntime = {
     return standbyHealthFromRow(rows[0]!, observedAt);
   },
 };
+
+const SLOT_SEVERITY: Record<ManagedSlotRetention["state"], number> = {
+  ok: 0,
+  lagging: 1,
+  critical: 2,
+};
+
+function slotState(
+  walStatus: string,
+): ManagedSlotRetention["state"] {
+  // `unreserved`: past the cap, WAL may go at the next checkpoint. `lost`:
+  // already gone. `extended`: held beyond `max_wal_size`, still safe.
+  if (walStatus === "lost" || walStatus === "unreserved") return "critical";
+  if (walStatus === "extended") return "lagging";
+  return "ok";
+}
+
+/**
+ * Rows of `managedSlotRetentionSql` (name, active, wal_status, retained
+ * bytes, safe bytes) to the worst slot's state. `undefined` when the primary
+ * has no managed slot (a single-member cluster).
+ */
+export function slotRetentionFromRows(
+  rows: readonly string[][],
+): ManagedSlotRetention | undefined {
+  const slots = rows.filter((row) => row[0]).map(slotFromRow);
+  if (slots.length === 0) return undefined;
+  const worst = slots.reduce((a, b) =>
+    SLOT_SEVERITY[b.state] > SLOT_SEVERITY[a.state] ||
+      (b.state === a.state && (b.retainedBytes ?? 0) > (a.retainedBytes ?? 0))
+      ? b
+      : a
+  );
+  return worst.state === "ok" ? { state: "ok" } : worst;
+}
+
+function slotFromRow(row: readonly string[]): ManagedSlotRetention {
+  const [slot, active, walStatus = "", retainedRaw, safeRaw] = row;
+  const safeBytes = optionalNumber(safeRaw);
+  return {
+    state: slotState(walStatus),
+    slot,
+    ...(walStatus ? { walStatus } : {}),
+    retainedBytes: optionalNumber(retainedRaw) ?? 0,
+    ...(safeBytes !== undefined && safeBytes >= 0 ? { safeBytes } : {}),
+    active: active === "true",
+  };
+}
+
+/** Best effort: a failed slot read must never fail the health read. */
+async function readSlotRetention(
+  ctx: ManagedEngineContext,
+): Promise<ManagedSlotRetention | undefined> {
+  try {
+    return slotRetentionFromRows(
+      await parsePsqlRows(ctx, managedSlotRetentionSql()),
+    );
+  } catch {
+    return undefined;
+  }
+}
 
 function optionalNumber(raw: string | undefined): number | undefined {
   if (raw === undefined || raw === "") return undefined;

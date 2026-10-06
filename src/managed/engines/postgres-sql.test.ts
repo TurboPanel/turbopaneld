@@ -7,6 +7,7 @@ import {
   createReplicationRoleSql,
   databaseExistsSql,
   dropDatabaseSql,
+  dropLostPhysicalSlotsSql,
   dropPhysicalSlotSql,
   dropRoleSql,
   ensureProxySqlMonitorRoleSql,
@@ -15,6 +16,7 @@ import {
   listDatabasesForRoleReleaseSql,
   listManagedSlotsSql,
   MANAGED_SLOT_PREFIX,
+  managedSlotRetentionSql,
   primaryReplicationStatusSql,
   promoteSql,
   quoteIdentifier,
@@ -122,6 +124,8 @@ test("replication SQL builders use quoted identifiers and managed slot prefix", 
 
   const dropSlot = dropPhysicalSlotSql("tp_member_2");
   assertEquals(dropSlot.includes("pg_drop_replication_slot"), true);
+  // A slot a replica is attached to is skipped, not an error.
+  assertEquals(dropSlot.includes("AND NOT active"), true);
 
   assertEquals(listManagedSlotsSql().includes("tp_member_"), true);
   assertEquals(
@@ -205,4 +209,20 @@ test("listDatabasesForRoleReleaseSql covers connectable non-template databases o
     true,
   );
   assertThrows(() => listDatabasesForRoleReleaseSql("bad\nname"));
+});
+
+test("dropLostPhysicalSlotsSql only touches inactive, lost, managed slots", () => {
+  const sql = dropLostPhysicalSlotsSql();
+  assertEquals(sql.includes("pg_drop_replication_slot"), true);
+  assertEquals(sql.includes("LIKE 'tp_member_%'"), true);
+  assertEquals(sql.includes("wal_status = 'lost'"), true);
+  assertEquals(sql.includes("NOT active"), true);
+});
+
+test("managedSlotRetentionSql reads retained bytes and safe size per managed slot", () => {
+  const sql = managedSlotRetentionSql();
+  assertEquals(sql.includes("wal_status"), true);
+  assertEquals(sql.includes("safe_wal_size"), true);
+  assertEquals(sql.includes("pg_current_wal_lsn()"), true);
+  assertEquals(sql.includes("LIKE 'tp_member_%'"), true);
 });

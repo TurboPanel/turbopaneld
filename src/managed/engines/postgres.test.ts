@@ -19,6 +19,7 @@ import type { ManagedApplyCredential } from "../../contracts/commands-contracts.
 import { getManagedEngineRuntime } from "./index.ts";
 import {
   postgresManagedEngineRuntime,
+  slotRetentionFromRows,
   standbyHealthFromRow,
 } from "./postgres.ts";
 import type { ManagedEngineContext, ManagedEngineExec } from "./types.ts";
@@ -1152,4 +1153,130 @@ test("standbyHealthFromRow drops NULL or malformed LSNs", () => {
     state: "unknown",
     observedAt: at,
   });
+});
+
+const GIB = 1024 * 1024 * 1024;
+
+test("slotRetentionFromRows is absent without slots and ok when every slot is reserved", () => {
+  assertEquals(slotRetentionFromRows([]), undefined);
+  assertEquals(
+    slotRetentionFromRows([["tp_member_2", "true", "reserved", "4096", "-1"]]),
+    { state: "ok" },
+  );
+});
+
+test("slotRetentionFromRows reports the worst slot: lost beats unreserved beats extended", () => {
+  const rows = [
+    ["tp_member_2", "false", "extended", String(2 * GIB), String(2 * GIB)],
+    ["tp_member_3", "false", "lost", String(4 * GIB), "0"],
+    ["tp_member_4", "false", "unreserved", String(3 * GIB), "100"],
+  ];
+  assertEquals(slotRetentionFromRows(rows), {
+    state: "critical",
+    slot: "tp_member_3",
+    walStatus: "lost",
+    retainedBytes: 4 * GIB,
+    safeBytes: 0,
+    active: false,
+  });
+  assertEquals(slotRetentionFromRows(rows.slice(0, 1)), {
+    state: "lagging",
+    slot: "tp_member_2",
+    walStatus: "extended",
+    retainedBytes: 2 * GIB,
+    safeBytes: 2 * GIB,
+    active: false,
+  });
+});
+
+test("slotRetentionFromRows picks the heavier of two equally bad slots and drops a missing cap", () => {
+  const result = slotRetentionFromRows([
+    ["tp_member_2", "false", "extended", "100", "-1"],
+    ["tp_member_3", "true", "extended", "900", "-1"],
+  ]);
+  assertEquals(result?.slot, "tp_member_3");
+  assertEquals(result?.safeBytes, undefined);
+  assertEquals(result?.active, true);
+});
+
+test("postgres primary readHealth carries slot retention, even with no replica attached", async () => {
+  const replication = postgresManagedEngineRuntime.replication;
+  if (!replication?.readHealth) {
+    throw new TypeError("expected postgres readHealth");
+  }
+  const exec: ManagedEngineExec = (_argv, input) =>
+    Promise.resolve({
+      success: true,
+      stdout: input?.includes("safe_wal_size")
+        ? "tp_member_2\tfalse\tunreserved\t5000\t10\n"
+        : "",
+      stderr: "",
+    });
+  const health = await replication.readHealth(buildContext(exec), "primary");
+  assertEquals(health.state, "unknown");
+  assertEquals(health.slotRetention?.state, "critical");
+  assertEquals(health.slotRetention?.slot, "tp_member_2");
+});
+
+test("postgres primary readHealth still answers when the slot query fails", async () => {
+  const replication = postgresManagedEngineRuntime.replication;
+  if (!replication?.readHealth) {
+    throw new TypeError("expected postgres readHealth");
+  }
+  const exec: ManagedEngineExec = (_argv, input) =>
+    Promise.resolve(
+      input?.includes("safe_wal_size")
+        ? { success: false, stdout: "", stderr: "no such column" }
+        : { success: true, stdout: "streaming\t8\n", stderr: "" },
+    );
+  const health = await replication.readHealth(buildContext(exec), "primary");
+  assertEquals(health.state, "streaming");
+  assertEquals("slotRetention" in health, false);
+});
+
+test("postgres ensurePrimary drops lost slots before creating the desired ones", async () => {
+  const replication = postgresManagedEngineRuntime.replication;
+  if (!replication?.ensurePrimary) {
+    throw new TypeError("expected postgres ensurePrimary");
+  }
+  const { exec, calls } = recordingExec();
+  await replication.ensurePrimary(buildContext(exec), {
+    username: "tp_repl",
+    password: "repl-pass",
+    desiredSlots: ["tp_member_2"],
+  });
+  const inputs = calls.map((c) => c.input ?? "");
+  const dropLost = inputs.findIndex((i) => i.includes("wal_status = 'lost'"));
+  const create = inputs.findIndex((i) =>
+    i.includes("pg_create_physical_replication_slot")
+  );
+  assertEquals(dropLost >= 0 && dropLost < create, true);
+});
+
+test("postgres pruneOrphanSlots drops every managed slot not listed and keeps the listed ones", async () => {
+  const replication = postgresManagedEngineRuntime.replication;
+  if (!replication?.pruneOrphanSlots) {
+    throw new TypeError("expected postgres pruneOrphanSlots");
+  }
+  const { exec, calls } = recordingExec();
+  const lister: ManagedEngineExec = (argv, input) =>
+    input?.includes("SELECT slot_name FROM pg_catalog.pg_replication_slots")
+      ? Promise.resolve({
+        success: true,
+        stdout: "tp_member_2\ntp_member_3\n",
+        stderr: "",
+      })
+      : exec(argv, input);
+  await replication.pruneOrphanSlots(buildContext(lister), []);
+  const drops = calls.map((c) => c.input ?? "").filter((i) =>
+    i.includes("pg_drop_replication_slot")
+  );
+  assertEquals(drops.length, 2);
+  await replication.pruneOrphanSlots(buildContext(lister), ["tp_member_2"]);
+  assertEquals(
+    calls.map((c) => c.input ?? "").filter((i) =>
+      i.includes("pg_drop_replication_slot") && i.includes("tp_member_2")
+    ).length,
+    1,
+  );
 });

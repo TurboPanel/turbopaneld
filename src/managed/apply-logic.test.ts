@@ -9,7 +9,12 @@ import type {
 } from "../contracts/commands-contracts.ts";
 import { resolveLayout } from "../paths/layout.ts";
 import { withTempLayout } from "../testing/temp-layout.ts";
-import { applyManagedEngineState, buildNeedsResyncMember } from "./apply.ts";
+import {
+  applyManagedEngineState,
+  buildNeedsResyncMember,
+  collectMemberHealth,
+} from "./apply.ts";
+import type { ManagedEngineContext } from "./engines/types.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -693,4 +698,48 @@ test("buildEngineExec gives up after the retry budget on a persistent restart wi
   assertEquals(result.success, false);
   // One initial attempt plus ENGINE_EXEC_RETRIES (10) retries.
   assertEquals(calls, 11);
+});
+
+/** Minimal engine whose replication runtime records the slot sweeps. */
+function slotSweepEngine(sweeps: string[][]) {
+  return {
+    replication: {
+      pruneOrphanSlots: (_ctx: ManagedEngineContext, desired: string[]) => {
+        sweeps.push([...desired]);
+        return Promise.resolve();
+      },
+    },
+  } as unknown as Parameters<typeof collectMemberHealth>[1];
+}
+
+const SLOT_SWEEP_CTX = {} as ManagedEngineContext;
+const SLOT_SWEEP_MEMBER_ID = "00000000-0000-4000-8000-0000000000aa";
+
+test("a primary with no replication payload (last replica removed) sweeps every leftover slot", async () => {
+  const sweeps: string[][] = [];
+  const member = await collectMemberHealth(
+    SLOT_SWEEP_CTX,
+    slotSweepEngine(sweeps),
+    {
+      memberId: SLOT_SWEEP_MEMBER_ID,
+      memberRole: "primary",
+    } as unknown as ManagedApplyPayload,
+    [],
+  );
+  assertEquals(sweeps, [[]]);
+  assertEquals(member?.status, "ready");
+});
+
+test("a replica without a replication payload never sweeps slots", async () => {
+  const sweeps: string[][] = [];
+  await collectMemberHealth(
+    SLOT_SWEEP_CTX,
+    slotSweepEngine(sweeps),
+    {
+      memberId: SLOT_SWEEP_MEMBER_ID,
+      memberRole: "replica",
+    } as unknown as ManagedApplyPayload,
+    [],
+  );
+  assertEquals(sweeps, []);
 });

@@ -615,7 +615,7 @@ async function returnStandbyNeedsResync(
   );
 }
 
-async function collectMemberHealth(
+export async function collectMemberHealth(
   ctx: ManagedEngineContext,
   engine: ReturnType<typeof getManagedEngineRuntime>,
   payload: ManagedApplyPayload,
@@ -647,6 +647,15 @@ async function collectMemberHealth(
       status: "ready",
       replication: health,
     };
+  }
+
+  // A primary with no replication payload is a single-member cluster: every
+  // replication slot it still holds belongs to a replica that was removed, and
+  // would keep all WAL until the disk is full.
+  if (
+    payload.memberRole === "primary" && engine.replication?.pruneOrphanSlots
+  ) {
+    await engine.replication.pruneOrphanSlots(ctx, []);
   }
 
   return {
