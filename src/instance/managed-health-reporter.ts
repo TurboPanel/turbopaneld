@@ -14,8 +14,10 @@
  * the replica's reading as unknown once it passes the freshness window.
  */
 
-import type { DaemonMessage } from "../contracts/cell-messages.ts";
-import type { ManagedHealthReportMember } from "../contracts/cell-messages.ts";
+import type {
+  DaemonMessage,
+  ManagedHealthReportMember,
+} from "../contracts/cell-messages.ts";
 import { type LayoutPaths, resolveLayout } from "../paths/layout.ts";
 import {
   listManagedHaMembers,
