@@ -1,0 +1,102 @@
+/**
+ * How a native app starts when its author typed no start command.
+ *
+ * Decided once, at build time, from the built tree (`resolveNativeAppStart` in
+ * `../release/build.ts`), and recorded with the release. The
+ * unit renderer cannot look for itself: a published release is root-owned and
+ * readable only by the site owner's Linux user and its group, which the daemon
+ * is not in. Recording it also means a rollback restarts the old release the
+ * way it was started when it was live, not the way the newest build would be.
+ */
+
+/**
+ * Next's own CLI, relative to the release root. Stable from Next 9 through 16.
+ * Run with the vendored Node directly, never through `node_modules/.bin/next`,
+ * whose `#!/usr/bin/env node` shebang depends on `PATH`.
+ */
+export const NEXT_CLI_PATH = "node_modules/next/dist/bin/next";
+
+/**
+ * Address every native app binds. The unit also exports it as `HOST` and
+ * `HOSTNAME`, but `next start` reads neither (only its `--hostname` flag), so
+ * the Next entry passes it on the command line too.
+ */
+export const NATIVE_APP_BIND_ADDRESS = "127.0.0.1";
+
+export type NativeAppStart =
+  /** `<node> <path>` — a Next standalone `server.js`, `main`, `index.js`, … */
+  | { kind: "file"; path: string }
+  /** `<node> --run start` — the package's own `start` script. */
+  | { kind: "start-script" }
+  /** `<node> node_modules/next/dist/bin/next start --hostname 127.0.0.1 --port <port>`. */
+  | { kind: "next-start" };
+
+const SAFE_START_PATH_RE = /^[A-Za-z0-9._/-]+$/;
+
+/**
+ * A relative path that can sit in an `ExecStart` line as one argument: no
+ * spaces, quotes, `%` (systemd specifiers) or `$`, no leading `/` or `-` (a
+ * leading dash would be read as a Node option), and no `..` segment. Leading
+ * `./` is dropped, so `"main": "./dist/index.js"` renders as `dist/index.js`.
+ */
+export function normalizeNativeAppStartPath(
+  value: string,
+): string | undefined {
+  let path = value.trim();
+  while (path.startsWith("./")) path = path.slice(2);
+  if (path.length === 0 || path.length > 200) return undefined;
+  if (!SAFE_START_PATH_RE.test(path)) return undefined;
+  if (path.startsWith("/") || path.startsWith("-")) return undefined;
+  if (path.endsWith("/")) return undefined;
+  const segments = path.split("/");
+  if (segments.some((segment) => segment === "" || segment === "..")) {
+    return undefined;
+  }
+  return path;
+}
+
+/** Shape check for a value read back from a release record. */
+export function isNativeAppStart(value: unknown): value is NativeAppStart {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const record = value as Record<string, unknown>;
+  if (record.kind === "start-script" || record.kind === "next-start") {
+    return true;
+  }
+  return record.kind === "file" && typeof record.path === "string" &&
+    normalizeNativeAppStartPath(record.path) === record.path;
+}
+
+/** The `ExecStart` argv (no shell) for one recorded start. */
+export function nativeAppStartExec(
+  start: NativeAppStart,
+  nodeBinary: string,
+  listenPort: number,
+): string {
+  switch (start.kind) {
+    case "start-script":
+      return `${nodeBinary} --run start`;
+    case "next-start":
+      return `${nodeBinary} ${NEXT_CLI_PATH} start --hostname ${NATIVE_APP_BIND_ADDRESS} --port ${listenPort}`;
+    case "file": {
+      const path = normalizeNativeAppStartPath(start.path);
+      if (path === undefined) {
+        throw new TypeError(`unsafe native app start file: ${start.path}`);
+      }
+      return `${nodeBinary} ${path}`;
+    }
+  }
+}
+
+/** Plain words for the build transcript. */
+export function describeNativeAppStart(start: NativeAppStart): string {
+  switch (start.kind) {
+    case "start-script":
+      return "the package.json start script (node --run start)";
+    case "next-start":
+      return `next start on ${NATIVE_APP_BIND_ADDRESS}`;
+    case "file":
+      return `node ${start.path}`;
+  }
+}

@@ -17,6 +17,10 @@
 import { join } from "@std/path";
 import { writeComposeFileAtomic } from "../compose-files.ts";
 import { RELEASE_METADATA_DIRNAME } from "./release-layout.ts";
+import {
+  isNativeAppStart,
+  type NativeAppStart,
+} from "../native/start-entry.ts";
 
 export const RELEASE_MANIFEST_FILENAME = "release.json";
 
@@ -54,6 +58,15 @@ export type ReleaseManifestV1 = {
    */
   standaloneOutput?: boolean;
   staticExport?: boolean;
+  /**
+   * How the unit starts this release when its author typed no start command
+   * (`../native/start-entry.ts`), decided from the built tree. Recorded for the
+   * same reason as the two above: a rollback cannot look inside the release
+   * (it is readable only by the site owner's Linux user), and must restart the
+   * old release the way it ran when it was live. Optional: an older record
+   * reads back as `undefined`, which means `node server.js`.
+   */
+  nativeStart?: NativeAppStart;
   /**
    * Railpack lane only: the OCI image this release produced, and the pinned
    * tools that produced it.
@@ -100,6 +113,11 @@ function isReleaseManifestV1(value: unknown): value is ReleaseManifestV1 {
   for (const key of ["standaloneOutput", "staticExport"]) {
     const field = record[key];
     if (field !== undefined && typeof field !== "boolean") return false;
+  }
+  if (
+    record.nativeStart !== undefined && !isNativeAppStart(record.nativeStart)
+  ) {
+    return false;
   }
   for (
     const key of [

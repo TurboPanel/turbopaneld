@@ -30,6 +30,11 @@ import type {
 import type { ReleaseOutputHandler } from "./checkout.ts";
 import { normalizeNodePackageManagerCommand } from "../node-package-manager.ts";
 import {
+  describeNativeAppStart,
+  type NativeAppStart,
+  normalizeNativeAppStartPath,
+} from "../native/start-entry.ts";
+import {
   type ContainedPath,
   copyContainedTree,
   inspectContainedDir,
@@ -416,24 +421,84 @@ async function yarnIsBerry(workingDir: string): Promise<boolean> {
 
 type NodeManagerName = "pnpm" | "yarn" | "npm";
 
-/** The manager and major version `package.json`'s `packageManager` pins. */
-async function readPackageManagerPin(
-  workingDir: string,
-): Promise<{ name: NodeManagerName; major: number } | undefined> {
+type PackageJson = Record<string, unknown>;
+
+/**
+ * `package.json` at the root of `dir`, parsed — only when it is a regular file
+ * (not a link: the checkout is tenant content, and a link named package.json
+ * must not make the daemon read whatever it points at) holding a JSON object.
+ */
+async function readPackageJson(dir: string): Promise<PackageJson | undefined> {
+  const path = join(dir, "package.json");
+  if (!(await regularFileExists(path))) return undefined;
   try {
-    const raw = await Deno.readTextFile(join(workingDir, "package.json"));
-    const pin = JSON.parse(raw)?.packageManager;
-    const match = typeof pin === "string"
-      ? /^(pnpm|yarn|npm)@(\d+)/.exec(pin)
-      : null;
-    if (!match) return undefined;
-    return {
-      name: match[1] as NodeManagerName,
-      major: Number(match[2]),
-    };
+    const parsed: unknown = JSON.parse(await Deno.readTextFile(path));
+    if (typeof parsed !== "object" || parsed === null) return undefined;
+    return Array.isArray(parsed) ? undefined : parsed as PackageJson;
   } catch {
     return undefined;
   }
+}
+
+/** A non-empty `scripts.<name>` from `package.json`, or `undefined`. */
+function packageScript(pkg: PackageJson, name: string): string | undefined {
+  const scripts = pkg.scripts;
+  if (typeof scripts !== "object" || scripts === null) return undefined;
+  const value = (scripts as Record<string, unknown>)[name];
+  return typeof value === "string" && value.trim().length > 0
+    ? value
+    : undefined;
+}
+
+/** The manager and major version `package.json`'s `packageManager` pins. */
+function packageManagerPin(
+  pkg: PackageJson | undefined,
+): { name: NodeManagerName; major: number } | undefined {
+  const pin = pkg?.packageManager;
+  const match = typeof pin === "string"
+    ? /^(pnpm|yarn|npm)@(\d+)/.exec(pin)
+    : null;
+  if (!match) return undefined;
+  return { name: match[1] as NodeManagerName, major: Number(match[2]) };
+}
+
+/** Which package manager a native build uses, and what told us. */
+type NodeManagerChoice = {
+  manager: NodeManagerName;
+  pin: { name: NodeManagerName; major: number } | undefined;
+  hasPnpmLock: boolean;
+  hasYarnLock: boolean;
+  pkg: PackageJson | undefined;
+};
+
+/**
+ * The package manager for a native build, by the usual convention: the operator's `build.packageManager` wins, then `package.json`'s
+ * `packageManager` pin, then the lockfile (`pnpm-lock.yaml` > `yarn.lock` >
+ * npm). `undefined` when there is no `package.json` at all.
+ */
+async function resolveNodeManager(params: {
+  packageManager?: EnvironmentDeploySourceBuild["packageManager"];
+  workingDir: string;
+}): Promise<NodeManagerChoice | undefined> {
+  const has = (name: string) =>
+    regularFileExists(join(params.workingDir, name));
+  if (!(await has("package.json"))) return undefined;
+  const [hasPnpmLock, hasYarnLock, pkg] = await Promise.all([
+    has("pnpm-lock.yaml"),
+    has("yarn.lock"),
+    readPackageJson(params.workingDir),
+  ]);
+  let lockfileManager: NodeManagerName = "npm";
+  if (hasPnpmLock) lockfileManager = "pnpm";
+  else if (hasYarnLock) lockfileManager = "yarn";
+  const pin = packageManagerPin(pkg);
+  return {
+    manager: params.packageManager ?? pin?.name ?? lockfileManager,
+    pin,
+    hasPnpmLock,
+    hasYarnLock,
+    pkg,
+  };
 }
 
 /**
@@ -468,37 +533,54 @@ export async function deriveNodeInstallCommand(params: {
   packageManager?: EnvironmentDeploySourceBuild["packageManager"];
   workingDir: string;
 }): Promise<string | undefined> {
-  // Regular files only: the checkout is tenant content, and a link named
-  // package.json must not make the daemon read whatever it points at.
-  const has = (name: string) =>
-    regularFileExists(join(params.workingDir, name));
-  if (!(await has("package.json"))) return undefined;
-
-  const hasPnpmLock = await has("pnpm-lock.yaml");
-  const hasYarnLock = await has("yarn.lock");
-  let lockfileManager: NodeManagerName = "npm";
-  if (hasPnpmLock) lockfileManager = "pnpm";
-  else if (hasYarnLock) lockfileManager = "yarn";
-  const pin = await readPackageManagerPin(params.workingDir);
-  const manager = params.packageManager ?? pin?.name ?? lockfileManager;
+  const choice = await resolveNodeManager(params);
+  if (!choice) return undefined;
+  const { manager, pin } = choice;
 
   if (manager === "pnpm") {
     return [
       "corepack pnpm install",
-      ...(hasPnpmLock ? ["--frozen-lockfile"] : []),
+      ...(choice.hasPnpmLock ? ["--frozen-lockfile"] : []),
       ...pnpmDevDepsArgs(pin?.name === "pnpm" ? pin.major : undefined),
     ].join(" ");
   }
   if (manager === "yarn") {
     // CI=1 already makes Berry installs immutable when a lockfile exists.
     if (await yarnIsBerry(params.workingDir)) return "corepack yarn install";
-    return hasYarnLock
+    return choice.hasYarnLock
       ? "corepack yarn install --frozen-lockfile --production=false"
       : "corepack yarn install --production=false";
   }
-  return (await has("package-lock.json"))
+  const [hasLock, hasShrinkwrap] = await Promise.all([
+    regularFileExists(join(params.workingDir, "package-lock.json")),
+    regularFileExists(join(params.workingDir, "npm-shrinkwrap.json")),
+  ]);
+  return hasLock || hasShrinkwrap
     ? "npm ci --include=dev"
     : "npm install --include=dev";
+}
+
+/**
+ * Derive the build command for a native-app build: the package's own `build`
+ * script, run through the same package manager the install picked
+ * ({@link resolveNodeManager}) — `corepack pnpm run build`,
+ * `corepack yarn run build`, or `npm run build`. Corepack, because bare
+ * `pnpm` / `yarn` are not on the native build `PATH`.
+ *
+ * Returns `undefined` when there is no `package.json` or it has no `build`
+ * script: a plain Node app with nothing to compile ships as installed.
+ */
+export async function deriveNodeBuildCommand(params: {
+  packageManager?: EnvironmentDeploySourceBuild["packageManager"];
+  workingDir: string;
+}): Promise<string | undefined> {
+  const choice = await resolveNodeManager(params);
+  if (!choice?.pkg || packageScript(choice.pkg, "build") === undefined) {
+    return undefined;
+  }
+  return choice.manager === "npm"
+    ? "npm run build"
+    : `corepack ${choice.manager} run build`;
 }
 
 /** @deprecated Use {@link normalizeNodePackageManagerCommand}. */
@@ -506,42 +588,81 @@ export {
   normalizeNodePackageManagerCommand as normalizeNodeBuildCommand,
 } from "../node-package-manager.ts";
 
+/** What the transcript says decided a derived command. */
+function derivationSource(params: ReleaseBuildParams): string {
+  return params.build.packageManager ?? "lockfile detection";
+}
+
+/**
+ * The install command: the author's, else (native app only) one derived from
+ * the package manager / lockfile ({@link deriveNodeInstallCommand}).
+ */
+async function resolveInstallCommand(
+  params: ReleaseBuildParams,
+): Promise<string | undefined> {
+  const explicit = params.build.installCommand;
+  if (explicit !== undefined || !params.nativeRuntime) return explicit;
+  const derived = await deriveNodeInstallCommand({
+    packageManager: params.build.packageManager,
+    workingDir: params.workingDir,
+  });
+  if (derived !== undefined) {
+    params.onOutput?.(
+      "stdout",
+      `derived install command from ${derivationSource(params)}`,
+    );
+  }
+  return derived;
+}
+
+/**
+ * The build command: the author's (with bare `pnpm` / `yarn` put through
+ * Corepack on the native lane), else (native app only) the package's `build`
+ * script ({@link deriveNodeBuildCommand}).
+ */
+async function resolveBuildCommand(
+  params: ReleaseBuildParams,
+): Promise<string | undefined> {
+  const explicit = params.build.buildCommand;
+  if (!params.nativeRuntime) return explicit;
+  if (explicit === undefined) {
+    const derived = await deriveNodeBuildCommand({
+      packageManager: params.build.packageManager,
+      workingDir: params.workingDir,
+    });
+    if (derived !== undefined) {
+      params.onOutput?.(
+        "stdout",
+        `derived build command from ${
+          derivationSource(params)
+        } (package.json has a build script)`,
+      );
+    }
+    return derived;
+  }
+  const normalized = normalizeNodePackageManagerCommand(explicit);
+  if (explicit && normalized !== explicit) {
+    params.onOutput?.(
+      "stdout",
+      "normalized build command for Corepack (bare pnpm/yarn is not on the native build PATH)",
+    );
+    return normalized;
+  }
+  return explicit;
+}
+
 /**
  * Run `installCommand` then `buildCommand`. A missing command is a no-op — a
  * source with neither is a valid "ship the repository as-is" release — except
- * for a native-app build, where a missing `installCommand` is derived from the
- * package manager / lockfile so all three managers deploy without the operator
- * typing an install line.
+ * for a native-app build, where both are derived by the usual Node convention: the install from the package manager / lockfile, the build from the
+ * package's `build` script. So all three managers deploy without the operator
+ * typing a command, and an explicit command always wins.
  */
 export async function runReleaseBuild(
   params: ReleaseBuildParams,
 ): Promise<void> {
-  let installCommand = params.build.installCommand;
-  if (installCommand === undefined && params.nativeRuntime) {
-    installCommand = await deriveNodeInstallCommand({
-      packageManager: params.build.packageManager,
-      workingDir: params.workingDir,
-    });
-    if (installCommand !== undefined) {
-      params.onOutput?.(
-        "stdout",
-        `derived install command from ${
-          params.build.packageManager ?? "lockfile detection"
-        }`,
-      );
-    }
-  }
-  let buildCommand = params.build.buildCommand;
-  if (buildCommand && params.nativeRuntime) {
-    const normalized = normalizeNodePackageManagerCommand(buildCommand);
-    if (normalized !== buildCommand) {
-      params.onOutput?.(
-        "stdout",
-        "normalized build command for Corepack (bare pnpm/yarn is not on the native build PATH)",
-      );
-      buildCommand = normalized;
-    }
-  }
+  const installCommand = await resolveInstallCommand(params);
+  const buildCommand = await resolveBuildCommand(params);
   const commands = [
     installCommand,
     buildCommand,
@@ -707,6 +828,19 @@ export type NativeAppBuildContext = {
    * so a build that swapped its checkout for a link is refused.
    */
   containmentRoot?: string;
+  /**
+   * The author's `outputDirectory`, relative to `workingDir`. It is the
+   * release root as declared, so it is never second-guessed: no Next fold, no
+   * static-export detection; only the start is looked for inside it.
+   */
+  outputDirectory?: string;
+  /**
+   * Work out how the release starts ({@link NativeAppBuildOutput.start}). Set
+   * when the author typed neither a start command nor a `startupFile`; a build
+   * where nothing can start the app then fails here, with the fix spelled out,
+   * rather than promoting a release whose unit can only crash-loop.
+   */
+  detectStart?: boolean;
   onOutput?: ReleaseOutputHandler;
 };
 
@@ -725,6 +859,12 @@ export type NativeAppBuildOutput = {
    * to supervise, so a native unit would be a unit that can never come up.
    */
   staticExport: boolean;
+  /**
+   * How the unit starts the release when the author said nothing
+   * (`detectStart`). Recorded with the release so a rollback restarts it the
+   * same way.
+   */
+  start?: NativeAppStart;
 };
 
 /**
@@ -732,8 +872,8 @@ export type NativeAppBuildOutput = {
  *
  * When `.next/standalone` exists, fold `.next/static` and `public/` into it
  * (the layout Next documents for a standalone deployment) and ship *that*
- * subtree — `server.js` then sits at the release root, which is exactly where
- * the generated systemd unit's default `ExecStart` looks for it.
+ * subtree — `server.js` then sits at the release root, and the unit runs
+ * `node server.js`.
  *
  * When the build instead emitted `output: 'export'` (an `out/` tree with an
  * `index.html` and no standalone server), that subtree is published as the
@@ -743,17 +883,38 @@ export type NativeAppBuildOutput = {
  * to re-declare `serviceKind` to get a working deploy. `out/` at the release
  * root is what lets the generated vhost serve `current` directly.
  *
- * Everything else ships the working tree unchanged, which is the correct answer
- * for a plain Node service.
+ * Everything else ships the working tree unchanged, and (with `detectStart`)
+ * {@link detectNativeAppStart} picks how it starts.
  */
 export async function prepareNativeAppBuildOutput(
   context: NativeAppBuildContext,
 ): Promise<NativeAppBuildOutput> {
-  if (context.framework === "node") {
-    return { standaloneOutput: false, staticExport: false };
-  }
-
   const tree = buildTree(context.workingDir, context.containmentRoot);
+  if (context.outputDirectory !== undefined) {
+    return await withDetectedStart(context, tree, context.outputDirectory, {
+      standaloneOutput: false,
+      staticExport: false,
+    });
+  }
+  if (context.framework !== "node") {
+    const next = await prepareNextOutput(context, tree);
+    if (next) return next;
+  }
+  return await withDetectedStart(context, tree, ".", {
+    standaloneOutput: false,
+    staticExport: false,
+  });
+}
+
+/**
+ * The Next.js shapes that change the release payload: a standalone server
+ * (folded and published, started with `node server.js`) or a static export
+ * (published, no process). `undefined` for any other tree.
+ */
+async function prepareNextOutput(
+  context: NativeAppBuildContext,
+  tree: BuildTree,
+): Promise<NativeAppBuildOutput | undefined> {
   if (!(await buildDirExists(tree, NEXT_STANDALONE_DIR))) {
     if (await hasNextStaticExport(context.workingDir, tree)) {
       context.onOutput?.(
@@ -772,7 +933,7 @@ export async function prepareNativeAppBuildOutput(
         'framework=next but neither .next/standalone nor an exported out/ was emitted — shipping the build tree as-is. Set `output: "standalone"` in next.config for a smaller release.',
       );
     }
-    return { standaloneOutput: false, staticExport: false };
+    return undefined;
   }
 
   await forEachSequential([
@@ -789,9 +950,136 @@ export async function prepareNativeAppBuildOutput(
     "stdout",
     "detected Next.js standalone output — publishing .next/standalone as the release",
   );
-  return {
+  const output: NativeAppBuildOutput = {
     outputDirectory: NEXT_STANDALONE_DIR,
     standaloneOutput: true,
     staticExport: false,
   };
+  if (context.detectStart) {
+    output.start = { kind: "file", path: STANDALONE_SERVER_FILE };
+    reportStart(context, output.start);
+  }
+  return output;
+}
+
+/** The file `next build` writes at the standalone root. */
+const STANDALONE_SERVER_FILE = "server.js";
+
+/** Files a plain Node app is started from when nothing else says (in order). */
+const DEFAULT_ENTRY_FILES = ["index.js", "server.js"] as const;
+
+function reportStart(context: NativeAppBuildContext, start: NativeAppStart) {
+  context.onOutput?.(
+    "stdout",
+    `no start command set — the app will start with ${
+      describeNativeAppStart(start)
+    }`,
+  );
+}
+
+/** `base` plus the detected start, when `detectStart` asked for one. */
+async function withDetectedStart(
+  context: NativeAppBuildContext,
+  tree: BuildTree,
+  releaseRoot: string,
+  base: NativeAppBuildOutput,
+): Promise<NativeAppBuildOutput> {
+  if (!context.detectStart) return base;
+  const start = await detectNativeAppStart(context.framework, tree, {
+    workingDir: context.workingDir,
+    releaseRoot,
+  });
+  if (!start) {
+    throw new Error(
+      "no start command: the release has no package.json start script, no " +
+        "Next.js build, no package.json main file, and no index.js or " +
+        "server.js at its root. Add a start script to package.json, or set a " +
+        "start command for this service.",
+    );
+  }
+  reportStart(context, start);
+  return { ...base, start };
+}
+
+/**
+ * True for a `start` script that is just `next start` (with or without its own
+ * flags). That one is run as Next's CLI with the platform's `--hostname` and
+ * `--port` instead: `next start` reads no hostname from the environment and
+ * binds every interface by default, which would put the app on the public
+ * address next to the proxy. A script that chains other commands is the
+ * author's and runs as written.
+ */
+function isPlainNextStart(script: string): boolean {
+  const trimmed = script.trim();
+  if (/[;&|]/.test(trimmed)) return false;
+  return /^next\s+start(?:\s|$)/.test(trimmed);
+}
+
+/**
+ * How a release starts when its author typed nothing, by the usual Node
+ * convention:
+ *
+ * 1. the `package.json` `start` script (`node --run start`; a plain
+ *    `next start` becomes Next's CLI bound to 127.0.0.1, see
+ *    {@link isPlainNextStart});
+ * 2. a Next.js app (`framework: next`, or a `.next/` build in the release
+ *    root) → `next start`;
+ * 3. the `package.json` `main` file, when it exists;
+ * 4. `index.js`, then `server.js`, at the release root.
+ *
+ * A Next standalone build never gets here: it always runs `node server.js`.
+ * `undefined` when nothing applies.
+ */
+async function detectNativeAppStart(
+  framework: NativeAppBuildContext["framework"],
+  tree: BuildTree,
+  params: { workingDir: string; releaseRoot: string },
+): Promise<NativeAppStart | undefined> {
+  // A declared release root that is not a real directory of the build tree
+  // (a link the build planted) is never read; the promote refuses it anyway.
+  if (
+    params.releaseRoot !== "." &&
+    !(await buildDirExists(tree, params.releaseRoot))
+  ) {
+    return undefined;
+  }
+  const rootDir = join(params.workingDir, params.releaseRoot);
+  const pkg = await readPackageJson(rootDir);
+  const nextAware = framework !== "node";
+  const startScript = pkg ? packageScript(pkg, "start") : undefined;
+  if (startScript !== undefined) {
+    return nextAware && isPlainNextStart(startScript)
+      ? { kind: "next-start" }
+      : { kind: "start-script" };
+  }
+  // `framework: next` alone identifies the checkout itself; a directory the
+  // author declared must hold the `.next/` build to be started as Next.
+  const declaredNext = framework === "next" && params.releaseRoot === ".";
+  if (
+    nextAware &&
+    (declaredNext ||
+      await buildDirExists(tree, join(params.releaseRoot, ".next")))
+  ) {
+    return { kind: "next-start" };
+  }
+  return await detectEntryFile(rootDir, pkg);
+}
+
+/** `main`, then the conventional entry files, whichever exists first. */
+async function detectEntryFile(
+  rootDir: string,
+  pkg: PackageJson | undefined,
+): Promise<NativeAppStart | undefined> {
+  const main = typeof pkg?.main === "string"
+    ? normalizeNativeAppStartPath(pkg.main)
+    : undefined;
+  const candidates = [
+    ...(main === undefined ? [] : [main]),
+    ...DEFAULT_ENTRY_FILES,
+  ];
+  const present = await Promise.all(
+    candidates.map((candidate) => regularFileExists(join(rootDir, candidate))),
+  );
+  const index = present.indexOf(true);
+  return index === -1 ? undefined : { kind: "file", path: candidates[index] };
 }

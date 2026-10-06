@@ -57,6 +57,8 @@ import { resolveReleasePaths } from "../release/release-layout.ts";
 import type { ReleaseOutputHandler } from "../release/checkout.ts";
 import { swapCurrentSymlink } from "../release/promote.ts";
 import type { RunFn, RunResult } from "../ensure-principal.ts";
+import { definedFields } from "../../util/optional-fields.ts";
+import type { NativeAppStart } from "./start-entry.ts";
 import {
   nativeAppConfigDir,
   nativeAppStagedFilePrefix,
@@ -112,6 +114,13 @@ export type NativeAppRelease = {
   previousReleaseId?: string | null;
   /** `x-turbopanel.source.startCommand`, when the author declared one. */
   startCommand?: string;
+  /** The release this deploy put live (`current`), when one was applied. */
+  releaseId?: string;
+  /**
+   * How that release starts when the author typed no start command, as the
+   * build (or, on a rollback, the release record) decided it.
+   */
+  nativeStart?: NativeAppStart;
 };
 
 export type NativeAppBindings = ReadonlyMap<string, NativeAppRelease>;
@@ -508,6 +517,9 @@ async function installNativeAppUnit(
       ...(binding.startCommand === undefined
         ? {}
         : { startCommand: binding.startCommand }),
+      ...(binding.nativeStart === undefined
+        ? {}
+        : { nativeStart: binding.nativeStart }),
     }),
   });
 }
@@ -1001,6 +1013,7 @@ export async function removeNativeAppServices(
 export function nativeAppBindingsFromPayload(
   payload: EnvironmentDeployPayload,
   previousReleaseByService?: ReadonlyMap<string, string | null>,
+  appliedByService?: ReadonlyMap<string, AppliedNativeRelease>,
 ): Map<string, NativeAppRelease> {
   const bindings = new Map<string, NativeAppRelease>();
   for (const entry of payload.sourceMaterial ?? []) {
@@ -1008,13 +1021,23 @@ export function nativeAppBindingsFromPayload(
     if (!principal) continue;
     const previous = previousReleaseByService?.get(entry.composeServiceName) ??
       null;
-    bindings.set(entry.composeServiceName, {
-      username: principal.username,
-      previousReleaseId: previous,
-      ...(entry.build.startCommand === undefined
-        ? {}
-        : { startCommand: entry.build.startCommand }),
-    });
+    const applied = appliedByService?.get(entry.composeServiceName);
+    bindings.set(
+      entry.composeServiceName,
+      definedFields({
+        username: principal.username,
+        previousReleaseId: previous,
+        startCommand: entry.build.startCommand,
+        releaseId: applied?.releaseId,
+        nativeStart: applied?.nativeStart,
+      }),
+    );
   }
   return bindings;
 }
+
+/** The facts about this deploy's release that the unit needs. */
+export type AppliedNativeRelease = {
+  releaseId: string;
+  nativeStart?: NativeAppStart;
+};

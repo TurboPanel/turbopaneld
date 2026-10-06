@@ -539,6 +539,30 @@ test("an explicit startCommand replaces the default ExecStart", async () => {
   }
 });
 
+test("the start the build detected becomes the unit's ExecStart", async () => {
+  const host = await makeTestHost();
+  try {
+    await applyNativeAppServices(host.layout, ENVIRONMENT_ID, [makeApp()], {
+      ...applyOpts(host, createRunMock()),
+      bindings: new Map([["web", {
+        username: USERNAME,
+        previousReleaseId: null,
+        releaseId: "rel-new",
+        nativeStart: { kind: "next-start" as const },
+      }]]),
+    });
+    const unit = await Deno.readTextFile(
+      nativeAppUnitPath("svc-web", host.unitDir),
+    );
+    assertStringIncludes(
+      unit,
+      "node_modules/next/dist/bin/next start --hostname 127.0.0.1 --port 18100\n",
+    );
+  } finally {
+    await host.cleanup();
+  }
+});
+
 test("an operator-disabled app is installed but stopped and disabled, never probed", async () => {
   const host = await makeTestHost();
   const mock = createRunMock();
@@ -624,6 +648,37 @@ test("nativeAppBindingsFromPayload skips sources with no owning principal", () =
     username: USERNAME,
     previousReleaseId: "rel-old",
     startCommand: "node server.js",
+  });
+});
+
+test("nativeAppBindingsFromPayload carries the applied release and its detected start", () => {
+  const payload = {
+    environmentId: ENVIRONMENT_ID,
+    sourceMaterial: [{
+      sourceId: "s1",
+      composeServiceName: "web",
+      provider: "github",
+      cloneUrl: "https://example.test/repo.git",
+      ref: "main",
+      commitSha: "abc",
+      releaseId: "rel-new",
+      principal: { principalId: "pr1", username: USERNAME },
+      build: { kind: "native" },
+    }],
+  } as unknown as EnvironmentDeployPayload;
+  const resolved = nativeAppBindingsFromPayload(
+    payload,
+    new Map([["web", null]]),
+    new Map([["web", {
+      releaseId: "rel-new",
+      nativeStart: { kind: "start-script" as const },
+    }]]),
+  );
+  assertEquals(resolved.get("web"), {
+    username: USERNAME,
+    previousReleaseId: null,
+    releaseId: "rel-new",
+    nativeStart: { kind: "start-script" },
   });
 });
 

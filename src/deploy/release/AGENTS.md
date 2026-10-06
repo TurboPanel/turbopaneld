@@ -324,7 +324,20 @@ build runs under `NODE_ENV=production`, where npm, pnpm, and classic yarn
 silently omit `devDependencies` — which is where every build toolchain lives.
 An explicit `installCommand` always wins, no `package.json` derives nothing,
 and the transcript records a `derived install command …` line so the operator
-can see what ran.
+can see what ran. `npm-shrinkwrap.json` counts as an npm lockfile (`npm ci`).
+Bun lockfiles are not used: the native lane vendors no Bun, so such a repo
+installs with npm.
+
+A missing `buildCommand` is derived the same way (`deriveNodeBuildCommand`):
+when `package.json` has a non-empty `build` script, the build runs
+`corepack pnpm run build`, `corepack yarn run build` or `npm run build` with the
+manager the install picked, and the transcript says `derived build command
+from …`. No `build` script derives nothing; an explicit `buildCommand` always
+wins. How the release then starts is detected from the built tree and recorded
+with it (`../native/AGENTS.md`, Entrypoint). These follow the usual Node
+conventions (package manager from the `packageManager` pin, then the lockfile;
+the `build` script; then the `start` script, `main`, `index.js`), implemented
+here so the decision runs on the native build's own tree and toolchain.
 
 **Retention** — `retention.ts` keeps the newest `DEFAULT_RELEASE_RETENTION` (5)
 releases **plus whatever `current` resolves to**, even when that falls outside

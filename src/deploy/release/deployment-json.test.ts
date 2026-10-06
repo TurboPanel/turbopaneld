@@ -106,6 +106,7 @@ test("readReleaseManifest accepts optional native and railpack fields", async ()
       commitAuthor: "ops@example.com",
       standaloneOutput: true,
       staticExport: false,
+      nativeStart: { kind: "file", path: "server.js" },
       imageTag: "tp-svc-1:rel-1",
       imageDigest: "sha256:deadbeef",
       railpackFrontendVersion: "0.9.0",
@@ -141,6 +142,27 @@ test("readReleaseManifest rejects non-boolean standalone/static flags", async ()
       JSON.stringify({ ...BASE, standaloneOutput: "yes" }),
     );
     assertEquals(await readReleaseManifest(releaseDir), null);
+  });
+});
+
+test("readReleaseManifest rejects a recorded start it could not render safely", async () => {
+  await withReleaseDir(async (releaseDir) => {
+    await Deno.mkdir(join(releaseDir, RELEASE_METADATA_DIRNAME), {
+      recursive: true,
+    });
+    for (
+      const nativeStart of [
+        "next-start",
+        { kind: "file", path: "../../etc/x.js" },
+        { kind: "shell", command: "id" },
+      ]
+    ) {
+      await Deno.writeTextFile(
+        releaseManifestPath(releaseDir),
+        JSON.stringify({ ...BASE, nativeStart }),
+      );
+      assertEquals(await readReleaseManifest(releaseDir), null);
+    }
   });
 });
 
