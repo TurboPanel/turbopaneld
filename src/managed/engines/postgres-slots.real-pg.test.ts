@@ -123,7 +123,7 @@ for (const series of SERIES) {
         "--name",
         name,
         "-e",
-        "POSTGRES_PASSWORD=unused-throwaway",
+        "POSTGRES_HOST_AUTH_METHOD=trust",
         `postgres:${series}`,
         "-c",
         "max_slot_wal_keep_size=32MB",
@@ -152,7 +152,7 @@ for (const series of SERIES) {
         const replication = postgresManagedEngineRuntime.replication!;
         const spec = {
           username: "tp_repl",
-          password: "repl-throwaway",
+          password: ["tp", crypto.randomUUID()].join("-"),
           desiredSlots: ["tp_member_a"],
         };
         const retention = async () =>
