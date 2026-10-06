@@ -320,6 +320,37 @@ prompt off — never a host-wide
 Corepack install, never the daemon's home. `NODE_ENV` follows the app's
 `appMode` (default `production`) in the build exactly as in the generated unit.
 
+**Deno builds (`runtime: deno`).** The same lane with the vendored Deno in
+place of Node (`nativeRuntime.runtime === "deno"`): `vendor/deno-app/<series>/current/bin`
+leads the curated `PATH`, the build's user reaches it through the `tpdeno<series>`
+group (tp-host gives a build every `tpnode<series>` and `tpdeno<series>` group),
+`DENO_DIR` is the project's sandbox cache (unsandboxed: `<checkout>/.deno`), and
+`DENO_NO_UPDATE_CHECK=1` / `DENO_NO_PROMPT=1` are set. The network rules are the
+build's usual ones (the public internet only). Nothing is derived from Node's
+package manager. `deno-build.ts` derives, from the project's own files
+(`deno.json`, else `deno.jsonc`, parsed with comments and trailing commas):
+
+1. `deno install` when a `deno.lock`, a `package.json` or a `nodeModulesDir`
+   setting needs the dependencies fetched ahead of the run;
+2. `deno task build` when the config has a `build` task;
+3. `deno cache <entry>`, after the two above, when the author typed neither an
+   install nor a build command and an entry file can be named (the file a plain
+   `deno run` start task runs, else the entry the start detection would pick).
+   It fetches the imports with the build's network and writes `deno.lock` into
+   the tree. The lock matters at run time: the release is read-only, and `deno
+   run` with remote imports and no lockfile dies trying to write one.
+
+An author's own install or build command always wins and is never rewritten.
+The start is detected after the build, from the built tree
+(`detectDenoStart`): the config's `start` task (`deno task start`), else the
+first entry file that exists among `main`, the `.` export, the entry of a
+`serve` / `server` / `run` task (`deno run <flags> <file>`), then `main.ts`,
+`mod.ts`, `server.ts`, `main.js`, `index.ts` (`deno run --allow-all <file>`).
+It is recorded in the release record like a Node start (`deno-task` /
+`deno-file`), so a rollback restarts the old release the way it ran. Nothing
+found fails the build, before promote. A broken config fails the build naming
+the file. A Deno release is never read as a Next.js build.
+
 A missing `installCommand` is then **derived** rather than skipped
 (`deriveNodeInstallCommand`): the operator's `build.packageManager` wins, else
 the lockfile decides (`pnpm-lock.yaml` > `yarn.lock` > `package-lock.json` >

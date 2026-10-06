@@ -1302,21 +1302,35 @@ async function applyDeployNativeApps(
       definedFields({
         releaseId: entry.releaseId,
         nativeStart: entry.nativeStart,
+        runtime: entry.runtime,
       }),
     ]),
   );
-  await applyNativeAppServices(layout, parsedPayload.environmentId, apps, {
-    variableMaterial: parsedPayload.variableMaterial ?? [],
-    decryptSecrets,
-    ...io,
-    onOutput: io?.onOutput ??
-      ((stream, line) => logSink.onLine(stream, line)),
-    bindings: nativeAppBindingsFromPayload(
-      parsedPayload,
-      previousReleaseByService,
-      appliedByService,
-    ),
+  // The live release's own runtime wins over the payload's: a rollback across a
+  // Node/Deno switch restores the unit the old release needs.
+  const appsForRelease = apps.map((app) => {
+    const runtime = appliedByService.get(app.composeServiceName)?.runtime;
+    if (runtime === undefined) return app;
+    const { runtime: _runtime, ...rest } = app;
+    return runtime === "deno" ? { ...rest, runtime } : rest;
   });
+  await applyNativeAppServices(
+    layout,
+    parsedPayload.environmentId,
+    appsForRelease,
+    {
+      variableMaterial: parsedPayload.variableMaterial ?? [],
+      decryptSecrets,
+      ...io,
+      onOutput: io?.onOutput ??
+        ((stream, line) => logSink.onLine(stream, line)),
+      bindings: nativeAppBindingsFromPayload(
+        parsedPayload,
+        previousReleaseByService,
+        appliedByService,
+      ),
+    },
+  );
 }
 
 function buildDaemonOverlayFragment(

@@ -414,6 +414,36 @@ test("parseEnvironmentDeployPayload round-trips nativeAppServices optional limit
   assertEquals(app?.accountLimits?.tasksMax, 4);
 });
 
+test("parseEnvironmentDeployPayload carries a Deno native app's runtime and denoVersion", () => {
+  const base = {
+    composeServiceName: "api",
+    serviceId: "svc-native-1",
+    listenPort: 13000,
+    framework: "auto",
+  };
+  const payload = parseEnvironmentDeployPayload({
+    ...DEPLOY_BASE,
+    nativeAppServices: [
+      { ...base, runtime: "deno", denoVersion: "2.9" },
+      base,
+    ],
+  });
+  assertEquals(payload.nativeAppServices?.[0]?.runtime, "deno");
+  assertEquals(payload.nativeAppServices?.[0]?.denoVersion, "2.9");
+  // A Node app's wire shape is untouched.
+  assertEquals("runtime" in (payload.nativeAppServices?.[1] ?? {}), false);
+  for (const bad of [{ runtime: "bun" }, { denoVersion: "latest" }]) {
+    assertThrows(
+      () =>
+        parseEnvironmentDeployPayload({
+          ...DEPLOY_BASE,
+          nativeAppServices: [{ ...base, ...bad }],
+        }),
+      TypeError,
+    );
+  }
+});
+
 test("parseEnvironmentDeployPayload rejects invalid nativeAppServices fields", () => {
   assertThrows(
     () =>

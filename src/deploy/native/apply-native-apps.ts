@@ -44,6 +44,7 @@ import {
   runLocalPlaybook,
 } from "../../orchestration/ansible.ts";
 import {
+  DENO_APP_RUNTIME_APPLY_PLAYBOOK,
   NODE_APP_RUNTIME_APPLY_PLAYBOOK,
   ORCHESTRATION_DIR,
 } from "../../orchestration/assets.ts";
@@ -66,6 +67,7 @@ import { definedFields } from "../../util/optional-fields.ts";
 import type { NativeAppStart } from "./start-entry.ts";
 import {
   nativeAppConfigDir,
+  nativeAppRuntimeKind,
   nativeAppStagedFilePrefix,
   nativeAppStagedPath,
   nativeAppUnitContent,
@@ -74,6 +76,7 @@ import {
   principalSliceContent,
   principalSlicePath,
   principalSliceStagedPath,
+  resolveNativeAppDenoVersion,
   resolveNativeAppNodeVersion,
   SYSTEMD_UNIT_DIR,
 } from "./unit.ts";
@@ -446,6 +449,11 @@ export type RecordedStart = {
   startCommand?: string;
   startupFile?: string;
   nativeStart?: NativeAppStart;
+  /**
+   * The runtime that release ran on. A rollback renders its unit for this, not
+   * for the newer payload's runtime. Absent leaves the app's own.
+   */
+  runtime?: "node" | "deno";
 };
 
 /** The start fields of a release record. */
@@ -454,6 +462,8 @@ function recordedStart(manifest: ReleaseManifestV1): RecordedStart {
     startCommand: manifest.startCommand,
     startupFile: manifest.startupFile,
     nativeStart: manifest.nativeStart,
+    // A record with no runtime ran on Node.
+    runtime: manifest.runtime ?? "node",
   });
 }
 
@@ -469,6 +479,13 @@ function withRecordedStart(
     ...bindingRest
   } = binding;
   const { startupFile: _file, ...appRest } = app;
+  // The unit is rendered from the app, so the recorded runtime goes there. A
+  // Node release carries no `runtime` key, as a Node payload never does.
+  const { runtime: _runtime, ...appWithoutRuntime } = appRest;
+  const appForRelease = start.runtime === undefined ? appRest : {
+    ...appWithoutRuntime,
+    ...(start.runtime === "deno" ? { runtime: "deno" as const } : {}),
+  };
   return {
     binding: {
       ...bindingRest,
@@ -478,7 +495,7 @@ function withRecordedStart(
       }),
     },
     app: {
-      ...appRest,
+      ...appForRelease,
       ...definedFields({ startupFile: start.startupFile }),
     },
   };
@@ -852,40 +869,75 @@ export function nativeAppNodeVersions(
   apps: readonly EnvironmentDeployNativeAppService[],
 ): string[] {
   const versions = new Set<string>();
-  for (const app of apps) versions.add(resolveNativeAppNodeVersion(app));
+  for (const app of apps) {
+    if (nativeAppRuntimeKind(app) === "node") {
+      versions.add(resolveNativeAppNodeVersion(app));
+    }
+  }
+  return [...versions].sort((a, b) => a.localeCompare(b));
+}
+
+/** The Deno series this apply needs, sorted like {@link nativeAppNodeVersions}. */
+export function nativeAppDenoVersions(
+  apps: readonly EnvironmentDeployNativeAppService[],
+): string[] {
+  const versions = new Set<string>();
+  for (const app of apps) {
+    if (nativeAppRuntimeKind(app) === "deno") {
+      versions.add(resolveNativeAppDenoVersion(app));
+    }
+  }
   return [...versions].sort((a, b) => a.localeCompare(b));
 }
 
 /**
- * Vendor the tenant Node runtimes on first use, the same way hosting Caddy and
- * the web engines are installed on demand rather than up front.
+ * Vendor the tenant Node and Deno runtimes on first use, the same way hosting
+ * Caddy and the web engines are installed on demand rather than up front.
  *
  * Called **before** the Git build as well as from {@link applyNativeAppServices}:
- * native installs run `corepack` / `node` from this tree, and the playbook
- * historically ran only after promote — so the first build had no binary and
- * dash reported `corepack: Permission denied` against an unreadable PATH dir.
+ * native installs run `corepack` / `node` (or `deno`) from this tree, and the
+ * playbook historically ran only after promote — so the first build had no
+ * binary and dash reported `corepack: Permission denied` against an unreadable
+ * PATH dir.
  *
  * The requested series are passed **into** the playbook rather than pinned in
  * its defaults: `nodeVersion` is a per-app contract, so two apps on different
  * series have to end up on two different vendored trees
- * (`vendor/node-app/<series>/current`) or the hint would be decorative.
+ * (`vendor/node-app/<series>/current`) or the hint would be decorative. Each
+ * runtime has its own playbook and runs only when an app of that runtime is in
+ * the deploy, so a Node-only deploy never touches the Deno tree and the other
+ * way round.
  */
 export async function ensureNativeAppRuntime(
   apps: readonly EnvironmentDeployNativeAppService[],
   opts?: Pick<ApplyNativeAppsOpts, "runPlaybook">,
 ): Promise<void> {
   if (apps.length === 0) return;
-  const versions = nativeAppNodeVersions(apps);
-  for (const version of versions) {
+  const nodeVersions = nativeAppNodeVersions(apps);
+  const denoVersions = nativeAppDenoVersions(apps);
+  for (const version of nodeVersions) {
     const message = unsupportedSeriesMessage("node", version);
     if (message) throw new Error(message);
   }
+  for (const version of denoVersions) {
+    const message = unsupportedSeriesMessage("deno", version);
+    if (message) throw new Error(message);
+  }
   const runPlaybook = opts?.runPlaybook ?? runPlaybookDefault;
-  await runPlaybook(
-    NODE_APP_RUNTIME_APPLY_PLAYBOOK,
-    `node-app-runtime-apply (vendor tenant Node ${versions.join(", ")})`,
-    ["-e", JSON.stringify({ node_app_versions: versions })],
-  );
+  if (nodeVersions.length > 0) {
+    await runPlaybook(
+      NODE_APP_RUNTIME_APPLY_PLAYBOOK,
+      `node-app-runtime-apply (vendor tenant Node ${nodeVersions.join(", ")})`,
+      ["-e", JSON.stringify({ node_app_versions: nodeVersions })],
+    );
+  }
+  if (denoVersions.length > 0) {
+    await runPlaybook(
+      DENO_APP_RUNTIME_APPLY_PLAYBOOK,
+      `deno-app-runtime-apply (vendor tenant Deno ${denoVersions.join(", ")})`,
+      ["-e", JSON.stringify({ deno_app_versions: denoVersions })],
+    );
+  }
 }
 
 /**
@@ -1191,4 +1243,6 @@ export function nativeAppBindingsFromPayload(
 export type AppliedNativeRelease = {
   releaseId: string;
   nativeStart?: NativeAppStart;
+  /** The runtime the live release runs on; absent keeps the payload's. */
+  runtime?: "node" | "deno";
 };
