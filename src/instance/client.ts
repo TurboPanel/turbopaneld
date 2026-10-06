@@ -137,12 +137,14 @@ import {
 import { installOriginNeedsInsecureTls } from "./install-tls.ts";
 import { ManagedHaObserver } from "./ha-observe.ts";
 import { PgDeadPrimaryObserver } from "./pg-dead-primary-observe.ts";
+import { BootHoldReporter } from "./boot-hold-reporter.ts";
 import { PgStandbySampler } from "./pg-standby-sampler.ts";
 import { BackupResultReporter } from "../backups/result-reporter.ts";
 import { AcmeIssuanceObserver } from "./acme-observe.ts";
 import { InstanceAcmeRenewalScheduler } from "./instance-acme-renew.ts";
 import { DAEMON_VERSION } from "../version.ts";
 import {
+  MANAGED_HA_BOOT_HOLD_FEATURE,
   MANAGED_HA_PROBE_FEATURE,
   resolveDaemonCapabilities,
 } from "./version-wire.ts";
@@ -439,6 +441,8 @@ export class InstanceClient {
    * omits `features` — default closed.
    */
   #peerFeatures: readonly string[] = [];
+  /** The attach frame (which carries the feature list) has arrived on this socket. */
+  #peerFeaturesKnown = false;
   /** Last unsupported version we already logged, so reconnects do not repeat it. */
   #loggedUnsupportedInstanceVersion: string | undefined;
   #licenseStamp: string | undefined;
@@ -447,6 +451,7 @@ export class InstanceClient {
   readonly #seenDispatchIds = new SeenCommandIds();
   #haObserver: ManagedHaObserver | undefined;
   #pgProbeObserver: PgDeadPrimaryObserver | undefined;
+  #bootHoldReporter: BootHoldReporter | undefined;
   #pgStandbySampler: PgStandbySampler | undefined;
   #backupReporter: BackupResultReporter | undefined;
   #acmeObserver: AcmeIssuanceObserver | undefined;
@@ -707,6 +712,7 @@ export class InstanceClient {
 
   /** Attach-frame advertisement. A missing or non-array field is closed. */
   #notePeerFeatures(features: unknown): void {
+    this.#peerFeaturesKnown = true;
     if (!Array.isArray(features)) {
       this.#peerFeatures = [];
       return;
@@ -881,6 +887,7 @@ export class InstanceClient {
     this.#idlePresence = undefined;
     this.#haObserver?.detach();
     this.#pgProbeObserver?.detach();
+    this.#bootHoldReporter?.detach();
     this.#pgStandbySampler?.detach();
     this.#haObserver = undefined;
     this.#backupReporter?.detach();
@@ -965,6 +972,7 @@ export class InstanceClient {
     this.#idlePresence?.detach();
     this.#haObserver?.detach();
     this.#pgProbeObserver?.detach();
+    this.#bootHoldReporter?.detach();
     this.#pgStandbySampler?.detach();
     this.#backupReporter?.detach();
     this.#acmeObserver?.detach();
@@ -1378,12 +1386,17 @@ export class InstanceClient {
 
     sessionRegistered = true;
     this.#hadStableSession = true;
+    // The feature list arrives with this socket's attach frame, after the
+    // observers below attach: until then nothing may read it as "unsupported".
+    this.#peerFeaturesKnown = false;
     const connectedAt = now();
     this.#idlePresence?.attach(ws);
     this.#ensureHaObserver();
     this.#haObserver?.attach();
     this.#ensurePgProbeObserver();
     this.#pgProbeObserver?.attach();
+    this.#ensureBootHoldReporter();
+    this.#bootHoldReporter?.attach();
     this.#pgStandbySampler ??= new PgStandbySampler();
     this.#pgStandbySampler.attach();
     this.#ensureBackupReporter().attach();
@@ -1440,9 +1453,11 @@ export class InstanceClient {
       if (this.#ws !== undefined && this.#ws !== ws) return;
       this.#ws = undefined;
       this.#peerFeatures = [];
+      this.#peerFeaturesKnown = false;
       this.#idlePresence?.detach();
       this.#haObserver?.detach();
       this.#pgProbeObserver?.detach();
+      this.#bootHoldReporter?.detach();
       this.#pgStandbySampler?.detach();
       this.#backupReporter?.detach();
       this.#acmeObserver?.detach();
@@ -1505,6 +1520,21 @@ export class InstanceClient {
         return true;
       },
       peerSupportsProbe: () => this.instanceSupports(MANAGED_HA_PROBE_FEATURE),
+    });
+  }
+
+  #ensureBootHoldReporter(): void {
+    if (this.#bootHoldReporter) return;
+    this.#bootHoldReporter = new BootHoldReporter({
+      send: (message) => {
+        if (!this.#ws || this.#ws.readyState !== WebSocket.OPEN) return false;
+        this.#ws.send(JSON.stringify(message));
+        return true;
+      },
+      peerBootHoldSupport: () =>
+        this.#peerFeaturesKnown
+          ? this.instanceSupports(MANAGED_HA_BOOT_HOLD_FEATURE)
+          : undefined,
     });
   }
 

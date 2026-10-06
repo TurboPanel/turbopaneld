@@ -30,6 +30,7 @@ Certificate authorities: `../../../turbopanel/src/lib/tls/AGENTS.md`.
 | `../commands/managed-ha-reconcile.ts` / `managed-ha-failover.ts` | `managed.ha.reconcile` (whole-server HA stack) + `managed.ha.failover` (`drain` / `recover`). Designated Orchestrator recover-to; on HTTP/API failure **or** absent stack, falls back to `managed.promote` so fencing is not stranded. `Recover: false` stays — TurboPanel picks the candidate. `Future:` fail-closed HA lease when Raft is unreachable. |
 | `../instance/ha-observe.ts` | Poll local Orchestrator `/api/problems` when `configDir/orchestrator/docker-compose.yml` exists; emit unsolicited `managed-ha-event` carrying the dead instance's `instanceHost`/`instancePort` (feature `managed-ha-instance-v1`; the control plane fences only if they match the current primary) |
 | `pg-dead-primary.ts` / `../instance/pg-dead-primary-observe.ts` | Postgres dead-primary probe on the primary's **own** host (Orchestrator cannot see Postgres). See **Postgres dead-primary detection** below |
+| `host-boot.ts` / `boot-hold.ts` / `../instance/boot-hold-reporter.ts` | Boot hold after a power cut: see **Boot hold after an unclean host restart** below |
 | `ha-intent.ts` / `ha-member.ts` / `ha-command-hooks.ts` | Probe inputs kept by `command-router.ts`: operator-intent markers around every engine-touching managed verb, and the per-host member record (`managed/<id>/ha-member.json`) |
 | `backup.ts` | `managed.backup` (`create`/`delete`) + `managed.restore` — streamed dump/restore, checksum, prune; exports the shared core (`createManagedBackupArtifact`, `restoreManagedBackupArtifact`, `resolveBackupEngine`) for scheduled runs |
 | `target-lock.ts` | Per-engine `flock` (`withManagedTargetLock`, `ManagedTargetBusyError`) shared by the backup/restore handlers and the scheduled `backup-run` process |
@@ -429,11 +430,12 @@ there is no raft-leader check on that path.
 
 - **Scope** (`DEAD_PRIMARY_DETECTION_SCOPE = 'engine-dead-host-alive'`): the
   engine container/process is dead while the host and daemon are alive, so the
-  old primary can still be fenced. **Whole-host loss is not detected** — it
-  stays manual with an alert. Widening it (Option A) is a control-plane policy
-  switch (`turbopanel/src/features/managed/ha-policy.ts` →
-  `AUTOMATIC_FAILOVER_DETECTORS`) plus a host-loss detector there, never a
-  change to this probe.
+  old primary can still be fenced. **Whole-host loss is not this probe's job**
+  (a dead host sends nothing): the control plane detects it itself from the
+  daemon connection going silent, confirmed by the replicas
+  (`turbopanel/src/features/managed/ha-host-loss-sweep.ts`). What the daemon
+  adds for that path is the **boot hold** below, so a primary that returns
+  after a power cut cannot serve writes unchecked.
 - **Watched**: a Postgres member recorded `primary` in `ha-member.json` with at
   least one replica peer. The daemon cannot see `replicaClass`; the control
   plane still requires a healthy same-DC `failover` replica and otherwise
@@ -509,3 +511,35 @@ there is no raft-leader check on that path.
   within 2 s (fails closed), or to a control plane that does not advertise
   `managed-ha-probe-v1`. `turbopaneld.service` is ordered `After=docker.service`
   so at shutdown the daemon stops before Docker kills the engines.
+
+## Boot hold after an unclean host restart
+
+While a host is off the control plane may promote a replica, but Docker
+restarts engines (`restart: unless-stopped`) before this daemon runs, so a
+stale primary can accept writes again within seconds of boot.
+
+- **Detect** (`host-boot.ts`): `<stateDir>/managed/host-boot.json` holds the
+  kernel `boot_id` of the last run, plus a `cleanShutdownAt` stamp written on
+  SIGTERM/SIGINT (`entry/run.ts`). A different `boot_id` with no stamp is an
+  *unclean* boot (power cut, kernel panic, `reboot -f`); with the stamp it is a
+  planned reboot; the same `boot_id` is a daemon restart. No boot id or no
+  record means no information: no hold. Wall-clock time is never compared.
+- **Hold** (`boot-hold.ts`, first thing in `runDaemon`): on an unclean boot,
+  every primary in `ha-member.json` with at least one peer gets a HELD `stop`
+  intent marker (so the dead-primary probe reads the stop as intended), a
+  `managed/<id>/boot-hold.json`, and `docker compose -p <id> stop`. Standalone
+  databases and replicas are never held.
+- **Report** (`instance/boot-hold-reporter.ts`, every 60 s while a hold exists
+  and the socket is attached): `managed-ha-event` with `detector: 'boot-hold'`
+  and `evidence { reason, heldAt, engineStopped }`. It is never a failover
+  request. The control plane answers a still-current primary with
+  `managed.lifecycle start`; a successful start (or restart/apply/promote)
+  releases the held marker, and the hold file goes with it
+  (`listActiveBootHolds`). A primary the control plane replaced is left
+  stopped (`needs_resync`).
+- **No answer possible**: a control plane without `managed-ha-boot-hold-v1`
+  gets nothing; the daemon releases the hold itself and starts the engine (the
+  behaviour before this feature). A control plane that is merely unreachable
+  leaves the hold on: that fails closed on purpose.
+- Tests: `host-boot.test.ts`, `boot-hold.test.ts`,
+  `../instance/boot-hold-reporter.test.ts`, `../entry/run.test.ts`.

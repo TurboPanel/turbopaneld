@@ -78,6 +78,8 @@ function stubIo(overrides: Partial<DaemonRunIo> = {}): {
       if (signal === "SIGTERM") queueMicrotask(handler);
     },
     initOrchestration: () => Promise.resolve(false),
+    applyManagedBootHold: () => Promise.resolve(),
+    markCleanShutdown: () => Promise.resolve(),
     scanLiveReleases: () => Promise.resolve(),
     restoreFabricFromPersistedState: () => {
       fabricRestores += 1;
@@ -199,6 +201,46 @@ test("runDaemon scans live releases in the background and only warns on failure"
       line.includes("live release link scan failed") &&
       line.includes("password is required")
     ),
+    true,
+  );
+});
+
+test("runDaemon holds primaries first and stamps a clean shutdown last", async () => {
+  const order: string[] = [];
+  const stub = stubIo({
+    applyManagedBootHold: () => {
+      order.push("hold");
+      return Promise.resolve();
+    },
+    initOrchestration: () => {
+      order.push("orchestration");
+      return Promise.resolve(false);
+    },
+    markCleanShutdown: () => {
+      order.push("clean");
+      return Promise.resolve();
+    },
+    exit: () => {
+      order.push("exit");
+    },
+  });
+  await runDaemon(stub.io);
+  assertEquals(order, ["hold", "orchestration", "clean", "exit"]);
+});
+
+test("runDaemon still starts when the boot hold check or the shutdown stamp fails", async () => {
+  const stub = stubIo({
+    applyManagedBootHold: () => Promise.reject(new Error("docker unreachable")),
+    markCleanShutdown: () => Promise.reject(new Error("disk full")),
+  });
+  await runDaemon(stub.io);
+  assertEquals(stub.exits, [0]);
+  assertEquals(
+    stub.warns.some((line) => line.includes("boot hold check failed")),
+    true,
+  );
+  assertEquals(
+    stub.warns.some((line) => line.includes("clean shutdown stamp failed")),
     true,
   );
 });

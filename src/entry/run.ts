@@ -19,6 +19,9 @@ import { logInfo, logWarn } from "../util/logger.ts";
 import { resolveLayout } from "../paths/layout.ts";
 import { reportLiveReleaseLinks } from "../deploy/release/live-release-scan.ts";
 import { guardHostingCaddySites } from "../deploy/ingress.ts";
+import { runDocker } from "../deploy/docker-cli.ts";
+import { applyBootHold } from "../managed/boot-hold.ts";
+import { markHostCleanShutdown, recordHostBoot } from "../managed/host-boot.ts";
 import { createSentinel, type SentinelOptions } from "../monitor/index.ts";
 import type { ServiceRunState } from "../contracts/service-run-state.ts";
 import { setServiceRunStateSource } from "../host/service-run-state.ts";
@@ -62,6 +65,10 @@ export type DaemonRunIo = {
   scanLiveReleases?: () => Promise<void>;
   /** Set aside hosting Caddy snippets it cannot load; defaults to {@link guardHostingSites}. */
   guardHostingCaddySites?: () => Promise<void>;
+  /** Hold HA primaries after an unclean host restart; defaults to {@link applyManagedBootHoldAtStart}. */
+  applyManagedBootHold?: () => Promise<void>;
+  /** Stamp a clean shutdown for the next start; defaults to {@link markCleanShutdown}. */
+  markCleanShutdown?: () => Promise<void>;
   reinstallFabricForwardingIfEnabled?: () => Promise<void>;
   reinstallFirewallForwardingIfEnabled?: () => Promise<void>;
   /** Start any per-site PHP runtime that is installed but not running. */
@@ -184,6 +191,21 @@ async function guardHostingSites(): Promise<void> {
 }
 
 /**
+ * Compare this boot with the last one and, after a restart that was not a
+ * clean shutdown, hold every HA primary on this host until the control plane
+ * confirms it is still the primary (`managed/boot-hold.ts`).
+ */
+async function applyManagedBootHoldAtStart(): Promise<void> {
+  const layout = resolveLayout(Deno.env.toObject());
+  const kind = await recordHostBoot(layout);
+  await applyBootHold(kind, { layout, run: runDocker });
+}
+
+async function markCleanShutdown(): Promise<void> {
+  await markHostCleanShutdown(resolveLayout(Deno.env.toObject()));
+}
+
+/**
  * Long-running daemon loop. `main.ts` / `prod-main.ts` call this after CLI
  * verbs. Tests inject {@link DaemonRunIo} so startup branches stay isolated.
  */
@@ -212,6 +234,17 @@ export async function runDaemon(io: DaemonRunIo = {}): Promise<void> {
   };
 
   info("daemon", "starting up");
+
+  // First, before anything slow: a stale primary must not keep serving.
+  try {
+    await (io.applyManagedBootHold ?? applyManagedBootHoldAtStart)();
+  } catch (err) {
+    (io.logWarn ?? logWarn)(
+      "managed",
+      "boot hold check failed:",
+      err instanceof Error ? err.message : String(err),
+    );
+  }
 
   const orchestrationReady =
     await (io.initOrchestration ?? initOrchestration)();
@@ -309,6 +342,16 @@ export async function runDaemon(io: DaemonRunIo = {}): Promise<void> {
   await new Promise<void>((resolve) => {
     abort.signal.addEventListener("abort", () => resolve());
   });
+
+  try {
+    await (io.markCleanShutdown ?? markCleanShutdown)();
+  } catch (err) {
+    (io.logWarn ?? logWarn)(
+      "managed",
+      "clean shutdown stamp failed:",
+      err instanceof Error ? err.message : String(err),
+    );
+  }
 
   info("daemon", "shut down");
   exitFn(0);

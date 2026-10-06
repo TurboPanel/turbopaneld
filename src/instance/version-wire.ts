@@ -65,6 +65,7 @@ export const DAEMON_WIRE_FEATURES = [
   "managed-health-v1",
   "managed-ha-probe-v1",
   "managed-ha-instance-v1",
+  "managed-ha-boot-hold-v1",
   "metrics-v7",
   "php-site-modes-v1",
   "site-engine-nginx-apache-v1",
@@ -106,6 +107,18 @@ export const MANAGED_HA_PROBE_FEATURE: DaemonWireFeature =
  */
 export const MANAGED_HA_INSTANCE_FEATURE: DaemonWireFeature =
   "managed-ha-instance-v1";
+
+/**
+ * After a host restart that was not a clean shutdown, this daemon holds each
+ * HA primary it runs (engine stopped) and reports it with `managed-ha-event`
+ * `detector: 'boot-hold'` until the control plane answers (`managed.lifecycle
+ * start` = still the primary; a role change = stays stopped). A control plane
+ * that does not list this feature cannot answer, so the daemon releases the
+ * hold itself. A control plane that lists it also trusts that a daemon listing
+ * it will not let a stale primary serve writes again unchecked.
+ */
+export const MANAGED_HA_BOOT_HOLD_FEATURE: DaemonWireFeature =
+  "managed-ha-boot-hold-v1";
 
 /**
  * Metrics schema v7. This daemon can produce v7 samples (`metadata.version`
