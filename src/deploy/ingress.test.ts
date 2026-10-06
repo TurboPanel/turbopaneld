@@ -571,6 +571,7 @@ test("siteSnippet acme mode still emits HTTPS when forceHttps is false", () => {
   assertEquals(snippet.includes("tls internal"), false);
   assertStringIncludes(snippet, `app.example.com {`);
   assertStringIncludes(snippet, caddyTraefikUpstream("https"));
+  assertStringIncludes(snippet, "header_up Host {host}");
 });
 
 test("siteSnippet acme mode keeps HTTPS for multi-route forceHttps:false", () => {
@@ -612,6 +613,7 @@ test("siteSnippet acme mode omits the tls line and keeps the redirect block", ()
   assertEquals(snippet.includes("tls internal"), false);
   assertStringIncludes(snippet, `app.example.com {`);
   assertStringIncludes(snippet, caddyTraefikUpstream("https"));
+  assertStringIncludes(snippet, "header_up Host {host}");
   // Manual `caddy adapt` of this snippet (when the binary is available)
   // succeeds: omitting `tls` leaves Caddy's ACME client on :80/:443.
 });
