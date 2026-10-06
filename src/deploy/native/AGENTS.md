@@ -5,7 +5,7 @@ Parent context: `../AGENTS.md` (tenant deploy & hosting ingress).
 When `environment.deploy` carries **`nativeAppServices[]`** (compose services
 with `x-turbopanel.serviceKind: node`), those services are in neither Docker
 Compose nor a document root. Each entry is
-`{ composeServiceName, serviceId, listenPort, framework, nodeVersion?,
+`{ composeServiceName, serviceId, listenPort, framework, runtime?, nodeVersion?, denoVersion?,
 appMode?, enabled?, startupFile?, resources?, accountLimits? }`; the *release*
 itself rides the ordinary
 `sourceMaterial[]` lane, so checkout, build, promote, retention, and
@@ -148,6 +148,49 @@ owner's group), and it is recorded in the daemon's release record
 ran. Every detected start execs the vendored Node directly: no Corepack at
 runtime, and no shell in `ExecStart` except the `prestart` form above
 (`node --run` itself runs a script through `/bin/sh`).
+
+**Deno apps.** A native app with `runtime: "deno"` (and `denoVersion`, a
+series reduced to the major: `2.9.7` runs series `2`) is the same lane with the
+vendored Deno instead of Node: `ensureNativeAppRuntime` runs
+`deno-app-runtime-apply.yml` (only when the deploy has a Deno app, and the Node
+playbook only when it has a Node app), the unit's `ExecStart` is
+`<runtimesDir>/deno-app/<series>/current/bin/deno …`, and the owner's Linux user
+joins `tpdeno<series>`. The unit sets `PATH` (Deno first), `PORT`, `HOST`,
+`HOSTNAME`, `HOME`, `TMPDIR`, `XDG_CACHE_HOME`, `NODE_ENV`, `DENO_DIR=<shared>/.cache/deno`
+(the one writable folder), `DENO_NO_UPDATE_CHECK=1` and `DENO_NO_PROMPT=1`; the
+Corepack lines are not written. The start is the author's `startCommand` (through
+`/bin/sh -c`, untouched, no package-manager rewrite), else `startupFile` as
+`deno run --allow-all <file>`, else what the build recorded (`deno task start`
+or `deno run --allow-all <entry>`, see `../release/AGENTS.md`), else `deno task
+start`. A start recorded by a Deno build is ignored by a Node unit, so a service
+switched between runtimes never runs `node task start`.
+
+Permissions: the platform passes `--allow-all` when it picks the command, and
+nothing Deno enforces is needed on top of the unit's hardening. `--allow-run`
+and `--allow-ffi` let the app start programs and load native code **as the same
+site owner's Linux user inside the same unit**, which a Node app can already do
+with `child_process` and native addons; the unit's fence (`NoNewPrivileges`,
+`ProtectSystem=strict` with only the site's `shared/` writable, `ProtectHome`,
+empty capability set, `RestrictSUIDSGID`, the account slice's limits) applies to
+every child and loaded library alike. A `deno task start` task that runs its own
+`deno run` with narrower flags is the author's choice and is left as written.
+
+An app has to listen where the platform says, as a Node app does:
+
+```ts
+Deno.serve(
+  { hostname: Deno.env.get("HOSTNAME"), port: Number(Deno.env.get("PORT")) },
+  handler,
+);
+```
+
+`Deno.serve` with no options binds every interface on port 8000 and would never
+answer the platform's loopback probe, so the build log says so for every Deno
+start. Dependencies are fetched at build time into the build's cache, and again
+into the app's own `DENO_DIR` on its first start (the release tree is read-only
+and the build cache is not shipped), so a cold first start of an app with remote
+imports can take longer than the health probe waits; commit a `vendor` folder (or
+use `nodeModulesDir`) to ship the dependencies in the release.
 
 **Loopback bind.** The unit exports `HOST=127.0.0.1` **and**
 `HOSTNAME=127.0.0.1`: Next's standalone `server.js` reads `HOSTNAME` and binds

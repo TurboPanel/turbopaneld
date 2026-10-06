@@ -47,7 +47,7 @@ import type {
 import type { DecryptSecretsFn } from "../materialize-tls.ts";
 import type { RunFn } from "../ensure-principal.ts";
 import type { DeployCancelToken } from "../deploy-cancel.ts";
-import { dirname, join } from "@std/path";
+import { join } from "@std/path";
 import {
   assertCheckoutCredentialsRemoved,
   checkoutRelease,
@@ -56,6 +56,7 @@ import {
 } from "./checkout.ts";
 import {
   type NativeAppBuildOutput,
+  type NativeBuildRuntime,
   prepareNativeAppBuildOutput,
   runReleaseBuild,
 } from "./build.ts";
@@ -72,9 +73,8 @@ import {
 } from "./build-sandbox.ts";
 import type { ImagePrepareSandbox } from "./image-prepare-sandbox.ts";
 import {
-  nativeAppNodeBinary,
-  nativeAppRuntimeGroup,
-  resolveNativeAppNodeVersion,
+  nativeAppRuntimeKind,
+  nativeAppRuntimeTarget,
 } from "../native/unit.ts";
 import {
   ensureBuildkitRailpack,
@@ -1014,16 +1014,7 @@ async function buildNativeTree(
     // NODE_ENV, so the derived install command and the build both run on
     // the series the app will execute on.
     nativeRuntime: nativeApp
-      ? definedFields({
-        nodeBinDir: dirname(nativeAppNodeBinary(
-          layout,
-          resolveNativeAppNodeVersion(nativeApp),
-        )),
-        nodeEnv: nativeApp.appMode ?? "production",
-        runtimeGroup: nativeAppRuntimeGroup(
-          resolveNativeAppNodeVersion(nativeApp),
-        ),
-      })
+      ? nativeBuildRuntime(layout, nativeApp)
       : undefined,
     sandbox: work
       ? definedFields({
@@ -1044,6 +1035,9 @@ async function buildNativeTree(
   const output = await (deps.prepareNativeAppBuildOutputFn ??
     prepareNativeAppBuildOutput)(definedFields({
       framework: nativeApp.framework,
+      ...(nativeAppRuntimeKind(nativeApp) === "deno"
+        ? { runtime: "deno" as const }
+        : {}),
       workingDir: buildWorkingDir,
       containmentRoot: work?.workDir,
       outputDirectory: entry.build.outputDirectory,
@@ -1054,6 +1048,24 @@ async function buildNativeTree(
     warnStandaloneStartCommand(entry.build.startCommand, onOutput);
   }
   return output;
+}
+
+/**
+ * What a native app's build runs on: its vendored runtime on `PATH` and its
+ * entitlement group, so the derived install and build commands run on the
+ * runtime the app will execute on.
+ */
+function nativeBuildRuntime(
+  layout: LayoutPaths,
+  nativeApp: EnvironmentDeployNativeAppService,
+): NativeBuildRuntime {
+  const target = nativeAppRuntimeTarget(layout, nativeApp);
+  return definedFields({
+    ...(target.runtime === "deno" ? { runtime: "deno" as const } : {}),
+    nodeBinDir: target.binDir,
+    nodeEnv: nativeApp.appMode ?? "production",
+    runtimeGroup: target.group,
+  });
 }
 
 /** The author said how the app starts: a start command or a startup file. */

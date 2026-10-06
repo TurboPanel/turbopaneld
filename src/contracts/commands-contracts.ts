@@ -1020,12 +1020,22 @@ export type EnvironmentDeployNativeAppRestartPolicy = {
   window?: string;
 };
 
+/** Runtime a native app runs on. Omitted means `node`. */
+export type EnvironmentDeployNativeRuntime = "node" | "deno";
+
 export type EnvironmentDeployNativeAppService = {
   composeServiceName: string;
   serviceId: string;
   listenPort: number;
   framework: EnvironmentDeployNativeFramework;
+  /**
+   * `deno` runs the app on the vendored Deno (`denoVersion`) instead of Node.
+   * Omitted means `node`, and a Node app's wire shape is unchanged.
+   */
+  runtime?: EnvironmentDeployNativeRuntime;
   nodeVersion?: string;
+  /** Deno series ("2", "2.9", "2.9.7"); only read when `runtime` is `deno`. */
+  denoVersion?: string;
   /** `NODE_ENV` for the generated unit. Omitted means `production`. */
   appMode?: "production" | "development";
   /**
@@ -4403,6 +4413,8 @@ function parseSitePrincipal(
 
 const NATIVE_APP_FRAMEWORKS = new Set(["auto", "node", "next"]);
 
+const NATIVE_APP_RUNTIMES: ReadonlySet<string> = new Set(["node", "deno"]);
+
 /** Same shape as the instance parser — a range or tag is not a pin. */
 const NATIVE_APP_NODE_VERSION_RE = /^\d{1,3}(\.\d{1,3}){0,2}$/;
 
@@ -4503,6 +4515,24 @@ function parseNativeAppNodeVersion(value: unknown): string | undefined {
     throw new TypeError("Invalid nativeAppServices nodeVersion");
   }
   return value;
+}
+
+function parseNativeAppDenoVersion(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !NATIVE_APP_NODE_VERSION_RE.test(value)) {
+    throw new TypeError("Invalid nativeAppServices denoVersion");
+  }
+  return value;
+}
+
+function parseNativeAppRuntime(
+  value: unknown,
+): EnvironmentDeployNativeRuntime | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !NATIVE_APP_RUNTIMES.has(value)) {
+    throw new TypeError("Invalid nativeAppServices runtime");
+  }
+  return value as EnvironmentDeployNativeRuntime;
 }
 
 function parseNativeAppMode(
@@ -4703,8 +4733,12 @@ function parseNativeAppService(
     listenPort: parseSiteListenPort(value.listenPort),
     framework: value.framework as EnvironmentDeployNativeFramework,
   };
+  const runtime = parseNativeAppRuntime(value.runtime);
+  if (runtime !== undefined) app.runtime = runtime;
   const nodeVersion = parseNativeAppNodeVersion(value.nodeVersion);
   if (nodeVersion !== undefined) app.nodeVersion = nodeVersion;
+  const denoVersion = parseNativeAppDenoVersion(value.denoVersion);
+  if (denoVersion !== undefined) app.denoVersion = denoVersion;
   const appMode = parseNativeAppMode(value.appMode);
   if (appMode !== undefined) app.appMode = appMode;
   const enabled = parseNativeAppEnabled(value.enabled);

@@ -134,6 +134,21 @@
           "gid": 9925
         }
       }
+    },
+    "deno": {
+      "seriesKey": "major",
+      "default": "2",
+      "series": {
+        "2": {
+          "group": "tpdeno2",
+          "gid": 9941
+        }
+      },
+      "$comment": [
+        "Deno publishes one major (2) and ships minors often, so a series is the",
+        "major: the vendoring role installs the newest 2.x release and moves",
+        "`current` at it. Add a series only when Deno ships a new major."
+      ]
     }
   }
 }

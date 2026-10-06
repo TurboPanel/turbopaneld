@@ -29,12 +29,13 @@ import {
 const test = Deno.test.bind(Deno);
 
 test("RUNTIME_NAMES is the sorted runtime set", () => {
-  assertEquals([...RUNTIME_NAMES], ["node", "php"]);
+  assertEquals([...RUNTIME_NAMES], ["deno", "node", "php"]);
 });
 
 test("isRuntimeName accepts only registry names", () => {
   assertEquals(isRuntimeName("php"), true);
   assertEquals(isRuntimeName("node"), true);
+  assertEquals(isRuntimeName("deno"), true);
   assertEquals(isRuntimeName("python"), false);
   assertEquals(isRuntimeName(""), false);
 });
@@ -60,11 +61,14 @@ test("entitlementSeries uses major.minor for php and major for node", () => {
   assertEquals(entitlementSeries("php", " 8.3 "), "8.3");
   assertEquals(entitlementSeries("node", "24.17.0"), "24");
   assertEquals(entitlementSeries("node", "22"), "22");
+  assertEquals(entitlementSeries("deno", "2.9.7"), "2");
 });
 
 test("supportedSeries and defaultSeries come from the registry", () => {
   assertEquals(supportedSeries("php"), ["8.3", "8.4"]);
   assertEquals(supportedSeries("node"), ["22", "24", "26"]);
+  assertEquals(supportedSeries("deno"), ["2"]);
+  assertEquals(defaultSeries("deno"), "2");
   assertEquals(defaultSeries("php"), "8.4");
   assertEquals(defaultSeries("node"), "24");
 });
@@ -80,13 +84,17 @@ test("runtimeGroup and runtimeGid resolve known series and unknown as undefined"
   assertEquals(runtimeGid("node", "22"), 9921);
   assertEquals(runtimeGroup("node", "26.10.0"), "tpnode26");
   assertEquals(runtimeGid("node", "26"), 9925);
+  assertEquals(runtimeGroup("deno", "2.9.7"), "tpdeno2");
+  assertEquals(runtimeGid("deno", "2"), 9941);
   assertEquals(runtimeGroup("php", "7.4"), undefined);
+  assertEquals(runtimeGroup("deno", "3"), undefined);
   assertEquals(runtimeGid("node", "18"), undefined);
 });
 
 test("allRuntimeGroups and allManagedGroups are the containment sets", () => {
   const runtime = [...allRuntimeGroups()].sort((a, b) => a.localeCompare(b));
   assertEquals(runtime, [
+    "tpdeno2",
     "tpnode22",
     "tpnode24",
     "tpnode26",
@@ -95,6 +103,7 @@ test("allRuntimeGroups and allManagedGroups are the containment sets", () => {
   ]);
   const managed = [...allManagedGroups()].sort((a, b) => a.localeCompare(b));
   assertEquals(managed, [
+    "tpdeno2",
     "tpnode22",
     "tpnode24",
     "tpnode26",

@@ -188,10 +188,16 @@ async function daemonExtraVars(): Promise<Array<[string, string[]]>> {
   await ensureNativeAppRuntime(
     [{ nodeVersion: "24" }, {
       nodeVersion: "22",
+    }, {
+      runtime: "deno",
+      denoVersion: "2.9.7",
     }] as unknown as EnvironmentDeployNativeAppService[],
     {
-      runPlaybook: (_playbook, _label, args) => {
-        captured.push(["node-app-runtime-apply", extraVarValues(args ?? [])]);
+      runPlaybook: (playbook, _label, args) => {
+        const name = playbook.endsWith("deno-app-runtime-apply.yml")
+          ? "deno-app-runtime-apply"
+          : "node-app-runtime-apply";
+        captured.push([name, extraVarValues(args ?? [])]);
         return Promise.resolve();
       },
     },
