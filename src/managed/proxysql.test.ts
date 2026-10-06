@@ -383,6 +383,22 @@ test("proxysqlCompose publishes only on the intended address for public/datacent
   assertEquals(compose.includes('"0.0.0.0:13306:13306"'), false);
 });
 
+test("proxysqlCompose publishes a local-scope frontend on loopback only", () => {
+  // `local` exposure: host sites on 127.0.0.1:13306 keep working, and nothing
+  // else on the host network can reach the listeners.
+  const compose = proxysqlCompose(
+    DESCRIPTOR,
+    ["127.0.0.1"],
+    [],
+    null,
+    MANAGED_NETWORK,
+  );
+  assertStringIncludes(compose, '"127.0.0.1:15432:15432"');
+  assertStringIncludes(compose, '"127.0.0.1:13306:13306"');
+  assertEquals(compose.includes("0.0.0.0:"), false);
+  assertEquals(readPublishedBindAddressesFromCompose(compose), ["127.0.0.1"]);
+});
+
 test("renderProxySqlConfig keeps ProxySQL's internal listener on every interface regardless of the publish bind", () => {
   // The container's own `interfaces=` must stay `0.0.0.0` even when the
   // compose-level publish is private-only (null) or a narrow public IP —
