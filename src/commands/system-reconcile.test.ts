@@ -19,6 +19,7 @@ import {
   proxysqlMonitorCnfPath,
 } from "../managed/engine-paths.ts";
 import { resolveLayout } from "../paths/layout.ts";
+import { createFakeProxySqlAdmin } from "../testing/fake-proxysql-admin.ts";
 import {
   type TempLayoutFixture,
   withTempLayout,
@@ -1047,8 +1048,15 @@ async function reconcileWithTwoSegments(bindAddress?: string): Promise<void> {
   };
   if (bindAddress !== undefined) payload.bindAddresses = [bindAddress];
 
+  // The reconcile reads the runtime table back after its apply, so the fake
+  // admin has to remember what the apply wrote.
+  const admin = createFakeProxySqlAdmin();
   await handleManagedIngressReconcile(payload, new Date().toISOString(), {
-    runDocker: fakeRunOk(),
+    runDocker: (args, options) =>
+      Promise.resolve(
+        admin.run(args, options) ??
+          { success: true, stdout: "", stderr: "", code: 0 },
+      ),
     ensureDocker: () => Promise.resolve(),
     decryptSecrets: (ciphertexts: string[]) =>
       Promise.resolve(
