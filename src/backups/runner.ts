@@ -166,6 +166,8 @@ function backUpManagedTarget(
         artifactExtension,
         retentionKeep: entry.retentionKeep,
         policyId: entry.policyId,
+        // Absent from an older control plane: the engine default applies.
+        database: entry.database,
       },
       deps.artifact,
     );

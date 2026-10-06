@@ -159,6 +159,7 @@
         "required": false,
         "type": "'docker' | 'path'"
       },
+      { "name": "database", "required": false, "type": "string" },
       { "name": "enabled", "required": true, "type": "boolean" },
       { "name": "hostPath", "required": false, "type": "string" },
       { "name": "managedId", "required": false, "type": "string" },
