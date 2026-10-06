@@ -186,6 +186,7 @@ test("readOnlySessionDefaultSql sets or clears the read-only default per databas
 test("reconcileDatabaseObjectsSql gives writers exactly five table privileges and readers only SELECT, now and for later tables", () => {
   const sql = reconcileDatabaseObjectsSql({
     creators: ["postgres", "own", "rw"],
+    owners: ["own"],
     writers: ["own", "rw"],
     readers: ["ro"],
   });
@@ -243,6 +244,22 @@ test("reconcileDatabaseObjectsSql gives writers exactly five table privileges an
   // the wipe of an old grant.
   assertEquals(/GRANT ALL[^;]*(TABLE|SEQUENCE)/.test(sql), false);
   assertEquals(/GRANT[^;]*(TRIGGER|MAINTAIN)/.test(sql), false);
+  // Schema CREATE: the owner login only; a read-write login gets USAGE alone
+  // (it creates in its own schema, which it owns), now and for later schemas.
+  assertEquals(sql.includes('GRANT USAGE, CREATE ON SCHEMA %s TO "own"'), true);
+  assertEquals(sql.includes('GRANT USAGE ON SCHEMA %s TO "rw"'), true);
+  assertEquals(sql.includes('GRANT USAGE, CREATE ON SCHEMA %s TO "rw"'), false);
+  assertEquals(
+    sql.includes(
+      'FOR ROLE "postgres" GRANT USAGE, CREATE ON SCHEMAS TO "own";',
+    ),
+    true,
+  );
+  assertEquals(
+    sql.includes('FOR ROLE "postgres" GRANT USAGE ON SCHEMAS TO "rw";'),
+    true,
+  );
+  assertEquals(/GRANT[^;\n]*CREATE ON SCHEMAS TO "rw"/.test(sql), false);
   // Nothing in the read-only path grants a write.
   const readerLines = sql.split("\n").filter((line) => line.includes('"ro"'));
   assertEquals(
@@ -258,6 +275,7 @@ test("reconcileDatabaseObjectsSql gives writers exactly five table privileges an
 test("reconcileDatabaseObjectsSql with no logins only closes the public schema", () => {
   const sql = reconcileDatabaseObjectsSql({
     creators: ["postgres"],
+    owners: [],
     writers: [],
     readers: [],
   });

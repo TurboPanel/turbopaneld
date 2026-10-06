@@ -161,7 +161,8 @@ const WRITER_TABLE_PRIVILEGES = [
   "REFERENCES",
 ] as const;
 const WRITER_SEQUENCE_PRIVILEGES = ["USAGE", "SELECT", "UPDATE"] as const;
-const WRITER_SCHEMA_PRIVILEGES = ["USAGE", "CREATE"] as const;
+const OWNER_SCHEMA_PRIVILEGES = ["USAGE", "CREATE"] as const;
+const WRITER_SCHEMA_PRIVILEGES = ["USAGE"] as const;
 const READER_TABLE_PRIVILEGES = ["SELECT"] as const;
 const READER_SEQUENCE_PRIVILEGES = ["SELECT"] as const;
 const READER_SCHEMA_PRIVILEGES = ["USAGE"] as const;
@@ -381,7 +382,9 @@ export type DatabaseObjectAccess = {
    * every owner or read-write login on the database.
    */
   creators: readonly string[];
-  /** Owner and read-write logins: read, write and create. */
+  /** Owner logins: the only logins that may create in `public` and in other logins' schemas. */
+  owners: readonly string[];
+  /** Owner and read-write logins: read and write (create only for owners, and in a login's own schema). */
   writers: readonly string[];
   /** Read-only logins: read and nothing else. */
   readers: readonly string[];
@@ -389,6 +392,7 @@ export type DatabaseObjectAccess = {
 
 function defaultPrivilegeSql(
   creator: string,
+  owners: readonly string[],
   writers: readonly string[],
   readers: readonly string[],
 ): string[] {
@@ -407,7 +411,12 @@ function defaultPrivilegeSql(
       `ALTER DEFAULT PRIVILEGES FOR ROLE ${owner} GRANT ${
         WRITER_SEQUENCE_PRIVILEGES.join(", ")
       } ON SEQUENCES TO ${role};`,
-      `ALTER DEFAULT PRIVILEGES FOR ROLE ${owner} GRANT USAGE, CREATE ON SCHEMAS TO ${role};`,
+      `ALTER DEFAULT PRIVILEGES FOR ROLE ${owner} REVOKE ALL ON SCHEMAS FROM ${role};`,
+      `ALTER DEFAULT PRIVILEGES FOR ROLE ${owner} GRANT ${
+        (owners.includes(name)
+          ? OWNER_SCHEMA_PRIVILEGES
+          : WRITER_SCHEMA_PRIVILEGES).join(", ")
+      } ON SCHEMAS TO ${role};`,
     );
   }
   for (const name of readers) {
@@ -502,6 +511,7 @@ function exactObjectAclSql(
 }
 
 function existingObjectSql(
+  owners: readonly string[],
   writers: readonly string[],
   readers: readonly string[],
 ): string[] {
@@ -511,7 +521,14 @@ function existingObjectSql(
   const schema: AclTarget = { acl: "n", noun: "SCHEMA" };
   for (const name of writers) {
     lines.push(
-      exactObjectAclSql(schema, name, WRITER_SCHEMA_PRIVILEGES, true),
+      exactObjectAclSql(
+        schema,
+        name,
+        owners.includes(name)
+          ? OWNER_SCHEMA_PRIVILEGES
+          : WRITER_SCHEMA_PRIVILEGES,
+        true,
+      ),
       exactObjectAclSql(table, name, WRITER_TABLE_PRIVILEGES, true),
       exactObjectAclSql(sequence, name, WRITER_SEQUENCE_PRIVILEGES, true),
     );
@@ -569,10 +586,17 @@ export function reconcileDatabaseObjectsSql(
   access: DatabaseObjectAccess,
 ): string {
   const lines = [closePublicSchemaSql()];
-  lines.push(...existingObjectSql(access.writers, access.readers));
+  lines.push(
+    ...existingObjectSql(access.owners, access.writers, access.readers),
+  );
   for (const creator of access.creators) {
     lines.push(
-      ...defaultPrivilegeSql(creator, access.writers, access.readers),
+      ...defaultPrivilegeSql(
+        creator,
+        access.owners,
+        access.writers,
+        access.readers,
+      ),
     );
   }
   return lines.join("\n");

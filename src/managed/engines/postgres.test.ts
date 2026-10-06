@@ -155,12 +155,22 @@ test("applyCredentials reaches each login only to its levels: lock-down, per-log
   );
   assertEquals(rwGrants.length, 2);
   assertEquals(
-    rwGrants.every((i) => i.includes("CONNECT, CREATE, TEMPORARY")),
+    rwGrants.every((i) =>
+      i.includes("CONNECT, TEMPORARY") && !i.includes("CREATE")
+    ),
     true,
   );
-  // Each listed database is reconciled once, connected to that database.
-  assertEquals(inDatabase.map(databaseOf).sort(), ["appdb", "other"]);
-  const appdb = inDatabase.find((c) => databaseOf(c) === "appdb")!.input!;
+  // Each listed database gets rw's own schema, then one reconcile, connected to it.
+  const reconciles = inDatabase.filter((c) =>
+    (c.input ?? "").includes("ALTER DEFAULT PRIVILEGES")
+  );
+  assertEquals(reconciles.map(databaseOf).sort(), ["appdb", "other"]);
+  assertEquals(
+    inDatabase.filter((c) => (c.input ?? "").includes('CREATE SCHEMA "rw"'))
+      .map(databaseOf).sort(),
+    ["appdb", "other"],
+  );
+  const appdb = reconciles.find((c) => databaseOf(c) === "appdb")!.input!;
   // Creators: the platform admin, the exposed root login and owner/read-write logins.
   for (const creator of ["postgres", "postgres_x", "own", "rw"]) {
     assertEquals(

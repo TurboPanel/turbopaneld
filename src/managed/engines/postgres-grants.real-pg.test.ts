@@ -225,7 +225,7 @@ async function proveLogins(
      UPDATE public.orders SET note = 'rw2' WHERE id = 1;
      DELETE FROM public.orders WHERE id = 2;
      SELECT nextval('public.orders_id_seq');
-     TRUNCATE public.rw_made;`,
+     TRUNCATE rw.rw_made;`,
   );
   const trigger =
     `CREATE FUNCTION rw.rw_fn() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END';
@@ -235,7 +235,7 @@ async function proveLogins(
     "rw",
     "appdb",
     trigger,
-    "permission denied for table public.orders",
+    "permission denied for table orders",
   );
   await expectRefused(
     session,
@@ -307,6 +307,43 @@ async function proveLogins(
     "t",
     "read-write should have CREATE on their own schema",
   );
+  // The owner login can create in public; read-only cannot create anywhere.
+  assertEquals(
+    await session.value(
+      `SELECT has_schema_privilege('own', 'public', 'CREATE')`,
+      "appdb",
+    ),
+    "t",
+    "owner should have CREATE on public schema",
+  );
+  await expectAllowed(
+    session,
+    "own",
+    "appdb",
+    `CREATE TABLE public.owner_made (id int);`,
+  );
+  await expectRefused(
+    session,
+    "rw",
+    "appdb",
+    `CREATE TABLE public.rw_made2 (id int);`,
+    "permission denied for schema public",
+  );
+  assertEquals(
+    await session.value(
+      `SELECT has_schema_privilege('ro', 'rw', 'CREATE') OR has_schema_privilege('ro', 'public', 'CREATE')`,
+      "appdb",
+    ),
+    "f",
+    "read-only should not have CREATE on any schema",
+  );
+  assertEquals(
+    await session.value(
+      `SELECT has_schema_privilege('rw', 'rw', 'CREATE')`,
+      "appdb",
+    ),
+    "t",
+  );
   // A table the platform admin makes later (a restore) is reachable, still
   // without TRIGGER.
   await session.value(
@@ -339,7 +376,7 @@ async function proveLogins(
     session,
     "rw",
     "appdb",
-    `CREATE TABLE public.fk_child (p int REFERENCES public.restored (id));`,
+    `CREATE TABLE rw.fk_child (p int REFERENCES public.restored (id));`,
   );
   // ...and still no TRIGGER, ALTER or DROP on that table.
   await expectRefused(

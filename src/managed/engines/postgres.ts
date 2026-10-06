@@ -210,11 +210,15 @@ function objectAccessFor(
   const writers = here.filter((entry) => entry.level !== "read-only").map((
     entry,
   ) => entry.username);
+  const owners = here.filter((entry) => entry.level === "owner").map((
+    entry,
+  ) => entry.username);
   const readers = here.filter((entry) => entry.level === "read-only").map((
     entry,
   ) => entry.username);
   return {
     creators: [...new Set([ctx.rootUsername, ...rootUsernames, ...writers])],
+    owners,
     writers,
     readers,
   };
