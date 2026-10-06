@@ -41,6 +41,15 @@ Deno.test("redactUrlSecrets keeps an @ that belongs to the path or the query", (
   );
 });
 
+Deno.test("redactUrlSecrets drops a token-only user name before a query or fragment with @", () => {
+  const first = redactUrlSecrets("https://TOKEN@host.example?mail=a@b.test");
+  assertEquals(first, "https://host.example?[redacted]");
+  assertEquals(redactUrlSecrets(first), first);
+  const second = redactUrlSecrets("https://TOKEN@host.example#x@y");
+  assertEquals(second, "https://host.example?[redacted]");
+  assertEquals(redactUrlSecrets(second), second);
+});
+
 Deno.test("redactUrlSecrets gives the same text when applied twice", () => {
   const once = redactUrlSecrets("see https://u:p?w@h.test/a?b=c#d and more");
   assertEquals(once, "see https://h.test/a?[redacted] and more");
