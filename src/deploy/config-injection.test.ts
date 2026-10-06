@@ -513,7 +513,7 @@ test("www redirect target refuses a hostile name", () => {
           redirectTo: `example.com${fragment}x`,
         }),
       Error,
-      "hostings[].wwwRedirect must be",
+      "hostings[].www must be",
     );
   }
 });

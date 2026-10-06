@@ -7,9 +7,10 @@ import {
   type EnvironmentDeployContainer,
   type EnvironmentDeployHosting,
   type EnvironmentDeployPayload,
+  hostingServedNames,
+  hostingWwwRedirects,
   isValidIpv4Literal,
   isValidIpv6Literal,
-  wwwSiblingHostname,
 } from "../contracts/commands-contracts.ts";
 import { type LayoutPaths, PROD_HOME_DEFAULT } from "../paths/layout.ts";
 import { safeConfigToken, safeUrlPath } from "../contracts/config-values.ts";
@@ -1546,7 +1547,7 @@ type HostnameSite = {
   bindAddress?: string;
   routes: CaddySiteRoute[];
   tlsMode?: EnvironmentDeployHosting["tlsMode"];
-  /** Set on a `wwwRedirect` name: send every request to `https://<redirectTo>`. */
+  /** Set on a `www` redirect name: send every request to `<redirectTo>`. */
   redirectTo?: string;
 };
 
@@ -1681,26 +1682,30 @@ export type SiteSnippetOptions = Readonly<{
   routes?: readonly CaddySiteRoute[];
   tlsMode?: EnvironmentDeployHosting["tlsMode"];
   /**
-   * Serve this name as a permanent redirect to `https://<redirectTo>` (path and
-   * query kept) instead of proxying. Always HTTPS, so the name holds a
-   * certificate and a browser typing it gets there without a warning.
+   * Serve this name as a permanent redirect to `<redirectTo>` (path and query
+   * kept) instead of proxying. With `forceHttps` (the default) both plain HTTP
+   * and HTTPS land on `https://<redirectTo>` in one hop; without it each scheme
+   * keeps its own.
    */
   redirectTo?: string;
 }>;
 
-/** A name that only redirects: plain HTTP and HTTPS both send the visitor on. */
+/** A name that only redirects, under its own certificate on the HTTPS side. */
 function redirectSiteSnippet(options: SiteSnippetOptions): string {
   const { hostname, tlsDir, tlsId, bindAddress, tlsMode } = options;
-  const target = safeConfigToken("hostings[].wwwRedirect", options.redirectTo!);
+  const target = safeConfigToken("hostings[].www", options.redirectTo!);
   const tlsDirective = hostingTlsDirective(tlsMode, tlsId, tlsDir);
   const tlsLine = tlsDirective ? `${tlsDirective}\n` : "";
   const bindLine = bindAddress ? formatBindDirective(bindAddress) : "";
-  const redirect = `  redir https://${target}{uri} permanent\n`;
+  const httpsRedirect = `  redir https://${target}{uri} permanent\n`;
+  const httpRedirect = emitHttpsSite(options.forceHttps ?? true, tlsMode)
+    ? httpsRedirect
+    : `  redir http://${target}{uri} permanent\n`;
   return `http://${hostname} {
-${bindLine}${redirect}}
+${bindLine}${httpRedirect}}
 
 ${hostname} {
-${bindLine}${tlsLine}${redirect}}
+${bindLine}${tlsLine}${httpsRedirect}}
 `;
 }
 
@@ -1874,7 +1879,7 @@ export function buildCaddyHostnameRoutes(
     if (hosting.hostnames.length === 0) continue;
 
     const route = buildCaddySiteRoute(hosting, loopbackByService);
-    for (const hostname of hosting.hostnames) {
+    for (const hostname of hostingServedNames(hosting)) {
       const site = getOrCreateHostnameSite(byHostname, hostname);
       mergeHostingIntoHostnameSite(site, hosting, route);
     }
@@ -1885,8 +1890,8 @@ export function buildCaddyHostnameRoutes(
 }
 
 /**
- * The `wwwRedirect` names: one redirect site per hostname, under the same TLS
- * mode and bind address as the hostname it points at. A name some hosting
+ * The redirect-only names from `www` modes: one redirect site per name, under
+ * the same TLS mode and bind address as the hosting. A name some hosting
  * already serves is left alone (the control plane refuses that deploy; this
  * keeps a stray payload from replacing a real site).
  */
@@ -1895,17 +1900,15 @@ function addWwwRedirectSites(
   hostings: readonly EnvironmentDeployHosting[],
 ): void {
   for (const hosting of hostings) {
-    if (!hosting.wwwRedirect || (hosting.protocol ?? "http") !== "http") {
-      continue;
-    }
-    for (const hostname of hosting.hostnames) {
-      const sibling = wwwSiblingHostname(hostname);
-      if (sibling === null || byHostname.has(sibling)) continue;
-      byHostname.set(sibling, {
-        forceHttps: true,
+    if ((hosting.protocol ?? "http") !== "http") continue;
+    const acme = hosting.tlsMode === "acme";
+    for (const { from, to } of hostingWwwRedirects(hosting)) {
+      if (byHostname.has(from)) continue;
+      byHostname.set(from, {
+        forceHttps: acme || (hosting.proxy?.forceHttps ?? true),
         routes: [],
-        redirectTo: hostname,
-        ...(hosting.tlsMode === "acme" ? { tlsMode: "acme" as const } : {}),
+        redirectTo: to,
+        ...(acme ? { tlsMode: "acme" as const } : {}),
         ...(hosting.bindAddress ? { bindAddress: hosting.bindAddress } : {}),
       });
     }

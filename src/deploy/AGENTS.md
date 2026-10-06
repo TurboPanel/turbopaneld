@@ -224,6 +224,23 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    merge-patches the matching `managed` `lets_encrypt` row's
    `tls.metadata.acme` (`lastError`, `lastIssuedAt`, `notAfter`) and deliberately never touches `tls.status`
    — see `turbopanel/src/client/tls/acme-issuance-event.ts`.
+11b. **www modes** (`hostings[].www`, omitted = `off`): `both` serves the site
+   on the hostname and its other spelling (`www.` added or removed);
+   `www-to-root` serves the bare name and turns `www.<name>` into a
+   redirect-only site; `root-to-www` the other way round. The direction is
+   about the names, not about which one was typed. One helper,
+   `hostingWwwNames` in `src/contracts/commands-contracts.ts` (twin of the
+   control plane's `src/contracts/commands/hostname.ts`), expands a hostname;
+   `hostingServedNames` feeds the Caddy sites, the Traefik `Host()` rule and
+   the pinned-certificate map, and `hostingWwwRedirects` the redirect sites.
+   A redirect site answers `http://` and `https://` with one permanent
+   redirect straight to `https://<target>{uri}` (path and query kept; plain
+   `http://` when the hosting turned forced HTTPS off), under the hosting's
+   own TLS mode, so in `acme` mode it gets its own certificate and lands in
+   the acme manifest. `validateDeployWwwModes` refuses a mode on `tcp`/`udp`,
+   a name with no valid other spelling (a wildcard), an other spelling that is
+   already a hostname in the deploy, and a name one hosting redirects while
+   another hosting (another path of it) serves it.
 12. Best-effort `docker compose ps --format json` — per-container identity/status
    (`containerId`, `containerName`, `composeServiceName`, `status`, optional
    `serviceId` from `payload.hostings`) is included in the command result when

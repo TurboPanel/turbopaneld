@@ -1,5 +1,5 @@
 import { assertEquals } from "@std/assert";
-import { wwwSiblingHostname } from "./commands-contracts.ts";
+import { hostingWwwNames, wwwSiblingHostname } from "./commands-contracts.ts";
 import { describe, it } from "@std/testing/bdd";
 import type {
   EnvironmentDeployHosting,
@@ -15,7 +15,7 @@ import {
   validateDeployStorageMaterial,
   validateDeployStorageMaterialList,
   validateDeployTargetPort,
-  validateDeployWwwRedirects,
+  validateDeployWwwModes,
 } from "./deploy-validation.ts";
 
 function hosting(
@@ -271,7 +271,7 @@ describe("daemon deploy-validation parity", () => {
   });
 });
 
-describe("wwwRedirect validation", () => {
+describe("www mode validation", () => {
   it("flips the www spelling and refuses unusable results", () => {
     assertEquals(wwwSiblingHostname("example.com"), "www.example.com");
     assertEquals(wwwSiblingHostname("www.example.com"), "example.com");
@@ -279,45 +279,97 @@ describe("wwwRedirect validation", () => {
     assertEquals(wwwSiblingHostname(`${"a.".repeat(124)}com`), null);
   });
 
-  it("accepts a lone www redirect", () => {
-    assertEquals(
-      validateDeployHostings([
-        hosting({ hostnames: ["example.com"], wwwRedirect: true }),
-      ]),
-      null,
-    );
+  it("expands each mode the same way whichever spelling was typed", () => {
+    assertEquals(hostingWwwNames("example.com"), {
+      serve: ["example.com"],
+      redirect: null,
+    });
+    assertEquals(hostingWwwNames("example.com", "both"), {
+      serve: ["example.com", "www.example.com"],
+      redirect: null,
+    });
+    for (const typed of ["example.com", "www.example.com"]) {
+      assertEquals(hostingWwwNames(typed, "www-to-root"), {
+        serve: ["example.com"],
+        redirect: { from: "www.example.com", to: "example.com" },
+      });
+      assertEquals(hostingWwwNames(typed, "root-to-www"), {
+        serve: ["www.example.com"],
+        redirect: { from: "example.com", to: "www.example.com" },
+      });
+    }
+    assertEquals(hostingWwwNames("www.", "both"), null);
   });
 
-  it("refuses wwwRedirect on a tcp hosting", () => {
+  it("accepts every mode on a lone hostname", () => {
+    for (const www of ["both", "www-to-root", "root-to-www"] as const) {
+      assertEquals(
+        validateDeployHostings([hosting({ hostnames: ["example.com"], www })]),
+        null,
+      );
+    }
+  });
+
+  it("refuses www on a tcp hosting", () => {
     assertEquals(
-      validateDeployWwwRedirects([
+      validateDeployWwwModes([
         hosting({
           hostnames: [],
           protocol: "tcp",
           ports: [{ published: 5432, target: 5432 }],
-          wwwRedirect: true,
+          www: "both",
         }),
       ]),
-      "wwwRedirect requires the http protocol",
+      "www requires the http protocol",
     );
   });
 
   it("refuses a sibling that is already a hostname, in this or another hosting", () => {
-    const own = validateDeployWwwRedirects([
+    const own = validateDeployWwwModes([
       hosting({
         hostnames: ["example.com", "www.example.com"],
-        wwwRedirect: true,
+        www: "www-to-root",
       }),
     ]);
     assertEquals(own?.includes("www.example.com"), true);
     const other = validateDeployHostings([
-      hosting({ hostnames: ["example.com"], wwwRedirect: true }),
+      hosting({ hostnames: ["example.com"], www: "both" }),
       hosting({ hostingId: "h2", hostnames: ["www.example.com"] }),
     ]);
     assertEquals(other?.includes("already a hostname"), true);
   });
 
-  it("ignores hostings without the flag", () => {
+  it("refuses a name one hosting redirects while another path of it is served", () => {
+    const error = validateDeployHostings([
+      hosting({ hostnames: ["example.com"], www: "root-to-www" }),
+      hosting({
+        hostingId: "h2",
+        hostnames: ["example.com"],
+        pathPrefix: "/api",
+      }),
+    ]);
+    assertEquals(
+      error,
+      "www: example.com is sent to www.example.com by one hosting but served by another",
+    );
+  });
+
+  it("lets paths of one name agree on a www mode", () => {
+    assertEquals(
+      validateDeployHostings([
+        hosting({ hostnames: ["example.com"], www: "root-to-www" }),
+        hosting({
+          hostingId: "h2",
+          hostnames: ["example.com"],
+          pathPrefix: "/api",
+          www: "root-to-www",
+        }),
+      ]),
+      null,
+    );
+  });
+
+  it("ignores hostings without a mode", () => {
     assertEquals(
       validateDeployHostings([
         hosting({ hostnames: ["example.com"] }),

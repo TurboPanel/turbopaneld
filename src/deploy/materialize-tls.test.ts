@@ -238,20 +238,34 @@ test("hostnameTlsMap skips acme-mode hostings even when tlsId is set", () => {
   assertEquals(map.has("acme.example.test"), false);
 });
 
-test("hostnameTlsMap pins the www redirect name to the same certificate", () => {
+test("hostnameTlsMap pins every www name to the same certificate", () => {
+  const hosting = {
+    hostingId: "h1",
+    serviceId: "s1",
+    composeServiceName: "web",
+    tlsId: TLS_ID,
+  };
   const payload = {
     hostings: [
-      {
-        hostingId: "h1",
-        serviceId: "s1",
-        composeServiceName: "web",
-        hostnames: ["example.com"],
-        tlsId: TLS_ID,
-        wwwRedirect: true,
-      },
+      { ...hosting, hostnames: ["example.com"], www: "www-to-root" },
+      { ...hosting, hostnames: ["shop.example.com"], www: "root-to-www" },
+      { ...hosting, hostnames: ["blog.example.com"], www: "both" },
+      { ...hosting, hostnames: ["plain.example.com"] },
     ],
   } as EnvironmentDeployPayload;
   const map = hostnameTlsMap(payload);
-  assertEquals(map.get("example.com"), TLS_ID);
-  assertEquals(map.get("www.example.com"), TLS_ID);
+  for (
+    const name of [
+      "example.com",
+      "www.example.com",
+      "shop.example.com",
+      "www.shop.example.com",
+      "blog.example.com",
+      "www.blog.example.com",
+      "plain.example.com",
+    ]
+  ) {
+    assertEquals(map.get(name), TLS_ID, name);
+  }
+  assertEquals(map.has("www.plain.example.com"), false);
 });

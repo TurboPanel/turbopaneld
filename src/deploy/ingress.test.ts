@@ -6,6 +6,7 @@ import {
   assertThrows,
 } from "@std/assert";
 import { dirname, join } from "@std/path";
+import type { EnvironmentDeployHosting } from "../contracts/commands-contracts.ts";
 import { INSTANCE_ACME_HTTP01_SITE } from "./instance-acme-http01.ts";
 import {
   assertSafeComposeProjectName,
@@ -4036,19 +4037,29 @@ const WWW_BASE_PAYLOAD = {
   }],
 };
 
-test("buildCaddyHostnameRoutes adds a redirect site for each wwwRedirect hostname", () => {
+function wwwHosting(
+  hostnames: string[],
+  www?: EnvironmentDeployHosting["www"],
+  extra: Partial<EnvironmentDeployHosting> = {},
+): EnvironmentDeployHosting {
+  return {
+    hostingId: `h-${hostnames.join("-")}`,
+    serviceId: "s1",
+    composeServiceName: "web",
+    hostnames,
+    ...(www ? { www } : {}),
+    ...extra,
+  };
+}
+
+test("buildCaddyHostnameRoutes www-to-root serves the bare name and redirects www", () => {
   const routes = buildCaddyHostnameRoutes({
     ...WWW_BASE_PAYLOAD,
     hostings: [
-      {
-        hostingId: "h1",
-        serviceId: "s1",
-        composeServiceName: "web",
-        hostnames: ["example.com", "www.shop.example.com"],
+      wwwHosting(["example.com", "www.shop.example.com"], "www-to-root", {
         tlsMode: "acme",
         bindAddress: "203.0.113.10",
-        wwwRedirect: true,
-      },
+      }),
     ],
   });
   assertEquals(
@@ -4065,14 +4076,92 @@ test("buildCaddyHostnameRoutes adds a redirect site for each wwwRedirect hostnam
   assertEquals(redirect.routes, []);
   assertEquals(redirect.tlsMode, "acme");
   assertEquals(redirect.bindAddress, "203.0.113.10");
+  // Typed as www, still served on the bare name: the mode names the direction.
   assertEquals(
-    routes.get("shop.example.com")!.redirectTo,
-    "www.shop.example.com",
+    routes.get("www.shop.example.com")!.redirectTo,
+    "shop.example.com",
   );
+  assertEquals(routes.get("shop.example.com")!.routes.length, 1);
   assertEquals(routes.get("example.com")!.redirectTo, undefined);
 });
 
-test("buildCaddyHostnameRoutes ignores wwwRedirect off, on tcp, and on a name already served", () => {
+test("buildCaddyHostnameRoutes root-to-www serves www and redirects the bare name", () => {
+  const routes = buildCaddyHostnameRoutes({
+    ...WWW_BASE_PAYLOAD,
+    hostings: [wwwHosting(["example.com"], "root-to-www")],
+  });
+  assertEquals([...routes.keys()].sort(), ["example.com", "www.example.com"]);
+  assertEquals(routes.get("example.com")!.redirectTo, "www.example.com");
+  assertEquals(routes.get("example.com")!.routes, []);
+  assertEquals(routes.get("www.example.com")!.redirectTo, undefined);
+  assertEquals(routes.get("www.example.com")!.routes.length, 1);
+});
+
+test("buildCaddyHostnameRoutes both serves the site on both names", () => {
+  const routes = buildCaddyHostnameRoutes({
+    ...WWW_BASE_PAYLOAD,
+    hostings: [wwwHosting(["www.example.com"], "both")],
+  });
+  assertEquals([...routes.keys()].sort(), ["example.com", "www.example.com"]);
+  for (const name of ["example.com", "www.example.com"]) {
+    assertEquals(routes.get(name)!.redirectTo, undefined);
+    assertEquals(routes.get(name)!.routes.length, 1);
+  }
+});
+
+test("buildCaddyHostnameRoutes merges path routes of one name onto its www spelling", () => {
+  const routes = buildCaddyHostnameRoutes({
+    ...WWW_BASE_PAYLOAD,
+    hostings: [
+      wwwHosting(["example.com"], "root-to-www"),
+      wwwHosting(["example.com"], "root-to-www", {
+        hostingId: "h-api",
+        composeServiceName: "api",
+        pathPrefix: "/api",
+      }),
+    ],
+  });
+  assertEquals(routes.get("www.example.com")!.routes.length, 2);
+  assertEquals(routes.get("example.com")!.redirectTo, "www.example.com");
+});
+
+test("siteSnippet www redirect sends plain HTTP straight to the HTTPS target, path and query kept", () => {
+  const snippet = siteSnippet({
+    hostname: "www.example.com",
+    tlsDir: "/etc/turbopanel/tls",
+    tlsMode: "acme",
+    redirectTo: "example.com",
+  });
+  // One hop from http://www to https://root; Caddy's {uri} is path plus query.
+  assertStringIncludes(
+    snippet,
+    "http://www.example.com {\n  redir https://example.com{uri} permanent\n}",
+  );
+  assertStringIncludes(
+    snippet,
+    "www.example.com {\n  redir https://example.com{uri} permanent\n}",
+  );
+  assertEquals(snippet.includes("reverse_proxy"), false);
+});
+
+test("siteSnippet www redirect without forced HTTPS keeps each scheme", () => {
+  const snippet = siteSnippet({
+    hostname: "example.com",
+    tlsDir: "/etc/turbopanel/tls",
+    forceHttps: false,
+    redirectTo: "www.example.com",
+  });
+  assertStringIncludes(
+    snippet,
+    "http://example.com {\n  redir http://www.example.com{uri} permanent\n}",
+  );
+  assertStringIncludes(
+    snippet,
+    "example.com {\n  tls internal\n  redir https://www.example.com{uri} permanent\n}",
+  );
+});
+
+test("buildCaddyHostnameRoutes ignores www off, on tcp, and on a name already served", () => {
   const routes = buildCaddyHostnameRoutes({
     ...WWW_BASE_PAYLOAD,
     hostings: [
@@ -4081,7 +4170,7 @@ test("buildCaddyHostnameRoutes ignores wwwRedirect off, on tcp, and on a name al
         serviceId: "s1",
         composeServiceName: "web",
         hostnames: ["example.com"],
-        wwwRedirect: true,
+        www: "www-to-root",
       },
       {
         hostingId: "h2",
@@ -4096,7 +4185,7 @@ test("buildCaddyHostnameRoutes ignores wwwRedirect off, on tcp, and on a name al
         hostnames: [],
         protocol: "tcp",
         ports: [{ published: 5432, target: 5432 }],
-        wwwRedirect: true,
+        www: "www-to-root",
       },
       {
         hostingId: "h4",
@@ -4125,7 +4214,7 @@ test("rewriteHostingCaddySites serves the www name and lists it in the acme mani
           composeServiceName: "web",
           hostnames: ["example.com"],
           tlsMode: "acme",
-          wwwRedirect: true,
+          www: "www-to-root",
         },
       ],
     });
