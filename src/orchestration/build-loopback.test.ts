@@ -76,7 +76,7 @@ function deniedPorts(stdout: string): Array<[number, number]> {
 const portOf = (addr: string) => Number(addr.slice(addr.lastIndexOf(":") + 1));
 
 test("a build is refused every platform loopback port the code owns", async () => {
-  const out = await run(B1, "sync", "b1");
+  const out = await run(B1, "sync", "b1", "alice");
   assertEquals(out.code, 0, out.stderr);
   const ranges = deniedPorts(out.stdout);
   const denied = (port: number) =>
@@ -117,7 +117,7 @@ test("a build is refused every platform loopback port the code owns", async () =
 });
 
 test("only platform ports are refused: ephemeral ports and the resolver stub stay open", async () => {
-  const { stdout } = await run(B1, "sync", "b1");
+  const { stdout } = await run(B1, "sync", "b1", "alice");
   const ranges = deniedPorts(stdout);
   for (
     const open of [
@@ -142,7 +142,7 @@ test("only platform ports are refused: ephemeral ports and the resolver stub sta
 });
 
 test("the rules bind the build unit's own cgroup, loopback only, tcp and udp, v4 and v6", async () => {
-  const { code, stdout, stderr } = await run(B1, "sync", "b1");
+  const { code, stdout, stderr } = await run(B1, "sync", "b1", "alice");
   assertEquals(code, 0, stderr);
   const match =
     'socket cgroupv2 level 4 "turbopanel.slice/turbopanel-alice.slice/turbopanel-alice-build.slice/turbopanel-build-b1.service"';
@@ -170,17 +170,23 @@ test("the rules bind the build unit's own cgroup, loopback only, tcp and udp, v4
 });
 
 test("the level follows the slice depth: a dashed owner, and a build with no owner", async () => {
+  // A dash in the owner's name is `.` in its slices (a dash is a level).
   const dashed = await run(
-    "/turbopanel.slice/turbopanel-web.slice/turbopanel-web-x.slice/turbopanel-web-x-build.slice/turbopanel-build-b1.service",
+    "/turbopanel.slice/turbopanel-web.x.slice/turbopanel-web.x-build.slice/turbopanel-build-b1.service",
     "sync",
     "b1",
+    "web-x",
   );
   assertEquals(dashed.code, 0, dashed.stderr);
-  assertStringIncludes(dashed.stdout, "socket cgroupv2 level 5 ");
+  assertStringIncludes(
+    dashed.stdout,
+    'socket cgroupv2 level 4 "turbopanel.slice/turbopanel-web.x.slice/turbopanel-web.x-build.slice/turbopanel-build-b1.service"',
+  );
   const ownerless = await run(
     "/turbopanel.slice/turbopanel-tpbuild.slice/turbopanel-build-b1.service",
     "sync",
     "b1",
+    "tpbuild",
   );
   assertEquals(ownerless.code, 0, ownerless.stderr);
   assertStringIncludes(
@@ -200,20 +206,40 @@ test("before the unit exists, sync loads the port set and no build rule", async 
 
 test("no rules and an error outside the build unit, in another unit, or on a hostile path", async () => {
   const cases = [
-    [null, ["sync", "b1"]],
-    ["/system.slice/turbopaneld.service", ["sync", "b1"]],
-    [B1, ["sync", "b2"]],
-    ["/system.slice/turbopanel-build-b1.service", ["sync", "b1"]],
-    ["/turbopanel.slice/turbopanel-build-b1.service/x", ["sync", "b1"]],
-    ['/turbopanel.slice/a" accept;/turbopanel-build-b1.service', [
-      "sync",
-      "b1",
-    ]],
-    ["/turbopanel.slice/../turbopanel-build-b1.service", ["sync", "b1"]],
-    ["/turbopanel.slice//turbopanel-build-b1.service", ["sync", "b1"]],
-    [B1, ["sync", "../b1"]],
-    [B1, ["sync", "B1"]],
-    [B1, ["sync", "b1", "extra"]],
+    [null, ["sync", "b1", "alice"]],
+    ["/system.slice/turbopaneld.service", ["sync", "b1", "alice"]],
+    [B1, ["sync", "b2", "alice"]],
+    // Right unit, wrong owner, or the unit name anywhere else.
+    [B1, ["sync", "b1", "bob"]],
+    [B1, ["sync", "b1", "tpbuild"]],
+    ["/system.slice/turbopanel-build-b1.service", ["sync", "b1", "alice"]],
+    [
+      "/turbopanel.slice/turbopanel-containers.slice/docker-1.scope/turbopanel-build-b1.service",
+      ["sync", "b1", "alice"],
+    ],
+    [
+      "/turbopanel.slice/turbopanel-alice.slice/x/turbopanel-alice-build.slice/turbopanel-build-b1.service",
+      ["sync", "b1", "alice"],
+    ],
+    // A dashed owner's unescaped path is someone else's slice.
+    [
+      "/turbopanel.slice/turbopanel-web.slice/turbopanel-web-x.slice/turbopanel-web-x-build.slice/turbopanel-build-b1.service",
+      ["sync", "b1", "web-x"],
+    ],
+    [
+      "/turbopanel.slice/turbopanel-containers.slice/turbopanel-containers-build.slice/turbopanel-build-b1.service",
+      [
+        "sync",
+        "b1",
+        "containers",
+      ],
+    ],
+    [B1, ["sync", "../b1", "alice"]],
+    [B1, ["sync", "B1", "alice"]],
+    [B1, ["sync", "b1", "../alice"]],
+    [B1, ["sync", "b1", 'a" accept;']],
+    [B1, ["sync", "b1"]],
+    [B1, ["sync", "b1", "alice", "extra"]],
     [B1, ["flush"]],
     [B1, []],
   ] as Array<[string | null, string[]]>;
@@ -241,7 +267,7 @@ test("fail closed: no nft or no loaded rules stops the build, and the unit re-ch
   // And as the unit's own root hook, once its cgroup exists.
   assertStringIncludes(
     host,
-    '-p ExecStartPre="+$BUILD_LOOPBACK sync $_br_id"',
+    '-p ExecStartPre="+$BUILD_LOOPBACK sync $_br_id $_br_owner"',
   );
   // The blanket loopback deny is gone from the build; the other denies stay.
   const deny = /^BUILD_DENY_V[46]="([^"]*)"/gm;

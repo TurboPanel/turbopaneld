@@ -192,9 +192,16 @@ export function principalReadWritePaths(
   }`;
 }
 
-/** `turbopanel-<username>.slice` — one parent slice per tenant account. */
+/**
+ * `turbopanel-<username>.slice` — one parent slice per tenant account. systemd
+ * reads every `-` in a slice name as a level, so a dash in the username becomes
+ * `.` (no meaning to systemd, never in a username): `a-b` gets its own
+ * `turbopanel-a.b.slice` instead of sitting inside `a`'s. Kept equal to
+ * `tp_principal_slice` in orchestration/scripts/tp-host, which refuses a unit
+ * naming any other slice.
+ */
 export function principalSliceName(username: string): string {
-  return `turbopanel-${username}.slice`;
+  return `turbopanel-${username.replaceAll("-", ".")}.slice`;
 }
 
 export function principalSlicePath(

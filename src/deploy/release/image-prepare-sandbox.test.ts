@@ -20,7 +20,7 @@ import {
   prepareImagePlanInSandbox,
   takePlan,
 } from "./image-prepare-sandbox.ts";
-import { runRailpackBuild } from "./railpack-build.ts";
+import { readPlanVersion, runRailpackBuild } from "./railpack-build.ts";
 import { UnsafeTreeError } from "./safe-copy.ts";
 
 /**
@@ -249,5 +249,22 @@ test("an image build on a managed host prepares in the sandbox with the build's 
     assert(plan.startsWith(scratchDir), plan);
     assertEquals((await Deno.readTextFile(plan)).trim(), PLAN);
     assertEquals(build.at(-1), work.checkoutDir);
+  });
+});
+
+test("only a short, plain plan version is recorded from a plan the build wrote", async () => {
+  await withWork(async ({ root }) => {
+    const read = async (version: unknown, index: number) => {
+      const plan = join(root, `plan-${index}.json`);
+      await Deno.writeTextFile(plan, JSON.stringify({ version }));
+      return await readPlanVersion(plan);
+    };
+    assertEquals(await read("1.2.3+build.4", 0), "1.2.3+build.4");
+    assertEquals(await read(7, 1), "7");
+    const fallback = await read("x".repeat(65), 2);
+    assertEquals(fallback.length < 65, true);
+    const hostile = ["a b", "v1\nforged", "$(id)", "", "x".repeat(4096)];
+    const seen = await Promise.all(hostile.map((v, i) => read(v, i + 3)));
+    assertEquals(seen, hostile.map(() => fallback));
   });
 });

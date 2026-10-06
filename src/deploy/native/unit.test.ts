@@ -88,6 +88,8 @@ test("native app path helpers follow systemd and staging conventions", () => {
     "/tmp/systemd/turbopanel-app-svc-native-1.service",
   );
   assertEquals(principalSliceName("appuser"), "turbopanel-appuser.slice");
+  // A dash is a slice level to systemd: `web-x` never nests under `web`.
+  assertEquals(principalSliceName("web-x"), "turbopanel-web.x.slice");
   assertEquals(
     nativeAppConfigDir(layout),
     "/etc/turbopanel/node-apps",

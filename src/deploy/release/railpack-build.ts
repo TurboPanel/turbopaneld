@@ -695,14 +695,22 @@ export type RailpackBuildResult = {
   railpackPlanVersion: string;
 };
 
+/**
+ * A plan version worth recording: short and plain. The plan is written by the
+ * build (from the repository), so anything else is ignored.
+ */
+const PLAN_VERSION_RE = /^[\w.+-]{1,64}$/;
+
 /** Best-effort plan-version read; a plan without one is not an error. */
-async function readPlanVersion(planPath: string): Promise<string> {
+export async function readPlanVersion(planPath: string): Promise<string> {
   try {
     const parsed: unknown = JSON.parse(await Deno.readTextFile(planPath));
     if (typeof parsed === "object" && parsed !== null) {
-      const version = (parsed as Record<string, unknown>).version;
-      if (typeof version === "string" && version.length > 0) return version;
-      if (typeof version === "number") return String(version);
+      const raw = (parsed as Record<string, unknown>).version;
+      const version = typeof raw === "number" ? String(raw) : raw;
+      if (typeof version === "string" && PLAN_VERSION_RE.test(version)) {
+        return version;
+      }
     }
   } catch {
     // Unreadable or unparsable plan — the build below will fail loudly on its

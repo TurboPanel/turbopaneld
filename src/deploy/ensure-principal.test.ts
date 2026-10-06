@@ -3,10 +3,12 @@ import {
   assertEquals,
   assertRejects,
   assertStringIncludes,
+  assertThrows,
 } from "@std/assert";
 import type { LayoutPaths } from "../paths/layout.ts";
 import { accessGroup } from "../runtime/registry.ts";
 import {
+  assertIdOverridesInBand,
   DEFAULT_PRINCIPAL_SHELL,
   ensureDirectoryOwnedByPrincipal,
   ensureDirectoryWithOwner,
@@ -1951,4 +1953,18 @@ test("ensureSystemPrincipals fails when useradd lands below the uid floor (Debia
     "uid=10000",
   );
   assert(err.message.includes("usermod -u"));
+});
+
+test("a uid/gid override must sit in the principal band, never in systemd's throwaway build range", () => {
+  const spec = (uid?: number, gid?: number): PrincipalEnsureSpec =>
+    ({ principalId: "p", username: "carol", uid, gid }) as PrincipalEnsureSpec;
+  assertIdOverridesInBand(spec());
+  assertIdOverridesInBand(spec(15001, 60000));
+  for (const [uid, gid] of [[61500, 15001], [15001, 65519], [15000, 15001]]) {
+    assertThrows(
+      () => assertIdOverridesInBand(spec(uid, gid)),
+      RangeError,
+      "outside 15001–60000",
+    );
+  }
 });

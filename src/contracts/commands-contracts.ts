@@ -749,7 +749,7 @@ export type EnvironmentDeployStorageMaterial = {
  *
  * The host allocates UID/GID from 15001–60000 via `useradd`/`groupadd`
  * (`-K` on that command) unless the control plane sends an explicit operator
- * override (`uid`/`gid` ≥ 15001).
+ * override (`uid`/`gid` 15001–60000).
  */
 /** One runtime series a principal is entitled to execute. */
 export type EnvironmentDeployPrincipalRuntime = {
@@ -860,7 +860,7 @@ export type EnvironmentDeployHostingPhp = {
  * Project principal that owns a site tree on the host.
  * `ensureSystemPrincipals` creates the Linux user before apply; document
  * roots are owned by this user with the engine group for read access.
- * UID/GID are optional operator overrides (≥ 15001) — the host allocates
+ * UID/GID are optional operator overrides (15001–60000) — the host allocates
  * from 15001–60000 otherwise.
  */
 export type EnvironmentDeploySitePrincipal = {
@@ -1042,7 +1042,7 @@ export type EnvironmentDeployNativeAppService = {
   resources?: { cpus?: number; memoryBytes?: number };
   /**
    * Effective org/server ceiling for the owning principal — repeated on every
-   * app of that principal. Becomes `turbopanel-<username>.slice`, so per-app
+   * app of that principal. Becomes its slice (`principalSliceName`), so per-app
    * limits cannot add up past the account total.
    */
   accountLimits?: { cpus?: number; memoryBytes?: number; tasksMax?: number };

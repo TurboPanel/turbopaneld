@@ -126,7 +126,8 @@ state dir, so destroying an engine never leaves an orphan tree on that storage.
 
 The **host** allocates UID/GID via `useradd`/`groupadd` from **15001–60000**
 (`-K` on that one command; `/etc/login.defs` is not edited). The control plane
-may send an optional operator override, which must be ≥ **15001** and clear
+may send an optional operator override, which must be **15001–60000** (above
+it is systemd's 61184–65519 range for throwaway build users) and clear
 the `tp*` service band **9989–9999**. Homes are keyed on the username. Override
 the home root with
 `TURBOPANEL_PRINCIPAL_HOME_ROOT` (`layout.principalHomeRoot`). **Platform CA**
@@ -727,7 +728,11 @@ it regresses:
     read *as the daemon account* (`setpriv`);
   - checks systemd unit content before installing it: known directives only,
     tenant services `User=<principal>` / `Group=<principal>-grp` /
-    `Slice=turbopanel-<principal>.slice` / `NoNewPrivileges=yes` / empty
+    `Slice=turbopanel-<principal>.slice` (each `-` in the name written `.`:
+    systemd reads a dash as a slice level, so `a-b` would otherwise sit inside
+    `a`'s slice; `tp_principal_slice`, `principalSliceName`; `containers` and
+    `tpbuild` are platform slices no principal may take) /
+    `NoNewPrivileges=yes` / empty
     capability sets, no `+`/`!`/`:` exec prefixes, no line ending in a
     backslash (systemd would join it onto the next line, hiding e.g. `User=`
     from this line-by-line check), a timer may only start its own service;
@@ -787,19 +792,21 @@ it regresses:
     xtables without `--modprobe` or rule files.
   - starts tenant builds only through
     `build-run <build-id> <project-id> <owner>` (ids `[a-z0-9-]{1,64}`; the
-    owner is the site owner's Linux user, an existing principal with a plain
-    name and no `--`, or `tpbuild` for a build nobody owns; nothing else in
-    argv). Every build runs as a **throwaway user systemd creates for that one
+    owner is the site owner's Linux user, an existing principal with a uid
+    in 15001-60000 and a plain name with no `--`, never another `tp*` name,
+    or `tpbuild` for a build nobody owns; checked again under the build lock;
+    nothing else in argv). Every build runs as a **throwaway user systemd creates for that one
     run** (`DynamicUser=yes`, `User=tpb-<16 hex of sha256(owner/project)>`: a
     uid from systemd's 61184-65519 range that exists only while the unit runs,
     never a host account, never in docker/tp/sudo, refused if a host account
-    or group already has that name), with every `tpnode<series>` group as
+    or group already has that name or any group lists a `tpb-*` member), with
+    every `tpnode<series>` group as
     `SupplementaryGroups=`, inside the **site owner's own resource group**
     (`Slice=turbopanel-<owner>-build.slice`, a child of the owner's
-    `turbopanel-<owner>.slice`, so a build counts against whatever limits that
-    slice carries; `turbopanel-tpbuild.slice` with no owner; `<name>-build` is
-    reserved as a principal name and both slice names are refused as unit
-    files). It checks the root-owned
+    `turbopanel-<owner>.slice`, dashes in the owner's name written `.`, so a
+    build counts against whatever limits that slice carries;
+    `turbopanel-tpbuild.slice` with no owner; both slice names are refused as
+    unit files). It checks the root-owned
     `/var/lib/turbopanel-build/{work,caches}` layout, takes a host-wide lock
     (one build at a time), makes `caches/<owner>/<project>` (root 0700 dirs;
     a cache is never shared between site owners or projects), and execs
@@ -813,20 +820,27 @@ it regresses:
     unit's own cgroup by `lib/tp-build-loopback` (nftables table
     `inet turbopanel_build`, `socket cgroupv2 level N "<unit cgroup>"`; loaded
     empty by `build-run` to prove nft works, then with the build's rules as the
-    unit's first `ExecStartPre=+`, from inside the unit's cgroup; no `nft` or a
-    load failure means the build does not start), 4G memory, 200% CPU, 1800 s).
-    The unit's second `ExecStartPre=+` is `tp-host build-handover <id>
-    <project> <owner>`: refused unless it runs inside that unit's own cgroup,
-    it reads the throwaway uid from the unit's `RuntimeDirectory=`
-    (`/run/turbopanel-build-<id>`, created by systemd owned by that user;
-    read-only to the build so it cannot fill `/run`) and hands the pinned
-    cache and work tree to it (`chown -R -h -P`). The only command is
+    unit's first `ExecStartPre=+ … sync <id> <owner>`, which refuses unless
+    its own cgroup is exactly the one systemd builds for that owner's build
+    slice; no `nft` or a load failure means the build does not start), 4G
+    memory, 200% CPU, 1800 s). The unit's second `ExecStartPre=+` is
+    `tp-host build-handover <id> <project> <owner>`: refused unless its cgroup
+    is exactly that unit's, it reads the throwaway uid from the unit's
+    `RuntimeDirectory=` (`/run/turbopanel-build-<id>`, created by systemd
+    owned by that user; read-only to the build so it cannot fill `/run`),
+    takes the work tree from the daemon (top directory root 0700), refuses
+    (and unlinks) any regular file with more than one name in it (a hard link
+    the daemon planted to a file outside), and only then hands the pinned
+    cache and work tree to the build's user (`chown -R -h -P`). The only command is
     `/bin/sh` on `lib/tp-build-runner`, loaded as a systemd credential (PID 1
     reads it; the build's user gets a private copy); the spec rides stdin to
     the runner (format in its header; `TMPDIR` is `<work>/tmp`, because
     `DynamicUser=` always gives the unit systemd's own private `/tmp`: a 10%
-    of RAM tmpfs on systemd 257, host `/tmp` on 255, which `build-watch`
-    caps). Not `CacheDirectory=`: on systemd 257 with `DynamicUser=` it is
+    of RAM tmpfs on systemd 257, a hard limit; host `/tmp` on 255, which
+    `build-watch` checks every 10 s against 1.5 GB, not a hard limit).
+    `principal-remove` deletes the owner's `caches/<owner>`, so a later owner
+    given the same name never builds with them. The image builder's plan
+    version is recorded only when it is 1-64 plain characters. Not `CacheDirectory=`: on systemd 257 with `DynamicUser=` it is
     owned by `nobody` on disk and mounted `noexec`, which breaks `npx`/`pnpm
     dlx`. Below systemd 255 (Debian 13 / Ubuntu 24.04 floor) it warns and
     drops the newer properties, below 247 it refuses. `build-return

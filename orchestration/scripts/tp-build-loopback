@@ -20,9 +20,9 @@
 # every process of turbopanel-build-<id>.service, whatever uid it runs as, and
 # nothing else on the host. nftables turns the cgroup path into its id when the
 # rules load, so they can only be loaded once the unit's cgroup exists: the unit
-# runs `sync <build-id>` itself, as its `ExecStartPre=+` (inside that cgroup),
-# before the build's first command (FAILS CLOSED: when this exits non-zero the build does not
-# start). A cgroup id is never reused, so rules left behind by a finished build
+# runs `sync <build-id> <owner>` itself, as its `ExecStartPre=+` (inside it),
+# before the build's first command (FAILS CLOSED: when this exits non-zero the
+# build does not start). A cgroup id is never reused, so rules left behind by a finished build
 # match nothing.
 #
 # Residual risk, accepted by the owner: a loopback service on a port that is
@@ -37,8 +37,10 @@
 #   sync            by `tp-host build-run` before the unit exists: loads the
 #                   table with no build rule (the previous build's go), which
 #                   also proves nft works before a build is started.
-#   sync BUILD-ID   by turbopanel-build-<BUILD-ID>.service as `ExecStartPre=+`:
-#                   loads the rules for that unit's cgroup.
+#   sync BUILD-ID OWNER
+#                   by turbopanel-build-<BUILD-ID>.service as `ExecStartPre=+`:
+#                   loads the rules for that unit's cgroup, which must be
+#                   exactly the one systemd builds for OWNER's build slice.
 # The whole table is replaced in one atomic nft transaction and read back.
 #
 # Needs `nft` and `flock` (Ansible installs the nftables and util-linux
@@ -75,38 +77,48 @@ else
   P="$TP_HOST_TEST_PREFIX"
 fi
 
-[ "$#" -ge 1 ] && [ "$#" -le 2 ] && [ "$1" = "sync" ] || tp_die "only: sync [BUILD-ID]"
+# The unit runs this with its own stdin, the build spec: never read it.
+exec </dev/null
 
-# The build unit's cgroup: this script runs inside it (the unit's own
-# ExecStartPre=+), so it is this process's cgroup, which must be exactly
-# /turbopanel.slice/…/turbopanel-build-<id>.service with plain names only (run
-# from anywhere else, it refuses). Sets _cg (no leading slash) and _level (its
-# depth).
-unit_cgroup() {
+{ [ "$#" -eq 1 ] || [ "$#" -eq 3 ]; } && [ "$1" = "sync" ] || tp_die "only: sync [BUILD-ID OWNER]"
+
+# The cgroup systemd builds for build $1 of owner $2 (kept equal to tp-host's
+# tp_build_cgroup): the owner's slice is turbopanel-<owner>.slice with each `-`
+# made `.` (a dash is a slice level), its build slice the same name plus
+# `-build`; a build with no owner (tpbuild) sits in turbopanel-tpbuild.slice.
+# Sets _cg (no leading slash) and _level (its depth).
+expected_cgroup() {
   case "$1" in
     ''|-*|*[!a-z0-9-]*) tp_die "refusing build id $1" ;;
   esac
   [ "${#1}" -le 64 ] || tp_die "refusing build id $1"
-  _unit="turbopanel-build-$1.service"
-  if [ -n "$TP_TEST" ]; then
-    _cg="$(cat -- "$P/run/self-cgroup" 2>/dev/null || true)"
-  else
-    _cg="$(sed -n 's/^0:://p' /proc/self/cgroup)"
+  case "$2" in
+    ''|-*|*-|*--*|*[!A-Za-z0-9_-]*) tp_die "refusing owner $2" ;;
+  esac
+  [ "${#2}" -le 32 ] || tp_die "refusing owner $2"
+  if [ "$2" = "tpbuild" ]; then
+    _cg="turbopanel.slice/turbopanel-tpbuild.slice/turbopanel-build-$1.service"
+    _level=3
+    return
   fi
-  case "$_cg" in
-    /turbopanel.slice/*/"$_unit") ;;
-    *) tp_die "not running in $_unit's cgroup under turbopanel.slice; builds cannot start without their network rules" ;;
-  esac
-  case "$_cg" in
-    *[!A-Za-z0-9_.@:/-]*|*//*|*/./*|*/../*) tp_die "refusing the cgroup path of $_unit" ;;
-  esac
-  _cg="${_cg#/}"
-  _level="$(printf '%s\n' "$_cg" | awk -F/ '{ print NF }')"
+  case "$2" in containers|tp*) tp_die "refusing owner $2" ;; esac
+  _owner_slice="turbopanel-$(printf '%s' "$2" | tr -- '-' '.')"
+  _cg="turbopanel.slice/$_owner_slice.slice/$_owner_slice-build.slice/turbopanel-build-$1.service"
+  _level=4
 }
 
+# This script runs inside the build unit (its own ExecStartPre=+), so its
+# cgroup must be exactly the expected one; run from anywhere else, it refuses.
 _match=""
-if [ "$#" -eq 2 ]; then
-  unit_cgroup "$2"
+if [ "$#" -eq 3 ]; then
+  expected_cgroup "$2" "$3"
+  if [ -n "$TP_TEST" ]; then
+    _self="$(cat -- "$P/run/self-cgroup" 2>/dev/null || true)"
+  else
+    _self="$(sed -n 's/^0:://p' /proc/self/cgroup)"
+  fi
+  [ "$_self" = "/$_cg" ] ||
+    tp_die "not running in turbopanel-build-$2.service's own cgroup; builds cannot start without their network rules"
   _match="socket cgroupv2 level $_level \"$_cg\""
 fi
 

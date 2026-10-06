@@ -242,7 +242,7 @@ function expectedSystemdRun(
       "169.254.0.0/16 172.16.0.0/12 192.0.0.0/24 192.168.0.0/16 " +
       "198.18.0.0/15 224.0.0.0/3 ::/128 64:ff9b::/96 2002::/16 " +
       "fc00::/7 fe80::/10 ff00::/8" + (tier.hostDeny ?? ""),
-      `ExecStartPre=+${prefix}/opt/turbopanel/lib/tp-build-loopback sync b1`,
+      `ExecStartPre=+${prefix}/opt/turbopanel/lib/tp-build-loopback sync b1 alice`,
       `ExecStartPre=+/usr/bin/env SUDO_UID=${Deno.uid()} SUDO_GID=${Deno.gid()} ${prefix}/opt/turbopanel/lib/tp-host build-handover b1 p1 alice`,
       "Slice=turbopanel-alice-build.slice",
       "MemoryMax=4G",
@@ -369,17 +369,24 @@ test("build-run refuses an owner that is not a site owner's Linux user, or a tak
   await withHost(async (host) => {
     await setUpBuildHost(host, {
       accounts: [
-        "carol:x:15003:15003::/srv/users/carol:/bin/bash",
-        // A principal whose own slice would be carol's build slice.
-        "carol-build:x:15004:15004::/srv/users/carol-build:/bin/bash",
+        // Names a site owner can never have, or a uid a site owner never
+        // has: above the band is systemd's throwaway build users' range,
+        // which nss-systemd resolves while a build runs.
+        "containers:x:15010:15010::/srv/users/containers:/bin/bash",
+        "tpx:x:15011:15011::/srv/users/tpx:/bin/bash",
+        "ghost:x:61500:61500::/:/usr/sbin/nologin",
+        "toohigh:x:60001:60001::/srv/users/toohigh:/bin/bash",
       ],
     });
     await forEachSequential([
       "root",
       "tp",
       "tpnginx",
+      "tpx",
+      "containers",
+      "ghost",
+      "toohigh",
       "nobody-here",
-      "carol",
       "alice-",
       "al--ice",
       "-alice",
@@ -698,6 +705,11 @@ test("build-handover gives the work tree and cache to the unit's throwaway user,
       "/system.slice/turbopaneld.service",
       "/turbopanel.slice/turbopanel-alice.slice/turbopanel-alice-build.slice/turbopanel-build-b2.service",
       "/turbopanel.slice/turbopanel-build-b1.service.d/x",
+      // The right unit name anywhere else under turbopanel.slice is not it,
+      // e.g. under a delegated container scope.
+      "/turbopanel.slice/turbopanel-containers.slice/docker-1.scope/turbopanel-build-b1.service",
+      "/turbopanel.slice/turbopanel-alice.slice/x/turbopanel-alice-build.slice/turbopanel-build-b1.service",
+      "/turbopanel.slice/turbopanel-tpbuild.slice/turbopanel-build-b1.service",
     ], async (other) => {
       await Deno.writeTextFile(host.path("run/self-cgroup"), `${other}\n`);
       assertStringIncludes(await refused(host, args), "only");
@@ -727,8 +739,15 @@ test("build-handover gives the work tree and cache to the unit's throwaway user,
       `${self}:${Deno.gid()}`,
       ".",
     ]);
-    // The cache, then the work tree (each pinned, so `.` is that tree).
-    assertEquals(execLines(result.stdout), [chown, chown]);
+    // The work tree is taken from the daemon first (root's, 0700), then the
+    // cache and the work tree go to the build's user (each pinned, so `.` is
+    // that tree).
+    assertEquals(execLines(result.stdout), [
+      execLine(["chown", "-h", "--", `${self}:${self}`, "."]),
+      execLine(["chmod", "0700", "."]),
+      chown,
+      chown,
+    ]);
   });
 });
 
@@ -1018,30 +1037,125 @@ test("build-watch measures the owner's own project cache and the unit's private 
   });
 });
 
-test("no new site owner may take a name whose slice is another owner's build slice", async () => {
+test("build-handover refuses a work tree holding a hard link, and removes only the link", async () => {
+  await withHost(async (host) => {
+    await setUpBuildHost(host);
+    await makeRuntimeDir(host);
+    await makeBuildCache(host);
+    const self = String(Deno.uid());
+    // The daemon could link a file it may write but does not own (outside
+    // the tree, on the same file system) into the tree before the handover.
+    await Deno.link(
+      host.path("outside/secret"),
+      host.path("var/lib/turbopanel-build/work/b1/app/innocent"),
+    );
+    const out = await host.run(["build-handover", "b1", "p1", "alice"], "", {
+      TP_TEST_DYN_MIN: self,
+      TP_TEST_DYN_MAX: self,
+    });
+    assertEquals(out.code, 1);
+    assertStringIncludes(out.stderr, "hard link");
+    const lines = execLines(out.stdout);
+    assert(
+      lines.includes(
+        execLine([
+          "find",
+          ".",
+          "-xdev",
+          "-type",
+          "f",
+          "-links",
+          "+1",
+          "-delete",
+        ]),
+      ),
+    );
+    // Nothing was handed to the build's user.
+    assertEquals(lines.some((line) => line.includes("[-R]")), false);
+  });
+});
+
+test("a dashed site owner gets a slice of its own, never inside another owner's or the platform's", async () => {
+  await withHost(async (host) => {
+    await setUpBuildHost(host, {
+      accounts: ["web-x:x:15020:15020::/srv/users/web-x:/bin/bash"],
+      groups: ["web-x-grp:x:15020:"],
+    });
+    const run = execLines(
+      (await host.run(["build-run", "b1", "p1", "web-x"])).stdout,
+    ).at(-1) ?? "";
+    // `-` is a slice level to systemd: it becomes `.` in the owner's slices.
+    assertStringIncludes(run, "[Slice=turbopanel-web.x-build.slice]");
+    assertStringIncludes(run, "tp-build-loopback sync b1 web-x]");
+    const unit = (slice: string) =>
+      [
+        "[Service]",
+        "User=web-x",
+        "Group=web-x-grp",
+        `Slice=${slice}`,
+        "NoNewPrivileges=yes",
+        "ExecStart=/bin/true",
+        "",
+      ].join("\n");
+    const install = async (slice: string) => {
+      await Deno.writeTextFile(host.path("tmp/unit"), unit(slice));
+      return await host.run([
+        "install",
+        "-m",
+        "0644",
+        host.path("tmp/unit"),
+        host.path("etc/systemd/system/turbopanel-app-x.service"),
+      ]);
+    };
+    const own = await install("turbopanel-web.x.slice");
+    assertEquals(own.code, 0, own.stderr);
+    // The plain dashed name would sit inside owner `web`'s slice.
+    assertEquals((await install("turbopanel-web-x.slice")).code, 1);
+  });
+});
+
+test("no new site owner may take a platform slice's name or an id above the band", async () => {
   await withHost(async (host) => {
     await Deno.writeTextFile(
       host.path("etc/group"),
-      "web-build-grp:x:15020:\n",
-      {
-        append: true,
-      },
+      "containers-grp:x:15020:\ncarol2-grp:x:15021:\n",
+      { append: true },
     );
-    const stderr = await refused(host, [
+    const useradd = (name: string, ids: string[]) => [
       "useradd",
-      "-K",
-      "UID_MIN=15001",
-      "-K",
-      "UID_MAX=60000",
+      ...ids,
       "-g",
-      "web-build-grp",
+      `${name}-grp`,
       "-d",
-      host.path("srv/users/web-build/home"),
+      host.path(`srv/users/${name}/home`),
       "-M",
       "-s",
       "/bin/bash",
-      "web-build",
-    ]);
-    assert(stderr.length > 0);
+      name,
+    ];
+    const band = ["-K", "UID_MIN=15001", "-K", "UID_MAX=60000"];
+    await refused(host, useradd("containers", band));
+    // systemd hands out 61184-65519 to throwaway build users.
+    await refused(host, useradd("carol2", ["-u", "61500"]));
+    await refused(host, useradd("carol2", ["-u", "60001"]));
+    await refused(host, ["groupadd", "-g", "61500", "dave-grp"]);
+    const ok = await host.run(useradd("carol2", ["-u", "60000"]));
+    assertEquals(ok.code, 0, ok.stderr);
+  });
+});
+
+test("removing a site owner removes their build caches, and nobody else's", async () => {
+  await withHost(async (host) => {
+    await setUpBuildHost(host);
+    const mine = await makeBuildCache(host, "alice", "p1");
+    const other = await makeBuildCache(host, "bob", "p1");
+    await Deno.writeTextFile(join(mine, "npm-cache"), "x");
+    const out = await host.run(["principal-remove", "alice"]);
+    assertEquals(out.code, 0, out.stderr);
+    assertEquals(
+      await exists(host.path("var/lib/turbopanel-build/caches/alice")),
+      false,
+    );
+    assertEquals(await exists(other), true);
   });
 });

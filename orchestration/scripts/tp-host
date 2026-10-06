@@ -485,19 +485,46 @@ tp_name_shape_ok() {
   [ "${#1}" -le 32 ]
 }
 
-# A tenant principal: an existing account with a uid in the principal band.
+# Platform slices directly under turbopanel.slice: no site owner may own one.
+# turbopanel-containers.slice is Docker's cgroup parent for the platform's own
+# containers (roles/docker turbopanel_docker_cgroup_parent).
+TP_PLATFORM_SLICE_NAMES="containers tpbuild"
+
+# The slice a site owner's units run in, `turbopanel-<name>.slice`. systemd
+# reads every `-` in a slice name as a level (`turbopanel-a-b.slice` would sit
+# inside owner `a`'s slice), so a dash in the name becomes `.`: a legal unit
+# name character with no meaning to systemd, which no site owner's name can
+# contain, so two names never share a slice. (systemd's own `\x2d` escaping
+# would put backslashes in unit file names and Slice= values, which every path
+# check here refuses.) Kept equal to principalSliceName in
+# src/deploy/native/unit.ts. Fails for a name that is not plain or that would
+# take a platform slice.
+tp_principal_slice() {
+  case "$1" in ''|-*|*[!A-Za-z0-9_-]*) return 1 ;; esac
+  _ps_name="$(printf '%s' "$1" | tr -- '-' '.')"
+  for _ps_platform in $TP_PLATFORM_SLICE_NAMES; do
+    [ "$_ps_name" != "$_ps_platform" ] || return 1
+  done
+  printf 'turbopanel-%s.slice\n' "$_ps_name"
+}
+
+# A tenant principal: an existing account with a uid in the principal band
+# (never above it: systemd's throwaway build users, 61184-65519, resolve
+# through nss-systemd while a build runs and must never pass for one).
 tp_is_principal() {
   tp_name_shape_ok "$1" || return 1
   _ip_uid="$(tp_uid_of "$1")"
   case "$_ip_uid" in ''|*[!0-9]*) return 1 ;; esac
-  [ "$_ip_uid" -ge "$PRINCIPAL_ID_MIN" ] && [ "$_ip_uid" -ne 65534 ]
+  [ "${#_ip_uid}" -le 10 ] && [ "$_ip_uid" -ge "$PRINCIPAL_ID_MIN" ] &&
+    [ "$_ip_uid" -le "$PRINCIPAL_ID_MAX" ]
 }
 
 tp_is_principal_group() {
   tp_name_shape_ok "$1" || return 1
   _ipg="$(tp_gid_of_group "$1")"
   case "$_ipg" in ''|*[!0-9]*) return 1 ;; esac
-  [ "$_ipg" -ge "$PRINCIPAL_ID_MIN" ] && [ "$_ipg" -ne 65534 ]
+  [ "${#_ipg}" -le 10 ] && [ "$_ipg" -ge "$PRINCIPAL_ID_MIN" ] &&
+    [ "$_ipg" -le "$PRINCIPAL_ID_MAX" ]
 }
 
 tp_is_service_account() {
@@ -1019,7 +1046,7 @@ tp_unit_ok() {
   fi
   tp_is_principal "$_uk_user" || return 1
   [ "$_uk_group" = "${_uk_user}-grp" ] || return 1
-  [ "$_uk_slice" = "turbopanel-${_uk_user}.slice" ] || return 1
+  [ "$_uk_slice" = "$(tp_principal_slice "$_uk_user")" ] || return 1
   [ "$_uk_nnp" = "yes" ] || return 1
   [ -z "$_uk_app" ] || tp_app_envfile_ok "$_uk_file" "$_uk_app" || return 1
   return 0
@@ -1389,7 +1416,7 @@ tp_php_service_pinned_ok() {
   case "$1" in
     Service.User=*) [ "${1#*=}" = "$_ps_user" ] ;;
     Service.Group=*) [ "${1#*=}" = "$_ps_user-grp" ] ;;
-    Service.Slice=*) [ "${1#*=}" = "turbopanel-$_ps_user.slice" ] ;;
+    Service.Slice=*) [ "${1#*=}" = "$(tp_principal_slice "$_ps_user")" ] ;;
     Service.NoNewPrivileges=*) [ "${1#*=}" = "yes" ] ;;
     Service.CapabilityBoundingSet=*|Service.AmbientCapabilities=*) [ -z "${1#*=}" ] ;;
     Service.ProtectSystem=*) [ "${1#*=}" = "strict" ] ;;
@@ -2699,22 +2726,24 @@ tp_shell_ok() {
 
 tp_new_name_ok() {
   case "$1" in
-    # `<name>-build` is reserved: turbopanel-<name>-build.slice is where
-    # <name>'s sandboxed builds run (tp_build_slice).
-    ''|-*|*[!A-Za-z0-9_-]*|root|tp|tp[a-z]*|*-build) return 1 ;;
+    ''|-*|*[!A-Za-z0-9_-]*|root|tp|tp[a-z]*) return 1 ;;
   esac
   [ "${#1}" -le 32 ] || return 1
+  # Its slice must not be one of the platform's (tp_principal_slice).
+  tp_principal_slice "$1" >/dev/null || return 1
   ! tp_getent passwd "$1" >/dev/null 2>&1 || return 1
   return 0
 }
 
-# Either an explicit id in the principal band, or the band itself via -K.
+# Either an explicit id in the principal band, or the band itself via -K. The
+# band ends below systemd's DynamicUser= range (61184-65519), which this
+# script treats as throwaway build users only.
 tp_id_args_ok() {
   _ia_kind="$1"
   shift
   if [ "$1" = "-u" ] || [ "$1" = "-g" ]; then
     case "$2" in ''|*[!0-9]*) return 1 ;; esac
-    [ "$2" -ge "$PRINCIPAL_ID_MIN" ] && [ "$2" -ne 65534 ] && [ "$2" -lt 2147483647 ]
+    [ "${#2}" -le 10 ] && [ "$2" -ge "$PRINCIPAL_ID_MIN" ] && [ "$2" -le "$PRINCIPAL_ID_MAX" ]
     return
   fi
   [ "$1" = "-K" ] && [ "$2" = "${_ia_kind}_MIN=$PRINCIPAL_ID_MIN" ] &&
@@ -2865,8 +2894,8 @@ tp_retire_group_gid() {
 tp_retire_unit_ref() {
   for _ru in "$R_UNITS"/turbopanel-*; do
     [ -f "$_ru" ] || continue
-    [ "${_ru##*/}" != "turbopanel-$1.slice" ] || continue
-    if grep -qxF -e "User=$1" -e "Slice=turbopanel-$1.slice" -- "$_ru"; then
+    [ "${_ru##*/}" != "$2" ] || continue
+    if grep -qxF -e "User=$1" -e "Slice=$2" -- "$_ru"; then
       printf '%s' "${_ru##*/}"
       return 0
     fi
@@ -2875,7 +2904,7 @@ tp_retire_unit_ref() {
 }
 
 tp_retire_refs_check() {
-  if _rr_unit="$(tp_retire_unit_ref "$1")"; then
+  if _rr_unit="$(tp_retire_unit_ref "$1" "$2")"; then
     tp_die "principal-remove: $1 is still referenced by $_rr_unit"
   fi
   tp_pin_dir "$R_PRINCIPALS" || return 0
@@ -2907,12 +2936,21 @@ tp_retire_member_groups() {
     awk -F: -v u="$1" '{ n = split($4, m, ","); for (i = 1; i <= n; i++) if (m[i] == u) { print $1; break } }'
 }
 
-# Key file and slice unit (installed and staged copies). Nothing here is a
-# principal-owned path, so a missing file is simply already gone.
+# Key file, slice unit $2 (installed and staged copies) and build caches.
+# Nothing here is a principal-owned path, so a missing file is simply already
+# gone.
 tp_retire_files() {
   if tp_pin_dir "$R_SSHKEYS/authorized_keys"; then rm -f -- "./$1"; fi
   if tp_pin_dir "$R_CONFIG/node-apps"; then rm -f -- "./slice-$1.slice"; fi
-  if tp_pin_dir "$R_UNITS"; then rm -f -- "./turbopanel-$1.slice"; fi
+  if tp_pin_dir "$R_UNITS"; then rm -f -- "./$2"; fi
+  # The site owner's build caches: a later owner given the same name must not
+  # build with them. Pinned, on one file system, never through a symlink.
+  if tp_pin_dir "$R_BUILD_CACHE"; then
+    [ ! -L "./$1" ] || tp_die "principal-remove: $R_BUILD_CACHE/$1 is a symlink"
+    if [ -d "./$1" ]; then
+      rm -rf --one-file-system -- "./$1" || tp_die "principal-remove: could not remove $R_BUILD_CACHE/$1"
+    fi
+  fi
   tp_run systemctl daemon-reload
 }
 
@@ -2940,21 +2978,22 @@ tp_verb_principal_remove() {
   [ "$#" -eq 1 ] || tp_die "principal-remove: only principal-remove NAME"
   _pv="$1"
   tp_retire_name_ok "$_pv" || tp_die "principal-remove: refusing name $_pv"
+  _pv_slice="$(tp_principal_slice "$_pv")" || tp_die "principal-remove: refusing name $_pv"
   if ! tp_getent passwd "$_pv" >/dev/null 2>&1; then
     # Already gone: finish the slice, group and files an earlier run left.
-    tp_retire_refs_check "$_pv"
-    tp_run systemctl --no-pager stop "turbopanel-$_pv.slice" || true
-    tp_retire_files "$_pv"
+    tp_retire_refs_check "$_pv" "$_pv_slice"
+    tp_run systemctl --no-pager stop "$_pv_slice" || true
+    tp_retire_files "$_pv" "$_pv_slice"
     if tp_retire_group_gid "$_pv" >/dev/null; then tp_run groupdel "$_pv-grp"; fi
     return 0
   fi
   tp_retire_account_check "$_pv"
-  tp_retire_refs_check "$_pv"
+  tp_retire_refs_check "$_pv" "$_pv_slice"
   tp_retire_home_check "$_pv" "$RETIRE_UID" || true
-  tp_run systemctl --no-pager stop "turbopanel-$_pv.slice" || true
+  tp_run systemctl --no-pager stop "$_pv_slice" || true
   # pkill exits 1 when nothing matched.
   tp_run pkill -KILL -u "$RETIRE_UID" || true
-  tp_retire_files "$_pv"
+  tp_retire_files "$_pv" "$_pv_slice"
   tp_retire_member_groups "$_pv" | while IFS= read -r _pv_group; do
     tp_run gpasswd -d "$_pv" "$_pv_group"
   done
@@ -3030,8 +3069,11 @@ BUILD_RUNTIME_MAX_SEC=1800
 # or unused for BUILD_CACHE_MAX_AGE_DAYS, is emptied before the next build.
 # DynamicUser= always gives the unit systemd's own private /tmp (it wins over
 # a TemporaryFileSystem=/tmp): on systemd 257 one tmpfs of 10% of RAM, charged
-# to the build's memory; on 255 directories under the host's /tmp and /var/tmp,
-# which BUILD_TMP_MAX_KB caps.
+# to the build's memory, a hard limit; on 255 directories under the host's /tmp
+# and /var/tmp. There BUILD_TMP_MAX_KB is not a hard limit: build-watch looks
+# every BUILD_WATCH_SEC (10 s), so between looks a build can write at disk
+# speed, each file capped by LimitFSIZE (4G). A hard cap on 255 would need
+# tp-host to mount and clean up its own tmpfs per build; not done.
 BUILD_TMP_MAX_KB=1572864
 BUILD_WORK_MAX_KB=8388608
 BUILD_CACHE_MAX_KB=6291456
@@ -3084,27 +3126,42 @@ tp_group_db() {
   getent group
 }
 
-# The site owner a build runs for: an existing principal, or BUILD_NO_OWNER.
-# Plain characters only (it names a slice and a cache directory, and a dash
-# separates slice levels), and never a name whose build slice would be another
-# principal's own slice (`<owner>-build`).
+# The site owner a build runs for: an existing principal (uid in the principal
+# band, so never a throwaway build user) with a plain name that has a slice of
+# its own, or exactly BUILD_NO_OWNER. No other tp* name.
 tp_build_owner_ok() {
   case "$1" in
     ''|-*|*-|*--*|*[!A-Za-z0-9_-]*) return 1 ;;
   esac
   [ "${#1}" -le 32 ] || return 1
   [ "$1" = "$BUILD_NO_OWNER" ] && return 0
-  tp_is_principal "$1" || return 1
-  ! tp_getent passwd "$1-build" >/dev/null 2>&1
+  case "$1" in tp*) return 1 ;; esac
+  tp_principal_slice "$1" >/dev/null || return 1
+  tp_is_principal "$1"
 }
 
-# The slice a build of owner $1 runs in: a child of the site owner's own slice,
-# so the build counts against that owner's CPU and memory.
+# The slice a build of owner $1 runs in: a child of the site owner's own slice
+# (tp_principal_slice), so the build counts against that owner's CPU and
+# memory. The slice name has no dash but the one before `build`, so the parent
+# is exactly the owner's slice.
 tp_build_slice() {
   if [ "$1" = "$BUILD_NO_OWNER" ]; then
     printf 'turbopanel-%s.slice\n' "$BUILD_NO_OWNER"
   else
-    printf 'turbopanel-%s-build.slice\n' "$1"
+    _bs_owner="$(tp_principal_slice "$1")" || return 1
+    printf '%s-build.slice\n' "${_bs_owner%.slice}"
+  fi
+}
+
+# The exact cgroup of turbopanel-build-$1.service for owner $2, as systemd
+# builds it from the slice names (kept equal to tp-build-loopback's).
+tp_build_cgroup() {
+  _bc_slice="$(tp_build_slice "$2")" || return 1
+  if [ "$2" = "$BUILD_NO_OWNER" ]; then
+    printf '/turbopanel.slice/%s/turbopanel-build-%s.service\n' "$_bc_slice" "$1"
+  else
+    printf '/turbopanel.slice/%s/%s/turbopanel-build-%s.service\n' \
+      "$(tp_principal_slice "$2")" "$_bc_slice" "$1"
   fi
 }
 
@@ -3141,19 +3198,28 @@ tp_build_runtime_groups() {
     }'
 }
 
-# True when this process runs inside turbopanel-build-$1.service's own cgroup:
-# only systemd can put a process there, so build-handover cannot be started by
-# the daemon through sudo.
+# True when this process runs in exactly the cgroup of build $1 of owner $2
+# (tp_build_cgroup): only systemd can put a process there, so build-handover
+# cannot be started by the daemon through sudo.
 tp_build_in_unit() {
   if [ -n "$TP_TEST" ]; then
     _iu_cg="$(cat -- "$P/run/self-cgroup" 2>/dev/null || true)"
   else
     _iu_cg="$(sed -n 's/^0:://p' /proc/self/cgroup)"
   fi
-  case "$_iu_cg" in
-    /turbopanel.slice/*/"turbopanel-build-$1.service") return 0 ;;
-  esac
-  return 1
+  _iu_want="$(tp_build_cgroup "$1" "$2")" || return 1
+  [ -n "$_iu_cg" ] && [ "$_iu_cg" = "$_iu_want" ]
+}
+
+# Fail when any group lists a build user (tpb-*) as a member: systemd runs
+# initgroups() for the build's user, so such a line would hand every build of
+# that site the group (docker, tp, sudo, …).
+tp_build_groups_clean() {
+  _gc_group="$(tp_group_db | awk -F: '{
+    n = split($4, m, ",")
+    for (i = 1; i <= n; i++) if (m[i] ~ /^tpb-/) { print $1; exit }
+  }')"
+  [ -z "$_gc_group" ] || tp_die "build-run: group $_gc_group lists a build user as a member; refusing"
 }
 
 # The build tree: root-owned, never world-writable, group-writable only with
@@ -3175,13 +3241,14 @@ tp_build_tree_ok() {
   esac
 }
 
-# Pin work/<id>; it must be a real directory owned by the caller or by a
-# build's throwaway user (a build ran or is starting). Leaves the working
-# directory in it.
+# Pin work/<id>; it must be a real directory owned by the caller, by root
+# (build-handover took it), or by a build's throwaway user (a build ran or is
+# starting). Leaves the working directory in it.
 tp_build_work_pin() {
   tp_pin_dir "$R_BUILD/work/$1" || tp_die "no work directory $R_BUILD/work/$1"
   _bw_owner="$(stat -c '%u' .)"
-  [ "$_bw_owner" = "$CALLER_UID" ] || tp_build_dyn_id_ok "$_bw_owner" ||
+  [ "$_bw_owner" = "$CALLER_UID" ] || [ "$_bw_owner" = "$ROOT_UID" ] ||
+    tp_build_dyn_id_ok "$_bw_owner" ||
     tp_die "refusing $R_BUILD/work/$1: owned by uid $_bw_owner"
 }
 
@@ -3317,10 +3384,12 @@ tp_verb_build_run() {
   [ "$_br_v" -ge "$BUILD_SYSTEMD_MIN" ] ||
     tp_die "build-run: systemd $_br_v cannot sandbox a build; the supported floor is Debian 13 / Ubuntu 24.04"
   tp_build_lock
-  # Checked under the lock: with nss-systemd a running build's own throwaway
-  # user resolves too, and the lock is what guarantees none is left.
+  # Checked again under the lock: with nss-systemd a running build's own
+  # throwaway user resolves too, and the lock is what guarantees none is left.
+  tp_build_owner_ok "$_br_owner" || tp_die "build-run: refusing site owner $_br_owner"
   tp_build_dyn_user "$_br_owner" "$_br_project" ||
     tp_die "build-run: $BUILD_DYN_USER exists as a host account or group; refusing to build as it"
+  tp_build_groups_clean
   tp_build_write_resolv
   _br_work="$R_BUILD/work/$1"
   tp_build_work_pin "$1"
@@ -3395,9 +3464,10 @@ tp_verb_build_run() {
   # fill the host's /run). Either failing stops the build before it starts.
   set -- "$@" -p RestrictAddressFamilies="AF_INET AF_INET6 AF_UNIX" \
     -p IPAddressDeny="$BUILD_DENY_V4 $BUILD_DENY_V6${_br_host_deny:+ ${_br_host_deny% }}" \
-    -p ExecStartPre="+$BUILD_LOOPBACK sync $_br_id" \
+    -p ExecStartPre="+$BUILD_LOOPBACK sync $_br_id $_br_owner" \
     -p ExecStartPre="+/usr/bin/env SUDO_UID=$CALLER_UID SUDO_GID=$CALLER_GID $_self_dir/tp-host build-handover $_br_id $_br_project $_br_owner"
-  set -- "$@" -p Slice="$(tp_build_slice "$_br_owner")" -p MemoryMax="$BUILD_MEMORY_MAX" -p MemorySwapMax=0 \
+  _br_slice="$(tp_build_slice "$_br_owner")" || tp_die "build-run: no build slice for $_br_owner"
+  set -- "$@" -p Slice="$_br_slice" -p MemoryMax="$BUILD_MEMORY_MAX" -p MemorySwapMax=0 \
     -p CPUQuota="$BUILD_CPU_QUOTA" -p TasksMax=1024 -p IOWeight=50 -p LimitFSIZE=4G \
     -p LimitNOFILE=65536 -p LimitCORE=0 -p RuntimeMaxSec="$BUILD_RUNTIME_MAX_SEC" \
     -p KillMode=control-group -p OOMPolicy=continue -p UMask=0022 \
@@ -3418,15 +3488,28 @@ tp_verb_build_handover() {
   tp_build_id_ok "$1" || tp_die "build-handover: refusing build id $1"
   tp_build_id_ok "$2" || tp_die "build-handover: refusing project id $2"
   tp_build_owner_ok "$3" || tp_die "build-handover: refusing site owner $3"
-  tp_build_in_unit "$1" || tp_die "build-handover: run by turbopanel-build-$1.service only"
+  tp_build_in_unit "$1" "$3" || tp_die "build-handover: run by turbopanel-build-$1.service only"
   tp_pin_dir "$P/run/turbopanel-build-$1" ||
     tp_die "build-handover: turbopanel-build-$1.service has no runtime directory"
   _bh_uid="$(stat -c '%u' .)"
   _bh_gid="$(stat -c '%g' .)"
   tp_build_dyn_id_ok "$_bh_uid" && tp_build_dyn_id_ok "$_bh_gid" ||
     tp_die "build-handover: the unit's runtime directory is owned by $_bh_uid:$_bh_gid, not a throwaway build user"
+  # The work tree is the daemon's until now. Take it from the daemon first (the
+  # top directory root's and 0700, so nothing more can be added through it),
+  # then refuse a regular file with more than one name: it could be a hard
+  # link to a file outside the tree, which the chown below would give away.
+  # Such names are removed (only the link goes) and the build is refused. The
+  # cache needs no such check: only root and the site's own builds reach it.
   # Both trees are checked before either is changed.
+  tp_build_cache_pin "$3" "$2"
   tp_build_work_pin "$1"
+  tp_run chown -h -- "$ROOT_UID:$ROOT_UID" .
+  tp_run chmod 0700 .
+  if [ -n "$(find . -xdev -type f -links +1 -print 2>/dev/null | head -n 1)" ]; then
+    tp_run find . -xdev -type f -links +1 -delete
+    tp_die "build-handover: the work tree holds a file with more than one name (a hard link); refusing the build"
+  fi
   tp_build_cache_pin "$3" "$2"
   tp_run chown -R -h -P -- "$_bh_uid:$_bh_gid" .
   tp_build_work_pin "$1"
