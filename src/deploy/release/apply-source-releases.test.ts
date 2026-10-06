@@ -764,6 +764,8 @@ test("applySourceReleases builds railpack releases without a project principal",
               frontendLayoutDir: "/tmp/frontend",
               frontendDigest: "sha256:front",
             }),
+          // A development host: the prepare step runs unsandboxed here.
+          sandboxedBuilds: false,
           runRailpackBuildFn: () =>
             Promise.resolve({
               imageTag: "turbopanel-app/api:rel-pack",

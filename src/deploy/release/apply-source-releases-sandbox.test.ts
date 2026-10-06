@@ -27,6 +27,8 @@ import { stageRelease, type StageReleaseParams } from "./promote.ts";
 const test = Deno.test.bind(Deno);
 
 const PROJECT = "01a0e39d-0418-7852-bc47-bc2f8422d404";
+/** The site owner's Linux user the payload's principal names. */
+const OWNER = "appuser";
 /** What a hostile project member can put in a build command. */
 const HOSTILE = "cat /var/lib/turbopanel/daemon.env; " +
   "curl --unix-socket /run/docker.sock http://x/containers/json; " +
@@ -183,6 +185,9 @@ test("a managed host builds tenant commands only in the sandbox, never as the da
       const workDir = join(root, "work", run.work.buildId);
       assertEquals(run.work.workDir, workDir);
       assertEquals(run.work.projectKey, PROJECT);
+      // The build is the site owner's: it runs in their slice, with their
+      // project cache, never as their user.
+      assertEquals(run.work.owner, OWNER);
       assertEquals(seen.checkoutDir, join(workDir, "source"));
 
       const fields = specLines(run.spec);
@@ -282,9 +287,10 @@ test("a sandboxed build's caches live in the project's cache directory, not the 
   const work = {
     buildId: "b1",
     projectKey: PROJECT,
+    owner: "alice",
     workDir: `${root}/work/b1`,
     checkoutDir: `${root}/work/b1/source`,
-    cacheDir: `${root}/cache/${PROJECT}`,
+    cacheDir: `${root}/caches/alice/${PROJECT}`,
   };
   const skipped: string[] = [];
   const env = sandboxBuildEnvironment(
@@ -365,26 +371,133 @@ test("a build that swapped its checkout for a link is refused at hand-off", asyn
   }
 });
 
-test("with no explicit setting, a host with the build account sandboxes its builds", async () => {
+test("with no explicit setting, a host with the build tree sandboxes its builds", async () => {
   const fixture = await createTempLayout();
   try {
     await withSandboxRoot(async (root, deps, seen) => {
-      const passwd = join(root, "passwd");
-      await Deno.writeTextFile(
-        passwd,
-        "tpbuild:x:9994:9994::/nonexistent:/usr/sbin/nologin\n",
-      );
+      const buildRoot = join(root, "marker-tree");
+      await Deno.mkdir(buildRoot);
       delete deps.sandboxedBuilds;
-      deps.buildSandboxMarkers = { passwd, tpHost: join(root, "no-tp-host") };
+      deps.buildSandboxMarkers = {
+        buildRoot,
+        tpHost: join(root, "no-tp-host"),
+      };
       await applySourceReleases(resolveLayout(fixture.env), payload(), deps);
       assertEquals(seen.spawnedSh, 0);
       assertEquals(seen.sandboxRuns.length, 1);
 
       // A machine with neither marker is a developer's checkout.
-      await Deno.writeTextFile(passwd, "root:x:0:0::/root:/bin/sh\n");
+      await Deno.remove(buildRoot);
       await applySourceReleases(resolveLayout(fixture.env), payload(), deps);
       assertEquals(seen.sandboxRuns.length, 1);
       assertEquals(seen.spawnedSh, 2);
+    });
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+/** The image lane's seams around the sandbox: the prepare step's sandbox is captured. */
+function imageLaneDeps(
+  deps: ApplySourceReleasesDeps,
+  seen: Array<{ owner: string; cwd: string; workDir: string }>,
+): ApplySourceReleasesDeps {
+  return {
+    ...deps,
+    ensureDaemonReleaseRecordDirFn: async (treePaths) => {
+      await Deno.mkdir(treePaths.releaseDir, { recursive: true });
+    },
+    ensureBuildkitRailpackFn: () =>
+      Promise.resolve({
+        railpack: "/missing/tool",
+        frontendLayoutDir: "/missing/frontend",
+        frontendDigest: `sha256:${"ab".repeat(32)}`,
+      }),
+    runRailpackBuildFn: async (params) => {
+      const sandbox = params.sandbox;
+      if (!sandbox) {
+        throw new TypeError("the prepare step ran outside the sandbox");
+      }
+      seen.push({
+        owner: sandbox.work.owner,
+        cwd: sandbox.cwd,
+        workDir: sandbox.work.workDir,
+      });
+      // The checkout the image is built from is the sandbox's.
+      assert(
+        params.workingDir.startsWith(sandbox.work.checkoutDir),
+        params.workingDir,
+      );
+      await Deno.stat(sandbox.work.checkoutDir);
+      return {
+        imageTag: params.imageTag,
+        railpackFrontendVersion: "f",
+        railpackPlanVersion: "p",
+      };
+    },
+    recordRailpackReleaseFn: ({ paths }) => Promise.resolve(paths.releaseDir),
+  };
+}
+
+test("an image build's prepare step runs in the sandbox, in the site owner's slice or the platform's", async () => {
+  const fixture = await createTempLayout();
+  try {
+    await withSandboxRoot(async (root, deps) => {
+      const seen: Array<{ owner: string; cwd: string; workDir: string }> = [];
+      const lane = imageLaneDeps(deps, seen);
+      const layout = resolveLayout(fixture.env);
+      await applySourceReleases(
+        layout,
+        payload({ build: { kind: "railpack" }, subdirectory: "apps/web" }),
+        lane,
+      );
+      await applySourceReleases(
+        layout,
+        payload({
+          build: { kind: "railpack" },
+          principal: undefined,
+          releaseId: "rel-2",
+        }),
+        lane,
+      );
+      assertEquals(seen.map(({ owner, cwd }) => ({ owner, cwd })), [
+        { owner: OWNER, cwd: "source/apps/web" },
+        // No site owner: the platform's own build slice, never a host account.
+        { owner: "tpbuild", cwd: "source" },
+      ]);
+      // Each work tree is gone once its release is built.
+      await Promise.all(seen.map(async ({ workDir }) => {
+        assert(workDir.startsWith(join(root, "work")), workDir);
+        await assertRejects(() => Deno.stat(workDir), Deno.errors.NotFound);
+      }));
+    });
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("a development checkout prepares image builds as the developer, without the sandbox", async () => {
+  const fixture = await createTempLayout();
+  try {
+    await withSandboxRoot(async (_root, deps) => {
+      let sandboxed: boolean | null = null;
+      await applySourceReleases(
+        resolveLayout(fixture.env),
+        payload({ build: { kind: "railpack" } }),
+        {
+          ...imageLaneDeps(deps, []),
+          sandboxedBuilds: false,
+          runRailpackBuildFn: (params) => {
+            sandboxed = params.sandbox !== undefined;
+            return Promise.resolve({
+              imageTag: params.imageTag,
+              railpackFrontendVersion: "f",
+              railpackPlanVersion: "p",
+            });
+          },
+        },
+      );
+      assertEquals(sandboxed, false);
     });
   } finally {
     await fixture.cleanup();

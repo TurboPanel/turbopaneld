@@ -224,7 +224,7 @@ function tenantBuildEnv(
 
 /**
  * Environment for a sandboxed build, on top of the runner's own `HOME` (the
- * work tree), `PATH=/usr/local/bin:/usr/bin:/bin` and private `TMPDIR`.
+ * work tree), `PATH=/usr/local/bin:/usr/bin:/bin` and `TMPDIR` (in the work tree).
  * Package-manager caches live in the project's bound cache directory, never in
  * the checkout (which a release may ship as-is). A tenant variable whose name
  * no shell can carry is dropped with a transcript line.

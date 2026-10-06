@@ -65,8 +65,8 @@
     - role: daemon-logs
     - role: principal-access
     - role: rapl-access
-    # tpbuild, /var/lib/turbopanel-build and tpbuild.slice for tp-host
-    # build-run's sandboxed builds.
+    # /var/lib/turbopanel-build for tp-host build-run's sandboxed builds
+    # (and the retired shared tpbuild account removed).
     - role: build-user
     - role: daemon-config
     - role: daemon-launch

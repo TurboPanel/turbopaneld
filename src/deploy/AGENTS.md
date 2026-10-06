@@ -82,7 +82,9 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    `tmp/` are `0700` `username:<username>-grp`. SSH keys live in
    `/etc/ssh/turbopanel/authorized_keys`, never the home. Host-picked UID/GID come from
    **15001–60000** (`-K` on that `useradd` / `groupadd` only; `/etc/login.defs`
-   is not edited). An explicit operator override must be ≥ **15001**, and every
+   is not edited). An explicit operator override must be **15001–60000** (above it is
+   systemd's range for throwaway build users, which tp-host never treats as a
+   site owner), and every
    override in the batch is checked before the first host call so a later id
    below that floor cannot leave an earlier account already created. Existing
    accounts are adopted and never renumbered. Username max
