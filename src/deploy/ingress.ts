@@ -294,7 +294,10 @@ export function caddyTraefikUpstream(hop: "http" | "https"): string {
   }
 }`;
   }
+  // Caddy rewrites Host to the upstream address on a TLS hop, and Traefik
+  // routes on the original hostname, so pass it through explicitly.
   return `reverse_proxy ${TRAEFIK_LOOPBACK}:${TRAEFIK_HTTPS_PORT} {
+  header_up Host {host}
   transport http {
     proxy_protocol v2
     keepalive off

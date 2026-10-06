@@ -489,6 +489,12 @@ test("caddyTraefikUpstream http hop uses h2c and PROXY v2", () => {
   assertStringIncludes(upstream, "keepalive off");
 });
 
+test("caddyTraefikUpstream https hop preserves the original Host header", () => {
+  // Without this Caddy sends Host: 127.0.0.1:7443 and Traefik answers 404.
+  assertStringIncludes(caddyTraefikUpstream("https"), "header_up Host {host}");
+  assertEquals(caddyTraefikUpstream("http").includes("header_up"), false);
+});
+
 test("caddyTraefikUpstream https hop uses TLS skip-verify and PROXY v2", () => {
   const upstream = caddyTraefikUpstream("https");
   assertStringIncludes(upstream, "127.0.0.1:7443");
@@ -565,6 +571,7 @@ test("siteSnippet acme mode still emits HTTPS when forceHttps is false", () => {
   assertEquals(snippet.includes("tls internal"), false);
   assertStringIncludes(snippet, `app.example.com {`);
   assertStringIncludes(snippet, caddyTraefikUpstream("https"));
+  assertStringIncludes(snippet, "header_up Host {host}");
 });
 
 test("siteSnippet acme mode keeps HTTPS for multi-route forceHttps:false", () => {
@@ -606,6 +613,7 @@ test("siteSnippet acme mode omits the tls line and keeps the redirect block", ()
   assertEquals(snippet.includes("tls internal"), false);
   assertStringIncludes(snippet, `app.example.com {`);
   assertStringIncludes(snippet, caddyTraefikUpstream("https"));
+  assertStringIncludes(snippet, "header_up Host {host}");
   // Manual `caddy adapt` of this snippet (when the binary is available)
   // succeeds: omitting `tls` leaves Caddy's ACME client on :80/:443.
 });

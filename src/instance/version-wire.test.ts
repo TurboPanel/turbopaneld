@@ -4,6 +4,7 @@ import {
   compareSemver,
   DAEMON_FEATURE_MIN_VERSIONS,
   DAEMON_WIRE_FEATURES,
+  DENO_NATIVE_APPS_FEATURE,
   DEPLOY_CANCEL_FEATURE,
   instanceUnsupportedReason,
   MANAGED_HA_INSTANCE_FEATURE,
@@ -15,6 +16,7 @@ import {
   resolveDaemonCapabilities,
   resolveInstanceCapabilities,
   resolveInstanceSupport,
+  SITE_DB_BINDINGS_FEATURE,
   SITE_ENGINE_NGINX_APACHE_FEATURE,
 } from "./version-wire.ts";
 
@@ -165,6 +167,28 @@ test("deploy-cancel-v1 is advertised on the wire and raised no floor", () => {
   assertEquals(
     (DAEMON_WIRE_FEATURES as readonly string[]).includes(
       DEPLOY_CANCEL_FEATURE,
+    ),
+    true,
+  );
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+});
+
+test("site-db-bindings-v1 is advertised on the wire and raised no floor", () => {
+  assertEquals(SITE_DB_BINDINGS_FEATURE, "site-db-bindings-v1");
+  assertEquals(
+    (DAEMON_WIRE_FEATURES as readonly string[]).includes(
+      SITE_DB_BINDINGS_FEATURE,
+    ),
+    true,
+  );
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+});
+
+test("deno-native-apps-v1 is advertised on the wire and raised no floor", () => {
+  assertEquals(DENO_NATIVE_APPS_FEATURE, "deno-native-apps-v1");
+  assertEquals(
+    (DAEMON_WIRE_FEATURES as readonly string[]).includes(
+      DENO_NATIVE_APPS_FEATURE,
     ),
     true,
   );

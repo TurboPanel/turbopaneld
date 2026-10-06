@@ -3048,9 +3048,9 @@ fi
 # owner): its slice is turbopanel-tpbuild.slice, which no principal can own
 # (tp_new_name_ok refuses every tp* name).
 BUILD_NO_OWNER="tpbuild"
-# Runtime entitlement groups (tpnode<series>) live in this gid band
-# (orchestration/runtime-registry.json); a build gets them as
-# SupplementaryGroups= so it can run the vendored Node it was assigned.
+# Runtime entitlement groups (tpnode<series>, tpdeno<series>) live in this gid
+# band (orchestration/runtime-registry.json); a build gets them as
+# SupplementaryGroups= so it can run the vendored Node or Deno it was assigned.
 BUILD_RUNTIME_GID_MIN=9900
 BUILD_RUNTIME_GID_MAX=9979
 BUILD_LOCK="$P/run/tpbuild.lock"
@@ -3190,10 +3190,11 @@ tp_build_dyn_user() {
 }
 
 # The runtime groups a build gets (SupplementaryGroups=), space-separated:
-# every tpnode<series> group in the runtime entitlement band, and nothing else.
+# every tpnode<series> and tpdeno<series> group in the runtime entitlement band,
+# and nothing else.
 tp_build_runtime_groups() {
   tp_group_db | awk -F: -v lo="$BUILD_RUNTIME_GID_MIN" -v hi="$BUILD_RUNTIME_GID_MAX" '
-    $1 ~ /^tpnode[0-9]+$/ && $3 ~ /^[0-9]+$/ && $3 + 0 >= lo + 0 && $3 + 0 <= hi + 0 {
+    $1 ~ /^tp(node|deno)[0-9]+$/ && $3 ~ /^[0-9]+$/ && $3 + 0 >= lo + 0 && $3 + 0 <= hi + 0 {
       printf "%s%s", sep, $1; sep = " "
     }'
 }

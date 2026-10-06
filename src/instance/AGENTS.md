@@ -63,6 +63,14 @@ It is not a queued command: a running deploy holds the queue slot. The deploy
 itself ends with a `command-outcome` whose error starts with `cancelled: `. The
 cutover rule and its limits are in `../deploy/AGENTS.md`.
 
+**Site database bindings (`site-db-bindings-v1`).** The daemon advertises the
+feature in `hello.features`. A control plane that sees it may send
+`sites[].dbCa` (a public CA bundle the daemon keeps as a file for the site
+owner's Linux user and points variables at) and `sites[].requiredEnv`; the
+`environment.deploy` result may carry `warnings` (variables a site's web server
+could not carry, named, never their values). All additive: an older control
+plane sends neither and ignores `warnings`. See `../deploy/site/AGENTS.md`.
+
 **On-demand managed health (`managed-health-v1`).** The daemon advertises
 the feature in `hello.features`. A control plane that sees it may send
 `managed-health-request` (`managedId`, `memberId`, `role`, `engine`) and gets

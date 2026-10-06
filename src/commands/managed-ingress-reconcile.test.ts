@@ -336,6 +336,88 @@ test({
 
 test({
   name:
+    "handleManagedIngressReconcile re-publishes on exactly the addresses of the new scope when exposure narrows or widens",
+  permissions: { env: true, read: true, write: true, run: false },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      await seedFixture(fixture);
+      const layout = resolveLayout(fixture.env);
+      Deno.env.set("TURBOPANEL_STATE_DIR", fixture.dirs.stateDir);
+      Deno.env.set("TURBOPANEL_CONFIG_DIR", fixture.dirs.configDir);
+      try {
+        let composeUps = 0;
+        const run = (args: string[]): Promise<DockerCliResult> => {
+          if (args.includes("up")) composeUps += 1;
+          return fakeRun()(args);
+        };
+        const reconcile = async (...bindAddresses: string[]) => {
+          const result = await handleManagedIngressReconcile(
+            basePayload(...bindAddresses),
+            new Date().toISOString(),
+            {
+              runDocker: run,
+              decryptSecrets: decryptSecretsEcho,
+              ensureDocker: () => Promise.resolve(),
+              // The previous frontend holds these ports itself.
+              probeHostPort: () => Promise.resolve(true),
+            },
+          );
+          const composeText = await Deno.readTextFile(
+            proxysqlComposePath(layout),
+          );
+          return { restarted: result.restarted, composeText };
+        };
+        // Scope -> address, as the control plane resolves it.
+        const steps: Array<{ scope: string; binds: string[] }> = [
+          { scope: "public", binds: ["0.0.0.0"] },
+          { scope: "local", binds: ["127.0.0.1"] },
+          { scope: "datacenter", binds: ["10.20.0.5"] },
+          {
+            scope: "datacenter+turbofabric",
+            binds: ["10.20.0.5", "10.99.0.5"],
+          },
+          { scope: "off", binds: [] },
+          { scope: "local again", binds: ["127.0.0.1"] },
+        ];
+        for (const step of steps) {
+          const before = composeUps;
+          const { restarted, composeText } = await reconcile(...step.binds);
+          assertEquals(restarted, true, `${step.scope}: frontend is recreated`);
+          assertEquals(composeUps, before + 1, `${step.scope}: one compose up`);
+          assertEquals(
+            readPublishedBindAddressesFromCompose(composeText),
+            step.binds,
+            `${step.scope}: published addresses`,
+          );
+          // Nothing from the previous scope is left behind.
+          const published = composeText.split("\n").filter((line) =>
+            line.includes(":15432:15432") || line.includes(":13306:13306")
+          );
+          assertEquals(
+            published.length,
+            step.binds.length * 2,
+            `${step.scope}: one pair of listener ports per address`,
+          );
+          // The admin and REST ports never follow the client scope.
+          assertStringIncludes(composeText, '"127.0.0.1:6032:6032"');
+          assertStringIncludes(composeText, '"127.0.0.1:6070:6070"');
+        }
+        // `local` is loopback only: host sites on 127.0.0.1:13306 keep working,
+        // and neither the wildcard nor a LAN address is published.
+        const local = await reconcile("127.0.0.1");
+        assertStringIncludes(local.composeText, '"127.0.0.1:15432:15432"');
+        assertStringIncludes(local.composeText, '"127.0.0.1:13306:13306"');
+        assertEquals(local.composeText.includes("0.0.0.0:"), false);
+      } finally {
+        Deno.env.delete("TURBOPANEL_STATE_DIR");
+        Deno.env.delete("TURBOPANEL_CONFIG_DIR");
+      }
+    });
+  },
+});
+
+test({
+  name:
     "handleManagedIngressReconcile compose-ups after teardown when yaml/cnf are unchanged",
   permissions: { env: true, read: true, write: true, run: false },
   fn: async () => {

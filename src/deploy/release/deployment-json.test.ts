@@ -169,6 +169,26 @@ test("readReleaseManifest rejects a recorded start it could not render safely", 
   );
 });
 
+test("readReleaseManifest keeps a recorded runtime and rejects an unknown one", async () => {
+  await withReleaseDir(async (releaseDir) => {
+    await Deno.mkdir(join(releaseDir, RELEASE_METADATA_DIRNAME), {
+      recursive: true,
+    });
+    for (const runtime of ["node", "deno"]) {
+      await Deno.writeTextFile(
+        releaseManifestPath(releaseDir),
+        JSON.stringify({ ...BASE, runtime }),
+      );
+      assertEquals((await readReleaseManifest(releaseDir))?.runtime, runtime);
+    }
+    await Deno.writeTextFile(
+      releaseManifestPath(releaseDir),
+      JSON.stringify({ ...BASE, runtime: "bun" }),
+    );
+    assertEquals(await readReleaseManifest(releaseDir), null);
+  });
+});
+
 test("readReleaseManifest rejects non-string railpack version fields", async () => {
   await withReleaseDir(async (releaseDir) => {
     await Deno.mkdir(join(releaseDir, RELEASE_METADATA_DIRNAME), {
