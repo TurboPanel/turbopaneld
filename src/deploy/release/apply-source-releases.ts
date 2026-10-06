@@ -239,6 +239,16 @@ function nativeAppForService(
   );
 }
 
+/** `deno` for a Deno app, else nothing: a Node release records no runtime. */
+function builtRuntime(
+  payload: EnvironmentDeployPayload,
+  composeServiceName: string,
+): "deno" | undefined {
+  return nativeAppForService(payload, composeServiceName)?.runtime === "deno"
+    ? "deno"
+    : undefined;
+}
+
 export type ApplySourceReleasesDeps = {
   logSink: CommandOutputSink;
   /**
@@ -897,10 +907,7 @@ async function buildNativeRelease(
       nativeStart: nativeOutput.start,
       // Only Deno is written, so a Node manifest is unchanged (see
       // `ReleaseManifestV1.runtime`).
-      runtime: nativeAppForService(payload, entry.composeServiceName)
-          ?.runtime === "deno"
-        ? "deno"
-        : undefined,
+      runtime: builtRuntime(payload, entry.composeServiceName),
       // The author's own start settings, so a rollback to this release
       // starts it the way it ran (see `ReleaseManifestV1.startCommand`).
       startCommand: entry.build.startCommand?.trim() || undefined,
@@ -960,10 +967,7 @@ async function buildNativeRelease(
       standaloneOutput: nativeOutput.standaloneOutput,
       staticExport: nativeOutput.staticExport,
       nativeStart: nativeOutput.start,
-      runtime: nativeAppForService(payload, entry.composeServiceName)
-          ?.runtime === "deno"
-        ? "deno"
-        : undefined,
+      runtime: builtRuntime(payload, entry.composeServiceName),
     });
   } finally {
     if (work) await removeBuildWork(work, onOutput);
