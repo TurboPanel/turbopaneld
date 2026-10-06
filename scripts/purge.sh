@@ -3657,7 +3657,8 @@ TP_OTHER_DIRS=
 TP_LEGACY_ACCOUNTS="turbopanel turbopaneli turbopanelc"
 TP_LEGACY_ACCOUNT_IDS="9999 9998 9997"
 TP_LEGACY_UNITS="turbopanel-mailer.service turbopanel-php-fpm.service"
-# Current units whose names the turbopanel* scans miss.
+# Units whose names the turbopanel* scans miss. tpbuild.slice was retired with
+# the shared build account (2026-10-06) and stays for hosts that still carry it.
 TP_OTHER_UNITS="tpbuild.slice"
 # Groups the platform creates outside the 9900-9999 band (the Docker gate's
 # build group, a system gid). Matched by exact name only.

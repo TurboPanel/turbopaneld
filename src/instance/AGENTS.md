@@ -63,6 +63,14 @@ It is not a queued command: a running deploy holds the queue slot. The deploy
 itself ends with a `command-outcome` whose error starts with `cancelled: `. The
 cutover rule and its limits are in `../deploy/AGENTS.md`.
 
+**Site database bindings (`site-db-bindings-v1`).** The daemon advertises the
+feature in `hello.features`. A control plane that sees it may send
+`sites[].dbCa` (a public CA bundle the daemon keeps as a file for the site
+owner's Linux user and points variables at) and `sites[].requiredEnv`; the
+`environment.deploy` result may carry `warnings` (variables a site's web server
+could not carry, named, never their values). All additive: an older control
+plane sends neither and ignores `warnings`. See `../deploy/site/AGENTS.md`.
+
 **On-demand managed health (`managed-health-v1`).** The daemon advertises
 the feature in `hello.features`. A control plane that sees it may send
 `managed-health-request` (`managedId`, `memberId`, `role`, `engine`) and gets
@@ -333,13 +341,13 @@ dev-user parameters — not shipped in release; resolved via
 `TURBOPANEL_DEV_ORCHESTRATION_DIR` / `resolveDevOrchestrationDir`, layered with
 daemon production roles through `ANSIBLE_ROLES_PATH`). Production installs
 extract **`orchestration.tar.zst`** from the channel manifest into
-`/opt/turbopanel/share/orchestration/`. Release CDN artifacts are four split
-tarballs per build under versioned paths (`channels/trunk/daemon/<buildId>/…`):
+`/opt/turbopanel/share/orchestration/`. Release artifacts are four split
+tarballs per build on GitHub Releases:
 host-arch `turbopaneld-{amd64,arm64}.tar.zst`, shared `turbopaneld.js.tar.zst`
 (Deno JS runtime for hosts that cannot execute the native binary), and shared
-`orchestration.tar.zst`. Manifest artifact URLs are canonical — Bunny CDN
-ignores `?build=` query cache-bust, so each publish uploads to a new
-`<buildId>/` prefix with `Cache-Control: immutable`.
+`orchestration.tar.zst`. Manifest artifact URLs are canonical: assets are added
+under build-unique names, so a manifest never names a file a later publish
+replaces.
 
 **Two managed ExecStart modes (native vs Deno JS):** `run.sh` always downloads
 the host-arch native binary and orchestration tree, then probes

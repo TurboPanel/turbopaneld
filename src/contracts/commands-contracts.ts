@@ -5,7 +5,7 @@
  * inline instance-only imports.
  */
 import type { SensorCapabilities } from "../metrics/collector/sensors/discovery.ts";
-import { ConfigValueError, safeUrlPath } from "./config-values.ts";
+import { ConfigValueError, safeEnvName, safeUrlPath } from "./config-values.ts";
 
 export const COMMAND_TYPES = [
   "daemon.ping",
@@ -705,12 +705,13 @@ export type EnvironmentDeployHosting = {
   ports?: EnvironmentDeployHostingPort[];
   web?: EnvironmentDeployHostingWeb;
   /**
-   * Also serve the other spelling of each hostname (`www.` added, or removed
-   * when the name starts with `www.`) as a permanent redirect to the hostname
-   * as written. `http` only; omitted when off. In `acme` mode the extra name
-   * gets its own certificate. Older daemons ignore the field.
+   * What happens to the other spelling of each hostname (`www.` added, or
+   * removed when the name starts with `www.`); see {@link HostingWwwMode}.
+   * `http` only; omitted when `off`. The redirect is permanent and keeps the
+   * path and query. Every extra name is served under the hosting's own TLS
+   * mode (`acme` gives it its own certificate; a pinned pair must cover it).
    */
-  wwwRedirect?: boolean;
+  www?: Exclude<HostingWwwMode, "off">;
 };
 
 export type EnvironmentDeployVariableMaterial = {
@@ -754,7 +755,7 @@ export type EnvironmentDeployStorageMaterial = {
  *
  * The host allocates UID/GID from 15001–60000 via `useradd`/`groupadd`
  * (`-K` on that command) unless the control plane sends an explicit operator
- * override (`uid`/`gid` ≥ 15001).
+ * override (`uid`/`gid` 15001–60000).
  */
 /** One runtime series a principal is entitled to execute. */
 export type EnvironmentDeployPrincipalRuntime = {
@@ -865,9 +866,22 @@ export type EnvironmentDeployHostingPhp = {
  * Project principal that owns a site tree on the host.
  * `ensureSystemPrincipals` creates the Linux user before apply; document
  * roots are owned by this user with the engine group for read access.
- * UID/GID are optional operator overrides (≥ 15001) — the host allocates
+ * UID/GID are optional operator overrides (15001–60000) — the host allocates
  * from 15001–60000 otherwise.
  */
+/**
+ * A public CA bundle for a site's managed database connection. The daemon
+ * writes it to a file only the site owner's Linux user can read (next to the
+ * site's other hosting files) and sets every name in `variables` to that
+ * file's path, so PHP can verify the database's certificate without a
+ * multi-line value in the web server's environment. Public certificates only:
+ * a bundle holding anything but `CERTIFICATE` blocks is refused at parse.
+ */
+export type EnvironmentDeploySiteDbCa = {
+  variables: string[];
+  pem: string;
+};
+
 export type EnvironmentDeploySitePrincipal = {
   principalId: string;
   username: string;
@@ -950,6 +964,20 @@ export type EnvironmentDeploySite = {
    * applied; the plaintext only ever reaches the engine's own config files.
    */
   webSecretEnv?: Record<string, string>;
+  /**
+   * The CA a managed database's TLS certificate chains to, delivered as a
+   * file. See {@link EnvironmentDeploySiteDbCa}. Sent only to a daemon that
+   * lists `site-db-bindings-v1`.
+   */
+  dbCa?: EnvironmentDeploySiteDbCa;
+  /**
+   * Variable names this site cannot run without (a database binding's host,
+   * port, user, password and name). If the site's engine cannot carry one of
+   * them the deploy fails with a plain-words error naming it; every other
+   * variable the engine cannot carry is dropped with a warning. Sent only to a
+   * daemon that lists `site-db-bindings-v1`.
+   */
+  requiredEnv?: string[];
   php?: EnvironmentDeployHostingPhp;
   /**
    * When set (from a project principal ↔ service tenancy), the site tree
@@ -1047,7 +1075,7 @@ export type EnvironmentDeployNativeAppService = {
   resources?: { cpus?: number; memoryBytes?: number };
   /**
    * Effective org/server ceiling for the owning principal — repeated on every
-   * app of that principal. Becomes `turbopanel-<username>.slice`, so per-app
+   * app of that principal. Becomes its slice (`principalSliceName`), so per-app
    * limits cannot add up past the account total.
    */
   accountLimits?: { cpus?: number; memoryBytes?: number; tasksMax?: number };
@@ -1475,6 +1503,12 @@ export type EnvironmentDeployResultSite = {
 export type EnvironmentDeployResult = {
   projectName: string;
   summary: string;
+  /**
+   * Things the deploy worked around without failing, in plain words (a
+   * variable the site's web server cannot carry was left out). Names only,
+   * never values. Omitted when there were none.
+   */
+  warnings?: string[];
   services?: string[];
   containers?: EnvironmentDeployContainer[];
   /** Git-backed releases this deploy applied; omitted when there were none. */
@@ -2191,17 +2225,102 @@ export function isValidHostname(value: unknown): boolean {
 
 const WWW_PREFIX = "www.";
 
+/** True when every character of a non-empty label is a digit (an IPv4 octet). */
+function isAllDigits(label: string): boolean {
+  if (label.length === 0) return false;
+  for (const ch of label) {
+    if (ch < "0" || ch > "9") return false;
+  }
+  return true;
+}
+
 /**
- * The other spelling of a site name for the "send www to the main name" option:
- * `www.example.com` for `example.com`, and `example.com` for `www.example.com`.
- * `null` when no valid name results. Must stay in sync with the instance
- * canonical version in src/contracts/commands/hostname.ts
+ * The other spelling of a site name for the www choice: `www.example.com` for
+ * `example.com`, and `example.com` for `www.example.com`. `null` when no valid
+ * name results, and for names that have no www spelling at all: an IP address
+ * (the last label is all digits) or a one-word name (`localhost`, `com` from
+ * `www.com`). Must stay in sync with the instance canonical version in
+ * src/contracts/commands/hostname.ts
  */
 export function wwwSiblingHostname(hostname: string): string | null {
-  const sibling = hostname.startsWith(WWW_PREFIX)
+  const typedIsWww = hostname.startsWith(WWW_PREFIX);
+  const sibling = typedIsWww
     ? hostname.slice(WWW_PREFIX.length)
     : WWW_PREFIX + hostname;
+  const bare = typedIsWww ? sibling : hostname;
+  const lastDot = bare.lastIndexOf(".");
+  if (lastDot === -1 || isAllDigits(bare.slice(lastDot + 1))) return null;
   return isValidHostname(sibling) ? sibling : null;
+}
+
+/**
+ * How a hosting treats the www spelling of each of its hostnames. `off` (the
+ * wire omits it) answers only on the name as written; `both` serves the site on
+ * both spellings; `www-to-root` serves it on the bare name and permanently
+ * redirects `www.` to it; `root-to-www` serves it on `www.` and redirects the
+ * bare name there. The direction is about the names themselves, not about which
+ * one was typed: `www-to-root` on `www.example.com` serves `example.com`.
+ */
+export type HostingWwwMode = "off" | "both" | "www-to-root" | "root-to-www";
+
+export const HOSTING_WWW_MODES: readonly HostingWwwMode[] = [
+  "off",
+  "both",
+  "www-to-root",
+  "root-to-www",
+];
+
+/** What one hostname turns into under a www mode. */
+export type HostingWwwNames = {
+  /** Names the site answers on (the hostname as written comes first). */
+  serve: string[];
+  /** A name that only redirects, and where it sends the visitor. */
+  redirect: { from: string; to: string } | null;
+};
+
+/**
+ * Expand one hostname under a www mode. `null` when the mode needs the other
+ * spelling and that spelling is not a valid hostname (a wildcard, say). Must
+ * stay in sync with the instance canonical version in
+ * src/contracts/commands/hostname.ts
+ */
+export function hostingWwwNames(
+  hostname: string,
+  mode: HostingWwwMode = "off",
+): HostingWwwNames | null {
+  if (mode === "off") return { serve: [hostname], redirect: null };
+  const sibling = wwwSiblingHostname(hostname);
+  if (sibling === null) return null;
+  if (mode === "both") return { serve: [hostname, sibling], redirect: null };
+  const typedIsWww = hostname.startsWith(WWW_PREFIX);
+  const root = typedIsWww ? sibling : hostname;
+  const www = typedIsWww ? hostname : sibling;
+  return mode === "www-to-root"
+    ? { serve: [root], redirect: { from: www, to: root } }
+    : { serve: [www], redirect: { from: root, to: www } };
+}
+
+/**
+ * Every name a hosting's site answers on: each hostname as written, swapped or
+ * joined by its other spelling under the hosting's `www` mode. Names a mode
+ * cannot expand (refused by validation) stay as written.
+ */
+export function hostingServedNames(
+  hosting: Pick<EnvironmentDeployHosting, "hostnames" | "www">,
+): string[] {
+  return hosting.hostnames.flatMap((hostname) =>
+    hostingWwwNames(hostname, hosting.www)?.serve ?? [hostname]
+  );
+}
+
+/** The names a hosting's `www` mode only redirects, with their targets. */
+export function hostingWwwRedirects(
+  hosting: Pick<EnvironmentDeployHosting, "hostnames" | "www">,
+): { from: string; to: string }[] {
+  return hosting.hostnames.flatMap((hostname) => {
+    const redirect = hostingWwwNames(hostname, hosting.www)?.redirect;
+    return redirect ? [redirect] : [];
+  });
 }
 
 /** Must stay in sync with the instance canonical version in src/contracts/commands/hostname.ts */
@@ -3662,12 +3781,38 @@ function parseHostingTlsMode(
   return value as EnvironmentDeployHosting["tlsMode"];
 }
 
-function parseHostingWwwRedirect(value: unknown): true | undefined {
-  if (value === undefined) return undefined;
-  if (typeof value !== "boolean") {
+/**
+ * An older control plane sends `wwwRedirect: true` ("send the other spelling
+ * to the name as written"). Honour it as the mode that keeps the first typed
+ * name the site rather than dropping the redirect without a word.
+ */
+function parseLegacyHostingWwwRedirect(
+  value: unknown,
+  hostnames: unknown,
+): EnvironmentDeployHosting["www"] {
+  if (value === undefined || value === false) return undefined;
+  if (value !== true) {
     throw new TypeError("hostings[].wwwRedirect must be a boolean");
   }
-  return value ? true : undefined;
+  const first = Array.isArray(hostnames) ? hostnames[0] : undefined;
+  return typeof first === "string" && first.startsWith(WWW_PREFIX)
+    ? "root-to-www"
+    : "www-to-root";
+}
+
+function parseHostingWww(
+  value: unknown,
+): EnvironmentDeployHosting["www"] {
+  if (value === undefined) return undefined;
+  if (
+    typeof value !== "string" ||
+    !(HOSTING_WWW_MODES as readonly string[]).includes(value)
+  ) {
+    throw new TypeError(
+      "hostings[].www must be off, both, www-to-root, or root-to-www",
+    );
+  }
+  return value === "off" ? undefined : value as Exclude<HostingWwwMode, "off">;
 }
 
 function isValidPortNumber(value: unknown): value is number {
@@ -3782,7 +3927,9 @@ function parseHosting(value: unknown): EnvironmentDeployHosting {
   const protocol = parseHostingProtocol(value.protocol);
   const ports = parseHostingPorts(value.ports);
   const web = parseHostingWeb(value.web);
-  const wwwRedirect = parseHostingWwwRedirect(value.wwwRedirect);
+  const www = value.www === undefined
+    ? parseLegacyHostingWwwRedirect(value.wwwRedirect, value.hostnames)
+    : parseHostingWww(value.www);
 
   return {
     hostingId: parseNonEmptyString(value, "hostingId"),
@@ -3798,7 +3945,7 @@ function parseHosting(value: unknown): EnvironmentDeployHosting {
     ...(protocol === undefined ? {} : { protocol }),
     ...(ports === undefined ? {} : { ports }),
     ...(web === undefined ? {} : { web }),
-    ...(wwwRedirect === undefined ? {} : { wwwRedirect }),
+    ...(www === undefined ? {} : { www }),
   };
 }
 
@@ -4619,6 +4766,73 @@ function parseNativeAppService(
   return app;
 }
 
+/** Largest CA bundle accepted for a site (a handful of certificates). */
+const MAX_SITE_DB_CA_BYTES = 65_536;
+const MAX_SITE_DB_CA_VARIABLES = 8;
+const MAX_SITE_REQUIRED_ENV = 64;
+const PEM_CERTIFICATE_BEGIN = "-----BEGIN CERTIFICATE-----";
+
+/** True when every PEM block in `pem` is a certificate and there is one. */
+function isCertificateOnlyPem(pem: string): boolean {
+  let blocks = 0;
+  for (const line of pem.split("\n")) {
+    if (!line.startsWith("-----BEGIN ")) continue;
+    if (line.trim() !== PEM_CERTIFICATE_BEGIN) return false;
+    blocks += 1;
+  }
+  return blocks > 0;
+}
+
+function parseSiteEnvNames(
+  value: unknown,
+  max: number,
+  field: string,
+): string[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > max) {
+    throw new TypeError(`Invalid ${field}`);
+  }
+  return value.map((entry) => {
+    if (typeof entry !== "string") throw new TypeError(`Invalid ${field}`);
+    return safeEnvName(field, entry);
+  });
+}
+
+function parseSiteDbCa(
+  value: unknown,
+  service: string,
+): EnvironmentDeploySiteDbCa | undefined {
+  if (value === undefined) return undefined;
+  const field = `sites.${service}.dbCa`;
+  if (
+    !isRecord(value) || typeof value.pem !== "string" ||
+    value.pem.length > MAX_SITE_DB_CA_BYTES || !isCertificateOnlyPem(value.pem)
+  ) {
+    throw new TypeError(
+      `Invalid ${field}: expected certificate PEM blocks only`,
+    );
+  }
+  return {
+    variables: parseSiteEnvNames(
+      value.variables,
+      MAX_SITE_DB_CA_VARIABLES,
+      `${field}.variables`,
+    ),
+    pem: value.pem,
+  };
+}
+
+function parseSiteRequiredEnv(
+  value: unknown,
+  service: string,
+): string[] | undefined {
+  if (value === undefined) return undefined;
+  return parseSiteEnvNames(
+    value,
+    MAX_SITE_REQUIRED_ENV,
+    `sites.${service}.requiredEnv`,
+  );
+}
+
 function parseSite(
   value: unknown,
 ): EnvironmentDeploySite {
@@ -4643,6 +4857,13 @@ function parseSite(
   if (webEnv) site.webEnv = webEnv;
   const webSecretEnv = parseStringRecord(value.webSecretEnv);
   if (webSecretEnv) site.webSecretEnv = webSecretEnv;
+  const dbCa = parseSiteDbCa(value.dbCa, site.composeServiceName);
+  if (dbCa) site.dbCa = dbCa;
+  const requiredEnv = parseSiteRequiredEnv(
+    value.requiredEnv,
+    site.composeServiceName,
+  );
+  if (requiredEnv) site.requiredEnv = requiredEnv;
   const php = parseHostingPhp(value.php);
   if (php) site.php = php;
   const principal = parseSitePrincipal(value.principal);

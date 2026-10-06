@@ -8,6 +8,7 @@ import {
   NATIVE_APP_ENV_DIR_MODE,
   NATIVE_APP_ENV_FILE_MODE,
   NATIVE_APP_ENV_MAX_BYTES,
+  normalizeNativeAppEnvValue,
   removeNativeAppEnvFile,
   renderNativeAppEnvFile,
   renderNativeAppEnvLine,
@@ -152,6 +153,42 @@ test("an app with only plain values needs no decrypt call", async () => {
     undefined,
   );
   assertEquals(resolved.entries, [{ name: "A", value: "1" }]);
+});
+
+test("Windows line endings in a value, plain or secret, become LF before the file is rendered", async () => {
+  const pem = "-----BEGIN KEY-----\r\nAAAA\r\n-----END KEY-----\r\n";
+  const resolved = await resolveNativeAppVariables(
+    {
+      ...app,
+      variables: [
+        { name: "PLAIN_PEM", value: pem },
+        { name: "SECRET_PEM", secretKey: "SECRET_PEM" },
+      ],
+    },
+    [sealed("SECRET_PEM", `tpdaemon.${pem}`)],
+    decryptSecrets,
+  );
+  const lf = "-----BEGIN KEY-----\nAAAA\n-----END KEY-----\n";
+  assertEquals(resolved.entries, [
+    { name: "PLAIN_PEM", value: lf },
+    { name: "SECRET_PEM", value: lf },
+  ]);
+  assertEquals(renderNativeAppEnvFile(resolved.entries).includes("\r"), false);
+});
+
+test("a carriage return that is not part of CR LF, or a NUL, is refused by name, never by value", () => {
+  for (const bad of ["a\rb", "a\r", "a\r\r\nb", "a\0b"]) {
+    try {
+      normalizeNativeAppEnvValue("api", "TLS_KEY", bad);
+      throw new Error("expected a refusal");
+    } catch (error) {
+      const message = (error as Error).message;
+      assertStringIncludes(message, "native app api: variable TLS_KEY");
+      assertEquals(message.includes("a\rb"), false);
+    }
+  }
+  assertEquals(normalizeNativeAppEnvValue("api", "K", "x\r\ny"), "x\ny");
+  assertEquals(normalizeNativeAppEnvValue("api", "K", "plain"), "plain");
 });
 
 test("env lines keep every value literal: single quotes, or escaped double quotes", () => {

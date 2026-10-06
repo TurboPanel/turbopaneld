@@ -333,12 +333,15 @@ test("converge and web-service account ids are globally unique", async () => {
     }
   }
 
-  // tpbuild (build-user) takes the 9994 slot, uid and gid alike.
+  // 9994 stays reserved for the retired shared build account (tpbuild,
+  // build-user): an old file may still carry it, so nothing reuses it.
   const buildDefaults = parse(
     await readRole("roles/build-user/defaults/main.yml"),
-  ) as { build_uid: number; build_gid: number };
-  if (buildDefaults.build_uid !== 9994 || buildDefaults.build_gid !== 9994) {
-    throw new Error("build-user: tpbuild must be uid/gid 9994");
+  ) as { build_retired_uid: number };
+  if (buildDefaults.build_retired_uid !== 9994) {
+    throw new Error(
+      "build-user: the retired tpbuild id 9994 must stay reserved",
+    );
   }
 
   const convergeIds = ACCOUNTS.map((entry) => entry.id);
@@ -358,7 +361,7 @@ test("converge and web-service account ids are globally unique", async () => {
   const ids = [
     ...convergeIds,
     ...webIds,
-    buildDefaults.build_uid,
+    buildDefaults.build_retired_uid,
     ...entitlementIds,
     ...accessGroupIds,
     hostingCaddy.hosting_caddy_uid,

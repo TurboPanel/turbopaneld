@@ -2,7 +2,7 @@
  * Managed apply handler tests — standby mutation skip + needs_resync fence.
  */
 
-import { assertEquals } from "@std/assert";
+import { assertEquals, assertRejects } from "@std/assert";
 import type {
   ManagedApplyCredential,
   ManagedApplyPayload,
@@ -149,8 +149,8 @@ test("primary applyManagedEngineState still mutates credentials/databases", asyn
   assertEquals(state.appliedDatabases, ["appdb"]);
   assertEquals(calls, [
     "waitReady",
-    "applyCredentials",
     "applyDatabases",
+    "applyCredentials",
     "readVersion",
   ]);
 });
@@ -236,10 +236,10 @@ test("primary applyManagedEngineState runs host prep then ensures ProxySQL monit
 
       assertEquals(calls, [
         "waitReady",
+        "applyDatabases",
         "applyCredentials",
         "hostPrep",
         "ensure:tp_monitor",
-        "applyDatabases",
         "readVersion",
       ]);
     } finally {
@@ -249,6 +249,122 @@ test("primary applyManagedEngineState runs host prep then ensures ProxySQL monit
       }
     }
   });
+});
+
+/** Engine double that records every step and the database ops it was handed. */
+function orderingEngine(
+  calls: string[],
+  options?: { failCredentials?: boolean },
+) {
+  return {
+    rootUsername: "postgres",
+    waitReady: () => Promise.resolve(),
+    applyDatabases: (
+      _ctx: unknown,
+      ops: Array<{ name: string; action: string }>,
+    ) => {
+      calls.push(
+        `applyDatabases:${
+          ops.map((op) => `${op.action}:${op.name}`).join(",")
+        }`,
+      );
+      return Promise.resolve(ops.map((op) => op.name));
+    },
+    applyCredentials: () => {
+      calls.push("applyCredentials");
+      return options?.failCredentials
+        ? Promise.reject(new Error('database "p_db" does not exist'))
+        : Promise.resolve(["app_user"]);
+    },
+    dropUsers: (_ctx: unknown, usernames: string[]) => {
+      calls.push(`dropUsers:${usernames.join(",")}`);
+      return Promise.resolve(usernames);
+    },
+    ensureProxySqlMonitor: () => {
+      calls.push("monitor");
+      return Promise.resolve();
+    },
+    readVersion: () => Promise.resolve("18.0"),
+  };
+}
+
+const orderingPayload = {
+  engine: "postgres",
+  dropUsers: ["old_user"],
+  databases: [
+    { action: "drop", name: "old_db" },
+    { action: "create", name: "p_db" },
+    { action: "create", name: "q_db" },
+  ],
+} as unknown as ManagedApplyPayload;
+
+test("primary applyManagedEngineState creates databases before credentials and drops them after dropUsers", async () => {
+  const calls: string[] = [];
+
+  const state = await applyManagedEngineState(
+    {} as never,
+    orderingEngine(calls) as never,
+    orderingPayload,
+    [],
+    { monitorUsers: [{ user: "tp_monitor", password: "mon-s3cret" }] },
+  );
+
+  assertEquals(calls, [
+    "applyDatabases:create:p_db,create:q_db",
+    "applyCredentials",
+    "dropUsers:old_user",
+    "monitor",
+    "applyDatabases:drop:old_db",
+  ]);
+  // Complete list: creates in payload order, then drops.
+  assertEquals(state.appliedDatabases, ["p_db", "q_db", "old_db"]);
+  assertEquals(state.appliedUsers, ["app_user", "old_user"]);
+});
+
+test("primary applyManagedEngineState leaves the database created when credentials fail", async () => {
+  const calls: string[] = [];
+
+  await assertRejects(
+    () =>
+      applyManagedEngineState(
+        {} as never,
+        orderingEngine(calls, { failCredentials: true }) as never,
+        orderingPayload,
+        [],
+      ),
+    Error,
+    "does not exist",
+  );
+
+  // The create already ran; the failing step stops the apply before the
+  // user drops and the database drops.
+  assertEquals(calls, [
+    "applyDatabases:create:p_db,create:q_db",
+    "applyCredentials",
+  ]);
+});
+
+test("primary applyManagedEngineState skips database steps that have no operations", async () => {
+  const calls: string[] = [];
+  const payload = {
+    engine: "postgres",
+    databases: [{ action: "drop", name: "old_db" }],
+  } as unknown as ManagedApplyPayload;
+
+  const state = await applyManagedEngineState(
+    {} as never,
+    orderingEngine(calls) as never,
+    payload,
+    [],
+    { monitorUsers: [{ user: "tp_monitor", password: "mon-s3cret" }] },
+  );
+
+  assertEquals(calls, [
+    "applyCredentials",
+    "monitor",
+    "applyDatabases:drop:old_db",
+  ]);
+  assertEquals(state.appliedDatabases, ["old_db"]);
 });
 
 test("primary applyManagedEngineState drops users except the platform root", async () => {

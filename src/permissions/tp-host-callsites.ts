@@ -97,7 +97,7 @@ const PROJECT_ID = "01a0e39d-0418-7852-bc47-bc2f8422d404";
 const BUILD_TREE: CallSiteSetup = {
   dirs: [
     `${P}/var/lib/turbopanel-build/work/${BUILD_ID}/source`,
-    `${P}/var/lib/turbopanel-build/cache`,
+    `${P}/var/lib/turbopanel-build/caches`,
   ],
   files: {
     [`${P}/opt/turbopanel/lib/tp-build-runner`]: "#!/bin/sh\n",
@@ -983,9 +983,9 @@ const SITES: CallSite[] = [
   // --- release promotion ----------------------------------------------------
   // tp-host builds every path from the ids; the staging leaf is the daemon's.
   tpHost(
-    'src/deploy/release/build-sandbox.ts|["-n","build-run",work.buildId,work.projectKey],MANAGED',
+    'src/deploy/release/build-sandbox.ts|["-n","build-run",work.buildId,work.projectKey,work.owner],MANAGED',
     {
-      argv: ["build-run", BUILD_ID, PROJECT_ID],
+      argv: ["build-run", BUILD_ID, PROJECT_ID, "alice"],
       stdin: "tp-build-spec 1\ncwd source\nrun dHJ1ZQ==\nend\n",
       setup: BUILD_TREE,
     },
@@ -2000,10 +2000,6 @@ const SITES: CallSite[] = [
     {
       argv: ["systemctl", "is-failed", "--quiet", APP_UNIT],
     },
-  ),
-  tpHost(
-    'src/deploy/native/apply-native-apps.ts|systemctl(io,["restart",nativeAppUnitName(params.app.serviceId)])',
-    { argv: ["systemctl", "restart", APP_UNIT] },
   ),
   tpHost(
     'src/deploy/native/apply-native-apps.ts|systemctl(io,["restart",unit])',

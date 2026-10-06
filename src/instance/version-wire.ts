@@ -69,6 +69,7 @@ export const DAEMON_WIRE_FEATURES = [
   "php-site-modes-v1",
   "site-engine-nginx-apache-v1",
   "deploy-cancel-v1",
+  "site-db-bindings-v1",
 ] as const;
 
 export type DaemonWireFeature = (typeof DAEMON_WIRE_FEATURES)[number];
@@ -140,6 +141,15 @@ export const PHP_SITE_MODES_FEATURE: DaemonWireFeature = "php-site-modes-v1";
  * would drop it and the deploy would run on.
  */
 export const DEPLOY_CANCEL_FEATURE: DaemonWireFeature = "deploy-cancel-v1";
+
+/**
+ * This daemon takes `sites[].dbCa` (a managed database's CA as a file the site
+ * owner's Linux user can read) and `sites[].requiredEnv` (variables a site
+ * cannot run without), and answers an `environment.deploy` with `warnings`. The
+ * control plane sends those fields only to a daemon that lists this feature.
+ */
+export const SITE_DB_BINDINGS_FEATURE: DaemonWireFeature =
+  "site-db-bindings-v1";
 
 /** Features that need an instance at or above a semver. Empty until one lands. */
 export const INSTANCE_FEATURE_MIN_VERSIONS: Readonly<Record<string, string>> =

@@ -66,6 +66,7 @@ import { ensureDocker as defaultEnsureDocker } from "../deploy/ensure-docker.ts"
 import { ensureSystemPrincipals } from "../deploy/ensure-principal.ts";
 import { applySshAccess, type PrincipalSshSpec } from "../deploy/ssh/apply.ts";
 import {
+  assertHostingNamesFree,
   buildTcpUdpIngressEntries,
   cleanupStaleTcpUdpServiceIngress,
   ensureHostingCaddyRuntime,
@@ -100,6 +101,7 @@ import {
 import {
   applySites,
   ensureSitePhpRuntimes,
+  planSiteWebEnv,
   resolveSiteDocumentRoot,
   resolveSitePhpSeries,
   type SiteManagedDirectory,
@@ -149,6 +151,7 @@ import {
 } from "../deploy/site-docker.ts";
 import { logInfo, logWarn } from "../util/logger.ts";
 import { forEachSequential } from "../util/sequential.ts";
+import { definedFields } from "../util/optional-fields.ts";
 import {
   assertComposeHostPathsConfined,
   collectAuthoredHostPaths,
@@ -1293,6 +1296,15 @@ async function applyDeployNativeApps(
   const previousReleaseByService = new Map<string, string | null>(
     applied.map((entry) => [entry.composeServiceName, entry.previousReleaseId]),
   );
+  const appliedByService = new Map(
+    applied.map((entry) => [
+      entry.composeServiceName,
+      definedFields({
+        releaseId: entry.releaseId,
+        nativeStart: entry.nativeStart,
+      }),
+    ]),
+  );
   await applyNativeAppServices(layout, parsedPayload.environmentId, apps, {
     variableMaterial: parsedPayload.variableMaterial ?? [],
     decryptSecrets,
@@ -1302,6 +1314,7 @@ async function applyDeployNativeApps(
     bindings: nativeAppBindingsFromPayload(
       parsedPayload,
       previousReleaseByService,
+      appliedByService,
     ),
   });
 }
@@ -1970,6 +1983,8 @@ export function shapeEnvironmentDeployResult(input: {
   releases?: readonly EnvironmentDeployResultRelease[];
   /** Per-site application facts for the sites this deploy applied. */
   siteApps?: readonly EnvironmentDeployResultSite[];
+  /** What the deploy worked around without failing; omitted when empty. */
+  warnings?: readonly string[];
 }): EnvironmentDeployResult {
   const summary = buildDeploySummary(
     input.environmentId,
@@ -1994,6 +2009,9 @@ export function shapeEnvironmentDeployResult(input: {
       : {}),
     ...(input.siteApps && input.siteApps.length > 0
       ? { sites: [...input.siteApps] }
+      : {}),
+    ...(input.warnings && input.warnings.length > 0
+      ? { warnings: [...input.warnings] }
       : {}),
   };
 }
@@ -2239,6 +2257,14 @@ export async function handleEnvironmentDeploy(
     runtime.decryptSecrets,
   );
 
+  // Before anything is written: a variable a site's web server cannot carry is
+  // named in the command log and the result, a required database setting stops
+  // the deploy here.
+  const siteWarnings = sites.flatMap(planSiteWebEnv);
+  for (const warning of siteWarnings) {
+    runtime.logSink.onLine("stderr", warning);
+  }
+
   const siteReleaseBindings = deployReleaseBindings(parsedPayload);
   const siteManagedBindings = deployManagedDirectoryBindings(
     parsedPayload,
@@ -2305,6 +2331,10 @@ export async function handleEnvironmentDeploy(
     nativeAppBindingsFromPayload(parsedPayload),
   );
 
+  // Before any container carries a routing label for a name another
+  // environment already serves here.
+  await assertHostingNamesFree(layout, parsedPayload);
+
   const published = await publishDeployedCompose({
     hasContainers,
     layout,
@@ -2356,5 +2386,6 @@ export async function handleEnvironmentDeploy(
     containers,
     releases: deployResultReleases(appliedReleases),
     siteApps,
+    warnings: siteWarnings,
   });
 }

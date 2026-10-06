@@ -2,7 +2,9 @@ import { assertEquals, assertNotEquals } from "@std/assert";
 import { computeSlotMapping } from "../../contracts/topology-slot-mapping.ts";
 import {
   computeTopologyGeneration,
+  MEMORY_TOTAL_TOLERANCE_BYTES,
   resolveTopologyGeneration,
+  topologyGenerationPath,
 } from "./generation.ts";
 import {
   EMPTY_TOPOLOGY_OVERRIDES,
@@ -262,6 +264,14 @@ test("computeTopologyGeneration: null previous state starts at 0", () => {
       { ...inputs(), generation: 0 },
       EMPTY_TOPOLOGY_OVERRIDES,
     ),
+    memoryTotalBytes: null,
+    swapTotalBytes: null,
+    cpuShape: {
+      sockets: 1,
+      coresPerSocket: 1,
+      threadsPerSocket: 1,
+      logicalCores: 0,
+    },
   };
   assertEquals(computeTopologyGeneration(null, fingerprint), 0);
 });
@@ -273,4 +283,107 @@ test("resolveTopologyGeneration never consults the capability plan", () => {
   assertEquals(source.includes("capability-plan"), false);
   assertEquals(source.includes("capabilityPlan"), false);
   assertEquals(source.includes("truncateSample"), false);
+});
+
+const GIB = 1024 * 1024 * 1024;
+
+async function ticks(
+  dir: string,
+  readings: TopologySnapshotInputs[],
+): Promise<number[]> {
+  const out: number[] = [];
+  for (const reading of readings) {
+    // Ticks are sequential by nature: each reads the previous tick's state.
+    out.push(
+      await resolveTopologyGeneration(reading, EMPTY_TOPOLOGY_OVERRIDES, {
+        daemonStateDir: dir,
+      }),
+    );
+  }
+  return out;
+}
+
+function sized(
+  memoryTotalBytes: number | null,
+  cores = 1,
+): TopologySnapshotInputs {
+  return inputs({
+    memoryTotalBytes,
+    swapTotalBytes: GIB,
+    cpu: {
+      sockets: 1,
+      coresPerSocket: cores,
+      threadsPerSocket: cores,
+      model: null,
+      cores: Array.from({ length: cores }, (_, i) => ({
+        logicalIndex: i,
+        coreId: `core:${i}`,
+      })),
+    },
+  });
+}
+
+test("a RAM resize starts a new generation", async () => {
+  await withTempStateDir(async (dir) => {
+    assertEquals(await ticks(dir, [sized(GIB), sized(4 * GIB)]), [0, 1]);
+  });
+});
+
+test("an identical reading keeps the generation", async () => {
+  await withTempStateDir(async (dir) => {
+    assertEquals(await ticks(dir, [sized(GIB), sized(GIB), sized(GIB)]), [
+      0,
+      0,
+      0,
+    ]);
+  });
+});
+
+test("memory jitter below the tolerance keeps the generation, even drifting", async () => {
+  await withTempStateDir(async (dir) => {
+    const half = MEMORY_TOTAL_TOLERANCE_BYTES / 2;
+    const gens = await ticks(dir, [
+      sized(GIB),
+      sized(GIB - 4096),
+      sized(GIB + half),
+      sized(GIB + 2 * half - 1),
+      sized(GIB - half),
+    ]);
+    assertEquals(gens, [0, 0, 0, 0, 0]);
+  });
+});
+
+test("memory change above the tolerance bumps once", async () => {
+  await withTempStateDir(async (dir) => {
+    const gens = await ticks(dir, [
+      sized(GIB),
+      sized(GIB + MEMORY_TOTAL_TOLERANCE_BYTES + 1),
+      sized(GIB + MEMORY_TOTAL_TOLERANCE_BYTES + 1),
+    ]);
+    assertEquals(gens, [0, 1, 1]);
+  });
+});
+
+test("a CPU core count change starts a new generation", async () => {
+  await withTempStateDir(async (dir) => {
+    assertEquals(await ticks(dir, [sized(GIB, 1), sized(GIB, 2)]), [0, 1]);
+  });
+});
+
+test("a persisted record without the size fields bumps once, then settles", async () => {
+  await withTempStateDir(async (dir) => {
+    assertEquals(await ticks(dir, [sized(GIB)]), [0]);
+    // Rewrite the file the way an older daemon stored it.
+    const path = topologyGenerationPath(dir);
+    const record = JSON.parse(await Deno.readTextFile(path));
+    delete record.fingerprint.memoryTotalBytes;
+    delete record.fingerprint.swapTotalBytes;
+    delete record.fingerprint.cpuShape;
+    await Deno.writeTextFile(path, JSON.stringify(record));
+    assertEquals(await ticks(dir, [sized(GIB), sized(GIB), sized(GIB)]), [
+      1,
+      1,
+      1,
+    ]);
+  });
 });

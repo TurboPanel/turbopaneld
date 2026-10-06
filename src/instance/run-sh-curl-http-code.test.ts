@@ -105,3 +105,52 @@ test("tp_ca_validates_leaf fails when curl exits non-zero", async () => {
   assertEquals(result.status, 0);
   assertEquals(result.stdout, "ok");
 });
+
+/** `tp_curl_http_code` against a stub that exits with each of `exits` in turn (the last repeats). */
+async function httpCodeWithExits(exits: number[]) {
+  const source = await Deno.readTextFile(runShPath);
+  const helper = extractShellFunction(source, "tp_curl_http_code");
+  const dir = await Deno.makeTempDir();
+  try {
+    const result = await evalHelper(
+      helper,
+      [
+        `STUB_DIR=${dir}`,
+        `STUB_EXITS="${exits.join(" ")}"`,
+        "TP_CURL_NET_RETRY_UNIT=0",
+        "fake_curl() {",
+        '  n=$(cat "$STUB_DIR/n" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$STUB_DIR/n"',
+        "  set -- $STUB_EXITS; i=1; code=0",
+        '  for e in "$@"; do code=$e; [ "$i" -ge "$n" ] && break; i=$((i + 1)); done',
+        `  if [ "$code" = 0 ]; then printf '%s' 200; else printf '%s' 000; fi`,
+        '  return "$code"',
+        "}",
+        "got=$(tp_curl_http_code fake_curl)",
+        `printf '%s' "$got"`,
+      ].join("\n"),
+    );
+    const calls = Number(await Deno.readTextFile(join(dir, "n")));
+    return { ...result, calls };
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+}
+
+test("tp_curl_http_code retries a DNS failure (curl exit 6) and then reports the status", async () => {
+  const result = await httpCodeWithExits([6, 7, 0]);
+  assertEquals(result.status, 0);
+  assertEquals(result.stdout, "200");
+  assertEquals(result.calls, 3);
+});
+
+test("tp_curl_http_code answers 000 after four attempts on a persistent DNS failure", async () => {
+  const result = await httpCodeWithExits([6]);
+  assertEquals(result.stdout, "000");
+  assertEquals(result.calls, 4);
+});
+
+test("tp_curl_http_code does not retry a TLS verification failure (curl exit 60)", async () => {
+  const result = await httpCodeWithExits([60, 0]);
+  assertEquals(result.stdout, "000");
+  assertEquals(result.calls, 1);
+});

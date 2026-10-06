@@ -23,6 +23,7 @@ import {
   resolveReleasePaths,
 } from "./release-layout.ts";
 import { swapCurrentSymlink } from "./promote.ts";
+import type { NativeAppBuildContext } from "./build.ts";
 import {
   applySourceReleases,
   resolveReleaseServiceId,
@@ -519,6 +520,8 @@ test("applySourceReleases railpack prune logs superseded releases and optional m
               frontendLayoutDir: "/tmp/frontend",
               frontendDigest: "sha256:front",
             }),
+          // A development host: the prepare step runs unsandboxed here.
+          sandboxedBuilds: false,
           runRailpackBuildFn: (params) => {
             assertEquals(params.redactSummary?.("token"), "token");
             return Promise.resolve({
@@ -574,7 +577,7 @@ test("applySourceReleases native builds honor subdirectory, credentials, and cur
       let capturedSubdirectory: string | undefined;
       let capturedOutput: string | undefined;
       let capturedNodeEnv: string | undefined;
-      let prepareCalled = false;
+      let prepareContext: NativeAppBuildContext | undefined;
       const decryptSecrets: DecryptSecretsFn = () =>
         Promise.resolve(["ghs_decrypted"]);
 
@@ -628,12 +631,13 @@ test("applySourceReleases native builds honor subdirectory, credentials, and cur
             assertEquals(params.redactSummary?.("secret"), "secret");
             return Promise.resolve();
           },
-          prepareNativeAppBuildOutputFn: () => {
-            prepareCalled = true;
+          prepareNativeAppBuildOutputFn: (context) => {
+            prepareContext = context;
             return Promise.resolve({
               standaloneOutput: false,
               staticExport: false,
               outputDirectory: undefined,
+              start: { kind: "file", path: "server.js" },
             });
           },
           promoteReleaseFn: async (params) => {
@@ -655,7 +659,11 @@ test("applySourceReleases native builds honor subdirectory, credentials, and cur
       assertEquals(capturedSubdirectory, "apps/web");
       assertEquals(capturedOutput, "dist");
       assertEquals(capturedNodeEnv, "development");
-      assertEquals(prepareCalled, false);
+      // The declared output directory is the release root as written: only
+      // how it starts is still worked out, inside it.
+      assertEquals(prepareContext?.outputDirectory, "dist");
+      assertEquals(prepareContext?.detectStart, true);
+      assertEquals(row.nativeStart, { kind: "file", path: "server.js" });
       assertEquals(row.previousReleaseId, "rel-old");
       assertEquals(row.commitMessage, "feat");
       assertEquals(row.commitAuthor, "dev@example.com");

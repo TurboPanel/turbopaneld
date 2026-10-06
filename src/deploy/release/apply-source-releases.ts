@@ -40,6 +40,7 @@ import {
   type CommandOutputSink,
 } from "../../logs/contracts.ts";
 import type {
+  EnvironmentDeployNativeAppService,
   EnvironmentDeployPayload,
   EnvironmentDeploySource,
 } from "../../contracts/commands-contracts.ts";
@@ -59,6 +60,7 @@ import {
   runReleaseBuild,
 } from "./build.ts";
 import {
+  BUILD_NO_OWNER,
   buildSandboxEnabled,
   type BuildSandboxMarkers,
   buildSpecCwd,
@@ -68,6 +70,7 @@ import {
   resolveBuildWork,
   sweepStaleBuildWork,
 } from "./build-sandbox.ts";
+import type { ImagePrepareSandbox } from "./image-prepare-sandbox.ts";
 import {
   nativeAppNodeBinary,
   nativeAppRuntimeGroup,
@@ -87,6 +90,9 @@ import {
   releasePathExists,
 } from "./promote.ts";
 import { pruneReleases } from "./retention.ts";
+import { PENDING_RECORD_MARKER } from "./release-health.ts";
+import { isPackageManagerStart } from "../node-package-manager.ts";
+import type { NativeAppStart } from "../native/start-entry.ts";
 import { definedFields } from "../../util/optional-fields.ts";
 import { forEachSequential } from "../../util/sequential.ts";
 import {
@@ -156,6 +162,13 @@ export type AppliedRelease = {
    * server process to supervise, so no systemd unit is generated for it.
    */
   staticExport: boolean;
+  /**
+   * How the unit starts this release when its author typed no start command
+   * (detected at build time, or read back from the release record on a
+   * rollback). Absent when the author chose, or for a release recorded before
+   * this was kept — the unit then falls back to `node server.js`.
+   */
+  nativeStart?: NativeAppStart;
 };
 
 /**
@@ -377,6 +390,9 @@ async function rollbackOneRelease(
     // those releases already had.
     standaloneOutput: recordedManifest.standaloneOutput ?? false,
     staticExport: recordedManifest.staticExport ?? false,
+    ...(recordedManifest.nativeStart === undefined
+      ? {}
+      : { nativeStart: recordedManifest.nativeStart }),
   };
 }
 
@@ -391,8 +407,9 @@ async function rollbackOneRelease(
  * lanes' history lives in one place and rollback can restore this release by
  * re-running its tag instead of re-cloning and rebuilding.
  *
- * The scratch checkout is removed in the caller's `finally`, exactly as on the
- * native lane — a clone never lands anywhere but scratch.
+ * The checkout is removed in the caller's `finally`, exactly as on the native
+ * lane: scratch, or on a managed host the build sandbox's work tree, where the
+ * prepare step runs as a throwaway build user.
  */
 async function applyRailpackRelease(
   layout: LayoutPaths,
@@ -405,6 +422,8 @@ async function applyRailpackRelease(
     commitSha: string;
     deps: ApplySourceReleasesDeps;
     onOutput: ReleaseOutputHandler;
+    /** The build sandbox the prepare step runs in (every managed host). */
+    sandbox?: ImagePrepareSandbox;
   },
 ): Promise<AppliedRelease> {
   const { deps, onOutput, serviceId } = params;
@@ -424,6 +443,7 @@ async function applyRailpackRelease(
     onOutput,
     redactSummary: (text) => logSink.redactSummary(text),
     ...(deps.cancel === undefined ? {} : { signal: deps.cancel.signal }),
+    ...(params.sandbox === undefined ? {} : { sandbox: params.sandbox }),
   });
 
   // Recording the image is not a switch (compose `up` is), so this is a
@@ -576,9 +596,6 @@ async function resolveRollbackTarget(
     ? { paths: params.principalPaths, manifest }
     : null;
 }
-
-/** Present in a record dir from before the promote until it has finished. */
-const PENDING_RECORD_MARKER = ".pending";
 
 /**
  * The record at `recordDir`, unless it is still pending: a pending record was
@@ -754,22 +771,46 @@ async function buildRailpackRelease(
     paths,
   );
   await resetReleaseScratchDir(paths);
+  let work: BuildWork | null = null;
   try {
+    // The prepare step interprets the repository: on a managed host it runs
+    // in the build sandbox like any other build, in the site owner's slice
+    // (or the platform's own build slice when the service has no owner).
+    work = await prepareBuildWork(payload, entry, {
+      serviceId,
+      owner: entry.principal?.username ?? BUILD_NO_OWNER,
+      deps,
+    });
     logSink.setPhase(COMMAND_LOG_PHASES.FETCH);
-    const checkout = await checkoutForEntry(entry, paths, deps, onOutput);
+    const checkout = await checkoutForEntry(
+      entry,
+      paths,
+      deps,
+      onOutput,
+      work?.checkoutDir,
+    );
 
     // Same `build` phase the native lane uses — an operator reading the
     // transcript should not have to learn a second phase name to find out why
     // their image did not build.
     logSink.setPhase(COMMAND_LOG_PHASES.BUILD);
+    if (work) await assertCheckoutCredentialsRemoved(paths.scratchDir);
     return await applyRailpackRelease(layout, payload, entry, paths, {
       serviceId,
       buildWorkingDir: buildWorkingDirFor(entry, checkout.workingDir),
       commitSha: checkout.commitSha,
       deps,
       onOutput,
+      ...(work === null ? {} : {
+        sandbox: definedFields({
+          work,
+          cwd: buildSpecCwd(entry.subdirectory),
+          runFn: deps.runFn,
+        }),
+      }),
     });
   } finally {
+    if (work) await removeBuildWork(work, onOutput);
     await removeReleaseScratchDir(paths);
   }
 }
@@ -801,7 +842,11 @@ async function buildNativeRelease(
   await resetReleaseScratchDir(paths);
   let work: BuildWork | null = null;
   try {
-    work = await prepareBuildWork(payload, entry, serviceId, deps);
+    work = await prepareBuildWork(payload, entry, {
+      serviceId,
+      owner: username,
+      deps,
+    });
     logSink.setPhase(COMMAND_LOG_PHASES.FETCH);
     const checkout = await checkoutForEntry(
       entry,
@@ -841,6 +886,12 @@ async function buildNativeRelease(
       // without rebuilding — see `ReleaseManifestV1`.
       standaloneOutput: nativeOutput.standaloneOutput,
       staticExport: nativeOutput.staticExport,
+      nativeStart: nativeOutput.start,
+      // The author's own start settings, so a rollback to this release
+      // starts it the way it ran (see `ReleaseManifestV1.startCommand`).
+      startCommand: entry.build.startCommand?.trim() || undefined,
+      startupFile: nativeAppForService(payload, entry.composeServiceName)
+        ?.startupFile?.trim() || undefined,
     });
     await recordNativeRelease(layout, manifest, deps);
     let releaseDir: string;
@@ -894,6 +945,7 @@ async function buildNativeRelease(
       previousReleaseId,
       standaloneOutput: nativeOutput.standaloneOutput,
       staticExport: nativeOutput.staticExport,
+      nativeStart: nativeOutput.start,
     });
   } finally {
     if (work) await removeBuildWork(work, onOutput);
@@ -908,9 +960,14 @@ async function buildNativeRelease(
 async function prepareBuildWork(
   payload: EnvironmentDeployPayload,
   entry: EnvironmentDeploySource,
-  serviceId: string,
-  deps: ApplySourceReleasesDeps,
+  params: {
+    serviceId: string;
+    /** The site owner's Linux user: the build's resource group and cache. */
+    owner: string;
+    deps: ApplySourceReleasesDeps;
+  },
 ): Promise<BuildWork | null> {
+  const { serviceId, owner, deps } = params;
   const sandboxed = deps.sandboxedBuilds ??
     await buildSandboxEnabled(deps.buildSandboxMarkers);
   if (!sandboxed) return null;
@@ -919,7 +976,12 @@ async function prepareBuildWork(
     onOutput: (stream, line) => deps.logSink.onLine(stream, line),
   });
   const work = await resolveBuildWork(
-    { serviceId, releaseId: entry.releaseId, projectId: payload.projectId },
+    {
+      serviceId,
+      releaseId: entry.releaseId,
+      projectId: payload.projectId,
+      owner,
+    },
     deps.buildSandboxRoot,
   );
   await createBuildWorkDir(work, deps.runFn);
@@ -975,18 +1037,54 @@ async function buildNativeTree(
     redactSummary: (text: string) => deps.logSink.redactSummary(text),
   }));
 
+  if (!nativeApp) return { standaloneOutput: false, staticExport: false };
   // An operator-declared `outputDirectory` always wins: they said where the
   // payload is, and second-guessing that would make the field a suggestion.
-  if (!nativeApp || entry.build.outputDirectory !== undefined) {
-    return { standaloneOutput: false, staticExport: false };
-  }
-  return await (deps.prepareNativeAppBuildOutputFn ??
+  // Only how it starts is still worked out, inside that directory.
+  const output = await (deps.prepareNativeAppBuildOutputFn ??
     prepareNativeAppBuildOutput)(definedFields({
       framework: nativeApp.framework,
       workingDir: buildWorkingDir,
       containmentRoot: work?.workDir,
+      outputDirectory: entry.build.outputDirectory,
+      detectStart: !authorChoseStart(entry, nativeApp),
       onOutput,
     }));
+  if (output.standaloneOutput) {
+    warnStandaloneStartCommand(entry.build.startCommand, onOutput);
+  }
+  return output;
+}
+
+/** The author said how the app starts: a start command or a startup file. */
+function authorChoseStart(
+  entry: EnvironmentDeploySource,
+  nativeApp: EnvironmentDeployNativeAppService,
+): boolean {
+  return Boolean(
+    entry.build.startCommand?.trim() || nativeApp.startupFile?.trim(),
+  );
+}
+
+/**
+ * A Next standalone release is `server.js` plus a pruned `node_modules`: it
+ * has no `node_modules/.bin/next` and no package scripts. A start command that
+ * needs either (`pnpm start`, `next start`) can only crash-loop, so say so
+ * while the build output is still on screen.
+ */
+function warnStandaloneStartCommand(
+  startCommand: string | undefined,
+  onOutput: ReleaseOutputHandler,
+): void {
+  const command = startCommand?.trim();
+  if (!command) return;
+  if (!isPackageManagerStart(command) && !/^(?:npx\s+)?next\s/.test(command)) {
+    return;
+  }
+  onOutput(
+    "stderr",
+    `warning: this is a Next.js standalone build, which has no node_modules/.bin/next and no package scripts, so the start command "${command}" will likely fail. Remove the start command and the app starts with node server.js.`,
+  );
 }
 
 async function applyOneRelease(

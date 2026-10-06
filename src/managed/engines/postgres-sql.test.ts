@@ -140,6 +140,26 @@ test("replication SQL builders use quoted identifiers and managed slot prefix", 
   assertEquals(promoteSql().includes("pg_promote"), true);
 });
 
+test("reload verify SQL treats both restart-required texts as pending, not errors", () => {
+  const reload = reloadVerifySql();
+  const pending = "(error = 'setting could not be applied' " +
+    "OR error LIKE '%cannot be changed without restarting the server%')";
+  // Counted as pending ...
+  assertEquals(
+    reload.includes(`WHERE ${pending}) AS restart_pending`),
+    true,
+  );
+  // ... and excluded from the error count, which still sees everything else.
+  assertEquals(
+    reload.includes(
+      `WHERE error IS NOT NULL AND NOT ${pending}) AS config_errors`,
+    ),
+    true,
+  );
+  // Unknown-parameter and syntax errors are not whitelisted by name.
+  assertEquals(reload.includes("unrecognized"), false);
+});
+
 test("reload, census, recovery, and slot-prefix SQL stay catalog-qualified", () => {
   const reload = reloadVerifySql();
   assertEquals(reload.includes("pg_file_settings"), true);

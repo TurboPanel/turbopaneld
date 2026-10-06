@@ -88,6 +88,8 @@ test("native app path helpers follow systemd and staging conventions", () => {
     "/tmp/systemd/turbopanel-app-svc-native-1.service",
   );
   assertEquals(principalSliceName("appuser"), "turbopanel-appuser.slice");
+  // A dash is a slice level to systemd: `web-x` never nests under `web`.
+  assertEquals(principalSliceName("web-x"), "turbopanel-web.x.slice");
   assertEquals(
     nativeAppConfigDir(layout),
     "/etc/turbopanel/node-apps",
@@ -390,7 +392,7 @@ test("authored deploy.labels are preserved on the generated unit", () => {
   );
 });
 
-test("a native app's HOME and TMPDIR are its tenant dirs, never the sealed home root", () => {
+test("a native app writes only its own site's shared/, not the owner's home/, data/ or tmp/", () => {
   const content = nativeAppUnitContent({
     layout,
     app,
@@ -399,17 +401,26 @@ test("a native app's HOME and TMPDIR are its tenant dirs, never the sealed home 
   });
   const lines = content.split("\n");
 
+  // HOME is the owner's home/ (read-only to the app), never the sealed root.
   assertStringIncludes(content, "Environment=HOME=/srv/users/appuser/home\n");
-  assertStringIncludes(content, "Environment=TMPDIR=/srv/users/appuser/tmp\n");
-  // Only its own site's shared/ plus the principal's home/, data/ and tmp/.
+  assertEquals(lines.includes("Environment=HOME=/srv/users/appuser"), false);
+  // Temp files go to the unit's private /tmp, not the owner's tmp/.
+  assertStringIncludes(content, "Environment=TMPDIR=/tmp\n");
+  assertStringIncludes(content, "PrivateTmp=yes\n");
   assertEquals(
     lines.filter((line) => line.startsWith("ReadWritePaths=")),
-    [
-      "ReadWritePaths=/srv/users/appuser/sites/svc-native-1/shared " +
-      "/srv/users/appuser/home /srv/users/appuser/data /srv/users/appuser/tmp",
-    ],
+    ["ReadWritePaths=/srv/users/appuser/sites/svc-native-1/shared"],
   );
-  assertEquals(lines.includes("Environment=HOME=/srv/users/appuser"), false);
+  for (const dir of ["home", "data", "tmp"]) {
+    assertEquals(
+      lines.some((line) =>
+        line.startsWith("ReadWritePaths=") &&
+        line.includes(`/srv/users/appuser/${dir}`)
+      ),
+      false,
+      `${dir}/ must not be writable by a Node app`,
+    );
+  }
 });
 
 test("a unit loads an environment file only when the app has variables", () => {
@@ -459,4 +470,82 @@ test("the platform-owned names are exactly the Environment= keys a unit sets", (
   // systemd lets EnvironmentFile override Environment=, so every name the unit
   // sets must be on the list that keeps tenant values out of the file.
   assertEquals([...set].sort(), [...NATIVE_APP_PLATFORM_ENV_NAMES].sort());
+});
+
+test("every native app binds loopback under both HOST and HOSTNAME", () => {
+  const unit = nativeAppUnitContent({
+    layout,
+    app,
+    username: "alice",
+    environmentId: "env-1",
+  });
+  // Next.js (standalone server.js) reads HOSTNAME; without it the app binds
+  // every interface, beside the proxy rather than behind it.
+  assertStringIncludes(unit, "Environment=HOST=127.0.0.1\n");
+  assertStringIncludes(unit, "Environment=HOSTNAME=127.0.0.1\n");
+  assertEquals(NATIVE_APP_PLATFORM_ENV_NAMES.has("HOSTNAME"), true);
+});
+
+test("resolveExecStart: author's command, then startupFile, then the detected start", () => {
+  const node = nativeAppNodeBinary(layout, "24");
+  const next = { kind: "next-start" } as const;
+  // Standalone Next and a plain Node app with server.js: exactly as before.
+  assertEquals(
+    resolveExecStart({
+      nodeBinary: node,
+      nativeStart: { kind: "file", path: "server.js" },
+      listenPort: 4100,
+    }),
+    `${node} server.js`,
+  );
+  assertEquals(resolveExecStart({ nodeBinary: node }), `${node} server.js`);
+  // A Next build shipped without standalone output: next start, on loopback.
+  assertEquals(
+    resolveExecStart({ nodeBinary: node, nativeStart: next, listenPort: 4100 }),
+    `${node} node_modules/next/dist/bin/next start --hostname 127.0.0.1 --port 4100`,
+  );
+  assertEquals(
+    resolveExecStart({
+      nodeBinary: node,
+      nativeStart: { kind: "start-script" },
+      listenPort: 4100,
+    }),
+    `${node} --run start`,
+  );
+  // What the author set always wins over what the build detected.
+  assertEquals(
+    resolveExecStart({
+      nodeBinary: node,
+      startupFile: "dist/index.js",
+      nativeStart: next,
+      listenPort: 4100,
+    }),
+    `${node} dist/index.js`,
+  );
+  assertEquals(
+    resolveExecStart({
+      nodeBinary: node,
+      startCommand: "node worker.js",
+      nativeStart: next,
+      listenPort: 4100,
+    }),
+    `/bin/sh -c ${quoteSystemdArgument("node worker.js")}`,
+  );
+});
+
+test("a recorded server.js start renders the same unit as no recorded start", () => {
+  const base = { layout, app, username: "alice", environmentId: "env-1" };
+  assertEquals(
+    nativeAppUnitContent({
+      ...base,
+      nativeStart: { kind: "file", path: DEFAULT_START_SCRIPT },
+    }),
+    nativeAppUnitContent(base),
+  );
+  assertStringIncludes(
+    nativeAppUnitContent({ ...base, nativeStart: { kind: "next-start" } }),
+    `ExecStart=${
+      nativeAppNodeBinary(layout)
+    } node_modules/next/dist/bin/next start --hostname 127.0.0.1 --port 4100\n`,
+  );
 });
