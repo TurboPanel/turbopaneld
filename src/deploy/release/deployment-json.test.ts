@@ -146,24 +146,25 @@ test("readReleaseManifest rejects non-boolean standalone/static flags", async ()
 });
 
 test("readReleaseManifest rejects a recorded start it could not render safely", async () => {
-  await withReleaseDir(async (releaseDir) => {
-    await Deno.mkdir(join(releaseDir, RELEASE_METADATA_DIRNAME), {
-      recursive: true,
-    });
-    for (
-      const nativeStart of [
-        "next-start",
-        { kind: "file", path: "../../etc/x.js" },
-        { kind: "shell", command: "id" },
-      ]
-    ) {
-      await Deno.writeTextFile(
-        releaseManifestPath(releaseDir),
-        JSON.stringify({ ...BASE, nativeStart }),
-      );
-      assertEquals(await readReleaseManifest(releaseDir), null);
-    }
-  });
+  const unsafe = [
+    "next-start",
+    { kind: "file", path: "../../etc/x.js" },
+    { kind: "shell", command: "id" },
+  ];
+  await Promise.all(
+    unsafe.map((nativeStart) =>
+      withReleaseDir(async (releaseDir) => {
+        await Deno.mkdir(join(releaseDir, RELEASE_METADATA_DIRNAME), {
+          recursive: true,
+        });
+        await Deno.writeTextFile(
+          releaseManifestPath(releaseDir),
+          JSON.stringify({ ...BASE, nativeStart }),
+        );
+        assertEquals(await readReleaseManifest(releaseDir), null);
+      })
+    ),
+  );
 });
 
 test("readReleaseManifest rejects non-string railpack version fields", async () => {

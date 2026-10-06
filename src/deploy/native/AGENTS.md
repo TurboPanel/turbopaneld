@@ -126,7 +126,8 @@ crash-loop. The decision is detected at build time because the daemon cannot
 read a published release (it is not in the site owner's group), and it is
 recorded in the daemon's release record (`ReleaseManifestV1.nativeStart`) so a
 rollback restarts the old release the way it ran. Every detected start execs
-the vendored Node directly: no shell, and no Corepack at runtime.
+the vendored Node directly: no shell in `ExecStart` and no Corepack at runtime
+(`node --run start` runs the script itself through `/bin/sh`).
 
 **Loopback bind.** The unit exports `HOST=127.0.0.1` **and**
 `HOSTNAME=127.0.0.1`: Next's standalone `server.js` reads `HOSTNAME` and binds

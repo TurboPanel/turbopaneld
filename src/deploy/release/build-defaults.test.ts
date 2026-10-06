@@ -55,13 +55,15 @@ test("deriveNodeBuildCommand runs the build script through the detected manager"
     ["package-lock.json", "npm run build"],
     [undefined, "npm run build"],
   ];
-  for (const [lockfile, expected] of cases) {
-    await withWorkingDir(async (workingDir) => {
-      await writeJson(join(workingDir, "package.json"), WITH_BUILD_SCRIPT);
-      if (lockfile) await writeFile(workingDir, lockfile);
-      assertEquals(await deriveNodeBuildCommand({ workingDir }), expected);
-    });
-  }
+  await Promise.all(
+    cases.map(([lockfile, expected]) =>
+      withWorkingDir(async (workingDir) => {
+        await writeJson(join(workingDir, "package.json"), WITH_BUILD_SCRIPT);
+        if (lockfile) await writeFile(workingDir, lockfile);
+        assertEquals(await deriveNodeBuildCommand({ workingDir }), expected);
+      })
+    ),
+  );
 });
 
 test("deriveNodeBuildCommand follows the packageManager pin, then the operator", async () => {
@@ -232,18 +234,20 @@ test("the package start script wins over every file", async () => {
     // Chained commands are the author's: run as written.
     "prisma migrate deploy && next start",
   ];
-  for (const start of scripts) {
-    await withWorkingDir(async (workingDir) => {
-      await writeJson(join(workingDir, "package.json"), {
-        main: "index.js",
-        scripts: { start },
-      });
-      await writeFile(workingDir, "server.js");
-      await writeFile(workingDir, "index.js");
-      const { output } = await detect(workingDir);
-      assertEquals(output.start, { kind: "start-script" });
-    });
-  }
+  await Promise.all(
+    scripts.map((start) =>
+      withWorkingDir(async (workingDir) => {
+        await writeJson(join(workingDir, "package.json"), {
+          main: "index.js",
+          scripts: { start },
+        });
+        await writeFile(workingDir, "server.js");
+        await writeFile(workingDir, "index.js");
+        const { output } = await detect(workingDir);
+        assertEquals(output.start, { kind: "start-script" });
+      })
+    ),
+  );
   await withWorkingDir(async (workingDir) => {
     // framework node never treats anything as Next.
     await writeJson(join(workingDir, "package.json"), {

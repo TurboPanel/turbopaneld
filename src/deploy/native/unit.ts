@@ -308,8 +308,9 @@ export const DEFAULT_START_SCRIPT = "server.js";
  *    `start` script, `next start` bound to 127.0.0.1, or an entry file);
  * 4. `node server.js`.
  *
- * Every case but the first execs the vendored Node directly, with no shell
- * and no Corepack in between.
+ * Every case but the first execs the vendored Node directly: no shell in the
+ * `ExecStart` line and no Corepack at runtime (`node --run start` itself runs
+ * the script through `/bin/sh`, as npm would).
  */
 export function resolveExecStart(params: {
   nodeBinary: string;
