@@ -700,12 +700,13 @@ export type EnvironmentDeployHosting = {
   ports?: EnvironmentDeployHostingPort[];
   web?: EnvironmentDeployHostingWeb;
   /**
-   * Also serve the other spelling of each hostname (`www.` added, or removed
-   * when the name starts with `www.`) as a permanent redirect to the hostname
-   * as written. `http` only; omitted when off. In `acme` mode the extra name
-   * gets its own certificate. Older daemons ignore the field.
+   * What happens to the other spelling of each hostname (`www.` added, or
+   * removed when the name starts with `www.`); see {@link HostingWwwMode}.
+   * `http` only; omitted when `off`. The redirect is permanent and keeps the
+   * path and query. Every extra name is served under the hosting's own TLS
+   * mode (`acme` gives it its own certificate; a pinned pair must cover it).
    */
-  wwwRedirect?: boolean;
+  www?: Exclude<HostingWwwMode, "off">;
 };
 
 export type EnvironmentDeployVariableMaterial = {
@@ -2186,17 +2187,102 @@ export function isValidHostname(value: unknown): boolean {
 
 const WWW_PREFIX = "www.";
 
+/** True when every character of a non-empty label is a digit (an IPv4 octet). */
+function isAllDigits(label: string): boolean {
+  if (label.length === 0) return false;
+  for (const ch of label) {
+    if (ch < "0" || ch > "9") return false;
+  }
+  return true;
+}
+
 /**
- * The other spelling of a site name for the "send www to the main name" option:
- * `www.example.com` for `example.com`, and `example.com` for `www.example.com`.
- * `null` when no valid name results. Must stay in sync with the instance
- * canonical version in src/contracts/commands/hostname.ts
+ * The other spelling of a site name for the www choice: `www.example.com` for
+ * `example.com`, and `example.com` for `www.example.com`. `null` when no valid
+ * name results, and for names that have no www spelling at all: an IP address
+ * (the last label is all digits) or a one-word name (`localhost`, `com` from
+ * `www.com`). Must stay in sync with the instance canonical version in
+ * src/contracts/commands/hostname.ts
  */
 export function wwwSiblingHostname(hostname: string): string | null {
-  const sibling = hostname.startsWith(WWW_PREFIX)
+  const typedIsWww = hostname.startsWith(WWW_PREFIX);
+  const sibling = typedIsWww
     ? hostname.slice(WWW_PREFIX.length)
     : WWW_PREFIX + hostname;
+  const bare = typedIsWww ? sibling : hostname;
+  const lastDot = bare.lastIndexOf(".");
+  if (lastDot === -1 || isAllDigits(bare.slice(lastDot + 1))) return null;
   return isValidHostname(sibling) ? sibling : null;
+}
+
+/**
+ * How a hosting treats the www spelling of each of its hostnames. `off` (the
+ * wire omits it) answers only on the name as written; `both` serves the site on
+ * both spellings; `www-to-root` serves it on the bare name and permanently
+ * redirects `www.` to it; `root-to-www` serves it on `www.` and redirects the
+ * bare name there. The direction is about the names themselves, not about which
+ * one was typed: `www-to-root` on `www.example.com` serves `example.com`.
+ */
+export type HostingWwwMode = "off" | "both" | "www-to-root" | "root-to-www";
+
+export const HOSTING_WWW_MODES: readonly HostingWwwMode[] = [
+  "off",
+  "both",
+  "www-to-root",
+  "root-to-www",
+];
+
+/** What one hostname turns into under a www mode. */
+export type HostingWwwNames = {
+  /** Names the site answers on (the hostname as written comes first). */
+  serve: string[];
+  /** A name that only redirects, and where it sends the visitor. */
+  redirect: { from: string; to: string } | null;
+};
+
+/**
+ * Expand one hostname under a www mode. `null` when the mode needs the other
+ * spelling and that spelling is not a valid hostname (a wildcard, say). Must
+ * stay in sync with the instance canonical version in
+ * src/contracts/commands/hostname.ts
+ */
+export function hostingWwwNames(
+  hostname: string,
+  mode: HostingWwwMode = "off",
+): HostingWwwNames | null {
+  if (mode === "off") return { serve: [hostname], redirect: null };
+  const sibling = wwwSiblingHostname(hostname);
+  if (sibling === null) return null;
+  if (mode === "both") return { serve: [hostname, sibling], redirect: null };
+  const typedIsWww = hostname.startsWith(WWW_PREFIX);
+  const root = typedIsWww ? sibling : hostname;
+  const www = typedIsWww ? hostname : sibling;
+  return mode === "www-to-root"
+    ? { serve: [root], redirect: { from: www, to: root } }
+    : { serve: [www], redirect: { from: root, to: www } };
+}
+
+/**
+ * Every name a hosting's site answers on: each hostname as written, swapped or
+ * joined by its other spelling under the hosting's `www` mode. Names a mode
+ * cannot expand (refused by validation) stay as written.
+ */
+export function hostingServedNames(
+  hosting: Pick<EnvironmentDeployHosting, "hostnames" | "www">,
+): string[] {
+  return hosting.hostnames.flatMap((hostname) =>
+    hostingWwwNames(hostname, hosting.www)?.serve ?? [hostname]
+  );
+}
+
+/** The names a hosting's `www` mode only redirects, with their targets. */
+export function hostingWwwRedirects(
+  hosting: Pick<EnvironmentDeployHosting, "hostnames" | "www">,
+): { from: string; to: string }[] {
+  return hosting.hostnames.flatMap((hostname) => {
+    const redirect = hostingWwwNames(hostname, hosting.www)?.redirect;
+    return redirect ? [redirect] : [];
+  });
 }
 
 /** Must stay in sync with the instance canonical version in src/contracts/commands/hostname.ts */
@@ -3657,12 +3743,38 @@ function parseHostingTlsMode(
   return value as EnvironmentDeployHosting["tlsMode"];
 }
 
-function parseHostingWwwRedirect(value: unknown): true | undefined {
-  if (value === undefined) return undefined;
-  if (typeof value !== "boolean") {
+/**
+ * An older control plane sends `wwwRedirect: true` ("send the other spelling
+ * to the name as written"). Honour it as the mode that keeps the first typed
+ * name the site rather than dropping the redirect without a word.
+ */
+function parseLegacyHostingWwwRedirect(
+  value: unknown,
+  hostnames: unknown,
+): EnvironmentDeployHosting["www"] {
+  if (value === undefined || value === false) return undefined;
+  if (value !== true) {
     throw new TypeError("hostings[].wwwRedirect must be a boolean");
   }
-  return value ? true : undefined;
+  const first = Array.isArray(hostnames) ? hostnames[0] : undefined;
+  return typeof first === "string" && first.startsWith(WWW_PREFIX)
+    ? "root-to-www"
+    : "www-to-root";
+}
+
+function parseHostingWww(
+  value: unknown,
+): EnvironmentDeployHosting["www"] {
+  if (value === undefined) return undefined;
+  if (
+    typeof value !== "string" ||
+    !(HOSTING_WWW_MODES as readonly string[]).includes(value)
+  ) {
+    throw new TypeError(
+      "hostings[].www must be off, both, www-to-root, or root-to-www",
+    );
+  }
+  return value === "off" ? undefined : value as Exclude<HostingWwwMode, "off">;
 }
 
 function isValidPortNumber(value: unknown): value is number {
@@ -3777,7 +3889,9 @@ function parseHosting(value: unknown): EnvironmentDeployHosting {
   const protocol = parseHostingProtocol(value.protocol);
   const ports = parseHostingPorts(value.ports);
   const web = parseHostingWeb(value.web);
-  const wwwRedirect = parseHostingWwwRedirect(value.wwwRedirect);
+  const www = value.www === undefined
+    ? parseLegacyHostingWwwRedirect(value.wwwRedirect, value.hostnames)
+    : parseHostingWww(value.www);
 
   return {
     hostingId: parseNonEmptyString(value, "hostingId"),
@@ -3793,7 +3907,7 @@ function parseHosting(value: unknown): EnvironmentDeployHosting {
     ...(protocol === undefined ? {} : { protocol }),
     ...(ports === undefined ? {} : { ports }),
     ...(web === undefined ? {} : { web }),
-    ...(wwwRedirect === undefined ? {} : { wwwRedirect }),
+    ...(www === undefined ? {} : { www }),
   };
 }
 

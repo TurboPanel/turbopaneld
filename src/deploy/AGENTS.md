@@ -226,6 +226,35 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    merge-patches the matching `managed` `lets_encrypt` row's
    `tls.metadata.acme` (`lastError`, `lastIssuedAt`, `notAfter`) and deliberately never touches `tls.status`
    — see `turbopanel/src/client/tls/acme-issuance-event.ts`.
+11b. **www modes** (`hostings[].www`, omitted = `off`): `both` serves the site
+   on the hostname and its other spelling (`www.` added or removed);
+   `www-to-root` serves the bare name and turns `www.<name>` into a
+   redirect-only site; `root-to-www` the other way round. The direction is
+   about the names, not about which one was typed. One helper,
+   `hostingWwwNames` in `src/contracts/commands-contracts.ts` (twin of the
+   control plane's `src/contracts/commands/hostname.ts`), expands a hostname;
+   `hostingServedNames` feeds the Caddy sites, the Traefik `Host()` rule and
+   the pinned-certificate map, and `hostingWwwRedirects` the redirect sites.
+   A redirect site answers `http://` and `https://` with one permanent
+   redirect to the scheme its target serves: `https://<target>{uri}` in one
+   hop normally (path and query kept), `http://<target>{uri}` when the target
+   has forced HTTPS off and so no HTTPS site. It runs under the hosting's own
+   TLS mode, so in `acme` mode it gets its own certificate and lands in the
+   acme manifest. Names with no www spelling (IP addresses, one-word names like
+   `localhost` or `com` from `www.com`) expand to nothing extra. An older
+   control plane's `wwwRedirect: true` is read as `www-to-root`
+   (`root-to-www` when the first name starts with `www.`).
+   **Where the rules are enforced:** `validateDeployWwwModes` (refuses a mode
+   on `tcp`/`udp`, a name with no other spelling, an other spelling already a
+   hostname in the deploy, and different www choices on paths of one name) is
+   run by the **control plane** before it sends the deploy; the daemon only
+   carries the twin for parity and tests. On the daemon side the guards are:
+   `assertHostingNamesFree` (called by `deploy-environment.ts` before
+   `compose up`: refuses a deploy whose names, typed or added by a www choice,
+   another environment's live site file already answers on, so the shared
+   Traefik never gets a routing label for someone else's name),
+   `addWwwRedirectSites` never replacing a served name, and Caddy's own
+   refusal of a duplicate site in the staged candidate check.
 12. Best-effort `docker compose ps --format json` — per-container identity/status
    (`containerId`, `containerName`, `composeServiceName`, `status`, optional
    `serviceId` from `payload.hostings`) is included in the command result when

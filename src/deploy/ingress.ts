@@ -7,9 +7,10 @@ import {
   type EnvironmentDeployContainer,
   type EnvironmentDeployHosting,
   type EnvironmentDeployPayload,
+  hostingServedNames,
+  hostingWwwRedirects,
   isValidIpv4Literal,
   isValidIpv6Literal,
-  wwwSiblingHostname,
 } from "../contracts/commands-contracts.ts";
 import { type LayoutPaths, PROD_HOME_DEFAULT } from "../paths/layout.ts";
 import { safeConfigToken, safeUrlPath } from "../contracts/config-values.ts";
@@ -1546,7 +1547,7 @@ type HostnameSite = {
   bindAddress?: string;
   routes: CaddySiteRoute[];
   tlsMode?: EnvironmentDeployHosting["tlsMode"];
-  /** Set on a `wwwRedirect` name: send every request to `https://<redirectTo>`. */
+  /** Set on a `www` redirect name: send every request to `<redirectTo>`. */
   redirectTo?: string;
 };
 
@@ -1681,21 +1682,28 @@ export type SiteSnippetOptions = Readonly<{
   routes?: readonly CaddySiteRoute[];
   tlsMode?: EnvironmentDeployHosting["tlsMode"];
   /**
-   * Serve this name as a permanent redirect to `https://<redirectTo>` (path and
-   * query kept) instead of proxying. Always HTTPS, so the name holds a
-   * certificate and a browser typing it gets there without a warning.
+   * Serve this name as a permanent redirect to `<redirectTo>` (path and query
+   * kept) instead of proxying. With `forceHttps` (the default) both plain HTTP
+   * and HTTPS land on `https://<redirectTo>` in one hop; without it both land
+   * on `http://<redirectTo>`, the only site the target then has.
    */
   redirectTo?: string;
 }>;
 
-/** A name that only redirects: plain HTTP and HTTPS both send the visitor on. */
+/** A name that only redirects, under its own certificate on the HTTPS side. */
 function redirectSiteSnippet(options: SiteSnippetOptions): string {
   const { hostname, tlsDir, tlsId, bindAddress, tlsMode } = options;
-  const target = safeConfigToken("hostings[].wwwRedirect", options.redirectTo!);
+  const target = safeConfigToken("hostings[].www", options.redirectTo!);
   const tlsDirective = hostingTlsDirective(tlsMode, tlsId, tlsDir);
   const tlsLine = tlsDirective ? `${tlsDirective}\n` : "";
   const bindLine = bindAddress ? formatBindDirective(bindAddress) : "";
-  const redirect = `  redir https://${target}{uri} permanent\n`;
+  // Both schemes land on the scheme the target actually serves: HTTPS in one
+  // hop normally, plain HTTP when the target has forced HTTPS off (it then has
+  // no HTTPS site to land on).
+  const scheme = emitHttpsSite(options.forceHttps ?? true, tlsMode)
+    ? "https"
+    : "http";
+  const redirect = `  redir ${scheme}://${target}{uri} permanent\n`;
   return `http://${hostname} {
 ${bindLine}${redirect}}
 
@@ -1874,7 +1882,7 @@ export function buildCaddyHostnameRoutes(
     if (hosting.hostnames.length === 0) continue;
 
     const route = buildCaddySiteRoute(hosting, loopbackByService);
-    for (const hostname of hosting.hostnames) {
+    for (const hostname of hostingServedNames(hosting)) {
       const site = getOrCreateHostnameSite(byHostname, hostname);
       mergeHostingIntoHostnameSite(site, hosting, route);
     }
@@ -1885,8 +1893,8 @@ export function buildCaddyHostnameRoutes(
 }
 
 /**
- * The `wwwRedirect` names: one redirect site per hostname, under the same TLS
- * mode and bind address as the hostname it points at. A name some hosting
+ * The redirect-only names from `www` modes: one redirect site per name, under
+ * the same TLS mode and bind address as the hosting. A name some hosting
  * already serves is left alone (the control plane refuses that deploy; this
  * keeps a stray payload from replacing a real site).
  */
@@ -1895,21 +1903,35 @@ function addWwwRedirectSites(
   hostings: readonly EnvironmentDeployHosting[],
 ): void {
   for (const hosting of hostings) {
-    if (!hosting.wwwRedirect || (hosting.protocol ?? "http") !== "http") {
-      continue;
-    }
-    for (const hostname of hosting.hostnames) {
-      const sibling = wwwSiblingHostname(hostname);
-      if (sibling === null || byHostname.has(sibling)) continue;
-      byHostname.set(sibling, {
-        forceHttps: true,
-        routes: [],
-        redirectTo: hostname,
-        ...(hosting.tlsMode === "acme" ? { tlsMode: "acme" as const } : {}),
-        ...(hosting.bindAddress ? { bindAddress: hosting.bindAddress } : {}),
-      });
+    if ((hosting.protocol ?? "http") !== "http") continue;
+    for (const { from, to } of hostingWwwRedirects(hosting)) {
+      if (byHostname.has(from)) continue;
+      byHostname.set(from, redirectSiteFor(hosting, to, byHostname.get(to)));
     }
   }
+}
+
+/**
+ * The redirect-only site for one name: the hosting's TLS mode and bind
+ * address, and the HTTPS setting the target site actually serves (every path
+ * of it), so the redirect never lands on a scheme the target lacks.
+ */
+function redirectSiteFor(
+  hosting: EnvironmentDeployHosting,
+  to: string,
+  target: HostnameSite | undefined,
+): HostnameSite {
+  const acme = hosting.tlsMode === "acme";
+  const forceHttps = target
+    ? emitHttpsSite(target.forceHttps, target.tlsMode)
+    : acme || (hosting.proxy?.forceHttps ?? true);
+  return {
+    forceHttps,
+    routes: [],
+    redirectTo: to,
+    ...(acme ? { tlsMode: "acme" as const } : {}),
+    ...(hosting.bindAddress ? { bindAddress: hosting.bindAddress } : {}),
+  };
 }
 
 /** Companion manifest naming which of an environment's hostnames run tlsMode: 'acme'. */
@@ -2111,6 +2133,69 @@ async function hostingCandidateRefusal(
     );
   }
   return test.stderr || "caddy validate failed";
+}
+
+/**
+ * The site addresses one snippet answers on: every top-level `name {` /
+ * `http://name {` line the daemon itself wrote (`siteSnippet`).
+ */
+export function snippetSiteAddresses(contents: string): string[] {
+  const names: string[] = [];
+  for (const line of contents.split("\n")) {
+    if (line.length === 0 || line.startsWith(" ") || !line.endsWith(" {")) {
+      continue;
+    }
+    const address = line.slice(0, -2).trim();
+    names.push(
+      address.startsWith("http://") ? address.slice("http://".length) : address,
+    );
+  }
+  return names;
+}
+
+/**
+ * Before any container starts: refuse a deploy that would answer on a name
+ * another environment's live site already answers on on this server. A www
+ * choice adds names the panel's uniqueness check may not have seen, and the
+ * shared Traefik would otherwise route that name to this environment's
+ * containers even though Caddy later refuses the duplicate site.
+ */
+export async function assertHostingNamesFree(
+  layout: LayoutPaths,
+  payload: EnvironmentDeployPayload,
+): Promise<void> {
+  const wanted = new Set(
+    payload.hostings
+      .filter((hosting) => (hosting.protocol ?? "http") === "http")
+      .flatMap((hosting) => [
+        ...hostingServedNames(hosting),
+        ...hostingWwwRedirects(hosting).map((redirect) => redirect.from),
+      ]),
+  );
+  if (wanted.size === 0) return;
+  const sitesDir = join(layout.configDir, "hosting", "sites");
+  let names: string[];
+  try {
+    names = await liveSnippetNames(sitesDir);
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) return;
+    throw err;
+  }
+  const own = `${payload.environmentId}.caddy`;
+  const others = names.filter((name) =>
+    name !== own && !isDaemonReservedHostingSite(name)
+  );
+  const contents = await Promise.all(
+    others.map((name) => Deno.readTextFile(join(sitesDir, name))),
+  );
+  const taken = contents.flatMap(snippetSiteAddresses).find((name) =>
+    wanted.has(name)
+  );
+  if (taken !== undefined) {
+    throw new Error(
+      `${taken} is already served by another environment on this server; remove it there (or change this hosting's www choice) before deploying`,
+    );
+  }
 }
 
 async function liveSnippetNames(sitesDir: string): Promise<string[]> {

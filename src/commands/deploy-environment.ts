@@ -66,6 +66,7 @@ import { ensureDocker as defaultEnsureDocker } from "../deploy/ensure-docker.ts"
 import { ensureSystemPrincipals } from "../deploy/ensure-principal.ts";
 import { applySshAccess, type PrincipalSshSpec } from "../deploy/ssh/apply.ts";
 import {
+  assertHostingNamesFree,
   buildTcpUdpIngressEntries,
   cleanupStaleTcpUdpServiceIngress,
   ensureHostingCaddyRuntime,
@@ -2315,6 +2316,10 @@ export async function handleEnvironmentDeploy(
     nativeAppServices,
     nativeAppBindingsFromPayload(parsedPayload),
   );
+
+  // Before any container carries a routing label for a name another
+  // environment already serves here.
+  await assertHostingNamesFree(layout, parsedPayload);
 
   const published = await publishDeployedCompose({
     hasContainers,
