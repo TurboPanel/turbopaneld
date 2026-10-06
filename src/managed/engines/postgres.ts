@@ -19,19 +19,20 @@ import {
   createReplicationRoleSql,
   databaseExistsSql,
   dropDatabaseSql,
-  dropLostPhysicalSlotsSql,
   dropPhysicalSlotSql,
   dropRoleSql,
   ensureProxySqlMonitorRoleSql,
   grantDatabaseSql,
   isInRecoverySql,
   listDatabasesForRoleReleaseSql,
+  listLostPhysicalSlotsSql,
   listManagedSlotsSql,
   type ManagedDatabasePrivilege,
   managedSlotRetentionSql,
   primaryReplicationStatusSql,
   promoteSql,
   quoteIdentifier,
+  recreateLostPhysicalSlotSql,
   releaseRoleObjectsSql,
   reloadVerifySql,
   standbyReplicationStatusSql,
@@ -303,9 +304,14 @@ const postgresReplicationRuntime: ManagedEngineReplicationRuntime = {
 
     const desired = new Set(spec.desiredSlots);
     // A slot the primary already gave up on (its WAL is gone) cannot serve a
-    // replica again, not even a freshly re-seeded one: drop it so the create
-    // step below makes a usable slot.
-    await runPsql(ctx, dropLostPhysicalSlotsSql());
+    // replica again, not even a freshly re-seeded one: replace it with a slot
+    // that keeps no WAL until the replica is re-seeded. Health keeps reporting
+    // it as waiting for a Resync, so a later apply never hides the cut-off.
+    const lost = await parsePsqlRows(ctx, listLostPhysicalSlotsSql());
+    await forEachSequential(lost, async ([slotName]) => {
+      if (!slotName) return;
+      await runPsql(ctx, recreateLostPhysicalSlotSql(slotName));
+    });
     await forEachSequential(
       desired,
       (slot) => runPsql(ctx, createPhysicalSlotSql(slot)),
@@ -485,12 +491,30 @@ const SLOT_SEVERITY: Record<ManagedSlotRetention["state"], number> = {
 
 function slotState(
   walStatus: string,
+  active: boolean,
 ): ManagedSlotRetention["state"] {
   // `unreserved`: past the cap, WAL may go at the next checkpoint. `lost`:
-  // already gone. `extended`: held beyond `max_wal_size`, still safe.
+  // already gone. An inactive slot with no `wal_status` at all holds no WAL:
+  // the replacement of a lost slot, still waiting for its replica to be
+  // re-seeded. All three mean that replica needs a Resync. `extended`: held
+  // beyond `max_wal_size`, still safe.
   if (walStatus === "lost" || walStatus === "unreserved") return "critical";
+  if (walStatus === "" && !active) return "critical";
   if (walStatus === "extended") return "lagging";
   return "ok";
+}
+
+/** `wal_status` label of a slot that has none: waiting for a Resync. */
+const AWAITING_RESYNC = "awaiting_resync";
+
+function isWorse(
+  candidate: ManagedSlotRetention,
+  current: ManagedSlotRetention,
+): boolean {
+  const bySeverity = SLOT_SEVERITY[candidate.state] -
+    SLOT_SEVERITY[current.state];
+  if (bySeverity !== 0) return bySeverity > 0;
+  return (candidate.retainedBytes ?? 0) > (current.retainedBytes ?? 0);
 }
 
 /**
@@ -501,27 +525,29 @@ function slotState(
 export function slotRetentionFromRows(
   rows: readonly string[][],
 ): ManagedSlotRetention | undefined {
-  const slots = rows.filter((row) => row[0]).map(slotFromRow);
-  if (slots.length === 0) return undefined;
-  // Worst first: higher severity, then more WAL held.
-  const [worst] = slots.sort((a, b) =>
-    SLOT_SEVERITY[b.state] - SLOT_SEVERITY[a.state] ||
-    (b.retainedBytes ?? 0) - (a.retainedBytes ?? 0)
-  );
+  let worst: ManagedSlotRetention | undefined;
+  for (const row of rows) {
+    if (!row[0]) continue;
+    const slot = slotFromRow(row);
+    if (worst === undefined || isWorse(slot, worst)) worst = slot;
+  }
   if (worst === undefined) return undefined;
   return worst.state === "ok" ? { state: "ok" } : worst;
 }
 
 function slotFromRow(row: readonly string[]): ManagedSlotRetention {
-  const [slot, active, walStatus = "", retainedRaw, safeRaw] = row;
+  const [slot, activeRaw, walStatus = "", retainedRaw, safeRaw] = row;
+  const active = activeRaw === "true";
+  const state = slotState(walStatus, active);
   const safeBytes = optionalNumber(safeRaw);
+  const label = walStatus || (state === "critical" ? AWAITING_RESYNC : "");
   return {
-    state: slotState(walStatus),
+    state,
     slot,
-    ...(walStatus ? { walStatus } : {}),
+    ...(label ? { walStatus: label } : {}),
     retainedBytes: optionalNumber(retainedRaw) ?? 0,
     ...(safeBytes !== undefined && safeBytes >= 0 ? { safeBytes } : {}),
-    active: active === "true",
+    active,
   };
 }
 

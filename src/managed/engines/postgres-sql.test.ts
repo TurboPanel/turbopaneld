@@ -7,13 +7,13 @@ import {
   createReplicationRoleSql,
   databaseExistsSql,
   dropDatabaseSql,
-  dropLostPhysicalSlotsSql,
   dropPhysicalSlotSql,
   dropRoleSql,
   ensureProxySqlMonitorRoleSql,
   grantDatabaseSql,
   isInRecoverySql,
   listDatabasesForRoleReleaseSql,
+  listLostPhysicalSlotsSql,
   listManagedSlotsSql,
   MANAGED_SLOT_PREFIX,
   managedSlotRetentionSql,
@@ -21,6 +21,7 @@ import {
   promoteSql,
   quoteIdentifier,
   quoteLiteral,
+  recreateLostPhysicalSlotSql,
   releaseRoleObjectsSql,
   reloadVerifySql,
   standbyReplicationStatusSql,
@@ -211,12 +212,28 @@ test("listDatabasesForRoleReleaseSql covers connectable non-template databases o
   assertThrows(() => listDatabasesForRoleReleaseSql("bad\nname"));
 });
 
-test("dropLostPhysicalSlotsSql only touches inactive, lost, managed slots", () => {
-  const sql = dropLostPhysicalSlotsSql();
-  assertEquals(sql.includes("pg_drop_replication_slot"), true);
-  assertEquals(sql.includes("LIKE 'tp_member_%'"), true);
-  assertEquals(sql.includes("wal_status = 'lost'"), true);
-  assertEquals(sql.includes("NOT active"), true);
+test("listLostPhysicalSlotsSql and recreateLostPhysicalSlotSql only touch inactive, lost, managed slots", () => {
+  const list = listLostPhysicalSlotsSql();
+  assertEquals(list.includes("starts_with(slot_name, 'tp_member_')"), true);
+  assertEquals(list.includes("wal_status = 'lost'"), true);
+  assertEquals(list.includes("NOT active"), true);
+  const recreate = recreateLostPhysicalSlotSql("tp_member_2");
+  assertEquals(recreate.includes("pg_drop_replication_slot"), true);
+  assertEquals(recreate.includes("wal_status = 'lost' AND NOT active"), true);
+  // Replaced by a slot that keeps no WAL until its replica is re-seeded.
+  assertEquals(recreate.includes("'tp_member_2', false, false"), true);
+  assertEquals(
+    createPhysicalSlotSql("tp_member_2").includes("true, false"),
+    true,
+  );
+  assertThrows(() => recreateLostPhysicalSlotSql("bad name"), Error);
+});
+
+test("slot queries match the managed prefix literally (no LIKE wildcard)", () => {
+  for (const sql of [listManagedSlotsSql(), managedSlotRetentionSql()]) {
+    assertEquals(sql.includes("starts_with(slot_name, 'tp_member_')"), true);
+    assertEquals(sql.includes("LIKE"), false);
+  }
 });
 
 test("managedSlotRetentionSql reads retained bytes and safe size per managed slot", () => {
@@ -224,5 +241,5 @@ test("managedSlotRetentionSql reads retained bytes and safe size per managed slo
   assertEquals(sql.includes("wal_status"), true);
   assertEquals(sql.includes("safe_wal_size"), true);
   assertEquals(sql.includes("pg_current_wal_lsn()"), true);
-  assertEquals(sql.includes("LIKE 'tp_member_%'"), true);
+  assertEquals(sql.includes("starts_with(slot_name, 'tp_member_')"), true);
 });

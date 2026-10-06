@@ -26,7 +26,7 @@ import {
   createNoopCommandOutputSink,
 } from "../logs/contracts.ts";
 import { redactPlaintexts } from "../logs/redactor.ts";
-import { logInfo, sanitizeForLog } from "../util/logger.ts";
+import { logInfo, logWarn, sanitizeForLog } from "../util/logger.ts";
 import { forEachSequential } from "../util/sequential.ts";
 import { type LayoutPaths, resolveLayout } from "../paths/layout.ts";
 import {
@@ -652,10 +652,21 @@ export async function collectMemberHealth(
   // A primary with no replication payload is a single-member cluster: every
   // replication slot it still holds belongs to a replica that was removed, and
   // would keep all WAL until the disk is full.
+  // Best effort: a slot that became active between the list and the drop, or
+  // a transient SQL error, must not fail the apply of a single-member cluster
+  // (it did no SQL here before); the next apply repeats the sweep.
   if (
     payload.memberRole === "primary" && engine.replication?.pruneOrphanSlots
   ) {
-    await engine.replication.pruneOrphanSlots(ctx, []);
+    try {
+      await engine.replication.pruneOrphanSlots(ctx, []);
+    } catch (err) {
+      logWarn(
+        "managed",
+        `managedId=${payload.managedId} orphan replication slot sweep failed:`,
+        sanitizeForLog(err),
+      );
+    }
   }
 
   return {

@@ -1234,7 +1234,37 @@ test("postgres primary readHealth still answers when the slot query fails", asyn
   assertEquals("slotRetention" in health, false);
 });
 
-test("postgres ensurePrimary drops lost slots before creating the desired ones", async () => {
+test("postgres ensurePrimary replaces a lost slot with an unreserved one before creating the desired ones", async () => {
+  const replication = postgresManagedEngineRuntime.replication;
+  if (!replication?.ensurePrimary) {
+    throw new TypeError("expected postgres ensurePrimary");
+  }
+  const { exec, calls } = recordingExec();
+  const lister: ManagedEngineExec = (argv, input) =>
+    input?.includes("wal_status = 'lost' AND NOT active") &&
+      input.includes("SELECT slot_name")
+      ? Promise.resolve({ success: true, stdout: "tp_member_2\n", stderr: "" })
+      : exec(argv, input);
+  await replication.ensurePrimary(buildContext(lister), {
+    username: "tp_repl",
+    password: "repl-pass",
+    desiredSlots: ["tp_member_2", "tp_member_3"],
+  });
+  const inputs = calls.map((c) => c.input ?? "");
+  const recreate = inputs.findIndex((i) =>
+    i.includes("pg_drop_replication_slot") && i.includes("wal_status = 'lost'")
+  );
+  const firstDesired = inputs.findIndex((i) =>
+    i.includes("pg_create_physical_replication_slot") &&
+    i.includes("'tp_member_3', true, false")
+  );
+  assertEquals(recreate >= 0 && recreate < firstDesired, true);
+  // The replacement keeps no WAL until the replica is re-seeded, so health
+  // keeps reporting the cut-off and the stale replica holds nothing back.
+  assertEquals(inputs[recreate]!.includes("'tp_member_2', false, false"), true);
+});
+
+test("postgres ensurePrimary leaves healthy slots alone: nothing is replaced when none is lost", async () => {
   const replication = postgresManagedEngineRuntime.replication;
   if (!replication?.ensurePrimary) {
     throw new TypeError("expected postgres ensurePrimary");
@@ -1245,12 +1275,34 @@ test("postgres ensurePrimary drops lost slots before creating the desired ones",
     password: "repl-pass",
     desiredSlots: ["tp_member_2"],
   });
-  const inputs = calls.map((c) => c.input ?? "");
-  const dropLost = inputs.findIndex((i) => i.includes("wal_status = 'lost'"));
-  const create = inputs.findIndex((i) =>
-    i.includes("pg_create_physical_replication_slot")
+  assertEquals(
+    calls.some((c) => c.input?.includes("', false, false)")),
+    false,
   );
-  assertEquals(dropLost >= 0 && dropLost < create, true);
+});
+
+test("slotRetentionFromRows keeps a replaced slot critical until a replica is attached or reserved", () => {
+  // Inactive and no wal_status: the replacement of a lost slot, still waiting
+  // for its replica to be re-seeded.
+  assertEquals(
+    slotRetentionFromRows([["tp_member_2", "false", "", "0", "-100"]]),
+    {
+      state: "critical",
+      slot: "tp_member_2",
+      walStatus: "awaiting_resync",
+      retainedBytes: 0,
+      active: false,
+    },
+  );
+  // After the Resync the slot is reserved again.
+  assertEquals(
+    slotRetentionFromRows([["tp_member_2", "false", "reserved", "10", "500"]]),
+    { state: "ok" },
+  );
+  assertEquals(
+    slotRetentionFromRows([["tp_member_2", "true", "reserved", "10", "500"]]),
+    { state: "ok" },
+  );
 });
 
 test("postgres pruneOrphanSlots drops every managed slot not listed and keeps the listed ones", async () => {

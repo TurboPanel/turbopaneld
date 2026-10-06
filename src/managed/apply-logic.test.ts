@@ -743,3 +743,22 @@ test("a replica without a replication payload never sweeps slots", async () => {
   );
   assertEquals(sweeps, []);
 });
+
+test("a failing orphan-slot sweep never fails the apply of a single-member cluster", async () => {
+  const engine = {
+    replication: {
+      pruneOrphanSlots: () => Promise.reject(new Error("slot is active")),
+    },
+  } as unknown as Parameters<typeof collectMemberHealth>[1];
+  const member = await collectMemberHealth(
+    SLOT_SWEEP_CTX,
+    engine,
+    {
+      managedId: "00000000-0000-4000-8000-0000000000bb",
+      memberId: SLOT_SWEEP_MEMBER_ID,
+      memberRole: "primary",
+    } as unknown as ManagedApplyPayload,
+    [],
+  );
+  assertEquals(member?.status, "ready");
+});

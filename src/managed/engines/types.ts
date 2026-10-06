@@ -243,13 +243,18 @@ export type ManagedLastStreamingObservation = {
  * `ok`: nothing unusual. `lagging`: a slot holds more than `max_wal_size`
  * (a replica is away or far behind; disk is filling). `critical`: a slot is
  * about to be, or already is, invalidated by the `max_slot_wal_keep_size`
- * cap, so that replica needs a Resync.
+ * cap, or its replacement is still waiting for the replica to be re-seeded
+ * (`walStatus: "awaiting_resync"`), so that replica needs a Resync. The cut-off
+ * stays reported on every apply until the Resync reserves the slot again.
  */
 export type ManagedSlotRetention = {
   state: "ok" | "lagging" | "critical";
   /** The worst slot (absent when `ok`). */
   slot?: string;
-  /** Postgres `wal_status` of that slot: reserved, extended, unreserved, lost. */
+  /**
+   * Postgres `wal_status` of that slot: reserved, extended, unreserved, lost;
+   * or `awaiting_resync` for the replacement of a lost slot.
+   */
   walStatus?: string;
   /** Bytes of WAL that slot is keeping. */
   retainedBytes?: number;
