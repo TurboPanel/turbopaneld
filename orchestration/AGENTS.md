@@ -218,8 +218,9 @@ engine serves the site.
 
 gids are hand-assigned in the registry, never computed from the version string
 (that breaks the day `8.10` exists). Band **9900–9979** is entitlements;
-**9980–9999** is service identities (`tpbuild`, the sandboxed build account
-from the `build-user` role, is 9994). `../src/orchestration/service-accounts.test.ts`
+**9980–9999** is service identities (9994 stays reserved for `tpbuild`, the
+retired shared build account; builds now run as per-build systemd
+`DynamicUser=` identities). `../src/orchestration/service-accounts.test.ts`
 enforces uniqueness across both and that entitlement gids stay inside their band.
 
 **Membership is reconciled by the daemon, not by this role.** The role only

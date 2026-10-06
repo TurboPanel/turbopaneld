@@ -898,6 +898,9 @@ tp_unit_ok() {
   esac
   case "$_uk_name" in
     turbopanel-build-*.service|turbopanel-buildwatch-*.service) return 1 ;;
+    # The build slices (tp_build_slice) are systemd's implicit ones: tp-host
+    # sets every limit a build has on the build unit itself.
+    turbopanel-*-build.slice|turbopanel-tpbuild.slice) return 1 ;;
     turbopanel-php-*)
       tp_php_unit_ok "$_uk_file" "$_uk_name"
       return
@@ -2696,7 +2699,9 @@ tp_shell_ok() {
 
 tp_new_name_ok() {
   case "$1" in
-    ''|-*|*[!A-Za-z0-9_-]*|root|tp|tp[a-z]*) return 1 ;;
+    # `<name>-build` is reserved: turbopanel-<name>-build.slice is where
+    # <name>'s sandboxed builds run (tp_build_slice).
+    ''|-*|*[!A-Za-z0-9_-]*|root|tp|tp[a-z]*|*-build) return 1 ;;
   esac
   [ "${#1}" -le 32 ] || return 1
   ! tp_getent passwd "$1" >/dev/null 2>&1 || return 1
@@ -2959,47 +2964,75 @@ tp_verb_principal_remove() {
 }
 
 # --- builds ------------------------------------------------------------------
-# Tenant build commands run as BUILD_ACCOUNT (not in docker or tp, no sudo) in
-# a transient turbopanel-build-<id>.service whose every property is fixed
-# here. The daemon passes only ids; the spec rides stdin straight through to
-# lib/tp-build-runner, which reads it as the build account (root never parses
-# it, and it never becomes an EnvironmentFile PID 1 would read as root).
+# Site owners' build commands run in a transient turbopanel-build-<id>.service
+# whose every property is fixed here, as a throwaway user systemd creates for
+# that one run (DynamicUser=yes: a uid from systemd's 61184-65519 range that
+# exists only while the unit runs; never a host account, never in docker or
+# tp, no sudo), inside the site owner's own resource group
+# (turbopanel-<owner>-build.slice, under the owner's turbopanel-<owner>.slice).
+# The daemon passes only ids and the owner's name; the spec rides stdin
+# straight through to lib/tp-build-runner, which reads it as the build's user
+# (root never parses it, and it never becomes an EnvironmentFile PID 1 would
+# read as root).
 #
-# Layout (the build-user role creates it; checked on every run):
+# Layout (the build-user role creates the tree; checked on every run):
 #   /var/lib/turbopanel-build          root, not group/world-writable
 #   /var/lib/turbopanel-build/work     root:tp 1770 (sticky: tp cannot swap
-#                                      out a work dir it handed over)
-#   /var/lib/turbopanel-build/cache    root:root 0700
-#   work/<build-id>                    checked out by tp, handed to the build
-#                                      account for the run, returned after
-#   cache/<project-id>                 build account 0700, one project's cache
+#                                      out a work dir the build owns)
+#   work/<build-id>                    checked out by tp, handed to the build's
+#                                      user as its unit starts (build-handover),
+#                                      given back after (build-return)
+#   /var/lib/turbopanel-build/caches   root:root 0700: nothing but root ever
+#                                      reaches a cache from the host
+#   caches/<owner>/                    root:root 0700, made by build-run
+#   caches/<owner>/<project>           one site owner's project cache, handed to
+#                                      each build's user as its unit starts;
+#                                      only this one is bound into the unit
+#
+# Not systemd's CacheDirectory=: with DynamicUser= systemd 257 keeps it owned
+# by nobody and mounts it noexec in the unit, which breaks tools that run what
+# they cached (npx, pnpm dlx); 255 does neither. This layout is the same on both.
 #
 # One build at a time per host: build-run holds a root-only lock while the
-# unit runs and refuses to start while another build unit is still active,
-# so builds that share one uid never see each other's processes.
+# unit runs and refuses to start while another build unit is still active.
 R_BUILD="$P/var/lib/turbopanel-build"
-BUILD_ACCOUNT="tpbuild"
-# Not turbopanel-*: tp may install turbopanel-* units, and a principal named
-# `build` would own turbopanel-build.slice.
-BUILD_SLICE="tpbuild.slice"
+R_BUILD_CACHE="$R_BUILD/caches"
+# systemd's DynamicUser= uid/gid range (fixed when systemd is built, the same
+# in every distribution).
+BUILD_DYN_MIN=61184
+BUILD_DYN_MAX=65519
+if [ -n "$TP_TEST" ]; then
+  BUILD_DYN_MIN="${TP_TEST_DYN_MIN:-$BUILD_DYN_MIN}"
+  BUILD_DYN_MAX="${TP_TEST_DYN_MAX:-$BUILD_DYN_MAX}"
+fi
+# The owner of a build nobody owns (an image build for a service with no site
+# owner): its slice is turbopanel-tpbuild.slice, which no principal can own
+# (tp_new_name_ok refuses every tp* name).
+BUILD_NO_OWNER="tpbuild"
+# Runtime entitlement groups (tpnode<series>) live in this gid band
+# (orchestration/runtime-registry.json); a build gets them as
+# SupplementaryGroups= so it can run the vendored Node it was assigned.
+BUILD_RUNTIME_GID_MIN=9900
+BUILD_RUNTIME_GID_MAX=9979
 BUILD_LOCK="$P/run/tpbuild.lock"
 # root:tp 0750 like this script. PID 1 reads it as root and hands it to the
 # unit as a credential (a private, read-only copy owned by the unit's user),
-# which /bin/sh then runs: the build account never reaches /opt/turbopanel.
+# which /bin/sh then runs: the build's user never reaches /opt/turbopanel.
 BUILD_RUNNER="$INSTALL_ROOT/lib/tp-build-runner"
 BUILD_LOCK_WAIT_SEC=2100
 # Owner decision: the same limits for every plan.
 BUILD_MEMORY_MAX=4G
 BUILD_CPU_QUOTA=200%
 BUILD_RUNTIME_MAX_SEC=1800
-# Disk: a build's private /tmp and /var/tmp are size-capped tmpfs (counted in
-# MemoryMax); the work tree and the project cache are watched while the build
-# runs (build-watch) and the build is stopped past the caps. A cache past its
-# cap, or unused for BUILD_CACHE_MAX_AGE_DAYS, is emptied before the next build.
-BUILD_TMP_SIZE=1G
-BUILD_TMP_INODES=262144
-BUILD_VARTMP_SIZE=512M
-BUILD_VARTMP_INODES=131072
+# Disk: the work tree (which also holds the runner's TMPDIR), the project cache
+# and systemd's private /tmp and /var/tmp are watched while the build runs
+# (build-watch) and the build is stopped past the caps. A cache past its cap,
+# or unused for BUILD_CACHE_MAX_AGE_DAYS, is emptied before the next build.
+# DynamicUser= always gives the unit systemd's own private /tmp (it wins over
+# a TemporaryFileSystem=/tmp): on systemd 257 one tmpfs of 10% of RAM, charged
+# to the build's memory; on 255 directories under the host's /tmp and /var/tmp,
+# which BUILD_TMP_MAX_KB caps.
+BUILD_TMP_MAX_KB=1572864
 BUILD_WORK_MAX_KB=8388608
 BUILD_CACHE_MAX_KB=6291456
 BUILD_TREE_MAX_INODES=2000000
@@ -3009,7 +3042,10 @@ if [ -n "$TP_TEST" ]; then
   BUILD_WORK_MAX_KB="${TP_TEST_WORK_MAX_KB:-$BUILD_WORK_MAX_KB}"
   BUILD_TREE_MAX_INODES="${TP_TEST_TREE_MAX_INODES:-$BUILD_TREE_MAX_INODES}"
   BUILD_CACHE_MAX_KB="${TP_TEST_CACHE_MAX_KB:-$BUILD_CACHE_MAX_KB}"
+  BUILD_TMP_MAX_KB="${TP_TEST_TMP_MAX_KB:-$BUILD_TMP_MAX_KB}"
   BUILD_WATCH_SEC="${TP_TEST_WATCH_SEC:-$BUILD_WATCH_SEC}"
+  # One look, then stop (a test of a build that stays under its caps).
+  BUILD_WATCH_ONCE="${TP_TEST_WATCH_ONCE:-}"
 fi
 # Debian 13 / Ubuntu 24.04. Below it: a warning and a reduced sandbox (still
 # the build account, still confined); below the minimum: no build.
@@ -3021,7 +3057,7 @@ BUILD_SYSTEMD_MIN=247
 # resolves through its own resolv.conf naming only public nameservers, which
 # public egress already reaches. Loopback (127.0.0.0/8, ::1) is NOT denied here:
 # Turbopack's helper processes talk to each other over it. lib/tp-build-loopback
-# (nftables, per tpbuild uid) refuses the platform's loopback ports instead.
+# (nftables, per build unit cgroup) refuses the platform's loopback ports instead.
 BUILD_LOOPBACK="$INSTALL_ROOT/lib/tp-build-loopback"
 BUILD_DENY_V4="0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 169.254.0.0/16 172.16.0.0/12 192.0.0.0/24 192.168.0.0/16 198.18.0.0/15 224.0.0.0/3"
 # NAT64 (64:ff9b::/96) and 6to4 (2002::/16) embed IPv4 addresses, private
@@ -3048,29 +3084,82 @@ tp_group_db() {
   getent group
 }
 
-tp_in_service_band() {
-  case "$1" in ''|*[!0-9]*) return 1 ;; esac
-  [ "$1" -ge "$SERVICE_ID_MIN" ] && [ "$1" -le "$SERVICE_ID_MAX" ]
+# The site owner a build runs for: an existing principal, or BUILD_NO_OWNER.
+# Plain characters only (it names a slice and a cache directory, and a dash
+# separates slice levels), and never a name whose build slice would be another
+# principal's own slice (`<owner>-build`).
+tp_build_owner_ok() {
+  case "$1" in
+    ''|-*|*-|*--*|*[!A-Za-z0-9_-]*) return 1 ;;
+  esac
+  [ "${#1}" -le 32 ] || return 1
+  [ "$1" = "$BUILD_NO_OWNER" ] && return 0
+  tp_is_principal "$1" || return 1
+  ! tp_getent passwd "$1-build" >/dev/null 2>&1
 }
 
-# Sets BUILD_UID/BUILD_GID. The account must be a service-band system user
-# with its own group whose only supplementary groups are runtime groups
-# (tpnode*): never docker, tp, sudo or anything else that grants reach.
-tp_build_account_ok() {
-  _ba_line="$(tp_getent passwd "$BUILD_ACCOUNT")" || return 1
-  BUILD_UID="$(printf '%s' "$_ba_line" | cut -d: -f3)"
-  BUILD_GID="$(printf '%s' "$_ba_line" | cut -d: -f4)"
-  tp_in_service_band "$BUILD_UID" && tp_in_service_band "$BUILD_GID" || return 1
-  [ "$(tp_gid_of_group "$BUILD_ACCOUNT")" = "$BUILD_GID" ] || return 1
-  _ba_extra="$(tp_group_db | awk -F: -v u="$BUILD_ACCOUNT" '
-    { n = split($4, m, ","); for (i = 1; i <= n; i++) if (m[i] == u && $1 !~ /^tpnode[a-z0-9]*$/) print $1 }')"
-  [ -z "$_ba_extra" ] || tp_die "build-run: $BUILD_ACCOUNT is in group(s) $_ba_extra; refusing"
+# The slice a build of owner $1 runs in: a child of the site owner's own slice,
+# so the build counts against that owner's CPU and memory.
+tp_build_slice() {
+  if [ "$1" = "$BUILD_NO_OWNER" ]; then
+    printf 'turbopanel-%s.slice\n' "$BUILD_NO_OWNER"
+  else
+    printf 'turbopanel-%s-build.slice\n' "$1"
+  fi
+}
+
+# A uid or gid systemd hands out for DynamicUser= (never a host account's).
+tp_build_dyn_id_ok() {
+  case "$1" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$1" -ge "$BUILD_DYN_MIN" ] && [ "$1" -le "$BUILD_DYN_MAX" ]
+}
+
+# Sets BUILD_DYN_USER, the name of the build's throwaway user for owner $1 and
+# project $2: tpb- and 16 hex digits of a hash of both. The same site's builds
+# keep the same name, so systemd usually hands back the same uid and the cache
+# needs no re-chown; a different owner or project never shares one. Fails when
+# that name exists as a host account or group: systemd would then run the build
+# as that account instead of a throwaway one.
+tp_build_dyn_user() {
+  _du_hash="$(printf '%s/%s' "$1" "$2" | sha256sum | cut -c1-16)"
+  case "$_du_hash" in
+    ????????????????) ;;
+    *) tp_die "build-run: cannot name the build's user (sha256sum)" ;;
+  esac
+  case "$_du_hash" in *[!0-9a-f]*) tp_die "build-run: cannot name the build's user" ;; esac
+  BUILD_DYN_USER="tpb-$_du_hash"
+  ! tp_getent passwd "$BUILD_DYN_USER" >/dev/null 2>&1 &&
+    ! tp_getent group "$BUILD_DYN_USER" >/dev/null 2>&1
+}
+
+# The runtime groups a build gets (SupplementaryGroups=), space-separated:
+# every tpnode<series> group in the runtime entitlement band, and nothing else.
+tp_build_runtime_groups() {
+  tp_group_db | awk -F: -v lo="$BUILD_RUNTIME_GID_MIN" -v hi="$BUILD_RUNTIME_GID_MAX" '
+    $1 ~ /^tpnode[0-9]+$/ && $3 ~ /^[0-9]+$/ && $3 + 0 >= lo + 0 && $3 + 0 <= hi + 0 {
+      printf "%s%s", sep, $1; sep = " "
+    }'
+}
+
+# True when this process runs inside turbopanel-build-$1.service's own cgroup:
+# only systemd can put a process there, so build-handover cannot be started by
+# the daemon through sudo.
+tp_build_in_unit() {
+  if [ -n "$TP_TEST" ]; then
+    _iu_cg="$(cat -- "$P/run/self-cgroup" 2>/dev/null || true)"
+  else
+    _iu_cg="$(sed -n 's/^0:://p' /proc/self/cgroup)"
+  fi
+  case "$_iu_cg" in
+    /turbopanel.slice/*/"turbopanel-build-$1.service") return 0 ;;
+  esac
+  return 1
 }
 
 # The build tree: root-owned, never world-writable, group-writable only with
 # the sticky bit.
 tp_build_tree_ok() {
-  for _bt in "$R_BUILD" "$R_BUILD/work" "$R_BUILD/cache"; do
+  for _bt in "$R_BUILD" "$R_BUILD/work" "$R_BUILD_CACHE"; do
     tp_pin_dir "$_bt" || tp_die "no build directory $_bt (run the build-user role)"
     [ "$(stat -c '%u' .)" = "$(id -u)" ] || tp_die "refusing $_bt: not owned by root"
     case "$(stat -c '%A' .)" in
@@ -3086,12 +3175,13 @@ tp_build_tree_ok() {
   esac
 }
 
-# Pin work/<id>; it must be a real directory owned by the caller or the build
-# account (a re-run). Leaves the working directory in it.
+# Pin work/<id>; it must be a real directory owned by the caller or by a
+# build's throwaway user (a build ran or is starting). Leaves the working
+# directory in it.
 tp_build_work_pin() {
   tp_pin_dir "$R_BUILD/work/$1" || tp_die "no work directory $R_BUILD/work/$1"
   _bw_owner="$(stat -c '%u' .)"
-  [ "$_bw_owner" = "$CALLER_UID" ] || [ "$_bw_owner" = "$BUILD_UID" ] ||
+  [ "$_bw_owner" = "$CALLER_UID" ] || tp_build_dyn_id_ok "$_bw_owner" ||
     tp_die "refusing $R_BUILD/work/$1: owned by uid $_bw_owner"
 }
 
@@ -3214,31 +3304,32 @@ tp_build_lock() {
 }
 
 tp_verb_build_run() {
-  [ $# -eq 2 ] || tp_die "build-run: only build-run BUILD-ID PROJECT-ID"
+  [ $# -eq 3 ] || tp_die "build-run: only build-run BUILD-ID PROJECT-ID OWNER"
   tp_build_id_ok "$1" || tp_die "build-run: refusing build id $1"
   tp_build_id_ok "$2" || tp_die "build-run: refusing project id $2"
-  tp_build_account_ok || tp_die "build-run: no confined $BUILD_ACCOUNT account (run the build-user role)"
+  tp_build_owner_ok "$3" || tp_die "build-run: refusing site owner $3 (not a site owner's Linux user)"
   _br_id="$1"
   _br_project="$2"
+  _br_owner="$3"
   tp_build_tree_ok
   _br_v="$(tp_systemd_major)"
   case "$_br_v" in ''|*[!0-9]*) tp_die "build-run: cannot read the systemd version" ;; esac
   [ "$_br_v" -ge "$BUILD_SYSTEMD_MIN" ] ||
     tp_die "build-run: systemd $_br_v cannot sandbox a build; the supported floor is Debian 13 / Ubuntu 24.04"
   tp_build_lock
+  # Checked under the lock: with nss-systemd a running build's own throwaway
+  # user resolves too, and the lock is what guarantees none is left.
+  tp_build_dyn_user "$_br_owner" "$_br_project" ||
+    tp_die "build-run: $BUILD_DYN_USER exists as a host account or group; refusing to build as it"
   tp_build_write_resolv
   _br_work="$R_BUILD/work/$1"
-  _br_cache="$R_BUILD/cache/$2"
   tp_build_work_pin "$1"
-  tp_pin_dir "$R_BUILD/cache"
-  tp_build_prune_cache "$2"
-  mkdir -m 0700 -- "./$2" 2>/dev/null || [ -d "./$2" ] || tp_die "cannot create $_br_cache"
-  tp_pin_dir "$_br_cache" || tp_die "refusing $_br_cache"
-  tp_run chown -h -- "$BUILD_UID:$BUILD_GID" .
-  tp_build_work_pin "$1"
-  tp_run chown -R -h -P -- "$BUILD_UID:$BUILD_GID" .
+  tp_build_prune_cache "$_br_owner" "$_br_project"
+  _br_cache="$R_BUILD_CACHE/$_br_owner/$_br_project"
+  tp_build_cache_dir "$_br_owner" "$_br_project"
   # Fail closed: without the port filter the build would reach host services
-  # on loopback, so it does not start (the unit re-runs this as ExecStartPre).
+  # on loopback, so it does not start. This load (no build rule yet) proves nft
+  # works and drops the last build's rules; the unit loads its own as it starts.
   tp_run "$BUILD_LOOPBACK" sync ||
     tp_die "build-run: the build's network rules could not be loaded (is nftables installed?); builds are stopped until they can"
   cd /
@@ -3251,15 +3342,21 @@ tp_verb_build_run() {
   tp_run systemd-run --unit="turbopanel-buildwatch-$_br_id" --collect --quiet --no-block \
     --setenv=SUDO_UID="$CALLER_UID" --setenv=SUDO_GID="$CALLER_GID" \
     -p RuntimeMaxSec="$((BUILD_RUNTIME_MAX_SEC + 300))" \
-    -- "$_self_dir/tp-host" build-watch "$_br_id" "$_br_project" ||
+    -- "$_self_dir/tp-host" build-watch "$_br_id" "$_br_project" "$_br_owner" ||
     tp_die "build-run: cannot start the build's disk watcher"
+  # DynamicUser=yes: systemd creates the user as the unit starts and removes it
+  # when the unit stops; the name is ours (tp_build_dyn_user), the uid systemd's.
   set -- --unit="turbopanel-build-$1" --service-type=exec --wait --pipe --quiet --collect \
-    -p User="$BUILD_ACCOUNT" -p Group="$BUILD_ACCOUNT" -p WorkingDirectory="$_br_work" \
+    -p DynamicUser=yes -p User="$BUILD_DYN_USER"
+  _br_groups="$(tp_build_runtime_groups)"
+  [ -z "$_br_groups" ] || set -- "$@" -p SupplementaryGroups="$_br_groups"
+  set -- "$@" -p WorkingDirectory="$_br_work" \
     -p NoNewPrivileges=yes -p CapabilityBoundingSet= -p AmbientCapabilities= \
     -p RestrictSUIDSGID=yes -p ProtectSystem=strict -p ProtectHome=yes \
     -p PrivateDevices=yes \
-    -p TemporaryFileSystem="/tmp:mode=1777,nosuid,nodev,size=$BUILD_TMP_SIZE,nr_inodes=$BUILD_TMP_INODES" \
-    -p TemporaryFileSystem="/var/tmp:mode=1777,nosuid,nodev,size=$BUILD_VARTMP_SIZE,nr_inodes=$BUILD_VARTMP_INODES" -p TemporaryFileSystem="$R_BUILD:ro" \
+    -p TemporaryFileSystem="$R_BUILD:ro" \
+    -p RuntimeDirectory="turbopanel-build-$_br_id" -p RuntimeDirectoryMode=0700 \
+    -p ReadOnlyPaths="$P/run/turbopanel-build-$_br_id" \
     -p LoadCredential="tp-build-runner:$BUILD_RUNNER" \
     -p BindPaths="$_br_work" -p BindPaths="$_br_cache" \
     -p BindReadOnlyPaths="$BUILD_RESOLV_DIR/resolv.conf:$P/etc/resolv.conf"
@@ -3279,8 +3376,8 @@ tp_verb_build_run() {
   if [ "$_br_v" -ge "$BUILD_SYSTEMD_FLOOR" ]; then
     set -- "$@" -p ProtectClock=yes -p ProtectProc=invisible -p PrivateIPC=yes
   else
-    printf 'tp-host: warning: systemd %s is below the supported floor (Debian 13 / Ubuntu 24.04); this build runs as %s with a reduced sandbox (other processes visible, shared IPC)\n' \
-      "$_br_v" "$BUILD_ACCOUNT" >&2
+    printf 'tp-host: warning: systemd %s is below the supported floor (Debian 13 / Ubuntu 24.04); this build runs with a reduced sandbox (other processes visible, shared IPC)\n' \
+      "$_br_v" >&2
   fi
   [ "$_br_v" -lt 257 ] || set -- "$@" -p PrivatePIDs=yes
   # The site and app listen bands belong to the platform: a build must not
@@ -3290,10 +3387,17 @@ tp_verb_build_run() {
       -p SocketBindDeny=tcp:19100-19799 -p SocketBindDeny=udp:19100-19799
   fi
   _br_host_deny="$(tp_build_host_deny | tr '\n' ' ')"
+  # Two root steps before the first build command, in order: load the loopback
+  # port filter for this unit's own cgroup (it exists only now), then hand the
+  # work tree and cache to the build's user (whose uid exists only now; systemd
+  # has made the unit's RuntimeDirectory= its own, which is how build-handover
+  # learns it; the build itself sees that directory read-only, so it cannot
+  # fill the host's /run). Either failing stops the build before it starts.
   set -- "$@" -p RestrictAddressFamilies="AF_INET AF_INET6 AF_UNIX" \
     -p IPAddressDeny="$BUILD_DENY_V4 $BUILD_DENY_V6${_br_host_deny:+ ${_br_host_deny% }}" \
-    -p ExecStartPre="+$BUILD_LOOPBACK sync"
-  set -- "$@" -p Slice="$BUILD_SLICE" -p MemoryMax="$BUILD_MEMORY_MAX" -p MemorySwapMax=0 \
+    -p ExecStartPre="+$BUILD_LOOPBACK sync $_br_id" \
+    -p ExecStartPre="+/usr/bin/env SUDO_UID=$CALLER_UID SUDO_GID=$CALLER_GID $_self_dir/tp-host build-handover $_br_id $_br_project $_br_owner"
+  set -- "$@" -p Slice="$(tp_build_slice "$_br_owner")" -p MemoryMax="$BUILD_MEMORY_MAX" -p MemorySwapMax=0 \
     -p CPUQuota="$BUILD_CPU_QUOTA" -p TasksMax=1024 -p IOWeight=50 -p LimitFSIZE=4G \
     -p LimitNOFILE=65536 -p LimitCORE=0 -p RuntimeMaxSec="$BUILD_RUNTIME_MAX_SEC" \
     -p KillMode=control-group -p OOMPolicy=continue -p UMask=0022 \
@@ -3301,35 +3405,89 @@ tp_verb_build_run() {
   tp_exec systemd-run "$@"
 }
 
-# Empty caches of projects not built for BUILD_CACHE_MAX_AGE_DAYS, and this
-# project's own cache when it is over its cap. Runs with cwd = cache/ (pinned)
-# and the host build lock held, so no build unit is running. A cache is only a
-# cache: emptying one costs a slower next build. find -delete never follows a
-# symlink; a project directory is only touched when its name is well formed.
+# Run by the build unit itself, as its last ExecStartPre=+ (never by hand):
+# hand work/<id> and the owner's project cache to the unit's throwaway user.
+# Before the unit's first ExecStartPre= runs, systemd has created the unit's
+# RuntimeDirectory= (/run/turbopanel-build-<id>, which only root can create)
+# owned by that user, so the directory's owner names the user; it must be a uid
+# systemd hands out for DynamicUser=. The trees must still be the daemon's or
+# root's (or a build user's, from an earlier build).
+tp_verb_build_handover() {
+  exec </dev/null
+  [ $# -eq 3 ] || tp_die "build-handover: only build-handover BUILD-ID PROJECT-ID OWNER"
+  tp_build_id_ok "$1" || tp_die "build-handover: refusing build id $1"
+  tp_build_id_ok "$2" || tp_die "build-handover: refusing project id $2"
+  tp_build_owner_ok "$3" || tp_die "build-handover: refusing site owner $3"
+  tp_build_in_unit "$1" || tp_die "build-handover: run by turbopanel-build-$1.service only"
+  tp_pin_dir "$P/run/turbopanel-build-$1" ||
+    tp_die "build-handover: turbopanel-build-$1.service has no runtime directory"
+  _bh_uid="$(stat -c '%u' .)"
+  _bh_gid="$(stat -c '%g' .)"
+  tp_build_dyn_id_ok "$_bh_uid" && tp_build_dyn_id_ok "$_bh_gid" ||
+    tp_die "build-handover: the unit's runtime directory is owned by $_bh_uid:$_bh_gid, not a throwaway build user"
+  # Both trees are checked before either is changed.
+  tp_build_work_pin "$1"
+  tp_build_cache_pin "$3" "$2"
+  tp_run chown -R -h -P -- "$_bh_uid:$_bh_gid" .
+  tp_build_work_pin "$1"
+  tp_run chown -R -h -P -- "$_bh_uid:$_bh_gid" .
+}
+
+# Make caches/<owner> (root 0700) and caches/<owner>/<project> (0700) when
+# missing, pinning every step. Leaves the working directory in the project's.
+tp_build_cache_dir() {
+  tp_pin_dir "$R_BUILD_CACHE" || tp_die "no build directory $R_BUILD_CACHE (run the build-user role)"
+  mkdir -m 0700 -- "./$1" 2>/dev/null || [ -d "./$1" ] || tp_die "cannot create $R_BUILD_CACHE/$1"
+  tp_pin_dir "$R_BUILD_CACHE/$1" || tp_die "refusing $R_BUILD_CACHE/$1"
+  [ "$(stat -c '%u' .)" = "$ROOT_UID" ] || tp_die "refusing $R_BUILD_CACHE/$1: not owned by root"
+  mkdir -m 0700 -- "./$2" 2>/dev/null || [ -d "./$2" ] || tp_die "cannot create $R_BUILD_CACHE/$1/$2"
+  tp_build_cache_pin "$1" "$2"
+}
+
+# Pin caches/<owner>/<project>: a real directory owned by root (new) or by a
+# build's throwaway user. Leaves the working directory in it.
+tp_build_cache_pin() {
+  tp_pin_dir "$R_BUILD_CACHE/$1/$2" || tp_die "no build cache $R_BUILD_CACHE/$1/$2"
+  _bc_owner="$(stat -c '%u' .)"
+  [ "$_bc_owner" = "$ROOT_UID" ] || tp_build_dyn_id_ok "$_bc_owner" ||
+    tp_die "refusing $R_BUILD_CACHE/$1/$2: owned by uid $_bc_owner"
+}
+
+# Empty caches not built with for BUILD_CACHE_MAX_AGE_DAYS, and this owner's
+# project cache when it is over its cap. Runs with the host build lock held, so
+# no build unit is running. A cache is only a cache: emptying one costs a slower
+# next build. find -delete never follows a symlink; a cache directory is only
+# touched when both its owner and project names are well formed.
 tp_build_prune_cache() {
-  find . -mindepth 1 -maxdepth 1 -type d -mtime "+$BUILD_CACHE_MAX_AGE_DAYS" ! -name "$1" |
+  tp_pin_dir "$R_BUILD_CACHE" || tp_die "no build directory $R_BUILD_CACHE (run the build-user role)"
+  find . -mindepth 2 -maxdepth 2 -type d -mtime "+$BUILD_CACHE_MAX_AGE_DAYS" |
     while IFS= read -r _pc_dir; do
-      _pc_name="${_pc_dir#./}"
+      _pc_rel="${_pc_dir#./}"
+      _pc_owner="${_pc_rel%%/*}"
+      _pc_name="${_pc_rel#*/}"
+      [ "$_pc_rel" != "$1/$2" ] || continue
+      case "$_pc_owner" in ''|-*|*[!A-Za-z0-9_-]*) continue ;; esac
       tp_build_id_ok "$_pc_name" || continue
-      tp_run find "./$_pc_name" -mindepth 1 -delete
-      tp_run rmdir -- "./$_pc_name"
+      tp_run find "./$_pc_rel" -mindepth 1 -delete
+      tp_run rmdir -- "./$_pc_rel"
     done
-  [ -d "./$1" ] && [ ! -L "./$1" ] || return 0
-  _pc_kb="$(du -sk -x -- "./$1" 2>/dev/null | cut -f1)"
+  [ -d "./$1/$2" ] && [ ! -L "./$1" ] && [ ! -L "./$1/$2" ] || return 0
+  _pc_kb="$(du -sk -x -- "./$1/$2" 2>/dev/null | cut -f1)"
   case "$_pc_kb" in ''|*[!0-9]*) return 0 ;; esac
   if [ "$_pc_kb" -gt "$BUILD_CACHE_MAX_KB" ]; then
-    tp_run find "./$1" -mindepth 1 -delete
+    tp_run find "./$1/$2" -mindepth 1 -delete
   fi
-  tp_run touch -- "./$1"
+  tp_run touch -- "./$1/$2"
 }
 
 # Run by the transient unit build-run starts (never by hand): stop build $1
-# when its work tree or its project's cache holds more than the caps. Ends when
-# the build unit is gone.
+# when its work tree or its cache (owner $3, project $2) holds more than the
+# caps. Ends when the build unit is gone.
 tp_verb_build_watch() {
-  [ $# -eq 2 ] || tp_die "build-watch: only build-watch BUILD-ID PROJECT-ID"
+  [ $# -eq 3 ] || tp_die "build-watch: only build-watch BUILD-ID PROJECT-ID OWNER"
   tp_build_id_ok "$1" || tp_die "build-watch: refusing build id $1"
   tp_build_id_ok "$2" || tp_die "build-watch: refusing project id $2"
+  tp_build_owner_ok "$3" || tp_die "build-watch: refusing site owner $3"
   [ -n "$TP_TEST" ] || [ -n "${INVOCATION_ID:-}" ] ||
     tp_die "build-watch: started by build-run only"
   _bw_unit="turbopanel-build-$1.service"
@@ -3345,26 +3503,37 @@ tp_verb_build_watch() {
         [ "$_bw_wait" -le 12 ] || exit 0
         ;;
     esac
-    if [ "$_bw_seen" = 1 ] && tp_build_over_caps "$1" "$2"; then
+    if [ "$_bw_seen" = 1 ] && tp_build_over_caps "$1" "$2" "$3"; then
       printf 'tp-host: build %s stopped: its work tree or cache is over the disk limit\n' "$1" >&2
       tp_run systemctl stop -- "$_bw_unit"
       exit 0
     fi
+    [ -z "${BUILD_WATCH_ONCE:-}" ] || exit 0
     sleep "$BUILD_WATCH_SEC"
   done
 }
 
-# True when work/$1 or cache/$2 is over its size or inode cap.
+# True when work/$1, the cache of owner $3 and project $2, or the unit's
+# private /tmp and /var/tmp on the host (systemd 255) are over their caps.
 tp_build_over_caps() {
-  for _oc_pair in "work/$1:$BUILD_WORK_MAX_KB" "cache/$2:$BUILD_CACHE_MAX_KB"; do
-    _oc_path="$R_BUILD/${_oc_pair%:*}"
+  for _oc_pair in "$R_BUILD/work/$1:$BUILD_WORK_MAX_KB" "$R_BUILD_CACHE/$3/$2:$BUILD_CACHE_MAX_KB"; do
+    _oc_path="${_oc_pair%:*}"
     _oc_kb="$(du -sk -x -- "$_oc_path" 2>/dev/null | cut -f1)"
     _oc_n="$(du -s --inodes -x -- "$_oc_path" 2>/dev/null | cut -f1)"
     case "$_oc_kb" in ''|*[!0-9]*) _oc_kb=0 ;; esac
     case "$_oc_n" in ''|*[!0-9]*) _oc_n=0 ;; esac
-    [ "$_oc_kb" -le "${_oc_pair#*:}" ] || return 0
+    [ "$_oc_kb" -le "${_oc_pair##*:}" ] || return 0
     [ "$_oc_n" -le "$BUILD_TREE_MAX_INODES" ] || return 0
   done
+  _oc_tmp=0
+  for _oc_path in "$P"/tmp/systemd-private-*-"turbopanel-build-$1.service"-* \
+    "$P"/var/tmp/systemd-private-*-"turbopanel-build-$1.service"-*; do
+    [ -d "$_oc_path" ] && [ ! -L "$_oc_path" ] || continue
+    _oc_kb="$(du -sk -x -- "$_oc_path" 2>/dev/null | cut -f1)"
+    case "$_oc_kb" in ''|*[!0-9]*) _oc_kb=0 ;; esac
+    _oc_tmp=$((_oc_tmp + _oc_kb))
+  done
+  [ "$_oc_tmp" -le "$BUILD_TMP_MAX_KB" ] || return 0
   return 1
 }
 
@@ -3373,7 +3542,6 @@ tp_build_over_caps() {
 tp_verb_build_return() {
   [ $# -eq 1 ] || tp_die "build-return: only build-return BUILD-ID"
   tp_build_id_ok "$1" || tp_die "build-return: refusing build id $1"
-  tp_build_account_ok || tp_die "build-return: no confined $BUILD_ACCOUNT account"
   _bt_state="$(tp_build_unit_state "turbopanel-build-$1.service")"
   case "$_bt_state" in
     inactive|failed) ;;
@@ -3898,6 +4066,7 @@ case "$_verb" in
   build-run) tp_verb_build_run "$@" ;;
   build-return) tp_verb_build_return "$@" ;;
   build-watch) tp_verb_build_watch "$@" ;;
+  build-handover) tp_verb_build_handover "$@" ;;
   publish-open) tp_verb_publish_open "$@" ;;
   publish) tp_verb_publish "$@" ;;
   php-test) tp_verb_php_test "$@" ;;

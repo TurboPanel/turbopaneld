@@ -6,12 +6,17 @@
  * daemon account (which can reach the Docker socket, the daemon's state and
  * `sudo tp-host`). The daemon clones into `work/<buildId>` under
  * {@link BUILD_SANDBOX_ROOT}, writes a spec, and asks `tp-host build-run` to
- * hand the tree to the unprivileged build account and run the spec in a
- * transient `turbopanel-build-<buildId>.service` whose sandbox and limits
- * tp-host fixes (no docker or tp group, daemon trees and sockets hidden,
- * private-range and metadata egress denied, 4G memory, 2 CPUs, 30 minutes).
- * `build-return` gives the tree back only once that unit is gone, and only
- * then does the daemon read it (`./safe-copy.ts`, contained in `work/<id>`).
+ * run the spec in a transient `turbopanel-build-<buildId>.service` whose
+ * sandbox and limits tp-host fixes. The unit runs as a throwaway user systemd
+ * creates for that one run (`DynamicUser=yes`, never a host account, never in
+ * docker or tp), inside the site owner's own resource group
+ * (`turbopanel-<owner>-build.slice`), with daemon trees and sockets hidden,
+ * private-range and metadata egress denied, 4G memory, 2 CPUs, 30 minutes.
+ * The unit hands the tree to its user as it starts; `build-return` gives it
+ * back only once that unit is gone, and only then does the daemon read it
+ * (`./safe-copy.ts`, contained in `work/<id>`). Package caches live in
+ * `caches/<owner>/<project>`, one per site owner and project, handed to each
+ * build's user only while it runs; no other build can see them.
  *
  * Spec format and runner semantics: `orchestration/scripts/tp-build-runner`.
  */
@@ -44,6 +49,25 @@ const RUNNER_REFUSED_EXITS = new Set([64, 65]);
 
 /** `tp-host`'s id rule: lower-case letters, digits and `-`, not leading `-`. */
 const SANDBOX_ID_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
+/** Letters, digits, `_` and `-`, 1 to 32 of them. */
+const SANDBOX_OWNER_CHARS_RE = /^[\w-]{1,32}$/;
+
+/**
+ * The owner of a build nobody owns (an image build for a service with no site
+ * owner). tp-host runs it in `turbopanel-tpbuild.slice`, which no site owner's
+ * Linux user can own (their names never start with `tp`).
+ */
+export const BUILD_NO_OWNER = "tpbuild";
+
+/**
+ * `tp-host build-run`'s rule for the site owner's Linux user name: it names a
+ * slice (`turbopanel-<owner>-build.slice`, where a dash is a slice level) and a
+ * cache directory, so no leading, trailing or doubled dash.
+ */
+export function isSandboxOwnerName(owner: string): boolean {
+  return SANDBOX_OWNER_CHARS_RE.test(owner) && !owner.startsWith("-") &&
+    !owner.endsWith("-") && !owner.includes("--");
+}
 const SPEC_ENV_NAME_RE = /^[A-Za-z_]\w*$/;
 const SPEC_CWD_RE = /^[\w.@+,=/-]+$/;
 const SUDO_PATH = "/usr/sbin:/usr/bin:/sbin:/bin";
@@ -52,26 +76,32 @@ const ERROR_TAIL_LINES = 80;
 export type BuildWork = {
   /** `turbopanel-build-<buildId>.service`; also the `work/` entry name. */
   buildId: string;
-  /** The project's cache directory name (`cache/<projectKey>`). */
+  /** The project id: with {@link owner}, names the build's cache. */
   projectKey: string;
+  /**
+   * The site owner's Linux user. The build runs in that user's resource group
+   * (`turbopanel-<owner>-build.slice`) and keeps its cache apart from every
+   * other site owner's; it never runs as that user.
+   */
+  owner: string;
   /** `work/<buildId>`: the containment root for everything the build wrote. */
   workDir: string;
   /** The clone, inside {@link workDir}. */
   checkoutDir: string;
-  /** `cache/<projectKey>`, bound into the build unit at the same path. */
+  /** `caches/<owner>/<projectKey>`, bound into the build unit at the same path. */
   cacheDir: string;
 };
 
 /** Root-owned facts that mark a host whose builds must be sandboxed. */
 export type BuildSandboxMarkers = {
-  /** The account database the build account is looked up in. */
-  passwd: string;
+  /** The build-user role's root-owned tree. */
+  buildRoot: string;
   /** The managed install's root helper. */
   tpHost: string;
 };
 
 const HOST_MARKERS: BuildSandboxMarkers = {
-  passwd: "/etc/passwd",
+  buildRoot: BUILD_SANDBOX_ROOT,
   tpHost: join(PROD_LIB_DIR_DEFAULT, "tp-host"),
 };
 
@@ -96,14 +126,11 @@ const MANAGED = {
 export async function buildSandboxEnabled(
   markers: BuildSandboxMarkers = HOST_MARKERS,
 ): Promise<boolean> {
-  const [account, helper] = await Promise.all([
-    Deno.readTextFile(markers.passwd).then(
-      (text) => text.split("\n").some((line) => line.startsWith("tpbuild:")),
-      () => false,
-    ),
+  const [tree, helper] = await Promise.all([
+    lstatOrNull(markers.buildRoot).then((info) => info !== null, () => true),
     lstatOrNull(markers.tpHost).then((info) => info !== null, () => true),
   ]);
-  return account || helper;
+  return tree || helper;
 }
 
 /**
@@ -111,12 +138,23 @@ export async function buildSandboxEnabled(
  * release, so a rerun after a crash finds (and reclaims) the same tree.
  */
 export async function resolveBuildWork(
-  params: { serviceId: string; releaseId: string; projectId: string },
+  params: {
+    serviceId: string;
+    releaseId: string;
+    projectId: string;
+    /** The site owner's Linux user. */
+    owner: string;
+  },
   root: string = BUILD_SANDBOX_ROOT,
 ): Promise<BuildWork> {
   if (!SANDBOX_ID_RE.test(params.projectId)) {
     throw new Error(
       `project id ${params.projectId} cannot name a build cache directory`,
+    );
+  }
+  if (!isSandboxOwnerName(params.owner)) {
+    throw new Error(
+      `site owner ${params.owner} cannot own a sandboxed build`,
     );
   }
   const digest = await crypto.subtle.digest(
@@ -128,9 +166,10 @@ export async function resolveBuildWork(
   return {
     buildId,
     projectKey: params.projectId,
+    owner: params.owner,
     workDir,
     checkoutDir: join(workDir, "source"),
-    cacheDir: join(root, "cache", params.projectId),
+    cacheDir: join(root, "caches", params.owner, params.projectId),
   };
 }
 
@@ -296,6 +335,7 @@ export async function sweepStaleBuildWork(
       return {
         buildId: name,
         projectKey: "",
+        owner: "",
         workDir,
         checkoutDir: join(workDir, "source"),
         cacheDir: "",
@@ -522,7 +562,10 @@ async function runBuildUnit(
     ((text: string) => redactCommandSummary(text));
   const timeoutMs = params.timeoutMs ?? SANDBOX_BUILD_TIMEOUT_MS;
   const child = (params.spawn ?? spawnSudo)(
-    hostSudoArgs(["-n", "build-run", work.buildId, work.projectKey], MANAGED),
+    hostSudoArgs(
+      ["-n", "build-run", work.buildId, work.projectKey, work.owner],
+      MANAGED,
+    ),
   );
   let aborted: Promise<void> | null = null;
   let abortReason = `build timed out after ${timeoutMs}ms`;

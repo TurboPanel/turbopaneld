@@ -785,32 +785,61 @@ it regresses:
   - allows `systemctl` verbs on `turbopanel*` / `wg-quick@tp0` / `ssh(d)`
     units, fixed `journalctl`/`ss`/`sshd -t|-T`/`sysctl`/`ip`/`wg` shapes, and
     xtables without `--modprobe` or rule files.
-  - starts tenant builds only through `build-run <build-id> <project-id>`
-    (ids `[a-z0-9-]{1,64}`, nothing else in argv): it checks the `tpbuild`
-    account (service band, own group, only `tpnode*` supplementary groups)
-    and the root-owned `/var/lib/turbopanel-build/{work,cache}` layout, takes
-    a host-wide lock (one build at a time), hands the pinned `work/<id>` to
-    `tpbuild` (`chown -R -h -P`), and execs `systemd-run --wait --pipe` with a
-    fixed property set (`NoNewPrivileges`, no capabilities,
-    `ProtectSystem=strict`, private tmp/devices/IPC/PIDs, the daemon's trees,
-    principal homes, Docker/containerd/gate sockets and `/etc/ssh` made
-    inaccessible, private/link-local/CGNAT egress denied except the host's
-    literal nameservers, loopback open but port-filtered per `tpbuild` uid by
-    `lib/tp-build-loopback` (nftables table `inet turbopanel_build`, loaded by
-    `build-run` and again as the unit's `ExecStartPre=+`; no `nft` or a load
-    failure means the build does not start), 4G memory, 200% CPU, 1800 s, `tpbuild.slice`)
-    whose only command is `/bin/sh` on `lib/tp-build-runner`, loaded as a
-    systemd credential (PID 1 reads it; the build account gets a private
-    copy); the spec rides
-    stdin to the runner (format in its header). Below systemd 255 (Debian 13 /
-    Ubuntu 24.04 floor) it warns and drops the newer properties, below 247 it
-    refuses. `build-return <build-id>` chowns the tree back to the caller only
-    once `turbopanel-build-<id>.service` is inactive; abort is
-    `systemctl stop turbopanel-build-<id>.service`. `turbopanel-build-*.service`
-    unit files are refused at install. On a managed host the daemon sends
-    every native/static release build through it
-    (`src/deploy/release/build-sandbox.ts`), so no tenant build command runs
-    as `tp`;
+  - starts tenant builds only through
+    `build-run <build-id> <project-id> <owner>` (ids `[a-z0-9-]{1,64}`; the
+    owner is the site owner's Linux user, an existing principal with a plain
+    name and no `--`, or `tpbuild` for a build nobody owns; nothing else in
+    argv). Every build runs as a **throwaway user systemd creates for that one
+    run** (`DynamicUser=yes`, `User=tpb-<16 hex of sha256(owner/project)>`: a
+    uid from systemd's 61184-65519 range that exists only while the unit runs,
+    never a host account, never in docker/tp/sudo, refused if a host account
+    or group already has that name), with every `tpnode<series>` group as
+    `SupplementaryGroups=`, inside the **site owner's own resource group**
+    (`Slice=turbopanel-<owner>-build.slice`, a child of the owner's
+    `turbopanel-<owner>.slice`, so a build counts against whatever limits that
+    slice carries; `turbopanel-tpbuild.slice` with no owner; `<name>-build` is
+    reserved as a principal name and both slice names are refused as unit
+    files). It checks the root-owned
+    `/var/lib/turbopanel-build/{work,caches}` layout, takes a host-wide lock
+    (one build at a time), makes `caches/<owner>/<project>` (root 0700 dirs;
+    a cache is never shared between site owners or projects), and execs
+    `systemd-run --wait --pipe` with a fixed property set (`NoNewPrivileges`,
+    no capabilities, `ProtectSystem=strict`, systemd's private tmp, private
+    devices/IPC/PIDs, the daemon's trees, principal homes,
+    Docker/containerd/gate sockets and `/etc/ssh` made inaccessible,
+    `/var/lib/turbopanel-build` a read-only tmpfs with only this build's work
+    tree and cache bound in, private/link-local/CGNAT egress denied except
+    the host's literal nameservers, loopback open but port-filtered for the
+    unit's own cgroup by `lib/tp-build-loopback` (nftables table
+    `inet turbopanel_build`, `socket cgroupv2 level N "<unit cgroup>"`; loaded
+    empty by `build-run` to prove nft works, then with the build's rules as the
+    unit's first `ExecStartPre=+`, from inside the unit's cgroup; no `nft` or a
+    load failure means the build does not start), 4G memory, 200% CPU, 1800 s).
+    The unit's second `ExecStartPre=+` is `tp-host build-handover <id>
+    <project> <owner>`: refused unless it runs inside that unit's own cgroup,
+    it reads the throwaway uid from the unit's `RuntimeDirectory=`
+    (`/run/turbopanel-build-<id>`, created by systemd owned by that user;
+    read-only to the build so it cannot fill `/run`) and hands the pinned
+    cache and work tree to it (`chown -R -h -P`). The only command is
+    `/bin/sh` on `lib/tp-build-runner`, loaded as a systemd credential (PID 1
+    reads it; the build's user gets a private copy); the spec rides stdin to
+    the runner (format in its header; `TMPDIR` is `<work>/tmp`, because
+    `DynamicUser=` always gives the unit systemd's own private `/tmp`: a 10%
+    of RAM tmpfs on systemd 257, host `/tmp` on 255, which `build-watch`
+    caps). Not `CacheDirectory=`: on systemd 257 with `DynamicUser=` it is
+    owned by `nobody` on disk and mounted `noexec`, which breaks `npx`/`pnpm
+    dlx`. Below systemd 255 (Debian 13 / Ubuntu 24.04 floor) it warns and
+    drops the newer properties, below 247 it refuses. `build-return
+    <build-id>` chowns the tree back to the caller only once
+    `turbopanel-build-<id>.service` is inactive; abort is `systemctl stop
+    turbopanel-build-<id>.service`. `turbopanel-build-*.service` unit files
+    are refused at install. On a managed host the daemon sends every
+    native/static release build, and the image builder's prepare step,
+    through it (`src/deploy/release/build-sandbox.ts`,
+    `src/deploy/release/image-prepare-sandbox.ts`), so no tenant build command
+    and no repository-reading build tool runs as `tp`. The shared `tpbuild`
+    account, its cache and `tpbuild.slice` are retired (the `build-user` role
+    removes them; uid 9994 stays reserved);
     **Build loopback (plain words):** Turbopack's helper processes talk over
     127.0.0.1 on ports the build picks, so the build may use loopback. The
     build is refused every known platform port (list in one place,
@@ -1062,7 +1091,7 @@ and the mount kept). There is one copy of that function. A Docker apt
 
 **Post-check rules (what "left over" means).** The final inventory must
 match what can exist after the purge. A `.slice` unit that systemd still
-reports as loaded but with no unit file and inactive (`tpbuild.slice`) is gone
+reports as loaded but with no unit file and inactive (the retired `tpbuild.slice`) is gone
 (`tp_unit_present`). Once Docker Engine was purged (`TP_DOCKER_ENGINE_GONE`)
 the final inventory skips Docker, so the `<id>-in` containers removed with it
 are not reported. Anything else still on disk stays a failure. When the Docker daemon is not answering at the final check, the pre-purge container and network lists are carried forward only if the removal step itself was skipped (`TP_DOCKER_LEFT`); a daemon that is gone after a removal that ran holds nothing, so it is never a false failure. The purge also

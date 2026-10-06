@@ -519,6 +519,8 @@ test("applySourceReleases railpack prune logs superseded releases and optional m
               frontendLayoutDir: "/tmp/frontend",
               frontendDigest: "sha256:front",
             }),
+          // A development host: the prepare step runs unsandboxed here.
+          sandboxedBuilds: false,
           runRailpackBuildFn: (params) => {
             assertEquals(params.redactSummary?.("token"), "token");
             return Promise.resolve({

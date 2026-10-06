@@ -99,9 +99,13 @@ test("the runner runs each command in order, in cwd, from a clean environment", 
     assertEquals(result.code, 0, result.stderr);
     assertEquals(
       result.stdout,
-      `two words\nand a line\n|/opt/node/bin:/usr/bin:/bin|${work}|/tmp|unset||${work}/app|second\n`,
+      `two words\nand a line\n|/opt/node/bin:/usr/bin:/bin|${work}|${work}/tmp|unset||${work}/app|second\n`,
     );
     assertEquals(result.stderr, "to-stderr\n");
+    // Temporary files live in the work tree, private to the build.
+    const tmp = await Deno.stat(`${work}/tmp`);
+    assertEquals(tmp.isDirectory, true);
+    assertEquals((tmp.mode ?? 0) & 0o777, 0o700);
   });
 });
 

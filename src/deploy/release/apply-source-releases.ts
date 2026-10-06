@@ -59,6 +59,7 @@ import {
   runReleaseBuild,
 } from "./build.ts";
 import {
+  BUILD_NO_OWNER,
   buildSandboxEnabled,
   type BuildSandboxMarkers,
   buildSpecCwd,
@@ -68,6 +69,7 @@ import {
   resolveBuildWork,
   sweepStaleBuildWork,
 } from "./build-sandbox.ts";
+import type { ImagePrepareSandbox } from "./image-prepare-sandbox.ts";
 import {
   nativeAppNodeBinary,
   nativeAppRuntimeGroup,
@@ -391,8 +393,9 @@ async function rollbackOneRelease(
  * lanes' history lives in one place and rollback can restore this release by
  * re-running its tag instead of re-cloning and rebuilding.
  *
- * The scratch checkout is removed in the caller's `finally`, exactly as on the
- * native lane — a clone never lands anywhere but scratch.
+ * The checkout is removed in the caller's `finally`, exactly as on the native
+ * lane: scratch, or on a managed host the build sandbox's work tree, where the
+ * prepare step runs as a throwaway build user.
  */
 async function applyRailpackRelease(
   layout: LayoutPaths,
@@ -405,6 +408,8 @@ async function applyRailpackRelease(
     commitSha: string;
     deps: ApplySourceReleasesDeps;
     onOutput: ReleaseOutputHandler;
+    /** The build sandbox the prepare step runs in (every managed host). */
+    sandbox?: ImagePrepareSandbox;
   },
 ): Promise<AppliedRelease> {
   const { deps, onOutput, serviceId } = params;
@@ -424,6 +429,7 @@ async function applyRailpackRelease(
     onOutput,
     redactSummary: (text) => logSink.redactSummary(text),
     ...(deps.cancel === undefined ? {} : { signal: deps.cancel.signal }),
+    ...(params.sandbox === undefined ? {} : { sandbox: params.sandbox }),
   });
 
   // Recording the image is not a switch (compose `up` is), so this is a
@@ -754,22 +760,46 @@ async function buildRailpackRelease(
     paths,
   );
   await resetReleaseScratchDir(paths);
+  let work: BuildWork | null = null;
   try {
+    // The prepare step interprets the repository: on a managed host it runs
+    // in the build sandbox like any other build, in the site owner's slice
+    // (or the platform's own build slice when the service has no owner).
+    work = await prepareBuildWork(payload, entry, {
+      serviceId,
+      owner: entry.principal?.username ?? BUILD_NO_OWNER,
+      deps,
+    });
     logSink.setPhase(COMMAND_LOG_PHASES.FETCH);
-    const checkout = await checkoutForEntry(entry, paths, deps, onOutput);
+    const checkout = await checkoutForEntry(
+      entry,
+      paths,
+      deps,
+      onOutput,
+      work?.checkoutDir,
+    );
 
     // Same `build` phase the native lane uses — an operator reading the
     // transcript should not have to learn a second phase name to find out why
     // their image did not build.
     logSink.setPhase(COMMAND_LOG_PHASES.BUILD);
+    if (work) await assertCheckoutCredentialsRemoved(paths.scratchDir);
     return await applyRailpackRelease(layout, payload, entry, paths, {
       serviceId,
       buildWorkingDir: buildWorkingDirFor(entry, checkout.workingDir),
       commitSha: checkout.commitSha,
       deps,
       onOutput,
+      ...(work === null ? {} : {
+        sandbox: definedFields({
+          work,
+          cwd: buildSpecCwd(entry.subdirectory),
+          runFn: deps.runFn,
+        }),
+      }),
     });
   } finally {
+    if (work) await removeBuildWork(work, onOutput);
     await removeReleaseScratchDir(paths);
   }
 }
@@ -801,7 +831,11 @@ async function buildNativeRelease(
   await resetReleaseScratchDir(paths);
   let work: BuildWork | null = null;
   try {
-    work = await prepareBuildWork(payload, entry, serviceId, deps);
+    work = await prepareBuildWork(payload, entry, {
+      serviceId,
+      owner: username,
+      deps,
+    });
     logSink.setPhase(COMMAND_LOG_PHASES.FETCH);
     const checkout = await checkoutForEntry(
       entry,
@@ -908,9 +942,14 @@ async function buildNativeRelease(
 async function prepareBuildWork(
   payload: EnvironmentDeployPayload,
   entry: EnvironmentDeploySource,
-  serviceId: string,
-  deps: ApplySourceReleasesDeps,
+  params: {
+    serviceId: string;
+    /** The site owner's Linux user: the build's resource group and cache. */
+    owner: string;
+    deps: ApplySourceReleasesDeps;
+  },
 ): Promise<BuildWork | null> {
+  const { serviceId, owner, deps } = params;
   const sandboxed = deps.sandboxedBuilds ??
     await buildSandboxEnabled(deps.buildSandboxMarkers);
   if (!sandboxed) return null;
@@ -919,7 +958,12 @@ async function prepareBuildWork(
     onOutput: (stream, line) => deps.logSink.onLine(stream, line),
   });
   const work = await resolveBuildWork(
-    { serviceId, releaseId: entry.releaseId, projectId: payload.projectId },
+    {
+      serviceId,
+      releaseId: entry.releaseId,
+      projectId: payload.projectId,
+      owner,
+    },
     deps.buildSandboxRoot,
   );
   await createBuildWorkDir(work, deps.runFn);

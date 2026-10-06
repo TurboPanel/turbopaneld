@@ -68,6 +68,12 @@ import type { LayoutPaths } from "../../paths/layout.ts";
 import type { EnvironmentDeploySourceBuild } from "../../contracts/commands-contracts.ts";
 import type { ReleaseOutputHandler } from "./checkout.ts";
 import { throwIfAborted, withCancelSignal } from "../deploy-cancel.ts";
+import { sandboxBuildEnvironment } from "./build.ts";
+import { definedFields } from "../../util/optional-fields.ts";
+import {
+  type ImagePrepareSandbox,
+  prepareImagePlanInSandbox,
+} from "./image-prepare-sandbox.ts";
 
 /** Keep in step with orchestration/roles/buildkit/defaults/main.yml. */
 export const RAILPACK_VERSION = "0.9.0";
@@ -545,9 +551,18 @@ function railpackToolEnvironment(
     if (RESERVED_BUILD_ENV_KEYS.has(key)) continue;
     env[key] = value;
   }
-  // Advisory overrides. Railpack's own detection is the default; when an
-  // operator typed a command we hand it over and let Railpack decide whether
-  // the provider it detected has a slot for it.
+  return { ...env, ...builderCommandOverrides(build) };
+}
+
+/**
+ * Advisory overrides. The image builder's own detection is the default; when
+ * an operator typed a command we hand it over and let the builder decide
+ * whether the provider it detected has a slot for it.
+ */
+function builderCommandOverrides(
+  build: EnvironmentDeploySourceBuild,
+): Record<string, string> {
+  const env: Record<string, string> = {};
   if (build.installCommand) env.RAILPACK_INSTALL_CMD = build.installCommand;
   if (build.buildCommand) env.RAILPACK_BUILD_CMD = build.buildCommand;
   if (build.startCommand) env.RAILPACK_START_CMD = build.startCommand;
@@ -635,6 +650,12 @@ export type RailpackBuildParams = {
   redactSummary?: CommandSummaryRedactor;
   /** Cancel signal of the deploy; aborting it stops the build. */
   signal?: AbortSignal;
+  /**
+   * On a managed host: run the prepare step in the build sandbox (as a
+   * throwaway user, in the site owner's build slice) instead of as the daemon.
+   * `workingDir` is then the checkout inside `sandbox.work`.
+   */
+  sandbox?: ImagePrepareSandbox;
 };
 
 /** Optional test seams for {@link runRailpackBuild}. */
@@ -867,6 +888,39 @@ async function resolveBuiltImageDigest(
 }
 
 /**
+ * The prepare step on a managed host: it reads and interprets the repository,
+ * so it runs in the build sandbox, never as the daemon account. The sandbox
+ * env drops every variable the native lane drops (`LD_*`, `BASH_ENV`,
+ * `GIT_CONFIG_*`, …) and the runner sets its own `PATH`, `HOME` and `TMPDIR`.
+ */
+async function prepareInSandbox(
+  params: RailpackBuildParams,
+  sandbox: ImagePrepareSandbox,
+  planPath: string,
+): Promise<void> {
+  await prepareImagePlanInSandbox(definedFields({
+    sandbox,
+    tool: params.tools.railpack,
+    toolName: "image-builder",
+    args: ["prepare", "."],
+    planFlag: "--plan-out",
+    env: {
+      ...sandboxBuildEnvironment(
+        params.build,
+        sandbox.work,
+        undefined,
+        params.onOutput,
+      ),
+      ...builderCommandOverrides(params.build),
+    },
+    planDest: planPath,
+    onOutput: params.onOutput,
+    redactSummary: params.redactSummary,
+    signal: params.signal,
+  }));
+}
+
+/**
  * `railpack prepare` → `docker buildx build` (Railpack gateway frontend on the
  * Engine's BuildKit, `--load`ed into the image store).
  *
@@ -907,11 +961,15 @@ export async function runRailpackBuild(
   await assertBuildxAvailable(runDocker, redact);
 
   params.onOutput?.("stdout", "$ railpack prepare");
-  await runTool(
-    params.tools.railpack,
-    ["prepare", params.workingDir, "--plan-out", planPath],
-    { ...toolOptions, label: "railpack prepare" },
-  );
+  if (params.sandbox) {
+    await prepareInSandbox(params, params.sandbox, planPath);
+  } else {
+    await runTool(
+      params.tools.railpack,
+      ["prepare", params.workingDir, "--plan-out", planPath],
+      { ...toolOptions, label: "railpack prepare" },
+    );
+  }
 
   await ensureFrontendImage(
     params,
