@@ -1904,22 +1904,34 @@ function addWwwRedirectSites(
 ): void {
   for (const hosting of hostings) {
     if ((hosting.protocol ?? "http") !== "http") continue;
-    const acme = hosting.tlsMode === "acme";
     for (const { from, to } of hostingWwwRedirects(hosting)) {
       if (byHostname.has(from)) continue;
-      // Follow what the target site actually serves (every path of it).
-      const target = byHostname.get(to);
-      byHostname.set(from, {
-        forceHttps: target
-          ? emitHttpsSite(target.forceHttps, target.tlsMode)
-          : acme || (hosting.proxy?.forceHttps ?? true),
-        routes: [],
-        redirectTo: to,
-        ...(acme ? { tlsMode: "acme" as const } : {}),
-        ...(hosting.bindAddress ? { bindAddress: hosting.bindAddress } : {}),
-      });
+      byHostname.set(from, redirectSiteFor(hosting, to, byHostname.get(to)));
     }
   }
+}
+
+/**
+ * The redirect-only site for one name: the hosting's TLS mode and bind
+ * address, and the HTTPS setting the target site actually serves (every path
+ * of it), so the redirect never lands on a scheme the target lacks.
+ */
+function redirectSiteFor(
+  hosting: EnvironmentDeployHosting,
+  to: string,
+  target: HostnameSite | undefined,
+): HostnameSite {
+  const acme = hosting.tlsMode === "acme";
+  const forceHttps = target
+    ? emitHttpsSite(target.forceHttps, target.tlsMode)
+    : acme || (hosting.proxy?.forceHttps ?? true);
+  return {
+    forceHttps,
+    routes: [],
+    redirectTo: to,
+    ...(acme ? { tlsMode: "acme" as const } : {}),
+    ...(hosting.bindAddress ? { bindAddress: hosting.bindAddress } : {}),
+  };
 }
 
 /** Companion manifest naming which of an environment's hostnames run tlsMode: 'acme'. */
