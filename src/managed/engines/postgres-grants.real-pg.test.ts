@@ -1,5 +1,6 @@
 import { assertEquals, assertStringIncludes } from "@std/assert";
 import type { ManagedApplyCredential } from "../../contracts/commands-contracts.ts";
+import { forEachSequential } from "../../util/sequential.ts";
 import { createDatabaseSql } from "./postgres-sql.ts";
 import { postgresManagedEngineRuntime } from "./postgres.ts";
 import type { ManagedEngineContext } from "./types.ts";
@@ -30,6 +31,9 @@ const SERIES = (Deno.env.get("TURBOPANEL_REAL_POSTGRES_SERIES") ?? "16,18")
 const REQUIRE = Deno.env.get("TURBOPANEL_REQUIRE_REAL_POSTGRES") === "1";
 const WANTED = Deno.env.get("TURBOPANEL_REAL_POSTGRES") === "1" ||
   Deno.env.get("CI") === "true";
+
+const DENIED = "permission denied";
+const NO_DATABASE_ACCESS = "permission denied for database";
 
 type Run = { success: boolean; stdout: string; stderr: string };
 
@@ -202,7 +206,7 @@ async function proveLogins(
   const trigger =
     `CREATE FUNCTION public.rw_fn() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END';
     CREATE TRIGGER rw_trg BEFORE INSERT ON public.orders FOR EACH ROW EXECUTE FUNCTION public.rw_fn();`;
-  await expectRefused(session, "rw", "appdb", trigger, "permission denied");
+  await expectRefused(session, "rw", "appdb", trigger, DENIED);
   await expectRefused(
     session,
     "rw",
@@ -222,7 +226,7 @@ async function proveLogins(
     "rw",
     "appdb",
     `CREATE ROLE sneaky;`,
-    "permission denied",
+    DENIED,
   );
   // Exactly the five table privileges, no REFERENCES or TRIGGER.
   const held = await session.value(
@@ -287,42 +291,42 @@ async function proveLogins(
     "ro",
     "appdb",
     lifted(`INSERT INTO public.orders (note) VALUES ('x');`),
-    "permission denied",
+    DENIED,
   );
   await expectRefused(
     session,
     "ro",
     "appdb",
     lifted(`SELECT nextval('public.orders_id_seq');`),
-    "permission denied",
+    DENIED,
   );
   await expectRefused(
     session,
     "ro",
     "appdb",
     lifted(`CREATE TABLE public.ro_made (id int);`),
-    "permission denied",
+    DENIED,
   );
   await expectRefused(
     session,
     "ro",
     "appdb",
     lifted(`CREATE SCHEMA ro_schema;`),
-    "permission denied",
+    DENIED,
   );
   await expectRefused(
     session,
     "ro",
     "appdb",
     lifted(`CREATE TEMP TABLE t (id int);`),
-    "permission denied",
+    DENIED,
   );
   await expectRefused(
     session,
     "ro",
     "appdb",
     lifted(`TRUNCATE public.orders;`),
-    "permission denied",
+    DENIED,
   );
 
   // Lock-down: nobody gets in by default.
@@ -331,21 +335,21 @@ async function proveLogins(
     "stranger",
     "appdb",
     `SELECT 1;`,
-    "permission denied for database",
+    NO_DATABASE_ACCESS,
   );
   await expectRefused(
     session,
     "rw",
     "other",
     `SELECT 1;`,
-    "permission denied for database",
+    NO_DATABASE_ACCESS,
   );
   await expectRefused(
     session,
     "ro",
     "postgres",
     `SELECT 1;`,
-    "permission denied for database",
+    NO_DATABASE_ACCESS,
   );
   // A ProxySQL monitor login (member of pg_monitor) still reaches `postgres`.
   await session.value(
@@ -358,7 +362,7 @@ async function proveLogins(
     "mon",
     "appdb",
     `SELECT 1;`,
-    "permission denied for database",
+    NO_DATABASE_ACCESS,
   );
 }
 
@@ -387,7 +391,7 @@ async function proveOldClusterIsCorrected(
     "t",
   );
   await applyAgain();
-  for (const table of ["orders", "later"]) {
+  await forEachSequential(["orders", "later"], async (table) => {
     assertEquals(
       await session.value(
         `SELECT has_table_privilege('rw', 'public.${table}', 'TRIGGER') OR has_table_privilege('rw', 'public.${table}', 'REFERENCES')`,
@@ -396,7 +400,7 @@ async function proveOldClusterIsCorrected(
       "f",
       `${table} still carries TRIGGER or REFERENCES for the read-write login`,
     );
-  }
+  });
   await expectAllowed(
     session,
     "own",
