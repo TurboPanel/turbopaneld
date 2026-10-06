@@ -153,10 +153,10 @@ test("revokeUnlistedDatabasesSql keeps only the listed databases and quotes name
   assertThrows(() => revokeUnlistedDatabasesSql("bad name", []), Error);
 });
 
-test("monitor role may connect to the maintenance database", () => {
+test("the lock-down keeps the ProxySQL monitors connected through pg_monitor", () => {
   assertEquals(
-    ensureProxySqlMonitorRoleSql("tp_monitor", "pw").includes(
-      'GRANT CONNECT ON DATABASE postgres TO "tp_monitor";',
+    revokePublicDatabaseAccessSql().endsWith(
+      "GRANT CONNECT ON DATABASE postgres TO pg_monitor;",
     ),
     true,
   );

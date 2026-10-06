@@ -200,7 +200,10 @@ test("applyCredentials gives a login with no recognised level no database at all
     ),
     true,
   );
-  assertEquals(inputs.some((i) => i.includes("GRANT CONNECT")), false);
+  assertEquals(
+    inputs.some((i) => i.includes('GRANT CONNECT ON DATABASE "')),
+    false,
+  );
   // No database is reconciled for it.
   assertEquals(
     calls.every((c) => c.argv[c.argv.indexOf("-d") + 1] === "postgres"),

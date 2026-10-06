@@ -70,9 +70,6 @@ export function ensureProxySqlMonitorRoleSql(
       superuser: false,
     }),
     `GRANT pg_monitor TO ${quoteIdentifier(username)};`,
-    // The public connect default is revoked (`revokePublicDatabaseAccessSql`);
-    // the monitor dials the maintenance database, so it gets its own grant.
-    grantMonitorConnectSql(username),
   ].join("\n");
 }
 
@@ -234,6 +231,7 @@ export function revokePublicDatabaseAccessSql(): string {
     `  END LOOP;`,
     `END`,
     `$turbopanel$;`,
+    grantMonitorConnectSql(),
   ].join("\n");
 }
 
@@ -264,11 +262,13 @@ export function revokeUnlistedDatabasesSql(
 }
 
 /**
- * The maintenance database accepts the ProxySQL health-check login only; the
- * public default is gone, so grant it explicitly.
+ * ProxySQL's health checks dial the maintenance database as a login that is a
+ * member of `pg_monitor`. With the public default gone, give that predefined
+ * role the connect right: every such login (one per fronting server) inherits
+ * it, including ones this apply does not name.
  */
-export function grantMonitorConnectSql(username: string): string {
-  return `GRANT CONNECT ON DATABASE postgres TO ${quoteIdentifier(username)};`;
+export function grantMonitorConnectSql(): string {
+  return `GRANT CONNECT ON DATABASE postgres TO pg_monitor;`;
 }
 
 /**
