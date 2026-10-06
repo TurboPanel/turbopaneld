@@ -9,7 +9,10 @@
  */
 
 import { assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
-import type { DockerCliResult } from "../deploy/docker-cli.ts";
+import type {
+  DockerCliResult,
+  RunDockerOptions,
+} from "../deploy/docker-cli.ts";
 import {
   readSystemComponentDescriptor,
   SYSTEM_MANAGED_INGRESS_COMPONENT,
@@ -22,6 +25,10 @@ import {
   proxysqlConfigPath,
 } from "../managed/engine-paths.ts";
 import { readPublishedBindAddressesFromCompose } from "../managed/proxysql.ts";
+import {
+  createFakeProxySqlAdmin,
+  type FakeProxySqlAdmin,
+} from "../testing/fake-proxysql-admin.ts";
 import {
   type TempLayoutFixture,
   withTempLayout,
@@ -108,9 +115,20 @@ async function seedFixture(fixture: TempLayoutFixture): Promise<void> {
   );
 }
 
-function fakeRun(): (args: string[]) => Promise<DockerCliResult> {
-  return (_args: string[]) =>
-    Promise.resolve({ success: true, stdout: "", stderr: "", code: 0 });
+/**
+ * Stands in for the ProxySQL admin interface: applies land in an in-memory
+ * runtime table the handler then reads back (see `fake-proxysql-admin.ts`).
+ */
+const proxysqlAdmin = createFakeProxySqlAdmin();
+
+function fakeRun(
+  admin: FakeProxySqlAdmin = proxysqlAdmin,
+): (args: string[], options?: RunDockerOptions) => Promise<DockerCliResult> {
+  return (args, options) =>
+    Promise.resolve(
+      admin.run(args, options) ??
+        { success: true, stdout: "", stderr: "", code: 0 },
+    );
 }
 
 function runningProxySqlPsStdout(): string {
@@ -129,8 +147,9 @@ function runningProxySqlPsStdout(): string {
 /** `compose ps` reports the allocated ProxySQL container as running. */
 function fakeRunWithRunningProxySql(): (
   args: string[],
+  options?: RunDockerOptions,
 ) => Promise<DockerCliResult> {
-  return (args) => {
+  return (args, options) => {
     if (args.includes("ps")) {
       return Promise.resolve({
         success: true,
@@ -139,7 +158,7 @@ function fakeRunWithRunningProxySql(): (
         code: 0,
       });
     }
-    return fakeRun()(args);
+    return fakeRun()(args, options);
   };
 }
 
@@ -343,9 +362,9 @@ test({
           basePayload(),
           new Date().toISOString(),
           {
-            runDocker: (args) => {
+            runDocker: (args, options) => {
               dockerArgs.push([...args]);
-              return fakeRun()(args);
+              return fakeRun()(args, options);
             },
             decryptSecrets: decryptSecretsEcho,
             ensureDocker: () => Promise.resolve(),
@@ -477,7 +496,7 @@ test({
               basePayload(),
               new Date().toISOString(),
               {
-                runDocker: (args) => {
+                runDocker: (args, options) => {
                   if (args.includes("up")) {
                     return Promise.resolve({
                       success: false,
@@ -486,7 +505,7 @@ test({
                       code: 1,
                     });
                   }
-                  return fakeRun()(args);
+                  return fakeRun()(args, options);
                 },
                 ensureDocker: () => Promise.resolve(),
                 decryptSecrets: decryptSecretsEcho,
@@ -519,7 +538,7 @@ test({
           basePayload(),
           new Date().toISOString(),
           {
-            runDocker: (args) => {
+            runDocker: (args, options) => {
               dockerArgs.push([...args]);
               if (args.includes("up")) {
                 upCount += 1;
@@ -533,7 +552,7 @@ test({
                   });
                 }
               }
-              return fakeRun()(args);
+              return fakeRun()(args, options);
             },
             decryptSecrets: decryptSecretsEcho,
             ensureDocker: () => Promise.resolve(),
@@ -604,7 +623,7 @@ test({
           basePayload(),
           new Date().toISOString(),
           {
-            runDocker: (args) => {
+            runDocker: (args, options) => {
               if (args.includes("ps")) {
                 return Promise.resolve({
                   success: false,
@@ -613,7 +632,7 @@ test({
                   code: 1,
                 });
               }
-              return fakeRun()(args);
+              return fakeRun()(args, options);
             },
             ensureDocker: () => Promise.resolve(),
             decryptSecrets: decryptSecretsEcho,
@@ -643,7 +662,7 @@ test({
           basePayload(),
           new Date().toISOString(),
           {
-            runDocker: (args) => {
+            runDocker: (args, options) => {
               if (args.includes("ps")) {
                 return Promise.resolve({
                   success: true,
@@ -652,7 +671,7 @@ test({
                   code: 0,
                 });
               }
-              return fakeRun()(args);
+              return fakeRun()(args, options);
             },
             ensureDocker: () => Promise.resolve(),
             decryptSecrets: decryptSecretsEcho,
@@ -691,7 +710,7 @@ test({
           },
           new Date().toISOString(),
           {
-            runDocker: (args) => {
+            runDocker: (args, options) => {
               dockerArgs.push([...args]);
               if (args[0] === "network" && args[1] === "inspect") {
                 return Promise.resolve({
@@ -701,7 +720,7 @@ test({
                   code: 0,
                 });
               }
-              return fakeRun()(args);
+              return fakeRun()(args, options);
             },
             ensureDocker: () => Promise.resolve(),
             decryptSecrets: (ciphertexts) => {
@@ -766,7 +785,7 @@ test({
           },
           new Date().toISOString(),
           {
-            runDocker: (args) => {
+            runDocker: (args, options) => {
               dockerArgs.push([...args]);
               if (args[0] === "network" && args[1] === "inspect") {
                 return Promise.resolve({
@@ -778,7 +797,7 @@ test({
                   code: 0,
                 });
               }
-              return fakeRun()(args);
+              return fakeRun()(args, options);
             },
           },
         );
@@ -810,7 +829,7 @@ test({
           },
           new Date().toISOString(),
           {
-            runDocker: (args) => {
+            runDocker: (args, options) => {
               dockerArgs.push([...args]);
               if (args[0] === "network" && args[1] === "inspect") {
                 return Promise.resolve({
@@ -820,7 +839,7 @@ test({
                   code: 0,
                 });
               }
-              return fakeRun()(args);
+              return fakeRun()(args, options);
             },
           },
         );
@@ -927,9 +946,9 @@ test({
           basePayload(),
           new Date().toISOString(),
           {
-            runDocker: (args: string[]) => {
+            runDocker: (args: string[], options?: RunDockerOptions) => {
               if (args[0] === "network") events.push(`network:${args[1]}`);
-              return fakeRun()(args);
+              return fakeRun()(args, options);
             },
             decryptSecrets: decryptSecretsEcho,
             ensureDocker: () => Promise.resolve(),
@@ -1184,7 +1203,7 @@ test({
           basePayload(),
           new Date().toISOString(),
           {
-            runDocker: (args) => {
+            runDocker: (args, options) => {
               dockerArgs.push([...args]);
               if (
                 args[0] === "network" && args[1] === "inspect" &&
@@ -1205,7 +1224,7 @@ test({
                   code: 0,
                 });
               }
-              return fakeRun()(args);
+              return fakeRun()(args, options);
             },
             decryptSecrets: decryptSecretsEcho,
             ensureDocker: () => Promise.resolve(),
@@ -1266,7 +1285,7 @@ test({
           basePayload(),
           new Date().toISOString(),
           {
-            runDocker: (args) => {
+            runDocker: (args, options) => {
               dockerArgs.push([...args]);
               if (args.includes("up")) {
                 return Promise.resolve({
@@ -1295,7 +1314,7 @@ test({
                   code: 0,
                 });
               }
-              return fakeRun()(args);
+              return fakeRun()(args, options);
             },
             decryptSecrets: decryptSecretsEcho,
             ensureDocker: () => Promise.resolve(),
@@ -1405,6 +1424,130 @@ test({
           Error,
           "failed to decrypt monitor credential",
         );
+      } finally {
+        Deno.env.delete("TURBOPANEL_STATE_DIR");
+        Deno.env.delete("TURBOPANEL_CONFIG_DIR");
+      }
+    });
+  },
+});
+
+/** The same cluster after a failover: engine-2 is primary, engine-1 follows. */
+function failedOverPayload(): ManagedIngressReconcilePayload {
+  const payload = basePayload();
+  const cluster = payload.clusters[0]!;
+  cluster.backends = [
+    {
+      memberId: "55555555-5555-4555-8555-555555555555",
+      role: "primary",
+      readEligible: false,
+      address: "engine-2",
+      port: 5432,
+      transport: "local",
+    },
+    {
+      memberId: MEMBER_ID,
+      role: "replica",
+      readEligible: true,
+      address: "engine-1",
+      port: 5432,
+      transport: "local",
+    },
+  ];
+  return payload;
+}
+
+test({
+  name:
+    "handleManagedIngressReconcile fails when ProxySQL's runtime still routes writes to the old primary",
+  permissions: { env: true, read: true, write: true, run: false },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      await seedFixture(fixture);
+      Deno.env.set("TURBOPANEL_STATE_DIR", fixture.dirs.stateDir);
+      Deno.env.set("TURBOPANEL_CONFIG_DIR", fixture.dirs.configDir);
+      try {
+        const admin = createFakeProxySqlAdmin();
+        admin.freeze("pgsql", [
+          {
+            hostgroupId: 0,
+            hostname: "engine-1",
+            port: 5432,
+            status: "ONLINE",
+          },
+        ]);
+        const err = await assertRejects(
+          () =>
+            handleManagedIngressReconcile(
+              failedOverPayload(),
+              new Date().toISOString(),
+              {
+                runDocker: fakeRun(admin),
+                decryptSecrets: decryptSecretsEcho,
+                ensureDocker: () => Promise.resolve(),
+              },
+            ),
+          Error,
+        );
+        assertEquals(
+          err.message,
+          `ProxySQL on this server did not repoint: writer for ${MANAGED_ID} is still engine-1:5432, expected engine-2:5432`,
+        );
+        // Plain words only: no admin, monitor or frontend credentials.
+        for (const secret of ["admin-secret", "mon-secret", "app-pass"]) {
+          assertEquals(err.message.includes(secret), false);
+        }
+      } finally {
+        Deno.env.delete("TURBOPANEL_STATE_DIR");
+        Deno.env.delete("TURBOPANEL_CONFIG_DIR");
+      }
+    });
+  },
+});
+
+test({
+  name:
+    "handleManagedIngressReconcile reports success once the runtime table holds the new primary",
+  permissions: { env: true, read: true, write: true, run: false },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      await seedFixture(fixture);
+      Deno.env.set("TURBOPANEL_STATE_DIR", fixture.dirs.stateDir);
+      Deno.env.set("TURBOPANEL_CONFIG_DIR", fixture.dirs.configDir);
+      try {
+        const admin = createFakeProxySqlAdmin();
+        const inputs: string[] = [];
+        const run = fakeRun(admin);
+        const deps = {
+          runDocker: (args: string[], options?: RunDockerOptions) => {
+            if (options?.input) inputs.push(options.input);
+            return run(args, options);
+          },
+          decryptSecrets: decryptSecretsEcho,
+          ensureDocker: () => Promise.resolve(),
+        };
+        await handleManagedIngressReconcile(
+          basePayload(),
+          new Date().toISOString(),
+          deps,
+        );
+        const result = await handleManagedIngressReconcile(
+          failedOverPayload(),
+          new Date().toISOString(),
+          deps,
+        );
+        assertEquals(result.appliedBackends.length, 2);
+        assertEquals(
+          admin.tables.pgsql.find((row) => row.hostgroupId === 0)?.hostname,
+          "engine-2",
+        );
+        // The runtime table was read back after each apply, for the family in use only.
+        const selects = inputs.filter((input) => input.includes("SELECT"));
+        assertEquals(selects.length, 2);
+        for (const select of selects) {
+          assertStringIncludes(select, "runtime_pgsql_servers");
+          assertEquals(select.includes("runtime_mysql_servers"), false);
+        }
       } finally {
         Deno.env.delete("TURBOPANEL_STATE_DIR");
         Deno.env.delete("TURBOPANEL_CONFIG_DIR");

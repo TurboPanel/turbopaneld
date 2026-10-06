@@ -20,6 +20,7 @@ import {
   PROXYSQL_ADMIN_DEFAULTS_PATH,
   PROXYSQL_MONITOR_USERNAME,
   proxySqlHostPrepPresent,
+  readProxySqlRuntimeServers,
 } from "./proxysql-admin.ts";
 import {
   proxysqlAdminCnfPath,
@@ -415,6 +416,166 @@ test("applyProxySqlAdminStatements retries admin connect failures then succeeds"
       "Access denied",
     );
     assertEquals(sqlAttempts, 1);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+async function adminLayout(
+  fixture: Awaited<ReturnType<typeof createTempLayout>>,
+) {
+  const layout = resolveLayout(fixture.env);
+  await Deno.mkdir(layout.configDir + "/proxysql", {
+    recursive: true,
+    mode: 0o750,
+  });
+  await Deno.writeTextFile(
+    proxysqlAdminCnfPath(layout),
+    "[client]\nuser=admin\npassword=s3cret-password\n",
+    { mode: 0o600 },
+  );
+  return layout;
+}
+
+test("readProxySqlRuntimeServers selects the runtime table over the admin path and parses rows", async () => {
+  const fixture = await createTempLayout();
+  try {
+    const layout = await adminLayout(fixture);
+    const calls: Array<{ args: string[]; input?: string }> = [];
+    const rows = await readProxySqlRuntimeServers("pgsql", {
+      layout,
+      containerName: "proxysql-test",
+      runDocker: (args, options) => {
+        calls.push({ args, input: options?.input });
+        return Promise.resolve({
+          success: true,
+          code: 0,
+          stdout: "0\tengine-2\t5432\tONLINE\n1\tengine-1\t5432\tSHUNNED\n",
+          stderr: "",
+        });
+      },
+    });
+    assertEquals(rows, [
+      { hostgroupId: 0, hostname: "engine-2", port: 5432, status: "ONLINE" },
+      { hostgroupId: 1, hostname: "engine-1", port: 5432, status: "SHUNNED" },
+    ]);
+    assertEquals(calls.length, 1);
+    const call = calls[0]!;
+    const mysqlIdx = call.args.indexOf("mysql");
+    assertEquals(
+      call.args[mysqlIdx + 1],
+      `--defaults-extra-file=${PROXYSQL_ADMIN_DEFAULTS_PATH}`,
+    );
+    assertEquals(call.args.includes("--skip-column-names"), true);
+    assertEquals(call.args.some((a) => a.includes("s3cret-password")), false);
+    assertStringIncludes(
+      call.input ?? "",
+      "SELECT hostgroup_id,hostname,port,status FROM runtime_pgsql_servers",
+    );
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("readProxySqlRuntimeServers treats empty output as an empty table and mysql as runtime_mysql_servers", async () => {
+  const fixture = await createTempLayout();
+  try {
+    const layout = await adminLayout(fixture);
+    let input = "";
+    const rows = await readProxySqlRuntimeServers("mysql", {
+      layout,
+      containerName: "proxysql-test",
+      runDocker: (_args, options) => {
+        input = options?.input ?? "";
+        return Promise.resolve({
+          success: true,
+          code: 0,
+          stdout: "",
+          stderr: "",
+        });
+      },
+    });
+    assertEquals(rows, []);
+    assertStringIncludes(input, "FROM runtime_mysql_servers");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("readProxySqlRuntimeServers rejects output it cannot parse", async () => {
+  const fixture = await createTempLayout();
+  try {
+    const layout = await adminLayout(fixture);
+    for (const stdout of ["0\tengine-1\tnot-a-port\tONLINE\n", "just text\n"]) {
+      await assertRejects(
+        () =>
+          readProxySqlRuntimeServers("pgsql", {
+            layout,
+            containerName: "proxysql-test",
+            runDocker: () =>
+              Promise.resolve({ success: true, code: 0, stdout, stderr: "" }),
+          }),
+        Error,
+        "unexpected ProxySQL runtime table output",
+      );
+    }
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("readProxySqlRuntimeServers redacts the password, retries connect failures and requires layout", async () => {
+  const fixture = await createTempLayout();
+  try {
+    const layout = await adminLayout(fixture);
+    const err = await assertRejects(
+      () =>
+        readProxySqlRuntimeServers("pgsql", {
+          layout,
+          containerName: "proxysql-test",
+          runDocker: () =>
+            Promise.resolve({
+              success: false,
+              code: 1,
+              stdout: "",
+              stderr: "boom s3cret-password",
+            }),
+        }),
+      Error,
+    );
+    assertEquals(err.message.includes("s3cret-password"), false);
+
+    let attempts = 0;
+    const rows = await readProxySqlRuntimeServers("pgsql", {
+      layout,
+      containerName: "proxysql-test",
+      retryDelayMs: 1,
+      runDocker: () => {
+        attempts += 1;
+        if (attempts < 3) {
+          return Promise.resolve({
+            success: false,
+            code: 1,
+            stdout: "",
+            stderr: "ERROR 2002 (HY000): Can't connect to server",
+          });
+        }
+        return Promise.resolve({
+          success: true,
+          code: 0,
+          stdout: "0\tengine-1\t5432\tONLINE\n",
+          stderr: "",
+        });
+      },
+    });
+    assertEquals(attempts, 3);
+    assertEquals(rows.length, 1);
+
+    await assertRejects(
+      () => readProxySqlRuntimeServers("pgsql", {}),
+      TypeError,
+      "readProxySqlRuntimeServers requires layout",
+    );
   } finally {
     await fixture.cleanup();
   }

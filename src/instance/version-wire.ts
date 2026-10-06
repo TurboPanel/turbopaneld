@@ -63,6 +63,7 @@ export const DAEMON_WIRE_FEATURES = [
   "update-progress-v1",
   "sealed-instance-secrets-v1",
   "managed-health-v1",
+  "managed-health-report-v1",
   "managed-ha-probe-v1",
   "managed-ha-instance-v1",
   "metrics-v7",
@@ -87,6 +88,14 @@ export const SEALED_INSTANCE_SECRETS_FEATURE: DaemonWireFeature =
  * the request only to a daemon that lists this feature.
  */
 export const MANAGED_HEALTH_FEATURE: DaemonWireFeature = "managed-health-v1";
+
+/**
+ * This daemon pushes `managed-health-report` (every local replica's fresh
+ * replication reading, every 30 s) so a quiet cluster's health never ages out.
+ * It sends one only to a control plane that lists this feature.
+ */
+export const MANAGED_HEALTH_REPORT_FEATURE: DaemonWireFeature =
+  "managed-health-report-v1";
 
 /**
  * This daemon may send `managed-ha-event` with `detector: 'postgres-probe'`

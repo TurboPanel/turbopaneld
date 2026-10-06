@@ -17,6 +17,7 @@ import {
   DEFAULT_PROXYSQL_LISTENER_PORTS,
   ensureProxySqlIngress,
   extractStaticProxySqlConfigSection,
+  findIngressRuntimeMismatch,
   formatProxySqlBindHost,
   inspectProxySqlContainer,
   ManagedFrontendUserConflictError,
@@ -29,6 +30,8 @@ import {
   proxysqlCompose,
   proxysqlComposeWithAttachments,
   type ProxySqlDesiredState,
+  proxySqlFamiliesInUse,
+  type ProxySqlRuntimeServerRow,
   readCurrentProxySqlBindAddresses,
   readCurrentProxySqlListenerPorts,
   readCurrentProxySqlManagedNetwork,
@@ -1795,4 +1798,177 @@ test("restartProxySqlIngress throws when compose restart fails", async () => {
   } finally {
     await fixture.cleanup();
   }
+});
+
+function runtimeRow(
+  hostgroupId: number,
+  hostname: string,
+  port: number,
+  status = "ONLINE",
+): ProxySqlRuntimeServerRow {
+  return { hostgroupId, hostname, port, status };
+}
+
+/** A failover just moved the primary: engine-2 writes, engine-1 follows. */
+function failedOverCluster(): ProxySqlDesiredState["clusters"][number] {
+  return clusterDesired({
+    backends: [
+      {
+        memberId: "mb2",
+        role: "primary",
+        readEligible: false,
+        address: "engine-2",
+        port: 5432,
+        transport: "local",
+      },
+      {
+        memberId: "mb1",
+        role: "replica",
+        readEligible: true,
+        address: "engine-1",
+        port: 5432,
+        transport: "local",
+      },
+    ],
+  });
+}
+
+function desiredWith(
+  ...clusters: ProxySqlDesiredState["clusters"]
+): ProxySqlDesiredState {
+  return { bindAddresses: [], clusters };
+}
+
+test("findIngressRuntimeMismatch accepts a runtime table that matches the desired placement", () => {
+  const desired = desiredWith(failedOverCluster());
+  assertEquals(
+    findIngressRuntimeMismatch(desired, {
+      pgsql: [runtimeRow(0, "engine-2", 5432), runtimeRow(1, "engine-1", 5432)],
+    }),
+    null,
+  );
+});
+
+test("findIngressRuntimeMismatch names a stale old primary left in the writer hostgroup", () => {
+  const desired = desiredWith(failedOverCluster());
+  const message = findIngressRuntimeMismatch(desired, {
+    pgsql: [runtimeRow(0, "engine-1", 5432), runtimeRow(1, "engine-1", 5432)],
+  });
+  assertEquals(
+    message,
+    "ProxySQL on this server did not repoint: writer for m1 is still engine-1:5432, expected engine-2:5432",
+  );
+});
+
+test("findIngressRuntimeMismatch fails when the new writer is present but the old one stays beside it", () => {
+  const desired = desiredWith(failedOverCluster());
+  const message = findIngressRuntimeMismatch(desired, {
+    pgsql: [
+      runtimeRow(0, "engine-1", 5432),
+      runtimeRow(0, "engine-2", 5432),
+      runtimeRow(1, "engine-1", 5432),
+    ],
+  });
+  assertStringIncludes(message ?? "", "writer for m1 is still engine-1:5432");
+});
+
+test("findIngressRuntimeMismatch fails when a desired row is missing", () => {
+  const desired = desiredWith(failedOverCluster());
+  assertEquals(
+    findIngressRuntimeMismatch(desired, {
+      pgsql: [runtimeRow(0, "engine-2", 5432)],
+    }),
+    "ProxySQL on this server did not repoint: engine-1:5432 is missing from the reader hostgroup for m1",
+  );
+  assertStringIncludes(
+    findIngressRuntimeMismatch(desired, { pgsql: [] }) ?? "",
+    "engine-2:5432 is missing from the writer hostgroup for m1",
+  );
+  // A table that was never read counts as empty.
+  assertStringIncludes(
+    findIngressRuntimeMismatch(desired, {}) ?? "",
+    "is missing",
+  );
+});
+
+test("findIngressRuntimeMismatch matches on port as well as host", () => {
+  const desired = desiredWith(clusterDesired());
+  assertStringIncludes(
+    findIngressRuntimeMismatch(desired, {
+      pgsql: [runtimeRow(0, "engine-1", 5433)],
+    }) ?? "",
+    "writer for m1 is still engine-1:5433, expected engine-1:5432",
+  );
+});
+
+test("findIngressRuntimeMismatch ignores status and extra reader rows", () => {
+  const desired = desiredWith(failedOverCluster());
+  assertEquals(
+    findIngressRuntimeMismatch(desired, {
+      pgsql: [
+        runtimeRow(0, "engine-2", 5432, "SHUNNED"),
+        runtimeRow(1, "engine-1", 5432, "OFFLINE_HARD"),
+        runtimeRow(1, "engine-9", 5432),
+      ],
+    }),
+    null,
+  );
+});
+
+test("findIngressRuntimeMismatch checks the mysql family against runtime_mysql_servers", () => {
+  const mysql = clusterDesired({
+    managedId: "m2",
+    engine: "mysql",
+    family: "mysql",
+    protocolPort: 13306,
+    writerHostgroup: 10,
+    readerHostgroup: 11,
+    backends: [
+      {
+        memberId: "mb3",
+        role: "primary",
+        readEligible: false,
+        address: "my-2",
+        port: 3306,
+        transport: "local",
+      },
+    ],
+  });
+  const desired = desiredWith(mysql);
+  assertEquals(
+    findIngressRuntimeMismatch(desired, {
+      mysql: [runtimeRow(10, "my-2", 3306)],
+    }),
+    null,
+  );
+  assertEquals(
+    findIngressRuntimeMismatch(desired, {
+      mysql: [runtimeRow(10, "my-1", 3306)],
+    }),
+    "ProxySQL on this server did not repoint: writer for m2 is still my-1:3306, expected my-2:3306",
+  );
+  // Rows in the other family's table are not this family's rows.
+  assertStringIncludes(
+    findIngressRuntimeMismatch(desired, {
+      pgsql: [runtimeRow(10, "my-2", 3306)],
+    }) ?? "",
+    "is missing",
+  );
+});
+
+test("findIngressRuntimeMismatch skips families the desired state does not use", () => {
+  assertEquals(proxySqlFamiliesInUse(desiredWith()), []);
+  assertEquals(
+    proxySqlFamiliesInUse(desiredWith(clusterDesired())),
+    ["pgsql"],
+  );
+  assertEquals(findIngressRuntimeMismatch(desiredWith(), {}), null);
+  // Only pgsql is in use, so a stale mysql table is nobody's business here.
+  assertEquals(
+    findIngressRuntimeMismatch(desiredWith(clusterDesired()), {
+      pgsql: [runtimeRow(0, "engine-1", 5432)],
+      mysql: [runtimeRow(0, "old", 3306)],
+    }),
+    null,
+  );
 });
