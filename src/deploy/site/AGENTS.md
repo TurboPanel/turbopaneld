@@ -431,6 +431,22 @@ every engine: PHP-FPM reads them from the FastCGI request as ini overrides, so
 `resolveSiteSecretEnv` drops them (plain or sealed, before decrypting) and names
 them in the log; the control plane drops them first.
 
+**Managed database bindings (`site-db-bindings-v1`).** A site bound to a managed
+database carries `sites[].requiredEnv` (the connection variables it cannot run
+without) and `sites[].dbCa` (`{ variables, pem }`). `planSiteWebEnv` runs before
+anything is written: every variable the site's engine cannot carry is **left out
+and named** in the command log and in `warnings[]` on the deploy result (Apache
+and Caddy now do what nginx always did; a bad *name* is still refused), but a
+name in `requiredEnv` that is left out or missing stops the deploy with a
+plain-words error, and so does `requiredEnv` on an OpenLiteSpeed site (it gets
+no variables at all). `dbCa.pem` is a public CA bundle, certificate blocks only
+(checked at parse). It lands as `<siteRoot>/.turbopanel-hosting/managed-ca.pem`
+through the same `sudo -n install` call as `hosting.env` (owner's Linux user,
+`0400`, directory `root:root` `0711`), and every name in `dbCa.variables` is set
+to that path, so a multi-line certificate never enters the web server's
+environment. A site with `dbCa` and no owning Linux user is refused. Native
+apps are unchanged: their environment file carries a multi-line value as is.
+
 Future seams (not MVP): multi-version PHP side-by-side, OLS `web.env`,
 swarm-style replicas, ACME issuance on the daemon. TurboFabric **is** the
 single org mesh (`server.fabric.reconcile` — see `src/commands/fabric.ts`

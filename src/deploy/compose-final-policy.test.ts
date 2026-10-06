@@ -206,12 +206,27 @@ test("volume options other than bind or a sized tmpfs pass only with host-level 
   }, {});
 });
 
+test("the reserved host port refusal names who reserves them and lists the ports", () => {
+  const doc = {
+    services: { web: { ports: [{ target: 80, published: "443" }] } },
+  };
+  assertThrows(
+    () => assertComposePolicy(doc, {}),
+    Error,
+    "reserved host ports: 80, 443, 2019, 2029, 2039, 6070, 7080-7081, 7443, 18080-18999, 19100-19799",
+  );
+});
+
 test("published ports on platform bands are host-level", () => {
   for (
     const published of ["80", "443", 7080, "18080", "19150", "18000-18100"]
   ) {
     const doc = { services: { web: { ports: [{ target: 80, published }] } } };
-    assertThrows(() => assertComposePolicy(doc, {}), Error, "platform uses");
+    assertThrows(
+      () => assertComposePolicy(doc, {}),
+      Error,
+      "platform reserves",
+    );
     assertComposePolicy(doc, { hostLevelApproved: true });
   }
   assertComposePolicy({
