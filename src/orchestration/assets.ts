@@ -341,6 +341,16 @@ export const NODE_APP_RUNTIME_APPLY_PLAYBOOK = join(
   "playbooks",
   "node-app-runtime-apply.yml",
 );
+/**
+ * Vendors the **tenant** Deno release for native `runtime: deno` apps, under
+ * `vendor/deno-app/<series>/current`. Nothing else on the host runs it: the
+ * panel itself is not started from this tree.
+ */
+export const DENO_APP_RUNTIME_APPLY_PLAYBOOK = join(
+  ORCHESTRATION_DIR,
+  "playbooks",
+  "deno-app-runtime-apply.yml",
+);
 export const DAEMON_INSTALL_PLAYBOOK = join(
   ORCHESTRATION_DIR,
   "playbooks",

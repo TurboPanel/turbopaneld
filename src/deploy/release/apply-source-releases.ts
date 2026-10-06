@@ -47,7 +47,7 @@ import type {
 import type { DecryptSecretsFn } from "../materialize-tls.ts";
 import type { RunFn } from "../ensure-principal.ts";
 import type { DeployCancelToken } from "../deploy-cancel.ts";
-import { dirname, join } from "@std/path";
+import { join } from "@std/path";
 import {
   assertCheckoutCredentialsRemoved,
   checkoutRelease,
@@ -56,6 +56,7 @@ import {
 } from "./checkout.ts";
 import {
   type NativeAppBuildOutput,
+  type NativeBuildRuntime,
   prepareNativeAppBuildOutput,
   runReleaseBuild,
 } from "./build.ts";
@@ -72,9 +73,8 @@ import {
 } from "./build-sandbox.ts";
 import type { ImagePrepareSandbox } from "./image-prepare-sandbox.ts";
 import {
-  nativeAppNodeBinary,
-  nativeAppRuntimeGroup,
-  resolveNativeAppNodeVersion,
+  nativeAppRuntimeKind,
+  nativeAppRuntimeTarget,
 } from "../native/unit.ts";
 import {
   ensureBuildkitRailpack,
@@ -169,6 +169,11 @@ export type AppliedRelease = {
    * this was kept — the unit then falls back to `node server.js`.
    */
   nativeStart?: NativeAppStart;
+  /**
+   * The runtime the live release runs on, when it is not Node: the build's own
+   * (`deno`), or on a rollback the one its record kept. Absent means Node.
+   */
+  runtime?: "node" | "deno";
 };
 
 /**
@@ -232,6 +237,16 @@ function nativeAppForService(
   return (payload.nativeAppServices ?? []).find(
     (app) => app.composeServiceName === composeServiceName,
   );
+}
+
+/** `deno` for a Deno app, else nothing: a Node release records no runtime. */
+function builtRuntime(
+  payload: EnvironmentDeployPayload,
+  composeServiceName: string,
+): "deno" | undefined {
+  return nativeAppForService(payload, composeServiceName)?.runtime === "deno"
+    ? "deno"
+    : undefined;
 }
 
 export type ApplySourceReleasesDeps = {
@@ -393,6 +408,9 @@ async function rollbackOneRelease(
     ...(recordedManifest.nativeStart === undefined
       ? {}
       : { nativeStart: recordedManifest.nativeStart }),
+    // A record without a runtime ran on Node; say so explicitly so a rollback
+    // across a switch never keeps the newer payload's `deno`.
+    runtime: recordedManifest.runtime ?? "node",
   };
 }
 
@@ -887,6 +905,9 @@ async function buildNativeRelease(
       standaloneOutput: nativeOutput.standaloneOutput,
       staticExport: nativeOutput.staticExport,
       nativeStart: nativeOutput.start,
+      // Only Deno is written, so a Node manifest is unchanged (see
+      // `ReleaseManifestV1.runtime`).
+      runtime: builtRuntime(payload, entry.composeServiceName),
       // The author's own start settings, so a rollback to this release
       // starts it the way it ran (see `ReleaseManifestV1.startCommand`).
       startCommand: entry.build.startCommand?.trim() || undefined,
@@ -946,6 +967,7 @@ async function buildNativeRelease(
       standaloneOutput: nativeOutput.standaloneOutput,
       staticExport: nativeOutput.staticExport,
       nativeStart: nativeOutput.start,
+      runtime: builtRuntime(payload, entry.composeServiceName),
     });
   } finally {
     if (work) await removeBuildWork(work, onOutput);
@@ -1014,16 +1036,7 @@ async function buildNativeTree(
     // NODE_ENV, so the derived install command and the build both run on
     // the series the app will execute on.
     nativeRuntime: nativeApp
-      ? definedFields({
-        nodeBinDir: dirname(nativeAppNodeBinary(
-          layout,
-          resolveNativeAppNodeVersion(nativeApp),
-        )),
-        nodeEnv: nativeApp.appMode ?? "production",
-        runtimeGroup: nativeAppRuntimeGroup(
-          resolveNativeAppNodeVersion(nativeApp),
-        ),
-      })
+      ? nativeBuildRuntime(layout, nativeApp)
       : undefined,
     sandbox: work
       ? definedFields({
@@ -1044,6 +1057,9 @@ async function buildNativeTree(
   const output = await (deps.prepareNativeAppBuildOutputFn ??
     prepareNativeAppBuildOutput)(definedFields({
       framework: nativeApp.framework,
+      ...(nativeAppRuntimeKind(nativeApp) === "deno"
+        ? { runtime: "deno" as const }
+        : {}),
       workingDir: buildWorkingDir,
       containmentRoot: work?.workDir,
       outputDirectory: entry.build.outputDirectory,
@@ -1054,6 +1070,24 @@ async function buildNativeTree(
     warnStandaloneStartCommand(entry.build.startCommand, onOutput);
   }
   return output;
+}
+
+/**
+ * What a native app's build runs on: its vendored runtime on `PATH` and its
+ * entitlement group, so the derived install and build commands run on the
+ * runtime the app will execute on.
+ */
+function nativeBuildRuntime(
+  layout: LayoutPaths,
+  nativeApp: EnvironmentDeployNativeAppService,
+): NativeBuildRuntime {
+  const target = nativeAppRuntimeTarget(layout, nativeApp);
+  return definedFields({
+    ...(target.runtime === "deno" ? { runtime: "deno" as const } : {}),
+    nodeBinDir: target.binDir,
+    nodeEnv: nativeApp.appMode ?? "production",
+    runtimeGroup: target.group,
+  });
 }
 
 /** The author said how the app starts: a start command or a startup file. */
