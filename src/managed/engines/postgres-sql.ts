@@ -148,6 +148,61 @@ export function dropDatabaseSql(name: string): string {
   ].join("\n");
 }
 
+/** Privilege lists, as Postgres spells them in `aclexplode`. */
+const DATABASE_PRIVILEGES = ["CONNECT", "CREATE", "TEMPORARY"] as const;
+const READ_ONLY_DATABASE_PRIVILEGES = ["CONNECT"] as const;
+const WRITER_TABLE_PRIVILEGES = [
+  "SELECT",
+  "INSERT",
+  "UPDATE",
+  "DELETE",
+  "TRUNCATE",
+] as const;
+const WRITER_SEQUENCE_PRIVILEGES = ["USAGE", "SELECT", "UPDATE"] as const;
+const WRITER_SCHEMA_PRIVILEGES = ["USAGE", "CREATE"] as const;
+const READER_TABLE_PRIVILEGES = ["SELECT"] as const;
+const READER_SEQUENCE_PRIVILEGES = ["SELECT"] as const;
+const READER_SCHEMA_PRIVILEGES = ["USAGE"] as const;
+
+function textArray(values: readonly string[]): string {
+  return `ARRAY[${
+    values.map((value) => quoteLiteral(value)).join(", ")
+  }]::text[]`;
+}
+
+/** Subquery: the oid of a role by name (NULL when it does not exist). */
+function roleOidSql(username: string): string {
+  return `(SELECT oid FROM pg_catalog.pg_roles WHERE rolname = ${
+    quoteLiteral(username)
+  })`;
+}
+
+/**
+ * Boolean SQL: the role's own entry in an ACL holds exactly `want` and nothing
+ * else (order does not matter). `acl` is the catalog column, `defaultAcl` the
+ * `acldefault(...)` it stands for while the column is NULL.
+ */
+function aclEntryIsExactlySql(
+  acl: string,
+  defaultAcl: string,
+  username: string,
+  want: readonly string[],
+): string {
+  const have =
+    `COALESCE((SELECT pg_catalog.array_agg(a.privilege_type::text) FROM pg_catalog.aclexplode(COALESCE(${acl}, ${defaultAcl})) a WHERE a.grantee = ${
+      roleOidSql(username)
+    }), ARRAY[]::text[])`;
+  const wanted = textArray(want);
+  return `(${have} @> ${wanted} AND ${have} <@ ${wanted})`;
+}
+
+/**
+ * Give a login exactly this level on one database. The old level is revoked
+ * first so a changed level (read-write to read-only, say) leaves nothing from
+ * the old one, in one block so a login that is connected to this database (or
+ * connecting right now) never sees the gap. Nothing is written when the login
+ * already holds exactly this, so a repeated apply does not rewrite the ACL.
+ */
 export function grantDatabaseSql(
   database: string,
   username: string,
@@ -155,38 +210,36 @@ export function grantDatabaseSql(
 ): string {
   const db = quoteIdentifier(database);
   const role = quoteIdentifier(username);
-  // Revoke first so a changed level (read-write to read-only, say) leaves
-  // exactly the grant for the new level and nothing from the old one. One
-  // transaction, so a login that is already connected to this database (or
-  // connecting right now) never sees the gap between the revoke and the grant.
-  const reset = `REVOKE ALL ON DATABASE ${db} FROM ${role};`;
-  switch (privilege) {
-    case "owner":
-      return [
-        `BEGIN;`,
-        `ALTER DATABASE ${db} OWNER TO ${role};`,
-        `GRANT ALL PRIVILEGES ON DATABASE ${db} TO ${role};`,
-        `COMMIT;`,
-      ].join("\n");
-    case "read-write":
-      return [
-        `BEGIN;`,
-        reset,
-        `GRANT CONNECT, CREATE, TEMPORARY ON DATABASE ${db} TO ${role};`,
-        `COMMIT;`,
-      ].join("\n");
-    case "read-only":
-      return [
-        `BEGIN;`,
-        reset,
-        `GRANT CONNECT ON DATABASE ${db} TO ${role};`,
-        `COMMIT;`,
-      ].join("\n");
-    default: {
-      const _exhaustive: never = privilege;
-      throw new Error(`unsupported privilege: ${_exhaustive}`);
-    }
+  const want = privilege === "read-only"
+    ? READ_ONLY_DATABASE_PRIVILEGES
+    : DATABASE_PRIVILEGES;
+  const upToDate = aclEntryIsExactlySql(
+    "d.datacl",
+    "pg_catalog.acldefault('d', d.datdba)",
+    username,
+    want,
+  );
+  const lines = [`DO $turbopanel$`, `BEGIN`];
+  if (privilege === "owner") {
+    lines.push(
+      `  IF (SELECT d.datdba FROM pg_catalog.pg_database d WHERE d.datname = ${
+        quoteLiteral(database)
+      }) IS DISTINCT FROM ${roleOidSql(username)} THEN`,
+      `    ALTER DATABASE ${db} OWNER TO ${role};`,
+      `  END IF;`,
+    );
   }
+  lines.push(
+    `  IF (SELECT ${upToDate} FROM pg_catalog.pg_database d WHERE d.datname = ${
+      quoteLiteral(database)
+    }) IS NOT TRUE THEN`,
+    `    REVOKE ALL ON DATABASE ${db} FROM ${role};`,
+    `    GRANT ${want.join(", ")} ON DATABASE ${db} TO ${role};`,
+    `  END IF;`,
+    `END`,
+    `$turbopanel$;`,
+  );
+  return lines.join("\n");
 }
 
 const PRIVILEGE_RANK: Record<ManagedDatabasePrivilege, number> = {
@@ -219,41 +272,47 @@ export function strongestPrivilege(
  * accepts connections (templates and the maintenance database included).
  * A login then reaches only the databases it was explicitly granted. Safe to
  * repeat; run on every apply so databases created by hand or by an older
- * version are covered too. Superusers are unaffected.
+ * version are covered too, and only a database that still carries a PUBLIC
+ * entry is written. The monitor grant comes first so a ProxySQL health check
+ * never meets the locked maintenance database without it. Superusers are
+ * unaffected.
  */
 export function revokePublicDatabaseAccessSql(): string {
   return [
+    grantMonitorConnectSql(),
     `DO $turbopanel$`,
     `DECLARE d record;`,
     `BEGIN`,
-    `  FOR d IN SELECT datname FROM pg_catalog.pg_database WHERE datallowconn LOOP`,
+    `  FOR d IN SELECT datname FROM pg_catalog.pg_database`,
+    `           WHERE datallowconn AND (datacl IS NULL OR EXISTS (`,
+    `             SELECT 1 FROM pg_catalog.aclexplode(datacl) a WHERE a.grantee = 0)) LOOP`,
     `    EXECUTE pg_catalog.format('REVOKE ALL ON DATABASE %I FROM PUBLIC', d.datname);`,
     `  END LOOP;`,
     `END`,
     `$turbopanel$;`,
-    grantMonitorConnectSql(),
   ].join("\n");
 }
 
 /**
  * Remove whatever access a login still holds on databases that are not in its
- * list (a database taken off the login, or granted by an older version). The
- * owner of a database keeps what ownership implies.
+ * list (a database taken off the login, or granted by an older version). Only
+ * databases where the login still has an entry are written.
  */
 export function revokeUnlistedDatabasesSql(
   username: string,
   keep: readonly string[],
 ): string {
   const role = quoteIdentifier(username);
-  const keepArray = keep.length === 0
-    ? `ARRAY[]::text[]`
-    : `ARRAY[${keep.map((name) => quoteLiteral(name)).join(", ")}]::text[]`;
+  for (const name of keep) quoteIdentifier(name);
+  const keepArray = textArray(keep);
   return [
     `DO $turbopanel$`,
     `DECLARE d record;`,
     `BEGIN`,
     `  FOR d IN SELECT datname FROM pg_catalog.pg_database`,
-    `           WHERE datallowconn AND datname <> ALL (${keepArray}) LOOP`,
+    `           WHERE datallowconn AND datname <> ALL (${keepArray})`,
+    `           AND EXISTS (SELECT 1 FROM pg_catalog.aclexplode(datacl) a`,
+    `                       WHERE a.grantee = ${roleOidSql(username)}) LOOP`,
     `    EXECUTE pg_catalog.format('REVOKE ALL ON DATABASE %I FROM ${role}', d.datname);`,
     `  END LOOP;`,
     `END`,
@@ -313,8 +372,15 @@ function defaultPrivilegeSql(
     if (name === creator) continue;
     const role = quoteIdentifier(name);
     lines.push(
-      `ALTER DEFAULT PRIVILEGES FOR ROLE ${owner} GRANT ALL ON TABLES TO ${role};`,
-      `ALTER DEFAULT PRIVILEGES FOR ROLE ${owner} GRANT ALL ON SEQUENCES TO ${role};`,
+      // Wipe an earlier, wider default (one that included TRIGGER) first.
+      `ALTER DEFAULT PRIVILEGES FOR ROLE ${owner} REVOKE ALL ON TABLES FROM ${role};`,
+      `ALTER DEFAULT PRIVILEGES FOR ROLE ${owner} REVOKE ALL ON SEQUENCES FROM ${role};`,
+      `ALTER DEFAULT PRIVILEGES FOR ROLE ${owner} GRANT ${
+        WRITER_TABLE_PRIVILEGES.join(", ")
+      } ON TABLES TO ${role};`,
+      `ALTER DEFAULT PRIVILEGES FOR ROLE ${owner} GRANT ${
+        WRITER_SEQUENCE_PRIVILEGES.join(", ")
+      } ON SEQUENCES TO ${role};`,
       `ALTER DEFAULT PRIVILEGES FOR ROLE ${owner} GRANT USAGE, CREATE ON SCHEMAS TO ${role};`,
     );
   }
@@ -334,11 +400,79 @@ function defaultPrivilegeSql(
   return lines;
 }
 
-/** One statement run per schema inside the loop; `%I` is the schema name. */
-function perSchema(statement: string, role: string): string {
-  return `    EXECUTE pg_catalog.format('${statement} ${
-    quoteIdentifier(role)
-  }', s.nspname);`;
+type AclTarget = {
+  /** `r` (tables, views), `s` (sequences) or `n` (schemas): acldefault kind. */
+  acl: "r" | "s" | "n";
+  /** GRANT/REVOKE object word, and how the loop names the object. */
+  noun: "TABLE" | "SEQUENCE" | "SCHEMA";
+};
+
+/**
+ * One DO block that makes a login hold exactly `want` on every object of one
+ * kind outside the system schemas, and writes only the objects where it does
+ * not already (a repeated apply rewrites no ACL). `REVOKE ALL` then `GRANT`
+ * sit in the same block, so a connected login never sees the gap. An object
+ * the login owns keeps its owner rights when `skipOwned` is set (writers).
+ *
+ * Never `GRANT ALL` for a login that is not the owner: ALL includes TRIGGER
+ * (which would let a read-write login run code as whoever writes the table)
+ * and, on newer series, MAINTAIN.
+ */
+function exactObjectAclSql(
+  target: AclTarget,
+  username: string,
+  want: readonly string[],
+  skipOwned: boolean,
+): string {
+  const role = quoteIdentifier(username);
+  const isSchema = target.acl === "n";
+  const relation = isSchema
+    ? "pg_catalog.pg_namespace o"
+    : "pg_catalog.pg_class o";
+  const owner = isSchema ? "o.nspowner" : "o.relowner";
+  const aclColumn = isSchema ? "o.nspacl" : "o.relacl";
+  const nameColumn = isSchema ? "o.nspname" : "o.relname";
+  const schemaColumn = isSchema ? "o.nspname" : "n.nspname";
+  const kindFilter = {
+    r: `o.relkind IN ('r', 'p', 'v', 'm', 'f')`,
+    s: `o.relkind = 'S'`,
+    n: `true`,
+  }[target.acl];
+  const join = isSchema
+    ? ""
+    : ` JOIN pg_catalog.pg_namespace n ON n.oid = o.relnamespace`;
+  const upToDate = aclEntryIsExactlySql(
+    aclColumn,
+    `pg_catalog.acldefault('${target.acl}', ${owner})`,
+    username,
+    want,
+  );
+  const objectName = isSchema
+    ? `pg_catalog.quote_ident(${nameColumn})`
+    : `o.oid::pg_catalog.regclass::text`;
+  const conditions = [
+    `${schemaColumn} <> 'information_schema'`,
+    `${schemaColumn} !~ '^pg_'`,
+    kindFilter,
+    `NOT ${upToDate}`,
+  ];
+  if (skipOwned) {
+    conditions.push(`${owner} IS DISTINCT FROM ${roleOidSql(username)}`);
+  }
+  return [
+    `DO $turbopanel$`,
+    `DECLARE r record;`,
+    `BEGIN`,
+    `  FOR r IN SELECT ${objectName} AS obj FROM ${relation}${join}`,
+    `           WHERE ${conditions.join(" AND ")} LOOP`,
+    `    EXECUTE pg_catalog.format('REVOKE ALL ON ${target.noun} %s FROM ${role}', r.obj);`,
+    `    EXECUTE pg_catalog.format('GRANT ${
+      want.join(", ")
+    } ON ${target.noun} %s TO ${role}', r.obj);`,
+    `  END LOOP;`,
+    `END`,
+    `$turbopanel$;`,
+  ].join("\n");
 }
 
 function existingObjectSql(
@@ -346,30 +480,43 @@ function existingObjectSql(
   readers: readonly string[],
 ): string[] {
   const lines: string[] = [];
+  const table: AclTarget = { acl: "r", noun: "TABLE" };
+  const sequence: AclTarget = { acl: "s", noun: "SEQUENCE" };
+  const schema: AclTarget = { acl: "n", noun: "SCHEMA" };
   for (const name of writers) {
     lines.push(
-      perSchema(`GRANT USAGE, CREATE ON SCHEMA %I TO`, name),
-      perSchema(`GRANT ALL ON ALL TABLES IN SCHEMA %I TO`, name),
-      perSchema(`GRANT ALL ON ALL SEQUENCES IN SCHEMA %I TO`, name),
+      exactObjectAclSql(schema, name, WRITER_SCHEMA_PRIVILEGES, true),
+      exactObjectAclSql(table, name, WRITER_TABLE_PRIVILEGES, true),
+      exactObjectAclSql(sequence, name, WRITER_SEQUENCE_PRIVILEGES, true),
     );
   }
   for (const name of readers) {
     lines.push(
-      perSchema(`REVOKE CREATE ON SCHEMA %I FROM`, name),
-      perSchema(
-        `REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON ALL TABLES IN SCHEMA %I FROM`,
-        name,
-      ),
-      perSchema(
-        `REVOKE USAGE, UPDATE ON ALL SEQUENCES IN SCHEMA %I FROM`,
-        name,
-      ),
-      perSchema(`GRANT USAGE ON SCHEMA %I TO`, name),
-      perSchema(`GRANT SELECT ON ALL TABLES IN SCHEMA %I TO`, name),
-      perSchema(`GRANT SELECT ON ALL SEQUENCES IN SCHEMA %I TO`, name),
+      exactObjectAclSql(schema, name, READER_SCHEMA_PRIVILEGES, false),
+      exactObjectAclSql(table, name, READER_TABLE_PRIVILEGES, false),
+      exactObjectAclSql(sequence, name, READER_SEQUENCE_PRIVILEGES, false),
     );
   }
   return lines;
+}
+
+/**
+ * Close CREATE on `public` to everyone (Postgres 14 and older open it; 15+
+ * already does not): same end state on every series. Writes only while the
+ * PUBLIC entry still holds CREATE.
+ */
+function closePublicSchemaSql(): string {
+  return [
+    `DO $turbopanel$`,
+    `BEGIN`,
+    `  IF EXISTS (SELECT 1 FROM pg_catalog.pg_namespace n,`,
+    `             pg_catalog.aclexplode(COALESCE(n.nspacl, pg_catalog.acldefault('n', n.nspowner))) a`,
+    `             WHERE n.nspname = 'public' AND a.grantee = 0 AND a.privilege_type = 'CREATE') THEN`,
+    `    REVOKE CREATE ON SCHEMA public FROM PUBLIC;`,
+    `  END IF;`,
+    `END`,
+    `$turbopanel$;`,
+  ].join("\n");
 }
 
 /**
@@ -378,36 +525,24 @@ function existingObjectSql(
  * each database's own catalog). Covers every schema that is not a system
  * schema, existing objects now and objects made later by any creator.
  *
- * - writers (owner, read-write): everything on tables and sequences, plus
- *   use and create on schemas.
+ * - writers (owner, read-write): SELECT, INSERT, UPDATE, DELETE and TRUNCATE
+ *   on tables; USAGE, SELECT and UPDATE on sequences; USAGE and CREATE on
+ *   schemas. Never TRIGGER, REFERENCES or MAINTAIN: a login that may add a
+ *   trigger to a table runs code as whoever writes that table, the owner
+ *   login included. Version-neutral (no privilege is named for revoking), so
+ *   it applies unchanged on every supported Postgres series.
  * - readers (read-only): SELECT on tables and sequences, USAGE on schemas.
  *
  * Postgres only lets an object's owner alter or drop it, so a read-write
  * login can read and write every table but only alter or drop what it made
- * itself; the owner login does the rest.
+ * itself; the owner login does the rest (and for a table a read-write login
+ * made, the platform admin or `REASSIGN OWNED`).
  */
 export function reconcileDatabaseObjectsSql(
   access: DatabaseObjectAccess,
 ): string {
-  const lines = [
-    // Postgres 14 and older let everyone create in `public`; 15+ already
-    // does not. Same end state on every series.
-    `REVOKE CREATE ON SCHEMA public FROM PUBLIC;`,
-  ];
-  const existing = existingObjectSql(access.writers, access.readers);
-  if (existing.length > 0) {
-    lines.push(
-      `DO $turbopanel$`,
-      `DECLARE s record;`,
-      `BEGIN`,
-      `  FOR s IN SELECT nspname FROM pg_catalog.pg_namespace`,
-      `           WHERE nspname <> 'information_schema' AND nspname !~ '^pg_' LOOP`,
-      ...existing,
-      `  END LOOP;`,
-      `END`,
-      `$turbopanel$;`,
-    );
-  }
+  const lines = [closePublicSchemaSql()];
+  lines.push(...existingObjectSql(access.writers, access.readers));
   for (const creator of access.creators) {
     lines.push(
       ...defaultPrivilegeSql(creator, access.writers, access.readers),

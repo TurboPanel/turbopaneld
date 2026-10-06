@@ -123,7 +123,7 @@ for (const [name, engine] of engines) {
         privileges: ["read-write"],
       } as ManagedApplyCredential])
     );
-    const grants = inputs.filter((input) => /GRANT/i.test(input));
+    const grants = inputs.filter((input) => /\bGRANT\b/i.test(input));
     assertEquals(grants.length, 2);
     assertEquals(grants[0]!.includes("db_a"), true);
     assertEquals(grants[1]!.includes("db_b"), true);
