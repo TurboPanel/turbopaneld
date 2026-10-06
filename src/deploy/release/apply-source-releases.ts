@@ -88,6 +88,7 @@ import {
   releasePathExists,
 } from "./promote.ts";
 import { pruneReleases } from "./retention.ts";
+import { PENDING_RECORD_MARKER } from "./release-health.ts";
 import { isPackageManagerStart } from "../node-package-manager.ts";
 import type { NativeAppStart } from "../native/start-entry.ts";
 import { definedFields } from "../../util/optional-fields.ts";
@@ -589,9 +590,6 @@ async function resolveRollbackTarget(
     ? { paths: params.principalPaths, manifest }
     : null;
 }
-
-/** Present in a record dir from before the promote until it has finished. */
-const PENDING_RECORD_MARKER = ".pending";
 
 /**
  * The record at `recordDir`, unless it is still pending: a pending record was

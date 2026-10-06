@@ -66,9 +66,10 @@ the unit starts. Per app:
 7. Probe `127.0.0.1:<listenPort>` until it answers. Start, the probe
    verdict, and a failed unit's `journalctl` tail are written to the
    command transcript (`health` phase).
-8. On probe failure, dump the unit journal **first**, then repoint
-   `current` back at the previous release and restart, then fail the
-   command.
+8. On probe failure, dump the unit journal **first**, then — only when the
+   previous release once answered on this host — repoint `current` back at
+   it, re-render the unit for that release's recorded start, reload if it
+   changed and restart; otherwise stop the unit. Then fail the command.
 
 **Render → diff → install-if-changed** is the same discipline the vhost path
 uses, and the same reasoning: a candidate is staged under
@@ -244,8 +245,17 @@ seam fully controls timing in tests.
 `current` untouched; a release that builds and promotes cleanly can still fail
 to start, and that is what step 7 covers. `applySourceReleases` reports
 `previousReleaseId` (read before the swap) precisely so the native apply has
-something to roll back to. A first deploy has none, and says so in the error
-rather than pretending it recovered.
+something to roll back to. **Only a release that once answered is a target**
+(`../release/release-health.ts`): when a probe answers, the apply writes a
+`.healthy` mark into that release's daemon-owned record, and a rollback needs
+the mark on a finalized (not `.pending`) record. Restoring a release that never
+came up would only swap one crash loop for another while the error claimed a
+recovery. With no healthy previous release (a first deploy, a release recorded
+before marks existed, or one that never answered) the unit is **stopped** and
+the error says which case it was; the next deploy starts it again. The unit is
+re-rendered for the restored release's own recorded start (`nativeStart`), so
+a `next start` release that fails rolls back to a `node server.js` one
+correctly.
 
 **Next.js.** `build.ts`'s `prepareNativeAppBuildOutput` runs after the build
 commands: when `.next/standalone` exists it folds `.next/static` and `public/`

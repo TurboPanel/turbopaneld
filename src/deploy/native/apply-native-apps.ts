@@ -56,6 +56,10 @@ import type { DecryptSecretsFn } from "../materialize-tls.ts";
 import { resolveReleasePaths } from "../release/release-layout.ts";
 import type { ReleaseOutputHandler } from "../release/checkout.ts";
 import { swapCurrentSymlink } from "../release/promote.ts";
+import {
+  markReleaseHealthy,
+  readHealthyRelease,
+} from "../release/release-health.ts";
 import type { RunFn, RunResult } from "../ensure-principal.ts";
 import { definedFields } from "../../util/optional-fields.ts";
 import type { NativeAppStart } from "./start-entry.ts";
@@ -433,9 +437,19 @@ async function emitNativeAppJournal(
   }
 }
 
+/** `binding` with its recorded start replaced (or cleared). */
+function withNativeStart(
+  binding: NativeAppRelease,
+  nativeStart: NativeAppStart | undefined,
+): NativeAppRelease {
+  const { nativeStart: _replaced, ...rest } = binding;
+  return nativeStart === undefined ? rest : { ...rest, nativeStart };
+}
+
 /**
- * Repoint `current` at the release it pointed at before this deploy and restart
- * the unit.
+ * Repoint `current` at the release it pointed at before this deploy, put back
+ * the unit that release ran under (its recorded start may differ from the new
+ * one's: `next start` against `node server.js`), and restart it.
  *
  * Best-effort by design: the deploy is failing either way, and an error here
  * must not mask the health failure that caused it.
@@ -444,32 +458,84 @@ async function rollbackNativeApp(
   io: NativeAppIo,
   layout: LayoutPaths,
   params: {
-    app: EnvironmentDeployNativeAppService;
-    username: string;
+    prepared: PreparedNativeApp;
     previousReleaseId: string;
+    nativeStart: NativeAppStart | undefined;
   },
 ): Promise<boolean> {
+  const { app, binding, unit } = params.prepared;
   try {
     const paths = resolveReleasePaths(layout, {
-      username: params.username,
-      serviceId: params.app.serviceId,
+      username: binding.username,
+      serviceId: app.serviceId,
       releaseId: params.previousReleaseId,
     });
     await swapCurrentSymlink(paths);
-    const restart = await systemctl(io, [
-      "restart",
-      nativeAppUnitName(params.app.serviceId),
-    ]);
+    const changed = await params.prepared.reinstallUnit?.(params.nativeStart);
+    if (changed) {
+      const reload = await systemctl(io, ["daemon-reload"]);
+      if (!reload.success) {
+        throw new Error(reload.stderr || "daemon-reload failed");
+      }
+    }
+    const restart = await systemctl(io, ["restart", unit]);
     return restart.success;
   } catch (err) {
     logWarn(
       "deploy",
-      `native app rollback failed service=${params.app.serviceId}: ${
+      `native app rollback failed service=${app.serviceId}: ${
         err instanceof Error ? err.message : String(err)
       }`,
     );
     return false;
   }
+}
+
+/**
+ * Stop a unit whose release never answered and that has no healthy release to
+ * go back to, so it does not crash-loop until the next deploy. Best-effort.
+ */
+async function stopFailedNativeApp(
+  io: NativeAppIo,
+  unit: string,
+): Promise<void> {
+  const result = await systemctl(io, ["stop", unit]);
+  if (!result.success) {
+    logWarn("deploy", `native app stop failed unit=${unit}: ${result.stderr}`);
+  }
+}
+
+/**
+ * After a failed health check: roll back to the previous release when it once
+ * answered on this host ({@link readHealthyRelease}), otherwise stop the app.
+ * Returns the sentence the deploy error ends with.
+ */
+async function recoverFailedNativeApp(
+  io: NativeAppIo,
+  layout: LayoutPaths,
+  prepared: PreparedNativeApp,
+): Promise<string> {
+  const previous = prepared.binding.previousReleaseId;
+  const record = previous
+    ? await readHealthyRelease(layout, prepared.app.serviceId, previous)
+      .catch(() => null)
+    : null;
+  if (previous && record) {
+    const rolledBack = await rollbackNativeApp(io, layout, {
+      prepared,
+      previousReleaseId: previous,
+      nativeStart: record.nativeStart,
+    });
+    if (rolledBack) return ` — rolled back to release ${previous}`;
+  }
+  await stopFailedNativeApp(io, prepared.unit);
+  if (!previous) {
+    return " — no previous release to roll back to; the app is stopped";
+  }
+  if (!record) {
+    return ` — the previous release ${previous} never passed a health check on this server, so it was not restored; the app is stopped`;
+  }
+  return ` — rolling back to release ${previous} failed; the app is stopped`;
 }
 
 /**
@@ -480,6 +546,11 @@ type PreparedNativeApp = {
   app: EnvironmentDeployNativeAppService;
   binding: NativeAppRelease;
   unit: string;
+  /**
+   * Re-render and install this app's unit for another release's recorded
+   * start (a rollback). Returns whether the installed unit changed.
+   */
+  reinstallUnit?: (nativeStart: NativeAppStart | undefined) => Promise<boolean>;
 };
 
 /**
@@ -599,7 +670,7 @@ async function startNativeApp(
   layout: LayoutPaths,
   prepared: PreparedNativeApp,
 ): Promise<void> {
-  const { app, binding, unit } = prepared;
+  const { app, unit } = prepared;
 
   // `enable --now` on first deploy, `restart` afterwards: an already-enabled
   // unit re-enabled is a no-op, but an already-running one needs a restart to
@@ -625,6 +696,7 @@ async function startNativeApp(
       "stdout",
       `${app.composeServiceName} answered on 127.0.0.1:${app.listenPort}`,
     );
+    await recordHealthy(layout, prepared);
     return;
   }
 
@@ -636,23 +708,35 @@ async function startNativeApp(
   );
   await emitNativeAppJournal(io, unit);
 
-  const previous = binding.previousReleaseId;
-  const rolledBack = previous
-    ? await rollbackNativeApp(io, layout, {
-      app,
-      username: binding.username,
-      previousReleaseId: previous,
-    })
-    : false;
+  const outcome = await recoverFailedNativeApp(io, layout, prepared);
   throw new Error(
     `native app ${app.composeServiceName} did not answer on 127.0.0.1:${app.listenPort} within ${
       NATIVE_APP_HEALTH_TIMEOUT_MS / 1000
-    }s${
-      rolledBack
-        ? ` — rolled back to release ${previous}`
-        : " — no previous release to roll back to"
-    }`,
+    }s${outcome}`,
   );
+}
+
+/**
+ * Remember that this release answered, so a later failed deploy may roll back
+ * to it. Best-effort: the app is up; a missing mark only means it will not be
+ * a rollback target.
+ */
+async function recordHealthy(
+  layout: LayoutPaths,
+  prepared: PreparedNativeApp,
+): Promise<void> {
+  const releaseId = prepared.binding.releaseId;
+  if (!releaseId) return;
+  try {
+    await markReleaseHealthy(layout, prepared.app.serviceId, releaseId);
+  } catch (err) {
+    logWarn(
+      "deploy",
+      `native app ${prepared.app.serviceId}: could not record release ${releaseId} as healthy: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
 }
 
 /**
@@ -837,6 +921,14 @@ export async function applyNativeAppServices(
       app,
       binding,
       unit: nativeAppUnitName(app.serviceId),
+      reinstallUnit: (nativeStart) =>
+        installNativeAppUnit(io, layout, {
+          environmentId,
+          app,
+          binding: withNativeStart(binding, nativeStart),
+          systemdUnitDir,
+          environmentFile,
+        }),
     });
   });
 

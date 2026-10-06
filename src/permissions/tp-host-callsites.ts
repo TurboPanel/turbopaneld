@@ -2002,8 +2002,8 @@ const SITES: CallSite[] = [
     },
   ),
   tpHost(
-    'src/deploy/native/apply-native-apps.ts|systemctl(io,["restart",nativeAppUnitName(params.app.serviceId)])',
-    { argv: ["systemctl", "restart", APP_UNIT] },
+    'src/deploy/native/apply-native-apps.ts|systemctl(io,["stop",unit])',
+    { argv: ["systemctl", "stop", APP_UNIT] },
   ),
   tpHost(
     'src/deploy/native/apply-native-apps.ts|systemctl(io,["restart",unit])',
