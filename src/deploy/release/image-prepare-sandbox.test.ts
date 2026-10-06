@@ -141,7 +141,7 @@ test("the prepare step runs as the build, from the work tree's tool copy, and th
     assertEquals(seen.length, 1);
     assertEquals(seen[0]?.work, work);
     const copy = await Deno.stat(join(work.workDir, "tools", "image-builder"));
-    assertEquals((copy.mode ?? 0) & 0o777, 0o755);
+    assertEquals((copy.mode ?? 0) & 0o777, 0o700);
     assertEquals(
       (await Deno.readTextFile(join(capture, "args"))).trim().split("\n"),
       ["prepare", ".", "--plan-out", join(work.workDir, "image-plan.json")],

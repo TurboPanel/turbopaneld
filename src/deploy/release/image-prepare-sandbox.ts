@@ -65,9 +65,12 @@ export type ImagePrepareParams = {
   signal?: AbortSignal;
 };
 
+/** A single quote inside a single-quoted shell word: close, escape, reopen. */
+const QUOTED_QUOTE = String.raw`'\''`;
+
 /** One shell word, single-quoted. */
 function shellQuote(value: string): string {
-  return `'${value.replaceAll("'", `'\\''`)}'`;
+  return `'${value.replaceAll("'", QUOTED_QUOTE)}'`;
 }
 
 /**
@@ -100,7 +103,9 @@ export async function prepareImagePlanInSandbox(
   await Deno.mkdir(toolsDir, { recursive: true, mode: 0o700 });
   const copy = join(toolsDir, params.toolName);
   await Deno.copyFile(params.tool, copy);
-  await Deno.chmod(copy, 0o755);
+  // Owner-only: the unit hands the whole work tree to the build's user before
+  // the spec runs, so that user is this copy's owner.
+  await Deno.chmod(copy, 0o700);
   const spec = renderBuildSpec({
     cwd: sandbox.cwd,
     env: params.env,
@@ -127,14 +132,12 @@ export async function prepareImagePlanInSandbox(
  * checked on the opened handle.
  */
 export async function takePlan(source: string, dest: string): Promise<void> {
-  let info: Deno.FileInfo;
-  try {
-    info = await Deno.lstat(source);
-  } catch (err) {
-    if (err instanceof Deno.errors.NotFound) {
-      throw new Error("the image builder's prepare step wrote no build plan");
-    }
+  const info = await Deno.lstat(source).catch((err) => {
+    if (err instanceof Deno.errors.NotFound) return null;
     throw err;
+  });
+  if (info === null) {
+    throw new Error("the image builder's prepare step wrote no build plan");
   }
   if (!info.isFile) {
     throw new UnsafeTreeError(
