@@ -2,6 +2,7 @@ import { assertEquals, assertStringIncludes } from "@std/assert";
 import { resolveLayout } from "../../paths/layout.ts";
 import type { EnvironmentDeployNativeAppService } from "../../contracts/commands-contracts.ts";
 import {
+  DEFAULT_NATIVE_APP_DENO_VERSION,
   DEFAULT_NATIVE_APP_NODE_VERSION,
   DEFAULT_START_SCRIPT,
   formatCpuQuota,
@@ -12,7 +13,9 @@ import {
   nativeAppEnvStageDir,
   nativeAppEnvStagePath,
   nativeAppNodeBinary,
+  nativeAppRuntimeKind,
   nativeAppRuntimeRoot,
+  nativeAppRuntimeTarget,
   nativeAppStagedFilePrefix,
   nativeAppStagedPath,
   nativeAppUnitContent,
@@ -23,6 +26,7 @@ import {
   principalSliceStagedPath,
   quoteSystemdArgument,
   resolveExecStart,
+  resolveNativeAppDenoVersion,
   resolveNativeAppNodeVersion,
   serviceLabelsLine,
   systemdRestartDirective,
@@ -456,20 +460,162 @@ test("a unit loads an environment file only when the app has variables", () => {
   assertEquals(withFile.includes("EnvironmentFile=-"), false);
 });
 
-test("the platform-owned names are exactly the Environment= keys a unit sets", () => {
-  const unit = nativeAppUnitContent({
+/** The `Environment=` names a unit sets. */
+function environmentNames(unit: string): string[] {
+  return unit.split("\n")
+    .filter((line) => line.startsWith("Environment="))
+    .map((line) => line.slice("Environment=".length).split("=")[0]);
+}
+
+const denoApp: EnvironmentDeployNativeAppService = {
+  ...app,
+  runtime: "deno",
+  framework: "auto",
+};
+
+test("the platform-owned names are exactly the Environment= keys the units set", () => {
+  const nodeUnit = nativeAppUnitContent({
     layout,
     app,
     username: "alice",
     environmentId: "env-1",
     environmentFile: true,
   });
-  const set = unit.split("\n")
-    .filter((line) => line.startsWith("Environment="))
-    .map((line) => line.slice("Environment=".length).split("=")[0]);
-  // systemd lets EnvironmentFile override Environment=, so every name the unit
-  // sets must be on the list that keeps tenant values out of the file.
+  const denoUnit = nativeAppUnitContent({
+    layout,
+    app: denoApp,
+    username: "alice",
+    environmentId: "env-1",
+    environmentFile: true,
+  });
+  // systemd lets EnvironmentFile override Environment=, so every name a unit
+  // sets (Node's or Deno's) must be on the list that keeps tenant values out
+  // of the file.
+  const set = new Set([
+    ...environmentNames(nodeUnit),
+    ...environmentNames(denoUnit),
+  ]);
   assertEquals([...set].sort(), [...NATIVE_APP_PLATFORM_ENV_NAMES].sort());
+});
+
+test("a Deno app's unit runs the vendored Deno, with its cache and loopback bind", () => {
+  const unit = nativeAppUnitContent({
+    layout,
+    app: { ...denoApp, denoVersion: "2.9.7" },
+    username: "alice",
+    environmentId: "env-1",
+    nativeStart: { kind: "deno-task" },
+  });
+  const deno = "/opt/turbopanel/vendor/deno-app/2/current/bin/deno";
+  assertStringIncludes(unit, `ExecStart=${deno} task start\n`);
+  assertStringIncludes(
+    unit,
+    "Environment=PATH=/opt/turbopanel/vendor/deno-app/2/current/bin:/usr/bin:/bin\n",
+  );
+  assertStringIncludes(unit, "/.cache/deno\n");
+  assertStringIncludes(unit, "Environment=DENO_DIR=/srv/users/");
+  assertStringIncludes(unit, "Environment=DENO_NO_UPDATE_CHECK=1\n");
+  assertStringIncludes(unit, "Environment=DENO_NO_PROMPT=1\n");
+  assertStringIncludes(unit, "Environment=HOST=127.0.0.1\n");
+  assertStringIncludes(unit, "Environment=HOSTNAME=127.0.0.1\n");
+  assertStringIncludes(unit, "Environment=PORT=4100\n");
+  assertEquals(unit.includes("COREPACK"), false);
+  assertEquals(unit.includes("node-app"), false);
+  // The same hardening as a Node app: this is the fence, not Deno's flags.
+  for (
+    const line of [
+      "NoNewPrivileges=yes",
+      "ProtectSystem=strict",
+      "ProtectHome=yes",
+      "CapabilityBoundingSet=",
+      "AmbientCapabilities=",
+      "PrivateTmp=yes",
+    ]
+  ) {
+    assertStringIncludes(unit, `${line}\n`);
+  }
+  const shared = unit.split("\n").find((l) => l.startsWith("ReadWritePaths="));
+  assertEquals(shared?.endsWith("/shared"), true);
+});
+
+test("the Node unit is untouched by the Deno runtime", () => {
+  const unit = nativeAppUnitContent({
+    layout,
+    app,
+    username: "alice",
+    environmentId: "env-1",
+  });
+  assertEquals(unit.includes("DENO"), false);
+  assertStringIncludes(unit, "Environment=COREPACK_HOME=");
+  assertStringIncludes(unit, "node-app/24/current/bin/node server.js\n");
+});
+
+test("resolveExecStart for Deno: command, startup file, detected start, then deno task start", () => {
+  const deno = "/opt/turbopanel/vendor/deno-app/2/current/bin/deno";
+  const base = { nodeBinary: "unused", denoBinary: deno, listenPort: 4100 };
+  assertEquals(
+    resolveExecStart({ ...base, nativeStart: { kind: "deno-task" } }),
+    `${deno} task start`,
+  );
+  assertEquals(
+    resolveExecStart({
+      ...base,
+      nativeStart: { kind: "deno-file", path: "src/main.ts" },
+    }),
+    `${deno} run --allow-all src/main.ts`,
+  );
+  assertEquals(
+    resolveExecStart({ ...base, startupFile: "app.ts" }),
+    `${deno} run --allow-all app.ts`,
+  );
+  // The author's command runs through sh untouched: no Corepack rewrite.
+  assertEquals(
+    resolveExecStart({
+      ...base,
+      startCommand: "deno run -A main.ts --flag",
+      nativeStart: { kind: "deno-task" },
+    }),
+    "/bin/sh -c 'deno run -A main.ts --flag'",
+  );
+  // A release that recorded no start, or a Node start by mistake.
+  assertEquals(resolveExecStart(base), `${deno} task start`);
+  assertEquals(
+    resolveExecStart({ ...base, nativeStart: { kind: "next-start" } }),
+    `${deno} task start`,
+  );
+  // And a Deno start never reaches Node.
+  assertEquals(
+    resolveExecStart({
+      nodeBinary: "/n/node",
+      nativeStart: { kind: "deno-task" },
+      listenPort: 1,
+    }),
+    "/n/node server.js",
+  );
+});
+
+test("nativeAppRuntimeTarget picks the runtime tree, series and group", () => {
+  const node = nativeAppRuntimeTarget(layout, { nodeVersion: "22" });
+  assertEquals(node.runtime, "node");
+  assertEquals(node.group, "tpnode22");
+  assertEquals(node.binDir, "/opt/turbopanel/vendor/node-app/22/current/bin");
+  const deno = nativeAppRuntimeTarget(layout, {
+    runtime: "deno",
+    denoVersion: "2.9.7",
+    nodeVersion: "22",
+  });
+  assertEquals(deno.runtime, "deno");
+  assertEquals(deno.series, "2");
+  assertEquals(deno.group, "tpdeno2");
+  assertEquals(
+    deno.binary,
+    "/opt/turbopanel/vendor/deno-app/2/current/bin/deno",
+  );
+  assertEquals(
+    resolveNativeAppDenoVersion({}),
+    DEFAULT_NATIVE_APP_DENO_VERSION,
+  );
+  assertEquals(nativeAppRuntimeKind({}), "node");
 });
 
 test("every native app binds loopback under both HOST and HOSTNAME", () => {

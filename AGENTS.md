@@ -800,7 +800,7 @@ it regresses:
     uid from systemd's 61184-65519 range that exists only while the unit runs,
     never a host account, never in docker/tp/sudo, refused if a host account
     or group already has that name or any group lists a `tpb-*` member), with
-    every `tpnode<series>` group as
+    every `tpnode<series>` and `tpdeno<series>` group as
     `SupplementaryGroups=`, inside the **site owner's own resource group**
     (`Slice=turbopanel-<owner>-build.slice`, a child of the owner's
     `turbopanel-<owner>.slice`, dashes in the owner's name written `.`, so a
