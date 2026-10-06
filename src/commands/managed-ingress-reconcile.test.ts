@@ -346,9 +346,12 @@ test({
       Deno.env.set("TURBOPANEL_CONFIG_DIR", fixture.dirs.configDir);
       try {
         let composeUps = 0;
-        const run = (args: string[]): Promise<DockerCliResult> => {
+        const run = (
+          args: string[],
+          options?: RunDockerOptions,
+        ): Promise<DockerCliResult> => {
           if (args.includes("up")) composeUps += 1;
-          return fakeRun()(args);
+          return fakeRun()(args, options);
         };
         const reconcile = async (...bindAddresses: string[]) => {
           const result = await handleManagedIngressReconcile(
