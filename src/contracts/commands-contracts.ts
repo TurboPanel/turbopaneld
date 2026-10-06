@@ -423,6 +423,11 @@ export type BackupPolicyWireEntry = {
   managedId?: string;
   engine?: ManagedEngineCode;
   artifactExtension?: ManagedBackupArtifactExtension;
+  /**
+   * The database a `managed` run dumps. Absent from an older control plane,
+   * in which case the engine's default database is dumped.
+   */
+  database?: string;
   copyId?: string;
   copyProvider?: CopyBackupProvider;
   volumeName?: string;
@@ -7793,12 +7798,19 @@ function parseBackupPolicyTarget(
     entry.managedId = raw.managedId;
     entry.engine = raw.engine;
     entry.artifactExtension = raw.artifactExtension;
+    if (raw.database !== undefined) {
+      if (typeof raw.database !== "string" || !isSafeIdentifier(raw.database)) {
+        throw new Error("Invalid backup policy managed database");
+      }
+      entry.database = raw.database;
+    }
     return;
   }
   if (
     raw.managedId !== undefined ||
     raw.engine !== undefined ||
-    raw.artifactExtension !== undefined
+    raw.artifactExtension !== undefined ||
+    raw.database !== undefined
   ) {
     throw new Error("Invalid backup policy copy target");
   }
