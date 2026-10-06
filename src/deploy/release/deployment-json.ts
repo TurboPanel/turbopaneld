@@ -106,57 +106,60 @@ export type ReleaseManifestV1 = {
   railpackPlanVersion?: string;
 };
 
+/** Every named field is absent or passes `ok`. */
+function optionalFieldsOk(
+  record: Record<string, unknown>,
+  keys: readonly string[],
+  ok: (field: unknown) => boolean,
+): boolean {
+  return keys.every((key) => record[key] === undefined || ok(record[key]));
+}
+
 function isReleaseManifestV1(value: unknown): value is ReleaseManifestV1 {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     return false;
   }
   const record = value as Record<string, unknown>;
   if (record.version !== 1) return false;
-  for (
-    const key of [
-      "serviceId",
-      "composeServiceName",
-      "releaseId",
-      "sourceId",
-      "commitSha",
-      "ref",
-      "promotedAt",
-    ]
-  ) {
+  const required = [
+    "serviceId",
+    "composeServiceName",
+    "releaseId",
+    "sourceId",
+    "commitSha",
+    "ref",
+    "promotedAt",
+  ];
+  const requiredOk = required.every((key) => {
     const field = record[key];
-    if (typeof field !== "string" || field.length === 0) return false;
-  }
-  for (const key of ["standaloneOutput", "staticExport"]) {
-    const field = record[key];
-    if (field !== undefined && typeof field !== "boolean") return false;
-  }
-  if (
-    record.nativeStart !== undefined && !isNativeAppStart(record.nativeStart)
-  ) {
-    return false;
-  }
-  if (
-    record.runtime !== undefined && record.runtime !== "node" &&
-    record.runtime !== "deno"
-  ) {
-    return false;
-  }
-  for (
-    const key of [
-      "commitMessage",
-      "commitAuthor",
-      "startCommand",
-      "startupFile",
-      "imageTag",
-      "imageDigest",
-      "railpackFrontendVersion",
-      "railpackPlanVersion",
-    ]
-  ) {
-    const field = record[key];
-    if (field !== undefined && typeof field !== "string") return false;
-  }
-  return true;
+    return typeof field === "string" && field.length > 0;
+  });
+  if (!requiredOk) return false;
+  return optionalFieldsOk(
+    record,
+    ["standaloneOutput", "staticExport"],
+    (field) => typeof field === "boolean",
+  ) &&
+    optionalFieldsOk(record, ["nativeStart"], isNativeAppStart) &&
+    optionalFieldsOk(
+      record,
+      ["runtime"],
+      (field) => field === "node" || field === "deno",
+    ) &&
+    optionalFieldsOk(
+      record,
+      [
+        "commitMessage",
+        "commitAuthor",
+        "startCommand",
+        "startupFile",
+        "imageTag",
+        "imageDigest",
+        "railpackFrontendVersion",
+        "railpackPlanVersion",
+      ],
+      (field) => typeof field === "string",
+    );
 }
 
 /** `<releaseDir>/.turbopanel/release.json`. */
