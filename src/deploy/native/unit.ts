@@ -152,8 +152,9 @@ export function nativeAppUnitPath(
 }
 
 /**
- * `HOME` and `TMPDIR` for a unit that runs as a principal: its own `home/` and
- * `tmp/`, never the home itself, which is root-owned and read-only to it.
+ * `HOME` and `TMPDIR` for a cron job, which runs as a principal: its own
+ * `home/` and `tmp/`, never the home itself, which is root-owned and read-only
+ * to it. A Node app sets its own (see {@link nativeAppUnitContent}).
  */
 export function principalUnitEnvironment(
   layout: Pick<LayoutPaths, "principalHomeRoot">,
@@ -166,10 +167,10 @@ export function principalUnitEnvironment(
 }
 
 /**
- * The one `ReadWritePaths=` line for a unit that runs as a principal: the
- * site directories it may write, then the principal's `home/`, `data/` and
- * `tmp/`. Never the home root: under `ProtectSystem=strict` everything else
- * stays read-only, whatever the file modes say.
+ * The one `ReadWritePaths=` line for a cron job: the site directories it may
+ * write, then the principal's `home/`, `data/` and `tmp/`. Never the home
+ * root: under `ProtectSystem=strict` everything else stays read-only, whatever
+ * the file modes say. A Node app gets only its site's `shared/` instead.
  *
  * Every path must exist before the unit starts (systemd fails it with
  * `226/NAMESPACE` otherwise). Principal ensure creates the three tenant dirs,
@@ -444,12 +445,18 @@ export function serviceLabelsLine(
 }
 
 /**
+ * A Node app's `TMPDIR`: the unit's private `/tmp` (`PrivateTmp=yes`), so it
+ * never needs the owner's shared `tmp/`.
+ */
+const NATIVE_APP_TMPDIR = "/tmp"; // NOSONAR typescript:S5443 — the unit's PrivateTmp, not a write by this process
+
+/**
  * Variable names the unit sets itself.
  *
  * systemd applies an `EnvironmentFile=` **over** every `Environment=` line, no
  * matter which comes first, so a tenant variable of one of these names would
  * silently replace what the platform decided (the port the proxy dials, the
- * Node on `PATH`, the writable `HOME`). They are therefore never written to the
+ * Node on `PATH`, the `HOME` and temp directory). They are therefore never written to the
  * app's environment file. Kept next to {@link nativeAppUnitContent} so a new
  * `Environment=` line and its entry here are changed together; a unit test
  * fails when they disagree.
@@ -554,7 +561,12 @@ export function nativeAppUnitContent(opts: NativeAppUnitOpts): string {
     `Environment=NODE_ENV=${app.appMode ?? "production"}`,
     `Environment=PORT=${app.listenPort}`,
     `Environment=HOST=127.0.0.1`,
-    ...principalUnitEnvironment(opts.layout, username),
+    // A Node app writes only its own site folder (`shared/`). Its `HOME` is
+    // the owner's `home/`, read-only here, and its temp files go to the
+    // unit's own `/tmp` (`PrivateTmp=yes`), not the owner's `tmp/`, which
+    // shell, SFTP and cron use.
+    `Environment=HOME=${principalUserHome(opts.layout, username)}`,
+    `Environment=TMPDIR=${NATIVE_APP_TMPDIR}`,
     // Writable under ReadWritePaths=shared — Corepack falls back here when a
     // custom start command still invokes pnpm/yarn at runtime.
     `Environment=XDG_CACHE_HOME=${sharedDir}/.cache`,
@@ -583,8 +595,9 @@ export function nativeAppUnitContent(opts: NativeAppUnitOpts): string {
     "LockPersonality=yes",
     "CapabilityBoundingSet=",
     "AmbientCapabilities=",
-    // Its own site's shared/ plus home/, data/ and tmp/: nothing else.
-    principalReadWritePaths(opts.layout, username, [sharedDir]),
+    // Its own site's shared/: nothing else (not the owner's home/, data/ or
+    // tmp/). Under ProtectSystem=strict every other path stays read-only.
+    `ReadWritePaths=${sharedDir}`,
   ];
 
   if (app.resources?.cpus !== undefined) {

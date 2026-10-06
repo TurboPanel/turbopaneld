@@ -92,9 +92,11 @@ from what is actually installed.
 `ProtectKernelTunables=yes`, `ProtectKernelModules=yes`,
 `ProtectControlGroups=yes`, `RestrictSUIDSGID=yes`, `RestrictRealtime=yes`,
 `LockPersonality=yes`, and an **empty** `CapabilityBoundingSet=` /
-`AmbientCapabilities=`. The writable paths are the site's own `shared/` plus
-the principal's `home/`, `data/` and `tmp/` (`ReadWritePaths=`, built by
-`principalReadWritePaths`), with `HOME=<home>/home` and `TMPDIR=<home>/tmp`.
+`AmbientCapabilities=`. The only writable path is the site's own `shared/`
+(`ReadWritePaths=<shared>`): a Node app writes only its own site folder, never
+the principal's `home/`, `data/` or `tmp/` (an owner decision; cron jobs, by
+contrast, get those three through `principalReadWritePaths`). `HOME=<home>/home`
+stays read-only to the app, and `TMPDIR=/tmp` is the unit's private `/tmp`.
 The home root, `sites/` and the release tree stay read-only to the runtime
 user, so a compromised app cannot rewrite the code it is running. No supplementary-group dance is needed
 here (unlike the web engines): the app *is* the principal that already has group

@@ -390,7 +390,7 @@ test("authored deploy.labels are preserved on the generated unit", () => {
   );
 });
 
-test("a native app's HOME and TMPDIR are its tenant dirs, never the sealed home root", () => {
+test("a native app writes only its own site's shared/, not the owner's home/, data/ or tmp/", () => {
   const content = nativeAppUnitContent({
     layout,
     app,
@@ -399,17 +399,26 @@ test("a native app's HOME and TMPDIR are its tenant dirs, never the sealed home 
   });
   const lines = content.split("\n");
 
+  // HOME is the owner's home/ (read-only to the app), never the sealed root.
   assertStringIncludes(content, "Environment=HOME=/srv/users/appuser/home\n");
-  assertStringIncludes(content, "Environment=TMPDIR=/srv/users/appuser/tmp\n");
-  // Only its own site's shared/ plus the principal's home/, data/ and tmp/.
+  assertEquals(lines.includes("Environment=HOME=/srv/users/appuser"), false);
+  // Temp files go to the unit's private /tmp, not the owner's tmp/.
+  assertStringIncludes(content, "Environment=TMPDIR=/tmp\n");
+  assertStringIncludes(content, "PrivateTmp=yes\n");
   assertEquals(
     lines.filter((line) => line.startsWith("ReadWritePaths=")),
-    [
-      "ReadWritePaths=/srv/users/appuser/sites/svc-native-1/shared " +
-      "/srv/users/appuser/home /srv/users/appuser/data /srv/users/appuser/tmp",
-    ],
+    ["ReadWritePaths=/srv/users/appuser/sites/svc-native-1/shared"],
   );
-  assertEquals(lines.includes("Environment=HOME=/srv/users/appuser"), false);
+  for (const dir of ["home", "data", "tmp"]) {
+    assertEquals(
+      lines.some((line) =>
+        line.startsWith("ReadWritePaths=") &&
+        line.includes(`/srv/users/appuser/${dir}`)
+      ),
+      false,
+      `${dir}/ must not be writable by a Node app`,
+    );
+  }
 });
 
 test("a unit loads an environment file only when the app has variables", () => {
