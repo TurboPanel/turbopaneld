@@ -20,8 +20,15 @@ import { resolveLayout } from "../paths/layout.ts";
 import { reportLiveReleaseLinks } from "../deploy/release/live-release-scan.ts";
 import { guardHostingCaddySites } from "../deploy/ingress.ts";
 import { runDocker } from "../deploy/docker-cli.ts";
-import { applyBootHold } from "../managed/boot-hold.ts";
-import { markHostCleanShutdown, recordHostBoot } from "../managed/host-boot.ts";
+import {
+  applyBootHold,
+  BootHoldLocalRetry,
+} from "../managed/boot-hold.ts";
+import {
+  classifyHostBootRecord,
+  markHostCleanShutdown,
+  recordHostBootPersist,
+} from "../managed/host-boot.ts";
 import { createSentinel, type SentinelOptions } from "../monitor/index.ts";
 import type { ServiceRunState } from "../contracts/service-run-state.ts";
 import { setServiceRunStateSource } from "../host/service-run-state.ts";
@@ -57,6 +64,9 @@ export type SentinelLike = {
   /** Per-service run state for the presence channel; absent on test doubles. */
   serviceRunStates?(): ServiceRunState[] | undefined;
 };
+
+// Global for shutdown cleanup: P1-2 fix boot-hold local retry timer.
+let bootHoldRetry: BootHoldLocalRetry | undefined;
 
 export type DaemonRunIo = {
   initOrchestration?: () => Promise<boolean>;
@@ -197,8 +207,23 @@ async function guardHostingSites(): Promise<void> {
  */
 async function applyManagedBootHoldAtStart(): Promise<void> {
   const layout = resolveLayout(Deno.env.toObject());
-  const kind = await recordHostBoot(layout);
-  await applyBootHold(kind, { layout, run: runDocker });
+  // P1-1 fix: classify before holding, hold before persisting the record.
+  // If the daemon crashes between hold and persist, the next start reads the
+  // old record, sees a new boot id, and holds again.
+  const kind = await classifyHostBootRecord(layout);
+  const holdSucceeded = await applyBootHold(kind, { layout, run: runDocker });
+  // Start local retries for any stops that failed (P1-2 fix): independent
+  // timer that keeps trying until every hold has stopped the engine.
+  if (holdSucceeded) {
+    const retry = new BootHoldLocalRetry(layout, runDocker);
+    retry.start();
+    // Stored globally for shutdown cleanup (below).
+    bootHoldRetry = retry;
+  }
+  // Only persist the record after holds are applied and on success.
+  if (holdSucceeded) {
+    await recordHostBootPersist(layout);
+  }
 }
 
 async function markCleanShutdown(): Promise<void> {
@@ -346,6 +371,8 @@ export async function runDaemon(io: DaemonRunIo = {}): Promise<void> {
       sentinel.stop();
       setServiceRunStateSource(undefined);
       (io.stopHostStorageSamplers ?? stopHostStorageSamplers)();
+      // P1-2 cleanup: stop local retry timer so the process can exit.
+      bootHoldRetry?.stop();
       closeDockerClient(dockerClient);
       dockerClient = undefined;
       abort.abort();

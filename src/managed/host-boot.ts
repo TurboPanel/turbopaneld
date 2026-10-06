@@ -96,19 +96,34 @@ export function classifyHostBoot(
 }
 
 /**
- * Compare with the previous record, then write this run's record (no clean
- * stamp: it must be earned again by the next clean shutdown).
+ * Classify the boot, comparing with the previous record, without persisting.
+ * Must be called before `recordHostBootPersist` to ensure holds are applied
+ * before the record is written (P1-1 fix: a crash between classify and
+ * persist must not lose the hold).
  */
-export async function recordHostBoot(
+export async function classifyHostBootRecord(
+  layout: LayoutPaths,
+  deps: {
+    readBootId?: () => Promise<string | undefined>;
+  } = {},
+): Promise<HostBootKind> {
+  const bootId = await (deps.readBootId ?? readProcBootId)();
+  const previous = await readHostBootRecord(layout);
+  return classifyHostBoot(previous, bootId);
+}
+
+/**
+ * Persist this run's record (no clean stamp: it must be earned again by the
+ * next clean shutdown). Must not be called until all boot holds are applied.
+ */
+export async function recordHostBootPersist(
   layout: LayoutPaths,
   deps: {
     readBootId?: () => Promise<string | undefined>;
     nowIso?: () => string;
   } = {},
-): Promise<HostBootKind> {
+): Promise<void> {
   const bootId = await (deps.readBootId ?? readProcBootId)();
-  const previous = await readHostBootRecord(layout);
-  const kind = classifyHostBoot(previous, bootId);
   if (bootId !== undefined) {
     // Same boot or not, start a fresh record without the clean stamp, so a
     // daemon restart followed by a power cut reads as unclean.
@@ -117,6 +132,23 @@ export async function recordHostBoot(
       startedAt: (deps.nowIso ?? (() => new Date().toISOString()))(),
     });
   }
+}
+
+/**
+ * Compare with the previous record, then write this run's record (no clean
+ * stamp: it must be earned again by the next clean shutdown).
+ *
+ * @deprecated Use `classifyHostBootRecord` then `recordHostBootPersist` instead.
+ */
+export async function recordHostBoot(
+  layout: LayoutPaths,
+  deps: {
+    readBootId?: () => Promise<string | undefined>;
+    nowIso?: () => string;
+  } = {},
+): Promise<HostBootKind> {
+  const kind = await classifyHostBootRecord(layout, deps);
+  await recordHostBootPersist(layout, deps);
   return kind;
 }
 

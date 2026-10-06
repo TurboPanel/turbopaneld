@@ -152,22 +152,30 @@ async function stopEngine(
 }
 
 /**
- * Hold every primary on this host after an unclean boot. Any other boot kind
- * does nothing. Never throws: a failure to hold one cluster is logged and the
- * rest are still held. Returns the clusters now held.
+ * Hold every primary on this host after an unclean boot OR a planned reboot
+ * that took longer than the control plane's window (P0-1 fix: a long clean
+ * reboot could trigger promotion before this daemon starts, so the old primary
+ * must be held until the control plane confirms it is still the primary).
+ *
+ * Any other boot kind does nothing. Never throws: a failure to hold one
+ * cluster is logged and the rest are still held. Returns true only if all
+ * clusters' hold files and markers were written (the boot record persists
+ * only on success).
  */
 export async function applyBootHold(
   kind: HostBootKind,
   deps: BootHoldDeps,
-): Promise<BootHoldRecord[]> {
-  if (kind !== "unclean") return [];
+): Promise<boolean> {
+  if (kind !== "unclean" && kind !== "clean-reboot") return true;
   const members = await (deps.listMembers ??
     (() => listManagedHaMembers(deps.layout)))();
+  let holdFailed = false;
   const held: BootHoldRecord[] = [];
   await forEachSequential(members.filter(isHoldablePrimary), async (member) => {
     try {
       held.push(await holdOne(member, deps));
     } catch (err) {
+      holdFailed = true;
       logWarn(
         "managed",
         `boot hold failed managedId=${member.managedId}:`,
@@ -175,7 +183,7 @@ export async function applyBootHold(
       );
     }
   });
-  return held;
+  return !holdFailed;
 }
 
 async function holdOne(
@@ -294,5 +302,64 @@ export async function releaseBootHoldLocally(
       `boot hold release: compose start failed managedId=${record.managedId}:`,
       sanitizeForLog(started.stderr || started.stdout),
     );
+  }
+}
+
+/**
+ * Retry `ensureHoldStopped` for every active hold with a local timer,
+ * independent of the control-plane socket. Runs every 5-10 seconds until
+ * every hold has `engineStopped: true` or is released by a command.
+ *
+ * P1-2 fix: a failed `compose stop` retries even when the control plane is
+ * unreachable, so a stale primary does not keep serving the hold window.
+ * The socket-based reporter would retry only when connected.
+ */
+export class BootHoldLocalRetry {
+  #timer: ReturnType<typeof setInterval> | undefined;
+  #ticking = false;
+
+  constructor(
+    readonly layout: LayoutPaths,
+    readonly run: DockerRunFn,
+  ) {}
+
+  start(): void {
+    this.stop();
+    this.#timer = setInterval(() => {
+      void this.tick();
+    }, 5_000); // 5s cadence
+    void this.tick();
+  }
+
+  stop(): void {
+    if (this.#timer !== undefined) {
+      clearInterval(this.#timer);
+      this.#timer = undefined;
+    }
+  }
+
+  async tick(): Promise<void> {
+    if (this.#ticking) return;
+    this.#ticking = true;
+    try {
+      const holds = await listActiveBootHolds(this.layout);
+      const unstopped = holds.filter((h) => !h.engineStopped);
+      if (unstopped.length === 0) {
+        // No more holds to retry; stop the timer.
+        this.stop();
+        return;
+      }
+      await forEachSequential(unstopped, (hold) =>
+        ensureHoldStopped(hold, { layout: this.layout, run: this.run })
+      );
+    } catch (err) {
+      logWarn(
+        "managed",
+        `boot hold local retry failed:`,
+        sanitizeForLog(err),
+      );
+    } finally {
+      this.#ticking = false;
+    }
   }
 }
