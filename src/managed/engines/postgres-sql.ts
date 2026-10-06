@@ -206,6 +206,15 @@ function aclEntryIsExactlySql(
  * connecting right now) never sees the gap. Nothing is written when the login
  * already holds exactly this, so a repeated apply does not rewrite the ACL.
  */
+
+function databasePrivilegesFor(
+  privilege: string,
+): readonly string[] {
+  if (privilege === "read-only") return READ_ONLY_DATABASE_PRIVILEGES;
+  if (privilege === "read-write") return READ_WRITE_DATABASE_PRIVILEGES;
+  return DATABASE_PRIVILEGES;
+}
+
 export function grantDatabaseSql(
   database: string,
   username: string,
@@ -213,11 +222,7 @@ export function grantDatabaseSql(
 ): string {
   const db = quoteIdentifier(database);
   const role = quoteIdentifier(username);
-  const want = privilege === "read-only"
-    ? READ_ONLY_DATABASE_PRIVILEGES
-    : privilege === "read-write"
-    ? READ_WRITE_DATABASE_PRIVILEGES
-    : DATABASE_PRIVILEGES;
+  const want = databasePrivilegesFor(privilege);
   const upToDate = aclEntryIsExactlySql(
     "d.datacl",
     "pg_catalog.acldefault('d', d.datdba)",
