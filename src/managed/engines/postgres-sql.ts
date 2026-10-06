@@ -150,6 +150,7 @@ export function dropDatabaseSql(name: string): string {
 
 /** Privilege lists, as Postgres spells them in `aclexplode`. */
 const DATABASE_PRIVILEGES = ["CONNECT", "CREATE", "TEMPORARY"] as const;
+const READ_WRITE_DATABASE_PRIVILEGES = ["CONNECT", "TEMPORARY"] as const;
 const READ_ONLY_DATABASE_PRIVILEGES = ["CONNECT"] as const;
 const WRITER_TABLE_PRIVILEGES = [
   "SELECT",
@@ -213,6 +214,8 @@ export function grantDatabaseSql(
   const role = quoteIdentifier(username);
   const want = privilege === "read-only"
     ? READ_ONLY_DATABASE_PRIVILEGES
+    : privilege === "read-write"
+    ? READ_WRITE_DATABASE_PRIVILEGES
     : DATABASE_PRIVILEGES;
   const upToDate = aclEntryIsExactlySql(
     "d.datacl",
@@ -241,6 +244,26 @@ export function grantDatabaseSql(
     `$turbopanel$;`,
   );
   return lines.join("\n");
+}
+
+/**
+ * Create a per-login schema where read-write logins can create objects.
+ * The schema is owned by the login and they have full CREATE rights within it.
+ * Run inside the database where the read-write login needs CREATE capability.
+ */
+export function ensureReadWriteLoginSchemaSql(username: string): string {
+  const ident = quoteIdentifier(username);
+  return [
+    `DO $turbopanel$`,
+    `BEGIN`,
+    `  IF NOT EXISTS (`,
+    `    SELECT 1 FROM pg_catalog.pg_namespace WHERE nspname = ${quoteLiteral(username)}`,
+    `  ) THEN`,
+    `    CREATE SCHEMA ${ident} AUTHORIZATION ${ident};`,
+    `  END IF;`,
+    `END`,
+    `$turbopanel$;`,
+  ].join("\n");
 }
 
 const PRIVILEGE_RANK: Record<ManagedDatabasePrivilege, number> = {

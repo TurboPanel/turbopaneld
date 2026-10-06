@@ -22,6 +22,7 @@ import {
   dropPhysicalSlotSql,
   dropRoleSql,
   ensureProxySqlMonitorRoleSql,
+  ensureReadWriteLoginSchemaSql,
   grantDatabaseSql,
   isInRecoverySql,
   listDatabasesForRoleReleaseSql,
@@ -265,6 +266,19 @@ async function reconcileDatabaseAccess(
 
   const databases = [...new Set(granted.flatMap((entry) => entry.databases))];
   await forEachSequential(databases, async (database) => {
+    // Create per-login schemas for read-write logins in each database.
+    const readWriteLogins = granted
+      .filter(
+        (entry) =>
+          entry.databases.includes(database) && entry.level === "read-write",
+      )
+      .map((entry) => entry.username);
+    if (readWriteLogins.length > 0) {
+      const schemaCreation = readWriteLogins
+        .map((username) => ensureReadWriteLoginSchemaSql(username))
+        .join("\n");
+      await runPsql(ctx, schemaCreation, database);
+    }
     const access = objectAccessFor(ctx, database, granted, rootUsernames);
     const sessionDefaults = granted
       .filter((entry) => entry.databases.includes(database))

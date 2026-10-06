@@ -102,7 +102,7 @@ test("grantDatabaseSql covers privilege levels, resets the old one first and wri
   const readWrite = grantDatabaseSql("appdb", "app", "read-write");
   assertEquals(
     readWrite.includes(
-      'REVOKE ALL ON DATABASE "appdb" FROM "app";\n    GRANT CONNECT, CREATE, TEMPORARY ON DATABASE "appdb" TO "app";',
+      'REVOKE ALL ON DATABASE "appdb" FROM "app";\n    GRANT CONNECT, TEMPORARY ON DATABASE "appdb" TO "app";',
     ),
     true,
   );

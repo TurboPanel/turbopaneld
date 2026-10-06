@@ -169,6 +169,7 @@ async function snapshot(session: Session): Promise<string> {
   return await session.value(
     `SELECT (SELECT xmin::text FROM pg_database WHERE datname = 'appdb') || '/' ||
             (SELECT xmin::text FROM pg_namespace WHERE nspname = 'public') || '/' ||
+            (SELECT xmin::text FROM pg_namespace WHERE nspname = 'rw') || '/' ||
             (SELECT string_agg(xmin::text, ',' ORDER BY relname) FROM pg_class
               WHERE relname IN ('orders', 'orders_id_seq', 'rw_made'));`,
     "appdb",
@@ -192,6 +193,30 @@ async function proveLogins(
   await applyAgain();
 
   // Read-write: reads and writes, and nothing that runs code as someone else.
+  // First, verify that read-write cannot CREATE on the database level.
+  await expectRefused(
+    session,
+    "rw",
+    "appdb",
+    `CREATE SCHEMA cant_create_here;`,
+    "permission denied for database",
+  );
+  // Also cannot CREATE directly on public schema.
+  await expectRefused(
+    session,
+    "rw",
+    "appdb",
+    `CREATE TABLE public.rw_made (id int);`,
+    "permission denied for schema public",
+  );
+  // But CAN create in their own schema.
+  await expectAllowed(
+    session,
+    "rw",
+    "appdb",
+    `CREATE TABLE rw.rw_made (id int);`,
+  );
+  // And can work with tables normally in public.
   await expectAllowed(
     session,
     "rw",
@@ -200,13 +225,12 @@ async function proveLogins(
      UPDATE public.orders SET note = 'rw2' WHERE id = 1;
      DELETE FROM public.orders WHERE id = 2;
      SELECT nextval('public.orders_id_seq');
-     CREATE TABLE public.rw_made (id int);
      TRUNCATE public.rw_made;`,
   );
   const trigger =
-    `CREATE FUNCTION public.rw_fn() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END';
-    CREATE TRIGGER rw_trg BEFORE INSERT ON public.orders FOR EACH ROW EXECUTE FUNCTION public.rw_fn();`;
-  await expectRefused(session, "rw", "appdb", trigger, DENIED);
+    `CREATE FUNCTION rw.rw_fn() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END';
+    CREATE TRIGGER rw_trg BEFORE INSERT ON public.orders FOR EACH ROW EXECUTE FUNCTION rw.rw_fn();`;
+  await expectRefused(session, "rw", "appdb", trigger, "permission denied for table public.orders");
   await expectRefused(
     session,
     "rw",
@@ -249,8 +273,33 @@ async function proveLogins(
     session,
     "own",
     "appdb",
-    `CREATE TRIGGER own_trg BEFORE INSERT ON public.rw_made FOR EACH ROW EXECUTE FUNCTION public.rw_fn();`,
+    `CREATE TRIGGER own_trg BEFORE INSERT ON rw.rw_made FOR EACH ROW EXECUTE FUNCTION rw.rw_fn();`,
     "permission denied for table rw_made",
+  );
+  // Verify catalog privileges: read-write has no CREATE on database or public.
+  assertEquals(
+    await session.value(
+      `SELECT has_database_privilege('rw', 'appdb', 'CREATE')`,
+      "appdb",
+    ),
+    "f",
+    "read-write should not have CREATE on database",
+  );
+  assertEquals(
+    await session.value(
+      `SELECT has_schema_privilege('rw', 'public', 'CREATE')`,
+      "appdb",
+    ),
+    "f",
+    "read-write should not have CREATE on public schema",
+  );
+  assertEquals(
+    await session.value(
+      `SELECT has_schema_privilege('rw', 'rw', 'CREATE')`,
+      "appdb",
+    ),
+    "t",
+    "read-write should have CREATE on their own schema",
   );
   // A table the platform admin makes later (a restore) is reachable, still
   // without TRIGGER.
@@ -397,11 +446,28 @@ async function proveOldClusterIsCorrected(
   applyAgain: () => Promise<void>,
 ): Promise<void> {
   // What the first draft of the grants left behind: ALL on tables, now and
-  // for tables the owner makes later.
+  // for tables the owner makes later; plus CREATE on database.
   await session.value(
-    `GRANT ALL ON ALL TABLES IN SCHEMA public TO rw;
+    `GRANT CREATE ON DATABASE appdb TO rw;
+     GRANT CREATE ON SCHEMA public TO rw;
+     GRANT ALL ON ALL TABLES IN SCHEMA public TO rw;
      ALTER DEFAULT PRIVILEGES FOR ROLE own GRANT ALL ON TABLES TO rw;`,
     "appdb",
+  );
+  // Verify the old grants are in place.
+  assertEquals(
+    await session.value(
+      `SELECT has_database_privilege('rw', 'appdb', 'CREATE')`,
+      "appdb",
+    ),
+    "t",
+  );
+  assertEquals(
+    await session.value(
+      `SELECT has_schema_privilege('rw', 'public', 'CREATE')`,
+      "appdb",
+    ),
+    "t",
   );
   await expectAllowed(
     session,
@@ -417,6 +483,23 @@ async function proveOldClusterIsCorrected(
     "t",
   );
   await applyAgain();
+  // After apply, old CREATE privileges should be gone.
+  assertEquals(
+    await session.value(
+      `SELECT has_database_privilege('rw', 'appdb', 'CREATE')`,
+      "appdb",
+    ),
+    "f",
+    "apply should have removed CREATE on database",
+  );
+  assertEquals(
+    await session.value(
+      `SELECT has_schema_privilege('rw', 'public', 'CREATE')`,
+      "appdb",
+    ),
+    "f",
+    "apply should have removed CREATE on public schema",
+  );
   await forEachSequential(["orders", "later"], async (table) => {
     assertEquals(
       await session.value(
@@ -439,6 +522,13 @@ async function proveOldClusterIsCorrected(
       "appdb",
     ),
     "f|t",
+  );
+  // Verify that a new table created by owner grants right privileges to read-write.
+  await expectAllowed(
+    session,
+    "rw",
+    "appdb",
+    `INSERT INTO public.after_fix VALUES (1);`,
   );
 }
 
