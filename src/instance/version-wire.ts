@@ -69,6 +69,7 @@ export const DAEMON_WIRE_FEATURES = [
   "php-site-modes-v1",
   "site-engine-nginx-apache-v1",
   "deploy-cancel-v1",
+  "site-db-bindings-v1",
   "deno-native-apps-v1",
 ] as const;
 
@@ -141,6 +142,15 @@ export const PHP_SITE_MODES_FEATURE: DaemonWireFeature = "php-site-modes-v1";
  * would drop it and the deploy would run on.
  */
 export const DEPLOY_CANCEL_FEATURE: DaemonWireFeature = "deploy-cancel-v1";
+
+/**
+ * This daemon takes `sites[].dbCa` (a managed database's CA as a file the site
+ * owner's Linux user can read) and `sites[].requiredEnv` (variables a site
+ * cannot run without), and answers an `environment.deploy` with `warnings`. The
+ * control plane sends those fields only to a daemon that lists this feature.
+ */
+export const SITE_DB_BINDINGS_FEATURE: DaemonWireFeature =
+  "site-db-bindings-v1";
 
 /**
  * This daemon runs a native app on Deno (`nativeAppServices[].runtime: "deno"`,

@@ -5,7 +5,7 @@
  * inline instance-only imports.
  */
 import type { SensorCapabilities } from "../metrics/collector/sensors/discovery.ts";
-import { ConfigValueError, safeUrlPath } from "./config-values.ts";
+import { ConfigValueError, safeEnvName, safeUrlPath } from "./config-values.ts";
 
 export const COMMAND_TYPES = [
   "daemon.ping",
@@ -864,6 +864,19 @@ export type EnvironmentDeployHostingPhp = {
  * UID/GID are optional operator overrides (15001–60000) — the host allocates
  * from 15001–60000 otherwise.
  */
+/**
+ * A public CA bundle for a site's managed database connection. The daemon
+ * writes it to a file only the site owner's Linux user can read (next to the
+ * site's other hosting files) and sets every name in `variables` to that
+ * file's path, so PHP can verify the database's certificate without a
+ * multi-line value in the web server's environment. Public certificates only:
+ * a bundle holding anything but `CERTIFICATE` blocks is refused at parse.
+ */
+export type EnvironmentDeploySiteDbCa = {
+  variables: string[];
+  pem: string;
+};
+
 export type EnvironmentDeploySitePrincipal = {
   principalId: string;
   username: string;
@@ -946,6 +959,20 @@ export type EnvironmentDeploySite = {
    * applied; the plaintext only ever reaches the engine's own config files.
    */
   webSecretEnv?: Record<string, string>;
+  /**
+   * The CA a managed database's TLS certificate chains to, delivered as a
+   * file. See {@link EnvironmentDeploySiteDbCa}. Sent only to a daemon that
+   * lists `site-db-bindings-v1`.
+   */
+  dbCa?: EnvironmentDeploySiteDbCa;
+  /**
+   * Variable names this site cannot run without (a database binding's host,
+   * port, user, password and name). If the site's engine cannot carry one of
+   * them the deploy fails with a plain-words error naming it; every other
+   * variable the engine cannot carry is dropped with a warning. Sent only to a
+   * daemon that lists `site-db-bindings-v1`.
+   */
+  requiredEnv?: string[];
   php?: EnvironmentDeployHostingPhp;
   /**
    * When set (from a project principal ↔ service tenancy), the site tree
@@ -1481,6 +1508,12 @@ export type EnvironmentDeployResultSite = {
 export type EnvironmentDeployResult = {
   projectName: string;
   summary: string;
+  /**
+   * Things the deploy worked around without failing, in plain words (a
+   * variable the site's web server cannot carry was left out). Names only,
+   * never values. Omitted when there were none.
+   */
+  warnings?: string[];
   services?: string[];
   containers?: EnvironmentDeployContainer[];
   /** Git-backed releases this deploy applied; omitted when there were none. */
@@ -4762,6 +4795,73 @@ function parseNativeAppService(
   return app;
 }
 
+/** Largest CA bundle accepted for a site (a handful of certificates). */
+const MAX_SITE_DB_CA_BYTES = 65_536;
+const MAX_SITE_DB_CA_VARIABLES = 8;
+const MAX_SITE_REQUIRED_ENV = 64;
+const PEM_CERTIFICATE_BEGIN = "-----BEGIN CERTIFICATE-----";
+
+/** True when every PEM block in `pem` is a certificate and there is one. */
+function isCertificateOnlyPem(pem: string): boolean {
+  let blocks = 0;
+  for (const line of pem.split("\n")) {
+    if (!line.startsWith("-----BEGIN ")) continue;
+    if (line.trim() !== PEM_CERTIFICATE_BEGIN) return false;
+    blocks += 1;
+  }
+  return blocks > 0;
+}
+
+function parseSiteEnvNames(
+  value: unknown,
+  max: number,
+  field: string,
+): string[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > max) {
+    throw new TypeError(`Invalid ${field}`);
+  }
+  return value.map((entry) => {
+    if (typeof entry !== "string") throw new TypeError(`Invalid ${field}`);
+    return safeEnvName(field, entry);
+  });
+}
+
+function parseSiteDbCa(
+  value: unknown,
+  service: string,
+): EnvironmentDeploySiteDbCa | undefined {
+  if (value === undefined) return undefined;
+  const field = `sites.${service}.dbCa`;
+  if (
+    !isRecord(value) || typeof value.pem !== "string" ||
+    value.pem.length > MAX_SITE_DB_CA_BYTES || !isCertificateOnlyPem(value.pem)
+  ) {
+    throw new TypeError(
+      `Invalid ${field}: expected certificate PEM blocks only`,
+    );
+  }
+  return {
+    variables: parseSiteEnvNames(
+      value.variables,
+      MAX_SITE_DB_CA_VARIABLES,
+      `${field}.variables`,
+    ),
+    pem: value.pem,
+  };
+}
+
+function parseSiteRequiredEnv(
+  value: unknown,
+  service: string,
+): string[] | undefined {
+  if (value === undefined) return undefined;
+  return parseSiteEnvNames(
+    value,
+    MAX_SITE_REQUIRED_ENV,
+    `sites.${service}.requiredEnv`,
+  );
+}
+
 function parseSite(
   value: unknown,
 ): EnvironmentDeploySite {
@@ -4786,6 +4886,13 @@ function parseSite(
   if (webEnv) site.webEnv = webEnv;
   const webSecretEnv = parseStringRecord(value.webSecretEnv);
   if (webSecretEnv) site.webSecretEnv = webSecretEnv;
+  const dbCa = parseSiteDbCa(value.dbCa, site.composeServiceName);
+  if (dbCa) site.dbCa = dbCa;
+  const requiredEnv = parseSiteRequiredEnv(
+    value.requiredEnv,
+    site.composeServiceName,
+  );
+  if (requiredEnv) site.requiredEnv = requiredEnv;
   const php = parseHostingPhp(value.php);
   if (php) site.php = php;
   const principal = parseSitePrincipal(value.principal);
