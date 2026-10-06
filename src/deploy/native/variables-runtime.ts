@@ -112,6 +112,33 @@ async function decryptInBatches(
 }
 
 /**
+ * A value as the env file will carry it: Windows line endings (CR LF) become
+ * LF, so a PEM pasted from a Windows editor arrives intact instead of being
+ * refused by the host's checker (which will not accept any carriage return,
+ * because systemd and the checker could read one differently). A CR that is
+ * not half of a CR LF, or a NUL, cannot be carried at all: the error names the
+ * app and the variable, never the value.
+ */
+export function normalizeNativeAppEnvValue(
+  composeServiceName: string,
+  name: string,
+  value: string,
+): string {
+  const normalized = value.replaceAll("\r\n", "\n");
+  if (normalized.includes("\r")) {
+    throw new Error(
+      `native app ${composeServiceName}: variable ${name} holds a carriage return that is not part of a Windows line ending (CR LF); remove it and deploy again`,
+    );
+  }
+  if (normalized.includes("\0")) {
+    throw new Error(
+      `native app ${composeServiceName}: variable ${name} holds a NUL character, which an environment variable cannot carry`,
+    );
+  }
+  return normalized;
+}
+
+/**
  * Decrypt the secrets this app references and merge them with its plain
  * values. A referenced secret with no sealed material, or one that will not
  * decrypt, fails the deploy: starting the app without a credential it was told
@@ -167,7 +194,11 @@ export async function resolveNativeAppVariables(
 
   const entries = wanted.map((entry) => ({
     name: entry.name,
-    value: entry.value ?? secretValues.get(entry.name) ?? "",
+    value: normalizeNativeAppEnvValue(
+      app.composeServiceName,
+      entry.name,
+      entry.value ?? secretValues.get(entry.name) ?? "",
+    ),
   }));
   entries.sort((a, b) => a.name.localeCompare(b.name));
   return { entries, platformManaged };

@@ -182,6 +182,11 @@ points to). Rules that are not obvious:
   unit test keeps that set equal to the `Environment=` keys the unit renders.
 - **Quoting.** Values are single-quoted (literal: no `$`, no backslash
   handling); a value containing `'` is double-quoted with `\ " ` $` escaped.
+- **Line endings.** `tp-host` refuses any carriage return (systemd and its
+  checker could read one differently), so `normalizeNativeAppEnvValue` turns
+  every CR LF in a value, plain or decrypted, into LF (a PEM pasted from a
+  Windows editor). A CR that is not half of a CR LF, or a NUL, fails the deploy
+  naming the app and the variable, never the value.
 - **Lifecycle.** Staged and copied on every deploy before the unit is installed
   (the restart that follows is what delivers a changed value). An app left with
   no variables loses its root copy (`app-env-remove`) only after its new unit
