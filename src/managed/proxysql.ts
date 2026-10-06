@@ -1410,6 +1410,140 @@ export function buildProxySqlAdminStatements(
   return statements;
 }
 
+/** One row of ProxySQL's live `runtime_<family>_servers` table. */
+export type ProxySqlRuntimeServerRow = {
+  hostgroupId: number;
+  hostname: string;
+  port: number;
+  status: string;
+};
+
+/** The protocol families (and so `runtime_*_servers` tables) a desired state uses. */
+export function proxySqlFamiliesInUse(
+  desired: ProxySqlDesiredState,
+): ProxySqlProtocolFamily[] {
+  const families: ProxySqlProtocolFamily[] = [];
+  if (clusterUsesMysql(desired.clusters)) families.push("mysql");
+  if (clusterUsesPgsql(desired.clusters)) families.push("pgsql");
+  return families;
+}
+
+type PlacedServer = { hostgroup: number; hostname: string; port: number };
+
+function placedServers(cluster: ProxySqlClusterDesired): PlacedServer[] {
+  return cluster.backends.map((backend) => ({
+    hostgroup: backendPlacement(cluster, backend).hostgroup,
+    hostname: backend.address,
+    port: backend.port,
+  }));
+}
+
+function placedServerKey(server: PlacedServer): string {
+  return `${server.hostgroup}\t${server.hostname}\t${server.port}`;
+}
+
+function runtimeRowKey(row: ProxySqlRuntimeServerRow): string {
+  return placedServerKey({
+    hostgroup: row.hostgroupId,
+    hostname: row.hostname,
+    port: row.port,
+  });
+}
+
+function serverAddress(server: { hostname: string; port: number }): string {
+  return `${server.hostname}:${server.port}`;
+}
+
+/**
+ * A writer hostgroup row nobody asked for: the old primary left behind.
+ *
+ * ProxySQL keeps a backend that was just removed in the runtime table as
+ * `OFFLINE_HARD` while its connections drain. That row takes no traffic, so it
+ * is not "still the writer".
+ */
+function staleWriterMismatch(
+  cluster: ProxySqlClusterDesired,
+  rows: readonly ProxySqlRuntimeServerRow[],
+  wanted: ReadonlySet<string>,
+): string | null {
+  const stale = rows.filter((row) =>
+    row.hostgroupId === cluster.writerHostgroup &&
+    row.status !== "OFFLINE_HARD" &&
+    !wanted.has(runtimeRowKey(row))
+  );
+  if (stale.length === 0) return null;
+  const expected = placedServers(cluster)
+    .filter((server) => server.hostgroup === cluster.writerHostgroup)
+    .map(serverAddress);
+  return `writer for ${cluster.managedId} is still ${
+    stale.map(serverAddress).join(", ")
+  }, expected ${expected.length > 0 ? expected.join(", ") : "no writer"}`;
+}
+
+/** A desired backend that is not in the runtime table at all. */
+function missingServerMismatch(
+  cluster: ProxySqlClusterDesired,
+  present: ReadonlySet<string>,
+): string | null {
+  const missing = placedServers(cluster).find((server) =>
+    !present.has(placedServerKey(server))
+  );
+  if (!missing) return null;
+  const role = missing.hostgroup === cluster.writerHostgroup
+    ? "writer"
+    : "reader";
+  return `${
+    serverAddress(missing)
+  } is missing from the ${role} hostgroup for ${cluster.managedId}`;
+}
+
+function familyRuntimeMismatch(
+  clusters: readonly ProxySqlClusterDesired[],
+  rows: readonly ProxySqlRuntimeServerRow[],
+): string | null {
+  const wanted = new Set(clusters.flatMap(placedServers).map(placedServerKey));
+  const present = new Set(rows.map(runtimeRowKey));
+  for (const cluster of clusters) {
+    const stale = staleWriterMismatch(cluster, rows, wanted);
+    if (stale !== null) return stale;
+  }
+  for (const cluster of clusters) {
+    const missing = missingServerMismatch(cluster, present);
+    if (missing !== null) return missing;
+  }
+  return null;
+}
+
+/**
+ * Compare what ProxySQL is actually routing to (its runtime tables, read back
+ * after an admin apply) with the placement the desired state asked for.
+ *
+ * Every desired (hostgroup, hostname, port) must be present, and a cluster's
+ * writer hostgroup must hold nothing that was not asked for, so an old primary
+ * left in the writer hostgroup fails. `status` is deliberately not compared:
+ * ProxySQL's own monitor may shun a backend at any moment. Families the desired
+ * state does not use are not checked. Returns a plain-words message naming only
+ * backend addresses already in the desired state or the runtime table, or `null`
+ * when ProxySQL is routing as desired.
+ */
+export function findIngressRuntimeMismatch(
+  desired: ProxySqlDesiredState,
+  runtime: Partial<
+    Record<ProxySqlProtocolFamily, readonly ProxySqlRuntimeServerRow[]>
+  >,
+): string | null {
+  for (const family of proxySqlFamiliesInUse(desired)) {
+    const clusters = desired.clusters.filter((cluster) =>
+      clusterMatchesFamily(cluster, family)
+    );
+    const mismatch = familyRuntimeMismatch(clusters, runtime[family] ?? []);
+    if (mismatch !== null) {
+      return `ProxySQL on this server did not repoint: ${mismatch}`;
+    }
+  }
+  return null;
+}
+
 export async function writeProxySqlConfigAtomic(
   path: string,
   contents: string,
