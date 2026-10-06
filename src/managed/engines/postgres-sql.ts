@@ -159,21 +159,32 @@ export function grantDatabaseSql(
   const db = quoteIdentifier(database);
   const role = quoteIdentifier(username);
   // Revoke first so a changed level (read-write to read-only, say) leaves
-  // exactly the grant for the new level and nothing from the old one.
+  // exactly the grant for the new level and nothing from the old one. One
+  // transaction, so a login that is already connected to this database (or
+  // connecting right now) never sees the gap between the revoke and the grant.
   const reset = `REVOKE ALL ON DATABASE ${db} FROM ${role};`;
   switch (privilege) {
     case "owner":
       return [
+        `BEGIN;`,
         `ALTER DATABASE ${db} OWNER TO ${role};`,
         `GRANT ALL PRIVILEGES ON DATABASE ${db} TO ${role};`,
+        `COMMIT;`,
       ].join("\n");
     case "read-write":
       return [
+        `BEGIN;`,
         reset,
         `GRANT CONNECT, CREATE, TEMPORARY ON DATABASE ${db} TO ${role};`,
+        `COMMIT;`,
       ].join("\n");
     case "read-only":
-      return [reset, `GRANT CONNECT ON DATABASE ${db} TO ${role};`].join("\n");
+      return [
+        `BEGIN;`,
+        reset,
+        `GRANT CONNECT ON DATABASE ${db} TO ${role};`,
+        `COMMIT;`,
+      ].join("\n");
     default: {
       const _exhaustive: never = privilege;
       throw new Error(`unsupported privilege: ${_exhaustive}`);

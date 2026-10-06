@@ -105,15 +105,19 @@ test("grantDatabaseSql covers privilege levels and resets the old one first", ()
   assertEquals(
     grantDatabaseSql("appdb", "app", "read-write"),
     [
+      "BEGIN;",
       'REVOKE ALL ON DATABASE "appdb" FROM "app";',
       'GRANT CONNECT, CREATE, TEMPORARY ON DATABASE "appdb" TO "app";',
+      "COMMIT;",
     ].join("\n"),
   );
   assertEquals(
     grantDatabaseSql("appdb", "app", "read-only"),
     [
+      "BEGIN;",
       'REVOKE ALL ON DATABASE "appdb" FROM "app";',
       'GRANT CONNECT ON DATABASE "appdb" TO "app";',
+      "COMMIT;",
     ].join("\n"),
   );
 });

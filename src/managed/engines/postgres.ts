@@ -222,9 +222,10 @@ function objectAccessFor(
 /**
  * Make each SQL user reach exactly what its level says, and nothing else:
  *
- * 1. Nobody gets in by default (`CONNECT` is taken from PUBLIC everywhere).
- * 2. Each user loses databases it is not listed for, then receives its level
+ * 1. Each user loses databases it is not listed for, then receives its level
  *    on every listed database (re-granting replaces an older, different level).
+ * 2. Nobody gets in by default (`CONNECT` is taken from PUBLIC everywhere),
+ *    after the explicit grants so a login that holds one never loses access.
  * 3. Inside each listed database: table and sequence privileges on what
  *    exists, default privileges for what its creators make later, and a
  *    read-only session default for read-only users.
@@ -240,8 +241,6 @@ async function reconcileDatabaseAccess(
   const rootUsernames = credentials.filter((c) => c.role === "root").map((c) =>
     c.username
   );
-
-  await runPsql(ctx, revokePublicDatabaseAccessSql());
 
   await forEachSequential([...usernames], async ([username, databases]) => {
     const level = granted.find((entry) => entry.username === username)?.level;
@@ -260,6 +259,9 @@ async function reconcileDatabaseAccess(
       (database) =>
         runPsql(ctx, grantDatabaseSql(database, entry.username, entry.level)),
     ));
+
+  // After the explicit grants, so no login that holds one is ever without it.
+  await runPsql(ctx, revokePublicDatabaseAccessSql());
 
   const databases = [...new Set(granted.flatMap((entry) => entry.databases))];
   await forEachSequential(databases, async (database) => {

@@ -146,8 +146,9 @@ test("applyCredentials reaches each login only to its levels: lock-down, per-log
   const lockDown = inputs.findIndex((i) => i.includes("FROM PUBLIC'"));
   const firstGrant = inputs.findIndex((i) => i.includes("GRANT CONNECT"));
   const inDatabase = calls.filter((c) => databaseOf(c) !== "postgres");
-  // Roles exist before anything is granted; the lock-down comes before grants.
-  assertEquals(lockDown > 0 && lockDown < firstGrant, true);
+  // Roles exist before anything is granted; the lock-down comes after the
+  // explicit grants, so a login that holds one is never without it.
+  assertEquals(firstGrant > 0 && firstGrant < lockDown, true);
   // The strongest level wins per login: rw holds read-write, never read-only.
   const rwGrants = inputs.filter((i) =>
     i.includes('TO "rw";') && i.includes("ON DATABASE")
