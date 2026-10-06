@@ -224,7 +224,7 @@ export async function resolveTopologyGeneration(
 
   // On a reused generation keep the stored fingerprint, so tolerated jitter
   // in the memory totals cannot drift the baseline tick by tick.
-  const stored = previous && generation === previous.generation
+  const stored = previous?.generation === generation
     ? previous.fingerprint
     : fingerprint;
   await writePersistedState(path, {
