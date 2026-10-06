@@ -228,13 +228,13 @@ async function proveLogins(
     `CREATE ROLE sneaky;`,
     DENIED,
   );
-  // Exactly the five table privileges, no REFERENCES or TRIGGER.
+  // Exactly the six table privileges, no TRIGGER.
   const held = await session.value(
     `SELECT string_agg(p, ',' ORDER BY p) FROM unnest(ARRAY['SELECT','INSERT','UPDATE','DELETE','TRUNCATE','REFERENCES','TRIGGER']) p
       WHERE has_table_privilege('rw', 'public.orders', p)`,
     "appdb",
   );
-  assertEquals(held, "DELETE,INSERT,SELECT,TRUNCATE,UPDATE");
+  assertEquals(held, "DELETE,INSERT,REFERENCES,SELECT,TRUNCATE,UPDATE");
   if (major >= 17) {
     assertEquals(
       await session.value(
@@ -254,7 +254,10 @@ async function proveLogins(
   );
   // A table the platform admin makes later (a restore) is reachable, still
   // without TRIGGER.
-  await session.value(`CREATE TABLE public.restored (id int)`, "appdb");
+  await session.value(
+    `CREATE TABLE public.restored (id int PRIMARY KEY)`,
+    "appdb",
+  );
   await expectAllowed(
     session,
     "rw",
@@ -274,6 +277,29 @@ async function proveLogins(
       "appdb",
     ),
     "f",
+  );
+
+  // REFERENCES works across owners: a foreign key to the admin-made table.
+  await expectAllowed(
+    session,
+    "rw",
+    "appdb",
+    `CREATE TABLE public.fk_child (p int REFERENCES public.restored (id));`,
+  );
+  // ...and still no TRIGGER, ALTER or DROP on that table.
+  await expectRefused(
+    session,
+    "rw",
+    "appdb",
+    `ALTER TABLE public.restored ADD COLUMN extra int;`,
+    "must be owner",
+  );
+  await expectRefused(
+    session,
+    "rw",
+    "appdb",
+    `DROP TABLE public.restored;`,
+    "must be owner",
   );
 
   // Read-only: reads, and cannot change a table, sequence or schema. The
@@ -394,11 +420,11 @@ async function proveOldClusterIsCorrected(
   await forEachSequential(["orders", "later"], async (table) => {
     assertEquals(
       await session.value(
-        `SELECT has_table_privilege('rw', 'public.${table}', 'TRIGGER') OR has_table_privilege('rw', 'public.${table}', 'REFERENCES')`,
+        `SELECT has_table_privilege('rw', 'public.${table}', 'TRIGGER')`,
         "appdb",
       ),
       "f",
-      `${table} still carries TRIGGER or REFERENCES for the read-write login`,
+      `${table} still carries TRIGGER for the read-write login`,
     );
   });
   await expectAllowed(

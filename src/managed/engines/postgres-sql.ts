@@ -157,6 +157,7 @@ const WRITER_TABLE_PRIVILEGES = [
   "UPDATE",
   "DELETE",
   "TRUNCATE",
+  "REFERENCES",
 ] as const;
 const WRITER_SEQUENCE_PRIVILEGES = ["USAGE", "SELECT", "UPDATE"] as const;
 const WRITER_SCHEMA_PRIVILEGES = ["USAGE", "CREATE"] as const;
@@ -525,9 +526,10 @@ function closePublicSchemaSql(): string {
  * each database's own catalog). Covers every schema that is not a system
  * schema, existing objects now and objects made later by any creator.
  *
- * - writers (owner, read-write): SELECT, INSERT, UPDATE, DELETE and TRUNCATE
- *   on tables; USAGE, SELECT and UPDATE on sequences; USAGE and CREATE on
- *   schemas. Never TRIGGER, REFERENCES or MAINTAIN: a login that may add a
+ * - writers (owner, read-write): SELECT, INSERT, UPDATE, DELETE, TRUNCATE and
+ *   REFERENCES on tables (REFERENCES lets a migration add a foreign key to a
+ *   table another login owns; it cannot run code); USAGE, SELECT and UPDATE on
+ *   sequences; USAGE and CREATE on schemas. Never TRIGGER or MAINTAIN: a login that may add a
  *   trigger to a table runs code as whoever writes that table, the owner
  *   login included. Version-neutral (no privilege is named for revoking), so
  *   it applies unchanged on every supported Postgres series.

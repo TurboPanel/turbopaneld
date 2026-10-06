@@ -193,7 +193,7 @@ test("reconcileDatabaseObjectsSql gives writers exactly five table privileges an
   assertEquals(sql.includes("nspname !~ '^pg_'"), true);
   assertEquals(
     sql.includes(
-      `GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE ON TABLE %s TO "rw"`,
+      `GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES ON TABLE %s TO "rw"`,
     ),
     true,
   );
@@ -209,7 +209,7 @@ test("reconcileDatabaseObjectsSql gives writers exactly five table privileges an
   // Later objects, from every creator, to everyone else.
   assertEquals(
     sql.includes(
-      'ALTER DEFAULT PRIVILEGES FOR ROLE "own" GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE ON TABLES TO "rw";',
+      'ALTER DEFAULT PRIVILEGES FOR ROLE "own" GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES ON TABLES TO "rw";',
     ),
     true,
   );
@@ -234,15 +234,15 @@ test("reconcileDatabaseObjectsSql gives writers exactly five table privileges an
   // A creator is never granted its own defaults.
   assertEquals(
     sql.includes(
-      'FOR ROLE "own" GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE ON TABLES TO "own"',
+      'FOR ROLE "own" GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES ON TABLES TO "own"',
     ),
     false,
   );
-  // No writer statement says ALL on tables or sequences (ALL carries TRIGGER,
-  // REFERENCES and, on 17+, MAINTAIN), and none names TRIGGER at all except
+  // No writer statement says ALL on tables or sequences (ALL carries TRIGGER
+  // and, on 17+, MAINTAIN), and none names TRIGGER at all except
   // the wipe of an old grant.
   assertEquals(/GRANT ALL[^;]*(TABLE|SEQUENCE)/.test(sql), false);
-  assertEquals(/GRANT[^;]*(TRIGGER|REFERENCES|MAINTAIN)/.test(sql), false);
+  assertEquals(/GRANT[^;]*(TRIGGER|MAINTAIN)/.test(sql), false);
   // Nothing in the read-only path grants a write.
   const readerLines = sql.split("\n").filter((line) => line.includes('"ro"'));
   assertEquals(
