@@ -8,6 +8,7 @@ import {
   instanceUnsupportedReason,
   MANAGED_HA_INSTANCE_FEATURE,
   MANAGED_HEALTH_FEATURE,
+  MANAGED_HEALTH_REPORT_FEATURE,
   MIN_SUPPORTED_INSTANCE_VERSION,
   parseSemver,
   PHP_SITE_MODES_FEATURE,
@@ -101,6 +102,16 @@ test("capability gates: above and equal open, below and unknown stay closed", ()
     })[
       "future-instance-feature"
     ],
+    true,
+  );
+});
+
+test("managed-health-report-v1 is an advertised wire feature and raised no floor", () => {
+  assertEquals(MANAGED_HEALTH_REPORT_FEATURE, "managed-health-report-v1");
+  assertEquals(
+    (DAEMON_WIRE_FEATURES as readonly string[]).includes(
+      MANAGED_HEALTH_REPORT_FEATURE,
+    ),
     true,
   );
 });

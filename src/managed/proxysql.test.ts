@@ -1872,6 +1872,31 @@ test("findIngressRuntimeMismatch fails when the new writer is present but the ol
   assertStringIncludes(message ?? "", "writer for m1 is still engine-1:5432");
 });
 
+test("findIngressRuntimeMismatch ignores a removed backend still draining as OFFLINE_HARD", () => {
+  const desired = desiredWith(failedOverCluster());
+  assertEquals(
+    findIngressRuntimeMismatch(desired, {
+      pgsql: [
+        runtimeRow(0, "engine-1", 5432, "OFFLINE_HARD"),
+        runtimeRow(0, "engine-2", 5432),
+        runtimeRow(1, "engine-1", 5432),
+      ],
+    }),
+    null,
+  );
+  // Still fails when the old primary is live in the writer group.
+  assertStringIncludes(
+    findIngressRuntimeMismatch(desired, {
+      pgsql: [
+        runtimeRow(0, "engine-1", 5432, "SHUNNED"),
+        runtimeRow(0, "engine-2", 5432),
+        runtimeRow(1, "engine-1", 5432),
+      ],
+    }) ?? "",
+    "writer for m1 is still engine-1:5432",
+  );
+});
+
 test("findIngressRuntimeMismatch fails when a desired row is missing", () => {
   const desired = desiredWith(failedOverCluster());
   assertEquals(

@@ -1454,7 +1454,13 @@ function serverAddress(server: { hostname: string; port: number }): string {
   return `${server.hostname}:${server.port}`;
 }
 
-/** A writer hostgroup row nobody asked for: the old primary left behind. */
+/**
+ * A writer hostgroup row nobody asked for: the old primary left behind.
+ *
+ * ProxySQL keeps a backend that was just removed in the runtime table as
+ * `OFFLINE_HARD` while its connections drain. That row takes no traffic, so it
+ * is not "still the writer".
+ */
 function staleWriterMismatch(
   cluster: ProxySqlClusterDesired,
   rows: readonly ProxySqlRuntimeServerRow[],
@@ -1462,6 +1468,7 @@ function staleWriterMismatch(
 ): string | null {
   const stale = rows.filter((row) =>
     row.hostgroupId === cluster.writerHostgroup &&
+    row.status !== "OFFLINE_HARD" &&
     !wanted.has(runtimeRowKey(row))
   );
   if (stale.length === 0) return null;
