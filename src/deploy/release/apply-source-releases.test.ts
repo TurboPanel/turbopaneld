@@ -8,7 +8,10 @@ import type {
 import type { DecryptSecretsFn } from "../materialize-tls.ts";
 import { resolveLayout } from "../../paths/layout.ts";
 import { createTempLayout } from "../../testing/temp-layout.ts";
-import { writeReleaseManifest } from "./deployment-json.ts";
+import {
+  readReleaseManifest,
+  writeReleaseManifest,
+} from "./deployment-json.ts";
 import {
   RELEASE_METADATA_DIRNAME,
   resolveDaemonReleasePaths,
@@ -943,6 +946,16 @@ test("a standalone build with a start command that needs package scripts warns, 
       );
       assertEquals(detectStart, false);
       assertEquals(applied[0]?.nativeStart, undefined);
+      // The author's start command is recorded, so a rollback to this
+      // release would start it the same way.
+      const record = await readReleaseManifest(
+        resolveDaemonReleasePaths(layout, {
+          serviceId,
+          releaseId: "rel-standalone",
+        }).releaseDir,
+      );
+      assertEquals(record?.startCommand, "pnpm start");
+      assertEquals(record?.startupFile, undefined);
       assertEquals(
         log.lines.some(({ stream, message }) =>
           stream === "stderr" &&

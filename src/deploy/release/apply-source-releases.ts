@@ -853,6 +853,11 @@ async function buildNativeRelease(
       standaloneOutput: nativeOutput.standaloneOutput,
       staticExport: nativeOutput.staticExport,
       nativeStart: nativeOutput.start,
+      // The author's own start settings, so a rollback to this release
+      // starts it the way it ran (see `ReleaseManifestV1.startCommand`).
+      startCommand: entry.build.startCommand?.trim() || undefined,
+      startupFile: nativeAppForService(payload, entry.composeServiceName)
+        ?.startupFile?.trim() || undefined,
     });
     await recordNativeRelease(layout, manifest, deps);
     let releaseDir: string;

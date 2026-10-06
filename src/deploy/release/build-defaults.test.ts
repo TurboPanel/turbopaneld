@@ -203,28 +203,98 @@ test("a Next standalone build still starts with node server.js", async () => {
   });
 });
 
+/** What `next build` plus an install leave: a `.next/` build and Next's CLI. */
+async function seedNextBuild(dir: string): Promise<void> {
+  await Deno.mkdir(join(dir, ".next"), { recursive: true });
+  await writeFile(dir, "node_modules/next/dist/bin/next", "// cli");
+}
+
 test("a Next build without standalone output starts with next start", async () => {
   await withWorkingDir(async (workingDir) => {
     // The common shape: `start: "next start"` (its own -p is replaced).
     await writeJson(join(workingDir, "package.json"), {
       scripts: { build: "next build", start: "next start -p 3000" },
     });
-    await Deno.mkdir(join(workingDir, ".next"));
+    await seedNextBuild(workingDir);
     const { output } = await detect(workingDir, { framework: "next" });
     assertEquals(output.standaloneOutput, false);
     assertEquals(output.start, { kind: "next-start" });
   });
   await withWorkingDir(async (workingDir) => {
-    // No start script at all: framework next is enough.
+    // No start script: framework next with a build is enough.
     await writeJson(join(workingDir, "package.json"), {});
+    await seedNextBuild(workingDir);
     const { output } = await detect(workingDir, { framework: "next" });
     assertEquals(output.start, { kind: "next-start" });
   });
   await withWorkingDir(async (workingDir) => {
     // framework auto: a .next/ build tree identifies it.
-    await Deno.mkdir(join(workingDir, ".next"));
+    await seedNextBuild(workingDir);
     const { output } = await detect(workingDir);
     assertEquals(output.start, { kind: "next-start" });
+  });
+  await withWorkingDir(async (workingDir) => {
+    // A plain `next start` is Next whatever the framework says, so it is
+    // always bound to loopback.
+    await writeJson(join(workingDir, "package.json"), {
+      scripts: { start: "next start" },
+    });
+    await seedNextBuild(workingDir);
+    const { output } = await detect(workingDir, { framework: "node" });
+    assertEquals(output.start, { kind: "next-start" });
+  });
+});
+
+test("next start without a build or without Next installed fails the build", async () => {
+  await withWorkingDir(async (workingDir) => {
+    // framework next, nothing built, nothing else to start.
+    await writeJson(join(workingDir, "package.json"), {});
+    await assertRejects(
+      () => detect(workingDir, { framework: "next" }),
+      Error,
+      "the build left no .next folder",
+    );
+  });
+  await withWorkingDir(async (workingDir) => {
+    await writeJson(join(workingDir, "package.json"), {
+      scripts: { start: "next start" },
+    });
+    await assertRejects(
+      () => detect(workingDir),
+      Error,
+      "the build left no .next folder",
+    );
+    await Deno.mkdir(join(workingDir, ".next"));
+    await assertRejects(
+      () => detect(workingDir),
+      Error,
+      "next is not installed in node_modules",
+    );
+  });
+});
+
+test("a declared .next/standalone release root starts with node server.js", async () => {
+  await withWorkingDir(async (workingDir) => {
+    // Next's documented standalone recipe, with the folder declared by the
+    // author: Next copies package.json (still saying `next start`) into it.
+    const standalone = join(".next", "standalone");
+    await Deno.mkdir(join(workingDir, standalone), { recursive: true });
+    await writeJson(join(workingDir, standalone, "package.json"), {
+      scripts: { start: "next start" },
+    });
+    await writeFile(workingDir, join(standalone, "server.js"));
+    await Deno.mkdir(join(workingDir, standalone, ".next", "static"), {
+      recursive: true,
+    });
+    const frameworks = ["auto", "next", "node"] as const;
+    const outputs = await Promise.all(
+      frameworks.map((framework) =>
+        detect(workingDir, { framework, outputDirectory: standalone })
+      ),
+    );
+    for (const { output } of outputs) {
+      assertEquals(output.start, { kind: "file", path: "server.js" });
+    }
   });
 });
 
@@ -248,13 +318,84 @@ test("the package start script wins over every file", async () => {
       })
     ),
   );
+});
+
+test("a start script the platform cannot rewrite gets a loopback warning", async () => {
   await withWorkingDir(async (workingDir) => {
-    // framework node never treats anything as Next.
     await writeJson(join(workingDir, "package.json"), {
-      scripts: { start: "next start" },
+      scripts: {
+        start: "cross-env NODE_OPTIONS=--trace-warnings next start",
+        poststart: "echo done",
+      },
     });
-    const { output } = await detect(workingDir, { framework: "node" });
+    const { output, lines } = await detect(workingDir);
     assertEquals(output.start, { kind: "start-script" });
+    assertEquals(
+      lines.some((line) => line.includes("Add `--hostname 127.0.0.1` to it")),
+      true,
+    );
+    assertEquals(
+      lines.some((line) => line.includes("poststart script is not run")),
+      true,
+    );
+  });
+  await withWorkingDir(async (workingDir) => {
+    await writeJson(join(workingDir, "package.json"), {
+      scripts: { start: "node server.js" },
+    });
+    const { lines } = await detect(workingDir);
+    assertEquals(
+      lines.includes(
+        "the start script must listen on 127.0.0.1 and $PORT (the unit sets HOST, HOSTNAME and PORT)",
+      ),
+      true,
+    );
+  });
+});
+
+test("a prestart script runs before start", async () => {
+  await withWorkingDir(async (workingDir) => {
+    await writeJson(join(workingDir, "package.json"), {
+      scripts: { prestart: "prisma migrate deploy", start: "node dist/a.js" },
+    });
+    const { output } = await detect(workingDir);
+    assertEquals(output.start, { kind: "start-script", prestart: true });
+  });
+});
+
+test("a Yarn Plug'n'Play install fails the build with the fix", async () => {
+  await withWorkingDir(async (workingDir) => {
+    await writeJson(join(workingDir, "package.json"), {
+      scripts: { start: "node server.js" },
+    });
+    await writeFile(workingDir, ".pnp.cjs");
+    await assertRejects(
+      () => detect(workingDir),
+      Error,
+      "Add `nodeLinker: node-modules` to .yarnrc.yml",
+    );
+    // With node_modules (nodeLinker: node-modules), it is fine.
+    await Deno.mkdir(join(workingDir, "node_modules"));
+    const { output } = await detect(workingDir);
+    assertEquals(output.start, { kind: "start-script" });
+  });
+});
+
+test("entry files reached through a link are not used", async () => {
+  await withWorkingDir(async (workingDir) => {
+    const outside = await Deno.makeTempDir({ prefix: "tp-outside-" });
+    try {
+      await writeFile(outside, "app.js");
+      // `main` in a linked directory, and a linked index.js.
+      await Deno.symlink(outside, join(workingDir, "lib"));
+      await Deno.symlink(join(outside, "app.js"), join(workingDir, "index.js"));
+      await writeJson(join(workingDir, "package.json"), { main: "lib/app.js" });
+      await writeFile(workingDir, "server.js");
+      const { output } = await detect(workingDir, { framework: "node" });
+      assertEquals(output.start, { kind: "file", path: "server.js" });
+    } finally {
+      await Deno.remove(outside, { recursive: true });
+    }
   });
 });
 

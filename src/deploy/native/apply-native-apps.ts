@@ -60,6 +60,7 @@ import {
   markReleaseHealthy,
   readHealthyRelease,
 } from "../release/release-health.ts";
+import type { ReleaseManifestV1 } from "../release/deployment-json.ts";
 import type { RunFn, RunResult } from "../ensure-principal.ts";
 import { definedFields } from "../../util/optional-fields.ts";
 import type { NativeAppStart } from "./start-entry.ts";
@@ -437,19 +438,57 @@ async function emitNativeAppJournal(
   }
 }
 
-/** `binding` with its recorded start replaced (or cleared). */
-function withNativeStart(
+/**
+ * How one release was started, as its record says: the author's start command
+ * and startup file at the time, and what the build detected.
+ */
+export type RecordedStart = {
+  startCommand?: string;
+  startupFile?: string;
+  nativeStart?: NativeAppStart;
+};
+
+/** The start fields of a release record. */
+function recordedStart(manifest: ReleaseManifestV1): RecordedStart {
+  return definedFields({
+    startCommand: manifest.startCommand,
+    startupFile: manifest.startupFile,
+    nativeStart: manifest.nativeStart,
+  });
+}
+
+/** `binding` and `app` re-pointed at another release's recorded start. */
+function withRecordedStart(
   binding: NativeAppRelease,
-  nativeStart: NativeAppStart | undefined,
-): NativeAppRelease {
-  const { nativeStart: _replaced, ...rest } = binding;
-  return nativeStart === undefined ? rest : { ...rest, nativeStart };
+  app: EnvironmentDeployNativeAppService,
+  start: RecordedStart,
+): { binding: NativeAppRelease; app: EnvironmentDeployNativeAppService } {
+  const {
+    startCommand: _command,
+    nativeStart: _detected,
+    ...bindingRest
+  } = binding;
+  const { startupFile: _file, ...appRest } = app;
+  return {
+    binding: {
+      ...bindingRest,
+      ...definedFields({
+        startCommand: start.startCommand,
+        nativeStart: start.nativeStart,
+      }),
+    },
+    app: {
+      ...appRest,
+      ...definedFields({ startupFile: start.startupFile }),
+    },
+  };
 }
 
 /**
  * Repoint `current` at the release it pointed at before this deploy, put back
- * the unit that release ran under (its recorded start may differ from the new
- * one's: `next start` against `node server.js`), and restart it.
+ * the unit that release ran under (its own recorded start command, startup
+ * file or detected start, which may differ from the new release's), restart
+ * it, and wait for it to answer.
  *
  * Best-effort by design: the deploy is failing either way, and an error here
  * must not mask the health failure that caused it.
@@ -460,9 +499,9 @@ async function rollbackNativeApp(
   params: {
     prepared: PreparedNativeApp;
     previousReleaseId: string;
-    nativeStart: NativeAppStart | undefined;
+    start: RecordedStart;
   },
-): Promise<boolean> {
+): Promise<"answered" | "silent" | "failed"> {
   const { app, binding, unit } = params.prepared;
   try {
     const paths = resolveReleasePaths(layout, {
@@ -471,7 +510,7 @@ async function rollbackNativeApp(
       releaseId: params.previousReleaseId,
     });
     await swapCurrentSymlink(paths);
-    const changed = await params.prepared.reinstallUnit?.(params.nativeStart);
+    const changed = await params.prepared.reinstallUnit?.(params.start);
     if (changed) {
       const reload = await systemctl(io, ["daemon-reload"]);
       if (!reload.success) {
@@ -479,7 +518,10 @@ async function rollbackNativeApp(
       }
     }
     const restart = await systemctl(io, ["restart", unit]);
-    return restart.success;
+    if (!restart.success) return "failed";
+    return await waitForNativeApp(io, app.listenPort, unit)
+      ? "answered"
+      : "silent";
   } catch (err) {
     logWarn(
       "deploy",
@@ -487,55 +529,73 @@ async function rollbackNativeApp(
         err instanceof Error ? err.message : String(err)
       }`,
     );
-    return false;
+    return "failed";
   }
 }
 
 /**
- * Stop a unit whose release never answered and that has no healthy release to
- * go back to, so it does not crash-loop until the next deploy. Best-effort.
+ * Stop and disable a unit that has no answering release to run, so it neither
+ * crash-loops until the next deploy nor comes back after a reboot. The next
+ * deploy's `enable --now` starts it again. Best-effort.
  */
 async function stopFailedNativeApp(
   io: NativeAppIo,
   unit: string,
 ): Promise<void> {
-  const result = await systemctl(io, ["stop", unit]);
+  const result = await systemctl(io, ["disable", "--now", unit]);
   if (!result.success) {
     logWarn("deploy", `native app stop failed unit=${unit}: ${result.stderr}`);
   }
 }
 
+/** A healthy, recorded previous release other than the one that just failed. */
+async function healthyPreviousRelease(
+  layout: LayoutPaths,
+  prepared: PreparedNativeApp,
+): Promise<{ previous: string | null; record: ReleaseManifestV1 | null }> {
+  const previous = prepared.binding.previousReleaseId ?? null;
+  // A re-sent deploy of the live release has itself as "previous": going back
+  // to it is not a rollback.
+  if (!previous || previous === prepared.binding.releaseId) {
+    return { previous: null, record: null };
+  }
+  const record = await readHealthyRelease(
+    layout,
+    prepared.app.serviceId,
+    previous,
+  ).catch(() => null);
+  return { previous, record };
+}
+
 /**
  * After a failed health check: roll back to the previous release when it once
- * answered on this host ({@link readHealthyRelease}), otherwise stop the app.
- * Returns the sentence the deploy error ends with.
+ * answered on this host ({@link readHealthyRelease}) and answers again,
+ * otherwise stop the app. Returns the sentence the deploy error ends with.
  */
 async function recoverFailedNativeApp(
   io: NativeAppIo,
   layout: LayoutPaths,
   prepared: PreparedNativeApp,
 ): Promise<string> {
-  const previous = prepared.binding.previousReleaseId;
-  const record = previous
-    ? await readHealthyRelease(layout, prepared.app.serviceId, previous)
-      .catch(() => null)
-    : null;
-  if (previous && record) {
-    const rolledBack = await rollbackNativeApp(io, layout, {
-      prepared,
-      previousReleaseId: previous,
-      nativeStart: record.nativeStart,
-    });
-    if (rolledBack) return ` — rolled back to release ${previous}`;
-  }
-  await stopFailedNativeApp(io, prepared.unit);
+  const { previous, record } = await healthyPreviousRelease(layout, prepared);
   if (!previous) {
+    await stopFailedNativeApp(io, prepared.unit);
     return " — no previous release to roll back to; the app is stopped";
   }
   if (!record) {
+    await stopFailedNativeApp(io, prepared.unit);
     return ` — the previous release ${previous} never passed a health check on this server, so it was not restored; the app is stopped`;
   }
-  return ` — rolling back to release ${previous} failed; the app is stopped`;
+  const outcome = await rollbackNativeApp(io, layout, {
+    prepared,
+    previousReleaseId: previous,
+    start: recordedStart(record),
+  });
+  if (outcome === "answered") return ` — rolled back to release ${previous}`;
+  await stopFailedNativeApp(io, prepared.unit);
+  return outcome === "silent"
+    ? ` — rolled back to release ${previous}, but it did not answer either; the app is stopped`
+    : ` — rolling back to release ${previous} failed; the app is stopped`;
 }
 
 /**
@@ -550,7 +610,7 @@ type PreparedNativeApp = {
    * Re-render and install this app's unit for another release's recorded
    * start (a rollback). Returns whether the installed unit changed.
    */
-  reinstallUnit?: (nativeStart: NativeAppStart | undefined) => Promise<boolean>;
+  reinstallUnit?: (start: RecordedStart) => Promise<boolean>;
 };
 
 /**
@@ -921,11 +981,10 @@ export async function applyNativeAppServices(
       app,
       binding,
       unit: nativeAppUnitName(app.serviceId),
-      reinstallUnit: (nativeStart) =>
+      reinstallUnit: (start) =>
         installNativeAppUnit(io, layout, {
           environmentId,
-          app,
-          binding: withNativeStart(binding, nativeStart),
+          ...withRecordedStart(binding, app, start),
           systemdUnitDir,
           environmentFile,
         }),

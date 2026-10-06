@@ -15,7 +15,7 @@
  * under the `build` phase while the build is still running.
  */
 
-import { isAbsolute, join, relative } from "@std/path";
+import { dirname, isAbsolute, join, relative } from "@std/path";
 import {
   BUILD_OUTPUT_LIMITS,
   type PumpLimits,
@@ -32,6 +32,7 @@ import { normalizeNodePackageManagerCommand } from "../node-package-manager.ts";
 import {
   describeNativeAppStart,
   type NativeAppStart,
+  NEXT_CLI_PATH,
   normalizeNativeAppStartPath,
 } from "../native/start-entry.ts";
 import {
@@ -977,6 +978,15 @@ function reportStart(context: NativeAppBuildContext, start: NativeAppStart) {
   );
 }
 
+/** The release root a start is looked for in. */
+type StartRoot = {
+  tree: BuildTree;
+  /** Relative to the build working directory (`.` for the checkout itself). */
+  releaseRoot: string;
+  /** Absolute path of the release root. */
+  rootDir: string;
+};
+
 /** `base` plus the detected start, when `detectStart` asked for one. */
 async function withDetectedStart(
   context: NativeAppBuildContext,
@@ -985,10 +995,20 @@ async function withDetectedStart(
   base: NativeAppBuildOutput,
 ): Promise<NativeAppBuildOutput> {
   if (!context.detectStart) return base;
-  const start = await detectNativeAppStart(context.framework, tree, {
-    workingDir: context.workingDir,
+  // A declared release root that is a link the build planted is refused here
+  // (`buildDirExists` throws), exactly as the promote would refuse it.
+  const rootExists = releaseRoot === "." ||
+    await buildDirExists(tree, releaseRoot);
+  const root: StartRoot = {
+    tree,
     releaseRoot,
-  });
+    rootDir: join(context.workingDir, releaseRoot),
+  };
+  const pkg = rootExists ? await readPackageJson(root.rootDir) : undefined;
+  if (rootExists) await assertNotPlugAndPlay(root);
+  const start = rootExists
+    ? await detectNativeAppStart(context.framework, root, pkg)
+    : undefined;
   if (!start) {
     throw new Error(
       "no start command: the release has no package.json start script, no " +
@@ -998,16 +1018,79 @@ async function withDetectedStart(
     );
   }
   reportStart(context, start);
+  if (start.kind === "start-script" && pkg) reportStartScript(context, pkg);
   return { ...base, start };
+}
+
+/**
+ * Yarn Plug'n'Play installs no `node_modules`: packages are resolved through
+ * `.pnp.cjs`, which only Yarn's own runner loads. An app run directly by Node
+ * then fails on its first `require`, so stop at build time with the fix.
+ */
+async function assertNotPlugAndPlay(root: StartRoot): Promise<void> {
+  if (!(await regularFileExists(join(root.rootDir, ".pnp.cjs")))) return;
+  if (
+    await containedDirExists(root.tree, join(root.releaseRoot, NODE_MODULES))
+  ) {
+    return;
+  }
+  throw new Error(
+    "this app was installed with Yarn Plug'n'Play (a .pnp.cjs file and no " +
+      "node_modules folder), which apps run directly on the server do not " +
+      "support. Add `nodeLinker: node-modules` to .yarnrc.yml and deploy again.",
+  );
+}
+
+const NODE_MODULES = "node_modules";
+
+/** Like {@link buildDirExists}, but a link on the way is "no", not an error. */
+async function containedDirExists(
+  tree: BuildTree,
+  relativePath: string,
+): Promise<boolean> {
+  try {
+    return await buildDirExists(tree, relativePath);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Build-log notes for a start script the platform runs as written: it has to
+ * listen on loopback itself, `poststart` never runs, and a `next start` buried
+ * in it binds every address unless it is given `--hostname`.
+ */
+function reportStartScript(context: NativeAppBuildContext, pkg: PackageJson) {
+  const script = packageScript(pkg, "start") ?? "";
+  if (
+    /(?:^|\s)next\s+start(?:\s|$)/.test(script) &&
+    !/--hostname|-H\s/.test(script)
+  ) {
+    context.onOutput?.(
+      "stderr",
+      "warning: the start script runs next start inside other commands, so it runs as written, and next start listens on every address unless told otherwise. Add `--hostname 127.0.0.1` to it so the app is reachable only through the proxy.",
+    );
+  } else {
+    context.onOutput?.(
+      "stdout",
+      "the start script must listen on 127.0.0.1 and $PORT (the unit sets HOST, HOSTNAME and PORT)",
+    );
+  }
+  if (packageScript(pkg, "poststart") !== undefined) {
+    context.onOutput?.(
+      "stdout",
+      "note: the poststart script is not run — a server's start script only finishes when the app stops",
+    );
+  }
 }
 
 /**
  * True for a `start` script that is just `next start` (with or without its own
  * flags). That one is run as Next's CLI with the platform's `--hostname` and
- * `--port` instead: `next start` reads no hostname from the environment and
- * binds every interface by default, which would put the app on the public
- * address next to the proxy. A script that chains other commands is the
- * author's and runs as written.
+ * `--port` instead, whatever `framework` says: `next start` reads no hostname
+ * from the environment and binds every interface by default, which would put
+ * the app on the public address next to the proxy. A script that chains other
+ * commands is the author's and runs as written (with a warning).
  */
 function isPlainNextStart(script: string): boolean {
   const trimmed = script.trim();
@@ -1019,57 +1102,92 @@ function isPlainNextStart(script: string): boolean {
  * How a release starts when its author typed nothing, by the usual Node
  * convention:
  *
- * 1. the `package.json` `start` script (`node --run start`; a plain
- *    `next start` becomes Next's CLI bound to 127.0.0.1, see
- *    {@link isPlainNextStart});
- * 2. a Next.js app (`framework: next`, or a `.next/` build in the release
- *    root) → `next start`;
- * 3. the `package.json` `main` file, when it exists;
- * 4. `index.js`, then `server.js`, at the release root.
+ * 1. a Next standalone tree (`server.js` beside a `.next/` folder, e.g. a
+ *    declared `outputDirectory: .next/standalone`) → `node server.js`: the
+ *    `package.json` Next copies in there still says `next start`, which that
+ *    tree cannot run;
+ * 2. the `package.json` `start` script (`node --run start`, after `prestart`
+ *    when there is one; a plain `next start` becomes Next's CLI bound to
+ *    127.0.0.1, see {@link isPlainNextStart});
+ * 3. a Next.js app (`framework: next`, or a `.next/` build in the release
+ *    root) → `next start`, once the build and the CLI are both there;
+ * 4. the `package.json` `main` file, when it exists;
+ * 5. `index.js`, then `server.js`, at the release root.
  *
- * A Next standalone build never gets here: it always runs `node server.js`.
- * `undefined` when nothing applies.
+ * A standalone build the daemon found itself never gets here: it always runs
+ * `node server.js`. `undefined` when nothing applies.
  */
 async function detectNativeAppStart(
   framework: NativeAppBuildContext["framework"],
-  tree: BuildTree,
-  params: { workingDir: string; releaseRoot: string },
-): Promise<NativeAppStart | undefined> {
-  // A declared release root that is not a real directory of the build tree
-  // (a link the build planted) is never read; the promote refuses it anyway.
-  if (
-    params.releaseRoot !== "." &&
-    !(await buildDirExists(tree, params.releaseRoot))
-  ) {
-    return undefined;
-  }
-  const rootDir = join(params.workingDir, params.releaseRoot);
-  const pkg = await readPackageJson(rootDir);
-  const nextAware = framework !== "node";
-  const startScript = pkg ? packageScript(pkg, "start") : undefined;
-  if (startScript !== undefined) {
-    return nextAware && isPlainNextStart(startScript)
-      ? { kind: "next-start" }
-      : { kind: "start-script" };
-  }
-  // `framework: next` alone identifies the checkout itself; a directory the
-  // author declared must hold the `.next/` build to be started as Next.
-  const declaredNext = framework === "next" && params.releaseRoot === ".";
-  if (
-    nextAware &&
-    (declaredNext ||
-      await buildDirExists(tree, join(params.releaseRoot, ".next")))
-  ) {
-    return { kind: "next-start" };
-  }
-  return await detectEntryFile(rootDir, pkg);
-}
-
-/** `main`, then the conventional entry files, whichever exists first. */
-async function detectEntryFile(
-  rootDir: string,
+  root: StartRoot,
   pkg: PackageJson | undefined,
 ): Promise<NativeAppStart | undefined> {
+  const hasNextBuild = await containedDirExists(
+    root.tree,
+    join(root.releaseRoot, ".next"),
+  );
+  if (
+    hasNextBuild &&
+    await regularFileExists(join(root.rootDir, STANDALONE_SERVER_FILE))
+  ) {
+    return { kind: "file", path: STANDALONE_SERVER_FILE };
+  }
+  const startScript = pkg ? packageScript(pkg, "start") : undefined;
+  if (startScript !== undefined) {
+    if (isPlainNextStart(startScript)) return await nextStart(root);
+    return pkg && packageScript(pkg, "prestart") !== undefined
+      ? { kind: "start-script", prestart: true }
+      : { kind: "start-script" };
+  }
+  if (framework !== "node" && hasNextBuild) return await nextStart(root);
+  const entry = await detectEntryFile(root);
+  // Declared Next with no build and no entry file: say what is missing.
+  if (entry || framework !== "next") return entry;
+  return await nextStart(root);
+}
+
+/**
+ * `next start`, but only for a tree that can run it: a `.next/` build and
+ * Next's CLI in `node_modules`. Otherwise the build fails now, with the
+ * reason, instead of promoting a release that can only crash-loop.
+ */
+async function nextStart(root: StartRoot): Promise<NativeAppStart> {
+  if (!(await containedDirExists(root.tree, join(root.releaseRoot, ".next")))) {
+    throw new Error(
+      "the app starts with next start, but the build left no .next folder. " +
+        "Make sure the package.json build script runs next build.",
+    );
+  }
+  if (!(await nextCliExists(root.rootDir))) {
+    throw new Error(
+      "the app starts with next start, but next is not installed in " +
+        "node_modules. Add next to the package.json dependencies.",
+    );
+  }
+  return { kind: "next-start" };
+}
+
+/**
+ * Whether Next's CLI file is there. Links are followed on purpose: pnpm makes
+ * `node_modules/next` a link into its own store inside the tree, and this is
+ * only an existence check (nothing is read).
+ */
+async function nextCliExists(rootDir: string): Promise<boolean> {
+  try {
+    return (await Deno.stat(join(rootDir, NEXT_CLI_PATH))).isFile;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * `main`, then the conventional entry files, whichever exists first: a regular
+ * file (not a link) in a real directory of the tree (no link on the way).
+ */
+async function detectEntryFile(
+  root: StartRoot,
+): Promise<NativeAppStart | undefined> {
+  const pkg = await readPackageJson(root.rootDir);
   const main = typeof pkg?.main === "string"
     ? normalizeNativeAppStartPath(pkg.main)
     : undefined;
@@ -1078,8 +1196,22 @@ async function detectEntryFile(
     ...DEFAULT_ENTRY_FILES,
   ];
   const present = await Promise.all(
-    candidates.map((candidate) => regularFileExists(join(rootDir, candidate))),
+    candidates.map((candidate) => entryFileExists(root, candidate)),
   );
   const index = present.indexOf(true);
   return index === -1 ? undefined : { kind: "file", path: candidates[index] };
+}
+
+async function entryFileExists(
+  root: StartRoot,
+  candidate: string,
+): Promise<boolean> {
+  const dir = dirname(candidate);
+  if (
+    dir !== "." &&
+    !(await containedDirExists(root.tree, join(root.releaseRoot, dir)))
+  ) {
+    return false;
+  }
+  return await regularFileExists(join(root.rootDir, candidate));
 }

@@ -107,6 +107,8 @@ test("readReleaseManifest accepts optional native and railpack fields", async ()
       standaloneOutput: true,
       staticExport: false,
       nativeStart: { kind: "file", path: "server.js" },
+      startCommand: "node dist/main.js",
+      startupFile: "dist/main.js",
       imageTag: "tp-svc-1:rel-1",
       imageDigest: "sha256:deadbeef",
       railpackFrontendVersion: "0.9.0",
@@ -172,6 +174,11 @@ test("readReleaseManifest rejects non-string railpack version fields", async () 
     await Deno.mkdir(join(releaseDir, RELEASE_METADATA_DIRNAME), {
       recursive: true,
     });
+    await Deno.writeTextFile(
+      releaseManifestPath(releaseDir),
+      JSON.stringify({ ...BASE, startCommand: ["sh"] }),
+    );
+    assertEquals(await readReleaseManifest(releaseDir), null);
     await Deno.writeTextFile(
       releaseManifestPath(releaseDir),
       JSON.stringify({ ...BASE, railpackFrontendVersion: 9 }),

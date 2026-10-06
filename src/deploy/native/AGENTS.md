@@ -69,7 +69,8 @@ the unit starts. Per app:
 8. On probe failure, dump the unit journal **first**, then — only when the
    previous release once answered on this host — repoint `current` back at
    it, re-render the unit for that release's recorded start, reload if it
-   changed and restart; otherwise stop the unit. Then fail the command.
+   changed, restart and probe it again; when there is no such release, or it
+   does not answer either, `disable --now` the unit. Then fail the command.
 
 **Render → diff → install-if-changed** is the same discipline the vhost path
 uses, and the same reasoning: a candidate is staged under
@@ -112,28 +113,54 @@ runs the start the **build detected** and recorded with the release
 `<vendored node> server.js`. A blank `startupFile` counts as unset.
 
 When the author typed neither, `prepareNativeAppBuildOutput` (`build.ts`) picks
-the start from the built tree in the usual Node convention, after the Next
-cases: a Next standalone build → `node server.js`; else the `package.json`
-`start` script → `node --run start` (a script that is just `next start …` is
-run as Next's CLI instead, see below); else a Next app (`framework: next`, or a
-`.next/` build) → `node node_modules/next/dist/bin/next start --hostname
-127.0.0.1 --port <listenPort>`; else the `package.json` `main` file (when it
-exists and is one safe argument: no spaces, `%`, `$`, leading `/` or `-`, or
-`..`); else `index.js`, then `server.js`. Nothing found fails the **build**,
-before promote, with "no start command: … Add a start script to package.json,
-or set a start command for this service." — never a unit that can only
-crash-loop. The decision is detected at build time because the daemon cannot
-read a published release (it is not in the site owner's group), and it is
-recorded in the daemon's release record (`ReleaseManifestV1.nativeStart`) so a
-rollback restarts the old release the way it ran. Every detected start execs
-the vendored Node directly: no shell in `ExecStart` and no Corepack at runtime
-(`node --run start` runs the script itself through `/bin/sh`).
+the start from the built tree in the usual Node convention:
+
+1. a Next standalone tree → `node server.js`: one the daemon found and folded
+   itself, or a release root holding `server.js` beside a `.next/` folder (an
+   author-declared `outputDirectory: .next/standalone`). This comes before the
+   start script on purpose: Next copies `package.json`, still saying
+   `next start`, into the standalone folder, which has no Next CLI to run it;
+2. the `package.json` `start` script → `node --run start`. `node --run` runs no
+   `pre`/`post` hooks, so a package with a `prestart` script (often
+   migrations) gets `/bin/sh -c '<node> --run prestart && exec <node> --run
+   start'` instead; `poststart` is never run (a server's start only finishes
+   when it stops) and the build log says so. A script that is exactly
+   `next start …` runs as Next's CLI instead, whatever `framework` says;
+3. a Next app (`framework: next`, or a `.next/` build) → `node
+   node_modules/next/dist/bin/next start --hostname 127.0.0.1 --port
+   <listenPort>`. Both `.next/` and that CLI file must exist, or the build
+   fails saying which is missing;
+4. the `package.json` `main` file (when it exists and is one safe argument: no
+   spaces, `%`, `$`, leading `/` or `-`, or `..`);
+5. `index.js`, then `server.js`.
+
+Entry files count only as regular files in real directories of the tree (a
+link on the way, or the file itself a link, is skipped). Nothing found fails
+the **build**, before promote, with "no start command: … Add a start script to
+package.json, or set a start command for this service." — never a unit that
+can only crash-loop. A Yarn Plug'n'Play install (`.pnp.cjs`, no
+`node_modules`) also fails the build, pointing at `nodeLinker: node-modules`:
+Node alone cannot resolve its packages. The decision is detected at build time
+because the daemon cannot read a published release (it is not in the site
+owner's group), and it is recorded in the daemon's release record
+(`ReleaseManifestV1.nativeStart`, with the author's `startCommand` and
+`startupFile` of the time) so a rollback restarts the old release the way it
+ran. Every detected start execs the vendored Node directly: no Corepack at
+runtime, and no shell in `ExecStart` except the `prestart` form above
+(`node --run` itself runs a script through `/bin/sh`).
 
 **Loopback bind.** The unit exports `HOST=127.0.0.1` **and**
 `HOSTNAME=127.0.0.1`: Next's standalone `server.js` reads `HOSTNAME` and binds
 every interface without it. `next start` reads neither (only `--hostname`), so
-the Next entry passes `--hostname` and `--port` on argv. An author's own start
-command or start script must bind `HOST`/`HOSTNAME` itself.
+wherever the daemon runs Next itself it passes `--hostname` and `--port` on
+argv. A start script that runs `next start` inside other commands
+(`cross-env … next start`) runs as written, and the build log warns that it
+needs `--hostname 127.0.0.1`; any other start script gets a note that it must
+listen on 127.0.0.1 and `$PORT`. No unit setting forces this: systemd's
+`SocketBindAllow=`/`SocketBindDeny=` filter ports, not addresses, and
+`IPAddressDeny=` / `RestrictNetworkInterfaces=` filter traffic in both
+directions, so they would also cut the app off from every outside service it
+calls.
 
 **Application mode.** `appMode` renders as `Environment=NODE_ENV=<mode>` in the
 unit (default `production`) and rides into the release build as the same value
@@ -251,12 +278,17 @@ something to roll back to. **Only a release that once answered is a target**
 `.healthy` mark into that release's daemon-owned record, and a rollback needs
 the mark on a finalized (not `.pending`) record. Restoring a release that never
 came up would only swap one crash loop for another while the error claimed a
-recovery. With no healthy previous release (a first deploy, a release recorded
-before marks existed, or one that never answered) the unit is **stopped** and
-the error says which case it was; the next deploy starts it again. The unit is
-re-rendered for the restored release's own recorded start (`nativeStart`), so
-a `next start` release that fails rolls back to a `node server.js` one
-correctly.
+recovery. A re-sent deploy of the live release (previous = this release) has
+nothing to go back to. The unit is re-rendered for the restored release's own
+recorded start (its start command, startup file and detected start at the
+time), so a failing `next start` release goes back to a `node server.js` one,
+and a release that ran an explicit command gets that command back. The
+restored release is probed again: only an answer reports "rolled back". With
+no healthy previous release (a first deploy, a release recorded before marks
+existed, or one that never answered), or one that does not answer again, the
+unit is **stopped and disabled** (`disable --now`, so a reboot does not bring
+the crash loop back) and the error says which case it was; the next deploy's
+`enable --now` starts it again.
 
 **Next.js.** `build.ts`'s `prepareNativeAppBuildOutput` runs after the build
 commands: when `.next/standalone` exists it folds `.next/static` and `public/`

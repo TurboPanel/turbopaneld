@@ -1,7 +1,7 @@
 /**
  * How a native app starts when its author typed no start command.
  *
- * Decided once, at build time, from the built tree (`resolveNativeAppStart` in
+ * Decided once, at build time, from the built tree (`detectNativeAppStart` in
  * `../release/build.ts`), and recorded with the release. The
  * unit renderer cannot look for itself: a published release is root-owned and
  * readable only by the site owner's Linux user and its group, which the daemon
@@ -26,8 +26,14 @@ export const NATIVE_APP_BIND_ADDRESS = "127.0.0.1";
 export type NativeAppStart =
   /** `<node> <path>` — a Next standalone `server.js`, `main`, `index.js`, … */
   | { kind: "file"; path: string }
-  /** `<node> --run start` — the package's own `start` script. */
-  | { kind: "start-script" }
+  /**
+   * `<node> --run start` — the package's own `start` script. `node --run`
+   * runs no `pre`/`post` hooks, so with `prestart: true` (the package has a
+   * `prestart` script, often migrations) the unit runs
+   * `/bin/sh -c '<node> --run prestart && exec <node> --run start'`, the order
+   * a package manager would use.
+   */
+  | { kind: "start-script"; prestart?: true }
   /** `<node> node_modules/next/dist/bin/next start --hostname 127.0.0.1 --port <port>`. */
   | { kind: "next-start" };
 
@@ -61,9 +67,10 @@ export function isNativeAppStart(value: unknown): value is NativeAppStart {
     return false;
   }
   const record = value as Record<string, unknown>;
-  if (record.kind === "start-script" || record.kind === "next-start") {
-    return true;
+  if (record.kind === "start-script") {
+    return record.prestart === undefined || record.prestart === true;
   }
+  if (record.kind === "next-start") return true;
   return record.kind === "file" && typeof record.path === "string" &&
     normalizeNativeAppStartPath(record.path) === record.path;
 }
@@ -76,7 +83,9 @@ export function nativeAppStartExec(
 ): string {
   switch (start.kind) {
     case "start-script":
-      return `${nodeBinary} --run start`;
+      return start.prestart
+        ? startWithPrestart(nodeBinary)
+        : `${nodeBinary} --run start`;
     case "next-start":
       return `${nodeBinary} ${NEXT_CLI_PATH} start --hostname ${NATIVE_APP_BIND_ADDRESS} --port ${listenPort}`;
     case "file": {
@@ -89,11 +98,26 @@ export function nativeAppStartExec(
   }
 }
 
+/**
+ * `prestart`, then `start` in its place (`exec`, so systemd supervises the app
+ * and not the shell). The Node path comes from the daemon's layout and the
+ * rest is fixed text, so the single-quoted shell argument needs no escaping;
+ * a path that would need it is refused.
+ */
+function startWithPrestart(nodeBinary: string): string {
+  if (!SAFE_START_PATH_RE.test(nodeBinary)) {
+    throw new TypeError(`unexpected Node path: ${nodeBinary}`);
+  }
+  return `/bin/sh -c '${nodeBinary} --run prestart && exec ${nodeBinary} --run start'`;
+}
+
 /** Plain words for the build transcript. */
 export function describeNativeAppStart(start: NativeAppStart): string {
   switch (start.kind) {
     case "start-script":
-      return "the package.json start script (node --run start)";
+      return start.prestart
+        ? "the package.json prestart then start scripts (node --run)"
+        : "the package.json start script (node --run start)";
     case "next-start":
       return `next start on ${NATIVE_APP_BIND_ADDRESS}`;
     case "file":

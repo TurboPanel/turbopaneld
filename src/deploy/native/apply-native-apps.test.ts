@@ -239,7 +239,12 @@ function bindings(
 async function recordRelease(
   layout: LayoutPaths,
   releaseId: string,
-  opts: { healthy?: boolean; nativeStart?: NativeAppStart } = {},
+  opts: {
+    healthy?: boolean;
+    nativeStart?: NativeAppStart;
+    startCommand?: string;
+    startupFile?: string;
+  } = {},
 ): Promise<string> {
   const { releaseDir } = resolveDaemonReleasePaths(layout, {
     serviceId: "svc-web",
@@ -258,6 +263,12 @@ async function recordRelease(
     ...(opts.nativeStart === undefined
       ? {}
       : { nativeStart: opts.nativeStart }),
+    ...(opts.startCommand === undefined
+      ? {}
+      : { startCommand: opts.startCommand }),
+    ...(opts.startupFile === undefined
+      ? {}
+      : { startupFile: opts.startupFile }),
   });
   if (opts.healthy !== false) {
     await Deno.writeTextFile(join(releaseDir, HEALTHY_RECORD_MARKER), "");
@@ -432,6 +443,10 @@ test("a failed health probe rolls current back to the previous release", async (
       () =>
         applyNativeAppServices(host.layout, ENVIRONMENT_ID, [makeApp()], {
           ...applyOpts(host, mock, false),
+          // Only the restored release answers.
+          probe: async () =>
+            await Deno.readLink(join(siteDir, "current")) ===
+              join("releases", "rel-old"),
           bindings: new Map([["web", {
             username: USERNAME,
             previousReleaseId: "rel-old",
@@ -466,7 +481,7 @@ test("a failed health probe rolls current back to the previous release", async (
       mock.systemctl("restart").at(-1),
       nativeAppUnitName("svc-web"),
     );
-    assertEquals(mock.systemctl("stop"), []);
+    assertEquals(mock.systemctl("disable"), []);
   } finally {
     await host.cleanup();
   }
@@ -524,7 +539,102 @@ test("a previous release that never answered is not restored; the app is stopped
       await Deno.readLink(join(siteDir, "current")),
       join("releases", "rel-new"),
     );
-    assertEquals(mock.systemctl("stop"), [nativeAppUnitName("svc-web")]);
+    // Stopped and disabled, so a reboot does not bring the crash loop back.
+    assertEquals(mock.systemctl("disable"), [nativeAppUnitName("svc-web")]);
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("a rollback restores the old release's own start command and startup file, and must answer", async () => {
+  const host = await makeTestHost();
+  const siteDir = join(
+    host.layout.principalHomeRoot,
+    USERNAME,
+    "sites",
+    "svc-web",
+  );
+  await Deno.mkdir(join(siteDir, "releases", "rel-old"), { recursive: true });
+  await Deno.mkdir(join(siteDir, "releases", "rel-new"), { recursive: true });
+  await Deno.symlink(join("releases", "rel-new"), join(siteDir, "current"));
+  // rel-old ran with an explicit command; the new deploy cleared it.
+  await recordRelease(host.layout, "rel-old", {
+    startCommand: "node dist/main.js",
+  });
+  const answers = { rolledBack: true };
+  try {
+    const mock = createRunMock();
+    const error = await assertRejects(
+      () =>
+        applyNativeAppServices(
+          host.layout,
+          ENVIRONMENT_ID,
+          [makeApp({ startupFile: "dist/new.js" })],
+          {
+            ...applyOpts(host, mock, false),
+            probe: async () =>
+              answers.rolledBack &&
+              await Deno.readLink(join(siteDir, "current")) ===
+                join("releases", "rel-old"),
+            bindings: new Map([["web", {
+              username: USERNAME,
+              previousReleaseId: "rel-old",
+              releaseId: "rel-new",
+            }]]),
+          },
+        ),
+      Error,
+    );
+    assertStringIncludes(error.message, "rolled back to release rel-old");
+    const unit = await Deno.readTextFile(
+      nativeAppUnitPath("svc-web", host.unitDir),
+    );
+    assertStringIncludes(unit, "ExecStart=/bin/sh -c 'node dist/main.js'\n");
+
+    // The same rollback, but the old release does not answer either.
+    answers.rolledBack = false;
+    await Deno.remove(join(siteDir, "current"));
+    await Deno.symlink(join("releases", "rel-new"), join(siteDir, "current"));
+    const silent = createRunMock();
+    const error2 = await assertRejects(
+      () =>
+        applyNativeAppServices(host.layout, ENVIRONMENT_ID, [makeApp()], {
+          ...applyOpts(host, silent, false),
+          bindings: bindings({ previousReleaseId: "rel-old" }),
+        }),
+      Error,
+    );
+    assertStringIncludes(
+      error2.message,
+      "rolled back to release rel-old, but it did not answer either; the app is stopped",
+    );
+    assertEquals(silent.systemctl("disable"), [nativeAppUnitName("svc-web")]);
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("a re-sent live release is never rolled back to itself", async () => {
+  const host = await makeTestHost();
+  try {
+    await recordRelease(host.layout, "rel-same");
+    const mock = createRunMock();
+    const error = await assertRejects(
+      () =>
+        applyNativeAppServices(host.layout, ENVIRONMENT_ID, [makeApp()], {
+          ...applyOpts(host, mock, false),
+          bindings: new Map([["web", {
+            username: USERNAME,
+            previousReleaseId: "rel-same",
+            releaseId: "rel-same",
+          }]]),
+        }),
+      Error,
+    );
+    assertStringIncludes(
+      error.message,
+      "no previous release to roll back to; the app is stopped",
+    );
   } finally {
     await host.cleanup();
   }

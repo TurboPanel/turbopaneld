@@ -68,6 +68,13 @@ export type ReleaseManifestV1 = {
    */
   nativeStart?: NativeAppStart;
   /**
+   * The author's start command and startup file when this release was built,
+   * so a rollback after a failed health check starts this release the way it
+   * ran, not with whatever the newer deploy asked for. Absent when unset.
+   */
+  startCommand?: string;
+  startupFile?: string;
+  /**
    * Railpack lane only: the OCI image this release produced, and the pinned
    * tools that produced it.
    *
@@ -123,6 +130,8 @@ function isReleaseManifestV1(value: unknown): value is ReleaseManifestV1 {
     const key of [
       "commitMessage",
       "commitAuthor",
+      "startCommand",
+      "startupFile",
       "imageTag",
       "imageDigest",
       "railpackFrontendVersion",
