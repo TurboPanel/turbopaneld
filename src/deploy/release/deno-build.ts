@@ -207,9 +207,7 @@ export async function deriveDenoInstallCommand(
 export function deriveDenoBuildCommand(
   config: DenoConfig | undefined,
 ): string | undefined {
-  return config && config.tasks.build !== undefined
-    ? "deno task build"
-    : undefined;
+  return config?.tasks.build !== undefined ? "deno task build" : undefined;
 }
 
 /** Extensions Deno runs directly: what a task's last word must end in to be an entry. */
@@ -235,7 +233,7 @@ export function denoRunTaskFile(command: string): string | undefined {
     return undefined;
   }
   if (words.some((word) => word.startsWith("--watch"))) return undefined;
-  const file = words[words.length - 1];
+  const file = words.at(-1) as string;
   if (file.startsWith("-")) return undefined;
   if (!DENO_ENTRY_EXTENSIONS.some((extension) => file.endsWith(extension))) {
     return undefined;
