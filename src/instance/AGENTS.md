@@ -84,10 +84,12 @@ control plane ignores them.
 one `managed-health-report` frame (`members[]`, at most 32) to a control plane
 that lists the feature. A replica whose engine is down goes out as
 `down: true`; any other probe error sends nothing for that replica, so the
-control plane lets the old reading age out. Fire-and-forget and read-only. It
-exists because health was only read when someone asked: a quiet cluster aged
-past the control plane's freshness window and a stopped replica kept its last
-`streaming` line.
+control plane lets the old reading age out. Fire-and-forget and **display-only**:
+the report is written to a separate metadata field (`metadata.replicationDisplay`)
+and does not affect promote decisions or automatic failover, which continue
+reading the probe-measured field (`metadata.replication`). It exists because
+health was only read when someone asked: a quiet cluster aged past the control
+plane's freshness window and a stopped replica kept its last `streaming` line.
 
 **Rate-limited control-plane calls (HTTP 429).** The control plane limits each
 daemon's REST calls to about 30 a minute per route per server. An authenticated
