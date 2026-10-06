@@ -19,9 +19,14 @@ import {
   promoteSql,
   quoteIdentifier,
   quoteLiteral,
+  readOnlySessionDefaultSql,
+  reconcileDatabaseObjectsSql,
   releaseRoleObjectsSql,
   reloadVerifySql,
+  revokePublicDatabaseAccessSql,
+  revokeUnlistedDatabasesSql,
   standbyReplicationStatusSql,
+  strongestPrivilege,
 } from "./postgres-sql.ts";
 
 /**
@@ -90,7 +95,7 @@ test("createDatabaseSql and dropDatabaseSql", () => {
   assertEquals(dropRoleSql("app").includes('DROP ROLE IF EXISTS "app"'), true);
 });
 
-test("grantDatabaseSql covers privilege levels", () => {
+test("grantDatabaseSql covers privilege levels and resets the old one first", () => {
   assertEquals(
     grantDatabaseSql("appdb", "app", "owner").includes(
       'ALTER DATABASE "appdb" OWNER TO "app"',
@@ -98,12 +103,138 @@ test("grantDatabaseSql covers privilege levels", () => {
     true,
   );
   assertEquals(
-    grantDatabaseSql("appdb", "app", "read-write").includes("CREATE"),
-    true,
+    grantDatabaseSql("appdb", "app", "read-write"),
+    [
+      'REVOKE ALL ON DATABASE "appdb" FROM "app";',
+      'GRANT CONNECT, CREATE, TEMPORARY ON DATABASE "appdb" TO "app";',
+    ].join("\n"),
   );
   assertEquals(
     grantDatabaseSql("appdb", "app", "read-only"),
-    'GRANT CONNECT ON DATABASE "appdb" TO "app";',
+    [
+      'REVOKE ALL ON DATABASE "appdb" FROM "app";',
+      'GRANT CONNECT ON DATABASE "appdb" TO "app";',
+    ].join("\n"),
+  );
+});
+
+test("strongestPrivilege picks owner over read-write over read-only and ignores unknown values", () => {
+  assertEquals(strongestPrivilege(["read-only", "read-write"]), "read-write");
+  assertEquals(
+    strongestPrivilege(["read-write", "owner", "read-only"]),
+    "owner",
+  );
+  assertEquals(strongestPrivilege(["nonsense", "read-only"]), "read-only");
+  assertEquals(strongestPrivilege(["toString", "constructor"]), null);
+  assertEquals(strongestPrivilege([]), null);
+});
+
+test("revokePublicDatabaseAccessSql takes CONNECT from PUBLIC on every connectable database", () => {
+  const sql = revokePublicDatabaseAccessSql();
+  assertEquals(sql.includes("WHERE datallowconn"), true);
+  assertEquals(sql.includes("REVOKE ALL ON DATABASE %I FROM PUBLIC"), true);
+});
+
+test("revokeUnlistedDatabasesSql keeps only the listed databases and quotes names", () => {
+  const sql = revokeUnlistedDatabasesSql("app", ["appdb", "it's"]);
+  assertEquals(
+    sql.includes("datname <> ALL (ARRAY['appdb', 'it''s']::text[])"),
+    true,
+  );
+  assertEquals(sql.includes('FROM "app"'), true);
+  assertEquals(
+    revokeUnlistedDatabasesSql("app", []).includes("ARRAY[]::text[]"),
+    true,
+  );
+  assertThrows(() => revokeUnlistedDatabasesSql("bad name", []), Error);
+});
+
+test("monitor role may connect to the maintenance database", () => {
+  assertEquals(
+    ensureProxySqlMonitorRoleSql("tp_monitor", "pw").includes(
+      'GRANT CONNECT ON DATABASE postgres TO "tp_monitor";',
+    ),
+    true,
+  );
+});
+
+test("readOnlySessionDefaultSql sets or clears the read-only default per database", () => {
+  assertEquals(
+    readOnlySessionDefaultSql("appdb", "ro", true),
+    'ALTER ROLE "ro" IN DATABASE "appdb" SET default_transaction_read_only = on;',
+  );
+  assertEquals(
+    readOnlySessionDefaultSql("appdb", "rw", false),
+    'ALTER ROLE "rw" IN DATABASE "appdb" RESET default_transaction_read_only;',
+  );
+});
+
+test("reconcileDatabaseObjectsSql grants writers everything and readers only SELECT, now and for later tables", () => {
+  const sql = reconcileDatabaseObjectsSql({
+    creators: ["postgres", "own", "rw"],
+    writers: ["own", "rw"],
+    readers: ["ro"],
+  });
+  // Existing objects, every non-system schema.
+  assertEquals(sql.includes("nspname !~ '^pg_'"), true);
+  assertEquals(
+    sql.includes('GRANT ALL ON ALL TABLES IN SCHEMA %I TO "rw"'),
+    true,
+  );
+  assertEquals(
+    sql.includes('GRANT SELECT ON ALL TABLES IN SCHEMA %I TO "ro"'),
+    true,
+  );
+  assertEquals(
+    sql.includes(
+      'REVOKE USAGE, UPDATE ON ALL SEQUENCES IN SCHEMA %I FROM "ro"',
+    ),
+    true,
+  );
+  // Later objects, from every creator, to everyone else.
+  assertEquals(
+    sql.includes(
+      'ALTER DEFAULT PRIVILEGES FOR ROLE "own" GRANT ALL ON TABLES TO "rw";',
+    ),
+    true,
+  );
+  assertEquals(
+    sql.includes(
+      'ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" GRANT SELECT ON TABLES TO "ro";',
+    ),
+    true,
+  );
+  assertEquals(
+    sql.includes(
+      'ALTER DEFAULT PRIVILEGES FOR ROLE "rw" GRANT SELECT ON SEQUENCES TO "ro";',
+    ),
+    true,
+  );
+  // A creator is never granted its own defaults.
+  assertEquals(
+    sql.includes('FOR ROLE "own" GRANT ALL ON TABLES TO "own"'),
+    false,
+  );
+  // Nothing in the read-only path grants a write.
+  const readerLines = sql.split("\n").filter((line) => line.includes('"ro"'));
+  assertEquals(
+    readerLines.some((line) =>
+      /GRANT (ALL|INSERT|UPDATE|DELETE|TRUNCATE|CREATE|USAGE, CREATE)/.test(
+        line,
+      )
+    ),
+    false,
+  );
+});
+
+test("reconcileDatabaseObjectsSql with no logins only closes the public schema", () => {
+  assertEquals(
+    reconcileDatabaseObjectsSql({
+      creators: ["postgres"],
+      writers: [],
+      readers: [],
+    }),
+    "REVOKE CREATE ON SCHEMA public FROM PUBLIC;",
   );
 });
 

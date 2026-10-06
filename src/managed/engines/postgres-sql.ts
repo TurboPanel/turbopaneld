@@ -70,6 +70,9 @@ export function ensureProxySqlMonitorRoleSql(
       superuser: false,
     }),
     `GRANT pg_monitor TO ${quoteIdentifier(username)};`,
+    // The public connect default is revoked (`revokePublicDatabaseAccessSql`);
+    // the monitor dials the maintenance database, so it gets its own grant.
+    grantMonitorConnectSql(username),
   ].join("\n");
 }
 
@@ -155,6 +158,9 @@ export function grantDatabaseSql(
 ): string {
   const db = quoteIdentifier(database);
   const role = quoteIdentifier(username);
+  // Revoke first so a changed level (read-write to read-only, say) leaves
+  // exactly the grant for the new level and nothing from the old one.
+  const reset = `REVOKE ALL ON DATABASE ${db} FROM ${role};`;
   switch (privilege) {
     case "owner":
       return [
@@ -163,15 +169,240 @@ export function grantDatabaseSql(
       ].join("\n");
     case "read-write":
       return [
+        reset,
         `GRANT CONNECT, CREATE, TEMPORARY ON DATABASE ${db} TO ${role};`,
       ].join("\n");
     case "read-only":
-      return [`GRANT CONNECT ON DATABASE ${db} TO ${role};`].join("\n");
+      return [reset, `GRANT CONNECT ON DATABASE ${db} TO ${role};`].join("\n");
     default: {
       const _exhaustive: never = privilege;
       throw new Error(`unsupported privilege: ${_exhaustive}`);
     }
   }
+}
+
+const PRIVILEGE_RANK: Record<ManagedDatabasePrivilege, number> = {
+  "read-only": 1,
+  "read-write": 2,
+  owner: 3,
+};
+
+/**
+ * The one level a login holds on its databases: the strongest recognised
+ * entry of its `privileges` list (owner, then read-write, then read-only).
+ * `null` when the list has no recognised entry — the login is granted nothing.
+ */
+export function strongestPrivilege(
+  raw: readonly string[],
+): ManagedDatabasePrivilege | null {
+  let best: ManagedDatabasePrivilege | null = null;
+  for (const value of raw) {
+    if (!Object.hasOwn(PRIVILEGE_RANK, value)) continue;
+    const level = value as ManagedDatabasePrivilege;
+    if (best === null || PRIVILEGE_RANK[level] > PRIVILEGE_RANK[best]) {
+      best = level;
+    }
+  }
+  return best;
+}
+
+/**
+ * Take the "everyone may connect" default away from every database that
+ * accepts connections (templates and the maintenance database included).
+ * A login then reaches only the databases it was explicitly granted. Safe to
+ * repeat; run on every apply so databases created by hand or by an older
+ * version are covered too. Superusers are unaffected.
+ */
+export function revokePublicDatabaseAccessSql(): string {
+  return [
+    `DO $turbopanel$`,
+    `DECLARE d record;`,
+    `BEGIN`,
+    `  FOR d IN SELECT datname FROM pg_catalog.pg_database WHERE datallowconn LOOP`,
+    `    EXECUTE pg_catalog.format('REVOKE ALL ON DATABASE %I FROM PUBLIC', d.datname);`,
+    `  END LOOP;`,
+    `END`,
+    `$turbopanel$;`,
+  ].join("\n");
+}
+
+/**
+ * Remove whatever access a login still holds on databases that are not in its
+ * list (a database taken off the login, or granted by an older version). The
+ * owner of a database keeps what ownership implies.
+ */
+export function revokeUnlistedDatabasesSql(
+  username: string,
+  keep: readonly string[],
+): string {
+  const role = quoteIdentifier(username);
+  const keepArray = keep.length === 0
+    ? `ARRAY[]::text[]`
+    : `ARRAY[${keep.map((name) => quoteLiteral(name)).join(", ")}]::text[]`;
+  return [
+    `DO $turbopanel$`,
+    `DECLARE d record;`,
+    `BEGIN`,
+    `  FOR d IN SELECT datname FROM pg_catalog.pg_database`,
+    `           WHERE datallowconn AND datname <> ALL (${keepArray}) LOOP`,
+    `    EXECUTE pg_catalog.format('REVOKE ALL ON DATABASE %I FROM ${role}', d.datname);`,
+    `  END LOOP;`,
+    `END`,
+    `$turbopanel$;`,
+  ].join("\n");
+}
+
+/**
+ * The maintenance database accepts the ProxySQL health-check login only; the
+ * public default is gone, so grant it explicitly.
+ */
+export function grantMonitorConnectSql(username: string): string {
+  return `GRANT CONNECT ON DATABASE postgres TO ${quoteIdentifier(username)};`;
+}
+
+/**
+ * A read-only login also starts every session in this database read-only.
+ * Table privileges are the real wall (SELECT only); this stops an accidental
+ * write from even beginning a transaction. Scoped to the database so the
+ * same login stays writable where it holds a higher level.
+ */
+export function readOnlySessionDefaultSql(
+  database: string,
+  username: string,
+  readOnly: boolean,
+): string {
+  const db = quoteIdentifier(database);
+  const role = quoteIdentifier(username);
+  return readOnly
+    ? `ALTER ROLE ${role} IN DATABASE ${db} SET default_transaction_read_only = on;`
+    : `ALTER ROLE ${role} IN DATABASE ${db} RESET default_transaction_read_only;`;
+}
+
+export type DatabaseObjectAccess = {
+  /**
+   * Roles whose future tables, sequences and schemas the others must reach:
+   * the platform admin (restores run as it), the exposed root login, and
+   * every owner or read-write login on the database.
+   */
+  creators: readonly string[];
+  /** Owner and read-write logins: read, write and create. */
+  writers: readonly string[];
+  /** Read-only logins: read and nothing else. */
+  readers: readonly string[];
+};
+
+function defaultPrivilegeSql(
+  creator: string,
+  writers: readonly string[],
+  readers: readonly string[],
+): string[] {
+  const owner = quoteIdentifier(creator);
+  const lines: string[] = [];
+  for (const name of writers) {
+    if (name === creator) continue;
+    const role = quoteIdentifier(name);
+    lines.push(
+      `ALTER DEFAULT PRIVILEGES FOR ROLE ${owner} GRANT ALL ON TABLES TO ${role};`,
+      `ALTER DEFAULT PRIVILEGES FOR ROLE ${owner} GRANT ALL ON SEQUENCES TO ${role};`,
+      `ALTER DEFAULT PRIVILEGES FOR ROLE ${owner} GRANT USAGE, CREATE ON SCHEMAS TO ${role};`,
+    );
+  }
+  for (const name of readers) {
+    if (name === creator) continue;
+    const role = quoteIdentifier(name);
+    lines.push(
+      // Wipe a former read-write default before the read-only one.
+      `ALTER DEFAULT PRIVILEGES FOR ROLE ${owner} REVOKE ALL ON TABLES FROM ${role};`,
+      `ALTER DEFAULT PRIVILEGES FOR ROLE ${owner} REVOKE ALL ON SEQUENCES FROM ${role};`,
+      `ALTER DEFAULT PRIVILEGES FOR ROLE ${owner} REVOKE ALL ON SCHEMAS FROM ${role};`,
+      `ALTER DEFAULT PRIVILEGES FOR ROLE ${owner} GRANT SELECT ON TABLES TO ${role};`,
+      `ALTER DEFAULT PRIVILEGES FOR ROLE ${owner} GRANT SELECT ON SEQUENCES TO ${role};`,
+      `ALTER DEFAULT PRIVILEGES FOR ROLE ${owner} GRANT USAGE ON SCHEMAS TO ${role};`,
+    );
+  }
+  return lines;
+}
+
+/** One statement run per schema inside the loop; `%I` is the schema name. */
+function perSchema(statement: string, role: string): string {
+  return `    EXECUTE pg_catalog.format('${statement} ${
+    quoteIdentifier(role)
+  }', s.nspname);`;
+}
+
+function existingObjectSql(
+  writers: readonly string[],
+  readers: readonly string[],
+): string[] {
+  const lines: string[] = [];
+  for (const name of writers) {
+    lines.push(
+      perSchema(`GRANT USAGE, CREATE ON SCHEMA %I TO`, name),
+      perSchema(`GRANT ALL ON ALL TABLES IN SCHEMA %I TO`, name),
+      perSchema(`GRANT ALL ON ALL SEQUENCES IN SCHEMA %I TO`, name),
+    );
+  }
+  for (const name of readers) {
+    lines.push(
+      perSchema(`REVOKE CREATE ON SCHEMA %I FROM`, name),
+      perSchema(
+        `REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON ALL TABLES IN SCHEMA %I FROM`,
+        name,
+      ),
+      perSchema(
+        `REVOKE USAGE, UPDATE ON ALL SEQUENCES IN SCHEMA %I FROM`,
+        name,
+      ),
+      perSchema(`GRANT USAGE ON SCHEMA %I TO`, name),
+      perSchema(`GRANT SELECT ON ALL TABLES IN SCHEMA %I TO`, name),
+      perSchema(`GRANT SELECT ON ALL SEQUENCES IN SCHEMA %I TO`, name),
+    );
+  }
+  return lines;
+}
+
+/**
+ * Table-level access inside ONE database; run connected to that database
+ * (privileges on tables and the default privileges for future ones live in
+ * each database's own catalog). Covers every schema that is not a system
+ * schema, existing objects now and objects made later by any creator.
+ *
+ * - writers (owner, read-write): everything on tables and sequences, plus
+ *   use and create on schemas.
+ * - readers (read-only): SELECT on tables and sequences, USAGE on schemas.
+ *
+ * Postgres only lets an object's owner alter or drop it, so a read-write
+ * login can read and write every table but only alter or drop what it made
+ * itself; the owner login does the rest.
+ */
+export function reconcileDatabaseObjectsSql(
+  access: DatabaseObjectAccess,
+): string {
+  const lines = [
+    // Postgres 14 and older let everyone create in `public`; 15+ already
+    // does not. Same end state on every series.
+    `REVOKE CREATE ON SCHEMA public FROM PUBLIC;`,
+  ];
+  const existing = existingObjectSql(access.writers, access.readers);
+  if (existing.length > 0) {
+    lines.push(
+      `DO $turbopanel$`,
+      `DECLARE s record;`,
+      `BEGIN`,
+      `  FOR s IN SELECT nspname FROM pg_catalog.pg_namespace`,
+      `           WHERE nspname <> 'information_schema' AND nspname !~ '^pg_' LOOP`,
+      ...existing,
+      `  END LOOP;`,
+      `END`,
+      `$turbopanel$;`,
+    );
+  }
+  for (const creator of access.creators) {
+    lines.push(
+      ...defaultPrivilegeSql(creator, access.writers, access.readers),
+    );
+  }
+  return lines.join("\n");
 }
 
 const MANAGED_SLOT_PREFIX = "tp_member_";
