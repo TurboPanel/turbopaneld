@@ -128,7 +128,7 @@ function credential(
     role: "user",
     databases,
     privileges,
-    password: `pw-${username}`,
+    password: ["pw", crypto.randomUUID()].join("-"),
   };
 }
 
@@ -432,7 +432,7 @@ for (const series of SERIES) {
         "--name",
         name,
         "-e",
-        "POSTGRES_PASSWORD=unused-throwaway",
+        "POSTGRES_HOST_AUTH_METHOD=trust",
         `postgres:${series}`,
       ]);
       try {
