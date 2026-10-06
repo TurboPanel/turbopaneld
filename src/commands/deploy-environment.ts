@@ -101,6 +101,7 @@ import {
 import {
   applySites,
   ensureSitePhpRuntimes,
+  planSiteWebEnv,
   resolveSiteDocumentRoot,
   resolveSitePhpSeries,
   type SiteManagedDirectory,
@@ -1982,6 +1983,8 @@ export function shapeEnvironmentDeployResult(input: {
   releases?: readonly EnvironmentDeployResultRelease[];
   /** Per-site application facts for the sites this deploy applied. */
   siteApps?: readonly EnvironmentDeployResultSite[];
+  /** What the deploy worked around without failing; omitted when empty. */
+  warnings?: readonly string[];
 }): EnvironmentDeployResult {
   const summary = buildDeploySummary(
     input.environmentId,
@@ -2006,6 +2009,9 @@ export function shapeEnvironmentDeployResult(input: {
       : {}),
     ...(input.siteApps && input.siteApps.length > 0
       ? { sites: [...input.siteApps] }
+      : {}),
+    ...(input.warnings && input.warnings.length > 0
+      ? { warnings: [...input.warnings] }
       : {}),
   };
 }
@@ -2251,6 +2257,14 @@ export async function handleEnvironmentDeploy(
     runtime.decryptSecrets,
   );
 
+  // Before anything is written: a variable a site's web server cannot carry is
+  // named in the command log and the result, a required database setting stops
+  // the deploy here.
+  const siteWarnings = sites.flatMap(planSiteWebEnv);
+  for (const warning of siteWarnings) {
+    runtime.logSink.onLine("stderr", warning);
+  }
+
   const siteReleaseBindings = deployReleaseBindings(parsedPayload);
   const siteManagedBindings = deployManagedDirectoryBindings(
     parsedPayload,
@@ -2372,5 +2386,6 @@ export async function handleEnvironmentDeploy(
     containers,
     releases: deployResultReleases(appliedReleases),
     siteApps,
+    warnings: siteWarnings,
   });
 }
