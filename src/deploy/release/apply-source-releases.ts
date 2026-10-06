@@ -169,6 +169,11 @@ export type AppliedRelease = {
    * this was kept — the unit then falls back to `node server.js`.
    */
   nativeStart?: NativeAppStart;
+  /**
+   * The runtime the live release runs on, when it is not Node: the build's own
+   * (`deno`), or on a rollback the one its record kept. Absent means Node.
+   */
+  runtime?: "node" | "deno";
 };
 
 /**
@@ -393,6 +398,9 @@ async function rollbackOneRelease(
     ...(recordedManifest.nativeStart === undefined
       ? {}
       : { nativeStart: recordedManifest.nativeStart }),
+    // A record without a runtime ran on Node; say so explicitly so a rollback
+    // across a switch never keeps the newer payload's `deno`.
+    runtime: recordedManifest.runtime ?? "node",
   };
 }
 
@@ -887,6 +895,12 @@ async function buildNativeRelease(
       standaloneOutput: nativeOutput.standaloneOutput,
       staticExport: nativeOutput.staticExport,
       nativeStart: nativeOutput.start,
+      // Only Deno is written, so a Node manifest is unchanged (see
+      // `ReleaseManifestV1.runtime`).
+      runtime: nativeAppForService(payload, entry.composeServiceName)
+          ?.runtime === "deno"
+        ? "deno"
+        : undefined,
       // The author's own start settings, so a rollback to this release
       // starts it the way it ran (see `ReleaseManifestV1.startCommand`).
       startCommand: entry.build.startCommand?.trim() || undefined,
@@ -946,6 +960,10 @@ async function buildNativeRelease(
       standaloneOutput: nativeOutput.standaloneOutput,
       staticExport: nativeOutput.staticExport,
       nativeStart: nativeOutput.start,
+      runtime: nativeAppForService(payload, entry.composeServiceName)
+          ?.runtime === "deno"
+        ? "deno"
+        : undefined,
     });
   } finally {
     if (work) await removeBuildWork(work, onOutput);

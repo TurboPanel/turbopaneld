@@ -449,6 +449,11 @@ export type RecordedStart = {
   startCommand?: string;
   startupFile?: string;
   nativeStart?: NativeAppStart;
+  /**
+   * The runtime that release ran on. A rollback renders its unit for this, not
+   * for the newer payload's runtime. Absent leaves the app's own.
+   */
+  runtime?: "node" | "deno";
 };
 
 /** The start fields of a release record. */
@@ -457,6 +462,8 @@ function recordedStart(manifest: ReleaseManifestV1): RecordedStart {
     startCommand: manifest.startCommand,
     startupFile: manifest.startupFile,
     nativeStart: manifest.nativeStart,
+    // A record with no runtime ran on Node.
+    runtime: manifest.runtime ?? "node",
   });
 }
 
@@ -472,6 +479,13 @@ function withRecordedStart(
     ...bindingRest
   } = binding;
   const { startupFile: _file, ...appRest } = app;
+  // The unit is rendered from the app, so the recorded runtime goes there. A
+  // Node release carries no `runtime` key, as a Node payload never does.
+  const { runtime: _runtime, ...appWithoutRuntime } = appRest;
+  const appForRelease = start.runtime === undefined ? appRest : {
+    ...appWithoutRuntime,
+    ...(start.runtime === "deno" ? { runtime: "deno" as const } : {}),
+  };
   return {
     binding: {
       ...bindingRest,
@@ -481,7 +495,7 @@ function withRecordedStart(
       }),
     },
     app: {
-      ...appRest,
+      ...appForRelease,
       ...definedFields({ startupFile: start.startupFile }),
     },
   };
@@ -1229,4 +1243,6 @@ export function nativeAppBindingsFromPayload(
 export type AppliedNativeRelease = {
   releaseId: string;
   nativeStart?: NativeAppStart;
+  /** The runtime the live release runs on; absent keeps the payload's. */
+  runtime?: "node" | "deno";
 };

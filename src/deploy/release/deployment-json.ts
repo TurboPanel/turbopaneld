@@ -68,6 +68,15 @@ export type ReleaseManifestV1 = {
    */
   nativeStart?: NativeAppStart;
   /**
+   * Which runtime the unit ran this release on. Written only for `deno`; a
+   * record without it ran on Node (every record written before Deno apps
+   * existed, and every Node release since, so Node manifests are unchanged).
+   * A rollback reads it to put back the unit of the runtime that release ran
+   * on, not the runtime the newer payload asks for, so a site switched from
+   * Node to Deno (or back) is restored to the runtime its old release needs.
+   */
+  runtime?: "node" | "deno";
+  /**
    * The author's start command and startup file when this release was built,
    * so a rollback after a failed health check starts this release the way it
    * ran, not with whatever the newer deploy asked for. Absent when unset.
@@ -123,6 +132,12 @@ function isReleaseManifestV1(value: unknown): value is ReleaseManifestV1 {
   }
   if (
     record.nativeStart !== undefined && !isNativeAppStart(record.nativeStart)
+  ) {
+    return false;
+  }
+  if (
+    record.runtime !== undefined && record.runtime !== "node" &&
+    record.runtime !== "deno"
   ) {
     return false;
   }

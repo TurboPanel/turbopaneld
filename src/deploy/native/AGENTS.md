@@ -165,6 +165,16 @@ or `deno run --allow-all <entry>`, see `../release/AGENTS.md`), else `deno task
 start`. A start recorded by a Deno build is ignored by a Node unit, so a service
 switched between runtimes never runs `node task start`.
 
+A release record keeps the runtime too (`ReleaseManifestV1.runtime`, written only
+for `deno`; no value means Node, so Node manifests are unchanged). A rollback,
+whether after a failed health check or by request, renders the unit for the
+runtime the old release ran on, not the newer payload's: a site switched from
+Node to Deno whose first Deno release fails goes back to a Node unit. The Node
+or Deno version of that unit still comes from the payload (or its default), as
+only the runtime kind is recorded. `DENO_DIR`, `DENO_NO_UPDATE_CHECK` and
+`DENO_NO_PROMPT` are reserved names for every native app, Node included: a
+variable with one of those names is dropped from the app's env file.
+
 Permissions: the platform passes `--allow-all` when it picks the command, and
 nothing Deno enforces is needed on top of the unit's hardening. `--allow-run`
 and `--allow-ffi` let the app start programs and load native code **as the same
