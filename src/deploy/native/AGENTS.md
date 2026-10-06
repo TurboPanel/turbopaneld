@@ -66,9 +66,11 @@ the unit starts. Per app:
 7. Probe `127.0.0.1:<listenPort>` until it answers. Start, the probe
    verdict, and a failed unit's `journalctl` tail are written to the
    command transcript (`health` phase).
-8. On probe failure, dump the unit journal **first**, then repoint
-   `current` back at the previous release and restart, then fail the
-   command.
+8. On probe failure, dump the unit journal **first**, then — only when the
+   previous release once answered on this host — repoint `current` back at
+   it, re-render the unit for that release's recorded start, reload if it
+   changed, restart and probe it again; when there is no such release, or it
+   does not answer either, `disable --now` the unit. Then fail the command.
 
 **Render → diff → install-if-changed** is the same discipline the vhost path
 uses, and the same reasoning: a candidate is staged under
@@ -102,12 +104,63 @@ user, so a compromised app cannot rewrite the code it is running. No supplementa
 here (unlike the web engines): the app *is* the principal that already has group
 read on its own tree.
 
-**Entrypoint.** The default `ExecStart` is `<vendored node> server.js`.
+**Entrypoint.** Most specific first (`resolveExecStart` in `unit.ts`): an
+explicit `build.startCommand` runs through `/bin/sh -c` untouched;
 `startupFile` (a validated relative path — `isSafeSourceSubdirectory` at the
-contract boundary) replaces the `server.js` name; an explicit
-`build.startCommand` still wins over both and runs through `/bin/sh -c`
-untouched. A blank `startupFile` falls back to the default rather than
-rendering an `ExecStart` with no script.
+contract boundary) runs as `<vendored node> <startupFile>`; otherwise the unit
+runs the start the **build detected** and recorded with the release
+(`nativeStart`, `start-entry.ts`); a release recorded before that existed runs
+`<vendored node> server.js`. A blank `startupFile` counts as unset.
+
+When the author typed neither, `prepareNativeAppBuildOutput` (`build.ts`) picks
+the start from the built tree in the usual Node convention:
+
+1. a Next standalone tree → `node server.js`: one the daemon found and folded
+   itself, or a release root holding `server.js` beside a `.next/` folder (an
+   author-declared `outputDirectory: .next/standalone`). This comes before the
+   start script on purpose: Next copies `package.json`, still saying
+   `next start`, into the standalone folder, which has no Next CLI to run it;
+2. the `package.json` `start` script → `node --run start`. `node --run` runs no
+   `pre`/`post` hooks, so a package with a `prestart` script (often
+   migrations) gets `/bin/sh -c '<node> --run prestart && exec <node> --run
+   start'` instead; `poststart` is never run (a server's start only finishes
+   when it stops) and the build log says so. A script that is exactly
+   `next start …` runs as Next's CLI instead, whatever `framework` says;
+3. a Next app (`framework: next`, or a `.next/` build) → `node
+   node_modules/next/dist/bin/next start --hostname 127.0.0.1 --port
+   <listenPort>`. Both `.next/` and that CLI file must exist, or the build
+   fails saying which is missing;
+4. the `package.json` `main` file (when it exists and is one safe argument: no
+   spaces, `%`, `$`, leading `/` or `-`, or `..`);
+5. `index.js`, then `server.js`.
+
+Entry files count only as regular files in real directories of the tree (a
+link on the way, or the file itself a link, is skipped). Nothing found fails
+the **build**, before promote, with "no start command: … Add a start script to
+package.json, or set a start command for this service." — never a unit that
+can only crash-loop. A Yarn Plug'n'Play install (`.pnp.cjs`, no
+`node_modules`) also fails the build, pointing at `nodeLinker: node-modules`:
+Node alone cannot resolve its packages. The decision is detected at build time
+because the daemon cannot read a published release (it is not in the site
+owner's group), and it is recorded in the daemon's release record
+(`ReleaseManifestV1.nativeStart`, with the author's `startCommand` and
+`startupFile` of the time) so a rollback restarts the old release the way it
+ran. Every detected start execs the vendored Node directly: no Corepack at
+runtime, and no shell in `ExecStart` except the `prestart` form above
+(`node --run` itself runs a script through `/bin/sh`).
+
+**Loopback bind.** The unit exports `HOST=127.0.0.1` **and**
+`HOSTNAME=127.0.0.1`: Next's standalone `server.js` reads `HOSTNAME` and binds
+every interface without it. `next start` reads neither (only `--hostname`), so
+wherever the daemon runs Next itself it passes `--hostname` and `--port` on
+argv. A start script that runs `next start` inside other commands
+(`cross-env … next start`) runs as written, and the build log warns that it
+needs `--hostname 127.0.0.1`; any other start script gets a note that it must
+listen on 127.0.0.1 and `$PORT`. No unit setting forces this: systemd's
+`SocketBindAllow=`/`SocketBindDeny=` filter ports, not addresses, and
+`IPAddressDeny=` / `RestrictNetworkInterfaces=` filter traffic in both
+directions, so they would also cut the app off from every outside service it
+calls.
 
 **Application mode.** `appMode` renders as `Environment=NODE_ENV=<mode>` in the
 unit (default `production`) and rides into the release build as the same value
@@ -179,7 +232,7 @@ points to). Rules that are not obvious:
   `systemctl show`, and has `%` expanded; the file is root-read and private.
 - **`EnvironmentFile=` overrides `Environment=` whatever the line order**, so
   the platform's own names (`NATIVE_APP_PLATFORM_ENV_NAMES` in `unit.ts`:
-  `PATH`, `NODE_ENV`, `PORT`, `HOST`, `HOME`, `TMPDIR`, `XDG_CACHE_HOME`,
+  `PATH`, `NODE_ENV`, `PORT`, `HOST`, `HOSTNAME`, `HOME`, `TMPDIR`, `XDG_CACHE_HOME`,
   `COREPACK_*`) are dropped from the file, and the transcript says which. A
   unit test keeps that set equal to the `Environment=` keys the unit renders.
 - **Quoting.** Values are single-quoted (literal: no `$`, no backslash
@@ -220,14 +273,33 @@ seam fully controls timing in tests.
 `current` untouched; a release that builds and promotes cleanly can still fail
 to start, and that is what step 7 covers. `applySourceReleases` reports
 `previousReleaseId` (read before the swap) precisely so the native apply has
-something to roll back to. A first deploy has none, and says so in the error
-rather than pretending it recovered.
+something to roll back to. **Only a release that once answered is a target**
+(`../release/release-health.ts`): when a probe answers, the apply writes a
+`.healthy` mark into that release's daemon-owned record, and a rollback needs
+the mark on a finalized (not `.pending`) record. Restoring a release that never
+came up would only swap one crash loop for another while the error claimed a
+recovery. A re-sent deploy of the live release (previous = this release) has
+nothing to go back to. The unit is re-rendered for the restored release's own
+recorded start (its start command, startup file and detected start at the
+time), so a failing `next start` release goes back to a `node server.js` one,
+and a release that ran an explicit command gets that command back. The
+restored release is probed again: only an answer reports "rolled back". With
+no healthy previous release (a first deploy, a release recorded before marks
+existed, or one that never answered), or one that does not answer again, the
+unit is **stopped and disabled** (`disable --now`, so a reboot does not bring
+the crash loop back) and the error says which case it was; the next deploy's
+`enable --now` starts it again.
 
 **Next.js.** `build.ts`'s `prepareNativeAppBuildOutput` runs after the build
 commands: when `.next/standalone` exists it folds `.next/static` and `public/`
 into it (the layout Next documents) and publishes that subtree, so `server.js`
-lands at the release root — where the unit's default `ExecStart` looks. An
-operator-declared `outputDirectory` always wins.
+lands at the release root and the unit runs `node server.js`. Without
+`output: "standalone"` the whole build tree ships (with a warning) and the app
+runs `next start` on 127.0.0.1. A standalone build with an author start command
+that needs package scripts or `next` (`pnpm start`, `next start`) gets a build
+warning: the standalone tree has neither. An operator-declared
+`outputDirectory` always wins (no fold, no export detection; only the start is
+looked for inside it).
 
 **A statically exported build leaves this lane.** When the build emitted
 `output: 'export'` instead — an `out/` tree with an `index.html` and no
@@ -304,7 +376,7 @@ the same account still reference it, and an unreferenced slice costs nothing.
 Transcript: fetch / build / release-promote still bracket the Git release.
 Native start, the loopback probe, and (on probe failure) a `journalctl`
 dump of the unit land under **`health`**, so an operator opening Deploy
-output sees why `node server.js` exited rather than only the 30s timeout.
+output sees why the app exited rather than only the 30s timeout.
 A source with no `installCommand` / `buildCommand` still ships the
 checkout as-is, but the build phase records that — an empty Build section
 used to look like the engine skipped the step.

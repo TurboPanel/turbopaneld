@@ -149,6 +149,7 @@ import {
 } from "../deploy/site-docker.ts";
 import { logInfo, logWarn } from "../util/logger.ts";
 import { forEachSequential } from "../util/sequential.ts";
+import { definedFields } from "../util/optional-fields.ts";
 import {
   assertComposeHostPathsConfined,
   collectAuthoredHostPaths,
@@ -1293,6 +1294,15 @@ async function applyDeployNativeApps(
   const previousReleaseByService = new Map<string, string | null>(
     applied.map((entry) => [entry.composeServiceName, entry.previousReleaseId]),
   );
+  const appliedByService = new Map(
+    applied.map((entry) => [
+      entry.composeServiceName,
+      definedFields({
+        releaseId: entry.releaseId,
+        nativeStart: entry.nativeStart,
+      }),
+    ]),
+  );
   await applyNativeAppServices(layout, parsedPayload.environmentId, apps, {
     variableMaterial: parsedPayload.variableMaterial ?? [],
     decryptSecrets,
@@ -1302,6 +1312,7 @@ async function applyDeployNativeApps(
     bindings: nativeAppBindingsFromPayload(
       parsedPayload,
       previousReleaseByService,
+      appliedByService,
     ),
   });
 }

@@ -27,6 +27,11 @@ import {
 import {
   resolveNativeAppRuntimeStartCommand,
 } from "../node-package-manager.ts";
+import {
+  NATIVE_APP_BIND_ADDRESS,
+  type NativeAppStart,
+  nativeAppStartExec,
+} from "./start-entry.ts";
 import { principalUnixGroupName } from "../ensure-principal.ts";
 import { runtimeGroup } from "../../runtime/registry.ts";
 import type {
@@ -283,28 +288,39 @@ export function principalSliceStagedPath(
 }
 
 /**
- * Default entrypoint, relative to the release root.
- *
- * One value for every runtime family on purpose: a Next.js standalone build is
- * *staged so that* its `server.js` lands at the release root (see
- * `../release/build.ts`), which is exactly where a plain Node app's `server.js`
- * already is. An operator who needs anything else sets
- * `x-turbopanel.source.startCommand`.
+ * Entrypoint, relative to the release root, for a release that recorded no
+ * start ({@link NativeAppStart}): one built before the start was recorded.
+ * A Next.js standalone build is *staged so that* its `server.js` lands at the
+ * release root (see `../release/build.ts`), which is also where a plain Node
+ * app's `server.js` conventionally is.
  */
 export const DEFAULT_START_SCRIPT = "server.js";
 
 /**
- * Resolve the `ExecStart` line.
+ * Resolve the `ExecStart` line, most specific first:
  *
- * An explicit `startCommand` is run through `/bin/sh -c` so an operator can
- * write the same string they would type in a shell (`node dist/main.js --flag`);
- * the default path execs the vendored Node directly, with no shell in between.
+ * 1. an explicit `startCommand`, run through `/bin/sh -c` so an operator can
+ *    write the same string they would type in a shell
+ *    (`node dist/main.js --flag`);
+ * 2. `startupFile`, run by the vendored Node;
+ * 3. the start the build detected and recorded with the release
+ *    (`nativeStart`: `server.js` for a Next standalone build, the package's
+ *    `start` script, `next start` bound to 127.0.0.1, or an entry file);
+ * 4. `node server.js`.
+ *
+ * Every case but the first execs the vendored Node directly: no shell in the
+ * `ExecStart` line and no Corepack at runtime (`node --run start` itself runs
+ * the script through `/bin/sh`, as npm would).
  */
 export function resolveExecStart(params: {
   nodeBinary: string;
   startCommand?: string;
   /** Replaces {@link DEFAULT_START_SCRIPT}; an explicit `startCommand` wins. */
   startupFile?: string;
+  /** What the build detected; used only when neither of the above is set. */
+  nativeStart?: NativeAppStart;
+  /** The app's loopback port, for a start that passes it on the command line. */
+  listenPort?: number;
 }): string {
   if (params.startCommand && params.startCommand.trim().length > 0) {
     const command = resolveNativeAppRuntimeStartCommand(
@@ -313,8 +329,16 @@ export function resolveExecStart(params: {
     );
     return `/bin/sh -c ${quoteSystemdArgument(command)}`;
   }
-  const script = params.startupFile?.trim() || DEFAULT_START_SCRIPT;
-  return `${params.nodeBinary} ${script}`;
+  const startupFile = params.startupFile?.trim();
+  if (startupFile) return `${params.nodeBinary} ${startupFile}`;
+  if (params.nativeStart && params.listenPort !== undefined) {
+    return nativeAppStartExec(
+      params.nativeStart,
+      params.nodeBinary,
+      params.listenPort,
+    );
+  }
+  return `${params.nodeBinary} ${DEFAULT_START_SCRIPT}`;
 }
 
 /** systemd's escape for a `'` embedded in a single-quoted argument. */
@@ -466,6 +490,7 @@ export const NATIVE_APP_PLATFORM_ENV_NAMES: ReadonlySet<string> = new Set([
   "NODE_ENV",
   "PORT",
   "HOST",
+  "HOSTNAME",
   "HOME",
   "TMPDIR",
   "XDG_CACHE_HOME",
@@ -483,6 +508,11 @@ export type NativeAppUnitOpts = {
   environmentId: string;
   /** Resolved from `sourceMaterial[].build.startCommand`, when the author set one. */
   startCommand?: string;
+  /**
+   * How this release starts when the author typed nothing, as its build
+   * decided ({@link resolveExecStart}). Absent means `node server.js`.
+   */
+  nativeStart?: NativeAppStart;
   /**
    * The app has variables, so the unit loads {@link nativeAppEnvPath}. Left
    * false, no `EnvironmentFile=` line is written and the unit text is
@@ -529,6 +559,10 @@ export function nativeAppUnitContent(opts: NativeAppUnitOpts): string {
       ? {}
       : { startCommand: opts.startCommand }),
     ...(app.startupFile === undefined ? {} : { startupFile: app.startupFile }),
+    ...(opts.nativeStart === undefined
+      ? {}
+      : { nativeStart: opts.nativeStart }),
+    listenPort: app.listenPort,
   });
 
   const labelsLine = serviceLabelsLine(app.serviceLabels);
@@ -560,7 +594,11 @@ export function nativeAppUnitContent(opts: NativeAppUnitOpts): string {
     `Environment=PATH=${nodeBinDir}:${NATIVE_RUNTIME_PATH_TAIL}`,
     `Environment=NODE_ENV=${app.appMode ?? "production"}`,
     `Environment=PORT=${app.listenPort}`,
-    `Environment=HOST=127.0.0.1`,
+    // Both spellings: Node frameworks disagree on the name. Next.js (its
+    // standalone server.js) reads HOSTNAME and would otherwise bind every
+    // interface, putting the app on the public address beside the proxy.
+    `Environment=HOST=${NATIVE_APP_BIND_ADDRESS}`,
+    `Environment=HOSTNAME=${NATIVE_APP_BIND_ADDRESS}`,
     // A Node app writes only its own site folder (`shared/`). Its `HOME` is
     // the owner's `home/`, read-only here, and its temp files go to the
     // unit's own `/tmp` (`PrivateTmp=yes`), not the owner's `tmp/`, which

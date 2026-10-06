@@ -8,7 +8,10 @@ import type {
 import type { DecryptSecretsFn } from "../materialize-tls.ts";
 import { resolveLayout } from "../../paths/layout.ts";
 import { createTempLayout } from "../../testing/temp-layout.ts";
-import { writeReleaseManifest } from "./deployment-json.ts";
+import {
+  readReleaseManifest,
+  writeReleaseManifest,
+} from "./deployment-json.ts";
 import {
   RELEASE_METADATA_DIRNAME,
   resolveDaemonReleasePaths,
@@ -503,6 +506,7 @@ test("applySourceReleases rolls back native releases without fetch or build", as
         promotedAt: "2025-12-01T00:00:00.000Z",
         standaloneOutput: false,
         staticExport: true,
+        nativeStart: { kind: "next-start" },
       });
 
       let checkoutCalled = false;
@@ -561,6 +565,8 @@ test("applySourceReleases rolls back native releases without fetch or build", as
       assertEquals(row.commitSha, "old-commit");
       assertEquals(row.staticExport, true);
       assertEquals(row.standaloneOutput, false);
+      // How the old release started comes back from its record, not a guess.
+      assertEquals(row.nativeStart, { kind: "next-start" });
       assertEquals(
         log.phases.includes(COMMAND_LOG_PHASES.FETCH),
         false,
@@ -872,6 +878,93 @@ test("applySourceReleases propagates staticExport from native app build shaping"
       } catch (err) {
         if (!(err instanceof Deno.errors.NotFound)) throw err;
       }
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+});
+
+test("a standalone build with a start command that needs package scripts warns, and records no detected start", async () => {
+  await createTempLayout().then(async (fixture) => {
+    try {
+      const layout = layoutFromFixture(fixture);
+      const serviceId = "svc-standalone";
+      const log = fakeLogSink();
+      let detectStart: boolean | undefined;
+      const applied = await applySourceReleases(
+        layout,
+        basePayload({
+          hostings: [{
+            hostingId: "host-standalone",
+            composeServiceName: "web",
+            serviceId,
+            hostnames: ["standalone.example.com"],
+          }],
+          sourceMaterial: [
+            baseSource({
+              releaseId: "rel-standalone",
+              principal: {
+                principalId: "pr-3",
+                username: "siteuser",
+                uid: 2100,
+                gid: 2101,
+              },
+              build: { kind: "native", startCommand: "pnpm start" },
+            }),
+          ],
+          nativeAppServices: [{
+            composeServiceName: "web",
+            serviceId,
+            listenPort: 3002,
+            framework: "next",
+          }],
+        }),
+        {
+          logSink: log.sink,
+          decryptSecrets: undefined,
+          ensureReleaseTreeFn: mkdirReleaseTree,
+          checkoutReleaseFn: async (params) => {
+            const workingDir = join(params.scratchDir, "source");
+            await Deno.mkdir(workingDir, { recursive: true });
+            return { workingDir, commitSha: "standalone-commit" };
+          },
+          runReleaseBuildFn: () => Promise.resolve(),
+          prepareNativeAppBuildOutputFn: (context) => {
+            detectStart = context.detectStart;
+            return Promise.resolve({
+              standaloneOutput: true,
+              staticExport: false,
+              outputDirectory: ".next/standalone",
+            });
+          },
+          promoteReleaseFn: async (params) => {
+            await swapCurrentSymlink(params.paths);
+            return params.paths.releaseDir;
+          },
+          pruneReleasesFn: () => Promise.resolve([]),
+        },
+      );
+      assertEquals(detectStart, false);
+      assertEquals(applied[0]?.nativeStart, undefined);
+      // The author's start command is recorded, so a rollback to this
+      // release would start it the same way.
+      const record = await readReleaseManifest(
+        resolveDaemonReleasePaths(layout, {
+          serviceId,
+          releaseId: "rel-standalone",
+        }).releaseDir,
+      );
+      assertEquals(record?.startCommand, "pnpm start");
+      assertEquals(record?.startupFile, undefined);
+      assertEquals(
+        log.lines.some(({ stream, message }) =>
+          stream === "stderr" &&
+          message.includes(
+            'start command "pnpm start" will likely fail. Remove the start command',
+          )
+        ),
+        true,
+      );
     } finally {
       await fixture.cleanup();
     }

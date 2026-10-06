@@ -40,6 +40,7 @@ import {
   type CommandOutputSink,
 } from "../../logs/contracts.ts";
 import type {
+  EnvironmentDeployNativeAppService,
   EnvironmentDeployPayload,
   EnvironmentDeploySource,
 } from "../../contracts/commands-contracts.ts";
@@ -87,6 +88,9 @@ import {
   releasePathExists,
 } from "./promote.ts";
 import { pruneReleases } from "./retention.ts";
+import { PENDING_RECORD_MARKER } from "./release-health.ts";
+import { isPackageManagerStart } from "../node-package-manager.ts";
+import type { NativeAppStart } from "../native/start-entry.ts";
 import { definedFields } from "../../util/optional-fields.ts";
 import { forEachSequential } from "../../util/sequential.ts";
 import {
@@ -156,6 +160,13 @@ export type AppliedRelease = {
    * server process to supervise, so no systemd unit is generated for it.
    */
   staticExport: boolean;
+  /**
+   * How the unit starts this release when its author typed no start command
+   * (detected at build time, or read back from the release record on a
+   * rollback). Absent when the author chose, or for a release recorded before
+   * this was kept — the unit then falls back to `node server.js`.
+   */
+  nativeStart?: NativeAppStart;
 };
 
 /**
@@ -377,6 +388,9 @@ async function rollbackOneRelease(
     // those releases already had.
     standaloneOutput: recordedManifest.standaloneOutput ?? false,
     staticExport: recordedManifest.staticExport ?? false,
+    ...(recordedManifest.nativeStart === undefined
+      ? {}
+      : { nativeStart: recordedManifest.nativeStart }),
   };
 }
 
@@ -576,9 +590,6 @@ async function resolveRollbackTarget(
     ? { paths: params.principalPaths, manifest }
     : null;
 }
-
-/** Present in a record dir from before the promote until it has finished. */
-const PENDING_RECORD_MARKER = ".pending";
 
 /**
  * The record at `recordDir`, unless it is still pending: a pending record was
@@ -841,6 +852,12 @@ async function buildNativeRelease(
       // without rebuilding — see `ReleaseManifestV1`.
       standaloneOutput: nativeOutput.standaloneOutput,
       staticExport: nativeOutput.staticExport,
+      nativeStart: nativeOutput.start,
+      // The author's own start settings, so a rollback to this release
+      // starts it the way it ran (see `ReleaseManifestV1.startCommand`).
+      startCommand: entry.build.startCommand?.trim() || undefined,
+      startupFile: nativeAppForService(payload, entry.composeServiceName)
+        ?.startupFile?.trim() || undefined,
     });
     await recordNativeRelease(layout, manifest, deps);
     let releaseDir: string;
@@ -894,6 +911,7 @@ async function buildNativeRelease(
       previousReleaseId,
       standaloneOutput: nativeOutput.standaloneOutput,
       staticExport: nativeOutput.staticExport,
+      nativeStart: nativeOutput.start,
     });
   } finally {
     if (work) await removeBuildWork(work, onOutput);
@@ -975,18 +993,54 @@ async function buildNativeTree(
     redactSummary: (text: string) => deps.logSink.redactSummary(text),
   }));
 
+  if (!nativeApp) return { standaloneOutput: false, staticExport: false };
   // An operator-declared `outputDirectory` always wins: they said where the
   // payload is, and second-guessing that would make the field a suggestion.
-  if (!nativeApp || entry.build.outputDirectory !== undefined) {
-    return { standaloneOutput: false, staticExport: false };
-  }
-  return await (deps.prepareNativeAppBuildOutputFn ??
+  // Only how it starts is still worked out, inside that directory.
+  const output = await (deps.prepareNativeAppBuildOutputFn ??
     prepareNativeAppBuildOutput)(definedFields({
       framework: nativeApp.framework,
       workingDir: buildWorkingDir,
       containmentRoot: work?.workDir,
+      outputDirectory: entry.build.outputDirectory,
+      detectStart: !authorChoseStart(entry, nativeApp),
       onOutput,
     }));
+  if (output.standaloneOutput) {
+    warnStandaloneStartCommand(entry.build.startCommand, onOutput);
+  }
+  return output;
+}
+
+/** The author said how the app starts: a start command or a startup file. */
+function authorChoseStart(
+  entry: EnvironmentDeploySource,
+  nativeApp: EnvironmentDeployNativeAppService,
+): boolean {
+  return Boolean(
+    entry.build.startCommand?.trim() || nativeApp.startupFile?.trim(),
+  );
+}
+
+/**
+ * A Next standalone release is `server.js` plus a pruned `node_modules`: it
+ * has no `node_modules/.bin/next` and no package scripts. A start command that
+ * needs either (`pnpm start`, `next start`) can only crash-loop, so say so
+ * while the build output is still on screen.
+ */
+function warnStandaloneStartCommand(
+  startCommand: string | undefined,
+  onOutput: ReleaseOutputHandler,
+): void {
+  const command = startCommand?.trim();
+  if (!command) return;
+  if (!isPackageManagerStart(command) && !/^(?:npx\s+)?next\s/.test(command)) {
+    return;
+  }
+  onOutput(
+    "stderr",
+    `warning: this is a Next.js standalone build, which has no node_modules/.bin/next and no package scripts, so the start command "${command}" will likely fail. Remove the start command and the app starts with node server.js.`,
+  );
 }
 
 async function applyOneRelease(
