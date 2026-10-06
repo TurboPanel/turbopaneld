@@ -205,6 +205,23 @@ async function markCleanShutdown(): Promise<void> {
   await markHostCleanShutdown(resolveLayout(Deno.env.toObject()));
 }
 
+/** Run `work`; a failure is only logged, never allowed to stop startup or exit. */
+async function bestEffort(
+  warn: typeof logWarn,
+  what: string,
+  work: () => Promise<void>,
+): Promise<void> {
+  try {
+    await work();
+  } catch (err) {
+    warn(
+      "managed",
+      `${what} failed:`,
+      err instanceof Error ? err.message : String(err),
+    );
+  }
+}
+
 /**
  * Long-running daemon loop. `main.ts` / `prod-main.ts` call this after CLI
  * verbs. Tests inject {@link DaemonRunIo} so startup branches stay isolated.
@@ -236,15 +253,11 @@ export async function runDaemon(io: DaemonRunIo = {}): Promise<void> {
   info("daemon", "starting up");
 
   // First, before anything slow: a stale primary must not keep serving.
-  try {
-    await (io.applyManagedBootHold ?? applyManagedBootHoldAtStart)();
-  } catch (err) {
-    (io.logWarn ?? logWarn)(
-      "managed",
-      "boot hold check failed:",
-      err instanceof Error ? err.message : String(err),
-    );
-  }
+  await bestEffort(
+    io.logWarn ?? logWarn,
+    "boot hold check",
+    io.applyManagedBootHold ?? applyManagedBootHoldAtStart,
+  );
 
   const orchestrationReady =
     await (io.initOrchestration ?? initOrchestration)();
@@ -343,15 +356,11 @@ export async function runDaemon(io: DaemonRunIo = {}): Promise<void> {
     abort.signal.addEventListener("abort", () => resolve());
   });
 
-  try {
-    await (io.markCleanShutdown ?? markCleanShutdown)();
-  } catch (err) {
-    (io.logWarn ?? logWarn)(
-      "managed",
-      "clean shutdown stamp failed:",
-      err instanceof Error ? err.message : String(err),
-    );
-  }
+  await bestEffort(
+    io.logWarn ?? logWarn,
+    "clean shutdown stamp",
+    io.markCleanShutdown ?? markCleanShutdown,
+  );
 
   info("daemon", "shut down");
   exitFn(0);

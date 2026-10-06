@@ -109,16 +109,23 @@ export async function recordHostBoot(
   const bootId = await (deps.readBootId ?? readProcBootId)();
   const previous = await readHostBootRecord(layout);
   const kind = classifyHostBoot(previous, bootId);
-  if (bootId === undefined) return kind;
-  // Same boot: keep the earlier stamp semantics simple and start a fresh
-  // record, so a daemon restart followed by a power cut reads as unclean.
-  const record: HostBootRecord = {
-    bootId,
-    startedAt: (deps.nowIso ?? (() => new Date().toISOString()))(),
-  };
+  if (bootId !== undefined) {
+    // Same boot or not, start a fresh record without the clean stamp, so a
+    // daemon restart followed by a power cut reads as unclean.
+    await writeBootRecord(layout, {
+      bootId,
+      startedAt: (deps.nowIso ?? (() => new Date().toISOString()))(),
+    });
+  }
+  return kind;
+}
+
+async function writeBootRecord(
+  layout: LayoutPaths,
+  record: HostBootRecord,
+): Promise<void> {
   await Deno.mkdir(join(layout.stateDir, RECORD_DIR), { recursive: true });
   await writeFileAtomic(hostBootPath(layout), `${JSON.stringify(record)}\n`);
-  return kind;
 }
 
 /** The daemon is stopping cleanly (SIGTERM / SIGINT): earn the stamp. */
