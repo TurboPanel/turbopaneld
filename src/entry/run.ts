@@ -15,7 +15,7 @@ import {
 import { reinstallFirewallForwardingIfEnabled } from "../firewall/apply.ts";
 import { recoverInterruptedRestores } from "../backups/copy-restore.ts";
 import { reconcileSitePhpRuntimesAtBoot } from "../deploy/site/php-runtime-apply.ts";
-import { logInfo, logWarn } from "../util/logger.ts";
+import { logInfo, logWarn, sanitizeForLog } from "../util/logger.ts";
 import { type LayoutPaths, resolveLayout } from "../paths/layout.ts";
 import { reportLiveReleaseLinks } from "../deploy/release/live-release-scan.ts";
 import { guardHostingCaddySites } from "../deploy/ingress.ts";
@@ -210,30 +210,61 @@ export type BootHoldStartDeps = {
   classify: (layout: LayoutPaths) => Promise<HostBootKind>;
   hold: (kind: HostBootKind, layout: LayoutPaths) => Promise<boolean>;
   persist: (layout: LayoutPaths) => Promise<void>;
-  newRetry: (layout: LayoutPaths) => { start(): void; stop(): void };
+  newRetry: (
+    layout: LayoutPaths,
+    reapply?: () => Promise<boolean>,
+  ) => { start(): void; stop(): void };
 };
 
 export async function applyManagedBootHoldAtStart(
   deps: Partial<BootHoldStartDeps> = {},
 ): Promise<void> {
   const layout = resolveLayout(Deno.env.toObject());
+  const hold = deps.hold ??
+    ((k, l) => applyBootHold(k, { layout: l, run: runDocker }));
+  const persist = deps.persist ?? recordHostBootPersist;
   // P1-1 fix: classify before holding, hold before persisting the record.
   // If the daemon crashes between hold and persist, the next start reads the
   // old record, sees a new boot id, and holds again.
-  const kind = await (deps.classify ?? classifyHostBootRecord)(layout);
-  const holdSucceeded = await (deps.hold ??
-    ((k, l) => applyBootHold(k, { layout: l, run: runDocker })))(kind, layout);
+  let kind: HostBootKind;
+  try {
+    kind = await (deps.classify ?? classifyHostBootRecord)(layout);
+  } catch (err) {
+    // Fail closed: an unreadable boot record is treated as an unclean boot.
+    logWarn("managed", "boot classify failed, holding:", sanitizeForLog(err));
+    kind = "unclean";
+  }
+  let holdSucceeded = false;
+  let listingFailed = false;
+  try {
+    holdSucceeded = await hold(kind, layout);
+  } catch (err) {
+    // The members could not be listed: no hold was taken. The retry below
+    // tries again every few seconds until the list works.
+    listingFailed = true;
+    logWarn("managed", "boot hold failed, retrying:", sanitizeForLog(err));
+  }
+  const reapply = listingFailed
+    ? async () => {
+      const done = await hold(kind, layout);
+      if (done) await persist(layout);
+      return done;
+    }
+    : undefined;
   // Always start the local retry (P1-2 fix): it keeps trying every stop that
-  // failed, even when a hold could not be fully written, and ends itself when
-  // nothing is left to retry. It does not depend on the control plane socket.
+  // failed, re-stops held engines for a minute (Docker's restart policy may
+  // start them after our stop), and does not depend on the control plane.
   const retry = (deps.newRetry ??
-    ((l) => new BootHoldLocalRetry(l, runDocker)))(layout);
+    ((l, r) => new BootHoldLocalRetry(l, runDocker, { reapply: r })))(
+      layout,
+      reapply,
+    );
   retry.start();
   // Stored globally for shutdown cleanup (below).
   bootHoldRetry = retry;
   // Only persist the record after every hold is applied.
   if (holdSucceeded) {
-    await (deps.persist ?? recordHostBootPersist)(layout);
+    await persist(layout);
   }
 }
 

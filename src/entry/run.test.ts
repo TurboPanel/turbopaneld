@@ -537,14 +537,16 @@ test("runDaemon feeds the sentinel's service run state to presence and clears it
   assertEquals(readServiceRunStates(), undefined);
 });
 
-function bootHoldStartStub(holdResult: boolean | Error) {
+function bootHoldStartStub(holdResult: boolean | Error, classifyFails = false) {
   const order: string[] = [];
   return {
     order,
     deps: {
       classify: () => {
         order.push("classify");
-        return Promise.resolve("unclean" as const);
+        return classifyFails
+          ? Promise.reject(new Error("unreadable"))
+          : Promise.resolve("unclean" as const);
       },
       hold: () => {
         order.push("hold");
@@ -556,7 +558,7 @@ function bootHoldStartStub(holdResult: boolean | Error) {
         order.push("persist");
         return Promise.resolve();
       },
-      newRetry: () => ({
+      newRetry: (_layout: unknown, reapply?: () => Promise<boolean>) => ({
         start: () => order.push("retry-start"),
         stop: () => order.push("retry-stop"),
       }),
@@ -574,4 +576,24 @@ test("a failed hold starts the local retry and does not persist the boot record"
   const failed = bootHoldStartStub(false);
   await applyManagedBootHoldAtStart(failed.deps);
   assertEquals(failed.order, ["classify", "hold", "retry-start"]);
+});
+
+test("an unreadable boot record still holds, as an unclean boot", async () => {
+  const stub = bootHoldStartStub(true, true);
+  await applyManagedBootHoldAtStart(stub.deps);
+  assertEquals(stub.order, ["classify", "hold", "retry-start", "persist"]);
+});
+
+test("a hold that throws still starts the retry with a reapply and skips persist", async () => {
+  const stub = bootHoldStartStub(new Error("cannot list"));
+  let reapply: (() => Promise<boolean>) | undefined;
+  await applyManagedBootHoldAtStart({
+    ...stub.deps,
+    newRetry: (_l, r) => {
+      reapply = r;
+      return { start: () => stub.order.push("retry-start"), stop: () => {} };
+    },
+  });
+  assertEquals(stub.order, ["classify", "hold", "retry-start"]);
+  assertEquals(typeof reapply, "function");
 });

@@ -62,6 +62,18 @@ export type BootHoldRecord = {
   engineStopped: boolean;
 };
 
+/**
+ * Clusters whose hold could not be completed in this process (a marker or
+ * file write threw, or `compose stop` failed). They have no usable hold file,
+ * so {@link listActiveBootHolds} cannot see them; the local retry keeps
+ * stopping them until a stop succeeds or a later command releases the marker.
+ */
+const unsettledHolds = new Set<string>();
+
+export function resetUnsettledBootHoldsForTests(): void {
+  unsettledHolds.clear();
+}
+
 export type DockerRunFn = (args: string[]) => Promise<DockerCliResult>;
 
 export type BootHoldDeps = {
@@ -162,8 +174,9 @@ async function stopEngine(
  * reboot could trigger promotion before this daemon starts, so the old primary
  * must be held until the control plane confirms it is still the primary).
  *
- * Any other boot kind does nothing. Never throws: a failure to hold one
- * cluster is logged and the rest are still held. Returns true only if all
+ * Any other boot kind does nothing. A failure to hold one cluster is logged
+ * and the rest are still held; a failure to list the members throws, so the
+ * caller can fail closed and try again. Returns true only if all
  * clusters' hold files and markers were written (the boot record persists
  * only on success).
  */
@@ -180,6 +193,7 @@ export async function applyBootHold(
       await holdOne(member, deps);
     } catch (err) {
       holdFailed = true;
+      unsettledHolds.add(member.managedId);
       logWarn(
         "managed",
         `boot hold failed managedId=${member.managedId}:`,
@@ -224,6 +238,8 @@ async function holdOne(
   const stopped = await stopEngine(deps.run, member.managedId).catch(() =>
     false
   );
+  if (stopped) unsettledHolds.delete(member.managedId);
+  else unsettledHolds.add(member.managedId);
   if (writeError !== undefined) throw writeError;
   const final = { ...record, engineStopped: record.engineStopped || stopped };
   if (final.engineStopped !== record.engineStopped) {
@@ -328,17 +344,38 @@ export async function releaseBootHoldLocally(
  * unreachable, so a stale primary does not keep serving the hold window.
  * The socket-based reporter would retry only when connected.
  */
+export type BootHoldRetryOptions = {
+  /** How long after start every active hold is re-stopped (Docker boot race). */
+  settleMs?: number;
+  now?: () => number;
+  /**
+   * Hold again until it succeeds, for a boot whose members could not be
+   * listed. Returns true once every hold is applied.
+   */
+  reapply?: () => Promise<boolean>;
+};
+
 export class BootHoldLocalRetry {
   #timer: ReturnType<typeof setInterval> | undefined;
   #ticking = false;
+  #settleUntil = 0;
+  #reapply: (() => Promise<boolean>) | undefined;
+  readonly #settleMs: number;
+  readonly #now: () => number;
 
   constructor(
     readonly layout: LayoutPaths,
     readonly run: DockerRunFn,
-  ) {}
+    options: BootHoldRetryOptions = {},
+  ) {
+    this.#settleMs = options.settleMs ?? 60_000;
+    this.#now = options.now ?? Date.now;
+    this.#reapply = options.reapply;
+  }
 
   start(): void {
     this.stop();
+    this.#settleUntil = this.#now() + this.#settleMs;
     this.#timer = setInterval(() => {
       void this.tick();
     }, 5_000); // 5s cadence
@@ -356,18 +393,48 @@ export class BootHoldLocalRetry {
     if (this.#ticking) return;
     this.#ticking = true;
     try {
-      const holds = await listActiveBootHolds(this.layout);
-      const unstopped = holds.filter((h) => !h.engineStopped);
-      if (unstopped.length === 0) {
-        // No more holds to retry; stop the timer.
-        this.stop();
-        return;
+      if (this.#reapply) {
+        try {
+          if (await this.#reapply()) this.#reapply = undefined;
+        } catch (err) {
+          logWarn("managed", `boot hold retry failed:`, sanitizeForLog(err));
+        }
       }
-      await forEachSequential(
-        unstopped,
-        (hold) =>
-          ensureHoldStopped(hold, { layout: this.layout, run: this.run }),
-      );
+      const deps = { layout: this.layout, run: this.run };
+      const holds = await listActiveBootHolds(this.layout);
+      const settling = this.#now() < this.#settleUntil;
+      const heldIds = new Set(holds.map((h) => h.managedId));
+      await forEachSequential(holds, async (hold) => {
+        if (!hold.engineStopped) {
+          await ensureHoldStopped(hold, deps);
+        } else if (settling) {
+          // Docker's restart policy may start the engine after our stop;
+          // only a hold still active (not released by a command) is re-stopped.
+          await stopEngine(this.run, hold.managedId);
+        }
+      });
+      await forEachSequential([...unsettledHolds], async (id) => {
+        if (heldIds.has(id)) {
+          // The file path owns it now; stop once more and drop the entry.
+          if (await stopEngine(this.run, id)) unsettledHolds.delete(id);
+          return;
+        }
+        const lookup = await lookupManagedIntent(this.layout.stateDir, id);
+        if (
+          lookup.status === "found" &&
+          !(isHeldIntent(lookup) && lookup.intent.kind === "stop")
+        ) {
+          unsettledHolds.delete(id); // released by a later command
+          return;
+        }
+        if (await stopEngine(this.run, id)) unsettledHolds.delete(id);
+      });
+      const unstopped = holds.some((h) => !h.engineStopped);
+      if (
+        !this.#reapply && !unstopped && unsettledHolds.size === 0 && !settling
+      ) {
+        this.stop();
+      }
     } catch (err) {
       logWarn(
         "managed",

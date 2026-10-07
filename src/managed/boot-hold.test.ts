@@ -10,6 +10,7 @@ import {
   isHoldablePrimary,
   listActiveBootHolds,
   releaseBootHoldLocally,
+  resetUnsettledBootHoldsForTests,
 } from "./boot-hold.ts";
 import {
   beginManagedIntent,
@@ -75,6 +76,7 @@ test("only a primary with a peer is holdable", () => {
 test("an unclean boot stops every primary that has a peer and writes a held marker first", async () => {
   await withTempLayout(async ({ env }) => {
     resetManagedIntentsForTests();
+    resetUnsettledBootHoldsForTests();
     const layout = resolveLayout(env);
     const fake = docker();
     assertEquals(
@@ -109,6 +111,7 @@ test("an unclean boot stops every primary that has a peer and writes a held mark
 test("a daemon restart and a first boot hold nothing", async () => {
   await withTempLayout(async ({ env }) => {
     resetManagedIntentsForTests();
+    resetUnsettledBootHoldsForTests();
     const layout = resolveLayout(env);
     const fake = docker();
     for (const kind of ["first", "same-boot"] as const) {
@@ -129,6 +132,7 @@ test("a daemon restart and a first boot hold nothing", async () => {
 test("a failed stop keeps the hold and the marker, and the retry finishes it", async () => {
   await withTempLayout(async ({ env }) => {
     resetManagedIntentsForTests();
+    resetUnsettledBootHoldsForTests();
     const layout = resolveLayout(env);
     const fake = docker([false, true]);
     await applyBootHold("unclean", {
@@ -151,6 +155,7 @@ test("a failed stop keeps the hold and the marker, and the retry finishes it", a
 test("a hold is kept across a second unclean boot, not reset", async () => {
   await withTempLayout(async ({ env }) => {
     resetManagedIntentsForTests();
+    resetUnsettledBootHoldsForTests();
     const layout = resolveLayout(env);
     const fake = docker();
     const deps = {
@@ -175,6 +180,7 @@ test("a hold is kept across a second unclean boot, not reset", async () => {
 test("a successful start releases the hold; a failed start does not", async () => {
   await withTempLayout(async ({ env }) => {
     resetManagedIntentsForTests();
+    resetUnsettledBootHoldsForTests();
     const layout = resolveLayout(env);
     await applyBootHold("unclean", {
       layout,
@@ -210,6 +216,7 @@ async function assertRejectsMissing(path: string): Promise<void> {
 test("releasing locally clears the marker, removes the file and starts the engine", async () => {
   await withTempLayout(async ({ env }) => {
     resetManagedIntentsForTests();
+    resetUnsettledBootHoldsForTests();
     const layout = resolveLayout(env);
     const fake = docker();
     await applyBootHold("unclean", {
@@ -231,6 +238,7 @@ test("releasing locally clears the marker, removes the file and starts the engin
 test("a planned reboot (clean stamp) holds the primary until the control plane answers", async () => {
   await withTempLayout(async ({ env }) => {
     resetManagedIntentsForTests();
+    resetUnsettledBootHoldsForTests();
     const layout = resolveLayout(env);
     const fake = docker();
     assertEquals(
@@ -249,6 +257,7 @@ test("a planned reboot (clean stamp) holds the primary until the control plane a
 test("a hold marker write that throws still stops the engine and reports failure", async () => {
   await withTempLayout(async ({ env }) => {
     resetManagedIntentsForTests();
+    resetUnsettledBootHoldsForTests();
     const layout = resolveLayout(env);
     const fake = docker();
     // A file where the managed state directory should be makes every hold
@@ -270,6 +279,7 @@ test("a hold marker write that throws still stops the engine and reports failure
 test("BootHoldLocalRetry retries a failed stop and ends itself once every hold is stopped", async () => {
   await withTempLayout(async ({ env }) => {
     resetManagedIntentsForTests();
+    resetUnsettledBootHoldsForTests();
     const layout = resolveLayout(env);
     const fake = docker([false, false, true]);
     await applyBootHold("unclean", {
@@ -285,5 +295,110 @@ test("BootHoldLocalRetry retries a failed stop and ends itself once every hold i
     const callsBefore = fake.calls.length;
     await retry.tick();
     assertEquals(fake.calls.length, callsBefore);
+  });
+});
+
+test("a failed write and a failed stop keep the retry going until the engine stops", async () => {
+  await withTempLayout(async ({ env }) => {
+    resetManagedIntentsForTests();
+    resetUnsettledBootHoldsForTests();
+    const layout = resolveLayout(env);
+    await Deno.mkdir(layout.stateDir, { recursive: true });
+    await Deno.writeTextFile(`${layout.stateDir}/managed`, "not a directory");
+    const fake = docker([false, false, true]);
+    assertEquals(
+      await applyBootHold("unclean", {
+        layout,
+        run: fake.run,
+        listMembers: () => Promise.resolve([record()]),
+      }),
+      false,
+    );
+    assertEquals(await listActiveBootHolds(layout), []);
+    let clock = 0;
+    const retry = new BootHoldLocalRetry(layout, fake.run, {
+      settleMs: 0,
+      now: () => clock,
+    });
+    await retry.tick(); // stop fails again
+    assertEquals(fake.calls.length, 2);
+    await retry.tick(); // stop succeeds, entry dropped
+    assertEquals(fake.calls.length, 3);
+    clock += 1;
+    await retry.tick(); // nothing left
+    assertEquals(fake.calls.length, 3);
+  });
+});
+
+test("a held engine is re-stopped during the settle window only, and never after release", async () => {
+  await withTempLayout(async ({ env }) => {
+    resetManagedIntentsForTests();
+    resetUnsettledBootHoldsForTests();
+    const layout = resolveLayout(env);
+    const fake = docker();
+    await applyBootHold("unclean", {
+      layout,
+      run: fake.run,
+      listMembers: () => Promise.resolve([record()]),
+    });
+    assertEquals(fake.calls.length, 1);
+    let clock = 1_000;
+    const retry = new BootHoldLocalRetry(layout, fake.run, {
+      settleMs: 60_000,
+      now: () => clock,
+    });
+    retry.start(); // arms the window and fires the first tick
+    retry.stop();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert(fake.calls.length >= 2);
+    const inWindow = fake.calls.length;
+    clock += 61_000;
+    await retry.tick();
+    assertEquals(fake.calls.length, inWindow);
+  });
+});
+
+test("a hold released by a command is not re-stopped in the settle window", async () => {
+  await withTempLayout(async ({ env }) => {
+    resetManagedIntentsForTests();
+    resetUnsettledBootHoldsForTests();
+    const layout = resolveLayout(env);
+    const fake = docker();
+    await applyBootHold("unclean", {
+      layout,
+      run: fake.run,
+      listMembers: () => Promise.resolve([record()]),
+    });
+    const token = await beginManagedIntent(
+      layout.stateDir,
+      PRIMARY_ID,
+      "start",
+    );
+    await endManagedIntent(layout.stateDir, token, true);
+    const before = fake.calls.length;
+    const retry = new BootHoldLocalRetry(layout, fake.run, {
+      settleMs: 60_000,
+    });
+    retry.start();
+    retry.stop();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assertEquals(fake.calls.length, before);
+  });
+});
+
+test("a member listing that throws propagates so the caller can retry", async () => {
+  await withTempLayout(async ({ env }) => {
+    const layout = resolveLayout(env);
+    let rejected = false;
+    try {
+      await applyBootHold("unclean", {
+        layout,
+        run: docker().run,
+        listMembers: () => Promise.reject(new Error("unreadable")),
+      });
+    } catch {
+      rejected = true;
+    }
+    assert(rejected);
   });
 });
