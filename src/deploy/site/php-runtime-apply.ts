@@ -581,14 +581,14 @@ async function listVhostDir(
 }
 
 /**
- * Adds every runtime id the vhosts in `dir` name. An entry `cat` cannot read
- * is entered as a directory while `depth` allows (OpenLiteSpeed's per-site
- * directories); `false` when anything could not be read.
+ * Hands the text of every config file in `dir` to `visit`. An entry `cat`
+ * cannot read is entered as a directory while `depth` allows (OpenLiteSpeed's
+ * per-site directories); `false` when anything could not be read.
  */
-async function referencesIn(
+async function visitVhostTexts(
   io: SitePhpRuntimeIo,
   dir: string,
-  into: Set<string>,
+  visit: (text: string) => void,
   depth = 1,
 ): Promise<boolean> {
   const names = await listVhostDir(io, dir, depth === 1);
@@ -599,15 +599,51 @@ async function referencesIn(
   await forEachSequential(names, async (name) => {
     const cat = await sudo(io, ["cat", "--", join(dir, name)]);
     if (cat.success) {
-      for (const id of sitePhpRuntimeIdsIn(cat.stdout)) into.add(id);
+      visit(cat.stdout);
       return;
     }
-    if (depth > 0 && await referencesIn(io, join(dir, name), into, depth - 1)) {
+    if (
+      depth > 0 && await visitVhostTexts(io, join(dir, name), visit, depth - 1)
+    ) {
       return;
     }
     readAll = false;
   });
   return readAll;
+}
+
+/** Adds every runtime id the vhosts in `dir` name; `false` if any was unreadable. */
+function referencesIn(
+  io: SitePhpRuntimeIo,
+  dir: string,
+  into: Set<string>,
+): Promise<boolean> {
+  return visitVhostTexts(io, dir, (text) => {
+    for (const id of sitePhpRuntimeIdsIn(text)) into.add(id);
+  });
+}
+
+/**
+ * The text of every vhost, pool-socket and OpenLiteSpeed config on this host,
+ * or `null` when any could not be read: the caller then decides nothing on the
+ * strength of a reference it could not see.
+ */
+export async function readSiteConfigTexts(
+  io: SitePhpRuntimeIo,
+  configDir: string,
+): Promise<string[] | null> {
+  const texts: string[] = [];
+  let readAll = true;
+  const dirs = [
+    ...sitePhpVhostDirs(configDir),
+    join(configDir, "openlitespeed", "sites"),
+  ];
+  await forEachSequential(dirs, async (dir) => {
+    if (!await visitVhostTexts(io, dir, (text) => texts.push(text))) {
+      readAll = false;
+    }
+  });
+  return readAll ? texts : null;
 }
 
 /**

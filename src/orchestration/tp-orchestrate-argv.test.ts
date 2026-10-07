@@ -281,6 +281,14 @@ test("tp-orchestrate refuses keys and values that would steer root Ansible", asy
       '{"php_fpm_extensions":{"latest":["intl"]}}',
       '{"php_fpm_extensions":["intl"]}',
       '{"php_fpm_extensions":{"8.4":"intl"}}',
+      // The series root purges: a series, never an apt option or a second package.
+      '{"php_series_prune":["8.1 ; id"]}',
+      '{"php_series_prune":["8.1","--allow-remove-essential"]}',
+      '{"php_series_prune":["8.1-fpm"]}',
+      '{"php_series_prune":["*"]}',
+      '{"php_series_prune":["8"]}',
+      '{"php_series_prune":"8.1"}',
+      '{"php_series_prune":[8.1]}',
       // Runtime series reach a group name and an ACL entity: digits only.
       '{"deno_app_versions":["x:rwx,u:tp:rwx"]}',
       '{"deno_app_versions":["2.9"]}',
@@ -316,6 +324,19 @@ test("tp-orchestrate accepts PHP series and extension names that are apt package
       { vendorDir },
     );
     assertEquals(verdicts.map((v) => v.accepted), [true]);
+  } finally {
+    await Deno.remove(vendorDir, { recursive: true });
+  }
+});
+
+test("tp-orchestrate accepts the PHP series to remove as plain major.minor strings", async () => {
+  const vendorDir = await makeFakeVendorDir();
+  try {
+    const verdicts = await checkExtraVars(
+      ['{"php_series_prune":["8.1"]}', '{"php_series_prune":["8.1","8.5"]}'],
+      { vendorDir },
+    );
+    assertEquals(verdicts.map((v) => v.accepted), [true, true]);
   } finally {
     await Deno.remove(vendorDir, { recursive: true });
   }
