@@ -274,6 +274,28 @@ test("destroy is held from the start, so a failed destroy never re-arms the prob
   });
 });
 
+test("a destroy that succeeded leaves no marker behind", async () => {
+  await withTempLayout(async ({ dirs }) => {
+    resetManagedIntentsForTests();
+    const destroy = await beginManagedIntent(
+      dirs.stateDir,
+      MANAGED_ID,
+      "destroy",
+    );
+    assertEquals(
+      (await lookupManagedIntent(dirs.stateDir, MANAGED_ID)).status,
+      "found",
+    );
+    await endManagedIntent(dirs.stateDir, destroy, true);
+    assertEquals(
+      (await lookupManagedIntent(dirs.stateDir, MANAGED_ID)).status,
+      "none",
+    );
+    resetManagedIntentsForTests();
+    assertEquals(await readManagedIntent(dirs.stateDir, MANAGED_ID), null);
+  });
+});
+
 test("clearManagedIntent removes memory and disk copies", async () => {
   await withTempLayout(async ({ dirs }) => {
     resetManagedIntentsForTests();

@@ -372,13 +372,24 @@ export async function beginManagedIntent(
  * After a command ran. Only the command that owns the current marker
  * refreshes it (concurrent commands: the last to finish must not overwrite a
  * newer marker); a successful stop becomes held; a successful start /
- * restart / apply / promote / failover releases a held marker.
+ * restart / apply / promote / failover releases a held marker; a successful
+ * destroy removes the marker (a failed one stays held).
  */
 export async function endManagedIntent(
   stateDir: string,
   token: ManagedIntentToken,
   succeeded: boolean,
 ): Promise<void> {
+  if (succeeded && token.kind === "destroy") {
+    // The cluster is gone: nothing is left to guard, and the held marker
+    // would otherwise stay in the state directory for good.
+    await clearManagedIntent(
+      stateDir,
+      token.managedId,
+      "destroy succeeded",
+    );
+    return;
+  }
   const current = await lookupManagedIntent(stateDir, token.managedId);
   if (succeeded && token.kind === "stop") {
     await recordManagedIntent(stateDir, token.managedId, "stop", {
