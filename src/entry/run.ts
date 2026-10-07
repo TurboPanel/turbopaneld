@@ -19,6 +19,7 @@ import { logInfo, logWarn } from "../util/logger.ts";
 import { resolveLayout } from "../paths/layout.ts";
 import { reportLiveReleaseLinks } from "../deploy/release/live-release-scan.ts";
 import { guardHostingCaddySites } from "../deploy/ingress.ts";
+import { repairProxySqlFrontendAtBoot } from "../managed/proxysql-boot-repair.ts";
 import { createSentinel, type SentinelOptions } from "../monitor/index.ts";
 import type { ServiceRunState } from "../contracts/service-run-state.ts";
 import { setServiceRunStateSource } from "../host/service-run-state.ts";
@@ -62,6 +63,8 @@ export type DaemonRunIo = {
   scanLiveReleases?: () => Promise<void>;
   /** Set aside hosting Caddy snippets it cannot load; defaults to {@link guardHostingSites}. */
   guardHostingCaddySites?: () => Promise<void>;
+  /** Boot-time ProxySQL frontend repair; defaults to {@link repairProxySqlFrontendAtBoot}. */
+  repairProxySqlFrontend?: () => Promise<unknown>;
   reinstallFabricForwardingIfEnabled?: () => Promise<void>;
   reinstallFirewallForwardingIfEnabled?: () => Promise<void>;
   /** Start any per-site PHP runtime that is installed but not running. */
@@ -253,6 +256,21 @@ export async function runDaemon(io: DaemonRunIo = {}): Promise<void> {
         err instanceof Error ? err.message : String(err),
       );
     });
+  }
+
+  // In the background: it may wait minutes for the datacenter address, and a
+  // failure is only ever reported.
+  if (orchestrationReady) {
+    (io.repairProxySqlFrontend ??
+      (() =>
+        repairProxySqlFrontendAtBoot(resolveLayout(Deno.env.toObject()))))()
+      .catch((err) => {
+        (io.logWarn ?? logWarn)(
+          "managed",
+          "ProxySQL frontend boot repair failed:",
+          err instanceof Error ? err.message : String(err),
+        );
+      });
   }
 
   const abort = new AbortController();
