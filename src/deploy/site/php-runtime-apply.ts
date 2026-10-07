@@ -128,9 +128,19 @@ async function writeTemp(contents: string): Promise<string> {
 export async function listSitePhpUnits(
   io: SitePhpRuntimeIo,
 ): Promise<SitePhpUnitListing> {
+  return await readSitePhpUnits(io) ?? new Map();
+}
+
+/**
+ * {@link listSitePhpUnits}, but `null` when the unit directory could not be
+ * listed, for callers that must not read "could not look" as "none there".
+ */
+export async function readSitePhpUnits(
+  io: SitePhpRuntimeIo,
+): Promise<SitePhpUnitListing | null> {
   const listing = new Map<string, { service: boolean; socket: boolean }>();
   const ls = await sudo(io, ["ls", "-1", "--", io.unitDir]);
-  if (!ls.success) return listing;
+  if (!ls.success) return null;
   for (const name of ls.stdout.split("\n")) {
     const match = /^turbopanel-php-([a-z0-9][a-z0-9-]*)\.(service|socket)$/
       .exec(name.trim());
@@ -624,9 +634,10 @@ function referencesIn(
 }
 
 /**
- * The text of every vhost, pool-socket and OpenLiteSpeed config on this host,
- * or `null` when any could not be read: the caller then decides nothing on the
- * strength of a reference it could not see.
+ * The text of every nginx, Apache and OpenLiteSpeed vhost on this host, or
+ * `null` when any could not be read: the caller then decides nothing on the
+ * strength of a reference it could not see. Caddy's site files are not read:
+ * a Caddy site always runs PHP in a shared pool, which the pool check covers.
  */
 export async function readSiteConfigTexts(
   io: SitePhpRuntimeIo,

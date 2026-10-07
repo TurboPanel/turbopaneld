@@ -154,6 +154,7 @@ import {
   orphanSitePhpRuntimes,
   type PreparedSitePhpRuntime,
   readSiteConfigTexts,
+  readSitePhpUnits,
   removeSitePhpRuntimes,
   rollbackSitePhpRuntime,
   settleSitePhpRuntimes,
@@ -4171,7 +4172,8 @@ async function installedPhpSeries(layout: LayoutPaths): Promise<string[]> {
  *
  * Retiring a series is a **removal-path** decision, never a side effect of an
  * install: the deploy payload describes one environment, but the host serves
- * many. Packages stay installed — uninstalling is a fleet decision.
+ * many. Removing the packages is a separate step, {@link prunePhpSeries},
+ * once no site uses the series.
  */
 async function disableIdlePhpSeries(
   layout: LayoutPaths,
@@ -4230,8 +4232,10 @@ async function gatherPhpSeriesUsage(
   } catch {
     return null;
   }
-  const runtimeIds = [...(await listSitePhpUnits(sitePhpIo())).keys()]
-    .filter(isSitePhpRuntimeId);
+  // A unit listing that failed is doubt, not "no per-site runtimes".
+  const units = await readSitePhpUnits(sitePhpIo());
+  if (units === null) return null;
+  const runtimeIds = [...units.keys()].filter(isSitePhpRuntimeId);
   const cheap: PhpSeriesUsageInput = {
     installed,
     pools,
