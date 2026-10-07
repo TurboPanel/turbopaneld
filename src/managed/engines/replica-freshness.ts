@@ -53,6 +53,40 @@ function normalizeGtidList(text: string): string {
 }
 
 /**
+ * The GTID fields for a received/executed pair. Empty sets are left out
+ * (unknown, never `""`); `fullyApplied` needs both sets, and `applied` says
+ * whether the engine proved it (undefined: cannot tell).
+ */
+function gtidFields(
+  received: string,
+  executed: string,
+  applied: boolean | undefined,
+): ReplicaFreshness {
+  const out: ReplicaFreshness = {};
+  if (received !== "") out.receivedGtid = received;
+  if (executed !== "") out.executedGtid = executed;
+  if (received !== "" && executed !== "" && applied !== undefined) {
+    out.fullyApplied = applied;
+  }
+  return out;
+}
+
+function mysqlReceipt(cols: string[]): ReplicaFreshness {
+  if (cols[0].trim().toUpperCase() !== "ON") return {};
+  const ages = [cols[4], cols[5]].map(nonNegativeSeconds).filter((age) =>
+    age !== undefined
+  );
+  if (ages.length === 0) return {};
+  const interval = nonNegativeSeconds(cols[6]);
+  return {
+    receiptAgeSeconds: Math.min(...ages),
+    receiptAgeLimitSeconds: interval === undefined
+      ? DEFAULT_RECEIPT_LIMIT_SECONDS
+      : Math.max(DEFAULT_RECEIPT_LIMIT_SECONDS, Math.ceil(interval * 2) + 1),
+  };
+}
+
+/**
  * MySQL: one tab-separated row (`mysql -N -B`) of `io_state`, received set,
  * executed set, `GTID_SUBSET(received, executed)`, seconds since the last
  * heartbeat, seconds since the last queued transaction, heartbeat interval
@@ -66,29 +100,10 @@ export function parseMysqlFreshness(stdout: string): ReplicaFreshness {
   const received = boundedGtid(cols[1]);
   const executed = boundedGtid(cols[2]);
   if (received === undefined || executed === undefined) return {};
-  // An empty set is unknown: the field is left out, never sent as "".
-  const out: ReplicaFreshness = {};
-  if (received !== "") out.receivedGtid = received;
-  if (executed !== "") out.executedGtid = executed;
   // Nothing received since this server started (the set resets on restart)
   // proves nothing about the source: unknown, not "applied".
-  if (received !== "" && executed !== "") {
-    if (cols[3] === "1") out.fullyApplied = true;
-    else if (cols[3] === "0") out.fullyApplied = false;
-  }
-  if (cols[0].trim().toUpperCase() === "ON") {
-    const ages = [cols[4], cols[5]].map(nonNegativeSeconds).filter((age) =>
-      age !== undefined
-    );
-    if (ages.length > 0) {
-      out.receiptAgeSeconds = Math.min(...ages);
-      const interval = nonNegativeSeconds(cols[6]);
-      out.receiptAgeLimitSeconds = interval === undefined
-        ? DEFAULT_RECEIPT_LIMIT_SECONDS
-        : Math.max(DEFAULT_RECEIPT_LIMIT_SECONDS, Math.ceil(interval * 2) + 1);
-    }
-  }
-  return out;
+  const applied = { "1": true, "0": false }[cols[3]];
+  return { ...gtidFields(received, executed, applied), ...mysqlReceipt(cols) };
 }
 
 /**
@@ -114,19 +129,16 @@ export function parseMariadbFreshness(verbose: string): ReplicaFreshness {
   const received = boundedGtid(fields.get("Gtid_IO_Pos"));
   const executed = boundedGtid(fields.get("gtid_slave_pos"));
   if (received === undefined || executed === undefined) return {};
-  const out: ReplicaFreshness = {};
   // With binlog-position replication both positions can be stale yet equal:
   // only GTID replication makes them a proof.
   const usingGtid = (fields.get("Using_Gtid") ?? "").toLowerCase();
-  if (usingGtid === "slave_pos" || usingGtid === "current_pos") {
-    if (received !== "") out.receivedGtid = received;
-    if (executed !== "") out.executedGtid = executed;
-    if (received !== "" && executed !== "") {
-      out.fullyApplied = normalizeGtidList(received) ===
-        normalizeGtidList(executed);
-    }
-  }
+  const gtid = usingGtid === "slave_pos" || usingGtid === "current_pos"
+    ? gtidFields(
+      received,
+      executed,
+      normalizeGtidList(received) === normalizeGtidList(executed),
+    )
+    : {};
   const io = (fields.get("Slave_IO_Running") ?? "").toLowerCase();
-  if (io === "yes") out.receiptAgeSeconds = 0;
-  return out;
+  return io === "yes" ? { ...gtid, receiptAgeSeconds: 0 } : gtid;
 }
