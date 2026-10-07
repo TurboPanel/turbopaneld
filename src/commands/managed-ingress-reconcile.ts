@@ -553,11 +553,17 @@ export function handleManagedIngressReconcile(
   daemonReceivedAt: string,
   deps?: ManagedIngressReconcileHandlerDeps,
 ): Promise<ManagedIngressReconcileResult> {
-  // Marked before queueing so a waiting boot repair stands down at once.
-  markProxySqlReconciled();
-  return withProxySqlLock(() =>
-    reconcileManagedIngress(payload, daemonReceivedAt, deps)
-  );
+  return withProxySqlLock(async () => {
+    const result = await reconcileManagedIngress(
+      payload,
+      daemonReceivedAt,
+      deps,
+    );
+    // Only a reconcile that settled the stack (up or deliberate down) makes
+    // the boot repair stand down; a thrown one leaves it free to run.
+    markProxySqlReconciled();
+    return result;
+  });
 }
 
 async function reconcileManagedIngress(
