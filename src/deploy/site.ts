@@ -573,6 +573,106 @@ function isSafeCaddyEnvValue(value: string): boolean {
   return !/[{}"\\]/.test(value) && !hasLineBreakOrControl(value);
 }
 
+/** Why the site Caddy cannot carry a variable value, or `null` when it can. */
+function caddyEnvRefusal(value: string): string | null {
+  if (hasLineBreakOrControl(value)) {
+    return "holds a line break or control character";
+  }
+  return isSafeCaddyEnvValue(value)
+    ? null
+    : "holds a brace, quote or backslash, which Caddy reads as syntax";
+}
+
+/**
+ * Why Apache cannot carry a variable value, or `null` when it can. `SetEnv`
+ * stays on one line, and Apache expands `${NAME}` on every config line with no
+ * escape.
+ */
+function apacheEnvRefusal(field: string, raw: string): string | null {
+  try {
+    safeEnvValue(field, raw);
+  } catch (error) {
+    if (error instanceof ConfigValueError) return error.message;
+    throw error;
+  }
+  return raw.includes("${") ? "holds ${, which Apache expands" : null;
+}
+
+const ENGINE_ENV_LABELS: Readonly<Record<SiteApplySpec["engine"], string>> = {
+  caddy: "Caddy",
+  apache: "Apache",
+  nginx: "nginx",
+  openlitespeed: "OpenLiteSpeed",
+  "nginx+apache": "Apache behind nginx",
+};
+
+/** Why this site's web server cannot carry the variable, or `null`. */
+function webEnvRefusal(
+  site: SiteApplySpec,
+  name: string,
+  raw: string,
+): string | null {
+  const field = `sites.${site.composeServiceName}.webEnv.${name}`;
+  switch (site.engine) {
+    case "nginx":
+      return nginxEnvRefusal(field, name, raw);
+    case "apache":
+    case "nginx+apache":
+      return apacheEnvRefusal(field, raw);
+    case "caddy":
+      return caddyEnvRefusal(raw);
+    default:
+      // OpenLiteSpeed receives no variables at all (handled by the caller).
+      return null;
+  }
+}
+
+/**
+ * Check a site's variables against its web server before anything is written.
+ *
+ * A value the engine cannot carry is **left out and named** (never its value:
+ * it may be a decrypted secret), the same way nginx always has, so one
+ * variable that suits another engine does not stop an unrelated site. The
+ * exception is a name in `requiredEnv` (a database binding's connection
+ * settings): starting the site without them would look like it worked, so the
+ * deploy stops with an error naming the variable. Returns the warnings, in
+ * name order. A name that is not an environment variable name still throws
+ * where the engine writes it.
+ */
+export function planSiteWebEnv(site: SiteApplySpec): string[] {
+  const env = site.webEnv ?? {};
+  const required = site.requiredEnv ?? [];
+  const label = ENGINE_ENV_LABELS[site.engine];
+  const name = site.composeServiceName;
+  if (site.engine === "openlitespeed" && required.length > 0) {
+    throw new Error(
+      `Site ${name} needs its database settings as variables, and OpenLiteSpeed does not pass variables to PHP yet. Move the site to Apache, nginx or Caddy, then deploy again.`,
+    );
+  }
+  const warnings: string[] = [];
+  for (const key of Object.keys(env).sort((a, b) => a.localeCompare(b))) {
+    const refusal = webEnvRefusal(site, key, env[key] ?? "");
+    if (refusal === null) continue;
+    if (required.includes(key)) {
+      throw new Error(
+        `Site ${name} cannot start: its database setting ${key} cannot be passed to ${label} (${refusal}). The deploy was stopped instead of starting the site without it.`,
+      );
+    }
+    warnings.push(
+      `Site ${name}: variable ${key} was left out because ${label} cannot carry it (${refusal}).`,
+    );
+  }
+  const missing = required.filter((key) => env[key] === undefined);
+  if (missing.length > 0) {
+    throw new Error(
+      `Site ${name} cannot start: its database settings are incomplete (missing ${
+        missing.join(", ")
+      }). The deploy was stopped instead of starting the site without them.`,
+    );
+  }
+  return warnings;
+}
+
 /**
  * A site block for the **site** Caddy (loopback high port), not the edge one.
  *
@@ -1167,7 +1267,7 @@ export type ApacheSiteConfigOpts = Readonly<{
  * `${`: Apache expands `${NAME}` from its own environment on every config
  * line, quoted or not, and has no escape for it.
  */
-function apacheSetEnvLine(
+export function apacheSetEnvLine(
   service: string,
   key: string,
   raw: string,
@@ -1231,9 +1331,14 @@ export function apacheSiteConfig(
   if (site.webEnv) {
     const keys = Object.keys(site.webEnv).sort((a, b) => a.localeCompare(b));
     for (const key of keys) {
-      envLines.push(
-        apacheSetEnvLine(site.composeServiceName, key, site.webEnv[key] ?? ""),
-      );
+      const raw = site.webEnv[key] ?? "";
+      // Left out here, named by `planSiteWebEnv` (the deploy's warnings); the
+      // strict `apacheSetEnvLine` below stays the last line of defence.
+      if (apacheEnvRefusal(`sites.${site.composeServiceName}.webEnv`, raw)) {
+        safeEnvName(`sites.${site.composeServiceName}.webEnv`, key);
+        continue;
+      }
+      envLines.push(apacheSetEnvLine(site.composeServiceName, key, raw));
     }
   }
   const phpBlock = buildApachePhpBlock(
@@ -1563,11 +1668,48 @@ export function formatHostingEnvFile(env: Record<string, string>): string {
   return `${lines.join("\n")}\n`;
 }
 
+/** The managed database's CA bundle, in the site's hosting folder. */
+export const SITE_DB_CA_FILE_NAME = "managed-ca.pem";
+
+/**
+ * Point every `dbCa.variables` name at the CA file the owner's folder will
+ * hold, so the site's engine renders a path instead of a multi-line value. The
+ * file lives with the other hosting files and is written by the same call, so
+ * only a site with a Linux user owning its tree can take one.
+ */
+export function withDbCaVariables(
+  layout: LayoutPaths,
+  site: SiteApplySpec,
+  owner: { username: string; serviceId: string } | undefined,
+): SiteApplySpec {
+  if (!site.dbCa) return site;
+  if (!owner) {
+    throw new Error(
+      `Site ${site.composeServiceName} has a database certificate to deliver but no site owner's Linux user to keep it for. Give the site an owner, then deploy again.`,
+    );
+  }
+  const path = join(
+    siteMetadataDir(principalHomePath(layout, owner.username), owner.serviceId),
+    SITE_DB_CA_FILE_NAME,
+  );
+  const webEnv = { ...site.webEnv };
+  for (const variable of site.dbCa.variables) webEnv[variable] = path;
+  return { ...site, webEnv };
+}
+
 /** `hosting.env` / `php.json` contents, or `null` when the site declares neither. */
-function hostingWebMetadataFiles(
+export function hostingWebMetadataFiles(
   site: SiteApplySpec,
 ): Array<{ name: string; contents: string }> {
   const files: Array<{ name: string; contents: string }> = [];
+  if (site.dbCa !== undefined) {
+    files.push({
+      name: SITE_DB_CA_FILE_NAME,
+      contents: site.dbCa.pem.endsWith("\n")
+        ? site.dbCa.pem
+        : `${site.dbCa.pem}\n`,
+    });
+  }
   if (site.webEnv !== undefined && Object.keys(site.webEnv).length > 0) {
     files.push({
       name: "hosting.env",
@@ -3383,12 +3525,13 @@ async function siteCaddyUnmounted(dirs: readonly string[]): Promise<string[]> {
 async function applyOneSite(
   layout: LayoutPaths,
   environmentId: string,
-  site: SiteApplySpec,
+  declared: SiteApplySpec,
   sitesDirs: SiteConfigDirs,
   dockerBind: string | null,
   release?: SiteRelease,
   managed?: SiteManagedDirectory,
 ): Promise<ApplyOneSiteResult> {
+  const site = withDbCaVariables(layout, declared, release ?? managed);
   const base = siteDir(
     layout,
     environmentId,

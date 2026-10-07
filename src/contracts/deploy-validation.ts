@@ -167,40 +167,59 @@ function isHttpHosting(hosting: EnvironmentDeployHosting): boolean {
   return (hosting.protocol ?? "http") === "http";
 }
 
-function validateWwwRedirectHostnames(
+function validateWwwHostnames(
   hosting: EnvironmentDeployHosting,
-  served: ReadonlySet<string>,
+  typed: ReadonlySet<string>,
 ): string | null {
   for (const hostname of hosting.hostnames) {
     const sibling = wwwSiblingHostname(hostname);
     if (sibling === null) {
-      return `wwwRedirect: no valid www/non-www name for hostname ${hostname}`;
+      return `www: ${hostname} has no www or bare spelling to use`;
     }
-    if (served.has(sibling)) {
-      return `wwwRedirect: ${sibling} is already a hostname in this environment (it would be redirected from ${hostname})`;
+    if (typed.has(sibling)) {
+      return `www: ${sibling} is already a hostname in this environment, so ${hostname} cannot also claim it`;
+    }
+  }
+  return null;
+}
+
+/** Hostings on different paths of one name must make the same www choice. */
+function findMixedWwwModes(
+  hostings: readonly EnvironmentDeployHosting[],
+): string | null {
+  const modeByName = new Map<string, string>();
+  for (const hosting of hostings) {
+    const mode = hosting.www ?? "off";
+    for (const hostname of hosting.hostnames) {
+      const seen = modeByName.get(hostname);
+      if (seen !== undefined && seen !== mode) {
+        return `www: every path of ${hostname} must use the same www choice (found ${seen} and ${mode})`;
+      }
+      modeByName.set(hostname, mode);
     }
   }
   return null;
 }
 
 /**
- * `wwwRedirect` serves a second name per hostname, so it only makes sense on
- * `http`, every such name must be a valid hostname, and none may already be a
- * hostname in the same deploy (that would be two sites for one name).
+ * `www` answers on a second name per hostname, so it only makes sense on
+ * `http`, every such name must be a valid hostname, none may already be a
+ * hostname in the same deploy (that would be two sites for one name), every
+ * path of one name must make the same choice (so one spelling is never a
+ * redirect for one path and the site for another).
  */
-export function validateDeployWwwRedirects(
+export function validateDeployWwwModes(
   hostings: EnvironmentDeployHosting[],
 ): string | null {
-  const served = new Set(
-    hostings.filter(isHttpHosting).flatMap((hosting) => hosting.hostnames),
-  );
-  for (const hosting of hostings.filter((h) => h.wwwRedirect)) {
+  const http = hostings.filter(isHttpHosting);
+  const typed = new Set(http.flatMap((hosting) => hosting.hostnames));
+  for (const hosting of hostings.filter((h) => h.www !== undefined)) {
     const error = isHttpHosting(hosting)
-      ? validateWwwRedirectHostnames(hosting, served)
-      : "wwwRedirect requires the http protocol";
+      ? validateWwwHostnames(hosting, typed)
+      : "www requires the http protocol";
     if (error) return error;
   }
-  return null;
+  return findMixedWwwModes(http);
 }
 
 export function validateDeployTargetPort(
@@ -257,7 +276,7 @@ export function validateDeployHostings(
   }
   return (
     validateDeployHostnameRouting(hostings) ??
-      validateDeployWwwRedirects(hostings)
+      validateDeployWwwModes(hostings)
   );
 }
 

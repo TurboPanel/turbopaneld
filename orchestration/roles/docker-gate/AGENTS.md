@@ -447,7 +447,7 @@ BuildKit's `/session` and `/grpc` upgrade to HTTP/2 the gate cannot read: every 
 mounts) rides inside them. They open only on the **build listener** (`build.ts`):
 
 - **Identity.** The client is the daemon account `tp` (`railpack-build.ts` runs `docker buildx build` as tp; Compose
-  builds too). The sandboxed build runner (`tpbuild`, `tp-host build-run`) never speaks Docker: its unit makes
+  builds too). The sandboxed build runner (`tp-host build-run`'s per-build throwaway users) never speaks Docker: its unit makes
   `/run/turbopanel-gate` and both Docker sockets inaccessible. Deno cannot read a Unix peer's credentials (no
   SO_PEERCRED), and a header token does not work either: the Docker CLI's `HttpHeaders` are not sent on the hijacked
   `/grpc` request buildx opens (seen on adrastea, Engine 29.8 / buildx 0.37: the header was missing on every `/grpc`).

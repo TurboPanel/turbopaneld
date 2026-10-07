@@ -1,0 +1,93 @@
+---
+# One requested series (`deno_app_series`, the major), vendored to
+# `<deno_app_root>/<series>/<resolved>` with `<series>/current` pointing at it.
+
+# The series reaches Ansible from an `environment.deploy` payload. It is already
+# validated on the wire, but it is about to become a path segment and a URL, so
+# it is re-validated here rather than trusted across the process boundary.
+- name: Validate the requested tenant Deno series
+  ansible.builtin.assert:
+    that:
+      - deno_app_series is match('^[0-9]{1,3}$')
+    fail_msg: >-
+      Invalid tenant Deno series '{{ deno_app_series }}'.
+      Expected a major version such as '2'.
+
+- name: Resolve the series entitlement group
+  ansible.builtin.set_fact:
+    deno_app_series_group: "tpdeno{{ deno_app_series }}"
+
+# Ahead of the install: the shell below writes into this directory, and the
+# release tree it extracts inherits the group from it.
+- name: Ensure the tenant Deno series tree is reachable by the runtime group
+  ansible.builtin.file:
+    path: "{{ deno_app_root }}/{{ deno_app_series }}"
+    state: directory
+    owner: root
+    group: "{{ deno_app_series_group }}"
+    mode: "0750"
+
+# The newest stable release, from the official distribution.
+- name: Fetch the newest stable Deno release
+  ansible.builtin.uri:
+    url: "{{ deno_app_dist_url }}/release-latest.txt"
+    return_content: true
+  register: _deno_app_latest
+  check_mode: false
+
+- name: Take the newest release when it is in the series
+  vars:
+    _deno_app_latest_version: "{{ _deno_app_latest.content | trim | regex_replace('^v', '') }}"
+  ansible.builtin.set_fact:
+    deno_app_resolved_version: "{{ _deno_app_latest_version if _deno_app_latest_version is match('^' ~ deno_app_series ~ '[.][0-9]+[.][0-9]+$') else '' }}"
+
+# The series is no longer the newest major: look it up in the release list.
+- name: Fetch the Deno release list
+  ansible.builtin.uri:
+    url: "{{ deno_app_releases_api_url }}"
+    return_content: true
+  register: _deno_app_releases
+  check_mode: false
+  when: deno_app_resolved_version | length == 0
+
+- name: Resolve newest stable Deno release in the series
+  vars:
+    _deno_app_stable: "{{ _deno_app_releases.json | default([]) | rejectattr('prerelease') | rejectattr('draft') | map(attribute='tag_name') | map('regex_replace', '^v', '') | list }}"
+    _deno_app_in_series: "{{ _deno_app_stable | select('match', '^' ~ deno_app_series ~ '[.][0-9]+[.][0-9]+$') | list }}"
+  ansible.builtin.set_fact:
+    deno_app_resolved_version: "{{ _deno_app_in_series | first | default('') }}"
+  when: deno_app_resolved_version | length == 0
+
+- name: Require an upstream release for the series
+  ansible.builtin.assert:
+    that:
+      - deno_app_resolved_version | length > 0
+      - deno_app_resolved_version is match('^[0-9]{1,3}[.][0-9]{1,3}[.][0-9]{1,3}$')
+    fail_msg: "no Deno release found for series {{ deno_app_series }}"
+
+# The installer lives in files/ so this task has no inline shell (Ansible
+# rejects a `shell: |` block that mixes Jinja with nested quotes).
+- name: Install tenant Deno series into the vendor tree
+  ansible.builtin.command:
+    argv:
+      - /bin/bash
+      - "{{ role_path }}/files/install-series.sh"
+  environment:
+    DENO_APP_SERIES: "{{ deno_app_series }}"
+    DENO_APP_ARCH: "{{ deno_app_arch }}"
+    DENO_APP_RESOLVED: "{{ deno_app_resolved_version }}"
+    DENO_APP_GROUP: "{{ deno_app_series_group }}"
+    DENO_APP_SERIES_DIR: "{{ deno_app_root }}/{{ deno_app_series }}"
+    DENO_APP_DIST_URL: "{{ deno_app_dist_url }}"
+  register: _deno_app_install
+  changed_when: "'turbopanel-' in _deno_app_install.stdout"
+
+# Supplementary-group changes are not visible to an already-running process, so
+# an unsandboxed (development) build child refreshes groups with
+# `sudo -n -u <self>` after this append. Sandboxed builds get every tpdeno<series>
+# group from tp-host build-run as SupplementaryGroups=.
+- name: Allow the daemon account to execute this tenant Deno series
+  ansible.builtin.user:
+    name: "{{ turbopanel_user }}"
+    groups: "{{ deno_app_series_group }}"
+    append: true

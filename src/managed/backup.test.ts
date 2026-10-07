@@ -461,6 +461,7 @@ test("handleManagedRestore streams the artifact into the engine on a checksum ma
     await Deno.writeFile(artifactPath, bytes, { mode: 0o600 });
     const checksum = await sha256Hex(bytes);
 
+    let restoreArgv: string[] = [];
     let streamed: Uint8Array | undefined;
     const result = await handleManagedRestore(
       {
@@ -476,13 +477,16 @@ test("handleManagedRestore streams the artifact into the engine on a checksum ma
       {
         ensureDocker: noopEnsureDocker,
         resolveContainer: () => Promise.resolve(FAKE_CONTAINER),
-        runRestore: async (_argv, source) => {
+        runRestore: async (argv, source) => {
+          restoreArgv = argv;
           streamed = await drainStream(source);
           return { success: true, stderr: "" };
         },
       },
     );
 
+    // Root exec: the MariaDB UBI image defaults to OS user `mysql`.
+    assertEquals(restoreArgv.slice(0, 4), ["exec", "-i", "-u", "0"]);
     assertEquals(streamed, bytes);
     assertEquals(result.status, "restored");
     assertEquals(result.database, "app");

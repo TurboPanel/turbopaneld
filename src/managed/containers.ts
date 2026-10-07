@@ -256,7 +256,7 @@ export async function collectManagedMemberHealth(
         defaultDatabase: engine.defaultDatabase,
         exec: async (argv, input) => {
           const result = await run(
-            ["exec", "-i", containerId, ...argv],
+            ["exec", "-i", "-u", "0", containerId, ...argv],
             input === undefined ? undefined : { input },
           );
           const redact = params.redact ?? ((text: string) => text);

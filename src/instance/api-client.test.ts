@@ -1,4 +1,4 @@
-import { assertEquals, assertRejects } from "@std/assert";
+import { assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
 import {
   challengeResponse,
   commandLogChunkResponse,
@@ -225,6 +225,235 @@ test({
       assertEquals(decryptHits, 1);
       assertEquals(tokenCalls, 1);
       assertEquals(tokens, ["initial"]);
+    } finally {
+      restore();
+    }
+  },
+});
+
+const DECRYPT_PATH = "/api/daemon/v1/secrets/decrypt";
+
+function rateLimited(headers?: HeadersInit): Response {
+  return new Response(JSON.stringify({ ok: false, error: "rate_limited" }), {
+    status: 429,
+    headers,
+  });
+}
+
+function decryptOk(): Response {
+  return new Response(JSON.stringify({ ok: true, plaintexts: ["plain"] }), {
+    status: 200,
+  });
+}
+
+/** A client whose rate-limit waits are recorded instead of slept. */
+function clientWithWaits(
+  waits: number[],
+  getToken: DaemonApiClientGetToken = () => Promise.resolve("tok"),
+): DaemonApiClient {
+  return new DaemonApiClient({
+    config: INSTANCE_CONFIG,
+    getToken,
+    sleep: (ms) => {
+      waits.push(ms);
+      return Promise.resolve();
+    },
+  });
+}
+
+type DaemonApiClientGetToken = ConstructorParameters<
+  typeof DaemonApiClient
+>[0]["getToken"];
+
+test({
+  name: "DaemonApiClient retries a 429 and returns the later success",
+  permissions: { net: true },
+  fn: async () => {
+    const api = createFakeInstanceApi();
+    const restore = api.install();
+    try {
+      let hits = 0;
+      api.script(DECRYPT_PATH, () => {
+        hits += 1;
+        return hits === 1 ? rateLimited() : decryptOk();
+      });
+      const waits: number[] = [];
+      const plaintexts = await clientWithWaits(waits).decryptSecrets([
+        "tpdaemon.v1.a",
+      ]);
+      assertEquals(plaintexts, ["plain"]);
+      assertEquals(hits, 2);
+      assertEquals(waits, [2000]);
+    } finally {
+      restore();
+    }
+  },
+});
+
+test({
+  name:
+    "DaemonApiClient honours Retry-After on a 429 but never past 30 s or below the backoff",
+  permissions: { net: true },
+  fn: async () => {
+    const cases: Array<{ retryAfter: string; expectedWait: number }> = [
+      { retryAfter: "5", expectedWait: 5000 },
+      { retryAfter: "3600", expectedWait: 30_000 },
+      { retryAfter: "1", expectedWait: 2000 },
+    ];
+    for (const entry of cases) {
+      const api = createFakeInstanceApi();
+      const restore = api.install();
+      try {
+        let hits = 0;
+        api.script(DECRYPT_PATH, () => {
+          hits += 1;
+          return hits === 1
+            ? rateLimited({ "retry-after": entry.retryAfter })
+            : decryptOk();
+        });
+        const waits: number[] = [];
+        await clientWithWaits(waits).decryptSecrets(["tpdaemon.v1.a"]);
+        assertEquals(waits, [entry.expectedWait], entry.retryAfter);
+      } finally {
+        restore();
+      }
+    }
+  },
+});
+
+test({
+  name:
+    "DaemonApiClient gives up after six 429s with a plain rate_limited error and cancels every body",
+  permissions: { net: true },
+  fn: async () => {
+    const api = createFakeInstanceApi();
+    const restore = api.install();
+    try {
+      let hits = 0;
+      let cancelled = 0;
+      api.script(DECRYPT_PATH, () => {
+        hits += 1;
+        return new Response(
+          new ReadableStream({
+            cancel() {
+              cancelled += 1;
+            },
+          }),
+          { status: 429 },
+        );
+      });
+      const waits: number[] = [];
+      const err = await assertRejects(
+        () => clientWithWaits(waits).decryptSecrets(["tpdaemon.v1.a"]),
+        DaemonApiError,
+      );
+      assertEquals(err.status, 429);
+      assertStringIncludes(err.message, "rate_limited");
+      assertStringIncludes(err.message, "after 6 tries");
+      assertStringIncludes(err.message, DECRYPT_PATH);
+      assertEquals(hits, 6);
+      assertEquals(cancelled, 6);
+      assertEquals(waits, [2000, 4000, 8000, 16_000, 32_000]);
+    } finally {
+      restore();
+    }
+  },
+});
+
+test({
+  name: "DaemonApiClient does not retry statuses other than 429",
+  permissions: { net: true },
+  fn: async () => {
+    for (const status of [500, 403, 503]) {
+      const api = createFakeInstanceApi();
+      const restore = api.install();
+      try {
+        let hits = 0;
+        api.script(DECRYPT_PATH, () => {
+          hits += 1;
+          return new Response(JSON.stringify({ error: `status ${status}` }), {
+            status,
+          });
+        });
+        const waits: number[] = [];
+        const err = await assertRejects(
+          () => clientWithWaits(waits).decryptSecrets(["tpdaemon.v1.a"]),
+          DaemonApiError,
+        );
+        assertEquals(err.status, status);
+        assertEquals(err.message, `status ${status}`);
+        assertEquals(hits, 1, `status ${status}`);
+        assertEquals(waits, []);
+      } finally {
+        restore();
+      }
+    }
+  },
+});
+
+test({
+  name:
+    "DaemonApiClient keeps the 401 token refresh on every rate-limit attempt",
+  permissions: { net: true },
+  fn: async () => {
+    const api = createFakeInstanceApi();
+    const restore = api.install();
+    try {
+      const auths: Array<string | null> = [];
+      // try 1: 401 -> refreshed 429; try 2: 401 -> refreshed 200.
+      const script = [401, 429, 401, 200];
+      api.script(DECRYPT_PATH, (init) => {
+        auths.push(new Headers(init?.headers).get("authorization"));
+        const status = script[auths.length - 1]!;
+        if (status === 429) return rateLimited();
+        if (status === 401) {
+          return new Response(JSON.stringify({ error: "unauthorized" }), {
+            status: 401,
+          });
+        }
+        return decryptOk();
+      });
+      const waits: number[] = [];
+      const plaintexts = await clientWithWaits(
+        waits,
+        (options) => Promise.resolve(options?.forceRefresh ? "fresh" : "stale"),
+      ).decryptSecrets(["tpdaemon.v1.a"]);
+      assertEquals(plaintexts, ["plain"]);
+      assertEquals(auths, [
+        "Bearer stale",
+        "Bearer fresh",
+        "Bearer stale",
+        "Bearer fresh",
+      ]);
+      assertEquals(waits, [2000]);
+    } finally {
+      restore();
+    }
+  },
+});
+
+test({
+  name:
+    "DaemonApiClient leaves unauthenticated enrollment calls on a single try",
+  permissions: { net: true },
+  fn: async () => {
+    const api = createFakeInstanceApi();
+    const restore = api.install();
+    try {
+      let hits = 0;
+      api.script("/api/daemon/v1/auth/challenge", () => {
+        hits += 1;
+        return rateLimited();
+      });
+      const waits: number[] = [];
+      const err = await assertRejects(
+        () => clientWithWaits(waits).getEnrollmentChallenge(),
+        DaemonApiError,
+      );
+      assertEquals(err.status, 429);
+      assertEquals(err.message, "rate_limited");
+      assertEquals(hits, 1);
+      assertEquals(waits, []);
     } finally {
       restore();
     }

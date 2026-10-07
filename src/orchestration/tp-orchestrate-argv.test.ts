@@ -188,10 +188,16 @@ async function daemonExtraVars(): Promise<Array<[string, string[]]>> {
   await ensureNativeAppRuntime(
     [{ nodeVersion: "24" }, {
       nodeVersion: "22",
+    }, {
+      runtime: "deno",
+      denoVersion: "2.9.7",
     }] as unknown as EnvironmentDeployNativeAppService[],
     {
-      runPlaybook: (_playbook, _label, args) => {
-        captured.push(["node-app-runtime-apply", extraVarValues(args ?? [])]);
+      runPlaybook: (playbook, _label, args) => {
+        const name = playbook.endsWith("deno-app-runtime-apply.yml")
+          ? "deno-app-runtime-apply"
+          : "node-app-runtime-apply";
+        captured.push([name, extraVarValues(args ?? [])]);
         return Promise.resolve();
       },
     },
@@ -275,6 +281,19 @@ test("tp-orchestrate refuses keys and values that would steer root Ansible", asy
       '{"php_fpm_extensions":{"latest":["intl"]}}',
       '{"php_fpm_extensions":["intl"]}',
       '{"php_fpm_extensions":{"8.4":"intl"}}',
+      // Runtime series reach a group name and an ACL entity: digits only.
+      '{"deno_app_versions":["x:rwx,u:tp:rwx"]}',
+      '{"deno_app_versions":["2.9"]}',
+      '{"deno_app_versions":["2\\n"]}',
+      '{"deno_app_versions":"2"}',
+      '{"deno_app_versions":[2]}',
+      '{"deno_app_versions":["2",""]}',
+      '{"node_app_versions":["24;id"]}',
+      '{"node_app_versions":["x:rwx"]}',
+      '{"node_app_versions":["24."]}',
+      '{"node_app_versions":["1.2.3.4"]}',
+      '{"node_app_versions":"24"}',
+      '{"node_app_versions":[24]}',
       '{"unknown_key":1}',
       '["php_fpm_versions"]',
       "{}",
@@ -297,6 +316,23 @@ test("tp-orchestrate accepts PHP series and extension names that are apt package
       { vendorDir },
     );
     assertEquals(verdicts.map((v) => v.accepted), [true]);
+  } finally {
+    await Deno.remove(vendorDir, { recursive: true });
+  }
+});
+
+test("tp-orchestrate accepts Node and Deno series that are plain numbers", async () => {
+  const vendorDir = await makeFakeVendorDir();
+  try {
+    const verdicts = await checkExtraVars(
+      [
+        '{"node_app_versions":["22","24","24.17.0"]}',
+        '{"deno_app_versions":["2"]}',
+        '{"node_app_versions":[],"deno_app_versions":["2"]}',
+      ],
+      { vendorDir },
+    );
+    assertEquals(verdicts.map((v) => v.accepted), [true, true, true]);
   } finally {
     await Deno.remove(vendorDir, { recursive: true });
   }

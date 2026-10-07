@@ -230,7 +230,7 @@
       loop:
         - daemon-layout
         - principal-access
-        # tpbuild, /var/lib/turbopanel-build and tpbuild.slice: tp-host
+        # /var/lib/turbopanel-build (and the retired tpbuild removed): tp-host
         # build-run refuses the first git deploy without them. Same place as
         # in daemon-install.yml and daemon-colocated-refresh.yml.
         - build-user

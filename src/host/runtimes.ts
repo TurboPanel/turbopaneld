@@ -24,6 +24,8 @@ export type HostRuntimeMetadata = {
   php?: { series: string[]; extensions?: Record<string, string[]> };
   /** Vendored tenant Node series (`vendor/node-app/<series>/current`). */
   node?: { series: string[] };
+  /** Vendored tenant Deno series (`vendor/deno-app/<series>/current`). */
+  deno?: { series: string[] };
   /** Vendored OpenLiteSpeed LSAPI PHP series (`vendor/lsphp/<series>/current`). */
   lsphp?: { series: string[] };
 };
@@ -134,6 +136,9 @@ export function readHostRuntimes(
 
   const nodeSeries = vendoredSeries(`${resolvedVendorDir}/node-app`);
   if (nodeSeries.length > 0) meta.node = { series: nodeSeries };
+
+  const denoSeries = vendoredSeries(`${resolvedVendorDir}/deno-app`);
+  if (denoSeries.length > 0) meta.deno = { series: denoSeries };
 
   const lsphpSeries = vendoredSeries(`${resolvedVendorDir}/lsphp`);
   if (lsphpSeries.length > 0) meta.lsphp = { series: lsphpSeries };

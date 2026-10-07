@@ -27,8 +27,14 @@ import {
 import {
   resolveNativeAppRuntimeStartCommand,
 } from "../node-package-manager.ts";
+import {
+  DENO_RUN_FLAGS,
+  NATIVE_APP_BIND_ADDRESS,
+  type NativeAppStart,
+  nativeAppStartExec,
+} from "./start-entry.ts";
 import { principalUnixGroupName } from "../ensure-principal.ts";
-import { runtimeGroup } from "../../runtime/registry.ts";
+import { entitlementSeries, runtimeGroup } from "../../runtime/registry.ts";
 import type {
   EnvironmentDeployNativeAppRestartPolicy,
   EnvironmentDeployNativeAppService,
@@ -137,6 +143,113 @@ export function nativeAppNodeBinDir(
   );
 }
 
+/**
+ * Deno series a native Deno app runs on when the payload declared no
+ * `denoVersion`. Deno publishes one major, so the series is the major: the
+ * vendoring role installs the newest 2.x and `current` follows it.
+ */
+export const DEFAULT_NATIVE_APP_DENO_VERSION = "2";
+
+/** Which runtime a native app runs on; an app that says nothing runs Node. */
+export function nativeAppRuntimeKind(
+  app: Pick<EnvironmentDeployNativeAppService, "runtime">,
+): "node" | "deno" {
+  return app.runtime === "deno" ? "deno" : "node";
+}
+
+/**
+ * Root of the **tenant** Deno tree: `<runtimesDir>/deno-app/<series>/current`.
+ * Beside `node-app/`, never inside it, so each runtime's group and ACL stay its
+ * own.
+ */
+export function denoAppRuntimeRoot(
+  layout: Pick<LayoutPaths, "runtimesDir">,
+): string {
+  return join(layout.runtimesDir, "deno-app");
+}
+
+/**
+ * The Deno **series** one app runs on: its `denoVersion` reduced to the exec
+ * boundary (`2.9.7` and `2.9` are both `2`), else
+ * {@link DEFAULT_NATIVE_APP_DENO_VERSION}. Reduced here because the series is
+ * a directory name and a group name, and `deno-app/2.9/` would not be a tree
+ * the vendoring role ever creates.
+ */
+export function resolveNativeAppDenoVersion(
+  app: Pick<EnvironmentDeployNativeAppService, "denoVersion">,
+): string {
+  const declared = app.denoVersion?.trim();
+  return declared && declared.length > 0
+    ? entitlementSeries("deno", declared)
+    : DEFAULT_NATIVE_APP_DENO_VERSION;
+}
+
+/** `<runtimesDir>/deno-app/<series>/current/bin` — leads a Deno app's `PATH`. */
+export function nativeAppDenoBinDir(
+  layout: Pick<LayoutPaths, "runtimesDir">,
+  denoSeries: string = DEFAULT_NATIVE_APP_DENO_VERSION,
+): string {
+  return join(
+    denoAppRuntimeRoot(layout),
+    entitlementSeries("deno", denoSeries),
+    "current",
+    "bin",
+  );
+}
+
+/** `<runtimesDir>/deno-app/<series>/current/bin/deno`. */
+export function nativeAppDenoBinary(
+  layout: Pick<LayoutPaths, "runtimesDir">,
+  denoSeries: string = DEFAULT_NATIVE_APP_DENO_VERSION,
+): string {
+  return join(nativeAppDenoBinDir(layout, denoSeries), "deno");
+}
+
+/** Entitlement group for one vendored Deno series (`tpdeno2`). */
+export function nativeAppDenoRuntimeGroup(
+  denoVersion: string,
+): string | undefined {
+  return runtimeGroup("deno", denoVersion);
+}
+
+/**
+ * Binary directory, series and entitlement group of the runtime one app runs
+ * on. The one place that decides Node or Deno from the payload, so the unit,
+ * the build and the vendoring step cannot disagree.
+ */
+export function nativeAppRuntimeTarget(
+  layout: Pick<LayoutPaths, "runtimesDir">,
+  app: Pick<
+    EnvironmentDeployNativeAppService,
+    "runtime" | "nodeVersion" | "denoVersion"
+  >,
+): {
+  runtime: "node" | "deno";
+  series: string;
+  binDir: string;
+  binary: string;
+  group: string | undefined;
+} {
+  if (nativeAppRuntimeKind(app) === "deno") {
+    const series = resolveNativeAppDenoVersion(app);
+    return {
+      runtime: "deno",
+      series,
+      binDir: nativeAppDenoBinDir(layout, series),
+      binary: nativeAppDenoBinary(layout, series),
+      group: nativeAppDenoRuntimeGroup(series),
+    };
+  }
+  const series = resolveNativeAppNodeVersion(app);
+  return {
+    runtime: "node",
+    series,
+    binDir: nativeAppNodeBinDir(layout, series),
+    binary: nativeAppNodeBinary(layout, series),
+    group: nativeAppRuntimeGroup(series),
+  };
+}
+
 const NATIVE_RUNTIME_PATH_TAIL = "/usr/bin:/bin";
 
 /** `/etc/systemd/system/turbopanel-app-<serviceId>.service`. */
@@ -152,8 +265,9 @@ export function nativeAppUnitPath(
 }
 
 /**
- * `HOME` and `TMPDIR` for a unit that runs as a principal: its own `home/` and
- * `tmp/`, never the home itself, which is root-owned and read-only to it.
+ * `HOME` and `TMPDIR` for a cron job, which runs as a principal: its own
+ * `home/` and `tmp/`, never the home itself, which is root-owned and read-only
+ * to it. A Node app sets its own (see {@link nativeAppUnitContent}).
  */
 export function principalUnitEnvironment(
   layout: Pick<LayoutPaths, "principalHomeRoot">,
@@ -166,10 +280,10 @@ export function principalUnitEnvironment(
 }
 
 /**
- * The one `ReadWritePaths=` line for a unit that runs as a principal: the
- * site directories it may write, then the principal's `home/`, `data/` and
- * `tmp/`. Never the home root: under `ProtectSystem=strict` everything else
- * stays read-only, whatever the file modes say.
+ * The one `ReadWritePaths=` line for a cron job: the site directories it may
+ * write, then the principal's `home/`, `data/` and `tmp/`. Never the home
+ * root: under `ProtectSystem=strict` everything else stays read-only, whatever
+ * the file modes say. A Node app gets only its site's `shared/` instead.
  *
  * Every path must exist before the unit starts (systemd fails it with
  * `226/NAMESPACE` otherwise). Principal ensure creates the three tenant dirs,
@@ -191,9 +305,16 @@ export function principalReadWritePaths(
   }`;
 }
 
-/** `turbopanel-<username>.slice` — one parent slice per tenant account. */
+/**
+ * `turbopanel-<username>.slice` — one parent slice per tenant account. systemd
+ * reads every `-` in a slice name as a level, so a dash in the username becomes
+ * `.` (no meaning to systemd, never in a username): `a-b` gets its own
+ * `turbopanel-a.b.slice` instead of sitting inside `a`'s. Kept equal to
+ * `tp_principal_slice` in orchestration/scripts/tp-host, which refuses a unit
+ * naming any other slice.
+ */
 export function principalSliceName(username: string): string {
-  return `turbopanel-${username}.slice`;
+  return `turbopanel-${username.replaceAll("-", ".")}.slice`;
 }
 
 export function principalSlicePath(
@@ -282,29 +403,48 @@ export function principalSliceStagedPath(
 }
 
 /**
- * Default entrypoint, relative to the release root.
- *
- * One value for every runtime family on purpose: a Next.js standalone build is
- * *staged so that* its `server.js` lands at the release root (see
- * `../release/build.ts`), which is exactly where a plain Node app's `server.js`
- * already is. An operator who needs anything else sets
- * `x-turbopanel.source.startCommand`.
+ * Entrypoint, relative to the release root, for a release that recorded no
+ * start ({@link NativeAppStart}): one built before the start was recorded.
+ * A Next.js standalone build is *staged so that* its `server.js` lands at the
+ * release root (see `../release/build.ts`), which is also where a plain Node
+ * app's `server.js` conventionally is.
  */
 export const DEFAULT_START_SCRIPT = "server.js";
 
 /**
- * Resolve the `ExecStart` line.
+ * Resolve the `ExecStart` line, most specific first:
  *
- * An explicit `startCommand` is run through `/bin/sh -c` so an operator can
- * write the same string they would type in a shell (`node dist/main.js --flag`);
- * the default path execs the vendored Node directly, with no shell in between.
+ * 1. an explicit `startCommand`, run through `/bin/sh -c` so an operator can
+ *    write the same string they would type in a shell
+ *    (`node dist/main.js --flag`);
+ * 2. `startupFile`, run by the vendored Node;
+ * 3. the start the build detected and recorded with the release
+ *    (`nativeStart`: `server.js` for a Next standalone build, the package's
+ *    `start` script, `next start` bound to 127.0.0.1, or an entry file);
+ * 4. `node server.js`.
+ *
+ * Every case but the first execs the vendored Node directly: no shell in the
+ * `ExecStart` line and no Corepack at runtime (`node --run start` itself runs
+ * the script through `/bin/sh`, as npm would).
  */
 export function resolveExecStart(params: {
   nodeBinary: string;
+  /**
+   * Set for a Deno app: the vendored Deno binary. `nodeBinary` is then unused
+   * and every start runs Deno ({@link resolveDenoExecStart}).
+   */
+  denoBinary?: string;
   startCommand?: string;
   /** Replaces {@link DEFAULT_START_SCRIPT}; an explicit `startCommand` wins. */
   startupFile?: string;
+  /** What the build detected; used only when neither of the above is set. */
+  nativeStart?: NativeAppStart;
+  /** The app's loopback port, for a start that passes it on the command line. */
+  listenPort?: number;
 }): string {
+  if (params.denoBinary !== undefined) {
+    return resolveDenoExecStart({ ...params, denoBinary: params.denoBinary });
+  }
   if (params.startCommand && params.startCommand.trim().length > 0) {
     const command = resolveNativeAppRuntimeStartCommand(
       safeConfigLine("startCommand", params.startCommand.trim()),
@@ -312,8 +452,54 @@ export function resolveExecStart(params: {
     );
     return `/bin/sh -c ${quoteSystemdArgument(command)}`;
   }
-  const script = params.startupFile?.trim() || DEFAULT_START_SCRIPT;
-  return `${params.nodeBinary} ${script}`;
+  const startupFile = params.startupFile?.trim();
+  if (startupFile) return `${params.nodeBinary} ${startupFile}`;
+  // A start recorded by a Deno build means nothing to Node (`node task start`
+  // would run a file called `task`), so it is ignored here.
+  if (
+    params.nativeStart && params.listenPort !== undefined &&
+    !params.nativeStart.kind.startsWith("deno-")
+  ) {
+    return nativeAppStartExec(
+      params.nativeStart,
+      params.nodeBinary,
+      params.listenPort,
+    );
+  }
+  return `${params.nodeBinary} ${DEFAULT_START_SCRIPT}`;
+}
+
+/**
+ * A Deno app's `ExecStart`, most specific first: the author's start command
+ * (through `/bin/sh -c`, untouched; Deno is on the unit's `PATH`), then
+ * `startupFile` as `deno run --allow-all <file>`, then what the build detected
+ * (`deno task start`, or `deno run --allow-all <entry>`). A release that
+ * recorded no start runs `deno task start`.
+ */
+function resolveDenoExecStart(params: {
+  denoBinary: string;
+  startCommand?: string;
+  startupFile?: string;
+  nativeStart?: NativeAppStart;
+  listenPort?: number;
+}): string {
+  if (params.startCommand && params.startCommand.trim().length > 0) {
+    const command = safeConfigLine("startCommand", params.startCommand.trim());
+    return `/bin/sh -c ${quoteSystemdArgument(command)}`;
+  }
+  const startupFile = params.startupFile?.trim();
+  if (startupFile) {
+    return `${params.denoBinary} run ${DENO_RUN_FLAGS} ${startupFile}`;
+  }
+  const start = params.nativeStart;
+  if (start && (start.kind === "deno-task" || start.kind === "deno-file")) {
+    return nativeAppStartExec(start, params.denoBinary, params.listenPort ?? 0);
+  }
+  return nativeAppStartExec(
+    { kind: "deno-task" },
+    params.denoBinary,
+    params.listenPort ?? 0,
+  );
 }
 
 /** systemd's escape for a `'` embedded in a single-quoted argument. */
@@ -444,12 +630,18 @@ export function serviceLabelsLine(
 }
 
 /**
+ * A Node app's `TMPDIR`: the unit's private `/tmp` (`PrivateTmp=yes`), so it
+ * never needs the owner's shared `tmp/`.
+ */
+const NATIVE_APP_TMPDIR = "/tmp"; // NOSONAR typescript:S5443 — the unit's PrivateTmp, not a write by this process
+
+/**
  * Variable names the unit sets itself.
  *
  * systemd applies an `EnvironmentFile=` **over** every `Environment=` line, no
  * matter which comes first, so a tenant variable of one of these names would
  * silently replace what the platform decided (the port the proxy dials, the
- * Node on `PATH`, the writable `HOME`). They are therefore never written to the
+ * Node on `PATH`, the `HOME` and temp directory). They are therefore never written to the
  * app's environment file. Kept next to {@link nativeAppUnitContent} so a new
  * `Environment=` line and its entry here are changed together; a unit test
  * fails when they disagree.
@@ -459,11 +651,16 @@ export const NATIVE_APP_PLATFORM_ENV_NAMES: ReadonlySet<string> = new Set([
   "NODE_ENV",
   "PORT",
   "HOST",
+  "HOSTNAME",
   "HOME",
   "TMPDIR",
   "XDG_CACHE_HOME",
   "COREPACK_HOME",
   "COREPACK_ENABLE_DOWNLOAD_PROMPT",
+  // A Deno app's unit sets these instead of the two above.
+  "DENO_DIR",
+  "DENO_NO_UPDATE_CHECK",
+  "DENO_NO_PROMPT",
 ]);
 
 export type NativeAppUnitOpts = {
@@ -476,6 +673,11 @@ export type NativeAppUnitOpts = {
   environmentId: string;
   /** Resolved from `sourceMaterial[].build.startCommand`, when the author set one. */
   startCommand?: string;
+  /**
+   * How this release starts when the author typed nothing, as its build
+   * decided ({@link resolveExecStart}). Absent means `node server.js`.
+   */
+  nativeStart?: NativeAppStart;
   /**
    * The app has variables, so the unit loads {@link nativeAppEnvPath}. Left
    * false, no `EnvironmentFile=` line is written and the unit text is
@@ -514,14 +716,19 @@ export function nativeAppUnitContent(opts: NativeAppUnitOpts): string {
   const workingDir = siteCurrentSymlink(home, app.serviceId);
   const sharedDir = siteSharedDir(home, app.serviceId);
   const group = principalUnixGroupName(username);
-  const nodeVersion = resolveNativeAppNodeVersion(app);
-  const nodeBinDir = nativeAppNodeBinDir(opts.layout, nodeVersion);
+  const target = nativeAppRuntimeTarget(opts.layout, app);
+  const nodeBinDir = target.binDir;
   const execStart = resolveExecStart({
-    nodeBinary: nativeAppNodeBinary(opts.layout, nodeVersion),
+    nodeBinary: target.binary,
+    ...(target.runtime === "deno" ? { denoBinary: target.binary } : {}),
     ...(opts.startCommand === undefined
       ? {}
       : { startCommand: opts.startCommand }),
     ...(app.startupFile === undefined ? {} : { startupFile: app.startupFile }),
+    ...(opts.nativeStart === undefined
+      ? {}
+      : { nativeStart: opts.nativeStart }),
+    listenPort: app.listenPort,
   });
 
   const labelsLine = serviceLabelsLine(app.serviceLabels);
@@ -553,13 +760,32 @@ export function nativeAppUnitContent(opts: NativeAppUnitOpts): string {
     `Environment=PATH=${nodeBinDir}:${NATIVE_RUNTIME_PATH_TAIL}`,
     `Environment=NODE_ENV=${app.appMode ?? "production"}`,
     `Environment=PORT=${app.listenPort}`,
-    `Environment=HOST=127.0.0.1`,
-    ...principalUnitEnvironment(opts.layout, username),
+    // Both spellings: Node frameworks disagree on the name. Next.js (its
+    // standalone server.js) reads HOSTNAME and would otherwise bind every
+    // interface, putting the app on the public address beside the proxy.
+    `Environment=HOST=${NATIVE_APP_BIND_ADDRESS}`,
+    `Environment=HOSTNAME=${NATIVE_APP_BIND_ADDRESS}`,
+    // A Node app writes only its own site folder (`shared/`). Its `HOME` is
+    // the owner's `home/`, read-only here, and its temp files go to the
+    // unit's own `/tmp` (`PrivateTmp=yes`), not the owner's `tmp/`, which
+    // shell, SFTP and cron use.
+    `Environment=HOME=${principalUserHome(opts.layout, username)}`,
+    `Environment=TMPDIR=${NATIVE_APP_TMPDIR}`,
     // Writable under ReadWritePaths=shared — Corepack falls back here when a
     // custom start command still invokes pnpm/yarn at runtime.
     `Environment=XDG_CACHE_HOME=${sharedDir}/.cache`,
-    `Environment=COREPACK_HOME=${sharedDir}/.corepack`,
-    `Environment=COREPACK_ENABLE_DOWNLOAD_PROMPT=0`,
+    ...(target.runtime === "deno"
+      ? [
+        // Deno's own cache, in the one writable folder; no update check, and
+        // never a permission prompt (there is no terminal to answer it).
+        `Environment=DENO_DIR=${sharedDir}/.cache/deno`,
+        "Environment=DENO_NO_UPDATE_CHECK=1",
+        "Environment=DENO_NO_PROMPT=1",
+      ]
+      : [
+        `Environment=COREPACK_HOME=${sharedDir}/.corepack`,
+        `Environment=COREPACK_ENABLE_DOWNLOAD_PROMPT=0`,
+      ]),
     // The author's variables. Read by systemd (as root) from a `0600` file, so
     // a secret is never in this world-readable unit or in `systemctl show`.
     // The file already omits every name set above — see
@@ -583,8 +809,9 @@ export function nativeAppUnitContent(opts: NativeAppUnitOpts): string {
     "LockPersonality=yes",
     "CapabilityBoundingSet=",
     "AmbientCapabilities=",
-    // Its own site's shared/ plus home/, data/ and tmp/: nothing else.
-    principalReadWritePaths(opts.layout, username, [sharedDir]),
+    // Its own site's shared/: nothing else (not the owner's home/, data/ or
+    // tmp/). Under ProtectSystem=strict every other path stays read-only.
+    `ReadWritePaths=${sharedDir}`,
   ];
 
   if (app.resources?.cpus !== undefined) {
