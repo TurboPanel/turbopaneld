@@ -101,6 +101,7 @@ import {
 import {
   applySites,
   ensureSitePhpRuntimes,
+  planSiteWebEnv,
   resolveSiteDocumentRoot,
   resolveSitePhpSeries,
   type SiteManagedDirectory,
@@ -1301,21 +1302,35 @@ async function applyDeployNativeApps(
       definedFields({
         releaseId: entry.releaseId,
         nativeStart: entry.nativeStart,
+        runtime: entry.runtime,
       }),
     ]),
   );
-  await applyNativeAppServices(layout, parsedPayload.environmentId, apps, {
-    variableMaterial: parsedPayload.variableMaterial ?? [],
-    decryptSecrets,
-    ...io,
-    onOutput: io?.onOutput ??
-      ((stream, line) => logSink.onLine(stream, line)),
-    bindings: nativeAppBindingsFromPayload(
-      parsedPayload,
-      previousReleaseByService,
-      appliedByService,
-    ),
+  // The live release's own runtime wins over the payload's: a rollback across a
+  // Node/Deno switch restores the unit the old release needs.
+  const appsForRelease = apps.map((app) => {
+    const runtime = appliedByService.get(app.composeServiceName)?.runtime;
+    if (runtime === undefined) return app;
+    const { runtime: _runtime, ...rest } = app;
+    return runtime === "deno" ? { ...rest, runtime } : rest;
   });
+  await applyNativeAppServices(
+    layout,
+    parsedPayload.environmentId,
+    appsForRelease,
+    {
+      variableMaterial: parsedPayload.variableMaterial ?? [],
+      decryptSecrets,
+      ...io,
+      onOutput: io?.onOutput ??
+        ((stream, line) => logSink.onLine(stream, line)),
+      bindings: nativeAppBindingsFromPayload(
+        parsedPayload,
+        previousReleaseByService,
+        appliedByService,
+      ),
+    },
+  );
 }
 
 function buildDaemonOverlayFragment(
@@ -1982,6 +1997,8 @@ export function shapeEnvironmentDeployResult(input: {
   releases?: readonly EnvironmentDeployResultRelease[];
   /** Per-site application facts for the sites this deploy applied. */
   siteApps?: readonly EnvironmentDeployResultSite[];
+  /** What the deploy worked around without failing; omitted when empty. */
+  warnings?: readonly string[];
 }): EnvironmentDeployResult {
   const summary = buildDeploySummary(
     input.environmentId,
@@ -2006,6 +2023,9 @@ export function shapeEnvironmentDeployResult(input: {
       : {}),
     ...(input.siteApps && input.siteApps.length > 0
       ? { sites: [...input.siteApps] }
+      : {}),
+    ...(input.warnings && input.warnings.length > 0
+      ? { warnings: [...input.warnings] }
       : {}),
   };
 }
@@ -2251,6 +2271,14 @@ export async function handleEnvironmentDeploy(
     runtime.decryptSecrets,
   );
 
+  // Before anything is written: a variable a site's web server cannot carry is
+  // named in the command log and the result, a required database setting stops
+  // the deploy here.
+  const siteWarnings = sites.flatMap(planSiteWebEnv);
+  for (const warning of siteWarnings) {
+    runtime.logSink.onLine("stderr", warning);
+  }
+
   const siteReleaseBindings = deployReleaseBindings(parsedPayload);
   const siteManagedBindings = deployManagedDirectoryBindings(
     parsedPayload,
@@ -2372,5 +2400,6 @@ export async function handleEnvironmentDeploy(
     containers,
     releases: deployResultReleases(appliedReleases),
     siteApps,
+    warnings: siteWarnings,
   });
 }

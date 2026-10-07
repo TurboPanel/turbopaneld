@@ -77,7 +77,9 @@ test("applyCredentials connects as the stable platform admin even for a suffixed
   const applied = await engine.applyCredentials(ctx, [suffixedRootCredential]);
   assertEquals(applied, ["postgres_a1b2c3d4"]);
 
-  assertEquals(calls.length, 1);
+  // The role statement first, then the lock-down; nothing per database since
+  // the superuser holds no database grants.
+  assertEquals(calls.length, 2);
   const [call] = calls;
   // Connection identity is the stable admin, not the suffixed credential.
   assertEquals(call!.argv.includes("-U"), true);
@@ -111,6 +113,113 @@ test("applyCredentials grants non-root credentials without superuser regardless 
   }
   assertEquals(createCall.input?.includes("NOSUPERUSER"), true);
   assertEquals(createCall.argv[createCall.argv.indexOf("-U") + 1], "postgres");
+});
+
+test("applyCredentials reaches each login only to its levels: lock-down, per-login revoke and grant, then table access inside each database", async () => {
+  const { exec, calls } = recordingExec();
+  const credential = (
+    username: string,
+    databases: string[],
+    privileges: string[],
+  ): ManagedApplyCredential => ({
+    principalId: `p-${username}`,
+    username,
+    role: "user",
+    databases,
+    privileges,
+    password: "pw",
+  });
+  await postgresManagedEngineRuntime.applyCredentials(buildContext(exec), [
+    {
+      principalId: "p-root",
+      username: "postgres_x",
+      role: "root",
+      databases: [],
+      password: "pw",
+    },
+    credential("own", ["appdb"], ["owner"]),
+    credential("rw", ["appdb", "other"], ["read-only", "read-write"]),
+    credential("ro", ["appdb"], ["read-only"]),
+  ]);
+  const databaseOf = (call: RecordedExec) =>
+    call.argv[call.argv.indexOf("-d") + 1];
+  const inputs = calls.map((c) => c.input ?? "");
+  const lockDown = inputs.findIndex((i) => i.includes("FROM PUBLIC'"));
+  const firstGrant = inputs.findIndex((i) => i.includes("GRANT CONNECT"));
+  const inDatabase = calls.filter((c) => databaseOf(c) !== "postgres");
+  // Roles exist before anything is granted; the lock-down comes after the
+  // explicit grants, so a login that holds one is never without it.
+  assertEquals(firstGrant > 0 && firstGrant < lockDown, true);
+  // The strongest level wins per login: rw holds read-write, never read-only.
+  const rwGrants = inputs.filter((i) =>
+    i.includes('TO "rw";') && i.includes("ON DATABASE")
+  );
+  assertEquals(rwGrants.length, 2);
+  assertEquals(
+    rwGrants.every((i) =>
+      i.includes("CONNECT, TEMPORARY") && !i.includes("CREATE")
+    ),
+    true,
+  );
+  // Each listed database gets rw's own schema, then one reconcile, connected to it.
+  const reconciles = inDatabase.filter((c) =>
+    (c.input ?? "").includes("ALTER DEFAULT PRIVILEGES")
+  );
+  assertEquals(reconciles.map(databaseOf).sort(), ["appdb", "other"]);
+  assertEquals(
+    inDatabase.filter((c) => (c.input ?? "").includes('CREATE SCHEMA "rw"'))
+      .map(databaseOf).sort(),
+    ["appdb", "other"],
+  );
+  const appdb = reconciles.find((c) => databaseOf(c) === "appdb")!.input!;
+  // Creators: the platform admin, the exposed root login and owner/read-write logins.
+  for (const creator of ["postgres", "postgres_x", "own", "rw"]) {
+    assertEquals(
+      appdb.includes(`FOR ROLE "${creator}" GRANT SELECT ON TABLES TO "ro"`),
+      true,
+    );
+  }
+  assertEquals(appdb.includes('FOR ROLE "ro"'), false);
+  assertEquals(
+    appdb.includes(
+      'ALTER ROLE "ro" IN DATABASE "appdb" SET default_transaction_read_only = on',
+    ),
+    true,
+  );
+  assertEquals(
+    appdb.includes(
+      'ALTER ROLE "rw" IN DATABASE "appdb" RESET default_transaction_read_only',
+    ),
+    true,
+  );
+});
+
+test("applyCredentials gives a login with no recognised level no database at all", async () => {
+  const { exec, calls } = recordingExec();
+  await postgresManagedEngineRuntime.applyCredentials(buildContext(exec), [{
+    principalId: "p-x",
+    username: "nolevel",
+    role: "user",
+    databases: ["appdb"],
+    privileges: ["bogus"],
+    password: "pw",
+  }]);
+  const inputs = calls.map((c) => c.input ?? "");
+  assertEquals(
+    inputs.some((i) =>
+      i.includes("ARRAY[]::text[]") && i.includes('FROM "nolevel"')
+    ),
+    true,
+  );
+  assertEquals(
+    inputs.some((i) => i.includes('GRANT CONNECT ON DATABASE "')),
+    false,
+  );
+  // No database is reconciled for it.
+  assertEquals(
+    calls.every((c) => c.argv[c.argv.indexOf("-d") + 1] === "postgres"),
+    true,
+  );
 });
 
 test("dropUsers never drops the stable platform admin, even when it matches a stored username", async () => {

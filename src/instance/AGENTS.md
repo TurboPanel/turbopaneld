@@ -63,6 +63,14 @@ It is not a queued command: a running deploy holds the queue slot. The deploy
 itself ends with a `command-outcome` whose error starts with `cancelled: `. The
 cutover rule and its limits are in `../deploy/AGENTS.md`.
 
+**Site database bindings (`site-db-bindings-v1`).** The daemon advertises the
+feature in `hello.features`. A control plane that sees it may send
+`sites[].dbCa` (a public CA bundle the daemon keeps as a file for the site
+owner's Linux user and points variables at) and `sites[].requiredEnv`; the
+`environment.deploy` result may carry `warnings` (variables a site's web server
+could not carry, named, never their values). All additive: an older control
+plane sends neither and ignores `warnings`. See `../deploy/site/AGENTS.md`.
+
 **On-demand managed health (`managed-health-v1`).** The daemon advertises
 the feature in `hello.features`. A control plane that sees it may send
 `managed-health-request` (`managedId`, `memberId`, `role`, `engine`) and gets
@@ -77,6 +85,31 @@ additive and no floor moved. A replica's `member.replication` also carries
 `receivedLsn` / `replayLsn` and, once `PgStandbySampler` has seen it streaming,
 `lastStreaming` (`at`, monotonic `ageMs`, lag); all optional, so an older
 control plane ignores them.
+
+**Pushed managed health (`managed-health-report-v1`).** `ManagedHealthReporter`
+(`managed-health-reporter.ts`) reads every replica recorded in `ha-member.json`
+(all engines) every 30 s, through the same `probeManagedMemberHealth`, and sends
+one `managed-health-report` frame (`members[]`, at most 32) to a control plane
+that lists the feature. A replica whose engine is down goes out as
+`down: true`; any other probe error sends nothing for that replica, so the
+control plane lets the old reading age out. Fire-and-forget and read-only. It
+exists because health was only read when someone asked: a quiet cluster aged
+past the control plane's freshness window and a stopped replica kept its last
+`streaming` line.
+
+**Rate-limited control-plane calls (HTTP 429).** The control plane limits each
+daemon's REST calls to about 30 a minute per route per server. An authenticated
+`DaemonApiClient` call (secrets/decrypt, the command log, rehydrate, ...) that
+gets a 429 is retried, 6 tries in all with 2, 4, 8, 16 and 32 s waits (about
+62 s, one full limiter window); a `Retry-After` header can lengthen a wait but
+never past 30 s. Each retry logs a WARN naming the route and the try number. When
+the tries run out the call throws `DaemonApiError(429, ...)` whose message starts
+`rate_limited:` and says the limit was still in effect after 6 tries, so a failed
+managed command shows a clear reason. Only 429 is retried (no other status, no
+network error), the 401 token refresh still runs on every try, and the
+unauthenticated enroll/challenge/session calls keep a single try (the connect
+loop backs a 429 off itself). `DaemonApiClientOptions.sleep` is the test seam; the
+policy sits in `util/retry-fetch.ts` options.
 
 ### Instance Let's Encrypt renewal (`src/instance/instance-acme-renew.ts`)
 
