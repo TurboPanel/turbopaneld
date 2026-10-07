@@ -69,6 +69,7 @@ export const DAEMON_WIRE_FEATURES = [
   "managed-ha-instance-v1",
   "managed-ha-boot-hold-v1",
   "metrics-v7",
+  "metrics-v7-sizes",
   "php-site-modes-v1",
   "site-engine-nginx-apache-v1",
   "deploy-cancel-v1",
@@ -148,6 +149,14 @@ export const MANAGED_HA_BOOT_HOLD_FEATURE: DaemonWireFeature =
  * sending samples the old control plane accepts.
  */
 export const METRICS_V7_FEATURE: DaemonWireFeature = "metrics-v7";
+
+/**
+ * The control plane accepts the per-sample sizes (`extended.sizes`,
+ * `filesystemSizes`, `gpuSizes`). A control plane that advertises `metrics-v7`
+ * but predates the sizes rejects the unknown `extended` keys, which would
+ * drop every sample, so the daemon sends the sizes only once this is listed.
+ */
+export const METRICS_V7_SIZES_FEATURE: DaemonWireFeature = "metrics-v7-sizes";
 
 /**
  * This daemon deploys sites with `engine: 'nginx+apache'` (nginx in front of

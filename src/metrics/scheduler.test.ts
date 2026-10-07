@@ -349,6 +349,7 @@ function makeScheduler(options: {
   primeMs?: number;
   logRateLimitMs?: number;
   durabilityFlag?: () => boolean;
+  sizesFlag?: () => boolean;
   collectDeadlineMs?: number;
   onLog?: (level: "info" | "warn", message: string) => void;
 }): MetricsScheduler {
@@ -368,6 +369,7 @@ function makeScheduler(options: {
       .clearIntervalFn as unknown as typeof clearInterval,
     logRateLimitMs: options.logRateLimitMs,
     durabilityFlag: options.durabilityFlag,
+    sizesFlag: options.sizesFlag,
     collectDeadlineMs: options.collectDeadlineMs,
     onLog: options.onLog,
   });
@@ -1241,6 +1243,40 @@ it("metrics-v7 stamps sample version 7; the v6 wire keeps 6 and no extended", as
     };
     assertEquals(frame.metadata.version, v7 ? 7 : METRICS_LEGACY_WIRE_VERSION);
     assertEquals(frame.extended !== undefined, v7);
+  }
+});
+
+it("the per-sample sizes are sent only once the control plane advertises metrics-v7-sizes", async () => {
+  for (const sizes of [false, true]) {
+    const clock = new FakeClock();
+    const sent: unknown[] = [];
+    const scheduler = makeScheduler({
+      clock,
+      durabilityFlag: () => true,
+      sizesFlag: () => sizes,
+      collectorFactory: () =>
+        createFakeCollector((sequence) => {
+          const r = supportedSample(sequence);
+          if (r.supported) {
+            r.sample.extended = {
+              docker: { containersRunning: 2 },
+              sizes: { memoryTotalBytes: 8e9 },
+              filesystemSizes: [{ filesystemId: "fs-a", totalBytes: 1e9 }],
+              gpuSizes: [{ gpuId: "gpu0", memoryTotalBytes: 16e9 }],
+            };
+          }
+          return r;
+        }),
+    });
+    scheduler.attach(capturingSink(sent));
+    await clock.advance(0);
+    const extended = (sent[0] as { extended: Record<string, unknown> })
+      .extended;
+    // A v7 control plane without the sizes still gets the rest of the v7 block.
+    assertEquals(extended.docker, { containersRunning: 2 });
+    assertEquals("sizes" in extended, sizes);
+    assertEquals("filesystemSizes" in extended, sizes);
+    assertEquals("gpuSizes" in extended, sizes);
   }
 });
 

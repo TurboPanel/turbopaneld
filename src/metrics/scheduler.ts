@@ -96,6 +96,13 @@ export type MetricsSchedulerOptions = {
    * the single-cadence behaviour.
    */
   durabilityFlag?: () => boolean;
+  /**
+   * `true` once the control plane also advertises `metrics-v7-sizes`. Until
+   * then the per-sample sizes are stripped from the v7 `extended` block: a
+   * control plane that predates them rejects the unknown keys and would drop
+   * the whole sample.
+   */
+  sizesFlag?: () => boolean;
   /** Override {@link METRICS_COLLECT_DEADLINE_MS} (tests). */
   collectDeadlineMs?: number;
   onLog?: (level: MetricsLogLevel, message: string) => void;
@@ -146,6 +153,15 @@ export function rebindMetricsScheduler(args: {
   };
 }
 
+/** Remove the per-sample sizes from a sample's `extended` block (the control plane does not know them yet). */
+function stripSizes(sample: unknown): void {
+  const extended = (sample as { extended?: Record<string, unknown> }).extended;
+  if (!extended) return;
+  delete extended.sizes;
+  delete extended.filesystemSizes;
+  delete extended.gpuSizes;
+}
+
 export class MetricsScheduler {
   #serverId: string;
   readonly #collectorFactory: () => MetricsCollector;
@@ -160,6 +176,7 @@ export class MetricsScheduler {
   readonly #logRateLimitMs: number;
   readonly #onLog: (level: MetricsLogLevel, message: string) => void;
   readonly #durabilityFlag: () => boolean;
+  readonly #sizesFlag: () => boolean;
 
   #streamCollector: MetricsCollector | undefined;
   #streamTimer: ReturnType<typeof setInterval> | undefined;
@@ -196,6 +213,7 @@ export class MetricsScheduler {
     this.#logRateLimitMs = options.logRateLimitMs ?? METRICS_LOG_RATE_LIMIT_MS;
     this.#onLog = options.onLog ?? defaultOnLog;
     this.#durabilityFlag = options.durabilityFlag ?? (() => false);
+    this.#sizesFlag = options.sizesFlag ?? (() => false);
     this.#collectDeadlineMs = options.collectDeadlineMs ??
       METRICS_COLLECT_DEADLINE_MS;
   }
@@ -342,6 +360,7 @@ export class MetricsScheduler {
       metadata.version = METRICS_SCHEMA_VERSION;
       metadata.durable = durable;
     }
+    if (!this.#sizesFlag()) stripSizes(sample);
     return sample;
   }
 
