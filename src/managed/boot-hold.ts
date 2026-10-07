@@ -76,7 +76,12 @@ export function bootHoldPath(layout: LayoutPaths, managedId: string): string {
   return join(managedDir(layout, managedId), HOLD_FILE);
 }
 
-/** A primary with at least one other member: someone may have replaced it. */
+/**
+ * A primary with at least one other member: someone may have replaced it.
+ * A record without `peerCount` (written before the field) falls back to
+ * `replicaPeerCount`, so a primary that had replicas is still held; only a
+ * lone primary is never held.
+ */
 export function isHoldablePrimary(record: ManagedHaMemberRecord): boolean {
   return record.role === "primary" &&
     (record.peerCount ?? record.replicaPeerCount) > 0;
@@ -198,18 +203,28 @@ async function holdOne(
     engineStopped: false,
   };
   // Marker first: the dead-primary probe must never read the stop as a crash.
-  await recordManagedIntent(deps.layout.stateDir, member.managedId, "stop", {
-    mode: "held",
-  });
-  await Deno.mkdir(managedDir(deps.layout, member.managedId), {
-    recursive: true,
-  });
-  await writeHold(deps.layout, record);
-  logWarn(
-    "managed",
-    `host restarted without a clean shutdown: holding primary managedId=${member.managedId} member=${member.memberId} until the control plane confirms it is still the primary`,
+  // A failed marker or file write must never leave the engine running as a
+  // stale primary, so the stop is attempted whatever happens here.
+  let writeError: unknown;
+  try {
+    await recordManagedIntent(deps.layout.stateDir, member.managedId, "stop", {
+      mode: "held",
+    });
+    await Deno.mkdir(managedDir(deps.layout, member.managedId), {
+      recursive: true,
+    });
+    await writeHold(deps.layout, record);
+    logWarn(
+      "managed",
+      `host restarted without a clean shutdown: holding primary managedId=${member.managedId} member=${member.memberId} until the control plane confirms it is still the primary`,
+    );
+  } catch (err) {
+    writeError = err;
+  }
+  const stopped = await stopEngine(deps.run, member.managedId).catch(() =>
+    false
   );
-  const stopped = await stopEngine(deps.run, member.managedId);
+  if (writeError !== undefined) throw writeError;
   const final = { ...record, engineStopped: record.engineStopped || stopped };
   if (final.engineStopped !== record.engineStopped) {
     await writeHold(deps.layout, final);

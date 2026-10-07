@@ -1,4 +1,5 @@
 import { assertEquals } from "@std/assert";
+import { applyManagedBootHoldAtStart } from "./run.ts";
 import { readServiceRunStates } from "../host/service-run-state.ts";
 import {
   type DaemonRunIo,
@@ -534,4 +535,43 @@ test("runDaemon feeds the sentinel's service run state to presence and clears it
   await runDaemon(stub.io);
   assertEquals(seenWhileRunning, services);
   assertEquals(readServiceRunStates(), undefined);
+});
+
+function bootHoldStartStub(holdResult: boolean | Error) {
+  const order: string[] = [];
+  return {
+    order,
+    deps: {
+      classify: () => {
+        order.push("classify");
+        return Promise.resolve("unclean" as const);
+      },
+      hold: () => {
+        order.push("hold");
+        return holdResult instanceof Error
+          ? Promise.reject(holdResult)
+          : Promise.resolve(holdResult);
+      },
+      persist: () => {
+        order.push("persist");
+        return Promise.resolve();
+      },
+      newRetry: () => ({
+        start: () => order.push("retry-start"),
+        stop: () => order.push("retry-stop"),
+      }),
+    },
+  };
+}
+
+test("the boot record is persisted only after the holds were applied", async () => {
+  const ok = bootHoldStartStub(true);
+  await applyManagedBootHoldAtStart(ok.deps);
+  assertEquals(ok.order, ["classify", "hold", "retry-start", "persist"]);
+});
+
+test("a failed hold starts the local retry and does not persist the boot record", async () => {
+  const failed = bootHoldStartStub(false);
+  await applyManagedBootHoldAtStart(failed.deps);
+  assertEquals(failed.order, ["classify", "hold", "retry-start"]);
 });

@@ -16,13 +16,14 @@ import { reinstallFirewallForwardingIfEnabled } from "../firewall/apply.ts";
 import { recoverInterruptedRestores } from "../backups/copy-restore.ts";
 import { reconcileSitePhpRuntimesAtBoot } from "../deploy/site/php-runtime-apply.ts";
 import { logInfo, logWarn } from "../util/logger.ts";
-import { resolveLayout } from "../paths/layout.ts";
+import { type LayoutPaths, resolveLayout } from "../paths/layout.ts";
 import { reportLiveReleaseLinks } from "../deploy/release/live-release-scan.ts";
 import { guardHostingCaddySites } from "../deploy/ingress.ts";
 import { runDocker } from "../deploy/docker-cli.ts";
 import { applyBootHold, BootHoldLocalRetry } from "../managed/boot-hold.ts";
 import {
   classifyHostBootRecord,
+  type HostBootKind,
   markHostCleanShutdown,
   recordHostBootPersist,
 } from "../managed/host-boot.ts";
@@ -64,7 +65,7 @@ export type SentinelLike = {
 };
 
 // Global for shutdown cleanup: P1-2 fix boot-hold local retry timer.
-let bootHoldRetry: BootHoldLocalRetry | undefined;
+let bootHoldRetry: { stop(): void } | undefined;
 
 export type DaemonRunIo = {
   initOrchestration?: () => Promise<boolean>;
@@ -205,24 +206,34 @@ async function guardHostingSites(): Promise<void> {
  * clean shutdown, hold every HA primary on this host until the control plane
  * confirms it is still the primary (`managed/boot-hold.ts`).
  */
-async function applyManagedBootHoldAtStart(): Promise<void> {
+export type BootHoldStartDeps = {
+  classify: (layout: LayoutPaths) => Promise<HostBootKind>;
+  hold: (kind: HostBootKind, layout: LayoutPaths) => Promise<boolean>;
+  persist: (layout: LayoutPaths) => Promise<void>;
+  newRetry: (layout: LayoutPaths) => { start(): void; stop(): void };
+};
+
+export async function applyManagedBootHoldAtStart(
+  deps: Partial<BootHoldStartDeps> = {},
+): Promise<void> {
   const layout = resolveLayout(Deno.env.toObject());
   // P1-1 fix: classify before holding, hold before persisting the record.
   // If the daemon crashes between hold and persist, the next start reads the
   // old record, sees a new boot id, and holds again.
-  const kind = await classifyHostBootRecord(layout);
-  const holdSucceeded = await applyBootHold(kind, { layout, run: runDocker });
-  // Start local retries for any stops that failed (P1-2 fix): independent
-  // timer that keeps trying until every hold has stopped the engine.
+  const kind = await (deps.classify ?? classifyHostBootRecord)(layout);
+  const holdSucceeded = await (deps.hold ??
+    ((k, l) => applyBootHold(k, { layout: l, run: runDocker })))(kind, layout);
+  // Always start the local retry (P1-2 fix): it keeps trying every stop that
+  // failed, even when a hold could not be fully written, and ends itself when
+  // nothing is left to retry. It does not depend on the control plane socket.
+  const retry = (deps.newRetry ??
+    ((l) => new BootHoldLocalRetry(l, runDocker)))(layout);
+  retry.start();
+  // Stored globally for shutdown cleanup (below).
+  bootHoldRetry = retry;
+  // Only persist the record after every hold is applied.
   if (holdSucceeded) {
-    const retry = new BootHoldLocalRetry(layout, runDocker);
-    retry.start();
-    // Stored globally for shutdown cleanup (below).
-    bootHoldRetry = retry;
-  }
-  // Only persist the record after holds are applied and on success.
-  if (holdSucceeded) {
-    await recordHostBootPersist(layout);
+    await (deps.persist ?? recordHostBootPersist)(layout);
   }
 }
 

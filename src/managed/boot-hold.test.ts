@@ -4,6 +4,7 @@ import { withTempLayout } from "../testing/temp-layout.ts";
 import type { DockerCliResult } from "../deploy/docker-cli.ts";
 import {
   applyBootHold,
+  BootHoldLocalRetry,
   bootHoldPath,
   ensureHoldStopped,
   isHoldablePrimary,
@@ -242,5 +243,47 @@ test("a planned reboot (clean stamp) holds the primary until the control plane a
     );
     assertEquals(fake.calls, [["compose", "-p", PRIMARY_ID, "stop"]]);
     assertEquals((await listActiveBootHolds(layout)).length, 1);
+  });
+});
+
+test("a hold marker write that throws still stops the engine and reports failure", async () => {
+  await withTempLayout(async ({ env }) => {
+    resetManagedIntentsForTests();
+    const layout = resolveLayout(env);
+    const fake = docker();
+    // A file where the managed state directory should be makes every hold
+    // write fail.
+    await Deno.mkdir(`${layout.stateDir}`, { recursive: true });
+    await Deno.writeTextFile(`${layout.stateDir}/managed`, "not a directory");
+    assertEquals(
+      await applyBootHold("unclean", {
+        layout,
+        run: fake.run,
+        listMembers: () => Promise.resolve([record()]),
+      }),
+      false,
+    );
+    assertEquals(fake.calls, [["compose", "-p", PRIMARY_ID, "stop"]]);
+  });
+});
+
+test("BootHoldLocalRetry retries a failed stop and ends itself once every hold is stopped", async () => {
+  await withTempLayout(async ({ env }) => {
+    resetManagedIntentsForTests();
+    const layout = resolveLayout(env);
+    const fake = docker([false, false, true]);
+    await applyBootHold("unclean", {
+      layout,
+      run: fake.run,
+      listMembers: () => Promise.resolve([record()]),
+    });
+    const retry = new BootHoldLocalRetry(layout, fake.run);
+    await retry.tick();
+    assertEquals((await listActiveBootHolds(layout))[0]?.engineStopped, false);
+    await retry.tick();
+    assertEquals((await listActiveBootHolds(layout))[0]?.engineStopped, true);
+    const callsBefore = fake.calls.length;
+    await retry.tick();
+    assertEquals(fake.calls.length, callsBefore);
   });
 });
