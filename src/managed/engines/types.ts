@@ -284,6 +284,23 @@ export type ManagedReplicationObservedHealth = {
    * the streaming tracker uses it to refuse a stale "streaming" read.
    */
   receiptAgeSeconds?: number;
+  /**
+   * Daemon-internal: the oldest `receiptAgeSeconds` that still counts as
+   * receiving (MySQL: twice the heartbeat interval). Default 5 s.
+   */
+  receiptAgeLimitSeconds?: number;
+  /**
+   * MySQL / MariaDB replica only: GTID sets (bounded opaque text) the replica
+   * has received and applied. Absent when not read or malformed (unknown).
+   */
+  receivedGtid?: string;
+  executedGtid?: string;
+  /**
+   * MySQL / MariaDB replica only, computed on the daemon: everything it has
+   * received is applied. Absent (never `true`) when it cannot be proved.
+   * `observedAt` is the sampling time.
+   */
+  fullyApplied?: boolean;
   /** Standby only, on `managed-health-result`. */
   lastStreaming?: ManagedLastStreamingObservation;
   /** Primary only, Postgres: WAL held back by the replicas' slots. */

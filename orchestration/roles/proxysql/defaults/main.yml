@@ -8,6 +8,7 @@ proxysql_config_dir: "{{ turbopanel_config_dir }}/proxysql"
 # directory, never under the daemon-writable config dir.
 proxysql_libexec_dir: "{{ turbopanel_install_root }}/libexec"
 proxysql_wait_ready_script: "{{ proxysql_libexec_dir }}/proxysql-wait-ready.sh"
+proxysql_wait_addresses_script: "{{ proxysql_libexec_dir }}/proxysql-wait-addresses.sh"
 proxysql_tls_dir: "{{ proxysql_config_dir }}/tls"
 proxysql_data_dir: "{{ turbopanel_state_dir }}/proxysql"
 proxysql_service_name: turbopanel-proxysql-stack

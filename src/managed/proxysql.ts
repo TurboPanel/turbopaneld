@@ -380,6 +380,13 @@ function clientPortMappings(
   return mappings;
 }
 
+/** Every published client-listener `host:port`, admin and REST API excluded. */
+export function readPublishedClientMappingsFromCompose(
+  composeText: string,
+): Array<{ host: string; port: number }> {
+  return clientPortMappings(composeText);
+}
+
 /**
  * Recover the previously-published bind addresses (`[]` when the frontend was
  * not published to the host at all) from an on-disk

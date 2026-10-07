@@ -297,6 +297,14 @@
     group: root
     mode: "0750"
 
+- name: Install ProxySQL published-address wait script
+  ansible.builtin.template:
+    src: wait-addresses.sh.j2
+    dest: "{{ proxysql_wait_addresses_script }}"
+    owner: root
+    group: root
+    mode: "0750"
+
 - name: Install turbopanel-proxysql-stack systemd unit
   ansible.builtin.template:
     src: turbopanel-proxysql-stack.service.j2
