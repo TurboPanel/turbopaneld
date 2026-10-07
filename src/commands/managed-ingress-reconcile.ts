@@ -2,6 +2,10 @@
  * `managed.ingress.reconcile` — whole-server ProxySQL desired state.
  */
 
+import {
+  markProxySqlReconciled,
+  withProxySqlLock,
+} from "../managed/proxysql-lock.ts";
 import type {
   EnvironmentDeployContainer,
   ManagedIngressReconcilePayload,
@@ -544,7 +548,25 @@ async function assertRuntimeRepointed(
   if (mismatch !== null) throw new Error(sanitizeForLog(mismatch));
 }
 
-export async function handleManagedIngressReconcile(
+export function handleManagedIngressReconcile(
+  payload: ManagedIngressReconcilePayload,
+  daemonReceivedAt: string,
+  deps?: ManagedIngressReconcileHandlerDeps,
+): Promise<ManagedIngressReconcileResult> {
+  return withProxySqlLock(async () => {
+    const result = await reconcileManagedIngress(
+      payload,
+      daemonReceivedAt,
+      deps,
+    );
+    // Only a reconcile that settled the stack (up or deliberate down) makes
+    // the boot repair stand down; a thrown one leaves it free to run.
+    markProxySqlReconciled();
+    return result;
+  });
+}
+
+async function reconcileManagedIngress(
   payload: ManagedIngressReconcilePayload,
   daemonReceivedAt: string,
   deps?: ManagedIngressReconcileHandlerDeps,
