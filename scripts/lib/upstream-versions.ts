@@ -558,7 +558,7 @@ export function renderReport(result: WatchResult, checkedOn: string): string {
   );
   const info = result.findings.filter((finding) => finding.level === "info");
   const parts = [
-    `Checked on ${checkedOn} by the Upstream Version Watch workflow, which rewrites ` +
+    `Checked on ${checkedOn} by the Upstream Version Watch workflow in TurboPanel/turbopaneld, which rewrites ` +
     "this issue every week. Nothing here is changed automatically: pins are bumped by hand.\n",
     section(
       "Action needed",

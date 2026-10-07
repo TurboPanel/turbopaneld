@@ -28,6 +28,14 @@ import {
   watchUpstream,
 } from "./upstream-versions.ts";
 
+/**
+ * Jest/Mocha-shaped alias for {@link Deno.test}.
+ *
+ * Sonar typescript:S2187 only recognizes `test()` / `it()` / `describe()` and
+ * reports Deno suites as empty; keep this alias so analysis sees real tests.
+ */
+const test = Deno.test.bind(Deno);
+
 const orchestration = new URL("../../orchestration/", import.meta.url);
 const readRepo = (path: string) =>
   Deno.readTextFile(new URL(path, orchestration));
@@ -88,7 +96,7 @@ function deb(
 const levels = (findings: Finding[]) =>
   findings.map((finding) => finding.level);
 
-Deno.test("readPins reads the real registry and role defaults", async () => {
+test("readPins reads the real registry and role defaults", async () => {
   const pins = readPins({
     registryJson: await readRepo("runtime-registry.json"),
     openlitespeedDefaults: await readRepo(
@@ -116,7 +124,7 @@ Deno.test("readPins reads the real registry and role defaults", async () => {
   assert(suites.has("trixie"));
 });
 
-Deno.test("readPins rejects a defaults file without a version pin", () => {
+test("readPins rejects a defaults file without a version pin", () => {
   assertThrows(
     () =>
       readPins({
@@ -130,7 +138,7 @@ Deno.test("readPins rejects a defaults file without a version pin", () => {
   );
 });
 
-Deno.test("readPins tolerates missing optional registry and role fields", () => {
+test("readPins tolerates missing optional registry and role fields", () => {
   const pins = readPins({
     registryJson: JSON.stringify({
       runtimes: { php: { series: { "8.4": {} } } },
@@ -148,7 +156,7 @@ Deno.test("readPins tolerates missing optional registry and role fields", () => 
   assertEquals(pins.lsphpSeries["8.4"], { version: "", pkg: "" });
 });
 
-Deno.test("compareVersions compares numerically, segment by segment", () => {
+test("compareVersions compares numerically, segment by segment", () => {
   assertEquals(compareVersions("1.9.0.1", "1.9.1"), -1);
   assertEquals(compareVersions("8.10", "8.9"), 1);
   assertEquals(compareVersions("1.9", "1.9.0"), 0);
@@ -156,13 +164,13 @@ Deno.test("compareVersions compares numerically, segment by segment", () => {
   assertEquals(newestVersion([]), undefined);
 });
 
-Deno.test("upstreamVersion drops the epoch and Debian revision", () => {
+test("upstreamVersion drops the epoch and Debian revision", () => {
   assertEquals(upstreamVersion("8.5.11-1+trixie"), "8.5.11");
   assertEquals(upstreamVersion("1:2.4.63-1"), "2.4.63");
   assertEquals(upstreamVersion("1.9.1"), "1.9.1");
 });
 
-Deno.test("parsePackages reads stanzas and skips continuation lines", () => {
+test("parsePackages reads stanzas and skips continuation lines", () => {
   const text = `${stanza("lsphp84", "8.4.25-1+trixie", "amd64")}\n\n` +
     `${stanza("lsphp84-common", "8.4.25-1+trixie", "all", SHA_B)}\n\n` +
     "Description: no package field here\n\n";
@@ -185,7 +193,7 @@ Deno.test("parsePackages reads stanzas and skips continuation lines", () => {
   });
 });
 
-Deno.test("pinnedLsphpDebs refuses a file name without suite and arch", () => {
+test("pinnedLsphpDebs refuses a file name without suite and arch", () => {
   assertThrows(
     () => pinnedLsphpDebs({ ...PINS, lsphpDebs: { "lsphp84.deb": SHA_A } }),
     Error,
@@ -193,7 +201,7 @@ Deno.test("pinnedLsphpDebs refuses a file name without suite and arch", () => {
   );
 });
 
-Deno.test("lsphpIndexes lists each suite/arch once and skips arch-all files", () => {
+test("lsphpIndexes lists each suite/arch once and skips arch-all files", () => {
   const pins: Pins = {
     ...PINS,
     lsphpDebs: {
@@ -210,13 +218,13 @@ Deno.test("lsphpIndexes lists each suite/arch once and skips arch-all files", ()
   ]);
 });
 
-Deno.test("lsphpSeriesOf reads base packages only", () => {
+test("lsphpSeriesOf reads base packages only", () => {
   assertEquals(lsphpSeriesOf("lsphp85"), "8.5");
   assertEquals(lsphpSeriesOf("lsphp74"), "7.4");
   assertEquals(lsphpSeriesOf("lsphp85-common"), undefined);
 });
 
-Deno.test("checkLsphp: pins present with matching digests are quiet", () => {
+test("checkLsphp: pins present with matching digests are quiet", () => {
   const findings = checkLsphp(PINS, [{
     suite: "trixie",
     arch: "amd64",
@@ -229,7 +237,7 @@ Deno.test("checkLsphp: pins present with matching digests are quiet", () => {
   assertEquals(findings, []);
 });
 
-Deno.test("checkLsphp: a pinned .deb that is gone needs action", () => {
+test("checkLsphp: a pinned .deb that is gone needs action", () => {
   const findings = checkLsphp(PINS, [{
     suite: "trixie",
     arch: "amd64",
@@ -243,7 +251,7 @@ Deno.test("checkLsphp: a pinned .deb that is gone needs action", () => {
   assert(findings[1].message.includes("8.4.26"));
 });
 
-Deno.test("checkLsphp: a changed digest needs action", () => {
+test("checkLsphp: a changed digest needs action", () => {
   const findings = checkLsphp(PINS, [{
     suite: "trixie",
     arch: "amd64",
@@ -256,7 +264,7 @@ Deno.test("checkLsphp: a changed digest needs action", () => {
   assert(findings[0].message.includes("different sha256"));
 });
 
-Deno.test("checkLsphp: suites we did not fetch are not reported as gone", () => {
+test("checkLsphp: suites we did not fetch are not reported as gone", () => {
   const pins: Pins = {
     ...PINS,
     lsphpDebs: { "lsphp84_8.4.25-1+bookworm_amd64.deb": SHA_A },
@@ -264,7 +272,7 @@ Deno.test("checkLsphp: suites we did not fetch are not reported as gone", () => 
   assertEquals(checkLsphp(pins, []), []);
 });
 
-Deno.test("checkLsphp: a new series is action, older unoffered ones are not", () => {
+test("checkLsphp: a new series is action, older unoffered ones are not", () => {
   const pins: Pins = { ...PINS, lsphpDebs: {} };
   const findings = checkLsphp(pins, [{
     suite: "bookworm",
@@ -281,7 +289,7 @@ Deno.test("checkLsphp: a new series is action, older unoffered ones are not", ()
   assert(findings[0].message.includes("bookworm"));
 });
 
-Deno.test("suryPackagesFor leaves out compiled-in extensions", () => {
+test("suryPackagesFor leaves out compiled-in extensions", () => {
   assertEquals(suryPackagesFor(PINS, "8.4"), [
     "php8.4-fpm",
     "php8.4-cli",
@@ -297,7 +305,7 @@ Deno.test("suryPackagesFor leaves out compiled-in extensions", () => {
   ]);
 });
 
-Deno.test("checkSury: missing packages for an offered series need action", () => {
+test("checkSury: missing packages for an offered series need action", () => {
   const complete = [
     ...suryPackagesFor(PINS, "8.4"),
     ...suryPackagesFor(PINS, "8.5"),
@@ -325,7 +333,7 @@ Deno.test("checkSury: missing packages for an offered series need action", () =>
   assert(findings[0].message.includes("trixie/arm64"));
 });
 
-Deno.test("parseNginxPool keeps stable releases for the pinned dist", () => {
+test("parseNginxPool keeps stable releases for the pinned dist", () => {
   const html = `
 <a href="nginx_1.28.3-1~bookworm_amd64.deb">nginx_1.28.3-1~bookworm_amd64.deb</a>
 <a href="nginx_1.28.3-1~bookworm_arm64.deb">nginx_1.28.3-1~bookworm_arm64.deb</a>
@@ -336,7 +344,7 @@ Deno.test("parseNginxPool keeps stable releases for the pinned dist", () => {
   assertEquals(parseNginxPool(html, "bookworm").sort(), ["1.28.3", "1.30.5"]);
 });
 
-Deno.test("parseGithubReleases skips drafts, pre-releases and odd tags", () => {
+test("parseGithubReleases skips drafts, pre-releases and odd tags", () => {
   const json = JSON.stringify([
     { tag_name: "v1.9.3", draft: false, prerelease: false },
     { tag_name: "v1.9.4", draft: true, prerelease: false },
@@ -348,7 +356,7 @@ Deno.test("parseGithubReleases skips drafts, pre-releases and odd tags", () => {
   assertEquals(parseGithubReleases(json), ["1.9.3", "1.9.0.1"]);
 });
 
-Deno.test("parseTarballIndex tells apr from apr-util and skips signatures", () => {
+test("parseTarballIndex tells apr from apr-util and skips signatures", () => {
   const html = `
 <a href="apr-1.6.5.tar.gz">apr-1.6.5.tar.gz</a>
 <a href="apr-1.7.6.tar.gz">apr-1.7.6.tar.gz</a>
@@ -359,7 +367,7 @@ Deno.test("parseTarballIndex tells apr from apr-util and skips signatures", () =
   assertEquals(parseTarballIndex(html, "apr-util"), ["1.6.5"]);
 });
 
-Deno.test("newerThanPin reports only a strictly newer version", () => {
+test("newerThanPin reports only a strictly newer version", () => {
   assertEquals(newerThanPin("nginx", "nginx stable", "1.28.3", ["1.28.3"]), []);
   assertEquals(newerThanPin("nginx", "nginx stable", "1.28.3", []), []);
   assertEquals(
@@ -388,7 +396,7 @@ function fakeUpstream(pages: Record<string, string>) {
 const packagesUrl = (base: string, suite: string, arch: string) =>
   `${base}/dists/${suite}/main/binary-${arch}/Packages.gz`;
 
-Deno.test("watchUpstream runs every check against the fetched pages", async () => {
+test("watchUpstream runs every check against the fetched pages", async () => {
   const lsphp = [
     stanza("lsphp84", "8.4.25-1+trixie", "amd64"),
     stanza("lsphp84-common", "8.4.25-1+trixie", "all", SHA_B),
@@ -423,7 +431,7 @@ Deno.test("watchUpstream runs every check against the fetched pages", async () =
   assertEquals(requested.length, 6);
 });
 
-Deno.test("watchUpstream records an unreadable upstream and keeps going", async () => {
+test("watchUpstream records an unreadable upstream and keeps going", async () => {
   const { fetchText } = fakeUpstream({
     [OPENLITESPEED_RELEASES]: JSON.stringify([{ tag_name: "v1.9.3" }]),
   });
@@ -447,7 +455,7 @@ Deno.test("watchUpstream records an unreadable upstream and keeps going", async 
   assertEquals(thrown.failures[0].error, "plain string");
 });
 
-Deno.test("renderReport groups findings and lists sources it could not read", () => {
+test("renderReport groups findings and lists sources it could not read", () => {
   const quiet = renderReport({ findings: [], failures: [] }, "2026-10-07");
   assert(quiet.includes("Checked on 2026-10-07"));
   assert(quiet.includes("Nothing needs action."));

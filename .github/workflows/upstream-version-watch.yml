@@ -1,9 +1,14 @@
 # upstream-version-watch: weekly check of the upstream versions we pin by hand
 # (PHP per OS from LiteSpeed lsphp and sury php-fpm, OpenLiteSpeed, nginx,
 # Apache httpd/APR/APR-util). Keeps ONE issue titled "Upstream versions to
-# review" up to date: edits it in place in any state, reopens it only when
-# something needs action, creates it once, never closes it. With issues turned
-# off, the run summary has the report.
+# review" in TurboPanel/turbopanel up to date (owner decision: issues are off
+# here): edits it in place in any state, reopens it only when something needs
+# action, creates it once, never closes it.
+#
+# GITHUB_TOKEN cannot write issues in another repository, so the issue step
+# uses the UPSTREAM_WATCH_ISSUES_TOKEN secret: a fine-grained token for
+# TurboPanel/turbopanel only, with Issues: read and write. Without it (or with
+# issues off there) the report stays in the run summary only.
 # The checks live in scripts/lib/upstream-versions.ts; nothing is bumped here.
 name: Upstream Version Watch
 
@@ -14,7 +19,6 @@ on:
 
 permissions:
   contents: read
-  issues: write
 
 concurrency:
   group: upstream-version-watch
@@ -80,7 +84,8 @@ jobs:
       - name: Update the tracking issue
         if: always() && steps.check.outcome != 'skipped'
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.UPSTREAM_WATCH_ISSUES_TOKEN }}
+          ISSUE_REPO: TurboPanel/turbopanel
           TITLE: Upstream versions to review
           ACTIONS: ${{ steps.check.outputs.actions }}
         run: |
@@ -90,23 +95,28 @@ jobs:
             exit 1
           fi
           cat "$report" >> "$GITHUB_STEP_SUMMARY"
-          # Same fallback as the dependency sweep: with issues turned off on
-          # the repository the report stays in the run summary only.
-          if [ "$(gh api "repos/$GITHUB_REPOSITORY" --jq .has_issues)" != "true" ]; then
-            echo "::notice title=Upstream version watch::Issues are turned off for this repository; the report is in the run summary only."
+          # Same fallback as the dependency sweep: without a token for the
+          # issue repository, or with issues off there, the report stays in
+          # the run summary only.
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::notice title=Upstream version watch::UPSTREAM_WATCH_ISSUES_TOKEN is not set; the report is in the run summary only."
+            exit 0
+          fi
+          if [ "$(gh api "repos/$ISSUE_REPO" --jq .has_issues)" != "true" ]; then
+            echo "::notice title=Upstream version watch::Issues are not available in $ISSUE_REPO; the report is in the run summary only."
             exit 0
           fi
           # One issue for good: found by exact title in any state, edited in
           # place, reopened only when something needs action, created once.
-          found="$(gh issue list -R "$GITHUB_REPOSITORY" --state all --limit 100 \
+          found="$(gh issue list -R "$ISSUE_REPO" --state all --limit 100 \
             --search "\"$TITLE\" in:title" --json number,title,state \
             --jq "map(select(.title == env.TITLE)) | first | select(. != null) | \"\(.number) \(.state)\"")"
           if [ -z "$found" ]; then
-            gh issue create -R "$GITHUB_REPOSITORY" --title "$TITLE" --body-file "$report"
+            gh issue create -R "$ISSUE_REPO" --title "$TITLE" --body-file "$report"
             exit 0
           fi
           number="${found% *}"
-          gh issue edit "$number" -R "$GITHUB_REPOSITORY" --body-file "$report"
+          gh issue edit "$number" -R "$ISSUE_REPO" --body-file "$report"
           if [ "${found#* }" != "OPEN" ] && [ "${ACTIONS:-0}" != "0" ]; then
-            gh issue reopen "$number" -R "$GITHUB_REPOSITORY"
+            gh issue reopen "$number" -R "$ISSUE_REPO"
           fi
