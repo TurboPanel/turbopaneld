@@ -103,6 +103,20 @@ export function emptyGpuSamplesResult(): GpuSamplesResult {
  * `null` — never fabricated, never backfilled past the last adapter in
  * the chain.
  */
+/** The first reading carrying a non-`null` value for `field`, or `undefined` when none does. */
+function firstPresent<K extends keyof GpuReading>(
+  readings: GpuReading[],
+  field: K,
+): NonNullable<GpuReading[K]> | undefined {
+  for (const reading of readings) {
+    const candidate = reading[field];
+    if (candidate !== undefined && candidate !== null) {
+      return candidate as NonNullable<GpuReading[K]>;
+    }
+  }
+  return undefined;
+}
+
 function mergeReadings(
   gpuId: string,
   readings: GpuReading[],
@@ -113,33 +127,17 @@ function mergeReadings(
 } {
   const fields: Omit<GpuSample, "gpuId"> = { ...EMPTY_GPU_FIELDS };
   for (const field of GPU_FIELD_NAMES) {
-    for (const reading of readings) {
-      const candidate = reading[field];
-      if (candidate !== undefined && candidate !== null) {
-        fields[field] = candidate;
-        break;
-      }
-    }
+    fields[field] = firstPresent(readings, field) ?? fields[field];
   }
   const thermals: GpuThermalReading = { ...EMPTY_GPU_THERMALS };
   for (const field of GPU_THERMAL_FIELD_NAMES) {
-    for (const reading of readings) {
-      const candidate = reading[field];
-      if (candidate !== undefined && candidate !== null) {
-        thermals[field] = candidate;
-        break;
-      }
-    }
+    thermals[field] = firstPresent(readings, field) ?? thermals[field];
   }
-  let memoryTotalBytes: number | null = null;
-  for (const reading of readings) {
-    const candidate = reading.memoryTotalBytes;
-    if (candidate !== undefined && candidate !== null) {
-      memoryTotalBytes = candidate;
-      break;
-    }
-  }
-  return { sample: { gpuId, ...fields }, thermals, memoryTotalBytes };
+  return {
+    sample: { gpuId, ...fields },
+    thermals,
+    memoryTotalBytes: firstPresent(readings, "memoryTotalBytes") ?? null,
+  };
 }
 
 /** Vendor-scoped adapter precedence chain — never mixed per GPU (see module doc). */
