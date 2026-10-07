@@ -170,10 +170,9 @@ export async function applyBootHold(
   const members = await (deps.listMembers ??
     (() => listManagedHaMembers(deps.layout)))();
   let holdFailed = false;
-  const held: BootHoldRecord[] = [];
   await forEachSequential(members.filter(isHoldablePrimary), async (member) => {
     try {
-      held.push(await holdOne(member, deps));
+      await holdOne(member, deps);
     } catch (err) {
       holdFailed = true;
       logWarn(
