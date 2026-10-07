@@ -128,27 +128,30 @@ class Repair {
     if (first === null) return "no-compose";
     this.wanted = wantedAddresses(first);
 
-    const sleep = this.deps.sleep ??
-      ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
-    const now = this.deps.now ?? Date.now;
     const budget = this.deps.budgetMs ?? DEFAULT_BUDGET_MS;
-    const deadline = now() + budget;
-    let delay = FIRST_DELAY_MS;
-    let reason = "";
-    for (;;) {
-      const attempt = await this.attempt();
-      if (attempt.kind === "done") return attempt.result;
-      reason = attempt.reason;
-      if (now() + delay > deadline) break;
-      await sleep(delay);
-      delay = Math.min(delay * 2, MAX_DELAY_MS);
-    }
+    const deadline = (this.deps.now ?? Date.now)() + budget;
+    const end = await this.poll(deadline, FIRST_DELAY_MS);
+    if (end.kind === "done") return end.result;
+    const reason = end.reason;
     this.warn(
       `ProxySQL frontend boot repair gave up after ${
         Math.round(budget / 1000)
       }s: ${reason}`,
     );
     return "gave-up";
+  }
+
+  /** Resolves to a final attempt, or to the last retry once out of budget. */
+  private async poll(
+    deadline: number,
+    delay: number,
+  ): Promise<Attempt> {
+    const attempt = await this.attempt();
+    if (attempt.kind === "done") return attempt;
+    if ((this.deps.now ?? Date.now)() + delay > deadline) return attempt;
+    await (this.deps.sleep ??
+      ((ms: number) => new Promise<void>((r) => setTimeout(r, ms))))(delay);
+    return this.poll(deadline, Math.min(delay * 2, MAX_DELAY_MS));
   }
 
   private async attempt(): Promise<Attempt> {
