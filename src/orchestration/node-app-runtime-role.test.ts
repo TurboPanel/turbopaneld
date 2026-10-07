@@ -84,3 +84,39 @@ test("deno-app-runtime-apply is the one playbook that vendors Deno, and the root
   assert(orchestrate.includes(" deno-app-runtime-apply.yml "));
   assert(orchestrate.includes(" deno_app_versions "));
 });
+
+test("turbopanel-user never wipes the other:x traverse the runtimes rely on", async () => {
+  const tasks = parse(
+    await Deno.readTextFile(
+      join(DAEMON_ROOT, "orchestration/roles/turbopanel-user/tasks/main.yml"),
+    ),
+  ) as Task[];
+  const fileOn = (path: string) =>
+    tasks
+      .map((t) =>
+        t["ansible.builtin.file"] as
+          | { path?: string; mode?: string }
+          | undefined
+      )
+      .filter((f) => f?.path === path);
+  // An octal mode would reset the "other" bits on every install and upgrade,
+  // so site owners' Linux users would lose traverse until a runtime role ran.
+  for (
+    const path of [
+      "{{ turbopanel_install_root }}",
+      "{{ turbopanel_vendor_dir }}",
+    ]
+  ) {
+    const found = fileOn(path);
+    assert(found.length === 1, `one file task for ${path}`);
+    assertEquals(found[0]?.mode, "u=rwx,g=rx");
+  }
+  const acl = tasks
+    .map((t) =>
+      t["ansible.posix.acl"] as
+        | { etype?: string; permissions?: string }
+        | undefined
+    )
+    .find((a) => a?.etype === "other");
+  assertEquals(acl?.permissions, "x");
+});

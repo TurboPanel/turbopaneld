@@ -39,10 +39,11 @@ test("the dispatcher needs no privilege and every account may run it", async () 
   assert(!/\bsetuid\b/i.test(source), "dispatcher must never be setuid");
 
   const tasks = await Deno.readTextFile(PHP_FPM_TASKS);
-  const install = /dest: \/usr\/local\/bin\/php\n(?:.*\n)*?\s*mode: "(\d+)"/
+  const install = /dest: \/usr\/local\/bin\/php\n(?:.*\n)*?\s*mode: "([^"]+)"/
     .exec(tasks);
   assert(install, "dispatcher install task must set an explicit mode");
-  assertEquals(install[1], "0750");
+  // Owner and group only, so the `other` ACL entry survives every run.
+  assertEquals(install[1], "u=rwx,g=rx");
   // Every site owner's Linux user may run every installed series, so every
   // account gets read + execute through an `other` ACL entry.
   const acl =

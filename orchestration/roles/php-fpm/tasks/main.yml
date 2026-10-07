@@ -147,7 +147,9 @@
     dest: /usr/local/bin/php
     owner: root
     group: root
-    mode: "0750"
+    # Owner and group bits only: the "other" bits belong to the ACL below, and
+    # a full octal mode would wipe it on every run.
+    mode: "u=rwx,g=rx"
 
 # Every site owner's Linux user may run every installed PHP series, so every
 # account may run the dispatcher too. An `other` ACL entry rather than a 0755

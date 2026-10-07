@@ -1583,6 +1583,8 @@ test("accounts: only principals are created or changed, and only into registry g
         // principal can no longer be put in one.
         ["usermod", "-aG", "tpphp84", "alice"],
         ["usermod", "-aG", "tpnode24", "alice"],
+        // The registry name is matched literally: `.` is not a wildcard.
+        ["usermod", "-aG", "tps.ell", "alice"],
       ]
     ) {
       await refused(host, args);
