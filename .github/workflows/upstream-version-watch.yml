@@ -1,7 +1,8 @@
 # upstream-version-watch: weekly check of the upstream versions we pin by hand
 # (PHP per OS from LiteSpeed lsphp and sury php-fpm, OpenLiteSpeed, nginx,
 # Apache httpd/APR/APR-util). Keeps ONE issue titled "Upstream versions to
-# review" up to date: edits it when open, creates it otherwise, never closes it.
+# review" up to date: edits it in place (reopening it if closed), creates it
+# once, never closes it. With issues turned off, the run summary has the report.
 # The checks live in scripts/lib/upstream-versions.ts; nothing is bumped here.
 name: Upstream Version Watch
 
@@ -86,12 +87,24 @@ jobs:
             echo "::error::No report was written; the tracking issue is unchanged."
             exit 1
           fi
-          number="$(gh issue list -R "$GITHUB_REPOSITORY" --state open \
-            --search "\"$TITLE\" in:title" --json number,title \
-            --jq "map(select(.title == env.TITLE)) | first | .number // empty")"
-          if [ -n "$number" ]; then
-            gh issue edit "$number" -R "$GITHUB_REPOSITORY" --body-file "$report"
-          else
-            gh issue create -R "$GITHUB_REPOSITORY" --title "$TITLE" --body-file "$report"
-          fi
           cat "$report" >> "$GITHUB_STEP_SUMMARY"
+          # Same fallback as the dependency sweep: with issues turned off on
+          # the repository the report stays in the run summary only.
+          if [ "$(gh api "repos/$GITHUB_REPOSITORY" --jq .has_issues)" != "true" ]; then
+            echo "::notice title=Upstream version watch::Issues are turned off for this repository; the report is in the run summary only."
+            exit 0
+          fi
+          # One issue for good: found by exact title in any state, edited in
+          # place and reopened if someone closed it, created only once.
+          found="$(gh issue list -R "$GITHUB_REPOSITORY" --state all --limit 100 \
+            --search "\"$TITLE\" in:title" --json number,title,state \
+            --jq "map(select(.title == env.TITLE)) | first | select(. != null) | \"\(.number) \(.state)\"")"
+          if [ -z "$found" ]; then
+            gh issue create -R "$GITHUB_REPOSITORY" --title "$TITLE" --body-file "$report"
+            exit 0
+          fi
+          number="${found% *}"
+          gh issue edit "$number" -R "$GITHUB_REPOSITORY" --body-file "$report"
+          if [ "${found#* }" != "OPEN" ]; then
+            gh issue reopen "$number" -R "$GITHUB_REPOSITORY"
+          fi
