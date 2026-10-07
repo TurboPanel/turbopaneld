@@ -1559,6 +1559,10 @@ END_rules
  * `allowBrowse` is OpenLiteSpeed's "Accessible" switch for the context, not
  * directory listing (that is `autoIndex`): `0` answers 403 for everything.
  *
+ * `useServer 0` in the `index` block makes the vhost's own file list count: left
+ * out, OpenLiteSpeed keeps the server-level `indexFiles index.html` and a
+ * directory request never reaches `index.php`.
+ *
  * Static document root only (no directory listing) unless `php` is supplied, in
  * which case the vhost also carries the processor for the site's own runtime
  * and a `.php` script handler bound to it. The hosting PHP settings live in
@@ -1571,6 +1575,7 @@ export function openlitespeedVhostConfig(
     return `docRoot $VH_ROOT/
 index {
   indexFiles index.html
+  useServer 0
   autoIndex 0
 }
 ${openlitespeedScriptDenyRewrite(false)}
@@ -1593,6 +1598,7 @@ context / {
   return `docRoot $VH_ROOT/
 index {
   indexFiles index.php, index.html
+  useServer 0
   autoIndex 0
 }
 
