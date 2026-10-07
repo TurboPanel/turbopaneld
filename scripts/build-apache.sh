@@ -68,13 +68,17 @@ for k in httpd apr; do
 done
 
 fetch() { # <url> <file> <sha256> <signer fingerprint>
-  curl --proto "=https" --tlsv1.2 -fsSL -o "$2" "$1"
-  curl --proto "=https" --tlsv1.2 -fsSL -o "$2.asc" "$1.asc"
-  echo "$3  $2" | sha256sum -c -
+  fetch_url="$1"
+  fetch_file="$2"
+  fetch_sha="$3"
+  fetch_signer="$4"
+  curl --proto "=https" --tlsv1.2 -fsSL -o "$fetch_file" "$fetch_url"
+  curl --proto "=https" --tlsv1.2 -fsSL -o "$fetch_file.asc" "$fetch_url.asc"
+  echo "$fetch_sha  $fetch_file" | sha256sum -c -
   # The signature must verify and come from the pinned release manager.
-  gpg --batch --status-fd 1 --verify "$2.asc" "$2" 2>/dev/null |
-    grep -q "^\[GNUPG:\] VALIDSIG $4 " || {
-    echo "signature check failed for $1 (expected signer $4)" >&2
+  gpg --batch --status-fd 1 --verify "$fetch_file.asc" "$fetch_file" 2>/dev/null |
+    grep -q "^\[GNUPG:\] VALIDSIG $fetch_signer " || {
+    echo "signature check failed for $fetch_url (expected signer $fetch_signer)" >&2
     exit 1
   }
 }
@@ -157,9 +161,11 @@ while read -r f; do
       linux-vdso* | /lib*/ld-linux* | ld-linux*) continue ;;
       libc.so* | libm.so* | libdl.so* | libpthread.so* | libcrypt.so* | librt.so*) continue ;;
       libz.so* | libexpat.so* | libpcre2-8.so* | libssl.so* | libcrypto.so* | libuuid.so*) continue ;;
+      *) ;;
     esac
     case "$rest" in
       *"=> $TREE/"*) continue ;;
+      *) ;;
     esac
     BAD="$BAD $f:$lib"
   done <"$LDD_OUT"
