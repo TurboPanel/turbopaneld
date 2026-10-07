@@ -1015,7 +1015,10 @@ export class LinuxMetricsCollector implements MetricsCollector {
         logicalCores: snapshot.cpu.cores.length,
         root: rootFilesystemCapacity,
         filesystems: filesystemSizeReadings,
-        gpus: [],
+        gpus: gpuResult.samples.map((sample) => ({
+          gpuId: sample.gpuId,
+          memoryTotalBytes: gpuResult.memoryTotals.get(sample.gpuId) ?? null,
+        })),
       }),
     });
     return {

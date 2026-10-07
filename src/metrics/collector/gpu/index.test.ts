@@ -295,3 +295,22 @@ test("buildGpuSamples consults a fallback-only NVIDIA adapter only when DCGM and
   assertEquals(withoutNvml.samples[0].memoryUsedBytes, 34 * 1024 * 1024);
   assertEquals(smiCalls, 1);
 });
+
+test("buildGpuSamples reports each GPU's memory size beside the sample, first adapter with a value wins, null when none has one", async () => {
+  const adapters: GpuAdapterSet = {
+    dcgm: nullAdapter("dcgm"),
+    nvml: fakeAdapter("nvml", () => ({ memoryTotalBytes: 16 * 1024 ** 3 })),
+    sysfs: fakeAdapter("sysfs", () => ({ utilizationPercent: 3 })),
+  };
+  const nvidia = gpu({
+    gpuId: "pci:0000:02:00.0",
+    vendor: "nvidia",
+    chip: "nvidia",
+  });
+  const amd = gpu();
+  const result = await buildGpuSamples([nvidia, amd], adapters, ctx());
+  assertEquals(result.memoryTotals.get(nvidia.gpuId), 16 * 1024 ** 3);
+  assertEquals(result.memoryTotals.get(amd.gpuId), null);
+  // The size is not a sample field.
+  assertEquals("memoryTotalBytes" in result.samples[0], false);
+});

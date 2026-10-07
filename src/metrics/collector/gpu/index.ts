@@ -37,6 +37,7 @@ import type {
   GpuAdapterSet,
   GpuReadContext,
   GpuReading,
+  GpuSizeReading,
   GpuThermalReading,
 } from "./adapter.ts";
 
@@ -46,6 +47,7 @@ export type {
   GpuAdapterSet,
   GpuReadContext,
   GpuReading,
+  GpuSizeReading,
   GpuThermalReading,
 } from "./adapter.ts";
 export { DCGM_EXPORTER_ADDR, DcgmGpuAdapter } from "./dcgm-adapter.ts";
@@ -85,11 +87,13 @@ export type GpuThermalReadings = Map<string, GpuThermalReading>;
 export type GpuSamplesResult = {
   samples: GpuSample[];
   thermals: GpuThermalReadings;
+  /** Each GPU's memory size this tick (`null` when no adapter knows it), keyed by `gpuId`. */
+  memoryTotals: Map<string, number | null>;
 };
 
 /** The empty result — the shape a collector with no wired adapter set produces. */
 export function emptyGpuSamplesResult(): GpuSamplesResult {
-  return { samples: [], thermals: new Map() };
+  return { samples: [], thermals: new Map(), memoryTotals: new Map() };
 }
 
 /**
@@ -103,7 +107,11 @@ export function emptyGpuSamplesResult(): GpuSamplesResult {
 function mergeReadings(
   gpuId: string,
   readings: GpuReading[],
-): { sample: GpuSample; thermals: GpuThermalReading } {
+): {
+  sample: GpuSample;
+  thermals: GpuThermalReading;
+  memoryTotalBytes: number | null;
+} {
   const fields: Omit<GpuSample, "gpuId"> = { ...EMPTY_GPU_FIELDS };
   for (const field of GPU_FIELD_NAMES) {
     for (const reading of readings) {
@@ -124,7 +132,15 @@ function mergeReadings(
       }
     }
   }
-  return { sample: { gpuId, ...fields }, thermals };
+  let memoryTotalBytes: number | null = null;
+  for (const reading of readings) {
+    const candidate = reading.memoryTotalBytes;
+    if (candidate !== undefined && candidate !== null) {
+      memoryTotalBytes = candidate;
+      break;
+    }
+  }
+  return { sample: { gpuId, ...fields }, thermals, memoryTotalBytes };
 }
 
 /** Vendor-scoped adapter precedence chain — never mixed per GPU (see module doc). */
@@ -200,6 +216,7 @@ export async function buildGpuSamples(
       return {
         sample: { gpuId: gpu.gpuId, ...EMPTY_GPU_FIELDS },
         thermals: { ...EMPTY_GPU_THERMALS },
+        memoryTotalBytes: null,
       };
     }
     return mergeReadings(gpu.gpuId, readings);
@@ -209,6 +226,9 @@ export async function buildGpuSamples(
     samples: merged.map((entry) => entry.sample),
     thermals: new Map(
       merged.map((entry) => [entry.sample.gpuId, entry.thermals]),
+    ),
+    memoryTotals: new Map(
+      merged.map((entry) => [entry.sample.gpuId, entry.memoryTotalBytes]),
     ),
   };
 }

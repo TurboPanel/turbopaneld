@@ -99,6 +99,12 @@ export function parseDcgmGpuReading(
     reading.memoryUsedBytes = framebufferUsedMib * BYTES_PER_MIB;
   }
 
+  const framebufferFreeMib = firstValue(own, "DCGM_FI_DEV_FB_FREE");
+  if (framebufferUsedMib !== undefined && framebufferFreeMib !== undefined) {
+    reading.memoryTotalBytes = (framebufferUsedMib + framebufferFreeMib) *
+      BYTES_PER_MIB;
+  }
+
   const memoryActivity = firstValue(own, "DCGM_FI_DEV_MEM_COPY_UTIL");
   if (memoryActivity !== undefined) {
     reading.memoryActivityPercent = memoryActivity;
