@@ -49,6 +49,7 @@ import { forEachSequential } from "../util/sequential.ts";
 import { runLocalPlaybook } from "../orchestration/ansible.ts";
 import {
   ORCHESTRATION_DIR,
+  PHP_SERIES_PRUNE_PLAYBOOK,
   SITE_APACHE_APPLY_PLAYBOOK,
   SITE_CADDY_APPLY_PLAYBOOK,
   SITE_NGINX_APPLY_PLAYBOOK,
@@ -56,6 +57,10 @@ import {
 } from "../orchestration/assets.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 import { readOsRelease } from "../host/os-release.ts";
+import {
+  type HostRuntimeMetadata,
+  readHostRuntimes,
+} from "../host/runtimes.ts";
 import {
   isAllowedExtension,
   unsupportedPhpSeriesMessage,
@@ -108,6 +113,11 @@ import {
   type ProbeHostPortFn,
 } from "../managed/proxysql.ts";
 import {
+  type PhpSeriesUsageInput,
+  prunePhpSeries,
+  unusedPhpSeries,
+} from "./site/php-series-prune.ts";
+import {
   apacheBehindNginxLines,
   apacheDotfileDenyLines,
   isNginxApacheSite,
@@ -118,6 +128,7 @@ import {
   siteServingEngines,
 } from "./site/nginx-apache.ts";
 import {
+  isSitePhpRuntimeId,
   isSitePhpRuntimeOf,
   sitePhpFpmConf,
   sitePhpIni,
@@ -142,6 +153,8 @@ import {
   listSitePhpUnits,
   orphanSitePhpRuntimes,
   type PreparedSitePhpRuntime,
+  readSiteConfigTexts,
+  readSitePhpUnits,
   removeSitePhpRuntimes,
   rollbackSitePhpRuntime,
   settleSitePhpRuntimes,
@@ -214,6 +227,8 @@ type SiteIo = {
   /** Where per-site PHP units live (`/etc/systemd/system` on a host). */
   unitDir?: string;
   sleep?: (ms: number) => Promise<void>;
+  /** What the host has installed; the real probe is skipped when seams are set. */
+  hostRuntimes?: () => HostRuntimeMetadata | undefined;
 };
 
 let activeIo: SiteIo | undefined;
@@ -2344,6 +2359,8 @@ export type ApplySiteOpts = {
   runPlaybook?: SitePlaybookFn;
   /** Test seam: the systemd unit directory per-site PHP units go to. */
   systemdUnitDir?: string;
+  /** Test seam: the runtimes the host reports installed (unused-series check). */
+  hostRuntimes?: () => HostRuntimeMetadata | undefined;
   /** Test seam: the pause before a started PHP runtime is checked. */
   sleep?: (ms: number) => Promise<void>;
   /** Test seam: whether a loopback port could be bound right now. */
@@ -2353,7 +2370,9 @@ export type ApplySiteOpts = {
 /** Optional test seams for {@link removeSites}. */
 export type RemoveSiteDeps = {
   run?: SiteRunFn;
+  runPlaybook?: SitePlaybookFn;
   systemdUnitDir?: string;
+  hostRuntimes?: () => HostRuntimeMetadata | undefined;
 };
 
 function resolveSiteIo(
@@ -2362,6 +2381,7 @@ function resolveSiteIo(
     runPlaybook?: SitePlaybookFn;
     systemdUnitDir?: string;
     sleep?: (ms: number) => Promise<void>;
+    hostRuntimes?: () => HostRuntimeMetadata | undefined;
   }>,
 ): SiteIo | undefined {
   if (!opts?.run && !opts?.runPlaybook) return undefined;
@@ -2372,6 +2392,9 @@ function resolveSiteIo(
       ? {}
       : { unitDir: opts.systemdUnitDir }),
     ...(opts.sleep === undefined ? {} : { sleep: opts.sleep }),
+    ...(opts.hostRuntimes === undefined
+      ? {}
+      : { hostRuntimes: opts.hostRuntimes }),
   };
 }
 
@@ -4051,6 +4074,8 @@ export async function applySites(
         )
         .map((site) => site.composeServiceName),
     );
+    // A site that moved to another PHP series may have left the old one empty.
+    await pruneUnusedPhpSeries(layout);
 
     // `reloaded=` empty is the expected shape of a release promote that only
     // moved `current` — say so, or a skipped reload looks like a lost step.
@@ -4147,7 +4172,8 @@ async function installedPhpSeries(layout: LayoutPaths): Promise<string[]> {
  *
  * Retiring a series is a **removal-path** decision, never a side effect of an
  * install: the deploy payload describes one environment, but the host serves
- * many. Packages stay installed — uninstalling is a fleet decision.
+ * many. Removing the packages is a separate step, {@link prunePhpSeries},
+ * once no site uses the series.
  */
 async function disableIdlePhpSeries(
   layout: LayoutPaths,
@@ -4172,6 +4198,76 @@ async function disableIdlePhpSeries(
   );
   if (!stop.success) {
     logWarn("deploy", `could not disable idle ${unit}: ${stop.stderr}`);
+  }
+}
+
+/**
+ * Read the host for {@link prunePhpSeries}: what is installed and every place a
+ * series can be used. `null` when something that could name a series could not
+ * be read. The expensive part (every vhost's text) is read only when a series
+ * is still unclaimed after the cheap checks.
+ */
+async function gatherPhpSeriesUsage(
+  layout: LayoutPaths,
+): Promise<PhpSeriesUsageInput | null> {
+  // With test seams set the real host is never probed.
+  const host = activeIo
+    ? activeIo.hostRuntimes?.()
+    : readHostRuntimes(layout.runtimesDir);
+  const installed = [
+    ...new Set([
+      ...(host?.php?.series ?? []),
+      ...(host?.lsphp?.series ?? []),
+      ...await installedPhpSeries(layout),
+    ]),
+  ];
+  const pools = new Map<string, string[]>();
+  try {
+    await forEachSequential(installed, async (series) => {
+      pools.set(
+        series,
+        await listEngineConfigDir(phpFpmPoolsDir(layout, series)) ?? [],
+      );
+    });
+  } catch {
+    return null;
+  }
+  // A unit listing that failed is doubt, not "no per-site runtimes".
+  const units = await readSitePhpUnits(sitePhpIo());
+  if (units === null) return null;
+  const runtimeIds = [...units.keys()].filter(isSitePhpRuntimeId);
+  const cheap: PhpSeriesUsageInput = {
+    installed,
+    pools,
+    runtimeIds,
+    configTexts: [],
+  };
+  if (unusedPhpSeries(cheap).length === 0) return cheap;
+  const configTexts = await readSiteConfigTexts(sitePhpIo(), layout.configDir);
+  return configTexts === null ? null : { ...cheap, configTexts };
+}
+
+/**
+ * Remove the PHP series no site uses any more (packages, vendored lsphp,
+ * config). Installing stays lazy; this is its counterpart, run after a deploy
+ * or a teardown changed what a host serves. Best-effort: the deploy or teardown
+ * that called it has already succeeded, and a series that stays is retried by
+ * the next one.
+ */
+async function pruneUnusedPhpSeries(layout: LayoutPaths): Promise<void> {
+  try {
+    await prunePhpSeries({
+      gather: () => gatherPhpSeriesUsage(layout),
+      remove: (series) =>
+        runSitePlaybook(
+          PHP_SERIES_PRUNE_PLAYBOOK,
+          `php-series-prune (remove unused PHP ${series.join(", ")})`,
+          ["-e", JSON.stringify({ php_series_prune: series })],
+        ),
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    logWarn("deploy", `unused PHP series not checked: ${message}`);
   }
 }
 
@@ -4340,6 +4436,9 @@ export async function removeSites(
       ...nginxRemoved.services,
       ...apacheRemoved.services,
     ]);
+    // Nothing names the PHP this environment used: remove it once no other
+    // environment on the host uses it either.
+    await pruneUnusedPhpSeries(layout);
   });
 }
 
