@@ -1,14 +1,13 @@
 # Publishes a GitHub Release on a v* tag: compiles and packages the daemon
-# exactly like publish-daemon-trunk.yml does for the trunk/CDN drop, but
+# exactly like publish-daemon-trunk.yml does for the rolling canary, but
 # with a real version (TURBOPANEL_RELEASE_VERSION, already supported
 # end-to-end by scripts/package-daemon-release.sh and
 # scripts/bundle-orchestration.sh — this workflow is the first caller to
 # actually set it), and publishes to GitHub Releases.
 #
-# The per-merge trunk → Bunny/dl.trbp.nl CDN drop that used to sit beside this
-# path is retired (owner decision 2026-10-05: "i dont think we need the trunk
-# channel anymore"; the DL_S3_* secrets are deleted). publish-daemon-trunk.yml
-# keeps its push-to-trunk trigger only to publish the rolling GitHub canary.
+# There is no per-merge CDN drop any more (owner decision 2026-10-05: the
+# `trunk` channel is retired). publish-daemon-trunk.yml keeps its push-to-trunk
+# trigger only to publish the rolling GitHub canary.
 #
 # The manifest.json this generates records the tag-pinned GitHub Release
 # download URL for every asset (ARTIFACT_BASE_URL below — see

@@ -638,9 +638,9 @@ tp_read_control_plane_pin() {
 # Release-rail manifest URL check, on the raw string: https only, exact host,
 # no %, @, :, ?, #, \, whitespace or controls, no empty, "." or ".." path
 # segment, and one exact rail shape per kind (daemon, instance, ui):
-#   daemon    https://dl.trbp.nl/channels/<channel>/manifest*.json
 #   any kind  https://github.com/TurboPanel/<repo>/releases/download/<tag>/manifest*.json
 #             https://github.com/TurboPanel/<repo>/releases/latest/download/manifest*.json
+# (dl.trbp.nl is no longer on the rail: the trunk CDN drop was retired.)
 # Byte-identical in scripts/run.sh and orchestration/scripts/tp-orchestrate;
 # src/update/urls.ts releaseManifestUrlAllowed is the TypeScript copy, and
 # src/testing/release-manifest-url-corpus.json pins all three together.
@@ -673,10 +673,6 @@ tp_release_manifest_url_ok() {
     *) return 1 ;;
   esac
   case "$_rmu_host" in
-    dl.trbp.nl)
-      [ "$_rmu_kind" = daemon ] || return 1
-      _rmu_mid="${_rmu_path#/channels/}"
-      ;;
     github.com)
       _rmu_mid="${_rmu_path#/TurboPanel/"$_rmu_repo"/releases/}"
       ;;
@@ -687,13 +683,6 @@ tp_release_manifest_url_ok() {
     */*) _rmu_mid="${_rmu_mid%/*}" ;;
     *) return 1 ;;
   esac
-  if [ "$_rmu_host" = dl.trbp.nl ]; then
-    case "$_rmu_mid" in
-      */*) return 1 ;;
-      *) ;;
-    esac
-    return 0
-  fi
   case "$_rmu_mid" in
     latest/download) return 0 ;;
     download/*/*) return 1 ;;
