@@ -147,10 +147,13 @@ export function buildEngineExec(
   run: RunDockerFn,
   retryDelayMs: number = ENGINE_EXEC_RETRY_MS,
 ): ManagedEngineContext["exec"] {
+  // Root explicitly: the MariaDB UBI image defaults to user `mysql`, but the
+  // platform admin is `root@localhost` over `unix_socket`, which only maps
+  // from OS user root. Other variants already default to root.
   return async (argv, input) => {
     const execOnce = () =>
       run(
-        ["exec", "-i", containerId, ...argv],
+        ["exec", "-i", "-u", "0", containerId, ...argv],
         input === undefined ? undefined : { input },
       );
     const retryWhileTransient = async (

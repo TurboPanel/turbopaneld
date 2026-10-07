@@ -646,7 +646,7 @@ export async function restoreManagedBackupArtifact(
   const runRestore = deps.runRestore ?? defaultRunRestore;
   const source = await Deno.open(artifactPath, { read: true });
   const outcome = await runRestore(
-    ["exec", "-i", target.containerId, ...restoreArgv],
+    ["exec", "-i", "-u", "0", target.containerId, ...restoreArgv],
     source.readable,
   );
 
