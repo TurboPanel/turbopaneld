@@ -19,12 +19,7 @@
  */
 
 import { sitePhpRuntimeIdsIn } from "./php-runtime.ts";
-import {
-  holdPruneKeys,
-  phpSeriesHoldKey,
-  pruneUnheld,
-  resetPruneHoldsForTests,
-} from "./prune-holds.ts";
+import { holdPruneKeys, phpSeriesHoldKey, pruneUnheld } from "./prune-holds.ts";
 
 /** What the host looks like, gathered by the caller (all reads, no writes). */
 export type PhpSeriesUsageInput = Readonly<{
@@ -129,4 +124,4 @@ export function prunePhpSeries(deps: PhpSeriesPruneDeps): Promise<string[]> {
 }
 
 /** Test seam: forget holds and a running prune between cases. */
-export const resetPhpSeriesPruneForTests = resetPruneHoldsForTests;
+export { resetPruneHoldsForTests as resetPhpSeriesPruneForTests } from "./prune-holds.ts";
