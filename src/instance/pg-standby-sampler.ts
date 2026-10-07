@@ -58,7 +58,7 @@ export type PgStandbySamplerOptions = {
   /** Test seam — defaults to the Postgres runtime's standby `readHealth`. */
   readStandby?: (
     containerName: string,
-    engine: "postgres" | "mysql" | "mariadb",
+    engine: SampledEngine,
   ) => Promise<ManagedReplicationObservedHealth>;
   runDocker?: RunDockerFn;
   layout?: LayoutPaths;
@@ -70,6 +70,8 @@ export type PgStandbySamplerOptions = {
   engines?: readonly string[];
 };
 
+type SampledEngine = "postgres" | "mysql" | "mariadb";
+
 export const MYSQL_FAMILY_SAMPLED_ENGINES = ["mysql", "mariadb"] as const;
 
 export function isSampledStandby(
@@ -80,7 +82,7 @@ export function isSampledStandby(
 }
 
 function readEngineStandby(
-  engineCode: "postgres" | "mysql" | "mariadb",
+  engineCode: SampledEngine,
   containerName: string,
   run: RunDockerFn,
 ): Promise<ManagedReplicationObservedHealth> {
@@ -119,7 +121,7 @@ export class PgStandbySampler {
   readonly #listMembers: () => Promise<ManagedHaMemberRecord[]>;
   readonly #readStandby: (
     containerName: string,
-    engine: "postgres" | "mysql" | "mariadb",
+    engine: SampledEngine,
   ) => Promise<ManagedReplicationObservedHealth>;
   readonly #timeoutMs: number;
   readonly #engines: readonly string[];
@@ -212,7 +214,7 @@ export class PgStandbySampler {
     this.#busy.add(containerName);
     const read = this.#readStandby(
       containerName,
-      record.engine as "postgres" | "mysql" | "mariadb",
+      record.engine as SampledEngine,
     );
     read.then(
       () => this.#busy.delete(containerName),

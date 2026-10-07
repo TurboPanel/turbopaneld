@@ -45,7 +45,10 @@ function nonNegativeSeconds(raw: string | undefined): number | undefined {
 }
 
 function normalizeGtidList(text: string): string {
-  return text.split(",").map((part) => part.trim()).filter(Boolean).sort()
+  return text.split(",").map((part) => part.trim()).filter(Boolean).sort((
+    a,
+    b,
+  ) => a.localeCompare(b))
     .join(",");
 }
 
