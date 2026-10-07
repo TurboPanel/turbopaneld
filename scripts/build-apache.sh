@@ -1,6 +1,6 @@
 #!/bin/sh
 # Builds the vendored Apache httpd (+ bundled APR / APR-util) once, for the
-# CPU this script runs on, and writes apache-<httpdver>-<arch>.tar.gz plus its
+# CPU this script runs on, and writes apache-httpd-<httpdver>-<arch>.tar.zst plus its
 # .sha256 file into OUT_DIR. The `apache` Ansible role downloads that tarball
 # instead of compiling on every host; .github/workflows/vendor-apache.yml runs
 # this on a native x86_64 and a native arm64 runner so both come from the same
@@ -13,7 +13,7 @@
 # Source tarballs are verified against the SHA-256 pins in the role defaults.
 # Versions and source URLs come from orchestration/roles/apache/defaults/main.yml
 # (the single pin). Needs: build-essential libexpat1-dev libpcre2-dev
-# libssl-dev zlib1g-dev curl.
+# libssl-dev zlib1g-dev curl zstd.
 set -eu
 
 ROOT="$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)"
@@ -38,8 +38,8 @@ APU_SHA="$(pin apache_apr_util_sha256)"
 }
 
 case "$(uname -m)" in
-  x86_64) ARCH=x86_64 ;;
-  aarch64 | arm64) ARCH=aarch64 ;;
+  x86_64 | amd64) ARCH=amd64 ;;
+  aarch64 | arm64) ARCH=arm64 ;;
   *) echo "unsupported CPU: $(uname -m)" >&2; exit 1 ;;
 esac
 
@@ -134,6 +134,15 @@ TREE="$STAGE$PREFIX"
 rm -rf "$TREE/manual" "$TREE/htdocs" "$TREE/cgi-bin"
 mkdir -p "$TREE/htdocs"
 
+# The Apache License 2.0 asks redistributors to pass on LICENSE and NOTICE.
+SRC="$TMP/httpd-$HTTPD_VER"
+for part in httpd:. apr:srclib/apr apr-util:srclib/apr-util; do
+  name="${part%%:*}"
+  dir="$SRC/${part#*:}"
+  install -d "$TREE/share/licenses/$name"
+  install -m 0644 "$dir/LICENSE" "$dir/NOTICE" "$TREE/share/licenses/$name/"
+done
+
 # Fail the build if httpd, any module, or any bundled library (APR, APR-util
 # and its drivers) links a library the hosts do not get from the role's runtime
 # package list (apache_runtime_packages): libc family, zlib, expat, pcre2,
@@ -175,7 +184,7 @@ done <"$FILES"
   exit 1
 }
 
-ASSET="apache-$HTTPD_VER-$ARCH.tar.gz"
-tar --sort=name --owner=0 --group=0 --numeric-owner -czf "$OUT_DIR/$ASSET" -C "$TREE" .
+ASSET="apache-httpd-$HTTPD_VER-$ARCH.tar.zst"
+tar --sort=name --owner=0 --group=0 --numeric-owner -I 'zstd -19 -T0' -cf "$OUT_DIR/$ASSET" -C "$TREE" .
 (cd "$OUT_DIR" && sha256sum "$ASSET" >"$ASSET.sha256")
 cat "$OUT_DIR/$ASSET.sha256"

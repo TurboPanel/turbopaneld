@@ -1,12 +1,12 @@
 # Builds the vendored Apache httpd ONCE per pinned version, for x86_64 and
-# arm64, and publishes it as the release `vendor-apache-<httpdver>` so hosts
+# arm64, and publishes it as the release `apache-httpd-<httpdver>` so hosts
 # download a tarball instead of compiling (the `apache` role,
 # orchestration/roles/apache). The build flags live in scripts/build-apache.sh;
 # the version pin is orchestration/roles/apache/defaults/main.yml.
 #
 # Runs on workflow_dispatch and when that pin changes on trunk. A release is
 # never overwritten (a rebuild would change the SHA-256 the role pins): if
-# `vendor-apache-<httpdver>` already exists the run only reports its digests.
+# `apache-httpd-<httpdver>` already exists the run only reports its digests.
 # After the first publish of a version, copy the digests from the run summary
 # into `apache_sha256` in the role defaults (the role refuses to install
 # until they are pinned).
@@ -41,9 +41,9 @@ jobs:
       fail-fast: true
       matrix:
         include:
-          - arch: x86_64
+          - arch: amd64
             runner: ubuntu-22.04
-          - arch: aarch64
+          - arch: arm64
             runner: ubuntu-22.04-arm
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
@@ -57,7 +57,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential libexpat1-dev libpcre2-dev libssl-dev zlib1g-dev curl
+            build-essential libexpat1-dev libpcre2-dev libssl-dev zlib1g-dev curl zstd
 
       - name: Build Apache
         env:
@@ -74,7 +74,7 @@ jobs:
           retention-days: 3
 
   publish:
-    name: Publish vendor-apache release
+    name: Publish apache-httpd release
     needs: build
     # A dispatch from a branch may build (to try changes) but never publishes.
     if: github.ref == 'refs/heads/trunk'
@@ -100,7 +100,7 @@ jobs:
         run: |
           set -eu
           VER="$(sed -n 's/^apache_version: "\(.*\)"$/\1/p' orchestration/roles/apache/defaults/main.yml | head -n 1)"
-          TAG="vendor-apache-${VER}"
+          TAG="apache-httpd-${VER}"
           # `gh release view` cannot see a draft, so look through the API.
           # A published release is final: stop. Only then clear leftover drafts.
           gh api "repos/${GITHUB_REPOSITORY}/releases" --paginate \
@@ -120,17 +120,26 @@ jobs:
             echo '```yaml'
             echo "apache_sha256:"
             echo "  \"${VER}\":"
-            for arch in x86_64 aarch64; do
-              echo "    ${arch}: \"$(cut -d' ' -f1 "out/apache-${VER}-${arch}.tar.gz.sha256")\""
+            for arch in amd64 arm64; do
+              echo "    ${arch}: \"$(cut -d' ' -f1 "out/apache-httpd-${VER}-${arch}.tar.zst.sha256")\""
             done
             echo '```'
           } >>"$GITHUB_STEP_SUMMARY"
+          APR="$(sed -n 's/^apache_apr_version: "\(.*\)"$/\1/p' orchestration/roles/apache/defaults/main.yml | head -n 1)"
+          APU="$(sed -n 's/^apache_apr_util_version: "\(.*\)"$/\1/p' orchestration/roles/apache/defaults/main.yml | head -n 1)"
+          cat >notes.md <<EOF
+          Prebuilt vendor library for the Apache HTTP Server ${VER} (with APR ${APR} and APR-util ${APU}) on 64-bit Linux, amd64 and arm64. TurboPanel's apache role installs it and checks the SHA-256 pinned in its defaults.
+
+          The Apache HTTP Server, APR and APR-util are made by The Apache Software Foundation (https://httpd.apache.org, https://apr.apache.org) and licensed under the Apache License 2.0. These archives are built from the unmodified, signature-checked ASF source releases and carry their LICENSE and NOTICE files under share/licenses. This build is not made or endorsed by the ASF.
+          EOF
           # Draft first, publish only once every asset is uploaded, so a failed
           # upload cannot leave a published partial release that reruns skip.
-          gh release create "$TAG" out/*.tar.gz out/SHA256SUMS \
+          gh release create "$TAG" out/*.tar.zst out/SHA256SUMS \
             --draft \
             --target "$GITHUB_SHA" \
-            --title "Vendored Apache httpd ${VER}" \
-            --notes "Prebuilt Apache httpd ${VER} for x86_64 and aarch64, built by the Vendor Apache workflow. The apache role downloads these and checks the SHA-256 pinned in its defaults." \
+            --title "$TAG" \
+            --notes-file notes.md \
             --latest=false
-          gh release edit "$TAG" --draft=false
+          # Publishing a draft marks it Latest unless told otherwise, which would
+          # point every releases/latest download (the update manifest) here.
+          gh release edit "$TAG" --draft=false --latest=false

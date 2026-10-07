@@ -178,9 +178,10 @@ Vendored — **never** a distro package, and never compiled on the host (a
 2-core build took over 10 minutes and timed the first deploy out). Apache
 (httpd + bundled APR / APR-util) is built **once in CI** by
 `.github/workflows/vendor-apache.yml` (`scripts/build-apache.sh`, native
-x86_64 and arm64 runners, same configure flags) and published as the release
-`vendor-apache-<httpdver>`: `apache-<httpdver>-<arch>.tar.gz` plus
-`SHA256SUMS`. The role pins version, URL and per-arch SHA-256 in its defaults
+amd64 and arm64 runners, same configure flags) and published as the release
+`apache-httpd-<httpdver>` (never marked Latest): `apache-httpd-<httpdver>-<arch>.tar.zst`
+(arch amd64/arm64, zstd like the daemon's own assets, with the ASF LICENSE and NOTICE
+files under `share/licenses`) plus `SHA256SUMS`. The role pins version, URL and per-arch SHA-256 in its defaults
 (`apache_sha256`), asserts the digest like the caddy role (`get_url`
 `checksum:`), unpacks into `{{ turbopanel_vendor_dir }}/apache/<version>`
 (`creates:` on `bin/httpd` keeps it idempotent) and points `current` at that
