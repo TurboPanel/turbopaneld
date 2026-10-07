@@ -6,6 +6,7 @@ import type { DockerCliResult } from "../deploy/docker-cli.ts";
 import {
   materializeManagedState,
   normalizeManagedFileOwnership,
+  normalizeManagedSecretOwnership,
 } from "./materialize.ts";
 import { managedConfigDir, managedTlsDir } from "./engine-paths.ts";
 import { ensureManagedSelfSignedCert } from "./tls.ts";
@@ -434,4 +435,29 @@ test("normalizeManagedFileOwnership formats multi-line verification failures as 
       true,
     );
   });
+});
+
+Deno.test("normalizeManagedSecretOwnership chowns the root password file to the engine user, 0400, without the value in argv", async () => {
+  let argv: string[] = [];
+  await normalizeManagedSecretOwnership(
+    "postgres:18",
+    "/state/managed/x",
+    "postgres",
+    "postgres",
+    (args) => {
+      argv = args;
+      return Promise.resolve({
+        success: true,
+        code: 0,
+        stdout: "",
+        stderr: "",
+      });
+    },
+  );
+  const script = argv[argv.length - 1]!;
+  assertEquals(
+    script.includes("chmod 0400 /managed/secrets/root-password"),
+    true,
+  );
+  assertEquals(script.includes("USER_NAME='postgres'"), true);
 });

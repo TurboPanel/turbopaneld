@@ -102,9 +102,9 @@ The engine root password reaches the engine as a file, not an env value:
 normalization rewrites `POSTGRES_PASSWORD` / `MYSQL_ROOT_PASSWORD` /
 `MARIADB_ROOT_PASSWORD: ${TURBOPANEL_MANAGED_ROOT_PASSWORD}` to `<KEY>_FILE`
 pointing at `/run/secrets/tp_root_password`, a read-only bind of
-`<stateDir>/managed/<id>/secrets/root-password` (file `0444` inside a `0700`
-daemon-owned directory — the engine's uid differs per image, the directory is
-the host-side guard), so `docker inspect` shows only a path. The file persists
+`<stateDir>/managed/<id>/secrets/root-password` (created `0600` by the daemon, then handed to the engine's own user by a
+throwaway root container: `engineUser:engineGroup` `0400`, never world-readable;
+the daemon never rewrites it afterwards), so `docker inspect` shows only a path. The file persists
 (restart policies re-bind it). An engine created before this keeps the old
 env form (persisted compose still contains the placeholder): an apply that
 leaves its compose byte-identical keeps it (no restart); any apply that

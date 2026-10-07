@@ -276,6 +276,52 @@ export async function normalizeManagedFileOwnership(
   }
 }
 
+/**
+ * Hand the engine root password file to the engine's own user: owner
+ * `<engineUser>:<engineGroup>`, mode 0400, with `secrets/` group-traversable
+ * (daemon stays owner so it can replace the file). Same throwaway-root-
+ * container approach as {@link normalizeManagedFileOwnership}; the secret
+ * value never appears in the command line.
+ */
+export async function normalizeManagedSecretOwnership(
+  image: string,
+  managedRoot: string,
+  containerUser: string,
+  containerGroup: string,
+  run: RunDockerFn = defaultRunDocker,
+): Promise<void> {
+  const script = [
+    "set -eu",
+    `USER_NAME=${shellSingleQuote(containerUser)}`,
+    `GROUP_NAME=${shellSingleQuote(containerGroup)}`,
+    'chown ":$GROUP_NAME" /managed/secrets',
+    "chmod 0750 /managed/secrets",
+    'chown "$USER_NAME:$GROUP_NAME" /managed/secrets/root-password',
+    "chmod 0400 /managed/secrets/root-password",
+  ].join("\n");
+  const result = await run([
+    "run",
+    "--rm",
+    ...helperLabelArgs("managed-files"),
+    "--user",
+    "0",
+    "--entrypoint",
+    "sh",
+    "-v",
+    `${managedRoot}:/managed`,
+    image,
+    "-c",
+    script,
+  ]);
+  if (!result.success) {
+    throw new Error(
+      `failed to hand the engine root password file to the engine user: ${
+        formatDockerFailure(result)
+      }`,
+    );
+  }
+}
+
 function shellSingleQuote(value: string): string {
   const escapedSingleQuote = String.raw`'\''`;
   return `'${value.replaceAll("'", escapedSingleQuote)}'`;

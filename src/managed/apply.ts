@@ -50,11 +50,13 @@ import type { ManagedEngineContext } from "./engines/types.ts";
 import {
   materializeManagedState,
   normalizeManagedFileOwnership,
+  normalizeManagedSecretOwnership,
 } from "./materialize.ts";
 import {
   assertSafeManagedIdentifiers,
   managedComposePath,
   managedComposeProject,
+  managedDir,
   managedEnvFilePath,
   managedRootPasswordPath,
   managedSecretsDir,
@@ -310,28 +312,28 @@ async function rewriteDaemonOwnedFile(
 /**
  * Write the engine root password for the engine's `<KEY>_FILE` read.
  *
- * The file is world-readable (0444) on purpose: the engine reads it as its own
- * unprivileged user, whose uid differs between images. What protects it on the
- * host is the 0700 daemon-owned directory above it — no other host account can
- * traverse to it. Unchanged content is left in place (same inode) so a running
- * engine's bind mount is never disturbed.
+ * Created 0600 by the daemon, then handed to the engine's own user by
+ * {@link normalizeManagedSecretOwnership} (the daemon cannot chown), which
+ * leaves it `engineUser:engineGroup` 0400. Once handed over the daemon can no
+ * longer read it, so an existing file is never rewritten: the engine only
+ * reads it at first initialisation. Returns true when the file still needs the
+ * ownership hand-over (new, or still daemon-owned after a failed hand-over).
  */
 export async function writeManagedRootPasswordFile(
   dir: string,
   path: string,
   password: string,
-): Promise<void> {
-  await Deno.mkdir(dir, { recursive: true, mode: 0o700 });
-  await Deno.chmod(dir, 0o700);
+): Promise<boolean> {
+  await Deno.mkdir(dir, { recursive: true, mode: 0o750 });
   try {
-    if ((await Deno.readTextFile(path)) === password) {
-      await Deno.chmod(path, 0o444); // NOSONAR typescript:S2612 — engine uid varies per image; the 0700 parent directory is the guard
-      return;
-    }
+    const existing = await Deno.stat(path);
+    if (existing.uid !== Deno.uid()) return false;
+    await Deno.remove(path);
   } catch (err) {
     if (!(err instanceof Deno.errors.NotFound)) throw err;
   }
-  await rewriteDaemonOwnedFile(path, password, 0o444); // NOSONAR typescript:S2612 — see above
+  await Deno.writeTextFile(path, password, { mode: 0o600 });
+  return true;
 }
 
 /**
@@ -385,6 +387,9 @@ type ComposeUpManagedEngineArgs = {
   runDockerSetup: () => Promise<void>;
   logSink: CommandOutputSink;
   runStreamed: RunDockerStreamedFn;
+  run: RunDockerFn;
+  engineUser: string;
+  engineGroup: string;
 };
 
 async function composeUpManagedEngine({
@@ -396,6 +401,9 @@ async function composeUpManagedEngine({
   runDockerSetup,
   logSink,
   runStreamed,
+  run,
+  engineUser,
+  engineGroup,
 }: ComposeUpManagedEngineArgs): Promise<string> {
   const composePath = managedComposePath(layout, payload.managedId);
   const envPath = managedEnvFilePath(layout, payload.managedId);
@@ -405,11 +413,20 @@ async function composeUpManagedEngine({
 
   const needsEnvFile = composeUsesRootPasswordInterpolation(composeYaml);
   if (composeYaml.includes(`${MANAGED_ROOT_PASSWORD_FILE_SOURCE}:`)) {
-    await writeManagedRootPasswordFile(
+    const needsHandOver = await writeManagedRootPasswordFile(
       managedSecretsDir(layout, payload.managedId),
       managedRootPasswordPath(layout, payload.managedId),
       rootCredential.password,
     );
+    if (needsHandOver) {
+      await normalizeManagedSecretOwnership(
+        payload.image,
+        managedDir(layout, payload.managedId),
+        engineUser,
+        engineGroup,
+        run,
+      );
+    }
   }
 
   try {
@@ -838,6 +855,9 @@ export async function handleManagedApply(
     runDockerSetup,
     logSink,
     runStreamed,
+    run,
+    engineUser: engine.containerUser,
+    engineGroup: engine.containerGroup,
   });
 
   // Scope the public listener once the publish exists; never blocks apply.

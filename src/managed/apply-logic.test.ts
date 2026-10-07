@@ -710,18 +710,22 @@ test("buildEngineExec gives up after the retry budget on a persistent restart wi
   assertEquals(calls, 11);
 });
 
-test("writeManagedRootPasswordFile keeps the directory 0700 and the inode on unchanged content", async () => {
+test("writeManagedRootPasswordFile writes 0600 once and never rewrites a handed-over file", async () => {
   const dir = await Deno.makeTempDir();
   try {
     const secretsDir = `${dir}/secrets`;
     const path = `${secretsDir}/root-password`;
-    await writeManagedRootPasswordFile(secretsDir, path, "pw-one");
-    assertEquals((await Deno.stat(secretsDir)).mode! & 0o777, 0o700);
-    assertEquals((await Deno.stat(path)).mode! & 0o777, 0o444);
-    const ino = (await Deno.stat(path)).ino;
-    await writeManagedRootPasswordFile(secretsDir, path, "pw-one");
-    assertEquals((await Deno.stat(path)).ino, ino);
-    await writeManagedRootPasswordFile(secretsDir, path, "pw-two");
+    assertEquals(
+      await writeManagedRootPasswordFile(secretsDir, path, "pw-one"),
+      true,
+    );
+    assertEquals((await Deno.stat(path)).mode! & 0o777, 0o600);
+    assertEquals(await Deno.readTextFile(path), "pw-one");
+    // Still daemon-owned (hand-over failed earlier): rewritten and re-flagged.
+    assertEquals(
+      await writeManagedRootPasswordFile(secretsDir, path, "pw-two"),
+      true,
+    );
     assertEquals(await Deno.readTextFile(path), "pw-two");
   } finally {
     await Deno.remove(dir, { recursive: true });
