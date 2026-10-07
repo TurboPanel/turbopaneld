@@ -792,8 +792,15 @@ it regresses:
     (`groupadd`) only under a name `useradd` would take: never `root`, `tp*`,
     `systemd-*`, a name in `TP_RESERVED_NAMES` (privileged and system group
     names such as `sudo`, `admin`, `wheel`, `adm`, `lxd`, `docker`, kept equal
-    to the control plane's reserved list), a group sudoers names (`%name`), an
-    existing account or an existing group. `groupmod` only renames a site
+    to the control plane's reserved list), a name a `sysusers.d` file declares
+    (a package's system user or group that may not exist yet), a group sudoers
+    names (`%name`, quoted or escaped, in `/etc/sudoers`, `sudoers.d` and the
+    files it `@include`s), a name ending in `-grp` (an older owner's group),
+    an all-digit name, an existing account or an existing group. `useradd`
+    takes the same names and only a fresh group of the user's own name: in the
+    band, nobody's primary group yet, no members. Residual risk accepted with
+    the per-user group: polkit rules, PAM `access.conf` and sshd `Match Group`
+    lines that name a group are not scanned. `groupmod` only renames a site
     owner's old `<name>-grp` primary group to `<name>`. It takes `chpasswd`
     input only as one sha512-crypt line;
   - allows `systemctl` verbs on `turbopanel*` / `wg-quick@tp0` / `ssh(d)`

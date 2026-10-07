@@ -207,7 +207,10 @@ function assertSafePrincipalUsername(username: string): string {
   if (
     username.length === 0 ||
     username.length > MAX_PRINCIPAL_USERNAME_LENGTH ||
-    !PRINCIPAL_USERNAME_RE.test(username)
+    !PRINCIPAL_USERNAME_RE.test(username) ||
+    // `<name>-grp` is an older site owner's group: a new user of that name
+    // would share it.
+    username.endsWith("-grp")
   ) {
     throw new Error(`Invalid principal username: ${username}`);
   }
@@ -382,9 +385,18 @@ function assertAdoptedGroupGid(
 function assertGroupIsAccountPrimary(
   username: string,
   groupName: string,
+  groupLine: string,
   groupGid: number,
   account: { gid: number } | null,
 ): void {
+  // Without the account, only a group nobody joined yet is taken over (a run
+  // that stopped between groupadd and useradd); tp-host's useradd also
+  // refuses a group that is already some account's primary group.
+  if (!account && (groupLine.split(":")[3] ?? "").trim() !== "") {
+    throw new Error(
+      `refusing to use the existing group ${groupName} (gid=${groupGid}): it already has members and there is no account ${username}`,
+    );
+  }
   if (account && account.gid !== groupGid) {
     throw new Error(
       `refusing to use the existing group ${groupName} (gid=${groupGid}): the account ${username} has primary gid=${account.gid}`,
@@ -443,6 +455,7 @@ async function ensurePrincipalGroup(
     assertGroupIsAccountPrimary(
       principal.username,
       groupName,
+      groupCheck.stdout,
       currentGid,
       owner,
     );

@@ -225,3 +225,74 @@ test("principal-remove with no account removes only the owner's leftover groups 
     }
   });
 });
+
+test("useradd never hands a new account another owner's group", async () => {
+  await withHost(async (host) => {
+    // An older owner whose group is still bob-grp, and a group with members.
+    await append(host, "etc/passwd", [
+      `bob:x:15060:15060::${host.path("srv/users/bob/home")}:/bin/bash`,
+    ]);
+    await append(host, "etc/group", [
+      "bob-grp:x:15060:tpnginx",
+      "kay:x:15061:tpnginx",
+      "lee:x:15062:",
+    ]);
+    await refused(
+      host,
+      useradd(host.path("srv/users/bob-grp/home"), "bob-grp"),
+    );
+    await refused(host, useradd(host.path("srv/users/kay/home"), "kay"));
+    // The same group as somebody's primary group.
+    await append(host, "etc/passwd", [
+      `mo:x:15063:15062::${host.path("srv/users/mo/home")}:/bin/bash`,
+    ]);
+    await refused(host, useradd(host.path("srv/users/lee/home"), "lee"));
+    // All-digit names read as ids.
+    await refused(host, ["groupadd", ...BAND, "15999"]);
+  });
+});
+
+test("groupadd refuses names sudoers pulls in, escapes or quotes, and package system names", async () => {
+  await withHost(async (host) => {
+    await Deno.mkdir(host.path("etc/sudoers.local"), { recursive: true });
+    await Deno.mkdir(host.path("usr/lib/sysusers.d"), { recursive: true });
+    await Deno.writeTextFile(
+      host.path("etc/sudoers"),
+      [
+        '%"quoted" ALL=(ALL) ALL',
+        "%esc\\aped ALL=(ALL) ALL",
+        "@includedir /etc/sudoers.local",
+        "#include /etc/sudoers.extra",
+        "",
+      ].join("\n"),
+    );
+    await Deno.writeTextFile(
+      host.path("etc/sudoers.local/x"),
+      "%inc ALL=(ALL) ALL\n",
+    );
+    await Deno.writeTextFile(
+      host.path("etc/sudoers.extra"),
+      "%extra ALL=(ALL) ALL\n",
+    );
+    await Deno.writeTextFile(
+      host.path("usr/lib/sysusers.d/pkg.conf"),
+      'g pkggrp - -\nu pkgusr - "pkg"\n',
+    );
+    for (
+      const name of [
+        "quoted",
+        "escaped",
+        "inc",
+        "extra",
+        "pkggrp",
+        "pkgusr",
+        "wireshark",
+        "tss",
+      ]
+    ) {
+      await refused(host, ["groupadd", ...BAND, name]);
+    }
+    const ok = await host.run(["groupadd", ...BAND, "plainname"]);
+    assertEquals(ok.code, 0, ok.stderr);
+  });
+});

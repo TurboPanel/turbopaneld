@@ -176,3 +176,28 @@ test("a leftover group of the user's name in the band is adopted for a new accou
   assertEquals(verb(sudoCalls, "groupadd"), undefined);
   assertEquals(verb(sudoCalls, "useradd")?.includes("appuser"), true);
 });
+
+test("a group of the user's name that already has members is not taken over for a new account", async () => {
+  const { run, sudoCalls } = host({ appuser: "appuser:x:15003:tpnginx" }, null);
+  const err = await assertRejects(
+    () => ensureSystemPrincipals(layout, [spec], run),
+    Error,
+  );
+  assertStringIncludes(err.message, "already has members");
+  assertEquals(verb(sudoCalls, "useradd"), undefined);
+});
+
+test("a user name ending in -grp is refused: it is an older owner's group", async () => {
+  const { run, sudoCalls } = host({}, null);
+  await assertRejects(
+    () =>
+      ensureSystemPrincipals(layout, [{
+        ...spec,
+        username: "bob-grp",
+        home: "/srv/users/bob-grp",
+      }], run),
+    Error,
+    "Invalid principal username",
+  );
+  assertEquals(sudoCalls, []);
+});
