@@ -1,9 +1,10 @@
 ---
-# Builds pinned ASF httpd (+ APR / APR-util) from source into
-# `vendor/apache/<version>/` with a `current` symlink — never
-# `apt install apache2`, never the distro apache2 unit. Compile-time host
-# packages (build-essential, libssl-dev, …) are install-deps only; the
-# resulting binary tree is TurboPanel-owned under the FHS vendor tree.
+# Installs pinned ASF httpd (+ APR / APR-util) from a prebuilt, SHA-256
+# checked tarball (built once in CI by .github/workflows/vendor-apache.yml)
+# into `vendor/apache/<version>/` with a `current` symlink — never
+# `apt install apache2`, never the distro apache2 unit, never a compile on the
+# host. Only runtime libraries come from apt; the binary tree is
+# TurboPanel-owned under the FHS vendor tree.
 #
 # Config/logs/state live under FHS so version upgrades do not lose site
 # fragments written by `src/deploy/site.ts`. PHP is not built into
@@ -22,59 +23,68 @@
     path: "{{ turbopanel_vendor_dir }}/apache/{{ apache_version }}/bin/httpd"
   register: _apache_pinned
 
-- name: Install Apache build dependencies (compile-time only; not apache2)
+# A version bump must land with the digests of the CI-built tarballs: refuse
+# rather than install an unverified runtime.
+- name: Require a pinned SHA-256 for this Apache version and architecture
+  when: not _apache_pinned.stat.exists
+  ansible.builtin.assert:
+    that:
+      - apache_version in apache_sha256
+      - ansible_architecture in apache_sha256[apache_version]
+      - apache_sha256[apache_version][ansible_architecture] is match('^[0-9a-f]{64}$')
+    fail_msg: >-
+      No pinned SHA-256 for Apache {{ apache_version }} on
+      {{ ansible_architecture }} — run the vendor-apache workflow, then pin its
+      checksum in roles/apache/defaults/main.yml (apache_sha256).
+
+- name: Install Apache runtime libraries (not apache2)
   ansible.builtin.apt:
-    name:
-      - build-essential
-      - libexpat1-dev
-      - libpcre2-dev
-      - libssl-dev
-      - zlib1g-dev
+    name: "{{ apache_runtime_packages }}"
     state: present
     update_cache: true
     cache_valid_time: 3600
   when: not _apache_pinned.stat.exists
 
-- name: Build and install Apache httpd into runtimes directory
+- name: Create Apache download scratch directory
+  when: not _apache_pinned.stat.exists
+  ansible.builtin.tempfile:
+    state: directory
+    prefix: apache-tar-
+  register: _apache_tmp
+
+# get_url verifies the digest before the file is kept: a mismatch fails the
+# task and leaves nothing to extract.
+- name: Download prebuilt Apache tarball (SHA-256 verified)
+  when: not _apache_pinned.stat.exists
+  ansible.builtin.get_url:
+    url: "{{ apache_release_base_url }}/apache-{{ apache_version }}-{{ ansible_architecture }}.tar.gz"
+    dest: "{{ _apache_tmp.path }}/apache.tar.gz"
+    checksum: "sha256:{{ apache_sha256[apache_version][ansible_architecture] }}"
+    owner: root
+    group: root
+    mode: "0600"
+
+# Extract beside the target and rename, so an interrupted run never leaves a
+# half-unpacked tree that the bin/httpd check would mistake for an install.
+- name: Install Apache httpd into runtimes directory
   when: not _apache_pinned.stat.exists
   ansible.builtin.shell: |
     set -euo pipefail
-    HTTPD_VER="{{ apache_version }}"
-    APR_VER="{{ apache_apr_version }}"
-    APU_VER="{{ apache_apr_util_version }}"
-    DEST="{{ turbopanel_vendor_dir }}/apache/${HTTPD_VER}"
-    TMP="$(mktemp -d)"
-    trap 'rm -rf "$TMP"' EXIT
-
-    curl -fsSL -o "$TMP/httpd.tar.gz" "{{ apache_httpd_url }}"
-    curl -fsSL -o "$TMP/apr.tar.gz" "{{ apache_apr_url }}"
-    curl -fsSL -o "$TMP/apr-util.tar.gz" "{{ apache_apr_util_url }}"
-
-    tar -xzf "$TMP/httpd.tar.gz" -C "$TMP"
-    tar -xzf "$TMP/apr.tar.gz" -C "$TMP"
-    tar -xzf "$TMP/apr-util.tar.gz" -C "$TMP"
-
-    mv "$TMP/apr-${APR_VER}" "$TMP/httpd-${HTTPD_VER}/srclib/apr"
-    mv "$TMP/apr-util-${APU_VER}" "$TMP/httpd-${HTTPD_VER}/srclib/apr-util"
-
-    cd "$TMP/httpd-${HTTPD_VER}"
-    ./configure \
-      --prefix="${DEST}" \
-      --with-included-apr \
-      --enable-mpms-shared=event \
-      --with-mpm=event \
-      --enable-mods-shared=most \
-      --enable-so \
-      --disable-imagemap
-    make -j"$(nproc)"
-    make install
-
-    # Drop ASF default htdocs/manual noise from the vendor tree — sites use
-    # FHS document roots under turbopanel_state_dir/sites/.
-    rm -rf "${DEST}/manual" "${DEST}/htdocs" "${DEST}/cgi-bin" || true
-    install -d "${DEST}/htdocs"
+    DEST="{{ turbopanel_vendor_dir }}/apache/{{ apache_version }}"
+    install -d "$(dirname "$DEST")"
+    rm -rf "${DEST}.partial"
+    install -d "${DEST}.partial"
+    tar -xzf "{{ _apache_tmp.path }}/apache.tar.gz" -C "${DEST}.partial"
+    rm -rf "$DEST"
+    mv "${DEST}.partial" "$DEST"
   args:
     creates: "{{ turbopanel_vendor_dir }}/apache/{{ apache_version }}/bin/httpd"
+
+- name: Remove Apache download scratch directory
+  when: _apache_tmp.path is defined
+  ansible.builtin.file:
+    path: "{{ _apache_tmp.path }}"
+    state: absent
 
 - name: Harden Apache httpd binary permissions
   ansible.builtin.file:

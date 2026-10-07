@@ -1,14 +1,29 @@
 ---
 # Runtimes always live under the FHS vendor tree (dev shares it with prod).
 turbopanel_vendor_dir: "{{ turbopanel_install_root | default('/opt/turbopanel') }}/vendor"  # noqa: var-naming[no-role-prefix]
-# Pinned ASF httpd + APR sources (built into vendor — never apt install apache2).
-# PHP is a separate vendor role (`php-fpm`); this build enables shared proxy_fcgi.
+# Pinned ASF httpd, built once in CI (.github/workflows/vendor-apache.yml,
+# scripts/build-apache.sh) and downloaded as a prebuilt tarball — never compiled
+# on the host, never apt install apache2. The APR versions below are only read
+# by the build script. PHP is a separate vendor role (`php-fpm`); the build
+# enables shared proxy_fcgi.
 apache_version: "2.4.63"
 apache_apr_version: "1.7.5"
 apache_apr_util_version: "1.6.3"
-apache_httpd_url: "https://archive.apache.org/dist/httpd/httpd-{{ apache_version }}.tar.gz"
-apache_apr_url: "https://archive.apache.org/dist/apr/apr-{{ apache_apr_version }}.tar.gz"
-apache_apr_util_url: "https://archive.apache.org/dist/apr/apr-util-{{ apache_apr_util_version }}.tar.gz"
+apache_release_tag: "vendor-apache-{{ apache_version }}"
+apache_release_base_url: "https://github.com/TurboPanel/turbopaneld/releases/download/{{ apache_release_tag }}"
+# SHA-256 of apache-<version>-<arch>.tar.gz, keyed by version then by
+# ansible_architecture. PLACEHOLDERS until the vendor-apache workflow has run:
+# the install task refuses anything that is not 64 hex characters. Copy the
+# digests from that run's summary (or the release's SHA256SUMS asset).
+apache_sha256:
+  "2.4.63":
+    x86_64: "UNPINNED"
+    aarch64: "UNPINNED"
+# Runtime libraries the prebuilt httpd links against (not the -dev packages).
+apache_runtime_packages:
+  - libexpat1
+  - libpcre2-8-0
+  - libssl3
 turbopanel_dev_user: ""  # noqa: var-naming[no-role-prefix]
 turbopanel_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tp' }}"  # noqa: var-naming[no-role-prefix]
 
