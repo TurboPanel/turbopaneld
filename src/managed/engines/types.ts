@@ -184,6 +184,16 @@ export type ManagedEngineReplicationRuntime = {
       slotName: string;
     },
   ): Promise<void>;
+  /**
+   * Postgres only. Drop the managed replication slots that are not in
+   * `desired`. `ensurePrimary` does this for clusters with replicas; this is
+   * the same sweep for a cluster that just lost its last replica and so no
+   * longer gets a replication payload.
+   */
+  pruneOrphanSlots?(
+    ctx: ManagedEngineContext,
+    desired: readonly string[],
+  ): Promise<void>;
   promote(ctx: ManagedEngineContext): Promise<void>;
   readHealth(
     ctx: ManagedEngineContext,
@@ -228,6 +238,32 @@ export type ManagedLastStreamingObservation = {
   receiveLagBytes?: number;
 };
 
+/**
+ * Primary only: how much WAL the replicas' replication slots hold back.
+ * `ok`: nothing unusual. `lagging`: a slot holds more than `max_wal_size`
+ * (a replica is away or far behind; disk is filling). `critical`: a slot is
+ * about to be, or already is, invalidated by the `max_slot_wal_keep_size`
+ * cap, or its replacement is still waiting for the replica to be re-seeded
+ * (`walStatus: "awaiting_resync"`), so that replica needs a Resync. The cut-off
+ * stays reported on every apply until the Resync reserves the slot again.
+ */
+export type ManagedSlotRetention = {
+  state: "ok" | "lagging" | "critical";
+  /** The worst slot (absent when `ok`). */
+  slot?: string;
+  /**
+   * Postgres `wal_status` of that slot: reserved, extended, unreserved, lost;
+   * or `awaiting_resync` for the replacement of a lost slot.
+   */
+  walStatus?: string;
+  /** Bytes of WAL that slot is keeping. */
+  retainedBytes?: number;
+  /** Bytes left before the cap invalidates it; absent when no cap is set. */
+  safeBytes?: number;
+  /** Whether a replica is attached to that slot right now. */
+  active?: boolean;
+};
+
 export type ManagedReplicationObservedHealth = {
   state: string;
   lagBytes?: number;
@@ -267,6 +303,8 @@ export type ManagedReplicationObservedHealth = {
   fullyApplied?: boolean;
   /** Standby only, on `managed-health-result`. */
   lastStreaming?: ManagedLastStreamingObservation;
+  /** Primary only, Postgres: WAL held back by the replicas' slots. */
+  slotRetention?: ManagedSlotRetention;
 };
 
 export class ManagedEngineNotSupportedError extends Error {

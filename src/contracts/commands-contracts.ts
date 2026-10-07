@@ -1814,6 +1814,23 @@ export type ManagedReplicationHealth = {
     lagSeconds?: number;
     receiveLagBytes?: number;
   };
+  /**
+   * Postgres primary only: how much WAL the replicas' replication slots hold
+   * back. `lagging` = a slot holds more than `max_wal_size`; `critical` = a
+   * slot is about to be (or was) invalidated by the `max_slot_wal_keep_size`
+   * cap, so that replica needs a Resync.
+   */
+  slotRetention?: ManagedSlotRetention;
+};
+
+/** Must stay in sync with the instance canonical `managed.apply` shape. */
+export type ManagedSlotRetention = {
+  state: "ok" | "lagging" | "critical";
+  slot?: string;
+  walStatus?: string;
+  retainedBytes?: number;
+  safeBytes?: number;
+  active?: boolean;
 };
 
 /** Must stay in sync with the instance canonical `managed.apply` shape. */
@@ -7199,7 +7216,44 @@ export function parseManagedReplicationHealth(
   ) {
     health.lagSeconds = value.lagSeconds;
   }
+  const slotRetention = parseManagedSlotRetention(value.slotRetention);
+  if (slotRetention !== undefined) health.slotRetention = slotRetention;
   return withStandbyPositions(health, value);
+}
+
+const MANAGED_SLOT_RETENTION_STATES = new Set(["ok", "lagging", "critical"]);
+
+function nonNegativeNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? value
+    : undefined;
+}
+
+function parseManagedSlotRetention(
+  value: unknown,
+): ManagedSlotRetention | undefined {
+  if (!isRecord(value)) return undefined;
+  if (
+    typeof value.state !== "string" ||
+    !MANAGED_SLOT_RETENTION_STATES.has(value.state)
+  ) {
+    return undefined;
+  }
+  const retention: ManagedSlotRetention = {
+    state: value.state as ManagedSlotRetention["state"],
+  };
+  if (typeof value.slot === "string" && value.slot.length <= 64) {
+    retention.slot = value.slot;
+  }
+  if (typeof value.walStatus === "string" && value.walStatus.length <= 32) {
+    retention.walStatus = value.walStatus;
+  }
+  const retainedBytes = nonNegativeNumber(value.retainedBytes);
+  if (retainedBytes !== undefined) retention.retainedBytes = retainedBytes;
+  const safeBytes = nonNegativeNumber(value.safeBytes);
+  if (safeBytes !== undefined) retention.safeBytes = safeBytes;
+  if (typeof value.active === "boolean") retention.active = value.active;
+  return retention;
 }
 
 /** Standby WAL positions and receive lag, when present and well-formed. */

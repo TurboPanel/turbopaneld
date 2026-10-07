@@ -13,6 +13,7 @@ import {
   applyManagedEngineState,
   buildNeedsResyncMember,
   chooseManagedCompose,
+  collectMemberHealth,
   composeUpManagedEngine,
   type ComposeUpManagedEngineArgs,
   provisionManagedRootPasswordFile,
@@ -25,6 +26,7 @@ import {
   managedRootPasswordPath,
 } from "./engine-paths.ts";
 import { createNoopCommandOutputSink } from "../logs/contracts.ts";
+import type { ManagedEngineContext } from "./engines/types.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -720,6 +722,69 @@ test("buildEngineExec gives up after the retry budget on a persistent restart wi
   assertEquals(result.success, false);
   // One initial attempt plus ENGINE_EXEC_RETRIES (10) retries.
   assertEquals(calls, 11);
+});
+
+/** Minimal engine whose replication runtime records the slot sweeps. */
+function slotSweepEngine(sweeps: string[][]) {
+  return {
+    replication: {
+      pruneOrphanSlots: (_ctx: ManagedEngineContext, desired: string[]) => {
+        sweeps.push([...desired]);
+        return Promise.resolve();
+      },
+    },
+  } as unknown as Parameters<typeof collectMemberHealth>[1];
+}
+
+const SLOT_SWEEP_CTX = {} as ManagedEngineContext;
+const SLOT_SWEEP_MEMBER_ID = "00000000-0000-4000-8000-0000000000aa";
+
+test("a primary with no replication payload (last replica removed) sweeps every leftover slot", async () => {
+  const sweeps: string[][] = [];
+  const member = await collectMemberHealth(
+    SLOT_SWEEP_CTX,
+    slotSweepEngine(sweeps),
+    {
+      memberId: SLOT_SWEEP_MEMBER_ID,
+      memberRole: "primary",
+    } as unknown as ManagedApplyPayload,
+    [],
+  );
+  assertEquals(sweeps, [[]]);
+  assertEquals(member?.status, "ready");
+});
+
+test("a replica without a replication payload never sweeps slots", async () => {
+  const sweeps: string[][] = [];
+  await collectMemberHealth(
+    SLOT_SWEEP_CTX,
+    slotSweepEngine(sweeps),
+    {
+      memberId: SLOT_SWEEP_MEMBER_ID,
+      memberRole: "replica",
+    } as unknown as ManagedApplyPayload,
+    [],
+  );
+  assertEquals(sweeps, []);
+});
+
+test("a failing orphan-slot sweep never fails the apply of a single-member cluster", async () => {
+  const engine = {
+    replication: {
+      pruneOrphanSlots: () => Promise.reject(new Error("slot is active")),
+    },
+  } as unknown as Parameters<typeof collectMemberHealth>[1];
+  const member = await collectMemberHealth(
+    SLOT_SWEEP_CTX,
+    engine,
+    {
+      managedId: "00000000-0000-4000-8000-0000000000bb",
+      memberId: SLOT_SWEEP_MEMBER_ID,
+      memberRole: "primary",
+    } as unknown as ManagedApplyPayload,
+    [],
+  );
+  assertEquals(member?.status, "ready");
 });
 
 test("writeManagedRootPasswordFile writes 0600 once and never rewrites a handed-over file", async () => {

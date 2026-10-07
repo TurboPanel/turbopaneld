@@ -630,12 +630,24 @@ export function createReplicationRoleSql(
   ].join("\n");
 }
 
-export function createPhysicalSlotSql(slotName: string): string {
+/**
+ * Create a managed physical slot unless it exists. Reserved at once by
+ * default, so a replica that has not connected yet already has its WAL kept.
+ * `reserve: false` makes a slot that keeps no WAL until a replica first
+ * connects (what a Resync does): used for a slot that replaces a cut-off one,
+ * so the stale replica cannot make the primary hold WAL again before it is
+ * re-seeded.
+ */
+export function createPhysicalSlotSql(
+  slotName: string,
+  options?: { reserve?: boolean },
+): string {
   quoteIdentifier(slotName);
+  const reserve = options?.reserve === false ? "false" : "true";
   return [
     `SELECT pg_catalog.pg_create_physical_replication_slot(${
       quoteLiteral(slotName)
-    }, true, false)`,
+    }, ${reserve}, false)`,
     `WHERE NOT EXISTS (`,
     `  SELECT 1 FROM pg_catalog.pg_replication_slots WHERE slot_name = ${
       quoteLiteral(slotName)
@@ -649,17 +661,82 @@ export function dropPhysicalSlotSql(slotName: string): string {
   return [
     `SELECT pg_catalog.pg_drop_replication_slot(slot_name)`,
     `FROM pg_catalog.pg_replication_slots`,
-    `WHERE slot_name = ${quoteLiteral(slotName)};`,
+    // A slot a replica is still attached to cannot be dropped (Postgres
+    // refuses); leave it for the next apply instead of failing this one.
+    `WHERE slot_name = ${quoteLiteral(slotName)} AND NOT active;`,
   ].join("\n");
 }
 
 /** List physical slots owned by the managed prefix (`tp_member_`). */
 export function listManagedSlotsSql(): string {
-  const managedSlotPattern = `${MANAGED_SLOT_PREFIX}%`;
   return [
     `SELECT slot_name FROM pg_catalog.pg_replication_slots`,
-    `WHERE slot_name LIKE ${quoteLiteral(managedSlotPattern)}`,
+    `WHERE ${managedSlotPrefixSql()}`,
     `  AND slot_type = 'physical';`,
+  ].join("\n");
+}
+
+/**
+ * `starts_with` instead of `LIKE`: `_` is a LIKE wildcard, so `tp_member_%`
+ * would also match names such as `tp-member-x`.
+ */
+function managedSlotPrefixSql(): string {
+  return `starts_with(slot_name, ${quoteLiteral(MANAGED_SLOT_PREFIX)})`;
+}
+
+/**
+ * Managed slots the primary has already given up on (`wal_status = 'lost'`:
+ * their WAL is gone, a replica can no longer stream from them) and that no
+ * replica is attached to. A lost slot cannot be reused, not even by a fresh
+ * `pg_basebackup -S`, so the apply replaces it (see
+ * `recreateLostPhysicalSlotSql`). In-use slots are never listed.
+ */
+export function listLostPhysicalSlotsSql(): string {
+  return [
+    `SELECT slot_name FROM pg_catalog.pg_replication_slots`,
+    `WHERE ${managedSlotPrefixSql()}`,
+    `  AND slot_type = 'physical' AND wal_status = 'lost' AND NOT active`,
+    `ORDER BY slot_name;`,
+  ].join("\n");
+}
+
+/**
+ * Replace a lost slot with one that keeps no WAL until its replica connects
+ * again. The replacement is deliberately left unreserved: health reports an
+ * inactive slot with no `wal_status` as "waiting for a Resync" (critical), so
+ * the cut-off stays visible on every later apply until the replica has been
+ * re-seeded (the re-seed reserves the slot), and the stale replica does not
+ * make the primary hold WAL again in the meantime.
+ */
+export function recreateLostPhysicalSlotSql(slotName: string): string {
+  quoteIdentifier(slotName);
+  return [
+    `SELECT pg_catalog.pg_drop_replication_slot(slot_name)`,
+    `FROM pg_catalog.pg_replication_slots`,
+    `WHERE slot_name = ${
+      quoteLiteral(slotName)
+    } AND wal_status = 'lost' AND NOT active;`,
+    createPhysicalSlotSql(slotName, { reserve: false }),
+  ].join("\n");
+}
+
+/**
+ * How much WAL each managed slot is holding back, one row per slot:
+ * name, whether a replica is attached, `wal_status` (empty for a slot that
+ * has no WAL reserved), bytes between the primary's WAL position and what
+ * the slot still needs, and the bytes left before the `max_slot_wal_keep_size`
+ * cap invalidates it (-1 with no cap). Primary only (`pg_current_wal_lsn()`
+ * does not run on a standby).
+ */
+export function managedSlotRetentionSql(): string {
+  return [
+    `SELECT slot_name, active::text, COALESCE(wal_status, ''),`,
+    `  COALESCE(pg_catalog.pg_wal_lsn_diff(pg_catalog.pg_current_wal_lsn(), restart_lsn), 0)::bigint,`,
+    `  COALESCE(safe_wal_size, -1)::bigint`,
+    `FROM pg_catalog.pg_replication_slots`,
+    `WHERE ${managedSlotPrefixSql()}`,
+    `  AND slot_type = 'physical'`,
+    `ORDER BY slot_name;`,
   ].join("\n");
 }
 
