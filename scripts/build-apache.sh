@@ -50,13 +50,37 @@ STAGE="$TMP/stage"
 mkdir -p "$STAGE" "$OUT_DIR"
 OUT_DIR="$(CDPATH= cd -- "$OUT_DIR" && pwd)"
 
-fetch() { # <url> <file> <sha256>
+# ASF release-manager key fingerprints for these exact releases: the signers
+# of httpd-2.4.63 (Jim Jagielski) and of apr-1.7.5 / apr-util-1.6.3 (Eric
+# Covener), read from the VALIDSIG of each .asc against the ASF KEYS files.
+# Bump them with the versions.
+HTTPD_SIGNER="A93D62ECC3C8EA12DB220EC934EA76E6791485A8"
+APR_SIGNER="65B2D44FE74BD5E3DE3AC3F082781DE46D5954FA"
+
+GNUPGHOME="$TMP/gnupg"
+export GNUPGHOME
+mkdir -p "$GNUPGHOME"
+chmod 700 "$GNUPGHOME"
+KEYS_BASE="https://downloads.apache.org"
+for k in httpd apr; do
+  curl --proto "=https" --tlsv1.2 -fsSL -o "$TMP/$k.KEYS" "$KEYS_BASE/$k/KEYS"
+  gpg --batch --quiet --import "$TMP/$k.KEYS"
+done
+
+fetch() { # <url> <file> <sha256> <signer fingerprint>
   curl --proto "=https" --tlsv1.2 -fsSL -o "$2" "$1"
+  curl --proto "=https" --tlsv1.2 -fsSL -o "$2.asc" "$1.asc"
   echo "$3  $2" | sha256sum -c -
+  # The signature must verify and come from the pinned release manager.
+  gpg --batch --status-fd 1 --verify "$2.asc" "$2" 2>/dev/null |
+    grep -q "^\[GNUPG:\] VALIDSIG $4 " || {
+    echo "signature check failed for $1 (expected signer $4)" >&2
+    exit 1
+  }
 }
-fetch "$BASE/httpd/httpd-$HTTPD_VER.tar.gz" "$TMP/httpd.tar.gz" "$HTTPD_SHA"
-fetch "$BASE/apr/apr-$APR_VER.tar.gz" "$TMP/apr.tar.gz" "$APR_SHA"
-fetch "$BASE/apr/apr-util-$APU_VER.tar.gz" "$TMP/apr-util.tar.gz" "$APU_SHA"
+fetch "$BASE/httpd/httpd-$HTTPD_VER.tar.gz" "$TMP/httpd.tar.gz" "$HTTPD_SHA" "$HTTPD_SIGNER"
+fetch "$BASE/apr/apr-$APR_VER.tar.gz" "$TMP/apr.tar.gz" "$APR_SHA" "$APR_SIGNER"
+fetch "$BASE/apr/apr-util-$APU_VER.tar.gz" "$TMP/apr-util.tar.gz" "$APU_SHA" "$APR_SIGNER"
 tar -xzf "$TMP/httpd.tar.gz" -C "$TMP"
 tar -xzf "$TMP/apr.tar.gz" -C "$TMP"
 tar -xzf "$TMP/apr-util.tar.gz" -C "$TMP"
@@ -82,7 +106,21 @@ cd "$TMP/httpd-$HTTPD_VER"
   --disable-md \
   --disable-proxy-html \
   --disable-xml2enc \
-  --disable-session-crypto
+  --disable-session-crypto \
+  --disable-ldap \
+  --disable-authnz-ldap \
+  --disable-socache-dc \
+  --without-sqlite3 \
+  --without-sqlite2 \
+  --without-pgsql \
+  --without-mysql \
+  --without-odbc \
+  --without-oracle \
+  --without-freetds \
+  --without-berkeley-db \
+  --without-gdbm \
+  --without-ldap \
+  --without-nss
 make -j"$(nproc)"
 make install DESTDIR="$STAGE"
 
@@ -92,11 +130,28 @@ TREE="$STAGE$PREFIX"
 rm -rf "$TREE/manual" "$TREE/htdocs" "$TREE/cgi-bin"
 mkdir -p "$TREE/htdocs"
 
-# Fail the build if httpd or any module links a library the hosts do not get
-# from the role's runtime package list (apache_runtime_packages): libc family,
-# zlib, expat, pcre2, openssl, libuuid, plus the bundled APR under the tree.
+# Fail the build if httpd, any module, or any bundled library (APR, APR-util
+# and its drivers) links a library the hosts do not get from the role's runtime
+# package list (apache_runtime_packages): libc family, zlib, expat, pcre2,
+# openssl, libuuid, plus the bundled APR under the tree. A failing ldd or any
+# "not found" line also fails the build, allow-listed or not.
+LDD_OUT="$TMP/ldd.out"
 BAD=""
-for f in "$TREE/bin/httpd" "$TREE"/modules/*.so; do
+FILES="$TMP/elf.list"
+find "$TREE/bin" "$TREE/modules" "$TREE/lib" -type f \
+  \( -name httpd -o -name '*.so' -o -name '*.so.*' \) >"$FILES"
+[ -s "$FILES" ] || { echo "no binaries found to check in $TREE" >&2; exit 1; }
+while read -r f; do
+  LD_LIBRARY_PATH="$TREE/lib" ldd "$f" >"$LDD_OUT" 2>&1 || {
+    echo "ldd failed on $f" >&2
+    cat "$LDD_OUT" >&2
+    exit 1
+  }
+  if grep -q 'not found' "$LDD_OUT"; then
+    echo "unresolved library in $f" >&2
+    cat "$LDD_OUT" >&2
+    exit 1
+  fi
   while read -r lib rest; do
     case "$lib" in
       linux-vdso* | /lib*/ld-linux* | ld-linux*) continue ;;
@@ -107,10 +162,8 @@ for f in "$TREE/bin/httpd" "$TREE"/modules/*.so; do
       *"=> $TREE/"*) continue ;;
     esac
     BAD="$BAD $f:$lib"
-  done <<LDD
-$(LD_LIBRARY_PATH="$TREE/lib" ldd "$f")
-LDD
-done
+  done <"$LDD_OUT"
+done <"$FILES"
 [ -z "$BAD" ] || {
   echo "unexpected shared library dependencies (add the package to apache_runtime_packages and the allow list, or disable the module):$BAD" >&2
   exit 1

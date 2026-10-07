@@ -23,6 +23,16 @@
     path: "{{ turbopanel_vendor_dir }}/apache/{{ apache_version }}/bin/httpd"
   register: _apache_pinned
 
+# The prebuilt tree has its install prefix (rpath, apxs, envvars) baked in.
+- name: Require the default vendor directory for the prebuilt Apache tree
+  when: not _apache_pinned.stat.exists
+  ansible.builtin.assert:
+    that:
+      - turbopanel_vendor_dir == apache_build_install_root ~ '/vendor'
+    fail_msg: >-
+      The prebuilt Apache tree is built for {{ apache_build_install_root }}/vendor but this
+      host's vendor directory is {{ turbopanel_vendor_dir }}.
+
 # A version bump must land with the digests of the CI-built tarballs: refuse
 # rather than install an unverified runtime.
 - name: Require a pinned SHA-256 for this Apache version and architecture
@@ -98,6 +108,7 @@
     path: "{{ turbopanel_vendor_dir }}/apache/{{ apache_version }}"
     state: directory
     recurse: true
+    follow: false
     owner: root
     group: root
     mode: "go-w"

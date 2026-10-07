@@ -12,6 +12,16 @@ Deno.test("build-apache.sh verifies sources, fixes owners and gates linked libra
     "tarball entries are root-owned",
   );
   assert(script.includes("ldd"), "linked libraries are gated");
+  assert(script.includes("gpg --batch --status-fd 1 --verify"), "signatures");
+  assertMatch(script, /^HTTPD_SIGNER="[0-9A-F]{40}"$/m, "httpd signer");
+  assertMatch(script, /^APR_SIGNER="[0-9A-F]{40}"$/m, "apr signer");
+  assert(script.includes("not found"), "unresolved libraries fail the build");
+  assert(script.includes("--without-sqlite3"), "apr-util drivers off");
+  const workflow = await read(".github/workflows/vendor-apache.yml");
+  assert(
+    workflow.includes("if: github.ref == 'refs/heads/trunk'"),
+    "only trunk publishes",
+  );
   assert(script.includes("--disable-http2"), "optional modules are disabled");
 });
 

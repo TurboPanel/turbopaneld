@@ -76,6 +76,8 @@ jobs:
   publish:
     name: Publish vendor-apache release
     needs: build
+    # A dispatch from a branch may build (to try changes) but never publishes.
+    if: github.ref == 'refs/heads/trunk'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -100,18 +102,18 @@ jobs:
           VER="$(sed -n 's/^apache_version: "\(.*\)"$/\1/p' orchestration/roles/apache/defaults/main.yml | head -n 1)"
           TAG="vendor-apache-${VER}"
           # `gh release view` cannot see a draft, so look through the API.
-          FOUND="$(gh api "repos/${GITHUB_REPOSITORY}/releases" --paginate \
-            --jq ".[] | select(.tag_name == \"${TAG}\") | \"\(.id) \(.draft)\"" | head -n 1)"
-          if [ -n "$FOUND" ]; then
-            if [ "${FOUND#* }" = "true" ]; then
-              # A previous run died before publishing: discard its draft.
-              gh api -X DELETE "repos/${GITHUB_REPOSITORY}/releases/${FOUND% *}"
-            else
-              echo "Release $TAG already exists; not overwriting (a rebuild has different digests)."
-              echo "Release $TAG already exists; nothing published. Pin the digests from its SHA256SUMS asset." >>"$GITHUB_STEP_SUMMARY"
-              exit 0
-            fi
+          # A published release is final: stop. Only then clear leftover drafts.
+          gh api "repos/${GITHUB_REPOSITORY}/releases" --paginate \
+            --jq ".[] | select(.tag_name == \"${TAG}\") | \"\(.id) \(.draft)\"" >releases.txt
+          if grep -q ' false$' releases.txt; then
+            echo "Release $TAG already exists; not overwriting (a rebuild has different digests)."
+            echo "Release $TAG already exists; nothing published. Pin the digests from its SHA256SUMS asset." >>"$GITHUB_STEP_SUMMARY"
+            exit 0
           fi
+          # Drafts left by a run that died before publishing.
+          while read -r id _; do
+            gh api -X DELETE "repos/${GITHUB_REPOSITORY}/releases/${id}"
+          done <releases.txt
           cat out/*.sha256 >out/SHA256SUMS
           {
             echo "### Pin these in orchestration/roles/apache/defaults/main.yml"

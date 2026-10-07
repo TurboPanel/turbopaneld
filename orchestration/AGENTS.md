@@ -185,9 +185,10 @@ x86_64 and arm64 runners, same configure flags) and published as the release
 `checksum:`), unpacks into `{{ turbopanel_vendor_dir }}/apache/<version>`
 (`creates:` on `bin/httpd` keeps it idempotent) and points `current` at that
 tree. The build script verifies the ASF source tarballs against pinned SHA-256s,
-switches off optional modules that need extra libraries (HTTP/2, brotli, lua,
+verifies each tarball's ASF GPG signature against the pinned release-manager fingerprint (KEYS from downloads.apache.org),
+switches off optional modules and APR-util drivers that need extra libraries (HTTP/2, brotli, lua,
 md, proxy_html, xml2enc, session_crypto), and fails if `httpd` or a module
-links anything outside the runtime list (`ldd` gate). Only those runtime
+links anything outside the runtime list (`ldd` gate over bin, modules and lib; a failing ldd or "not found" also fails). The tree bakes in `/opt/turbopanel/vendor`, so the role refuses any other vendor directory. The release job only runs from trunk. Only those runtime
 libraries (`apache_runtime_packages`: `libexpat1`, `libpcre2-8-0`, `libssl3`,
 `libuuid1`, `zlib1g`) come from apt. The tree is built with the default vendor
 root as its prefix (so `apxs`/`envvars` paths are right there) and shipped
