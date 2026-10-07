@@ -16,6 +16,10 @@
  */
 
 import {
+  markProxySqlReconciled,
+  withProxySqlLock,
+} from "../managed/proxysql-lock.ts";
+import {
   dockerBinaryInstalled,
   type DockerCliResult,
   runDocker as defaultRunDocker,
@@ -374,11 +378,14 @@ async function observeProxySql(
   descriptor: SystemComponentDescriptor,
 ): Promise<ObservedContainer> {
   const { layout, run } = runtime;
-  await runWhenPresentOrStop(runtime, {
-    stop: () => stopProxySqlIngress(layout, run),
-    present: () =>
-      ensurePresentProxySql(layout, descriptor, run, runtime.action),
-  });
+  markProxySqlReconciled();
+  await withProxySqlLock(() =>
+    runWhenPresentOrStop(runtime, {
+      stop: () => stopProxySqlIngress(layout, run),
+      present: () =>
+        ensurePresentProxySql(layout, descriptor, run, runtime.action),
+    })
+  );
   return inspectProxySqlContainer(layout, descriptor, { runDocker: run });
 }
 
