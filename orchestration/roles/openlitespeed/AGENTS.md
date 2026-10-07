@@ -64,7 +64,7 @@ generated vhost:
 
 | Path | Owner | Mode | Purpose |
 | ---- | ----- | ---- | ------- |
-| `{{ turbopanel_vendor_dir }}/lsphp/<series>/<version>/` | `root:root` | `u=rwX,go=rX` (readable by everyone, writable by root only) | extracted `bin/lsphp` + `lib/` extensions; `bin/php.ini` (relocated config, below) |
+| `{{ turbopanel_vendor_dir }}/lsphp/<series>/<version>/` | `root:root` | not group/world writable; `other:rX` ACL (readable by everyone) | extracted `bin/lsphp` + `lib/` extensions; `bin/php.ini` (relocated config, below) |
 | `{{ turbopanel_vendor_dir }}/lsphp/<series>/current` | symlink | — | what the per-site units' `ExecStart=` points at |
 | `{{ turbopanel_vendor_dir }}/lsphp/<series>/<version>/lib/php/ext` | symlink | — | `lib/php/<api>/`: the stable `extension_dir` a per-site php.ini names |
 
