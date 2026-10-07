@@ -14,8 +14,10 @@
     that:
       - engine_prune is sequence
       - engine_prune is not string
+      - engine_prune is not mapping
       - engine_prune | length <= 3
-      - engine_prune | difference(['nginx', 'apache', 'openlitespeed']) | length == 0
+      - engine_prune | select('string') | list | length == engine_prune | length
+      - engine_prune | select('in', ['nginx', 'apache', 'openlitespeed']) | list | length == engine_prune | length
     fail_msg: >-
       engine_prune must be a list of nginx, apache or openlitespeed;
       got {{ engine_prune }}.

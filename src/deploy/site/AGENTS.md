@@ -113,7 +113,9 @@ Docker Compose. The daemon:
    `vhosts/`. A directory it cannot list keeps every engine. Holds are keyed
    (`site/prune-holds.ts`: `php:8.4`, `engine:nginx`); a deploy holds every
    series it names and every engine `resolveSiteEngineNeeds` says it serves
-   (`pruneHoldKeysForDeploy`). The removal is `engine-prune.yml` (`engine-prune`
+   (`pruneHoldKeysForDeploy`). One removal of either kind runs at a time; a
+   removal asked for while another runs is skipped (the next deploy or
+   teardown asks again). The removal is `engine-prune.yml` (`engine-prune`
    role, `engine_prune` JSON key checked to nginx|apache|openlitespeed by
    `tp-orchestrate`): it re-checks the config on disk and refuses an engine with
    a site, stops and disables `turbopanel-<engine>`, refuses to go on while it

@@ -58,6 +58,17 @@
     state: absent
   register: _engine_prune_unit
 
+# A unit that had failed stays listed until its failed state is cleared.
+- name: Clear a failed state ({{ engine_prune_engine }})
+  ansible.builtin.command:
+    argv:
+      - systemctl
+      - reset-failed
+      - "turbopanel-{{ engine_prune_engine }}.service"
+  register: _engine_prune_reset
+  changed_when: _engine_prune_reset.rc == 0
+  failed_when: false
+
 - name: Reload systemd after the unit went ({{ engine_prune_engine }})
   ansible.builtin.systemd:
     daemon_reload: true

@@ -4808,6 +4808,13 @@ test("an OpenLiteSpeed site directory keeps the engine, and a failed removal nev
       run,
       runPlaybook: () => Promise.reject(new Error("unit busy")),
     });
+    // The failure kept the engine and locked nothing: the next teardown asks again.
+    const retry = capturePlaybooks();
+    await removeSites(layout, "envengC", {
+      run,
+      runPlaybook: retry.runPlaybook,
+    });
+    assertEquals(enginePruneRequests(retry), [["openlitespeed"]]);
   } finally {
     resetPhpSeriesPruneForTests();
     await cleanup();
