@@ -581,6 +581,37 @@ export type ExtendedGpuText = {
   model?: string;
 };
 
+/**
+ * Capacity totals each sample carries beside the readings that are measured
+ * against them (used memory against total memory, and so on). A percentage is
+ * always taken against the size at that moment, so a resize or a balloon never
+ * needs a new topology generation and never rewrites history. An unknown total
+ * is absent, never `0`.
+ */
+export type ExtendedSizes = {
+  memoryTotalBytes?: number | null;
+  swapTotalBytes?: number | null;
+  /** `CommitLimit` from `/proc/meminfo`, the ceiling committed memory is judged against. */
+  commitLimitBytes?: number | null;
+  /** Logical CPU count, the divisor of the saturated-core count. */
+  logicalCores?: number | null;
+  rootFilesystemTotalBytes?: number | null;
+  rootFilesystemTotalInodes?: number | null;
+};
+
+/** Capacity of one filesystem, keyed by its `filesystemId`. */
+export type ExtendedFilesystemSize = {
+  filesystemId: string;
+  totalBytes?: number | null;
+  totalInodes?: number | null;
+};
+
+/** Memory capacity of one GPU, keyed by its `gpuId`. */
+export type ExtendedGpuSize = {
+  gpuId: string;
+  memoryTotalBytes?: number | null;
+};
+
 export type MetricsExtended = {
   host?: ExtendedHostMetrics;
   docker?: ExtendedDockerMetrics;
@@ -588,6 +619,9 @@ export type MetricsExtended = {
   text?: MetricsTextFields;
   blockDeviceText?: ExtendedBlockDeviceText[];
   gpuText?: ExtendedGpuText[];
+  sizes?: ExtendedSizes;
+  filesystemSizes?: ExtendedFilesystemSize[];
+  gpuSizes?: ExtendedGpuSize[];
 };
 
 export const EXTENDED_HOST_FIELD_NAMES = [
@@ -609,6 +643,15 @@ export const EXTENDED_DOCKER_FIELD_NAMES = [
   "containersCpuPercent",
   "containersMemoryBytes",
   "reclaimableBytes",
+] as const;
+
+export const EXTENDED_SIZE_FIELD_NAMES = [
+  "memoryTotalBytes",
+  "swapTotalBytes",
+  "commitLimitBytes",
+  "logicalCores",
+  "rootFilesystemTotalBytes",
+  "rootFilesystemTotalInodes",
 ] as const;
 
 export const EXTENDED_INGRESS_FIELD_NAMES = [
@@ -1278,6 +1321,20 @@ function sanitizeExtended(raw: MetricsExtended): MetricsExtended {
       ...sanitizeTextRecord(["driver", "model"] as const, entry),
     }));
   }
+  const sizes = sanitizeOptionalNumbers(EXTENDED_SIZE_FIELD_NAMES, raw.sizes);
+  if (sizes) out.sizes = sizes;
+  if (raw.filesystemSizes) {
+    out.filesystemSizes = raw.filesystemSizes.map((entry) => ({
+      filesystemId: entry.filesystemId,
+      ...sanitizeOptionalNumbers(["totalBytes", "totalInodes"] as const, entry),
+    }));
+  }
+  if (raw.gpuSizes) {
+    out.gpuSizes = raw.gpuSizes.map((entry) => ({
+      gpuId: entry.gpuId,
+      ...sanitizeOptionalNumbers(["memoryTotalBytes"] as const, entry),
+    }));
+  }
   return out;
 }
 
@@ -1360,6 +1417,17 @@ export function buildMetricsSample(
   assertArrayWithinCap(
     "extended.gpuText",
     input.extended?.gpuText ?? [],
+    MAX_METRIC_ENTITY_ARRAY_LENGTH,
+  );
+
+  assertArrayWithinCap(
+    "extended.filesystemSizes",
+    input.extended?.filesystemSizes ?? [],
+    MAX_METRIC_ENTITY_ARRAY_LENGTH,
+  );
+  assertArrayWithinCap(
+    "extended.gpuSizes",
+    input.extended?.gpuSizes ?? [],
     MAX_METRIC_ENTITY_ARRAY_LENGTH,
   );
 

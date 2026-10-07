@@ -264,6 +264,48 @@ test("buildMetricsSample sanitizes the v7 extended section without coercing miss
   assertEquals(extended?.gpuText, [{ gpuId: "gpu0", driver: "nvidia 570.1" }]);
 });
 
+test("buildMetricsSample keeps the v7 sizes, drops non-finite ones and caps the per-entity arrays", () => {
+  const input = fixtureInput();
+  input.extended = {
+    sizes: {
+      memoryTotalBytes: 4_294_967_296,
+      swapTotalBytes: Number.NaN,
+      logicalCores: 2,
+    },
+    filesystemSizes: [{
+      filesystemId: "fs:a",
+      totalBytes: 1e9,
+      totalInodes: null,
+    }],
+    gpuSizes: [{ gpuId: "gpu0", memoryTotalBytes: 17_179_869_184 }],
+  };
+  const { extended } = buildMetricsSample(input);
+  assertEquals(extended?.sizes, {
+    memoryTotalBytes: 4_294_967_296,
+    swapTotalBytes: null,
+    logicalCores: 2,
+  });
+  assertEquals(extended?.filesystemSizes, [
+    { filesystemId: "fs:a", totalBytes: 1e9, totalInodes: null },
+  ]);
+  assertEquals(extended?.gpuSizes, [
+    { gpuId: "gpu0", memoryTotalBytes: 17_179_869_184 },
+  ]);
+
+  const tooMany = fixtureInput();
+  tooMany.extended = {
+    filesystemSizes: Array.from({ length: 65 }, (_, i) => ({
+      filesystemId: `fs:${i}`,
+      totalBytes: 1,
+    })),
+  };
+  assertThrows(
+    () => buildMetricsSample(tooMany),
+    TypeError,
+    "extended.filesystemSizes",
+  );
+});
+
 test("buildMetricsSample rejects a metadata.version that is not an accepted wire version", () => {
   const input = fixtureInput();
   // deno-lint-ignore no-explicit-any

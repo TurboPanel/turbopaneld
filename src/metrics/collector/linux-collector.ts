@@ -57,7 +57,7 @@ import {
 import { buildDatabaseProxies } from "./database-proxy/index.ts";
 import type { EventDetectContext } from "./events/index.ts";
 import {
-  buildFilesystemSamples,
+  buildFilesystemReadings,
   probeRootFilesystemCapacity,
 } from "./filesystem.ts";
 import { buildGpuSamples, emptyGpuSamplesResult } from "./gpu/index.ts";
@@ -106,6 +106,8 @@ import {
   vmstatRates,
 } from "./parse-vmstat.ts";
 import { buildHostExtended } from "./extended-host.ts";
+import { buildExtendedSizes } from "./extended-sizes.ts";
+import { parseCommitLimitBytes } from "./parse-meminfo.ts";
 import { buildCollectedExtended, mergeExtended } from "./extended-v7.ts";
 import { SOURCE_DEADLINE_MS, withDeadline } from "./deadline.ts";
 import { type HostTextSample, hostTextToExtended } from "./host-text.ts";
@@ -455,6 +457,9 @@ type MemoryTick = {
   usedBytes: number | null;
   cachedFilesBytes: number | null;
   swapUsedBytes: number | null;
+  /** This tick's totals: the denominators of the used-memory and used-swap percentages. */
+  totalBytes: number | null;
+  swapTotalBytes: number | null;
   vmstat: VmstatCounters;
   rates: VmstatRates;
 };
@@ -469,6 +474,8 @@ function readMemoryTick(
   return {
     usedBytes: gauges?.usedBytes ?? null,
     cachedFilesBytes: gauges?.cachedFilesBytes ?? null,
+    totalBytes: gauges?.totalBytes ?? null,
+    swapTotalBytes: gauges?.swapTotalBytes ?? null,
     swapUsedBytes: swapUsedBytes(
       gauges?.swapTotalBytes ?? null,
       gauges?.swapFreeBytes ?? null,
@@ -804,10 +811,8 @@ export class LinuxMetricsCollector implements MetricsCollector {
     const memory = readMemoryTick(raw, rates, this.#pageSizeBytes);
     const network = readNetworkRates(raw, rates);
 
-    const filesystems = await buildFilesystemSamples(
-      snapshot.filesystems,
-      statfsIo,
-    );
+    const { samples: filesystems, sizes: filesystemSizeReadings } =
+      await buildFilesystemReadings(snapshot.filesystems, statfsIo);
     const rootFilesystemCapacity = await probeRootFilesystemCapacity(
       snapshot.filesystems,
       statfsIo,
@@ -1001,6 +1006,17 @@ export class LinuxMetricsCollector implements MetricsCollector {
         ? undefined
         : dockerUsageReading?.usage,
       topSites: directoryUsage?.topSites,
+      sizes: buildExtendedSizes({
+        memoryTotalBytes: memory.totalBytes,
+        swapTotalBytes: memory.swapTotalBytes,
+        commitLimitBytes: raw.memText
+          ? parseCommitLimitBytes(raw.memText)
+          : null,
+        logicalCores: snapshot.cpu.cores.length,
+        root: rootFilesystemCapacity,
+        filesystems: filesystemSizeReadings,
+        gpus: [],
+      }),
     });
     return {
       supported: true,
@@ -1023,6 +1039,7 @@ export class LinuxMetricsCollector implements MetricsCollector {
     bootGeneration: number;
     dockerUsage: DockerUsageSample | undefined;
     topSites: BuiltExtendedInput["topSites"];
+    sizes: MetricsExtended | undefined;
   }): {
     extended?: MetricsExtended;
     containers?: ReturnType<typeof toContainerHealthSample>;
@@ -1040,6 +1057,7 @@ export class LinuxMetricsCollector implements MetricsCollector {
         input.outgoing.extended,
         input.hostText ? hostTextToExtended(input.hostText) : undefined,
         input.hostExtended ? { host: input.hostExtended } : undefined,
+        input.sizes,
         buildCollectedExtended({
           containers,
           dockerUsage: input.dockerUsage,

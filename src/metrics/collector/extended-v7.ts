@@ -136,7 +136,7 @@ export function mergeExtended(
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
-const OBJECT_SECTIONS = ["host", "docker", "ingress", "text"] as const;
+const OBJECT_SECTIONS = ["host", "docker", "ingress", "text", "sizes"] as const;
 
 function mergePart(out: MetricsExtended, part: MetricsExtended): void {
   for (const key of OBJECT_SECTIONS) {
@@ -149,5 +149,7 @@ function pickArrays(part: MetricsExtended): MetricsExtended {
   const arrays: MetricsExtended = {};
   if (part.blockDeviceText) arrays.blockDeviceText = part.blockDeviceText;
   if (part.gpuText) arrays.gpuText = part.gpuText;
+  if (part.filesystemSizes) arrays.filesystemSizes = part.filesystemSizes;
+  if (part.gpuSizes) arrays.gpuSizes = part.gpuSizes;
   return arrays;
 }
