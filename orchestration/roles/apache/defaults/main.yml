@@ -19,16 +19,16 @@ apache_apr_util_sha256: "2b74d8932703826862ca305b094eef2983c27b39d5c9414442e9976
 # Install root the CI build bakes into the tree (APACHE_VENDOR_ROOT in the
 # workflow is this plus /vendor).
 apache_build_install_root: "/opt/turbopanel"
-apache_release_tag: "vendor-apache-{{ apache_version }}"
+apache_release_tag: "apache-httpd-{{ apache_version }}"
 apache_release_base_url: "https://github.com/TurboPanel/turbopaneld/releases/download/{{ apache_release_tag }}"
-# SHA-256 of apache-<version>-<arch>.tar.gz, keyed by version then by
-# ansible_architecture. Pinned from the vendor-apache run (release vendor-apache-2.4.63):
-# the install task refuses anything that is not 64 hex characters. Copy the
-# digests from that run's summary (or the release's SHA256SUMS asset).
+# Release assets name the CPU the Debian way (amd64/arm64), like the daemon's.
+apache_release_arch: "{{ {'x86_64': 'amd64', 'aarch64': 'arm64'}[ansible_architecture] }}"
+# SHA-256 of apache-httpd-<version>-<arch>.tar.zst, keyed by version then by
+# release arch (amd64/arm64). Copy the digests from the vendor-apache run's
+# summary (or the release's SHA256SUMS asset): the install task refuses anything
+# that is not 64 hex characters, so a version without pins does not install.
 apache_sha256:
-  "2.4.63":
-    x86_64: "5d8b35535e6d48fe9dd6346b725d3783ce6ef489f7051fdc45704b9a1b55b543"
-    aarch64: "9d92ddea239a232bad62bef7741d1f2b5611b09637a3ba7623b5aaee407f8696"
+  "2.4.63": {}
 # OpenSSL 3 runtime package: renamed to libssl3t64 (and libssl3 left only as a
 # virtual name) on Debian 13 and Ubuntu 24.04 and later.
 apache_libssl_package: >-
@@ -43,6 +43,8 @@ apache_runtime_packages:
   - "{{ apache_libssl_package }}"
   - libuuid1
   - zlib1g
+  # Unpacks the .tar.zst release asset.
+  - zstd
 turbopanel_dev_user: ""  # noqa: var-naming[no-role-prefix]
 turbopanel_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tp' }}"  # noqa: var-naming[no-role-prefix]
 

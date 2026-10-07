@@ -23,6 +23,15 @@ Deno.test("build-apache.sh verifies sources, fixes owners and gates linked libra
     "only trunk publishes",
   );
   assert(script.includes("--disable-http2"), "optional modules are disabled");
+  assert(
+    script.includes('ASSET="apache-httpd-$HTTPD_VER-$ARCH.tar.zst"'),
+    "lower-case apache-httpd-<ver>-<arch>.tar.zst asset",
+  );
+  assert(script.includes("share/licenses"), "ASF LICENSE and NOTICE ship");
+  assert(
+    workflow.includes('gh release edit "$TAG" --draft=false --latest=false'),
+    "publishing never makes the vendor release Latest",
+  );
 });
 
 Deno.test("apache role pins source digests the build script reads", async () => {

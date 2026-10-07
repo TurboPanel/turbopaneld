@@ -40,11 +40,11 @@
   ansible.builtin.assert:
     that:
       - apache_version in apache_sha256
-      - ansible_architecture in apache_sha256[apache_version]
-      - apache_sha256[apache_version][ansible_architecture] is match('^[0-9a-f]{64}$')
+      - apache_release_arch in apache_sha256[apache_version]
+      - apache_sha256[apache_version][apache_release_arch] is match('^[0-9a-f]{64}$')
     fail_msg: >-
       No pinned SHA-256 for Apache {{ apache_version }} on
-      {{ ansible_architecture }} — run the vendor-apache workflow, then pin its
+      {{ apache_release_arch }} — run the vendor-apache workflow, then pin its
       checksum in roles/apache/defaults/main.yml (apache_sha256).
 
 - name: Install Apache runtime libraries (not apache2)
@@ -70,9 +70,9 @@
     # task and leaves nothing to extract.
     - name: Download prebuilt Apache tarball (SHA-256 verified)
       ansible.builtin.get_url:
-        url: "{{ apache_release_base_url }}/apache-{{ apache_version }}-{{ ansible_architecture }}.tar.gz"
-        dest: "{{ _apache_tmp.path }}/apache.tar.gz"
-        checksum: "sha256:{{ apache_sha256[apache_version][ansible_architecture] }}"
+        url: "{{ apache_release_base_url }}/apache-httpd-{{ apache_version }}-{{ apache_release_arch }}.tar.zst"
+        dest: "{{ _apache_tmp.path }}/apache.tar.zst"
+        checksum: "sha256:{{ apache_sha256[apache_version][apache_release_arch] }}"
         owner: root
         group: root
         mode: "0600"
@@ -87,7 +87,7 @@
         install -d "$(dirname "$DEST")"
         rm -rf "${DEST}.partial"
         install -d "${DEST}.partial"
-        tar -xzf "{{ _apache_tmp.path }}/apache.tar.gz" --no-same-owner -C "${DEST}.partial"
+        tar --zstd -xf "{{ _apache_tmp.path }}/apache.tar.zst" --no-same-owner -C "${DEST}.partial"
         test -x "${DEST}.partial/bin/httpd"
         rm -rf "$DEST"
         mv "${DEST}.partial" "$DEST"
