@@ -1,8 +1,9 @@
 # upstream-version-watch: weekly check of the upstream versions we pin by hand
 # (PHP per OS from LiteSpeed lsphp and sury php-fpm, OpenLiteSpeed, nginx,
 # Apache httpd/APR/APR-util). Keeps ONE issue titled "Upstream versions to
-# review" up to date: edits it in place (reopening it if closed), creates it
-# once, never closes it. With issues turned off, the run summary has the report.
+# review" up to date: edits it in place in any state, reopens it only when
+# something needs action, creates it once, never closes it. With issues turned
+# off, the run summary has the report.
 # The checks live in scripts/lib/upstream-versions.ts; nothing is bumped here.
 name: Upstream Version Watch
 
@@ -71,9 +72,9 @@ jobs:
         run: >-
           deno run
           --allow-read=orchestration
-          --allow-write="$RUNNER_TEMP"
+          --allow-write="$RUNNER_TEMP","$GITHUB_OUTPUT"
           --allow-net=rpms.litespeedtech.com,packages.sury.org,nginx.org,api.github.com,downloads.apache.org
-          --allow-env=GH_TOKEN,LOG_TOKENS,LOG_STREAM
+          --allow-env=GH_TOKEN,GITHUB_OUTPUT,LOG_TOKENS,LOG_STREAM
           scripts/check-upstream-versions.ts "$RUNNER_TEMP/upstream-versions.md"
 
       - name: Update the tracking issue
@@ -81,6 +82,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TITLE: Upstream versions to review
+          ACTIONS: ${{ steps.check.outputs.actions }}
         run: |
           report="$RUNNER_TEMP/upstream-versions.md"
           if [ ! -s "$report" ]; then
@@ -95,7 +97,7 @@ jobs:
             exit 0
           fi
           # One issue for good: found by exact title in any state, edited in
-          # place and reopened if someone closed it, created only once.
+          # place, reopened only when something needs action, created once.
           found="$(gh issue list -R "$GITHUB_REPOSITORY" --state all --limit 100 \
             --search "\"$TITLE\" in:title" --json number,title,state \
             --jq "map(select(.title == env.TITLE)) | first | select(. != null) | \"\(.number) \(.state)\"")"
@@ -105,6 +107,6 @@ jobs:
           fi
           number="${found% *}"
           gh issue edit "$number" -R "$GITHUB_REPOSITORY" --body-file "$report"
-          if [ "${found#* }" != "OPEN" ]; then
+          if [ "${found#* }" != "OPEN" ] && [ "${ACTIONS:-0}" != "0" ]; then
             gh issue reopen "$number" -R "$GITHUB_REPOSITORY"
           fi

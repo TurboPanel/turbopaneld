@@ -6,7 +6,7 @@
  *
  *   deno run --allow-read=orchestration --allow-write=. \
  *     --allow-net=rpms.litespeedtech.com,packages.sury.org,nginx.org,api.github.com,downloads.apache.org \
- *     --allow-env=GH_TOKEN,LOG_TOKENS,LOG_STREAM scripts/check-upstream-versions.ts report.md
+ *     --allow-env=GH_TOKEN,GITHUB_OUTPUT,LOG_TOKENS,LOG_STREAM scripts/check-upstream-versions.ts report.md
  *
  * Exits 1 after writing the report when an upstream could not be read.
  */
@@ -61,5 +61,10 @@ if (import.meta.main) {
       result.findings.length - actions
     } information only, ${result.failures.length} could not be checked`,
   );
+  // The workflow reopens a closed tracking issue only when something needs action.
+  const output = Deno.env.get("GITHUB_OUTPUT");
+  if (output) {
+    await Deno.writeTextFile(output, `actions=${actions}\n`, { append: true });
+  }
   if (result.failures.length > 0) Deno.exit(1);
 }
