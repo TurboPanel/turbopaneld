@@ -1,14 +1,13 @@
 #!/bin/bash
 # Vendors one tenant Node series. Invoked by vendor-series.yml with env:
-# NODE_APP_SERIES, NODE_APP_ARCH, NODE_APP_RESOLVED, NODE_APP_GROUP,
-# NODE_APP_SERIES_DIR. Kept out of the playbook so Ansible does not try to
+# NODE_APP_SERIES, NODE_APP_ARCH, NODE_APP_RESOLVED, NODE_APP_SERIES_DIR,
+# NODE_APP_COREPACK_TGZ. Kept out of the playbook so Ansible does not try to
 # parse shell quotes as Jinja.
 set -euo pipefail
 
 SERIES="${NODE_APP_SERIES:?}"
 ARCH="${NODE_APP_ARCH:?}"
 RESOLVED="${NODE_APP_RESOLVED:?}"
-GROUP="${NODE_APP_GROUP:?}"
 SERIES_DIR="${NODE_APP_SERIES_DIR:?}"
 COREPACK_TGZ="${NODE_APP_COREPACK_TGZ:?}"
 DEST="${SERIES_DIR}/${RESOLVED}"
@@ -46,10 +45,11 @@ if [[ ! -e "${DEST}/bin/pnpm" ]]; then
   "${DEST}/bin/corepack" enable --install-directory "${DEST}/bin" pnpm yarn
 fi
 
-# Unconditional: cp -a keeps upstream 0755, and a tree vendored before the
-# per-series group still needs ownership repaired on a skip-install path.
-chown -R "root:${GROUP}" "$DEST"
-chmod -R u=rwX,g=rX,o= "$DEST"
+# Unconditional, so a tree vendored under an old per-version group is repaired
+# on a skip-install path too: root-owned, readable and executable by every
+# site owner's Linux user, never writable by anyone but root.
+chown -R root:root "$DEST"
+chmod -R u=rwX,go=rX "$DEST"
 
 CURRENT="$(readlink "${SERIES_DIR}/current" || true)"
 if [[ "$CURRENT" != "$DEST" ]]; then

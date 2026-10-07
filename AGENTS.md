@@ -784,8 +784,8 @@ it regresses:
     `php-test <siteId>` runs the installed unit's binary on that config as
     the owner. daemon-install's tp:tp pass over the config tree skips it;
   - changes only principal accounts (uid ≥ 15001, `<name>-grp`, home under
-    the principal root, a listed shell), adds principals only to groups
-    `runtime-registry.json` defines and engine accounts only to principal
+    the principal root, a listed shell), adds principals only to the SSH access
+    groups `runtime-registry.json` defines and engine accounts only to principal
     groups, and takes `chpasswd` input only as one sha512-crypt line;
   - allows `systemctl` verbs on `turbopanel*` / `wg-quick@tp0` / `ssh(d)`
     units, fixed `journalctl`/`ss`/`sshd -t|-T`/`sysctl`/`ip`/`wg` shapes, and
@@ -799,9 +799,9 @@ it regresses:
     run** (`DynamicUser=yes`, `User=tpb-<16 hex of sha256(owner/project)>`: a
     uid from systemd's 61184-65519 range that exists only while the unit runs,
     never a host account, never in docker/tp/sudo, refused if a host account
-    or group already has that name or any group lists a `tpb-*` member), with
-    every `tpnode<series>` and `tpdeno<series>` group as
-    `SupplementaryGroups=`, inside the **site owner's own resource group**
+    or group already has that name or any group lists a `tpb-*` member; no
+    supplementary group: the vendored runtimes are readable by everyone),
+    inside the **site owner's own resource group**
     (`Slice=turbopanel-<owner>-build.slice`, a child of the owner's
     `turbopanel-<owner>.slice`, dashes in the owner's name written `.`, so a
     build counts against whatever limits that slice carries;

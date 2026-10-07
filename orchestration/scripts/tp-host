@@ -95,7 +95,7 @@ R_STAGING="$R_PRINCIPALS/.tp-staging"
 
 PRINCIPAL_ID_MIN=15001
 PRINCIPAL_ID_MAX=60000
-# Service identities and runtime entitlements (orchestration/runtime-registry.json).
+# Service identities and SSH access groups (orchestration/runtime-registry.json).
 SERVICE_ID_MIN=9900
 SERVICE_ID_MAX=9999
 ENGINE_USERS="tpnginx tpapache tpols tpcaddysite"
@@ -1832,9 +1832,7 @@ tp_verb_php_loopback_sync() {
 # daemon's config tree outside its unit, so root opens the config files
 # (verified, no symlink) and the binary reads them through /proc/self/fd —
 # which checks the file's own mode, root:<owner>-grp 0640. The owner keeps its
-# supplementary groups, as systemd gives them to the unit: the PHP binaries are
-# 0750 root:tpphp<series>, so without its entitlement group the owner could not
-# even exec the binary the unit runs.
+# supplementary groups, as systemd gives them to the unit.
 tp_verb_php_test() {
   [ $# -eq 1 ] || tp_die "php-test: only php-test <siteId>"
   tp_php_site_id_ok "$1" || tp_die "php-test: refusing site id $1"
@@ -2808,8 +2806,8 @@ tp_verb_usermod() {
       ;;
     -aG)
       [ $# -eq 3 ] || tp_die "usermod -aG GROUP USER"
-      # A principal joins a group the runtime registry defines (entitlements
-      # and SSH access levels); an engine account joins a site's group.
+      # A principal joins a group the runtime registry defines (its SSH access
+      # groups); an engine account joins a site's group.
       if tp_is_principal "$3"; then
         tp_registry_group "$2" || tp_die "usermod: $2 is not a registry group"
       else
@@ -3048,11 +3046,6 @@ fi
 # owner): its slice is turbopanel-tpbuild.slice, which no principal can own
 # (tp_new_name_ok refuses every tp* name).
 BUILD_NO_OWNER="tpbuild"
-# Runtime entitlement groups (tpnode<series>, tpdeno<series>) live in this gid
-# band (orchestration/runtime-registry.json); a build gets them as
-# SupplementaryGroups= so it can run the vendored Node or Deno it was assigned.
-BUILD_RUNTIME_GID_MIN=9900
-BUILD_RUNTIME_GID_MAX=9979
 BUILD_LOCK="$P/run/tpbuild.lock"
 # root:tp 0750 like this script. PID 1 reads it as root and hands it to the
 # unit as a credential (a private, read-only copy owned by the unit's user),
@@ -3187,16 +3180,6 @@ tp_build_dyn_user() {
   BUILD_DYN_USER="tpb-$_du_hash"
   ! tp_getent passwd "$BUILD_DYN_USER" >/dev/null 2>&1 &&
     ! tp_getent group "$BUILD_DYN_USER" >/dev/null 2>&1
-}
-
-# The runtime groups a build gets (SupplementaryGroups=), space-separated:
-# every tpnode<series> and tpdeno<series> group in the runtime entitlement band,
-# and nothing else.
-tp_build_runtime_groups() {
-  tp_group_db | awk -F: -v lo="$BUILD_RUNTIME_GID_MIN" -v hi="$BUILD_RUNTIME_GID_MAX" '
-    $1 ~ /^tp(node|deno)[0-9]+$/ && $3 ~ /^[0-9]+$/ && $3 + 0 >= lo + 0 && $3 + 0 <= hi + 0 {
-      printf "%s%s", sep, $1; sep = " "
-    }'
 }
 
 # True when this process runs in exactly the cgroup of build $1 of owner $2
@@ -3418,8 +3401,6 @@ tp_verb_build_run() {
   # when the unit stops; the name is ours (tp_build_dyn_user), the uid systemd's.
   set -- --unit="turbopanel-build-$1" --service-type=exec --wait --pipe --quiet --collect \
     -p DynamicUser=yes -p User="$BUILD_DYN_USER"
-  _br_groups="$(tp_build_runtime_groups)"
-  [ -z "$_br_groups" ] || set -- "$@" -p SupplementaryGroups="$_br_groups"
   set -- "$@" -p WorkingDirectory="$_br_work" \
     -p NoNewPrivileges=yes -p CapabilityBoundingSet= -p AmbientCapabilities= \
     -p RestrictSUIDSGID=yes -p ProtectSystem=strict -p ProtectHome=yes \

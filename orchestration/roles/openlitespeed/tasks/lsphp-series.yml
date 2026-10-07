@@ -19,7 +19,6 @@
   ansible.builtin.set_fact:
     _lsphp: "{{ _map }}"
     _lsphp_suite: "{{ _suite }}"
-    _lsphp_group: "tpphp{{ lsphp_series | replace('.', '') }}"
     _lsphp_dest: "{{ turbopanel_vendor_dir }}/lsphp/{{ lsphp_series }}/{{ _map.version }}"
     # `<pkg>_<version>-<rev>+<suite>_<arch>.deb`; `-common` is `_all`.
     _lsphp_debs: >-
@@ -91,15 +90,6 @@
         state: absent
       when: _lsphp_tmp.path is defined
 
-# Entitlement group for this PHP series, shared with php-fpm: one grant means
-# "may execute PHP <series> here", whichever engine serves the site.
-- name: Ensure the PHP entitlement group for lsphp ({{ lsphp_series }})
-  ansible.builtin.include_role:
-    name: runtime-entitlement
-  vars:
-    runtime_entitlement_runtime: php
-    runtime_entitlement_series: ["{{ lsphp_series }}"]
-
 # The binary was built for /usr/local/lsws/<pkg>/, so its compiled php.ini and
 # extension paths do not exist here. PHP also looks for php.ini next to the
 # executable, so the relocated config lives in bin/ and needs no env or flag in
@@ -125,7 +115,7 @@
     dest: "{{ _lsphp_dest }}/lib/php/ext"
     state: link
     owner: root
-    group: "{{ _lsphp_group }}"
+    group: root
     force: true
 
 - name: Seed the relocated php.ini from the production template ({{ lsphp_series }})
@@ -134,7 +124,7 @@
     src: "{{ _lsphp_dest }}/lib/php/{{ lsphp_series }}/php.ini-production"
     dest: "{{ _lsphp_dest }}/bin/php.ini"
     owner: root
-    group: "{{ _lsphp_group }}"
+    group: root
     mode: "0640"
     force: false
 
@@ -170,30 +160,25 @@
     or 'Zend OPcache' not in _lsphp_info.stdout
     or 'mysqli' not in _lsphp_info.stdout
 
-# Detached lsphp runs as the site principal from its systemd unit, and tenant
-# principals are deliberately never in `tp`: the series entitlement group
-# (which the daemon grants a site's principal) is the identity that execs it.
-- name: Scope the lsphp tree to its PHP entitlement group ({{ lsphp_series }})
+# Every site owner's Linux user may run every installed PHP series (detached
+# lsphp runs as the site's owner from its systemd unit): the tree is
+# root-owned, readable by everyone, never writable but by root. `X` keeps
+# directories and executables executable without making every file so. Also
+# repairs a tree an older release grouped to a per-version PHP group.
+- name: Make the lsphp tree root-owned and readable by everyone ({{ lsphp_series }})
   ansible.builtin.file:
     path: "{{ _lsphp_dest }}"
-    owner: root
-    group: "{{ _lsphp_group }}"
-    mode: "0750"
+    state: directory
     recurse: true
-
-- name: Keep the lsphp binary executable by the entitlement group only ({{ lsphp_series }})
-  ansible.builtin.file:
-    path: "{{ _lsphp_dest }}/bin/lsphp"
+    follow: false
     owner: root
-    group: "{{ _lsphp_group }}"
-    mode: "0750"
+    group: root
+    mode: "u=rwX,go=rX"
 
-# The parent holds every series, so it belongs to no single series' group.
-- name: Grant the PHP entitlement group traversal of the lsphp tree ({{ lsphp_series }})
+- name: Let every site owner's Linux user traverse to this lsphp series ({{ lsphp_series }})
   ansible.posix.acl:
-    path: "{{ turbopanel_vendor_dir }}/lsphp"
-    etype: group
-    entity: "{{ _lsphp_group }}"
+    path: "{{ turbopanel_vendor_dir }}/lsphp/{{ lsphp_series }}"
+    etype: other
     permissions: x
     state: present
 

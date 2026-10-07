@@ -160,10 +160,8 @@ Docker Compose. The daemon:
    changed too. RFC 1918 stays open
    (scope addresses, VPC services, operator-set Docker pools), so the host's
    private addresses and other containers' bridge IPs are not closed by it.
-   The `tpphp<series>` entitlement (the binaries are
-   `0750 root:tpphp<series>`) is resolved control-plane side as a `deploy`
-   entitlement; the daemon also adds it on deploy only to
-   cover an older control plane.
+   Every installed PHP series may be run by every site owner's Linux user, so
+   a PHP site needs no group for its runtime.
    No mode keeps the shared master on nginx and Apache; a mode without a
    principal, or lsphp on nginx/Apache, is refused. OpenLiteSpeed runs the same
    runtimes (plus `-lsd<series>`, detached lsphp) behind `tpols`; Caddy ignores

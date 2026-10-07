@@ -39,7 +39,7 @@ type Account = {
 /**
  * A principal on the root-owned layout: <root>/<name> with home/, data/,
  * tmp/ and sites/, its key file, its slice (installed and staged), and
- * membership in tpsftp and tpphp84.
+ * membership in tpsftp and tpshell.
  */
 async function addPrincipal(host: Host, account: Account): Promise<string> {
   const root = host.path(`srv/users/${account.name}`);
@@ -55,7 +55,7 @@ async function addPrincipal(host: Host, account: Account): Promise<string> {
     host.path("etc/group"),
     group
       .replace("tpsftp:x:9986:", `tpsftp:x:9986:${account.name}`)
-      .replace("tpphp84:x:9902:", `tpphp84:x:9902:alice,${account.name}`) +
+      .replace("tpshell:x:9985:", `tpshell:x:9985:alice,${account.name}`) +
       `${account.name}-grp:x:${account.groupGid ?? gid}:tpnginx\n`,
   );
   for (const dir of ["home", "data", "tmp", "sites"]) {
@@ -88,7 +88,7 @@ test("principal-remove retires a principal on the root-owned layout", async () =
       "EXEC [systemctl] [--no-pager] [stop] [turbopanel-dave.slice]",
       "EXEC [pkill] [-KILL] [-u] [15004]",
       "EXEC [systemctl] [daemon-reload]",
-      "EXEC [gpasswd] [-d] [dave] [tpphp84]",
+      "EXEC [gpasswd] [-d] [dave] [tpshell]",
       "EXEC [gpasswd] [-d] [dave] [tpsftp]",
       "EXEC [userdel] [dave]",
       "EXEC [groupdel] [dave-grp]",

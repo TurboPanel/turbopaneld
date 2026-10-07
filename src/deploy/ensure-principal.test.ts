@@ -878,26 +878,26 @@ test("resolveManagedGroups grants the password group only alongside an SSH level
 });
 
 test("ensurePrincipalManagedGroups adds only the missing groups", async () => {
-  const { run, calls } = runtimeGroupRun(["appuser-grp", "tpphp84"]);
+  const { run, calls } = runtimeGroupRun(["appuser-grp", "tpsftp"]);
   await ensurePrincipalManagedGroups(
     "appuser",
-    new Set(["tpphp84", "tpnode24"]),
+    new Set(["tpsftp", "tpshell"]),
     run,
   );
   assertEquals(groupMutations(calls), [
-    ["-n", "usermod", "-aG", "tpnode24", "appuser"],
+    ["-n", "usermod", "-aG", "tpshell", "appuser"],
   ]);
 });
 
 test("ensurePrincipalManagedGroups revokes a group that is no longer granted", async () => {
   // The whole reason this function exists: `usermod -aG` can only add, so a
   // principal that once deployed a Node app could execute Node forever.
-  const { run, calls } = runtimeGroupRun(["appuser-grp", "tpnode24"]);
-  await ensurePrincipalManagedGroups("appuser", new Set(["tpphp84"]), run);
+  const { run, calls } = runtimeGroupRun(["appuser-grp", "tpshell"]);
+  await ensurePrincipalManagedGroups("appuser", new Set(["tpsftp"]), run);
   // Revoke first, then grant.
   assertEquals(groupMutations(calls), [
-    ["-n", "gpasswd", "-d", "appuser", "tpnode24"],
-    ["-n", "usermod", "-aG", "tpphp84", "appuser"],
+    ["-n", "gpasswd", "-d", "appuser", "tpshell"],
+    ["-n", "usermod", "-aG", "tpsftp", "appuser"],
   ]);
 });
 
@@ -905,17 +905,17 @@ test("ensurePrincipalManagedGroups never touches a group outside the registry", 
   // Containment is what makes revocation safe. `<username>-grp` is the
   // principal's primary group, `tp` is the panel's own, `tpnginx` is an engine
   // account joined for release reads, and `ops` is something an operator added
-  // by hand. None of them are entitlements, so none may be stripped.
+  // by hand. None of them is in the registry, so none may be stripped.
   const { run, calls } = runtimeGroupRun([
     "appuser-grp",
     "tp",
     "tpnginx",
     "ops",
-    "tpnode24",
+    "tpshell",
   ]);
   await ensurePrincipalManagedGroups("appuser", new Set(), run);
   assertEquals(groupMutations(calls), [
-    ["-n", "gpasswd", "-d", "appuser", "tpnode24"],
+    ["-n", "gpasswd", "-d", "appuser", "tpshell"],
   ]);
 });
 
@@ -929,9 +929,8 @@ test("ensurePrincipalManagedGroups rejects a group the registry does not define"
 });
 
 test("ensurePrincipalManagedGroups tolerates a host missing the group", async () => {
-  // A host provisioned some other way may legitimately not have the group yet;
-  // the unit's own health probe is what catches an unreachable runtime. A
-  // failed *revoke* stays loud, since a lingering entitlement is a real risk.
+  // A host provisioned some other way may legitimately not have the group yet.
+  // A failed *revoke* stays loud, since a lingering login is a real risk.
   const calls: Array<{ command: string; args: string[] }> = [];
   const run: RunFn = (command, args) => {
     calls.push({ command, args });
@@ -945,31 +944,11 @@ test("ensurePrincipalManagedGroups tolerates a host missing the group", async ()
     return Promise.resolve({
       success: false,
       stdout: "",
-      stderr: "group tpnode24 does not exist",
+      stderr: "group tpshell does not exist",
     });
   };
-  await ensurePrincipalManagedGroups("appuser", new Set(["tpnode24"]), run);
+  await ensurePrincipalManagedGroups("appuser", new Set(["tpshell"]), run);
   assertEquals(groupMutations(calls).length, 1);
-});
-
-test("ensureSystemPrincipals grants the runtimes its spec carries", async () => {
-  const { run, calls } = captureRun({});
-  await ensureSystemPrincipals(
-    stubLayout(),
-    [{
-      principalId: "pr-1",
-      username: "appuser",
-      runtimes: [
-        { runtime: "php", series: "8.4" },
-        { runtime: "node", series: "24.17.0" },
-      ],
-    }],
-    run,
-  );
-  const added = calls
-    .filter((c) => c.args.includes("usermod") && c.args.includes("-aG"))
-    .map((c) => c.args[3]);
-  assertEquals(added.sort(), ["tpnode24", "tpphp84", "tpprincipal"]);
 });
 
 test("ensureSystemPrincipals grants the access group its spec carries", async () => {
@@ -981,20 +960,18 @@ test("ensureSystemPrincipals grants the access group its spec carries", async ()
       username: "appuser",
       shell: "/bin/bash",
       accessGroups: ["tpshell"],
-      runtimes: [{ runtime: "php", series: "8.4" }],
     }],
     run,
   );
   const added = calls
     .filter((c) => c.args.includes("usermod") && c.args.includes("-aG"))
     .map((c) => c.args[3]);
-  // Entitlements and access are one reconcile pass, so both land together.
-  assertEquals(added.sort(), ["tpphp84", "tpprincipal", "tpshell"]);
+  assertEquals(added.sort(), ["tpprincipal", "tpshell"]);
 });
 
 test("downgrading from shell to files-only revokes the shell group", async () => {
-  // The whole reason the containment set is a single one: an entitlement-only
-  // pass would not recognize `tpshell` and would leave it behind.
+  // Revocation is the reason the reconcile exists: an add-only pass would
+  // leave `tpshell` behind.
   const { run, calls } = captureRun({ groups: ["appuser-grp", "tpshell"] });
   await ensureSystemPrincipals(
     stubLayout(),
@@ -1075,9 +1052,10 @@ test("a suspended account keeps its groups revoked and nothing else touched", as
   const removed = calls
     .filter((c) => c.args.includes("gpasswd") && c.args.includes("-d"))
     .map((c) => c.args.at(-1));
-  // `appuser-grp` and `tp` survive: they are outside the registry, so the
-  // reconcile has no opinion about them no matter what the wire asks for.
-  assertEquals(removed.sort(), ["tpphp84", "tpsftp"]);
+  // `appuser-grp`, `tp` and a leftover per-version `tpphp84` survive: they are
+  // outside the registry, so the reconcile has no opinion about them no matter
+  // what the wire asks for (the runtime-access role deletes leftover groups).
+  assertEquals(removed.sort(), ["tpsftp"]);
 });
 
 test("an access group the registry does not define is dropped, not created", async () => {
@@ -1115,7 +1093,7 @@ test("every principal joins the every-principal group, even with no SSH level", 
 });
 
 test("a principal that cannot join the every-principal group fails the reconcile", async () => {
-  // Best-effort is right for a runtime group, wrong here: a silent miss leaves
+  // Best-effort is right for a level group, wrong here: a silent miss leaves
   // the account on the host's sshd defaults.
   const { run: base } = captureRun({});
   const run: RunFn = (command, args, stdin) =>
@@ -1369,21 +1347,6 @@ test("ensureSystemPrincipals rejects a shell outside the allowlist", async () =>
   );
 });
 
-test("ensureSystemPrincipals drops an unknown runtime instead of failing", async () => {
-  const { run, calls } = captureRun({});
-  await ensureSystemPrincipals(stubLayout(), [{
-    ...baseSpec,
-    home: defaultHome,
-    runtimes: [{ runtime: "python", series: "3.12" }],
-  }], run);
-  assertEquals(
-    calls
-      .filter((c) => c.args.includes("usermod") && c.args.includes("-aG"))
-      .map((c) => c.args[3]),
-    ["tpprincipal"],
-  );
-});
-
 test("ensureSystemPrincipals rejects existing username with mismatched gid override", async () => {
   const { run } = captureRun({
     getentGroup: { success: true, stdout: "appuser-grp:x:15001:", stderr: "" },
@@ -1615,20 +1578,20 @@ test("ensurePrincipalManagedGroups adds in sorted order and keeps going after a 
     }
     calls.push(args);
     return Promise.resolve(
-      args.includes("tpnode24")
+      args.includes("tpsftp")
         ? { success: false, stdout: "", stderr: "no such group" }
         : { success: true, stdout: "", stderr: "" },
     );
   };
   const warnings = await ensurePrincipalManagedGroups(
     "appuser",
-    new Set(["tpphp84", "tpnode24", "tpnode22"]),
+    new Set(["tpshell", "tpsftp", "tppasswd"]),
     run,
   );
-  assertEquals(calls.map((a) => a.at(-2)), ["tpnode22", "tpnode24", "tpphp84"]);
-  // The failed add is reported, not swallowed (a runtime not installed here).
+  assertEquals(calls.map((a) => a.at(-2)), ["tppasswd", "tpsftp", "tpshell"]);
+  // The failed add is reported, not swallowed (a host missing the group).
   assertEquals(warnings.length, 1);
-  assertStringIncludes(warnings[0], "could not add appuser to tpnode24");
+  assertStringIncludes(warnings[0], "could not add appuser to tpsftp");
   assertStringIncludes(warnings[0], "no such group");
 });
 
@@ -1638,13 +1601,13 @@ test("ensurePrincipalManagedGroups revokes in sorted order and stops at the firs
     if (command === "id") {
       return Promise.resolve({
         success: true,
-        stdout: "appuser-grp tpphp84 tpnode22 tpnode24",
+        stdout: "appuser-grp tpshell tppasswd tpsftp",
         stderr: "",
       });
     }
     revoked.push(args.at(-1) ?? "");
     return Promise.resolve(
-      args.at(-1) === "tpnode24"
+      args.at(-1) === "tpsftp"
         ? { success: false, stdout: "", stderr: "gpasswd denied" }
         : { success: true, stdout: "", stderr: "" },
     );
@@ -1654,7 +1617,7 @@ test("ensurePrincipalManagedGroups revokes in sorted order and stops at the firs
     Error,
     "gpasswd denied",
   );
-  assertEquals(revoked, ["tpnode22", "tpnode24"]);
+  assertEquals(revoked, ["tppasswd", "tpsftp"]);
 });
 
 test("ensurePrincipalManagedGroups is loud when a revoke fails", async () => {
@@ -1662,7 +1625,7 @@ test("ensurePrincipalManagedGroups is loud when a revoke fails", async () => {
     if (command === "id") {
       return Promise.resolve({
         success: true,
-        stdout: "appuser-grp tpnode24",
+        stdout: "appuser-grp tpsftp",
         stderr: "",
       });
     }
@@ -1687,7 +1650,7 @@ test("ensurePrincipalManagedGroups uses a generic revoke error when stderr is em
     if (command === "id") {
       return Promise.resolve({
         success: true,
-        stdout: "tpphp84",
+        stdout: "tpshell",
         stderr: "",
       });
     }
@@ -1699,7 +1662,7 @@ test("ensurePrincipalManagedGroups uses a generic revoke error when stderr is em
   await assertRejects(
     () => ensurePrincipalManagedGroups("appuser", new Set(), run),
     Error,
-    "Failed to remove appuser from group tpphp84",
+    "Failed to remove appuser from group tpshell",
   );
 });
 
@@ -1708,11 +1671,11 @@ test("ensureSupplementaryGroupMembership surfaces empty-stderr failures", async 
     () =>
       ensureSupplementaryGroupMembership(
         "appuser",
-        "tpnode24",
+        "tpsftp",
         () => Promise.resolve({ success: false, stdout: "", stderr: "" }),
       ),
     Error,
-    "Failed to add appuser to group tpnode24",
+    "Failed to add appuser to group tpsftp",
   );
 });
 

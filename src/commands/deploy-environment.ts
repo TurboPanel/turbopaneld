@@ -103,12 +103,10 @@ import {
   ensureSitePhpRuntimes,
   planSiteWebEnv,
   resolveSiteDocumentRoot,
-  resolveSitePhpSeries,
   type SiteManagedDirectory,
   type SiteRelease,
 } from "../deploy/site.ts";
 import { detectSiteApps } from "../deploy/site-apps.ts";
-import { sitePhpRuntimeMode } from "../deploy/site/php-runtime.ts";
 import {
   applyCronJobs,
   type CronApplySpec,
@@ -567,48 +565,7 @@ export function deployPrincipalSpecs(
       ...(principal.gid === undefined ? {} : { gid: principal.gid }),
     });
   }
-  return withSitePhpRuntimes([...byId.values()], parsedPayload.sites ?? []);
-}
-
-/**
- * A per-site PHP runtime runs `php-cgi<series>` / `php-fpm<series>` as the
- * site's principal, and those binaries are `0750 root:tpphp<series>`: the
- * principal must hold that series' entitlement or its unit dies `203/EXEC`.
- *
- * The grant belongs in the control plane's effective runtime set (see
- * `PrincipalEnsureSpec.runtimes`: the daemon reconciles, it does not derive),
- * which persists it as a `deploy` entitlement the way a native app's Node
- * series is, so `server.principals.reconcile` and every other environment's
- * deploy (both full-replace) carry it too. Adding it here as well only covers
- * a control plane older than that, since the daemon ships first: a deploy
- * from one still starts its runtime, though a later reconcile from it can
- * still take the grant away.
- */
-function withSitePhpRuntimes(
-  principals: EnvironmentDeployPrincipalMaterial[],
-  sites: readonly EnvironmentDeploySite[],
-): EnvironmentDeployPrincipalMaterial[] {
-  const implied = new Map<string, Set<string>>();
-  for (const site of sites) {
-    if (!site.principal || sitePhpRuntimeMode(site) === null) continue;
-    const series = resolveSitePhpSeries(site);
-    if (!series) continue;
-    const set = implied.get(site.principal.principalId) ?? new Set<string>();
-    set.add(series);
-    implied.set(site.principal.principalId, set);
-  }
-  return principals.map((principal) => {
-    const series = implied.get(principal.principalId);
-    if (!series) return principal;
-    const runtimes = [...(principal.runtimes ?? [])];
-    for (const entry of series) {
-      const held = runtimes.some((r) =>
-        r.runtime === "php" && r.series === entry
-      );
-      if (!held) runtimes.push({ runtime: "php", series: entry });
-    }
-    return { ...principal, runtimes };
-  });
+  return [...byId.values()];
 }
 
 async function ensureDeployPrincipals(
@@ -625,9 +582,6 @@ async function ensureDeployPrincipals(
       ...(principal.gid === undefined ? {} : { gid: principal.gid }),
       ...(principal.home === undefined ? {} : { home: principal.home }),
       ...(principal.shell === undefined ? {} : { shell: principal.shell }),
-      ...(principal.runtimes === undefined
-        ? {}
-        : { runtimes: principal.runtimes }),
       ...(principal.accessGroups === undefined
         ? {}
         : { accessGroups: principal.accessGroups }),
@@ -2201,17 +2155,13 @@ export async function handleEnvironmentDeploy(
   );
   await Deno.mkdir(deploymentDir, { recursive: true, mode: 0o750 });
 
-  // Before the principals: the playbook creates the `tpnode<NN>` runtime
-  // groups, and the principal reconcile joins the site owner's Linux user to
-  // them. Joining a group that does not exist yet is skipped with a warning, so
-  // on the first deploy of a series the user missed the group and the unit died
-  // 203/EXEC. Tenant Node must also exist before the Git build: native installs
-  // run `corepack` from `vendor/node-app/<series>/current/bin`.
+  // Tenant Node must exist before the Git build: native installs run
+  // `corepack` from `vendor/node-app/<series>/current/bin`.
   await ensureNativeAppRuntime(
     parsedPayload.nativeAppServices ?? [],
     deps?.nativeAppIo,
   );
-  // Same for PHP: the site engine playbooks create the `tpphp<series>` groups.
+  // PHP too, so a site's runtime is on disk before anything starts it.
   await ensureSitePhpRuntimes(parsedPayload.sites ?? [], deps?.siteIo);
 
   const principalMaterial = parsedPayload.principalMaterial ?? [];

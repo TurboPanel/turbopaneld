@@ -64,7 +64,7 @@ generated vhost:
 
 | Path | Owner | Mode | Purpose |
 | ---- | ----- | ---- | ------- |
-| `{{ turbopanel_vendor_dir }}/lsphp/<series>/<version>/` | `root:tpphp<series>` | `0750` | extracted `bin/lsphp` + `lib/` extensions; `bin/php.ini` (relocated config, below) |
+| `{{ turbopanel_vendor_dir }}/lsphp/<series>/<version>/` | `root:root` | `u=rwX,go=rX` (readable by everyone, writable by root only) | extracted `bin/lsphp` + `lib/` extensions; `bin/php.ini` (relocated config, below) |
 | `{{ turbopanel_vendor_dir }}/lsphp/<series>/current` | symlink | — | what the per-site units' `ExecStart=` points at |
 | `{{ turbopanel_vendor_dir }}/lsphp/<series>/<version>/lib/php/ext` | symlink | — | `lib/php/<api>/`: the stable `extension_dir` a per-site php.ini names |
 
@@ -91,6 +91,7 @@ extensions (PHP also reads php.ini next to its executable), then runs
 per-site runtime sets `PHPRC` to its own php.ini, which replaces that file, so
 its ini repeats `extension_dir` (through `lib/php/ext`) and the module lines;
 tp-host allows only `curl`, `mysqli` and `pdo_mysql` there. `lsphp` and `php-fpm` are different binaries from
-different sources, but a series string means the same thing to both, and one
-entitlement group (`tpphp<series>`) covers whichever engine serves the site. Hosting `web.php` hints land in the per-site runtime's php.ini.
+different sources, but a series string means the same thing to both, and every
+site owner's Linux user may run every installed series, whichever engine serves
+the site. Hosting `web.php` hints land in the per-site runtime's php.ini.
 

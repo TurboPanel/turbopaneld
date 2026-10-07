@@ -15,7 +15,7 @@ const tasksOf = async (role: string): Promise<Task[]> =>
     ),
   ) as Task[];
 
-test("deploy vendors PHP runtimes (creating tpphp groups) before joining principals", async () => {
+test("deploy vendors PHP runtimes before joining principals", async () => {
   const src = await Deno.readTextFile(
     join(DAEMON_ROOT, "src/commands/deploy-environment.ts"),
   );

@@ -307,14 +307,9 @@ not after promote. When an entry belongs to a `nativeAppServices[]` row,
 series' `bin/` leads a **curated** `PATH` (`<bin>:/usr/bin:/bin`, never the
 daemon's PATH — Deno's `node_compat_bin` would shadow `node`, and an
 unreadable `/usr/local/sbin` makes dash report `corepack: Permission denied`
-for a missing binary). In the sandbox the build's throwaway user reaches the
-series through `SupplementaryGroups=` (tp-host gives it every
-`tpnode<series>` group). Unsandboxed, the
-child is `sudo -n -u <self> -- env … sh -c` so
-`initgroups()` picks up `tpnode<series>` without a daemon re-login and
-without exec'ing the passwd shell (`sg` dies on `/usr/sbin/nologin` with
-"This account is currently not available" — the managed daemon user `tp`
-and tenant principals are both nologin). Corepack caches under the
+for a missing binary). The vendored trees are readable by everyone, so the
+sandbox's throwaway user (and, unsandboxed, the daemon's plain `sh -c` child)
+reaches the series with no group at all. Corepack caches under the
 project's sandbox cache (unsandboxed: `<checkout>/.corepack`) with its download
 prompt off — never a host-wide
 Corepack install, never the daemon's home. `NODE_ENV` follows the app's
@@ -322,9 +317,8 @@ Corepack install, never the daemon's home. `NODE_ENV` follows the app's
 
 **Deno builds (`runtime: deno`).** The same lane with the vendored Deno in
 place of Node (`nativeRuntime.runtime === "deno"`): `vendor/deno-app/<series>/current/bin`
-leads the curated `PATH`, the build's user reaches it through the `tpdeno<series>`
-group (tp-host gives a build every `tpnode<series>` and `tpdeno<series>` group),
-`DENO_DIR` is the project's sandbox cache (unsandboxed: `<checkout>/.deno`), and
+leads the curated `PATH` (readable by everyone, so the build's user needs no
+group), `DENO_DIR` is the project's sandbox cache (unsandboxed: `<checkout>/.deno`), and
 `DENO_NO_UPDATE_CHECK=1` / `DENO_NO_PROMPT=1` are set. The network rules are the
 build's usual ones (the public internet only). Nothing is derived from Node's
 package manager. `deno-build.ts` derives, from the project's own files

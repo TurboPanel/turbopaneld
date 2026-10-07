@@ -312,26 +312,6 @@ test("parseEnvironmentDeployPayload rejects principalMaterial field errors", () 
       principalMaterial: [{
         principalId: PRINCIPAL_ID,
         username: "deploy_user",
-        runtimes: "php",
-      }],
-    },
-    "Invalid environment deploy principalMaterial runtimes",
-  );
-  rejectDeploy(
-    {
-      principalMaterial: [{
-        principalId: PRINCIPAL_ID,
-        username: "deploy_user",
-        runtimes: [{ runtime: "php", series: "latest" }],
-      }],
-    },
-    "Invalid environment deploy principalMaterial runtimes entry",
-  );
-  rejectDeploy(
-    {
-      principalMaterial: [{
-        principalId: PRINCIPAL_ID,
-        username: "deploy_user",
         accessGroups: ["TPNODEAPP"],
       }],
     },
@@ -371,21 +351,20 @@ test("parseEnvironmentDeployPayload rejects principalMaterial field errors", () 
   }
 });
 
-test("parsePrincipalsReconcilePayload rejects malformed principal grants", () => {
-  assertThrows(
-    () =>
-      parsePrincipalsReconcilePayload({
-        principals: [{
-          principalId: PRINCIPAL_ID,
-          username: "deploy_user",
-          home: "/srv/users/deploy_user",
-          shell: "/usr/sbin/nologin",
-          runtimes: [{ series: "8.4" }],
-        }],
-      }),
-    TypeError,
-    "Invalid environment deploy principalMaterial runtimes entry",
-  );
+test("parsePrincipalsReconcilePayload ignores a leftover runtimes field", () => {
+  // Older control planes sent per-version runtime grants; every installed
+  // runtime is now open to every site owner's Linux user, so the field is
+  // dropped whatever its shape.
+  const payload = parsePrincipalsReconcilePayload({
+    principals: [{
+      principalId: PRINCIPAL_ID,
+      username: "deploy_user",
+      home: "/srv/users/deploy_user",
+      shell: "/usr/sbin/nologin",
+      runtimes: [{ series: "8.4" }],
+    }],
+  });
+  assertEquals("runtimes" in payload.principals[0], false);
 });
 
 test("parsePrincipalsReconcilePayload round-trips a password hash", () => {
