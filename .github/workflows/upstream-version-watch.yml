@@ -1,0 +1,97 @@
+# upstream-version-watch: weekly check of the upstream versions we pin by hand
+# (PHP per OS from LiteSpeed lsphp and sury php-fpm, OpenLiteSpeed, nginx,
+# Apache httpd/APR/APR-util). Keeps ONE issue titled "Upstream versions to
+# review" up to date: edits it when open, creates it otherwise, never closes it.
+# The checks live in scripts/lib/upstream-versions.ts; nothing is bumped here.
+name: Upstream Version Watch
+
+on:
+  schedule:
+    - cron: "41 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: upstream-version-watch
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    name: watch
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Three attempts, 15 s then 45 s apart: setup-deno has no retry input and
+      # a transient GitHub 5xx on the download must not turn the run red.
+      - name: Install Deno
+        id: deno-try-1
+        continue-on-error: true
+        uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
+        with:
+          # Keep in step with DENO_VERSION / deno_version / TP_DENO_VERSION (2.9.7).
+          deno-version: "2.9.7"
+          cache: true
+      - name: Wait before retrying the Deno download
+        if: steps.deno-try-1.outcome == 'failure'
+        run: sleep 15
+      - name: Install Deno (retry 1 of 2)
+        id: deno-try-2
+        if: steps.deno-try-1.outcome == 'failure'
+        continue-on-error: true
+        uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
+        with:
+          # Keep in step with DENO_VERSION / deno_version / TP_DENO_VERSION (2.9.7).
+          deno-version: "2.9.7"
+          cache: true
+      - name: Wait before retrying the Deno download again
+        if: steps.deno-try-2.outcome == 'failure'
+        run: sleep 45
+      - name: Install Deno (retry 2 of 2)
+        if: steps.deno-try-2.outcome == 'failure'
+        uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
+        with:
+          # Keep in step with DENO_VERSION / deno_version / TP_DENO_VERSION (2.9.7).
+          deno-version: "2.9.7"
+          cache: true
+
+      # Exits 1 after writing the report when an upstream could not be read,
+      # so the run goes red while the issue still gets the partial report.
+      - name: Check upstream versions
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          deno run
+          --allow-read=orchestration
+          --allow-write="$RUNNER_TEMP"
+          --allow-net=rpms.litespeedtech.com,packages.sury.org,nginx.org,api.github.com,downloads.apache.org
+          --allow-env=GH_TOKEN,LOG_TOKENS,LOG_STREAM
+          scripts/check-upstream-versions.ts "$RUNNER_TEMP/upstream-versions.md"
+
+      - name: Update the tracking issue
+        if: always() && steps.check.outcome != 'skipped'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TITLE: Upstream versions to review
+        run: |
+          report="$RUNNER_TEMP/upstream-versions.md"
+          if [ ! -s "$report" ]; then
+            echo "::error::No report was written; the tracking issue is unchanged."
+            exit 1
+          fi
+          number="$(gh issue list -R "$GITHUB_REPOSITORY" --state open \
+            --search "\"$TITLE\" in:title" --json number,title \
+            --jq "map(select(.title == env.TITLE)) | first | .number // empty")"
+          if [ -n "$number" ]; then
+            gh issue edit "$number" -R "$GITHUB_REPOSITORY" --body-file "$report"
+          else
+            gh issue create -R "$GITHUB_REPOSITORY" --title "$TITLE" --body-file "$report"
+          fi
+          cat "$report" >> "$GITHUB_STEP_SUMMARY"
