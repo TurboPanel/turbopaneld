@@ -34,6 +34,9 @@ import { createNoopCommandOutputSink } from "../logs/contracts.ts";
  */
 const test = Deno.test.bind(Deno);
 
+/** Random per run so no credential-shaped literal sits in the source. */
+const TEST_ROOT_VALUE = `v-${crypto.randomUUID()}`;
+
 test("needs_resync member projection marks replica needs_resync", () => {
   const member = buildNeedsResyncMember(
     "00000000-0000-4000-8000-0000000000aa",
@@ -799,18 +802,18 @@ test("provisionManagedRootPasswordFile writes the file and hands it over once, w
       managedId: "00000000-0000-4000-8000-000000000001",
       image: "postgres:18",
     } as unknown as ManagedApplyPayload;
-    await provisionManagedRootPasswordFile(layout, payload, "s3cret-pw", {
+    await provisionManagedRootPasswordFile(layout, payload, TEST_ROOT_VALUE, {
       engineUser: "postgres",
       engineGroup: "postgres",
       run,
     });
     assertEquals(calls.length, 2);
-    assertEquals(calls.flat().join(" ").includes("s3cret-pw"), false);
+    assertEquals(calls.flat().join(" ").includes(TEST_ROOT_VALUE), false);
     assertEquals(
       await Deno.readTextFile(
         managedRootPasswordPath(layout, payload.managedId),
       ),
-      "s3cret-pw",
+      TEST_ROOT_VALUE,
     );
   });
 });
@@ -835,7 +838,7 @@ function composeUpFixture(
       layout,
       payload,
       composeYaml,
-      rootCredential: { password: "s3cret-pw" } as ManagedApplyCredential,
+      rootCredential: { password: TEST_ROOT_VALUE } as ManagedApplyCredential,
       redact: (t: string) => t,
       runDockerSetup: () => Promise.resolve(),
       logSink: createNoopCommandOutputSink(),
