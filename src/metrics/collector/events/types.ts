@@ -12,13 +12,12 @@
  * throws the whole sample away over that cap, so the event set must never
  * hand it more).
  */
-import {
-  type GpuSample,
-  type HardwareSignalSample,
-  MAX_METRIC_EVENTS_PER_SAMPLE,
-  type MetricEvent,
-  type MetricEventKind,
-  type MetricEventSeverity,
+import type {
+  GpuSample,
+  HardwareSignalSample,
+  MetricEvent,
+  MetricEventKind,
+  MetricEventSeverity,
 } from "../../../contracts/metrics-contract.ts";
 import { fnv1aHex } from "../../topology/identity.ts";
 import type { TopologySnapshot } from "../../../contracts/topology-types.ts";
@@ -29,7 +28,7 @@ import type { SensorCandidate } from "../types.ts";
 import type { SensorIo } from "../sensors/discovery.ts";
 
 /** The contract's `MAX_METRIC_EVENTS_PER_SAMPLE`: one detect tick never yields more than one sample can carry. */
-export const MAX_EVENTS_PER_DETECT_TICK = MAX_METRIC_EVENTS_PER_SAMPLE;
+export { MAX_METRIC_EVENTS_PER_SAMPLE as MAX_EVENTS_PER_DETECT_TICK } from "../../../contracts/metrics-contract.ts";
 
 /** Stable signal identity → discovered sensor candidate, from `hardware-signals.ts`'s live discovery this tick. */
 export type HardwareSignalCandidateMap = ReadonlyMap<string, SensorCandidate>;

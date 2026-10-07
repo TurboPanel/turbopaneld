@@ -46,9 +46,8 @@ type ExtendedSizesSection = Pick<
   "sizes" | "filesystemSizes" | "gpuSizes" | "networkSizes"
 >;
 
-export function buildExtendedSizes(
-  input: SizesInput,
-): ExtendedSizesSection | undefined {
+/** The host-wide sizes this sample knows, each only when it is a real (positive) number. */
+function hostSizes(input: SizesInput): ExtendedSizes {
   const sizes: ExtendedSizes = {};
   const set = (key: keyof ExtendedSizes, value: number | null | undefined) => {
     const known = positive(value);
@@ -60,33 +59,47 @@ export function buildExtendedSizes(
   set("logicalCores", input.logicalCores);
   set("rootFilesystemTotalBytes", input.root?.totalBytes);
   set("rootFilesystemTotalInodes", input.root?.totalInodes);
+  return sizes;
+}
 
-  const filesystemSizes: ExtendedFilesystemSize[] = [];
-  for (const fs of input.filesystems) {
+function filesystemSizesOf(input: SizesInput): ExtendedFilesystemSize[] {
+  return input.filesystems.flatMap((fs) => {
     const totalBytes = positive(fs.totalBytes);
     const totalInodes = positive(fs.totalInodes);
-    if (totalBytes === undefined && totalInodes === undefined) continue;
-    filesystemSizes.push({
+    if (totalBytes === undefined && totalInodes === undefined) return [];
+    return [{
       filesystemId: fs.filesystemId,
       ...(totalBytes !== undefined ? { totalBytes } : {}),
       ...(totalInodes !== undefined ? { totalInodes } : {}),
-    });
-  }
-  const gpuSizes: ExtendedGpuSize[] = [];
-  for (const gpu of input.gpus) {
-    const memoryTotalBytes = positive(gpu.memoryTotalBytes);
-    if (memoryTotalBytes !== undefined) {
-      gpuSizes.push({ gpuId: gpu.gpuId, memoryTotalBytes });
-    }
-  }
+    }];
+  });
+}
 
-  const networkSizes: ExtendedNetworkSize[] = [];
-  for (const nic of input.networks ?? []) {
+function gpuSizesOf(input: SizesInput): ExtendedGpuSize[] {
+  return input.gpus.flatMap((gpu) => {
+    const memoryTotalBytes = positive(gpu.memoryTotalBytes);
+    return memoryTotalBytes === undefined
+      ? []
+      : [{ gpuId: gpu.gpuId, memoryTotalBytes }];
+  });
+}
+
+function networkSizesOf(input: SizesInput): ExtendedNetworkSize[] {
+  return (input.networks ?? []).flatMap((nic) => {
     const linkSpeedMbps = positive(nic.speedMbps);
-    if (linkSpeedMbps !== undefined) {
-      networkSizes.push({ deviceId: nic.deviceId, linkSpeedMbps });
-    }
-  }
+    return linkSpeedMbps === undefined
+      ? []
+      : [{ deviceId: nic.deviceId, linkSpeedMbps }];
+  });
+}
+
+export function buildExtendedSizes(
+  input: SizesInput,
+): ExtendedSizesSection | undefined {
+  const sizes = hostSizes(input);
+  const filesystemSizes = filesystemSizesOf(input);
+  const gpuSizes = gpuSizesOf(input);
+  const networkSizes = networkSizesOf(input);
 
   const out: ExtendedSizesSection = {};
   if (Object.keys(sizes).length > 0) out.sizes = sizes;
