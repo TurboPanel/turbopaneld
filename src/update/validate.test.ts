@@ -51,12 +51,12 @@ test("requireHttpsUrl rejects HTTP overlay artifact URLs", () => {
 test("validateArtifactEntry requires HTTPS url, sha256, and positive size", () => {
   assertEquals(
     validateArtifactEntry({
-      url: "https://dl.trbp.nl/channels/trunk/daemon/linux-amd64.tar.zst",
+      url: "https://dl.example.test/channels/canary/daemon/linux-amd64.tar.zst",
       sha256: "a".repeat(64),
       size: 123,
     }, "artifacts.linux-amd64"),
     {
-      url: "https://dl.trbp.nl/channels/trunk/daemon/linux-amd64.tar.zst",
+      url: "https://dl.example.test/channels/canary/daemon/linux-amd64.tar.zst",
       sha256: "a".repeat(64),
       size: 123,
     },
@@ -82,7 +82,8 @@ test("validateArtifactEntry requires HTTPS url, sha256, and positive size", () =
   assertThrows(
     () =>
       validateArtifactEntry({
-        url: "http://dl.trbp.nl/channels/trunk/daemon/linux-amd64.tar.zst",
+        url:
+          "http://dl.example.test/channels/canary/daemon/linux-amd64.tar.zst",
         sha256: "a".repeat(64),
         size: 123,
       }, "artifacts.linux-amd64"),
@@ -93,7 +94,8 @@ test("validateArtifactEntry requires HTTPS url, sha256, and positive size", () =
   assertThrows(
     () =>
       validateArtifactEntry({
-        url: "https://dl.trbp.nl/channels/trunk/daemon/linux-amd64.tar.zst",
+        url:
+          "https://dl.example.test/channels/canary/daemon/linux-amd64.tar.zst",
         sha256: "not-hex",
         size: 123,
       }, "artifacts.linux-amd64"),
@@ -104,7 +106,8 @@ test("validateArtifactEntry requires HTTPS url, sha256, and positive size", () =
   assertThrows(
     () =>
       validateArtifactEntry({
-        url: "https://dl.trbp.nl/channels/trunk/daemon/linux-amd64.tar.zst",
+        url:
+          "https://dl.example.test/channels/canary/daemon/linux-amd64.tar.zst",
         sha256: "a".repeat(64),
         size: 0,
       }, "artifacts.linux-amd64"),
@@ -124,7 +127,7 @@ test("validateBinaryArtifacts requires both linux arches", () => {
     () =>
       validateBinaryArtifacts({
         "linux-amd64": {
-          url: "https://dl.trbp.nl/a.tar.zst",
+          url: "https://dl.example.test/a.tar.zst",
           sha256: "a".repeat(64),
           size: 1,
         },
@@ -193,7 +196,7 @@ test("parseRootCatalog validates shape and schema", () => {
         defaultChannel: "trunk",
         channels: {
           trunk: {
-            manifestUrl: "http://dl.trbp.nl/channels/trunk/manifest.json",
+            manifestUrl: "http://dl.example.test/channels/canary/manifest.json",
           },
         },
       }),
@@ -206,14 +209,14 @@ test("parseRootCatalog validates shape and schema", () => {
     defaultChannel: "trunk",
     channels: {
       trunk: {
-        manifestUrl: "https://dl.trbp.nl/channels/trunk/manifest.json",
+        manifestUrl: "https://dl.example.test/channels/canary/manifest.json",
       },
     },
   });
   assertEquals(catalog.defaultChannel, "trunk");
   assertEquals(
     catalog.channels.trunk.manifestUrl,
-    "https://dl.trbp.nl/channels/trunk/manifest.json",
+    "https://dl.example.test/channels/canary/manifest.json",
   );
 });
 
@@ -227,24 +230,26 @@ test("parseChannelManifest validates artifact entries", () => {
     binaryArtifacts: {
       "linux-amd64": {
         url:
-          "https://dl.trbp.nl/channels/trunk/daemon/turbopaneld-amd64.tar.zst",
+          "https://dl.example.test/channels/canary/daemon/turbopaneld-amd64.tar.zst",
         sha256: "a".repeat(64),
         size: 123,
       },
       "linux-arm64": {
         url:
-          "https://dl.trbp.nl/channels/trunk/daemon/turbopaneld-arm64.tar.zst",
+          "https://dl.example.test/channels/canary/daemon/turbopaneld-arm64.tar.zst",
         sha256: "b".repeat(64),
         size: 234,
       },
     },
     jsFallbackArtifact: {
-      url: "https://dl.trbp.nl/channels/trunk/daemon/turbopaneld.js.tar.zst",
+      url:
+        "https://dl.example.test/channels/canary/daemon/turbopaneld.js.tar.zst",
       sha256: "c".repeat(64),
       size: 345,
     },
     orchestrationArtifact: {
-      url: "https://dl.trbp.nl/channels/trunk/daemon/orchestration.tar.zst",
+      url:
+        "https://dl.example.test/channels/canary/daemon/orchestration.tar.zst",
       sha256: "d".repeat(64),
       size: 456,
     },

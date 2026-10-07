@@ -1,15 +1,13 @@
 import { InsecureOverlayBaseError } from "./errors.ts";
 import type { UpdateChannel } from "./types.ts";
 
-export const DL_BASE_URL = "https://dl.trbp.nl";
-
 /** The repository whose GitHub Releases carry the daemon's canary/rc/release packages. */
 export const GITHUB_RELEASES_REPO = "TurboPanel/turbopaneld";
 
-/** Control-plane packages (compiled instance). GitHub Releases only — no CDN drop. */
+/** Control-plane packages (compiled instance). GitHub Releases only. */
 export const INSTANCE_GITHUB_RELEASES_REPO = "TurboPanel/turbopanel";
 
-/** Web export packages. GitHub Releases only — no CDN drop. */
+/** Web export packages. GitHub Releases only. */
 export const UI_GITHUB_RELEASES_REPO = "TurboPanel/ui";
 
 export const RELEASE_ARTIFACT_KINDS = ["daemon", "instance", "ui"] as const;
@@ -33,8 +31,7 @@ export function githubReleasesRepo(
  * Where each advertised channel's manifest lives when no overlay catalog
  * (`TURBOPANEL_DL_BASE`) is configured — the built-in rail.
  *
- * `trunk` is the per-merge CDN drop. `canary`, `rc` and `release` are GitHub
- * Releases: `release` follows the platform's own `releases/latest` pointer
+ * `canary`, `rc` and `release` are GitHub Releases: `release` follows the platform's own `releases/latest` pointer
  * (which skips pre-releases, so promotion is `gh release edit
  * --prerelease=false` and nothing here moves); `rc` follows a rolling
  * pre-release tagged `rc` whose manifest points at a versioned pre-release;
@@ -43,17 +40,18 @@ export function githubReleasesRepo(
  * (publish-daemon-trunk.yml → TurboPanel/dev gh-canary.yml). All three are
  * redirects GitHub serves without touching the unauthenticated API limit.
  * `edge` is reserved and unadvertised: no built-in location, so a daemon
- * following it needs an overlay catalog that names it.
+ * following it needs an overlay catalog that names it. `trunk` is the same
+ * since the per-merge CDN drop was retired: it is now only the channel name a
+ * development overlay catalog uses (see {@link describeMissingBuiltinChannel}
+ * for what a host that still follows it is told).
  *
  * Mirrored by hand in scripts/run.sh (`tp_builtin_channel_manifest_url`) and
  * the control plane's src/contracts/update-channel.ts — keep the three in step;
  * urls.test.ts pins run.sh's copy against this one.
  *
- * `kind` selects the package. Daemon `trunk` stays
- * `channels/trunk/manifest.json` (the CDN drop). Instance and UI have no CDN
- * drop, so their `trunk` (and every kind's `edge`) is `null` — canary, rc,
- * and release are GitHub Releases for that repository. The default kind is
- * `daemon` so existing call sites stay on the daemon rail.
+ * `kind` selects the package: canary, rc and release are GitHub Releases for
+ * that kind's repository, and every kind's `trunk` and `edge` is `null`. The
+ * default kind is `daemon` so existing call sites stay on the daemon rail.
  */
 export function builtinChannelManifestUrl(
   channel: UpdateChannel,
@@ -61,8 +59,6 @@ export function builtinChannelManifestUrl(
 ): string | null {
   const repo = githubReleasesRepo(kind);
   switch (channel) {
-    case "trunk":
-      return trunkManifestUrl(kind);
     case "canary":
       return `https://github.com/${repo}/releases/download/canary/manifest.json`;
     case "rc":
@@ -74,9 +70,18 @@ export function builtinChannelManifestUrl(
   }
 }
 
-function trunkManifestUrl(kind: ReleaseArtifactKind): string | null {
-  if (kind !== "daemon") return null;
-  return `${DL_BASE_URL}/channels/trunk/manifest.json`;
+/**
+ * What an update status says when a channel has no built-in manifest location.
+ * `trunk` gets its own message: it used to be the per-merge CDN drop, and a
+ * host still following it must be told to move, not to set up an overlay.
+ */
+export function describeMissingBuiltinChannel(
+  channel: UpdateChannel,
+): string {
+  if (channel === "trunk") {
+    return "The trunk update channel was retired and nothing is published to it any more. Set TURBOPANEL_UPDATE_CHANNEL to canary, rc or release.";
+  }
+  return `Channel has no built-in manifest location: ${channel}`;
 }
 
 /**
@@ -118,16 +123,14 @@ export function pinnedChannelManifestUrl(
  */
 const RELEASE_MANIFEST_URL_CHARS = /^[A-Za-z0-9._~/+-]+$/;
 const RELEASE_MANIFEST_FILE = /^manifest(?:-[A-Za-z0-9._~+-]+)?\.json$/;
-const RELEASE_CDN_HOST = new URL(DL_BASE_URL).host;
 
 /**
  * Whether `url` names a manifest on the release rail for `kind`, checked on
  * the raw string before anything parses or normalises it:
  *
- * - daemon: `https://dl.trbp.nl/channels/<channel>/manifest*.json`, or the
- *   turbopaneld GitHub rail;
- * - every kind: `https://github.com/TurboPanel/<repo>/releases/download/<tag>/manifest*.json`
- *   or `…/releases/latest/download/manifest*.json`, `<repo>` fixed by kind.
+ * `https://github.com/TurboPanel/<repo>/releases/download/<tag>/manifest*.json`
+ * or `…/releases/latest/download/manifest*.json`, `<repo>` fixed by kind. The
+ * former CDN host (dl.trbp.nl) is off the rail since the trunk drop retired.
  *
  * Exact host, no empty / `.` / `..` segment, closed character set. A URL
  * that a client would normalise onto another path can therefore never match.
@@ -146,10 +149,6 @@ export function releaseManifestUrlAllowed(kind: string, url: string): boolean {
   const segments = rest.slice(slash + 1).split("/");
   if (segments.some((s) => s === "" || s === "." || s === "..")) return false;
   if (!RELEASE_MANIFEST_FILE.test(segments.at(-1) ?? "")) return false;
-  if (host === RELEASE_CDN_HOST) {
-    return kind === "daemon" && segments.length === 3 &&
-      segments[0] === "channels";
-  }
   if (host !== "github.com" || segments.length !== 6) return false;
   const [owner, repo] = githubReleasesRepo(kind).split("/");
   if (
@@ -194,15 +193,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/** Artifact catalog origin: local overlay (`TURBOPANEL_DL_BASE`) or the public CDN. */
-export function resolveDlBase(
-  env: Record<string, string | undefined> = Deno.env.toObject(),
-): string {
-  const override = env.TURBOPANEL_DL_BASE?.trim();
-  if (override) return stripTrailingSlashes(override);
-  return DL_BASE_URL;
-}
-
 /**
  * A pinned manifest: one exact release manifest, typically a tag's
  * releases/download/vX.Y.Z/manifest.json, that wins over the channel's
@@ -236,8 +226,7 @@ const PER_BUILD_MANIFEST_FILE_RE = /^manifest-\d[0-9A-Za-z._+-]*\.json$/;
  * {@link pinnedChannelManifestUrl} produces and the control plane sends for
  * an update run: a canary build's `…/releases/download/canary/manifest-<version>.json`
  * or a tag's `…/releases/download/v<version>/manifest.json`. A channel
- * pointer (`…/download/canary/manifest.json`, `…/latest/download/…`, the
- * CDN's `channels/<channel>/manifest.json`) floats and is not one build.
+ * pointer (`…/download/canary/manifest.json`, `…/latest/download/…`) floats and is not one build.
  */
 export function isExactBuildManifestUrl(kind: string, url: string): boolean {
   if (!releaseManifestUrlAllowed(kind, url)) return false;
@@ -276,8 +265,6 @@ export function selectUpdateManifestUrl(
  * An absent or blank value is `null` (the built-in rail). A configured
  * value that is not https throws {@link InsecureOverlayBaseError} so the
  * resolver cannot treat it as "no overlay" and fetch the public catalog.
- * Setting `TURBOPANEL_DL_BASE=https://dl.trbp.nl` is the manual override
- * that forces the CDN catalog for every channel.
  */
 export function resolveOverlayDlBase(
   env: Record<string, string | undefined> = Deno.env.toObject(),
@@ -299,7 +286,7 @@ export function resolveOverlayDlBase(
   return base;
 }
 
-export function rootCatalogUrl(base = DL_BASE_URL): string {
+export function rootCatalogUrl(base: string): string {
   return joinPath(base, "/channels.json");
 }
 
