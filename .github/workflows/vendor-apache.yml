@@ -1,4 +1,4 @@
-# Builds the vendored Apache httpd ONCE per pinned version, for x86_64 and
+# Builds the vendored Apache httpd ONCE per pinned version, for amd64 and
 # arm64, and publishes it as the release `apache-httpd-<httpdver>` so hosts
 # download a tarball instead of compiling (the `apache` role,
 # orchestration/roles/apache). The build flags live in scripts/build-apache.sh;

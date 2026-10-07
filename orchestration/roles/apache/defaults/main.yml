@@ -28,7 +28,9 @@ apache_release_arch: "{{ {'x86_64': 'amd64', 'aarch64': 'arm64'}[ansible_archite
 # summary (or the release's SHA256SUMS asset): the install task refuses anything
 # that is not 64 hex characters, so a version without pins does not install.
 apache_sha256:
-  "2.4.63": {}
+  "2.4.63":
+    amd64: "57492bae04e05ca9856645d63a8d6cb06c7bd1bfccfc62ae22ad862e51148cf1"
+    arm64: "6e02237ae9fa9999bbaf8dabf3b756abaebbea3f02204c7047bf9222f853da03"
 # OpenSSL 3 runtime package: renamed to libssl3t64 (and libssl3 left only as a
 # virtual name) on Debian 13 and Ubuntu 24.04 and later.
 apache_libssl_package: >-

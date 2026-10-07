@@ -3,7 +3,7 @@
 # CPU this script runs on, and writes apache-httpd-<httpdver>-<arch>.tar.zst plus its
 # .sha256 file into OUT_DIR. The `apache` Ansible role downloads that tarball
 # instead of compiling on every host; .github/workflows/vendor-apache.yml runs
-# this on a native x86_64 and a native arm64 runner so both come from the same
+# this on a native amd64 and a native arm64 runner so both come from the same
 # flags.
 #
 # Usage: APACHE_VENDOR_ROOT=<vendor dir> sh scripts/build-apache.sh <out-dir>
