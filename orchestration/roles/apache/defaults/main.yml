@@ -4,11 +4,18 @@ turbopanel_vendor_dir: "{{ turbopanel_install_root | default('/opt/turbopanel') 
 # Pinned ASF httpd, built once in CI (.github/workflows/vendor-apache.yml,
 # scripts/build-apache.sh) and downloaded as a prebuilt tarball — never compiled
 # on the host, never apt install apache2. The APR versions below are only read
-# by the build script. PHP is a separate vendor role (`php-fpm`); the build
+# by the build script (with the source digests below). PHP is a separate vendor role (`php-fpm`); the build
 # enables shared proxy_fcgi.
 apache_version: "2.4.63"
 apache_apr_version: "1.7.5"
 apache_apr_util_version: "1.6.3"
+# SHA-256 of the ASF source tarballs the build script verifies. Taken from the
+# ASF-published `<tarball>.sha256` files at archive.apache.org (the same site
+# serves the tarballs; the 2.4.63 / APR 1.7.5 releases are no longer on the
+# primary mirrors), and each equals the digest of the downloaded tarball.
+apache_httpd_sha256: "1fdf1667ebe313a04e9f4d35ea9f043a4e0ebb62ba5a3047abcad824224c3867"
+apache_apr_sha256: "3375fa365d67bcf945e52b52cba07abea57ef530f40b281ffbe977a9251361db"
+apache_apr_util_sha256: "2b74d8932703826862ca305b094eef2983c27b39d5c9414442e9976a9acf1983"
 apache_release_tag: "vendor-apache-{{ apache_version }}"
 apache_release_base_url: "https://github.com/TurboPanel/turbopaneld/releases/download/{{ apache_release_tag }}"
 # SHA-256 of apache-<version>-<arch>.tar.gz, keyed by version then by
@@ -24,6 +31,8 @@ apache_runtime_packages:
   - libexpat1
   - libpcre2-8-0
   - libssl3
+  - libuuid1
+  - zlib1g
 turbopanel_dev_user: ""  # noqa: var-naming[no-role-prefix]
 turbopanel_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tp' }}"  # noqa: var-naming[no-role-prefix]
 

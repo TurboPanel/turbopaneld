@@ -184,8 +184,15 @@ x86_64 and arm64 runners, same configure flags) and published as the release
 (`apache_sha256`), asserts the digest like the caddy role (`get_url`
 `checksum:`), unpacks into `{{ turbopanel_vendor_dir }}/apache/<version>`
 (`creates:` on `bin/httpd` keeps it idempotent) and points `current` at that
-tree. Only runtime libraries (`libexpat1`, `libpcre2-8-0`, `libssl3`) come from
-apt. The role refuses to run while a digest is the `UNPINNED` placeholder: run
+tree. The build script verifies the ASF source tarballs against pinned SHA-256s,
+switches off optional modules that need extra libraries (HTTP/2, brotli, lua,
+md, proxy_html, xml2enc, session_crypto), and fails if `httpd` or a module
+links anything outside the runtime list (`ldd` gate). Only those runtime
+libraries (`apache_runtime_packages`: `libexpat1`, `libpcre2-8-0`, `libssl3`,
+`libuuid1`, `zlib1g`) come from apt. The tree is built with the default vendor
+root as its prefix (so `apxs`/`envvars` paths are right there) and shipped
+root-owned; the role extracts it with `--no-same-owner` and re-asserts root
+ownership and no group/world write. The role refuses to run while a digest is the `UNPINNED` placeholder: run
 the workflow, then pin its checksums. A published release is never overwritten
 (a rebuild changes the digest); to change the build, bump the version or use a
 new release name. A release is never rebuilt on the host as a fallback. Main config is

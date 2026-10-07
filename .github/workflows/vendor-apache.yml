@@ -60,6 +60,9 @@ jobs:
             build-essential libexpat1-dev libpcre2-dev libssl-dev zlib1g-dev curl
 
       - name: Build Apache
+        env:
+          # The production install root; baked into the tree's apxs/envvars.
+          APACHE_VENDOR_ROOT: /opt/turbopanel/vendor
         run: sh scripts/build-apache.sh out
 
       - name: Upload build
@@ -96,10 +99,18 @@ jobs:
           set -eu
           VER="$(sed -n 's/^apache_version: "\(.*\)"$/\1/p' orchestration/roles/apache/defaults/main.yml | head -n 1)"
           TAG="vendor-apache-${VER}"
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Release $TAG already exists; not overwriting (a rebuild has different digests)."
-            echo "Release $TAG already exists; nothing published. Pin the digests from its SHA256SUMS asset." >>"$GITHUB_STEP_SUMMARY"
-            exit 0
+          # `gh release view` cannot see a draft, so look through the API.
+          FOUND="$(gh api "repos/${GITHUB_REPOSITORY}/releases" --paginate \
+            --jq ".[] | select(.tag_name == \"${TAG}\") | \"\(.id) \(.draft)\"" | head -n 1)"
+          if [ -n "$FOUND" ]; then
+            if [ "${FOUND#* }" = "true" ]; then
+              # A previous run died before publishing: discard its draft.
+              gh api -X DELETE "repos/${GITHUB_REPOSITORY}/releases/${FOUND% *}"
+            else
+              echo "Release $TAG already exists; not overwriting (a rebuild has different digests)."
+              echo "Release $TAG already exists; nothing published. Pin the digests from its SHA256SUMS asset." >>"$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
           fi
           cat out/*.sha256 >out/SHA256SUMS
           {
@@ -112,8 +123,12 @@ jobs:
             done
             echo '```'
           } >>"$GITHUB_STEP_SUMMARY"
+          # Draft first, publish only once every asset is uploaded, so a failed
+          # upload cannot leave a published partial release that reruns skip.
           gh release create "$TAG" out/*.tar.gz out/SHA256SUMS \
+            --draft \
             --target "$GITHUB_SHA" \
             --title "Vendored Apache httpd ${VER}" \
             --notes "Prebuilt Apache httpd ${VER} for x86_64 and aarch64, built by the Vendor Apache workflow. The apache role downloads these and checks the SHA-256 pinned in its defaults." \
             --latest=false
+          gh release edit "$TAG" --draft=false
