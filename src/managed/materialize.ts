@@ -302,8 +302,11 @@ export async function normalizeManagedSecretOwnership(
     "chmod 0400 /managed/secrets/root-password",
     'chown "$USER_NAME:$GROUP_NAME" /managed/secrets/root-password',
   ].join("\n");
-  // Only the secrets directory is mounted, with no network and only the two
-  // capabilities chown/chmod on files root does not own require.
+  // Only the secrets directory is mounted, with no network and only the
+  // capabilities chown/chmod on files root does not own require: CHOWN and
+  // FOWNER for the change itself, DAC_READ_SEARCH so root can still traverse
+  // the daemon-owned directory (mode 0750 owned by the daemon, not root) to
+  // reach the file. Without it the chmod fails with "Permission denied".
   const result = await run([
     "run",
     "--rm",
@@ -316,6 +319,8 @@ export async function normalizeManagedSecretOwnership(
     "CHOWN",
     "--cap-add",
     "FOWNER",
+    "--cap-add",
+    "DAC_READ_SEARCH",
     "--security-opt",
     "no-new-privileges",
     "--user",
