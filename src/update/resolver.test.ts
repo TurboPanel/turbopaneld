@@ -33,29 +33,29 @@ function artifact(url: string, sha256: string, size: number) {
 function channelManifest() {
   return {
     schema: 1,
-    channel: "trunk",
+    channel: "canary",
     commit: "abc1234",
     buildId: "build-1",
     builtAt: "2026-01-01T00:00:00.000Z",
     binaryArtifacts: {
       "linux-amd64": artifact(
-        "https://dl.trbp.nl/channels/trunk/daemon/turbopaneld-amd64.tar.zst",
+        "https://dl.example.test/channels/canary/daemon/turbopaneld-amd64.tar.zst",
         SHA,
         100,
       ),
       "linux-arm64": artifact(
-        "https://dl.trbp.nl/channels/trunk/daemon/turbopaneld-arm64.tar.zst",
+        "https://dl.example.test/channels/canary/daemon/turbopaneld-arm64.tar.zst",
         SHA_B,
         200,
       ),
     },
     jsFallbackArtifact: artifact(
-      "https://dl.trbp.nl/channels/trunk/daemon/turbopaneld.js.tar.zst",
+      "https://dl.example.test/channels/canary/daemon/turbopaneld.js.tar.zst",
       SHA_C,
       300,
     ),
     orchestrationArtifact: artifact(
-      "https://dl.trbp.nl/channels/trunk/daemon/orchestration.tar.zst",
+      "https://dl.example.test/channels/canary/daemon/orchestration.tar.zst",
       SHA_D,
       400,
     ),
@@ -90,19 +90,8 @@ function installFetch(
   };
 }
 
-test("resolveUpdate fetches catalog + manifest and picks host arch artifact", async () => {
+test("resolveUpdate reads the canary manifest and picks host arch artifact", async () => {
   const restore = installFetch((url) => {
-    if (url.endsWith("/channels.json")) {
-      return Response.json({
-        schema: 1,
-        defaultChannel: "trunk",
-        channels: {
-          trunk: {
-            manifestUrl: "https://dl.trbp.nl/channels/trunk/manifest.json",
-          },
-        },
-      });
-    }
     if (url.endsWith("/manifest.json")) {
       return Response.json(channelManifest());
     }
@@ -114,7 +103,7 @@ test("resolveUpdate fetches catalog + manifest and picks host arch artifact", as
       { app: "daemon", channel: "canary" },
       {},
     );
-    assertEquals(info.channel, "trunk");
+    assertEquals(info.channel, "canary");
     assertEquals(info.commit, "abc1234");
     assertEquals(info.buildId, "build-1");
     assertEquals(
@@ -134,7 +123,7 @@ test("resolveUpdate fetches catalog + manifest and picks host arch artifact", as
   }
 });
 
-const OVERLAY_ENV = { TURBOPANEL_DL_BASE: "https://dl.trbp.nl" };
+const OVERLAY_ENV = { TURBOPANEL_DL_BASE: "https://dl.example.test" };
 
 test("resolveUpdate reads the built-in rail directly — no channels.json hop without an overlay", async () => {
   const fetched: string[] = [];
@@ -275,7 +264,8 @@ test("resolveUpdate throws MissingChannelError for absent catalog channels", asy
         defaultChannel: "trunk",
         channels: {
           trunk: {
-            manifestUrl: "https://dl.trbp.nl/channels/trunk/manifest.json",
+            manifestUrl:
+              "https://dl.example.test/channels/canary/manifest.json",
           },
         },
       });
@@ -301,7 +291,8 @@ test("resolveUpdate throws when channel manifest HTTP status is not ok", async (
         defaultChannel: "trunk",
         channels: {
           trunk: {
-            manifestUrl: "https://dl.trbp.nl/channels/trunk/manifest.json",
+            manifestUrl:
+              "https://dl.example.test/channels/canary/manifest.json",
           },
         },
       });
@@ -456,7 +447,8 @@ test("resolveUpdate rejects unsupported CPU architectures", async () => {
         defaultChannel: "trunk",
         channels: {
           trunk: {
-            manifestUrl: "https://dl.trbp.nl/channels/trunk/manifest.json",
+            manifestUrl:
+              "https://dl.example.test/channels/canary/manifest.json",
           },
         },
       });
@@ -640,7 +632,7 @@ test("resolveUpdate verifies the signature before absolutising relative artifact
     );
     assertEquals(
       info.orchestrationArtifact.url,
-      "https://dl.trbp.nl/daemon/orchestration.tar.zst",
+      "https://dl.example.test/daemon/orchestration.tar.zst",
     );
   } finally {
     restore();
