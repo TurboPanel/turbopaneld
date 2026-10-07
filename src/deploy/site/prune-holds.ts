@@ -26,6 +26,15 @@ let pruning: Promise<void> | null = null;
 /** The keys the running removal is taking away. */
 let pruningKeys: ReadonlySet<string> = new Set();
 
+/** Wait until no running removal takes any of `keys` away. */
+async function waitForRemovalOf(keys: readonly string[]): Promise<void> {
+  const running = pruning;
+  if (running === null || !keys.some((key) => pruningKeys.has(key))) return;
+  await running;
+  // Another removal may have started meanwhile: check again.
+  await waitForRemovalOf(keys);
+}
+
 /**
  * Keep `keys` from being removed until the returned function is called. A
  * deploy takes this before it installs anything. Waits out a removal already
@@ -36,9 +45,7 @@ let pruningKeys: ReadonlySet<string> = new Set();
 export async function holdPruneKeys(
   keys: readonly string[],
 ): Promise<() => void> {
-  while (pruning && keys.some((key) => pruningKeys.has(key))) {
-    await pruning;
-  }
+  await waitForRemovalOf(keys);
   for (const key of keys) held.set(key, (held.get(key) ?? 0) + 1);
   let released = false;
   return () => {
@@ -75,13 +82,13 @@ export type PruneUnheldDeps<T extends string> = Readonly<{
 export async function pruneUnheld<T extends string>(
   deps: PruneUnheldDeps<T>,
 ): Promise<T[]> {
-  if (pruning) return [];
+  if (pruning !== null) return [];
   const unused = await deps.findUnused();
   if (unused === null) return [];
   // From here to `pruning = …` nothing awaits: a deploy either holds a key
   // before this check (and is skipped) or waits for the removal to finish.
   const free = unused.filter((item) => !held.has(deps.keyOf(item)));
-  if (free.length === 0 || pruning) return [];
+  if (free.length === 0 || pruning !== null) return [];
   pruningKeys = new Set(free.map(deps.keyOf));
   const work = (async (): Promise<boolean> => {
     try {
