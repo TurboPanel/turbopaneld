@@ -252,6 +252,24 @@ test("the daemon's own unit files pass; privileged or foreign units do not", asy
         }),
       ],
       [
+        // A Deno app: the same directives, the vendored Deno as ExecStart.
+        "turbopanel-app-svc2.service",
+        nativeAppUnitContent({
+          layout,
+          username: "alice",
+          environmentId: "env1",
+          environmentFile: true,
+          nativeStart: { kind: "deno-file", path: "src/main.ts" },
+          app: {
+            serviceId: "svc2",
+            composeServiceName: "api",
+            listenPort: 3001,
+            runtime: "deno",
+            framework: "auto",
+          } as unknown as EnvironmentDeployNativeAppService,
+        }),
+      ],
+      [
         "turbopanel-alice.slice",
         principalSliceContent(
           {

@@ -35,7 +35,25 @@ export type NativeAppStart =
    */
   | { kind: "start-script"; prestart?: true }
   /** `<node> node_modules/next/dist/bin/next start --hostname 127.0.0.1 --port <port>`. */
-  | { kind: "next-start" };
+  | { kind: "next-start" }
+  /**
+   * `<deno> task start` — the project's own `start` task in `deno.json` /
+   * `deno.jsonc`. A Deno app only.
+   */
+  | { kind: "deno-task" }
+  /**
+   * `<deno> run --allow-all <path>` — the entry file from `deno.json` `main` /
+   * `exports` / `tasks`, or a conventional file. A Deno app only.
+   */
+  | { kind: "deno-file"; path: string };
+
+/**
+ * Flags a Deno app runs with when the platform picks the command. The
+ * permission model is left wide open on purpose: the unit's sandbox (read-only
+ * system, one writable folder, no capabilities, no new privileges) is the fence,
+ * and Deno's own flags could only repeat it for the same user.
+ */
+export const DENO_RUN_FLAGS = "--allow-all";
 
 const SAFE_START_PATH_RE = /^[A-Za-z0-9._/-]+$/;
 
@@ -70,12 +88,17 @@ export function isNativeAppStart(value: unknown): value is NativeAppStart {
   if (record.kind === "start-script") {
     return record.prestart === undefined || record.prestart === true;
   }
-  if (record.kind === "next-start") return true;
-  return record.kind === "file" && typeof record.path === "string" &&
+  if (record.kind === "next-start" || record.kind === "deno-task") return true;
+  return (record.kind === "file" || record.kind === "deno-file") &&
+    typeof record.path === "string" &&
     normalizeNativeAppStartPath(record.path) === record.path;
 }
 
-/** The `ExecStart` argv (no shell) for one recorded start. */
+/**
+ * The `ExecStart` argv (no shell) for one recorded start. `nodeBinary` is the
+ * runtime's own binary: the vendored Node, or for a `deno-*` start the vendored
+ * Deno.
+ */
 export function nativeAppStartExec(
   start: NativeAppStart,
   nodeBinary: string,
@@ -88,6 +111,15 @@ export function nativeAppStartExec(
         : `${nodeBinary} --run start`;
     case "next-start":
       return `${nodeBinary} ${NEXT_CLI_PATH} start --hostname ${NATIVE_APP_BIND_ADDRESS} --port ${listenPort}`;
+    case "deno-task":
+      return `${nodeBinary} task start`;
+    case "deno-file": {
+      const path = normalizeNativeAppStartPath(start.path);
+      if (path === undefined) {
+        throw new TypeError(`unsafe native app start file: ${start.path}`);
+      }
+      return `${nodeBinary} run ${DENO_RUN_FLAGS} ${path}`;
+    }
     case "file": {
       const path = normalizeNativeAppStartPath(start.path);
       if (path === undefined) {
@@ -120,6 +152,10 @@ export function describeNativeAppStart(start: NativeAppStart): string {
         : "the package.json start script (node --run start)";
     case "next-start":
       return `next start on ${NATIVE_APP_BIND_ADDRESS}`;
+    case "deno-task":
+      return "the deno.json start task (deno task start)";
+    case "deno-file":
+      return `deno run ${DENO_RUN_FLAGS} ${start.path}`;
     case "file":
       return `node ${start.path}`;
   }

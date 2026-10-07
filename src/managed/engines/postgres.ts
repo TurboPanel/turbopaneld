@@ -22,6 +22,7 @@ import {
   dropPhysicalSlotSql,
   dropRoleSql,
   ensureProxySqlMonitorRoleSql,
+  ensureReadWriteLoginSchemaSql,
   grantDatabaseSql,
   isInRecoverySql,
   listDatabasesForRoleReleaseSql,
@@ -30,9 +31,14 @@ import {
   primaryReplicationStatusSql,
   promoteSql,
   quoteIdentifier,
+  readOnlySessionDefaultSql,
+  reconcileDatabaseObjectsSql,
   releaseRoleObjectsSql,
   reloadVerifySql,
+  revokePublicDatabaseAccessSql,
+  revokeUnlistedDatabasesSql,
   standbyReplicationStatusSql,
+  strongestPrivilege,
 } from "./postgres-sql.ts";
 import {
   DOWN_ENGINE_CENSUS,
@@ -136,13 +142,7 @@ async function runPsql(
   }
 }
 
-function asPrivilege(value: string): ManagedDatabasePrivilege | null {
-  if (value === "owner" || value === "read-write" || value === "read-only") {
-    return value;
-  }
-  return null;
-}
-
+/** Create or update the login itself; database access is reconciled after. */
 async function applyOneCredential(
   ctx: ManagedEngineContext,
   credential: ManagedApplyCredential,
@@ -173,20 +173,132 @@ async function applyOneCredential(
       superuser: false,
     }),
   );
+}
 
-  const privileges = credential.privileges ?? [];
-  await forEachSequential(
-    credential.databases,
-    (database) =>
-      forEachSequential(privileges, async (raw) => {
-        const privilege = asPrivilege(raw);
-        if (privilege === null) return;
-        await runPsql(
-          ctx,
-          grantDatabaseSql(database, credential.username, privilege),
-        );
-      }),
+type UserAccess = {
+  username: string;
+  level: ManagedDatabasePrivilege;
+  databases: string[];
+};
+
+/** Every SQL user with a recognised level and its de-duplicated databases. */
+function userAccessList(
+  credentials: readonly ManagedApplyCredential[],
+): { granted: UserAccess[]; usernames: Map<string, string[]> } {
+  const granted: UserAccess[] = [];
+  const usernames = new Map<string, string[]>();
+  for (const credential of credentials) {
+    if (credential.role !== "user") continue;
+    const databases = [...new Set(credential.databases)];
+    usernames.set(credential.username, databases);
+    const level = strongestPrivilege(credential.privileges ?? []);
+    if (level !== null) {
+      granted.push({ username: credential.username, level, databases });
+    }
+  }
+  return { granted, usernames };
+}
+
+/** Who may create, write and read inside one database. */
+function objectAccessFor(
+  ctx: ManagedEngineContext,
+  database: string,
+  granted: readonly UserAccess[],
+  rootUsernames: readonly string[],
+) {
+  const here = granted.filter((entry) => entry.databases.includes(database));
+  const writers = here.filter((entry) => entry.level !== "read-only").map((
+    entry,
+  ) => entry.username);
+  const owners = here.filter((entry) => entry.level === "owner").map((
+    entry,
+  ) => entry.username);
+  const readers = here.filter((entry) => entry.level === "read-only").map((
+    entry,
+  ) => entry.username);
+  return {
+    creators: [...new Set([ctx.rootUsername, ...rootUsernames, ...writers])],
+    owners,
+    writers,
+    readers,
+  };
+}
+
+/**
+ * Make each SQL user reach exactly what its level says, and nothing else:
+ *
+ * 1. Each user loses databases it is not listed for, then receives its level
+ *    on every listed database (re-granting replaces an older, different level).
+ * 2. Nobody gets in by default (`CONNECT` is taken from PUBLIC everywhere),
+ *    after the explicit grants so a login that holds one never loses access.
+ * 3. Inside each listed database: table and sequence privileges on what
+ *    exists, default privileges for what its creators make later, and a
+ *    read-only session default for read-only users.
+ *
+ * Runs on every apply, so a cluster made by an older version is corrected at
+ * its next apply.
+ */
+async function reconcileDatabaseAccess(
+  ctx: ManagedEngineContext,
+  credentials: readonly ManagedApplyCredential[],
+): Promise<void> {
+  const { granted, usernames } = userAccessList(credentials);
+  const rootUsernames = credentials.filter((c) => c.role === "root").map((c) =>
+    c.username
   );
+
+  await forEachSequential([...usernames], async ([username, databases]) => {
+    const level = granted.find((entry) => entry.username === username)?.level;
+    await runPsql(
+      ctx,
+      revokeUnlistedDatabasesSql(
+        username,
+        level === undefined ? [] : databases,
+      ),
+    );
+  });
+
+  await forEachSequential(granted, (entry) =>
+    forEachSequential(
+      entry.databases,
+      (database) =>
+        runPsql(ctx, grantDatabaseSql(database, entry.username, entry.level)),
+    ));
+
+  // After the explicit grants, so no login that holds one is ever without it.
+  await runPsql(ctx, revokePublicDatabaseAccessSql());
+
+  const databases = [...new Set(granted.flatMap((entry) => entry.databases))];
+  await forEachSequential(databases, async (database) => {
+    // Create per-login schemas for read-write logins in each database.
+    const readWriteLogins = granted
+      .filter(
+        (entry) =>
+          entry.databases.includes(database) && entry.level === "read-write",
+      )
+      .map((entry) => entry.username);
+    if (readWriteLogins.length > 0) {
+      const schemaCreation = readWriteLogins
+        .map((username) => ensureReadWriteLoginSchemaSql(username))
+        .join("\n");
+      await runPsql(ctx, schemaCreation, database);
+    }
+    const access = objectAccessFor(ctx, database, granted, rootUsernames);
+    const sessionDefaults = granted
+      .filter((entry) => entry.databases.includes(database))
+      .map((entry) =>
+        readOnlySessionDefaultSql(
+          database,
+          entry.username,
+          entry.level === "read-only",
+        )
+      );
+    await runPsql(
+      ctx,
+      [reconcileDatabaseObjectsSql(access), ...sessionDefaults].join("\n"),
+      database,
+    );
+  });
 }
 
 async function parsePsqlRows(
@@ -619,6 +731,7 @@ export const postgresManagedEngineRuntime: ManagedEngineRuntime = {
       await applyOneCredential(ctx, credential);
       applied.push(credential.username);
     });
+    await reconcileDatabaseAccess(ctx, credentials);
     return applied;
   },
 

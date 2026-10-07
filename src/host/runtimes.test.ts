@@ -256,3 +256,21 @@ test("readHostRuntimes reports php-fpm series and mods-available extensions", ()
     Deno.removeSync(dir, { recursive: true });
   }
 });
+
+test("readHostRuntimes reports a vendored Deno series once current resolves", async () => {
+  const dir = await Deno.makeTempDir();
+  try {
+    await Deno.mkdir(`${dir}/deno-app/2`, { recursive: true });
+    assertEquals(readHostRuntimes(dir)?.deno, undefined);
+    await Deno.mkdir(`${dir}/deno-app/2/v2.9.7`, { recursive: true });
+    await Deno.symlink(
+      `${dir}/deno-app/2/v2.9.7`,
+      `${dir}/deno-app/2/current`,
+    );
+    assertEquals(readHostRuntimes(dir)?.deno, { series: ["2"] });
+    // Node and Deno are reported apart.
+    assertEquals(readHostRuntimes(dir)?.node, undefined);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});

@@ -35,6 +35,15 @@ export type CellAttachVersionMessage = {
   features?: string[];
 };
 
+/** One replica in a `managed-health-report`: `down`, or its reading. */
+export type ManagedHealthReportMember = {
+  managedId: string;
+  memberId: string;
+  /** The engine is not running or not answering. */
+  down?: true;
+  replication?: NonNullable<ManagedMemberObservedResult["replication"]>;
+};
+
 /** Daemon → control plane hello. `features` is the advertised wire set. */
 export type DaemonHelloMessage = {
   type: "hello";
@@ -232,6 +241,17 @@ export type DaemonMessage =
     ok: boolean;
     member?: ManagedMemberObservedResult;
     error?: string;
+    at: string;
+  }
+  | {
+    /**
+     * Daemon-initiated, fire-and-forget: every managed replica this host runs,
+     * read just now. Sent every 30 s, only to a control plane advertising
+     * `managed-health-report-v1`. A replica whose engine is down is sent as
+     * `down: true` (no `replication`).
+     */
+    type: "managed-health-report";
+    members: ManagedHealthReportMember[];
     at: string;
   }
   | {

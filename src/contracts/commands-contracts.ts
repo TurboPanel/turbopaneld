@@ -5,7 +5,7 @@
  * inline instance-only imports.
  */
 import type { SensorCapabilities } from "../metrics/collector/sensors/discovery.ts";
-import { ConfigValueError, safeUrlPath } from "./config-values.ts";
+import { ConfigValueError, safeEnvName, safeUrlPath } from "./config-values.ts";
 
 export const COMMAND_TYPES = [
   "daemon.ping",
@@ -423,6 +423,11 @@ export type BackupPolicyWireEntry = {
   managedId?: string;
   engine?: ManagedEngineCode;
   artifactExtension?: ManagedBackupArtifactExtension;
+  /**
+   * The database a `managed` run dumps. Absent from an older control plane,
+   * in which case the engine's default database is dumped.
+   */
+  database?: string;
   copyId?: string;
   copyProvider?: CopyBackupProvider;
   volumeName?: string;
@@ -864,6 +869,19 @@ export type EnvironmentDeployHostingPhp = {
  * UID/GID are optional operator overrides (15001–60000) — the host allocates
  * from 15001–60000 otherwise.
  */
+/**
+ * A public CA bundle for a site's managed database connection. The daemon
+ * writes it to a file only the site owner's Linux user can read (next to the
+ * site's other hosting files) and sets every name in `variables` to that
+ * file's path, so PHP can verify the database's certificate without a
+ * multi-line value in the web server's environment. Public certificates only:
+ * a bundle holding anything but `CERTIFICATE` blocks is refused at parse.
+ */
+export type EnvironmentDeploySiteDbCa = {
+  variables: string[];
+  pem: string;
+};
+
 export type EnvironmentDeploySitePrincipal = {
   principalId: string;
   username: string;
@@ -946,6 +964,20 @@ export type EnvironmentDeploySite = {
    * applied; the plaintext only ever reaches the engine's own config files.
    */
   webSecretEnv?: Record<string, string>;
+  /**
+   * The CA a managed database's TLS certificate chains to, delivered as a
+   * file. See {@link EnvironmentDeploySiteDbCa}. Sent only to a daemon that
+   * lists `site-db-bindings-v1`.
+   */
+  dbCa?: EnvironmentDeploySiteDbCa;
+  /**
+   * Variable names this site cannot run without (a database binding's host,
+   * port, user, password and name). If the site's engine cannot carry one of
+   * them the deploy fails with a plain-words error naming it; every other
+   * variable the engine cannot carry is dropped with a warning. Sent only to a
+   * daemon that lists `site-db-bindings-v1`.
+   */
+  requiredEnv?: string[];
   php?: EnvironmentDeployHostingPhp;
   /**
    * When set (from a project principal ↔ service tenancy), the site tree
@@ -1020,12 +1052,22 @@ export type EnvironmentDeployNativeAppRestartPolicy = {
   window?: string;
 };
 
+/** Runtime a native app runs on. Omitted means `node`. */
+export type EnvironmentDeployNativeRuntime = "node" | "deno";
+
 export type EnvironmentDeployNativeAppService = {
   composeServiceName: string;
   serviceId: string;
   listenPort: number;
   framework: EnvironmentDeployNativeFramework;
+  /**
+   * `deno` runs the app on the vendored Deno (`denoVersion`) instead of Node.
+   * Omitted means `node`, and a Node app's wire shape is unchanged.
+   */
+  runtime?: EnvironmentDeployNativeRuntime;
   nodeVersion?: string;
+  /** Deno series ("2", "2.9", "2.9.7"); only read when `runtime` is `deno`. */
+  denoVersion?: string;
   /** `NODE_ENV` for the generated unit. Omitted means `production`. */
   appMode?: "production" | "development";
   /**
@@ -1471,6 +1513,12 @@ export type EnvironmentDeployResultSite = {
 export type EnvironmentDeployResult = {
   projectName: string;
   summary: string;
+  /**
+   * Things the deploy worked around without failing, in plain words (a
+   * variable the site's web server cannot carry was left out). Names only,
+   * never values. Omitted when there were none.
+   */
+  warnings?: string[];
   services?: string[];
   containers?: EnvironmentDeployContainer[];
   /** Git-backed releases this deploy applied; omitted when there were none. */
@@ -4403,6 +4451,8 @@ function parseSitePrincipal(
 
 const NATIVE_APP_FRAMEWORKS = new Set(["auto", "node", "next"]);
 
+const NATIVE_APP_RUNTIMES: ReadonlySet<string> = new Set(["node", "deno"]);
+
 /** Same shape as the instance parser — a range or tag is not a pin. */
 const NATIVE_APP_NODE_VERSION_RE = /^\d{1,3}(\.\d{1,3}){0,2}$/;
 
@@ -4503,6 +4553,24 @@ function parseNativeAppNodeVersion(value: unknown): string | undefined {
     throw new TypeError("Invalid nativeAppServices nodeVersion");
   }
   return value;
+}
+
+function parseNativeAppDenoVersion(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !NATIVE_APP_NODE_VERSION_RE.test(value)) {
+    throw new TypeError("Invalid nativeAppServices denoVersion");
+  }
+  return value;
+}
+
+function parseNativeAppRuntime(
+  value: unknown,
+): EnvironmentDeployNativeRuntime | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !NATIVE_APP_RUNTIMES.has(value)) {
+    throw new TypeError("Invalid nativeAppServices runtime");
+  }
+  return value as EnvironmentDeployNativeRuntime;
 }
 
 function parseNativeAppMode(
@@ -4703,8 +4771,12 @@ function parseNativeAppService(
     listenPort: parseSiteListenPort(value.listenPort),
     framework: value.framework as EnvironmentDeployNativeFramework,
   };
+  const runtime = parseNativeAppRuntime(value.runtime);
+  if (runtime !== undefined) app.runtime = runtime;
   const nodeVersion = parseNativeAppNodeVersion(value.nodeVersion);
   if (nodeVersion !== undefined) app.nodeVersion = nodeVersion;
+  const denoVersion = parseNativeAppDenoVersion(value.denoVersion);
+  if (denoVersion !== undefined) app.denoVersion = denoVersion;
   const appMode = parseNativeAppMode(value.appMode);
   if (appMode !== undefined) app.appMode = appMode;
   const enabled = parseNativeAppEnabled(value.enabled);
@@ -4726,6 +4798,73 @@ function parseNativeAppService(
   const variables = parseNativeAppVariables(value.variables);
   if (variables) app.variables = variables;
   return app;
+}
+
+/** Largest CA bundle accepted for a site (a handful of certificates). */
+const MAX_SITE_DB_CA_BYTES = 65_536;
+const MAX_SITE_DB_CA_VARIABLES = 8;
+const MAX_SITE_REQUIRED_ENV = 64;
+const PEM_CERTIFICATE_BEGIN = "-----BEGIN CERTIFICATE-----";
+
+/** True when every PEM block in `pem` is a certificate and there is one. */
+function isCertificateOnlyPem(pem: string): boolean {
+  let blocks = 0;
+  for (const line of pem.split("\n")) {
+    if (!line.startsWith("-----BEGIN ")) continue;
+    if (line.trim() !== PEM_CERTIFICATE_BEGIN) return false;
+    blocks += 1;
+  }
+  return blocks > 0;
+}
+
+function parseSiteEnvNames(
+  value: unknown,
+  max: number,
+  field: string,
+): string[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > max) {
+    throw new TypeError(`Invalid ${field}`);
+  }
+  return value.map((entry) => {
+    if (typeof entry !== "string") throw new TypeError(`Invalid ${field}`);
+    return safeEnvName(field, entry);
+  });
+}
+
+function parseSiteDbCa(
+  value: unknown,
+  service: string,
+): EnvironmentDeploySiteDbCa | undefined {
+  if (value === undefined) return undefined;
+  const field = `sites.${service}.dbCa`;
+  if (
+    !isRecord(value) || typeof value.pem !== "string" ||
+    value.pem.length > MAX_SITE_DB_CA_BYTES || !isCertificateOnlyPem(value.pem)
+  ) {
+    throw new TypeError(
+      `Invalid ${field}: expected certificate PEM blocks only`,
+    );
+  }
+  return {
+    variables: parseSiteEnvNames(
+      value.variables,
+      MAX_SITE_DB_CA_VARIABLES,
+      `${field}.variables`,
+    ),
+    pem: value.pem,
+  };
+}
+
+function parseSiteRequiredEnv(
+  value: unknown,
+  service: string,
+): string[] | undefined {
+  if (value === undefined) return undefined;
+  return parseSiteEnvNames(
+    value,
+    MAX_SITE_REQUIRED_ENV,
+    `sites.${service}.requiredEnv`,
+  );
 }
 
 function parseSite(
@@ -4752,6 +4891,13 @@ function parseSite(
   if (webEnv) site.webEnv = webEnv;
   const webSecretEnv = parseStringRecord(value.webSecretEnv);
   if (webSecretEnv) site.webSecretEnv = webSecretEnv;
+  const dbCa = parseSiteDbCa(value.dbCa, site.composeServiceName);
+  if (dbCa) site.dbCa = dbCa;
+  const requiredEnv = parseSiteRequiredEnv(
+    value.requiredEnv,
+    site.composeServiceName,
+  );
+  if (requiredEnv) site.requiredEnv = requiredEnv;
   const php = parseHostingPhp(value.php);
   if (php) site.php = php;
   const principal = parseSitePrincipal(value.principal);
@@ -7907,12 +8053,19 @@ function parseBackupPolicyTarget(
     entry.managedId = raw.managedId;
     entry.engine = raw.engine;
     entry.artifactExtension = raw.artifactExtension;
+    if (raw.database !== undefined) {
+      if (typeof raw.database !== "string" || !isSafeIdentifier(raw.database)) {
+        throw new Error("Invalid backup policy managed database");
+      }
+      entry.database = raw.database;
+    }
     return;
   }
   if (
     raw.managedId !== undefined ||
     raw.engine !== undefined ||
-    raw.artifactExtension !== undefined
+    raw.artifactExtension !== undefined ||
+    raw.database !== undefined
   ) {
     throw new Error("Invalid backup policy copy target");
   }

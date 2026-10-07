@@ -349,8 +349,10 @@ export class BootHoldLocalRetry {
         this.stop();
         return;
       }
-      await forEachSequential(unstopped, (hold) =>
-        ensureHoldStopped(hold, { layout: this.layout, run: this.run })
+      await forEachSequential(
+        unstopped,
+        (hold) =>
+          ensureHoldStopped(hold, { layout: this.layout, run: this.run }),
       );
     } catch (err) {
       logWarn(

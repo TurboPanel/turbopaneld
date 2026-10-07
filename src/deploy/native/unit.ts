@@ -28,12 +28,13 @@ import {
   resolveNativeAppRuntimeStartCommand,
 } from "../node-package-manager.ts";
 import {
+  DENO_RUN_FLAGS,
   NATIVE_APP_BIND_ADDRESS,
   type NativeAppStart,
   nativeAppStartExec,
 } from "./start-entry.ts";
 import { principalUnixGroupName } from "../ensure-principal.ts";
-import { runtimeGroup } from "../../runtime/registry.ts";
+import { entitlementSeries, runtimeGroup } from "../../runtime/registry.ts";
 import type {
   EnvironmentDeployNativeAppRestartPolicy,
   EnvironmentDeployNativeAppService,
@@ -140,6 +141,113 @@ export function nativeAppNodeBinDir(
     "current",
     "bin",
   );
+}
+
+/**
+ * Deno series a native Deno app runs on when the payload declared no
+ * `denoVersion`. Deno publishes one major, so the series is the major: the
+ * vendoring role installs the newest 2.x and `current` follows it.
+ */
+export const DEFAULT_NATIVE_APP_DENO_VERSION = "2";
+
+/** Which runtime a native app runs on; an app that says nothing runs Node. */
+export function nativeAppRuntimeKind(
+  app: Pick<EnvironmentDeployNativeAppService, "runtime">,
+): "node" | "deno" {
+  return app.runtime === "deno" ? "deno" : "node";
+}
+
+/**
+ * Root of the **tenant** Deno tree: `<runtimesDir>/deno-app/<series>/current`.
+ * Beside `node-app/`, never inside it, so each runtime's group and ACL stay its
+ * own.
+ */
+export function denoAppRuntimeRoot(
+  layout: Pick<LayoutPaths, "runtimesDir">,
+): string {
+  return join(layout.runtimesDir, "deno-app");
+}
+
+/**
+ * The Deno **series** one app runs on: its `denoVersion` reduced to the exec
+ * boundary (`2.9.7` and `2.9` are both `2`), else
+ * {@link DEFAULT_NATIVE_APP_DENO_VERSION}. Reduced here because the series is
+ * a directory name and a group name, and `deno-app/2.9/` would not be a tree
+ * the vendoring role ever creates.
+ */
+export function resolveNativeAppDenoVersion(
+  app: Pick<EnvironmentDeployNativeAppService, "denoVersion">,
+): string {
+  const declared = app.denoVersion?.trim();
+  return declared && declared.length > 0
+    ? entitlementSeries("deno", declared)
+    : DEFAULT_NATIVE_APP_DENO_VERSION;
+}
+
+/** `<runtimesDir>/deno-app/<series>/current/bin` — leads a Deno app's `PATH`. */
+export function nativeAppDenoBinDir(
+  layout: Pick<LayoutPaths, "runtimesDir">,
+  denoSeries: string = DEFAULT_NATIVE_APP_DENO_VERSION,
+): string {
+  return join(
+    denoAppRuntimeRoot(layout),
+    entitlementSeries("deno", denoSeries),
+    "current",
+    "bin",
+  );
+}
+
+/** `<runtimesDir>/deno-app/<series>/current/bin/deno`. */
+export function nativeAppDenoBinary(
+  layout: Pick<LayoutPaths, "runtimesDir">,
+  denoSeries: string = DEFAULT_NATIVE_APP_DENO_VERSION,
+): string {
+  return join(nativeAppDenoBinDir(layout, denoSeries), "deno");
+}
+
+/** Entitlement group for one vendored Deno series (`tpdeno2`). */
+export function nativeAppDenoRuntimeGroup(
+  denoVersion: string,
+): string | undefined {
+  return runtimeGroup("deno", denoVersion);
+}
+
+/**
+ * Binary directory, series and entitlement group of the runtime one app runs
+ * on. The one place that decides Node or Deno from the payload, so the unit,
+ * the build and the vendoring step cannot disagree.
+ */
+export function nativeAppRuntimeTarget(
+  layout: Pick<LayoutPaths, "runtimesDir">,
+  app: Pick<
+    EnvironmentDeployNativeAppService,
+    "runtime" | "nodeVersion" | "denoVersion"
+  >,
+): {
+  runtime: "node" | "deno";
+  series: string;
+  binDir: string;
+  binary: string;
+  group: string | undefined;
+} {
+  if (nativeAppRuntimeKind(app) === "deno") {
+    const series = resolveNativeAppDenoVersion(app);
+    return {
+      runtime: "deno",
+      series,
+      binDir: nativeAppDenoBinDir(layout, series),
+      binary: nativeAppDenoBinary(layout, series),
+      group: nativeAppDenoRuntimeGroup(series),
+    };
+  }
+  const series = resolveNativeAppNodeVersion(app);
+  return {
+    runtime: "node",
+    series,
+    binDir: nativeAppNodeBinDir(layout, series),
+    binary: nativeAppNodeBinary(layout, series),
+    group: nativeAppRuntimeGroup(series),
+  };
 }
 
 const NATIVE_RUNTIME_PATH_TAIL = "/usr/bin:/bin";
@@ -321,6 +429,11 @@ export const DEFAULT_START_SCRIPT = "server.js";
  */
 export function resolveExecStart(params: {
   nodeBinary: string;
+  /**
+   * Set for a Deno app: the vendored Deno binary. `nodeBinary` is then unused
+   * and every start runs Deno ({@link resolveDenoExecStart}).
+   */
+  denoBinary?: string;
   startCommand?: string;
   /** Replaces {@link DEFAULT_START_SCRIPT}; an explicit `startCommand` wins. */
   startupFile?: string;
@@ -329,6 +442,9 @@ export function resolveExecStart(params: {
   /** The app's loopback port, for a start that passes it on the command line. */
   listenPort?: number;
 }): string {
+  if (params.denoBinary !== undefined) {
+    return resolveDenoExecStart({ ...params, denoBinary: params.denoBinary });
+  }
   if (params.startCommand && params.startCommand.trim().length > 0) {
     const command = resolveNativeAppRuntimeStartCommand(
       safeConfigLine("startCommand", params.startCommand.trim()),
@@ -338,7 +454,12 @@ export function resolveExecStart(params: {
   }
   const startupFile = params.startupFile?.trim();
   if (startupFile) return `${params.nodeBinary} ${startupFile}`;
-  if (params.nativeStart && params.listenPort !== undefined) {
+  // A start recorded by a Deno build means nothing to Node (`node task start`
+  // would run a file called `task`), so it is ignored here.
+  if (
+    params.nativeStart && params.listenPort !== undefined &&
+    !params.nativeStart.kind.startsWith("deno-")
+  ) {
     return nativeAppStartExec(
       params.nativeStart,
       params.nodeBinary,
@@ -346,6 +467,39 @@ export function resolveExecStart(params: {
     );
   }
   return `${params.nodeBinary} ${DEFAULT_START_SCRIPT}`;
+}
+
+/**
+ * A Deno app's `ExecStart`, most specific first: the author's start command
+ * (through `/bin/sh -c`, untouched; Deno is on the unit's `PATH`), then
+ * `startupFile` as `deno run --allow-all <file>`, then what the build detected
+ * (`deno task start`, or `deno run --allow-all <entry>`). A release that
+ * recorded no start runs `deno task start`.
+ */
+function resolveDenoExecStart(params: {
+  denoBinary: string;
+  startCommand?: string;
+  startupFile?: string;
+  nativeStart?: NativeAppStart;
+  listenPort?: number;
+}): string {
+  if (params.startCommand && params.startCommand.trim().length > 0) {
+    const command = safeConfigLine("startCommand", params.startCommand.trim());
+    return `/bin/sh -c ${quoteSystemdArgument(command)}`;
+  }
+  const startupFile = params.startupFile?.trim();
+  if (startupFile) {
+    return `${params.denoBinary} run ${DENO_RUN_FLAGS} ${startupFile}`;
+  }
+  const start = params.nativeStart;
+  if (start && (start.kind === "deno-task" || start.kind === "deno-file")) {
+    return nativeAppStartExec(start, params.denoBinary, params.listenPort ?? 0);
+  }
+  return nativeAppStartExec(
+    { kind: "deno-task" },
+    params.denoBinary,
+    params.listenPort ?? 0,
+  );
 }
 
 /** systemd's escape for a `'` embedded in a single-quoted argument. */
@@ -503,6 +657,10 @@ export const NATIVE_APP_PLATFORM_ENV_NAMES: ReadonlySet<string> = new Set([
   "XDG_CACHE_HOME",
   "COREPACK_HOME",
   "COREPACK_ENABLE_DOWNLOAD_PROMPT",
+  // A Deno app's unit sets these instead of the two above.
+  "DENO_DIR",
+  "DENO_NO_UPDATE_CHECK",
+  "DENO_NO_PROMPT",
 ]);
 
 export type NativeAppUnitOpts = {
@@ -558,10 +716,11 @@ export function nativeAppUnitContent(opts: NativeAppUnitOpts): string {
   const workingDir = siteCurrentSymlink(home, app.serviceId);
   const sharedDir = siteSharedDir(home, app.serviceId);
   const group = principalUnixGroupName(username);
-  const nodeVersion = resolveNativeAppNodeVersion(app);
-  const nodeBinDir = nativeAppNodeBinDir(opts.layout, nodeVersion);
+  const target = nativeAppRuntimeTarget(opts.layout, app);
+  const nodeBinDir = target.binDir;
   const execStart = resolveExecStart({
-    nodeBinary: nativeAppNodeBinary(opts.layout, nodeVersion),
+    nodeBinary: target.binary,
+    ...(target.runtime === "deno" ? { denoBinary: target.binary } : {}),
     ...(opts.startCommand === undefined
       ? {}
       : { startCommand: opts.startCommand }),
@@ -615,8 +774,18 @@ export function nativeAppUnitContent(opts: NativeAppUnitOpts): string {
     // Writable under ReadWritePaths=shared — Corepack falls back here when a
     // custom start command still invokes pnpm/yarn at runtime.
     `Environment=XDG_CACHE_HOME=${sharedDir}/.cache`,
-    `Environment=COREPACK_HOME=${sharedDir}/.corepack`,
-    `Environment=COREPACK_ENABLE_DOWNLOAD_PROMPT=0`,
+    ...(target.runtime === "deno"
+      ? [
+        // Deno's own cache, in the one writable folder; no update check, and
+        // never a permission prompt (there is no terminal to answer it).
+        `Environment=DENO_DIR=${sharedDir}/.cache/deno`,
+        "Environment=DENO_NO_UPDATE_CHECK=1",
+        "Environment=DENO_NO_PROMPT=1",
+      ]
+      : [
+        `Environment=COREPACK_HOME=${sharedDir}/.corepack`,
+        `Environment=COREPACK_ENABLE_DOWNLOAD_PROMPT=0`,
+      ]),
     // The author's variables. Read by systemd (as root) from a `0600` file, so
     // a secret is never in this world-readable unit or in `systemctl show`.
     // The file already omits every name set above — see

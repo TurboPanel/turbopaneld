@@ -76,20 +76,24 @@ test("an unclean boot stops every primary that has a peer and writes a held mark
     resetManagedIntentsForTests();
     const layout = resolveLayout(env);
     const fake = docker();
-    const held = await applyBootHold("unclean", {
-      layout,
-      run: fake.run,
-      listMembers: () =>
-        Promise.resolve([
-          record(),
-          record({
-            managedId: STANDALONE_ID,
-            peerCount: 0,
-            replicaPeerCount: 0,
-          }),
-          record({ managedId: REPLICA_ID, role: "replica" }),
-        ]),
-    });
+    assertEquals(
+      await applyBootHold("unclean", {
+        layout,
+        run: fake.run,
+        listMembers: () =>
+          Promise.resolve([
+            record(),
+            record({
+              managedId: STANDALONE_ID,
+              peerCount: 0,
+              replicaPeerCount: 0,
+            }),
+            record({ managedId: REPLICA_ID, role: "replica" }),
+          ]),
+      }),
+      true,
+    );
+    const held = await listActiveBootHolds(layout);
     assertEquals(held.map((row) => row.managedId), [PRIMARY_ID]);
     assertEquals(held[0]?.engineStopped, true);
     assertEquals(fake.calls, [["compose", "-p", PRIMARY_ID, "stop"]]);
@@ -101,18 +105,20 @@ test("an unclean boot stops every primary that has a peer and writes a held mark
   });
 });
 
-test("a clean reboot, a daemon restart and a first boot hold nothing", async () => {
+test("a daemon restart and a first boot hold nothing", async () => {
   await withTempLayout(async ({ env }) => {
     resetManagedIntentsForTests();
     const layout = resolveLayout(env);
     const fake = docker();
-    for (const kind of ["first", "same-boot", "clean-reboot"] as const) {
-      const held = await applyBootHold(kind, {
-        layout,
-        run: fake.run,
-        listMembers: () => Promise.resolve([record()]),
-      });
-      assertEquals(held, []);
+    for (const kind of ["first", "same-boot"] as const) {
+      assertEquals(
+        await applyBootHold(kind, {
+          layout,
+          run: fake.run,
+          listMembers: () => Promise.resolve([record()]),
+        }),
+        true,
+      );
     }
     assertEquals(fake.calls, []);
     assertEquals(await listActiveBootHolds(layout), []);
@@ -124,12 +130,12 @@ test("a failed stop keeps the hold and the marker, and the retry finishes it", a
     resetManagedIntentsForTests();
     const layout = resolveLayout(env);
     const fake = docker([false, true]);
-    const held = await applyBootHold("unclean", {
+    await applyBootHold("unclean", {
       layout,
       run: fake.run,
       listMembers: () => Promise.resolve([record()]),
     });
-    assertEquals(held[0]?.engineStopped, false);
+    assertEquals((await listActiveBootHolds(layout))[0]?.engineStopped, false);
     const [active] = await listActiveBootHolds(layout);
     assertEquals(active?.engineStopped, false);
     const retried = await ensureHoldStopped(active!, { layout, run: fake.run });
@@ -151,14 +157,16 @@ test("a hold is kept across a second unclean boot, not reset", async () => {
       run: fake.run,
       listMembers: () => Promise.resolve([record()]),
     };
-    const first = await applyBootHold("unclean", {
+    await applyBootHold("unclean", {
       ...deps,
       nowIso: () => "2026-10-06T10:00:00.000Z",
     });
-    const second = await applyBootHold("unclean", {
+    const first = await listActiveBootHolds(layout);
+    await applyBootHold("unclean", {
       ...deps,
       nowIso: () => "2026-10-06T11:00:00.000Z",
     });
+    const second = await listActiveBootHolds(layout);
     assertEquals(second[0]?.heldAt, first[0]?.heldAt);
   });
 });
@@ -203,11 +211,12 @@ test("releasing locally clears the marker, removes the file and starts the engin
     resetManagedIntentsForTests();
     const layout = resolveLayout(env);
     const fake = docker();
-    const [hold] = await applyBootHold("unclean", {
+    await applyBootHold("unclean", {
       layout,
       run: fake.run,
       listMembers: () => Promise.resolve([record()]),
     });
+    const [hold] = await listActiveBootHolds(layout);
     await releaseBootHoldLocally(hold!, { layout, run: fake.run }, "test");
     assertEquals(fake.calls.at(-1), ["compose", "-p", PRIMARY_ID, "start"]);
     assertEquals(
@@ -215,5 +224,23 @@ test("releasing locally clears the marker, removes the file and starts the engin
       "none",
     );
     assertEquals(await listActiveBootHolds(layout), []);
+  });
+});
+
+test("a planned reboot (clean stamp) holds the primary until the control plane answers", async () => {
+  await withTempLayout(async ({ env }) => {
+    resetManagedIntentsForTests();
+    const layout = resolveLayout(env);
+    const fake = docker();
+    assertEquals(
+      await applyBootHold("clean-reboot", {
+        layout,
+        run: fake.run,
+        listMembers: () => Promise.resolve([record()]),
+      }),
+      true,
+    );
+    assertEquals(fake.calls, [["compose", "-p", PRIMARY_ID, "stop"]]);
+    assertEquals((await listActiveBootHolds(layout)).length, 1);
   });
 });

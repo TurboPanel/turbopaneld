@@ -61,6 +61,8 @@ async function setUpBuildHost(
     "tpnode24:x:9911:alice",
     "tpnode26:x:9925:",
     "tpnode99:x:15050:",
+    "tpdeno2:x:9941:",
+    "tpdeno3:x:15051:",
     ...(options.groups ?? []),
   ];
   await Deno.writeTextFile(host.path("etc/group"), `${groups.join("\n")}\n`, {
@@ -192,7 +194,7 @@ function expectedSystemdRun(
     ...[
       "DynamicUser=yes",
       `User=${user}`,
-      "SupplementaryGroups=tpnode24 tpnode26",
+      "SupplementaryGroups=tpnode24 tpnode26 tpdeno2",
       `WorkingDirectory=${work}`,
       "NoNewPrivileges=yes",
       "CapabilityBoundingSet=",
@@ -660,7 +662,7 @@ test("build-run refuses a symlinked or missing work tree and a loosened build la
 test("the build gets runtime groups only: never docker, tp, sudo or a look-alike outside the band", async () => {
   await withHost(async (host) => {
     await setUpBuildHost(host, {
-      groups: ["tpnode30x:x:9930:", "tpnode31:x:999:"],
+      groups: ["tpnode30x:x:9930:", "tpnode31:x:999:", "tpdeno2x:x:9942:"],
     });
     const result = await host.run(["build-run", "b1", "p1", "alice"]);
     assertEquals(result.code, 0, result.stderr);
@@ -668,17 +670,17 @@ test("the build gets runtime groups only: never docker, tp, sudo or a look-alike
     // The one group list the unit gets (docker and the rest only appear as
     // InaccessiblePaths= sockets).
     const groups = run.match(/\[SupplementaryGroups=[^\]]*\]/g);
-    assertEquals(groups, ["[SupplementaryGroups=tpnode24 tpnode26]"]);
+    assertEquals(groups, ["[SupplementaryGroups=tpnode24 tpnode26 tpdeno2]"]);
     assertEquals(run.includes("Group="), false);
   });
   await withHost(async (host) => {
-    // A host with no Node series vendored yet: no supplementary group at all.
+    // A host with no Node or Deno series vendored yet: no supplementary group at all.
     await setUpBuildHost(host);
     await Deno.writeTextFile(
       host.path("etc/group"),
       (await Deno.readTextFile(host.path("etc/group")))
         .split("\n")
-        .filter((line) => !/^tpnode\d+:/.test(line))
+        .filter((line) => !/^tp(node|deno)\d+:/.test(line))
         .join("\n"),
     );
     const result = await host.run(["build-run", "b1", "p1", "alice"]);

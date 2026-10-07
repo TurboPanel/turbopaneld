@@ -110,3 +110,40 @@ test("describeNativeAppStart says in plain words what will run", () => {
     "the package.json start script (node --run start)",
   );
 });
+
+const DENO = "/opt/turbopanel/vendor/deno-app/2/current/bin/deno";
+
+test("Deno starts: the recorded shapes, the argv, and the plain-words line", () => {
+  assertEquals(isNativeAppStart({ kind: "deno-task" }), true);
+  assertEquals(isNativeAppStart({ kind: "deno-file", path: "main.ts" }), true);
+  for (
+    const bad of [
+      { kind: "deno-file" },
+      { kind: "deno-file", path: "./main.ts" },
+      { kind: "deno-file", path: "../main.ts" },
+      { kind: "deno-file", path: "--eval" },
+    ]
+  ) {
+    assertEquals(isNativeAppStart(bad), false, JSON.stringify(bad));
+  }
+  assertEquals(
+    nativeAppStartExec({ kind: "deno-task" }, DENO, 18591),
+    `${DENO} task start`,
+  );
+  assertEquals(
+    nativeAppStartExec({ kind: "deno-file", path: "src/main.ts" }, DENO, 1),
+    `${DENO} run --allow-all src/main.ts`,
+  );
+  assertThrows(
+    () => nativeAppStartExec({ kind: "deno-file", path: "-e" }, DENO, 1),
+    TypeError,
+  );
+  assertEquals(
+    describeNativeAppStart({ kind: "deno-task" }),
+    "the deno.json start task (deno task start)",
+  );
+  assertEquals(
+    describeNativeAppStart({ kind: "deno-file", path: "main.ts" }),
+    "deno run --allow-all main.ts",
+  );
+});

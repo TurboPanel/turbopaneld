@@ -19,6 +19,7 @@ import {
   proxysqlMonitorCnfPath,
 } from "../managed/engine-paths.ts";
 import { resolveLayout } from "../paths/layout.ts";
+import { createFakeProxySqlAdmin } from "../testing/fake-proxysql-admin.ts";
 import {
   type TempLayoutFixture,
   withTempLayout,
@@ -29,6 +30,11 @@ import type {
   SystemReconcilePayload,
 } from "../contracts/commands-contracts.ts";
 import { handleManagedIngressReconcile } from "./managed-ingress-reconcile.ts";
+import { probeBootRepair } from "../testing/boot-repair-probe.ts";
+import {
+  proxySqlReconciledSinceStart,
+  resetProxySqlLockForTests,
+} from "../managed/proxysql-lock.ts";
 import { handleSystemReconcile } from "./system-reconcile.ts";
 
 /**
@@ -1047,8 +1053,15 @@ async function reconcileWithTwoSegments(bindAddress?: string): Promise<void> {
   };
   if (bindAddress !== undefined) payload.bindAddresses = [bindAddress];
 
+  // The reconcile reads the runtime table back after its apply, so the fake
+  // admin has to remember what the apply wrote.
+  const admin = createFakeProxySqlAdmin();
   await handleManagedIngressReconcile(payload, new Date().toISOString(), {
-    runDocker: fakeRunOk(),
+    runDocker: (args, options) =>
+      Promise.resolve(
+        admin.run(args, options) ??
+          { success: true, stdout: "", stderr: "", code: 0 },
+      ),
     ensureDocker: () => Promise.resolve(),
     decryptSecrets: (ciphertexts: string[]) =>
       Promise.resolve(
@@ -1434,6 +1447,71 @@ test({
         assertEquals(stopCall !== undefined, true);
         assertEquals(stopCall?.includes("-p"), false);
         assertEquals(result.containers, []);
+      });
+    });
+  },
+});
+
+function proxysqlReconcileFor(
+  action: "reconcile" | "stop",
+  desired: "present" | "absent",
+) {
+  const payload = proxysqlPayload();
+  payload.components[0]!.desired = desired;
+  return { ...payload, action };
+}
+
+const ZERO_DEPS = {
+  ensureDocker: () => Promise.resolve(),
+  runDocker: fakeRunOk(),
+  inspectSystemStackContainer: () => Promise.resolve(null),
+};
+
+test({
+  name:
+    "handleSystemReconcile proxysql: a no-op or skipped self-heal leaves the boot repair free to run",
+  permissions: { env: true, read: true, write: true },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      await withLayoutEnv(fixture, async () => {
+        resetProxySqlLockForTests();
+        // desired=absent with action=reconcile does nothing for ProxySQL.
+        await handleSystemReconcile(
+          proxysqlReconcileFor("reconcile", "absent"),
+          new Date().toISOString(),
+          ZERO_DEPS,
+        );
+        assertEquals(proxySqlReconciledSinceStart(), false);
+        // desired=present but no managed network on disk: self-heal skips.
+        await handleSystemReconcile(
+          proxysqlReconcileFor("reconcile", "present"),
+          new Date().toISOString(),
+          ZERO_DEPS,
+        );
+        assertEquals(proxySqlReconciledSinceStart(), false);
+        const probe = await probeBootRepair(resolveLayout(fixture.env));
+        assertEquals(probe, { result: "started", upCalls: 1 });
+      });
+    });
+  },
+});
+
+test({
+  name:
+    "handleSystemReconcile proxysql: a deliberate stop makes the boot repair stand down",
+  permissions: { env: true, read: true, write: true },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      await withLayoutEnv(fixture, async () => {
+        resetProxySqlLockForTests();
+        await handleSystemReconcile(
+          proxysqlReconcileFor("stop", "absent"),
+          new Date().toISOString(),
+          ZERO_DEPS,
+        );
+        assertEquals(proxySqlReconciledSinceStart(), true);
+        const probe = await probeBootRepair(resolveLayout(fixture.env));
+        assertEquals(probe, { result: "superseded", upCalls: 0 });
       });
     });
   },

@@ -6,7 +6,10 @@
 
 import { helperLabelArgs } from "../../deploy/labels.ts";
 import { sanitizeForLog } from "../../util/logger.ts";
-import type { ManagedEngineProbeContext } from "./types.ts";
+import type {
+  ManagedEngineContext,
+  ManagedEngineProbeContext,
+} from "./types.ts";
 
 /** `-v name:target` pairs for every managed volume. */
 export function volumeMountArgs(
@@ -90,4 +93,46 @@ export function probeMysqlFamilyStandbyData(
     data: { flag: "-d", path: `${dataRoot}/mysql` },
     marker: `${dataRoot}/${marker}`,
   });
+}
+
+const SEED_ROOT_DEFAULTS_MARK = "__TP_ROOT_DEFAULTS__";
+
+/**
+ * Script lines that read the seed's stdin. Plain: one defaults file for the
+ * primary. With `withRootPassword`: that file, the marker line, then a second
+ * defaults file for the local root client (`$rootopt`).
+ */
+export function standbySeedStdinLines(withRootPassword: boolean): string[] {
+  if (!withRootPassword) return ['cat > "$tmp"', "rootopt="];
+  return [
+    "rootcnf=$(mktemp)",
+    'trap \'rm -f "$tmp" "$rootcnf"\' EXIT INT TERM HUP',
+    'chmod 600 "$rootcnf"',
+    `while IFS= read -r line; do [ "$line" = "${SEED_ROOT_DEFAULTS_MARK}" ] && break; ` +
+    String.raw`printf '%s\n' "$line" >> "$tmp"; done`,
+    'cat > "$rootcnf"',
+    'rootopt="--defaults-extra-file=$rootcnf"',
+  ];
+}
+
+/**
+ * Run a standby seed. Volumes whose initdb never installed socket auth reject
+ * a bare local root with 1045 "using password: NO" before anything is
+ * imported; retry once with the platform root password in a 0600 file.
+ */
+export async function execStandbySeed(
+  ctx: ManagedEngineContext,
+  buildScript: (withRootPassword: boolean) => string,
+  defaultsBody: string,
+): Promise<{ success: boolean; stdout: string; stderr: string }> {
+  const first = await ctx.exec(["sh", "-c", buildScript(false)], defaultsBody);
+  const text = `${first.stderr}\n${first.stdout}`;
+  const denied = text.includes("Access denied") &&
+    text.includes("using password: NO");
+  if (first.success || !denied || !ctx.socketPassword) return first;
+  return await ctx.exec(
+    ["sh", "-c", buildScript(true)],
+    `${defaultsBody}${SEED_ROOT_DEFAULTS_MARK}\n` +
+      `[client]\nuser=${ctx.rootUsername}\npassword=${ctx.socketPassword}\n`,
+  );
 }

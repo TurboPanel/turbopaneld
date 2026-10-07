@@ -20,15 +20,13 @@ import { resolveLayout } from "../paths/layout.ts";
 import { reportLiveReleaseLinks } from "../deploy/release/live-release-scan.ts";
 import { guardHostingCaddySites } from "../deploy/ingress.ts";
 import { runDocker } from "../deploy/docker-cli.ts";
-import {
-  applyBootHold,
-  BootHoldLocalRetry,
-} from "../managed/boot-hold.ts";
+import { applyBootHold, BootHoldLocalRetry } from "../managed/boot-hold.ts";
 import {
   classifyHostBootRecord,
   markHostCleanShutdown,
   recordHostBootPersist,
 } from "../managed/host-boot.ts";
+import { repairProxySqlFrontendAtBoot } from "../managed/proxysql-boot-repair.ts";
 import { createSentinel, type SentinelOptions } from "../monitor/index.ts";
 import type { ServiceRunState } from "../contracts/service-run-state.ts";
 import { setServiceRunStateSource } from "../host/service-run-state.ts";
@@ -79,6 +77,8 @@ export type DaemonRunIo = {
   applyManagedBootHold?: () => Promise<void>;
   /** Stamp a clean shutdown for the next start; defaults to {@link markCleanShutdown}. */
   markCleanShutdown?: () => Promise<void>;
+  /** Boot-time ProxySQL frontend repair; defaults to {@link repairProxySqlFrontendAtBoot}. */
+  repairProxySqlFrontend?: () => Promise<unknown>;
   reinstallFabricForwardingIfEnabled?: () => Promise<void>;
   reinstallFirewallForwardingIfEnabled?: () => Promise<void>;
   /** Start any per-site PHP runtime that is installed but not running. */
@@ -324,6 +324,21 @@ export async function runDaemon(io: DaemonRunIo = {}): Promise<void> {
         err instanceof Error ? err.message : String(err),
       );
     });
+  }
+
+  // In the background: it may wait minutes for the datacenter address, and a
+  // failure is only ever reported.
+  if (orchestrationReady) {
+    (io.repairProxySqlFrontend ??
+      (() =>
+        repairProxySqlFrontendAtBoot(resolveLayout(Deno.env.toObject()))))()
+      .catch((err) => {
+        (io.logWarn ?? logWarn)(
+          "managed",
+          "ProxySQL frontend boot repair failed:",
+          err instanceof Error ? err.message : String(err),
+        );
+      });
   }
 
   const abort = new AbortController();

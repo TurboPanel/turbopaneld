@@ -207,7 +207,17 @@ with `include_vars` in the `runtime-entitlement` role, and the daemon imports th
 same file in `../src/runtime/registry.ts`. Same bytes, so group names and gids
 cannot drift.
 
-**Groups are per `(runtime, series)`** — `tpphp84`, `tpnode24` — never one group
+**Deno** (`deno-app-runtime` role, `playbooks/deno-app-runtime-apply.yml`) vendors the
+tenant Deno under `vendor/deno-app/<series>/current`, the way `node-app-runtime`
+vendors Node: the newest stable release of the series from the official Deno
+distribution (`dl.deno.land/release-latest.txt`, else the release list when the
+series is no longer the newest), the archive checked against the release's
+published SHA-256 before it is unpacked, group `tpdeno<series>`, gid in the
+entitlement band. Deno ships one major, so the series is the major (`2`). The
+playbook and its `deno_app_versions` extra-var are on `tp-orchestrate`'s
+allowlists.
+
+**Groups are per `(runtime, series)`** — `tpphp84`, `tpnode24`, `tpdeno2` — never one group
 per runtime. Co-installed PHP versions are distinct binaries, so a single
 `tpphp` would mean granting 8.4 also grants 8.3 with whatever CVEs another
 tenant's pinned app carries. It is also what lets a shell wrapper resolve a

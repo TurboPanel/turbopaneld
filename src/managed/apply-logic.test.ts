@@ -646,7 +646,16 @@ test("buildEngineExec retries restart-window failures, then stops on success", a
   const result = await exec(["mysql", "-e", "select 1"]);
   assertEquals(result, { success: true, stdout: "done", stderr: "" });
   assertEquals(calls.length, 3);
-  assertEquals(calls[0], ["exec", "-i", "cid", "mysql", "-e", "select 1"]);
+  assertEquals(calls[0], [
+    "exec",
+    "-i",
+    "-u",
+    "0",
+    "cid",
+    "mysql",
+    "-e",
+    "select 1",
+  ]);
 });
 
 test("buildEngineExec does not retry non-transient failures and redacts stderr", async () => {

@@ -52,8 +52,10 @@ import type {
   ManagedReplicationObservedHealth,
 } from "./types.ts";
 import {
+  execStandbySeed,
   mysqlFamilyDataRoot,
   probeMysqlFamilyStandbyData,
+  standbySeedStdinLines,
   volumeMountArgs,
 } from "./standby-probe.ts";
 
@@ -399,7 +401,7 @@ export function resolveMysqlPrimaryConnectHost(primary: {
  * Failure-safe logical seed: credentials only in a 0600 defaults file, trap
  * removes it on every exit, dump|import fails if either side fails.
  */
-export function buildMysqlStandbySeedScript(): string {
+export function buildMysqlStandbySeedScript(withRootPassword = false): string {
   return [
     "set -e",
     "tmp=$(mktemp)",
@@ -407,13 +409,13 @@ export function buildMysqlStandbySeedScript(): string {
     // plaintext defaults file on the container filesystem.
     "trap 'rm -f \"$tmp\"' EXIT INT TERM HUP",
     'chmod 600 "$tmp"',
-    'cat > "$tmp"',
+    ...standbySeedStdinLines(withRootPassword),
     // Prefer pipefail when available (bash/busybox ash); fifo path otherwise.
     "if (set -o pipefail) 2>/dev/null; then",
     "  set -o pipefail",
     '  mysqldump --defaults-extra-file="$tmp" --single-transaction --routines ' +
     "--triggers --events --set-gtid-purged=ON --all-databases " +
-    "| mysql --protocol=socket -u root",
+    "| mysql $rootopt --protocol=socket -u root",
     "else",
     '  fifo="$tmp.fifo"',
     '  mkfifo "$fifo"',
@@ -422,7 +424,7 @@ export function buildMysqlStandbySeedScript(): string {
     '--triggers --events --set-gtid-purged=ON --all-databases >"$fifo" &',
     "  dump_pid=$!",
     "  set +e",
-    '  mysql --protocol=socket -u root <"$fifo"',
+    '  mysql $rootopt --protocol=socket -u root <"$fifo"',
     "  import_rc=$?",
     "  wait $dump_pid",
     "  dump_rc=$?",
@@ -514,8 +516,9 @@ const mysqlReplicationRuntime: ManagedEngineReplicationRuntime = {
     await ensureAuthSocketPlugin(ctx);
 
     // Short-lived 0600 defaults file via stdin (never -p on argv / never MYSQL_PWD).
-    const seed = await ctx.exec(
-      ["sh", "-c", buildMysqlStandbySeedScript()],
+    const seed = await execStandbySeed(
+      ctx,
+      buildMysqlStandbySeedScript,
       defaultsBody,
     );
     if (!seed.success) {
