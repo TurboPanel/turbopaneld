@@ -34,6 +34,12 @@ import {
   withTempLayout,
 } from "../testing/temp-layout.ts";
 import type { ManagedIngressReconcilePayload } from "../contracts/commands-contracts.ts";
+import { probeBootRepair } from "../testing/boot-repair-probe.ts";
+import {
+  proxySqlReconciledSinceStart,
+  resetProxySqlLockForTests,
+  withProxySqlLock,
+} from "../managed/proxysql-lock.ts";
 import { handleManagedIngressReconcile } from "./managed-ingress-reconcile.ts";
 
 /**
@@ -1633,6 +1639,126 @@ test({
           assertStringIncludes(select, "runtime_pgsql_servers");
           assertEquals(select.includes("runtime_mysql_servers"), false);
         }
+      } finally {
+        Deno.env.delete("TURBOPANEL_STATE_DIR");
+        Deno.env.delete("TURBOPANEL_CONFIG_DIR");
+      }
+    });
+  },
+});
+
+test({
+  name:
+    "handleManagedIngressReconcile: a reconcile that throws leaves the boot repair free to run",
+  permissions: { env: true, read: true, write: true, run: false },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      await seedFixture(fixture);
+      Deno.env.set("TURBOPANEL_STATE_DIR", fixture.dirs.stateDir);
+      Deno.env.set("TURBOPANEL_CONFIG_DIR", fixture.dirs.configDir);
+      try {
+        resetProxySqlLockForTests();
+        await assertRejects(
+          () =>
+            handleManagedIngressReconcile(
+              basePayload(),
+              new Date().toISOString(),
+              { runDocker: fakeRun(), ensureDocker: () => Promise.resolve() },
+            ),
+          Error,
+          "requires decryptSecrets",
+        );
+        assertEquals(proxySqlReconciledSinceStart(), false);
+        const probe = await probeBootRepair(resolveLayout(fixture.env));
+        assertEquals(probe, { result: "started", upCalls: 1 });
+      } finally {
+        Deno.env.delete("TURBOPANEL_STATE_DIR");
+        Deno.env.delete("TURBOPANEL_CONFIG_DIR");
+      }
+    });
+  },
+});
+
+test({
+  name:
+    "handleManagedIngressReconcile: a settled reconcile makes the boot repair stand down",
+  permissions: { env: true, read: true, write: true, run: false },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      await seedFixture(fixture);
+      Deno.env.set("TURBOPANEL_STATE_DIR", fixture.dirs.stateDir);
+      Deno.env.set("TURBOPANEL_CONFIG_DIR", fixture.dirs.configDir);
+      try {
+        resetProxySqlLockForTests();
+        await handleManagedIngressReconcile(
+          basePayload(),
+          new Date().toISOString(),
+          {
+            runDocker: fakeRunWithRunningProxySql(),
+            decryptSecrets: decryptSecretsEcho,
+            ensureDocker: () => Promise.resolve(),
+          },
+        );
+        assertEquals(proxySqlReconciledSinceStart(), true);
+        const probe = await probeBootRepair(resolveLayout(fixture.env));
+        assertEquals(probe, { result: "superseded", upCalls: 0 });
+      } finally {
+        Deno.env.delete("TURBOPANEL_STATE_DIR");
+        Deno.env.delete("TURBOPANEL_CONFIG_DIR");
+      }
+    });
+  },
+});
+
+test({
+  name:
+    "handleManagedIngressReconcile: a deliberate teardown makes the boot repair stand down, and the handler takes the lock",
+  permissions: { env: true, read: true, write: true, run: false },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      await seedFixture(fixture);
+      Deno.env.set("TURBOPANEL_STATE_DIR", fixture.dirs.stateDir);
+      Deno.env.set("TURBOPANEL_CONFIG_DIR", fixture.dirs.configDir);
+      try {
+        resetProxySqlLockForTests();
+        let release!: () => void;
+        const held = withProxySqlLock(() =>
+          new Promise<void>((resolve) => release = resolve)
+        );
+        let dockerCalls = 0;
+        const teardown = handleManagedIngressReconcile(
+          {
+            serverId: SERVER_ID,
+            managedNetwork: MANAGED_NETWORK,
+            clusters: [],
+          },
+          new Date().toISOString(),
+          {
+            runDocker: (args, options) => {
+              dockerCalls += 1;
+              if (args[0] === "network" && args[1] === "inspect") {
+                return Promise.resolve({
+                  success: true,
+                  stdout: managedNetworkInspectJson(),
+                  stderr: "",
+                  code: 0,
+                });
+              }
+              return fakeRun()(args, options);
+            },
+            ensureDocker: () => Promise.resolve(),
+            decryptSecrets: decryptSecretsEcho,
+          },
+        );
+        await new Promise((r) => setTimeout(r, 10));
+        assertEquals(dockerCalls, 0);
+        assertEquals(proxySqlReconciledSinceStart(), false);
+        release();
+        await held;
+        await teardown;
+        assertEquals(proxySqlReconciledSinceStart(), true);
+        const probe = await probeBootRepair(resolveLayout(fixture.env));
+        assertEquals(probe, { result: "superseded", upCalls: 0 });
       } finally {
         Deno.env.delete("TURBOPANEL_STATE_DIR");
         Deno.env.delete("TURBOPANEL_CONFIG_DIR");
