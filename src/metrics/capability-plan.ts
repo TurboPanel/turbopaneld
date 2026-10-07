@@ -99,7 +99,7 @@ export const PLATFORM_DEFAULT_METRICS_CAPABILITY_PLAN: MetricsCapabilityPlan = {
   normalNicSlots: 2,
   turboFabricEnabled: true,
   extraFilesystemSlots: 0,
-  detailedBlockDeviceSlots: 2,
+  detailedBlockDeviceSlots: 3,
   gpuSlots: 1,
   gpuInterconnectEnabled: false,
   physicalHardwareSignalSlots: 19,
