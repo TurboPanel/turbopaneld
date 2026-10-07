@@ -1797,6 +1797,11 @@ export type ManagedReplicationHealth = {
   replayLsn?: string;
   /** Standby only, while streaming: received-vs-primary byte lag. */
   receiveLagBytes?: number;
+  /** MySQL / MariaDB replica: GTID sets received / applied (bounded text). */
+  receivedGtid?: string;
+  executedGtid?: string;
+  /** MySQL / MariaDB replica: all received transactions are applied. */
+  fullyApplied?: boolean;
   /**
    * Standby only, on `managed-health-result`: the daemon's last `streaming`
    * read of this member. `ageMs` is measured on the daemon's monotonic clock
