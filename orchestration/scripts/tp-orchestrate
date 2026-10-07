@@ -316,7 +316,7 @@ tp_backup_dir_ok() {
 # Keys a JSON-object extra-var may carry (-e '{"k": …}'), for the playbooks
 # whose inputs are lists or booleans: time sync, Docker addressing, native
 # app runtimes, site engines. Checked by tp_json_extra_var_ok.
-TP_JSON_EXTRA_VAR_KEYS="turbopanel_timezone turbopanel_ntp_servers turbopanel_ntp_fallback_servers turbopanel_ntp_enabled turbopanel_apply_ntp_config turbopanel_docker_address_pools turbopanel_docker_default_bridge_cidr turbopanel_docker_clear_addressing node_app_versions deno_app_versions turbopanel_php_fpm_install php_fpm_versions php_fpm_extensions turbopanel_lsphp_install openlitespeed_lsphp_versions"
+TP_JSON_EXTRA_VAR_KEYS="turbopanel_timezone turbopanel_ntp_servers turbopanel_ntp_fallback_servers turbopanel_ntp_enabled turbopanel_apply_ntp_config turbopanel_docker_address_pools turbopanel_docker_default_bridge_cidr turbopanel_docker_clear_addressing node_app_versions deno_app_versions turbopanel_php_fpm_install php_fpm_versions php_fpm_extensions turbopanel_lsphp_install openlitespeed_lsphp_versions php_series_prune"
 
 # A single-line JSON object whose keys are all in TP_JSON_EXTRA_VAR_KEYS and
 # whose leaf strings carry no Jinja delimiter or control character and no
@@ -364,9 +364,12 @@ if any(k not in allowed for k in doc):
 # option, a version pin or a second package.
 series = re.compile(r"[0-9]\.[0-9]{1,2}")
 ext = re.compile(r"[a-z0-9][a-z0-9.+-]{0,31}")
-versions = doc.get("php_fpm_versions", [])
-if not (isinstance(versions, list) and all(isinstance(x, str) and series.fullmatch(x) for x in versions)):
-    sys.exit(1)
+# php_series_prune names the series whose packages root purges: the same shape
+# as php_fpm_versions, and a name here is a series, never an apt option.
+for key in ("php_fpm_versions", "php_series_prune"):
+    versions = doc.get(key, [])
+    if not (isinstance(versions, list) and all(isinstance(x, str) and series.fullmatch(x) for x in versions)):
+        sys.exit(1)
 # The tenant Node and Deno series become a directory name and part of a
 # download URL before the role asserts them: only digits (Node also accepts
 # 24.17.0 style pins) get that far.
@@ -413,7 +416,7 @@ tp_valid_extra_var() {
 # A playbook shipped in the tree but missing from this list is refused, so a
 # new play the daemon runs through the helper must be added here
 # (src/orchestration/tp-orchestrate.test.ts checks the list against the daemon).
-TP_PLAYBOOK_ALLOWLIST="buildkit-setup.yml caddy-setup.yml daemon-converge.yml daemon-logs-setup.yml daemon-systemd-setup.yml deno-app-runtime-apply.yml docker-setup.yml instance-backup.yml instance-build-toggle.yml instance-certs-apply.yml instance-launch-only.yml instance-rollback.yml instance-units-refresh.yml localhost-test.yml node-app-runtime-apply.yml orchestrator-setup.yml postgres-setup.yml proxysql-setup.yml rabbitmq-setup.yml redis-setup.yml set-hostname.yml site-apache-apply.yml site-caddy-apply.yml site-nginx-apply.yml site-openlitespeed-apply.yml socket-dirs-setup.yml time-sync-apply.yml"
+TP_PLAYBOOK_ALLOWLIST="buildkit-setup.yml caddy-setup.yml daemon-converge.yml daemon-logs-setup.yml daemon-systemd-setup.yml deno-app-runtime-apply.yml docker-setup.yml instance-backup.yml instance-build-toggle.yml instance-certs-apply.yml instance-launch-only.yml instance-rollback.yml instance-units-refresh.yml localhost-test.yml node-app-runtime-apply.yml orchestrator-setup.yml php-series-prune.yml postgres-setup.yml proxysql-setup.yml rabbitmq-setup.yml redis-setup.yml set-hostname.yml site-apache-apply.yml site-caddy-apply.yml site-nginx-apply.yml site-openlitespeed-apply.yml socket-dirs-setup.yml time-sync-apply.yml"
 
 # Resolve the caller's playbook argument into $_resolved, or die. It is a bare
 # basename, or the daemon's absolute constant (<orchestration>/playbooks/<name>),

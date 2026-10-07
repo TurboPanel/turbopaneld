@@ -26,6 +26,10 @@ import {
   sitePhpRuntimeId,
   type SitePhpRuntimeMode,
 } from "./site/php-runtime.ts";
+import {
+  holdPhpSeries,
+  resetPhpSeriesPruneForTests,
+} from "./site/php-series-prune.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -1631,6 +1635,148 @@ test("removeSites drops nginx pools and reloads php-fpm", async () => {
       true,
     );
   } finally {
+    await cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Unused PHP series are removed; one anything still uses never is.
+// ---------------------------------------------------------------------------
+
+/** The host reports PHP 8.4 installed (the real `/usr/sbin` is never probed). */
+const hostWithPhp84 = () => ({ php: { series: ["8.4"] } });
+
+/** `php_series_prune` lists the playbook runs asked for, in order. */
+function pruneRequests(
+  captured: ReturnType<typeof capturePlaybooks>,
+): unknown[] {
+  return captured.extraVars
+    .filter((entry) => entry.label.startsWith("php-series-prune"))
+    .map((entry) => entry.vars.php_series_prune);
+}
+
+test("removeSites removes PHP 8.4 once the last site using it goes", async () => {
+  resetPhpSeriesPruneForTests();
+  const { layout, cleanup } = await makeTestLayout();
+  const { run } = createSiteRunMock();
+  const applied = capturePlaybooks();
+  try {
+    await applySites(layout, "envpruneA", [nginxPhpSite], {
+      run,
+      runPlaybook: applied.runPlaybook,
+      hostRuntimes: hostWithPhp84,
+    });
+    // Applying a site that uses the series asks for no removal.
+    assertEquals(pruneRequests(applied), []);
+
+    const removal = capturePlaybooks();
+    await removeSites(layout, "envpruneA", {
+      run,
+      runPlaybook: removal.runPlaybook,
+      hostRuntimes: hostWithPhp84,
+    });
+    assertEquals(pruneRequests(removal), [["8.4"]]);
+  } finally {
+    resetPhpSeriesPruneForTests();
+    await cleanup();
+  }
+});
+
+test("removeSites keeps a PHP series another environment still uses", async () => {
+  resetPhpSeriesPruneForTests();
+  const { layout, cleanup } = await makeTestLayout();
+  const { run } = createSiteRunMock();
+  const applied = capturePlaybooks();
+  try {
+    for (
+      const [environmentId, listenPort] of [
+        ["envshareA", 18083],
+        ["envshareB", 18183],
+      ] as const
+    ) {
+      await applySites(
+        layout,
+        environmentId,
+        [{ ...nginxPhpSite, listenPort }],
+        {
+          run,
+          runPlaybook: applied.runPlaybook,
+          hostRuntimes: hostWithPhp84,
+        },
+      );
+    }
+    const first = capturePlaybooks();
+    await removeSites(layout, "envshareA", {
+      run,
+      runPlaybook: first.runPlaybook,
+      hostRuntimes: hostWithPhp84,
+    });
+    assertEquals(pruneRequests(first), []);
+
+    const last = capturePlaybooks();
+    await removeSites(layout, "envshareB", {
+      run,
+      runPlaybook: last.runPlaybook,
+      hostRuntimes: hostWithPhp84,
+    });
+    assertEquals(pruneRequests(last), [["8.4"]]);
+  } finally {
+    resetPhpSeriesPruneForTests();
+    await cleanup();
+  }
+});
+
+test("removeSites never removes a PHP series a deploy in flight holds", async () => {
+  resetPhpSeriesPruneForTests();
+  const { layout, cleanup } = await makeTestLayout();
+  const { run } = createSiteRunMock();
+  const applied = capturePlaybooks();
+  try {
+    await applySites(layout, "envholdA", [nginxPhpSite], {
+      run,
+      runPlaybook: applied.runPlaybook,
+      hostRuntimes: hostWithPhp84,
+    });
+    const release = await holdPhpSeries(["8.4"]);
+    const held = capturePlaybooks();
+    await removeSites(layout, "envholdA", {
+      run,
+      runPlaybook: held.runPlaybook,
+      hostRuntimes: hostWithPhp84,
+    });
+    assertEquals(pruneRequests(held), []);
+
+    release();
+    const after = capturePlaybooks();
+    await removeSites(layout, "envholdA", {
+      run,
+      runPlaybook: after.runPlaybook,
+      hostRuntimes: hostWithPhp84,
+    });
+    assertEquals(pruneRequests(after), [["8.4"]]);
+  } finally {
+    resetPhpSeriesPruneForTests();
+    await cleanup();
+  }
+});
+
+test("a failed PHP series removal never fails the teardown that triggered it", async () => {
+  resetPhpSeriesPruneForTests();
+  const { layout, cleanup } = await makeTestLayout();
+  const { run } = createSiteRunMock();
+  try {
+    await applySites(layout, "envfailA", [nginxPhpSite], {
+      run,
+      runPlaybook: capturePlaybooks().runPlaybook,
+      hostRuntimes: hostWithPhp84,
+    });
+    await removeSites(layout, "envfailA", {
+      run,
+      runPlaybook: () => Promise.reject(new Error("apt is busy")),
+      hostRuntimes: hostWithPhp84,
+    });
+  } finally {
+    resetPhpSeriesPruneForTests();
     await cleanup();
   }
 });

@@ -1,0 +1,89 @@
+---
+# Everything scoped to ONE series; looped from main.yml with
+# `loop_var: php_prune_series`.
+- name: Find site pools on the shared php-fpm master ({{ php_prune_series }})
+  ansible.builtin.find:
+    paths: "{{ turbopanel_config_dir }}/php/{{ php_prune_series }}/pools"
+    patterns: "*.conf"
+    excludes: ["default.conf"]
+    file_type: file
+  register: _php_prune_pools
+
+# A per-site runtime's unit name ends `-<fcgi|fpm|lsd><series without the dot>`.
+- name: Find per-site PHP runtimes on this series ({{ php_prune_series }})
+  ansible.builtin.find:
+    paths: /etc/systemd/system
+    use_regex: true
+    patterns:
+      - '^turbopanel-php-.*-(fcgi|fpm|lsd){{ php_prune_series | replace(".", "") }}\.(service|socket)$'
+    file_type: file
+  register: _php_prune_units
+
+- name: Refuse a series a site still uses ({{ php_prune_series }})
+  ansible.builtin.assert:
+    that:
+      - _php_prune_pools.files | length == 0
+      - _php_prune_units.files | length == 0
+    fail_msg: >-
+      PHP {{ php_prune_series }} still has
+      {{ _php_prune_pools.files | length }} site pool(s) and
+      {{ _php_prune_units.files | length }} per-site runtime unit(s); not removed.
+
+- name: Stop and disable the php-fpm master ({{ php_prune_series }})
+  ansible.builtin.systemd:
+    name: "turbopanel-php-fpm@{{ php_prune_series }}"
+    state: stopped
+    enabled: false
+  failed_when: false
+
+# Only this series' own packages: `php<series>` and `php<series>-*`. Nothing
+# else, no autoremove (shared libraries other software may use stay).
+- name: List this series' installed packages ({{ php_prune_series }})
+  ansible.builtin.command:
+    argv:
+      - dpkg-query
+      - "-W"
+      - "-f"
+      - "${db:Status-Abbrev}\t${Package}\n"
+      - "php{{ php_prune_series }}"
+      - "php{{ php_prune_series }}-*"
+  register: _php_prune_dpkg
+  changed_when: false
+  failed_when: _php_prune_dpkg.rc not in [0, 1]
+
+- name: Purge this series' packages ({{ php_prune_series }})
+  ansible.builtin.apt:
+    name: "{{ _php_prune_packages }}"
+    state: absent
+    purge: true
+    autoremove: false
+  register: _php_prune_apt
+  vars:
+    _php_prune_packages: >-
+      {{
+        _php_prune_dpkg.stdout
+        | regex_findall('(?m)^[ir][a-z ]{2}\t(php' ~ (php_prune_series | regex_escape) ~ '(?:-[a-z0-9.+-]+)?)$')
+      }}
+  when: _php_prune_packages | length > 0
+
+# Left behind by the role's "stop and mask sury's own unit" step.
+- name: Remove the masked sury php-fpm unit ({{ php_prune_series }})
+  ansible.builtin.file:
+    path: "/etc/systemd/system/php{{ php_prune_series }}-fpm.service"
+    state: absent
+  register: _php_prune_masked_unit
+
+- name: Reload systemd after removing the php-fpm unit ({{ php_prune_series }})
+  ansible.builtin.systemd:
+    daemon_reload: true
+  when: _php_prune_masked_unit is changed or _php_prune_apt is changed
+
+- name: Remove the series' config, log and runtime directories ({{ php_prune_series }})
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ turbopanel_config_dir }}/php/{{ php_prune_series }}"
+    - "{{ turbopanel_log_dir }}/php/{{ php_prune_series }}"
+    - "{{ turbopanel_run_dir }}/php/{{ php_prune_series }}"
+    - "{{ turbopanel_vendor_dir }}/lsphp/{{ php_prune_series }}"

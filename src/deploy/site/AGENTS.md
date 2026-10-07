@@ -83,8 +83,27 @@ Docker Compose. The daemon:
    environment, but the host serves many. Retiring a series belongs to the
    *removal* path: `removeSites` sweeps every installed series' pools and
    `disableIdlePhpSeries` disables a master whose pool directory holds nothing
-   but the bootstrap `default.conf`. Packages stay installed; uninstalling is a
-   fleet decision.
+   but the bootstrap `default.conf`.
+
+   **A series nothing uses is removed** (owner decision 2026-10-07: install on
+   first use, remove when unused). After `applySites` and `removeSites`,
+   `pruneUnusedPhpSeries` asks `prunePhpSeries` (`site/php-series-prune.ts`)
+   which installed series (php-fpm binaries, vendored `lsphp`, a config tree) no
+   site uses: no non-bootstrap pool, no per-site runtime unit, no vhost or
+   OpenLiteSpeed config naming a pool socket, a runtime socket or the vendored
+   `lsphp` of that series (`readSiteConfigTexts`). Anything it cannot read keeps
+   every series. A deploy in this process **holds** the series it names for its
+   whole length (`handleEnvironmentDeploy` -> `holdPhpSeries`): a series is
+   installed minutes before its pool exists, so without the hold a concurrent
+   teardown could take it. A hold only waits for a removal that covers its
+   series; one removal runs at a time. The removal is `php-series-prune.yml`
+   (`php-series-prune` role, on `tp-orchestrate`'s playbook allowlist and
+   `php_series_prune` JSON key): it purges `php<series>` and `php<series>-*` (no
+   autoremove), drops the stat overrides, the masked sury unit, the series'
+   config/log/run directories and the vendored `lsphp/<series>` tree, and it
+   refuses a series that still has a site pool or a per-site runtime unit on
+   disk. Entitlement groups stay. A failed removal is logged and retried by the
+   next deploy or teardown; it never fails the one that triggered it.
 
    `php-fpm` and `lsphp` remain different binaries from different sources, but a
    series string means the same thing to both, so one value still selects both.
