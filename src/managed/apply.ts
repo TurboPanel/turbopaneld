@@ -35,6 +35,8 @@ import {
 } from "../orchestration/ansible.ts";
 import {
   assertPublicPrivateListenerTls,
+  composeUsesRootPasswordInterpolation,
+  MANAGED_ROOT_PASSWORD_FILE_SOURCE,
   MANAGED_ROOT_PASSWORD_VAR,
   normalizeManagedCompose,
 } from "./compose.ts";
@@ -54,6 +56,8 @@ import {
   managedComposePath,
   managedComposeProject,
   managedEnvFilePath,
+  managedRootPasswordPath,
+  managedSecretsDir,
 } from "./engine-paths.ts";
 import {
   loadProxySqlMonitorCredentials,
@@ -303,6 +307,59 @@ async function rewriteDaemonOwnedFile(
   await Deno.chmod(path, mode);
 }
 
+/**
+ * Write the engine root password for the engine's `<KEY>_FILE` read.
+ *
+ * The file is world-readable (0444) on purpose: the engine reads it as its own
+ * unprivileged user, whose uid differs between images. What protects it on the
+ * host is the 0700 daemon-owned directory above it — no other host account can
+ * traverse to it. Unchanged content is left in place (same inode) so a running
+ * engine's bind mount is never disturbed.
+ */
+export async function writeManagedRootPasswordFile(
+  dir: string,
+  path: string,
+  password: string,
+): Promise<void> {
+  await Deno.mkdir(dir, { recursive: true, mode: 0o700 });
+  await Deno.chmod(dir, 0o700);
+  try {
+    if ((await Deno.readTextFile(path)) === password) {
+      await Deno.chmod(path, 0o444);
+      return;
+    }
+  } catch (err) {
+    if (!(err instanceof Deno.errors.NotFound)) throw err;
+  }
+  await rewriteDaemonOwnedFile(path, password, 0o444);
+}
+
+/**
+ * Pick the compose form for this apply. A cluster created before the file
+ * form has a persisted compose with the password as an env var; when this
+ * apply changes nothing else about that compose, keep it byte-identical so
+ * `compose up` does not recreate (restart) the engine. Any apply that
+ * recreates the container anyway moves it to the file form.
+ */
+export async function chooseManagedCompose(
+  composePath: string,
+  payload: ManagedApplyPayload,
+) {
+  let previous: string | null = null;
+  try {
+    previous = await Deno.readTextFile(composePath);
+  } catch (err) {
+    if (!(err instanceof Deno.errors.NotFound)) throw err;
+  }
+  if (previous !== null && composeUsesRootPasswordInterpolation(previous)) {
+    const legacy = normalizeManagedCompose(payload, {
+      legacyRootPasswordEnv: true,
+    });
+    if (legacy.composeYaml === previous) return legacy;
+  }
+  return normalizeManagedCompose(payload);
+}
+
 async function composeUpWithDockerRetry(
   run: RunDockerFn,
   args: string[],
@@ -346,12 +403,23 @@ async function composeUpManagedEngine({
 
   await rewriteDaemonOwnedFile(composePath, composeYaml, 0o640);
 
-  try {
-    await rewriteDaemonOwnedFile(
-      envPath,
-      `${MANAGED_ROOT_PASSWORD_VAR}=${rootCredential.password}\n`,
-      0o600,
+  const needsEnvFile = composeUsesRootPasswordInterpolation(composeYaml);
+  if (composeYaml.includes(`${MANAGED_ROOT_PASSWORD_FILE_SOURCE}:`)) {
+    await writeManagedRootPasswordFile(
+      managedSecretsDir(layout, payload.managedId),
+      managedRootPasswordPath(layout, payload.managedId),
+      rootCredential.password,
     );
+  }
+
+  try {
+    if (needsEnvFile) {
+      await rewriteDaemonOwnedFile(
+        envPath,
+        `${MANAGED_ROOT_PASSWORD_VAR}=${rootCredential.password}\n`,
+        0o600,
+      );
+    }
 
     logSink.setPhase(COMMAND_LOG_PHASES.MANAGED_APPLY);
     const up = await composeUpWithDockerRetry(
@@ -361,8 +429,7 @@ async function composeUpManagedEngine({
         }),
       [
         "compose",
-        "--env-file",
-        envPath,
+        ...(needsEnvFile ? ["--env-file", envPath] : []),
         "-p",
         project,
         "-f",
@@ -758,7 +825,10 @@ export async function handleManagedApply(
     }
   }
 
-  const { composeYaml, composeServiceName } = normalizeManagedCompose(payload);
+  const { composeYaml, composeServiceName } = await chooseManagedCompose(
+    managedComposePath(layout, payload.managedId),
+    payload,
+  );
   const project = await composeUpManagedEngine({
     layout,
     payload,

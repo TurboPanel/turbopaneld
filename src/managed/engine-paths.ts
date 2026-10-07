@@ -139,6 +139,26 @@ export function managedEnvFilePath(
 }
 
 /**
+ * Daemon-only (0700) directory holding the engine root password file the
+ * engine reads through `<KEY>_FILE`. Not under `config/` or `tls/`, so
+ * ownership normalization never touches it.
+ */
+export function managedSecretsDir(
+  layout: LayoutPaths,
+  managedId: string,
+): string {
+  return join(managedDir(layout, managedId), "secrets");
+}
+
+/** Matches `MANAGED_ROOT_PASSWORD_FILE_SOURCE` (`./secrets/root-password`). */
+export function managedRootPasswordPath(
+  layout: LayoutPaths,
+  managedId: string,
+): string {
+  return join(managedSecretsDir(layout, managedId), "root-password");
+}
+
+/**
  * Compose project for one managed engine — the bare `managedId` (already a
  * UUID), with no readable prefix. `assertSafeManagedIdentifiers` still
  * enforces `COMPOSE_PROJECT_RE` and the 64-char bound on the instance-supplied

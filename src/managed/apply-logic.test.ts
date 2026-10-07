@@ -9,7 +9,13 @@ import type {
 } from "../contracts/commands-contracts.ts";
 import { resolveLayout } from "../paths/layout.ts";
 import { withTempLayout } from "../testing/temp-layout.ts";
-import { applyManagedEngineState, buildNeedsResyncMember } from "./apply.ts";
+import {
+  applyManagedEngineState,
+  buildNeedsResyncMember,
+  chooseManagedCompose,
+  writeManagedRootPasswordFile,
+} from "./apply.ts";
+import { normalizeManagedCompose } from "./compose.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -702,4 +708,63 @@ test("buildEngineExec gives up after the retry budget on a persistent restart wi
   assertEquals(result.success, false);
   // One initial attempt plus ENGINE_EXEC_RETRIES (10) retries.
   assertEquals(calls, 11);
+});
+
+test("writeManagedRootPasswordFile keeps the directory 0700 and the inode on unchanged content", async () => {
+  const dir = await Deno.makeTempDir();
+  try {
+    const secretsDir = `${dir}/secrets`;
+    const path = `${secretsDir}/root-password`;
+    await writeManagedRootPasswordFile(secretsDir, path, "pw-one");
+    assertEquals((await Deno.stat(secretsDir)).mode! & 0o777, 0o700);
+    assertEquals((await Deno.stat(path)).mode! & 0o777, 0o444);
+    const ino = (await Deno.stat(path)).ino;
+    await writeManagedRootPasswordFile(secretsDir, path, "pw-one");
+    assertEquals((await Deno.stat(path)).ino, ino);
+    await writeManagedRootPasswordFile(secretsDir, path, "pw-two");
+    assertEquals(await Deno.readTextFile(path), "pw-two");
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+test("chooseManagedCompose leaves an unchanged legacy cluster alone and moves a changed one to the file form", async () => {
+  const dir = await Deno.makeTempDir();
+  try {
+    const path = `${dir}/docker-compose.yml`;
+    const payload = {
+      managedId: "00000000-0000-4000-8000-000000000001",
+      engine: "postgres",
+      containerName: "c1",
+      managedNetwork: "net",
+      image: "postgres:18",
+      containerPort: 5432,
+      composeYaml: [
+        "services:",
+        "  postgres:",
+        "    environment:",
+        "      POSTGRES_PASSWORD: ${TURBOPANEL_MANAGED_ROOT_PASSWORD}",
+      ].join("\n"),
+      configFiles: [],
+      volumes: [],
+    } as unknown as ManagedApplyPayload;
+
+    const fresh = await chooseManagedCompose(path, payload);
+    assertEquals(fresh.composeYaml.includes("POSTGRES_PASSWORD_FILE"), true);
+
+    const legacy = normalizeManagedCompose(payload, {
+      legacyRootPasswordEnv: true,
+    });
+    await Deno.writeTextFile(path, legacy.composeYaml);
+    const same = await chooseManagedCompose(path, payload);
+    assertEquals(same.composeYaml, legacy.composeYaml);
+
+    const changed = await chooseManagedCompose(path, {
+      ...payload,
+      image: "postgres:19",
+    });
+    assertEquals(changed.composeYaml.includes("POSTGRES_PASSWORD_FILE"), true);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
 });
