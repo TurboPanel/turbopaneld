@@ -558,7 +558,7 @@ function bootHoldStartStub(holdResult: boolean | Error, classifyFails = false) {
         order.push("persist");
         return Promise.resolve();
       },
-      newRetry: (_layout: unknown, reapply?: () => Promise<boolean>) => ({
+      newRetry: () => ({
         start: () => order.push("retry-start"),
         stop: () => order.push("retry-stop"),
       }),
