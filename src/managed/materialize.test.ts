@@ -470,6 +470,8 @@ Deno.test("normalizeManagedSecretOwnership hands the file over in a locked-down 
     chown.join(" ").includes("--cap-drop ALL --cap-add CHOWN --cap-add FOWNER"),
     true,
   );
+  // Root is neither owner nor group of secrets/, so it needs search rights.
+  assertEquals(chown.join(" ").includes("--cap-add DAC_READ_SEARCH"), true);
   assertEquals(chown.join(" ").includes("no-new-privileges"), true);
   assertEquals(chown.includes("--privileged"), false);
   assertEquals(verify.join(" ").includes("--user postgres:postgres"), true);
