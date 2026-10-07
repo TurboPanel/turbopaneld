@@ -293,6 +293,8 @@ export async function normalizeManagedSecretOwnership(
   const secretsDir = join(managedRoot, "secrets");
   // Mode first, then owner: after the chown the file is no longer the
   // daemon's, and chmod on a file root does not own needs CAP_FOWNER anyway.
+  // The directory is the daemon's (0700, then group-traversable for the engine
+  // group only), so root also needs CAP_DAC_READ_SEARCH to reach the file in it.
   const script = [
     "set -eu",
     `USER_NAME=${shellSingleQuote(containerUser)}`,
@@ -316,6 +318,8 @@ export async function normalizeManagedSecretOwnership(
     "CHOWN",
     "--cap-add",
     "FOWNER",
+    "--cap-add",
+    "DAC_READ_SEARCH",
     "--security-opt",
     "no-new-privileges",
     "--user",
