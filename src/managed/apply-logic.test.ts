@@ -13,9 +13,11 @@ import {
   applyManagedEngineState,
   buildNeedsResyncMember,
   chooseManagedCompose,
+  provisionManagedRootPasswordFile,
   writeManagedRootPasswordFile,
 } from "./apply.ts";
 import { normalizeManagedCompose } from "./compose.ts";
+import { managedRootPasswordPath } from "./engine-paths.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -771,4 +773,37 @@ test("chooseManagedCompose leaves an unchanged legacy cluster alone and moves a 
   } finally {
     await Deno.remove(dir, { recursive: true });
   }
+});
+
+test("provisionManagedRootPasswordFile writes the file and hands it over once, without the password in argv", async () => {
+  await withTempLayout(async (fixture) => {
+    const layout = resolveLayout(fixture.env);
+    const calls: string[][] = [];
+    const run = (args: string[]) => {
+      calls.push(args);
+      return Promise.resolve({
+        success: true,
+        code: 0,
+        stdout: "",
+        stderr: "",
+      });
+    };
+    const payload = {
+      managedId: "00000000-0000-4000-8000-000000000001",
+      image: "postgres:18",
+    } as unknown as ManagedApplyPayload;
+    await provisionManagedRootPasswordFile(layout, payload, "s3cret-pw", {
+      engineUser: "postgres",
+      engineGroup: "postgres",
+      run,
+    });
+    assertEquals(calls.length, 1);
+    assertEquals(calls[0]!.join(" ").includes("s3cret-pw"), false);
+    assertEquals(
+      await Deno.readTextFile(
+        managedRootPasswordPath(layout, payload.managedId),
+      ),
+      "s3cret-pw",
+    );
+  });
 });

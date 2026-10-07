@@ -336,6 +336,29 @@ export async function writeManagedRootPasswordFile(
   return true;
 }
 
+/** Write the root password file and, when new, hand it to the engine user. */
+export async function provisionManagedRootPasswordFile(
+  layout: LayoutPaths,
+  payload: ManagedApplyPayload,
+  password: string,
+  engine: { engineUser: string; engineGroup: string; run: RunDockerFn },
+): Promise<void> {
+  const needsHandOver = await writeManagedRootPasswordFile(
+    managedSecretsDir(layout, payload.managedId),
+    managedRootPasswordPath(layout, payload.managedId),
+    password,
+  );
+  if (needsHandOver) {
+    await normalizeManagedSecretOwnership(
+      payload.image,
+      managedDir(layout, payload.managedId),
+      engine.engineUser,
+      engine.engineGroup,
+      engine.run,
+    );
+  }
+}
+
 /**
  * Pick the compose form for this apply. A cluster created before the file
  * form has a persisted compose with the password as an env var; when this
@@ -413,20 +436,12 @@ async function composeUpManagedEngine({
 
   const needsEnvFile = composeUsesRootPasswordInterpolation(composeYaml);
   if (composeYaml.includes(`${MANAGED_ROOT_PASSWORD_FILE_SOURCE}:`)) {
-    const needsHandOver = await writeManagedRootPasswordFile(
-      managedSecretsDir(layout, payload.managedId),
-      managedRootPasswordPath(layout, payload.managedId),
+    await provisionManagedRootPasswordFile(
+      layout,
+      payload,
       rootCredential.password,
+      { engineUser, engineGroup, run },
     );
-    if (needsHandOver) {
-      await normalizeManagedSecretOwnership(
-        payload.image,
-        managedDir(layout, payload.managedId),
-        engineUser,
-        engineGroup,
-        run,
-      );
-    }
   }
 
   try {
