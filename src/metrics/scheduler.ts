@@ -89,7 +89,7 @@ export type MetricsSchedulerOptions = {
   clearTimeoutFn?: typeof clearTimeout;
   logRateLimitMs?: number;
   /**
-   * `true` once the control plane negotiated the `metrics-v7` wire feature.
+   * `true` once the control plane negotiated the `metrics-v8` wire feature.
    * Then live leases keep the baseline sampler running and the 10 s stream
    * runs beside it on its own collector; each sample carries
    * `metadata.durable` (baseline `true`, stream `false`). Closed (v6) keeps
@@ -97,8 +97,8 @@ export type MetricsSchedulerOptions = {
    */
   durabilityFlag?: () => boolean;
   /**
-   * `true` once the control plane also advertises `metrics-v7-sizes`. Until
-   * then the per-sample sizes are stripped from the v7 `extended` block: a
+   * `true` once the control plane also advertises `metrics-v8-sizes`. Until
+   * then the per-sample sizes are stripped from the v8 `extended` block: a
    * control plane that predates them rejects the unknown keys and would drop
    * the whole sample.
    */
@@ -350,14 +350,14 @@ export class MetricsScheduler {
 
   #stampDurable<T>(sample: T, durable: boolean): T {
     if (!this.#durabilityFlag()) {
-      // v6 wire: the v7-only `extended` block (free text included) is never sent.
+      // v6 wire: the v8-only `extended` block (free text included) is never sent.
       delete (sample as { extended?: unknown }).extended;
       return sample;
     }
     const metadata = (sample as { metadata?: Record<string, unknown> })
       .metadata;
     if (metadata) {
-      // metrics-v7 negotiated: this is a v7 sample (durable flag, extended).
+      // metrics-v8 negotiated: this is a v8 sample (durable flag, extended).
       metadata.version = METRICS_SCHEMA_VERSION;
       metadata.durable = durable;
     }

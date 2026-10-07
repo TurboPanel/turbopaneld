@@ -1,5 +1,5 @@
 /**
- * The contract's `extended.host` section (v7): kernel PID-limit use, OOM kills,
+ * The contract's `extended.host` section (v8): kernel PID-limit use, OOM kills,
  * the queue and IOPS of the disk that holds `/`, software-RAID health and the
  * failed-unit count. Pure and synchronous; the collector hands in what it
  * already read this tick. A reading that is unknown is left out of the section,

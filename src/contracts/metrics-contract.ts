@@ -24,20 +24,20 @@
 
 /**
  * The schema version the control plane stores (`blob3` on every row, dataset
- * `turbopanel_server_metrics_v7`). A sample on the wire may still be stamped
+ * `turbopanel_server_metrics_v8`). A sample on the wire may still be stamped
  * with an older {@link METRICS_WIRE_VERSIONS} entry; the control plane writes
- * v7 rows for all of them.
+ * v8 rows for all of them.
  */
-export const METRICS_SCHEMA_VERSION = 7 as const;
+export const METRICS_SCHEMA_VERSION = 8 as const;
 
 /**
  * The wire version a daemon stamps until the control plane advertises the
- * `metrics-v7` wire feature (`DAEMON_WIRE_FEATURES`). v6-shaped samples carry
+ * `metrics-v8` wire feature (`DAEMON_WIRE_FEATURES`). v6-shaped samples carry
  * no {@link MetricsExtended} section and no `durable` flag.
  */
 export const METRICS_LEGACY_WIRE_VERSION = 6 as const;
 
-/** Sample versions the control plane accepts from a daemon during the v6 -> v7 transition. */
+/** Sample versions the control plane accepts from a daemon during the v6 -> v8 transition. */
 export const METRICS_WIRE_VERSIONS = [
   METRICS_LEGACY_WIRE_VERSION,
   METRICS_SCHEMA_VERSION,
@@ -477,13 +477,13 @@ export type DockerUsageSample = {
 };
 
 // ---------------------------------------------------------------------------
-// v7 extension — everything the v7 layout stores that the v6 groups above do
+// v8 extension — everything the v8 layout stores that the v6 groups above do
 // not carry. One optional, self-contained section so a v6 daemon's sample
 // stays valid byte for byte: every field is optional, `null` is "unknown",
 // and a missing section reads exactly like a section of nulls.
 // ---------------------------------------------------------------------------
 
-/** Host-wide readings added in v7 (kernel limits, OOM kills, root disk queue/IOPS, health counters). */
+/** Host-wide readings added in v8 (kernel limits, OOM kills, root disk queue/IOPS, health counters). */
 export type ExtendedHostMetrics = {
   /** Processes and threads as a share of the kernel PID limit. */
   pidLimitUsedPercent?: number | null;
@@ -508,7 +508,7 @@ export type ExtendedHostMetrics = {
   mdArraysResyncing?: number | null;
 };
 
-/** Docker health and container totals added in v7 (alongside {@link DockerUsageSample}'s disk breakdown). */
+/** Docker health and container totals added in v8 (alongside {@link DockerUsageSample}'s disk breakdown). */
 export type ExtendedDockerMetrics = {
   containersRunning?: number | null;
   containersUnhealthy?: number | null;
@@ -525,14 +525,14 @@ export type ExtendedDockerMetrics = {
   reclaimableBytes?: number | null;
 };
 
-/** Hosting-Caddy fields added in v7. Totals only: never per-site counts. */
+/** Hosting-Caddy fields added in v8. Totals only: never per-site counts. */
 export type ExtendedIngressMetrics = {
   /** Days until the soonest hosting certificate expires. */
   tlsCertSoonestExpiryDays?: number | null;
 };
 
 /**
- * Host-wide text fields v7 stores in free blobs, in no particular order. Each
+ * Host-wide text fields v8 stores in free blobs, in no particular order. Each
  * is a short human-readable string (process short names and site ids only,
  * never full command lines, domain names, serials or IPs).
  */
@@ -835,9 +835,9 @@ export type MetricsSampleMetadata = {
   topologyGeneration: number;
   bootGeneration: number;
   /**
-   * v7 daemons only. `false` marks a 10 s live-lease sample that feeds the
+   * v8 daemons only. `false` marks a 10 s live-lease sample that feeds the
    * live overlay and is never stored; the parallel 60 s baseline sample is
-   * `true`. Absent means durable (every v6 sample, and v7 samples outside a
+   * `true`. Absent means durable (every v6 sample, and v8 samples outside a
    * lease), so a v6 daemon's lease samples keep being stored.
    */
   durable?: boolean;
@@ -859,7 +859,7 @@ export type MetricsSample = {
   router?: RouterSample;
   storage?: StorageSample;
   dockerUsage?: DockerUsageSample;
-  /** v7 additions. Absent on a v6 daemon's sample. */
+  /** v8 additions. Absent on a v6 daemon's sample. */
   extended?: MetricsExtended;
 };
 

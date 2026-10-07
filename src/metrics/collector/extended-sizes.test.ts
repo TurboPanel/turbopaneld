@@ -1,6 +1,6 @@
 import { assertEquals } from "@std/assert";
 import { buildExtendedSizes } from "./extended-sizes.ts";
-import { mergeExtended } from "./extended-v7.ts";
+import { mergeExtended } from "./extended-v8.ts";
 import { parseCommitLimitBytes } from "./parse-meminfo.ts";
 
 const GIB = 1024 ** 3;

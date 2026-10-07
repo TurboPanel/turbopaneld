@@ -1360,7 +1360,7 @@ test("LinuxMetricsCollector puts container, TLS, site and host text data in exte
   assertEquals(extended?.text?.topSites, "site-a=700");
 });
 
-test("LinuxMetricsCollector sends only the always-known RAID zeros and the sizes when nothing else v7 was collected", async () => {
+test("LinuxMetricsCollector sends only the always-known RAID zeros and the sizes when nothing else v8 was collected", async () => {
   const result = await new LinuxMetricsCollector(
     makeDeps(() => TICK_1, fullTopologySnapshot(), () => 1_000_000),
   ).collect({ sequence: 1, nowMs: 1_000_000 });

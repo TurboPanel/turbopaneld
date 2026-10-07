@@ -4,7 +4,7 @@
  * the contract's `extended` section, using exactly the contract's keys. Pure
  * and synchronous. Anything unknown is left out of the section, never sent as
  * `0`. The scheduler strips `extended` (and keeps version 6) unless the
- * control plane negotiated `metrics-v7`.
+ * control plane negotiated `metrics-v8`.
  */
 import type {
   DockerUsageSample,

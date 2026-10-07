@@ -1,5 +1,5 @@
 /**
- * The contract's `extended.sizes`, `filesystemSizes` and `gpuSizes` (v7): the
+ * The contract's `extended.sizes`, `filesystemSizes` and `gpuSizes` (v8): the
  * capacity every percentage is taken against, read in the same tick as the
  * reading itself. This is what lets a resize or a balloon change a total
  * without starting a new topology generation. Pure and synchronous. A total

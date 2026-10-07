@@ -109,7 +109,7 @@ import {
 import { buildHostExtended } from "./extended-host.ts";
 import { buildExtendedSizes } from "./extended-sizes.ts";
 import { parseCommitLimitBytes } from "./parse-meminfo.ts";
-import { buildCollectedExtended, mergeExtended } from "./extended-v7.ts";
+import { buildCollectedExtended, mergeExtended } from "./extended-v8.ts";
 import { SOURCE_DEADLINE_MS, withDeadline } from "./deadline.ts";
 import { type HostTextSample, hostTextToExtended } from "./host-text.ts";
 import type {
@@ -1075,11 +1075,11 @@ export class LinuxMetricsCollector implements MetricsCollector {
   }
 
   /**
-   * Everything v7 adds rides in the contract's `extended` block: host text,
+   * Everything v8 adds rides in the contract's `extended` block: host text,
    * container health, Docker reclaimable bytes, TLS expiry and the largest
-   * sites. The scheduler strips `extended` (and stamps v6) unless metrics-v7
+   * sites. The scheduler strips `extended` (and stamps v6) unless metrics-v8
    * is negotiated. Added after plan truncation, so no plan gates it. A failure
-   * here drops only the v7 block, never the good v6 sample around it.
+   * here drops only the v8 block, never the good v6 sample around it.
    */
   #buildExtended(input: {
     outgoing: { extended?: MetricsExtended };
