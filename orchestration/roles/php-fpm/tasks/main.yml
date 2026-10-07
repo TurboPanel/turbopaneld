@@ -105,6 +105,15 @@
     group: "{{ turbopanel_group }}"
     mode: "0750"
 
+# Loaded before the series loop (series.yml reads `builtinExtensions`), and
+# here rather than relying on the copy runtime-entitlement leaves behind:
+# that role is included per-series from series.yml, so depending on its side
+# effect would make the dispatcher's contents depend on task ordering.
+- name: Load the shared runtime registry
+  ansible.builtin.include_vars:
+    file: "{{ role_path }}/../../runtime-registry.json"
+    name: runtime_registry
+
 - name: Install and configure each requested PHP series
   ansible.builtin.include_tasks: series.yml
   loop: "{{ php_fpm_versions | map('trim') | reject('equalto', '') | unique | list }}"
@@ -124,14 +133,6 @@
     - "{{ turbopanel_config_dir }}/php/php.ini"
     - "{{ turbopanel_config_dir }}/php/pools"
     - "{{ turbopanel_config_dir }}/php/conf.d"
-
-# Loaded here rather than relying on the copy runtime-entitlement leaves behind:
-# that role is included per-series from series.yml, so depending on its side
-# effect would make the dispatcher's contents depend on task ordering.
-- name: Load the shared runtime registry
-  ansible.builtin.include_vars:
-    file: "{{ role_path }}/../../runtime-registry.json"
-    name: runtime_registry
 
 # /usr/local/bin precedes /usr/bin in Debian's default PATH, so this shadows
 # sury's `update-alternatives` link for `php` without removing it. Removing the

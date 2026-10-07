@@ -165,6 +165,15 @@
 # never downloads a PHP interpreter. Layout mirrors every other vendored
 # runtime: `vendor/lsphp/<series>/<version>/` + a `current` symlink, so a patch
 # bump is a defaults edit and the generated vhosts never change.
+#
+# lsphp-series.yml reads `builtinExtensions` from the registry; load it here
+# rather than relying on the copy runtime-entitlement leaves behind.
+- name: Load the shared runtime registry
+  when: turbopanel_lsphp_install | default(false) | bool
+  ansible.builtin.include_vars:
+    file: "{{ role_path }}/../../runtime-registry.json"
+    name: runtime_registry
+
 - name: Vendor lsphp (LSAPI PHP) for OpenLiteSpeed vhosts
   when: turbopanel_lsphp_install | default(false) | bool
   ansible.builtin.include_tasks: lsphp-series.yml

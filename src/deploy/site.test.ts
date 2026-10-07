@@ -1,6 +1,7 @@
 import { assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
 import {
   apacheSiteConfig,
+  assertPhpSeriesOffered,
   caddySiteConfig,
   DEFAULT_PHP_SERIES,
   defaultIndexHtml,
@@ -1249,4 +1250,16 @@ test("nginxSiteConfig carries no site variables outside the PHP location", () =>
     "/srv/users/alice/sites/app/current/public",
   );
   assertEquals(staticSite.includes("APP_ENV"), false);
+});
+
+test("a PHP series the server's operating system does not offer is refused before any playbook runs", () => {
+  assertPhpSeriesOffered(["8.1", "8.4", "8.5"], "trixie");
+  assertThrows(
+    () => assertPhpSeriesOffered(["8.4", "7.4"], "trixie"),
+    Error,
+    "php 7.4 is not offered on this server's operating system. Offered series: 8.1, 8.2, 8.3, 8.4, 8.5.",
+  );
+  // A suite the table does not list gets every registry series.
+  assertPhpSeriesOffered(["8.1"], "bookworm");
+  assertThrows(() => assertPhpSeriesOffered(["7.4"], "bookworm"), Error);
 });

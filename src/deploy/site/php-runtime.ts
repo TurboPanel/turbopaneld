@@ -28,6 +28,7 @@ import type {
 } from "../../contracts/commands-contracts.ts";
 import { principalSliceName } from "../native/unit.ts";
 import { logWarn } from "../../util/logger.ts";
+import { phpBuiltinExtensions } from "../../runtime/registry.ts";
 
 /** The modes a per-site runtime runs in (lsphp-attached runs as lsphp-detached). */
 export type SitePhpRuntimeMode = Extract<
@@ -629,7 +630,10 @@ function lsphpModuleLines(
     `extension_dir = ${
       sitePhpLsphpExtensionDir(lsphp.runtimesDir, lsphp.series)
     }`,
-    "zend_extension = opcache.so",
+    // Built into the interpreter on some series (8.5): no opcache.so to load.
+    ...(phpBuiltinExtensions(lsphp.series).includes("opcache")
+      ? []
+      : ["zend_extension = opcache.so"]),
     ...LSPHP_SHARED_EXTENSIONS.map((name) => `extension = ${name}`),
   ];
 }

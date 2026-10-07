@@ -143,10 +143,16 @@
     path: "{{ _lsphp_dest }}/bin/php.ini"
     marker: "; {mark} TurboPanel relocated lsphp"
     # One line per list item: `extension_dir` first, then the extensions.
+    # Extensions compiled into the series (opcache on 8.5) are not loaded by
+    # name: their .so does not exist and loading it would fail.
     block: >-
       {{
         (['extension_dir = "' ~ _lsphp_ext_dirs.files[0].path ~ '"']
-          + openlitespeed_lsphp_ini_extensions) | join(_lsphp_newline)
+          + (openlitespeed_lsphp_ini_extensions
+             | reject('equalto', 'zend_extension=opcache.so')
+               if 'opcache' in (runtime_registry.runtimes.php.builtinExtensions[lsphp_series] | default([]))
+               else openlitespeed_lsphp_ini_extensions))
+        | join(_lsphp_newline)
       }}
   vars:
     _lsphp_newline: "\n"

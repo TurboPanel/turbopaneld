@@ -288,6 +288,16 @@ test("detached lsphp: the vendored binary on a socket, its own php.ini through P
   assertEquals(sitePhpIni([], SPEC.home).includes("extension"), false);
 });
 
+test("detached lsphp on a series with a compiled-in opcache never loads opcache.so", () => {
+  const ini = sitePhpIni([], SPEC.home, {
+    mode: "lsphp-detached",
+    runtimesDir: "/opt/turbopanel/vendor",
+    series: "8.5",
+  });
+  assertStringIncludes(ini, "extension = mysqli.so\n");
+  assertEquals(ini.includes("opcache.so"), false);
+});
+
 test("a runtime's children: the site's pm.max_children for php-fpm, fixed otherwise", () => {
   assertEquals(sitePhpRuntimeChildren("fastcgi", []), 4);
   assertEquals(sitePhpRuntimeChildren("lsphp-detached", []), 10);

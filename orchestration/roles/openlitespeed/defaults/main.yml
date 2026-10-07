@@ -32,6 +32,16 @@ openlitespeed_lsphp_repo_base: "https://rpms.litespeedtech.com/debian/pool/main"
 openlitespeed_lsphp_suite: "{{ ansible_facts['distribution_release'] | default('') }}"
 openlitespeed_lsphp_deb_revision: "1"
 openlitespeed_lsphp_series_map:
+  "8.1":
+    version: "8.1.34"
+    pkg: lsphp81
+    packages: [lsphp81, lsphp81-common, lsphp81-mysql, lsphp81-opcache, lsphp81-curl]
+    arch_all: [lsphp81-common]
+  "8.2":
+    version: "8.2.34"
+    pkg: lsphp82
+    packages: [lsphp82, lsphp82-common, lsphp82-mysql, lsphp82-opcache, lsphp82-curl]
+    arch_all: [lsphp82-common]
   "8.3":
     version: "8.3.33"
     pkg: lsphp83
@@ -43,11 +53,55 @@ openlitespeed_lsphp_series_map:
     pkg: lsphp84
     packages: [lsphp84, lsphp84-common, lsphp84-mysql, lsphp84-opcache, lsphp84-curl]
     arch_all: [lsphp84-common]
+  # PHP 8.5 builds opcache in: there is no lsphp85-opcache package, and the
+  # relocated php.ini must not load opcache.so (see `builtinExtensions` in
+  # runtime-registry.json).
+  "8.5":
+    version: "8.5.11"
+    pkg: lsphp85
+    packages: [lsphp85, lsphp85-common, lsphp85-mysql, lsphp85-curl]
+    arch_all: [lsphp85-common]
 
 # sha256 of every pinned `.deb`, keyed by file name (from the suite's
 # `dists/<suite>/main/binary-<arch>/Packages` index). A pin bump without its
 # digests fails the role before anything is downloaded.
 openlitespeed_lsphp_sha256:
+  "lsphp81-common_8.1.34-1+bookworm_all.deb": "1d6dfdf95021b656c4377deb9452fbd813ca4a0b5829e01cc7b17ad7b3eee699"
+  "lsphp81-common_8.1.34-1+trixie_all.deb": "ec7bd6bfb90ac80c7cbb5fef9e5fa0a117951ec49ae3b33a4d7b6aa8bab4a890"
+  "lsphp81-curl_8.1.34-1+bookworm_amd64.deb": "00ab36534efc5f4e29a09ab591b4017a006b6457d5d388e820953be3da46151f"
+  "lsphp81-curl_8.1.34-1+bookworm_arm64.deb": "e2b35c333088c6935e06d3626e1fc0649ac12197582251f45c44044f11397cf9"
+  "lsphp81-curl_8.1.34-1+trixie_amd64.deb": "a8854b46d6a51c2138f52ced62b4ef73e55d6e2b31678baef4020419e8362d45"
+  "lsphp81-curl_8.1.34-1+trixie_arm64.deb": "0cbfbe610c679788b480f2bf6ddc7dfb62c95489303bf80ec991686f43547d2b"
+  "lsphp81-mysql_8.1.34-1+bookworm_amd64.deb": "936217a7238833c5b9365ed18041404802b5bce06dd4b664b4afc290e66c548f"
+  "lsphp81-mysql_8.1.34-1+bookworm_arm64.deb": "c225f7561311652c68edc904e494d320507792b676426954fc1512130b667514"
+  "lsphp81-mysql_8.1.34-1+trixie_amd64.deb": "956e30da27d1fbbca04f4ac6bf73d30b66f448337b784164e640c30ff5278d5d"
+  "lsphp81-mysql_8.1.34-1+trixie_arm64.deb": "e6060b17370964667ec66d71e62d984f64772d588c8d968db26c3fd462d66744"
+  "lsphp81-opcache_8.1.34-1+bookworm_amd64.deb": "99c63be3cae59b598a68eac1bb2d5fe7faa71c8ebab5a6237b1f1acd0f123252"
+  "lsphp81-opcache_8.1.34-1+bookworm_arm64.deb": "425a6e571650d8944f9b4569e3e68437baa7242ac80cad7717b7d2b4feda8ebd"
+  "lsphp81-opcache_8.1.34-1+trixie_amd64.deb": "5d7ed956535542bb24fbcb05902121c5cbcb7e5c2097b75743d278356d1fc578"
+  "lsphp81-opcache_8.1.34-1+trixie_arm64.deb": "96e432e7b3c346a2aa56fbc255355057a051ec6b1c25fa91bec0e8db718681b8"
+  "lsphp81_8.1.34-1+bookworm_amd64.deb": "137dec78871cfa17827a250c837b4fbe7fd18c574251470f19b98e9156ecfb15"
+  "lsphp81_8.1.34-1+bookworm_arm64.deb": "2f28c9592fe7e2823742d4c40b11c87381bb2eb4f1a405c5bcf0389fd6eb42c7"
+  "lsphp81_8.1.34-1+trixie_amd64.deb": "3b3a8280b4dfb9c6c9177e46a9a45a6338ff41998fa3641fde3bbd48cc69a24a"
+  "lsphp81_8.1.34-1+trixie_arm64.deb": "89d23662d0c753f10a5c5a701e5843108609612515b6704f63b7b92281eb3da0"
+  "lsphp82-common_8.2.34-1+bookworm_all.deb": "90a0b5eab566e023331a7cb5a39855ce7f254983d0784bd729317e18134577b8"
+  "lsphp82-common_8.2.34-1+trixie_all.deb": "c3a20ee0be95adad4fe59b7d01cc6ab84f2ab5c241032b71d8c73c2cab1c5a55"
+  "lsphp82-curl_8.2.34-1+bookworm_amd64.deb": "8ebb613a6d835ebdd6ea6c23819ad30d936e70b5cecbc3c08357df756a779a5d"
+  "lsphp82-curl_8.2.34-1+bookworm_arm64.deb": "01f52e8c137b49224b707b5aa47e51a31089c30e01f13a2089d725c5b6726da1"
+  "lsphp82-curl_8.2.34-1+trixie_amd64.deb": "525958ed83b220b4819fc7cf25527756849d6144bf075d63b091fc81e3a4b241"
+  "lsphp82-curl_8.2.34-1+trixie_arm64.deb": "017c505211c7a8fe4bbc3662c098549d8e0d7ef472c00dd02f39f43b68d6738e"
+  "lsphp82-mysql_8.2.34-1+bookworm_amd64.deb": "bf612c13805fc89a5925d2ed74286e380f1edfd339b2fbd2edd64f60299eef05"
+  "lsphp82-mysql_8.2.34-1+bookworm_arm64.deb": "644724edd70a78e89d0ec598af1f707b56247e375225b5a9032d62de39ba9969"
+  "lsphp82-mysql_8.2.34-1+trixie_amd64.deb": "105da67489b981aa58fc2b2383a5a966776eeadc875883dd21555fa9077c25bb"
+  "lsphp82-mysql_8.2.34-1+trixie_arm64.deb": "9d8673b311b25a169480d93dadef924f397d491ce8f32290cc455e0fbdb3f83e"
+  "lsphp82-opcache_8.2.34-1+bookworm_amd64.deb": "4b10d407d06ec15b75dec2e2ad6de9ea9ae26854f3265e00aa9c67e77e5f49f8"
+  "lsphp82-opcache_8.2.34-1+bookworm_arm64.deb": "a3bb87da806d41261e6ba7b0792410d81d0a2ed2a6ad7680c4978bd18814ac8b"
+  "lsphp82-opcache_8.2.34-1+trixie_amd64.deb": "568adcaf08c1e13d39e6dff5fc4baa99b10abf155200b335af264b3fd73e64ed"
+  "lsphp82-opcache_8.2.34-1+trixie_arm64.deb": "f1e12dc1ac516d69d54c5763d2abde60184b9b2bd2df80a0e7e70139d3ea9b61"
+  "lsphp82_8.2.34-1+bookworm_amd64.deb": "94b696067daf280498d4a97b7adb882b47410a44c00e9908526190b8297444f3"
+  "lsphp82_8.2.34-1+bookworm_arm64.deb": "8986b14211e739694079d654cbe13d56dabd70cf4cea5be062dd34480a140c93"
+  "lsphp82_8.2.34-1+trixie_amd64.deb": "4585f2be1f6a909234c1a38a01fba4c1a623fb18a8396a61689d2f761a0abf03"
+  "lsphp82_8.2.34-1+trixie_arm64.deb": "a2008bcc3479e080f93b3d8338e6ab27f8a584a7f035fae3edb9906de4711de7"
   "lsphp83-common_8.3.33-1+bookworm_all.deb": "d4b56ecb4b3a8c9acb3b4273040f7129422cdc3b0a28a88faaf3423710e8b1da"
   "lsphp83-common_8.3.33-1+trixie_all.deb": "58ae3d3ad9293a24a6875ccf0f0d330f8fa075149976d29e911eb24bfbbf686f"
   "lsphp83-curl_8.3.33-1+bookworm_amd64.deb": "dba1e12ce0537a9e8b7e04bfe19a3b47977bcca50778de119ee480a041ee9069"
@@ -84,6 +138,20 @@ openlitespeed_lsphp_sha256:
   "lsphp84_8.4.25-1+bookworm_arm64.deb": "b2e7e5ea42de2374f36d731e5e0ec247f5a8a530c12892fc63fde90ad4c2884f"
   "lsphp84_8.4.25-1+trixie_amd64.deb": "5d2988ff053997b8794c241d7774452045843cbec7ca629c74c26c6eec5dcca1"
   "lsphp84_8.4.25-1+trixie_arm64.deb": "b6080560ec886e9d59a05d03c57df9950f9ddc517c490440d0179afe046a6f59"
+  "lsphp85-common_8.5.11-1+bookworm_all.deb": "3e64c56c1fa9364fdb301fc53773e112fac6d57b392a4f8c0d90804b2a2161ec"
+  "lsphp85-common_8.5.11-1+trixie_all.deb": "3acd4855b7dfcd6bee04d7cc627a3659633a1e8243ce2ea28d6ddcb2daedd79d"
+  "lsphp85-curl_8.5.11-1+bookworm_amd64.deb": "d5109440095c1890ce2620ce7d42757819ed3bae9bdf83ff195e74615e810bc6"
+  "lsphp85-curl_8.5.11-1+bookworm_arm64.deb": "29c11fefc2ef5d51114cf7ed1b0a9227cc80e341fe6c4a3196b55a71ff2fb8ad"
+  "lsphp85-curl_8.5.11-1+trixie_amd64.deb": "236b3c1ad798a23989e6eb7e27d5f77c4ce3ed5d4929b6044e2b98e78dd1b628"
+  "lsphp85-curl_8.5.11-1+trixie_arm64.deb": "67e845dcc2f8f5006f6ef097a634d4ceeb7b24d471ce814eb9b8f1c9e9bd5942"
+  "lsphp85-mysql_8.5.11-1+bookworm_amd64.deb": "b4ba4f225042d99e120289e2534b564cfb29715dfc356939e61dfdb6f45987cd"
+  "lsphp85-mysql_8.5.11-1+bookworm_arm64.deb": "24abe9e5025e58a85e6bac300e1f1fc850210f906571f89e36c8c66d8069ab0f"
+  "lsphp85-mysql_8.5.11-1+trixie_amd64.deb": "261fbadc18f21b751e35774e1b0463bbb51598e840b380c36f96c7029354e902"
+  "lsphp85-mysql_8.5.11-1+trixie_arm64.deb": "5cbfed14694e560fc291efe88588cdac4f4caeacfab4959ae757d616be5df985"
+  "lsphp85_8.5.11-1+bookworm_amd64.deb": "21736cb4758ec7a1662b5b4429aa75c5993f3cdb8d4b32a56e720a44c85a149d"
+  "lsphp85_8.5.11-1+bookworm_arm64.deb": "110ae62b742dafc6871468ce55cb24f71fb38ac8ac35f80227a3e2d1120904ea"
+  "lsphp85_8.5.11-1+trixie_amd64.deb": "8ac52d849d75606101d8af76ad8ae38ada6b51c5826bc9cb485871b5ee81f936"
+  "lsphp85_8.5.11-1+trixie_arm64.deb": "804f263e1f43a8885db69b7917e613d6826cd9e16fa72e953f60710d9a1b9b2a"
 
 # Shared libraries the pinned packages declare in `Depends:`. `dpkg-deb -x`
 # never resolves dependencies, and lsphp will not start without these (the

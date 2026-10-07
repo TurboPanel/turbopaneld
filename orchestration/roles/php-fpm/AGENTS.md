@@ -27,6 +27,15 @@ optional exact apt pin; empty means "latest in the series". Extension packages
 split into `php_fpm_baseline_extensions` (always installed, parity with the flags the previous
 source build compiled in.
 
+**Which series exist.** The registry's `suiteSeries` table lists the PHP series
+offered per OS suite (`VERSION_CODENAME`; Debian 13 `trixie`: 8.1 to 8.5), the
+same list for php-fpm and lsphp — it mirrors what LiteSpeed's repository
+publishes for that suite, and sury publishes every one of them for Debian
+(checked 2026-10-07 on trixie, bookworm, bullseye). Nothing is installed up
+front: a series lands on the first deploy that names it. An extension compiled
+into a series (`builtinExtensions`: opcache on 8.5) has no `php<series>-<name>`
+package, so `series.yml` leaves it out of the apt list.
+
 **Extensions resolve by union, per series.** The daemon passes
 `php_fpm_extensions` as `{"8.4": ["intl","redis"]}` — the union of what every
 site on that series opted into — and the role installs baseline ∪ requested.
