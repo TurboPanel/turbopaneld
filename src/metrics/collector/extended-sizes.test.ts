@@ -93,3 +93,17 @@ Deno.test("CommitLimit is read from meminfo in bytes", () => {
   );
   assertEquals(parseCommitLimitBytes("MemTotal: 100 kB\n"), null);
 });
+
+Deno.test("NIC link speeds ride beside the NIC ids; an unknown speed is left out", () => {
+  assertEquals(
+    buildExtendedSizes({
+      ...none,
+      networks: [
+        { deviceId: "mac:aa", speedMbps: 1000 },
+        { deviceId: "mac:bb", speedMbps: null },
+        { deviceId: "mac:cc" },
+      ],
+    }),
+    { networkSizes: [{ deviceId: "mac:aa", linkSpeedMbps: 1000 }] },
+  );
+});

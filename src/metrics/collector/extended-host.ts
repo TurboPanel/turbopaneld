@@ -70,6 +70,8 @@ export type HostExtendedInput = {
   pidMaxText: string | undefined;
   threadsMaxText: string | undefined;
   mdstatText: string | undefined;
+  /** IRQ pressure `full` this tick; `null` when `/proc/pressure/irq` is missing or on the first tick. */
+  irqPressureFullPercent?: number | null;
   /** Kernel OOM kills since the previous tick (`null` on the first tick or after a reboot). */
   oomKills: number | null;
   /** The block-device sample of the disk that holds `/`, when it is known. */
@@ -98,6 +100,7 @@ export function buildHostExtended(
       input.threadsMaxText,
     ),
   );
+  setKnown(out, "irqPressureFullPercent", input.irqPressureFullPercent);
   setKnown(out, "oomKills", input.oomKills);
   setKnown(out, "rootDiskQueueDepth", input.rootDisk?.queueDepth);
   setKnown(out, "rootDiskOpsPerSecond", rootDiskOpsPerSecond(input.rootDisk));

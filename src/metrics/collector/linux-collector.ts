@@ -29,6 +29,7 @@ import {
   type DockerUsageSample,
   type GpuSample,
   type HostMetrics,
+  MAX_METRIC_EVENTS_PER_SAMPLE,
   type MetricEvent,
   METRICS_LEGACY_WIRE_VERSION,
   type MetricsExtended,
@@ -129,6 +130,8 @@ const PROC_NET_SOFTNET_STAT = "/proc/net/softnet_stat";
 const PROC_PRESSURE_CPU = "/proc/pressure/cpu";
 const PROC_PRESSURE_MEMORY = "/proc/pressure/memory";
 const PROC_PRESSURE_IO = "/proc/pressure/io";
+/** Kernel 6.1+ with IRQ time accounting; only a `full` line. Missing elsewhere. */
+const PROC_PRESSURE_IRQ = "/proc/pressure/irq";
 const PROC_FILE_NR = "/proc/sys/fs/file-nr";
 const PROC_FILE_MAX = "/proc/sys/fs/file-max";
 const PROC_CONNTRACK_COUNT = "/proc/sys/net/netfilter/nf_conntrack_count";
@@ -157,6 +160,36 @@ function intervalSeconds(
   return elapsed;
 }
 
+/** Events held over for later samples, at most; beyond it the least severe are dropped. */
+export const MAX_CARRIED_EVENTS = MAX_METRIC_EVENTS_PER_SAMPLE * 4;
+
+const SEVERITY_RANK: Readonly<Record<MetricEvent["severity"], number>> = {
+  critical: 0,
+  warning: 1,
+  info: 2,
+};
+
+/**
+ * Split pending events into what this sample carries (at most the contract's
+ * per-sample cap, most severe first, then oldest) and what waits for the next
+ * sample (bounded, so a storm of events can never grow memory without limit).
+ */
+export function takeEventsForSample(
+  events: readonly MetricEvent[],
+): { sent: MetricEvent[]; carried: MetricEvent[] } {
+  const ordered = [...events].sort((a, b) =>
+    SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity] ||
+    Date.parse(a.at) - Date.parse(b.at)
+  );
+  return {
+    sent: ordered.slice(0, MAX_METRIC_EVENTS_PER_SAMPLE),
+    carried: ordered.slice(
+      MAX_METRIC_EVENTS_PER_SAMPLE,
+      MAX_METRIC_EVENTS_PER_SAMPLE + MAX_CARRIED_EVENTS,
+    ),
+  };
+}
+
 /** All raw `/proc` text this tick needs, read in one batch. */
 type RawTexts = {
   statText: string | undefined;
@@ -170,6 +203,7 @@ type RawTexts = {
   pressureCpuText: string | undefined;
   pressureMemoryText: string | undefined;
   pressureIoText: string | undefined;
+  pressureIrqText: string | undefined;
   fileNrText: string | undefined;
   fileMaxText: string | undefined;
   conntrackCountText: string | undefined;
@@ -194,6 +228,7 @@ async function readRawTexts(deps: CollectorDeps): Promise<RawTexts> {
     pressureCpuText,
     pressureMemoryText,
     pressureIoText,
+    pressureIrqText,
     fileNrText,
     fileMaxText,
     conntrackCountText,
@@ -215,6 +250,7 @@ async function readRawTexts(deps: CollectorDeps): Promise<RawTexts> {
     deps.readProcFile(PROC_PRESSURE_CPU),
     deps.readProcFile(PROC_PRESSURE_MEMORY),
     deps.readProcFile(PROC_PRESSURE_IO),
+    deps.readProcFile(PROC_PRESSURE_IRQ),
     deps.readProcFile(PROC_FILE_NR),
     deps.readProcFile(PROC_FILE_MAX),
     deps.readProcFile(PROC_CONNTRACK_COUNT),
@@ -237,6 +273,7 @@ async function readRawTexts(deps: CollectorDeps): Promise<RawTexts> {
     pressureCpuText,
     pressureMemoryText,
     pressureIoText,
+    pressureIrqText,
     fileNrText,
     fileMaxText,
     conntrackCountText,
@@ -400,6 +437,7 @@ type PsiPercents = {
   memoryFull: number | null;
   ioSome: number | null;
   ioFull: number | null;
+  irqFull: number | null;
 };
 
 function psiFromText(
@@ -434,6 +472,7 @@ function readPsiPercents(raw: RawTexts, rates: TickRates): PsiPercents {
     ),
     ioSome: psiFromText(raw.pressureIoText, "some", rates, "psi:io:some"),
     ioFull: psiFromText(raw.pressureIoText, "full", rates, "psi:io:full"),
+    irqFull: psiFromText(raw.pressureIrqText, "full", rates, "psi:irq:full"),
   };
 }
 
@@ -984,6 +1023,7 @@ export class LinuxMetricsCollector implements MetricsCollector {
       pidMaxText: raw.pidMaxText,
       threadsMaxText: raw.threadsMaxText,
       mdstatText: raw.mdstatText,
+      irqPressureFullPercent: psi.irqFull,
       oomKills: oomKillsThisTick(
         this.#tracker,
         memory.vmstat.oomKill,
@@ -1015,6 +1055,12 @@ export class LinuxMetricsCollector implements MetricsCollector {
         logicalCores: snapshot.cpu.cores.length,
         root: rootFilesystemCapacity,
         filesystems: filesystemSizeReadings,
+        networks: networks.map((sample) => ({
+          deviceId: sample.deviceId,
+          speedMbps: snapshot.networks.find((nic) =>
+            nic.deviceId === sample.deviceId
+          )?.speedMbps,
+        })),
         gpus: gpuResult.samples.map((sample) => ({
           gpuId: sample.gpuId,
           memoryTotalBytes: gpuResult.memoryTotals.get(sample.gpuId) ?? null,
@@ -1097,9 +1143,12 @@ export class LinuxMetricsCollector implements MetricsCollector {
     // The control plane rejects a whole sample holding an event older than 7
     // days, so a carried event that old (a detect stuck for days) is dropped.
     const oldest = ctx.nowMs - EVENT_MAX_AGE_MS;
-    return this.#carriedEvents.splice(0).filter((event) =>
+    const fresh = this.#carriedEvents.splice(0).filter((event) =>
       Date.parse(event.at) >= oldest
     );
+    const { sent, carried } = takeEventsForSample(fresh);
+    this.#carriedEvents.push(...carried);
+    return sent;
   }
 
   /** Free-text facts never break a sample: any failure just omits them. */

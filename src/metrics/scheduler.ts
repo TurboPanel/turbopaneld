@@ -160,6 +160,7 @@ function stripSizes(sample: unknown): void {
   delete extended.sizes;
   delete extended.filesystemSizes;
   delete extended.gpuSizes;
+  delete extended.networkSizes;
 }
 
 export class MetricsScheduler {

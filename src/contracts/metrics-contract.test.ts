@@ -278,8 +278,12 @@ test("buildMetricsSample keeps the v7 sizes, drops non-finite ones and caps the 
       totalInodes: null,
     }],
     gpuSizes: [{ gpuId: "gpu0", memoryTotalBytes: 17_179_869_184 }],
+    networkSizes: [{ deviceId: "mac:aa", linkSpeedMbps: 1000 }],
   };
   const { extended } = buildMetricsSample(input);
+  assertEquals(extended?.networkSizes, [
+    { deviceId: "mac:aa", linkSpeedMbps: 1000 },
+  ]);
   assertEquals(extended?.sizes, {
     memoryTotalBytes: 4_294_967_296,
     swapTotalBytes: null,
@@ -542,4 +546,21 @@ test({
     assertEquals(sibling.METRIC_EVENT_KINDS, own.METRIC_EVENT_KINDS);
     assertEquals(new Set(Object.keys(sibling)), new Set(Object.keys(own)));
   },
+});
+
+test("buildMetricsSample keeps IRQ pressure as a 0-100 percentage and refuses more than 16 events", () => {
+  const input = fixtureInput();
+  input.extended = { host: { irqPressureFullPercent: 140 } };
+  assertEquals(
+    buildMetricsSample(input).extended?.host?.irqPressureFullPercent,
+    100,
+  );
+  const flood = fixtureInput();
+  flood.events = Array.from({ length: 17 }, (_, i) => ({
+    eventId: `e${i}`,
+    at: flood.metadata.sampledAt,
+    kind: "oom_kill" as const,
+    severity: "warning" as const,
+  }));
+  assertThrows(() => buildMetricsSample(flood), TypeError, "events");
 });

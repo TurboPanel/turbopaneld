@@ -151,5 +151,6 @@ function pickArrays(part: MetricsExtended): MetricsExtended {
   if (part.gpuText) arrays.gpuText = part.gpuText;
   if (part.filesystemSizes) arrays.filesystemSizes = part.filesystemSizes;
   if (part.gpuSizes) arrays.gpuSizes = part.gpuSizes;
+  if (part.networkSizes) arrays.networkSizes = part.networkSizes;
   return arrays;
 }

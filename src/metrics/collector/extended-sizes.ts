@@ -8,6 +8,7 @@
 import type {
   ExtendedFilesystemSize,
   ExtendedGpuSize,
+  ExtendedNetworkSize,
   ExtendedSizes,
   MetricsExtended,
 } from "../../contracts/metrics-contract.ts";
@@ -27,6 +28,8 @@ export type SizesInput = {
     | undefined;
   filesystems: readonly FilesystemSizeReading[];
   gpus: readonly { gpuId: string; memoryTotalBytes: number | null }[];
+  /** NICs in this sample and their negotiated link speed (Mb/s), from topology. */
+  networks?: readonly { deviceId: string; speedMbps?: number | null }[];
 };
 
 function positive(value: number | null | undefined): number | undefined {
@@ -38,9 +41,14 @@ function positive(value: number | null | undefined): number | undefined {
 /** Most per-entity totals one sample carries (the contract's per-array cap). */
 const MAX_ENTITY_SIZES = 64;
 
+type ExtendedSizesSection = Pick<
+  MetricsExtended,
+  "sizes" | "filesystemSizes" | "gpuSizes" | "networkSizes"
+>;
+
 export function buildExtendedSizes(
   input: SizesInput,
-): Pick<MetricsExtended, "sizes" | "filesystemSizes" | "gpuSizes"> | undefined {
+): ExtendedSizesSection | undefined {
   const sizes: ExtendedSizes = {};
   const set = (key: keyof ExtendedSizes, value: number | null | undefined) => {
     const known = positive(value);
@@ -72,12 +80,22 @@ export function buildExtendedSizes(
     }
   }
 
-  const out: Pick<MetricsExtended, "sizes" | "filesystemSizes" | "gpuSizes"> =
-    {};
+  const networkSizes: ExtendedNetworkSize[] = [];
+  for (const nic of input.networks ?? []) {
+    const linkSpeedMbps = positive(nic.speedMbps);
+    if (linkSpeedMbps !== undefined) {
+      networkSizes.push({ deviceId: nic.deviceId, linkSpeedMbps });
+    }
+  }
+
+  const out: ExtendedSizesSection = {};
   if (Object.keys(sizes).length > 0) out.sizes = sizes;
   if (filesystemSizes.length > 0) {
     out.filesystemSizes = filesystemSizes.slice(0, MAX_ENTITY_SIZES);
   }
   if (gpuSizes.length > 0) out.gpuSizes = gpuSizes.slice(0, MAX_ENTITY_SIZES);
+  if (networkSizes.length > 0) {
+    out.networkSizes = networkSizes.slice(0, MAX_ENTITY_SIZES);
+  }
   return Object.keys(out).length > 0 ? out : undefined;
 }
