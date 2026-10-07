@@ -1,0 +1,136 @@
+# Builds the vendored Apache httpd ONCE per pinned version, for x86_64 and
+# arm64, and publishes it as the release `vendor-apache-<httpdver>` so hosts
+# download a tarball instead of compiling (the `apache` role,
+# orchestration/roles/apache). The build flags live in scripts/build-apache.sh;
+# the version pin is orchestration/roles/apache/defaults/main.yml.
+#
+# Runs on workflow_dispatch and when that pin changes on trunk. A release is
+# never overwritten (a rebuild would change the SHA-256 the role pins): if
+# `vendor-apache-<httpdver>` already exists the run only reports its digests.
+# After the first publish of a version, copy the digests from the run summary
+# into `apache_sha256` in the role defaults (the role refuses to install
+# until they are pinned).
+#
+# Native runners on an older glibc (22.04) so the binaries run on the oldest
+# supported host. The ubuntu-22.04-arm runner is GitHub-hosted and free for
+# public repositories.
+
+name: Vendor Apache
+
+on:
+  push:
+    branches:
+      - trunk
+    paths:
+      - orchestration/roles/apache/defaults/main.yml
+      - scripts/build-apache.sh
+      - .github/workflows/vendor-apache.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vendor-apache
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build ${{ matrix.arch }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-22.04
+          - arch: aarch64
+            runner: ubuntu-22.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential libexpat1-dev libpcre2-dev libssl-dev zlib1g-dev curl
+
+      - name: Build Apache
+        env:
+          # The production install root; baked into the tree's apxs/envvars.
+          APACHE_VENDOR_ROOT: /opt/turbopanel/vendor
+        run: sh scripts/build-apache.sh out
+
+      - name: Upload build
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: apache-${{ matrix.arch }}
+          path: out
+          if-no-files-found: error
+          retention-days: 3
+
+  publish:
+    name: Publish vendor-apache release
+    needs: build
+    # A dispatch from a branch may build (to try changes) but never publishes.
+    if: github.ref == 'refs/heads/trunk'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download builds
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: apache-*
+          path: out
+          merge-multiple: true
+
+      - name: Publish the release (never overwrites)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          VER="$(sed -n 's/^apache_version: "\(.*\)"$/\1/p' orchestration/roles/apache/defaults/main.yml | head -n 1)"
+          TAG="vendor-apache-${VER}"
+          # `gh release view` cannot see a draft, so look through the API.
+          # A published release is final: stop. Only then clear leftover drafts.
+          gh api "repos/${GITHUB_REPOSITORY}/releases" --paginate \
+            --jq ".[] | select(.tag_name == \"${TAG}\") | \"\(.id) \(.draft)\"" >releases.txt
+          if grep -q ' false$' releases.txt; then
+            echo "Release $TAG already exists; not overwriting (a rebuild has different digests)."
+            echo "Release $TAG already exists; nothing published. Pin the digests from its SHA256SUMS asset." >>"$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          # Drafts left by a run that died before publishing.
+          while read -r id _; do
+            gh api -X DELETE "repos/${GITHUB_REPOSITORY}/releases/${id}"
+          done <releases.txt
+          cat out/*.sha256 >out/SHA256SUMS
+          {
+            echo "### Pin these in orchestration/roles/apache/defaults/main.yml"
+            echo '```yaml'
+            echo "apache_sha256:"
+            echo "  \"${VER}\":"
+            for arch in x86_64 aarch64; do
+              echo "    ${arch}: \"$(cut -d' ' -f1 "out/apache-${VER}-${arch}.tar.gz.sha256")\""
+            done
+            echo '```'
+          } >>"$GITHUB_STEP_SUMMARY"
+          # Draft first, publish only once every asset is uploaded, so a failed
+          # upload cannot leave a published partial release that reruns skip.
+          gh release create "$TAG" out/*.tar.gz out/SHA256SUMS \
+            --draft \
+            --target "$GITHUB_SHA" \
+            --title "Vendored Apache httpd ${VER}" \
+            --notes "Prebuilt Apache httpd ${VER} for x86_64 and aarch64, built by the Vendor Apache workflow. The apache role downloads these and checks the SHA-256 pinned in its defaults." \
+            --latest=false
+          gh release edit "$TAG" --draft=false
