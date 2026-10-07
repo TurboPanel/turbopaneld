@@ -13,11 +13,18 @@ import {
   applyManagedEngineState,
   buildNeedsResyncMember,
   chooseManagedCompose,
+  composeUpManagedEngine,
+  type ComposeUpManagedEngineArgs,
   provisionManagedRootPasswordFile,
   writeManagedRootPasswordFile,
 } from "./apply.ts";
 import { normalizeManagedCompose } from "./compose.ts";
-import { managedRootPasswordPath } from "./engine-paths.ts";
+import {
+  managedDir,
+  managedEnvFilePath,
+  managedRootPasswordPath,
+} from "./engine-paths.ts";
+import { createNoopCommandOutputSink } from "../logs/contracts.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -797,13 +804,102 @@ test("provisionManagedRootPasswordFile writes the file and hands it over once, w
       engineGroup: "postgres",
       run,
     });
-    assertEquals(calls.length, 1);
-    assertEquals(calls[0]!.join(" ").includes("s3cret-pw"), false);
+    assertEquals(calls.length, 2);
+    assertEquals(calls.flat().join(" ").includes("s3cret-pw"), false);
     assertEquals(
       await Deno.readTextFile(
         managedRootPasswordPath(layout, payload.managedId),
       ),
       "s3cret-pw",
+    );
+  });
+});
+
+function composeUpFixture(
+  fixture: { env: Record<string, string> },
+  composeYaml: string,
+  run: (args: string[]) => Promise<
+    { success: boolean; code: number; stdout: string; stderr: string }
+  >,
+  streamed: string[][],
+) {
+  const layout = resolveLayout(fixture.env);
+  const payload = {
+    managedId: "00000000-0000-4000-8000-000000000001",
+    image: "postgres:18",
+  } as unknown as ManagedApplyPayload;
+  return {
+    layout,
+    payload,
+    args: {
+      layout,
+      payload,
+      composeYaml,
+      rootCredential: { password: "s3cret-pw" } as ManagedApplyCredential,
+      redact: (t: string) => t,
+      runDockerSetup: () => Promise.resolve(),
+      logSink: createNoopCommandOutputSink(),
+      runStreamed: (args: string[]) => {
+        streamed.push(args);
+        return Promise.resolve({
+          success: true,
+          code: 0,
+          stdout: "",
+          stderr: "",
+        });
+      },
+      run,
+      engineUser: "postgres",
+      engineGroup: "postgres",
+    } as unknown as ComposeUpManagedEngineArgs,
+  };
+}
+
+test("composeUpManagedEngine does not reach compose up when the secret hand-over fails", async () => {
+  await withTempLayout(async (fixture) => {
+    const streamed: string[][] = [];
+    const { layout, payload, args } = composeUpFixture(
+      fixture,
+      "services: {}\n# ./secrets/root-password:/run/secrets/tp_root_password:ro",
+      () =>
+        Promise.resolve({
+          success: false,
+          code: 1,
+          stdout: "",
+          stderr: "chown denied",
+        }),
+      streamed,
+    );
+    await Deno.mkdir(managedDir(layout, payload.managedId), {
+      recursive: true,
+    });
+    await assertRejects(
+      () => composeUpManagedEngine(args),
+      Error,
+      "failed to hand the engine root password file",
+    );
+    assertEquals(streamed.length, 0);
+  });
+});
+
+test("composeUpManagedEngine skips the env file and --env-file when the compose has no placeholder", async () => {
+  await withTempLayout(async (fixture) => {
+    const streamed: string[][] = [];
+    const { layout, payload, args } = composeUpFixture(
+      fixture,
+      "services: {}\n# no password here",
+      () => Promise.reject(new Error("helper must not run")),
+      streamed,
+    );
+    await Deno.mkdir(managedDir(layout, payload.managedId), {
+      recursive: true,
+    });
+    await composeUpManagedEngine(args);
+    assertEquals(streamed.length, 1);
+    assertEquals(streamed[0]!.includes("--env-file"), false);
+    await assertRejects(
+      () => Deno.stat(managedEnvFilePath(layout, payload.managedId)),
+      Deno.errors.NotFound,
     );
   });
 });

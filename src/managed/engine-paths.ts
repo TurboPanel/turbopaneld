@@ -139,7 +139,7 @@ export function managedEnvFilePath(
 }
 
 /**
- * Daemon-only (0700) directory holding the engine root password file the
+ * Daemon-owned (0750, group = engine group after hand-over) directory holding the engine root password file the
  * engine reads through `<KEY>_FILE`. Not under `config/` or `tls/`, so
  * ownership normalization never touches it.
  */

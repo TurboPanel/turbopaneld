@@ -290,25 +290,40 @@ export async function normalizeManagedSecretOwnership(
   containerGroup: string,
   run: RunDockerFn = defaultRunDocker,
 ): Promise<void> {
+  const secretsDir = join(managedRoot, "secrets");
+  // Mode first, then owner: after the chown the file is no longer the
+  // daemon's, and chmod on a file root does not own needs CAP_FOWNER anyway.
   const script = [
     "set -eu",
     `USER_NAME=${shellSingleQuote(containerUser)}`,
     `GROUP_NAME=${shellSingleQuote(containerGroup)}`,
-    'chown ":$GROUP_NAME" /managed/secrets',
     "chmod 0750 /managed/secrets",
-    'chown "$USER_NAME:$GROUP_NAME" /managed/secrets/root-password',
+    'chown ":$GROUP_NAME" /managed/secrets',
     "chmod 0400 /managed/secrets/root-password",
+    'chown "$USER_NAME:$GROUP_NAME" /managed/secrets/root-password',
   ].join("\n");
+  // Only the secrets directory is mounted, with no network and only the two
+  // capabilities chown/chmod on files root does not own require.
   const result = await run([
     "run",
     "--rm",
     ...helperLabelArgs("managed-files"),
+    "--network",
+    "none",
+    "--cap-drop",
+    "ALL",
+    "--cap-add",
+    "CHOWN",
+    "--cap-add",
+    "FOWNER",
+    "--security-opt",
+    "no-new-privileges",
     "--user",
     "0",
     "--entrypoint",
     "sh",
     "-v",
-    `${managedRoot}:/managed`,
+    `${secretsDir}:/managed/secrets`,
     image,
     "-c",
     script,
@@ -317,6 +332,36 @@ export async function normalizeManagedSecretOwnership(
     throw new Error(
       `failed to hand the engine root password file to the engine user: ${
         formatDockerFailure(result)
+      }`,
+    );
+  }
+
+  // Fail closed: the engine user must be able to read it, or the engine
+  // would crash-loop on first start with no hint.
+  const verified = await run([
+    "run",
+    "--rm",
+    ...helperLabelArgs("managed-files"),
+    "--network",
+    "none",
+    "--cap-drop",
+    "ALL",
+    "--security-opt",
+    "no-new-privileges",
+    "--user",
+    `${containerUser}:${containerGroup}`,
+    "--entrypoint",
+    "sh",
+    "-v",
+    `${secretsDir}:/verify/secrets:ro`,
+    image,
+    "-c",
+    'test -r /verify/secrets/root-password || { echo "engine user cannot read the root password file" >&2; exit 1; }',
+  ]);
+  if (!verified.success) {
+    throw new Error(
+      `engine root password file verification failed: ${
+        formatDockerFailure(verified)
       }`,
     );
   }

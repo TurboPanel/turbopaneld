@@ -401,7 +401,7 @@ async function composeUpWithDockerRetry(
   return await run(args);
 }
 
-type ComposeUpManagedEngineArgs = {
+export type ComposeUpManagedEngineArgs = {
   layout: LayoutPaths;
   payload: ManagedApplyPayload;
   composeYaml: string;
@@ -415,7 +415,7 @@ type ComposeUpManagedEngineArgs = {
   engineGroup: string;
 };
 
-async function composeUpManagedEngine({
+export async function composeUpManagedEngine({
   layout,
   payload,
   composeYaml,
