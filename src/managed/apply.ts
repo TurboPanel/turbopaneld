@@ -325,13 +325,13 @@ export async function writeManagedRootPasswordFile(
   await Deno.chmod(dir, 0o700);
   try {
     if ((await Deno.readTextFile(path)) === password) {
-      await Deno.chmod(path, 0o444);
+      await Deno.chmod(path, 0o444); // NOSONAR typescript:S2612 — engine uid varies per image; the 0700 parent directory is the guard
       return;
     }
   } catch (err) {
     if (!(err instanceof Deno.errors.NotFound)) throw err;
   }
-  await rewriteDaemonOwnedFile(path, password, 0o444);
+  await rewriteDaemonOwnedFile(path, password, 0o444); // NOSONAR typescript:S2612 — see above
 }
 
 /**
