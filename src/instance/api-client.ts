@@ -1,5 +1,7 @@
 import { encodeBase64 } from "@std/encoding/base64";
 import { rememberSecretPlaintexts } from "../logs/redactor.ts";
+import { logWarn } from "../util/logger.ts";
+import { retryTransient, type RetryView } from "../util/retry-fetch.ts";
 import { type InstanceConfig, instanceUrl } from "./sockets.ts";
 import { INSTANCE_VERSION_HEADER } from "./version-wire.ts";
 
@@ -12,7 +14,25 @@ export interface DaemonApiClientOptions {
    * `x-turbopanel-version`, or `null` when that header is absent.
    */
   onInstanceVersion?: (version: string | null) => void;
+  /** Wait between rate-limit retries; tests inject a no-op. Defaults to a timer. */
+  sleep?: (ms: number) => Promise<void>;
 }
+
+/**
+ * The control plane limits each daemon's REST calls to about 30 per minute per
+ * route and answers HTTP 429. Six tries with 2, 4, 8, 16 and 32 s waits span
+ * about 62 s, one full limiter window, so a managed command that needs several
+ * calls is delayed instead of dropped. A `Retry-After` header can only lengthen
+ * a wait, and never past {@link RATE_LIMIT_MAX_RETRY_AFTER_MS}.
+ */
+export const RATE_LIMIT_ATTEMPTS = 6;
+const RATE_LIMIT_MAX_RETRY_AFTER_MS = 30_000;
+
+const RESPONSE_VIEW: RetryView<Response> = {
+  status: (res) => res.status,
+  retryAfter: (res) => res.headers.get("retry-after"),
+  discard: (res) => res.body?.cancel(),
+};
 
 export class DaemonApiError extends Error {
   readonly status: number;
@@ -151,6 +171,12 @@ function parseHostDockerNetworkingBody(body: unknown): HostDockerNetworking {
     out.defaultBridgeCidr = record.defaultBridgeCidr;
   }
   return out;
+}
+
+function rateLimitedMessage(path: string): string {
+  return `rate_limited: the control plane rate limit was still in effect after ${RATE_LIMIT_ATTEMPTS} tries over about a minute (${
+    path.split("?")[0]
+  })`;
 }
 
 export class DaemonApiClient {
@@ -429,6 +455,53 @@ export class DaemonApiClient {
     init: RequestInit,
     options: { auth?: boolean } = {},
   ): Promise<Response> {
+    // Only authenticated routes are rate limited per server. The enroll /
+    // challenge / session calls keep their single try: the connect loop already
+    // backs a 429 off (`classifyConnectFailure` treats it as transient).
+    const response = options.auth
+      ? await retryTransient(
+        () => this.#attempt(path, init, options),
+        RESPONSE_VIEW,
+        this.#rateLimitRetryOptions(path),
+      )
+      : await this.#attempt(path, init, options);
+
+    if (!response.ok) {
+      if (options.auth && response.status === 429) {
+        await response.body?.cancel();
+        throw new DaemonApiError(429, rateLimitedMessage(path));
+      }
+      throw await this.#toApiError(response);
+    }
+    return response;
+  }
+
+  #rateLimitRetryOptions(path: string) {
+    const route = path.split("?")[0];
+    return {
+      attempts: RATE_LIMIT_ATTEMPTS,
+      maxRetryAfterMs: RATE_LIMIT_MAX_RETRY_AFTER_MS,
+      retryAfterOnlyExtends: true,
+      statuses: new Set([429]),
+      networkErrors: false,
+      sleep: this.#options.sleep,
+      onRetry: (notice: { retry: number; delayMs: number }) => {
+        logWarn(
+          "instance",
+          `control plane rate limited ${route} (try ${notice.retry} of ${RATE_LIMIT_ATTEMPTS}); retrying in ${
+            Math.round(notice.delayMs / 1000)
+          }s`,
+        );
+      },
+    };
+  }
+
+  /** One request, plus the single token-refresh retry on a 401. */
+  async #attempt(
+    path: string,
+    init: RequestInit,
+    options: { auth?: boolean },
+  ): Promise<Response> {
     const headers = new Headers(init.headers);
     headers.set("content-type", "application/json");
     if (options.auth) {
@@ -439,6 +512,7 @@ export class DaemonApiClient {
     let response = await this.#fetch(path, { ...init, headers });
     this.#captureInstanceVersion(response);
     if (options.auth && response.status === 401) {
+      await response.body?.cancel();
       const refreshedToken = await this.#options.getToken({
         forceRefresh: true,
       });
@@ -447,10 +521,6 @@ export class DaemonApiClient {
       retryHeaders.set("authorization", `Bearer ${refreshedToken}`);
       response = await this.#fetch(path, { ...init, headers: retryHeaders });
       this.#captureInstanceVersion(response);
-    }
-
-    if (!response.ok) {
-      throw await this.#toApiError(response);
     }
     return response;
   }

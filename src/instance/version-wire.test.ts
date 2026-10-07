@@ -4,10 +4,12 @@ import {
   compareSemver,
   DAEMON_FEATURE_MIN_VERSIONS,
   DAEMON_WIRE_FEATURES,
+  DENO_NATIVE_APPS_FEATURE,
   DEPLOY_CANCEL_FEATURE,
   instanceUnsupportedReason,
   MANAGED_HA_INSTANCE_FEATURE,
   MANAGED_HEALTH_FEATURE,
+  MANAGED_HEALTH_REPORT_FEATURE,
   MIN_SUPPORTED_INSTANCE_VERSION,
   parseSemver,
   PHP_SITE_MODES_FEATURE,
@@ -106,6 +108,16 @@ test("capability gates: above and equal open, below and unknown stay closed", ()
   );
 });
 
+test("managed-health-report-v1 is an advertised wire feature and raised no floor", () => {
+  assertEquals(MANAGED_HEALTH_REPORT_FEATURE, "managed-health-report-v1");
+  assertEquals(
+    (DAEMON_WIRE_FEATURES as readonly string[]).includes(
+      MANAGED_HEALTH_REPORT_FEATURE,
+    ),
+    true,
+  );
+});
+
 test("managed-health-v1 is advertised on the wire and raised no floor", () => {
   assertEquals(MANAGED_HEALTH_FEATURE, "managed-health-v1");
   assertEquals(
@@ -166,6 +178,17 @@ test("site-db-bindings-v1 is advertised on the wire and raised no floor", () => 
   assertEquals(
     (DAEMON_WIRE_FEATURES as readonly string[]).includes(
       SITE_DB_BINDINGS_FEATURE,
+    ),
+    true,
+  );
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+});
+
+test("deno-native-apps-v1 is advertised on the wire and raised no floor", () => {
+  assertEquals(DENO_NATIVE_APPS_FEATURE, "deno-native-apps-v1");
+  assertEquals(
+    (DAEMON_WIRE_FEATURES as readonly string[]).includes(
+      DENO_NATIVE_APPS_FEATURE,
     ),
     true,
   );

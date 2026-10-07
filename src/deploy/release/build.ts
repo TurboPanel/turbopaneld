@@ -40,6 +40,15 @@ import {
   copyContainedTree,
   inspectContainedDir,
 } from "./safe-copy.ts";
+import {
+  type DenoConfig,
+  type DenoProjectFiles,
+  deriveDenoBuildCommand,
+  deriveDenoCacheCommand,
+  deriveDenoInstallCommand,
+  detectDenoStart,
+  readDenoConfig,
+} from "./deno-build.ts";
 import { forEachSequential } from "../../util/sequential.ts";
 import { throwIfAborted, withCancelSignal } from "../deploy-cancel.ts";
 import { definedFields } from "../../util/optional-fields.ts";
@@ -115,7 +124,16 @@ const defaultSummaryRedactor: CommandSummaryRedactor = (text) =>
  * lets `NODE_ENV` follow the operator's application mode.
  */
 export type NativeBuildRuntime = {
-  /** `dirname(nativeAppNodeBinary(layout, series))` — prefixed onto `PATH`. */
+  /**
+   * `node` (the default) or `deno`. A Deno build puts Deno on `PATH`, gets a
+   * `DENO_DIR` and derives `deno install` / `deno task build` instead of the
+   * Node package-manager commands.
+   */
+  runtime?: "node" | "deno";
+  /**
+   * `dirname(nativeAppNodeBinary(layout, series))` — prefixed onto `PATH`. For
+   * a Deno build, the vendored Deno's `bin` directory instead.
+   */
   nodeBinDir: string;
   /** Operator's application mode; `production` when undeclared. */
   nodeEnv: "production" | "development";
@@ -198,7 +216,9 @@ export function buildEnvironment(
     // Signals to the usual toolchains that this is a production build.
     NODE_ENV: nativeRuntime?.nodeEnv ?? "production",
   };
-  if (nativeRuntime) {
+  if (nativeRuntime?.runtime === "deno") {
+    Object.assign(env, denoBuildEnvironment(join(workingDir, ".deno")));
+  } else if (nativeRuntime) {
     // Corepack caches per checkout, never in the daemon's own home, and must
     // not stop a build to ask whether downloading yarn/pnpm is okay.
     env.COREPACK_HOME = join(workingDir, ".corepack");
@@ -209,6 +229,18 @@ export function buildEnvironment(
     Object.entries(tenantBuildEnv(build)).filter(([key]) => isSpecEnvName(key)),
   );
   return { ...env, ...tenant };
+}
+
+/**
+ * Deno's build environment: its cache in `denoDir` (never the daemon's home),
+ * no update check, and no permission prompt (there is no terminal to answer).
+ */
+function denoBuildEnvironment(denoDir: string): Record<string, string> {
+  return {
+    DENO_DIR: denoDir,
+    DENO_NO_UPDATE_CHECK: "1",
+    DENO_NO_PROMPT: "1",
+  };
 }
 
 /** The tenant's own `build.env`, minus the keys that are the sandbox. */
@@ -243,8 +275,12 @@ export function sandboxBuildEnvironment(
   };
   if (nativeRuntime) {
     env.PATH = `${nativeRuntime.nodeBinDir}:${NATIVE_BUILD_PATH_TAIL}`;
-    env.COREPACK_HOME = join(work.cacheDir, "corepack");
-    env.COREPACK_ENABLE_DOWNLOAD_PROMPT = "0";
+    if (nativeRuntime.runtime === "deno") {
+      Object.assign(env, denoBuildEnvironment(join(work.cacheDir, "deno")));
+    } else {
+      env.COREPACK_HOME = join(work.cacheDir, "corepack");
+      env.COREPACK_ENABLE_DOWNLOAD_PROMPT = "0";
+    }
   }
   for (const [key, value] of Object.entries(tenantBuildEnv(build))) {
     if (isSpecEnvName(key)) {
@@ -603,6 +639,20 @@ async function resolveInstallCommand(
 ): Promise<string | undefined> {
   const explicit = params.build.installCommand;
   if (explicit !== undefined || !params.nativeRuntime) return explicit;
+  if (params.nativeRuntime.runtime === "deno") {
+    const files = preBuildDenoFiles(params.workingDir);
+    const derived = await deriveDenoInstallCommand(
+      files,
+      await readDenoConfig(files),
+    );
+    if (derived !== undefined) {
+      params.onOutput?.(
+        "stdout",
+        "derived install command from the Deno project files (lockfile, package.json or nodeModulesDir)",
+      );
+    }
+    return derived;
+  }
   const derived = await deriveNodeInstallCommand({
     packageManager: params.build.packageManager,
     workingDir: params.workingDir,
@@ -619,13 +669,27 @@ async function resolveInstallCommand(
 /**
  * The build command: the author's (with bare `pnpm` / `yarn` put through
  * Corepack on the native lane), else (native app only) the package's `build`
- * script ({@link deriveNodeBuildCommand}).
+ * script ({@link deriveNodeBuildCommand}), or for a Deno app the config's
+ * `build` task.
  */
 async function resolveBuildCommand(
   params: ReleaseBuildParams,
 ): Promise<string | undefined> {
   const explicit = params.build.buildCommand;
   if (!params.nativeRuntime) return explicit;
+  if (params.nativeRuntime.runtime === "deno") {
+    if (explicit !== undefined) return explicit;
+    const derived = deriveDenoBuildCommand(
+      await readDenoConfig(preBuildDenoFiles(params.workingDir)),
+    );
+    if (derived !== undefined) {
+      params.onOutput?.(
+        "stdout",
+        "derived build command from deno.json (it has a build task)",
+      );
+    }
+    return derived;
+  }
   if (explicit === undefined) {
     const derived = await deriveNodeBuildCommand({
       packageManager: params.build.packageManager,
@@ -653,6 +717,57 @@ async function resolveBuildCommand(
 }
 
 /**
+ * A Deno app whose author typed no install or build command also fetches its
+ * entry's imports at build time, with the build's network, and so writes
+ * `deno.lock` into the tree: `deno cache <entry>`. Without a lockfile `deno run`
+ * dies on a read-only release trying to write one.
+ */
+async function deriveDenoCacheStep(
+  params: ReleaseBuildParams,
+): Promise<string | undefined> {
+  const files = preBuildDenoFiles(params.workingDir);
+  const cache = await deriveDenoCacheCommand(
+    files,
+    await readDenoConfig(files),
+  );
+  if (cache !== undefined) {
+    params.onOutput?.(
+      "stdout",
+      "caching the app's imports and writing deno.lock (the release is read-only at run time)",
+    );
+  }
+  return cache;
+}
+
+/** The tree before the build runs: the checkout, read as plain files. */
+function preBuildDenoFiles(workingDir: string): DenoProjectFiles {
+  return denoProjectFiles(
+    workingDir,
+    (path) => regularFileExists(join(workingDir, path)),
+  );
+}
+
+/** Regular files only (a link named `deno.json` is not read). */
+function denoProjectFiles(
+  rootDir: string,
+  entryExists: (path: string) => Promise<boolean>,
+): DenoProjectFiles {
+  return {
+    async read(name) {
+      const path = join(rootDir, name);
+      if (!(await regularFileExists(path))) return undefined;
+      try {
+        return await Deno.readTextFile(path);
+      } catch {
+        return undefined;
+      }
+    },
+    exists: (name) => regularFileExists(join(rootDir, name)),
+    entryExists,
+  };
+}
+
+/**
  * Run `installCommand` then `buildCommand`. A missing command is a no-op — a
  * source with neither is a valid "ship the repository as-is" release — except
  * for a native-app build, where both are derived by the usual Node convention: the install from the package manager / lockfile, the build from the
@@ -664,9 +779,17 @@ export async function runReleaseBuild(
 ): Promise<void> {
   const installCommand = await resolveInstallCommand(params);
   const buildCommand = await resolveBuildCommand(params);
+  // After a derived install / build too: the lock they leave may not cover
+  // the entry's own imports, and the release is read-only at run time.
+  const cacheCommand = params.nativeRuntime?.runtime === "deno" &&
+      params.build.installCommand === undefined &&
+      params.build.buildCommand === undefined
+    ? await deriveDenoCacheStep(params)
+    : undefined;
   const commands = [
     installCommand,
     buildCommand,
+    cacheCommand,
   ].filter((command): command is string => Boolean(command));
   if (commands.length === 0) {
     params.onOutput?.(
@@ -822,6 +945,11 @@ async function hasNextStaticExport(
 export type NativeAppBuildContext = {
   /** Declared runtime family; `auto` lets the built tree decide. */
   framework: EnvironmentDeployNativeAppService["framework"];
+  /**
+   * `deno` looks for a Deno start (the config's `start` task, then an entry
+   * file) and never treats the tree as a Next.js build. Omitted means Node.
+   */
+  runtime?: "node" | "deno";
   /** Working directory the build ran in (checkout root + `subdirectory`). */
   workingDir: string;
   /**
@@ -897,7 +1025,7 @@ export async function prepareNativeAppBuildOutput(
       staticExport: false,
     });
   }
-  if (context.framework !== "node") {
+  if (context.framework !== "node" && context.runtime !== "deno") {
     const next = await prepareNextOutput(context, tree);
     if (next) return next;
   }
@@ -1004,6 +1132,9 @@ async function withDetectedStart(
     releaseRoot,
     rootDir: join(context.workingDir, releaseRoot),
   };
+  if (context.runtime === "deno") {
+    return await withDetectedDenoStart(context, root, rootExists, base);
+  }
   const pkg = rootExists ? await readPackageJson(root.rootDir) : undefined;
   if (rootExists) await assertNotPlugAndPlay(root);
   const start = rootExists
@@ -1020,6 +1151,52 @@ async function withDetectedStart(
   reportStart(context, start);
   if (start.kind === "start-script" && pkg) reportStartScript(context, pkg);
   return { ...base, start };
+}
+
+/**
+ * The start of a Deno release ({@link detectDenoStart}). Nothing found fails
+ * the build, before promote, saying how to give the app a start.
+ */
+async function withDetectedDenoStart(
+  context: NativeAppBuildContext,
+  root: StartRoot,
+  rootExists: boolean,
+  base: NativeAppBuildOutput,
+): Promise<NativeAppBuildOutput> {
+  const files = denoProjectFiles(
+    root.rootDir,
+    (path) => entryFileExists(root, path),
+  );
+  const config = rootExists ? await readDenoConfig(files) : undefined;
+  const start = rootExists ? await detectDenoStart(files, config) : undefined;
+  if (!start) {
+    throw new Error(
+      "no start command: the release has no start task in deno.json, no main " +
+        "or exports entry that exists, and none of main.ts, mod.ts, server.ts, " +
+        "main.js or index.ts at its root. Add a start task to deno.json, or " +
+        "set a start command for this service.",
+    );
+  }
+  reportStart(context, start);
+  reportDenoStart(context, config);
+  return { ...base, start };
+}
+
+/** Build-log notes a Deno start needs: where it must listen, and a missing config. */
+function reportDenoStart(
+  context: NativeAppBuildContext,
+  config: DenoConfig | undefined,
+) {
+  if (config === undefined) {
+    context.onOutput?.(
+      "stdout",
+      "note: no deno.json or deno.jsonc found, so the app runs without a project config",
+    );
+  }
+  context.onOutput?.(
+    "stdout",
+    "the app must listen on 127.0.0.1 and $PORT (the unit sets HOST, HOSTNAME and PORT): pass Deno.serve the hostname from HOSTNAME and the port from PORT, because Deno.serve alone listens on every address on port 8000",
+  );
 }
 
 /**

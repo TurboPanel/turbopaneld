@@ -75,3 +75,8 @@ export {
   writeFixtureLeafCertificate,
   writeFixtureLeafPair,
 } from "./openssl-fixture-leaf.ts";
+
+export {
+  createFakeProxySqlAdmin,
+  type FakeProxySqlAdmin,
+} from "./fake-proxysql-admin.ts";
