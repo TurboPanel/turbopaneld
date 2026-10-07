@@ -457,9 +457,12 @@ export type DaemonMessage =
     /**
      * Who decided the primary is dead. Absent = the Orchestrator poller
      * (`ha-observe.ts`); `postgres-probe` = `pg-dead-primary-observe.ts`,
-     * sent only to a control plane advertising `managed-ha-probe-v1`.
+     * sent only to a control plane advertising `managed-ha-probe-v1`;
+     * `boot-hold` = a primary held after an unclean host restart
+     * (`instance/boot-hold-reporter.ts`, feature `managed-ha-boot-hold-v1`),
+     * never a failover request.
      */
-    detector?: "orchestrator" | "postgres-probe";
+    detector?: "orchestrator" | "postgres-probe" | "boot-hold";
     /**
      * Orchestrator's key for the dead instance (`ha-observe.ts` only; feature
      * `managed-ha-instance-v1`). Both or neither. The control plane fences
