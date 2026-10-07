@@ -331,6 +331,16 @@ export const SITE_OPENLITESPEED_APPLY_PLAYBOOK = join(
   "site-openlitespeed-apply.yml",
 );
 /**
+ * Removes PHP series no site uses any more: sury php-fpm packages, the vendored
+ * lsphp tree, and the series' config/log/runtime directories. The daemon passes
+ * `php_series_prune`; the role refuses a series with a site pool or runtime.
+ */
+export const PHP_SERIES_PRUNE_PLAYBOOK = join(
+  ORCHESTRATION_DIR,
+  "playbooks",
+  "php-series-prune.yml",
+);
+/**
  * Vendors the **tenant** Node release for native `serviceKind: node` apps.
  * Deliberately separate from the `node-runtime` role that vendors the
  * instance's own Node: bumping the runtime tenants execute must not perturb the

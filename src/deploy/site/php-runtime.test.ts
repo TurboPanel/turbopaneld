@@ -28,7 +28,9 @@ import {
 import {
   holdSitePhpRuntime,
   installSitePhpRuntime,
+  listSitePhpUnits,
   orphanSitePhpRuntimes,
+  readSitePhpUnits,
   reconcileSitePhpRuntimes,
   type SitePhpRuntimeFiles,
   type SitePhpRuntimeIo,
@@ -757,4 +759,24 @@ Deno.test("php-fpm pool locks memory_limit as php_admin_value", () => {
   const admin = sitePhpLockedValues([{ key: "memory_limit", value: "64M" }]);
   const conf = sitePhpFpmConf({ ...SPEC, mode: "fpm" }, { pool: [], admin });
   assertStringIncludes(conf, "php_admin_value[memory_limit] = 64M");
+});
+
+test("a unit listing that fails reads as doubt, not as no per-site runtimes", async () => {
+  const io = (success: boolean): SitePhpRuntimeIo => ({
+    unitDir: "/units",
+    run: () =>
+      Promise.resolve({
+        success,
+        stdout: success
+          ? "turbopanel-php-shop-0a1b2c3d4e5f-fcgi84.service"
+          : "",
+        stderr: success ? "" : "ls: permission denied",
+      }),
+  });
+  assertEquals(await readSitePhpUnits(io(false)), null);
+  assertEquals((await listSitePhpUnits(io(false))).size, 0);
+  assertEquals(
+    [...(await readSitePhpUnits(io(true)))?.keys() ?? []],
+    ["shop-0a1b2c3d4e5f-fcgi84"],
+  );
 });
