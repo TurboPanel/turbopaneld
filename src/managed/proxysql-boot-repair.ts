@@ -4,16 +4,20 @@
  * After a hard reboot dockerd restarts the frontend (`restart: unless-stopped`)
  * before the host's datacenter address is on its interface. Docker then fails
  * the host publish ("cannot assign requested address"), does not retry, and
- * leaves the container stopped with no port bindings. Nothing else brings it
- * back until the control plane next sends `managed.ingress.reconcile`.
+ * leaves the container without its port bindings (not running, or running with
+ * none). Nothing else brings it back until the control plane next sends
+ * `managed.ingress.reconcile`.
  *
- * On every daemon start this waits (bounded) for each address the on-disk
- * compose file publishes on, then runs `compose up -d` on that same file. It
- * rewrites nothing, so it never widens or changes exposure. It is a no-op when
- * there is no compose file or the container is already running.
+ * On every daemon start this checks, for up to 10 minutes (backoff capped at
+ * 15 s), that the container is running and docker shows a host binding for
+ * every client mapping the on-disk compose file publishes. If not, it waits
+ * for each specific bind address to exist locally, then runs
+ * `compose up -d --force-recreate` on that same file. It rewrites nothing, so
+ * it never widens or changes exposure. Wildcard binds never wait. It is a
+ * no-op when there is no compose file or the bindings are in place.
  */
 
-import { readPublishedBindAddressesFromCompose } from "./proxysql.ts";
+import { readPublishedClientMappingsFromCompose } from "./proxysql.ts";
 import { proxysqlComposePath } from "./engine-paths.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 import type { DockerCliResult } from "../deploy/docker-cli.ts";
@@ -38,14 +42,14 @@ export type ProxySqlBootRepairDeps = {
   localAddresses?: () => string[];
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
-  /** Total time to wait for addresses and Docker, default 5 minutes. */
+  /** Total time to wait for addresses and Docker, default 10 minutes. */
   budgetMs?: number;
   /** Log sinks; default to the daemon logger. */
   info?: (message: string) => void;
   warn?: (message: string) => void;
 };
 
-const DEFAULT_BUDGET_MS = 5 * 60_000;
+const DEFAULT_BUDGET_MS = 10 * 60_000;
 const FIRST_DELAY_MS = 2_000;
 const MAX_DELAY_MS = 15_000;
 const ANY_ADDRESSES = new Set(["0.0.0.0", "::", "[::]"]);
@@ -67,11 +71,42 @@ function normaliseAddress(address: string): string {
   return zone === -1 ? out : out.slice(0, zone);
 }
 
-function wantedAddresses(composeText: string): string[] {
-  return readPublishedBindAddressesFromCompose(composeText)
-    .map(normaliseAddress)
-    .filter((address) => !ANY_ADDRESSES.has(address))
-    .sort((a, b) => a.localeCompare(b));
+type Mapping = { host: string; port: number };
+
+function wantedMappings(composeText: string): Mapping[] {
+  return readPublishedClientMappingsFromCompose(composeText)
+    .map((m) => ({ host: normaliseAddress(m.host), port: m.port }))
+    .sort((a, b) => `${a.host}:${a.port}`.localeCompare(`${b.host}:${b.port}`));
+}
+
+function mappingKey(mappings: Mapping[]): string {
+  return mappings.map((m) => `${m.host}:${m.port}`).join(",");
+}
+
+function specificAddresses(mappings: Mapping[]): string[] {
+  const out = new Set<string>();
+  for (const m of mappings) if (!ANY_ADDRESSES.has(m.host)) out.add(m.host);
+  return [...out];
+}
+
+/** True when every wanted mapping appears in one `NetworkSettings.Ports`. */
+function hasBindings(portsJson: string, mappings: Mapping[]): boolean {
+  let ports: Record<
+    string,
+    Array<{ HostIp?: string; HostPort?: string }> | null
+  >;
+  try {
+    ports = JSON.parse(portsJson) ?? {};
+  } catch {
+    return false;
+  }
+  return mappings.every((m) => {
+    const bound = ports[`${m.port}/tcp`] ?? [];
+    return bound.some((b) =>
+      b.HostPort === String(m.port) &&
+      (ANY_ADDRESSES.has(m.host) || normaliseAddress(b.HostIp ?? "") === m.host)
+    );
+  });
 }
 
 function readLocalAddresses(): string[] {
@@ -98,7 +133,7 @@ class Repair {
   private readonly readCompose: (path: string) => Promise<string | null>;
   private readonly info: (message: string) => void;
   private readonly warn: (message: string) => void;
-  private wanted: string[] = [];
+  private wanted: Mapping[] = [];
 
   constructor(
     layout: LayoutPaths,
@@ -111,22 +146,49 @@ class Repair {
     this.warn = deps.warn ?? ((m) => logWarn("managed", m));
   }
 
-  private isRunning(): Promise<DockerCliResult> {
-    return this.docker([
+  /**
+   * Healthy means the frontend container is running AND docker shows a host
+   * binding for every published client mapping. A failed publish bind can
+   * leave the container up (or restarting) with no bindings at all.
+   */
+  private async isHealthy(): Promise<
+    { ok: true; healthy: boolean } | { ok: false; reason: string }
+  > {
+    const ps = await this.docker([
       "compose",
       "-f",
       this.composePath,
       "ps",
-      "--status",
-      "running",
+      "-a",
       "-q",
     ]);
+    if (!ps.success) {
+      return { ok: false, reason: ps.stderr.trim() || "docker not ready" };
+    }
+    const ids = ps.stdout.split("\n").map((l) => l.trim()).filter(Boolean);
+    if (ids.length === 0) return { ok: true, healthy: false };
+    const inspect = await this.docker([
+      "inspect",
+      "--format",
+      "{{.State.Running}}|{{json .NetworkSettings.Ports}}",
+      ...ids,
+    ]);
+    if (!inspect.success) {
+      return { ok: false, reason: inspect.stderr.trim() || "inspect failed" };
+    }
+    const lines = inspect.stdout.split("\n").filter((l) => l.trim());
+    const healthy = lines.length > 0 && lines.every((line) => {
+      const cut = line.indexOf("|");
+      return line.slice(0, cut) === "true" &&
+        hasBindings(line.slice(cut + 1), this.wanted);
+    });
+    return { ok: true, healthy };
   }
 
   async run(): Promise<ProxySqlBootRepairResult> {
     const first = await this.readCompose(this.composePath);
     if (first === null) return "no-compose";
-    this.wanted = wantedAddresses(first);
+    this.wanted = wantedMappings(first);
 
     const budget = this.deps.budgetMs ?? DEFAULT_BUDGET_MS;
     const deadline = (this.deps.now ?? Date.now)() + budget;
@@ -156,15 +218,15 @@ class Repair {
 
   private async attempt(): Promise<Attempt> {
     if (proxySqlReconciledSinceStart()) return this.standDown();
-    const ps = await this.isRunning();
-    if (!ps.success) {
-      return { kind: "retry", reason: ps.stderr.trim() || "docker not ready" };
-    }
-    if (ps.stdout.trim().length > 0) return RUNNING;
+    const health = await this.isHealthy();
+    if (!health.ok) return { kind: "retry", reason: health.reason };
+    if (health.healthy) return RUNNING;
     const present = new Set(
       (this.deps.localAddresses ?? readLocalAddresses)().map(normaliseAddress),
     );
-    const missing = this.wanted.filter((address) => !present.has(address));
+    const missing = specificAddresses(this.wanted).filter((address) =>
+      !present.has(address)
+    );
     if (missing.length > 0) {
       return {
         kind: "retry",
@@ -189,22 +251,27 @@ class Repair {
     if (proxySqlReconciledSinceStart()) return this.standDown();
     const current = await this.readCompose(this.composePath);
     if (current === null) return this.abort("compose file removed");
-    if (wantedAddresses(current).join(",") !== this.wanted.join(",")) {
+    if (mappingKey(wantedMappings(current)) !== mappingKey(this.wanted)) {
       return this.abort("published addresses changed");
     }
-    const again = await this.isRunning();
-    if (again.success && again.stdout.trim().length > 0) return RUNNING;
+    const again = await this.isHealthy();
+    if (again.ok && again.healthy) return RUNNING;
+    // Recreate: a container that failed its publish bind keeps no bindings
+    // across a plain `up -d`.
     const up = await this.docker([
       "compose",
       "-f",
       this.composePath,
       "up",
       "-d",
+      "--force-recreate",
     ]);
     if (!up.success) {
       return { kind: "retry", reason: up.stderr.trim() || "compose up failed" };
     }
-    this.info("ProxySQL frontend was not running after boot; started it");
+    this.info(
+      "ProxySQL frontend had no running listener bindings after boot; recreated it",
+    );
     return { kind: "done", result: "started" };
   }
 }
