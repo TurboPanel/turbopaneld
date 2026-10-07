@@ -1647,6 +1647,17 @@ test("removeSites drops nginx pools and reloads php-fpm", async () => {
 /** The host reports PHP 8.4 installed (the real `/usr/sbin` is never probed). */
 const hostWithPhp84 = () => ({ php: { series: ["8.4"] } });
 
+/**
+ * An empty systemd unit folder inside the test layout, so the per-site PHP
+ * unit listing never depends on the machine's own `/etc/systemd/system` (a
+ * listing that fails keeps every series).
+ */
+async function emptyUnitDir(layout: LayoutPaths): Promise<string> {
+  const dir = join(layout.stateDir, "test-systemd-units");
+  await Deno.mkdir(dir, { recursive: true });
+  return dir;
+}
+
 /** `php_series_prune` lists the playbook runs asked for, in order. */
 function pruneRequests(
   captured: ReturnType<typeof capturePlaybooks>,
@@ -1666,6 +1677,7 @@ test("removeSites removes PHP 8.4 once the last site using it goes", async () =>
       run,
       runPlaybook: applied.runPlaybook,
       hostRuntimes: hostWithPhp84,
+      systemdUnitDir: await emptyUnitDir(layout),
     });
     // Applying a site that uses the series asks for no removal.
     assertEquals(pruneRequests(applied), []);
@@ -1675,6 +1687,7 @@ test("removeSites removes PHP 8.4 once the last site using it goes", async () =>
       run,
       runPlaybook: removal.runPlaybook,
       hostRuntimes: hostWithPhp84,
+      systemdUnitDir: await emptyUnitDir(layout),
     });
     assertEquals(pruneRequests(removal), [["8.4"]]);
   } finally {
@@ -1703,6 +1716,7 @@ test("removeSites keeps a PHP series another environment still uses", async () =
           run,
           runPlaybook: applied.runPlaybook,
           hostRuntimes: hostWithPhp84,
+          systemdUnitDir: await emptyUnitDir(layout),
         },
       );
     }
@@ -1711,6 +1725,7 @@ test("removeSites keeps a PHP series another environment still uses", async () =
       run,
       runPlaybook: first.runPlaybook,
       hostRuntimes: hostWithPhp84,
+      systemdUnitDir: await emptyUnitDir(layout),
     });
     assertEquals(pruneRequests(first), []);
 
@@ -1719,6 +1734,7 @@ test("removeSites keeps a PHP series another environment still uses", async () =
       run,
       runPlaybook: last.runPlaybook,
       hostRuntimes: hostWithPhp84,
+      systemdUnitDir: await emptyUnitDir(layout),
     });
     assertEquals(pruneRequests(last), [["8.4"]]);
   } finally {
@@ -1737,6 +1753,7 @@ test("removeSites never removes a PHP series a deploy in flight holds", async ()
       run,
       runPlaybook: applied.runPlaybook,
       hostRuntimes: hostWithPhp84,
+      systemdUnitDir: await emptyUnitDir(layout),
     });
     const release = await holdPhpSeries(["8.4"]);
     const held = capturePlaybooks();
@@ -1744,6 +1761,7 @@ test("removeSites never removes a PHP series a deploy in flight holds", async ()
       run,
       runPlaybook: held.runPlaybook,
       hostRuntimes: hostWithPhp84,
+      systemdUnitDir: await emptyUnitDir(layout),
     });
     assertEquals(pruneRequests(held), []);
 
@@ -1753,6 +1771,7 @@ test("removeSites never removes a PHP series a deploy in flight holds", async ()
       run,
       runPlaybook: after.runPlaybook,
       hostRuntimes: hostWithPhp84,
+      systemdUnitDir: await emptyUnitDir(layout),
     });
     assertEquals(pruneRequests(after), [["8.4"]]);
   } finally {
@@ -1770,11 +1789,13 @@ test("a failed PHP series removal never fails the teardown that triggered it", a
       run,
       runPlaybook: capturePlaybooks().runPlaybook,
       hostRuntimes: hostWithPhp84,
+      systemdUnitDir: await emptyUnitDir(layout),
     });
     await removeSites(layout, "envfailA", {
       run,
       runPlaybook: () => Promise.reject(new Error("apt is busy")),
       hostRuntimes: hostWithPhp84,
+      systemdUnitDir: await emptyUnitDir(layout),
     });
   } finally {
     resetPhpSeriesPruneForTests();
