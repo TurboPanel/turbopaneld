@@ -99,9 +99,18 @@ across a rewrite) before `exec proxysql`, and every reconcile ends with
 `PROXYSQL RELOAD TLS`, which applies a rotated leaf and fails the reconcile
 instead of falling back when a file is missing.
 
-`.env` (`TURBOPANEL_MANAGED_ROOT_PASSWORD=…`, mode `0600`) exists **only** for
-the duration of engine `docker compose --env-file … up` and is deleted in
-`finally`.
+The engine root password reaches the engine as a file, not an env value:
+normalization rewrites `POSTGRES_PASSWORD` / `MYSQL_ROOT_PASSWORD` /
+`MARIADB_ROOT_PASSWORD: ${TURBOPANEL_MANAGED_ROOT_PASSWORD}` to `<KEY>_FILE`
+pointing at `/run/secrets/tp_root_password`, a read-only bind of
+`<stateDir>/managed/<id>/secrets/root-password` (created `0600` by the daemon, then handed to the engine's own user by a
+throwaway root container: `engineUser:engineGroup` `0400`, never world-readable;
+the daemon never rewrites it afterwards), so `docker inspect` shows only a path. The file persists
+(restart policies re-bind it). An engine created before this keeps the old
+env form (persisted compose still contains the placeholder): an apply that
+leaves its compose byte-identical keeps it (no restart); any apply that
+recreates the container anyway moves it to the file form. Only then does the
+legacy `.env` (`0600`, deleted in `finally`) apply to `compose --env-file … up`.
 
 Compose project names:
 

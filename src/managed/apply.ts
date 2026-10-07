@@ -35,6 +35,8 @@ import {
 } from "../orchestration/ansible.ts";
 import {
   assertPublicPrivateListenerTls,
+  composeUsesRootPasswordInterpolation,
+  MANAGED_ROOT_PASSWORD_FILE_SOURCE,
   MANAGED_ROOT_PASSWORD_VAR,
   normalizeManagedCompose,
 } from "./compose.ts";
@@ -48,12 +50,16 @@ import type { ManagedEngineContext } from "./engines/types.ts";
 import {
   materializeManagedState,
   normalizeManagedFileOwnership,
+  normalizeManagedSecretOwnership,
 } from "./materialize.ts";
 import {
   assertSafeManagedIdentifiers,
   managedComposePath,
   managedComposeProject,
+  managedDir,
   managedEnvFilePath,
+  managedRootPasswordPath,
+  managedSecretsDir,
 } from "./engine-paths.ts";
 import {
   loadProxySqlMonitorCredentials,
@@ -303,6 +309,82 @@ async function rewriteDaemonOwnedFile(
   await Deno.chmod(path, mode);
 }
 
+/**
+ * Write the engine root password for the engine's `<KEY>_FILE` read.
+ *
+ * Created 0600 by the daemon, then handed to the engine's own user by
+ * {@link normalizeManagedSecretOwnership} (the daemon cannot chown), which
+ * leaves it `engineUser:engineGroup` 0400. Once handed over the daemon can no
+ * longer read it, so an existing file is never rewritten: the engine only
+ * reads it at first initialisation. Returns true when the file still needs the
+ * ownership hand-over (new, or still daemon-owned after a failed hand-over).
+ */
+export async function writeManagedRootPasswordFile(
+  dir: string,
+  path: string,
+  password: string,
+): Promise<boolean> {
+  await Deno.mkdir(dir, { recursive: true, mode: 0o750 });
+  try {
+    const existing = await Deno.stat(path);
+    if (existing.uid !== Deno.uid()) return false;
+    await Deno.remove(path);
+  } catch (err) {
+    if (!(err instanceof Deno.errors.NotFound)) throw err;
+  }
+  await Deno.writeTextFile(path, password, { mode: 0o600 });
+  return true;
+}
+
+/** Write the root password file and, when new, hand it to the engine user. */
+export async function provisionManagedRootPasswordFile(
+  layout: LayoutPaths,
+  payload: ManagedApplyPayload,
+  password: string,
+  engine: { engineUser: string; engineGroup: string; run: RunDockerFn },
+): Promise<void> {
+  const needsHandOver = await writeManagedRootPasswordFile(
+    managedSecretsDir(layout, payload.managedId),
+    managedRootPasswordPath(layout, payload.managedId),
+    password,
+  );
+  if (needsHandOver) {
+    await normalizeManagedSecretOwnership(
+      payload.image,
+      managedDir(layout, payload.managedId),
+      engine.engineUser,
+      engine.engineGroup,
+      engine.run,
+    );
+  }
+}
+
+/**
+ * Pick the compose form for this apply. A cluster created before the file
+ * form has a persisted compose with the password as an env var; when this
+ * apply changes nothing else about that compose, keep it byte-identical so
+ * `compose up` does not recreate (restart) the engine. Any apply that
+ * recreates the container anyway moves it to the file form.
+ */
+export async function chooseManagedCompose(
+  composePath: string,
+  payload: ManagedApplyPayload,
+) {
+  let previous: string | null = null;
+  try {
+    previous = await Deno.readTextFile(composePath);
+  } catch (err) {
+    if (!(err instanceof Deno.errors.NotFound)) throw err;
+  }
+  if (previous !== null && composeUsesRootPasswordInterpolation(previous)) {
+    const legacy = normalizeManagedCompose(payload, {
+      legacyRootPasswordEnv: true,
+    });
+    if (legacy.composeYaml === previous) return legacy;
+  }
+  return normalizeManagedCompose(payload);
+}
+
 async function composeUpWithDockerRetry(
   run: RunDockerFn,
   args: string[],
@@ -319,7 +401,7 @@ async function composeUpWithDockerRetry(
   return await run(args);
 }
 
-type ComposeUpManagedEngineArgs = {
+export type ComposeUpManagedEngineArgs = {
   layout: LayoutPaths;
   payload: ManagedApplyPayload;
   composeYaml: string;
@@ -328,9 +410,12 @@ type ComposeUpManagedEngineArgs = {
   runDockerSetup: () => Promise<void>;
   logSink: CommandOutputSink;
   runStreamed: RunDockerStreamedFn;
+  run: RunDockerFn;
+  engineUser: string;
+  engineGroup: string;
 };
 
-async function composeUpManagedEngine({
+export async function composeUpManagedEngine({
   layout,
   payload,
   composeYaml,
@@ -339,6 +424,9 @@ async function composeUpManagedEngine({
   runDockerSetup,
   logSink,
   runStreamed,
+  run,
+  engineUser,
+  engineGroup,
 }: ComposeUpManagedEngineArgs): Promise<string> {
   const composePath = managedComposePath(layout, payload.managedId);
   const envPath = managedEnvFilePath(layout, payload.managedId);
@@ -346,12 +434,24 @@ async function composeUpManagedEngine({
 
   await rewriteDaemonOwnedFile(composePath, composeYaml, 0o640);
 
-  try {
-    await rewriteDaemonOwnedFile(
-      envPath,
-      `${MANAGED_ROOT_PASSWORD_VAR}=${rootCredential.password}\n`,
-      0o600,
+  const needsEnvFile = composeUsesRootPasswordInterpolation(composeYaml);
+  if (composeYaml.includes(`${MANAGED_ROOT_PASSWORD_FILE_SOURCE}:`)) {
+    await provisionManagedRootPasswordFile(
+      layout,
+      payload,
+      rootCredential.password,
+      { engineUser, engineGroup, run },
     );
+  }
+
+  try {
+    if (needsEnvFile) {
+      await rewriteDaemonOwnedFile(
+        envPath,
+        `${MANAGED_ROOT_PASSWORD_VAR}=${rootCredential.password}\n`,
+        0o600,
+      );
+    }
 
     logSink.setPhase(COMMAND_LOG_PHASES.MANAGED_APPLY);
     const up = await composeUpWithDockerRetry(
@@ -361,8 +461,7 @@ async function composeUpManagedEngine({
         }),
       [
         "compose",
-        "--env-file",
-        envPath,
+        ...(needsEnvFile ? ["--env-file", envPath] : []),
         "-p",
         project,
         "-f",
@@ -778,7 +877,10 @@ export async function handleManagedApply(
     }
   }
 
-  const { composeYaml, composeServiceName } = normalizeManagedCompose(payload);
+  const { composeYaml, composeServiceName } = await chooseManagedCompose(
+    managedComposePath(layout, payload.managedId),
+    payload,
+  );
   const project = await composeUpManagedEngine({
     layout,
     payload,
@@ -788,6 +890,9 @@ export async function handleManagedApply(
     runDockerSetup,
     logSink,
     runStreamed,
+    run,
+    engineUser: engine.containerUser,
+    engineGroup: engine.containerGroup,
   });
 
   // Scope the public listener once the publish exists; never blocks apply.

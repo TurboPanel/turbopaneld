@@ -12,8 +12,20 @@ import { withTempLayout } from "../testing/temp-layout.ts";
 import {
   applyManagedEngineState,
   buildNeedsResyncMember,
+  chooseManagedCompose,
   collectMemberHealth,
+  composeUpManagedEngine,
+  type ComposeUpManagedEngineArgs,
+  provisionManagedRootPasswordFile,
+  writeManagedRootPasswordFile,
 } from "./apply.ts";
+import { normalizeManagedCompose } from "./compose.ts";
+import {
+  managedDir,
+  managedEnvFilePath,
+  managedRootPasswordPath,
+} from "./engine-paths.ts";
+import { createNoopCommandOutputSink } from "../logs/contracts.ts";
 import type { ManagedEngineContext } from "./engines/types.ts";
 
 /**
@@ -23,6 +35,9 @@ import type { ManagedEngineContext } from "./engines/types.ts";
  * reports Deno suites as empty; keep this alias so analysis sees real tests.
  */
 const test = Deno.test.bind(Deno);
+
+/** Random per run so no credential-shaped literal sits in the source. */
+const TEST_ROOT_VALUE = `v-${crypto.randomUUID()}`;
 
 test("needs_resync member projection marks replica needs_resync", () => {
   const member = buildNeedsResyncMember(
@@ -770,4 +785,189 @@ test("a failing orphan-slot sweep never fails the apply of a single-member clust
     [],
   );
   assertEquals(member?.status, "ready");
+});
+
+test("writeManagedRootPasswordFile writes 0600 once and never rewrites a handed-over file", async () => {
+  const dir = await Deno.makeTempDir();
+  try {
+    const secretsDir = `${dir}/secrets`;
+    const path = `${secretsDir}/root-password`;
+    assertEquals(
+      await writeManagedRootPasswordFile(secretsDir, path, "pw-one"),
+      true,
+    );
+    assertEquals((await Deno.stat(path)).mode! & 0o777, 0o600);
+    assertEquals(await Deno.readTextFile(path), "pw-one");
+    // Still daemon-owned (hand-over failed earlier): rewritten and re-flagged.
+    assertEquals(
+      await writeManagedRootPasswordFile(secretsDir, path, "pw-two"),
+      true,
+    );
+    assertEquals(await Deno.readTextFile(path), "pw-two");
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+test("chooseManagedCompose leaves an unchanged legacy cluster alone and moves a changed one to the file form", async () => {
+  const dir = await Deno.makeTempDir();
+  try {
+    const path = `${dir}/docker-compose.yml`;
+    const payload = {
+      managedId: "00000000-0000-4000-8000-000000000001",
+      engine: "postgres",
+      containerName: "c1",
+      managedNetwork: "net",
+      image: "postgres:18",
+      containerPort: 5432,
+      composeYaml: [
+        "services:",
+        "  postgres:",
+        "    environment:",
+        "      POSTGRES_PASSWORD: ${TURBOPANEL_MANAGED_ROOT_PASSWORD}",
+      ].join("\n"),
+      configFiles: [],
+      volumes: [],
+    } as unknown as ManagedApplyPayload;
+
+    const fresh = await chooseManagedCompose(path, payload);
+    assertEquals(fresh.composeYaml.includes("POSTGRES_PASSWORD_FILE"), true);
+
+    const legacy = normalizeManagedCompose(payload, {
+      legacyRootPasswordEnv: true,
+    });
+    await Deno.writeTextFile(path, legacy.composeYaml);
+    const same = await chooseManagedCompose(path, payload);
+    assertEquals(same.composeYaml, legacy.composeYaml);
+
+    const changed = await chooseManagedCompose(path, {
+      ...payload,
+      image: "postgres:19",
+    });
+    assertEquals(changed.composeYaml.includes("POSTGRES_PASSWORD_FILE"), true);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+test("provisionManagedRootPasswordFile writes the file and hands it over once, without the password in argv", async () => {
+  await withTempLayout(async (fixture) => {
+    const layout = resolveLayout(fixture.env);
+    const calls: string[][] = [];
+    const run = (args: string[]) => {
+      calls.push(args);
+      return Promise.resolve({
+        success: true,
+        code: 0,
+        stdout: "",
+        stderr: "",
+      });
+    };
+    const payload = {
+      managedId: "00000000-0000-4000-8000-000000000001",
+      image: "postgres:18",
+    } as unknown as ManagedApplyPayload;
+    await provisionManagedRootPasswordFile(layout, payload, TEST_ROOT_VALUE, {
+      engineUser: "postgres",
+      engineGroup: "postgres",
+      run,
+    });
+    assertEquals(calls.length, 2);
+    assertEquals(calls.flat().join(" ").includes(TEST_ROOT_VALUE), false);
+    assertEquals(
+      await Deno.readTextFile(
+        managedRootPasswordPath(layout, payload.managedId),
+      ),
+      TEST_ROOT_VALUE,
+    );
+  });
+});
+
+function composeUpFixture(
+  fixture: { env: Record<string, string> },
+  composeYaml: string,
+  run: (args: string[]) => Promise<
+    { success: boolean; code: number; stdout: string; stderr: string }
+  >,
+  streamed: string[][],
+) {
+  const layout = resolveLayout(fixture.env);
+  const payload = {
+    managedId: "00000000-0000-4000-8000-000000000001",
+    image: "postgres:18",
+  } as unknown as ManagedApplyPayload;
+  return {
+    layout,
+    payload,
+    args: {
+      layout,
+      payload,
+      composeYaml,
+      rootCredential: { password: TEST_ROOT_VALUE } as ManagedApplyCredential,
+      redact: (t: string) => t,
+      runDockerSetup: () => Promise.resolve(),
+      logSink: createNoopCommandOutputSink(),
+      runStreamed: (args: string[]) => {
+        streamed.push(args);
+        return Promise.resolve({
+          success: true,
+          code: 0,
+          stdout: "",
+          stderr: "",
+        });
+      },
+      run,
+      engineUser: "postgres",
+      engineGroup: "postgres",
+    } as unknown as ComposeUpManagedEngineArgs,
+  };
+}
+
+test("composeUpManagedEngine does not reach compose up when the secret hand-over fails", async () => {
+  await withTempLayout(async (fixture) => {
+    const streamed: string[][] = [];
+    const { layout, payload, args } = composeUpFixture(
+      fixture,
+      "services: {}\n# ./secrets/root-password:/run/secrets/tp_root_password:ro",
+      () =>
+        Promise.resolve({
+          success: false,
+          code: 1,
+          stdout: "",
+          stderr: "chown denied",
+        }),
+      streamed,
+    );
+    await Deno.mkdir(managedDir(layout, payload.managedId), {
+      recursive: true,
+    });
+    await assertRejects(
+      () => composeUpManagedEngine(args),
+      Error,
+      "failed to hand the engine root password file",
+    );
+    assertEquals(streamed.length, 0);
+  });
+});
+
+test("composeUpManagedEngine skips the env file and --env-file when the compose has no placeholder", async () => {
+  await withTempLayout(async (fixture) => {
+    const streamed: string[][] = [];
+    const { layout, payload, args } = composeUpFixture(
+      fixture,
+      "services: {}\n# no password here",
+      () => Promise.reject(new Error("helper must not run")),
+      streamed,
+    );
+    await Deno.mkdir(managedDir(layout, payload.managedId), {
+      recursive: true,
+    });
+    await composeUpManagedEngine(args);
+    assertEquals(streamed.length, 1);
+    assertEquals(streamed[0]!.includes("--env-file"), false);
+    await assertRejects(
+      () => Deno.stat(managedEnvFilePath(layout, payload.managedId)),
+      Deno.errors.NotFound,
+    );
+  });
 });

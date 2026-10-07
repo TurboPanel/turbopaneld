@@ -3,6 +3,7 @@ import { parse } from "yaml";
 import type { ManagedApplyPayload } from "../contracts/commands-contracts.ts";
 import {
   assertPublicPrivateListenerTls,
+  composeUsesRootPasswordInterpolation,
   MANAGED_ENGINE_LABEL,
   MANAGED_ROOT_PASSWORD_VAR,
   normalizeManagedCompose,
@@ -585,4 +586,58 @@ Deno.test("normalizeManagedCompose stamps the engine code label on every engine 
       .labels as Record<string, string>;
   assertEquals(labels["tp.example"], "keep");
   assertEquals(labels[MANAGED_ENGINE_LABEL], "postgres");
+});
+
+function serviceOf(composeYaml: string): Record<string, unknown> {
+  const doc = parse(composeYaml) as Record<string, unknown>;
+  return (doc.services as Record<string, Record<string, unknown>>)["postgres"]!;
+}
+
+test("normalizeManagedCompose hands the root password to the engine as a file, never an env value", () => {
+  const { composeYaml } = normalizeManagedCompose(basePayload());
+  const service = serviceOf(composeYaml);
+  const env = service.environment as Record<string, string>;
+  assertEquals(env["POSTGRES_PASSWORD"], undefined);
+  assertEquals(env["POSTGRES_PASSWORD_FILE"], "/run/secrets/tp_root_password");
+  assertEquals(
+    (service.volumes as string[]).includes(
+      "./secrets/root-password:/run/secrets/tp_root_password:ro",
+    ),
+    true,
+  );
+  assertEquals(composeYaml.includes(MANAGED_ROOT_PASSWORD_VAR), false);
+});
+
+test("normalizeManagedCompose covers the mysql and mariadb root password keys", () => {
+  for (
+    const [engine, key] of [
+      ["mysql", "MYSQL_ROOT_PASSWORD"],
+      ["mariadb", "MARIADB_ROOT_PASSWORD"],
+    ] as const
+  ) {
+    const { composeYaml } = normalizeManagedCompose(basePayload({
+      engine,
+      composeYaml: [
+        "services:",
+        "  postgres:",
+        "    image: x",
+        "    environment:",
+        `      - ${key}=\${${MANAGED_ROOT_PASSWORD_VAR}}`,
+        "      - KEEP=1",
+      ].join("\n"),
+    }));
+    const env = serviceOf(composeYaml).environment as Record<string, string>;
+    assertEquals(env[key], undefined);
+    assertEquals(env[`${key}_FILE`], "/run/secrets/tp_root_password");
+    assertEquals(env["KEEP"], "1");
+  }
+});
+
+test("normalizeManagedCompose legacy option keeps the env form byte-for-byte", () => {
+  const { composeYaml } = normalizeManagedCompose(basePayload(), {
+    legacyRootPasswordEnv: true,
+  });
+  const env = serviceOf(composeYaml).environment as Record<string, string>;
+  assertEquals(env["POSTGRES_PASSWORD"], `\${${MANAGED_ROOT_PASSWORD_VAR}}`);
+  assertEquals(composeUsesRootPasswordInterpolation(composeYaml), true);
 });
