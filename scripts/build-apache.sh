@@ -17,7 +17,8 @@ DEFAULTS="$ROOT/orchestration/roles/apache/defaults/main.yml"
 OUT_DIR="${1:?usage: build-apache.sh <out-dir>}"
 
 pin() {
-  sed -n "s/^$1: \"\\(.*\\)\"\$/\\1/p" "$DEFAULTS" | head -n 1
+  key="$1"
+  sed -n "s/^${key}: \"\\(.*\\)\"\$/\\1/p" "$DEFAULTS" | head -n 1
 }
 HTTPD_VER="$(pin apache_version)"
 APR_VER="$(pin apache_apr_version)"
@@ -40,9 +41,9 @@ STAGE="$TMP/stage"
 mkdir -p "$STAGE" "$OUT_DIR"
 OUT_DIR="$(CDPATH= cd -- "$OUT_DIR" && pwd)"
 
-curl -fsSL -o "$TMP/httpd.tar.gz" "$BASE/httpd/httpd-$HTTPD_VER.tar.gz"
-curl -fsSL -o "$TMP/apr.tar.gz" "$BASE/apr/apr-$APR_VER.tar.gz"
-curl -fsSL -o "$TMP/apr-util.tar.gz" "$BASE/apr/apr-util-$APU_VER.tar.gz"
+curl --proto "=https" --tlsv1.2 -fsSL -o "$TMP/httpd.tar.gz" "$BASE/httpd/httpd-$HTTPD_VER.tar.gz"
+curl --proto "=https" --tlsv1.2 -fsSL -o "$TMP/apr.tar.gz" "$BASE/apr/apr-$APR_VER.tar.gz"
+curl --proto "=https" --tlsv1.2 -fsSL -o "$TMP/apr-util.tar.gz" "$BASE/apr/apr-util-$APU_VER.tar.gz"
 tar -xzf "$TMP/httpd.tar.gz" -C "$TMP"
 tar -xzf "$TMP/apr.tar.gz" -C "$TMP"
 tar -xzf "$TMP/apr-util.tar.gz" -C "$TMP"
