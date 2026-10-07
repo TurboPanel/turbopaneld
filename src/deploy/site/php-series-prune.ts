@@ -91,6 +91,19 @@ let pruning: Promise<void> | null = null;
 /** The series the running removal is taking away. */
 let pruningSeries: ReadonlySet<string> = new Set();
 
+/** Wait until no running removal takes any of `series` away. */
+async function waitForRemovalOf(series: readonly string[]): Promise<void> {
+  const running = pruning;
+  if (
+    running === null || !series.some((entry) => pruningSeries.has(entry))
+  ) {
+    return;
+  }
+  await running;
+  // Another removal may have started meanwhile: check again.
+  await waitForRemovalOf(series);
+}
+
 /**
  * Keep `series` from being removed until the returned function is called. A
  * deploy takes this before it installs anything. Waits out a removal already
@@ -101,9 +114,7 @@ let pruningSeries: ReadonlySet<string> = new Set();
 export async function holdPhpSeries(
   series: readonly string[],
 ): Promise<() => void> {
-  while (pruning && series.some((entry) => pruningSeries.has(entry))) {
-    await pruning;
-  }
+  await waitForRemovalOf(series);
   for (const entry of series) held.set(entry, (held.get(entry) ?? 0) + 1);
   let released = false;
   return () => {
@@ -135,14 +146,14 @@ export type PhpSeriesPruneDeps = Readonly<{
 export async function prunePhpSeries(
   deps: PhpSeriesPruneDeps,
 ): Promise<string[]> {
-  if (pruning) return [];
+  if (pruning !== null) return [];
   const input = await deps.gather();
   if (input === null) return [];
   const unused = unusedPhpSeries(input);
   // From here to `pruning = …` nothing awaits: a deploy either holds a series
   // before this check (and is skipped) or waits for the removal to finish.
   const free = unused.filter((series) => !held.has(series));
-  if (free.length === 0 || pruning) return [];
+  if (free.length === 0 || pruning !== null) return [];
   pruningSeries = new Set(free);
   const work = (async (): Promise<boolean> => {
     try {
