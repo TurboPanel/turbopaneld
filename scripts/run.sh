@@ -3,9 +3,8 @@
 # Co-located dev Caddy serves the same script at /run.sh.
 #
 # Fetches split release artifacts from the channel manifest. Without an
-# overlay the manifest comes from the built-in rail — trunk from the CDN drop
-# (https://dl.trbp.nl/channels/trunk/manifest.json), rc and release from
-# GitHub Releases (see tp_builtin_channel_manifest_url); with
+# overlay the manifest comes from the built-in rail — canary, rc and release
+# from GitHub Releases (see tp_builtin_channel_manifest_url); with
 # $TURBOPANEL_DL_BASE set it comes from that overlay's channels.json instead,
 # so remote servers on a development overlay never hit the public rail:
 # host-arch native binary + orchestration tree, plus the JS bundle when the
@@ -22,7 +21,7 @@
 # Typical install (production):
 #   curl -fsSL turbopanel.sh | TURBOPANEL_LICENSE=<b64> sh
 # Optional: TURBOPANEL_HOST, TURBOPANEL_INSECURE_TLS=1, TURBOPANEL_UPDATE_CHANNEL (default release),
-# TURBOPANEL_DL_BASE (dev overlay catalog; never falls back to the public CDN).
+# TURBOPANEL_DL_BASE (dev overlay catalog; never falls back to the public rail).
 # Flags (--license, --host, …) remain supported for scripts and sudo re-exec.
 #
 # Self-hosted control plane — the one door, chosen by what you pass:
@@ -1325,10 +1324,10 @@ tp_default_update_channel() {
 # when no overlay catalog is configured. Mirrors src/update/urls.ts
 # builtinChannelManifestUrl (urls.test.ts pins this copy against that one) —
 # keep the two in step. Kind is daemon (default), instance, or ui.
-# Daemon trunk is the CDN drop. Instance and UI publish only through GitHub
-# Releases, so their trunk has no location. canary is the rolling GitHub
-# pre-release carrying the newest green trunk build; edge is reserved and
-# unadvertised: no built-in location.
+# canary is the rolling GitHub pre-release carrying the newest green trunk
+# build. trunk (the retired per-merge CDN drop) and edge (reserved) have no
+# built-in location; trunk is only the channel name a development overlay
+# catalog uses.
 tp_builtin_channel_manifest_url() {
   _channel="$1"
   _kind="${2:-daemon}"
@@ -1339,12 +1338,6 @@ tp_builtin_channel_manifest_url() {
     *) return 1 ;;
   esac
   case "$_channel" in
-    trunk)
-      if [ "$_kind" != "daemon" ]; then
-        return 1
-      fi
-      printf '%s' "https://dl.trbp.nl/channels/trunk/manifest.json"
-      ;;
     canary) printf '%s' "https://github.com/TurboPanel/${_repo}/releases/download/canary/manifest.json" ;;
     rc) printf '%s' "https://github.com/TurboPanel/${_repo}/releases/download/rc/manifest.json" ;;
     release) printf '%s' "https://github.com/TurboPanel/${_repo}/releases/latest/download/manifest.json" ;;
@@ -1390,9 +1383,9 @@ tp_pinned_channel_manifest_url() {
 # Release-rail manifest URL check, on the raw string: https only, exact host,
 # no %, @, :, ?, #, \, whitespace or controls, no empty, "." or ".." path
 # segment, and one exact rail shape per kind (daemon, instance, ui):
-#   daemon    https://dl.trbp.nl/channels/<channel>/manifest*.json
 #   any kind  https://github.com/TurboPanel/<repo>/releases/download/<tag>/manifest*.json
 #             https://github.com/TurboPanel/<repo>/releases/latest/download/manifest*.json
+# (dl.trbp.nl is no longer on the rail: the trunk CDN drop was retired.)
 # Byte-identical in scripts/run.sh and orchestration/scripts/tp-orchestrate;
 # src/update/urls.ts releaseManifestUrlAllowed is the TypeScript copy, and
 # src/testing/release-manifest-url-corpus.json pins all three together.
@@ -1425,10 +1418,6 @@ tp_release_manifest_url_ok() {
     *) return 1 ;;
   esac
   case "$_rmu_host" in
-    dl.trbp.nl)
-      [ "$_rmu_kind" = daemon ] || return 1
-      _rmu_mid="${_rmu_path#/channels/}"
-      ;;
     github.com)
       _rmu_mid="${_rmu_path#/TurboPanel/"$_rmu_repo"/releases/}"
       ;;
@@ -1439,13 +1428,6 @@ tp_release_manifest_url_ok() {
     */*) _rmu_mid="${_rmu_mid%/*}" ;;
     *) return 1 ;;
   esac
-  if [ "$_rmu_host" = dl.trbp.nl ]; then
-    case "$_rmu_mid" in
-      */*) return 1 ;;
-      *) ;;
-    esac
-    return 0
-  fi
   case "$_rmu_mid" in
     latest/download) return 0 ;;
     download/*/*) return 1 ;;
@@ -1457,8 +1439,8 @@ tp_release_manifest_url_ok() {
 
 # The same rail addressed by repository name (turbopaneld, turbopanel, ui).
 # Instance and UI publish only through GitHub Releases: canary, rc, release.
-# There is no CDN drop for them, so trunk has no location and an --instance
-# install must name canary, rc or release.
+# trunk has no built-in location, so an --instance install must name canary,
+# rc or release.
 tp_builtin_repo_manifest_url() {
   _bru_repo="$1"
   _bru_channel="$2"
@@ -1497,7 +1479,11 @@ tp_fetch_channel_manifest() {
   else
     _curl="$(tp_release_curl)"
     if ! _manifest_url="$(tp_builtin_channel_manifest_url "$_channel")"; then
-      echo "run.sh: channel ${_channel} has no built-in manifest location; set TURBOPANEL_DL_BASE to a catalog that names it" >&2
+      if [ "$_channel" = trunk ]; then
+        echo "run.sh: the trunk update channel was retired and nothing is published to it any more; set TURBOPANEL_UPDATE_CHANNEL to canary, rc or release" >&2
+      else
+        echo "run.sh: channel ${_channel} has no built-in manifest location; set TURBOPANEL_DL_BASE to a catalog that names it" >&2
+      fi
       return 1
     fi
   fi
@@ -2328,7 +2314,7 @@ fi
 [ -n "$MANIFEST_URL" ] || MANIFEST_URL="${TURBOPANEL_MANIFEST_URL:-}"
 if [ -n "$MANIFEST_URL" ]; then
   if ! tp_release_manifest_url_ok daemon "$MANIFEST_URL"; then
-    tp_print_error "--manifest-url must be a TurboPanel daemon release manifest (dl.trbp.nl/channels/… or github.com/TurboPanel/turbopaneld/releases/…; got $MANIFEST_URL)"
+    tp_print_error "--manifest-url must be a TurboPanel daemon release manifest (github.com/TurboPanel/turbopaneld/releases/…; got $MANIFEST_URL)"
     exit 1
   fi
   if [ -n "$DL_BASE" ]; then
