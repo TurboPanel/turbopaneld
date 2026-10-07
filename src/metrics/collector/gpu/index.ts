@@ -37,7 +37,6 @@ import type {
   GpuAdapterSet,
   GpuReadContext,
   GpuReading,
-  GpuSizeReading,
   GpuThermalReading,
 } from "./adapter.ts";
 
