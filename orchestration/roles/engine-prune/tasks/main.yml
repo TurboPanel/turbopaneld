@@ -1,0 +1,27 @@
+---
+# Removes web engines that no site uses any more. Install is lazy (an engine
+# lands on the first deploy with a site it serves, see the nginx, apache and
+# openlitespeed roles); this is its counterpart. Never the service accounts
+# (tpnginx, tpapache, tpols): site owners' groups list them, and the next
+# install needs them again. Never Caddy, php-fpm or the vendored lsphp.
+#
+# The daemon works out which engines are unused (it sees every site config on
+# the host and every deploy in flight). Root re-checks the on-disk part here
+# before it removes anything: an engine with a site config is refused, so a
+# daemon bug cannot take a running site's web server away.
+- name: Validate the engines to remove
+  ansible.builtin.assert:
+    that:
+      - engine_prune is sequence
+      - engine_prune is not string
+      - engine_prune | length <= 3
+      - engine_prune | difference(['nginx', 'apache', 'openlitespeed']) | length == 0
+    fail_msg: >-
+      engine_prune must be a list of nginx, apache or openlitespeed;
+      got {{ engine_prune }}.
+
+- name: Remove each unused engine
+  ansible.builtin.include_tasks: engine.yml
+  loop: "{{ engine_prune | unique | list }}"
+  loop_control:
+    loop_var: engine_prune_engine

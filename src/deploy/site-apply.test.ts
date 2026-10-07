@@ -30,6 +30,7 @@ import {
   holdPhpSeries,
   resetPhpSeriesPruneForTests,
 } from "./site/php-series-prune.ts";
+import { engineHoldKey, holdPruneKeys } from "./site/prune-holds.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -4711,5 +4712,104 @@ test("nginx+apache -> nginx: Apache drops the backend vhost, and PHP's socket mo
     assert(socketRestart >= 0 && socketRestart < nginxTest, "socket restarted");
   } finally {
     await h.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Unused web engines are removed; one a site or a deploy still needs never is.
+// ---------------------------------------------------------------------------
+
+/** Mark `engine` installed the way the roles do (`<vendor>/<engine>/current`). */
+async function installEngine(
+  layout: LayoutPaths,
+  engine: string,
+): Promise<void> {
+  await Deno.mkdir(join(layout.runtimesDir, engine, "current"), {
+    recursive: true,
+  });
+}
+
+/** `engine_prune` lists the playbook runs asked for, in order. */
+function enginePruneRequests(
+  captured: ReturnType<typeof capturePlaybooks>,
+): unknown[] {
+  return captured.extraVars
+    .filter((entry) => entry.label.startsWith("engine-prune"))
+    .map((entry) => entry.vars.engine_prune);
+}
+
+test("applySites removes an installed engine no site uses, and keeps the one it serves", async () => {
+  resetPhpSeriesPruneForTests();
+  const { layout, cleanup } = await makeTestLayout();
+  const { run } = createSiteRunMock();
+  const applied = capturePlaybooks();
+  try {
+    await installEngine(layout, "nginx");
+    await installEngine(layout, "apache");
+    await applySites(layout, "envengA", [nginxSite], {
+      run,
+      runPlaybook: applied.runPlaybook,
+    });
+    assertEquals(enginePruneRequests(applied), [["apache"]]);
+  } finally {
+    resetPhpSeriesPruneForTests();
+    await cleanup();
+  }
+});
+
+test("removeSites removes nginx once its last site goes, unless a deploy holds it", async () => {
+  resetPhpSeriesPruneForTests();
+  const { layout, cleanup } = await makeTestLayout();
+  const { run } = createSiteRunMock();
+  try {
+    await installEngine(layout, "nginx");
+    await applySites(layout, "envengB", [nginxSite], {
+      run,
+      runPlaybook: capturePlaybooks().runPlaybook,
+    });
+    const release = await holdPruneKeys([engineHoldKey("nginx")]);
+    const held = capturePlaybooks();
+    await removeSites(layout, "envengB", {
+      run,
+      runPlaybook: held.runPlaybook,
+    });
+    assertEquals(enginePruneRequests(held), []);
+
+    release();
+    const after = capturePlaybooks();
+    await removeSites(layout, "envengB", {
+      run,
+      runPlaybook: after.runPlaybook,
+    });
+    assertEquals(enginePruneRequests(after), [["nginx"]]);
+  } finally {
+    resetPhpSeriesPruneForTests();
+    await cleanup();
+  }
+});
+
+test("an OpenLiteSpeed site directory keeps the engine, and a failed removal never fails the teardown", async () => {
+  resetPhpSeriesPruneForTests();
+  const { layout, cleanup } = await makeTestLayout();
+  const { run } = createSiteRunMock();
+  try {
+    await installEngine(layout, "openlitespeed");
+    const vhost = join(layout.configDir, "openlitespeed", "vhosts", "left");
+    await Deno.mkdir(vhost, { recursive: true });
+    const kept = capturePlaybooks();
+    await removeSites(layout, "envengC", {
+      run,
+      runPlaybook: kept.runPlaybook,
+    });
+    assertEquals(enginePruneRequests(kept), []);
+
+    await Deno.remove(vhost);
+    await removeSites(layout, "envengC", {
+      run,
+      runPlaybook: () => Promise.reject(new Error("unit busy")),
+    });
+  } finally {
+    resetPhpSeriesPruneForTests();
+    await cleanup();
   }
 });
