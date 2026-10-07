@@ -63,6 +63,14 @@
       "seriesKey": "major.minor",
       "default": "8.4",
       "series": {
+        "8.1": {
+          "group": "tpphp81",
+          "gid": 9903
+        },
+        "8.2": {
+          "group": "tpphp82",
+          "gid": 9904
+        },
         "8.3": {
           "group": "tpphp83",
           "gid": 9901
@@ -70,12 +78,53 @@
         "8.4": {
           "group": "tpphp84",
           "gid": 9902
+        },
+        "8.5": {
+          "group": "tpphp85",
+          "gid": 9905
         }
       },
       "$comment": [
         "One group spans both PHP flavors: tpphp84 owns /usr/sbin/php-fpm8.4,",
         "/usr/bin/php8.4, AND vendor/lsphp/8.4/current/bin/lsphp. Semantically",
-        "'may execute PHP 8.4 here', whichever engine serves the site."
+        "'may execute PHP 8.4 here', whichever engine serves the site.",
+        "gids 9906 (8.0) and 9907 (7.4) are held back for the older series the",
+        "Debian 12 / Ubuntu 22.04 suites would add (see suiteSeries)."
+      ],
+      "suiteSeries": {
+        "trixie": [
+          "8.1",
+          "8.2",
+          "8.3",
+          "8.4",
+          "8.5"
+        ]
+      },
+      "$suiteSeriesComment": [
+        "PHP series offered per Debian/Ubuntu suite (VERSION_CODENAME), and the",
+        "same list for every engine: lsphp (OpenLiteSpeed) and php-fpm (nginx,",
+        "Apache). Owner decision 2026-10-07: mirror what the LiteSpeed repository",
+        "(rpms.litespeedtech.com/debian/dists/<suite>/main) publishes for the",
+        "suite, so web hosting is at parity across engines and server versions.",
+        "Debian 13 (trixie) is the only supported OS today, so it is the only",
+        "suite listed. Checked 2026-10-07: LiteSpeed also publishes 7.4 and 8.0",
+        "for bullseye, bookworm and jammy, 8.1-8.5 for noble, 8.2-8.5 for",
+        "resolute; ondrej/sury publishes every one of those series for Debian",
+        "(trixie, bookworm, bullseye). A suite is added here only together with",
+        "its pinned lsphp digests and the 7.4/8.0 registry series; a test fails",
+        "a suite that lists a series the lsphp role cannot install.",
+        "Nothing is installed up front: a series lands on the first deploy that",
+        "names it and goes when no site uses it any more (series prune)."
+      ],
+      "builtinExtensions": {
+        "8.5": [
+          "opcache"
+        ]
+      },
+      "$builtinExtensionsComment": [
+        "Extensions compiled into the interpreter for a series: there is no",
+        "php<series>-<name> / lsphp<NN>-<name> package to install (PHP 8.5 builds",
+        "opcache in), and loading opcache.so from php.ini would fail."
       ],
       "baselineExtensions": [
         "bcmath",

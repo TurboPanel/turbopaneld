@@ -1,4 +1,7 @@
 import { assertEquals } from "@std/assert";
+import registryJson from "../../orchestration/runtime-registry.json" with {
+  type: "json",
+};
 import {
   accessGroup,
   allAccessGroups,
@@ -11,12 +14,15 @@ import {
   isRuntimeName,
   optionalExtensions,
   phpBinaryPaths,
+  phpBuiltinExtensions,
   phpFpmUnit,
+  phpSeriesForSuite,
   RUNTIME_GID_BAND,
   RUNTIME_NAMES,
   runtimeGid,
   runtimeGroup,
   supportedSeries,
+  unsupportedPhpSeriesMessage,
   unsupportedSeriesMessage,
 } from "./registry.ts";
 
@@ -65,7 +71,7 @@ test("entitlementSeries uses major.minor for php and major for node", () => {
 });
 
 test("supportedSeries and defaultSeries come from the registry", () => {
-  assertEquals(supportedSeries("php"), ["8.3", "8.4"]);
+  assertEquals(supportedSeries("php"), ["8.1", "8.2", "8.3", "8.4", "8.5"]);
   assertEquals(supportedSeries("node"), ["22", "24", "26"]);
   assertEquals(supportedSeries("deno"), ["2"]);
   assertEquals(defaultSeries("deno"), "2");
@@ -78,6 +84,9 @@ test("runtimeGroup and runtimeGid resolve known series and unknown as undefined"
   assertEquals(runtimeGid("php", "8.4.3"), 9902);
   assertEquals(runtimeGroup("php", "8.3"), "tpphp83");
   assertEquals(runtimeGid("php", "8.3"), 9901);
+  assertEquals(runtimeGid("php", "8.1"), 9903);
+  assertEquals(runtimeGid("php", "8.2"), 9904);
+  assertEquals(runtimeGid("php", "8.5"), 9905);
   assertEquals(runtimeGroup("node", "24.17.0"), "tpnode24");
   assertEquals(runtimeGid("node", "24.17.0"), 9923);
   assertEquals(runtimeGroup("node", "22"), "tpnode22");
@@ -98,8 +107,11 @@ test("allRuntimeGroups and allManagedGroups are the containment sets", () => {
     "tpnode22",
     "tpnode24",
     "tpnode26",
+    "tpphp81",
+    "tpphp82",
     "tpphp83",
     "tpphp84",
+    "tpphp85",
   ]);
   const managed = [...allManagedGroups()].sort((a, b) => a.localeCompare(b));
   assertEquals(managed, [
@@ -108,8 +120,11 @@ test("allRuntimeGroups and allManagedGroups are the containment sets", () => {
     "tpnode24",
     "tpnode26",
     "tppasswd",
+    "tpphp81",
+    "tpphp82",
     "tpphp83",
     "tpphp84",
+    "tpphp85",
     "tpprincipal",
     "tpsftp",
     "tpshell",
@@ -141,4 +156,49 @@ test("unsupportedSeriesMessage names the supported series, and is silent for kno
     unsupportedSeriesMessage("node", "27"),
     "node 27 is not a supported node version on this server. Supported series: 22, 24, 26.",
   );
+});
+
+test("phpSeriesForSuite lists what the OS offers, and every series for an unlisted suite", () => {
+  assertEquals(phpSeriesForSuite("trixie"), [
+    "8.1",
+    "8.2",
+    "8.3",
+    "8.4",
+    "8.5",
+  ]);
+  assertEquals(phpSeriesForSuite(" Trixie "), phpSeriesForSuite("trixie"));
+  // Not in the table: no block here, the roles report a missing pin.
+  assertEquals(phpSeriesForSuite("bookworm"), supportedSeries("php"));
+  assertEquals(phpSeriesForSuite(undefined), supportedSeries("php"));
+});
+
+test("every suite series is a registry series, and the default is offered on each suite", () => {
+  const suites = registryJson.runtimes.php.suiteSeries as Record<
+    string,
+    string[]
+  >;
+  for (const [suite, series] of Object.entries(suites)) {
+    for (const entry of series) {
+      assertEquals(
+        supportedSeries("php").includes(entry),
+        true,
+        `${suite} lists ${entry}, which has no registry group`,
+      );
+    }
+    assertEquals(series.includes(defaultSeries("php")), true, suite);
+  }
+});
+
+test("unsupportedPhpSeriesMessage names the series the OS offers", () => {
+  assertEquals(unsupportedPhpSeriesMessage("8.4.3", "trixie"), undefined);
+  assertEquals(unsupportedPhpSeriesMessage("8.1", "trixie"), undefined);
+  assertEquals(
+    unsupportedPhpSeriesMessage("7.4", "trixie"),
+    "php 7.4 is not offered on this server's operating system. Offered series: 8.1, 8.2, 8.3, 8.4, 8.5.",
+  );
+});
+
+test("phpBuiltinExtensions names what a series compiles in", () => {
+  assertEquals(phpBuiltinExtensions("8.5"), ["opcache"]);
+  assertEquals(phpBuiltinExtensions("8.4"), []);
 });

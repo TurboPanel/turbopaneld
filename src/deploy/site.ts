@@ -55,7 +55,11 @@ import {
   SITE_OPENLITESPEED_APPLY_PLAYBOOK,
 } from "../orchestration/assets.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
-import { isAllowedExtension } from "../runtime/registry.ts";
+import { readOsRelease } from "../host/os-release.ts";
+import {
+  isAllowedExtension,
+  unsupportedPhpSeriesMessage,
+} from "../runtime/registry.ts";
 import {
   principalHomePath,
   siteCurrentSymlink,
@@ -2478,6 +2482,21 @@ export function siteEngineApplyExtraArgs(
 }
 
 /**
+ * Refuse a PHP series this server's operating system does not offer, before any
+ * playbook runs. The offered list is per OS (`suiteSeries` in the registry) and
+ * the same for every engine.
+ */
+export function assertPhpSeriesOffered(
+  phpSeries: readonly string[],
+  codename: string | undefined = readOsRelease()?.codename,
+): void {
+  for (const series of phpSeries) {
+    const message = unsupportedPhpSeriesMessage(series, codename);
+    if (message) throw new Error(message);
+  }
+}
+
+/**
  * `phpSeries` is the distinct set this deploy needs. The role only ever
  * *installs* what it is handed — it must not remove a series it was not asked
  * about, because the host serves many environments and this payload describes
@@ -2488,6 +2507,7 @@ async function installSiteEngines(
   phpSeries: readonly string[],
   phpExtensions: Record<string, string[]>,
 ): Promise<void> {
+  assertPhpSeriesOffered(phpSeries);
   const engines = [
     [
       needs.caddy,

@@ -68,6 +68,12 @@ generated vhost:
 | `{{ turbopanel_vendor_dir }}/lsphp/<series>/current` | symlink | — | what the per-site units' `ExecStart=` points at |
 | `{{ turbopanel_vendor_dir }}/lsphp/<series>/<version>/lib/php/ext` | symlink | — | `lib/php/<api>/`: the stable `extension_dir` a per-site php.ini names |
 
+Which series the role may be asked for follows the registry's `suiteSeries`
+table (Debian 13: 8.1 to 8.5): `src/orchestration/php-series-pins.test.ts` fails
+a suite that lists a series without a pinned, digested package set for it. PHP
+8.5 compiles opcache in, so its set has no `lsphp85-opcache` and the relocated
+php.ini does not load `opcache.so` (`builtinExtensions` in the registry).
+
 `openlitespeed_lsphp_series_map` carries per-series package data (version,
 package list, which packages are `_all`) because a series needs more than a
 version string to build its `.deb` URLs. Packages come from

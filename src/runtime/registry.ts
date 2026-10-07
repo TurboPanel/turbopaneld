@@ -32,6 +32,10 @@ type RuntimeEntry = Readonly<{
   series: Readonly<Record<string, RuntimeSeriesEntry>>;
   baselineExtensions?: readonly string[];
   optionalExtensions?: readonly string[];
+  /** Series offered per Debian/Ubuntu suite (`VERSION_CODENAME`). PHP only. */
+  suiteSeries?: Readonly<Record<string, readonly string[]>>;
+  /** Extensions compiled into a series, so no package exists for them. */
+  builtinExtensions?: Readonly<Record<string, readonly string[]>>;
 }>;
 
 const RUNTIMES = registryJson.runtimes as unknown as Readonly<
@@ -108,6 +112,46 @@ export function supportedSeries(runtime: RuntimeName): readonly string[] {
   return Object.keys(RUNTIMES[runtime].series).sort((a, b) =>
     a.localeCompare(b, undefined, { numeric: true })
   );
+}
+
+/**
+ * PHP series offered on a host whose `VERSION_CODENAME` is `codename`.
+ *
+ * The table mirrors what LiteSpeed's repository publishes per suite and is the
+ * same list for every engine (lsphp and php-fpm), so hosting is at parity
+ * across engines and server versions. A suite the table does not list (or an
+ * unreadable codename) gets every series the registry knows rather than none:
+ * the roles then fail with their own clear message if a pin is missing.
+ */
+export function phpSeriesForSuite(
+  codename: string | undefined,
+): readonly string[] {
+  const listed = codename
+    ? RUNTIMES.php.suiteSeries?.[codename.trim().toLowerCase()]
+    : undefined;
+  return listed ? [...listed] : supportedSeries("php");
+}
+
+/**
+ * Clear error for a PHP series the host's OS does not offer, or `undefined`
+ * when it does. Checked before any playbook runs, like
+ * {@link unsupportedSeriesMessage}.
+ */
+export function unsupportedPhpSeriesMessage(
+  version: string,
+  codename: string | undefined,
+): string | undefined {
+  const series = entitlementSeries("php", version);
+  const offered = phpSeriesForSuite(codename);
+  if (offered.includes(series) && runtimeGroup("php", series)) return undefined;
+  return `php ${version} is not offered on this server's operating system. Offered series: ${
+    offered.join(", ")
+  }.`;
+}
+
+/** Extensions compiled into a PHP series (no package to install for them). */
+export function phpBuiltinExtensions(series: string): readonly string[] {
+  return RUNTIMES.php.builtinExtensions?.[series] ?? [];
 }
 
 export function defaultSeries(runtime: RuntimeName): string {

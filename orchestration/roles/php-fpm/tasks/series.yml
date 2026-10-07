@@ -19,7 +19,9 @@
 # is PHP_INI_SYSTEM and there is no per-pool loading), so one site opting in
 # loads it for every site on that series. Additive by construction — apt
 # installs are idempotent and nothing here uninstalls, so the set accumulates
-# across deploys the way `node_app_versions` does.
+# across deploys the way `node_app_versions` does. Extensions compiled into a
+# series (`builtinExtensions` in the registry: opcache on 8.5) have no package
+# to install, so they are left out of the apt list.
 - name: Install php-fpm and extensions from sury ({{ php_fpm_series_item }})
   ansible.builtin.apt:
     name: >-
@@ -28,6 +30,7 @@
           'php' ~ php_fpm_series_item ~ '-cgi']
           + ((php_fpm_baseline_extensions
               + (php_fpm_extensions[php_fpm_series_item] | default([])))
+             | difference(runtime_registry.runtimes.php.builtinExtensions[php_fpm_series_item] | default([]))
              | unique | sort
              | map('regex_replace', '^', 'php' ~ php_fpm_series_item ~ '-')
              | list))
