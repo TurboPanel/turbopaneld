@@ -34,7 +34,7 @@ export type PhpSeriesUsageInput = Readonly<{
   pools: ReadonlyMap<string, readonly string[]>;
   /** Every per-site runtime id with a unit file. */
   runtimeIds: readonly string[];
-  /** Text of every vhost / OpenLiteSpeed config; read only when needed. */
+  /** Text of every nginx, Apache and OpenLiteSpeed vhost; read only when needed. */
   configTexts: readonly string[];
 }>;
 
