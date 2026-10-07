@@ -48,7 +48,7 @@ function buildEngineExec(
 ): ManagedEngineContext["exec"] {
   return async (argv, input) => {
     const result = await run(
-      ["exec", "-i", containerId, ...argv],
+      ["exec", "-i", "-u", "0", containerId, ...argv],
       input === undefined ? undefined : { input },
     );
     return {

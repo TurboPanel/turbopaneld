@@ -207,7 +207,17 @@ with `include_vars` in the `runtime-entitlement` role, and the daemon imports th
 same file in `../src/runtime/registry.ts`. Same bytes, so group names and gids
 cannot drift.
 
-**Groups are per `(runtime, series)`** — `tpphp84`, `tpnode24` — never one group
+**Deno** (`deno-app-runtime` role, `playbooks/deno-app-runtime-apply.yml`) vendors the
+tenant Deno under `vendor/deno-app/<series>/current`, the way `node-app-runtime`
+vendors Node: the newest stable release of the series from the official Deno
+distribution (`dl.deno.land/release-latest.txt`, else the release list when the
+series is no longer the newest), the archive checked against the release's
+published SHA-256 before it is unpacked, group `tpdeno<series>`, gid in the
+entitlement band. Deno ships one major, so the series is the major (`2`). The
+playbook and its `deno_app_versions` extra-var are on `tp-orchestrate`'s
+allowlists.
+
+**Groups are per `(runtime, series)`** — `tpphp84`, `tpnode24`, `tpdeno2` — never one group
 per runtime. Co-installed PHP versions are distinct binaries, so a single
 `tpphp` would mean granting 8.4 also grants 8.3 with whatever CVEs another
 tenant's pinned app carries. It is also what lets a shell wrapper resolve a
@@ -218,8 +228,9 @@ engine serves the site.
 
 gids are hand-assigned in the registry, never computed from the version string
 (that breaks the day `8.10` exists). Band **9900–9979** is entitlements;
-**9980–9999** is service identities (`tpbuild`, the sandboxed build account
-from the `build-user` role, is 9994). `../src/orchestration/service-accounts.test.ts`
+**9980–9999** is service identities (9994 stays reserved for `tpbuild`, the
+retired shared build account; builds now run as per-build systemd
+`DynamicUser=` identities). `../src/orchestration/service-accounts.test.ts`
 enforces uniqueness across both and that entitlement gids stay inside their band.
 
 **Membership is reconciled by the daemon, not by this role.** The role only

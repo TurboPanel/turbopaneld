@@ -2,12 +2,12 @@
 # tp-build-runner — runs one tenant build's commands inside the build sandbox
 # (POSIX sh, root:tp 0750 at <install>/lib/tp-build-runner).
 #
-# Only `tp-host build-run` starts it: as the unprivileged build account, as the
-# ExecStart of a transient turbopanel-build-<id>.service whose sandbox and
-# limits tp-host fixes. systemd hands this file to the unit as a credential
-# and /bin/sh runs that copy, so the build account never needs to traverse
-# /opt/turbopanel. Its one argument is the work directory tp-host derived from
-# the build id.
+# Only `tp-host build-run` starts it: as the ExecStart of a transient
+# turbopanel-build-<id>.service whose sandbox and limits tp-host fixes, running
+# as a throwaway user systemd creates for that one build (DynamicUser=yes).
+# systemd hands this file to the unit as a credential and /bin/sh runs that
+# copy, so the build's user never needs to traverse /opt/turbopanel. Its one
+# argument is the work directory tp-host derived from the build id.
 #
 # Interface (the daemon writes the spec; WP4 of the unprivileged-builds
 # design):
@@ -23,8 +23,10 @@
 #            end                    last line, exactly
 #
 #          Every command starts from an empty environment holding
-#          HOME=<work dir>, PATH=/usr/local/bin:/usr/bin:/bin and TMPDIR=/tmp
-#          (a private /tmp), then the spec's env in order (a later NAME wins).
+#          HOME=<work dir>, PATH=/usr/local/bin:/usr/bin:/bin and
+#          TMPDIR=<work dir>/tmp (inside the work tree, so its size counts
+#          against the work tree's cap; systemd's private /tmp also exists),
+#          then the spec's env in order (a later NAME wins).
 #   stdout/stderr  The commands' own streams, unbuffered by the runner.
 #   exit   0 when every command succeeded; otherwise the first failing
 #          command's status (the rest are not run), after a
@@ -144,6 +146,10 @@ EOF
 [ -n "$_ended" ] || rn_bad_spec "no end line (truncated?)"
 [ "$_steps" -ge 1 ] || rn_bad_spec "no command to run"
 
+# Temporary files go in the work tree (see TMPDIR above).
+_tmpdir="$WORK/tmp"
+mkdir -m 0700 -- "$_tmpdir" 2>/dev/null || [ -d "$_tmpdir" ] || rn_usage "cannot create $_tmpdir"
+
 set -f
 _step=0
 _old_ifs="$IFS"
@@ -168,7 +174,7 @@ for _run in $_runs; do
 $_envs
 EOF
   _status=0
-  env -i "HOME=$WORK" "PATH=$DEFAULT_PATH" "TMPDIR=/tmp" "$@" sh -c "$_command" || _status=$?
+  env -i "HOME=$WORK" "PATH=$DEFAULT_PATH" "TMPDIR=$_tmpdir" "$@" sh -c "$_command" || _status=$?
   if [ "$_status" -ne 0 ]; then
     printf 'tp-build-runner: step %s of %s failed (exit %s)\n' "$_step" "$_steps" "$_status" >&2
     # 127 is "command not found". Whether pnpm and yarn are on the build PATH

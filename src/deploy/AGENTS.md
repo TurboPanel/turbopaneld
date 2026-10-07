@@ -82,7 +82,9 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    `tmp/` are `0700` `username:<username>-grp`. SSH keys live in
    `/etc/ssh/turbopanel/authorized_keys`, never the home. Host-picked UID/GID come from
    **15001–60000** (`-K` on that `useradd` / `groupadd` only; `/etc/login.defs`
-   is not edited). An explicit operator override must be ≥ **15001**, and every
+   is not edited). An explicit operator override must be **15001–60000** (above it is
+   systemd's range for throwaway build users, which tp-host never treats as a
+   site owner), and every
    override in the batch is checked before the first host call so a later id
    below that floor cannot leave an earlier account already created. Existing
    accounts are adopted and never renumbered. Username max
@@ -224,6 +226,35 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    merge-patches the matching `managed` `lets_encrypt` row's
    `tls.metadata.acme` (`lastError`, `lastIssuedAt`, `notAfter`) and deliberately never touches `tls.status`
    — see `turbopanel/src/client/tls/acme-issuance-event.ts`.
+11b. **www modes** (`hostings[].www`, omitted = `off`): `both` serves the site
+   on the hostname and its other spelling (`www.` added or removed);
+   `www-to-root` serves the bare name and turns `www.<name>` into a
+   redirect-only site; `root-to-www` the other way round. The direction is
+   about the names, not about which one was typed. One helper,
+   `hostingWwwNames` in `src/contracts/commands-contracts.ts` (twin of the
+   control plane's `src/contracts/commands/hostname.ts`), expands a hostname;
+   `hostingServedNames` feeds the Caddy sites, the Traefik `Host()` rule and
+   the pinned-certificate map, and `hostingWwwRedirects` the redirect sites.
+   A redirect site answers `http://` and `https://` with one permanent
+   redirect to the scheme its target serves: `https://<target>{uri}` in one
+   hop normally (path and query kept), `http://<target>{uri}` when the target
+   has forced HTTPS off and so no HTTPS site. It runs under the hosting's own
+   TLS mode, so in `acme` mode it gets its own certificate and lands in the
+   acme manifest. Names with no www spelling (IP addresses, one-word names like
+   `localhost` or `com` from `www.com`) expand to nothing extra. An older
+   control plane's `wwwRedirect: true` is read as `www-to-root`
+   (`root-to-www` when the first name starts with `www.`).
+   **Where the rules are enforced:** `validateDeployWwwModes` (refuses a mode
+   on `tcp`/`udp`, a name with no other spelling, an other spelling already a
+   hostname in the deploy, and different www choices on paths of one name) is
+   run by the **control plane** before it sends the deploy; the daemon only
+   carries the twin for parity and tests. On the daemon side the guards are:
+   `assertHostingNamesFree` (called by `deploy-environment.ts` before
+   `compose up`: refuses a deploy whose names, typed or added by a www choice,
+   another environment's live site file already answers on, so the shared
+   Traefik never gets a routing label for someone else's name),
+   `addWwwRedirectSites` never replacing a served name, and Caddy's own
+   refusal of a duplicate site in the staged candidate check.
 12. Best-effort `docker compose ps --format json` — per-container identity/status
    (`containerId`, `containerName`, `composeServiceName`, `status`, optional
    `serviceId` from `payload.hostings`) is included in the command result when
@@ -816,9 +847,9 @@ new sink still needs a `SINKS` row and a refusal test.
 | `hostings[].tlsId` | hosting Caddyfile `tls` paths | `safeConfigToken` |
 | `hostings[].hostnames` | hosting Caddyfile site addresses, Traefik `Host` | `isValidHostname` (contract parse) |
 | `hostings[].bindAddress` | hosting Caddyfile `bind` | IP literal (contract parse, `assertValidBindAddress`) |
-| `sites[].webEnv` key / value | Apache `SetEnv` | `safeEnvName` / `safeEnvValue`, and no `${` (Apache expands it on every line, with no escape) |
+| `sites[].webEnv` key / value | Apache `SetEnv` | `safeEnvName` (refused) / `safeEnvValue`, and no `${` (Apache expands it on every line, with no escape) (value left out and named by `planSiteWebEnv`, not refused; `apacheSetEnvLine` still throws as the last line of defence) |
 | `sites[].webEnv` key / value | nginx `fastcgi_param` | `safeEnvName` (refused) / `safeEnvValue` and no `$` (nginx expands it inside quotes, no escape) and no name nginx or PHP sets itself (`SCRIPT_FILENAME`, `REMOTE_ADDR`, `HTTP_*`, ...) (all dropped and named, not refused: variables are inherited into every hosting) |
-| `sites[].webEnv` key / value | site Caddy `php_fastcgi env` | `safeEnvName` (refused) / `isSafeCaddyEnvValue` (dropped: a multi-line PEM is legitimate and other engines carry it) |
+| `sites[].webEnv` key / value | site Caddy `php_fastcgi env` | `safeEnvName` (refused) / `isSafeCaddyEnvValue` (dropped, and named by `planSiteWebEnv`) |
 | `sites[].php.settings` | php-fpm `php_admin_value[...]`, OpenLiteSpeed `phpIniOverride{}` | key allowlist (unknown keys dropped), `safePhpIniValue` |
 | `sites[].php.pool` | php-fpm pool tuning | key allowlist, `^[A-Za-z0-9._-]+$` |
 | `sites[].root` | every engine's document root | `assertSafeRoot` |

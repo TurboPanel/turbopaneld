@@ -40,7 +40,12 @@ function managed(...argv: string[]): string[] {
 
 async function work(root = "/var/lib/turbopanel-build"): Promise<BuildWork> {
   return await resolveBuildWork(
-    { serviceId: "svc1", releaseId: "20260927-120000", projectId: PROJECT },
+    {
+      serviceId: "svc1",
+      releaseId: "20260927-120000",
+      projectId: PROJECT,
+      owner: "alice",
+    },
     root,
   );
 }
@@ -118,22 +123,17 @@ function recordingRunFn(
 test("the sandbox is decided by root-owned facts, not by the guessed install mode", async () => {
   const dir = await Deno.makeTempDir({ prefix: "tp-sandbox-markers-" });
   try {
-    const passwd = join(dir, "passwd");
+    const buildRoot = join(dir, "turbopanel-build");
     const tpHost = join(dir, "tp-host");
-    const markers = { passwd, tpHost };
-    await Deno.writeTextFile(passwd, "root:x:0:0::/root:/bin/sh\n");
-    // A developer's machine: no build account, no managed tp-host.
+    const markers = { buildRoot, tpHost };
+    // A developer's machine: no build tree, no managed tp-host.
     assertEquals(await buildSandboxEnabled(markers), false);
     // This suite runs in a "development" layout (what a planted main.ts or
-    // ansible.cfg would make the daemon guess); the account alone wins.
-    await Deno.writeTextFile(
-      passwd,
-      "tpbuild:x:9994:9994::/nonexistent:/usr/sbin/nologin\n",
-      { append: true },
-    );
+    // ansible.cfg would make the daemon guess); the build tree alone wins.
+    await Deno.mkdir(buildRoot);
     assertEquals(await buildSandboxEnabled(markers), true);
     // So does the managed tp-host alone (the role not yet converged).
-    await Deno.writeTextFile(passwd, "root:x:0:0::/root:/bin/sh\n");
+    await Deno.remove(buildRoot);
     await Deno.writeTextFile(tpHost, "#!/bin/sh\n");
     assertEquals(await buildSandboxEnabled(markers), true);
   } finally {
@@ -151,16 +151,47 @@ test("a build's work tree is derived from its release and named the way tp-host 
     `/var/lib/turbopanel-build/work/${first.buildId}`,
   );
   assertEquals(first.checkoutDir, `${first.workDir}/source`);
-  assertEquals(first.cacheDir, `/var/lib/turbopanel-build/cache/${PROJECT}`);
+  assertEquals(first.owner, "alice");
+  // One cache per site owner and project, where the unit binds it.
+  assertEquals(
+    first.cacheDir,
+    `/var/lib/turbopanel-build/caches/alice/${PROJECT}`,
+  );
   await assertRejects(
     () =>
       resolveBuildWork({
         serviceId: "svc1",
         releaseId: "r1",
         projectId: "../etc",
+        owner: "alice",
       }),
     Error,
     "cannot name a build cache directory",
+  );
+  await Promise.all(
+    [
+      "",
+      "../x",
+      "a/b",
+      "-x",
+      "x-",
+      "a--b",
+      "a.b",
+      "a b",
+      "x".repeat(33),
+    ].map((owner) =>
+      assertRejects(
+        () =>
+          resolveBuildWork({
+            serviceId: "svc1",
+            releaseId: "r1",
+            projectId: PROJECT,
+            owner,
+          }),
+        Error,
+        "cannot own a sandboxed build",
+      )
+    ),
   );
 });
 
@@ -241,7 +272,7 @@ test("a build is the fixed build-run argv with the spec on stdin, then build-ret
     onOutput: (_stream, line) => lines.push(line),
   });
   assertEquals(child.argv, [
-    managed("build-run", target.buildId, PROJECT),
+    managed("build-run", target.buildId, PROJECT, "alice"),
   ]);
   assertEquals(child.stdin(), "tp-build-spec 1\nrun dHJ1ZQ==\nend\n");
   assertEquals(lines, ["built"]);

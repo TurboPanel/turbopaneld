@@ -108,7 +108,11 @@ for (const [name, engine] of engines) {
 
 for (const [name, engine] of engines) {
   test(`${name} applyCredentials grants database by database and stops at the first failure`, async () => {
-    const { ctx, inputs, maxInFlight } = failingContext("db_b");
+    // Postgres also names every listed database in its lock-down statements;
+    // fail on the grant itself so the test still checks grant-by-grant order.
+    const { ctx, inputs, maxInFlight } = failingContext(
+      name === "postgres" ? 'ON DATABASE "db_b" TO' : "db_b",
+    );
     await assertRejects(() =>
       engine.applyCredentials(ctx, [{
         principalId: "p1",
@@ -119,7 +123,7 @@ for (const [name, engine] of engines) {
         privileges: ["read-write"],
       } as ManagedApplyCredential])
     );
-    const grants = inputs.filter((input) => /GRANT/i.test(input));
+    const grants = inputs.filter((input) => /\bGRANT\b/i.test(input));
     assertEquals(grants.length, 2);
     assertEquals(grants[0]!.includes("db_a"), true);
     assertEquals(grants[1]!.includes("db_b"), true);

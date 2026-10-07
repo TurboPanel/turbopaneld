@@ -1,5 +1,5 @@
 #!/bin/sh
-# tp-build-loopback — keeps the build account off the platform's loopback ports
+# tp-build-loopback — keeps sandboxed builds off the platform's loopback ports
 # (POSIX sh, root:root, installed next to tp-host in lib/).
 #
 # A build (`tp-host build-run`) shares the host's network. Turbopack (Next.js)
@@ -7,12 +7,23 @@
 # build picks itself, so the build unit may use loopback. systemd filters by
 # address only, so this script adds the port filter: one nftables table,
 # `inet turbopanel_build`, whose output hook (same hook and priority as
-# tp-php-loopback's table) refuses anything the build account (tpbuild) sends to
+# tp-php-loopback's table) refuses anything the running build sends to
 # 127.0.0.0/8 or ::1 on a port in DENY_PORTS below: every fixed port the
 # platform listens on (database proxy and its admin and metrics ports, the
 # panel, the hosting web servers and their metrics and admin ports, the site and
 # app listen bands). Every other loopback port stays open, and so does the
 # resolver stub (53) because it is not listed.
+#
+# Which traffic is the build's: every build runs as a throwaway user systemd
+# creates for that run (DynamicUser=yes), so there is no fixed uid to match.
+# The rules match the build unit's own cgroup instead (`socket cgroupv2`):
+# every process of turbopanel-build-<id>.service, whatever uid it runs as, and
+# nothing else on the host. nftables turns the cgroup path into its id when the
+# rules load, so they can only be loaded once the unit's cgroup exists: the unit
+# runs `sync <build-id> <owner>` itself, as its `ExecStartPre=+` (inside it),
+# before the build's first command (FAILS CLOSED: when this exits non-zero the
+# build does not start). A cgroup id is never reused, so rules left behind by a finished build
+# match nothing.
 #
 # Residual risk, accepted by the owner: a loopback service on a port that is
 # NOT in DENY_PORTS (for example a Docker port a site owner published on
@@ -22,18 +33,21 @@
 # Replies: `ct state established,related accept` comes first so the build's own
 # local servers can answer their clients; its new connections hit the filter.
 #
-# One verb, `sync`, run as root by `tp-host build-run` before the unit is
-# created and again as the unit's `ExecStartPre=+` (FAILS CLOSED: when this
-# exits non-zero the build does not start). The whole table is replaced in one
-# atomic nft transaction and read back. The table is persistent and only
-# matches tpbuild's uid, so it is harmless between builds.
+# One verb, `sync`, run as root:
+#   sync            by `tp-host build-run` before the unit exists: loads the
+#                   table with no build rule (the previous build's go), which
+#                   also proves nft works before a build is started.
+#   sync BUILD-ID OWNER
+#                   by turbopanel-build-<BUILD-ID>.service as `ExecStartPre=+`:
+#                   loads the rules for that unit's cgroup, which must be
+#                   exactly the one systemd builds for OWNER's build slice.
+# The whole table is replaced in one atomic nft transaction and read back.
 #
 # Needs `nft` and `flock` (Ansible installs the nftables and util-linux
 # packages). When either is missing the script exits non-zero and says so.
 set -eu
 umask 077
 
-BUILD_ACCOUNT="tpbuild"
 # The one list of ports the build is refused on loopback, tcp and udp. Single
 # ports and inclusive ranges. Pinned to the code that owns each port by
 # src/orchestration/build-loopback.test.ts.
@@ -63,15 +77,50 @@ else
   P="$TP_HOST_TEST_PREFIX"
 fi
 
-[ "$#" -eq 1 ] && [ "$1" = "sync" ] || tp_die "only: sync"
+# The unit runs this with its own stdin, the build spec: never read it.
+exec </dev/null
 
-if [ -n "$TP_TEST" ]; then
-  _uid="$(awk -F: -v n="$BUILD_ACCOUNT" '$1 == n { print $3; exit }' "$P/etc/passwd")"
-else
-  _uid="$(getent passwd "$BUILD_ACCOUNT" | cut -d: -f3)"
+{ [ "$#" -eq 1 ] || [ "$#" -eq 3 ]; } && [ "$1" = "sync" ] || tp_die "only: sync [BUILD-ID OWNER]"
+
+# The cgroup systemd builds for build $1 of owner $2 (kept equal to tp-host's
+# tp_build_cgroup): the owner's slice is turbopanel-<owner>.slice with each `-`
+# made `.` (a dash is a slice level), its build slice the same name plus
+# `-build`; a build with no owner (tpbuild) sits in turbopanel-tpbuild.slice.
+# Sets _cg (no leading slash) and _level (its depth).
+expected_cgroup() {
+  case "$1" in
+    ''|-*|*[!a-z0-9-]*) tp_die "refusing build id $1" ;;
+  esac
+  [ "${#1}" -le 64 ] || tp_die "refusing build id $1"
+  case "$2" in
+    ''|-*|*-|*--*|*[!A-Za-z0-9_-]*) tp_die "refusing owner $2" ;;
+  esac
+  [ "${#2}" -le 32 ] || tp_die "refusing owner $2"
+  if [ "$2" = "tpbuild" ]; then
+    _cg="turbopanel.slice/turbopanel-tpbuild.slice/turbopanel-build-$1.service"
+    _level=3
+    return
+  fi
+  case "$2" in containers|tp*) tp_die "refusing owner $2" ;; esac
+  _owner_slice="turbopanel-$(printf '%s' "$2" | tr -- '-' '.')"
+  _cg="turbopanel.slice/$_owner_slice.slice/$_owner_slice-build.slice/turbopanel-build-$1.service"
+  _level=4
+}
+
+# This script runs inside the build unit (its own ExecStartPre=+), so its
+# cgroup must be exactly the expected one; run from anywhere else, it refuses.
+_match=""
+if [ "$#" -eq 3 ]; then
+  expected_cgroup "$2" "$3"
+  if [ -n "$TP_TEST" ]; then
+    _self="$(cat -- "$P/run/self-cgroup" 2>/dev/null || true)"
+  else
+    _self="$(sed -n 's/^0:://p' /proc/self/cgroup)"
+  fi
+  [ "$_self" = "/$_cg" ] ||
+    tp_die "not running in turbopanel-build-$2.service's own cgroup; builds cannot start without their network rules"
+  _match="socket cgroupv2 level $_level \"$_cg\""
 fi
-case "$_uid" in ''|*[!0-9]*) tp_die "no $BUILD_ACCOUNT account; builds cannot start" ;; esac
-[ "$_uid" -ge 100 ] && [ "$_uid" -ne 65534 ] || tp_die "$BUILD_ACCOUNT has uid $_uid; refusing"
 
 ruleset() {
   _elems=""
@@ -87,14 +136,17 @@ table inet turbopanel_build {
   }
   chain output {
     type filter hook output priority -150; policy accept;
-    meta skuid $_uid ct state established,related accept
-    meta skuid $_uid ip daddr 127.0.0.0/8 tcp dport @denied_ports reject with tcp reset
-    meta skuid $_uid ip daddr 127.0.0.0/8 udp dport @denied_ports reject
-    meta skuid $_uid ip6 daddr ::1 tcp dport @denied_ports reject with tcp reset
-    meta skuid $_uid ip6 daddr ::1 udp dport @denied_ports reject
-  }
-}
 RULES
+  if [ -n "$_match" ]; then
+    cat <<RULES
+    $_match ct state established,related accept
+    $_match ip daddr 127.0.0.0/8 tcp dport @denied_ports reject with tcp reset
+    $_match ip daddr 127.0.0.0/8 udp dport @denied_ports reject
+    $_match ip6 daddr ::1 tcp dport @denied_ports reject with tcp reset
+    $_match ip6 daddr ::1 udp dport @denied_ports reject
+RULES
+  fi
+  printf '  }\n}\n'
 }
 
 _rules="$(ruleset)"
@@ -110,5 +162,8 @@ exec 9>/run/turbopanel-build-loopback.lock
 flock 9
 printf '%s\n' "$_rules" | nft -f - || tp_die "nft refused the build network rules; builds cannot start"
 _live="$(nft list table inet turbopanel_build)" || tp_die "build network rules did not load"
-printf '%s\n' "$_live" | grep -Eq "meta skuid $_uid " || tp_die "uid $_uid missing from the loaded build rules"
 printf '%s\n' "$_live" | grep -q "13306" || tp_die "build rules loaded without the port list"
+if [ -n "$_match" ]; then
+  printf '%s\n' "$_live" | grep -qF "socket cgroupv2 level $_level " ||
+    tp_die "the build's cgroup is missing from the loaded build rules"
+fi

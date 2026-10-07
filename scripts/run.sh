@@ -111,14 +111,31 @@ tp_ca_parses() {
 # `curl ... || echo 000` concatenates onto an already-printed code (commonly
 # producing 000000) so the CA-fetch `000)` retry never runs and leaf checks
 # can treat a TLS/transport failure as success.
+#
+# A failed name lookup (curl exit 6) or refused connection (exit 7) is retried
+# like tp_curl_net_retry does (4 attempts, 2 s / 4 s / 8 s waits), so one
+# resolver blip does not read as "could not reach the control plane". Every
+# other failure, a TLS verification failure included, answers 000 at once.
 tp_curl_http_code() {
   _tp_curl_cmd="$1"
   shift
-  if _tp_http_code=$("$_tp_curl_cmd" -w '%{http_code}' "$@"); then
-    printf '%s' "$_tp_http_code"
-  else
-    printf '%s' "000"
-  fi
+  _tp_hc_try=1
+  while :; do
+    _tp_hc_rc=0
+    _tp_http_code=$("$_tp_curl_cmd" -w '%{http_code}' "$@") || _tp_hc_rc=$?
+    if [ "$_tp_hc_rc" -eq 0 ]; then
+      printf '%s' "$_tp_http_code"
+      return 0
+    fi
+    case "$_tp_hc_rc" in
+      6 | 7) ;;
+      *) break ;;
+    esac
+    [ "$_tp_hc_try" -ge 4 ] && break
+    sleep $((${TP_CURL_NET_RETRY_UNIT:-2} * (1 << (_tp_hc_try - 1))))
+    _tp_hc_try=$((_tp_hc_try + 1))
+  done
+  printf '%s' "000"
 }
 
 # The public installer host that serves an update channel's run.sh: rc is the

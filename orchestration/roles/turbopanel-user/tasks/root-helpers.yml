@@ -70,8 +70,8 @@
     remote_src: true
   when: turbopanel_dev_user | default('') | length == 0
 
-# tp-build-loopback keeps the build account (tpbuild) off the platform's
-# loopback ports; tp-host build-run runs it before every build.
+# tp-build-loopback keeps sandboxed builds off the platform's loopback ports;
+# tp-host build-run and each build unit run it before every build.
 - name: Install tp-build-loopback
   ansible.builtin.copy:
     src: "{{ turbopanel_orchestration_dir }}/scripts/tp-build-loopback"

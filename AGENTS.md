@@ -126,7 +126,8 @@ state dir, so destroying an engine never leaves an orphan tree on that storage.
 
 The **host** allocates UID/GID via `useradd`/`groupadd` from **15001–60000**
 (`-K` on that one command; `/etc/login.defs` is not edited). The control plane
-may send an optional operator override, which must be ≥ **15001** and clear
+may send an optional operator override, which must be **15001–60000** (above
+it is systemd's 61184–65519 range for throwaway build users) and clear
 the `tp*` service band **9989–9999**. Homes are keyed on the username. Override
 the home root with
 `TURBOPANEL_PRINCIPAL_HOME_ROOT` (`layout.principalHomeRoot`). **Platform CA**
@@ -573,7 +574,7 @@ from production code.
 | ----- | --- | ------ | --------- |
 | pre-commit | scan-secrets only (tests deferred) | scan-secrets + `deno fmt` + `lint` + `check:layout` + `check:vocabulary` (typecheck/tests deferred) | secret scan always; daemon fmt/guards via the pinned Deno or `vagrant ssh`; the cheap half of `verify.yml` runs in ~1s so contract breaks never reach CI; suites in CI / guest |
 | PR → `trunk` | `verify.yml` | `verify.yml` (`verify` + `contract-drift`, folded into the single `ci-ok` job that the ruleset requires) | blocks merge |
-| push `trunk` | `verify.yml` | `verify.yml`; `publish` job `needs: verify` → the `trunk` CDN drop **and** the rolling GitHub `canary` pre-release (`canary` job, via `TurboPanel/dev` `gh-canary.yml`) | nothing compiles from failing code |
+| push `trunk` | `verify.yml` | `verify.yml`; `publish` job `needs: verify` → the rolling GitHub `canary` pre-release (`canary` job, via `TurboPanel/dev` `gh-canary.yml`) | nothing compiles from failing code |
 | promote → rc/release | `promote.yml` (notes-only) | `promote.yml` → `TurboPanel/dev` `gh-promote.yml`: **signature + sha256/size of the tested canary build, manifest re-signed, same bytes**; gh-release.yml re-downloads and re-hashes after publish | no new code enters after publish |
 
 **Automatic promotion (two PRs, the normal path):** `promote-prs.yml` keeps a **trunk → staging** PR ("Release Candidate x.y.z-rc.N") open after every green trunk build (opened with the Release App token so `ci-ok` runs; merge commit only). Merging it makes a push to `staging`, which runs `publish-rc.yml` (from the pushed commit, so the first merge already works): it finds the merged PR's head commit, waits for that commit's canary build, finds the canary manifest that names exactly that commit, then runs the shared promote workflows with **no approval gate** (`approval-environment: ""` — the merge is the act) to publish `v<base>-rc.<N>` (N = one past the highest existing rc tag; a bad rc is fixed on trunk and the next merge publishes rc.N+1), and opens/refreshes the **staging → live** PR "Release x.y.z". `verify.yml` skips Sonar on PRs into staging/live (no new code in a promotion). Merging the staging → live PR pushes to `live`, which runs `publish-release.yml`: it picks the newest rc that has not shipped, runs the shared promote workflows (the `release` environment approval stays on this hop until the path has run once end to end) to publish `v<x.y.z>`, and nothing else: no PR opens afterwards. **Versions come from git tags** (no version file, no "Start x.y.z" PR): the base is the newest release tag's next patch, unless an unreleased rc or a `start/vX.Y.0` marker names a higher version; canaries are `<base>-canary.<N>` with N restarting at 1 per base; only the base is stamped into the build (the committed version numbers are what a local build reports). TurboPanel/dev's Version From Tags action (`scripts/promote/version.sh`) works them out. A minor or major is started with turbopaneld's **Start Next Version** workflow (`bump: minor|major`), which pushes the `start/` marker in all four repos and rebuilds their trunks. The plain `promote.yml` form below is **break-glass only**.
@@ -727,7 +728,11 @@ it regresses:
     read *as the daemon account* (`setpriv`);
   - checks systemd unit content before installing it: known directives only,
     tenant services `User=<principal>` / `Group=<principal>-grp` /
-    `Slice=turbopanel-<principal>.slice` / `NoNewPrivileges=yes` / empty
+    `Slice=turbopanel-<principal>.slice` (each `-` in the name written `.`:
+    systemd reads a dash as a slice level, so `a-b` would otherwise sit inside
+    `a`'s slice; `tp_principal_slice`, `principalSliceName`; `containers` and
+    `tpbuild` are platform slices no principal may take) /
+    `NoNewPrivileges=yes` / empty
     capability sets, no `+`/`!`/`:` exec prefixes, no line ending in a
     backslash (systemd would join it onto the next line, hiding e.g. `User=`
     from this line-by-line check), a timer may only start its own service;
@@ -785,32 +790,70 @@ it regresses:
   - allows `systemctl` verbs on `turbopanel*` / `wg-quick@tp0` / `ssh(d)`
     units, fixed `journalctl`/`ss`/`sshd -t|-T`/`sysctl`/`ip`/`wg` shapes, and
     xtables without `--modprobe` or rule files.
-  - starts tenant builds only through `build-run <build-id> <project-id>`
-    (ids `[a-z0-9-]{1,64}`, nothing else in argv): it checks the `tpbuild`
-    account (service band, own group, only `tpnode*` supplementary groups)
-    and the root-owned `/var/lib/turbopanel-build/{work,cache}` layout, takes
-    a host-wide lock (one build at a time), hands the pinned `work/<id>` to
-    `tpbuild` (`chown -R -h -P`), and execs `systemd-run --wait --pipe` with a
-    fixed property set (`NoNewPrivileges`, no capabilities,
-    `ProtectSystem=strict`, private tmp/devices/IPC/PIDs, the daemon's trees,
-    principal homes, Docker/containerd/gate sockets and `/etc/ssh` made
-    inaccessible, private/link-local/CGNAT egress denied except the host's
-    literal nameservers, loopback open but port-filtered per `tpbuild` uid by
-    `lib/tp-build-loopback` (nftables table `inet turbopanel_build`, loaded by
-    `build-run` and again as the unit's `ExecStartPre=+`; no `nft` or a load
-    failure means the build does not start), 4G memory, 200% CPU, 1800 s, `tpbuild.slice`)
-    whose only command is `/bin/sh` on `lib/tp-build-runner`, loaded as a
-    systemd credential (PID 1 reads it; the build account gets a private
-    copy); the spec rides
-    stdin to the runner (format in its header). Below systemd 255 (Debian 13 /
-    Ubuntu 24.04 floor) it warns and drops the newer properties, below 247 it
-    refuses. `build-return <build-id>` chowns the tree back to the caller only
-    once `turbopanel-build-<id>.service` is inactive; abort is
-    `systemctl stop turbopanel-build-<id>.service`. `turbopanel-build-*.service`
-    unit files are refused at install. On a managed host the daemon sends
-    every native/static release build through it
-    (`src/deploy/release/build-sandbox.ts`), so no tenant build command runs
-    as `tp`;
+  - starts tenant builds only through
+    `build-run <build-id> <project-id> <owner>` (ids `[a-z0-9-]{1,64}`; the
+    owner is the site owner's Linux user, an existing principal with a uid
+    in 15001-60000 and a plain name with no `--`, never another `tp*` name,
+    or `tpbuild` for a build nobody owns; checked again under the build lock;
+    nothing else in argv). Every build runs as a **throwaway user systemd creates for that one
+    run** (`DynamicUser=yes`, `User=tpb-<16 hex of sha256(owner/project)>`: a
+    uid from systemd's 61184-65519 range that exists only while the unit runs,
+    never a host account, never in docker/tp/sudo, refused if a host account
+    or group already has that name or any group lists a `tpb-*` member), with
+    every `tpnode<series>` and `tpdeno<series>` group as
+    `SupplementaryGroups=`, inside the **site owner's own resource group**
+    (`Slice=turbopanel-<owner>-build.slice`, a child of the owner's
+    `turbopanel-<owner>.slice`, dashes in the owner's name written `.`, so a
+    build counts against whatever limits that slice carries;
+    `turbopanel-tpbuild.slice` with no owner; both slice names are refused as
+    unit files). It checks the root-owned
+    `/var/lib/turbopanel-build/{work,caches}` layout, takes a host-wide lock
+    (one build at a time), makes `caches/<owner>/<project>` (root 0700 dirs;
+    a cache is never shared between site owners or projects), and execs
+    `systemd-run --wait --pipe` with a fixed property set (`NoNewPrivileges`,
+    no capabilities, `ProtectSystem=strict`, systemd's private tmp, private
+    devices/IPC/PIDs, the daemon's trees, principal homes,
+    Docker/containerd/gate sockets and `/etc/ssh` made inaccessible,
+    `/var/lib/turbopanel-build` a read-only tmpfs with only this build's work
+    tree and cache bound in, private/link-local/CGNAT egress denied except
+    the host's literal nameservers, loopback open but port-filtered for the
+    unit's own cgroup by `lib/tp-build-loopback` (nftables table
+    `inet turbopanel_build`, `socket cgroupv2 level N "<unit cgroup>"`; loaded
+    empty by `build-run` to prove nft works, then with the build's rules as the
+    unit's first `ExecStartPre=+ … sync <id> <owner>`, which refuses unless
+    its own cgroup is exactly the one systemd builds for that owner's build
+    slice; no `nft` or a load failure means the build does not start), 4G
+    memory, 200% CPU, 1800 s). The unit's second `ExecStartPre=+` is
+    `tp-host build-handover <id> <project> <owner>`: refused unless its cgroup
+    is exactly that unit's, it reads the throwaway uid from the unit's
+    `RuntimeDirectory=` (`/run/turbopanel-build-<id>`, created by systemd
+    owned by that user; read-only to the build so it cannot fill `/run`),
+    takes the work tree from the daemon (top directory root 0700), refuses
+    (and unlinks) any regular file with more than one name in it (a hard link
+    the daemon planted to a file outside), and only then hands the pinned
+    cache and work tree to the build's user (`chown -R -h -P`). The only command is
+    `/bin/sh` on `lib/tp-build-runner`, loaded as a systemd credential (PID 1
+    reads it; the build's user gets a private copy); the spec rides stdin to
+    the runner (format in its header; `TMPDIR` is `<work>/tmp`, because
+    `DynamicUser=` always gives the unit systemd's own private `/tmp`: a 10%
+    of RAM tmpfs on systemd 257, a hard limit; host `/tmp` on 255, which
+    `build-watch` checks every 10 s against 1.5 GB, not a hard limit).
+    `principal-remove` deletes the owner's `caches/<owner>`, so a later owner
+    given the same name never builds with them. The image builder's plan
+    version is recorded only when it is 1-64 plain characters. Not `CacheDirectory=`: on systemd 257 with `DynamicUser=` it is
+    owned by `nobody` on disk and mounted `noexec`, which breaks `npx`/`pnpm
+    dlx`. Below systemd 255 (Debian 13 / Ubuntu 24.04 floor) it warns and
+    drops the newer properties, below 247 it refuses. `build-return
+    <build-id>` chowns the tree back to the caller only once
+    `turbopanel-build-<id>.service` is inactive; abort is `systemctl stop
+    turbopanel-build-<id>.service`. `turbopanel-build-*.service` unit files
+    are refused at install. On a managed host the daemon sends every
+    native/static release build, and the image builder's prepare step,
+    through it (`src/deploy/release/build-sandbox.ts`,
+    `src/deploy/release/image-prepare-sandbox.ts`), so no tenant build command
+    and no repository-reading build tool runs as `tp`. The shared `tpbuild`
+    account, its cache and `tpbuild.slice` are retired (the `build-user` role
+    removes them; uid 9994 stays reserved);
     **Build loopback (plain words):** Turbopack's helper processes talk over
     127.0.0.1 on ports the build picks, so the build may use loopback. The
     build is refused every known platform port (list in one place,
@@ -1061,7 +1104,7 @@ and the mount kept). There is one copy of that function. A Docker apt
 
 **Post-check rules (what "left over" means).** The final inventory must
 match what can exist after the purge. A `.slice` unit that systemd still
-reports as loaded but with no unit file and inactive (`tpbuild.slice`) is gone
+reports as loaded but with no unit file and inactive (the retired `tpbuild.slice`) is gone
 (`tp_unit_present`). Once Docker Engine was purged (`TP_DOCKER_ENGINE_GONE`)
 the final inventory skips Docker, so the `<id>-in` containers removed with it
 are not reported. Anything else still on disk stays a failure. When the Docker daemon is not answering at the final check, the pre-purge container and network lists are carried forward only if the removal step itself was skipped (`TP_DOCKER_LEFT`); a daemon that is gone after a removal that ran holds nothing, so it is never a false failure. The purge also

@@ -18,7 +18,7 @@ import registryJson from "../../orchestration/runtime-registry.json" with {
   type: "json",
 };
 
-export type RuntimeName = "php" | "node";
+export type RuntimeName = "php" | "node" | "deno";
 
 export type RuntimeSeriesEntry = Readonly<{
   /** Unix group whose only meaning is "may exec this runtime series". */
