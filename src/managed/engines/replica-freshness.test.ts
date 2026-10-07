@@ -5,6 +5,7 @@ import {
   parseMariadbFreshness,
   parseMysqlFreshness,
 } from "./replica-freshness.ts";
+import { replicaFreshnessSql } from "./mysql-sql.ts";
 import { StandbyStreamingTracker } from "../standby-streaming.ts";
 
 /** Sonar only recognizes `test()`. */
@@ -71,7 +72,9 @@ test("mysql empty or NULL received set is unknown, never applied", () => {
   for (const rcv of ["", "NULL"]) {
     const out = parseMysqlFreshness(mysqlRow({ rcv, subset: "1" }));
     assertEquals(out.fullyApplied, undefined);
-    assertEquals(out.receivedGtid, "");
+    // Omitted, not "": the control plane rejects a zero-length GTID string.
+    assertEquals("receivedGtid" in out, false);
+    assertEquals(JSON.stringify(out).includes('Gtid":""'), false);
   }
   assertEquals(
     parseMysqlFreshness(mysqlRow({ exec: "" })).fullyApplied,
@@ -108,6 +111,7 @@ function mariadb(
 const MDB_OK = {
   Slave_IO_Running: "Yes",
   Slave_SQL_Running: "Yes",
+  Using_Gtid: "Slave_Pos",
   Gtid_IO_Pos: "0-1-100",
   gtid_slave_pos: "0-1-100",
 };
@@ -152,6 +156,7 @@ test("mariadb empty GTID positions are unknown; malformed reports nothing", () =
     mariadb({ ...MDB_OK, Gtid_IO_Pos: "", gtid_slave_pos: "" }),
   );
   assertEquals(empty.fullyApplied, undefined);
+  assertEquals(JSON.stringify(empty).includes('Gtid":""'), false);
   assertEquals(
     parseMariadbFreshness(mariadb({ ...MDB_OK, gtid_slave_pos: "NULL" }))
       .fullyApplied,
@@ -180,4 +185,29 @@ test("tracker honours a per-read receipt limit (heartbeat-paced engines)", () =>
   assertEquals(tracker.lastStreaming("a", 100_000)?.ageMs, 20_000);
   tracker.forget("a");
   assertEquals(tracker.lastStreaming("a", 100_000), undefined);
+});
+
+test("mysql freshness query reads the default channel only", () => {
+  const sql = replicaFreshnessSql();
+  assertEquals(sql.match(/CHANNEL_NAME = ''/g)?.length, 2);
+});
+
+test("mysql two-channel output is unknown, not an arbitrary channel", () => {
+  assertEquals(parseMysqlFreshness(mysqlRow() + mysqlRow({ rcv: "b:1" })), {});
+});
+
+test("mariadb without GTID replication reports no GTID proof", () => {
+  for (const using of ["No", "", "no"]) {
+    const out = parseMariadbFreshness(
+      mariadb({ ...MDB_OK, Using_Gtid: using }),
+    );
+    assertEquals(out.fullyApplied, undefined);
+    assertEquals(out.receivedGtid, undefined);
+    assertEquals(out.receiptAgeSeconds, 0);
+  }
+  assertEquals(
+    parseMariadbFreshness(mariadb({ ...MDB_OK, Using_Gtid: "Current_Pos" }))
+      .fullyApplied,
+    true,
+  );
 });

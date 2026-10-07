@@ -66,8 +66,10 @@ export function parseMysqlFreshness(stdout: string): ReplicaFreshness {
   const received = boundedGtid(cols[1]);
   const executed = boundedGtid(cols[2]);
   if (received === undefined || executed === undefined) return {};
-  const out: ReplicaFreshness = { receivedGtid: received };
-  out.executedGtid = executed;
+  // An empty set is unknown: the field is left out, never sent as "".
+  const out: ReplicaFreshness = {};
+  if (received !== "") out.receivedGtid = received;
+  if (executed !== "") out.executedGtid = executed;
   // Nothing received since this server started (the set resets on restart)
   // proves nothing about the source: unknown, not "applied".
   if (received !== "" && executed !== "") {
@@ -93,8 +95,12 @@ export function parseMysqlFreshness(stdout: string): ReplicaFreshness {
  * MariaDB: vertical `SHOW SLAVE STATUS` followed by
  * `SELECT @@GLOBAL.gtid_slave_pos AS gtid_slave_pos`. Received is
  * `Gtid_IO_Pos`, applied is `gtid_slave_pos`; equal means fully applied.
- * `Slave_IO_Running: Yes` is the only receiving signal MariaDB gives (no
- * heartbeat timestamp), so it counts as receipt now.
+ * Requires `Using_Gtid` of Slave_Pos or Current_Pos, else the GTID fields are
+ * unknown. `Slave_IO_Running: Yes` is the only receiving signal MariaDB gives
+ * (no heartbeat timestamp), so it counts as receipt now. It only shows the IO
+ * thread is connected: it stays Yes until `slave_net_timeout` (~60 s) after
+ * the source dies, so `ageMs` from it is NOT proof the source was alive; a
+ * gate must also rely on `fullyApplied` and peer evidence.
  */
 export function parseMariadbFreshness(verbose: string): ReplicaFreshness {
   const fields = new Map<string, string>();
@@ -108,13 +114,17 @@ export function parseMariadbFreshness(verbose: string): ReplicaFreshness {
   const received = boundedGtid(fields.get("Gtid_IO_Pos"));
   const executed = boundedGtid(fields.get("gtid_slave_pos"));
   if (received === undefined || executed === undefined) return {};
-  const out: ReplicaFreshness = {
-    receivedGtid: received,
-    executedGtid: executed,
-  };
-  if (received !== "" && executed !== "") {
-    out.fullyApplied = normalizeGtidList(received) ===
-      normalizeGtidList(executed);
+  const out: ReplicaFreshness = {};
+  // With binlog-position replication both positions can be stale yet equal:
+  // only GTID replication makes them a proof.
+  const usingGtid = (fields.get("Using_Gtid") ?? "").toLowerCase();
+  if (usingGtid === "slave_pos" || usingGtid === "current_pos") {
+    if (received !== "") out.receivedGtid = received;
+    if (executed !== "") out.executedGtid = executed;
+    if (received !== "" && executed !== "") {
+      out.fullyApplied = normalizeGtidList(received) ===
+        normalizeGtidList(executed);
+    }
   }
   const io = (fields.get("Slave_IO_Running") ?? "").toLowerCase();
   if (io === "yes") out.receiptAgeSeconds = 0;

@@ -105,7 +105,11 @@ GTID sets: MySQL received is a subset of executed; MariaDB `Gtid_IO_Pos` equals
 `true`. A second `PgStandbySampler` (engines mysql, mariadb, every 2 s) feeds
 the same streaming tracker, so `lastStreaming.ageMs` exists for them too (MySQL:
 newest heartbeat or queued transaction while the IO thread is `ON`; MariaDB: IO
-thread `Yes`). Parsers: `managed/engines/replica-freshness.ts`.
+thread `Yes`, which only shows the thread is connected and stays `Yes` until
+`slave_net_timeout`, ~60 s after the source dies, so the gate must also rely
+on `fullyApplied` and peer evidence). Empty/NULL GTID sets are omitted, never
+sent as `""`. MySQL reads the default channel only; MariaDB needs `Using_Gtid`
+Slave_Pos/Current_Pos. Parsers: `managed/engines/replica-freshness.ts`.
 
 **Rate-limited control-plane calls (HTTP 429).** The control plane limits each
 daemon's REST calls to about 30 a minute per route per server. An authenticated
