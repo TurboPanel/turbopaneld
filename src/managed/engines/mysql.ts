@@ -14,6 +14,7 @@ import type {
 import { sanitizeForLog } from "../../util/logger.ts";
 import { forEachSequential } from "../../util/sequential.ts";
 import { grantDatabasePrivileges } from "./grant-databases.ts";
+import { parseMysqlFreshness } from "./replica-freshness.ts";
 import {
   authSocketPluginPresentSql,
   changeReplicationSourceSql,
@@ -34,6 +35,7 @@ import {
   isWritableSql,
   promoteSql,
   quoteIdentifier,
+  replicaFreshnessSql,
   showReplicaStatusSql,
   versionSql,
 } from "./mysql-sql.ts";
@@ -52,8 +54,10 @@ import type {
   ManagedReplicationObservedHealth,
 } from "./types.ts";
 import {
+  execStandbySeed,
   mysqlFamilyDataRoot,
   probeMysqlFamilyStandbyData,
+  standbySeedStdinLines,
   volumeMountArgs,
 } from "./standby-probe.ts";
 
@@ -267,6 +271,7 @@ async function ensureAuthSocketPlugin(
 async function runMysqlStatusQuery(
   ctx: ManagedEngineContext,
   sql: string,
+  format: "-E" | "-N" = "-E",
 ): Promise<string> {
   const result = await execMysql(
     ctx,
@@ -275,7 +280,8 @@ async function runMysqlStatusQuery(
       "--protocol=socket",
       "-u",
       ctx.rootUsername,
-      "-E",
+      format,
+      ...(format === "-N" ? ["-B"] : []),
       "-e",
       sql,
     ],
@@ -399,7 +405,7 @@ export function resolveMysqlPrimaryConnectHost(primary: {
  * Failure-safe logical seed: credentials only in a 0600 defaults file, trap
  * removes it on every exit, dump|import fails if either side fails.
  */
-export function buildMysqlStandbySeedScript(): string {
+export function buildMysqlStandbySeedScript(withRootPassword = false): string {
   return [
     "set -e",
     "tmp=$(mktemp)",
@@ -407,13 +413,13 @@ export function buildMysqlStandbySeedScript(): string {
     // plaintext defaults file on the container filesystem.
     "trap 'rm -f \"$tmp\"' EXIT INT TERM HUP",
     'chmod 600 "$tmp"',
-    'cat > "$tmp"',
+    ...standbySeedStdinLines(withRootPassword),
     // Prefer pipefail when available (bash/busybox ash); fifo path otherwise.
     "if (set -o pipefail) 2>/dev/null; then",
     "  set -o pipefail",
     '  mysqldump --defaults-extra-file="$tmp" --single-transaction --routines ' +
     "--triggers --events --set-gtid-purged=ON --all-databases " +
-    "| mysql --protocol=socket -u root",
+    "| mysql $rootopt --protocol=socket -u root",
     "else",
     '  fifo="$tmp.fifo"',
     '  mkfifo "$fifo"',
@@ -422,7 +428,7 @@ export function buildMysqlStandbySeedScript(): string {
     '--triggers --events --set-gtid-purged=ON --all-databases >"$fifo" &',
     "  dump_pid=$!",
     "  set +e",
-    '  mysql --protocol=socket -u root <"$fifo"',
+    '  mysql $rootopt --protocol=socket -u root <"$fifo"',
     "  import_rc=$?",
     "  wait $dump_pid",
     "  dump_rc=$?",
@@ -514,8 +520,9 @@ const mysqlReplicationRuntime: ManagedEngineReplicationRuntime = {
     await ensureAuthSocketPlugin(ctx);
 
     // Short-lived 0600 defaults file via stdin (never -p on argv / never MYSQL_PWD).
-    const seed = await ctx.exec(
-      ["sh", "-c", buildMysqlStandbySeedScript()],
+    const seed = await execStandbySeed(
+      ctx,
+      buildMysqlStandbySeedScript,
       defaultsBody,
     );
     if (!seed.success) {
@@ -583,7 +590,14 @@ const mysqlReplicationRuntime: ManagedEngineReplicationRuntime = {
         return { state: "unknown", observedAt };
       }
       const parsed = parseShowReplicaStatus(verbose);
-      return { ...parsed, observedAt };
+      // Freshness is best effort: a failed read leaves the fields out
+      // (unknown), never `fullyApplied: true`.
+      const freshness = await runMysqlStatusQuery(
+        ctx,
+        replicaFreshnessSql(),
+        "-N",
+      ).then(parseMysqlFreshness, () => ({}));
+      return { ...parsed, ...freshness, observedAt };
     } catch {
       return { state: "unknown", observedAt };
     }

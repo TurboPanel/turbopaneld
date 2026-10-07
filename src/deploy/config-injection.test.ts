@@ -21,6 +21,7 @@ import { cronServiceContent, cronTimerContent } from "./cron/unit.ts";
 import { siteSnippet } from "./ingress.ts";
 import { nativeAppUnitContent } from "./native/unit.ts";
 import {
+  apacheSetEnvLine,
   apacheSiteConfig,
   caddySiteConfig,
   nginxSiteConfig,
@@ -280,13 +281,15 @@ test("Traefik labels refuse a stripPrefix that would add list entries or syntax"
   }
 });
 
-test("Apache SetEnv refuses a line break in a value or a key, and ${ in a value", () => {
-  for (const ch of ["\n", "\r", "\0", "\u0085", " ", " "]) {
-    assertThrows(
-      () => apacheWithEnv({ TOKEN: `x${ch}CustomLog "|/bin/sh" common` }),
-      Error,
-      "sites.phpapp.webEnv.TOKEN must not contain line breaks",
-    );
+test("Apache SetEnv leaves out a hostile value, refuses a bad name", () => {
+  for (const ch of ["\n", "\r", "\0", "\u0085", "\u2028", "\u2029"]) {
+    const conf = apacheWithEnv({
+      TOKEN: `x${ch}CustomLog "|/bin/sh" common`,
+      KEEP: "ok",
+    });
+    assertEquals(conf.includes("TOKEN"), false);
+    assertEquals(conf.includes("CustomLog"), false);
+    assertEquals(conf.includes('SetEnv KEEP "ok"'), true);
   }
   for (const key of ["A\nB", "A B", "A}", "1A", ""]) {
     assertThrows(
@@ -295,15 +298,16 @@ test("Apache SetEnv refuses a line break in a value or a key, and ${ in a value"
       "sites.phpapp.webEnv must be a letter",
     );
   }
-  assertThrows(
-    () => apacheWithEnv({ LEAK: "${PATH}" }),
-    Error,
-    "sites.phpapp.webEnv.LEAK must not contain ${",
+  assertEquals(apacheWithEnv({ LEAK: "${PATH}" }).includes("LEAK"), false);
+  assertEquals(
+    apacheWithEnv({ BIG: "x".repeat(4097) }).includes("BIG"),
+    false,
   );
+  // The strict line renderer is still the last line of defence.
   assertThrows(
-    () => apacheWithEnv({ BIG: "x".repeat(4097) }),
+    () => apacheSetEnvLine("phpapp", "TOKEN", "x\ny"),
     Error,
-    "sites.phpapp.webEnv.BIG must be at most",
+    "sites.phpapp.webEnv.TOKEN must not contain line breaks",
   );
 });
 
@@ -513,7 +517,7 @@ test("www redirect target refuses a hostile name", () => {
           redirectTo: `example.com${fragment}x`,
         }),
       Error,
-      "hostings[].wwwRedirect must be",
+      "hostings[].www must be",
     );
   }
 });

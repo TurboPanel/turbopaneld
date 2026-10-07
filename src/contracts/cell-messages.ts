@@ -35,6 +35,15 @@ export type CellAttachVersionMessage = {
   features?: string[];
 };
 
+/** One replica in a `managed-health-report`: `down`, or its reading. */
+export type ManagedHealthReportMember = {
+  managedId: string;
+  memberId: string;
+  /** The engine is not running or not answering. */
+  down?: true;
+  replication?: NonNullable<ManagedMemberObservedResult["replication"]>;
+};
+
 /** Daemon → control plane hello. `features` is the advertised wire set. */
 export type DaemonHelloMessage = {
   type: "hello";
@@ -232,6 +241,17 @@ export type DaemonMessage =
     ok: boolean;
     member?: ManagedMemberObservedResult;
     error?: string;
+    at: string;
+  }
+  | {
+    /**
+     * Daemon-initiated, fire-and-forget: every managed replica this host runs,
+     * read just now. Sent every 30 s, only to a control plane advertising
+     * `managed-health-report-v1`. A replica whose engine is down is sent as
+     * `down: true` (no `replication`).
+     */
+    type: "managed-health-report";
+    members: ManagedHealthReportMember[];
     at: string;
   }
   | {
@@ -437,9 +457,12 @@ export type DaemonMessage =
     /**
      * Who decided the primary is dead. Absent = the Orchestrator poller
      * (`ha-observe.ts`); `postgres-probe` = `pg-dead-primary-observe.ts`,
-     * sent only to a control plane advertising `managed-ha-probe-v1`.
+     * sent only to a control plane advertising `managed-ha-probe-v1`;
+     * `boot-hold` = a primary held after an unclean host restart
+     * (`instance/boot-hold-reporter.ts`, feature `managed-ha-boot-hold-v1`),
+     * never a failover request.
      */
-    detector?: "orchestrator" | "postgres-probe";
+    detector?: "orchestrator" | "postgres-probe" | "boot-hold";
     /**
      * Orchestrator's key for the dead instance (`ha-observe.ts` only; feature
      * `managed-ha-instance-v1`). Both or neither. The control plane fences

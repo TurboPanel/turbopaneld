@@ -1,0 +1,9 @@
+{
+  // A real Deno project, the shape a site owner would deploy.
+  "tasks": {
+    "build": "deno check main.ts",
+    "start": "deno run --allow-env --allow-net main.ts" // the platform runs this
+  },
+  /* No lockfile and no npm packages: nothing to install. */
+  "imports": {}
+}

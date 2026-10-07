@@ -233,11 +233,13 @@ test({
     await withFabricDir(
       "tp-fabric-rm-net-",
       async () => {
-        await removeFabricDockerNetworks([
+        const left = await removeFabricDockerNetworks([
           "tpn_missing",
           "tpn_busy",
           "tpn_boom",
         ]);
+        // A missing network counts as removed; the others are retried later.
+        assertEquals(left, ["tpn_busy", "tpn_boom"]);
       },
       (_cmd, args) => {
         const name = args.at(-1);

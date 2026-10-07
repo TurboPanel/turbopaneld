@@ -595,7 +595,6 @@ test("tp-orchestrate update trusts a pinned private uploaded issuer without --in
 test("tp-orchestrate update accepts the daemon release rails as manifest pins", async () => {
   for (
     const url of [
-      "https://dl.trbp.nl/channels/trunk/manifest.json",
       "https://github.com/TurboPanel/turbopaneld/releases/download/v0.1.0/manifest.json",
       "https://github.com/TurboPanel/turbopaneld/releases/latest/download/manifest.json",
     ]
@@ -612,6 +611,9 @@ test("tp-orchestrate update accepts the daemon release rails as manifest pins", 
 test("tp-orchestrate update refuses traversal and other packages' rails as the daemon pin", async () => {
   for (
     const url of [
+      // the retired CDN host is off the rail for every channel
+      "https://dl.trbp.nl/channels/trunk/manifest.json",
+      "https://dl.trbp.nl/channels/release/manifest.json",
       "https://github.com/TurboPanel/turbopaneld/releases/download/../../../../attacker/repo/releases/download/v1/manifest.json",
       "https://github.com/TurboPanel/turbopaneld/releases/download/%2e%2e/%2e%2e/attacker/manifest.json",
       "https://github.com/TurboPanel/turbopanel/releases/download/v0.1.0/manifest.json",

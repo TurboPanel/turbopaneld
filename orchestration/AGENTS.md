@@ -174,11 +174,29 @@ account php-fpm's master runs as) when the daemon passes
 
 ### Apache (`apache`)
 
-Vendored — **never** a distro package. The role downloads pinned ASF
-**httpd** + **APR** + **APR-util** source tarballs, builds them with
-`--prefix={{ turbopanel_vendor_dir }}/apache/<version>` (compile-time apt
-deps only: `build-essential`, `libssl-dev`, `libpcre2-dev`, … — not
-`apache2`), and points `current` at that tree. Main config is
+Vendored — **never** a distro package, and never compiled on the host (a
+2-core build took over 10 minutes and timed the first deploy out). Apache
+(httpd + bundled APR / APR-util) is built **once in CI** by
+`.github/workflows/vendor-apache.yml` (`scripts/build-apache.sh`, native
+x86_64 and arm64 runners, same configure flags) and published as the release
+`vendor-apache-<httpdver>`: `apache-<httpdver>-<arch>.tar.gz` plus
+`SHA256SUMS`. The role pins version, URL and per-arch SHA-256 in its defaults
+(`apache_sha256`), asserts the digest like the caddy role (`get_url`
+`checksum:`), unpacks into `{{ turbopanel_vendor_dir }}/apache/<version>`
+(`creates:` on `bin/httpd` keeps it idempotent) and points `current` at that
+tree. The build script verifies the ASF source tarballs against pinned SHA-256s,
+verifies each tarball's ASF GPG signature against the pinned release-manager fingerprint (KEYS from downloads.apache.org),
+switches off optional modules and APR-util drivers that need extra libraries (HTTP/2, brotli, lua,
+md, proxy_html, xml2enc, session_crypto), and fails if `httpd` or a module
+links anything outside the runtime list (`ldd` gate over bin, modules and lib; a failing ldd or "not found" also fails). The tree bakes in `/opt/turbopanel/vendor`, so the role refuses any other vendor directory. The release job only runs from trunk. Only those runtime
+libraries (`apache_runtime_packages`: `libexpat1`, `libpcre2-8-0`, `libssl3`,
+`libuuid1`, `zlib1g`) come from apt. The tree is built with the default vendor
+root as its prefix (so `apxs`/`envvars` paths are right there) and shipped
+root-owned; the role extracts it with `--no-same-owner` and re-asserts root
+ownership and no group/world write. The role refuses to run while a digest is the `UNPINNED` placeholder: run
+the workflow, then pin its checksums. A published release is never overwritten
+(a rebuild changes the digest); to change the build, bump the version or use a
+new release name. A release is never rebuilt on the host as a fallback. Main config is
 `/etc/turbopanel/apache/httpd.conf` with `IncludeOptional …/sites/*.conf`
 and loads `mod_proxy` + `mod_proxy_fcgi` for PHP. Driven by
 **`turbopanel-apache.service`**, which runs the whole server, master
@@ -207,7 +225,17 @@ with `include_vars` in the `runtime-entitlement` role, and the daemon imports th
 same file in `../src/runtime/registry.ts`. Same bytes, so group names and gids
 cannot drift.
 
-**Groups are per `(runtime, series)`** — `tpphp84`, `tpnode24` — never one group
+**Deno** (`deno-app-runtime` role, `playbooks/deno-app-runtime-apply.yml`) vendors the
+tenant Deno under `vendor/deno-app/<series>/current`, the way `node-app-runtime`
+vendors Node: the newest stable release of the series from the official Deno
+distribution (`dl.deno.land/release-latest.txt`, else the release list when the
+series is no longer the newest), the archive checked against the release's
+published SHA-256 before it is unpacked, group `tpdeno<series>`, gid in the
+entitlement band. Deno ships one major, so the series is the major (`2`). The
+playbook and its `deno_app_versions` extra-var are on `tp-orchestrate`'s
+allowlists.
+
+**Groups are per `(runtime, series)`** — `tpphp84`, `tpnode24`, `tpdeno2` — never one group
 per runtime. Co-installed PHP versions are distinct binaries, so a single
 `tpphp` would mean granting 8.4 also grants 8.3 with whatever CVEs another
 tenant's pinned app carries. It is also what lets a shell wrapper resolve a
@@ -218,8 +246,9 @@ engine serves the site.
 
 gids are hand-assigned in the registry, never computed from the version string
 (that breaks the day `8.10` exists). Band **9900–9979** is entitlements;
-**9980–9999** is service identities (`tpbuild`, the sandboxed build account
-from the `build-user` role, is 9994). `../src/orchestration/service-accounts.test.ts`
+**9980–9999** is service identities (9994 stays reserved for `tpbuild`, the
+retired shared build account; builds now run as per-build systemd
+`DynamicUser=` identities). `../src/orchestration/service-accounts.test.ts`
 enforces uniqueness across both and that entitlement gids stay inside their band.
 
 **Membership is reconciled by the daemon, not by this role.** The role only

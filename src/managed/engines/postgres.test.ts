@@ -19,6 +19,7 @@ import type { ManagedApplyCredential } from "../../contracts/commands-contracts.
 import { getManagedEngineRuntime } from "./index.ts";
 import {
   postgresManagedEngineRuntime,
+  slotRetentionFromRows,
   standbyHealthFromRow,
 } from "./postgres.ts";
 import type { ManagedEngineContext, ManagedEngineExec } from "./types.ts";
@@ -76,7 +77,9 @@ test("applyCredentials connects as the stable platform admin even for a suffixed
   const applied = await engine.applyCredentials(ctx, [suffixedRootCredential]);
   assertEquals(applied, ["postgres_a1b2c3d4"]);
 
-  assertEquals(calls.length, 1);
+  // The role statement first, then the lock-down; nothing per database since
+  // the superuser holds no database grants.
+  assertEquals(calls.length, 2);
   const [call] = calls;
   // Connection identity is the stable admin, not the suffixed credential.
   assertEquals(call!.argv.includes("-U"), true);
@@ -112,6 +115,113 @@ test("applyCredentials grants non-root credentials without superuser regardless 
   assertEquals(createCall.argv[createCall.argv.indexOf("-U") + 1], "postgres");
 });
 
+test("applyCredentials reaches each login only to its levels: lock-down, per-login revoke and grant, then table access inside each database", async () => {
+  const { exec, calls } = recordingExec();
+  const credential = (
+    username: string,
+    databases: string[],
+    privileges: string[],
+  ): ManagedApplyCredential => ({
+    principalId: `p-${username}`,
+    username,
+    role: "user",
+    databases,
+    privileges,
+    password: "pw",
+  });
+  await postgresManagedEngineRuntime.applyCredentials(buildContext(exec), [
+    {
+      principalId: "p-root",
+      username: "postgres_x",
+      role: "root",
+      databases: [],
+      password: "pw",
+    },
+    credential("own", ["appdb"], ["owner"]),
+    credential("rw", ["appdb", "other"], ["read-only", "read-write"]),
+    credential("ro", ["appdb"], ["read-only"]),
+  ]);
+  const databaseOf = (call: RecordedExec) =>
+    call.argv[call.argv.indexOf("-d") + 1];
+  const inputs = calls.map((c) => c.input ?? "");
+  const lockDown = inputs.findIndex((i) => i.includes("FROM PUBLIC'"));
+  const firstGrant = inputs.findIndex((i) => i.includes("GRANT CONNECT"));
+  const inDatabase = calls.filter((c) => databaseOf(c) !== "postgres");
+  // Roles exist before anything is granted; the lock-down comes after the
+  // explicit grants, so a login that holds one is never without it.
+  assertEquals(firstGrant > 0 && firstGrant < lockDown, true);
+  // The strongest level wins per login: rw holds read-write, never read-only.
+  const rwGrants = inputs.filter((i) =>
+    i.includes('TO "rw";') && i.includes("ON DATABASE")
+  );
+  assertEquals(rwGrants.length, 2);
+  assertEquals(
+    rwGrants.every((i) =>
+      i.includes("CONNECT, TEMPORARY") && !i.includes("CREATE")
+    ),
+    true,
+  );
+  // Each listed database gets rw's own schema, then one reconcile, connected to it.
+  const reconciles = inDatabase.filter((c) =>
+    (c.input ?? "").includes("ALTER DEFAULT PRIVILEGES")
+  );
+  assertEquals(reconciles.map(databaseOf).sort(), ["appdb", "other"]);
+  assertEquals(
+    inDatabase.filter((c) => (c.input ?? "").includes('CREATE SCHEMA "rw"'))
+      .map(databaseOf).sort(),
+    ["appdb", "other"],
+  );
+  const appdb = reconciles.find((c) => databaseOf(c) === "appdb")!.input!;
+  // Creators: the platform admin, the exposed root login and owner/read-write logins.
+  for (const creator of ["postgres", "postgres_x", "own", "rw"]) {
+    assertEquals(
+      appdb.includes(`FOR ROLE "${creator}" GRANT SELECT ON TABLES TO "ro"`),
+      true,
+    );
+  }
+  assertEquals(appdb.includes('FOR ROLE "ro"'), false);
+  assertEquals(
+    appdb.includes(
+      'ALTER ROLE "ro" IN DATABASE "appdb" SET default_transaction_read_only = on',
+    ),
+    true,
+  );
+  assertEquals(
+    appdb.includes(
+      'ALTER ROLE "rw" IN DATABASE "appdb" RESET default_transaction_read_only',
+    ),
+    true,
+  );
+});
+
+test("applyCredentials gives a login with no recognised level no database at all", async () => {
+  const { exec, calls } = recordingExec();
+  await postgresManagedEngineRuntime.applyCredentials(buildContext(exec), [{
+    principalId: "p-x",
+    username: "nolevel",
+    role: "user",
+    databases: ["appdb"],
+    privileges: ["bogus"],
+    password: "pw",
+  }]);
+  const inputs = calls.map((c) => c.input ?? "");
+  assertEquals(
+    inputs.some((i) =>
+      i.includes("ARRAY[]::text[]") && i.includes('FROM "nolevel"')
+    ),
+    true,
+  );
+  assertEquals(
+    inputs.some((i) => i.includes('GRANT CONNECT ON DATABASE "')),
+    false,
+  );
+  // No database is reconciled for it.
+  assertEquals(
+    calls.every((c) => c.argv[c.argv.indexOf("-d") + 1] === "postgres"),
+    true,
+  );
+});
+
 test("dropUsers never drops the stable platform admin, even when it matches a stored username", async () => {
   const engine = getManagedEngineRuntime("postgres");
   const { exec, calls } = recordingExec();
@@ -125,6 +235,140 @@ test("dropUsers never drops the stable platform admin, even when it matches a st
   assertEquals(dropped, ["orphaned_user"]);
   assertEquals(calls.some((c) => c.input?.includes('"postgres"')), false);
   assertEquals(calls.some((c) => c.input?.includes('"orphaned_user"')), true);
+});
+
+/** Scripted exec: answers the release-databases query, records every call. */
+function releaseExec(
+  databases: Record<string, string[]>,
+  options?: { failDropRole?: boolean },
+): { exec: ManagedEngineExec; calls: RecordedExec[] } {
+  const calls: RecordedExec[] = [];
+  const exec: ManagedEngineExec = (argv, input) => {
+    calls.push({ argv: [...argv], input });
+    if (input?.includes("FROM pg_catalog.pg_database d")) {
+      const role = /rolname = '([^']+)'/.exec(input)?.[1] ?? "";
+      return Promise.resolve({
+        success: true,
+        stdout: (databases[role] ?? []).join("\n"),
+        stderr: "",
+      });
+    }
+    if (options?.failDropRole && input?.includes("DROP ROLE")) {
+      return Promise.resolve({
+        success: false,
+        stdout: "",
+        stderr: "role cannot be dropped because some objects depend on it",
+      });
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  return { exec, calls };
+}
+
+const databaseOf = (call: RecordedExec): string | undefined =>
+  call.argv[call.argv.indexOf("-d") + 1];
+
+test("dropUsers releases the role in every connectable database before DROP ROLE", async () => {
+  const { exec, calls } = releaseExec({
+    app_user: ["p_db", "postgres", "other_db"],
+  });
+  const ctx = buildContext(exec);
+
+  const dropped = await postgresManagedEngineRuntime.dropUsers!(ctx, [
+    "app_user",
+  ]);
+
+  assertEquals(dropped, ["app_user"]);
+  const release = calls.filter((c) =>
+    c.input?.startsWith('REASSIGN OWNED BY "app_user" TO "postgres";')
+  );
+  // One run per listed database, each connected to that database as the admin.
+  assertEquals(release.map(databaseOf), ["p_db", "postgres", "other_db"]);
+  for (const call of release) {
+    assertEquals(call.argv[call.argv.indexOf("-U") + 1], "postgres");
+    assertEquals(
+      call.input,
+      'REASSIGN OWNED BY "app_user" TO "postgres";\nDROP OWNED BY "app_user";',
+    );
+  }
+  // Order: list databases, release each one, only then DROP ROLE (last).
+  const steps = calls.map((c) => {
+    if (c.input?.includes("pg_database d")) return "list";
+    if (c.input?.includes("REASSIGN OWNED")) return `release:${databaseOf(c)}`;
+    return "drop";
+  });
+  assertEquals(steps, [
+    "list",
+    "release:p_db",
+    "release:postgres",
+    "release:other_db",
+    "drop",
+  ]);
+  const last = calls.at(-1);
+  assertEquals(last?.input, 'DROP ROLE IF EXISTS "app_user";');
+  assertEquals(databaseOf(last!), "postgres");
+});
+
+test("dropUsers skips the release step for a role that no longer exists", async () => {
+  // The listing query returns no rows when the role is gone.
+  const { exec, calls } = releaseExec({});
+  const ctx = buildContext(exec);
+
+  const dropped = await postgresManagedEngineRuntime.dropUsers!(ctx, [
+    "already_gone",
+  ]);
+
+  assertEquals(dropped, ["already_gone"]);
+  assertEquals(calls.some((c) => c.input?.includes("REASSIGN OWNED")), false);
+  assertEquals(calls.some((c) => c.input?.includes("DROP OWNED")), false);
+  assertEquals(calls.at(-1)?.input, 'DROP ROLE IF EXISTS "already_gone";');
+});
+
+test("dropUsers never releases or drops the platform admin and handles each role in turn", async () => {
+  const { exec, calls } = releaseExec({
+    user_a: ["db_one"],
+    user_b: ["db_one", "db_two"],
+  });
+  const ctx = buildContext(exec);
+
+  const dropped = await postgresManagedEngineRuntime.dropUsers!(ctx, [
+    "user_a",
+    "postgres",
+    "user_b",
+  ]);
+
+  assertEquals(dropped, ["user_a", "user_b"]);
+  assertEquals(
+    calls.some((c) => c.input?.includes('"postgres" TO "postgres"')),
+    false,
+  );
+  assertEquals(calls.some((c) => c.input?.includes("'postgres'")), false);
+  const order = calls
+    .filter((c) => !c.input?.includes("pg_database d"))
+    .map((c) => `${databaseOf(c)}:${c.input?.split("\n")[0]}`);
+  assertEquals(order, [
+    'db_one:REASSIGN OWNED BY "user_a" TO "postgres";',
+    'postgres:DROP ROLE IF EXISTS "user_a";',
+    'db_one:REASSIGN OWNED BY "user_b" TO "postgres";',
+    'db_two:REASSIGN OWNED BY "user_b" TO "postgres";',
+    'postgres:DROP ROLE IF EXISTS "user_b";',
+  ]);
+});
+
+test("dropUsers skips database names the identifier guard rejects and surfaces a DROP ROLE failure", async () => {
+  const { exec, calls } = releaseExec(
+    { app_user: ["good_db", "bad-db"] },
+    { failDropRole: true },
+  );
+  const ctx = buildContext(exec);
+
+  await assertRejects(
+    () => postgresManagedEngineRuntime.dropUsers!(ctx, ["app_user"]),
+    Error,
+    "psql failed",
+  );
+  const release = calls.filter((c) => c.input?.includes("REASSIGN OWNED"));
+  assertEquals(release.map(databaseOf), ["good_db"]);
 });
 
 test("waitReady and readVersion always target the stable platform admin", async () => {
@@ -657,6 +901,59 @@ test("postgres reloadConfig tolerates restart-pending settings but rejects file 
   assertEquals(threw, true);
 });
 
+test("postgres reloadConfig: a removed restart-required setting is pending, an unknown parameter still fails", async () => {
+  const reload = postgresManagedEngineRuntime.reloadConfig;
+  if (!reload) throw new TypeError("expected postgres reloadConfig");
+
+  // Fake pg_file_settings: evaluate the daemon's own exclusion rules against
+  // fixture rows by honouring the two texts the real SQL matches on.
+  const restartOnRemove =
+    'parameter "max_connections" cannot be changed without restarting the server';
+  const unknownParameter =
+    'unrecognized configuration parameter "bogus_setting"';
+  const verifyingExec =
+    (errors: string[]): ManagedEngineExec => (_argv, input) => {
+      if (!input?.includes("pg_file_settings")) {
+        return Promise.resolve({ success: true, stdout: "", stderr: "" });
+      }
+      const isPending = (e: string) =>
+        e === "setting could not be applied" ||
+        e.includes("cannot be changed without restarting the server");
+      const pending = errors.filter(isPending).length;
+      const broken = errors.length - pending;
+      return Promise.resolve({
+        success: true,
+        stdout: `${broken}\t0\t${pending}\n`,
+        stderr: "",
+      });
+    };
+
+  const logged: string[] = [];
+  const originalWrite = Deno.stdout.writeSync;
+  Deno.stdout.writeSync = (data: Uint8Array) => {
+    logged.push(new TextDecoder().decode(data));
+    return data.byteLength;
+  };
+  try {
+    await reload(buildContext(verifyingExec([restartOnRemove])));
+  } finally {
+    Deno.stdout.writeSync = originalWrite;
+  }
+  assertEquals(
+    logged.some((line) => line.includes("1 setting(s) pending engine restart")),
+    true,
+  );
+
+  const error = await assertRejects(() =>
+    reload(buildContext(verifyingExec([unknownParameter])))
+  );
+  assertEquals(
+    (error as Error).message,
+    "postgres config reload failed: 1 postgresql.conf error(s), " +
+      "0 pg_hba.conf error(s) — see engine logs",
+  );
+});
+
 test("postgres readVersion returns undefined when the query fails or is empty", async () => {
   const failed = await postgresManagedEngineRuntime.readVersion(
     buildContext(() =>
@@ -965,4 +1262,182 @@ test("standbyHealthFromRow drops NULL or malformed LSNs", () => {
     state: "unknown",
     observedAt: at,
   });
+});
+
+const GIB = 1024 * 1024 * 1024;
+
+test("slotRetentionFromRows is absent without slots and ok when every slot is reserved", () => {
+  assertEquals(slotRetentionFromRows([]), undefined);
+  assertEquals(
+    slotRetentionFromRows([["tp_member_2", "true", "reserved", "4096", "-1"]]),
+    { state: "ok" },
+  );
+});
+
+test("slotRetentionFromRows reports the worst slot: lost beats unreserved beats extended", () => {
+  const rows = [
+    ["tp_member_2", "false", "extended", String(2 * GIB), String(2 * GIB)],
+    ["tp_member_3", "false", "lost", String(4 * GIB), "0"],
+    ["tp_member_4", "false", "unreserved", String(3 * GIB), "100"],
+  ];
+  assertEquals(slotRetentionFromRows(rows), {
+    state: "critical",
+    slot: "tp_member_3",
+    walStatus: "lost",
+    retainedBytes: 4 * GIB,
+    safeBytes: 0,
+    active: false,
+  });
+  assertEquals(slotRetentionFromRows(rows.slice(0, 1)), {
+    state: "lagging",
+    slot: "tp_member_2",
+    walStatus: "extended",
+    retainedBytes: 2 * GIB,
+    safeBytes: 2 * GIB,
+    active: false,
+  });
+});
+
+test("slotRetentionFromRows picks the heavier of two equally bad slots and drops a missing cap", () => {
+  const result = slotRetentionFromRows([
+    ["tp_member_2", "false", "extended", "100", "-1"],
+    ["tp_member_3", "true", "extended", "900", "-1"],
+  ]);
+  assertEquals(result?.slot, "tp_member_3");
+  assertEquals(result?.safeBytes, undefined);
+  assertEquals(result?.active, true);
+});
+
+test("postgres primary readHealth carries slot retention, even with no replica attached", async () => {
+  const replication = postgresManagedEngineRuntime.replication;
+  if (!replication?.readHealth) {
+    throw new TypeError("expected postgres readHealth");
+  }
+  const exec: ManagedEngineExec = (_argv, input) =>
+    Promise.resolve({
+      success: true,
+      stdout: input?.includes("safe_wal_size")
+        ? "tp_member_2\tfalse\tunreserved\t5000\t10\n"
+        : "",
+      stderr: "",
+    });
+  const health = await replication.readHealth(buildContext(exec), "primary");
+  assertEquals(health.state, "unknown");
+  assertEquals(health.slotRetention?.state, "critical");
+  assertEquals(health.slotRetention?.slot, "tp_member_2");
+});
+
+test("postgres primary readHealth still answers when the slot query fails", async () => {
+  const replication = postgresManagedEngineRuntime.replication;
+  if (!replication?.readHealth) {
+    throw new TypeError("expected postgres readHealth");
+  }
+  const exec: ManagedEngineExec = (_argv, input) =>
+    Promise.resolve(
+      input?.includes("safe_wal_size")
+        ? { success: false, stdout: "", stderr: "no such column" }
+        : { success: true, stdout: "streaming\t8\n", stderr: "" },
+    );
+  const health = await replication.readHealth(buildContext(exec), "primary");
+  assertEquals(health.state, "streaming");
+  assertEquals("slotRetention" in health, false);
+});
+
+test("postgres ensurePrimary replaces a lost slot with an unreserved one before creating the desired ones", async () => {
+  const replication = postgresManagedEngineRuntime.replication;
+  if (!replication?.ensurePrimary) {
+    throw new TypeError("expected postgres ensurePrimary");
+  }
+  const { exec, calls } = recordingExec();
+  const lister: ManagedEngineExec = (argv, input) =>
+    input?.includes("wal_status = 'lost' AND NOT active") &&
+      input.includes("SELECT slot_name")
+      ? Promise.resolve({ success: true, stdout: "tp_member_2\n", stderr: "" })
+      : exec(argv, input);
+  await replication.ensurePrimary(buildContext(lister), {
+    username: "tp_repl",
+    password: ["tp", crypto.randomUUID()].join("-"),
+    desiredSlots: ["tp_member_2", "tp_member_3"],
+  });
+  const inputs = calls.map((c) => c.input ?? "");
+  const recreate = inputs.findIndex((i) =>
+    i.includes("pg_drop_replication_slot") && i.includes("wal_status = 'lost'")
+  );
+  const firstDesired = inputs.findIndex((i) =>
+    i.includes("pg_create_physical_replication_slot") &&
+    i.includes("'tp_member_3', true, false")
+  );
+  assertEquals(recreate >= 0 && recreate < firstDesired, true);
+  // The replacement keeps no WAL until the replica is re-seeded, so health
+  // keeps reporting the cut-off and the stale replica holds nothing back.
+  assertEquals(inputs[recreate]!.includes("'tp_member_2', false, false"), true);
+});
+
+test("postgres ensurePrimary leaves healthy slots alone: nothing is replaced when none is lost", async () => {
+  const replication = postgresManagedEngineRuntime.replication;
+  if (!replication?.ensurePrimary) {
+    throw new TypeError("expected postgres ensurePrimary");
+  }
+  const { exec, calls } = recordingExec();
+  await replication.ensurePrimary(buildContext(exec), {
+    username: "tp_repl",
+    password: ["tp", crypto.randomUUID()].join("-"),
+    desiredSlots: ["tp_member_2"],
+  });
+  assertEquals(
+    calls.some((c) => c.input?.includes("', false, false)")),
+    false,
+  );
+});
+
+test("slotRetentionFromRows keeps a replaced slot critical until a replica is attached or reserved", () => {
+  // Inactive and no wal_status: the replacement of a lost slot, still waiting
+  // for its replica to be re-seeded.
+  assertEquals(
+    slotRetentionFromRows([["tp_member_2", "false", "", "0", "-100"]]),
+    {
+      state: "critical",
+      slot: "tp_member_2",
+      walStatus: "awaiting_resync",
+      retainedBytes: 0,
+      active: false,
+    },
+  );
+  // After the Resync the slot is reserved again.
+  assertEquals(
+    slotRetentionFromRows([["tp_member_2", "false", "reserved", "10", "500"]]),
+    { state: "ok" },
+  );
+  assertEquals(
+    slotRetentionFromRows([["tp_member_2", "true", "reserved", "10", "500"]]),
+    { state: "ok" },
+  );
+});
+
+test("postgres pruneOrphanSlots drops every managed slot not listed and keeps the listed ones", async () => {
+  const replication = postgresManagedEngineRuntime.replication;
+  if (!replication?.pruneOrphanSlots) {
+    throw new TypeError("expected postgres pruneOrphanSlots");
+  }
+  const { exec, calls } = recordingExec();
+  const lister: ManagedEngineExec = (argv, input) =>
+    input?.includes("SELECT slot_name FROM pg_catalog.pg_replication_slots")
+      ? Promise.resolve({
+        success: true,
+        stdout: "tp_member_2\ntp_member_3\n",
+        stderr: "",
+      })
+      : exec(argv, input);
+  await replication.pruneOrphanSlots(buildContext(lister), []);
+  const drops = calls.map((c) => c.input ?? "").filter((i) =>
+    i.includes("pg_drop_replication_slot")
+  );
+  assertEquals(drops.length, 2);
+  await replication.pruneOrphanSlots(buildContext(lister), ["tp_member_2"]);
+  assertEquals(
+    calls.map((c) => c.input ?? "").filter((i) =>
+      i.includes("pg_drop_replication_slot") && i.includes("tp_member_2")
+    ).length,
+    1,
+  );
 });

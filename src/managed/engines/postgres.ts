@@ -22,15 +22,26 @@ import {
   dropPhysicalSlotSql,
   dropRoleSql,
   ensureProxySqlMonitorRoleSql,
+  ensureReadWriteLoginSchemaSql,
   grantDatabaseSql,
   isInRecoverySql,
+  listDatabasesForRoleReleaseSql,
+  listLostPhysicalSlotsSql,
   listManagedSlotsSql,
   type ManagedDatabasePrivilege,
+  managedSlotRetentionSql,
   primaryReplicationStatusSql,
   promoteSql,
   quoteIdentifier,
+  readOnlySessionDefaultSql,
+  reconcileDatabaseObjectsSql,
+  recreateLostPhysicalSlotSql,
+  releaseRoleObjectsSql,
   reloadVerifySql,
+  revokePublicDatabaseAccessSql,
+  revokeUnlistedDatabasesSql,
   standbyReplicationStatusSql,
+  strongestPrivilege,
 } from "./postgres-sql.ts";
 import {
   DOWN_ENGINE_CENSUS,
@@ -46,6 +57,7 @@ import type {
   ManagedEngineReplicationRuntime,
   ManagedEngineRuntime,
   ManagedReplicationObservedHealth,
+  ManagedSlotRetention,
 } from "./types.ts";
 import { probeStandbyState, volumeMountArgs } from "./standby-probe.ts";
 
@@ -111,6 +123,7 @@ function sleep(ms: number): Promise<void> {
 async function runPsql(
   ctx: ManagedEngineContext,
   sql: string,
+  database: string = ctx.defaultDatabase,
 ): Promise<void> {
   const result = await ctx.exec(
     [
@@ -120,7 +133,7 @@ async function runPsql(
       "-U",
       ctx.rootUsername,
       "-d",
-      ctx.defaultDatabase,
+      database,
     ],
     sql,
   );
@@ -133,13 +146,7 @@ async function runPsql(
   }
 }
 
-function asPrivilege(value: string): ManagedDatabasePrivilege | null {
-  if (value === "owner" || value === "read-write" || value === "read-only") {
-    return value;
-  }
-  return null;
-}
-
+/** Create or update the login itself; database access is reconciled after. */
 async function applyOneCredential(
   ctx: ManagedEngineContext,
   credential: ManagedApplyCredential,
@@ -170,20 +177,132 @@ async function applyOneCredential(
       superuser: false,
     }),
   );
+}
 
-  const privileges = credential.privileges ?? [];
-  await forEachSequential(
-    credential.databases,
-    (database) =>
-      forEachSequential(privileges, async (raw) => {
-        const privilege = asPrivilege(raw);
-        if (privilege === null) return;
-        await runPsql(
-          ctx,
-          grantDatabaseSql(database, credential.username, privilege),
-        );
-      }),
+type UserAccess = {
+  username: string;
+  level: ManagedDatabasePrivilege;
+  databases: string[];
+};
+
+/** Every SQL user with a recognised level and its de-duplicated databases. */
+function userAccessList(
+  credentials: readonly ManagedApplyCredential[],
+): { granted: UserAccess[]; usernames: Map<string, string[]> } {
+  const granted: UserAccess[] = [];
+  const usernames = new Map<string, string[]>();
+  for (const credential of credentials) {
+    if (credential.role !== "user") continue;
+    const databases = [...new Set(credential.databases)];
+    usernames.set(credential.username, databases);
+    const level = strongestPrivilege(credential.privileges ?? []);
+    if (level !== null) {
+      granted.push({ username: credential.username, level, databases });
+    }
+  }
+  return { granted, usernames };
+}
+
+/** Who may create, write and read inside one database. */
+function objectAccessFor(
+  ctx: ManagedEngineContext,
+  database: string,
+  granted: readonly UserAccess[],
+  rootUsernames: readonly string[],
+) {
+  const here = granted.filter((entry) => entry.databases.includes(database));
+  const writers = here.filter((entry) => entry.level !== "read-only").map((
+    entry,
+  ) => entry.username);
+  const owners = here.filter((entry) => entry.level === "owner").map((
+    entry,
+  ) => entry.username);
+  const readers = here.filter((entry) => entry.level === "read-only").map((
+    entry,
+  ) => entry.username);
+  return {
+    creators: [...new Set([ctx.rootUsername, ...rootUsernames, ...writers])],
+    owners,
+    writers,
+    readers,
+  };
+}
+
+/**
+ * Make each SQL user reach exactly what its level says, and nothing else:
+ *
+ * 1. Each user loses databases it is not listed for, then receives its level
+ *    on every listed database (re-granting replaces an older, different level).
+ * 2. Nobody gets in by default (`CONNECT` is taken from PUBLIC everywhere),
+ *    after the explicit grants so a login that holds one never loses access.
+ * 3. Inside each listed database: table and sequence privileges on what
+ *    exists, default privileges for what its creators make later, and a
+ *    read-only session default for read-only users.
+ *
+ * Runs on every apply, so a cluster made by an older version is corrected at
+ * its next apply.
+ */
+async function reconcileDatabaseAccess(
+  ctx: ManagedEngineContext,
+  credentials: readonly ManagedApplyCredential[],
+): Promise<void> {
+  const { granted, usernames } = userAccessList(credentials);
+  const rootUsernames = credentials.filter((c) => c.role === "root").map((c) =>
+    c.username
   );
+
+  await forEachSequential([...usernames], async ([username, databases]) => {
+    const level = granted.find((entry) => entry.username === username)?.level;
+    await runPsql(
+      ctx,
+      revokeUnlistedDatabasesSql(
+        username,
+        level === undefined ? [] : databases,
+      ),
+    );
+  });
+
+  await forEachSequential(granted, (entry) =>
+    forEachSequential(
+      entry.databases,
+      (database) =>
+        runPsql(ctx, grantDatabaseSql(database, entry.username, entry.level)),
+    ));
+
+  // After the explicit grants, so no login that holds one is ever without it.
+  await runPsql(ctx, revokePublicDatabaseAccessSql());
+
+  const databases = [...new Set(granted.flatMap((entry) => entry.databases))];
+  await forEachSequential(databases, async (database) => {
+    // Create per-login schemas for read-write logins in each database.
+    const readWriteLogins = granted
+      .filter(
+        (entry) =>
+          entry.databases.includes(database) && entry.level === "read-write",
+      )
+      .map((entry) => entry.username);
+    if (readWriteLogins.length > 0) {
+      const schemaCreation = readWriteLogins
+        .map((username) => ensureReadWriteLoginSchemaSql(username))
+        .join("\n");
+      await runPsql(ctx, schemaCreation, database);
+    }
+    const access = objectAccessFor(ctx, database, granted, rootUsernames);
+    const sessionDefaults = granted
+      .filter((entry) => entry.databases.includes(database))
+      .map((entry) =>
+        readOnlySessionDefaultSql(
+          database,
+          entry.username,
+          entry.level === "read-only",
+        )
+      );
+    await runPsql(
+      ctx,
+      [reconcileDatabaseObjectsSql(access), ...sessionDefaults].join("\n"),
+      database,
+    );
+  });
 }
 
 async function parsePsqlRows(
@@ -242,6 +361,52 @@ function probePostgresStandbyData(
   });
 }
 
+/**
+ * Hand a role's objects to the platform admin and strip its privileges in
+ * every connectable database, so `DROP ROLE` no longer fails with "some
+ * objects depend on it". Ownership moves first (data survives); a role that
+ * is already gone lists no databases and is a no-op.
+ */
+async function releaseRoleObjects(
+  ctx: ManagedEngineContext,
+  username: string,
+): Promise<void> {
+  const rows = await parsePsqlRows(
+    ctx,
+    listDatabasesForRoleReleaseSql(username),
+  );
+  const sql = releaseRoleObjectsSql(username, ctx.rootUsername);
+  await forEachSequential(rows, async ([database]) => {
+    if (!database) return;
+    // Names come from the catalog and reach argv (`psql -d`), never a shell;
+    // still refuse anything the platform's own identifier guard rejects.
+    try {
+      assertSafeDatabaseIdentifier(database);
+    } catch {
+      logInfo(
+        "managed",
+        `postgres drop user skipped unsafe database name ${
+          sanitizeForLog(database)
+        }`,
+      );
+      return;
+    }
+    await runPsql(ctx, sql, database);
+  });
+}
+
+/** Drop managed slots that are not wanted (a removed member's leftovers). */
+async function pruneOrphanSlots(
+  ctx: ManagedEngineContext,
+  desired: ReadonlySet<string>,
+): Promise<void> {
+  const rows = await parsePsqlRows(ctx, listManagedSlotsSql());
+  await forEachSequential(rows, async ([slotName]) => {
+    if (!slotName || desired.has(slotName)) return;
+    await runPsql(ctx, dropPhysicalSlotSql(slotName));
+  });
+}
+
 const postgresReplicationRuntime: ManagedEngineReplicationRuntime = {
   async ensurePrimary(ctx, spec) {
     await runPsql(
@@ -250,17 +415,24 @@ const postgresReplicationRuntime: ManagedEngineReplicationRuntime = {
     );
 
     const desired = new Set(spec.desiredSlots);
+    // A slot the primary already gave up on (its WAL is gone) cannot serve a
+    // replica again, not even a freshly re-seeded one: replace it with a slot
+    // that keeps no WAL until the replica is re-seeded. Health keeps reporting
+    // it as waiting for a Resync, so a later apply never hides the cut-off.
+    const lost = await parsePsqlRows(ctx, listLostPhysicalSlotsSql());
+    await forEachSequential(lost, async ([slotName]) => {
+      if (!slotName) return;
+      await runPsql(ctx, recreateLostPhysicalSlotSql(slotName));
+    });
     await forEachSequential(
       desired,
       (slot) => runPsql(ctx, createPhysicalSlotSql(slot)),
     );
 
-    const rows = await parsePsqlRows(ctx, listManagedSlotsSql());
-    await forEachSequential(rows, async ([slotName]) => {
-      if (!slotName || desired.has(slotName)) return;
-      await runPsql(ctx, dropPhysicalSlotSql(slotName));
-    });
+    await pruneOrphanSlots(ctx, desired);
   },
+
+  pruneOrphanSlots: (ctx, desired) => pruneOrphanSlots(ctx, new Set(desired)),
 
   probeStandbyData: probePostgresStandbyData,
 
@@ -401,8 +573,10 @@ const postgresReplicationRuntime: ManagedEngineReplicationRuntime = {
     const observedAt = new Date().toISOString();
     if (role === "primary") {
       const rows = await parsePsqlRows(ctx, primaryReplicationStatusSql());
+      const slotRetention = await readSlotRetention(ctx);
+      const withSlots = slotRetention === undefined ? {} : { slotRetention };
       if (rows.length === 0) {
-        return { state: "unknown", observedAt };
+        return { state: "unknown", observedAt, ...withSlots };
       }
       const [state, lagBytesRaw] = rows[0]!;
       const lagBytes = Number(lagBytesRaw);
@@ -410,6 +584,7 @@ const postgresReplicationRuntime: ManagedEngineReplicationRuntime = {
         state: state || "unknown",
         ...(Number.isFinite(lagBytes) ? { lagBytes } : {}),
         observedAt,
+        ...withSlots,
       };
     }
     const rows = await parsePsqlRows(ctx, standbyReplicationStatusSql());
@@ -419,6 +594,87 @@ const postgresReplicationRuntime: ManagedEngineReplicationRuntime = {
     return standbyHealthFromRow(rows[0]!, observedAt);
   },
 };
+
+const SLOT_SEVERITY: Record<ManagedSlotRetention["state"], number> = {
+  ok: 0,
+  lagging: 1,
+  critical: 2,
+};
+
+function slotState(
+  walStatus: string,
+  active: boolean,
+): ManagedSlotRetention["state"] {
+  // `unreserved`: past the cap, WAL may go at the next checkpoint. `lost`:
+  // already gone. An inactive slot with no `wal_status` at all holds no WAL:
+  // the replacement of a lost slot, still waiting for its replica to be
+  // re-seeded. All three mean that replica needs a Resync. `extended`: held
+  // beyond `max_wal_size`, still safe.
+  if (walStatus === "lost" || walStatus === "unreserved") return "critical";
+  if (walStatus === "" && !active) return "critical";
+  if (walStatus === "extended") return "lagging";
+  return "ok";
+}
+
+/** `wal_status` label of a slot that has none: waiting for a Resync. */
+const AWAITING_RESYNC = "awaiting_resync";
+
+function isWorse(
+  candidate: ManagedSlotRetention,
+  current: ManagedSlotRetention,
+): boolean {
+  const bySeverity = SLOT_SEVERITY[candidate.state] -
+    SLOT_SEVERITY[current.state];
+  if (bySeverity !== 0) return bySeverity > 0;
+  return (candidate.retainedBytes ?? 0) > (current.retainedBytes ?? 0);
+}
+
+/**
+ * Rows of `managedSlotRetentionSql` (name, active, wal_status, retained
+ * bytes, safe bytes) to the worst slot's state. `undefined` when the primary
+ * has no managed slot (a single-member cluster).
+ */
+export function slotRetentionFromRows(
+  rows: readonly string[][],
+): ManagedSlotRetention | undefined {
+  let worst: ManagedSlotRetention | undefined;
+  for (const row of rows) {
+    if (!row[0]) continue;
+    const slot = slotFromRow(row);
+    if (worst === undefined || isWorse(slot, worst)) worst = slot;
+  }
+  if (worst === undefined) return undefined;
+  return worst.state === "ok" ? { state: "ok" } : worst;
+}
+
+function slotFromRow(row: readonly string[]): ManagedSlotRetention {
+  const [slot, activeRaw, walStatus = "", retainedRaw, safeRaw] = row;
+  const active = activeRaw === "true";
+  const state = slotState(walStatus, active);
+  const safeBytes = optionalNumber(safeRaw);
+  const label = walStatus || (state === "critical" ? AWAITING_RESYNC : "");
+  return {
+    state,
+    slot,
+    ...(label ? { walStatus: label } : {}),
+    retainedBytes: optionalNumber(retainedRaw) ?? 0,
+    ...(safeBytes !== undefined && safeBytes >= 0 ? { safeBytes } : {}),
+    active,
+  };
+}
+
+/** Best effort: a failed slot read must never fail the health read. */
+async function readSlotRetention(
+  ctx: ManagedEngineContext,
+): Promise<ManagedSlotRetention | undefined> {
+  try {
+    return slotRetentionFromRows(
+      await parsePsqlRows(ctx, managedSlotRetentionSql()),
+    );
+  } catch {
+    return undefined;
+  }
+}
 
 function optionalNumber(raw: string | undefined): number | undefined {
   if (raw === undefined || raw === "") return undefined;
@@ -582,6 +838,7 @@ export const postgresManagedEngineRuntime: ManagedEngineRuntime = {
       await applyOneCredential(ctx, credential);
       applied.push(credential.username);
     });
+    await reconcileDatabaseAccess(ctx, credentials);
     return applied;
   },
 
@@ -626,6 +883,7 @@ export const postgresManagedEngineRuntime: ManagedEngineRuntime = {
     const dropped: string[] = [];
     await forEachSequential(usernames, async (username) => {
       if (username === ctx.rootUsername) return;
+      await releaseRoleObjects(ctx, username);
       await runPsql(ctx, dropRoleSql(username));
       dropped.push(username);
     });

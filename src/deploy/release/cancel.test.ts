@@ -330,7 +330,12 @@ test("an unsandboxed build is killed by a cancel, quickly, as a cancel", async (
 
 async function sandboxWork(): Promise<BuildWork> {
   return await resolveBuildWork(
-    { serviceId: "svc1", releaseId: "20260927-120000", projectId: PROJECT },
+    {
+      serviceId: "svc1",
+      releaseId: "20260927-120000",
+      projectId: PROJECT,
+      owner: "alice",
+    },
     "/var/lib/turbopanel-build",
   );
 }

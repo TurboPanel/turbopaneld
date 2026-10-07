@@ -22,6 +22,7 @@ import {
   type FabricRunResult,
   handleFabricPathProbe,
   handleFabricReconcile,
+  isFabricBridgeName,
   isFreshProbeHandshake,
   parsePeerPresharedKeysFromWgConf,
   parseWgDumpPeers,
@@ -593,6 +594,150 @@ test("teardown with persisted state is idempotent on a second call", async () =>
       return null;
     },
   );
+});
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await Deno.stat(path);
+    return true;
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) return false;
+    throw err;
+  }
+}
+
+test("teardown records a bridge that still has containers and retries it on the next teardown", async () => {
+  let busy = true;
+  await withFabricDir(
+    "tp-fabric-teardown-busy-",
+    async (networkDir) => {
+      const parsed = parseFabricReconcilePayload(enabledPayload());
+      if (!parsed.enabled) {
+        throw new TypeError("expected enabled fabric payload");
+      }
+      await handleFabricReconcile(parsed, new Date().toISOString());
+      const first = await handleFabricReconcile(
+        { enabled: false },
+        new Date().toISOString(),
+      );
+      assertEquals(
+        first.summary,
+        `TurboFabric torn down; not removed yet, retried later: ${NETWORK_NAME}`,
+      );
+      // state.json is gone (fabric is off), the leftover is kept apart.
+      assertEquals(await pathExists(join(networkDir, "state.json")), false);
+      const pending = JSON.parse(
+        await Deno.readTextFile(join(networkDir, "teardown-pending.json")),
+      );
+      assertEquals(pending, { networks: [NETWORK_NAME] });
+
+      busy = false;
+      const second = await handleFabricReconcile(
+        { enabled: false },
+        new Date().toISOString(),
+      );
+      assertEquals(second.summary, "TurboFabric torn down");
+      assertEquals(
+        await pathExists(join(networkDir, "teardown-pending.json")),
+        false,
+      );
+    },
+    (cmd, args) => {
+      if (cmd === "docker" && args[0] === "network" && args[1] === "rm") {
+        return busy
+          ? fail(
+            `Error response from daemon: error while removing network: network ${NETWORK_NAME} has active endpoints`,
+          )
+          : ok("");
+      }
+      return null;
+    },
+  );
+});
+
+const ORPHAN_BRIDGE = "tpn_6f1c2d3e-4a5b-4c6d-8e7f-001122334455";
+
+test("teardown removes TurboFabric bridges that state.json does not name, and nothing else", async () => {
+  await withFabricDir(
+    "tp-fabric-teardown-orphan-",
+    async (_networkDir, invocations) => {
+      const result = await handleFabricReconcile(
+        { enabled: false },
+        new Date().toISOString(),
+      );
+      assertEquals(result.summary, "TurboFabric torn down");
+      const removed = invocations.filter((line) =>
+        line.startsWith("docker network rm")
+      );
+      assertEquals(removed, [`docker network rm ${ORPHAN_BRIDGE}`]);
+    },
+    (cmd, args) => {
+      if (cmd === "docker" && args[0] === "network" && args[1] === "ls") {
+        // An operator network named tpn_mynet, and a look-alike, stay.
+        return ok(`${ORPHAN_BRIDGE}\ntpn_mynet\nmy-tpn_app\n`);
+      }
+      if (cmd === "docker" && args[0] === "network" && args[1] === "rm") {
+        return ok("");
+      }
+      return null;
+    },
+  );
+});
+
+test("daemon start with fabric off retries bridges an earlier teardown left", async () => {
+  await withFabricDir(
+    "tp-fabric-boot-pending-",
+    async (networkDir, invocations) => {
+      await Deno.writeTextFile(
+        join(networkDir, "teardown-pending.json"),
+        `${JSON.stringify({ networks: [NETWORK_NAME, "tpn_mynet"] })}\n`,
+      );
+      await restoreFabricFromPersistedState();
+      assertEquals(
+        invocations.filter((line) => line.startsWith("docker network rm")),
+        [`docker network rm ${NETWORK_NAME}`],
+      );
+      assertEquals(
+        await pathExists(join(networkDir, "teardown-pending.json")),
+        false,
+      );
+    },
+    (cmd, args) => {
+      if (cmd === "docker" && args[0] === "network" && args[1] === "rm") {
+        return ok("");
+      }
+      return null;
+    },
+  );
+});
+
+test("an enable that uses a bridge again takes it off the teardown list", async () => {
+  await withFabricDir(
+    "tp-fabric-enable-pending-",
+    async (networkDir) => {
+      const other = "tpn_0a1b2c3d-4e5f-4a6b-8c7d-8899aabbccdd";
+      await Deno.writeTextFile(
+        join(networkDir, "teardown-pending.json"),
+        `${JSON.stringify({ networks: [NETWORK_NAME, other] })}\n`,
+      );
+      const parsed = parseFabricReconcilePayload(enabledPayload());
+      if (!parsed.enabled) {
+        throw new TypeError("expected enabled fabric payload");
+      }
+      await handleFabricReconcile(parsed, new Date().toISOString());
+      const pending = JSON.parse(
+        await Deno.readTextFile(join(networkDir, "teardown-pending.json")),
+      );
+      assertEquals(pending, { networks: [other] });
+    },
+  );
+});
+
+test("isFabricBridgeName accepts only tpn_<uuid>", () => {
+  assertEquals(isFabricBridgeName(NETWORK_NAME), true);
+  assertEquals(isFabricBridgeName("tpn_mynet"), false);
+  assertEquals(isFabricBridgeName(`x${NETWORK_NAME}`), false);
+  assertEquals(isFabricBridgeName(`${NETWORK_NAME}x`), false);
 });
 
 test("teardown fails when wg-quick unit cannot be disabled", async () => {

@@ -13,6 +13,7 @@ import type {
 import { sanitizeForLog } from "../../util/logger.ts";
 import { forEachSequential } from "../../util/sequential.ts";
 import { grantDatabasePrivileges } from "./grant-databases.ts";
+import { parseMariadbFreshness } from "./replica-freshness.ts";
 import {
   changeReplicationSourceSql,
   connectionCensusSql,
@@ -49,8 +50,10 @@ import type {
   ManagedReplicationObservedHealth,
 } from "./types.ts";
 import {
+  execStandbySeed,
   mysqlFamilyDataRoot,
   probeMysqlFamilyStandbyData,
+  standbySeedStdinLines,
   volumeMountArgs,
 } from "./standby-probe.ts";
 
@@ -357,7 +360,9 @@ export function resolveMariadbPrimaryConnectHost(primary: {
  * Failure-safe logical seed: credentials only in a 0600 defaults file, trap
  * removes it on every exit, dump|import fails if either side fails.
  */
-export function buildMariadbStandbySeedScript(): string {
+export function buildMariadbStandbySeedScript(
+  withRootPassword = false,
+): string {
   // `--gtid` records a GTID start position ONLY together with
   // `--master-data`; without it the import leaves gtid_slave_pos empty and
   // MASTER_USE_GTID=slave_pos replays the primary's binlog from the very
@@ -376,14 +381,14 @@ export function buildMariadbStandbySeedScript(): string {
     "tmp=$(mktemp)",
     "trap 'rm -f \"$tmp\"' EXIT INT TERM HUP",
     'chmod 600 "$tmp"',
-    'cat > "$tmp"',
-    'mariadb --protocol=socket -u root -e "RESET MASTER"',
+    ...standbySeedStdinLines(withRootPassword),
+    'mariadb $rootopt --protocol=socket -u root -e "RESET MASTER"',
     "if (set -o pipefail) 2>/dev/null; then",
     "  set -o pipefail",
     SQL_LOG_BIN_OFF +
     'mariadb-dump --defaults-extra-file="$tmp" --single-transaction --master-data=1 --routines ' +
     "--triggers --events --gtid --all-databases; } " +
-    "| mariadb --protocol=socket -u root",
+    "| mariadb $rootopt --protocol=socket -u root",
     "else",
     '  fifo="$tmp.fifo"',
     '  mkfifo "$fifo"',
@@ -393,7 +398,7 @@ export function buildMariadbStandbySeedScript(): string {
     '--triggers --events --gtid --all-databases; } >"$fifo" &',
     "  dump_pid=$!",
     "  set +e",
-    '  mariadb --protocol=socket -u root <"$fifo"',
+    '  mariadb $rootopt --protocol=socket -u root <"$fifo"',
     "  import_rc=$?",
     "  wait $dump_pid",
     "  dump_rc=$?",
@@ -478,8 +483,9 @@ const mariadbReplicationRuntime: ManagedEngineReplicationRuntime = {
     // replication is configured.
     await runMariadb(ctx, disableReadOnlySql());
 
-    const seed = await ctx.exec(
-      ["sh", "-c", buildMariadbStandbySeedScript()],
+    const seed = await execStandbySeed(
+      ctx,
+      buildMariadbStandbySeedScript,
       defaultsBody,
     );
     if (!seed.success) {
@@ -547,7 +553,12 @@ const mariadbReplicationRuntime: ManagedEngineReplicationRuntime = {
         return { state: "unknown", observedAt };
       }
       const parsed = parseShowSlaveStatus(verbose);
-      return { ...parsed, observedAt };
+      // Best effort: a failed read leaves the freshness fields out (unknown).
+      const freshness = await runMariadbStatusQuery(
+        ctx,
+        `${showReplicaStatusSql()}\nSELECT @@GLOBAL.gtid_slave_pos AS gtid_slave_pos;`,
+      ).then(parseMariadbFreshness, () => ({}));
+      return { ...parsed, ...freshness, observedAt };
     } catch {
       return { state: "unknown", observedAt };
     }

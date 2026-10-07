@@ -3,6 +3,7 @@ import {
   BufferedReader,
   type ByteSink,
   type ByteSource,
+  type ChunkCapture,
   concatBytes,
   encodeText,
   errorResponse,
@@ -249,6 +250,24 @@ test("relayChunked can capture the decoded payload and enforce a cap", async () 
     HttpError,
   );
   assertEquals(err.status, 413);
+});
+
+test("relayChunked keeps a running total across many tiny chunks", async () => {
+  const count = 20_000;
+  const body = "1\r\nx\r\n".repeat(count) + "0\r\n\r\n";
+  const capture: ChunkCapture = { chunks: [], maxBytes: count };
+  await relayChunked(new BufferedReader(pieces(body)), null, capture);
+  assertEquals(capture.chunks.length, count);
+  assertEquals(capture.held, count);
+
+  // One byte over the cap is refused at the chunk that crosses it.
+  const tight: ChunkCapture = { chunks: [], maxBytes: count - 1 };
+  const err = await assertRejects(
+    () => relayChunked(new BufferedReader(pieces(body)), null, tight),
+    HttpError,
+  );
+  assertEquals(err.status, 413);
+  assertEquals(tight.held, count - 1);
 });
 
 test("relayChunked refuses a bad chunk size", async () => {

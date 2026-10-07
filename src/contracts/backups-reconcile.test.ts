@@ -51,6 +51,32 @@ test("server.backups.reconcile accepts managed and copy entries as the complete 
   );
 });
 
+test("server.backups.reconcile carries a managed entry's database and refuses an unsafe or copy-side one", () => {
+  const withDatabase = { ...managedEntry, database: "defaultdb" };
+  assertEquals(
+    parseBackupsReconcilePayload({ policies: [withDatabase] }),
+    { policies: [withDatabase] },
+  );
+  for (const database of ["", "a b", "x;rm -rf /", 7]) {
+    assertThrows(
+      () =>
+        parseBackupsReconcilePayload({
+          policies: [{ ...managedEntry, database }],
+        }),
+      Error,
+      "managed database",
+    );
+  }
+  assertThrows(
+    () =>
+      parseBackupsReconcilePayload({
+        policies: [{ ...copyEntry, database: "defaultdb" }],
+      }),
+    Error,
+    "copy target",
+  );
+});
+
 test("server.backups.reconcile refuses a set that names one policy twice", () => {
   assertThrows(
     () =>

@@ -1,4 +1,5 @@
 import { assertEquals } from "@std/assert";
+import { applyManagedBootHoldAtStart } from "./run.ts";
 import { readServiceRunStates } from "../host/service-run-state.ts";
 import {
   type DaemonRunIo,
@@ -78,6 +79,8 @@ function stubIo(overrides: Partial<DaemonRunIo> = {}): {
       if (signal === "SIGTERM") queueMicrotask(handler);
     },
     initOrchestration: () => Promise.resolve(false),
+    applyManagedBootHold: () => Promise.resolve(),
+    markCleanShutdown: () => Promise.resolve(),
     scanLiveReleases: () => Promise.resolve(),
     restoreFabricFromPersistedState: () => {
       fabricRestores += 1;
@@ -199,6 +202,46 @@ test("runDaemon scans live releases in the background and only warns on failure"
       line.includes("live release link scan failed") &&
       line.includes("password is required")
     ),
+    true,
+  );
+});
+
+test("runDaemon holds primaries first and stamps a clean shutdown last", async () => {
+  const order: string[] = [];
+  const stub = stubIo({
+    applyManagedBootHold: () => {
+      order.push("hold");
+      return Promise.resolve();
+    },
+    initOrchestration: () => {
+      order.push("orchestration");
+      return Promise.resolve(false);
+    },
+    markCleanShutdown: () => {
+      order.push("clean");
+      return Promise.resolve();
+    },
+    exit: () => {
+      order.push("exit");
+    },
+  });
+  await runDaemon(stub.io);
+  assertEquals(order, ["hold", "orchestration", "clean", "exit"]);
+});
+
+test("runDaemon still starts when the boot hold check or the shutdown stamp fails", async () => {
+  const stub = stubIo({
+    applyManagedBootHold: () => Promise.reject(new Error("docker unreachable")),
+    markCleanShutdown: () => Promise.reject(new Error("disk full")),
+  });
+  await runDaemon(stub.io);
+  assertEquals(stub.exits, [0]);
+  assertEquals(
+    stub.warns.some((line) => line.includes("boot hold check failed")),
+    true,
+  );
+  assertEquals(
+    stub.warns.some((line) => line.includes("clean shutdown stamp failed")),
     true,
   );
 });
@@ -492,4 +535,65 @@ test("runDaemon feeds the sentinel's service run state to presence and clears it
   await runDaemon(stub.io);
   assertEquals(seenWhileRunning, services);
   assertEquals(readServiceRunStates(), undefined);
+});
+
+function bootHoldStartStub(holdResult: boolean | Error, classifyFails = false) {
+  const order: string[] = [];
+  return {
+    order,
+    deps: {
+      classify: () => {
+        order.push("classify");
+        return classifyFails
+          ? Promise.reject(new Error("unreadable"))
+          : Promise.resolve("unclean" as const);
+      },
+      hold: () => {
+        order.push("hold");
+        return holdResult instanceof Error
+          ? Promise.reject(holdResult)
+          : Promise.resolve(holdResult);
+      },
+      persist: () => {
+        order.push("persist");
+        return Promise.resolve();
+      },
+      newRetry: () => ({
+        start: () => order.push("retry-start"),
+        stop: () => order.push("retry-stop"),
+      }),
+    },
+  };
+}
+
+test("the boot record is persisted only after the holds were applied", async () => {
+  const ok = bootHoldStartStub(true);
+  await applyManagedBootHoldAtStart(ok.deps);
+  assertEquals(ok.order, ["classify", "hold", "retry-start", "persist"]);
+});
+
+test("a failed hold starts the local retry and does not persist the boot record", async () => {
+  const failed = bootHoldStartStub(false);
+  await applyManagedBootHoldAtStart(failed.deps);
+  assertEquals(failed.order, ["classify", "hold", "retry-start"]);
+});
+
+test("an unreadable boot record still holds, as an unclean boot", async () => {
+  const stub = bootHoldStartStub(true, true);
+  await applyManagedBootHoldAtStart(stub.deps);
+  assertEquals(stub.order, ["classify", "hold", "retry-start", "persist"]);
+});
+
+test("a hold that throws still starts the retry with a reapply and skips persist", async () => {
+  const stub = bootHoldStartStub(new Error("cannot list"));
+  let reapply: (() => Promise<boolean>) | undefined;
+  await applyManagedBootHoldAtStart({
+    ...stub.deps,
+    newRetry: (_l, r) => {
+      reapply = r;
+      return { start: () => stub.order.push("retry-start"), stop: () => {} };
+    },
+  });
+  assertEquals(stub.order, ["classify", "hold", "retry-start"]);
+  assertEquals(typeof reapply, "function");
 });

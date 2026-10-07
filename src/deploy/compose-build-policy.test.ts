@@ -162,6 +162,26 @@ const REFUSED: Array<
     "build_context_internal_url",
   ],
   [
+    "a remote context on localhost with a trailing dot",
+    { context: "https://localhost./x.git" },
+    "build_context_internal_url",
+  ],
+  [
+    "a remote context on a reserved suffix with a trailing dot",
+    { context: "https://metadata.google.internal./x.git" },
+    "build_context_internal_url",
+  ],
+  [
+    "a remote context on an address with a trailing dot",
+    { context: "https://127.0.0.1./x.git" },
+    "build_context_internal_url",
+  ],
+  [
+    "a git@ context on localhost with a trailing dot",
+    { context: "git@localhost.:x/y.git" },
+    "build_context_internal_url",
+  ],
+  [
     "a remote context on a single-label name",
     { context: "ssh://gitlab/x.git" },
     "build_context_internal_url",

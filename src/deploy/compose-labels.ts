@@ -1,4 +1,7 @@
-import type { EnvironmentDeployPayload } from "../contracts/commands-contracts.ts";
+import {
+  type EnvironmentDeployPayload,
+  hostingServedNames,
+} from "../contracts/commands-contracts.ts";
 import { safeUrlPath } from "../contracts/config-values.ts";
 import type { ComposeOverlayFragment } from "./compose-overlay.ts";
 import type { ResolvedComposeModel } from "./compose-services.ts";
@@ -207,7 +210,8 @@ function applyHttpHostingLabels(
   addLabel(
     labels,
     `traefik.http.routers.${routerId}.rule`,
-    buildRouterRule(hosting.hostnames, hosting.pathPrefix),
+    // Every name the site answers on, including a `www` mode's other spelling.
+    buildRouterRule(hostingServedNames(hosting), hosting.pathPrefix),
   );
   addLabel(
     labels,

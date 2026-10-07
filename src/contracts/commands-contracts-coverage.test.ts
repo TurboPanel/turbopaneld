@@ -414,6 +414,36 @@ test("parseEnvironmentDeployPayload round-trips nativeAppServices optional limit
   assertEquals(app?.accountLimits?.tasksMax, 4);
 });
 
+test("parseEnvironmentDeployPayload carries a Deno native app's runtime and denoVersion", () => {
+  const base = {
+    composeServiceName: "api",
+    serviceId: "svc-native-1",
+    listenPort: 13000,
+    framework: "auto",
+  };
+  const payload = parseEnvironmentDeployPayload({
+    ...DEPLOY_BASE,
+    nativeAppServices: [
+      { ...base, runtime: "deno", denoVersion: "2.9" },
+      base,
+    ],
+  });
+  assertEquals(payload.nativeAppServices?.[0]?.runtime, "deno");
+  assertEquals(payload.nativeAppServices?.[0]?.denoVersion, "2.9");
+  // A Node app's wire shape is untouched.
+  assertEquals("runtime" in (payload.nativeAppServices?.[1] ?? {}), false);
+  for (const bad of [{ runtime: "bun" }, { denoVersion: "latest" }]) {
+    assertThrows(
+      () =>
+        parseEnvironmentDeployPayload({
+          ...DEPLOY_BASE,
+          nativeAppServices: [{ ...base, ...bad }],
+        }),
+      TypeError,
+    );
+  }
+});
+
 test("parseEnvironmentDeployPayload rejects invalid nativeAppServices fields", () => {
   assertThrows(
     () =>
@@ -1421,7 +1451,7 @@ test("parseFirewallReconcileResult round-trips the daemon report", () => {
   );
 });
 
-test("parseEnvironmentDeployPayload keeps wwwRedirect only when true and rejects non-booleans", () => {
+test("parseEnvironmentDeployPayload keeps a www mode, drops off, and rejects unknown values", () => {
   const withHosting = (extra: Record<string, unknown>) =>
     parseEnvironmentDeployPayload({
       ...DEPLOY_BASE,
@@ -1434,15 +1464,33 @@ test("parseEnvironmentDeployPayload keeps wwwRedirect only when true and rejects
       }],
       hostingIngressNetwork: HOSTING_INGRESS_NETWORK,
     });
+  for (const www of ["both", "www-to-root", "root-to-www"]) {
+    assertEquals(withHosting({ www }).hostings[0]?.www, www);
+  }
+  assertEquals(withHosting({ www: "off" }).hostings[0]?.www, undefined);
+  assertEquals(withHosting({}).hostings[0]?.www, undefined);
+  for (const www of ["yes", true]) {
+    assertThrows(
+      () => withHosting({ www }),
+      TypeError,
+      "hostings[].www must be off, both, www-to-root, or root-to-www",
+    );
+  }
+  // An older control plane's on/off flag is honoured, never dropped silently.
   assertEquals(
-    withHosting({ wwwRedirect: true }).hostings[0]?.wwwRedirect,
-    true,
+    withHosting({ wwwRedirect: true }).hostings[0]?.www,
+    "www-to-root",
   );
   assertEquals(
-    withHosting({ wwwRedirect: false }).hostings[0]?.wwwRedirect,
-    undefined,
+    withHosting({ wwwRedirect: true, hostnames: ["www.example.com"] })
+      .hostings[0]?.www,
+    "root-to-www",
   );
-  assertEquals(withHosting({}).hostings[0]?.wwwRedirect, undefined);
+  assertEquals(
+    withHosting({ wwwRedirect: true, www: "both" }).hostings[0]?.www,
+    "both",
+  );
+  assertEquals(withHosting({ wwwRedirect: false }).hostings[0]?.www, undefined);
   assertThrows(
     () => withHosting({ wwwRedirect: "yes" }),
     TypeError,

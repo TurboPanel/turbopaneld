@@ -1,68 +1,11 @@
 ---
-# The account tp-host build-run runs tenant builds as. No home, no shell, no
-# sudo, and never in docker or tp: either would hand tenant build scripts the
-# daemon's reach. Its only supplementary groups are tpnode<series> runtime
-# groups, so a build can exec the vendored Node it was assigned.
-- name: Ensure the build account's primary group
-  ansible.builtin.group:
-    name: "{{ build_group }}"
-    gid: "{{ build_gid }}"
-    state: present
-    system: true
+# Builds run as a throwaway user systemd creates for each one
+# (DynamicUser=yes): no build account exists on the host, so none can be put
+# in docker, tp or sudo. tp-host build-run sets every property of the build
+# unit itself; this role only owns the tree it checks.
 
-- name: Ensure the build account
-  ansible.builtin.user:
-    name: "{{ build_user }}"
-    uid: "{{ build_uid }}"
-    group: "{{ build_group }}"
-    home: /nonexistent
-    create_home: false
-    shell: /usr/sbin/nologin
-    system: true
-    state: present
-
-# node-app-runtime appends the account to each series it vendors from now on;
-# this catches series vendored before the account existed.
-- name: Load the shared runtime registry
-  ansible.builtin.include_vars:
-    file: "{{ role_path }}/../../runtime-registry.json"
-    name: build_runtime_registry
-
-- name: Read the host group database
-  ansible.builtin.getent:
-    database: group
-
-- name: Let the build account execute the Node series already on this host
-  ansible.builtin.user:
-    name: "{{ build_user }}"
-    groups: "{{ _build_node_groups }}"
-    append: true
-  vars:
-    _build_node_groups: >-
-      {{ build_runtime_registry.runtimes.node.series.values()
-         | map(attribute='group')
-         | select('in', ansible_facts.getent_group)
-         | list }}
-  when: _build_node_groups | length > 0
-
-# tp-host refuses to build when the account is in any other group. Fail the
-# converge here instead, naming the group, rather than at the first deploy.
-- name: Refuse a build account that holds docker, tp or sudo
-  ansible.builtin.assert:
-    that:
-      - build_user not in (ansible_facts.getent_group[item] | default(['', '', '']))[2].split(',')
-    fail_msg: >-
-      {{ build_user }} is a member of {{ item }}. Remove it (gpasswd -d
-      {{ build_user }} {{ item }}); builds must not reach {{ item }}.
-    quiet: true
-  loop:
-    - docker
-    - "{{ turbopanel_group }}"
-    - sudo
-    - wheel
-
-# Only tp needs to traverse the root (to reach work/). The build account never
-# does: inside its unit the root is a tmpfs with its own dirs bound in.
+# Only tp needs to traverse the root (to reach work/). A build never does:
+# inside its unit the root is a tmpfs with its own work tree bound in.
 - name: Ensure the build sandbox root
   ansible.builtin.file:
     path: "{{ build_root }}"
@@ -79,19 +22,37 @@
     group: "{{ turbopanel_group }}"
     mode: "1770"
 
+# Build caches, one per site owner and project (caches/<owner>/<project>,
+# made by tp-host build-run). Root-only: each cache is handed to its build's
+# throwaway user only while that build runs, and no other build can see it.
 - name: Ensure the build cache directory
   ansible.builtin.file:
-    path: "{{ build_root }}/cache"
+    path: "{{ build_root }}/caches"
     state: directory
     owner: root
     group: root
     mode: "0700"
 
-- name: Install the build slice
-  ansible.builtin.template:
-    src: tpbuild.slice.j2
-    dest: "/etc/systemd/system/{{ build_slice }}"
-    owner: root
-    group: root
-    mode: "0640"
+# Retired with the shared build account: the per-project caches it owned
+# (shared by every site owner's builds), its slice and the account itself. A
+# cache is only a cache: the next build fills its own.
+- name: Remove the retired shared build cache
+  ansible.builtin.file:
+    path: "{{ build_root }}/cache"
+    state: absent
+
+- name: Remove the retired build slice
+  ansible.builtin.file:
+    path: "/etc/systemd/system/{{ build_retired_slice }}"
+    state: absent
   notify: Reload systemd for the build slice
+
+- name: Remove the retired shared build account
+  ansible.builtin.user:
+    name: "{{ build_retired_user }}"
+    state: absent
+
+- name: Remove the retired shared build group
+  ansible.builtin.group:
+    name: "{{ build_retired_user }}"
+    state: absent

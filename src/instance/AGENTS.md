@@ -63,6 +63,14 @@ It is not a queued command: a running deploy holds the queue slot. The deploy
 itself ends with a `command-outcome` whose error starts with `cancelled: `. The
 cutover rule and its limits are in `../deploy/AGENTS.md`.
 
+**Site database bindings (`site-db-bindings-v1`).** The daemon advertises the
+feature in `hello.features`. A control plane that sees it may send
+`sites[].dbCa` (a public CA bundle the daemon keeps as a file for the site
+owner's Linux user and points variables at) and `sites[].requiredEnv`; the
+`environment.deploy` result may carry `warnings` (variables a site's web server
+could not carry, named, never their values). All additive: an older control
+plane sends neither and ignores `warnings`. See `../deploy/site/AGENTS.md`.
+
 **On-demand managed health (`managed-health-v1`).** The daemon advertises
 the feature in `hello.features`. A control plane that sees it may send
 `managed-health-request` (`managedId`, `memberId`, `role`, `engine`) and gets
@@ -77,6 +85,45 @@ additive and no floor moved. A replica's `member.replication` also carries
 `receivedLsn` / `replayLsn` and, once `PgStandbySampler` has seen it streaming,
 `lastStreaming` (`at`, monotonic `ageMs`, lag); all optional, so an older
 control plane ignores them.
+
+**Pushed managed health (`managed-health-report-v1`).** `ManagedHealthReporter`
+(`managed-health-reporter.ts`) reads every replica recorded in `ha-member.json`
+(all engines) every 30 s, through the same `probeManagedMemberHealth`, and sends
+one `managed-health-report` frame (`members[]`, at most 32) to a control plane
+that lists the feature. A replica whose engine is down goes out as
+`down: true`; any other probe error sends nothing for that replica, so the
+control plane lets the old reading age out. Fire-and-forget and read-only. It
+exists because health was only read when someone asked: a quiet cluster aged
+past the control plane's freshness window and a stopped replica kept its last
+`streaming` line.
+
+**Replica freshness (`managed-replica-freshness-v1`).** A MySQL / MariaDB
+replica's `replication` also carries `receivedGtid`, `executedGtid` (bounded
+opaque text, 4096 chars max) and `fullyApplied` (computed on the daemon from the
+GTID sets: MySQL received is a subset of executed; MariaDB `Gtid_IO_Pos` equals
+`gtid_slave_pos`). A failed, empty or malformed read omits them: unknown, never
+`true`. A second `PgStandbySampler` (engines mysql, mariadb, every 2 s) feeds
+the same streaming tracker, so `lastStreaming.ageMs` exists for them too (MySQL:
+newest heartbeat or queued transaction while the IO thread is `ON`; MariaDB: IO
+thread `Yes`, which only shows the thread is connected and stays `Yes` until
+`slave_net_timeout`, ~60 s after the source dies, so the gate must also rely
+on `fullyApplied` and peer evidence). Empty/NULL GTID sets are omitted, never
+sent as `""`. MySQL reads the default channel only; MariaDB needs `Using_Gtid`
+Slave_Pos/Current_Pos. Parsers: `managed/engines/replica-freshness.ts`.
+
+**Rate-limited control-plane calls (HTTP 429).** The control plane limits each
+daemon's REST calls to about 30 a minute per route per server. An authenticated
+`DaemonApiClient` call (secrets/decrypt, the command log, rehydrate, ...) that
+gets a 429 is retried, 6 tries in all with 2, 4, 8, 16 and 32 s waits (about
+62 s, one full limiter window); a `Retry-After` header can lengthen a wait but
+never past 30 s. Each retry logs a WARN naming the route and the try number. When
+the tries run out the call throws `DaemonApiError(429, ...)` whose message starts
+`rate_limited:` and says the limit was still in effect after 6 tries, so a failed
+managed command shows a clear reason. Only 429 is retried (no other status, no
+network error), the 401 token refresh still runs on every try, and the
+unauthenticated enroll/challenge/session calls keep a single try (the connect
+loop backs a 429 off itself). `DaemonApiClientOptions.sleep` is the test seam; the
+policy sits in `util/retry-fetch.ts` options.
 
 ### Instance Let's Encrypt renewal (`src/instance/instance-acme-renew.ts`)
 
@@ -176,9 +223,14 @@ identifier per hour (one refill every 12 minutes). The tenant
   `src/host/service-run-state.ts`; `undefined` (Docker not watched, or the first
   container listing not in yet) omits the field, `[]` is sent so the control
   plane clears. A container is `running` only after 60 s up (`SERVICE_SETTLE_MS`),
-  `crashing` while Docker restarts it, `stopped_after_crashes` when down at 10
-  restarts (`SERVICE_CRASH_LIMIT`; reporting only, the restart policy itself is
-  set by the deploy). `asOf` is when the state last changed, so an idle service
+  `crashing` while Docker restarts it, `stopped_after_crashes` once it is down
+  after 10 restarts in a row (`SERVICE_CRASH_LIMIT`). The crash-loop guard
+  (`src/monitor/crash-loop-guard.ts`, wired through `SentinelOptions.stopContainer`)
+  does the stopping: it counts restarts since the container last stayed up for
+  60 s, runs `docker stop` once at the limit and leaves the authored restart
+  policy alone. A manual start zeroes Docker's `RestartCount`, which clears the
+  mark. Only service containers are guarded (not ingress/platform), and native
+  (systemd) apps are not watched. `asOf` is when the state last changed, so an idle service
   never re-triggers a heartbeat. Wire twin: `src/contracts/service-run-state.ts`
   (checked by `check:contract-drift`). The last log line comes from
   `docker logs --tail 5`, fetched in the background once per restart count.
@@ -328,13 +380,13 @@ dev-user parameters — not shipped in release; resolved via
 `TURBOPANEL_DEV_ORCHESTRATION_DIR` / `resolveDevOrchestrationDir`, layered with
 daemon production roles through `ANSIBLE_ROLES_PATH`). Production installs
 extract **`orchestration.tar.zst`** from the channel manifest into
-`/opt/turbopanel/share/orchestration/`. Release CDN artifacts are four split
-tarballs per build under versioned paths (`channels/trunk/daemon/<buildId>/…`):
+`/opt/turbopanel/share/orchestration/`. Release artifacts are four split
+tarballs per build on GitHub Releases:
 host-arch `turbopaneld-{amd64,arm64}.tar.zst`, shared `turbopaneld.js.tar.zst`
 (Deno JS runtime for hosts that cannot execute the native binary), and shared
-`orchestration.tar.zst`. Manifest artifact URLs are canonical — Bunny CDN
-ignores `?build=` query cache-bust, so each publish uploads to a new
-`<buildId>/` prefix with `Cache-Control: immutable`.
+`orchestration.tar.zst`. Manifest artifact URLs are canonical: assets are added
+under build-unique names, so a manifest never names a file a later publish
+replaces.
 
 **Two managed ExecStart modes (native vs Deno JS):** `run.sh` always downloads
 the host-arch native binary and orchestration tree, then probes

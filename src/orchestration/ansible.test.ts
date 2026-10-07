@@ -1625,6 +1625,15 @@ test("site apply playbooks vendor engines (never apt nginx/apache2)", async () =
   );
   assertMatch(nginxDefaults, /nginx_version:\s*"1\.\d+\.\d+"/, "nginx pin");
   assertMatch(apacheDefaults, /apache_version:\s*"2\.\d+\.\d+"/, "apache pin");
+  // Prebuilt, checksum-pinned tarball: no host compile, fail closed while the
+  // digests are unpinned placeholders.
+  assertMatch(apacheDefaults, /apache_sha256:/, "apache digest table");
+  const apacheTasks = await Deno.readTextFile(
+    join(CHECKOUT_ORCHESTRATION_DIR, "roles/apache/tasks/main.yml"),
+  );
+  assertEquals(apacheTasks.includes("./configure"), false);
+  assertEquals(apacheTasks.includes("make install"), false);
+  assertMatch(apacheTasks, /vendor-apache workflow/, "unpinned message");
   // php-fpm is the one component that is NOT vendored: it comes from Ondrej
   // Sury's Debian repo. So the series is the pin (there is no source-build
   // patch version), and the repo wiring must stay deb822 + Signed-By.

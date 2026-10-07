@@ -2,6 +2,10 @@
  * `managed.ingress.reconcile` — whole-server ProxySQL desired state.
  */
 
+import {
+  markProxySqlReconciled,
+  withProxySqlLock,
+} from "../managed/proxysql-lock.ts";
 import type {
   EnvironmentDeployContainer,
   ManagedIngressReconcilePayload,
@@ -22,7 +26,7 @@ import {
   writeSystemComponentDescriptor,
 } from "../deploy/system-component.ts";
 import { ingressContainerName } from "../deploy/ingress-identity.ts";
-import { logInfo } from "../util/logger.ts";
+import { logInfo, sanitizeForLog } from "../util/logger.ts";
 import { type LayoutPaths, resolveLayout } from "../paths/layout.ts";
 import {
   containerMissesManagedNetwork,
@@ -38,6 +42,7 @@ import {
   loadProxySqlAdminCredentials,
   loadProxySqlMonitorCredentials,
   proxySqlHostPrepPresent,
+  readProxySqlRuntimeServers,
 } from "../managed/proxysql-admin.ts";
 import { runProxySqlSetup } from "../orchestration/ansible.ts";
 import {
@@ -45,10 +50,13 @@ import {
   assertNoFrontendUserConflict,
   buildProxySqlAdminStatements,
   DEFAULT_PROXYSQL_LISTENER_PORTS,
+  findIngressRuntimeMismatch,
   inspectProxySqlContainer,
   type ProbeHostPortFn,
   proxysqlCompose,
   type ProxySqlDesiredState,
+  proxySqlFamiliesInUse,
+  type ProxySqlRuntimeServerRow,
   readManagedNetworkFromCompose,
   readPublishedBindAddressesFromCompose,
   readPublishedListenerPortsFromCompose,
@@ -512,7 +520,53 @@ function containersFromObserved(
   return observed === null ? [] : [observed];
 }
 
-export async function handleManagedIngressReconcile(
+/**
+ * Read ProxySQL's runtime tables back after the admin apply and refuse to
+ * report success while they still route somewhere the desired state does not
+ * (for instance a writer hostgroup still holding the old primary after a
+ * failover). Only called with at least one cluster, never on teardown.
+ */
+async function assertRuntimeRepointed(
+  desired: ProxySqlDesiredState,
+  admin: {
+    runDocker: RunDockerFn;
+    layout: LayoutPaths;
+    containerName: string;
+  },
+): Promise<void> {
+  const families = proxySqlFamiliesInUse(desired);
+  const tables = await Promise.all(
+    families.map((family) => readProxySqlRuntimeServers(family, admin)),
+  );
+  const runtime: Partial<
+    Record<(typeof families)[number], ProxySqlRuntimeServerRow[]>
+  > = {};
+  families.forEach((family, index) => {
+    runtime[family] = tables[index];
+  });
+  const mismatch = findIngressRuntimeMismatch(desired, runtime);
+  if (mismatch !== null) throw new Error(sanitizeForLog(mismatch));
+}
+
+export function handleManagedIngressReconcile(
+  payload: ManagedIngressReconcilePayload,
+  daemonReceivedAt: string,
+  deps?: ManagedIngressReconcileHandlerDeps,
+): Promise<ManagedIngressReconcileResult> {
+  return withProxySqlLock(async () => {
+    const result = await reconcileManagedIngress(
+      payload,
+      daemonReceivedAt,
+      deps,
+    );
+    // Only a reconcile that settled the stack (up or deliberate down) makes
+    // the boot repair stand down; a thrown one leaves it free to run.
+    markProxySqlReconciled();
+    return result;
+  });
+}
+
+async function reconcileManagedIngress(
   payload: ManagedIngressReconcilePayload,
   daemonReceivedAt: string,
   deps?: ManagedIngressReconcileHandlerDeps,
@@ -683,6 +737,11 @@ export async function handleManagedIngressReconcile(
     monitor: monitorCredentials,
   });
   await applyProxySqlAdminStatements(statements, {
+    runDocker: run,
+    layout,
+    containerName,
+  });
+  await assertRuntimeRepointed(desired, {
     runDocker: run,
     layout,
     containerName,

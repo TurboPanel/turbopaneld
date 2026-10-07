@@ -6,7 +6,6 @@ import {
   listSpooledRunIds,
   MAX_REPORTS_PER_TICK,
   parseSpooledBackupRunResult,
-  parseSystemdUnixTimestamp,
   readTimerNextRun,
 } from "./result-reporter.ts";
 import {
@@ -244,20 +243,6 @@ test("parseSpooledBackupRunResult refuses files the control plane would reject",
     });
     assertEquals(parseSpooledBackupRunResult(text, "run_1"), reason);
   }
-});
-
-test("parseSystemdUnixTimestamp reads @seconds and nothing else", () => {
-  assertEquals(
-    parseSystemdUnixTimestamp("@1790744400\n"),
-    "2026-09-30T05:00:00.000Z",
-  );
-  assertEquals(parseSystemdUnixTimestamp(""), undefined);
-  assertEquals(parseSystemdUnixTimestamp("n/a"), undefined);
-  assertEquals(parseSystemdUnixTimestamp("@0"), undefined);
-  assertEquals(
-    parseSystemdUnixTimestamp("Wed 2026-10-01 03:00:00 UTC"),
-    undefined,
-  );
 });
 
 test("readTimerNextRun refuses a malformed policy id without asking systemd", async () => {

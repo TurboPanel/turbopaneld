@@ -202,6 +202,9 @@ jobs:
           sparse-checkout: scripts/download-caddy.mjs
 
       - name: Test with coverage
+        env:
+          # The real-Postgres suites must run here, never skip on a Docker hiccup.
+          TURBOPANEL_REQUIRE_REAL_POSTGRES: "1"
         run: deno task test:coverage
 
       # `deno task test:coverage` already normalizes; re-running here is

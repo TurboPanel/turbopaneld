@@ -426,6 +426,27 @@ async function assertCreatedUidAboveFloor(
   }
 }
 
+/**
+ * An operator's uid/gid override must sit in the principal band
+ * [{@link PRINCIPAL_ID_MIN}, {@link PRINCIPAL_ID_MAX}]. Above it starts
+ * systemd's range for throwaway build users (61184–65519), which tp-host
+ * never treats as a site owner; it refuses such an override too, this only
+ * says so first, in plain words.
+ */
+export function assertIdOverridesInBand(principal: PrincipalEnsureSpec): void {
+  for (const [field, id] of [["uid", principal.uid], ["gid", principal.gid]]) {
+    if (id === undefined) continue;
+    if (
+      typeof id !== "number" || !Number.isInteger(id) ||
+      id < PRINCIPAL_ID_MIN || id > PRINCIPAL_ID_MAX
+    ) {
+      throw new RangeError(
+        `Principal ${principal.username}: ${field} ${id} is outside ${PRINCIPAL_ID_MIN}–${PRINCIPAL_ID_MAX}`,
+      );
+    }
+  }
+}
+
 /** Explicit uid/gid overrides must still match the existing account. */
 function assertAdoptedIdsMatch(
   principal: PrincipalEnsureSpec,
@@ -716,6 +737,7 @@ async function ensureOnePrincipal(
   if (!ALLOWED_PRINCIPAL_SHELLS.includes(shell)) {
     throw new TypeError(`Principal shell is not allowed: ${shell}`);
   }
+  assertIdOverridesInBand(principal);
 
   // 0750 plus other:x, not 0751. A world bit trips ansible:S2612; the ACL
   // is traverse without list. A principal with a shell can otherwise

@@ -2,14 +2,31 @@
  * Managed apply handler tests — standby mutation skip + needs_resync fence.
  */
 
-import { assertEquals } from "@std/assert";
+import { assertEquals, assertRejects } from "@std/assert";
 import type {
   ManagedApplyCredential,
   ManagedApplyPayload,
 } from "../contracts/commands-contracts.ts";
 import { resolveLayout } from "../paths/layout.ts";
 import { withTempLayout } from "../testing/temp-layout.ts";
-import { applyManagedEngineState, buildNeedsResyncMember } from "./apply.ts";
+import {
+  applyManagedEngineState,
+  buildNeedsResyncMember,
+  chooseManagedCompose,
+  collectMemberHealth,
+  composeUpManagedEngine,
+  type ComposeUpManagedEngineArgs,
+  provisionManagedRootPasswordFile,
+  writeManagedRootPasswordFile,
+} from "./apply.ts";
+import { normalizeManagedCompose } from "./compose.ts";
+import {
+  managedDir,
+  managedEnvFilePath,
+  managedRootPasswordPath,
+} from "./engine-paths.ts";
+import { createNoopCommandOutputSink } from "../logs/contracts.ts";
+import type { ManagedEngineContext } from "./engines/types.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -18,6 +35,9 @@ import { applyManagedEngineState, buildNeedsResyncMember } from "./apply.ts";
  * reports Deno suites as empty; keep this alias so analysis sees real tests.
  */
 const test = Deno.test.bind(Deno);
+
+/** Random per run so no credential-shaped literal sits in the source. */
+const TEST_ROOT_VALUE = `v-${crypto.randomUUID()}`;
 
 test("needs_resync member projection marks replica needs_resync", () => {
   const member = buildNeedsResyncMember(
@@ -149,8 +169,8 @@ test("primary applyManagedEngineState still mutates credentials/databases", asyn
   assertEquals(state.appliedDatabases, ["appdb"]);
   assertEquals(calls, [
     "waitReady",
-    "applyCredentials",
     "applyDatabases",
+    "applyCredentials",
     "readVersion",
   ]);
 });
@@ -236,10 +256,10 @@ test("primary applyManagedEngineState runs host prep then ensures ProxySQL monit
 
       assertEquals(calls, [
         "waitReady",
+        "applyDatabases",
         "applyCredentials",
         "hostPrep",
         "ensure:tp_monitor",
-        "applyDatabases",
         "readVersion",
       ]);
     } finally {
@@ -249,6 +269,122 @@ test("primary applyManagedEngineState runs host prep then ensures ProxySQL monit
       }
     }
   });
+});
+
+/** Engine double that records every step and the database ops it was handed. */
+function orderingEngine(
+  calls: string[],
+  options?: { failCredentials?: boolean },
+) {
+  return {
+    rootUsername: "postgres",
+    waitReady: () => Promise.resolve(),
+    applyDatabases: (
+      _ctx: unknown,
+      ops: Array<{ name: string; action: string }>,
+    ) => {
+      calls.push(
+        `applyDatabases:${
+          ops.map((op) => `${op.action}:${op.name}`).join(",")
+        }`,
+      );
+      return Promise.resolve(ops.map((op) => op.name));
+    },
+    applyCredentials: () => {
+      calls.push("applyCredentials");
+      return options?.failCredentials
+        ? Promise.reject(new Error('database "p_db" does not exist'))
+        : Promise.resolve(["app_user"]);
+    },
+    dropUsers: (_ctx: unknown, usernames: string[]) => {
+      calls.push(`dropUsers:${usernames.join(",")}`);
+      return Promise.resolve(usernames);
+    },
+    ensureProxySqlMonitor: () => {
+      calls.push("monitor");
+      return Promise.resolve();
+    },
+    readVersion: () => Promise.resolve("18.0"),
+  };
+}
+
+const orderingPayload = {
+  engine: "postgres",
+  dropUsers: ["old_user"],
+  databases: [
+    { action: "drop", name: "old_db" },
+    { action: "create", name: "p_db" },
+    { action: "create", name: "q_db" },
+  ],
+} as unknown as ManagedApplyPayload;
+
+test("primary applyManagedEngineState creates databases before credentials and drops them after dropUsers", async () => {
+  const calls: string[] = [];
+
+  const state = await applyManagedEngineState(
+    {} as never,
+    orderingEngine(calls) as never,
+    orderingPayload,
+    [],
+    { monitorUsers: [{ user: "tp_monitor", password: "mon-s3cret" }] },
+  );
+
+  assertEquals(calls, [
+    "applyDatabases:create:p_db,create:q_db",
+    "applyCredentials",
+    "dropUsers:old_user",
+    "monitor",
+    "applyDatabases:drop:old_db",
+  ]);
+  // Complete list: creates in payload order, then drops.
+  assertEquals(state.appliedDatabases, ["p_db", "q_db", "old_db"]);
+  assertEquals(state.appliedUsers, ["app_user", "old_user"]);
+});
+
+test("primary applyManagedEngineState leaves the database created when credentials fail", async () => {
+  const calls: string[] = [];
+
+  await assertRejects(
+    () =>
+      applyManagedEngineState(
+        {} as never,
+        orderingEngine(calls, { failCredentials: true }) as never,
+        orderingPayload,
+        [],
+      ),
+    Error,
+    "does not exist",
+  );
+
+  // The create already ran; the failing step stops the apply before the
+  // user drops and the database drops.
+  assertEquals(calls, [
+    "applyDatabases:create:p_db,create:q_db",
+    "applyCredentials",
+  ]);
+});
+
+test("primary applyManagedEngineState skips database steps that have no operations", async () => {
+  const calls: string[] = [];
+  const payload = {
+    engine: "postgres",
+    databases: [{ action: "drop", name: "old_db" }],
+  } as unknown as ManagedApplyPayload;
+
+  const state = await applyManagedEngineState(
+    {} as never,
+    orderingEngine(calls) as never,
+    payload,
+    [],
+    { monitorUsers: [{ user: "tp_monitor", password: "mon-s3cret" }] },
+  );
+
+  assertEquals(calls, [
+    "applyCredentials",
+    "monitor",
+    "applyDatabases:drop:old_db",
+  ]);
+  assertEquals(state.appliedDatabases, ["old_db"]);
 });
 
 test("primary applyManagedEngineState drops users except the platform root", async () => {
@@ -530,7 +666,16 @@ test("buildEngineExec retries restart-window failures, then stops on success", a
   const result = await exec(["mysql", "-e", "select 1"]);
   assertEquals(result, { success: true, stdout: "done", stderr: "" });
   assertEquals(calls.length, 3);
-  assertEquals(calls[0], ["exec", "-i", "cid", "mysql", "-e", "select 1"]);
+  assertEquals(calls[0], [
+    "exec",
+    "-i",
+    "-u",
+    "0",
+    "cid",
+    "mysql",
+    "-e",
+    "select 1",
+  ]);
 });
 
 test("buildEngineExec does not retry non-transient failures and redacts stderr", async () => {
@@ -577,4 +722,252 @@ test("buildEngineExec gives up after the retry budget on a persistent restart wi
   assertEquals(result.success, false);
   // One initial attempt plus ENGINE_EXEC_RETRIES (10) retries.
   assertEquals(calls, 11);
+});
+
+/** Minimal engine whose replication runtime records the slot sweeps. */
+function slotSweepEngine(sweeps: string[][]) {
+  return {
+    replication: {
+      pruneOrphanSlots: (_ctx: ManagedEngineContext, desired: string[]) => {
+        sweeps.push([...desired]);
+        return Promise.resolve();
+      },
+    },
+  } as unknown as Parameters<typeof collectMemberHealth>[1];
+}
+
+const SLOT_SWEEP_CTX = {} as ManagedEngineContext;
+const SLOT_SWEEP_MEMBER_ID = "00000000-0000-4000-8000-0000000000aa";
+
+test("a primary with no replication payload (last replica removed) sweeps every leftover slot", async () => {
+  const sweeps: string[][] = [];
+  const member = await collectMemberHealth(
+    SLOT_SWEEP_CTX,
+    slotSweepEngine(sweeps),
+    {
+      memberId: SLOT_SWEEP_MEMBER_ID,
+      memberRole: "primary",
+    } as unknown as ManagedApplyPayload,
+    [],
+  );
+  assertEquals(sweeps, [[]]);
+  assertEquals(member?.status, "ready");
+});
+
+test("a replica without a replication payload never sweeps slots", async () => {
+  const sweeps: string[][] = [];
+  await collectMemberHealth(
+    SLOT_SWEEP_CTX,
+    slotSweepEngine(sweeps),
+    {
+      memberId: SLOT_SWEEP_MEMBER_ID,
+      memberRole: "replica",
+    } as unknown as ManagedApplyPayload,
+    [],
+  );
+  assertEquals(sweeps, []);
+});
+
+test("a failing orphan-slot sweep never fails the apply of a single-member cluster", async () => {
+  const engine = {
+    replication: {
+      pruneOrphanSlots: () => Promise.reject(new Error("slot is active")),
+    },
+  } as unknown as Parameters<typeof collectMemberHealth>[1];
+  const member = await collectMemberHealth(
+    SLOT_SWEEP_CTX,
+    engine,
+    {
+      managedId: "00000000-0000-4000-8000-0000000000bb",
+      memberId: SLOT_SWEEP_MEMBER_ID,
+      memberRole: "primary",
+    } as unknown as ManagedApplyPayload,
+    [],
+  );
+  assertEquals(member?.status, "ready");
+});
+
+test("writeManagedRootPasswordFile writes 0600 once and never rewrites a handed-over file", async () => {
+  const dir = await Deno.makeTempDir();
+  try {
+    const secretsDir = `${dir}/secrets`;
+    const path = `${secretsDir}/root-password`;
+    assertEquals(
+      await writeManagedRootPasswordFile(secretsDir, path, "pw-one"),
+      true,
+    );
+    assertEquals((await Deno.stat(path)).mode! & 0o777, 0o600);
+    assertEquals(await Deno.readTextFile(path), "pw-one");
+    // Still daemon-owned (hand-over failed earlier): rewritten and re-flagged.
+    assertEquals(
+      await writeManagedRootPasswordFile(secretsDir, path, "pw-two"),
+      true,
+    );
+    assertEquals(await Deno.readTextFile(path), "pw-two");
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+test("chooseManagedCompose leaves an unchanged legacy cluster alone and moves a changed one to the file form", async () => {
+  const dir = await Deno.makeTempDir();
+  try {
+    const path = `${dir}/docker-compose.yml`;
+    const payload = {
+      managedId: "00000000-0000-4000-8000-000000000001",
+      engine: "postgres",
+      containerName: "c1",
+      managedNetwork: "net",
+      image: "postgres:18",
+      containerPort: 5432,
+      composeYaml: [
+        "services:",
+        "  postgres:",
+        "    environment:",
+        "      POSTGRES_PASSWORD: ${TURBOPANEL_MANAGED_ROOT_PASSWORD}",
+      ].join("\n"),
+      configFiles: [],
+      volumes: [],
+    } as unknown as ManagedApplyPayload;
+
+    const fresh = await chooseManagedCompose(path, payload);
+    assertEquals(fresh.composeYaml.includes("POSTGRES_PASSWORD_FILE"), true);
+
+    const legacy = normalizeManagedCompose(payload, {
+      legacyRootPasswordEnv: true,
+    });
+    await Deno.writeTextFile(path, legacy.composeYaml);
+    const same = await chooseManagedCompose(path, payload);
+    assertEquals(same.composeYaml, legacy.composeYaml);
+
+    const changed = await chooseManagedCompose(path, {
+      ...payload,
+      image: "postgres:19",
+    });
+    assertEquals(changed.composeYaml.includes("POSTGRES_PASSWORD_FILE"), true);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+test("provisionManagedRootPasswordFile writes the file and hands it over once, without the password in argv", async () => {
+  await withTempLayout(async (fixture) => {
+    const layout = resolveLayout(fixture.env);
+    const calls: string[][] = [];
+    const run = (args: string[]) => {
+      calls.push(args);
+      return Promise.resolve({
+        success: true,
+        code: 0,
+        stdout: "",
+        stderr: "",
+      });
+    };
+    const payload = {
+      managedId: "00000000-0000-4000-8000-000000000001",
+      image: "postgres:18",
+    } as unknown as ManagedApplyPayload;
+    await provisionManagedRootPasswordFile(layout, payload, TEST_ROOT_VALUE, {
+      engineUser: "postgres",
+      engineGroup: "postgres",
+      run,
+    });
+    assertEquals(calls.length, 2);
+    assertEquals(calls.flat().join(" ").includes(TEST_ROOT_VALUE), false);
+    assertEquals(
+      await Deno.readTextFile(
+        managedRootPasswordPath(layout, payload.managedId),
+      ),
+      TEST_ROOT_VALUE,
+    );
+  });
+});
+
+function composeUpFixture(
+  fixture: { env: Record<string, string> },
+  composeYaml: string,
+  run: (args: string[]) => Promise<
+    { success: boolean; code: number; stdout: string; stderr: string }
+  >,
+  streamed: string[][],
+) {
+  const layout = resolveLayout(fixture.env);
+  const payload = {
+    managedId: "00000000-0000-4000-8000-000000000001",
+    image: "postgres:18",
+  } as unknown as ManagedApplyPayload;
+  return {
+    layout,
+    payload,
+    args: {
+      layout,
+      payload,
+      composeYaml,
+      rootCredential: { password: TEST_ROOT_VALUE } as ManagedApplyCredential,
+      redact: (t: string) => t,
+      runDockerSetup: () => Promise.resolve(),
+      logSink: createNoopCommandOutputSink(),
+      runStreamed: (args: string[]) => {
+        streamed.push(args);
+        return Promise.resolve({
+          success: true,
+          code: 0,
+          stdout: "",
+          stderr: "",
+        });
+      },
+      run,
+      engineUser: "postgres",
+      engineGroup: "postgres",
+    } as unknown as ComposeUpManagedEngineArgs,
+  };
+}
+
+test("composeUpManagedEngine does not reach compose up when the secret hand-over fails", async () => {
+  await withTempLayout(async (fixture) => {
+    const streamed: string[][] = [];
+    const { layout, payload, args } = composeUpFixture(
+      fixture,
+      "services: {}\n# ./secrets/root-password:/run/secrets/tp_root_password:ro",
+      () =>
+        Promise.resolve({
+          success: false,
+          code: 1,
+          stdout: "",
+          stderr: "chown denied",
+        }),
+      streamed,
+    );
+    await Deno.mkdir(managedDir(layout, payload.managedId), {
+      recursive: true,
+    });
+    await assertRejects(
+      () => composeUpManagedEngine(args),
+      Error,
+      "failed to hand the engine root password file",
+    );
+    assertEquals(streamed.length, 0);
+  });
+});
+
+test("composeUpManagedEngine skips the env file and --env-file when the compose has no placeholder", async () => {
+  await withTempLayout(async (fixture) => {
+    const streamed: string[][] = [];
+    const { layout, payload, args } = composeUpFixture(
+      fixture,
+      "services: {}\n# no password here",
+      () => Promise.reject(new Error("helper must not run")),
+      streamed,
+    );
+    await Deno.mkdir(managedDir(layout, payload.managedId), {
+      recursive: true,
+    });
+    await composeUpManagedEngine(args);
+    assertEquals(streamed.length, 1);
+    assertEquals(streamed[0]!.includes("--env-file"), false);
+    await assertRejects(
+      () => Deno.stat(managedEnvFilePath(layout, payload.managedId)),
+      Deno.errors.NotFound,
+    );
+  });
 });

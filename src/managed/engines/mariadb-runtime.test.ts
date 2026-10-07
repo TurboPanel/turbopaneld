@@ -949,3 +949,65 @@ Deno.test("readCensus: a passing mariadb-admin ping plus the census rows is heal
     },
   );
 });
+
+test("mariadb configureStandby retries the seed with the root password when bare socket root is denied", async () => {
+  const replication = mariadbManagedEngineRuntime.replication;
+  if (!replication?.configureStandby) {
+    throw new TypeError("expected mariadb configureStandby");
+  }
+  const seeds: Array<{ script: string; input?: string }> = [];
+  const exec: ManagedEngineExec = (argv, input) => {
+    if (argv[0] === "test" && argv.includes("-f")) {
+      return Promise.resolve({ success: false, stdout: "", stderr: "" });
+    }
+    if (argv[0] === "sh" && argv[2]?.includes("--all-databases")) {
+      seeds.push({ script: argv[2]!, input });
+      return Promise.resolve(
+        seeds.length === 1
+          ? {
+            success: false,
+            stdout: "",
+            stderr:
+              "ERROR 1045 (28000): Access denied for user 'root'@'localhost' (using password: NO)",
+          }
+          : { success: true, stdout: "", stderr: "" },
+      );
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  await replication.configureStandby(
+    { ...buildContext(exec), socketPassword: "rootpw" },
+    standbyReplicationSpec(),
+  );
+  assertEquals(seeds.length, 2);
+  assertEquals(seeds[0]!.input?.includes("rootpw"), false);
+  assertEquals(seeds[1]!.script.includes("rootcnf"), true);
+  assertEquals(seeds[1]!.input?.includes("password=rootpw"), true);
+});
+
+test("mariadb configureStandby does not retry a denied seed without a root password", async () => {
+  const replication = mariadbManagedEngineRuntime.replication;
+  if (!replication?.configureStandby) {
+    throw new TypeError("expected mariadb configureStandby");
+  }
+  let seeds = 0;
+  const exec: ManagedEngineExec = (argv) => {
+    if (argv[0] === "test" && argv.includes("-f")) {
+      return Promise.resolve({ success: false, stdout: "", stderr: "" });
+    }
+    if (argv[0] === "sh" && argv[2]?.includes("--all-databases")) {
+      seeds++;
+      return Promise.resolve({
+        success: false,
+        stdout: "",
+        stderr:
+          "Access denied for user 'root'@'localhost' (using password: NO)",
+      });
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  await assertRejects(() =>
+    replication.configureStandby!(buildContext(exec), standbyReplicationSpec())
+  );
+  assertEquals(seeds, 1);
+});

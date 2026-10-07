@@ -362,7 +362,10 @@ function checkExtraHosts(ctx: Ctx, name: string, value: unknown): void {
 
 /** Why a remote host is internal, or `null`. */
 function internalHostReason(rawHost: string): string | null {
-  const host = rawHost.toLowerCase().replace(/^\[|\]$/g, "");
+  let host = rawHost.toLowerCase().replace(/^\[|\]$/g, "");
+  // A fully qualified name ends in a dot (`localhost.`, `x.internal.`): the
+  // resolver treats it as the same host, so the checks below must too.
+  while (host.endsWith(".")) host = host.slice(0, -1);
   if (host === "") return "names no host";
   const scope = ipScope(host);
   if (scope !== null) {

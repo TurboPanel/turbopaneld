@@ -9,8 +9,8 @@
  *   {@link SERVICE_SETTLE_MS}. A deploy that dies at second 10 therefore never
  *   shows as running, however briefly Docker reports it up.
  * - `restarting` is `crashing`.
- * - Down with a non-zero exit at or past {@link SERVICE_CRASH_LIMIT} restarts is
- *   `stopped_after_crashes`.
+ * - Down with a non-zero exit at or past {@link SERVICE_CRASH_LIMIT} restarts
+ *   in a row, or stopped by the crash-loop guard, is `stopped_after_crashes`.
  * - A service with several containers reports its worst one.
  */
 import type { ContainerInspect, ContainerSummary } from "../docker/client.ts";
@@ -39,6 +39,10 @@ export type ServiceContainerObservation = {
   inspect?: ContainerInspect;
   /** Last log line fetched for a failing container, when known. */
   lastLogLine?: string;
+  /** Restarts since the container last stayed up; set by the crash-loop guard. */
+  crashStreak?: number;
+  /** The crash-loop guard stopped this container. */
+  crashStopped?: boolean;
 };
 
 type DerivedServiceRunState = Omit<ServiceRunState, "asOf">;
@@ -54,12 +58,12 @@ const STATE_SEVERITY: Record<ServiceRunStateName, number> = {
   running: 0,
 };
 
-function dockerStatusOf(obs: ServiceContainerObservation): string {
+export function dockerStatusOf(obs: ServiceContainerObservation): string {
   return (obs.inspect?.State?.Status ?? obs.summary?.State ?? "")
     .toLowerCase();
 }
 
-function upForMs(inspect: ContainerInspect | undefined, nowMs: number) {
+export function upForMs(inspect: ContainerInspect | undefined, nowMs: number) {
   const startedAt = inspect?.State?.StartedAt;
   if (!startedAt) return undefined;
   const startedMs = Date.parse(startedAt);
@@ -79,11 +83,11 @@ function runningState(
 }
 
 function downState(obs: ServiceContainerObservation): ServiceRunStateName {
+  if (obs.crashStopped) return "stopped_after_crashes";
   const exitCode = obs.inspect?.State?.ExitCode ?? 0;
   const failed = exitCode !== 0 || dockerStatusOf(obs) === "dead";
-  if (failed && (obs.inspect?.RestartCount ?? 0) >= SERVICE_CRASH_LIMIT) {
-    return "stopped_after_crashes";
-  }
+  const restarts = obs.crashStreak ?? obs.inspect?.RestartCount ?? 0;
+  if (failed && restarts >= SERVICE_CRASH_LIMIT) return "stopped_after_crashes";
   return "stopped";
 }
 
@@ -111,7 +115,9 @@ export function containerRunState(
 /** True when the container is down or flapping and its last log line helps. */
 export function wantsLastLogLine(obs: ServiceContainerObservation): boolean {
   const status = dockerStatusOf(obs);
-  if (status === "restarting" || status === "dead") return true;
+  if (status === "restarting" || status === "dead" || obs.crashStopped) {
+    return true;
+  }
   return status === "exited" && (obs.inspect?.State?.ExitCode ?? 0) !== 0;
 }
 

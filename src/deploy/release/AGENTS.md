@@ -269,21 +269,33 @@ removed on the rerun); git clones into `work/<id>/source` while git's HOME
 and the credential files stay in the daemon-only scratch dir, and the build
 refuses to start if a credential file is still there; the commands, the
 filtered env (`PATH`/`HOME`/`LD_*`/`GIT_*` reserved, Node `bin/` leading
-`PATH` for a native app, Corepack/npm/XDG caches in `cache/<projectId>`) and
-the cwd go to `sudo tp-host build-run <id> <projectId>` as a spec on stdin
-(`orchestration/scripts/tp-build-runner` documents the format). tp-host runs
-them as `tpbuild` in a transient `turbopanel-build-<id>.service` with a fixed
-sandbox: no docker or tp group, daemon trees and sockets inaccessible,
-private-range / metadata egress denied, 4G memory, 2 CPUs, 1024 tasks, 30
-minutes, one build per host (the daemon also queues its own builds and says
-so in the transcript). Output streams back line by line. On any abort (the
+`PATH` for a native app, Corepack/npm/XDG caches in
+`caches/<owner>/<projectId>`) and the cwd go to `sudo tp-host build-run <id>
+<projectId> <owner>` as a spec on stdin (`orchestration/scripts/tp-build-runner`
+documents the format; `<owner>` is the site owner's Linux user,
+`entry.principal.username`). tp-host runs them in a transient
+`turbopanel-build-<id>.service` as a throwaway user systemd creates for that
+one build (`DynamicUser=yes`: never the site owner's user, never a host
+account, never in docker or tp), inside the site owner's
+`turbopanel-<owner>-build.slice` (a child of their own slice), with a fixed
+sandbox: daemon trees and sockets inaccessible, only this build's work tree and
+its owner's project cache visible under `/var/lib/turbopanel-build`,
+private-range / metadata egress denied, loopback platform ports refused for the
+unit's cgroup, 4G memory, 2 CPUs, 1024 tasks, 30 minutes, one build per host
+(the daemon also queues its own builds and says so in the transcript). Output streams back line by line. On any abort (the
 daemon-side ceiling, a lost client) the daemon runs `tp-host systemctl stop
 turbopanel-build-<id>.service`; then, success or not, `tp-host build-return
 <id>` gives the tree back only once the unit is gone, and only after that do
 the Next fold and the stage read it, contained in `work/<id>` (so a build
 that swapped `source` itself for a link is refused). Systemd 247–254 hosts
-get tp-host's reduced sandbox and a warning; below 247 builds refuse. Docker
-and Railpack builds stay on the Docker lane. There is no opt-out on a managed
+get tp-host's reduced sandbox and a warning; below 247 builds refuse. Image
+builds: the image builder's prepare step (it reads and interprets the whole
+repository) runs in this same sandbox (`image-prepare-sandbox.ts`: the daemon
+copies the vendored tool into `work/<id>/tools/`, the spec runs it, and the
+plan comes back as one regular file checked on its open handle); with no site
+owner the build runs in `turbopanel-tpbuild.slice`. The image build itself
+(`docker buildx`, Compose `build:`) stays on the Docker lane: the Engine's
+BuildKit, driven by `tp`, with no per-site-owner limits yet. There is no opt-out on a managed
 host. A development install runs the commands as the developer with `clearEnv` and an explicit
 allow-list, and no resource caps.
 
@@ -295,8 +307,9 @@ not after promote. When an entry belongs to a `nativeAppServices[]` row,
 series' `bin/` leads a **curated** `PATH` (`<bin>:/usr/bin:/bin`, never the
 daemon's PATH — Deno's `node_compat_bin` would shadow `node`, and an
 unreadable `/usr/local/sbin` makes dash report `corepack: Permission denied`
-for a missing binary). In the sandbox `tpbuild` reaches the series through
-its own `tpnode<series>` membership (node-app-runtime role). Unsandboxed, the
+for a missing binary). In the sandbox the build's throwaway user reaches the
+series through `SupplementaryGroups=` (tp-host gives it every
+`tpnode<series>` group). Unsandboxed, the
 child is `sudo -n -u <self> -- env … sh -c` so
 `initgroups()` picks up `tpnode<series>` without a daemon re-login and
 without exec'ing the passwd shell (`sg` dies on `/usr/sbin/nologin` with
@@ -306,6 +319,37 @@ project's sandbox cache (unsandboxed: `<checkout>/.corepack`) with its download
 prompt off — never a host-wide
 Corepack install, never the daemon's home. `NODE_ENV` follows the app's
 `appMode` (default `production`) in the build exactly as in the generated unit.
+
+**Deno builds (`runtime: deno`).** The same lane with the vendored Deno in
+place of Node (`nativeRuntime.runtime === "deno"`): `vendor/deno-app/<series>/current/bin`
+leads the curated `PATH`, the build's user reaches it through the `tpdeno<series>`
+group (tp-host gives a build every `tpnode<series>` and `tpdeno<series>` group),
+`DENO_DIR` is the project's sandbox cache (unsandboxed: `<checkout>/.deno`), and
+`DENO_NO_UPDATE_CHECK=1` / `DENO_NO_PROMPT=1` are set. The network rules are the
+build's usual ones (the public internet only). Nothing is derived from Node's
+package manager. `deno-build.ts` derives, from the project's own files
+(`deno.json`, else `deno.jsonc`, parsed with comments and trailing commas):
+
+1. `deno install` when a `deno.lock`, a `package.json` or a `nodeModulesDir`
+   setting needs the dependencies fetched ahead of the run;
+2. `deno task build` when the config has a `build` task;
+3. `deno cache <entry>`, after the two above, when the author typed neither an
+   install nor a build command and an entry file can be named (the file a plain
+   `deno run` start task runs, else the entry the start detection would pick).
+   It fetches the imports with the build's network and writes `deno.lock` into
+   the tree. The lock matters at run time: the release is read-only, and `deno
+   run` with remote imports and no lockfile dies trying to write one.
+
+An author's own install or build command always wins and is never rewritten.
+The start is detected after the build, from the built tree
+(`detectDenoStart`): the config's `start` task (`deno task start`), else the
+first entry file that exists among `main`, the `.` export, the entry of a
+`serve` / `server` / `run` task (`deno run <flags> <file>`), then `main.ts`,
+`mod.ts`, `server.ts`, `main.js`, `index.ts` (`deno run --allow-all <file>`).
+It is recorded in the release record like a Node start (`deno-task` /
+`deno-file`), so a rollback restarts the old release the way it ran. Nothing
+found fails the build, before promote. A broken config fails the build naming
+the file. A Deno release is never read as a Next.js build.
 
 A missing `installCommand` is then **derived** rather than skipped
 (`deriveNodeInstallCommand`): the operator's `build.packageManager` wins, else
@@ -324,7 +368,20 @@ build runs under `NODE_ENV=production`, where npm, pnpm, and classic yarn
 silently omit `devDependencies` — which is where every build toolchain lives.
 An explicit `installCommand` always wins, no `package.json` derives nothing,
 and the transcript records a `derived install command …` line so the operator
-can see what ran.
+can see what ran. `npm-shrinkwrap.json` counts as an npm lockfile (`npm ci`).
+Bun lockfiles are not used: the native lane vendors no Bun, so such a repo
+installs with npm.
+
+A missing `buildCommand` is derived the same way (`deriveNodeBuildCommand`):
+when `package.json` has a non-empty `build` script, the build runs
+`corepack pnpm run build`, `corepack yarn run build` or `npm run build` with the
+manager the install picked, and the transcript says `derived build command
+from …`. No `build` script derives nothing; an explicit `buildCommand` always
+wins. How the release then starts is detected from the built tree and recorded
+with it (`../native/AGENTS.md`, Entrypoint). These follow the usual Node
+conventions (package manager from the `packageManager` pin, then the lockfile;
+the `build` script; then the `start` script, `main`, `index.js`), implemented
+here so the decision runs on the native build's own tree and toolchain.
 
 **Retention** — `retention.ts` keeps the newest `DEFAULT_RELEASE_RETENTION` (5)
 releases **plus whatever `current` resolves to**, even when that falls outside
