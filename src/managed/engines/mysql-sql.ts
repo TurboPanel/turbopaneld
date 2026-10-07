@@ -319,6 +319,30 @@ export function standbyReplicationStatusSql(): string {
   ].join("\n");
 }
 
+/**
+ * One row for `mysql -N -B` (newlines stripped from the GTID sets so the row
+ * stays on one line): IO state, received set, executed set,
+ * `GTID_SUBSET(received, executed)`, seconds since the last heartbeat, seconds
+ * since the last queued transaction, heartbeat interval. Parsed by
+ * `parseMysqlFreshness`.
+ */
+export function replicaFreshnessSql(): string {
+  return [
+    "SELECT",
+    "  COALESCE(c.SERVICE_STATE, ''),",
+    "  c.rcv,",
+    "  REPLACE(@@GLOBAL.gtid_executed, CHAR(10), ''),",
+    "  GTID_SUBSET(c.rcv, REPLACE(@@GLOBAL.gtid_executed, CHAR(10), '')),",
+    "  TIMESTAMPDIFF(SECOND, c.LAST_HEARTBEAT_TIMESTAMP, NOW()),",
+    "  TIMESTAMPDIFF(SECOND, c.LAST_QUEUED_TRANSACTION_END_QUEUE_TIMESTAMP, NOW()),",
+    "  (SELECT HEARTBEAT_INTERVAL FROM performance_schema.replication_connection_configuration LIMIT 1)",
+    "FROM (SELECT SERVICE_STATE, LAST_HEARTBEAT_TIMESTAMP,",
+    "  LAST_QUEUED_TRANSACTION_END_QUEUE_TIMESTAMP,",
+    "  REPLACE(COALESCE(RECEIVED_TRANSACTION_SET, ''), CHAR(10), '') AS rcv",
+    "  FROM performance_schema.replication_connection_status LIMIT 1) AS c;",
+  ].join("\n");
+}
+
 export function showReplicaStatusSql(): string {
   // Tabular status — consumer maps IO/SQL running fields (MySQL 8 performance_schema
   // is preferred when present; SHOW REPLICA STATUS remains the portable fallback).

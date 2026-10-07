@@ -97,6 +97,16 @@ exists because health was only read when someone asked: a quiet cluster aged
 past the control plane's freshness window and a stopped replica kept its last
 `streaming` line.
 
+**Replica freshness (`managed-replica-freshness-v1`).** A MySQL / MariaDB
+replica's `replication` also carries `receivedGtid`, `executedGtid` (bounded
+opaque text, 4096 chars max) and `fullyApplied` (computed on the daemon from the
+GTID sets: MySQL received is a subset of executed; MariaDB `Gtid_IO_Pos` equals
+`gtid_slave_pos`). A failed, empty or malformed read omits them: unknown, never
+`true`. A second `PgStandbySampler` (engines mysql, mariadb, every 2 s) feeds
+the same streaming tracker, so `lastStreaming.ageMs` exists for them too (MySQL:
+newest heartbeat or queued transaction while the IO thread is `ON`; MariaDB: IO
+thread `Yes`). Parsers: `managed/engines/replica-freshness.ts`.
+
 **Rate-limited control-plane calls (HTTP 429).** The control plane limits each
 daemon's REST calls to about 30 a minute per route per server. An authenticated
 `DaemonApiClient` call (secrets/decrypt, the command log, rehydrate, ...) that

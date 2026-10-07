@@ -64,6 +64,7 @@ export const DAEMON_WIRE_FEATURES = [
   "sealed-instance-secrets-v1",
   "managed-health-v1",
   "managed-health-report-v1",
+  "managed-replica-freshness-v1",
   "managed-ha-probe-v1",
   "managed-ha-instance-v1",
   "metrics-v7",
@@ -98,6 +99,14 @@ export const MANAGED_HEALTH_FEATURE: DaemonWireFeature = "managed-health-v1";
  */
 export const MANAGED_HEALTH_REPORT_FEATURE: DaemonWireFeature =
   "managed-health-report-v1";
+
+/**
+ * A MySQL / MariaDB replica's `replication` carries `receivedGtid`,
+ * `executedGtid`, `fullyApplied` and `lastStreaming` (sampled every 2 s), the
+ * proof the control plane's host-loss failover gate needs.
+ */
+export const MANAGED_REPLICA_FRESHNESS_FEATURE: DaemonWireFeature =
+  "managed-replica-freshness-v1";
 
 /**
  * This daemon may send `managed-ha-event` with `detector: 'postgres-probe'`

@@ -58,28 +58,43 @@ export type PgStandbySamplerOptions = {
   /** Test seam — defaults to the Postgres runtime's standby `readHealth`. */
   readStandby?: (
     containerName: string,
+    engine: "postgres" | "mysql" | "mariadb",
   ) => Promise<ManagedReplicationObservedHealth>;
   runDocker?: RunDockerFn;
   layout?: LayoutPaths;
+  /**
+   * Engines to sample. Default Postgres only; the MySQL family runs a second
+   * instance (see {@link MYSQL_FAMILY_SAMPLED_ENGINES}) whose reads also
+   * carry the GTID freshness fields.
+   */
+  engines?: readonly string[];
 };
 
-export function isSampledStandby(record: ManagedHaMemberRecord): boolean {
-  return record.engine === "postgres" && record.role === "replica";
+export const MYSQL_FAMILY_SAMPLED_ENGINES = ["mysql", "mariadb"] as const;
+
+export function isSampledStandby(
+  record: ManagedHaMemberRecord,
+  engines: readonly string[] = ["postgres"],
+): boolean {
+  return engines.includes(record.engine) && record.role === "replica";
 }
 
-function readPostgresStandby(
+function readEngineStandby(
+  engineCode: "postgres" | "mysql" | "mariadb",
   containerName: string,
   run: RunDockerFn,
 ): Promise<ManagedReplicationObservedHealth> {
-  const engine = getManagedEngineRuntime("postgres");
+  const engine = getManagedEngineRuntime(engineCode);
   const replication = engine.replication;
   if (!replication) {
-    return Promise.reject(new Error("postgres has no replication runtime"));
+    return Promise.reject(
+      new Error(`${engineCode} has no replication runtime`),
+    );
   }
   return replication.readHealth({
     containerId: containerName,
     // Unused by `readHealth`; exec goes straight to the container name.
-    composeServiceName: "postgres",
+    composeServiceName: engineCode,
     rootUsername: engine.rootUsername,
     defaultDatabase: engine.defaultDatabase,
     exec: async (argv, input) => {
@@ -104,17 +119,21 @@ export class PgStandbySampler {
   readonly #listMembers: () => Promise<ManagedHaMemberRecord[]>;
   readonly #readStandby: (
     containerName: string,
+    engine: "postgres" | "mysql" | "mariadb",
   ) => Promise<ManagedReplicationObservedHealth>;
   readonly #timeoutMs: number;
+  readonly #engines: readonly string[];
   /** Containers whose previous read (possibly timed out) is still running. */
   readonly #busy = new Set<string>();
   #timer: ReturnType<typeof setInterval> | undefined;
   #inFlight = false;
+  #seen = new Set<string>();
   #lastWarnMono: number | null = null;
 
   constructor(options: PgStandbySamplerOptions = {}) {
     this.#intervalMs = options.intervalMs ?? STANDBY_SAMPLE_INTERVAL_MS;
     this.#timeoutMs = options.timeoutMs ?? STANDBY_SAMPLE_TIMEOUT_MS;
+    this.#engines = options.engines ?? ["postgres"];
     this.#tracker = options.tracker ?? standbyStreamingTracker;
     this.#monoMs = options.monoMs ?? (() => performance.now());
     this.#globallyEnabled = options.globallyEnabled ??
@@ -125,7 +144,7 @@ export class PgStandbySampler {
       (() => listManagedHaMembers(layout()));
     const run = options.runDocker ?? defaultRunDocker;
     this.#readStandby = options.readStandby ??
-      ((name) => readPostgresStandby(name, run));
+      ((name, engine) => readEngineStandby(engine, name, run));
   }
 
   attach(): void {
@@ -148,7 +167,7 @@ export class PgStandbySampler {
     try {
       await this.#pollOnce();
     } catch (err) {
-      this.#warn(`pg standby sampler failed: ${sanitizeForLog(err)}`);
+      this.#warn(`standby sampler failed: ${sanitizeForLog(err)}`);
     } finally {
       this.#inFlight = false;
     }
@@ -156,8 +175,16 @@ export class PgStandbySampler {
 
   async #pollOnce(): Promise<void> {
     if (!this.#globallyEnabled()) return;
-    const standbys = (await this.#listMembers()).filter(isSampledStandby);
-    this.#tracker.retain(new Set(standbys.map((record) => record.memberId)));
+    const standbys = (await this.#listMembers()).filter((record) =>
+      isSampledStandby(record, this.#engines)
+    );
+    // Forget only members THIS sampler recorded: a second sampler (other
+    // engines) shares the tracker.
+    const current = new Set(standbys.map((record) => record.memberId));
+    for (const id of this.#seen) {
+      if (!current.has(id)) this.#tracker.forget(id);
+    }
+    this.#seen = current;
     await Promise.all(standbys.map((record) => this.#sampleOne(record)));
   }
 
@@ -169,22 +196,24 @@ export class PgStandbySampler {
     if (this.#busy.has(record.containerName)) return;
     const startedMono = this.#monoMs();
     try {
-      const health = await this.#readWithDeadline(record.containerName);
+      const health = await this.#readWithDeadline(record);
       this.#tracker.record(record.memberId, health, startedMono);
     } catch (err) {
       this.#warn(
-        `pg standby sample for ${record.managedId} failed: ${
-          sanitizeForLog(err)
-        }`,
+        `standby sample for ${record.managedId} failed: ${sanitizeForLog(err)}`,
       );
     }
   }
 
   #readWithDeadline(
-    containerName: string,
+    record: ManagedHaMemberRecord,
   ): Promise<ManagedReplicationObservedHealth> {
+    const containerName = record.containerName;
     this.#busy.add(containerName);
-    const read = this.#readStandby(containerName);
+    const read = this.#readStandby(
+      containerName,
+      record.engine as "postgres" | "mysql" | "mariadb",
+    );
     read.then(
       () => this.#busy.delete(containerName),
       () => this.#busy.delete(containerName),

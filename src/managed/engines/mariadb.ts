@@ -13,6 +13,7 @@ import type {
 import { sanitizeForLog } from "../../util/logger.ts";
 import { forEachSequential } from "../../util/sequential.ts";
 import { grantDatabasePrivileges } from "./grant-databases.ts";
+import { parseMariadbFreshness } from "./replica-freshness.ts";
 import {
   changeReplicationSourceSql,
   connectionCensusSql,
@@ -552,7 +553,12 @@ const mariadbReplicationRuntime: ManagedEngineReplicationRuntime = {
         return { state: "unknown", observedAt };
       }
       const parsed = parseShowSlaveStatus(verbose);
-      return { ...parsed, observedAt };
+      // Best effort: a failed read leaves the freshness fields out (unknown).
+      const freshness = await runMariadbStatusQuery(
+        ctx,
+        `${showReplicaStatusSql()}\nSELECT @@GLOBAL.gtid_slave_pos AS gtid_slave_pos;`,
+      ).then(parseMariadbFreshness, () => ({}));
+      return { ...parsed, ...freshness, observedAt };
     } catch {
       return { state: "unknown", observedAt };
     }

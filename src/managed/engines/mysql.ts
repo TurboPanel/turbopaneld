@@ -14,6 +14,7 @@ import type {
 import { sanitizeForLog } from "../../util/logger.ts";
 import { forEachSequential } from "../../util/sequential.ts";
 import { grantDatabasePrivileges } from "./grant-databases.ts";
+import { parseMysqlFreshness } from "./replica-freshness.ts";
 import {
   authSocketPluginPresentSql,
   changeReplicationSourceSql,
@@ -34,6 +35,7 @@ import {
   isWritableSql,
   promoteSql,
   quoteIdentifier,
+  replicaFreshnessSql,
   showReplicaStatusSql,
   versionSql,
 } from "./mysql-sql.ts";
@@ -269,6 +271,7 @@ async function ensureAuthSocketPlugin(
 async function runMysqlStatusQuery(
   ctx: ManagedEngineContext,
   sql: string,
+  format: "-E" | "-N" = "-E",
 ): Promise<string> {
   const result = await execMysql(
     ctx,
@@ -277,7 +280,8 @@ async function runMysqlStatusQuery(
       "--protocol=socket",
       "-u",
       ctx.rootUsername,
-      "-E",
+      format,
+      ...(format === "-N" ? ["-B"] : []),
       "-e",
       sql,
     ],
@@ -586,7 +590,14 @@ const mysqlReplicationRuntime: ManagedEngineReplicationRuntime = {
         return { state: "unknown", observedAt };
       }
       const parsed = parseShowReplicaStatus(verbose);
-      return { ...parsed, observedAt };
+      // Freshness is best effort: a failed read leaves the fields out
+      // (unknown), never `fullyApplied: true`.
+      const freshness = await runMysqlStatusQuery(
+        ctx,
+        replicaFreshnessSql(),
+        "-N",
+      ).then(parseMysqlFreshness, () => ({}));
+      return { ...parsed, ...freshness, observedAt };
     } catch {
       return { state: "unknown", observedAt };
     }

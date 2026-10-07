@@ -137,7 +137,10 @@ import {
 import { installOriginNeedsInsecureTls } from "./install-tls.ts";
 import { ManagedHaObserver } from "./ha-observe.ts";
 import { PgDeadPrimaryObserver } from "./pg-dead-primary-observe.ts";
-import { PgStandbySampler } from "./pg-standby-sampler.ts";
+import {
+  MYSQL_FAMILY_SAMPLED_ENGINES,
+  PgStandbySampler,
+} from "./pg-standby-sampler.ts";
 import { ManagedHealthReporter } from "./managed-health-reporter.ts";
 import { BackupResultReporter } from "../backups/result-reporter.ts";
 import { AcmeIssuanceObserver } from "./acme-observe.ts";
@@ -450,6 +453,7 @@ export class InstanceClient {
   #haObserver: ManagedHaObserver | undefined;
   #pgProbeObserver: PgDeadPrimaryObserver | undefined;
   #pgStandbySampler: PgStandbySampler | undefined;
+  #mysqlFamilySampler: PgStandbySampler | undefined;
   #managedHealthReporter: ManagedHealthReporter | undefined;
   #backupReporter: BackupResultReporter | undefined;
   #acmeObserver: AcmeIssuanceObserver | undefined;
@@ -885,6 +889,7 @@ export class InstanceClient {
     this.#haObserver?.detach();
     this.#pgProbeObserver?.detach();
     this.#pgStandbySampler?.detach();
+    this.#mysqlFamilySampler?.detach();
     this.#managedHealthReporter?.detach();
     this.#haObserver = undefined;
     this.#backupReporter?.detach();
@@ -970,6 +975,7 @@ export class InstanceClient {
     this.#haObserver?.detach();
     this.#pgProbeObserver?.detach();
     this.#pgStandbySampler?.detach();
+    this.#mysqlFamilySampler?.detach();
     this.#managedHealthReporter?.detach();
     this.#backupReporter?.detach();
     this.#acmeObserver?.detach();
@@ -1391,6 +1397,11 @@ export class InstanceClient {
     this.#pgProbeObserver?.attach();
     this.#pgStandbySampler ??= new PgStandbySampler();
     this.#pgStandbySampler.attach();
+    this.#mysqlFamilySampler ??= new PgStandbySampler({
+      engines: MYSQL_FAMILY_SAMPLED_ENGINES,
+      globallyEnabled: () => true,
+    });
+    this.#mysqlFamilySampler.attach();
     this.#ensureManagedHealthReporter().attach();
     this.#ensureBackupReporter().attach();
     this.#ensureAcmeObserver();
@@ -1450,6 +1461,7 @@ export class InstanceClient {
       this.#haObserver?.detach();
       this.#pgProbeObserver?.detach();
       this.#pgStandbySampler?.detach();
+      this.#mysqlFamilySampler?.detach();
       this.#managedHealthReporter?.detach();
       this.#backupReporter?.detach();
       this.#acmeObserver?.detach();
