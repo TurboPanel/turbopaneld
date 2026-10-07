@@ -101,8 +101,8 @@ import {
 import {
   applySites,
   ensureSitePhpRuntimes,
-  phpSeriesForDeploy,
   planSiteWebEnv,
+  pruneHoldKeysForDeploy,
   resolveSiteDocumentRoot,
   resolveSitePhpSeries,
   type SiteManagedDirectory,
@@ -110,7 +110,7 @@ import {
 } from "../deploy/site.ts";
 import { detectSiteApps } from "../deploy/site-apps.ts";
 import { sitePhpRuntimeMode } from "../deploy/site/php-runtime.ts";
-import { holdPhpSeries } from "../deploy/site/php-series-prune.ts";
+import { holdPruneKeys } from "../deploy/site/prune-holds.ts";
 import {
   applyCronJobs,
   type CronApplySpec,
@@ -2161,10 +2161,11 @@ export async function handleEnvironmentDeploy(
   deps?: EnvironmentDeployDeps,
 ): Promise<EnvironmentDeployResult> {
   const parsedPayload = parseEnvironmentDeployPayload(payload);
-  // A PHP series is installed long before its pool exists (the release builds
-  // in between), so no unused-series removal may take one this deploy names.
-  const releaseSeries = await holdPhpSeries(
-    phpSeriesForDeploy(parsedPayload.sites ?? []),
+  // A PHP series or a web engine is installed long before the site config that
+  // uses it exists (the release builds in between), so no unused-software
+  // removal may take one this deploy needs.
+  const releaseHolds = await holdPruneKeys(
+    pruneHoldKeysForDeploy(parsedPayload.sites ?? []),
   );
   try {
     return await deployEnvironmentHolding(
@@ -2173,7 +2174,7 @@ export async function handleEnvironmentDeploy(
       deps,
     );
   } finally {
-    releaseSeries();
+    releaseHolds();
   }
 }
 

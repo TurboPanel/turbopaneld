@@ -18,8 +18,8 @@
  *   series it names for its whole length.
  */
 
-import { logInfo, logWarn } from "../../util/logger.ts";
 import { sitePhpRuntimeIdsIn } from "./php-runtime.ts";
+import { holdPruneKeys, phpSeriesHoldKey, pruneUnheld } from "./prune-holds.ts";
 
 /** What the host looks like, gathered by the caller (all reads, no writes). */
 export type PhpSeriesUsageInput = Readonly<{
@@ -86,46 +86,14 @@ export function unusedPhpSeries(input: PhpSeriesUsageInput): string[] {
     .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
 }
 
-const held = new Map<string, number>();
-let pruning: Promise<void> | null = null;
-/** The series the running removal is taking away. */
-let pruningSeries: ReadonlySet<string> = new Set();
-
-/** Wait until no running removal takes any of `series` away. */
-async function waitForRemovalOf(series: readonly string[]): Promise<void> {
-  const running = pruning;
-  if (
-    running === null || !series.some((entry) => pruningSeries.has(entry))
-  ) {
-    return;
-  }
-  await running;
-  // Another removal may have started meanwhile: check again.
-  await waitForRemovalOf(series);
-}
-
 /**
- * Keep `series` from being removed until the returned function is called. A
- * deploy takes this before it installs anything. Waits out a removal already
- * running, so a deploy that wants a series a prune is taking away installs it
- * again afterwards rather than finding it half gone. A removal of other series
- * is no reason to wait.
+ * Keep `series` from being removed until the returned function is called; see
+ * {@link holdPruneKeys}.
  */
-export async function holdPhpSeries(
+export function holdPhpSeries(
   series: readonly string[],
 ): Promise<() => void> {
-  await waitForRemovalOf(series);
-  for (const entry of series) held.set(entry, (held.get(entry) ?? 0) + 1);
-  let released = false;
-  return () => {
-    if (released) return;
-    released = true;
-    for (const entry of series) {
-      const left = (held.get(entry) ?? 1) - 1;
-      if (left > 0) held.set(entry, left);
-      else held.delete(entry);
-    }
-  };
+  return holdPruneKeys(series.map(phpSeriesHoldKey));
 }
 
 export type PhpSeriesPruneDeps = Readonly<{
@@ -143,41 +111,17 @@ export type PhpSeriesPruneDeps = Readonly<{
  * series it removed. Never throws: a failed removal is logged and the series
  * stays for the next try.
  */
-export async function prunePhpSeries(
-  deps: PhpSeriesPruneDeps,
-): Promise<string[]> {
-  if (pruning !== null) return [];
-  const input = await deps.gather();
-  if (input === null) return [];
-  const unused = unusedPhpSeries(input);
-  // From here to `pruning = …` nothing awaits: a deploy either holds a series
-  // before this check (and is skipped) or waits for the removal to finish.
-  const free = unused.filter((series) => !held.has(series));
-  if (free.length === 0 || pruning !== null) return [];
-  pruningSeries = new Set(free);
-  const work = (async (): Promise<boolean> => {
-    try {
-      await deps.remove(free);
-      logInfo("deploy", `unused PHP series removed: ${free.join(",")}`);
-      return true;
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      logWarn(
-        "deploy",
-        `unused PHP series kept (${free.join(",")}): ${message}`,
-      );
-      return false;
-    } finally {
-      pruning = null;
-    }
-  })();
-  pruning = work.then(() => undefined);
-  return await work ? free : [];
+export function prunePhpSeries(deps: PhpSeriesPruneDeps): Promise<string[]> {
+  return pruneUnheld({
+    label: "PHP series",
+    keyOf: phpSeriesHoldKey,
+    findUnused: async () => {
+      const input = await deps.gather();
+      return input === null ? null : unusedPhpSeries(input);
+    },
+    remove: deps.remove,
+  });
 }
 
 /** Test seam: forget holds and a running prune between cases. */
-export function resetPhpSeriesPruneForTests(): void {
-  held.clear();
-  pruning = null;
-  pruningSeries = new Set();
-}
+export { resetPruneHoldsForTests as resetPhpSeriesPruneForTests } from "./prune-holds.ts";
