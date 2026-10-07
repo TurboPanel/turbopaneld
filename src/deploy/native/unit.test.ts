@@ -211,7 +211,7 @@ test("nativeAppUnitContent points WorkingDirectory at current and applies limits
     "ReadWritePaths=/srv/users/appuser/sites/svc-native-1/shared",
   );
   assertStringIncludes(content, "User=appuser");
-  assertStringIncludes(content, "Group=appuser-grp");
+  assertStringIncludes(content, "Group=appuser");
   assertStringIncludes(content, "Slice=turbopanel-appuser.slice");
   assertStringIncludes(content, "Environment=PORT=4100");
   assertStringIncludes(content, "CPUQuota=200%");

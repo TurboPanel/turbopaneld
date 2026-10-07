@@ -624,7 +624,7 @@ export function siteSharedDir(
 /**
  * Principal home for `username` under the layout's principal home root.
  *
- * `root:<username>-grp 0750`, like `sites/` and `volumes/` inside it: a
+ * `root:<username> 0750`, like `sites/` and `volumes/` inside it: a
  * directory's owner can rename its entries, so every directory holding a
  * root-owned path is root's. The principal writes only into the leaves —
  * {@link principalUserHome}, {@link principalDataDir}, {@link principalTmpDir}
@@ -661,7 +661,7 @@ export function releaseStagingDir(
 
 /**
  * `<home>/home` — the account's passwd home (`$HOME`): dotfiles, shell
- * history, tool caches. `<username>:<username>-grp 0700`.
+ * history, tool caches. `<username>:<username> 0700`.
  */
 export function principalUserHome(
   layout: Pick<LayoutPaths, "principalHomeRoot">,
@@ -673,7 +673,7 @@ export function principalUserHome(
 /**
  * `<home>/data` — private persistent data not tied to one site (SQLite
  * files, state shared by the principal's services). Never served.
- * `<username>:<username>-grp 0700`.
+ * `<username>:<username> 0700`.
  */
 export function principalDataDir(
   layout: Pick<LayoutPaths, "principalHomeRoot">,
@@ -684,7 +684,7 @@ export function principalDataDir(
 
 /**
  * `<home>/tmp` — the principal's own `TMPDIR`, off the shared `/tmp`.
- * `<username>:<username>-grp 0700`.
+ * `<username>:<username> 0700`.
  */
 export function principalTmpDir(
   layout: Pick<LayoutPaths, "principalHomeRoot">,

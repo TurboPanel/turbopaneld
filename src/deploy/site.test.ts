@@ -459,7 +459,7 @@ test("phpFpmPoolConfig runs workers as assigned principal", () => {
     "/run/turbopanel/php/tp-env1-phpapp.sock",
   );
   assertStringIncludes(conf, "user = site_user");
-  assertStringIncludes(conf, "group = site_user-grp");
+  assertStringIncludes(conf, "group = site_user");
   assertStringIncludes(conf, "listen.owner = tpapache");
   assertStringIncludes(conf, "listen.group = tpapache");
 });

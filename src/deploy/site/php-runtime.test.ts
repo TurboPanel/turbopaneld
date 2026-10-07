@@ -47,7 +47,7 @@ const SPEC: SitePhpRuntimeSpec = {
   mode: "fastcgi",
   series: "8.4",
   user: "alice",
-  group: "alice-grp",
+  group: "alice",
   home: "/srv/users/alice",
   configDir: "/etc/turbopanel",
   libDir: "/opt/turbopanel/lib",

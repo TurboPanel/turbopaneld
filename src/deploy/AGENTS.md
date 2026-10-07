@@ -76,10 +76,10 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    the home root is `0750` root:root plus an `other:x` ACL (traverse
    without list — a `0751` world bit trips `ansible:S2612`, and `0755`
    would let a tenant `ls` every account). The home itself, `sites/` and
-   `volumes/` are `0750` **root**:`<username>-grp` (an owner can rename its
+   `volumes/` are `0750` **root**:`<username>` (an owner can rename its
    entries, so nothing root writes into may sit in a tenant-owned directory);
    `home/` (the passwd home, `useradd -d <root>/<username>/home`), `data/` and
-   `tmp/` are `0700` `username:<username>-grp`. SSH keys live in
+   `tmp/` are `0700` `username:<username>`. SSH keys live in
    `/etc/ssh/turbopanel/authorized_keys`, never the home. Host-picked UID/GID come from
    **15001–60000** (`-K` on that `useradd` / `groupadd` only; `/etc/login.defs`
    is not edited). An explicit operator override must be **15001–60000** (above it is
@@ -87,12 +87,20 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    site owner), and every
    override in the batch is checked before the first host call so a later id
    below that floor cannot leave an earlier account already created. Existing
-   accounts are adopted and never renumbered. Username max
-   length is **28** so `<username>-grp` fits the Linux 32-char group-name
-   limit (keep in sync with instance `MAX_PRINCIPAL_USERNAME_LENGTH`). When a GID
-   override is supplied and `<username>-grp` already exists with a different
-   numeric GID, ensure fails (conflict) instead of silently attaching the
-   principal to that group. Shell comes from `principalMaterial[].shell`
+   accounts are adopted and never renumbered. The primary group is the
+   standard Debian per-user group: named after the user (`<username>`), gid in
+   the same band. Username max length is **28** (keep in sync with instance
+   `MAX_PRINCIPAL_USERNAME_LENGTH`). When a GID override is supplied and the
+   group `<username>` already exists with a different numeric GID, ensure fails
+   (conflict) instead of silently attaching the principal to that group. An
+   existing group `<username>` is adopted only when its gid is in the band and,
+   if the account exists, it is the account's primary group; an existing
+   account whose primary group is neither is refused. A host set up while the
+   group was still called `<username>-grp` gets it renamed in place
+   (`tp-host groupmod -n <username> <username>-grp`, only for that exact shape:
+   a principal whose primary group it is, in the band, no group `<username>`
+   yet); files and memberships follow the gid. Units rendered before the rename
+   still say `Group=<username>-grp` until the same deploy rewrites them. Shell comes from `principalMaterial[].shell`
    (default `/usr/sbin/nologin`) via `useradd -s` / `usermod -s`. Existing
    accounts are adopted only when the passwd **home** matches the expected
    path — a username collision with a foreign home fails the deploy instead

@@ -295,7 +295,7 @@ export type SitePhpRuntimeSpec = Readonly<{
   series: string;
   /** The site's principal: the runtime's `User=`. */
   user: string;
-  /** `<user>-grp`. */
+  /** `<user>`: the owner's own group, named after it. */
   group: string;
   /** Root-owned principal home, `<principalHomeRoot>/<user>`. */
   home: string;

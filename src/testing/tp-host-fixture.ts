@@ -78,8 +78,8 @@ export async function makeHost(): Promise<Host> {
       "tpnginx:x:9990:",
       "tpphp84:x:9902:",
       "tpsftp:x:9986:",
-      "alice-grp:x:15001:",
-      "carol-grp:x:15003:",
+      "alice:x:15001:",
+      "carol:x:15003:",
       "",
     ].join("\n"),
   );

@@ -29,8 +29,8 @@ turbopanel_user: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') |
 #
 # A group means "may execute this runtime series". One group for every series
 # would mean granting Node 24 also grants Node 22, which defeats the point of
-# co-installing them. Tenant principals each have only their own
-# `<username>-grp` and are deliberately not in `tp` (the panel's own group), and
+# co-installing them. Tenant principals each have only their own group
+# (`<username>`) and are deliberately not in `tp` (the panel's own group), and
 # world bits are not an option on a tree reached through `/opt/turbopanel`.
 #
 # Membership is reconciled per principal by the daemon

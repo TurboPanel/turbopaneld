@@ -196,7 +196,7 @@ test("a paired site needs both engines and reaches PHP through Apache", () => {
 test("a paired site's tree carries the principal group both engines join", () => {
   assertEquals(resolveSiteOwnership(pairedSite), {
     user: "alice",
-    group: "alice-grp",
+    group: "alice",
   });
   assertEquals(siteEngineUnixUser(pairedSite.engine), "tpapache");
   assertEquals(sitePhpRuntimeMode(pairedSite), "fastcgi");

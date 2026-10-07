@@ -2302,7 +2302,7 @@ async function chownWebTree(
 /**
  * Legacy site trees are chowned to the assigned principal with engine group
  * read. A release-backed tree is skipped entirely: the release engine already
- * sealed it `root:<username>-grp` mode `0550`, and re-chowning it would hand
+ * sealed it `root:<username>` mode `0550`, and re-chowning it would hand
  * the app process write access to the code it is running.
  */
 /**
@@ -3366,7 +3366,7 @@ async function userSupplementaryGroups(user: string): Promise<Set<string>> {
 /**
  * Create a managed-directory site's tree.
  *
- * `sites/<serviceId>/` is root-owned, group `<username>-grp`, `0750` — the same
+ * `sites/<serviceId>/` is root-owned, group `<username>`, `0750` — the same
  * shape as the release lane: the tenant cannot rename what sits in it, and the
  * serving engine traverses it through its membership of the principal's group.
  * The leaves below it (`webroot/`, `shared/`, the document root) are the

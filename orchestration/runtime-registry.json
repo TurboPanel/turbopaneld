@@ -26,7 +26,7 @@
     "9900-9979 band: an entitlement group protects a binary's mode bits, while",
     "these only select an `sshd` Match block. They live here anyway because",
     "revocation needs ONE containment set — ensurePrincipalManagedGroups removes",
-    "stale membership only for names this file defines, so <user>-grp, tp, and",
+    "stale membership only for names this file defines, so the user's own group, tp, and",
     "anything an operator added by hand are never touched. Two files would mean",
     "two containment sets and a downgrade that leaves a group behind.",
     "",

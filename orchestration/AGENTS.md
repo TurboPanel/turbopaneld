@@ -258,7 +258,7 @@ creates groups and grants them traverse-only ACLs on `/opt/turbopanel` and
 adds *and revokes* during principal materialization — which runs before any unit
 is installed, because systemd resolves supplementary groups at `execve` and a
 unit started too early dies `203/EXEC`. Revocation only ever touches names the
-registry defines, so `<username>-grp`, `tp`, engine groups, and anything an
+registry defines, so the user's own group `<username>`, `tp`, engine groups, and anything an
 operator added by hand are never stripped.
 
 ### php-fpm (`php-fpm`)

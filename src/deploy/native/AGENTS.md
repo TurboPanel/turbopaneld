@@ -89,7 +89,7 @@ site remove path does — no second bookkeeping file that could drift
 from what is actually installed.
 
 **Hardening.** Each unit runs as the principal (`User=<username>`,
-`Group=<username>-grp`) under its account slice, with `NoNewPrivileges=yes`,
+`Group=<username>`) under its account slice, with `NoNewPrivileges=yes`,
 `PrivateTmp=yes`, `ProtectSystem=strict`, `ProtectHome=yes`,
 `ProtectKernelTunables=yes`, `ProtectKernelModules=yes`,
 `ProtectControlGroups=yes`, `RestrictSUIDSGID=yes`, `RestrictRealtime=yes`,
@@ -383,7 +383,7 @@ the unit text. The tenant tree stays under `node-app/` rather than `node/`
 because `vendor/node/current` is the panel's own toolchain.
 
 **Reaching the vendored Node.** The tree is `root:tpnodeapp 0750` — **not**
-world-readable. Tenant principals have only their own `<username>-grp` and are
+world-readable. Tenant principals have only their own group (`<username>`) and are
 deliberately never added to `tp` (the panel's own group), so `tpnodeapp` (gid
 **9988**, group with no user) exists purely to mean "may execute the vendored
 tenant Node". Its two parents, `/opt/turbopanel` and `vendor/`, stay `tp:tp

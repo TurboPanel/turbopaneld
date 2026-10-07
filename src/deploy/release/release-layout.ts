@@ -4,17 +4,17 @@
  * ```
  * <principalHomeRoot>/.tp-staging/                 root:tp 0710
  *   <username>.<serviceId>.<releaseId>/            tp 0700 while the daemon copies
- * <principalHomeRoot>/<username>/sites/            root:<username>-grp 0750
- *   <serviceId>/                                   root:<username>-grp 0750
- *     releases/                                    root:<username>-grp 0750
- *       <releaseId>/  root:<username>-grp, 0550 top, nothing g/o-writable
+ * <principalHomeRoot>/<username>/sites/            root:<username> 0750
+ *   <serviceId>/                                   root:<username> 0750
+ *     releases/                                    root:<username> 0750
+ *       <releaseId>/  root:<username>, 0550 top, nothing g/o-writable
  *     current -> releases/<releaseId>
- *     shared/         <username>:<username>-grp 0750  (the one writable path)
+ *     shared/         <username>:<username> 0750  (the one writable path)
  * ```
  *
  * **Ownership is the security property, not just the mode.** Everything on the
  * immutable side — `sites/<serviceId>`, `releases/`, and each release inside it
- * — is **root-owned**, group `<username>-grp`: the runtime user gets `r-x` so it
+ * — is **root-owned**, group `<username>`: the runtime user gets `r-x` so it
  * can traverse to `current` and read what it is running, and nothing more. A
  * principal-owned `releases/` would leave the app process able to rewrite the
  * code it runs (and to swap `current`), which turns any RCE into persistence and
@@ -98,7 +98,7 @@ export const RELEASE_DIR_MODE = "0750";
 export const RELEASE_PUBLISHED_MODE = 0o550;
 export const RELEASE_SHARED_MODE = "0750";
 
-/** Owner of every immutable path in the tree (`root:<username>-grp`). */
+/** Owner of every immutable path in the tree (`root:<username>`). */
 function releaseRootOwner(username: string): string {
   return `root:${principalUnixGroupName(username)}`;
 }
@@ -240,7 +240,7 @@ export async function ensureDaemonReleaseRecordDir(
  * role requires.
  *
  * - `sites/`, `sites/<serviceId>/`, `releases/` — **root-owned**, group
- *   `<username>-grp`, {@link RELEASE_DIR_MODE}. The runtime user may traverse
+ *   `<username>`, {@link RELEASE_DIR_MODE}. The runtime user may traverse
  *   and read; it may not create, rename, or unlink anything, so it can neither
  *   plant a release nor repoint `current`.
  * - `shared/` — principal-owned and writable: the one path an app may write
@@ -295,7 +295,7 @@ export async function runPrivileged(
 }
 
 /**
- * Seal a staged release: hand the tree to `root:<username>-grp` and drop the
+ * Seal a staged release: hand the tree to `root:<username>` and drop the
  * release directory to {@link RELEASE_PUBLISHED_MODE}.
  *
  * A published release must be **read-only to the runtime user** — an app

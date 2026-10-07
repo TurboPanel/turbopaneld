@@ -216,7 +216,7 @@ export function allRuntimeGroups(): ReadonlySet<string> {
  *
  * **This is the containment set for revocation**, and it must be exactly one
  * set. `ensurePrincipalManagedGroups` removes stale membership only for names
- * in here, so `<username>-grp`, `tp`, an engine group, and anything an operator
+ * in here, so the user's own group, `tp`, an engine group, and anything an operator
  * added by hand survive untouched. Two sets would mean two containment rules,
  * and a principal downgraded from shell to files-only would keep `tpshell`
  * because the entitlement pass did not recognize it.

@@ -56,7 +56,7 @@ async function addPrincipal(host: Host, account: Account): Promise<string> {
     group
       .replace("tpsftp:x:9986:", `tpsftp:x:9986:${account.name}`)
       .replace("tpphp84:x:9902:", `tpphp84:x:9902:alice,${account.name}`) +
-      `${account.name}-grp:x:${account.groupGid ?? gid}:tpnginx\n`,
+      `${account.name}:x:${account.groupGid ?? gid}:tpnginx\n`,
   );
   for (const dir of ["home", "data", "tmp", "sites"]) {
     await Deno.mkdir(`${root}/${dir}`, { recursive: true });
@@ -91,7 +91,7 @@ test("principal-remove retires a principal on the root-owned layout", async () =
       "EXEC [gpasswd] [-d] [dave] [tpphp84]",
       "EXEC [gpasswd] [-d] [dave] [tpsftp]",
       "EXEC [userdel] [dave]",
-      "EXEC [groupdel] [dave-grp]",
+      "EXEC [groupdel] [dave]",
     ]);
     assertEquals(await exists(root), false);
     for (
@@ -122,7 +122,7 @@ test("principal-remove retires a principal on the tenant-owned layout before it"
       [
         "EXEC [pkill] [-KILL] [-u] [15001]",
         "EXEC [userdel] [alice]",
-        "EXEC [groupdel] [alice-grp]",
+        "EXEC [groupdel] [alice]",
       ],
     );
     assertEquals(await exists(host.path("srv/users/alice")), false);
@@ -135,7 +135,7 @@ test("principal-remove never touches an account outside the principal band", asy
     ["uid below the band", { name: "lo", uid: 1000, gid: 15011 }],
     ["nobody", { name: "nob", uid: 65534, gid: 15012 }],
     ["group above the band", { name: "gh", uid: 15013, groupGid: 60001 }],
-    ["primary group not <name>-grp", {
+    ["primary group not <name>", {
       name: "pg",
       uid: 15014,
       gid: 15999,
@@ -178,7 +178,7 @@ test("principal-remove refuses while the host still references the account", asy
     [
       "an app unit runs as it",
       "etc/systemd/system/turbopanel-app-svc1.service",
-      "[Service]\nUser=dave\nGroup=dave-grp\n",
+      "[Service]\nUser=dave\nGroup=dave\n",
     ],
     [
       "a cron unit runs in its slice",
@@ -233,7 +233,7 @@ test("principal-remove accepts one plain principal name and nothing else", async
 
 test("principal-remove finishes what an earlier run left once the account is gone", async () => {
   await withHost(async (host) => {
-    await Deno.writeTextFile(host.path("etc/group"), "erin-grp:x:15030:\n", {
+    await Deno.writeTextFile(host.path("etc/group"), "erin:x:15030:\n", {
       append: true,
     });
     await Deno.writeTextFile(
@@ -245,7 +245,7 @@ test("principal-remove finishes what an earlier run left once the account is gon
     assertEquals(execLines(result.stdout), [
       "EXEC [systemctl] [--no-pager] [stop] [turbopanel-erin.slice]",
       "EXEC [systemctl] [daemon-reload]",
-      "EXEC [groupdel] [erin-grp]",
+      "EXEC [groupdel] [erin]",
     ]);
     assertEquals(
       await exists(host.path("etc/systemd/system/turbopanel-erin.slice")),
