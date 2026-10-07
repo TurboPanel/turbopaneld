@@ -1749,13 +1749,10 @@ test("managed.apply enforces the engine image allowlist", () => {
     }).image,
     "docker.io/library/mysql:9.7",
   );
-  // MySQL 8.0 went EOL in April 2026 and is absent from the catalog; 8.4 is
-  // catalogued but untested, and is refused for the same reason.
+  // MySQL 8.0 went EOL in April 2026 and is absent from the catalog.
   for (
     const image of [
       "docker.io/library/mysql:8.0",
-      "docker.io/library/mysql:8.4",
-      "docker.io/library/mysql:8.4-oraclelinux9",
     ]
   ) {
     assertThrows(
@@ -1824,6 +1821,22 @@ test("managed.apply admits exactly the tested series and their variants", () => 
       image: "docker.io/library/mariadb:12.3-ubi",
       username: "root",
     },
+    { engine: "mysql", image: "docker.io/library/mysql:8.4", username: "root" },
+    {
+      engine: "mysql",
+      image: "docker.io/library/mysql:8.4-oraclelinux9",
+      username: "root",
+    },
+    {
+      engine: "mariadb",
+      image: "docker.io/library/mariadb:11.8",
+      username: "root",
+    },
+    {
+      engine: "mariadb",
+      image: "docker.io/library/mariadb:11.8-ubi",
+      username: "root",
+    },
   ];
   for (const row of catalog) {
     assertEquals(
@@ -1861,12 +1874,6 @@ test("managed.apply admits exactly the tested series and their variants", () => 
       engine: "postgres",
       image: "docker.io/library/postgres:15-alpine",
       username: "postgres",
-    },
-    { engine: "mysql", image: "docker.io/library/mysql:8.4", username: "root" },
-    {
-      engine: "mariadb",
-      image: "docker.io/library/mariadb:11.8",
-      username: "root",
     },
     {
       engine: "mariadb",
