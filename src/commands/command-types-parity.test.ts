@@ -3101,12 +3101,40 @@ test("managed.ha.reconcile and failover result parsers reject invalid shapes", (
     }).restarted,
     false,
   );
+  assertEquals(
+    parseManagedHaReconcileResult({
+      summary: "partial",
+      registeredClusters: ["00000000-0000-4000-8000-000000000001"],
+      failedClusters: [{
+        managedId: "00000000-0000-4000-8000-000000000002",
+        error: "HTTP 500",
+      }],
+      partial: true,
+      restarted: false,
+    }).failedClusters?.[0]?.error,
+    "HTTP 500",
+  );
   assertThrows(
     () =>
       parseManagedHaReconcileResult({
         summary: "ok",
         registeredClusters: [],
         restarted: "yes",
+      }),
+    TypeError,
+    "Invalid managed.ha.reconcile result",
+  );
+  assertThrows(
+    () =>
+      parseManagedHaReconcileResult({
+        summary: "not partial",
+        registeredClusters: [],
+        failedClusters: [{
+          managedId: "00000000-0000-4000-8000-000000000002",
+          error: "HTTP 500",
+        }],
+        partial: false,
+        restarted: false,
       }),
     TypeError,
     "Invalid managed.ha.reconcile result",

@@ -10,6 +10,7 @@ import type {
   ManagedHaCluster,
   ManagedHaReconcilePayload,
   ManagedHaReconcileResult,
+  ManagedHaRegistrationFailure,
 } from "../contracts/commands-contracts.ts";
 import { parseManagedHaReconcilePayload } from "../contracts/commands-contracts.ts";
 import {
@@ -24,7 +25,7 @@ import {
   type SystemComponentDescriptor,
   writeSystemComponentDescriptor,
 } from "../deploy/system-component.ts";
-import { logInfo, logWarn } from "../util/logger.ts";
+import { logInfo, logWarn, sanitizeForLog } from "../util/logger.ts";
 import { forEachSequential } from "../util/sequential.ts";
 import { type LayoutPaths, resolveLayout } from "../paths/layout.ts";
 import { ensureManagedIngressNetwork } from "../managed/networks.ts";
@@ -49,6 +50,7 @@ import {
 } from "../managed/orchestrator-api.ts";
 import { orchestratorTlsDir } from "../managed/engine-paths.ts";
 import { runOrchestratorSetup } from "../orchestration/ansible.ts";
+import { clipKeepingEnd } from "../util/error-line.ts";
 
 type RunDockerFn = (
   args: string[],
@@ -69,6 +71,8 @@ function emptyHaResult(serverId: string): ManagedHaReconcileResult {
   return {
     summary: `managed HA torn down for server ${serverId}`,
     registeredClusters: [],
+    failedClusters: [],
+    partial: false,
     restarted: false,
     containers: [],
   };
@@ -116,33 +120,75 @@ export function orchestratorMonitorsEngine(engine: string): boolean {
 async function registerClusters(
   clusters: readonly ManagedHaCluster[],
   api: OrchestratorApiDeps,
-): Promise<string[]> {
+): Promise<{
+  registeredClusters: string[];
+  failedClusters: ManagedHaRegistrationFailure[];
+}> {
   const registered: string[] = [];
+  const failures: ManagedHaRegistrationFailure[] = [];
   await forEachSequential(clusters, async (cluster) => {
-    await forEachSequential(cluster.members, async (member) => {
-      // `host` is the private-listener address (not the Docker name, which
-      // only resolves on the member's own host). `containerName` is mapped
-      // via extra_hosts so a later topology walk can still resolve it.
-      await discoverInstance({ host: member.host, port: member.port }, api);
-      await registerCandidate(
-        { host: member.host, port: member.port },
-        member.promotionRule,
-        api,
+    try {
+      await registerOneCluster(cluster, api);
+      registered.push(cluster.managedId);
+    } catch (err) {
+      logWarn(
+        "commands",
+        `managed.ha.reconcile failed to register cluster ${cluster.managedId}:`,
+        sanitizeForLog(err),
       );
-    });
-    const primary = cluster.members.find((member) => member.role === "primary");
-    if (primary) {
-      await setClusterAlias(
-        `${primary.host}:${primary.port}`,
-        cluster.clusterAlias,
-        api,
-      ).catch(() => {
-        // Alias is best-effort — recover still keys off host:port.
+      failures.push({
+        managedId: cluster.managedId,
+        error: clipKeepingEnd(sanitizeForLog(err)),
       });
     }
-    registered.push(cluster.managedId);
   });
-  return registered.sort((a, b) => a.localeCompare(b));
+  if (clusters.length > 0 && registered.length === 0) {
+    throw new Error(
+      `managed.ha.reconcile failed to register every monitored cluster: ${
+        formatRegistrationFailures(failures)
+      }`,
+    );
+  }
+  return {
+    registeredClusters: registered.toSorted((a, b) => a.localeCompare(b)),
+    failedClusters: failures.toSorted((a, b) =>
+      a.managedId.localeCompare(b.managedId)
+    ),
+  };
+}
+
+function formatRegistrationFailures(
+  failures: readonly ManagedHaRegistrationFailure[],
+): string {
+  return failures.map((failure) => `${failure.managedId}: ${failure.error}`)
+    .join("; ");
+}
+
+async function registerOneCluster(
+  cluster: ManagedHaCluster,
+  api: OrchestratorApiDeps,
+): Promise<void> {
+  await forEachSequential(cluster.members, async (member) => {
+    // `host` is the private-listener address (not the Docker name, which
+    // only resolves on the member's own host). `containerName` is mapped
+    // via extra_hosts so a later topology walk can still resolve it.
+    await discoverInstance({ host: member.host, port: member.port }, api);
+    await registerCandidate(
+      { host: member.host, port: member.port },
+      member.promotionRule,
+      api,
+    );
+  });
+  const primary = cluster.members.find((member) => member.role === "primary");
+  if (primary) {
+    await setClusterAlias(
+      `${primary.host}:${primary.port}`,
+      cluster.clusterAlias,
+      api,
+    ).catch(() => {
+      // Alias is best-effort — recover still keys off host:port.
+    });
+  }
 }
 
 async function resolveClustersForOrchestrator(
@@ -275,9 +321,11 @@ export async function handleManagedHaReconcile(
       } cluster(s) Orchestrator cannot monitor serverId=${payload.serverId}`,
     );
   }
-  const registeredClusters = monitored.length === 0
-    ? []
+  const registrations = monitored.length === 0
+    ? { registeredClusters: [], failedClusters: [] }
     : await registerClusters(monitored, api);
+  const { registeredClusters, failedClusters } = registrations;
+  const partial = failedClusters.length > 0;
 
   let containers: EnvironmentDeployContainer[] | undefined;
   const observed = await inspectOrchestratorContainer(layout, descriptor, {
@@ -287,11 +335,18 @@ export async function handleManagedHaReconcile(
 
   logInfo(
     "commands",
-    `managed.ha.reconcile completed serverId=${payload.serverId} clusters=${registeredClusters.length} received=${daemonReceivedAt}`,
+    `managed.ha.reconcile completed serverId=${payload.serverId} clusters=${registeredClusters.length} failed=${failedClusters.length} received=${daemonReceivedAt}`,
   );
+  const summary = partial
+    ? `managed HA partially reconciled for server ${payload.serverId}; failed clusters: ${
+      formatRegistrationFailures(failedClusters)
+    }`
+    : `managed HA reconciled for server ${payload.serverId}`;
   return {
-    summary: `managed HA reconciled for server ${payload.serverId}`,
+    summary,
     registeredClusters,
+    failedClusters,
+    partial,
     restarted,
     ...(containers ? { containers } : {}),
   };
