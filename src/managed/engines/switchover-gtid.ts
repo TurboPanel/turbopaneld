@@ -37,6 +37,18 @@ export function gtidSetTooLongForWire(length: number): boolean {
   return length > GTID_MAX_LENGTH;
 }
 
+export async function quiesceAndReadPrimaryGtid(
+  enforceReadOnly: () => Promise<void>,
+  readGtidSet: () => Promise<string>,
+): Promise<string> {
+  await enforceReadOnly();
+  const gtid = boundedGtid((await readGtidSet()).trim());
+  if (!gtid) {
+    throw new Error("switchover: could not read primary GTID position");
+  }
+  return gtid;
+}
+
 export async function waitForRequiredGtidSet(
   runScalarQuery: (sql: string) => Promise<string>,
   waitSql: (gtidSet: string, timeoutSeconds: number) => string,

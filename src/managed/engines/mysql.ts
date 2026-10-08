@@ -15,8 +15,9 @@ import type {
 import { sanitizeForLog } from "../../util/logger.ts";
 import { forEachSequential } from "../../util/sequential.ts";
 import { grantDatabasePrivileges } from "./grant-databases.ts";
-import { boundedGtid, parseMysqlFreshness } from "./replica-freshness.ts";
+import { parseMysqlFreshness } from "./replica-freshness.ts";
 import {
+  quiesceAndReadPrimaryGtid,
   SWITCHOVER_GTID_WAIT_DEFAULT_SECONDS,
   waitForRequiredGtidSet,
 } from "./switchover-gtid.ts";
@@ -624,13 +625,10 @@ const mysqlReplicationRuntime: ManagedEngineReplicationRuntime = {
   },
 
   async quiesceFormerPrimaryForSwitchover(ctx) {
-    await runMysql(ctx, enforceReadOnlySql());
-    const out = await runMysqlQuery(ctx, primaryFinalGtidSetSql());
-    const gtid = boundedGtid(out.trim());
-    if (!gtid) {
-      throw new Error("switchover: could not read primary GTID position");
-    }
-    return gtid;
+    return await quiesceAndReadPrimaryGtid(
+      () => runMysql(ctx, enforceReadOnlySql()),
+      () => runMysqlQuery(ctx, primaryFinalGtidSetSql()),
+    );
   },
 
   async reactivateFormerPrimaryAfterSwitchoverAbort(ctx) {

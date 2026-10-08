@@ -33,7 +33,10 @@ import {
   clearManagedDemotedMarker,
   writeManagedDemotedMarker,
 } from "./demoted-marker.ts";
-import { resolveLocalReplicationEngine } from "./local-engine-context.ts";
+import {
+  captureSwitchoverGtidBeforeStop,
+  reactivatePrimaryAfterSwitchoverAbort,
+} from "./lifecycle-switchover.ts";
 import {
   buildNeedsResyncMember,
   stopManagedProjectForResync,
@@ -160,22 +163,11 @@ export async function handleManagedLifecycle(
   const refused = await refuseNonStandbyReplicaStart(payload, layout, run);
   if (refused) return refused;
 
-  let switchoverPrimaryExecutedGtidSet: string | undefined;
-  if (payload.action === "stop" && payload.captureSwitchoverGtid === true) {
-    const { engine, ctx } = await resolveLocalReplicationEngine(
-      payload.managedId,
-      payload.engine,
-      "managed.lifecycle",
-      { runDocker: run },
+  const switchoverPrimaryExecutedGtidSet =
+    await captureSwitchoverGtidBeforeStop(
+      payload,
+      run,
     );
-    const quiesce = engine.replication?.quiesceFormerPrimaryForSwitchover;
-    if (!quiesce) {
-      throw new Error(
-        "managed.lifecycle captureSwitchoverGtid is not supported for this engine",
-      );
-    }
-    switchoverPrimaryExecutedGtidSet = await quiesce(ctx);
-  }
 
   if (payload.action === "start" && payload.reactivateAfterSwitchoverAbort) {
     await clearManagedDemotedMarker(layout, payload.managedId);
@@ -205,21 +197,7 @@ export async function handleManagedLifecycle(
     );
   }
 
-  if (
-    payload.action === "start" &&
-    payload.reactivateAfterSwitchoverAbort === true
-  ) {
-    const { engine, ctx } = await resolveLocalReplicationEngine(
-      payload.managedId,
-      payload.engine,
-      "managed.lifecycle",
-      { runDocker: run },
-    );
-    await engine.waitReady(ctx);
-    await engine.replication?.reactivateFormerPrimaryAfterSwitchoverAbort?.(
-      ctx,
-    );
-  }
+  await reactivatePrimaryAfterSwitchoverAbort(payload, run);
 
   if (payload.memberId) {
     const engine = getManagedEngineRuntime(payload.engine ?? "postgres");

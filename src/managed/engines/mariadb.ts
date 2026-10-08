@@ -14,8 +14,9 @@ import type {
 import { sanitizeForLog } from "../../util/logger.ts";
 import { forEachSequential } from "../../util/sequential.ts";
 import { grantDatabasePrivileges } from "./grant-databases.ts";
-import { boundedGtid, parseMariadbFreshness } from "./replica-freshness.ts";
+import { parseMariadbFreshness } from "./replica-freshness.ts";
 import {
+  quiesceAndReadPrimaryGtid,
   SWITCHOVER_GTID_WAIT_DEFAULT_SECONDS,
   waitForRequiredGtidSet,
 } from "./switchover-gtid.ts";
@@ -579,13 +580,10 @@ const mariadbReplicationRuntime: ManagedEngineReplicationRuntime = {
   },
 
   async quiesceFormerPrimaryForSwitchover(ctx) {
-    await runMariadb(ctx, enforceReadOnlySql());
-    const out = await runMariadbQuery(ctx, primaryFinalGtidSetSql());
-    const gtid = boundedGtid(out.trim());
-    if (!gtid) {
-      throw new Error("switchover: could not read primary GTID position");
-    }
-    return gtid;
+    return await quiesceAndReadPrimaryGtid(
+      () => runMariadb(ctx, enforceReadOnlySql()),
+      () => runMariadbQuery(ctx, primaryFinalGtidSetSql()),
+    );
   },
 
   async reactivateFormerPrimaryAfterSwitchoverAbort(ctx) {
