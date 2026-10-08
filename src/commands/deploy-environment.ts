@@ -162,6 +162,8 @@ import {
 } from "../deploy/compose-host-paths.ts";
 import {
   materializeSecretFiles,
+  pruneStaleSecretFiles,
+  removeSecretTree,
   rewriteComposeSecretFilePaths,
 } from "../deploy/secret-runtime.ts";
 import {
@@ -1415,7 +1417,12 @@ async function materializeDeploySecrets(
   decryptSecrets: DecryptSecretsFn | undefined,
 ): Promise<void> {
   const plan = payload.secretPlan ?? [];
-  if (plan.length === 0) return;
+  if (plan.length === 0) {
+    // Nothing is planned any more (every binding or secret variable was
+    // removed): do not leave the old files on disk.
+    await removeSecretTree(layout, payload.projectId, payload.environmentId);
+    return;
+  }
   if (!decryptSecrets) {
     throw new Error("Secret plan present but secrets decrypt is unavailable");
   }
@@ -1426,6 +1433,14 @@ async function materializeDeploySecrets(
     plan,
     payload.variableMaterial ?? [],
     decryptSecrets,
+  );
+  // The plan is the whole environment's; files for anything detached or
+  // removed since the last deploy are no longer wanted.
+  await pruneStaleSecretFiles(
+    layout,
+    payload.projectId,
+    payload.environmentId,
+    plan,
   );
 }
 
