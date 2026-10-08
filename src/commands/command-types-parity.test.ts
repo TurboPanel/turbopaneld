@@ -1749,13 +1749,10 @@ test("managed.apply enforces the engine image allowlist", () => {
     }).image,
     "docker.io/library/mysql:9.7",
   );
-  // MySQL 8.0 went EOL in April 2026 and is absent from the catalog; 8.4 is
-  // catalogued but untested, and is refused for the same reason.
+  // MySQL 8.0 went EOL in April 2026 and is absent from the catalog.
   for (
     const image of [
       "docker.io/library/mysql:8.0",
-      "docker.io/library/mysql:8.4",
-      "docker.io/library/mysql:8.4-oraclelinux9",
     ]
   ) {
     assertThrows(
@@ -1824,6 +1821,22 @@ test("managed.apply admits exactly the tested series and their variants", () => 
       image: "docker.io/library/mariadb:12.3-ubi",
       username: "root",
     },
+    { engine: "mysql", image: "docker.io/library/mysql:8.4", username: "root" },
+    {
+      engine: "mysql",
+      image: "docker.io/library/mysql:8.4-oraclelinux9",
+      username: "root",
+    },
+    {
+      engine: "mariadb",
+      image: "docker.io/library/mariadb:11.8",
+      username: "root",
+    },
+    {
+      engine: "mariadb",
+      image: "docker.io/library/mariadb:11.8-ubi",
+      username: "root",
+    },
   ];
   for (const row of catalog) {
     assertEquals(
@@ -1861,12 +1874,6 @@ test("managed.apply admits exactly the tested series and their variants", () => 
       engine: "postgres",
       image: "docker.io/library/postgres:15-alpine",
       username: "postgres",
-    },
-    { engine: "mysql", image: "docker.io/library/mysql:8.4", username: "root" },
-    {
-      engine: "mariadb",
-      image: "docker.io/library/mariadb:11.8",
-      username: "root",
     },
     {
       engine: "mariadb",
@@ -2171,8 +2178,34 @@ test("managed.lifecycle fixture round-trips and rejects invalid action", () => {
     parseManagedLifecyclePayload({ managedId: "m1", action: "stop" }),
     { managedId: "m1", action: "stop" },
   );
+  assertEquals(
+    parseManagedLifecyclePayload({
+      managedId: "m1",
+      action: "stop",
+      demoted: true,
+    }),
+    { managedId: "m1", action: "stop", demoted: true },
+  );
+  assertEquals(
+    parseManagedLifecyclePayload({
+      managedId: "m1",
+      action: "stop",
+      demoted: false,
+    }),
+    { managedId: "m1", action: "stop" },
+  );
   assertThrows(
     () => parseManagedLifecyclePayload({ managedId: "m1", action: "pause" }),
+    TypeError,
+    "Invalid managed.lifecycle payload",
+  );
+  assertThrows(
+    () =>
+      parseManagedLifecyclePayload({
+        managedId: "m1",
+        action: "stop",
+        demoted: "yes",
+      }),
     TypeError,
     "Invalid managed.lifecycle payload",
   );
@@ -3069,6 +3102,20 @@ test("managed.ha.failover round-trips drain and recover hosts", () => {
   });
   assertEquals(recover.phase, "recover");
   assertEquals(recover.targetHost, "203.0.113.11");
+  const repoint = parseManagedHaFailoverPayload({
+    managedId: "00000000-0000-4000-8000-000000000001",
+    sourceMemberId: "00000000-0000-4000-8000-000000000002",
+    targetMemberId: "00000000-0000-4000-8000-000000000003",
+    phase: "repoint",
+    targetHost: "203.0.113.11",
+    targetPort: 5432,
+    targetHostaddr: "10.100.0.4",
+    ensureSlots: ["tp_member_1", "tp_member_3"],
+  });
+  assertEquals(repoint.phase, "repoint");
+  assertEquals(repoint.targetHost, "203.0.113.11");
+  assertEquals(repoint.targetHostaddr, "10.100.0.4");
+  assertEquals(repoint.ensureSlots, ["tp_member_1", "tp_member_3"]);
 });
 
 test("managed.ha.reconcile and failover result parsers reject invalid shapes", () => {
@@ -3096,6 +3143,13 @@ test("managed.ha.reconcile and failover result parsers reject invalid shapes", (
       phase: "drain",
     }).phase,
     "drain",
+  );
+  assertEquals(
+    parseManagedHaFailoverResult({
+      summary: "repointed",
+      phase: "repoint",
+    }).phase,
+    "repoint",
   );
   assertThrows(
     () =>

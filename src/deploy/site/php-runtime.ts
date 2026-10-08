@@ -67,6 +67,8 @@ const LSPHP_SHARED_EXTENSIONS: readonly string[] = Object.freeze([
   "curl.so",
   "mysqli.so",
   "pdo_mysql.so",
+  "pgsql.so",
+  "pdo_pgsql.so",
 ]);
 
 const MODE_TAG: Readonly<Record<SitePhpRuntimeMode, string>> = {
@@ -295,7 +297,7 @@ export type SitePhpRuntimeSpec = Readonly<{
   series: string;
   /** The site's principal: the runtime's `User=`. */
   user: string;
-  /** `<user>-grp`. */
+  /** `<user>`: the owner's own group, named after it. */
   group: string;
   /** Root-owned principal home, `<principalHomeRoot>/<user>`. */
   home: string;

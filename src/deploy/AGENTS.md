@@ -76,10 +76,10 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    the home root is `0750` root:root plus an `other:x` ACL (traverse
    without list — a `0751` world bit trips `ansible:S2612`, and `0755`
    would let a tenant `ls` every account). The home itself, `sites/` and
-   `volumes/` are `0750` **root**:`<username>-grp` (an owner can rename its
+   `volumes/` are `0750` **root**:`<username>` (an owner can rename its
    entries, so nothing root writes into may sit in a tenant-owned directory);
    `home/` (the passwd home, `useradd -d <root>/<username>/home`), `data/` and
-   `tmp/` are `0700` `username:<username>-grp`. SSH keys live in
+   `tmp/` are `0700` `username:<username>`. SSH keys live in
    `/etc/ssh/turbopanel/authorized_keys`, never the home. Host-picked UID/GID come from
    **15001–60000** (`-K` on that `useradd` / `groupadd` only; `/etc/login.defs`
    is not edited). An explicit operator override must be **15001–60000** (above it is
@@ -87,12 +87,20 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    site owner), and every
    override in the batch is checked before the first host call so a later id
    below that floor cannot leave an earlier account already created. Existing
-   accounts are adopted and never renumbered. Username max
-   length is **28** so `<username>-grp` fits the Linux 32-char group-name
-   limit (keep in sync with instance `MAX_PRINCIPAL_USERNAME_LENGTH`). When a GID
-   override is supplied and `<username>-grp` already exists with a different
-   numeric GID, ensure fails (conflict) instead of silently attaching the
-   principal to that group. Shell comes from `principalMaterial[].shell`
+   accounts are adopted and never renumbered. The primary group is the
+   standard Debian per-user group: named after the user (`<username>`), gid in
+   the same band. Username max length is **28** (keep in sync with instance
+   `MAX_PRINCIPAL_USERNAME_LENGTH`). When a GID override is supplied and the
+   group `<username>` already exists with a different numeric GID, ensure fails
+   (conflict) instead of silently attaching the principal to that group. An
+   existing group `<username>` is adopted only when its gid is in the band and,
+   if the account exists, it is the account's primary group; an existing
+   account whose primary group is neither is refused. A host set up while the
+   group was still called `<username>-grp` gets it renamed in place
+   (`tp-host groupmod -n <username> <username>-grp`, only for that exact shape:
+   a principal whose primary group it is, in the band, no group `<username>`
+   yet); files and memberships follow the gid. Units rendered before the rename
+   still say `Group=<username>-grp` until the same deploy rewrites them. Shell comes from `principalMaterial[].shell`
    (default `/usr/sbin/nologin`) via `useradd -s` / `usermod -s`. Existing
    accounts are adopted only when the passwd **home** matches the expected
    path — a username collision with a foreign home fails the deploy instead
@@ -113,7 +121,14 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
 6. Decrypt `variableMaterial[]` via `POST /api/daemon/v1/secrets/decrypt` and
    write Compose standalone secret files under
    `<runDir>/deployments/<projectId>/<environmentId>/secrets/` (`secret-runtime.ts`,
-   mode `0600`, dir `0700`). Write the payload `.env` (non-secrets only, `0640`)
+   mode `0600`, dir `0700`). Files are only written before `up`. Once the new release is up (and its
+   post-deploy hooks passed; for a sequential deploy, after the health gate),
+   `pruneStaleSecretFiles` removes every file in that directory that is not in
+   the deploy's secret plan (a detached binding's old password, a removed
+   variable, a half-written `.tmp`), and an empty plan removes the whole
+   directory. A failed, cancelled or reverted deploy never prunes: the release
+   still running, or the one restored, may point at those files. Rehydrate never
+   prunes. Write the payload `.env` (non-secrets only, `0640`)
    next to staged `compose.yaml`. Overlay mounts from each entry's **`mounts[]`**
    (`apply-storage-volumes.ts`) — docker volumes emit
    `volumes.<name> = { name, external: true }` so Compose mounts the
@@ -788,29 +803,25 @@ materialization, PHP-FPM wiring, managed-directory sites.
 `/usr/local/bin/php` resolves which co-installed series a bare `php` means for
 the calling account and execs the real binary.
 
-**It grants nothing.** The enforcement is the kernel's at `execve`, against
-`/usr/bin/php<series>` being `root:tpphp<SS> 0750` (the `dpkg-statoverride` the
-php-fpm role applies). The wrapper itself is `root:root 0750` with an execute
-ACL per entitled series group — same answer as running `/usr/bin/php8.3`
-directly. No sudo, no setuid — `src/orchestration/php-dispatcher.test.ts`
+**It grants nothing.** Every installed series may be run by every site owner's
+Linux user: sury's `/usr/bin/php<series>` keeps its packaged `root:root 0755`.
+The wrapper itself is `root:root 0750` with an `other:rx` ACL entry, so every
+account may run it. No sudo, no setuid — `src/orchestration/php-dispatcher.test.ts`
 asserts both.
 
 **It is not a diversion.** `/usr/local/bin` precedes `/usr/bin` in Debian's
 default PATH, so the dispatcher shadows sury's `update-alternatives` link
 without removing it — removing it would break every other package that expects
-`php` to exist. That link was never a privilege leak either: it resolves to
-`/usr/bin/php<series>`, whose mode the kernel checks. What it actually is, is a
-*usability* problem — which series a bare `php` resolves to would otherwise be
-decided by host-global alternatives priority, so two tenants entitled to
-different series would both land on whichever apt installed last.
+`php` to exist. What it fixes is *usability*: which series a bare `php`
+resolves to would otherwise be decided by host-global alternatives priority,
+so two site owners on different series would both land on whichever apt
+installed last.
 
 Resolution order: `$TURBOPANEL_PHP`, then a root-owned per-account pin under
-`<configDir>/php/pins/<username>`, then the highest entitled series. Only ever
-selected from what the account already holds — passing a request straight
-through would reach `execve` and come back as a bare `EACCES` with nothing
-explaining why. The group→series table is **rendered from the registry**, not
-parsed out of the group name (`tpphp810` cannot be read back unambiguously as
-8.10 rather than 81.0), and ordering uses `sort -V` for that same reason.
+`<configDir>/php/pins/<username>`, then the highest installed series. Only ever
+selected from the series installed here (rendered from the playbook's series
+list and checked with `-x`), so a request for a missing one is named instead of
+failing at `execve`. Ordering uses `sort -V`, so 8.10 comes after 8.4.
 
 
 ## Scheduled jobs

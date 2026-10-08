@@ -16,9 +16,6 @@
 
 import { readEnv, resolveRuntimesDir } from "../paths/layout.ts";
 
-/** Re-exported so the registry's band stays one definition. */
-export { RUNTIME_GID_BAND as RUNTIME_ENTITLEMENT_GID_BAND } from "../runtime/registry.ts";
-
 export type HostRuntimeMetadata = {
   /** php-fpm series installed from sury, e.g. `["8.3", "8.4"]`. */
   php?: { series: string[]; extensions?: Record<string, string[]> };

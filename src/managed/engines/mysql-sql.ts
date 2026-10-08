@@ -6,6 +6,11 @@
  * escapes — {@link quoteLiteral} must escape `\` as well as `'`.
  */
 
+import {
+  type FollowSourceDialect,
+  renderFollowSourceSql,
+} from "./follow-source-sql.ts";
+
 const ACCOUNT_MAX_LENGTH = 32;
 const SCHEMA_MAX_LENGTH = 64;
 const IDENTIFIER_RE = /^[A-Za-z_]\w*$/;
@@ -246,9 +251,36 @@ export function ensureSocketAdminSql(osUser: string = "mysql"): string {
   ].join("\n");
 }
 
+/**
+ * Session-only: keep replica-local statements out of the binary log so they
+ * cannot mint a replica-UUID GTID the primary never executed.
+ */
+export function withoutSessionBinlogSql(sql: string): string {
+  return [
+    "SET SESSION sql_log_bin = 0;",
+    sql.trim(),
+    "SET SESSION sql_log_bin = 1;",
+  ].join("\n");
+}
+
+/**
+ * MySQL 8.4+ replacement for `RESET MASTER`. Clears entrypoint-init GTIDs on
+ * a freshly initdb'd standby before the dump's `SET GTID_PURGED`.
+ */
+export function resetReplicaGtidStateSql(): string {
+  return "RESET BINARY LOGS AND GTIDS;";
+}
+
+/** Replica-local flush — must not be binary-logged. */
+export function flushPrivilegesLocalSql(): string {
+  return withoutSessionBinlogSql("FLUSH PRIVILEGES;");
+}
+
 /** MySQL 8+/9 `INSTALL PLUGIN` — no `IF NOT EXISTS` (that is MariaDB-only). */
 export function installAuthSocketPluginSql(): string {
-  return "INSTALL PLUGIN auth_socket SONAME 'auth_socket.so';";
+  return withoutSessionBinlogSql(
+    "INSTALL PLUGIN auth_socket SONAME 'auth_socket.so';",
+  );
 }
 
 export function authSocketPluginPresentSql(): string {
@@ -371,6 +403,25 @@ export function changeReplicationSourceSql(spec: {
     "  SOURCE_SSL_VERIFY_SERVER_CERT = 1;",
     "START REPLICA;",
   ].join("\n");
+}
+
+/**
+ * Re-point an already-configured replica after promotion. Host and port
+ * only — user, password, SSL, and auto-position stay as seeded.
+ */
+export const MYSQL_FOLLOW_SOURCE_DIALECT: FollowSourceDialect = {
+  stop: "STOP REPLICA",
+  change: "CHANGE REPLICATION SOURCE TO",
+  hostKey: "SOURCE_HOST",
+  portKey: "SOURCE_PORT",
+  start: "START REPLICA",
+};
+
+export function followReplicationSourceSql(spec: {
+  host: string;
+  port: number;
+}): string {
+  return renderFollowSourceSql(MYSQL_FOLLOW_SOURCE_DIALECT, spec, quoteLiteral);
 }
 
 /**

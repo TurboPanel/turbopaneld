@@ -2,12 +2,14 @@
  * Managed engine apply: materialize → compose up → databases/credentials.
  */
 
-import type {
-  EnvironmentDeployContainer,
-  ManagedApplyCredential,
-  ManagedApplyDatabaseOp,
-  ManagedApplyPayload,
-  ManagedApplyResult,
+import {
+  type EnvironmentDeployContainer,
+  isValidIpv4Literal,
+  isValidIpv6Literal,
+  type ManagedApplyCredential,
+  type ManagedApplyDatabaseOp,
+  type ManagedApplyPayload,
+  type ManagedApplyResult,
 } from "../contracts/commands-contracts.ts";
 import { ensureDocker as defaultEnsureDocker } from "../deploy/ensure-docker.ts";
 import { ensureManagedIngressNetwork } from "./networks.ts";
@@ -45,7 +47,13 @@ import {
   resolveEngineContainerId,
 } from "./containers.ts";
 import { getManagedEngineRuntime } from "./engines/index.ts";
+import { maybeClearDemotedMarkerAfterApply } from "./demoted-marker.ts";
+import {
+  isManagedMemberDestroyed,
+  ManagedDestroyedError,
+} from "./destroyed-marker.ts";
 import { reconcileManagedPublicFirewallBestEffort } from "./firewall.ts";
+import { withManagedLifecycleLock } from "./target-lock.ts";
 import type { ManagedEngineContext } from "./engines/types.ts";
 import {
   materializeManagedState,
@@ -187,24 +195,34 @@ export function buildEngineExec(
   };
 }
 
+function isClientSourceHostLiteral(address: string): boolean {
+  return isValidIpv4Literal(address) || isValidIpv6Literal(address);
+}
+
 /**
- * Cross-host addresses whose ProxySQL dials this engine's private listener:
- * peer members plus bound consumer servers. MySQL/MariaDB scope account
- * hosts with these; Postgres admission lives in pg_hba (control-plane
- * config). Container-name peers ride the managed docker network pattern —
- * only address literals need per-host accounts.
+ * Cross-host addresses whose ProxySQL dials this engine's private listener.
+ * Every member host IP (peers + this host's private listener) plus bound
+ * consumer servers. MySQL/MariaDB scope monitor/client/root accounts with
+ * these; Postgres admission lives in pg_hba (control-plane config).
+ * Container-name peers ride the managed docker network pattern — only
+ * address literals need per-host accounts. Own-host is required: this
+ * server's ProxySQL reaches replicas via the published listener, so the
+ * engine sees the host address, not a docker-network source.
  */
 export function resolveClientSourceHosts(
   payload: ManagedApplyPayload,
 ): string[] {
   const hosts = new Set<string>();
-  for (
-    const address of [
-      ...(payload.replication?.peerAddresses ?? []),
-      ...(payload.ingressSourceAddresses ?? []),
-    ]
-  ) {
-    if (/^\d{1,3}(\.\d{1,3}){3}$/.test(address) || address.includes(":")) {
+  const candidates = [
+    payload.privateListener?.address,
+    payload.replication?.primary?.hostaddr,
+    payload.replication?.primary?.host,
+    ...(payload.replication?.peerAddresses ?? []),
+    ...(payload.peers ?? []).map((peer) => peer.address),
+    ...(payload.ingressSourceAddresses ?? []),
+  ];
+  for (const address of candidates) {
+    if (address !== undefined && isClientSourceHostLiteral(address)) {
       hosts.add(address);
     }
   }
@@ -780,14 +798,48 @@ export async function collectMemberHealth(
 
 export async function handleManagedApply(
   payload: ManagedApplyPayload,
-  _daemonReceivedAt: string,
+  daemonReceivedAt: string,
   deps?: ManagedApplyHandlerDeps,
 ): Promise<ManagedApplyResult> {
   assertSafeManagedIdentifiers(payload);
+  const layout = resolveLayout(Deno.env.toObject());
+  // One apply or destroy per managed id at a time, and a destroyed member is
+  // never rebuilt: the check runs inside the lock, so an apply that waited
+  // behind a destroy sees its marker.
+  return await withManagedLifecycleLock(layout, payload.managedId, async () => {
+    if (
+      await isManagedMemberDestroyed(
+        layout.stateDir,
+        payload.managedId,
+        payload.memberId,
+      )
+    ) {
+      throw new ManagedDestroyedError(payload.managedId);
+    }
+    const result = await applyManagedEngine(
+      payload,
+      daemonReceivedAt,
+      layout,
+      deps,
+    );
+    await maybeClearDemotedMarkerAfterApply(
+      layout,
+      payload,
+      result.member?.status,
+    );
+    return result;
+  });
+}
+
+async function applyManagedEngine(
+  payload: ManagedApplyPayload,
+  _daemonReceivedAt: string,
+  layout: LayoutPaths,
+  deps?: ManagedApplyHandlerDeps,
+): Promise<ManagedApplyResult> {
   // Fail before any state is materialized: a public listener without org-CA
   // material must never reach materialize/compose up.
   assertPublicPrivateListenerTls(payload);
-  const layout = resolveLayout(Deno.env.toObject());
   const engine = getManagedEngineRuntime(payload.engine);
   const run = deps?.runDocker ?? defaultRunDocker;
   const runStreamed = createStreamedRunner(deps?.runDocker);

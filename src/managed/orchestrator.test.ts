@@ -18,16 +18,21 @@ import {
   hasOrchestratorLabels,
   hostPrepPresent,
   inspectOrchestratorContainer,
+  isPrivateAdvertiseAddress,
   loadOrchestratorApiCredentials,
   loadOrchestratorRaftToken,
   MANAGED_HA_HTTP_PORT,
   MANAGED_HA_RAFT_PORT,
   ORCHESTRATOR_IMAGE,
+  ORCHESTRATOR_TLS_CA_PATH,
   orchestratorCompose,
   orchestratorStackPresent,
+  orchestratorTopologyAliases,
+  pickPublishedEngineDial,
   readCurrentOrchestratorManagedNetwork,
   readManagedNetworkFromCompose,
   renderOrchestratorConf,
+  resolveOrchestratorRegisterHost,
   restartOrchestratorStack,
   stopOrchestratorStack,
 } from "./orchestrator.ts";
@@ -117,9 +122,15 @@ test("renderOrchestratorConf disables unsupervised recovery", () => {
   assertEquals(conf.RecoverMasterClusterFilters, []);
   assertEquals(conf.RaftAuthToken, "raft-token");
   assertEquals(conf.ListenAddress, `:${MANAGED_HA_HTTP_PORT}`);
+  assertEquals(conf.MySQLTopologyUseMutualTLS, true);
+  assertEquals("MySQLTopologyUseSSL" in conf, false);
+  assertEquals(
+    conf.HTTPAdvertise,
+    `http://203.0.113.10:${MANAGED_HA_HTTP_PORT}`,
+  );
 });
 
-test("orchestratorCompose publishes HTTP on loopback and Raft on advertise only", () => {
+test("orchestratorCompose publishes HTTP on loopback and advertise, Raft on advertise", () => {
   const yaml = orchestratorCompose(
     {
       component: SYSTEM_MANAGED_HA_COMPONENT,
@@ -130,7 +141,7 @@ test("orchestratorCompose publishes HTTP on loopback and Raft on advertise only"
     },
     {
       nodeId: "00000000-0000-4000-8000-0000000000ab",
-      advertiseAddress: "203.0.113.10",
+      advertiseAddress: "10.100.0.10",
       httpPort: MANAGED_HA_HTTP_PORT,
       raftPort: MANAGED_HA_RAFT_PORT,
       peers: [],
@@ -139,7 +150,9 @@ test("orchestratorCompose publishes HTTP on loopback and Raft on advertise only"
   );
   assertEquals(yaml.includes(ORCHESTRATOR_IMAGE), true);
   assertEquals(yaml.includes("127.0.0.1:33001:33001"), true);
-  assertEquals(yaml.includes("203.0.113.10:33002:33002"), true);
+  assertEquals(yaml.includes("10.100.0.10:33001:33001"), true);
+  assertEquals(yaml.includes("10.100.0.10:33002:33002"), true);
+  assertEquals(yaml.includes("restart: always"), true);
   assertEquals(yaml.includes("0.0.0.0"), false);
   // The compose text must be valid YAML end-to-end. A quoted source path
   // immediately followed by `:` (`- "./x":/etc/…`) is rejected by compose's
@@ -154,6 +167,96 @@ test("orchestratorCompose publishes HTTP on loopback and Raft on advertise only"
     true,
   );
   assertEquals(volumes.includes("./tls:/etc/orchestrator/tls:ro"), true);
+  const environment = services[ORCHESTRATOR_COMPOSE_SERVICE_NAME]
+    .environment as Record<string, string>;
+  assertEquals(environment.SSL_CERT_FILE, ORCHESTRATOR_TLS_CA_PATH);
+});
+
+test("pickPublishedEngineDial uses the private-listener publish, not loopback", () => {
+  assertEquals(
+    pickPublishedEngineDial(
+      JSON.stringify({
+        "3306/tcp": [
+          { HostIp: "127.0.0.1", HostPort: "3306" },
+          { HostIp: "10.100.0.5", HostPort: "45001" },
+        ],
+      }),
+      3306,
+    ),
+    { host: "10.100.0.5", port: 45001 },
+  );
+  assertEquals(
+    pickPublishedEngineDial(
+      JSON.stringify({
+        "3306/tcp": [{ HostIp: "0.0.0.0", HostPort: "45001" }],
+      }),
+      3306,
+    ),
+    null,
+  );
+  assertEquals(pickPublishedEngineDial("not-json", 3306), null);
+});
+
+test("resolveOrchestratorRegisterHost inspects a container-name host", async () => {
+  const commands: string[][] = [];
+  const dial = await resolveOrchestratorRegisterHost(
+    { host: "db-1", port: 3306, containerName: "db-1" },
+    (args) => {
+      commands.push([...args]);
+      return Promise.resolve({
+        success: true,
+        stdout: JSON.stringify({
+          "3306/tcp": [{ HostIp: "10.100.0.5", HostPort: "45001" }],
+        }),
+        stderr: "",
+        code: 0,
+      });
+    },
+  );
+  assertEquals(dial, { host: "10.100.0.5", port: 45001 });
+  assertEquals(commands[0]?.[0], "inspect");
+});
+
+test("resolveOrchestratorRegisterHost keeps an IP host without inspect", async () => {
+  const dial = await resolveOrchestratorRegisterHost(
+    { host: "10.100.0.4", port: 45002, containerName: "db-2" },
+    () => Promise.reject(new TypeError("docker must not run")),
+  );
+  assertEquals(dial, { host: "10.100.0.4", port: 45002 });
+});
+
+test("orchestratorTopologyAliases maps container names onto IP register hosts", () => {
+  assertEquals(
+    orchestratorTopologyAliases([
+      { host: "10.100.0.5", containerName: "db-1" },
+      { host: "10.100.0.4", containerName: "db-2" },
+      { host: "db-3", containerName: "db-3" },
+      { host: "10.100.0.5", containerName: "db-1" },
+      { host: "not-an-ip", containerName: "db-4" },
+    ]),
+    [
+      { name: "db-1", address: "10.100.0.5" },
+      { name: "db-2", address: "10.100.0.4" },
+    ],
+  );
+  assertEquals(
+    orchestratorTopologyAliases([
+      { host: "2001:db8::10", containerName: "db-v6" },
+    ]),
+    [{ name: "db-v6", address: "[2001:db8::10]" }],
+  );
+});
+
+test("orchestratorCompose extra_hosts aliases container names to listener IPs", () => {
+  const yaml = orchestratorCompose(
+    HA_DESCRIPTOR,
+    BASE_RAFT,
+    MANAGED_NETWORK,
+    undefined,
+    [{ name: "db-1", address: "10.100.0.5" }],
+  );
+  assertEquals(yaml.includes("extra_hosts:"), true);
+  assertEquals(yaml.includes(`"db-1:10.100.0.5"`), true);
 });
 
 test("orchestratorCompose refuses publishing on every interface", () => {
@@ -192,15 +295,19 @@ test("renderOrchestratorConf omits RaftAuthToken when unset and maps RaftNodes",
   })) as Record<string, unknown>;
   assertEquals("RaftAuthToken" in conf, false);
   assertEquals(conf.RaftNodes, ["203.0.113.11:33002"]);
+  assertEquals(conf.MySQLTopologyUseMutualTLS, true);
+  assertEquals("MySQLTopologyUseSSL" in conf, false);
   assertEquals(conf.MySQLTopologySSLSkipVerify, true);
   assertEquals("MySQLTopologySSLCAFile" in conf, false);
 });
 
 test("renderOrchestratorConf sets Organization CA path and verifies TLS", () => {
   const conf = JSON.parse(sampleConf({
-    sslCaPath: "/etc/orchestrator/tls/ca.pem",
+    sslCaPath: ORCHESTRATOR_TLS_CA_PATH,
   })) as Record<string, unknown>;
-  assertEquals(conf.MySQLTopologySSLCAFile, "/etc/orchestrator/tls/ca.pem");
+  assertEquals(conf.MySQLTopologySSLCAFile, ORCHESTRATOR_TLS_CA_PATH);
+  assertEquals(conf.MySQLTopologyUseMutualTLS, true);
+  assertEquals("MySQLTopologyUseSSL" in conf, false);
   assertEquals(conf.MySQLTopologySSLSkipVerify, false);
 });
 
@@ -680,4 +787,25 @@ test("ensureOrchestratorStack fails with the container's last log line when it c
   } finally {
     await fixture.cleanup();
   }
+});
+
+test("isPrivateAdvertiseAddress accepts only private network addresses", () => {
+  assertEquals(isPrivateAdvertiseAddress("10.100.0.5"), true);
+  assertEquals(isPrivateAdvertiseAddress("172.20.1.1"), true);
+  assertEquals(isPrivateAdvertiseAddress("192.168.1.9"), true);
+  assertEquals(isPrivateAdvertiseAddress("100.64.1.2"), true);
+  assertEquals(isPrivateAdvertiseAddress("fd00::5"), true);
+  assertEquals(isPrivateAdvertiseAddress("203.0.113.9"), false);
+  assertEquals(isPrivateAdvertiseAddress("2001:db8::1"), false);
+  assertEquals(isPrivateAdvertiseAddress("172.32.0.1"), false);
+});
+
+test("orchestratorCompose does not publish the API on a public advertise address", () => {
+  const yaml = orchestratorCompose(
+    HA_DESCRIPTOR,
+    { ...BASE_RAFT, advertiseAddress: "203.0.113.10" },
+    MANAGED_NETWORK,
+  );
+  assertEquals(yaml.includes("127.0.0.1:33001:33001"), true);
+  assertEquals(yaml.includes("203.0.113.10:33001:33001"), false);
 });

@@ -11,92 +11,37 @@ import type {
   ManagedPromotePayload,
   ManagedPromoteResult,
 } from "../contracts/commands-contracts.ts";
-import { ensureDocker as defaultEnsureDocker } from "../deploy/ensure-docker.ts";
-import {
-  type DockerCliResult,
-  runDocker as defaultRunDocker,
-  type RunDockerOptions,
-} from "../deploy/docker-cli.ts";
-import { sanitizeForLog } from "../util/logger.ts";
 import { resolveLayout } from "../paths/layout.ts";
+import { clearManagedDemotedMarker } from "./demoted-marker.ts";
 import {
-  collectManagedContainers,
-  resolveEngineContainerId,
-} from "./containers.ts";
-import { getManagedEngineRuntime } from "./engines/index.ts";
-import type { ManagedEngineContext } from "./engines/types.ts";
-import { ManagedReplicationNotSupportedError } from "./engines/types.ts";
-import { managedComposeProject } from "./engine-paths.ts";
+  type LocalEngineContextDeps,
+  resolveLocalReplicationEngine,
+} from "./local-engine-context.ts";
 
 type DecryptSecretsFn = (ciphertexts: string[]) => Promise<(string | null)[]>;
-type RunDockerFn = (
-  args: string[],
-  options?: RunDockerOptions,
-) => Promise<DockerCliResult>;
 
-export type ManagedPromoteHandlerDeps = {
+export type ManagedPromoteHandlerDeps = LocalEngineContextDeps & {
   decryptSecrets?: DecryptSecretsFn;
-  /** Test seam — defaults to {@link defaultRunDocker}. */
-  runDocker?: RunDockerFn;
-  /** Test seam — defaults to {@link defaultEnsureDocker}. */
-  ensureDocker?: () => Promise<void>;
 };
-
-function buildEngineExec(
-  containerId: string,
-  run: RunDockerFn,
-): ManagedEngineContext["exec"] {
-  return async (argv, input) => {
-    const result = await run(
-      ["exec", "-i", "-u", "0", containerId, ...argv],
-      input === undefined ? undefined : { input },
-    );
-    return {
-      success: result.success,
-      stdout: result.stdout,
-      stderr: sanitizeForLog(result.stderr),
-    };
-  };
-}
 
 export async function handleManagedPromote(
   payload: ManagedPromotePayload,
   _daemonReceivedAt: string,
   deps?: ManagedPromoteHandlerDeps,
 ): Promise<ManagedPromoteResult> {
-  const engine = getManagedEngineRuntime(payload.engine ?? "postgres");
-  if (!engine.replication) {
-    throw new ManagedReplicationNotSupportedError(engine.engine);
-  }
-
-  const run = deps?.runDocker ?? defaultRunDocker;
-  const ensureDocker = deps?.ensureDocker ?? defaultEnsureDocker;
-
-  await ensureDocker();
-  resolveLayout(Deno.env.toObject());
-
-  const project = managedComposeProject(payload.managedId);
-  const containers = await collectManagedContainers(project, undefined, run);
-  if (!containers || containers.length === 0) {
-    throw new Error(
-      `managed.promote: no running containers for ${payload.managedId}`,
-    );
-  }
-  const containerId = resolveEngineContainerId(
-    containers,
-    containers[0]!.composeServiceName,
+  const { engine, ctx } = await resolveLocalReplicationEngine(
+    payload.managedId,
+    payload.engine,
+    "managed.promote",
+    deps,
   );
 
-  const ctx: ManagedEngineContext = {
-    containerId,
-    composeServiceName: containers[0]!.composeServiceName,
-    rootUsername: engine.rootUsername,
-    defaultDatabase: engine.defaultDatabase,
-    exec: buildEngineExec(containerId, run),
-  };
-
-  await engine.replication.promote(ctx);
-  const health = await engine.replication.readHealth(ctx, "primary");
+  await engine.replication!.promote(ctx);
+  await clearManagedDemotedMarker(
+    resolveLayout(Deno.env.toObject()),
+    payload.managedId,
+  );
+  const health = await engine.replication!.readHealth(ctx, "primary");
 
   return {
     status: "ready",

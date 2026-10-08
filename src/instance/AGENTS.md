@@ -680,8 +680,8 @@ same shape: server-scoped, carries the full desired state, no reply channel. It
 exists because a deploy is the wrong trigger for a **revocation** — removing a
 key must not wait for an unrelated environment to ship — and because a deploy
 payload can never carry the complete set that safe removal requires. It
-subsumes shell and entitlement changes too, so granting a principal PHP 8.4 no
-longer means deploying one of its environments. See `../deploy/ssh/` for the
+subsumes shell and SSH access changes too, so changing them no longer means
+deploying one of its environments. See `../deploy/ssh/` for the
 host side. `run.sh` still pins
 `--cacert` first (`tp_fetch_instance_ca`); on HTTP `000` with an existing CA
 it asks again with the **system roots** — a `404` there means the control

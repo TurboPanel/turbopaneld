@@ -1,0 +1,204 @@
+import { assert, assertEquals } from "@std/assert";
+import type { DockerCliResult } from "../deploy/docker-cli.ts";
+import { resolveLayout } from "../paths/layout.ts";
+import { withTempLayout } from "../testing/temp-layout.ts";
+import { writeManagedDestroyedMarker } from "./destroyed-marker.ts";
+import { DemotedMemberGuard } from "./demoted-guard.ts";
+import { writeManagedDemotedMarker } from "./demoted-marker.ts";
+import {
+  lookupManagedIntent,
+  resetManagedIntentsForTests,
+} from "./ha-intent.ts";
+import { saveManagedHaMember } from "./ha-member.ts";
+import { withManagedLifecycleLock } from "./target-lock.ts";
+
+/**
+ * Jest/Mocha-shaped alias for {@link Deno.test}.
+ *
+ * Sonar typescript:S2187 only recognizes `test()` / `it()` / `describe()` and
+ * reports Deno suites as empty; keep this alias so analysis sees real tests.
+ */
+const test = Deno.test.bind(Deno);
+
+const MANAGED_ID = "00000000-0000-4000-8000-000000000001";
+const OTHER_ID = "00000000-0000-4000-8000-000000000002";
+const MEMBER_ID = "00000000-0000-4000-8000-0000000000a1";
+
+const RUNNING_PS = JSON.stringify([
+  {
+    ID: "abc123",
+    Name: "db-1",
+    Service: "db",
+    State: "running",
+  },
+]);
+
+function memberRecord(managedId = MANAGED_ID) {
+  return {
+    managedId,
+    memberId: MEMBER_ID,
+    engine: "postgres" as const,
+    role: "primary" as const,
+    containerName: "db-1",
+    replicaPeerCount: 1,
+    peerCount: 1,
+    updatedAt: "2026-10-08T12:00:00.000Z",
+  };
+}
+
+function docker(psStdout = RUNNING_PS) {
+  const calls: string[][] = [];
+  let stdout = psStdout;
+  const run = (args: string[]): Promise<DockerCliResult> => {
+    calls.push(args);
+    if (args[0] === "compose" && args.includes("ps")) {
+      return Promise.resolve({
+        success: true,
+        code: 0,
+        stdout,
+        stderr: "",
+      });
+    }
+    if (args[0] === "compose" && args.at(-1) === "stop") {
+      stdout = "[]";
+    }
+    return Promise.resolve({ success: true, code: 0, stdout: "", stderr: "" });
+  };
+  return { run, calls };
+}
+
+async function seedMember(
+  layout: ReturnType<typeof resolveLayout>,
+  managedId = MANAGED_ID,
+): Promise<void> {
+  await Deno.mkdir(`${layout.stateDir}/managed/${managedId}`, {
+    recursive: true,
+  });
+  await saveManagedHaMember(layout, memberRecord(managedId));
+}
+
+test("a running demoted member is stopped once and a held intent is written first", async () => {
+  await withTempLayout(async ({ env }) => {
+    resetManagedIntentsForTests();
+    const layout = resolveLayout(env);
+    await seedMember(layout);
+    await writeManagedDemotedMarker(
+      layout,
+      MANAGED_ID,
+      MEMBER_ID,
+      "2026-10-08T12:00:00.000Z",
+    );
+    const fake = docker();
+    const guard = new DemotedMemberGuard({
+      layout,
+      run: fake.run,
+      listMembers: () => Promise.resolve([memberRecord()]),
+    });
+    await guard.tick();
+    const stopAt = fake.calls.findIndex((args) =>
+      args[0] === "compose" && args.at(-1) === "stop"
+    );
+    assert(stopAt > 0);
+    assertEquals(fake.calls[stopAt], ["compose", "-p", MANAGED_ID, "stop"]);
+    const psBeforeStop = fake.calls.slice(0, stopAt).some((args) =>
+      args[0] === "compose" && args.includes("ps")
+    );
+    assert(psBeforeStop);
+    const marker = await lookupManagedIntent(layout.stateDir, MANAGED_ID);
+    assert(marker.status === "found" && marker.intent.kind === "stop");
+    assertEquals(marker.intent.untilMs, null);
+    assertEquals(marker.intent.maxUntilMs, null);
+    await guard.tick();
+    const stops = fake.calls.filter((args) => args.at(-1) === "stop");
+    assertEquals(stops.length, 1);
+  });
+});
+
+test("a member without a demoted marker is not stopped", async () => {
+  await withTempLayout(async ({ env }) => {
+    resetManagedIntentsForTests();
+    const layout = resolveLayout(env);
+    await seedMember(layout);
+    const fake = docker();
+    const guard = new DemotedMemberGuard({
+      layout,
+      run: fake.run,
+      listMembers: () => Promise.resolve([memberRecord()]),
+    });
+    await guard.tick();
+    assertEquals(fake.calls.some((args) => args.at(-1) === "stop"), false);
+  });
+});
+
+test("a destroyed member is not stopped even with a demoted marker", async () => {
+  await withTempLayout(async ({ env }) => {
+    resetManagedIntentsForTests();
+    const layout = resolveLayout(env);
+    await seedMember(layout);
+    await writeManagedDemotedMarker(
+      layout,
+      MANAGED_ID,
+      MEMBER_ID,
+      "2026-10-08T12:00:00.000Z",
+    );
+    await writeManagedDestroyedMarker(
+      layout.stateDir,
+      MANAGED_ID,
+      MEMBER_ID,
+      new Date().toISOString(),
+    );
+    const fake = docker();
+    const guard = new DemotedMemberGuard({ layout, run: fake.run });
+    await guard.tick();
+    assertEquals(fake.calls.some((args) => args.at(-1) === "stop"), false);
+  });
+});
+
+test("a member under the lifecycle lock is skipped until the lock is free", async () => {
+  await withTempLayout(async ({ env }) => {
+    resetManagedIntentsForTests();
+    const layout = resolveLayout(env);
+    await seedMember(layout);
+    await writeManagedDemotedMarker(
+      layout,
+      MANAGED_ID,
+      MEMBER_ID,
+      "2026-10-08T12:00:00.000Z",
+    );
+    const fake = docker();
+    const guard = new DemotedMemberGuard({
+      layout,
+      run: fake.run,
+      listMembers: () => Promise.resolve([memberRecord()]),
+    });
+    await withManagedLifecycleLock(layout, MANAGED_ID, async () => {
+      await guard.tick();
+      assertEquals(fake.calls.some((args) => args.at(-1) === "stop"), false);
+    });
+    await guard.tick();
+    assertEquals(fake.calls.some((args) => args.at(-1) === "stop"), true);
+  });
+});
+
+test("a stopped demoted member is left alone", async () => {
+  await withTempLayout(async ({ env }) => {
+    resetManagedIntentsForTests();
+    const layout = resolveLayout(env);
+    await seedMember(layout);
+    await writeManagedDemotedMarker(
+      layout,
+      MANAGED_ID,
+      MEMBER_ID,
+      "2026-10-08T12:00:00.000Z",
+    );
+    const fake = docker("[]");
+    const guard = new DemotedMemberGuard({
+      layout,
+      run: fake.run,
+      listMembers: () =>
+        Promise.resolve([memberRecord(), memberRecord(OTHER_ID)]),
+    });
+    await guard.tick();
+    assertEquals(fake.calls.some((args) => args.at(-1) === "stop"), false);
+  });
+});

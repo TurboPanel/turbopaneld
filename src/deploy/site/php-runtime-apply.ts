@@ -153,7 +153,7 @@ export async function readSitePhpUnits(
 }
 
 /**
- * Install one config file root:<owner>-grp 0640 when its bytes differ, with a
+ * Install one config file root:<owner> 0640 when its bytes differ, with a
  * `.tpprev` snapshot of what was there. `null` when nothing changed.
  */
 async function installConfigFile(

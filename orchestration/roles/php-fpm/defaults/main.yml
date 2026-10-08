@@ -44,7 +44,8 @@ php_fpm_sury_suite: "{{ ansible_distribution_release }}"
 # Extensions. This list is parity with the flags the previous source build
 # compiled in (--enable-mbstring --enable-bcmath --enable-gd --with-pdo-mysql
 # --with-mysqli --with-pdo-sqlite --with-zip --with-curl --enable-opcache, plus
-# libxml2). openssl and zlib are in php8.4-common and need no package.
+# libxml2), plus `pgsql` (pgsql + pdo_pgsql) so a site can use a Postgres
+# database. openssl and zlib are in php8.4-common and need no package.
 # Baseline: installed on every series whether or not a site asked. Parity with
 # the flags the previous source build compiled in (--enable-mbstring
 # --enable-bcmath --enable-gd --with-pdo-mysql --with-mysqli --with-pdo-sqlite
@@ -57,6 +58,7 @@ php_fpm_baseline_extensions:
   - mbstring
   - mysql
   - opcache
+  - pgsql
   - sqlite3
   - xml
   - zip

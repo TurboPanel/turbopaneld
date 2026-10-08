@@ -459,7 +459,7 @@ test("phpFpmPoolConfig runs workers as assigned principal", () => {
     "/run/turbopanel/php/tp-env1-phpapp.sock",
   );
   assertStringIncludes(conf, "user = site_user");
-  assertStringIncludes(conf, "group = site_user-grp");
+  assertStringIncludes(conf, "group = site_user");
   assertStringIncludes(conf, "listen.owner = tpapache");
   assertStringIncludes(conf, "listen.group = tpapache");
 });
@@ -609,6 +609,7 @@ test("openlitespeedVhostConfig serves a static document root with no directory l
   const conf = openlitespeedVhostConfig();
   assertStringIncludes(conf, "docRoot $VH_ROOT/");
   assertStringIncludes(conf, "autoIndex 0");
+  assertStringIncludes(conf, "useServer 0");
   // `allowBrowse` is OpenLiteSpeed's "Accessible" flag: 0 answers 403 for `/`.
   assertStringIncludes(conf, "allowBrowse 1");
   assertEquals(conf.includes("allowBrowse 0"), false);
@@ -923,7 +924,12 @@ test("openlitespeedVhostConfig hands PHP to the site's own runtime, never starti
       conf,
       `add                       ${type}:php_tp_env1_phpapp php`,
     );
-    assertStringIncludes(conf, "indexFiles index.php, index.html");
+    // Without `useServer 0` OLS keeps the server-level `indexFiles index.html`
+    // and `/` never reaches index.php.
+    assertStringIncludes(
+      conf,
+      "indexFiles index.php, index.html\n  useServer 0\n  autoIndex 0",
+    );
     // OpenLiteSpeed runs as tpols and cannot switch users: no suEXEC lines,
     // no binary to start, and the settings live in the runtime's php.ini.
     for (

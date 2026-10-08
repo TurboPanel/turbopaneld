@@ -1,9 +1,12 @@
 /**
- * `managed.ha.failover` — ProxySQL drain or designated Orchestrator recover.
+ * `managed.ha.failover` — ProxySQL drain, designated Orchestrator recover,
+ * or replica repoint after promotion.
  *
  * Drain is fail-closed for automatic failover (control plane still decides).
  * Recover talks to local Orchestrator; when the HA stack is absent **or**
  * designated recover fails, it falls back to `managed.promote`.
+ * Repoint runs on every other healthy replica so `primary_conninfo` /
+ * replication source follows the new primary (without a full Resync).
  */
 
 import type {
@@ -12,6 +15,11 @@ import type {
 } from "../contracts/commands-contracts.ts";
 import { parseManagedHaFailoverPayload } from "../contracts/commands-contracts.ts";
 import { handleManagedPromote } from "../managed/promote.ts";
+import {
+  ensureLocalPrimarySlots,
+  followLocalStandby,
+  type FollowPrimaryDeps,
+} from "../managed/follow-primary.ts";
 import { applyProxySqlAdminStatements } from "../managed/proxysql-admin.ts";
 import { buildProxySqlDrainStatements } from "../managed/proxysql.ts";
 import {
@@ -37,8 +45,11 @@ export type ManagedHaFailoverHandlerDeps = {
   ) => Promise<void>;
   recover?: typeof recoverToCandidate;
   promote?: typeof handleManagedPromote;
+  follow?: typeof followLocalStandby;
+  ensurePrimarySlots?: typeof ensureLocalPrimarySlots;
   /** Test seam — defaults to {@link hostPrepPresent}. */
   haPresent?: () => Promise<boolean>;
+  followDeps?: FollowPrimaryDeps;
 };
 
 async function drainWriterOnLocalProxySql(
@@ -109,6 +120,79 @@ async function promoteWithoutOrchestrator(
   };
 }
 
+function repointHasEnsureSlots(payload: ManagedHaFailoverPayload): boolean {
+  return (payload.ensureSlots?.length ?? 0) > 0;
+}
+
+async function handleEnsureSlotsRepoint(
+  payload: ManagedHaFailoverPayload,
+  daemonReceivedAt: string,
+  deps: ManagedHaFailoverHandlerDeps | undefined,
+): Promise<ManagedHaFailoverResult> {
+  const ensure = deps?.ensurePrimarySlots ?? ensureLocalPrimarySlots;
+  await ensure(
+    {
+      managedId: payload.managedId,
+      ...(payload.engine ? { engine: payload.engine } : {}),
+      slots: payload.ensureSlots ?? [],
+    },
+    deps?.followDeps,
+  );
+  logInfo(
+    "commands",
+    `managed.ha.failover repoint slots ensured managedId=${payload.managedId} received=${daemonReceivedAt}`,
+  );
+  return {
+    summary: `slots ensured for managed ${payload.managedId}`,
+    phase: "repoint",
+  };
+}
+
+async function handleFollowRepoint(
+  payload: ManagedHaFailoverPayload,
+  daemonReceivedAt: string,
+  deps: ManagedHaFailoverHandlerDeps | undefined,
+): Promise<ManagedHaFailoverResult> {
+  if (!payload.targetHost || payload.targetPort === undefined) {
+    throw new Error(
+      "managed.ha.failover repoint requires targetHost and targetPort",
+    );
+  }
+  const follow = deps?.follow ?? followLocalStandby;
+  await follow(
+    {
+      managedId: payload.managedId,
+      ...(payload.engine ? { engine: payload.engine } : {}),
+      primary: {
+        host: payload.targetHost,
+        port: payload.targetPort,
+        ...(payload.targetHostaddr ? { hostaddr: payload.targetHostaddr } : {}),
+      },
+    },
+    deps?.followDeps,
+  );
+  logInfo(
+    "commands",
+    `managed.ha.failover repoint completed managedId=${payload.managedId} received=${daemonReceivedAt}`,
+  );
+  return {
+    summary:
+      `repointed replica for managed ${payload.managedId} at the new primary`,
+    phase: "repoint",
+  };
+}
+
+async function handleRepointPhase(
+  payload: ManagedHaFailoverPayload,
+  daemonReceivedAt: string,
+  deps: ManagedHaFailoverHandlerDeps | undefined,
+): Promise<ManagedHaFailoverResult> {
+  if (repointHasEnsureSlots(payload)) {
+    return await handleEnsureSlotsRepoint(payload, daemonReceivedAt, deps);
+  }
+  return await handleFollowRepoint(payload, daemonReceivedAt, deps);
+}
+
 async function handleDrainPhase(
   payload: ManagedHaFailoverPayload,
   daemonReceivedAt: string,
@@ -172,6 +256,9 @@ export async function handleManagedHaFailover(
   const payload = parseManagedHaFailoverPayload(rawPayload);
   if (payload.phase === "drain") {
     return await handleDrainPhase(payload, daemonReceivedAt, deps);
+  }
+  if (payload.phase === "repoint") {
+    return await handleRepointPhase(payload, daemonReceivedAt, deps);
   }
 
   const haPresent = deps?.haPresent

@@ -757,12 +757,6 @@ export type EnvironmentDeployStorageMaterial = {
  * (`-K` on that command) unless the control plane sends an explicit operator
  * override (`uid`/`gid` 15001–60000).
  */
-/** One runtime series a principal is entitled to execute. */
-export type EnvironmentDeployPrincipalRuntime = {
-  runtime: string;
-  series: string;
-};
-
 export type EnvironmentDeployPrincipalMaterial = {
   principalId: string;
   username: string;
@@ -771,18 +765,11 @@ export type EnvironmentDeployPrincipalMaterial = {
   home?: string;
   shell?: string;
   /**
-   * The **effective** entitlement set — explicit operator grants plus what this
-   * principal's services imply — resolved control-plane side. The daemon
-   * reconciles unix group membership from it (adding *and revoking*); it never
-   * derives entitlements itself, because a derived grant can only ever add.
-   */
-  runtimes?: EnvironmentDeployPrincipalRuntime[];
-  /**
    * SSH access groups this principal should hold (`tpsftp` / `tpshell`).
    *
    * Resolved control-plane side from the account's shell **and** whether it
-   * holds any key — same doctrine as `runtimes`, and for the same reason: one
-   * place decides the effective set, the daemon reconciles to it. `[]` is a
+   * holds any key: one place decides the effective set, the daemon reconciles
+   * to it. `[]` is a
    * revocation and is the normal value for an account that holds no keys.
    */
   accessGroups?: string[];
@@ -1931,6 +1918,11 @@ export type ManagedLifecyclePayload = {
    * (defaults to primary).
    */
   role?: "primary" | "replica";
+  /**
+   * True on a fence stop of a replaced primary. Absent on ordinary operator
+   * stops and on older control planes; older daemons ignore it.
+   */
+  demoted?: boolean;
 };
 
 /** Must stay in sync with the instance canonical `managed.lifecycle` shape. */
@@ -2092,9 +2084,9 @@ export type ManagedIngressReconcilePayload = {
    */
   managedNetwork: string;
   /**
-   * Every host address the client listeners publish on. More than one entry
-   * when the instance resolved distinct interfaces for the enabled access
-   * scopes (datacenter private IP plus TurboFabric `tp0`, say); absent or empty
+   * Every host address the client listeners publish on. The instance sends one
+   * entry, from the server's single "allow external access to the databases on
+   * this server" setting: `127.0.0.1` (off) or `0.0.0.0` (on). Absent or empty
    * means no host publish at all.
    */
   bindAddresses?: string[];
@@ -2215,7 +2207,7 @@ export type ManagedHaReconcileResult = {
   containers?: EnvironmentDeployContainer[];
 };
 
-export type ManagedHaFailoverPhase = "drain" | "recover";
+export type ManagedHaFailoverPhase = "drain" | "recover" | "repoint";
 
 /** Must stay in sync with the instance canonical `managed.ha.failover` shape. */
 export type ManagedHaFailoverPayload = {
@@ -2228,6 +2220,17 @@ export type ManagedHaFailoverPayload = {
   sourcePort?: number;
   targetHost?: string;
   targetPort?: number;
+  /**
+   * Dial IP when `targetHost` is the leaf SAN (Postgres `hostaddr`).
+   * Omitted when `targetHost` is already the address to dial.
+   */
+  targetHostaddr?: string;
+  /**
+   * When non-empty, this `repoint` runs on the **new primary** and creates
+   * each missing physical slot (Postgres). MySQL/MariaDB ignore the list.
+   * Follow mode still uses `targetHost` / `targetPort` on remaining replicas.
+   */
+  ensureSlots?: string[];
 };
 
 export type ManagedHaFailoverResult = {
@@ -4165,7 +4168,10 @@ function isValidPrincipalShellPath(value: string): boolean {
 }
 
 const PRINCIPAL_USERNAME_RE = /^[A-Za-z_][A-Za-z0-9_-]*$/;
-/** Cap so `${username}-grp` fits the Linux 32-char group-name limit. */
+/**
+ * Longest site owner's Linux user name; its group carries the same name.
+ * Keep in sync with `MAX_PRINCIPAL_USERNAME_LENGTH` in ensure-principal.ts.
+ */
 const MAX_PRINCIPAL_USERNAME_LENGTH = 28;
 
 function isValidPrincipalUsername(value: unknown): value is string {
@@ -4185,9 +4191,6 @@ function parseOptionalPrincipalId(
   return value;
 }
 
-/** `8.4` or `24` — the exec boundary a group protects, not a patch pin. */
-const RUNTIME_SERIES_RE = /^\d{1,3}(\.\d{1,3})?$/;
-
 /** Optional string field with its own validator, so the caller stays flat. */
 function parsePrincipalOptionalString(
   value: unknown,
@@ -4204,48 +4207,8 @@ function parsePrincipalOptionalString(
 }
 
 /**
- * `series` is a version label, not a number: the control plane may render `8.4`
- * as either JSON form, so a numeric one is normalized rather than stringified
- * blind — an object would otherwise reach the regex as `[object Object]`.
- */
-function parsePrincipalRuntimeSeries(value: unknown): string {
-  const series = typeof value === "number" ? value.toString() : value;
-  if (typeof series !== "string" || !RUNTIME_SERIES_RE.test(series)) {
-    throw new TypeError(
-      "Invalid environment deploy principalMaterial runtimes entry",
-    );
-  }
-  return series;
-}
-
-/**
- * Rejected rather than dropped: this is a grant, and silently discarding a
- * malformed one would revoke every entitlement the principal should hold.
- */
-function parsePrincipalRuntimes(
-  value: unknown,
-): EnvironmentDeployPrincipalRuntime[] {
-  if (!Array.isArray(value)) {
-    throw new TypeError(
-      "Invalid environment deploy principalMaterial runtimes",
-    );
-  }
-  return value.map((entry) => {
-    if (!isRecord(entry) || typeof entry.runtime !== "string") {
-      throw new TypeError(
-        "Invalid environment deploy principalMaterial runtimes entry",
-      );
-    }
-    return {
-      runtime: entry.runtime,
-      series: parsePrincipalRuntimeSeries(entry.series),
-    };
-  });
-}
-
-/**
- * Rejected rather than dropped, for the same reason `runtimes` is: dropping a
- * malformed grant silently revokes the login it describes.
+ * Rejected rather than dropped: dropping a malformed grant silently revokes
+ * the login it describes.
  */
 function parsePrincipalStringList(
   value: unknown,
@@ -4294,9 +4257,6 @@ function parsePrincipalMaterial(
     isValidPrincipalShellPath,
   );
   if (shell !== undefined) material.shell = shell;
-  if (value.runtimes !== undefined) {
-    material.runtimes = parsePrincipalRuntimes(value.runtimes);
-  }
   if (value.accessGroups !== undefined) {
     material.accessGroups = parsePrincipalStringList(
       value.accessGroups,
@@ -6229,8 +6189,8 @@ const MAX_MANAGED_IMAGE_LENGTH = 256;
  *
  * **Tested series only.** The control-plane catalog marks a series
  * `tested: true` once it is validated end-to-end, and only those series are
- * creatable: PostgreSQL 18, MySQL 9.7, MariaDB 12.3. The catalog still *knows*
- * about older series (17/16/15, 8.4, 11.8/11.4/10.11) so an already-persisted
+ * creatable: PostgreSQL 18, MySQL 9.7 and 8.4, MariaDB 12.3 and 11.8. The catalog still *knows*
+ * about older series (17/16/15, 11.4/10.11) so an already-persisted
  * image can be named in the UI, but they must never reach Docker — do not add
  * one back here without flipping `tested` in the control-plane catalog and the
  * UI mirror in the same change.
@@ -6249,10 +6209,14 @@ const MANAGED_ALLOWED_IMAGES_BY_ENGINE: Record<string, readonly string[]> = {
   mysql: [
     "docker.io/library/mysql:9.7",
     "docker.io/library/mysql:9.7-oraclelinux9",
+    "docker.io/library/mysql:8.4",
+    "docker.io/library/mysql:8.4-oraclelinux9",
   ],
   mariadb: [
     "docker.io/library/mariadb:12.3",
     "docker.io/library/mariadb:12.3-ubi",
+    "docker.io/library/mariadb:11.8",
+    "docker.io/library/mariadb:11.8-ubi",
   ],
 };
 
@@ -7458,13 +7422,29 @@ export function parseManagedLifecyclePayload(
     }
     payload.engine = value.engine;
   }
-  if (value.role !== undefined) {
-    if (value.role !== "primary" && value.role !== "replica") {
-      throw new TypeError("Invalid managed.lifecycle payload");
-    }
-    payload.role = value.role;
-  }
+  const role = parseManagedLifecycleRole(value.role);
+  if (role !== undefined) payload.role = role;
+  if (parseManagedLifecycleDemoted(value.demoted)) payload.demoted = true;
   return payload;
+}
+
+function parseManagedLifecycleRole(
+  value: unknown,
+): ManagedLifecyclePayload["role"] {
+  if (value === undefined) return undefined;
+  if (value !== "primary" && value !== "replica") {
+    throw new TypeError("Invalid managed.lifecycle payload");
+  }
+  return value;
+}
+
+/** `true` only when the fence marked the stop as a replaced primary's. */
+function parseManagedLifecycleDemoted(value: unknown): boolean {
+  if (value === undefined) return false;
+  if (typeof value !== "boolean") {
+    throw new TypeError("Invalid managed.lifecycle payload");
+  }
+  return value;
 }
 
 /** Must stay in sync with the instance canonical `managed.destroy` validator. */
@@ -8642,7 +8622,7 @@ export function parseManagedIngressReconcileResult(
 }
 
 const HA_PROMOTION_RULES = new Set(["prefer", "must_not"]);
-const HA_FAILOVER_PHASES = new Set(["drain", "recover"]);
+const HA_FAILOVER_PHASES = new Set(["drain", "recover", "repoint"]);
 const MAX_HA_CLUSTERS = 64;
 const MAX_HA_MEMBERS = 32;
 const MAX_HA_PEERS = 32;
@@ -8913,6 +8893,26 @@ function parseOptionalManagedHaPort(value: unknown): number | undefined {
   return value;
 }
 
+const HA_FAILOVER_SLOT_RE = /^[a-z0-9_]{1,63}$/;
+const MAX_HA_FAILOVER_ENSURE_SLOTS = 32;
+
+function parseManagedHaFailoverEnsureSlots(
+  value: unknown,
+): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > MAX_HA_FAILOVER_ENSURE_SLOTS) {
+    throw new TypeError(MANAGED_HA_FAILOVER_PAYLOAD_ERROR);
+  }
+  const slots: string[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "string" || !HA_FAILOVER_SLOT_RE.test(entry)) {
+      throw new TypeError(MANAGED_HA_FAILOVER_PAYLOAD_ERROR);
+    }
+    slots.push(entry);
+  }
+  return slots;
+}
+
 /** Must stay in sync with the instance canonical `managed.ha.failover` validator. */
 export function parseManagedHaFailoverPayload(
   value: unknown,
@@ -8937,6 +8937,10 @@ export function parseManagedHaFailoverPayload(
   if (targetHost !== undefined) payload.targetHost = targetHost;
   const targetPort = parseOptionalManagedHaPort(value.targetPort);
   if (targetPort !== undefined) payload.targetPort = targetPort;
+  const targetHostaddr = parseOptionalManagedHaHost(value.targetHostaddr);
+  if (targetHostaddr !== undefined) payload.targetHostaddr = targetHostaddr;
+  const ensureSlots = parseManagedHaFailoverEnsureSlots(value.ensureSlots);
+  if (ensureSlots !== undefined) payload.ensureSlots = ensureSlots;
   return payload;
 }
 

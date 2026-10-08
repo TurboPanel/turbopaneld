@@ -5,6 +5,11 @@
  * (`MASTER_USE_GTID=slave_pos` / `gtid_slave_pos` vs `SOURCE_AUTO_POSITION=1`).
  */
 
+import {
+  type FollowSourceDialect,
+  renderFollowSourceSql,
+} from "./follow-source-sql.ts";
+
 const ACCOUNT_MAX_LENGTH = 32;
 const SCHEMA_MAX_LENGTH = 64;
 const IDENTIFIER_RE = /^[A-Za-z_]\w*$/;
@@ -231,6 +236,28 @@ export function ensureSocketAdminSql(osUser: string = "mysql"): string {
 }
 
 /**
+ * Session-only: keep replica-local statements out of the binary log so they
+ * cannot mint a replica-UUID GTID the primary never executed.
+ */
+export function withoutSessionBinlogSql(sql: string): string {
+  return [
+    "SET SESSION sql_log_bin = 0;",
+    sql.trim(),
+    "SET SESSION sql_log_bin = 1;",
+  ].join("\n");
+}
+
+/** Clears entrypoint-init GTID state on a freshly initdb'd standby. */
+export function resetReplicaGtidStateSql(): string {
+  return "RESET MASTER;";
+}
+
+/** Replica-local flush — must not be binary-logged. */
+export function flushPrivilegesLocalSql(): string {
+  return withoutSessionBinlogSql("FLUSH PRIVILEGES;");
+}
+
+/**
  * Standby seed window: the platform my.cnf boots standbys with
  * `read_only=ON`, which blocks the seed IMPORT for non-SUPER users;
  * `configureStandby` disables it for the seed and re-enforces it once
@@ -284,6 +311,29 @@ export function changeReplicationSourceSql(spec: {
     "  MASTER_SSL_VERIFY_SERVER_CERT = 1;",
     "START SLAVE;",
   ].join("\n");
+}
+
+/**
+ * Re-point an already-configured replica after promotion. Host and port
+ * only — user, password, SSL, and GTID stay as seeded.
+ */
+export const MARIADB_FOLLOW_SOURCE_DIALECT: FollowSourceDialect = {
+  stop: "STOP SLAVE",
+  change: "CHANGE MASTER TO",
+  hostKey: "MASTER_HOST",
+  portKey: "MASTER_PORT",
+  start: "START SLAVE",
+};
+
+export function followReplicationSourceSql(spec: {
+  host: string;
+  port: number;
+}): string {
+  return renderFollowSourceSql(
+    MARIADB_FOLLOW_SOURCE_DIALECT,
+    spec,
+    quoteLiteral,
+  );
 }
 
 /**

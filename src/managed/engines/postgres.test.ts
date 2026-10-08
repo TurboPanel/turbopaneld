@@ -743,6 +743,50 @@ test("postgres promote leaves recovery on first writable check", async () => {
   assertEquals(recoveryChecks >= 2, true);
 });
 
+test("postgres followPrimary rewrites primary_conninfo toward the new primary", async () => {
+  const replication = postgresManagedEngineRuntime.replication;
+  if (!replication?.followPrimary) {
+    throw new TypeError("expected postgres followPrimary");
+  }
+  const inputs: string[] = [];
+  const exec: ManagedEngineExec = (_argv, input) => {
+    inputs.push(input ?? "");
+    if (input?.includes("current_setting")) {
+      return Promise.resolve({
+        success: true,
+        stdout:
+          "user=tp_repl password=s3cret host=10.100.0.5 port=45001 sslmode=verify-full\n",
+        stderr: "",
+      });
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  await replication.followPrimary(buildContext(exec), {
+    primary: { host: "10.100.0.4", port: 45001 },
+  });
+  const apply = inputs.find((sql) => sql.includes("ALTER SYSTEM"));
+  if (!apply) throw new TypeError("expected ALTER SYSTEM primary_conninfo");
+  assertEquals(apply.includes("host=10.100.0.4"), true);
+  assertEquals(apply.includes("10.100.0.5"), false);
+});
+
+test("postgres followPrimary throws when primary_conninfo is empty", async () => {
+  const replication = postgresManagedEngineRuntime.replication;
+  if (!replication?.followPrimary) {
+    throw new TypeError("expected postgres followPrimary");
+  }
+  const exec: ManagedEngineExec = () =>
+    Promise.resolve({ success: true, stdout: "\n", stderr: "" });
+  await assertRejects(
+    () =>
+      replication.followPrimary(buildContext(exec), {
+        primary: { host: "10.100.0.4", port: 45001 },
+      }),
+    Error,
+    "empty primary_conninfo",
+  );
+});
+
 test("postgres readHealth reports primary replication rows", async () => {
   const replication = postgresManagedEngineRuntime.replication;
   if (!replication?.readHealth) {
@@ -1454,4 +1498,41 @@ test("postgres pruneOrphanSlots drops every managed slot not listed and keeps th
     ).length,
     1,
   );
+});
+
+test("postgres ensureSlots creates each missing physical slot", async () => {
+  const replication = postgresManagedEngineRuntime.replication;
+  if (!replication?.ensureSlots) {
+    throw new TypeError("expected postgres ensureSlots");
+  }
+  const { exec, calls } = recordingExec();
+  await replication.ensureSlots(buildContext(exec), [
+    "tp_member_2",
+    "tp_member_3",
+  ]);
+  const sql = calls.map((c) => c.input ?? "").join("\n");
+  assertEquals(sql.includes("pg_create_physical_replication_slot"), true);
+  assertEquals(sql.includes("tp_member_2"), true);
+  assertEquals(sql.includes("tp_member_3"), true);
+});
+
+test("postgres isStandby follows pg_is_in_recovery", async () => {
+  const replication = postgresManagedEngineRuntime.replication;
+  if (!replication?.isStandby) {
+    throw new TypeError("expected postgres isStandby");
+  }
+  const standby: ManagedEngineExec = (_argv, input) => {
+    if (input?.includes("pg_is_in_recovery")) {
+      return Promise.resolve({ success: true, stdout: "t\n", stderr: "" });
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  const primary: ManagedEngineExec = (_argv, input) => {
+    if (input?.includes("pg_is_in_recovery")) {
+      return Promise.resolve({ success: true, stdout: "f\n", stderr: "" });
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  assertEquals(await replication.isStandby(buildContext(standby)), true);
+  assertEquals(await replication.isStandby(buildContext(primary)), false);
 });

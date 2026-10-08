@@ -35,23 +35,23 @@ openlitespeed_lsphp_series_map:
   "8.1":
     version: "8.1.34"
     pkg: lsphp81
-    packages: [lsphp81, lsphp81-common, lsphp81-mysql, lsphp81-opcache, lsphp81-curl]
+    packages: [lsphp81, lsphp81-common, lsphp81-mysql, lsphp81-opcache, lsphp81-curl, lsphp81-pgsql]
     arch_all: [lsphp81-common]
   "8.2":
     version: "8.2.34"
     pkg: lsphp82
-    packages: [lsphp82, lsphp82-common, lsphp82-mysql, lsphp82-opcache, lsphp82-curl]
+    packages: [lsphp82, lsphp82-common, lsphp82-mysql, lsphp82-opcache, lsphp82-curl, lsphp82-pgsql]
     arch_all: [lsphp82-common]
   "8.3":
     version: "8.3.33"
     pkg: lsphp83
-    packages: [lsphp83, lsphp83-common, lsphp83-mysql, lsphp83-opcache, lsphp83-curl]
+    packages: [lsphp83, lsphp83-common, lsphp83-mysql, lsphp83-opcache, lsphp83-curl, lsphp83-pgsql]
     # Architecture-independent packages (`_all.deb`).
     arch_all: [lsphp83-common]
   "8.4":
     version: "8.4.25"
     pkg: lsphp84
-    packages: [lsphp84, lsphp84-common, lsphp84-mysql, lsphp84-opcache, lsphp84-curl]
+    packages: [lsphp84, lsphp84-common, lsphp84-mysql, lsphp84-opcache, lsphp84-curl, lsphp84-pgsql]
     arch_all: [lsphp84-common]
   # PHP 8.5 builds opcache in: there is no lsphp85-opcache package, and the
   # relocated php.ini must not load opcache.so (see `builtinExtensions` in
@@ -59,7 +59,7 @@ openlitespeed_lsphp_series_map:
   "8.5":
     version: "8.5.11"
     pkg: lsphp85
-    packages: [lsphp85, lsphp85-common, lsphp85-mysql, lsphp85-curl]
+    packages: [lsphp85, lsphp85-common, lsphp85-mysql, lsphp85-curl, lsphp85-pgsql]
     arch_all: [lsphp85-common]
 
 # sha256 of every pinned `.deb`, keyed by file name (from the suite's
@@ -80,6 +80,10 @@ openlitespeed_lsphp_sha256:
   "lsphp81-opcache_8.1.34-1+bookworm_arm64.deb": "425a6e571650d8944f9b4569e3e68437baa7242ac80cad7717b7d2b4feda8ebd"
   "lsphp81-opcache_8.1.34-1+trixie_amd64.deb": "5d7ed956535542bb24fbcb05902121c5cbcb7e5c2097b75743d278356d1fc578"
   "lsphp81-opcache_8.1.34-1+trixie_arm64.deb": "96e432e7b3c346a2aa56fbc255355057a051ec6b1c25fa91bec0e8db718681b8"
+  "lsphp81-pgsql_8.1.34-1+bookworm_amd64.deb": "6ead227dfccf46d1d4a49717211075d955f719cd431a65cfe0de10889a967f13"
+  "lsphp81-pgsql_8.1.34-1+bookworm_arm64.deb": "5f48a9bd5d9be62ed8b5f3e9d4760d8374b86127756805895c49cc48bd11becb"
+  "lsphp81-pgsql_8.1.34-1+trixie_amd64.deb": "321f1984e48060921333e5541d1b70abfa0dac8e1c3f2e77e2d0494aa87d5ff5"
+  "lsphp81-pgsql_8.1.34-1+trixie_arm64.deb": "2eadd7f50f7e4dd52126709b5a67400b54aa54a2f4805608d83bc1c7b972fd7a"
   "lsphp81_8.1.34-1+bookworm_amd64.deb": "137dec78871cfa17827a250c837b4fbe7fd18c574251470f19b98e9156ecfb15"
   "lsphp81_8.1.34-1+bookworm_arm64.deb": "2f28c9592fe7e2823742d4c40b11c87381bb2eb4f1a405c5bcf0389fd6eb42c7"
   "lsphp81_8.1.34-1+trixie_amd64.deb": "3b3a8280b4dfb9c6c9177e46a9a45a6338ff41998fa3641fde3bbd48cc69a24a"
@@ -98,6 +102,10 @@ openlitespeed_lsphp_sha256:
   "lsphp82-opcache_8.2.34-1+bookworm_arm64.deb": "a3bb87da806d41261e6ba7b0792410d81d0a2ed2a6ad7680c4978bd18814ac8b"
   "lsphp82-opcache_8.2.34-1+trixie_amd64.deb": "568adcaf08c1e13d39e6dff5fc4baa99b10abf155200b335af264b3fd73e64ed"
   "lsphp82-opcache_8.2.34-1+trixie_arm64.deb": "f1e12dc1ac516d69d54c5763d2abde60184b9b2bd2df80a0e7e70139d3ea9b61"
+  "lsphp82-pgsql_8.2.34-1+bookworm_amd64.deb": "204323432fd35b933ddb4a2ced01e5b9ceac3b3a8be7806b9e7b853f9f506258"
+  "lsphp82-pgsql_8.2.34-1+bookworm_arm64.deb": "d1410cad237862fcbd0f8cf1db5565448d4c6158dfb611fc74d2a397a1201c21"
+  "lsphp82-pgsql_8.2.34-1+trixie_amd64.deb": "6473570013a43082892a6607cc89d449c3d9eb4875d2dccf63a080d4d25666e5"
+  "lsphp82-pgsql_8.2.34-1+trixie_arm64.deb": "9b2d0cfe3bb5d2fb6668c89f32fe34fe578fd2e685c55d57a7c0f9487d931494"
   "lsphp82_8.2.34-1+bookworm_amd64.deb": "94b696067daf280498d4a97b7adb882b47410a44c00e9908526190b8297444f3"
   "lsphp82_8.2.34-1+bookworm_arm64.deb": "8986b14211e739694079d654cbe13d56dabd70cf4cea5be062dd34480a140c93"
   "lsphp82_8.2.34-1+trixie_amd64.deb": "4585f2be1f6a909234c1a38a01fba4c1a623fb18a8396a61689d2f761a0abf03"
@@ -116,6 +124,10 @@ openlitespeed_lsphp_sha256:
   "lsphp83-opcache_8.3.33-1+bookworm_arm64.deb": "1dac58abc4cc54ce12a7b80ba136579d40a726838dc172a8a521b5e2ff650153"
   "lsphp83-opcache_8.3.33-1+trixie_amd64.deb": "2c241562744ddc490c2e68590c37b93ae580263e3aee09bbc814694a6f4ba9ab"
   "lsphp83-opcache_8.3.33-1+trixie_arm64.deb": "d672863361b54a0e2de92c42e748a9ff6fa6707ca43922d51e51c351ca7530d5"
+  "lsphp83-pgsql_8.3.33-1+bookworm_amd64.deb": "c056e9d70d748159471551de82eb9d7545a56a11333aadcfb81e7ec3b8af5da6"
+  "lsphp83-pgsql_8.3.33-1+bookworm_arm64.deb": "29fbcd0912de0283215925c38d1d66468a2d335afc10312150a9ee07eb24fe42"
+  "lsphp83-pgsql_8.3.33-1+trixie_amd64.deb": "b09c73f471ed41bacaf42175d6a0784ea9efe79948d18d770355455d464d2cb6"
+  "lsphp83-pgsql_8.3.33-1+trixie_arm64.deb": "ef2f1a06c846cbd27b26f1550aeb0cd593fc1547e6e18304e91e9f46a15042d3"
   "lsphp83_8.3.33-1+bookworm_amd64.deb": "eee5a4a9ae20588b5d070e5d628271069782b2a51965541e4b466d97d9513169"
   "lsphp83_8.3.33-1+bookworm_arm64.deb": "46f9741b6bf3953ab2a0b681b9b5dac855fe10b2838f05760e8da77910024589"
   "lsphp83_8.3.33-1+trixie_amd64.deb": "f359c937c23c3758eea502d8d3dbf652c6ce220971e323af5588c1b9666ffc6d"
@@ -134,6 +146,10 @@ openlitespeed_lsphp_sha256:
   "lsphp84-opcache_8.4.25-1+bookworm_arm64.deb": "5d21fb6bee664efc8431807c73673b4a433d98aa6a371d3425ebc3ae526487a5"
   "lsphp84-opcache_8.4.25-1+trixie_amd64.deb": "3b9e33a879d7e528ad23fd14848ca8cf51ec386e5ff77b6899f69881a22333a1"
   "lsphp84-opcache_8.4.25-1+trixie_arm64.deb": "37b2fb1ba6241e999ba362071b52f801e0239d9069d53403d8226fdae650e100"
+  "lsphp84-pgsql_8.4.25-1+bookworm_amd64.deb": "5e96d4c9b2f7746051e1247bae188562da9016ccbcb368a16c47c2a663c2271b"
+  "lsphp84-pgsql_8.4.25-1+bookworm_arm64.deb": "fc310138c7147c53908dfec18ffaa78c7598970db792e561084ef4ccd16881e4"
+  "lsphp84-pgsql_8.4.25-1+trixie_amd64.deb": "61071f0ead9e4aceda70b65e9e5de382625bf2e21b37ab8ecbe384de13af29bf"
+  "lsphp84-pgsql_8.4.25-1+trixie_arm64.deb": "a4e3a1c8be01d6dc156dc5140604dbbb81b07d2782135fa0d8eb5fd71aad4aa6"
   "lsphp84_8.4.25-1+bookworm_amd64.deb": "5e0c55e28642b2523262d78493ca7eb75654cfcc45b5b5d706f73a863a1966e1"
   "lsphp84_8.4.25-1+bookworm_arm64.deb": "b2e7e5ea42de2374f36d731e5e0ec247f5a8a530c12892fc63fde90ad4c2884f"
   "lsphp84_8.4.25-1+trixie_amd64.deb": "5d2988ff053997b8794c241d7774452045843cbec7ca629c74c26c6eec5dcca1"
@@ -148,6 +164,10 @@ openlitespeed_lsphp_sha256:
   "lsphp85-mysql_8.5.11-1+bookworm_arm64.deb": "24abe9e5025e58a85e6bac300e1f1fc850210f906571f89e36c8c66d8069ab0f"
   "lsphp85-mysql_8.5.11-1+trixie_amd64.deb": "261fbadc18f21b751e35774e1b0463bbb51598e840b380c36f96c7029354e902"
   "lsphp85-mysql_8.5.11-1+trixie_arm64.deb": "5cbfed14694e560fc291efe88588cdac4f4caeacfab4959ae757d616be5df985"
+  "lsphp85-pgsql_8.5.11-1+bookworm_amd64.deb": "a05715e6f789ee6b963bb10e26b7c7e385869f24e80b50395cea9de31294eaa8"
+  "lsphp85-pgsql_8.5.11-1+bookworm_arm64.deb": "7f70edcc450eb82faa412633b87edcb481f3042141d37b191fdbdebf9bb1ce35"
+  "lsphp85-pgsql_8.5.11-1+trixie_amd64.deb": "fcc9717385fdbce3d8d5373a9a089664be85d8f0cfe10919349e34e68e4a4733"
+  "lsphp85-pgsql_8.5.11-1+trixie_arm64.deb": "93bddb8639a3101c098ec9217e351195a55bdd2c71271628e55071adbda6cbb6"
   "lsphp85_8.5.11-1+bookworm_amd64.deb": "21736cb4758ec7a1662b5b4429aa75c5993f3cdb8d4b32a56e720a44c85a149d"
   "lsphp85_8.5.11-1+bookworm_arm64.deb": "110ae62b742dafc6871468ce55cb24f71fb38ac8ac35f80227a3e2d1120904ea"
   "lsphp85_8.5.11-1+trixie_amd64.deb": "8ac52d849d75606101d8af76ad8ae38ada6b51c5826bc9cb485871b5ee81f936"
@@ -159,10 +179,10 @@ openlitespeed_lsphp_sha256:
 openlitespeed_lsphp_runtime_packages:
   bookworm: [libargon2-1, libbz2-1.0, libcurl4, libedit2, libenchant-2-2, libfreetype6,
              libgmp10, libjpeg62-turbo, libmagic1, libonig5, libpng16-16, libsodium23,
-             libssl3, libwebp7, libxml2, libxpm4, libxslt1.1, libzip4, zlib1g]
+             libpq5, libssl3, libwebp7, libxml2, libxpm4, libxslt1.1, libzip4, zlib1g]
   trixie: [libargon2-1, libbz2-1.0, libcurl4t64, libedit2, libenchant-2-2, libfreetype6,
            libgmp10, libjpeg62-turbo, libmagic1, libonig5, libpng16-16t64, libsodium23,
-           libssl3t64, libwebp7, libxml2, libxpm4, libxslt1.1, libzip5, zlib1g]
+           libpq5, libssl3t64, libwebp7, libxml2, libxpm4, libxslt1.1, libzip5, zlib1g]
 
 # Extensions the pinned packages ship. The package postinst scripts would
 # enable these under /usr/local/lsws/…; an extracted tree has no postinst, so
@@ -172,6 +192,8 @@ openlitespeed_lsphp_ini_extensions:
   - extension=curl.so
   - extension=mysqli.so
   - extension=pdo_mysql.so
+  - extension=pgsql.so
+  - extension=pdo_pgsql.so
 
 # Back-compat alias for callers that still pass a single series.
 openlitespeed_lsphp_series: "{{ openlitespeed_lsphp_default_series }}"

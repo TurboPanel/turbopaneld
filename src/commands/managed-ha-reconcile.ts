@@ -24,7 +24,7 @@ import {
   type SystemComponentDescriptor,
   writeSystemComponentDescriptor,
 } from "../deploy/system-component.ts";
-import { logInfo } from "../util/logger.ts";
+import { logInfo, logWarn } from "../util/logger.ts";
 import { forEachSequential } from "../util/sequential.ts";
 import { type LayoutPaths, resolveLayout } from "../paths/layout.ts";
 import { ensureManagedIngressNetwork } from "../managed/networks.ts";
@@ -35,7 +35,10 @@ import {
   inspectOrchestratorContainer,
   loadOrchestratorApiCredentials,
   loadOrchestratorRaftToken,
+  ORCHESTRATOR_TLS_CA_PATH,
+  orchestratorTopologyAliases,
   renderOrchestratorConf,
+  resolveOrchestratorRegisterHost,
   stopOrchestratorStack,
 } from "../managed/orchestrator.ts";
 import {
@@ -117,6 +120,9 @@ async function registerClusters(
   const registered: string[] = [];
   await forEachSequential(clusters, async (cluster) => {
     await forEachSequential(cluster.members, async (member) => {
+      // `host` is the private-listener address (not the Docker name, which
+      // only resolves on the member's own host). `containerName` is mapped
+      // via extra_hosts so a later topology walk can still resolve it.
       await discoverInstance({ host: member.host, port: member.port }, api);
       await registerCandidate(
         { host: member.host, port: member.port },
@@ -137,6 +143,33 @@ async function registerClusters(
     registered.push(cluster.managedId);
   });
   return registered.sort((a, b) => a.localeCompare(b));
+}
+
+async function resolveClustersForOrchestrator(
+  clusters: readonly ManagedHaCluster[],
+  run: RunDockerFn,
+): Promise<ManagedHaCluster[]> {
+  const resolved: ManagedHaCluster[] = [];
+  await forEachSequential(clusters, async (cluster) => {
+    const members: ManagedHaCluster["members"] = [];
+    await forEachSequential(cluster.members, async (member) => {
+      try {
+        const dial = await resolveOrchestratorRegisterHost(member, run);
+        members.push({ ...member, host: dial.host, port: dial.port });
+      } catch (err) {
+        // A stopped or recreating member (exactly when a primary just died)
+        // must not abort the reconcile for everyone else on this server.
+        logWarn(
+          "commands",
+          `managed.ha.reconcile skipped member ${
+            member.containerName ?? member.host
+          }: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    });
+    if (members.length > 0) resolved.push({ ...cluster, members });
+  });
+  return resolved;
 }
 
 export async function handleManagedHaReconcile(
@@ -198,9 +231,7 @@ export async function handleManagedHaReconcile(
     httpAuth,
     topologyUser,
     topologyPassword,
-    sslCaPath: payload.orgTlsMaterial
-      ? "/etc/orchestrator/tls/ca.pem"
-      : undefined,
+    sslCaPath: payload.orgTlsMaterial ? ORCHESTRATOR_TLS_CA_PATH : undefined,
     ...(raftAuthToken ? { raftAuthToken } : {}),
   });
 
@@ -212,6 +243,13 @@ export async function handleManagedHaReconcile(
     throw new Error("managed-ha identity missing after persist");
   }
 
+  const clusters = await resolveClustersForOrchestrator(
+    payload.clusters,
+    run,
+  );
+  const topologyAliases = orchestratorTopologyAliases(
+    clusters.flatMap((cluster) => cluster.members),
+  );
   const restarted = await ensureOrchestratorStack(
     layout,
     descriptor,
@@ -219,13 +257,14 @@ export async function handleManagedHaReconcile(
     payload.managedNetwork,
     conf,
     run,
+    { topologyAliases },
   );
 
   const api: OrchestratorApiDeps = {
     ...deps?.orchestratorApi,
     credentials: httpAuth,
   };
-  const monitored = payload.clusters.filter((cluster) =>
+  const monitored = clusters.filter((cluster) =>
     orchestratorMonitorsEngine(cluster.engine)
   );
   if (monitored.length < payload.clusters.length) {

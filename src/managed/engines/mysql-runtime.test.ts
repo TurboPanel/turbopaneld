@@ -84,6 +84,9 @@ test("buildMysqlStandbySeedScript registers trap before writing credentials", ()
   assertEquals(trapIdx < catIdx, true);
   assertEquals(script.includes("pipefail"), true);
   assertEquals(script.includes("mysqldump --defaults-extra-file="), true);
+  // Entrypoint init GTIDs must be cleared before the dump's GTID_PURGED.
+  assertEquals(script.includes("RESET BINARY LOGS AND GTIDS"), true);
+  assertEquals(script.includes("SET SESSION sql_log_bin=0;"), true);
 });
 
 type RecordedExec = { argv: string[]; input?: string };
@@ -110,9 +113,12 @@ function buildContext(exec: ManagedEngineExec): ManagedEngineContext {
 test("mysql waitReady succeeds on first mysqladmin ping", async () => {
   const { exec, calls } = recordingExec();
   await mysqlManagedEngineRuntime.waitReady(buildContext(exec));
-  assertEquals(calls.length, 1);
-  assertEquals(calls[0]!.argv.includes("mysqladmin"), true);
-  assertEquals(calls[0]!.argv.includes("ping"), true);
+  assertEquals(calls.length, 3);
+  assertEquals(calls[0]!.argv.includes("--protocol=socket"), true);
+  assertEquals(calls[1]!.argv.includes("--protocol=tcp"), true);
+  assertEquals(calls[1]!.argv.includes("127.0.0.1"), true);
+  assertEquals(calls[1]!.argv.includes("3306"), true);
+  assertEquals(calls[2]!.argv.includes("--protocol=socket"), true);
 });
 
 test("mysql waitReady retries mysqladmin ping via defaults-extra-file after 1045", async () => {
@@ -135,11 +141,12 @@ test("mysql waitReady retries mysqladmin ping via defaults-extra-file after 1045
     ...buildContext(exec),
     socketPassword: "root-pass",
   });
-  assertEquals(calls.length, 2);
+  assertEquals(calls.length, 4);
   assertEquals(calls[1]!.argv[0], "sh");
   assertEquals(calls[1]!.argv.includes("mysqladmin"), true);
   assertEquals(calls[1]!.input?.includes("[client]"), true);
   assertEquals(calls[1]!.input?.includes("password=root-pass"), true);
+  assertEquals(calls[2]!.argv.includes("--protocol=tcp"), true);
 });
 
 test("mysql waitReady retries ping when mysqladmin exits 0 on 1045", async () => {
@@ -166,7 +173,7 @@ test("mysql waitReady retries ping when mysqladmin exits 0 on 1045", async () =>
     ...buildContext(exec),
     socketPassword: "root-pass",
   });
-  assertEquals(calls.length, 2);
+  assertEquals(calls.length, 4);
   assertEquals(calls[1]!.argv[0], "sh");
   assertEquals(calls[1]!.input?.includes("password=root-pass"), true);
 });
@@ -490,11 +497,13 @@ test("mysql configureStandby throws when seed script fails", async () => {
   if (!replication?.configureStandby) {
     throw new TypeError("expected mysql configureStandby");
   }
+  let seeds = 0;
   const exec: ManagedEngineExec = (argv) => {
     if (argv[0] === "test" && argv.includes("-f")) {
       return Promise.resolve({ success: false, stdout: "", stderr: "" });
     }
-    if (argv[0] === "sh") {
+    if (argv[0] === "sh" && argv[2]?.includes("--all-databases")) {
+      seeds++;
       return Promise.resolve({
         success: false,
         stdout: "",
@@ -503,7 +512,7 @@ test("mysql configureStandby throws when seed script fails", async () => {
     }
     return Promise.resolve({ success: true, stdout: "", stderr: "" });
   };
-  await assertRejects(
+  const err = await assertRejects(
     () =>
       replication.configureStandby!(
         buildContext(exec),
@@ -512,6 +521,90 @@ test("mysql configureStandby throws when seed script fails", async () => {
     Error,
     "configureStandby seed failed",
   );
+  assertEquals(seeds, 1);
+  assertEquals(err.message.includes("unknown"), false);
+  assertEquals(err.message.includes("seed boom"), true);
+});
+
+test("mysql configureStandby retries the seed once after empty output", async () => {
+  const replication = mysqlManagedEngineRuntime.replication;
+  if (!replication?.configureStandby) {
+    throw new TypeError("expected mysql configureStandby");
+  }
+  let seeds = 0;
+  const exec: ManagedEngineExec = (argv) => {
+    if (argv[0] === "test" && argv.includes("-f")) {
+      return Promise.resolve({ success: false, stdout: "", stderr: "" });
+    }
+    if (argv[0] === "sh" && argv[2]?.includes("--all-databases")) {
+      seeds++;
+      if (seeds === 1) {
+        return Promise.resolve({ success: false, stdout: "", stderr: "" });
+      }
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  await replication.configureStandby(
+    buildContext(exec),
+    standbyReplicationSpec(),
+  );
+  assertEquals(seeds, 2);
+});
+
+test("mysql configureStandby retries the seed once after error 1133", async () => {
+  const replication = mysqlManagedEngineRuntime.replication;
+  if (!replication?.configureStandby) {
+    throw new TypeError("expected mysql configureStandby");
+  }
+  let seeds = 0;
+  const exec: ManagedEngineExec = (argv) => {
+    if (argv[0] === "test" && argv.includes("-f")) {
+      return Promise.resolve({ success: false, stdout: "", stderr: "" });
+    }
+    if (argv[0] === "sh" && argv[2]?.includes("--all-databases")) {
+      seeds++;
+      if (seeds === 1) {
+        return Promise.resolve({
+          success: false,
+          stdout: "",
+          stderr:
+            "ERROR 1133 (28000) at line 11: Can't find any matching row in the user table",
+        });
+      }
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  await replication.configureStandby(
+    buildContext(exec),
+    standbyReplicationSpec(),
+  );
+  assertEquals(seeds, 2);
+});
+
+test("mysql configureStandby empty seed failure is not reported as unknown", async () => {
+  const replication = mysqlManagedEngineRuntime.replication;
+  if (!replication?.configureStandby) {
+    throw new TypeError("expected mysql configureStandby");
+  }
+  const exec: ManagedEngineExec = (argv) => {
+    if (argv[0] === "test" && argv.includes("-f")) {
+      return Promise.resolve({ success: false, stdout: "", stderr: "" });
+    }
+    if (argv[0] === "sh" && argv[2]?.includes("--all-databases")) {
+      return Promise.resolve({ success: false, stdout: "", stderr: "" });
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  const err = await assertRejects(
+    () =>
+      replication.configureStandby!(
+        buildContext(exec),
+        standbyReplicationSpec(),
+      ),
+    Error,
+    "the seed command produced no output",
+  );
+  assertEquals(err.message.includes("unknown"), false);
 });
 
 test("mysql promote clears read-only and returns when writable", async () => {
@@ -533,6 +626,43 @@ test("mysql promote clears read-only and returns when writable", async () => {
   };
   await replication.promote(buildContext(exec));
   assertEquals(writableChecks >= 2, true);
+});
+
+test("mysql promote returns when read_only and super_read_only print OFF", async () => {
+  const replication = mysqlManagedEngineRuntime.replication;
+  if (!replication?.promote) {
+    throw new TypeError("expected mysql promote");
+  }
+  let writableChecks = 0;
+  const exec: ManagedEngineExec = (argv, input) => {
+    if (input?.includes("RESET") || input?.includes("SOURCE")) {
+      return Promise.resolve({ success: true, stdout: "", stderr: "" });
+    }
+    if (argv.includes("-e")) {
+      writableChecks++;
+      const stdout = writableChecks >= 2 ? "OFF\tOFF\n" : "ON\tON\n";
+      return Promise.resolve({ success: true, stdout, stderr: "" });
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  await replication.promote(buildContext(exec));
+  assertEquals(writableChecks >= 2, true);
+});
+
+test("mysql followPrimary changes source host without reseeding", async () => {
+  const replication = mysqlManagedEngineRuntime.replication;
+  if (!replication?.followPrimary) {
+    throw new TypeError("expected mysql followPrimary");
+  }
+  const { exec, calls } = recordingExec();
+  await replication.followPrimary(buildContext(exec), {
+    primary: { host: "10.100.0.4", hostaddr: "10.100.0.4", port: 45001 },
+  });
+  const sql = calls.map((c) => c.input ?? "").join("\n");
+  assertEquals(sql.includes("STOP REPLICA"), true);
+  assertEquals(sql.includes("SOURCE_HOST = '10.100.0.4'"), true);
+  assertEquals(sql.includes("SOURCE_PASSWORD"), false);
+  assertEquals(calls.some((c) => c.argv[0] === "test"), false);
 });
 
 test("mysql readHealth parses standby replica status", async () => {
@@ -571,11 +701,11 @@ test("mysql readHealth returns unknown when replica status is empty", async () =
 });
 
 test("mysql waitReady retries until mysqladmin ping succeeds", async () => {
-  let attempts = 0;
+  let socketAttempts = 0;
   const exec: ManagedEngineExec = (argv) => {
-    if (argv.includes("mysqladmin")) {
-      attempts++;
-      if (attempts === 1) {
+    if (argv.includes("mysqladmin") && argv.includes("--protocol=socket")) {
+      socketAttempts++;
+      if (socketAttempts === 1) {
         return Promise.resolve({
           success: false,
           stdout: "",
@@ -586,7 +716,26 @@ test("mysql waitReady retries until mysqladmin ping succeeds", async () => {
     return Promise.resolve({ success: true, stdout: "", stderr: "" });
   };
   await mysqlManagedEngineRuntime.waitReady(buildContext(exec));
-  assertEquals(attempts, 2);
+  assertEquals(socketAttempts, 3);
+});
+
+test("mysql waitReady keeps polling when TCP ping is refused", async () => {
+  let tcpAttempts = 0;
+  const exec: ManagedEngineExec = (argv) => {
+    if (argv.includes("--protocol=tcp")) {
+      tcpAttempts++;
+      if (tcpAttempts === 1) {
+        return Promise.resolve({
+          success: false,
+          stdout: "",
+          stderr: "Can't connect to server on '127.0.0.1' (111)",
+        });
+      }
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  await mysqlManagedEngineRuntime.waitReady(buildContext(exec));
+  assertEquals(tcpAttempts, 2);
 });
 
 test("mysql waitReady throws after the readiness deadline", async () => {
@@ -656,6 +805,49 @@ test("mysql promote throws when the instance stays read-only", async () => {
   }
 });
 
+test("mysql promote throws when super_read_only stays ON", async () => {
+  const replication = mysqlManagedEngineRuntime.replication;
+  if (!replication?.promote) {
+    throw new TypeError("expected mysql promote");
+  }
+  const originalDateNow = Date.now;
+  const originalSetTimeout = globalThis.setTimeout;
+  let nowCalls = 0;
+  Date.now = () => {
+    nowCalls++;
+    if (nowCalls === 1) return 0;
+    if (nowCalls <= 5) return 1_000;
+    return 70_000;
+  };
+  globalThis.setTimeout = ((handler: () => void) => {
+    queueMicrotask(handler);
+    return 0 as unknown as ReturnType<typeof setTimeout>;
+  }) as typeof setTimeout;
+  const exec: ManagedEngineExec = (argv, input) => {
+    if (input?.includes("RESET") || input?.includes("SOURCE")) {
+      return Promise.resolve({ success: true, stdout: "", stderr: "" });
+    }
+    if (argv.includes("-e")) {
+      return Promise.resolve({
+        success: true,
+        stdout: "OFF\tON\n",
+        stderr: "",
+      });
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  try {
+    await assertRejects(
+      () => replication.promote!(buildContext(exec)),
+      Error,
+      "mysql promote did not become writable within 60s",
+    );
+  } finally {
+    Date.now = originalDateNow;
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
+
 test("mysql configureStandby throws when marker write fails", async () => {
   const replication = mysqlManagedEngineRuntime.replication;
   if (!replication?.configureStandby) {
@@ -701,10 +893,18 @@ test("mysql applyDatabases drops databases and ensures ProxySQL monitor", async 
   assertEquals(calls.some((c) => c.input?.includes("DROP DATABASE")), true);
 
   await mysqlManagedEngineRuntime.ensureProxySqlMonitor!(
-    buildContext(exec),
+    {
+      ...buildContext(exec),
+      clientSourceHosts: ["10.100.0.3", "10.100.0.5"],
+    },
     { user: "tp_monitor", password: "mon-pass" },
   );
-  assertEquals(calls.some((c) => c.input?.includes("tp_monitor")), true);
+  const monitorSql =
+    calls.find((c) => c.input?.includes("tp_monitor"))?.input ??
+      "";
+  assertEquals(monitorSql.includes("'10.100.0.3'"), true);
+  assertEquals(monitorSql.includes("'10.100.0.5'"), true);
+  assertEquals(monitorSql.includes("172.16.0.0/255.240.0.0"), true);
 });
 
 test("mysql readVersion returns undefined when version query fails", async () => {
@@ -766,7 +966,7 @@ function deniedThenOk(): { exec: ManagedEngineExec; calls: RecordedExec[] } {
 test("mysql waitReady does not use defaults-extra-file without a socket password", async () => {
   const { exec, calls } = deniedThenOk();
   await mysqlManagedEngineRuntime.waitReady(buildContext(exec));
-  assertEquals(calls.length, 2);
+  assertEquals(calls.length, 4);
   assertEquals(calls.every((c) => c.argv.includes("mysqladmin")), true);
   assertEquals(calls.some((c) => c.argv[0] === "sh"), false);
 });
@@ -1161,4 +1361,31 @@ test("mysql configureStandby does not retry a denied seed without a root passwor
     replication.configureStandby!(buildContext(exec), standbyReplicationSpec())
   );
   assertEquals(seeds, 1);
+});
+
+test("mysql ensureSlots is a no-op", async () => {
+  const replication = mysqlManagedEngineRuntime.replication;
+  if (!replication?.ensureSlots) {
+    throw new TypeError("expected mysql ensureSlots");
+  }
+  const { exec, calls } = recordingExec();
+  await replication.ensureSlots(buildContext(exec), ["tp_member_2"]);
+  assertEquals(calls.length, 0);
+});
+
+test("mysql isStandby is true when SHOW REPLICA STATUS is non-empty", async () => {
+  const replication = mysqlManagedEngineRuntime.replication;
+  if (!replication?.isStandby) {
+    throw new TypeError("expected mysql isStandby");
+  }
+  const replica: ManagedEngineExec = () =>
+    Promise.resolve({
+      success: true,
+      stdout: HEALTHY_VERTICAL,
+      stderr: "",
+    });
+  const primary: ManagedEngineExec = () =>
+    Promise.resolve({ success: true, stdout: "\n", stderr: "" });
+  assertEquals(await replication.isStandby(buildContext(replica)), true);
+  assertEquals(await replication.isStandby(buildContext(primary)), false);
 });

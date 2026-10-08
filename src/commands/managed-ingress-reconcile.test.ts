@@ -376,17 +376,19 @@ test({
           );
           return { restarted: result.restarted, composeText };
         };
-        // Scope -> address, as the control plane resolves it.
+        // Bind lists as the daemon can receive them. The control plane sends
+        // one address from the server's "allow external access" setting
+        // (127.0.0.1 no, 0.0.0.0 yes); the other shapes stay supported.
         const steps: Array<{ scope: string; binds: string[] }> = [
-          { scope: "public", binds: ["0.0.0.0"] },
-          { scope: "local", binds: ["127.0.0.1"] },
-          { scope: "datacenter", binds: ["10.20.0.5"] },
+          { scope: "all interfaces", binds: ["0.0.0.0"] },
+          { scope: "loopback", binds: ["127.0.0.1"] },
+          { scope: "one other address", binds: ["10.20.0.5"] },
           {
-            scope: "datacenter+turbofabric",
+            scope: "two addresses",
             binds: ["10.20.0.5", "10.99.0.5"],
           },
-          { scope: "off", binds: [] },
-          { scope: "local again", binds: ["127.0.0.1"] },
+          { scope: "no publish", binds: [] },
+          { scope: "loopback again", binds: ["127.0.0.1"] },
         ];
         for (const step of steps) {
           const before = composeUps;

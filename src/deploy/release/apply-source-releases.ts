@@ -1073,9 +1073,9 @@ async function buildNativeTree(
 }
 
 /**
- * What a native app's build runs on: its vendored runtime on `PATH` and its
- * entitlement group, so the derived install and build commands run on the
- * runtime the app will execute on.
+ * What a native app's build runs on: its vendored runtime on `PATH`, so the
+ * derived install and build commands run on the runtime the app will execute
+ * on.
  */
 function nativeBuildRuntime(
   layout: LayoutPaths,
@@ -1086,7 +1086,6 @@ function nativeBuildRuntime(
     ...(target.runtime === "deno" ? { runtime: "deno" as const } : {}),
     nodeBinDir: target.binDir,
     nodeEnv: nativeApp.appMode ?? "production",
-    runtimeGroup: target.group,
   });
 }
 

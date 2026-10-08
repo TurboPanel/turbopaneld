@@ -53,39 +53,6 @@
     masked: true
   failed_when: false
 
-- name: Ensure the PHP entitlement group ({{ php_fpm_series_item }})
-  ansible.builtin.include_role:
-    name: runtime-entitlement
-  vars:
-    runtime_entitlement_runtime: php
-    runtime_entitlement_series: ["{{ php_fpm_series_item }}"]
-
-# dpkg-statoverride, not a bare `file:` chmod: apt would reset the mode on every
-# php<series>-* upgrade, and these binaries must not be world-executable.
-#
-# The group is the per-series entitlement group, not `tp`. That is what makes
-# "only a principal granted PHP 8.4 can run PHP 8.4" true at the kernel rather
-# than by convention — and it is why the groups are per series in the first
-# place: one shared group would let a grant for 8.4 also unlock 8.3.
-- name: Restrict php binaries to the PHP entitlement group ({{ php_fpm_series_item }})
-  ansible.builtin.command:
-    argv:
-      - dpkg-statoverride
-      - "--force-statoverride-add"
-      - "--update"
-      - "--add"
-      - root
-      - "tpphp{{ php_fpm_series_item | replace('.', '') }}"
-      - "0750"
-      - "{{ item }}"
-  loop:
-    - "/usr/sbin/php-fpm{{ php_fpm_series_item }}"
-    - "/usr/bin/php{{ php_fpm_series_item }}"
-    - "/usr/bin/php-cgi{{ php_fpm_series_item }}"
-  register: _php_statoverride
-  changed_when: _php_statoverride.rc == 0
-  failed_when: false
-
 - name: Ensure FHS PHP config directories ({{ php_fpm_series_item }})
   ansible.builtin.file:
     path: "{{ turbopanel_config_dir }}/php/{{ php_fpm_series_item }}/{{ item }}"

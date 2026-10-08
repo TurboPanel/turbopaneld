@@ -13,6 +13,8 @@ import {
   ensureProxySqlMonitorAccountSql,
   ensureReplicationAccountSql,
   ensureSocketAdminSql,
+  flushPrivilegesLocalSql,
+  followReplicationSourceSql,
   grantDatabaseSql,
   grantReplicationSql,
   grantRootSql,
@@ -22,8 +24,10 @@ import {
   quoteAccount,
   quoteIdentifier,
   quoteLiteral,
+  resetReplicaGtidStateSql,
   showReplicaStatusSql,
   versionSql,
+  withoutSessionBinlogSql,
 } from "./mariadb-sql.ts";
 import { mariadbManagedEngineRuntime } from "./mariadb.ts";
 
@@ -71,6 +75,15 @@ test("privilege and replication dialect is MariaDB-shaped", () => {
   assertEquals(change.includes("MASTER_USE_GTID = slave_pos"), true);
   assertEquals(change.includes("START SLAVE"), true);
   assertEquals(change.includes("SOURCE_AUTO_POSITION"), false);
+  const follow = followReplicationSourceSql({
+    host: "10.100.0.4",
+    port: 45001,
+  });
+  assertEquals(follow.includes("STOP SLAVE"), true);
+  assertEquals(follow.includes("MASTER_HOST = '10.100.0.4'"), true);
+  assertEquals(follow.includes("MASTER_PORT = 45001"), true);
+  assertEquals(follow.includes("MASTER_PASSWORD"), false);
+  assertEquals(follow.includes("START SLAVE"), true);
 });
 
 test("createClientAccountSql and dumpArgv system-schema rejection", () => {
@@ -187,4 +200,18 @@ test("mariadb dialect never references super_read_only (MySQL-only variable)", (
   ) {
     assertEquals(sql.includes("super_read_only"), false);
   }
+});
+
+test("replica-local SQL is wrapped so it cannot mint a replica GTID", () => {
+  const wrapped = withoutSessionBinlogSql("FLUSH PRIVILEGES;");
+  const off = wrapped.indexOf("SET SESSION sql_log_bin = 0;");
+  const flush = wrapped.indexOf("FLUSH PRIVILEGES;");
+  const on = wrapped.lastIndexOf("SET SESSION sql_log_bin = 1;");
+  assertEquals(off !== -1 && flush !== -1 && on !== -1, true);
+  assertEquals(off < flush && flush < on, true);
+  const local = flushPrivilegesLocalSql();
+  assertEquals(local.includes("SET SESSION sql_log_bin = 0;"), true);
+  assertEquals(local.includes("FLUSH PRIVILEGES;"), true);
+  assertEquals(local.includes("SET SESSION sql_log_bin = 1;"), true);
+  assertEquals(resetReplicaGtidStateSql(), "RESET MASTER;");
 });

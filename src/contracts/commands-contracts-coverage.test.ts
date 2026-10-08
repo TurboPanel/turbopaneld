@@ -673,7 +673,7 @@ test("parseEnvironmentDeployPayload rejects invalid generation replicaCounts and
   );
 });
 
-test("parseEnvironmentDeployPayload round-trips principalMaterial runtimes and sshKeys", () => {
+test("parseEnvironmentDeployPayload ignores a leftover runtimes field and round-trips sshKeys", () => {
   const payload = parseEnvironmentDeployPayload({
     ...DEPLOY_BASE,
     principalMaterial: [{
@@ -681,16 +681,17 @@ test("parseEnvironmentDeployPayload round-trips principalMaterial runtimes and s
       username: "deploy_user",
       home: "/srv/users/deploy_user",
       shell: "/bin/bash",
+      // A leftover `runtimes` field from an older control plane is ignored.
       runtimes: [{ runtime: "php", series: "8.4" }],
-      accessGroups: ["tpnodeapp"],
+      accessGroups: ["tpshell"],
       sshKeys: [
         "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGEmvBcjT+NvO6sokGNoJ0zA3dr0nhIQhhZ3wP220uFZ",
       ],
     }],
   });
   const principal = payload.principalMaterial?.[0];
-  assertEquals(principal?.runtimes?.[0]?.series, "8.4");
-  assertEquals(principal?.accessGroups, ["tpnodeapp"]);
+  assertEquals("runtimes" in (principal ?? {}), false);
+  assertEquals(principal?.accessGroups, ["tpshell"]);
   assertEquals(principal?.sshKeys?.length, 1);
 });
 

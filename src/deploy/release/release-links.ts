@@ -1,7 +1,7 @@
 /**
  * Publish-time symlink checks for a release.
  *
- * The seal re-owns the whole tree `root:<p>-grp` (`chown -R -h`), links
+ * The seal re-owns the whole tree `root:<p>` (`chown -R -h`), links
  * included, so a build that ships `x → /srv/users/bob/sites/app/current/…`
  * would pass the engines' owner-match rules (nginx `disable_symlinks
  * if_not_owner`, Apache `SymLinksIfOwnerMatch`, OpenLiteSpeed

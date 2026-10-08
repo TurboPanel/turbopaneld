@@ -43,6 +43,7 @@ import {
   recordManagedIntent,
   writeFileAtomic,
 } from "./ha-intent.ts";
+import { isManagedMemberDemoted } from "./demoted-marker.ts";
 import {
   listManagedHaMembers,
   type ManagedHaMemberRecord,
@@ -187,8 +188,24 @@ export async function applyBootHold(
   if (kind !== "unclean" && kind !== "clean-reboot") return true;
   const members = await (deps.listMembers ??
     (() => listManagedHaMembers(deps.layout)))();
+  const toHold: ManagedHaMemberRecord[] = [];
+  await forEachSequential(members, async (member) => {
+    if (isHoldablePrimary(member)) {
+      toHold.push(member);
+      return;
+    }
+    if (
+      await isManagedMemberDemoted(
+        deps.layout,
+        member.managedId,
+        member.memberId,
+      )
+    ) {
+      toHold.push(member);
+    }
+  });
   let holdFailed = false;
-  await forEachSequential(members.filter(isHoldablePrimary), async (member) => {
+  await forEachSequential(toHold, async (member) => {
     try {
       await holdOne(member, deps);
     } catch (err) {
@@ -228,9 +245,12 @@ async function holdOne(
       recursive: true,
     });
     await writeHold(deps.layout, record);
+    const why = isHoldablePrimary(member)
+      ? "until the control plane confirms it is still the primary"
+      : "because it was demoted";
     logWarn(
       "managed",
-      `host restarted without a clean shutdown: holding primary managedId=${member.managedId} member=${member.memberId} until the control plane confirms it is still the primary`,
+      `host restarted without a clean shutdown: holding managedId=${member.managedId} member=${member.memberId} ${why}`,
     );
   } catch (err) {
     writeError = err;
@@ -316,6 +336,19 @@ export async function releaseBootHoldLocally(
   deps: Pick<BootHoldDeps, "layout" | "run">,
   reason: string,
 ): Promise<void> {
+  if (
+    await isManagedMemberDemoted(
+      deps.layout,
+      record.managedId,
+      record.memberId,
+    )
+  ) {
+    logWarn(
+      "managed",
+      `boot hold: not releasing demoted member managedId=${record.managedId}`,
+    );
+    return;
+  }
   await clearManagedIntent(deps.layout.stateDir, record.managedId, reason);
   await Deno.remove(bootHoldPath(deps.layout, record.managedId)).catch(() =>
     undefined

@@ -1559,6 +1559,10 @@ END_rules
  * `allowBrowse` is OpenLiteSpeed's "Accessible" switch for the context, not
  * directory listing (that is `autoIndex`): `0` answers 403 for everything.
  *
+ * `useServer 0` in the `index` block makes the vhost's own file list count: left
+ * out, OpenLiteSpeed keeps the server-level `indexFiles index.html` and a
+ * directory request never reaches `index.php`.
+ *
  * Static document root only (no directory listing) unless `php` is supplied, in
  * which case the vhost also carries the processor for the site's own runtime
  * and a `.php` script handler bound to it. The hosting PHP settings live in
@@ -1571,6 +1575,7 @@ export function openlitespeedVhostConfig(
     return `docRoot $VH_ROOT/
 index {
   indexFiles index.html
+  useServer 0
   autoIndex 0
 }
 ${openlitespeedScriptDenyRewrite(false)}
@@ -1593,6 +1598,7 @@ context / {
   return `docRoot $VH_ROOT/
 index {
   indexFiles index.php, index.html
+  useServer 0
   autoIndex 0
 }
 
@@ -2325,7 +2331,7 @@ async function chownWebTree(
 /**
  * Legacy site trees are chowned to the assigned principal with engine group
  * read. A release-backed tree is skipped entirely: the release engine already
- * sealed it `root:<username>-grp` mode `0550`, and re-chowning it would hand
+ * sealed it `root:<username>` mode `0550`, and re-chowning it would hand
  * the app process write access to the code it is running.
  */
 /**
@@ -2595,14 +2601,9 @@ async function installSiteEngines(
 }
 
 /**
- * Vendor the PHP runtimes (and so create their `tpphp<series>` entitlement
- * groups) for a deploy's PHP sites, ahead of the principal reconcile.
- *
- * The reconcile joins the site owner's Linux user to those groups, and a join
- * to a group that does not exist yet is skipped: on the first PHP deploy of a
- * series the user missed the group and `php-cgi` was permission denied. Same
- * ordering fix as `ensureNativeAppRuntime` for Node. {@link applySites} runs the
- * same idempotent playbooks again afterwards.
+ * Vendor the PHP runtimes for a deploy's PHP sites early in the deploy, the
+ * way `ensureNativeAppRuntime` does for Node. {@link applySites} runs the same
+ * idempotent playbooks again afterwards.
  */
 export async function ensureSitePhpRuntimes(
   sites: readonly SiteApplySpec[],
@@ -3412,7 +3413,7 @@ async function userSupplementaryGroups(user: string): Promise<Set<string>> {
 /**
  * Create a managed-directory site's tree.
  *
- * `sites/<serviceId>/` is root-owned, group `<username>-grp`, `0750` — the same
+ * `sites/<serviceId>/` is root-owned, group `<username>`, `0750` — the same
  * shape as the release lane: the tenant cannot rename what sits in it, and the
  * serving engine traverses it through its membership of the principal's group.
  * The leaves below it (`webroot/`, `shared/`, the document root) are the
