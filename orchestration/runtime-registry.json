@@ -99,6 +99,7 @@
         "mbstring",
         "mysql",
         "opcache",
+        "pgsql",
         "sqlite3",
         "xml",
         "zip"
@@ -113,7 +114,6 @@
         "ldap",
         "memcached",
         "msgpack",
-        "pgsql",
         "redis",
         "snmp",
         "soap",

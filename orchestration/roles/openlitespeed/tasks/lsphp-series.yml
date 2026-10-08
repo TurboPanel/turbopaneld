@@ -48,9 +48,11 @@
     update_cache: true
     cache_valid_time: 3600
 
-- name: Check vendored lsphp binary ({{ lsphp_series }})
+# Keyed on the newest module (not the binary) so a tree vendored before
+# `pgsql` joined the base set is topped up on the next apply.
+- name: Check vendored lsphp binary and its modules ({{ lsphp_series }})
   ansible.builtin.stat:
-    path: "{{ _lsphp_dest }}/bin/lsphp"
+    path: "{{ _lsphp_dest }}/lib/php/ext/pdo_pgsql.so"
   register: _lsphp_pinned
 
 - name: Extract lsphp packages into runtimes directory ({{ lsphp_series }})
@@ -79,9 +81,10 @@
           dpkg-deb -x "$DEB" "{{ _lsphp_tmp.path }}/extract"
         done
         install -d "{{ _lsphp_dest }}"
-        cp -a "{{ _lsphp_tmp.path }}/extract/usr/local/lsws/{{ _lsphp.pkg }}/." "{{ _lsphp_dest }}/"
+        # --remove-destination: a running lsphp binary cannot be overwritten.
+        cp -a --remove-destination "{{ _lsphp_tmp.path }}/extract/usr/local/lsws/{{ _lsphp.pkg }}/." "{{ _lsphp_dest }}/"
       args:
-        creates: "{{ _lsphp_dest }}/bin/lsphp"
+        creates: "{{ _lsphp_dest }}/lib/php/ext/pdo_pgsql.so"
 
   always:
     - name: Remove lsphp temp dir ({{ lsphp_series }})
@@ -159,6 +162,7 @@
     or ('Loaded Configuration File => ' ~ _lsphp_dest ~ '/bin/php.ini') not in _lsphp_info.stdout
     or 'Zend OPcache' not in _lsphp_info.stdout
     or 'mysqli' not in _lsphp_info.stdout
+    or 'pdo_pgsql' not in _lsphp_info.stdout
 
 # Every site owner's Linux user may run every installed PHP series (detached
 # lsphp runs as the site's owner from its systemd unit): the tree is
