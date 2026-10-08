@@ -140,6 +140,7 @@ test("handleManagedApply requires decryptSecrets", async () => {
           {
             ensureDocker: () => Promise.resolve(),
             runHostPrep: () => Promise.resolve(),
+            runDocker: () => Promise.resolve(dockerOk()),
           },
         ),
       Error,

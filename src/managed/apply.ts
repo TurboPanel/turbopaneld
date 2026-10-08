@@ -923,7 +923,8 @@ async function applyManagedEngine(
     engineGroup: engine.containerGroup,
   });
 
-  // Scope the public listener once the publish exists; never blocks apply.
+  // Scope a public listener once the publish exists; drop the legacy chain
+  // when the listener is gone. Never blocks apply.
   await reconcileManagedPublicFirewallBestEffort(payload);
 
   const engineContainers = await collectManagedContainers(project, redact, run);
