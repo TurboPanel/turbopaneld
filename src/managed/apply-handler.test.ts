@@ -473,20 +473,16 @@ test("a replica needs_resync apply keeps the demoted marker", async () => {
           port: 15432,
         },
       },
+      // Reuse the base root credential and add the replication one by
+      // cloning it, so this test carries no credential literals of its own.
       credentials: [
+        ...basePayload().credentials,
         {
-          principalId: "p-root",
-          username: "postgres",
-          role: "root",
-          databases: ["postgres"],
-          password: "tpdaemon.v1.root.payload",
-        },
-        {
+          ...basePayload().credentials[0],
           principalId: "p-repl",
           username: "tp_repl",
           role: "replication",
           databases: [],
-          password: "tpdaemon.v1.repl.payload",
         },
       ],
     });
@@ -501,7 +497,7 @@ test("a replica needs_resync apply keeps the demoted marker", async () => {
       new Date().toISOString(),
       {
         decryptSecrets: (ciphertexts) =>
-          Promise.resolve(ciphertexts.map(() => "repl-s3cret")),
+          Promise.resolve(ciphertexts.map((_, index) => `decrypted-${index}`)),
         ensureDocker: () => Promise.resolve(),
         runHostPrep: () => Promise.resolve(),
         runDocker: (args) => {
