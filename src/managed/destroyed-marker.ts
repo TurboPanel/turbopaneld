@@ -14,7 +14,7 @@
  * be able to apply. A marker also stops counting after {@link DESTROYED_MARKER_TTL_MS}, well
  * past any command's life.
  *
- * Lives under `<stateDir>/managed-destroyed/<managedId>.json`, outside
+ * Lives under `<stateDir>/managed-intent/<managedId>.destroyed.json`, outside
  * `managed/<id>/` so removing the state directory does not take it with it.
  */
 
@@ -49,7 +49,7 @@ export function managedDestroyedMarkerPath(
   if (!SAFE_MANAGED_ID_RE.test(managedId)) {
     throw new Error("managedId contains unsupported characters");
   }
-  return join(stateDir, "managed-destroyed", `${managedId}.json`);
+  return join(stateDir, "managed-intent", `${managedId}.destroyed.json`);
 }
 
 /** Write the marker (throws: a destroy that cannot record it must not proceed). */
@@ -60,7 +60,7 @@ export async function writeManagedDestroyedMarker(
   destroyedAt: string,
 ): Promise<void> {
   const path = managedDestroyedMarkerPath(stateDir, managedId);
-  await Deno.mkdir(join(stateDir, "managed-destroyed"), { recursive: true });
+  await Deno.mkdir(join(stateDir, "managed-intent"), { recursive: true });
   const marker: ManagedDestroyedMarker = {
     managedId,
     memberId: memberId ?? null,

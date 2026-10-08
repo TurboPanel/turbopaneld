@@ -153,7 +153,7 @@ test("a destroy that cannot write its marker fails before removing anything", as
     const root = managedDir(layout, MANAGED_ID);
     await Deno.mkdir(root, { recursive: true });
     // A file where the marker directory belongs.
-    await Deno.writeTextFile(`${stateDir}/managed-destroyed`, "x");
+    await Deno.writeTextFile(`${stateDir}/managed-intent`, "x");
     const calls: string[][] = [];
     await assertRejects(() =>
       handleManagedDestroy(
