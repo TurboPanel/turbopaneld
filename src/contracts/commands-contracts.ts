@@ -6184,8 +6184,8 @@ const MAX_MANAGED_IMAGE_LENGTH = 256;
  *
  * **Tested series only.** The control-plane catalog marks a series
  * `tested: true` once it is validated end-to-end, and only those series are
- * creatable: PostgreSQL 18, MySQL 9.7, MariaDB 12.3. The catalog still *knows*
- * about older series (17/16/15, 8.4, 11.8/11.4/10.11) so an already-persisted
+ * creatable: PostgreSQL 18, MySQL 9.7 and 8.4, MariaDB 12.3 and 11.8. The catalog still *knows*
+ * about older series (17/16/15, 11.4/10.11) so an already-persisted
  * image can be named in the UI, but they must never reach Docker — do not add
  * one back here without flipping `tested` in the control-plane catalog and the
  * UI mirror in the same change.
@@ -6204,10 +6204,14 @@ const MANAGED_ALLOWED_IMAGES_BY_ENGINE: Record<string, readonly string[]> = {
   mysql: [
     "docker.io/library/mysql:9.7",
     "docker.io/library/mysql:9.7-oraclelinux9",
+    "docker.io/library/mysql:8.4",
+    "docker.io/library/mysql:8.4-oraclelinux9",
   ],
   mariadb: [
     "docker.io/library/mariadb:12.3",
     "docker.io/library/mariadb:12.3-ubi",
+    "docker.io/library/mariadb:11.8",
+    "docker.io/library/mariadb:11.8-ubi",
   ],
 };
 
