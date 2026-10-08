@@ -169,10 +169,16 @@
     enabled: false
   failed_when: false
 
-- name: Ensure turbopanel-nginx is enabled
+# Started, not just enabled: the pidfile directory is the unit's own
+# RuntimeDirectory=, which only exists while the unit has run. The first site
+# deploy on a fresh host runs `nginx -t` before it starts the unit, and that
+# test fails when the pidfile directory is missing. With no site config yet,
+# nginx starts idle (no listeners).
+- name: Ensure turbopanel-nginx is enabled and running
   ansible.builtin.systemd:
     name: turbopanel-nginx
     enabled: true
+    state: started
     daemon_reload: true
 
 # The pidfile now lives in the unit's own RuntimeDirectory= (/run/{{ nginx_runtime_directory }}),
