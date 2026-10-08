@@ -54,11 +54,14 @@ import type {
   ManagedReplicationObservedHealth,
 } from "./types.ts";
 import {
-  execStandbySeed,
+  execStandbySeedWithInitRetry,
+  formatStandbySeedFailure,
+  MYSQL_FAMILY_NATIVE_PORT,
   mysqlFamilyDataRoot,
   probeMysqlFamilyStandbyData,
   standbySeedStdinLines,
   volumeMountArgs,
+  waitMysqlFamilyRealServer,
 } from "./standby-probe.ts";
 
 const STANDBY_MARKER = ".turbopanel-standby";
@@ -100,8 +103,6 @@ const mariadbBackupRuntime: ManagedEngineBackupRuntime = {
   },
 };
 
-const READY_POLL_MS = 1_000;
-const READY_TIMEOUT_MS = 120_000;
 const MARIADB_SQL_STDIN_MARK = "__TP_SQL__";
 
 function sleep(ms: number): Promise<void> {
@@ -181,6 +182,37 @@ async function execMariadb(
   const password = ctx.socketPassword;
   if (!password || !deniedNoPassword) return first;
   return await execMariadbWithDefaults(ctx, argv, input, password);
+}
+
+function waitMariadbRealServer(ctx: ManagedEngineContext): Promise<void> {
+  return waitMysqlFamilyRealServer({
+    label: "managed mariadb",
+    fallbackError: "mariadb-admin ping did not succeed",
+    ping: (kind) => {
+      if (kind === "tcp") {
+        // Raw exec: ping exit 0 (including access-denied) means the real
+        // listener is up. Do not treat 1045 as "not ready" here.
+        return ctx.exec([
+          "mariadb-admin",
+          "ping",
+          "--protocol=tcp",
+          "--host",
+          "127.0.0.1",
+          "--port",
+          String(MYSQL_FAMILY_NATIVE_PORT),
+          "-u",
+          ctx.rootUsername,
+        ]);
+      }
+      return execMariadb(ctx, [
+        "mariadb-admin",
+        "ping",
+        "--protocol=socket",
+        "-u",
+        ctx.rootUsername,
+      ]);
+    },
+  });
 }
 
 async function runMariadb(
@@ -490,15 +522,16 @@ const mariadbReplicationRuntime: ManagedEngineReplicationRuntime = {
     // replication is configured.
     await runMariadb(ctx, disableReadOnlySql());
 
-    const seed = await execStandbySeed(
+    const seed = await execStandbySeedWithInitRetry(
       ctx,
       buildMariadbStandbySeedScript,
       defaultsBody,
+      () => waitMariadbRealServer(ctx),
     );
     if (!seed.success) {
       throw new Error(
         `mariadb configureStandby seed failed: ${
-          sanitizeForLog(seed.stderr || seed.stdout || "unknown")
+          formatStandbySeedFailure(seed)
         }`,
       );
     }
@@ -593,28 +626,7 @@ export const mariadbManagedEngineRuntime: ManagedEngineRuntime = {
   defaultDatabase: "appdb",
 
   async waitReady(ctx: ManagedEngineContext): Promise<void> {
-    const deadline = Date.now() + READY_TIMEOUT_MS;
-    let lastError = "mariadb-admin ping did not succeed";
-    const ready = async (): Promise<boolean> => {
-      if (Date.now() >= deadline) return false;
-      const result = await execMariadb(ctx, [
-        "mariadb-admin",
-        "ping",
-        "--protocol=socket",
-        "-u",
-        ctx.rootUsername,
-      ]);
-      if (result.success) return true;
-      lastError = result.stderr || result.stdout || lastError;
-      await sleep(READY_POLL_MS);
-      return ready();
-    };
-    if (await ready()) return;
-    throw new Error(
-      `managed mariadb not ready within ${READY_TIMEOUT_MS}ms: ${
-        sanitizeForLog(lastError)
-      }`,
-    );
+    await waitMariadbRealServer(ctx);
   },
 
   async readCensus(ctx: ManagedEngineContext): Promise<ManagedEngineCensus> {
