@@ -51,18 +51,22 @@ async function waitUntilStandbyStreaming(
   deps?: FollowPrimaryDeps,
 ): Promise<void> {
   const sleep = deps?.sleep ?? defaultSleep;
-  const timeoutMs = deps?.timeoutMs ?? REPOINT_STREAMING_TIMEOUT_MS;
-  const deadline = Date.now() + timeoutMs;
-  let lastState = "unknown";
-  for (;;) {
-    lastState = (await replication.readHealth(ctx, "standby")).state;
-    if (lastState === "streaming") return;
-    if (Date.now() >= deadline) break;
+  const deadline = Date.now() +
+    (deps?.timeoutMs ?? REPOINT_STREAMING_TIMEOUT_MS);
+  // Poll by recursion, one health read per step, until streaming or the
+  // deadline; the next step starts only after the sleep.
+  const poll = async (): Promise<void> => {
+    const { state } = await replication.readHealth(ctx, "standby");
+    if (state === "streaming") return;
+    if (Date.now() >= deadline) {
+      throw new Error(
+        `standby did not reach streaming after repoint (last state: ${state})`,
+      );
+    }
     await sleep(REPOINT_STREAMING_POLL_MS);
-  }
-  throw new Error(
-    `standby did not reach streaming after repoint (last state: ${lastState})`,
-  );
+    return poll();
+  };
+  await poll();
 }
 
 export async function ensureLocalPrimarySlots(
