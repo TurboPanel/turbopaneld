@@ -18,7 +18,6 @@
  */
 
 import {
-  ANY_ADDRESSES,
   frontendBindingsHealth,
   type Mapping,
   mappingKey,
