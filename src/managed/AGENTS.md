@@ -32,6 +32,7 @@ Certificate authorities: `../../../turbopanel/src/lib/tls/AGENTS.md`.
 | `pg-dead-primary.ts` / `../instance/pg-dead-primary-observe.ts` | Postgres dead-primary probe on the primary's **own** host (Orchestrator cannot see Postgres). See **Postgres dead-primary detection** below |
 | `host-boot.ts` / `boot-hold.ts` / `../instance/boot-hold-reporter.ts` | Boot hold after a power cut: see **Boot hold after an unclean host restart** below |
 | `ha-intent.ts` / `ha-member.ts` / `ha-command-hooks.ts` | Probe inputs kept by `command-router.ts`: operator-intent markers around every engine-touching managed verb, and the per-host member record (`managed/<id>/ha-member.json`) |
+| `demoted-marker.ts` / `demoted-guard.ts` | After a fence `managed.lifecycle` stop with `demoted: true`, a durable `<stateDir>/managed/<id>/demoted.json` (0600). A 5 s guard stops that member if its engine is running (`compose -p <id> stop`, intent marker first). Cleared on replica `managed.apply`, `managed.promote`, and `managed.destroy`. |
 | `backup.ts` | `managed.backup` (`create`/`delete`) + `managed.restore` — streamed dump/restore, checksum, prune; exports the shared core (`createManagedBackupArtifact`, `restoreManagedBackupArtifact`, `resolveBackupEngine`) for scheduled runs |
 | `target-lock.ts` | Per-engine `flock` (`withManagedTargetLock`, `ManagedTargetBusyError`) shared by the backup/restore handlers and the scheduled `backup-run` process |
 | `logs.ts` | Bounded `compose logs`; cell `managed-logs-request` / `managed-logs-result` (not a command) |
@@ -546,7 +547,8 @@ stale primary can accept writes again within seconds of boot.
   every primary in `ha-member.json` with at least one peer gets a HELD `stop`
   intent marker (so the dead-primary probe reads the stop as intended), a
   `managed/<id>/boot-hold.json`, and `docker compose -p <id> stop`. Standalone
-  databases and replicas are never held.
+  databases and replicas are never held unless they carry a demoted marker
+  (a replaced primary counts as replaced on boot and is never released).
 - **Report** (`instance/boot-hold-reporter.ts`, every 60 s while a hold exists
   and the socket is attached): `managed-ha-event` with `detector: 'boot-hold'`
   and `evidence { reason, heldAt, engineStopped }`. It is never a failover
@@ -554,10 +556,28 @@ stale primary can accept writes again within seconds of boot.
   `managed.lifecycle start`; a successful start (or restart/apply/promote)
   releases the held marker, and the hold file goes with it
   (`listActiveBootHolds`). A primary the control plane replaced is left
-  stopped (`needs_resync`).
+  stopped (`needs_resync`). A demoted marker is the same as replaced: local
+  release must not start that engine.
 - **No answer possible**: a control plane without `managed-ha-boot-hold-v1`
   gets nothing; the daemon releases the hold itself and starts the engine (the
-  behaviour before this feature). A control plane that is merely unreachable
-  leaves the hold on: that fails closed on purpose.
+  behaviour before this feature) unless a demoted marker is present. A control
+  plane that is merely unreachable leaves the hold on: that fails closed on
+  purpose.
 - Tests: `host-boot.test.ts`, `boot-hold.test.ts`,
   `../instance/boot-hold-reporter.test.ts`, `../entry/run.test.ts`.
+
+## Demoted member fence
+
+After failover or switchover the old primary is stopped and must stay stopped
+until it is re-added as a replica. The control plane sends `demoted: true` on
+that fence `managed.lifecycle` stop. This daemon writes
+`<stateDir>/managed/<managedId>/demoted.json` (member id + timestamp, 0600,
+atomic) and a 5 s guard (`demoted-guard.ts`, started from `runDaemon`) stops
+the compose project if the engine is running. It writes a held operator-intent
+marker first so the dead-primary probe never treats the stop as a crash. It
+takes `tryWithManagedLifecycleLock` so a replica apply that clears the marker
+inside the same lock is not stopped mid-run. `listManagedHaMembers` already
+skips destroyed members. The marker is cleared on a successful replica apply
+(`status: ready`), on `managed.promote`, and on `managed.destroy`. The guard
+never starts anything and never deletes data.
+Tests: `demoted-marker.test.ts`, `demoted-guard.test.ts`, `lifecycle.test.ts`.
