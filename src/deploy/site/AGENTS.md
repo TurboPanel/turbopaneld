@@ -102,8 +102,7 @@ Docker Compose. The daemon:
    autoremove), drops the stat overrides, the masked sury unit, the series'
    config/log/run directories and the vendored `lsphp/<series>` tree, and it
    refuses a series that still has a site pool or a per-site runtime unit on
-   disk. Entitlement groups stay. A failed removal is logged and retried by the
-   next deploy or teardown; it never fails the one that triggered it.
+   disk. A failed removal is logged and retried by the next deploy or teardown; it never fails the one that triggered it.
 
    **A web engine nothing uses is removed too** (owner decision 2026-10-07).
    Right after the PHP series step, `pruneEngines` (`site/engine-prune.ts`)

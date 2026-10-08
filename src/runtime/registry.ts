@@ -60,7 +60,8 @@ const ACCESS_GROUPS = registryJson.accessGroups as unknown as Readonly<
  * Group that puts a principal in one `sshd` Match block.
  *
  * It protects no inode and grants no `execve`. It exists because `sshd`
- * matches on groups rather than on shells, so `ForceCommand internal-sftp` needs a group of its own to hang from.
+ * matches on groups rather than on shells, so `ForceCommand internal-sftp`
+ * needs a group of its own to hang from.
  */
 export function accessGroup(
   level: PrincipalAccessGroupLevel,
