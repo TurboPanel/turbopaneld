@@ -858,6 +858,86 @@ test("postgres applyCredentials throws when psql fails", async () => {
   );
 });
 
+const STREAM_CLOSED = "spawn failed: Writable stream is closed";
+
+test("postgres applyCredentials retries psql once after a closed stdin then succeeds", async () => {
+  let calls = 0;
+  const exec: ManagedEngineExec = () => {
+    calls++;
+    if (calls === 1) {
+      return Promise.resolve({
+        success: false,
+        stdout: "",
+        stderr: STREAM_CLOSED,
+      });
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  const applied = await postgresManagedEngineRuntime.applyCredentials(
+    buildContext(exec),
+    [{
+      principalId: "p-app",
+      username: "app_user",
+      role: "user",
+      databases: ["appdb"],
+      password: "app-pass",
+    }],
+  );
+  assertEquals(applied, ["app_user"]);
+  assertEquals(calls >= 2, true);
+});
+
+test("postgres applyCredentials does not retry a SQL error", async () => {
+  let calls = 0;
+  const exec: ManagedEngineExec = () => {
+    calls++;
+    return Promise.resolve({
+      success: false,
+      stdout: "",
+      stderr: 'ERROR:  syntax error at or near "FOO"',
+    });
+  };
+  await assertRejects(
+    () =>
+      postgresManagedEngineRuntime.applyCredentials(buildContext(exec), [{
+        principalId: "p-app",
+        username: "app_user",
+        role: "user",
+        databases: ["appdb"],
+        password: "app-pass",
+      }]),
+    Error,
+    "psql failed",
+  );
+  assertEquals(calls, 1);
+});
+
+test("postgres applyCredentials surfaces a closed stdin after one failed retry", async () => {
+  let calls = 0;
+  const exec: ManagedEngineExec = () => {
+    calls++;
+    return Promise.resolve({
+      success: false,
+      stdout: "",
+      stderr: STREAM_CLOSED,
+    });
+  };
+  const err = await assertRejects(
+    () =>
+      postgresManagedEngineRuntime.applyCredentials(buildContext(exec), [{
+        principalId: "p-app",
+        username: "app_user",
+        role: "user",
+        databases: ["appdb"],
+        password: "app-pass",
+      }]),
+    Error,
+    "stdin closed after retry",
+  );
+  assertEquals(err.message.includes("Writable stream is closed"), true);
+  assertEquals(calls, 2);
+});
+
 test("postgres waitReady retries until pg_isready succeeds", async () => {
   let attempts = 0;
   const exec: ManagedEngineExec = (argv) => {

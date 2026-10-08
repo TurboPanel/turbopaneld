@@ -2,6 +2,8 @@
  * Postgres managed-engine runtime: readiness, credentials, databases.
  *
  * SQL is built by `postgres-sql.ts` and fed to `psql` via stdin (never `-c`).
+ * `runPsql` retries once when docker exec closes stdin before the write
+ * finishes and the process produced no SQL error.
  */
 
 import { helperLabelArgs } from "../../deploy/labels.ts";
@@ -62,6 +64,7 @@ import type {
   ManagedReplicationObservedHealth,
   ManagedSlotRetention,
 } from "./types.ts";
+import { execSqlWithStdinRetry } from "./sql-stdin.ts";
 import { probeStandbyState, volumeMountArgs } from "./standby-probe.ts";
 
 /**
@@ -128,7 +131,8 @@ async function runPsql(
   sql: string,
   database: string = ctx.defaultDatabase,
 ): Promise<void> {
-  const result = await ctx.exec(
+  const result = await execSqlWithStdinRetry(
+    ctx.exec,
     [
       "psql",
       "-v",

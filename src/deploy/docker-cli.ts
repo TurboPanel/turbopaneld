@@ -118,6 +118,60 @@ export function dockerOutputLooksLikeSocketPermission(
     isDockerSocketPermissionError(stdout);
 }
 
+function isStdinClosedEarlyMessage(message: string): boolean {
+  const lower = message.toLowerCase();
+  return lower.includes("writable stream is closed") ||
+    lower.includes("broken pipe") ||
+    lower.includes("epipe");
+}
+
+/**
+ * Write `input` and close stdin. When the child already exited, Deno
+ * throws EPIPE / "Writable stream is closed" — swallow that so callers
+ * can surface the process's real stderr/exit instead of the stream error.
+ */
+async function writePipedStdin(
+  stdin: WritableStream<Uint8Array>,
+  input: string,
+): Promise<string | undefined> {
+  const writer = stdin.getWriter();
+  try {
+    await writer.write(new TextEncoder().encode(input));
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    await writer.close().catch(() => {});
+    if (isStdinClosedEarlyMessage(message)) return message;
+    throw err;
+  }
+  try {
+    await writer.close();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (isStdinClosedEarlyMessage(message)) return message;
+    throw err;
+  }
+  return undefined;
+}
+
+function dockerResultFromChildOutput(
+  result: Deno.CommandOutput,
+  stdinClosedEarly?: string,
+): DockerCliResult {
+  const stdout = decoder.decode(result.stdout).trim();
+  const stderr = decoder.decode(result.stderr).trim();
+  if (result.success) {
+    return { success: true, code: result.code, stdout, stderr };
+  }
+  const processText = stderr || stdout;
+  return {
+    success: false,
+    code: result.code,
+    stdout,
+    stderr: processText ||
+      (stdinClosedEarly ? `spawn failed: ${stdinClosedEarly}` : ""),
+  };
+}
+
 async function runRawDefault(
   command: string,
   args: string[],
@@ -132,22 +186,11 @@ async function runRawDefault(
       stderr: "piped",
     }).spawn();
 
-    if (hasInput) {
-      const writer = child.stdin.getWriter();
-      try {
-        await writer.write(new TextEncoder().encode(options?.input ?? ""));
-      } finally {
-        await writer.close();
-      }
-    }
+    const stdinClosedEarly = hasInput
+      ? await writePipedStdin(child.stdin, options?.input ?? "")
+      : undefined;
 
-    const result = await child.output();
-    return {
-      success: result.success,
-      code: result.code,
-      stdout: decoder.decode(result.stdout).trim(),
-      stderr: decoder.decode(result.stderr).trim(),
-    };
+    return dockerResultFromChildOutput(await child.output(), stdinClosedEarly);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return {
@@ -450,14 +493,9 @@ export async function runDockerStreamed(
       ...(options?.signal === undefined ? {} : { signal: options.signal }),
     });
 
-    if (hasInput) {
-      const writer = child.stdin.getWriter();
-      try {
-        await writer.write(new TextEncoder().encode(options?.input ?? ""));
-      } finally {
-        await writer.close();
-      }
-    }
+    const stdinClosedEarly = hasInput
+      ? await writePipedStdin(child.stdin, options?.input ?? "")
+      : undefined;
 
     const onLine = options?.onLine;
     const [status, stdout, stderr] = await Promise.all([
@@ -472,11 +510,18 @@ export async function runDockerStreamed(
       ),
     ]);
 
+    const out = stdout.trim();
+    const err = stderr.trim();
+    if (status.success) {
+      return { success: true, code: status.code, stdout: out, stderr: err };
+    }
+    const processText = err || out;
     return {
-      success: status.success,
+      success: false,
       code: status.code,
-      stdout: stdout.trim(),
-      stderr: stderr.trim(),
+      stdout: out,
+      stderr: processText ||
+        (stdinClosedEarly ? `spawn failed: ${stdinClosedEarly}` : ""),
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
