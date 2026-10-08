@@ -496,9 +496,12 @@ there is no raft-leader check on that path.
     whole duration (a major-upgrade apply or a restore that keeps the engine
     down for an hour stays suppressed) up to a 6 h ceiling, at which it stops
     suppressing with a WARN; when the command ends it becomes transient and
-    suppresses 10 min + 30 s from THEN; only the command that owns the
-    current marker refreshes it (concurrent commands: the last to finish
-    never overwrites a newer marker);
+    suppresses 10 min + 30 s from THEN (a **successful** `promote` or
+    `failover` only 1 min + 30 s: those report success once the new primary is
+    writable, so a primary killed minutes after a switchover is a real
+    failure, not something to wave off for another ten); only the command
+    that owns the current marker refreshes it (concurrent commands: the last
+    to finish never overwrites a newer marker);
   - a `stop` is **held** only after it succeeded; `destroy` is held from the
     start (a failed destroy never re-arms the probe);
   - a transient marker never replaces a held one; only a **successful**
