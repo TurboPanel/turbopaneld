@@ -27,6 +27,11 @@
 #       a recognised flag here, and the only CA the fetch trusts beyond the
 #       system store is the daemon's canonical Platform CA file.
 #
+#   kernel-features list|status [ID]|apply ID [--reboot] [--countdown N]|undo ID
+#       Named kernel/boot features (orchestration/scripts/tp-kernel-features),
+#       for the installer and an operator. `apply` and `undo` are refused when
+#       sudo was run by the daemon account.
+#
 # Every input that could steer root is taken from this root-owned tree, not
 # from the caller: the orchestration dir is derived from $0, ansible.cfg and
 # ANSIBLE_ROLES_PATH are fixed, PATH is rebuilt, and Ansible's temp/home live
@@ -1012,7 +1017,31 @@ tp_verb_migrate() {
   timeout 120 env TURBOPANEL_DATABASE_URL="$_url" "$_bin" migrate
 }
 
-[ $# -ge 1 ] || tp_die "usage: tp-orchestrate playbook|galaxy-docker-role|update|update-instance|update-colocated|migrate …"
+# Named kernel/boot features (orchestration/scripts/tp-kernel-features). The
+# installer and an operator use this; the daemon account never applies one, so
+# `apply` and `undo` are refused when sudo was invoked by that account (it may
+# still list and read status). The helper itself accepts only its fixed feature
+# ids and options; nothing the caller passes becomes a path, a line of text or a
+# command.
+tp_verb_kernel_features() {
+  [ $# -ge 1 ] || tp_die "kernel-features needs list, status, apply or undo"
+  case "$1" in
+    list|status) ;;
+    apply|undo)
+      _kf_daemon_uid="$(id -u tp 2>/dev/null || true)"
+      if [ -n "$_kf_daemon_uid" ] && [ "${SUDO_UID:-}" = "$_kf_daemon_uid" ]; then
+        tp_die "kernel-features $1 is for the installer and an operator, not the daemon account"
+      fi
+      ;;
+    *) tp_die "kernel-features: unknown action $1" ;;
+  esac
+  _kf_script="$ORCH_DIR/scripts/tp-kernel-features"
+  [ -f "$_kf_script" ] && [ ! -L "$_kf_script" ] && [ -x "$_kf_script" ] ||
+    tp_die "missing $_kf_script"
+  exec "$_kf_script" "$@"
+}
+
+[ $# -ge 1 ] || tp_die "usage: tp-orchestrate playbook|galaxy-docker-role|update|update-instance|update-colocated|migrate|kernel-features …"
 _verb="$1"
 shift
 case "$_verb" in
@@ -1022,5 +1051,6 @@ case "$_verb" in
   update-instance) tp_verb_update_instance "$@" ;;
   update-colocated) tp_verb_update_colocated "$@" ;;
   migrate) tp_verb_migrate "$@" ;;
+  kernel-features) tp_verb_kernel_features "$@" ;;
   *) tp_die "unknown verb $_verb" ;;
 esac
