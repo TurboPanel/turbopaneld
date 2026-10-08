@@ -12,11 +12,13 @@ import type {
 import { logInfo, sanitizeForLog } from "../../util/logger.ts";
 import { forEachSequential } from "../../util/sequential.ts";
 import {
+  applyFollowedPrimaryConninfoSql,
   connectionCensusSql,
   createDatabaseSql,
   createOrAlterRoleSql,
   createPhysicalSlotSql,
   createReplicationRoleSql,
+  currentPrimaryConninfoSql,
   databaseExistsSql,
   dropDatabaseSql,
   dropPhysicalSlotSql,
@@ -40,6 +42,7 @@ import {
   reloadVerifySql,
   revokePublicDatabaseAccessSql,
   revokeUnlistedDatabasesSql,
+  rewritePrimaryConninfo,
   standbyReplicationStatusSql,
   strongestPrivilege,
 } from "./postgres-sql.ts";
@@ -432,6 +435,12 @@ const postgresReplicationRuntime: ManagedEngineReplicationRuntime = {
     await pruneOrphanSlots(ctx, desired);
   },
 
+  ensureSlots: (ctx, slots) =>
+    forEachSequential(
+      slots,
+      (slot) => runPsql(ctx, createPhysicalSlotSql(slot)),
+    ),
+
   pruneOrphanSlots: (ctx, desired) => pruneOrphanSlots(ctx, new Set(desired)),
 
   probeStandbyData: probePostgresStandbyData,
@@ -567,6 +576,22 @@ const postgresReplicationRuntime: ManagedEngineReplicationRuntime = {
     };
     if (await leftRecovery()) return;
     throw new Error("pg_promote did not leave recovery within 60s");
+  },
+
+  async isStandby(ctx) {
+    const rows = await parsePsqlRows(ctx, isInRecoverySql());
+    const value = rows[0]?.[0]?.toLowerCase();
+    return value === "t" || value === "true";
+  },
+
+  async followPrimary(ctx, spec) {
+    const rows = await parsePsqlRows(ctx, currentPrimaryConninfoSql());
+    const current = rows[0]?.[0]?.trim() ?? "";
+    if (!current) {
+      throw new Error("postgres followPrimary: empty primary_conninfo");
+    }
+    const next = rewritePrimaryConninfo(current, spec.primary);
+    await runPsql(ctx, applyFollowedPrimaryConninfoSql(next));
   },
 
   async readHealth(ctx, role): Promise<ManagedReplicationObservedHealth> {

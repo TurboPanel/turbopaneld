@@ -14,6 +14,7 @@ import {
   ensureProxySqlMonitorAccountSql,
   ensureReplicationAccountSql,
   ensureSocketAdminSql,
+  followReplicationSourceSql,
   grantDatabaseSql,
   grantReplicationSql,
   grantRootSql,
@@ -210,6 +211,15 @@ test("replication and status SQL builders", () => {
   });
   assertEquals(change.includes("SOURCE_SSL = 1"), true);
   assertEquals(change.includes("START REPLICA"), true);
+  const follow = followReplicationSourceSql({
+    host: "10.100.0.4",
+    port: 45001,
+  });
+  assertEquals(follow.includes("STOP REPLICA"), true);
+  assertEquals(follow.includes("SOURCE_HOST = '10.100.0.4'"), true);
+  assertEquals(follow.includes("SOURCE_PORT = 45001"), true);
+  assertEquals(follow.includes("SOURCE_PASSWORD"), false);
+  assertEquals(follow.includes("START REPLICA"), true);
 });
 
 test("runtime defaultDatabase is a non-system application schema", () => {

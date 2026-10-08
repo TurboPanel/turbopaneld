@@ -5,6 +5,7 @@
  * Dump flag is `--gtid` (not MySQL `--set-gtid-purged`).
  */
 
+import { dropUserOnEveryHost } from "./account-hosts.ts";
 import { helperLabelArgs } from "../../deploy/labels.ts";
 import type {
   ManagedApplyCredential,
@@ -14,6 +15,7 @@ import { sanitizeForLog } from "../../util/logger.ts";
 import { forEachSequential } from "../../util/sequential.ts";
 import { grantDatabasePrivileges } from "./grant-databases.ts";
 import { parseMariadbFreshness } from "./replica-freshness.ts";
+import { parseSqlBool } from "./sql-bool.ts";
 import {
   changeReplicationSourceSql,
   connectionCensusSql,
@@ -27,11 +29,14 @@ import {
   ensureProxySqlMonitorAccountSql,
   ensureReplicationAccountSql,
   ensureSocketAdminSql,
+  followReplicationSourceSql,
   grantDatabaseSql,
   grantRootSql,
   isWritableSql,
+  MANAGED_DOCKER_NETWORK_HOST,
   promoteSql,
   quoteIdentifier,
+  quoteLiteral,
   showReplicaStatusSql,
   versionSql,
 } from "./mariadb-sql.ts";
@@ -50,11 +55,14 @@ import type {
   ManagedReplicationObservedHealth,
 } from "./types.ts";
 import {
-  execStandbySeed,
+  execStandbySeedWithInitRetry,
+  formatStandbySeedFailure,
+  MYSQL_FAMILY_NATIVE_PORT,
   mysqlFamilyDataRoot,
   probeMysqlFamilyStandbyData,
   standbySeedStdinLines,
   volumeMountArgs,
+  waitMysqlFamilyRealServer,
 } from "./standby-probe.ts";
 
 const STANDBY_MARKER = ".turbopanel-standby";
@@ -96,8 +104,6 @@ const mariadbBackupRuntime: ManagedEngineBackupRuntime = {
   },
 };
 
-const READY_POLL_MS = 1_000;
-const READY_TIMEOUT_MS = 120_000;
 const MARIADB_SQL_STDIN_MARK = "__TP_SQL__";
 
 function sleep(ms: number): Promise<void> {
@@ -177,6 +183,37 @@ async function execMariadb(
   const password = ctx.socketPassword;
   if (!password || !deniedNoPassword) return first;
   return await execMariadbWithDefaults(ctx, argv, input, password);
+}
+
+function waitMariadbRealServer(ctx: ManagedEngineContext): Promise<void> {
+  return waitMysqlFamilyRealServer({
+    label: "managed mariadb",
+    fallbackError: "mariadb-admin ping did not succeed",
+    ping: (kind) => {
+      if (kind === "tcp") {
+        // Raw exec: ping exit 0 (including access-denied) means the real
+        // listener is up. Do not treat 1045 as "not ready" here.
+        return ctx.exec([
+          "mariadb-admin",
+          "ping",
+          "--protocol=tcp",
+          "--host",
+          "127.0.0.1",
+          "--port",
+          String(MYSQL_FAMILY_NATIVE_PORT),
+          "-u",
+          ctx.rootUsername,
+        ]);
+      }
+      return execMariadb(ctx, [
+        "mariadb-admin",
+        "ping",
+        "--protocol=socket",
+        "-u",
+        ctx.rootUsername,
+      ]);
+    },
+  });
 }
 
 async function runMariadb(
@@ -418,6 +455,9 @@ const mariadbReplicationRuntime: ManagedEngineReplicationRuntime = {
     );
   },
 
+  // MariaDB has no physical slots — failover still sends ensureSlots.
+  ensureSlots: () => Promise.resolve(),
+
   probeStandbyData: (ctx) => probeMysqlFamilyStandbyData(ctx, STANDBY_MARKER),
 
   async bootstrapStandby(ctx: ManagedEngineBootstrapContext, spec) {
@@ -483,15 +523,16 @@ const mariadbReplicationRuntime: ManagedEngineReplicationRuntime = {
     // replication is configured.
     await runMariadb(ctx, disableReadOnlySql());
 
-    const seed = await execStandbySeed(
+    const seed = await execStandbySeedWithInitRetry(
       ctx,
       buildMariadbStandbySeedScript,
       defaultsBody,
+      () => waitMariadbRealServer(ctx),
     );
     if (!seed.success) {
       throw new Error(
         `mariadb configureStandby seed failed: ${
-          sanitizeForLog(seed.stderr || seed.stdout || "unknown")
+          formatStandbySeedFailure(seed)
         }`,
       );
     }
@@ -533,13 +574,25 @@ const mariadbReplicationRuntime: ManagedEngineReplicationRuntime = {
     const writable = async (): Promise<boolean> => {
       if (Date.now() >= deadline) return false;
       const out = await runMariadbQuery(ctx, isWritableSql());
-      const readOnly = out.trim();
-      if (readOnly === "0") return true;
+      if (parseSqlBool(out) === false) return true;
       await sleep(500);
       return writable();
     };
     if (await writable()) return;
     throw new Error("mariadb promote did not become writable within 60s");
+  },
+
+  async isStandby(ctx) {
+    const verbose = await runMariadbStatusQuery(ctx, showReplicaStatusSql());
+    return verbose.trim().length > 0;
+  },
+
+  async followPrimary(ctx, spec) {
+    const host = resolveMariadbPrimaryConnectHost(spec.primary);
+    await runMariadb(
+      ctx,
+      followReplicationSourceSql({ host, port: spec.primary.port }),
+    );
   },
 
   async readHealth(ctx, role): Promise<ManagedReplicationObservedHealth> {
@@ -573,28 +626,7 @@ export const mariadbManagedEngineRuntime: ManagedEngineRuntime = {
   defaultDatabase: "appdb",
 
   async waitReady(ctx: ManagedEngineContext): Promise<void> {
-    const deadline = Date.now() + READY_TIMEOUT_MS;
-    let lastError = "mariadb-admin ping did not succeed";
-    const ready = async (): Promise<boolean> => {
-      if (Date.now() >= deadline) return false;
-      const result = await execMariadb(ctx, [
-        "mariadb-admin",
-        "ping",
-        "--protocol=socket",
-        "-u",
-        ctx.rootUsername,
-      ]);
-      if (result.success) return true;
-      lastError = result.stderr || result.stdout || lastError;
-      await sleep(READY_POLL_MS);
-      return ready();
-    };
-    if (await ready()) return;
-    throw new Error(
-      `managed mariadb not ready within ${READY_TIMEOUT_MS}ms: ${
-        sanitizeForLog(lastError)
-      }`,
-    );
+    await waitMariadbRealServer(ctx);
   },
 
   async readCensus(ctx: ManagedEngineContext): Promise<ManagedEngineCensus> {
@@ -677,7 +709,14 @@ export const mariadbManagedEngineRuntime: ManagedEngineRuntime = {
     const dropped: string[] = [];
     await forEachSequential(usernames, async (username) => {
       if (username === ctx.rootUsername) return;
-      await runMariadb(ctx, dropAccountSql(username));
+      await dropUserOnEveryHost({
+        username,
+        fixedHosts: [MANAGED_DOCKER_NETWORK_HOST, "localhost"],
+        quoteLiteral,
+        query: (sql) => runMariadbQuery(ctx, sql),
+        run: (sql) => runMariadb(ctx, sql),
+        dropAccountSql,
+      });
       dropped.push(username);
     });
     return dropped;

@@ -770,9 +770,24 @@ export function standbyReplicationStatusSql(): string {
     `    THEN COALESCE(pg_catalog.pg_wal_lsn_diff(r.flushed_lsn, pg_catalog.pg_last_wal_replay_lsn()), 0)`,
     `    ELSE NULL`,
     `  END AS lag_bytes,`,
+    // Clock-from-last-replay is apply delay only while the replica is behind.
+    // An idle primary sends no new xacts, so that timestamp stays put and
+    // `now() - pg_last_xact_replay_timestamp()` would grow without bound
+    // even when flushed/replayed WAL already matches the primary's last
+    // reported end (`latest_end_lsn`). Caught-up idle replicas report 0. The
+    // zero needs a reported end: just after the receiver starts, before the
+    // first message, `latest_end_lsn` is NULL and the clock branch applies.
     `  CASE`,
+    `    WHEN r.status = 'streaming'`,
+    `      AND r.latest_end_lsn IS NOT NULL`,
+    `      AND pg_catalog.pg_last_wal_replay_lsn() IS NOT NULL`,
+    `      AND pg_catalog.pg_wal_lsn_diff(`,
+    `        r.latest_end_lsn,`,
+    `        pg_catalog.pg_last_wal_replay_lsn()`,
+    `      ) <= 0`,
+    `    THEN 0`,
     `    WHEN r.status = 'streaming' AND pg_catalog.pg_last_xact_replay_timestamp() IS NOT NULL`,
-    `    THEN EXTRACT(EPOCH FROM (now() - pg_catalog.pg_last_xact_replay_timestamp()))`,
+    `    THEN GREATEST(EXTRACT(EPOCH FROM (now() - pg_catalog.pg_last_xact_replay_timestamp())), 0)`,
     `    ELSE NULL`,
     `  END AS lag_seconds,`,
     // Both stay readable after the WAL receiver exits (primary gone): the
@@ -853,6 +868,108 @@ export function connectionCensusSql(): string {
 
 export function promoteSql(): string {
   return "SELECT pg_catalog.pg_promote(true, 60);";
+}
+
+export function currentPrimaryConninfoSql(): string {
+  return "SELECT pg_catalog.current_setting('primary_conninfo', true);";
+}
+
+function conninfoValueNeedsQuotes(value: string): boolean {
+  return value.length === 0 || /\s/.test(value) || value.includes("'") ||
+    value.includes("\\");
+}
+
+export function formatConninfoValue(value: string): string {
+  if (!conninfoValueNeedsQuotes(value)) return value;
+  return `'${
+    value.replaceAll("\\", String.raw`\\`).replaceAll("'", String.raw`\'`)
+  }'`;
+}
+
+/** Read a single-quoted conninfo value starting after the opening quote. */
+function readQuotedConninfoValue(
+  text: string,
+  start: number,
+): { value: string; next: number } {
+  let value = "";
+  let i = start;
+  while (i < text.length) {
+    const ch = text[i]!;
+    if (ch === "\\" && i + 1 < text.length) {
+      value += text[i + 1];
+      i += 2;
+    } else if (ch === "'") {
+      return { value, next: i + 1 };
+    } else {
+      value += ch;
+      i += 1;
+    }
+  }
+  return { value, next: i };
+}
+
+/** Read an unquoted conninfo value up to the next space. */
+function readBareConninfoValue(
+  text: string,
+  start: number,
+): { value: string; next: number } {
+  let i = start;
+  while (i < text.length && text[i] !== " ") i += 1;
+  return { value: text.slice(start, i), next: i };
+}
+
+function parseConninfoEntries(current: string): Array<[string, string]> {
+  const entries: Array<[string, string]> = [];
+  let i = 0;
+  while (i < current.length) {
+    while (i < current.length && current[i] === " ") i += 1;
+    const eq = current.indexOf("=", i);
+    if (i >= current.length || eq === -1) break;
+    const key = current.slice(i, eq);
+    const valueStart = eq + 1;
+    const read = current[valueStart] === "'"
+      ? readQuotedConninfoValue(current, valueStart + 1)
+      : readBareConninfoValue(current, valueStart);
+    entries.push([key, read.value]);
+    i = read.next;
+  }
+  return entries;
+}
+
+/**
+ * Replace `host` / `port` (and `hostaddr` when supplied) in a libpq
+ * `primary_conninfo` string, leaving user, password, and TLS keys.
+ * When the new dial has no `hostaddr`, drop the old key — libpq requires a
+ * numeric IP there, never a container name.
+ */
+export function rewritePrimaryConninfo(
+  current: string,
+  primary: { host: string; hostaddr?: string; port: number },
+): string {
+  const entries = parseConninfoEntries(current);
+  const byKey = new Map(entries);
+  byKey.set("host", primary.host);
+  byKey.set("port", String(primary.port));
+  if (primary.hostaddr) {
+    byKey.set("hostaddr", primary.hostaddr);
+  } else {
+    byKey.delete("hostaddr");
+  }
+  // Map keeps first-insertion order: existing keys first, new ones after.
+  return [...byKey]
+    .map(([key, value]) => `${key}=${formatConninfoValue(value)}`)
+    .join(" ");
+}
+
+/** Persist a rewritten `primary_conninfo` and restart the WAL receiver. */
+export function applyFollowedPrimaryConninfoSql(conninfo: string): string {
+  return [
+    `ALTER SYSTEM SET primary_conninfo = ${quoteLiteral(conninfo)};`,
+    "SELECT pg_catalog.pg_reload_conf();",
+    "SELECT pg_catalog.pg_terminate_backend(pid)",
+    "  FROM pg_catalog.pg_stat_activity",
+    "  WHERE backend_type = 'walreceiver';",
+  ].join("\n");
 }
 
 export function isInRecoverySql(): string {

@@ -6,6 +6,7 @@
  * backup credential-free — never `-p` on argv and never `-e MYSQL_PWD`.
  */
 
+import { dropUserOnEveryHost } from "./account-hosts.ts";
 import { helperLabelArgs } from "../../deploy/labels.ts";
 import type {
   ManagedApplyCredential,
@@ -15,6 +16,7 @@ import { sanitizeForLog } from "../../util/logger.ts";
 import { forEachSequential } from "../../util/sequential.ts";
 import { grantDatabasePrivileges } from "./grant-databases.ts";
 import { parseMysqlFreshness } from "./replica-freshness.ts";
+import { parseSqlBool } from "./sql-bool.ts";
 import {
   authSocketPluginPresentSql,
   changeReplicationSourceSql,
@@ -29,12 +31,15 @@ import {
   ensureProxySqlMonitorAccountSql,
   ensureReplicationAccountSql,
   ensureSocketAdminSql,
+  followReplicationSourceSql,
   grantDatabaseSql,
   grantRootSql,
   installAuthSocketPluginSql,
   isWritableSql,
+  MANAGED_DOCKER_NETWORK_HOST,
   promoteSql,
   quoteIdentifier,
+  quoteLiteral,
   replicaFreshnessSql,
   showReplicaStatusSql,
   versionSql,
@@ -54,11 +59,14 @@ import type {
   ManagedReplicationObservedHealth,
 } from "./types.ts";
 import {
-  execStandbySeed,
+  execStandbySeedWithInitRetry,
+  formatStandbySeedFailure,
+  MYSQL_FAMILY_NATIVE_PORT,
   mysqlFamilyDataRoot,
   probeMysqlFamilyStandbyData,
   standbySeedStdinLines,
   volumeMountArgs,
+  waitMysqlFamilyRealServer,
 } from "./standby-probe.ts";
 
 /** Marker written into the data volume once configureStandby finishes. */
@@ -109,8 +117,6 @@ const mysqlBackupRuntime: ManagedEngineBackupRuntime = {
   },
 };
 
-const READY_POLL_MS = 1_000;
-const READY_TIMEOUT_MS = 120_000;
 const MYSQL_SQL_STDIN_MARK = "__TP_SQL__";
 
 function sleep(ms: number): Promise<void> {
@@ -195,6 +201,37 @@ async function execMysql(
   const password = ctx.socketPassword;
   if (!password || !deniedNoPassword) return first;
   return await execMysqlWithDefaults(ctx, argv, input, password);
+}
+
+function waitMysqlRealServer(ctx: ManagedEngineContext): Promise<void> {
+  return waitMysqlFamilyRealServer({
+    label: "managed mysql",
+    fallbackError: "mysqladmin ping did not succeed",
+    ping: (kind) => {
+      if (kind === "tcp") {
+        // Raw exec: ping exit 0 (including access-denied) means the real
+        // listener is up. Do not treat 1045 as "not ready" here.
+        return ctx.exec([
+          "mysqladmin",
+          "ping",
+          "--protocol=tcp",
+          "--host",
+          "127.0.0.1",
+          "--port",
+          String(MYSQL_FAMILY_NATIVE_PORT),
+          "-u",
+          ctx.rootUsername,
+        ]);
+      }
+      return execMysql(ctx, [
+        "mysqladmin",
+        "ping",
+        "--protocol=socket",
+        "-u",
+        ctx.rootUsername,
+      ]);
+    },
+  });
 }
 
 async function runMysql(
@@ -448,6 +485,9 @@ const mysqlReplicationRuntime: ManagedEngineReplicationRuntime = {
     );
   },
 
+  // MySQL has no physical slots — failover still sends ensureSlots.
+  ensureSlots: () => Promise.resolve(),
+
   probeStandbyData: (ctx) => probeMysqlFamilyStandbyData(ctx, STANDBY_MARKER),
 
   async bootstrapStandby(ctx: ManagedEngineBootstrapContext, spec) {
@@ -520,16 +560,15 @@ const mysqlReplicationRuntime: ManagedEngineReplicationRuntime = {
     await ensureAuthSocketPlugin(ctx);
 
     // Short-lived 0600 defaults file via stdin (never -p on argv / never MYSQL_PWD).
-    const seed = await execStandbySeed(
+    const seed = await execStandbySeedWithInitRetry(
       ctx,
       buildMysqlStandbySeedScript,
       defaultsBody,
+      () => waitMysqlRealServer(ctx),
     );
     if (!seed.success) {
       throw new Error(
-        `mysql configureStandby seed failed: ${
-          sanitizeForLog(seed.stderr || seed.stdout || "unknown")
-        }`,
+        `mysql configureStandby seed failed: ${formatStandbySeedFailure(seed)}`,
       );
     }
 
@@ -571,12 +610,30 @@ const mysqlReplicationRuntime: ManagedEngineReplicationRuntime = {
       if (Date.now() >= deadline) return false;
       const out = await runMysqlQuery(ctx, isWritableSql());
       const [readOnly, superReadOnly] = out.trim().split(/\s+/);
-      if (readOnly === "0" && superReadOnly === "0") return true;
+      if (
+        parseSqlBool(readOnly ?? "") === false &&
+        parseSqlBool(superReadOnly ?? "") === false
+      ) {
+        return true;
+      }
       await sleep(500);
       return writable();
     };
     if (await writable()) return;
     throw new Error("mysql promote did not become writable within 60s");
+  },
+
+  async isStandby(ctx) {
+    const verbose = await runMysqlStatusQuery(ctx, showReplicaStatusSql());
+    return verbose.trim().length > 0;
+  },
+
+  async followPrimary(ctx, spec) {
+    const host = resolveMysqlPrimaryConnectHost(spec.primary);
+    await runMysql(
+      ctx,
+      followReplicationSourceSql({ host, port: spec.primary.port }),
+    );
   },
 
   async readHealth(ctx, role): Promise<ManagedReplicationObservedHealth> {
@@ -612,28 +669,7 @@ export const mysqlManagedEngineRuntime: ManagedEngineRuntime = {
   defaultDatabase: "appdb",
 
   async waitReady(ctx: ManagedEngineContext): Promise<void> {
-    const deadline = Date.now() + READY_TIMEOUT_MS;
-    let lastError = "mysqladmin ping did not succeed";
-    const ready = async (): Promise<boolean> => {
-      if (Date.now() >= deadline) return false;
-      const result = await execMysql(ctx, [
-        "mysqladmin",
-        "ping",
-        "--protocol=socket",
-        "-u",
-        ctx.rootUsername,
-      ]);
-      if (result.success) return true;
-      lastError = result.stderr || result.stdout || lastError;
-      await sleep(READY_POLL_MS);
-      return ready();
-    };
-    if (await ready()) return;
-    throw new Error(
-      `managed mysql not ready within ${READY_TIMEOUT_MS}ms: ${
-        sanitizeForLog(lastError)
-      }`,
-    );
+    await waitMysqlRealServer(ctx);
   },
 
   async readCensus(ctx: ManagedEngineContext): Promise<ManagedEngineCensus> {
@@ -716,7 +752,14 @@ export const mysqlManagedEngineRuntime: ManagedEngineRuntime = {
     const dropped: string[] = [];
     await forEachSequential(usernames, async (username) => {
       if (username === ctx.rootUsername) return;
-      await runMysql(ctx, dropAccountSql(username));
+      await dropUserOnEveryHost({
+        username,
+        fixedHosts: [MANAGED_DOCKER_NETWORK_HOST, "localhost"],
+        quoteLiteral,
+        query: (sql) => runMysqlQuery(ctx, sql),
+        run: (sql) => runMysql(ctx, sql),
+        dropAccountSql,
+      });
       dropped.push(username);
     });
     return dropped;

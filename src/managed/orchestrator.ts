@@ -30,7 +30,7 @@ import {
   runDocker as defaultRunDocker,
   type RunDockerOptions,
 } from "../deploy/docker-cli.ts";
-import { logInfo } from "../util/logger.ts";
+import { logInfo, logWarn } from "../util/logger.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 import { pruneStaleManagedDockerNetworks } from "./networks.ts";
 import {
@@ -47,9 +47,11 @@ import {
   orchestratorRaftCnfPath,
   orchestratorTlsDir,
 } from "./engine-paths.ts";
-import type {
-  EnvironmentDeployContainer,
-  ManagedHaRaftConfig,
+import {
+  type EnvironmentDeployContainer,
+  isValidIpv4Literal,
+  isValidIpv6Literal,
+  type ManagedHaRaftConfig,
 } from "../contracts/commands-contracts.ts";
 import { parseProxySqlClientCnf } from "./proxysql-admin.ts";
 
@@ -142,6 +144,7 @@ export function renderOrchestratorConf(input: OrchestratorConfInput): string {
     MySQLTopologyPassword: input.topologyPassword,
     PostgreSQLTopologyUser: input.topologyUser,
     PostgreSQLTopologyPassword: input.topologyPassword,
+    MySQLTopologyUseSSL: true,
     MySQLTopologySSLSkipVerify: input.sslCaPath === undefined,
     Recover: false,
     RecoverMasterClusterFilters: [],
@@ -167,6 +170,161 @@ export function renderOrchestratorConf(input: OrchestratorConfInput): string {
   return `${JSON.stringify(conf, null, 2)}\n`;
 }
 
+export type OrchestratorTopologyAlias = {
+  name: string;
+  address: string;
+};
+
+/**
+ * extra_hosts entries so Orchestrator can resolve a member's Docker name to
+ * the private-listener address used at register time. Skips names that are
+ * already the register host, and hosts that are not an IP literal.
+ */
+export function orchestratorTopologyAliases(
+  members: readonly { host: string; containerName?: string }[],
+): OrchestratorTopologyAlias[] {
+  const aliases: OrchestratorTopologyAlias[] = [];
+  const seen = new Set<string>();
+  for (const member of members) {
+    const name = member.containerName;
+    if (!name || name === member.host || seen.has(name)) continue;
+    const address = extraHostsAddress(member.host);
+    if (address === null) continue;
+    seen.add(name);
+    aliases.push({ name, address });
+  }
+  return aliases;
+}
+
+function extraHostsAddress(host: string): string | null {
+  if (isValidIpv4Literal(host)) return host;
+  if (isValidIpv6Literal(host)) return `[${host}]`;
+  return null;
+}
+
+/** True when `host` is already an address every Raft peer can dial. */
+export function isOrchestratorRegisterHost(host: string): boolean {
+  return extraHostsAddress(host) !== null;
+}
+
+const LOOPBACK_HOST = "127.0.0.1";
+
+const UNREACHABLE_PUBLISH_IPS = new Set([
+  "",
+  "0.0.0.0",
+  "::",
+  "[::]",
+  LOOPBACK_HOST,
+  "::1",
+  "[::1]",
+]);
+
+/**
+ * Host:port Orchestrator should discover, taken from an engine container's
+ * published private listener. Container names only resolve on that member's
+ * Docker network, so Raft peers on other hosts cannot use them.
+ */
+export function pickPublishedEngineDial(
+  portsJson: string,
+  containerPort: number,
+): { host: string; port: number } | null {
+  let ports: Record<
+    string,
+    Array<{ HostIp?: string; HostPort?: string }> | null
+  >;
+  try {
+    const parsed: unknown = JSON.parse(portsJson);
+    if (typeof parsed !== "object" || parsed === null) return null;
+    ports = parsed as typeof ports;
+  } catch {
+    return null;
+  }
+  const bound = ports[`${containerPort}/tcp`] ?? [];
+  for (const binding of bound) {
+    const host = unwrapPublishedHost(binding.HostIp);
+    const port = Number(binding.HostPort);
+    if (UNREACHABLE_PUBLISH_IPS.has(host)) continue;
+    if (!Number.isInteger(port) || port < 1 || port > 65_535) continue;
+    if (!isOrchestratorRegisterHost(host)) continue;
+    return { host, port };
+  }
+  return null;
+}
+
+function unwrapPublishedHost(host: string | undefined): string {
+  const raw = (host ?? "").trim();
+  if (raw.startsWith("[") && raw.endsWith("]")) return raw.slice(1, -1);
+  return raw;
+}
+
+export async function resolveOrchestratorRegisterHost(
+  member: { host: string; port: number; containerName?: string },
+  run: RunDockerFn,
+): Promise<{ host: string; port: number }> {
+  if (isOrchestratorRegisterHost(member.host)) {
+    return { host: member.host, port: member.port };
+  }
+  const name = member.containerName;
+  if (!name) return { host: member.host, port: member.port };
+  const inspect = await run([
+    "inspect",
+    "--format",
+    "{{json .NetworkSettings.Ports}}",
+    name,
+  ]);
+  if (!inspect.success) {
+    throw new Error(
+      `orchestrator could not inspect ${name} for a register address: ${
+        inspect.stderr || "docker inspect failed"
+      }`,
+    );
+  }
+  const dial = pickPublishedEngineDial(inspect.stdout.trim(), member.port);
+  if (!dial) {
+    throw new Error(
+      `orchestrator needs a host-published port for ${name}:${member.port}`,
+    );
+  }
+  return dial;
+}
+
+/**
+ * True for an address only a private network can reach: RFC 1918, carrier
+ * grade NAT (the range overlay networks often use), and IPv6 unique local.
+ */
+export function isPrivateAdvertiseAddress(address: string): boolean {
+  if (isValidIpv4Literal(address)) {
+    const [a, b] = address.split(".").map(Number) as [number, number];
+    if (a === 10) return true;
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 192 && b === 168) return true;
+    return a === 100 && b >= 64 && b <= 127;
+  }
+  const lower = address.toLowerCase();
+  return lower.startsWith("fc") || lower.startsWith("fd");
+}
+
+function httpPublishPorts(raft: ManagedHaRaftConfig): string[] {
+  // Local API + wait-ready probe this host's loopback; Raft followers proxy
+  // HTTP to HTTPAdvertise (`advertiseAddress:httpPort`), so that same port
+  // must also be published on the advertise address.
+  const loopback = formatPublishedPort(LOOPBACK_HOST, raft.httpPort);
+  if (raft.advertiseAddress === LOOPBACK_HOST) return [loopback];
+  if (!isPrivateAdvertiseAddress(raft.advertiseAddress)) {
+    // The Orchestrator API takes admin actions; never publish it on an
+    // address that is not on a private network.
+    logWarn(
+      "managed",
+      `orchestrator HTTP not published on ${raft.advertiseAddress}: not a private address`,
+    );
+    return [loopback];
+  }
+  return [
+    loopback,
+    formatPublishedPort(raft.advertiseAddress, raft.httpPort),
+  ];
+}
+
 /**
  * Compose document for the per-org Orchestrator Raft group.
  *
@@ -180,6 +338,7 @@ export function orchestratorCompose(
   raft: ManagedHaRaftConfig,
   managedNetwork: string,
   daemonGid?: number | null,
+  topologyAliases: readonly OrchestratorTopologyAlias[] = [],
 ): string {
   const project = orchestratorProject(identity.serviceId);
   assertSafeComposeProjectName(project);
@@ -187,7 +346,7 @@ export function orchestratorCompose(
     raft.advertiseAddress,
     raft.raftPort,
   );
-  const httpPublish = formatPublishedPort("127.0.0.1", raft.httpPort);
+  const httpPublish = httpPublishPorts(raft);
   // Literal `./` prefix — `join(".", …)` normalizes it away and compose then
   // reads the source as a NAMED VOLUME instead of a bind mount.
   const confMountSpec =
@@ -205,20 +364,29 @@ export function orchestratorCompose(
     `      component: ${SYSTEM_MANAGED_HA_COMPONENT}`,
     `      serviceId: ${identity.serviceId}`,
     `      containerName: ${identity.containerName}`,
-    "    restart: unless-stopped",
+    "    restart: always",
     // The image runs as uid 1001 (`mysql`), but the daemon writes the
     // bind-mounted conf and TLS CA as `tp:tp` 0640 (they hold the topology
     // and HTTP-auth passwords, so never world-readable). Joining the
     // daemon's group is what lets the container read them; without it the
     // process dies on start with "Cannot read config file … permission
-    // denied" and `restart: unless-stopped` loops it forever.
+    // denied" and `restart: always` loops it forever.
     ...(typeof daemonGid === "number" && Number.isInteger(daemonGid) &&
         daemonGid > 0
       ? ["    group_add:", `      - ${quoteYamlScalar(String(daemonGid))}`]
       : []),
     "    ports:",
-    `      - ${httpPublish}`,
+    ...httpPublish.map((publish) => `      - ${publish}`),
     `      - ${raftPublish}`,
+    ...(topologyAliases.length > 0
+      ? [
+        "    extra_hosts:",
+        ...topologyAliases.map((alias) => {
+          const entry = quoteYamlScalar(alias.name + ":" + alias.address);
+          return `      - ${entry}`;
+        }),
+      ]
+      : []),
     "    labels:",
     `      ${LABEL_ROLE}: ${LABEL_ROLE_SYSTEM}`,
     `      ${LABEL_SYSTEM_COMPONENT}: ${
@@ -340,6 +508,7 @@ export type EnsureOrchestratorOptions = {
    */
   daemonGid?: number;
   stability?: ContainerStabilityOptions;
+  topologyAliases?: readonly OrchestratorTopologyAlias[];
 };
 
 export async function ensureOrchestratorStack(
@@ -383,6 +552,7 @@ export async function ensureOrchestratorStack(
     raft,
     managedNetwork,
     daemonGid,
+    options.topologyAliases ?? [],
   );
   const restarted = previousCompose !== composeYaml || previousConf !== conf ||
     networkRenamed;

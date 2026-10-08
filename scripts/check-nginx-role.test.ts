@@ -55,3 +55,15 @@ Deno.test("nginx role restarts a running master after the unit changed", () => {
   assert(body.includes("systemctl try-restart turbopanel-nginx.service"));
   assert(body.includes("_nginx_unit.changed"));
 });
+
+Deno.test("nginx role starts the unit so the first site deploy's config test finds its pidfile directory", () => {
+  const at = tasks.indexOf("Ensure turbopanel-nginx is enabled and running");
+  assert(at !== -1, "the role must start turbopanel-nginx, not only enable it");
+  const body = tasks.slice(at, tasks.indexOf("\n- name:", at + 1));
+  assert(body.includes("enabled: true"));
+  assert(body.includes("state: started"));
+  assert(
+    unit.includes("RuntimeDirectoryPreserve=yes"),
+    "a stopped or crashed unit must not take its pidfile directory with it",
+  );
+});
