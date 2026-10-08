@@ -220,7 +220,7 @@ test("replication and status SQL builders", () => {
       "  SOURCE_SSL_CA = '/etc/mysql/tls/ca.crt',",
       "  SOURCE_SSL_VERIFY_SERVER_CERT = 1,",
       "  SOURCE_CONNECT_RETRY = 10,",
-      "  SOURCE_RETRY_COUNT = 604800;",
+      "  SOURCE_RETRY_COUNT = 60480;",
       "START REPLICA;",
     ]
   ) {

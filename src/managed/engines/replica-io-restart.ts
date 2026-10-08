@@ -1,9 +1,12 @@
 /**
- * Decide whether a MySQL-family replica whose IO thread has given up should
- * be started again. A thread that exhausted SOURCE_RETRY_COUNT /
+ * Decide whether a MySQL-family replica needs `START REPLICA` / `START SLAVE`
+ * after a connection outage. A thread that exhausted SOURCE_RETRY_COUNT /
  * MASTER_RETRY_COUNT stays stopped even after the primary returns; health
- * polls can restart it only for connection errors, never applier/GTID errors.
+ * polls restart only for connection errors on IO or SQL, never applier/GTID
+ * errors.
  */
+
+import { logInfo, sanitizeForLog } from "../../util/logger.ts";
 
 export type ReplicaIoThreadState = "yes" | "connecting" | "no";
 
@@ -130,28 +133,49 @@ export function isReplicationApplierError(
   sqlErrno: number,
   sqlError: string,
 ): boolean {
+  if (isReplicationConnectionError(sqlErrno, sqlError)) return false;
+  if (DATA_OR_GTID_ERRNOS.has(sqlErrno)) return true;
   if (sqlErrno !== 0) return true;
   return DATA_OR_GTID_ERROR_RE.test(sqlError);
 }
 
+function replicaIoFieldsAreClean(obs: ReplicaIoRestartObservation): boolean {
+  if (DATA_OR_GTID_ERRNOS.has(obs.lastIoErrno)) return false;
+  if (DATA_OR_GTID_ERROR_RE.test(obs.lastIoError)) return false;
+  return true;
+}
+
 /**
- * Restart IO/SQL only when a thread is actually stopped (not still
- * `Connecting`), the last error is a source connection failure, the SQL
- * applier is clean, and a TCP probe already reached the primary.
+ * Restart IO/SQL when a stopped thread hit a connection error, or the SQL
+ * thread stopped with a connection error while IO is still running or
+ * connecting and IO fields are clean. Never restart through applier/GTID
+ * errors. Caller must confirm the primary is reachable before starting.
  */
 export function shouldRestartReplicaThreads(
   obs: ReplicaIoRestartObservation,
 ): boolean {
   if (!obs.primaryReachable) return false;
+  if (!replicaIoFieldsAreClean(obs)) return false;
   if (isReplicationApplierError(obs.lastSqlErrno, obs.lastSqlError)) {
     return false;
   }
+
   const ioStopped = obs.ioRunning === "no";
+  const ioActive = obs.ioRunning === "yes" || obs.ioRunning === "connecting";
   const sqlStopped = !obs.sqlRunning;
   if (!ioStopped && !sqlStopped) return false;
-  if (DATA_OR_GTID_ERRNOS.has(obs.lastIoErrno)) return false;
-  if (DATA_OR_GTID_ERROR_RE.test(obs.lastIoError)) return false;
-  return isReplicationConnectionError(obs.lastIoErrno, obs.lastIoError);
+
+  const ioConnectionFailure = ioStopped &&
+    isReplicationConnectionError(obs.lastIoErrno, obs.lastIoError);
+  const sqlConnectionFailure = sqlStopped &&
+    isReplicationConnectionError(obs.lastSqlErrno, obs.lastSqlError);
+
+  if (ioStopped && sqlStopped) {
+    return ioConnectionFailure || sqlConnectionFailure;
+  }
+  if (ioStopped) return ioConnectionFailure;
+  if (sqlStopped && ioActive) return sqlConnectionFailure;
+  return false;
 }
 
 export function replicaPrimaryPingArgv(
@@ -191,6 +215,7 @@ export async function healStoppedReplicaIo(options: {
   startSql: string;
   runSql: (sql: string) => Promise<void>;
   pingPrimary: (host: string, port: number) => Promise<boolean>;
+  logComponent?: string;
 }): Promise<boolean> {
   const status = parseReplicaIoStatus(options.verbose);
   if (status.sourceHost.length === 0 || status.sourcePort <= 0) return false;
@@ -212,10 +237,22 @@ export async function healStoppedReplicaIo(options: {
     status.sourcePort,
   );
   if (!reachable) return false;
+  const logComponent = options.logComponent ?? "managed-replica";
+  logInfo(
+    logComponent,
+    `replica heal: attempting ${options.startSql.trim()} for source`,
+    `${status.sourceHost}:${status.sourcePort}`,
+  );
   try {
     await options.runSql(options.startSql);
     return true;
-  } catch {
+  } catch (error) {
+    logInfo(
+      logComponent,
+      `replica heal: ${options.startSql.trim()} failed for source`,
+      `${status.sourceHost}:${status.sourcePort}:`,
+      sanitizeForLog(String(error)),
+    );
     return false;
   }
 }

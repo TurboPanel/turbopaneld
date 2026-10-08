@@ -614,6 +614,7 @@ const mariadbReplicationRuntime: ManagedEngineReplicationRuntime = {
       const restarted = await healStoppedReplicaIo({
         verbose,
         startSql: startReplicaSql(),
+        logComponent: "managed-mariadb",
         runSql: (sql) => runMariadb(ctx, sql),
         pingPrimary: async (host, port) =>
           replicaPrimaryLooksReachable(

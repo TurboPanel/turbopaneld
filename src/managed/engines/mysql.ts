@@ -655,6 +655,7 @@ const mysqlReplicationRuntime: ManagedEngineReplicationRuntime = {
       const restarted = await healStoppedReplicaIo({
         verbose,
         startSql: startReplicaSql(),
+        logComponent: "managed-mysql",
         runSql: (sql) => runMysql(ctx, sql),
         pingPrimary: async (host, port) =>
           replicaPrimaryLooksReachable(

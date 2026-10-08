@@ -138,7 +138,55 @@ test("shouldRestartReplicaThreads never restarts through applier or GTID errors"
   assertEquals(isReplicationConnectionError(2003, ""), true);
   assertEquals(isReplicationConnectionError(1236, "purged"), false);
   assertEquals(isReplicationApplierError(1062, ""), true);
+  assertEquals(isReplicationApplierError(1032, ""), true);
   assertEquals(isReplicationApplierError(0, ""), false);
+  assertEquals(
+    isReplicationApplierError(2013, "Lost connection to MySQL server"),
+    false,
+  );
+  assertEquals(isReplicationApplierError(2003, ""), false);
+});
+
+test("shouldRestartReplicaThreads heals SQL connection errors with IO still running", () => {
+  assertEquals(
+    shouldRestartReplicaThreads({
+      ioRunning: "yes",
+      sqlRunning: false,
+      lastIoErrno: 0,
+      lastSqlErrno: 2013,
+      lastIoError: "",
+      lastSqlError: "Lost connection to MySQL server during query",
+      primaryReachable: true,
+    }),
+    true,
+  );
+  assertEquals(
+    shouldRestartReplicaThreads({
+      ioRunning: "connecting",
+      sqlRunning: false,
+      lastIoErrno: 0,
+      lastSqlErrno: 2006,
+      lastIoError: "",
+      lastSqlError: "MySQL server has gone away",
+      primaryReachable: true,
+    }),
+    true,
+  );
+});
+
+test("shouldRestartReplicaThreads heals when IO and SQL both stopped with connection SQL errno", () => {
+  assertEquals(
+    shouldRestartReplicaThreads({
+      ioRunning: "no",
+      sqlRunning: false,
+      lastIoErrno: 2003,
+      lastSqlErrno: 2013,
+      lastIoError: "Can't connect",
+      lastSqlError: "Lost connection",
+      primaryReachable: true,
+    }),
+    true,
+  );
 });
 
 test("healStoppedReplicaIo starts replica SQL only when the primary pings", async () => {

@@ -364,10 +364,11 @@ export const MYSQL_REPLICA_CONNECT_RETRY_SECONDS = 10;
 /**
  * How many reconnects to attempt. MySQL 8.4 / 9.7 default SOURCE_RETRY_COUNT
  * is 10 (~10 minutes at the 60 s default connect retry) and then leave the
- * IO thread stopped. Seven days of 10 s attempts keeps it retrying across a
- * long primary outage.
+ * IO thread stopped. At {@link MYSQL_REPLICA_CONNECT_RETRY_SECONDS}, seven
+ * days is `(7 * 86400) / 10` attempts.
  */
-export const MYSQL_REPLICA_RETRY_COUNT = 86400 * 7;
+export const MYSQL_REPLICA_RETRY_COUNT = (7 * 86400) /
+  MYSQL_REPLICA_CONNECT_RETRY_SECONDS;
 
 export function startReplicaSql(): string {
   return "START REPLICA;";
