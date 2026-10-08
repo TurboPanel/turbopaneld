@@ -4,7 +4,7 @@
 # role (packages.redis.io .deb extract) and the openlitespeed/caddy vendor
 # layout: `vendor/nginx/<version>/` + `current` symlink.
 #
-# Config/logs/state live under FHS (`/etc|/var/log|/var/lib|/run/turbopanel/nginx`)
+# Config/logs/state live under FHS (`/etc|/var/log|/var/lib`; the pidfile is in the unit's `RuntimeDirectory=`, `/run/turbopanel-nginx`)
 # so version upgrades do not lose site fragments written by
 # `src/deploy/site.ts`.
 #
@@ -140,14 +140,6 @@
     group: "{{ nginx_service_group }}"
     mode: "0640"
 
-- name: Ensure nginx runtime directory (pidfile)
-  ansible.builtin.file:
-    path: "{{ turbopanel_run_dir }}/nginx"
-    state: directory
-    owner: "{{ nginx_service_user }}"
-    group: "{{ nginx_service_group }}"
-    mode: "0750"
-
 - name: Install TurboPanel nginx main config
   ansible.builtin.template:
     src: nginx.conf.j2
@@ -182,3 +174,18 @@
     name: turbopanel-nginx
     enabled: true
     daemon_reload: true
+
+# The pidfile now lives in the unit's own RuntimeDirectory= (/run/{{ nginx_runtime_directory }}),
+# which systemd creates on every start. A running master still holds the old
+# pidfile path, so restart it once when the unit changed; the next reload would
+# otherwise look for the new path and fail.
+- name: Restart a running nginx after its unit changed
+  ansible.builtin.command:
+    cmd: systemctl try-restart turbopanel-nginx.service
+  when: _nginx_unit.changed # noqa: no-handler
+  changed_when: true
+
+- name: Remove the old nginx pidfile directory
+  ansible.builtin.file:
+    path: "{{ turbopanel_run_dir }}/nginx"
+    state: absent
