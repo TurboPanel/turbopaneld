@@ -1671,7 +1671,64 @@ export type EnsureProxySqlIngressOptions = {
   readonly listenerPorts: ProxySqlListenerPorts | null | undefined;
   readonly managedNetwork: string;
   readonly stability?: ContainerStabilityOptions;
+  /** Test seam: the host kernel's memory page size in bytes. */
+  readonly pageSizeBytes?: () => Promise<number | undefined>;
 };
+
+/** The largest kernel memory page size the published proxy image can start on. */
+export const PROXYSQL_MAX_SUPPORTED_PAGE_SIZE = 4096;
+
+/**
+ * Plain-words error for a host whose kernel pages memory in larger blocks than
+ * the proxy image supports, or `undefined` when the host is fine.
+ *
+ * The published proxy image bundles a memory allocator compiled for 4 KiB
+ * pages. On a kernel with bigger pages (a Raspberry Pi 5 on its default
+ * kernel, Apple Silicon, some 64 KiB ARM servers) it aborts on start, so the
+ * container crash-loops with no useful message and every managed database on
+ * the server loses its client port. Failing early, with the reason, is better
+ * than a restart loop.
+ */
+export function proxySqlPageSizeError(
+  pageSizeBytes: number | undefined,
+): string | undefined {
+  if (
+    pageSizeBytes === undefined ||
+    !Number.isFinite(pageSizeBytes) ||
+    pageSizeBytes <= PROXYSQL_MAX_SUPPORTED_PAGE_SIZE
+  ) {
+    return undefined;
+  }
+  return `This server's kernel uses ${
+    pageSizeBytes / 1024
+  } KiB memory pages, ` +
+    `and the database proxy only starts on ${
+      PROXYSQL_MAX_SUPPORTED_PAGE_SIZE / 1024
+    } KiB pages. ` +
+    `Managed databases cannot run on this server until it boots a ` +
+    `${PROXYSQL_MAX_SUPPORTED_PAGE_SIZE / 1024} KiB-page kernel ` +
+    `(on a Raspberry Pi 5, set kernel=kernel8.img in config.txt and reboot).`;
+}
+
+/** Read the host kernel page size in bytes (Linux only; `undefined` if unknown). */
+async function readHostPageSizeBytes(): Promise<number | undefined> {
+  if (Deno.build.os !== "linux") return undefined;
+  try {
+    const out = await new Deno.Command("getconf", {
+      args: ["PAGESIZE"],
+      stdout: "piped",
+      stderr: "null",
+    }).output();
+    if (!out.success) return undefined;
+    const value = Number.parseInt(
+      new TextDecoder().decode(out.stdout).trim(),
+      10,
+    );
+    return Number.isFinite(value) ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 /**
  * Write identity-bearing compose and bring the shared ProxySQL project up.
@@ -1698,6 +1755,10 @@ export async function ensureProxySqlIngress(
     managedNetwork,
     stability,
   } = options;
+  const pageSizeError = proxySqlPageSizeError(
+    await (options.pageSizeBytes ?? readHostPageSizeBytes)(),
+  );
+  if (pageSizeError) throw new Error(pageSizeError);
   const composePath = proxysqlComposePath(layout);
   await Deno.mkdir(proxysqlConfigDir(layout), { recursive: true, mode: 0o750 });
   await Deno.writeTextFile(
