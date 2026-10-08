@@ -37,6 +37,7 @@ import {
   loadOrchestratorRaftToken,
   orchestratorTopologyAliases,
   renderOrchestratorConf,
+  resolveOrchestratorRegisterHost,
   stopOrchestratorStack,
 } from "../managed/orchestrator.ts";
 import {
@@ -143,6 +144,22 @@ async function registerClusters(
   return registered.sort((a, b) => a.localeCompare(b));
 }
 
+async function resolveClustersForOrchestrator(
+  clusters: readonly ManagedHaCluster[],
+  run: RunDockerFn,
+): Promise<ManagedHaCluster[]> {
+  const resolved: ManagedHaCluster[] = [];
+  await forEachSequential(clusters, async (cluster) => {
+    const members: ManagedHaCluster["members"] = [];
+    await forEachSequential(cluster.members, async (member) => {
+      const dial = await resolveOrchestratorRegisterHost(member, run);
+      members.push({ ...member, host: dial.host, port: dial.port });
+    });
+    resolved.push({ ...cluster, members });
+  });
+  return resolved;
+}
+
 export async function handleManagedHaReconcile(
   rawPayload: unknown,
   daemonReceivedAt: string,
@@ -216,8 +233,12 @@ export async function handleManagedHaReconcile(
     throw new Error("managed-ha identity missing after persist");
   }
 
+  const clusters = await resolveClustersForOrchestrator(
+    payload.clusters,
+    run,
+  );
   const topologyAliases = orchestratorTopologyAliases(
-    payload.clusters.flatMap((cluster) => cluster.members),
+    clusters.flatMap((cluster) => cluster.members),
   );
   const restarted = await ensureOrchestratorStack(
     layout,
@@ -233,7 +254,7 @@ export async function handleManagedHaReconcile(
     ...deps?.orchestratorApi,
     credentials: httpAuth,
   };
-  const monitored = payload.clusters.filter((cluster) =>
+  const monitored = clusters.filter((cluster) =>
     orchestratorMonitorsEngine(cluster.engine)
   );
   if (monitored.length < payload.clusters.length) {

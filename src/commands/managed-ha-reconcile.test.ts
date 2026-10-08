@@ -378,6 +378,77 @@ test({
 
 test({
   name:
+    "handleManagedHaReconcile rewrites a container-name host to the published listener",
+  permissions: { env: true, read: true, write: true, run: false },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      const layout = resolveLayout(fixture.env);
+      await seedOrchestratorHostPrep(layout);
+      applyLayoutEnv(fixture);
+      const apiCalls: string[] = [];
+      const [cluster] = presentPayload().clusters;
+      const ports = JSON.stringify({
+        "3306/tcp": [{ HostIp: "10.100.0.5", HostPort: "45001" }],
+      });
+      try {
+        await handleManagedHaReconcile(
+          presentPayload({
+            clusters: [{
+              ...cluster,
+              members: [{
+                ...cluster.members[0]!,
+                host: "db-1",
+                port: 3306,
+                containerName: "db-1",
+              }],
+            }],
+          }),
+          new Date().toISOString(),
+          {
+            runDocker: (args) => {
+              if (args[0] === "inspect") {
+                return Promise.resolve({
+                  success: true,
+                  stdout: ports,
+                  stderr: "",
+                  code: 0,
+                });
+              }
+              return fakeRunWithRunningOrchestrator()(args);
+            },
+            ensureDocker: () => Promise.resolve(),
+            decryptSecrets: decryptSecretsEcho,
+            orchestratorApi: {
+              fetch: (url) => {
+                apiCalls.push(url);
+                return Promise.resolve(new Response("", { status: 200 }));
+              },
+            },
+          },
+        );
+        assertEquals(
+          apiCalls.some((url) =>
+            url.includes("/api/discover/10.100.0.5/45001")
+          ),
+          true,
+        );
+        assertEquals(
+          apiCalls.some((url) => url.includes("/api/discover/db-1/")),
+          false,
+        );
+        const compose = await Deno.readTextFile(
+          orchestratorComposePath(layout),
+        );
+        assertEquals(compose.includes(`"db-1:10.100.0.5"`), true);
+      } finally {
+        clearLayoutEnv();
+      }
+    });
+  },
+});
+
+test({
+  name:
     "handleManagedHaReconcile reports no restart when stack files are unchanged",
   permissions: { env: true, read: true, write: true, run: false },
   fn: async () => {

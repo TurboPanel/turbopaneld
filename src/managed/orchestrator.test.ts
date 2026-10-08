@@ -26,9 +26,11 @@ import {
   orchestratorCompose,
   orchestratorStackPresent,
   orchestratorTopologyAliases,
+  pickPublishedEngineDial,
   readCurrentOrchestratorManagedNetwork,
   readManagedNetworkFromCompose,
   renderOrchestratorConf,
+  resolveOrchestratorRegisterHost,
   restartOrchestratorStack,
   stopOrchestratorStack,
 } from "./orchestrator.ts";
@@ -162,6 +164,59 @@ test("orchestratorCompose publishes HTTP on loopback and advertise, Raft on adve
     true,
   );
   assertEquals(volumes.includes("./tls:/etc/orchestrator/tls:ro"), true);
+});
+
+test("pickPublishedEngineDial uses the private-listener publish, not loopback", () => {
+  assertEquals(
+    pickPublishedEngineDial(
+      JSON.stringify({
+        "3306/tcp": [
+          { HostIp: "127.0.0.1", HostPort: "3306" },
+          { HostIp: "10.100.0.5", HostPort: "45001" },
+        ],
+      }),
+      3306,
+    ),
+    { host: "10.100.0.5", port: 45001 },
+  );
+  assertEquals(
+    pickPublishedEngineDial(
+      JSON.stringify({
+        "3306/tcp": [{ HostIp: "0.0.0.0", HostPort: "45001" }],
+      }),
+      3306,
+    ),
+    null,
+  );
+  assertEquals(pickPublishedEngineDial("not-json", 3306), null);
+});
+
+test("resolveOrchestratorRegisterHost inspects a container-name host", async () => {
+  const commands: string[][] = [];
+  const dial = await resolveOrchestratorRegisterHost(
+    { host: "db-1", port: 3306, containerName: "db-1" },
+    (args) => {
+      commands.push([...args]);
+      return Promise.resolve({
+        success: true,
+        stdout: JSON.stringify({
+          "3306/tcp": [{ HostIp: "10.100.0.5", HostPort: "45001" }],
+        }),
+        stderr: "",
+        code: 0,
+      });
+    },
+  );
+  assertEquals(dial, { host: "10.100.0.5", port: 45001 });
+  assertEquals(commands[0]?.[0], "inspect");
+});
+
+test("resolveOrchestratorRegisterHost keeps an IP host without inspect", async () => {
+  const dial = await resolveOrchestratorRegisterHost(
+    { host: "10.100.0.4", port: 45002, containerName: "db-2" },
+    () => Promise.reject(new TypeError("docker must not run")),
+  );
+  assertEquals(dial, { host: "10.100.0.4", port: 45002 });
 });
 
 test("orchestratorTopologyAliases maps container names onto IP register hosts", () => {

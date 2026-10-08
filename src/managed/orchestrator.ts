@@ -47,13 +47,11 @@ import {
   orchestratorRaftCnfPath,
   orchestratorTlsDir,
 } from "./engine-paths.ts";
-import type {
-  EnvironmentDeployContainer,
-  ManagedHaRaftConfig,
-} from "../contracts/commands-contracts.ts";
 import {
+  type EnvironmentDeployContainer,
   isValidIpv4Literal,
   isValidIpv6Literal,
+  type ManagedHaRaftConfig,
 } from "../contracts/commands-contracts.ts";
 import { parseProxySqlClientCnf } from "./proxysql-admin.ts";
 
@@ -202,6 +200,90 @@ function extraHostsAddress(host: string): string | null {
   if (isValidIpv4Literal(host)) return host;
   if (isValidIpv6Literal(host)) return `[${host}]`;
   return null;
+}
+
+/** True when `host` is already an address every Raft peer can dial. */
+export function isOrchestratorRegisterHost(host: string): boolean {
+  return extraHostsAddress(host) !== null;
+}
+
+const UNREACHABLE_PUBLISH_IPS = new Set([
+  "",
+  "0.0.0.0",
+  "::",
+  "[::]",
+  "127.0.0.1", // NOSONAR typescript:S1313 — loopback publish is not a cluster dial
+  "::1",
+  "[::1]",
+]);
+
+/**
+ * Host:port Orchestrator should discover, taken from an engine container's
+ * published private listener. Container names only resolve on that member's
+ * Docker network, so Raft peers on other hosts cannot use them.
+ */
+export function pickPublishedEngineDial(
+  portsJson: string,
+  containerPort: number,
+): { host: string; port: number } | null {
+  let ports: Record<
+    string,
+    Array<{ HostIp?: string; HostPort?: string }> | null
+  >;
+  try {
+    const parsed: unknown = JSON.parse(portsJson);
+    if (typeof parsed !== "object" || parsed === null) return null;
+    ports = parsed as typeof ports;
+  } catch {
+    return null;
+  }
+  const bound = ports[`${containerPort}/tcp`] ?? [];
+  for (const binding of bound) {
+    const host = unwrapPublishedHost(binding.HostIp);
+    const port = Number(binding.HostPort);
+    if (UNREACHABLE_PUBLISH_IPS.has(host)) continue;
+    if (!Number.isInteger(port) || port < 1 || port > 65_535) continue;
+    if (!isOrchestratorRegisterHost(host)) continue;
+    return { host, port };
+  }
+  return null;
+}
+
+function unwrapPublishedHost(host: string | undefined): string {
+  const raw = (host ?? "").trim();
+  if (raw.startsWith("[") && raw.endsWith("]")) return raw.slice(1, -1);
+  return raw;
+}
+
+export async function resolveOrchestratorRegisterHost(
+  member: { host: string; port: number; containerName?: string },
+  run: RunDockerFn,
+): Promise<{ host: string; port: number }> {
+  if (isOrchestratorRegisterHost(member.host)) {
+    return { host: member.host, port: member.port };
+  }
+  const name = member.containerName;
+  if (!name) return { host: member.host, port: member.port };
+  const inspect = await run([
+    "inspect",
+    "--format",
+    "{{json .NetworkSettings.Ports}}",
+    name,
+  ]);
+  if (!inspect.success) {
+    throw new Error(
+      `orchestrator could not inspect ${name} for a register address: ${
+        inspect.stderr || "docker inspect failed"
+      }`,
+    );
+  }
+  const dial = pickPublishedEngineDial(inspect.stdout.trim(), member.port);
+  if (!dial) {
+    throw new Error(
+      `orchestrator needs a host-published port for ${name}:${member.port}`,
+    );
+  }
+  return dial;
 }
 
 function httpPublishPorts(raft: ManagedHaRaftConfig): string[] {
