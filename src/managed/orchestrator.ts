@@ -356,9 +356,10 @@ export function orchestratorCompose(
     ...(topologyAliases.length > 0
       ? [
         "    extra_hosts:",
-        ...topologyAliases.map((alias) =>
-          `      - ${quoteYamlScalar(`${alias.name}:${alias.address}`)}`
-        ),
+        ...topologyAliases.map((alias) => {
+          const entry = quoteYamlScalar(alias.name + ":" + alias.address);
+          return `      - ${entry}`;
+        }),
       ]
       : []),
     "    labels:",
