@@ -29,6 +29,7 @@ import {
   recreateLostPhysicalSlotSql,
   releaseRoleObjectsSql,
   reloadVerifySql,
+  restoreReadWriteLoginSchemasSql,
   restoreResetSql,
   revokePublicDatabaseAccessSql,
   revokeUnlistedDatabasesSql,
@@ -460,6 +461,14 @@ test("managedSlotRetentionSql reads retained bytes and safe size per managed slo
   assertEquals(sql.includes("safe_wal_size"), true);
   assertEquals(sql.includes("pg_current_wal_lsn()"), true);
   assertEquals(sql.includes("starts_with(slot_name, 'tp_member_')"), true);
+});
+
+test("restoreReadWriteLoginSchemasSql recreates schemas for read-write logins only", () => {
+  const sql = restoreReadWriteLoginSchemasSql();
+  assertStringIncludes(sql, "CREATE SCHEMA %I AUTHORIZATION %I");
+  assertStringIncludes(sql, "'TEMPORARY'");
+  assertStringIncludes(sql, "'CREATE'");
+  assertStringIncludes(sql, "NOT rol.rolsuper");
 });
 
 test("restoreResetSql drops every user schema and recreates only public with its owner and privileges", () => {

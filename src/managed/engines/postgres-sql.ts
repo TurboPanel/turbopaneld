@@ -169,6 +169,42 @@ export function restoreResetSql(): string {
 }
 
 /**
+ * Recreate per-login schemas for every read-write platform login on the
+ * connected database. The schema reset drops them; the dump does not contain
+ * logins created after the backup. Idempotent — run after `pg_restore` in the
+ * same transaction, before `COMMIT`.
+ */
+export function restoreReadWriteLoginSchemasSql(): string {
+  return [
+    "DO $tp_rw_schemas$",
+    "DECLARE r record;",
+    "BEGIN",
+    "  FOR r IN",
+    "    SELECT rol.rolname",
+    "      FROM pg_catalog.pg_roles rol",
+    "     WHERE rol.rolcanlogin",
+    "       AND NOT rol.rolsuper",
+    "       AND pg_catalog.has_database_privilege(",
+    "             rol.oid, pg_catalog.current_database(), 'CONNECT')",
+    "       AND pg_catalog.has_database_privilege(",
+    "             rol.oid, pg_catalog.current_database(), 'TEMPORARY')",
+    "       AND NOT pg_catalog.has_database_privilege(",
+    "             rol.oid, pg_catalog.current_database(), 'CREATE')",
+    "  LOOP",
+    "    IF NOT EXISTS (",
+    "      SELECT 1 FROM pg_catalog.pg_namespace n WHERE n.nspname = r.rolname",
+    "    ) THEN",
+    "      EXECUTE pg_catalog.format(",
+    "        'CREATE SCHEMA %I AUTHORIZATION %I', r.rolname, r.rolname",
+    "      );",
+    "    END IF;",
+    "  END LOOP;",
+    "END",
+    "$tp_rw_schemas$;",
+  ].join("\n");
+}
+
+/**
  * CREATE DATABASE must not run inside a DO/function block (Postgres error
  * "CREATE DATABASE cannot be executed from a function"). Callers check
  * existence first via {@link databaseExistsSql}, then run this top-level.

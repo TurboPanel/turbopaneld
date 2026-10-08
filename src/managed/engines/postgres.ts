@@ -40,6 +40,7 @@ import {
   recreateLostPhysicalSlotSql,
   releaseRoleObjectsSql,
   reloadVerifySql,
+  restoreReadWriteLoginSchemasSql,
   restoreResetSql,
   revokePublicDatabaseAccessSql,
   revokeUnlistedDatabasesSql,
@@ -83,8 +84,9 @@ const POSTGRES_RESTORE_SCRIPT = [
   "set -eu",
   "out=$({",
   String.raw`  printf 'BEGIN;\n%s\n' "$3"`,
-  "  if pg_restore --no-owner -f -; then",
-  String.raw`    printf 'COMMIT;\nSELECT %s;\n' "'tp_restore_committed'"`,
+  "  if pg_restore --no-owner --clean --if-exists -f -; then",
+  String
+    .raw`    printf '%s\nCOMMIT;\nSELECT %s;\n' "$4" "'tp_restore_committed'"`,
   "  fi",
   '} | psql -X -q -A -t -v ON_ERROR_STOP=1 -U "$1" -d "$2")',
   'case "$out" in',
@@ -104,8 +106,11 @@ const postgresBackupRuntime: ManagedEngineBackupRuntime = {
   /**
    * Returns the database to exactly the backup's state, all or nothing.
    *
-   * One transaction: empty every user schema (`restoreResetSql`), then replay
-   * the dump as plain SQL. `COMMIT` is only sent when `pg_restore` succeeded,
+   * One transaction: empty every user schema (`restoreResetSql`), replay the
+   * dump as plain SQL (`pg_restore --clean --if-exists` drops database-global
+   * objects the dump recreates), then recreate per-login read-write schemas
+   * (`restoreReadWriteLoginSchemasSql`). `COMMIT` is only sent when
+   * `pg_restore` succeeded,
    * so a bad or truncated dump, or a failing statement, rolls back and the
    * customer keeps their data. The final line proves the commit happened;
    * without it the command fails. `pg_restore` reads the dump from stdin.
@@ -121,6 +126,7 @@ const postgresBackupRuntime: ManagedEngineBackupRuntime = {
       ctx.rootUsername,
       db,
       restoreResetSql(),
+      restoreReadWriteLoginSchemasSql(),
     ];
   },
 };

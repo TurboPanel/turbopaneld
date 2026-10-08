@@ -176,9 +176,19 @@ for (const series of SERIES) {
            INSERT INTO public.orders (note) VALUES ('first'), ('second');
            CREATE SCHEMA reports;
            CREATE TABLE reports.totals (n int);
-           INSERT INTO reports.totals VALUES (7);`,
+           INSERT INTO reports.totals VALUES (7);
+           CREATE SCHEMA ext;
+           CREATE EXTENSION IF NOT EXISTS pgcrypto SCHEMA ext;
+           CREATE PUBLICATION tp_restore_pub FOR TABLE public.orders;
+           SELECT lo_create(424242);`,
         );
-        await sql("postgres", "CREATE EXTENSION IF NOT EXISTS pgcrypto;");
+        await sql(
+          "postgres",
+          `CREATE FUNCTION tp_restore_trf() RETURNS event_trigger
+             LANGUAGE plpgsql AS $$ BEGIN END; $$;
+           CREATE EVENT TRIGGER tp_restore_et ON ddl_command_end
+             EXECUTE FUNCTION tp_restore_trf();`,
+        );
         await sql("postgres", "GRANT USAGE ON SCHEMA reports TO rw;");
 
         const schemaPrivileges = () =>
@@ -194,8 +204,6 @@ for (const series of SERIES) {
                FROM pg_namespace n, aclexplode(n.nspacl) e
               WHERE n.nspname = 'public';`,
           );
-        const aclBefore = await schemaPrivileges();
-
         // The backup, exactly as the daemon takes it.
         const dump = await docker([
           "exec",
@@ -207,14 +215,21 @@ for (const series of SERIES) {
         assertEquals(dump.success, true, dump.stderr);
 
         // Changes made after the backup: more rows, a new table, a new
-        // schema, and a table that existed at backup time is dropped.
+        // schema, a table dropped after backup, a login added after backup,
+        // and a publication only in the live database (not in the dump).
+        const lateLogin = credential("late_rw", ["read-write"]);
+        await postgresManagedEngineRuntime.applyCredentials(ctx, [
+          ...CREDENTIALS,
+          lateLogin,
+        ]);
         await sql(
           "own",
           `INSERT INTO public.orders (note) VALUES ('after-backup');
            CREATE TABLE public.made_later (id int);
            CREATE SCHEMA later;
            CREATE TABLE later.t (id int);
-           DROP TABLE reports.totals;`,
+           DROP TABLE reports.totals;
+           CREATE PUBLICATION only_after_backup FOR TABLE public.made_later;`,
         );
 
         const restoreArgv = backup.restoreArgv(ctx, { database: "appdb" });
@@ -253,10 +268,26 @@ for (const series of SERIES) {
           "7",
           "a table dropped after the backup should be back",
         );
-        assertEquals(
-          await schemaPrivileges(),
-          aclBefore,
-          "the public schema keeps its privileges",
+        const aclAfter = await schemaPrivileges();
+        for (
+          const entry of [
+            "public:PUBLIC:USAGE",
+            "public:own:CREATE",
+            "public:own:USAGE",
+            "public:ro:USAGE",
+            "public:rw:USAGE",
+          ]
+        ) {
+          assertStringIncludes(
+            aclAfter,
+            entry,
+            "the public schema keeps its backup-era privileges",
+          );
+        }
+        assertStringIncludes(
+          aclAfter,
+          "public:late_rw:USAGE",
+          "a login added after the backup keeps its public schema grant",
         );
         assertEquals(
           await sql(
@@ -269,9 +300,44 @@ for (const series of SERIES) {
         assertEquals(
           await sql(
             "postgres",
-            "SELECT count(*) FROM pg_extension WHERE extname = 'pgcrypto';",
+            `SELECT n.nspname FROM pg_extension e
+               JOIN pg_namespace n ON n.oid = e.extnamespace
+              WHERE e.extname = 'pgcrypto';`,
+          ),
+          "ext",
+          "extension in a non-public schema should be back from the backup",
+        );
+        assertEquals(
+          (await sql(
+            "postgres",
+            "SELECT encode(ext.digest('x', 'sha256'), 'hex');",
+          )).length,
+          64,
+          "extension in schema ext should work after restore",
+        );
+        assertEquals(
+          await sql(
+            "postgres",
+            "SELECT count(*) FROM pg_publication WHERE pubname = 'tp_restore_pub';",
           ),
           "1",
+          "publication from the backup should be restored",
+        );
+        assertEquals(
+          await sql(
+            "postgres",
+            "SELECT count(*) FROM pg_event_trigger WHERE evtname = 'tp_restore_et';",
+          ),
+          "1",
+          "event trigger from the backup should be restored",
+        );
+        assertEquals(
+          await sql(
+            "postgres",
+            "SELECT count(*) FROM pg_largeobject_metadata WHERE oid = 424242;",
+          ),
+          "1",
+          "large object from the backup should be restored",
         );
         // The bound logins keep working after the restore.
         assertEquals(
@@ -289,6 +355,26 @@ for (const series of SERIES) {
         await sql(
           "own",
           "CREATE TABLE public.owner_can_still_create (id int);",
+        );
+        // Login created after the backup: role grants survive restore; the
+        // per-login schema is recreated by restoreReadWriteLoginSchemasSql.
+        await sql(
+          "late_rw",
+          "CREATE TABLE late_rw.after_restore (id int); INSERT INTO late_rw.after_restore VALUES (1);",
+        );
+        assertEquals(
+          await sql("postgres", "SELECT count(*) FROM late_rw.after_restore;"),
+          "1",
+        );
+        // pg_restore --clean only drops objects named in the dump; a
+        // publication created solely after the backup is not in the archive.
+        assertEquals(
+          await sql(
+            "postgres",
+            "SELECT count(*) FROM pg_publication WHERE pubname = 'only_after_backup';",
+          ),
+          "1",
+          "publications not in the dump are left in place by --clean",
         );
 
         // A dump that fails halfway rolls everything back: data stays.

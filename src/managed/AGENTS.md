@@ -387,8 +387,10 @@ ProxySQL to enforce. Canonical policy:
    - **A restore returns the database to the backup's state, all or nothing.**
      Postgres runs one transaction: `restoreResetSql` drops every user schema
      (only `public` is recreated, with its owner and privileges; the dump
-     creates the others), then the dump is replayed as plain SQL (`pg_restore
-     --no-owner -f -` into `psql`). `COMMIT` is sent only when `pg_restore`
+     creates the others), then the dump is replayed as plain SQL
+     (`pg_restore --no-owner --clean --if-exists -f -` into `psql`), then
+     `restoreReadWriteLoginSchemasSql` recreates per-login read-write schemas.
+     `COMMIT` is sent only when `pg_restore`
      succeeded, and the script fails unless the server confirmed the commit,
      so a truncated dump, a failing statement or a lock timeout (30 s) leaves
      the data untouched. Rows, tables and schemas made after the backup are

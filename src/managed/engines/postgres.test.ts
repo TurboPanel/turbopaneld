@@ -409,8 +409,11 @@ test("backup dump/restore argv always target the stable platform admin regardles
     'psql -X -q -A -t -v ON_ERROR_STOP=1 -U "$1" -d "$2"',
   );
   assertEquals(restoreArgv[2].includes("appdb"), false);
-  assertStringIncludes(restoreArgv[2], "pg_restore --no-owner -f -");
-  assertEquals(restoreArgv[2].includes("--clean"), false);
+  assertStringIncludes(
+    restoreArgv[2],
+    "pg_restore --no-owner --clean --if-exists -f -",
+  );
+  assertStringIncludes(restoreArgv[7], "CREATE SCHEMA %I AUTHORIZATION %I");
 });
 
 function standbyReplicationSpec() {
