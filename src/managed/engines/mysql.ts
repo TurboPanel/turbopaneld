@@ -16,6 +16,7 @@ import { forEachSequential } from "../../util/sequential.ts";
 import { grantDatabasePrivileges } from "./grant-databases.ts";
 import { parseMysqlFreshness } from "./replica-freshness.ts";
 import {
+  accountHostsSql,
   authSocketPluginPresentSql,
   changeReplicationSourceSql,
   connectionCensusSql,
@@ -33,6 +34,7 @@ import {
   grantRootSql,
   installAuthSocketPluginSql,
   isWritableSql,
+  MANAGED_DOCKER_NETWORK_HOST,
   promoteSql,
   quoteIdentifier,
   replicaFreshnessSql,
@@ -716,7 +718,21 @@ export const mysqlManagedEngineRuntime: ManagedEngineRuntime = {
     const dropped: string[] = [];
     await forEachSequential(usernames, async (username) => {
       if (username === ctx.rootUsername) return;
-      await runMysql(ctx, dropAccountSql(username));
+      // Per-member accounts (monitor, client, root) exist for each member
+      // host address, which changes as members come and go: drop whatever
+      // hosts the account really has, not only the fixed ones.
+      const existing = (await runMysqlQuery(ctx, accountHostsSql(username)))
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0);
+      await runMysql(
+        ctx,
+        dropAccountSql(username, [
+          MANAGED_DOCKER_NETWORK_HOST,
+          "localhost",
+          ...existing,
+        ]),
+      );
       dropped.push(username);
     });
     return dropped;

@@ -15,6 +15,7 @@ import { forEachSequential } from "../../util/sequential.ts";
 import { grantDatabasePrivileges } from "./grant-databases.ts";
 import { parseMariadbFreshness } from "./replica-freshness.ts";
 import {
+  accountHostsSql,
   changeReplicationSourceSql,
   connectionCensusSql,
   createClientAccountSql,
@@ -30,6 +31,7 @@ import {
   grantDatabaseSql,
   grantRootSql,
   isWritableSql,
+  MANAGED_DOCKER_NETWORK_HOST,
   promoteSql,
   quoteIdentifier,
   showReplicaStatusSql,
@@ -677,7 +679,21 @@ export const mariadbManagedEngineRuntime: ManagedEngineRuntime = {
     const dropped: string[] = [];
     await forEachSequential(usernames, async (username) => {
       if (username === ctx.rootUsername) return;
-      await runMariadb(ctx, dropAccountSql(username));
+      // Per-member accounts (monitor, client, root) exist for each member
+      // host address, which changes as members come and go: drop whatever
+      // hosts the account really has, not only the fixed ones.
+      const existing = (await runMariadbQuery(ctx, accountHostsSql(username)))
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0);
+      await runMariadb(
+        ctx,
+        dropAccountSql(username, [
+          MANAGED_DOCKER_NETWORK_HOST,
+          "localhost",
+          ...existing,
+        ]),
+      );
       dropped.push(username);
     });
     return dropped;
