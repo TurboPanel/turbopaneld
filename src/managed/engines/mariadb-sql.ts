@@ -87,11 +87,6 @@ export function ensureProxySqlMonitorAccountSql(
   return lines.join("\n");
 }
 
-/** Every host an account exists for, read back so none is left behind. */
-export function accountHostsSql(username: string): string {
-  return `SELECT host FROM mysql.user WHERE user = ${quoteLiteral(username)};`;
-}
-
 export function dropAccountSql(
   username: string,
   hosts: string[] = [MANAGED_DOCKER_NETWORK_HOST, "localhost"],

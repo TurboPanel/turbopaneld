@@ -98,11 +98,6 @@ export function ensureProxySqlMonitorAccountSql(
  * Drop an account across host variants. Drops managed-network + localhost
  * plus any explicit peer hosts.
  */
-/** Every host an account exists for, read back so none is left behind. */
-export function accountHostsSql(username: string): string {
-  return `SELECT host FROM mysql.user WHERE user = ${quoteLiteral(username)};`;
-}
-
 export function dropAccountSql(
   username: string,
   hosts: string[] = [MANAGED_DOCKER_NETWORK_HOST, "localhost"],
