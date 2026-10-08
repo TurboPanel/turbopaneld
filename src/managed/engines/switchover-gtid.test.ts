@@ -3,6 +3,7 @@ import {
   assertBoundedSwitchoverGtidSet,
   gtidWaitTimedOutMessage,
   parseGtidWaitScalar,
+  quiesceAndReadPrimaryGtid,
   waitForRequiredGtidSet,
 } from "./switchover-gtid.ts";
 import { masterGtidWaitSql } from "./mariadb-sql.ts";
@@ -40,6 +41,19 @@ test("waitForRequiredGtidSet throws on timeout", async () => {
     message = error instanceof Error ? error.message : "";
   }
   assertEquals(message, gtidWaitTimedOutMessage(5));
+});
+
+test("quiesceAndReadPrimaryGtid enforces read-only then returns bounded GTID", async () => {
+  let enforced = false;
+  const gtid = await quiesceAndReadPrimaryGtid(
+    () => {
+      enforced = true;
+      return Promise.resolve();
+    },
+    () => Promise.resolve("0-1-99"),
+  );
+  assertEquals(enforced, true);
+  assertEquals(gtid, "0-1-99");
 });
 
 test("assertBoundedSwitchoverGtidSet rejects empty input", () => {
