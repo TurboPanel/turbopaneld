@@ -387,7 +387,7 @@ test("proxysqlCompose publishes only on the intended address for public/datacent
 });
 
 test("proxysqlCompose publishes a local-scope frontend on loopback only", () => {
-  // `local` exposure: host sites on 127.0.0.1:13306 keep working, and nothing
+  // external access off: host sites on 127.0.0.1:13306 keep working, and nothing
   // else on the host network can reach the listeners.
   const compose = proxysqlCompose(
     DESCRIPTOR,
