@@ -16,6 +16,11 @@ const CONTROL_CHAR_RE = /[\u0000-\u001F\u007F]/;
  * Managed Docker network host for account scoping — 172.16.0.0/12 as MySQL
  * IP/netmask (not `172.%`, which would admit the entire 172.0.0.0/8 range).
  */
+import {
+  type FollowSourceDialect,
+  renderFollowSourceSql,
+} from "./follow-source-sql.ts";
+
 export const MANAGED_DOCKER_NETWORK_HOST = "172.16.0.0/255.240.0.0";
 
 export type ManagedDatabasePrivilege = "owner" | "read-write" | "read-only";
@@ -377,17 +382,19 @@ export function changeReplicationSourceSql(spec: {
  * Re-point an already-configured replica after promotion. Host and port
  * only — user, password, SSL, and auto-position stay as seeded.
  */
+export const MYSQL_FOLLOW_SOURCE_DIALECT: FollowSourceDialect = {
+  stop: "STOP REPLICA",
+  change: "CHANGE REPLICATION SOURCE TO",
+  hostKey: "SOURCE_HOST",
+  portKey: "SOURCE_PORT",
+  start: "START REPLICA",
+};
+
 export function followReplicationSourceSql(spec: {
   host: string;
   port: number;
 }): string {
-  return [
-    "STOP REPLICA;",
-    "CHANGE REPLICATION SOURCE TO",
-    `  SOURCE_HOST = ${quoteLiteral(spec.host)},`,
-    `  SOURCE_PORT = ${spec.port};`,
-    "START REPLICA;",
-  ].join("\n");
+  return renderFollowSourceSql(MYSQL_FOLLOW_SOURCE_DIALECT, spec, quoteLiteral);
 }
 
 /**
