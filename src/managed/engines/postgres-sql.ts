@@ -870,6 +870,56 @@ function formatConninfoValue(value: string): string {
   }'`;
 }
 
+/** Read a single-quoted conninfo value starting after the opening quote. */
+function readQuotedConninfoValue(
+  text: string,
+  start: number,
+): { value: string; next: number } {
+  let value = "";
+  let i = start;
+  while (i < text.length) {
+    const ch = text[i]!;
+    if (ch === "\\" && i + 1 < text.length) {
+      value += text[i + 1];
+      i += 2;
+    } else if (ch === "'") {
+      return { value, next: i + 1 };
+    } else {
+      value += ch;
+      i += 1;
+    }
+  }
+  return { value, next: i };
+}
+
+/** Read an unquoted conninfo value up to the next space. */
+function readBareConninfoValue(
+  text: string,
+  start: number,
+): { value: string; next: number } {
+  let i = start;
+  while (i < text.length && text[i] !== " ") i += 1;
+  return { value: text.slice(start, i), next: i };
+}
+
+function parseConninfoEntries(current: string): Array<[string, string]> {
+  const entries: Array<[string, string]> = [];
+  let i = 0;
+  while (i < current.length) {
+    while (i < current.length && current[i] === " ") i += 1;
+    const eq = current.indexOf("=", i);
+    if (i >= current.length || eq === -1) break;
+    const key = current.slice(i, eq);
+    const valueStart = eq + 1;
+    const read = current[valueStart] === "'"
+      ? readQuotedConninfoValue(current, valueStart + 1)
+      : readBareConninfoValue(current, valueStart);
+    entries.push([key, read.value]);
+    i = read.next;
+  }
+  return entries;
+}
+
 /**
  * Replace `host` / `port` (and `hostaddr` when present or supplied) in a
  * libpq `primary_conninfo` string, leaving user, password, and TLS keys.
@@ -878,40 +928,7 @@ export function rewritePrimaryConninfo(
   current: string,
   primary: { host: string; hostaddr?: string; port: number },
 ): string {
-  const entries: Array<[string, string]> = [];
-  let i = 0;
-  while (i < current.length) {
-    while (i < current.length && current[i] === " ") i += 1;
-    if (i >= current.length) break;
-    const eq = current.indexOf("=", i);
-    if (eq === -1) break;
-    const key = current.slice(i, eq);
-    i = eq + 1;
-    let value = "";
-    if (current[i] === "'") {
-      i += 1;
-      while (i < current.length) {
-        const ch = current[i];
-        if (ch === "\\" && i + 1 < current.length) {
-          value += current[i + 1];
-          i += 2;
-          continue;
-        }
-        if (ch === "'") {
-          i += 1;
-          break;
-        }
-        value += ch;
-        i += 1;
-      }
-    } else {
-      while (i < current.length && current[i] !== " ") {
-        value += current[i];
-        i += 1;
-      }
-    }
-    entries.push([key, value]);
-  }
+  const entries = parseConninfoEntries(current);
   const byKey = new Map(entries);
   byKey.set("host", primary.host);
   byKey.set("port", String(primary.port));
@@ -920,20 +937,10 @@ export function rewritePrimaryConninfo(
   } else if (byKey.has("hostaddr")) {
     byKey.set("hostaddr", primary.host);
   }
-  const seen = new Set<string>();
-  const out: string[] = [];
-  for (const [key] of entries) {
-    if (seen.has(key)) continue;
-    seen.add(key);
-    const value = byKey.get(key);
-    if (value === undefined) continue;
-    out.push(`${key}=${formatConninfoValue(value)}`);
-  }
-  for (const [key, value] of byKey) {
-    if (seen.has(key)) continue;
-    out.push(`${key}=${formatConninfoValue(value)}`);
-  }
-  return out.join(" ");
+  // Map keeps first-insertion order: existing keys first, new ones after.
+  return [...byKey]
+    .map(([key, value]) => `${key}=${formatConninfoValue(value)}`)
+    .join(" ");
 }
 
 /** Persist a rewritten `primary_conninfo` and restart the WAL receiver. */
