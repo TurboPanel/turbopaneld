@@ -82,9 +82,9 @@ function assertSafeDatabaseIdentifier(database: string): string {
 const POSTGRES_RESTORE_SCRIPT = [
   "set -eu",
   "out=$({",
-  "  printf 'BEGIN;\\n%s\\n' \"$3\"",
+  String.raw`  printf 'BEGIN;\n%s\n' "$3"`,
   "  if pg_restore --no-owner -f -; then",
-  "    printf 'COMMIT;\\nSELECT %s;\\n' \"'tp_restore_committed'\"",
+  String.raw`    printf 'COMMIT;\nSELECT %s;\n' "'tp_restore_committed'"`,
   "  fi",
   '} | psql -X -q -A -t -v ON_ERROR_STOP=1 -U "$1" -d "$2")',
   'case "$out" in',
