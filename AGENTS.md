@@ -785,8 +785,8 @@ it regresses:
     the owner. daemon-install's tp:tp pass over the config tree skips it;
   - changes only principal accounts (uid ≥ 15001, primary group the
     account's own group `<name>` in the same band, home under the principal
-    root, a listed shell), adds principals only to groups
-    `runtime-registry.json` defines and engine accounts only to a site owner's
+    root, a listed shell), adds principals only to the SSH access
+    groups `runtime-registry.json` defines and engine accounts only to a site owner's
     own group (`tp_principal_own_group`: the account `<name>` exists in the
     band and the group `<name>` is its primary group), and creates a group
     (`groupadd`) only under a name `useradd` would take: never `root`, `tp*`,
@@ -815,9 +815,9 @@ it regresses:
     run** (`DynamicUser=yes`, `User=tpb-<16 hex of sha256(owner/project)>`: a
     uid from systemd's 61184-65519 range that exists only while the unit runs,
     never a host account, never in docker/tp/sudo, refused if a host account
-    or group already has that name or any group lists a `tpb-*` member), with
-    every `tpnode<series>` and `tpdeno<series>` group as
-    `SupplementaryGroups=`, inside the **site owner's own resource group**
+    or group already has that name or any group lists a `tpb-*` member; no
+    supplementary group: the vendored runtimes are readable by everyone),
+    inside the **site owner's own resource group**
     (`Slice=turbopanel-<owner>-build.slice`, a child of the owner's
     `turbopanel-<owner>.slice`, dashes in the owner's name written `.`, so a
     build counts against whatever limits that slice carries;

@@ -29,22 +29,14 @@ the unit starts. Per app:
    `vendor/node-app/<series>/current`. `handleEnvironmentDeploy` calls
    `ensureNativeAppRuntime` **before** `applySourceReleases` so the Git build
    can exec that tree; `applyNativeAppServices` calls it again (idempotent)
-   before units are installed. The role also appends the daemon account
-   (`tp` / dest user) to `tpnode<series>` so a build child can
-   `sudo -n -u <self>` into that group without a daemon re-login (`sg` execs
-   nologin and cannot). It is **separate from the
+   before units are installed. It is **separate from the
    `node-runtime` role**, which vendors the instance's own Node under
    `vendor/node/current`: bumping what tenants execute must never move the
    panel's toolchain, and vice versa. A missing playbook is a warning, not a
    deploy failure (same rule the web engines use). See "Per-app Node version"
    below.
-2. Add every principal in the deploy to the **`tpnodeapp`** group
-   (`ensureSupplementaryGroupMembership`). systemd `execve()`s `ExecStart`
-   *after* dropping to `User=`, so the principal itself needs read + traverse on
-   the vendored Node tree; see "Reaching the vendored Node" below. Best-effort
-   per principal for the same reason step 1 is: a host whose orchestration
-   assets were not shipped may legitimately have no such group, and the health
-   probe in step 7 is what catches a genuinely unreachable runtime.
+2. (No runtime group.) Every installed Node or Deno series may be run by
+   every site owner's Linux user; see "Reaching the vendored Node" below.
 3. Install/refresh the per-principal slice
    `/etc/systemd/system/turbopanel-<username>.slice` from `accountLimits`
    (`CPUQuota` / `MemoryHigh` / `MemoryMax` / `TasksMax`).
@@ -154,8 +146,7 @@ series reduced to the major: `2.9.7` runs series `2`) is the same lane with the
 vendored Deno instead of Node: `ensureNativeAppRuntime` runs
 `deno-app-runtime-apply.yml` (only when the deploy has a Deno app, and the Node
 playbook only when it has a Node app), the unit's `ExecStart` is
-`<runtimesDir>/deno-app/<series>/current/bin/deno …`, and the owner's Linux user
-joins `tpdeno<series>`. The unit sets `PATH` (Deno first), `PORT`, `HOST`,
+`<runtimesDir>/deno-app/<series>/current/bin/deno …`. The unit sets `PATH` (Deno first), `PORT`, `HOST`,
 `HOSTNAME`, `HOME`, `TMPDIR`, `XDG_CACHE_HOME`, `NODE_ENV`, `DENO_DIR=<shared>/.cache/deno`
 (the one writable folder), `DENO_NO_UPDATE_CHECK=1` and `DENO_NO_PROMPT=1`; the
 Corepack lines are not written. The start is the author's `startCommand` (through
@@ -382,23 +373,19 @@ genuinely different binaries while a patch bump inside a series moves nothing in
 the unit text. The tenant tree stays under `node-app/` rather than `node/`
 because `vendor/node/current` is the panel's own toolchain.
 
-**Reaching the vendored Node.** The tree is `root:tpnodeapp 0750` — **not**
-world-readable. Tenant principals have only their own group (`<username>`) and are
-deliberately never added to `tp` (the panel's own group), so `tpnodeapp` (gid
-**9988**, group with no user) exists purely to mean "may execute the vendored
-tenant Node". Its two parents, `/opt/turbopanel` and `vendor/`, stay `tp:tp
-0750` and grant the group **traverse-only** through a POSIX ACL
-(`ansible.posix.acl`, `node-app-runtime` role) rather than an `o+x` mode bit, so
-a principal can reach `node-app/` without being able to list either parent. Two
-consequences worth knowing:
-
-- `turbopanel-user` recursively fixes ownership only under `vendor/uv`,
-  `vendor/python`, and `vendor/ansible` — the three subtrees bootstrap
-  populates. A blanket recurse over `vendor/` would hand `node-app/` back to
-  `tp:tp` on every converge and leave tenant units failing `203/EXEC`.
-- The vendoring shell `chown -R root:tpnodeapp` + `chmod -R u=rwX,g=rX,o=` each
-  extracted release: `cp -a` otherwise preserves the upstream tarball's
-  world-readable `0755`.
+**Reaching the vendored Node.** Every installed series may be run by every
+site owner's Linux user (owner decision 2026-10-07), so there is no runtime
+group. Each `vendor/node-app/<series>/<version>/` tree is `root:root`, readable
+and executable by everyone, writable by root only (the vendoring shell runs
+`chown -R root:root` + `chmod -R u=rwX,go=rX` on every run, which also repairs
+a tree an older release grouped to `tpnode<series>`). `/opt/turbopanel`,
+`vendor/`, `node-app/` and `node-app/<series>/` stay `0750` with an `other:x`
+POSIX ACL (`runtime-access` role) rather than an `o+x` mode bit, so a site
+owner's Linux user reaches its series by path without being able to list any
+of them. `turbopanel-user` recursively fixes ownership only under `vendor/uv`,
+`vendor/python`, and `vendor/ansible` — the three subtrees bootstrap populates.
+A blanket recurse over `vendor/` would hand `node-app/` back to `tp:tp` on
+every converge.
 
 **Container-only paths must never see a host-native hosting.** Neither lane has
 a service in the runtime compose, so a hosting that names one has no compose

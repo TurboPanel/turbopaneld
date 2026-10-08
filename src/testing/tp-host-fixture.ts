@@ -76,7 +76,7 @@ export async function makeHost(): Promise<Host> {
       "docker:x:998:tp",
       "tp:x:9999:",
       "tpnginx:x:9990:",
-      "tpphp84:x:9902:",
+      "tpshell:x:9985:",
       "tpsftp:x:9986:",
       "alice:x:15001:",
       "carol:x:15003:",

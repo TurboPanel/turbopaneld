@@ -2,6 +2,7 @@ import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import {
   apacheSiteConfig,
   nginxSiteConfig,
+  pruneHoldKeysForDeploy,
   resolveSiteEngineNeeds,
   resolveSiteOwnership,
   type SiteApplySpec,
@@ -191,6 +192,34 @@ test("a paired site needs both engines and reaches PHP through Apache", () => {
   assertEquals(needs.apache, true);
   assertEquals(needs.caddy, false);
   assertEquals([...needs.phpFpmEngines], ["apache"]);
+});
+
+test("a deploy holds every engine its sites are served by, and its PHP series, never Caddy", () => {
+  assertEquals(pruneHoldKeysForDeploy([pairedSite]), [
+    "php:8.4",
+    "engine:nginx",
+    "engine:apache",
+  ]);
+  assertEquals(
+    pruneHoldKeysForDeploy([
+      {
+        composeServiceName: "ols",
+        engine: "openlitespeed",
+        root: "public",
+        listenPort: 18081,
+        php: { version: "8.3", mode: "lsphp-detached" },
+      },
+      {
+        composeServiceName: "static",
+        engine: "caddy",
+        root: "public",
+        listenPort: 18082,
+        php: { version: "8.4" },
+      },
+    ]),
+    ["php:8.3", "php:8.4", "engine:openlitespeed"],
+  );
+  assertEquals(pruneHoldKeysForDeploy([]), []);
 });
 
 test("a paired site's tree carries the principal group both engines join", () => {

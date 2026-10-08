@@ -1,9 +1,8 @@
 ---
 # Removes PHP series that no site uses any more. Install is lazy (a series
 # lands on the first deploy that names it, see the php-fpm and openlitespeed
-# roles); this is its counterpart. Never entitlement groups: they are one
-# line in /etc/group, site owners' Linux users keep their group membership,
-# and the next deploy of the series needs them again.
+# roles); this is its counterpart. There are no per-version groups to remove:
+# every installed series may be run by every site owner's Linux user.
 #
 # The daemon works out which series are unused (it sees every vhost, pool and
 # per-site runtime on the host and every deploy in flight). Root re-checks the

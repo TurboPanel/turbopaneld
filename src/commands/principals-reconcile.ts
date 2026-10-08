@@ -15,9 +15,8 @@
  * command rail is for — unlike a repository read, which is an operator request
  * *with* an answer and therefore rides the cell request channel instead.
  *
- * It subsumes more than keys. Shell changes and runtime entitlement grants also
- * stop requiring a redeploy, which fixes a real defect: granting a principal
- * PHP 8.4 currently means deploying one of its environments.
+ * It subsumes more than keys: shell and SSH access changes also stop requiring
+ * a redeploy.
  */
 
 import { logInfo } from "../util/logger.ts";
@@ -70,9 +69,6 @@ export async function handlePrincipalsReconcile(
         ...(principal.gid === undefined ? {} : { gid: principal.gid }),
         ...(principal.home === undefined ? {} : { home: principal.home }),
         ...(principal.shell === undefined ? {} : { shell: principal.shell }),
-        ...(principal.runtimes === undefined
-          ? {}
-          : { runtimes: principal.runtimes }),
         ...(principal.accessGroups === undefined
           ? {}
           : { accessGroups: principal.accessGroups }),

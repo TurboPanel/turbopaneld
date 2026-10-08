@@ -41,8 +41,14 @@ The units: the service is a oneshot as `tp:tp` whose only `ExecStart` is the
 wrapper with its own policy id, reading `daemon.env`, at `Nice=10` /
 `IOSchedulingClass=idle`, no `[Install]` (only its timer starts it). The timer
 is `Persistent=true` (a run missed while the host was off happens once when it
-returns) with a 300 s `RandomizedDelaySec`. tp-host pins every one of those
-lines — change `units.ts` and `tp_backup_unit_ok` together.
+returns). How late it may start depends on how often it fires, read from the
+`OnCalendar` value by `backupTimerTiming()`: more than once an hour (minute
+field is a step, list or `*`) gets `RandomizedDelaySec=0` and `AccuracySec=1s`
+so a 2-minute policy really fires every 2 minutes; hourly or every few hours
+gets 30 s; daily, weekly and monthly keep 300 s. An `OnCalendar` value it cannot
+read gets no delay. tp-host pins the service lines (`tp_backup_unit_ok`), not
+the timer's delay values — change `units.ts` and `tp_backup_unit_ok` together
+for the service, and `units.test.ts` for the timer.
 
 ## What the runner may do (Deno permissions)
 

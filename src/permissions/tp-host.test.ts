@@ -1107,9 +1107,15 @@ test("scheduled-backup units pass only in their exact shape; tenant units gain n
     const service = backupServiceContent(layout, BACKUP_ID);
     const timer = backupTimerContent(BACKUP_ID, "*-*-* 03:00:00");
 
-    // The daemon's own rendering passes.
+    // The daemon's own rendering passes, including a sub-hourly timer with
+    // its tightened accuracy.
+    const frequentTimer = backupTimerContent(BACKUP_ID, "*-*-* *:0/2:00");
     for (
-      const [name, content] of [[serviceName, service], [timerName, timer]]
+      const [name, content] of [
+        [serviceName, service],
+        [timerName, timer],
+        [timerName, frequentTimer],
+      ]
     ) {
       const result = await installUnit(host, name, content);
       assertEquals(result.code, 0, `${name}: ${result.stderr}`);
@@ -1579,16 +1585,22 @@ test("accounts: only principals are created or changed, and only into registry g
         ["usermod", "-p", "!", "tp"],
         ["gpasswd", "-d", "alice", "alice"],
         ["getent", "shadow", "--", "root"],
+        // The per-version runtime groups are gone from the registry, so a
+        // principal can no longer be put in one.
+        ["usermod", "-aG", "tpphp84", "alice"],
+        ["usermod", "-aG", "tpnode24", "alice"],
+        // The registry name is matched literally: `.` is not a wildcard.
+        ["usermod", "-aG", "tps.ell", "alice"],
       ]
     ) {
       await refused(host, args);
     }
     for (
       const args of [
-        ["usermod", "-aG", "tpphp84", "alice"],
+        ["usermod", "-aG", "tpshell", "alice"],
         ["usermod", "-aG", "tpsftp", "alice"],
         ["usermod", "-aG", "alice", "tpnginx"],
-        ["gpasswd", "-d", "alice", "tpphp84"],
+        ["gpasswd", "-d", "alice", "tpshell"],
         ["usermod", "-p", "!", "alice"],
       ]
     ) {

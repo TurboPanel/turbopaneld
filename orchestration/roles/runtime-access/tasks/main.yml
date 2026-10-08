@@ -1,0 +1,119 @@
+---
+# --- Leftovers of the per-version runtime groups ------------------------------
+# Older releases created one group per runtime series (tpphp84, tpnode24,
+# tpdeno2, ...), made the runtime binaries 0750 to that group and gave it
+# traverse ACLs. Every installed series is now open to every site owner's Linux
+# user, so those groups go. Order matters: the dpkg-statoverride entries and
+# ACL entries name the group, so they are removed while the name still
+# resolves, and the group last. On a host that never had them, every task
+# below finds nothing to do.
+- name: Read the host group database
+  ansible.builtin.getent:
+    database: group
+
+# Name AND gid band must match, so a group an operator created is never touched.
+- name: Find the old per-version runtime groups
+  ansible.builtin.set_fact:
+    _runtime_access_legacy_groups: >-
+      {%- set found = [] -%}
+      {%- for name, entry in ansible_facts.getent_group.items() -%}
+      {%- if name is match(runtime_access_legacy_group_pattern)
+            and (entry[1] | int) >= runtime_access_legacy_gid_min
+            and (entry[1] | int) <= runtime_access_legacy_gid_max -%}
+      {%- set _ = found.append(name) -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {{ found | sort }}
+
+# dpkg refuses to run while a statoverride names a group that does not exist,
+# so every override pointing at an old group goes before the group does.
+- name: List dpkg-statoverride entries
+  ansible.builtin.command:
+    argv:
+      - dpkg-statoverride
+      - --list
+  register: _runtime_access_overrides
+  changed_when: false
+  failed_when: false
+  when: _runtime_access_legacy_groups | length > 0
+
+- name: Find the overrides that name an old runtime group
+  ansible.builtin.set_fact:
+    _runtime_access_legacy_overrides: >-
+      {{
+        (_runtime_access_overrides.stdout_lines | default([]))
+        | map('split') | selectattr('3', 'defined')
+        | selectattr('1', 'in', _runtime_access_legacy_groups)
+        | map(attribute='3') | list
+      }}
+  when: _runtime_access_legacy_groups | length > 0
+
+- name: Remove the old runtime-group statoverrides
+  ansible.builtin.command:
+    argv:
+      - dpkg-statoverride
+      - --remove
+      - "{{ item }}"
+  loop: "{{ _runtime_access_legacy_overrides | default([]) }}"
+  changed_when: true
+
+# Removing an override does not reset the file, so the packaged owner and mode
+# come back by hand: root:root, readable and executable by everyone.
+- name: Give the PHP binaries back their packaged owner and mode
+  ansible.builtin.command:
+    argv:
+      - /bin/sh
+      - -c
+      - '[ ! -e "$1" ] || { chown root:root "$1" && chmod 0755 "$1"; }'
+      - runtime-access
+      - "{{ item }}"
+  loop: "{{ _runtime_access_legacy_overrides | default([]) }}"
+  changed_when: true
+
+- name: Check which runtime paths may carry old group ACLs
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - "{{ turbopanel_install_root }}"
+    - "{{ turbopanel_vendor_dir }}"
+    - "{{ turbopanel_vendor_dir }}/lsphp"
+    - "{{ turbopanel_vendor_dir }}/node-app"
+    - "{{ turbopanel_vendor_dir }}/deno-app"
+    - /usr/local/bin/php
+  register: _runtime_access_acl_dirs
+  when: _runtime_access_legacy_groups | length > 0
+
+- name: Remove the old runtime-group ACL entries
+  ansible.posix.acl:
+    path: "{{ item.0 }}"
+    etype: group
+    entity: "{{ item.1 }}"
+    state: absent
+  loop: >-
+    {{
+      (_runtime_access_acl_dirs.results | default([])
+        | selectattr('stat.exists', 'defined') | selectattr('stat.exists')
+        | map(attribute='item') | list)
+      | product(_runtime_access_legacy_groups) | list
+    }}
+  loop_control:
+    label: "{{ item.0 }} -> {{ item.1 }}"
+
+- name: Remove the old per-version runtime groups
+  ansible.builtin.group:
+    name: "{{ item }}"
+    state: absent
+  loop: "{{ _runtime_access_legacy_groups }}"
+
+# --- Traverse access for every site owner's Linux user ------------------------
+# `/opt/turbopanel` and `vendor/` stay 0750: they hold the panel's own
+# runtimes. `other:x` lets anyone follow a path into them without being able
+# to list either directory, the same contract principal-access uses on the
+# home root (an ACL rather than a 0751 mode, which ansible:S2612 flags).
+- name: Let every site owner's Linux user traverse to the vendored runtimes
+  ansible.posix.acl:
+    path: "{{ item }}"
+    etype: other
+    permissions: x
+    state: present
+  loop: "{{ [turbopanel_install_root, turbopanel_vendor_dir] + runtime_access_dirs }}"

@@ -796,29 +796,25 @@ materialization, PHP-FPM wiring, managed-directory sites.
 `/usr/local/bin/php` resolves which co-installed series a bare `php` means for
 the calling account and execs the real binary.
 
-**It grants nothing.** The enforcement is the kernel's at `execve`, against
-`/usr/bin/php<series>` being `root:tpphp<SS> 0750` (the `dpkg-statoverride` the
-php-fpm role applies). The wrapper itself is `root:root 0750` with an execute
-ACL per entitled series group — same answer as running `/usr/bin/php8.3`
-directly. No sudo, no setuid — `src/orchestration/php-dispatcher.test.ts`
+**It grants nothing.** Every installed series may be run by every site owner's
+Linux user: sury's `/usr/bin/php<series>` keeps its packaged `root:root 0755`.
+The wrapper itself is `root:root 0750` with an `other:rx` ACL entry, so every
+account may run it. No sudo, no setuid — `src/orchestration/php-dispatcher.test.ts`
 asserts both.
 
 **It is not a diversion.** `/usr/local/bin` precedes `/usr/bin` in Debian's
 default PATH, so the dispatcher shadows sury's `update-alternatives` link
 without removing it — removing it would break every other package that expects
-`php` to exist. That link was never a privilege leak either: it resolves to
-`/usr/bin/php<series>`, whose mode the kernel checks. What it actually is, is a
-*usability* problem — which series a bare `php` resolves to would otherwise be
-decided by host-global alternatives priority, so two tenants entitled to
-different series would both land on whichever apt installed last.
+`php` to exist. What it fixes is *usability*: which series a bare `php`
+resolves to would otherwise be decided by host-global alternatives priority,
+so two site owners on different series would both land on whichever apt
+installed last.
 
 Resolution order: `$TURBOPANEL_PHP`, then a root-owned per-account pin under
-`<configDir>/php/pins/<username>`, then the highest entitled series. Only ever
-selected from what the account already holds — passing a request straight
-through would reach `execve` and come back as a bare `EACCES` with nothing
-explaining why. The group→series table is **rendered from the registry**, not
-parsed out of the group name (`tpphp810` cannot be read back unambiguously as
-8.10 rather than 81.0), and ordering uses `sort -V` for that same reason.
+`<configDir>/php/pins/<username>`, then the highest installed series. Only ever
+selected from the series installed here (rendered from the playbook's series
+list and checked with `-x`), so a request for a missing one is named instead of
+failing at `execve`. Ordering uses `sort -V`, so 8.10 comes after 8.4.
 
 
 ## Scheduled jobs

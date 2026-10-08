@@ -53,7 +53,9 @@ Docker Compose. The daemon:
    the runtime's php.ini, and the site fragment flips
    `enableScript 1`. Every `context /` renders `allowBrowse 1`: in OLS that is
    the context's "Accessible" flag (`0` is a 403 for everything); listing is
-   `autoIndex 0`. `httpd_config.conf` sets `fileAccessControl`
+   `autoIndex 0`. The `index` block carries `useServer 0` so the vhost's own
+   `indexFiles` (`index.php` first on PHP sites) wins over the server-level
+   `index.html`. `httpd_config.conf` sets `fileAccessControl`
    `requiredPermissionMask 000`: by default OLS answers 403 for any static file
    without the world-read bit, and site files are shared with `tpols` by group.
 
@@ -87,13 +89,13 @@ Docker Compose. The daemon:
 
    **A series nothing uses is removed** (owner decision 2026-10-07: install on
    first use, remove when unused). After `applySites` and `removeSites`,
-   `pruneUnusedPhpSeries` asks `prunePhpSeries` (`site/php-series-prune.ts`)
+   `pruneUnusedSoftware` asks `prunePhpSeries` (`site/php-series-prune.ts`)
    which installed series (php-fpm binaries, vendored `lsphp`, a config tree) no
    site uses: no non-bootstrap pool, no per-site runtime unit, no vhost or
    OpenLiteSpeed config naming a pool socket, a runtime socket or the vendored
    `lsphp` of that series (`readSiteConfigTexts`). Anything it cannot read keeps
    every series. A deploy in this process **holds** the series it names for its
-   whole length (`handleEnvironmentDeploy` -> `holdPhpSeries`): a series is
+   whole length (`handleEnvironmentDeploy` -> `holdPruneKeys`): a series is
    installed minutes before its pool exists, so without the hold a concurrent
    teardown could take it. A hold only waits for a removal that covers its
    series; one removal runs at a time. The removal is `php-series-prune.yml`
@@ -102,8 +104,26 @@ Docker Compose. The daemon:
    autoremove), drops the stat overrides, the masked sury unit, the series'
    config/log/run directories and the vendored `lsphp/<series>` tree, and it
    refuses a series that still has a site pool or a per-site runtime unit on
-   disk. Entitlement groups stay. A failed removal is logged and retried by the
-   next deploy or teardown; it never fails the one that triggered it.
+   disk. A failed removal is logged and retried by the next deploy or teardown; it never fails the one that triggered it.
+
+   **A web engine nothing uses is removed too** (owner decision 2026-10-07).
+   Right after the PHP series step, `pruneEngines` (`site/engine-prune.ts`)
+   looks at nginx, Apache and OpenLiteSpeed: installed means
+   `<vendor>/<engine>/current` exists; in use means its `sites/` holds a
+   `.conf`, `.tpnew` or `.tpprev`, or (OpenLiteSpeed) anything sits in
+   `vhosts/`. A directory it cannot list keeps every engine. Holds are keyed
+   (`site/prune-holds.ts`: `php:8.4`, `engine:nginx`); a deploy holds every
+   series it names and every engine `resolveSiteEngineNeeds` says it serves
+   (`pruneHoldKeysForDeploy`). One removal of either kind runs at a time; a
+   removal asked for while another runs is skipped (the next deploy or
+   teardown asks again). The removal is `engine-prune.yml` (`engine-prune`
+   role, `engine_prune` JSON key checked to nginx|apache|openlitespeed by
+   `tp-orchestrate`): it re-checks the config on disk and refuses an engine with
+   a site, stops and disables `turbopanel-<engine>`, refuses to go on while it
+   is still active, then deletes the unit file, `<vendor>/<engine>` and
+   `<config>/<engine>`. Service accounts, logs and state directories stay. Never
+   Caddy, `turbopanel-php-fpm@` or `vendor/lsphp`. The engine's role installs it
+   again on the next site that needs it.
 
    `php-fpm` and `lsphp` remain different binaries from different sources, but a
    series string means the same thing to both, so one value still selects both.
@@ -179,10 +199,8 @@ Docker Compose. The daemon:
    changed too. RFC 1918 stays open
    (scope addresses, VPC services, operator-set Docker pools), so the host's
    private addresses and other containers' bridge IPs are not closed by it.
-   The `tpphp<series>` entitlement (the binaries are
-   `0750 root:tpphp<series>`) is resolved control-plane side as a `deploy`
-   entitlement; the daemon also adds it on deploy only to
-   cover an older control plane.
+   Every installed PHP series may be run by every site owner's Linux user, so
+   a PHP site needs no group for its runtime.
    No mode keeps the shared master on nginx and Apache; a mode without a
    principal, or lsphp on nginx/Apache, is refused. OpenLiteSpeed runs the same
    runtimes (plus `-lsd<series>`, detached lsphp) behind `tpols`; Caddy ignores

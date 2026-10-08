@@ -594,10 +594,9 @@ test("resolveExecStart for Deno: command, startup file, detected start, then den
   );
 });
 
-test("nativeAppRuntimeTarget picks the runtime tree, series and group", () => {
+test("nativeAppRuntimeTarget picks the runtime tree and series", () => {
   const node = nativeAppRuntimeTarget(layout, { nodeVersion: "22" });
   assertEquals(node.runtime, "node");
-  assertEquals(node.group, "tpnode22");
   assertEquals(node.binDir, "/opt/turbopanel/vendor/node-app/22/current/bin");
   const deno = nativeAppRuntimeTarget(layout, {
     runtime: "deno",
@@ -606,7 +605,6 @@ test("nativeAppRuntimeTarget picks the runtime tree, series and group", () => {
   });
   assertEquals(deno.runtime, "deno");
   assertEquals(deno.series, "2");
-  assertEquals(deno.group, "tpdeno2");
   assertEquals(
     deno.binary,
     "/opt/turbopanel/vendor/deno-app/2/current/bin/deno",

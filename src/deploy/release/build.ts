@@ -64,15 +64,6 @@ import {
 export const BUILD_TIMEOUT_MS = 1_800_000;
 
 /**
- * Refresh supplementary groups (`tpnodeNN`) without a login shell. `sg` execs
- * the passwd shell and dies on `/usr/sbin/nologin` with "This account is
- * currently not available" — the managed daemon user `tp` is nologin, and so
- * is a tenant principal. Same `sudo -n -u <self>` pattern as docker-cli.ts.
- */
-const SUDO_BIN = "/usr/bin/sudo";
-/** Apply the sandboxed build env after sudo's env_reset / secure_path. */
-const ENV_BIN = "/usr/bin/env";
-/**
  * Host binaries a native build may resolve after the tenant Node `bin/`.
  * Do not inherit the daemon PATH: Deno's `node_compat_bin` would shadow
  * `node`, and an unreadable `/usr/local/sbin` makes dash report
@@ -137,19 +128,6 @@ export type NativeBuildRuntime = {
   nodeBinDir: string;
   /** Operator's application mode; `production` when undeclared. */
   nodeEnv: "production" | "development";
-  /**
-   * Per-series entitlement group (`tpnode24`). The vendored tree is
-   * `root:<group> 0750`; builds run as the daemon, so the child is
-   * `sudo -n -u <self>` after the playbook appends the daemon account to this
-   * group (`sg` cannot — it execs `/usr/sbin/nologin`).
-   */
-  runtimeGroup?: string;
-};
-
-/** Group-refresh context for a native-app build child. */
-export type BuildInvocationIdentity = {
-  username: string;
-  env: Record<string, string>;
 };
 
 export type ReleaseBuildParams = {
@@ -172,7 +150,7 @@ export type ReleaseBuildParams = {
   signal?: AbortSignal;
   /**
    * Test seam for the unsandboxed (development) command runner. Defaults to
-   * spawning `sh -c` (or the `sudo -n -u <self>` group refresh).
+   * spawning `sh -c`.
    */
   runCommand?: (
     command: string,
@@ -293,64 +271,14 @@ export function sandboxBuildEnvironment(
 }
 
 /**
- * A bare `sh -c` (development builds). Native-app builds wrap with
- * `sudo -n -u <self> -- env … sh -c` so `initgroups()` picks up `tpnodeNN`
- * without exec'ing the passwd shell. Exported so host-free suites can assert
- * the argv shape without spawning.
+ * A bare `sh -c` (development builds). Exported so host-free suites can
+ * assert the argv shape without spawning.
  */
-export function buildInvocation(
-  command: string,
-  runtimeGroup?: string,
-  identity?: BuildInvocationIdentity,
-): { bin: string; args: string[] } {
-  if (!runtimeGroup) return { bin: "sh", args: ["-c", command] };
-  if (!identity) {
-    throw new TypeError(
-      "native build group refresh requires the daemon username",
-    );
-  }
-  return {
-    bin: SUDO_BIN,
-    args: [
-      "-n",
-      "-u",
-      identity.username,
-      "--",
-      ENV_BIN,
-      // Without `--`, a name that starts with `-` would be read as an option.
-      "--",
-      ...Object.entries(identity.env).map(([key, value]) => `${key}=${value}`),
-      "sh",
-      "-c",
-      command,
-    ],
-  };
-}
-
-async function currentUsername(): Promise<string> {
-  const fromEnv = Deno.env.get("USER")?.trim() ||
-    Deno.env.get("LOGNAME")?.trim();
-  if (fromEnv) return fromEnv;
-  const output = await new Deno.Command("/usr/bin/id", {
-    args: ["-un"],
-    stdout: "piped",
-    stderr: "piped",
-  }).output();
-  const name = new TextDecoder().decode(output.stdout).trim();
-  if (output.success && name) return name;
-  throw new Error(
-    "cannot resolve daemon username for native build group refresh",
-  );
-}
-
-async function resolveBuildInvocation(
-  command: string,
-  env: Record<string, string>,
-  runtimeGroup?: string,
-): Promise<{ bin: string; args: string[] }> {
-  if (!runtimeGroup) return buildInvocation(command);
-  const username = await currentUsername();
-  return buildInvocation(command, runtimeGroup, { username, env });
+export function buildInvocation(command: string): {
+  bin: string;
+  args: string[];
+} {
+  return { bin: "sh", args: ["-c", command] };
 }
 
 const OUTPUT_LIMIT_MESSAGE =
@@ -377,17 +305,12 @@ async function runBuildCommand(
   env: Record<string, string>,
   onOutput?: ReleaseOutputHandler,
   redactSummary: CommandSummaryRedactor = defaultSummaryRedactor,
-  runtimeGroup?: string,
   cancelSignal?: AbortSignal,
 ): Promise<void> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), BUILD_TIMEOUT_MS);
   const signal = withCancelSignal(controller.signal, cancelSignal);
-  const { bin, args } = await resolveBuildInvocation(
-    command,
-    env,
-    runtimeGroup,
-  );
+  const { bin, args } = buildInvocation(command);
   let outputExceeded = false;
   const limits = {
     ...BUILD_OUTPUT_LIMITS,
@@ -816,7 +739,6 @@ export async function runReleaseBuild(
         commandEnv,
         commandOnOutput,
         commandRedactSummary,
-        params.nativeRuntime?.runtimeGroup,
         params.signal,
       ));
   // Build commands run in order and stop at the first failure.

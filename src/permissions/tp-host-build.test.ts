@@ -55,8 +55,8 @@ async function setUpBuildHost(
     );
   }
   const groups = [
-    // Runtime groups in the entitlement band are the build's; anything else
-    // (a look-alike outside the band, a non-series name) is not.
+    // Leftovers of the old per-version runtime groups: a build gets none of
+    // them (every installed runtime is readable by everyone now).
     "tpnodeapp:x:9910:",
     "tpnode24:x:9911:alice",
     "tpnode26:x:9925:",
@@ -194,7 +194,6 @@ function expectedSystemdRun(
     ...[
       "DynamicUser=yes",
       `User=${user}`,
-      "SupplementaryGroups=tpnode24 tpnode26 tpdeno2",
       `WorkingDirectory=${work}`,
       "NoNewPrivileges=yes",
       "CapabilityBoundingSet=",
@@ -659,7 +658,7 @@ test("build-run refuses a symlinked or missing work tree and a loosened build la
   });
 });
 
-test("the build gets runtime groups only: never docker, tp, sudo or a look-alike outside the band", async () => {
+test("the build gets no supplementary group, even with old runtime groups on the host", async () => {
   await withHost(async (host) => {
     await setUpBuildHost(host, {
       groups: ["tpnode30x:x:9930:", "tpnode31:x:999:", "tpdeno2x:x:9942:"],
@@ -667,26 +666,9 @@ test("the build gets runtime groups only: never docker, tp, sudo or a look-alike
     const result = await host.run(["build-run", "b1", "p1", "alice"]);
     assertEquals(result.code, 0, result.stderr);
     const run = execLines(result.stdout).at(-1) ?? "";
-    // The one group list the unit gets (docker and the rest only appear as
-    // InaccessiblePaths= sockets).
-    const groups = run.match(/\[SupplementaryGroups=[^\]]*\]/g);
-    assertEquals(groups, ["[SupplementaryGroups=tpnode24 tpnode26 tpdeno2]"]);
-    assertEquals(run.includes("Group="), false);
-  });
-  await withHost(async (host) => {
-    // A host with no Node or Deno series vendored yet: no supplementary group at all.
-    await setUpBuildHost(host);
-    await Deno.writeTextFile(
-      host.path("etc/group"),
-      (await Deno.readTextFile(host.path("etc/group")))
-        .split("\n")
-        .filter((line) => !/^tp(node|deno)\d+:/.test(line))
-        .join("\n"),
-    );
-    const result = await host.run(["build-run", "b1", "p1", "alice"]);
-    assertEquals(result.code, 0, result.stderr);
-    const run = execLines(result.stdout).at(-1) ?? "";
+    // Docker and the rest only appear as InaccessiblePaths= sockets.
     assertEquals(run.includes("SupplementaryGroups"), false);
+    assertEquals(run.includes("Group="), false);
   });
 });
 

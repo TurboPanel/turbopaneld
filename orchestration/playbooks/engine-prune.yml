@@ -1,0 +1,18 @@
+---
+# Remove web engines (nginx, Apache, OpenLiteSpeed) no site on this host uses
+# any more: the vendored tree, the turbopanel-<engine> unit and its config
+# directory. The next site that needs one installs it again.
+#
+# The daemon passes the engines as `-e {"engine_prune": ["nginx"]}` once it has
+# checked that no site config and no deploy in flight needs them
+# (src/deploy/site/engine-prune.ts). The role re-checks the config on disk and
+# refuses an engine that still has a site.
+- name: TurboPanel unused web engine removal
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Remove the unused web engines
+      ansible.builtin.include_role:
+        name: engine-prune
