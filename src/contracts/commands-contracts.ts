@@ -4152,7 +4152,10 @@ function isValidPrincipalShellPath(value: string): boolean {
 }
 
 const PRINCIPAL_USERNAME_RE = /^[A-Za-z_][A-Za-z0-9_-]*$/;
-/** Cap so `${username}-grp` fits the Linux 32-char group-name limit. */
+/**
+ * Longest site owner's Linux user name; its group carries the same name.
+ * Keep in sync with `MAX_PRINCIPAL_USERNAME_LENGTH` in ensure-principal.ts.
+ */
 const MAX_PRINCIPAL_USERNAME_LENGTH = 28;
 
 function isValidPrincipalUsername(value: unknown): value is string {

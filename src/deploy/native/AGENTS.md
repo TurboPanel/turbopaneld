@@ -81,7 +81,7 @@ site remove path does — no second bookkeeping file that could drift
 from what is actually installed.
 
 **Hardening.** Each unit runs as the principal (`User=<username>`,
-`Group=<username>-grp`) under its account slice, with `NoNewPrivileges=yes`,
+`Group=<username>`) under its account slice, with `NoNewPrivileges=yes`,
 `PrivateTmp=yes`, `ProtectSystem=strict`, `ProtectHome=yes`,
 `ProtectKernelTunables=yes`, `ProtectKernelModules=yes`,
 `ProtectControlGroups=yes`, `RestrictSUIDSGID=yes`, `RestrictRealtime=yes`,

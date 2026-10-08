@@ -46,14 +46,14 @@ serving change in the next phase addresses the same tree without restating it):
 ```
 <principalHomeRoot>/.tp-staging/                 root:tp 0710 (publish-open)
   <username>.<serviceId>.<releaseId>/            tp 0700 until tp-host publish
-<principalHomeRoot>/<username>/sites/            root:<username>-grp 0750
-  <serviceId>/                                   root:<username>-grp 0750
-    releases/                                    root:<username>-grp 0750
-      <releaseId>/        root:<username>-grp, top 0550, nothing g/o-writable
+<principalHomeRoot>/<username>/sites/            root:<username> 0750
+  <serviceId>/                                   root:<username> 0750
+    releases/                                    root:<username> 0750
+      <releaseId>/        root:<username>, top 0550, nothing g/o-writable
       <releaseId>/.turbopanel/release.json        per-release manifest
       <releaseId>/shared -> ../../shared              relative convenience link
     current -> releases/<releaseId>
-    shared/               <username>:<username>-grp 0750
+    shared/               <username>:<username> 0750
     .turbopanel-hosting/  root:root 0711  (hosting.env / php.json: <username>:root 0400)
 ```
 
@@ -134,7 +134,7 @@ reuses the single `sudo -n install -d` seam in `ensure-principal.ts`
 (`ensureDirectoryWithOwner` for the root-owned side,
 `ensureDirectoryOwnedByPrincipal` for `shared/`); retention removal goes
 through the same `sudo -n` runner seam, never a second mkdir helper. The daemon
-is **not** in `<username>-grp`, so it cannot traverse the root-owned `0750`
+is **not** in the group `<username>`, so it cannot traverse the root-owned `0750`
 site tree: unprivileged `readlink` of `current`, the rollback swap and the
 probes fall back to that same `sudo -n` runner when Deno returns EACCES. Tests
 that own a temp tree keep the Deno path (copy, link, manifest, probe, seal,
@@ -206,7 +206,7 @@ the probe. `tp-host publish <user> <svc> <id>` then, as root and with every
 path built from the ids: takes the leaf (`root:root 0700`), refuses hard-linked
 files (before any `chown -R`, so no outside inode is re-owned), FIFOs,
 sockets, devices and a shipped `shared`, seals it
-(`chown -R -h -P root:<user>-grp`, `chmod -R u-s,g-s,go-w,g+rX,o-rwx`) and
+(`chown -R -h -P root:<user>`, `chmod -R u-s,g-s,go-w,g+rX,o-rwx`) and
 re-checks that nothing is left foreign-owned, set-id or group/other-writable,
 resolves every symlink physically (`realpath -m`) and refuses one that lands
 outside the leaf (so the two-link `s1/s2/up → ../..` + `s1/s2/s3/x → ../up/..`

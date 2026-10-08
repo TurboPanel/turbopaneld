@@ -727,7 +727,7 @@ it regresses:
     the opened descriptor (`/proc/self/fd/3`); files the daemon staged are
     read *as the daemon account* (`setpriv`);
   - checks systemd unit content before installing it: known directives only,
-    tenant services `User=<principal>` / `Group=<principal>-grp` /
+    tenant services `User=<principal>` / `Group=<principal>` /
     `Slice=turbopanel-<principal>.slice` (each `-` in the name written `.`:
     systemd reads a dash as a slice level, so `a-b` would otherwise sit inside
     `a`'s slice; `tp_principal_slice`, `principalSliceName`; `containers` and
@@ -778,15 +778,31 @@ it regresses:
     traverse tp's 0750 tree otherwise). Sockets sit at
     `/run/turbopanel-php-<siteId>/`, the owner's, group a web server's, 0660.
     Config lives in `/etc/turbopanel/php/sites/<siteId>/` (dir 0750, files
-    0640, root:<owner>-grp, directive allowlist; php.ini's only non-plain
+    0640, root:<owner>, directive allowlist; php.ini's only non-plain
     section is `[PATH=<owner home>]`, the locked limits; php-fpm pools take
     `listen.acl_users`, never `user`/`group`/`listen.group`);
     `php-test <siteId>` runs the installed unit's binary on that config as
     the owner. daemon-install's tp:tp pass over the config tree skips it;
-  - changes only principal accounts (uid ≥ 15001, `<name>-grp`, home under
-    the principal root, a listed shell), adds principals only to the SSH access
-    groups `runtime-registry.json` defines and engine accounts only to principal
-    groups, and takes `chpasswd` input only as one sha512-crypt line;
+  - changes only principal accounts (uid ≥ 15001, primary group the
+    account's own group `<name>` in the same band, home under the principal
+    root, a listed shell), adds principals only to the SSH access
+    groups `runtime-registry.json` defines and engine accounts only to a site owner's
+    own group (`tp_principal_own_group`: the account `<name>` exists in the
+    band and the group `<name>` is its primary group), and creates a group
+    (`groupadd`) only under a name `useradd` would take: never `root`, `tp*`,
+    `systemd-*`, a name in `TP_RESERVED_NAMES` (privileged and system group
+    names such as `sudo`, `admin`, `wheel`, `adm`, `lxd`, `docker`, kept equal
+    to the control plane's reserved list), a name a `sysusers.d` file declares
+    (a package's system user or group that may not exist yet), a group sudoers
+    names (`%name`, quoted or escaped, in `/etc/sudoers`, `sudoers.d` and the
+    files it `@include`s), a name ending in `-grp` (an older owner's group),
+    an all-digit name, an existing account or an existing group. `useradd`
+    takes the same names and only a fresh group of the user's own name: in the
+    band, nobody's primary group yet, no members. Residual risk accepted with
+    the per-user group: polkit rules, PAM `access.conf` and sshd `Match Group`
+    lines that name a group are not scanned. `groupmod` only renames a site
+    owner's old `<name>-grp` primary group to `<name>`. It takes `chpasswd`
+    input only as one sha512-crypt line;
   - allows `systemctl` verbs on `turbopanel*` / `wg-quick@tp0` / `ssh(d)`
     units, fixed `journalctl`/`ss`/`sshd -t|-T`/`sysctl`/`ip`/`wg` shapes, and
     xtables without `--modprobe` or rule files.
@@ -878,7 +894,7 @@ it regresses:
     `<principal root>/.tp-staging`, `root:tp 0710`, a class no generic verb
     accepts) and `publish <user> <svc> <id>`: it takes the leaf, refuses hard
     links, special files and a shipped `shared`, seals it recursively
-    (`root:<user>-grp`, no set-id, nothing group/other-writable), refuses a
+    (`root:<user>`, no set-id, nothing group/other-writable), refuses a
     symlink that resolves outside it, renames it in through a root-owned chain
     on the same filesystem, links `shared`, sets the top to `0550` and swaps
     `current` (a directory at `current` or `current.tmp.<id>` is refused).
@@ -1145,12 +1161,18 @@ Purge order:
    and deletion of the root run only when the path exists. Older installs
    used ids from 1000 (host-picked) or 10001 (overrides); the current band
    starts at 15001. Matching the home is what still finds them. For each
-   account: kill its processes, `userdel` it, then `groupdel` its
-   `<user>-grp` group. A directory in the root with no account (an earlier
-   run already deleted the user) gets `groupdel <name>-grp` only when that
-   group still exists and has no members. Homes are removed after the groups,
-   with `tp_safe_rm_tree`, so a stopped run can still find a leftover
-   `<user>-grp` from the directory name. `/srv` itself is left; Debian ships
+   account: kill its processes, `userdel` it, then `groupdel` its own
+   group: `<user>`, and `<user>-grp` from hosts set up before the group took
+   the user's name (`tp_purge_principal_groups`). Either is removed only when
+   its gid is in the site owners' band (`TP_PRINCIPAL_ID_MIN`-`MAX`,
+   15001-60000), its name is plain and not `root`/`tp*`, and no account still
+   has it as primary group: without the old suffix a directory called `sudo`
+   or `staff` must never cost the host its real group, and a group of that
+   name outside the band is only reported as kept. A directory in the root
+   with no account (an earlier run already deleted the user) gets the same
+   treatment, and additionally keeps a group that still lists any member.
+   Homes are removed after the groups, with `tp_safe_rm_tree`, so a stopped
+   run can still find a leftover group from the directory name. `/srv` itself is left; Debian ships
    it, and `tp_path_is_safe` refuses it. The preflight inventory records
    passwd accounts whose homes lie under a discovered root even when those
    directories are absent.

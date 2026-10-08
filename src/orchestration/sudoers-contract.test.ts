@@ -587,7 +587,7 @@ test("daemon-install.yml never recursively re-owns the daemon state tree", async
 });
 
 test("daemon-install.yml leaves per-site PHP config and the lsphp registry to tp-host", async () => {
-  // php/sites/<id>/ is root:<owner>-grp so the owner's PHP can read it and not
+  // php/sites/<id>/ is root:<owner> so the owner's PHP can read it and not
   // change it; a recursive tp:tp on update left every PHP site without config.
   const doc = parseYaml(await Deno.readTextFile(join(orch, DAEMON_INSTALL)));
   const play = (doc as Array<Record<string, unknown>>)[0]!;

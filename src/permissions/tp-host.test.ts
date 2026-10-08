@@ -182,14 +182,14 @@ test("install -d and mkdir -p create directories only below a managed root", asy
       "-o",
       "alice",
       "-g",
-      "alice-grp",
+      "alice",
       dir,
     ]);
     assertEquals(ok.code, 0, ok.stderr);
     assertEquals((await Deno.stat(dir)).isDirectory, true);
     assertStringIncludes(
       ok.stdout,
-      "EXEC [chown] [-h] [--] [alice:alice-grp] [.]",
+      "EXEC [chown] [-h] [--] [alice:alice] [.]",
     );
     await refused(host, [
       "install",
@@ -1149,7 +1149,7 @@ test("scheduled-backup units pass only in their exact shape; tenant units gain n
         "a principal instead of the daemon",
         service.replace("User=tp", "User=alice").replace(
           "Group=tp",
-          "Group=alice-grp",
+          "Group=alice",
         ),
       ],
       [
@@ -1305,7 +1305,7 @@ test("numeric owner and group ids resolve to the same accounts the name checks a
     assertEquals(mine.code, 0, mine.stderr);
     assertStringIncludes(
       mine.stdout,
-      "EXEC [chown] [-h] [--] [alice:alice-grp] [./home]",
+      "EXEC [chown] [-h] [--] [alice:alice] [./home]",
     );
 
     const staged = host.path("tmp/staged");
@@ -1348,17 +1348,17 @@ test("rm, chown and chmod stay inside the trees and never follow a symlink", asy
 
     const release = host.path("srv/users/alice/sites/web/releases/r1");
     await Deno.mkdir(release, { recursive: true });
-    const chown = await host.run(["chown", "-R", "root:alice-grp", release]);
+    const chown = await host.run(["chown", "-R", "root:alice", release]);
     assertEquals(chown.code, 0, chown.stderr);
     assertStringIncludes(
       chown.stdout,
-      "EXEC [chown] [-R] [-h] [-P] [--] [root:alice-grp] [./r1]",
+      "EXEC [chown] [-R] [-h] [-P] [--] [root:alice] [./r1]",
     );
     await refused(host, ["chown", "alice", host.path("etc/turbopanel")]);
     await refused(host, ["chown", "-R", "tp", host.path("outside")]);
     await refused(host, [
       "chown",
-      "alice:alice-grp",
+      "alice:alice",
       host.path("var/lib/turbopanel/x"),
     ]);
 
@@ -1486,7 +1486,7 @@ test("accounts: only principals are created or changed, and only into registry g
       "-K",
       "UID_MAX=60000",
       "-g",
-      "carol-grp",
+      "carol",
       "-d",
       home,
       "-M",
@@ -1499,14 +1499,14 @@ test("accounts: only principals are created or changed, and only into registry g
     // charge, which on a host with a 9999 account yields uid 10000/10001.
     assertStringIncludes(
       add.stdout,
-      "EXEC [useradd] [-K] [UID_MIN=15001] [-K] [UID_MAX=60000] [-g] [carol-grp]",
+      "EXEC [useradd] [-K] [UID_MIN=15001] [-K] [UID_MAX=60000] [-g] [carol]",
     );
     const addU = await host.run([
       "useradd",
       "-u",
       "15555",
       "-g",
-      "carol-grp",
+      "carol",
       "-d",
       home,
       "-M",
@@ -1517,7 +1517,7 @@ test("accounts: only principals are created or changed, and only into registry g
     assertEquals(addU.code, 0, addU.stderr);
     assertStringIncludes(
       addU.stdout,
-      "EXEC [useradd] [-u] [15555] [-g] [carol-grp]",
+      "EXEC [useradd] [-u] [15555] [-g] [carol]",
     );
     for (
       const args of [
@@ -1526,7 +1526,7 @@ test("accounts: only principals are created or changed, and only into registry g
           "-u",
           "0",
           "-g",
-          "carol-grp",
+          "carol",
           "-d",
           home,
           "-M",
@@ -1541,7 +1541,7 @@ test("accounts: only principals are created or changed, and only into registry g
           "-K",
           "UID_MAX=60000",
           "-g",
-          "carol-grp",
+          "carol",
           "-d",
           "/root",
           "-M",
@@ -1571,7 +1571,7 @@ test("accounts: only principals are created or changed, and only into registry g
           "-K",
           "UID_MAX=60000",
           "-g",
-          "carol-grp",
+          "carol",
           "-d",
           home,
           "-M",
@@ -1583,7 +1583,7 @@ test("accounts: only principals are created or changed, and only into registry g
         ["usermod", "-aG", "docker", "tp"],
         ["usermod", "-s", "/bin/bash", "root"],
         ["usermod", "-p", "!", "tp"],
-        ["gpasswd", "-d", "alice", "alice-grp"],
+        ["gpasswd", "-d", "alice", "alice"],
         ["getent", "shadow", "--", "root"],
         // The per-version runtime groups are gone from the registry, so a
         // principal can no longer be put in one.
@@ -1599,7 +1599,7 @@ test("accounts: only principals are created or changed, and only into registry g
       const args of [
         ["usermod", "-aG", "tpshell", "alice"],
         ["usermod", "-aG", "tpsftp", "alice"],
-        ["usermod", "-aG", "alice-grp", "tpnginx"],
+        ["usermod", "-aG", "alice", "tpnginx"],
         ["gpasswd", "-d", "alice", "tpshell"],
         ["usermod", "-p", "!", "alice"],
       ]
@@ -1740,8 +1740,8 @@ test("tp-host unit metadata is parsed by key and never shifts on an empty field"
   const meta = (u: string, g: string, s: string, n: string) =>
     `user=${u}\ngroup=${g}\nslice=${s}\nnnp=${n}`;
   assertEquals(
-    await parseUnitMeta(meta("a", "a-grp", "a.slice", "yes")),
-    "ok [a] [a-grp] [a.slice] [yes]",
+    await parseUnitMeta(meta("a", "a", "a.slice", "yes")),
+    "ok [a] [a] [a.slice] [yes]",
   );
   // Empty first, middle and last fields stay in place.
   assertEquals(
@@ -1758,8 +1758,8 @@ test("tp-host unit metadata is parsed by key and never shifts on an empty field"
   );
   // The previously shifted case: empty user with the rest populated.
   assertEquals(
-    await parseUnitMeta(meta("", "alice-grp", "turbopanel-alice.slice", "yes")),
-    "ok [] [alice-grp] [turbopanel-alice.slice] [yes]",
+    await parseUnitMeta(meta("", "alice", "turbopanel-alice.slice", "yes")),
+    "ok [] [alice] [turbopanel-alice.slice] [yes]",
   );
   // A value may hold `=` and a literal "-".
   assertEquals(
@@ -1788,7 +1788,7 @@ test("tp-host refuses a tenant unit whose User= is empty", async () => {
     const unit = [
       "[Service]",
       "User=",
-      "Group=alice-grp",
+      "Group=alice",
       "Slice=turbopanel-alice.slice",
       "NoNewPrivileges=yes",
       "ExecStart=/bin/true",
@@ -1821,20 +1821,20 @@ test("principal home: the home root itself is still root:root", async () => {
     const root = host.path("srv/users");
     const ok = await host.run(installDir(root, "0750", "root", "root"));
     assertEquals(ok.code, 0, ok.stderr);
-    await refused(host, installDir(root, "0750", "alice", "alice-grp"));
+    await refused(host, installDir(root, "0750", "alice", "alice"));
   });
 });
 
-test("principal home: the skeleton is root's, never group-writable, and only root:<p>-grp", async () => {
+test("principal home: the skeleton is root's, never group-writable, and only root:<p>", async () => {
   await withHost(async (host) => {
     const home = host.path("srv/users/alice");
     const sealed = await host.run(
-      installDir(home, "0750", "root", "alice-grp"),
+      installDir(home, "0750", "root", "alice"),
     );
     assertEquals(sealed.code, 0, sealed.stderr);
     assertStringIncludes(
       sealed.stdout,
-      "EXEC [chown] [-h] [--] [root:alice-grp] [.]",
+      "EXEC [chown] [-h] [--] [root:alice] [.]",
     );
     const structural = [
       home,
@@ -1846,16 +1846,16 @@ test("principal home: the skeleton is root's, never group-writable, and only roo
     ];
     for (const dir of structural) {
       // The tenant owning any of these could rename root's paths below it.
-      await refused(host, installDir(dir, "0750", "alice", "alice-grp"));
+      await refused(host, installDir(dir, "0750", "alice", "alice"));
       await refused(host, installDir(dir, "0750", "15001"));
-      await refused(host, ["chown", "alice:alice-grp", dir]);
+      await refused(host, ["chown", "alice:alice", dir]);
       await refused(host, ["chown", "tpnginx", dir]);
-      // The engines are in alice-grp: group write is the same rename hole.
-      await refused(host, installDir(dir, "0770", "root", "alice-grp"));
-      await refused(host, installDir(dir, "0752", "root", "alice-grp"));
-      await refused(host, installDir(dir, "2750", "root", "alice-grp"));
+      // The engines are in alice: group write is the same rename hole.
+      await refused(host, installDir(dir, "0770", "root", "alice"));
+      await refused(host, installDir(dir, "0752", "root", "alice"));
+      await refused(host, installDir(dir, "2750", "root", "alice"));
       // Another principal's group, or an engine's, never holds the skeleton.
-      await refused(host, installDir(dir, "0750", "root", "carol-grp"));
+      await refused(host, installDir(dir, "0750", "root", "carol"));
       await refused(host, installDir(dir, "0750", "root", "tpnginx"));
     }
     await Deno.mkdir(`${home}/sites/web/releases/r1`, { recursive: true });
@@ -1866,23 +1866,23 @@ test("principal home: the skeleton is root's, never group-writable, and only roo
       await refused(host, ["chmod", "-R", "u=rwX,g=rX,o=", dir]);
       if (dir.endsWith("/releases/r1")) {
         // A release directory appears only through publish, sealed.
-        await refused(host, installDir(dir, "0750", "root", "alice-grp"));
+        await refused(host, installDir(dir, "0750", "root", "alice"));
         continue;
       }
-      const ok = await host.run(installDir(dir, "0750", "root", "alice-grp"));
+      const ok = await host.run(installDir(dir, "0750", "root", "alice"));
       assertEquals(ok.code, 0, `${dir}: ${ok.stderr}`);
     }
     // Recursion from a skeleton directory would walk the tenant's leaves as
     // root; only a release (all root's) is re-owned in one sweep.
     for (const dir of structural.slice(0, 5)) {
-      await refused(host, ["chown", "-R", "root:alice-grp", dir]);
+      await refused(host, ["chown", "-R", "root:alice", dir]);
       await refused(host, ["chmod", "-R", "0750", dir]);
       await refused(host, setgidDirectoriesFindArgs(dir));
     }
     const seal = await host.run([
       "chown",
       "-R",
-      "root:alice-grp",
+      "root:alice",
       `${home}/sites/web/releases/r1`,
     ]);
     assertEquals(seal.code, 0, seal.stderr);
@@ -1895,22 +1895,22 @@ test("principal home: home/, data/ and tmp/ are the principal's alone, in a seal
     await Deno.chmod(home, 0o750);
     for (const name of ["home", "data", "tmp"]) {
       const dir = `${home}/${name}`;
-      const ok = await host.run(installDir(dir, "0700", "alice", "alice-grp"));
+      const ok = await host.run(installDir(dir, "0700", "alice", "alice"));
       assertEquals(ok.code, 0, ok.stderr);
       assertEquals((await Deno.lstat(dir)).isDirectory, true);
       assertStringIncludes(
         ok.stdout,
-        "EXEC [chown] [-h] [--] [alice:alice-grp] [.]",
+        "EXEC [chown] [-h] [--] [alice:alice] [.]",
       );
-      // 0700: the engine accounts in alice-grp stay out.
-      await refused(host, installDir(dir, "0750", "alice", "alice-grp"));
-      await refused(host, installDir(dir, "0701", "alice", "alice-grp"));
+      // 0700: the engine accounts in alice stay out.
+      await refused(host, installDir(dir, "0750", "alice", "alice"));
+      await refused(host, installDir(dir, "0701", "alice", "alice"));
       await refused(host, ["chmod", "0770", dir]);
       await refused(host, ["chmod", "u=rwX,g=rX,o=", dir]);
       await refused(host, ["chmod", "-R", "u=rwX,g=rX,o=", dir]);
       // Nobody else owns them: not root, an engine, or another principal.
-      await refused(host, installDir(dir, "0700", "tpnginx", "alice-grp"));
-      await refused(host, installDir(dir, "0700", "alice", "carol-grp"));
+      await refused(host, installDir(dir, "0700", "tpnginx", "alice"));
+      await refused(host, installDir(dir, "0700", "alice", "carol"));
       await refused(host, installDir(dir, "0700", "alice", "tpnginx"));
       await refused(host, ["chown", "root", dir]);
     }
@@ -1919,7 +1919,7 @@ test("principal home: home/, data/ and tmp/ are the principal's alone, in a seal
       const leaf of ["sites/web/shared", "sites/web/webroot", "volumes/v1"]
     ) {
       const ok = await host.run(
-        installDir(`${home}/${leaf}`, "0750", "alice", "alice-grp"),
+        installDir(`${home}/${leaf}`, "0750", "alice", "alice"),
       );
       assertEquals(ok.code, 0, `${leaf}: ${ok.stderr}`);
     }
@@ -1936,7 +1936,7 @@ test("principal home: a planted link or an unsealed parent stops the tenant dire
     await Deno.symlink(outside, `${home}/home`);
     await refused(
       host,
-      installDir(`${home}/home`, "0700", "alice", "alice-grp"),
+      installDir(`${home}/home`, "0700", "alice", "alice"),
     );
     assertEquals((await Deno.stat(outside)).mode! & 0o777, 0o755);
     await refused(host, ["chmod", "0700", `${home}/home`]);
@@ -1944,16 +1944,16 @@ test("principal home: a planted link or an unsealed parent stops the tenant dire
     await Deno.chmod(home, 0o770);
     const stderr = await refused(
       host,
-      installDir(`${home}/data`, "0700", "alice", "alice-grp"),
+      installDir(`${home}/data`, "0700", "alice", "alice"),
     );
     assertStringIncludes(stderr, "not sealed");
     await refused(
       host,
-      installDir(`${home}/sites`, "0750", "root", "alice-grp"),
+      installDir(`${home}/sites`, "0750", "root", "alice"),
     );
     await Deno.chmod(home, 0o750);
     const ok = await host.run(
-      installDir(`${home}/data`, "0700", "alice", "alice-grp"),
+      installDir(`${home}/data`, "0700", "alice", "alice"),
     );
     assertEquals(ok.code, 0, ok.stderr);
   });
@@ -1967,7 +1967,7 @@ test("useradd: the passwd home is <root>/<name>/home and nothing else", async ()
       "-u",
       "15003",
       "-g",
-      "carol-grp",
+      "carol",
       "-d",
       home,
       "-M",
@@ -2008,7 +2008,7 @@ async function addPhpAccounts(host: Host) {
   await Deno.writeTextFile(host.path("etc/passwd"), bob, { append: true });
   await Deno.writeTextFile(
     host.path("etc/group"),
-    "bob-grp:x:15002:\ntpapache:x:9991:\ntpols:x:9992:\n",
+    "bob:x:15002:\ntpapache:x:9991:\ntpols:x:9992:\n",
     { append: true },
   );
 }
@@ -2066,7 +2066,7 @@ function phpService(host: Host, mode: PhpMode): string {
     `ExecStart=${phpExec(host, mode)}`,
     ...byMode[mode],
     "User=alice",
-    "Group=alice-grp",
+    "Group=alice",
     "Slice=turbopanel-alice.slice",
     "NoNewPrivileges=yes",
     "CapabilityBoundingSet=",
@@ -2160,7 +2160,7 @@ test("per-site PHP services: a hostile corpus is refused in every mode", async (
       ["runs as another principal", line("User=", "User=bob")],
       ["root group", line("Group=", "Group=root")],
       ["web server group", line("Group=", "Group=tpnginx")],
-      ["another principal's group", line("Group=", "Group=bob-grp")],
+      ["another principal's group", line("Group=", "Group=bob")],
       [
         "another principal's slice",
         line("Slice=", "Slice=turbopanel-bob.slice"),
@@ -2495,7 +2495,7 @@ test("per-site PHP units: only exact names, and the generic tenant shape gains n
     const tenant = [
       "[Service]",
       "User=alice",
-      "Group=alice-grp",
+      "Group=alice",
       "Slice=turbopanel-alice.slice",
       "NoNewPrivileges=yes",
       "ExecStart=/bin/sh -c id",
@@ -2546,7 +2546,7 @@ test("per-site PHP sockets: a hostile corpus is refused", async () => {
       ["owned by a web server", line("SocketUser=", "SocketUser=tpnginx")],
       ["group tp", line("SocketGroup=", "SocketGroup=tp")],
       ["group root", line("SocketGroup=", "SocketGroup=root")],
-      ["the owner's group", line("SocketGroup=", "SocketGroup=alice-grp")],
+      ["the owner's group", line("SocketGroup=", "SocketGroup=alice")],
       [
         "the Caddy site account",
         line("SocketGroup=", "SocketGroup=tpcaddysite"),
@@ -2635,38 +2635,38 @@ async function installPhpConf(
     "-o",
     opts.owner ?? "root",
     "-g",
-    opts.group ?? "alice-grp",
+    opts.group ?? "alice",
     host.path("tmp/conf"),
     `${phpConfDir(host)}/${name}`,
   ]);
 }
 
-test("per-site PHP config: root:<owner>-grp, 0750/0640, directives on an allowlist", async () => {
+test("per-site PHP config: root:<owner>, 0750/0640, directives on an allowlist", async () => {
   await withPhpHost(async (host) => {
     const dir = phpConfDir(host);
     const mkdir = (
       path: string,
       mode = "0750",
       owner = "root",
-      group = "alice-grp",
+      group = "alice",
     ) =>
       host.run(["install", "-d", "-m", mode, "-o", owner, "-g", group, path]);
     const made = await mkdir(dir);
     assertEquals(made.code, 0, made.stderr);
     assertStringIncludes(
       made.stdout,
-      "EXEC [chown] [-h] [--] [root:alice-grp] [.]",
+      "EXEC [chown] [-h] [--] [root:alice] [.]",
     );
     for (
       const [mode, owner, group, path] of [
-        ["0755", "root", "alice-grp", dir],
-        ["0770", "root", "alice-grp", dir],
-        ["0750", "alice", "alice-grp", dir],
-        ["0750", "tp", "alice-grp", dir],
+        ["0755", "root", "alice", dir],
+        ["0770", "root", "alice", dir],
+        ["0750", "alice", "alice", dir],
+        ["0750", "tp", "alice", dir],
         ["0750", "root", "tpnginx", dir],
-        ["0750", "root", "carol-grp", dir],
-        ["0750", "root", "alice-grp", phpConfDir(host, "Shop")],
-        ["0750", "root", "alice-grp", `${dir}/deeper`],
+        ["0750", "root", "carol", dir],
+        ["0750", "root", "alice", phpConfDir(host, "Shop")],
+        ["0750", "root", "alice", `${dir}/deeper`],
         ["0755", "root", "root", host.path("etc/turbopanel/php/sites")],
       ]
     ) {
@@ -2687,7 +2687,7 @@ test("per-site PHP config: root:<owner>-grp, 0750/0640, directives on an allowli
       assertEquals(ok.code, 0, `${name}: ${ok.stderr}`);
       assertStringIncludes(
         ok.stdout,
-        "EXEC [chown] [-h] [--] [root:alice-grp] [./f]",
+        "EXEC [chown] [-h] [--] [root:alice] [./f]",
       );
       assertEquals(await Deno.readTextFile(`${dir}/${name}`), content);
       for (
@@ -2870,7 +2870,7 @@ test("per-site PHP config: symlinks, other verbs and the rollout copy", async ()
       "-o",
       "root",
       "-g",
-      "alice-grp",
+      "alice",
       dir,
     ]);
     assertEquals(
@@ -2894,7 +2894,7 @@ test("per-site PHP config: symlinks, other verbs and the rollout copy", async ()
       const args of [
         ["tee", ini],
         ["chmod", "0666", ini],
-        ["chown", "alice:alice-grp", ini],
+        ["chown", "alice:alice", ini],
         ["chown", "tp", dir],
         ["chmod", "0777", dir],
         ["cp", "-p", "--", ini, `${dir}/php-fpm.conf`],
@@ -3014,7 +3014,7 @@ test("per-site PHP: what the daemon renders for each mode and web server passes 
           mode,
           series: "8.4",
           user: "alice",
-          group: "alice-grp",
+          group: "alice",
           home,
           configDir: host.path("etc/turbopanel"),
           libDir: host.path("opt/turbopanel/lib"),
@@ -3030,7 +3030,7 @@ test("per-site PHP: what the daemon renders for each mode and web server passes 
           "-o",
           "root",
           "-g",
-          "alice-grp",
+          "alice",
           dir,
         ]);
         assertEquals(made.code, 0, made.stderr);
@@ -3065,7 +3065,7 @@ test("per-site PHP: what the daemon renders for each mode and web server passes 
             "-o",
             "root",
             "-g",
-            "alice-grp",
+            "alice",
             host.path("tmp/conf"),
             `${dir}/${name}`,
           ]);
@@ -3121,7 +3121,7 @@ test("one site is bound to one owner across its service, socket and config", asy
       "-o",
       "root",
       "-g",
-      "bob-grp",
+      "bob",
       phpConfDir(host),
     ]);
   });

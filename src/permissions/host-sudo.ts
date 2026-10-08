@@ -45,6 +45,7 @@ export const TP_HOST_VERBS: ReadonlySet<string> = new Set([
   "ip",
   "wg",
   "groupadd",
+  "groupmod",
   "useradd",
   "usermod",
   "gpasswd",

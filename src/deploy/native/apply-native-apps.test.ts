@@ -303,7 +303,7 @@ test("applyNativeAppServices installs the unit, reloads, and enables it", async 
     const unitPath = nativeAppUnitPath("svc-web", host.unitDir);
     const unit = await Deno.readTextFile(unitPath);
     assertStringIncludes(unit, `User=${USERNAME}`);
-    assertStringIncludes(unit, `Group=${USERNAME}-grp`);
+    assertStringIncludes(unit, `Group=${USERNAME}`);
     assertStringIncludes(unit, `Slice=turbopanel-${USERNAME}.slice`);
     assertStringIncludes(unit, "Environment=PORT=18100");
     assertStringIncludes(unit, "/sites/svc-web/current");

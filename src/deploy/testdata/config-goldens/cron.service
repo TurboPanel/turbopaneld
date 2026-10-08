@@ -6,7 +6,7 @@ X-TurboPanel-Environment=env-cron
 [Service]
 Type=oneshot
 User=appuser
-Group=appuser-grp
+Group=appuser
 Slice=turbopanel-appuser.slice
 WorkingDirectory=/srv/users/appuser/x
 Environment=HOME=/srv/users/appuser/home
