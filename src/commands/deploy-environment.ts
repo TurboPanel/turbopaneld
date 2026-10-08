@@ -160,6 +160,8 @@ import {
 } from "../deploy/compose-host-paths.ts";
 import {
   materializeSecretFiles,
+  pruneStaleSecretFiles,
+  removeSecretTree,
   rewriteComposeSecretFilePaths,
 } from "../deploy/secret-runtime.ts";
 import {
@@ -1383,6 +1385,41 @@ async function materializeDeploySecrets(
   );
 }
 
+/**
+ * Remove secret files that left the plan. Runs only once the new release is
+ * up (and its hooks passed): until then the previous release, or the one a
+ * failed or cancelled deploy restores, may still point at these files, so a
+ * restart of it has to find them. The plan is the whole environment's; an
+ * empty plan means every binding or secret variable is gone and the whole
+ * directory goes. Never called from rehydrate.
+ */
+async function pruneDeploySecrets(
+  layout: LayoutPaths,
+  payload: EnvironmentDeployPayload,
+): Promise<void> {
+  const plan = payload.secretPlan ?? [];
+  try {
+    if (plan.length === 0) {
+      await removeSecretTree(layout, payload.projectId, payload.environmentId);
+      return;
+    }
+    await pruneStaleSecretFiles(
+      layout,
+      payload.projectId,
+      payload.environmentId,
+      plan,
+    );
+  } catch (err) {
+    // The release is already running; a leftover file is not a failed deploy.
+    logWarn(
+      "deploy",
+      `could not remove secret files that left the plan: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+}
+
 function applySecretFilePaths(
   yaml: string,
   layout: LayoutPaths,
@@ -1797,13 +1834,15 @@ async function deployContainerServices(
 
     const serviceHooks = parsedPayload.serviceHooks ?? [];
     if (parsedPayload.deployStrategy === "sequential") {
-      return await deploySequentially(input, {
+      const sequential = await deploySequentially(input, {
         chain,
         serviceHooks,
         labeledServices,
         deploymentDir,
         onLine,
       });
+      await pruneDeploySecrets(layout, parsedPayload);
+      return sequential;
     }
     if (serviceHooks.length > 0) {
       // Every hook must be confined to a compose service this deploy runs;
@@ -1853,6 +1892,9 @@ async function deployContainerServices(
       });
     }
 
+    // The new release is up and its hooks passed: only now may the files the
+    // previous one needed (and this plan no longer lists) be removed.
+    await pruneDeploySecrets(layout, parsedPayload);
     return {
       serviceNames: labeledServices,
       composePaths: chain,

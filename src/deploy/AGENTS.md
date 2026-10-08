@@ -121,7 +121,14 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
 6. Decrypt `variableMaterial[]` via `POST /api/daemon/v1/secrets/decrypt` and
    write Compose standalone secret files under
    `<runDir>/deployments/<projectId>/<environmentId>/secrets/` (`secret-runtime.ts`,
-   mode `0600`, dir `0700`). Write the payload `.env` (non-secrets only, `0640`)
+   mode `0600`, dir `0700`). Files are only written before `up`. Once the new release is up (and its
+   post-deploy hooks passed; for a sequential deploy, after the health gate),
+   `pruneStaleSecretFiles` removes every file in that directory that is not in
+   the deploy's secret plan (a detached binding's old password, a removed
+   variable, a half-written `.tmp`), and an empty plan removes the whole
+   directory. A failed, cancelled or reverted deploy never prunes: the release
+   still running, or the one restored, may point at those files. Rehydrate never
+   prunes. Write the payload `.env` (non-secrets only, `0640`)
    next to staged `compose.yaml`. Overlay mounts from each entry's **`mounts[]`**
    (`apply-storage-volumes.ts`) — docker volumes emit
    `volumes.<name> = { name, external: true }` so Compose mounts the

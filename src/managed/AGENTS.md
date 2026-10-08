@@ -78,7 +78,7 @@ Certificate authorities: `../../../turbopanel/src/lib/tls/AGENTS.md`.
 <configDir>/proxysql/
 ├── docker-compose.yml   # daemon-written (mode 0640); absent until first reconcile
 ├── proxysql.cnf         # durable cold-start config (static + users/servers/rules)
-├── admin.cnf            # [client] admin user/password, mode 0600 (Ansible once)
+├── admin.cnf            # [client] admin user/password, mode 0640 root:<daemon group> (Ansible once; the unprivileged daemon reads it, the proxy container mounts it read-only)
 ├── wait-ready.sh        # Ansible; admin-port readiness for the oneshot unit
 └── tls/                 # leaf fullchain/privkey + CA PEMs written on reconcile
     ├── fullchain.pem
