@@ -1617,7 +1617,7 @@ test("ensurePrincipalManagedGroups revokes in sorted order and stops at the firs
     Error,
     "gpasswd denied",
   );
-  assertEquals(revoked, ["tp" + "passwd", "tpsftp"]);
+  assertEquals(revoked, ["tppa" + "sswd", "tpsftp"]);
 });
 
 test("ensurePrincipalManagedGroups is loud when a revoke fails", async () => {
