@@ -207,12 +207,14 @@ export function isOrchestratorRegisterHost(host: string): boolean {
   return extraHostsAddress(host) !== null;
 }
 
+const LOOPBACK_HOST = "127.0.0.1";
+
 const UNREACHABLE_PUBLISH_IPS = new Set([
   "",
   "0.0.0.0",
   "::",
   "[::]",
-  "127.0.0.1", // NOSONAR typescript:S1313 — loopback publish is not a cluster dial
+  LOOPBACK_HOST,
   "::1",
   "[::1]",
 ]);
@@ -290,11 +292,8 @@ function httpPublishPorts(raft: ManagedHaRaftConfig): string[] {
   // Local API + wait-ready probe this host's loopback; Raft followers proxy
   // HTTP to HTTPAdvertise (`advertiseAddress:httpPort`), so that same port
   // must also be published on the advertise address.
-  const loopback = formatPublishedPort(
-    "127.0.0.1", // NOSONAR typescript:S1313 — local HA API bind, not a remote host
-    raft.httpPort,
-  );
-  if (raft.advertiseAddress === "127.0.0.1") return [loopback]; // NOSONAR typescript:S1313
+  const loopback = formatPublishedPort(LOOPBACK_HOST, raft.httpPort);
+  if (raft.advertiseAddress === LOOPBACK_HOST) return [loopback];
   return [
     loopback,
     formatPublishedPort(raft.advertiseAddress, raft.httpPort),
