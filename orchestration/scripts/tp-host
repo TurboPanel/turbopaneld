@@ -1647,7 +1647,7 @@ tp_php_ini_awk='
     if (key == "zend_extension" && val != "opcache.so" && val != "opcache") fail("zend_extension=" val)
     # Only the modules the vendored lsphp ships as shared objects: PHPRC
     # replaces its own php.ini, so the ini of a detached lsphp site loads them.
-    if (key == "extension" && val !~ /^(curl|mysqli|pdo_mysql)(\.so)?$/) fail("extension=" val)
+    if (key == "extension" && val !~ /^(curl|mysqli|pdo_mysql|pgsql|pdo_pgsql)(\.so)?$/) fail("extension=" val)
     if ((key == "opcache.validate_permission" || key == "opcache.validate_root") && val !~ /^(1|[Oo]n|true|yes)$/) fail(key " must stay on")
   }
 '

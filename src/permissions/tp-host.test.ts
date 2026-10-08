@@ -2779,6 +2779,8 @@ test("per-site PHP config: root:<owner>, 0750/0640, directives on an allowlist",
       "extension = curl.so",
       "extension = mysqli.so",
       "extension = pdo_mysql",
+      "extension = pgsql.so",
+      "extension = pdo_pgsql",
     ].join("\n");
     const lsphp = await installPhpConf(
       host,

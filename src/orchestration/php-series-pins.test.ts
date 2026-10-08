@@ -23,6 +23,7 @@ type Defaults = {
   openlitespeed_lsphp_series_map: Record<string, LsphpSeries>;
   openlitespeed_lsphp_sha256: Record<string, string>;
   openlitespeed_lsphp_runtime_packages: Record<string, string[]>;
+  openlitespeed_lsphp_ini_extensions: string[];
 };
 
 const defaults = parse(
@@ -37,6 +38,8 @@ const php = registryJson.runtimes.php as {
   series: Record<string, unknown>;
   suiteSeries: Record<string, string[]>;
   builtinExtensions: Record<string, string[]>;
+  baselineExtensions: string[];
+  optionalExtensions: string[];
 };
 
 /** The `.deb` file names the lsphp role downloads for one series on one suite. */
@@ -117,4 +120,44 @@ test("the php-fpm role leaves a compiled-in extension out of the apt list", asyn
     ),
   );
   assert(series.includes("builtinExtensions[php_fpm_series_item]"));
+});
+
+test("pgsql (pgsql + pdo_pgsql) is in the base set for php-fpm, FastCGI and every lsphp series", async () => {
+  // php-fpm, php-cgi and the CLI share the distro `php<series>-pgsql` package.
+  assert(php.baselineExtensions.includes("pgsql"));
+  assert(!php.optionalExtensions.includes("pgsql"));
+  const fpm = parse(
+    await Deno.readTextFile(
+      new URL(
+        "../../orchestration/roles/php-fpm/defaults/main.yml",
+        import.meta.url,
+      ),
+    ),
+  ) as { php_fpm_baseline_extensions: string[] };
+  assertEquals(
+    [...fpm.php_fpm_baseline_extensions].sort(),
+    [...php.baselineExtensions].sort(),
+  );
+  // lsphp: one `lsphp<NN>-pgsql` package per series, its client library on
+  // every suite, and both modules loaded from the relocated php.ini.
+  for (
+    const [series, entry] of Object.entries(
+      defaults.openlitespeed_lsphp_series_map,
+    )
+  ) {
+    assert(
+      entry.packages.includes(`${entry.pkg}-pgsql`),
+      `lsphp ${series} has no pgsql package`,
+    );
+  }
+  for (
+    const [suite, libs] of Object.entries(
+      defaults.openlitespeed_lsphp_runtime_packages,
+    )
+  ) {
+    assert(libs.includes("libpq5"), `${suite}: lsphp needs libpq5 for pgsql`);
+  }
+  for (const ext of ["extension=pgsql.so", "extension=pdo_pgsql.so"]) {
+    assert(defaults.openlitespeed_lsphp_ini_extensions.includes(ext), ext);
+  }
 });

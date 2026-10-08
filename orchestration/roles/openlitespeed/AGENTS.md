@@ -90,7 +90,9 @@ extensions (PHP also reads php.ini next to its executable), then runs
 `lsphp -i` and fails unless that file is loaded with OPcache and mysqli. A
 per-site runtime sets `PHPRC` to its own php.ini, which replaces that file, so
 its ini repeats `extension_dir` (through `lib/php/ext`) and the module lines;
-tp-host allows only `curl`, `mysqli` and `pdo_mysql` there. `lsphp` and `php-fpm` are different binaries from
+tp-host allows only `curl`, `mysqli`, `pdo_mysql`, `pgsql` and `pdo_pgsql` there (`pgsql`
+is in the base set so a site can use a Postgres database; a tree vendored before it
+was listed is topped up on the next apply). `lsphp` and `php-fpm` are different binaries from
 different sources, but a series string means the same thing to both, and every
 site owner's Linux user may run every installed series, whichever engine serves
 the site. Hosting `web.php` hints land in the per-site runtime's php.ini.
