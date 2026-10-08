@@ -63,6 +63,14 @@ function stripTrailingCr(line: string): string {
   return line.endsWith("\r") ? line.slice(0, -1) : line;
 }
 
+/** The value of an active `kernel=` line, or `undefined` for any other line. */
+function kernelLineValue(head: string): string | undefined {
+  if (!head.startsWith("kernel")) return undefined;
+  const afterName = trimBlanks(head.slice("kernel".length), "start");
+  if (!afterName.startsWith("=")) return undefined;
+  return trimBlanks(afterName.slice(1), "both");
+}
+
 /**
  * Same rules as `kf_bootcfg_scan`: CRLF is tolerated, a `[section]` header
  * ends the top area, and any `kernel=` that is not `kernel8.img` wins as
@@ -74,22 +82,16 @@ export function scanBootConfigKernelLines(text: string): BootConfigKernelScan {
   let later = false;
   let other = false;
   for (const raw of text.split("\n")) {
-    const line = stripTrailingCr(raw);
-    const head = trimBlanks(line, "start");
+    const head = trimBlanks(stripTrailingCr(raw), "start");
     if (head.startsWith("[")) {
       section = true;
       continue;
     }
-    if (!head.startsWith("kernel")) continue;
-    const afterName = trimBlanks(head.slice("kernel".length), "start");
-    if (!afterName.startsWith("=")) continue;
-    const value = trimBlanks(afterName.slice(1), "both");
-    if (value === "kernel8.img") {
-      if (section) later = true;
-      else top = true;
-    } else {
-      other = true;
-    }
+    const value = kernelLineValue(head);
+    if (value === undefined) continue;
+    if (value !== "kernel8.img") other = true;
+    else if (section) later = true;
+    else top = true;
   }
   if (other) return "other";
   if (top) return "kernel8-top";
