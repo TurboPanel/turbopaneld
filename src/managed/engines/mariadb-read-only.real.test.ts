@@ -23,9 +23,9 @@ const test = Deno.test.bind(Deno);
  */
 const IMAGE = "mariadb:11.8";
 const REQUIRE = Deno.env.get("TURBOPANEL_REQUIRE_REAL_MARIADB") === "1";
-const ROOT_PASSWORD = "probe-root";
+const ROOT_PASSWORD = crypto.randomUUID();
 const NET_USER = "root_netguard";
-const NET_PASSWORD = "net-pass";
+const NET_PASSWORD = crypto.randomUUID();
 
 type Run = { success: boolean; stdout: string; stderr: string };
 
