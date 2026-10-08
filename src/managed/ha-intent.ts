@@ -373,13 +373,25 @@ export async function beginManagedIntent(
  * refreshes it (concurrent commands: the last to finish must not overwrite a
  * newer marker); a successful stop becomes held; a successful start /
  * restart / apply / promote / failover releases a held marker; a successful
- * destroy removes the marker (a failed one stays held).
+ * destroy removes the marker (a failed one stays held, and so does a
+ * successful one whose member record could not be removed: `keepHeld`).
  */
 export async function endManagedIntent(
   stateDir: string,
   token: ManagedIntentToken,
   succeeded: boolean,
+  options?: { keepHeld?: boolean },
 ): Promise<void> {
+  if (succeeded && token.kind === "destroy" && options?.keepHeld) {
+    // The destroy worked but the high-availability member record could not be
+    // removed: without a marker the dead-primary probe would read the missing
+    // engine as a dead primary. Keep the held marker until the record is gone.
+    logInfo(
+      "managed",
+      `destroy succeeded managedId=${token.managedId} but the member record remains; intent marker kept`,
+    );
+    return;
+  }
   if (succeeded && token.kind === "destroy") {
     // The cluster is gone: nothing is left to guard, and the held marker
     // would otherwise stay in the state directory for good.
