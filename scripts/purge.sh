@@ -3255,6 +3255,59 @@ tp_group_has_members() {
   getent passwd | awk -F: -v gid="$_ghm_gid" '$4 == gid { found = 1 } END { exit !found }'
 }
 
+# The gid of group $1 when it exists inside the site owners' band.
+tp_principal_band_gid() {
+  _pbg=$(getent group "$1" 2>/dev/null | head -n 1 | awk -F: '{ print $3; exit }' || true)
+  case "$_pbg" in ''|*[!0-9]*) return 1 ;; esac
+  [ "${#_pbg}" -le 10 ] || return 1
+  [ "$_pbg" -ge "$TP_PRINCIPAL_ID_MIN" ] && [ "$_pbg" -le "$TP_PRINCIPAL_ID_MAX" ] || return 1
+  printf '%s\n' "$_pbg"
+}
+
+# True when some account still has gid $1 as its primary group.
+tp_gid_is_primary() {
+  getent passwd | awk -F: -v gid="$1" '$4 == gid { found = 1 } END { exit !found }'
+}
+
+# Remove a site owner's own group: `<name>`, and `<name>-grp` from hosts set
+# up before the group took the owner's name. Only a group inside the band, with
+# a plain name that is not root or tp*, and that no account still has as its
+# primary group. With $3 = orphan (no account was found) a group that still
+# lists any member is kept too. Returns 1 after leaving the home in place.
+tp_purge_principal_groups() {
+  _ppg_name=$1
+  _ppg_home=$2
+  _ppg_mode=$3
+  case "$_ppg_name" in
+    ''|-*|*[!A-Za-z0-9_-]*|root|tp|tp[a-z]*) return 0 ;;
+  esac
+  for _ppg in "$_ppg_name" "${_ppg_name}-grp"; do
+    getent group "$_ppg" >/dev/null 2>&1 || continue
+    if ! _ppg_gid=$(tp_principal_band_gid "$_ppg"); then
+      tp_record_skip "kept group ${_ppg} (its id is outside ${TP_PRINCIPAL_ID_MIN}-${TP_PRINCIPAL_ID_MAX})"
+      continue
+    fi
+    if tp_gid_is_primary "$_ppg_gid"; then
+      tp_principal_leave_home "$_ppg_home" "${_ppg} is still an account's primary group"
+      return 1
+    fi
+    if [ "$_ppg_mode" = orphan ] && tp_group_has_members "$_ppg"; then
+      tp_principal_leave_home "$_ppg_home" "${_ppg} still has members"
+      return 1
+    fi
+    if [ "$DRY_RUN" != true ] && ! tp_has_tool groupdel; then
+      tp_principal_leave_home "$_ppg_home" "groupdel not installed"
+      return 1
+    fi
+    tp_run "groupdel $_ppg" groupdel "$_ppg" || true
+    if [ "$DRY_RUN" != true ] && getent group "$_ppg" >/dev/null 2>&1; then
+      tp_principal_leave_home "$_ppg_home" "${_ppg} still exists"
+      return 1
+    fi
+  done
+  return 0
+}
+
 tp_principal_leave_home() {
   _plh_home=$1
   _plh_why=$2
@@ -3277,18 +3330,7 @@ tp_purge_principal_account() {
       return 0
     fi
   fi
-  _ppa_grp="${_ppa_user}-grp"
-  if getent group "$_ppa_grp" >/dev/null 2>&1; then
-    if [ "$DRY_RUN" != true ] && ! tp_has_tool groupdel; then
-      tp_principal_leave_home "$_ppa_home" "groupdel not installed"
-      return 0
-    fi
-    tp_run "groupdel $_ppa_grp" groupdel "$_ppa_grp" || true
-    if [ "$DRY_RUN" != true ] && getent group "$_ppa_grp" >/dev/null 2>&1; then
-      tp_principal_leave_home "$_ppa_home" "${_ppa_grp} still exists"
-      return 0
-    fi
-  fi
+  tp_purge_principal_groups "$_ppa_user" "$_ppa_home" account || return 0
   _ppa_home=$(tp_normalize_path "$_ppa_home")
   if [ "$_ppa_home" = "$_ppa_root" ]; then
     return 0
@@ -3302,22 +3344,7 @@ tp_purge_principal_orphan() {
   _ppo_name=$(basename "$_ppo_dir")
   [ -n "$_ppo_name" ] || return 0
   [ "$_ppo_name" = lost+found ] && return 0
-  _ppo_grp="${_ppo_name}-grp"
-  if getent group "$_ppo_grp" >/dev/null 2>&1; then
-    if tp_group_has_members "$_ppo_grp"; then
-      tp_principal_leave_home "$_ppo_dir" "${_ppo_grp} still has members"
-      return 0
-    fi
-    if [ "$DRY_RUN" != true ] && ! tp_has_tool groupdel; then
-      tp_principal_leave_home "$_ppo_dir" "groupdel not installed"
-      return 0
-    fi
-    tp_run "groupdel $_ppo_grp" groupdel "$_ppo_grp" || true
-    if [ "$DRY_RUN" != true ] && getent group "$_ppo_grp" >/dev/null 2>&1; then
-      tp_principal_leave_home "$_ppo_dir" "${_ppo_grp} still exists"
-      return 0
-    fi
-  fi
+  tp_purge_principal_groups "$_ppo_name" "$_ppo_dir" orphan || return 0
   _ppo_dir=$(tp_normalize_path "$_ppo_dir")
   if [ "$_ppo_dir" = "$_ppo_root" ]; then
     return 0
@@ -3663,6 +3690,12 @@ TP_OTHER_UNITS="tpbuild.slice"
 # Groups the platform creates outside the 9900-9999 band (the Docker gate's
 # build group, a system gid). Matched by exact name only.
 TP_OTHER_GROUPS="tpgatebuild"
+# Site owners' Linux users and their own groups take ids from this band. A
+# site owner's group carries the owner's own name (`<name>-grp` on hosts set
+# up before 2026-10-07), so outside the band a group of that name is never
+# TurboPanel's and is never removed.
+TP_PRINCIPAL_ID_MIN=15001
+TP_PRINCIPAL_ID_MAX=60000
 TP_LEGACY_CONTAINER_NAMES="turbopanel-database turbopanel-queue"
 TP_LEGACY_OPT_PATHS="runtimes platform share/ansible lib/instance vendor/duckdb share/caddy bin/turbopanel-instance bin/turbopanel-mailer"
 TP_LEGACY_SHELL_RC_NEEDLE='/opt/turbopanel/runtimes/deno/.install/env'

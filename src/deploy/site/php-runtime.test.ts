@@ -49,7 +49,7 @@ const SPEC: SitePhpRuntimeSpec = {
   mode: "fastcgi",
   series: "8.4",
   user: "alice",
-  group: "alice-grp",
+  group: "alice",
   home: "/srv/users/alice",
   configDir: "/etc/turbopanel",
   libDir: "/opt/turbopanel/lib",
@@ -283,7 +283,7 @@ test("detached lsphp: the vendored binary on a socket, its own php.ini through P
   );
   assertStringIncludes(
     ini,
-    "[PHP]\nextension_dir = /opt/turbopanel/vendor/lsphp/8.4/current/lib/php/ext\nzend_extension = opcache.so\nextension = curl.so\nextension = mysqli.so\nextension = pdo_mysql.so\n",
+    "[PHP]\nextension_dir = /opt/turbopanel/vendor/lsphp/8.4/current/lib/php/ext\nzend_extension = opcache.so\nextension = curl.so\nextension = mysqli.so\nextension = pdo_mysql.so\nextension = pgsql.so\nextension = pdo_pgsql.so\n",
   );
   assertStringIncludes(ini, "memory_limit = 256M\n");
   // php-cgi and php-fpm load modules from their packaged conf.d.
@@ -297,6 +297,7 @@ test("detached lsphp on a series with a compiled-in opcache never loads opcache.
     series: "8.5",
   });
   assertStringIncludes(ini, "extension = mysqli.so\n");
+  assertStringIncludes(ini, "extension = pdo_pgsql.so\n");
   assertEquals(ini.includes("opcache.so"), false);
 });
 

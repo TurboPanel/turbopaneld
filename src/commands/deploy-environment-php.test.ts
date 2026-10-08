@@ -29,48 +29,15 @@ function phpSite(
   };
 }
 
-test("a per-site PHP runtime implies its PHP series for the site's principal", () => {
-  const specs = deployPrincipalSpecs({
+test("a per-site PHP runtime adds no runtime grant to the site's owner", () => {
+  // Every installed PHP series may be run by every site owner's Linux user,
+  // so the deploy passes its principals through unchanged.
+  const payload = {
     sites: [
       phpSite("a", ALICE, { version: "8.3", mode: "fastcgi" }),
-      phpSite("b", ALICE, { mode: "fpm" }),
-      phpSite("c", ALICE, { version: "8.4", mode: "fpm" }, "apache"),
-      // The shared master runs nothing as bob; OpenLiteSpeed's runtime does.
-      phpSite("d", BOB, { version: "8.4" }),
-      phpSite(
-        "e",
-        BOB,
-        { version: "8.3", mode: "lsphp-detached" },
-        "openlitespeed",
-      ),
-      phpSite("f", BOB, { version: "8.4", mode: "fastcgi" }, "caddy"),
+      phpSite("b", BOB, { version: "8.4", mode: "fpm" }, "apache"),
     ],
-  }, [
-    { ...ALICE, runtimes: [{ runtime: "node", series: "24" }] },
-    BOB,
-  ]);
-  assertEquals(specs, [
-    {
-      ...ALICE,
-      runtimes: [
-        { runtime: "node", series: "24" },
-        { runtime: "php", series: "8.3" },
-        { runtime: "php", series: "8.4" },
-      ],
-    },
-    { ...BOB, runtimes: [{ runtime: "php", series: "8.3" }] },
-  ]);
-});
-
-test("an entitlement the wire already grants is not repeated", () => {
-  const granted = {
-    ...ALICE,
-    runtimes: [{ runtime: "php", series: "8.4" }],
   };
-  assertEquals(
-    deployPrincipalSpecs({
-      sites: [phpSite("a", ALICE, { version: "8.4", mode: "fastcgi" })],
-    }, [granted]),
-    [granted],
-  );
+  const specs = deployPrincipalSpecs(payload, [ALICE, BOB]);
+  assertEquals(specs, [ALICE, BOB]);
 });

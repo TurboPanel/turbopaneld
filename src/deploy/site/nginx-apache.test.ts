@@ -225,7 +225,7 @@ test("a deploy holds every engine its sites are served by, and its PHP series, n
 test("a paired site's tree carries the principal group both engines join", () => {
   assertEquals(resolveSiteOwnership(pairedSite), {
     user: "alice",
-    group: "alice-grp",
+    group: "alice",
   });
   assertEquals(siteEngineUnixUser(pairedSite.engine), "tpapache");
   assertEquals(sitePhpRuntimeMode(pairedSite), "fastcgi");

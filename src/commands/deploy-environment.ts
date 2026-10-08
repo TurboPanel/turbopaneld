@@ -104,12 +104,10 @@ import {
   planSiteWebEnv,
   pruneHoldKeysForDeploy,
   resolveSiteDocumentRoot,
-  resolveSitePhpSeries,
   type SiteManagedDirectory,
   type SiteRelease,
 } from "../deploy/site.ts";
 import { detectSiteApps } from "../deploy/site-apps.ts";
-import { sitePhpRuntimeMode } from "../deploy/site/php-runtime.ts";
 import { holdPruneKeys } from "../deploy/site/prune-holds.ts";
 import {
   applyCronJobs,
@@ -162,6 +160,8 @@ import {
 } from "../deploy/compose-host-paths.ts";
 import {
   materializeSecretFiles,
+  pruneStaleSecretFiles,
+  removeSecretTree,
   rewriteComposeSecretFilePaths,
 } from "../deploy/secret-runtime.ts";
 import {
@@ -569,48 +569,7 @@ export function deployPrincipalSpecs(
       ...(principal.gid === undefined ? {} : { gid: principal.gid }),
     });
   }
-  return withSitePhpRuntimes([...byId.values()], parsedPayload.sites ?? []);
-}
-
-/**
- * A per-site PHP runtime runs `php-cgi<series>` / `php-fpm<series>` as the
- * site's principal, and those binaries are `0750 root:tpphp<series>`: the
- * principal must hold that series' entitlement or its unit dies `203/EXEC`.
- *
- * The grant belongs in the control plane's effective runtime set (see
- * `PrincipalEnsureSpec.runtimes`: the daemon reconciles, it does not derive),
- * which persists it as a `deploy` entitlement the way a native app's Node
- * series is, so `server.principals.reconcile` and every other environment's
- * deploy (both full-replace) carry it too. Adding it here as well only covers
- * a control plane older than that, since the daemon ships first: a deploy
- * from one still starts its runtime, though a later reconcile from it can
- * still take the grant away.
- */
-function withSitePhpRuntimes(
-  principals: EnvironmentDeployPrincipalMaterial[],
-  sites: readonly EnvironmentDeploySite[],
-): EnvironmentDeployPrincipalMaterial[] {
-  const implied = new Map<string, Set<string>>();
-  for (const site of sites) {
-    if (!site.principal || sitePhpRuntimeMode(site) === null) continue;
-    const series = resolveSitePhpSeries(site);
-    if (!series) continue;
-    const set = implied.get(site.principal.principalId) ?? new Set<string>();
-    set.add(series);
-    implied.set(site.principal.principalId, set);
-  }
-  return principals.map((principal) => {
-    const series = implied.get(principal.principalId);
-    if (!series) return principal;
-    const runtimes = [...(principal.runtimes ?? [])];
-    for (const entry of series) {
-      const held = runtimes.some((r) =>
-        r.runtime === "php" && r.series === entry
-      );
-      if (!held) runtimes.push({ runtime: "php", series: entry });
-    }
-    return { ...principal, runtimes };
-  });
+  return [...byId.values()];
 }
 
 async function ensureDeployPrincipals(
@@ -627,9 +586,6 @@ async function ensureDeployPrincipals(
       ...(principal.gid === undefined ? {} : { gid: principal.gid }),
       ...(principal.home === undefined ? {} : { home: principal.home }),
       ...(principal.shell === undefined ? {} : { shell: principal.shell }),
-      ...(principal.runtimes === undefined
-        ? {}
-        : { runtimes: principal.runtimes }),
       ...(principal.accessGroups === undefined
         ? {}
         : { accessGroups: principal.accessGroups }),
@@ -1429,6 +1385,41 @@ async function materializeDeploySecrets(
   );
 }
 
+/**
+ * Remove secret files that left the plan. Runs only once the new release is
+ * up (and its hooks passed): until then the previous release, or the one a
+ * failed or cancelled deploy restores, may still point at these files, so a
+ * restart of it has to find them. The plan is the whole environment's; an
+ * empty plan means every binding or secret variable is gone and the whole
+ * directory goes. Never called from rehydrate.
+ */
+async function pruneDeploySecrets(
+  layout: LayoutPaths,
+  payload: EnvironmentDeployPayload,
+): Promise<void> {
+  const plan = payload.secretPlan ?? [];
+  try {
+    if (plan.length === 0) {
+      await removeSecretTree(layout, payload.projectId, payload.environmentId);
+      return;
+    }
+    await pruneStaleSecretFiles(
+      layout,
+      payload.projectId,
+      payload.environmentId,
+      plan,
+    );
+  } catch (err) {
+    // The release is already running; a leftover file is not a failed deploy.
+    logWarn(
+      "deploy",
+      `could not remove secret files that left the plan: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+}
+
 function applySecretFilePaths(
   yaml: string,
   layout: LayoutPaths,
@@ -1843,13 +1834,15 @@ async function deployContainerServices(
 
     const serviceHooks = parsedPayload.serviceHooks ?? [];
     if (parsedPayload.deployStrategy === "sequential") {
-      return await deploySequentially(input, {
+      const sequential = await deploySequentially(input, {
         chain,
         serviceHooks,
         labeledServices,
         deploymentDir,
         onLine,
       });
+      await pruneDeploySecrets(layout, parsedPayload);
+      return sequential;
     }
     if (serviceHooks.length > 0) {
       // Every hook must be confined to a compose service this deploy runs;
@@ -1899,6 +1892,9 @@ async function deployContainerServices(
       });
     }
 
+    // The new release is up and its hooks passed: only now may the files the
+    // previous one needed (and this plan no longer lists) be removed.
+    await pruneDeploySecrets(layout, parsedPayload);
     return {
       serviceNames: labeledServices,
       composePaths: chain,
@@ -2225,17 +2221,13 @@ async function deployEnvironmentHolding(
   );
   await Deno.mkdir(deploymentDir, { recursive: true, mode: 0o750 });
 
-  // Before the principals: the playbook creates the `tpnode<NN>` runtime
-  // groups, and the principal reconcile joins the site owner's Linux user to
-  // them. Joining a group that does not exist yet is skipped with a warning, so
-  // on the first deploy of a series the user missed the group and the unit died
-  // 203/EXEC. Tenant Node must also exist before the Git build: native installs
-  // run `corepack` from `vendor/node-app/<series>/current/bin`.
+  // Tenant Node must exist before the Git build: native installs run
+  // `corepack` from `vendor/node-app/<series>/current/bin`.
   await ensureNativeAppRuntime(
     parsedPayload.nativeAppServices ?? [],
     deps?.nativeAppIo,
   );
-  // Same for PHP: the site engine playbooks create the `tpphp<series>` groups.
+  // PHP too, so a site's runtime is on disk before anything starts it.
   await ensureSitePhpRuntimes(parsedPayload.sites ?? [], deps?.siteIo);
 
   const principalMaterial = parsedPayload.principalMaterial ?? [];

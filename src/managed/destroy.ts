@@ -16,7 +16,9 @@ import {
 } from "../deploy/docker-cli.ts";
 import { logInfo, sanitizeForLog } from "../util/logger.ts";
 import { resolveLayout } from "../paths/layout.ts";
+import { writeManagedDestroyedMarker } from "./destroyed-marker.ts";
 import { removeManagedPublicFirewallBestEffort } from "./firewall.ts";
+import { withManagedLifecycleLock } from "./target-lock.ts";
 import {
   managedBackupsDir,
   managedComposeProject,
@@ -183,6 +185,32 @@ async function removeManagedBackupDir(backupRoot: string): Promise<void> {
   }
 }
 
+/**
+ * Last look before reporting success: no container still carries the
+ * cluster's compose label and the state directory did not come back while
+ * the teardown ran. Anything found is removed once more; what survives that
+ * fails the destroy so the control plane retries it instead of recording a
+ * cluster as gone while a container still runs.
+ */
+async function assertNothingRecreated(
+  run: RunDockerFn,
+  project: string,
+  root: string,
+): Promise<void> {
+  const remaining = await listComposeProjectContainerIds(run, project) ?? [];
+  if (remaining.length > 0) {
+    await forceRemoveContainers(run, remaining);
+    const still = await listComposeProjectContainerIds(run, project) ??
+      remaining;
+    if (still.length > 0) {
+      throw new Error(
+        `managed.destroy found ${still.length} container(s) re-created for project ${project}`,
+      );
+    }
+  }
+  if (await pathExists(root)) await removeManagedStateDir(root);
+}
+
 export async function handleManagedDestroy(
   payload: ManagedDestroyPayload,
   _daemonReceivedAt: string,
@@ -196,12 +224,33 @@ export async function handleManagedDestroy(
   const layout = resolveLayout(Deno.env.toObject());
   const root = managedDir(layout, payload.managedId);
   const project = managedComposeProject(payload.managedId);
-  const existed = await pathExists(root);
 
-  await tearDownManagedCompose(run, project, payload.removeVolumes);
-  await removeManagedPublicFirewallBestEffort(payload.managedId);
-  await removeManagedStateDir(root);
-  await removeManagedBackupDir(managedBackupsDir(layout, payload.managedId));
+  // Record the destroy BEFORE anything is removed (and before waiting for the
+  // lock): an apply that is queued behind this destroy, or redelivered right
+  // after it, then sees the marker and refuses instead of rebuilding the
+  // cluster. A marker that cannot be written fails the destroy (retried).
+  await writeManagedDestroyedMarker(
+    layout.stateDir,
+    payload.managedId,
+    payload.memberId,
+    new Date().toISOString(),
+  );
+
+  const existed = await withManagedLifecycleLock(
+    layout,
+    payload.managedId,
+    async () => {
+      const present = await pathExists(root);
+      await tearDownManagedCompose(run, project, payload.removeVolumes);
+      await removeManagedPublicFirewallBestEffort(payload.managedId);
+      await removeManagedStateDir(root);
+      await removeManagedBackupDir(
+        managedBackupsDir(layout, payload.managedId),
+      );
+      await assertNothingRecreated(run, project, root);
+      return present;
+    },
+  );
 
   return {
     status: "stopped",

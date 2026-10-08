@@ -26,11 +26,13 @@ import {
   PGSQL_PORT,
   protocolFamilyForCluster,
   PROXYSQL_IMAGE,
+  PROXYSQL_MAX_SUPPORTED_PAGE_SIZE,
   type ProxySqlBackendDesired,
   proxysqlCompose,
   proxysqlComposeWithAttachments,
   type ProxySqlDesiredState,
   proxySqlFamiliesInUse,
+  proxySqlPageSizeError,
   type ProxySqlRuntimeServerRow,
   readCurrentProxySqlBindAddresses,
   readCurrentProxySqlListenerPorts,
@@ -293,6 +295,58 @@ test("proxysqlComposeWithAttachments renders pinned attachments verbatim", () =>
   );
 });
 
+test("proxySqlPageSizeError allows 4 KiB and unknown page sizes, explains bigger ones", () => {
+  assertEquals(proxySqlPageSizeError(undefined), undefined);
+  assertEquals(
+    proxySqlPageSizeError(PROXYSQL_MAX_SUPPORTED_PAGE_SIZE),
+    undefined,
+  );
+  const message = proxySqlPageSizeError(16384);
+  assertStringIncludes(message ?? "", "16 KiB memory pages");
+  assertStringIncludes(message ?? "", "kernel8.img");
+  assertStringIncludes(
+    proxySqlPageSizeError(65536) ?? "",
+    "64 KiB memory pages",
+  );
+});
+
+test("ensureProxySqlIngress refuses a host with 16 KiB pages before touching compose", async () => {
+  const fixture = await createTempLayout();
+  try {
+    const layout = resolveLayout(fixture.env);
+    let ran = 0;
+    const error = await assertRejects(
+      () =>
+        ensureProxySqlIngress(
+          layout,
+          DESCRIPTOR,
+          () => {
+            ran++;
+            return Promise.resolve({
+              success: true,
+              stdout: "",
+              stderr: "",
+              code: 0,
+            });
+          },
+          {
+            bindAddresses: [],
+            segmentAttachments: [],
+            listenerPorts: null,
+            managedNetwork: MANAGED_NETWORK,
+            pageSizeBytes: () => Promise.resolve(16384),
+          },
+        ),
+      Error,
+      "16 KiB memory pages",
+    );
+    assertEquals(error instanceof Error, true);
+    assertEquals(ran, 0);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 test("ensureProxySqlIngress preserves passed segment attachments in the written compose", async () => {
   const fixture = await createTempLayout();
   try {
@@ -386,8 +440,8 @@ test("proxysqlCompose publishes only on the intended address for public/datacent
   assertEquals(compose.includes('"0.0.0.0:13306:13306"'), false);
 });
 
-test("proxysqlCompose publishes a local-scope frontend on loopback only", () => {
-  // `local` exposure: host sites on 127.0.0.1:13306 keep working, and nothing
+test("proxysqlCompose publishes a frontend bound to 127.0.0.1 on loopback only", () => {
+  // external access off: host sites on 127.0.0.1:13306 keep working, and nothing
   // else on the host network can reach the listeners.
   const compose = proxysqlCompose(
     DESCRIPTOR,
@@ -2012,4 +2066,50 @@ test("findIngressRuntimeMismatch skips families the desired state does not use",
     }),
     null,
   );
+});
+
+async function runEnsureWithContainer(
+  portsJson: string | null,
+): Promise<string[][]> {
+  const fixture = await createTempLayout();
+  try {
+    const layout = resolveLayout(fixture.env);
+    const calls: string[][] = [];
+    const ok = (stdout: string) =>
+      Promise.resolve({ success: true, stdout, stderr: "", code: 0 });
+    await ensureProxySqlIngress(
+      layout,
+      DESCRIPTOR,
+      (args) => {
+        calls.push(args);
+        if (args.includes("ps")) return ok(portsJson === null ? "" : "abc\n");
+        if (args[0] === "inspect" && args.includes("--format")) {
+          return ok(`true|${portsJson}\n`);
+        }
+        return ok("");
+      },
+      {
+        bindAddresses: ["10.10.1.10"],
+        segmentAttachments: [],
+        listenerPorts: null,
+        managedNetwork: MANAGED_NETWORK,
+        stability: { sleep: () => Promise.resolve(), attempts: 1 },
+      },
+    );
+    return calls;
+  } finally {
+    await fixture.cleanup();
+  }
+}
+
+const upCall = (calls: string[][]) => calls.find((c) => c.includes("up"))!;
+
+test("ensureProxySqlIngress recreates a running container that has no published ports", async () => {
+  const calls = await runEnsureWithContainer("{}");
+  assertEquals(upCall(calls).includes("--force-recreate"), true);
+});
+
+test("ensureProxySqlIngress does not recreate when there is no container yet", async () => {
+  const calls = await runEnsureWithContainer(null);
+  assertEquals(upCall(calls).includes("--force-recreate"), false);
 });

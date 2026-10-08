@@ -29,7 +29,6 @@ import {
   nativeAppEnvPath,
   nativeAppEnvStagePath,
   nativeAppNodeBinary,
-  nativeAppRuntimeGroup,
   nativeAppUnitName,
   nativeAppUnitPath,
   principalSliceContent,
@@ -304,7 +303,7 @@ test("applyNativeAppServices installs the unit, reloads, and enables it", async 
     const unitPath = nativeAppUnitPath("svc-web", host.unitDir);
     const unit = await Deno.readTextFile(unitPath);
     assertStringIncludes(unit, `User=${USERNAME}`);
-    assertStringIncludes(unit, `Group=${USERNAME}-grp`);
+    assertStringIncludes(unit, `Group=${USERNAME}`);
     assertStringIncludes(unit, `Slice=turbopanel-${USERNAME}.slice`);
     assertStringIncludes(unit, "Environment=PORT=18100");
     assertStringIncludes(unit, "/sites/svc-web/current");
@@ -1183,25 +1182,12 @@ test("native apply no longer grants runtime groups itself", async () => {
       applyOpts(host, mock),
     );
 
-    // Entitlement moved to `ensurePrincipalManagedGroups`, which runs during
-    // principal materialization — before releases and before any unit is
-    // installed. Keeping a second grant here would be a second source of truth
-    // that can only ever add, never revoke.
+    // Every installed runtime may be run by every site owner's Linux user, so
+    // deploying an app adds the owner to no group.
     assertEquals(usermodCalls(mock), []);
   } finally {
     await host.cleanup();
   }
-});
-
-test("nativeAppRuntimeGroup resolves the per-series entitlement group", () => {
-  // Per series, not one group for the whole tree: granting Node 24 must not
-  // also grant Node 22.
-  assertEquals(nativeAppRuntimeGroup("24"), "tpnode24");
-  assertEquals(nativeAppRuntimeGroup("24.17.0"), "tpnode24");
-  assertEquals(nativeAppRuntimeGroup("22"), "tpnode22");
-  // An unknown series has no group rather than an invented name — a name that
-  // does not exist would fail `usermod` far from the cause.
-  assertEquals(nativeAppRuntimeGroup("18"), undefined);
 });
 
 test("ensureNativeAppRuntime is a no-op for an empty app list", async () => {

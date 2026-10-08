@@ -67,7 +67,7 @@ const ROOT_SEALED_RECURSE = new Set([
   "roles/apache/tasks/main.yml: Make the vendored Apache tree root-owned and not group/world writable",
   "roles/buildkit/tasks/main.yml: Harden vendored Railpack frontend permissions",
   "roles/daemon-layout/tasks/main.yml: Ensure the orchestration tree and binaries are root-owned",
-  "roles/openlitespeed/tasks/lsphp-series.yml: Scope the lsphp tree to its PHP entitlement group ({{ lsphp_series }})",
+  "roles/openlitespeed/tasks/lsphp-series.yml: Make the lsphp tree root-owned and not group/world writable ({{ lsphp_series }})",
 ]);
 
 function recurses(value: unknown): boolean {

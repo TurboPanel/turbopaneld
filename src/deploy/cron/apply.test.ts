@@ -191,8 +191,7 @@ test("a job installs a timer and a oneshot service, then enables the timer", asy
     const timer = await Deno.readTextFile(join(host.unitDir, `${UNIT}.timer`));
 
     // The whole point of using a timer: ExecStart reaches execve AFTER systemd
-    // drops to User=, so the account's own entitlement groups decide whether it
-    // may run the interpreter at all.
+    // drops to User=, so the job has exactly the account's own rights.
     assertStringIncludes(service, `User=${USERNAME}`);
     assertStringIncludes(service, "Type=oneshot");
     assertStringIncludes(service, `Slice=turbopanel-${USERNAME}.slice`);

@@ -53,7 +53,9 @@ Docker Compose. The daemon:
    the runtime's php.ini, and the site fragment flips
    `enableScript 1`. Every `context /` renders `allowBrowse 1`: in OLS that is
    the context's "Accessible" flag (`0` is a 403 for everything); listing is
-   `autoIndex 0`. `httpd_config.conf` sets `fileAccessControl`
+   `autoIndex 0`. The `index` block carries `useServer 0` so the vhost's own
+   `indexFiles` (`index.php` first on PHP sites) wins over the server-level
+   `index.html`. `httpd_config.conf` sets `fileAccessControl`
    `requiredPermissionMask 000`: by default OLS answers 403 for any static file
    without the world-read bit, and site files are shared with `tpols` by group.
 
@@ -102,8 +104,7 @@ Docker Compose. The daemon:
    autoremove), drops the stat overrides, the masked sury unit, the series'
    config/log/run directories and the vendored `lsphp/<series>` tree, and it
    refuses a series that still has a site pool or a per-site runtime unit on
-   disk. Entitlement groups stay. A failed removal is logged and retried by the
-   next deploy or teardown; it never fails the one that triggered it.
+   disk. A failed removal is logged and retried by the next deploy or teardown; it never fails the one that triggered it.
 
    **A web engine nothing uses is removed too** (owner decision 2026-10-07).
    Right after the PHP series step, `pruneEngines` (`site/engine-prune.ts`)
@@ -198,10 +199,8 @@ Docker Compose. The daemon:
    changed too. RFC 1918 stays open
    (scope addresses, VPC services, operator-set Docker pools), so the host's
    private addresses and other containers' bridge IPs are not closed by it.
-   The `tpphp<series>` entitlement (the binaries are
-   `0750 root:tpphp<series>`) is resolved control-plane side as a `deploy`
-   entitlement; the daemon also adds it on deploy only to
-   cover an older control plane.
+   Every installed PHP series may be run by every site owner's Linux user, so
+   a PHP site needs no group for its runtime.
    No mode keeps the shared master on nginx and Apache; a mode without a
    principal, or lsphp on nginx/Apache, is refused. OpenLiteSpeed runs the same
    runtimes (plus `-lsd<series>`, detached lsphp) behind `tpols`; Caddy ignores
@@ -219,7 +218,7 @@ Docker Compose. The daemon:
    `u=rwX,g=rX` + setgid dirs so the engine can read while the principal owns
    writes. Without a pin, ownership stays the engine user (previous default).
    nginx/Apache php-fpm pools run workers as the principal when pinned (`user` /
-   `group = ${username}-grp` from `ensureSystemPrincipals`); the listen socket is
+   `group = ${username}` from `ensureSystemPrincipals`); the listen socket is
    owned by the serving engine (`tpnginx` / `tpapache`). An OpenLiteSpeed vhost
    declares no identity: its PHP runs as the owner through the per-site
    runtime, and the old `extUser`/`extGroup`/`setUIDMode` lines never took
@@ -315,7 +314,7 @@ root-owned `0550` by design:
 - **`chownWebTree` is skipped entirely.** Re-chowning the tree to the principal
   would hand a compromised app process write access to the code it runs — the
   exact property the release layout exists to prevent. Read access instead comes
-  from `usermod -aG <username>-grp <engineUser>`
+  from `usermod -aG <username> <engineUser>`
   (`ensureEngineGroupMembership`), giving the engine service account group `r-x`
   and nothing more. Supplementary groups are resolved when a process **starts**,
   so the first time an engine joins a group that engine is `systemctl restart`ed
@@ -515,7 +514,7 @@ the static list stays short.
 
 - The control plane allocates `backendPort` from the same loopback ledger as
   `listenPort`; the parser requires it (and a distinct value) for this engine.
-- A paired site needs a principal: its tree carries `<user>-grp`, which both
+- A paired site needs a principal: its tree carries the group `<user>` (the owner's own group), which both
   `tpnginx` and `tpapache` join (`resolveSiteOwnership`,
   `ensureEnginesCanReadPrincipalTree`).
 - Rollout is Apache first (`SITE_ENGINE_ORDER`), probed on `backendPort`,

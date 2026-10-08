@@ -757,12 +757,6 @@ export type EnvironmentDeployStorageMaterial = {
  * (`-K` on that command) unless the control plane sends an explicit operator
  * override (`uid`/`gid` 15001–60000).
  */
-/** One runtime series a principal is entitled to execute. */
-export type EnvironmentDeployPrincipalRuntime = {
-  runtime: string;
-  series: string;
-};
-
 export type EnvironmentDeployPrincipalMaterial = {
   principalId: string;
   username: string;
@@ -771,18 +765,11 @@ export type EnvironmentDeployPrincipalMaterial = {
   home?: string;
   shell?: string;
   /**
-   * The **effective** entitlement set — explicit operator grants plus what this
-   * principal's services imply — resolved control-plane side. The daemon
-   * reconciles unix group membership from it (adding *and revoking*); it never
-   * derives entitlements itself, because a derived grant can only ever add.
-   */
-  runtimes?: EnvironmentDeployPrincipalRuntime[];
-  /**
    * SSH access groups this principal should hold (`tpsftp` / `tpshell`).
    *
    * Resolved control-plane side from the account's shell **and** whether it
-   * holds any key — same doctrine as `runtimes`, and for the same reason: one
-   * place decides the effective set, the daemon reconciles to it. `[]` is a
+   * holds any key: one place decides the effective set, the daemon reconciles
+   * to it. `[]` is a
    * revocation and is the normal value for an account that holds no keys.
    */
   accessGroups?: string[];
@@ -2092,9 +2079,9 @@ export type ManagedIngressReconcilePayload = {
    */
   managedNetwork: string;
   /**
-   * Every host address the client listeners publish on. More than one entry
-   * when the instance resolved distinct interfaces for the enabled access
-   * scopes (datacenter private IP plus TurboFabric `tp0`, say); absent or empty
+   * Every host address the client listeners publish on. The instance sends one
+   * entry, from the server's single "allow external access to the databases on
+   * this server" setting: `127.0.0.1` (off) or `0.0.0.0` (on). Absent or empty
    * means no host publish at all.
    */
   bindAddresses?: string[];
@@ -4165,7 +4152,10 @@ function isValidPrincipalShellPath(value: string): boolean {
 }
 
 const PRINCIPAL_USERNAME_RE = /^[A-Za-z_][A-Za-z0-9_-]*$/;
-/** Cap so `${username}-grp` fits the Linux 32-char group-name limit. */
+/**
+ * Longest site owner's Linux user name; its group carries the same name.
+ * Keep in sync with `MAX_PRINCIPAL_USERNAME_LENGTH` in ensure-principal.ts.
+ */
 const MAX_PRINCIPAL_USERNAME_LENGTH = 28;
 
 function isValidPrincipalUsername(value: unknown): value is string {
@@ -4185,9 +4175,6 @@ function parseOptionalPrincipalId(
   return value;
 }
 
-/** `8.4` or `24` — the exec boundary a group protects, not a patch pin. */
-const RUNTIME_SERIES_RE = /^\d{1,3}(\.\d{1,3})?$/;
-
 /** Optional string field with its own validator, so the caller stays flat. */
 function parsePrincipalOptionalString(
   value: unknown,
@@ -4204,48 +4191,8 @@ function parsePrincipalOptionalString(
 }
 
 /**
- * `series` is a version label, not a number: the control plane may render `8.4`
- * as either JSON form, so a numeric one is normalized rather than stringified
- * blind — an object would otherwise reach the regex as `[object Object]`.
- */
-function parsePrincipalRuntimeSeries(value: unknown): string {
-  const series = typeof value === "number" ? value.toString() : value;
-  if (typeof series !== "string" || !RUNTIME_SERIES_RE.test(series)) {
-    throw new TypeError(
-      "Invalid environment deploy principalMaterial runtimes entry",
-    );
-  }
-  return series;
-}
-
-/**
- * Rejected rather than dropped: this is a grant, and silently discarding a
- * malformed one would revoke every entitlement the principal should hold.
- */
-function parsePrincipalRuntimes(
-  value: unknown,
-): EnvironmentDeployPrincipalRuntime[] {
-  if (!Array.isArray(value)) {
-    throw new TypeError(
-      "Invalid environment deploy principalMaterial runtimes",
-    );
-  }
-  return value.map((entry) => {
-    if (!isRecord(entry) || typeof entry.runtime !== "string") {
-      throw new TypeError(
-        "Invalid environment deploy principalMaterial runtimes entry",
-      );
-    }
-    return {
-      runtime: entry.runtime,
-      series: parsePrincipalRuntimeSeries(entry.series),
-    };
-  });
-}
-
-/**
- * Rejected rather than dropped, for the same reason `runtimes` is: dropping a
- * malformed grant silently revokes the login it describes.
+ * Rejected rather than dropped: dropping a malformed grant silently revokes
+ * the login it describes.
  */
 function parsePrincipalStringList(
   value: unknown,
@@ -4294,9 +4241,6 @@ function parsePrincipalMaterial(
     isValidPrincipalShellPath,
   );
   if (shell !== undefined) material.shell = shell;
-  if (value.runtimes !== undefined) {
-    material.runtimes = parsePrincipalRuntimes(value.runtimes);
-  }
   if (value.accessGroups !== undefined) {
     material.accessGroups = parsePrincipalStringList(
       value.accessGroups,

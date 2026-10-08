@@ -13,19 +13,22 @@
       Invalid tenant Node series '{{ node_app_series }}'.
       Expected a version series such as '24', '24.17', or '24.17.0'.
 
-- name: Resolve the series entitlement group
-  ansible.builtin.set_fact:
-    node_app_series_group: "tpnode{{ node_app_series | regex_replace('^([0-9]+).*$', '\\1') }}"
-
-# Ahead of the install: the shell below writes into this directory, and the
-# release tree it extracts inherits the group from it.
-- name: Ensure the tenant Node series tree is reachable by the runtime group
+- name: Ensure the tenant Node series tree
   ansible.builtin.file:
     path: "{{ node_app_root }}/{{ node_app_series }}"
     state: directory
     owner: root
-    group: "{{ node_app_series_group }}"
+    group: root
     mode: "0750"
+
+# Traverse without listing, like the tree root: every site owner's Linux user
+# may run every installed series.
+- name: Let every site owner's Linux user traverse the tenant Node series tree
+  ansible.posix.acl:
+    path: "{{ node_app_root }}/{{ node_app_series }}"
+    etype: other
+    permissions: x
+    state: present
 
 # Resolve the newest upstream release in Ansible rather than in a `shell:`
 # block. A previous inline `grep -o '"version":…'` plus a Jinja
@@ -79,22 +82,7 @@
     NODE_APP_SERIES: "{{ node_app_series }}"
     NODE_APP_ARCH: "{{ node_app_arch }}"
     NODE_APP_RESOLVED: "{{ node_app_resolved_version }}"
-    NODE_APP_GROUP: "{{ node_app_series_group }}"
     NODE_APP_SERIES_DIR: "{{ node_app_root }}/{{ node_app_series }}"
     NODE_APP_COREPACK_TGZ: "{{ node_app_root }}/corepack-{{ corepack_version }}.tgz"
   register: _node_app_install
   changed_when: "'turbopanel-' in _node_app_install.stdout"
-
-# Builds run as the daemon (`tp` / the co-located dest user), not as the
-# principal. Supplementary-group changes are not visible to an already-running
-# process, so the build child refreshes groups with `sudo -n -u <self>` after
-# this append (`sg` execs the passwd shell and dies on nologin).
-- name: Allow the daemon account to execute this tenant Node series
-  ansible.builtin.user:
-    name: "{{ turbopanel_user }}"
-    groups: "{{ node_app_series_group }}"
-    append: true
-
-# Sandboxed builds run as a per-build systemd DynamicUser that tp-host
-# build-run gives every tpnode<series> group as SupplementaryGroups=, so no
-# host account needs adding here.

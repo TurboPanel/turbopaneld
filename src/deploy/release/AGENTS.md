@@ -46,14 +46,14 @@ serving change in the next phase addresses the same tree without restating it):
 ```
 <principalHomeRoot>/.tp-staging/                 root:tp 0710 (publish-open)
   <username>.<serviceId>.<releaseId>/            tp 0700 until tp-host publish
-<principalHomeRoot>/<username>/sites/            root:<username>-grp 0750
-  <serviceId>/                                   root:<username>-grp 0750
-    releases/                                    root:<username>-grp 0750
-      <releaseId>/        root:<username>-grp, top 0550, nothing g/o-writable
+<principalHomeRoot>/<username>/sites/            root:<username> 0750
+  <serviceId>/                                   root:<username> 0750
+    releases/                                    root:<username> 0750
+      <releaseId>/        root:<username>, top 0550, nothing g/o-writable
       <releaseId>/.turbopanel/release.json        per-release manifest
       <releaseId>/shared -> ../../shared              relative convenience link
     current -> releases/<releaseId>
-    shared/               <username>:<username>-grp 0750
+    shared/               <username>:<username> 0750
     .turbopanel-hosting/  root:root 0711  (hosting.env / php.json: <username>:root 0400)
 ```
 
@@ -134,7 +134,7 @@ reuses the single `sudo -n install -d` seam in `ensure-principal.ts`
 (`ensureDirectoryWithOwner` for the root-owned side,
 `ensureDirectoryOwnedByPrincipal` for `shared/`); retention removal goes
 through the same `sudo -n` runner seam, never a second mkdir helper. The daemon
-is **not** in `<username>-grp`, so it cannot traverse the root-owned `0750`
+is **not** in the group `<username>`, so it cannot traverse the root-owned `0750`
 site tree: unprivileged `readlink` of `current`, the rollback swap and the
 probes fall back to that same `sudo -n` runner when Deno returns EACCES. Tests
 that own a temp tree keep the Deno path (copy, link, manifest, probe, seal,
@@ -206,7 +206,7 @@ the probe. `tp-host publish <user> <svc> <id>` then, as root and with every
 path built from the ids: takes the leaf (`root:root 0700`), refuses hard-linked
 files (before any `chown -R`, so no outside inode is re-owned), FIFOs,
 sockets, devices and a shipped `shared`, seals it
-(`chown -R -h -P root:<user>-grp`, `chmod -R u-s,g-s,go-w,g+rX,o-rwx`) and
+(`chown -R -h -P root:<user>`, `chmod -R u-s,g-s,go-w,g+rX,o-rwx`) and
 re-checks that nothing is left foreign-owned, set-id or group/other-writable,
 resolves every symlink physically (`realpath -m`) and refuses one that lands
 outside the leaf (so the two-link `s1/s2/up → ../..` + `s1/s2/s3/x → ../up/..`
@@ -307,14 +307,9 @@ not after promote. When an entry belongs to a `nativeAppServices[]` row,
 series' `bin/` leads a **curated** `PATH` (`<bin>:/usr/bin:/bin`, never the
 daemon's PATH — Deno's `node_compat_bin` would shadow `node`, and an
 unreadable `/usr/local/sbin` makes dash report `corepack: Permission denied`
-for a missing binary). In the sandbox the build's throwaway user reaches the
-series through `SupplementaryGroups=` (tp-host gives it every
-`tpnode<series>` group). Unsandboxed, the
-child is `sudo -n -u <self> -- env … sh -c` so
-`initgroups()` picks up `tpnode<series>` without a daemon re-login and
-without exec'ing the passwd shell (`sg` dies on `/usr/sbin/nologin` with
-"This account is currently not available" — the managed daemon user `tp`
-and tenant principals are both nologin). Corepack caches under the
+for a missing binary). The vendored trees are readable by everyone, so the
+sandbox's throwaway user (and, unsandboxed, the daemon's plain `sh -c` child)
+reaches the series with no group at all. Corepack caches under the
 project's sandbox cache (unsandboxed: `<checkout>/.corepack`) with its download
 prompt off — never a host-wide
 Corepack install, never the daemon's home. `NODE_ENV` follows the app's
@@ -322,9 +317,8 @@ Corepack install, never the daemon's home. `NODE_ENV` follows the app's
 
 **Deno builds (`runtime: deno`).** The same lane with the vendored Deno in
 place of Node (`nativeRuntime.runtime === "deno"`): `vendor/deno-app/<series>/current/bin`
-leads the curated `PATH`, the build's user reaches it through the `tpdeno<series>`
-group (tp-host gives a build every `tpnode<series>` and `tpdeno<series>` group),
-`DENO_DIR` is the project's sandbox cache (unsandboxed: `<checkout>/.deno`), and
+leads the curated `PATH` (readable by everyone, so the build's user needs no
+group), `DENO_DIR` is the project's sandbox cache (unsandboxed: `<checkout>/.deno`), and
 `DENO_NO_UPDATE_CHECK=1` / `DENO_NO_PROMPT=1` are set. The network rules are the
 build's usual ones (the public internet only). Nothing is derived from Node's
 package manager. `deno-build.ts` derives, from the project's own files

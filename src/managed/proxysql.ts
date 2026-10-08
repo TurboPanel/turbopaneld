@@ -40,6 +40,7 @@ import { logInfo } from "../util/logger.ts";
 import { forEachSequential } from "../util/sequential.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 import { reservedManagedIngressAddress } from "./ingress-cidr.ts";
+import { frontendBindingsHealth, wantedMappings } from "./proxysql-bindings.ts";
 import {
   proxysqlComposePath,
   proxysqlConfigDir,
@@ -249,11 +250,11 @@ export type ProxySqlDesiredState = {
    * reachable only via the organization's managed Docker network, never the
    * host).
    *
-   * More than one entry when the instance resolved distinct interfaces for the
-   * enabled access scopes (a datacenter private IP *and* a TurboFabric `tp0`
-   * address, say): one address per scope, because those are different IPs on the
-   * same host and ranking them would silently strand every client on the scope
-   * that lost. `0.0.0.0` arrives as a single entry covering all interfaces.
+   * Decided by the server's single "allow external access to the databases on
+   * this server" setting, so the control plane sends exactly one entry:
+   * `127.0.0.1` when it is off (services on the server only) or `0.0.0.0` when
+   * it is on (every address of the server). Several entries are still accepted
+   * and each is published, so older callers keep working.
    *
    * Never conflate this with ProxySQL's *internal* container listen address
    * (always `0.0.0.0` — see {@link renderProtocolFamilySection}); those are
@@ -757,8 +758,8 @@ function renderProxySqlTopLevelNetworks(
  * entirely, so the frontend is reachable exclusively via
  * the organization's managed Docker network (co-located compose services with
  * a binding) and never from the host or the public internet. Pass the addresses
- * resolved from enabled cluster exposure to additionally publish on each of
- * them; both protocol listeners are published per address. The admin port
+ * chosen by the server's "allow external access" setting (loopback, or all
+ * interfaces) to publish on each of them; both protocol listeners are published per address. The admin port
  * always publishes to `127.0.0.1` only, regardless.
  */
 export function proxysqlCompose(
@@ -1671,7 +1672,64 @@ export type EnsureProxySqlIngressOptions = {
   readonly listenerPorts: ProxySqlListenerPorts | null | undefined;
   readonly managedNetwork: string;
   readonly stability?: ContainerStabilityOptions;
+  /** Test seam: the host kernel's memory page size in bytes. */
+  readonly pageSizeBytes?: () => Promise<number | undefined>;
 };
+
+/** The largest kernel memory page size the published proxy image can start on. */
+export const PROXYSQL_MAX_SUPPORTED_PAGE_SIZE = 4096;
+
+/**
+ * Plain-words error for a host whose kernel pages memory in larger blocks than
+ * the proxy image supports, or `undefined` when the host is fine.
+ *
+ * The published proxy image bundles a memory allocator compiled for 4 KiB
+ * pages. On a kernel with bigger pages (a Raspberry Pi 5 on its default
+ * kernel, Apple Silicon, some 64 KiB ARM servers) it aborts on start, so the
+ * container crash-loops with no useful message and every managed database on
+ * the server loses its client port. Failing early, with the reason, is better
+ * than a restart loop.
+ */
+export function proxySqlPageSizeError(
+  pageSizeBytes: number | undefined,
+): string | undefined {
+  if (
+    pageSizeBytes === undefined ||
+    !Number.isFinite(pageSizeBytes) ||
+    pageSizeBytes <= PROXYSQL_MAX_SUPPORTED_PAGE_SIZE
+  ) {
+    return undefined;
+  }
+  return `This server's kernel uses ${
+    pageSizeBytes / 1024
+  } KiB memory pages, ` +
+    `and the database proxy only starts on ${
+      PROXYSQL_MAX_SUPPORTED_PAGE_SIZE / 1024
+    } KiB pages. ` +
+    `Managed databases cannot run on this server until it boots a ` +
+    `${PROXYSQL_MAX_SUPPORTED_PAGE_SIZE / 1024} KiB-page kernel ` +
+    `(on a Raspberry Pi 5, set kernel=kernel8.img in config.txt and reboot).`;
+}
+
+/** Read the host kernel page size in bytes (Linux only; `undefined` if unknown). */
+async function readHostPageSizeBytes(): Promise<number | undefined> {
+  if (Deno.build.os !== "linux") return undefined;
+  try {
+    const out = await new Deno.Command("getconf", {
+      args: ["PAGESIZE"],
+      stdout: "piped",
+      stderr: "null",
+    }).output();
+    if (!out.success) return undefined;
+    const value = Number.parseInt(
+      new TextDecoder().decode(out.stdout).trim(),
+      10,
+    );
+    return Number.isFinite(value) ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 /**
  * Write identity-bearing compose and bring the shared ProxySQL project up.
@@ -1698,19 +1756,29 @@ export async function ensureProxySqlIngress(
     managedNetwork,
     stability,
   } = options;
+  const pageSizeError = proxySqlPageSizeError(
+    await (options.pageSizeBytes ?? readHostPageSizeBytes)(),
+  );
+  if (pageSizeError) throw new Error(pageSizeError);
   const composePath = proxysqlComposePath(layout);
   await Deno.mkdir(proxysqlConfigDir(layout), { recursive: true, mode: 0o750 });
-  await Deno.writeTextFile(
-    composePath,
-    proxysqlComposeWithAttachments(
-      descriptor,
-      bindAddresses,
-      segmentAttachments,
-      listenerPorts,
-      managedNetwork,
-    ),
-    { mode: 0o640 },
+  const composeText = proxysqlComposeWithAttachments(
+    descriptor,
+    bindAddresses,
+    segmentAttachments,
+    listenerPorts,
+    managedNetwork,
   );
+  await Deno.writeTextFile(composePath, composeText, { mode: 0o640 });
+  // A container that failed its publish bind at boot stays "running" with no
+  // bindings, and a plain `up -d` leaves it alone (config unchanged). Recreate
+  // it then; an unreadable state falls back to the plain `up -d`.
+  const wanted = wantedMappings(
+    readPublishedClientMappingsFromCompose(composeText),
+  );
+  const health = await frontendBindingsHealth(run, composePath, wanted);
+  const missingBindings = health.ok && health.present && !health.healthy &&
+    wanted.length > 0;
   const up = await run([
     "compose",
     "-f",
@@ -1718,6 +1786,7 @@ export async function ensureProxySqlIngress(
     "up",
     "-d",
     "--remove-orphans",
+    ...(missingBindings ? ["--force-recreate"] : []),
   ]);
   if (!up.success) {
     throw new Error(up.stderr || "proxysql compose up failed");

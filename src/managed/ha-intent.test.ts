@@ -26,9 +26,13 @@ import {
   recordManagedIntent,
   resetManagedIntentsForTests,
 } from "./ha-intent.ts";
-import { setManagedCommandHooksLayoutForTests } from "./ha-command-hooks.ts";
+import {
+  noteManagedDestroySucceeded,
+  setManagedCommandHooksLayoutForTests,
+} from "./ha-command-hooks.ts";
 import {
   haMemberRecordFromApply,
+  managedHaMemberPath,
   markManagedHaMemberPromoted,
   readManagedHaMember,
   saveManagedHaMember,
@@ -78,7 +82,7 @@ test("the router records the intent before dispatch and refreshes it after", asy
   const begin = source.indexOf("await beginManagedCommandIntent(");
   const dispatch = source.indexOf("switch (message.commandType)");
   const end = source.indexOf(
-    "await endManagedCommandIntent(managedIntent, commandSucceeded)",
+    "await endManagedCommandIntent(managedIntent, commandSucceeded,",
   );
   assert(begin > 0 && dispatch > 0 && end > 0);
   assert(begin < dispatch, "intent must be recorded before any handler runs");
@@ -271,6 +275,95 @@ test("destroy is held from the start, so a failed destroy never re-arms the prob
     const current = await readManagedIntent(dirs.stateDir, MANAGED_ID);
     assertEquals(current?.kind, "destroy");
     assertEquals(current?.untilMs, null);
+  });
+});
+
+test("a destroy that succeeded leaves no marker behind", async () => {
+  await withTempLayout(async ({ dirs }) => {
+    resetManagedIntentsForTests();
+    const destroy = await beginManagedIntent(
+      dirs.stateDir,
+      MANAGED_ID,
+      "destroy",
+    );
+    assertEquals(
+      (await lookupManagedIntent(dirs.stateDir, MANAGED_ID)).status,
+      "found",
+    );
+    await endManagedIntent(dirs.stateDir, destroy, true);
+    assertEquals(
+      (await lookupManagedIntent(dirs.stateDir, MANAGED_ID)).status,
+      "none",
+    );
+    resetManagedIntentsForTests();
+    assertEquals(await readManagedIntent(dirs.stateDir, MANAGED_ID), null);
+  });
+});
+
+test("a destroy that succeeded but could not remove the member record keeps the marker", async () => {
+  await withTempLayout(async (fixture) => {
+    resetManagedIntentsForTests();
+    const layout = resolveLayout(fixture.env);
+    setManagedCommandHooksLayoutForTests(layout);
+    try {
+      // A non-empty directory where the record file should be: the remove
+      // fails with something other than NotFound.
+      const recordPath = managedHaMemberPath(layout, MANAGED_ID);
+      await Deno.mkdir(recordPath, { recursive: true });
+      await Deno.writeTextFile(`${recordPath}/stuck`, "x");
+      const destroy = await beginManagedIntent(
+        fixture.dirs.stateDir,
+        MANAGED_ID,
+        "destroy",
+      );
+      const recordGone = await noteManagedDestroySucceeded(
+        {
+          managedId: MANAGED_ID,
+        } as Parameters<typeof noteManagedDestroySucceeded>[0],
+      );
+      assertEquals(recordGone, false);
+      await endManagedIntent(fixture.dirs.stateDir, destroy, true, {
+        keepHeld: !recordGone,
+      });
+      resetManagedIntentsForTests();
+      assertEquals(
+        (await lookupManagedIntent(fixture.dirs.stateDir, MANAGED_ID)).status,
+        "found",
+      );
+    } finally {
+      setManagedCommandHooksLayoutForTests(null);
+    }
+  });
+});
+
+test("a destroy that succeeded with the member record gone clears the marker", async () => {
+  await withTempLayout(async (fixture) => {
+    resetManagedIntentsForTests();
+    const layout = resolveLayout(fixture.env);
+    setManagedCommandHooksLayoutForTests(layout);
+    try {
+      const destroy = await beginManagedIntent(
+        fixture.dirs.stateDir,
+        MANAGED_ID,
+        "destroy",
+      );
+      const recordGone = await noteManagedDestroySucceeded(
+        {
+          managedId: MANAGED_ID,
+        } as Parameters<typeof noteManagedDestroySucceeded>[0],
+      );
+      assertEquals(recordGone, true);
+      await endManagedIntent(fixture.dirs.stateDir, destroy, true, {
+        keepHeld: !recordGone,
+      });
+      resetManagedIntentsForTests();
+      assertEquals(
+        (await lookupManagedIntent(fixture.dirs.stateDir, MANAGED_ID)).status,
+        "none",
+      );
+    } finally {
+      setManagedCommandHooksLayoutForTests(null);
+    }
   });
 });
 
@@ -516,6 +609,94 @@ test("apply records the member; promote flips it; destroy removes it", async () 
         removeVolumes: false,
       });
       assertEquals(await readManagedHaMember(layout, MANAGED_ID), null);
+    } finally {
+      setCommandRouterHandlersForTests(null);
+      setManagedCommandHooksLayoutForTests(null);
+    }
+  });
+});
+
+test("a managed.destroy through the router keeps the marker held when the member record cannot be removed", async () => {
+  const { handleCommandDispatch, setCommandRouterHandlersForTests } =
+    await import("../commands/command-router.ts");
+  await withTempLayout(async (fixture) => {
+    resetManagedIntentsForTests();
+    const layout = resolveLayout(fixture.env);
+    setManagedCommandHooksLayoutForTests(layout);
+    try {
+      const recordPath = managedHaMemberPath(layout, MANAGED_ID);
+      await Deno.mkdir(recordPath, { recursive: true });
+      await Deno.writeTextFile(`${recordPath}/stuck`, "x");
+      setCommandRouterHandlersForTests({
+        handleManagedDestroy: () =>
+          Promise.resolve({ status: "stopped", containers: [] }),
+      });
+      await handleCommandDispatch(
+        {
+          type: "command-dispatch",
+          id: "req-managed.destroy",
+          commandId: "cmd-managed.destroy",
+          commandType: "managed.destroy",
+          payload: { managedId: MANAGED_ID, removeVolumes: false },
+          at: new Date().toISOString(),
+        },
+        new MockWebSocket() as unknown as WebSocket,
+        { decryptSecrets: (c) => Promise.resolve(c) },
+      );
+      resetManagedIntentsForTests();
+      assertEquals(
+        (await lookupManagedIntent(fixture.dirs.stateDir, MANAGED_ID)).status,
+        "found",
+      );
+    } finally {
+      setCommandRouterHandlersForTests(null);
+      setManagedCommandHooksLayoutForTests(null);
+    }
+  });
+});
+
+test("a managed.destroy through the router clears the marker once the member record is gone", async () => {
+  const { handleCommandDispatch, setCommandRouterHandlersForTests } =
+    await import("../commands/command-router.ts");
+  await withTempLayout(async (fixture) => {
+    resetManagedIntentsForTests();
+    const layout = resolveLayout(fixture.env);
+    setManagedCommandHooksLayoutForTests(layout);
+    try {
+      await Deno.mkdir(`${layout.stateDir}/managed/${MANAGED_ID}`, {
+        recursive: true,
+      });
+      await saveManagedHaMember(layout, {
+        managedId: MANAGED_ID,
+        memberId: MEMBER_ID,
+        engine: "postgres",
+        role: "primary",
+        containerName: "svc-1",
+        replicaPeerCount: 0,
+        updatedAt: new Date().toISOString(),
+      });
+      setCommandRouterHandlersForTests({
+        handleManagedDestroy: () =>
+          Promise.resolve({ status: "stopped", containers: [] }),
+      });
+      await handleCommandDispatch(
+        {
+          type: "command-dispatch",
+          id: "req-managed.destroy",
+          commandId: "cmd-managed.destroy",
+          commandType: "managed.destroy",
+          payload: { managedId: MANAGED_ID, removeVolumes: false },
+          at: new Date().toISOString(),
+        },
+        new MockWebSocket() as unknown as WebSocket,
+        { decryptSecrets: (c) => Promise.resolve(c) },
+      );
+      assertEquals(await readManagedHaMember(layout, MANAGED_ID), null);
+      resetManagedIntentsForTests();
+      assertEquals(
+        (await lookupManagedIntent(fixture.dirs.stateDir, MANAGED_ID)).status,
+        "none",
+      );
     } finally {
       setCommandRouterHandlersForTests(null);
       setManagedCommandHooksLayoutForTests(null);

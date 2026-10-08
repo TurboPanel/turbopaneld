@@ -19,6 +19,7 @@ import type {
 } from "../contracts/commands-contracts.ts";
 import { logInfo, logWarn, sanitizeForLog } from "../util/logger.ts";
 import { managedDir, SAFE_MANAGED_ID_RE } from "./engine-paths.ts";
+import { isManagedMemberDestroyed } from "./destroyed-marker.ts";
 import { writeFileAtomic } from "./ha-intent.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 
@@ -161,19 +162,22 @@ export async function markManagedHaMemberPromoted(
   );
 }
 
+/** True when the record is gone (removed or never there); false after a logged failure. */
 export async function removeManagedHaMember(
   layout: LayoutPaths,
   managedId: string,
-): Promise<void> {
+): Promise<boolean> {
   try {
     await Deno.remove(managedHaMemberPath(layout, managedId));
+    return true;
   } catch (err) {
-    if (err instanceof Deno.errors.NotFound) return;
+    if (err instanceof Deno.errors.NotFound) return true;
     logWarn(
       "managed",
       `ha-member record remove failed managedId=${managedId}:`,
       sanitizeForLog(err),
     );
+    return false;
   }
 }
 
@@ -194,7 +198,19 @@ export async function listManagedHaMembers(
   const records = await Promise.all(
     ids.map((id) => readManagedHaMember(layout, id)),
   );
-  return records.filter((record): record is ManagedHaMemberRecord =>
+  const live = records.filter((record): record is ManagedHaMemberRecord =>
     record !== null
   );
+  // A member destroyed on this host is never a primary to watch, even if a
+  // stray record is still on disk.
+  const destroyed = await Promise.all(
+    live.map((record) =>
+      isManagedMemberDestroyed(
+        layout.stateDir,
+        record.managedId,
+        record.memberId,
+      )
+    ),
+  );
+  return live.filter((_, i) => !destroyed[i]);
 }

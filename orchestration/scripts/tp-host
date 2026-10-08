@@ -95,7 +95,7 @@ R_STAGING="$R_PRINCIPALS/.tp-staging"
 
 PRINCIPAL_ID_MIN=15001
 PRINCIPAL_ID_MAX=60000
-# Service identities and runtime entitlements (orchestration/runtime-registry.json).
+# Service identities and SSH access groups (orchestration/runtime-registry.json).
 SERVICE_ID_MIN=9900
 SERVICE_ID_MAX=9999
 ENGINE_USERS="tpnginx tpapache tpols tpcaddysite"
@@ -556,11 +556,11 @@ tp_home_owner_of() {
 # is itself root-owned and never group- or world-writable (the principal's
 # group holds the engine accounts). The tenant writes only into leaves:
 #
-#   <home>                                  root:<p>-grp 0750  structural
-#   <home>/home|data|tmp                    <p>:<p>-grp  0700  tenant dir
-#   <home>/sites, <home>/volumes            root:<p>-grp 0750  structural
-#   <home>/sites/<svc>                      root:<p>-grp 0750  structural
-#   <home>/sites/<svc>/releases[/<id>]      root:<p>-grp       structural
+#   <home>                                  root:<p>     0750  structural
+#   <home>/home|data|tmp                    <p>:<p>      0700  tenant dir
+#   <home>/sites, <home>/volumes            root:<p>     0750  structural
+#   <home>/sites/<svc>                      root:<p>     0750  structural
+#   <home>/sites/<svc>/releases[/<id>]      root:<p>           structural
 #   <home>/sites/<svc>/shared|webroot, <home>/volumes/<id>   tenant leaves
 
 # PATH relative to its principal's home: empty for the home itself.
@@ -614,7 +614,8 @@ tp_home_owner_ok() {
   else
     return 0
   fi
-  [ -z "$3" ] || [ "$3" = "root" ] || [ "$3" = "${_hw_p}-grp" ]
+  [ -z "$3" ] || [ "$3" = "root" ] ||
+    { [ "$3" = "$_hw_p" ] && tp_principal_own_group "$_hw_p"; }
 }
 
 # The directory the shell is in (a pinned structural or tenant directory) must
@@ -1045,7 +1046,7 @@ tp_unit_ok() {
     return
   fi
   tp_is_principal "$_uk_user" || return 1
-  [ "$_uk_group" = "${_uk_user}-grp" ] || return 1
+  [ "$_uk_group" = "$_uk_user" ] && tp_principal_own_group "$_uk_user" || return 1
   [ "$_uk_slice" = "$(tp_principal_slice "$_uk_user")" ] || return 1
   [ "$_uk_nnp" = "yes" ] || return 1
   [ -z "$_uk_app" ] || tp_app_envfile_ok "$_uk_file" "$_uk_app" || return 1
@@ -1197,7 +1198,7 @@ tp_backup_unit_ok() {
 # exec line for the mode and PHP series, the owner's tmp/ bound on /tmp, a
 # read-only system with writes only inside the owner's home, and sockets at the
 # top of /run (never in the daemon's /run/turbopanel). The site's PHP config
-# lives in $R_CONFIG/php/sites/<siteId>/ (root:<owner>-grp, directive
+# lives in $R_CONFIG/php/sites/<siteId>/ (root:<owner>, directive
 # allowlist).
 
 # Web server accounts that talk to a site's PHP socket (Caddy serves no PHP).
@@ -1415,7 +1416,7 @@ tp_php_service_pinned_ok() {
   _pl_home="$R_PRINCIPALS/$_ps_user"
   case "$1" in
     Service.User=*) [ "${1#*=}" = "$_ps_user" ] ;;
-    Service.Group=*) [ "${1#*=}" = "$_ps_user-grp" ] ;;
+    Service.Group=*) [ "${1#*=}" = "$_ps_user" ] ;;
     Service.Slice=*) [ "${1#*=}" = "$(tp_principal_slice "$_ps_user")" ] ;;
     Service.NoNewPrivileges=*) [ "${1#*=}" = "yes" ] ;;
     Service.CapabilityBoundingSet=*|Service.AmbientCapabilities=*) [ -z "${1#*=}" ] ;;
@@ -1486,7 +1487,7 @@ tp_php_site_owner_ok() {
   # The test host cannot chown, so the directory's group is only read for real.
   if [ -z "$TP_TEST" ] && [ -d "$R_CONFIG/php/sites/$_po_site" ] &&
     [ ! -L "$R_CONFIG/php/sites/$_po_site" ]; then
-    [ "$(stat -c '%g' "$R_CONFIG/php/sites/$_po_site")" = "$(tp_gid_of_group "$_po_owner-grp")" ] ||
+    [ "$(stat -c '%g' "$R_CONFIG/php/sites/$_po_site")" = "$(tp_gid_of_group "$_po_owner")" ] ||
       return 1
   fi
   for _po_src in "$R_UNITS/turbopanel-php-$_po_site.service:User" \
@@ -1510,7 +1511,7 @@ tp_php_service_ok() {
   done
   _ps_user="$(printf '%s\n' "$_ps_lines" | sed -n 's/^Service\.User=//p' | head -1)"
   tp_is_principal "$_ps_user" || return 1
-  tp_is_principal_group "$_ps_user-grp" || return 1
+  tp_principal_own_group "$_ps_user" || return 1
   tp_php_site_owner_ok "$_ps_site" "$_ps_user" || {
     printf 'tp-host: php unit: %s is already bound to another owner than %s\n' "$_ps_site" "$_ps_user" >&2
     return 1
@@ -1605,15 +1606,11 @@ tp_php_unit_ok() {
 
 # --- per-site PHP config ($R_CONFIG/php/sites/<siteId>/) ---------------------
 
-# The principal a per-site config group belongs to (`alice` for alice-grp).
+# The principal a per-site config group belongs to: a site owner's own group
+# carries the owner's name (`alice` for the group alice).
 tp_php_conf_owner() {
-  case "$1" in
-    ?*-grp) ;;
-    *) return 1 ;;
-  esac
-  tp_is_principal_group "$1" || return 1
-  tp_is_principal "${1%-grp}" || return 1
-  printf '%s' "${1%-grp}"
+  tp_principal_own_group "$1" || return 1
+  printf '%s' "$1"
 }
 
 # php.ini, or the ini lines of a php-fpm pool (php_value[…] and friends): known
@@ -1650,7 +1647,7 @@ tp_php_ini_awk='
     if (key == "zend_extension" && val != "opcache.so" && val != "opcache") fail("zend_extension=" val)
     # Only the modules the vendored lsphp ships as shared objects: PHPRC
     # replaces its own php.ini, so the ini of a detached lsphp site loads them.
-    if (key == "extension" && val !~ /^(curl|mysqli|pdo_mysql)(\.so)?$/) fail("extension=" val)
+    if (key == "extension" && val !~ /^(curl|mysqli|pdo_mysql|pgsql|pdo_pgsql)(\.so)?$/) fail("extension=" val)
     if ((key == "opcache.validate_permission" || key == "opcache.validate_root") && val !~ /^(1|[Oo]n|true|yes)$/) fail(key " must stay on")
   }
 '
@@ -1781,8 +1778,8 @@ tp_php_path_class() {
   return 1
 }
 
-# install into a per-site PHP config path: the directory root:<owner>-grp 0750,
-# a config file root:<owner>-grp 0640 whose content passes the allowlist. The
+# install into a per-site PHP config path: the directory root:<owner> 0750,
+# a config file root:<owner> 0640 whose content passes the allowlist. The
 # owner can read its config and change none of it.
 tp_php_install() {
   _pi_dir="$1"
@@ -1831,10 +1828,8 @@ tp_verb_php_loopback_sync() {
 # (re-checked here), never from the caller. The owner cannot traverse the
 # daemon's config tree outside its unit, so root opens the config files
 # (verified, no symlink) and the binary reads them through /proc/self/fd —
-# which checks the file's own mode, root:<owner>-grp 0640. The owner keeps its
-# supplementary groups, as systemd gives them to the unit: the PHP binaries are
-# 0750 root:tpphp<series>, so without its entitlement group the owner could not
-# even exec the binary the unit runs.
+# which checks the file's own mode, root:<owner> 0640. The owner keeps its
+# supplementary groups, as systemd gives them to the unit.
 tp_verb_php_test() {
   [ $# -eq 1 ] || tp_die "php-test: only php-test <siteId>"
   tp_php_site_id_ok "$1" || tp_die "php-test: refusing site id $1"
@@ -1852,7 +1847,7 @@ tp_verb_php_test() {
   tp_open_verified "$_pt_cfg/php.ini" || tp_die "php-test: no $_pt_cfg/php.ini"
   _pt_bin="${_ps_exec%% *}"
   set -- timeout 30 setpriv --reuid="$(tp_uid_of "$_ps_user")" \
-    --regid="$(tp_gid_of_group "$_ps_user-grp")" --init-groups --no-new-privs -- \
+    --regid="$(tp_gid_of_group "$_ps_user")" --init-groups --no-new-privs -- \
     env -i PATH=/usr/bin:/bin
   case "$_ps_mode" in
     fpm) set -- "$@" "$_pt_bin" --test --fpm-config /proc/self/fd/4 -c /proc/self/fd/3 ;;
@@ -2709,7 +2704,9 @@ tp_registry_group() {
   tp_name_shape_ok "$1" || return 1
   _rg_file="$INSTALL_ROOT/share/orchestration/runtime-registry.json"
   [ -f "$_rg_file" ] && [ ! -L "$_rg_file" ] || return 1
-  grep -Eq "\"group\"[[:space:]]*:[[:space:]]*\"$1\"" "$_rg_file"
+  # A fixed string, not a pattern: `.` passes tp_name_shape_ok and would
+  # otherwise match any character.
+  grep -Fq "\"group\": \"$1\"" "$_rg_file"
 }
 
 # The passwd home is the tenant directory home/ inside the root-owned home.
@@ -2724,15 +2721,100 @@ tp_shell_ok() {
   return 1
 }
 
+# Names a site owner's Linux user may never take. Its primary group carries the
+# same name, and sudoers, PAM and polkit hand out power by group name whether
+# or not the group exists yet (Ubuntu's sudoers still names %admin; pam_wheel
+# and polkit name wheel), so a site owner called `admin` would be an
+# administrator. Compared in lower case. Kept equal to the control plane's
+# RESERVED_PRINCIPAL_USERNAMES (src/lib/naming.ts); the `tp` and `systemd-`
+# prefixes are refused there and in tp_reserved_name.
+TP_RESERVED_NAMES="root daemon bin sys sync games man lp mail news uucp proxy
+www-data backup list irc gnats nobody nogroup sshd ssh _ssh _apt _chrony
+postgres redis mysql docker containers adm admin audio avahi cdrom crontab
+dialout dip disk floppy fuse incus incus-admin input kmem kvm libvirt
+libvirt-qemu lpadmin lxd messagebus microk8s netdev operator plugdev polkitd
+render sambashare sasl sgx shadow src ssl-cert staff sudo tape tty users utmp
+video voice wheel bluetooth gpio i2c nopasswdlogin rdma scanner syslog
+systemd-journal tss uuidd vboxusers wireshark"
+
+# Every sudoers file: /etc/sudoers, /etc/sudoers.d, and whatever files or
+# directories /etc/sudoers pulls in with @include/@includedir (or the older
+# #include/#includedir), one level deep.
+tp_sudoers_files() {
+  printf '%s\n' "$P/etc/sudoers"
+  for _sf in "$P/etc/sudoers.d"/*; do printf '%s\n' "$_sf"; done
+  [ -f "$P/etc/sudoers" ] || return 0
+  sed -n 's/^[@#]include\(dir\)\{0,1\}[[:space:]][[:space:]]*\(\/[^[:space:]]*\).*/x\1 \2/p' \
+    "$P/etc/sudoers" 2>/dev/null | while read -r _sf_kind _sf_path; do
+    if [ "$_sf_kind" = xdir ]; then
+      for _sf in "$P$_sf_path"/*; do printf '%s\n' "$_sf"; done
+    else
+      printf '%s\n' "$P$_sf_path"
+    fi
+  done
+}
+
+# True when sudoers names the group $1 (`%name`, `%:name`, quoted or with
+# backslash escapes) in any sudoers file: an operator's own administrators'
+# group, which no fixed list can know. $1 is a plain name (letters, digits,
+# `_`, `-`).
+tp_sudoers_names_group() {
+  tp_sudoers_files | {
+    while IFS= read -r _sg_file; do
+      [ -f "$_sg_file" ] || continue
+      tr -d '"\\' < "$_sg_file" 2>/dev/null |
+        grep -Eq -- "%:?$1([^A-Za-z0-9_.-]|\$)" && exit 0
+    done
+    exit 1
+  }
+}
+
+# True when a sysusers.d file declares the user or group $1 (`u name …` or
+# `g name …`): a package's system account that may not exist yet, but whose
+# name the package (and its udev rules) will reuse when it is installed.
+tp_sysusers_names() {
+  for _su_file in "$P/usr/lib/sysusers.d"/*.conf "$P/etc/sysusers.d"/*.conf; do
+    [ -f "$_su_file" ] || continue
+    grep -Eq -- "^[ug][[:space:]]+$1([[:space:]]|\$)" "$_su_file" 2>/dev/null && return 0
+  done
+  return 1
+}
+
+# A name no site owner's Linux user (and so no site owner's group) may carry.
+tp_reserved_name() {
+  _rn="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+  case "$_rn" in tp*|systemd-*) return 0 ;; esac
+  for _rn_word in $TP_RESERVED_NAMES; do
+    [ "$_rn" != "$_rn_word" ] || return 0
+  done
+  tp_sysusers_names "$1" && return 0
+  tp_sudoers_names_group "$1"
+}
+
 tp_new_name_ok() {
+  # Never <name>-grp: that is an older site owner's group name (groupmod
+  # renames it). Never all digits: getent would read it as an id.
+  case "$1" in *[!0-9]*) ;; *) return 1 ;; esac
   case "$1" in
-    ''|-*|*[!A-Za-z0-9_-]*|root|tp|tp[a-z]*) return 1 ;;
+    ''|-*|*[!A-Za-z0-9_-]*|root|tp|tp[a-z]*|*-grp) return 1 ;;
   esac
   [ "${#1}" -le 32 ] || return 1
+  ! tp_reserved_name "$1" || return 1
   # Its slice must not be one of the platform's (tp_principal_slice).
   tp_principal_slice "$1" >/dev/null || return 1
   ! tp_getent passwd "$1" >/dev/null 2>&1 || return 1
   return 0
+}
+
+# A site owner's own group: the principal NAME exists, its primary group is the
+# group NAME, that group sits in the principal band, and the name is not one
+# tp_reserved_name refuses. The only group an engine account may join, and the
+# only group a site owner's units, PHP config and releases may carry.
+tp_principal_own_group() {
+  tp_is_principal "$1" || return 1
+  tp_is_principal_group "$1" || return 1
+  ! tp_reserved_name "$1" || return 1
+  [ "$(tp_getent passwd "$1" | cut -d: -f4)" = "$(tp_gid_of_group "$1")" ]
 }
 
 # Either an explicit id in the principal band, or the band itself via -K. The
@@ -2750,10 +2832,12 @@ tp_id_args_ok() {
     [ "$3" = "-K" ] && [ "$4" = "${_ia_kind}_MAX=$PRINCIPAL_ID_MAX" ]
 }
 
+# A site owner's group, created just before its account and named after it:
+# the same names useradd takes (never root, tp*, a reserved or sudoers-named
+# group, an existing account), never an existing group, ids in the band.
 tp_verb_groupadd() {
   for _ga_name in "$@"; do :; done
-  case "$_ga_name" in *-grp) ;; *) tp_die "groupadd: only <principal>-grp" ;; esac
-  tp_name_shape_ok "$_ga_name" || tp_die "groupadd: bad name"
+  tp_new_name_ok "$_ga_name" || tp_die "groupadd: refusing name $_ga_name"
   ! tp_getent group "$_ga_name" >/dev/null 2>&1 || tp_die "groupadd: $_ga_name exists"
   if [ $# -eq 3 ]; then
     tp_id_args_ok GID "$1" "$2" || tp_die "groupadd: gid outside the principal band"
@@ -2775,8 +2859,14 @@ tp_useradd_tail_ok() {
   shift "$_ut_n"
   [ "$#" -eq 8 ] && [ "$1" = "-g" ] && [ "$3" = "-d" ] && [ "$5" = "-M" ] &&
     [ "$6" = "-s" ] || tp_die "useradd: unsupported form"
-  [ "$2" = "${_ut_name}-grp" ] && tp_is_principal_group "$2" ||
-    tp_die "useradd: primary group must be ${_ut_name}-grp"
+  [ "$2" = "$_ut_name" ] && tp_is_principal_group "$2" ||
+    tp_die "useradd: primary group must be the group $_ut_name"
+  # A fresh group of its own: nobody's primary group yet, no members. Never a
+  # group another site owner already holds.
+  ! tp_gid_is_primary "$(tp_gid_of_group "$2")" ||
+    tp_die "useradd: group $2 is already an account's primary group"
+  [ -z "$(tp_getent group "$2" | cut -d: -f4)" ] ||
+    tp_die "useradd: group $2 already has members"
   tp_principal_home_ok "$4" "$_ut_name" || tp_die "useradd: home must be $R_PRINCIPALS/$_ut_name/home"
   tp_shell_ok "$7" || tp_die "useradd: refusing shell $7"
 }
@@ -2808,18 +2898,37 @@ tp_verb_usermod() {
       ;;
     -aG)
       [ $# -eq 3 ] || tp_die "usermod -aG GROUP USER"
-      # A principal joins a group the runtime registry defines (entitlements
-      # and SSH access levels); an engine account joins a site's group.
+      # A principal joins a group the runtime registry defines (its SSH access
+      # groups); an engine account joins a site owner's own group, never any
+      # other group in the band.
       if tp_is_principal "$3"; then
         tp_registry_group "$2" || tp_die "usermod: $2 is not a registry group"
       else
         case " $ENGINE_USERS " in *" $3 "*) ;; *) tp_die "usermod: refusing account $3" ;; esac
-        tp_is_principal_group "$2" || tp_die "usermod: $2 is not a principal group"
+        tp_principal_own_group "$2" || tp_die "usermod: $2 is not a site owner's own group"
       fi
       ;;
     *) tp_die "usermod: unsupported form" ;;
   esac
   tp_exec usermod "$@"
+}
+
+# groupmod -n NAME NAME-grp: a site owner's group from before the group took
+# the owner's own name is renamed in place, so everything keyed on its gid
+# (files, memberships) keeps working. Only for a principal NAME whose primary
+# group is NAME-grp in the principal band, with no group NAME yet, and only to
+# a name a new site owner could take.
+tp_verb_groupmod() {
+  [ "$#" -eq 3 ] && [ "$1" = "-n" ] && [ "$3" = "$2-grp" ] ||
+    tp_die "groupmod: only -n NAME NAME-grp"
+  tp_retire_name_ok "$2" || tp_die "groupmod: refusing name $2"
+  ! tp_reserved_name "$2" || tp_die "groupmod: refusing name $2"
+  tp_is_principal "$2" || tp_die "groupmod: $2 is not a principal"
+  ! tp_getent group "$2" >/dev/null 2>&1 || tp_die "groupmod: group $2 exists"
+  _gm_gid="$(tp_band_group_gid "$3")" || tp_die "groupmod: no group $3 in the principal band"
+  [ "$(tp_getent passwd "$2" | cut -d: -f4)" = "$_gm_gid" ] ||
+    tp_die "groupmod: $3 is not $2's primary group"
+  tp_exec groupmod -n "$2" "$3"
 }
 
 tp_verb_gpasswd() {
@@ -2856,12 +2965,12 @@ tp_verb_getent() {
 # `principal-remove NAME` takes back what a principal held on this host once the
 # panel says no project, site or app here uses the account any more: its slice
 # and processes, its key file, its group memberships, its home tree, the
-# account and its <name>-grp group. One argument and no options; every step is
-# fixed here.
+# account and its own group (NAME, or NAME-grp on a host set up before the group
+# took the owner's name). One argument and no options; every step is fixed here.
 #
-# Refused unless NAME is a TurboPanel principal: uid and <name>-grp gid both in
-# the principal band (an account outside it is never touched), that group is
-# the account's primary group, and the passwd home is <root>/<name>/home (the
+# Refused unless NAME is a TurboPanel principal: uid and gid both in the
+# principal band (an account outside it is never touched), the primary group is
+# the account's own group, and the passwd home is <root>/<name>/home (the
 # root-owned layout) or <root>/<name> (the tenant-owned layout before it).
 # Refused before anything changes while this host still references the
 # account: a turbopanel-* unit that runs as it or in its slice, or a site tree
@@ -2881,12 +2990,18 @@ tp_retire_name_ok() {
   [ "${#1}" -le 28 ]
 }
 
-# The <name>-grp group's id, when it exists inside the principal band.
-tp_retire_group_gid() {
-  _rg_line="$(tp_getent group "$1-grp")" || return 1
-  _rg_gid="$(printf '%s' "$_rg_line" | cut -d: -f3)"
-  tp_in_principal_band "$_rg_gid" || tp_die "principal-remove: $1-grp is outside the principal band"
-  printf '%s' "$_rg_gid"
+# The id of group $1, when it exists inside the principal band.
+tp_band_group_gid() {
+  _bg_line="$(tp_getent group "$1")" || return 1
+  _bg_gid="$(printf '%s' "$_bg_line" | cut -d: -f3)"
+  tp_in_principal_band "$_bg_gid" || return 1
+  printf '%s' "$_bg_gid"
+}
+
+# True when some account still has gid $1 as its primary group.
+tp_gid_is_primary() {
+  if [ -n "$TP_TEST" ]; then cat "$P/etc/passwd"; else getent passwd; fi |
+    awk -F: -v g="$1" '$4 == g { found = 1 } END { exit !found }'
 }
 
 # A turbopanel-* unit (other than the slice itself) that still runs as NAME or
@@ -2921,13 +3036,20 @@ tp_retire_account_check() {
   _ra_gid="$(printf '%s' "$_ra_line" | cut -d: -f4)"
   _ra_home="$(printf '%s' "$_ra_line" | cut -d: -f6)"
   tp_in_principal_band "$_ra_uid" || tp_die "principal-remove: $1 is outside the principal band"
-  _ra_grp="$(tp_retire_group_gid "$1")" || tp_die "principal-remove: $1 has no $1-grp group"
-  [ "$_ra_gid" = "$_ra_grp" ] || tp_die "principal-remove: $1's primary group is not $1-grp"
+  tp_in_principal_band "$_ra_gid" || tp_die "principal-remove: $1's primary group is outside the principal band"
+  RETIRE_GROUP=""
+  for _ra_name in "$1" "$1-grp"; do
+    [ "$(tp_band_group_gid "$_ra_name")" = "$_ra_gid" ] || continue
+    RETIRE_GROUP="$_ra_name"
+    break
+  done
+  [ -n "$RETIRE_GROUP" ] || tp_die "principal-remove: $1's primary group is not its own group $1"
   case "$_ra_home" in
     "$R_PRINCIPALS/$1/home"|"$R_PRINCIPALS/$1") ;;
     *) tp_die "principal-remove: $1's home is not under $R_PRINCIPALS/$1" ;;
   esac
   RETIRE_UID="$_ra_uid"
+  RETIRE_GID="$_ra_gid"
 }
 
 # Every group that lists NAME as a supplementary member.
@@ -2984,7 +3106,12 @@ tp_verb_principal_remove() {
     tp_retire_refs_check "$_pv" "$_pv_slice"
     tp_run systemctl --no-pager stop "$_pv_slice" || true
     tp_retire_files "$_pv" "$_pv_slice"
-    if tp_retire_group_gid "$_pv" >/dev/null; then tp_run groupdel "$_pv-grp"; fi
+    # Its own group, if an earlier run left it: only in the band, and only
+    # while no account has it as primary group.
+    for _pv_group in "$_pv" "$_pv-grp"; do
+      _pv_gid="$(tp_band_group_gid "$_pv_group")" || continue
+      tp_gid_is_primary "$_pv_gid" || tp_run groupdel "$_pv_group"
+    done
     return 0
   fi
   tp_retire_account_check "$_pv"
@@ -2999,7 +3126,12 @@ tp_verb_principal_remove() {
   done
   tp_retire_home "$_pv" "$RETIRE_UID"
   tp_run userdel "$_pv"
-  tp_run groupdel "$_pv-grp"
+  # userdel takes the group along itself when nothing else is in it; the
+  # engines usually are, so it often stays. Only the group checked above, with
+  # the same gid, is removed.
+  if [ "$(tp_band_group_gid "$RETIRE_GROUP")" = "$RETIRE_GID" ]; then
+    tp_run groupdel "$RETIRE_GROUP"
+  fi
 }
 
 # --- builds ------------------------------------------------------------------
@@ -3048,11 +3180,6 @@ fi
 # owner): its slice is turbopanel-tpbuild.slice, which no principal can own
 # (tp_new_name_ok refuses every tp* name).
 BUILD_NO_OWNER="tpbuild"
-# Runtime entitlement groups (tpnode<series>, tpdeno<series>) live in this gid
-# band (orchestration/runtime-registry.json); a build gets them as
-# SupplementaryGroups= so it can run the vendored Node or Deno it was assigned.
-BUILD_RUNTIME_GID_MIN=9900
-BUILD_RUNTIME_GID_MAX=9979
 BUILD_LOCK="$P/run/tpbuild.lock"
 # root:tp 0750 like this script. PID 1 reads it as root and hands it to the
 # unit as a credential (a private, read-only copy owned by the unit's user),
@@ -3187,16 +3314,6 @@ tp_build_dyn_user() {
   BUILD_DYN_USER="tpb-$_du_hash"
   ! tp_getent passwd "$BUILD_DYN_USER" >/dev/null 2>&1 &&
     ! tp_getent group "$BUILD_DYN_USER" >/dev/null 2>&1
-}
-
-# The runtime groups a build gets (SupplementaryGroups=), space-separated:
-# every tpnode<series> and tpdeno<series> group in the runtime entitlement band,
-# and nothing else.
-tp_build_runtime_groups() {
-  tp_group_db | awk -F: -v lo="$BUILD_RUNTIME_GID_MIN" -v hi="$BUILD_RUNTIME_GID_MAX" '
-    $1 ~ /^tp(node|deno)[0-9]+$/ && $3 ~ /^[0-9]+$/ && $3 + 0 >= lo + 0 && $3 + 0 <= hi + 0 {
-      printf "%s%s", sep, $1; sep = " "
-    }'
 }
 
 # True when this process runs in exactly the cgroup of build $1 of owner $2
@@ -3418,8 +3535,6 @@ tp_verb_build_run() {
   # when the unit stops; the name is ours (tp_build_dyn_user), the uid systemd's.
   set -- --unit="turbopanel-build-$1" --service-type=exec --wait --pipe --quiet --collect \
     -p DynamicUser=yes -p User="$BUILD_DYN_USER"
-  _br_groups="$(tp_build_runtime_groups)"
-  [ -z "$_br_groups" ] || set -- "$@" -p SupplementaryGroups="$_br_groups"
   set -- "$@" -p WorkingDirectory="$_br_work" \
     -p NoNewPrivileges=yes -p CapabilityBoundingSet= -p AmbientCapabilities= \
     -p RestrictSUIDSGID=yes -p ProtectSystem=strict -p ProtectHome=yes \
@@ -3668,7 +3783,7 @@ tp_verb_cert_dates() {
 
 # Allocated sizes of every principal home and of every site directory
 # (`<home>/sites/<id>`), for the metrics collector: homes are root-owned
-# 0750 root:<principal>-grp, so the daemon account cannot walk them. Sizes and
+# 0750 root:<principal>, so the daemon account cannot walk them. Sizes and
 # directory names only, `home <bytes> <name>` / `site <bytes> <id>`; no file
 # name or content is printed. Nothing follows a symlink: each directory is
 # pinned with `cd -P`, and `du -P` never follows one.
@@ -3753,7 +3868,7 @@ tp_verb_site_usage() {
 #                          (release/safe-copy.ts) and writes its manifest.
 #   publish P SVC ID       takes the leaf from the caller (root 0700), refuses
 #                          hard links and special files, seals it
-#                          (chown -R -h -P root:P-grp, chmod -R
+#                          (chown -R -h -P root:P, chmod -R
 #                          u-s,g-s,go-w,g+rX,o-rwx), refuses a symlink that
 #                          resolves outside it, renames it to releases/ID on
 #                          the same filesystem through a chain root owns, adds
@@ -3779,7 +3894,7 @@ tp_release_id_ok() {
 tp_publish_args() {
   [ $# -eq 3 ] || tp_die "$_verb: only $_verb PRINCIPAL SERVICE-ID RELEASE-ID"
   tp_is_principal "$1" || tp_die "$_verb: $1 is not a principal"
-  tp_is_principal_group "$1-grp" || tp_die "$_verb: no group $1-grp"
+  tp_principal_own_group "$1" || tp_die "$_verb: $1 has no group of its own"
   tp_release_id_ok "$2" || tp_die "$_verb: refusing service id $2"
   tp_release_id_ok "$3" || tp_die "$_verb: refusing release id $3"
   PUB_USER="$1"
@@ -3859,7 +3974,7 @@ tp_publish_seal() {
   # The layout links shared/ itself, after every check.
   [ ! -e ./shared ] && [ ! -L ./shared ] ||
     tp_die "publish: refusing $PUB_NAME: it ships its own shared entry"
-  tp_run chown -R -h -P -- "root:$PUB_USER-grp" .
+  tp_run chown -R -h -P -- "root:$PUB_USER" .
   # GNU chmod -R does not follow a link met during the walk.
   chmod -R u-s,g-s,a-t,go-w,g+rX,o-rwx .
   tp_publish_refuse_found "unsealed entry" ! -type l \( ! -user "$ROOT_UID" -o -perm /7022 \)
@@ -3922,7 +4037,7 @@ tp_publish_place() {
   [ ! -L "./$PUB_ID" ] && [ "$(stat -c '%d:%i' "./$PUB_ID")" = "$PUB_INODE" ] ||
     tp_die "publish: refusing $PUB_SITE/releases/$PUB_ID: not the sealed tree"
   ln -s -T -- ../../shared "./$PUB_ID/shared"
-  tp_run chown -h -- "root:$PUB_USER-grp" "./$PUB_ID/shared"
+  tp_run chown -h -- "root:$PUB_USER" "./$PUB_ID/shared"
   chmod 0550 "./$PUB_ID"
 }
 
@@ -4140,6 +4255,7 @@ case "$_verb" in
   ip) tp_verb_ip "$@" ;;
   wg) tp_verb_wg "$@" ;;
   groupadd) tp_verb_groupadd "$@" ;;
+  groupmod) tp_verb_groupmod "$@" ;;
   useradd) tp_verb_useradd "$@" ;;
   usermod) tp_verb_usermod "$@" ;;
   gpasswd) tp_verb_gpasswd "$@" ;;

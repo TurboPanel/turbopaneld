@@ -242,6 +242,7 @@ export async function handleCommandDispatch(
     message.payload,
   );
   let commandSucceeded = false;
+  let destroyRecordGone = false;
 
   try {
     let ok: boolean;
@@ -428,7 +429,7 @@ export async function handleCommandDispatch(
         )(payload, daemonReceivedAt, {
           decryptSecrets: deps?.decryptSecrets,
         });
-        await noteManagedDestroySucceeded(payload);
+        destroyRecordGone = await noteManagedDestroySucceeded(payload);
         ok = true;
         daemonRespondedAt = new Date().toISOString();
         break;
@@ -574,7 +575,9 @@ export async function handleCommandDispatch(
       daemonRespondedAt,
     });
   } finally {
-    await endManagedCommandIntent(managedIntent, commandSucceeded);
+    await endManagedCommandIntent(managedIntent, commandSucceeded, {
+      keepHeld: managedIntent?.kind === "destroy" && !destroyRecordGone,
+    });
     // Transcript upload is never load-bearing — finalize() never throws.
     await logSink.finalize();
   }

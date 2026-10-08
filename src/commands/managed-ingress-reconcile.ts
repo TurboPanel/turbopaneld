@@ -94,9 +94,10 @@ function desiredStateFromPayload(
   payload: ManagedIngressReconcilePayload,
 ): ProxySqlDesiredState {
   return {
-    // Missing/empty `bindAddresses` means "no cluster currently wants an access
-    // scope that reaches the host" (see instance `ingress-desired.ts`
-    // `decideIngressBindScopes`) — it must never be widened to "publish on every
+    // The instance sends one address from the server's single "allow external
+    // access to the databases on this server" setting (`127.0.0.1` off,
+    // `0.0.0.0` on). Missing/empty `bindAddresses` means nothing is published
+    // to the host — it must never be widened to "publish on every
     // interface". `[]` here means the shared frontend is reachable only via
     // the organization's managed Docker network (bindings from co-located
     // compose services),
@@ -658,7 +659,7 @@ async function reconcileManagedIngress(
   );
   // ProxySQL's internal `interfaces=` line is now a fixed constant (see
   // `CONTAINER_LISTEN_ADDRESS` in proxysql.ts), so a bind-only change
-  // (public <-> private, a different address, or gaining/losing a second scope)
+  // (all interfaces <-> loopback, or any other address change)
   // only changes the compose `ports:` publish — caught by full nextComposeText
   // comparison below (along with container_name renames).
   const {

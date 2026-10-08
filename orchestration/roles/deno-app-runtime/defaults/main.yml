@@ -13,10 +13,6 @@ deno_app_default_version: "2"
 # versions the deploy's Deno apps declared; a manual run gets the default.
 deno_app_versions: ["{{ deno_app_default_version }}"]
 deno_app_root: "{{ turbopanel_vendor_dir }}/deno-app"
-# Builds run as the daemon (dev) or a per-build throwaway account (managed
-# hosts). The playbook appends the daemon account to each series group so
-# `sudo -n -u <self>` can exec the 0750 tree without a daemon re-login.
-turbopanel_user: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tp' }}"
 
 # Where the official release metadata and zips come from. The newest stable
 # release is `release-latest.txt`; `release/v<version>/` holds each archive and
@@ -25,6 +21,7 @@ turbopanel_user: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') |
 deno_app_dist_url: https://dl.deno.land
 deno_app_releases_api_url: https://api.github.com/repos/denoland/deno/releases?per_page=100
 
-# `/opt/turbopanel` and `vendor/` stay `tp:tp 0750`; each entitlement group
-# gets traverse-only through a POSIX ACL (see the runtime-entitlement role).
+# `/opt/turbopanel`, `vendor/` and `deno-app/` stay 0750 with an `other:x` ACL
+# (the runtime-access role): every site owner's Linux user may run every
+# installed series, without being able to list those directories.
 turbopanel_install_root: /opt/turbopanel  # noqa: var-naming[no-role-prefix]
