@@ -67,6 +67,9 @@ export const ORCHESTRATOR_IMAGE = "percona/percona-orchestrator:3.2.6-24";
 export const MANAGED_HA_HTTP_PORT = 33001;
 export const MANAGED_HA_RAFT_PORT = 33002;
 
+/** Topology CA inside the Orchestrator container (`./tls` bind). */
+export const ORCHESTRATOR_TLS_CA_PATH = "/etc/orchestrator/tls/ca.pem";
+
 type RunDockerFn = (
   args: string[],
   options?: RunDockerOptions,
@@ -144,7 +147,11 @@ export function renderOrchestratorConf(input: OrchestratorConfInput): string {
     MySQLTopologyPassword: input.topologyPassword,
     PostgreSQLTopologyUser: input.topologyUser,
     PostgreSQLTopologyPassword: input.topologyPassword,
-    MySQLTopologyUseSSL: true,
+    // Topology TLS is MySQLTopologyUseMutualTLS (MySQLTopologyUseSSL is not a
+    // recognized key and is ignored). SkipVerify is true only without a CA.
+    // MySQLTopologySSLCAFile is still written when a CA path exists, but the
+    // process uses SSL_CERT_FILE as trust roots — the CAFile key is not.
+    MySQLTopologyUseMutualTLS: true,
     MySQLTopologySSLSkipVerify: input.sslCaPath === undefined,
     Recover: false,
     RecoverMasterClusterFilters: [],
@@ -399,6 +406,8 @@ export function orchestratorCompose(
     // and fails compose's loader ("did not find expected '-'").
     `      - ${quoteYamlScalar(confMountSpec)}`,
     `      - ${quoteYamlScalar(tlsMountSpec)}`,
+    "    environment:",
+    `      SSL_CERT_FILE: ${quoteYamlScalar(ORCHESTRATOR_TLS_CA_PATH)}`,
     "    networks:",
     `      - ${managedNetwork}`,
     "    command:",

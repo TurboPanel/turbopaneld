@@ -24,6 +24,7 @@ import {
   MANAGED_HA_HTTP_PORT,
   MANAGED_HA_RAFT_PORT,
   ORCHESTRATOR_IMAGE,
+  ORCHESTRATOR_TLS_CA_PATH,
   orchestratorCompose,
   orchestratorStackPresent,
   orchestratorTopologyAliases,
@@ -121,7 +122,8 @@ test("renderOrchestratorConf disables unsupervised recovery", () => {
   assertEquals(conf.RecoverMasterClusterFilters, []);
   assertEquals(conf.RaftAuthToken, "raft-token");
   assertEquals(conf.ListenAddress, `:${MANAGED_HA_HTTP_PORT}`);
-  assertEquals(conf.MySQLTopologyUseSSL, true);
+  assertEquals(conf.MySQLTopologyUseMutualTLS, true);
+  assertEquals("MySQLTopologyUseSSL" in conf, false);
   assertEquals(
     conf.HTTPAdvertise,
     `http://203.0.113.10:${MANAGED_HA_HTTP_PORT}`,
@@ -165,6 +167,9 @@ test("orchestratorCompose publishes HTTP on loopback and advertise, Raft on adve
     true,
   );
   assertEquals(volumes.includes("./tls:/etc/orchestrator/tls:ro"), true);
+  const environment = services[ORCHESTRATOR_COMPOSE_SERVICE_NAME]
+    .environment as Record<string, string>;
+  assertEquals(environment.SSL_CERT_FILE, ORCHESTRATOR_TLS_CA_PATH);
 });
 
 test("pickPublishedEngineDial uses the private-listener publish, not loopback", () => {
@@ -290,17 +295,19 @@ test("renderOrchestratorConf omits RaftAuthToken when unset and maps RaftNodes",
   })) as Record<string, unknown>;
   assertEquals("RaftAuthToken" in conf, false);
   assertEquals(conf.RaftNodes, ["203.0.113.11:33002"]);
-  assertEquals(conf.MySQLTopologyUseSSL, true);
+  assertEquals(conf.MySQLTopologyUseMutualTLS, true);
+  assertEquals("MySQLTopologyUseSSL" in conf, false);
   assertEquals(conf.MySQLTopologySSLSkipVerify, true);
   assertEquals("MySQLTopologySSLCAFile" in conf, false);
 });
 
 test("renderOrchestratorConf sets Organization CA path and verifies TLS", () => {
   const conf = JSON.parse(sampleConf({
-    sslCaPath: "/etc/orchestrator/tls/ca.pem",
+    sslCaPath: ORCHESTRATOR_TLS_CA_PATH,
   })) as Record<string, unknown>;
-  assertEquals(conf.MySQLTopologySSLCAFile, "/etc/orchestrator/tls/ca.pem");
-  assertEquals(conf.MySQLTopologyUseSSL, true);
+  assertEquals(conf.MySQLTopologySSLCAFile, ORCHESTRATOR_TLS_CA_PATH);
+  assertEquals(conf.MySQLTopologyUseMutualTLS, true);
+  assertEquals("MySQLTopologyUseSSL" in conf, false);
   assertEquals(conf.MySQLTopologySSLSkipVerify, false);
 });
 
