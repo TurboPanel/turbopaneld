@@ -8,6 +8,7 @@ import {
   allAccessGroups,
   allManagedGroups,
 } from "../runtime/registry.ts";
+import { isReservedPrincipalUsername } from "./reserved-principal-names.ts";
 
 export type PrincipalEnsureSpec = {
   principalId: string;
@@ -195,13 +196,15 @@ function assertSafeAbsolutePath(value: string, label: string): string {
 }
 
 function assertSafePrincipalUsername(username: string): string {
+  if (isReservedPrincipalUsername(username)) {
+    throw new Error(
+      `The name ${username.trim()} is reserved for the host's own accounts, so it cannot be a site owner's Linux user. Pick another name.`,
+    );
+  }
   if (
     username.length === 0 ||
     username.length > MAX_PRINCIPAL_USERNAME_LENGTH ||
-    !PRINCIPAL_USERNAME_RE.test(username) ||
-    // `<name>-grp` is an older site owner's group: a new user of that name
-    // would share it.
-    username.endsWith("-grp")
+    !PRINCIPAL_USERNAME_RE.test(username)
   ) {
     throw new Error(`Invalid principal username: ${username}`);
   }
@@ -349,7 +352,7 @@ function assertAdoptedGroupGid(
   if (principal.gid !== undefined) {
     if (currentGid !== principal.gid) {
       throw new Error(
-        `Principal group ${groupName} already exists with gid=${currentGid}; expected gid=${principal.gid}`,
+        `The name ${groupName} is already used by a group on this host (gid=${currentGid}); expected gid=${principal.gid}`,
       );
     }
   } else if (currentGid < PRINCIPAL_ID_MIN) {
@@ -359,11 +362,11 @@ function assertAdoptedGroupGid(
     // silently adopting this group would only defer the failure to the
     // first host command that touches its home tree.
     throw new Error(
-      `Principal group ${groupName} has gid=${currentGid}, below the current PRINCIPAL_ID_MIN=${PRINCIPAL_ID_MIN} — needs UID/GID migration (groupmod -g <new gid in [${PRINCIPAL_ID_MIN}, ${PRINCIPAL_ID_MAX}]> ${groupName}, then chown -R the principal's home tree) before this host can be used again`,
+      `The name ${groupName} is already used by a group on this host with gid=${currentGid}, below the current PRINCIPAL_ID_MIN=${PRINCIPAL_ID_MIN} — needs UID/GID migration (groupmod -g <new gid in [${PRINCIPAL_ID_MIN}, ${PRINCIPAL_ID_MAX}]> ${groupName}, then chown -R the principal's home tree) before this host can be used again`,
     );
   } else if (currentGid > PRINCIPAL_ID_MAX) {
     throw new Error(
-      `refusing to use the existing group ${groupName}: gid=${currentGid} is above ${PRINCIPAL_ID_MAX}, so it was not made for a site owner's Linux user`,
+      `The name ${groupName} is already used by a group on this host: gid=${currentGid} is above ${PRINCIPAL_ID_MAX}, so it was not made for a site owner's Linux user`,
     );
   }
 }
@@ -385,12 +388,12 @@ function assertGroupIsAccountPrimary(
   // refuses a group that is already some account's primary group.
   if (!account && (groupLine.split(":")[3] ?? "").trim() !== "") {
     throw new Error(
-      `refusing to use the existing group ${groupName} (gid=${groupGid}): it already has members and there is no account ${username}`,
+      `The name ${groupName} is already used by a group on this host (gid=${groupGid}): it already has members and there is no account ${username}`,
     );
   }
   if (account && account.gid !== groupGid) {
     throw new Error(
-      `refusing to use the existing group ${groupName} (gid=${groupGid}): the account ${username} has primary gid=${account.gid}`,
+      `The name ${groupName} is already used by a group on this host (gid=${groupGid}): the account ${username} has primary gid=${account.gid}`,
     );
   }
 }
@@ -820,6 +823,7 @@ export async function ensureSystemPrincipals(
   runFn: RunFn = runDefault,
 ): Promise<string[]> {
   for (const principal of principals) {
+    assertSafePrincipalUsername(principal.username);
     assertPrincipalIdOverrides(principal);
     assertSingleAccessLevel(principal);
   }
