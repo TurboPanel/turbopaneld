@@ -570,6 +570,7 @@ describe("host-inventory", () => {
       assertEquals(resources.cpus[0].speedMhz, 3200);
       assertEquals(resources.cpus[0].turboMhz, 4800);
       assertEquals(resources.memory?.totalBytes, 2097152 * 1024);
+      assertEquals(resources.memory?.pageSizeBytes, undefined);
       assertEquals(resources.swap?.totalBytes, 1048576 * 1024);
 
       if (!resources.gpus || resources.gpus.length < 3) {
@@ -641,6 +642,171 @@ describe("host-inventory", () => {
       Deno.removeSync(root, { recursive: true });
       resetHostResourcesCacheForTests();
     }
+  });
+
+  it("readHostResources reports memory.pageSizeBytes from injected getconf PAGESIZE", () => {
+    resetHostResourcesCacheForTests();
+    const { procRoot, sysRoot, root } = buildFixtureRoots();
+    try {
+      const resources = readHostResources({
+        procRoot,
+        sysRoot,
+        architecture: "x86_64",
+        os: "linux",
+        nvidiaSmiCsv: () => undefined,
+        getconfPagesize: () => "16384\n",
+      });
+      assertEquals(resources?.memory?.totalBytes, 2097152 * 1024);
+      assertEquals(resources?.memory?.pageSizeBytes, 16384);
+    } finally {
+      Deno.removeSync(root, { recursive: true });
+      resetHostResourcesCacheForTests();
+    }
+  });
+
+  it("readHostResources omits memory.pageSizeBytes off Linux and on bad getconf", () => {
+    resetHostResourcesCacheForTests();
+    const { procRoot, sysRoot, root } = buildFixtureRoots();
+    try {
+      const darwin = readHostResources({
+        procRoot,
+        sysRoot,
+        architecture: "x86_64",
+        os: "darwin",
+        nvidiaSmiCsv: () => undefined,
+        getconfPagesize: () => "4096\n",
+      });
+      assertEquals(darwin?.memory?.pageSizeBytes, undefined);
+
+      const noSpawn = readHostResources({
+        procRoot,
+        sysRoot,
+        architecture: "x86_64",
+        os: "linux",
+        nvidiaSmiCsv: () => undefined,
+      });
+      assertEquals(noSpawn?.memory?.pageSizeBytes, undefined);
+
+      for (
+        const stdout of [
+          "0\n",
+          "-4096\n",
+          "NaN\n",
+          "4096.5\n",
+          "pagesize\n",
+          "",
+        ]
+      ) {
+        const resources = readHostResources({
+          procRoot,
+          sysRoot,
+          architecture: "x86_64",
+          os: "linux",
+          nvidiaSmiCsv: () => undefined,
+          getconfPagesize: () => stdout,
+        });
+        assertEquals(resources?.memory?.pageSizeBytes, undefined);
+      }
+    } finally {
+      Deno.removeSync(root, { recursive: true });
+      resetHostResourcesCacheForTests();
+    }
+  });
+
+  it("readHostResources production path reads page size from getconf PAGESIZE", () => {
+    resetHostResourcesCacheForTests();
+    const originalRead = Deno.readTextFileSync;
+    const OriginalCommand = Deno.Command;
+    const originalReadDir = Deno.readDirSync;
+    const originalBuild = Object.getOwnPropertyDescriptor(Deno, "build");
+    Deno.readTextFileSync = () => {
+      throw new Error("read blocked");
+    };
+    Deno.readDirSync = () => {
+      throw new Error("readdir blocked");
+    };
+    Object.defineProperty(Deno, "build", {
+      configurable: true,
+      enumerable: true,
+      value: { ...Deno.build, os: "linux", arch: "" as typeof Deno.build.arch },
+      writable: true,
+    });
+
+    const stubGetconf = (
+      result: { code: number; stdout: Uint8Array } | "throw",
+    ) => {
+      Deno.Command = function (
+        name: string | URL,
+        options?: { args?: string[] },
+      ) {
+        if (String(name) === "getconf" && options?.args?.[0] === "PAGESIZE") {
+          if (result === "throw") throw new Error("getconf blocked");
+          return { outputSync: () => result };
+        }
+        throw new Error("command blocked");
+      } as unknown as typeof Deno.Command;
+    };
+
+    try {
+      stubGetconf({
+        code: 0,
+        stdout: new TextEncoder().encode("16384\n"),
+      });
+      assertEquals(readHostResources(), {
+        memory: { pageSizeBytes: 16384 },
+      });
+      resetHostResourcesCacheForTests();
+
+      stubGetconf({ code: 1, stdout: new Uint8Array() });
+      assertEquals(readHostResources(), undefined);
+      resetHostResourcesCacheForTests();
+
+      stubGetconf("throw");
+      assertEquals(readHostResources(), undefined);
+    } finally {
+      Deno.readTextFileSync = originalRead;
+      Deno.Command = OriginalCommand;
+      Deno.readDirSync = originalReadDir;
+      if (originalBuild) Object.defineProperty(Deno, "build", originalBuild);
+      resetHostResourcesCacheForTests();
+    }
+  });
+
+  it("hostResourcesFromProc merges extras.pageSizeBytes onto memory", () => {
+    const resources = hostResourcesFromProc(
+      undefined,
+      "MemTotal: 2048 kB\n",
+      undefined,
+      undefined,
+      { pageSizeBytes: 65536 },
+    );
+    assertEquals(resources, {
+      memory: { totalBytes: 2048 * 1024, pageSizeBytes: 65536 },
+    });
+    assertEquals(
+      hostResourcesFromProc(undefined, undefined, undefined, undefined, {
+        pageSizeBytes: 4096,
+      }),
+      { memory: { pageSizeBytes: 4096 } },
+    );
+    assertEquals(
+      hostResourcesFromProc(undefined, undefined, undefined, undefined, {
+        pageSizeBytes: 0,
+      }),
+      undefined,
+    );
+    assertEquals(
+      hostResourcesFromProc(undefined, undefined, undefined, undefined, {
+        pageSizeBytes: Number.NaN,
+      }),
+      undefined,
+    );
+    assertEquals(
+      hostResourcesFromProc(undefined, undefined, undefined, undefined, {
+        pageSizeBytes: 4096.5,
+      }),
+      undefined,
+    );
   });
 
   it("readHostResources returns undefined when fixture trees are empty", () => {

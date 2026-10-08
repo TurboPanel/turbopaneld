@@ -5,6 +5,12 @@ machine-key / runtime inventory probes attached on hello and refreshed by
 change-detected heartbeats.
 
 - **Host OS** — `src/host/os-release.ts` (process-cached; attached once on hello).
+- **Host resources** — `src/host/host-inventory.ts` (`readHostResources`,
+  process-cached). Static capacity for hello: CPU sockets, GPUs, memory /
+  swap `totalBytes`, and optional `memory.pageSizeBytes` (positive integer
+  bytes from `getconf PAGESIZE`, Linux only; omitted on other OS or when
+  unreadable / non-positive). Spawn is behind `HostInventoryIo.getconfPagesize`
+  so tests never need a live host.
 - **Time sync** — `src/host/time-sync.ts` (cache-light `timedatectl show`,
   with `timedatectl status` + `/etc/timezone` fallbacks, plus `timesyncd.conf`
   read; carried on hello and change-detected heartbeats with `ips` from

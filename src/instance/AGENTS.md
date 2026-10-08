@@ -175,7 +175,9 @@ identifier per hour (one refill every 12 minutes). The tenant
   64-bit Pi OS still reports `ID=debian`).   **Host resources** (static
   capacity under `resources.cpus[]` / `gpus[]` / `memory` / `swap`: per-socket
   `vendorId` / `name` / `cores` / `threads` / `cache` / `speedMhz` / `turboMhz`,
-  GPU identity + memory, `totalBytes`, plus `resources.ips`) come from `/proc/stat` + `/proc/cpuinfo` + `/proc/meminfo`
+  GPU identity + memory, `totalBytes`, optional `memory.pageSizeBytes` (kernel
+  page size in bytes from `getconf PAGESIZE`, Linux only — omitted elsewhere or
+  when unreadable), plus `resources.ips`) come from `/proc/stat` + `/proc/cpuinfo` + `/proc/meminfo`
   + `/sys` (cpufreq, cache, DRM) via `src/host/host-inventory.ts` (process-cached; cpus/gpus/mem/swap on hello only)
   and `collectServerIps()` (`src/host/server-addresses.ts`) as
   `{ address, version, scope, cidr?, interface? }[]` (public + private; `interface`
