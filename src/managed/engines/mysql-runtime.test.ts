@@ -717,10 +717,18 @@ test("mysql applyDatabases drops databases and ensures ProxySQL monitor", async 
   assertEquals(calls.some((c) => c.input?.includes("DROP DATABASE")), true);
 
   await mysqlManagedEngineRuntime.ensureProxySqlMonitor!(
-    buildContext(exec),
+    {
+      ...buildContext(exec),
+      clientSourceHosts: ["10.100.0.3", "10.100.0.5"],
+    },
     { user: "tp_monitor", password: "mon-pass" },
   );
-  assertEquals(calls.some((c) => c.input?.includes("tp_monitor")), true);
+  const monitorSql =
+    calls.find((c) => c.input?.includes("tp_monitor"))?.input ??
+      "";
+  assertEquals(monitorSql.includes("'10.100.0.3'"), true);
+  assertEquals(monitorSql.includes("'10.100.0.5'"), true);
+  assertEquals(monitorSql.includes("172.16.0.0/255.240.0.0"), true);
 });
 
 test("mysql readVersion returns undefined when version query fails", async () => {
