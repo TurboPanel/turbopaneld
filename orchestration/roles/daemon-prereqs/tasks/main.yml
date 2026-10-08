@@ -9,7 +9,7 @@
 #   - wireguard-tools: TurboFabric mesh (`server.fabric.reconcile`) on managed hosts
 #   - openssl: managed-engine self-signed TLS material (`managed.apply`)
 #   - pamtester: instance install PAM gate (production)
-#   - acl: setfacl/getfacl for principal-access + runtime-entitlement traverse ACLs
+#   - acl: setfacl/getfacl for principal-access + runtime-access traverse ACLs
 #     (Priority: optional on Debian — minimal images omit it; ansible.posix.acl needs it)
 #   - iptables: the nft-backed iptables/ip6tables + -restore/-save shims the managed
 #     host firewall (`server.firewall.reconcile`, src/firewall/) renders against;

@@ -213,53 +213,45 @@ bootstrap `Listen 127.0.0.1:19080` so httpd can start before any site
 fragment exists (Apache refuses zero-Listen configs). ASF httpd has **no**
 mod_php — PHP is the sibling `php-fpm` role below.
 
-### Runtime entitlements (`runtime-entitlement`, `runtime-registry.json`)
+### Runtime access (`runtime-access`, `runtime-registry.json`)
 
-**A runtime entitlement is a unix group**, because that is the only form the
-kernel enforces at `execve`. Anything derived only into a generated systemd unit
-or an FPM pool is invisible to an interactive shell or a cron job — both of which
-run as the principal, and both of which are exactly the cases the grant has to
-cover.
+**Every installed PHP, Node or Deno series may be run by every site owner's
+Linux user** (owner decision 2026-10-07). There is no per-version group: the
+vendored trees (`vendor/lsphp/<series>/`, `vendor/node-app/<series>/`,
+`vendor/deno-app/<series>/`) are root-owned, readable and executable by
+everyone, never writable but by root, and sury's `/usr/bin/php<series>`,
+`/usr/bin/php-cgi<series>` and `/usr/sbin/php-fpm<series>` keep their packaged
+`root:root 0755`. `/opt/turbopanel`, `vendor/` and each runtime's tree root stay
+`0750` with an `other:x` ACL, the traverse-without-list contract
+`principal-access` uses on the home root: a path into a runtime works, a
+listing of the panel's own trees does not.
 
-`orchestration/runtime-registry.json` is the single artifact: Ansible reads it
-with `include_vars` in the `runtime-entitlement` role, and the daemon imports the
-same file in `../src/runtime/registry.ts`. Same bytes, so group names and gids
-cannot drift.
+`orchestration/runtime-registry.json` lists the series a host offers. Ansible
+reads it with `include_vars` and the daemon imports the same file in
+`../src/runtime/registry.ts`, so the two cannot drift. It also defines the SSH
+access groups (`tpsftp`, `tpshell`, `tppasswd`, `tpprincipal`), which are the
+only groups the daemon reconciles on a site owner's Linux user.
+
+The `runtime-access` role (included by `php-fpm`, `openlitespeed` for lsphp,
+`node-app-runtime` and `deno-app-runtime`) sets those ACLs and removes what
+older releases left behind: every group named `tpphp<NN>`, `tpnode<N>` or
+`tpdeno<N>` with a gid in **9900–9979** (name and band must both match), first
+the `dpkg-statoverride` entries that name one (dpkg refuses to run while an
+override names a missing group; the binary is put back to `root:root 0755`),
+then their ACL entries, then the group. Nothing else may take a gid in that
+band; **9980–9999** is service identities (9994 stays reserved for `tpbuild`,
+the retired shared build account; builds now run as per-build systemd
+`DynamicUser=` identities). `../src/orchestration/service-accounts.test.ts`
+enforces both.
 
 **Deno** (`deno-app-runtime` role, `playbooks/deno-app-runtime-apply.yml`) vendors the
 tenant Deno under `vendor/deno-app/<series>/current`, the way `node-app-runtime`
 vendors Node: the newest stable release of the series from the official Deno
 distribution (`dl.deno.land/release-latest.txt`, else the release list when the
 series is no longer the newest), the archive checked against the release's
-published SHA-256 before it is unpacked, group `tpdeno<series>`, gid in the
-entitlement band. Deno ships one major, so the series is the major (`2`). The
-playbook and its `deno_app_versions` extra-var are on `tp-orchestrate`'s
-allowlists.
-
-**Groups are per `(runtime, series)`** — `tpphp84`, `tpnode24`, `tpdeno2` — never one group
-per runtime. Co-installed PHP versions are distinct binaries, so a single
-`tpphp` would mean granting 8.4 also grants 8.3 with whatever CVEs another
-tenant's pinned app carries. It is also what lets a shell wrapper resolve a
-caller's series from its group list. One PHP group spans both flavors:
-`tpphp84` owns `/usr/sbin/php-fpm8.4`, `/usr/bin/php8.4`, **and**
-`vendor/lsphp/8.4/current/bin/lsphp` — "may execute PHP 8.4 here", whichever
-engine serves the site.
-
-gids are hand-assigned in the registry, never computed from the version string
-(that breaks the day `8.10` exists). Band **9900–9979** is entitlements;
-**9980–9999** is service identities (9994 stays reserved for `tpbuild`, the
-retired shared build account; builds now run as per-build systemd
-`DynamicUser=` identities). `../src/orchestration/service-accounts.test.ts`
-enforces uniqueness across both and that entitlement gids stay inside their band.
-
-**Membership is reconciled by the daemon, not by this role.** The role only
-creates groups and grants them traverse-only ACLs on `/opt/turbopanel` and
-`vendor/`. `ensurePrincipalManagedGroups` (`../src/deploy/ensure-principal.ts`)
-adds *and revokes* during principal materialization — which runs before any unit
-is installed, because systemd resolves supplementary groups at `execve` and a
-unit started too early dies `203/EXEC`. Revocation only ever touches names the
-registry defines, so `<username>-grp`, `tp`, engine groups, and anything an
-operator added by hand are never stripped.
+published SHA-256 before it is unpacked. Deno ships one major, so the series is
+the major (`2`). The playbook and its `deno_app_versions` extra-var are on
+`tp-orchestrate`'s allowlists.
 
 ### php-fpm (`php-fpm`)
 

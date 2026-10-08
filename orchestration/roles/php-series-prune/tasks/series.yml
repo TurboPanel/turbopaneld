@@ -36,21 +36,6 @@
     enabled: false
   failed_when: false
 
-# The stat overrides the php-fpm role added would outlive the packages' files.
-- name: Drop the PHP binary stat overrides ({{ php_prune_series }})
-  ansible.builtin.command:
-    argv:
-      - dpkg-statoverride
-      - "--remove"
-      - "{{ item }}"
-  loop:
-    - "/usr/sbin/php-fpm{{ php_prune_series }}"
-    - "/usr/bin/php{{ php_prune_series }}"
-    - "/usr/bin/php-cgi{{ php_prune_series }}"
-  register: _php_prune_statoverride
-  changed_when: _php_prune_statoverride.rc == 0
-  failed_when: false
-
 # Only this series' own packages: `php<series>` and `php<series>-*`. Nothing
 # else, no autoremove (shared libraries other software may use stay).
 - name: List this series' installed packages ({{ php_prune_series }})
@@ -102,16 +87,3 @@
     - "{{ turbopanel_log_dir }}/php/{{ php_prune_series }}"
     - "{{ turbopanel_run_dir }}/php/{{ php_prune_series }}"
     - "{{ turbopanel_vendor_dir }}/lsphp/{{ php_prune_series }}"
-
-- name: Check the lsphp vendor directory ({{ php_prune_series }})
-  ansible.builtin.stat:
-    path: "{{ turbopanel_vendor_dir }}/lsphp"
-  register: _php_prune_lsphp_root
-
-- name: Drop the series' traversal grant on the lsphp vendor directory ({{ php_prune_series }})
-  ansible.posix.acl:
-    path: "{{ turbopanel_vendor_dir }}/lsphp"
-    etype: group
-    entity: "tpphp{{ php_prune_series | replace('.', '') }}"
-    state: absent
-  when: _php_prune_lsphp_root.stat.exists

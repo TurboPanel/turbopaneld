@@ -6,21 +6,18 @@ import {
   accessGroup,
   allAccessGroups,
   allManagedGroups,
-  allRuntimeGroups,
   baselineExtensions,
   defaultSeries,
-  entitlementSeries,
   isAllowedExtension,
   isRuntimeName,
+  isSupportedSeries,
   optionalExtensions,
   phpBinaryPaths,
   phpBuiltinExtensions,
   phpFpmUnit,
   phpSeriesForSuite,
-  RUNTIME_GID_BAND,
   RUNTIME_NAMES,
-  runtimeGid,
-  runtimeGroup,
+  runtimeSeries,
   supportedSeries,
   unsupportedPhpSeriesMessage,
   unsupportedSeriesMessage,
@@ -57,17 +54,12 @@ test("accessGroup and allAccessGroups cover SSH levels", () => {
   );
 });
 
-test("RUNTIME_GID_BAND matches the entitlement band", () => {
-  assertEquals(RUNTIME_GID_BAND.min, 9900);
-  assertEquals(RUNTIME_GID_BAND.max, 9979);
-});
-
-test("entitlementSeries uses major.minor for php and major for node", () => {
-  assertEquals(entitlementSeries("php", "8.4.3"), "8.4");
-  assertEquals(entitlementSeries("php", " 8.3 "), "8.3");
-  assertEquals(entitlementSeries("node", "24.17.0"), "24");
-  assertEquals(entitlementSeries("node", "22"), "22");
-  assertEquals(entitlementSeries("deno", "2.9.7"), "2");
+test("runtimeSeries uses major.minor for php and major for node", () => {
+  assertEquals(runtimeSeries("php", "8.4.3"), "8.4");
+  assertEquals(runtimeSeries("php", " 8.3 "), "8.3");
+  assertEquals(runtimeSeries("node", "24.17.0"), "24");
+  assertEquals(runtimeSeries("node", "22"), "22");
+  assertEquals(runtimeSeries("deno", "2.9.7"), "2");
 });
 
 test("supportedSeries and defaultSeries come from the registry", () => {
@@ -79,56 +71,31 @@ test("supportedSeries and defaultSeries come from the registry", () => {
   assertEquals(defaultSeries("node"), "24");
 });
 
-test("runtimeGroup and runtimeGid resolve known series and unknown as undefined", () => {
-  assertEquals(runtimeGroup("php", "8.4.3"), "tpphp84");
-  assertEquals(runtimeGid("php", "8.4.3"), 9902);
-  assertEquals(runtimeGroup("php", "8.3"), "tpphp83");
-  assertEquals(runtimeGid("php", "8.3"), 9901);
-  assertEquals(runtimeGid("php", "8.1"), 9903);
-  assertEquals(runtimeGid("php", "8.2"), 9904);
-  assertEquals(runtimeGid("php", "8.5"), 9905);
-  assertEquals(runtimeGroup("node", "24.17.0"), "tpnode24");
-  assertEquals(runtimeGid("node", "24.17.0"), 9923);
-  assertEquals(runtimeGroup("node", "22"), "tpnode22");
-  assertEquals(runtimeGid("node", "22"), 9921);
-  assertEquals(runtimeGroup("node", "26.10.0"), "tpnode26");
-  assertEquals(runtimeGid("node", "26"), 9925);
-  assertEquals(runtimeGroup("deno", "2.9.7"), "tpdeno2");
-  assertEquals(runtimeGid("deno", "2"), 9941);
-  assertEquals(runtimeGroup("php", "7.4"), undefined);
-  assertEquals(runtimeGroup("deno", "3"), undefined);
-  assertEquals(runtimeGid("node", "18"), undefined);
+test("isSupportedSeries resolves known series and refuses unknown ones", () => {
+  assertEquals(isSupportedSeries("php", "8.4.3"), true);
+  assertEquals(isSupportedSeries("php", "8.1"), true);
+  assertEquals(isSupportedSeries("node", "24.17.0"), true);
+  assertEquals(isSupportedSeries("deno", "2.9.7"), true);
+  assertEquals(isSupportedSeries("php", "7.4"), false);
+  assertEquals(isSupportedSeries("deno", "3"), false);
+  assertEquals(isSupportedSeries("node", "18"), false);
 });
 
-test("allRuntimeGroups and allManagedGroups are the containment sets", () => {
-  const runtime = [...allRuntimeGroups()].sort((a, b) => a.localeCompare(b));
-  assertEquals(runtime, [
-    "tpdeno2",
-    "tpnode22",
-    "tpnode24",
-    "tpnode26",
-    "tpphp81",
-    "tpphp82",
-    "tpphp83",
-    "tpphp84",
-    "tpphp85",
-  ]);
+test("allManagedGroups is the SSH access groups and nothing per runtime", () => {
   const managed = [...allManagedGroups()].sort((a, b) => a.localeCompare(b));
-  assertEquals(managed, [
-    "tpdeno2",
-    "tpnode22",
-    "tpnode24",
-    "tpnode26",
-    "tppasswd",
-    "tpphp81",
-    "tpphp82",
-    "tpphp83",
-    "tpphp84",
-    "tpphp85",
-    "tpprincipal",
-    "tpsftp",
-    "tpshell",
-  ]);
+  assertEquals(managed, ["tppasswd", "tpprincipal", "tpsftp", "tpshell"]);
+});
+
+test("no runtime series carries a group any more", () => {
+  for (const runtime of RUNTIME_NAMES) {
+    const series = (registryJson.runtimes as Record<
+      string,
+      { series: Record<string, Record<string, unknown>> }
+    >)[runtime]?.series ?? {};
+    for (const entry of Object.values(series)) {
+      assertEquals(Object.keys(entry), []);
+    }
+  }
 });
 
 test("php extensions: baseline, optional, and allowlist", () => {

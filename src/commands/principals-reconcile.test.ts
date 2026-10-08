@@ -42,7 +42,6 @@ test("handlePrincipalsReconcile maps optional fields and defaults ssh keys", asy
           gid: 2001,
           home: "/srv/users/alice",
           shell: "/bin/bash",
-          runtimes: [{ runtime: "php", series: "8.4" }],
           accessGroups: ["tpshell"],
           sshKeys: ["ssh-ed25519 AAAA"],
           passwordHash: `$6$saltstring$${"a".repeat(86)}`,
@@ -77,7 +76,6 @@ test("handlePrincipalsReconcile maps optional fields and defaults ssh keys", asy
     gid: 2001,
     home: "/srv/users/alice",
     shell: "/bin/bash",
-    runtimes: [{ runtime: "php", series: "8.4" }],
     accessGroups: ["tpshell"],
     passwordHash: `$6$saltstring$${"a".repeat(86)}`,
   });
@@ -140,7 +138,7 @@ test("handlePrincipalsReconcile reports a failed runtime group grant as a warnin
     {
       resolveLayout: () => LAYOUT,
       ensureSystemPrincipals: () =>
-        Promise.resolve(["could not add erin to tpphp84: no such group"]),
+        Promise.resolve(["could not add erin to tpsftp: no such group"]),
       applySshAccess: () =>
         Promise.resolve({
           changedPrincipals: [],
@@ -152,7 +150,7 @@ test("handlePrincipalsReconcile reports a failed runtime group grant as a warnin
     },
   );
   assertEquals(result.warnings, [
-    "could not add erin to tpphp84: no such group",
+    "could not add erin to tpsftp: no such group",
     "AllowUsers is set",
   ]);
 });

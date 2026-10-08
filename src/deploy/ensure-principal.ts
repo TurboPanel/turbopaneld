@@ -7,8 +7,6 @@ import {
   accessGroup,
   allAccessGroups,
   allManagedGroups,
-  isRuntimeName,
-  runtimeGroup,
 } from "../runtime/registry.ts";
 
 export type PrincipalEnsureSpec = {
@@ -36,20 +34,13 @@ export type PrincipalEnsureSpec = {
   home?: string;
   shell?: string;
   /**
-   * Runtimes this principal may execute, as `{ runtime, series }` pairs. The
-   * **effective** set (explicit operator grants plus what its services imply),
-   * resolved control-plane side — the daemon reconciles, it does not derive.
-   */
-  runtimes?: readonly { runtime: string; series: string }[];
-  /**
    * SSH access groups this principal should hold (`tpsftp` / `tpshell`), or
    * `[]` for an account that may not log in.
    *
    * Resolved control-plane side from the account's shell *and* whether it holds
-   * any key, for the same reason `runtimes` is: the daemon reconciles a stated
-   * set rather than deriving one, so there is exactly one place that decides.
-   * Same containment rule too — a name outside the registry is refused, not
-   * created.
+   * any key: the daemon reconciles a stated set rather than deriving one, so
+   * there is exactly one place that decides. A name outside the registry is
+   * refused, not created.
    */
   accessGroups?: readonly string[];
   /**
@@ -756,9 +747,8 @@ async function ensureOnePrincipal(
     runFn,
   );
   await ensurePrincipalHomeTree(home, principal.username, groupName, runFn);
-  // Runs here, before any unit is installed or pool staged: systemd resolves
-  // supplementary groups at `execve`, so a unit started before its principal
-  // joined the runtime group dies `203/EXEC`.
+  // Runs here, before any unit is installed or pool staged, so a login the
+  // reconcile revokes never outlives the deploy that revoked it.
   const warnings = await ensurePrincipalManagedGroups(
     principal.username,
     resolveManagedGroups(principal),
@@ -773,28 +763,18 @@ async function ensureOnePrincipal(
 }
 
 /**
- * Every group one principal should hold: runtime entitlements plus SSH access.
+ * Every group one principal should hold: its SSH access groups.
  *
- * Resolved together because they are reconciled together — see
- * {@link ensurePrincipalManagedGroups} for why the containment set has to be a
- * single one.
- *
- * Unknown **runtime** series are dropped rather than thrown: a newer control
- * plane must not fail every deploy on a host that has simply not learned about
- * a series yet, and the site's own version gate is what reports that. Unknown
- * **access** groups are dropped for the opposite reason — there is a fixed pair
- * of them, so a third name is a control-plane bug, and inventing the group
- * would hand out an `sshd` Match block nobody wrote.
+ * Every installed runtime may be run by every site owner's Linux user, so no
+ * runtime appears here (owner decision 2026-10-07). Unknown access groups are
+ * dropped: there is a fixed set of them, so another name is a control-plane
+ * bug, and inventing the group would hand out an `sshd` Match block nobody
+ * wrote.
  */
 export function resolveManagedGroups(
   principal: PrincipalEnsureSpec,
 ): Set<string> {
   const groups = new Set<string>();
-  for (const entry of principal.runtimes ?? []) {
-    if (!isRuntimeName(entry.runtime)) continue;
-    const group = runtimeGroup(entry.runtime, entry.series);
-    if (group) groups.add(group);
-  }
   const known = allAccessGroups();
   for (const group of principal.accessGroups ?? []) {
     if (known.has(group)) groups.add(group);
@@ -889,30 +869,22 @@ async function removeSupplementaryGroupMembership(
 }
 
 /**
- * Reconcile every group TurboPanel manages on a principal — which runtimes it
- * may execute, and how it may log in.
+ * Reconcile every group TurboPanel manages on a principal — how it may log in.
  *
- * A runtime entitlement is a **unix group**, because that is the only form the
- * kernel enforces at `execve` time. Anything derived only into a generated
- * systemd unit or an FPM pool is invisible to an interactive shell or a cron
- * job — both of which run as the principal and are exactly the cases the group
- * has to cover. SSH access is a group for a different reason: `sshd` matches on
- * groups, not on shells.
+ * SSH access is a group because `sshd` matches on groups, not on shells.
  *
  * **Revocation is the reason this exists.** `usermod -aG` alone can only ever
- * add, so a principal that once deployed a Node app could execute Node forever,
- * and one downgraded from a shell to files-only would keep its shell. Stale
+ * add, so one downgraded from a shell to files-only would keep its shell. Stale
  * membership is dropped here — but **only** for group names the registry
  * defines. That containment is what makes revoking safe: `<username>-grp`,
  * `tp`, an engine group, and anything an operator added by hand are never
  * touched, no matter what the wire asks for.
  *
  * Adds are best-effort and logged (a host provisioned some other way may
- * legitimately not have the group yet, and the unit's own health probe is what
- * catches a genuinely unreachable runtime) — except the every-principal group
+ * legitimately not have the group yet) — except the every-principal group
  * (`accessGroup("principal")`), whose add is loud like a revoke: without it the
- * sshd backstop block does not apply. A failed **revoke** is loud: an
- * entitlement or a login that silently outlives its grant is a security
+ * sshd backstop block does not apply. A failed **revoke** is loud: a login
+ * that silently outlives its grant is a security
  * problem, not an inconvenience.
  *
  * Returns one warning per add that failed, so a caller that has somewhere to
@@ -951,7 +923,7 @@ export async function ensurePrincipalManagedGroups(
       if (isRequiredManagedGroup(group)) throw err;
       const warning = `could not add ${username} to ${group}: ${
         err instanceof Error ? err.message : String(err)
-      } (is that runtime installed on this host?)`;
+      }`;
       logWarn("deploy", warning);
       warnings.push(warning);
     }

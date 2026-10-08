@@ -1656,13 +1656,10 @@ test("site apply playbooks vendor engines (never apt nginx/apache2)", async () =
   // Re-validated inside the loop: the series is a path segment, a package
   // name, AND a systemd instance name.
   assertEquals(phpFpmSeriesTasks.includes("Validate the PHP series"), true);
-  // The exec gate is the per-series entitlement group, never `tp`.
-  assertEquals(
-    phpFpmSeriesTasks.includes(
-      "tpphp{{ php_fpm_series_item | replace('.', '') }}",
-    ),
-    true,
-  );
+  // Every installed series is open to every site owner's Linux user: no
+  // per-version group and no statoverride restricting the binaries.
+  assertEquals(phpFpmSeriesTasks.includes("tpphp"), false);
+  assertEquals(phpFpmSeriesTasks.includes("dpkg-statoverride"), false);
 
   assertMatch(
     phpFpmDefaults,
@@ -1751,7 +1748,7 @@ test("site apply playbooks vendor engines (never apt nginx/apache2)", async () =
     "site caddy user",
   );
   assertEquals(webUserDefaults.includes("uid: 9987"), true);
-  // 9988 belongs to tpnodeapp; reusing it would collide.
+  // 9988 stays held back (the retired tpnodeapp group had it).
   assertEquals(webUserDefaults.includes("uid: 9988"), false);
 
   const siteCaddyUnit = await Deno.readTextFile(

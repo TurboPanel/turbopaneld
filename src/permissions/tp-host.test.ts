@@ -1585,16 +1585,22 @@ test("accounts: only principals are created or changed, and only into registry g
         ["usermod", "-p", "!", "tp"],
         ["gpasswd", "-d", "alice", "alice-grp"],
         ["getent", "shadow", "--", "root"],
+        // The per-version runtime groups are gone from the registry, so a
+        // principal can no longer be put in one.
+        ["usermod", "-aG", "tpphp84", "alice"],
+        ["usermod", "-aG", "tpnode24", "alice"],
+        // The registry name is matched literally: `.` is not a wildcard.
+        ["usermod", "-aG", "tps.ell", "alice"],
       ]
     ) {
       await refused(host, args);
     }
     for (
       const args of [
-        ["usermod", "-aG", "tpphp84", "alice"],
+        ["usermod", "-aG", "tpshell", "alice"],
         ["usermod", "-aG", "tpsftp", "alice"],
         ["usermod", "-aG", "alice-grp", "tpnginx"],
-        ["gpasswd", "-d", "alice", "tpphp84"],
+        ["gpasswd", "-d", "alice", "tpshell"],
         ["usermod", "-p", "!", "alice"],
       ]
     ) {

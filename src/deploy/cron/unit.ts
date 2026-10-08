@@ -7,8 +7,8 @@
  *
  * **Why systemd timers rather than `/etc/cron.d`.** The timer's service sets
  * `User=`, so `ExecStart` reaches `execve` *after* systemd has dropped
- * privileges — which makes `/usr/bin/php8.4` succeed or fail purely on the
- * account's entitlement groups. Nothing in the generated unit grants anything.
+ * privileges, so a job runs with exactly the account's own rights. Nothing in
+ * the generated unit grants anything.
  * It also reuses the per-principal slice, so a runaway job counts against the
  * same account ceiling its app does, and journald captures output for the log
  * viewer instead of a redirect the operator has to invent.
@@ -140,8 +140,8 @@ export function cronServiceContent(opts: CronUnitOpts): string {
     "",
     "[Service]",
     "Type=oneshot",
-    // The whole point. `ExecStart` runs after this drop, so the account's own
-    // entitlement groups decide whether it may execute the interpreter at all.
+    // The whole point. `ExecStart` runs after this drop, so the job has exactly
+    // the account's own rights.
     `User=${opts.username}`,
     `Group=${principalUnixGroupName(opts.username)}`,
     `Slice=${principalSliceName(opts.username)}`,
