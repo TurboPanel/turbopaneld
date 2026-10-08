@@ -378,6 +378,17 @@ ProxySQL to enforce. Canonical policy:
      `runDocker`, for dump/restore.
    - **Checksum before restore.** Verify size/checksum before touching the
      engine container.
+   - **A restore returns the database to the backup's state, all or nothing.**
+     Postgres runs one transaction: `restoreResetSql` drops every user schema
+     (only `public` is recreated, with its owner and privileges; the dump
+     creates the others), then the dump is replayed as plain SQL (`pg_restore
+     --no-owner -f -` into `psql`). `COMMIT` is sent only when `pg_restore`
+     succeeded, and the script fails unless the server confirmed the commit,
+     so a truncated dump, a failing statement or a lock timeout (30 s) leaves
+     the data untouched. Rows, tables and schemas made after the backup are
+     gone. Roles, the database itself and its connect rights are not touched.
+     Restored objects are owned by the platform admin (`--no-owner`), as before.
+     MySQL/MariaDB dumps already drop and recreate the dumped tables.
    - **`.part` cleanup on failure.** Partial artifacts must never look complete.
    - **Prune by retention, one directory at a time.** After create, keep the
      newest `retentionKeep` artifacts **in the artifact's own directory**;

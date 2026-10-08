@@ -38,6 +38,7 @@ import {
   recreateLostPhysicalSlotSql,
   releaseRoleObjectsSql,
   reloadVerifySql,
+  restoreResetSql,
   revokePublicDatabaseAccessSql,
   revokeUnlistedDatabasesSql,
   standbyReplicationStatusSql,
@@ -71,6 +72,24 @@ function assertSafeDatabaseIdentifier(database: string): string {
   return database;
 }
 
+/**
+ * `$1` root user, `$2` database, `$3` reset SQL. The sentinel line is printed
+ * by the server only after `COMMIT` succeeded.
+ */
+const POSTGRES_RESTORE_SCRIPT = [
+  "set -eu",
+  "out=$({",
+  "  printf 'BEGIN;\\n%s\\n' \"$3\"",
+  "  if pg_restore --no-owner -f -; then",
+  "    printf 'COMMIT;\\nSELECT %s;\\n' \"'tp_restore_committed'\"",
+  "  fi",
+  '} | psql -X -q -A -t -v ON_ERROR_STOP=1 -U "$1" -d "$2")',
+  'case "$out" in',
+  "  *tp_restore_committed*) ;;",
+  "  *) echo 'restore was not committed; the database is unchanged' >&2; exit 1 ;;",
+  "esac",
+].join("\n");
+
 const postgresBackupRuntime: ManagedEngineBackupRuntime = {
   artifactExtension: "dump",
 
@@ -79,17 +98,26 @@ const postgresBackupRuntime: ManagedEngineBackupRuntime = {
     return ["pg_dump", "-Fc", "-U", ctx.rootUsername, "-d", db];
   },
 
+  /**
+   * Returns the database to exactly the backup's state, all or nothing.
+   *
+   * One transaction: empty every user schema (`restoreResetSql`), then replay
+   * the dump as plain SQL. `COMMIT` is only sent when `pg_restore` succeeded,
+   * so a bad or truncated dump, or a failing statement, rolls back and the
+   * customer keeps their data. The final line proves the commit happened;
+   * without it the command fails. `pg_restore` reads the dump from stdin.
+   * Positional args keep every value out of the script text.
+   */
   restoreArgv(ctx: ManagedEngineContext, { database }): string[] {
     const db = assertSafeDatabaseIdentifier(database);
     return [
-      "pg_restore",
-      "--clean",
-      "--if-exists",
-      "--no-owner",
-      "-U",
+      "sh",
+      "-c",
+      POSTGRES_RESTORE_SCRIPT,
+      "tp-restore",
       ctx.rootUsername,
-      "-d",
       db,
+      restoreResetSql(),
     ];
   },
 };

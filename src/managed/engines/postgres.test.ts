@@ -14,7 +14,12 @@
  * assuming it is the connection identity.
  */
 
-import { assertEquals, assertRejects, assertThrows } from "@std/assert";
+import {
+  assertEquals,
+  assertRejects,
+  assertStringIncludes,
+  assertThrows,
+} from "@std/assert";
 import type { ManagedApplyCredential } from "../../contracts/commands-contracts.ts";
 import { getManagedEngineRuntime } from "./index.ts";
 import {
@@ -395,8 +400,17 @@ test("backup dump/restore argv always target the stable platform admin regardles
   const restoreArgv = engine.backup.restoreArgv(ctx, { database: "appdb" });
 
   assertEquals(dumpArgv, ["pg_dump", "-Fc", "-U", "postgres", "-d", "appdb"]);
-  assertEquals(restoreArgv.includes("-U"), true);
-  assertEquals(restoreArgv[restoreArgv.indexOf("-U") + 1], "postgres");
+  // The restore runs as one script; the admin and database travel as
+  // positional arguments, never inside the script text.
+  assertEquals(restoreArgv.slice(0, 2), ["sh", "-c"]);
+  assertEquals(restoreArgv.slice(3, 6), ["tp-restore", "postgres", "appdb"]);
+  assertStringIncludes(
+    restoreArgv[2],
+    'psql -X -q -A -t -v ON_ERROR_STOP=1 -U "$1" -d "$2"',
+  );
+  assertEquals(restoreArgv[2].includes("appdb"), false);
+  assertStringIncludes(restoreArgv[2], "pg_restore --no-owner -f -");
+  assertEquals(restoreArgv[2].includes("--clean"), false);
 });
 
 function standbyReplicationSpec() {
