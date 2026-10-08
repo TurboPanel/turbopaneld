@@ -15,6 +15,7 @@ import { sanitizeForLog } from "../../util/logger.ts";
 import { forEachSequential } from "../../util/sequential.ts";
 import { grantDatabasePrivileges } from "./grant-databases.ts";
 import { parseMariadbFreshness } from "./replica-freshness.ts";
+import { parseSqlBool } from "./sql-bool.ts";
 import {
   changeReplicationSourceSql,
   connectionCensusSql,
@@ -540,8 +541,7 @@ const mariadbReplicationRuntime: ManagedEngineReplicationRuntime = {
     const writable = async (): Promise<boolean> => {
       if (Date.now() >= deadline) return false;
       const out = await runMariadbQuery(ctx, isWritableSql());
-      const readOnly = out.trim();
-      if (readOnly === "0") return true;
+      if (parseSqlBool(out) === false) return true;
       await sleep(500);
       return writable();
     };

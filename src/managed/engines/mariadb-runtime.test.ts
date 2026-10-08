@@ -453,6 +453,27 @@ test("mariadb promote clears read-only and returns when writable", async () => {
   assertEquals(writableChecks >= 2, true);
 });
 
+test("mariadb promote returns when read_only prints OFF", async () => {
+  const replication = mariadbManagedEngineRuntime.replication;
+  if (!replication?.promote) {
+    throw new TypeError("expected mariadb promote");
+  }
+  let writableChecks = 0;
+  const exec: ManagedEngineExec = (argv, input) => {
+    if (input?.includes("RESET SLAVE")) {
+      return Promise.resolve({ success: true, stdout: "", stderr: "" });
+    }
+    if (argv.includes("-e")) {
+      writableChecks++;
+      const stdout = writableChecks >= 2 ? "OFF\n" : "ON\n";
+      return Promise.resolve({ success: true, stdout, stderr: "" });
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  await replication.promote(buildContext(exec));
+  assertEquals(writableChecks >= 2, true);
+});
+
 test("mariadb followPrimary changes master host without reseeding", async () => {
   const replication = mariadbManagedEngineRuntime.replication;
   if (!replication?.followPrimary) {
@@ -574,6 +595,45 @@ test("mariadb promote throws when the instance stays read-only", async () => {
     }
     if (argv.includes("-e")) {
       return Promise.resolve({ success: true, stdout: "1\t1\n", stderr: "" });
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  try {
+    await assertRejects(
+      () => replication.promote!(buildContext(exec)),
+      Error,
+      "mariadb promote did not become writable within 60s",
+    );
+  } finally {
+    Date.now = originalDateNow;
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
+
+test("mariadb promote throws when read_only stays ON", async () => {
+  const replication = mariadbManagedEngineRuntime.replication;
+  if (!replication?.promote) {
+    throw new TypeError("expected mariadb promote");
+  }
+  const originalDateNow = Date.now;
+  const originalSetTimeout = globalThis.setTimeout;
+  let nowCalls = 0;
+  Date.now = () => {
+    nowCalls++;
+    if (nowCalls === 1) return 0;
+    if (nowCalls <= 5) return 1_000;
+    return 70_000;
+  };
+  globalThis.setTimeout = ((handler: () => void) => {
+    queueMicrotask(handler);
+    return 0 as unknown as ReturnType<typeof setTimeout>;
+  }) as typeof setTimeout;
+  const exec: ManagedEngineExec = (argv, input) => {
+    if (input?.includes("RESET SLAVE")) {
+      return Promise.resolve({ success: true, stdout: "", stderr: "" });
+    }
+    if (argv.includes("-e")) {
+      return Promise.resolve({ success: true, stdout: "ON\n", stderr: "" });
     }
     return Promise.resolve({ success: true, stdout: "", stderr: "" });
   };
