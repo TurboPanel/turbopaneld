@@ -149,12 +149,10 @@ export function removeBootConfigLineTop(text: string, line: string): string {
   return `${kept.join("\n")}\n`;
 }
 
-/**
- * Same reasons and check order as `kf_pi_4k_pagesize_state`.
- */
-export function piFourKPagesizeState(
+/** Checks about the platform; `undefined` means the boot files come next. */
+function platformStatus(
   facts: PiFourKPagesizeFacts,
-): KernelFeatureStatus {
+): KernelFeatureStatus | undefined {
   const pageSizeBytes = facts.pageSizeBytes;
   if (
     pageSizeBytes === undefined ||
@@ -191,6 +189,13 @@ export function piFourKPagesizeState(
         `this server uses ${pageSizeBytes}-byte memory pages, not the 16 KiB Raspberry Pi kernel`,
     };
   }
+  return undefined;
+}
+
+/** Checks that something the switch needs is missing; `undefined` means none is. */
+function bootFilesBlocked(
+  facts: PiFourKPagesizeFacts,
+): KernelFeatureStatus | undefined {
   if (!facts.hasConfigTxt) {
     return {
       state: "blocked",
@@ -218,6 +223,17 @@ export function piFourKPagesizeState(
         "config.txt turns on auto_initramfs but initramfs8 is missing from the boot partition",
     };
   }
+  return undefined;
+}
+
+/**
+ * Same reasons and check order as `kf_pi_4k_pagesize_state`.
+ */
+export function piFourKPagesizeState(
+  facts: PiFourKPagesizeFacts,
+): KernelFeatureStatus {
+  const early = platformStatus(facts) ?? bootFilesBlocked(facts);
+  if (early !== undefined) return early;
   const scan = scanBootConfigKernelLines(facts.configText ?? "");
   if (scan === "other") {
     return {
