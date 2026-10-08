@@ -774,13 +774,15 @@ export function standbyReplicationStatusSql(): string {
     // An idle primary sends no new xacts, so that timestamp stays put and
     // `now() - pg_last_xact_replay_timestamp()` would grow without bound
     // even when flushed/replayed WAL already matches the primary's last
-    // reported end (`latest_end_lsn`). Caught-up idle replicas report 0.
+    // reported end (`latest_end_lsn`). Caught-up idle replicas report 0. The
+    // zero needs a reported end: just after the receiver starts, before the
+    // first message, `latest_end_lsn` is NULL and the clock branch applies.
     `  CASE`,
     `    WHEN r.status = 'streaming'`,
-    `      AND COALESCE(r.latest_end_lsn, pg_catalog.pg_last_wal_receive_lsn()) IS NOT NULL`,
+    `      AND r.latest_end_lsn IS NOT NULL`,
     `      AND pg_catalog.pg_last_wal_replay_lsn() IS NOT NULL`,
     `      AND pg_catalog.pg_wal_lsn_diff(`,
-    `        COALESCE(r.latest_end_lsn, pg_catalog.pg_last_wal_receive_lsn()),`,
+    `        r.latest_end_lsn,`,
     `        pg_catalog.pg_last_wal_replay_lsn()`,
     `      ) <= 0`,
     `    THEN 0`,

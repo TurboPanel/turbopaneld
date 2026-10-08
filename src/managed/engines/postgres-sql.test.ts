@@ -327,13 +327,20 @@ test("replication SQL builders use quoted identifiers and managed slot prefix", 
 test("standbyReplicationStatusSql reports 0 lagSeconds when replay has caught the primary", () => {
   const sql = standbyReplicationStatusSql();
   const collapsed = sql.replaceAll(/\s+/g, " ");
-  // Caught-up: replay LSN is at or past the primary's last reported WAL end
-  // (or the last received LSN if the receiver has not reported latest_end).
+  // Caught-up: replay LSN is at or past the primary's last reported WAL end.
   assertEquals(
     collapsed.includes(
-      "pg_catalog.pg_wal_lsn_diff( COALESCE(r.latest_end_lsn, pg_catalog.pg_last_wal_receive_lsn()), pg_catalog.pg_last_wal_replay_lsn() ) <= 0",
+      "r.latest_end_lsn IS NOT NULL AND pg_catalog.pg_last_wal_replay_lsn() IS NOT NULL AND pg_catalog.pg_wal_lsn_diff( r.latest_end_lsn, pg_catalog.pg_last_wal_replay_lsn() ) <= 0",
     ),
     true,
+  );
+  // No reported end yet (fresh receiver): never claim zero lag from the
+  // receive position alone.
+  assertEquals(
+    collapsed.includes(
+      "COALESCE(r.latest_end_lsn, pg_catalog.pg_last_wal_receive_lsn())",
+    ),
+    false,
   );
   assertEquals(collapsed.includes("THEN 0"), true);
   // Replay-timestamp clock is only the behind branch, never the sole lag.
