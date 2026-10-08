@@ -1,15 +1,18 @@
 import { assertEquals, assertThrows } from "@std/assert";
 import {
+  applyFollowedPrimaryConninfoSql,
   connectionCensusSql,
   createDatabaseSql,
   createOrAlterRoleSql,
   createPhysicalSlotSql,
   createReplicationRoleSql,
+  currentPrimaryConninfoSql,
   databaseExistsSql,
   dropDatabaseSql,
   dropPhysicalSlotSql,
   dropRoleSql,
   ensureProxySqlMonitorRoleSql,
+  formatConninfoValue,
   grantDatabaseSql,
   isInRecoverySql,
   listDatabasesForRoleReleaseSql,
@@ -28,6 +31,7 @@ import {
   reloadVerifySql,
   revokePublicDatabaseAccessSql,
   revokeUnlistedDatabasesSql,
+  rewritePrimaryConninfo,
   standbyReplicationStatusSql,
   strongestPrivilege,
 } from "./postgres-sql.ts";
@@ -455,4 +459,45 @@ test("managedSlotRetentionSql reads retained bytes and safe size per managed slo
   assertEquals(sql.includes("safe_wal_size"), true);
   assertEquals(sql.includes("pg_current_wal_lsn()"), true);
   assertEquals(sql.includes("starts_with(slot_name, 'tp_member_')"), true);
+});
+
+test("rewritePrimaryConninfo updates host port and hostaddr without dropping password", () => {
+  const current =
+    "user=tp_repl password=s3cret host=10.100.0.5 hostaddr=10.100.0.5 port=45001 sslmode=verify-full";
+  const next = rewritePrimaryConninfo(current, {
+    host: "10.100.0.4",
+    hostaddr: "10.100.0.4",
+    port: 45001,
+  });
+  assertEquals(next.includes("host=10.100.0.4"), true);
+  assertEquals(next.includes("hostaddr=10.100.0.4"), true);
+  assertEquals(next.includes("port=45001"), true);
+  assertEquals(next.includes("password=s3cret"), true);
+  assertEquals(next.includes("10.100.0.5"), false);
+  const sql = applyFollowedPrimaryConninfoSql(next);
+  assertEquals(sql.includes("ALTER SYSTEM SET primary_conninfo"), true);
+  assertEquals(sql.includes("pg_reload_conf"), true);
+  assertEquals(sql.includes("walreceiver"), true);
+  assertEquals(currentPrimaryConninfoSql().includes("primary_conninfo"), true);
+});
+
+test("rewritePrimaryConninfo drops hostaddr when the new dial is a container name", () => {
+  const current =
+    "user=tp_repl password=s3cret host=10.100.0.5 hostaddr=10.100.0.5 port=45001 sslmode=verify-full";
+  const next = rewritePrimaryConninfo(current, {
+    host: "svc-1",
+    port: 5432,
+  });
+  assertEquals(next.includes("host=svc-1"), true);
+  assertEquals(next.includes("hostaddr"), false);
+  assertEquals(next.includes("port=5432"), true);
+  assertEquals(next.includes("password=s3cret"), true);
+});
+
+test("formatConninfoValue quotes empty values and any whitespace", () => {
+  assertEquals(formatConninfoValue(""), "''");
+  assertEquals(formatConninfoValue("plain"), "plain");
+  assertEquals(formatConninfoValue("has space"), "'has space'");
+  assertEquals(formatConninfoValue("has\ttab"), "'has\ttab'");
+  assertEquals(formatConninfoValue("has\nnl"), "'has\nnl'");
 });

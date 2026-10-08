@@ -535,6 +535,22 @@ test("mysql promote clears read-only and returns when writable", async () => {
   assertEquals(writableChecks >= 2, true);
 });
 
+test("mysql followPrimary changes source host without reseeding", async () => {
+  const replication = mysqlManagedEngineRuntime.replication;
+  if (!replication?.followPrimary) {
+    throw new TypeError("expected mysql followPrimary");
+  }
+  const { exec, calls } = recordingExec();
+  await replication.followPrimary(buildContext(exec), {
+    primary: { host: "10.100.0.4", hostaddr: "10.100.0.4", port: 45001 },
+  });
+  const sql = calls.map((c) => c.input ?? "").join("\n");
+  assertEquals(sql.includes("STOP REPLICA"), true);
+  assertEquals(sql.includes("SOURCE_HOST = '10.100.0.4'"), true);
+  assertEquals(sql.includes("SOURCE_PASSWORD"), false);
+  assertEquals(calls.some((c) => c.argv[0] === "test"), false);
+});
+
 test("mysql readHealth parses standby replica status", async () => {
   const replication = mysqlManagedEngineRuntime.replication;
   if (!replication?.readHealth) {
@@ -1169,4 +1185,31 @@ test("mysql configureStandby does not retry a denied seed without a root passwor
     replication.configureStandby!(buildContext(exec), standbyReplicationSpec())
   );
   assertEquals(seeds, 1);
+});
+
+test("mysql ensureSlots is a no-op", async () => {
+  const replication = mysqlManagedEngineRuntime.replication;
+  if (!replication?.ensureSlots) {
+    throw new TypeError("expected mysql ensureSlots");
+  }
+  const { exec, calls } = recordingExec();
+  await replication.ensureSlots(buildContext(exec), ["tp_member_2"]);
+  assertEquals(calls.length, 0);
+});
+
+test("mysql isStandby is true when SHOW REPLICA STATUS is non-empty", async () => {
+  const replication = mysqlManagedEngineRuntime.replication;
+  if (!replication?.isStandby) {
+    throw new TypeError("expected mysql isStandby");
+  }
+  const replica: ManagedEngineExec = () =>
+    Promise.resolve({
+      success: true,
+      stdout: HEALTHY_VERTICAL,
+      stderr: "",
+    });
+  const primary: ManagedEngineExec = () =>
+    Promise.resolve({ success: true, stdout: "\n", stderr: "" });
+  assertEquals(await replication.isStandby(buildContext(replica)), true);
+  assertEquals(await replication.isStandby(buildContext(primary)), false);
 });

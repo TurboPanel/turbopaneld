@@ -6,6 +6,11 @@
  * escapes — {@link quoteLiteral} must escape `\` as well as `'`.
  */
 
+import {
+  type FollowSourceDialect,
+  renderFollowSourceSql,
+} from "./follow-source-sql.ts";
+
 const ACCOUNT_MAX_LENGTH = 32;
 const SCHEMA_MAX_LENGTH = 64;
 const IDENTIFIER_RE = /^[A-Za-z_]\w*$/;
@@ -371,6 +376,25 @@ export function changeReplicationSourceSql(spec: {
     "  SOURCE_SSL_VERIFY_SERVER_CERT = 1;",
     "START REPLICA;",
   ].join("\n");
+}
+
+/**
+ * Re-point an already-configured replica after promotion. Host and port
+ * only — user, password, SSL, and auto-position stay as seeded.
+ */
+export const MYSQL_FOLLOW_SOURCE_DIALECT: FollowSourceDialect = {
+  stop: "STOP REPLICA",
+  change: "CHANGE REPLICATION SOURCE TO",
+  hostKey: "SOURCE_HOST",
+  portKey: "SOURCE_PORT",
+  start: "START REPLICA",
+};
+
+export function followReplicationSourceSql(spec: {
+  host: string;
+  port: number;
+}): string {
+  return renderFollowSourceSql(MYSQL_FOLLOW_SOURCE_DIALECT, spec, quoteLiteral);
 }
 
 /**

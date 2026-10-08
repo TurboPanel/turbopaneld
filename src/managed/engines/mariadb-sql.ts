@@ -5,6 +5,11 @@
  * (`MASTER_USE_GTID=slave_pos` / `gtid_slave_pos` vs `SOURCE_AUTO_POSITION=1`).
  */
 
+import {
+  type FollowSourceDialect,
+  renderFollowSourceSql,
+} from "./follow-source-sql.ts";
+
 const ACCOUNT_MAX_LENGTH = 32;
 const SCHEMA_MAX_LENGTH = 64;
 const IDENTIFIER_RE = /^[A-Za-z_]\w*$/;
@@ -284,6 +289,29 @@ export function changeReplicationSourceSql(spec: {
     "  MASTER_SSL_VERIFY_SERVER_CERT = 1;",
     "START SLAVE;",
   ].join("\n");
+}
+
+/**
+ * Re-point an already-configured replica after promotion. Host and port
+ * only — user, password, SSL, and GTID stay as seeded.
+ */
+export const MARIADB_FOLLOW_SOURCE_DIALECT: FollowSourceDialect = {
+  stop: "STOP SLAVE",
+  change: "CHANGE MASTER TO",
+  hostKey: "MASTER_HOST",
+  portKey: "MASTER_PORT",
+  start: "START SLAVE",
+};
+
+export function followReplicationSourceSql(spec: {
+  host: string;
+  port: number;
+}): string {
+  return renderFollowSourceSql(
+    MARIADB_FOLLOW_SOURCE_DIALECT,
+    spec,
+    quoteLiteral,
+  );
 }
 
 /**
