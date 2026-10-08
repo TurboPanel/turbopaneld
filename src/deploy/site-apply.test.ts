@@ -760,7 +760,7 @@ test("applySites rejects unsafe document root", async () => {
 
 const RELEASE_USERNAME = "appuser";
 const RELEASE_SERVICE_ID = "svc-1";
-const RELEASE_GROUP = `${RELEASE_USERNAME}-grp`;
+const RELEASE_GROUP = `${RELEASE_USERNAME}`;
 
 const releaseBinding: SiteRelease = {
   serviceId: RELEASE_SERVICE_ID,

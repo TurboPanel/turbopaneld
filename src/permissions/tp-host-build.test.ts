@@ -808,7 +808,7 @@ test("tp cannot install a unit under the build sandbox's transient unit names", 
       [
         "[Service]",
         "User=alice",
-        "Group=alice-grp",
+        "Group=alice",
         "Slice=turbopanel-alice.slice",
         "NoNewPrivileges=yes",
         "ExecStart=/bin/true",
@@ -1063,7 +1063,7 @@ test("a dashed site owner gets a slice of its own, never inside another owner's 
   await withHost(async (host) => {
     await setUpBuildHost(host, {
       accounts: ["web-x:x:15020:15020::/srv/users/web-x:/bin/bash"],
-      groups: ["web-x-grp:x:15020:"],
+      groups: ["web-x:x:15020:"],
     });
     const run = execLines(
       (await host.run(["build-run", "b1", "p1", "web-x"])).stdout,
@@ -1075,7 +1075,7 @@ test("a dashed site owner gets a slice of its own, never inside another owner's 
       [
         "[Service]",
         "User=web-x",
-        "Group=web-x-grp",
+        "Group=web-x",
         `Slice=${slice}`,
         "NoNewPrivileges=yes",
         "ExecStart=/bin/true",
@@ -1102,14 +1102,14 @@ test("no new site owner may take a platform slice's name or an id above the band
   await withHost(async (host) => {
     await Deno.writeTextFile(
       host.path("etc/group"),
-      "containers-grp:x:15020:\ncarol2-grp:x:15021:\n",
+      "containers:x:15020:\ncarol2:x:15021:\n",
       { append: true },
     );
     const useradd = (name: string, ids: string[]) => [
       "useradd",
       ...ids,
       "-g",
-      `${name}-grp`,
+      `${name}`,
       "-d",
       host.path(`srv/users/${name}/home`),
       "-M",
@@ -1122,7 +1122,7 @@ test("no new site owner may take a platform slice's name or an id above the band
     // systemd hands out 61184-65519 to throwaway build users.
     await refused(host, useradd("carol2", ["-u", "61500"]));
     await refused(host, useradd("carol2", ["-u", "60001"]));
-    await refused(host, ["groupadd", "-g", "61500", "dave-grp"]);
+    await refused(host, ["groupadd", "-g", "61500", "dave"]);
     const ok = await host.run(useradd("carol2", ["-u", "60000"]));
     assertEquals(ok.code, 0, ok.stderr);
   });

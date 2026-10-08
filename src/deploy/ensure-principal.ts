@@ -114,16 +114,25 @@ const PRINCIPAL_USERNAME_RE = /^[A-Za-z_][A-Za-z0-9_-]*$/;
 const PASSWORD_HASH_RE =
   /^\$6\$(?:rounds=\d{4,9}\$)?[./0-9A-Za-z]{8,16}\$[./0-9A-Za-z]{86}$/;
 /**
- * Cap so `${username}-grp` fits the Linux 32-char group-name limit.
- * Keep in sync with instance `MAX_PRINCIPAL_USERNAME_LENGTH`.
+ * Longest site owner's Linux user name. The group carries the same name, well
+ * inside the Linux 32-character limit. Keep in sync with instance
+ * `MAX_PRINCIPAL_USERNAME_LENGTH`.
  */
 const MAX_PRINCIPAL_USERNAME_LENGTH = 28;
 
 /**
- * Primary group name created by {@link ensureSystemPrincipals}
- * (`groupadd … ${username}-grp`).
+ * Primary group name created by {@link ensureSystemPrincipals}: the standard
+ * Debian per-user group, named after the user (`groupadd … ${username}`).
  */
 export function principalUnixGroupName(username: string): string {
+  return username;
+}
+
+/**
+ * The name the group carried before it took the user's own name. Only
+ * {@link ensurePrincipalGroup} still looks for it, to rename it in place.
+ */
+export function legacyPrincipalUnixGroupName(username: string): string {
   return `${username}-grp`;
 }
 
@@ -189,7 +198,10 @@ function assertSafePrincipalUsername(username: string): string {
   if (
     username.length === 0 ||
     username.length > MAX_PRINCIPAL_USERNAME_LENGTH ||
-    !PRINCIPAL_USERNAME_RE.test(username)
+    !PRINCIPAL_USERNAME_RE.test(username) ||
+    // `<name>-grp` is an older site owner's group: a new user of that name
+    // would share it.
+    username.endsWith("-grp")
   ) {
     throw new Error(`Invalid principal username: ${username}`);
   }
@@ -306,6 +318,114 @@ async function ensureDir(
   }
 }
 
+/** The account's passwd entry, or `null` when there is no such account. */
+async function principalAccount(
+  username: string,
+  runFn: RunFn,
+): Promise<{ uid: number; gid: number; home: string; shell: string } | null> {
+  const userCheck = await runFn("getent", ["passwd", username]);
+  if (!userCheck.success) return null;
+  const current = parsePasswdHomeShell(userCheck.stdout);
+  if (!current) {
+    throw new Error(
+      `Failed to parse passwd entry for principal user ${username}`,
+    );
+  }
+  return current;
+}
+
+/**
+ * An existing group's gid must match an explicit override and otherwise sit in
+ * the principal band: a group outside it was not made for a site owner (or
+ * predates the current floor), and tp-host would refuse it on first use.
+ */
+function assertAdoptedGroupGid(
+  principal: PrincipalEnsureSpec,
+  groupName: string,
+  currentGid: number,
+): void {
+  // Explicit gid overrides must match the existing group — never silently
+  // attach a principal to a colliding group with a different numeric id.
+  if (principal.gid !== undefined) {
+    if (currentGid !== principal.gid) {
+      throw new Error(
+        `Principal group ${groupName} already exists with gid=${currentGid}; expected gid=${principal.gid}`,
+      );
+    }
+  } else if (currentGid < PRINCIPAL_ID_MIN) {
+    // Adopted from a host provisioned before the current floor
+    // (PRINCIPAL_ID_MIN was raised from 10001 to 15001 on 2026-09-25).
+    // tp-host hard-floors `tp_is_principal_group` at PRINCIPAL_ID_MIN, so
+    // silently adopting this group would only defer the failure to the
+    // first host command that touches its home tree.
+    throw new Error(
+      `Principal group ${groupName} has gid=${currentGid}, below the current PRINCIPAL_ID_MIN=${PRINCIPAL_ID_MIN} — needs UID/GID migration (groupmod -g <new gid in [${PRINCIPAL_ID_MIN}, ${PRINCIPAL_ID_MAX}]> ${groupName}, then chown -R the principal's home tree) before this host can be used again`,
+    );
+  } else if (currentGid > PRINCIPAL_ID_MAX) {
+    throw new Error(
+      `refusing to use the existing group ${groupName}: gid=${currentGid} is above ${PRINCIPAL_ID_MAX}, so it was not made for a site owner's Linux user`,
+    );
+  }
+}
+
+/**
+ * The group the account `<name>` already exists with must be that account's
+ * primary group. A group of the same name that belongs to nobody, or to some
+ * other purpose, is never adopted.
+ */
+function assertGroupIsAccountPrimary(
+  username: string,
+  groupName: string,
+  groupLine: string,
+  groupGid: number,
+  account: { gid: number } | null,
+): void {
+  // Without the account, only a group nobody joined yet is taken over (a run
+  // that stopped between groupadd and useradd); tp-host's useradd also
+  // refuses a group that is already some account's primary group.
+  if (!account && (groupLine.split(":")[3] ?? "").trim() !== "") {
+    throw new Error(
+      `refusing to use the existing group ${groupName} (gid=${groupGid}): it already has members and there is no account ${username}`,
+    );
+  }
+  if (account && account.gid !== groupGid) {
+    throw new Error(
+      `refusing to use the existing group ${groupName} (gid=${groupGid}): the account ${username} has primary gid=${account.gid}`,
+    );
+  }
+}
+
+/**
+ * A host set up before the group took the user's own name still has
+ * `<name>-grp` as the account's primary group. Rename it in place (tp-host
+ * `groupmod -n <name> <name>-grp`, which checks the same things again as
+ * root); files and memberships follow the gid, so nothing else moves.
+ * Returns false when there is no such group to rename.
+ */
+async function renameLegacyPrincipalGroup(
+  principal: PrincipalEnsureSpec,
+  groupName: string,
+  account: { gid: number },
+  runFn: RunFn,
+): Promise<boolean> {
+  const legacyName = legacyPrincipalUnixGroupName(principal.username);
+  const legacyCheck = await runFn("getent", ["group", legacyName]);
+  if (!legacyCheck.success) return false;
+  const legacyGid = parseGroupGid(legacyCheck.stdout);
+  if (legacyGid === null || legacyGid !== account.gid) return false;
+  assertAdoptedGroupGid(principal, legacyName, legacyGid);
+  const rename = await runFn(
+    "sudo",
+    hostSudoArgs(["-n", "groupmod", "-n", groupName, legacyName]),
+  );
+  if (!rename.success) {
+    throw new Error(
+      rename.stderr || `Failed to rename group ${legacyName} to ${groupName}`,
+    );
+  }
+  return true;
+}
+
 async function ensurePrincipalGroup(
   principal: PrincipalEnsureSpec,
   groupName: string,
@@ -319,25 +439,31 @@ async function ensurePrincipalGroup(
         `Failed to parse group entry for principal group ${groupName}`,
       );
     }
-    // Explicit gid overrides must match the existing group — never silently
-    // attach a principal to a colliding group with a different numeric id.
-    if (principal.gid !== undefined) {
-      if (currentGid !== principal.gid) {
-        throw new Error(
-          `Principal group ${groupName} already exists with gid=${currentGid}; expected gid=${principal.gid}`,
-        );
-      }
-    } else if (currentGid < PRINCIPAL_ID_MIN) {
-      // Adopted from a host provisioned before the current floor
-      // (PRINCIPAL_ID_MIN was raised from 10001 to 15001 on 2026-09-25).
-      // tp-host hard-floors `tp_is_principal_group` at PRINCIPAL_ID_MIN, so
-      // silently adopting this group would only defer the failure to the
-      // first host command that touches its home tree.
-      throw new Error(
-        `Principal group ${groupName} has gid=${currentGid}, below the current PRINCIPAL_ID_MIN=${PRINCIPAL_ID_MIN} — needs UID/GID migration (groupmod -g <new gid in [${PRINCIPAL_ID_MIN}, ${PRINCIPAL_ID_MAX}]> ${groupName}, then chown -R the principal's home tree) before this host can be used again`,
-      );
-    }
+    assertAdoptedGroupGid(principal, groupName, currentGid);
+    const owner = await principalAccount(principal.username, runFn);
+    // An explicit id override that the account contradicts says so first.
+    if (owner) assertAdoptedIdsMatch(principal, owner);
+    assertGroupIsAccountPrimary(
+      principal.username,
+      groupName,
+      groupCheck.stdout,
+      currentGid,
+      owner,
+    );
     return;
+  }
+  const account = await principalAccount(principal.username, runFn);
+  if (account) {
+    if (
+      await renameLegacyPrincipalGroup(principal, groupName, account, runFn)
+    ) {
+      return;
+    }
+    throw new Error(
+      `refusing to adopt the existing account ${principal.username}: its primary group (gid=${account.gid}) is neither ${groupName} nor ${
+        legacyPrincipalUnixGroupName(principal.username)
+      }`,
+    );
   }
   const args = ["-n", "groupadd"];
   if (principal.gid !== undefined) {
@@ -518,16 +644,10 @@ async function ensurePrincipalUser(
   groupName: string,
   runFn: RunFn,
 ): Promise<void> {
-  const userCheck = await runFn("getent", ["passwd", principal.username]);
-  if (!userCheck.success) {
+  const current = await principalAccount(principal.username, runFn);
+  if (!current) {
     await createPrincipalUser(principal, home, shell, groupName, runFn);
     return;
-  }
-  const current = parsePasswdHomeShell(userCheck.stdout);
-  if (!current) {
-    throw new Error(
-      `Failed to parse passwd entry for principal user ${principal.username}`,
-    );
   }
   assertAdoptedIdsMatch(principal, current);
   assertAdoptedUidAboveFloor(principal, current);
@@ -876,7 +996,7 @@ async function removeSupplementaryGroupMembership(
  * **Revocation is the reason this exists.** `usermod -aG` alone can only ever
  * add, so one downgraded from a shell to files-only would keep its shell. Stale
  * membership is dropped here — but **only** for group names the registry
- * defines. That containment is what makes revoking safe: `<username>-grp`,
+ * defines. That containment is what makes revoking safe: the user's own group,
  * `tp`, an engine group, and anything an operator added by hand are never
  * touched, no matter what the wire asks for.
  *
@@ -934,8 +1054,9 @@ export async function ensurePrincipalManagedGroups(
 /**
  * Let a web engine read one principal's published releases.
  *
- * A published release is root-owned, group `<username>-grp`, mode `0550` — the
- * group bit is the only way anything other than root reads it, and re-chowning
+ * A published release is root-owned, group `<username>` (the user's own
+ * group), mode `0550` — the group bit is the only way anything other than root
+ * reads it, and re-chowning
  * an immutable tree to a serving engine would defeat the point. So the engine
  * service account (`tpnginx` / `tpapache` / `tpols`) joins the principal's own
  * group instead: read + traverse, never write.
