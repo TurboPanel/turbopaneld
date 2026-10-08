@@ -79,6 +79,45 @@ export async function withManagedTargetLock<T>(
   );
 }
 
+/** `<runDir>/managed-locks/<managedId>.lifecycle.lock`; `managedId` is re-validated because it becomes a filename. */
+export function managedLifecycleLockPath(
+  layout: Pick<LayoutPaths, "runDir">,
+  managedId: string,
+): string {
+  if (!SAFE_MANAGED_ID_RE.test(managedId)) {
+    throw new Error("managedId contains unsupported characters");
+  }
+  return join(layout.runDir, "managed-locks", `${managedId}.lifecycle.lock`);
+}
+
+/**
+ * Run `fn` while holding the engine's create/remove lock, waiting (not
+ * refusing) when another holder has it. `managed.apply` and `managed.destroy`
+ * share it so one can never re-create what the other is removing. A separate
+ * file from {@link withManagedTargetLock}: an apply can run for minutes and
+ * must not make a scheduled backup report the engine busy.
+ */
+export async function withManagedLifecycleLock<T>(
+  layout: Pick<LayoutPaths, "runDir">,
+  managedId: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const dir = join(layout.runDir, "managed-locks");
+  await Deno.mkdir(dir, { recursive: true, mode: 0o770 });
+  const file = await Deno.open(managedLifecycleLockPath(layout, managedId), {
+    create: true,
+    write: true,
+    mode: 0o660,
+  });
+  try {
+    await file.lock(true);
+    return await fn();
+  } finally {
+    // Closing the descriptor releases the flock.
+    file.close();
+  }
+}
+
 /** Another backup or restore holds this storage copy's lock. */
 export class CopyTargetBusyError extends Error {
   constructor(copyId: string) {
