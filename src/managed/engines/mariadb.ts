@@ -5,6 +5,7 @@
  * Dump flag is `--gtid` (not MySQL `--set-gtid-purged`).
  */
 
+import { dropUserOnEveryHost } from "./account-hosts.ts";
 import { helperLabelArgs } from "../../deploy/labels.ts";
 import type {
   ManagedApplyCredential,
@@ -31,8 +32,10 @@ import {
   grantDatabaseSql,
   grantRootSql,
   isWritableSql,
+  MANAGED_DOCKER_NETWORK_HOST,
   promoteSql,
   quoteIdentifier,
+  quoteLiteral,
   showReplicaStatusSql,
   versionSql,
 } from "./mariadb-sql.ts";
@@ -694,7 +697,14 @@ export const mariadbManagedEngineRuntime: ManagedEngineRuntime = {
     const dropped: string[] = [];
     await forEachSequential(usernames, async (username) => {
       if (username === ctx.rootUsername) return;
-      await runMariadb(ctx, dropAccountSql(username));
+      await dropUserOnEveryHost({
+        username,
+        fixedHosts: [MANAGED_DOCKER_NETWORK_HOST, "localhost"],
+        quoteLiteral,
+        query: (sql) => runMariadbQuery(ctx, sql),
+        run: (sql) => runMariadb(ctx, sql),
+        dropAccountSql,
+      });
       dropped.push(username);
     });
     return dropped;
