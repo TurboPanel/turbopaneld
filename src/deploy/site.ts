@@ -1486,7 +1486,6 @@ export type OpenLiteSpeedVhostPhpOpts = Readonly<{
 }>;
 
 /**
-/**
  * One processor `env NAME=value` line, or a refusal naming the variable
  * (never its value: it may be a decrypted secret).
  */

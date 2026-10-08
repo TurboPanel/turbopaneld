@@ -479,9 +479,7 @@ anything is written: every variable the site's engine cannot carry is **left out
 and named** in the command log and in `warnings[]` on the deploy result (Apache,
 Caddy and OpenLiteSpeed now do what nginx always did; a bad *name* is still
 refused), but a name in `requiredEnv` that is left out or missing stops the
-deploy with a plain-words error. The control plane still refuses a PHP site
-bound to any listener but ProxySQL's MySQL port (`hostSiteBindingRefusal`):
-`tp-php-loopback` cannot reach Postgres on 15432. `dbCa.pem` is a public CA
+deploy with a plain-words error. `dbCa.pem` is a public CA
 bundle, certificate blocks only (checked at parse). It lands as
 `<siteRoot>/.turbopanel-hosting/managed-ca.pem` through the same `sudo -n
 install` call as `hosting.env` (owner's Linux user, `0400`, directory
