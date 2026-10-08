@@ -535,6 +535,27 @@ test("mysql promote clears read-only and returns when writable", async () => {
   assertEquals(writableChecks >= 2, true);
 });
 
+test("mysql promote returns when read_only and super_read_only print OFF", async () => {
+  const replication = mysqlManagedEngineRuntime.replication;
+  if (!replication?.promote) {
+    throw new TypeError("expected mysql promote");
+  }
+  let writableChecks = 0;
+  const exec: ManagedEngineExec = (argv, input) => {
+    if (input?.includes("RESET") || input?.includes("SOURCE")) {
+      return Promise.resolve({ success: true, stdout: "", stderr: "" });
+    }
+    if (argv.includes("-e")) {
+      writableChecks++;
+      const stdout = writableChecks >= 2 ? "OFF\tOFF\n" : "ON\tON\n";
+      return Promise.resolve({ success: true, stdout, stderr: "" });
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  await replication.promote(buildContext(exec));
+  assertEquals(writableChecks >= 2, true);
+});
+
 test("mysql followPrimary changes source host without reseeding", async () => {
   const replication = mysqlManagedEngineRuntime.replication;
   if (!replication?.followPrimary) {
@@ -657,6 +678,49 @@ test("mysql promote throws when the instance stays read-only", async () => {
     }
     if (argv.includes("-e")) {
       return Promise.resolve({ success: true, stdout: "1\t1\n", stderr: "" });
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  try {
+    await assertRejects(
+      () => replication.promote!(buildContext(exec)),
+      Error,
+      "mysql promote did not become writable within 60s",
+    );
+  } finally {
+    Date.now = originalDateNow;
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
+
+test("mysql promote throws when super_read_only stays ON", async () => {
+  const replication = mysqlManagedEngineRuntime.replication;
+  if (!replication?.promote) {
+    throw new TypeError("expected mysql promote");
+  }
+  const originalDateNow = Date.now;
+  const originalSetTimeout = globalThis.setTimeout;
+  let nowCalls = 0;
+  Date.now = () => {
+    nowCalls++;
+    if (nowCalls === 1) return 0;
+    if (nowCalls <= 5) return 1_000;
+    return 70_000;
+  };
+  globalThis.setTimeout = ((handler: () => void) => {
+    queueMicrotask(handler);
+    return 0 as unknown as ReturnType<typeof setTimeout>;
+  }) as typeof setTimeout;
+  const exec: ManagedEngineExec = (argv, input) => {
+    if (input?.includes("RESET") || input?.includes("SOURCE")) {
+      return Promise.resolve({ success: true, stdout: "", stderr: "" });
+    }
+    if (argv.includes("-e")) {
+      return Promise.resolve({
+        success: true,
+        stdout: "OFF\tON\n",
+        stderr: "",
+      });
     }
     return Promise.resolve({ success: true, stdout: "", stderr: "" });
   };

@@ -16,6 +16,7 @@ import { sanitizeForLog } from "../../util/logger.ts";
 import { forEachSequential } from "../../util/sequential.ts";
 import { grantDatabasePrivileges } from "./grant-databases.ts";
 import { parseMysqlFreshness } from "./replica-freshness.ts";
+import { parseSqlBool } from "./sql-bool.ts";
 import {
   authSocketPluginPresentSql,
   changeReplicationSourceSql,
@@ -578,7 +579,12 @@ const mysqlReplicationRuntime: ManagedEngineReplicationRuntime = {
       if (Date.now() >= deadline) return false;
       const out = await runMysqlQuery(ctx, isWritableSql());
       const [readOnly, superReadOnly] = out.trim().split(/\s+/);
-      if (readOnly === "0" && superReadOnly === "0") return true;
+      if (
+        parseSqlBool(readOnly ?? "") === false &&
+        parseSqlBool(superReadOnly ?? "") === false
+      ) {
+        return true;
+      }
       await sleep(500);
       return writable();
     };
