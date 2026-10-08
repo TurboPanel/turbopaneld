@@ -659,7 +659,7 @@ async function reconcileManagedIngress(
   );
   // ProxySQL's internal `interfaces=` line is now a fixed constant (see
   // `CONTAINER_LISTEN_ADDRESS` in proxysql.ts), so a bind-only change
-  // (public <-> private, a different address, or gaining/losing a second scope)
+  // (all interfaces <-> loopback, or any other address change)
   // only changes the compose `ports:` publish — caught by full nextComposeText
   // comparison below (along with container_name renames).
   const {
