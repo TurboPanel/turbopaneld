@@ -1700,14 +1700,14 @@ export function proxySqlPageSizeError(
   ) {
     return undefined;
   }
-  return `This server's kernel uses ${
-    pageSizeBytes / 1024
-  } KiB memory pages. ` +
-    `Every server needs the database proxy when an app on it uses a managed ` +
-    `database, even if no database runs on that server ` +
-    `(apps reach their databases through localhost:13306 and localhost:15432). ` +
-    `To switch, run: sudo tp-orchestrate kernel-features apply pi-4k-pagesize --reboot ` +
-    `(Raspberry Pi OS on Debian 13 only; on anything else, boot a 4 KiB-page kernel).`;
+  return `This kernel uses ${pageSizeBytes / 1024} KiB memory pages and the ` +
+    `database proxy only starts on 4 KiB pages (its memory allocator is built ` +
+    `for 4 KiB). Every server needs the proxy when an app on it uses a ` +
+    `managed database, even if no database runs on that server (apps reach ` +
+    `their databases through localhost:13306 and localhost:15432). To ` +
+    `switch, run: sudo /opt/turbopanel/share/orchestration/scripts/tp-orchestrate ` +
+    `kernel-features apply pi-4k-pagesize --reboot (Raspberry Pi OS on ` +
+    `Debian 13 only; on anything else, boot a 4 KiB-page kernel).`;
 }
 
 /** Read the host kernel page size in bytes (Linux only; `undefined` if unknown). */

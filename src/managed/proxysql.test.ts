@@ -303,11 +303,12 @@ test("proxySqlPageSizeError allows 4 KiB and unknown page sizes, explains bigger
   );
   const message = proxySqlPageSizeError(16384);
   assertStringIncludes(message ?? "", "16 KiB memory pages");
+  assertStringIncludes(message ?? "", "4 KiB");
+  assertStringIncludes(message ?? "", "localhost:13306");
   assertStringIncludes(
     message ?? "",
-    "sudo tp-orchestrate kernel-features apply pi-4k-pagesize --reboot",
+    "sudo /opt/turbopanel/share/orchestration/scripts/tp-orchestrate kernel-features apply pi-4k-pagesize --reboot",
   );
-  assertStringIncludes(message ?? "", "localhost:13306");
   assertStringIncludes(
     proxySqlPageSizeError(65536) ?? "",
     "64 KiB memory pages",

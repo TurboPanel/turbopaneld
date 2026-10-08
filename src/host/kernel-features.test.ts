@@ -93,6 +93,8 @@ const SWITCHABLE_HOST: PiFourKPagesizeFacts = {
   configText: "arm_64bit=1\n",
   hasKernel8Img: true,
   hasConfigTxt: true,
+  hasV8Modules: true,
+  hasInitramfs8: true,
 };
 
 type StateCase = {
@@ -148,6 +150,23 @@ const STATE_CASES: StateCase[] = [
     facts: { ...SWITCHABLE_HOST, hasKernel8Img: false },
     state: "blocked",
     reason: "the 4 KiB kernel (kernel8.img) is not on the boot partition",
+  },
+  {
+    name: "missing v8 modules",
+    facts: { ...SWITCHABLE_HOST, hasV8Modules: false },
+    state: "blocked",
+    reason: "the modules for the 4 KiB kernel (*-rpi-v8) are not installed",
+  },
+  {
+    name: "auto_initramfs without initramfs8",
+    facts: {
+      ...SWITCHABLE_HOST,
+      configText: "auto_initramfs=1\narm_64bit=1\n",
+      hasInitramfs8: false,
+    },
+    state: "blocked",
+    reason:
+      "config.txt turns on auto_initramfs but initramfs8 is missing from the boot partition",
   },
   {
     name: "other kernel chosen",
@@ -287,6 +306,18 @@ async function writePrefix(
       new Uint8Array([0]),
     );
   }
+  if (facts.hasV8Modules) {
+    await Deno.mkdir(
+      join(prefix, "lib/modules/6.12.0+rpt-rpi-v8"),
+      { recursive: true },
+    );
+  }
+  if (facts.hasInitramfs8) {
+    await Deno.writeTextFile(
+      join(prefix, "boot/firmware/initramfs8"),
+      "",
+    );
+  }
   if (facts.model !== undefined) {
     await Deno.writeTextFile(
       join(prefix, "proc/device-tree/model"),
@@ -344,14 +375,35 @@ test({
           "apply",
           "pi-4k-pagesize",
         ], pageSizeEnv(facts));
+        let afterApply = before;
         if (applied.code === 0) {
-          const afterApply = await Deno.readTextFile(
+          afterApply = await Deno.readTextFile(
             join(prefix, "boot/firmware/config.txt"),
           );
           assertEquals(
             afterApply,
             addBootConfigLineTop(before, LINE),
             `${golden.name} apply`,
+          );
+        }
+
+        if (applied.code === 0 && expected.state === "switchable") {
+          const undoneAfterApply = await runKernelFeatures(prefix, [
+            "undo",
+            "pi-4k-pagesize",
+          ], pageSizeEnv(facts));
+          assertEquals(
+            undoneAfterApply.code,
+            0,
+            `${golden.name} undo after apply: ${undoneAfterApply.stderr}`,
+          );
+          const afterUndoApply = await Deno.readTextFile(
+            join(prefix, "boot/firmware/config.txt"),
+          );
+          assertEquals(
+            afterUndoApply,
+            removeBootConfigLineTop(afterApply, LINE),
+            `${golden.name} undo after apply`,
           );
         }
 
@@ -362,13 +414,18 @@ test({
             "pi-4k-pagesize",
           ], pageSizeEnv(facts));
           assertEquals(undone.code, 0, `${golden.name} undo: ${undone.stderr}`);
+          assertEquals(
+            undone.stdout.includes("Nothing to undo"),
+            true,
+            `${golden.name} undo message: ${undone.stdout}`,
+          );
           const afterUndo = await Deno.readTextFile(
             join(prefixUndo, "boot/firmware/config.txt"),
           );
           assertEquals(
             afterUndo,
-            removeBootConfigLineTop(golden.input, LINE),
-            `${golden.name} undo`,
+            golden.input,
+            `${golden.name} undo leaves user-written config`,
           );
         } finally {
           await Deno.remove(prefixUndo, { recursive: true });

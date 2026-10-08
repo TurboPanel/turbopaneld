@@ -13,7 +13,8 @@
 #       Make the feature true. Idempotent. With --reboot, a feature that needs
 #       a restart is followed by a visible countdown and a reboot (see below).
 #   tp-kernel-features undo ID
-#       Remove what apply added. Never reboots.
+#       Remove what apply added (only when this tool added it: a marker in
+#       /var/lib/turbopanel-kernel says so). Never reboots.
 #   tp-kernel-features installer-step
 #       The last step of a first install (scripts/run.sh). For each feature that
 #       applies to this host: say what is about to happen in plain words, save
@@ -65,12 +66,18 @@ if [ "$(id -u)" = "0" ]; then
   TP_TEST=""
   P=""
 else
-  [ -n "${TP_KERNEL_TEST_PREFIX:-}" ] || tp_die "must run as root (sudo tp-orchestrate kernel-features …)"
+  [ -n "${TP_KERNEL_TEST_PREFIX:-}" ] || tp_die "must run as root (sudo /opt/turbopanel/share/orchestration/scripts/tp-orchestrate kernel-features …)"
   TP_TEST=1
   P="$TP_KERNEL_TEST_PREFIX"
 fi
 
 KF_IDS="pi-4k-pagesize"
+# tp-orchestrate is not on root's sudo PATH, so every command printed to a person
+# uses its full path.
+KF_CMD="/opt/turbopanel/share/orchestration/scripts/tp-orchestrate"
+# Root-owned on purpose (not the daemon's state dir): a note that THIS tool added
+# a line, so `undo` never removes a line a person wrote themselves.
+KF_MARKER_DIR="$P/var/lib/turbopanel-kernel"
 KF_LINE="kernel=kernel8.img"
 KF_BOOT_DIR="$P/boot/firmware"
 KF_STATE_DIR="$P/var/lib/turbopanel"
@@ -141,7 +148,11 @@ kf_bootcfg_add_top() {
   _bt_stamp="$(date -u +%Y%m%dT%H%M%SZ)"
   _bt_backup="$_bt_name.tp-backup-$_bt_stamp"
   _bt_new=".$_bt_name.tp-new.$$"
-  [ ! -e "$_bt_backup" ] || tp_die "$_bt_dir/$_bt_backup already exists"
+  _bt_n=1
+  while [ -e "$_bt_backup" ]; do
+    _bt_backup="$_bt_name.tp-backup-$_bt_stamp-$_bt_n"
+    _bt_n=$((_bt_n + 1))
+  done
   trap 'rm -f -- "$_bt_new"' EXIT
   cp -- "$_bt_name" "$_bt_backup"
   cmp -s -- "$_bt_name" "$_bt_backup" || tp_die "the backup does not match $_bt_file"
@@ -179,7 +190,11 @@ kf_bootcfg_remove_top() {
   _br_stamp="$(date -u +%Y%m%dT%H%M%SZ)"
   _br_backup="$_br_name.tp-backup-$_br_stamp"
   _br_new=".$_br_name.tp-new.$$"
-  [ ! -e "$_br_backup" ] || tp_die "$_br_dir/$_br_backup already exists"
+  _br_n=1
+  while [ -e "$_br_backup" ]; do
+    _br_backup="$_br_name.tp-backup-$_br_stamp-$_br_n"
+    _br_n=$((_br_n + 1))
+  done
   trap 'rm -f -- "$_br_new"' EXIT
   cp -- "$_br_name" "$_br_backup"
   cmp -s -- "$_br_name" "$_br_backup" || tp_die "the backup does not match $_br_file"
@@ -244,6 +259,19 @@ kf_pi_4k_pagesize_state() {
     printf 'blocked\tthe 4 KiB kernel (kernel8.img) is not on the boot partition\n'
     return 0
   fi
+  _mods=0
+  for _m in "$P"/lib/modules/*-rpi-v8; do
+    if [ -d "$_m" ]; then _mods=1; fi
+  done
+  if [ "$_mods" != "1" ]; then
+    printf 'blocked\tthe modules for the 4 KiB kernel (*-rpi-v8) are not installed\n'
+    return 0
+  fi
+  if grep -qi '^[[:space:]]*auto_initramfs[[:space:]]*=[[:space:]]*1' "$KF_BOOT_DIR/config.txt" &&
+    { [ ! -f "$KF_BOOT_DIR/initramfs8" ] || [ -L "$KF_BOOT_DIR/initramfs8" ]; }; then
+    printf 'blocked\tconfig.txt turns on auto_initramfs but initramfs8 is missing from the boot partition\n'
+    return 0
+  fi
   case "$(kf_bootcfg_scan "$KF_BOOT_DIR/config.txt")" in
     other)
       printf 'blocked\tconfig.txt already chooses a different kernel, so it is left as it is\n'
@@ -259,11 +287,23 @@ kf_pi_4k_pagesize_state() {
 
 # Prints the backup path (nothing when already in place).
 kf_pi_4k_pagesize_apply() {
-  kf_bootcfg_add_top "$KF_BOOT_DIR/config.txt" "$KF_LINE"
+  _ap_backup="$(kf_bootcfg_add_top "$KF_BOOT_DIR/config.txt" "$KF_LINE")"
+  mkdir -p -- "$KF_MARKER_DIR"
+  date -u +%Y-%m-%dT%H:%M:%SZ > "$KF_MARKER_DIR/pi-4k-pagesize.applied"
+  printf '%s\n' "$_ap_backup"
 }
 
+# Prints the backup path, or nothing when this tool did not add the line.
 kf_pi_4k_pagesize_undo() {
-  kf_bootcfg_remove_top "$KF_BOOT_DIR/config.txt" "$KF_LINE"
+  _un_marker="$KF_MARKER_DIR/pi-4k-pagesize.applied"
+  [ -f "$_un_marker" ] || return 0
+  if [ "$(kf_bootcfg_scan "$KF_BOOT_DIR/config.txt")" != "kernel8-top" ]; then
+    rm -f -- "$_un_marker"
+    return 0
+  fi
+  _un_backup="$(kf_bootcfg_remove_top "$KF_BOOT_DIR/config.txt" "$KF_LINE")"
+  rm -f -- "$_un_marker"
+  printf '%s\n' "$_un_backup"
 }
 
 kf_needs_reboot() {
@@ -291,9 +331,23 @@ kf_manual_reboot_hint() {
   printf 'To finish, restart this server yourself when it suits you:\n  sudo reboot\n'
 }
 
-# The daemon, when installed, must have saved its enrolment before a restart.
+# With TP_KF_ENROL_REF set (the installer does this), the three enrolment files
+# must be newer than that file, so files left by an earlier enrolment do not
+# count. A person running the command on an already enrolled server has no such
+# reference and the files simply have to exist.
+kf_enrol_files_fresh() {
+  [ -n "${TP_KF_ENROL_REF:-}" ] || return 0
+  [ -f "$TP_KF_ENROL_REF" ] || return 1
+  for _ef in "$KF_STATE_DIR/server.id" "$KF_STATE_DIR/server-key-id" "$1"; do
+    [ -n "$(find "$_ef" -newer "$TP_KF_ENROL_REF" 2>/dev/null)" ] || return 1
+  done
+}
+
+# The daemon must have saved its enrolment before a restart.
 kf_wait_enrolled() {
-  [ -d "$KF_STATE_DIR" ] || return 0
+  # Fail closed: with no state folder there is nothing to prove the enrolment
+  # is saved, so the server is not restarted.
+  [ -d "$KF_STATE_DIR" ] || return 1
   _we_waited=0
   _we_max=120
   [ -z "$TP_TEST" ] || _we_max="${TP_KERNEL_TEST_ENROL_WAIT:-0}"
@@ -301,7 +355,7 @@ kf_wait_enrolled() {
     # The saved server key file is matched by glob (its name ends in .j*).
     set -- "$KF_STATE_DIR"/server-key.j*
     if [ -s "$KF_STATE_DIR/server.id" ] && [ -s "$KF_STATE_DIR/server-key-id" ] &&
-      [ -s "$1" ]; then
+      [ -s "$1" ] && kf_enrol_files_fresh "$1"; then
       return 0
     fi
     [ "$_we_waited" -lt "$_we_max" ] || return 1
@@ -431,6 +485,11 @@ kf_verb_undo() {
   [ $# -eq 1 ] || tp_die "undo needs exactly one feature id"
   kf_known "$1" || tp_die "unknown feature: $1"
   _backup="$("$(kf_fn "$1" undo)")"
+  if [ -z "$_backup" ]; then
+    printf 'kernel-feature %s changed=no\n' "$1"
+    printf 'Nothing to undo: this tool did not add the line. If you added kernel=kernel8.img yourself, remove it from /boot/firmware/config.txt by hand.\n'
+    return 0
+  fi
   printf 'kernel-feature %s changed=yes backup=%s\n' "$1" "$_backup"
   printf 'Removed. A copy of the boot settings from before is at %s. The change takes effect after the next restart.\n' "$_backup"
 }
@@ -452,11 +511,17 @@ kf_verb_installer_step() {
       ;;
     *) return 0 ;;
   esac
+  if [ "${TP_KF_FIRST_INSTALL:-}" != "1" ]; then
+    printf '\nThis Raspberry Pi runs the 16 KiB kernel, which the database proxy cannot use.\n'
+    printf 'Only a first install restarts the server by itself. To switch it yourself:\n'
+    printf '  sudo %s kernel-features apply pi-4k-pagesize --reboot\n\n' "$KF_CMD"
+    return 0
+  fi
   printf '\nInstall finished. TurboPanel is installed and set to start by itself.\n'
   printf 'This Raspberry Pi runs the 16 KiB kernel, which the database proxy cannot use.\n'
   printf 'TurboPanel will switch it to the 4 KiB kernel and restart this server now.\n'
   printf 'It comes back by itself in about a minute. To skip this next time, set TURBOPANEL_SKIP_KERNEL_SWITCH=1.\n'
-  printf 'To undo it later: sudo tp-orchestrate kernel-features undo pi-4k-pagesize\n\n'
+  printf 'To undo it later: sudo %s kernel-features undo pi-4k-pagesize\n\n' "$KF_CMD"
   if [ -f "$P/run/turbopanel/update-guard.json" ]; then
     printf 'An update is still being checked, so this server will not restart on its own.\n'
     kf_verb_apply pi-4k-pagesize || true

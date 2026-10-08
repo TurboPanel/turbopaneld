@@ -32,6 +32,8 @@ export type PiFourKPagesizeFacts = {
   configText?: string;
   hasKernel8Img: boolean;
   hasConfigTxt: boolean;
+  hasV8Modules: boolean;
+  hasInitramfs8: boolean;
 };
 
 export type KernelFeatureStatus = {
@@ -42,6 +44,19 @@ export type KernelFeatureStatus = {
 /** True for features whose apply only takes effect after a restart. */
 export function needsReboot(id: KernelFeatureId): boolean {
   return id === "pi-4k-pagesize";
+}
+
+/** Trim spaces and tabs only (not other whitespace), like the shell helper. */
+function trimBlanks(text: string, side: "start" | "both"): string {
+  let from = 0;
+  while (from < text.length && (text[from] === " " || text[from] === "\t")) {
+    from++;
+  }
+  let to = text.length;
+  if (side === "both") {
+    while (to > from && (text[to - 1] === " " || text[to - 1] === "\t")) to--;
+  }
+  return text.slice(from, to);
 }
 
 function stripTrailingCr(line: string): string {
@@ -60,15 +75,15 @@ export function scanBootConfigKernelLines(text: string): BootConfigKernelScan {
   let other = false;
   for (const raw of text.split("\n")) {
     const line = stripTrailingCr(raw);
-    if (/^[ \t]*\[/.test(line)) {
+    const head = trimBlanks(line, "start");
+    if (head.startsWith("[")) {
       section = true;
       continue;
     }
-    if (!/^[ \t]*kernel[ \t]*=/.test(line)) continue;
-    const value = line.replace(/^[ \t]*kernel[ \t]*=[ \t]*/, "").replace(
-      /[ \t]+$/,
-      "",
-    );
+    if (!head.startsWith("kernel")) continue;
+    const afterName = trimBlanks(head.slice("kernel".length), "start");
+    if (!afterName.startsWith("=")) continue;
+    const value = trimBlanks(afterName.slice(1), "both");
     if (value === "kernel8.img") {
       if (section) later = true;
       else top = true;
@@ -80,6 +95,21 @@ export function scanBootConfigKernelLines(text: string): BootConfigKernelScan {
   if (top) return "kernel8-top";
   if (later) return "kernel8-later";
   return "none";
+}
+
+/** Same match as `grep -qi '^[[:space:]]*auto_initramfs[[:space:]]*=[[:space:]]*1'`. */
+function configTurnsOnAutoInitramfs(configText: string | undefined): boolean {
+  if (configText === undefined) return false;
+  for (const raw of configText.split("\n")) {
+    const head = trimBlanks(stripTrailingCr(raw), "start").toLowerCase();
+    if (!head.startsWith("auto_initramfs")) continue;
+    const afterName = trimBlanks(head.slice("auto_initramfs".length), "start");
+    if (
+      afterName.startsWith("=") &&
+      trimBlanks(afterName.slice(1), "start").startsWith("1")
+    ) return true;
+  }
+  return false;
 }
 
 function firstLineEndsCrlf(text: string): boolean {
@@ -106,12 +136,12 @@ export function removeBootConfigLineTop(text: string, line: string): string {
   let section = false;
   const kept: string[] = [];
   const parts = text.split("\n");
-  if (parts.length > 0 && parts[parts.length - 1] === "") {
+  if (parts.at(-1) === "") {
     parts.pop();
   }
   for (const raw of parts) {
     const stripped = stripTrailingCr(raw);
-    if (/^[ \t]*\[/.test(stripped)) section = true;
+    if (trimBlanks(stripped, "start").startsWith("[")) section = true;
     if (!section && stripped === line) continue;
     kept.push(raw);
   }
@@ -171,6 +201,21 @@ export function piFourKPagesizeState(
     return {
       state: "blocked",
       reason: "the 4 KiB kernel (kernel8.img) is not on the boot partition",
+    };
+  }
+  if (!facts.hasV8Modules) {
+    return {
+      state: "blocked",
+      reason: "the modules for the 4 KiB kernel (*-rpi-v8) are not installed",
+    };
+  }
+  if (
+    configTurnsOnAutoInitramfs(facts.configText) && !facts.hasInitramfs8
+  ) {
+    return {
+      state: "blocked",
+      reason:
+        "config.txt turns on auto_initramfs but initramfs8 is missing from the boot partition",
     };
   }
   const scan = scanBootConfigKernelLines(facts.configText ?? "");

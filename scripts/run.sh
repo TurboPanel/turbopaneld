@@ -2544,6 +2544,17 @@ LICENSE_STAGING_DIR="/var/lib/turbopanel-license-staging"
 # Release/CDN downloads stay TLS-verified via tp_release_curl(); the only way to
 # relax them is the undocumented operator-only TURBOPANEL_RELEASE_TLS_INSECURE_OVERRIDE.
 
+# Before anything below can enrol this server: remember whether it already was
+# enrolled, and when this run began. The last-step kernel switch restarts the
+# server only on a first install, and only once the enrolment files are newer
+# than this marker (see orchestration/scripts/tp-kernel-features).
+TP_KF_FIRST_INSTALL=0
+if [ ! -s "$STATE_DIR/server.id" ]; then
+  TP_KF_FIRST_INSTALL=1
+fi
+TP_KF_ENROL_REF="/run/turbopanel-install-start"
+: > "$TP_KF_ENROL_REF" || TP_KF_FIRST_INSTALL=0
+export TP_KF_FIRST_INSTALL TP_KF_ENROL_REF
 mkdir -p "$STATE_DIR" "$CONFIG_DIR" "$BIN_DIR" "$INSTALL_ROOT/share" "$RUN_DIR"
 if [ "$INSTANCE_INSTALL" != true ] && [ "$COLOCATED_DAEMON_ONLY" != true ]; then
   tp_stage_daemon_license
