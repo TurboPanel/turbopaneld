@@ -90,7 +90,9 @@ export async function isManagedMemberDestroyed(
   }
   try {
     const value = JSON.parse(text) as Record<string, unknown>;
-    const at = Date.parse(String(value.destroyedAt));
+    const at = typeof value.destroyedAt === "string"
+      ? Date.parse(value.destroyedAt)
+      : Number.NaN;
     if (Number.isNaN(at)) return true;
     if (nowMs - at >= DESTROYED_MARKER_TTL_MS) return false;
     const marked = value.memberId;
