@@ -425,7 +425,7 @@ Physical / GTID streaming is **engine → engine**, never through ProxySQL.
 | Credentials | Short-lived `0600` env-file for basebackup | Short-lived `0600` defaults file over exec stdin (never `-p` / never `MYSQL_PWD`) |
 | Standby SQL | not used (config-file primary_conninfo) | Optional `configureStandby` hook — replication channel setup is not user-data mutation |
 | Promote | Operator switchover, DR route, or TurboPanel-gated auto-failover after fence (Orchestrator designated recover-to, else `managed.promote` fallback) | same (`STOP REPLICA` / `STOP SLAVE` + clear read_only) |
-| Health | `streaming` requires active WAL receiver | `streaming` requires both IO + SQL threads running |
+| Health | `streaming` requires active WAL receiver; `lagSeconds` is 0 when replay has caught the primary's last reported WAL end (an idle primary must not make a caught-up replica look lagged) | `streaming` requires both IO + SQL threads running |
 
 ## Postgres dead-primary detection
 

@@ -770,9 +770,24 @@ export function standbyReplicationStatusSql(): string {
     `    THEN COALESCE(pg_catalog.pg_wal_lsn_diff(r.flushed_lsn, pg_catalog.pg_last_wal_replay_lsn()), 0)`,
     `    ELSE NULL`,
     `  END AS lag_bytes,`,
+    // Clock-from-last-replay is apply delay only while the replica is behind.
+    // An idle primary sends no new xacts, so that timestamp stays put and
+    // `now() - pg_last_xact_replay_timestamp()` would grow without bound
+    // even when flushed/replayed WAL already matches the primary's last
+    // reported end (`latest_end_lsn`). Caught-up idle replicas report 0. The
+    // zero needs a reported end: just after the receiver starts, before the
+    // first message, `latest_end_lsn` is NULL and the clock branch applies.
     `  CASE`,
+    `    WHEN r.status = 'streaming'`,
+    `      AND r.latest_end_lsn IS NOT NULL`,
+    `      AND pg_catalog.pg_last_wal_replay_lsn() IS NOT NULL`,
+    `      AND pg_catalog.pg_wal_lsn_diff(`,
+    `        r.latest_end_lsn,`,
+    `        pg_catalog.pg_last_wal_replay_lsn()`,
+    `      ) <= 0`,
+    `    THEN 0`,
     `    WHEN r.status = 'streaming' AND pg_catalog.pg_last_xact_replay_timestamp() IS NOT NULL`,
-    `    THEN EXTRACT(EPOCH FROM (now() - pg_catalog.pg_last_xact_replay_timestamp()))`,
+    `    THEN GREATEST(EXTRACT(EPOCH FROM (now() - pg_catalog.pg_last_xact_replay_timestamp())), 0)`,
     `    ELSE NULL`,
     `  END AS lag_seconds,`,
     // Both stay readable after the WAL receiver exits (primary gone): the

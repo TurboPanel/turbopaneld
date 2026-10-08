@@ -267,6 +267,11 @@ export type ManagedSlotRetention = {
 export type ManagedReplicationObservedHealth = {
   state: string;
   lagBytes?: number;
+  /**
+   * Apply delay while streaming. Postgres: 0 when replay has caught the
+   * primary's last reported WAL end (idle primary, replica fully caught up);
+   * `pg_last_xact_replay_timestamp` only when still behind.
+   */
   lagSeconds?: number;
   observedAt: string;
   /** Standby only: `pg_last_wal_receive_lsn()` (absent when NULL). */
