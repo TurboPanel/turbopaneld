@@ -2734,7 +2734,7 @@ postgres redis mysql docker containers adm admin audio avahi cdrom crontab
 dialout dip disk floppy fuse incus incus-admin input kmem kvm libvirt
 libvirt-qemu lpadmin lxd messagebus microk8s netdev operator plugdev polkitd
 render sambashare sasl sgx shadow src ssl-cert staff sudo tape tty users utmp
-video voice wheel bluetooth gpio i2c lpadmin nopasswdlogin rdma scanner syslog
+video voice wheel bluetooth gpio i2c nopasswdlogin rdma scanner syslog
 systemd-journal tss uuidd vboxusers wireshark"
 
 # Every sudoers file: /etc/sudoers, /etc/sudoers.d, and whatever files or
