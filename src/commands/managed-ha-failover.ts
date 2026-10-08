@@ -103,6 +103,12 @@ async function promoteWithoutOrchestrator(
       memberId: payload.targetMemberId,
       demoteMemberId: payload.sourceMemberId,
       ...(payload.engine ? { engine: payload.engine } : {}),
+      ...(payload.requiredExecutedGtidSet
+        ? { requiredExecutedGtidSet: payload.requiredExecutedGtidSet }
+        : {}),
+      ...(payload.gtidWaitTimeoutSeconds !== undefined
+        ? { gtidWaitTimeoutSeconds: payload.gtidWaitTimeoutSeconds }
+        : {}),
     },
     daemonReceivedAt,
     { decryptSecrets: deps?.decryptSecrets },

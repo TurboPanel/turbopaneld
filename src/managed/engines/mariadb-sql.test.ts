@@ -20,6 +20,8 @@ import {
   grantRootSql,
   isWritableSql,
   MANAGED_DOCKER_NETWORK_HOST,
+  masterGtidWaitSql,
+  primaryFinalGtidSetSql,
   promoteSql,
   quoteAccount,
   quoteIdentifier,
@@ -183,6 +185,14 @@ test("account, privilege, and census SQL builders cover MariaDB hosts", () => {
   );
   assertEquals(
     ensureSocketAdminSql("mariadb").includes("`mariadb`@'localhost'"),
+    true,
+  );
+});
+
+test("switchover SQL uses MASTER_GTID_WAIT and gtid_binlog_pos", () => {
+  assertEquals(primaryFinalGtidSetSql().includes("gtid_binlog_pos"), true);
+  assertEquals(
+    masterGtidWaitSql("0-1-5", 120).includes("MASTER_GTID_WAIT"),
     true,
   );
 });

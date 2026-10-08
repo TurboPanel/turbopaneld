@@ -29,7 +29,11 @@ import {
   SAFE_MANAGED_ID_RE,
 } from "./engine-paths.ts";
 import { readManagedComposeDataTarget } from "./compose.ts";
-import { writeManagedDemotedMarker } from "./demoted-marker.ts";
+import {
+  clearManagedDemotedMarker,
+  writeManagedDemotedMarker,
+} from "./demoted-marker.ts";
+import { resolveLocalReplicationEngine } from "./local-engine-context.ts";
 import {
   buildNeedsResyncMember,
   stopManagedProjectForResync,
@@ -156,6 +160,27 @@ export async function handleManagedLifecycle(
   const refused = await refuseNonStandbyReplicaStart(payload, layout, run);
   if (refused) return refused;
 
+  let switchoverPrimaryExecutedGtidSet: string | undefined;
+  if (payload.action === "stop" && payload.captureSwitchoverGtid === true) {
+    const { engine, ctx } = await resolveLocalReplicationEngine(
+      payload.managedId,
+      payload.engine,
+      "managed.lifecycle",
+      { runDocker: run },
+    );
+    const quiesce = engine.replication?.quiesceFormerPrimaryForSwitchover;
+    if (!quiesce) {
+      throw new Error(
+        "managed.lifecycle captureSwitchoverGtid is not supported for this engine",
+      );
+    }
+    switchoverPrimaryExecutedGtidSet = await quiesce(ctx);
+  }
+
+  if (payload.action === "start" && payload.reactivateAfterSwitchoverAbort) {
+    await clearManagedDemotedMarker(layout, payload.managedId);
+  }
+
   if (payload.action === "stop" && payload.demoted === true) {
     await writeManagedDemotedMarker(
       layout,
@@ -166,8 +191,6 @@ export async function handleManagedLifecycle(
   }
 
   const project = managedComposeProject(payload.managedId);
-  // Project-scoped only — no `-f`, so compose does not interpolate the
-  // removed TURBOPANEL_MANAGED_ROOT_PASSWORD env-file variable.
   const result = await run([
     "compose",
     "-p",
@@ -179,6 +202,22 @@ export async function handleManagedLifecycle(
       `managed.lifecycle ${payload.action} failed: ${
         sanitizeForLog(result.stderr || "compose failed")
       }`,
+    );
+  }
+
+  if (
+    payload.action === "start" &&
+    payload.reactivateAfterSwitchoverAbort === true
+  ) {
+    const { engine, ctx } = await resolveLocalReplicationEngine(
+      payload.managedId,
+      payload.engine,
+      "managed.lifecycle",
+      { runDocker: run },
+    );
+    await engine.waitReady(ctx);
+    await engine.replication?.reactivateFormerPrimaryAfterSwitchoverAbort?.(
+      ctx,
     );
   }
 
@@ -195,6 +234,9 @@ export async function handleManagedLifecycle(
       status,
       summary: `managed ${payload.action} observed status=${status}`,
       ...(collected.member !== undefined ? { member: collected.member } : {}),
+      ...(switchoverPrimaryExecutedGtidSet
+        ? { switchoverPrimaryExecutedGtidSet }
+        : {}),
     };
   }
 
@@ -208,5 +250,8 @@ export async function handleManagedLifecycle(
   return {
     status,
     summary: `managed ${payload.action} observed status=${status}`,
+    ...(switchoverPrimaryExecutedGtidSet
+      ? { switchoverPrimaryExecutedGtidSet }
+      : {}),
   };
 }

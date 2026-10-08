@@ -1923,6 +1923,16 @@ export type ManagedLifecyclePayload = {
    * stops and on older control planes; older daemons ignore it.
    */
   demoted?: boolean;
+  /**
+   * MySQL-family planned switchover: quiesce the running primary and return
+   * its final GTID position before compose stop.
+   */
+  captureSwitchoverGtid?: boolean;
+  /**
+   * Undo a failed switchover on the old primary: clear the demoted marker,
+   * start the engine, and make it writable again.
+   */
+  reactivateAfterSwitchoverAbort?: boolean;
 };
 
 /** Must stay in sync with the instance canonical `managed.lifecycle` shape. */
@@ -1930,6 +1940,8 @@ export type ManagedLifecycleResult = {
   status: string;
   summary?: string;
   member?: ManagedMemberObservedResult;
+  /** Present when `captureSwitchoverGtid` quiesced the primary before stop. */
+  switchoverPrimaryExecutedGtidSet?: string;
 };
 
 /**
@@ -1964,6 +1976,13 @@ export type ManagedPromotePayload = {
    * postgres).
    */
   engine?: ManagedEngineCode;
+  /**
+   * MySQL-family planned switchover: the old primary's final executed GTID
+   * set. The target must apply it before promotion.
+   */
+  requiredExecutedGtidSet?: string;
+  /** Seconds for `MASTER_GTID_WAIT` / `WAIT_FOR_EXECUTED_GTID_SET` (default 120). */
+  gtidWaitTimeoutSeconds?: number;
 };
 
 /** Must stay in sync with the instance canonical `managed.promote` shape. */
@@ -2231,6 +2250,12 @@ export type ManagedHaFailoverPayload = {
    * Follow mode still uses `targetHost` / `targetPort` on remaining replicas.
    */
   ensureSlots?: string[];
+  /**
+   * Carried on `recover` when Orchestrator falls back to `managed.promote`:
+   * the old primary's final GTID set from the fence quiesce step.
+   */
+  requiredExecutedGtidSet?: string;
+  gtidWaitTimeoutSeconds?: number;
 };
 
 export type ManagedHaFailoverResult = {
@@ -7425,6 +7450,16 @@ export function parseManagedLifecyclePayload(
   const role = parseManagedLifecycleRole(value.role);
   if (role !== undefined) payload.role = role;
   if (parseManagedLifecycleDemoted(value.demoted)) payload.demoted = true;
+  if (value.captureSwitchoverGtid === true) {
+    payload.captureSwitchoverGtid = true;
+  } else if (value.captureSwitchoverGtid !== undefined) {
+    throw new TypeError("Invalid managed.lifecycle payload");
+  }
+  if (value.reactivateAfterSwitchoverAbort === true) {
+    payload.reactivateAfterSwitchoverAbort = true;
+  } else if (value.reactivateAfterSwitchoverAbort !== undefined) {
+    throw new TypeError("Invalid managed.lifecycle payload");
+  }
   return payload;
 }
 
@@ -7521,6 +7556,27 @@ export function parseManagedPromotePayload(
       throw new TypeError("Invalid managed.promote payload");
     }
     payload.engine = value.engine;
+  }
+  if (value.requiredExecutedGtidSet !== undefined) {
+    if (
+      typeof value.requiredExecutedGtidSet !== "string" ||
+      value.requiredExecutedGtidSet.length === 0 ||
+      value.requiredExecutedGtidSet.length > 4096
+    ) {
+      throw new TypeError("Invalid managed.promote payload");
+    }
+    payload.requiredExecutedGtidSet = value.requiredExecutedGtidSet;
+  }
+  if (value.gtidWaitTimeoutSeconds !== undefined) {
+    if (
+      typeof value.gtidWaitTimeoutSeconds !== "number" ||
+      !Number.isInteger(value.gtidWaitTimeoutSeconds) ||
+      value.gtidWaitTimeoutSeconds < 1 ||
+      value.gtidWaitTimeoutSeconds > 600
+    ) {
+      throw new TypeError("Invalid managed.promote payload");
+    }
+    payload.gtidWaitTimeoutSeconds = value.gtidWaitTimeoutSeconds;
   }
   return payload;
 }
@@ -7650,6 +7706,15 @@ export function parseManagedLifecycleResult(
   if (isString(value.summary)) result.summary = value.summary;
   const member = parseManagedMemberObservedResult(value.member);
   if (member !== undefined) result.member = member;
+  if (isString(value.switchoverPrimaryExecutedGtidSet)) {
+    if (
+      value.switchoverPrimaryExecutedGtidSet.length > 0 &&
+      value.switchoverPrimaryExecutedGtidSet.length <= 4096
+    ) {
+      result.switchoverPrimaryExecutedGtidSet =
+        value.switchoverPrimaryExecutedGtidSet;
+    }
+  }
   return result;
 }
 
@@ -8941,6 +9006,27 @@ export function parseManagedHaFailoverPayload(
   if (targetHostaddr !== undefined) payload.targetHostaddr = targetHostaddr;
   const ensureSlots = parseManagedHaFailoverEnsureSlots(value.ensureSlots);
   if (ensureSlots !== undefined) payload.ensureSlots = ensureSlots;
+  if (value.requiredExecutedGtidSet !== undefined) {
+    if (
+      typeof value.requiredExecutedGtidSet !== "string" ||
+      value.requiredExecutedGtidSet.length === 0 ||
+      value.requiredExecutedGtidSet.length > 4096
+    ) {
+      throw new TypeError(MANAGED_HA_FAILOVER_PAYLOAD_ERROR);
+    }
+    payload.requiredExecutedGtidSet = value.requiredExecutedGtidSet;
+  }
+  if (value.gtidWaitTimeoutSeconds !== undefined) {
+    if (
+      typeof value.gtidWaitTimeoutSeconds !== "number" ||
+      !Number.isInteger(value.gtidWaitTimeoutSeconds) ||
+      value.gtidWaitTimeoutSeconds < 1 ||
+      value.gtidWaitTimeoutSeconds > 600
+    ) {
+      throw new TypeError(MANAGED_HA_FAILOVER_PAYLOAD_ERROR);
+    }
+    payload.gtidWaitTimeoutSeconds = value.gtidWaitTimeoutSeconds;
+  }
   return payload;
 }
 

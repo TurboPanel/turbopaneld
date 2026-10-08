@@ -14,7 +14,11 @@ import type {
 import { sanitizeForLog } from "../../util/logger.ts";
 import { forEachSequential } from "../../util/sequential.ts";
 import { grantDatabasePrivileges } from "./grant-databases.ts";
-import { parseMariadbFreshness } from "./replica-freshness.ts";
+import { boundedGtid, parseMariadbFreshness } from "./replica-freshness.ts";
+import {
+  SWITCHOVER_GTID_WAIT_DEFAULT_SECONDS,
+  waitForRequiredGtidSet,
+} from "./switchover-gtid.ts";
 import { parseSqlBool } from "./sql-bool.ts";
 import {
   changeReplicationSourceSql,
@@ -35,6 +39,8 @@ import {
   grantRootSql,
   isWritableSql,
   MANAGED_DOCKER_NETWORK_HOST,
+  masterGtidWaitSql,
+  primaryFinalGtidSetSql,
   promoteSql,
   quoteIdentifier,
   quoteLiteral,
@@ -572,7 +578,29 @@ const mariadbReplicationRuntime: ManagedEngineReplicationRuntime = {
     }
   },
 
-  async promote(ctx) {
+  async quiesceFormerPrimaryForSwitchover(ctx) {
+    await runMariadb(ctx, enforceReadOnlySql());
+    const out = await runMariadbQuery(ctx, primaryFinalGtidSetSql());
+    const gtid = boundedGtid(out.trim());
+    if (!gtid) {
+      throw new Error("switchover: could not read primary GTID position");
+    }
+    return gtid;
+  },
+
+  async reactivateFormerPrimaryAfterSwitchoverAbort(ctx) {
+    await runMariadb(ctx, disableReadOnlySql());
+  },
+
+  async promote(ctx, options) {
+    if (options?.requiredExecutedGtidSet) {
+      await waitForRequiredGtidSet(
+        (sql) => runMariadbQuery(ctx, sql),
+        masterGtidWaitSql,
+        options.requiredExecutedGtidSet,
+        options.gtidWaitTimeoutSeconds ?? SWITCHOVER_GTID_WAIT_DEFAULT_SECONDS,
+      );
+    }
     await runMariadb(ctx, promoteSql());
     const deadline = Date.now() + 60_000;
     const writable = async (): Promise<boolean> => {

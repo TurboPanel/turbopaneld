@@ -36,7 +36,15 @@ export async function handleManagedPromote(
     deps,
   );
 
-  await engine.replication!.promote(ctx);
+  const promoteOptions = payload.requiredExecutedGtidSet !== undefined
+    ? {
+      requiredExecutedGtidSet: payload.requiredExecutedGtidSet,
+      ...(payload.gtidWaitTimeoutSeconds !== undefined
+        ? { gtidWaitTimeoutSeconds: payload.gtidWaitTimeoutSeconds }
+        : {}),
+    }
+    : undefined;
+  await engine.replication!.promote(ctx, promoteOptions);
   await clearManagedDemotedMarker(
     resolveLayout(Deno.env.toObject()),
     payload.managedId,

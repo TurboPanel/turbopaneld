@@ -15,7 +15,11 @@ import type {
 import { sanitizeForLog } from "../../util/logger.ts";
 import { forEachSequential } from "../../util/sequential.ts";
 import { grantDatabasePrivileges } from "./grant-databases.ts";
-import { parseMysqlFreshness } from "./replica-freshness.ts";
+import { boundedGtid, parseMysqlFreshness } from "./replica-freshness.ts";
+import {
+  SWITCHOVER_GTID_WAIT_DEFAULT_SECONDS,
+  waitForRequiredGtidSet,
+} from "./switchover-gtid.ts";
 import { parseSqlBool } from "./sql-bool.ts";
 import {
   authSocketPluginPresentSql,
@@ -38,6 +42,7 @@ import {
   installAuthSocketPluginSql,
   isWritableSql,
   MANAGED_DOCKER_NETWORK_HOST,
+  primaryFinalGtidSetSql,
   promoteSql,
   quoteIdentifier,
   quoteLiteral,
@@ -45,6 +50,7 @@ import {
   resetReplicaGtidStateSql,
   showReplicaStatusSql,
   versionSql,
+  waitForExecutedGtidSetSql,
 } from "./mysql-sql.ts";
 import {
   DOWN_ENGINE_CENSUS,
@@ -617,7 +623,29 @@ const mysqlReplicationRuntime: ManagedEngineReplicationRuntime = {
     }
   },
 
-  async promote(ctx) {
+  async quiesceFormerPrimaryForSwitchover(ctx) {
+    await runMysql(ctx, enforceReadOnlySql());
+    const out = await runMysqlQuery(ctx, primaryFinalGtidSetSql());
+    const gtid = boundedGtid(out.trim());
+    if (!gtid) {
+      throw new Error("switchover: could not read primary GTID position");
+    }
+    return gtid;
+  },
+
+  async reactivateFormerPrimaryAfterSwitchoverAbort(ctx) {
+    await runMysql(ctx, disableReadOnlySql());
+  },
+
+  async promote(ctx, options) {
+    if (options?.requiredExecutedGtidSet) {
+      await waitForRequiredGtidSet(
+        (sql) => runMysqlQuery(ctx, sql),
+        waitForExecutedGtidSetSql,
+        options.requiredExecutedGtidSet,
+        options.gtidWaitTimeoutSeconds ?? SWITCHOVER_GTID_WAIT_DEFAULT_SECONDS,
+      );
+    }
     await runMysql(ctx, promoteSql());
     const deadline = Date.now() + 60_000;
     const writable = async (): Promise<boolean> => {
