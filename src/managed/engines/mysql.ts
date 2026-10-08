@@ -59,11 +59,14 @@ import type {
   ManagedReplicationObservedHealth,
 } from "./types.ts";
 import {
-  execStandbySeed,
+  execStandbySeedWithInitRetry,
+  formatStandbySeedFailure,
+  MYSQL_FAMILY_NATIVE_PORT,
   mysqlFamilyDataRoot,
   probeMysqlFamilyStandbyData,
   standbySeedStdinLines,
   volumeMountArgs,
+  waitMysqlFamilyRealServer,
 } from "./standby-probe.ts";
 
 /** Marker written into the data volume once configureStandby finishes. */
@@ -114,8 +117,6 @@ const mysqlBackupRuntime: ManagedEngineBackupRuntime = {
   },
 };
 
-const READY_POLL_MS = 1_000;
-const READY_TIMEOUT_MS = 120_000;
 const MYSQL_SQL_STDIN_MARK = "__TP_SQL__";
 
 function sleep(ms: number): Promise<void> {
@@ -200,6 +201,37 @@ async function execMysql(
   const password = ctx.socketPassword;
   if (!password || !deniedNoPassword) return first;
   return await execMysqlWithDefaults(ctx, argv, input, password);
+}
+
+function waitMysqlRealServer(ctx: ManagedEngineContext): Promise<void> {
+  return waitMysqlFamilyRealServer({
+    label: "managed mysql",
+    fallbackError: "mysqladmin ping did not succeed",
+    ping: (kind) => {
+      if (kind === "tcp") {
+        // Raw exec: ping exit 0 (including access-denied) means the real
+        // listener is up. Do not treat 1045 as "not ready" here.
+        return ctx.exec([
+          "mysqladmin",
+          "ping",
+          "--protocol=tcp",
+          "--host",
+          "127.0.0.1",
+          "--port",
+          String(MYSQL_FAMILY_NATIVE_PORT),
+          "-u",
+          ctx.rootUsername,
+        ]);
+      }
+      return execMysql(ctx, [
+        "mysqladmin",
+        "ping",
+        "--protocol=socket",
+        "-u",
+        ctx.rootUsername,
+      ]);
+    },
+  });
 }
 
 async function runMysql(
@@ -528,16 +560,15 @@ const mysqlReplicationRuntime: ManagedEngineReplicationRuntime = {
     await ensureAuthSocketPlugin(ctx);
 
     // Short-lived 0600 defaults file via stdin (never -p on argv / never MYSQL_PWD).
-    const seed = await execStandbySeed(
+    const seed = await execStandbySeedWithInitRetry(
       ctx,
       buildMysqlStandbySeedScript,
       defaultsBody,
+      () => waitMysqlRealServer(ctx),
     );
     if (!seed.success) {
       throw new Error(
-        `mysql configureStandby seed failed: ${
-          sanitizeForLog(seed.stderr || seed.stdout || "unknown")
-        }`,
+        `mysql configureStandby seed failed: ${formatStandbySeedFailure(seed)}`,
       );
     }
 
@@ -638,28 +669,7 @@ export const mysqlManagedEngineRuntime: ManagedEngineRuntime = {
   defaultDatabase: "appdb",
 
   async waitReady(ctx: ManagedEngineContext): Promise<void> {
-    const deadline = Date.now() + READY_TIMEOUT_MS;
-    let lastError = "mysqladmin ping did not succeed";
-    const ready = async (): Promise<boolean> => {
-      if (Date.now() >= deadline) return false;
-      const result = await execMysql(ctx, [
-        "mysqladmin",
-        "ping",
-        "--protocol=socket",
-        "-u",
-        ctx.rootUsername,
-      ]);
-      if (result.success) return true;
-      lastError = result.stderr || result.stdout || lastError;
-      await sleep(READY_POLL_MS);
-      return ready();
-    };
-    if (await ready()) return;
-    throw new Error(
-      `managed mysql not ready within ${READY_TIMEOUT_MS}ms: ${
-        sanitizeForLog(lastError)
-      }`,
-    );
+    await waitMysqlRealServer(ctx);
   },
 
   async readCensus(ctx: ManagedEngineContext): Promise<ManagedEngineCensus> {

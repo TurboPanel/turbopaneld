@@ -111,9 +111,12 @@ const STANDBY_MARKER = ".turbopanel-standby";
 test("mariadb waitReady succeeds on first mariadb-admin ping", async () => {
   const { exec, calls } = recordingExec();
   await mariadbManagedEngineRuntime.waitReady(buildContext(exec));
-  assertEquals(calls.length, 1);
-  assertEquals(calls[0]!.argv.includes("mariadb-admin"), true);
-  assertEquals(calls[0]!.argv.includes("ping"), true);
+  assertEquals(calls.length, 3);
+  assertEquals(calls[0]!.argv.includes("--protocol=socket"), true);
+  assertEquals(calls[1]!.argv.includes("--protocol=tcp"), true);
+  assertEquals(calls[1]!.argv.includes("127.0.0.1"), true);
+  assertEquals(calls[1]!.argv.includes("3306"), true);
+  assertEquals(calls[2]!.argv.includes("--protocol=socket"), true);
 });
 
 test("mariadb waitReady retries ping via defaults-extra-file after 1045", async () => {
@@ -140,9 +143,11 @@ test("mariadb waitReady retries ping via defaults-extra-file after 1045", async 
     ...buildContext(exec),
     socketPassword: "root-pass",
   });
-  assertEquals(calls.length, 2);
+  assertEquals(calls.length, 4);
   assertEquals(calls[1]!.argv[0], "sh");
   assertEquals(calls[1]!.input?.includes("password=root-pass"), true);
+  assertEquals(calls[2]!.argv.includes("--protocol=tcp"), true);
+  assertEquals(calls[3]!.argv.includes("--protocol=socket"), true);
 });
 
 test("mariadb applyCredentials creates root and app users via socket", async () => {
@@ -407,11 +412,13 @@ test("mariadb configureStandby throws when seed script fails", async () => {
   if (!replication?.configureStandby) {
     throw new TypeError("expected mariadb configureStandby");
   }
+  let seeds = 0;
   const exec: ManagedEngineExec = (argv) => {
     if (argv[0] === "test" && argv.includes("-f")) {
       return Promise.resolve({ success: false, stdout: "", stderr: "" });
     }
-    if (argv[0] === "sh") {
+    if (argv[0] === "sh" && argv[2]?.includes("--all-databases")) {
+      seeds++;
       return Promise.resolve({
         success: false,
         stdout: "",
@@ -420,7 +427,7 @@ test("mariadb configureStandby throws when seed script fails", async () => {
     }
     return Promise.resolve({ success: true, stdout: "", stderr: "" });
   };
-  await assertRejects(
+  const err = await assertRejects(
     () =>
       replication.configureStandby!(
         buildContext(exec),
@@ -429,6 +436,90 @@ test("mariadb configureStandby throws when seed script fails", async () => {
     Error,
     "configureStandby seed failed",
   );
+  assertEquals(seeds, 1);
+  assertEquals(err.message.includes("unknown"), false);
+  assertEquals(err.message.includes("seed boom"), true);
+});
+
+test("mariadb configureStandby retries the seed once after empty output", async () => {
+  const replication = mariadbManagedEngineRuntime.replication;
+  if (!replication?.configureStandby) {
+    throw new TypeError("expected mariadb configureStandby");
+  }
+  let seeds = 0;
+  const exec: ManagedEngineExec = (argv) => {
+    if (argv[0] === "test" && argv.includes("-f")) {
+      return Promise.resolve({ success: false, stdout: "", stderr: "" });
+    }
+    if (argv[0] === "sh" && argv[2]?.includes("--all-databases")) {
+      seeds++;
+      if (seeds === 1) {
+        return Promise.resolve({ success: false, stdout: "", stderr: "" });
+      }
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  await replication.configureStandby(
+    buildContext(exec),
+    standbyReplicationSpec(),
+  );
+  assertEquals(seeds, 2);
+});
+
+test("mariadb configureStandby retries the seed once after error 1133", async () => {
+  const replication = mariadbManagedEngineRuntime.replication;
+  if (!replication?.configureStandby) {
+    throw new TypeError("expected mariadb configureStandby");
+  }
+  let seeds = 0;
+  const exec: ManagedEngineExec = (argv) => {
+    if (argv[0] === "test" && argv.includes("-f")) {
+      return Promise.resolve({ success: false, stdout: "", stderr: "" });
+    }
+    if (argv[0] === "sh" && argv[2]?.includes("--all-databases")) {
+      seeds++;
+      if (seeds === 1) {
+        return Promise.resolve({
+          success: false,
+          stdout: "",
+          stderr:
+            "ERROR 1133 (28000) at line 11: Can't find any matching row in the user table",
+        });
+      }
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  await replication.configureStandby(
+    buildContext(exec),
+    standbyReplicationSpec(),
+  );
+  assertEquals(seeds, 2);
+});
+
+test("mariadb configureStandby empty seed failure is not reported as unknown", async () => {
+  const replication = mariadbManagedEngineRuntime.replication;
+  if (!replication?.configureStandby) {
+    throw new TypeError("expected mariadb configureStandby");
+  }
+  const exec: ManagedEngineExec = (argv) => {
+    if (argv[0] === "test" && argv.includes("-f")) {
+      return Promise.resolve({ success: false, stdout: "", stderr: "" });
+    }
+    if (argv[0] === "sh" && argv[2]?.includes("--all-databases")) {
+      return Promise.resolve({ success: false, stdout: "", stderr: "" });
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  const err = await assertRejects(
+    () =>
+      replication.configureStandby!(
+        buildContext(exec),
+        standbyReplicationSpec(),
+      ),
+    Error,
+    "the seed command produced no output",
+  );
+  assertEquals(err.message.includes("unknown"), false);
 });
 
 test("mariadb promote clears read-only and returns when writable", async () => {
@@ -525,11 +616,11 @@ test("mariadb readHealth returns unknown when status query fails", async () => {
 });
 
 test("mariadb waitReady retries until mariadb-admin ping succeeds", async () => {
-  let attempts = 0;
+  let socketAttempts = 0;
   const exec: ManagedEngineExec = (argv) => {
-    if (argv.includes("mariadb-admin")) {
-      attempts++;
-      if (attempts === 1) {
+    if (argv.includes("mariadb-admin") && argv.includes("--protocol=socket")) {
+      socketAttempts++;
+      if (socketAttempts === 1) {
         return Promise.resolve({
           success: false,
           stdout: "",
@@ -540,7 +631,26 @@ test("mariadb waitReady retries until mariadb-admin ping succeeds", async () => 
     return Promise.resolve({ success: true, stdout: "", stderr: "" });
   };
   await mariadbManagedEngineRuntime.waitReady(buildContext(exec));
-  assertEquals(attempts, 2);
+  assertEquals(socketAttempts, 3);
+});
+
+test("mariadb waitReady keeps polling when TCP ping is refused", async () => {
+  let tcpAttempts = 0;
+  const exec: ManagedEngineExec = (argv) => {
+    if (argv.includes("--protocol=tcp")) {
+      tcpAttempts++;
+      if (tcpAttempts === 1) {
+        return Promise.resolve({
+          success: false,
+          stdout: "",
+          stderr: "Can't connect to server on '127.0.0.1' (111)",
+        });
+      }
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  await mariadbManagedEngineRuntime.waitReady(buildContext(exec));
+  assertEquals(tcpAttempts, 2);
 });
 
 test("mariadb waitReady throws after the readiness deadline", async () => {
@@ -766,7 +876,7 @@ function deniedThenOk(): { exec: ManagedEngineExec; calls: RecordedExec[] } {
 test("mariadb waitReady does not use defaults-extra-file without a socket password", async () => {
   const { exec, calls } = deniedThenOk();
   await mariadbManagedEngineRuntime.waitReady(buildContext(exec));
-  assertEquals(calls.length, 2);
+  assertEquals(calls.length, 4);
   assertEquals(calls.every((c) => c.argv.includes("mariadb-admin")), true);
   assertEquals(calls.some((c) => c.argv[0] === "sh"), false);
 });
