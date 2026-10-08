@@ -1048,6 +1048,11 @@ tp_scan_systemctl_units() {
       }
     }')
     [ -n "$_ssu_name" ] || continue
+    # list-units --all keeps naming a stopped slice after its unit file is
+    # gone. That is not a leftover, so count a slice only while it is real.
+    case $_ssu_name in
+      *.slice) tp_unit_present "$_ssu_name" || continue ;;
+    esac
     tp_note_unit "$_ssu_name"
   done < "$_ssu_out"
 }
