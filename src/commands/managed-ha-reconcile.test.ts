@@ -412,7 +412,8 @@ test({
         assertEquals(conf.RaftAuthToken, "raft-token-value");
         assertEquals(conf.MySQLTopologyUser, "tp_repl");
         assertEquals(conf.MySQLTopologyPassword, "repl-plaintext");
-        assertEquals(conf.MySQLTopologyUseSSL, true);
+        assertEquals(conf.MySQLTopologyUseMutualTLS, true);
+        assertEquals("MySQLTopologyUseSSL" in conf, false);
         const compose = await Deno.readTextFile(
           orchestratorComposePath(layout),
         );

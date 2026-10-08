@@ -35,6 +35,7 @@ import {
   inspectOrchestratorContainer,
   loadOrchestratorApiCredentials,
   loadOrchestratorRaftToken,
+  ORCHESTRATOR_TLS_CA_PATH,
   orchestratorTopologyAliases,
   renderOrchestratorConf,
   resolveOrchestratorRegisterHost,
@@ -230,9 +231,7 @@ export async function handleManagedHaReconcile(
     httpAuth,
     topologyUser,
     topologyPassword,
-    sslCaPath: payload.orgTlsMaterial
-      ? "/etc/orchestrator/tls/ca.pem"
-      : undefined,
+    sslCaPath: payload.orgTlsMaterial ? ORCHESTRATOR_TLS_CA_PATH : undefined,
     ...(raftAuthToken ? { raftAuthToken } : {}),
   });
 
