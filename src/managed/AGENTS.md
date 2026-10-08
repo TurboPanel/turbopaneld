@@ -283,14 +283,18 @@ ProxySQL to enforce. Canonical policy:
    resolution (`containers.ts`) still keys off `Service` / `State`, never
    `Name`.
 2. **Native port, never remapped; published only via private listener.**
-   Normalized engine compose never emits arbitrary `ports:`. Multi-member
-   clusters may publish **one** engine port bound exclusively to the member's
-   datacenter, fabric (`tp0` relay), **or public** address at the
-   instance-allocated `private_port` — that private listener is the single
-   cross-host path for both streaming replication and remote ProxySQL
-   backends. Loopback and `0.0.0.0` binds are rejected. Single-member
-   clusters still publish nothing; client traffic enters only via the shared
-   ProxySQL client listeners.
+   Normalized engine compose never emits arbitrary `ports:`. A cluster may
+   publish **one** engine port bound exclusively to the member's datacenter,
+   fabric (`tp0` relay), **or public** address at the instance-allocated
+   `private_port` — that private listener is the single cross-host path for
+   both streaming replication and remote ProxySQL backends (including a
+   single-member engine whose bound app lives on another host). Loopback and
+   `0.0.0.0` binds are rejected. A cluster with no remote peer and no remote
+   consumer still publishes nothing; client traffic enters only via the
+   shared ProxySQL client listeners. The consumer host's reconcile still
+   ships `clusters[].users` for that remote backend — a missing private port
+   fails the whole cluster (no frontend login), which is why apply must
+   allocate the port first.
    A **public** bind (`privateListener.transport === 'public'`) is mandatorily
    **Organization CA** TLS-only: `assertPublicPrivateListenerTls` (exported from
    `compose.ts`, run first in `apply.ts` and again during compose normalization)

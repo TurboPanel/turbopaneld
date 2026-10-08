@@ -1641,6 +1641,44 @@ test("proxysqlCompose pins spanning segments to reserved ingress addresses", () 
   assertStringIncludes(compose, '"198.51.100.254"');
 });
 
+test("a remote-only cluster still emits frontend users for both families", () => {
+  const remoteBackend = {
+    memberId: "mb-remote",
+    role: "primary" as const,
+    readEligible: false,
+    address: "10.0.0.8",
+    port: 45001,
+    transport: "datacenter" as const,
+  };
+  const cnf = renderProxySqlConfig({
+    bindAddresses: ["127.0.0.1"],
+    clusters: [
+      clusterDesired({
+        backends: [remoteBackend],
+        users: [{ username: "app_pg", role: "user", password: "s3cret-pg" }],
+      }),
+      clusterDesired({
+        managedId: "m2",
+        engine: "mysql",
+        protocolPort: 13306,
+        writerHostgroup: 2,
+        readerHostgroup: 3,
+        backends: [{ ...remoteBackend, memberId: "mb-mysql", port: 45002 }],
+        users: [{
+          username: "app_mysql",
+          role: "user",
+          password: "s3cret-mysql",
+        }],
+      }),
+    ],
+  });
+  assertStringIncludes(cnf, "pgsql_users");
+  assertStringIncludes(cnf, 'username="app_pg"');
+  assertStringIncludes(cnf, "mysql_users");
+  assertStringIncludes(cnf, 'username="app_mysql"');
+  assertStringIncludes(cnf, "10.0.0.8");
+});
+
 test("renderProxySqlConfig includes mysql family and default_schema users", () => {
   const cnf = renderProxySqlConfig({
     bindAddresses: ["0.0.0.0"],
