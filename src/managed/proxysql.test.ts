@@ -2013,3 +2013,49 @@ test("findIngressRuntimeMismatch skips families the desired state does not use",
     null,
   );
 });
+
+async function runEnsureWithContainer(
+  portsJson: string | null,
+): Promise<string[][]> {
+  const fixture = await createTempLayout();
+  try {
+    const layout = resolveLayout(fixture.env);
+    const calls: string[][] = [];
+    const ok = (stdout: string) =>
+      Promise.resolve({ success: true, stdout, stderr: "", code: 0 });
+    await ensureProxySqlIngress(
+      layout,
+      DESCRIPTOR,
+      (args) => {
+        calls.push(args);
+        if (args.includes("ps")) return ok(portsJson === null ? "" : "abc\n");
+        if (args[0] === "inspect" && args.includes("--format")) {
+          return ok(`true|${portsJson}\n`);
+        }
+        return ok("");
+      },
+      {
+        bindAddresses: ["10.10.1.10"],
+        segmentAttachments: [],
+        listenerPorts: null,
+        managedNetwork: MANAGED_NETWORK,
+        stability: { sleep: () => Promise.resolve(), attempts: 1 },
+      },
+    );
+    return calls;
+  } finally {
+    await fixture.cleanup();
+  }
+}
+
+const upCall = (calls: string[][]) => calls.find((c) => c.includes("up"))!;
+
+test("ensureProxySqlIngress recreates a running container that has no published ports", async () => {
+  const calls = await runEnsureWithContainer("{}");
+  assertEquals(upCall(calls).includes("--force-recreate"), true);
+});
+
+test("ensureProxySqlIngress does not recreate when there is no container yet", async () => {
+  const calls = await runEnsureWithContainer(null);
+  assertEquals(upCall(calls).includes("--force-recreate"), false);
+});
