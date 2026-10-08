@@ -1107,9 +1107,15 @@ test("scheduled-backup units pass only in their exact shape; tenant units gain n
     const service = backupServiceContent(layout, BACKUP_ID);
     const timer = backupTimerContent(BACKUP_ID, "*-*-* 03:00:00");
 
-    // The daemon's own rendering passes.
+    // The daemon's own rendering passes, including a sub-hourly timer with
+    // its tightened accuracy.
+    const frequentTimer = backupTimerContent(BACKUP_ID, "*-*-* *:0/2:00");
     for (
-      const [name, content] of [[serviceName, service], [timerName, timer]]
+      const [name, content] of [
+        [serviceName, service],
+        [timerName, timer],
+        [timerName, frequentTimer],
+      ]
     ) {
       const result = await installUnit(host, name, content);
       assertEquals(result.code, 0, `${name}: ${result.stderr}`);

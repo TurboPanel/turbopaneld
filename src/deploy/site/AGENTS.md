@@ -53,7 +53,9 @@ Docker Compose. The daemon:
    the runtime's php.ini, and the site fragment flips
    `enableScript 1`. Every `context /` renders `allowBrowse 1`: in OLS that is
    the context's "Accessible" flag (`0` is a 403 for everything); listing is
-   `autoIndex 0`. `httpd_config.conf` sets `fileAccessControl`
+   `autoIndex 0`. The `index` block carries `useServer 0` so the vhost's own
+   `indexFiles` (`index.php` first on PHP sites) wins over the server-level
+   `index.html`. `httpd_config.conf` sets `fileAccessControl`
    `requiredPermissionMask 000`: by default OLS answers 403 for any static file
    without the world-read bit, and site files are shared with `tpols` by group.
 

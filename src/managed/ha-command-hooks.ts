@@ -73,10 +73,11 @@ export async function beginManagedCommandIntent(
 export async function endManagedCommandIntent(
   token: ManagedCommandIntentToken | null,
   succeeded: boolean,
+  options?: { keepHeld?: boolean },
 ): Promise<void> {
   if (!token) return;
   await guarded("intent marker refresh", async () => {
-    await endManagedIntent(hookLayout().stateDir, token, succeeded);
+    await endManagedIntent(hookLayout().stateDir, token, succeeded, options);
   });
 }
 
@@ -125,8 +126,10 @@ export async function noteManagedFailoverSucceeded(
 
 export async function noteManagedDestroySucceeded(
   payload: ManagedDestroyPayload,
-): Promise<void> {
+): Promise<boolean> {
+  let recordGone = false;
   await guarded("ha-member remove", async () => {
-    await removeManagedHaMember(hookLayout(), payload.managedId);
+    recordGone = await removeManagedHaMember(hookLayout(), payload.managedId);
   });
+  return recordGone;
 }

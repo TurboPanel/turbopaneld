@@ -161,19 +161,22 @@ export async function markManagedHaMemberPromoted(
   );
 }
 
+/** True when the record is gone (removed or never there); false after a logged failure. */
 export async function removeManagedHaMember(
   layout: LayoutPaths,
   managedId: string,
-): Promise<void> {
+): Promise<boolean> {
   try {
     await Deno.remove(managedHaMemberPath(layout, managedId));
+    return true;
   } catch (err) {
-    if (err instanceof Deno.errors.NotFound) return;
+    if (err instanceof Deno.errors.NotFound) return true;
     logWarn(
       "managed",
       `ha-member record remove failed managedId=${managedId}:`,
       sanitizeForLog(err),
     );
+    return false;
   }
 }
 
