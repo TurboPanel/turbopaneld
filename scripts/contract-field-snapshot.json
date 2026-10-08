@@ -158,7 +158,6 @@
         "type": "'restart' | 'start' | 'stop'"
       },
       { "name": "demoted", "required": false, "type": "boolean" },
-      { "name": "engine", "required": false, "type": "ManagedEngineCode" },
       { "name": "managedId", "required": true, "type": "string" },
       { "name": "memberId", "required": false, "type": "string" },
       {
