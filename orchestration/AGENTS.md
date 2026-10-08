@@ -160,7 +160,7 @@ Debian 13 too), extracts the binary with `dpkg-deb -x` (same pattern as the
 `{{ turbopanel_vendor_dir }}/nginx/<version>/sbin/nginx` + `current`. Main
 config is templated to `/etc/turbopanel/nginx/nginx.conf` and
 `Include`s `/etc/turbopanel/nginx/sites/*.conf`. Temp paths / logs / pidfile
-are under `/var/lib|/var/log|/run/turbopanel/nginx/`. Driven by
+are under `/var/lib|/var/log` and the unit's own `RuntimeDirectory=turbopanel-nginx` (`/run/turbopanel-nginx/`, recreated by systemd on every start, so it survives a reboot). Driven by
 **`turbopanel-nginx.service`** (runs as `tpnginx`; high-port vhosts only —
 hosting Caddy owns `:80`/`:443`).
 
