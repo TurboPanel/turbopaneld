@@ -133,7 +133,12 @@ Compose project names:
 - Shared ProxySQL needs a **4 KiB-page kernel**: the published image bundles a memory allocator compiled for 4 KiB pages and aborts on 16/64 KiB-page kernels (exit 133, "Unsupported system page size"; Raspberry Pi 5 default kernel, Apple Silicon, some 64 KiB ARM servers). `ensureProxySqlIngress` reads the host page size (Linux only) and fails with a plain-words error before touching compose (`proxySqlPageSizeError`). A newer image tag does not help (3.0.11 still fails); preloading a system allocator does not help either (the bundled one wins).
 - Shared ProxySQL: the `managed-ingress` `serviceId` (system component
   `managed-ingress`, compose service `proxysql`) on that same managed
-  network
+  network. Compose and `proxysql.cnf` must stay valid for **several**
+  clusters on one host (mixed MySQL/Postgres families, several `tpn_*`
+  attachments): libconfig lists stay comma-separated, and a bound
+  single-member cluster on another host is omitted by the control plane
+  rather than failing `managed.ingress.reconcile` / the external-access
+  PUT.
 - Engine container name: instance-allocated `<service.id>-1` (ordinal 2/3 for
   replicas)
 

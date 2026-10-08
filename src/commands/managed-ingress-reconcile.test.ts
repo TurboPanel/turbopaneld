@@ -287,6 +287,118 @@ test({
 
 test({
   name:
+    "handleManagedIngressReconcile with three clusters still publishes the external-access bind",
+  permissions: { env: true, read: true, write: true, run: false },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      await seedFixture(fixture);
+      const layout = resolveLayout(fixture.env);
+      Deno.env.set("TURBOPANEL_STATE_DIR", fixture.dirs.stateDir);
+      Deno.env.set("TURBOPANEL_CONFIG_DIR", fixture.dirs.configDir);
+      try {
+        const payload = basePayload("0.0.0.0");
+        payload.clusters = [
+          payload.clusters[0]!,
+          {
+            managedId: "55555555-5555-4555-8555-555555555555",
+            engine: "mysql",
+            protocolPort: 3306,
+            family: "mysql",
+            writerHostgroup: 2,
+            readerHostgroup: 3,
+            backends: [
+              {
+                memberId: "66666666-6666-4666-8666-666666666666",
+                role: "primary",
+                readEligible: false,
+                address: "engine-mysql",
+                port: 3306,
+                transport: "local",
+              },
+            ],
+            users: [
+              {
+                username: "app_mysql",
+                role: "user",
+                password: "tpdaemon.v1.mysql-pass",
+              },
+            ],
+          },
+          {
+            managedId: "77777777-7777-4777-8777-777777777777",
+            engine: "postgres",
+            protocolPort: 5432,
+            family: "pgsql",
+            writerHostgroup: 4,
+            readerHostgroup: 5,
+            backends: [
+              {
+                memberId: "88888888-8888-4888-8888-888888888888",
+                role: "primary",
+                readEligible: false,
+                address: "engine-pg2",
+                port: 5432,
+                transport: "local",
+              },
+            ],
+            users: [
+              {
+                username: "app_pg2",
+                role: "user",
+                password: "tpdaemon.v1.pg2-pass",
+              },
+            ],
+          },
+        ];
+        payload.segments = [
+          {
+            name: "tpn_00000000-0000-4000-8000-0000000000aa",
+            subnet: "10.90.1.0/24",
+          },
+          {
+            name: "tpn_00000000-0000-4000-8000-0000000000bb",
+            subnet: "10.90.2.0/24",
+          },
+          {
+            name: "tpn_00000000-0000-4000-8000-0000000000cc",
+            subnet: "10.90.3.0/24",
+          },
+        ];
+        const result = await handleManagedIngressReconcile(
+          payload,
+          new Date().toISOString(),
+          {
+            runDocker: fakeRun(),
+            decryptSecrets: decryptSecretsEcho,
+            ensureDocker: () => Promise.resolve(),
+          },
+        );
+        assertEquals(result.restarted, true);
+        const composeText = await Deno.readTextFile(
+          proxysqlComposePath(layout),
+        );
+        assertEquals(
+          readPublishedBindAddressesFromCompose(composeText),
+          ["0.0.0.0"],
+        );
+        assertStringIncludes(
+          composeText,
+          "tpn_00000000-0000-4000-8000-0000000000aa:",
+        );
+        assertStringIncludes(
+          composeText,
+          "tpn_00000000-0000-4000-8000-0000000000cc:",
+        );
+      } finally {
+        Deno.env.delete("TURBOPANEL_STATE_DIR");
+        Deno.env.delete("TURBOPANEL_CONFIG_DIR");
+      }
+    });
+  },
+});
+
+test({
+  name:
     "handleManagedIngressReconcile detects a bind-only change and restarts even though the static cnf section is unchanged",
   permissions: { env: true, read: true, write: true, run: false },
   fn: async () => {
