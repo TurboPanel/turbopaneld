@@ -153,23 +153,38 @@ async function writePipedStdin(
   return undefined;
 }
 
+/**
+ * Build the result for a finished child. A failed child keeps its own
+ * stderr/stdout; the closed-stdin note is only used when it printed nothing.
+ */
+function dockerResultFromParts(
+  success: boolean,
+  code: number,
+  stdout: string,
+  stderr: string,
+  stdinClosedEarly?: string,
+): DockerCliResult {
+  if (success) return { success: true, code, stdout, stderr };
+  return {
+    success: false,
+    code,
+    stdout,
+    stderr: stderr || stdout ||
+      (stdinClosedEarly ? `spawn failed: ${stdinClosedEarly}` : ""),
+  };
+}
+
 function dockerResultFromChildOutput(
   result: Deno.CommandOutput,
   stdinClosedEarly?: string,
 ): DockerCliResult {
-  const stdout = decoder.decode(result.stdout).trim();
-  const stderr = decoder.decode(result.stderr).trim();
-  if (result.success) {
-    return { success: true, code: result.code, stdout, stderr };
-  }
-  const processText = stderr || stdout;
-  return {
-    success: false,
-    code: result.code,
-    stdout,
-    stderr: processText ||
-      (stdinClosedEarly ? `spawn failed: ${stdinClosedEarly}` : ""),
-  };
+  return dockerResultFromParts(
+    result.success,
+    result.code,
+    decoder.decode(result.stdout).trim(),
+    decoder.decode(result.stderr).trim(),
+    stdinClosedEarly,
+  );
 }
 
 async function runRawDefault(
@@ -510,19 +525,13 @@ export async function runDockerStreamed(
       ),
     ]);
 
-    const out = stdout.trim();
-    const err = stderr.trim();
-    if (status.success) {
-      return { success: true, code: status.code, stdout: out, stderr: err };
-    }
-    const processText = err || out;
-    return {
-      success: false,
-      code: status.code,
-      stdout: out,
-      stderr: processText ||
-        (stdinClosedEarly ? `spawn failed: ${stdinClosedEarly}` : ""),
-    };
+    return dockerResultFromParts(
+      status.success,
+      status.code,
+      stdout.trim(),
+      stderr.trim(),
+      stdinClosedEarly,
+    );
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return {
