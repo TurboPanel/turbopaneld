@@ -449,6 +449,9 @@ const mysqlReplicationRuntime: ManagedEngineReplicationRuntime = {
     );
   },
 
+  // MySQL has no physical slots — failover still sends ensureSlots.
+  ensureSlots: () => Promise.resolve(),
+
   probeStandbyData: (ctx) => probeMysqlFamilyStandbyData(ctx, STANDBY_MARKER),
 
   async bootstrapStandby(ctx: ManagedEngineBootstrapContext, spec) {
@@ -578,6 +581,11 @@ const mysqlReplicationRuntime: ManagedEngineReplicationRuntime = {
     };
     if (await writable()) return;
     throw new Error("mysql promote did not become writable within 60s");
+  },
+
+  async isStandby(ctx) {
+    const verbose = await runMysqlStatusQuery(ctx, showReplicaStatusSql());
+    return verbose.trim().length > 0;
   },
 
   async followPrimary(ctx, spec) {

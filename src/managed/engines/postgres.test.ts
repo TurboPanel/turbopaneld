@@ -1485,3 +1485,40 @@ test("postgres pruneOrphanSlots drops every managed slot not listed and keeps th
     1,
   );
 });
+
+test("postgres ensureSlots creates each missing physical slot", async () => {
+  const replication = postgresManagedEngineRuntime.replication;
+  if (!replication?.ensureSlots) {
+    throw new TypeError("expected postgres ensureSlots");
+  }
+  const { exec, calls } = recordingExec();
+  await replication.ensureSlots(buildContext(exec), [
+    "tp_member_2",
+    "tp_member_3",
+  ]);
+  const sql = calls.map((c) => c.input ?? "").join("\n");
+  assertEquals(sql.includes("pg_create_physical_replication_slot"), true);
+  assertEquals(sql.includes("tp_member_2"), true);
+  assertEquals(sql.includes("tp_member_3"), true);
+});
+
+test("postgres isStandby follows pg_is_in_recovery", async () => {
+  const replication = postgresManagedEngineRuntime.replication;
+  if (!replication?.isStandby) {
+    throw new TypeError("expected postgres isStandby");
+  }
+  const standby: ManagedEngineExec = (_argv, input) => {
+    if (input?.includes("pg_is_in_recovery")) {
+      return Promise.resolve({ success: true, stdout: "t\n", stderr: "" });
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  const primary: ManagedEngineExec = (_argv, input) => {
+    if (input?.includes("pg_is_in_recovery")) {
+      return Promise.resolve({ success: true, stdout: "f\n", stderr: "" });
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  assertEquals(await replication.isStandby(buildContext(standby)), true);
+  assertEquals(await replication.isStandby(buildContext(primary)), false);
+});

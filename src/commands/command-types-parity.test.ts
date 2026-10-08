@@ -3077,10 +3077,12 @@ test("managed.ha.failover round-trips drain and recover hosts", () => {
     targetHost: "203.0.113.11",
     targetPort: 5432,
     targetHostaddr: "10.100.0.4",
+    ensureSlots: ["tp_member_1", "tp_member_3"],
   });
   assertEquals(repoint.phase, "repoint");
   assertEquals(repoint.targetHost, "203.0.113.11");
   assertEquals(repoint.targetHostaddr, "10.100.0.4");
+  assertEquals(repoint.ensureSlots, ["tp_member_1", "tp_member_3"]);
 });
 
 test("managed.ha.reconcile and failover result parsers reject invalid shapes", () => {

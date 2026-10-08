@@ -860,10 +860,11 @@ export function currentPrimaryConninfoSql(): string {
 }
 
 function conninfoValueNeedsQuotes(value: string): boolean {
-  return value.includes(" ") || value.includes("'") || value.includes("\\");
+  return value.length === 0 || /\s/.test(value) || value.includes("'") ||
+    value.includes("\\");
 }
 
-function formatConninfoValue(value: string): string {
+export function formatConninfoValue(value: string): string {
   if (!conninfoValueNeedsQuotes(value)) return value;
   return `'${
     value.replaceAll("\\", String.raw`\\`).replaceAll("'", String.raw`\'`)
@@ -921,8 +922,10 @@ function parseConninfoEntries(current: string): Array<[string, string]> {
 }
 
 /**
- * Replace `host` / `port` (and `hostaddr` when present or supplied) in a
- * libpq `primary_conninfo` string, leaving user, password, and TLS keys.
+ * Replace `host` / `port` (and `hostaddr` when supplied) in a libpq
+ * `primary_conninfo` string, leaving user, password, and TLS keys.
+ * When the new dial has no `hostaddr`, drop the old key — libpq requires a
+ * numeric IP there, never a container name.
  */
 export function rewritePrimaryConninfo(
   current: string,
@@ -934,8 +937,8 @@ export function rewritePrimaryConninfo(
   byKey.set("port", String(primary.port));
   if (primary.hostaddr) {
     byKey.set("hostaddr", primary.hostaddr);
-  } else if (byKey.has("hostaddr")) {
-    byKey.set("hostaddr", primary.host);
+  } else {
+    byKey.delete("hostaddr");
   }
   // Map keeps first-insertion order: existing keys first, new ones after.
   return [...byKey]

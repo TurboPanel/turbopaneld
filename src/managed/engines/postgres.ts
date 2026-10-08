@@ -435,6 +435,12 @@ const postgresReplicationRuntime: ManagedEngineReplicationRuntime = {
     await pruneOrphanSlots(ctx, desired);
   },
 
+  ensureSlots: (ctx, slots) =>
+    forEachSequential(
+      slots,
+      (slot) => runPsql(ctx, createPhysicalSlotSql(slot)),
+    ),
+
   pruneOrphanSlots: (ctx, desired) => pruneOrphanSlots(ctx, new Set(desired)),
 
   probeStandbyData: probePostgresStandbyData,
@@ -570,6 +576,12 @@ const postgresReplicationRuntime: ManagedEngineReplicationRuntime = {
     };
     if (await leftRecovery()) return;
     throw new Error("pg_promote did not leave recovery within 60s");
+  },
+
+  async isStandby(ctx) {
+    const rows = await parsePsqlRows(ctx, isInRecoverySql());
+    const value = rows[0]?.[0]?.toLowerCase();
+    return value === "t" || value === "true";
   },
 
   async followPrimary(ctx, spec) {

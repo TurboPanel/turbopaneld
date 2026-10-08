@@ -1186,3 +1186,30 @@ test("mysql configureStandby does not retry a denied seed without a root passwor
   );
   assertEquals(seeds, 1);
 });
+
+test("mysql ensureSlots is a no-op", async () => {
+  const replication = mysqlManagedEngineRuntime.replication;
+  if (!replication?.ensureSlots) {
+    throw new TypeError("expected mysql ensureSlots");
+  }
+  const { exec, calls } = recordingExec();
+  await replication.ensureSlots(buildContext(exec), ["tp_member_2"]);
+  assertEquals(calls.length, 0);
+});
+
+test("mysql isStandby is true when SHOW REPLICA STATUS is non-empty", async () => {
+  const replication = mysqlManagedEngineRuntime.replication;
+  if (!replication?.isStandby) {
+    throw new TypeError("expected mysql isStandby");
+  }
+  const replica: ManagedEngineExec = () =>
+    Promise.resolve({
+      success: true,
+      stdout: HEALTHY_VERTICAL,
+      stderr: "",
+    });
+  const primary: ManagedEngineExec = () =>
+    Promise.resolve({ success: true, stdout: "\n", stderr: "" });
+  assertEquals(await replication.isStandby(buildContext(replica)), true);
+  assertEquals(await replication.isStandby(buildContext(primary)), false);
+});

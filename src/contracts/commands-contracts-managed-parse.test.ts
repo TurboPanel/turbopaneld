@@ -1008,6 +1008,53 @@ test("parseManagedHaFailoverPayload rejects missing fields and optional host/por
   );
 });
 
+test("parseManagedHaFailoverPayload accepts ensureSlots and rejects bad entries", () => {
+  const parsed = parseManagedHaFailoverPayload({
+    managedId: MANAGED_ID,
+    sourceMemberId: MEMBER_ID,
+    targetMemberId: REPLICA_ID,
+    phase: "repoint",
+    ensureSlots: ["tp_member_2", "tp_member_3"],
+  });
+  assertEquals(parsed.ensureSlots, ["tp_member_2", "tp_member_3"]);
+  assertThrows(
+    () =>
+      parseManagedHaFailoverPayload({
+        managedId: MANAGED_ID,
+        sourceMemberId: MEMBER_ID,
+        targetMemberId: REPLICA_ID,
+        phase: "repoint",
+        ensureSlots: ["tp-member-2"],
+      }),
+    TypeError,
+    "Invalid managed.ha.failover payload",
+  );
+  assertThrows(
+    () =>
+      parseManagedHaFailoverPayload({
+        managedId: MANAGED_ID,
+        sourceMemberId: MEMBER_ID,
+        targetMemberId: REPLICA_ID,
+        phase: "repoint",
+        ensureSlots: Array.from({ length: 33 }, (_, i) => `tp_member_${i}`),
+      }),
+    TypeError,
+    "Invalid managed.ha.failover payload",
+  );
+  assertThrows(
+    () =>
+      parseManagedHaFailoverPayload({
+        managedId: MANAGED_ID,
+        sourceMemberId: MEMBER_ID,
+        targetMemberId: REPLICA_ID,
+        phase: "repoint",
+        ensureSlots: "tp_member_2",
+      }),
+    TypeError,
+    "Invalid managed.ha.failover payload",
+  );
+});
+
 const RESTORE_BASE = {
   managedId: MANAGED_ID,
   engine: "postgres",

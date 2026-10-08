@@ -1033,3 +1033,30 @@ test("mariadb configureStandby does not retry a denied seed without a root passw
   );
   assertEquals(seeds, 1);
 });
+
+test("mariadb ensureSlots is a no-op", async () => {
+  const replication = mariadbManagedEngineRuntime.replication;
+  if (!replication?.ensureSlots) {
+    throw new TypeError("expected mariadb ensureSlots");
+  }
+  const { exec, calls } = recordingExec();
+  await replication.ensureSlots(buildContext(exec), ["tp_member_2"]);
+  assertEquals(calls.length, 0);
+});
+
+test("mariadb isStandby is true when SHOW SLAVE STATUS is non-empty", async () => {
+  const replication = mariadbManagedEngineRuntime.replication;
+  if (!replication?.isStandby) {
+    throw new TypeError("expected mariadb isStandby");
+  }
+  const replica: ManagedEngineExec = () =>
+    Promise.resolve({
+      success: true,
+      stdout: HEALTHY_VERTICAL,
+      stderr: "",
+    });
+  const primary: ManagedEngineExec = () =>
+    Promise.resolve({ success: true, stdout: "\n", stderr: "" });
+  assertEquals(await replication.isStandby(buildContext(replica)), true);
+  assertEquals(await replication.isStandby(buildContext(primary)), false);
+});

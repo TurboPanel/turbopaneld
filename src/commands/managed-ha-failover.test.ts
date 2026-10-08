@@ -312,6 +312,42 @@ test("managed.ha.failover repoint works for mysql engines", async () => {
   assertEquals(result.phase, "repoint");
 });
 
+test("managed.ha.failover repoint ensureSlots does not require a follow endpoint", async () => {
+  const slotCalls: unknown[] = [];
+  let followCalled = false;
+  const result = await handleManagedHaFailover(
+    {
+      managedId: RECOVER_PAYLOAD.managedId,
+      sourceMemberId: RECOVER_PAYLOAD.sourceMemberId,
+      targetMemberId: RECOVER_PAYLOAD.targetMemberId,
+      engine: "postgres",
+      phase: "repoint",
+      ensureSlots: ["tp_member_2", "tp_member_3"],
+    },
+    "2026-08-19T12:00:00.000Z",
+    {
+      ensurePrimarySlots: (spec) => {
+        slotCalls.push(spec);
+        return Promise.resolve();
+      },
+      follow: () => {
+        followCalled = true;
+        return Promise.resolve();
+      },
+    },
+  );
+  assertEquals(followCalled, false);
+  assertEquals(slotCalls, [
+    {
+      managedId: RECOVER_PAYLOAD.managedId,
+      engine: "postgres",
+      slots: ["tp_member_2", "tp_member_3"],
+    },
+  ]);
+  assertEquals(result.phase, "repoint");
+  assertEquals(result.summary.includes("slots ensured"), true);
+});
+
 test("managed.ha.failover recover does not repoint the promoted member", async () => {
   let followCalled = false;
   await handleManagedHaFailover(

@@ -2220,6 +2220,12 @@ export type ManagedHaFailoverPayload = {
    * Omitted when `targetHost` is already the address to dial.
    */
   targetHostaddr?: string;
+  /**
+   * When non-empty, this `repoint` runs on the **new primary** and creates
+   * each missing physical slot (Postgres). MySQL/MariaDB ignore the list.
+   * Follow mode still uses `targetHost` / `targetPort` on remaining replicas.
+   */
+  ensureSlots?: string[];
 };
 
 export type ManagedHaFailoverResult = {
@@ -8862,6 +8868,26 @@ function parseOptionalManagedHaPort(value: unknown): number | undefined {
   return value;
 }
 
+const HA_FAILOVER_SLOT_RE = /^[a-z0-9_]{1,63}$/;
+const MAX_HA_FAILOVER_ENSURE_SLOTS = 32;
+
+function parseManagedHaFailoverEnsureSlots(
+  value: unknown,
+): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > MAX_HA_FAILOVER_ENSURE_SLOTS) {
+    throw new TypeError(MANAGED_HA_FAILOVER_PAYLOAD_ERROR);
+  }
+  const slots: string[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "string" || !HA_FAILOVER_SLOT_RE.test(entry)) {
+      throw new TypeError(MANAGED_HA_FAILOVER_PAYLOAD_ERROR);
+    }
+    slots.push(entry);
+  }
+  return slots;
+}
+
 /** Must stay in sync with the instance canonical `managed.ha.failover` validator. */
 export function parseManagedHaFailoverPayload(
   value: unknown,
@@ -8888,6 +8914,8 @@ export function parseManagedHaFailoverPayload(
   if (targetPort !== undefined) payload.targetPort = targetPort;
   const targetHostaddr = parseOptionalManagedHaHost(value.targetHostaddr);
   if (targetHostaddr !== undefined) payload.targetHostaddr = targetHostaddr;
+  const ensureSlots = parseManagedHaFailoverEnsureSlots(value.ensureSlots);
+  if (ensureSlots !== undefined) payload.ensureSlots = ensureSlots;
   return payload;
 }
 

@@ -419,6 +419,9 @@ const mariadbReplicationRuntime: ManagedEngineReplicationRuntime = {
     );
   },
 
+  // MariaDB has no physical slots — failover still sends ensureSlots.
+  ensureSlots: () => Promise.resolve(),
+
   probeStandbyData: (ctx) => probeMysqlFamilyStandbyData(ctx, STANDBY_MARKER),
 
   async bootstrapStandby(ctx: ManagedEngineBootstrapContext, spec) {
@@ -541,6 +544,11 @@ const mariadbReplicationRuntime: ManagedEngineReplicationRuntime = {
     };
     if (await writable()) return;
     throw new Error("mariadb promote did not become writable within 60s");
+  },
+
+  async isStandby(ctx) {
+    const verbose = await runMariadbStatusQuery(ctx, showReplicaStatusSql());
+    return verbose.trim().length > 0;
   },
 
   async followPrimary(ctx, spec) {

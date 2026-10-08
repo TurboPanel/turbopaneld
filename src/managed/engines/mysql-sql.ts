@@ -6,6 +6,11 @@
  * escapes — {@link quoteLiteral} must escape `\` as well as `'`.
  */
 
+import {
+  type FollowSourceDialect,
+  renderFollowSourceSql,
+} from "./follow-source-sql.ts";
+
 const ACCOUNT_MAX_LENGTH = 32;
 const SCHEMA_MAX_LENGTH = 64;
 const IDENTIFIER_RE = /^[A-Za-z_]\w*$/;
@@ -16,11 +21,6 @@ const CONTROL_CHAR_RE = /[\u0000-\u001F\u007F]/;
  * Managed Docker network host for account scoping — 172.16.0.0/12 as MySQL
  * IP/netmask (not `172.%`, which would admit the entire 172.0.0.0/8 range).
  */
-import {
-  type FollowSourceDialect,
-  renderFollowSourceSql,
-} from "./follow-source-sql.ts";
-
 export const MANAGED_DOCKER_NETWORK_HOST = "172.16.0.0/255.240.0.0";
 
 export type ManagedDatabasePrivilege = "owner" | "read-write" | "read-only";
