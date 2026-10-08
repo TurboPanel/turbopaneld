@@ -861,6 +861,7 @@ new sink still needs a `SINKS` row and a refusal test.
 | `sites[].webEnv` key / value | Apache `SetEnv` | `safeEnvName` (refused) / `safeEnvValue`, and no `${` (Apache expands it on every line, with no escape) (value left out and named by `planSiteWebEnv`, not refused; `apacheSetEnvLine` still throws as the last line of defence) |
 | `sites[].webEnv` key / value | nginx `fastcgi_param` | `safeEnvName` (refused) / `safeEnvValue` and no `$` (nginx expands it inside quotes, no escape) and no name nginx or PHP sets itself (`SCRIPT_FILENAME`, `REMOTE_ADDR`, `HTTP_*`, ...) (all dropped and named, not refused: variables are inherited into every hosting) |
 | `sites[].webEnv` key / value | site Caddy `php_fastcgi env` | `safeEnvName` (refused) / `isSafeCaddyEnvValue` (dropped, and named by `planSiteWebEnv`) |
+| `sites[].webEnv` key / value | OpenLiteSpeed `extprocessor` `env NAME=value` | `safeEnvName` (refused) / `safeEnvValue` and no `$` / braces / `<` / `>` / `#` (dropped and named by `planSiteWebEnv`) |
 | `sites[].php.settings` | php-fpm `php_admin_value[...]`, OpenLiteSpeed `phpIniOverride{}` | key allowlist (unknown keys dropped), `safePhpIniValue` |
 | `sites[].php.pool` | php-fpm pool tuning | key allowlist, `^[A-Za-z0-9._-]+$` |
 | `sites[].root` | every engine's document root | `assertSafeRoot` |

@@ -625,6 +625,30 @@ function apacheEnvRefusal(field: string, raw: string): string | null {
   return raw.includes("${") ? "holds ${, which Apache expands" : null;
 }
 
+/**
+ * Why OpenLiteSpeed cannot carry a variable value, or `null` when it can.
+ *
+ * `env NAME=value` is written unquoted inside the vhost processor block, so a
+ * value that holds `$` (OLS expands `$VH_ROOT` and friends), a brace or `}`
+ * (block delimiters), `<` (heredoc), or `#` (comment) cannot be written
+ * safely. The value must also stay on its line (`safeEnvValue`).
+ */
+function openlitespeedEnvRefusal(field: string, raw: string): string | null {
+  try {
+    safeEnvValue(field, raw);
+  } catch (error) {
+    if (error instanceof ConfigValueError) return error.message;
+    throw error;
+  }
+  if (raw.includes("$")) {
+    return "holds a $, which OpenLiteSpeed expands";
+  }
+  if (/[{}<>#]/.test(raw)) {
+    return "holds a brace, angle bracket or #, which OpenLiteSpeed reads as syntax";
+  }
+  return null;
+}
+
 const ENGINE_ENV_LABELS: Readonly<Record<SiteApplySpec["engine"], string>> = {
   caddy: "Caddy",
   apache: "Apache",
@@ -648,8 +672,9 @@ function webEnvRefusal(
       return apacheEnvRefusal(field, raw);
     case "caddy":
       return caddyEnvRefusal(raw);
+    case "openlitespeed":
+      return openlitespeedEnvRefusal(field, raw);
     default:
-      // OpenLiteSpeed receives no variables at all (handled by the caller).
       return null;
   }
 }
@@ -671,11 +696,6 @@ export function planSiteWebEnv(site: SiteApplySpec): string[] {
   const required = site.requiredEnv ?? [];
   const label = ENGINE_ENV_LABELS[site.engine];
   const name = site.composeServiceName;
-  if (site.engine === "openlitespeed" && required.length > 0) {
-    throw new Error(
-      `Site ${name} needs its database settings as variables, and OpenLiteSpeed does not pass variables to PHP yet. Move the site to Apache, nginx or Caddy, then deploy again.`,
-    );
-  }
   const warnings: string[] = [];
   for (const key of Object.keys(env).sort((a, b) => a.localeCompare(b))) {
     const refusal = webEnvRefusal(site, key, env[key] ?? "");
@@ -1455,7 +1475,64 @@ export type OpenLiteSpeedVhostPhpOpts = Readonly<{
   children: number;
   /** The limits site code must not raise ({@link sitePhpLockedValues}). */
   lockedValues: readonly PhpAdminValue[];
+  /** Compose service name, for validator field paths when {@link webEnv} is set. */
+  composeServiceName?: string;
+  /**
+   * Site variables as processor `env NAME=value` lines, the OLS spelling of
+   * nginx `fastcgi_param` / Apache `SetEnv` — FastCGI, php-fpm and detached
+   * lsphp all see them as CGI environment (`getenv()` / `$_SERVER`).
+   */
+  webEnv?: Record<string, string>;
 }>;
+
+/**
+/**
+ * One processor `env NAME=value` line, or a refusal naming the variable
+ * (never its value: it may be a decrypted secret).
+ */
+export function openlitespeedEnvLine(
+  service: string,
+  key: string,
+  raw: string,
+): string {
+  const name = safeEnvName(`sites.${service}.webEnv`, key);
+  const field = `sites.${service}.webEnv.${name}`;
+  const value = safeEnvValue(field, raw);
+  if (value.includes("$") || /[{}<>#]/.test(value)) {
+    throw new ConfigValueError(
+      field,
+      "must not contain $, braces, <, > or # in an OpenLiteSpeed site",
+    );
+  }
+  return `  env                       ${name}=${value}`;
+}
+
+/**
+ * The site's variables as processor `env` lines, in name order.
+ *
+ * A variable OpenLiteSpeed cannot carry is **dropped and named**, the same
+ * way nginx, Apache and Caddy already do.
+ */
+function openlitespeedEnvLines(opts: OpenLiteSpeedVhostPhpOpts): string[] {
+  const env = opts.webEnv ?? {};
+  const service = opts.composeServiceName ?? "site";
+  const lines: string[] = [];
+  for (const key of Object.keys(env).sort((a, b) => a.localeCompare(b))) {
+    const field = `sites.${service}.webEnv`;
+    const name = safeEnvName(field, key);
+    const raw = env[key] ?? "";
+    const refusal = openlitespeedEnvRefusal(`${field}.${name}`, raw);
+    if (refusal !== null) {
+      logWarn(
+        "site",
+        `OpenLiteSpeed site ${service}: variable ${name} not passed to PHP (${refusal})`,
+      );
+      continue;
+    }
+    lines.push(openlitespeedEnvLine(service, key, raw));
+  }
+  return lines;
+}
 
 /**
  * Per-vhost `extprocessor` for the site's own runtime.
@@ -1464,11 +1541,14 @@ export type OpenLiteSpeedVhostPhpOpts = Readonly<{
  * site owner, on a socket (FastCGI, detached lsphp) or as a php-fpm master, so
  * it outlives an OpenLiteSpeed restart. OpenLiteSpeed runs as `tpols` and
  * cannot switch users, which is why the old per-vhost `extUser`/`extGroup`
- * never took effect (WP0).
+ * never took effect (WP0). Site variables ride the processor as `env` so they
+ * reach PHP on each request even though OLS did not start the process.
  */
 export function openlitespeedPhpExtProcessorFragment(
   opts: OpenLiteSpeedVhostPhpOpts,
 ): string {
+  const envLines = openlitespeedEnvLines(opts);
+  const envBlock = envLines.length > 0 ? `${envLines.join("\n")}\n` : "";
   return `extprocessor ${opts.processorName}{
   type                      ${OPENLITESPEED_PHP_TYPE[opts.mode]}
   address                   uds://${opts.socket}
@@ -1478,7 +1558,7 @@ export function openlitespeedPhpExtProcessorFragment(
   persistConn               1
   respBuffer                0
   autoStart                 0
-}
+${envBlock}}
 `;
 }
 
@@ -3346,6 +3426,8 @@ function openlitespeedVhostPhp(
     lockedValues: sitePhpLockedValues(
       site.php ? phpAdminValues(site.php, adminOpts) : [],
     ),
+    composeServiceName: site.composeServiceName,
+    webEnv: site.webEnv,
   };
 }
 
