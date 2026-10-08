@@ -250,11 +250,11 @@ export type ProxySqlDesiredState = {
    * reachable only via the organization's managed Docker network, never the
    * host).
    *
-   * More than one entry when the instance resolved distinct interfaces for the
-   * enabled access scopes (a datacenter private IP *and* a TurboFabric `tp0`
-   * address, say): one address per scope, because those are different IPs on the
-   * same host and ranking them would silently strand every client on the scope
-   * that lost. `0.0.0.0` arrives as a single entry covering all interfaces.
+   * Decided by the server's single "allow external access to the databases on
+   * this server" setting, so the control plane sends exactly one entry:
+   * `127.0.0.1` when it is off (services on the server only) or `0.0.0.0` when
+   * it is on (every address of the server). Several entries are still accepted
+   * and each is published, so older callers keep working.
    *
    * Never conflate this with ProxySQL's *internal* container listen address
    * (always `0.0.0.0` — see {@link renderProtocolFamilySection}); those are
@@ -758,8 +758,8 @@ function renderProxySqlTopLevelNetworks(
  * entirely, so the frontend is reachable exclusively via
  * the organization's managed Docker network (co-located compose services with
  * a binding) and never from the host or the public internet. Pass the addresses
- * resolved from enabled cluster exposure to additionally publish on each of
- * them; both protocol listeners are published per address. The admin port
+ * chosen by the server's "allow external access" setting (loopback, or all
+ * interfaces) to publish on each of them; both protocol listeners are published per address. The admin port
  * always publishes to `127.0.0.1` only, regardless.
  */
 export function proxysqlCompose(

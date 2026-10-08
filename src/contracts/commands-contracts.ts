@@ -2079,9 +2079,9 @@ export type ManagedIngressReconcilePayload = {
    */
   managedNetwork: string;
   /**
-   * Every host address the client listeners publish on. More than one entry
-   * when the instance resolved distinct interfaces for the enabled access
-   * scopes (datacenter private IP plus TurboFabric `tp0`, say); absent or empty
+   * Every host address the client listeners publish on. The instance sends one
+   * entry, from the server's single "allow external access to the databases on
+   * this server" setting: `127.0.0.1` (off) or `0.0.0.0` (on). Absent or empty
    * means no host publish at all.
    */
   bindAddresses?: string[];
