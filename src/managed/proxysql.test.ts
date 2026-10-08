@@ -26,11 +26,13 @@ import {
   PGSQL_PORT,
   protocolFamilyForCluster,
   PROXYSQL_IMAGE,
+  PROXYSQL_MAX_SUPPORTED_PAGE_SIZE,
   type ProxySqlBackendDesired,
   proxysqlCompose,
   proxysqlComposeWithAttachments,
   type ProxySqlDesiredState,
   proxySqlFamiliesInUse,
+  proxySqlPageSizeError,
   type ProxySqlRuntimeServerRow,
   readCurrentProxySqlBindAddresses,
   readCurrentProxySqlListenerPorts,
@@ -291,6 +293,58 @@ test("proxysqlComposeWithAttachments renders pinned attachments verbatim", () =>
     compose,
     "  tpn_00000000-0000-4000-8000-0000000000cc:\n    external: true",
   );
+});
+
+test("proxySqlPageSizeError allows 4 KiB and unknown page sizes, explains bigger ones", () => {
+  assertEquals(proxySqlPageSizeError(undefined), undefined);
+  assertEquals(
+    proxySqlPageSizeError(PROXYSQL_MAX_SUPPORTED_PAGE_SIZE),
+    undefined,
+  );
+  const message = proxySqlPageSizeError(16384);
+  assertStringIncludes(message ?? "", "16 KiB memory pages");
+  assertStringIncludes(message ?? "", "kernel8.img");
+  assertStringIncludes(
+    proxySqlPageSizeError(65536) ?? "",
+    "64 KiB memory pages",
+  );
+});
+
+test("ensureProxySqlIngress refuses a host with 16 KiB pages before touching compose", async () => {
+  const fixture = await createTempLayout();
+  try {
+    const layout = resolveLayout(fixture.env);
+    let ran = 0;
+    const error = await assertRejects(
+      () =>
+        ensureProxySqlIngress(
+          layout,
+          DESCRIPTOR,
+          () => {
+            ran++;
+            return Promise.resolve({
+              success: true,
+              stdout: "",
+              stderr: "",
+              code: 0,
+            });
+          },
+          {
+            bindAddresses: [],
+            segmentAttachments: [],
+            listenerPorts: null,
+            managedNetwork: MANAGED_NETWORK,
+            pageSizeBytes: () => Promise.resolve(16384),
+          },
+        ),
+      Error,
+      "16 KiB memory pages",
+    );
+    assertEquals(error instanceof Error, true);
+    assertEquals(ran, 0);
+  } finally {
+    await fixture.cleanup();
+  }
 });
 
 test("ensureProxySqlIngress preserves passed segment attachments in the written compose", async () => {
