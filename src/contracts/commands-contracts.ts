@@ -7422,19 +7422,29 @@ export function parseManagedLifecyclePayload(
     }
     payload.engine = value.engine;
   }
-  if (value.role !== undefined) {
-    if (value.role !== "primary" && value.role !== "replica") {
-      throw new TypeError("Invalid managed.lifecycle payload");
-    }
-    payload.role = value.role;
-  }
-  if (value.demoted !== undefined) {
-    if (typeof value.demoted !== "boolean") {
-      throw new TypeError("Invalid managed.lifecycle payload");
-    }
-    if (value.demoted) payload.demoted = true;
-  }
+  const role = parseManagedLifecycleRole(value.role);
+  if (role !== undefined) payload.role = role;
+  if (parseManagedLifecycleDemoted(value.demoted)) payload.demoted = true;
   return payload;
+}
+
+function parseManagedLifecycleRole(
+  value: unknown,
+): ManagedLifecyclePayload["role"] {
+  if (value === undefined) return undefined;
+  if (value !== "primary" && value !== "replica") {
+    throw new TypeError("Invalid managed.lifecycle payload");
+  }
+  return value;
+}
+
+/** `true` only when the fence marked the stop as a replaced primary's. */
+function parseManagedLifecycleDemoted(value: unknown): boolean {
+  if (value === undefined) return false;
+  if (typeof value !== "boolean") {
+    throw new TypeError("Invalid managed.lifecycle payload");
+  }
+  return value;
 }
 
 /** Must stay in sync with the instance canonical `managed.destroy` validator. */
