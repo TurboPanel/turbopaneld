@@ -64,7 +64,7 @@ function presentPayload(
     desired: "present",
     raft: {
       nodeId: "00000000-0000-4000-8000-0000000000ab",
-      advertiseAddress: "203.0.113.10",
+      advertiseAddress: "10.100.0.10",
       httpPort: 33001,
       raftPort: 33002,
       peers: [],
@@ -162,6 +162,120 @@ function decryptSecretsEcho(
     ),
   );
 }
+
+function fakeRunWithInspect(
+  inspect: (args: string[]) => DockerCliResult,
+): (args: string[]) => Promise<DockerCliResult> {
+  const base = fakeRunWithRunningOrchestrator();
+  return (args) => {
+    if (args[0] === "inspect") return Promise.resolve(inspect(args));
+    return base(args);
+  };
+}
+
+async function reconcileWithTwoMembers(
+  inspect: (args: string[]) => DockerCliResult,
+): Promise<{ apiCalls: string[]; compose: string; registered: string[] }> {
+  let result:
+    | { apiCalls: string[]; compose: string; registered: string[] }
+    | undefined;
+  await withTempLayout(async (fixture) => {
+    const layout = resolveLayout(fixture.env);
+    await seedOrchestratorHostPrep(layout);
+    applyLayoutEnv(fixture);
+    const apiCalls: string[] = [];
+    const [cluster] = presentPayload().clusters;
+    try {
+      const out = await handleManagedHaReconcile(
+        presentPayload({
+          clusters: [{
+            ...cluster,
+            members: [
+              {
+                ...cluster.members[0]!,
+                host: "10.100.0.5",
+                port: 45001,
+                containerName: "db-up",
+              },
+              {
+                ...cluster.members[0]!,
+                memberId: "00000000-0000-4000-8000-0000000000a2",
+                host: "db-down",
+                port: 3306,
+                containerName: "db-down",
+              },
+            ],
+          }],
+        }),
+        new Date().toISOString(),
+        {
+          runDocker: fakeRunWithInspect(inspect),
+          ensureDocker: () => Promise.resolve(),
+          decryptSecrets: decryptSecretsEcho,
+          orchestratorApi: {
+            fetch: (url) => {
+              apiCalls.push(url);
+              return Promise.resolve(new Response("", { status: 200 }));
+            },
+          },
+        },
+      );
+      result = {
+        apiCalls,
+        compose: await Deno.readTextFile(orchestratorComposePath(layout)),
+        registered: out.registeredClusters,
+      };
+    } finally {
+      clearLayoutEnv();
+    }
+  });
+  return result!;
+}
+
+test({
+  name:
+    "handleManagedHaReconcile skips a member whose container has no published port and still registers the rest",
+  permissions: { env: true, read: true, write: true, run: false },
+  fn: async () => {
+    const out = await reconcileWithTwoMembers(() => ({
+      success: true,
+      stdout: "{}",
+      stderr: "",
+      code: 0,
+    }));
+    assertEquals(
+      out.apiCalls.some((url) =>
+        url.includes("/api/discover/10.100.0.5/45001")
+      ),
+      true,
+    );
+    assertEquals(out.apiCalls.some((url) => url.includes("db-down")), false);
+    assertEquals(out.compose.includes("db-up:10.100.0.5"), true);
+    assertEquals(out.registered.length, 1);
+  },
+});
+
+test({
+  name:
+    "handleManagedHaReconcile skips a member when docker inspect fails and keeps the stack",
+  permissions: { env: true, read: true, write: true, run: false },
+  fn: async () => {
+    const out = await reconcileWithTwoMembers(() => ({
+      success: false,
+      stdout: "",
+      stderr: "No such object: db-down",
+      code: 1,
+    }));
+    assertEquals(
+      out.apiCalls.some((url) =>
+        url.includes("/api/discover/10.100.0.5/45001")
+      ),
+      true,
+    );
+    assertEquals(out.compose.includes("services:"), true);
+    assertEquals(out.registered.length, 1);
+  },
+});
 
 test({
   name: "handleManagedHaReconcile tears down when desired is absent",
@@ -303,7 +417,7 @@ test({
           orchestratorComposePath(layout),
         );
         assertEquals(compose.includes("127.0.0.1:33001:33001"), true);
-        assertEquals(compose.includes("203.0.113.10:33001:33001"), true);
+        assertEquals(compose.includes("10.100.0.10:33001:33001"), true);
         assertEquals(compose.includes("restart: always"), true);
       } finally {
         clearLayoutEnv();

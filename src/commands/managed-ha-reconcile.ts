@@ -24,7 +24,7 @@ import {
   type SystemComponentDescriptor,
   writeSystemComponentDescriptor,
 } from "../deploy/system-component.ts";
-import { logInfo } from "../util/logger.ts";
+import { logInfo, logWarn } from "../util/logger.ts";
 import { forEachSequential } from "../util/sequential.ts";
 import { type LayoutPaths, resolveLayout } from "../paths/layout.ts";
 import { ensureManagedIngressNetwork } from "../managed/networks.ts";
@@ -152,10 +152,21 @@ async function resolveClustersForOrchestrator(
   await forEachSequential(clusters, async (cluster) => {
     const members: ManagedHaCluster["members"] = [];
     await forEachSequential(cluster.members, async (member) => {
-      const dial = await resolveOrchestratorRegisterHost(member, run);
-      members.push({ ...member, host: dial.host, port: dial.port });
+      try {
+        const dial = await resolveOrchestratorRegisterHost(member, run);
+        members.push({ ...member, host: dial.host, port: dial.port });
+      } catch (err) {
+        // A stopped or recreating member (exactly when a primary just died)
+        // must not abort the reconcile for everyone else on this server.
+        logWarn(
+          "commands",
+          `managed.ha.reconcile skipped member ${
+            member.containerName ?? member.host
+          }: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
     });
-    resolved.push({ ...cluster, members });
+    if (members.length > 0) resolved.push({ ...cluster, members });
   });
   return resolved;
 }

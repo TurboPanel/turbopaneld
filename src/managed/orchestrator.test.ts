@@ -18,6 +18,7 @@ import {
   hasOrchestratorLabels,
   hostPrepPresent,
   inspectOrchestratorContainer,
+  isPrivateAdvertiseAddress,
   loadOrchestratorApiCredentials,
   loadOrchestratorRaftToken,
   MANAGED_HA_HTTP_PORT,
@@ -138,7 +139,7 @@ test("orchestratorCompose publishes HTTP on loopback and advertise, Raft on adve
     },
     {
       nodeId: "00000000-0000-4000-8000-0000000000ab",
-      advertiseAddress: "203.0.113.10",
+      advertiseAddress: "10.100.0.10",
       httpPort: MANAGED_HA_HTTP_PORT,
       raftPort: MANAGED_HA_RAFT_PORT,
       peers: [],
@@ -147,8 +148,8 @@ test("orchestratorCompose publishes HTTP on loopback and advertise, Raft on adve
   );
   assertEquals(yaml.includes(ORCHESTRATOR_IMAGE), true);
   assertEquals(yaml.includes("127.0.0.1:33001:33001"), true);
-  assertEquals(yaml.includes("203.0.113.10:33001:33001"), true);
-  assertEquals(yaml.includes("203.0.113.10:33002:33002"), true);
+  assertEquals(yaml.includes("10.100.0.10:33001:33001"), true);
+  assertEquals(yaml.includes("10.100.0.10:33002:33002"), true);
   assertEquals(yaml.includes("restart: always"), true);
   assertEquals(yaml.includes("0.0.0.0"), false);
   // The compose text must be valid YAML end-to-end. A quoted source path
@@ -779,4 +780,25 @@ test("ensureOrchestratorStack fails with the container's last log line when it c
   } finally {
     await fixture.cleanup();
   }
+});
+
+test("isPrivateAdvertiseAddress accepts only private network addresses", () => {
+  assertEquals(isPrivateAdvertiseAddress("10.100.0.5"), true);
+  assertEquals(isPrivateAdvertiseAddress("172.20.1.1"), true);
+  assertEquals(isPrivateAdvertiseAddress("192.168.1.9"), true);
+  assertEquals(isPrivateAdvertiseAddress("100.64.1.2"), true);
+  assertEquals(isPrivateAdvertiseAddress("fd00::5"), true);
+  assertEquals(isPrivateAdvertiseAddress("203.0.113.9"), false);
+  assertEquals(isPrivateAdvertiseAddress("2001:db8::1"), false);
+  assertEquals(isPrivateAdvertiseAddress("172.32.0.1"), false);
+});
+
+test("orchestratorCompose does not publish the API on a public advertise address", () => {
+  const yaml = orchestratorCompose(
+    HA_DESCRIPTOR,
+    { ...BASE_RAFT, advertiseAddress: "203.0.113.10" },
+    MANAGED_NETWORK,
+  );
+  assertEquals(yaml.includes("127.0.0.1:33001:33001"), true);
+  assertEquals(yaml.includes("203.0.113.10:33001:33001"), false);
 });

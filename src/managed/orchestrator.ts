@@ -30,7 +30,7 @@ import {
   runDocker as defaultRunDocker,
   type RunDockerOptions,
 } from "../deploy/docker-cli.ts";
-import { logInfo } from "../util/logger.ts";
+import { logInfo, logWarn } from "../util/logger.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 import { pruneStaleManagedDockerNetworks } from "./networks.ts";
 import {
@@ -288,12 +288,37 @@ export async function resolveOrchestratorRegisterHost(
   return dial;
 }
 
+/**
+ * True for an address only a private network can reach: RFC 1918, carrier
+ * grade NAT (the range overlay networks often use), and IPv6 unique local.
+ */
+export function isPrivateAdvertiseAddress(address: string): boolean {
+  if (isValidIpv4Literal(address)) {
+    const [a, b] = address.split(".").map(Number) as [number, number];
+    if (a === 10) return true;
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 192 && b === 168) return true;
+    return a === 100 && b >= 64 && b <= 127;
+  }
+  const lower = address.toLowerCase();
+  return lower.startsWith("fc") || lower.startsWith("fd");
+}
+
 function httpPublishPorts(raft: ManagedHaRaftConfig): string[] {
   // Local API + wait-ready probe this host's loopback; Raft followers proxy
   // HTTP to HTTPAdvertise (`advertiseAddress:httpPort`), so that same port
   // must also be published on the advertise address.
   const loopback = formatPublishedPort(LOOPBACK_HOST, raft.httpPort);
   if (raft.advertiseAddress === LOOPBACK_HOST) return [loopback];
+  if (!isPrivateAdvertiseAddress(raft.advertiseAddress)) {
+    // The Orchestrator API takes admin actions; never publish it on an
+    // address that is not on a private network.
+    logWarn(
+      "managed",
+      `orchestrator HTTP not published on ${raft.advertiseAddress}: not a private address`,
+    );
+    return [loopback];
+  }
   return [
     loopback,
     formatPublishedPort(raft.advertiseAddress, raft.httpPort),
