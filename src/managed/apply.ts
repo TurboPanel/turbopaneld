@@ -45,7 +45,12 @@ import {
   resolveEngineContainerId,
 } from "./containers.ts";
 import { getManagedEngineRuntime } from "./engines/index.ts";
+import {
+  isManagedMemberDestroyed,
+  ManagedDestroyedError,
+} from "./destroyed-marker.ts";
 import { reconcileManagedPublicFirewallBestEffort } from "./firewall.ts";
+import { withManagedLifecycleLock } from "./target-lock.ts";
 import type { ManagedEngineContext } from "./engines/types.ts";
 import {
   materializeManagedState,
@@ -780,14 +785,37 @@ export async function collectMemberHealth(
 
 export async function handleManagedApply(
   payload: ManagedApplyPayload,
-  _daemonReceivedAt: string,
+  daemonReceivedAt: string,
   deps?: ManagedApplyHandlerDeps,
 ): Promise<ManagedApplyResult> {
   assertSafeManagedIdentifiers(payload);
+  const layout = resolveLayout(Deno.env.toObject());
+  // One apply or destroy per managed id at a time, and a destroyed member is
+  // never rebuilt: the check runs inside the lock, so an apply that waited
+  // behind a destroy sees its marker.
+  return await withManagedLifecycleLock(layout, payload.managedId, async () => {
+    if (
+      await isManagedMemberDestroyed(
+        layout.stateDir,
+        payload.managedId,
+        payload.memberId,
+      )
+    ) {
+      throw new ManagedDestroyedError(payload.managedId);
+    }
+    return await applyManagedEngine(payload, daemonReceivedAt, layout, deps);
+  });
+}
+
+async function applyManagedEngine(
+  payload: ManagedApplyPayload,
+  _daemonReceivedAt: string,
+  layout: LayoutPaths,
+  deps?: ManagedApplyHandlerDeps,
+): Promise<ManagedApplyResult> {
   // Fail before any state is materialized: a public listener without org-CA
   // material must never reach materialize/compose up.
   assertPublicPrivateListenerTls(payload);
-  const layout = resolveLayout(Deno.env.toObject());
   const engine = getManagedEngineRuntime(payload.engine);
   const run = deps?.runDocker ?? defaultRunDocker;
   const runStreamed = createStreamedRunner(deps?.runDocker);
