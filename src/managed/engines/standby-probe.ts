@@ -193,24 +193,21 @@ export async function waitMysqlFamilyRealServer(options: {
   const deadline = now() + timeoutMs;
   let lastError = options.fallbackError;
 
-  while (now() < deadline) {
-    const socket = await options.ping("socket");
-    if (!socket.success) {
-      lastError = pingErrorText(socket, lastError);
-      await sleep(pollMs);
-      continue;
-    }
-    const tcp = await options.ping("tcp");
-    if (!tcp.success) {
-      lastError = pingErrorText(tcp, lastError);
-      await sleep(pollMs);
-      continue;
-    }
-    const socketAgain = await options.ping("socket");
-    if (socketAgain.success) return;
-    lastError = pingErrorText(socketAgain, lastError);
+  // One probe round; true when socket, TCP, socket pings all succeed in order.
+  const pingOk = async (kind: MysqlFamilyReadyPingKind): Promise<boolean> => {
+    const result = await options.ping(kind);
+    if (!result.success) lastError = pingErrorText(result, lastError);
+    return result.success;
+  };
+  const probeOnce = async (): Promise<boolean> =>
+    await pingOk("socket") && await pingOk("tcp") && await pingOk("socket");
+  const poll = async (): Promise<boolean> => {
+    if (now() >= deadline) return false;
+    if (await probeOnce()) return true;
     await sleep(pollMs);
-  }
+    return poll();
+  };
+  if (await poll()) return;
 
   throw new Error(
     `${options.label} not ready within ${timeoutMs}ms: ${
