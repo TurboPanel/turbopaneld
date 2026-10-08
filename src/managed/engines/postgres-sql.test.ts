@@ -1,10 +1,12 @@
 import { assertEquals, assertThrows } from "@std/assert";
 import {
+  applyFollowedPrimaryConninfoSql,
   connectionCensusSql,
   createDatabaseSql,
   createOrAlterRoleSql,
   createPhysicalSlotSql,
   createReplicationRoleSql,
+  currentPrimaryConninfoSql,
   databaseExistsSql,
   dropDatabaseSql,
   dropPhysicalSlotSql,
@@ -28,6 +30,7 @@ import {
   reloadVerifySql,
   revokePublicDatabaseAccessSql,
   revokeUnlistedDatabasesSql,
+  rewritePrimaryConninfo,
   standbyReplicationStatusSql,
   strongestPrivilege,
 } from "./postgres-sql.ts";
@@ -421,4 +424,23 @@ test("managedSlotRetentionSql reads retained bytes and safe size per managed slo
   assertEquals(sql.includes("safe_wal_size"), true);
   assertEquals(sql.includes("pg_current_wal_lsn()"), true);
   assertEquals(sql.includes("starts_with(slot_name, 'tp_member_')"), true);
+});
+
+test("rewritePrimaryConninfo updates host port and hostaddr without dropping password", () => {
+  const current =
+    "user=tp_repl password=s3cret host=10.100.0.5 hostaddr=10.100.0.5 port=45001 sslmode=verify-full";
+  const next = rewritePrimaryConninfo(current, {
+    host: "10.100.0.4",
+    port: 45001,
+  });
+  assertEquals(next.includes("host=10.100.0.4"), true);
+  assertEquals(next.includes("hostaddr=10.100.0.4"), true);
+  assertEquals(next.includes("port=45001"), true);
+  assertEquals(next.includes("password=s3cret"), true);
+  assertEquals(next.includes("10.100.0.5"), false);
+  const sql = applyFollowedPrimaryConninfoSql(next);
+  assertEquals(sql.includes("ALTER SYSTEM SET primary_conninfo"), true);
+  assertEquals(sql.includes("pg_reload_conf"), true);
+  assertEquals(sql.includes("walreceiver"), true);
+  assertEquals(currentPrimaryConninfoSql().includes("primary_conninfo"), true);
 });

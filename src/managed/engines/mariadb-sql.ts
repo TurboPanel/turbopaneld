@@ -287,6 +287,23 @@ export function changeReplicationSourceSql(spec: {
 }
 
 /**
+ * Re-point an already-configured replica after promotion. Host and port
+ * only — user, password, SSL, and GTID stay as seeded.
+ */
+export function followReplicationSourceSql(spec: {
+  host: string;
+  port: number;
+}): string {
+  return [
+    "STOP SLAVE;",
+    "CHANGE MASTER TO",
+    `  MASTER_HOST = ${quoteLiteral(spec.host)},`,
+    `  MASTER_PORT = ${spec.port};`,
+    "START SLAVE;",
+  ].join("\n");
+}
+
+/**
  * Metrics census for the `-N -B -e` client: a `Threads_connected<TAB>n` row from
  * `SHOW GLOBAL STATUS` (portable across MySQL 8 and MariaDB, unlike the
  * `performance_schema` / `information_schema` status tables) followed by the

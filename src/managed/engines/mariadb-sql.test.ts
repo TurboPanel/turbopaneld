@@ -13,6 +13,7 @@ import {
   ensureProxySqlMonitorAccountSql,
   ensureReplicationAccountSql,
   ensureSocketAdminSql,
+  followReplicationSourceSql,
   grantDatabaseSql,
   grantReplicationSql,
   grantRootSql,
@@ -71,6 +72,15 @@ test("privilege and replication dialect is MariaDB-shaped", () => {
   assertEquals(change.includes("MASTER_USE_GTID = slave_pos"), true);
   assertEquals(change.includes("START SLAVE"), true);
   assertEquals(change.includes("SOURCE_AUTO_POSITION"), false);
+  const follow = followReplicationSourceSql({
+    host: "10.100.0.4",
+    port: 45001,
+  });
+  assertEquals(follow.includes("STOP SLAVE"), true);
+  assertEquals(follow.includes("MASTER_HOST = '10.100.0.4'"), true);
+  assertEquals(follow.includes("MASTER_PORT = 45001"), true);
+  assertEquals(follow.includes("MASTER_PASSWORD"), false);
+  assertEquals(follow.includes("START SLAVE"), true);
 });
 
 test("createClientAccountSql and dumpArgv system-schema rejection", () => {

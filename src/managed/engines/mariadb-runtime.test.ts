@@ -453,6 +453,21 @@ test("mariadb promote clears read-only and returns when writable", async () => {
   assertEquals(writableChecks >= 2, true);
 });
 
+test("mariadb followPrimary changes master host without reseeding", async () => {
+  const replication = mariadbManagedEngineRuntime.replication;
+  if (!replication?.followPrimary) {
+    throw new TypeError("expected mariadb followPrimary");
+  }
+  const { exec, calls } = recordingExec();
+  await replication.followPrimary(buildContext(exec), {
+    primary: { host: "10.100.0.4", port: 45001 },
+  });
+  const sql = calls.map((c) => c.input ?? "").join("\n");
+  assertEquals(sql.includes("STOP SLAVE"), true);
+  assertEquals(sql.includes("MASTER_HOST = '10.100.0.4'"), true);
+  assertEquals(sql.includes("MASTER_PASSWORD"), false);
+});
+
 test("mariadb readHealth parses standby slave status", async () => {
   const replication = mariadbManagedEngineRuntime.replication;
   if (!replication?.readHealth) {

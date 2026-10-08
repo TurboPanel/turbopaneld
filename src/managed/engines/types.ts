@@ -195,6 +195,22 @@ export type ManagedEngineReplicationRuntime = {
     desired: readonly string[],
   ): Promise<void>;
   promote(ctx: ManagedEngineContext): Promise<void>;
+  /**
+   * Point an already-seeded standby at a new primary after switchover or
+   * automatic failover. Must not re-seed or wipe the data volume. Postgres
+   * rewrites `primary_conninfo` in place; MySQL / MariaDB change only the
+   * source host and port so existing replica credentials stay.
+   */
+  followPrimary(
+    ctx: ManagedEngineContext,
+    spec: {
+      primary: {
+        host: string;
+        hostaddr?: string;
+        port: number;
+      };
+    },
+  ): Promise<void>;
   readHealth(
     ctx: ManagedEngineContext,
     role: "primary" | "standby",

@@ -729,6 +729,50 @@ test("postgres promote leaves recovery on first writable check", async () => {
   assertEquals(recoveryChecks >= 2, true);
 });
 
+test("postgres followPrimary rewrites primary_conninfo toward the new primary", async () => {
+  const replication = postgresManagedEngineRuntime.replication;
+  if (!replication?.followPrimary) {
+    throw new TypeError("expected postgres followPrimary");
+  }
+  const inputs: string[] = [];
+  const exec: ManagedEngineExec = (_argv, input) => {
+    inputs.push(input ?? "");
+    if (input?.includes("current_setting")) {
+      return Promise.resolve({
+        success: true,
+        stdout:
+          "user=tp_repl password=s3cret host=10.100.0.5 port=45001 sslmode=verify-full\n",
+        stderr: "",
+      });
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  await replication.followPrimary(buildContext(exec), {
+    primary: { host: "10.100.0.4", port: 45001 },
+  });
+  const apply = inputs.find((sql) => sql.includes("ALTER SYSTEM"));
+  if (!apply) throw new TypeError("expected ALTER SYSTEM primary_conninfo");
+  assertEquals(apply.includes("host=10.100.0.4"), true);
+  assertEquals(apply.includes("10.100.0.5"), false);
+});
+
+test("postgres followPrimary throws when primary_conninfo is empty", async () => {
+  const replication = postgresManagedEngineRuntime.replication;
+  if (!replication?.followPrimary) {
+    throw new TypeError("expected postgres followPrimary");
+  }
+  const exec: ManagedEngineExec = () =>
+    Promise.resolve({ success: true, stdout: "\n", stderr: "" });
+  await assertRejects(
+    () =>
+      replication.followPrimary(buildContext(exec), {
+        primary: { host: "10.100.0.4", port: 45001 },
+      }),
+    Error,
+    "empty primary_conninfo",
+  );
+});
+
 test("postgres readHealth reports primary replication rows", async () => {
   const replication = postgresManagedEngineRuntime.replication;
   if (!replication?.readHealth) {

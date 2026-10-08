@@ -855,6 +855,98 @@ export function promoteSql(): string {
   return "SELECT pg_catalog.pg_promote(true, 60);";
 }
 
+export function currentPrimaryConninfoSql(): string {
+  return "SELECT pg_catalog.current_setting('primary_conninfo', true);";
+}
+
+function conninfoValueNeedsQuotes(value: string): boolean {
+  return value.includes(" ") || value.includes("'") || value.includes("\\");
+}
+
+function formatConninfoValue(value: string): string {
+  if (!conninfoValueNeedsQuotes(value)) return value;
+  return `'${
+    value.replaceAll("\\", String.raw`\\`).replaceAll("'", String.raw`\'`)
+  }'`;
+}
+
+/**
+ * Replace `host` / `port` (and `hostaddr` when present or supplied) in a
+ * libpq `primary_conninfo` string, leaving user, password, and TLS keys.
+ */
+export function rewritePrimaryConninfo(
+  current: string,
+  primary: { host: string; hostaddr?: string; port: number },
+): string {
+  const entries: Array<[string, string]> = [];
+  let i = 0;
+  while (i < current.length) {
+    while (i < current.length && current[i] === " ") i += 1;
+    if (i >= current.length) break;
+    const eq = current.indexOf("=", i);
+    if (eq === -1) break;
+    const key = current.slice(i, eq);
+    i = eq + 1;
+    let value = "";
+    if (current[i] === "'") {
+      i += 1;
+      while (i < current.length) {
+        const ch = current[i];
+        if (ch === "\\" && i + 1 < current.length) {
+          value += current[i + 1];
+          i += 2;
+          continue;
+        }
+        if (ch === "'") {
+          i += 1;
+          break;
+        }
+        value += ch;
+        i += 1;
+      }
+    } else {
+      while (i < current.length && current[i] !== " ") {
+        value += current[i];
+        i += 1;
+      }
+    }
+    entries.push([key, value]);
+  }
+  const byKey = new Map(entries);
+  byKey.set("host", primary.host);
+  byKey.set("port", String(primary.port));
+  if (primary.hostaddr) {
+    byKey.set("hostaddr", primary.hostaddr);
+  } else if (byKey.has("hostaddr")) {
+    byKey.set("hostaddr", primary.host);
+  }
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const [key] of entries) {
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const value = byKey.get(key);
+    if (value === undefined) continue;
+    out.push(`${key}=${formatConninfoValue(value)}`);
+  }
+  for (const [key, value] of byKey) {
+    if (seen.has(key)) continue;
+    out.push(`${key}=${formatConninfoValue(value)}`);
+  }
+  return out.join(" ");
+}
+
+/** Persist a rewritten `primary_conninfo` and restart the WAL receiver. */
+export function applyFollowedPrimaryConninfoSql(conninfo: string): string {
+  return [
+    `ALTER SYSTEM SET primary_conninfo = ${quoteLiteral(conninfo)};`,
+    "SELECT pg_catalog.pg_reload_conf();",
+    "SELECT pg_catalog.pg_terminate_backend(pid)",
+    "  FROM pg_catalog.pg_stat_activity",
+    "  WHERE backend_type = 'walreceiver';",
+  ].join("\n");
+}
+
 export function isInRecoverySql(): string {
   return "SELECT pg_catalog.pg_is_in_recovery();";
 }

@@ -27,6 +27,7 @@ import {
   ensureProxySqlMonitorAccountSql,
   ensureReplicationAccountSql,
   ensureSocketAdminSql,
+  followReplicationSourceSql,
   grantDatabaseSql,
   grantRootSql,
   isWritableSql,
@@ -540,6 +541,14 @@ const mariadbReplicationRuntime: ManagedEngineReplicationRuntime = {
     };
     if (await writable()) return;
     throw new Error("mariadb promote did not become writable within 60s");
+  },
+
+  async followPrimary(ctx, spec) {
+    const host = resolveMariadbPrimaryConnectHost(spec.primary);
+    await runMariadb(
+      ctx,
+      followReplicationSourceSql({ host, port: spec.primary.port }),
+    );
   },
 
   async readHealth(ctx, role): Promise<ManagedReplicationObservedHealth> {

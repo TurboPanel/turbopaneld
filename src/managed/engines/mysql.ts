@@ -29,6 +29,7 @@ import {
   ensureProxySqlMonitorAccountSql,
   ensureReplicationAccountSql,
   ensureSocketAdminSql,
+  followReplicationSourceSql,
   grantDatabaseSql,
   grantRootSql,
   installAuthSocketPluginSql,
@@ -577,6 +578,14 @@ const mysqlReplicationRuntime: ManagedEngineReplicationRuntime = {
     };
     if (await writable()) return;
     throw new Error("mysql promote did not become writable within 60s");
+  },
+
+  async followPrimary(ctx, spec) {
+    const host = resolveMysqlPrimaryConnectHost(spec.primary);
+    await runMysql(
+      ctx,
+      followReplicationSourceSql({ host, port: spec.primary.port }),
+    );
   },
 
   async readHealth(ctx, role): Promise<ManagedReplicationObservedHealth> {
