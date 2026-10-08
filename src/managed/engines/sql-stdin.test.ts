@@ -1,4 +1,6 @@
 import { assertEquals } from "@std/assert";
+import { buildEngineExec } from "../apply.ts";
+import { runDocker, setDockerCliIoForTest } from "../../deploy/docker-cli.ts";
 import {
   execSqlWithStdinRetry,
   isTransientSqlStdinFailure,
@@ -80,10 +82,27 @@ test("execSqlWithStdinRetry retries once then succeeds", async () => {
     }
     return Promise.resolve({ success: true, stdout: "ok", stderr: "" });
   };
-  const result = await execSqlWithStdinRetry(exec, ["psql"], "SELECT 1;");
+  const result = await execSqlWithStdinRetry(exec, ["psql"], "SELECT 1;", {
+    idempotent: true,
+  });
   assertEquals(result.success, true);
   assertEquals(result.stdout, "ok");
   assertEquals(calls, 2);
+});
+
+test("execSqlWithStdinRetry does not retry a closed stdin when not idempotent", async () => {
+  let calls = 0;
+  const exec: ManagedEngineExec = () => {
+    calls++;
+    return Promise.resolve({
+      success: false,
+      stdout: "",
+      stderr: "spawn failed: Writable stream is closed",
+    });
+  };
+  const result = await execSqlWithStdinRetry(exec, ["psql"], "SELECT 1;");
+  assertEquals(result.success, false);
+  assertEquals(calls, 1);
 });
 
 test("execSqlWithStdinRetry does not retry a SQL error", async () => {
@@ -112,9 +131,56 @@ test("execSqlWithStdinRetry names a second closed-stdin failure", async () => {
       stderr: "spawn failed: Writable stream is closed",
     });
   };
-  const result = await execSqlWithStdinRetry(exec, ["psql"], "SELECT 1;");
+  const result = await execSqlWithStdinRetry(exec, ["psql"], "SELECT 1;", {
+    idempotent: true,
+  });
   assertEquals(result.success, false);
   assertEquals(result.stderr.includes("stdin closed after retry"), true);
   assertEquals(result.stderr.includes("Writable stream is closed"), true);
   assertEquals(calls, 2);
+});
+
+test("execSqlWithStdinRetry retries through buildEngineExec and docker-cli stdin-closed shape", async () => {
+  let attempts = 0;
+  const restore = setDockerCliIoForTest({
+    runRaw: (_command, _args, options) => {
+      if (options?.input === undefined) {
+        return Promise.resolve({
+          success: true,
+          code: 0,
+          stdout: "",
+          stderr: "",
+        });
+      }
+      attempts++;
+      if (attempts === 1) {
+        return Promise.resolve({
+          success: false,
+          code: 1,
+          stdout: "",
+          stderr: "spawn failed: Writable stream is closed",
+        });
+      }
+      return Promise.resolve({
+        success: true,
+        code: 0,
+        stdout: "1",
+        stderr: "",
+      });
+    },
+  });
+  try {
+    const exec = buildEngineExec("cid", (text) => text, runDocker);
+    const result = await execSqlWithStdinRetry(
+      exec,
+      ["psql", "-t", "-A"],
+      "SELECT 1;",
+      { idempotent: true },
+    );
+    assertEquals(result.success, true);
+    assertEquals(result.stdout, "1");
+    assertEquals(attempts, 2);
+  } finally {
+    restore();
+  }
 });

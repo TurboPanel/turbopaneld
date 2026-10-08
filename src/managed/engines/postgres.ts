@@ -126,23 +126,43 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function psqlArgv(
+  ctx: ManagedEngineContext,
+  database: string,
+  output?: "tuples" | "rows",
+): string[] {
+  const argv = [
+    "psql",
+    "-v",
+    "ON_ERROR_STOP=1",
+    "-U",
+    ctx.rootUsername,
+    "-d",
+    database,
+  ];
+  if (output === "tuples") {
+    argv.push("-t", "-A");
+  } else if (output === "rows") {
+    argv.push("-t", "-A", "-F", "\t");
+  }
+  return argv;
+}
+
+type RunPsqlOptions = {
+  idempotent?: boolean;
+};
+
 async function runPsql(
   ctx: ManagedEngineContext,
   sql: string,
   database: string = ctx.defaultDatabase,
+  options: RunPsqlOptions = {},
 ): Promise<void> {
   const result = await execSqlWithStdinRetry(
     ctx.exec,
-    [
-      "psql",
-      "-v",
-      "ON_ERROR_STOP=1",
-      "-U",
-      ctx.rootUsername,
-      "-d",
-      database,
-    ],
+    psqlArgv(ctx, database),
     sql,
+    { idempotent: options.idempotent },
   );
   if (!result.success) {
     throw new Error(
@@ -316,21 +336,11 @@ async function parsePsqlRows(
   ctx: ManagedEngineContext,
   sql: string,
 ): Promise<string[][]> {
-  const result = await ctx.exec(
-    [
-      "psql",
-      "-v",
-      "ON_ERROR_STOP=1",
-      "-U",
-      ctx.rootUsername,
-      "-d",
-      ctx.defaultDatabase,
-      "-t",
-      "-A",
-      "-F",
-      "\t",
-    ],
+  const result = await execSqlWithStdinRetry(
+    ctx.exec,
+    psqlArgv(ctx, ctx.defaultDatabase, "rows"),
     sql,
+    { idempotent: true },
   );
   if (!result.success) {
     throw new Error(
@@ -433,7 +443,10 @@ const postgresReplicationRuntime: ManagedEngineReplicationRuntime = {
     });
     await forEachSequential(
       desired,
-      (slot) => runPsql(ctx, createPhysicalSlotSql(slot)),
+      (slot) =>
+        runPsql(ctx, createPhysicalSlotSql(slot), ctx.defaultDatabase, {
+          idempotent: true,
+        }),
     );
 
     await pruneOrphanSlots(ctx, desired);
@@ -442,7 +455,10 @@ const postgresReplicationRuntime: ManagedEngineReplicationRuntime = {
   ensureSlots: (ctx, slots) =>
     forEachSequential(
       slots,
-      (slot) => runPsql(ctx, createPhysicalSlotSql(slot)),
+      (slot) =>
+        runPsql(ctx, createPhysicalSlotSql(slot), ctx.defaultDatabase, {
+          idempotent: true,
+        }),
     ),
 
   pruneOrphanSlots: (ctx, desired) => pruneOrphanSlots(ctx, new Set(desired)),
@@ -839,19 +855,11 @@ export const postgresManagedEngineRuntime: ManagedEngineRuntime = {
   },
 
   async readVersion(ctx: ManagedEngineContext): Promise<string | undefined> {
-    const result = await ctx.exec(
-      [
-        "psql",
-        "-v",
-        "ON_ERROR_STOP=1",
-        "-U",
-        ctx.rootUsername,
-        "-d",
-        ctx.defaultDatabase,
-        "-t",
-        "-A",
-      ],
+    const result = await execSqlWithStdinRetry(
+      ctx.exec,
+      [...psqlArgv(ctx, ctx.defaultDatabase, "tuples")],
       "SHOW server_version;",
+      { idempotent: true },
     );
     if (!result.success) return undefined;
     const version = result.stdout.trim();

@@ -28,17 +28,30 @@ export function isTransientSqlStdinFailure(result: SqlExecResult): boolean {
   return STDIN_CLOSED_RE.test(stderr);
 }
 
+export type ExecSqlWithStdinRetryOptions = {
+  /**
+   * When true, retry once on a closed stdin / EPIPE with no SQL output.
+   * Non-idempotent batches (promote, grants, multi-statement DDL) must stay
+   * false — a partial commit cannot be distinguished from a clean failure.
+   */
+  idempotent?: boolean;
+};
+
 /**
  * Run SQL on stdin once, and retry the same argv+body once when the first
- * attempt is {@link isTransientSqlStdinFailure}.
+ * attempt is {@link isTransientSqlStdinFailure} and `idempotent` is true.
  */
 export async function execSqlWithStdinRetry(
   exec: ManagedEngineExec,
   argv: readonly string[],
   sql: string,
+  options: ExecSqlWithStdinRetryOptions = {},
 ): Promise<SqlExecResult> {
+  const idempotent = options.idempotent ?? false;
   const first = await exec([...argv], sql);
-  if (first.success || !isTransientSqlStdinFailure(first)) return first;
+  if (first.success || !idempotent || !isTransientSqlStdinFailure(first)) {
+    return first;
+  }
   const second = await exec([...argv], sql);
   if (second.success || !isTransientSqlStdinFailure(second)) return second;
   const detail = second.stderr.trim() || second.stdout.trim() ||

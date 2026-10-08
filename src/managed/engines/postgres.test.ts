@@ -860,31 +860,29 @@ test("postgres applyCredentials throws when psql fails", async () => {
 
 const STREAM_CLOSED = "spawn failed: Writable stream is closed";
 
-test("postgres applyCredentials retries psql once after a closed stdin then succeeds", async () => {
+test("postgres applyCredentials does not retry a closed stdin on non-idempotent SQL", async () => {
   let calls = 0;
   const exec: ManagedEngineExec = () => {
     calls++;
-    if (calls === 1) {
-      return Promise.resolve({
-        success: false,
-        stdout: "",
-        stderr: STREAM_CLOSED,
-      });
-    }
-    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+    return Promise.resolve({
+      success: false,
+      stdout: "",
+      stderr: STREAM_CLOSED,
+    });
   };
-  const applied = await postgresManagedEngineRuntime.applyCredentials(
-    buildContext(exec),
-    [{
-      principalId: "p-app",
-      username: "app_user",
-      role: "user",
-      databases: ["appdb"],
-      password: "app-pass",
-    }],
+  await assertRejects(
+    () =>
+      postgresManagedEngineRuntime.applyCredentials(buildContext(exec), [{
+        principalId: "p-app",
+        username: "app_user",
+        role: "user",
+        databases: ["appdb"],
+        password: "app-pass",
+      }]),
+    Error,
+    "psql failed",
   );
-  assertEquals(applied, ["app_user"]);
-  assertEquals(calls >= 2, true);
+  assertEquals(calls, 1);
 });
 
 test("postgres applyCredentials does not retry a SQL error", async () => {
@@ -912,29 +910,23 @@ test("postgres applyCredentials does not retry a SQL error", async () => {
   assertEquals(calls, 1);
 });
 
-test("postgres applyCredentials surfaces a closed stdin after one failed retry", async () => {
+test("postgres ensureSlots retries idempotent slot SQL once after a closed stdin", async () => {
   let calls = 0;
   const exec: ManagedEngineExec = () => {
     calls++;
-    return Promise.resolve({
-      success: false,
-      stdout: "",
-      stderr: STREAM_CLOSED,
-    });
+    if (calls === 1) {
+      return Promise.resolve({
+        success: false,
+        stdout: "",
+        stderr: STREAM_CLOSED,
+      });
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
   };
-  const err = await assertRejects(
-    () =>
-      postgresManagedEngineRuntime.applyCredentials(buildContext(exec), [{
-        principalId: "p-app",
-        username: "app_user",
-        role: "user",
-        databases: ["appdb"],
-        password: "app-pass",
-      }]),
-    Error,
-    "stdin closed after retry",
+  await postgresManagedEngineRuntime.replication!.ensureSlots!(
+    buildContext(exec),
+    ["tp_member_abcd"],
   );
-  assertEquals(err.message.includes("Writable stream is closed"), true);
   assertEquals(calls, 2);
 });
 
