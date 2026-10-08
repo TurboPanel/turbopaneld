@@ -5,6 +5,7 @@ machine-key / runtime inventory probes attached on hello and refreshed by
 change-detected heartbeats.
 
 - **Host OS** — `src/host/os-release.ts` (process-cached; attached once on hello).
+- **Kernel features** — `src/host/kernel-features.ts` is the typed registry mirroring `orchestration/scripts/tp-kernel-features` (`pi-4k-pagesize`); the daemon never calls the helper.
 - **Time sync** — `src/host/time-sync.ts` (cache-light `timedatectl show`,
   with `timedatectl status` + `/etc/timezone` fallbacks, plus `timesyncd.conf`
   read; carried on hello and change-detected heartbeats with `ips` from

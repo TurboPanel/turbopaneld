@@ -303,7 +303,11 @@ test("proxySqlPageSizeError allows 4 KiB and unknown page sizes, explains bigger
   );
   const message = proxySqlPageSizeError(16384);
   assertStringIncludes(message ?? "", "16 KiB memory pages");
-  assertStringIncludes(message ?? "", "kernel8.img");
+  assertStringIncludes(
+    message ?? "",
+    "sudo tp-orchestrate kernel-features apply pi-4k-pagesize --reboot",
+  );
+  assertStringIncludes(message ?? "", "localhost:13306");
   assertStringIncludes(
     proxySqlPageSizeError(65536) ?? "",
     "64 KiB memory pages",

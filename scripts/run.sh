@@ -1125,6 +1125,21 @@ tp_arm_update_guard() {
   fi
 }
 
+# Last step of a first install on a Raspberry Pi running the 16 KiB kernel:
+# switch it to the 4 KiB kernel (the database proxy cannot run on 16 KiB
+# pages) and restart. Everything above is finished by now, so the daemon is
+# enabled and starts and enrols by itself after the restart. The helper does
+# nothing on any other host, honours TURBOPANEL_SKIP_KERNEL_SWITCH=1, waits
+# for the daemon to save its enrolment before it restarts, and counts down
+# where the operator can cancel. Updates (--no-start) and the control-plane
+# installs never get here, and the install's exit status is not changed.
+tp_kernel_features_step() {
+  [ "$NO_START" != true ] || return 0
+  _kf_helper="$ORCHESTRATION_DIR/scripts/tp-kernel-features"
+  [ -x "$_kf_helper" ] || return 0
+  "$_kf_helper" installer-step || true
+}
+
 # Stop the running daemon before replacing release binaries on manual reconcile.
 # Skipped for --no-start (in-process UI update): that path must not stop the
 # caller; the daemon chdirs away and restarts itself after run.sh completes.
@@ -2887,3 +2902,5 @@ rm -rf /tmp/turbopanel-ansible /root/.ansible
 if ! tp_arm_update_guard; then
   exit 1
 fi
+
+tp_kernel_features_step
