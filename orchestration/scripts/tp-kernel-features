@@ -154,7 +154,7 @@ kf_bootcfg_add_top() {
     _bt_n=$((_bt_n + 1))
   done
   trap 'rm -f -- "$_bt_new"' EXIT
-  cp -- "$_bt_name" "$_bt_backup"
+  cp -- "$_bt_name" "$_bt_backup" || tp_die "cannot save a backup copy of $_bt_file"
   cmp -s -- "$_bt_name" "$_bt_backup" || tp_die "the backup does not match $_bt_file"
   _bt_cr="$(kf_bootcfg_cr "$_bt_name")"
   (
@@ -164,14 +164,14 @@ kf_bootcfg_add_top() {
   {
     printf '%s%s\n' "$_bt_line" "$_bt_cr"
     cat -- "$_bt_name"
-  } > "$_bt_new"
+  } > "$_bt_new" || tp_die "cannot write the new $_bt_file"
   [ "$(head -n 1 "$_bt_new" | tr -d '\r')" = "$_bt_line" ] ||
     tp_die "the new file does not start with $_bt_line"
   tail -n +2 "$_bt_new" | cmp -s - "$_bt_name" ||
     tp_die "the new file does not keep the old content of $_bt_file"
-  mv -T -f -- "$_bt_new" "$_bt_name"
+  mv -T -f -- "$_bt_new" "$_bt_name" || tp_die "cannot replace $_bt_file"
   trap - EXIT
-  sync
+  sync || tp_die "cannot flush $_bt_file to disk"
   [ "$(kf_bootcfg_scan "$_bt_name")" = "kernel8-top" ] ||
     tp_die "$_bt_file does not read back with the line in place"
   printf '%s/%s\n' "$_bt_dir" "$_bt_backup"
@@ -196,25 +196,33 @@ kf_bootcfg_remove_top() {
     _br_n=$((_br_n + 1))
   done
   trap 'rm -f -- "$_br_new"' EXIT
-  cp -- "$_br_name" "$_br_backup"
+  cp -- "$_br_name" "$_br_backup" || tp_die "cannot save a backup copy of $_br_file"
   cmp -s -- "$_br_name" "$_br_backup" || tp_die "the backup does not match $_br_file"
   (
     set -C
     : > "$_br_new"
   ) || tp_die "cannot create a temporary file in $_br_dir"
-  awk -v want="$_br_line" '
+  # LINE is "kernel=<value>"; spaces and tabs around the name, the = and the
+  # value are tolerated, the same way the scan reads them.
+  _br_value="${_br_line#*=}"
+  awk -v want="$_br_value" '
     {
       raw = $0
       line = $0
       sub(/\r$/, "", line)
       if (line ~ /^[ \t]*\[/) section = 1
-      if (!section && line == want) next
+      if (!section && line ~ /^[ \t]*kernel[ \t]*=/) {
+        v = line
+        sub(/^[ \t]*kernel[ \t]*=[ \t]*/, "", v)
+        sub(/[ \t]+$/, "", v)
+        if (v == want) next
+      }
       print raw
     }
-  ' "$_br_name" > "$_br_new"
-  mv -T -f -- "$_br_new" "$_br_name"
+  ' "$_br_name" > "$_br_new" || tp_die "cannot write the new $_br_file"
+  mv -T -f -- "$_br_new" "$_br_name" || tp_die "cannot replace $_br_file"
   trap - EXIT
-  sync
+  sync || tp_die "cannot flush $_br_file to disk"
   case "$(kf_bootcfg_scan "$_br_name")" in
     kernel8-top) tp_die "$_br_file still has the line after removing it" ;;
   esac
@@ -287,21 +295,28 @@ kf_pi_4k_pagesize_state() {
 
 # Prints the backup path (nothing when already in place).
 kf_pi_4k_pagesize_apply() {
-  _ap_backup="$(kf_bootcfg_add_top "$KF_BOOT_DIR/config.txt" "$KF_LINE")"
-  mkdir -p -- "$KF_MARKER_DIR"
-  date -u +%Y-%m-%dT%H:%M:%SZ > "$KF_MARKER_DIR/pi-4k-pagesize.applied"
+  # The marker goes first: if the edit then fails, a marker without the line is
+  # harmless (undo cleans it up); the line without a marker would never be undone.
+  mkdir -p -- "$KF_MARKER_DIR" || return 1
+  date -u +%Y-%m-%dT%H:%M:%SZ > "$KF_MARKER_DIR/pi-4k-pagesize.applied" || return 1
+  _ap_backup="$(kf_bootcfg_add_top "$KF_BOOT_DIR/config.txt" "$KF_LINE")" || {
+    rm -f -- "$KF_MARKER_DIR/pi-4k-pagesize.applied"
+    return 1
+  }
+  [ -n "$_ap_backup" ] || return 1
   printf '%s\n' "$_ap_backup"
 }
 
-# Prints the backup path, or nothing when this tool did not add the line.
+# Prints the backup path, or nothing when the line is no longer at the top.
+# The caller has already checked that the marker exists.
 kf_pi_4k_pagesize_undo() {
   _un_marker="$KF_MARKER_DIR/pi-4k-pagesize.applied"
-  [ -f "$_un_marker" ] || return 0
   if [ "$(kf_bootcfg_scan "$KF_BOOT_DIR/config.txt")" != "kernel8-top" ]; then
     rm -f -- "$_un_marker"
     return 0
   fi
-  _un_backup="$(kf_bootcfg_remove_top "$KF_BOOT_DIR/config.txt" "$KF_LINE")"
+  _un_backup="$(kf_bootcfg_remove_top "$KF_BOOT_DIR/config.txt" "$KF_LINE")" || return 1
+  [ -n "$_un_backup" ] || return 1
   rm -f -- "$_un_marker"
   printf '%s\n' "$_un_backup"
 }
@@ -455,7 +470,13 @@ kf_verb_apply() {
       tp_die "$_reason"
       ;;
     switchable)
-      _backup="$("$(kf_fn "$_id" apply)")"
+      _backup="$("$(kf_fn "$_id" apply)")" || tp_die "the change could not be saved, so the server will not restart; check /boot/firmware/config.txt (any backup copy is next to it)"
+      [ -n "$_backup" ] || tp_die "the change could not be saved, so the server will not restart"
+      _post="$("$(kf_fn "$_id" state)")" || tp_die "cannot read back the state, so the server will not restart"
+      case "$_post" in
+        restart-needed*) ;;
+        *) tp_die "the change was written but does not read back as saved, so the server will not restart" ;;
+      esac
       _changed=yes
       _state=restart-needed
       printf 'kernel-feature %s state=restart-needed changed=yes backup=%s\n' "$_id" "$_backup"
@@ -484,10 +505,15 @@ kf_verb_apply() {
 kf_verb_undo() {
   [ $# -eq 1 ] || tp_die "undo needs exactly one feature id"
   kf_known "$1" || tp_die "unknown feature: $1"
-  _backup="$("$(kf_fn "$1" undo)")"
-  if [ -z "$_backup" ]; then
+  if [ ! -f "$KF_MARKER_DIR/$1.applied" ]; then
     printf 'kernel-feature %s changed=no\n' "$1"
     printf 'Nothing to undo: this tool did not add the line. If you added kernel=kernel8.img yourself, remove it from /boot/firmware/config.txt by hand.\n'
+    return 0
+  fi
+  _backup="$("$(kf_fn "$1" undo)")" || tp_die "the change could not be undone; /boot/firmware/config.txt is as it was"
+  if [ -z "$_backup" ]; then
+    printf 'kernel-feature %s changed=no\n' "$1"
+    printf 'TurboPanel added the line earlier, but it is no longer at the top of /boot/firmware/config.txt (it was changed or removed since), so nothing was removed. Check that file by hand.\n'
     return 0
   fi
   printf 'kernel-feature %s changed=yes backup=%s\n' "$1" "$_backup"
@@ -524,10 +550,13 @@ kf_verb_installer_step() {
   printf 'To undo it later: sudo %s kernel-features undo pi-4k-pagesize\n\n' "$KF_CMD"
   if [ -f "$P/run/turbopanel/update-guard.json" ]; then
     printf 'An update is still being checked, so this server will not restart on its own.\n'
-    kf_verb_apply pi-4k-pagesize || true
+    kf_verb_apply pi-4k-pagesize
     return 0
   fi
-  kf_verb_apply pi-4k-pagesize --reboot --countdown 10 || true
+  # No `|| true`: that would switch off `set -e` inside the apply, and a failed
+  # step could then carry on to a restart. A failure here ends the script
+  # (nonzero, with a message) before any countdown.
+  kf_verb_apply pi-4k-pagesize --reboot --countdown 10
 }
 
 _verb="${1:-}"

@@ -78,6 +78,20 @@ const GOLDENS: Golden[] = [
     removed: "arm_64bit=1\n",
   },
   {
+    name: "trailing blanks on our line",
+    input: `${LINE}  \t\narm_64bit=1\n`,
+    scan: "kernel8-top",
+    added: `${LINE}  \t\narm_64bit=1\n`,
+    removed: "arm_64bit=1\n",
+  },
+  {
+    name: "spaces around the equals sign",
+    input: "kernel = kernel8.img\narm_64bit=1\n",
+    scan: "kernel8-top",
+    added: "kernel = kernel8.img\narm_64bit=1\n",
+    removed: "arm_64bit=1\n",
+  },
+  {
     name: "removal keeps later-section line",
     input: `${LINE}\n[all]\n${LINE}\n`,
     scan: "kernel8-top",

@@ -131,11 +131,13 @@ export function addBootConfigLineTop(text: string, line: string): string {
 }
 
 /**
- * Remove every exact `line` that comes before the first `[section]` header.
- * Later-section copies and raw endings stay.
+ * Remove every `kernel=` line with the same value as `line` that comes before
+ * the first `[section]` header (spaces and tabs around the name, the `=` and
+ * the value are tolerated). Later-section copies and raw endings stay.
  */
 export function removeBootConfigLineTop(text: string, line: string): string {
   let section = false;
+  const want = kernelLineValue(trimBlanks(line, "start"));
   const kept: string[] = [];
   const parts = text.split("\n");
   if (parts.at(-1) === "") {
@@ -143,8 +145,11 @@ export function removeBootConfigLineTop(text: string, line: string): string {
   }
   for (const raw of parts) {
     const stripped = stripTrailingCr(raw);
-    if (trimBlanks(stripped, "start").startsWith("[")) section = true;
-    if (!section && stripped === line) continue;
+    const head = trimBlanks(stripped, "start");
+    if (head.startsWith("[")) section = true;
+    if (!section && want !== undefined && kernelLineValue(head) === want) {
+      continue;
+    }
     kept.push(raw);
   }
   if (kept.length === 0) return "";
