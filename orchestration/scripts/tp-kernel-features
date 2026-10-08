@@ -300,7 +300,11 @@ kf_pi_4k_pagesize_apply() {
   mkdir -p -- "$KF_MARKER_DIR" || return 1
   date -u +%Y-%m-%dT%H:%M:%SZ > "$KF_MARKER_DIR/pi-4k-pagesize.applied" || return 1
   _ap_backup="$(kf_bootcfg_add_top "$KF_BOOT_DIR/config.txt" "$KF_LINE")" || {
-    rm -f -- "$KF_MARKER_DIR/pi-4k-pagesize.applied"
+    # A failure after the replace leaves the line in place: keep the marker so
+    # undo can still remove it. Drop it only when the line never got there.
+    if [ "$(kf_bootcfg_scan "$KF_BOOT_DIR/config.txt" 2>/dev/null)" != "kernel8-top" ]; then
+      rm -f -- "$KF_MARKER_DIR/pi-4k-pagesize.applied"
+    fi
     return 1
   }
   [ -n "$_ap_backup" ] || return 1
@@ -428,6 +432,15 @@ kf_verb_status() {
   done
 }
 
+# Said when a step of the switch failed. It says what state the file is in,
+# because a failure after the replace leaves the new line in place.
+kf_apply_failed() {
+  if [ "$(kf_bootcfg_scan "$KF_BOOT_DIR/config.txt" 2>/dev/null)" = "kernel8-top" ]; then
+    tp_die "the line was written to /boot/firmware/config.txt but the switch could not be confirmed, so the server will not restart; check that file (a backup copy is next to it) or undo it with the undo command"
+  fi
+  tp_die "the change could not be saved and /boot/firmware/config.txt is unchanged, so the server will not restart"
+}
+
 kf_verb_apply() {
   [ $# -ge 1 ] || tp_die "apply needs a feature id"
   _id="$1"
@@ -470,8 +483,8 @@ kf_verb_apply() {
       tp_die "$_reason"
       ;;
     switchable)
-      _backup="$("$(kf_fn "$_id" apply)")" || tp_die "the change could not be saved, so the server will not restart; check /boot/firmware/config.txt (any backup copy is next to it)"
-      [ -n "$_backup" ] || tp_die "the change could not be saved, so the server will not restart"
+      _backup="$("$(kf_fn "$_id" apply)")" || kf_apply_failed
+      [ -n "$_backup" ] || kf_apply_failed
       _post="$("$(kf_fn "$_id" state)")" || tp_die "cannot read back the state, so the server will not restart"
       case "$_post" in
         restart-needed*) ;;
