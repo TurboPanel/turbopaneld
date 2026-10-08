@@ -38,8 +38,14 @@ import {
   quoteIdentifier,
   quoteLiteral,
   showReplicaStatusSql,
+  startReplicaSql,
   versionSql,
 } from "./mariadb-sql.ts";
+import {
+  healStoppedReplicaIo,
+  replicaPrimaryLooksReachable,
+  replicaPrimaryPingArgv,
+} from "./replica-io-restart.ts";
 import {
   DOWN_ENGINE_CENSUS,
   type ManagedEngineCensus,
@@ -601,9 +607,28 @@ const mariadbReplicationRuntime: ManagedEngineReplicationRuntime = {
       return { state: "primary", observedAt };
     }
     try {
-      const verbose = await runMariadbStatusQuery(ctx, showReplicaStatusSql());
+      let verbose = await runMariadbStatusQuery(ctx, showReplicaStatusSql());
       if (!verbose.trim()) {
         return { state: "unknown", observedAt };
+      }
+      const restarted = await healStoppedReplicaIo({
+        verbose,
+        startSql: startReplicaSql(),
+        runSql: (sql) => runMariadb(ctx, sql),
+        pingPrimary: async (host, port) =>
+          replicaPrimaryLooksReachable(
+            await ctx.exec(
+              replicaPrimaryPingArgv(
+                "mariadb-admin",
+                host,
+                port,
+                ctx.rootUsername,
+              ),
+            ),
+          ),
+      });
+      if (restarted) {
+        verbose = await runMariadbStatusQuery(ctx, showReplicaStatusSql());
       }
       const parsed = parseShowSlaveStatus(verbose);
       // Best effort: a failed read leaves the freshness fields out (unknown).

@@ -1,4 +1,4 @@
-import { assertEquals, assertThrows } from "@std/assert";
+import { assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
 import {
   authSocketPluginPresentSql,
   changeReplicationSourceSql,
@@ -209,8 +209,23 @@ test("replication and status SQL builders", () => {
     username: "repl",
     password: "s3cret",
   });
-  assertEquals(change.includes("SOURCE_SSL = 1"), true);
-  assertEquals(change.includes("START REPLICA"), true);
+  for (
+    const expected of [
+      "CHANGE REPLICATION SOURCE TO",
+      "  SOURCE_HOST = '203.0.113.50',",
+      "  SOURCE_PORT = 3306,",
+      "  SOURCE_USER = 'repl',",
+      "  SOURCE_AUTO_POSITION = 1,",
+      "  SOURCE_SSL = 1,",
+      "  SOURCE_SSL_CA = '/etc/mysql/tls/ca.crt',",
+      "  SOURCE_SSL_VERIFY_SERVER_CERT = 1,",
+      "  SOURCE_CONNECT_RETRY = 10,",
+      "  SOURCE_RETRY_COUNT = 604800;",
+      "START REPLICA;",
+    ]
+  ) {
+    assertStringIncludes(change, expected);
+  }
   const follow = followReplicationSourceSql({
     host: "10.100.0.4",
     port: 45001,

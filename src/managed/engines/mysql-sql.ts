@@ -358,6 +358,21 @@ export function showReplicaStatusSql(): string {
   return "SHOW REPLICA STATUS;";
 }
 
+/** Seconds between IO-thread reconnect attempts (engine default is 60). */
+export const MYSQL_REPLICA_CONNECT_RETRY_SECONDS = 10;
+
+/**
+ * How many reconnects to attempt. MySQL 8.4 / 9.7 default SOURCE_RETRY_COUNT
+ * is 10 (~10 minutes at the 60 s default connect retry) and then leave the
+ * IO thread stopped. Seven days of 10 s attempts keeps it retrying across a
+ * long primary outage.
+ */
+export const MYSQL_REPLICA_RETRY_COUNT = 86400 * 7;
+
+export function startReplicaSql(): string {
+  return "START REPLICA;";
+}
+
 export function changeReplicationSourceSql(spec: {
   host: string;
   port: number;
@@ -373,8 +388,10 @@ export function changeReplicationSourceSql(spec: {
     "  SOURCE_AUTO_POSITION = 1,",
     "  SOURCE_SSL = 1,",
     "  SOURCE_SSL_CA = '/etc/mysql/tls/ca.crt',",
-    "  SOURCE_SSL_VERIFY_SERVER_CERT = 1;",
-    "START REPLICA;",
+    "  SOURCE_SSL_VERIFY_SERVER_CERT = 1,",
+    `  SOURCE_CONNECT_RETRY = ${MYSQL_REPLICA_CONNECT_RETRY_SECONDS},`,
+    `  SOURCE_RETRY_COUNT = ${MYSQL_REPLICA_RETRY_COUNT};`,
+    startReplicaSql(),
   ].join("\n");
 }
 
