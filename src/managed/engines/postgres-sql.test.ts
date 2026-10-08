@@ -328,6 +328,40 @@ test("replication SQL builders use quoted identifiers and managed slot prefix", 
   assertEquals(promoteSql().includes("pg_promote"), true);
 });
 
+test("standbyReplicationStatusSql reports 0 lagSeconds when replay has caught the primary", () => {
+  const sql = standbyReplicationStatusSql();
+  const collapsed = sql.replaceAll(/\s+/g, " ");
+  // Caught-up: replay LSN is at or past the primary's last reported WAL end.
+  assertEquals(
+    collapsed.includes(
+      "r.latest_end_lsn IS NOT NULL AND pg_catalog.pg_last_wal_replay_lsn() IS NOT NULL AND pg_catalog.pg_wal_lsn_diff( r.latest_end_lsn, pg_catalog.pg_last_wal_replay_lsn() ) <= 0",
+    ),
+    true,
+  );
+  // No reported end yet (fresh receiver): never claim zero lag from the
+  // receive position alone.
+  assertEquals(
+    collapsed.includes(
+      "COALESCE(r.latest_end_lsn, pg_catalog.pg_last_wal_receive_lsn())",
+    ),
+    false,
+  );
+  assertEquals(collapsed.includes("THEN 0"), true);
+  // Replay-timestamp clock is only the behind branch, never the sole lag.
+  assertEquals(
+    collapsed.includes(
+      "GREATEST(EXTRACT(EPOCH FROM (now() - pg_catalog.pg_last_xact_replay_timestamp())), 0)",
+    ),
+    true,
+  );
+  assertEquals(
+    collapsed.includes(
+      "WHEN r.status = 'streaming' AND pg_catalog.pg_last_xact_replay_timestamp() IS NOT NULL THEN EXTRACT(EPOCH FROM (now() - pg_catalog.pg_last_xact_replay_timestamp())) ELSE NULL",
+    ),
+    false,
+  );
+});
+
 test("reload verify SQL treats both restart-required texts as pending, not errors", () => {
   const reload = reloadVerifySql();
   const pending = "(error = 'setting could not be applied' " +
