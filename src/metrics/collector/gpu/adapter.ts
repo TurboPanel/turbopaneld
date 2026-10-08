@@ -23,6 +23,16 @@ export type GpuThermalReading = {
 };
 
 /**
+ * The GPU's own memory size this tick. It is not a `GpuSample` field: it rides
+ * `extended.gpuSizes`, the divisor of the used-memory percentage, so a card
+ * whose memory is reported differently after a driver change never needs a new
+ * topology generation.
+ */
+export type GpuSizeReading = {
+  memoryTotalBytes: number | null;
+};
+
+/**
  * Partial, per-field GPU reading — every `GpuSample` field plus the
  * physical-only {@link GpuThermalReading} fields. A field left unset (not
  * present in the object) or explicitly `null` both mean "this adapter has no
@@ -33,7 +43,7 @@ export type GpuThermalReading = {
  * contract).
  */
 export type GpuReading = Partial<
-  Omit<GpuSample, "gpuId"> & GpuThermalReading
+  Omit<GpuSample, "gpuId"> & GpuThermalReading & GpuSizeReading
 >;
 
 /** Shared context every adapter needs to compute rates from cumulative counters. */

@@ -24,20 +24,20 @@
 
 /**
  * The schema version the control plane stores (`blob3` on every row, dataset
- * `turbopanel_server_metrics_v7`). A sample on the wire may still be stamped
+ * `turbopanel_server_metrics_v8`). A sample on the wire may still be stamped
  * with an older {@link METRICS_WIRE_VERSIONS} entry; the control plane writes
- * v7 rows for all of them.
+ * v8 rows for all of them.
  */
-export const METRICS_SCHEMA_VERSION = 7 as const;
+export const METRICS_SCHEMA_VERSION = 8 as const;
 
 /**
  * The wire version a daemon stamps until the control plane advertises the
- * `metrics-v7` wire feature (`DAEMON_WIRE_FEATURES`). v6-shaped samples carry
+ * `metrics-v8` wire feature (`DAEMON_WIRE_FEATURES`). v6-shaped samples carry
  * no {@link MetricsExtended} section and no `durable` flag.
  */
 export const METRICS_LEGACY_WIRE_VERSION = 6 as const;
 
-/** Sample versions the control plane accepts from a daemon during the v6 -> v7 transition. */
+/** Sample versions the control plane accepts from a daemon during the v6 -> v8 transition. */
 export const METRICS_WIRE_VERSIONS = [
   METRICS_LEGACY_WIRE_VERSION,
   METRICS_SCHEMA_VERSION,
@@ -477,16 +477,23 @@ export type DockerUsageSample = {
 };
 
 // ---------------------------------------------------------------------------
-// v7 extension — everything the v7 layout stores that the v6 groups above do
+// v8 extension — everything the v8 layout stores that the v6 groups above do
 // not carry. One optional, self-contained section so a v6 daemon's sample
 // stays valid byte for byte: every field is optional, `null` is "unknown",
 // and a missing section reads exactly like a section of nulls.
 // ---------------------------------------------------------------------------
 
-/** Host-wide readings added in v7 (kernel limits, OOM kills, root disk queue/IOPS, health counters). */
+/** Host-wide readings added in v8 (kernel limits, OOM kills, root disk queue/IOPS, health counters). */
 export type ExtendedHostMetrics = {
   /** Processes and threads as a share of the kernel PID limit. */
   pidLimitUsedPercent?: number | null;
+  /**
+   * Share of the interval every task waited on interrupt handling
+   * (`/proc/pressure/irq`, `full` line). Absent where the kernel does not
+   * report it (no `/proc/pressure/irq`, or a kernel built without IRQ time
+   * accounting).
+   */
+  irqPressureFullPercent?: number | null;
   /** Processes the kernel OOM killer ended in the interval (`/proc/vmstat` `oom_kill` delta). */
   oomKills?: number | null;
   /** Requests queued at the disk that holds `/`. */
@@ -501,7 +508,7 @@ export type ExtendedHostMetrics = {
   mdArraysResyncing?: number | null;
 };
 
-/** Docker health and container totals added in v7 (alongside {@link DockerUsageSample}'s disk breakdown). */
+/** Docker health and container totals added in v8 (alongside {@link DockerUsageSample}'s disk breakdown). */
 export type ExtendedDockerMetrics = {
   containersRunning?: number | null;
   containersUnhealthy?: number | null;
@@ -518,14 +525,14 @@ export type ExtendedDockerMetrics = {
   reclaimableBytes?: number | null;
 };
 
-/** Hosting-Caddy fields added in v7. Totals only: never per-site counts. */
+/** Hosting-Caddy fields added in v8. Totals only: never per-site counts. */
 export type ExtendedIngressMetrics = {
   /** Days until the soonest hosting certificate expires. */
   tlsCertSoonestExpiryDays?: number | null;
 };
 
 /**
- * Host-wide text fields v7 stores in free blobs, in no particular order. Each
+ * Host-wide text fields v8 stores in free blobs, in no particular order. Each
  * is a short human-readable string (process short names and site ids only,
  * never full command lines, domain names, serials or IPs).
  */
@@ -581,6 +588,44 @@ export type ExtendedGpuText = {
   model?: string;
 };
 
+/**
+ * Capacity totals each sample carries beside the readings that are measured
+ * against them (used memory against total memory, and so on). A percentage is
+ * always taken against the size at that moment, so a resize or a balloon never
+ * needs a new topology generation and never rewrites history. An unknown total
+ * is absent, never `0`.
+ */
+export type ExtendedSizes = {
+  memoryTotalBytes?: number | null;
+  swapTotalBytes?: number | null;
+  /** `CommitLimit` from `/proc/meminfo`, the ceiling committed memory is judged against. */
+  commitLimitBytes?: number | null;
+  /** Logical CPU count, the divisor of the saturated-core count. */
+  logicalCores?: number | null;
+  rootFilesystemTotalBytes?: number | null;
+  rootFilesystemTotalInodes?: number | null;
+};
+
+/** Capacity of one filesystem, keyed by its `filesystemId`. */
+export type ExtendedFilesystemSize = {
+  filesystemId: string;
+  totalBytes?: number | null;
+  totalInodes?: number | null;
+};
+
+/** Memory capacity of one GPU, keyed by its `gpuId`. */
+export type ExtendedGpuSize = {
+  gpuId: string;
+  memoryTotalBytes?: number | null;
+};
+
+/** Link speed of one NIC, keyed by its `deviceId`. */
+export type ExtendedNetworkSize = {
+  deviceId: string;
+  /** Negotiated link speed in Mb/s. */
+  linkSpeedMbps?: number | null;
+};
+
 export type MetricsExtended = {
   host?: ExtendedHostMetrics;
   docker?: ExtendedDockerMetrics;
@@ -588,10 +633,15 @@ export type MetricsExtended = {
   text?: MetricsTextFields;
   blockDeviceText?: ExtendedBlockDeviceText[];
   gpuText?: ExtendedGpuText[];
+  sizes?: ExtendedSizes;
+  filesystemSizes?: ExtendedFilesystemSize[];
+  gpuSizes?: ExtendedGpuSize[];
+  networkSizes?: ExtendedNetworkSize[];
 };
 
 export const EXTENDED_HOST_FIELD_NAMES = [
   "pidLimitUsedPercent",
+  "irqPressureFullPercent",
   "oomKills",
   "rootDiskQueueDepth",
   "rootDiskOpsPerSecond",
@@ -609,6 +659,15 @@ export const EXTENDED_DOCKER_FIELD_NAMES = [
   "containersCpuPercent",
   "containersMemoryBytes",
   "reclaimableBytes",
+] as const;
+
+export const EXTENDED_SIZE_FIELD_NAMES = [
+  "memoryTotalBytes",
+  "swapTotalBytes",
+  "commitLimitBytes",
+  "logicalCores",
+  "rootFilesystemTotalBytes",
+  "rootFilesystemTotalInodes",
 ] as const;
 
 export const EXTENDED_INGRESS_FIELD_NAMES = [
@@ -776,9 +835,9 @@ export type MetricsSampleMetadata = {
   topologyGeneration: number;
   bootGeneration: number;
   /**
-   * v7 daemons only. `false` marks a 10 s live-lease sample that feeds the
+   * v8 daemons only. `false` marks a 10 s live-lease sample that feeds the
    * live overlay and is never stored; the parallel 60 s baseline sample is
-   * `true`. Absent means durable (every v6 sample, and v7 samples outside a
+   * `true`. Absent means durable (every v6 sample, and v8 samples outside a
    * lease), so a v6 daemon's lease samples keep being stored.
    */
   durable?: boolean;
@@ -800,7 +859,7 @@ export type MetricsSample = {
   router?: RouterSample;
   storage?: StorageSample;
   dockerUsage?: DockerUsageSample;
-  /** v7 additions. Absent on a v6 daemon's sample. */
+  /** v8 additions. Absent on a v6 daemon's sample. */
   extended?: MetricsExtended;
 };
 
@@ -885,7 +944,11 @@ function assertFinitePositive(field: string, value: number): void {
  * accept unbounded input in the meantime.
  */
 const MAX_METRIC_ENTITY_ARRAY_LENGTH = 64;
-const MAX_METRIC_EVENTS_PER_SAMPLE = 128;
+/**
+ * Events per sample. Every event is its own stored row, so this bounds what
+ * one sample can cost; the control plane also caps events per server per hour.
+ */
+export const MAX_METRIC_EVENTS_PER_SAMPLE = 16;
 
 function assertArrayWithinCap(
   field: string,
@@ -1249,7 +1312,7 @@ function sanitizeExtended(raw: MetricsExtended): MetricsExtended {
   const host = sanitizeOptionalNumbers(
     EXTENDED_HOST_FIELD_NAMES,
     raw.host,
-    ["pidLimitUsedPercent"],
+    ["pidLimitUsedPercent", "irqPressureFullPercent"],
   );
   if (host) out.host = host;
   const docker = sanitizeOptionalNumbers(
@@ -1276,6 +1339,26 @@ function sanitizeExtended(raw: MetricsExtended): MetricsExtended {
     out.gpuText = raw.gpuText.map((entry) => ({
       gpuId: entry.gpuId,
       ...sanitizeTextRecord(["driver", "model"] as const, entry),
+    }));
+  }
+  const sizes = sanitizeOptionalNumbers(EXTENDED_SIZE_FIELD_NAMES, raw.sizes);
+  if (sizes) out.sizes = sizes;
+  if (raw.filesystemSizes) {
+    out.filesystemSizes = raw.filesystemSizes.map((entry) => ({
+      filesystemId: entry.filesystemId,
+      ...sanitizeOptionalNumbers(["totalBytes", "totalInodes"] as const, entry),
+    }));
+  }
+  if (raw.networkSizes) {
+    out.networkSizes = raw.networkSizes.map((entry) => ({
+      deviceId: entry.deviceId,
+      ...sanitizeOptionalNumbers(["linkSpeedMbps"] as const, entry),
+    }));
+  }
+  if (raw.gpuSizes) {
+    out.gpuSizes = raw.gpuSizes.map((entry) => ({
+      gpuId: entry.gpuId,
+      ...sanitizeOptionalNumbers(["memoryTotalBytes"] as const, entry),
     }));
   }
   return out;
@@ -1360,6 +1443,22 @@ export function buildMetricsSample(
   assertArrayWithinCap(
     "extended.gpuText",
     input.extended?.gpuText ?? [],
+    MAX_METRIC_ENTITY_ARRAY_LENGTH,
+  );
+
+  assertArrayWithinCap(
+    "extended.filesystemSizes",
+    input.extended?.filesystemSizes ?? [],
+    MAX_METRIC_ENTITY_ARRAY_LENGTH,
+  );
+  assertArrayWithinCap(
+    "extended.gpuSizes",
+    input.extended?.gpuSizes ?? [],
+    MAX_METRIC_ENTITY_ARRAY_LENGTH,
+  );
+  assertArrayWithinCap(
+    "extended.networkSizes",
+    input.extended?.networkSizes ?? [],
     MAX_METRIC_ENTITY_ARRAY_LENGTH,
   );
 

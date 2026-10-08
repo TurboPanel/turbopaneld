@@ -68,7 +68,8 @@ export const DAEMON_WIRE_FEATURES = [
   "managed-ha-probe-v1",
   "managed-ha-instance-v1",
   "managed-ha-boot-hold-v1",
-  "metrics-v7",
+  "metrics-v8",
+  "metrics-v8-sizes",
   "php-site-modes-v1",
   "site-engine-nginx-apache-v1",
   "deploy-cancel-v1",
@@ -141,13 +142,21 @@ export const MANAGED_HA_BOOT_HOLD_FEATURE: DaemonWireFeature =
   "managed-ha-boot-hold-v1";
 
 /**
- * Metrics schema v7. This daemon can produce v7 samples (`metadata.version`
- * 7: the `extended` section and the `durable` flag). It stamps
+ * Metrics schema v8. This daemon can produce v8 samples (`metadata.version`
+ * 8: the `extended` section and the `durable` flag). It stamps
  * `METRICS_LEGACY_WIRE_VERSION` until the control plane it is attached to
  * lists this feature, so a daemon updated ahead of the control plane keeps
  * sending samples the old control plane accepts.
  */
-export const METRICS_V7_FEATURE: DaemonWireFeature = "metrics-v7";
+export const METRICS_V8_FEATURE: DaemonWireFeature = "metrics-v8";
+
+/**
+ * The control plane accepts the per-sample sizes (`extended.sizes`,
+ * `filesystemSizes`, `gpuSizes`). A control plane that advertises `metrics-v8`
+ * but predates the sizes rejects the unknown `extended` keys, which would
+ * drop every sample, so the daemon sends the sizes only once this is listed.
+ */
+export const METRICS_V8_SIZES_FEATURE: DaemonWireFeature = "metrics-v8-sizes";
 
 /**
  * This daemon deploys sites with `engine: 'nginx+apache'` (nginx in front of

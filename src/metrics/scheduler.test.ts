@@ -349,6 +349,7 @@ function makeScheduler(options: {
   primeMs?: number;
   logRateLimitMs?: number;
   durabilityFlag?: () => boolean;
+  sizesFlag?: () => boolean;
   collectDeadlineMs?: number;
   onLog?: (level: "info" | "warn", message: string) => void;
 }): MetricsScheduler {
@@ -368,6 +369,7 @@ function makeScheduler(options: {
       .clearIntervalFn as unknown as typeof clearInterval,
     logRateLimitMs: options.logRateLimitMs,
     durabilityFlag: options.durabilityFlag,
+    sizesFlag: options.sizesFlag,
     collectDeadlineMs: options.collectDeadlineMs,
     onLog: options.onLog,
   });
@@ -1146,7 +1148,7 @@ it({
   },
 });
 
-it("v7 live stream runs beside the baseline on its own collector; only the baseline is durable", async () => {
+it("v8 live stream runs beside the baseline on its own collector; only the baseline is durable", async () => {
   const clock = new FakeClock();
   const sent: unknown[] = [];
   let collectors = 0;
@@ -1192,13 +1194,13 @@ it("closed durability flag leaves samples unflagged and no stream collector", as
   );
 });
 
-it("extended text is stripped on the v6 wire and kept under metrics-v7", async () => {
-  for (const v7 of [false, true]) {
+it("extended text is stripped on the v6 wire and kept under metrics-v8", async () => {
+  for (const v8 of [false, true]) {
     const clock = new FakeClock();
     const sent: unknown[] = [];
     const scheduler = makeScheduler({
       clock,
-      durabilityFlag: () => v7,
+      durabilityFlag: () => v8,
       collectorFactory: () =>
         createFakeCollector((sequence) => {
           const r = supportedSample(sequence);
@@ -1212,18 +1214,18 @@ it("extended text is stripped on the v6 wire and kept under metrics-v7", async (
     await clock.advance(0);
     assertEquals(
       (sent[0] as { extended?: unknown }).extended !== undefined,
-      v7,
+      v8,
     );
   }
 });
 
-it("metrics-v7 stamps sample version 7; the v6 wire keeps 6 and no extended", async () => {
-  for (const v7 of [false, true]) {
+it("metrics-v8 stamps sample version 8; the v6 wire keeps 6 and no extended", async () => {
+  for (const v8 of [false, true]) {
     const clock = new FakeClock();
     const sent: unknown[] = [];
     const scheduler = makeScheduler({
       clock,
-      durabilityFlag: () => v7,
+      durabilityFlag: () => v8,
       collectorFactory: () =>
         createFakeCollector((sequence) => {
           const r = supportedSample(sequence);
@@ -1239,30 +1241,64 @@ it("metrics-v7 stamps sample version 7; the v6 wire keeps 6 and no extended", as
       metadata: { version: number };
       extended?: unknown;
     };
-    assertEquals(frame.metadata.version, v7 ? 7 : METRICS_LEGACY_WIRE_VERSION);
-    assertEquals(frame.extended !== undefined, v7);
+    assertEquals(frame.metadata.version, v8 ? 8 : METRICS_LEGACY_WIRE_VERSION);
+    assertEquals(frame.extended !== undefined, v8);
   }
 });
 
-it("a control plane that negotiates metrics-v7 later flips the same scheduler from v6 to v7", async () => {
+it("the per-sample sizes are sent only once the control plane advertises metrics-v8-sizes", async () => {
+  for (const sizes of [false, true]) {
+    const clock = new FakeClock();
+    const sent: unknown[] = [];
+    const scheduler = makeScheduler({
+      clock,
+      durabilityFlag: () => true,
+      sizesFlag: () => sizes,
+      collectorFactory: () =>
+        createFakeCollector((sequence) => {
+          const r = supportedSample(sequence);
+          if (r.supported) {
+            r.sample.extended = {
+              docker: { containersRunning: 2 },
+              sizes: { memoryTotalBytes: 8e9 },
+              filesystemSizes: [{ filesystemId: "fs-a", totalBytes: 1e9 }],
+              gpuSizes: [{ gpuId: "gpu0", memoryTotalBytes: 16e9 }],
+            };
+          }
+          return r;
+        }),
+    });
+    scheduler.attach(capturingSink(sent));
+    await clock.advance(0);
+    const extended = (sent[0] as { extended: Record<string, unknown> })
+      .extended;
+    // A v8 control plane without the sizes still gets the rest of the v8 block.
+    assertEquals(extended.docker, { containersRunning: 2 });
+    assertEquals("sizes" in extended, sizes);
+    assertEquals("filesystemSizes" in extended, sizes);
+    assertEquals("gpuSizes" in extended, sizes);
+  }
+});
+
+it("a control plane that negotiates metrics-v8 later flips the same scheduler from v6 to v8", async () => {
   const clock = new FakeClock();
   const sent: unknown[] = [];
-  let v7 = false;
+  let v8 = false;
   const scheduler = makeScheduler({
     clock,
     intervalMs: 1_000,
-    durabilityFlag: () => v7,
+    durabilityFlag: () => v8,
     collectorFactory: () =>
       createFakeCollector((sequence) => supportedSample(sequence)),
   });
   scheduler.attach(capturingSink(sent));
   await clock.advance(0);
-  v7 = true;
+  v8 = true;
   await clock.advance(1_000);
   const versions = sent.map((s) =>
     (s as { metadata: { version: number } }).metadata.version
   );
-  assertEquals(versions, [6, 7]);
+  assertEquals(versions, [6, 8]);
 });
 
 it("the live-stream collector is told it is live (so it skips event detection); the baseline is not", async () => {
