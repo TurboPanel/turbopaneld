@@ -341,6 +341,16 @@ export const PHP_SERIES_PRUNE_PLAYBOOK = join(
   "php-series-prune.yml",
 );
 /**
+ * Removes web engines (nginx, Apache, OpenLiteSpeed) no site uses any more:
+ * the vendored tree, the `turbopanel-<engine>` unit and its config directory.
+ * The daemon passes `engine_prune`; the role refuses an engine with a site.
+ */
+export const ENGINE_PRUNE_PLAYBOOK = join(
+  ORCHESTRATION_DIR,
+  "playbooks",
+  "engine-prune.yml",
+);
+/**
  * Vendors the **tenant** Node release for native `serviceKind: node` apps.
  * Deliberately separate from the `node-runtime` role that vendors the
  * instance's own Node: bumping the runtime tenants execute must not perturb the

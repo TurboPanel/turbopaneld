@@ -1,0 +1,12 @@
+---
+galaxy_info:
+  author: turbopanel
+  description: >-
+    Remove web engines (nginx, Apache, OpenLiteSpeed) no site uses any more:
+    the vendored tree, the turbopanel-<engine> unit and the engine's config
+    directory. The daemon decides which engines are unused and passes only
+    those; this role refuses an engine that still has a site config on this
+    host. Caddy, php-fpm and the vendored lsphp are never touched.
+  license: AGPL-3.0
+  min_ansible_version: "2.14"
+dependencies: []

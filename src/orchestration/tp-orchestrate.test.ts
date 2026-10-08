@@ -1,4 +1,4 @@
-import { assertEquals, assertStringIncludes } from "@std/assert";
+import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { dirname, fromFileUrl, join } from "@std/path";
 import {
   tpOrchestratePlaybookAllowlist,
@@ -777,7 +777,45 @@ test("rollback never installs the instance unit from the backup directory", asyn
   assertEquals(play.includes("tasks_from: units.yml"), true);
 });
 
-test("migrate reads the instance unit URL, not runtime.env or a caller URL", async () => {
+async function pythonWithJinja(): Promise<string | undefined> {
+  const candidates = [
+    Deno.env.get("TURBOPANEL_JINJA_PYTHON"),
+    "/opt/turbopanel/vendor/ansible/current/bin/python3",
+    "python3",
+    "python",
+  ].filter((c): c is string => typeof c === "string" && c.length > 0);
+  for (const bin of candidates) {
+    try {
+      const probe = await new Deno.Command(bin, {
+        args: ["-c", "import jinja2"],
+        stdout: "null",
+        stderr: "null",
+      }).output();
+      if (probe.success) return bin;
+    } catch {
+      // Missing binary: Deno throws synchronously from output(); skip.
+    }
+  }
+  return undefined;
+}
+
+const JINJA_PYTHON = await pythonWithJinja();
+// CI installs the Ansible toolchain (and with it Jinja2) before the tests run;
+// there a missing renderer is a broken gate, not a reason to skip.
+const RENDER_REQUIRED = Deno.env.get("CI") === "true";
+
+const migrateTest = JINJA_PYTHON === undefined && !RENDER_REQUIRED
+  ? Deno.test.ignore.bind(Deno.test)
+  : test;
+
+const MIGRATE_TEST_NAME =
+  "migrate reads the instance unit URL, not runtime.env or a caller URL";
+
+migrateTest(MIGRATE_TEST_NAME, async () => {
+  assert(
+    JINJA_PYTHON,
+    "CI must provide jinja2 (the Ansible toolchain) to render the instance templates",
+  );
   const source = await Deno.readTextFile(helperPath);
   const fn = extractShellFunction(source, "tp_verb_migrate");
   assertEquals(fn.includes("runtime.env"), false);
@@ -791,8 +829,7 @@ test("migrate reads the instance unit URL, not runtime.env or a caller URL", asy
     here,
     "../../orchestration/roles/instance-launch/templates",
   );
-  const python = await pythonWithJinja();
-  const render = await new Deno.Command(python, {
+  const render = await new Deno.Command(JINJA_PYTHON, {
     args: ["-c", RENDER_MANAGED_INSTANCE, templates, envPath, unitPath],
     stdout: "piped",
     stderr: "piped",
@@ -814,6 +851,14 @@ test("migrate reads the instance unit URL, not runtime.env or a caller URL", asy
     "#!/bin/sh\nprintf '%s\\n' \"$TURBOPANEL_DATABASE_URL\"\n",
   );
   await Deno.chmod(binPath, 0o755);
+  // GNU coreutils `timeout` is not on macOS /usr/bin:/bin. The helper still
+  // invokes it; this shim keeps the same argv shape (`timeout 120 cmd…`).
+  await Deno.writeTextFile(
+    join(root, "timeout"),
+    '#!/bin/sh\nshift\nexec "$@"\n',
+  );
+  await Deno.chmod(join(root, "timeout"), 0o755);
+  const path = `${root}:/usr/bin:/bin`;
   const script = [
     "set -eu",
     "tp_die() { printf 'tp-orchestrate: %s\\n' \"$1\" >&2; exit 1; }",
@@ -828,7 +873,7 @@ test("migrate reads the instance unit URL, not runtime.env or a caller URL", asy
   const migrated = await new Deno.Command("sh", {
     args: ["-c", script, "sh"],
     env: {
-      PATH: "/usr/bin:/bin",
+      PATH: path,
       TURBOPANEL_DATABASE_URL: "postgresql://caller:secret@localhost/wrong",
     },
     clearEnv: true,
@@ -842,7 +887,7 @@ test("migrate reads the instance unit URL, not runtime.env or a caller URL", asy
   );
   const refused = await new Deno.Command("sh", {
     args: ["-c", script, "sh", "postgresql://nope"],
-    env: { PATH: "/usr/bin:/bin" },
+    env: { PATH: path },
     clearEnv: true,
     stdout: "piped",
     stderr: "piped",
@@ -854,22 +899,6 @@ test("migrate reads the instance unit URL, not runtime.env or a caller URL", asy
   );
   await Deno.remove(root, { recursive: true });
 });
-
-async function pythonWithJinja(): Promise<string> {
-  const candidates = [
-    "python3",
-    "/opt/turbopanel/vendor/ansible/current/bin/python",
-  ];
-  for (const bin of candidates) {
-    const probe = await new Deno.Command(bin, {
-      args: ["-c", "import jinja2"],
-      stdout: "null",
-      stderr: "null",
-    }).output().catch(() => null);
-    if (probe?.success) return bin;
-  }
-  throw new TypeError("jinja2 is required to render the instance templates");
-}
 
 const RENDER_MANAGED_INSTANCE = `
 import sys

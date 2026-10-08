@@ -48,6 +48,7 @@ import { logInfo, logWarn } from "../util/logger.ts";
 import { forEachSequential } from "../util/sequential.ts";
 import { runLocalPlaybook } from "../orchestration/ansible.ts";
 import {
+  ENGINE_PRUNE_PLAYBOOK,
   ORCHESTRATION_DIR,
   PHP_SERIES_PRUNE_PLAYBOOK,
   SITE_APACHE_APPLY_PLAYBOOK,
@@ -117,6 +118,13 @@ import {
   prunePhpSeries,
   unusedPhpSeries,
 } from "./site/php-series-prune.ts";
+import {
+  type EngineUsage,
+  PRUNABLE_ENGINES,
+  type PrunableEngine,
+  pruneEngines,
+} from "./site/engine-prune.ts";
+import { engineHoldKey, phpSeriesHoldKey } from "./site/prune-holds.ts";
 import {
   apacheBehindNginxLines,
   apacheDotfileDenyLines,
@@ -2476,6 +2484,21 @@ export function resolveSiteEngineNeeds(
 }
 
 /**
+ * What a deploy of `sites` holds against unused-software removal for its
+ * whole length: every PHP series it names and every engine that serves one of
+ * its sites (both are installed long before the site config that uses them).
+ */
+export function pruneHoldKeysForDeploy(
+  sites: readonly SiteApplySpec[],
+): string[] {
+  const needs = resolveSiteEngineNeeds(sites);
+  return [
+    ...phpSeriesForDeploy(sites).map(phpSeriesHoldKey),
+    ...PRUNABLE_ENGINES.filter((engine) => needs[engine]).map(engineHoldKey),
+  ];
+}
+
+/**
  * The `-e` JSON object each site-engine apply playbook takes. One JSON object,
  * not key=value, so the version list stays a list and the extension map a map
  * (tp-orchestrate accepts these keys in `TP_JSON_EXTRA_VAR_KEYS`).
@@ -4069,8 +4092,9 @@ export async function applySites(
         )
         .map((site) => site.composeServiceName),
     );
-    // A site that moved to another PHP series may have left the old one empty.
-    await pruneUnusedPhpSeries(layout);
+    // A site that moved to another PHP series or engine may have left the old
+    // one empty.
+    await pruneUnusedSoftware(layout);
 
     // `reloaded=` empty is the expected shape of a release promote that only
     // moved `current` — say so, or a skipped reload looks like a lost step.
@@ -4242,16 +4266,75 @@ async function gatherPhpSeriesUsage(
   return configTexts === null ? null : { ...cheap, configTexts };
 }
 
-/**
- * Remove the PHP series no site uses any more (packages, vendored lsphp,
- * config). Installing stays lazy; this is its counterpart, run after a deploy
- * or a teardown changed what a host serves. Best-effort: the deploy or teardown
- * that called it has already succeeded, and a series that stays is retried by
- * the next one.
- */
-async function pruneUnusedPhpSeries(layout: LayoutPaths): Promise<void> {
+/** Whether `<vendor>/<engine>/current` exists (the engine is installed). */
+async function engineInstalled(
+  layout: LayoutPaths,
+  engine: PrunableEngine,
+): Promise<boolean> {
   try {
-    await prunePhpSeries({
+    await Deno.lstat(join(layout.runtimesDir, engine, "current"));
+    return true;
+  } catch {
+    // Missing, or a vendor tree the daemon cannot see into: either way it is
+    // not removed on the strength of this check.
+    return false;
+  }
+}
+
+/**
+ * Read the host for {@link pruneEngines}: every installed engine with its
+ * `sites/` (and OpenLiteSpeed's `vhosts/`) entries. `null` when any of those
+ * could not be listed.
+ */
+async function gatherEngineUsage(
+  layout: LayoutPaths,
+): Promise<EngineUsage[] | null> {
+  const usages: EngineUsage[] = [];
+  try {
+    await forEachSequential([...PRUNABLE_ENGINES], async (engine) => {
+      if (!await engineInstalled(layout, engine)) return;
+      const sites = await listEngineConfigDir(
+        join(layout.configDir, engine, "sites"),
+      ) ?? [];
+      const vhosts = engine === "openlitespeed"
+        ? await listEngineConfigDir(openlitespeedVhostsDir(layout)) ?? []
+        : [];
+      usages.push({ engine, sites, vhosts });
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    logWarn(
+      "deploy",
+      `web engine configs unreadable, none removed: ${message}`,
+    );
+    return null;
+  }
+  return usages;
+}
+
+/** Run one unused-software removal; a failure is logged, never thrown. */
+async function pruneQuietly(
+  label: string,
+  prune: () => Promise<unknown>,
+): Promise<void> {
+  try {
+    await prune();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    logWarn("deploy", `unused ${label} not checked: ${message}`);
+  }
+}
+
+/**
+ * Remove the PHP series (packages, vendored lsphp, config) and then the web
+ * engines (vendored tree, unit, config) no site uses any more. Installing
+ * stays lazy; this is its counterpart, run after a deploy or a teardown
+ * changed what a host serves. Best-effort: the deploy or teardown that called
+ * it has already succeeded, and whatever stays is retried by the next one.
+ */
+async function pruneUnusedSoftware(layout: LayoutPaths): Promise<void> {
+  await pruneQuietly("PHP series", () =>
+    prunePhpSeries({
       gather: () => gatherPhpSeriesUsage(layout),
       remove: (series) =>
         runSitePlaybook(
@@ -4259,11 +4342,17 @@ async function pruneUnusedPhpSeries(layout: LayoutPaths): Promise<void> {
           `php-series-prune (remove unused PHP ${series.join(", ")})`,
           ["-e", JSON.stringify({ php_series_prune: series })],
         ),
-    });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    logWarn("deploy", `unused PHP series not checked: ${message}`);
-  }
+    }));
+  await pruneQuietly("web engines", () =>
+    pruneEngines({
+      gather: () => gatherEngineUsage(layout),
+      remove: (engines) =>
+        runSitePlaybook(
+          ENGINE_PRUNE_PLAYBOOK,
+          `engine-prune (remove unused ${engines.join(", ")})`,
+          ["-e", JSON.stringify({ engine_prune: engines })],
+        ),
+    }));
 }
 
 /** Remove an OpenLiteSpeed vhost dir; best-effort (missing dir is not an error). */
@@ -4431,9 +4520,9 @@ export async function removeSites(
       ...nginxRemoved.services,
       ...apacheRemoved.services,
     ]);
-    // Nothing names the PHP this environment used: remove it once no other
-    // environment on the host uses it either.
-    await pruneUnusedPhpSeries(layout);
+    // Nothing names the PHP or the engines this environment used: remove them
+    // once no other environment on the host uses them either.
+    await pruneUnusedSoftware(layout);
   });
 }
 

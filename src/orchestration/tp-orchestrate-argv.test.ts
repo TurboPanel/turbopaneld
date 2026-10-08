@@ -289,6 +289,19 @@ test("tp-orchestrate refuses keys and values that would steer root Ansible", asy
       '{"php_series_prune":["8"]}',
       '{"php_series_prune":"8.1"}',
       '{"php_series_prune":[8.1]}',
+      // The engines root deletes: one of three names, never a path or Caddy.
+      '{"engine_prune":["caddy"]}',
+      '{"engine_prune":["lsphp"]}',
+      '{"engine_prune":["Nginx"]}',
+      '{"engine_prune":["nginx ; id"]}',
+      '{"engine_prune":["turbopanel-nginx"]}',
+      '{"engine_prune":["../nginx"]}',
+      '{"engine_prune":["nginx/../../etc"]}',
+      '{"engine_prune":["nginx",""]}',
+      '{"engine_prune":["nginx","nginx","nginx","nginx"]}',
+      '{"engine_prune":"nginx"}',
+      '{"engine_prune":{"nginx":true}}',
+      '{"engine_prune":[1]}',
       // Runtime series reach a group name and an ACL entity: digits only.
       '{"deno_app_versions":["x:rwx,u:tp:rwx"]}',
       '{"deno_app_versions":["2.9"]}',
@@ -337,6 +350,23 @@ test("tp-orchestrate accepts the PHP series to remove as plain major.minor strin
       { vendorDir },
     );
     assertEquals(verdicts.map((v) => v.accepted), [true, true]);
+  } finally {
+    await Deno.remove(vendorDir, { recursive: true });
+  }
+});
+
+test("tp-orchestrate accepts the web engines to remove by name", async () => {
+  const vendorDir = await makeFakeVendorDir();
+  try {
+    const verdicts = await checkExtraVars(
+      [
+        '{"engine_prune":["nginx"]}',
+        '{"engine_prune":["nginx","apache","openlitespeed"]}',
+        '{"engine_prune":[]}',
+      ],
+      { vendorDir },
+    );
+    assertEquals(verdicts.map((v) => v.accepted), [true, true, true]);
   } finally {
     await Deno.remove(vendorDir, { recursive: true });
   }
