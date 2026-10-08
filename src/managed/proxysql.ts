@@ -40,6 +40,7 @@ import { logInfo } from "../util/logger.ts";
 import { forEachSequential } from "../util/sequential.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 import { reservedManagedIngressAddress } from "./ingress-cidr.ts";
+import { frontendBindingsHealth, wantedMappings } from "./proxysql-bindings.ts";
 import {
   proxysqlComposePath,
   proxysqlConfigDir,
@@ -1700,17 +1701,23 @@ export async function ensureProxySqlIngress(
   } = options;
   const composePath = proxysqlComposePath(layout);
   await Deno.mkdir(proxysqlConfigDir(layout), { recursive: true, mode: 0o750 });
-  await Deno.writeTextFile(
-    composePath,
-    proxysqlComposeWithAttachments(
-      descriptor,
-      bindAddresses,
-      segmentAttachments,
-      listenerPorts,
-      managedNetwork,
-    ),
-    { mode: 0o640 },
+  const composeText = proxysqlComposeWithAttachments(
+    descriptor,
+    bindAddresses,
+    segmentAttachments,
+    listenerPorts,
+    managedNetwork,
   );
+  await Deno.writeTextFile(composePath, composeText, { mode: 0o640 });
+  // A container that failed its publish bind at boot stays "running" with no
+  // bindings, and a plain `up -d` leaves it alone (config unchanged). Recreate
+  // it then; an unreadable state falls back to the plain `up -d`.
+  const wanted = wantedMappings(
+    readPublishedClientMappingsFromCompose(composeText),
+  );
+  const health = await frontendBindingsHealth(run, composePath, wanted);
+  const missingBindings = health.ok && health.present && !health.healthy &&
+    wanted.length > 0;
   const up = await run([
     "compose",
     "-f",
@@ -1718,6 +1725,7 @@ export async function ensureProxySqlIngress(
     "up",
     "-d",
     "--remove-orphans",
+    ...(missingBindings ? ["--force-recreate"] : []),
   ]);
   if (!up.success) {
     throw new Error(up.stderr || "proxysql compose up failed");
