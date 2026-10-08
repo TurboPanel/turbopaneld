@@ -51,6 +51,10 @@ import type {
   EnvironmentDeployContainer,
   ManagedHaRaftConfig,
 } from "../contracts/commands-contracts.ts";
+import {
+  isValidIpv4Literal,
+  isValidIpv6Literal,
+} from "../contracts/commands-contracts.ts";
 import { parseProxySqlClientCnf } from "./proxysql-admin.ts";
 
 /**
@@ -142,6 +146,7 @@ export function renderOrchestratorConf(input: OrchestratorConfInput): string {
     MySQLTopologyPassword: input.topologyPassword,
     PostgreSQLTopologyUser: input.topologyUser,
     PostgreSQLTopologyPassword: input.topologyPassword,
+    MySQLTopologyUseSSL: true,
     MySQLTopologySSLSkipVerify: input.sslCaPath === undefined,
     Recover: false,
     RecoverMasterClusterFilters: [],
@@ -167,6 +172,53 @@ export function renderOrchestratorConf(input: OrchestratorConfInput): string {
   return `${JSON.stringify(conf, null, 2)}\n`;
 }
 
+export type OrchestratorTopologyAlias = {
+  name: string;
+  address: string;
+};
+
+/**
+ * extra_hosts entries so Orchestrator can resolve a member's Docker name to
+ * the private-listener address used at register time. Skips names that are
+ * already the register host, and hosts that are not an IP literal.
+ */
+export function orchestratorTopologyAliases(
+  members: readonly { host: string; containerName?: string }[],
+): OrchestratorTopologyAlias[] {
+  const aliases: OrchestratorTopologyAlias[] = [];
+  const seen = new Set<string>();
+  for (const member of members) {
+    const name = member.containerName;
+    if (!name || name === member.host || seen.has(name)) continue;
+    const address = extraHostsAddress(member.host);
+    if (address === null) continue;
+    seen.add(name);
+    aliases.push({ name, address });
+  }
+  return aliases;
+}
+
+function extraHostsAddress(host: string): string | null {
+  if (isValidIpv4Literal(host)) return host;
+  if (isValidIpv6Literal(host)) return `[${host}]`;
+  return null;
+}
+
+function httpPublishPorts(raft: ManagedHaRaftConfig): string[] {
+  // Local API + wait-ready probe this host's loopback; Raft followers proxy
+  // HTTP to HTTPAdvertise (`advertiseAddress:httpPort`), so that same port
+  // must also be published on the advertise address.
+  const loopback = formatPublishedPort(
+    "127.0.0.1", // NOSONAR typescript:S1313 — local HA API bind, not a remote host
+    raft.httpPort,
+  );
+  if (raft.advertiseAddress === "127.0.0.1") return [loopback]; // NOSONAR typescript:S1313
+  return [
+    loopback,
+    formatPublishedPort(raft.advertiseAddress, raft.httpPort),
+  ];
+}
+
 /**
  * Compose document for the per-org Orchestrator Raft group.
  *
@@ -180,6 +232,7 @@ export function orchestratorCompose(
   raft: ManagedHaRaftConfig,
   managedNetwork: string,
   daemonGid?: number | null,
+  topologyAliases: readonly OrchestratorTopologyAlias[] = [],
 ): string {
   const project = orchestratorProject(identity.serviceId);
   assertSafeComposeProjectName(project);
@@ -187,7 +240,7 @@ export function orchestratorCompose(
     raft.advertiseAddress,
     raft.raftPort,
   );
-  const httpPublish = formatPublishedPort("127.0.0.1", raft.httpPort);
+  const httpPublish = httpPublishPorts(raft);
   // Literal `./` prefix — `join(".", …)` normalizes it away and compose then
   // reads the source as a NAMED VOLUME instead of a bind mount.
   const confMountSpec =
@@ -205,20 +258,28 @@ export function orchestratorCompose(
     `      component: ${SYSTEM_MANAGED_HA_COMPONENT}`,
     `      serviceId: ${identity.serviceId}`,
     `      containerName: ${identity.containerName}`,
-    "    restart: unless-stopped",
+    "    restart: always",
     // The image runs as uid 1001 (`mysql`), but the daemon writes the
     // bind-mounted conf and TLS CA as `tp:tp` 0640 (they hold the topology
     // and HTTP-auth passwords, so never world-readable). Joining the
     // daemon's group is what lets the container read them; without it the
     // process dies on start with "Cannot read config file … permission
-    // denied" and `restart: unless-stopped` loops it forever.
+    // denied" and `restart: always` loops it forever.
     ...(typeof daemonGid === "number" && Number.isInteger(daemonGid) &&
         daemonGid > 0
       ? ["    group_add:", `      - ${quoteYamlScalar(String(daemonGid))}`]
       : []),
     "    ports:",
-    `      - ${httpPublish}`,
+    ...httpPublish.map((publish) => `      - ${publish}`),
     `      - ${raftPublish}`,
+    ...(topologyAliases.length > 0
+      ? [
+        "    extra_hosts:",
+        ...topologyAliases.map((alias) =>
+          `      - ${quoteYamlScalar(`${alias.name}:${alias.address}`)}`
+        ),
+      ]
+      : []),
     "    labels:",
     `      ${LABEL_ROLE}: ${LABEL_ROLE_SYSTEM}`,
     `      ${LABEL_SYSTEM_COMPONENT}: ${
@@ -340,6 +401,7 @@ export type EnsureOrchestratorOptions = {
    */
   daemonGid?: number;
   stability?: ContainerStabilityOptions;
+  topologyAliases?: readonly OrchestratorTopologyAlias[];
 };
 
 export async function ensureOrchestratorStack(
@@ -383,6 +445,7 @@ export async function ensureOrchestratorStack(
     raft,
     managedNetwork,
     daemonGid,
+    options.topologyAliases ?? [],
   );
   const restarted = previousCompose !== composeYaml || previousConf !== conf ||
     networkRenamed;

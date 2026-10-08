@@ -35,6 +35,7 @@ import {
   inspectOrchestratorContainer,
   loadOrchestratorApiCredentials,
   loadOrchestratorRaftToken,
+  orchestratorTopologyAliases,
   renderOrchestratorConf,
   stopOrchestratorStack,
 } from "../managed/orchestrator.ts";
@@ -117,6 +118,9 @@ async function registerClusters(
   const registered: string[] = [];
   await forEachSequential(clusters, async (cluster) => {
     await forEachSequential(cluster.members, async (member) => {
+      // `host` is the private-listener address (not the Docker name, which
+      // only resolves on the member's own host). `containerName` is mapped
+      // via extra_hosts so a later topology walk can still resolve it.
       await discoverInstance({ host: member.host, port: member.port }, api);
       await registerCandidate(
         { host: member.host, port: member.port },
@@ -212,6 +216,9 @@ export async function handleManagedHaReconcile(
     throw new Error("managed-ha identity missing after persist");
   }
 
+  const topologyAliases = orchestratorTopologyAliases(
+    payload.clusters.flatMap((cluster) => cluster.members),
+  );
   const restarted = await ensureOrchestratorStack(
     layout,
     descriptor,
@@ -219,6 +226,7 @@ export async function handleManagedHaReconcile(
     payload.managedNetwork,
     conf,
     run,
+    { topologyAliases },
   );
 
   const api: OrchestratorApiDeps = {

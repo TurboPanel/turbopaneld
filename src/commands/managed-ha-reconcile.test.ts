@@ -298,6 +298,77 @@ test({
         assertEquals(conf.RaftAuthToken, "raft-token-value");
         assertEquals(conf.MySQLTopologyUser, "tp_repl");
         assertEquals(conf.MySQLTopologyPassword, "repl-plaintext");
+        assertEquals(conf.MySQLTopologyUseSSL, true);
+        const compose = await Deno.readTextFile(
+          orchestratorComposePath(layout),
+        );
+        assertEquals(compose.includes("127.0.0.1:33001:33001"), true);
+        assertEquals(compose.includes("203.0.113.10:33001:33001"), true);
+        assertEquals(compose.includes("restart: always"), true);
+      } finally {
+        clearLayoutEnv();
+      }
+    });
+  },
+});
+
+test({
+  name:
+    "handleManagedHaReconcile registers the listener address, not the container name",
+  permissions: { env: true, read: true, write: true, run: false },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      const layout = resolveLayout(fixture.env);
+      await seedOrchestratorHostPrep(layout);
+      applyLayoutEnv(fixture);
+      const apiCalls: string[] = [];
+      const [cluster] = presentPayload().clusters;
+      try {
+        await handleManagedHaReconcile(
+          presentPayload({
+            clusters: [{
+              ...cluster,
+              members: [{
+                ...cluster.members[0]!,
+                host: "10.100.0.5",
+                port: 45001,
+                containerName: "db-1",
+              }],
+            }],
+          }),
+          new Date().toISOString(),
+          {
+            runDocker: fakeRunWithRunningOrchestrator(),
+            ensureDocker: () => Promise.resolve(),
+            decryptSecrets: decryptSecretsEcho,
+            orchestratorApi: {
+              fetch: (url) => {
+                apiCalls.push(url);
+                return Promise.resolve(new Response("", { status: 200 }));
+              },
+            },
+          },
+        );
+        assertEquals(
+          apiCalls.some((url) =>
+            url.includes("/api/discover/10.100.0.5/45001")
+          ),
+          true,
+        );
+        assertEquals(
+          apiCalls.some((url) =>
+            url.includes("/api/register-candidate/10.100.0.5/45001/prefer")
+          ),
+          true,
+        );
+        assertEquals(
+          apiCalls.some((url) => url.includes("/api/discover/db-1/")),
+          false,
+        );
+        const compose = await Deno.readTextFile(
+          orchestratorComposePath(layout),
+        );
+        assertEquals(compose.includes(`"db-1:10.100.0.5"`), true);
       } finally {
         clearLayoutEnv();
       }

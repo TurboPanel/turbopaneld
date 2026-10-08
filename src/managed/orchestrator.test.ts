@@ -25,6 +25,7 @@ import {
   ORCHESTRATOR_IMAGE,
   orchestratorCompose,
   orchestratorStackPresent,
+  orchestratorTopologyAliases,
   readCurrentOrchestratorManagedNetwork,
   readManagedNetworkFromCompose,
   renderOrchestratorConf,
@@ -117,9 +118,14 @@ test("renderOrchestratorConf disables unsupervised recovery", () => {
   assertEquals(conf.RecoverMasterClusterFilters, []);
   assertEquals(conf.RaftAuthToken, "raft-token");
   assertEquals(conf.ListenAddress, `:${MANAGED_HA_HTTP_PORT}`);
+  assertEquals(conf.MySQLTopologyUseSSL, true);
+  assertEquals(
+    conf.HTTPAdvertise,
+    `http://203.0.113.10:${MANAGED_HA_HTTP_PORT}`,
+  );
 });
 
-test("orchestratorCompose publishes HTTP on loopback and Raft on advertise only", () => {
+test("orchestratorCompose publishes HTTP on loopback and advertise, Raft on advertise", () => {
   const yaml = orchestratorCompose(
     {
       component: SYSTEM_MANAGED_HA_COMPONENT,
@@ -139,7 +145,9 @@ test("orchestratorCompose publishes HTTP on loopback and Raft on advertise only"
   );
   assertEquals(yaml.includes(ORCHESTRATOR_IMAGE), true);
   assertEquals(yaml.includes("127.0.0.1:33001:33001"), true);
+  assertEquals(yaml.includes("203.0.113.10:33001:33001"), true);
   assertEquals(yaml.includes("203.0.113.10:33002:33002"), true);
+  assertEquals(yaml.includes("restart: always"), true);
   assertEquals(yaml.includes("0.0.0.0"), false);
   // The compose text must be valid YAML end-to-end. A quoted source path
   // immediately followed by `:` (`- "./x":/etc/…`) is rejected by compose's
@@ -154,6 +162,40 @@ test("orchestratorCompose publishes HTTP on loopback and Raft on advertise only"
     true,
   );
   assertEquals(volumes.includes("./tls:/etc/orchestrator/tls:ro"), true);
+});
+
+test("orchestratorTopologyAliases maps container names onto IP register hosts", () => {
+  assertEquals(
+    orchestratorTopologyAliases([
+      { host: "10.100.0.5", containerName: "db-1" },
+      { host: "10.100.0.4", containerName: "db-2" },
+      { host: "db-3", containerName: "db-3" },
+      { host: "10.100.0.5", containerName: "db-1" },
+      { host: "not-an-ip", containerName: "db-4" },
+    ]),
+    [
+      { name: "db-1", address: "10.100.0.5" },
+      { name: "db-2", address: "10.100.0.4" },
+    ],
+  );
+  assertEquals(
+    orchestratorTopologyAliases([
+      { host: "2001:db8::10", containerName: "db-v6" },
+    ]),
+    [{ name: "db-v6", address: "[2001:db8::10]" }],
+  );
+});
+
+test("orchestratorCompose extra_hosts aliases container names to listener IPs", () => {
+  const yaml = orchestratorCompose(
+    HA_DESCRIPTOR,
+    BASE_RAFT,
+    MANAGED_NETWORK,
+    undefined,
+    [{ name: "db-1", address: "10.100.0.5" }],
+  );
+  assertEquals(yaml.includes("extra_hosts:"), true);
+  assertEquals(yaml.includes(`"db-1:10.100.0.5"`), true);
 });
 
 test("orchestratorCompose refuses publishing on every interface", () => {
@@ -192,6 +234,7 @@ test("renderOrchestratorConf omits RaftAuthToken when unset and maps RaftNodes",
   })) as Record<string, unknown>;
   assertEquals("RaftAuthToken" in conf, false);
   assertEquals(conf.RaftNodes, ["203.0.113.11:33002"]);
+  assertEquals(conf.MySQLTopologyUseSSL, true);
   assertEquals(conf.MySQLTopologySSLSkipVerify, true);
   assertEquals("MySQLTopologySSLCAFile" in conf, false);
 });
@@ -201,6 +244,7 @@ test("renderOrchestratorConf sets Organization CA path and verifies TLS", () => 
     sslCaPath: "/etc/orchestrator/tls/ca.pem",
   })) as Record<string, unknown>;
   assertEquals(conf.MySQLTopologySSLCAFile, "/etc/orchestrator/tls/ca.pem");
+  assertEquals(conf.MySQLTopologyUseSSL, true);
   assertEquals(conf.MySQLTopologySSLSkipVerify, false);
 });
 
