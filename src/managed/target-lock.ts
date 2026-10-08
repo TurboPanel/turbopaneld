@@ -118,6 +118,32 @@ export async function withManagedLifecycleLock<T>(
   }
 }
 
+/**
+ * Like {@link withManagedLifecycleLock}, but does not wait: returns `false`
+ * without running `fn` when apply/destroy already holds the lock. The demoted
+ * member guard uses this so a resync apply is not stopped mid-run.
+ */
+export async function tryWithManagedLifecycleLock(
+  layout: Pick<LayoutPaths, "runDir">,
+  managedId: string,
+  fn: () => Promise<void>,
+): Promise<boolean> {
+  const dir = join(layout.runDir, "managed-locks");
+  await Deno.mkdir(dir, { recursive: true, mode: 0o770 });
+  const file = await Deno.open(managedLifecycleLockPath(layout, managedId), {
+    create: true,
+    write: true,
+    mode: 0o660,
+  });
+  try {
+    if (!(await file.tryLock(true))) return false;
+    await fn();
+    return true;
+  } finally {
+    file.close();
+  }
+}
+
 /** Another backup or restore holds this storage copy's lock. */
 export class CopyTargetBusyError extends Error {
   constructor(copyId: string) {

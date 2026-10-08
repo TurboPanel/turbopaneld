@@ -16,6 +16,7 @@ import {
 } from "../deploy/docker-cli.ts";
 import { logInfo, sanitizeForLog } from "../util/logger.ts";
 import { resolveLayout } from "../paths/layout.ts";
+import { clearManagedDemotedMarker } from "./demoted-marker.ts";
 import { writeManagedDestroyedMarker } from "./destroyed-marker.ts";
 import { removeManagedPublicFirewallBestEffort } from "./firewall.ts";
 import { withManagedLifecycleLock } from "./target-lock.ts";
@@ -241,6 +242,7 @@ export async function handleManagedDestroy(
     payload.managedId,
     async () => {
       const present = await pathExists(root);
+      await clearManagedDemotedMarker(layout, payload.managedId);
       await tearDownManagedCompose(run, project, payload.removeVolumes);
       await removeManagedPublicFirewallBestEffort(payload.managedId);
       await removeManagedStateDir(root);

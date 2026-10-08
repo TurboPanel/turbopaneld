@@ -1918,6 +1918,11 @@ export type ManagedLifecyclePayload = {
    * (defaults to primary).
    */
   role?: "primary" | "replica";
+  /**
+   * True on a fence stop of a replaced primary. Absent on ordinary operator
+   * stops and on older control planes; older daemons ignore it.
+   */
+  demoted?: boolean;
 };
 
 /** Must stay in sync with the instance canonical `managed.lifecycle` shape. */
@@ -7422,6 +7427,12 @@ export function parseManagedLifecyclePayload(
       throw new TypeError("Invalid managed.lifecycle payload");
     }
     payload.role = value.role;
+  }
+  if (value.demoted !== undefined) {
+    if (typeof value.demoted !== "boolean") {
+      throw new TypeError("Invalid managed.lifecycle payload");
+    }
+    if (value.demoted) payload.demoted = true;
   }
   return payload;
 }
