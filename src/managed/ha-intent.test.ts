@@ -895,3 +895,31 @@ test("1+1 cluster: the promoted replica is watched at once (old primary counted 
     );
   });
 });
+
+test("managed.ha.failover repoint carries no intent but drain and recover do", () => {
+  const base = {
+    managedId: MANAGED_ID,
+    sourceMemberId: "00000000-0000-4000-8000-000000000002",
+    targetMemberId: "00000000-0000-4000-8000-000000000003",
+  };
+  assertEquals(
+    managedCommandIntent("managed.ha.failover", { ...base, phase: "repoint" }),
+    null,
+  );
+  assertEquals(
+    managedCommandIntent("managed.ha.failover", {
+      ...base,
+      phase: "repoint",
+      ensureSlots: ["tp_member_2"],
+    }),
+    null,
+  );
+  assertEquals(
+    managedCommandIntent("managed.ha.failover", { ...base, phase: "recover" }),
+    { managedId: MANAGED_ID, kind: "failover" },
+  );
+  assertEquals(
+    managedCommandIntent("managed.ha.failover", { ...base, phase: "drain" }),
+    { managedId: MANAGED_ID, kind: "failover" },
+  );
+});

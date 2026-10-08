@@ -90,7 +90,11 @@ export const MANAGED_COMMAND_INTENT_KINDS: Readonly<
   "managed.destroy": () => "destroy",
   "managed.promote": () => "promote",
   "managed.restore": () => "restore",
-  "managed.ha.failover": () => "failover",
+  // `repoint` only re-aims a replica (or creates slots on the new primary);
+  // it never stops or restarts an engine, so it must not hold off the
+  // dead-primary probe the way a real failover does.
+  "managed.ha.failover": (payload) =>
+    payload.phase === "repoint" ? null : "failover",
 };
 
 /** Managed command types that never touch an engine container, and why. */
