@@ -108,7 +108,6 @@ import {
   type SiteRelease,
 } from "../deploy/site.ts";
 import { detectSiteApps } from "../deploy/site-apps.ts";
-import { sitePhpRuntimeMode } from "../deploy/site/php-runtime.ts";
 import { holdPruneKeys } from "../deploy/site/prune-holds.ts";
 import {
   applyCronJobs,
