@@ -5,6 +5,7 @@ import { withTempLayout } from "../testing/temp-layout.ts";
 import { ManagedEngineExitGuard } from "./engine-exit-guard.ts";
 import { writeManagedDemotedMarker } from "./demoted-marker.ts";
 import {
+  beginManagedIntent,
   recordManagedIntent,
   resetManagedIntentsForTests,
 } from "./ha-intent.ts";
@@ -273,6 +274,142 @@ test("compose start failure is logged without throwing", async () => {
     });
     await guard.tick();
     assertEquals(startAttempted, true);
+  });
+});
+
+test("an empty compose ps list is treated as stopped", async () => {
+  await withTempLayout(async ({ env }) => {
+    resetManagedIntentsForTests();
+    const layout = resolveLayout(env);
+    await seedMember(layout);
+    const fake = docker("[]");
+    const guard = new ManagedEngineExitGuard({
+      layout,
+      run: fake.run,
+      listMembers: () => Promise.resolve([memberRecord()]),
+    });
+    await guard.tick();
+    assertEquals(
+      fake.calls.some((args) =>
+        args[0] === "compose" && args.at(-1) === "start"
+      ),
+      true,
+    );
+  });
+});
+
+test("a running managed command blocks compose start", async () => {
+  await withTempLayout(async ({ env }) => {
+    resetManagedIntentsForTests();
+    const layout = resolveLayout(env);
+    await seedMember(layout);
+    await beginManagedIntent(layout.stateDir, MANAGED_ID, "apply");
+    const fake = docker();
+    const guard = new ManagedEngineExitGuard({
+      layout,
+      run: fake.run,
+      listMembers: () => Promise.resolve([memberRecord()]),
+    });
+    await guard.tick();
+    assertEquals(
+      fake.calls.some((args) =>
+        args[0] === "compose" && args.at(-1) === "start"
+      ),
+      false,
+    );
+  });
+});
+
+test("a held destroy intent blocks compose start", async () => {
+  await withTempLayout(async ({ env }) => {
+    resetManagedIntentsForTests();
+    const layout = resolveLayout(env);
+    await seedMember(layout);
+    await recordManagedIntent(layout.stateDir, MANAGED_ID, "destroy", {
+      mode: "held",
+    });
+    const fake = docker();
+    const guard = new ManagedEngineExitGuard({
+      layout,
+      run: fake.run,
+      listMembers: () => Promise.resolve([memberRecord()]),
+    });
+    await guard.tick();
+    assertEquals(
+      fake.calls.some((args) =>
+        args[0] === "compose" && args.at(-1) === "start"
+      ),
+      false,
+    );
+  });
+});
+
+test("a standby replica with valid data may be started", async () => {
+  await withTempLayout(async ({ env }) => {
+    resetManagedIntentsForTests();
+    const layout = resolveLayout(env);
+    const root = `${layout.stateDir}/managed/${MANAGED_ID}`;
+    await Deno.mkdir(root, { recursive: true });
+    await Deno.writeTextFile(
+      `${root}/docker-compose.yml`,
+      [
+        "services:",
+        "  db:",
+        "    image: postgres:18-alpine",
+        "    volumes:",
+        "      - pgdata:/var/lib/postgresql",
+        "volumes:",
+        "  pgdata:",
+        "    name: pgdata",
+      ].join("\n"),
+    );
+    await saveManagedHaMember(layout, {
+      ...memberRecord(),
+      role: "replica",
+    });
+    const pgData = "/var/lib/postgresql/data/PG_VERSION";
+    const pgSignal = "/var/lib/postgresql/data/standby.signal";
+    const present = new Set([pgData, pgSignal]);
+    const calls: string[][] = [];
+    const run = (args: string[]): Promise<DockerCliResult> => {
+      calls.push(args);
+      if (args[0] === "run") {
+        const script = args.at(-1) ?? "";
+        const path = script.split(" ")[2] ?? "";
+        const stdout = present.has(path) ? "present\n" : "absent\n";
+        return Promise.resolve({
+          success: true,
+          code: 0,
+          stdout,
+          stderr: "",
+        });
+      }
+      if (args[0] === "compose" && args.includes("ps")) {
+        return Promise.resolve({
+          success: true,
+          code: 0,
+          stdout: EXITED_PS,
+          stderr: "",
+        });
+      }
+      return Promise.resolve({
+        success: true,
+        code: 0,
+        stdout: "",
+        stderr: "",
+      });
+    };
+    const guard = new ManagedEngineExitGuard({
+      layout,
+      run,
+      listMembers: () =>
+        Promise.resolve([{ ...memberRecord(), role: "replica" }]),
+    });
+    await guard.tick();
+    assertEquals(
+      calls.some((args) => args[0] === "compose" && args.at(-1) === "start"),
+      true,
+    );
   });
 });
 
